@@ -1,0 +1,23 @@
+{
+  "name": "backendclinicaclick",
+  "version": "1.0.0",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://C-Hervas@bitbucket.org/modsuite/backendclinicaclick.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "homepage": "https://bitbucket.org/modsuite/backendclinicaclick#readme",
+  "bugs": {
+    "url": "https://bitbucket.org/modsuite/backendclinicaclick/issues"
+  },
+  "description": "",
+  "dependencies": {
+    "axios": "^1.10.0"
+  }
+}
