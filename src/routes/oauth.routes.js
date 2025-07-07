@@ -15,27 +15,6 @@ const FRONTEND_URL = 'https://crm.clinicaclick.com';
 const FRONTEND_DEV_URL = 'http://localhost:4200'; // Para desarrollo local
 
 /**
- * Función auxiliar para obtener el userId del token JWT
- */
-const getUserIdFromToken = (req) => {
-    try {
-        const authHeader = req.headers.authorization;
-        if (authHeader && authHeader.startsWith('Bearer ')) {
-            const token = authHeader.substring(7); // Remover 'Bearer ' del inicio
-            if (token) {
-                // Usar el mismo secreto que se usa en auth.controllers.js
-                const decoded = jwt.verify(token, '6798261677hH-!');
-                console.log('🔍 Token JWT decodificado para connection-status:', decoded);
-                return decoded.userId; // El campo correcto según auth.controllers.js
-            }
-        }
-    } catch (error) {
-        console.error("❌ Error decodificando JWT:", error);
-    }
-    return null;
-};
-
-/**
  * GET /oauth/meta/callback
  * Maneja el callback de la autorización de Meta (Facebook).
  */
@@ -46,14 +25,6 @@ router.get('/meta/callback', async (req, res) => {
 
     if (error) {
         console.error('❌ Error en el callback de Meta:', { error, error_reason, error_description });
-        
-        // Caso específico: Usuario denegó la conexión
-        if (error === 'access_denied' && error_reason === 'user_denied') {
-            console.log('🚫 Usuario denegó la conexión con Meta');
-            return res.redirect(`${FRONTEND_URL}/pages/settings?meta_denied=true`);
-        }
-        
-        // Otros errores
         return res.redirect(`${FRONTEND_URL}/pages/settings?error=${encodeURIComponent(error_description || error)}`);
     }
 
@@ -155,8 +126,8 @@ router.get('/meta/callback', async (req, res) => {
         console.log('✅ Conexión Meta almacenada/actualizada en la base de datos.');
 
         // 5. Redirigir de vuelta al frontend con un indicador de éxito
-        console.log(`🚀 Redirigiendo al frontend: ${FRONTEND_URL}/pages/settings?connected=meta&userId=${userId}&userName=${encodeURIComponent(userData.name)}&userEmail=${encodeURIComponent(userData.email)}&accessToken=${encodeURIComponent(longLivedAccessToken)}`);
-        res.redirect(`${FRONTEND_URL}/pages/settings?connected=meta&userId=${userId}&userName=${encodeURIComponent(userData.name)}&userEmail=${encodeURIComponent(userData.email)}&accessToken=${encodeURIComponent(longLivedAccessToken)}`);
+        console.log(`🚀 Redirigiendo al frontend: ${FRONTEND_URL}/pages/settings?connected=meta&metaUserId=${userData.id}`);
+        res.redirect(`${FRONTEND_URL}/pages/settings?connected=meta&metaUserId=${userData.id}`);
 
     } catch (err) {
         console.error('❌ Error fatal en el proceso de OAuth:', err.response ? err.response.data : err.message);
@@ -356,7 +327,7 @@ router.get('/meta/assets', async (req, res) => {
             },
             assets: {
                 facebook_pages: facebookPages,
-                instagram_business_accounts: instagramBusinessAccounts,
+                instagram_business: instagramBusinessAccounts,
                 ad_accounts: adAccounts
             },
             total_assets: facebookPages.length + instagramBusinessAccounts.length + adAccounts.length,
@@ -387,217 +358,11 @@ router.get('/meta/assets', async (req, res) => {
 });
 
 /**
- * ✅ NUEVO: GET /oauth/meta/mappings
- * Obtener mapeos actuales de activos Meta
- */
-router.get('/meta/mappings', async (req, res) => {
-    try {
-        console.log('📋 Obteniendo mapeos de activos Meta...');
-        
-        const userId = getUserIdFromToken(req);
-        if (!userId) {
-            console.log('❌ No se pudo obtener userId del token JWT');
-            return res.status(401).json({
-                success: false,
-                error: 'Usuario no autenticado'
-            });
-        }
-        
-        console.log('🔍 Obteniendo mapeos para userId:', userId);
-        
-        // Verificar que existe conexión Meta
-        const connection = await MetaConnection.findOne({
-            where: { userId: userId }
-        });
-        
-        if (!connection) {
-            console.log('❌ No se encontró conexión Meta para este usuario');
-            return res.status(404).json({
-                success: false,
-                error: 'No hay conexión Meta activa para este usuario'
-            });
-        }
-        
-        // Obtener mapeos usando el método del modelo
-        const mappings = await ClinicMetaAsset.getAssetsByUser(userId, false); // Solo activos
-        
-        // Obtener resumen de mapeos
-        const summary = await ClinicMetaAsset.getMappingSummary(userId);
-        
-        console.log(`✅ ${mappings.length} mapeos encontrados para el usuario`);
-        
-        return res.json({
-            success: true,
-            user_id: userId,
-            mappings: mappings,
-            summary: summary,
-            total_mappings: mappings.length
-        });
-        
-    } catch (error) {
-        console.error('❌ Error obteniendo mapeos de Meta:', error);
-        res.status(500).json({
-            success: false,
-            error: 'Error interno del servidor',
-            details: error.message
-        });
-    }
-});
-
-/**
- * ✅ NUEVO: POST /oauth/meta/map-assets
- * Mapear activos Meta a clínicas (versión mejorada)
- */
-router.post('/meta/map-assets', async (req, res) => {
-    try {
-        console.log('🔗 Mapeando activos Meta a clínicas...');
-        
-        const userId = getUserIdFromToken(req);
-        if (!userId) {
-            console.log('❌ No se pudo obtener userId del token JWT');
-            return res.status(401).json({
-                success: false,
-                error: 'Usuario no autenticado'
-            });
-        }
-        
-        const { assets, clinicaIds } = req.body;
-        
-        // Validar datos de entrada
-        if (!assets || !Array.isArray(assets) || assets.length === 0) {
-            return res.status(400).json({
-                success: false,
-                error: 'Se requiere un array de activos válido'
-            });
-        }
-        
-        if (!clinicaIds || !Array.isArray(clinicaIds) || clinicaIds.length === 0) {
-            return res.status(400).json({
-                success: false,
-                error: 'Se requiere un array de IDs de clínicas válido'
-            });
-        }
-        
-        console.log('🔍 Mapeando para userId:', userId);
-        console.log('📋 Activos a mapear:', assets.length);
-        console.log('🏥 Clínicas destino:', clinicaIds.length);
-        
-        // Verificar que existe conexión Meta
-        const connection = await MetaConnection.findOne({
-            where: { userId: userId }
-        });
-        
-        if (!connection) {
-            console.log('❌ No se encontró conexión Meta para este usuario');
-            return res.status(404).json({
-                success: false,
-                error: 'No hay conexión Meta activa para este usuario'
-            });
-        }
-        
-        // Realizar mapeo usando el método del modelo
-        const result = await ClinicMetaAsset.mapAssetsToClinicas({
-            userId: userId,
-            metaConnectionId: connection.id,
-            assets: assets,
-            clinicaIds: clinicaIds
-        });
-        
-        console.log('✅ Mapeo completado:', result);
-        
-        return res.json({
-            success: true,
-            message: 'Activos mapeados correctamente',
-            result: result
-        });
-        
-    } catch (error) {
-        console.error('❌ Error mapeando activos de Meta:', error);
-        res.status(500).json({
-            success: false,
-            error: 'Error interno del servidor',
-            details: error.message
-        });
-    }
-});
-
-/**
- * ✅ NUEVO: DELETE /oauth/meta/unmap-asset
- * Desmapear activo Meta específico
- */
-router.delete('/meta/unmap-asset', async (req, res) => {
-    try {
-        console.log('🗑️ Desmapeando activo Meta...');
-        
-        const userId = getUserIdFromToken(req);
-        if (!userId) {
-            console.log('❌ No se pudo obtener userId del token JWT');
-            return res.status(401).json({
-                success: false,
-                error: 'Usuario no autenticado'
-            });
-        }
-        
-        const { clinicaId, metaAssetId } = req.body;
-        
-        // Validar datos de entrada
-        if (!clinicaId || !metaAssetId) {
-            return res.status(400).json({
-                success: false,
-                error: 'Se requieren clinicaId y metaAssetId'
-            });
-        }
-        
-        console.log('🔍 Desmapeando para userId:', userId);
-        console.log('🏥 Clínica:', clinicaId);
-        console.log('📋 Activo:', metaAssetId);
-        
-        // Verificar que existe conexión Meta
-        const connection = await MetaConnection.findOne({
-            where: { userId: userId }
-        });
-        
-        if (!connection) {
-            console.log('❌ No se encontró conexión Meta para este usuario');
-            return res.status(404).json({
-                success: false,
-                error: 'No hay conexión Meta activa para este usuario'
-            });
-        }
-        
-        // Desmapear usando el método del modelo
-        const result = await ClinicMetaAsset.unmapAsset(userId, clinicaId, metaAssetId);
-        
-        if (result) {
-            console.log('✅ Activo desmapeado correctamente');
-            return res.json({
-                success: true,
-                message: 'Activo desmapeado correctamente'
-            });
-        } else {
-            console.log('⚠️ No se encontró el mapeo especificado');
-            return res.status(404).json({
-                success: false,
-                error: 'No se encontró el mapeo especificado'
-            });
-        }
-        
-    } catch (error) {
-        console.error('❌ Error desmapeando activo de Meta:', error);
-        res.status(500).json({
-            success: false,
-            error: 'Error interno del servidor',
-            details: error.message
-        });
-    }
-});
-
-/**
- * POST /oauth/meta/map-assets (versión original para compatibilidad)
+ * POST /oauth/meta/map-assets
  * Endpoint para que el frontend guarde los activos de Meta mapeados a una clínica.
  * Requiere que el usuario esté autenticado en tu app y tenga los roles adecuados.
  */
-router.post('/meta/map-assets-legacy', async (req, res) => {
+router.post('/meta/map-assets', async (req, res) => {
     const userId = getUserIdFromToken(req);
     if (!userId) {
         return res.status(401).json({ message: 'Usuario no autenticado.' });
@@ -652,6 +417,107 @@ router.post('/meta/map-assets-legacy', async (req, res) => {
 });
 
 /**
+ * GET /oauth/test
+ * Endpoint de prueba para verificar que las rutas OAuth están funcionando.
+ */
+router.get('/test', (req, res) => {
+    res.json({
+        message: '✅ El servicio OAuth está funcionando correctamente.',
+        callback_url: REDIRECT_URI,
+        frontend_redirect_url: FRONTEND_URL + '/pages/settings?connected=meta'
+    });
+});
+
+/**
+ * Función auxiliar para obtener el userId del token JWT
+ */
+const getUserIdFromToken = (req) => {
+    try {
+        const authHeader = req.headers.authorization;
+        if (authHeader && authHeader.startsWith('Bearer ')) {
+            const token = authHeader.substring(7); // Remover 'Bearer ' del inicio
+            if (token) {
+                // Usar el mismo secreto que se usa en auth.controllers.js
+                const decoded = jwt.verify(token, '6798261677hH-!');
+                console.log('🔍 Token JWT decodificado para connection-status:', decoded);
+                return decoded.userId; // El campo correcto según auth.controllers.js
+            }
+        }
+    } catch (error) {
+        console.error("❌ Error decodificando JWT:", error);
+    }
+    return null;
+};
+
+/**
+ * GET /oauth/meta/connection-status
+ * Consulta el estado de conexión de Meta para el usuario logueado
+ */
+router.get('/meta/connection-status', async (req, res) => {
+    try {
+        console.log('🔍 Consultando estado de conexión Meta...');
+        
+        // Obtener el userId del token JWT
+        const userId = getUserIdFromToken(req);
+        
+        if (!userId) {
+            console.log('❌ No se pudo obtener userId del token JWT');
+            return res.json({
+                connected: false,
+                error: 'Usuario no autenticado'
+            });
+        }
+        
+        console.log('🔍 Buscando conexión Meta para userId:', userId);
+        
+        // Buscar la conexión Meta en la base de datos
+        const metaConnection = await MetaConnection.findOne({
+            where: { userId: userId }
+        });
+        
+        if (metaConnection) {
+            console.log('✅ Conexión Meta encontrada:', {
+                metaUserId: metaConnection.metaUserId,
+                userName: metaConnection.userName,
+                userEmail: metaConnection.userEmail
+            });
+            
+            // Verificar si el token no ha expirado
+            const now = new Date();
+            const isExpired = metaConnection.expiresAt && metaConnection.expiresAt < now;
+            
+            if (isExpired) {
+                console.log('⚠️ Token de Meta expirado');
+                return res.json({
+                    connected: false,
+                    error: 'Token expirado'
+                });
+            }
+            
+            return res.json({
+                connected: true,
+                metaUserId: metaConnection.metaUserId,
+                userName: metaConnection.userName,
+                userEmail: metaConnection.userEmail,
+                expiresAt: metaConnection.expiresAt
+            });
+        } else {
+            console.log('❌ No se encontró conexión Meta para este usuario');
+            return res.json({
+                connected: false
+            });
+        }
+        
+    } catch (error) {
+        console.error('❌ Error consultando estado de conexión Meta:', error);
+        res.status(500).json({
+            connected: false,
+            error: 'Error interno del servidor'
+        });
+    }
+});
+
+/**
  * DELETE /oauth/meta/disconnect
  * Elimina la conexión de Meta para el usuario logueado
  */
@@ -672,16 +538,6 @@ router.delete('/meta/disconnect', async (req, res) => {
         
         console.log('🔍 Eliminando conexión Meta para userId:', userId);
         
-        // ✅ TAMBIÉN DESMAPEAR TODOS LOS ACTIVOS DEL USUARIO
-        console.log('🗑️ Desmapeando todos los activos del usuario...');
-        const connection = await MetaConnection.findOne({ where: { userId: userId } });
-        if (connection) {
-            await ClinicMetaAsset.update(
-                { isActive: false },
-                { where: { metaConnectionId: connection.id } }
-            );
-        }
-        
         // Eliminar la conexión Meta de la base de datos
         const deletedRows = await MetaConnection.destroy({
             where: { userId: userId }
@@ -689,7 +545,6 @@ router.delete('/meta/disconnect', async (req, res) => {
         
         if (deletedRows > 0) {
             console.log('✅ Conexión Meta eliminada correctamente');
-            console.log('✅ Activos desmapeados correctamente');
             return res.json({
                 success: true,
                 message: 'Conexión Meta desconectada correctamente'
@@ -709,18 +564,6 @@ router.delete('/meta/disconnect', async (req, res) => {
             error: 'Error interno del servidor'
         });
     }
-});
-
-/**
- * GET /oauth/test
- * Endpoint de prueba para verificar que las rutas OAuth están funcionando.
- */
-router.get('/test', (req, res) => {
-    res.json({
-        message: '✅ El servicio OAuth está funcionando correctamente.',
-        callback_url: REDIRECT_URI,
-        frontend_redirect_url: FRONTEND_URL + '/pages/settings?connected=meta'
-    });
 });
 
 module.exports = router;
