@@ -15,6 +15,7 @@ const pacienteRoutes = require('./routes/paciente.routes');
 const campanaRoutes = require('./routes/campana.routes');
 const leadRoutes = require('./routes/lead.routes');
 const panelesRoutes = require('./routes/paneles.routes');
+const userClinicasRoutes = require('./routes/userclinicas.routes');
 
 // NUEVAS RUTAS Y MODELOS
 const oauthRoutes = require('./routes/oauth.routes');
@@ -56,6 +57,9 @@ app.use('/api/leads', leadRoutes);
 console.log('Ruta /api/leads configurada');
 app.use('/api/paneles', panelesRoutes);
 console.log('Ruta /api/paneles configurada');
+app.use('/api/userclinicas', userClinicasRoutes);
+console.log('Ruta /api/userclinicas configurada');
+
 
 // NUEVA RUTA: OAuth (sin /api/ porque es para OAuth2)
 app.use('/oauth', oauthRoutes);
