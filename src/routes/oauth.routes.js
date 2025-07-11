@@ -391,7 +391,7 @@ router.post('/meta/map-assets', async (req, res) => {
         await ClinicMetaAsset.destroy({
             where: {
                 clinicaId: clinicaId,
-                assetType: ['facebook_page', 'instagram_business_account', 'ad_account']
+                assetType: ['facebook_page', 'instagram_business', 'ad_account']
             }
         });
 
@@ -404,6 +404,7 @@ router.post('/meta/map-assets', async (req, res) => {
                 metaAssetId: asset.id,
                 metaAssetName: asset.name,
                 pageAccessToken: asset.pageAccessToken || null, // Guardar token de página si existe
+                isActive: asset.isActive || true 
             });
             createdAssets.push(newAsset);
         }
