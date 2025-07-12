@@ -520,6 +520,132 @@ router.get('/meta/connection-status', async (req, res) => {
 });
 
 /**
+ * GET /oauth/meta/mappings
+ * Obtiene los mapeos de activos Meta existentes para el usuario logueado
+ */
+router.get('/meta/mappings', async (req, res) => {
+    try {
+        console.log('🔍 Obteniendo mapeos de activos Meta...');
+        
+        // Obtener el userId del token JWT
+        const userId = getUserIdFromToken(req);
+        
+        if (!userId) {
+            console.log('❌ No se pudo obtener userId del token JWT');
+            return res.status(401).json({
+                success: false,
+                error: 'Usuario no autenticado'
+            });
+        }
+        
+        console.log('🔍 Buscando mapeos para userId:', userId);
+        
+        // Buscar la conexión Meta del usuario
+        const metaConnection = await MetaConnection.findOne({
+            where: { userId: userId }
+        });
+        
+        if (!metaConnection) {
+            console.log('❌ No se encontró conexión Meta para este usuario');
+            return res.json({
+                success: false,
+                error: 'Usuario no conectado a Meta'
+            });
+        }
+        
+        // ✅ CORREGIDO: Obtener todos los mapeos activos del usuario con nombres de columna correctos
+        const mappings = await ClinicMetaAsset.findAll({
+            where: {
+                metaConnectionId: metaConnection.id,
+                isActive: true
+            },
+            include: [
+                {
+                    model: db.Clinica,
+                    as: 'clinica',
+                    attributes: ['id_clinica', 'nombre_clinica', 'url_avatar'] // ✅ NOMBRES CORRECTOS
+                }
+            ],
+            order: [['clinicaId', 'ASC'], ['assetType', 'ASC']]
+        });
+        
+        // Agrupar mapeos por clínica
+        const mappingsByClinica = {};
+        
+        mappings.forEach(mapping => {
+            const clinicaId = mapping.clinicaId;
+            
+            if (!mappingsByClinica[clinicaId]) {
+                mappingsByClinica[clinicaId] = {
+                    clinica: {
+                        id: mapping.clinica?.id_clinica || clinicaId, // ✅ CORREGIDO: id_clinica
+                        nombre: mapping.clinica?.nombre_clinica || `Clínica ${clinicaId}`, // ✅ CORREGIDO: nombre_clinica
+                        avatar_url: mapping.clinica?.url_avatar || null // ✅ CORREGIDO: url_avatar
+                    },
+                    assets: {
+                        facebook_pages: [],
+                        instagram_business: [],
+                        ad_accounts: []
+                    },
+                    totalAssets: 0
+                };
+            }
+            
+            const assetData = {
+                id: mapping.id,
+                metaAssetId: mapping.metaAssetId,
+                metaAssetName: mapping.metaAssetName,
+                assetType: mapping.assetType,
+                pageAccessToken: mapping.pageAccessToken,
+                additionalData: mapping.additionalData,
+                createdAt: mapping.createdAt,
+                updatedAt: mapping.updatedAt
+            };
+            
+            // Agregar a la categoría correspondiente
+            switch (mapping.assetType) {
+                case 'facebook_page':
+                    mappingsByClinica[clinicaId].assets.facebook_pages.push(assetData);
+                    break;
+                case 'instagram_business':
+                    mappingsByClinica[clinicaId].assets.instagram_business.push(assetData);
+                    break;
+                case 'ad_account':
+                    mappingsByClinica[clinicaId].assets.ad_accounts.push(assetData);
+                    break;
+            }
+            
+            mappingsByClinica[clinicaId].totalAssets++;
+        });
+        
+        // Convertir objeto a array
+        const mappingsArray = Object.values(mappingsByClinica);
+        
+        console.log(`✅ Mapeos encontrados: ${mappings.length} activos en ${mappingsArray.length} clínicas`);
+        
+        res.json({
+            success: true,
+            mappings: mappingsArray,
+            totalMappings: mappings.length,
+            totalClinics: mappingsArray.length,
+            userInfo: {
+                metaUserId: metaConnection.metaUserId,
+                userName: metaConnection.userName,
+                userEmail: metaConnection.userEmail
+            }
+        });
+        
+    } catch (error) {
+        console.error('❌ Error obteniendo mapeos de Meta:', error);
+        res.status(500).json({
+            success: false,
+            error: 'Error interno del servidor',
+            details: error.message
+        });
+    }
+});
+
+/**
  * DELETE /oauth/meta/disconnect
  * Elimina la conexión de Meta para el usuario logueado
  */
