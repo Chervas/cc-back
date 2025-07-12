@@ -388,10 +388,11 @@ router.post('/meta/map-assets', async (req, res) => {
 
         // Eliminar mapeos existentes para esta clínica y tipos de activos para evitar duplicados
         // Esto es útil si el usuario cambia sus selecciones
+        const assetIds = selectedAssets.map(asset => asset.id);
         await ClinicMetaAsset.destroy({
             where: {
                 clinicaId: clinicaId,
-                assetType: ['facebook_page', 'instagram_business', 'ad_account']
+                metaAssetId: assetIds
             }
         });
 
