@@ -386,15 +386,16 @@ router.post('/meta/map-assets', async (req, res) => {
             return res.status(404).json({ message: 'No hay conexión Meta activa para este usuario.' });
         }
 
-        // Eliminar mapeos existentes para esta clínica y tipos de activos para evitar duplicados
-        // Esto es útil si el usuario cambia sus selecciones
-        const assetIds = selectedAssets.map(asset => asset.id);
+        // ✅ CORREGIDO: Eliminar TODOS los mapeos existentes para esta clínica antes de crear los nuevos
+        // Esto asegura que los nuevos mapeos reemplacen completamente a los anteriores
         await ClinicMetaAsset.destroy({
             where: {
                 clinicaId: clinicaId,
-                metaAssetId: assetIds
+                metaConnectionId: metaConnection.id
             }
         });
+
+        console.log(`🔄 Mapeos anteriores eliminados para clínica ${clinicaId}. Creando nuevos mapeos...`);
 
         const createdAssets = [];
         for (const asset of selectedAssets) {
@@ -410,7 +411,14 @@ router.post('/meta/map-assets', async (req, res) => {
             createdAssets.push(newAsset);
         }
 
-        res.status(200).json({ message: 'Activos de Meta mapeados correctamente.', assets: createdAssets });
+        console.log(`✅ ${createdAssets.length} nuevos mapeos creados para clínica ${clinicaId}`);
+
+        res.status(200).json({ 
+            message: 'Activos de Meta mapeados correctamente.', 
+            assets: createdAssets,
+            replacedMappings: true,
+            totalNewMappings: createdAssets.length
+        });
 
     } catch (error) {
         console.error('Error al mapear activos de Meta:', error.response ? error.response.data : error.message);
