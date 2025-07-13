@@ -20,7 +20,7 @@ const getUserIdFromToken = (req) => {
         if (authHeader && authHeader.startsWith('Bearer ')) {
             const token = authHeader.substring(7); // Remover 'Bearer ' del inicio
             if (token) {
-                // Usar el mismo secreto que se usa en auth.controllers.js
+                // ✅ CLAVE CORRECTA: Usar el mismo secreto que se usa en auth.controllers.js
                 const decoded = jwt.verify(token, '6798261677hH-!');
                 console.log('🔍 Token JWT decodificado para clinicas:', decoded);
                 return decoded.userId; // El campo correcto según auth.controllers.js
@@ -44,6 +44,7 @@ const isAdmin = (userId) => {
  * Obtiene las clínicas a las que tiene acceso el usuario actual
  * - Si es ADMIN: devuelve TODAS las clínicas del sistema
  * - Si es NORMAL: devuelve solo las clínicas asignadas
+ * ✅ INCLUYE CAMPO 'roles' para el selector del menú superior
  */
 router.get('/list', async (req, res) => {
     try {
@@ -103,9 +104,13 @@ router.get('/list', async (req, res) => {
                 role: c.userRole
             })));
 
+            // ✅ AGREGAR ROLES PARA ADMIN
+            const rolesAdmin = ['admin'];
+
             return res.json({
                 success: true,
                 clinicas: clinicas,
+                roles: rolesAdmin, // ✅ CAMPO CRÍTICO para el menú superior
                 total: clinicas.length,
                 userType: 'administrador',
                 message: `${clinicas.length} clínicas del sistema (acceso completo)`
@@ -138,6 +143,12 @@ router.get('/list', async (req, res) => {
             }
 
             console.log('📊 Clínicas asignadas encontradas:', usuario.clinicas?.length || 0);
+
+            // ✅ EXTRAER ROLES ÚNICOS del usuario
+            const rolesUnicos = [...new Set(usuario.clinicas.map(clinica => 
+                clinica.UsuarioClinica.rol_clinica
+            ))];
+            console.log('🎯 Roles únicos extraídos:', rolesUnicos);
 
             // Formatear respuesta para usuarios normales
             const clinicas = (usuario.clinicas || []).map(clinica => ({
@@ -172,6 +183,7 @@ router.get('/list', async (req, res) => {
             return res.json({
                 success: true,
                 clinicas: clinicas,
+                roles: rolesUnicos, // ✅ CAMPO CRÍTICO para el menú superior
                 total: clinicas.length,
                 userType: 'normal',
                 message: `${clinicas.length} clínicas asignadas`
@@ -264,3 +276,4 @@ router.get('/:id', async (req, res) => {
 });
 
 module.exports = router;
+
