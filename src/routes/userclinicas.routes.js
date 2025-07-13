@@ -248,6 +248,11 @@ router.get('/:id', async (req, res) => {
             });
         }
 
+        // ✅ EXTRAER ROLES ÚNICOS del usuario
+        const rolesUnicos = [...new Set(usuario.clinicas.map(clinica => 
+            clinica.UsuarioClinica.rol_clinica
+        ))];
+
         res.json({
             success: true,
             clinica: {
@@ -262,7 +267,8 @@ router.get('/:id', async (req, res) => {
                     address: clinica.direccion,
                     city: clinica.ciudad
                 }
-            }
+            },
+            roles: rolesUnicos // ✅ AGREGAR ESTA LÍNEA
         });
 
     } catch (error) {
