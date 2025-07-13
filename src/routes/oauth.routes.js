@@ -828,20 +828,19 @@ router.get('/meta/mappings/:clinicaId', async (req, res) => {
 });
 
 /**
- * Función auxiliar para generar URLs de activos Meta
+ * Generar URL directa para un activo Meta
  */
-function generateAssetUrl(assetType, metaAssetId, additionalData) {
+function generateAssetUrl(assetType, metaAssetId) {
     switch (assetType) {
         case 'facebook_page':
             return `https://facebook.com/${metaAssetId}`;
         case 'instagram_business':
-            // Usar username si está disponible, sino el ID
-            const username = additionalData?.username;
-            return username ? `https://instagram.com/${username}` : `https://instagram.com/p/${metaAssetId}`;
+            return `https://instagram.com/${metaAssetId}`;
         case 'ad_account':
-            return `https://business.facebook.com/adsmanager/manage/accounts?act=${metaAssetId}`;
+            // ✅ CORREGIDO: URL correcta para Facebook Ads Manager
+            return `https://adsmanager.facebook.com/adsmanager/manage/campaigns?act=${metaAssetId}`;
         default:
-            return null;
+            return '#';
     }
 }
 
