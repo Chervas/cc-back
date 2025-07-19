@@ -9,6 +9,7 @@ const router = express.Router();
  * Array de IDs de usuarios administradores
  * Estos usuarios tienen acceso a TODAS las clínicas del sistema
  */
+// ✅ CAMBIO 1: Se define la lista de IDs de administradores
 const ADMIN_USER_IDS = [1]; // Añadir más IDs según sea necesario
 
 /**
@@ -21,13 +22,13 @@ const getUserIdFromToken = (req) => {
             const token = authHeader.substring(7); // Remover 'Bearer ' del inicio
             if (token) {
                 // ✅ CLAVE CORRECTA: Usar el mismo secreto que se usa en auth.controllers.js
-                const decoded = jwt.verify(token, '6798261677hH-!');
-                console.log('🔍 Token JWT decodificado para clinicas:', decoded);
+                const decoded = jwt.verify(token, '6798261677hH-1');
+                console.log('🔍 Token JWT decodificado para clínicas:', decoded);
                 return decoded.userId; // El campo correcto según auth.controllers.js
             }
         }
     } catch (error) {
-        console.error("❌ Error decodificando JWT:", error);
+        console.error('❌ Error decodificando JWT:', error);
     }
     return null;
 };
@@ -49,7 +50,7 @@ const isAdmin = (userId) => {
 router.get('/list', async (req, res) => {
     try {
         console.log('🏥 Obteniendo clínicas del usuario...');
-        
+
         // Obtener userId del token JWT
         const userId = getUserIdFromToken(req);
         if (!userId) {
@@ -62,10 +63,23 @@ router.get('/list', async (req, res) => {
 
         console.log('🔍 Verificando permisos para userId:', userId);
 
+        // ✅ CAMBIO 2: Obtener el usuario para poder añadirle la propiedad isAdmin
+        const usuario = await Usuario.findByPk(userId);
+        if (!usuario) {
+            console.log('❌ Usuario no encontrado con ID:', userId);
+            return res.status(404).json({
+                success: false,
+                message: 'Usuario no encontrado'
+            });
+        }
+
+        // ✅ CAMBIO 3: Añade la bandera 'isAdmin' si el ID del usuario está en la lista
+        usuario.isAdmin = ADMIN_USER_IDS.includes(usuario.id_usuario);
+
         // Verificar si el usuario es administrador
         if (isAdmin(userId)) {
-            console.log('🔧 Usuario ADMINISTRADOR detectado (ID:', userId, ')');
-            console.log('📋 Obteniendo TODAS las clínicas del sistema...');
+            console.log('🔑 Usuario ADMINISTRADOR detectado (ID:', userId, ')');
+            console.log('🏥 Obteniendo TODAS las clínicas del sistema...');
 
             // Para administradores: obtener TODAS las clínicas
             const todasLasClinicas = await Clinica.findAll({
@@ -113,12 +127,15 @@ router.get('/list', async (req, res) => {
                 roles: rolesAdmin, // ✅ CAMPO CRÍTICO para el menú superior
                 total: clinicas.length,
                 userType: 'administrador',
-                message: `${clinicas.length} clínicas del sistema (acceso completo)`
+                message: `${clinicas.length} clínicas del sistema (acceso completo)`,
+                // ✅ CAMBIO 4: Incluir el usuario con la bandera isAdmin
+                user: usuario,
+                userRole: 'administrador' // ✅ CAMBIO 5: Establecer el rol principal como administrador
             });
 
         } else {
             console.log('👤 Usuario NORMAL detectado (ID:', userId, ')');
-            console.log('📋 Obteniendo clínicas asignadas al usuario...');
+            console.log('🏥 Obteniendo clínicas asignadas al usuario...');
 
             // Para usuarios normales: obtener solo clínicas asignadas
             const usuario = await Usuario.findByPk(userId, {
@@ -145,10 +162,10 @@ router.get('/list', async (req, res) => {
             console.log('📊 Clínicas asignadas encontradas:', usuario.clinicas?.length || 0);
 
             // ✅ EXTRAER ROLES ÚNICOS del usuario
-            const rolesUnicos = [...new Set(usuario.clinicas.map(clinica => 
+            const rolesUnicos = [...new Set(usuario.clinicas.map(clinica =>
                 clinica.UsuarioClinica.rol_clinica
             ))];
-            console.log('🎯 Roles únicos extraídos:', rolesUnicos);
+            console.log('🎭 Roles únicos extraídos:', rolesUnicos);
 
             // Formatear respuesta para usuarios normales
             const clinicas = (usuario.clinicas || []).map(clinica => ({
@@ -186,7 +203,10 @@ router.get('/list', async (req, res) => {
                 roles: rolesUnicos, // ✅ CAMPO CRÍTICO para el menú superior
                 total: clinicas.length,
                 userType: 'normal',
-                message: `${clinicas.length} clínicas asignadas`
+                message: `${clinicas.length} clínicas asignadas`,
+                // ✅ CAMBIO 6: Incluir el usuario (sin isAdmin para usuarios normales)
+                user: usuario,
+                userRole: rolesUnicos.length > 0 ? rolesUnicos[0] : 'paciente' // ✅ CAMBIO 7: Primer rol disponible
             });
         }
 
@@ -208,7 +228,7 @@ router.get('/:id', async (req, res) => {
     try {
         const { id } = req.params;
         const userId = getUserIdFromToken(req);
-        
+
         if (!userId) {
             return res.status(401).json({
                 success: false,
@@ -237,7 +257,7 @@ router.get('/:id', async (req, res) => {
                     }
                 }]
             });
-            
+
             clinica = usuario?.clinicas?.[0];
         }
 
@@ -249,7 +269,7 @@ router.get('/:id', async (req, res) => {
         }
 
         // ✅ EXTRAER ROLES ÚNICOS del usuario
-        const rolesUnicos = [...new Set(usuario.clinicas.map(clinica => 
+        const rolesUnicos = [...new Set(usuario.clinicas.map(clinica =>
             clinica.UsuarioClinica.rol_clinica
         ))];
 

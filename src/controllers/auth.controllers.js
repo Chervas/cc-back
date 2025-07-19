@@ -1,7 +1,7 @@
 require('dotenv').config();
 const jwt = require('jsonwebtoken');
 const bcrypt = require('bcryptjs');
-const secret = '6798261677hH-!';
+const secret = '6798261677hH-1';
 const { Usuario } = require('../../models'); 
 
 exports.forgotPassword = (req, res) => {
