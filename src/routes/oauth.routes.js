@@ -1,7 +1,7 @@
 // backendclinicaclick/src/routes/oauth.routes.js
 const express = require('express');
 const axios = require('axios');
-const jwt = require('jsonwebtoken'); // Para decodificar el token JWT
+const jwt = require('jsonwebtoken');  // Para decodificar el token JWT
 const router = express.Router();
 const db = require('../../models'); // <-- Importa el objeto db de models/index.js
 const MetaConnection = db.MetaConnection; // <-- Accede al modelo MetaConnection
@@ -447,8 +447,8 @@ const getUserIdFromToken = (req) => {
         if (authHeader && authHeader.startsWith('Bearer ')) {
             const token = authHeader.substring(7); // Remover 'Bearer ' del inicio
             if (token) {
-                // Usar el mismo secreto que se usa en auth.controllers.js
-                const decoded = jwt.verify(token, '6798261677hH-!');
+                // Usar la misma clave que se usa en auth.controllers.js ✅
+                const decoded = jwt.verify(token, process.env.JWT_SECRET); // ✅ Usar variable de entorno
                 console.log('🔍 Token JWT decodificado para connection-status:', decoded);
                 return decoded.userId; // El campo correcto según auth.controllers.js
             }

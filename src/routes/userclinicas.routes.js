@@ -1,7 +1,7 @@
 // src/routes/userclinicas.routes.js
 const express = require('express');
 const jwt = require('jsonwebtoken');
-const { Clinica, UsuarioClinica, Usuario } = require('../../models');
+const { Clinica, UsuarioClinica, Usuario, GrupoClinica } = require('../../models');
 
 const router = express.Router();
 
@@ -22,7 +22,7 @@ const getUserIdFromToken = (req) => {
             const token = authHeader.substring(7); // Remover 'Bearer ' del inicio
             if (token) {
                 // ✅ CLAVE CORRECTA: Usar el mismo secreto que se usa en auth.controllers.js
-                const decoded = jwt.verify(token, '6798261677hH-1');
+                const decoded = jwt.verify(token, process.env.JWT_SECRET);
                 console.log('🔍 Token JWT decodificado para clínicas:', decoded);
                 return decoded.userId; // El campo correcto según auth.controllers.js
             }
@@ -78,15 +78,21 @@ router.get('/list', async (req, res) => {
 
         // Verificar si el usuario es administrador
         if (isAdmin(userId)) {
-            console.log('🔑 Usuario ADMINISTRADOR detectado (ID:', userId, ')');
+            console.log('👑 Usuario ADMINISTRADOR detectado (ID:', userId, ')');
             console.log('🏥 Obteniendo TODAS las clínicas del sistema...');
 
             // Para administradores: obtener TODAS las clínicas
             const todasLasClinicas = await Clinica.findAll({
+                // ✅ CORRECCIÓN: Incluir relación con GrupoClinica
+                include: [{
+                    model: GrupoClinica,
+                    as: 'grupoClinica',
+                    required: false // LEFT JOIN para incluir clínicas sin grupo
+                }],
                 order: [['nombre_clinica', 'ASC']]
             });
 
-            console.log('📊 Clínicas del sistema encontradas:', todasLasClinicas.length);
+            console.log('🏥 Clínicas del sistema encontradas:', todasLasClinicas.length);
 
             // Formatear respuesta para administradores
             const clinicas = todasLasClinicas.map(clinica => ({
@@ -101,6 +107,13 @@ router.get('/list', async (req, res) => {
                     address: clinica.direccion || null,
                     city: clinica.ciudad || null
                 },
+                // ✅ CORRECCIÓN: Agregar información de grupo
+                groupId: clinica.grupoClinicaId || null,
+                groupName: clinica.grupoClinica?.nombre_grupo || null,
+                grupoClinica: clinica.grupoClinica ? {
+                    id_grupo: clinica.grupoClinica.id_grupo,
+                    nombre_grupo: clinica.grupoClinica.nombre_grupo
+                } : null,
                 userRole: 'administrador', // Rol especial para admin
                 userSubRole: 'sistema',
                 // Permisos completos para administradores
@@ -112,10 +125,12 @@ router.get('/list', async (req, res) => {
                 }
             }));
 
-            console.log('📊 Clínicas formateadas para admin:', clinicas.map(c => ({
+            console.log('🏥 Clínicas formateadas para admin:', clinicas.map(c => ({
                 id: c.id,
                 name: c.name,
-                role: c.userRole
+                role: c.userRole,
+                groupId: c.groupId,
+                groupName: c.groupName
             })));
 
             // ✅ AGREGAR ROLES PARA ADMIN
@@ -142,6 +157,12 @@ router.get('/list', async (req, res) => {
                 include: [{
                     model: Clinica,
                     as: 'clinicas',
+                    // ✅ CORRECCIÓN: Incluir relación con GrupoClinica en clínicas asignadas
+                    include: [{
+                        model: GrupoClinica,
+                        as: 'grupoClinica',
+                        required: false
+                    }],
                     through: {
                         where: {
                             rol_clinica: ['propietario', 'personaldeclinica'] // Solo roles apropiados
@@ -159,13 +180,13 @@ router.get('/list', async (req, res) => {
                 });
             }
 
-            console.log('📊 Clínicas asignadas encontradas:', usuario.clinicas?.length || 0);
+            console.log('🏥 Clínicas asignadas encontradas:', usuario.clinicas?.length || 0);
 
             // ✅ EXTRAER ROLES ÚNICOS del usuario
             const rolesUnicos = [...new Set(usuario.clinicas.map(clinica =>
                 clinica.UsuarioClinica.rol_clinica
             ))];
-            console.log('🎭 Roles únicos extraídos:', rolesUnicos);
+            console.log('👤 Roles únicos extraídos:', rolesUnicos);
 
             // Formatear respuesta para usuarios normales
             const clinicas = (usuario.clinicas || []).map(clinica => ({
@@ -180,9 +201,16 @@ router.get('/list', async (req, res) => {
                     address: clinica.direccion || null,
                     city: clinica.ciudad || null
                 },
+                // ✅ CORRECCIÓN: Agregar información de grupo para usuarios normales
+                groupId: clinica.grupoClinicaId || null,
+                groupName: clinica.grupoClinica?.nombre_grupo || null,
+                grupoClinica: clinica.grupoClinica ? {
+                    id_grupo: clinica.grupoClinica.id_grupo,
+                    nombre_grupo: clinica.grupoClinica.nombre_grupo
+                } : null,
                 userRole: clinica.UsuarioClinica.rol_clinica,
                 userSubRole: clinica.UsuarioClinica.subrol_clinica,
-                // Permisos basados en el rol
+                // Permisos basados en el rol asignado
                 permissions: {
                     canMapAssets: ['propietario', 'personaldeclinica'].includes(clinica.UsuarioClinica.rol_clinica),
                     canManageSettings: clinica.UsuarioClinica.rol_clinica === 'propietario',
@@ -191,10 +219,12 @@ router.get('/list', async (req, res) => {
                 }
             }));
 
-            console.log('📊 Clínicas formateadas para usuario:', clinicas.map(c => ({
+            console.log('🏥 Clínicas formateadas para usuario:', clinicas.map(c => ({
                 id: c.id,
                 name: c.name,
-                role: c.userRole
+                role: c.userRole,
+                groupId: c.groupId,
+                groupName: c.groupName
             })));
 
             return res.json({
