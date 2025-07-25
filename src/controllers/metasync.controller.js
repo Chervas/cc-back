@@ -1,7 +1,7 @@
 'use strict';
 const axios = require('axios');
 const { 
-    SocialStatsDaily, 
+    SocialStatDaily, 
     SocialPosts, 
     SocialPostStatDaily, 
     SyncLog, 
@@ -589,7 +589,7 @@ async function syncFacebookPageMetrics(asset, accessToken, startDate, endDate) {
                 }
                 
                 // Buscar si ya existe un registro para esta fecha
-                let existingStats = await SocialStatsDaily.findOne({
+                let existingStats = await SocialStatDaily.findOne({
                     where: {
                         clinica_id: asset.clinicaId,
                         asset_id: asset.id,
@@ -602,7 +602,7 @@ async function syncFacebookPageMetrics(asset, accessToken, startDate, endDate) {
                     await existingStats.update(statsData);
                 } else {
                     // Crear nuevo registro
-                    await SocialStatsDaily.create(statsData);
+                    await SocialStatDaily.create(statsData);
                 }
                 
                 processedDays.add(dateStr);
@@ -686,7 +686,7 @@ async function syncInstagramMetrics(asset, accessToken, startDate, endDate) {
                 }
                 
                 // Buscar si ya existe un registro para esta fecha
-                let existingStats = await SocialStatsDaily.findOne({
+                let existingStats = await SocialStatDaily.findOne({
                     where: {
                         clinica_id: asset.clinicaId,
                         asset_id: asset.id,
@@ -699,7 +699,7 @@ async function syncInstagramMetrics(asset, accessToken, startDate, endDate) {
                     await existingStats.update(statsData);
                 } else {
                     // Crear nuevo registro
-                    await SocialStatsDaily.create(statsData);
+                    await SocialStatDaily.create(statsData);
                 }
                 
                 processedDays.add(dateStr);
@@ -725,7 +725,7 @@ async function syncInstagramMetrics(asset, accessToken, startDate, endDate) {
                     date.setHours(0, 0, 0, 0);
                     
                     // Buscar si ya existe un registro para esta fecha
-                    let existingStats = await SocialStatsDaily.findOne({
+                    let existingStats = await SocialStatDaily.findOne({
                         where: {
                             clinica_id: asset.clinicaId,
                             asset_id: asset.id,

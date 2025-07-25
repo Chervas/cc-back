@@ -11,7 +11,7 @@ router.use(authMiddleware);
 // Rutas de sincronización
 router.post('/clinica/:clinicaId/sync', metaSyncController.syncClinica);
 router.post('/asset/:assetId/sync', metaSyncController.syncAsset);
-router.get('/logs', metaSyncController.getSyncLogs);
+router.get('/logs', metaSyncController.getSyncLog);
 router.get('/stats', metaSyncController.getSyncStats);
 
 // Rutas de validación de tokens
