@@ -1,31 +1,25 @@
-// routes/metasync.routes.js
+'use strict';
 const express = require('express');
 const router = express.Router();
-const metaSyncController = require('../controllers/metasynccontroller');
-const socialStatsController = require('../controllers/socialstatscontroller');
-const authMiddleware = require('../middlewares/auth');
+const metaSyncController = require('../controllers/metasync.controller');
+const socialStatsController = require('../controllers/socialstats.controller');
+const authMiddleware = require('./auth.middleware');
 
-/**
- * Rutas para la sincronización con la API de Meta
- */
-
-// Middleware de autenticación para todas las rutas
-router.use(authMiddleware.verifyToken);
+// Aplicar middleware de autenticación a todas las rutas
+router.use(authMiddleware);
 
 // Rutas de sincronización
 router.post('/clinica/:clinicaId/sync', metaSyncController.syncClinica);
 router.post('/asset/:assetId/sync', metaSyncController.syncAsset);
-
-// Rutas de logs y estadísticas de sincronización
 router.get('/logs', metaSyncController.getSyncLogs);
 router.get('/stats', metaSyncController.getSyncStats);
 
 // Rutas de validación de tokens
 router.get('/tokens/validate', metaSyncController.validateTokens);
-router.get('/tokens/validate/:connectionId', metaSyncController.validateTokens);
+router.get('/tokens/validate/:connectionId', metaSyncController.validateTokenById);
 router.get('/tokens/stats', metaSyncController.getTokenValidationStats);
 
-// Rutas de métricas de redes sociales
+// Rutas de métricas
 router.get('/clinica/:clinicaId/stats', socialStatsController.getClinicaStats);
 router.get('/asset/:assetId/stats', socialStatsController.getAssetStats);
 router.get('/clinica/:clinicaId/posts', socialStatsController.getClinicaPosts);

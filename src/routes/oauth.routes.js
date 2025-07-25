@@ -405,7 +405,7 @@ router.post('/meta/map-assets', async (req, res) => {
                 assetType: asset.type,
                 metaAssetId: asset.id,
                 metaAssetName: asset.name,
-                pageAccessToken: asset.pageAccessToken || null, // Guardar token de página si existe
+                pageAccessToken: page.access_token || asset.pageAccessToken || null, // Guardar token de página si existe
                 isActive: asset.isActive || true 
             });
             createdAssets.push(newAsset);

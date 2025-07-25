@@ -2,7 +2,6 @@ require('dotenv').config(); // Asegúrate de que .env está en la raíz del proy
 const cors = require('cors');
 const express = require('express');
 const cookieParser = require('cookie-parser');
-
 // Importar rutas existentes
 const userRoutes = require('./routes/user.routes');
 const authRoutes = require('./routes/auth.routes');
@@ -16,14 +15,14 @@ const campanaRoutes = require('./routes/campana.routes');
 const leadRoutes = require('./routes/lead.routes');
 const panelesRoutes = require('./routes/paneles.routes');
 const userClinicasRoutes = require('./routes/userclinicas.routes');
-
 // NUEVAS RUTAS Y MODELOS
 const oauthRoutes = require('./routes/oauth.routes');
+// NUEVA RUTA: Sistema de métricas de redes sociales
+const metaSyncRoutes = require('./routes/metasync.routes');
+
 // Importar db desde models/index.js que contiene sequelize y todos los modelos
 const db = require('../models'); // <-- Importa el objeto db de models/index.js
-
 const app = express();
-
 // Configuración CORS (mantengo tu estructura)
 const corsOptions = {
     origin: ['https://crm.clinicaclick.com', 'http://localhost:4200'],
@@ -32,7 +31,6 @@ const corsOptions = {
 app.use(cors(corsOptions));
 app.use(express.json());
 app.use(cookieParser());
-
 // ✅ CORREGIDO: Usar rutas con prefijo /api/ como en la versión que funcionaba
 console.log('Configurando rutas...');
 app.use('/api/users', userRoutes);
@@ -59,30 +57,24 @@ app.use('/api/paneles', panelesRoutes);
 console.log('Ruta /api/paneles configurada');
 app.use('/api/userclinicas', userClinicasRoutes);
 console.log('Ruta /api/userclinicas configurada');
-
-
 // NUEVA RUTA: OAuth (sin /api/ porque es para OAuth2)
 app.use('/oauth', oauthRoutes);
 console.log('Ruta /oauth configurada');
-
+// NUEVA RUTA: Sistema de métricas de redes sociales
+app.use('/api/metasync', metaSyncRoutes);
+console.log('Ruta /api/metasync configurada');
 console.log('Routes registered successfully');
-
 // Puerto del servidor
 const PORT = process.env.PORT || 3000;
-
 // Sincronizar modelos con la base de datos
 db.sequelize.authenticate() // <-- Usar db.sequelize
     .then(() => console.log('Conexión a la base de datos establecida correctamente.'))
     .catch(err => console.error('No se pudo conectar a la base de datos:', err));
-
 // Sincronizar modelos (comentado porque usamos migraciones)
 // db.sequelize.sync({ alter: true }) // <-- Usar db.sequelize
 //     .then(() => console.log('Modelos de la base de datos sincronizados.'))
 //     .catch(err => console.error('Error al sincronizar modelos de la base de datos:', err));
-
 app.listen(PORT, () => {
     console.log(`Servidor backend escuchando en el puerto ${PORT}`);
 });
-
 module.exports = app;
-
