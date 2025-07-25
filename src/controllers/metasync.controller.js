@@ -345,7 +345,7 @@ exports.getTokenValidationStats = async (req, res) => {
             include: [
                 {
                     model: MetaConnection,
-                    as: 'MetaConnection'
+                    as: 'metaConnection'
                 }
             ]
         });
@@ -381,7 +381,7 @@ async function syncClinicaAssets(clinicaId, startDate, endDate, syncLogId) {
             include: [
                 {
                     model: MetaConnection,
-                    as: 'MetaConnection',
+                    as: 'metaConnection',
                     required: true
                 }
             ]

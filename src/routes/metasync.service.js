@@ -13,7 +13,7 @@ const SocialPost = db.SocialPosts;
 const SocialPostStatDaily = db.SocialPostStatsDaily;
 
 // Constantes
-const META_API_VERSION = 'v18.0';
+const META_API_VERSION = 'v23.0';
 const META_API_BASE_URL = `https://graph.facebook.com/${META_API_VERSION}`;
 
 /**
@@ -41,7 +41,7 @@ const MetaSyncService = {
                 include: [
                     {
                         model: MetaConnection,
-                        as: 'MetaConnection',
+                        as: 'metaConnection',
                         required: true
                     }
                 ]
