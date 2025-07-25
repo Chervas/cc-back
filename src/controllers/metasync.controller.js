@@ -3,8 +3,8 @@ const axios = require('axios');
 const { 
     SocialStatsDaily, 
     SocialPosts, 
-    SocialPostStatsDaily, 
-    SyncLogs, 
+    SocialPostStatDaily, 
+    SyncLog, 
     TokenValidations,
     MetaConnection,
     ClinicMetaAsset
@@ -43,7 +43,7 @@ exports.syncClinica = async (req, res) => {
         }
         
         // Iniciar proceso de sincronización
-        const syncLog = await SyncLogs.create({
+        const syncLog = await SyncLog.create({
             job_type: 'clinica_sync',
             clinica_id: clinicaId,
             status: 'running',
@@ -57,7 +57,7 @@ exports.syncClinica = async (req, res) => {
             })
             .catch(error => {
                 console.error(`❌ Error en sincronización de clínica ${clinicaId}:`, error);
-                SyncLogs.update(
+                SyncLog.update(
                     {
                         status: 'failed',
                         error_message: error.message,
@@ -104,7 +104,7 @@ exports.syncAsset = async (req, res) => {
         }
         
         // Iniciar proceso de sincronización
-        const syncLog = await SyncLogs.create({
+        const syncLog = await SyncLog.create({
             job_type: 'asset_sync',
             clinica_id: asset.clinicaId,
             asset_id: assetId,
@@ -120,7 +120,7 @@ exports.syncAsset = async (req, res) => {
             })
             .catch(error => {
                 console.error(`❌ Error en sincronización de activo ${assetId}:`, error);
-                SyncLogs.update(
+                SyncLog.update(
                     {
                         status: 'failed',
                         error_message: error.message,
@@ -145,7 +145,7 @@ exports.syncAsset = async (req, res) => {
 };
 
 // Obtiene los logs de sincronización
-exports.getSyncLogs = async (req, res) => {
+exports.getSyncLog = async (req, res) => {
     try {
         const { limit = 10, offset = 0, jobType, status, clinicaId } = req.query;
         
@@ -165,7 +165,7 @@ exports.getSyncLogs = async (req, res) => {
         }
         
         // Obtener logs
-        const logs = await SyncLogs.findAndCountAll({
+        const logs = await SyncLog.findAndCountAll({
             where,
             limit: parseInt(limit),
             offset: parseInt(offset),
@@ -189,13 +189,13 @@ exports.getSyncLogs = async (req, res) => {
 exports.getSyncStats = async (req, res) => {
     try {
         // Estadísticas generales
-        const totalJobs = await SyncLogs.count();
-        const completedJobs = await SyncLogs.count({ where: { status: 'completed' } });
-        const failedJobs = await SyncLogs.count({ where: { status: 'failed' } });
-        const runningJobs = await SyncLogs.count({ where: { status: 'running' } });
+        const totalJobs = await SyncLog.count();
+        const completedJobs = await SyncLog.count({ where: { status: 'completed' } });
+        const failedJobs = await SyncLog.count({ where: { status: 'failed' } });
+        const runningJobs = await SyncLog.count({ where: { status: 'running' } });
         
         // Estadísticas por tipo de trabajo
-        const jobTypes = await SyncLogs.findAll({
+        const jobTypes = await SyncLog.findAll({
             attributes: [
                 'job_type',
                 [sequelize.fn('COUNT', sequelize.col('id')), 'count']
@@ -204,7 +204,7 @@ exports.getSyncStats = async (req, res) => {
         });
         
         // Estadísticas por clínica
-        const clinicaStats = await SyncLogs.findAll({
+        const clinicaStats = await SyncLog.findAll({
             attributes: [
                 'clinica_id',
                 [sequelize.fn('COUNT', sequelize.col('id')), 'count']
@@ -409,7 +409,7 @@ async function syncClinicaAssets(clinicaId, startDate, endDate, syncLogId) {
         
         // Actualizar registro de sincronización
         if (syncLogId) {
-            await SyncLogs.update(
+            await SyncLog.update(
                 {
                     status: errorCount === assets.length ? 'failed' : (errorCount > 0 ? 'partial' : 'completed'),
                     records_processed: processedCount,
@@ -431,7 +431,7 @@ async function syncClinicaAssets(clinicaId, startDate, endDate, syncLogId) {
         
         // Actualizar registro de sincronización en caso de error
         if (syncLogId) {
-            await SyncLogs.update(
+            await SyncLog.update(
                 {
                     status: 'failed',
                     error_message: error.message,
@@ -489,7 +489,7 @@ async function syncAsset(asset, startDate, endDate, syncLogId) {
         
         // Actualizar registro de sincronización
         if (syncLogId) {
-            await SyncLogs.update(
+            await SyncLog.update(
                 {
                     status: 'completed',
                     records_processed: result.recordsProcessed || 0,
@@ -507,7 +507,7 @@ async function syncAsset(asset, startDate, endDate, syncLogId) {
         
         // Actualizar registro de sincronización en caso de error
         if (syncLogId) {
-            await SyncLogs.update(
+            await SyncLog.update(
                 {
                     status: 'failed',
                     error_message: error.message,
