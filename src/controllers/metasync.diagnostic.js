@@ -17,7 +17,7 @@ const META_API_BASE_URL = 'https://graph.facebook.com/v23.0';
  */
 exports.testUserConnection = async (req, res) => {
   try {
-    const userId = req.user.id;
+    const userId = req.userData.userId;
     
     // Obtener conexión de Meta
     const connection = await MetaConnection.findOne({
