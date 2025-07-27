@@ -69,16 +69,23 @@ exports.getJobsStatus = async (req, res) => {
       lastExecutions: {}
     };
 
-    // Obtener últimas ejecuciones de cada tipo de job
+   // Obtener últimas ejecuciones de cada tipo de job
     const recentSyncs = await SyncLog.findAll({
       where: {
-        syncType: {
+        job_type: {
           [Op.in]: ['automated_metrics_sync', 'manual_job_execution']
         }
       },
-      order: [['createdAt', 'DESC']],
+      order: [['created_at', 'DESC']],
       limit: 10,
-      attributes: ['syncType', 'status', 'createdAt', 'completedAt', 'recordsProcessed', 'recordsErrored']
+      attributes: [
+        ['job_type', 'syncType'],
+        'status',
+        ['start_time', 'startedAt'],
+        ['end_time', 'completedAt'],
+        ['records_processed', 'recordsProcessed'],
+        ['error_message', 'errorMessage']
+      ]
     });
 
     status.recentExecutions = recentSyncs;
@@ -90,7 +97,7 @@ exports.getJobsStatus = async (req, res) => {
     status.todayStats = {
       syncExecutions: await SyncLog.count({
         where: {
-          createdAt: { [Op.gte]: today }
+          created_at: { [Op.gte]: today }
         }
       }),
       tokenValidations: await TokenValidation.count({
@@ -100,7 +107,7 @@ exports.getJobsStatus = async (req, res) => {
       }),
       metricsCollected: await SocialStatDaily.count({
         where: {
-          createdAt: { [Op.gte]: today }
+          created_at: { [Op.gte]: today }
         }
       })
     };
@@ -188,14 +195,9 @@ exports.runJob = async (req, res) => {
 
     // Crear log de ejecución manual
     const syncLog = await SyncLog.create({
-      syncType: 'manual_job_execution',
+      job_type: 'manual_job_execution',
       status: 'running',
-      startedAt: new Date(),
-      metadata: {
-        jobName: jobName,
-        executedBy: userId,
-        trigger: 'manual'
-      }
+      start_time: new Date()
     });
 
     try {
@@ -205,7 +207,7 @@ exports.runJob = async (req, res) => {
       // Actualizar log de éxito
       await syncLog.update({
         status: 'completed',
-        completedAt: new Date()
+        end_time: new Date()
       });
 
       return res.json({
@@ -220,8 +222,8 @@ exports.runJob = async (req, res) => {
       // Actualizar log de error
       await syncLog.update({
         status: 'failed',
-        completedAt: new Date(),
-        errorMessage: jobError.message
+        end_time: new Date(),
+        error_message: jobError.message
       });
 
       throw jobError;
@@ -235,6 +237,7 @@ exports.runJob = async (req, res) => {
     });
   }
 };
+
 
 /**
  * Obtener logs de ejecución de jobs
@@ -255,7 +258,7 @@ exports.getJobLogs = async (req, res) => {
 
     // Filtros
     if (jobType) {
-      whereClause.syncType = jobType;
+      whereClause.job_type = jobType;
     }
 
     if (status) {
@@ -263,24 +266,29 @@ exports.getJobLogs = async (req, res) => {
     }
 
     if (startDate || endDate) {
-      whereClause.createdAt = {};
+      whereClause.created_at = {};
       if (startDate) {
-        whereClause.createdAt[Op.gte] = new Date(startDate);
+        whereClause.created_at[Op.gte] = new Date(startDate);
       }
       if (endDate) {
-        whereClause.createdAt[Op.lte] = new Date(endDate);
+        whereClause.created_at[Op.lte] = new Date(endDate);
       }
     }
 
     // Obtener logs con paginación
     const { count, rows } = await SyncLog.findAndCountAll({
       where: whereClause,
-      order: [['createdAt', 'DESC']],
+      order: [['created_at', 'DESC']],
       limit: parseInt(limit),
       offset: offset,
       attributes: [
-        'id', 'syncType', 'status', 'startedAt', 'completedAt', 
-        'recordsProcessed', 'recordsErrored', 'errorMessage', 'metadata'
+        'id',
+        ['job_type', 'syncType'],
+        'status',
+        ['start_time', 'startedAt'],
+        ['end_time', 'completedAt'],
+        ['records_processed', 'recordsProcessed'],
+        ['error_message', 'errorMessage']
       ]
     });
 
@@ -357,18 +365,18 @@ exports.getJobStatistics = async (req, res) => {
     // Estadísticas de ejecuciones por tipo
     const executionsByType = await SyncLog.findAll({
       where: {
-        createdAt: {
+        created_at: {
           [Op.between]: [startDate, endDate]
         }
       },
       attributes: [
-        'syncType',
+        ['job_type', 'syncType'],
         'status',
         [SyncLog.sequelize.fn('COUNT', SyncLog.sequelize.col('id')), 'count'],
-        [SyncLog.sequelize.fn('AVG', SyncLog.sequelize.col('recordsProcessed')), 'avgRecordsProcessed'],
-        [SyncLog.sequelize.fn('SUM', SyncLog.sequelize.col('recordsProcessed')), 'totalRecordsProcessed']
+        [SyncLog.sequelize.fn('AVG', SyncLog.sequelize.col('records_processed')), 'avgRecordsProcessed'],
+        [SyncLog.sequelize.fn('SUM', SyncLog.sequelize.col('records_processed')), 'totalRecordsProcessed']
       ],
-      group: ['syncType', 'status'],
+      group: ['job_type', 'status'],
       raw: true
     });
 
@@ -390,7 +398,7 @@ exports.getJobStatistics = async (req, res) => {
     // Estadísticas de métricas recolectadas
     const metricsStats = await SocialStatDaily.findAll({
       where: {
-        createdAt: {
+        created_at: {
           [Op.between]: [startDate, endDate]
         }
       },
@@ -405,20 +413,20 @@ exports.getJobStatistics = async (req, res) => {
     // Tendencia diaria de ejecuciones
     const dailyTrend = await SyncLog.findAll({
       where: {
-        createdAt: {
+        created_at: {
           [Op.between]: [startDate, endDate]
         }
       },
       attributes: [
-        [SyncLog.sequelize.fn('DATE', SyncLog.sequelize.col('createdAt')), 'date'],
+        [SyncLog.sequelize.fn('DATE', SyncLog.sequelize.col('created_at')), 'date'],
         'status',
         [SyncLog.sequelize.fn('COUNT', SyncLog.sequelize.col('id')), 'count']
       ],
       group: [
-        SyncLog.sequelize.fn('DATE', SyncLog.sequelize.col('createdAt')),
+        SyncLog.sequelize.fn('DATE', SyncLog.sequelize.col('created_at')),
         'status'
       ],
-      order: [[SyncLog.sequelize.fn('DATE', SyncLog.sequelize.col('createdAt')), 'ASC']],
+      order: [[SyncLog.sequelize.fn('DATE', SyncLog.sequelize.col('created_at')), 'ASC']],
       raw: true
     });
 

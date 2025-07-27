@@ -157,13 +157,9 @@ class MetaSyncJobs {
       
       // Crear log de sincronización
       syncLog = await SyncLog.create({
-        syncType: 'automated_metrics_sync',
+        job_type: 'automated_metrics_sync',
         status: 'running',
-        startedAt: startTime,
-        metadata: {
-          jobType: 'cron',
-          trigger: 'scheduled'
-        }
+        start_time: startTime
       });
 
       // Obtener todas las conexiones activas
@@ -204,15 +200,9 @@ class MetaSyncJobs {
       // Actualizar log de sincronización
       await syncLog.update({
         status: errorCount === 0 ? 'completed' : 'completed_with_errors',
-        completedAt: new Date(),
-        recordsProcessed: successCount,
-        recordsErrored: errorCount,
-        metadata: {
-          ...syncLog.metadata,
-          successCount,
-          errorCount,
-          errors: errors.slice(0, 10) // Limitar errores guardados
-        }
+        end_time: new Date(),
+        records_processed: successCount,
+        error_message: errorCount > 0 ? `${errorCount} errors` : null
       });
 
       const duration = new Date() - startTime;
@@ -225,8 +215,8 @@ class MetaSyncJobs {
       if (syncLog) {
         await syncLog.update({
           status: 'failed',
-          completedAt: new Date(),
-          errorMessage: error.message
+          end_time: new Date(),
+          error_message: error.message
         });
       }
     }

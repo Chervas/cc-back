@@ -81,7 +81,7 @@ app.listen(PORT, () => {
 
 
 // Inicializar jobs automáticamente en producción
-const metaSyncJobs = require('./src/jobs/metasync.jobs');
+const { metaSyncJobs } = require('./jobs/metasync.jobs');
 if (process.env.NODE_ENV === 'production') {
   setTimeout(async () => {
     try {
