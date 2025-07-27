@@ -6,6 +6,7 @@ const router = express.Router();
 const metaSyncController = require('../controllers/metasync.controller');
 const socialStatsController = require('../controllers/socialstats.controller');
 const metaDiagnosticController = require('../controllers/metasync.diagnostic');
+const metaJobsController = require('../controllers/metasync.jobs.controller');
 
 // Middleware de autenticación
 const authMiddleware = require('./auth.middleware');
@@ -38,6 +39,18 @@ router.get('/diagnostic/asset/:assetId', metaDiagnosticController.testAssetConne
 router.get('/diagnostic/permissions', metaDiagnosticController.checkPermissions);
 router.get('/diagnostic/sample-data/:assetId', metaDiagnosticController.getSampleData);
 router.get('/diagnostic/asset-details/:assetId', metaDiagnosticController.getAssetDetails);
+
+// ===== RUTAS DE GESTIÓN DE JOBS CRON =====
+router.post('/jobs/initialize', metaJobsController.initializeJobs);
+router.get('/jobs/status', metaJobsController.getJobsStatus);
+router.post('/jobs/start', metaJobsController.startJobs);
+router.post('/jobs/stop', metaJobsController.stopJobs);
+router.post('/jobs/restart', metaJobsController.restartJobs);
+router.post('/jobs/run/:jobName', metaJobsController.runJob);
+router.get('/jobs/logs', metaJobsController.getJobLogs);
+router.get('/jobs/statistics', metaJobsController.getJobStatistics);
+router.get('/jobs/configuration', metaJobsController.getJobConfiguration);
+router.get('/jobs/next-executions', metaJobsController.getNextExecutions);
 
 module.exports = router;
 

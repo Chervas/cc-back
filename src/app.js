@@ -20,6 +20,7 @@ const oauthRoutes = require('./routes/oauth.routes');
 // NUEVA RUTA: Sistema de métricas de redes sociales
 const metaSyncRoutes = require('./routes/metasync.routes');
 
+
 // Importar db desde models/index.js que contiene sequelize y todos los modelos
 const db = require('../models'); // <-- Importa el objeto db de models/index.js
 const app = express();
@@ -77,4 +78,22 @@ db.sequelize.authenticate() // <-- Usar db.sequelize
 app.listen(PORT, () => {
     console.log(`Servidor backend escuchando en el puerto ${PORT}`);
 });
+
+
+// Inicializar jobs automáticamente en producción
+const metaSyncJobs = require('./src/jobs/metasync.jobs');
+if (process.env.NODE_ENV === 'production') {
+  setTimeout(async () => {
+    try {
+      console.log('🚀 Inicializando sistema de jobs automáticamente...');
+      await metaSyncJobs.initialize();
+      metaSyncJobs.start();
+      console.log('✅ Sistema de jobs iniciado automáticamente');
+    } catch (error) {
+      console.error('❌ Error al inicializar jobs automáticamente:', error);
+    }
+  }, 5000); // Esperar 5 segundos después del arranque
+}
+
+
 module.exports = app;
