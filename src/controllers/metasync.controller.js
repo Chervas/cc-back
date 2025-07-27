@@ -1,9 +1,9 @@
 'use strict';
 const axios = require('axios');
 const { 
-    SocialStatDaily, 
+    SocialStatsDaily, 
     SocialPosts, 
-    SocialPostStatDaily, 
+    SocialPostStatsDaily, 
     SyncLog, 
     TokenValidations,
     MetaConnection,
@@ -589,7 +589,7 @@ async function syncFacebookPageMetrics(asset, accessToken, startDate, endDate) {
                 }
                 
                 // Buscar si ya existe un registro para esta fecha
-                let existingStats = await SocialStatDaily.findOne({
+                let existingStats = await SocialStatsDaily.findOne({
                     where: {
                         clinica_id: asset.clinicaId,
                         asset_id: asset.id,
@@ -602,7 +602,7 @@ async function syncFacebookPageMetrics(asset, accessToken, startDate, endDate) {
                     await existingStats.update(statsData);
                 } else {
                     // Crear nuevo registro
-                    await SocialStatDaily.create(statsData);
+                    await SocialStatsDaily.create(statsData);
                 }
                 
                 processedDays.add(dateStr);
@@ -686,7 +686,7 @@ async function syncInstagramMetrics(asset, accessToken, startDate, endDate) {
                 }
                 
                 // Buscar si ya existe un registro para esta fecha
-                let existingStats = await SocialStatDaily.findOne({
+                let existingStats = await SocialStatsDaily.findOne({
                     where: {
                         clinica_id: asset.clinicaId,
                         asset_id: asset.id,
@@ -699,7 +699,7 @@ async function syncInstagramMetrics(asset, accessToken, startDate, endDate) {
                     await existingStats.update(statsData);
                 } else {
                     // Crear nuevo registro
-                    await SocialStatDaily.create(statsData);
+                    await SocialStatsDaily.create(statsData);
                 }
                 
                 processedDays.add(dateStr);
@@ -725,7 +725,7 @@ async function syncInstagramMetrics(asset, accessToken, startDate, endDate) {
                     date.setHours(0, 0, 0, 0);
                     
                     // Buscar si ya existe un registro para esta fecha
-                    let existingStats = await SocialStatDaily.findOne({
+                    let existingStats = await SocialStatsDaily.findOne({
                         where: {
                             clinica_id: asset.clinicaId,
                             asset_id: asset.id,
@@ -895,7 +895,7 @@ async function syncFacebookPosts(asset, accessToken, startDate, endDate) {
                 }
                 
                 // Guardar métricas en la base de datos
-                await SocialPostStatDaily.create(statsData);
+                await SocialPostStatsDaily.create(statsData);
             }
         }
         
@@ -1032,7 +1032,7 @@ async function syncInstagramPosts(asset, accessToken, startDate, endDate) {
                 }
                 
                 // Guardar métricas en la base de datos
-                await SocialPostStatDaily.create(statsData);
+                await SocialPostStatsDaily.create(statsData);
             }
         }
         

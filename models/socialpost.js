@@ -104,8 +104,8 @@ module.exports = (sequelize, DataTypes) => {
             as: 'asset'
         });
 
-        // SocialPost tiene muchas SocialPostStatDaily
-        SocialPost.hasMany(models.SocialPostStatDaily, {
+        // SocialPost tiene muchas SocialPostStatsDaily
+        SocialPost.hasMany(models.SocialPostStatsDaily, {
             foreignKey: 'post_id',
             sourceKey: 'id',
             as: 'stats'
@@ -218,7 +218,7 @@ module.exports = (sequelize, DataTypes) => {
         return await this.findByPk(postId, {
             include: [
                 {
-                    model: sequelize.models.SocialPostStatDaily,
+                    model: sequelize.models.SocialPostStatsDaily,
                     as: 'stats',
                     order: [['date', 'ASC']]
                 },

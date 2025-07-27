@@ -227,7 +227,7 @@ exports.getClinicaPosts = async (req, res) => {
             order: [[sortBy, sortOrder]],
             include: [
                 {
-                    model: SocialPostStatDaily,
+                    model: SocialPostStatsDaily,
                     as: 'stats',
                     required: false,
                     // Obtener solo las estadísticas más recientes
@@ -264,7 +264,7 @@ exports.getPost = async (req, res) => {
         const post = await SocialPosts.findByPk(postId, {
             include: [
                 {
-                    model: SocialPostStatDaily,
+                    model: SocialPostStatsDaily,
                     as: 'stats',
                     required: false,
                     order: [['date', 'ASC']]
@@ -332,7 +332,7 @@ exports.getTopPosts = async (req, res) => {
             where: postWhere,
             include: [
                 {
-                    model: SocialPostStatDaily,
+                    model: SocialPostStatsDaily,
                     as: 'stats',
                     required: true,
                     attributes: [
@@ -351,7 +351,7 @@ exports.getTopPosts = async (req, res) => {
                 const fullPost = await SocialPosts.findByPk(post.id, {
                     include: [
                         {
-                            model: SocialPostStatDaily,
+                            model: SocialPostStatsDaily,
                             as: 'stats',
                             required: false,
                             // Obtener solo las estadísticas más recientes

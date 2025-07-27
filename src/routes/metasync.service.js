@@ -8,9 +8,9 @@ const SyncLog = db.SyncLogs;
 const TokenValidation = db.TokenValidations;
 const MetaConnection = db.MetaConnection;
 const ClinicMetaAsset = db.ClinicMetaAsset;
-const SocialStatDaily = db.SocialStatsDaily;
+const SocialStatsDaily = db.SocialStatsDaily;
 const SocialPost = db.SocialPosts;
-const SocialPostStatDaily = db.SocialPostStatsDaily;
+const SocialPostStatsDaily = db.SocialPostStatsDaily;
 
 // Constantes
 const META_API_VERSION = 'v23.0';
@@ -263,7 +263,7 @@ const MetaSyncService = {
                     }
                     
                     // Buscar si ya existe un registro para esta fecha
-                    let existingStats = await SocialStatDaily.findOne({
+                    let existingStats = await SocialStatsDaily.findOne({
                         where: {
                             clinica_id: asset.clinicaId,
                             asset_id: asset.id,
@@ -276,7 +276,7 @@ const MetaSyncService = {
                         await existingStats.update(statsData);
                     } else {
                         // Crear nuevo registro
-                        await SocialStatDaily.create(statsData);
+                        await SocialStatsDaily.create(statsData);
                     }
                     
                     processedDays.add(dateStr);
@@ -367,7 +367,7 @@ const MetaSyncService = {
                     }
                     
                     // Buscar si ya existe un registro para esta fecha
-                    let existingStats = await SocialStatDaily.findOne({
+                    let existingStats = await SocialStatsDaily.findOne({
                         where: {
                             clinica_id: asset.clinicaId,
                             asset_id: asset.id,
@@ -380,7 +380,7 @@ const MetaSyncService = {
                         await existingStats.update(statsData);
                     } else {
                         // Crear nuevo registro
-                        await SocialStatDaily.create(statsData);
+                        await SocialStatsDaily.create(statsData);
                     }
                     
                     processedDays.add(dateStr);
@@ -406,7 +406,7 @@ const MetaSyncService = {
                         date.setHours(0, 0, 0, 0);
                         
                         // Buscar si ya existe un registro para esta fecha
-                        let existingStats = await SocialStatDaily.findOne({
+                        let existingStats = await SocialStatsDaily.findOne({
                             where: {
                                 clinica_id: asset.clinicaId,
                                 asset_id: asset.id,
@@ -583,7 +583,7 @@ const MetaSyncService = {
                     }
                     
                     // Guardar métricas en la base de datos
-                    await SocialPostStatDaily.create(statsData);
+                    await SocialPostStatsDaily.create(statsData);
                 }
             }
             
@@ -727,7 +727,7 @@ const MetaSyncService = {
                     }
                     
                     // Guardar métricas en la base de datos
-                    await SocialPostStatDaily.create(statsData);
+                    await SocialPostStatsDaily.create(statsData);
                 }
             }
             

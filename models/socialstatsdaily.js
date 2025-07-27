@@ -1,6 +1,6 @@
 // models/socialstatdaily.js
 module.exports = (sequelize, DataTypes) => {
-    const SocialStatDaily = sequelize.define('SocialStatDaily', {
+    const SocialStatsDaily = sequelize.define('SocialStatsDaily', {
         id: {
             type: DataTypes.INTEGER,
             primaryKey: true,
@@ -77,16 +77,16 @@ module.exports = (sequelize, DataTypes) => {
     });
 
     // Asociaciones
-    SocialStatDaily.associate = function(models) {
-        // SocialStatDaily pertenece a una Clínica
-        SocialStatDaily.belongsTo(models.Clinica, {
+    SocialStatsDaily.associate = function(models) {
+        // SocialStatsDaily pertenece a una Clínica
+        SocialStatsDaily.belongsTo(models.Clinica, {
             foreignKey: 'clinica_id',
             targetKey: 'id_clinica',
             as: 'clinica'
         });
 
-        // SocialStatDaily pertenece a un ClinicMetaAsset
-        SocialStatDaily.belongsTo(models.ClinicMetaAsset, {
+        // SocialStatsDaily pertenece a un ClinicMetaAsset
+        SocialStatsDaily.belongsTo(models.ClinicMetaAsset, {
             foreignKey: 'asset_id',
             targetKey: 'id',
             as: 'asset'
@@ -102,7 +102,7 @@ module.exports = (sequelize, DataTypes) => {
      * @param {Date} endDate - Fecha de fin
      * @returns {Promise<Array>} - Estadísticas diarias
      */
-    SocialStatDaily.getStatsByClinica = async function(clinicaId, startDate, endDate) {
+    SocialStatsDaily.getStatsByClinica = async function(clinicaId, startDate, endDate) {
         return await this.findAll({
             where: {
                 clinica_id: clinicaId,
@@ -128,7 +128,7 @@ module.exports = (sequelize, DataTypes) => {
      * @param {Date} endDate - Fecha de fin
      * @returns {Promise<Array>} - Estadísticas diarias
      */
-    SocialStatDaily.getStatsByAsset = async function(assetId, startDate, endDate) {
+    SocialStatsDaily.getStatsByAsset = async function(assetId, startDate, endDate) {
         return await this.findAll({
             where: {
                 asset_id: assetId,
@@ -145,7 +145,7 @@ module.exports = (sequelize, DataTypes) => {
      * @param {Object} stats - Datos de estadísticas
      * @returns {Promise<Object>} - Registro creado o actualizado
      */
-    SocialStatDaily.upsertStats = async function(stats) {
+    SocialStatsDaily.upsertStats = async function(stats) {
         const [record, created] = await this.findOrCreate({
             where: {
                 clinica_id: stats.clinica_id,
@@ -170,7 +170,7 @@ module.exports = (sequelize, DataTypes) => {
      * @param {Date} endDate - Fecha de fin
      * @returns {Promise<Array>} - Estadísticas agregadas
      */
-    SocialStatDaily.getAggregatedStats = async function(clinicaId, period, startDate, endDate) {
+    SocialStatsDaily.getAggregatedStats = async function(clinicaId, period, startDate, endDate) {
         let groupByClause;
         
         switch (period) {
@@ -228,6 +228,6 @@ module.exports = (sequelize, DataTypes) => {
         });
     };
 
-    return SocialStatDaily;
+    return SocialStatsDaily;
 };
 

@@ -1,6 +1,6 @@
 // models/socialpoststatdaily.js
 module.exports = (sequelize, DataTypes) => {
-    const SocialPostStatDaily = sequelize.define('SocialPostStatDaily', {
+    const SocialPostStatsDaily = sequelize.define('SocialPostStatsDaily', {
         id: {
             type: DataTypes.INTEGER,
             primaryKey: true,
@@ -87,9 +87,9 @@ module.exports = (sequelize, DataTypes) => {
     });
 
     // Asociaciones
-    SocialPostStatDaily.associate = function(models) {
-        // SocialPostStatDaily pertenece a un SocialPost
-        SocialPostStatDaily.belongsTo(models.SocialPost, {
+    SocialPostStatsDaily.associate = function(models) {
+        // SocialPostStatsDaily pertenece a un SocialPost
+        SocialPostStatsDaily.belongsTo(models.SocialPost, {
             foreignKey: 'post_id',
             targetKey: 'id',
             as: 'post'
@@ -103,7 +103,7 @@ module.exports = (sequelize, DataTypes) => {
      * @param {Object} statsData - Datos de estadísticas
      * @returns {Promise<Object>} - Registro creado o actualizado
      */
-    SocialPostStatDaily.upsertStats = async function(statsData) {
+    SocialPostStatsDaily.upsertStats = async function(statsData) {
         const [stats, created] = await this.findOrCreate({
             where: {
                 post_id: statsData.post_id,
@@ -126,7 +126,7 @@ module.exports = (sequelize, DataTypes) => {
      * @param {Date} endDate - Fecha de fin
      * @returns {Promise<Array>} - Estadísticas diarias
      */
-    SocialPostStatDaily.getStatsByDateRange = async function(postId, startDate, endDate) {
+    SocialPostStatsDaily.getStatsByDateRange = async function(postId, startDate, endDate) {
         return await this.findAll({
             where: {
                 post_id: postId,
@@ -147,7 +147,7 @@ module.exports = (sequelize, DataTypes) => {
      * @param {number} limit - Límite de resultados
      * @returns {Promise<Array>} - Publicaciones más populares
      */
-    SocialPostStatDaily.getTopPosts = async function(clinicaId, metric = 'engagement', startDate, endDate, limit = 5) {
+    SocialPostStatsDaily.getTopPosts = async function(clinicaId, metric = 'engagement', startDate, endDate, limit = 5) {
         // Validar métrica
         const validMetrics = ['engagement', 'reach', 'impressions', 'likes', 'comments', 'shares'];
         if (!validMetrics.includes(metric)) {
@@ -192,7 +192,7 @@ module.exports = (sequelize, DataTypes) => {
      * @param {Date} endDate - Fecha de fin
      * @returns {Promise<Array>} - Estadísticas agregadas por día
      */
-    SocialPostStatDaily.getAggregatedStatsByDay = async function(clinicaId, startDate, endDate) {
+    SocialPostStatsDaily.getAggregatedStatsByDay = async function(clinicaId, startDate, endDate) {
         return await this.findAll({
             attributes: [
                 'date',
@@ -221,6 +221,6 @@ module.exports = (sequelize, DataTypes) => {
         });
     };
 
-    return SocialPostStatDaily;
+    return SocialPostStatsDaily;
 };
 
