@@ -1,5 +1,6 @@
 /**
  * Controlador para Gestión de Jobs Cron de Sincronización de Métricas
+ * ClinicaClick - Versión Final (Sin Referencias Circulares)
  * 
  * Este controlador proporciona endpoints para:
  * - Inicializar y gestionar jobs cron
@@ -8,7 +9,7 @@
  * - Obtener estadísticas de ejecución
  * 
  * @author Manus AI
- * @version 1.0.0
+ * @version 1.0.0 - FINAL
  * @date 2025-07-27
  */
 
@@ -29,27 +30,26 @@ exports.initializeJobs = async (req, res) => {
         message: 'Sistema de jobs ya está inicializado',
         status: 'already_running',
         jobsCount: metaSyncJobs.jobs.size,
-        jobs: metaSyncJobs.getStatus()
+        jobs: getJobsSafeInfo() // CORREGIDO: usar función segura
       });
     }
 
-    // Inicializar jobs
-    await metaSyncJobs.initialize();
+    // Inicializar el sistema
+    const result = await metaSyncJobs.initialize();
     
-    // Iniciar jobs
+    // Iniciar automáticamente
     metaSyncJobs.start();
     
-    return res.json({
+    res.json({
       message: 'Sistema de jobs inicializado y iniciado correctamente',
-      status: 'initialized',
-      jobsCount: metaSyncJobs.jobs.size,
-      jobs: metaSyncJobs.getStatus(),
-      schedules: metaSyncJobs.config.schedules
+      status: result.status,
+      jobsCount: result.jobsCount,
+      jobs: getJobsSafeInfo() // CORREGIDO: usar función segura
     });
 
   } catch (error) {
     console.error('❌ Error al inicializar jobs:', error);
-    return res.status(500).json({
+    res.status(500).json({
       message: 'Error al inicializar sistema de jobs',
       error: error.message
     });
@@ -57,66 +57,104 @@ exports.initializeJobs = async (req, res) => {
 };
 
 /**
- * Obtener estado actual de todos los jobs
+ * Función auxiliar para obtener información segura de jobs (sin referencias circulares)
+ */
+function getJobsSafeInfo() {
+  const safeJobs = {};
+  
+  for (const [name, jobData] of metaSyncJobs.jobs) {
+    safeJobs[name] = {
+      schedule: jobData.schedule,
+      status: jobData.status,
+      lastExecution: jobData.lastExecution,
+      lastError: jobData.lastError || null
+    };
+  }
+  
+  return safeJobs;
+}
+
+/**
+ * Obtener estado actual de los jobs
  */
 exports.getJobsStatus = async (req, res) => {
   try {
-    const status = {
-      systemRunning: metaSyncJobs.isRunning,
-      jobsCount: metaSyncJobs.jobs.size,
-      jobs: metaSyncJobs.getStatus(),
-      schedules: metaSyncJobs.config.schedules,
-      lastExecutions: {}
-    };
-
-   // Obtener últimas ejecuciones de cada tipo de job
-    const recentSyncs = await SyncLog.findAll({
+    // Obtener estado básico del sistema
+    const systemStatus = metaSyncJobs.getStatus();
+    
+    // Obtener estadísticas del día actual
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    
+    // Obtener logs recientes - CORREGIDO: usar job_type en lugar de syncType
+    const recentLogs = await SyncLog.findAll({
+      attributes: ['job_type', 'status', 'start_time', 'end_time', 'records_processed', 'error_message'],
       where: {
         job_type: {
-          [Op.in]: ['automated_metrics_sync', 'manual_job_execution']
+          [Op.in]: ['automated_metrics_sync', 'manual_job_execution', 'health_check', 'token_validation', 'data_cleanup']
         }
       },
       order: [['created_at', 'DESC']],
-      limit: 10,
-      attributes: [
-        ['job_type', 'syncType'],
-        'status',
-        ['start_time', 'startedAt'],
-        ['end_time', 'completedAt'],
-        ['records_processed', 'recordsProcessed'],
-        ['error_message', 'errorMessage']
-      ]
+      limit: 10
     });
 
-    status.recentExecutions = recentSyncs;
-
-    // Estadísticas adicionales
-    const today = new Date();
-    today.setHours(0, 0, 0, 0);
-
-    status.todayStats = {
-      syncExecutions: await SyncLog.count({
-        where: {
-          created_at: { [Op.gte]: today }
-        }
-      }),
-      tokenValidations: await TokenValidation.count({
-        where: {
-          validatedAt: { [Op.gte]: today }
-        }
-      }),
-      metricsCollected: await SocialStatDaily.count({
-        where: {
-          created_at: { [Op.gte]: today }
-        }
-      })
+    // Obtener estadísticas del día - CORREGIDO: manejar posibles errores
+    let todayStats = {
+      totalExecutions: 0,
+      successfulExecutions: 0,
+      failedExecutions: 0
     };
 
-    return res.json(status);
+    try {
+      const todayExecutions = await SyncLog.count({
+        where: {
+          created_at: { [Op.gte]: today }
+        }
+      });
+      
+      const todaySuccessful = await SyncLog.count({
+        where: {
+          created_at: { [Op.gte]: today },
+          status: 'completed'
+        }
+      });
+
+      const todayFailed = await SyncLog.count({
+        where: {
+          created_at: { [Op.gte]: today },
+          status: 'failed'
+        }
+      });
+
+      todayStats = {
+        totalExecutions: todayExecutions || 0,
+        successfulExecutions: todaySuccessful || 0,
+        failedExecutions: todayFailed || 0
+      };
+    } catch (statsError) {
+      console.error('⚠️ Error obteniendo estadísticas del día:', statsError.message);
+      // Mantener valores por defecto
+    }
+
+    res.json({
+      systemRunning: systemStatus.running,
+      systemInitialized: systemStatus.initialized,
+      jobsCount: systemStatus.jobsCount,
+      jobs: getJobsSafeInfo(), // CORREGIDO: usar función segura
+      todayStats,
+      recentLogs: recentLogs.map(log => ({
+        jobType: log.job_type,
+        status: log.status,
+        startedAt: log.start_time,
+        completedAt: log.end_time,
+        recordsProcessed: log.records_processed,
+        errorMessage: log.error_message
+      }))
+    });
 
   } catch (error) {
     console.error('❌ Error al obtener estado de jobs:', error);
-    return res.status(500).json({
+    res.status(500).json({
       message: 'Error al obtener estado de jobs',
       error: error.message
     });
@@ -128,24 +166,17 @@ exports.getJobsStatus = async (req, res) => {
  */
 exports.startJobs = async (req, res) => {
   try {
-    if (!metaSyncJobs.isRunning) {
-      return res.status(400).json({
-        message: 'Sistema de jobs no está inicializado',
-        status: 'not_initialized'
-      });
-    }
-
-    metaSyncJobs.start();
-
-    return res.json({
-      message: 'Todos los jobs han sido iniciados',
-      status: 'started',
-      jobs: metaSyncJobs.getStatus()
+    const result = metaSyncJobs.start();
+    
+    res.json({
+      message: 'Jobs iniciados correctamente',
+      status: result.status,
+      jobsCount: result.jobsCount
     });
 
   } catch (error) {
     console.error('❌ Error al iniciar jobs:', error);
-    return res.status(500).json({
+    res.status(500).json({
       message: 'Error al iniciar jobs',
       error: error.message
     });
@@ -157,18 +188,40 @@ exports.startJobs = async (req, res) => {
  */
 exports.stopJobs = async (req, res) => {
   try {
-    metaSyncJobs.stop();
-
-    return res.json({
-      message: 'Todos los jobs han sido detenidos',
-      status: 'stopped',
-      jobs: metaSyncJobs.getStatus()
+    const result = metaSyncJobs.stop();
+    
+    res.json({
+      message: 'Jobs detenidos correctamente',
+      status: result.status,
+      jobsCount: result.jobsCount
     });
 
   } catch (error) {
     console.error('❌ Error al detener jobs:', error);
-    return res.status(500).json({
+    res.status(500).json({
       message: 'Error al detener jobs',
+      error: error.message
+    });
+  }
+};
+
+/**
+ * Reiniciar el sistema de jobs
+ */
+exports.restartJobs = async (req, res) => {
+  try {
+    const result = metaSyncJobs.restart();
+    
+    res.json({
+      message: 'Jobs reiniciados correctamente',
+      status: result.status,
+      jobsCount: result.jobsCount
+    });
+
+  } catch (error) {
+    console.error('❌ Error al reiniciar jobs:', error);
+    res.status(500).json({
+      message: 'Error al reiniciar jobs',
       error: error.message
     });
   }
@@ -180,46 +233,40 @@ exports.stopJobs = async (req, res) => {
 exports.runJob = async (req, res) => {
   try {
     const { jobName } = req.params;
-    const userId = req.userData.userId;
-
+    const userId = req.userData.userId; // CORREGIDO: usar userData.userId
+    
     console.log(`🔄 Ejecutando job '${jobName}' manualmente por usuario ${userId}`);
-
-    // Validar nombre del job
-    const validJobs = ['metricsSync', 'tokenValidation', 'dataCleanup', 'healthCheck'];
-    if (!validJobs.includes(jobName)) {
-      return res.status(400).json({
-        message: 'Nombre de job inválido',
-        validJobs: validJobs
-      });
-    }
-
+    
     // Crear log de ejecución manual
     const syncLog = await SyncLog.create({
       job_type: 'manual_job_execution',
       status: 'running',
-      start_time: new Date()
+      start_time: new Date(),
+      records_processed: 0
     });
 
     try {
       // Ejecutar el job
-      await metaSyncJobs.runJob(jobName);
-
-      // Actualizar log de éxito
+      const result = await metaSyncJobs.runJob(jobName);
+      
+      // Actualizar log
       await syncLog.update({
         status: 'completed',
-        end_time: new Date()
+        end_time: new Date(),
+        records_processed: result.processed || 1
       });
 
-      return res.json({
+      res.json({
         message: `Job '${jobName}' ejecutado correctamente`,
-        jobName: jobName,
+        jobName,
         status: 'completed',
         executedAt: new Date(),
-        syncLogId: syncLog.id
+        syncLogId: syncLog.id,
+        result
       });
 
     } catch (jobError) {
-      // Actualizar log de error
+      // Actualizar log con error
       await syncLog.update({
         status: 'failed',
         end_time: new Date(),
@@ -230,104 +277,80 @@ exports.runJob = async (req, res) => {
     }
 
   } catch (error) {
-    console.error(`❌ Error al ejecutar job '${req.params.jobName}':`, error);
-    return res.status(500).json({
+    console.error(`❌ Error ejecutando job '${req.params.jobName}':`, error);
+    res.status(500).json({
       message: `Error al ejecutar job '${req.params.jobName}'`,
       error: error.message
     });
   }
 };
 
-
 /**
- * Obtener logs de ejecución de jobs
+ * Obtener logs de ejecución con filtros
  */
-exports.getJobLogs = async (req, res) => {
+exports.getJobsLogs = async (req, res) => {
   try {
-    const { 
-      page = 1, 
-      limit = 20, 
-      jobType = null, 
-      status = null,
-      startDate = null,
-      endDate = null 
+    const {
+      page = 1,
+      limit = 20,
+      status,
+      jobType,
+      startDate,
+      endDate
     } = req.query;
 
-    const offset = (page - 1) * limit;
-    const whereClause = {};
-
-    // Filtros
-    if (jobType) {
-      whereClause.job_type = jobType;
-    }
-
+    // Construir filtros
+    const where = {};
+    
     if (status) {
-      whereClause.status = status;
+      where.status = status;
     }
-
+    
+    if (jobType) {
+      where.job_type = jobType;
+    }
+    
     if (startDate || endDate) {
-      whereClause.created_at = {};
+      where.created_at = {};
       if (startDate) {
-        whereClause.created_at[Op.gte] = new Date(startDate);
+        where.created_at[Op.gte] = new Date(startDate);
       }
       if (endDate) {
-        whereClause.created_at[Op.lte] = new Date(endDate);
+        where.created_at[Op.lte] = new Date(endDate);
       }
     }
 
     // Obtener logs con paginación
-    const { count, rows } = await SyncLog.findAndCountAll({
-      where: whereClause,
+    const offset = (page - 1) * limit;
+    const { count, rows: logs } = await SyncLog.findAndCountAll({
+      where,
       order: [['created_at', 'DESC']],
       limit: parseInt(limit),
-      offset: offset,
-      attributes: [
-        'id',
-        ['job_type', 'syncType'],
-        'status',
-        ['start_time', 'startedAt'],
-        ['end_time', 'completedAt'],
-        ['records_processed', 'recordsProcessed'],
-        ['error_message', 'errorMessage']
-      ]
+      offset: parseInt(offset)
     });
 
-    // Calcular estadísticas
-    const stats = await SyncLog.findAll({
-      where: whereClause,
-      attributes: [
-        'status',
-        [SyncLog.sequelize.fn('COUNT', SyncLog.sequelize.col('id')), 'count']
-      ],
-      group: ['status'],
-      raw: true
-    });
-
-    const statusStats = {};
-    stats.forEach(stat => {
-      statusStats[stat.status] = parseInt(stat.count);
-    });
-
-    return res.json({
-      logs: rows,
+    res.json({
+      logs: logs.map(log => ({
+        id: log.id,
+        jobType: log.job_type,
+        status: log.status,
+        startedAt: log.start_time,
+        completedAt: log.end_time,
+        recordsProcessed: log.records_processed,
+        errorMessage: log.error_message,
+        createdAt: log.created_at
+      })),
       pagination: {
-        page: parseInt(page),
-        limit: parseInt(limit),
-        total: count,
-        pages: Math.ceil(count / limit)
-      },
-      stats: statusStats,
-      filters: {
-        jobType,
-        status,
-        startDate,
-        endDate
+        currentPage: parseInt(page),
+        totalPages: Math.ceil(count / limit),
+        totalItems: count,
+        itemsPerPage: parseInt(limit)
       }
     });
 
   } catch (error) {
-    console.error('❌ Error al obtener logs de jobs:', error);
-    return res.status(500).json({
+    console.error('❌ Error obteniendo logs de jobs:', error);
+    res.status(500).json({
       message: 'Error al obtener logs de jobs',
       error: error.message
     });
@@ -335,127 +358,107 @@ exports.getJobLogs = async (req, res) => {
 };
 
 /**
- * Obtener estadísticas detalladas de jobs
+ * Obtener estadísticas de rendimiento
  */
-exports.getJobStatistics = async (req, res) => {
+exports.getJobsStatistics = async (req, res) => {
   try {
-    const { period = '7d' } = req.query;
+    const { period = '24h' } = req.query;
     
     // Calcular fecha de inicio según el período
-    const endDate = new Date();
-    const startDate = new Date();
+    const now = new Date();
+    let startDate = new Date();
     
     switch (period) {
       case '24h':
-        startDate.setHours(startDate.getHours() - 24);
+        startDate.setHours(now.getHours() - 24);
         break;
       case '7d':
-        startDate.setDate(startDate.getDate() - 7);
+        startDate.setDate(now.getDate() - 7);
         break;
       case '30d':
-        startDate.setDate(startDate.getDate() - 30);
+        startDate.setDate(now.getDate() - 30);
         break;
       case '90d':
-        startDate.setDate(startDate.getDate() - 90);
+        startDate.setDate(now.getDate() - 90);
         break;
       default:
-        startDate.setDate(startDate.getDate() - 7);
+        startDate.setHours(now.getHours() - 24);
     }
 
-    // Estadísticas de ejecuciones por tipo
-    const executionsByType = await SyncLog.findAll({
+    // Obtener estadísticas generales
+    const totalExecutions = await SyncLog.count({
       where: {
-        created_at: {
-          [Op.between]: [startDate, endDate]
-        }
-      },
+        created_at: { [Op.gte]: startDate }
+      }
+    });
+
+    const successfulExecutions = await SyncLog.count({
+      where: {
+        created_at: { [Op.gte]: startDate },
+        status: 'completed'
+      }
+    });
+
+    const failedExecutions = await SyncLog.count({
+      where: {
+        created_at: { [Op.gte]: startDate },
+        status: 'failed'
+      }
+    });
+
+    // Estadísticas por tipo de job
+    const jobTypeStats = await SyncLog.findAll({
       attributes: [
-        ['job_type', 'syncType'],
-        'status',
+        'job_type',
         [SyncLog.sequelize.fn('COUNT', SyncLog.sequelize.col('id')), 'count'],
-        [SyncLog.sequelize.fn('AVG', SyncLog.sequelize.col('records_processed')), 'avgRecordsProcessed'],
-        [SyncLog.sequelize.fn('SUM', SyncLog.sequelize.col('records_processed')), 'totalRecordsProcessed']
+        [SyncLog.sequelize.fn('AVG', SyncLog.sequelize.literal('TIMESTAMPDIFF(SECOND, start_time, end_time)')), 'avgDuration']
       ],
-      group: ['job_type', 'status'],
-      raw: true
-    });
-
-    // Estadísticas de validaciones de tokens
-    const tokenStats = await TokenValidation.findAll({
       where: {
-        validatedAt: {
-          [Op.between]: [startDate, endDate]
-        }
+        created_at: { [Op.gte]: startDate },
+        end_time: { [Op.not]: null }
       },
-      attributes: [
-        'isValid',
-        [TokenValidation.sequelize.fn('COUNT', TokenValidation.sequelize.col('id')), 'count']
-      ],
-      group: ['isValid'],
+      group: ['job_type'],
       raw: true
     });
 
-    // Estadísticas de métricas recolectadas
-    const metricsStats = await SocialStatDaily.findAll({
-      where: {
-        created_at: {
-          [Op.between]: [startDate, endDate]
-        }
-      },
-      attributes: [
-        'platform',
-        [SocialStatDaily.sequelize.fn('COUNT', SocialStatDaily.sequelize.col('id')), 'count']
-      ],
-      group: ['platform'],
-      raw: true
-    });
-
-    // Tendencia diaria de ejecuciones
+    // Tendencia diaria (últimos 7 días)
     const dailyTrend = await SyncLog.findAll({
-      where: {
-        created_at: {
-          [Op.between]: [startDate, endDate]
-        }
-      },
       attributes: [
         [SyncLog.sequelize.fn('DATE', SyncLog.sequelize.col('created_at')), 'date'],
-        'status',
-        [SyncLog.sequelize.fn('COUNT', SyncLog.sequelize.col('id')), 'count']
+        [SyncLog.sequelize.fn('COUNT', SyncLog.sequelize.col('id')), 'executions'],
+        [SyncLog.sequelize.fn('SUM', SyncLog.sequelize.literal('CASE WHEN status = "completed" THEN 1 ELSE 0 END')), 'successful']
       ],
-      group: [
-        SyncLog.sequelize.fn('DATE', SyncLog.sequelize.col('created_at')),
-        'status'
-      ],
+      where: {
+        created_at: { [Op.gte]: new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000) }
+      },
+      group: [SyncLog.sequelize.fn('DATE', SyncLog.sequelize.col('created_at'))],
       order: [[SyncLog.sequelize.fn('DATE', SyncLog.sequelize.col('created_at')), 'ASC']],
       raw: true
     });
 
-    return res.json({
-      period: period,
-      dateRange: {
-        start: startDate,
-        end: endDate
-      },
-      executionsByType: executionsByType,
-      tokenValidations: tokenStats,
-      metricsCollected: metricsStats,
-      dailyTrend: dailyTrend,
+    res.json({
+      period,
       summary: {
-        totalExecutions: executionsByType.reduce((sum, item) => sum + parseInt(item.count), 0),
-        successfulExecutions: executionsByType
-          .filter(item => item.status === 'completed')
-          .reduce((sum, item) => sum + parseInt(item.count), 0),
-        failedExecutions: executionsByType
-          .filter(item => item.status === 'failed')
-          .reduce((sum, item) => sum + parseInt(item.count), 0),
-        totalRecordsProcessed: executionsByType
-          .reduce((sum, item) => sum + (parseInt(item.totalRecordsProcessed) || 0), 0)
-      }
+        totalExecutions,
+        successfulExecutions,
+        failedExecutions,
+        successRate: totalExecutions > 0 ? ((successfulExecutions / totalExecutions) * 100).toFixed(2) : 0
+      },
+      jobTypeStats: jobTypeStats.map(stat => ({
+        jobType: stat.job_type,
+        executions: parseInt(stat.count),
+        avgDurationSeconds: stat.avgDuration ? parseFloat(stat.avgDuration).toFixed(2) : null
+      })),
+      dailyTrend: dailyTrend.map(day => ({
+        date: day.date,
+        executions: parseInt(day.executions),
+        successful: parseInt(day.successful)
+      }))
     });
 
   } catch (error) {
-    console.error('❌ Error al obtener estadísticas de jobs:', error);
-    return res.status(500).json({
+    console.error('❌ Error obteniendo estadísticas de jobs:', error);
+    res.status(500).json({
       message: 'Error al obtener estadísticas de jobs',
       error: error.message
     });
@@ -463,24 +466,24 @@ exports.getJobStatistics = async (req, res) => {
 };
 
 /**
- * Obtener configuración actual de jobs
+ * Obtener configuración actual del sistema
  */
-exports.getJobConfiguration = async (req, res) => {
+exports.getJobsConfiguration = async (req, res) => {
   try {
-    return res.json({
-      schedules: metaSyncJobs.config.schedules,
-      dataRetention: metaSyncJobs.config.dataRetention,
-      retries: metaSyncJobs.config.retries,
+    const config = metaSyncJobs.getConfiguration();
+    
+    res.json({
+      configuration: config,
       systemStatus: {
-        isRunning: metaSyncJobs.isRunning,
-        jobsCount: metaSyncJobs.jobs.size,
-        jobs: metaSyncJobs.getStatus()
+        initialized: metaSyncJobs.isInitialized,
+        running: metaSyncJobs.isRunning,
+        jobsCount: metaSyncJobs.jobs.size
       }
     });
 
   } catch (error) {
-    console.error('❌ Error al obtener configuración de jobs:', error);
-    return res.status(500).json({
+    console.error('❌ Error obteniendo configuración de jobs:', error);
+    res.status(500).json({
       message: 'Error al obtener configuración de jobs',
       error: error.message
     });
@@ -492,37 +495,36 @@ exports.getJobConfiguration = async (req, res) => {
  */
 exports.getNextExecutions = async (req, res) => {
   try {
-    const cron = require('node-cron');
+    const config = metaSyncJobs.getConfiguration();
+    
     const nextExecutions = {};
-
-    // Calcular próximas ejecuciones para cada job
-    Object.entries(metaSyncJobs.config.schedules).forEach(([jobName, schedule]) => {
+    
+    for (const [jobName, schedule] of Object.entries(config.schedules)) {
       try {
-        // Nota: node-cron no tiene una función nativa para calcular próxima ejecución
-        // Esta es una implementación simplificada
+        // Información básica de programación
         nextExecutions[jobName] = {
-          schedule: schedule,
-          description: this.getScheduleDescription(schedule),
-          isValid: cron.validate(schedule)
+          schedule,
+          description: getScheduleDescription(schedule),
+          timezone: 'Europe/Madrid'
         };
       } catch (error) {
         nextExecutions[jobName] = {
-          schedule: schedule,
-          error: 'Formato de cron inválido',
-          isValid: false
+          schedule,
+          description: 'Error calculando descripción',
+          timezone: 'Europe/Madrid'
         };
       }
-    });
+    }
 
-    return res.json({
-      nextExecutions: nextExecutions,
-      timezone: 'Europe/Madrid',
-      currentTime: new Date()
+    res.json({
+      nextExecutions,
+      currentTime: new Date(),
+      timezone: 'Europe/Madrid'
     });
 
   } catch (error) {
-    console.error('❌ Error al obtener próximas ejecuciones:', error);
-    return res.status(500).json({
+    console.error('❌ Error obteniendo próximas ejecuciones:', error);
+    res.status(500).json({
       message: 'Error al obtener próximas ejecuciones',
       error: error.message
     });
@@ -530,49 +532,16 @@ exports.getNextExecutions = async (req, res) => {
 };
 
 /**
- * Obtener descripción legible de un schedule cron
+ * Función auxiliar para describir horarios cron
  */
-getScheduleDescription = (cronExpression) => {
+function getScheduleDescription(cronExpression) {
   const descriptions = {
-    '0 2 * * *': 'Diario a las 2:00 AM',
+    '0 2 * * *': 'Diariamente a las 2:00 AM',
     '0 */6 * * *': 'Cada 6 horas',
     '0 3 * * 0': 'Domingos a las 3:00 AM',
     '0 * * * *': 'Cada hora'
   };
-
-  return descriptions[cronExpression] || 'Horario personalizado';
-};
-
-/**
- * Reiniciar el sistema de jobs
- */
-exports.restartJobs = async (req, res) => {
-  try {
-    console.log('🔄 Reiniciando sistema de jobs...');
-
-    // Detener jobs actuales
-    metaSyncJobs.stop();
-
-    // Esperar un momento
-    await new Promise(resolve => setTimeout(resolve, 1000));
-
-    // Reinicializar
-    await metaSyncJobs.initialize();
-    metaSyncJobs.start();
-
-    return res.json({
-      message: 'Sistema de jobs reiniciado correctamente',
-      status: 'restarted',
-      jobsCount: metaSyncJobs.jobs.size,
-      jobs: metaSyncJobs.getStatus()
-    });
-
-  } catch (error) {
-    console.error('❌ Error al reiniciar jobs:', error);
-    return res.status(500).json({
-      message: 'Error al reiniciar sistema de jobs',
-      error: error.message
-    });
-  }
-};
+  
+  return descriptions[cronExpression] || `Programación personalizada: ${cronExpression}`;
+}
 

@@ -1,4 +1,5 @@
 'use strict';
+
 const express = require('express');
 const router = express.Router();
 
@@ -47,9 +48,9 @@ router.post('/jobs/start', metaJobsController.startJobs);
 router.post('/jobs/stop', metaJobsController.stopJobs);
 router.post('/jobs/restart', metaJobsController.restartJobs);
 router.post('/jobs/run/:jobName', metaJobsController.runJob);
-router.get('/jobs/logs', metaJobsController.getJobLogs);
-router.get('/jobs/statistics', metaJobsController.getJobStatistics);
-router.get('/jobs/configuration', metaJobsController.getJobConfiguration);
+router.get('/jobs/logs', metaJobsController.getJobsLogs);
+router.get('/jobs/statistics', metaJobsController.getJobsStatistics);
+router.get('/jobs/configuration', metaJobsController.getJobsConfiguration);
 router.get('/jobs/next-executions', metaJobsController.getNextExecutions);
 
 module.exports = router;
