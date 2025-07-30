@@ -1,6 +1,6 @@
-// models/tokenvalidation.js
+// models/TokenValidations.js
 module.exports = (sequelize, DataTypes) => {
-  const TokenValidation = sequelize.define('TokenValidation', {
+  const TokenValidations = sequelize.define('TokenValidations', {
     id: {
       type: DataTypes.INTEGER,
       autoIncrement: true,
@@ -39,21 +39,21 @@ module.exports = (sequelize, DataTypes) => {
       comment: 'Mensaje de error si aplica'
     }
   }, {
-    tableName: 'TokenValidations',
+    tableName: 'TokenValidationss',
     timestamps: true,
     underscored: true,
     createdAt: 'created_at',
     updatedAt: 'updated_at'
   });
 
-  TokenValidation.associate = function(models) {
-    TokenValidation.belongsTo(models.ClinicMetaAsset, {
+  TokenValidations.associate = function(models) {
+    TokenValidations.belongsTo(models.ClinicMetaAsset, {
       foreignKey: 'assetId',
       targetKey: 'id',
       as: 'asset'
     });
   };
 
-  return TokenValidation;
+  return TokenValidations;
 };
 

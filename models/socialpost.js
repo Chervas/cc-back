@@ -1,6 +1,6 @@
-// models/socialpost.js
+// models/SocialPosts.js
 module.exports = (sequelize, DataTypes) => {
-    const SocialPost = sequelize.define('SocialPost', {
+    const SocialPosts = sequelize.define('SocialPosts', {
         id: {
             type: DataTypes.INTEGER,
             primaryKey: true,
@@ -89,23 +89,23 @@ module.exports = (sequelize, DataTypes) => {
     });
 
     // Asociaciones
-    SocialPost.associate = function(models) {
-        // SocialPost pertenece a una Clínica
-        SocialPost.belongsTo(models.Clinica, {
+    SocialPosts.associate = function(models) {
+        // SocialPosts pertenece a una Clínica
+        SocialPosts.belongsTo(models.Clinica, {
             foreignKey: 'clinica_id',
             targetKey: 'id_clinica',
             as: 'clinica'
         });
 
-        // SocialPost pertenece a un ClinicMetaAsset
-        SocialPost.belongsTo(models.ClinicMetaAsset, {
+        // SocialPosts pertenece a un ClinicMetaAsset
+        SocialPosts.belongsTo(models.ClinicMetaAsset, {
             foreignKey: 'asset_id',
             targetKey: 'id',
             as: 'asset'
         });
 
-        // SocialPost tiene muchas SocialPostStatsDaily
-        SocialPost.hasMany(models.SocialPostStatsDaily, {
+        // SocialPosts tiene muchas SocialPostStatsDaily
+        SocialPosts.hasMany(models.SocialPostStatsDaily, {
             foreignKey: 'post_id',
             sourceKey: 'id',
             as: 'stats'
@@ -119,7 +119,7 @@ module.exports = (sequelize, DataTypes) => {
      * @param {Object} postData - Datos de la publicación
      * @returns {Promise<Object>} - Publicación creada o encontrada
      */
-    SocialPost.findOrCreatePost = async function(postData) {
+    SocialPosts.findOrCreatePost = async function(postData) {
         const [post, created] = await this.findOrCreate({
             where: {
                 asset_id: postData.asset_id,
@@ -148,7 +148,7 @@ module.exports = (sequelize, DataTypes) => {
      * @param {Object} options - Opciones de consulta (limit, offset, startDate, endDate)
      * @returns {Promise<Object>} - Publicaciones y total
      */
-    SocialPost.getPostsByClinica = async function(clinicaId, options = {}) {
+    SocialPosts.getPostsByClinica = async function(clinicaId, options = {}) {
         const { limit = 10, offset = 0, startDate, endDate } = options;
         
         const whereClause = { clinica_id: clinicaId };
@@ -185,7 +185,7 @@ module.exports = (sequelize, DataTypes) => {
      * @param {Object} options - Opciones de consulta (limit, offset, startDate, endDate)
      * @returns {Promise<Object>} - Publicaciones y total
      */
-    SocialPost.getPostsByAsset = async function(assetId, options = {}) {
+    SocialPosts.getPostsByAsset = async function(assetId, options = {}) {
         const { limit = 10, offset = 0, startDate, endDate } = options;
         
         const whereClause = { asset_id: assetId };
@@ -214,7 +214,7 @@ module.exports = (sequelize, DataTypes) => {
      * @param {number} postId - ID de la publicación
      * @returns {Promise<Object>} - Publicación con estadísticas
      */
-    SocialPost.getPostWithStats = async function(postId) {
+    SocialPosts.getPostWithStats = async function(postId) {
         return await this.findByPk(postId, {
             include: [
                 {
@@ -231,6 +231,6 @@ module.exports = (sequelize, DataTypes) => {
         });
     };
 
-    return SocialPost;
+    return SocialPosts;
 };
 

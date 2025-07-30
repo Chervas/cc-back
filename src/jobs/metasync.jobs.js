@@ -16,11 +16,13 @@
 const cron = require('node-cron');
 const axios = require('axios');
 const { Op } = require('sequelize');
+const META_API_BASE_URL = process.env.META_API_BASE_URL || 'https://graph.facebook.com/v23.0';
+const url = `${META_API_BASE_URL}/...`;
 
 // Importar modelos
 const {
   ClinicMetaAsset,
-  MetaConecction, // Nota: usando el nombre correcto con doble 'c'
+  MetaConnection, // Nota: usando el nombre correcto con doble 'c'
   SocialStatDaily,
   SocialPost,
   SocialPostStatDaily,
@@ -339,18 +341,17 @@ class MetaSyncJobs {
     }
   }
 
-  /**
-   * Sincroniza métricas de un asset específico
-   */
-  async syncAssetMetrics(asset) {
-    const { assetType, metaAssetId, pageAccessToken } = asset;
-    
-    if (assetType === 'facebook_page') {
-      await this.syncFacebookPageMetrics(asset);
-    } else if (assetType === 'instagram_business') {
-      await this.syncInstagramMetrics(asset);
-    }
+
+  //  Usar la variable extraída:
+async syncAssetMetrics(asset) {
+  const { assetType, metaAssetId, pageAccessToken, clinicaId } = asset;
+  
+  if (assetType === 'facebook_page') {
+    await this.syncFacebookPageMetrics({ metaAssetId, pageAccessToken, clinicaId });
+  } else if (assetType === 'instagram_business') {
+    await this.syncInstagramMetrics({ metaAssetId, pageAccessToken, clinicaId });
   }
+}
 
   /**
    * Sincroniza métricas de página de Facebook

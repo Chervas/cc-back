@@ -12,8 +12,8 @@ const {
 const { Op } = require('sequelize');
 
 // Constantes
-const META_API_VERSION = 'v23.0';
-const META_API_BASE_URL = `https://graph.facebook.com/${META_API_VERSION}`;
+const META_API_BASE_URL = process.env.META_API_BASE_URL || 'https://graph.facebook.com/v23.0';
+const response = await axios.get(`${META_API_BASE_URL}/...`);
 
 // Inicia la sincronización de todos los activos de una clínica
 exports.syncClinica = async (req, res) => {

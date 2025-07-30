@@ -59,6 +59,11 @@ module.exports = (sequelize, DataTypes) => {
             type: DataTypes.TEXT,
             allowNull: true,
             comment: 'Mensaje de error (si aplica)'
+        },
+         status_report: {
+            type: DataTypes.JSON,
+            allowNull: true,
+            comment: 'Información detallada del estado del job'
         }
     }, {
         tableName: 'SyncLogs', // Actualizado a PascalCase
