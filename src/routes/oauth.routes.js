@@ -38,7 +38,7 @@ router.get('/meta/callback', async (req, res) => {
     try {
         // 1. Intercambiar el código por un Access Token de CORTA DURACIÓN
         console.log('🔄  Intercambiando código por Access Token de corta duración...');
-        const tokenUrl = `https://graph.facebook.com/v23.0/oauth/access_token`;
+        const tokenUrl = `${process.env.META_API_BASE_URL}/oauth/access_token`;
         const tokenParams = {
             client_id: META_APP_ID,
             client_secret: META_APP_SECRET,
@@ -56,7 +56,7 @@ router.get('/meta/callback', async (req, res) => {
 
         // 2. Intercambiar el Access Token de CORTA DURACIÓN por uno de LARGA DURACIÓN
         console.log('🔄  Intercambiando por Access Token de LARGA DURACIÓN...');
-        const longLivedTokenUrl = `https://graph.facebook.com/v23.0/oauth/access_token`;
+        const longLivedTokenUrl = `${process.env.META_API_BASE_URL}/oauth/access_token`;
         const longLivedTokenParams = {
             grant_type: 'fb_exchange_token',
             client_id: META_APP_ID,
@@ -75,7 +75,7 @@ router.get('/meta/callback', async (req, res) => {
 
         // 3. Obtener información básica del usuario de Meta
         console.log('👤 Obteniendo información del usuario de Meta...');
-        const userProfileUrl = `https://graph.facebook.com/me?fields=id,name,email&access_token=${longLivedAccessToken}`;
+        const userProfileUrl = `${process.env.META_API_BASE_URL.replace('/v23.0', '')}/me?fields=id,name,email&access_token=${longLivedAccessToken}`;
         const userProfileResponse = await axios.get(userProfileUrl);
         const userData = userProfileResponse.data;
         console.log('👤 Usuario de Meta autenticado:', userData);
@@ -255,14 +255,14 @@ router.get('/meta/assets', async (req, res) => {
 
         // 5. Obtener todas las páginas de Facebook con paginación
         console.log('📄 Obteniendo páginas de Facebook...');
-        const facebookPagesUrl = `https://graph.facebook.com/v23.0/me/accounts?fields=id,name,picture.width(200).height(200),access_token,category,verification_status,followers_count,instagram_business_account{id,name,username,profile_picture_url,followers_count,media_count,biography}`;
+        const facebookPagesUrl = `${process.env.META_API_BASE_URL}/me/accounts?fields=id,name,picture.width(200).height(200),access_token,category,verification_status,followers_count,instagram_business_account{id,name,username,profile_picture_url,followers_count,media_count,biography}`;
         
         const allFacebookPages = await getAllPaginatedData(facebookPagesUrl, metaConnection.accessToken);
         console.log(`✅ ${allFacebookPages.length} páginas de Facebook encontradas`);
 
         // 6. Obtener todas las cuentas publicitarias con paginación
         console.log('💰 Obteniendo cuentas publicitarias...');
-        const adAccountsUrl = `https://graph.facebook.com/v23.0/me/adaccounts?fields=id,name,account_status,currency,timezone_name,business_name`;
+        const adAccountsUrl = `${process.env.META_API_BASE_URL}/me/adaccounts?fields=id,name,account_status,currency,timezone_name,business_name`;
         
         const allAdAccounts = await getAllPaginatedData(adAccountsUrl, metaConnection.accessToken);
         console.log(`✅ ${allAdAccounts.length} cuentas publicitarias encontradas`);

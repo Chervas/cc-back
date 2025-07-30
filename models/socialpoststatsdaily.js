@@ -88,8 +88,8 @@ module.exports = (sequelize, DataTypes) => {
 
     // Asociaciones
     SocialPostStatsDaily.associate = function(models) {
-        // SocialPostStatsDaily pertenece a un SocialPost
-        SocialPostStatsDaily.belongsTo(models.SocialPost, {
+        // SocialPostStatsDaily pertenece a un SocialPosts (CORREGIDO: era SocialPost)
+        SocialPostStatsDaily.belongsTo(models.SocialPosts, {
             foreignKey: 'post_id',
             targetKey: 'id',
             as: 'post'
@@ -161,7 +161,7 @@ module.exports = (sequelize, DataTypes) => {
             ],
             include: [
                 {
-                    model: sequelize.models.SocialPost,
+                    model: sequelize.models.SocialPosts, // CORREGIDO: era SocialPost
                     as: 'post',
                     where: { clinica_id: clinicaId },
                     attributes: ['id', 'title', 'content', 'media_url', 'permalink_url', 'published_at', 'post_type'],
@@ -205,7 +205,7 @@ module.exports = (sequelize, DataTypes) => {
             ],
             include: [
                 {
-                    model: sequelize.models.SocialPost,
+                    model: sequelize.models.SocialPosts, // CORREGIDO: era SocialPost
                     as: 'post',
                     attributes: [],
                     where: { clinica_id: clinicaId }

@@ -362,7 +362,7 @@ async syncAssetMetrics(asset) {
     try {
       // Obtener métricas de la página
       const metricsResponse = await axios.get(
-        `https://graph.facebook.com/v18.0/${metaAssetId}/insights`,
+        `${META_API_BASE_URL}/${metaAssetId}/insights`,
         {
           params: {
             metric: 'page_fans,page_fan_adds,page_fan_removes,page_views_total,page_post_engagements,page_posts_impressions,page_posts_impressions_unique',
@@ -412,7 +412,7 @@ async syncAssetMetrics(asset) {
     try {
       // Obtener métricas de Instagram Business
       const metricsResponse = await axios.get(
-        `https://graph.facebook.com/v18.0/${metaAssetId}/insights`,
+        `${META_API_BASE_URL}/${metaAssetId}/insights`,
         {
           params: {
             metric: 'follower_count,impressions,reach,profile_views,website_clicks',
@@ -539,7 +539,7 @@ async syncAssetMetrics(asset) {
   async validateToken(token, assetId) {
     try {
       const response = await axios.get(
-        `https://graph.facebook.com/v18.0/${assetId}`,
+        `${META_API_BASE_URL}/${assetId}`,
         {
           params: {
             fields: 'id,name',
@@ -713,7 +713,7 @@ async syncAssetMetrics(asset) {
 
       // Verificar disponibilidad de Meta API (prueba simple)
       try {
-        const testResponse = await axios.get('https://graph.facebook.com/v18.0/', {
+        const testResponse = await axios.get(`${META_API_BASE_URL}/`, {
           timeout: 5000
         });
         healthStatus.metaApi = testResponse.status === 200;

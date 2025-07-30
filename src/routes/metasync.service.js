@@ -12,9 +12,8 @@ const SocialStatsDaily = db.SocialStatsDaily;
 const SocialPost = db.SocialPosts;
 const SocialPostStatsDaily = db.SocialPostStatsDaily;
 
-// Constantes
-const META_API_VERSION = 'v23.0';
-const META_API_BASE_URL = `https://graph.facebook.com/${META_API_VERSION}`;
+// Configuración de variables de entorno
+const META_API_BASE_URL = process.env.META_API_BASE_URL || 'https://graph.facebook.com/v23.0';
 
 /**
  * Servicio para sincronización con la API de Meta
