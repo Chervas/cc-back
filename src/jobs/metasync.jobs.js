@@ -667,6 +667,127 @@ async syncAssetMetrics(asset) {
   }
 
   /**
+ * Ejecutar verificación de salud del sistema
+ */
+async executeHealthCheck() {
+  try {
+    const health = {
+      timestamp: new Date(),
+      database: false,
+      metaApi: false,
+      activeConnections: 0,
+      validTokens: 0,
+      recentSyncs: 0
+    };
+
+    // Verificar conexión a base de datos
+    try {
+      await SyncLog.findOne({ limit: 1 });
+      health.database = true;
+    } catch (error) {
+      console.error('❌ Error de conexión a base de datos:', error);
+    }
+
+    // Verificar API de Meta
+    try {
+      const testAsset = await ClinicMetaAsset.findOne({
+        where: { assetType: 'page' },
+        include: [{ model: MetaConnection, as: 'connection' }]
+      });
+
+      if (testAsset && testAsset.connection && testAsset.connection.accessToken) {
+        const response = await axios.get(`${META_API_BASE_URL}/${testAsset.metaAssetId}`, {
+          params: {
+            access_token: testAsset.connection.accessToken,
+            fields: 'id,name'
+          }
+        });
+
+        if (response.status === 200) {
+          health.metaApi = true;
+        }
+      }
+    } catch (error) {
+      console.error('❌ Error de conexión a Meta API:', error.message);
+    }
+
+    // Contar conexiones activas
+    try {
+      const activeConnections = await MetaConnection.count({
+        where: {
+          isActive: true,
+          accessToken: { [Op.ne]: null }
+        }
+      });
+      health.activeConnections = activeConnections;
+    } catch (error) {
+      console.error('❌ Error contando conexiones activas:', error);
+    }
+
+    // Contar tokens válidos
+    try {
+      const validTokens = await TokenValidation.count({
+        where: {
+          isValid: true,
+          lastValidated: {
+            [Op.gte]: new Date(Date.now() - 24 * 60 * 60 * 1000) // Últimas 24 horas
+          }
+        }
+      });
+      health.validTokens = validTokens;
+    } catch (error) {
+      console.error('❌ Error contando tokens válidos:', error);
+    }
+
+    // Contar sincronizaciones recientes
+    try {
+      const recentSyncs = await SyncLog.count({
+        where: {
+          status: 'completed',
+          createdAt: {
+            [Op.gte]: new Date(Date.now() - 24 * 60 * 60 * 1000) // Últimas 24 horas
+          }
+        }
+      });
+      health.recentSyncs = recentSyncs;
+    } catch (error) {
+      console.error('❌ Error contando sincronizaciones recientes:', error);
+    }
+
+    // Registrar resultado del health check
+    await SyncLog.create({
+      jobType: 'health_check',
+      status: 'completed',
+      recordsProcessed: 1,
+      statusReport: health,
+      startTime: new Date(),
+      endTime: new Date()
+    });
+
+    console.log('✅ Verificación de salud completada:', health);
+    return health;
+
+  } catch (error) {
+    console.error('❌ Error en verificación de salud:', error);
+    
+    // Registrar error del health check
+    await SyncLog.create({
+      jobType: 'health_check',
+      status: 'failed',
+      recordsProcessed: 0,
+      errorMessage: error.message,
+      statusReport: { error: error.message },
+      startTime: new Date(),
+      endTime: new Date()
+    }).catch(dbError => {
+      console.error('❌ Error registrando fallo de health check:', dbError);
+    });
+
+    throw error;
+  }
+}
+
+  /**
    * Job: Verificación de salud del sistema
    */
   async executeHealthCheck() {
