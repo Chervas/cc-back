@@ -22,9 +22,8 @@ const url = `${META_API_BASE_URL}/...`;
 // Importar modelos
 const {
   ClinicMetaAsset,
-  MetaConnection, // Nota: usando el nombre correcto con doble 'c'
   SocialStatDaily,
-  SocialPost,
+  SocialPosts,
   SocialPostStatDaily,
   SyncLog,
   TokenValidation
