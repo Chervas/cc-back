@@ -26,7 +26,7 @@ const {
   SocialPosts,
   SocialPostStatDaily,
   SyncLog,
-  TokenValidation,
+  TokenValidations,
   MetaConnection
 } = require('../../models');
 
@@ -668,11 +668,11 @@ async syncAssetMetrics(asset) {
   }
 
   /**
- * Ejecutar verificación de salud del sistema
+ * Job: Verificación de salud del sistema
  */
 async executeHealthCheck() {
   console.log('🏥 Ejecutando verificación de salud del sistema...');
-
+  
   const syncLog = await SyncLog.create({
     job_type: 'health_check',
     status: 'running',
@@ -681,111 +681,115 @@ async executeHealthCheck() {
   });
 
   try {
-    const health = {
-      timestamp: new Date(),
+    const healthStatus = {
       database: false,
       metaApi: false,
       activeConnections: 0,
       validTokens: 0,
-      recentSyncs: 0
+      recentActivity: false
     };
 
-    // Verificar conexión a base de datos
+    // Verificar conectividad de base de datos
     try {
       await SyncLog.findOne({ limit: 1 });
-      health.database = true;
+      healthStatus.database = true;
+      console.log('✅ Base de datos: Conectada');
     } catch (error) {
-      console.error('❌ Error de conexión a base de datos:', error);
+      console.error('❌ Base de datos: Error de conexión');
+      throw new Error('Database connection failed');
     }
 
-    // Verificar API de Meta
-    try {
-      const testAsset = await ClinicMetaAsset.findOne({
-        where: { assetType: 'page' },
-        include: [{ model: MetaConnection, as: 'connection' }]
-      });
-
-      if (testAsset && testAsset.connection && testAsset.connection.accessToken) {
-        const response = await axios.get(`${META_API_BASE_URL}/${testAsset.metaAssetId}`, {
-          params: {
-            access_token: testAsset.connection.accessToken,
-            fields: 'id,name'
-          }
-        });
-
-        if (response.status === 200) {
-          health.metaApi = true;
-        }
-      }
-    } catch (error) {
-      console.error('❌ Error de conexión a Meta API:', error.message);
-    }
-
-    // Contar conexiones activas
+    // Verificar conexiones activas
     try {
       const activeConnections = await MetaConnection.count({
         where: {
-          isActive: true,
-          accessToken: { [Op.ne]: null }
+          accessToken: { [Op.ne]: null },
+          expiresAt: { [Op.gt]: new Date() }  // No expirado
         }
       });
-      health.activeConnections = activeConnections;
+      healthStatus.activeConnections = activeConnections;
+      console.log(`✅ Conexiones activas: ${activeConnections}`); 
     } catch (error) {
-      console.error('❌ Error contando conexiones activas:', error);
+      console.error('❌ Error verificando conexiones activas:', error);
     }
 
-    // Contar tokens válidos
+    // Verificar disponibilidad de Meta API (prueba simple)
+    // ✅ CORRECTO (usar token real):
     try {
-      const validTokens = await TokenValidation.count({
+      const connection = await MetaConnection.findOne({
         where: {
-          isValid: true,
-          validatedAt: {
-            [Op.gte]: new Date(Date.now() - 24 * 60 * 60 * 1000) // Últimas 24 horas
-          }
+          accessToken: { [Op.ne]: null },
+          expiresAt: { [Op.gt]: new Date() }
         }
       });
-      health.validTokens = validTokens;
+
+      if (connection && connection.accessToken) {
+        const testResponse = await axios.get(`${META_API_BASE_URL}/me`, {
+          params: { access_token: connection.accessToken },
+          timeout: 5000
+        });
+        healthStatus.metaApi = testResponse.status === 200;
+        console.log('✅ Meta API: Disponible');
+      } else {
+        healthStatus.metaApi = false;
+        console.log('❌ Meta API: Sin tokens válidos');
+      }
     } catch (error) {
-      console.error('❌ Error contando tokens válidos:', error);
+      console.error('❌ Meta API: Error -', error.message);
+      healthStatus.metaApi = false;
     }
 
-    // Contar sincronizaciones recientes
+    // Verificar tokens válidos
     try {
-      const recentSyncs = await SyncLog.count({
+     const validTokens = await TokenValidations.count({
         where: {
-          status: 'completed',
-          created_at: {
-            [Op.gte]: new Date(Date.now() - 24 * 60 * 60 * 1000) // Últimas 24 horas
-          }
+          status: 'valid',  // Campo correcto de la base de datos
+          validation_date: { [Op.gte]: new Date(Date.now() - 24 * 60 * 60 * 1000) }
         }
       });
-      health.recentSyncs = recentSyncs;
+      healthStatus.validTokens = validTokens;
+      console.log(`✅ Tokens válidos: ${validTokens}`);
     } catch (error) {
-      console.error('❌ Error contando sincronizaciones recientes:', error);
+      console.error('❌ Error verificando tokens válidos:', error);
     }
 
-    // Registrar resultado del health check
-     await syncLog.update({
+    // Verificar actividad reciente
+    try {
+      const recentLogs = await SyncLog.findAll({
+        where: {
+          created_at: { [Op.gte]: new Date(Date.now() - 24 * 60 * 60 * 1000) }
+        },
+        limit: 1
+      });
+      healthStatus.recentActivity = recentLogs.length > 0;
+      console.log(`✅ Actividad reciente: ${healthStatus.recentActivity ? 'Sí' : 'No'}`);
+    } catch (error) {
+      console.error('❌ Error verificando actividad reciente:', error);
+    }
+
+    // ✅ CORREGIDO: Usar status_report para health status
+    await syncLog.update({
       status: 'completed',
       end_time: new Date(),
       records_processed: 1,
-      status_report: health
+      status_report: healthStatus  // ✅ Usar el nuevo campo
     });
 
-    console.log('✅ Verificación de salud completada:', health);
-    return health;
+    console.log('✅ Verificación de salud completada');
+    
+    return {
+      status: 'completed',
+      health: healthStatus
+    };
 
   } catch (error) {
     console.error('❌ Error en verificación de salud:', error);
     
-    // Registrar error del health check
-     await syncLog.update({
+    // ✅ CORREGIDO: error_message solo para errores reales
+    await syncLog.update({
       status: 'failed',
       end_time: new Date(),
-      error_message: error.message
-
-    }).catch(dbError => {
-      console.error('❌ Error registrando fallo de health check:', dbError);
+      error_message: error.message  // ✅ Solo errores reales aquí
     });
 
     throw error;

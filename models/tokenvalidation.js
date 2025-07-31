@@ -6,37 +6,31 @@ module.exports = (sequelize, DataTypes) => {
       autoIncrement: true,
       primaryKey: true,
     },
-    assetId: {
+    connection_id: {
       type: DataTypes.INTEGER,
       allowNull: false,
       references: {
-        model: 'ClinicMetaAssets',
+        model: 'MetaConnections',
         key: 'id',
       },
       onUpdate: 'CASCADE',
       onDelete: 'CASCADE',
-      comment: 'ID del ClinicMetaAsset vinculado'
+      comment: 'ID de la conexión Meta validada'
     },
-    tokenType: {
-      type: DataTypes.STRING(50),
-      allowNull: false,
-      comment: 'Tipo de token validado'
-    },
-    isValid: {
-      type: DataTypes.BOOLEAN,
-      allowNull: false,
-      defaultValue: false,
-      comment: 'Resultado de la validación'
-    },
-    validatedAt: {
+    validation_date: {
       type: DataTypes.DATE,
       allowNull: false,
-      comment: 'Fecha de validación'
+      comment: 'Fecha y hora de la validación'
     },
-    errorMessage: {
+    status: {
+      type: DataTypes.ENUM('valid', 'invalid', 'expired'),
+      allowNull: false,
+      comment: 'Resultado de la validación del token'
+    },
+    error_message: {
       type: DataTypes.TEXT,
       allowNull: true,
-      comment: 'Mensaje de error si aplica'
+      comment: 'Mensaje de error (si aplica)'
     }
   }, {
     tableName: 'TokenValidations',
@@ -47,10 +41,10 @@ module.exports = (sequelize, DataTypes) => {
   });
 
   TokenValidations.associate = function(models) {
-    TokenValidations.belongsTo(models.ClinicMetaAsset, {
-      foreignKey: 'assetId',
+    TokenValidations.belongsTo(models.MetaConnection, {
+      foreignKey: 'connection_id',
       targetKey: 'id',
-      as: 'asset'
+      as: 'metaConnection'
     });
   };
 
