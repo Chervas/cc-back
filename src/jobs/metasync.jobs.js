@@ -275,183 +275,216 @@ class MetaSyncJobs {
    * Job: Sincronización de métricas de Meta
    */
   async executeMetricsSync() {
-    console.log('📊 Iniciando sincronización de métricas de Meta...');
-    
-    const syncLog = await SyncLog.create({
-      job_type: 'automated_metrics_sync',
-      status: 'running',
-      start_time: new Date(),
-      records_processed: 0
+  console.log('📊 Ejecutando sincronización de métricas...');
+  
+  const syncLog = await SyncLog.create({
+    job_type: 'metrics_sync',
+    status: 'running',
+    start_time: new Date(),
+    records_processed: 0
+  });
+
+  try {
+    let totalProcessed = 0;
+    const errors = [];
+
+    // Obtener todos los assets activos con tokens
+    const activeAssets = await ClinicMetaAsset.findAll({
+      where: {
+        isActive: true,
+        pageAccessToken: { [Op.ne]: null }
+      },
+      include: [{
+        model: MetaConnection,
+        as: 'metaConnection',
+        where: {
+          accessToken: { [Op.ne]: null },
+          expiresAt: { [Op.gt]: new Date() }
+        }
+      }]
     });
 
-    try {
-      // Obtener assets activos con tokens válidos
-      const assets = await ClinicMetaAsset.findAll({
-        where: {
-          isActive: true,
-          pageAccessToken: { [Op.not]: null }
-        }
-      });
+    console.log(`📋 Assets activos encontrados: ${activeAssets.length}`);
 
-      console.log(`📋 Encontrados ${assets.length} assets activos para sincronizar`);
-      
-      let processedCount = 0;
-      let errorCount = 0;
-
-      for (const asset of assets) {
-        try {
-          console.log(`🔄 Procesando asset ${asset.id} (${asset.assetType})`);
-          
-          await this.syncAssetMetrics(asset);
-          processedCount++;
-          
-          // Delay entre assets para respetar rate limiting
-          await new Promise(resolve => setTimeout(resolve, 2000));
-          
-        } catch (error) {
-          console.error(`❌ Error procesando asset ${asset.id}:`, error.message);
-          errorCount++;
-        }
+    for (const asset of activeAssets) {
+      try {
+        const processed = await this.syncAssetMetrics(asset);
+        totalProcessed += processed;
+        console.log(`✅ Asset ${asset.metaAssetName}: ${processed} métricas sincronizadas`);
+      } catch (error) {
+        console.error(`❌ Error sincronizando asset ${asset.metaAssetName}:`, error.message);
+        errors.push(`${asset.metaAssetName}: ${error.message}`);
       }
-
-      // Actualizar log de sincronización
-      await syncLog.update({
-        status: 'completed',
-        end_time: new Date(),
-        records_processed: processedCount,
-        error_message: errorCount > 0 ? `${errorCount} errores encontrados` : null
-      });
-
-      console.log(`✅ Sincronización completada: ${processedCount} assets procesados, ${errorCount} errores`);
-      
-      return {
-        status: 'completed',
-        processed: processedCount,
-        errors: errorCount
-      };
-
-    } catch (error) {
-      await syncLog.update({
-        status: 'failed',
-        end_time: new Date(),
-        error_message: error.message
-      });
-
-      throw error;
     }
+
+    // Actualizar log de sincronización
+    await syncLog.update({
+      status: 'completed',
+      end_time: new Date(),
+      records_processed: totalProcessed,
+      status_report: JSON.stringify({
+        assetsProcessed: activeAssets.length,
+        totalMetrics: totalProcessed,
+        errors: errors.length > 0 ? errors : null
+      })
+    });
+
+    console.log(`✅ Sincronización completada: ${totalProcessed} métricas procesadas`);
+    return { success: true, processed: totalProcessed };
+
+  } catch (error) {
+    console.error('❌ Error en sincronización de métricas:', error);
+    
+    await syncLog.update({
+      status: 'failed',
+      end_time: new Date(),
+      error_message: error.message
+    });
+
+    throw error;
   }
+}
 
 
   //  Usar la variable extraída:
 async syncAssetMetrics(asset) {
-  const { assetType, metaAssetId, pageAccessToken, clinicaId } = asset;
-  
-  if (assetType === 'facebook_page') {
-    await this.syncFacebookPageMetrics({ metaAssetId, pageAccessToken, clinicaId });
-  } else if (assetType === 'instagram_business') {
-    await this.syncInstagramMetrics({ metaAssetId, pageAccessToken, clinicaId });
+  let processed = 0;
+
+  switch (asset.assetType) {
+    case 'facebook_page':
+      processed = await this.syncFacebookPageMetrics(asset);
+      break;
+    
+    case 'instagram_business':
+      processed = await this.syncInstagramMetrics(asset);
+      break;
+    
+    case 'ad_account':
+      console.log(`ℹ️ Ad Account ${asset.metaAssetName}: Métricas de anuncios no implementadas aún`);
+      processed = 0;
+      break;
+    
+    default:
+      console.log(`⚠️ Tipo de asset no soportado: ${asset.assetType}`);
+      processed = 0;
   }
+
+  return processed;
 }
 
   /**
    * Sincroniza métricas de página de Facebook
    */
-  async syncFacebookPageMetrics(asset) {
-    const { metaAssetId, pageAccessToken, clinicaId } = asset;
-    const today = new Date().toISOString().split('T')[0];
-    
-    try {
-      // Obtener métricas de la página
-      const metricsResponse = await axios.get(
-        `${META_API_BASE_URL}/${metaAssetId}/insights`,
-        {
-          params: {
-            metric: 'page_fans,page_fan_adds,page_fan_removes,page_views_total,page_post_engagements,page_posts_impressions,page_posts_impressions_unique',
-            period: 'day',
-            since: today,
-            until: today,
-            access_token: pageAccessToken
-          }
-        }
-      );
+async syncFacebookPageMetrics(asset) {
+  console.log(`📘 Sincronizando métricas de Facebook: ${asset.metaAssetName}`);
+  
+  try {
+    const yesterday = new Date();
+    yesterday.setDate(yesterday.getDate() - 1);
+    const dateStr = yesterday.toISOString().split('T')[0];
 
-      const metrics = metricsResponse.data.data;
-      
-      // Procesar y almacenar métricas
-      for (const metric of metrics) {
-        if (metric.values && metric.values.length > 0) {
-          const value = metric.values[0].value || 0;
-          
-          await SocialStatDaily.upsert({
-            clinica_id: clinicaId,
-            asset_id: asset.id,
-            asset_type: 'facebook_page',
-            date: today,
-            metric_name: metric.name,
-            metric_value: value,
-            created_at: new Date(),
-            updated_at: new Date()
-          });
-        }
+    // Obtener métricas básicas de la página
+    const metricsUrl = `${process.env.META_API_BASE_URL}/${asset.metaAssetId}/insights`;
+    const params = new URLSearchParams({
+      metric: 'page_impressions,page_impressions_unique,page_views_total,page_fans',
+      period: 'day',
+      since: dateStr,
+      until: dateStr,
+      access_token: asset.pageAccessToken
+    });
+
+    const response = await axios.get(`${metricsUrl}?${params}`);
+    console.log(`✅ DEBUG: Respuesta recibida:`, JSON.stringify(response.data, null, 2));
+
+    const metrics = response.data.data;
+    let processed = 0;
+
+    // 🔧 AGREGAR ESTE CÓDIGO PARA PROCESAR LOS DATOS:
+    for (const metric of metrics) {
+      const metricName = metric.name;
+      const values = metric.values || [];
+
+      console.log(`🔍 Procesando métrica: ${metricName}, valores:`, values);
+
+      for (const value of values) {
+        // Guardar en SocialStatDaily
+        await SocialStatDaily.upsert({
+          asset_id: asset.id,
+          date: value.end_time.split('T')[0],
+          metric_name: metricName,
+          metric_value: value.value || 0,
+          platform: 'facebook',
+          asset_type: 'page'
+        });
+        processed++;
+        console.log(`✅ Guardado: ${metricName} = ${value.value}`);
       }
-
-      console.log(`✅ Métricas de Facebook sincronizadas para asset ${asset.id}`);
-      
-    } catch (error) {
-      console.error(`❌ Error sincronizando Facebook asset ${asset.id}:`, error.message);
-      throw error;
     }
+
+    console.log(`✅ Facebook ${asset.metaAssetName}: ${processed} métricas guardadas`);
+    return processed;
+
+  } catch (error) {
+    console.error(`❌ Error sincronizando Facebook ${asset.metaAssetName}:`, error.message);
+    console.error(`🔍 DEBUG: Error completo:`, error.response?.data || error);
+    throw error;
   }
+}
+
 
   /**
    * Sincroniza métricas de Instagram Business
    */
   async syncInstagramMetrics(asset) {
-    const { metaAssetId, pageAccessToken, clinicaId } = asset;
-    const today = new Date().toISOString().split('T')[0];
-    
-    try {
-      // Obtener métricas de Instagram Business
-      const metricsResponse = await axios.get(
-        `${META_API_BASE_URL}/${metaAssetId}/insights`,
-        {
-          params: {
-            metric: 'follower_count,impressions,reach,profile_views,website_clicks',
-            period: 'day',
-            since: today,
-            until: today,
-            access_token: pageAccessToken
-          }
-        }
-      );
+  console.log(`📷 Sincronizando métricas de Instagram: ${asset.metaAssetName}`);
+  
+  try {
+    const yesterday = new Date();
+    yesterday.setDate(yesterday.getDate() - 1);
+    const dateStr = yesterday.toISOString().split('T')[0];
 
-      const metrics = metricsResponse.data.data;
-      
-      // Procesar y almacenar métricas
-      for (const metric of metrics) {
-        if (metric.values && metric.values.length > 0) {
-          const value = metric.values[0].value || 0;
-          
-          await SocialStatDaily.upsert({
-            clinica_id: clinicaId,
-            asset_id: asset.id,
-            asset_type: 'instagram_business',
-            date: today,
-            metric_name: metric.name,
-            metric_value: value,
-            created_at: new Date(),
-            updated_at: new Date()
-          });
-        }
+    // Obtener métricas de Instagram Business
+    const metricsUrl = `${process.env.META_API_BASE_URL}/${asset.metaAssetId}/insights`;
+    const params = new URLSearchParams({
+      metric: 'impressions,reach,profile_views,follower_count',
+      period: 'day',
+      since: dateStr,
+      until: dateStr,
+      access_token: asset.pageAccessToken
+    });
+
+    const response = await axios.get(`${metricsUrl}?${params}`);
+    const metrics = response.data.data;
+
+    let processed = 0;
+
+    // Procesar cada métrica
+    for (const metric of metrics) {
+      const metricName = metric.name;
+      const values = metric.values || [];
+
+      for (const value of values) {
+        // Guardar en SocialStatDaily
+        await SocialStatDaily.upsert({
+          asset_id: asset.id,
+          date: value.end_time.split('T')[0],
+          metric_name: metricName,
+          metric_value: value.value || 0,
+          platform: 'instagram',
+          asset_type: 'business'
+        });
+        processed++;
       }
-
-      console.log(`✅ Métricas de Instagram sincronizadas para asset ${asset.id}`);
-      
-    } catch (error) {
-      console.error(`❌ Error sincronizando Instagram asset ${asset.id}:`, error.message);
-      throw error;
     }
+
+    console.log(`✅ Instagram ${asset.metaAssetName}: ${processed} métricas guardadas`);
+    return processed;
+
+  } catch (error) {
+    console.error(`❌ Error sincronizando Instagram ${asset.metaAssetName}:`, error.message);
+    throw error;
   }
+}
 
   /**
    * Job: Validación de tokens de acceso
