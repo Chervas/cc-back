@@ -740,18 +740,33 @@ async executeHealthCheck() {
     }
 
     // Verificar tokens válidos
-    try {
-     const validTokens = await TokenValidations.count({
-        where: {
-          status: 'valid',  // Campo correcto de la base de datos
-          validation_date: { [Op.gte]: new Date(Date.now() - 24 * 60 * 60 * 1000) }
-        }
-      });
-      healthStatus.validTokens = validTokens;
-      console.log(`✅ Tokens válidos: ${validTokens}`);
-    } catch (error) {
-      console.error('❌ Error verificando tokens válidos:', error);
+    // Verificar tokens válidos (incluir tokens de página permanentes)
+try {
+  // Contar tokens de página permanentes (más importantes)
+  const pageTokens = await ClinicMetaAsset.count({
+    where: {
+      pageAccessToken: { [Op.ne]: null },
+      isActive: true
     }
+  });
+
+  // Contar validaciones recientes de tokens de usuario
+  const recentValidations = await TokenValidations.count({
+    where: {
+      status: 'valid',
+      validation_date: { [Op.gte]: new Date(Date.now() - 24 * 60 * 60 * 1000) }
+    }
+  });
+
+  // Total de tokens válidos (página + validaciones recientes)
+  const totalValidTokens = pageTokens + recentValidations;
+  
+  healthStatus.validTokens = totalValidTokens;
+  console.log(`✅ Tokens válidos: ${totalValidTokens} (${pageTokens} de página + ${recentValidations} validaciones)`);
+} catch (error) {
+  console.error('❌ Error verificando tokens válidos:', error);
+  healthStatus.validTokens = 0;
+}
 
     // Verificar actividad reciente
     try {
