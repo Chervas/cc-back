@@ -22,7 +22,7 @@ const url = `${META_API_BASE_URL}/...`;
 // Importar modelos
 const {
   ClinicMetaAsset,
-  SocialStatDaily,
+  SocialStatsDaily,
   SocialPosts,
   SocialPostStatDaily,
   SyncLog,
@@ -372,9 +372,10 @@ async syncAssetMetrics(asset) {
   return processed;
 }
 
-  /**
-   * Sincroniza métricas de página de Facebook
-   */
+/**
+ * Sincronizar métricas de Facebook Page
+ * FUNCIÓN COMPLETA Y CORREGIDA - REEMPLAZAR COMPLETAMENTE
+ */
 async syncFacebookPageMetrics(asset) {
   console.log(`📘 Sincronizando métricas de Facebook: ${asset.metaAssetName}`);
   
@@ -399,7 +400,7 @@ async syncFacebookPageMetrics(asset) {
     const metrics = response.data.data;
     let processed = 0;
 
-    // 🔧 AGREGAR ESTE CÓDIGO PARA PROCESAR LOS DATOS:
+    // Procesar cada métrica recibida
     for (const metric of metrics) {
       const metricName = metric.name;
       const values = metric.values || [];
@@ -407,17 +408,28 @@ async syncFacebookPageMetrics(asset) {
       console.log(`🔍 Procesando métrica: ${metricName}, valores:`, values);
 
       for (const value of values) {
-        // Guardar en SocialStatDaily
-        await SocialStatDaily.upsert({
-          asset_id: asset.id,
-          date: value.end_time.split('T')[0],
-          metric_name: metricName,
-          metric_value: value.value || 0,
-          platform: 'facebook',
-          asset_type: 'page'
-        });
-        processed++;
-        console.log(`✅ Guardado: ${metricName} = ${value.value}`);
+        // Mapear métricas a columnas específicas
+        const metricMapping = {
+          'page_impressions': 'impressions',
+          'page_impressions_unique': 'reach',
+          'page_views_total': 'profile_visits',
+          'page_fans': 'followers'
+        };
+
+        const columnName = metricMapping[metricName];
+        if (columnName) {
+          const updateData = {
+            clinica_id: asset.clinicaId,        // ← AGREGADO
+            asset_id: asset.id,
+            date: value.end_time.split('T')[0],
+            asset_type: 'facebook_page',        // ← CORREGIDO
+            [columnName]: value.value || 0      // ← MAPEO DINÁMICO
+          };
+          
+          await SocialStatsDaily.upsert(updateData);
+          console.log(`✅ Guardado: ${metricName} = ${value.value} en columna ${columnName}`);
+          processed++;
+        }
       }
     }
 
@@ -430,6 +442,8 @@ async syncFacebookPageMetrics(asset) {
     throw error;
   }
 }
+
+
 
 
   /**
@@ -464,14 +478,14 @@ async syncFacebookPageMetrics(asset) {
       const values = metric.values || [];
 
       for (const value of values) {
-        // Guardar en SocialStatDaily
-        await SocialStatDaily.upsert({
+        // Guardar en SocialStatsDaily
+        await SocialStatsDaily.upsert({
           asset_id: asset.id,
           date: value.end_time.split('T')[0],
           metric_name: metricName,
           metric_value: value.value || 0,
           platform: 'instagram',
-          asset_type: 'business'
+          asset_type: 'instagram_business'
         });
         processed++;
       }
@@ -690,7 +704,7 @@ async syncFacebookPageMetrics(asset) {
     const cutoffDate = new Date();
     cutoffDate.setDate(cutoffDate.getDate() - this.config.dataRetention.socialStats);
     
-    const deleted = await SocialStatDaily.destroy({
+    const deleted = await SocialStatsDaily.destroy({
       where: {
         created_at: { [Op.lt]: cutoffDate }
       }
