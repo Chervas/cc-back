@@ -39,7 +39,7 @@ module.exports = (sequelize, DataTypes) => {
       comment: 'Mensaje de error si aplica'
     }
   }, {
-    tableName: 'TokenValidationss',
+    tableName: 'TokenValidations',
     timestamps: true,
     underscored: true,
     createdAt: 'created_at',

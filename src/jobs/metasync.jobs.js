@@ -26,7 +26,8 @@ const {
   SocialPosts,
   SocialPostStatDaily,
   SyncLog,
-  TokenValidation
+  TokenValidation,
+  MetaConnection
 } = require('../../models');
 
 class MetaSyncJobs {
@@ -670,6 +671,15 @@ async syncAssetMetrics(asset) {
  * Ejecutar verificación de salud del sistema
  */
 async executeHealthCheck() {
+  console.log('🏥 Ejecutando verificación de salud del sistema...');
+
+  const syncLog = await SyncLog.create({
+    job_type: 'health_check',
+    status: 'running',
+    start_time: new Date(),
+    records_processed: 0
+  });
+
   try {
     const health = {
       timestamp: new Date(),
@@ -729,7 +739,7 @@ async executeHealthCheck() {
       const validTokens = await TokenValidation.count({
         where: {
           isValid: true,
-          lastValidated: {
+          validatedAt: {
             [Op.gte]: new Date(Date.now() - 24 * 60 * 60 * 1000) // Últimas 24 horas
           }
         }
@@ -744,7 +754,7 @@ async executeHealthCheck() {
       const recentSyncs = await SyncLog.count({
         where: {
           status: 'completed',
-          createdAt: {
+          created_at: {
             [Op.gte]: new Date(Date.now() - 24 * 60 * 60 * 1000) // Últimas 24 horas
           }
         }
@@ -755,13 +765,11 @@ async executeHealthCheck() {
     }
 
     // Registrar resultado del health check
-    await SyncLog.create({
-      jobType: 'health_check',
+     await syncLog.update({
       status: 'completed',
-      recordsProcessed: 1,
-      statusReport: health,
-      startTime: new Date(),
-      endTime: new Date()
+      end_time: new Date(),
+      records_processed: 1,
+      status_report: health
     });
 
     console.log('✅ Verificación de salud completada:', health);
@@ -771,14 +779,11 @@ async executeHealthCheck() {
     console.error('❌ Error en verificación de salud:', error);
     
     // Registrar error del health check
-    await SyncLog.create({
-      jobType: 'health_check',
+     await syncLog.update({
       status: 'failed',
-      recordsProcessed: 0,
-      errorMessage: error.message,
-      statusReport: { error: error.message },
-      startTime: new Date(),
-      endTime: new Date()
+      end_time: new Date(),
+      error_message: error.message
+
     }).catch(dbError => {
       console.error('❌ Error registrando fallo de health check:', dbError);
     });
@@ -787,103 +792,7 @@ async executeHealthCheck() {
   }
 }
 
-  /**
-   * Job: Verificación de salud del sistema
-   */
-  async executeHealthCheck() {
-    console.log('🏥 Ejecutando verificación de salud del sistema...');
-    
-    const syncLog = await SyncLog.create({
-      job_type: 'health_check',
-      status: 'running',
-      start_time: new Date(),
-      records_processed: 0
-    });
-
-    try {
-      const healthStatus = {
-        database: false,
-        metaApi: false,
-        activeConnections: 0,
-        validTokens: 0,
-        recentActivity: false
-      };
-
-      // Verificar conectividad de base de datos
-      try {
-        await SyncLog.findOne({ limit: 1 });
-        healthStatus.database = true;
-        console.log('✅ Base de datos: Conectada');
-      } catch (error) {
-        console.error('❌ Base de datos: Error de conexión');
-        throw new Error('Database connection failed');
-      }
-
-      // Verificar conexiones activas
-      try {
-        const activeAssets = await ClinicMetaAsset.findAll({
-          where: {
-            pageAccessToken: { [Op.not]: null }
-          }
-        });
-        healthStatus.activeConnections = activeAssets.length;
-        console.log(`✅ Conexiones activas: ${activeAssets.length}`);
-      } catch (error) {
-        console.error('❌ Error verificando conexiones activas:', error);
-      }
-
-      // Verificar disponibilidad de Meta API (prueba simple)
-      try {
-        const testResponse = await axios.get(`${META_API_BASE_URL}/`, {
-          timeout: 5000
-        });
-        healthStatus.metaApi = testResponse.status === 200;
-        console.log('✅ Meta API: Disponible');
-      } catch (error) {
-        console.error('❌ Meta API: No disponible');
-      }
-
-      // Verificar actividad reciente
-      try {
-        const recentLogs = await SyncLog.findAll({
-          where: {
-            created_at: { [Op.gte]: new Date(Date.now() - 24 * 60 * 60 * 1000) }
-          },
-          limit: 1
-        });
-        healthStatus.recentActivity = recentLogs.length > 0;
-        console.log(`✅ Actividad reciente: ${healthStatus.recentActivity ? 'Sí' : 'No'}`);
-      } catch (error) {
-        console.error('❌ Error verificando actividad reciente:', error);
-      }
-
-      // Actualizar log
-      await syncLog.update({
-        status: 'completed',
-        end_time: new Date(),
-        records_processed: 1,
-        error_message: JSON.stringify(healthStatus)
-      });
-
-      console.log('✅ Verificación de salud completada');
-      
-      return {
-        status: 'completed',
-        health: healthStatus
-      };
-
-    } catch (error) {
-      console.error('❌ Error en verificación de salud:', error);
-      
-      await syncLog.update({
-        status: 'failed',
-        end_time: new Date(),
-        error_message: error.message
-      });
-
-      throw error;
-    }
-  }
+  
 
   /**
    * Obtiene el estado actual del sistema
