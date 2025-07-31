@@ -273,7 +273,7 @@ router.get('/meta/assets', async (req, res) => {
             name: page.name,
             type: 'facebook_page',
             assetAvatarUrl: page.picture?.data?.url || null,
-            page_access_token: page.access_token, // ⭐ TOKEN ESPECÍFICO
+            pageAccessToken: page.access_token, // ⭐ TOKEN ESPECÍFICO
             additionalData: {
                 category: page.category || null,
                 verification_status: page.verification_status || null,
