@@ -52,6 +52,7 @@ router.get('/jobs/logs', metaJobsController.getJobsLogs);
 router.get('/jobs/statistics', metaJobsController.getJobsStatistics);
 router.get('/jobs/configuration', metaJobsController.getJobsConfiguration);
 router.get('/jobs/next-executions', metaJobsController.getNextExecutions);
+router.get('/metrics/:clinicaId', metaSyncController.getMetricsByClinica);
 
 module.exports = router;
 

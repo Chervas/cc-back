@@ -12,7 +12,6 @@ const {
 const { Op } = require('sequelize');
 
 // Constantes
-const META_API_VERSION = process.env.META_API_VERSION || 'v23.0';
 const META_API_BASE_URL = process.env.META_API_BASE_URL || 'https://graph.facebook.com';
 
 // Inicia la sincronización de todos los activos de una clínica
@@ -1111,3 +1110,219 @@ async function validateToken(connectionId) {
     }
 }
 
+// ==========================================
+// A) ENDPOINT BACKEND - MÉTRICAS POR CLÍNICA
+// ==========================================
+// Archivo: /src/controllers/metasync.controller.js
+// Agregar esta función al controlador existente
+
+/**
+ * Obtener métricas de redes sociales por clínica
+ * GET /api/metasync/metrics/:clinicaId
+ */
+
+exports.getMetricsByClinica = async (req, res) => {
+
+  try {
+    const { clinicaId } = req.params;
+    const { startDate, endDate } = req.query;
+
+    // Validar parámetros
+    if (!clinicaId) {
+      return res.status(400).json({
+        success: false,
+        message: 'ID de clínica requerido'
+      });
+    }
+
+    // Fechas por defecto (últimos 30 días)
+    const defaultEndDate = new Date();
+    const defaultStartDate = new Date();
+    defaultStartDate.setDate(defaultStartDate.getDate() - 30);
+
+    const start = startDate ? new Date(startDate) : defaultStartDate;
+    const end = endDate ? new Date(endDate) : defaultEndDate;
+
+    // Obtener métricas de SocialStatsDaily
+    const metricas = await SocialStatsDaily.findAll({
+      where: {
+        clinica_id: clinicaId,
+        date: {
+          [Op.between]: [start, end]
+        }
+      },
+      include: [{
+        model: ClinicMetaAsset,
+        as: 'asset',
+        attributes: ['id', 'metaAssetId', 'metaAssetName', 'assetType']
+      }],
+      order: [['date', 'DESC']],
+      raw: false
+    });
+
+    // Procesar datos por plataforma
+    const metricasPorPlataforma = this.procesarMetricasPorPlataforma(metricas);
+
+    // Calcular totales y tendencias
+    const resumen = this.calcularResumenMetricas(metricas);
+
+    // Obtener assets activos de la clínica
+    const assetsActivos = await ClinicMetaAsset.findAll({
+      where: {
+        clinicaId: clinicaId,
+        isActive: true
+      },
+      attributes: ['id', 'metaAssetId', 'metaAssetName', 'assetType', 'pageAccessToken']
+    });
+
+    res.json({
+      success: true,
+      data: {
+        clinicaId: parseInt(clinicaId),
+        periodo: {
+          inicio: start.toISOString().split('T')[0],
+          fin: end.toISOString().split('T')[0]
+        },
+        resumen,
+        metricasPorPlataforma,
+        assetsActivos: assetsActivos.length,
+        ultimaActualizacion: metricas.length > 0 ? metricas[0].created_at : null
+      }
+    });
+
+  } catch (error) {
+    console.error('❌ Error obteniendo métricas por clínica:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Error interno del servidor',
+      error: error.message
+    });
+  }
+}
+
+/**
+ * Procesar métricas agrupadas por plataforma
+ */
+function procesarMetricasPorPlataforma(metricas) {
+  const plataformas = {
+    facebook: {
+      nombre: 'Facebook',
+      icono: 'heroicons_solid:check',
+      color: 'text-blue-600',
+      metricas: {
+        impressions: 0,
+        reach: 0,
+        profile_visits: 0,
+        followers: 0
+      },
+      tendencia: {
+        impressions: 0,
+        reach: 0,
+        profile_visits: 0,
+        followers: 0
+      }
+    },
+    instagram: {
+      nombre: 'Instagram',
+      icono: 'heroicons_solid:camera',
+      color: 'text-pink-500',
+      metricas: {
+        impressions: 0,
+        reach: 0,
+        profile_visits: 0,
+        followers: 0
+      },
+      tendencia: {
+        impressions: 0,
+        reach: 0,
+        profile_visits: 0,
+        followers: 0
+      }
+    }
+  };
+
+  // Agrupar métricas por plataforma y asset_type
+  metricas.forEach(metrica => {
+    let plataforma = null;
+    
+    if (metrica.asset_type === 'facebook_page') {
+      plataforma = plataformas.facebook;
+    } else if (metrica.asset_type === 'instagram_business') {
+      plataforma = plataformas.instagram;
+    }
+
+    if (plataforma) {
+      // Sumar métricas actuales
+      plataforma.metricas.impressions += metrica.impressions || 0;
+      plataforma.metricas.reach += metrica.reach || 0;
+      plataforma.metricas.profile_visits += metrica.profile_visits || 0;
+      plataforma.metricas.followers = Math.max(plataforma.metricas.followers, metrica.followers || 0);
+    }
+  });
+
+  // Calcular tendencias (comparar últimos 7 días vs 7 días anteriores)
+  const hoy = new Date();
+  const hace7Dias = new Date();
+  hace7Dias.setDate(hoy.getDate() - 7);
+  const hace14Dias = new Date();
+  hace14Dias.setDate(hoy.getDate() - 14);
+
+  const metricasRecientes = metricas.filter(m => new Date(m.date) >= hace7Dias);
+  const metricasAnteriores = metricas.filter(m => 
+    new Date(m.date) >= hace14Dias && new Date(m.date) < hace7Dias
+  );
+
+  // Calcular tendencias para cada plataforma
+  Object.keys(plataformas).forEach(key => {
+    const plataforma = plataformas[key];
+    const assetType = key === 'facebook' ? 'facebook_page' : 'instagram_business';
+
+    const recientes = metricasRecientes.filter(m => m.asset_type === assetType);
+    const anteriores = metricasAnteriores.filter(m => m.asset_type === assetType);
+
+    const sumaRecientes = {
+      impressions: recientes.reduce((sum, m) => sum + (m.impressions || 0), 0),
+      reach: recientes.reduce((sum, m) => sum + (m.reach || 0), 0),
+      profile_visits: recientes.reduce((sum, m) => sum + (m.profile_visits || 0), 0)
+    };
+
+    const sumaAnteriores = {
+      impressions: anteriores.reduce((sum, m) => sum + (m.impressions || 0), 0),
+      reach: anteriores.reduce((sum, m) => sum + (m.reach || 0), 0),
+      profile_visits: anteriores.reduce((sum, m) => sum + (m.profile_visits || 0), 0)
+    };
+
+    // Calcular porcentaje de cambio
+    Object.keys(sumaRecientes).forEach(metrica => {
+      if (sumaAnteriores[metrica] > 0) {
+        const cambio = ((sumaRecientes[metrica] - sumaAnteriores[metrica]) / sumaAnteriores[metrica]) * 100;
+        plataforma.tendencia[metrica] = Math.round(cambio * 100) / 100;
+      }
+    });
+  });
+
+  return plataformas;
+}
+
+/**
+ * Calcular resumen general de métricas
+ */
+calcularResumenMetricas(metricas) {
+  const totalImpressions = metricas.reduce((sum, m) => sum + (m.impressions || 0), 0);
+  const totalReach = metricas.reduce((sum, m) => sum + (m.reach || 0), 0);
+  const totalProfileVisits = metricas.reduce((sum, m) => sum + (m.profile_visits || 0), 0);
+  const maxFollowers = Math.max(...metricas.map(m => m.followers || 0), 0);
+
+  // Calcular engagement rate (aproximado)
+  const engagementRate = totalReach > 0 ? ((totalProfileVisits / totalReach) * 100) : 0;
+
+  return {
+    totalImpressions,
+    totalReach,
+    totalProfileVisits,
+    totalFollowers: maxFollowers,
+    engagementRate: Math.round(engagementRate * 100) / 100,
+    diasConDatos: [...new Set(metricas.map(m => m.date))].length,
+    ultimaActualizacion: metricas.lengåth > 0 ? metricas[0].date : null
+  };
+}
