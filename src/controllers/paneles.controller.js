@@ -104,4 +104,90 @@ router.get('/notificaciones-tareas', async (req, res) => {
     }
 });
 
+// GET /api/paneles/metricas/:clinicaId
+router.get('/metricas/:clinicaId', async (req, res) => {
+    try {
+        const { clinicaId } = req.params;
+        const { startDate, endDate } = req.query;
+
+        // Validar parámetros
+        if (!clinicaId) {
+            return res.status(400).json({
+                success: false,
+                message: 'ID de clínica requerido'
+            });
+        }
+
+        // Por ahora retornar datos de ejemplo basados en los datos reales que tienes
+        // TODO: Conectar con base de datos real cuando esté disponible
+        const metricasEjemplo = {
+            success: true,
+            data: {
+                clinicaId: parseInt(clinicaId),
+                periodo: {
+                    inicio: startDate || '2025-07-01',
+                    fin: endDate || '2025-08-08'
+                },
+                resumen: {
+                    totalImpressions: 58000,
+                    totalReach: 46000,
+                    totalProfileVisits: 630,
+                    totalFollowers: 429,
+                    engagementRate: 1.37,
+                    diasConDatos: 31,
+                    ultimaActualizacion: '2025-07-31'
+                },
+                platforms: {
+                    facebook: {
+                        nombre: 'Facebook',
+                        icono: 'heroicons_solid:check',
+                        color: 'text-blue-600',
+                        metricas: {
+                            impressions: 1933,
+                            reach: 1541,
+                            profile_visits: 21,
+                            followers: 429
+                        },
+                        tendencia: {
+                            impressions: 12.5,
+                            reach: 8.3,
+                            profile_visits: -2.1,
+                            followers: 0
+                        }
+                    },
+                    instagram: {
+                        nombre: 'Instagram',
+                        icono: 'heroicons_solid:camera',
+                        color: 'text-pink-500',
+                        metricas: {
+                            impressions: 0,
+                            reach: 0,
+                            profile_visits: 0,
+                            followers: 0
+                        },
+                        tendencia: {
+                            impressions: 0,
+                            reach: 0,
+                            profile_visits: 0,
+                            followers: 0
+                        }
+                    }
+                },
+                assetsActivos: 1,
+                ultimaActualizacion: new Date().toISOString()
+            }
+        };
+
+        res.json(metricasEjemplo);
+
+    } catch (error) {
+        console.error('❌ Error obteniendo métricas por clínica:', error);
+        res.status(500).json({
+            success: false,
+            message: 'Error interno del servidor',
+            error: error.message
+        });
+    }
+});
+
 module.exports = router;

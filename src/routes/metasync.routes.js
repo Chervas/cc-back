@@ -27,6 +27,7 @@ router.get('/tokens/validate/:connectionId', metaSyncController.validateTokenByI
 router.get('/tokens/stats', metaSyncController.getTokenValidationStats);
 
 // ===== RUTAS DE MÉTRICAS =====
+router.get('/metrics/:clinicaId', metaSyncController.getMetricsByClinica);
 router.get('/clinica/:clinicaId/stats', socialStatsController.getClinicaStats);
 router.get('/asset/:assetId/stats', socialStatsController.getAssetStats);
 router.get('/clinica/:clinicaId/posts', socialStatsController.getClinicaPosts);

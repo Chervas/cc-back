@@ -1304,25 +1304,3 @@ function procesarMetricasPorPlataforma(metricas) {
   return plataformas;
 }
 
-/**
- * Calcular resumen general de métricas
- */
-calcularResumenMetricas(metricas) {
-  const totalImpressions = metricas.reduce((sum, m) => sum + (m.impressions || 0), 0);
-  const totalReach = metricas.reduce((sum, m) => sum + (m.reach || 0), 0);
-  const totalProfileVisits = metricas.reduce((sum, m) => sum + (m.profile_visits || 0), 0);
-  const maxFollowers = Math.max(...metricas.map(m => m.followers || 0), 0);
-
-  // Calcular engagement rate (aproximado)
-  const engagementRate = totalReach > 0 ? ((totalProfileVisits / totalReach) * 100) : 0;
-
-  return {
-    totalImpressions,
-    totalReach,
-    totalProfileVisits,
-    totalFollowers: maxFollowers,
-    engagementRate: Math.round(engagementRate * 100) / 100,
-    diasConDatos: [...new Set(metricas.map(m => m.date))].length,
-    ultimaActualizacion: metricas.lengåth > 0 ? metricas[0].date : null
-  };
-}
