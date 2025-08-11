@@ -2,7 +2,7 @@
 const express = require('express');
 const router = express.Router();
 const { Op } = require('sequelize');
-const { SocialStatsDaily } = require('../models');
+const { SocialStatsDaily } = require('../../models');
 
 // GET /api/paneles/dashboard/:idClinica
 router.get('/dashboard/:idClinica', async (req, res) => {
@@ -217,7 +217,7 @@ router.get('/notificaciones-tareas', async (req, res) => {
 router.get('/metricas/:tipo', async (req, res) => {
     try {
         const { tipo } = req.params;
-        const { idClinica, periodo = 'ultimo_mes' } = req.query;
+        const { idClinica, periodo = 'ultimo_mes', assetType } = req.query;
         
         console.log(`Obteniendo métricas de ${tipo} para clínica ${idClinica}, período: ${periodo}`);
         
