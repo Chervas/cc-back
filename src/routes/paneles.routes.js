@@ -1,6 +1,8 @@
 // src/routes/paneles.routes.js
 const express = require('express');
 const router = express.Router();
+const { Op } = require('sequelize');
+const { SocialStatsDaily } = require('../models');
 
 // GET /api/paneles/dashboard/:idClinica
 router.get('/dashboard/:idClinica', async (req, res) => {
@@ -223,14 +225,84 @@ router.get('/metricas/:tipo', async (req, res) => {
         
         switch (tipo) {
             case 'redes-sociales':
-                metricas = {
-                    facebook: { seguidores: 2840, engagement: 3.8 },
-                    instagram: { seguidores: 4200, engagement: 4.2 },
-                    tiktok: { seguidores: 1800, visualizaciones: 45000 },
-                    linkedin: { seguidores: 950, impresiones: 8500 },
-                    doctoralia: { valoracion: 4.8, resenas: 124 }
+                if (!idClinica) {
+                    return res.status(400).json({ error: 'idClinica es requerido' });
+                }
+
+                const ahora = new Date();
+                const inicio = new Date();
+                switch (periodo) {
+                    case 'ultima_semana':
+                        inicio.setDate(ahora.getDate() - 7);
+                        break;
+                    case 'ultimo_anio':
+                        inicio.setFullYear(ahora.getFullYear() - 1);
+                        break;
+                    case 'ultimo_mes':
+                    default:
+                        inicio.setMonth(ahora.getMonth() - 1);
+                        break;
+                }
+
+                const where = {
+                    clinica_id: idClinica,
+                    date: { [Op.between]: [inicio, ahora] }
                 };
+                if (assetType) {
+                    where.asset_type = assetType;
+                }
+
+                let registros;
+                try {
+                    registros = await SocialStatsDaily.findAll({ where, raw: true });
+                } catch (err) {
+                    console.error('Error al consultar SocialStatsDaily:', err);
+                    return res.status(500).json({
+                        error: 'No se pudieron obtener métricas',
+                        message: err.message
+                    });
+                }
+
+                if (assetType && registros.length === 0) {
+                    return res.status(404).json({ error: 'Plataforma no sincronizada o sin datos' });
+                }
+
+                const mapTipos = {
+                    facebook_page: 'facebook',
+                    instagram_business: 'instagram',
+                    ad_account: 'meta_ads'
+                };
+                const metricasRedes = {};
+
+                registros.forEach(r => {
+                    const key = mapTipos[r.asset_type] || r.asset_type;
+                    if (!metricasRedes[key]) {
+                        metricasRedes[key] = {
+                            seguidores: 0,
+                            impresiones: 0,
+                            alcance: 0,
+                            engagement: 0,
+                            clics: 0
+                        };
+                    }
+                    metricasRedes[key].seguidores = Math.max(metricasRedes[key].seguidores, r.followers || 0);
+                    metricasRedes[key].impresiones += r.impressions || 0;
+                    metricasRedes[key].alcance += r.reach || 0;
+                    metricasRedes[key].engagement += r.engagement || 0;
+                    metricasRedes[key].clics += r.clicks || 0;
+                });
+
+                if (!assetType) {
+                    ['facebook', 'instagram', 'tiktok', 'linkedin', 'doctoralia'].forEach(p => {
+                        if (!metricasRedes[p]) {
+                            metricasRedes[p] = { sincronizado: false };
+                        }
+                    });
+                }
+
+                metricas = metricasRedes;
                 break;
+                
             case 'web':
                 metricas = {
                     visitas: 12500,
