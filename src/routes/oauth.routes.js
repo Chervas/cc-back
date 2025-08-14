@@ -6,6 +6,7 @@ const router = express.Router();
 const db = require('../../models'); // <-- Importa el objeto db de models/index.js
 const MetaConnection = db.MetaConnection; // <-- Accede al modelo MetaConnection
 const ClinicMetaAsset = db.ClinicMetaAsset; // <-- Accede al modelo ClinicMetaAsset
+const { triggerHistoricalSync } = require('../controllers/metasync.controller');
 
 // Configuración de la App de Meta
 const META_APP_ID = '1807844546609897'; // <-- App ID correcto
@@ -412,9 +413,15 @@ router.post('/meta/map-assets', async (req, res) => {
         }
 
         console.log(`✅ ${createdAssets.length} nuevos mapeos creados para clínica ${clinicaId}`);
+        // Desencadenar sincronización histórica en segundo plano
+        try {
+            triggerHistoricalSync(clinicaId);
+        } catch (err) {
+            console.error('⚠️ No se pudo iniciar la sincronización histórica:', err);
+        }
 
-        res.status(200).json({ 
-            message: 'Activos de Meta mapeados correctamente.', 
+        res.status(200).json({
+            message: 'Activos de Meta mapeados correctamente.',
             assets: createdAssets,
             replacedMappings: true,
             totalNewMappings: createdAssets.length

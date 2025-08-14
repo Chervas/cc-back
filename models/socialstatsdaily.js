@@ -50,6 +50,10 @@ module.exports = (sequelize, DataTypes) => {
             type: DataTypes.INTEGER,
             defaultValue: 0
         },
+        followers_day: {
+            type: DataTypes.INTEGER,
+            defaultValue: 0
+        },
         profile_visits: {
             type: DataTypes.INTEGER,
             defaultValue: 0
@@ -208,6 +212,7 @@ module.exports = (sequelize, DataTypes) => {
                 [sequelize.fn('SUM', sequelize.col('engagement')), 'engagement'],
                 [sequelize.fn('SUM', sequelize.col('clicks')), 'clicks'],
                 [sequelize.fn('MAX', sequelize.col('followers')), 'followers'],
+                [sequelize.fn('SUM', sequelize.col('followers_day')), 'followers_day'],
                 [sequelize.fn('SUM', sequelize.col('profile_visits')), 'profile_visits']
             ],
             where: {

@@ -70,6 +70,7 @@ exports.getClinicaStats = async (req, res) => {
                     [sequelize.fn('SUM', sequelize.col('engagement')), 'engagement'],
                     [sequelize.fn('SUM', sequelize.col('clicks')), 'clicks'],
                     [sequelize.fn('AVG', sequelize.col('followers')), 'followers'],
+                    [sequelize.fn('SUM', sequelize.col('followers_day')), 'followers_day'],
                     [sequelize.fn('SUM', sequelize.col('profile_visits')), 'profile_visits'],
                     'asset_type'
                 ],
@@ -160,6 +161,7 @@ exports.getAssetStats = async (req, res) => {
                     [sequelize.fn('SUM', sequelize.col('engagement')), 'engagement'],
                     [sequelize.fn('SUM', sequelize.col('clicks')), 'clicks'],
                     [sequelize.fn('AVG', sequelize.col('followers')), 'followers'],
+                    [sequelize.fn('SUM', sequelize.col('followers_day')), 'followers_day'],
                     [sequelize.fn('SUM', sequelize.col('profile_visits')), 'profile_visits']
                 ],
                 where,
@@ -407,6 +409,7 @@ exports.getDashboardSummary = async (req, res) => {
                 [sequelize.fn('SUM', sequelize.col('engagement')), 'engagement'],
                 [sequelize.fn('SUM', sequelize.col('clicks')), 'clicks'],
                 [sequelize.fn('AVG', sequelize.col('followers')), 'followers'],
+                [sequelize.fn('SUM', sequelize.col('followers_day')), 'followers_day'],
                 [sequelize.fn('SUM', sequelize.col('profile_visits')), 'profile_visits']
             ],
             where: {
@@ -427,6 +430,7 @@ exports.getDashboardSummary = async (req, res) => {
                 [sequelize.fn('SUM', sequelize.col('engagement')), 'engagement'],
                 [sequelize.fn('SUM', sequelize.col('clicks')), 'clicks'],
                 [sequelize.fn('AVG', sequelize.col('followers')), 'followers'],
+                [sequelize.fn('SUM', sequelize.col('followers_day')), 'followers_day'],
                 [sequelize.fn('SUM', sequelize.col('profile_visits')), 'profile_visits']
             ],
             where: {
@@ -506,4 +510,3 @@ exports.getDashboardSummary = async (req, res) => {
         });
     }
 };
-
