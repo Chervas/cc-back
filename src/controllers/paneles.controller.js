@@ -7,7 +7,7 @@ router.get('/dashboard/:idClinica', async (req, res) => {
         const { idClinica } = req.params;
         const { periodo = 'ultimo_mes' } = req.query;
         
-        // Aquí implementar lógica para obtener datos del dashboard
+        /// Aquí implementar lógica para obtener datos del dashboard
         const dashboardData = {
             resumen: {
                 pacientes_totales: 1314,
