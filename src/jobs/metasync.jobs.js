@@ -460,7 +460,7 @@ async syncFacebookPageMetrics(asset) {
     // Obtener métricas de Instagram Business
     const metricsUrl = `${process.env.META_API_BASE_URL}/${asset.metaAssetId}/insights`;
     const params = new URLSearchParams({
-      metric: 'impressions,reach,profile_views,follower_count',
+      metric: 'views,reach,profile_views,follower_count',
       period: 'day',
       since: dateStr,
       until: dateStr,

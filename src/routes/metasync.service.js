@@ -209,7 +209,7 @@ const MetaSyncService = {
              // Obtener métricas diarias
             const metricsResponse = await axios.get(`${META_API_BASE_URL}/${asset.metaAssetId}/insights`, {
                 params: {
-                    metric: 'impressions,reach,profile_views,follower_count',
+                    metric: 'views,reach,profile_views,follower_count',
                     period: 'day',
                     since,
                     until,
@@ -221,12 +221,14 @@ const MetaSyncService = {
                 throw new Error('Respuesta de API inválida al obtener métricas de Instagram');
             }
 
-            const statsByDate = {};
+            // Procesar métricas
             const metricsData = metricsResponse.data.data;
+            const processedDays = new Set();
+            const statsByDate = {};
 
             for (const metric of metricsData) {
                 const metricName = metric.name;
-                const values = metric.values || [];
+                const values = metric.values;
 
                 for (const value of values) {
                     const date = new Date(value.end_time);
@@ -238,19 +240,13 @@ const MetaSyncService = {
                             clinica_id: asset.clinicaId,
                             asset_id: asset.id,
                             asset_type: asset.assetType,
-                            date: date,
-                            impressions: 0,
-                            reach: 0,
-                            engagement: 0,
-                            clicks: 0,
-                            followers: 0,
-                            followers_day: 0,
-                            profile_visits: 0
+                            date: date
                         };
                     }
 
+                    // Mapear métricas de la API a campos de la base de datos
                     switch (metricName) {
-                        case 'impressions':
+                        case 'views':
                             statsByDate[dateStr].impressions = value.value || 0;
                             break;
                         case 'reach':
@@ -260,52 +256,30 @@ const MetaSyncService = {
                             statsByDate[dateStr].profile_visits = value.value || 0;
                             break;
                         case 'follower_count':
-                            statsByDate[dateStr].followers_day = value.value || 0;
+                            statsByDate[dateStr].followers = value.value || 0;
                             break;
                     }
+
+                    processedDays.add(dateStr);
                 }
             }
 
-            // Obtener total actual de seguidores
-            const accountResponse = await axios.get(`${META_API_BASE_URL}/${asset.metaAssetId}`, {
-                params: {
-                    fields: 'followers_count',
-                    access_token: accessToken
-                }
-            });
-            let currentFollowers = accountResponse.data?.followers_count || 0;
+            // Guardar métricas acumuladas en la base de datos
+            for (const dateStr of Object.keys(statsByDate)) {
+                const statsData = statsByDate[dateStr];
 
-            // Reconstruir historial de seguidores
-            const dates = Object.keys(statsByDate).sort();
-            if (dates.length > 0) {
-                let runningTotal = currentFollowers;
-                for (let i = dates.length - 1; i >= 0; i--) {
-                    const dateStr = dates[i];
-                    if (i === dates.length - 1) {
-                        statsByDate[dateStr].followers = runningTotal;
-                    } else {
-                        const nextDate = dates[i + 1];
-                        runningTotal -= statsByDate[nextDate].followers_day || 0;
-                        statsByDate[dateStr].followers = runningTotal;
+                let existingStats = await SocialStatsDaily.findOne({
+                    where: {
+                        clinica_id: asset.clinicaId,
+                        asset_id: asset.id,
+                        date: statsData.date
                     }
-                }
+                });
 
-                // Guardar en base de datos
-                for (const dateStr of dates) {
-                    const data = statsByDate[dateStr];
-                    let existing = await SocialStatsDaily.findOne({
-                        where: {
-                            clinica_id: data.clinica_id,
-                            asset_id: data.asset_id,
-                            date: data.date
-                        }
-                    });
-
-                    if (existing) {
-                        await existing.update(data);
-                    } else {
-                        await SocialStatsDaily.create(data);
-                    }
+                if (existingStats) {
+                    await existingStats.update(statsData);
+                } else {
+                    await SocialStatsDaily.create(statsData);
                 }
             }
 
