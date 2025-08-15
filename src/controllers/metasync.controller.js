@@ -687,6 +687,7 @@ async function syncInstagramMetrics(asset, accessToken, startDate, endDate) {
         const metricsResponse = await axios.get(`${META_API_BASE_URL}/${asset.metaAssetId}/insights`, {
             params: {
                 metric: 'views,reach,profile_views,follower_count',
+                metric_type: 'total_value',
                 period: 'day',
                 since,
                 until,
@@ -705,7 +706,7 @@ async function syncInstagramMetrics(asset, accessToken, startDate, endDate) {
 
         for (const metric of metricsData) {
             const metricName = metric.name;
-            const values = metric.values;
+            const values = Array.isArray(metric.values) ? metric.values : [];
 
             for (const value of values) {
                 const date = new Date(value.end_time);
@@ -721,19 +722,24 @@ async function syncInstagramMetrics(asset, accessToken, startDate, endDate) {
                     };
                 }
 
+                let metricValue = value.value;
+                if (metricValue && typeof metricValue === 'object') {
+                    metricValue = metricValue[metricName] ?? metricValue.value ?? 0;
+                }
+
                 // Mapear métricas de la API a campos de la base de datos
                 switch (metricName) {
                     case 'views':
-                        statsByDate[dateStr].impressions = value.value || 0;
+                        statsByDate[dateStr].impressions = metricValue || 0;
                         break;
                     case 'reach':
-                        statsByDate[dateStr].reach = value.value || 0;
+                        statsByDate[dateStr].reach = metricValue || 0;
                         break;
                     case 'profile_views':
-                        statsByDate[dateStr].profile_visits = value.value || 0;
+                        statsByDate[dateStr].profile_visits = metricValue || 0;
                         break;
                     case 'follower_count':
-                        statsByDate[dateStr].followers = value.value || 0;
+                        statsByDate[dateStr].followers = metricValue || 0;
                         break;
                 }
             }
@@ -780,6 +786,7 @@ async function syncInstagramMetrics(asset, accessToken, startDate, endDate) {
                 await SocialStatsDaily.create(statsData);
             }
         }
+    }
 
         // Obtener métricas de engagement (requiere una llamada separada)
         const engagementResponse = await axios.get(`${META_API_BASE_URL}/${asset.metaAssetId}/insights`, {
