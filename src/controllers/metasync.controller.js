@@ -702,7 +702,6 @@ async function syncInstagramMetrics(asset, accessToken, startDate, endDate) {
                 const response = await axios.get(`${META_API_BASE_URL}/${asset.metaAssetId}/insights`, {
                     params: {
                         metric: 'follower_count',
-                        metric_type: 'time_series',
                         period: 'day',
                         since: chunkStart,
                         until: chunkEnd,
@@ -732,16 +731,15 @@ async function syncInstagramMetrics(asset, accessToken, startDate, endDate) {
         }
 
         // Obtener total actual de seguidores
-        const followersTotalResponse = await axios.get(`${META_API_BASE_URL}/${asset.metaAssetId}/insights`, {
+        const followersTotalResponse = await axios.get(`${META_API_BASE_URL}/${asset.metaAssetId}`, {
             params: {
-                metric: 'follower_count',
-                metric_type: 'total_value',
-                period: 'day',
+                fields: 'followers_count',
+
                 access_token: accessToken
             }
         });
 
-        const currentFollowers = followersTotalResponse.data?.data?.[0]?.values?.[0]?.value || 0;
+        const currentFollowers = followersTotalResponse.data?.followers_count || 0;
 
         // Reconstruir historial de seguidores usando la variación diaria
         const dates = Object.keys(statsByDate).sort();
@@ -751,6 +749,36 @@ async function syncInstagramMetrics(asset, accessToken, startDate, endDate) {
             statsByDate[dateStr].followers = runningTotal;
             runningTotal -= statsByDate[dateStr].followers_day || 0;
         }
+
+        // Registrar estadísticas del día actual
+        const todayDate = new Date(endDate);
+        todayDate.setHours(0, 0, 0, 0);
+        const todayStr = todayDate.toISOString().split('T')[0];
+        let yesterdayFollowers = 0;
+        if (dates.length) {
+            const lastDateStr = dates[dates.length - 1];
+            yesterdayFollowers = statsByDate[lastDateStr]?.followers || 0;
+        } else {
+            const prevDate = new Date(todayDate);
+            prevDate.setDate(prevDate.getDate() - 1);
+            const prevStats = await SocialStatsDaily.findOne({
+                where: {
+                    clinica_id: asset.clinicaId,
+                    asset_id: asset.id,
+                    date: prevDate
+                }
+            });
+            yesterdayFollowers = prevStats ? prevStats.followers : 0;
+        }
+        statsByDate[todayStr] = {
+            clinica_id: asset.clinicaId,
+            asset_id: asset.id,
+            asset_type: asset.assetType,
+            date: todayDate,
+            followers: currentFollowers,
+            followers_day: currentFollowers - yesterdayFollowers
+        };
+        dates.push(todayStr);
 
         // Guardar/actualizar en la base de datos
         for (const dateStr of dates) {

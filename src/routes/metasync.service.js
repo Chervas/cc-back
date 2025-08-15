@@ -291,7 +291,6 @@ const MetaSyncService = {
             const followersDayResponse = await axios.get(`${META_API_BASE_URL}/${asset.metaAssetId}/insights`, {
                 params: {
                     metric: 'follower_count',
-                    metric_type: 'time_series',
                     period: 'day',
                     since,
                     until,
@@ -315,17 +314,16 @@ const MetaSyncService = {
                 };
             }
 
-            // Total actual de seguidores
-            const followersTotalResponse = await axios.get(`${META_API_BASE_URL}/${asset.metaAssetId}/insights`, {
+             // Total actual de seguidores
+            const followersTotalResponse = await axios.get(`${META_API_BASE_URL}/${asset.metaAssetId}`, {
                 params: {
-                    metric: 'followers_count',
-                    metric_type: 'total_value',
-                    period: 'day',
+                    fields: 'followers_count',
                     access_token: accessToken
                 }
             });
 
-            const currentFollowers = followersTotalResponse.data?.data?.[0]?.values?.[0]?.value || 0;
+            const currentFollowers = followersTotalResponse.data?.followers_count || 0;
+
 
             // Reconstruir historial de seguidores
             const dates = Object.keys(statsByDate).sort();
