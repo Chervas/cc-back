@@ -680,23 +680,40 @@ async function syncInstagramMetrics(asset, accessToken, startDate, endDate) {
         console.log(`📊 Sincronizando métricas de Instagram ${asset.metaAssetId}`);
 
         // Formatear fechas para la API de Meta
+        // Sincroniza métricas de una cuenta de Instagram
+async function syncInstagramMetrics(asset, accessToken, startDate, endDate) {
+    try {
+        console.log(`📊 Sincronizando métricas de Instagram ${asset.metaAssetId}`);
+
+        // Formatear fechas para la API de Meta
         const since = Math.floor(startDate.getTime() / 1000);
         const until = Math.floor(endDate.getTime() / 1000);
+        const MAX_RANGE_SECONDS = 30 * 24 * 60 * 60; // 30 días
 
-        // Obtener variación diaria de seguidores (últimos días disponibles)
-        const followersDayResponse = await axios.get(`${META_API_BASE_URL}/${asset.metaAssetId}/insights`, {
-            params: {
-                metric: 'follower_count',
-                metric_type: 'time_series',
-                period: 'day',
-                since,
-                until,
-                access_token: accessToken
-            }
-        });
-
+        // Obtener variación diaria de seguidores en bloques de 30 días
         const statsByDate = {};
-        const followerValues = followersDayResponse.data?.data?.[0]?.values || [];
+        let followerValues = [];
+        let chunkStart = since;
+        while (chunkStart <= until) {
+            const chunkEnd = Math.min(chunkStart + MAX_RANGE_SECONDS, until);
+            const response = await axios.get(`${META_API_BASE_URL}/${asset.metaAssetId}/insights`, {
+                params: {
+                    metric: 'follower_count',
+                    metric_type: 'time_series',
+                    period: 'day',
+                    since: chunkStart,
+                    until: chunkEnd,
+                    access_token: accessToken
+                }
+            });
+            const values = response.data?.data?.[0]?.values || [];
+            followerValues = followerValues.concat(values);
+            if (chunkEnd === until) {
+                break;
+            }
+            chunkStart = chunkEnd + 86400; // avanzar un día para evitar solapamiento
+        }
+
         for (const value of followerValues) {
             const date = new Date(value.end_time);
             date.setHours(0, 0, 0, 0);
@@ -750,6 +767,7 @@ async function syncInstagramMetrics(asset, accessToken, startDate, endDate) {
                 await SocialStatsDaily.create(statsData);
             }
         }
+
 
         // Sincronizar publicaciones
         await syncInstagramPosts(asset, accessToken, startDate, endDate);
