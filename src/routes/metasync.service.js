@@ -201,15 +201,97 @@ const MetaSyncService = {
     syncFacebookPageMetrics: async (asset, accessToken, startDate, endDate) => {
         try {
             console.log(`📊 Sincronizando métricas de página de Facebook ${asset.metaAssetId}`);
-            
-            // Formatear fechas para la API de Meta
+
+            // Obtener el número de seguidores actuales
+            const metricsResponse = await axios.get(`${META_API_BASE_URL}/${asset.metaAssetId}`, {
+                params: {
+                    fields: 'fan_count',
+                    access_token: accessToken
+                }
+            });
+
+            if (!metricsResponse.data || metricsResponse.data.fan_count === undefined) {
+                throw new Error('Respuesta de API inválida al obtener fan_count');
+            }
+
+            const fanCount = metricsResponse.data.fan_count;
+
+            // Fecha del registro (usamos endDate)
+            const date = new Date(endDate);
+            date.setHours(0, 0, 0, 0);
+
+            // Obtener seguidores del día anterior para calcular followers_day
+            const prevDate = new Date(date);
+            prevDate.setDate(prevDate.getDate() - 1);
+
+            const prevStats = await SocialStatsDaily.findOne({
+                where: {
+                    clinica_id: asset.clinicaId,
+                    asset_id: asset.id,
+                    date: prevDate
+                }
+            });
+
+            const followersDay = fanCount - (prevStats ? prevStats.followers : 0);
+
+            const statsData = {
+                clinica_id: asset.clinicaId,
+                asset_id: asset.id,
+                asset_type: asset.assetType,
+                date: date,
+                followers: fanCount,
+                followers_day: followersDay
+            };
+
+            let existingStats = await SocialStatsDaily.findOne({
+                where: {
+                    clinica_id: asset.clinicaId,
+                    asset_id: asset.id,
+                    date: date
+                }
+            });
+
+            if (existingStats) {
+                await existingStats.update(statsData);
+            } else {
+                await SocialStatsDaily.create(statsData);
+            }
+
+            // Sincronizar publicaciones
+            await MetaSyncService.syncFacebookPosts(asset, accessToken, startDate, endDate);
+
+            console.log(`✅ Sincronización de métricas de Facebook completada: 1 día procesado`);
+
+            return {
+                status: 'completed',
+                recordsProcessed: 1
+            };
+        } catch (error) {
+            console.error('❌ Error en syncFacebookPageMetrics:', error);
+            throw error;
+        }
+    },
+
+    /**
+     * Sincroniza métricas de una cuenta de Instagram
+     * @param {Object} asset - Activo de Meta (Instagram Business)
+     * @param {string} accessToken - Token de acceso
+     * @param {Date} startDate - Fecha de inicio
+     * @param {Date} endDate - Fecha de fin
+     * @returns {Promise}
+     */
+    syncInstagramMetrics: async (asset, accessToken, startDate, endDate) => {
+        try {
+            console.log(`📊 Sincronizando métricas de Instagram ${asset.metaAssetId}`);
+
             const since = Math.floor(startDate.getTime() / 1000);
             const until = Math.floor(endDate.getTime() / 1000);
-            
-             // Obtener métricas diarias
-            const metricsResponse = await axios.get(`${META_API_BASE_URL}/${asset.metaAssetId}/insights`, {
+
+            // Variación diaria de seguidores
+            const followersDayResponse = await axios.get(`${META_API_BASE_URL}/${asset.metaAssetId}/insights`, {
                 params: {
-                    metric: 'views,reach,profile_views,follower_count',
+                    metric: 'follower_count',
+                    metric_type: 'time_series',
                     period: 'day',
                     since,
                     until,
@@ -217,55 +299,45 @@ const MetaSyncService = {
                 }
             });
 
-            if (!metricsResponse.data || !metricsResponse.data.data) {
-                throw new Error('Respuesta de API inválida al obtener métricas de Instagram');
-            }
-
-            // Procesar métricas
-            const metricsData = metricsResponse.data.data;
-            const processedDays = new Set();
             const statsByDate = {};
+            const followerValues = followersDayResponse.data?.data?.[0]?.values || [];
+            for (const value of followerValues) {
+                const date = new Date(value.end_time);
+                date.setHours(0, 0, 0, 0);
+                const dateStr = date.toISOString().split('T')[0];
 
-            for (const metric of metricsData) {
-                const metricName = metric.name;
-                const values = metric.values;
-
-                for (const value of values) {
-                    const date = new Date(value.end_time);
-                    date.setHours(0, 0, 0, 0);
-                    const dateStr = date.toISOString().split('T')[0];
-
-                    if (!statsByDate[dateStr]) {
-                        statsByDate[dateStr] = {
-                            clinica_id: asset.clinicaId,
-                            asset_id: asset.id,
-                            asset_type: asset.assetType,
-                            date: date
-                        };
-                    }
-
-                    // Mapear métricas de la API a campos de la base de datos
-                    switch (metricName) {
-                        case 'views':
-                            statsByDate[dateStr].impressions = value.value || 0;
-                            break;
-                        case 'reach':
-                            statsByDate[dateStr].reach = value.value || 0;
-                            break;
-                        case 'profile_views':
-                            statsByDate[dateStr].profile_visits = value.value || 0;
-                            break;
-                        case 'follower_count':
-                            statsByDate[dateStr].followers = value.value || 0;
-                            break;
-                    }
-
-                    processedDays.add(dateStr);
-                }
+                statsByDate[dateStr] = {
+                    clinica_id: asset.clinicaId,
+                    asset_id: asset.id,
+                    asset_type: asset.assetType,
+                    date: date,
+                    followers_day: value.value || 0
+                };
             }
 
-            // Guardar métricas acumuladas en la base de datos
-            for (const dateStr of Object.keys(statsByDate)) {
+            // Total actual de seguidores
+            const followersTotalResponse = await axios.get(`${META_API_BASE_URL}/${asset.metaAssetId}/insights`, {
+                params: {
+                    metric: 'followers_count',
+                    metric_type: 'total_value',
+                    period: 'day',
+                    access_token: accessToken
+                }
+            });
+
+            const currentFollowers = followersTotalResponse.data?.data?.[0]?.values?.[0]?.value || 0;
+
+            // Reconstruir historial de seguidores
+            const dates = Object.keys(statsByDate).sort();
+            let runningTotal = currentFollowers;
+            for (let i = dates.length - 1; i >= 0; i--) {
+                const dateStr = dates[i];
+                statsByDate[dateStr].followers = runningTotal;
+                runningTotal -= statsByDate[dateStr].followers_day || 0;
+            }
+
+            // Guardar en base de datos
+            for (const dateStr of dates) {
                 const statsData = statsByDate[dateStr];
 
                 let existingStats = await SocialStatsDaily.findOne({
@@ -280,41 +352,6 @@ const MetaSyncService = {
                     await existingStats.update(statsData);
                 } else {
                     await SocialStatsDaily.create(statsData);
-                }
-            }
-
-            // Obtener métricas de engagement (requiere una llamada separada)
-            const engagementResponse = await axios.get(`${META_API_BASE_URL}/${asset.metaAssetId}/insights`, {
-                params: {
-                    metric: 'engagement',
-                    period: 'day',
-                    since,
-                    until,
-                    access_token: accessToken
-                }
-            });
-
-            if (engagementResponse.data && engagementResponse.data.data) {
-                const engagementData = engagementResponse.data.data[0];
-                if (engagementData && engagementData.values) {
-                    for (const value of engagementData.values) {
-                        const date = new Date(value.end_time);
-                        date.setHours(0, 0, 0, 0);
-
-                        let existingStats = await SocialStatsDaily.findOne({
-                            where: {
-                                clinica_id: asset.clinicaId,
-                                asset_id: asset.id,
-                                date: date
-                            }
-                        });
-
-                        if (existingStats) {
-                            await existingStats.update({
-                                engagement: value.value || 0
-                            });
-                        }
-                    }
                 }
             }
 
@@ -333,7 +370,6 @@ const MetaSyncService = {
         }
     },
 
-    
     /**
      * Sincroniza publicaciones de Facebook
      * @param {Object} asset - Activo de Meta (página de Facebook)

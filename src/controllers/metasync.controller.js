@@ -683,10 +683,10 @@ async function syncInstagramMetrics(asset, accessToken, startDate, endDate) {
         const since = Math.floor(startDate.getTime() / 1000);
         const until = Math.floor(endDate.getTime() / 1000);
 
-        // Obtener métricas de alcance e interacción
-        const metricsResponse = await axios.get(`${META_API_BASE_URL}/${asset.metaAssetId}/insights`, {
+        // Obtener variación diaria de seguidores (últimos días disponibles)
+        const followersDayResponse = await axios.get(`${META_API_BASE_URL}/${asset.metaAssetId}/insights`, {
             params: {
-                metric: 'views,reach,profile_views',
+                metric: 'follower_count',
                 metric_type: 'time_series',
                 period: 'day',
                 since,
@@ -695,108 +695,45 @@ async function syncInstagramMetrics(asset, accessToken, startDate, endDate) {
             }
         });
 
-        // Obtener métricas de seguidores por separado
-        const followersResponse = await axios.get(`${META_API_BASE_URL}/${asset.metaAssetId}/insights`, {
-            params: {
-                metric: 'follower_count',
-                metric_type: 'total_value',
-                period: 'day',
-                since,
-                until,
-                access_token: accessToken
-            }
-        });
-
-        if (!metricsResponse.data || !metricsResponse.data.data) {
-            throw new Error('Respuesta de API inválida al obtener métricas de Instagram');
-        }
-
-        const metricsData = [
-            ...(metricsResponse.data.data || []),
-            ...(followersResponse.data?.data || [])
-        ];
-        
         const statsByDate = {};
+        const followerValues = followersDayResponse.data?.data?.[0]?.values || [];
+        for (const value of followerValues) {
+            const date = new Date(value.end_time);
+            date.setHours(0, 0, 0, 0);
+            const dateStr = date.toISOString().split('T')[0];
 
-        for (const metric of metricsData) {
-            const metricName = metric.name;
-            const values = Array.isArray(metric.values) ? metric.values : [];
-
-            for (const value of values) {
-                const date = new Date(value.end_time);
-                date.setHours(0, 0, 0, 0);
-                const dateStr = date.toISOString().split('T')[0];
-
-                if (!statsByDate[dateStr]) {
-                    statsByDate[dateStr] = {
-                        clinica_id: asset.clinicaId,
-                        asset_id: asset.id,
-                        asset_type: asset.assetType,
-                        date: date
-                    };
-                }
-
-                let metricValue = value.value;
-                if (metricValue && typeof metricValue === 'object') {
-                    metricValue = metricValue[metricName] ?? metricValue.value ?? 0;
-                }
-
-                // Mapear métricas de la API a campos de la base de datos
-                switch (metricName) {
-                    case 'views':
-                        statsByDate[dateStr].impressions = metricValue || 0;
-                        break;
-                    case 'reach':
-                        statsByDate[dateStr].reach = metricValue || 0;
-                        break;
-                    case 'profile_views':
-                        statsByDate[dateStr].profile_visits = metricValue || 0;
-                        break;
-                    case 'follower_count':
-                        statsByDate[dateStr].followers_day = metricValue || 0;
-                        break;
-                }
-            }
-        }
-
-        // Calcular variación diaria de seguidores
-        const followerDates = Object.keys(statsByDate).sort();
-        if (followerDates.length > 0) {
-            statsByDate[followerDates[0]].followers_day = 0;
-            for (let i = 1; i < followerDates.length; i++) {
-                const prevDate = followerDates[i - 1];
-                const currDate = followerDates[i];
-                const prevFollowers = statsByDate[prevDate].followers ?? 0;
-                const currFollowers = statsByDate[currDate].followers ?? 0;
-                statsByDate[currDate].followers_day = currFollowers - prevFollowers;
-            }
+            statsByDate[dateStr] = {
+                clinica_id: asset.clinicaId,
+                asset_id: asset.id,
+                asset_type: asset.assetType,
+                date: date,
+                followers_day: value.value || 0
+            };
         }
 
         // Obtener total actual de seguidores
-        const accountResponse = await axios.get(`${META_API_BASE_URL}/${asset.metaAssetId}`, {
+        const followersTotalResponse = await axios.get(`${META_API_BASE_URL}/${asset.metaAssetId}/insights`, {
             params: {
-                fields: 'followers_count',
+                metric: 'followers_count',
+                metric_type: 'total_value',
+                period: 'day',
                 access_token: accessToken
             }
         });
-        let currentFollowers = accountResponse.data?.followers_count || 0;
 
-        // Reconstruir historial de seguidores
+        const currentFollowers = followersTotalResponse.data?.data?.[0]?.values?.[0]?.value || 0;
+
+        // Reconstruir historial de seguidores usando la variación diaria
         const dates = Object.keys(statsByDate).sort();
-        if (dates.length > 0) {
-            let runningTotal = currentFollowers;
-            for (let i = dates.length - 1; i >= 0; i--) {
-                const dateStr = dates[i];
-                if (i === dates.length - 1) {
-                    statsByDate[dateStr].followers = runningTotal;
-                } else {
-                    const nextDate = dates[i + 1];
-                    runningTotal -= statsByDate[nextDate].followers_day || 0;
-                    statsByDate[dateStr].followers = runningTotal;
-                }
-            }
+        let runningTotal = currentFollowers;
+        for (let i = dates.length - 1; i >= 0; i--) {
+            const dateStr = dates[i];
+            statsByDate[dateStr].followers = runningTotal;
+            runningTotal -= statsByDate[dateStr].followers_day || 0;
+        }
 
-            for (const dateStr of Object.keys(statsByDate)) {
+        // Guardar/actualizar en la base de datos
+        for (const dateStr of dates) {
             const statsData = statsByDate[dateStr];
 
             let existingStats = await SocialStatsDaily.findOne({
@@ -811,42 +748,6 @@ async function syncInstagramMetrics(asset, accessToken, startDate, endDate) {
                 await existingStats.update(statsData);
             } else {
                 await SocialStatsDaily.create(statsData);
-            }
-        }
-    }
-
-        // Obtener métricas de engagement (requiere una llamada separada)
-        const engagementResponse = await axios.get(`${META_API_BASE_URL}/${asset.metaAssetId}/insights`, {
-            params: {
-                metric: 'engagement',
-                period: 'day',
-                since,
-                until,
-                access_token: accessToken
-            }
-        });
-
-        if (engagementResponse.data && engagementResponse.data.data) {
-            const engagementData = engagementResponse.data.data[0];
-            if (engagementData && engagementData.values) {
-                for (const value of engagementData.values) {
-                    const date = new Date(value.end_time);
-                    date.setHours(0, 0, 0, 0);
-
-                    let existingStats = await SocialStatsDaily.findOne({
-                        where: {
-                            clinica_id: asset.clinicaId,
-                            asset_id: asset.id,
-                            date: date
-                        }
-                    });
-
-                    if (existingStats) {
-                        await existingStats.update({
-                            engagement: value.value || 0
-                        });
-                    }
-                }
             }
         }
 

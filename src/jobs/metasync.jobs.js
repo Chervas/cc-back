@@ -378,63 +378,51 @@ async syncAssetMetrics(asset) {
  */
 async syncFacebookPageMetrics(asset) {
   console.log(`📘 Sincronizando métricas de Facebook: ${asset.metaAssetName}`);
-  
+
   try {
-    const yesterday = new Date();
-    yesterday.setDate(yesterday.getDate() - 1);
-    const dateStr = yesterday.toISOString().split('T')[0];
-
-    // Obtener métricas básicas de la página
-    const metricsUrl = `${process.env.META_API_BASE_URL}/${asset.metaAssetId}/insights`;
-    const params = new URLSearchParams({
-      metric: 'page_impressions,page_impressions_unique,page_views_total,page_fans',
-      period: 'day',
-      since: dateStr,
-      until: dateStr,
-      access_token: asset.pageAccessToken
-    });
-
-    const response = await axios.get(`${metricsUrl}?${params}`);
-    console.log(`✅ DEBUG: Respuesta recibida:`, JSON.stringify(response.data, null, 2));
-
-    const metrics = response.data.data;
-    let processed = 0;
-
-    // Procesar cada métrica recibida
-    for (const metric of metrics) {
-      const metricName = metric.name;
-      const values = metric.values || [];
-
-      console.log(`🔍 Procesando métrica: ${metricName}, valores:`, values);
-
-      for (const value of values) {
-        // Mapear métricas a columnas específicas
-        const metricMapping = {
-          'page_impressions': 'impressions',
-          'page_impressions_unique': 'reach',
-          'page_views_total': 'profile_visits',
-          'page_fans': 'followers'
-        };
-
-        const columnName = metricMapping[metricName];
-        if (columnName) {
-          const updateData = {
-            clinica_id: asset.clinicaId,        // ← AGREGADO
-            asset_id: asset.id,
-            date: value.end_time.split('T')[0],
-            asset_type: 'facebook_page',        // ← CORREGIDO
-            [columnName]: value.value || 0      // ← MAPEO DINÁMICO
-          };
-          
-          await SocialStatsDaily.upsert(updateData);
-          console.log(`✅ Guardado: ${metricName} = ${value.value} en columna ${columnName}`);
-          processed++;
+    // Obtener número total de seguidores actuales
+    const response = await axios.get(
+      `${process.env.META_API_BASE_URL}/${asset.metaAssetId}`,
+      {
+        params: {
+          fields: 'fan_count',
+          access_token: asset.pageAccessToken
         }
       }
+    );
+
+    const fanCount = response.data?.fan_count;
+    if (fanCount === undefined) {
+      throw new Error('Respuesta de API inválida al obtener fan_count');
     }
 
-    console.log(`✅ Facebook ${asset.metaAssetName}: ${processed} métricas guardadas`);
-    return processed;
+    const date = new Date();
+    date.setHours(0, 0, 0, 0);
+
+    const prevDate = new Date(date);
+    prevDate.setDate(prevDate.getDate() - 1);
+
+    const prevStats = await SocialStatsDaily.findOne({
+      where: {
+        clinica_id: asset.clinicaId,
+        asset_id: asset.id,
+        date: prevDate
+      }
+    });
+
+    const followersDay = fanCount - (prevStats ? prevStats.followers : 0);
+
+    await SocialStatsDaily.upsert({
+      clinica_id: asset.clinicaId,
+      asset_id: asset.id,
+      asset_type: 'facebook_page',
+      date: date.toISOString().split('T')[0],
+      followers: fanCount,
+      followers_day: followersDay
+    });
+
+    console.log(`✅ Facebook ${asset.metaAssetName}: métricas guardadas`);
+    return 1;
 
   } catch (error) {
     console.error(`❌ Error sincronizando Facebook ${asset.metaAssetName}:`, error.message);
@@ -451,44 +439,69 @@ async syncFacebookPageMetrics(asset) {
    */
   async syncInstagramMetrics(asset) {
   console.log(`📷 Sincronizando métricas de Instagram: ${asset.metaAssetName}`);
-  
+
   try {
-    const yesterday = new Date();
-    yesterday.setDate(yesterday.getDate() - 1);
-    const dateStr = yesterday.toISOString().split('T')[0];
+    const until = Math.floor(Date.now() / 1000);
+    const since = until - 30 * 24 * 60 * 60; // últimos 30 días
 
-    // Obtener métricas de Instagram Business
-    const metricsUrl = `${process.env.META_API_BASE_URL}/${asset.metaAssetId}/insights`;
-    const params = new URLSearchParams({
-      metric: 'views,reach,profile_views,follower_count',
-      period: 'day',
-      since: dateStr,
-      until: dateStr,
-      access_token: asset.pageAccessToken
-    });
+    // Variación diaria de seguidores
+    const followersDayResp = await axios.get(
+      `${process.env.META_API_BASE_URL}/${asset.metaAssetId}/insights`,
+      {
+        params: {
+          metric: 'follower_count',
+          metric_type: 'time_series',
+          period: 'day',
+          since,
+          until,
+          access_token: asset.pageAccessToken
+        }
+      }
+    );
 
-    const response = await axios.get(`${metricsUrl}?${params}`);
-    const metrics = response.data.data;
+    const statsByDate = {};
+    const followerValues = followersDayResp.data?.data?.[0]?.values || [];
+    for (const value of followerValues) {
+      const date = new Date(value.end_time);
+      date.setHours(0, 0, 0, 0);
+      const dateStr = date.toISOString().split('T')[0];
+
+      statsByDate[dateStr] = {
+        asset_id: asset.id,
+        clinica_id: asset.clinicaId,
+        asset_type: 'instagram_business',
+        date: dateStr,
+        followers_day: value.value || 0
+      };
+    }
+
+    // Total actual de seguidores
+    const followersTotalResp = await axios.get(
+      `${process.env.META_API_BASE_URL}/${asset.metaAssetId}/insights`,
+      {
+        params: {
+          metric: 'followers_count',
+          metric_type: 'total_value',
+          period: 'day',
+          access_token: asset.pageAccessToken
+        }
+      }
+    );
+
+    const currentFollowers = followersTotalResp.data?.data?.[0]?.values?.[0]?.value || 0;
+
+    const dates = Object.keys(statsByDate).sort();
+    let runningTotal = currentFollowers;
+    for (let i = dates.length - 1; i >= 0; i--) {
+      const dateStr = dates[i];
+      statsByDate[dateStr].followers = runningTotal;
+      runningTotal -= statsByDate[dateStr].followers_day || 0;
+    }
 
     let processed = 0;
-
-    // Procesar cada métrica
-    for (const metric of metrics) {
-      const metricName = metric.name;
-      const values = metric.values || [];
-
-      for (const value of values) {
-        // Guardar en SocialStatsDaily
-        await SocialStatsDaily.upsert({
-          asset_id: asset.id,
-          date: value.end_time.split('T')[0],
-          metric_name: metricName,
-          metric_value: value.value || 0,
-          platform: 'instagram',
-          asset_type: 'instagram_business'
-        });
-        processed++;
-      }
+    for (const dateStr of dates) {
+      await SocialStatsDaily.upsert(statsByDate[dateStr]);
+      processed++;
     }
 
     console.log(`✅ Instagram ${asset.metaAssetName}: ${processed} métricas guardadas`);
