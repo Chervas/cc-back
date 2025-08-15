@@ -768,7 +768,6 @@ async function syncInstagramMetrics(asset, accessToken, startDate, endDate) {
             }
         }
 
-
         // Sincronizar publicaciones
         await syncInstagramPosts(asset, accessToken, startDate, endDate);
 
@@ -1330,4 +1329,7 @@ function procesarMetricasPorPlataforma(metricas) {
 
   return plataformas;
 }
+
+// Export utilidades
+exports.procesarMetricasPorPlataforma = procesarMetricasPorPlataforma;
 
