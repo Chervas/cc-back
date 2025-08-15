@@ -683,10 +683,22 @@ async function syncInstagramMetrics(asset, accessToken, startDate, endDate) {
         const since = Math.floor(startDate.getTime() / 1000);
         const until = Math.floor(endDate.getTime() / 1000);
 
-        // Obtener métricas diarias
+        // Obtener métricas de alcance e interacción
         const metricsResponse = await axios.get(`${META_API_BASE_URL}/${asset.metaAssetId}/insights`, {
             params: {
-                metric: 'views,reach,profile_views,follower_count',
+                metric: 'views,reach,profile_views',
+                metric_type: 'time_series',
+                period: 'day',
+                since,
+                until,
+                access_token: accessToken
+            }
+        });
+
+        // Obtener métricas de seguidores por separado
+        const followersResponse = await axios.get(`${META_API_BASE_URL}/${asset.metaAssetId}/insights`, {
+            params: {
+                metric: 'follower_count',
                 metric_type: 'total_value',
                 period: 'day',
                 since,
@@ -699,9 +711,11 @@ async function syncInstagramMetrics(asset, accessToken, startDate, endDate) {
             throw new Error('Respuesta de API inválida al obtener métricas de Instagram');
         }
 
-         // Procesar métricas
-        const metricsData = metricsResponse.data.data;
-        const processedDays = new Set();
+        const metricsData = [
+            ...(metricsResponse.data.data || []),
+            ...(followersResponse.data?.data || [])
+        ];
+        
         const statsByDate = {};
 
         for (const metric of metricsData) {
@@ -739,9 +753,22 @@ async function syncInstagramMetrics(asset, accessToken, startDate, endDate) {
                         statsByDate[dateStr].profile_visits = metricValue || 0;
                         break;
                     case 'follower_count':
-                        statsByDate[dateStr].followers = metricValue || 0;
+                        statsByDate[dateStr].followers_day = metricValue || 0;
                         break;
                 }
+            }
+        }
+
+        // Calcular variación diaria de seguidores
+        const followerDates = Object.keys(statsByDate).sort();
+        if (followerDates.length > 0) {
+            statsByDate[followerDates[0]].followers_day = 0;
+            for (let i = 1; i < followerDates.length; i++) {
+                const prevDate = followerDates[i - 1];
+                const currDate = followerDates[i];
+                const prevFollowers = statsByDate[prevDate].followers ?? 0;
+                const currFollowers = statsByDate[currDate].followers ?? 0;
+                statsByDate[currDate].followers_day = currFollowers - prevFollowers;
             }
         }
 
