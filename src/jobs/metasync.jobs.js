@@ -16,6 +16,7 @@
 const cron = require('node-cron');
 const axios = require('axios');
 const { Op } = require('sequelize');
+const { syncAdAccountMetrics } = require('../controllers/metasync.controller');
 const META_API_BASE_URL = process.env.META_API_BASE_URL || 'https://graph.facebook.com/v23.0';
 const url = `${META_API_BASE_URL}/...`;
 
@@ -36,16 +37,34 @@ class MetaSyncJobs {
     this.isInitialized = false;
     this.isRunning = false;
     
+    // Descripciones por job (usadas por el monitor/UX)
+    this.jobDescriptions = {
+      metricsSync: 'Sincroniza orgánico (Facebook/Instagram): seguidores, posts y agregados diarios por asset.',
+      adsSync: 'Sincroniza Ads (Marketing API) con ventana reciente: entidades, insights diarios y actions.',
+      adsBackfill: 'Backfill semanal de Ads con ventana extendida para consolidar atribución y cierres.',
+      tokenValidation: 'Valida tokens (usuario/página) y registra estado/errores recientes.',
+      dataCleanup: 'Limpia registros antiguos según retenciones configuradas (logs, validaciones, métricas).',
+      healthCheck: 'Comprueba salud de BD, disponibilidad de Meta API y actividad reciente.'
+    };
+
     // Configuración desde variables de entorno
     this.config = {
       schedules: {
         metricsSync: process.env.JOBS_METRICS_SCHEDULE || '0 2 * * *',
         tokenValidation: process.env.JOBS_TOKEN_VALIDATION_SCHEDULE || '0 */6 * * *',
         dataCleanup: process.env.JOBS_CLEANUP_SCHEDULE || '0 3 * * 0',
-        healthCheck: process.env.JOBS_HEALTH_CHECK_SCHEDULE || '0 * * * *'
+        healthCheck: process.env.JOBS_HEALTH_CHECK_SCHEDULE || '0 * * * *',
+        adsSync: process.env.JOBS_ADS_SCHEDULE || '30 3 * * *',
+        adsBackfill: process.env.JOBS_ADS_BACKFILL_SCHEDULE || '0 4 * * 0'
       },
       timezone: process.env.JOBS_TIMEZONE || 'Europe/Madrid',
       autoStart: process.env.JOBS_AUTO_START === 'true',
+      ads: {
+        initialDays: parseInt(process.env.ADS_SYNC_INITIAL_DAYS || '30', 10),
+        recentDays: parseInt(process.env.ADS_SYNC_RECENT_DAYS || '7', 10),
+        backfillDays: parseInt(process.env.ADS_SYNC_BACKFILL_DAYS || '28', 10),
+        betweenAccountsSleepMs: parseInt(process.env.ADS_SYNC_BETWEEN_ACCOUNTS_SLEEP_MS || '60000', 10)
+      },
       dataRetention: {
         syncLogs: parseInt(process.env.JOBS_SYNC_LOGS_RETENTION) || 90,
         tokenValidations: parseInt(process.env.JOBS_TOKEN_VALIDATIONS_RETENTION) || 30,
@@ -83,6 +102,8 @@ class MetaSyncJobs {
       this.registerJob('tokenValidation', this.config.schedules.tokenValidation, () => this.executeTokenValidation());
       this.registerJob('dataCleanup', this.config.schedules.dataCleanup, () => this.executeDataCleanup());
       this.registerJob('healthCheck', this.config.schedules.healthCheck, () => this.executeHealthCheck());
+      this.registerJob('adsSync', this.config.schedules.adsSync, () => this.executeAdsSync());
+      this.registerJob('adsBackfill', this.config.schedules.adsBackfill, () => this.executeAdsBackfill());
 
       this.isInitialized = true;
       
@@ -126,7 +147,8 @@ class MetaSyncJobs {
       schedule,
       handler,
       lastExecution: null,
-      status: 'registered'
+      status: 'registered',
+      description: this.jobDescriptions[name] || ''
     });
 
     console.log(`📝 Job '${name}' registrado con programación: ${schedule} (${this.config.timezone})`);
@@ -343,7 +365,143 @@ class MetaSyncJobs {
 
     throw error;
   }
-}
+  }
+
+  /**
+   * Job: Sincronización diaria de Ads (ventana reciente)
+   */
+  async executeAdsSync() {
+    console.log('📢 Ejecutando adsSync (ventana reciente)...');
+
+    const syncLog = await SyncLog.create({
+      job_type: 'ads_sync',
+      status: 'running',
+      start_time: new Date(),
+      records_processed: 0
+    });
+
+    const report = { accounts: 0, processed: 0, errors: [], totals: { entities: 0, insightsRows: 0, actionsRows: 0, linkedPromotions: 0 } };
+    try {
+      const activeAdAccounts = await ClinicMetaAsset.findAll({
+        where: { isActive: true, assetType: 'ad_account' },
+        include: [{ model: MetaConnection, as: 'metaConnection' }]
+      });
+
+      console.log(`🧾 Cuentas publicitarias activas: ${activeAdAccounts.length}`);
+      report.accounts = activeAdAccounts.length;
+
+      // Ventana: últimos N días hasta ayer
+      // Determinar ventana por asset (inicial vs reciente)
+      const end = new Date(); end.setHours(0,0,0,0); end.setDate(end.getDate() - 1);
+
+      for (const asset of activeAdAccounts) {
+        try {
+          const accessToken = asset.pageAccessToken || asset.metaConnection?.accessToken;
+          if (!accessToken) { throw new Error('Sin access token para ad_account'); }
+          // Detectar si es primera vez (sin logs previos)
+          let days = this.config.ads.recentDays;
+          try {
+            const prev = await SyncLog.count({ where: { asset_id: asset.id, job_type: { [Op.in]: ['ads_sync','ads_backfill'] }, status: 'completed' } });
+            if (!prev) days = this.config.ads.initialDays;
+          } catch (_) { /* no-op */ }
+          const start = new Date(end); start.setDate(start.getDate() - (days - 1));
+          console.log(`▶️ AdsSync ${asset.metaAssetName} (${asset.metaAssetId}) ${start.toISOString().slice(0,10)}..${end.toISOString().slice(0,10)}`);
+          const result = await syncAdAccountMetrics(asset, accessToken, start, end);
+          report.processed += 1;
+          if (result) {
+            report.totals.entities += result.entities || 0;
+            report.totals.insightsRows += result.insightsRows || 0;
+            report.totals.actionsRows += result.actionsRows || 0;
+            report.totals.linkedPromotions += result.linkedPromotions || 0;
+          }
+          // Espera entre cuentas para repartir carga
+          if (this.config.ads.betweenAccountsSleepMs > 0) {
+            await new Promise(r => setTimeout(r, this.config.ads.betweenAccountsSleepMs));
+          }
+        } catch (err) {
+          console.error('❌ Error en adsSync para asset:', asset.id, err.message);
+          report.errors.push({ assetId: asset.id, name: asset.metaAssetName, error: err.message });
+        }
+      }
+
+      await syncLog.update({
+        status: 'completed',
+        end_time: new Date(),
+        records_processed: report.processed,
+        status_report: report
+      });
+      console.log('✅ adsSync completado', report);
+      return { status: 'completed', ...report };
+    } catch (error) {
+      await syncLog.update({ status: 'failed', end_time: new Date(), error_message: error.message, status_report: report });
+      console.error('❌ Error en adsSync:', error);
+      throw error;
+    }
+  }
+
+  /**
+   * Job: Backfill semanal de Ads (ventana más larga)
+   */
+  async executeAdsBackfill() {
+    console.log('📢 Ejecutando adsBackfill (ventana extendida)...');
+    const syncLog = await SyncLog.create({
+      job_type: 'ads_backfill',
+      status: 'running',
+      start_time: new Date(),
+      records_processed: 0
+    });
+
+    const report = { accounts: 0, processed: 0, errors: [], totals: { entities: 0, insightsRows: 0, actionsRows: 0, linkedPromotions: 0 } };
+    try {
+      const activeAdAccounts = await ClinicMetaAsset.findAll({
+        where: { isActive: true, assetType: 'ad_account' },
+        include: [{ model: MetaConnection, as: 'metaConnection' }]
+      });
+
+      console.log(`🧾 Cuentas publicitarias activas: ${activeAdAccounts.length}`);
+      report.accounts = activeAdAccounts.length;
+
+      // Ventana: últimos M días hasta ayer
+      const days = this.config.ads.backfillDays;
+      const end = new Date(); end.setHours(0,0,0,0); end.setDate(end.getDate() - 1);
+      const start = new Date(end); start.setDate(start.getDate() - (days - 1));
+
+      for (const asset of activeAdAccounts) {
+        try {
+          const accessToken = asset.pageAccessToken || asset.metaConnection?.accessToken;
+          if (!accessToken) { throw new Error('Sin access token para ad_account'); }
+          console.log(`▶️ AdsBackfill ${asset.metaAssetName} (${asset.metaAssetId}) ${start.toISOString().slice(0,10)}..${end.toISOString().slice(0,10)}`);
+          const result = await syncAdAccountMetrics(asset, accessToken, start, end);
+          report.processed += 1;
+          if (result) {
+            report.totals.entities += result.entities || 0;
+            report.totals.insightsRows += result.insightsRows || 0;
+            report.totals.actionsRows += result.actionsRows || 0;
+            report.totals.linkedPromotions += result.linkedPromotions || 0;
+          }
+          if (this.config.ads.betweenAccountsSleepMs > 0) {
+            await new Promise(r => setTimeout(r, this.config.ads.betweenAccountsSleepMs));
+          }
+        } catch (err) {
+          console.error('❌ Error en adsBackfill para asset:', asset.id, err.message);
+          report.errors.push({ assetId: asset.id, name: asset.metaAssetName, error: err.message });
+        }
+      }
+
+      await syncLog.update({
+        status: 'completed',
+        end_time: new Date(),
+        records_processed: report.processed,
+        status_report: report
+      });
+      console.log('✅ adsBackfill completado', report);
+      return { status: 'completed', ...report };
+    } catch (error) {
+      await syncLog.update({ status: 'failed', end_time: new Date(), error_message: error.message, status_report: report });
+      console.error('❌ Error en adsBackfill:', error);
+      throw error;
+    }
+  }
 
 
   //  Usar la variable extraída:
@@ -524,7 +682,7 @@ async syncFacebookPageMetrics(asset) {
     });
 
     try {
-      // Obtener todos los assets con tokens
+      // Obtener todos los assets con tokens de página
       const assets = await ClinicMetaAsset.findAll({
         where: {
           pageAccessToken: { [Op.not]: null }
@@ -540,13 +698,17 @@ async syncFacebookPageMetrics(asset) {
         try {
           const isValid = await this.validateToken(asset.pageAccessToken, asset.metaAssetId);
           
-          // Registrar resultado de validación
-          await TokenValidation.create({
-            asset_id: asset.id,
-            token_valid: isValid,
-            validated_at: new Date(),
-            error_message: isValid ? null : 'Token inválido o expirado'
-          });
+          // Registrar resultado de validación en TokenValidations (por conexión)
+          try {
+            await TokenValidations.create({
+              connection_id: asset.metaConnectionId,
+              validation_date: new Date(),
+              status: isValid ? 'valid' : 'invalid',
+              error_message: isValid ? null : `Asset ${asset.id}: token de página inválido o expirado`
+            });
+          } catch (logErr) {
+            console.error('❌ Error registrando validación de token:', logErr.message);
+          }
 
           if (isValid) {
             validCount++;
@@ -697,9 +859,9 @@ async syncFacebookPageMetrics(asset) {
     const cutoffDate = new Date();
     cutoffDate.setDate(cutoffDate.getDate() - this.config.dataRetention.tokenValidations);
     
-    const deleted = await TokenValidation.destroy({
+    const deleted = await TokenValidations.destroy({
       where: {
-        created_at: { [Op.lt]: cutoffDate }
+        validation_date: { [Op.lt]: cutoffDate }
       }
     });
 
@@ -890,7 +1052,8 @@ try {
             schedule: data.schedule,
             status: data.status,
             lastExecution: data.lastExecution,
-            lastError: data.lastError
+            lastError: data.lastError,
+            description: this.jobDescriptions[name] || ''
           }
         ])
       )
@@ -906,7 +1069,9 @@ try {
       timezone: this.config.timezone,
       autoStart: this.config.autoStart,
       dataRetention: this.config.dataRetention,
-      retries: this.config.retries
+      retries: this.config.retries,
+      jobDescriptions: this.jobDescriptions,
+      validationNotes: 'Validación: /debug_token para tokens de usuario; tokens de página permanentes se contabilizan. Retenciones y recuentos diarios en SyncLogs. Rate-limit controlado por cabeceras X-*Usage con pausa hasta la siguiente hora si se supera el umbral.'
     };
   }
 }
@@ -918,4 +1083,3 @@ module.exports = {
   metaSyncJobs,
   MetaSyncJobs
 };
-

@@ -223,4 +223,3 @@ module.exports = (sequelize, DataTypes) => {
 
     return SocialPostStatsDaily;
 };
-

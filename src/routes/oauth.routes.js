@@ -387,44 +387,70 @@ router.post('/meta/map-assets', async (req, res) => {
             return res.status(404).json({ message: 'No hay conexión Meta activa para este usuario.' });
         }
 
-        // ✅ CORREGIDO: Eliminar TODOS los mapeos existentes para esta clínica antes de crear los nuevos
-        // Esto asegura que los nuevos mapeos reemplacen completamente a los anteriores
-        await ClinicMetaAsset.destroy({
-            where: {
-                clinicaId: clinicaId,
-                metaConnectionId: metaConnection.id
-            }
+        // Nueva lógica: NO borrar mapeos. Actualizar/crear preservando IDs para no romper FK de métricas.
+        const createdOrUpdated = [];
+        const selectedKeySet = new Set();
+
+        // Traer mapeos actuales de la clínica del mismo usuario
+        const existing = await ClinicMetaAsset.findAll({
+            where: { clinicaId, metaConnectionId: metaConnection.id }
         });
 
-        console.log(`🔄 Mapeos anteriores eliminados para clínica ${clinicaId}. Creando nuevos mapeos...`);
-
-        const createdAssets = [];
+        // Actualizar o crear assets seleccionados
         for (const asset of selectedAssets) {
-            const newAsset = await ClinicMetaAsset.create({
-                clinicaId: clinicaId,
-                metaConnectionId: metaConnection.id,
-                assetType: asset.type,
-                metaAssetId: asset.id,
-                metaAssetName: asset.name,
-                pageAccessToken: asset.pageAccessToken || null, // Guardar token de página si existe
-                isActive: asset.isActive || true 
-            });
-            createdAssets.push(newAsset);
+            const key = `${asset.type}|${asset.id}`;
+            selectedKeySet.add(key);
+
+            const found = existing.find(a => a.assetType === asset.type && a.metaAssetId === String(asset.id));
+            if (found) {
+                await found.update({
+                    metaAssetName: asset.name,
+                    pageAccessToken: asset.pageAccessToken || found.pageAccessToken || null,
+                    assetAvatarUrl: asset.assetAvatarUrl || found.assetAvatarUrl || null,
+                    isActive: true
+                });
+                createdOrUpdated.push(found);
+            } else {
+                const newAsset = await ClinicMetaAsset.create({
+                    clinicaId,
+                    metaConnectionId: metaConnection.id,
+                    assetType: asset.type,
+                    metaAssetId: asset.id,
+                    metaAssetName: asset.name,
+                    assetAvatarUrl: asset.assetAvatarUrl || null,
+                    pageAccessToken: asset.pageAccessToken || null,
+                    isActive: true
+                });
+                createdOrUpdated.push(newAsset);
+            }
         }
 
-        console.log(`✅ ${createdAssets.length} nuevos mapeos creados para clínica ${clinicaId}`);
-        // Desencadenar sincronización histórica en segundo plano
+        // Desactivar los que ya no estén seleccionados (no eliminar)
+        const toDeactivate = existing.filter(a => !selectedKeySet.has(`${a.assetType}|${a.metaAssetId}`) && a.isActive);
+        if (toDeactivate.length) {
+            await ClinicMetaAsset.update({ isActive: false }, {
+                where: {
+                    id: toDeactivate.map(a => a.id)
+                }
+            });
+        }
+
+        console.log(`✅ Mapeo actualizado para clínica ${clinicaId}: ${createdOrUpdated.length} activos activos, ${toDeactivate.length} inactivos`);
+
+        // Disparar sincronización inicial SOLO del día actual (sin histórico)
         try {
-            triggerHistoricalSync(clinicaId);
+            const { triggerInitialSync } = require('../controllers/metasync.controller');
+            triggerInitialSync(clinicaId);
         } catch (err) {
-            console.error('⚠️ No se pudo iniciar la sincronización histórica:', err);
+            console.error('⚠️ No se pudo iniciar la sincronización inicial del día:', err);
         }
 
         res.status(200).json({
             message: 'Activos de Meta mapeados correctamente.',
-            assets: createdAssets,
-            replacedMappings: true,
-            totalNewMappings: createdAssets.length
+            assets: createdOrUpdated,
+            replacedMappings: false,
+            totalActiveMappings: createdOrUpdated.length,
+            totalDeactivated: toDeactivate.length
         });
 
     } catch (error) {
@@ -850,4 +876,3 @@ function generateAssetUrl(assetType, metaAssetId) {
             return '#';
     }
 }
-

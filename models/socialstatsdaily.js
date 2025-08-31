@@ -46,6 +46,19 @@ module.exports = (sequelize, DataTypes) => {
             type: DataTypes.INTEGER,
             defaultValue: 0
         },
+        // Agregados diarios solicitados por CSV
+        reach_total: { type: DataTypes.INTEGER, defaultValue: 0 },
+        views: { type: DataTypes.INTEGER, defaultValue: 0 },
+        likes: { type: DataTypes.INTEGER, defaultValue: 0 },
+        reactions: { type: DataTypes.INTEGER, defaultValue: 0 },
+        posts_count: { type: DataTypes.INTEGER, defaultValue: 0 },
+        // Ads por plataforma
+        reach_instagram: { type: DataTypes.INTEGER, defaultValue: 0 },
+        reach_facebook: { type: DataTypes.INTEGER, defaultValue: 0 },
+        impressions_instagram: { type: DataTypes.INTEGER, defaultValue: 0 },
+        impressions_facebook: { type: DataTypes.INTEGER, defaultValue: 0 },
+        spend_instagram: { type: DataTypes.DECIMAL(12, 2), defaultValue: 0 },
+        spend_facebook: { type: DataTypes.DECIMAL(12, 2), defaultValue: 0 },
         followers: {
             type: DataTypes.INTEGER,
             defaultValue: 0
@@ -235,4 +248,3 @@ module.exports = (sequelize, DataTypes) => {
 
     return SocialStatsDaily;
 };
-

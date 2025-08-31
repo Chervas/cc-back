@@ -734,7 +734,7 @@ const MetaSyncService = {
                 connection_id: connectionId,
                 status: isValid ? 'valid' : 'invalid',
                 error_message: errorMessage,
-                validated_at: new Date()
+                validation_date: new Date()
             });
             
             console.log(`✅ Validación de token completada: ${isValid ? 'válido' : 'inválido'}`);
@@ -742,7 +742,7 @@ const MetaSyncService = {
             return {
                 status: isValid ? 'valid' : 'invalid',
                 errorMessage,
-                validatedAt: validation.validated_at
+                validatedAt: validation.validation_date
             };
         } catch (error) {
             console.error('❌ Error en validateToken:', error);
@@ -752,7 +752,7 @@ const MetaSyncService = {
                 connection_id: connectionId,
                 status: 'invalid',
                 error_message: error.message,
-                validated_at: new Date()
+                validation_date: new Date()
             });
             
             throw error;
@@ -761,4 +761,3 @@ const MetaSyncService = {
 };
 
 module.exports = MetaSyncService;
-

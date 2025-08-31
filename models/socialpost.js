@@ -60,7 +60,18 @@ module.exports = (sequelize, DataTypes) => {
             type: DataTypes.DATE,
             allowNull: true,
             comment: 'Fecha de publicación'
-        }
+        },
+        // Métricas lifetime (CSV)
+        reactions_and_likes: { type: DataTypes.INTEGER, defaultValue: 0 },
+        comments_count: { type: DataTypes.INTEGER, defaultValue: 0 },
+        shares_count: { type: DataTypes.INTEGER, defaultValue: 0 },
+        saved_count: { type: DataTypes.INTEGER, defaultValue: 0 },
+        views_count: { type: DataTypes.INTEGER, defaultValue: 0 },
+        avg_watch_time_ms: { type: DataTypes.INTEGER, defaultValue: 0 },
+        media_type: { type: DataTypes.STRING(32), allowNull: true },
+        reactions_breakdown_json: { type: DataTypes.JSON, allowNull: true },
+        insights_synced_at: { type: DataTypes.DATE, allowNull: true },
+        metrics_source_version: { type: DataTypes.STRING(16), allowNull: true }
     }, {
         tableName: 'SocialPosts', // Actualizado a PascalCase
         timestamps: true,
@@ -233,4 +244,3 @@ module.exports = (sequelize, DataTypes) => {
 
     return SocialPosts;
 };
-

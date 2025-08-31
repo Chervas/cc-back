@@ -67,7 +67,8 @@ function getJobsSafeInfo() {
       schedule: jobData.schedule,
       status: jobData.status,
       lastExecution: jobData.lastExecution,
-      lastError: jobData.lastError || null
+      lastError: jobData.lastError || null,
+      description: metaSyncJobs.jobDescriptions?.[name] || ''
     };
   }
   
@@ -91,7 +92,7 @@ exports.getJobsStatus = async (req, res) => {
       attributes: ['job_type', 'status', 'start_time', 'end_time', 'records_processed', 'error_message'],
       where: {
         job_type: {
-          [Op.in]: ['automated_metrics_sync', 'manual_job_execution', 'health_check', 'token_validation', 'data_cleanup']
+          [Op.in]: ['automated_metrics_sync', 'manual_job_execution', 'health_check', 'token_validation', 'data_cleanup', 'ads_sync', 'ads_backfill']
         }
       },
       order: [['created_at', 'DESC']],
@@ -140,7 +141,8 @@ exports.getJobsStatus = async (req, res) => {
       systemRunning: systemStatus.running,
       systemInitialized: systemStatus.initialized,
       jobsCount: systemStatus.jobsCount,
-      jobs: getJobsSafeInfo(), // CORREGIDO: usar función segura
+      jobs: getJobsSafeInfo(), // incluye description
+      jobDescriptions: metaSyncJobs.jobDescriptions,
       todayStats,
       recentLogs: recentLogs.map(log => ({
         jobType: log.job_type,
@@ -478,7 +480,8 @@ exports.getJobsConfiguration = async (req, res) => {
         initialized: metaSyncJobs.isInitialized,
         running: metaSyncJobs.isRunning,
         jobsCount: metaSyncJobs.jobs.size
-      }
+      },
+      jobDescriptions: metaSyncJobs.jobDescriptions
     });
 
   } catch (error) {
@@ -544,4 +547,3 @@ function getScheduleDescription(cronExpression) {
   
   return descriptions[cronExpression] || `Programación personalizada: ${cronExpression}`;
 }
-
