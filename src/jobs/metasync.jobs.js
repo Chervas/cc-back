@@ -645,21 +645,59 @@ async syncFacebookPageMetrics(asset) {
 
     const currentFollowers = followersTotalResp.data?.followers_count || 0;
 
-    const dates = Object.keys(statsByDate).sort();
-    let runningTotal = currentFollowers;
-    for (let i = dates.length - 1; i >= 0; i--) {
-      const dateStr = dates[i];
-      statsByDate[dateStr].followers = runningTotal;
-      runningTotal -= statsByDate[dateStr].followers_day || 0;
+    // Reconstruir followers (solo si hay serie follower_count)
+    const followerDates = Object.keys(statsByDate).sort();
+    if (followerDates.length > 0) {
+      let runningTotal = currentFollowers;
+      for (let i = followerDates.length - 1; i >= 0; i--) {
+        const dateStr = followerDates[i];
+        statsByDate[dateStr].followers = runningTotal;
+        runningTotal -= statsByDate[dateStr].followers_day || 0;
+      }
+    }
+
+    // Alcance diario a nivel de cuenta (IG User Insights)
+    try {
+      const reachResp = await axios.get(
+        `${process.env.META_API_BASE_URL}/${asset.metaAssetId}/insights`,
+        {
+          params: {
+            metric: 'reach',
+            period: 'day',
+            since,
+            until,
+            access_token: asset.pageAccessToken
+          }
+        }
+      );
+      const reachValues = reachResp.data?.data?.[0]?.values || [];
+      for (const r of reachValues) {
+        const d = new Date(r.end_time);
+        d.setHours(0, 0, 0, 0);
+        const dStr = d.toISOString().split('T')[0];
+        if (!statsByDate[dStr]) {
+          statsByDate[dStr] = {
+            asset_id: asset.id,
+            clinica_id: asset.clinicaId,
+            asset_type: 'instagram_business',
+            date: dStr
+          };
+        }
+        statsByDate[dStr].reach = r.value || 0;
+      }
+      console.log(`✅ Instagram ${asset.metaAssetName}: reach diario obtenido (${reachValues.length} días)`);
+    } catch (e) {
+      console.warn(`⚠️ IG reach (user insights) no disponible:`, e.response?.data || e.message);
     }
 
     let processed = 0;
-    for (const dateStr of dates) {
+    const allDates = Object.keys(statsByDate).sort();
+    for (const dateStr of allDates) {
       await SocialStatsDaily.upsert(statsByDate[dateStr]);
       processed++;
     }
 
-    console.log(`✅ Instagram ${asset.metaAssetName}: ${processed} métricas guardadas`);
+    console.log(`✅ Instagram ${asset.metaAssetName}: ${processed} métricas guardadas (followers/alcance)`);
     return processed;
 
   } catch (error) {

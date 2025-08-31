@@ -4,10 +4,20 @@ const { Clinica, GrupoClinica, Servicio } = require('../../models');
 const bcrypt = require('bcryptjs');
 const { Op } = require('sequelize');
 
-// Obtener todas las clínicas
+// Obtener todas las clínicas (con filtro opcional por clinica_id: id único, CSV o 'all')
 exports.getAllClinicas = async (req, res) => {
     try {
+        const { clinica_id } = req.query;
+        const where = {};
+        if (clinica_id && clinica_id !== 'all') {
+            if (typeof clinica_id === 'string' && clinica_id.includes(',')) {
+                where.id_clinica = { [Op.in]: clinica_id.split(',').map(id => parseInt(id)).filter(n => !isNaN(n)) };
+            } else {
+                where.id_clinica = clinica_id;
+            }
+        }
         const clinicas = await Clinica.findAll({
+            where,
             order: [['nombre_clinica', 'ASC']]
         });
         res.json(clinicas);

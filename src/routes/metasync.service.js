@@ -353,6 +353,39 @@ const MetaSyncService = {
                 }
             }
 
+            // IG reach (orgánico) diario a nivel de cuenta
+            try {
+                const reachResp = await axios.get(`${META_API_BASE_URL}/${asset.metaAssetId}/insights`, {
+                    params: {
+                        metric: 'reach',
+                        period: 'day',
+                        since,
+                        until,
+                        access_token: accessToken
+                    }
+                });
+                const values = reachResp.data?.data?.[0]?.values || [];
+                for (const item of values) {
+                    const end = new Date(item.end_time);
+                    const d = new Date(end);
+                    d.setDate(d.getDate() - 1);
+                    d.setHours(0,0,0,0);
+                    const existing = await SocialStatsDaily.findOne({ where: { clinica_id: asset.clinicaId, asset_id: asset.id, date: d } });
+                    const payload = {
+                        clinica_id: asset.clinicaId,
+                        asset_id: asset.id,
+                        asset_type: asset.assetType,
+                        date: d,
+                        reach: item.value || 0,
+                        reach_total: item.value || 0
+                    };
+                    if (existing) await existing.update(payload); else await SocialStatsDaily.create(payload);
+                }
+                console.log(`✅ IG reach diario (servicio) obtenido: ${values.length} días`);
+            } catch (e) {
+                console.warn('⚠️ IG reach diario (servicio) no disponible:', e.response?.data || e.message);
+            }
+
             // Sincronizar publicaciones
             await MetaSyncService.syncInstagramPosts(asset, accessToken, startDate, endDate);
 
