@@ -62,6 +62,8 @@ module.exports = (sequelize, DataTypes) => {
             comment: 'Fecha de publicación'
         },
         // Métricas lifetime (CSV)
+        impressions_count_fb: { type: DataTypes.INTEGER, defaultValue: 0 },
+        views_count_fb: { type: DataTypes.INTEGER, defaultValue: 0 },
         reactions_and_likes: { type: DataTypes.INTEGER, defaultValue: 0 },
         comments_count: { type: DataTypes.INTEGER, defaultValue: 0 },
         shares_count: { type: DataTypes.INTEGER, defaultValue: 0 },

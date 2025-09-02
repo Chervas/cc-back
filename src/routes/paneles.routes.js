@@ -2,7 +2,7 @@
 const express = require('express');
 const router = express.Router();
 const { Op } = require('sequelize');
-const { SocialStatsDaily } = require('../../models');
+const { SocialStatsDaily, ClinicMetaAsset } = require('../../models');
 
 // GET /api/paneles/dashboard/:idClinica
 router.get('/dashboard/:idClinica', async (req, res) => {
@@ -356,3 +356,106 @@ router.post('/refresh', async (req, res) => {
 
 module.exports = router;
 
+// =============================
+// SERIES: Seguidores por día (IG/FB)
+// GET /api/paneles/series/seguidores?clinicaId=<id|csv|all>&period=<this-year|last-year|all-time>
+router.get('/series/seguidores', async (req, res) => {
+    try {
+        let { clinicaId, period = 'this-year', startDate, endDate } = req.query;
+
+        // Rango de fechas
+        let start, end;
+        const now = new Date();
+        if (startDate && endDate) {
+            start = new Date(startDate);
+            end = new Date(endDate);
+            end.setHours(23,59,59,999);
+        } else {
+            start = new Date(now);
+            end = new Date(now);
+            end.setHours(23,59,59,999);
+            if (period === 'this-year') {
+                start = new Date(now.getFullYear(), 0, 1);
+            } else if (period === 'last-year') {
+                start = new Date(now.getFullYear() - 1, 0, 1);
+                end = new Date(now.getFullYear() - 1, 11, 31, 23, 59, 59, 999);
+            } else {
+                // all-time: dejar start muy atrás
+                start = new Date(2000, 0, 1);
+            }
+        }
+
+        // Construir filtro por clínicas
+        const whereClinica = {};
+        if (clinicaId && clinicaId !== 'all') {
+            if (String(clinicaId).includes(',')) {
+                whereClinica.clinica_id = { [Op.in]: String(clinicaId).split(',').map(x => parseInt(x)).filter(n => !isNaN(n)) };
+            } else {
+                whereClinica.clinica_id = parseInt(clinicaId);
+            }
+        }
+
+        // Obtener filas IG/FB en rango
+        const rows = await SocialStatsDaily.findAll({
+            where: {
+                ...whereClinica,
+                asset_type: { [Op.in]: ['instagram_business', 'facebook_page'] },
+                date: { [Op.between]: [start, end] }
+            },
+            raw: true
+        });
+
+        // Agregar por plataforma + fecha (sum followers)
+        const ig = new Map();
+        const fb = new Map();
+        for (const r of rows) {
+            const d = new Date(r.date); d.setHours(0,0,0,0);
+            const key = d.toISOString().slice(0,10);
+            const val = Number(r.followers || 0);
+            if (r.asset_type === 'instagram_business') {
+                ig.set(key, (ig.get(key) || 0) + val);
+            } else if (r.asset_type === 'facebook_page') {
+                fb.set(key, (fb.get(key) || 0) + val);
+            }
+        }
+
+        // Serializar a arrays ordenados por fecha
+        function mapToSeries(m) {
+            return Array.from(m.entries())
+                .sort((a,b) => a[0] < b[0] ? -1 : 1)
+                .map(([date, followers]) => ({ date, followers }));
+        }
+
+        return res.json({
+            instagram: mapToSeries(ig),
+            facebook: mapToSeries(fb)
+        });
+    } catch (error) {
+        console.error('❌ Error en series/seguidores:', error);
+        res.status(500).json({ error: 'Error interno', message: error.message });
+    }
+});
+
+// =============================
+// Vinculaciones por clínica(s)
+// GET /api/paneles/vinculaciones?clinicaId=<id|csv|all>
+router.get('/vinculaciones', async (req, res) => {
+    try {
+        let { clinicaId } = req.query;
+        const where = { isActive: true };
+        if (clinicaId && clinicaId !== 'all') {
+            if (String(clinicaId).includes(',')) {
+                where.clinicaId = { [Op.in]: String(clinicaId).split(',').map(x => parseInt(x)).filter(n => !isNaN(n)) };
+            } else {
+                where.clinicaId = parseInt(clinicaId);
+            }
+        }
+        const assets = await ClinicMetaAsset.findAll({ where, raw: true });
+        const anyIG = assets.some(a => a.assetType === 'instagram_business');
+        const anyFB = assets.some(a => a.assetType === 'facebook_page');
+        res.json({ instagram: anyIG, facebook: anyFB, google: false, tiktok: false });
+    } catch (error) {
+        console.error('❌ Error en vinculaciones:', error);
+        res.status(500).json({ error: 'Error interno', message: error.message });
+    }
+});

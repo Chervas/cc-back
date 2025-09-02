@@ -16,7 +16,12 @@
 const cron = require('node-cron');
 const axios = require('axios');
 const { Op } = require('sequelize');
-const { syncAdAccountMetrics } = require('../controllers/metasync.controller');
+// Unificar lógica: reutilizar las funciones del controlador
+const { 
+  syncAdAccountMetrics,
+  syncFacebookPageMetrics: controllerSyncFacebookPageMetrics,
+  syncInstagramMetrics: controllerSyncInstagramMetrics
+} = require('../controllers/metasync.controller');
 const META_API_BASE_URL = process.env.META_API_BASE_URL || 'https://graph.facebook.com/v23.0';
 const url = `${META_API_BASE_URL}/...`;
 
@@ -310,15 +315,16 @@ class MetaSyncJobs {
     let totalProcessed = 0;
     const errors = [];
 
-    // Obtener todos los assets activos con tokens
+    // Obtener todos los assets activos (FB Page + IG Business) con conexión válida
     const activeAssets = await ClinicMetaAsset.findAll({
       where: {
         isActive: true,
-        pageAccessToken: { [Op.ne]: null }
+        assetType: { [Op.in]: ['facebook_page', 'instagram_business'] }
       },
       include: [{
         model: MetaConnection,
         as: 'metaConnection',
+        required: true,
         where: {
           accessToken: { [Op.ne]: null },
           expiresAt: { [Op.gt]: new Date() }
@@ -508,20 +514,46 @@ class MetaSyncJobs {
 async syncAssetMetrics(asset) {
   let processed = 0;
 
+  // Token preferente: pageAccessToken y fallback al de usuario
+  const accessToken = asset.pageAccessToken || asset.metaConnection?.accessToken;
+  if (!accessToken) {
+    console.warn(`⚠️ Asset ${asset.id} sin token disponible (page/user). Omitido.`);
+    return 0;
+  }
+
+  // Ventana de sincronización: últimos N días hasta ayer (por defecto 7)
+  const days = parseInt(process.env.METRICS_SYNC_DAYS || '7', 10);
+  const end = new Date();
+  end.setHours(0,0,0,0); // día cerrado
+  end.setDate(end.getDate() - 1); // hasta ayer
+  const start = new Date(end);
+  start.setDate(start.getDate() - (Math.max(1, days) - 1));
+
   switch (asset.assetType) {
-    case 'facebook_page':
-      processed = await this.syncFacebookPageMetrics(asset);
+    case 'facebook_page': {
+      try {
+        const result = await controllerSyncFacebookPageMetrics(asset, accessToken, start, end);
+        processed = typeof result === 'number' ? result : (result?.recordsProcessed || 0);
+      } catch (e) {
+        console.error(`❌ Error en sync (FB Page) para asset ${asset.id}:`, e.message);
+        processed = 0;
+      }
       break;
-    
-    case 'instagram_business':
-      processed = await this.syncInstagramMetrics(asset);
+    }
+    case 'instagram_business': {
+      try {
+        const result = await controllerSyncInstagramMetrics(asset, accessToken, start, end);
+        processed = typeof result === 'number' ? result : (result?.recordsProcessed || 0);
+      } catch (e) {
+        console.error(`❌ Error en sync (IG Business) para asset ${asset.id}:`, e.message);
+        processed = 0;
+      }
       break;
-    
+    }
     case 'ad_account':
-      console.log(`ℹ️ Ad Account ${asset.metaAssetName}: Métricas de anuncios no implementadas aún`);
+      console.log(`ℹ️ Ad Account ${asset.metaAssetName}: Métricas de anuncios gestionadas en jobs de Ads.`);
       processed = 0;
       break;
-    
     default:
       console.log(`⚠️ Tipo de asset no soportado: ${asset.assetType}`);
       processed = 0;

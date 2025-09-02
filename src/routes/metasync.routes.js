@@ -31,6 +31,7 @@ router.get('/metrics/:clinicaId', metaSyncController.getMetricsByClinica);
 router.get('/clinica/:clinicaId/stats', socialStatsController.getClinicaStats);
 router.get('/asset/:assetId/stats', socialStatsController.getAssetStats);
 router.get('/clinica/:clinicaId/posts', socialStatsController.getClinicaPosts);
+router.get('/clinica/:clinicaId/organic-vs-paid', socialStatsController.getOrganicVsPaidByDay);
 router.get('/post/:postId', socialStatsController.getPost);
 router.get('/clinica/:clinicaId/top-posts', socialStatsController.getTopPosts);
 router.get('/clinica/:clinicaId/dashboard', socialStatsController.getDashboardSummary);
@@ -56,4 +57,3 @@ router.get('/jobs/next-executions', metaJobsController.getNextExecutions);
 router.get('/metrics/:clinicaId', metaSyncController.getMetricsByClinica);
 
 module.exports = router;
-

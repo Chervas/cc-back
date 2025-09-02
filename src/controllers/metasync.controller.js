@@ -1,5 +1,7 @@
 'use strict';
 const axios = require('axios');
+// ✅ Importar cliente Meta a nivel global para evitar "metaGet is not defined"
+const { metaGet } = require('../lib/metaClient');
 const { 
     SocialStatsDaily, 
     SocialPosts, 
@@ -13,7 +15,7 @@ const {
     MetaConnection,
     ClinicMetaAsset
 } = require('../../models');
-const { Op } = require('sequelize');
+const { Op, fn, col } = require('sequelize');
 
 // Constantes
 const META_API_BASE_URL = process.env.META_API_BASE_URL || 'https://graph.facebook.com';
@@ -50,7 +52,7 @@ exports.syncClinica = async (req, res) => {
             job_type: 'clinica_sync',
             clinica_id: clinicaId,
             status: 'running',
-            started_at: new Date()
+            start_time: new Date()
         });
         
         // Iniciar sincronización en segundo plano
@@ -64,7 +66,7 @@ exports.syncClinica = async (req, res) => {
                     {
                         status: 'failed',
                         error_message: error.message,
-                        completed_at: new Date()
+                        end_time: new Date()
                     },
                     { where: { id: syncLog.id } }
                 );
@@ -116,7 +118,7 @@ exports.syncAsset = async (req, res) => {
             asset_id: assetId,
             asset_type: asset.assetType,
             status: 'running',
-            started_at: new Date()
+            start_time: new Date()
         });
         
         // Iniciar sincronización en segundo plano
@@ -175,7 +177,8 @@ exports.getSyncLog = async (req, res) => {
             where,
             limit: parseInt(limit),
             offset: parseInt(offset),
-            order: [['started_at', 'DESC']]
+            // started_at no existe en la tabla. Usar created_at (o start_time si está disponible)
+            order: [['created_at', 'DESC']]
         });
         
         return res.status(200).json({
@@ -242,13 +245,13 @@ exports.getSyncStats = async (req, res) => {
 
 // Sincronización histórica de una clínica mes a mes
 exports.triggerHistoricalSync = async (clinicaId) => {
-    const syncLog = await SyncLog.create({
-        job_type: 'historical_sync',
-        clinica_id: clinicaId,
-        status: 'running',
-        started_at: new Date(),
-        records_processed: 0
-    });
+        const syncLog = await SyncLog.create({
+            job_type: 'historical_sync',
+            clinica_id: clinicaId,
+            status: 'running',
+            start_time: new Date(),
+            records_processed: 0
+        });
 
     const maxMonths = 12;
     let monthsProcessed = 0;
@@ -296,14 +299,14 @@ exports.triggerHistoricalSync = async (clinicaId) => {
 
         await SyncLog.update({
             status: 'completed',
-            completed_at: new Date(),
+            end_time: new Date(),
             records_processed: monthsProcessed
         }, { where: { id: syncLog.id } });
     } catch (error) {
         console.error('❌ Error en triggerHistoricalSync:', error);
         await SyncLog.update({
             status: 'failed',
-            completed_at: new Date(),
+            end_time: new Date(),
             error_message: error.message,
             records_processed: monthsProcessed
         }, { where: { id: syncLog.id } });
@@ -316,7 +319,7 @@ exports.triggerInitialSync = async (clinicaId) => {
         job_type: 'initial_sync',
         clinica_id: clinicaId,
         status: 'running',
-        started_at: new Date(),
+        start_time: new Date(),
         records_processed: 0
     });
 
@@ -330,14 +333,14 @@ exports.triggerInitialSync = async (clinicaId) => {
 
         await SyncLog.update({
             status: 'completed',
-            completed_at: new Date(),
+            end_time: new Date(),
             records_processed: result?.recordsProcessed || 0
         }, { where: { id: syncLog.id } });
     } catch (error) {
         console.error('❌ Error en triggerInitialSync:', error);
         await SyncLog.update({
             status: 'failed',
-            completed_at: new Date(),
+            end_time: new Date(),
             error_message: error.message
         }, { where: { id: syncLog.id } });
     }
@@ -610,7 +613,7 @@ async function syncAsset(asset, startDate, endDate, syncLogId) {
                 {
                     status: 'completed',
                     records_processed: result.recordsProcessed || 0,
-                    completed_at: new Date()
+                    end_time: new Date()
                 },
                 { where: { id: syncLogId } }
             );
@@ -628,7 +631,7 @@ async function syncAsset(asset, startDate, endDate, syncLogId) {
                 {
                     status: 'failed',
                     error_message: error.message,
-                    completed_at: new Date()
+                    end_time: new Date()
                 },
                 { where: { id: syncLogId } }
             );
@@ -643,11 +646,28 @@ async function syncFacebookPageMetrics(asset, accessToken, startDate, endDate) {
     try {
         console.log(`📊 Sincronizando métricas de página de Facebook ${asset.metaAssetId}`);
 
+        // Asegurar uso de Page Access Token para endpoints de Page Insights
+        let tokenForPage = accessToken;
+        try {
+            if (!asset.pageAccessToken) {
+                const tResp = await metaGet(`${asset.metaAssetId}`, { params: { fields: 'access_token' }, accessToken });
+                const t = tResp.data?.access_token;
+                if (t) {
+                    tokenForPage = t;
+                    console.log('🔑 Obtenido Page Access Token en runtime');
+                }
+            } else {
+                tokenForPage = asset.pageAccessToken;
+            }
+        } catch (e) {
+            console.warn('⚠️ No se pudo obtener Page Access Token vía user token, usando token disponible');
+        }
+
         // Obtener el número de seguidores actuales de la página
         const metricsResponse = await axios.get(`${META_API_BASE_URL}/${asset.metaAssetId}`, {
             params: {
                 fields: 'fan_count',
-                access_token: accessToken
+                access_token: tokenForPage
             }
         });
 
@@ -703,7 +723,7 @@ async function syncFacebookPageMetrics(asset, accessToken, startDate, endDate) {
         try {
             const since = Math.floor(startDate.getTime() / 1000);
             const until = Math.floor(endDate.getTime() / 1000);
-            const paramsBase = { since, until, period: 'day', access_token: accessToken };
+            const paramsBase = { since, until, period: 'day', access_token: tokenForPage };
 
             let valuesOrganic = [];
             let usedApproximation = false;
@@ -714,6 +734,10 @@ async function syncFacebookPageMetrics(asset, accessToken, startDate, endDate) {
                     params: { ...paramsBase, metric: 'page_impressions_organic_unique' }
                 });
                 valuesOrganic = reachResp.data?.data?.[0]?.values || [];
+                if (valuesOrganic.length === 0) {
+                  // Si la respuesta es válida pero sin datos, usar aproximación
+                  throw new Error('Empty values for page_impressions_organic_unique');
+                }
                 console.log('✅ FB reach orgánico (page_impressions_organic_unique) obtenido');
             } catch (e1) {
                 const msg = e1.response?.data?.error?.message || e1.message;
@@ -767,7 +791,7 @@ async function syncFacebookPageMetrics(asset, accessToken, startDate, endDate) {
         }
 
         // Sincronizar publicaciones (con batching + lifetime en SocialPosts)
-        await syncFacebookPosts(asset, accessToken, startDate, endDate);
+        await syncFacebookPosts(asset, tokenForPage, startDate, endDate);
 
         console.log(`✅ Sincronización de métricas de Facebook completada: 1 día procesado`);
 
@@ -967,15 +991,19 @@ async function syncFacebookPosts(asset, accessToken, startDate, endDate) {
     try {
         console.log(`📝 Sincronizando publicaciones de Facebook ${asset.metaAssetId}`);
 
-        // Formatear fechas para la API de Meta
-        const since = Math.floor(startDate.getTime() / 1000);
-        const until = Math.floor(endDate.getTime() / 1000);
+        // Formatear fechas para la API de Meta (ventana de día completo)
+        let since = Math.floor(new Date(startDate).setHours(0,0,0,0) / 1000);
+        let until = Math.floor(new Date(endDate).setHours(23,59,59,999) / 1000);
+        if (until <= since) {
+            // Evitar errores cuando start=end (asegurar rango de 1 día)
+            until = since + 86399;
+        }
 
-        // Obtener publicaciones por rango (usar attachments en lugar de full_picture/type para evitar deprecations)
-        const { metaGet } = require('../lib/metaClient');
+        // Obtener publicaciones por rango (sin attachments ni object_id para evitar deprecations)
+        // metaGet está importado a nivel global
         const postsResponse = await metaGet(`${asset.metaAssetId}/posts`, {
             params: {
-                fields: 'id,message,created_time,permalink_url,attachments{media_type,media,url,subattachments}',
+                fields: 'id,message,created_time,permalink_url,status_type',
                 since,
                 until,
                 limit: 100
@@ -990,11 +1018,11 @@ async function syncFacebookPosts(asset, accessToken, startDate, endDate) {
         const postsInRange = postsResponse.data.data;
         console.log(`📊 FB posts en rango: ${postsInRange.length}`);
 
-        // Siempre traer últimos N posts recientes (parametrizable)
+        // Siempre traer últimos N posts recientes (parametrizable), sin attachments
         const recentLimit = parseInt(process.env.METASYNC_POSTS_FALLBACK_LIMIT || '30', 10);
         const recentResp = await metaGet(`${asset.metaAssetId}/posts`, {
             params: {
-                fields: 'id,message,created_time,permalink_url,attachments{media_type,media,url,subattachments}',
+                fields: 'id,message,created_time,permalink_url,status_type',
                 limit: recentLimit
             },
             accessToken
@@ -1012,10 +1040,9 @@ async function syncFacebookPosts(asset, accessToken, startDate, endDate) {
         // Guardar/actualizar publicaciones en bloque (lifetime en SocialPosts)
         const postIdToDbId = new Map();
         for (const post of posts) {
-            // Derivar tipo/media desde attachments
-            const att = post.attachments?.data?.[0];
-            const mediaType = att?.media_type || null;
-            const mediaUrl = att?.media?.image?.src || att?.url || null;
+            // media_type/URL se rellenará tras fetch de attachments por post
+            const mediaType = post.media_type || null;
+            const mediaUrl = post.media_url || null;
 
             const postData = {
                 clinica_id: asset.clinicaId,
@@ -1043,13 +1070,96 @@ async function syncFacebookPosts(asset, accessToken, startDate, endDate) {
             return { status: 'completed', recordsProcessed: 0 };
         }
 
-        // Batching: insights + reactions/comm/shares summary
+        // Fetch attachments/object_id por post para detectar vídeo de forma robusta
+        try {
+            const attReqs = posts.map(p => ({ method: 'GET', relative_url: `${p.id}?fields=attachments{media_type,media,target,url,subattachments},object_id,permalink_url,status_type,type,full_picture` }));
+            const attResps = attReqs.length ? await graphBatch(accessToken, attReqs, process.env.META_API_BASE_URL) : [];
+            for (let i = 0; i < posts.length; i++) {
+                const body = (() => { try { const b = attResps[i]?.body; return typeof b === 'string' ? JSON.parse(b) : b; } catch { return null; } })();
+                const post = posts[i];
+                post._attachments = body?.attachments?.data || [];
+                post._object_id = body?.object_id || null;
+                post.status_type = body?.status_type || post.status_type;
+                post.permalink_url = body?.permalink_url || post.permalink_url;
+                post.type = body?.type || post.type;
+                post.full_picture = body?.full_picture || post.full_picture;
+            }
+        } catch (e) {
+            console.warn('⚠️ Error obteniendo attachments/object_id por post:', e.response?.data || e.message);
+        }
+
+        // Actualizar tipo y thumbnail por post tras fetch de detalles
+        try {
+            for (const post of posts) {
+                const dbId = postIdToDbId.get(post.id);
+                if (!dbId) continue;
+                const att = post._attachments?.[0];
+                const mediaTypeStr = (att?.media_type || '').toLowerCase();
+                // Heurística de tipo cuando no llega 'type'
+                let postType = post.type || (mediaTypeStr || null);
+                const st = (post.status_type || '').toLowerCase();
+                const link = String(post.permalink_url || '');
+                if (!postType) {
+                    if (/\/reel|\/reels|\/video|\/videos\//i.test(link) || st.includes('added_video')) postType = 'video';
+                    else if (st.includes('added_photos') || link.includes('photo.php')) postType = 'photo';
+                    else if (st.includes('shared_story')) postType = 'link';
+                }
+                let mediaThumb = null;
+                if (mediaTypeStr.includes('video')) {
+                    const objectId = post._object_id || att?.target?.id || null;
+                    if (objectId) {
+                        try {
+                            const th = await metaGet(`${objectId}/thumbnails`, { params: { access_token: accessToken } });
+                            const thumbs = th.data?.data || [];
+                            const pref = thumbs.find(t => t.is_preferred) || thumbs[0];
+                            mediaThumb = pref?.uri || null;
+                        } catch (e) {
+                            console.warn('⚠️ FB thumbnails fallo:', e.response?.data || e.message);
+                        }
+                    }
+                } else if (post.full_picture) {
+                    mediaThumb = post.full_picture;
+                } else if (att?.media?.image?.src) {
+                    mediaThumb = att.media.image.src;
+                }
+                const postModel = await SocialPosts.findByPk(dbId);
+                if (postModel) {
+                    const payload = {};
+                    if (postType && !postModel.media_type) payload.media_type = String(postType).toLowerCase();
+                    if (mediaThumb && !postModel.media_url) payload.media_url = mediaThumb;
+                    if (Object.keys(payload).length) await postModel.update(payload);
+                }
+            }
+        } catch (e) {
+            console.warn('⚠️ Error actualizando tipo/thumbnail FB:', e.message);
+        }
+
+        // Batching: insights + reactions/comm/shares summary + métricas de vídeo cuando aplique
         const requests = [];
         for (const post of posts) {
-            requests.push({ method: 'GET', relative_url: `${post.id}/insights?metric=post_impressions,post_impressions_unique,post_engaged_users,post_reactions_by_type_total` });
+            // Page Insights (lifetime) por publicación (evitar métricas problemáticas)
+            requests.push({ method: 'GET', relative_url: `${post.id}/insights?metric=post_impressions,post_impressions_unique,post_reactions_by_type_total,post_video_views&period=lifetime` });
         }
         for (const post of posts) {
             requests.push({ method: 'GET', relative_url: `${post.id}?fields=reactions.summary(total_count),comments.summary(true),shares` });
+        }
+
+        // Detectar posts de vídeo y preparar métricas de vídeo (views y avg_time)
+        const videoPosts = [];
+        for (let i = 0; i < posts.length; i++) {
+            const post = posts[i];
+            const att = post._attachments?.[0];
+            const mediaType = (att?.media_type || '').toLowerCase();
+            const attTargetId = att?.target?.id || null;
+            const objectId = post._object_id || attTargetId || null; // usar object_id si existe
+            const statusType = (post.status_type || '').toLowerCase();
+            const link = String(post.permalink_url || '');
+            const isVideo = mediaType.includes('video') || statusType.includes('added_video') || /\/video|\/videos|\/reel|\/reels\//i.test(link);
+            if (isVideo && objectId) {
+                videoPosts.push({ index: i, postId: post.id, objectId: String(objectId) });
+                // Intentar primero /insights
+                requests.push({ method: 'GET', relative_url: `${objectId}/insights?metric=total_video_views,total_video_avg_time_watched` });
+            }
         }
 
         const responses = await graphBatch(accessToken, requests, process.env.META_API_BASE_URL);
@@ -1059,7 +1169,7 @@ async function syncFacebookPosts(asset, accessToken, startDate, endDate) {
         const prevDate = new Date(date);
         prevDate.setDate(prevDate.getDate() - 1);
 
-        // Parsear respuestas en el mismo orden
+        // Parsear respuestas en el mismo orden (graphBatch.body puede venir como string)
         const n = posts.length;
         let processed = 0;
         for (let i = 0; i < posts.length; i++) {
@@ -1068,23 +1178,38 @@ async function syncFacebookPosts(asset, accessToken, startDate, endDate) {
 
             const insightsResp = responses[i];
             const objResp = responses[i + n];
+            const parseBody = (resp) => {
+                try {
+                    if (!resp) return null;
+                    const b = resp.body;
+                    return typeof b === 'string' ? JSON.parse(b) : b;
+                } catch { return null; }
+            };
+            const insightsBody = parseBody(insightsResp);
+            const objBody = parseBody(objResp);
+            const attForLoop = post.attachments?.data?.[0];
+            const mediaTypeForLoop = (attForLoop?.media_type || '').toLowerCase();
+            const isVideoPost = mediaTypeForLoop.includes('video');
             let reactions_total = 0;
             let comments_total = 0;
             let shares_total = 0;
+            let impressions_total = 0;
+            let reach_total = 0;
+            let post_video_views_total = 0;
 
-            if (insightsResp?.code === 200 && Array.isArray(insightsResp.body?.data)) {
-                for (const metric of insightsResp.body.data) {
+            if (insightsResp?.code === 200 && Array.isArray(insightsBody?.data)) {
+                for (const metric of insightsBody.data) {
                     const m = metric.name;
                     const v = metric.values?.[0]?.value || 0;
                     switch (m) {
                         case 'post_impressions':
-                            // Podemos usar impresiones/reach en futuros agregados si hiciera falta
+                            impressions_total = v;
                             break;
                         case 'post_impressions_unique':
-                            // idem
+                            reach_total = v;
                             break;
-                        case 'post_engaged_users':
-                            // idem
+                        case 'post_video_views':
+                            post_video_views_total = v;
                             break;
                         case 'post_reactions_by_type_total':
                             if (v && typeof v === 'object') {
@@ -1093,29 +1218,126 @@ async function syncFacebookPosts(asset, accessToken, startDate, endDate) {
                             break;
                     }
                 }
+            } else {
+                console.warn(`⚠️ FB insights fallo para post ${post.id}: code=${insightsResp?.code} body=${JSON.stringify(insightsBody)}`);
             }
             if (objResp?.code === 200) {
-                reactions_total = objResp.body?.reactions?.summary?.total_count || reactions_total;
-                comments_total = objResp.body?.comments?.summary?.total_count || 0;
-                shares_total = objResp.body?.shares?.count || 0;
+                reactions_total = objBody?.reactions?.summary?.total_count || reactions_total;
+                comments_total = objBody?.comments?.summary?.total_count || 0;
+                shares_total = objBody?.shares?.count || 0;
             }
 
             // Actualizar SocialPosts (lifetime)
             const postModel = await SocialPosts.findByPk(dbPostId);
             if (postModel) {
-                await postModel.update({
+                const updatePayload = {
                     reactions_and_likes: reactions_total,
                     comments_count: comments_total,
                     shares_count: shares_total,
-                    media_type: postModel.media_type || post.type?.toLowerCase() || null,
+                    // Tipo de publicación: preferir 'type' del Post; si no, mantener existente
+                    media_type: postModel.media_type || (post.type ? String(post.type).toLowerCase() : null),
+                    post_type: postModel.post_type || (post.type ? String(post.type).toLowerCase() : null),
                     insights_synced_at: new Date(),
                     metrics_source_version: 'v23'
+                };
+                // Registrar impresiones específicas de FB como lifetime
+                if (typeof impressions_total === 'number') {
+                    updatePayload.impressions_count_fb = impressions_total;
+                }
+                // Si no es vídeo, establecer avg a 0 explícitamente
+                if (!isVideoPost) updatePayload.avg_watch_time_ms = 0;
+                // Views de vídeo por post (usar post_video_views si está disponible; si no, usar de video_insights más abajo)
+                if (post_video_views_total > 0) {
+                    updatePayload.views_count_fb = post_video_views_total;
+                }
+                await postModel.update(updatePayload);
+            }
+
+            // ✅ Guardar snapshot diario en SocialPostStatsDaily (FB)
+            try {
+                const snapDate = new Date(endDate);
+                snapDate.setHours(0,0,0,0);
+                const [snap, created] = await SocialPostStatsDaily.findOrCreate({
+                    where: { post_id: dbPostId, date: snapDate },
+                    defaults: {
+                        post_id: dbPostId,
+                        date: snapDate,
+                        impressions: impressions_total,
+                        reach: reach_total,
+                        engagement: 0,
+                        likes: reactions_total,
+                        comments: comments_total,
+                        shares: shares_total,
+                        saved: 0,
+                        video_views: post_video_views_total || 0,
+                        avg_watch_time: 0
+                    }
                 });
+                if (!created) {
+                    await snap.update({ impressions: impressions_total, reach: reach_total, likes: reactions_total, comments: comments_total, shares: shares_total, video_views: (post_video_views_total || snap.video_views || 0) });
+                }
+            } catch (e) {
+                console.warn('⚠️ No se pudo guardar snapshot diario FB:', e.message);
             }
             processed++;
         }
 
         console.log(`✅ Sincronización de publicaciones de Facebook completada: ${processed} publicaciones procesadas`);
+
+        // Procesar métricas de vídeo (último bloque de respuestas)
+        if (videoPosts.length > 0) {
+            const videoResponses = responses.slice(2 * n);
+            const snapDate = new Date(endDate); snapDate.setHours(0,0,0,0);
+            for (let j = 0; j < videoPosts.length; j++) {
+                const vp = videoPosts[j];
+                const resp = videoResponses[j];
+                const parseBody = (r) => { try { const b = r?.body; return typeof b === 'string' ? JSON.parse(b) : b; } catch { return null; } };
+                const body = parseBody(resp);
+                let views = 0; let avgSecs = 0;
+                if (resp?.code === 200 && Array.isArray(body?.data)) {
+                    for (const m of body.data) {
+                        const name = m.name; const v = m.values?.[0]?.value || 0;
+                        if (name === 'total_video_views') views = v;
+                        if (name === 'total_video_avg_time_watched') avgSecs = Math.round(v || 0);
+                    }
+                } else {
+                    // Fallback: algunos objetos requieren /video_insights
+                    try {
+                        const fallback = await metaGet(`${vp.objectId}/video_insights`, { params: { metric: 'total_video_views,total_video_avg_time_watched' }, accessToken });
+                        const arr = fallback.data?.data || [];
+                        for (const m of arr) {
+                            const name = m.name; const v = m.values?.[0]?.value || 0;
+                            if (name === 'total_video_views') views = v;
+                            if (name === 'total_video_avg_time_watched') avgSecs = Math.round(v || 0);
+                        }
+                    } catch (e) {
+                        console.warn(`⚠️ FB video_insights fallo para video ${vp.objectId}:`, e.response?.data || e.message);
+                    }
+                }
+                // Actualizar SocialPosts con views/avg (campos específicos de FB)
+                try {
+                    const dbPostId = postIdToDbId.get(vp.postId);
+                    const postModel = await SocialPosts.findByPk(dbPostId);
+                    if (postModel) {
+                        const payload = { avg_watch_time_ms: avgSecs * 1000 };
+                        // Solo sobrescribir views_count_fb si no tenemos post_video_views
+                        if ((postModel.views_count_fb || 0) === 0 && views > 0) payload.views_count_fb = views;
+                        await postModel.update(payload);
+                    }
+                    // Actualizar snapshot diario
+                    const snap = await SocialPostStatsDaily.findOne({ where: { post_id: dbPostId, date: snapDate } });
+                    if (snap) {
+                        const vv = views || post_video_views_total || 0;
+                        await snap.update({ video_views: vv, avg_watch_time: avgSecs });
+                    } else {
+                        const vv = views || post_video_views_total || 0;
+                        await SocialPostStatsDaily.create({ post_id: dbPostId, date: snapDate, impressions: 0, reach: 0, engagement: 0, likes: 0, comments: 0, shares: 0, saved: 0, video_views: vv, avg_watch_time: avgSecs });
+                    }
+                } catch (e) {
+                    console.warn('⚠️ No se pudo actualizar métricas de vídeo FB:', e.message);
+                }
+            }
+        }
 
         // Agregados diarios a SocialStatsDaily (FB)
         await updateDailyAggregatesForAsset(asset, startDate, endDate);
@@ -1191,6 +1413,10 @@ async function syncInstagramPosts(asset, accessToken, startDate, endDate) {
         // Guardar/actualizar publicaciones (lifetime en SocialPosts)
         const postIdToDbId = new Map();
         for (const post of posts) {
+            // Elegir thumbnail para VIDEO/REEL y media_url para imagen
+            const mt = String(post.media_type || '').toUpperCase();
+            const isVideo = (mt === 'VIDEO' || mt === 'REEL');
+            const preferredMediaUrl = isVideo ? (post.thumbnail_url || post.media_url) : (post.media_url || post.thumbnail_url);
             const postData = {
                 clinica_id: asset.clinicaId,
                 asset_id: asset.id,
@@ -1199,7 +1425,7 @@ async function syncInstagramPosts(asset, accessToken, startDate, endDate) {
                 post_type: post.media_type.toLowerCase(),
                 title: post.caption ? post.caption.substring(0, 255) : null,
                 content: post.caption,
-                media_url: post.media_url || post.thumbnail_url,
+                media_url: preferredMediaUrl,
                 permalink_url: post.permalink,
                 published_at: new Date(post.timestamp)
             };
@@ -1216,11 +1442,22 @@ async function syncInstagramPosts(asset, accessToken, startDate, endDate) {
             return { status: 'completed', recordsProcessed: 0 };
         }
 
-        // Batching: insights (views/saved/engagement) + like_count/comments_count
+        // Batching: insights por tipo de media (evitar métricas inválidas) + like_count/comments_count
         const requests = [];
         for (const post of posts) {
-            // Para IG orgánico 2025: usar views en lugar de impressions si está disponible
-            requests.push({ method: 'GET', relative_url: `${post.id}/insights?metric=views,saved,engagement,shares,ig_reels_avg_watch_time` });
+            const mt = (post.media_type || '').toUpperCase();
+            const permalink = String(post.permalink || post.permalink_url || '');
+            const isReel = mt === 'REEL' || permalink.includes('/reel/');
+            // Métricas base compatibles
+            const base = ['reach', 'views', 'saved'];
+            const extra = [];
+            // Para reels: pedir tiempo medio de reproducción
+            if (isReel) {
+                extra.push('ig_reels_avg_watch_time');
+            }
+            // Construir lista final (sin métricas potencialmente deprecadas como impressions/video_views)
+            const metrics = [...base, ...extra].join(',');
+            requests.push({ method: 'GET', relative_url: `${post.id}/insights?metric=${metrics}` });
         }
         for (const post of posts) {
             requests.push({ method: 'GET', relative_url: `${post.id}?fields=like_count,comments_count` });
@@ -1242,36 +1479,60 @@ async function syncInstagramPosts(asset, accessToken, startDate, endDate) {
             const insightsResp = responses[i];
             const countsResp = responses[i + n];
 
+            // graphBatch devuelve body como string; parsearlo de forma segura
+            const parseBody = (resp) => {
+                try {
+                    if (!resp) return null;
+                    const b = resp.body;
+                    return typeof b === 'string' ? JSON.parse(b) : b;
+                } catch { return null; }
+            };
+            const insightsBody = parseBody(insightsResp);
+            const countsBody = parseBody(countsResp);
+
             let like_count = 0;
             let comments_count = 0;
             let saved_count = 0;
             let views_count = 0;
             let avg_watch_time_ms = 0;
+            let reach_count = 0;
+            let impressions_count = 0;
 
-            if (insightsResp?.code === 200 && Array.isArray(insightsResp.body?.data)) {
-                for (const metric of insightsResp.body.data) {
+            if (insightsResp?.code === 200 && Array.isArray(insightsBody?.data)) {
+                for (const metric of insightsBody.data) {
                     const m = metric.name;
                     const v = metric.values?.[0]?.value || 0;
                     switch (m) {
-                        case 'engagement':
-                            // usamos para QA, no se guarda directamente
+                        case 'reach':
+                            reach_count = v;
+                            break;
+                        case 'impressions':
+                            // Algunas versiones ya no devuelven impressions
+                            impressions_count = v;
                             break;
                         case 'saved':
                             saved_count = v;
                             break;
-                        case 'views':
-                            views_count = v;
-                            break;
                         case 'ig_reels_avg_watch_time':
                             avg_watch_time_ms = Math.round((v || 0) * 1000);
                             break;
+                        case 'views':
+                            // Algunas cuentas devuelven 'views' en lugar de 'video_views'
+                            if (!views_count) views_count = v;
+                            break;
                     }
                 }
+                // Fallback: usar views como impresiones si impressions no está disponible
+                if (!impressions_count && views_count) {
+                    impressions_count = views_count;
+                }
+            } else {
+                console.warn(`⚠️ IG insights fallo para post ${post.id}: code=${insightsResp?.code} body=${JSON.stringify(insightsBody)}`);
             }
 
             if (countsResp?.code === 200) {
-                like_count = countsResp.body?.like_count || 0;
-                comments_count = countsResp.body?.comments_count || 0;
+                like_count = countsBody?.like_count || 0;
+                comments_count = countsBody?.comments_count || 0;
             }
 
             // Actualizar SocialPosts (lifetime)
@@ -1287,6 +1548,33 @@ async function syncInstagramPosts(asset, accessToken, startDate, endDate) {
                     insights_synced_at: new Date(),
                     metrics_source_version: 'v23'
                 });
+            }
+
+            // ✅ Guardar snapshot diario en SocialPostStatsDaily (IG)
+            try {
+                const snapDate = new Date(endDate);
+                snapDate.setHours(0,0,0,0);
+                const [snap, created] = await SocialPostStatsDaily.findOrCreate({
+                    where: { post_id: dbPostId, date: snapDate },
+                    defaults: {
+                        post_id: dbPostId,
+                        date: snapDate,
+                        impressions: impressions_count || 0,
+                        reach: reach_count || 0,
+                        engagement: 0,
+                        likes: like_count,
+                        comments: comments_count,
+                        shares: 0,
+                        saved: saved_count,
+                        video_views: views_count,
+                        avg_watch_time: Math.round((avg_watch_time_ms || 0)/1000)
+                    }
+                });
+                if (!created) {
+                    await snap.update({ impressions: impressions_count || 0, reach: reach_count || 0, likes: like_count, comments: comments_count, saved: saved_count, video_views: views_count, avg_watch_time: Math.round((avg_watch_time_ms || 0)/1000) });
+                }
+            } catch (e) {
+                console.warn('⚠️ No se pudo guardar snapshot diario IG:', e.message);
             }
             processed++;
         }
@@ -1329,13 +1617,13 @@ async function updateDailyAggregatesForAsset(asset, startDate, endDate) {
                 asset_id: asset.id,
                 published_at: { [Op.between]: [start, end] }
             },
-            attributes: ['id','published_at','reactions_and_likes','comments_count','shares_count','saved_count','views_count']
+            attributes: ['id','published_at','reactions_and_likes','comments_count','shares_count','saved_count','views_count','views_count_fb']
         });
         const byDay = new Map();
         for (const p of posts) {
             const d = new Date(p.published_at); d.setHours(0,0,0,0);
             const key = d.toISOString();
-            if (!byDay.has(key)) byDay.set(key, { likes:0, reactions:0, comments:0, shares:0, saved:0, views:0, posts:0 });
+            if (!byDay.has(key)) byDay.set(key, { likes:0, reactions:0, comments:0, shares:0, saved:0, views:0, views_fb:0, posts:0 });
             const agg = byDay.get(key);
             if (asset.assetType === 'instagram_business') {
                 agg.likes += p.reactions_and_likes || 0;
@@ -1345,7 +1633,10 @@ async function updateDailyAggregatesForAsset(asset, startDate, endDate) {
             agg.comments += p.comments_count || 0;
             agg.shares += p.shares_count || 0;
             agg.saved += p.saved_count || 0;
+            // Mantener views genéricas para compatibilidad (IG usa views_count)
             agg.views += p.views_count || 0;
+            // Acumular views específicas de Facebook (vídeos y futuros formatos)
+            agg.views_fb += p.views_count_fb || 0;
             agg.posts += 1;
         }
         for (const [key, agg] of byDay) {
@@ -1356,6 +1647,7 @@ async function updateDailyAggregatesForAsset(asset, startDate, endDate) {
                 asset_type: asset.assetType,
                 date: d,
                 views: agg.views,
+                views_facebook: asset.assetType === 'facebook_page' ? agg.views_fb : undefined,
                 posts_count: agg.posts,
                 engagement: (agg.likes + agg.reactions + agg.comments + agg.shares + agg.saved)
             };
@@ -1367,6 +1659,35 @@ async function updateDailyAggregatesForAsset(asset, startDate, endDate) {
             const existing = await SocialStatsDaily.findOne({ where: { clinica_id: asset.clinicaId, asset_id: asset.id, date: d } });
             if (existing) await existing.update(payload); else await SocialStatsDaily.create(payload);
         }
+        // Además, actualizar reach/impressions diarios a partir de SocialPostStatsDaily (orgánico por día)
+        try {
+            const rows = await SocialPostStatsDaily.findAll({
+                attributes: ['date', [fn('SUM', col('reach')), 'reach'], [fn('SUM', col('impressions')), 'impressions']],
+                include: [{ model: SocialPosts, as: 'post', attributes: [], where: { asset_id: asset.id } }],
+                where: { date: { [Op.between]: [new Date(start.setHours(0,0,0,0)), new Date(end.setHours(23,59,59,999))] } },
+                group: ['date'],
+                raw: true
+            });
+            for (const r of rows) {
+                const d = new Date(r.date); d.setHours(0,0,0,0);
+                const existing = await SocialStatsDaily.findOne({ where: { clinica_id: asset.clinicaId, asset_id: asset.id, date: d } });
+                const reachFromPosts = parseInt(r.reach, 10) || 0;
+                const imprFromPosts = parseInt(r.impressions, 10) || 0;
+                const payload = {
+                    clinica_id: asset.clinicaId,
+                    asset_id: asset.id,
+                    asset_type: asset.assetType,
+                    date: d
+                };
+                // No sobrescribir reach/impressions si los cálculos por post son 0
+                if (reachFromPosts > 0) payload.reach = reachFromPosts;
+                if (imprFromPosts > 0) payload.impressions = imprFromPosts;
+                if (existing) await existing.update(payload); else await SocialStatsDaily.create(payload);
+            }
+        } catch (e) {
+            console.warn('⚠️ Error agregando reach/impressions diarios desde SocialPostStatsDaily:', e.message);
+        }
+
         console.log(`📈 Agregados diarios actualizados para asset ${asset.id} (${asset.assetType})`);
     } catch (e) {
         console.warn('⚠️ Error calculando agregados diarios:', e.message);
@@ -1646,8 +1967,10 @@ async function syncAdAccountMetrics(asset, accessToken, startDate, endDate) {
     }
 }
 
-// Exportar función para uso desde los jobs
+// Exportar funciones para uso desde los jobs (unificación de lógica)
 exports.syncAdAccountMetrics = syncAdAccountMetrics;
+exports.syncFacebookPageMetrics = syncFacebookPageMetrics;
+exports.syncInstagramMetrics = syncInstagramMetrics;
 // Valida un token de acceso
 async function validateToken(connectionId) {
     try {

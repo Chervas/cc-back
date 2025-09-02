@@ -3,7 +3,9 @@ const {
     SocialStatsDaily, 
     SocialPosts, 
     SocialPostStatsDaily, 
-    ClinicMetaAsset 
+    ClinicMetaAsset,
+    SocialAdsInsightsDaily,
+    PostPromotions
 } = require('../../models');
 const { Op } = require('sequelize');
 const sequelize = require('sequelize');
@@ -232,16 +234,52 @@ exports.getClinicaPosts = async (req, res) => {
                     model: SocialPostStatsDaily,
                     as: 'stats',
                     required: false,
-                    // Obtener solo las estadísticas más recientes
+                    // Obtener solo la estadística más reciente de cada post
+                    separate: true,
                     limit: 1,
                     order: [['date', 'DESC']]
                 }
             ]
         });
+
+        // Calcular alcance de pago por publicación (si hay vínculos con anuncios)
+        const postIds = posts.rows.map(p => p.id);
+        let paidReachByPost = {};
+        if (postIds.length > 0) {
+            // Buscar promociones vinculadas a estos posts
+            const promos = await PostPromotions.findAll({ where: { post_id: { [Op.in]: postIds } }, raw: true });
+            const adIds = promos.map(p => p.ad_id).filter(Boolean);
+            if (adIds.length > 0) {
+                // Sumar reach de insights por ad_id y rango
+                const insights = await SocialAdsInsightsDaily.findAll({
+                    where: {
+                        level: 'ad',
+                        entity_id: { [Op.in]: adIds },
+                        date: { [Op.between]: [start, end] }
+                    },
+                    attributes: [ 'entity_id', [sequelize.fn('SUM', sequelize.col('reach')), 'reach'] ],
+                    group: ['entity_id'],
+                    raw: true
+                });
+                const reachByAd = new Map(insights.map(i => [i.entity_id, parseInt(i.reach, 10) || 0]));
+                // Mapear por post
+                for (const promo of promos) {
+                    const r = reachByAd.get(promo.ad_id) || 0;
+                    paidReachByPost[promo.post_id] = (paidReachByPost[promo.post_id] || 0) + r;
+                }
+            }
+        }
+
+        // Adjuntar paid_reach en la salida
+        const rows = posts.rows.map(p => {
+            const json = p.toJSON();
+            json.paid_reach = paidReachByPost[p.id] || 0;
+            return json;
+        });
         
         return res.status(200).json({
             total: posts.count,
-            posts: posts.rows
+            posts: rows
         });
     } catch (error) {
         console.error('❌ Error al obtener publicaciones de clínica:', error);
@@ -269,6 +307,7 @@ exports.getPost = async (req, res) => {
                     model: SocialPostStatsDaily,
                     as: 'stats',
                     required: false,
+                    separate: true,
                     order: [['date', 'ASC']]
                 }
             ]
@@ -357,6 +396,7 @@ exports.getTopPosts = async (req, res) => {
                             as: 'stats',
                             required: false,
                             // Obtener solo las estadísticas más recientes
+                            separate: true,
                             limit: 1,
                             order: [['date', 'DESC']]
                         }
@@ -508,5 +548,67 @@ exports.getDashboardSummary = async (req, res) => {
             message: 'Error al obtener resumen del dashboard',
             error: error.message
         });
+    }
+};
+// Serie diaria: orgánico vs. de pago por clínica
+exports.getOrganicVsPaidByDay = async (req, res) => {
+    try {
+        const { clinicaId } = req.params;
+        const { startDate, endDate, assetType } = req.query;
+        if (!clinicaId) return res.status(400).json({ message: 'ID de clínica no proporcionado' });
+
+        const start = startDate ? new Date(startDate) : new Date(Date.now() - 30*24*60*60*1000);
+        const end = endDate ? new Date(endDate) : new Date();
+
+        // ORGÁNICO: sumar reach por día desde SocialPostStatsDaily cruzado con SocialPosts
+        const organicRows = await SocialPostStatsDaily.findAll({
+            attributes: ['date', [sequelize.fn('SUM', sequelize.col('reach')), 'reach']],
+            include: [
+                { model: SocialPosts, as: 'post', attributes: [], where: { clinica_id: clinicaId, ...(assetType ? { asset_type: assetType } : {}) } }
+            ],
+            where: { date: { [Op.between]: [start, end] } },
+            group: ['date'],
+            order: [['date','ASC']],
+            raw: true
+        });
+
+        // DE PAGO: reach por día desde SocialAdsInsightsDaily filtrando ad accounts de la clínica y plataforma
+        const adAccounts = await ClinicMetaAsset.findAll({ where: { clinicaId, assetType: 'ad_account', isActive: true }, raw: true });
+        const adAccountIds = adAccounts.map(a => a.metaAssetId);
+        let paidRows = [];
+        if (adAccountIds.length > 0) {
+            const wherePaid = {
+                ad_account_id: { [Op.in]: adAccountIds },
+                date: { [Op.between]: [start, end] }
+            };
+            if (assetType === 'instagram_business') wherePaid.publisher_platform = 'instagram';
+            if (assetType === 'facebook_page') wherePaid.publisher_platform = 'facebook';
+
+            paidRows = await SocialAdsInsightsDaily.findAll({
+                attributes: ['date', [sequelize.fn('SUM', sequelize.col('reach')), 'reach']],
+                where: wherePaid,
+                group: ['date'],
+                order: [['date','ASC']],
+                raw: true
+            });
+        }
+
+        // Unificar por fecha
+        const map = new Map();
+        for (const r of organicRows) {
+            const d = r.date; const v = parseInt(r.reach,10) || 0;
+            map.set(d, { date: d, organic: v, paid: 0 });
+        }
+        for (const r of paidRows) {
+            const d = r.date; const v = parseInt(r.reach,10) || 0;
+            const row = map.get(d) || { date: d, organic: 0, paid: 0 };
+            row.paid += v; map.set(d, row);
+        }
+        const series = Array.from(map.values()).sort((a,b)=> a.date < b.date ? -1 : 1).map(x => ({ ...x, total: x.organic + x.paid }));
+
+        return res.status(200).json({ startDate: start, endDate: end, assetType: assetType || null, series });
+    } catch (error) {
+        console.error('❌ Error en getOrganicVsPaidByDay:', error);
+        return res.status(500).json({ message: 'Error interno', error: error.message });
     }
 };

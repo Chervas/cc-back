@@ -57,6 +57,7 @@ module.exports = (sequelize, DataTypes) => {
         reach_facebook: { type: DataTypes.INTEGER, defaultValue: 0 },
         impressions_instagram: { type: DataTypes.INTEGER, defaultValue: 0 },
         impressions_facebook: { type: DataTypes.INTEGER, defaultValue: 0 },
+        views_facebook: { type: DataTypes.INTEGER, defaultValue: 0 },
         spend_instagram: { type: DataTypes.DECIMAL(12, 2), defaultValue: 0 },
         spend_facebook: { type: DataTypes.DECIMAL(12, 2), defaultValue: 0 },
         followers: {
