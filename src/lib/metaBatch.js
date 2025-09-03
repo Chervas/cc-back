@@ -11,7 +11,13 @@ const axios = require('axios');
  */
 async function graphBatch(accessToken, requests, baseUrl) {
   const META_API_BASE_URL = baseUrl || process.env.META_API_BASE_URL || 'https://graph.facebook.com/v23.0';
-  const root = META_API_BASE_URL.replace(/\/v\d+\.\d+$/, '/v23.0');
+  // Asegurar que siempre llamamos a una versión concreta (v23.0)
+  let root = META_API_BASE_URL;
+  if (/\/v\d+\.\d+$/.test(root)) {
+    root = root.replace(/\/v\d+\.\d+$/, '/v23.0');
+  } else {
+    root = root.replace(/\/?$/, '') + '/v23.0';
+  }
 
   const chunkSize = 50;
   const chunks = [];
@@ -49,4 +55,3 @@ async function graphBatch(accessToken, requests, baseUrl) {
 }
 
 module.exports = { graphBatch };
-

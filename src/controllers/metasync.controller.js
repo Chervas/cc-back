@@ -1003,6 +1003,7 @@ async function syncFacebookPosts(asset, accessToken, startDate, endDate) {
         // metaGet está importado a nivel global
         const postsResponse = await metaGet(`${asset.metaAssetId}/posts`, {
             params: {
+                // Campos mínimos y estables para listar (evitar 400 por campos no soportados en el edge)
                 fields: 'id,message,created_time,permalink_url,status_type',
                 since,
                 until,
@@ -1020,7 +1021,8 @@ async function syncFacebookPosts(asset, accessToken, startDate, endDate) {
 
         // Siempre traer últimos N posts recientes (parametrizable), sin attachments
         const recentLimit = parseInt(process.env.METASYNC_POSTS_FALLBACK_LIMIT || '30', 10);
-        const recentResp = await metaGet(`${asset.metaAssetId}/posts`, {
+        // Fallback: usar published_posts para últimos N (más estable que posts)
+        const recentResp = await metaGet(`${asset.metaAssetId}/published_posts`, {
             params: {
                 fields: 'id,message,created_time,permalink_url,status_type',
                 limit: recentLimit
@@ -1040,8 +1042,8 @@ async function syncFacebookPosts(asset, accessToken, startDate, endDate) {
         // Guardar/actualizar publicaciones en bloque (lifetime en SocialPosts)
         const postIdToDbId = new Map();
         for (const post of posts) {
-            // media_type/URL se rellenará tras fetch de attachments por post
-            const mediaType = post.media_type || null;
+            // media_type/URL se rellenará tras fetch de detalles (attachments/base)
+            const mediaType = post.media_type || (post.type ? String(post.type).toLowerCase() : null);
             const mediaUrl = post.media_url || null;
 
             const postData = {
@@ -1070,22 +1072,26 @@ async function syncFacebookPosts(asset, accessToken, startDate, endDate) {
             return { status: 'completed', recordsProcessed: 0 };
         }
 
-        // Fetch attachments/object_id por post para detectar vídeo de forma robusta
+        // Fetch attachments via edge y campos base por post (evitar deprecation en fields=attachments)
         try {
-            const attReqs = posts.map(p => ({ method: 'GET', relative_url: `${p.id}?fields=attachments{media_type,media,target,url,subattachments},object_id,permalink_url,status_type,type,full_picture` }));
-            const attResps = attReqs.length ? await graphBatch(accessToken, attReqs, process.env.META_API_BASE_URL) : [];
+            const attReqs = posts.map(p => ({ method: 'GET', relative_url: `${p.id}/attachments?fields=media_type,media,target,url,subattachments` }));
+            const baseReqs = posts.map(p => ({ method: 'GET', relative_url: `${p.id}?fields=object_id,permalink_url,status_type,type,full_picture,picture` }));
+            const batched = attReqs.length ? await graphBatch(accessToken, [...attReqs, ...baseReqs], process.env.META_API_BASE_URL) : [];
+            const nPosts = posts.length;
             for (let i = 0; i < posts.length; i++) {
-                const body = (() => { try { const b = attResps[i]?.body; return typeof b === 'string' ? JSON.parse(b) : b; } catch { return null; } })();
+                const attBody = (() => { try { const b = batched[i]?.body; return typeof b === 'string' ? JSON.parse(b) : b; } catch { return null; } })();
+                const baseBody = (() => { try { const b = batched[i + nPosts]?.body; return typeof b === 'string' ? JSON.parse(b) : b; } catch { return null; } })();
                 const post = posts[i];
-                post._attachments = body?.attachments?.data || [];
-                post._object_id = body?.object_id || null;
-                post.status_type = body?.status_type || post.status_type;
-                post.permalink_url = body?.permalink_url || post.permalink_url;
-                post.type = body?.type || post.type;
-                post.full_picture = body?.full_picture || post.full_picture;
+                post._attachments = attBody?.data || [];
+                post._object_id = baseBody?.object_id || null;
+                post.status_type = baseBody?.status_type || post.status_type;
+                post.permalink_url = baseBody?.permalink_url || post.permalink_url;
+                post.type = baseBody?.type || post.type;
+                post.full_picture = baseBody?.full_picture || post.full_picture;
+                post.picture = baseBody?.picture || post.picture;
             }
         } catch (e) {
-            console.warn('⚠️ Error obteniendo attachments/object_id por post:', e.response?.data || e.message);
+            console.warn('⚠️ Error obteniendo attachments/object_id por post (edge):', e.response?.data || e.message);
         }
 
         // Actualizar tipo y thumbnail por post tras fetch de detalles
@@ -1121,12 +1127,32 @@ async function syncFacebookPosts(asset, accessToken, startDate, endDate) {
                     mediaThumb = post.full_picture;
                 } else if (att?.media?.image?.src) {
                     mediaThumb = att.media.image.src;
+                } else if (att?.subattachments?.data?.length) {
+                    // Álbum/múltiples fotos: tomar la primera miniatura disponible
+                    const child = att.subattachments.data.find(x => x?.media?.image?.src) || att.subattachments.data[0];
+                    mediaThumb = child?.media?.image?.src || null;
+                } else {
+                    // Fallback adicional: intentar /{object_id}/picture?redirect=false
+                    try {
+                        const picId = post._object_id || att?.target?.id || (att?.subattachments?.data?.[0]?.target?.id) || null;
+                        if (picId) {
+                            const pic = await metaGet(`${picId}/picture`, { params: { redirect: 'false', type: 'normal' }, accessToken });
+                            mediaThumb = pic?.data?.data?.url || mediaThumb;
+                        }
+                    } catch (e) {
+                        console.warn('⚠️ FB picture fallback fallo:', e.response?.data || e.message);
+                    }
                 }
                 const postModel = await SocialPosts.findByPk(dbId);
                 if (postModel) {
                     const payload = {};
-                    if (postType && !postModel.media_type) payload.media_type = String(postType).toLowerCase();
-                    if (mediaThumb && !postModel.media_url) payload.media_url = mediaThumb;
+                    const ptLower = postType ? String(postType).toLowerCase() : null;
+                    // Asegurar que el tipo de post quede disponible para el frontend
+                    if (ptLower && postModel.post_type !== ptLower) payload.post_type = ptLower;
+                    // Completar/ajustar media_type si difiere
+                    if (ptLower && postModel.media_type !== ptLower) payload.media_type = ptLower;
+                    // Actualizar thumbnail si cambia o si no existe
+                    if (mediaThumb && postModel.media_url !== mediaThumb) payload.media_url = mediaThumb;
                     if (Object.keys(payload).length) await postModel.update(payload);
                 }
             }
@@ -1137,7 +1163,7 @@ async function syncFacebookPosts(asset, accessToken, startDate, endDate) {
         // Batching: insights + reactions/comm/shares summary + métricas de vídeo cuando aplique
         const requests = [];
         for (const post of posts) {
-            // Page Insights (lifetime) por publicación (evitar métricas problemáticas)
+            // Page Insights (lifetime) por publicación (sin métricas extra de avg time)
             requests.push({ method: 'GET', relative_url: `${post.id}/insights?metric=post_impressions,post_impressions_unique,post_reactions_by_type_total,post_video_views&period=lifetime` });
         }
         for (const post of posts) {
@@ -1244,7 +1270,7 @@ async function syncFacebookPosts(asset, accessToken, startDate, endDate) {
                 if (typeof impressions_total === 'number') {
                     updatePayload.impressions_count_fb = impressions_total;
                 }
-                // Si no es vídeo, establecer avg a 0 explícitamente
+                // Si no es vídeo, explicitar 0
                 if (!isVideoPost) updatePayload.avg_watch_time_ms = 0;
                 // Views de vídeo por post (usar post_video_views si está disponible; si no, usar de video_insights más abajo)
                 if (post_video_views_total > 0) {
@@ -1326,11 +1352,14 @@ async function syncFacebookPosts(asset, accessToken, startDate, endDate) {
                     }
                     // Actualizar snapshot diario
                     const snap = await SocialPostStatsDaily.findOne({ where: { post_id: dbPostId, date: snapDate } });
+                    // Preservar vistas previas si la métrica a nivel de vídeo no trae datos
+                    let vv = views || 0;
+                    if (vv === 0) {
+                        vv = (snap?.video_views || 0) || (postModel?.views_count_fb || 0);
+                    }
                     if (snap) {
-                        const vv = views || post_video_views_total || 0;
                         await snap.update({ video_views: vv, avg_watch_time: avgSecs });
                     } else {
-                        const vv = views || post_video_views_total || 0;
                         await SocialPostStatsDaily.create({ post_id: dbPostId, date: snapDate, impressions: 0, reach: 0, engagement: 0, likes: 0, comments: 0, shares: 0, saved: 0, video_views: vv, avg_watch_time: avgSecs });
                     }
                 } catch (e) {
