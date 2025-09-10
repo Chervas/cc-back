@@ -32,6 +32,12 @@ router.get('/clinica/:clinicaId/stats', socialStatsController.getClinicaStats);
 router.get('/asset/:assetId/stats', socialStatsController.getAssetStats);
 router.get('/clinica/:clinicaId/posts', socialStatsController.getClinicaPosts);
 router.get('/clinica/:clinicaId/organic-vs-paid', socialStatsController.getOrganicVsPaidByDay);
+router.get('/clinica/:clinicaId/views-organic-vs-paid', socialStatsController.getViewsOrganicVsPaidByDay);
+// Desgloses de pago (Meta Ads)
+router.get('/clinica/:clinicaId/ads/paid-views-breakdown', socialStatsController.getPaidViewsBreakdown);
+router.get('/clinica/:clinicaId/ads/paid-reach-breakdown', socialStatsController.getPaidReachBreakdown);
+// Salud de campañas (Meta Ads inicialmente)
+router.get('/clinica/:clinicaId/ads/health', socialStatsController.getAdsHealth);
 router.get('/post/:postId', socialStatsController.getPost);
 router.get('/clinica/:clinicaId/top-posts', socialStatsController.getTopPosts);
 router.get('/clinica/:clinicaId/dashboard', socialStatsController.getDashboardSummary);
@@ -54,6 +60,9 @@ router.get('/jobs/logs', metaJobsController.getJobsLogs);
 router.get('/jobs/statistics', metaJobsController.getJobsStatistics);
 router.get('/jobs/configuration', metaJobsController.getJobsConfiguration);
 router.get('/jobs/next-executions', metaJobsController.getNextExecutions);
+// Monitorización de uso de API y logs
+router.get('/jobs/usage/meta', metaJobsController.getMetaUsageStatus);
+router.get('/jobs/sync-logs/:id/tail', metaJobsController.tailJobLog);
 router.get('/metrics/:clinicaId', metaSyncController.getMetricsByClinica);
 
 module.exports = router;

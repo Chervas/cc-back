@@ -14,6 +14,9 @@
  */
 
 const { metaSyncJobs } = require('../jobs/metasync.jobs');
+const { getUsageStatus } = require('../lib/metaClient');
+const fs = require('fs');
+const path = require('path');
 const { SyncLog, TokenValidation, SocialStatDaily } = require('../../models');
 const { Op } = require('sequelize');
 
@@ -89,7 +92,7 @@ exports.getJobsStatus = async (req, res) => {
     
     // Obtener logs recientes - CORREGIDO: usar job_type en lugar de syncType
     const recentLogs = await SyncLog.findAll({
-      attributes: ['job_type', 'status', 'start_time', 'end_time', 'records_processed', 'error_message'],
+      attributes: ['id','job_type', 'status', 'start_time', 'end_time', 'records_processed', 'error_message', 'status_report'],
       where: {
         job_type: {
           [Op.in]: ['automated_metrics_sync', 'manual_job_execution', 'health_check', 'token_validation', 'data_cleanup', 'ads_sync', 'ads_backfill']
@@ -145,12 +148,14 @@ exports.getJobsStatus = async (req, res) => {
       jobDescriptions: metaSyncJobs.jobDescriptions,
       todayStats,
       recentLogs: recentLogs.map(log => ({
+        id: log.id,
         jobType: log.job_type,
         status: log.status,
         startedAt: log.start_time,
         completedAt: log.end_time,
         recordsProcessed: log.records_processed,
-        errorMessage: log.error_message
+        errorMessage: log.error_message,
+        statusReport: (() => { try { return JSON.parse(log.status_report || '{}'); } catch { return {}; } })()
       }))
     });
 
@@ -160,6 +165,77 @@ exports.getJobsStatus = async (req, res) => {
       message: 'Error al obtener estado de jobs',
       error: error.message
     });
+  }
+};
+
+/**
+ * Uso actual de la API de Meta (para gauge de carga)
+ */
+exports.getMetaUsageStatus = async (req, res) => {
+  try {
+    const s = getUsageStatus();
+    res.json({
+      usagePct: s.usagePct || 0,
+      nextAllowedAt: s.nextAllowedAt || 0,
+      now: s.now || Date.now(),
+      waiting: (s.nextAllowedAt || 0) > Date.now()
+    });
+  } catch (e) {
+    console.error('❌ Error getMetaUsageStatus:', e);
+    res.status(500).json({ message: 'Error obteniendo uso Meta', error: e.message });
+  }
+};
+
+/**
+ * Tail simple del log del proceso (o log asociado a un SyncLog si se provee ruta)
+ * GET /jobs/sync-logs/:id/tail?lines=500
+ * Si no hay log específico, lee PM2_LOG_PATH/APP_LOG_PATH
+ */
+exports.tailJobLog = async (req, res) => {
+  try {
+    const lines = Math.min(parseInt(req.query.lines || '500', 10), 5000);
+    const filter = String(req.query.filter || '').toLowerCase(); // 'important'
+    const levelsParam = String(req.query.levels || '').toLowerCase(); // ej. 'warn,error'
+    const wantLevels = levelsParam ? new Set(levelsParam.split(',').map(s => s.trim())) : null;
+    const logPathFromEnv = process.env.PM2_LOG_PATH || process.env.APP_LOG_PATH || '';
+    let filePath = logPathFromEnv;
+
+    // Intentar obtener un log específico si más adelante guardamos log_path en SyncLogs.status_report
+    const id = req.params.id ? parseInt(req.params.id, 10) : null;
+    if (id) {
+      try {
+        const log = await SyncLog.findByPk(id);
+        const sr = (() => { try { return JSON.parse(log?.status_report || '{}'); } catch { return {}; } })();
+        if (sr.log_path && fs.existsSync(sr.log_path)) filePath = sr.log_path;
+      } catch {}
+    }
+
+    if (!filePath || !fs.existsSync(filePath)) {
+      return res.status(404).json({ message: 'No se encontró archivo de log. Configure PM2_LOG_PATH o APP_LOG_PATH.' });
+    }
+
+    const content = fs.readFileSync(filePath, 'utf8');
+    const arr = content.split(/\r?\n/);
+    const tail = arr.slice(-lines);
+    // Clasificar niveles simples
+    let items = tail.map((t) => ({
+      level: /error|❌/i.test(t) ? 'error' : (/warn|⚠️/i.test(t) ? 'warn' : 'info'),
+      line: t
+    }));
+    // Filtro de importancia: incluir sólo errores/avisos/acciones relevantes
+    if (filter === 'important') {
+      const actionRegex = /(📝|📢|▶️|📊|📆)/;
+      items = items.filter(it => it.level !== 'info' ? true : actionRegex.test(it.line));
+      // Excluir ruido de consultas automáticas
+      items = items.filter(it => !/Executing \(default\): SELECT/.test(it.line));
+    }
+    if (wantLevels && wantLevels.size) {
+      items = items.filter(it => wantLevels.has(it.level));
+    }
+    res.json({ filePath, lines: items.length, items });
+  } catch (e) {
+    console.error('❌ Error tailJobLog:', e);
+    res.status(500).json({ message: 'Error leyendo log', error: e.message });
   }
 };
 

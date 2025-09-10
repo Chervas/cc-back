@@ -2,6 +2,7 @@
 const axios = require('axios');
 
 let nextAllowedAt = 0; // epoch ms
+let lastUsagePct = 0; // last observed usage percentage across headers
 
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
@@ -26,9 +27,13 @@ function parseUsageHeader(h) {
 
 async function metaGet(url, { params = {}, accessToken, timeout = 30000 } = {}) {
   const META_API_BASE_URL = process.env.META_API_BASE_URL || 'https://graph.facebook.com/v23.0';
+  // Retardo suave entre requests (ms). Previene picos de uso.
   const delayMs = parseInt(process.env.METASYNC_REQUEST_DELAY_MS || '300', 10);
+  // Umbral de uso (%) a partir del cual activamos backoff
   const thresh = parseInt(process.env.METASYNC_RATE_LIMIT_THRESHOLD || '90', 10);
+  // Reintentos máximos para errores no RL
   const maxRetries = parseInt(process.env.METASYNC_MAX_RETRIES || '3', 10);
+  // En rate limit, esperar hasta la siguiente hora (true) o hacer backoff corto (false)
   const waitNextHour = String(process.env.METASYNC_WAIT_NEXT_HOUR_ON_LIMIT || 'true') === 'true';
 
   // Respect global gate
@@ -60,6 +65,7 @@ async function metaGet(url, { params = {}, accessToken, timeout = 30000 } = {}) 
       const pageUsage = parseUsageHeader(h['x-page-usage']);
       const bizUsage = parseUsageHeader(h['x-business-use-case-usage']);
       const usage = Math.max(appUsage, adUsage, pageUsage, bizUsage);
+      lastUsagePct = usage;
       if (usage >= thresh) {
         if (waitNextHour) {
           const d = new Date();
@@ -104,3 +110,11 @@ async function metaGet(url, { params = {}, accessToken, timeout = 30000 } = {}) 
 
 module.exports = { metaGet };
 
+// Exponer estado de uso/limit para monitorización
+module.exports.getUsageStatus = function getUsageStatus() {
+  return {
+    usagePct: lastUsagePct,
+    nextAllowedAt,
+    now: Date.now()
+  };
+}

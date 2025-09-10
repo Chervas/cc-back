@@ -242,7 +242,11 @@ exports.checkPermissions = async (req, res) => {
 exports.getSampleData = async (req, res) => {
   try {
     const assetId = req.params.assetId;
-    const metric = req.query.metric || 'page_impressions'; // Métrica por defecto
+  const metric = req.query.metric || 'page_impressions'; // Métrica por defecto
+  const period = req.query.period || 'day';
+  const qSince = req.query.since || null; // YYYY-MM-DD
+  const qUntil = req.query.until || null; // YYYY-MM-DD
+  const metricType = req.query.metric_type || null; // e.g., total_value
     
     // Obtener activo
     const asset = await ClinicMetaAsset.findByPk(assetId, {
@@ -284,16 +288,22 @@ exports.getSampleData = async (req, res) => {
       case 'facebook_page':
         apiUrl = `${META_API_BASE_URL}/${asset.metaAssetId}/insights`;
         params.metric = metric;
-        params.period = 'day';
-        params.since = since;
-        params.until = until;
+        params.period = period;
+        params.since = qSince || since;
+        params.until = qUntil || until;
         break;
       case 'instagram_business':
         apiUrl = `${META_API_BASE_URL}/${asset.metaAssetId}/insights`;
-        params.metric = 'impressions,reach,profile_views';
-        params.period = 'day';
-        params.since = since;
-        params.until = until;
+        // Permitir métrica personalizada (por ejemplo: content_views, views, reach)
+        params.metric = metric || 'reach';
+        params.period = period;
+        params.since = qSince || since;
+        params.until = qUntil || until;
+        if ((metric === 'content_views' || metric === 'views') && !metricType) {
+          params.metric_type = 'total_value';
+        } else if (metricType) {
+          params.metric_type = metricType;
+        }
         break;
       default:
         return res.status(400).json({
@@ -383,4 +393,3 @@ exports.getAssetDetails = async (req, res) => {
     });
   }
 };
-

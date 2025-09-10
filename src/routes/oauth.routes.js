@@ -387,7 +387,8 @@ router.post('/meta/map-assets', async (req, res) => {
             return res.status(404).json({ message: 'No hay conexión Meta activa para este usuario.' });
         }
 
-        // Nueva lógica: NO borrar mapeos. Actualizar/crear preservando IDs para no romper FK de métricas.
+        // Nota: actualizamos/creamos mapeos. Además, forzamos unicidad por tipo en casos clave
+        // (instagram_business) y limpiamos datos del activo desasociado.
         const createdOrUpdated = [];
         const selectedKeySet = new Set();
 
@@ -425,17 +426,114 @@ router.post('/meta/map-assets', async (req, res) => {
             }
         }
 
-        // Desactivar los que ya no estén seleccionados (no eliminar)
+        // Desactivar los que ya no estén seleccionados y limpiar sus datos
         const toDeactivate = existing.filter(a => !selectedKeySet.has(`${a.assetType}|${a.metaAssetId}`) && a.isActive);
         if (toDeactivate.length) {
-            await ClinicMetaAsset.update({ isActive: false }, {
-                where: {
-                    id: toDeactivate.map(a => a.id)
+            await ClinicMetaAsset.update({ isActive: false }, { where: { id: toDeactivate.map(a => a.id) } });
+            // Borrar datos asociados a IG/FB desactivados cuando aplica
+            const { SocialStatsDaily, SocialPosts, SocialPostStatsDaily } = db;
+            for (const a of toDeactivate) {
+                try {
+                    await SocialStatsDaily.destroy({ where: { clinica_id: clinicaId, asset_id: a.id } });
+                    await SocialPostStatsDaily.destroy({ where: { clinica_id: clinicaId, asset_id: a.id } });
+                    await SocialPosts.destroy({ where: { clinica_id: clinicaId, asset_id: a.id } });
+                    // Opcional: eliminar el mapeo físico si es IG (se solicitó borrar anteriores)
+                    if (a.assetType === 'instagram_business') {
+                        await ClinicMetaAsset.destroy({ where: { id: a.id } });
+                    }
+                } catch (cleanErr) {
+                    console.warn('⚠️ Error limpiando datos de activo desactivado', a.id, cleanErr.message);
                 }
-            });
+            }
         }
 
-        console.log(`✅ Mapeo actualizado para clínica ${clinicaId}: ${createdOrUpdated.length} activos activos, ${toDeactivate.length} inactivos`);
+        // Enforce: solo 1 instagram_business activo por clínica
+        try {
+            const activeIGs = await ClinicMetaAsset.findAll({ where: { clinicaId, assetType: 'instagram_business', isActive: true } });
+            if (activeIGs.length > 1) {
+                // Conservar el IG que venga en selectedAssets (el primero) o el más reciente
+                const selectedIGIds = selectedAssets.filter((a) => a.type === 'instagram_business').map((a) => String(a.id));
+                let keep = null;
+                if (selectedIGIds.length) {
+                    keep = activeIGs.find(a => selectedIGIds.includes(String(a.metaAssetId))) || activeIGs[0];
+                } else {
+                    keep = activeIGs[0];
+                }
+                const toDrop = activeIGs.filter(a => a.id !== keep.id);
+                if (toDrop.length) {
+                    await ClinicMetaAsset.update({ isActive: false }, { where: { id: toDrop.map(a => a.id) } });
+                    const { SocialStatsDaily, SocialPosts, SocialPostStatsDaily } = db;
+                    for (const a of toDrop) {
+                        try {
+                            await SocialStatsDaily.destroy({ where: { clinica_id: clinicaId, asset_id: a.id } });
+                            await SocialPostStatsDaily.destroy({ where: { clinica_id: clinicaId, asset_id: a.id } });
+                            await SocialPosts.destroy({ where: { clinica_id: clinicaId, asset_id: a.id } });
+                            await ClinicMetaAsset.destroy({ where: { id: a.id } });
+                        } catch (e) {
+                            console.warn('⚠️ Error limpiando datos IG duplicado', a.id, e.message);
+                        }
+                    }
+                }
+            }
+        } catch (enfErr) {
+            console.warn('⚠️ No se pudo forzar unicidad de Instagram por clínica:', enfErr.message);
+        }
+
+        // Enforce: solo 1 facebook_page activo por clínica
+        try {
+            const activeFB = await ClinicMetaAsset.findAll({ where: { clinicaId, assetType: 'facebook_page', isActive: true } });
+            if (activeFB.length > 1) {
+                const selectedFBIds = selectedAssets.filter((a) => a.type === 'facebook_page').map((a) => String(a.id));
+                let keep = activeFB[0];
+                if (selectedFBIds.length) keep = activeFB.find(a => selectedFBIds.includes(String(a.metaAssetId))) || activeFB[0];
+                const toDrop = activeFB.filter(a => a.id !== keep.id);
+                if (toDrop.length) {
+                    await ClinicMetaAsset.update({ isActive: false }, { where: { id: toDrop.map(a => a.id) } });
+                    const { SocialStatsDaily, SocialPosts, SocialPostStatsDaily } = db;
+                    for (const a of toDrop) {
+                        try {
+                            await SocialStatsDaily.destroy({ where: { clinica_id: clinicaId, asset_id: a.id } });
+                            await SocialPostStatsDaily.destroy({ where: { clinica_id: clinicaId, asset_id: a.id } });
+                            await SocialPosts.destroy({ where: { clinica_id: clinicaId, asset_id: a.id } });
+                            await ClinicMetaAsset.destroy({ where: { id: a.id } });
+                        } catch (e) {
+                            console.warn('⚠️ Error limpiando datos FB duplicado', a.id, e.message);
+                        }
+                    }
+                }
+            }
+        } catch (enfErr) {
+            console.warn('⚠️ No se pudo forzar unicidad de Facebook Page por clínica:', enfErr.message);
+        }
+
+        // Enforce: solo 1 ad_account activo por clínica
+        try {
+            const activeAD = await ClinicMetaAsset.findAll({ where: { clinicaId, assetType: 'ad_account', isActive: true } });
+            if (activeAD.length > 1) {
+                const selectedADIds = selectedAssets.filter((a) => a.type === 'ad_account').map((a) => String(a.id));
+                let keep = activeAD[0];
+                if (selectedADIds.length) keep = activeAD.find(a => selectedADIds.includes(String(a.metaAssetId))) || activeAD[0];
+                const toDrop = activeAD.filter(a => a.id !== keep.id);
+                if (toDrop.length) {
+                    await ClinicMetaAsset.update({ isActive: false }, { where: { id: toDrop.map(a => a.id) } });
+                    const { SocialAdsInsightsDaily, SocialAdsActionsDaily } = db;
+                    for (const a of toDrop) {
+                        try {
+                            // Borrar datos de Ads vinculados al ad_account eliminado
+                            await SocialAdsInsightsDaily.destroy({ where: { ad_account_id: a.metaAssetId } });
+                            await SocialAdsActionsDaily.destroy({ where: { ad_account_id: a.metaAssetId } });
+                            await ClinicMetaAsset.destroy({ where: { id: a.id } });
+                        } catch (e) {
+                            console.warn('⚠️ Error limpiando datos Ads duplicado', a.id, e.message);
+                        }
+                    }
+                }
+            }
+        } catch (enfErr) {
+            console.warn('⚠️ No se pudo forzar unicidad de Ad Account por clínica:', enfErr.message);
+        }
+
+        console.log(`✅ Mapeo actualizado para clínica ${clinicaId}: ${createdOrUpdated.length} activos activos, ${toDeactivate.length} inactivos (unicidad aplicada para IG/FB/Ads)`);
 
         // Disparar sincronización inicial SOLO del día actual (sin histórico)
         try {

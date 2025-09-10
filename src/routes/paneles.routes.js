@@ -244,9 +244,16 @@ router.get('/metricas/:tipo', async (req, res) => {
                         break;
                 }
 
+                // Fechas locales como cadenas YYYY-MM-DD para DATEONLY
+                const fmt = (d) => {
+                    const y = d.getFullYear();
+                    const m = String(d.getMonth() + 1).padStart(2, '0');
+                    const day = String(d.getDate()).padStart(2, '0');
+                    return `${y}-${m}-${day}`;
+                };
                 const where = {
                     clinica_id: idClinica,
-                    date: { [Op.between]: [inicio, ahora] }
+                    date: { [Op.between]: [fmt(inicio), fmt(ahora)] }
                 };
                 if (assetType) {
                     where.asset_type = assetType;
@@ -396,11 +403,17 @@ router.get('/series/seguidores', async (req, res) => {
         }
 
         // Obtener filas IG/FB en rango
+        const fmt = (d) => {
+            const y = d.getFullYear();
+            const m = String(d.getMonth() + 1).padStart(2, '0');
+            const day = String(d.getDate()).padStart(2, '0');
+            return `${y}-${m}-${day}`;
+        };
         const rows = await SocialStatsDaily.findAll({
             where: {
                 ...whereClinica,
                 asset_type: { [Op.in]: ['instagram_business', 'facebook_page'] },
-                date: { [Op.between]: [start, end] }
+                date: { [Op.between]: [fmt(start), fmt(end)] }
             },
             raw: true
         });
@@ -409,8 +422,7 @@ router.get('/series/seguidores', async (req, res) => {
         const ig = new Map();
         const fb = new Map();
         for (const r of rows) {
-            const d = new Date(r.date); d.setHours(0,0,0,0);
-            const key = d.toISOString().slice(0,10);
+            const key = typeof r.date === 'string' ? r.date.slice(0,10) : fmt(new Date(r.date));
             const val = Number(r.followers || 0);
             if (r.asset_type === 'instagram_business') {
                 ig.set(key, (ig.get(key) || 0) + val);

@@ -721,8 +721,9 @@ async function syncFacebookPageMetrics(asset, accessToken, startDate, endDate) {
 
         // Alcance orgánico diario (CSV): page_impressions_organic_unique
         try {
-            const since = Math.floor(startDate.getTime() / 1000);
-            const until = Math.floor(endDate.getTime() / 1000);
+            // Ventana diaria inclusiva: incluir el día de endDate sumando +1 día al until
+            const since = Math.floor(new Date(new Date(startDate).setHours(0,0,0,0)).getTime() / 1000);
+            const until = Math.floor(new Date(new Date(endDate).setHours(0,0,0,0)).getTime() / 1000) + 86400; // +1 día
             const paramsBase = { since, until, period: 'day', access_token: tokenForPage };
 
             let valuesOrganic = [];
@@ -768,10 +769,11 @@ async function syncFacebookPageMetrics(asset, accessToken, startDate, endDate) {
                 }
             }
 
+            // 1.a Guardar alcance orgánico (reach) por día
             for (const item of valuesOrganic) {
-                // Normalizar fecha: usar end_time - 1 día para etiquetar el día del periodo
                 const end = new Date(item.end_time);
                 const d = new Date(end);
+                // Alinear con IG: almacenar en el día anterior al end_time
                 d.setDate(d.getDate() - 1);
                 d.setHours(0,0,0,0);
                 const existing = await SocialStatsDaily.findOne({ where: { clinica_id: asset.clinicaId, asset_id: asset.id, date: d } });
@@ -780,11 +782,92 @@ async function syncFacebookPageMetrics(asset, accessToken, startDate, endDate) {
                     asset_id: asset.id,
                     asset_type: asset.assetType,
                     date: d,
-                    reach: item.value || 0,
-                    reach_total: item.value || 0
+                    reach: item.value || 0
                 };
                 if (existing) await existing.update(payload); else await SocialStatsDaily.create(payload);
-                console.log(`📆 FB reach asignado a ${d.toISOString().slice(0,10)} (${usedApproximation ? 'aprox.' : 'orgánico oficial'})`);
+                console.log(`📆 FB reach (orgánico) asignado a ${d.toISOString().slice(0,10)} (${usedApproximation ? 'aprox.' : 'orgánico oficial'})`);
+            }
+
+            // 1.b Guardar alcance total único (reach_total) por día: page_impressions_unique
+            try {
+                const totalResp = await axios.get(`${META_API_BASE_URL}/${asset.metaAssetId}/insights`, {
+                    params: { ...paramsBase, metric: 'page_impressions_unique' }
+                });
+                const totalVals = totalResp.data?.data?.[0]?.values || [];
+                for (const item of totalVals) {
+                    const end = new Date(item.end_time);
+                    const d = new Date(end);
+                    // Alinear con IG: almacenar en el día anterior al end_time
+                    d.setDate(d.getDate() - 1);
+                    d.setHours(0,0,0,0);
+                    const existing = await SocialStatsDaily.findOne({ where: { clinica_id: asset.clinicaId, asset_id: asset.id, date: d } });
+                    const payload = {
+                        clinica_id: asset.clinicaId,
+                        asset_id: asset.id,
+                        asset_type: asset.assetType,
+                        date: d,
+                        reach_total: item.value || 0
+                    };
+                    if (existing) await existing.update(payload); else await SocialStatsDaily.create(payload);
+                    console.log(`📆 FB reach_total (page_impressions_unique) asignado a ${d.toISOString().slice(0,10)}`);
+                }
+            } catch (e) {
+                console.warn('⚠️ No se pudo obtener page_impressions_unique (reach_total):', e.response?.data || e.message);
+            }
+
+            // 1.c Guardar impresiones totales por día: page_impressions (compat: views post 2025-11-15)
+            try {
+                const NOV15_2025 = new Date('2025-11-15');
+                const useViews = new Date(endDate) >= NOV15_2025;
+                let metricName = 'page_impressions';
+                if (useViews) {
+                    // A partir del 15/11/2025, Meta indica usar "views"
+                    metricName = 'views';
+                }
+                const imprResp = await axios.get(`${META_API_BASE_URL}/${asset.metaAssetId}/insights`, {
+                    params: { ...paramsBase, metric: metricName }
+                });
+                const imprVals = imprResp.data?.data?.[0]?.values || [];
+                for (const item of imprVals) {
+                    const end = new Date(item.end_time);
+                    const d = new Date(end);
+                    // Alinear con IG: almacenar en el día anterior al end_time
+                    d.setDate(d.getDate() - 1);
+                    d.setHours(0,0,0,0);
+                    const existing = await SocialStatsDaily.findOne({ where: { clinica_id: asset.clinicaId, asset_id: asset.id, date: d } });
+                    const payload = {
+                        clinica_id: asset.clinicaId,
+                        asset_id: asset.id,
+                        asset_type: asset.assetType,
+                        date: d,
+                        impressions: item.value || 0
+                    };
+                    if (existing) await existing.update(payload); else await SocialStatsDaily.create(payload);
+                    console.log(`📆 FB ${metricName} asignado a ${d.toISOString().slice(0,10)}`);
+                }
+            } catch (e) {
+                console.warn('⚠️ No se pudo obtener impresiones/vistas totales de FB:', e.response?.data || e.message);
+            }
+
+            // 1.d Guardar visitas a la página por día: page_views_total
+            try {
+                const viewsResp = await axios.get(`${META_API_BASE_URL}/${asset.metaAssetId}/insights`, {
+                    params: { since, until, period: 'day', access_token: tokenForPage, metric: 'page_views_total' }
+                });
+                const vals = viewsResp.data?.data?.[0]?.values || [];
+                for (const item of vals) {
+                    const end = new Date(item.end_time);
+                    const d = new Date(end);
+                    // Alinear con IG: almacenar en el día anterior al end_time
+                    d.setDate(d.getDate() - 1);
+                    d.setHours(0,0,0,0);
+                    const existing = await SocialStatsDaily.findOne({ where: { clinica_id: asset.clinicaId, asset_id: asset.id, date: d } });
+                    const payload = { clinica_id: asset.clinicaId, asset_id: asset.id, asset_type: asset.assetType, date: d, profile_visits: parseInt(item.value || 0, 10) || 0 };
+                    if (existing) await existing.update(payload); else await SocialStatsDaily.create(payload);
+                    console.log(`📆 FB page_views_total asignado a ${d.toISOString().slice(0,10)} = ${payload.profile_visits}`);
+                }
+            } catch (e) {
+                console.warn('⚠️ FB page_views_total no disponible:', e.response?.data || e.message);
             }
         } catch (reachErr) {
             console.warn(`⚠️ FB page reach orgánico falló para ${asset.metaAssetId}:`, reachErr.response?.data || reachErr.message);
@@ -823,10 +906,10 @@ async function syncInstagramMetrics(asset, accessToken, startDate, endDate) {
             console.warn('⚠️ Rango fuera de los últimos 30 días, ajustando a últimos 30 días para IG followers');
         }
 
-        // Obtener variación diaria de seguidores en bloques de 30 días
+        // Obtener variación diaria de seguidores en bloques de 30 días (manejar restricciones IG)
         const statsByDate = {};
         let followerValues = [];
-        {
+        try {
             let chunkStart = since;
             if (chunkStart > until) {
                 // Ajuste: recuperar últimos 30 días hasta ayer
@@ -834,22 +917,29 @@ async function syncInstagramMetrics(asset, accessToken, startDate, endDate) {
             }
             while (chunkStart <= until) {
                 const chunkEnd = Math.min(chunkStart + MAX_RANGE_SECONDS, until);
-                const response = await axios.get(`${META_API_BASE_URL}/${asset.metaAssetId}/insights`, {
-                    params: {
-                        metric: 'follower_count',
-                        period: 'day',
-                        since: chunkStart,
-                        until: chunkEnd,
-                        access_token: accessToken
-                    }
-                });
-                const values = response.data?.data?.[0]?.values || [];
-                followerValues = followerValues.concat(values);
-                if (chunkEnd === until) {
-                    break;
+                try {
+                    const response = await axios.get(`${META_API_BASE_URL}/${asset.metaAssetId}/insights`, {
+                        params: {
+                            metric: 'follower_count',
+                            period: 'day',
+                            since: chunkStart,
+                            until: chunkEnd,
+                            access_token: accessToken
+                        }
+                    });
+                    const values = response.data?.data?.[0]?.values || [];
+                    followerValues = followerValues.concat(values);
+                } catch (e) {
+                    // Si IG rechaza por ventana fuera de rango u otra causa, registrar y continuar
+                    const msg = e.response?.data || e.message;
+                    console.warn(`⚠️ IG follower_count no disponible ${chunkStart}-${chunkEnd}:`, msg);
                 }
+                if (chunkEnd === until) break;
                 chunkStart = chunkEnd + 86400; // avanzar un día para evitar solapamiento
             }
+        } catch (outer) {
+            console.warn('⚠️ IG follower_count (bloques) falló, se continúa sin followers_day:', outer.response?.data || outer.message);
+            followerValues = [];
         }
         for (const value of followerValues) {
             const date = new Date(value.end_time);
@@ -885,35 +975,38 @@ async function syncInstagramMetrics(asset, accessToken, startDate, endDate) {
             runningTotal -= statsByDate[dateStr].followers_day || 0;
         }
 
-        // Registrar estadísticas del día actual
-        const todayDate = new Date(endDate);
-        todayDate.setHours(0, 0, 0, 0);
-        const todayStr = todayDate.toISOString().split('T')[0];
-        let yesterdayFollowers = 0;
-        if (dates.length) {
-            const lastDateStr = dates[dates.length - 1];
-            yesterdayFollowers = statsByDate[lastDateStr]?.followers || 0;
-        } else {
-            const prevDate = new Date(todayDate);
-            prevDate.setDate(prevDate.getDate() - 1);
-            const prevStats = await SocialStatsDaily.findOne({
-                where: {
-                    clinica_id: asset.clinicaId,
-                    asset_id: asset.id,
-                    date: prevDate
-                }
-            });
-            yesterdayFollowers = prevStats ? prevStats.followers : 0;
+        // Registrar seguidores para endDate SOLO si cae dentro de la ventana reciente (<= 30 días)
+        const endDateMid = new Date(endDate); endDateMid.setHours(0,0,0,0);
+        const within30Days = (today.getTime() - endDateMid.getTime()) <= MAX_RANGE_SECONDS * 1000;
+        if (within30Days) {
+            const todayDate = endDateMid;
+            const todayStr = todayDate.toISOString().split('T')[0];
+            let yesterdayFollowers = 0;
+            if (dates.length) {
+                const lastDateStr = dates[dates.length - 1];
+                yesterdayFollowers = statsByDate[lastDateStr]?.followers || 0;
+            } else {
+                const prevDate = new Date(todayDate);
+                prevDate.setDate(prevDate.getDate() - 1);
+                const prevStats = await SocialStatsDaily.findOne({
+                    where: {
+                        clinica_id: asset.clinicaId,
+                        asset_id: asset.id,
+                        date: prevDate
+                    }
+                });
+                yesterdayFollowers = prevStats ? prevStats.followers : 0;
+            }
+            statsByDate[todayStr] = {
+                clinica_id: asset.clinicaId,
+                asset_id: asset.id,
+                asset_type: asset.assetType,
+                date: todayDate,
+                followers: currentFollowers,
+                followers_day: currentFollowers - yesterdayFollowers
+            };
+            dates.push(todayStr);
         }
-        statsByDate[todayStr] = {
-            clinica_id: asset.clinicaId,
-            asset_id: asset.id,
-            asset_type: asset.assetType,
-            date: todayDate,
-            followers: currentFollowers,
-            followers_day: currentFollowers - yesterdayFollowers
-        };
-        dates.push(todayStr);
 
         // Guardar/actualizar en la base de datos
         for (const dateStr of dates) {
@@ -936,23 +1029,27 @@ async function syncInstagramMetrics(asset, accessToken, startDate, endDate) {
 
         // IG reach (orgánico) diario
         try {
-            const since = Math.floor(startDate.getTime() / 1000);
-            const until = Math.floor(endDate.getTime() / 1000);
+            // Ajuste de ventana: si since == until, ampliar until +1 día para capturar el bucket diario
+            const sReach = new Date(startDate); sReach.setHours(0,0,0,0);
+            const uReach = new Date(endDate); uReach.setHours(0,0,0,0);
+            // Incluir SIEMPRE el día de endDate en la ventana IG (uReach +1)
+            uReach.setDate(uReach.getDate() + 1);
+            const sinceStr = sReach.toISOString().slice(0,10);
+            const untilStr = uReach.toISOString().slice(0,10);
             const reachResp = await axios.get(`${META_API_BASE_URL}/${asset.metaAssetId}/insights`, {
                 params: {
                     metric: 'reach',
                     period: 'day',
-                    since,
-                    until,
+                    since: sinceStr,
+                    until: untilStr,
                     access_token: accessToken
                 }
             });
             const values = reachResp.data?.data?.[0]?.values || [];
             for (const item of values) {
-                // Normalizar fecha: end_time - 1 día
+                // Normalizar fecha: usar el día de end_time (Meta bucket-day)
                 const end = new Date(item.end_time);
                 const d = new Date(end);
-                d.setDate(d.getDate() - 1);
                 d.setHours(0,0,0,0);
                 const existing = await SocialStatsDaily.findOne({ where: { clinica_id: asset.clinicaId, asset_id: asset.id, date: d } });
                 const payload = {
@@ -970,8 +1067,152 @@ async function syncInstagramMetrics(asset, accessToken, startDate, endDate) {
             console.warn(`⚠️ IG reach diario falló para ${asset.metaAssetId}:`, reachErr.response?.data || reachErr.message);
         }
 
+        // IG profile views (visitas al perfil) — requiere metric_type=total_value
+        try {
+            const s = new Date(startDate); s.setHours(0,0,0,0);
+            const e = new Date(endDate); e.setHours(0,0,0,0);
+            const singleDay = s.getTime() === e.getTime();
+            if (singleDay) {
+                const sinceStr = s.toISOString().slice(0,10);
+                const untilStr = new Date(e.getTime() + 24*60*60*1000).toISOString().slice(0,10);
+                const resp = await axios.get(`${META_API_BASE_URL}/${asset.metaAssetId}/insights`, {
+                    params: {
+                        metric: 'profile_views',
+                        metric_type: 'total_value',
+                        period: 'day',
+                        since: sinceStr,
+                        until: untilStr,
+                        access_token: accessToken
+                    }
+                });
+                const totalVal = resp.data?.data?.[0]?.total_value?.value;
+                if (typeof totalVal === 'number') {
+                    const d = new Date(e); d.setHours(0,0,0,0);
+                    const existing = await SocialStatsDaily.findOne({ where: { clinica_id: asset.clinicaId, asset_id: asset.id, date: d } });
+                    const payload = { clinica_id: asset.clinicaId, asset_id: asset.id, asset_type: asset.assetType, date: d, profile_visits: totalVal };
+                    if (existing) await existing.update(payload); else await SocialStatsDaily.create(payload);
+                    console.log(`📆 IG profile_views asignado a ${d.toISOString().slice(0,10)} = ${totalVal}`);
+                }
+            } else {
+                console.warn('ℹ️ IG profile_views omitido: solo se guarda para ventanas de un día');
+            }
+        } catch (e) {
+            console.warn('⚠️ IG profile_views no disponible:', e.response?.data || e.message);
+        }
+
+        // IG total_interactions (interacciones con el contenido) — usar como engagement diario
+        let igEngagementTotal = null;
+        try {
+            const s = new Date(startDate); s.setHours(0,0,0,0);
+            const e = new Date(endDate); e.setHours(0,0,0,0);
+            const singleDay = s.getTime() === e.getTime();
+            if (singleDay) {
+                const sinceStr = s.toISOString().slice(0,10);
+                const untilStr = new Date(e.getTime() + 24*60*60*1000).toISOString().slice(0,10);
+                const resp = await axios.get(`${META_API_BASE_URL}/${asset.metaAssetId}/insights`, {
+                    params: {
+                        metric: 'total_interactions',
+                        metric_type: 'total_value',
+                        period: 'day',
+                        since: sinceStr,
+                        until: untilStr,
+                        access_token: accessToken
+                    }
+                });
+                const totalVal = resp.data?.data?.[0]?.total_value?.value;
+                if (typeof totalVal === 'number') {
+                    igEngagementTotal = totalVal;
+                    const d = new Date(e); d.setHours(0,0,0,0);
+                    const existing = await SocialStatsDaily.findOne({ where: { clinica_id: asset.clinicaId, asset_id: asset.id, date: d } });
+                    const payload = { clinica_id: asset.clinicaId, asset_id: asset.id, asset_type: asset.assetType, date: d, engagement: totalVal };
+                    if (existing) await existing.update(payload); else await SocialStatsDaily.create(payload);
+                    console.log(`📆 IG total_interactions asignado a ${d.toISOString().slice(0,10)} = ${totalVal}`);
+                }
+            } else {
+                console.warn('ℹ️ IG total_interactions omitido: solo se guarda para ventanas de un día');
+            }
+        } catch (e) {
+            console.warn('⚠️ IG total_interactions no disponible:', e.response?.data || e.message);
+        }
+
+        // IG visualizaciones totales diario (métricas válidas recientes: content_views o views; fallback a impressions si aplica)
+        try {
+            // Ajuste de ventana: si since == until, ampliar until +1 día para capturar el bucket diario
+            const sViews = new Date(startDate); sViews.setHours(0,0,0,0);
+            const uViews = new Date(endDate); uViews.setHours(0,0,0,0);
+            // Incluir SIEMPRE el día de endDate en la ventana (uViews +1)
+            uViews.setDate(uViews.getDate() + 1);
+            const sinceStr = sViews.toISOString().slice(0,10);
+            const untilStr = uViews.toISOString().slice(0,10);
+            const tryMetrics = ['content_views', 'views', 'impressions'];
+            let usedMetric = null;
+            let values = [];
+            for (const m of tryMetrics) {
+                try {
+                    const p = { metric: m, period: 'day', since: sinceStr, until: untilStr, access_token: accessToken };
+                    if (m === 'content_views' || m === 'views') {
+                        p.metric_type = 'total_value';
+                    }
+                    const resp = await axios.get(`${META_API_BASE_URL}/${asset.metaAssetId}/insights`, { params: p });
+                    const node = resp.data?.data?.[0];
+                    const arr = node?.values || [];
+                    if (Array.isArray(arr) && arr.length > 0) { values = arr; usedMetric = m; break; }
+                    // Manejar total_value para cuentas IG (sin 'values')
+                    const totalVal = node?.total_value?.value;
+                    if ((m === 'content_views' || m === 'views') && typeof totalVal === 'number') {
+                        usedMetric = m;
+                        values = [{ end_time: new Date(new Date(untilStr).getTime()).toISOString(), value: { total_value: totalVal } }];
+                        break;
+                    }
+                } catch (e) {
+                    // probar siguiente métrica
+                    continue;
+                }
+            }
+            if (!usedMetric) {
+                console.warn(`⚠️ IG views meta no disponibles para ${asset.metaAssetId} en ${sinceStr}-${untilStr} (content_views/views/impressions vacíos)`);
+            } else {
+                for (const item of values) {
+                    const end = new Date(item.end_time);
+                    const d = new Date(end);
+                    d.setHours(0,0,0,0);
+                    const existing = await SocialStatsDaily.findOne({ where: { clinica_id: asset.clinicaId, asset_id: asset.id, date: d } });
+                    const rawVal = item?.value;
+                    const numericVal = (typeof rawVal === 'object' && rawVal !== null)
+                        ? (parseInt(rawVal.total_value ?? rawVal.value ?? rawVal.count ?? 0, 10) || 0)
+                        : (parseInt(rawVal || 0, 10) || 0);
+                    const payload = {
+                        clinica_id: asset.clinicaId,
+                        asset_id: asset.id,
+                        asset_type: asset.assetType,
+                        date: d,
+                        // Si Meta nos devuelve content_views o views, guardamos en 'views'.
+                        // Si solo hay 'impressions', guardamos en 'impressions'.
+                        ...(usedMetric === 'content_views' || usedMetric === 'views'
+                            ? { views: numericVal }
+                            : { impressions: numericVal })
+                    };
+                    if (existing) await existing.update(payload); else await SocialStatsDaily.create(payload);
+                    console.log(`📆 IG ${usedMetric} asignado a ${d.toISOString().slice(0,10)} -> ${usedMetric === 'impressions' ? 'impressions' : 'views'}=${numericVal}`);
+                }
+            }
+        } catch (imprErr) {
+            console.warn(`⚠️ IG visualizaciones (content_views/views/impressions) falló para ${asset.metaAssetId}:`, imprErr.response?.data || imprErr.message);
+        }
+
         // Sincronizar publicaciones (con batching + lifetime en SocialPosts)
         await syncInstagramPosts(asset, accessToken, startDate, endDate);
+
+        // Asegurar que engagement del día queda como total_interactions (si lo tenemos), para evitar que otra ruta lo sobrescriba
+        try {
+            if (igEngagementTotal !== null) {
+                const d = new Date(endDate); d.setHours(0,0,0,0);
+                const existing = await SocialStatsDaily.findOne({ where: { clinica_id: asset.clinicaId, asset_id: asset.id, date: d } });
+                if (existing) await existing.update({ engagement: igEngagementTotal });
+            }
+        } catch (e) {
+            console.warn('⚠️ No se pudo reafirmar engagement (total_interactions):', e.message);
+        }
 
         console.log(`✅ Sincronización de métricas de Instagram completada: ${dates.length} días procesados`);
 
@@ -1397,9 +1638,13 @@ async function syncInstagramPosts(asset, accessToken, startDate, endDate) {
     try {
         console.log(`📝 Sincronizando publicaciones de Instagram ${asset.metaAssetId}`);
         
-        // Formatear fechas para la API de Meta
-        const since = Math.floor(startDate.getTime() / 1000);
-        const until = Math.floor(endDate.getTime() / 1000);
+        // Formatear fechas para la API de Meta (ajuste cuando since==until)
+        let since = Math.floor(new Date(startDate).setHours(0,0,0,0) / 1000);
+        let until = Math.floor(new Date(endDate).setHours(23,59,59,999) / 1000);
+        if (until <= since) {
+            // Asegurar rango de 1 día completo
+            until = since + 86399;
+        }
         
         // Obtener publicaciones por rango
         const { metaGet } = require('../lib/metaClient');
@@ -1641,6 +1886,12 @@ async function updateDailyAggregatesForAsset(asset, startDate, endDate) {
     try {
         const start = new Date(startDate); start.setHours(0,0,0,0);
         const end = new Date(endDate); end.setHours(23,59,59,999);
+        const fmt = (d) => {
+            const y = d.getFullYear();
+            const m = String(d.getMonth() + 1).padStart(2, '0');
+            const day = String(d.getDate()).padStart(2, '0');
+            return `${y}-${m}-${day}`;
+        };
         const posts = await SocialPosts.findAll({
             where: {
                 asset_id: asset.id,
@@ -1693,7 +1944,7 @@ async function updateDailyAggregatesForAsset(asset, startDate, endDate) {
             const rows = await SocialPostStatsDaily.findAll({
                 attributes: ['date', [fn('SUM', col('reach')), 'reach'], [fn('SUM', col('impressions')), 'impressions']],
                 include: [{ model: SocialPosts, as: 'post', attributes: [], where: { asset_id: asset.id } }],
-                where: { date: { [Op.between]: [new Date(start.setHours(0,0,0,0)), new Date(end.setHours(23,59,59,999))] } },
+                where: { date: { [Op.between]: [fmt(start), fmt(end)] } },
                 group: ['date'],
                 raw: true
             });
@@ -1708,13 +1959,60 @@ async function updateDailyAggregatesForAsset(asset, startDate, endDate) {
                     asset_type: asset.assetType,
                     date: d
                 };
-                // No sobrescribir reach/impressions si los cálculos por post son 0
-                if (reachFromPosts > 0) payload.reach = reachFromPosts;
-                if (imprFromPosts > 0) payload.impressions = imprFromPosts;
+                // Fallback: solo rellenar si NO existe reach/impressions oficial para ese día
+                if (reachFromPosts > 0 && (!existing || !existing.reach)) {
+                    payload.reach = reachFromPosts;
+                }
+                if (imprFromPosts > 0 && (!existing || !existing.impressions)) {
+                    payload.impressions = imprFromPosts;
+                }
                 if (existing) await existing.update(payload); else await SocialStatsDaily.create(payload);
             }
         } catch (e) {
             console.warn('⚠️ Error agregando reach/impressions diarios desde SocialPostStatsDaily:', e.message);
+        }
+
+        // Calcular visualizaciones diarias (views) como DELTA por post y día desde SocialPostStatsDaily (que guarda valores acumulados/lifetime)
+        try {
+            const rows = await SocialPostStatsDaily.findAll({
+                attributes: ['post_id', 'date', 'video_views'],
+                include: [{ model: SocialPosts, as: 'post', attributes: [], where: { asset_id: asset.id } }],
+                where: { date: { [Op.between]: [fmt(start), fmt(end)] } },
+                order: [[col('post_id'), 'ASC'], ['date', 'ASC']],
+                raw: true
+            });
+            const lastByPost = new Map(); // post_id -> last lifetime
+            const deltaByDate = new Map(); // dateStr -> total daily views
+            for (const r of rows) {
+                const lifetime = parseInt(r.video_views || 0, 10);
+                const prev = lastByPost.get(r.post_id) || 0;
+                let delta = lifetime - prev;
+                if (!Number.isFinite(delta) || delta < 0) delta = 0;
+                const d = new Date(r.date); d.setHours(0,0,0,0);
+                const key = d.toISOString().slice(0,10);
+                deltaByDate.set(key, (deltaByDate.get(key) || 0) + delta);
+                lastByPost.set(r.post_id, lifetime);
+            }
+
+            for (const [dateStr, totalViews] of deltaByDate.entries()) {
+                const d = new Date(dateStr);
+                const where = { clinica_id: asset.clinicaId, asset_id: asset.id, date: d };
+                const existing = await SocialStatsDaily.findOne({ where });
+                const payload = {
+                    clinica_id: asset.clinicaId,
+                    asset_id: asset.id,
+                    asset_type: asset.assetType,
+                    date: d,
+                    views: totalViews
+                };
+                if (existing) {
+                    await existing.update(payload);
+                } else {
+                    await SocialStatsDaily.create(payload);
+                }
+            }
+        } catch (e) {
+            console.warn('⚠️ Error calculando visualizaciones diarias (delta):', e.message);
         }
 
         console.log(`📈 Agregados diarios actualizados para asset ${asset.id} (${asset.assetType})`);
@@ -1737,9 +2035,22 @@ async function syncAdAccountMetrics(asset, accessToken, startDate, endDate) {
         try {
             const { metaGet } = require('../lib/metaClient');
             let nextUrl = `${accountId}/ads`;
-            let params = { fields: 'id,name,adset_id,campaign_id,status,effective_status,created_time,updated_time,creative{id,effective_instagram_media_id,effective_object_story_id,instagram_permalink_url}', limit: 200 };
+            const baseFields = 'id,name,adset_id,campaign_id,status,effective_status,created_time,updated_time,creative{id,effective_instagram_media_id,effective_object_story_id,instagram_permalink_url}';
+            let pageLimit = parseInt(process.env.ADS_ENTITIES_LIMIT || '50', 10);
+            let params = { fields: baseFields, limit: pageLimit };
             while (nextUrl) {
-                const resp = await metaGet(nextUrl, { params, accessToken });
+                let resp;
+                try {
+                    resp = await metaGet(nextUrl, { params, accessToken });
+                } catch (ePage) {
+                    if ((ePage.response?.status || 0) === 500 && pageLimit > 25) {
+                        console.warn('⚠️ Ads list 500, reduciendo límite a 25 y reintentando');
+                        pageLimit = 25;
+                        params = { fields: baseFields, limit: pageLimit };
+                        continue; // reintentar misma página con menor límite
+                    }
+                    throw ePage;
+                }
                 const data = resp.data?.data || [];
                 for (const ad of data) {
                     await SocialAdsEntity.upsert({
@@ -1832,49 +2143,92 @@ async function syncAdAccountMetrics(asset, accessToken, startDate, endDate) {
             console.warn('⚠️ Error sincronizando entidades de Ads:', e.response?.data || e.message);
         }
 
-        // 2) Insights diarios (por ad, con breakdown de plataforma y posición)
+        // 2) Insights diarios (por ad, con breakdown) — troceado por días para evitar 500
         try {
-            const params = {
-                level: 'ad',
-                time_increment: 1,
-                time_range: JSON.stringify({ since: sinceStr, until: untilStr }),
-                fields: 'impressions,reach,clicks,inline_link_clicks,spend,cpc,cpm,ctr,frequency',
-                breakdowns: 'publisher_platform,platform_position',
-                limit: 500,
-                access_token: accessToken
-            };
-            let nextUrl = `${accountId}/insights`;
+            const untilDate = new Date(untilStr);
+            const sinceDate = new Date(sinceStr);
+            const chunkDays = parseInt(process.env.ADS_CHUNK_DAYS || '3', 10);
             let totalRows = 0;
-            while (true) {
-                const resp = await metaGet(nextUrl, { params, accessToken });
-                const rows = resp.data?.data || [];
-                for (const r of rows) {
-                    const date = r.date_start ? new Date(r.date_start) : new Date(endDate);
-                    await SocialAdsInsightsDaily.upsert({
-                        ad_account_id: accountId,
-                        level: 'ad',
-                        entity_id: String(r.ad_id || 'unknown'),
-                        date: date.toISOString().slice(0,10),
-                        publisher_platform: r.publisher_platform || null,
-                        platform_position: r.platform_position || null,
-                        impressions: parseInt(r.impressions || 0, 10),
-                        reach: parseInt(r.reach || 0, 10),
-                        clicks: parseInt(r.clicks || 0, 10),
-                        inline_link_clicks: parseInt(r.inline_link_clicks || 0, 10),
-                        spend: parseFloat(r.spend || 0),
-                        cpm: parseFloat(r.cpm || 0),
-                        cpc: parseFloat(r.cpc || 0),
-                        ctr: parseFloat(r.ctr || 0),
-                        frequency: parseFloat(r.frequency || 0),
-                        video_plays: parseInt(r.video_plays || 0, 10),
-                        video_plays_75: parseInt(r.video_plays_75 || 0, 10)
-                    });
-                    totalRows++;
+            for (let d = new Date(sinceDate); d <= untilDate; d.setDate(d.getDate() + chunkDays)) {
+                const cs = new Date(d);
+                const ce = new Date(Math.min(untilDate.getTime(), new Date(d).setDate(d.getDate() + chunkDays - 1)));
+                let params = {
+                    level: 'ad',
+                    time_increment: 1,
+                    time_range: JSON.stringify({ since: cs.toISOString().slice(0,10), until: ce.toISOString().slice(0,10) }),
+                    fields: 'impressions,reach,clicks,inline_link_clicks,spend,cpc,cpm,ctr,frequency',
+                    breakdowns: 'publisher_platform,platform_position',
+                    limit: parseInt(process.env.ADS_PAGE_LIMIT || '100', 10),
+                    access_token: accessToken
+                };
+                let nextUrl = `${accountId}/insights`;
+                const runChunk = async (lim) => {
+                    params.limit = lim;
+                    while (true) {
+                        const resp = await metaGet(nextUrl, { params, accessToken });
+                        const rows = resp.data?.data || [];
+                        // Agregar por (entity_id, date, publisher_platform, platform_position)
+                        const agg = new Map();
+                        for (const r of rows) {
+                            const dateStr = (r.date_start ? new Date(r.date_start) : new Date(endDate)).toISOString().slice(0,10);
+                            const entityId = String(r.ad_id || 'unknown');
+                            const plat = (r.publisher_platform || '').toLowerCase() || null;
+                            const pos = (r.platform_position || '').toLowerCase() || 'unknown';
+                            const key = `${entityId}|${dateStr}|${plat}|${pos}`;
+                            const cur = agg.get(key) || { impressions:0, reach:0, clicks:0, inline:0, spend:0 };
+                            cur.impressions += parseInt(r.impressions || 0, 10) || 0;
+                            cur.reach += parseInt(r.reach || 0, 10) || 0;
+                            cur.clicks += parseInt(r.clicks || 0, 10) || 0;
+                            cur.inline += parseInt(r.inline_link_clicks || 0, 10) || 0;
+                            cur.spend += parseFloat(r.spend || 0) || 0;
+                            agg.set(key, cur);
+                        }
+                        const toFixed = (n, d) => Number.isFinite(n) ? Number(n.toFixed(d)) : 0;
+                        for (const [key, v] of agg.entries()) {
+                            const [entityId, dateStr, plat, pos] = key.split('|');
+                            const impressions = v.impressions;
+                            const clicks = v.clicks;
+                            const spend = v.spend;
+                            const cpm = impressions > 0 ? toFixed((spend * 1000) / impressions, 4) : 0;
+                            const cpc = clicks > 0 ? toFixed(spend / clicks, 4) : 0;
+                            const ctr = impressions > 0 ? toFixed((clicks / impressions) * 100, 4) : 0;
+                            const freq = v.reach > 0 ? toFixed(impressions / v.reach, 3) : 0;
+
+                            await SocialAdsInsightsDaily.upsert({
+                                ad_account_id: accountId,
+                                level: 'ad',
+                                entity_id: entityId,
+                                date: dateStr,
+                                publisher_platform: plat,
+                                platform_position: pos,
+                                impressions,
+                                reach: v.reach,
+                                clicks,
+                                inline_link_clicks: v.inline,
+                                spend,
+                                cpm,
+                                cpc,
+                                ctr: Math.min(ctr, 99.9999),
+                                frequency: Math.min(freq, 999.999)
+                            });
+                            totalRows++;
+                        }
+                        const next = resp.data?.paging?.next;
+                        if (!next) break;
+                        nextUrl = next.replace(/^https?:\/\/[^/]+\/[v\d\.]+\//, '');
+                        params = {}; // next URL carries params
+                    }
+                };
+                try {
+                    await runChunk(parseInt(process.env.ADS_PAGE_LIMIT || '100', 10));
+                } catch (e1) {
+                    if ((e1.response?.status || 0) === 500) {
+                        console.warn('⚠️ Insights 500, reintentando chunk con límite 50');
+                        await runChunk(50);
+                    } else {
+                        throw e1;
+                    }
                 }
-                const next = resp.data?.paging?.next;
-                if (!next) break;
-                nextUrl = next.replace(/^https?:\/\/[^/]+\/[v\d\.]+\//, '');
-                params = {}; // next URL carries params
             }
             console.log(`📊 Insights de Ads guardados: ${totalRows} filas`);
             stats.insightsRows += totalRows;
@@ -1882,42 +2236,64 @@ async function syncAdAccountMetrics(asset, accessToken, startDate, endDate) {
             console.warn('⚠️ Error guardando insights de Ads:', e.response?.data || e.message);
         }
 
-        // 3) Actions diarios (por ad) con breakdown por action_type
+        // 3) Actions diarios (por ad) — troceado por días y con breakdown de plataforma
         try {
-            const params = {
-                level: 'ad',
-                time_increment: 1,
-                time_range: JSON.stringify({ since: sinceStr, until: untilStr }),
-                fields: 'actions',
-                action_breakdowns: 'action_type,action_destination',
-                limit: 500,
-                access_token: accessToken
-            };
-            let nextUrl = `${accountId}/insights`;
+            const untilDate = new Date(untilStr);
+            const sinceDate = new Date(sinceStr);
+            const chunkDays = parseInt(process.env.ADS_CHUNK_DAYS || '3', 10);
             let totalActions = 0;
-            while (true) {
-                const resp = await metaGet(nextUrl, { params, accessToken });
-                const rows = resp.data?.data || [];
-                for (const r of rows) {
-                    const date = r.date_start ? new Date(r.date_start) : new Date(endDate);
-                    const actions = r.actions || [];
-                    for (const a of actions) {
-                        await SocialAdsActionsDaily.create({
-                            ad_account_id: accountId,
-                            level: 'ad',
-                            entity_id: String(r.ad_id || 'unknown'),
-                            date: date.toISOString().slice(0,10),
-                            action_type: a.action_type || 'unknown',
-                            action_destination: a.action_destination || null,
-                            value: parseInt(a.value || 0, 10)
-                        });
-                        totalActions++;
+            for (let d = new Date(sinceDate); d <= untilDate; d.setDate(d.getDate() + chunkDays)) {
+                const cs = new Date(d);
+                const ce = new Date(Math.min(untilDate.getTime(), new Date(d).setDate(d.getDate() + chunkDays - 1)));
+                let params = {
+                    level: 'ad',
+                    time_increment: 1,
+                    time_range: JSON.stringify({ since: cs.toISOString().slice(0,10), until: ce.toISOString().slice(0,10) }),
+                    fields: 'actions',
+                    action_breakdowns: 'action_type,action_destination',
+                    breakdowns: 'publisher_platform',
+                    limit: parseInt(process.env.ADS_PAGE_LIMIT || '100', 10),
+                    access_token: accessToken
+                };
+                let nextUrl = `${accountId}/insights`;
+                const runChunk = async (lim) => {
+                    params.limit = lim;
+                    while (true) {
+                        const resp = await metaGet(nextUrl, { params, accessToken });
+                        const rows = resp.data?.data || [];
+                        for (const r of rows) {
+                            const date = r.date_start ? new Date(r.date_start) : new Date(endDate);
+                            const actions = r.actions || [];
+                            for (const a of actions) {
+                                await SocialAdsActionsDaily.create({
+                                    ad_account_id: accountId,
+                                    level: 'ad',
+                                    entity_id: String(r.ad_id || 'unknown'),
+                                    date: date.toISOString().slice(0,10),
+                                    action_type: a.action_type || 'unknown',
+                                    action_destination: a.action_destination || null,
+                                    publisher_platform: r.publisher_platform || null,
+                                    value: parseInt(a.value || 0, 10)
+                                });
+                                totalActions++;
+                            }
+                        }
+                        const next = resp.data?.paging?.next;
+                        if (!next) break;
+                        nextUrl = next.replace(/^https?:\/\/[^/]+\/[v\d\.]+\//, '');
+                        params = {};
+                    }
+                };
+                try {
+                    await runChunk(parseInt(process.env.ADS_PAGE_LIMIT || '100', 10));
+                } catch (e1) {
+                    if ((e1.response?.status || 0) === 500) {
+                        console.warn('⚠️ Actions 500, reintentando chunk con límite 50');
+                        await runChunk(50);
+                    } else {
+                        throw e1;
                     }
                 }
-                const next = resp.data?.paging?.next;
-                if (!next) break;
-                nextUrl = next.replace(/^https?:\/\/[^/]+\/[v\d\.]+\//, '');
-                params = {};
             }
             console.log(`✅ Actions de Ads guardadas: ${totalActions} filas`);
             stats.actionsRows += totalActions;
@@ -2095,14 +2471,20 @@ exports.getMetricsByClinica = async (req, res) => {
 
     const start = startDate ? new Date(startDate) : defaultStartDate;
     const end = endDate ? new Date(endDate) : defaultEndDate;
+    const fmt = (d) => {
+      const y = d.getFullYear();
+      const m = String(d.getMonth() + 1).padStart(2, '0');
+      const day = String(d.getDate()).padStart(2, '0');
+      return `${y}-${m}-${day}`;
+    };
+    const startStr = startDate || fmt(start);
+    const endStr = endDate || fmt(end);
 
     // Obtener métricas de SocialStatsDaily
     const metricas = await SocialStatsDaily.findAll({
       where: {
         clinica_id: clinicaId,
-        date: {
-          [Op.between]: [start, end]
-        }
+        date: { [Op.between]: [startStr, endStr] }
       },
       include: [{
         model: ClinicMetaAsset,

@@ -26,7 +26,11 @@ module.exports = (sequelize, DataTypes) => {
     createdAt: 'created_at',
     updatedAt: 'updated_at',
     indexes: [
-      { unique: true, fields: ['level', 'entity_id', 'date'], name: 'uniq_ads_insights_entity_date' },
+      {
+        unique: true,
+        fields: ['level', 'entity_id', 'date', 'publisher_platform', 'platform_position'],
+        name: 'uniq_ads_insights_entity_date_platform_position'
+      },
       { fields: ['ad_account_id', 'date'] }
     ]
   });
@@ -37,4 +41,3 @@ module.exports = (sequelize, DataTypes) => {
 
   return SocialAdsInsightsDaily;
 };
-

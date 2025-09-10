@@ -284,22 +284,30 @@ const MetaSyncService = {
         try {
             console.log(`📊 Sincronizando métricas de Instagram ${asset.metaAssetId}`);
 
-            const since = Math.floor(startDate.getTime() / 1000);
-            const until = Math.floor(endDate.getTime() / 1000);
+            // IG insights: usar ventana inclusiva D->(D+1) para capturar el bucket del día final
+            const sinceDate = new Date(startDate); sinceDate.setHours(0,0,0,0);
+            const untilDate = new Date(endDate); untilDate.setHours(0,0,0,0); untilDate.setDate(untilDate.getDate() + 1);
+            const since = Math.floor(sinceDate.getTime() / 1000);
+            const until = Math.floor(untilDate.getTime() / 1000);
 
             // Variación diaria de seguidores
-            const followersDayResponse = await axios.get(`${META_API_BASE_URL}/${asset.metaAssetId}/insights`, {
-                params: {
-                    metric: 'follower_count',
-                    period: 'day',
-                    since,
-                    until,
-                    access_token: accessToken
-                }
-            });
-
             const statsByDate = {};
-            const followerValues = followersDayResponse.data?.data?.[0]?.values || [];
+            let followerValues = [];
+            try {
+                const followersDayResponse = await axios.get(`${META_API_BASE_URL}/${asset.metaAssetId}/insights`, {
+                    params: {
+                        metric: 'follower_count',
+                        period: 'day',
+                        since,
+                        until,
+                        access_token: accessToken
+                    }
+                });
+                followerValues = followersDayResponse.data?.data?.[0]?.values || [];
+            } catch (e) {
+                console.warn('⚠️ IG follower_count (servicio) no disponible en rango:', e.response?.data || e.message);
+                followerValues = [];
+            }
             for (const value of followerValues) {
                 const date = new Date(value.end_time);
                 date.setHours(0, 0, 0, 0);
@@ -368,7 +376,6 @@ const MetaSyncService = {
                 for (const item of values) {
                     const end = new Date(item.end_time);
                     const d = new Date(end);
-                    d.setDate(d.getDate() - 1);
                     d.setHours(0,0,0,0);
                     const existing = await SocialStatsDaily.findOne({ where: { clinica_id: asset.clinicaId, asset_id: asset.id, date: d } });
                     const payload = {

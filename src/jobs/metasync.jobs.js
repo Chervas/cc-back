@@ -334,11 +334,25 @@ class MetaSyncJobs {
 
     console.log(`📋 Assets activos encontrados: ${activeAssets.length}`);
 
-    for (const asset of activeAssets) {
+    for (const [idx, asset] of activeAssets.entries()) {
       try {
         const processed = await this.syncAssetMetrics(asset);
         totalProcessed += processed;
         console.log(`✅ Asset ${asset.metaAssetName}: ${processed} métricas sincronizadas`);
+        // Progreso + estado de uso API
+        try {
+          const { getUsageStatus } = require('../lib/metaClient');
+          const u = getUsageStatus();
+          await syncLog.update({
+            records_processed: totalProcessed,
+            status_report: JSON.stringify({
+              totalAssets: activeAssets.length,
+              processedAssets: idx + 1,
+              usagePct: u.usagePct || 0,
+              waiting: (u.nextAllowedAt || 0) > Date.now()
+            })
+          });
+        } catch {}
       } catch (error) {
         console.error(`❌ Error sincronizando asset ${asset.metaAssetName}:`, error.message);
         errors.push(`${asset.metaAssetName}: ${error.message}`);
@@ -400,7 +414,7 @@ class MetaSyncJobs {
       // Determinar ventana por asset (inicial vs reciente)
       const end = new Date(); end.setHours(0,0,0,0); end.setDate(end.getDate() - 1);
 
-      for (const asset of activeAdAccounts) {
+      for (const [idx, asset] of activeAdAccounts.entries()) {
         try {
           const accessToken = asset.pageAccessToken || asset.metaConnection?.accessToken;
           if (!accessToken) { throw new Error('Sin access token para ad_account'); }
@@ -420,6 +434,21 @@ class MetaSyncJobs {
             report.totals.actionsRows += result.actionsRows || 0;
             report.totals.linkedPromotions += result.linkedPromotions || 0;
           }
+          // Progreso + estado de uso
+          try {
+            const { getUsageStatus } = require('../lib/metaClient');
+            const u = getUsageStatus();
+            await syncLog.update({
+              records_processed: report.processed,
+              status_report: JSON.stringify({
+                accounts: report.accounts,
+                processed: report.processed,
+                totals: report.totals,
+                usagePct: u.usagePct || 0,
+                waiting: (u.nextAllowedAt || 0) > Date.now()
+              })
+            });
+          } catch {}
           // Espera entre cuentas para repartir carga
           if (this.config.ads.betweenAccountsSleepMs > 0) {
             await new Promise(r => setTimeout(r, this.config.ads.betweenAccountsSleepMs));
