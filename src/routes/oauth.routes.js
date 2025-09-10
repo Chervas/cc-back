@@ -5,6 +5,9 @@ const jwt = require('jsonwebtoken');  // Para decodificar el token JWT
 const router = express.Router();
 const db = require('../../models'); // <-- Importa el objeto db de models/index.js
 const MetaConnection = db.MetaConnection; // <-- Accede al modelo MetaConnection
+const GoogleConnection = db.GoogleConnection; // <-- Modelo GoogleConnection
+const ClinicWebAsset = db.ClinicWebAsset; // <-- Modelo de mapeo de sitios web
+const Clinica = db.Clinica;
 const ClinicMetaAsset = db.ClinicMetaAsset; // <-- Accede al modelo ClinicMetaAsset
 const { triggerHistoricalSync } = require('../controllers/metasync.controller');
 
@@ -14,6 +17,12 @@ const META_APP_SECRET = 'bfcfedd6447dce4c3eb280067300e141'; // <-- App Secret co
 const REDIRECT_URI = 'https://autenticacion.clinicaclick.com/oauth/meta/callback';
 const FRONTEND_URL = 'https://crm.clinicaclick.com';
 const FRONTEND_DEV_URL = 'http://localhost:4200'; // Para desarrollo local
+
+// Configuración Google OAuth (variables de entorno)
+const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID || '';
+const GOOGLE_CLIENT_SECRET = process.env.GOOGLE_CLIENT_SECRET || '';
+const GOOGLE_REDIRECT_URI = process.env.GOOGLE_REDIRECT_URI || 'https://autenticacion.clinicaclick.com/oauth/google/callback';
+const GOOGLE_SCOPES = (process.env.GOOGLE_OAUTH_SCOPES || 'https://www.googleapis.com/auth/webmasters.readonly openid email profile').split(/\s+/).join(' ');
 
 /**
  * GET /oauth/meta/callback
@@ -133,6 +142,285 @@ router.get('/meta/callback', async (req, res) => {
     } catch (err) {
         console.error('❌ Error fatal en el proceso de OAuth:', err.response ? err.response.data : err.message);
         res.redirect(`${FRONTEND_URL}/pages/settings?error=${encodeURIComponent('Error en el proceso de autenticación.')}`);
+    }
+});
+
+/**
+ * GOOGLE OAUTH — CONNECT URL
+ * GET /oauth/google/connect
+ * Devuelve la URL de autorización para iniciar el flujo (idéntico patrón a Meta)
+ */
+router.get('/google/connect', async (req, res) => {
+    try {
+        const userId = getUserIdFromToken(req);
+        if (!userId) return res.status(401).json({ success: false, error: 'Usuario no autenticado' });
+
+        const params = new URLSearchParams({
+            client_id: GOOGLE_CLIENT_ID,
+            redirect_uri: GOOGLE_REDIRECT_URI,
+            response_type: 'code',
+            scope: GOOGLE_SCOPES,
+            access_type: 'offline',
+            include_granted_scopes: 'true',
+            prompt: 'consent',
+            state: String(userId)
+        });
+        const authUrl = `https://accounts.google.com/o/oauth2/v2/auth?${params.toString()}`;
+        return res.json({ success: true, authUrl });
+    } catch (e) {
+        console.error('❌ Error generando authUrl de Google:', e.message);
+        return res.status(500).json({ success: false, error: 'No se pudo generar authUrl' });
+    }
+});
+
+/**
+ * GOOGLE OAUTH — CALLBACK
+ * GET /oauth/google/callback
+ */
+router.get('/google/callback', async (req, res) => {
+    try {
+        const { code, state, error } = req.query;
+        if (error) {
+            console.error('❌ Error en callback Google:', error);
+            return res.redirect(`${FRONTEND_URL}/pages/settings?error=${encodeURIComponent(String(error))}`);
+        }
+        if (!code) {
+            return res.redirect(`${FRONTEND_URL}/pages/settings?error=${encodeURIComponent('Código no proporcionado')}`);
+        }
+
+        // 1) Intercambiar code por tokens
+        const tokenResp = await axios.post('https://oauth2.googleapis.com/token', new URLSearchParams({
+            code: code,
+            client_id: GOOGLE_CLIENT_ID,
+            client_secret: GOOGLE_CLIENT_SECRET,
+            redirect_uri: GOOGLE_REDIRECT_URI,
+            grant_type: 'authorization_code'
+        }).toString(), { headers: { 'Content-Type': 'application/x-www-form-urlencoded' } });
+
+        const accessToken = tokenResp.data?.access_token;
+        const refreshToken = tokenResp.data?.refresh_token || null; // puede ser null si ya concedido
+        const expiresIn = tokenResp.data?.expires_in || 3600;
+        if (!accessToken) throw new Error('No access_token en respuesta de token');
+
+        const expiresAt = new Date(Date.now() + (expiresIn * 1000));
+
+        // 2) Userinfo (email, id)
+        const ui = await axios.get('https://www.googleapis.com/oauth2/v2/userinfo', { headers: { Authorization: `Bearer ${accessToken}` } });
+        const googleUserId = ui.data?.id || 'unknown';
+        const userEmail = ui.data?.email || null;
+        const userName = ui.data?.name || [ui.data?.given_name, ui.data?.family_name].filter(Boolean).join(' ') || null;
+
+        // 3) Guardar/actualizar conexión
+        const userId = String(state || '').trim();
+        if (!userId) {
+            console.warn('⚠️ state vacío en callback Google');
+        }
+        const existing = await GoogleConnection.findOne({ where: { userId: userId } });
+        const payload = {
+            userId,
+            googleUserId,
+            userEmail,
+            userName,
+            accessToken,
+            refreshToken: refreshToken || existing?.refreshToken || null,
+            scopes: GOOGLE_SCOPES,
+            expiresAt
+        };
+        if (existing) {
+            await existing.update(payload);
+        } else {
+            await GoogleConnection.create(payload);
+        }
+
+        // 4) Redirigir al frontend
+        return res.redirect(`${FRONTEND_URL}/pages/settings?connected=google&googleUserId=${googleUserId}`);
+    } catch (err) {
+        console.error('❌ Error en /oauth/google/callback:', err.response?.data || err.message);
+        return res.redirect(`${FRONTEND_URL}/pages/settings?error=${encodeURIComponent('Error en autenticación de Google')}`);
+    }
+});
+
+/**
+ * GOOGLE — Connection status
+ * GET /oauth/google/connection-status
+ */
+router.get('/google/connection-status', async (req, res) => {
+    try {
+        const userId = getUserIdFromToken(req);
+        if (!userId) return res.status(401).json({ connected: false, message: 'Usuario no autenticado' });
+        let conn;
+        try {
+            // Evitar seleccionar columnas que puedan no existir aún (userName) si la migración no ha corrido
+            conn = await GoogleConnection.findOne({
+                where: { userId },
+                attributes: ['id','userId','googleUserId','userEmail','accessToken','refreshToken','scopes','expiresAt']
+            });
+        } catch (e) {
+            // Fallback más defensivo
+            conn = await GoogleConnection.findOne({ where: { userId } });
+        }
+        if (!conn) return res.json({ connected: false });
+
+        const isExpired = conn.expiresAt ? (new Date(conn.expiresAt) < new Date()) : false;
+        return res.json({
+            connected: !isExpired,
+            userEmail: conn.userEmail,
+            googleUserId: conn.googleUserId,
+            userName: conn.userName || null,
+            expiresAt: conn.expiresAt,
+            scopes: conn.scopes,
+            expired: isExpired
+        });
+    } catch (e) {
+        console.error('❌ Error en connection-status Google:', e.message);
+        return res.status(500).json({ connected: false, message: 'Error interno' });
+    }
+});
+
+/**
+ * GOOGLE — Listar propiedades de Search Console para el usuario conectado
+ * GET /oauth/google/assets
+ */
+router.get('/google/assets', async (req, res) => {
+    try {
+        const userId = getUserIdFromToken(req);
+        if (!userId) return res.status(401).json({ success: false, error: 'Usuario no autenticado' });
+
+        const conn = await GoogleConnection.findOne({ where: { userId } });
+        if (!conn) return res.status(404).json({ success: false, error: 'No hay conexión Google' });
+
+        // Refrescar token si es necesario
+        let accessToken = conn.accessToken;
+        const needsRefresh = conn.expiresAt && new Date(conn.expiresAt) < new Date(Date.now() + 60_000);
+        if (needsRefresh && conn.refreshToken) {
+            try {
+                const tr = await axios.post('https://oauth2.googleapis.com/token', new URLSearchParams({
+                    client_id: GOOGLE_CLIENT_ID,
+                    client_secret: GOOGLE_CLIENT_SECRET,
+                    grant_type: 'refresh_token',
+                    refresh_token: conn.refreshToken
+                }).toString(), { headers: { 'Content-Type': 'application/x-www-form-urlencoded' } });
+                accessToken = tr.data?.access_token || accessToken;
+                const expiresIn = tr.data?.expires_in || 3600;
+                await conn.update({ accessToken, expiresAt: new Date(Date.now() + expiresIn * 1000) });
+            } catch (e) {
+                console.warn('⚠️ Error refrescando token Google:', e.response?.data || e.message);
+            }
+        }
+
+        // Llamar a Search Console sites.list
+        const resp = await axios.get('https://www.googleapis.com/webmasters/v3/sites', {
+            headers: { Authorization: `Bearer ${accessToken}` }
+        });
+        const entries = resp.data?.siteEntry || [];
+        const assets = entries.map((s) => ({
+            siteUrl: s.siteUrl,
+            permissionLevel: s.permissionLevel,
+            propertyType: s.siteUrl.startsWith('sc-domain:') ? 'sc-domain' : 'url-prefix'
+        }));
+        return res.json({ success: true, assets, total: assets.length });
+    } catch (e) {
+        console.error('❌ Error en /oauth/google/assets:', e.response?.data || e.message);
+        return res.status(500).json({ success: false, error: 'Error obteniendo propiedades' });
+    }
+});
+
+/**
+ * GOOGLE — Mapear propiedades a clínicas
+ * POST /oauth/google/map-assets
+ * body: { mappings: [{ clinicaId, siteUrl, propertyType?, permissionLevel? }] }
+ */
+router.post('/google/map-assets', async (req, res) => {
+    try {
+        const userId = getUserIdFromToken(req);
+        if (!userId) return res.status(401).json({ success: false, error: 'Usuario no autenticado' });
+        const conn = await GoogleConnection.findOne({ where: { userId } });
+        if (!conn) return res.status(404).json({ success: false, error: 'No hay conexión Google' });
+
+        const mappings = Array.isArray(req.body?.mappings) ? req.body.mappings : [];
+        if (!mappings.length) return res.status(400).json({ success: false, error: 'mappings requerido' });
+
+        const createdOrUpdated = [];
+        for (const m of mappings) {
+            const clinicaId = parseInt(m.clinicaId, 10);
+            const siteUrl = String(m.siteUrl || '').trim();
+            if (!clinicaId || !siteUrl) continue;
+            const payload = {
+                clinicaId,
+                googleConnectionId: conn.id,
+                siteUrl,
+                propertyType: m.propertyType || (siteUrl.startsWith('sc-domain:') ? 'sc-domain' : 'url-prefix'),
+                permissionLevel: m.permissionLevel || null,
+                verified: true,
+                isActive: true
+            };
+            const existing = await ClinicWebAsset.findOne({ where: { clinicaId, siteUrl } });
+            if (existing) {
+                await existing.update(payload);
+                createdOrUpdated.push({ id: existing.id, ...payload });
+            } else {
+                const rec = await ClinicWebAsset.create(payload);
+                createdOrUpdated.push({ id: rec.id, ...payload });
+            }
+        }
+
+        return res.json({ success: true, mapped: createdOrUpdated.length, assets: createdOrUpdated });
+    } catch (e) {
+        console.error('❌ Error en /oauth/google/map-assets:', e.response?.data || e.message);
+        return res.status(500).json({ success: false, error: 'Error mapeando propiedades' });
+    }
+});
+
+/**
+ * GOOGLE — Obtener mapeos actuales por clínica
+ * GET /oauth/google/mappings
+ */
+router.get('/google/mappings', async (req, res) => {
+    try {
+        const userId = getUserIdFromToken(req);
+        if (!userId) return res.status(401).json({ success: false, error: 'Usuario no autenticado' });
+        const conn = await GoogleConnection.findOne({ where: { userId } });
+        if (!conn) return res.status(404).json({ success: false, error: 'No hay conexión Google' });
+
+        const rows = await ClinicWebAsset.findAll({ where: { googleConnectionId: conn.id, isActive: true }, raw: true });
+        const clinicIds = Array.from(new Set(rows.map(r => r.clinicaId))).filter(Boolean);
+        const clinics = clinicIds.length ? await Clinica.findAll({ where: { id_clinica: clinicIds }, raw: true }) : [];
+        const clinicIndex = new Map(clinics.map(c => [c.id_clinica, c]));
+
+        const byClinic = new Map();
+        for (const r of rows) {
+            if (!byClinic.has(r.clinicaId)) {
+                const c = clinicIndex.get(r.clinicaId) || {};
+                byClinic.set(r.clinicaId, {
+                    clinica: { id: r.clinicaId, nombre: c.nombre_clinica || 'Clínica', avatar_url: c.url_avatar || null },
+                    assets: { search_console: [] }
+                });
+            }
+            byClinic.get(r.clinicaId).assets.search_console.push({ siteUrl: r.siteUrl, propertyType: r.propertyType, permissionLevel: r.permissionLevel });
+        }
+        return res.json({ success: true, mappings: Array.from(byClinic.values()) });
+    } catch (e) {
+        console.error('❌ Error en /oauth/google/mappings:', e.response?.data || e.message);
+        return res.status(500).json({ success: false, error: 'Error obteniendo mapeos' });
+    }
+});
+
+/**
+ * GOOGLE — Desconectar cuenta (elimina conexión y mapeos)
+ * DELETE /oauth/google/disconnect
+ */
+router.delete('/google/disconnect', async (req, res) => {
+    try {
+        const userId = getUserIdFromToken(req);
+        if (!userId) return res.status(401).json({ success: false, error: 'Usuario no autenticado' });
+        const conn = await GoogleConnection.findOne({ where: { userId } });
+        if (!conn) return res.status(404).json({ success: false, error: 'No hay conexión Google' });
+        await ClinicWebAsset.destroy({ where: { googleConnectionId: conn.id } });
+        await conn.destroy();
+        return res.json({ success: true, message: 'Conexión Google desconectada y mapeos eliminados' });
+    } catch (e) {
+        console.error('❌ Error en /oauth/google/disconnect:', e.response?.data || e.message);
+        return res.status(500).json({ success: false, error: 'Error al desconectar Google' });
     }
 });
 

@@ -2031,12 +2031,95 @@ async function syncAdAccountMetrics(asset, accessToken, startDate, endDate) {
         const untilStr = new Date(endDate).toISOString().slice(0,10);
         const stats = { entities: 0, insightsRows: 0, actionsRows: 0, linkedPromotions: 0 };
 
-        // 1) Entidades (Ads) con creatives para posible vínculo a posts (guardamos entidades ahora)
+        // 1) Entidades (Campaigns/AdSets/Ads) — guardamos jerarquía completa
         try {
             const { metaGet } = require('../lib/metaClient');
+            let pageLimit = parseInt(process.env.ADS_ENTITIES_LIMIT || '50', 10);
+
+            // 1.a) Campaigns
+            try {
+                let nextUrl = `${accountId}/campaigns`;
+                let params = { fields: 'id,name,status,effective_status,objective,buying_type,created_time,updated_time', limit: pageLimit };
+                while (nextUrl) {
+                    let resp;
+                    try {
+                        resp = await metaGet(nextUrl, { params, accessToken });
+                    } catch (ePage) {
+                        if ((ePage.response?.status || 0) === 500 && pageLimit > 25) {
+                            console.warn('⚠️ Campaigns 500, reduciendo límite a 25 y reintentando');
+                            pageLimit = 25;
+                            params = { fields: 'id,name,status,effective_status,objective,buying_type,created_time,updated_time', limit: pageLimit };
+                            continue;
+                        }
+                        throw ePage;
+                    }
+                    const data = resp.data?.data || [];
+                    for (const camp of data) {
+                        await SocialAdsEntity.upsert({
+                            ad_account_id: accountId,
+                            level: 'campaign',
+                            entity_id: String(camp.id),
+                            parent_id: null,
+                            name: camp.name || null,
+                            status: camp.status || null,
+                            effective_status: camp.effective_status || null,
+                            objective: camp.objective || null,
+                            buying_type: camp.buying_type || null,
+                            created_time: camp.created_time ? new Date(camp.created_time) : null,
+                            updated_time: camp.updated_time ? new Date(camp.updated_time) : null
+                        });
+                        stats.entities++;
+                    }
+                    const next = resp.data?.paging?.next;
+                    if (next) { nextUrl = next.replace(/^https?:\/\/[^/]+\/[v\d\.]+\//, ''); params = {}; } else { nextUrl = null; }
+                }
+            } catch (eCamp) {
+                console.warn('⚠️ Error sincronizando Campaigns:', eCamp.response?.data || eCamp.message);
+            }
+
+            // 1.b) AdSets
+            try {
+                let nextUrl = `${accountId}/adsets`;
+                let params = { fields: 'id,name,campaign_id,status,effective_status,created_time,updated_time', limit: pageLimit };
+                while (nextUrl) {
+                    let resp;
+                    try { resp = await metaGet(nextUrl, { params, accessToken }); }
+                    catch (ePage) {
+                        if ((ePage.response?.status || 0) === 500 && pageLimit > 25) {
+                            console.warn('⚠️ AdSets 500, reduciendo límite a 25 y reintentando');
+                            pageLimit = 25;
+                            params = { fields: 'id,name,campaign_id,status,effective_status,created_time,updated_time', limit: pageLimit };
+                            continue;
+                        }
+                        throw ePage;
+                    }
+                    const data = resp.data?.data || [];
+                    for (const aset of data) {
+                        await SocialAdsEntity.upsert({
+                            ad_account_id: accountId,
+                            level: 'adset',
+                            entity_id: String(aset.id),
+                            parent_id: aset.campaign_id ? String(aset.campaign_id) : null,
+                            name: aset.name || null,
+                            status: aset.status || null,
+                            effective_status: aset.effective_status || null,
+                            objective: null,
+                            buying_type: null,
+                            created_time: aset.created_time ? new Date(aset.created_time) : null,
+                            updated_time: aset.updated_time ? new Date(aset.updated_time) : null
+                        });
+                        stats.entities++;
+                    }
+                    const next = resp.data?.paging?.next;
+                    if (next) { nextUrl = next.replace(/^https?:\/\/[^/]+\/[v\d\.]+\//, ''); params = {}; } else { nextUrl = null; }
+                }
+            } catch (eAset) {
+                console.warn('⚠️ Error sincronizando AdSets:', eAset.response?.data || eAset.message);
+            }
+
+            // 1.c) Ads con creatives para posible vínculo a posts (antes estaba como 1)
             let nextUrl = `${accountId}/ads`;
             const baseFields = 'id,name,adset_id,campaign_id,status,effective_status,created_time,updated_time,creative{id,effective_instagram_media_id,effective_object_story_id,instagram_permalink_url}';
-            let pageLimit = parseInt(process.env.ADS_ENTITIES_LIMIT || '50', 10);
             let params = { fields: baseFields, limit: pageLimit };
             while (nextUrl) {
                 let resp;

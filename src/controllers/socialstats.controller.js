@@ -374,9 +374,25 @@ exports.getAdsHealth = async (req, res) => {
         const accIds = accounts.map(a => a.metaAssetId);
         if (!accIds.length) return res.status(200).json({ platform:'meta', period: { start: fmt(start), end: fmt(end) }, cards: [] });
 
-        const replacements = { accs: accIds, s: fmt(start), e: fmt(end), ps: fmt(prevStart), pe: fmt(prevEnd) };
+        // Umbrales parametrizables (querystring) con defaults desde .env
+        const num = (v) => { const n = parseFloat(String(v)); return Number.isFinite(n) ? n : undefined; };
+        const envFreq = num(process.env.ADS_HEALTH_FREQ_MAX) ?? 3;
+        const envCtr = num(process.env.ADS_HEALTH_CTR_MIN) ?? 0.005;
+        const envCpl = num(process.env.ADS_HEALTH_CPL_MAX) ?? 15;
+        const envGrowth = num(process.env.ADS_HEALTH_CPL_GROWTH) ?? 0.4;
+        const freq = Math.max(0.1, num(req.query.freq) ?? envFreq);
+        const ctr = Math.min(0.5, Math.max(0, num(req.query.ctr) ?? envCtr));
+        const cpl = Math.max(0, num(req.query.cpl) ?? envCpl);
+        const growth = Math.max(0, num(req.query.growth) ?? envGrowth);
+        const growthM = 1 + growth; // multiplicador
 
-        // 1) Grupos de anuncios sin leads 48h (spend>0 y leads=0)
+        const replacements = { accs: accIds, s: fmt(start), e: fmt(end), ps: fmt(prevStart), pe: fmt(prevEnd), freq, ctr, cpl, growthM };
+
+        // Helper: condición de activos (excluir pausados/archivados/eliminados)
+        const notInactive = `UPPER(IFNULL(%s.status,'')) NOT IN ('PAUSED','ARCHIVED','DELETED','INACTIVE')
+                             AND UPPER(IFNULL(%s.effective_status,'')) NOT IN ('PAUSED','ARCHIVED','DELETED','INACTIVE')`;
+
+        // 1) Grupos de anuncios sin leads 48h (spend>0 y leads=0) — sólo adsets/campaigns activos
         const [noLeads48h] = await SocialAdsInsightsDaily.sequelize.query(`
             SELECT se.ad_account_id,
                    se.name as adset_name, se.entity_id as adset_id,
@@ -400,10 +416,12 @@ exports.getAdsHealth = async (req, res) => {
             LEFT JOIN ClinicMetaAssets cma ON cma.assetType='ad_account' AND cma.metaAssetId = se.ad_account_id
             LEFT JOIN Clinicas cl ON cl.id_clinica = cma.clinicaId
             WHERE IFNULL(l.leads,0)=0 AND x.spend>0
+              AND ${notInactive.replace(/%s/g, 'se')}
+              AND ${notInactive.replace(/%s/g, 'camp')}
             ORDER BY x.spend DESC
             LIMIT 50;`, { replacements });
 
-        // 2) Frecuencia > 3 (anuncios)
+        // 2) Frecuencia > 3 (anuncios) — sólo anuncios y sus padres activos
         const [highFreq] = await SocialAdsInsightsDaily.sequelize.query(`
             SELECT se.ad_account_id,
                    se.name as ad_name, se.entity_id as ad_id,
@@ -422,7 +440,10 @@ exports.getAdsHealth = async (req, res) => {
             LEFT JOIN SocialAdsEntities camp ON camp.entity_id = aset.parent_id
             LEFT JOIN ClinicMetaAssets cma ON cma.assetType='ad_account' AND cma.metaAssetId = se.ad_account_id
             LEFT JOIN Clinicas cl ON cl.id_clinica = cma.clinicaId
-            WHERE x.avg_freq > 3
+            WHERE x.avg_freq > :freq
+              AND ${notInactive.replace(/%s/g, 'se')}
+              AND ${notInactive.replace(/%s/g, 'aset')}
+              AND ${notInactive.replace(/%s/g, 'camp')}
             ORDER BY x.avg_freq DESC
             LIMIT 50;`, { replacements });
 
@@ -453,7 +474,9 @@ exports.getAdsHealth = async (req, res) => {
           LEFT JOIN SocialAdsEntities camp ON camp.entity_id=se.parent_id
           LEFT JOIN ClinicMetaAssets cma ON cma.assetType='ad_account' AND cma.metaAssetId = se.ad_account_id
           LEFT JOIN Clinicas cl ON cl.id_clinica = cma.clinicaId
-          WHERE cur.leads>0 AND prev.leads>0 AND (cur.spend/cur.leads) >= 1.4 * (prev.spend/prev.leads)
+          WHERE cur.leads>0 AND prev.leads>0 AND (cur.spend/cur.leads) >= :growthM * (prev.spend/prev.leads)
+            AND ${notInactive.replace(/%s/g, 'se')}
+            AND ${notInactive.replace(/%s/g, 'camp')}
           ORDER BY (cur.spend/cur.leads) DESC
           LIMIT 50;`, { replacements });
 
@@ -476,7 +499,9 @@ exports.getAdsHealth = async (req, res) => {
           LEFT JOIN SocialAdsEntities camp ON camp.entity_id=se.parent_id
           LEFT JOIN ClinicMetaAssets cma ON cma.assetType='ad_account' AND cma.metaAssetId = se.ad_account_id
           LEFT JOIN Clinicas cl ON cl.id_clinica = cma.clinicaId
-          WHERE cur.leads>0 AND (cur.spend/cur.leads) > 15
+          WHERE cur.leads>0 AND (cur.spend/cur.leads) > :cpl
+            AND ${notInactive.replace(/%s/g, 'se')}
+            AND ${notInactive.replace(/%s/g, 'camp')}
           ORDER BY cpl DESC
           LIMIT 50;`, { replacements });
 
@@ -507,7 +532,10 @@ exports.getAdsHealth = async (req, res) => {
             LEFT JOIN SocialAdsEntities camp ON camp.entity_id = aset.parent_id
             LEFT JOIN ClinicMetaAssets cma ON cma.assetType='ad_account' AND cma.metaAssetId = se.ad_account_id
             LEFT JOIN Clinicas cl ON cl.id_clinica = cma.clinicaId
-            WHERE x.impressions >= 100 AND (x.clicks/x.impressions) < 0.005
+            WHERE x.impressions >= 100 AND (x.clicks/x.impressions) < :ctr
+              AND ${notInactive.replace(/%s/g, 'se')}
+              AND ${notInactive.replace(/%s/g, 'aset')}
+              AND ${notInactive.replace(/%s/g, 'camp')}
             ORDER BY ctr ASC
             LIMIT 50;`, { replacements });
         cards.push({ id: 'low-ctr', title: 'CTR bajo (<0,5%)', status: lowCtr.length ? 'warning' : 'ok', items: lowCtr });
@@ -524,6 +552,8 @@ exports.getAdsHealth = async (req, res) => {
             LEFT JOIN ClinicMetaAssets cma ON cma.assetType='ad_account' AND cma.metaAssetId = se.ad_account_id
             LEFT JOIN Clinicas cl ON cl.id_clinica = cma.clinicaId
             WHERE se.ad_account_id IN (:accs) AND se.level='adset' AND se.effective_status LIKE 'LEARNING_LIMITED%'
+              AND ${notInactive.replace(/%s/g, 'se')}
+              AND ${notInactive.replace(/%s/g, 'camp')}
             ORDER BY se.updated_at DESC
             LIMIT 50;`, { replacements });
         cards.push({ id: 'learning-limited', title: 'Conjunto en aprendizaje limitado', status: learningLimited.length ? 'warning' : 'ok', items: learningLimited });
@@ -545,6 +575,9 @@ exports.getAdsHealth = async (req, res) => {
                 UPPER(se.status) LIKE '%REJECT%' OR UPPER(se.status) LIKE '%DISAPPROV%'
                 OR UPPER(se.effective_status) LIKE '%REJECT%' OR UPPER(se.effective_status) LIKE '%DISAPPROV%'
             )
+              AND ${notInactive.replace(/%s/g, 'se')}
+              AND ${notInactive.replace(/%s/g, 'aset')}
+              AND ${notInactive.replace(/%s/g, 'camp')}
             ORDER BY se.updated_at DESC
             LIMIT 50;`, { replacements });
         cards.push({ id: 'rejected-ads', title: 'Anuncios rechazados', status: rejectedAds.length ? 'error' : 'ok', items: rejectedAds });

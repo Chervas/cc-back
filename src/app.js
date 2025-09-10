@@ -58,9 +58,10 @@ app.use('/api/paneles', panelesRoutes);
 console.log('Ruta /api/paneles configurada');
 app.use('/api/userclinicas', userClinicasRoutes);
 console.log('Ruta /api/userclinicas configurada');
-// NUEVA RUTA: OAuth (sin /api/ porque es para OAuth2)
+// RUTA: OAuth (exponer bajo /api/oauth para proxy y también /oauth por compatibilidad)
+app.use('/api/oauth', oauthRoutes);
 app.use('/oauth', oauthRoutes);
-console.log('Ruta /oauth configurada');
+console.log('Ruta /api/oauth y /oauth configuradas');
 // NUEVA RUTA: Sistema de métricas de redes sociales
 app.use('/api/metasync', metaSyncRoutes);
 console.log('Ruta /api/metasync configurada');
