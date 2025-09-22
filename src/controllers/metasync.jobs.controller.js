@@ -13,11 +13,12 @@
  * @date 2025-07-27
  */
 
-const { metaSyncJobs } = require('../jobs/metasync.jobs');
+const { metaSyncJobs } = require('../jobs/sync.jobs');
 const { getUsageStatus } = require('../lib/metaClient');
+const { getGoogleAdsUsageStatus, resumeGoogleAdsUsage } = require('../lib/googleAdsClient');
 const fs = require('fs');
 const path = require('path');
-const { SyncLog, TokenValidation, SocialStatDaily } = require('../../models');
+const { SyncLog, TokenValidation, SocialStatDaily, ApiUsageCounter } = require('../../models');
 const { Op } = require('sequelize');
 
 /**
@@ -54,7 +55,6 @@ exports.initializeJobs = async (req, res) => {
     console.error('❌ Error al inicializar jobs:', error);
     res.status(500).json({
       message: 'Error al inicializar sistema de jobs',
-      error: error.message
     });
   }
 };
@@ -95,7 +95,7 @@ exports.getJobsStatus = async (req, res) => {
       attributes: ['id','job_type', 'status', 'start_time', 'end_time', 'records_processed', 'error_message', 'status_report'],
       where: {
         job_type: {
-          [Op.in]: ['automated_metrics_sync', 'manual_job_execution', 'health_check', 'token_validation', 'data_cleanup', 'ads_sync', 'ads_backfill']
+          [Op.in]: ['automated_metrics_sync', 'manual_job_execution', 'health_check', 'token_validation', 'data_cleanup', 'ads_sync', 'ads_sync_midday', 'ads_backfill', 'web_sync', 'web_backfill', 'analytics_sync', 'analytics_backfill']
         }
       },
       order: [['created_at', 'DESC']],
@@ -140,11 +140,43 @@ exports.getJobsStatus = async (req, res) => {
       // Mantener valores por defecto
     }
 
+    // Exponer uso de Meta y estado de espera (waiting)
+    const metaUsage = await getUsageStatus();
+    const googleUsage = await getGoogleAdsUsageStatus();
+    const googleWaiting = googleUsage && googleUsage.pauseUntil && googleUsage.pauseUntil > Date.now();
+    const jobsBase = getJobsSafeInfo();
+    const jobsView = {};
+    Object.keys(jobsBase).forEach((name) => {
+      const j = jobsBase[name];
+      let effectiveStatus = j.status;
+      if (metaUsage.waiting && j.status === 'running' && name.startsWith('ads')) {
+        effectiveStatus = 'waiting';
+      }
+      if (googleWaiting && j.status === 'running' && name.startsWith('googleAds')) {
+        effectiveStatus = 'waiting';
+      }
+      jobsView[name] = { ...j, status: effectiveStatus };
+    });
+
     res.json({
       systemRunning: systemStatus.running,
       systemInitialized: systemStatus.initialized,
       jobsCount: systemStatus.jobsCount,
-      jobs: getJobsSafeInfo(), // incluye description
+      jobs: jobsView, // incluye description y estado efectivo
+      metaUsage: {
+        usagePct: metaUsage.usagePct || 0,
+        waiting: !!metaUsage.waiting,
+        nextAllowedAt: metaUsage.nextAllowedAt || 0,
+        now: metaUsage.now || Date.now()
+      },
+      googleAdsUsage: {
+        usagePct: googleUsage?.usagePct || 0,
+        requestCount: googleUsage?.requestCount || 0,
+        quota: googleUsage?.quota || 0,
+        resetAt: googleUsage?.resetAt || 0,
+        pauseUntil: googleUsage?.pauseUntil || 0,
+        now: googleUsage?.now || Date.now()
+      },
       jobDescriptions: metaSyncJobs.jobDescriptions,
       todayStats,
       recentLogs: recentLogs.map(log => ({
@@ -173,16 +205,48 @@ exports.getJobsStatus = async (req, res) => {
  */
 exports.getMetaUsageStatus = async (req, res) => {
   try {
-    const s = getUsageStatus();
+    const s = await getUsageStatus();
+    const metaCounter = await ApiUsageCounter.findOne({ where: { provider: 'meta_ads' } });
     res.json({
       usagePct: s.usagePct || 0,
       nextAllowedAt: s.nextAllowedAt || 0,
       now: s.now || Date.now(),
-      waiting: (s.nextAllowedAt || 0) > Date.now()
+      waiting: (s.nextAllowedAt || 0) > Date.now(),
+      lastUpdatedAt: metaCounter?.updated_at || null
     });
   } catch (e) {
     console.error('❌ Error getMetaUsageStatus:', e);
     res.status(500).json({ message: 'Error obteniendo uso Meta', error: e.message });
+  }
+};
+
+exports.getGoogleUsageStatus = async (req, res) => {
+  try {
+    const s = await getGoogleAdsUsageStatus();
+    const googleCounter = await ApiUsageCounter.findOne({ where: { provider: 'google_ads' } });
+    res.json({
+      usagePct: s?.usagePct || 0,
+      requestCount: s?.requestCount || googleCounter?.requestCount || 0,
+      quota: s?.quota || 0,
+      resetAt: s?.resetAt || 0,
+      pauseUntil: s?.pauseUntil || googleCounter?.pauseUntil?.getTime?.() || 0,
+      now: s?.now || Date.now(),
+      waiting: !!(s?.pauseUntil && s.pauseUntil > Date.now()),
+      lastUpdatedAt: googleCounter?.updated_at || null
+    });
+  } catch (e) {
+    console.error('❌ Error getGoogleUsageStatus:', e);
+    res.status(500).json({ message: 'Error obteniendo uso Google Ads', error: e.message });
+  }
+};
+
+exports.resumeGoogleUsage = async (req, res) => {
+  try {
+    await resumeGoogleAdsUsage();
+    res.json({ success: true });
+  } catch (e) {
+    console.error('❌ Error resumeGoogleUsage:', e);
+    res.status(500).json({ message: 'Error reactivando Google Ads', error: e.message });
   }
 };
 
@@ -358,6 +422,96 @@ exports.runJob = async (req, res) => {
     console.error(`❌ Error ejecutando job '${req.params.jobName}':`, error);
     res.status(500).json({
       message: `Error al ejecutar job '${req.params.jobName}'`,
+      error: error.message
+    });
+  }
+};
+
+/**
+ * Ejecutar un backfill web acotado a los sitios recién mapeados
+ */
+exports.runTargetedWebBackfill = async (req, res) => {
+  try {
+    const mappings = Array.isArray(req.body?.mappings)
+      ? req.body.mappings
+          .map((item) => ({
+            clinicId: item?.clinicId ?? item?.clinicaId,
+            siteUrl: item?.siteUrl
+          }))
+          .filter((item) => item.clinicId && item.siteUrl)
+      : [];
+
+    if (!mappings.length) {
+      return res.status(400).json({
+        success: false,
+        message: 'Se necesita al menos un par { clinicId, siteUrl } en mappings.'
+      });
+    }
+
+    setImmediate(async () => {
+      try {
+        await metaSyncJobs.executeWebBackfillForSites(mappings);
+      } catch (error) {
+        console.error('❌ Error en backfill dirigido de Search Console:', error);
+      }
+    });
+
+    return res.status(202).json({
+      success: true,
+      enqueued: mappings.length,
+      message: 'Backfill dirigido encolado'
+    });
+  } catch (error) {
+    console.error('❌ Error al encolar backfill dirigido:', error);
+    return res.status(500).json({
+      success: false,
+      message: 'Error al encolar backfill dirigido',
+      error: error.message
+    });
+  }
+};
+
+
+/**
+ * Ejecutar un backfill dirigido de Google Analytics (GA4) tras un nuevo mapeo
+ */
+exports.runTargetedAnalyticsBackfill = async (req, res) => {
+  try {
+    const mappings = Array.isArray(req.body?.mappings)
+      ? req.body.mappings
+          .map((item) => ({
+            clinicId: item?.clinicId ?? item?.clinicaId,
+            propertyId: item?.propertyId ?? item?.id,
+            propertyName: item?.propertyName ?? item?.name
+          }))
+          .filter((item) => item.clinicId && (item.propertyId || item.propertyName))
+      : [];
+
+    if (!mappings.length) {
+      return res.status(400).json({
+        success: false,
+        message: 'Se necesita al menos un par { clinicId, propertyId|propertyName } en mappings.'
+      });
+    }
+
+    setImmediate(async () => {
+      try {
+        await metaSyncJobs.executeAnalyticsBackfillForProperties(mappings);
+      } catch (error) {
+        console.error('❌ Error en backfill dirigido de Analytics:', error);
+      }
+    });
+
+    return res.status(202).json({
+      success: true,
+      enqueued: mappings.length,
+      message: 'Backfill de Analytics encolado'
+    });
+  } catch (error) {
+    console.error('❌ Error al encolar backfill de Analytics:', error);
+    return res.status(500).json({
+      success: false,
+      message: 'Error al encolar backfill de Analytics',
       error: error.message
     });
   }

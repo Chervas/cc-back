@@ -6,6 +6,7 @@ const {
     ClinicMetaAsset,
     SocialAdsInsightsDaily,
     SocialAdsActionsDaily,
+    SocialAdsAdsetDailyAgg,
     PostPromotions
 } = require('../../models');
 const { Op } = require('sequelize');
@@ -355,6 +356,7 @@ exports.getAdsHealth = async (req, res) => {
     try {
         const { clinicaId } = req.params;
         const { startDate, endDate, platform = 'meta' } = req.query;
+        const live = String(req.query.live || '').toLowerCase() === '1' || String(req.query.live || '').toLowerCase() === 'true' || String(req.query.live || '').toLowerCase() === 'yes';
         if (!clinicaId) return res.status(400).json({ message: 'ID de clínica requerido' });
         if (platform !== 'meta') {
             return res.status(200).json({ platform, period: { start: startDate, end: endDate }, cards: [] });
@@ -367,10 +369,25 @@ exports.getAdsHealth = async (req, res) => {
         start.setHours(0,0,0,0);
         const prevEnd = new Date(start.getTime() - 86400000);
         const prevStart = new Date(prevEnd.getTime() - (end.getTime() - start.getTime()));
+        // Ventana anclada: desde ayer (ayer..hoy) para tarjetas 48h
+        const todayRef = new Date(); todayRef.setHours(0,0,0,0);
+        const yestRef = new Date(todayRef); yestRef.setDate(yestRef.getDate()-1);
+        const prevWeekEnd = new Date(yestRef); prevWeekEnd.setDate(prevWeekEnd.getDate()-1);
+        const twoDaysAgoRef = new Date(yestRef); twoDaysAgoRef.setDate(twoDaysAgoRef.getDate()-1);
+        const prevWeekStart = new Date(prevWeekEnd); prevWeekStart.setDate(prevWeekStart.getDate()-6);
         const fmt = (d)=> d.toISOString().slice(0,10);
+        const labelRange = `${fmt(start)} - ${fmt(end)}`;
+        const labelRecent = `${fmt(yestRef)} - ${fmt(todayRef)}`;
+        const labelPrevWeek = `${fmt(prevWeekStart)} - ${fmt(prevWeekEnd)}`;
 
-        // Ad accounts de la clínica
-        const accounts = await ClinicMetaAsset.findAll({ where: { clinicaId, isActive: true, assetType: 'ad_account' } });
+        // Ad accounts de la clínica (+ token para estado de cuenta)
+        const accounts = await ClinicMetaAsset.findAll({ 
+            where: { clinicaId, isActive: true, assetType: 'ad_account' },
+            include: [
+                { model: ClinicMetaAsset.sequelize.models.MetaConnection, as: 'metaConnection', attributes: ['accessToken','expiresAt'] },
+                { model: ClinicMetaAsset.sequelize.models.Clinica, as: 'clinica', attributes: ['nombre_clinica'] }
+            ]
+        });
         const accIds = accounts.map(a => a.metaAssetId);
         if (!accIds.length) return res.status(200).json({ platform:'meta', period: { start: fmt(start), end: fmt(end) }, cards: [] });
 
@@ -386,130 +403,212 @@ exports.getAdsHealth = async (req, res) => {
         const growth = Math.max(0, num(req.query.growth) ?? envGrowth);
         const growthM = 1 + growth; // multiplicador
 
-        const replacements = { accs: accIds, s: fmt(start), e: fmt(end), ps: fmt(prevStart), pe: fmt(prevEnd), freq, ctr, cpl, growthM };
+        const replacements = {
+            accs: accIds,
+            s: fmt(start),
+            e: fmt(end),
+            ps: fmt(prevStart),
+            pe: fmt(prevEnd),
+            y: fmt(yestRef),
+            t: fmt(todayRef),
+            cy: fmt(yestRef),
+            ct: fmt(todayRef),
+            y48: fmt(twoDaysAgoRef),
+            t48: fmt(yestRef),
+            py: fmt(prevWeekStart),
+            pt: fmt(prevWeekEnd),
+            freq, ctr, cpl, growthM
+        };
+
+        // ==========================
+        // KPI: Estado de cuenta(s)
+        // ==========================
+        let accountStatusItems = [];
+        if (live) {
+            try {
+                const { metaGet } = require('../lib/metaClient');
+                for (const acc of accounts) {
+                    const actId = String(acc.metaAssetId).startsWith('act_') ? String(acc.metaAssetId) : `act_${acc.metaAssetId}`;
+                    const token = acc.metaConnection?.accessToken || null;
+                    if (!token) { continue; }
+                    try {
+                        const resp = await metaGet(actId, { 
+                            // disable_reasons no existe en AdAccount -> provocaba 400 (#100)
+                            params: { fields: 'account_status,disable_reason,spend_cap,amount_spent,balance,adtrust_dsl{trust,account_trust},funding_source_details' },
+                            accessToken: token
+                        });
+                        const d = resp.data || {};
+                        accountStatusItems.push({
+                            ad_account_id: actId,
+                            clinic_name: acc.clinica?.nombre_clinica || null,
+                            account_status: d.account_status,
+                            disable_reason: d.disable_reason ?? null,
+                            spend_cap: d.spend_cap,
+                            amount_spent: d.amount_spent,
+                            balance: d.balance,
+                            trust: d.adtrust_dsl?.trust ?? null
+                        });
+                    } catch (eAcc) {
+                        accountStatusItems.push({ ad_account_id: actId, clinic_name: acc.clinica?.nombre_clinica || null, error: eAcc.response?.data?.error?.message || eAcc.message });
+                    }
+                }
+            } catch (e) {
+                console.warn('⚠️ No se pudo recuperar el estado de las cuentas:', e.message);
+            }
+        } else {
+            // Sin llamadas en vivo: devolver datos persistidos en ClinicMetaAssets
+            for (const acc of accounts) {
+                const actId = String(acc.metaAssetId).startsWith('act_') ? String(acc.metaAssetId) : `act_${acc.metaAssetId}`;
+                accountStatusItems.push({
+                    ad_account_id: actId,
+                    clinic_name: acc.clinica?.nombre_clinica || null,
+                    account_status: acc.ad_account_status ?? null,
+                    disable_reason: acc.ad_account_disable_reason ?? null,
+                    spend_cap: acc.ad_account_spend_cap ?? null,
+                    amount_spent: acc.ad_account_amount_spent ?? null
+                });
+            }
+        }
+
+        // Mapear estados de cuenta y motivos a texto humano
+        function mapAccountStatusText(code) {
+            const n = Number(code);
+            switch (n) {
+                case 1: return 'Activa';
+                case 2: return 'Deshabilitada';
+                case 3: return 'Pago pendiente';
+                case 7: return 'Revisión de riesgo';
+                case 8: return 'Periodo de gracia';
+                case 9: return 'Cierre pendiente';
+                case 100: return 'Falta información de facturación';
+                default: return (code == null ? 'Desconocido' : String(code));
+            }
+        }
+        function mapDisableReasonText(reason) {
+            // Soportar numérico o string; fallback al valor crudo
+            const r = (typeof reason === 'number') ? reason : Number(reason);
+            if (!Number.isFinite(r) || r === 0) return null; // 0 o inválido → sin motivo
+            switch (r) {
+                case 1: return 'Políticas de anuncios (integridad)';
+                case 2: return 'Revisión de propiedad intelectual';
+                case 3: return 'Problemas de pago';
+                case 4: return 'Cuenta gris deshabilitada';
+                case 5: return 'Revisión de contenidos (AFC)';
+                case 7: return 'Revisión de integridad de negocio';
+                case 8: return 'Cierre permanente';
+                default: return (reason == null || reason === '' ? null : String(reason));
+            }
+        }
+        accountStatusItems = accountStatusItems.map(it => {
+            const disableRaw = it.disable_reason;
+            const disableIsZero = (disableRaw === 0 || disableRaw === '0');
+            const reasonText = mapDisableReasonText(disableRaw) || (Number(it.account_status) === 3 ? 'Pago no atendido o facturación pendiente' : null);
+            return {
+                ...it,
+                // Normalizar motivo: si es 0/'0' tratar como null para no mostrar "0"
+                disable_reason: disableIsZero ? null : disableRaw,
+                account_status_text: mapAccountStatusText(it.account_status),
+                reason_text: reasonText
+            };
+        });
 
         // Helper: condición de activos (excluir pausados/archivados/eliminados)
         const notInactive = `UPPER(IFNULL(%s.status,'')) NOT IN ('PAUSED','ARCHIVED','DELETED','INACTIVE')
                              AND UPPER(IFNULL(%s.effective_status,'')) NOT IN ('PAUSED','ARCHIVED','DELETED','INACTIVE')`;
 
-        // 1) Grupos de anuncios sin leads 48h (spend>0 y leads=0) — sólo adsets/campaigns activos
-        const [noLeads48h] = await SocialAdsInsightsDaily.sequelize.query(`
-            SELECT se.ad_account_id,
-                   se.name as adset_name, se.entity_id as adset_id,
-                   camp.name as campaign_name, camp.entity_id as campaign_id,
-                   cl.nombre_clinica as clinic_name,
-                   x.entity_id, x.spend, IFNULL(l.leads,0) leads
-            FROM (
-              SELECT d.entity_id, SUM(d.spend) spend
-              FROM SocialAdsInsightsDaily d
-              WHERE d.ad_account_id IN (:accs) AND d.level='adset' AND d.date BETWEEN DATE_SUB(:e, INTERVAL 1 DAY) AND :e
-              GROUP BY d.entity_id
-            ) x
-            LEFT JOIN (
-              SELECT a.entity_id, SUM(a.value) leads
-              FROM SocialAdsActionsDaily a
-              WHERE a.action_type IN ('lead','offsite_conversion.fb_pixel_lead') AND a.date BETWEEN DATE_SUB(:e, INTERVAL 1 DAY) AND :e
-              GROUP BY a.entity_id
-            ) l ON l.entity_id = x.entity_id
-            LEFT JOIN SocialAdsEntities se ON se.entity_id = x.entity_id
+        // 1) Adsets sin leads 48h (spend>0 y leads=0) — agregando desde ADS (nivel ad → adset)
+        const [noLeads48h] = await SocialAdsAdsetDailyAgg.sequelize.query(`
+            SELECT MAX(se.ad_account_id) as ad_account_id,
+                   MAX(se.name) as adset_name,
+                   agg.adset_id as adset_id,
+                   MAX(camp.name) as campaign_name,
+                   MAX(camp.entity_id) as campaign_id,
+                   MAX(cl.nombre_clinica) as clinic_name,
+                   agg.adset_id as entity_id,
+                   SUM(agg.spend) AS spend,
+                   SUM(agg.leads) AS leads
+            FROM SocialAdsAdsetDailyAgg agg
+            LEFT JOIN SocialAdsEntities se ON se.entity_id = agg.adset_id
             LEFT JOIN SocialAdsEntities camp ON camp.entity_id = se.parent_id
             LEFT JOIN ClinicMetaAssets cma ON cma.assetType='ad_account' AND cma.metaAssetId = se.ad_account_id
             LEFT JOIN Clinicas cl ON cl.id_clinica = cma.clinicaId
-            WHERE IFNULL(l.leads,0)=0 AND x.spend>0
+            WHERE agg.ad_account_id IN (:accs) AND agg.date BETWEEN :y48 AND :t48
               AND ${notInactive.replace(/%s/g, 'se')}
               AND ${notInactive.replace(/%s/g, 'camp')}
-            ORDER BY x.spend DESC
+            GROUP BY agg.adset_id
+            HAVING SUM(agg.spend) > 0 AND SUM(agg.leads) = 0
+            ORDER BY spend DESC
             LIMIT 50;`, { replacements });
 
-        // 2) Frecuencia > 3 (anuncios) — sólo anuncios y sus padres activos
+        // 2) Frecuencia > umbral (pico histórico registrado en SocialAdsEntities)
         const [highFreq] = await SocialAdsInsightsDaily.sequelize.query(`
             SELECT se.ad_account_id,
                    se.name as ad_name, se.entity_id as ad_id,
                    aset.name as adset_name, aset.entity_id as adset_id,
                    camp.name as campaign_name, camp.entity_id as campaign_id,
                    cl.nombre_clinica as clinic_name,
-                   x.entity_id, x.avg_freq
-            FROM (
-                SELECT d.entity_id, AVG(d.frequency) avg_freq
-                FROM SocialAdsInsightsDaily d
-                WHERE d.ad_account_id IN (:accs) AND d.level='ad' AND d.date BETWEEN :s AND :e
-                GROUP BY d.entity_id
-            ) x
-            LEFT JOIN SocialAdsEntities se ON se.entity_id = x.entity_id
+                   se.peak_frequency as peak_freq
+            FROM SocialAdsEntities se
             LEFT JOIN SocialAdsEntities aset ON aset.entity_id = se.parent_id
             LEFT JOIN SocialAdsEntities camp ON camp.entity_id = aset.parent_id
             LEFT JOIN ClinicMetaAssets cma ON cma.assetType='ad_account' AND cma.metaAssetId = se.ad_account_id
             LEFT JOIN Clinicas cl ON cl.id_clinica = cma.clinicaId
-            WHERE x.avg_freq > :freq
+            WHERE se.ad_account_id IN (:accs) AND se.level='ad' AND COALESCE(se.peak_frequency,0) > :freq
               AND ${notInactive.replace(/%s/g, 'se')}
               AND ${notInactive.replace(/%s/g, 'aset')}
               AND ${notInactive.replace(/%s/g, 'camp')}
-            ORDER BY x.avg_freq DESC
+            ORDER BY se.peak_frequency DESC
             LIMIT 50;`, { replacements });
 
         // 3) CPL muy alto (>=40% sobre la semana previa)
-        const [cplGrowth] = await SocialAdsInsightsDaily.sequelize.query(`
-          SELECT cur.entity_id,
-                 se.ad_account_id,
-                 se.name as adset_name, se.entity_id as adset_id,
-                 camp.name as campaign_name, camp.entity_id as campaign_id,
-                 cl.nombre_clinica as clinic_name,
+        const [cplGrowth] = await SocialAdsAdsetDailyAgg.sequelize.query(`
+          SELECT cur.adset_id as entity_id,
+                 MAX(se.ad_account_id) as ad_account_id,
+                 MAX(se.name) as adset_name,
+                 cur.adset_id as adset_id,
+                 MAX(camp.name) as campaign_name,
+                 MAX(camp.entity_id) as campaign_id,
+                 MAX(cl.nombre_clinica) as clinic_name,
                  CASE WHEN cur.leads>0 THEN cur.spend/cur.leads ELSE NULL END cpl_cur,
                  CASE WHEN prev.leads>0 THEN prev.spend/prev.leads ELSE NULL END cpl_prev
           FROM (
-            SELECT d.entity_id, SUM(d.spend) spend, IFNULL(SUM(a.value),0) leads
-            FROM SocialAdsInsightsDaily d
-            LEFT JOIN SocialAdsActionsDaily a ON a.entity_id=d.entity_id AND a.date=d.date AND a.action_type IN ('lead','offsite_conversion.fb_pixel_lead')
-            WHERE d.ad_account_id IN (:accs) AND d.level='adset' AND d.date BETWEEN :s AND :e
-            GROUP BY d.entity_id
+            SELECT adset_id, SUM(spend) AS spend, SUM(leads) AS leads
+            FROM SocialAdsAdsetDailyAgg
+            WHERE ad_account_id IN (:accs) AND date BETWEEN :cy AND :ct
+            GROUP BY adset_id
           ) cur
           LEFT JOIN (
-            SELECT d.entity_id, SUM(d.spend) spend, IFNULL(SUM(a.value),0) leads
-            FROM SocialAdsInsightsDaily d
-            LEFT JOIN SocialAdsActionsDaily a ON a.entity_id=d.entity_id AND a.date=d.date AND a.action_type IN ('lead','offsite_conversion.fb_pixel_lead')
-            WHERE d.ad_account_id IN (:accs) AND d.level='adset' AND d.date BETWEEN :ps AND :pe
-            GROUP BY d.entity_id
-          ) prev ON prev.entity_id=cur.entity_id
-          LEFT JOIN SocialAdsEntities se ON se.entity_id=cur.entity_id
+            SELECT adset_id, SUM(spend) AS spend, SUM(leads) AS leads
+            FROM SocialAdsAdsetDailyAgg
+            WHERE ad_account_id IN (:accs) AND date BETWEEN :py AND :pt
+            GROUP BY adset_id
+          ) prev ON prev.adset_id=cur.adset_id
+          LEFT JOIN SocialAdsEntities se ON se.entity_id=cur.adset_id
           LEFT JOIN SocialAdsEntities camp ON camp.entity_id=se.parent_id
           LEFT JOIN ClinicMetaAssets cma ON cma.assetType='ad_account' AND cma.metaAssetId = se.ad_account_id
           LEFT JOIN Clinicas cl ON cl.id_clinica = cma.clinicaId
           WHERE cur.leads>0 AND prev.leads>0 AND (cur.spend/cur.leads) >= :growthM * (prev.spend/prev.leads)
             AND ${notInactive.replace(/%s/g, 'se')}
             AND ${notInactive.replace(/%s/g, 'camp')}
+          GROUP BY cur.adset_id
           ORDER BY (cur.spend/cur.leads) DESC
           LIMIT 50;`, { replacements });
 
-        // 4) CPL > 15€
-        const [cplOver15] = await SocialAdsInsightsDaily.sequelize.query(`
-          SELECT cur.entity_id,
-                 se.ad_account_id,
-                 se.name as adset_name, se.entity_id as adset_id,
-                 camp.name as campaign_name, camp.entity_id as campaign_id,
-                 cl.nombre_clinica as clinic_name,
-                 CASE WHEN cur.leads>0 THEN cur.spend/cur.leads ELSE NULL END cpl
-          FROM (
-            SELECT d.entity_id, SUM(d.spend) spend, IFNULL(SUM(a.value),0) leads
-            FROM SocialAdsInsightsDaily d
-            LEFT JOIN SocialAdsActionsDaily a ON a.entity_id=d.entity_id AND a.date=d.date AND a.action_type IN ('lead','offsite_conversion.fb_pixel_lead')
-            WHERE d.ad_account_id IN (:accs) AND d.level='adset' AND d.date BETWEEN :s AND :e
-            GROUP BY d.entity_id
-          ) cur
-          LEFT JOIN SocialAdsEntities se ON se.entity_id=cur.entity_id
-          LEFT JOIN SocialAdsEntities camp ON camp.entity_id=se.parent_id
-          LEFT JOIN ClinicMetaAssets cma ON cma.assetType='ad_account' AND cma.metaAssetId = se.ad_account_id
-          LEFT JOIN Clinicas cl ON cl.id_clinica = cma.clinicaId
-          WHERE cur.leads>0 AND (cur.spend/cur.leads) > :cpl
-            AND ${notInactive.replace(/%s/g, 'se')}
-            AND ${notInactive.replace(/%s/g, 'camp')}
-          ORDER BY cpl DESC
-          LIMIT 50;`, { replacements });
+        // Determinar estado de cuenta y filtrar items mostrados (no listar cuentas OK)
+        let accountStatusCardStatus = 'unknown';
+        if (accountStatusItems.length && accountStatusItems.every(i => Number(i.account_status) === 1 && !i.disable_reason)) {
+            accountStatusCardStatus = 'ok';
+        } else if (live) {
+            accountStatusCardStatus = accountStatusItems.some(i => i.error) ? 'warning' : 'error';
+        }
+        const accountProblemItems = (accountStatusItems || []).filter(i => !(Number(i.account_status) === 1 && !i.disable_reason));
 
         const cards = [
-            { id: 'no-leads-48h', title: 'Grupos de anuncios sin leads en las últimas 48 horas', status: noLeads48h.length ? 'error' : 'ok', items: noLeads48h },
-            { id: 'frequency-gt-3', title: 'Frecuencia del anuncio > 3', status: highFreq.length ? 'warning' : 'ok', items: highFreq },
-            { id: 'cpl-growth', title: 'Precio del lead muy alto (≥40% vs. semana previa)', status: cplGrowth.length ? 'error' : 'ok', items: cplGrowth },
-            { id: 'cpl-over-15', title: 'Alerta de lead por encima de 15€', status: cplOver15.length ? 'error' : 'ok', items: cplOver15 }
+            // KPI de cuenta publicitaria (mostrar siempre; tabla solo si hay problemas)
+            { id: 'account-status', title: 'Cuenta publicitaria (estado actual)', status: accountStatusCardStatus, items: accountProblemItems },
+            { id: 'no-leads-48h', title: 'Adsets sin leads (últimas 48 h)', status: noLeads48h.length ? 'error' : 'ok', items: noLeads48h },
+            { id: 'frequency-gt-3', title: `Frecuencia > ${freq} (rango ${labelRange})`, status: highFreq.length ? 'warning' : 'ok', items: highFreq },
+            { id: 'cpl-growth', title: `CPL aumenta >${Math.round(growth*100)}% ayer respecto la última semana`, status: cplGrowth.length ? 'error' : 'ok', items: cplGrowth }
         ];
 
         // 5) CTR bajo (<0.5%) en el rango (anuncios)
@@ -538,7 +637,150 @@ exports.getAdsHealth = async (req, res) => {
               AND ${notInactive.replace(/%s/g, 'camp')}
             ORDER BY ctr ASC
             LIMIT 50;`, { replacements });
-        cards.push({ id: 'low-ctr', title: 'CTR bajo (<0,5%)', status: lowCtr.length ? 'warning' : 'ok', items: lowCtr });
+        cards.push({ id: 'low-ctr', title: 'Anuncios con rendimiento bajo en el último mes', status: lowCtr.length ? 'warning' : 'ok', items: lowCtr });
+
+        // 5.bis) CPL > 10€ en últimas 48h (adset)
+        try {
+            const [cplOver10_48h] = await SocialAdsAdsetDailyAgg.sequelize.query(`
+              SELECT cur.adset_id as entity_id,
+                     MAX(se.ad_account_id) as ad_account_id,
+                     MAX(se.name) as adset_name,
+                     cur.adset_id as adset_id,
+                     MAX(camp.name) as campaign_name,
+                     MAX(camp.entity_id) as campaign_id,
+                     MAX(cl.nombre_clinica) as clinic_name,
+                     CASE WHEN cur.leads>0 THEN cur.spend/cur.leads ELSE NULL END cpl
+              FROM (
+                SELECT adset_id, SUM(spend) AS spend, SUM(leads) AS leads
+                FROM SocialAdsAdsetDailyAgg
+                WHERE ad_account_id IN (:accs) AND date BETWEEN :y48 AND :t48
+                GROUP BY adset_id
+              ) cur
+              LEFT JOIN SocialAdsEntities se ON se.entity_id=cur.adset_id
+              LEFT JOIN SocialAdsEntities camp ON camp.entity_id=se.parent_id
+              LEFT JOIN ClinicMetaAssets cma ON cma.assetType='ad_account' AND cma.metaAssetId = se.ad_account_id
+              LEFT JOIN Clinicas cl ON cl.id_clinica = cma.clinicaId
+              WHERE cur.leads>0 AND (cur.spend/cur.leads) > :cpl
+                AND ${notInactive.replace(/%s/g, 'se')}
+                AND ${notInactive.replace(/%s/g, 'camp')}
+              GROUP BY cur.adset_id
+              ORDER BY cpl DESC
+              LIMIT 50;`, { replacements });
+            cards.push({
+                id: 'cpl-over-10',
+                title: `CPL > ${cpl} € últimas 48 h`,
+                status: cplOver10_48h.length ? 'warning' : 'ok',
+                items: cplOver10_48h,
+                rangeLabel: `${fmt(twoDaysAgoRef)} - ${fmt(yestRef)}`
+            });
+        } catch {}
+
+        // 6.bis) Revisión pendiente (ads/adsets)
+        const [reviewPending] = await SocialAdsInsightsDaily.sequelize.query(`
+            SELECT se.ad_account_id,
+                   se.name as entity_name, se.entity_id,
+                   aset.name as adset_name, aset.entity_id as adset_id,
+                   camp.name as campaign_name, camp.entity_id as campaign_id,
+                   cl.nombre_clinica as clinic_name,
+                   se.level, se.status, se.effective_status
+            FROM SocialAdsEntities se
+            LEFT JOIN SocialAdsEntities aset ON aset.entity_id = (CASE WHEN se.level='ad' THEN se.parent_id ELSE se.entity_id END)
+            LEFT JOIN SocialAdsEntities camp ON camp.entity_id = (CASE WHEN se.level='ad' THEN aset.parent_id ELSE se.parent_id END)
+            LEFT JOIN ClinicMetaAssets cma ON cma.assetType='ad_account' AND cma.metaAssetId = se.ad_account_id
+            LEFT JOIN Clinicas cl ON cl.id_clinica = cma.clinicaId
+            WHERE se.ad_account_id IN (:accs)
+              AND se.level IN ('ad','adset')
+              AND (
+                    UPPER(IFNULL(se.status,'')) LIKE 'PENDING%'
+                 OR UPPER(IFNULL(se.effective_status,'')) LIKE 'PENDING%'
+                 OR UPPER(IFNULL(se.status,'')) LIKE 'IN_REVIEW%'
+                 OR UPPER(IFNULL(se.effective_status,'')) LIKE 'IN_REVIEW%'
+              )
+              AND ${notInactive.replace(/%s/g, 'se')}
+            ORDER BY se.updated_at DESC
+            LIMIT 50;`, { replacements });
+        cards.push({ id: 'review-pending', title: 'Anuncios en revisión', status: reviewPending.length ? 'warning' : 'ok', items: reviewPending });
+
+        // 6.ter) Problemas de entrega: adsets activos sin impresiones en el rango (excluyendo borradores y en proceso)
+        const [noDelivery] = await SocialAdsInsightsDaily.sequelize.query(`
+            SELECT se.ad_account_id,
+                   se.name as adset_name, se.entity_id as adset_id,
+                   se.entity_id as entity_id,
+                   camp.name as campaign_name, camp.entity_id as campaign_id,
+                   cl.nombre_clinica as clinic_name,
+                   se.delivery_reason_text as reason_text,
+                   se.delivery_status as delivery_status
+            FROM SocialAdsEntities se
+            LEFT JOIN SocialAdsEntities camp ON camp.entity_id = se.parent_id
+            LEFT JOIN ClinicMetaAssets cma ON cma.assetType='ad_account' AND cma.metaAssetId = se.ad_account_id
+            LEFT JOIN Clinicas cl ON cl.id_clinica = cma.clinicaId
+            LEFT JOIN (
+                SELECT ad.parent_id AS adset_id, SUM(d.impressions) impr, SUM(d.spend) spend
+                FROM SocialAdsInsightsDaily d
+                JOIN SocialAdsEntities ad ON ad.level='ad' AND ad.entity_id=d.entity_id
+                WHERE d.ad_account_id IN (:accs) AND d.level='ad' AND d.date BETWEEN :s AND :e
+                  AND UPPER(IFNULL(ad.effective_status,'')) LIKE 'ACTIVE%'
+                GROUP BY ad.parent_id
+            ) x ON x.adset_id = se.entity_id
+            WHERE se.ad_account_id IN (:accs) AND se.level='adset'
+              AND ${notInactive.replace(/%s/g, 'se')}
+              AND ${notInactive.replace(/%s/g, 'camp')}
+              AND UPPER(IFNULL(se.status,'')) NOT LIKE 'DRAFT%'
+              AND UPPER(IFNULL(se.effective_status,'')) NOT LIKE 'DRAFT%'
+              AND UPPER(IFNULL(se.status,'')) NOT LIKE 'IN_PROCESS%'
+              AND UPPER(IFNULL(se.effective_status,'')) NOT LIKE 'IN_PROCESS%'
+              AND EXISTS (
+                   SELECT 1 FROM SocialAdsEntities ad
+                   WHERE ad.level='ad' AND ad.parent_id = se.entity_id
+                     AND UPPER(IFNULL(ad.status,'')) NOT IN ('PAUSED','ARCHIVED','DELETED','INACTIVE','DRAFT','IN_PROCESS')
+                     AND UPPER(IFNULL(ad.effective_status,'')) NOT IN ('PAUSED','ARCHIVED','DELETED','INACTIVE','DRAFT','IN_PROCESS')
+              )
+              AND IFNULL(x.spend,0) > 0
+              AND IFNULL(x.impr,0) = 0
+            ORDER BY se.updated_at DESC
+            LIMIT 50;`, { replacements });
+        // Enriquecer con delivery insights (Meta) cuando sea posible
+        if (live) {
+            try {
+                const { metaGet } = require('../lib/metaClient');
+                const tokenByAccount = new Map();
+                for (const a of accounts) {
+                    const act = String(a.metaAssetId).startsWith('act_') ? String(a.metaAssetId) : `act_${a.metaAssetId}`;
+                    if (a.metaConnection?.accessToken) tokenByAccount.set(act, a.metaConnection.accessToken);
+                }
+                const summarizeIssues = (arr) => {
+                    if (!Array.isArray(arr) || !arr.length) return null;
+                    const texts = arr.map(x => x?.description || x?.message || x?.title || x?.summary).filter(Boolean);
+                    return texts.length ? Array.from(new Set(texts)).slice(0,3).join(' · ') : null;
+                };
+                const cap = Math.min(noDelivery.length || 0, 20);
+                for (let i=0; i<cap; i++) {
+                    const it = noDelivery[i];
+                    const act = String(it.ad_account_id).startsWith('act_') ? String(it.ad_account_id) : `act_${it.ad_account_id}`;
+                    const token = tokenByAccount.get(act);
+                    if (!token) continue;
+                    try {
+                        const resp = await metaGet(`${it.adset_id}`, { params: { fields: 'issues_info,effective_status' }, accessToken: token });
+                        const data = resp.data || {};
+                        const reason = summarizeIssues(data.issues_info) || null;
+                        it.reason_text = reason || null;
+                    } catch {}
+                }
+            } catch {}
+        }
+        cards.push({ id: 'delivery-issues', title: 'Posibles problemas de entrega (sin impresiones)', status: noDelivery.length ? 'warning' : 'ok', items: noDelivery });
+
+        // 0) Límite de gasto de cuenta alcanzado
+        try {
+            const budgetCap = (accountStatusItems || []).filter(it => {
+                const cap = parseFloat(it.spend_cap || 0);
+                const spent = parseFloat(it.amount_spent || 0);
+                return cap > 0 && spent >= cap;
+            });
+            if (budgetCap.length) {
+                cards.push({ id: 'budget-cap', title: 'Límite de gasto alcanzado', status: 'warning', items: budgetCap });
+            }
+        } catch {}
 
         // 6) Learning limited (adset)
         const [learningLimited] = await SocialAdsInsightsDaily.sequelize.query(`
@@ -583,24 +825,50 @@ exports.getAdsHealth = async (req, res) => {
         cards.push({ id: 'rejected-ads', title: 'Anuncios rechazados', status: rejectedAds.length ? 'error' : 'ok', items: rejectedAds });
 
         // Añadir ui_link en items
-        function linkFor(level, acc, id, adsetId, campaignId) {
-            if (!acc || !id) return null;
+        function linkFor(level, acc, id, adsetId, campaignId, overrideSince, overrideUntil, pageOverride) {
+            if (!acc) return null;
             const act = String(acc).replace(/^act_/, '');
-            const base = 'https://adsmanager.facebook.com/adsmanager/manage/ads?act=' + act;
+            const page = pageOverride || (level === 'ad' ? 'ads' : 'adsets');
+            const base = `https://adsmanager.facebook.com/adsmanager/manage/${page}?act=${act}`;
             const params = [];
             if (campaignId) params.push(`selected_campaign_ids=${campaignId}`);
             if (adsetId) params.push(`selected_adset_ids=${adsetId}`);
-            if (level === 'ad') params.push(`selected_ad_ids=${id}`);
+            if (level === 'ad' && id) params.push(`selected_ad_ids=${id}`);
+            try {
+                const since = overrideSince || fmt(start);
+                const until = overrideUntil || fmt(end);
+                const range = `${since}_${until}`;
+                params.push(`date=${range}`);
+                params.push(`insights_date=${range}`);
+                params.push(`comparison_date=`);
+                params.push(`insights_comparison_date=`);
+            } catch {}
             return base + (params.length ? '&' + params.join('&') : '');
         }
-        const mapLink = (arr, level) => (arr || []).map(it => ({ ...it, ui_link: linkFor(level, it.ad_account_id, it.entity_id, it.adset_id, it.campaign_id) }));
+        const mapLink = (arr, level, sinceOverride, untilOverride, pageOverride) => (arr || []).map(it => ({
+            ...it,
+            ui_link: linkFor(level, it.ad_account_id, it.entity_id, it.adset_id, it.campaign_id, sinceOverride, untilOverride, pageOverride)
+        }));
         const cardsLinked = cards.map(c => {
             let level = 'adset';
             if (c.id === 'frequency-gt-3' || c.id === 'low-ctr' || c.id === 'rejected-ads') level = 'ad';
-            return { ...c, items: mapLink(c.items, level) };
+            let sinceOverride = null, untilOverride = null, pageOverride = null;
+            if (c.id === 'cpl-growth') {
+                sinceOverride = fmt(yestRef);
+                untilOverride = fmt(todayRef);
+            } else if (c.id === 'no-leads-48h' || c.id === 'cpl-over-10') {
+                const until48 = fmt(end);
+                const d = new Date(end.getTime() - 86400000);
+                d.setHours(0,0,0,0);
+                const since48 = fmt(d);
+                sinceOverride = since48; untilOverride = until48;
+            }
+            if (level === 'adset') pageOverride = 'adsets';
+            return { ...c, items: mapLink(c.items, level, sinceOverride, untilOverride, pageOverride) };
         });
 
-        return res.status(200).json({ platform:'meta', period: { start: fmt(start), end: fmt(end) }, cards: cardsLinked });
+
+        return res.status(200).json({ platform:'meta', period: { start: fmt(start), end: fmt(end) }, thresholds: { freq, ctr, cpl, growth }, cards: cardsLinked });
     } catch (error) {
         console.error('❌ getAdsHealth error:', error);
         return res.status(500).json({ message: 'Error obteniendo salud de campañas', error: error.message });
@@ -1213,6 +1481,43 @@ exports.getPaidReachBreakdown = async (req, res) => {
         });
     } catch (error) {
         console.error('❌ Error en getPaidReachBreakdown:', error);
+        return res.status(500).json({ message: 'Error interno', error: error.message });
+    }
+};
+
+// Diagnóstico: lista action_types por clínica/rango (Meta Ads)
+exports.getAdsActionTypes = async (req, res) => {
+    try {
+        const { clinicaId } = req.params;
+        const { startDate, endDate, includeDestination, includePlatform } = req.query;
+        if (!clinicaId) return res.status(400).json({ message: 'clinicaId requerido' });
+        const fmt = (d) => d.toISOString().slice(0,10);
+        const start = startDate ? new Date(startDate) : new Date(Date.now() - 7*24*60*60*1000);
+        const end = endDate ? new Date(endDate) : new Date();
+
+        const accounts = await ClinicMetaAsset.findAll({ where: { clinicaId, isActive: true, assetType: 'ad_account' }, raw: true });
+        const accIds = accounts.map(a => a.metaAssetId);
+        if (!accIds.length) return res.json({ clinicaId, items: [] });
+
+        const selects = [];
+        const groups = [];
+        if (String(includeDestination||'') === '1') { selects.push('a.action_destination'); groups.push('a.action_destination'); }
+        if (String(includePlatform||'') === '1') { selects.push('a.publisher_platform'); groups.push('a.publisher_platform'); }
+        const sel = selects.length ? ','+selects.join(',') : '';
+        const grp = groups.length ? ','+groups.join(',') : '';
+
+        const sql = 'SELECT a.action_type' + sel + '\n' +
+                    '       ,COUNT(*) AS rows, SUM(a.value) AS total\n' +
+                    'FROM SocialAdsActionsDaily a\n' +
+                    'WHERE a.ad_account_id IN (:accs) AND a.date BETWEEN :s AND :e\n' +
+                    'GROUP BY a.action_type' + grp + '\n' +
+                    'ORDER BY total DESC, rows DESC\n' +
+                    'LIMIT 500;';
+        const [rows] = await SocialAdsActionsDaily.sequelize.query(sql, { replacements: { accs: accIds, s: fmt(start), e: fmt(end) } });
+
+        return res.json({ clinicaId, start: fmt(start), end: fmt(end), items: rows });
+    } catch (error) {
+        console.error('❌ Error en getAdsActionTypes:', error);
         return res.status(500).json({ message: 'Error interno', error: error.message });
     }
 };

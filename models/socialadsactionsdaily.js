@@ -9,7 +9,7 @@ module.exports = (sequelize, DataTypes) => {
     action_type: { type: DataTypes.STRING(128), allowNull: false },
     action_destination: { type: DataTypes.STRING(128) },
     publisher_platform: { type: DataTypes.STRING(64), allowNull: true },
-    value: { type: DataTypes.INTEGER, allowNull: false, defaultValue: 0 }
+    value: { type: DataTypes.DECIMAL(12, 4), allowNull: false, defaultValue: 0 }
   }, {
     tableName: 'SocialAdsActionsDaily',
     timestamps: true,

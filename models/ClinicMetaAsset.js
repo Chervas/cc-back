@@ -64,6 +64,11 @@ module.exports = (sequelize, DataTypes) => {
             defaultValue: true,
             comment: 'Si el mapeo está activo o deshabilitado'
         }
+        ,ad_account_status: { type: DataTypes.INTEGER, allowNull: true }
+        ,ad_account_disable_reason: { type: DataTypes.STRING(64), allowNull: true }
+        ,ad_account_spend_cap: { type: DataTypes.DECIMAL(18,2), allowNull: true }
+        ,ad_account_amount_spent: { type: DataTypes.DECIMAL(18,2), allowNull: true }
+        ,ad_account_refreshed_at: { type: DataTypes.DATE, allowNull: true }
     }, {
         tableName: 'ClinicMetaAssets',
         timestamps: true,
@@ -392,4 +397,3 @@ module.exports = (sequelize, DataTypes) => {
 
     return ClinicMetaAsset;
 };
-

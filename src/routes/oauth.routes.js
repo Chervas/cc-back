@@ -3,12 +3,25 @@ const express = require('express');
 const axios = require('axios');
 const jwt = require('jsonwebtoken');  // Para decodificar el token JWT
 const router = express.Router();
+const { Op } = require('sequelize');
 const db = require('../../models'); // <-- Importa el objeto db de models/index.js
 const MetaConnection = db.MetaConnection; // <-- Accede al modelo MetaConnection
 const GoogleConnection = db.GoogleConnection; // <-- Modelo GoogleConnection
 const ClinicWebAsset = db.ClinicWebAsset; // <-- Modelo de mapeo de sitios web
+const ClinicAnalyticsProperty = db.ClinicAnalyticsProperty;
 const Clinica = db.Clinica;
 const ClinicMetaAsset = db.ClinicMetaAsset; // <-- Accede al modelo ClinicMetaAsset
+const ClinicBusinessLocation = db.ClinicBusinessLocation;
+const ClinicGoogleAdsAccount = db.ClinicGoogleAdsAccount;
+const {
+    googleAdsRequest,
+    normalizeCustomerId,
+    formatCustomerId,
+    ensureGoogleAdsConfig,
+    getGoogleAdsUsageStatus,
+    resumeGoogleAdsUsage
+} = require('../lib/googleAdsClient');
+const { metaSyncJobs } = require('../jobs/sync.jobs');
 const { triggerHistoricalSync } = require('../controllers/metasync.controller');
 
 // Configuración de la App de Meta
@@ -22,7 +35,297 @@ const FRONTEND_DEV_URL = 'http://localhost:4200'; // Para desarrollo local
 const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID || '';
 const GOOGLE_CLIENT_SECRET = process.env.GOOGLE_CLIENT_SECRET || '';
 const GOOGLE_REDIRECT_URI = process.env.GOOGLE_REDIRECT_URI || 'https://autenticacion.clinicaclick.com/oauth/google/callback';
-const GOOGLE_SCOPES = (process.env.GOOGLE_OAUTH_SCOPES || 'https://www.googleapis.com/auth/webmasters.readonly openid email profile').split(/\s+/).join(' ');
+const DEFAULT_GOOGLE_SCOPES = [
+    'openid',
+    'email',
+    'profile',
+    'https://www.googleapis.com/auth/webmasters.readonly',
+    'https://www.googleapis.com/auth/analytics.readonly',
+    'https://www.googleapis.com/auth/business.manage',
+    'https://www.googleapis.com/auth/adwords'
+].join(' ');
+
+const GOOGLE_SCOPES = (process.env.GOOGLE_OAUTH_SCOPES || DEFAULT_GOOGLE_SCOPES).split(/\s+/).join(' ');
+const GOOGLE_BUSINESS_INFORMATION_API = 'https://mybusinessbusinessinformation.googleapis.com/v1';
+const GOOGLE_BUSINESS_ACCOUNT_API = 'https://mybusinessaccountmanagement.googleapis.com/v1';
+
+const GOOGLE_ADS_SCOPE = 'https://www.googleapis.com/auth/adwords';
+
+function googleTokenError(code, message) {
+    const err = new Error(message);
+    err.code = code;
+    return err;
+}
+
+async function ensureGoogleAccessToken(conn, { allowExpired = false } = {}) {
+    if (!conn) {
+        throw googleTokenError('NO_CONNECTION', 'No existe conexión Google para este usuario');
+    }
+    if (!conn.accessToken) {
+        throw googleTokenError('NO_TOKEN', 'No existe access token de Google almacenado');
+    }
+
+    let accessToken = conn.accessToken;
+    let expiresAt = conn.expiresAt ? new Date(conn.expiresAt) : null;
+    const now = Date.now();
+    const threshold = now + 60_000;
+
+    const shouldRefresh = conn.refreshToken && (!expiresAt || expiresAt.getTime() <= threshold);
+    if (shouldRefresh) {
+        try {
+            const tr = await axios.post('https://oauth2.googleapis.com/token', new URLSearchParams({
+                client_id: GOOGLE_CLIENT_ID,
+                client_secret: GOOGLE_CLIENT_SECRET,
+                grant_type: 'refresh_token',
+                refresh_token: conn.refreshToken
+            }).toString(), { headers: { 'Content-Type': 'application/x-www-form-urlencoded' } });
+            const newToken = tr.data?.access_token;
+            const expiresIn = tr.data?.expires_in || 3600;
+            if (newToken) {
+                accessToken = newToken;
+                expiresAt = new Date(Date.now() + expiresIn * 1000);
+                await conn.update({ accessToken, expiresAt });
+            }
+        } catch (refreshErr) {
+            if (!allowExpired) {
+                throw googleTokenError('REFRESH_FAILED', refreshErr.response?.data?.error_description || refreshErr.message || 'No se pudo refrescar el token');
+            }
+        }
+    }
+
+    const isExpired = expiresAt ? expiresAt.getTime() <= now : false;
+    if (isExpired && !allowExpired) {
+        throw googleTokenError('TOKEN_EXPIRED', 'El token de Google ha expirado');
+    }
+
+    return { accessToken, expiresAt, expired: isExpired };
+}
+
+function hasScopeText(scopesText, scope) {
+    if (!scopesText || !scope) {
+        return false;
+    }
+    return scopesText.split(/\s+/).includes(scope);
+}
+
+function getGoogleManagerId() {
+    return ensureGoogleAdsConfig().managerId;
+}
+
+async function ensureGoogleAdsAccess(conn) {
+    if (!hasScopeText(conn?.scopes || '', GOOGLE_ADS_SCOPE)) {
+        const err = googleTokenError('INSUFFICIENT_SCOPE', 'La conexión Google no tiene permisos de Google Ads');
+        throw err;
+    }
+    const tokenInfo = await ensureGoogleAccessToken(conn);
+    ensureGoogleAdsConfig();
+    return tokenInfo;
+}
+
+async function listAccessibleAdsCustomers(accessToken) {
+    const resp = await googleAdsRequest('GET', 'customers:listAccessibleCustomers', { accessToken });
+    const resourceNames = resp?.resourceNames || [];
+    return resourceNames.map((name) => normalizeCustomerId(name.split('/').pop()));
+}
+
+async function fetchAdsCustomerSummary(accessToken, customerId, { loginCustomerId } = {}) {
+    if (!customerId) {
+        return null;
+    }
+    const cleanId = normalizeCustomerId(customerId);
+    const query = [
+        'SELECT',
+        '  customer.id,',
+        '  customer.descriptive_name,',
+        '  customer.currency_code,',
+        '  customer.time_zone,',
+        '  customer.manager,',
+        '  customer.status',
+        'FROM customer'
+    ].join('\n');
+    const requestOptions = {
+        accessToken,
+        data: { query }
+    };
+    if (loginCustomerId) {
+        requestOptions.loginCustomerId = normalizeCustomerId(loginCustomerId);
+    }
+    const result = await googleAdsRequest('POST', `customers/${cleanId}/googleAds:search`, requestOptions);
+    const row = Array.isArray(result?.results) ? result.results[0] : null;
+    if (!row?.customer) {
+        return { customerId: cleanId };
+    }
+    return {
+        customerId: cleanId,
+        descriptiveName: row.customer.descriptiveName || null,
+        currencyCode: row.customer.currencyCode || null,
+        timeZone: row.customer.timeZone || null,
+        accountStatus: row.customer.status || null,
+        isManager: row.customer.manager || false
+    };
+}
+
+async function fetchAdsCustomerClients(accessToken, managerCustomerId) {
+    const manager = normalizeCustomerId(managerCustomerId);
+    if (!manager) {
+        return [];
+    }
+
+    const query = [
+        'SELECT',
+        '  customer_client.client_customer,',
+        '  customer_client.descriptive_name,',
+        '  customer_client.currency_code,',
+        '  customer_client.time_zone,',
+        '  customer_client.status,',
+        '  customer_client.level,',
+        '  customer_client.manager,',
+        '  customer_client.hidden',
+        'FROM customer_client',
+        'WHERE customer_client.hidden = FALSE'
+    ].join('\n');
+
+    const clients = [];
+    let pageToken = null;
+    do {
+        const resp = await googleAdsRequest('POST', `customers/${manager}/googleAds:search`, {
+            accessToken,
+            loginCustomerId: manager,
+            data: { query, pageToken }
+        });
+        const rows = Array.isArray(resp?.results) ? resp.results : [];
+        for (const row of rows) {
+            const client = row.customerClient || row.customer_client;
+            if (!client) {
+                continue;
+            }
+            const resourceName = client.clientCustomer || client.client_customer;
+            const customerId = resourceName ? normalizeCustomerId(String(resourceName).split('/').pop()) : null;
+            if (!customerId) {
+                continue;
+            }
+            clients.push({
+                customerId,
+                descriptiveName: client.descriptiveName || null,
+                currencyCode: client.currencyCode || null,
+                timeZone: client.timeZone || null,
+                status: client.status || null,
+                level: client.level || 0,
+                isManager: !!client.manager,
+                hidden: !!client.hidden
+            });
+        }
+        pageToken = resp?.nextPageToken || resp?.next_page_token || null;
+    } while (pageToken);
+
+    return clients;
+}
+
+async function fetchManagerLinkForCustomer(accessToken, customerId, managerId, { loginCustomerId } = {}) {
+    const manager = normalizeCustomerId(managerId);
+    if (!manager) {
+        return null;
+    }
+    const query = [
+        'SELECT',
+        '  customer_manager_link.manager_link_id,',
+        '  customer_manager_link.manager_customer,',
+        '  customer_manager_link.status',
+        'FROM customer_manager_link'
+    ].join('\n');
+    const requestOptions = {
+        accessToken,
+        data: { query: `${query} WHERE customer_manager_link.manager_customer = 'customers/${manager}'` }
+    };
+    if (loginCustomerId) {
+        requestOptions.loginCustomerId = normalizeCustomerId(loginCustomerId);
+    }
+    const result = await googleAdsRequest('POST', `customers/${customerId}/googleAds:search`, requestOptions);
+    const row = Array.isArray(result?.results) ? result.results[0] : null;
+    if (!row?.customerManagerLink) {
+        return null;
+    }
+    return {
+        managerCustomerId: normalizeCustomerId(row.customerManagerLink.managerCustomer?.split('/').pop()),
+        managerLinkId: row.customerManagerLink.managerLinkId,
+        status: row.customerManagerLink.status
+    };
+}
+
+async function fetchAllGoogleBusinessAccounts(accessToken) {
+    const accounts = [];
+    let nextPageToken = null;
+    do {
+        const resp = await axios.get(`${GOOGLE_BUSINESS_ACCOUNT_API}/accounts`, {
+            params: { pageSize: 100, pageToken: nextPageToken || undefined },
+            headers: { Authorization: `Bearer ${accessToken}` }
+        });
+        const batch = resp.data?.accounts || [];
+        accounts.push(...batch);
+        nextPageToken = resp.data?.nextPageToken || null;
+    } while (nextPageToken);
+    return accounts;
+}
+
+async function fetchAllGoogleBusinessLocations(accessToken, accountName) {
+    const locations = [];
+    let nextPageToken = null;
+    const paramsBase = {
+        pageSize: 100
+    };
+    do {
+        const resp = await axios.get(`${GOOGLE_BUSINESS_INFORMATION_API}/${accountName}/locations`, {
+            params: { ...paramsBase, pageToken: nextPageToken || undefined },
+            headers: { Authorization: `Bearer ${accessToken}` }
+        });
+        const batch = resp.data?.locations || [];
+        locations.push(...batch);
+        nextPageToken = resp.data?.nextPageToken || null;
+    } while (nextPageToken);
+    return locations;
+}
+
+function normalizeBusinessLocation(location, account) {
+    if (!location) {
+        return null;
+    }
+    const accountName = account?.name || null;
+    const accountDisplayName = account?.accountName || account?.name || null;
+    const locationName = location.title || location.locationName || null;
+    const resourceName = location.name || null;
+    const storeCode = location.storeCode || null;
+    const primaryCategory = location.primaryCategory?.displayName || location.primaryCategory?.name || null;
+    const verificationStatus = location.metadata?.verificationState || location.metadata?.verificationStatus || null;
+    const suspended = Array.isArray(location.metadata?.suspensionReasons) && location.metadata.suspensionReasons.length > 0;
+    const verified = verificationStatus ? verificationStatus.toUpperCase() === 'VERIFIED' : !!location.metadata?.hasBusinessAuthority;
+    const address = location.address || null;
+    const locality = address?.locality || address?.localityName || null;
+    const region = address?.administrativeArea || null;
+    const country = address?.regionCode || null;
+    const placeId = location.metadata?.placeId || location.locationKey?.placeId || null;
+    return {
+        id: resourceName,
+        accountName,
+        accountDisplayName,
+        locationId: resourceName,
+        locationName,
+        storeCode,
+        primaryCategory,
+        verificationStatus,
+        isVerified: verified,
+        isSuspended: suspended,
+        placeId,
+        locality,
+        region,
+        country,
+        websiteUri: location.websiteUri || null,
+        phoneNumbers: location.phoneNumbers || null,
+        openInfo: location.openInfo || null,
+        serviceArea: location.serviceArea || null,
+        labels: location.labels || null,
+        rawLocation: location
+    };
+}
 
 /**
  * GET /oauth/meta/callback
@@ -250,26 +553,22 @@ router.get('/google/connection-status', async (req, res) => {
         if (!userId) return res.status(401).json({ connected: false, message: 'Usuario no autenticado' });
         let conn;
         try {
-            // Evitar seleccionar columnas que puedan no existir aún (userName) si la migración no ha corrido
-            conn = await GoogleConnection.findOne({
-                where: { userId },
-                attributes: ['id','userId','googleUserId','userEmail','accessToken','refreshToken','scopes','expiresAt']
-            });
-        } catch (e) {
-            // Fallback más defensivo
             conn = await GoogleConnection.findOne({ where: { userId } });
+        } catch (e) {
+            console.warn('⚠️ Error obteniendo conexión Google:', e.message);
         }
         if (!conn) return res.json({ connected: false });
 
-        const isExpired = conn.expiresAt ? (new Date(conn.expiresAt) < new Date()) : false;
+        const tokenInfo = await ensureGoogleAccessToken(conn, { allowExpired: true });
+
         return res.json({
-            connected: !isExpired,
+            connected: !tokenInfo.expired,
             userEmail: conn.userEmail,
             googleUserId: conn.googleUserId,
             userName: conn.userName || null,
             expiresAt: conn.expiresAt,
             scopes: conn.scopes,
-            expired: isExpired
+            expired: tokenInfo.expired
         });
     } catch (e) {
         console.error('❌ Error en connection-status Google:', e.message);
@@ -289,23 +588,12 @@ router.get('/google/assets', async (req, res) => {
         const conn = await GoogleConnection.findOne({ where: { userId } });
         if (!conn) return res.status(404).json({ success: false, error: 'No hay conexión Google' });
 
-        // Refrescar token si es necesario
-        let accessToken = conn.accessToken;
-        const needsRefresh = conn.expiresAt && new Date(conn.expiresAt) < new Date(Date.now() + 60_000);
-        if (needsRefresh && conn.refreshToken) {
-            try {
-                const tr = await axios.post('https://oauth2.googleapis.com/token', new URLSearchParams({
-                    client_id: GOOGLE_CLIENT_ID,
-                    client_secret: GOOGLE_CLIENT_SECRET,
-                    grant_type: 'refresh_token',
-                    refresh_token: conn.refreshToken
-                }).toString(), { headers: { 'Content-Type': 'application/x-www-form-urlencoded' } });
-                accessToken = tr.data?.access_token || accessToken;
-                const expiresIn = tr.data?.expires_in || 3600;
-                await conn.update({ accessToken, expiresAt: new Date(Date.now() + expiresIn * 1000) });
-            } catch (e) {
-                console.warn('⚠️ Error refrescando token Google:', e.response?.data || e.message);
-            }
+        let accessToken;
+        try {
+            ({ accessToken } = await ensureGoogleAccessToken(conn));
+        } catch (tokenErr) {
+            console.error('❌ Token Google inválido al listar assets:', tokenErr.message);
+            return res.status(401).json({ success: false, error: tokenErr.code || 'TOKEN_ERROR' });
         }
 
         // Llamar a Search Console sites.list
@@ -322,6 +610,907 @@ router.get('/google/assets', async (req, res) => {
     } catch (e) {
         console.error('❌ Error en /oauth/google/assets:', e.response?.data || e.message);
         return res.status(500).json({ success: false, error: 'Error obteniendo propiedades' });
+    }
+});
+
+/**
+ * GOOGLE — Estado de conexión para Google Analytics
+ */
+router.get('/google/analytics/connection-status', async (req, res) => {
+    try {
+        const userId = getUserIdFromToken(req);
+        if (!userId) return res.status(401).json({ connected: false, reason: 'unauthenticated' });
+
+        const conn = await GoogleConnection.findOne({ where: { userId } });
+        if (!conn) return res.json({ connected: false, reason: 'no_connection' });
+
+        let accessToken;
+        try {
+            ({ accessToken } = await ensureGoogleAccessToken(conn));
+        } catch (tokenErr) {
+            if (tokenErr.code === 'TOKEN_EXPIRED' || tokenErr.code === 'REFRESH_FAILED') {
+                return res.json({ connected: false, reason: 'token_expired' });
+            }
+            throw tokenErr;
+        }
+
+        try {
+            const resp = await axios.get('https://analyticsadmin.googleapis.com/v1beta/accountSummaries', {
+                params: { pageSize: 1 },
+                headers: { Authorization: `Bearer ${accessToken}` }
+            });
+            const summaries = resp.data?.accountSummaries || [];
+            return res.json({
+                connected: true,
+                hasAccounts: summaries.length > 0,
+                accounts: summaries.length,
+                expiresAt: conn.expiresAt
+            });
+        } catch (apiErr) {
+            const status = apiErr.response?.status;
+            if (status === 403) {
+                return res.json({ connected: false, reason: 'insufficient_scope' });
+            }
+            if (status === 401) {
+                return res.json({ connected: false, reason: 'token_invalid' });
+            }
+            console.error('❌ Error comprobando Analytics:', apiErr.response?.data || apiErr.message);
+            return res.json({ connected: false, reason: 'api_error' });
+        }
+    } catch (e) {
+        console.error('❌ Error en analytics/connection-status:', e.message);
+        return res.status(500).json({ connected: false, reason: 'internal_error' });
+    }
+});
+
+/**
+ * GOOGLE — Listar propiedades de Google Analytics (GA4)
+ */
+router.get('/google/analytics/properties', async (req, res) => {
+    try {
+        const userId = getUserIdFromToken(req);
+        if (!userId) return res.status(401).json({ success: false, error: 'Usuario no autenticado' });
+
+        const conn = await GoogleConnection.findOne({ where: { userId } });
+        if (!conn) return res.status(404).json({ success: false, error: 'No hay conexión Google' });
+
+        let accessToken;
+        try {
+            ({ accessToken } = await ensureGoogleAccessToken(conn));
+        } catch (tokenErr) {
+            console.error('❌ Token Google inválido al listar Analytics:', tokenErr.message);
+            return res.status(401).json({ success: false, error: tokenErr.code || 'TOKEN_ERROR' });
+        }
+
+        const accountSummaries = [];
+        let pageToken;
+        do {
+            const resp = await axios.get('https://analyticsadmin.googleapis.com/v1beta/accountSummaries', {
+                params: { pageSize: 200, pageToken },
+                headers: { Authorization: `Bearer ${accessToken}` }
+            });
+            const entries = resp.data?.accountSummaries || [];
+            accountSummaries.push(...entries);
+            pageToken = resp.data?.nextPageToken || null;
+        } while (pageToken);
+
+        const mapped = accountSummaries.map((acc) => ({
+            accountName: acc.name,
+            accountDisplayName: acc.displayName,
+            properties: (acc.propertySummaries || []).map((p) => ({
+                propertyName: p.property,
+                propertyDisplayName: p.displayName,
+                propertyType: p.propertyType,
+                parent: p.parent
+            }))
+        }));
+
+        return res.json({ success: true, accounts: mapped });
+    } catch (e) {
+        const status = e.response?.status;
+        if (status === 403) {
+            return res.status(403).json({ success: false, error: 'insufficient_scope' });
+        }
+        console.error('❌ Error listando propiedades de Analytics:', e.response?.data || e.message);
+        return res.status(500).json({ success: false, error: 'Error listando propiedades' });
+    }
+});
+
+/**
+ * GOOGLE — Guardar mapeo de propiedades GA4 a clínicas
+ * body: { mappings: [{ clinicaId, propertyName, propertyDisplayName?, propertyType?, parent?, measurementId? }] }
+ */
+router.post('/google/analytics/map-properties', async (req, res) => {
+    try {
+        const userId = getUserIdFromToken(req);
+        if (!userId) return res.status(401).json({ success: false, error: 'Usuario no autenticado' });
+
+        const conn = await GoogleConnection.findOne({ where: { userId } });
+        if (!conn) return res.status(404).json({ success: false, error: 'No hay conexión Google' });
+
+        const mappings = Array.isArray(req.body?.mappings) ? req.body.mappings : [];
+        if (!mappings.length) return res.status(400).json({ success: false, error: 'mappings requerido' });
+
+        const createdOrUpdated = [];
+        const propertiesToBackfill = [];
+        for (const m of mappings) {
+            const clinicaId = parseInt(m.clinicaId, 10);
+            const propertyName = String(m.propertyName || '').trim();
+            if (!clinicaId || !propertyName) continue;
+
+            const payload = {
+                clinicaId,
+                googleConnectionId: conn.id,
+                propertyName,
+                propertyDisplayName: m.propertyDisplayName || null,
+                propertyType: m.propertyType || null,
+                parent: m.parent || null,
+                measurementId: m.measurementId || null,
+                isActive: true
+            };
+
+            const existing = await ClinicAnalyticsProperty.findOne({ where: { clinicaId, propertyName } });
+            if (existing) {
+                await existing.update(payload);
+                createdOrUpdated.push({ id: existing.id, ...payload });
+                propertiesToBackfill.push({ clinicId: clinicaId, propertyId: existing.id, propertyName });
+            } else {
+                const rec = await ClinicAnalyticsProperty.create(payload);
+                createdOrUpdated.push({ id: rec.id, ...payload });
+                propertiesToBackfill.push({ clinicId: clinicaId, propertyId: rec.id, propertyName });
+            }
+        }
+
+        if (propertiesToBackfill.length) {
+            setImmediate(async () => {
+                try {
+                    await metaSyncJobs.executeAnalyticsBackfillForProperties(propertiesToBackfill);
+                } catch (err) {
+                    console.error('❌ Error lanzando analyticsSync tras mapeo:', err.message);
+                }
+            });
+        }
+
+        return res.json({ success: true, mapped: createdOrUpdated.length, properties: createdOrUpdated });
+    } catch (e) {
+        console.error('❌ Error en /oauth/google/analytics/map-properties:', e.response?.data || e.message);
+        return res.status(500).json({ success: false, error: 'Error mapeando propiedades' });
+    }
+});
+
+/**
+ * GOOGLE — Listar ubicaciones de Google Business Profile accesibles
+ */
+router.get('/google/local/locations', async (req, res) => {
+    try {
+        const userId = getUserIdFromToken(req);
+        if (!userId) {
+            return res.status(401).json({ success: false, error: 'Usuario no autenticado' });
+        }
+
+        const conn = await GoogleConnection.findOne({ where: { userId } });
+        if (!conn) {
+            return res.status(404).json({ success: false, error: 'No hay conexión Google' });
+        }
+
+        let accessToken;
+        try {
+            ({ accessToken } = await ensureGoogleAccessToken(conn));
+        } catch (tokenErr) {
+            const errCode = tokenErr.code || 'TOKEN_ERROR';
+            if (errCode === 'INSUFFICIENT_SCOPE') {
+                return res.status(403).json({ success: false, error: 'insufficient_scope' });
+            }
+            return res.status(401).json({ success: false, error: errCode });
+        }
+
+        try {
+            const accounts = await fetchAllGoogleBusinessAccounts(accessToken);
+            const response = [];
+            for (const account of accounts) {
+                const locations = await fetchAllGoogleBusinessLocations(accessToken, account.name);
+                const simplified = locations
+                    .map((loc) => normalizeBusinessLocation(loc, account))
+                    .filter(Boolean);
+                response.push({
+                    accountName: account.name,
+                    accountDisplayName: account.accountName || account.name,
+                    accountNumber: account.accountNumber || null,
+                    locations: simplified
+                });
+            }
+
+            return res.json({ success: true, accounts: response });
+        } catch (apiErr) {
+            const status = apiErr.response?.status;
+            if (status === 403) {
+                return res.status(403).json({ success: false, error: 'insufficient_scope' });
+            }
+            console.error('❌ Error listando ubicaciones de Google Business Profile:', apiErr.response?.data || apiErr.message);
+            return res.status(500).json({ success: false, error: 'Error obteniendo ubicaciones' });
+        }
+    } catch (err) {
+        console.error('❌ Error interno en /oauth/google/local/locations:', err.message);
+        return res.status(500).json({ success: false, error: 'Error interno' });
+    }
+});
+
+/**
+ * GOOGLE — Guardar mapeo de ubicaciones de Google Business Profile con clínicas
+ */
+router.post('/google/local/map-locations', async (req, res) => {
+    try {
+        const userId = getUserIdFromToken(req);
+        if (!userId) {
+            return res.status(401).json({ success: false, error: 'Usuario no autenticado' });
+        }
+
+        const conn = await GoogleConnection.findOne({ where: { userId } });
+        if (!conn) {
+            return res.status(404).json({ success: false, error: 'No hay conexión Google' });
+        }
+
+        const mappings = Array.isArray(req.body?.mappings) ? req.body.mappings : [];
+        if (!mappings.length) {
+            return res.status(400).json({ success: false, error: 'mappings requerido' });
+        }
+
+        const createdOrUpdated = [];
+        for (const mapping of mappings) {
+            const clinicaId = parseInt(mapping?.clinicaId, 10);
+            const locationId = String(mapping?.locationId || mapping?.id || '').trim();
+            if (!clinicaId || !locationId) {
+                continue;
+            }
+
+            const payload = {
+                clinica_id: clinicaId,
+                google_connection_id: conn.id,
+                location_name: mapping.locationName || mapping.title || null,
+                location_id: locationId,
+                store_code: mapping.storeCode || null,
+                primary_category: mapping.primaryCategory || null,
+                sync_status: 'pending',
+                is_verified: typeof mapping.isVerified === 'boolean' ? mapping.isVerified : false,
+                is_suspended: typeof mapping.isSuspended === 'boolean' ? mapping.isSuspended : false,
+                raw_payload: mapping.rawLocation || mapping.rawPayload || null,
+                is_active: true,
+                last_synced_at: null
+            };
+
+            let record = await ClinicBusinessLocation.findOne({ where: { location_id: locationId } });
+            if (record) {
+                await record.update(payload);
+            } else {
+                record = await ClinicBusinessLocation.create(payload);
+            }
+            createdOrUpdated.push({ id: record.id, clinicaId, locationId });
+        }
+
+        return res.json({ success: true, mapped: createdOrUpdated.length, locations: createdOrUpdated });
+    } catch (err) {
+        console.error('❌ Error en /oauth/google/local/map-locations:', err.response?.data || err.message);
+        return res.status(500).json({ success: false, error: 'Error guardando mapeo Local' });
+    }
+});
+
+/**
+ * GOOGLE — Obtener mapeos actuales de Local Business
+ */
+router.get('/google/local/mappings', async (req, res) => {
+    try {
+        const userId = getUserIdFromToken(req);
+        if (!userId) {
+            return res.status(401).json({ success: false, error: 'Usuario no autenticado' });
+        }
+
+        const conn = await GoogleConnection.findOne({ where: { userId } });
+        if (!conn) {
+            return res.json({ success: true, mappings: [] });
+        }
+
+        const rows = await ClinicBusinessLocation.findAll({
+            where: { google_connection_id: conn.id, is_active: true },
+            include: [{ model: Clinica, as: 'clinica', required: false }],
+            order: [['location_name', 'ASC']]
+        });
+
+        const byClinic = new Map();
+        for (const row of rows) {
+            const clinicaId = row.clinica_id;
+            if (!byClinic.has(clinicaId)) {
+                const clinic = row.clinica || {};
+                byClinic.set(clinicaId, {
+                    clinicaId,
+                    clinicName: clinic.nombre_clinica || clinic.nombre || null,
+                    clinicAvatar: clinic.url_avatar || null,
+                    locations: []
+                });
+            }
+            byClinic.get(clinicaId).locations.push({
+                locationId: row.location_id,
+                locationName: row.location_name,
+                storeCode: row.store_code,
+                primaryCategory: row.primary_category,
+                isVerified: !!row.is_verified,
+                isSuspended: !!row.is_suspended,
+                lastSyncedAt: row.last_synced_at
+            });
+        }
+
+        return res.json({ success: true, mappings: Array.from(byClinic.values()) });
+    } catch (err) {
+        console.error('❌ Error en /oauth/google/local/mappings:', err.response?.data || err.message);
+        return res.status(500).json({ success: false, error: 'Error obteniendo mapeos Local' });
+    }
+});
+
+/**
+ * GOOGLE — Estado de conexión Google Ads
+ */
+router.get('/google/ads/connection-status', async (req, res) => {
+    try {
+        const userId = getUserIdFromToken(req);
+        if (!userId) {
+            return res.status(401).json({ connected: false, reason: 'unauthenticated' });
+        }
+
+        const conn = await GoogleConnection.findOne({ where: { userId } });
+        if (!conn) {
+            return res.json({ connected: false, reason: 'no_connection' });
+        }
+
+        if (!hasScopeText(conn.scopes || '', GOOGLE_ADS_SCOPE)) {
+            return res.json({ connected: false, reason: 'insufficient_scope' });
+        }
+
+        let accessToken;
+        try {
+            ({ accessToken } = await ensureGoogleAdsAccess(conn));
+        } catch (tokenErr) {
+            if (tokenErr.code === 'INSUFFICIENT_SCOPE') {
+                return res.json({ connected: false, reason: 'insufficient_scope' });
+            }
+            if (tokenErr.code === 'TOKEN_EXPIRED' || tokenErr.code === 'REFRESH_FAILED') {
+                return res.json({ connected: false, reason: 'token_expired' });
+            }
+            if (tokenErr.code === 'ADS_CONFIG_MISSING') {
+                return res.json({ connected: false, reason: 'config_missing' });
+            }
+            console.error('❌ Error obteniendo token Google Ads:', tokenErr.message);
+            return res.json({ connected: false, reason: 'token_error' });
+        }
+
+        let customers = [];
+        try {
+            customers = await listAccessibleAdsCustomers(accessToken);
+        } catch (adsErr) {
+            console.error('❌ Error consultando cuentas Ads accesibles:', adsErr.details || adsErr.message);
+            return res.json({ connected: false, reason: 'api_error', details: adsErr.details || adsErr.message });
+        }
+
+        return res.json({
+            connected: true,
+            managerId: formatCustomerId(getGoogleManagerId()),
+            customersCount: customers.length,
+            customers
+        });
+    } catch (err) {
+        if (err.code === 'ADS_CONFIG_MISSING') {
+            return res.json({ connected: false, reason: 'config_missing' });
+        }
+        console.error('❌ Error en /oauth/google/ads/connection-status:', err.details || err.message);
+        return res.status(500).json({ connected: false, reason: 'internal_error' });
+    }
+});
+
+/**
+ * GOOGLE — Listar cuentas Google Ads accesibles
+ */
+router.get('/google/ads/accounts', async (req, res) => {
+    try {
+        const userId = getUserIdFromToken(req);
+        if (!userId) {
+            return res.status(401).json({ success: false, error: 'Usuario no autenticado' });
+        }
+
+        const conn = await GoogleConnection.findOne({ where: { userId } });
+        if (!conn) {
+            return res.status(404).json({ success: false, error: 'No hay conexión Google' });
+        }
+
+        if (!hasScopeText(conn.scopes || '', GOOGLE_ADS_SCOPE)) {
+            return res.status(403).json({ success: false, error: 'insufficient_scope' });
+        }
+
+        let accessToken;
+        try {
+            ({ accessToken } = await ensureGoogleAdsAccess(conn));
+        } catch (tokenErr) {
+            const reason = tokenErr.code === 'INSUFFICIENT_SCOPE' ? 'insufficient_scope' : tokenErr.code === 'TOKEN_EXPIRED' ? 'token_expired' : tokenErr.code === 'ADS_CONFIG_MISSING' ? 'config_missing' : 'token_error';
+            return res.status(400).json({ success: false, error: reason });
+        }
+
+        const baseCustomers = await listAccessibleAdsCustomers(accessToken);
+        const uniqueCustomers = new Set();
+        const queue = [];
+        const parentByCustomer = new Map();
+
+        for (const customerId of baseCustomers) {
+            const cleanId = normalizeCustomerId(customerId);
+            if (!cleanId || uniqueCustomers.has(cleanId)) {
+                continue;
+            }
+            uniqueCustomers.add(cleanId);
+            parentByCustomer.set(cleanId, null);
+            queue.push(cleanId);
+        }
+
+        const summaries = new Map();
+        const processedManagers = new Set();
+
+        while (queue.length > 0) {
+            const currentId = queue.shift();
+            if (!currentId) {
+                continue;
+            }
+
+            const parentId = parentByCustomer.get(currentId) || undefined;
+            let summary = summaries.get(currentId);
+            if (!summary) {
+                try {
+                    summary = await fetchAdsCustomerSummary(accessToken, currentId, { loginCustomerId: parentId });
+                    if (summary) {
+                        summaries.set(currentId, summary);
+                    }
+                } catch (summaryErr) {
+                    console.error(`❌ Error obteniendo summary de Ads para ${currentId}:`, summaryErr.details || summaryErr.message);
+                    summary = null;
+                }
+            }
+
+            if (!summary?.isManager || processedManagers.has(currentId)) {
+                continue;
+            }
+
+            processedManagers.add(currentId);
+            try {
+                const clients = await fetchAdsCustomerClients(accessToken, currentId);
+                for (const client of clients) {
+                    if (!client?.customerId) {
+                        continue;
+                    }
+                    if (!uniqueCustomers.has(client.customerId)) {
+                        uniqueCustomers.add(client.customerId);
+                        parentByCustomer.set(client.customerId, currentId);
+                        queue.push(client.customerId);
+                    }
+                    if (!summaries.has(client.customerId)) {
+                        summaries.set(client.customerId, {
+                            customerId: client.customerId,
+                            descriptiveName: client.descriptiveName || null,
+                            currencyCode: client.currencyCode || null,
+                            timeZone: client.timeZone || null,
+                            accountStatus: client.status || null,
+                            isManager: !!client.isManager
+                        });
+                    }
+                }
+            } catch (clientErr) {
+                console.error(`❌ Error listando clientes de manager ${currentId}:`, clientErr.details || clientErr.message);
+            }
+        }
+
+        const customers = Array.from(uniqueCustomers);
+
+        const existing = await ClinicGoogleAdsAccount.findAll({ where: { googleConnectionId: conn.id, isActive: true }, raw: true });
+        const existingByCustomer = new Map();
+        for (const row of existing) {
+            const key = normalizeCustomerId(row.customerId);
+            if (!existingByCustomer.has(key)) {
+                existingByCustomer.set(key, []);
+            }
+            existingByCustomer.get(key).push(row);
+        }
+
+        const clinicIds = Array.from(existingByCustomer.values()).flat().map(r => r.clinicaId);
+        const uniqueClinicIds = Array.from(new Set(clinicIds));
+        const clinicIndex = uniqueClinicIds.length
+            ? new Map((await Clinica.findAll({ where: { id_clinica: uniqueClinicIds }, raw: true })).map(c => [c.id_clinica, c]))
+            : new Map();
+
+        const accounts = [];
+        const mainManagerId = normalizeCustomerId(getGoogleManagerId());
+
+        for (const customerId of customers) {
+            const cleanId = normalizeCustomerId(customerId);
+            const parentId = parentByCustomer.get(cleanId) || undefined;
+            const response = {
+                customerId: cleanId,
+                formattedCustomerId: formatCustomerId(cleanId),
+                parentCustomerId: parentId ? formatCustomerId(parentId) : null,
+                parentDescriptiveName: null,
+                loginCustomerId: parentId || null,
+                inHierarchy: false
+            };
+            try {
+                let summary = summaries.get(cleanId);
+                if (!summary) {
+                    summary = await fetchAdsCustomerSummary(accessToken, cleanId, { loginCustomerId: parentId });
+                    if (summary) {
+                        summaries.set(cleanId, summary);
+                    }
+                }
+                const link = await fetchManagerLinkForCustomer(accessToken, cleanId, getGoogleManagerId(), { loginCustomerId: parentId });
+                const parentSummary = parentId ? summaries.get(parentId) : null;
+                response.descriptiveName = summary?.descriptiveName || null;
+                response.currencyCode = summary?.currencyCode || null;
+                response.timeZone = summary?.timeZone || null;
+                response.accountStatus = summary?.accountStatus || null;
+                response.isManager = !!summary?.isManager;
+                response.parentDescriptiveName = parentSummary?.descriptiveName || null;
+                if (link?.status === 'ACTIVE') {
+                    response.loginCustomerId = mainManagerId;
+                    response.inHierarchy = true;
+                } else if (parentId) {
+                    response.loginCustomerId = parentId;
+                    response.inHierarchy = true;
+                }
+                response.managerCustomerId = link?.managerCustomerId ? formatCustomerId(link.managerCustomerId) : null;
+                response.managerLinkId = link?.managerLinkId || null;
+                response.managerLinkStatus = link?.status || null;
+                response.isLinked = link?.status === 'ACTIVE';
+                response.invitationStatus = link?.status === 'PENDING' ? 'PENDING' : null;
+
+                const mappedRows = existingByCustomer.get(cleanId) || [];
+                response.mappedClinics = mappedRows.map(row => {
+                    const clinic = clinicIndex.get(row.clinicaId) || {};
+                    return {
+                        clinicaId: row.clinicaId,
+                        clinicName: clinic.nombre_clinica || null,
+                        clinicAvatar: clinic.url_avatar || null,
+                        managerLinkStatus: row.managerLinkStatus || row.invitationStatus || null,
+                        accountStatus: row.accountStatus || null,
+                        invitationStatus: row.invitationStatus || null
+                    };
+                });
+                if (response.loginCustomerId === null && response.inHierarchy) {
+                    response.loginCustomerId = mainManagerId;
+                }
+            } catch (adsErr) {
+                console.error(`❌ Error obteniendo detalles de Ads para ${cleanId}:`, adsErr.details || adsErr.message);
+                response.error = adsErr.details || adsErr.message;
+            }
+            accounts.push(response);
+        }
+
+        return res.json({ success: true, managerId: formatCustomerId(getGoogleManagerId()), accounts });
+    } catch (err) {
+        if (err.code === 'ADS_CONFIG_MISSING') {
+            return res.status(500).json({ success: false, error: 'config_missing' });
+        }
+        console.error('❌ Error en /oauth/google/ads/accounts:', err.details || err.message);
+        return res.status(500).json({ success: false, error: 'internal_error' });
+    }
+});
+
+/**
+ * GOOGLE — Invitar cuenta al MCC (customerClientLink)
+ */
+router.post('/google/ads/request-link', async (req, res) => {
+    try {
+        const userId = getUserIdFromToken(req);
+        if (!userId) {
+            return res.status(401).json({ success: false, error: 'Usuario no autenticado' });
+        }
+
+        const conn = await GoogleConnection.findOne({ where: { userId } });
+        if (!conn) {
+            return res.status(404).json({ success: false, error: 'No hay conexión Google' });
+        }
+
+        const customerId = normalizeCustomerId(req.body?.customerId);
+        if (!customerId) {
+            return res.status(400).json({ success: false, error: 'customerId requerido' });
+        }
+
+        if (!hasScopeText(conn.scopes || '', GOOGLE_ADS_SCOPE)) {
+            return res.status(403).json({ success: false, error: 'insufficient_scope' });
+        }
+
+        let accessToken;
+        try {
+            ({ accessToken } = await ensureGoogleAdsAccess(conn));
+        } catch (tokenErr) {
+            const reason = tokenErr.code === 'INSUFFICIENT_SCOPE' ? 'insufficient_scope' : tokenErr.code === 'TOKEN_EXPIRED' ? 'token_expired' : tokenErr.code === 'ADS_CONFIG_MISSING' ? 'config_missing' : 'token_error';
+            return res.status(400).json({ success: false, error: reason });
+        }
+
+        const managerId = ensureGoogleAdsConfig().managerId;
+        try {
+            const payload = {
+                operation: {
+                    create: {
+                        clientCustomer: `customers/${customerId}`,
+                        status: 'PENDING'
+                    }
+                }
+            };
+            const data = await googleAdsRequest('POST', `customers/${managerId}/customerClientLinks:mutate`, {
+                accessToken,
+                loginCustomerId: managerId,
+                data: payload
+            });
+            const result = Array.isArray(data?.results) ? data.results[0] : null;
+            return res.json({ success: true, invitation: result });
+        } catch (adsErr) {
+            const rawError = adsErr.response?.data?.error || adsErr.response?.data || null;
+            let message = rawError?.message || adsErr.message;
+            const inner = Array.isArray(rawError?.details) ? rawError.details.find(detail => Array.isArray(detail?.errors) && detail.errors.length) : null;
+            const firstError = inner?.errors ? inner.errors[0] : null;
+            if (firstError?.message) {
+                message = firstError.message;
+            }
+            console.error('❌ Error creando invitación MCC:', message, rawError);
+            return res.status(400).json({ success: false, error: message, details: rawError });
+        }
+    } catch (err) {
+        if (err.code === 'ADS_CONFIG_MISSING') {
+            return res.status(500).json({ success: false, error: 'config_missing' });
+        }
+        console.error('❌ Error en /oauth/google/ads/request-link:', err.details || err.message);
+        return res.status(500).json({ success: false, error: 'internal_error' });
+    }
+});
+
+/**
+ * GOOGLE — Aceptar invitación MCC desde la cuenta cliente
+ */
+router.post('/google/ads/accept-link', async (req, res) => {
+    try {
+        const userId = getUserIdFromToken(req);
+        if (!userId) {
+            return res.status(401).json({ success: false, error: 'Usuario no autenticado' });
+        }
+
+        const conn = await GoogleConnection.findOne({ where: { userId } });
+        if (!conn) {
+            return res.status(404).json({ success: false, error: 'No hay conexión Google' });
+        }
+
+        if (!hasScopeText(conn.scopes || '', GOOGLE_ADS_SCOPE)) {
+            return res.status(403).json({ success: false, error: 'insufficient_scope' });
+        }
+
+        const customerId = normalizeCustomerId(req.body?.customerId);
+        if (!customerId) {
+            return res.status(400).json({ success: false, error: 'customerId requerido' });
+        }
+
+        let accessToken;
+        try {
+            ({ accessToken } = await ensureGoogleAdsAccess(conn));
+        } catch (tokenErr) {
+            const reason = tokenErr.code === 'INSUFFICIENT_SCOPE' ? 'insufficient_scope' : tokenErr.code === 'TOKEN_EXPIRED' ? 'token_expired' : tokenErr.code === 'ADS_CONFIG_MISSING' ? 'config_missing' : 'token_error';
+            return res.status(400).json({ success: false, error: reason });
+        }
+
+        const managerId = ensureGoogleAdsConfig().managerId;
+        const link = await fetchManagerLinkForCustomer(accessToken, customerId, managerId);
+        if (!link) {
+            return res.status(404).json({ success: false, error: 'no_pending_invitation' });
+        }
+
+        if (link.status === 'ACTIVE') {
+            return res.json({ success: true, status: 'ACTIVE', message: 'La cuenta ya está enlazada con el MCC' });
+        }
+
+        if (!link.managerLinkId) {
+            return res.status(400).json({ success: false, error: 'missing_manager_link_id' });
+        }
+
+        try {
+            const resourceName = `customers/${customerId}/customerManagerLinks/${managerId}~${link.managerLinkId}`;
+            const payload = {
+                operations: [
+                    {
+                        update: {
+                            resourceName,
+                            status: 'ACTIVE'
+                        },
+                        updateMask: 'status'
+                    }
+                ]
+            };
+            await googleAdsRequest('POST', `customers/${customerId}/customerManagerLinks:mutate`, {
+                accessToken,
+                loginCustomerId: customerId,
+                data: payload
+            });
+            return res.json({ success: true, status: 'ACTIVE', managerLinkId: link.managerLinkId });
+        } catch (adsErr) {
+            console.error('❌ Error aceptando invitación MCC:', adsErr.details || adsErr.message);
+            return res.status(500).json({ success: false, error: adsErr.details || adsErr.message });
+        }
+    } catch (err) {
+        if (err.code === 'ADS_CONFIG_MISSING') {
+            return res.status(500).json({ success: false, error: 'config_missing' });
+        }
+        console.error('❌ Error en /oauth/google/ads/accept-link:', err.details || err.message);
+        return res.status(500).json({ success: false, error: 'internal_error' });
+    }
+});
+
+/**
+ * GOOGLE — Guardar mapeo de cuentas Ads ↔ clínicas
+ */
+router.post('/google/ads/map-accounts', async (req, res) => {
+    try {
+        const userId = getUserIdFromToken(req);
+        if (!userId) {
+            return res.status(401).json({ success: false, error: 'Usuario no autenticado' });
+        }
+
+        const conn = await GoogleConnection.findOne({ where: { userId } });
+        if (!conn) {
+            return res.status(404).json({ success: false, error: 'No hay conexión Google' });
+        }
+
+        const mappings = Array.isArray(req.body?.mappings) ? req.body.mappings : [];
+        if (!mappings.length) {
+            return res.status(400).json({ success: false, error: 'mappings requerido' });
+        }
+
+        const transaction = await db.sequelize.transaction();
+        const results = [];
+        try {
+            for (const mapping of mappings) {
+                const clinicaId = parseInt(mapping?.clinicaId, 10);
+                const customerId = normalizeCustomerId(mapping?.customerId);
+                if (!clinicaId || !customerId) {
+                    continue;
+                }
+
+                const payload = {
+                    clinicaId,
+                    googleConnectionId: conn.id,
+                    customerId,
+                    descriptiveName: mapping?.descriptiveName || null,
+                    currencyCode: mapping?.currencyCode || null,
+                    timeZone: mapping?.timeZone || null,
+                    accountStatus: mapping?.accountStatus || null,
+                managerCustomerId: mapping?.managerCustomerId ? normalizeCustomerId(mapping.managerCustomerId) : normalizeCustomerId(getGoogleManagerId()),
+                loginCustomerId: mapping?.loginCustomerId ? normalizeCustomerId(mapping.loginCustomerId) : (mapping?.managerCustomerId ? normalizeCustomerId(mapping.managerCustomerId) : normalizeCustomerId(getGoogleManagerId())),
+                managerLinkId: mapping?.managerLinkId || null,
+                managerLinkStatus: mapping?.managerLinkStatus || null,
+                invitationStatus: mapping?.invitationStatus || null,
+                linkedAt: mapping?.linkedAt ? new Date(mapping.linkedAt) : (mapping?.managerLinkStatus === 'ACTIVE' ? new Date() : null),
+                isActive: true
+                };
+
+                await ClinicGoogleAdsAccount.update(
+                    { isActive: false },
+                    {
+                        where: {
+                            clinicaId,
+                            customerId: { [Op.ne]: customerId },
+                            isActive: true
+                        },
+                        transaction
+                    }
+                );
+
+                const existing = await ClinicGoogleAdsAccount.findOne({ where: { clinicaId, customerId }, transaction });
+                if (existing) {
+                    await existing.update(payload, { transaction });
+                    results.push({ id: existing.id, ...payload });
+                } else {
+                    const rec = await ClinicGoogleAdsAccount.create(payload, { transaction });
+                    results.push({ id: rec.id, ...payload });
+                }
+            }
+            await transaction.commit();
+        } catch (txErr) {
+            await transaction.rollback();
+            throw txErr;
+        }
+
+        return res.json({ success: true, mapped: results.length, accounts: results });
+    } catch (err) {
+        console.error('❌ Error en /oauth/google/ads/map-accounts:', err.details || err.message);
+        return res.status(500).json({ success: false, error: 'internal_error' });
+    }
+});
+
+/**
+ * GOOGLE — Obtener mapeos Ads actuales
+ */
+router.get('/google/ads/mappings', async (req, res) => {
+    try {
+        const userId = getUserIdFromToken(req);
+        if (!userId) {
+            return res.status(401).json({ success: false, error: 'Usuario no autenticado' });
+        }
+
+        const conn = await GoogleConnection.findOne({ where: { userId } });
+        if (!conn) {
+            return res.status(404).json({ success: false, error: 'No hay conexión Google' });
+        }
+
+        const rows = await ClinicGoogleAdsAccount.findAll({ where: { googleConnectionId: conn.id, isActive: true }, raw: true });
+        if (!rows.length) {
+            return res.json({ success: true, mappings: [] });
+        }
+
+        const clinicIds = Array.from(new Set(rows.map(r => r.clinicaId))).filter(Boolean);
+        const clinics = clinicIds.length ? await Clinica.findAll({ where: { id_clinica: clinicIds }, raw: true }) : [];
+        const clinicIndex = new Map(clinics.map(c => [c.id_clinica, c]));
+
+        const byClinic = new Map();
+        for (const row of rows) {
+            const clinicaId = row.clinicaId;
+            if (!byClinic.has(clinicaId)) {
+                const clinic = clinicIndex.get(clinicaId) || {};
+                byClinic.set(clinicaId, {
+                    clinicaId,
+                    clinicName: clinic.nombre_clinica || null,
+                    clinicAvatar: clinic.url_avatar || null,
+                    ads: []
+                });
+            }
+            byClinic.get(clinicaId).ads.push({
+                customerId: row.customerId,
+                formattedCustomerId: formatCustomerId(row.customerId),
+                descriptiveName: row.descriptiveName || null,
+                currencyCode: row.currencyCode || null,
+                timeZone: row.timeZone || null,
+                accountStatus: row.accountStatus || null,
+                managerCustomerId: row.managerCustomerId ? formatCustomerId(row.managerCustomerId) : formatCustomerId(getGoogleManagerId()),
+                managerLinkId: row.managerLinkId || null,
+                managerLinkStatus: row.managerLinkStatus || null,
+                invitationStatus: row.invitationStatus || null,
+                linkedAt: row.linkedAt || null
+            });
+        }
+
+        return res.json({ success: true, mappings: Array.from(byClinic.values()) });
+    } catch (err) {
+        console.error('❌ Error en /oauth/google/ads/mappings:', err.details || err.message);
+        return res.status(500).json({ success: false, error: 'internal_error' });
+    }
+});
+
+/**
+ * GOOGLE — Obtener mapeos GA4 actuales
+ */
+router.get('/google/analytics/mappings', async (req, res) => {
+    try {
+        const userId = getUserIdFromToken(req);
+        if (!userId) return res.status(401).json({ success: false, error: 'Usuario no autenticado' });
+
+        const conn = await GoogleConnection.findOne({ where: { userId } });
+        if (!conn) return res.status(404).json({ success: false, error: 'No hay conexión Google' });
+
+        const items = await ClinicAnalyticsProperty.findAll({
+            where: { googleConnectionId: conn.id },
+            include: [{ model: Clinica, as: 'clinica', attributes: ['id_clinica', 'nombre_clinica'] }]
+        });
+
+        const mapped = items.map(item => ({
+            id: item.id,
+            clinicaId: item.clinicaId,
+            clinicName: item.clinica?.nombre_clinica || null,
+            propertyName: item.propertyName,
+            propertyDisplayName: item.propertyDisplayName,
+            propertyType: item.propertyType,
+            parent: item.parent,
+            measurementId: item.measurementId
+        }));
+
+        return res.json({ success: true, mappings: mapped });
+    } catch (e) {
+        console.error('❌ Error en /oauth/google/analytics/mappings:', e.response?.data || e.message);
+        return res.status(500).json({ success: false, error: 'Error obteniendo mapeos de Analytics' });
     }
 });
 
@@ -416,6 +1605,9 @@ router.delete('/google/disconnect', async (req, res) => {
         const conn = await GoogleConnection.findOne({ where: { userId } });
         if (!conn) return res.status(404).json({ success: false, error: 'No hay conexión Google' });
         await ClinicWebAsset.destroy({ where: { googleConnectionId: conn.id } });
+        await ClinicAnalyticsProperty.destroy({ where: { googleConnectionId: conn.id } });
+        await ClinicBusinessLocation.destroy({ where: { google_connection_id: conn.id } });
+        await ClinicGoogleAdsAccount.destroy({ where: { googleConnectionId: conn.id } });
         await conn.destroy();
         return res.json({ success: true, message: 'Conexión Google desconectada y mapeos eliminados' });
     } catch (e) {

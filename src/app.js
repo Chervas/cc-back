@@ -19,6 +19,9 @@ const userClinicasRoutes = require('./routes/userclinicas.routes');
 const oauthRoutes = require('./routes/oauth.routes');
 // NUEVA RUTA: Sistema de métricas de redes sociales
 const metaSyncRoutes = require('./routes/metasync.routes');
+const webRoutes = require('./routes/web.routes');
+const localRoutes = require('./routes/local.routes');
+const googleAdsRoutes = require('./routes/googleads.routes');
 
 
 // Importar db desde models/index.js que contiene sequelize y todos los modelos
@@ -65,6 +68,12 @@ console.log('Ruta /api/oauth y /oauth configuradas');
 // NUEVA RUTA: Sistema de métricas de redes sociales
 app.use('/api/metasync', metaSyncRoutes);
 console.log('Ruta /api/metasync configurada');
+app.use('/api/web', webRoutes);
+console.log('Ruta /api/web configurada');
+app.use('/api/local', localRoutes);
+console.log('Ruta /api/local configurada');
+app.use('/api/googleads', googleAdsRoutes);
+console.log('Ruta /api/googleads configurada');
 console.log('Routes registered successfully');
 // Puerto del servidor
 const PORT = process.env.PORT || 3000;
@@ -82,7 +91,7 @@ app.listen(PORT, () => {
 
 
 // Inicializar jobs automáticamente en producción
-const { metaSyncJobs } = require('./jobs/metasync.jobs');
+const { metaSyncJobs } = require('./jobs/sync.jobs');
 if (process.env.NODE_ENV === 'production') {
   setTimeout(async () => {
     try {

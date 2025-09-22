@@ -9,6 +9,7 @@ const {
     SocialAdsEntity,
     SocialAdsInsightsDaily,
     SocialAdsActionsDaily,
+    SocialAdsAdsetDailyAgg,
     PostPromotions,
     SyncLog, 
     TokenValidations,
@@ -964,7 +965,19 @@ async function syncInstagramMetrics(asset, accessToken, startDate, endDate) {
             }
         });
 
-        const currentFollowers = followersTotalResponse.data?.followers_count || 0;
+        let currentFollowers = followersTotalResponse.data?.followers_count || 0;
+        if (!currentFollowers) {
+            const lastKnown = await SocialStatsDaily.findOne({
+                where: {
+                    clinica_id: asset.clinicaId,
+                    asset_id: asset.id
+                },
+                order: [['date', 'DESC']]
+            });
+            if (lastKnown && lastKnown.followers) {
+                currentFollowers = lastKnown.followers;
+            }
+        }
 
         // Reconstruir historial de seguidores usando la variación diaria
         const dates = Object.keys(statsByDate).sort();
@@ -2239,7 +2252,8 @@ async function syncAdAccountMetrics(asset, accessToken, startDate, endDate) {
                     level: 'ad',
                     time_increment: 1,
                     time_range: JSON.stringify({ since: cs.toISOString().slice(0,10), until: ce.toISOString().slice(0,10) }),
-                    fields: 'impressions,reach,clicks,inline_link_clicks,spend,cpc,cpm,ctr,frequency',
+                    // Include ad_id explicitly to avoid 'unknown' entity_id rows
+                    fields: 'ad_id,impressions,reach,clicks,inline_link_clicks,spend,cpc,cpm,ctr,frequency',
                     breakdowns: 'publisher_platform,platform_position',
                     limit: parseInt(process.env.ADS_PAGE_LIMIT || '100', 10),
                     access_token: accessToken
@@ -2254,7 +2268,7 @@ async function syncAdAccountMetrics(asset, accessToken, startDate, endDate) {
                         const agg = new Map();
                         for (const r of rows) {
                             const dateStr = (r.date_start ? new Date(r.date_start) : new Date(endDate)).toISOString().slice(0,10);
-                            const entityId = String(r.ad_id || 'unknown');
+                            const entityId = r.ad_id ? String(r.ad_id) : null;
                             const plat = (r.publisher_platform || '').toLowerCase() || null;
                             const pos = (r.platform_position || '').toLowerCase() || 'unknown';
                             const key = `${entityId}|${dateStr}|${plat}|${pos}`;
@@ -2277,6 +2291,10 @@ async function syncAdAccountMetrics(asset, accessToken, startDate, endDate) {
                             const ctr = impressions > 0 ? toFixed((clicks / impressions) * 100, 4) : 0;
                             const freq = v.reach > 0 ? toFixed(impressions / v.reach, 3) : 0;
 
+                            if (!entityId) {
+                                console.warn('⚠️ Insights row sin ad_id; se omite');
+                                continue;
+                            }
                             await SocialAdsInsightsDaily.upsert({
                                 ad_account_id: accountId,
                                 level: 'ad',
@@ -2313,6 +2331,25 @@ async function syncAdAccountMetrics(asset, accessToken, startDate, endDate) {
                     }
                 }
             }
+            // Actualizar picos de frecuencia por anuncio para esta cuenta
+            try {
+                await SocialAdsEntity.sequelize.query(`
+                  UPDATE SocialAdsEntities se
+                  LEFT JOIN (
+                    SELECT entity_id,
+                           MAX(frequency) AS peak_freq,
+                           SUBSTRING_INDEX(GROUP_CONCAT(date ORDER BY frequency DESC, date DESC), ',', 1) AS peak_date
+                    FROM SocialAdsInsightsDaily
+                    WHERE ad_account_id = :acc AND level='ad'
+                    GROUP BY entity_id
+                  ) m ON m.entity_id = se.entity_id
+                  SET se.peak_frequency = m.peak_freq,
+                      se.peak_frequency_date = m.peak_date
+                  WHERE se.ad_account_id = :acc AND se.level='ad';
+                `, { replacements: { acc: accountId } });
+            } catch (ePeak) {
+                console.warn('⚠️ No se pudieron actualizar peak_frequency:', ePeak.message);
+            }
             console.log(`📊 Insights de Ads guardados: ${totalRows} filas`);
             stats.insightsRows += totalRows;
         } catch (e) {
@@ -2332,7 +2369,8 @@ async function syncAdAccountMetrics(asset, accessToken, startDate, endDate) {
                     level: 'ad',
                     time_increment: 1,
                     time_range: JSON.stringify({ since: cs.toISOString().slice(0,10), until: ce.toISOString().slice(0,10) }),
-                    fields: 'actions',
+                    // Include ad_id to bind actions to the ad entity
+                    fields: 'ad_id,actions',
                     action_breakdowns: 'action_type,action_destination',
                     breakdowns: 'publisher_platform',
                     limit: parseInt(process.env.ADS_PAGE_LIMIT || '100', 10),
@@ -2341,30 +2379,59 @@ async function syncAdAccountMetrics(asset, accessToken, startDate, endDate) {
                 let nextUrl = `${accountId}/insights`;
                 const runChunk = async (lim) => {
                     params.limit = lim;
+                    const rowsToPersist = [];
+                    const chunkDates = [];
+                    const chunkAdIds = new Set();
+                    // Prefill chunkDates with every day in the interval so we can wipe stale rows even si Meta no devuelve datos
+                    for (let day = new Date(cs); day <= ce; day.setDate(day.getDate() + 1)) {
+                        chunkDates.push(new Date(day).toISOString().slice(0,10));
+                    }
                     while (true) {
                         const resp = await metaGet(nextUrl, { params, accessToken });
                         const rows = resp.data?.data || [];
                         for (const r of rows) {
                             const date = r.date_start ? new Date(r.date_start) : new Date(endDate);
+                            const dateStr = date.toISOString().slice(0,10);
+                            const adId = r.ad_id ? String(r.ad_id) : null;
                             const actions = r.actions || [];
+                            if (!adId) {
+                                if (actions.length) console.warn('⚠️ Actions row sin ad_id; se omite');
+                                continue;
+                            }
+                            chunkAdIds.add(adId);
                             for (const a of actions) {
-                                await SocialAdsActionsDaily.create({
+                                const rawValue = a?.value ?? 0;
+                                const numericValue = typeof rawValue === 'number' ? rawValue : Number(rawValue);
+                                const safeValue = Number.isFinite(numericValue) ? numericValue : 0;
+                                rowsToPersist.push({
                                     ad_account_id: accountId,
                                     level: 'ad',
-                                    entity_id: String(r.ad_id || 'unknown'),
-                                    date: date.toISOString().slice(0,10),
+                                    entity_id: adId,
+                                    date: dateStr,
                                     action_type: a.action_type || 'unknown',
                                     action_destination: a.action_destination || null,
                                     publisher_platform: r.publisher_platform || null,
-                                    value: parseInt(a.value || 0, 10)
+                                    value: safeValue
                                 });
-                                totalActions++;
                             }
                         }
                         const next = resp.data?.paging?.next;
                         if (!next) break;
                         nextUrl = next.replace(/^https?:\/\/[^/]+\/[v\d\.]+\//, '');
                         params = {};
+                    }
+                    const where = {
+                        ad_account_id: accountId,
+                        level: 'ad',
+                        date: { [Op.in]: chunkDates }
+                    };
+                    if (chunkAdIds.size) {
+                        where.entity_id = { [Op.in]: Array.from(chunkAdIds) };
+                    }
+                    await SocialAdsActionsDaily.destroy({ where });
+                    if (rowsToPersist.length) {
+                        await SocialAdsActionsDaily.bulkCreate(rowsToPersist);
+                        totalActions += rowsToPersist.length;
                     }
                 };
                 try {
@@ -2382,6 +2449,50 @@ async function syncAdAccountMetrics(asset, accessToken, startDate, endDate) {
             stats.actionsRows += totalActions;
         } catch (e) {
             console.warn('⚠️ Error guardando actions de Ads:', e.response?.data || e.message);
+        }
+
+        // 3.bis) Agregados diarios por adset (tabla auxiliar)
+        try {
+            await SocialAdsAdsetDailyAgg.destroy({ where: { ad_account_id: accountId, date: { [Op.between]: [sinceStr, untilStr] } } });
+            await SocialAdsAdsetDailyAgg.sequelize.query(`
+              INSERT INTO SocialAdsAdsetDailyAgg (ad_account_id, adset_id, date, spend, impressions, clicks, leads, created_at, updated_at)
+              SELECT agg.ad_account_id, agg.adset_id, agg.date,
+                     agg.spend, agg.impressions, agg.clicks, IFNULL(la.leads,0) AS leads, NOW(), NOW()
+              FROM (
+                SELECT d.ad_account_id, ad.parent_id AS adset_id, d.date,
+                       SUM(d.spend) AS spend, SUM(d.impressions) AS impressions, SUM(d.clicks) AS clicks
+                FROM SocialAdsInsightsDaily d
+                JOIN SocialAdsEntities ad ON ad.level='ad' AND ad.entity_id=d.entity_id
+                WHERE d.ad_account_id = :acc AND d.level='ad' AND d.date BETWEEN :since AND :until
+                GROUP BY d.ad_account_id, ad.parent_id, d.date
+              ) agg
+              LEFT JOIN (
+                SELECT base.adset_id, base.date,
+                       GREATEST(
+                         IFNULL(MAX(CASE WHEN base.action_type = 'onsite_conversion.lead_grouped' THEN base.total_value END), 0),
+                         IFNULL(MAX(CASE WHEN base.action_type = 'onsite_conversion.lead_form' THEN base.total_value END), 0),
+                         IFNULL(MAX(CASE WHEN base.action_type = 'offsite_conversion.fb_pixel_lead' THEN base.total_value END), 0),
+                         IFNULL(MAX(CASE WHEN base.action_type = 'leadgen.other' THEN base.total_value END), 0),
+                         IFNULL(MAX(CASE WHEN base.action_type = 'lead' THEN base.total_value END), 0),
+                         IFNULL(MAX(CASE WHEN base.action_type LIKE '%add_meta_leads%' THEN base.total_value END), 0),
+                         0
+                       ) AS leads
+                FROM (
+                  SELECT ad2.parent_id AS adset_id, a.date, a.action_type, SUM(a.value) AS total_value
+                  FROM SocialAdsActionsDaily a
+                  JOIN SocialAdsEntities ad2 ON ad2.level='ad' AND ad2.entity_id=a.entity_id
+                  WHERE a.ad_account_id = :acc AND a.date BETWEEN :since AND :until
+                    AND (
+                       a.action_type IN ('lead','offsite_conversion.fb_pixel_lead','onsite_conversion.lead_form','leadgen.other','onsite_conversion.lead_grouped')
+                       OR a.action_type LIKE '%add_meta_leads%'
+                    )
+                  GROUP BY ad2.parent_id, a.date, a.action_type
+                ) base
+                GROUP BY base.adset_id, base.date
+              ) la ON la.adset_id = agg.adset_id AND la.date = agg.date;
+            `, { replacements: { acc: accountId, since: sinceStr, until: untilStr } });
+        } catch (eAgg) {
+            console.warn('⚠️ No se pudieron actualizar agregados diarios por adset:', eAgg.message);
         }
 
         // 4) Volcar agregados por plataforma a SocialStatsDaily
