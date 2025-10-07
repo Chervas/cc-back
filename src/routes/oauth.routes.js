@@ -13,6 +13,7 @@ const Clinica = db.Clinica;
 const ClinicMetaAsset = db.ClinicMetaAsset; // <-- Accede al modelo ClinicMetaAsset
 const ClinicBusinessLocation = db.ClinicBusinessLocation;
 const ClinicGoogleAdsAccount = db.ClinicGoogleAdsAccount;
+const GrupoClinica = db.GrupoClinica;
 const {
     googleAdsRequest,
     normalizeCustomerId,
@@ -1363,6 +1364,47 @@ router.post('/google/ads/map-accounts', async (req, res) => {
 
         const transaction = await db.sequelize.transaction();
         const results = [];
+        const clinicsToSync = new Set();
+        const clinicAssignmentCache = new Map();
+        const groupCache = new Map();
+
+        async function resolveAssignment(clinicaId) {
+            if (!clinicaId) {
+                return { assignmentScope: 'clinic', grupoClinicaId: null };
+            }
+
+            if (clinicAssignmentCache.has(clinicaId)) {
+                return clinicAssignmentCache.get(clinicaId);
+            }
+
+            const clinic = await Clinica.findByPk(clinicaId, {
+                attributes: ['id_clinica', 'grupoClinicaId']
+            });
+
+            let assignmentScope = 'clinic';
+            let grupoClinicaId = null;
+
+            if (clinic?.grupoClinicaId) {
+                const groupId = clinic.grupoClinicaId;
+                let group = groupCache.get(groupId);
+                if (!group) {
+                    group = await GrupoClinica.findByPk(groupId, {
+                        attributes: ['id_grupo', 'ads_assignment_mode']
+                    });
+                    groupCache.set(groupId, group);
+                }
+
+                if (group?.ads_assignment_mode === 'automatic') {
+                    assignmentScope = 'group';
+                    grupoClinicaId = group.id_grupo;
+                }
+            }
+
+            const resolved = { assignmentScope, grupoClinicaId };
+            clinicAssignmentCache.set(clinicaId, resolved);
+            return resolved;
+        }
+
         try {
             for (const mapping of mappings) {
                 const clinicaId = parseInt(mapping?.clinicaId, 10);
@@ -1370,6 +1412,8 @@ router.post('/google/ads/map-accounts', async (req, res) => {
                 if (!clinicaId || !customerId) {
                     continue;
                 }
+
+                const { assignmentScope, grupoClinicaId } = await resolveAssignment(clinicaId);
 
                 const payload = {
                     clinicaId,
@@ -1379,13 +1423,15 @@ router.post('/google/ads/map-accounts', async (req, res) => {
                     currencyCode: mapping?.currencyCode || null,
                     timeZone: mapping?.timeZone || null,
                     accountStatus: mapping?.accountStatus || null,
-                managerCustomerId: mapping?.managerCustomerId ? normalizeCustomerId(mapping.managerCustomerId) : normalizeCustomerId(getGoogleManagerId()),
-                loginCustomerId: mapping?.loginCustomerId ? normalizeCustomerId(mapping.loginCustomerId) : (mapping?.managerCustomerId ? normalizeCustomerId(mapping.managerCustomerId) : normalizeCustomerId(getGoogleManagerId())),
-                managerLinkId: mapping?.managerLinkId || null,
-                managerLinkStatus: mapping?.managerLinkStatus || null,
-                invitationStatus: mapping?.invitationStatus || null,
-                linkedAt: mapping?.linkedAt ? new Date(mapping.linkedAt) : (mapping?.managerLinkStatus === 'ACTIVE' ? new Date() : null),
-                isActive: true
+                    managerCustomerId: mapping?.managerCustomerId ? normalizeCustomerId(mapping.managerCustomerId) : normalizeCustomerId(getGoogleManagerId()),
+                    loginCustomerId: mapping?.loginCustomerId ? normalizeCustomerId(mapping.loginCustomerId) : (mapping?.managerCustomerId ? normalizeCustomerId(mapping.managerCustomerId) : normalizeCustomerId(getGoogleManagerId())),
+                    managerLinkId: mapping?.managerLinkId || null,
+                    managerLinkStatus: mapping?.managerLinkStatus || null,
+                    invitationStatus: mapping?.invitationStatus || null,
+                    linkedAt: mapping?.linkedAt ? new Date(mapping.linkedAt) : (mapping?.managerLinkStatus === 'ACTIVE' ? new Date() : null),
+                    assignmentScope,
+                    grupoClinicaId,
+                    isActive: true
                 };
 
                 await ClinicGoogleAdsAccount.update(
@@ -1408,11 +1454,21 @@ router.post('/google/ads/map-accounts', async (req, res) => {
                     const rec = await ClinicGoogleAdsAccount.create(payload, { transaction });
                     results.push({ id: rec.id, ...payload });
                 }
+
+                clinicsToSync.add(clinicaId);
             }
             await transaction.commit();
         } catch (txErr) {
             await transaction.rollback();
             throw txErr;
+        }
+
+        const clinicIds = Array.from(clinicsToSync).filter(id => Number.isInteger(id));
+        if (clinicIds.length) {
+            setImmediate(() => {
+                metaSyncJobs.executeGoogleAdsSync({ clinicIds })
+                    .catch(err => console.error('❌ Error en resync automático de Google Ads tras map-accounts:', err.message));
+            });
         }
 
         return res.json({ success: true, mapped: results.length, accounts: results });
@@ -1871,6 +1927,46 @@ router.post('/meta/map-assets', async (req, res) => {
         // (instagram_business) y limpiamos datos del activo desasociado.
         const createdOrUpdated = [];
         const selectedKeySet = new Set();
+        const clinicsToSync = new Set();
+        const clinicAssignmentCache = new Map();
+        const groupCache = new Map();
+
+        async function resolveAssignment(clinicId) {
+            if (!clinicId) {
+                return { assignmentScope: 'clinic', grupoClinicaId: null };
+            }
+
+            if (clinicAssignmentCache.has(clinicId)) {
+                return clinicAssignmentCache.get(clinicId);
+            }
+
+            const clinic = await Clinica.findByPk(clinicId, {
+                attributes: ['id_clinica', 'grupoClinicaId']
+            });
+
+            let assignmentScope = 'clinic';
+            let grupoClinicaId = null;
+
+            if (clinic?.grupoClinicaId) {
+                const groupId = clinic.grupoClinicaId;
+                let group = groupCache.get(groupId);
+                if (!group) {
+                    group = await GrupoClinica.findByPk(groupId, {
+                        attributes: ['id_grupo', 'ads_assignment_mode']
+                    });
+                    groupCache.set(groupId, group);
+                }
+
+                if (group?.ads_assignment_mode === 'automatic') {
+                    assignmentScope = 'group';
+                    grupoClinicaId = group.id_grupo;
+                }
+            }
+
+            const resolved = { assignmentScope, grupoClinicaId };
+            clinicAssignmentCache.set(clinicId, resolved);
+            return resolved;
+        }
 
         // Traer mapeos actuales de la clínica del mismo usuario
         const existing = await ClinicMetaAsset.findAll({
@@ -1882,12 +1978,16 @@ router.post('/meta/map-assets', async (req, res) => {
             const key = `${asset.type}|${asset.id}`;
             selectedKeySet.add(key);
 
+            const { assignmentScope, grupoClinicaId } = await resolveAssignment(clinicaId);
+
             const found = existing.find(a => a.assetType === asset.type && a.metaAssetId === String(asset.id));
             if (found) {
                 await found.update({
                     metaAssetName: asset.name,
                     pageAccessToken: asset.pageAccessToken || found.pageAccessToken || null,
                     assetAvatarUrl: asset.assetAvatarUrl || found.assetAvatarUrl || null,
+                    assignmentScope,
+                    grupoClinicaId,
                     isActive: true
                 });
                 createdOrUpdated.push(found);
@@ -1900,9 +2000,18 @@ router.post('/meta/map-assets', async (req, res) => {
                     metaAssetName: asset.name,
                     assetAvatarUrl: asset.assetAvatarUrl || null,
                     pageAccessToken: asset.pageAccessToken || null,
+                    assignmentScope,
+                    grupoClinicaId,
                     isActive: true
                 });
                 createdOrUpdated.push(newAsset);
+            }
+
+            if (asset.type === 'ad_account') {
+                const numericClinicId = Number(clinicaId);
+                if (Number.isInteger(numericClinicId)) {
+                    clinicsToSync.add(numericClinicId);
+                }
             }
         }
 
@@ -2014,6 +2123,14 @@ router.post('/meta/map-assets', async (req, res) => {
         }
 
         console.log(`✅ Mapeo actualizado para clínica ${clinicaId}: ${createdOrUpdated.length} activos activos, ${toDeactivate.length} inactivos (unicidad aplicada para IG/FB/Ads)`);
+
+        const clinicIds = Array.from(clinicsToSync);
+        if (clinicIds.length) {
+            setImmediate(() => {
+                metaSyncJobs.executeAdsSync({ clinicIds })
+                    .catch(err => console.error('❌ Error en resync automático de Meta Ads tras map-assets:', err.message));
+            });
+        }
 
         // Disparar sincronización inicial SOLO del día actual (sin histórico)
         try {

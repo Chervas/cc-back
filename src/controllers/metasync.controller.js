@@ -2,6 +2,7 @@
 const axios = require('axios');
 // ✅ Importar cliente Meta a nivel global para evitar "metaGet is not defined"
 const { metaGet } = require('../lib/metaClient');
+const { buildClinicMatcher } = require('../lib/clinicAttribution');
 const { 
     SocialStatsDaily, 
     SocialPosts, 
@@ -14,7 +15,10 @@ const {
     SyncLog, 
     TokenValidations,
     MetaConnection,
-    ClinicMetaAsset
+    ClinicMetaAsset,
+    Clinica,
+    GrupoClinica,
+    AdAttributionIssue
 } = require('../../models');
 const { Op, fn, col } = require('sequelize');
 
@@ -2035,7 +2039,7 @@ async function updateDailyAggregatesForAsset(asset, startDate, endDate) {
 }
 
 // Sincroniza métricas de una cuenta publicitaria (Ads)
-async function syncAdAccountMetrics(asset, accessToken, startDate, endDate) {
+async function syncAdAccountMetrics(asset, accessToken, startDate, endDate, options = {}) {
     try {
         console.log(`💰 Sincronizando métricas de Ads para ${asset.metaAssetId}`);
 
@@ -2043,6 +2047,157 @@ async function syncAdAccountMetrics(asset, accessToken, startDate, endDate) {
         const sinceStr = new Date(startDate).toISOString().slice(0,10);
         const untilStr = new Date(endDate).toISOString().slice(0,10);
         const stats = { entities: 0, insightsRows: 0, actionsRows: 0, linkedPromotions: 0 };
+
+        const clinicsCache = new Map();
+
+        const loadGroupDetails = async (groupId) => {
+            if (!groupId) {
+                return null;
+            }
+            const cacheKey = String(groupId);
+            if (clinicsCache.has(cacheKey)) {
+                return clinicsCache.get(cacheKey);
+            }
+            const group = await GrupoClinica.findByPk(groupId, {
+                include: [{
+                    model: Clinica,
+                    as: 'clinicas',
+                    attributes: ['id_clinica', 'nombre_clinica', 'grupoClinicaId']
+                }]
+            });
+            if (!group) {
+                clinicsCache.set(cacheKey, null);
+                return null;
+            }
+            const plain = group.get({ plain: true });
+            const clinics = Array.isArray(plain.clinicas) ? plain.clinicas : [];
+            const delimiter = plain.ads_assignment_delimiter || '**';
+            const matcher = clinics.length ? buildClinicMatcher(clinics, { delimiter, requireDelimiter: true }) : null;
+            const context = {
+                group: plain,
+                clinics,
+                matcher,
+                delimiter,
+                mode: plain.ads_assignment_mode === 'manual' ? 'group-manual' : 'group-auto'
+            };
+            clinicsCache.set(cacheKey, context);
+            return context;
+        };
+
+        const resolveAssignmentContext = async () => {
+            let assignment = options.assignment && typeof options.assignment === 'object' ? { ...options.assignment } : null;
+            const fallbackGroupId = assignment?.groupId ?? asset.grupoClinicaId ?? asset.clinica?.grupoClinicaId ?? null;
+
+            if (assignment && assignment.mode) {
+                assignment.groupId = assignment.groupId ?? fallbackGroupId ?? null;
+                if (assignment.mode === 'group-auto' && assignment.groupId && !assignment.matcher) {
+                    const groupContext = await loadGroupDetails(assignment.groupId);
+                    if (groupContext) {
+                        assignment.matcher = groupContext.matcher;
+                        assignment.clinics = groupContext.clinics;
+                        assignment.delimiter = groupContext.delimiter;
+                    } else {
+                        assignment.mode = 'group-manual';
+                    }
+                }
+                return assignment;
+            }
+
+            if (asset.assignmentScope === 'group' && fallbackGroupId) {
+                const groupContext = await loadGroupDetails(fallbackGroupId);
+                if (groupContext) {
+                    return {
+                        mode: groupContext.mode,
+                        groupId: fallbackGroupId,
+                        matcher: groupContext.matcher,
+                        clinics: groupContext.clinics,
+                        delimiter: groupContext.delimiter
+                    };
+                }
+            }
+
+            if (!asset.clinica && asset.clinicaId) {
+                asset.clinica = await Clinica.findByPk(asset.clinicaId, {
+                    attributes: ['id_clinica', 'nombre_clinica', 'grupoClinicaId']
+                });
+            }
+
+            return {
+                mode: 'manual',
+                clinicaId: asset.clinicaId || asset.clinica?.id_clinica || null,
+                groupId: fallbackGroupId,
+                matcher: null,
+                clinics: asset.clinica ? [asset.clinica.get ? asset.clinica.get({ plain: true }) : asset.clinica] : []
+            };
+        };
+
+        const assignment = await resolveAssignmentContext();
+        const groupId = assignment.groupId ?? asset.grupoClinicaId ?? asset.clinica?.grupoClinicaId ?? null;
+
+        const campaignAssignments = new Map();
+        const adsetAssignments = new Map();
+        const adAssignments = new Map();
+
+        const recordAttributionIssue = async ({ entityLevel, entityId, campaignId = null, campaignName = null, adsetName = null, tokens = [], candidates = [] }) => {
+            if (assignment.mode !== 'group-auto') {
+                return;
+            }
+
+            const payload = {
+                provider: 'meta',
+                ad_account_id: accountId,
+                customer_id: null,
+                entity_level: entityLevel,
+                entity_id: String(entityId),
+                campaign_id: campaignId ? String(campaignId) : null,
+                campaign_name: campaignName ? String(campaignName) : null,
+                adset_name: adsetName ? String(adsetName) : null,
+                detected_tokens: Array.isArray(tokens) && tokens.length ? tokens.map(t => t.raw) : null,
+                match_candidates: Array.isArray(candidates) && candidates.length ? candidates.map(item => ({
+                    clinicId: item?.clinic?.id || null,
+                    clinicName: item?.clinic?.displayName || null,
+                    token: item?.token?.raw || null
+                })) : null,
+                grupo_clinica_id: groupId || null,
+                clinica_id: null,
+                status: 'open',
+                last_seen_at: new Date()
+            };
+
+            const [issue, created] = await AdAttributionIssue.findOrCreate({
+                where: {
+                    provider: 'meta',
+                    entity_level: entityLevel,
+                    entity_id: String(entityId)
+                },
+                defaults: payload
+            });
+
+            if (!created) {
+                await issue.update({
+                    ...payload,
+                    resolved_at: null
+                });
+            }
+        };
+
+        const resolveAttributionIssue = async (entityLevel, entityId, clinicaId = null) => {
+            if (assignment.mode !== 'group-auto') {
+                return;
+            }
+
+            await AdAttributionIssue.update({
+                status: 'resolved',
+                resolved_at: new Date(),
+                clinica_id: clinicaId || null
+            }, {
+                where: {
+                    provider: 'meta',
+                    entity_level: entityLevel,
+                    entity_id: String(entityId)
+                }
+            });
+        };
 
         // 1) Entidades (Campaigns/AdSets/Ads) — guardamos jerarquía completa
         try {
@@ -2082,6 +2237,46 @@ async function syncAdAccountMetrics(asset, accessToken, startDate, endDate) {
                             updated_time: camp.updated_time ? new Date(camp.updated_time) : null
                         });
                         stats.entities++;
+
+                        const campaignKey = String(camp.id);
+                        let assignedClinicId = null;
+                        let matchSource = null;
+                        let matchValue = null;
+
+                        if (assignment.mode === 'manual') {
+                            assignedClinicId = assignment.clinicaId || asset.clinicaId || null;
+                            matchSource = 'manual';
+                        } else if (assignment.mode === 'group-manual') {
+                            matchSource = 'group-manual';
+                        } else if (assignment.mode === 'group-auto' && assignment.matcher) {
+                            const matchResult = assignment.matcher.matchFromText(camp.name || '', {
+                                level: 'campaign',
+                                campaignId: camp.id
+                            });
+
+                            if (matchResult.match) {
+                                assignedClinicId = matchResult.match.clinic.id;
+                                matchSource = 'campaign';
+                                matchValue = matchResult.match.token?.raw || null;
+                                await resolveAttributionIssue('campaign', campaignKey, assignedClinicId);
+                            } else {
+                                await recordAttributionIssue({
+                                    entityLevel: 'campaign',
+                                    entityId: campaignKey,
+                                    campaignId: camp.id,
+                                    campaignName: camp.name || null,
+                                    tokens: matchResult.tokens,
+                                    candidates: matchResult.candidates
+                                });
+                            }
+                        }
+
+                        campaignAssignments.set(campaignKey, {
+                            clinicaId: assignedClinicId,
+                            source: matchSource,
+                            matchValue,
+                            name: camp.name || null
+                        });
                     }
                     const next = resp.data?.paging?.next;
                     if (next) { nextUrl = next.replace(/^https?:\/\/[^/]+\/[v\d\.]+\//, ''); params = {}; } else { nextUrl = null; }
@@ -2122,6 +2317,64 @@ async function syncAdAccountMetrics(asset, accessToken, startDate, endDate) {
                             updated_time: aset.updated_time ? new Date(aset.updated_time) : null
                         });
                         stats.entities++;
+
+                        const adsetKey = String(aset.id);
+                        const campaignKey = aset.campaign_id ? String(aset.campaign_id) : null;
+                        let assignedClinicId = null;
+                        let matchSource = null;
+                        let matchValue = null;
+
+                        if (assignment.mode === 'manual') {
+                            assignedClinicId = assignment.clinicaId || asset.clinicaId || null;
+                            matchSource = 'manual';
+                        } else if (assignment.mode === 'group-manual') {
+                            matchSource = 'group-manual';
+                        } else if (assignment.mode === 'group-auto' && assignment.matcher) {
+                            const matchResult = assignment.matcher.matchFromText(aset.name || '', {
+                                level: 'adset',
+                                adsetId: aset.id,
+                                campaignId: aset.campaign_id
+                            });
+
+                            if (matchResult.match) {
+                                assignedClinicId = matchResult.match.clinic.id;
+                                matchSource = 'adset';
+                                matchValue = matchResult.match.token?.raw || null;
+                                await resolveAttributionIssue('adset', adsetKey, assignedClinicId);
+                            } else {
+                                const campaignAssignment = campaignAssignments.get(campaignKey);
+                                if (campaignAssignment?.clinicaId) {
+                                    assignedClinicId = campaignAssignment.clinicaId;
+                                    matchSource = campaignAssignment.source || 'campaign';
+                                    matchValue = campaignAssignment.matchValue || null;
+                                } else {
+                                    await recordAttributionIssue({
+                                        entityLevel: 'adset',
+                                        entityId: adsetKey,
+                                        campaignId: aset.campaign_id || null,
+                                        campaignName: campaignAssignment?.name || null,
+                                        adsetName: aset.name || null,
+                                        tokens: matchResult.tokens,
+                                        candidates: matchResult.candidates
+                                    });
+                                }
+                            }
+                        } else if (assignment.mode === 'group-auto') {
+                            const campaignAssignment = campaignAssignments.get(campaignKey);
+                            if (campaignAssignment?.clinicaId) {
+                                assignedClinicId = campaignAssignment.clinicaId;
+                                matchSource = campaignAssignment.source || 'campaign';
+                                matchValue = campaignAssignment.matchValue || null;
+                            }
+                        }
+
+                        adsetAssignments.set(adsetKey, {
+                            clinicaId: assignedClinicId,
+                            source: matchSource,
+                            matchValue,
+                            campaignId: campaignKey,
+                            name: aset.name || null
+                        });
                     }
                     const next = resp.data?.paging?.next;
                     if (next) { nextUrl = next.replace(/^https?:\/\/[^/]+\/[v\d\.]+\//, ''); params = {}; } else { nextUrl = null; }
@@ -2163,6 +2416,72 @@ async function syncAdAccountMetrics(asset, accessToken, startDate, endDate) {
                         updated_time: ad.updated_time ? new Date(ad.updated_time) : null
                     });
                     stats.entities++;
+
+                    const adKey = String(ad.id);
+                    const adsetKey = ad.adset_id ? String(ad.adset_id) : null;
+                    const campaignKey = ad.campaign_id ? String(ad.campaign_id) : null;
+                    let assignedClinicId = null;
+                    let matchSource = null;
+                    let matchValue = null;
+                    let issueLogged = false;
+
+                    if (assignment.mode === 'manual') {
+                        assignedClinicId = assignment.clinicaId || asset.clinicaId || null;
+                        matchSource = 'manual';
+                    } else if (assignment.mode === 'group-manual') {
+                        matchSource = 'group-manual';
+                    } else if (assignment.mode === 'group-auto') {
+                        if (assignment.matcher) {
+                            const adMatch = assignment.matcher.matchFromText(ad.name || '', {
+                                level: 'ad',
+                                adId: ad.id,
+                                adsetId: ad.adset_id,
+                                campaignId: ad.campaign_id
+                            });
+                            if (adMatch.match) {
+                                assignedClinicId = adMatch.match.clinic.id;
+                                matchSource = 'ad';
+                                matchValue = adMatch.match.token?.raw || null;
+                                await resolveAttributionIssue('ad', adKey, assignedClinicId);
+                            } else if (adMatch.candidates?.length || adMatch.tokens?.length) {
+                                await recordAttributionIssue({
+                                    entityLevel: 'ad',
+                                    entityId: adKey,
+                                    campaignId: ad.campaign_id || null,
+                                    campaignName: campaignAssignments.get(campaignKey)?.name || null,
+                                    adsetName: adsetAssignments.get(adsetKey)?.name || null,
+                                    tokens: adMatch.tokens,
+                                    candidates: adMatch.candidates
+                                });
+                                issueLogged = true;
+                            }
+                        }
+
+                        if (!assignedClinicId) {
+                            const adsetAssignment = adsetAssignments.get(adsetKey);
+                            if (adsetAssignment?.clinicaId) {
+                                assignedClinicId = adsetAssignment.clinicaId;
+                                matchSource = adsetAssignment.source || 'adset';
+                                matchValue = adsetAssignment.matchValue || null;
+                            } else {
+                                const campaignAssignment = campaignAssignments.get(campaignKey);
+                                if (campaignAssignment?.clinicaId) {
+                                    assignedClinicId = campaignAssignment.clinicaId;
+                                    matchSource = campaignAssignment.source || 'campaign';
+                                    matchValue = campaignAssignment.matchValue || null;
+                                }
+                            }
+                        }
+                    }
+
+                    adAssignments.set(adKey, {
+                        clinicaId: assignedClinicId,
+                        source: matchSource,
+                        matchValue,
+                        campaignId: campaignKey,
+                        adsetId: adsetKey,
+                        issueLogged
+                    });
 
                     // Vincular anuncio ↔ post orgánico (PostPromotions)
                     try {
@@ -2295,6 +2614,15 @@ async function syncAdAccountMetrics(asset, accessToken, startDate, endDate) {
                                 console.warn('⚠️ Insights row sin ad_id; se omite');
                                 continue;
                             }
+                            const assignmentInfo = adAssignments.get(entityId) || {};
+                            let targetClinicId = assignmentInfo.clinicaId ?? null;
+                            let matchSource = assignmentInfo.source || null;
+                            let matchValue = assignmentInfo.matchValue || null;
+                            if (!targetClinicId && assignment.mode === 'manual') {
+                                targetClinicId = assignment.clinicaId || asset.clinicaId || null;
+                                matchSource = 'manual';
+                            }
+                            const grupoClinicaId = groupId;
                             await SocialAdsInsightsDaily.upsert({
                                 ad_account_id: accountId,
                                 level: 'ad',
@@ -2302,6 +2630,8 @@ async function syncAdAccountMetrics(asset, accessToken, startDate, endDate) {
                                 date: dateStr,
                                 publisher_platform: plat,
                                 platform_position: pos,
+                                clinica_id: targetClinicId,
+                                grupo_clinica_id: grupoClinicaId,
                                 impressions,
                                 reach: v.reach,
                                 clicks,
@@ -2310,7 +2640,9 @@ async function syncAdAccountMetrics(asset, accessToken, startDate, endDate) {
                                 cpm,
                                 cpc,
                                 ctr: Math.min(ctr, 99.9999),
-                                frequency: Math.min(freq, 999.999)
+                                frequency: Math.min(freq, 999.999),
+                                clinic_match_source: matchSource,
+                                clinic_match_value: matchValue
                             });
                             totalRows++;
                         }
@@ -2399,6 +2731,15 @@ async function syncAdAccountMetrics(asset, accessToken, startDate, endDate) {
                                 continue;
                             }
                             chunkAdIds.add(adId);
+                            const assignmentInfo = adAssignments.get(adId) || {};
+                            let targetClinicId = assignmentInfo.clinicaId ?? null;
+                            let matchSource = assignmentInfo.source || null;
+                            let matchValue = assignmentInfo.matchValue || null;
+                            if (!targetClinicId && assignment.mode === 'manual') {
+                                targetClinicId = assignment.clinicaId || asset.clinicaId || null;
+                                matchSource = 'manual';
+                            }
+                            const grupoClinicaId = groupId;
                             for (const a of actions) {
                                 const rawValue = a?.value ?? 0;
                                 const numericValue = typeof rawValue === 'number' ? rawValue : Number(rawValue);
@@ -2411,7 +2752,11 @@ async function syncAdAccountMetrics(asset, accessToken, startDate, endDate) {
                                     action_type: a.action_type || 'unknown',
                                     action_destination: a.action_destination || null,
                                     publisher_platform: r.publisher_platform || null,
-                                    value: safeValue
+                                    value: safeValue,
+                                    clinica_id: targetClinicId,
+                                    grupo_clinica_id: grupoClinicaId,
+                                    clinic_match_source: matchSource,
+                                    clinic_match_value: matchValue
                                 });
                             }
                         }
@@ -2516,42 +2861,53 @@ async function syncAdAccountMetrics(asset, accessToken, startDate, endDate) {
                     },
                     raw: true
                 });
-                let agg = {
-                    instagram: { reach: 0, impressions: 0, spend: 0 },
-                    facebook: { reach: 0, impressions: 0, spend: 0 }
-                };
+                const clinicAggregates = new Map();
                 for (const r of rows) {
+                    const clinicId = r.clinica_id || (assignment.mode === 'manual' ? (assignment.clinicaId || asset.clinicaId || null) : null);
+                    if (!clinicId) {
+                        continue;
+                    }
+                    const key = String(clinicId);
+                    if (!clinicAggregates.has(key)) {
+                        clinicAggregates.set(key, {
+                            clinica_id: clinicId,
+                            instagram: { reach: 0, impressions: 0, spend: 0 },
+                            facebook: { reach: 0, impressions: 0, spend: 0 }
+                        });
+                    }
+                    const entry = clinicAggregates.get(key);
                     const plat = (r.publisher_platform || '').toLowerCase();
                     if (plat === 'instagram') {
-                        agg.instagram.reach += r.reach || 0;
-                        agg.instagram.impressions += r.impressions || 0;
-                        agg.instagram.spend += parseFloat(r.spend || 0);
+                        entry.instagram.reach += r.reach || 0;
+                        entry.instagram.impressions += r.impressions || 0;
+                        entry.instagram.spend += parseFloat(r.spend || 0);
                     } else if (plat === 'facebook') {
-                        agg.facebook.reach += r.reach || 0;
-                        agg.facebook.impressions += r.impressions || 0;
-                        agg.facebook.spend += parseFloat(r.spend || 0);
+                        entry.facebook.reach += r.reach || 0;
+                        entry.facebook.impressions += r.impressions || 0;
+                        entry.facebook.spend += parseFloat(r.spend || 0);
                     }
                 }
 
-                // Upsert SocialStatsDaily para este día
-                const where = { clinica_id: asset.clinicaId, asset_id: asset.id, date: dateStr };
-                const existing = await SocialStatsDaily.findOne({ where });
-                const payload = {
-                    clinica_id: asset.clinicaId,
-                    asset_id: asset.id,
-                    asset_type: 'ad_account',
-                    date: dateStr,
-                    reach_instagram: agg.instagram.reach,
-                    reach_facebook: agg.facebook.reach,
-                    impressions_instagram: agg.instagram.impressions,
-                    impressions_facebook: agg.facebook.impressions,
-                    spend_instagram: agg.instagram.spend,
-                    spend_facebook: agg.facebook.spend
-                };
-                if (existing) {
-                    await existing.update(payload);
-                } else {
-                    await SocialStatsDaily.create(payload);
+                for (const aggregate of clinicAggregates.values()) {
+                    const where = { clinica_id: aggregate.clinica_id, asset_id: asset.id, date: dateStr };
+                    const payload = {
+                        clinica_id: aggregate.clinica_id,
+                        asset_id: asset.id,
+                        asset_type: 'ad_account',
+                        date: dateStr,
+                        reach_instagram: aggregate.instagram.reach,
+                        reach_facebook: aggregate.facebook.reach,
+                        impressions_instagram: aggregate.instagram.impressions,
+                        impressions_facebook: aggregate.facebook.impressions,
+                        spend_instagram: aggregate.instagram.spend,
+                        spend_facebook: aggregate.facebook.spend
+                    };
+                    const existing = await SocialStatsDaily.findOne({ where });
+                    if (existing) {
+                        await existing.update(payload);
+                    } else {
+                        await SocialStatsDaily.create(payload);
+                    }
                 }
             }
             console.log('📈 Agregados Ads volcados a SocialStatsDaily');

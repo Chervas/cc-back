@@ -7,69 +7,97 @@ const {
     SocialAdsInsightsDaily,
     SocialAdsActionsDaily,
     SocialAdsAdsetDailyAgg,
-    PostPromotions
+    PostPromotions,
+    AdAttributionIssue
 } = require('../../models');
 const { Op } = require('sequelize');
 const sequelize = require('sequelize');
+const {
+    resolveClinicScope,
+    buildClinicWhere,
+    buildAssetScopeWhere
+} = require('../lib/clinicScope');
+const notificationService = require('../services/notifications.service');
 
 // Obtiene métricas de una clínica
 exports.getClinicaStats = async (req, res) => {
     try {
-        const { clinicaId } = req.params;
-        const { 
-            startDate, 
-            endDate, 
-            period = 'day', 
-            assetType,
-            assetId 
-        } = req.query;
-        
-        // Validar parámetros
-        if (!clinicaId) {
-            return res.status(400).json({ message: 'ID de clínica no proporcionado' });
+        const clinicaParam = req.params.clinicaId;
+        const scope = await resolveClinicScope(clinicaParam);
+
+        if (scope.notFound) {
+            return res.status(404).json({ message: 'Grupo de clínicas no encontrado' });
         }
-        
-        // Convertir fechas a objetos Date y a cadenas YYYY-MM-DD (evita desfases de TZ con DATEONLY)
-        const start = startDate ? new Date(startDate) : new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
-        const end = endDate ? new Date(endDate) : new Date();
+        if (!scope.isValid && scope.scope !== 'group') {
+            return res.status(400).json({ message: 'Identificador de clínica/grupo inválido' });
+        }
+
+        const clinicIds = Array.isArray(scope.clinicIds) ? scope.clinicIds : [];
+        if (scope.scope !== 'group' && clinicIds.length === 0) {
+            return res.status(404).json({ message: 'No se encontraron clínicas para el identificador proporcionado' });
+        }
+
+        const {
+            startDate,
+            endDate,
+            period = 'day',
+            assetType,
+            assetId
+        } = req.query;
+
+        const defaultRangeDays = 30;
+        const parseDate = (value, fallbackDays) => {
+            if (!value) {
+                const d = new Date(Date.now() - fallbackDays * 86400000);
+                d.setHours(0, 0, 0, 0);
+                return d;
+            }
+            const parsed = new Date(value);
+            if (Number.isNaN(parsed.getTime())) {
+                const d = new Date(Date.now() - fallbackDays * 86400000);
+                d.setHours(0, 0, 0, 0);
+                return d;
+            }
+            parsed.setHours(0, 0, 0, 0);
+            return parsed;
+        };
+
+        const end = parseDate(endDate, 0);
+        const start = parseDate(startDate, defaultRangeDays);
         const fmt = (d) => {
             const y = d.getFullYear();
             const m = String(d.getMonth() + 1).padStart(2, '0');
             const day = String(d.getDate()).padStart(2, '0');
             return `${y}-${m}-${day}`;
         };
-        const startStr = startDate || fmt(start);
-        const endStr = endDate || fmt(end);
-        
-        // Construir condiciones de búsqueda
+        const startStr = fmt(start);
+        const endStr = fmt(end);
+
+        const clinicFilter = buildClinicWhere('clinica_id', clinicIds);
         const where = {
-            clinica_id: clinicaId,
             date: { [Op.between]: [startStr, endStr] }
         };
-        
+        if (clinicFilter) {
+            Object.assign(where, clinicFilter);
+        }
         if (assetType) {
             where.asset_type = assetType;
         }
-        
         if (assetId) {
             where.asset_id = assetId;
         }
-        
-        // Obtener métricas según el período solicitado
+
         let stats;
-        
         if (period === 'day') {
-            // Métricas diarias (sin agregación)
             stats = await SocialStatsDaily.findAll({
                 where,
                 order: [['date', 'ASC']]
             });
         } else {
-            // Métricas agregadas por semana o mes
-            const groupByClause = period === 'week' 
+            const groupByClause = period === 'week'
                 ? sequelize.fn('YEARWEEK', sequelize.col('date'), 0)
                 : sequelize.fn('DATE_FORMAT', sequelize.col('date'), '%Y-%m');
-            
+
             stats = await SocialStatsDaily.findAll({
                 attributes: [
                     [groupByClause, period],
@@ -89,23 +117,205 @@ exports.getClinicaStats = async (req, res) => {
                 order: [[sequelize.col('start_date'), 'ASC']]
             });
         }
-        
-        // Obtener activos de la clínica para enriquecer la respuesta
+
+        const assetWhere = buildAssetScopeWhere(scope);
+        if (assetType) {
+            assetWhere.assetType = assetType;
+        }
         const assets = await ClinicMetaAsset.findAll({
-            where: {
-                clinicaId: clinicaId,
-                isActive: true
-            },
+            where: assetWhere,
             attributes: ['id', 'assetType', 'metaAssetName', 'assetAvatarUrl']
         });
-        
+
+        let groupSummary = null;
+        if (scope.scope === 'group' && scope.groupId) {
+            const baseAdsWhere = {
+                grupo_clinica_id: scope.groupId,
+                clinica_id: { [Op.is]: null },
+                date: { [Op.between]: [startStr, endStr] }
+            };
+
+            const unassignedRows = await SocialAdsInsightsDaily.findAll({
+                attributes: [
+                    'date',
+                    'publisher_platform',
+                    [sequelize.fn('SUM', sequelize.col('reach')), 'reach'],
+                    [sequelize.fn('SUM', sequelize.col('impressions')), 'impressions'],
+                    [sequelize.fn('SUM', sequelize.col('spend')), 'spend']
+                ],
+                where: baseAdsWhere,
+                group: ['date', 'publisher_platform'],
+                raw: true
+            });
+
+            const normalizePlatform = (value) => {
+                const v = (value || '').toString().toLowerCase();
+                if (v.includes('instagram')) return 'instagram';
+                if (v.includes('facebook')) return 'facebook';
+                return 'other';
+            };
+
+            const toNumber = (val) => {
+                const num = Number(val);
+                return Number.isFinite(num) ? num : 0;
+            };
+
+            const dailyMap = new Map();
+            for (const row of unassignedRows) {
+                const date = row.date;
+                if (!dailyMap.has(date)) {
+                    dailyMap.set(date, {
+                        date,
+                        reach_instagram: 0,
+                        reach_facebook: 0,
+                        reach_other: 0,
+                        impressions_instagram: 0,
+                        impressions_facebook: 0,
+                        impressions_other: 0,
+                        spend_instagram: 0,
+                        spend_facebook: 0,
+                        spend_other: 0
+                    });
+                }
+                const entry = dailyMap.get(date);
+                const platform = normalizePlatform(row.publisher_platform);
+                const reach = toNumber(row.reach);
+                const impressions = toNumber(row.impressions);
+                const spend = Number.parseFloat(row.spend || 0) || 0;
+
+                if (platform === 'instagram') {
+                    entry.reach_instagram += reach;
+                    entry.impressions_instagram += impressions;
+                    entry.spend_instagram += spend;
+                } else if (platform === 'facebook') {
+                    entry.reach_facebook += reach;
+                    entry.impressions_facebook += impressions;
+                    entry.spend_facebook += spend;
+                } else {
+                    entry.reach_other += reach;
+                    entry.impressions_other += impressions;
+                    entry.spend_other += spend;
+                }
+            }
+
+            const daily = Array.from(dailyMap.values()).sort((a, b) => a.date.localeCompare(b.date));
+            const totals = daily.reduce((acc, day) => {
+                acc.reach_instagram += day.reach_instagram;
+                acc.reach_facebook += day.reach_facebook;
+                acc.reach_other += day.reach_other;
+                acc.impressions_instagram += day.impressions_instagram;
+                acc.impressions_facebook += day.impressions_facebook;
+                acc.impressions_other += day.impressions_other;
+                acc.spend_instagram += day.spend_instagram;
+                acc.spend_facebook += day.spend_facebook;
+                acc.spend_other += day.spend_other;
+                return acc;
+            }, {
+                reach_instagram: 0,
+                reach_facebook: 0,
+                reach_other: 0,
+                impressions_instagram: 0,
+                impressions_facebook: 0,
+                impressions_other: 0,
+                spend_instagram: 0,
+                spend_facebook: 0,
+                spend_other: 0
+            });
+            totals.reach_total = totals.reach_instagram + totals.reach_facebook + totals.reach_other;
+            totals.impressions_total = totals.impressions_instagram + totals.impressions_facebook + totals.impressions_other;
+            totals.spend_total = totals.spend_instagram + totals.spend_facebook + totals.spend_other;
+
+            const unassignedAccountsRaw = await SocialAdsInsightsDaily.findAll({
+                attributes: [
+                    'ad_account_id',
+                    [sequelize.fn('SUM', sequelize.col('reach')), 'reach'],
+                    [sequelize.fn('SUM', sequelize.col('impressions')), 'impressions'],
+                    [sequelize.fn('SUM', sequelize.col('spend')), 'spend']
+                ],
+                where: baseAdsWhere,
+                group: ['ad_account_id'],
+                raw: true
+            });
+
+            const unassignedAccounts = unassignedAccountsRaw
+                .map(row => ({
+                    adAccountId: row.ad_account_id,
+                    reach: toNumber(row.reach),
+                    impressions: toNumber(row.impressions),
+                    spend: Number.parseFloat(row.spend || 0) || 0
+                }))
+                .filter(item => item.spend > 0 || item.reach > 0 || item.impressions > 0)
+                .sort((a, b) => b.spend - a.spend);
+
+            let assignedBreakdown = [];
+            if (clinicIds.length) {
+                const assignedWhere = {
+                    ...where,
+                    asset_type: 'ad_account',
+                    clinica_id: { [Op.in]: clinicIds }
+                };
+
+                const assignedRows = await SocialStatsDaily.findAll({
+                    attributes: [
+                        'clinica_id',
+                        [sequelize.fn('SUM', sequelize.col('reach_instagram')), 'reach_instagram'],
+                        [sequelize.fn('SUM', sequelize.col('reach_facebook')), 'reach_facebook'],
+                        [sequelize.fn('SUM', sequelize.col('impressions_instagram')), 'impressions_instagram'],
+                        [sequelize.fn('SUM', sequelize.col('impressions_facebook')), 'impressions_facebook'],
+                        [sequelize.fn('SUM', sequelize.col('spend_instagram')), 'spend_instagram'],
+                        [sequelize.fn('SUM', sequelize.col('spend_facebook')), 'spend_facebook']
+                    ],
+                    where: assignedWhere,
+                    group: ['clinica_id'],
+                    raw: true
+                });
+
+                assignedBreakdown = assignedRows.map(row => {
+                    const reachInstagram = toNumber(row.reach_instagram);
+                    const reachFacebook = toNumber(row.reach_facebook);
+                    const impressionsInstagram = toNumber(row.impressions_instagram);
+                    const impressionsFacebook = toNumber(row.impressions_facebook);
+                    const spendInstagram = Number.parseFloat(row.spend_instagram || 0) || 0;
+                    const spendFacebook = Number.parseFloat(row.spend_facebook || 0) || 0;
+                    return {
+                        clinicaId: row.clinica_id,
+                        reach_instagram: reachInstagram,
+                        reach_facebook: reachFacebook,
+                        reach_total: reachInstagram + reachFacebook,
+                        impressions_instagram: impressionsInstagram,
+                        impressions_facebook: impressionsFacebook,
+                        impressions_total: impressionsInstagram + impressionsFacebook,
+                        spend_instagram: spendInstagram,
+                        spend_facebook: spendFacebook,
+                        spend_total: spendInstagram + spendFacebook
+                    };
+                });
+            }
+
+            groupSummary = {
+                groupId: scope.groupId,
+                clinics: clinicIds,
+                assigned: assignedBreakdown,
+                unassigned: {
+                    totals,
+                    daily,
+                    accounts: unassignedAccounts
+                }
+            };
+        }
+
         return res.status(200).json({
-            clinicaId,
+            clinicaId: clinicaParam,
+            clinicIds,
+            scope: scope.scope,
+            groupId: scope.groupId ?? null,
+            group: scope.group ?? null,
             period,
             startDate: start,
             endDate: end,
             stats,
-            assets
+            assets,
+            groupSummary
         });
     } catch (error) {
         console.error('❌ Error al obtener métricas de clínica:', error);
@@ -354,12 +564,31 @@ exports.getClinicaPosts = async (req, res) => {
 // ==============================
 exports.getAdsHealth = async (req, res) => {
     try {
-        const { clinicaId } = req.params;
+        const clinicaParam = req.params.clinicaId;
         const { startDate, endDate, platform = 'meta' } = req.query;
         const live = String(req.query.live || '').toLowerCase() === '1' || String(req.query.live || '').toLowerCase() === 'true' || String(req.query.live || '').toLowerCase() === 'yes';
-        if (!clinicaId) return res.status(400).json({ message: 'ID de clínica requerido' });
+
+        const scope = await resolveClinicScope(clinicaParam);
+        if (scope.notFound) {
+            return res.status(404).json({ message: 'Grupo de clínicas no encontrado' });
+        }
+        if (!scope.isValid && scope.scope !== 'group') {
+            return res.status(400).json({ message: 'ID de clínica o grupo inválido' });
+        }
+        const clinicIds = Array.isArray(scope.clinicIds) ? scope.clinicIds : [];
+        if (scope.scope !== 'group' && clinicIds.length === 0) {
+            return res.status(404).json({ message: 'No se encontraron clínicas para el identificador proporcionado' });
+        }
+
         if (platform !== 'meta') {
-            return res.status(200).json({ platform, period: { start: startDate, end: endDate }, cards: [] });
+            return res.status(200).json({
+                platform,
+                scope: scope.scope,
+                clinicIds,
+                groupId: scope.groupId ?? null,
+                period: { start: startDate || null, end: endDate || null },
+                cards: []
+            });
         }
 
         // Rango (por defecto últimos 7 días)
@@ -380,16 +609,36 @@ exports.getAdsHealth = async (req, res) => {
         const labelRecent = `${fmt(yestRef)} - ${fmt(todayRef)}`;
         const labelPrevWeek = `${fmt(prevWeekStart)} - ${fmt(prevWeekEnd)}`;
 
-        // Ad accounts de la clínica (+ token para estado de cuenta)
-        const accounts = await ClinicMetaAsset.findAll({ 
-            where: { clinicaId, isActive: true, assetType: 'ad_account' },
+        // Ad accounts de la clínica/grupo (+ token para estado de cuenta)
+        const assetWhere = buildAssetScopeWhere(scope);
+        assetWhere.assetType = 'ad_account';
+
+        const accountsRaw = await ClinicMetaAsset.findAll({ 
+            where: assetWhere,
             include: [
                 { model: ClinicMetaAsset.sequelize.models.MetaConnection, as: 'metaConnection', attributes: ['accessToken','expiresAt'] },
                 { model: ClinicMetaAsset.sequelize.models.Clinica, as: 'clinica', attributes: ['nombre_clinica'] }
             ]
         });
-        const accIds = accounts.map(a => a.metaAssetId);
-        if (!accIds.length) return res.status(200).json({ platform:'meta', period: { start: fmt(start), end: fmt(end) }, cards: [] });
+        const accountsMap = new Map();
+        for (const acc of accountsRaw) {
+            const key = String(acc.metaAssetId || acc.id);
+            if (!accountsMap.has(key)) {
+                accountsMap.set(key, acc);
+            }
+        }
+        const accounts = Array.from(accountsMap.values());
+        const accIds = accounts.map(a => a.metaAssetId).filter(Boolean);
+        if (!accIds.length) {
+            return res.status(200).json({
+                platform: 'meta',
+                scope: scope.scope,
+                clinicIds,
+                groupId: scope.groupId ?? null,
+                period: { start: fmt(start), end: fmt(end) },
+                cards: []
+            });
+        }
 
         // Umbrales parametrizables (querystring) con defaults desde .env
         const num = (v) => { const n = parseFloat(String(v)); return Number.isFinite(n) ? n : undefined; };
@@ -867,13 +1116,225 @@ exports.getAdsHealth = async (req, res) => {
             return { ...c, items: mapLink(c.items, level, sinceOverride, untilOverride, pageOverride) };
         });
 
+        try {
+            const problematicCards = cardsLinked.filter((card) =>
+                (card.status === 'warning' || card.status === 'error') && Array.isArray(card.items) && card.items.length
+            );
+            if (problematicCards.length) {
+                let clinicName = null;
+                let clinicIdForNotification = null;
+                if (Array.isArray(clinicIds) && clinicIds.length === 1) {
+                    clinicIdForNotification = Number(clinicIds[0]) || null;
+                    const owningAccount = accounts.find((acc) => Number(acc.clinicaId) === clinicIdForNotification);
+                    clinicName = owningAccount?.clinica?.nombre_clinica || problematicCards[0]?.items?.[0]?.clinic_name || null;
+                }
+                const groupClinicsCsv = Array.isArray(clinicIds) && clinicIds.length > 1
+                    ? clinicIds.map((id) => Number(id)).filter((n) => Number.isFinite(n)).join(',')
+                    : null;
+                const notificationLink = clinicIdForNotification
+                    ? `/paneles?clinicId=${clinicIdForNotification}&view=ads-health`
+                    : scope.scope === 'group' && groupClinicsCsv
+                        ? `/paneles?groupClinics=${groupClinicsCsv}&view=ads-health`
+                        : '/paneles?view=ads-health';
+                await notificationService.dispatchEvent({
+                    event: 'ads.health_issue',
+                    clinicId: clinicIdForNotification,
+                    data: {
+                        clinicName,
+                        scope: scope.scope,
+                        groupId: scope.groupId ?? null,
+                        groupClinicsCsv,
+                        view: 'ads-health',
+                        link: notificationLink,
+                        useRouter: true,
+                        period: { start: fmt(start), end: fmt(end) },
+                        cards: problematicCards.map((card) => ({
+                            id: card.id,
+                            title: card.title,
+                            status: card.status,
+                            count: card.items.length
+                        }))
+                    }
+                });
+            }
+        } catch (notificationError) {
+            console.warn('⚠️ No se pudo emitir notificación de salud Ads:', notificationError.message || notificationError);
+        }
 
-        return res.status(200).json({ platform:'meta', period: { start: fmt(start), end: fmt(end) }, thresholds: { freq, ctr, cpl, growth }, cards: cardsLinked });
+
+        return res.status(200).json({
+            platform: 'meta',
+            scope: scope.scope,
+            clinicIds,
+            groupId: scope.groupId ?? null,
+            period: { start: fmt(start), end: fmt(end) },
+            thresholds: { freq, ctr, cpl, growth },
+            cards: cardsLinked
+        });
     } catch (error) {
         console.error('❌ getAdsHealth error:', error);
         return res.status(500).json({ message: 'Error obteniendo salud de campañas', error: error.message });
     }
 }
+
+// ==============================
+// Incidencias de atribución Ads
+// ==============================
+exports.getAdsIssues = async (req, res) => {
+    try {
+        const {
+            provider = 'meta',
+            status,
+            clinicaId: clinicaParam,
+            groupId: groupParam,
+            adAccountId,
+            customerId,
+            limit = 50,
+            offset = 0,
+            order = 'last_seen_at',
+            direction = 'DESC'
+        } = req.query;
+
+        const where = {};
+        const normalizedProvider = typeof provider === 'string' && provider !== '' ? provider : null;
+        if (normalizedProvider) {
+            where.provider = normalizedProvider;
+        }
+        if (adAccountId) {
+            where.ad_account_id = adAccountId;
+        }
+        if (customerId) {
+            where.customer_id = customerId;
+        }
+
+        let scopeDescriptor = { scope: null, clinicIds: [], groupId: null };
+
+        if (groupParam) {
+            const parsedGroup = Number.parseInt(groupParam, 10);
+            if (!Number.isNaN(parsedGroup)) {
+                scopeDescriptor = { scope: 'group', clinicIds: [], groupId: parsedGroup };
+                where.grupo_clinica_id = parsedGroup;
+            }
+        } else if (clinicaParam) {
+            const resolvedScope = await resolveClinicScope(clinicaParam);
+            if (resolvedScope.notFound) {
+                return res.status(404).json({ message: 'Grupo de clínicas no encontrado' });
+            }
+            if (!resolvedScope.isValid && resolvedScope.scope !== 'group') {
+                return res.status(400).json({ message: 'ID de clínica o grupo inválido' });
+            }
+            scopeDescriptor = {
+                scope: resolvedScope.scope,
+                clinicIds: Array.isArray(resolvedScope.clinicIds) ? resolvedScope.clinicIds : [],
+                groupId: resolvedScope.groupId ?? null
+            };
+
+            if (resolvedScope.scope === 'group' && resolvedScope.groupId) {
+                const clauses = [{ grupo_clinica_id: resolvedScope.groupId }];
+                if (scopeDescriptor.clinicIds.length) {
+                    clauses.push({ clinica_id: { [Op.in]: scopeDescriptor.clinicIds } });
+                }
+                where[Op.or] = clauses;
+            } else if (scopeDescriptor.clinicIds.length) {
+                where.clinica_id = scopeDescriptor.clinicIds.length === 1
+                    ? scopeDescriptor.clinicIds[0]
+                    : { [Op.in]: scopeDescriptor.clinicIds };
+            }
+        }
+
+        const normalizedStatus = (typeof status === 'string' && status.toLowerCase() === 'all')
+            ? null
+            : (status || 'open');
+        if (normalizedStatus) {
+            where.status = normalizedStatus;
+        }
+
+        const parsedLimit = Math.min(100, Math.max(1, Number.parseInt(limit, 10) || 50));
+        const parsedOffset = Math.max(0, Number.parseInt(offset, 10) || 0);
+        const allowedOrder = ['last_seen_at', 'created_at', 'updated_at'];
+        const sortField = allowedOrder.includes(order) ? order : 'last_seen_at';
+        const sortDirection = String(direction).toUpperCase() === 'ASC' ? 'ASC' : 'DESC';
+
+        const issues = await AdAttributionIssue.findAll({
+            where,
+            limit: parsedLimit,
+            offset: parsedOffset,
+            order: [[sortField, sortDirection]],
+            include: [
+                {
+                    model: AdAttributionIssue.sequelize.models.Clinica,
+                    as: 'clinica',
+                    attributes: ['id_clinica', 'nombre_clinica']
+                },
+                {
+                    model: AdAttributionIssue.sequelize.models.GrupoClinica,
+                    as: 'grupoClinica',
+                    attributes: ['id_grupo', 'nombre_grupo']
+                }
+            ]
+        });
+
+        const baseWhere = { ...where };
+        const total = await AdAttributionIssue.count({ where: baseWhere });
+        const openCount = await AdAttributionIssue.count({ where: { ...baseWhere, status: 'open' } });
+        const resolvedCount = await AdAttributionIssue.count({ where: { ...baseWhere, status: 'resolved' } });
+
+        return res.status(200).json({
+            provider: normalizedProvider,
+            scope: scopeDescriptor.scope,
+            clinicIds: scopeDescriptor.clinicIds,
+            groupId: scopeDescriptor.groupId,
+            status: normalizedStatus ?? 'all',
+            limit: parsedLimit,
+            offset: parsedOffset,
+            total,
+            openCount,
+            resolvedCount,
+            items: issues
+        });
+    } catch (error) {
+        console.error('❌ Error al obtener incidencias de Ads:', error);
+        return res.status(500).json({ message: 'Error obteniendo incidencias de Ads', error: error.message });
+    }
+};
+
+exports.resolveAdsIssue = async (req, res) => {
+    try {
+        const { ids, id, resolutionNote } = req.body || {};
+        let idList = [];
+        if (Array.isArray(ids)) {
+            idList = ids;
+        } else if (id !== undefined && id !== null) {
+            idList = [id];
+        }
+        idList = idList
+            .map(value => Number.parseInt(value, 10))
+            .filter(Number.isFinite);
+
+        if (!idList.length) {
+            return res.status(400).json({ message: 'Debe proporcionar al menos un ID de incidencia' });
+        }
+
+        const updatePayload = {
+            status: 'resolved',
+            resolved_at: new Date()
+        };
+        if (typeof resolutionNote === 'string' && resolutionNote.trim().length) {
+            updatePayload.resolution_note = resolutionNote.trim().slice(0, 512);
+        }
+
+        const [updated] = await AdAttributionIssue.update(updatePayload, {
+            where: { id: { [Op.in]: idList } }
+        });
+
+        const refreshed = await AdAttributionIssue.findAll({ where: { id: { [Op.in]: idList } } });
+
+        return res.status(200).json({ updated, items: refreshed });
+    } catch (error) {
+        console.error('❌ Error al resolver incidencias de Ads:', error);
+        return res.status(500).json({ message: 'Error al actualizar incidencias de Ads', error: error.message });
+    }
+};
 
 // Obtiene una publicación específica con sus estadísticas
 exports.getPost = async (req, res) => {

@@ -15,6 +15,7 @@ const campanaRoutes = require('./routes/campana.routes');
 const leadRoutes = require('./routes/lead.routes');
 const panelesRoutes = require('./routes/paneles.routes');
 const userClinicasRoutes = require('./routes/userclinicas.routes');
+const notificationsRoutes = require('./routes/notifications.routes');
 // NUEVAS RUTAS Y MODELOS
 const oauthRoutes = require('./routes/oauth.routes');
 // NUEVA RUTA: Sistema de métricas de redes sociales
@@ -61,6 +62,8 @@ app.use('/api/paneles', panelesRoutes);
 console.log('Ruta /api/paneles configurada');
 app.use('/api/userclinicas', userClinicasRoutes);
 console.log('Ruta /api/userclinicas configurada');
+app.use('/api/common/notifications', notificationsRoutes);
+console.log('Ruta /api/common/notifications configurada');
 // RUTA: OAuth (exponer bajo /api/oauth para proxy y también /oauth por compatibilidad)
 app.use('/api/oauth', oauthRoutes);
 app.use('/oauth', oauthRoutes);

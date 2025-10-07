@@ -18,6 +18,22 @@ module.exports = (sequelize, DataTypes) => {
             onUpdate: 'CASCADE',
             onDelete: 'CASCADE',
         },
+        grupoClinicaId: {
+            type: DataTypes.INTEGER,
+            allowNull: true,
+            references: {
+                model: 'GruposClinicas',
+                key: 'id_grupo'
+            },
+            onUpdate: 'CASCADE',
+            onDelete: 'SET NULL'
+        },
+        assignmentScope: {
+            type: DataTypes.ENUM('clinic', 'group'),
+            allowNull: false,
+            defaultValue: 'clinic',
+            comment: 'Indica si el activo se asigna a una clínica específica o al grupo completo'
+        },
         metaConnectionId: { 
             type: DataTypes.INTEGER,
             allowNull: false,
@@ -75,7 +91,7 @@ module.exports = (sequelize, DataTypes) => {
         indexes: [ 
             {
                 unique: true,
-                fields: ['clinicaId', 'assetType', 'metaAssetId']
+                fields: ['metaConnectionId', 'metaAssetId']
             },
             {
                 fields: ['isActive']
@@ -85,6 +101,9 @@ module.exports = (sequelize, DataTypes) => {
             },
             {
                 fields: ['clinicaId', 'isActive']
+            },
+            {
+                fields: ['grupoClinicaId', 'isActive']
             }
         ]
     });
@@ -105,6 +124,12 @@ module.exports = (sequelize, DataTypes) => {
             foreignKey: 'metaConnectionId', 
             targetKey: 'id',
             as: 'metaConnection'
+        });
+
+        ClinicMetaAsset.belongsTo(models.GrupoClinica, {
+            foreignKey: 'grupoClinicaId',
+            targetKey: 'id_grupo',
+            as: 'grupoClinica'
         });
     };
 

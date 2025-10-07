@@ -40,6 +40,9 @@ router.get('/clinica/:clinicaId/ads/paid-reach-breakdown', socialStatsController
 router.get('/clinica/:clinicaId/ads/action-types', socialStatsController.getAdsActionTypes);
 // Salud de campañas (Meta Ads inicialmente)
 router.get('/clinica/:clinicaId/ads/health', socialStatsController.getAdsHealth);
+// Incidencias de atribución Ads
+router.get('/ads/issues', socialStatsController.getAdsIssues);
+router.post('/ads/issues/resolve', socialStatsController.resolveAdsIssue);
 router.get('/post/:postId', socialStatsController.getPost);
 router.get('/clinica/:clinicaId/top-posts', socialStatsController.getTopPosts);
 router.get('/clinica/:clinicaId/dashboard', socialStatsController.getDashboardSummary);

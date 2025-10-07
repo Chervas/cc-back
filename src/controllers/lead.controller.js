@@ -3,6 +3,7 @@ const Lead = db.Lead;
 const Campana = db.Campana;
 const Clinica = db.Clinica;
 const asyncHandler = require('express-async-handler');
+const notificationService = require('../services/notifications.service');
 
 // Obtener todos los leads
 exports.getAllLeads = asyncHandler(async (req, res) => {
@@ -77,8 +78,9 @@ exports.createLead = asyncHandler(async (req, res) => {
   }
   
   // Verificar si la clínica existe
+  let clinica = null;
   if (clinica_id) {
-    const clinica = await Clinica.findByPk(clinica_id);
+    clinica = await Clinica.findByPk(clinica_id);
     if (!clinica) {
       res.status(404);
       throw new Error('Clínica no encontrada');
@@ -107,6 +109,23 @@ exports.createLead = asyncHandler(async (req, res) => {
     });
   }
   
+  try {
+    await notificationService.dispatchEvent({
+      event: 'ads.new_lead',
+      clinicId: clinica ? clinica.id_clinica : null,
+      data: {
+        clinicName: clinica?.nombre_clinica || null,
+        leadName: nombre || email || telefono || 'Nuevo lead',
+        leadId: lead.id,
+        campaignId: campana_id || null,
+        link: '/panel-principal?view=leads',
+        useRouter: true
+      }
+    });
+  } catch (notifyErr) {
+    console.warn('⚠️ No se pudo emitir notificación de nuevo lead:', notifyErr.message || notifyErr);
+  }
+
   res.status(201).json(lead);
 });
 

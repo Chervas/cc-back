@@ -3,6 +3,7 @@
 const { Op, fn, col, literal } = require('sequelize');
 const { ClinicGoogleAdsAccount, GoogleAdsInsightsDaily } = require('../../models');
 const { formatCustomerId } = require('../lib/googleAdsClient');
+const { resolveClinicScope, buildAssetScopeWhere } = require('../lib/clinicScope');
 
 function parseDate(value, fallback) {
   if (!value) return fallback;
@@ -25,12 +26,81 @@ function safeNumber(value) {
   return Number.isFinite(n) ? n : 0;
 }
 
+function getAttr(instance, key) {
+  if (!instance) return null;
+  if (typeof instance.get === 'function') {
+    return instance.get(key);
+  }
+  return instance[key];
+}
+
+function dedupeAccounts(accounts) {
+  const map = new Map();
+  for (const acc of accounts) {
+    const key = getAttr(acc, 'customerId') || getAttr(acc, 'id');
+    if (!key) continue;
+    if (!map.has(key)) {
+      map.set(key, acc);
+    }
+  }
+  return Array.from(map.values());
+}
+
+async function aggregateMetrics(where) {
+  const rows = await GoogleAdsInsightsDaily.findAll({
+    attributes: [
+      [fn('SUM', col('impressions')), 'impressions'],
+      [fn('SUM', col('clicks')), 'clicks'],
+      [fn('SUM', col('costMicros')), 'costMicros'],
+      [fn('SUM', col('conversions')), 'conversions']
+    ],
+    where,
+    raw: true
+  });
+  const row = rows?.[0] || {};
+  const impressions = safeNumber(row.impressions);
+  const clicks = safeNumber(row.clicks);
+  const costMicros = safeNumber(row.costMicros);
+  const conversions = safeNumber(row.conversions);
+  const spend = microsToCurrency(costMicros);
+  return {
+    impressions,
+    clicks,
+    spend,
+    conversions,
+    ctr: impressions ? clicks / impressions : 0,
+    cpc: clicks ? spend / clicks : 0,
+    cpm: impressions ? spend / (impressions / 1000) : 0,
+    cpa: conversions ? spend / conversions : null,
+    conversionRate: clicks ? conversions / clicks : 0
+  };
+}
+
+function computeDelta(current, previous) {
+  const pct = (curr, prev) => {
+    if (!Number.isFinite(prev) || prev === 0) return null;
+    return Number((((curr - prev) / prev) * 100).toFixed(1));
+  };
+  return {
+    spend: pct(current.spend, previous.spend),
+    impressions: pct(current.impressions, previous.impressions),
+    clicks: pct(current.clicks, previous.clicks),
+    conversions: pct(current.conversions, previous.conversions)
+  };
+}
+
 exports.getOverview = async (req, res) => {
   try {
-    const clinicaId = parseInt(req.params.clinicaId, 10);
-    if (!clinicaId) {
-      return res.status(400).json({ message: 'clinicaId requerido' });
+    const clinicaParam = req.params.clinicaId;
+    const scope = await resolveClinicScope(clinicaParam);
+    if (scope.notFound) {
+      return res.status(404).json({ message: 'Grupo de clínicas no encontrado' });
     }
+    if (!scope.isValid && scope.scope !== 'group') {
+      return res.status(400).json({ message: 'clinicaId/grupo inválido' });
+    }
+
+    const clinicIds = Array.isArray(scope.clinicIds) ? scope.clinicIds : [];
 
     const end = parseDate(req.query.endDate, (() => {
       const d = new Date();
@@ -43,69 +113,72 @@ exports.getOverview = async (req, res) => {
     const prevEnd = new Date(start.getTime() - 86400000);
     const prevStart = new Date(prevEnd.getTime() - (end.getTime() - start.getTime()));
 
-    const accounts = await ClinicGoogleAdsAccount.findAll({
-      where: { clinicaId, isActive: true },
-      raw: true
-    });
+    const accountWhere = buildAssetScopeWhere(scope);
+    accountWhere.isActive = true;
+    const accountsRaw = await ClinicGoogleAdsAccount.findAll({ where: accountWhere, raw: true });
+    const accounts = dedupeAccounts(accountsRaw);
+    const customerIds = accounts.map(acc => acc.customerId).filter(Boolean);
 
-    if (!accounts.length) {
+    const basePeriod = {
+      start: formatDate(start),
+      end: formatDate(end),
+      previousStart: formatDate(prevStart),
+      previousEnd: formatDate(prevEnd)
+    };
+
+    if (!accounts.length || !customerIds.length) {
       return res.json({
-        period: { start: formatDate(start), end: formatDate(end), previousStart: formatDate(prevStart), previousEnd: formatDate(prevEnd) },
-        totals: { spend: 0, impressions: 0, clicks: 0, conversions: 0, ctr: 0, cpc: 0, cpm: 0 },
+        scope: scope.scope,
+        clinicIds,
+        groupId: scope.groupId ?? null,
+        period: basePeriod,
+        totals: { spend: 0, impressions: 0, clicks: 0, conversions: 0, ctr: 0, cpc: 0, cpm: 0, cpa: null, conversionRate: 0 },
+        previousTotals: { spend: 0, impressions: 0, clicks: 0, conversions: 0, ctr: 0, cpc: 0, cpm: 0, cpa: null, conversionRate: 0 },
+        unassignedTotals: null,
         delta: { spend: null, impressions: null, clicks: null, conversions: null },
         accounts: []
       });
     }
 
-    const accountIds = accounts.map(a => a.id);
+    const startStr = formatDate(start);
+    const endStr = formatDate(end);
+    const prevStartStr = formatDate(prevStart);
+    const prevEndStr = formatDate(prevEnd);
 
-    const buildWhere = (dateStart, dateEnd) => ({
-      clinicaId,
-      date: { [Op.between]: [formatDate(dateStart), formatDate(dateEnd)] }
+    const baseAssignedWhere = {
+      customerId: { [Op.in]: customerIds }
+    };
+    if (clinicIds.length) {
+      baseAssignedWhere.clinicaId = clinicIds.length === 1 ? clinicIds[0] : { [Op.in]: clinicIds };
+    }
+
+    const currentTotals = await aggregateMetrics({
+      ...baseAssignedWhere,
+      date: { [Op.between]: [startStr, endStr] }
     });
 
-    const aggregateMetrics = async (dateStart, dateEnd) => {
-      const rows = await GoogleAdsInsightsDaily.findAll({
-        attributes: [
-          [fn('SUM', col('impressions')), 'impressions'],
-          [fn('SUM', col('clicks')), 'clicks'],
-          [fn('SUM', col('costMicros')), 'costMicros'],
-          [fn('SUM', col('conversions')), 'conversions']
-        ],
-        where: buildWhere(dateStart, dateEnd),
-        raw: true
+    const previousTotals = await aggregateMetrics({
+      ...baseAssignedWhere,
+      date: { [Op.between]: [prevStartStr, prevEndStr] }
+    });
+
+    let unassignedTotals = null;
+    if (scope.groupId) {
+      unassignedTotals = await aggregateMetrics({
+        customerId: { [Op.in]: customerIds },
+        grupoClinicaId: scope.groupId,
+        clinicaId: { [Op.is]: null },
+        date: { [Op.between]: [startStr, endStr] }
       });
-      const row = rows?.[0] || {};
-      const impressions = safeNumber(row.impressions);
-      const clicks = safeNumber(row.clicks);
-      const costMicros = safeNumber(row.costMicros);
-      const conversions = safeNumber(row.conversions);
-      const spend = microsToCurrency(costMicros);
-      const ctr = impressions ? clicks / impressions : 0;
-      const cpc = clicks ? spend / clicks : 0;
-      const cpm = impressions ? spend / (impressions / 1000) : 0;
-      const cpa = conversions ? spend / conversions : null;
-      const conversionRate = clicks ? conversions / clicks : 0;
-      return { impressions, clicks, spend, conversions, ctr, cpc, cpm, cpa, conversionRate };
-    };
+    }
 
-    const currentTotals = await aggregateMetrics(start, end);
-    const previousTotals = await aggregateMetrics(prevStart, prevEnd);
-
-    const pctDelta = (curr, prev) => {
-      if (!prev) return null;
-      return Number((((curr - prev) / prev) * 100).toFixed(1));
-    };
-
-    const delta = {
-      spend: pctDelta(currentTotals.spend, previousTotals.spend),
-      impressions: pctDelta(currentTotals.impressions, previousTotals.impressions),
-      clicks: pctDelta(currentTotals.clicks, previousTotals.clicks),
-      conversions: pctDelta(currentTotals.conversions, previousTotals.conversions)
-    };
+    const delta = computeDelta(currentTotals, previousTotals);
 
     const accountSummaries = accounts.map(acc => ({
       id: acc.id,
+      clinicaId: acc.clinicaId || null,
+      grupoClinicaId: acc.grupoClinicaId || null,
+      assignmentScope: acc.assignmentScope,
       customerId: acc.customerId,
       formattedCustomerId: formatCustomerId(acc.customerId),
       descriptiveName: acc.descriptiveName,
@@ -117,20 +190,17 @@ exports.getOverview = async (req, res) => {
       lastSyncedAt: acc.lastSyncedAt
     }));
 
-    const payload = {
-      period: {
-        start: formatDate(start),
-        end: formatDate(end),
-        previousStart: formatDate(prevStart),
-        previousEnd: formatDate(prevEnd)
-      },
+    return res.json({
+      scope: scope.scope,
+      clinicIds,
+      groupId: scope.groupId ?? null,
+      period: basePeriod,
       totals: currentTotals,
       previousTotals,
+      unassignedTotals,
       delta,
       accounts: accountSummaries
-    };
-
-    res.json(payload);
+    });
   } catch (error) {
     console.error('❌ getOverview Google Ads error:', error);
     res.status(500).json({ message: 'Error obteniendo resumen de Google Ads', error: error.message });
@@ -139,24 +209,52 @@ exports.getOverview = async (req, res) => {
 
 exports.getTimeseries = async (req, res) => {
   try {
-    const clinicaId = parseInt(req.params.clinicaId, 10);
-    if (!clinicaId) return res.status(400).json({ message: 'clinicaId requerido' });
+    const clinicaParam = req.params.clinicaId;
+    const scope = await resolveClinicScope(clinicaParam);
+    if (scope.notFound) {
+      return res.status(404).json({ message: 'Grupo de clínicas no encontrado' });
+    }
+    if (!scope.isValid && scope.scope !== 'group') {
+      return res.status(400).json({ message: 'clinicaId/grupo inválido' });
+    }
+
+    const clinicIds = Array.isArray(scope.clinicIds) ? scope.clinicIds : [];
 
     const end = parseDate(req.query.endDate, (() => { const d = new Date(); d.setHours(0,0,0,0); return d; })());
     const windowDays = parseInt(req.query.windowDays || req.query.days || '30', 10);
     const days = Number.isFinite(windowDays) && windowDays > 0 ? windowDays : 30;
     const start = parseDate(req.query.startDate, new Date(end.getTime() - (days - 1) * 86400000));
+    const startStr = formatDate(start);
+    const endStr = formatDate(end);
 
-    const accounts = await ClinicGoogleAdsAccount.findAll({
-      where: { clinicaId, isActive: true },
-      attributes: ['id'],
-      raw: true
-    });
-    if (!accounts.length) {
-      return res.json({ series: [], totals: { spend: 0, impressions: 0, clicks: 0, conversions: 0 } });
+    const accountWhere = buildAssetScopeWhere(scope);
+    accountWhere.isActive = true;
+    const accountsRaw = await ClinicGoogleAdsAccount.findAll({ where: accountWhere, raw: true });
+    const accounts = dedupeAccounts(accountsRaw);
+    const customerIds = accounts.map(acc => acc.customerId).filter(Boolean);
+
+    const baseResponse = {
+      scope: scope.scope,
+      clinicIds,
+      groupId: scope.groupId ?? null,
+      series: [],
+      totals: { impressions: 0, clicks: 0, spend: 0, conversions: 0 },
+      unassignedSeries: [],
+      unassignedTotals: { impressions: 0, clicks: 0, spend: 0, conversions: 0 }
+    };
+
+    if (!accounts.length || !customerIds.length) {
+      return res.json(baseResponse);
     }
 
-    const accountIds = accounts.map(a => a.id);
+    const assignedWhere = {
+      customerId: { [Op.in]: customerIds },
+      date: { [Op.between]: [startStr, endStr] }
+    };
+    if (clinicIds.length) {
+      assignedWhere.clinicaId = clinicIds.length === 1 ? clinicIds[0] : { [Op.in]: clinicIds };
+    }
+
     const rows = await GoogleAdsInsightsDaily.findAll({
       attributes: [
         'date',
@@ -165,7 +263,7 @@ exports.getTimeseries = async (req, res) => {
         [fn('SUM', col('costMicros')), 'costMicros'],
         [fn('SUM', col('conversions')), 'conversions']
       ],
-      where: { clinicaId, date: { [Op.between]: [formatDate(start), formatDate(end)] } },
+      where: assignedWhere,
       group: ['date'],
       order: [[col('date'), 'ASC']],
       raw: true
@@ -186,7 +284,52 @@ exports.getTimeseries = async (req, res) => {
       conversions: acc.conversions + item.conversions
     }), { impressions: 0, clicks: 0, spend: 0, conversions: 0 });
 
-    res.json({ series, totals });
+    let unassignedSeries = [];
+    let unassignedTotals = { impressions: 0, clicks: 0, spend: 0, conversions: 0 };
+    if (scope.groupId) {
+      const unassignedWhere = {
+        customerId: { [Op.in]: customerIds },
+        grupoClinicaId: scope.groupId,
+        clinicaId: { [Op.is]: null },
+        date: { [Op.between]: [startStr, endStr] }
+      };
+      const unassignedRows = await GoogleAdsInsightsDaily.findAll({
+        attributes: [
+          'date',
+          [fn('SUM', col('impressions')), 'impressions'],
+          [fn('SUM', col('clicks')), 'clicks'],
+          [fn('SUM', col('costMicros')), 'costMicros'],
+          [fn('SUM', col('conversions')), 'conversions']
+        ],
+        where: unassignedWhere,
+        group: ['date'],
+        order: [[col('date'), 'ASC']],
+        raw: true
+      });
+      unassignedSeries = unassignedRows.map(row => ({
+        date: row.date,
+        impressions: safeNumber(row.impressions),
+        clicks: safeNumber(row.clicks),
+        spend: microsToCurrency(row.costMicros),
+        conversions: safeNumber(row.conversions)
+      }));
+      unassignedTotals = unassignedSeries.reduce((acc, item) => ({
+        impressions: acc.impressions + item.impressions,
+        clicks: acc.clicks + item.clicks,
+        spend: acc.spend + item.spend,
+        conversions: acc.conversions + item.conversions
+      }), { impressions: 0, clicks: 0, spend: 0, conversions: 0 });
+    }
+
+    return res.json({
+      scope: scope.scope,
+      clinicIds,
+      groupId: scope.groupId ?? null,
+      series,
+      totals,
+      unassignedSeries,
+      unassignedTotals
+    });
   } catch (error) {
     console.error('❌ getTimeseries Google Ads error:', error);
     res.status(500).json({ message: 'Error obteniendo serie temporal de Google Ads', error: error.message });
@@ -195,30 +338,62 @@ exports.getTimeseries = async (req, res) => {
 
 exports.getCampaigns = async (req, res) => {
   try {
-    const clinicaId = parseInt(req.params.clinicaId, 10);
-    if (!clinicaId) return res.status(400).json({ message: 'clinicaId requerido' });
+    const clinicaParam = req.params.clinicaId;
+    const scope = await resolveClinicScope(clinicaParam);
+    if (scope.notFound) {
+      return res.status(404).json({ message: 'Grupo de clínicas no encontrado' });
+    }
+    if (!scope.isValid && scope.scope !== 'group') {
+      return res.status(400).json({ message: 'clinicaId/grupo inválido' });
+    }
+
+    const clinicIds = Array.isArray(scope.clinicIds) ? scope.clinicIds : [];
+
     const end = parseDate(req.query.endDate, (() => { const d = new Date(); d.setHours(0,0,0,0); return d; })());
     const windowDays = parseInt(req.query.windowDays || req.query.days || '30', 10);
     const days = Number.isFinite(windowDays) && windowDays > 0 ? windowDays : 30;
     const start = parseDate(req.query.startDate, new Date(end.getTime() - (days - 1) * 86400000));
+    const startStr = formatDate(start);
+    const endStr = formatDate(end);
 
-    const accounts = await ClinicGoogleAdsAccount.findAll({ where: { clinicaId, isActive: true }, attributes: ['id'], raw: true });
-    if (!accounts.length) {
-      return res.json({ campaigns: [] });
+    const accountWhere = buildAssetScopeWhere(scope);
+    accountWhere.isActive = true;
+    const accountsRaw = await ClinicGoogleAdsAccount.findAll({ where: accountWhere, raw: true });
+    const accounts = dedupeAccounts(accountsRaw);
+    const customerIds = accounts.map(acc => acc.customerId).filter(Boolean);
+
+    const baseResponse = {
+      scope: scope.scope,
+      clinicIds,
+      groupId: scope.groupId ?? null,
+      campaigns: [],
+      unassignedCampaigns: []
+    };
+
+    if (!accounts.length || !customerIds.length) {
+      return res.json(baseResponse);
     }
-    const accountIds = accounts.map(a => a.id);
+
+    const assignedWhere = {
+      customerId: { [Op.in]: customerIds },
+      date: { [Op.between]: [startStr, endStr] }
+    };
+    if (clinicIds.length) {
+      assignedWhere.clinicaId = clinicIds.length === 1 ? clinicIds[0] : { [Op.in]: clinicIds };
+    }
 
     const rows = await GoogleAdsInsightsDaily.findAll({
       attributes: [
         'campaignId',
         'campaignName',
+        'clinicaId',
         [fn('SUM', col('impressions')), 'impressions'],
         [fn('SUM', col('clicks')), 'clicks'],
         [fn('SUM', col('costMicros')), 'costMicros'],
         [fn('SUM', col('conversions')), 'conversions']
       ],
-      where: { clinicaId, date: { [Op.between]: [formatDate(start), formatDate(end)] } },
-      group: ['campaignId', 'campaignName'],
+      where: assignedWhere,
+      group: ['campaignId', 'campaignName', 'clinicaId'],
       order: [[literal('SUM(costMicros)'), 'DESC']],
       raw: true
     });
@@ -228,27 +403,73 @@ exports.getCampaigns = async (req, res) => {
       const clicks = safeNumber(row.clicks);
       const spend = microsToCurrency(row.costMicros);
       const conversions = safeNumber(row.conversions);
-      const ctr = impressions ? clicks / impressions : 0;
-      const cpc = clicks ? spend / clicks : 0;
-      const cpm = impressions ? spend / (impressions / 1000) : 0;
-      const cpa = conversions ? spend / conversions : null;
-      const conversionRate = clicks ? conversions / clicks : 0;
       return {
         campaignId: row.campaignId,
         campaignName: row.campaignName || 'Campaña sin nombre',
+        clinicaId: row.clinicaId ?? null,
         impressions,
         clicks,
         spend,
         conversions,
-        ctr,
-        cpc,
-        cpm,
-        cpa,
-        conversionRate
+        ctr: impressions ? clicks / impressions : 0,
+        cpc: clicks ? spend / clicks : 0,
+        cpm: impressions ? spend / (impressions / 1000) : 0,
+        cpa: conversions ? spend / conversions : null,
+        conversionRate: clicks ? conversions / clicks : 0
       };
     });
 
-    res.json({ campaigns });
+    let unassignedCampaigns = [];
+    if (scope.groupId) {
+      const unassignedWhere = {
+        customerId: { [Op.in]: customerIds },
+        grupoClinicaId: scope.groupId,
+        clinicaId: { [Op.is]: null },
+        date: { [Op.between]: [startStr, endStr] }
+      };
+      const unassignedRows = await GoogleAdsInsightsDaily.findAll({
+        attributes: [
+          'campaignId',
+          'campaignName',
+          [fn('SUM', col('impressions')), 'impressions'],
+          [fn('SUM', col('clicks')), 'clicks'],
+          [fn('SUM', col('costMicros')), 'costMicros'],
+          [fn('SUM', col('conversions')), 'conversions']
+        ],
+        where: unassignedWhere,
+        group: ['campaignId', 'campaignName'],
+        order: [[literal('SUM(costMicros)'), 'DESC']],
+        raw: true
+      });
+      unassignedCampaigns = unassignedRows.map(row => {
+        const impressions = safeNumber(row.impressions);
+        const clicks = safeNumber(row.clicks);
+        const spend = microsToCurrency(row.costMicros);
+        const conversions = safeNumber(row.conversions);
+        return {
+          campaignId: row.campaignId,
+          campaignName: row.campaignName || 'Campaña sin nombre',
+          clinicaId: null,
+          impressions,
+          clicks,
+          spend,
+          conversions,
+          ctr: impressions ? clicks / impressions : 0,
+          cpc: clicks ? spend / clicks : 0,
+          cpm: impressions ? spend / (impressions / 1000) : 0,
+          cpa: conversions ? spend / conversions : null,
+          conversionRate: clicks ? conversions / clicks : 0
+        };
+      });
+    }
+
+    return res.json({
+      scope: scope.scope,
+      clinicIds,
+      groupId: scope.groupId ?? null,
+      campaigns,
+      unassignedCampaigns
+    });
   } catch (error) {
     console.error('❌ getCampaigns Google Ads error:', error);
     res.status(500).json({ message: 'Error obteniendo campañas de Google Ads', error: error.message });
@@ -257,10 +478,16 @@ exports.getCampaigns = async (req, res) => {
 
 exports.getHealth = async (req, res) => {
   try {
-    const clinicaId = parseInt(req.params.clinicaId, 10);
-    if (!clinicaId) {
-      return res.status(400).json({ message: 'clinicaId requerido' });
+    const clinicaParam = req.params.clinicaId;
+    const scope = await resolveClinicScope(clinicaParam);
+    if (scope.notFound) {
+      return res.status(404).json({ message: 'Grupo de clínicas no encontrado' });
     }
+    if (!scope.isValid && scope.scope !== 'group') {
+      return res.status(400).json({ message: 'clinicaId/grupo inválido' });
+    }
+
+    const clinicIds = Array.isArray(scope.clinicIds) ? scope.clinicIds : [];
 
     const dayMs = 86400000;
     const end = parseDate(req.query.endDate, (() => { const d = new Date(); d.setHours(0,0,0,0); return d; })());
@@ -285,11 +512,47 @@ exports.getHealth = async (req, res) => {
     const cpaGrowthThreshold = parseFloat(process.env.GOOGLE_ADS_HEALTH_CPA_GROWTH || '0.3');
     const minImpressions = parseFloat(process.env.GOOGLE_ADS_HEALTH_MIN_IMPRESSIONS || '200');
 
+    const accountWhere = buildAssetScopeWhere(scope);
+    accountWhere.isActive = true;
+    const accountsRaw = await ClinicGoogleAdsAccount.findAll({ where: accountWhere, raw: true });
+    const accounts = dedupeAccounts(accountsRaw);
+    const customerIds = accounts.map(acc => acc.customerId).filter(Boolean);
+
+    if (!accounts.length || !customerIds.length) {
+      return res.json({
+        scope: scope.scope,
+        clinicIds,
+        groupId: scope.groupId ?? null,
+        platform: 'google',
+        period: { start: startStr, end: endStr },
+        cards: [],
+        thresholds: {
+          minSpend,
+          ctr: ctrThreshold,
+          cpa: cpaThreshold,
+          growth: cpaGrowthThreshold,
+          minImpressions
+        }
+      });
+    }
+
+    const insightsWhere = {
+      customerId: { [Op.in]: customerIds },
+      date: { [Op.between]: [formatDate(prevStart), endStr] }
+    };
+    if (scope.groupId) {
+      const clauses = [];
+      if (clinicIds.length) {
+        clauses.push({ clinicaId: { [Op.in]: clinicIds } });
+      }
+      clauses.push({ clinicaId: { [Op.is]: null }, grupoClinicaId: scope.groupId });
+      insightsWhere[Op.or] = clauses;
+    } else if (clinicIds.length) {
+      insightsWhere.clinicaId = clinicIds.length === 1 ? clinicIds[0] : { [Op.in]: clinicIds };
+    }
+
     const rowsRaw = await GoogleAdsInsightsDaily.findAll({
-      where: {
-        clinicaId,
-        date: { [Op.between]: [formatDate(prevStart), endStr] }
-      },
+      where: insightsWhere,
       attributes: ['date', 'campaignId', 'campaignName', 'impressions', 'clicks', 'costMicros', 'conversions'],
       raw: true
     });
@@ -460,6 +723,9 @@ exports.getHealth = async (req, res) => {
     });
 
     res.json({
+      scope: scope.scope,
+      clinicIds,
+      groupId: scope.groupId ?? null,
       platform: 'google',
       period: { start: startStr, end: endStr },
       cards,

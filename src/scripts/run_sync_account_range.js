@@ -12,7 +12,7 @@ const { syncAdAccountMetrics } = require('../controllers/metasync.controller');
 async function main() {
   const clinicaId = parseInt(process.argv[2] || '19', 10);
   const daysBack = parseInt(process.argv[3] || '90', 10);
-  const end = new Date(); end.setHours(0,0,0,0); end.setDate(end.getDate()-1);
+  const end = new Date(); end.setHours(0,0,0,0);
   const start = new Date(end); start.setDate(start.getDate() - (daysBack-1));
 
   const asset = await db.ClinicMetaAsset.findOne({

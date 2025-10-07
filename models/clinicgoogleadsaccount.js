@@ -3,7 +3,9 @@
 module.exports = (sequelize, DataTypes) => {
   const ClinicGoogleAdsAccount = sequelize.define('ClinicGoogleAdsAccount', {
     id: { type: DataTypes.INTEGER, primaryKey: true, autoIncrement: true },
-    clinicaId: { type: DataTypes.INTEGER, allowNull: false, field: 'clinicaId' },
+    clinicaId: { type: DataTypes.INTEGER, allowNull: true, field: 'clinicaId' },
+    grupoClinicaId: { type: DataTypes.INTEGER, allowNull: true, field: 'grupoClinicaId' },
+    assignmentScope: { type: DataTypes.ENUM('clinic', 'group'), allowNull: false, defaultValue: 'clinic', field: 'assignmentScope' },
     googleConnectionId: { type: DataTypes.INTEGER, allowNull: false, field: 'googleConnectionId' },
     customerId: { type: DataTypes.STRING(32), allowNull: false, field: 'customerId' },
     descriptiveName: { type: DataTypes.STRING(256), allowNull: true, field: 'descriptiveName' },
@@ -27,6 +29,7 @@ module.exports = (sequelize, DataTypes) => {
 
   ClinicGoogleAdsAccount.associate = function(models) {
     ClinicGoogleAdsAccount.belongsTo(models.Clinica, { foreignKey: 'clinicaId', targetKey: 'id_clinica', as: 'clinica' });
+    ClinicGoogleAdsAccount.belongsTo(models.GrupoClinica, { foreignKey: 'grupoClinicaId', targetKey: 'id_grupo', as: 'grupoClinica' });
     ClinicGoogleAdsAccount.belongsTo(models.GoogleConnection, { foreignKey: 'googleConnectionId', as: 'googleConnection' });
     ClinicGoogleAdsAccount.hasMany(models.GoogleAdsInsightsDaily, { foreignKey: 'clinicGoogleAdsAccountId', as: 'insights' });
   };

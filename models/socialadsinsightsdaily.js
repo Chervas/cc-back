@@ -18,7 +18,11 @@ module.exports = (sequelize, DataTypes) => {
     ctr: { type: DataTypes.DECIMAL(6,4), defaultValue: 0 },
     frequency: { type: DataTypes.DECIMAL(6,3), defaultValue: 0 },
     video_plays: { type: DataTypes.INTEGER, defaultValue: 0 },
-    video_plays_75: { type: DataTypes.INTEGER, defaultValue: 0 }
+    video_plays_75: { type: DataTypes.INTEGER, defaultValue: 0 },
+    clinica_id: { type: DataTypes.INTEGER, allowNull: true },
+    grupo_clinica_id: { type: DataTypes.INTEGER, allowNull: true },
+    clinic_match_source: { type: DataTypes.STRING(32), allowNull: true },
+    clinic_match_value: { type: DataTypes.STRING(255), allowNull: true }
   }, {
     tableName: 'SocialAdsInsightsDaily',
     timestamps: true,
@@ -31,12 +35,16 @@ module.exports = (sequelize, DataTypes) => {
         fields: ['level', 'entity_id', 'date', 'publisher_platform', 'platform_position'],
         name: 'uniq_ads_insights_entity_date_platform_position'
       },
-      { fields: ['ad_account_id', 'date'] }
+      { fields: ['ad_account_id', 'date'] },
+      { fields: ['clinica_id', 'date'], name: 'idx_social_ads_insights_clinic_date' },
+      { fields: ['grupo_clinica_id', 'date'], name: 'idx_social_ads_insights_group_date' }
     ]
   });
 
   SocialAdsInsightsDaily.associate = function(models) {
     SocialAdsInsightsDaily.belongsTo(models.SocialAdsEntity, { foreignKey: 'entity_id', targetKey: 'entity_id', as: 'entity' });
+    SocialAdsInsightsDaily.belongsTo(models.Clinica, { foreignKey: 'clinica_id', targetKey: 'id_clinica', as: 'clinica' });
+    SocialAdsInsightsDaily.belongsTo(models.GrupoClinica, { foreignKey: 'grupo_clinica_id', targetKey: 'id_grupo', as: 'grupoClinica' });
   };
 
   return SocialAdsInsightsDaily;

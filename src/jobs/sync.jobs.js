@@ -26,7 +26,9 @@ const {
 const META_API_BASE_URL = process.env.META_API_BASE_URL || 'https://graph.facebook.com/v23.0';
 const url = `${META_API_BASE_URL}/...`;
 const { metaGet } = require('../lib/metaClient');
+const { buildClinicMatcher } = require('../lib/clinicAttribution');
 const { googleAdsRequest, getGoogleAdsUsageStatus, resumeGoogleAdsUsage, ensureGoogleAdsConfig, normalizeCustomerId, formatCustomerId } = require('../lib/googleAdsClient');
+const notificationService = require('../services/notifications.service');
 
 // Importar modelos
 const {
@@ -45,13 +47,43 @@ const {
   ClinicGoogleAdsAccount,
   GoogleAdsInsightsDaily,
   Clinica,
+  GrupoClinica,
   WebGaDaily,
   WebGaDimensionDaily,
   WebScQueryDaily,
   BusinessProfileDailyMetric,
   BusinessProfileReview,
-  BusinessProfilePost
+  BusinessProfilePost,
+  AdAttributionIssue
 } = require('../../models');
+
+const MS_PER_DAY = 24 * 60 * 60 * 1000;
+
+function parseDateInput(value, label) {
+  if (!value) {
+    return null;
+  }
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    throw new Error(`Invalid ${label}: ${value}`);
+  }
+  date.setHours(0, 0, 0, 0);
+  return date;
+}
+
+function ensureAscending(start, end) {
+  if (start && end && start.getTime() > end.getTime()) {
+    return [end, start];
+  }
+  return [start, end];
+}
+
+function diffInDaysInclusive(start, end) {
+  if (!start || !end) {
+    return null;
+  }
+  return Math.floor((end.getTime() - start.getTime()) / MS_PER_DAY) + 1;
+}
 
 class MetaSyncJobs {
   constructor() {
@@ -62,6 +94,7 @@ class MetaSyncJobs {
     this._webBackfillMode = false;
     this._analyticsBackfillMode = false;
     this._localBackfillMode = false;
+    this._groupAssignmentCache = new Map();
     
     // Descripciones por job (usadas por el monitor/UX)
     this.jobDescriptions = {
@@ -412,6 +445,65 @@ class MetaSyncJobs {
     }
   }
 
+  async _fetchGroupWithClinics(groupId) {
+    if (!groupId) {
+      return null;
+    }
+
+    const cacheKey = String(groupId);
+    if (this._groupAssignmentCache.has(cacheKey)) {
+      return this._groupAssignmentCache.get(cacheKey);
+    }
+
+    const group = await GrupoClinica.findByPk(groupId, {
+      include: [{
+        model: Clinica,
+        as: 'clinicas',
+        attributes: ['id_clinica', 'nombre_clinica', 'grupoClinicaId']
+      }]
+    });
+
+    const plain = group ? group.get({ plain: true }) : null;
+    this._groupAssignmentCache.set(cacheKey, plain);
+    return plain;
+  }
+
+  async _buildMetaAssignmentContext(asset) {
+    const groupId = asset.grupoClinicaId || asset.clinica?.grupoClinicaId || null;
+
+    if (asset.assignmentScope === 'group' && groupId) {
+      const group = await this._fetchGroupWithClinics(groupId);
+      if (!group) {
+        return {
+          mode: 'manual',
+          clinicaId: asset.clinicaId || null,
+          groupId: null,
+          clinics: []
+        };
+      }
+
+      const clinics = Array.isArray(group.clinicas) ? group.clinicas : [];
+      const delimiter = group.ads_assignment_delimiter || '**';
+      const matcher = clinics.length ? buildClinicMatcher(clinics, { delimiter, requireDelimiter: true }) : null;
+      const mode = group.ads_assignment_mode === 'manual' ? 'group-manual' : 'group-auto';
+
+      return {
+        mode,
+        groupId: group.id_grupo,
+        delimiter,
+        matcher,
+        clinics
+      };
+    }
+
+    return {
+      mode: 'manual',
+      clinicaId: asset.clinicaId || null,
+      groupId,
+      clinics: asset.clinica ? [asset.clinica] : []
+    };
+  }
+
   /**
    * Ejecuta job manualmente
    */
@@ -538,6 +630,8 @@ class MetaSyncJobs {
     const windowLabel = options.windowLabel || 'default';
     console.log(`📢 Ejecutando adsSync (${windowLabel})...`);
 
+    this._groupAssignmentCache.clear();
+
     const syncLog = await SyncLog.create({
       job_type: windowLabel === 'midday' ? 'ads_sync_midday' : 'ads_sync',
       status: 'running',
@@ -547,36 +641,97 @@ class MetaSyncJobs {
 
     const report = { accounts: 0, processed: 0, errors: [], totals: { entities: 0, insightsRows: 0, actionsRows: 0, linkedPromotions: 0 } };
     try {
-      const activeAdAccounts = await ClinicMetaAsset.findAll({
+      let activeAdAccounts = await ClinicMetaAsset.findAll({
         where: { isActive: true, assetType: 'ad_account' },
-        include: [{ model: MetaConnection, as: 'metaConnection' }]
+        include: [
+          { model: MetaConnection, as: 'metaConnection' },
+          { model: Clinica, as: 'clinica', attributes: ['id_clinica', 'nombre_clinica', 'grupoClinicaId'] }
+        ]
       });
+
+      if (Array.isArray(options.clinicIds) && options.clinicIds.length) {
+        const allowedClinicIds = options.clinicIds
+          .map((id) => Number(id))
+          .filter(Number.isFinite);
+        activeAdAccounts = activeAdAccounts.filter((asset) => {
+          const clinicId = Number(asset.clinicaId ?? asset.clinica?.id_clinica);
+          return allowedClinicIds.includes(clinicId);
+        });
+      }
+
+      if (Array.isArray(options.groupIds) && options.groupIds.length) {
+        const allowedGroupIds = options.groupIds
+          .map((id) => Number(id))
+          .filter(Number.isFinite);
+        if (allowedGroupIds.length) {
+          activeAdAccounts = activeAdAccounts.filter((asset) => {
+            const groupId = Number(asset.grupoClinicaId ?? asset.clinica?.grupoClinicaId);
+            if (!Number.isFinite(groupId)) {
+              return false;
+            }
+            return allowedGroupIds.includes(groupId);
+          });
+        }
+      }
 
       console.log(`🧾 Cuentas publicitarias activas: ${activeAdAccounts.length}`);
       report.accounts = activeAdAccounts.length;
-
-      // Ventana: últimos N días hasta límite seleccionado
-      const end = new Date();
-      end.setHours(0, 0, 0, 0);
-      if (windowLabel !== 'midday') {
-        end.setDate(end.getDate() - 1);
+      if (!activeAdAccounts.length) {
+        await syncLog.update({
+          status: 'completed',
+          end_time: new Date(),
+          records_processed: 0,
+          status_report: report
+        });
+        console.log('ℹ️ adsSync sin cuentas tras aplicar filtros.');
+        return { status: 'completed', ...report };
       }
+
+      const defaultEnd = new Date();
+      defaultEnd.setHours(0, 0, 0, 0);
+      if (!options.endDate && windowLabel !== 'midday') {
+        defaultEnd.setDate(defaultEnd.getDate() - 1);
+      }
+
+      const parsedEnd = parseDateInput(options.endDate, 'endDate') || defaultEnd;
+      const parsedStart = parseDateInput(options.startDate, 'startDate');
+      const customWindowDays = Number(options.windowDays || options.days);
 
       for (const [idx, asset] of activeAdAccounts.entries()) {
         try {
           const accessToken = asset.pageAccessToken || asset.metaConnection?.accessToken;
           if (!accessToken) { throw new Error('Sin access token para ad_account'); }
           // Detectar si es primera vez (sin logs previos)
-          let days = windowLabel === 'midday' ? Math.max(2, this.config.ads.middayDays || 2) : this.config.ads.recentDays;
-          if (windowLabel !== 'midday') {
-            try {
-              const prev = await SyncLog.count({ where: { asset_id: asset.id, job_type: { [Op.in]: ['ads_sync','ads_backfill'] }, status: 'completed' } });
-              if (!prev) days = this.config.ads.initialDays;
-            } catch (_) { /* no-op */ }
+          let start;
+          let end = new Date(parsedEnd);
+
+          if (parsedStart) {
+            start = new Date(parsedStart);
+          } else {
+            let days;
+            if (Number.isFinite(customWindowDays) && customWindowDays > 0) {
+              days = Math.floor(customWindowDays);
+            } else {
+              days = windowLabel === 'midday' ? Math.max(2, this.config.ads.middayDays || 2) : this.config.ads.recentDays;
+              if (windowLabel !== 'midday') {
+                try {
+                  const prev = await SyncLog.count({ where: { asset_id: asset.id, job_type: { [Op.in]: ['ads_sync','ads_backfill'] }, status: 'completed' } });
+                  if (!prev) {
+                    days = this.config.ads.initialDays;
+                  }
+                } catch (_) { /* no-op */ }
+              }
+            }
+            days = Math.max(1, days);
+            start = new Date(end);
+            start.setDate(start.getDate() - (days - 1));
           }
-          const start = new Date(end); start.setDate(start.getDate() - (days - 1));
+
+          [start, end] = ensureAscending(start, end);
+
           console.log(`▶️ AdsSync ${asset.metaAssetName} (${asset.metaAssetId}) ${start.toISOString().slice(0,10)}..${end.toISOString().slice(0,10)}`);
-          const result = await syncAdAccountMetrics(asset, accessToken, start, end);
+          const assignment = await this._buildMetaAssignmentContext(asset);
+          const result = await syncAdAccountMetrics(asset, accessToken, start, end, { assignment });
           // Persistir estado de cuenta y motivos de entrega (ligero)
           try { await this._updateAdAccountStatus(asset, accessToken); } catch (e) { console.warn('Account status update error:', e.message); }
           try { await this._enrichAdsetDeliveryReasons(asset, accessToken, end); } catch (e) { console.warn('Adset delivery enrich error:', e.message); }
@@ -630,8 +785,9 @@ class MetaSyncJobs {
   /**
    * Job: Backfill semanal de Ads (ventana más larga)
    */
-  async executeAdsBackfill() {
+  async executeAdsBackfill(options = {}) {
     console.log('📢 Ejecutando adsBackfill (ventana extendida)...');
+    this._groupAssignmentCache.clear();
     const syncLog = await SyncLog.create({
       job_type: 'ads_backfill',
       status: 'running',
@@ -639,30 +795,81 @@ class MetaSyncJobs {
       records_processed: 0
     });
 
-    const report = { accounts: 0, processed: 0, errors: [], totals: { entities: 0, insightsRows: 0, actionsRows: 0, linkedPromotions: 0 } };
+    const report = { accounts: 0, processed: 0, errors: [], totals: { entities: 0, insightsRows: 0, actionsRows: 0, linkedPromotions: 0 }, dateRange: null, windowDays: null };
     try {
-      const activeAdAccounts = await ClinicMetaAsset.findAll({
+      let activeAdAccounts = await ClinicMetaAsset.findAll({
         where: { isActive: true, assetType: 'ad_account' },
-        include: [{ model: MetaConnection, as: 'metaConnection' }]
+        include: [
+          { model: MetaConnection, as: 'metaConnection' },
+          { model: Clinica, as: 'clinica', attributes: ['id_clinica', 'nombre_clinica', 'grupoClinicaId'] }
+        ]
       });
+
+      if (Array.isArray(options.clinicIds) && options.clinicIds.length) {
+        const allowedClinicIds = options.clinicIds.map((id) => Number(id)).filter(Number.isFinite);
+        if (allowedClinicIds.length) {
+          activeAdAccounts = activeAdAccounts.filter((asset) => {
+            const clinicId = Number(asset.clinicaId ?? asset.clinica?.id_clinica);
+            return allowedClinicIds.includes(clinicId);
+          });
+        }
+      }
+
+      if (Array.isArray(options.groupIds) && options.groupIds.length) {
+        const allowedGroupIds = options.groupIds.map((id) => Number(id)).filter(Number.isFinite);
+        if (allowedGroupIds.length) {
+          activeAdAccounts = activeAdAccounts.filter((asset) => {
+            const groupId = Number(asset.grupoClinicaId ?? asset.clinica?.grupoClinicaId);
+            if (!Number.isFinite(groupId)) {
+              return false;
+            }
+            return allowedGroupIds.includes(groupId);
+          });
+        }
+      }
 
       console.log(`🧾 Cuentas publicitarias activas: ${activeAdAccounts.length}`);
       report.accounts = activeAdAccounts.length;
 
       // Ventana: últimos M días hasta ayer
-      const days = this.config.ads.backfillDays;
-      const end = new Date(); end.setHours(0,0,0,0); end.setDate(end.getDate() - 1);
-      const start = new Date(end); start.setDate(start.getDate() - (days - 1));
+      const defaultEnd = new Date();
+      defaultEnd.setHours(0, 0, 0, 0);
+      defaultEnd.setDate(defaultEnd.getDate() - 1);
+
+      let end = parseDateInput(options.endDate, 'endDate') || defaultEnd;
+      let start = parseDateInput(options.startDate, 'startDate');
+      let windowDays = Number(options.windowDays || options.days);
+      if (!Number.isFinite(windowDays) || windowDays <= 0) {
+        windowDays = this.config.ads.backfillDays;
+      } else {
+        windowDays = Math.floor(windowDays);
+      }
+
+      if (!start) {
+        start = new Date(end);
+        start.setDate(start.getDate() - (Math.max(1, windowDays) - 1));
+      }
+
+      [start, end] = ensureAscending(start, end);
+
+      report.windowDays = diffInDaysInclusive(start, end);
+      report.dateRange = {
+        start: start.toISOString().slice(0, 10),
+        end: end.toISOString().slice(0, 10)
+      };
 
       for (const asset of activeAdAccounts) {
         try {
           const accessToken = asset.pageAccessToken || asset.metaConnection?.accessToken;
           if (!accessToken) { throw new Error('Sin access token para ad_account'); }
-          console.log(`▶️ AdsBackfill ${asset.metaAssetName} (${asset.metaAssetId}) ${start.toISOString().slice(0,10)}..${end.toISOString().slice(0,10)}`);
-          const result = await syncAdAccountMetrics(asset, accessToken, start, end);
+          const assetStart = new Date(start);
+          const assetEnd = new Date(end);
+          console.log(`▶️ AdsBackfill ${asset.metaAssetName} (${asset.metaAssetId}) ${assetStart.toISOString().slice(0,10)}..${assetEnd.toISOString().slice(0,10)}`);
+          const assignment = await this._buildMetaAssignmentContext(asset);
+          const result = await syncAdAccountMetrics(asset, accessToken, assetStart, assetEnd, { assignment });
           // Sólo actualizar estado/motivos una vez por backfill (usa fin de ventana)
           try { await this._updateAdAccountStatus(asset, accessToken); } catch (e) { console.warn('Account status update error:', e.message); }
-          try { await this._enrichAdsetDeliveryReasons(asset, accessToken, end); } catch (e) { console.warn('Adset delivery enrich error:', e.message); }
+          try { await this._enrichAdsetDeliveryReasons(asset, accessToken, assetEnd); } catch (e) { console.warn('Adset delivery enrich error:', e.message); }
           report.processed += 1;
           if (result) {
             report.totals.entities += result.entities || 0;
@@ -1878,9 +2085,9 @@ try {
       records_processed: 0
     });
 
-    const report = { accounts: 0, processed: 0, rows: 0, errors: [], notes: [], skipped: 0, windowDays: options.windowDays || this.config.googleAds.recentDays };
+    const report = { accounts: 0, processed: 0, rows: 0, errors: [], notes: [], skipped: 0, windowDays: options.windowDays || this.config.googleAds.recentDays, dateRange: null };
     try {
-      const accounts = await ClinicGoogleAdsAccount.findAll({
+      let accounts = await ClinicGoogleAdsAccount.findAll({
         where: {
           isActive: true,
           [Op.or]: [
@@ -1894,6 +2101,28 @@ try {
         ]
       });
 
+      if (Array.isArray(options.clinicIds) && options.clinicIds.length) {
+        const allowedIds = options.clinicIds
+          .map((id) => Number(id))
+          .filter(Number.isFinite);
+        accounts = accounts.filter((acc) => allowedIds.includes(Number(acc.clinicaId ?? acc.clinica?.id_clinica)));
+      }
+
+      if (Array.isArray(options.groupIds) && options.groupIds.length) {
+        const allowedGroupIds = options.groupIds
+          .map((id) => Number(id))
+          .filter(Number.isFinite);
+        if (allowedGroupIds.length) {
+          accounts = accounts.filter((acc) => {
+            const groupId = Number(acc.grupoClinicaId ?? acc.clinica?.grupoClinicaId);
+            if (!Number.isFinite(groupId)) {
+              return false;
+            }
+            return allowedGroupIds.includes(groupId);
+          });
+        }
+      }
+
       report.accounts = accounts.length;
       if (!accounts.length) {
         await syncLog.update({ status: 'completed', end_time: new Date(), records_processed: 0, status_report: report });
@@ -1902,9 +2131,13 @@ try {
       }
 
       // Ventana: últimos N días hasta ayer
-      const days = report.windowDays;
-      const end = new Date(); end.setHours(0,0,0,0); end.setDate(end.getDate() - 1);
-      const start = new Date(end); start.setDate(start.getDate() - (days - 1));
+      const defaultEnd = new Date();
+      defaultEnd.setHours(0, 0, 0, 0);
+      defaultEnd.setDate(defaultEnd.getDate() - 1);
+
+      const parsedEnd = parseDateInput(options.endDate, 'endDate') || defaultEnd;
+      const parsedStart = parseDateInput(options.startDate, 'startDate');
+      const customWindowDays = Number(options.windowDays || options.days);
 
       const usageStatus = await getGoogleAdsUsageStatus();
       if (usageStatus.pauseUntil && usageStatus.pauseUntil > Date.now()) {
@@ -1917,7 +2150,40 @@ try {
       for (const account of accounts) {
         try {
           const token = await this._getGoogleAccessToken(account.googleConnection);
-          const stats = await this._syncGoogleAdsAccount(account, { start, end, chunkDays: this.config.googleAds.chunkDays, accessToken: token, report });
+
+          let end = new Date(parsedEnd);
+          let start;
+          if (parsedStart) {
+            start = new Date(parsedStart);
+          } else {
+            let days;
+            if (Number.isFinite(customWindowDays) && customWindowDays > 0) {
+              days = Math.floor(customWindowDays);
+            } else {
+              days = report.windowDays;
+            }
+            days = Math.max(1, days);
+            start = new Date(end);
+            start.setDate(start.getDate() - (days - 1));
+          }
+
+          [start, end] = ensureAscending(start, end);
+          const rangeDays = diffInDaysInclusive(start, end);
+          if (rangeDays) {
+            report.windowDays = rangeDays;
+            report.dateRange = {
+              start: start.toISOString().slice(0, 10),
+              end: end.toISOString().slice(0, 10)
+            };
+          }
+
+          const stats = await this._syncGoogleAdsAccount(account, {
+            start,
+            end,
+            chunkDays: options.chunkDays || this.config.googleAds.chunkDays,
+            accessToken: token,
+            report
+          });
           if (stats?.skipped) {
             report.skipped += 1;
             continue;
@@ -1931,14 +2197,36 @@ try {
           }
         } catch (err) {
           const details = err?.response?.data?.error || err?.response?.data;
-          if (err?.code === 'GOOGLE_ADS_QUOTA_REACHED' || err?.code === 'GOOGLE_ADS_PAUSED') {
-            console.warn('⏸️ googleAdsSync detenido por cuota:', err.message);
-            report.errors.push({ customerId: account.customerId, error: err.message, code: err.code, details });
+         if (err?.code === 'GOOGLE_ADS_QUOTA_REACHED' || err?.code === 'GOOGLE_ADS_PAUSED') {
+           console.warn('⏸️ googleAdsSync detenido por cuota:', err.message);
+           report.errors.push({ customerId: account.customerId, error: err.message, code: err.code, details });
+            await notificationService.dispatchEvent({
+              event: 'ads.sync_error',
+              clinicId: account.clinicaId || account.clinica?.id_clinica || null,
+              data: {
+                clinicName: account.clinica?.nombre_clinica,
+                accountName: account.descriptiveName,
+                customerId: account.customerId,
+                error: err.message,
+                details
+              }
+            });
             await syncLog.update({ status: 'waiting', end_time: new Date(), records_processed: report.processed, status_report: { ...report, waiting: true } });
             return { status: 'waiting', ...report, waiting: true };
           }
           console.error('❌ Error en googleAdsSync para cuenta:', account.customerId, err.message, details);
           report.errors.push({ customerId: account.customerId, error: err.message, details });
+          await notificationService.dispatchEvent({
+            event: 'ads.sync_error',
+            clinicId: account.clinicaId || account.clinica?.id_clinica || null,
+            data: {
+              clinicName: account.clinica?.nombre_clinica,
+              accountName: account.descriptiveName,
+              customerId: account.customerId,
+              error: err.message,
+              details
+            }
+          });
         }
       }
 
@@ -1948,6 +2236,13 @@ try {
     } catch (error) {
       await syncLog.update({ status: 'failed', end_time: new Date(), error_message: error.message, status_report: report });
       console.error('❌ Error en googleAdsSync:', error);
+      await notificationService.dispatchEvent({
+        event: 'jobs.failed',
+        data: {
+          jobName: 'googleAdsSync',
+          error: error.message
+        }
+      });
       throw error;
     }
   }
@@ -1964,9 +2259,9 @@ try {
       records_processed: 0
     });
 
-    const report = { accounts: 0, processed: 0, rows: 0, errors: [], notes: [], skipped: 0, windowDays: options.windowDays || this.config.googleAds.backfillDays };
+    const report = { accounts: 0, processed: 0, rows: 0, errors: [], notes: [], skipped: 0, windowDays: options.windowDays || this.config.googleAds.backfillDays, dateRange: null };
     try {
-      const accounts = await ClinicGoogleAdsAccount.findAll({
+      let accounts = await ClinicGoogleAdsAccount.findAll({
         where: {
           isActive: true,
           [Op.or]: [
@@ -1979,6 +2274,25 @@ try {
           { model: Clinica, as: 'clinica', attributes: ['id_clinica', 'nombre_clinica'] }
         ]
       });
+      if (Array.isArray(options.clinicIds) && options.clinicIds.length) {
+        const allowedIds = options.clinicIds.map((id) => Number(id)).filter(Number.isFinite);
+        if (allowedIds.length) {
+          accounts = accounts.filter((acc) => allowedIds.includes(Number(acc.clinicaId ?? acc.clinica?.id_clinica)));
+        }
+      }
+
+      if (Array.isArray(options.groupIds) && options.groupIds.length) {
+        const allowedGroupIds = options.groupIds.map((id) => Number(id)).filter(Number.isFinite);
+        if (allowedGroupIds.length) {
+          accounts = accounts.filter((acc) => {
+            const groupId = Number(acc.grupoClinicaId ?? acc.clinica?.grupoClinicaId);
+            if (!Number.isFinite(groupId)) {
+              return false;
+            }
+            return allowedGroupIds.includes(groupId);
+          });
+        }
+      }
 
       report.accounts = accounts.length;
       if (!accounts.length) {
@@ -1987,16 +2301,41 @@ try {
         return { status: 'completed', ...report };
       }
 
-      const days = report.windowDays;
-      const end = new Date(); end.setHours(0,0,0,0); end.setDate(end.getDate() - 1);
-      const start = new Date(end); start.setDate(start.getDate() - (days - 1));
+      const defaultEnd = new Date();
+      defaultEnd.setHours(0, 0, 0, 0);
+      defaultEnd.setDate(defaultEnd.getDate() - 1);
+
+      let end = parseDateInput(options.endDate, 'endDate') || defaultEnd;
+      let start = parseDateInput(options.startDate, 'startDate');
+      let windowDays = Number(options.windowDays || options.days);
+      if (!Number.isFinite(windowDays) || windowDays <= 0) {
+        windowDays = this.config.googleAds.backfillDays;
+      } else {
+        windowDays = Math.floor(windowDays);
+      }
+
+      if (!start) {
+        start = new Date(end);
+        start.setDate(start.getDate() - (Math.max(1, windowDays) - 1));
+      }
+
+      [start, end] = ensureAscending(start, end);
+
+      report.windowDays = diffInDaysInclusive(start, end) || report.windowDays;
+      report.dateRange = {
+        start: start.toISOString().slice(0, 10),
+        end: end.toISOString().slice(0, 10)
+      };
 
       for (const account of accounts) {
         try {
           const token = await this._getGoogleAccessToken(account.googleConnection);
+          const accountStart = new Date(start);
+          const accountEnd = new Date(end);
+
           const stats = await this._syncGoogleAdsAccount(account, {
-            start,
-            end,
+            start: accountStart,
+            end: accountEnd,
             chunkDays: options.chunkDays || this.config.googleAds.chunkDays,
             accessToken: token,
             report
@@ -2079,6 +2418,12 @@ try {
     const customerId = normalizeCustomerId(account.customerId);
     const clinicId = account.clinicaId;
 
+    const assignment = await this._buildMetaAssignmentContext(account);
+    const groupId = assignment.groupId || account.grupoClinicaId || (account.clinica ? account.clinica.grupoClinicaId : null) || null;
+    const defaultClinicId = assignment.mode === 'manual'
+      ? (assignment.clinicaId || clinicId || null)
+      : (assignment.mode === 'group-manual' ? null : (assignment.clinicaId || null));
+
     const metricVariants = [
       {
         name: 'extended',
@@ -2106,7 +2451,7 @@ try {
 
     let variantIndex = 0;
 
-    const resourceFields = ['campaign.id', 'campaign.name', 'campaign.status'];
+    const resourceFields = ['campaign.id', 'campaign.name', 'campaign.status', 'campaign.advertising_channel_type', 'ad_group.id', 'ad_group.name', 'ad_group.status'];
     const segmentFields = ['segments.date', 'segments.ad_network_type', 'segments.device'];
 
     const buildQuery = (metrics, startDate, endDate) => {
@@ -2118,7 +2463,7 @@ try {
       return [
         'SELECT',
         ...lines,
-        'FROM campaign',
+        'FROM ad_group',
         `WHERE segments.date BETWEEN '${startDate}' AND '${endDate}'`
       ].join('\n');
     };
@@ -2155,6 +2500,8 @@ try {
     const dayMs = 86400000;
     let cursor = new Date(start);
 
+    const processedCampaignDates = new Set();
+
     while (cursor <= end) {
       const chunkEnd = new Date(Math.min(end.getTime(), cursor.getTime() + (chunkDays - 1) * dayMs));
       const startDate = cursor.toISOString().slice(0, 10);
@@ -2175,7 +2522,21 @@ try {
             });
             const results = resp?.results || [];
             const nextToken = resp?.nextPageToken || resp?.next_page_token || null;
-            await this._persistGoogleAdsResults(account, clinicId, results);
+            for (const row of results) {
+              const campaignId = row?.campaign?.id ? String(row.campaign.id) : null;
+              const date = row?.segments?.date;
+              if (campaignId && date) {
+                processedCampaignDates.add(`${campaignId}:${date}`);
+              }
+            }
+            await this._persistGoogleAdsResults({
+              account,
+              assignment,
+              groupId,
+              defaultClinicId,
+              results,
+              report
+            });
             rows += results.length;
             pageToken = nextToken;
           } while (pageToken);
@@ -2208,16 +2569,265 @@ try {
         }
       }
 
+      // Fallback: campañas Performance Max sin filas a nivel ad_group
+      try {
+        const fallbackRows = await this._fetchPerformanceMaxMetrics({
+          account,
+          assignment,
+          groupId,
+          defaultClinicId,
+          accessToken,
+          effectiveLoginCustomerId,
+          startDate,
+          endDate,
+          processedCampaignDates,
+          report
+        });
+        rows += fallbackRows;
+      } catch (fallbackErr) {
+        console.error('⚠️ Error en fallback Performance Max:', fallbackErr.message || fallbackErr);
+        report?.notes?.push?.(`PMAX fallback ${startDate}..${endDate}: ${fallbackErr.message || fallbackErr}`);
+      }
+
       cursor = new Date(chunkEnd.getTime() + dayMs);
     }
 
     return { rows, metricVariant: metricVariants[variantIndex]?.name };
   }
 
-  async _persistGoogleAdsResults(account, clinicId, results) {
+  async _fetchPerformanceMaxMetrics({
+    account,
+    assignment,
+    groupId,
+    defaultClinicId,
+    accessToken,
+    effectiveLoginCustomerId,
+    startDate,
+    endDate,
+    processedCampaignDates,
+    report
+  }) {
+    const customerId = normalizeCustomerId(account.customerId);
+    const query = [
+      'SELECT',
+      '  campaign.id,',
+      '  campaign.name,',
+      '  campaign.status,',
+      '  campaign.advertising_channel_type,',
+      '  segments.date,',
+      '  metrics.impressions,',
+      '  metrics.clicks,',
+      '  metrics.cost_micros',
+      'FROM campaign',
+      "WHERE campaign.advertising_channel_type = 'PERFORMANCE_MAX'",
+      `  AND segments.date BETWEEN '${startDate}' AND '${endDate}'`
+    ].join('\n');
+
+    let fallbackRows = 0;
+    let pageToken = null;
+    do {
+      const resp = await googleAdsRequest('POST', `customers/${customerId}/googleAds:search`, {
+        accessToken,
+        loginCustomerId: effectiveLoginCustomerId,
+        data: { query, pageToken }
+      });
+      const results = (resp?.results || []).filter((row) => {
+        const campaignId = row?.campaign?.id ? String(row.campaign.id) : null;
+        const date = row?.segments?.date;
+        if (!campaignId || !date) {
+          return false;
+        }
+        const key = `${campaignId}:${date}`;
+        if (processedCampaignDates.has(key)) {
+          return false;
+        }
+        processedCampaignDates.add(key);
+        return true;
+      });
+
+      if (results.length) {
+        fallbackRows += results.length;
+        await this._persistGoogleAdsResults({
+          account,
+          assignment,
+          groupId,
+          defaultClinicId,
+          results,
+          report
+        });
+      }
+
+      pageToken = resp?.nextPageToken || resp?.next_page_token || null;
+    } while (pageToken);
+
+    return fallbackRows;
+  }
+  async _persistGoogleAdsResults({ account, assignment, groupId, defaultClinicId, results, report }) {
     if (!Array.isArray(results) || !results.length) {
       return;
     }
+
+    const matcher = assignment && assignment.matcher ? assignment.matcher : null;
+    const groupClinicaId = groupId || account.grupoClinicaId || (account.clinica ? account.clinica.grupoClinicaId : null) || null;
+    const customerId = normalizeCustomerId(account.customerId);
+    const campaignAssignments = new Map();
+    const adGroupAssignments = new Map();
+    const recordedIssues = new Set();
+    const resolvedIssues = new Set();
+
+    const recordAttributionIssue = async ({ entityLevel, entityId, campaignId = null, campaignName = null, adGroupName = null, tokens = [], candidates = [] }) => {
+      if (!matcher || assignment.mode !== 'group-auto') {
+        return;
+      }
+      const key = `${entityLevel}:${entityId}`;
+      if (recordedIssues.has(key)) {
+        return;
+      }
+      recordedIssues.add(key);
+
+      const payload = {
+        provider: 'google',
+        ad_account_id: null,
+        customer_id: customerId,
+        entity_level: entityLevel,
+        entity_id: String(entityId),
+        campaign_id: campaignId ? String(campaignId) : null,
+        campaign_name: campaignName || null,
+        adset_name: adGroupName || null,
+        detected_tokens: Array.isArray(tokens) && tokens.length ? tokens.map(t => t.raw) : null,
+        match_candidates: Array.isArray(candidates) && candidates.length ? candidates.map(item => ({
+          clinicId: item?.clinic?.id || null,
+          clinicName: item?.clinic?.displayName || null,
+          token: item?.token?.raw || null
+        })) : null,
+        grupo_clinica_id: groupClinicaId || null,
+        clinica_id: null,
+        status: 'open',
+        last_seen_at: new Date()
+      };
+
+      const [issue, created] = await AdAttributionIssue.findOrCreate({
+        where: {
+          provider: 'google',
+          entity_level: entityLevel,
+          entity_id: String(entityId)
+        },
+        defaults: payload
+      });
+
+      if (!created) {
+        await issue.update({
+          ...payload,
+          resolved_at: null
+        });
+      }
+    };
+
+    const resolveAttributionIssue = async (entityLevel, entityId, clinicaId = null) => {
+      if (assignment.mode !== 'group-auto') {
+        return;
+      }
+      const key = `${entityLevel}:${entityId}`;
+      if (resolvedIssues.has(key)) {
+        return;
+      }
+      resolvedIssues.add(key);
+      await AdAttributionIssue.update({
+        status: 'resolved',
+        resolved_at: new Date(),
+        clinica_id: clinicaId || null
+      }, {
+        where: {
+          provider: 'google',
+          entity_level: entityLevel,
+          entity_id: String(entityId)
+        }
+      });
+    };
+
+    const getCampaignAssignment = async (campaignId, campaignName) => {
+      const key = campaignId ? String(campaignId) : null;
+      if (!key) {
+        return { clinicaId: null, source: null, matchValue: null };
+      }
+      if (campaignAssignments.has(key)) {
+        return campaignAssignments.get(key);
+      }
+      let assignmentResult = { clinicaId: null, source: null, matchValue: null };
+      if (matcher && assignment.mode === 'group-auto') {
+        const matchResult = matcher.matchFromText(campaignName || '', {
+          level: 'campaign',
+          campaignId
+        });
+        if (matchResult.match) {
+          assignmentResult = {
+            clinicaId: matchResult.match.clinic.id,
+            source: 'campaign',
+            matchValue: matchResult.match.token?.raw || null
+          };
+          await resolveAttributionIssue('campaign', key, assignmentResult.clinicaId);
+        } else if ((matchResult.tokens && matchResult.tokens.length) || (matchResult.candidates && matchResult.candidates.length)) {
+          await recordAttributionIssue({
+            entityLevel: 'campaign',
+            entityId: key,
+            campaignId,
+            campaignName,
+            tokens: matchResult.tokens,
+            candidates: matchResult.candidates
+          });
+        }
+      }
+      campaignAssignments.set(key, assignmentResult);
+      return assignmentResult;
+    };
+
+    const getAdGroupAssignment = async (adGroupId, adGroupName, campaignId, campaignName) => {
+      const key = adGroupId ? String(adGroupId) : null;
+      if (!key) {
+        return { clinicaId: null, source: null, matchValue: null };
+      }
+      if (adGroupAssignments.has(key)) {
+        return adGroupAssignments.get(key);
+      }
+      let assignmentResult = { clinicaId: null, source: null, matchValue: null };
+      if (matcher && assignment.mode === 'group-auto') {
+        const matchResult = matcher.matchFromText(adGroupName || '', {
+          level: 'ad_group',
+          adGroupId,
+          campaignId
+        });
+        if (matchResult.match) {
+          assignmentResult = {
+            clinicaId: matchResult.match.clinic.id,
+            source: 'ad_group',
+            matchValue: matchResult.match.token?.raw || null
+          };
+          await resolveAttributionIssue('ad_group', key, assignmentResult.clinicaId);
+        } else if ((matchResult.tokens && matchResult.tokens.length) || (matchResult.candidates && matchResult.candidates.length)) {
+          await recordAttributionIssue({
+            entityLevel: 'ad_group',
+            entityId: key,
+            campaignId,
+            campaignName,
+            adGroupName,
+            tokens: matchResult.tokens,
+            candidates: matchResult.candidates
+          });
+        }
+      }
+      if (!assignmentResult.clinicaId && campaignId) {
+        const campaignAssignment = await getCampaignAssignment(campaignId, campaignName);
+        if (campaignAssignment && campaignAssignment.clinicaId) {
+          assignmentResult = {
+            clinicaId: campaignAssignment.clinicaId,
+            source: campaignAssignment.source || 'campaign',
+            matchValue: campaignAssignment.matchValue || null
+          };
+        }
+      }
+      adGroupAssignments.set(key, assignmentResult);
+      return assignmentResult;
+    };
 
     const decimalToMicros = (value) => {
       if (value === null || typeof value === 'undefined') return 0;
@@ -2228,22 +2838,64 @@ try {
 
     for (const row of results) {
       const campaign = row.campaign || {};
+      const adGroup = row.adGroup || row.ad_group || {};
       const metrics = row.metrics || {};
       const segments = row.segments || {};
       const date = segments.date;
       if (!date || !campaign.id) {
         continue;
       }
+      const campaignId = String(campaign.id);
+      const campaignName = campaign.name || null;
+      const adGroupId = adGroup.id ? String(adGroup.id) : null;
+      const adGroupName = adGroup.name || null;
+
+      let targetClinicId = null;
+      let matchSource = null;
+      let matchValue = null;
+
+      if (assignment.mode === 'manual') {
+        targetClinicId = defaultClinicId || null;
+        matchSource = targetClinicId ? 'manual' : null;
+      } else if (assignment.mode === 'group-manual') {
+        matchSource = 'group-manual';
+      } else if (assignment.mode === 'group-auto' && matcher) {
+        if (adGroupId) {
+          const adGroupAssignment = await getAdGroupAssignment(adGroupId, adGroupName, campaignId, campaignName);
+          if (adGroupAssignment && adGroupAssignment.clinicaId) {
+            targetClinicId = adGroupAssignment.clinicaId;
+            matchSource = adGroupAssignment.source || 'ad_group';
+            matchValue = adGroupAssignment.matchValue || null;
+          }
+        }
+        if (!targetClinicId) {
+          const campaignAssignment = await getCampaignAssignment(campaignId, campaignName);
+          if (campaignAssignment && campaignAssignment.clinicaId) {
+            targetClinicId = campaignAssignment.clinicaId;
+            matchSource = campaignAssignment.source || 'campaign';
+            matchValue = campaignAssignment.matchValue || null;
+          }
+        }
+      }
+
+      if (!targetClinicId && assignment.mode === 'manual' && defaultClinicId) {
+        targetClinicId = defaultClinicId;
+        matchSource = 'manual';
+      }
+
       try {
         await GoogleAdsInsightsDaily.upsert({
           clinicGoogleAdsAccountId: account.id,
-          clinicaId: clinicId,
-          customerId: normalizeCustomerId(account.customerId),
-          campaignId: String(campaign.id),
-          campaignName: campaign.name || null,
+          clinicaId: targetClinicId || null,
+          grupoClinicaId: groupClinicaId || null,
+          customerId,
+          campaignId,
+          campaignName,
           campaignStatus: campaign.status || null,
+          adGroupId,
+          adGroupName: adGroupName || null,
           date,
-          network: segments.adNetworkType || null,
+          network: segments.adNetworkType || segments.ad_network_type || null,
           device: segments.device || null,
           impressions: Number(metrics.impressions || 0),
           clicks: Number(metrics.clicks || 0),
@@ -2254,12 +2906,15 @@ try {
           averageCpcMicros: decimalToMicros(metrics.averageCpc || metrics.average_cpc),
           averageCpmMicros: decimalToMicros(metrics.averageCpm || metrics.average_cpm),
           averageCostMicros: decimalToMicros(metrics.averageCost || metrics.average_cost),
-          conversionsFromInteractionsRate: Number(metrics.conversionsFromInteractionsRate || metrics.conversions_from_interactions_rate || 0)
+          conversionsFromInteractionsRate: Number(metrics.conversionsFromInteractionsRate || metrics.conversions_from_interactions_rate || 0),
+          clinicMatchSource: matchSource || null,
+          clinicMatchValue: matchValue || null
         });
       } catch (err) {
         console.error('❌ Error guardando fila Google Ads', {
           customerId: account.customerId,
           campaignId: campaign.id,
+          adGroupId,
           date,
           error: err.message
         });

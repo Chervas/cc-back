@@ -7,7 +7,9 @@ module.exports = (sequelize, DataTypes) => {
     spend: { type: DataTypes.DECIMAL(12, 2), allowNull: false, defaultValue: 0 },
     impressions: { type: DataTypes.INTEGER, allowNull: false, defaultValue: 0 },
     clicks: { type: DataTypes.INTEGER, allowNull: false, defaultValue: 0 },
-    leads: { type: DataTypes.DECIMAL(12, 4), allowNull: false, defaultValue: 0 }
+    leads: { type: DataTypes.DECIMAL(12, 4), allowNull: false, defaultValue: 0 },
+    clinica_id: { type: DataTypes.INTEGER, allowNull: true },
+    grupo_clinica_id: { type: DataTypes.INTEGER, allowNull: true }
   }, {
     tableName: 'SocialAdsAdsetDailyAgg',
     timestamps: true,
@@ -16,7 +18,8 @@ module.exports = (sequelize, DataTypes) => {
     updatedAt: 'updated_at',
     indexes: [
       { unique: true, fields: ['ad_account_id','adset_id','date'], name: 'uniq_ads_adset_day' },
-      { fields: ['date'], name: 'idx_ads_adset_day_date' }
+      { fields: ['date'], name: 'idx_ads_adset_day_date' },
+      { fields: ['clinica_id', 'date'], name: 'idx_social_ads_adset_daily_clinic_date' }
     ]
   });
   return SocialAdsAdsetDailyAgg;

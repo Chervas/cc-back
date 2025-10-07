@@ -4,11 +4,14 @@ module.exports = (sequelize, DataTypes) => {
   const GoogleAdsInsightsDaily = sequelize.define('GoogleAdsInsightsDaily', {
     id: { type: DataTypes.INTEGER, primaryKey: true, autoIncrement: true },
     clinicGoogleAdsAccountId: { type: DataTypes.INTEGER, allowNull: false, field: 'clinicGoogleAdsAccountId' },
-    clinicaId: { type: DataTypes.INTEGER, allowNull: false, field: 'clinicaId' },
+    clinicaId: { type: DataTypes.INTEGER, allowNull: true, field: 'clinicaId' },
+    grupoClinicaId: { type: DataTypes.INTEGER, allowNull: true, field: 'grupoClinicaId' },
     customerId: { type: DataTypes.STRING(32), allowNull: false, field: 'customerId' },
     campaignId: { type: DataTypes.STRING(64), allowNull: false, field: 'campaignId' },
     campaignName: { type: DataTypes.STRING(256), allowNull: true, field: 'campaignName' },
     campaignStatus: { type: DataTypes.STRING(32), allowNull: true, field: 'campaignStatus' },
+    adGroupId: { type: DataTypes.STRING(64), allowNull: true, field: 'adGroupId' },
+    adGroupName: { type: DataTypes.STRING(256), allowNull: true, field: 'adGroupName' },
     date: { type: DataTypes.DATEONLY, allowNull: false, field: 'date' },
     network: { type: DataTypes.STRING(64), allowNull: true, field: 'network' },
     device: { type: DataTypes.STRING(64), allowNull: true, field: 'device' },
@@ -21,12 +24,17 @@ module.exports = (sequelize, DataTypes) => {
     averageCpcMicros: { type: DataTypes.BIGINT, allowNull: false, defaultValue: 0, field: 'averageCpcMicros' },
     averageCpmMicros: { type: DataTypes.BIGINT, allowNull: false, defaultValue: 0, field: 'averageCpmMicros' },
     averageCostMicros: { type: DataTypes.BIGINT, allowNull: false, defaultValue: 0, field: 'averageCostMicros' },
-    conversionsFromInteractionsRate: { type: DataTypes.DECIMAL(10,6), allowNull: false, defaultValue: 0, field: 'conversionsFromInteractionsRate' }
+    conversionsFromInteractionsRate: { type: DataTypes.DECIMAL(10,6), allowNull: false, defaultValue: 0, field: 'conversionsFromInteractionsRate' },
+    clinicMatchSource: { type: DataTypes.STRING(32), allowNull: true, field: 'clinicMatchSource' },
+    clinicMatchValue: { type: DataTypes.STRING(255), allowNull: true, field: 'clinicMatchValue' }
   }, {
     tableName: 'GoogleAdsInsightsDaily',
     underscored: true,
     createdAt: 'created_at',
-    updatedAt: 'updated_at'
+    updatedAt: 'updated_at',
+    indexes: [
+      { fields: ['clinicaId', 'date'], name: 'idx_google_ads_insights_clinic_date' }
+    ]
   });
 
   GoogleAdsInsightsDaily.associate = function(models) {
@@ -38,6 +46,11 @@ module.exports = (sequelize, DataTypes) => {
       foreignKey: 'clinicaId',
       targetKey: 'id_clinica',
       as: 'clinica'
+    });
+    GoogleAdsInsightsDaily.belongsTo(models.GrupoClinica, {
+      foreignKey: 'grupoClinicaId',
+      targetKey: 'id_grupo',
+      as: 'grupoClinica'
     });
   };
 

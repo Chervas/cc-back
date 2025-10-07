@@ -1,8 +1,9 @@
 'use strict';
 
-const { Clinica, GrupoClinica, Servicio } = require('../../models');
+const { Clinica, GrupoClinica, Servicio, ClinicMetaAsset, ClinicGoogleAdsAccount } = require('../../models');
 const bcrypt = require('bcryptjs');
 const { Op } = require('sequelize');
+const { metaSyncJobs } = require('../jobs/sync.jobs');
 
 // Obtener todas las clínicas (con filtro opcional por clinica_id: id único, CSV o 'all')
 exports.getAllClinicas = async (req, res) => {
@@ -134,6 +135,12 @@ exports.updateClinica = async (req, res) => {
         let id_clinica = req.params.id_clinica || req.params.id;
         
         console.log('ID de clínica final:', id_clinica);
+
+        const clinicaExistente = await Clinica.findByPk(id_clinica);
+        if (!clinicaExistente) {
+            return res.status(404).json({ message: 'Clínica no encontrada' });
+        }
+        const previousGroupId = clinicaExistente.grupoClinicaId || null;
         
         // ✅ INCLUIR TODOS LOS CAMPOS que pueden venir del frontend
         const {
@@ -228,6 +235,68 @@ exports.updateClinica = async (req, res) => {
         });
 
         console.log('Clínica actualizada con éxito:', updatedClinica);
+
+        const newGroupId = updatedClinica?.grupoClinicaId ?? null;
+        const clinicIdNumeric = Number(id_clinica);
+        if (!Number.isNaN(clinicIdNumeric) && previousGroupId !== newGroupId) {
+            console.log('🔄 Cambio de grupo detectado:', { previousGroupId, newGroupId, clinicId: clinicIdNumeric });
+            try {
+                if (newGroupId) {
+                    const groupConfig = await GrupoClinica.findByPk(newGroupId);
+                    let adsAutomatic = groupConfig?.ads_assignment_mode === 'automatic';
+                    if (typeof req.body.autoAssignmentMode === 'string') {
+                        if (req.body.autoAssignmentMode === 'automatic') {
+                            adsAutomatic = true;
+                        }
+                        if (req.body.autoAssignmentMode === 'manual') {
+                            adsAutomatic = false;
+                        }
+                    }
+
+                    await ClinicMetaAsset.update({
+                        assignmentScope: adsAutomatic ? 'group' : 'clinic',
+                        grupoClinicaId: newGroupId
+                    }, {
+                        where: { clinicaId: clinicIdNumeric, assetType: 'ad_account' }
+                    });
+
+                    await ClinicGoogleAdsAccount.update({
+                        assignmentScope: adsAutomatic ? 'group' : 'clinic',
+                        grupoClinicaId: newGroupId
+                    }, {
+                        where: { clinicaId: clinicIdNumeric }
+                    });
+
+                    if (adsAutomatic) {
+                        console.log(`🚀 Lanzando resync automático para la clínica ${clinicIdNumeric}`);
+                        setImmediate(() => {
+                            metaSyncJobs.executeAdsSync({ clinicIds: [clinicIdNumeric] })
+                                .catch(err => console.error('❌ Error en resync Meta Ads post-asignación:', err.message));
+                        });
+                        setImmediate(() => {
+                            metaSyncJobs.executeGoogleAdsSync({ clinicIds: [clinicIdNumeric] })
+                                .catch(err => console.error('❌ Error en resync Google Ads post-asignación:', err.message));
+                        });
+                    }
+                } else {
+                    await ClinicMetaAsset.update({
+                        assignmentScope: 'clinic',
+                        grupoClinicaId: null
+                    }, {
+                        where: { clinicaId: clinicIdNumeric, assetType: 'ad_account' }
+                    });
+
+                    await ClinicGoogleAdsAccount.update({
+                        assignmentScope: 'clinic',
+                        grupoClinicaId: null
+                    }, {
+                        where: { clinicaId: clinicIdNumeric }
+                    });
+                }
+            } catch (assignmentError) {
+                console.error('❌ Error actualizando assignmentScope post cambio de grupo:', assignmentError);
+            }
+        }
         res.status(200).json(updatedClinica);
 
     } catch (error) {
