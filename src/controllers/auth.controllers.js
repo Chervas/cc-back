@@ -70,6 +70,10 @@ exports.signIn = async (req, res) => {
             { expiresIn: '1h' }
         );
 
+        // Actualizar último acceso
+        user.ultimo_login = new Date();
+        await user.save({ fields: ['ultimo_login'] });
+
         res.status(200).json({
             token: token,
             expiresIn: 3600,
@@ -98,6 +102,9 @@ exports.signInWithToken = async (req, res) => {
             secret, 
             { expiresIn: '1h' }
         );
+
+        user.ultimo_login = new Date();
+        await user.save({ fields: ['ultimo_login'] });
 
         res.status(200).json({
             token: newToken,

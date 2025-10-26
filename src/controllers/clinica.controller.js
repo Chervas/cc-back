@@ -1,9 +1,11 @@
 'use strict';
 
-const { Clinica, GrupoClinica, Servicio, ClinicMetaAsset, ClinicGoogleAdsAccount } = require('../../models');
+const { Clinica, GrupoClinica, Servicio, ClinicMetaAsset, ClinicGoogleAdsAccount, Usuario } = require('../../models');
 const bcrypt = require('bcryptjs');
 const { Op } = require('sequelize');
 const { metaSyncJobs } = require('../jobs/sync.jobs');
+const jobRequestsService = require('../services/jobRequests.service');
+const jobScheduler = require('../services/jobScheduler.service');
 
 // Obtener todas las clínicas (con filtro opcional por clinica_id: id único, CSV o 'all')
 exports.getAllClinicas = async (req, res) => {
@@ -48,10 +50,32 @@ exports.searchClinicas = async (req, res) => {
 exports.getClinicaById = async (req, res) => {
     try {
         const clinica = await Clinica.findByPk(req.params.id, {
-            include: [{
-                model: GrupoClinica,
-                as: 'grupoClinica'
-            }]
+            include: [
+                {
+                    model: GrupoClinica,
+                    as: 'grupoClinica'
+                },
+                {
+                    model: Usuario,
+                    as: 'usuarios',
+                    attributes: [
+                        'id_usuario',
+                        'nombre',
+                        'apellidos',
+                        'email_usuario',
+                        'telefono',
+                        'fecha_creacion',
+                        'ultimo_login'
+                    ],
+                    through: {
+                        where: {
+                            rol_clinica: { [Op.ne]: 'paciente' }
+                        },
+                        attributes: ['rol_clinica', 'subrol_clinica']
+                    },
+                    required: false
+                }
+            ]
         });
         if (!clinica) {
             return res.status(404).json({ message: 'Clinica not found' });
@@ -268,14 +292,31 @@ exports.updateClinica = async (req, res) => {
                     });
 
                     if (adsAutomatic) {
-                        console.log(`🚀 Lanzando resync automático para la clínica ${clinicIdNumeric}`);
-                        setImmediate(() => {
-                            metaSyncJobs.executeAdsSync({ clinicIds: [clinicIdNumeric] })
-                                .catch(err => console.error('❌ Error en resync Meta Ads post-asignación:', err.message));
+                        console.log(`🚀 Encolando resync automático para la clínica ${clinicIdNumeric}`);
+                        const metaJob = await jobRequestsService.enqueueJobRequest({
+                            type: 'meta_ads_recent',
+                            payload: { clinicIds: [clinicIdNumeric] },
+                            priority: 'critical',
+                            origin: 'clinica:group-change',
+                            requestedBy: req.userData?.userId || null,
+                            requestedByRole: req.userData?.role || null,
+                            requestedByName: req.userData?.name || null
                         });
-                        setImmediate(() => {
-                            metaSyncJobs.executeGoogleAdsSync({ clinicIds: [clinicIdNumeric] })
-                                .catch(err => console.error('❌ Error en resync Google Ads post-asignación:', err.message));
+                        jobScheduler.triggerImmediate(metaJob.id).catch((err) => {
+                            console.error('❌ Error ejecutando resync Meta Ads post-asignación:', err);
+                        });
+
+                        const googleJob = await jobRequestsService.enqueueJobRequest({
+                            type: 'google_ads_recent',
+                            payload: { clinicIds: [clinicIdNumeric] },
+                            priority: 'critical',
+                            origin: 'clinica:group-change',
+                            requestedBy: req.userData?.userId || null,
+                            requestedByRole: req.userData?.role || null,
+                            requestedByName: req.userData?.name || null
+                        });
+                        jobScheduler.triggerImmediate(googleJob.id).catch((err) => {
+                            console.error('❌ Error ejecutando resync Google Ads post-asignación:', err);
                         });
                     }
                 } else {

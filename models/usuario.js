@@ -42,6 +42,10 @@ module.exports = (sequelize, DataTypes) => {
       type: DataTypes.BOOLEAN,
       allowNull: false,
       defaultValue: false
+    },
+    ultimo_login: {
+      type: DataTypes.DATE,
+      allowNull: true
     }
   }, {
     sequelize,

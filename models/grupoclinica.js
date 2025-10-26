@@ -44,6 +44,104 @@ module.exports = (sequelize, DataTypes) => {
     web_assignment_updated_at: {
       type: DataTypes.DATE,
       allowNull: true,
+    },
+    facebook_assignment_mode: {
+      type: DataTypes.ENUM('group', 'clinic'),
+      allowNull: false,
+      defaultValue: 'clinic'
+    },
+    facebook_primary_asset_id: {
+      type: DataTypes.INTEGER,
+      allowNull: true,
+      references: {
+        model: 'ClinicMetaAssets',
+        key: 'id'
+      }
+    },
+    facebook_assignment_updated_at: {
+      type: DataTypes.DATE,
+      allowNull: true
+    },
+    instagram_assignment_mode: {
+      type: DataTypes.ENUM('group', 'clinic'),
+      allowNull: false,
+      defaultValue: 'clinic'
+    },
+    instagram_primary_asset_id: {
+      type: DataTypes.INTEGER,
+      allowNull: true,
+      references: {
+        model: 'ClinicMetaAssets',
+        key: 'id'
+      }
+    },
+    instagram_assignment_updated_at: {
+      type: DataTypes.DATE,
+      allowNull: true
+    },
+    tiktok_assignment_mode: {
+      type: DataTypes.ENUM('group', 'clinic'),
+      allowNull: false,
+      defaultValue: 'clinic'
+    },
+    tiktok_primary_asset_id: {
+      type: DataTypes.INTEGER,
+      allowNull: true
+    },
+    tiktok_assignment_updated_at: {
+      type: DataTypes.DATE,
+      allowNull: true
+    },
+    search_console_assignment_mode: {
+      type: DataTypes.ENUM('group', 'clinic'),
+      allowNull: false,
+      defaultValue: 'clinic'
+    },
+    search_console_primary_asset_id: {
+      type: DataTypes.INTEGER,
+      allowNull: true,
+      references: {
+        model: 'ClinicWebAssets',
+        key: 'id'
+      }
+    },
+    search_console_assignment_updated_at: {
+      type: DataTypes.DATE,
+      allowNull: true
+    },
+    analytics_assignment_mode: {
+      type: DataTypes.ENUM('group', 'clinic'),
+      allowNull: false,
+      defaultValue: 'clinic'
+    },
+    analytics_primary_property_id: {
+      type: DataTypes.INTEGER,
+      allowNull: true,
+      references: {
+        model: 'ClinicAnalyticsProperties',
+        key: 'id'
+      }
+    },
+    analytics_assignment_updated_at: {
+      type: DataTypes.DATE,
+      allowNull: true
+    },
+    business_profile_assignment_mode: {
+      type: DataTypes.ENUM('group', 'clinic'),
+      allowNull: false,
+      defaultValue: 'clinic'
+    },
+    business_profile_primary_location_id: {
+      type: DataTypes.INTEGER,
+      allowNull: true,
+      references: {
+        model: 'ClinicBusinessLocations',
+        key: 'id'
+      }
+    },
+    business_profile_assignment_updated_at: {
+      type: DataTypes.DATE,
+      allowNull: true
     }
   }, {
     sequelize,

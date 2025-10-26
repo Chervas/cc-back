@@ -20,9 +20,12 @@ const notificationsRoutes = require('./routes/notifications.routes');
 const oauthRoutes = require('./routes/oauth.routes');
 // NUEVA RUTA: Sistema de métricas de redes sociales
 const metaSyncRoutes = require('./routes/metasync.routes');
+const whatsappRoutes = require('./routes/whatsapp.routes');
 const webRoutes = require('./routes/web.routes');
 const localRoutes = require('./routes/local.routes');
 const googleAdsRoutes = require('./routes/googleads.routes');
+const jobRequestsRoutes = require('./routes/jobrequests.routes');
+const jobScheduler = require('./services/jobScheduler.service');
 
 
 // Importar db desde models/index.js que contiene sequelize y todos los modelos
@@ -77,6 +80,10 @@ app.use('/api/local', localRoutes);
 console.log('Ruta /api/local configurada');
 app.use('/api/googleads', googleAdsRoutes);
 console.log('Ruta /api/googleads configurada');
+app.use('/api/job-requests', jobRequestsRoutes);
+console.log('Ruta /api/job-requests configurada');
+app.use('/api/whatsapp', whatsappRoutes);
+console.log('Ruta /api/whatsapp configurada');
 console.log('Routes registered successfully');
 // Puerto del servidor
 const PORT = process.env.PORT || 3000;
@@ -92,10 +99,16 @@ app.listen(PORT, () => {
     console.log(`Servidor backend escuchando en el puerto ${PORT}`);
 });
 
+jobScheduler.start();
+console.log('🔁 Job scheduler iniciado');
 
 // Inicializar jobs automáticamente en producción
 const { metaSyncJobs } = require('./jobs/sync.jobs');
-if (process.env.NODE_ENV === 'production') {
+metaSyncJobs.initialize().catch((error) => {
+  console.error('⚠️ No se pudo inicializar el sistema de jobs al arranque:', error.message);
+});
+const shouldAutoStart = process.env.NODE_ENV === 'production' || process.env.JOBS_AUTO_START === 'true';
+if (shouldAutoStart) {
   setTimeout(async () => {
     try {
       console.log('🚀 Inicializando sistema de jobs automáticamente...');
@@ -103,9 +116,9 @@ if (process.env.NODE_ENV === 'production') {
       metaSyncJobs.start();
       console.log('✅ Sistema de jobs iniciado automáticamente');
     } catch (error) {
-      console.error('❌ Error al inicializar jobs automáticamente:', error);
+      console.error('❌ Error al iniciar jobs automáticamente:', error);
     }
-  }, 5000); // Esperar 5 segundos después del arranque
+  }, 5000);
 }
 
 

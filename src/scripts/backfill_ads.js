@@ -6,6 +6,8 @@ require('dotenv').config({ path: path.join(__dirname, '..', '..', '.env') });
 
 const db = require('../../models');
 const { metaSyncJobs } = require('../jobs/sync.jobs');
+const jobRequestsService = require('../services/jobRequests.service');
+const jobScheduler = require('../services/jobScheduler.service');
 
 const HELP_TEXT = `Uso: node src/scripts/backfill_ads.js [opciones]
 
@@ -149,32 +151,44 @@ async function run() {
   }
 
   await metaSyncJobs.initialize().catch(() => {});
+  jobScheduler.start();
 
   const results = [];
   const platforms = Array.isArray(parsed.platforms) && parsed.platforms.length ? parsed.platforms : ['meta', 'google'];
 
   for (const platform of platforms) {
-    if (platform === 'meta') {
-      if (parsed.mode === 'recent') {
-        console.log('▶️ Lanzando Meta Ads (recent)…');
-        results.push({ platform: 'meta', mode: 'recent', report: await metaSyncJobs.executeAdsSync(jobOptions) });
-      } else {
-        console.log('▶️ Lanzando Meta Ads (backfill)…');
-        results.push({ platform: 'meta', mode: 'backfill', report: await metaSyncJobs.executeAdsBackfill(jobOptions) });
-      }
-    } else if (platform === 'google') {
-      if (parsed.mode === 'recent') {
-        console.log('▶️ Lanzando Google Ads (recent)…');
-        results.push({ platform: 'google', mode: 'recent', report: await metaSyncJobs.executeGoogleAdsSync(jobOptions) });
-      } else {
-        console.log('▶️ Lanzando Google Ads (backfill)…');
-        results.push({ platform: 'google', mode: 'backfill', report: await metaSyncJobs.executeGoogleAdsBackfill(jobOptions) });
-      }
-    } else {
+    if (!['meta', 'google'].includes(platform)) {
       console.warn(`⚠️ Plataforma no soportada: ${platform}`);
+      continue;
     }
+
+    const type =
+      platform === 'meta'
+        ? (parsed.mode === 'recent' ? 'meta_ads_recent' : 'meta_ads_backfill')
+        : (parsed.mode === 'recent' ? 'google_ads_recent' : 'google_ads_backfill');
+
+    const job = await jobRequestsService.enqueueJobRequest({
+      type,
+      payload: { ...jobOptions },
+      priority: parsed.mode === 'recent' ? 'normal' : 'high',
+      origin: `cli:backfill_ads:${platform}:${parsed.mode}`,
+      requestedBy: null
+    });
+
+    console.log(`▶️ Encolado job ${job.id} (${type}). Ejecutando...`);
+    await jobScheduler.triggerImmediate(job.id);
+    const refreshed = await jobRequestsService.findJobById(job.id);
+    results.push({
+      platform,
+      mode: parsed.mode,
+      jobId: job.id,
+      status: refreshed?.status || 'unknown',
+      error: refreshed?.error_message || null,
+      result: refreshed?.result_summary || null
+    });
   }
 
+  jobScheduler.stop();
   console.log('✅ Ejecución finalizada:', results);
 }
 

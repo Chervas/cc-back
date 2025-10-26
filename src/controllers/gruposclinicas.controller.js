@@ -1,7 +1,9 @@
 'use strict';
-const { Op } = require('sequelize');
-const { GrupoClinica, ClinicMetaAsset, ClinicGoogleAdsAccount, Clinica } = require('../../models');
+const { GrupoClinica, Clinica } = require('../../models');
 const { metaSyncJobs } = require('../jobs/sync.jobs');
+const groupAssetsService = require('../services/groupAssets.service');
+const jobRequestsService = require('../services/jobRequests.service');
+const jobScheduler = require('../services/jobScheduler.service');
 
 exports.getAllGroups = async (req, res) => {
   try {
@@ -30,112 +32,58 @@ exports.createGroup = async (req, res) => {
 
 exports.updateGroup = async (req, res) => {
   try {
-    console.log("Actualizando grupo con ID:", req.params.id);
-    const group = await GrupoClinica.findByPk(req.params.id);
+    const groupId = parseInt(req.params.id, 10);
+    if (!Number.isInteger(groupId)) {
+      return res.status(400).json({ message: 'ID de grupo inválido' });
+    }
+
+    const group = await GrupoClinica.findByPk(groupId);
     if (!group) {
-      console.log("Grupo no encontrado");
       return res.status(404).json({ message: 'Group not found' });
     }
-    const {
-      nombre_grupo,
-      ads_assignment_mode,
-      ads_assignment_delimiter,
-      web_assignment_mode,
-      web_primary_url
-    } = req.body;
 
-    const previousAdsMode = group.ads_assignment_mode;
+    const payload = req.body && typeof req.body === 'object' ? req.body : {};
+    const updated = await groupAssetsService.updateGroupConfig(groupId, payload);
 
-    if (typeof nombre_grupo === 'string' && nombre_grupo.trim().length) {
-      group.nombre_grupo = nombre_grupo.trim();
-    }
-    if (ads_assignment_mode && ['manual', 'automatic'].includes(ads_assignment_mode)) {
-      group.ads_assignment_mode = ads_assignment_mode;
-    }
-    if (typeof ads_assignment_delimiter === 'string' && ads_assignment_delimiter.trim().length) {
-      group.ads_assignment_delimiter = ads_assignment_delimiter.trim();
-    }
-    if (web_assignment_mode && ['manual', 'automatic'].includes(web_assignment_mode)) {
-      group.web_assignment_mode = web_assignment_mode;
-    }
-    if (typeof web_primary_url === 'string') {
-      group.web_primary_url = web_primary_url.trim() || null;
-    }
+    // Re-sincronizar Ads cuando corresponda (manteniendo comportamiento previo)
+    const clinics = await Clinica.findAll({
+      where: { grupoClinicaId: groupId },
+      attributes: ['id_clinica']
+    });
+    const clinicIds = Array.from(new Set(clinics.map(c => Number(c.id_clinica)).filter(Number.isInteger)));
 
-    await group.save();
-    console.log("Grupo actualizado:", group);
+    if (clinicIds.length && payload.ads && payload.ads.mode) {
+      const metaJob = await jobRequestsService.enqueueJobRequest({
+        type: 'meta_ads_recent',
+        payload: { clinicIds },
+        priority: 'high',
+        origin: 'group:update',
+        requestedBy: req.userData?.userId || null,
+        requestedByRole: req.userData?.role || null,
+        requestedByName: req.userData?.name || null
+      });
+      jobScheduler.triggerImmediate(metaJob.id).catch((err) =>
+        console.error('❌ Error en resync Meta Ads tras actualizar grupo:', err)
+      );
 
-    const adsModeChanged = previousAdsMode !== group.ads_assignment_mode;
-
-    if (adsModeChanged) {
-      try {
-        const clinics = await Clinica.findAll({
-          where: { grupoClinicaId: group.id_grupo },
-          attributes: ['id_clinica']
-        });
-
-        const clinicIds = Array.from(new Set(clinics.map(c => Number(c.id_clinica)).filter(Number.isInteger)));
-
-        if (clinicIds.length) {
-          if (group.ads_assignment_mode === 'automatic') {
-            await ClinicMetaAsset.update({
-              assignmentScope: 'group',
-              grupoClinicaId: group.id_grupo
-            }, {
-              where: {
-                clinicaId: { [Op.in]: clinicIds },
-                assetType: 'ad_account'
-              }
-            });
-
-            await ClinicGoogleAdsAccount.update({
-              assignmentScope: 'group',
-              grupoClinicaId: group.id_grupo
-            }, {
-              where: {
-                clinicaId: { [Op.in]: clinicIds }
-              }
-            });
-
-            setImmediate(() => {
-              metaSyncJobs.executeAdsSync({ clinicIds })
-                .catch(err => console.error('❌ Error en resync Meta Ads tras cambio de modo de grupo:', err.message));
-            });
-
-            setImmediate(() => {
-              metaSyncJobs.executeGoogleAdsSync({ clinicIds })
-                .catch(err => console.error('❌ Error en resync Google Ads tras cambio de modo de grupo:', err.message));
-            });
-          } else {
-            await ClinicMetaAsset.update({
-              assignmentScope: 'clinic',
-              grupoClinicaId: null
-            }, {
-              where: {
-                clinicaId: { [Op.in]: clinicIds },
-                assetType: 'ad_account'
-              }
-            });
-
-            await ClinicGoogleAdsAccount.update({
-              assignmentScope: 'clinic',
-              grupoClinicaId: null
-            }, {
-              where: {
-                clinicaId: { [Op.in]: clinicIds }
-              }
-            });
-          }
-        }
-      } catch (assignmentErr) {
-        console.error('❌ Error actualizando asignaciones tras cambio de modo del grupo:', assignmentErr);
-      }
+      const googleJob = await jobRequestsService.enqueueJobRequest({
+        type: 'google_ads_recent',
+        payload: { clinicIds },
+        priority: 'high',
+        origin: 'group:update',
+        requestedBy: req.userData?.userId || null,
+        requestedByRole: req.userData?.role || null,
+        requestedByName: req.userData?.name || null
+      });
+      jobScheduler.triggerImmediate(googleJob.id).catch((err) =>
+        console.error('❌ Error en resync Google Ads tras actualizar grupo:', err)
+      );
     }
 
-    res.json(group);
+    return res.json(updated);
   } catch (error) {
     console.error("Error updating group:", error);
-    res.status(500).json({ message: 'Error updating group', error: error.message });
+    return res.status(500).json({ message: 'Error updating group', error: error.message });
   }
 };
 
@@ -163,39 +111,14 @@ exports.getAdsConfig = async (req, res) => {
       return res.status(400).json({ message: 'ID de grupo inválido' });
     }
 
-    const group = await GrupoClinica.findByPk(groupId, {
-      include: [{ model: Clinica, as: 'clinicas', attributes: ['id_clinica', 'nombre_clinica'] }]
-    });
-
-    if (!group) {
+    const config = await groupAssetsService.getGroupConfig(groupId);
+    if (!config) {
       return res.status(404).json({ message: 'Group not found' });
     }
 
-    const plainGroup = group.get ? group.get({ plain: true }) : group;
-
-    const metaAdsAccounts = await ClinicMetaAsset.findAll({
-      where: { grupoClinicaId: groupId, assetType: 'ad_account', isActive: true },
-      attributes: ['id', 'metaAssetId', 'metaAssetName', 'assignmentScope', 'clinicaId', 'grupoClinicaId']
-    });
-
-    const googleAdsAccounts = await ClinicGoogleAdsAccount.findAll({
-      where: { grupoClinicaId: groupId, isActive: true },
-      attributes: ['id', 'customerId', 'descriptiveName', 'assignmentScope', 'clinicaId', 'grupoClinicaId']
-    });
-
-    return res.json({
-      id: plainGroup.id_grupo,
-      nombre: plainGroup.nombre_grupo,
-      adsAssignmentMode: plainGroup.ads_assignment_mode,
-      adsAssignmentDelimiter: plainGroup.ads_assignment_delimiter,
-      webAssignmentMode: plainGroup.web_assignment_mode,
-      webPrimaryUrl: plainGroup.web_primary_url,
-      clinics: (plainGroup.clinicas || []).map(c => ({ id: c.id_clinica, nombre: c.nombre_clinica })),
-      metaAdsAccounts,
-      googleAdsAccounts
-    });
+    return res.json(config);
   } catch (error) {
-    console.error('Error retrieving group ads configuration:', error);
-    res.status(500).json({ message: 'Error retrieving group ads configuration', error: error.message });
+    console.error('Error retrieving group configuration:', error);
+    res.status(500).json({ message: 'Error retrieving group configuration', error: error.message });
   }
 };

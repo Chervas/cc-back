@@ -16,10 +16,24 @@
 const { metaSyncJobs } = require('../jobs/sync.jobs');
 const { getUsageStatus } = require('../lib/metaClient');
 const { getGoogleAdsUsageStatus, resumeGoogleAdsUsage } = require('../lib/googleAdsClient');
+const jobRequestsService = require('../services/jobRequests.service');
+const jobScheduler = require('../services/jobScheduler.service');
 const fs = require('fs');
 const path = require('path');
 const { SyncLog, TokenValidation, SocialStatDaily, ApiUsageCounter } = require('../../models');
 const { Op } = require('sequelize');
+
+const JOB_NAME_TO_QUEUE_TYPE = {
+  adsSync: 'meta_ads_recent',
+  adsSyncMidday: 'meta_ads_midday',
+  adsBackfill: 'meta_ads_backfill',
+  googleAdsSync: 'google_ads_recent',
+  googleAdsBackfill: 'google_ads_backfill',
+  analyticsSync: 'analytics_recent',
+  analyticsBackfill: 'analytics_backfill',
+  webSync: 'web_recent',
+  webBackfill: 'web_backfill'
+};
 
 /**
  * Inicializar el sistema de jobs cron
@@ -375,11 +389,46 @@ exports.restartJobs = async (req, res) => {
 exports.runJob = async (req, res) => {
   try {
     const { jobName } = req.params;
-    const userId = req.userData.userId; // CORREGIDO: usar userData.userId
-    
-    console.log(`🔄 Ejecutando job '${jobName}' manualmente por usuario ${userId}`);
-    
-    // Crear log de ejecución manual
+    const userId = req.userData?.userId || null;
+    const userRole = req.userData?.role || null;
+    const userName = req.userData?.name || null;
+    const queueType = JOB_NAME_TO_QUEUE_TYPE[jobName] || null;
+    const payload = (req.body && typeof req.body.payload === 'object') ? req.body.payload : {};
+    const priority = req.body?.priority || (queueType && queueType.includes('backfill') ? 'high' : 'normal');
+    const runImmediately = Boolean(req.body?.runImmediately);
+
+    if (queueType) {
+      const jobRequest = await jobRequestsService.enqueueJobRequest({
+        type: queueType,
+        payload,
+        priority,
+        origin: `manual:${jobName}`,
+        requestedBy: userId,
+        requestedByName: userName,
+        requestedByRole: userRole
+      });
+
+      if (runImmediately || jobRequest.priority === 'critical') {
+        jobScheduler.triggerImmediate(jobRequest.id).catch((error) => {
+          console.error(`❌ Error ejecutando job ${jobRequest.id} inmediatamente:`, error);
+        });
+      }
+
+      return res.json({
+        message: `Job '${jobName}' encolado`,
+        jobName,
+        jobRequest: {
+          id: jobRequest.id,
+          type: jobRequest.type,
+          status: jobRequest.status,
+          priority: jobRequest.priority,
+          createdAt: jobRequest.created_at
+        }
+      });
+    }
+
+    console.log(`🔄 Ejecutando job '${jobName}' manualmente en modo directo por usuario ${userId}`);
+
     const syncLog = await SyncLog.create({
       job_type: 'manual_job_execution',
       status: 'running',
@@ -388,14 +437,12 @@ exports.runJob = async (req, res) => {
     });
 
     try {
-      // Ejecutar el job
       const result = await metaSyncJobs.runJob(jobName);
-      
-      // Actualizar log
+
       await syncLog.update({
         status: 'completed',
         end_time: new Date(),
-        records_processed: result.processed || 1
+        records_processed: result?.processed || 1
       });
 
       res.json({
@@ -408,7 +455,6 @@ exports.runJob = async (req, res) => {
       });
 
     } catch (jobError) {
-      // Actualizar log con error
       await syncLog.update({
         status: 'failed',
         end_time: new Date(),
@@ -448,17 +494,22 @@ exports.runTargetedWebBackfill = async (req, res) => {
       });
     }
 
-    setImmediate(async () => {
-      try {
-        await metaSyncJobs.executeWebBackfillForSites(mappings);
-      } catch (error) {
-        console.error('❌ Error en backfill dirigido de Search Console:', error);
-      }
+    const job = await jobRequestsService.enqueueJobRequest({
+      type: 'web_backfill',
+      payload: { mappings },
+      priority: 'high',
+      origin: 'web:targeted-backfill',
+      requestedBy: req.userData?.userId || null
+    });
+
+    jobScheduler.triggerImmediate(job.id).catch((error) => {
+      console.error('❌ Error ejecutando backfill dirigido de Search Console desde cola:', error);
     });
 
     return res.status(202).json({
       success: true,
       enqueued: mappings.length,
+      jobRequestId: job.id,
       message: 'Backfill dirigido encolado'
     });
   } catch (error) {
@@ -494,17 +545,22 @@ exports.runTargetedAnalyticsBackfill = async (req, res) => {
       });
     }
 
-    setImmediate(async () => {
-      try {
-        await metaSyncJobs.executeAnalyticsBackfillForProperties(mappings);
-      } catch (error) {
-        console.error('❌ Error en backfill dirigido de Analytics:', error);
-      }
+    const job = await jobRequestsService.enqueueJobRequest({
+      type: 'analytics_backfill',
+      payload: { mappings },
+      priority: 'high',
+      origin: 'analytics:targeted-backfill',
+      requestedBy: req.userData?.userId || null
+    });
+
+    jobScheduler.triggerImmediate(job.id).catch((error) => {
+      console.error('❌ Error ejecutando backfill dirigido de Analytics desde cola:', error);
     });
 
     return res.status(202).json({
       success: true,
       enqueued: mappings.length,
+      jobRequestId: job.id,
       message: 'Backfill de Analytics encolado'
     });
   } catch (error) {

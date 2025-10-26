@@ -763,13 +763,20 @@ router.post('/google/analytics/map-properties', async (req, res) => {
         }
 
         if (propertiesToBackfill.length) {
-            setImmediate(async () => {
-                try {
-                    await metaSyncJobs.executeAnalyticsBackfillForProperties(propertiesToBackfill);
-                } catch (err) {
-                    console.error('❌ Error lanzando analyticsSync tras mapeo:', err.message);
-                }
-            });
+            try {
+                const job = await jobRequestsService.enqueueJobRequest({
+                    type: 'analytics_backfill',
+                    payload: { mappings: propertiesToBackfill },
+                    priority: 'high',
+                    origin: 'analytics:map-properties',
+                    requestedBy: userId
+                });
+                jobScheduler.triggerImmediate(job.id).catch((err) =>
+                    console.error('❌ Error lanzando analyticsSync tras mapeo:', err)
+                );
+            } catch (queueErr) {
+                console.error('❌ Error encolando analyticsSync tras mapeo:', queueErr);
+            }
         }
 
         return res.json({ success: true, mapped: createdOrUpdated.length, properties: createdOrUpdated });
@@ -1463,12 +1470,22 @@ router.post('/google/ads/map-accounts', async (req, res) => {
             throw txErr;
         }
 
-        const clinicIds = Array.from(clinicsToSync).filter(id => Number.isInteger(id));
+        const clinicIds = Array.from(clinicsToSync).filter((id) => Number.isInteger(id));
         if (clinicIds.length) {
-            setImmediate(() => {
-                metaSyncJobs.executeGoogleAdsSync({ clinicIds })
-                    .catch(err => console.error('❌ Error en resync automático de Google Ads tras map-accounts:', err.message));
-            });
+            try {
+                const job = await jobRequestsService.enqueueJobRequest({
+                    type: 'google_ads_recent',
+                    payload: { clinicIds },
+                    priority: 'critical',
+                    origin: 'google:map-accounts',
+                    requestedBy: userId
+                });
+                jobScheduler.triggerImmediate(job.id).catch((err) =>
+                    console.error('❌ Error disparando resync de Google Ads desde cola:', err.message)
+                );
+            } catch (queueError) {
+                console.error('❌ Error encolando resync de Google Ads tras map-accounts:', queueError);
+            }
         }
 
         return res.json({ success: true, mapped: results.length, accounts: results });
@@ -2124,12 +2141,22 @@ router.post('/meta/map-assets', async (req, res) => {
 
         console.log(`✅ Mapeo actualizado para clínica ${clinicaId}: ${createdOrUpdated.length} activos activos, ${toDeactivate.length} inactivos (unicidad aplicada para IG/FB/Ads)`);
 
-        const clinicIds = Array.from(clinicsToSync);
+        const clinicIds = Array.from(clinicsToSync).filter((id) => Number.isInteger(id));
         if (clinicIds.length) {
-            setImmediate(() => {
-                metaSyncJobs.executeAdsSync({ clinicIds })
-                    .catch(err => console.error('❌ Error en resync automático de Meta Ads tras map-assets:', err.message));
-            });
+            try {
+                const job = await jobRequestsService.enqueueJobRequest({
+                    type: 'meta_ads_recent',
+                    payload: { clinicIds },
+                    priority: 'critical',
+                    origin: 'meta:map-assets',
+                    requestedBy: userId
+                });
+                jobScheduler.triggerImmediate(job.id).catch((err) =>
+                    console.error('❌ Error disparando resync de Meta Ads desde cola:', err.message)
+                );
+            } catch (queueError) {
+                console.error('❌ Error encolando resync de Meta Ads tras map-assets:', queueError);
+            }
         }
 
         // Disparar sincronización inicial SOLO del día actual (sin histórico)

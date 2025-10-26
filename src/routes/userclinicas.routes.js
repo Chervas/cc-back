@@ -82,12 +82,39 @@ router.get('/list', async (req, res) => {
             console.log('🏥 Obteniendo TODAS las clínicas del sistema...');
 
             // Para administradores: obtener TODAS las clínicas
+            const adminAssignments = await UsuarioClinica.findAll({
+                where: { id_usuario: userId },
+                attributes: ['id_clinica', 'rol_clinica', 'subrol_clinica']
+            });
+
+            const assignmentByClinic = new Map();
+            adminAssignments.forEach(assignment => {
+                assignmentByClinic.set(Number(assignment.id_clinica), {
+                    role: assignment.rol_clinica,
+                    subrole: assignment.subrol_clinica
+                });
+            });
+
+            const normalizeRole = (role) => {
+                if (!role) {
+                    return 'administrador';
+                }
+                if (role === 'personaldeclinica') {
+                    return 'medico';
+                }
+                if (role === 'admin') {
+                    return 'administrador';
+                }
+                return role;
+            };
+
             const todasLasClinicas = await Clinica.findAll({
                 // ✅ CORRECCIÓN: Incluir relación con GrupoClinica
                 include: [{
                     model: GrupoClinica,
                     as: 'grupoClinica',
-                    required: false // LEFT JOIN para incluir clínicas sin grupo
+                    required: false,
+                    attributes: ['id_grupo', 'nombre_grupo']
                 }],
                 order: [['nombre_clinica', 'ASC']]
             });
@@ -114,8 +141,8 @@ router.get('/list', async (req, res) => {
                     id_grupo: clinica.grupoClinica.id_grupo,
                     nombre_grupo: clinica.grupoClinica.nombre_grupo
                 } : null,
-                userRole: 'administrador', // Rol especial para admin
-                userSubRole: 'sistema',
+                userRole: normalizeRole(assignmentByClinic.get(clinica.id_clinica)?.role),
+                userSubRole: assignmentByClinic.get(clinica.id_clinica)?.subrole || 'sistema',
                 // Permisos completos para administradores
                 permissions: {
                     canMapAssets: true,
@@ -134,7 +161,11 @@ router.get('/list', async (req, res) => {
             })));
 
             // ✅ AGREGAR ROLES PARA ADMIN
-            const rolesAdmin = ['admin'];
+            const rolesAdminSet = new Set(['administrador']);
+            adminAssignments.forEach(assignment => {
+                rolesAdminSet.add(normalizeRole(assignment.rol_clinica));
+            });
+            const rolesAdmin = Array.from(rolesAdminSet);
 
             return res.json({
                 success: true,
@@ -161,7 +192,8 @@ router.get('/list', async (req, res) => {
                     include: [{
                         model: GrupoClinica,
                         as: 'grupoClinica',
-                        required: false
+                        required: false,
+                        attributes: ['id_grupo', 'nombre_grupo']
                     }],
                     through: {
                         where: {
@@ -332,4 +364,3 @@ router.get('/:id', async (req, res) => {
 });
 
 module.exports = router;
-

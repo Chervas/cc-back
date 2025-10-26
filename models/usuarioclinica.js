@@ -27,7 +27,7 @@ module.exports = (sequelize, DataTypes) => {
     },
     // Subrol: 'Auxiliares y enfermeros', 'Doctores' o 'Administrativos'
     subrol_clinica: {
-      type: DataTypes.ENUM('Auxiliares y enfermeros', 'Doctores', 'Administrativos'),
+      type: DataTypes.ENUM('Auxiliares y enfermeros', 'Doctores', 'Administrativos', 'Recepción / Comercial ventas'),
       allowNull: true,
       defaultValue: null
     },

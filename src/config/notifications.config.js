@@ -52,7 +52,8 @@ const NOTIFICATION_ROLE_GROUPS = [
     subroles: [
       { id: 'Doctores', label: 'Doctores' },
       { id: 'Auxiliares y enfermeros', label: 'Auxiliares y enfermeros' },
-      { id: 'Administrativos', label: 'Administrativos' }
+      { id: 'Administrativos', label: 'Administrativos' },
+      { id: 'Recepción / Comercial ventas', label: 'Recepción / Comercial ventas' }
     ]
   },
   {
@@ -77,6 +78,9 @@ const DEFAULT_NOTIFICATION_PREFERENCES = [
   { role: 'personaldeclinica', subrole: 'Administrativos', event: 'ads.sync_error', enabled: false },
   { role: 'personaldeclinica', subrole: 'Administrativos', event: 'ads.new_lead', enabled: false },
   { role: 'personaldeclinica', subrole: 'Administrativos', event: 'ads.health_issue', enabled: false },
+  { role: 'personaldeclinica', subrole: 'Recepción / Comercial ventas', event: 'ads.sync_error', enabled: false },
+  { role: 'personaldeclinica', subrole: 'Recepción / Comercial ventas', event: 'ads.new_lead', enabled: true },
+  { role: 'personaldeclinica', subrole: 'Recepción / Comercial ventas', event: 'ads.health_issue', enabled: false },
   { role: 'propietario', subrole: null, event: 'ads.sync_error', enabled: true },
   { role: 'propietario', subrole: null, event: 'ads.new_lead', enabled: true },
   { role: 'propietario', subrole: null, event: 'ads.health_issue', enabled: true },
