@@ -471,31 +471,37 @@ class MetaSyncJobs {
   async _buildMetaAssignmentContext(asset) {
     const groupId = asset.grupoClinicaId || asset.clinica?.grupoClinicaId || null;
 
-    if (asset.assignmentScope === 'group' && groupId) {
+    if (groupId) {
       const group = await this._fetchGroupWithClinics(groupId);
-      if (!group) {
-        return {
-          mode: 'manual',
-          clinicaId: asset.clinicaId || null,
-          groupId: null,
-          clinics: []
-        };
+      if (group) {
+        const clinics = Array.isArray(group.clinicas) ? group.clinicas : [];
+        const delimiter = group.ads_assignment_delimiter || '**';
+        const matcher = clinics.length ? buildClinicMatcher(clinics, { delimiter, requireDelimiter: true }) : null;
+        const adsMode = (group.ads_assignment_mode || '').toLowerCase();
+
+        if (adsMode === 'automatic') {
+          return {
+            mode: 'group-auto',
+            groupId: group.id_grupo,
+            delimiter,
+            matcher,
+            clinics,
+            clinicaId: asset.clinicaId || null
+          };
+        }
+
+        if (asset.assignmentScope === 'group') {
+          return {
+            mode: 'group-manual',
+            groupId: group.id_grupo,
+            delimiter,
+            matcher,
+            clinics,
+            clinicaId: asset.clinicaId || null
+          };
+        }
       }
-
-      const clinics = Array.isArray(group.clinicas) ? group.clinicas : [];
-      const delimiter = group.ads_assignment_delimiter || '**';
-      const matcher = clinics.length ? buildClinicMatcher(clinics, { delimiter, requireDelimiter: true }) : null;
-      const mode = group.ads_assignment_mode === 'manual' ? 'group-manual' : 'group-auto';
-
-      return {
-        mode,
-        groupId: group.id_grupo,
-        delimiter,
-        matcher,
-        clinics
-      };
     }
-
     return {
       mode: 'manual',
       clinicaId: asset.clinicaId || null,
@@ -2097,7 +2103,7 @@ try {
         },
         include: [
           { model: GoogleConnection, as: 'googleConnection' },
-          { model: Clinica, as: 'clinica', attributes: ['id_clinica', 'nombre_clinica'] }
+          { model: Clinica, as: 'clinica', attributes: ['id_clinica', 'nombre_clinica', 'grupoClinicaId'] }
         ]
       });
 
@@ -2271,7 +2277,7 @@ try {
         },
         include: [
           { model: GoogleConnection, as: 'googleConnection' },
-          { model: Clinica, as: 'clinica', attributes: ['id_clinica', 'nombre_clinica'] }
+          { model: Clinica, as: 'clinica', attributes: ['id_clinica', 'nombre_clinica', 'grupoClinicaId'] }
         ]
       });
       if (Array.isArray(options.clinicIds) && options.clinicIds.length) {
@@ -2617,7 +2623,9 @@ try {
       '  segments.date,',
       '  metrics.impressions,',
       '  metrics.clicks,',
-      '  metrics.cost_micros',
+      '  metrics.cost_micros,',
+      '  metrics.conversions,',
+      '  metrics.conversions_value',
       'FROM campaign',
       "WHERE campaign.advertising_channel_type = 'PERFORMANCE_MAX'",
       `  AND segments.date BETWEEN '${startDate}' AND '${endDate}'`

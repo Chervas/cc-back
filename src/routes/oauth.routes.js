@@ -13,6 +13,12 @@ const Clinica = db.Clinica;
 const ClinicMetaAsset = db.ClinicMetaAsset; // <-- Accede al modelo ClinicMetaAsset
 const ClinicBusinessLocation = db.ClinicBusinessLocation;
 const ClinicGoogleAdsAccount = db.ClinicGoogleAdsAccount;
+const GroupAssetClinicAssignment = db.GroupAssetClinicAssignment;
+const SocialStatsDaily = db.SocialStatsDaily;
+const SocialPosts = db.SocialPosts;
+const SocialPostStatsDaily = db.SocialPostStatsDaily;
+const SocialAdsInsightsDaily = db.SocialAdsInsightsDaily;
+const SocialAdsActionsDaily = db.SocialAdsActionsDaily;
 const GrupoClinica = db.GrupoClinica;
 const {
     googleAdsRequest,
@@ -24,6 +30,8 @@ const {
 } = require('../lib/googleAdsClient');
 const { metaSyncJobs } = require('../jobs/sync.jobs');
 const { triggerHistoricalSync } = require('../controllers/metasync.controller');
+const jobRequestsService = require('../services/jobRequests.service');
+const jobScheduler = require('../services/jobScheduler.service');
 
 // Configuración de la App de Meta
 const META_APP_ID = '1807844546609897'; // <-- App ID correcto
@@ -1532,6 +1540,7 @@ router.get('/google/ads/mappings', async (req, res) => {
                 });
             }
             byClinic.get(clinicaId).ads.push({
+                id: row.id,
                 customerId: row.customerId,
                 formattedCustomerId: formatCustomerId(row.customerId),
                 descriptiveName: row.descriptiveName || null,
@@ -1550,6 +1559,40 @@ router.get('/google/ads/mappings', async (req, res) => {
     } catch (err) {
         console.error('❌ Error en /oauth/google/ads/mappings:', err.details || err.message);
         return res.status(500).json({ success: false, error: 'internal_error' });
+    }
+});
+
+router.delete('/google/ads/mappings/:mappingId', async (req, res) => {
+    const mappingId = Number.parseInt(req.params.mappingId, 10);
+    if (!Number.isInteger(mappingId)) {
+        return res.status(400).json({ success: false, error: 'mappingId inválido' });
+    }
+    try {
+        const userId = getUserIdFromToken(req);
+        if (!userId) {
+            return res.status(401).json({ success: false, error: 'Usuario no autenticado' });
+        }
+
+        const conn = await GoogleConnection.findOne({ where: { userId } });
+        if (!conn) {
+            return res.status(404).json({ success: false, error: 'No hay conexión Google' });
+        }
+
+        const account = await ClinicGoogleAdsAccount.findOne({ where: { id: mappingId, googleConnectionId: conn.id } });
+        if (!account) {
+            return res.status(404).json({ success: false, error: 'Cuenta Google Ads no encontrada' });
+        }
+
+        await GroupAssetClinicAssignment.destroy({
+            where: { assetType: 'google.ads_account', assetId: mappingId }
+        });
+
+        await account.destroy();
+
+        return res.json({ success: true });
+    } catch (error) {
+        console.error('❌ Error eliminando mapeo de Google Ads:', error);
+        return res.status(500).json({ success: false, error: 'Error interno del servidor' });
     }
 });
 
@@ -1584,6 +1627,36 @@ router.get('/google/analytics/mappings', async (req, res) => {
     } catch (e) {
         console.error('❌ Error en /oauth/google/analytics/mappings:', e.response?.data || e.message);
         return res.status(500).json({ success: false, error: 'Error obteniendo mapeos de Analytics' });
+    }
+});
+
+router.delete('/google/analytics/mappings/:mappingId', async (req, res) => {
+    const mappingId = Number.parseInt(req.params.mappingId, 10);
+    if (!Number.isInteger(mappingId)) {
+        return res.status(400).json({ success: false, error: 'mappingId inválido' });
+    }
+    try {
+        const userId = getUserIdFromToken(req);
+        if (!userId) return res.status(401).json({ success: false, error: 'Usuario no autenticado' });
+
+        const conn = await GoogleConnection.findOne({ where: { userId } });
+        if (!conn) return res.status(404).json({ success: false, error: 'No hay conexión Google' });
+
+        const mapping = await ClinicAnalyticsProperty.findOne({ where: { id: mappingId, googleConnectionId: conn.id } });
+        if (!mapping) {
+            return res.status(404).json({ success: false, error: 'Mapeo no encontrado' });
+        }
+
+        await GroupAssetClinicAssignment.destroy({
+            where: { assetType: 'google.analytics', assetId: mappingId }
+        });
+
+        await mapping.destroy();
+
+        return res.json({ success: true });
+    } catch (error) {
+        console.error('❌ Error eliminando mapeo de Analytics:', error);
+        return res.status(500).json({ success: false, error: 'Error interno del servidor' });
     }
 });
 
@@ -1658,12 +1731,47 @@ router.get('/google/mappings', async (req, res) => {
                     assets: { search_console: [] }
                 });
             }
-            byClinic.get(r.clinicaId).assets.search_console.push({ siteUrl: r.siteUrl, propertyType: r.propertyType, permissionLevel: r.permissionLevel });
+            byClinic.get(r.clinicaId).assets.search_console.push({
+                id: r.id,
+                siteUrl: r.siteUrl,
+                propertyType: r.propertyType,
+                permissionLevel: r.permissionLevel
+            });
         }
         return res.json({ success: true, mappings: Array.from(byClinic.values()) });
     } catch (e) {
         console.error('❌ Error en /oauth/google/mappings:', e.response?.data || e.message);
         return res.status(500).json({ success: false, error: 'Error obteniendo mapeos' });
+    }
+});
+
+router.delete('/google/mappings/:mappingId', async (req, res) => {
+    const mappingId = Number.parseInt(req.params.mappingId, 10);
+    if (!Number.isInteger(mappingId)) {
+        return res.status(400).json({ success: false, error: 'mappingId inválido' });
+    }
+    try {
+        const userId = getUserIdFromToken(req);
+        if (!userId) return res.status(401).json({ success: false, error: 'Usuario no autenticado' });
+
+        const conn = await GoogleConnection.findOne({ where: { userId } });
+        if (!conn) return res.status(404).json({ success: false, error: 'No hay conexión Google' });
+
+        const mapping = await ClinicWebAsset.findOne({ where: { id: mappingId, googleConnectionId: conn.id } });
+        if (!mapping) {
+            return res.status(404).json({ success: false, error: 'Mapeo no encontrado' });
+        }
+
+        await GroupAssetClinicAssignment.destroy({
+            where: { assetType: 'google.search_console', assetId: mappingId }
+        });
+
+        await mapping.destroy();
+
+        return res.json({ success: true });
+    } catch (error) {
+        console.error('❌ Error eliminando mapeo de Search Console:', error);
+        return res.status(500).json({ success: false, error: 'Error interno del servidor' });
     }
 });
 
@@ -2405,6 +2513,98 @@ router.get('/meta/mappings', async (req, res) => {
             error: 'Error interno del servidor',
             details: error.message
         });
+    }
+});
+
+/**
+ * DELETE /oauth/meta/mappings/:mappingId
+ * Elimina un mapeo individual de activos Meta para el usuario logueado
+ */
+router.delete('/meta/mappings/:mappingId', async (req, res) => {
+    const mappingId = Number.parseInt(req.params.mappingId, 10);
+    if (!Number.isInteger(mappingId)) {
+        return res.status(400).json({ success: false, error: 'mappingId inválido' });
+    }
+
+    try {
+        const userId = getUserIdFromToken(req);
+        if (!userId) {
+            return res.status(401).json({ success: false, error: 'Usuario no autenticado' });
+        }
+
+        const metaConnection = await MetaConnection.findOne({ where: { userId } });
+        if (!metaConnection) {
+            return res.status(404).json({ success: false, error: 'Usuario no conectado a Meta' });
+        }
+
+        const mapping = await ClinicMetaAsset.findOne({
+            where: { id: mappingId, metaConnectionId: metaConnection.id }
+        });
+
+        if (!mapping) {
+            return res.status(404).json({ success: false, error: 'Mapeo no encontrado' });
+        }
+
+        const plain = mapping.get({ plain: true });
+        const clinicaId = plain.clinicaId;
+        const assetType = plain.assetType;
+        const metaAssetId = plain.metaAssetId;
+
+        const transaction = await db.sequelize.transaction();
+        try {
+            await GroupAssetClinicAssignment.destroy({
+                where: {
+                    assetId: mappingId,
+                    assetType: assetType === 'ad_account'
+                        ? 'meta.ad_account'
+                        : assetType === 'instagram_business'
+                            ? 'meta.instagram_business'
+                            : 'meta.facebook_page'
+                },
+                transaction
+            });
+
+            await mapping.destroy({ transaction });
+            await transaction.commit();
+        } catch (txErr) {
+            await transaction.rollback();
+            throw txErr;
+        }
+
+        try {
+            if (assetType === 'instagram_business' || assetType === 'facebook_page') {
+                await SocialStatsDaily.destroy({ where: { clinica_id: clinicaId, asset_id: mappingId } });
+                await SocialPostStatsDaily.destroy({ where: { clinica_id: clinicaId, asset_id: mappingId } });
+                await SocialPosts.destroy({ where: { clinica_id: clinicaId, asset_id: mappingId } });
+            } else if (assetType === 'ad_account') {
+                await SocialAdsInsightsDaily.destroy({ where: { ad_account_id: metaAssetId } });
+                await SocialAdsActionsDaily.destroy({ where: { ad_account_id: metaAssetId } });
+            }
+        } catch (cleanupErr) {
+            console.warn('⚠️ Error limpiando datos asociados al mapeo Meta eliminado:', cleanupErr.message);
+        }
+
+        if (clinicaId) {
+            try {
+                const job = await jobRequestsService.enqueueJobRequest({
+                    type: 'meta_ads_recent',
+                    payload: { clinicIds: [clinicaId] },
+                    priority: 'high',
+                    origin: 'meta:delete-mapping',
+                    requestedBy: userId
+                });
+                jobScheduler.triggerImmediate(job.id).catch((err) =>
+                    console.error('❌ Error disparando resync tras eliminar mapeo Meta:', err.message)
+                );
+            } catch (queueErr) {
+                console.error('⚠️ No se pudo encolar resync Meta Ads tras eliminar mapeo:', queueErr.message);
+            }
+        }
+
+        return res.json({ success: true });
+    } catch (error) {
+        console.error('❌ Error eliminando mapeo de Meta:', error);
+        return res.status(500).json({ success: false, error: 'Error interno del servidor' });
     }
 });
 
