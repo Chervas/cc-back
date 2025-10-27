@@ -10,7 +10,7 @@ module.exports = (sequelize, DataTypes) => {
         },
         clinicaId: { 
             type: DataTypes.INTEGER,
-            allowNull: false,
+            allowNull: true,
             references: {
                 model: 'Clinicas',
                 key: 'id_clinica',

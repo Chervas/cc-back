@@ -9,7 +9,8 @@ const {
   ClinicWebAsset,
   ClinicAnalyticsProperty,
   ClinicBusinessLocation,
-  ClinicGoogleAdsAccount
+  ClinicGoogleAdsAccount,
+  GroupAssetClinicAssignment
 } = require('../../models');
 
 const MODE_VALUES = ['group', 'clinic'];
@@ -17,6 +18,32 @@ const MODE_VALUES = ['group', 'clinic'];
 const META_TYPES = {
   facebook: 'facebook_page',
   instagram: 'instagram_business'
+};
+
+const GROUP_ASSET_TYPES = {
+  META_FACEBOOK: 'meta.facebook_page',
+  META_INSTAGRAM: 'meta.instagram_business',
+  META_AD_ACCOUNT: 'meta.ad_account',
+  GOOGLE_ADS_ACCOUNT: 'google.ads_account',
+  GOOGLE_SEARCH_CONSOLE: 'google.search_console',
+  GOOGLE_ANALYTICS: 'google.analytics',
+  GOOGLE_BUSINESS_PROFILE: 'google.business_profile'
+};
+
+const META_GROUP_ASSET_TYPE_BY_SECTION = {
+  facebook: GROUP_ASSET_TYPES.META_FACEBOOK,
+  instagram: GROUP_ASSET_TYPES.META_INSTAGRAM
+};
+
+const META_SECTION_BY_ASSET_TYPE = {
+  [META_TYPES.facebook]: 'facebook',
+  [META_TYPES.instagram]: 'instagram'
+};
+
+const GOOGLE_GROUP_ASSET_TYPE_BY_SECTION = {
+  searchConsole: GROUP_ASSET_TYPES.GOOGLE_SEARCH_CONSOLE,
+  analytics: GROUP_ASSET_TYPES.GOOGLE_ANALYTICS,
+  businessProfile: GROUP_ASSET_TYPES.GOOGLE_BUSINESS_PROFILE
 };
 
 const GOOGLE_MODE_CONFIG = {
@@ -53,6 +80,51 @@ const CONNECTION_STATUSES = {
   connected: 'connected',
   disconnected: 'disconnected'
 };
+
+function _indexAssignments(rows = []) {
+  const byType = new Map();
+  rows.forEach(row => {
+    const type = row.assetType;
+    if (!byType.has(type)) {
+      byType.set(type, new Map());
+    }
+    const typeMap = byType.get(type);
+    const assetId = Number(row.assetId);
+    if (!typeMap.has(assetId)) {
+      typeMap.set(assetId, new Set());
+    }
+    typeMap.get(assetId).add(Number(row.clinicaId));
+  });
+  return byType;
+}
+
+function _getAssignedClinics(index, assetType, assetId) {
+  const typeMap = index.get(assetType);
+  if (!typeMap) {
+    return [];
+  }
+  const clinicSet = typeMap.get(Number(assetId));
+  return clinicSet ? Array.from(clinicSet) : [];
+}
+
+function _buildClinicAssignmentMap(clinicIds, index, assetType) {
+  const assignments = {};
+  clinicIds.forEach(id => {
+    assignments[String(id)] = null;
+  });
+  const typeMap = index.get(assetType);
+  if (!typeMap) {
+    return assignments;
+  }
+  typeMap.forEach((clinicSet, assetId) => {
+    clinicSet.forEach(clinicId => {
+      if (clinicIds.includes(clinicId)) {
+        assignments[String(clinicId)] = assetId;
+      }
+    });
+  });
+  return assignments;
+}
 
 async function _loadGroupContext(groupId) {
   const group = await GrupoClinica.findByPk(groupId, {
@@ -141,28 +213,53 @@ async function getGroupConfig(groupId) {
   const { group, clinics } = ctx;
   let clinicIds = Array.isArray(ctx.clinicIds) ? [...ctx.clinicIds] : [];
 
+  const assignmentRows = await GroupAssetClinicAssignment.findAll({
+    where: { grupoClinicaId: group.id_grupo }
+  });
+  const assignmentIndex = _indexAssignments(
+    assignmentRows.map(row => (row.get ? row.get({ plain: true }) : row))
+  );
+
   // Ads existentes (Meta/Google Ads) se mantienen igual
-  const metaAdsAccounts = await ClinicMetaAsset.findAll({
+  const rawMetaAdsAccounts = await ClinicMetaAsset.findAll({
     where: {
       assetType: 'ad_account',
       [Op.or]: [
         { clinicaId: { [Op.in]: clinicIds } },
         { grupoClinicaId: group.id_grupo }
-      ],
-      isActive: true
+      ]
     },
-    attributes: ['id', 'metaAssetId', 'metaAssetName', 'assignmentScope', 'clinicaId', 'grupoClinicaId']
+    attributes: ['id', 'metaAssetId', 'metaAssetName', 'assignmentScope', 'clinicaId', 'grupoClinicaId', 'isActive']
   });
 
-  const googleAdsAccounts = await ClinicGoogleAdsAccount.findAll({
+  const metaAdsAccounts = rawMetaAdsAccounts.map(acc => {
+    const plain = acc.get ? acc.get({ plain: true }) : acc;
+    const assigned = _getAssignedClinics(assignmentIndex, GROUP_ASSET_TYPES.META_AD_ACCOUNT, plain.id);
+    plain.assignedClinicIds = assigned;
+    if (!plain.clinicaId && assigned.length) {
+      plain.clinicaId = assigned[0];
+    }
+    return plain;
+  });
+
+  const rawGoogleAdsAccounts = await ClinicGoogleAdsAccount.findAll({
     where: {
       [Op.or]: [
         { clinicaId: { [Op.in]: clinicIds } },
         { grupoClinicaId: group.id_grupo }
-      ],
-      isActive: true
+      ]
     },
-    attributes: ['id', 'customerId', 'descriptiveName', 'assignmentScope', 'clinicaId', 'grupoClinicaId']
+    attributes: ['id', 'customerId', 'descriptiveName', 'assignmentScope', 'clinicaId', 'grupoClinicaId', 'isActive']
+  });
+
+  const googleAdsAccounts = rawGoogleAdsAccounts.map(acc => {
+    const plain = acc.get ? acc.get({ plain: true }) : acc;
+    const assigned = _getAssignedClinics(assignmentIndex, GROUP_ASSET_TYPES.GOOGLE_ADS_ACCOUNT, plain.id);
+    plain.assignedClinicIds = assigned;
+    if (!plain.clinicaId && assigned.length) {
+      plain.clinicaId = assigned[0];
+    }
+    return plain;
   });
 
   // Meta (Facebook / Instagram)
@@ -181,38 +278,49 @@ async function getGroupConfig(groupId) {
     facebook: [],
     instagram: []
   };
-  metaAssets.forEach(asset => {
-    if (asset.assetType === META_TYPES.facebook) {
-      metaByType.facebook.push(_serializeMetaAsset(asset));
-    }
-    if (asset.assetType === META_TYPES.instagram) {
-      metaByType.instagram.push(_serializeMetaAsset(asset));
-    }
-  });
 
   const metaClinicAssignments = {
-    facebook: {},
-    instagram: {}
+    facebook: _buildClinicAssignmentMap(clinicIds, assignmentIndex, GROUP_ASSET_TYPES.META_FACEBOOK),
+    instagram: _buildClinicAssignmentMap(clinicIds, assignmentIndex, GROUP_ASSET_TYPES.META_INSTAGRAM)
   };
 
   const tiktokAssignments = {};
-
   clinicIds.forEach(id => {
     const key = String(id);
-    metaClinicAssignments.facebook[key] = null;
-    metaClinicAssignments.instagram[key] = null;
+    if (!(key in metaClinicAssignments.facebook)) {
+      metaClinicAssignments.facebook[key] = null;
+    }
+    if (!(key in metaClinicAssignments.instagram)) {
+      metaClinicAssignments.instagram[key] = null;
+    }
     tiktokAssignments[key] = null;
   });
 
-  metaByType.facebook.forEach(asset => {
-    if (asset.clinicaId && asset.isActive) {
-      metaClinicAssignments.facebook[String(asset.clinicaId)] = asset.id;
+  metaAssets.forEach(asset => {
+    const plain = _serializeMetaAsset(asset);
+    const section = META_SECTION_BY_ASSET_TYPE[plain.type];
+    if (!section) {
+      return;
     }
-  });
-
-  metaByType.instagram.forEach(asset => {
-    if (asset.clinicaId && asset.isActive) {
-      metaClinicAssignments.instagram[String(asset.clinicaId)] = asset.id;
+    const assignedFromJoin = new Set(
+      _getAssignedClinics(assignmentIndex, META_GROUP_ASSET_TYPE_BY_SECTION[section], plain.id)
+    );
+    if (!assignedFromJoin.size && plain.clinicaId) {
+      assignedFromJoin.add(Number(plain.clinicaId));
+    }
+    plain.assignedClinicIds = Array.from(assignedFromJoin);
+    if (!plain.clinicaId && plain.assignedClinicIds.length) {
+      plain.clinicaId = plain.assignedClinicIds[0];
+    }
+    plain.assignedClinicIds.forEach(clinicId => {
+      if (clinicIds.includes(clinicId)) {
+        metaClinicAssignments[section][String(clinicId)] = plain.id;
+      }
+    });
+    if (section === 'facebook') {
+      metaByType.facebook.push(plain);
+    } else if (section === 'instagram') {
+      metaByType.instagram.push(plain);
     }
   });
 
@@ -231,16 +339,25 @@ async function getGroupConfig(groupId) {
     const rows = await config.model.findAll({ where: whereClause });
 
     const items = [];
-    const assignments = {};
-    clinicIds.forEach(id => { assignments[id] = null; });
+    const groupAssetType = GOOGLE_GROUP_ASSET_TYPE_BY_SECTION[key];
+    const assignments = _buildClinicAssignmentMap(clinicIds, assignmentIndex, groupAssetType);
 
     rows.forEach(row => {
       const plain = _serializeGoogleAsset(row, config.activeField, clinicField);
-      items.push(plain);
-
-      if (plain.clinicaId && plain.isActive) {
-        assignments[plain.clinicaId] = plain.id;
+      const assignedFromJoin = new Set(_getAssignedClinics(assignmentIndex, groupAssetType, plain.id));
+      if (!assignedFromJoin.size && plain.clinicaId && plain.isActive) {
+        assignedFromJoin.add(Number(plain.clinicaId));
       }
+      plain.assignedClinicIds = Array.from(assignedFromJoin);
+      if (!plain.clinicaId && plain.assignedClinicIds.length) {
+        plain.clinicaId = plain.assignedClinicIds[0];
+      }
+      plain.assignedClinicIds.forEach(clinicId => {
+        if (clinicIds.includes(clinicId)) {
+          assignments[String(clinicId)] = plain.id;
+        }
+      });
+      items.push(plain);
 
       const connId = plain.googleConnectionId || plain.google_connection_id;
       if (connId) {
@@ -359,68 +476,47 @@ function _ensureValidMode(value, field) {
 
 async function _updateMetaAssignments({ type, mode, primaryAssetId, clinicAssignments = {}, groupId, clinicIds, transaction }) {
   const assetType = META_TYPES[type];
-  if (!assetType) {
+  const assetTypeKey = META_GROUP_ASSET_TYPE_BY_SECTION[type];
+  if (!assetType || !assetTypeKey) {
     return;
   }
 
   const now = new Date();
 
+  const accessibleAssets = await ClinicMetaAsset.findAll({
+    where: {
+      assetType,
+      [Op.or]: [
+        { clinicaId: { [Op.in]: clinicIds } },
+        { grupoClinicaId: groupId }
+      ]
+    },
+    transaction
+  });
+  const accessibleAssetIds = accessibleAssets.map(asset => asset.id);
+
   if (mode === 'group') {
-    if (!primaryAssetId) {
-      throw new Error(`Debes seleccionar un activo principal para ${type} en modo grupo`);
+    if (!primaryAssetId || !accessibleAssetIds.includes(Number(primaryAssetId))) {
+      throw new Error(`Debes seleccionar un activo principal válido para ${type} en modo grupo`);
     }
 
-    const selectedAsset = await ClinicMetaAsset.findOne({
-      where: {
-        id: primaryAssetId,
-        assetType,
-        [Op.or]: [
-          { clinicaId: { [Op.in]: clinicIds } },
-          { grupoClinicaId: groupId }
-        ]
-      },
+    await GroupAssetClinicAssignment.destroy({
+      where: { grupoClinicaId: groupId, assetType: assetTypeKey },
       transaction
     });
 
-    if (!selectedAsset) {
-      throw new Error(`El activo seleccionado (${primaryAssetId}) no pertenece a este grupo`);
+    const otherAssetIds = accessibleAssetIds.filter(id => id !== Number(primaryAssetId));
+
+    if (otherAssetIds.length) {
+      await ClinicMetaAsset.update(
+        { assignmentScope: 'clinic', grupoClinicaId: null, isActive: false },
+        { where: { id: { [Op.in]: otherAssetIds } }, transaction }
+      );
     }
 
     await ClinicMetaAsset.update(
-      { assignmentScope: 'clinic', grupoClinicaId: null },
-      {
-        where: {
-          assetType,
-          clinicaId: { [Op.in]: clinicIds },
-          id: { [Op.ne]: primaryAssetId }
-        },
-        transaction
-      }
-    );
-
-    await ClinicMetaAsset.update(
-      { isActive: false },
-      {
-        where: {
-          assetType,
-          clinicaId: { [Op.in]: clinicIds },
-          id: { [Op.ne]: primaryAssetId },
-          isActive: true
-        },
-        transaction
-      }
-    );
-
-    await ClinicMetaAsset.update(
-      {
-        assignmentScope: 'group',
-        grupoClinicaId: groupId,
-        isActive: true
-      },
-      {
-        where: { id: primaryAssetId },
-        transaction
-      }
+      { assignmentScope: 'group', grupoClinicaId: groupId, isActive: true },
+      { where: { id: primaryAssetId }, transaction }
     );
 
     await GrupoClinica.update(
@@ -431,92 +527,120 @@ async function _updateMetaAssignments({ type, mode, primaryAssetId, clinicAssign
       },
       { where: { id_grupo: groupId }, transaction }
     );
-  } else if (mode === 'clinic') {
-    await ClinicMetaAsset.update(
-      { assignmentScope: 'clinic', grupoClinicaId: null },
-      {
-        where: {
-          assetType,
-          clinicaId: { [Op.in]: clinicIds }
-        },
-        transaction
-      }
-    );
 
-    const clinicIdsToProcess = Object.keys(clinicAssignments).map(id => parseInt(id, 10)).filter(id => clinicIds.includes(id));
-
-    for (const clinicaId of clinicIdsToProcess) {
-      const selectedId = clinicAssignments[clinicaId];
-      const assets = await ClinicMetaAsset.findAll({
-        where: { assetType, clinicaId, isActive: true },
-        transaction
-      });
-
-      const selected = selectedId
-        ? assets.find(a => a.id === selectedId)
-        : null;
-
-      if (selectedId && !selected) {
-        const exists = await ClinicMetaAsset.findOne({
-          where: { id: selectedId, assetType, clinicaId },
-          transaction
-        });
-        if (!exists) {
-          throw new Error(`El activo ${selectedId} no pertenece a la clínica ${clinicaId}`);
-        }
-      }
-
-      const activeIds = assets.map(a => a.id);
-      if (activeIds.length) {
-        await ClinicMetaAsset.update(
-          { isActive: false },
-          { where: { id: activeIds }, transaction }
-        );
-      }
-
-      if (selectedId) {
-        await ClinicMetaAsset.update(
-          { isActive: true },
-          { where: { id: selectedId }, transaction }
-        );
-      }
-    }
-
-    await GrupoClinica.update(
-      {
-        [`${type}_assignment_mode`]: mode,
-        [`${type}_primary_asset_id`]: null,
-        [`${type}_assignment_updated_at`]: now
-      },
-      { where: { id_grupo: groupId }, transaction }
-    );
+    return;
   }
+
+  // Clinic mode
+  await GroupAssetClinicAssignment.destroy({
+    where: { grupoClinicaId: groupId, assetType: assetTypeKey },
+    transaction
+  });
+
+  const assignmentsPerAsset = new Map();
+  Object.entries(clinicAssignments || {}).forEach(([clinicKey, rawValue]) => {
+    const clinicId = Number.parseInt(clinicKey, 10);
+    if (!Number.isInteger(clinicId) || !clinicIds.includes(clinicId)) {
+      return;
+    }
+    if (rawValue == null || rawValue === '') {
+      return;
+    }
+    const assetId = Number(rawValue);
+    if (!Number.isFinite(assetId) || !accessibleAssetIds.includes(assetId)) {
+      throw new Error(`El activo ${rawValue} no pertenece a este grupo de clínicas`);
+    }
+    if (!assignmentsPerAsset.has(assetId)) {
+      assignmentsPerAsset.set(assetId, new Set());
+    }
+    assignmentsPerAsset.get(assetId).add(clinicId);
+  });
+
+  const bulkRows = [];
+  for (const [assetId, clinicSet] of assignmentsPerAsset.entries()) {
+    const clinicList = Array.from(clinicSet);
+    const primaryClinicId = clinicList[0] ?? null;
+    bulkRows.push(
+      ...clinicList.map(clinicId => ({
+        grupoClinicaId: groupId,
+        assetType: assetTypeKey,
+        assetId,
+        clinicaId
+      }))
+    );
+
+    const updatePayload = {
+      assignmentScope: 'clinic',
+      grupoClinicaId: null,
+      isActive: clinicList.length > 0
+    };
+    if (primaryClinicId != null) {
+      updatePayload.clinicaId = primaryClinicId;
+    }
+    await ClinicMetaAsset.update(updatePayload, { where: { id: assetId }, transaction });
+  }
+
+  const assignedAssetIds = new Set(assignmentsPerAsset.keys());
+  const unassignedAssetIds = accessibleAssetIds.filter(id => !assignedAssetIds.has(id));
+  if (unassignedAssetIds.length) {
+      await ClinicMetaAsset.update(
+        { assignmentScope: 'clinic', grupoClinicaId: null, isActive: false },
+        { where: { id: { [Op.in]: unassignedAssetIds } }, transaction }
+      );
+  }
+
+  if (bulkRows.length) {
+    await GroupAssetClinicAssignment.bulkCreate(bulkRows, { transaction });
+  }
+
+  await GrupoClinica.update(
+    {
+      [`${type}_assignment_mode`]: mode,
+      [`${type}_primary_asset_id`]: null,
+      [`${type}_assignment_updated_at`]: now
+    },
+    { where: { id_grupo: groupId }, transaction }
+  );
 }
 
 async function _updateGoogleAssignments({ key, mode, primaryAssetId, clinicAssignments = {}, groupId, clinicIds, transaction }) {
   const config = GOOGLE_MODE_CONFIG[key];
-  if (!config) {
+  const assetTypeKey = GOOGLE_GROUP_ASSET_TYPE_BY_SECTION[key];
+  if (!config || !assetTypeKey) {
     return;
   }
 
   const { model, primaryField, modeField, updatedField, activeField, clinicField = 'clinicaId' } = config;
   const now = new Date();
 
+  const accessibleAssets = await model.findAll({
+    where: { [clinicField]: { [Op.in]: clinicIds } },
+    transaction
+  });
+  const accessibleAssetIds = accessibleAssets.map(asset => asset.id);
+
   if (mode === 'group') {
-    if (!primaryAssetId) {
-      throw new Error(`Debes seleccionar un activo principal para ${key} en modo grupo`);
+    if (!primaryAssetId || !accessibleAssetIds.includes(Number(primaryAssetId))) {
+      throw new Error(`Debes seleccionar un activo principal válido para ${key}`);
     }
 
-    const primary = await model.findOne({
-      where: {
-        id: primaryAssetId,
-        [clinicField]: { [Op.in]: clinicIds }
-      },
+    await GroupAssetClinicAssignment.destroy({
+      where: { grupoClinicaId: groupId, assetType: assetTypeKey },
       transaction
     });
 
-    if (!primary) {
-      throw new Error(`El activo seleccionado (${primaryAssetId}) no pertenece a este grupo`);
+    if (activeField) {
+      await model.update(
+        { [activeField]: true },
+        { where: { id: primaryAssetId }, transaction }
+      );
+      const otherIds = accessibleAssetIds.filter(id => id !== Number(primaryAssetId));
+      if (otherIds.length) {
+        await model.update(
+          { [activeField]: false },
+          { where: { id: { [Op.in]: otherIds } }, transaction }
+        );
+      }
     }
 
     await GrupoClinica.update(
@@ -527,77 +651,290 @@ async function _updateGoogleAssignments({ key, mode, primaryAssetId, clinicAssig
       },
       { where: { id_grupo: groupId }, transaction }
     );
-  } else if (mode === 'clinic') {
-    const clinicIdsToProcess = Object.keys(clinicAssignments)
-      .map(id => parseInt(id, 10))
-      .filter(id => clinicIds.includes(id));
+    return;
+  }
 
-    for (const clinicaId of clinicIdsToProcess) {
-      const selectedId = clinicAssignments[clinicaId];
-      if (!selectedId) {
-        if (activeField) {
-          await model.update(
-            { [activeField]: false },
-            {
-              where: { [clinicField]: clinicaId },
-              transaction
-            }
-          );
-        }
-        continue;
-      }
+  await GroupAssetClinicAssignment.destroy({
+    where: { grupoClinicaId: groupId, assetType: assetTypeKey },
+    transaction
+  });
 
-      const selected = await model.findOne({
-        where: { id: selectedId },
-        transaction
-      });
+  const assignmentsPerAsset = new Map();
+  Object.entries(clinicAssignments || {}).forEach(([clinicKey, rawValue]) => {
+    const clinicId = Number.parseInt(clinicKey, 10);
+    if (!Number.isInteger(clinicId) || !clinicIds.includes(clinicId)) {
+      return;
+    }
+    if (rawValue == null || rawValue === '') {
+      return;
+    }
+    const assetId = Number(rawValue);
+    if (!Number.isFinite(assetId) || !accessibleAssetIds.includes(assetId)) {
+      throw new Error(`El activo ${rawValue} no pertenece a este grupo de clínicas`);
+    }
+    if (!assignmentsPerAsset.has(assetId)) {
+      assignmentsPerAsset.set(assetId, new Set());
+    }
+    assignmentsPerAsset.get(assetId).add(clinicId);
+  });
 
-      if (!selected) {
-        throw new Error(`Activo ${selectedId} no encontrado`);
-      }
+  const bulkRows = [];
+  for (const [assetId, clinicSet] of assignmentsPerAsset.entries()) {
+    bulkRows.push(
+      ...Array.from(clinicSet).map(clinicId => ({
+        grupoClinicaId: groupId,
+        assetType: assetTypeKey,
+        assetId,
+        clinicaId: clinicId
+      }))
+    );
+  }
 
-      const ownerClinicId = Number(selected[clinicField] ?? null);
-      const belongsToGroup = ownerClinicId == null || clinicIds.includes(ownerClinicId);
+  if (bulkRows.length) {
+    await GroupAssetClinicAssignment.bulkCreate(bulkRows, { transaction });
+  }
 
-      if (!belongsToGroup) {
-        throw new Error(`El activo ${selectedId} no pertenece al grupo`);
-      }
+  if (activeField) {
+    const assignedIds = Array.from(assignmentsPerAsset.keys());
+    if (assignedIds.length) {
+      await model.update(
+        { [activeField]: true },
+        { where: { id: { [Op.in]: assignedIds } }, transaction }
+      );
+    }
+    const unassignedIds = accessibleAssetIds.filter(id => !assignmentsPerAsset.has(id));
+    if (unassignedIds.length) {
+      await model.update(
+        { [activeField]: false },
+        { where: { id: { [Op.in]: unassignedIds } }, transaction }
+      );
+    }
+  }
 
-      if (ownerClinicId !== clinicaId) {
-        const updatePayload = { [clinicField]: clinicaId };
-        if (activeField) {
-          updatePayload[activeField] = true;
-        }
-        await model.update(updatePayload, { where: { id: selectedId }, transaction });
-      } else if (activeField) {
-        await model.update(
-          { [activeField]: true },
-          { where: { id: selectedId }, transaction }
-        );
-      }
+  await GrupoClinica.update(
+    {
+      [modeField]: mode,
+      [primaryField]: null,
+      [updatedField]: now
+    },
+    { where: { id_grupo: groupId }, transaction }
+  );
+}
 
-      if (activeField) {
-        await model.update(
-          { [activeField]: false },
-          {
-            where: {
-              [clinicField]: clinicaId,
-              id: { [Op.ne]: selectedId }
-            },
-            transaction
-          }
-        );
-      }
+async function _updateMetaAdAccounts({ mode, primaryAccountId, clinicAssignments = {}, groupId, clinicIds, transaction }) {
+  if (!mode) {
+    return;
+  }
+
+  const where = {
+    assetType: 'ad_account',
+    [Op.or]: [
+      { clinicaId: { [Op.in]: clinicIds } },
+      { grupoClinicaId: groupId }
+    ]
+  };
+
+  const accounts = await ClinicMetaAsset.findAll({ where, transaction });
+  if (!accounts.length) {
+    return;
+  }
+
+  const accountIds = accounts.map(acc => acc.id);
+
+  if (mode === 'group') {
+    const parsedPrimary = primaryAccountId != null ? Number(primaryAccountId) : null;
+    if (!parsedPrimary || !accountIds.includes(parsedPrimary)) {
+      throw new Error('Selecciona una cuenta válida de Meta Ads para el grupo');
     }
 
-    await GrupoClinica.update(
-      {
-        [modeField]: mode,
-        [primaryField]: null,
-        [updatedField]: now
-      },
-      { where: { id_grupo: groupId }, transaction }
+    await GroupAssetClinicAssignment.destroy({
+      where: { grupoClinicaId: groupId, assetType: GROUP_ASSET_TYPES.META_AD_ACCOUNT },
+      transaction
+    });
+
+    const remaining = accountIds.filter(id => id !== parsedPrimary);
+
+    if (remaining.length) {
+      await ClinicMetaAsset.update(
+        { assignmentScope: 'clinic', grupoClinicaId: null, isActive: false },
+        { where: { id: { [Op.in]: remaining } }, transaction }
+      );
+    }
+
+    await ClinicMetaAsset.update(
+      { assignmentScope: 'group', grupoClinicaId: groupId, isActive: true },
+      { where: { id: parsedPrimary }, transaction }
     );
+
+    return;
+  }
+
+  await GroupAssetClinicAssignment.destroy({
+    where: { grupoClinicaId: groupId, assetType: GROUP_ASSET_TYPES.META_AD_ACCOUNT },
+    transaction
+  });
+
+  const assignmentsPerAccount = new Map();
+  Object.entries(clinicAssignments || {}).forEach(([clinicKey, rawValue]) => {
+    const clinicId = Number.parseInt(clinicKey, 10);
+    if (!Number.isInteger(clinicId) || !clinicIds.includes(clinicId)) {
+      return;
+    }
+    if (rawValue == null || rawValue === '') {
+      return;
+    }
+    const accountId = Number(rawValue);
+    if (!Number.isFinite(accountId) || !accountIds.includes(accountId)) {
+      throw new Error(`La cuenta de Meta Ads ${rawValue} no pertenece a este grupo de clínicas`);
+    }
+    if (!assignmentsPerAccount.has(accountId)) {
+      assignmentsPerAccount.set(accountId, new Set());
+    }
+    assignmentsPerAccount.get(accountId).add(clinicId);
+  });
+
+  const bulkRows = [];
+  for (const [accountId, clinicSet] of assignmentsPerAccount.entries()) {
+    const clinicsList = Array.from(clinicSet);
+    const primaryClinic = clinicsList[0] ?? null;
+    bulkRows.push(
+      ...clinicsList.map(clinicId => ({
+        grupoClinicaId: groupId,
+        assetType: GROUP_ASSET_TYPES.META_AD_ACCOUNT,
+        assetId: accountId,
+        clinicaId
+      }))
+    );
+
+    const updatePayload = {
+      assignmentScope: 'clinic',
+      grupoClinicaId: null,
+      isActive: clinicsList.length > 0
+    };
+    if (primaryClinic != null) {
+      updatePayload.clinicaId = primaryClinic;
+    }
+    await ClinicMetaAsset.update(updatePayload, { where: { id: accountId }, transaction });
+  }
+
+  const assignedAccountIds = new Set(assignmentsPerAccount.keys());
+  const unassignedIds = accountIds.filter(id => !assignedAccountIds.has(id));
+  if (unassignedIds.length) {
+    await ClinicMetaAsset.update(
+      { assignmentScope: 'clinic', grupoClinicaId: null, isActive: false },
+      { where: { id: { [Op.in]: unassignedIds } }, transaction }
+    );
+  }
+
+  if (bulkRows.length) {
+    await GroupAssetClinicAssignment.bulkCreate(bulkRows, { transaction });
+  }
+}
+
+async function _updateGoogleAdAccounts({ mode, primaryAccountId, clinicAssignments = {}, groupId, clinicIds, transaction }) {
+  if (!mode) {
+    return;
+  }
+
+  const where = {
+    [Op.or]: [
+      { clinicaId: { [Op.in]: clinicIds } },
+      { grupoClinicaId: groupId }
+    ]
+  };
+
+  const accounts = await ClinicGoogleAdsAccount.findAll({ where, transaction });
+  if (!accounts.length) {
+    return;
+  }
+
+  const accountIds = accounts.map(acc => acc.id);
+
+  if (mode === 'group') {
+    const parsedPrimary = primaryAccountId != null ? Number(primaryAccountId) : null;
+    if (!parsedPrimary || !accountIds.includes(parsedPrimary)) {
+      throw new Error('Selecciona una cuenta válida de Google Ads para el grupo');
+    }
+
+    await GroupAssetClinicAssignment.destroy({
+      where: { grupoClinicaId: groupId, assetType: GROUP_ASSET_TYPES.GOOGLE_ADS_ACCOUNT },
+      transaction
+    });
+
+    const remaining = accountIds.filter(id => id !== parsedPrimary);
+    if (remaining.length) {
+      await ClinicGoogleAdsAccount.update(
+        { assignmentScope: 'clinic', grupoClinicaId: null, isActive: false },
+        { where: { id: { [Op.in]: remaining } }, transaction }
+      );
+    }
+
+    await ClinicGoogleAdsAccount.update(
+      { assignmentScope: 'group', grupoClinicaId: groupId, isActive: true },
+      { where: { id: parsedPrimary }, transaction }
+    );
+    return;
+  }
+
+  await GroupAssetClinicAssignment.destroy({
+    where: { grupoClinicaId: groupId, assetType: GROUP_ASSET_TYPES.GOOGLE_ADS_ACCOUNT },
+    transaction
+  });
+
+  const assignmentsPerAccount = new Map();
+  Object.entries(clinicAssignments || {}).forEach(([clinicKey, rawValue]) => {
+    const clinicId = Number.parseInt(clinicKey, 10);
+    if (!Number.isInteger(clinicId) || !clinicIds.includes(clinicId)) {
+      return;
+    }
+    if (rawValue == null || rawValue === '') {
+      return;
+    }
+    const accountId = Number(rawValue);
+    if (!Number.isFinite(accountId) || !accountIds.includes(accountId)) {
+      throw new Error(`La cuenta de Google Ads ${rawValue} no pertenece a este grupo de clínicas`);
+    }
+    if (!assignmentsPerAccount.has(accountId)) {
+      assignmentsPerAccount.set(accountId, new Set());
+    }
+    assignmentsPerAccount.get(accountId).add(clinicId);
+  });
+
+  const bulkRows = [];
+  for (const [accountId, clinicSet] of assignmentsPerAccount.entries()) {
+    const clinicsList = Array.from(clinicSet);
+    const primaryClinic = clinicsList[0] ?? null;
+    bulkRows.push(
+      ...clinicsList.map(clinicId => ({
+        grupoClinicaId: groupId,
+        assetType: GROUP_ASSET_TYPES.GOOGLE_ADS_ACCOUNT,
+        assetId: accountId,
+        clinicaId: clinicId
+      }))
+    );
+
+    const updatePayload = {
+      assignmentScope: 'clinic',
+      grupoClinicaId: null,
+      isActive: clinicsList.length > 0
+    };
+    if (primaryClinic != null) {
+      updatePayload.clinicaId = primaryClinic;
+    }
+    await ClinicGoogleAdsAccount.update(updatePayload, { where: { id: accountId }, transaction });
+  }
+
+  const assignedIds = new Set(assignmentsPerAccount.keys());
+  const unassigned = accountIds.filter(id => !assignedIds.has(id));
+  if (unassigned.length) {
+    await ClinicGoogleAdsAccount.update(
+      { assignmentScope: 'clinic', grupoClinicaId: null, isActive: false },
+      { where: { id: { [Op.in]: unassigned } }, transaction }
+    );
+  }
+
+  if (bulkRows.length) {
+    await GroupAssetClinicAssignment.bulkCreate(bulkRows, { transaction });
   }
 }
 
@@ -697,6 +1034,21 @@ async function updateGroupConfig(groupId, payload) {
               transaction
             }
           );
+
+          await GroupAssetClinicAssignment.destroy({
+            where: {
+              grupoClinicaId: groupId,
+              assetType: GROUP_ASSET_TYPES.META_AD_ACCOUNT
+            },
+            transaction
+          });
+          await GroupAssetClinicAssignment.destroy({
+            where: {
+              grupoClinicaId: groupId,
+              assetType: GROUP_ASSET_TYPES.GOOGLE_ADS_ACCOUNT
+            },
+            transaction
+          });
         } else {
           await ClinicMetaAsset.update(
             {
@@ -832,6 +1184,34 @@ async function updateGroupConfig(groupId, payload) {
           mode,
           primaryAssetId: businessProfile.primaryAssetId,
           clinicAssignments: businessProfile.clinicAssignments || {},
+          groupId,
+          clinicIds,
+          transaction
+        });
+      }
+    }
+
+    if (payload.adsAccounts) {
+      const { meta, google } = payload.adsAccounts;
+
+      if (meta) {
+        const mode = _ensureValidMode(meta.mode, 'adsAccounts.meta.mode');
+        await _updateMetaAdAccounts({
+          mode,
+          primaryAccountId: meta.primaryAccountId ?? null,
+          clinicAssignments: meta.clinicAssignments || {},
+          groupId,
+          clinicIds,
+          transaction
+        });
+      }
+
+      if (google) {
+        const mode = _ensureValidMode(google.mode, 'adsAccounts.google.mode');
+        await _updateGoogleAdAccounts({
+          mode,
+          primaryAccountId: google.primaryAccountId ?? null,
+          clinicAssignments: google.clinicAssignments || {},
           groupId,
           clinicIds,
           transaction

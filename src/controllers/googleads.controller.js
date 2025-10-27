@@ -496,7 +496,10 @@ exports.getHealth = async (req, res) => {
     const start = parseDate(req.query.startDate, new Date(end.getTime() - (days - 1) * dayMs));
     const prevEnd = new Date(start.getTime() - dayMs);
     const prevStart = new Date(prevEnd.getTime() - (end.getTime() - start.getTime()));
-    const recentEnd = new Date(end.getTime() - dayMs);
+    const recentEndCandidate = new Date(end.getTime() - dayMs);
+    const recentEnd = recentEndCandidate.getTime() >= start.getTime()
+      ? recentEndCandidate
+      : new Date(start.getTime());
     const recentStartCandidate = new Date(recentEnd.getTime() - dayMs);
     const recentStart = new Date(Math.max(start.getTime(), recentStartCandidate.getTime()));
     const startStr = formatDate(start);
