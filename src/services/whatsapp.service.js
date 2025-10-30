@@ -3,12 +3,12 @@ const axios = require('axios');
 const FALLBACK_CONFIG = {
     phoneNumberId: '101717972850686',
     accessToken:
-        'EAAZAsOZAwCgukBP3ASYn9E4cb5EaAuSs37LZAIA78YL1n33lNlbIZAHSJYHHiBTqqIu2npXqB3h7h77kym8zScuGW4oIOWmY9grYCafpJfk1ueiDUKpAJ1ypnIILnly1xSZA0YebAmAvtoBxHxVBozQSJFWcnSOoOnZBRJKmuHRRK55LPSsP04bq29FR6zqTlZCMZCn6OSHDgNFqFdKJqdyZAqT4UZBS7o8FePiOOvrisZCbWQ28gZDZD',
+        'EAAZAsOZAwCgukBPZBjIzcxUntETJTBYBP98DwdCZCgZBsmnxcLS7gN8hoiWMmMnyzaZBjwfRKimzsMKMQdpv3oo7XgWzJCZAzmKUvdWSfo9lCKaanDBRAoZA9RdpFJYbAImZCY5KWZAG85nedJpaap6FLCYbMKV4EkW6JZAeFEpjCFQZCKhzlXA6UuqDMPnuCRasOcs0NG6oL0bQEclTZASPYu3WLmhKV3yXDpTeClrPiuQHldEh1CPIZD',
     apiVersion: 'v22.0',
     defaultCountryCode: '+34',
     templateName: 'hello_world',
     templateLanguage: 'en_US',
-    useTemplate: true,
+    useTemplate: false,
 };
 
 class WhatsAppService {
