@@ -52,6 +52,9 @@ module.exports = (sequelize, DataTypes) => {
     telefono: { type: DataTypes.STRING(64), allowNull: true },
     phone_hash: { type: DataTypes.STRING(128), allowNull: true },
     notas: { type: DataTypes.TEXT, allowNull: true },
+    notas_internas: { type: DataTypes.TEXT, allowNull: true },
+    asignado_a: { type: DataTypes.INTEGER, allowNull: true },
+    motivo_descarte: { type: DataTypes.STRING(512), allowNull: true },
     status_lead: {
       type: DataTypes.ENUM('nuevo', 'contactado', 'convertido', 'descartado'),
       allowNull: false,

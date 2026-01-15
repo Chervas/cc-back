@@ -26,6 +26,7 @@ const localRoutes = require('./routes/local.routes');
 const googleAdsRoutes = require('./routes/googleads.routes');
 const jobRequestsRoutes = require('./routes/jobrequests.routes');
 const intakeRoutes = require('./routes/intake.routes');
+const campaignRoutes = require('./routes/campaign.routes');
 const jobScheduler = require('./services/jobScheduler.service');
 
 
@@ -92,6 +93,8 @@ app.use('/api/whatsapp', whatsappRoutes);
 console.log('Ruta /api/whatsapp configurada');
 app.use('/api/intake', intakeRoutes);
 console.log('Ruta /api/intake configurada');
+app.use('/api/campaigns', campaignRoutes);
+console.log('Ruta /api/campaigns configurada');
 console.log('Routes registered successfully');
 // Puerto del servidor
 const PORT = process.env.PORT || 3000;

@@ -281,3 +281,41 @@ exports.listLeads = asyncHandler(async (req, res) => {
     items: leads.rows
   });
 });
+
+exports.updateLeadStatus = asyncHandler(async (req, res) => {
+  const { id } = req.params;
+  const { status_lead, notas_internas, asignado_a, motivo_descarte } = req.body || {};
+
+  const lead = await LeadIntake.findByPk(id);
+  if (!lead) {
+    return res.status(404).json({ message: 'Lead no encontrado' });
+  }
+
+  if (status_lead && !STATUSES.has(status_lead)) {
+    return res.status(400).json({ message: 'status_lead inválido' });
+  }
+
+  if (status_lead === 'descartado' && !motivo_descarte) {
+    return res.status(400).json({ message: 'motivo_descarte es obligatorio al descartar' });
+  }
+
+  const updatePayload = {};
+  if (status_lead) updatePayload.status_lead = status_lead;
+  if (notas_internas !== undefined) updatePayload.notas_internas = notas_internas;
+  if (asignado_a !== undefined) updatePayload.asignado_a = asignado_a;
+  if (motivo_descarte !== undefined) updatePayload.motivo_descarte = motivo_descarte;
+
+  await lead.update(updatePayload);
+
+  try {
+    await LeadAttributionAudit.create({
+      lead_intake_id: lead.id,
+      raw_payload: { status_lead, notas_internas, asignado_a, motivo_descarte },
+      attribution_steps: { action: 'status_update', userId: req.userData?.userId || null }
+    });
+  } catch (auditErr) {
+    console.warn('⚠️ No se pudo registrar auditoría de cambio de estado:', auditErr.message || auditErr);
+  }
+
+  res.status(200).json(lead);
+});
