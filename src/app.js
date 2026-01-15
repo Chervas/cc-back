@@ -25,6 +25,7 @@ const webRoutes = require('./routes/web.routes');
 const localRoutes = require('./routes/local.routes');
 const googleAdsRoutes = require('./routes/googleads.routes');
 const jobRequestsRoutes = require('./routes/jobrequests.routes');
+const intakeRoutes = require('./routes/intake.routes');
 const jobScheduler = require('./services/jobScheduler.service');
 
 
@@ -37,7 +38,12 @@ const corsOptions = {
     credentials: true
 };
 app.use(cors(corsOptions));
-app.use(express.json());
+app.use(express.json({
+    verify: (req, res, buf) => {
+        // Guardar el cuerpo crudo para validar firmas HMAC de intake
+        req.rawBody = buf;
+    }
+}));
 app.use(cookieParser());
 // ✅ CORREGIDO: Usar rutas con prefijo /api/ como en la versión que funcionaba
 console.log('Configurando rutas...');
@@ -84,6 +90,8 @@ app.use('/api/job-requests', jobRequestsRoutes);
 console.log('Ruta /api/job-requests configurada');
 app.use('/api/whatsapp', whatsappRoutes);
 console.log('Ruta /api/whatsapp configurada');
+app.use('/api/intake', intakeRoutes);
+console.log('Ruta /api/intake configurada');
 console.log('Routes registered successfully');
 // Puerto del servidor
 const PORT = process.env.PORT || 3000;
