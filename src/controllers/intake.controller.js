@@ -221,8 +221,10 @@ exports.listLeads = asyncHandler(async (req, res) => {
   } = req.query;
 
   const where = {};
-  const clinicIdParsed = parseInteger(clinicId || req.query.clinica_id);
-  const groupIdParsed = parseInteger(groupId || req.query.grupo_clinica_id);
+  const clinicIdRaw = clinicId || req.query.clinica_id;
+  const groupIdRaw = groupId || req.query.grupo_clinica_id;
+  const clinicIdParsed = clinicIdRaw === 'all' ? null : parseInteger(clinicIdRaw);
+  const groupIdParsed = groupIdRaw === 'all' ? null : parseInteger(groupIdRaw);
   const campanaIdParsed = parseInteger(campanaId || req.query.campana_id);
 
   if (clinicIdParsed !== null) where.clinica_id = clinicIdParsed;
