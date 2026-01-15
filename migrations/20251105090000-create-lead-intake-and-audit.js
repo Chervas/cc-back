@@ -18,13 +18,7 @@ module.exports = {
         onUpdate: 'CASCADE',
         onDelete: 'SET NULL'
       },
-      campana_id: {
-        type: Sequelize.INTEGER,
-        allowNull: true,
-        references: { model: 'Campanas', key: 'id' },
-        onUpdate: 'CASCADE',
-        onDelete: 'SET NULL'
-      },
+      campana_id: { type: Sequelize.INTEGER, allowNull: true },
       channel: {
         type: Sequelize.ENUM('paid', 'organic', 'unknown'),
         allowNull: false,
