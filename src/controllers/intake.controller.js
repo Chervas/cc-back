@@ -262,8 +262,7 @@ exports.listLeads = asyncHandler(async (req, res) => {
     where,
     include: [
       { model: Clinica, as: 'clinica', attributes: ['id_clinica', 'nombre_clinica'] },
-      { model: GrupoClinica, as: 'grupoClinica', attributes: ['id_grupo', 'nombre_grupo'] },
-      Campana ? { model: Campana, as: 'campana', attributes: ['id', 'nombre', 'campaign_id'] } : null
+      { model: GrupoClinica, as: 'grupoClinica', attributes: ['id_grupo', 'nombre_grupo'] }
     ].filter(Boolean),
     order: [[orderField, orderDirection]],
     limit: parsedLimit,
