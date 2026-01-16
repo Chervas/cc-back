@@ -11,7 +11,7 @@ const Campana = db.Campana;
 
 const CHANNELS = new Set(['paid', 'organic', 'unknown']);
 const SOURCES = new Set(['meta_ads', 'google_ads', 'web', 'whatsapp', 'call_click', 'tiktok_ads', 'seo', 'direct', 'local_services']);
-const STATUSES = new Set(['nuevo', 'contactado', 'convertido', 'descartado']);
+const STATUSES = new Set(['nuevo', 'contactado', 'citado', 'convertido', 'descartado']);
 
 const SIGNATURE_HEADER = 'x-cc-signature';
 const SIGNATURE_HEADER_SHA = 'x-cc-signature-sha256';
@@ -283,6 +283,67 @@ exports.listLeads = asyncHandler(async (req, res) => {
   });
 });
 
+exports.getLeadStats = asyncHandler(async (req, res) => {
+  const {
+    clinicId,
+    groupId,
+    campanaId,
+    channel,
+    source,
+    search,
+    startDate,
+    endDate
+  } = req.query;
+
+  const where = {};
+  const clinicIdRaw = clinicId || req.query.clinica_id;
+  const groupIdRaw = groupId || req.query.grupo_clinica_id;
+  const clinicIdParsed = clinicIdRaw === 'all' ? null : parseInteger(clinicIdRaw);
+  const groupIdParsed = groupIdRaw === 'all' ? null : parseInteger(groupIdRaw);
+  const campanaIdParsed = parseInteger(campanaId || req.query.campana_id);
+
+  if (clinicIdParsed !== null) where.clinica_id = clinicIdParsed;
+  if (groupIdParsed !== null) where.grupo_clinica_id = groupIdParsed;
+  if (campanaIdParsed !== null) where.campana_id = campanaIdParsed;
+  if (channel && CHANNELS.has(channel)) where.channel = channel;
+  if (source && SOURCES.has(source)) where.source = source;
+
+  if (startDate || endDate) {
+    where.created_at = {};
+    if (startDate) where.created_at[Op.gte] = new Date(startDate);
+    if (endDate) where.created_at[Op.lte] = new Date(endDate);
+  }
+
+  if (search) {
+    const term = `%${search}%`;
+    where[Op.or] = [
+      { nombre: { [Op.like]: term } },
+      { email: { [Op.like]: term } },
+      { telefono: { [Op.like]: term } }
+    ];
+  }
+
+  // Obtener conteos por estado
+  const total = await LeadIntake.count({ where });
+  const nuevos = await LeadIntake.count({ where: { ...where, status_lead: 'nuevo' } });
+  const contactados = await LeadIntake.count({ where: { ...where, status_lead: 'contactado' } });
+  const citados = await LeadIntake.count({ where: { ...where, status_lead: 'citado' } });
+  const convertidos = await LeadIntake.count({ where: { ...where, status_lead: 'convertido' } });
+  const descartados = await LeadIntake.count({ where: { ...where, status_lead: 'descartado' } });
+
+  const tasa_conversion = total > 0 ? (convertidos / total) * 100 : 0;
+
+  res.status(200).json({
+    total,
+    nuevos,
+    contactados,
+    citados,
+    convertidos,
+    descartados,
+    tasa_conversion
+  });
+});
+
 exports.updateLeadStatus = asyncHandler(async (req, res) => {
   const { id } = req.params;
   const { status_lead, notas_internas, asignado_a, motivo_descarte } = req.body || {};
@@ -319,4 +380,70 @@ exports.updateLeadStatus = asyncHandler(async (req, res) => {
   }
 
   res.status(200).json(lead);
+});
+
+exports.registrarContacto = asyncHandler(async (req, res) => {
+  const { id } = req.params;
+  const { motivo, notas } = req.body || {};
+
+  const lead = await LeadIntake.findByPk(id);
+  if (!lead) {
+    return res.status(404).json({ message: 'Lead no encontrado' });
+  }
+
+  // Obtener historial actual o inicializar
+  const historial = lead.historial_contactos || [];
+  
+  // Añadir nuevo registro de contacto
+  const nuevoContacto = {
+    fecha: new Date().toISOString(),
+    motivo: motivo || 'no_contesta',
+    notas: notas || null,
+    usuario_id: req.userData?.userId || null
+  };
+  
+  historial.push(nuevoContacto);
+
+  // Actualizar el lead
+  await lead.update({
+    historial_contactos: historial,
+    status_lead: 'contactado'
+  });
+
+  // Registrar auditoría
+  try {
+    await LeadAttributionAudit.create({
+      lead_intake_id: lead.id,
+      raw_payload: { action: 'registrar_contacto', motivo, notas },
+      attribution_steps: { action: 'registrar_contacto', userId: req.userData?.userId || null }
+    });
+  } catch (auditErr) {
+    console.warn('⚠️ No se pudo registrar auditoría de contacto:', auditErr.message || auditErr);
+  }
+
+  res.status(200).json(lead);
+});
+
+exports.deleteLead = asyncHandler(async (req, res) => {
+  const { id } = req.params;
+
+  const lead = await LeadIntake.findByPk(id);
+  if (!lead) {
+    return res.status(404).json({ message: 'Lead no encontrado' });
+  }
+
+  // Registrar auditoría antes de eliminar
+  try {
+    await LeadAttributionAudit.create({
+      lead_intake_id: lead.id,
+      raw_payload: { action: 'delete', lead_data: lead.toJSON() },
+      attribution_steps: { action: 'delete', userId: req.userData?.userId || null }
+    });
+  } catch (auditErr) {
+    console.warn('⚠️ No se pudo registrar auditoría de eliminación:', auditErr.message || auditErr);
+  }
+
+  await lead.destroy();
+
+  res.status(200).json({ message: 'Lead eliminado correctamente', id: parseInt(id) });
 });

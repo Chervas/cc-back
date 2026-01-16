@@ -56,11 +56,17 @@ module.exports = (sequelize, DataTypes) => {
     asignado_a: { type: DataTypes.INTEGER, allowNull: true },
     motivo_descarte: { type: DataTypes.STRING(512), allowNull: true },
     status_lead: {
-      type: DataTypes.ENUM('nuevo', 'contactado', 'convertido', 'descartado'),
+      type: DataTypes.ENUM('nuevo', 'contactado', 'citado', 'convertido', 'descartado'),
       allowNull: false,
       defaultValue: 'nuevo'
     },
-    consentimiento_canal: { type: DataTypes.JSON, allowNull: true }
+    consentimiento_canal: { type: DataTypes.JSON, allowNull: true },
+    // Historial de contactos (array de objetos con fecha, motivo, etc.)
+    historial_contactos: { type: DataTypes.JSON, allowNull: true, defaultValue: [] },
+    // Flags de avisos del lead
+    es_paciente: { type: DataTypes.BOOLEAN, allowNull: true, defaultValue: false },
+    suele_cancelar: { type: DataTypes.BOOLEAN, allowNull: true, defaultValue: false },
+    no_acudio_cita: { type: DataTypes.BOOLEAN, allowNull: true, defaultValue: false }
   }, {
     sequelize,
     modelName: 'LeadIntake',
