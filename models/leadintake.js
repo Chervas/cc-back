@@ -55,6 +55,8 @@ module.exports = (sequelize, DataTypes) => {
     notas_internas: { type: DataTypes.TEXT, allowNull: true },
     asignado_a: { type: DataTypes.INTEGER, allowNull: true },
     motivo_descarte: { type: DataTypes.STRING(512), allowNull: true },
+    num_contactos: { type: DataTypes.INTEGER, allowNull: false, defaultValue: 0 },
+    ultimo_contacto: { type: DataTypes.DATE, allowNull: true },
     status_lead: {
       type: DataTypes.ENUM('nuevo', 'contactado', 'citado', 'convertido', 'descartado'),
       allowNull: false,

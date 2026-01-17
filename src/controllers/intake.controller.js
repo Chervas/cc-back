@@ -407,6 +407,8 @@ exports.registrarContacto = asyncHandler(async (req, res) => {
   // Actualizar el lead
   await lead.update({
     historial_contactos: historial,
+    num_contactos: (lead.num_contactos || 0) + 1,
+    ultimo_contacto: new Date(),
     status_lead: 'contactado'
   });
 
