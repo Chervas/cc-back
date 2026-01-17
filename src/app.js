@@ -30,6 +30,7 @@ const campaignRoutes = require('./routes/campaign.routes');
 const campaignRequestRoutes = require('./routes/campaign-request.routes');
 const templatesRoutes = require('./routes/templates.routes');
 const citasRoutes = require('./routes/citas.routes');
+const tratamientosRoutes = require('./routes/tratamientos.routes');
 const jobScheduler = require('./services/jobScheduler.service');
 
 
@@ -104,6 +105,8 @@ app.use('/api', templatesRoutes);
 console.log('Rutas /api/templates, /api/flows, /api/message-log configuradas');
 app.use('/api/citas', citasRoutes);
 console.log('Ruta /api/citas configurada');
+app.use('/api/tratamientos', tratamientosRoutes);
+console.log('Ruta /api/tratamientos configurada');
 console.log('Routes registered successfully');
 // Puerto del servidor
 const PORT = process.env.PORT || 3000;

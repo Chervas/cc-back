@@ -30,6 +30,11 @@ module.exports = (sequelize, DataTypes) => {
     titulo: { type: DataTypes.STRING(255), allowNull: true },
     nota: { type: DataTypes.TEXT, allowNull: true },
     motivo: { type: DataTypes.STRING(255), allowNull: true },
+    tipo_cita: {
+      type: DataTypes.ENUM('primera_sin_trat', 'primera_con_trat', 'continuacion', 'urgencia', 'revision'),
+      allowNull: false,
+      defaultValue: 'continuacion'
+    },
     estado: {
       type: DataTypes.ENUM('pendiente', 'confirmada', 'cancelada'),
       allowNull: false,

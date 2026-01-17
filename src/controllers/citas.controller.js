@@ -49,6 +49,7 @@ exports.createCita = asyncHandler(async (req, res) => {
         estado = 'pendiente',
         nota,
         motivo,
+        tipo_cita = 'continuacion',
         lead_intake_id = null,
         doctor_id = null,
         instalacion_id = null,
@@ -97,6 +98,7 @@ exports.createCita = asyncHandler(async (req, res) => {
         titulo: datosPaciente.titulo || null,
         nota: nota || null,
         motivo: motivo || null,
+        tipo_cita,
         estado,
         inicio,
         fin
