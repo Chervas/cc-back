@@ -58,6 +58,11 @@ exports.searchPacientes = async (req, res) => {
     const normPhone = normalizePhone(req.query.telefono || '');
     const normEmail = normalizeEmail(req.query.email || '');
 
+    // No permitir búsqueda vacía para evitar devolver todo
+    if (!query && !normPhone && !normEmail) {
+      return res.json([]);
+    }
+
     const whereOr = [
       { nombre: { [Op.like]: `%${query}%` } },
       { apellidos: { [Op.like]: `%${query}%` } },
@@ -73,13 +78,15 @@ exports.searchPacientes = async (req, res) => {
 
     const whereClause = { [Op.or]: whereOr };
 
-    if (clinicaId) {
-      const clinicaIds = await getClinicaIdsForScope(clinicaId, scope);
-      if (clinicaIds.length === 1) {
-        whereClause.clinica_id = clinicaIds[0];
-      } else if (clinicaIds.length > 1) {
-        whereClause.clinica_id = { [Op.in]: clinicaIds };
-      }
+    // Clinica_id es requerido en scope clinica; en grupo, usamos el grupo de la clínica base
+    if (!clinicaId) {
+      return res.status(400).json({ message: 'clinica_id es obligatorio para la búsqueda' });
+    }
+    const clinicaIds = await getClinicaIdsForScope(clinicaId, scope);
+    if (clinicaIds.length === 1) {
+      whereClause.clinica_id = clinicaIds[0];
+    } else if (clinicaIds.length > 1) {
+      whereClause.clinica_id = { [Op.in]: clinicaIds };
     }
 
     const pacientes = await Paciente.findAll({
