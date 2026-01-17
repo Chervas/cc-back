@@ -197,6 +197,25 @@ exports.createPaciente = async (req, res) => {
       return res.status(400).json({ message: 'clinica_id es obligatorio' });
     }
 
+    // Duplicados globales (cualquier clínica)
+    const globalDupWhere = { [Op.or]: [] };
+    if (normPhone) globalDupWhere[Op.or].push({ telefono_movil: normPhone });
+    if (normEmail) globalDupWhere[Op.or].push({ email: normEmail });
+    if (globalDupWhere[Op.or].length > 0) {
+      const dupGlobal = await Paciente.findOne({
+        where: globalDupWhere,
+        include: [{ model: Clinica, as: 'clinica' }]
+      });
+      if (dupGlobal) {
+        return res.status(409).json({
+          error: 'PACIENTE_DUPLICADO',
+          message: `Ya existe un paciente con este teléfono/email en ${dupGlobal.clinica?.nombre_clinica || 'otra clínica'}`,
+          paciente: dupGlobal,
+          sameClinic: dupGlobal.clinica_id === parseInt(clinica_id)
+        });
+      }
+    }
+
     // Verificar duplicados en el grupo (por teléfono o email exacto)
     const clinicaIds = await getClinicaIdsForScope(clinica_id, 'grupo');
     const dupWhere = { [Op.or]: [] };
