@@ -28,7 +28,7 @@ module.exports = (sequelize, DataTypes) => {
     dni: DataTypes.STRING,
     telefono_movil: {
       type: DataTypes.STRING,
-      allowNull: false
+      allowNull: true
     },
     email: DataTypes.STRING,
     telefono_secundario: DataTypes.STRING,

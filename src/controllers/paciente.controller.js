@@ -240,19 +240,21 @@ exports.createPaciente = async (req, res) => {
     } else if (clinicaIds.length > 1) {
       dupWhere.clinica_id = { [Op.in]: clinicaIds };
     }
-    const existente = await Paciente.findOne({
-      where: dupWhere,
-      include: [{ model: Clinica, as: 'clinica' }]
-    });
-    if (existente) {
-      return res.status(409).json({
-        error: 'PACIENTE_DUPLICADO',
-        message: existente.clinica_id === parseInt(clinica_id)
-          ? 'Ya existe un paciente con este teléfono/email en esta clínica'
-          : `Ya existe un paciente con este teléfono/email en ${existente.clinica?.nombre_clinica || 'otra clínica del grupo'}`,
-        paciente: existente,
-        sameClinic: existente.clinica_id === parseInt(clinica_id)
+    if (dupWhere[Op.or].length > 0) {
+      const existente = await Paciente.findOne({
+        where: dupWhere,
+        include: [{ model: Clinica, as: 'clinica' }]
       });
+      if (existente) {
+        return res.status(409).json({
+          error: 'PACIENTE_DUPLICADO',
+          message: existente.clinica_id === parseInt(clinica_id)
+            ? 'Ya existe un paciente con este teléfono/email en esta clínica'
+            : `Ya existe un paciente con este teléfono/email en ${existente.clinica?.nombre_clinica || 'otra clínica del grupo'}`,
+          paciente: existente,
+          sameClinic: existente.clinica_id === parseInt(clinica_id)
+        });
+      }
     }
 
     const newPaciente = await Paciente.create({

@@ -38,7 +38,8 @@ module.exports = {
       campana_id: {
         type: Sequelize.INTEGER,
         allowNull: true,
-        references: { model: 'Campanas', key: 'id' },
+        // En BD la PK de Campanas es id_campana (no id)
+        references: { model: 'Campanas', key: 'id_campana' },
         onUpdate: 'CASCADE',
         onDelete: 'SET NULL'
       },

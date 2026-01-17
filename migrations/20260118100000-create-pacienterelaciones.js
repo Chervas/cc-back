@@ -3,6 +3,15 @@
 /** @type {import('sequelize-cli').Migration} */
 module.exports = {
   async up(queryInterface, Sequelize) {
+    // Idempotente: si ya existe la tabla (creada manualmente), no se intenta recrear
+    const table = await queryInterface.sequelize.query(
+      "SELECT COUNT(*) AS count FROM information_schema.tables WHERE table_schema = DATABASE() AND table_name = 'PacienteRelaciones';",
+      { type: Sequelize.QueryTypes.SELECT }
+    );
+    if (table[0].count > 0) {
+      return;
+    }
+
     await queryInterface.createTable('PacienteRelaciones', {
       id: {
         type: Sequelize.INTEGER,
