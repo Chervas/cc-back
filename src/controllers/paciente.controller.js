@@ -2,6 +2,16 @@
 const { Paciente, Clinica } = require('../../models');
 const { Op } = require('sequelize');
 
+const normalizePhone = (phone) => {
+  if (!phone) return null;
+  return phone.toString().replace(/\D+/g, '');
+};
+
+const normalizeEmail = (email) => {
+  if (!email) return null;
+  return email.toString().trim().toLowerCase();
+};
+
 const getClinicaIdsForScope = async (clinicaId, scope) => {
   if (!clinicaId) return [];
   if (scope !== 'grupo') return [parseInt(clinicaId)];
@@ -45,6 +55,8 @@ exports.searchPacientes = async (req, res) => {
     const query = req.query.q || req.query.query || '';
     const scope = req.query.scope || 'clinica';
     const clinicaId = req.query.clinica_id;
+    const normPhone = normalizePhone(req.query.telefono || '');
+    const normEmail = normalizeEmail(req.query.email || '');
 
     const whereOr = [
       { nombre: { [Op.like]: `%${query}%` } },
@@ -52,6 +64,12 @@ exports.searchPacientes = async (req, res) => {
       { telefono_movil: { [Op.like]: `%${query}%` } },
       { email: { [Op.like]: `%${query}%` } }
     ];
+    if (normPhone) {
+      whereOr.push({ telefono_movil: { [Op.like]: `%${normPhone}%` } });
+    }
+    if (normEmail) {
+      whereOr.push({ email: { [Op.like]: `%${normEmail}%` } });
+    }
 
     const whereClause = { [Op.or]: whereOr };
 
@@ -79,7 +97,9 @@ exports.searchPacientes = async (req, res) => {
 exports.checkDuplicates = async (req, res) => {
   try {
     const { telefono, email, clinica_id, scope = 'grupo' } = req.query;
-    if (!telefono && !email) {
+    const normPhone = normalizePhone(telefono);
+    const normEmail = normalizeEmail(email);
+    if (!normPhone && !normEmail) {
       return res.json({ exists: false });
     }
     if (!clinica_id) {
@@ -89,8 +109,18 @@ exports.checkDuplicates = async (req, res) => {
     const clinicaIds = await getClinicaIdsForScope(clinica_id, scope);
     const whereClause = { [Op.and]: [] };
     const orClause = [];
-    if (telefono) orClause.push({ telefono_movil: telefono });
-    if (email) orClause.push({ email });
+    if (normPhone) {
+      orClause.push({ telefono_movil: normPhone });
+      orClause.push({ telefono_movil: telefono });
+    } else if (telefono) {
+      orClause.push({ telefono_movil: telefono });
+    }
+    if (normEmail) {
+      orClause.push({ email: normEmail });
+      orClause.push({ email: email });
+    } else if (email) {
+      orClause.push({ email });
+    }
     whereClause[Op.or] = orClause;
     if (clinicaIds.length === 1) {
       whereClause.clinica_id = clinicaIds[0];
@@ -135,7 +165,9 @@ exports.getPacienteById = async (req, res) => {
 exports.createPaciente = async (req, res) => {
   try {
     const { nombre, apellidos, dni, telefono_movil, email, telefono_secundario, foto, fecha_nacimiento, edad, estatura, peso, sexo, profesion, fecha_alta, fecha_baja, alergias, antecedentes, medicacion, paciente_conocido, como_nos_conocio, procedencia, clinica_id } = req.body;
-    if (!nombre || !telefono_movil) {
+    const normPhone = normalizePhone(telefono_movil);
+    const normEmail = normalizeEmail(email);
+    if (!nombre || !normPhone) {
       return res.status(400).json({ message: 'Faltan campos obligatorios (nombre, telefono_movil)' });
     }
     if (!clinica_id) {
@@ -145,8 +177,14 @@ exports.createPaciente = async (req, res) => {
     // Verificar duplicados en el grupo (por teléfono o email exacto)
     const clinicaIds = await getClinicaIdsForScope(clinica_id, 'grupo');
     const dupWhere = { [Op.or]: [] };
-    if (telefono_movil) dupWhere[Op.or].push({ telefono_movil });
-    if (email) dupWhere[Op.or].push({ email });
+    if (normPhone) {
+      dupWhere[Op.or].push({ telefono_movil: normPhone });
+      dupWhere[Op.or].push({ telefono_movil });
+    }
+    if (normEmail) {
+      dupWhere[Op.or].push({ email: normEmail });
+      dupWhere[Op.or].push({ email });
+    }
     if (clinicaIds.length === 1) {
       dupWhere.clinica_id = clinicaIds[0];
     } else if (clinicaIds.length > 1) {
@@ -171,8 +209,8 @@ exports.createPaciente = async (req, res) => {
       nombre,
       apellidos,
       dni,
-      telefono_movil,
-      email,
+      telefono_movil: normPhone,
+      email: normEmail,
       telefono_secundario,
       foto,
       fecha_nacimiento,
