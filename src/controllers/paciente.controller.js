@@ -1,5 +1,5 @@
 'use strict';
-const { Paciente, Clinica } = require('../../models');
+const { Paciente, Clinica, PacienteRelacion } = require('../../models');
 const { Op } = require('sequelize');
 
 const normalizePhone = (phone) => {
@@ -151,7 +151,19 @@ exports.checkDuplicates = async (req, res) => {
 exports.getPacienteById = async (req, res) => {
   try {
     const paciente = await Paciente.findByPk(req.params.id, {
-      include: [{ model: Clinica, as: 'clinica' }]
+      include: [
+        { model: Clinica, as: 'clinica' },
+        {
+          model: PacienteRelacion,
+          as: 'relaciones',
+          include: [{ model: Paciente, as: 'relacionado', include: [{ model: Clinica, as: 'clinica' }] }]
+        },
+        {
+          model: PacienteRelacion,
+          as: 'tutorDe',
+          include: [{ model: Paciente, as: 'paciente', include: [{ model: Clinica, as: 'clinica' }] }]
+        }
+      ]
     });
     if (!paciente) {
       return res.status(404).json({ message: 'Paciente not found' });
@@ -164,11 +176,15 @@ exports.getPacienteById = async (req, res) => {
 
 exports.createPaciente = async (req, res) => {
   try {
-    const { nombre, apellidos, dni, telefono_movil, email, telefono_secundario, foto, fecha_nacimiento, edad, estatura, peso, sexo, profesion, fecha_alta, fecha_baja, alergias, antecedentes, medicacion, paciente_conocido, como_nos_conocio, procedencia, clinica_id } = req.body;
+    const { nombre, apellidos, dni, telefono_movil, email, telefono_secundario, foto, fecha_nacimiento, edad, estatura, peso, sexo, profesion, fecha_alta, fecha_baja, alergias, antecedentes, medicacion, paciente_conocido, como_nos_conocio, procedencia, clinica_id, tutor } = req.body;
     const normPhone = normalizePhone(telefono_movil);
     const normEmail = normalizeEmail(email);
-    if (!nombre || !normPhone) {
-      return res.status(400).json({ message: 'Faltan campos obligatorios (nombre, telefono_movil)' });
+    if (!nombre) {
+      return res.status(400).json({ message: 'Faltan campos obligatorios (nombre)' });
+    }
+    // Permitimos sin teléfono/email solo si hay tutor
+    if (!normPhone && !normEmail && !tutor?.id_paciente_relacionado) {
+      return res.status(400).json({ message: 'Se requiere teléfono/email o un tutor como contacto principal' });
     }
     if (!clinica_id) {
       return res.status(400).json({ message: 'clinica_id es obligatorio' });
@@ -179,11 +195,19 @@ exports.createPaciente = async (req, res) => {
     const dupWhere = { [Op.or]: [] };
     if (normPhone) {
       dupWhere[Op.or].push({ telefono_movil: normPhone });
-      dupWhere[Op.or].push({ telefono_movil });
+      if (telefono_movil && telefono_movil !== normPhone) {
+        dupWhere[Op.or].push({ telefono_movil });
+      }
     }
     if (normEmail) {
       dupWhere[Op.or].push({ email: normEmail });
-      dupWhere[Op.or].push({ email });
+      if (email && email !== normEmail) {
+        dupWhere[Op.or].push({ email });
+      }
+    }
+    // Si no hay forma de contactar y sólo hay tutor, saltar duplicados por contacto
+    if (!normPhone && !normEmail) {
+      dupWhere[Op.or] = [];
     }
     if (clinicaIds.length === 1) {
       dupWhere.clinica_id = clinicaIds[0];
@@ -229,6 +253,17 @@ exports.createPaciente = async (req, res) => {
       procedencia,
       clinica_id
     });
+
+    // Crear relación con tutor si aplica
+    if (tutor?.id_paciente_relacionado) {
+      await PacienteRelacion.create({
+        id_paciente: newPaciente.id_paciente,
+        id_paciente_relacionado: tutor.id_paciente_relacionado,
+        tipo_relacion: tutor.tipo_relacion || 'tutor_legal',
+        es_contacto_principal: tutor.es_contacto_principal === false ? false : true,
+        fecha_inicio: tutor.fecha_inicio || new Date()
+      });
+    }
     res.status(201).json({
       message: 'Paciente creado exitosamente',
       paciente: newPaciente
@@ -257,6 +292,71 @@ exports.updatePaciente = async (req, res) => {
     });
   } catch (error) {
     res.status(500).json({ message: 'Error updating paciente', error: error.message });
+  }
+};
+
+/**
+ * Transferir contacto al propio paciente (al cumplir mayoría de edad, etc.)
+ */
+exports.transferirContacto = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { telefono_movil, email } = req.body || {};
+    const normPhone = normalizePhone(telefono_movil);
+    const normEmail = normalizeEmail(email);
+    if (!normPhone && !normEmail) {
+      return res.status(400).json({ message: 'Se requiere teléfono o email para transferir el contacto' });
+    }
+
+    const paciente = await Paciente.findByPk(id, { include: [{ model: Clinica, as: 'clinica' }] });
+    if (!paciente) {
+      return res.status(404).json({ message: 'Paciente no encontrado' });
+    }
+
+    // Comprobar duplicados en el grupo
+    const clinicaIds = await getClinicaIdsForScope(paciente.clinica_id, 'grupo');
+    const dupWhere = { [Op.or]: [] };
+    if (normPhone) dupWhere[Op.or].push({ telefono_movil: normPhone });
+    if (normEmail) dupWhere[Op.or].push({ email: normEmail });
+    if (clinicaIds.length === 1) dupWhere.clinica_id = clinicaIds[0];
+    else if (clinicaIds.length > 1) dupWhere.clinica_id = { [Op.in]: clinicaIds };
+
+    if (dupWhere[Op.or].length > 0) {
+      const duplicado = await Paciente.findOne({
+        where: dupWhere,
+        include: [{ model: Clinica, as: 'clinica' }]
+      });
+      if (duplicado && duplicado.id_paciente !== paciente.id_paciente) {
+        return res.status(409).json({
+          error: 'PACIENTE_DUPLICADO',
+          message: duplicado.clinica_id === paciente.clinica_id
+            ? 'Ya existe un paciente con este teléfono/email en esta clínica'
+            : `Ya existe un paciente con este teléfono/email en ${duplicado.clinica?.nombre_clinica || 'otra clínica del grupo'}`,
+          paciente: duplicado,
+          sameClinic: duplicado.clinica_id === paciente.clinica_id
+        });
+      }
+    }
+
+    // Actualizar paciente con sus datos de contacto
+    await paciente.update({
+      telefono_movil: normPhone || paciente.telefono_movil,
+      email: normEmail || paciente.email
+    });
+
+    // Cerrar relaciones de tutoría como contacto principal
+    await PacienteRelacion.update(
+      { es_contacto_principal: false, fecha_fin: new Date() },
+      { where: { id_paciente: paciente.id_paciente, es_contacto_principal: true, fecha_fin: null } }
+    );
+
+    const updated = await Paciente.findByPk(id, {
+      include: [{ model: Clinica, as: 'clinica' }, { model: PacienteRelacion, as: 'relaciones', include: [{ model: Paciente, as: 'relacionado' }] }]
+    });
+
+    res.json({ message: 'Contacto transferido al paciente', paciente: updated });
+  } catch (error) {
+    res.status(500).json({ message: 'Error al transferir contacto', error: error.message });
   }
 };
 

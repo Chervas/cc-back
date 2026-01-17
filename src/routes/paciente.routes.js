@@ -8,6 +8,7 @@ router.get('/check-duplicates', pacienteController.checkDuplicates);
 router.get('/:id', pacienteController.getPacienteById);
 router.post('/', pacienteController.createPaciente);
 router.patch('/:id', pacienteController.updatePaciente);
+router.post('/:id/transferir-contacto', pacienteController.transferirContacto);
 router.delete('/:id', pacienteController.deletePaciente);
 
 module.exports = router;
