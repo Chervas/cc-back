@@ -11,9 +11,29 @@ const Campana = db.Campana;
 /**
  * Helper: encontrar o crear paciente por teléfono/email en una clínica
  */
-async function findOrCreatePaciente({ clinica_id, nombre, apellidos, telefono, email }) {
-    if (!telefono && !email) {
+async function findOrCreatePaciente({ clinica_id, nombre, apellidos, telefono, email, id_paciente }) {
+    if (!telefono && !email && !id_paciente) {
         throw new Error('Se requiere teléfono o email para crear el paciente');
+    }
+
+    // Si viene un id_paciente, vincularlo si hace falta y devolverlo
+    if (id_paciente) {
+        const existente = await Paciente.findByPk(id_paciente, {
+            include: [{ model: db.PacienteClinica, as: 'clinicasVinculadas', required: false }]
+        });
+        if (!existente) {
+            throw new Error('Paciente no encontrado');
+        }
+        const yaVinculado = existente.clinica_id === clinica_id ||
+            (existente.clinicasVinculadas || []).some(vc => vc.clinica_id === clinica_id);
+        if (!yaVinculado) {
+            await db.PacienteClinica.create({
+                paciente_id: existente.id_paciente,
+                clinica_id,
+                es_principal: false
+            });
+        }
+        return existente;
     }
 
     const whereContacto = [];
@@ -119,7 +139,8 @@ exports.createCita = asyncHandler(async (req, res) => {
         nombre: datosPaciente.nombre,
         apellidos: datosPaciente.apellidos,
         telefono: datosPaciente.telefono,
-        email: datosPaciente.email
+        email: datosPaciente.email,
+        id_paciente: datosPaciente.id_paciente || datosPaciente.id
     });
 
     // Crear cita
