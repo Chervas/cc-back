@@ -7,6 +7,10 @@ module.exports = (sequelize, DataTypes) => {
       if (models.Clinica) {
         Tratamiento.belongsTo(models.Clinica, { foreignKey: 'clinica_id', targetKey: 'id_clinica', as: 'clinica' });
       }
+       if (models.DependenciaTratamiento) {
+        Tratamiento.hasMany(models.DependenciaTratamiento, { foreignKey: 'id_tratamiento_origen', as: 'dependenciasOrigen' });
+        Tratamiento.hasMany(models.DependenciaTratamiento, { foreignKey: 'id_tratamiento_destino', as: 'dependenciasDestino' });
+      }
     }
   }
 
@@ -20,6 +24,10 @@ module.exports = (sequelize, DataTypes) => {
       type: DataTypes.STRING(255),
       allowNull: false
     },
+    codigo: {
+      type: DataTypes.STRING(50),
+      allowNull: true
+    },
     descripcion: {
       type: DataTypes.TEXT,
       allowNull: true
@@ -27,6 +35,10 @@ module.exports = (sequelize, DataTypes) => {
     disciplina: {
       type: DataTypes.STRING(50),
       allowNull: false
+    },
+    especialidad: {
+      type: DataTypes.STRING(100),
+      allowNull: true
     },
     categoria: {
       type: DataTypes.STRING(100),
@@ -44,6 +56,38 @@ module.exports = (sequelize, DataTypes) => {
     color: {
       type: DataTypes.STRING(20),
       allowNull: true
+    },
+    origen: {
+      type: DataTypes.ENUM('sistema', 'grupo', 'clinica'),
+      allowNull: false,
+      defaultValue: 'clinica'
+    },
+    id_tratamiento_base: {
+      type: DataTypes.INTEGER,
+      allowNull: true
+    },
+    eliminado_por_clinica: {
+      type: DataTypes.JSON,
+      allowNull: true
+    },
+    asignacion_especialidades: {
+      type: DataTypes.JSON,
+      allowNull: true
+    },
+    sesiones_defecto: {
+      type: DataTypes.INTEGER,
+      allowNull: true,
+      defaultValue: 1
+    },
+    requiere_pieza: {
+      type: DataTypes.BOOLEAN,
+      allowNull: false,
+      defaultValue: false
+    },
+    requiere_zona: {
+      type: DataTypes.BOOLEAN,
+      allowNull: false,
+      defaultValue: false
     },
     activo: {
       type: DataTypes.BOOLEAN,
