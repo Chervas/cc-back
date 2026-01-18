@@ -220,3 +220,13 @@ exports.deleteTratamiento = asyncHandler(async (req, res) => {
     await tratamiento.save();
     res.json({ message: 'Tratamiento desactivado' });
 });
+
+// Obtener tratamiento por ID
+exports.getTratamientoById = asyncHandler(async (req, res) => {
+    const { id } = req.params;
+    const tratamiento = await Tratamiento.findByPk(id);
+    if (!tratamiento) {
+        return res.status(404).json({ message: 'Tratamiento no encontrado' });
+    }
+    res.json(tratamiento);
+});
