@@ -1,4 +1,5 @@
 const asyncHandler = require('express-async-handler');
+const { Op } = require('sequelize');
 const db = require('../../models');
 
 const CitaPaciente = db.CitaPaciente;
@@ -15,19 +16,48 @@ async function findOrCreatePaciente({ clinica_id, nombre, apellidos, telefono, e
         throw new Error('Se requiere teléfono o email para crear el paciente');
     }
 
-    const where = { clinica_id };
+    const whereContacto = [];
     if (telefono) {
-        where.telefono_movil = telefono;
-    } else if (email) {
-        where.email = email;
+        whereContacto.push({ telefono_movil: telefono });
+    }
+    if (email) {
+        whereContacto.push({ email });
     }
 
-    let paciente = await Paciente.findOne({ where });
+    const paciente = await Paciente.findOne({
+        where: {
+            [Op.and]: [
+                { [Op.or]: whereContacto },
+                {
+                    [Op.or]: [
+                        { clinica_id },
+                        { '$clinicasVinculadas.clinica_id$': clinica_id }
+                    ]
+                }
+            ]
+        },
+        include: [
+            {
+                model: db.PacienteClinica,
+                as: 'clinicasVinculadas',
+                required: false
+            }
+        ]
+    });
     if (paciente) {
+        // Asegurar vínculo explícito
+        const yaVinculado = (paciente.clinicasVinculadas || []).some(vc => vc.clinica_id === clinica_id);
+        if (!yaVinculado) {
+            await db.PacienteClinica.create({
+                paciente_id: paciente.id_paciente,
+                clinica_id,
+                es_principal: false
+            });
+        }
         return paciente;
     }
 
-    paciente = await Paciente.create({
+    const nuevoPaciente = await Paciente.create({
         nombre: nombre || 'Sin nombre',
         apellidos: apellidos || '',
         telefono_movil: telefono || '',
@@ -35,7 +65,13 @@ async function findOrCreatePaciente({ clinica_id, nombre, apellidos, telefono, e
         clinica_id: clinica_id
     });
 
-    return paciente;
+    await db.PacienteClinica.create({
+        paciente_id: nuevoPaciente.id_paciente,
+        clinica_id,
+        es_principal: true
+    });
+
+    return nuevoPaciente;
 }
 
 /**

@@ -9,6 +9,7 @@ router.get('/:id', pacienteController.getPacienteById);
 router.post('/', pacienteController.createPaciente);
 router.patch('/:id', pacienteController.updatePaciente);
 router.post('/:id/transferir-contacto', pacienteController.transferirContacto);
+router.post('/:id/vincular-clinica', pacienteController.vincularPacienteAClinica);
 router.delete('/:id', pacienteController.deletePaciente);
 
 module.exports = router;

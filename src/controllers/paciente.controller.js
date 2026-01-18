@@ -1,5 +1,5 @@
 'use strict';
-const { Paciente, Clinica, PacienteRelacion } = require('../../models');
+const { Paciente, Clinica, PacienteRelacion, PacienteClinica } = require('../../models');
 const { Op } = require('sequelize');
 
 const normalizePhone = (phone) => {
@@ -14,11 +14,11 @@ const normalizeEmail = (email) => {
 
 const getClinicaIdsForScope = async (clinicaId, scope) => {
   if (!clinicaId) return [];
-  if (scope !== 'grupo') return [parseInt(clinicaId)];
+  if (scope !== 'grupo') return [parseInt(clinicaId, 10)];
 
   const clinica = await Clinica.findOne({ where: { id_clinica: clinicaId } });
   if (!clinica || !clinica.grupoClinicaId) {
-    return [parseInt(clinicaId)];
+    return [parseInt(clinicaId, 10)];
   }
   const clinicasGrupo = await Clinica.findAll({
     where: { grupoClinicaId: clinica.grupoClinicaId },
@@ -30,18 +30,33 @@ const getClinicaIdsForScope = async (clinicaId, scope) => {
 exports.getAllPacientes = async (req, res) => {
   try {
     let whereClause = {};
+    const include = [{ model: Clinica, as: 'clinica' }];
+
     if (req.query.clinica_id) {
       const clinicaParam = req.query.clinica_id;
-      // Si es una lista separada por comas, usar Op.in
-      if (typeof clinicaParam === 'string' && clinicaParam.indexOf(',') !== -1) {
-        whereClause.clinica_id = { [Op.in]: clinicaParam.split(',').map(id => parseInt(id)) };
-      } else {
-        whereClause.clinica_id = clinicaParam;
-      }
+      const clinicaList = typeof clinicaParam === 'string' && clinicaParam.indexOf(',') !== -1
+        ? clinicaParam.split(',').map(id => parseInt(id, 10))
+        : [parseInt(clinicaParam, 10)];
+
+      include.push({
+        model: PacienteClinica,
+        as: 'clinicasVinculadas',
+        required: false,
+        where: { clinica_id: { [Op.in]: clinicaList } },
+        include: [{ model: Clinica, as: 'clinica' }]
+      });
+
+      whereClause = {
+        [Op.or]: [
+          { clinica_id: clinicaList.length === 1 ? clinicaList[0] : { [Op.in]: clinicaList } },
+          { '$clinicasVinculadas.clinica_id$': { [Op.in]: clinicaList } }
+        ]
+      };
     }
     const pacientes = await Paciente.findAll({
       where: whereClause,
-      include: [{ model: Clinica, as: 'clinica' }],
+      include,
+      distinct: true,
       order: [['nombre', 'ASC']]
     });
     res.json(pacientes);
@@ -76,24 +91,40 @@ exports.searchPacientes = async (req, res) => {
       whereOr.push({ email: { [Op.like]: `%${normEmail}%` } });
     }
 
-    const whereClause = { [Op.or]: whereOr };
-
-    // Clinica_id es requerido en scope clinica; en grupo, usamos el grupo de la clínica base
     if (!clinicaId) {
       return res.status(400).json({ message: 'clinica_id es obligatorio para la búsqueda' });
     }
+
     const clinicaIds = await getClinicaIdsForScope(clinicaId, scope);
-    if (clinicaIds.length === 1) {
-      whereClause.clinica_id = clinicaIds[0];
-    } else if (clinicaIds.length > 1) {
-      whereClause.clinica_id = { [Op.in]: clinicaIds };
-    }
+    const clinicFilter = clinicaIds.length === 1 ? clinicaIds[0] : { [Op.in]: clinicaIds };
+
+    const whereClause = {
+      [Op.and]: [
+        { [Op.or]: whereOr },
+        {
+          [Op.or]: [
+            { clinica_id: clinicFilter },
+            { '$clinicasVinculadas.clinica_id$': clinicFilter }
+          ]
+        }
+      ]
+    };
 
     const pacientes = await Paciente.findAll({
       where: whereClause,
-      include: [{ model: Clinica, as: 'clinica' }],
+      include: [
+        { model: Clinica, as: 'clinica' },
+        {
+          model: PacienteClinica,
+          as: 'clinicasVinculadas',
+          required: false,
+          where: { clinica_id: clinicFilter },
+          include: [{ model: Clinica, as: 'clinica' }]
+        }
+      ],
       order: [['nombre', 'ASC']],
-      limit: 20
+      limit: 20,
+      distinct: true
     });
     res.json(pacientes);
   } catch (error) {
@@ -129,26 +160,42 @@ exports.checkDuplicates = async (req, res) => {
       orClause.push({ email });
     }
     whereClause[Op.or] = orClause;
-    if (clinicaIds.length === 1) {
-      whereClause.clinica_id = clinicaIds[0];
-    } else if (clinicaIds.length > 1) {
-      whereClause.clinica_id = { [Op.in]: clinicaIds };
-    }
+    const clinicFilter = clinicaIds.length === 1 ? clinicaIds[0] : { [Op.in]: clinicaIds };
+    whereClause[Op.and].push({
+      [Op.or]: [
+        { clinica_id: clinicFilter },
+        { '$clinicasVinculadas.clinica_id$': clinicFilter }
+      ]
+    });
 
     const pacienteExistente = await Paciente.findOne({
       where: whereClause,
-      include: [{ model: Clinica, as: 'clinica' }]
+      include: [
+        { model: Clinica, as: 'clinica' },
+        { model: PacienteClinica, as: 'clinicasVinculadas', required: false, include: [{ model: Clinica, as: 'clinica' }] }
+      ],
+      distinct: true
     });
 
     if (!pacienteExistente) {
       return res.json({ exists: false });
     }
 
+    const targetClinicaId = parseInt(clinica_id, 10);
+    const hasLink = pacienteExistente.clinica_id === targetClinicaId ||
+      (pacienteExistente.clinicasVinculadas || []).some(vc => vc.clinica_id === targetClinicaId);
+
     return res.json({
       exists: true,
       paciente: pacienteExistente,
-      sameClinic: pacienteExistente.clinica_id === parseInt(clinica_id),
-      clinicaNombre: pacienteExistente.clinica?.nombre_clinica || null
+      sameClinic: pacienteExistente.clinica_id === targetClinicaId,
+      clinicaNombre: pacienteExistente.clinica?.nombre_clinica || null,
+      reuseCandidate: !hasLink,
+      vinculos: (pacienteExistente.clinicasVinculadas || []).map(vc => ({
+        clinica_id: vc.clinica_id,
+        clinicaNombre: vc.clinica?.nombre_clinica || null,
+        es_principal: vc.es_principal
+      }))
     });
   } catch (error) {
     res.status(500).json({ message: 'Error al verificar duplicados', error: error.message });
@@ -160,6 +207,7 @@ exports.getPacienteById = async (req, res) => {
     const paciente = await Paciente.findByPk(req.params.id, {
       include: [
         { model: Clinica, as: 'clinica' },
+        { model: PacienteClinica, as: 'clinicasVinculadas', required: false, include: [{ model: Clinica, as: 'clinica' }] },
         {
           model: PacienteRelacion,
           as: 'relaciones',
@@ -197,62 +245,62 @@ exports.createPaciente = async (req, res) => {
       return res.status(400).json({ message: 'clinica_id es obligatorio' });
     }
 
-    // Duplicados globales (cualquier clínica)
-    const globalDupWhere = { [Op.or]: [] };
-    if (normPhone) globalDupWhere[Op.or].push({ telefono_movil: normPhone });
-    if (normEmail) globalDupWhere[Op.or].push({ email: normEmail });
-    if (globalDupWhere[Op.or].length > 0) {
-      const dupGlobal = await Paciente.findOne({
-        where: globalDupWhere,
-        include: [{ model: Clinica, as: 'clinica' }]
-      });
-      if (dupGlobal) {
-        return res.status(409).json({
-          error: 'PACIENTE_DUPLICADO',
-          message: `Ya existe un paciente con este teléfono/email en ${dupGlobal.clinica?.nombre_clinica || 'otra clínica'}`,
-          paciente: dupGlobal,
-          sameClinic: dupGlobal.clinica_id === parseInt(clinica_id)
-        });
-      }
-    }
-
-    // Verificar duplicados en el grupo (por teléfono o email exacto)
+    // Verificar duplicados solo en el grupo de la clínica (no global)
     const clinicaIds = await getClinicaIdsForScope(clinica_id, 'grupo');
-    const dupWhere = { [Op.or]: [] };
+    const dupWhere = { [Op.and]: [] };
+    const contactoOr = [];
     if (normPhone) {
-      dupWhere[Op.or].push({ telefono_movil: normPhone });
+      contactoOr.push({ telefono_movil: normPhone });
       if (telefono_movil && telefono_movil !== normPhone) {
-        dupWhere[Op.or].push({ telefono_movil });
+          contactoOr.push({ telefono_movil });
       }
     }
     if (normEmail) {
-      dupWhere[Op.or].push({ email: normEmail });
+      contactoOr.push({ email: normEmail });
       if (email && email !== normEmail) {
-        dupWhere[Op.or].push({ email });
+          contactoOr.push({ email });
       }
     }
     // Si no hay forma de contactar y sólo hay tutor, saltar duplicados por contacto
     if (!normPhone && !normEmail) {
-      dupWhere[Op.or] = [];
+      contactoOr.length = 0;
     }
-    if (clinicaIds.length === 1) {
-      dupWhere.clinica_id = clinicaIds[0];
-    } else if (clinicaIds.length > 1) {
-      dupWhere.clinica_id = { [Op.in]: clinicaIds };
-    }
-    if (dupWhere[Op.or].length > 0) {
+    const clinicFilter = clinicaIds.length === 1 ? clinicaIds[0] : { [Op.in]: clinicaIds };
+    if (contactoOr.length > 0) {
+      dupWhere[Op.and].push({ [Op.or]: contactoOr });
+      dupWhere[Op.and].push({
+        [Op.or]: [
+          { clinica_id: clinicFilter },
+          { '$clinicasVinculadas.clinica_id$': clinicFilter }
+        ]
+      });
       const existente = await Paciente.findOne({
         where: dupWhere,
-        include: [{ model: Clinica, as: 'clinica' }]
+        include: [
+          { model: Clinica, as: 'clinica' },
+          { model: PacienteClinica, as: 'clinicasVinculadas', required: false, include: [{ model: Clinica, as: 'clinica' }] }
+        ],
+        distinct: true
       });
       if (existente) {
-        return res.status(409).json({
-          error: 'PACIENTE_DUPLICADO',
-          message: existente.clinica_id === parseInt(clinica_id)
-            ? 'Ya existe un paciente con este teléfono/email en esta clínica'
-            : `Ya existe un paciente con este teléfono/email en ${existente.clinica?.nombre_clinica || 'otra clínica del grupo'}`,
+        const targetClinicaId = parseInt(clinica_id, 10);
+        const hasLink = existente.clinica_id === targetClinicaId ||
+          (existente.clinicasVinculadas || []).some(vc => vc.clinica_id === targetClinicaId);
+
+        if (!hasLink) {
+          await PacienteClinica.create({
+            paciente_id: existente.id_paciente,
+            clinica_id: targetClinicaId,
+            es_principal: false
+          });
+        }
+
+        return res.status(200).json({
+          message: 'Paciente existente reutilizado en esta clínica',
           paciente: existente,
-          sameClinic: existente.clinica_id === parseInt(clinica_id)
+          sameClinic: existente.clinica_id === targetClinicaId,
+          reuseCandidate: !hasLink,
+          vinculado: true
         });
       }
     }
@@ -292,12 +340,71 @@ exports.createPaciente = async (req, res) => {
         fecha_inicio: tutor.fecha_inicio || new Date()
       });
     }
+    // Vincular a la clínica actual como principal
+    await PacienteClinica.create({
+      paciente_id: newPaciente.id_paciente,
+      clinica_id,
+      es_principal: true
+    });
+
     res.status(201).json({
       message: 'Paciente creado exitosamente',
-      paciente: newPaciente
+      paciente: newPaciente,
+      reuseCandidate: false,
+      vinculado: true
     });
   } catch (error) {
     res.status(500).json({ message: 'Error creating paciente', error: error.message });
+  }
+};
+
+/**
+ * Vincula un paciente existente a otra clínica del mismo grupo sin duplicar ficha.
+ */
+exports.vincularPacienteAClinica = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { clinica_id } = req.body || {};
+    const targetClinicaId = parseInt(clinica_id, 10);
+
+    if (!targetClinicaId) {
+      return res.status(400).json({ message: 'clinica_id es obligatorio' });
+    }
+
+    const paciente = await Paciente.findByPk(id, { include: [{ model: Clinica, as: 'clinica' }] });
+    if (!paciente) {
+      return res.status(404).json({ message: 'Paciente no encontrado' });
+    }
+
+    const clinicaOrigen = paciente.clinica;
+    const clinicaDestino = await Clinica.findByPk(targetClinicaId);
+
+    if (!clinicaDestino) {
+      return res.status(404).json({ message: 'Clínica destino no encontrada' });
+    }
+
+    // Solo permitimos vincular dentro del mismo grupo de clínicas
+    if (clinicaOrigen?.grupoClinicaId && clinicaDestino.grupoClinicaId && clinicaOrigen.grupoClinicaId !== clinicaDestino.grupoClinicaId) {
+      return res.status(400).json({ message: 'El paciente solo puede vincularse a clínicas del mismo grupo' });
+    }
+
+    const existente = await PacienteClinica.findOne({
+      where: { paciente_id: paciente.id_paciente, clinica_id: targetClinicaId }
+    });
+
+    if (existente) {
+      return res.json({ message: 'Paciente ya vinculado a la clínica', vinculado: true });
+    }
+
+    await PacienteClinica.create({
+      paciente_id: paciente.id_paciente,
+      clinica_id: targetClinicaId,
+      es_principal: false
+    });
+
+    return res.json({ message: 'Paciente vinculado correctamente', vinculado: true });
+  } catch (error) {
+    res.status(500).json({ message: 'Error al vincular paciente', error: error.message });
   }
 };
 

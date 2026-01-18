@@ -5,6 +5,10 @@ module.exports = (sequelize, DataTypes) => {
     static associate(models) {
       // Cada paciente pertenece a una clínica
       Paciente.belongsTo(models.Clinica, { foreignKey: 'clinica_id', as: 'clinica' });
+      // Un paciente puede estar vinculado a varias clínicas del mismo grupo
+      if (models.PacienteClinica) {
+        Paciente.hasMany(models.PacienteClinica, { foreignKey: 'paciente_id', as: 'clinicasVinculadas' });
+      }
       if (models.PacienteRelacion) {
         Paciente.hasMany(models.PacienteRelacion, { foreignKey: 'id_paciente', as: 'relaciones' });
         Paciente.hasMany(models.PacienteRelacion, { foreignKey: 'id_paciente_relacionado', as: 'tutorDe' });
