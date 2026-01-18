@@ -274,13 +274,17 @@ exports.createPaciente = async (req, res) => {
     if (!normPhone && !normEmail) {
       contactoOr.length = 0;
     }
-    const clinicFilter = clinicaIds.length === 1 ? clinicaIds[0] : { [Op.in]: clinicaIds };
+    const clinicIdsList = clinicaIds.map(id => parseInt(id, 10)).filter(id => !isNaN(id));
+    const clinicFilter = clinicIdsList.length === 1 ? clinicIdsList[0] : { [Op.in]: clinicIdsList };
     if (contactoOr.length > 0) {
       dupWhere[Op.and].push({ [Op.or]: contactoOr });
+      const clinicExists = clinicIdsList.length > 0
+        ? literal(`EXISTS (SELECT 1 FROM PacienteClinicas pc WHERE pc.paciente_id = Paciente.id_paciente AND pc.clinica_id IN (${clinicIdsList.join(',')}))`)
+        : literal('0=1');
       dupWhere[Op.and].push({
         [Op.or]: [
           { clinica_id: clinicFilter },
-          { '$clinicasVinculadas.clinica_id$': clinicFilter }
+          clinicExists
         ]
       });
       const existente = await Paciente.findOne({
