@@ -30,7 +30,25 @@ const getClinicaIdsForScope = async (clinicaId, scope) => {
 exports.getAllPacientes = async (req, res) => {
   try {
     let whereClause = {};
-    const include = [{ model: Clinica, as: 'clinica' }];
+    const include = [
+      { model: Clinica, as: 'clinica' },
+      {
+        model: PacienteRelacion,
+        as: 'relaciones',
+        required: false,
+        include: [
+          { model: Paciente, as: 'relacionado', attributes: ['id_paciente', 'nombre', 'apellidos'], include: [{ model: Clinica, as: 'clinica', attributes: ['nombre_clinica'] }] }
+        ]
+      },
+      {
+        model: PacienteRelacion,
+        as: 'tutorDe',
+        required: false,
+        include: [
+          { model: Paciente, as: 'paciente', attributes: ['id_paciente', 'nombre', 'apellidos'], include: [{ model: Clinica, as: 'clinica', attributes: ['nombre_clinica'] }] }
+        ]
+      }
+    ];
 
     if (req.query.clinica_id) {
       const clinicaParam = req.query.clinica_id;
