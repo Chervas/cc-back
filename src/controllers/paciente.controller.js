@@ -1,6 +1,6 @@
 'use strict';
 const { Paciente, Clinica, PacienteRelacion, PacienteClinica } = require('../../models');
-const { Op } = require('sequelize');
+const { Op, literal } = require('sequelize');
 
 const normalizePhone = (phone) => {
   if (!phone) return null;
@@ -42,14 +42,16 @@ exports.getAllPacientes = async (req, res) => {
         model: PacienteClinica,
         as: 'clinicasVinculadas',
         required: false,
-        where: { clinica_id: { [Op.in]: clinicaList } },
         include: [{ model: Clinica, as: 'clinica' }]
       });
 
+      const clinicFilter = clinicaList.length === 1 ? clinicaList[0] : { [Op.in]: clinicaList };
+      const clinicExists = literal(`EXISTS (SELECT 1 FROM PacienteClinicas pc WHERE pc.paciente_id = Pacientes.id_paciente AND pc.clinica_id IN (${clinicaList.join(',')}))`);
+
       whereClause = {
         [Op.or]: [
-          { clinica_id: clinicaList.length === 1 ? clinicaList[0] : { [Op.in]: clinicaList } },
-          { '$clinicasVinculadas.clinica_id$': { [Op.in]: clinicaList } }
+          { clinica_id: clinicFilter },
+          clinicExists
         ]
       };
     }
@@ -97,6 +99,7 @@ exports.searchPacientes = async (req, res) => {
 
     const clinicaIds = await getClinicaIdsForScope(clinicaId, scope);
     const clinicFilter = clinicaIds.length === 1 ? clinicaIds[0] : { [Op.in]: clinicaIds };
+    const clinicExists = literal(`EXISTS (SELECT 1 FROM PacienteClinicas pc WHERE pc.paciente_id = Pacientes.id_paciente AND pc.clinica_id IN (${clinicaIds.join(',')}))`);
 
     const whereClause = {
       [Op.and]: [
@@ -104,7 +107,7 @@ exports.searchPacientes = async (req, res) => {
         {
           [Op.or]: [
             { clinica_id: clinicFilter },
-            { '$clinicasVinculadas.clinica_id$': clinicFilter }
+            clinicExists
           ]
         }
       ]
@@ -160,10 +163,11 @@ exports.checkDuplicates = async (req, res) => {
     }
     whereClause[Op.or] = orClause;
     const clinicFilter = clinicaIds.length === 1 ? clinicaIds[0] : { [Op.in]: clinicaIds };
+    const clinicExists = literal(`EXISTS (SELECT 1 FROM PacienteClinicas pc WHERE pc.paciente_id = Pacientes.id_paciente AND pc.clinica_id IN (${clinicaIds.join(',')}))`);
     whereClause[Op.and].push({
       [Op.or]: [
         { clinica_id: clinicFilter },
-        { '$clinicasVinculadas.clinica_id$': clinicFilter }
+        clinicExists
       ]
     });
 
