@@ -137,6 +137,78 @@ exports.updateTratamiento = asyncHandler(async (req, res) => {
     res.json(tratamiento);
 });
 
+// Ocultar tratamiento de sistema/grupo para una clínica
+exports.ocultarTratamiento = asyncHandler(async (req, res) => {
+    const { id } = req.params;
+    const { clinica_id } = req.body;
+    if (!clinica_id) return res.status(400).json({ message: 'clinica_id es obligatorio' });
+
+    const tratamiento = await Tratamiento.findByPk(id);
+    if (!tratamiento) return res.status(404).json({ message: 'Tratamiento no encontrado' });
+
+    if (tratamiento.origen === 'clinica' && tratamiento.clinica_id === clinica_id) {
+        return res.status(400).json({ message: 'No puedes ocultar un tratamiento propio de tu clínica' });
+    }
+
+    let eliminados = tratamiento.eliminado_por_clinica || [];
+    if (!eliminados.includes(clinica_id)) {
+        eliminados.push(clinica_id);
+        tratamiento.eliminado_por_clinica = eliminados;
+        await tratamiento.save();
+    }
+
+    res.json({ message: 'Tratamiento ocultado para esta clínica' });
+});
+
+// Restaurar tratamiento oculto
+exports.restaurarTratamiento = asyncHandler(async (req, res) => {
+    const { id } = req.params;
+    const { clinica_id } = req.body;
+    if (!clinica_id) return res.status(400).json({ message: 'clinica_id es obligatorio' });
+
+    const tratamiento = await Tratamiento.findByPk(id);
+    if (!tratamiento) return res.status(404).json({ message: 'Tratamiento no encontrado' });
+
+    let eliminados = tratamiento.eliminado_por_clinica || [];
+    eliminados = eliminados.filter(item => item !== clinica_id);
+    tratamiento.eliminado_por_clinica = eliminados;
+    await tratamiento.save();
+
+    res.json({ message: 'Tratamiento restaurado para esta clínica' });
+});
+
+// Personalizar (copiar) tratamiento de sistema/grupo
+exports.personalizarTratamiento = asyncHandler(async (req, res) => {
+    const { id } = req.params;
+    const { clinica_id, ...cambios } = req.body;
+    if (!clinica_id) return res.status(400).json({ message: 'clinica_id es obligatorio' });
+
+    const tratamientoBase = await Tratamiento.findByPk(id);
+    if (!tratamientoBase) return res.status(404).json({ message: 'Tratamiento no encontrado' });
+
+    // No personalizar uno ya propio
+    if (tratamientoBase.origen === 'clinica' && tratamientoBase.clinica_id === clinica_id) {
+        return res.status(400).json({ message: 'El tratamiento ya pertenece a esta clínica' });
+    }
+
+    const datosCopia = {
+        ...tratamientoBase.toJSON(),
+        id_tratamiento: undefined,
+        origen: 'clinica',
+        clinica_id,
+        id_tratamiento_base: tratamientoBase.id_tratamiento,
+        ...cambios
+    };
+    delete datosCopia.createdAt;
+    delete datosCopia.updatedAt;
+
+    const nuevoCodigo = tratamientoBase.codigo ? `${tratamientoBase.codigo}-C${clinica_id}` : null;
+    datosCopia.codigo = nuevoCodigo;
+
+    const copia = await Tratamiento.create(datosCopia);
+    res.status(201).json(copia);
+});
+
 // Borrado lógico
 exports.deleteTratamiento = asyncHandler(async (req, res) => {
     const { id } = req.params;

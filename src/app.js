@@ -31,6 +31,8 @@ const campaignRequestRoutes = require('./routes/campaign-request.routes');
 const templatesRoutes = require('./routes/templates.routes');
 const citasRoutes = require('./routes/citas.routes');
 const tratamientosRoutes = require('./routes/tratamientos.routes');
+const especialidadesRoutes = require('./routes/especialidades.routes');
+const dependenciasRoutes = require('./routes/dependencias.routes');
 const jobScheduler = require('./services/jobScheduler.service');
 
 
@@ -107,6 +109,10 @@ app.use('/api/citas', citasRoutes);
 console.log('Ruta /api/citas configurada');
 app.use('/api/tratamientos', tratamientosRoutes);
 console.log('Ruta /api/tratamientos configurada');
+app.use('/api/especialidades', especialidadesRoutes);
+console.log('Ruta /api/especialidades configurada');
+app.use('/api/dependencias', dependenciasRoutes);
+console.log('Ruta /api/dependencias configurada');
 console.log('Routes registered successfully');
 // Puerto del servidor
 const PORT = process.env.PORT || 3000;
