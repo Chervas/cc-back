@@ -118,7 +118,6 @@ exports.searchPacientes = async (req, res) => {
           model: PacienteClinica,
           as: 'clinicasVinculadas',
           required: false,
-          where: { clinica_id: clinicFilter },
           include: [{ model: Clinica, as: 'clinica' }]
         }
       ],
