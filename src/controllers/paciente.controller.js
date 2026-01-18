@@ -46,7 +46,7 @@ exports.getAllPacientes = async (req, res) => {
       });
 
       const clinicFilter = clinicaList.length === 1 ? clinicaList[0] : { [Op.in]: clinicaList };
-      const clinicExists = literal(`EXISTS (SELECT 1 FROM PacienteClinicas pc WHERE pc.paciente_id = Pacientes.id_paciente AND pc.clinica_id IN (${clinicaList.join(',')}))`);
+      const clinicExists = literal(`EXISTS (SELECT 1 FROM PacienteClinicas pc WHERE pc.paciente_id = Paciente.id_paciente AND pc.clinica_id IN (${clinicaList.join(',')}))`);
 
       whereClause = {
         [Op.or]: [
@@ -98,8 +98,11 @@ exports.searchPacientes = async (req, res) => {
     }
 
     const clinicaIds = await getClinicaIdsForScope(clinicaId, scope);
-    const clinicFilter = clinicaIds.length === 1 ? clinicaIds[0] : { [Op.in]: clinicaIds };
-    const clinicExists = literal(`EXISTS (SELECT 1 FROM PacienteClinicas pc WHERE pc.paciente_id = Pacientes.id_paciente AND pc.clinica_id IN (${clinicaIds.join(',')}))`);
+    const clinicIdsList = clinicaIds.map(id => parseInt(id, 10)).filter(id => !isNaN(id));
+    const clinicFilter = clinicIdsList.length === 1 ? clinicIdsList[0] : { [Op.in]: clinicIdsList };
+    const clinicExists = clinicIdsList.length > 0
+      ? literal(`EXISTS (SELECT 1 FROM PacienteClinicas pc WHERE pc.paciente_id = Paciente.id_paciente AND pc.clinica_id IN (${clinicIdsList.join(',')}))`)
+      : literal('0=1');
 
     const whereClause = {
       [Op.and]: [
@@ -162,8 +165,11 @@ exports.checkDuplicates = async (req, res) => {
       orClause.push({ email });
     }
     whereClause[Op.or] = orClause;
-    const clinicFilter = clinicaIds.length === 1 ? clinicaIds[0] : { [Op.in]: clinicaIds };
-    const clinicExists = literal(`EXISTS (SELECT 1 FROM PacienteClinicas pc WHERE pc.paciente_id = Pacientes.id_paciente AND pc.clinica_id IN (${clinicaIds.join(',')}))`);
+    const clinicIdsList = clinicaIds.map(id => parseInt(id, 10)).filter(id => !isNaN(id));
+    const clinicFilter = clinicIdsList.length === 1 ? clinicIdsList[0] : { [Op.in]: clinicIdsList };
+    const clinicExists = clinicIdsList.length > 0
+      ? literal(`EXISTS (SELECT 1 FROM PacienteClinicas pc WHERE pc.paciente_id = Paciente.id_paciente AND pc.clinica_id IN (${clinicIdsList.join(',')}))`)
+      : literal('0=1');
     whereClause[Op.and].push({
       [Op.or]: [
         { clinica_id: clinicFilter },
