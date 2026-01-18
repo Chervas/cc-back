@@ -74,6 +74,10 @@ exports.createTratamiento = asyncHandler(async (req, res) => {
     if (!nombre || !disciplina) {
         return res.status(400).json({ message: 'nombre y disciplina son obligatorios' });
     }
+    const clinicaIdNum = clinica_id !== undefined && clinica_id !== null ? Number(clinica_id) : null;
+    if (origen === 'clinica' && (!clinicaIdNum || Number.isNaN(clinicaIdNum))) {
+        return res.status(400).json({ message: 'clinica_id válido es obligatorio para tratamientos de clínica' });
+    }
 
     const tratamiento = await Tratamiento.create({
         nombre,
@@ -93,7 +97,7 @@ exports.createTratamiento = asyncHandler(async (req, res) => {
         requiere_pieza: !!requiere_pieza,
         requiere_zona: !!requiere_zona,
         activo: activo !== false,
-        clinica_id: clinica_id || null,
+        clinica_id: clinicaIdNum || null,
         grupo_clinica_id: grupo_clinica_id || null
     });
 
