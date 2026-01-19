@@ -23,7 +23,16 @@ exports.getAllClinicas = async (req, res) => {
             where,
             order: [['nombre_clinica', 'ASC']]
         });
-        res.json(clinicas);
+        const payload = clinicas.map(c => {
+            const data = c.toJSON();
+            const cfg = data.configuracion || {};
+            data.configuracion = {
+                ...cfg,
+                disciplinas: Array.isArray(cfg.disciplinas) && cfg.disciplinas.length > 0 ? cfg.disciplinas : ['dental']
+            };
+            return data;
+        });
+        res.json(payload);
     } catch (error) {
         res.status(500).json({ message: 'Error retrieving clinicas', error: error.message });
     }
@@ -80,7 +89,13 @@ exports.getClinicaById = async (req, res) => {
         if (!clinica) {
             return res.status(404).json({ message: 'Clinica not found' });
         }
-        res.json(clinica);
+        const clinicaData = clinica.toJSON();
+        const cfg = clinicaData.configuracion || {};
+        clinicaData.configuracion = {
+            ...cfg,
+            disciplinas: Array.isArray(cfg.disciplinas) && cfg.disciplinas.length > 0 ? cfg.disciplinas : ['dental']
+        };
+        res.json(clinicaData);
     } catch (error) {
         res.status(500).json({ message: 'Error retrieving clinica', error: error.message });
     }
@@ -107,8 +122,14 @@ exports.createClinica = async (req, res) => {
             checklist,
             estado_clinica = true,
             datos_fiscales_clinica,
+            configuracion,
             grupoClinicaId  // Campo opcional para asignar grupo
         } = req.body;
+
+        const configPayload = configuracion && typeof configuracion === 'object' ? configuracion : {};
+        if (!Array.isArray(configPayload.disciplinas) || configPayload.disciplinas.length === 0) {
+            configPayload.disciplinas = ['dental'];
+        }
 
         const newClinica = await Clinica.create({   
             nombre_clinica,
@@ -127,6 +148,7 @@ exports.createClinica = async (req, res) => {
             checklist,
             estado_clinica,
             datos_fiscales_clinica,
+            configuracion: configPayload,
             grupoClinicaId
         });
 
@@ -212,6 +234,11 @@ exports.updateClinica = async (req, res) => {
             });
         }
 
+        let configToSave = configuracion !== undefined ? configuracion : (clinicaExistente.configuracion || {});
+        if (!Array.isArray(configToSave?.disciplinas) || configToSave.disciplinas.length === 0) {
+            configToSave = { ...configToSave, disciplinas: ['dental'] };
+        }
+
         // ✅ ACTUALIZAR con TODOS los campos
         const [updatedRowsCount] = await Clinica.update({
             nombre_clinica,
@@ -239,7 +266,7 @@ exports.updateClinica = async (req, res) => {
             estado_clinica,
             datos_fiscales_clinica,
             redes_sociales,
-            configuracion,
+            configuracion: configToSave,
             grupoClinicaId
         }, {
             where: { id_clinica: id_clinica }
@@ -338,7 +365,13 @@ exports.updateClinica = async (req, res) => {
                 console.error('❌ Error actualizando assignmentScope post cambio de grupo:', assignmentError);
             }
         }
-        res.status(200).json(updatedClinica);
+        const updatedData = updatedClinica.toJSON();
+        const cfg = updatedData.configuracion || {};
+        updatedData.configuracion = {
+            ...cfg,
+            disciplinas: Array.isArray(cfg.disciplinas) && cfg.disciplinas.length > 0 ? cfg.disciplinas : ['dental']
+        };
+        res.status(200).json(updatedData);
 
     } catch (error) {
         console.error('Error updating clinic:', error);
