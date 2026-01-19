@@ -11,6 +11,7 @@ router.get('/clinica', ctrl.getEspecialidadesClinica);
 router.post('/clinica', ctrl.createEspecialidadClinica);
 router.patch('/clinica/:id', ctrl.updateEspecialidadClinica);
 router.delete('/clinica/:id', ctrl.deleteEspecialidadClinica);
+router.get('/clinica/:id/en-uso', ctrl.checkEspecialidadClinicaEnUso);
 
 // Usuario-Especialidades
 router.get('/usuario/:id_usuario', ctrl.getEspecialidadesUsuario);

@@ -121,3 +121,25 @@ exports.removeEspecialidadUsuario = asyncHandler(async (req, res) => {
     await asignacion.destroy();
     res.json({ message: 'Especialidad eliminada del usuario' });
 });
+
+// ============ UTILIDAD: ESPECIALIDAD EN USO ============
+exports.checkEspecialidadClinicaEnUso = asyncHandler(async (req, res) => {
+    const { id } = req.params;
+    if (!id) return res.status(400).json({ message: 'id es obligatorio' });
+
+    // Verificar que exista
+    const especialidad = await EspecialidadClinica.findByPk(id);
+    if (!especialidad) {
+        return res.status(404).json({ message: 'Especialidad no encontrada' });
+    }
+
+    // Contar asignaciones de usuarios a esta especialidad de clínica
+    const cantidadProfesionales = await UsuarioEspecialidades.count({
+        where: { id_especialidad_clinica: id }
+    });
+
+    res.json({
+        enUso: cantidadProfesionales > 0,
+        cantidadProfesionales
+    });
+});
