@@ -41,7 +41,7 @@ const db = require('../models'); // <-- Importa el objeto db de models/index.js
 const app = express();
 // Configuración CORS (mantengo tu estructura)
 const corsOptions = {
-    origin: ['https://crm.clinicaclick.com', 'http://localhost:4200'],
+    origin: ['https://app.clinicaclick.com', 'https://crm.clinicaclick.com', 'http://localhost:4200'],
     credentials: true
 };
 app.use(cors(corsOptions));

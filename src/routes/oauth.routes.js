@@ -37,7 +37,7 @@ const jobScheduler = require('../services/jobScheduler.service');
 const META_APP_ID = '1807844546609897'; // <-- App ID correcto
 const META_APP_SECRET = 'bfcfedd6447dce4c3eb280067300e141'; // <-- App Secret correcto
 const REDIRECT_URI = 'https://autenticacion.clinicaclick.com/oauth/meta/callback';
-const FRONTEND_URL = 'https://crm.clinicaclick.com';
+const FRONTEND_URL = 'https://app.clinicaclick.com';
 const FRONTEND_DEV_URL = 'http://localhost:4200'; // Para desarrollo local
 
 // Configuración Google OAuth (variables de entorno)
