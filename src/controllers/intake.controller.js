@@ -1,4 +1,5 @@
 const crypto = require('crypto');
+const axios = require('axios');
 const asyncHandler = require('express-async-handler');
 const db = require('../../models');
 const { Op } = db.Sequelize;
@@ -8,6 +9,7 @@ const LeadAttributionAudit = db.LeadAttributionAudit;
 const Clinica = db.Clinica;
 const GrupoClinica = db.GrupoClinica;
 const Campana = db.Campana;
+const AdCache = db.AdCache;
 
 const CHANNELS = new Set(['paid', 'organic', 'unknown']);
 const SOURCES = new Set(['meta_ads', 'google_ads', 'web', 'whatsapp', 'call_click', 'tiktok_ads', 'seo', 'direct', 'local_services']);
@@ -64,6 +66,88 @@ const validateSignature = (req) => {
   }
   return crypto.timingSafeEqual(expectedBuf, providedBuf);
 };
+
+const META_VERIFY_TOKEN = process.env.META_WEBHOOK_VERIFY_TOKEN || process.env.META_VERIFY_TOKEN;
+const META_APP_SECRET = process.env.META_APP_SECRET;
+const META_GRAPH_TOKEN = process.env.META_GRAPH_TOKEN || process.env.META_PAGE_ACCESS_TOKEN;
+
+const validateMetaSignature = (req) => {
+  if (!META_APP_SECRET) return true;
+  const signature = req.headers['x-hub-signature-256'];
+  if (!signature || typeof signature !== 'string') return false;
+  const payloadBuffer = req.rawBody ? (Buffer.isBuffer(req.rawBody) ? req.rawBody : Buffer.from(req.rawBody)) : Buffer.from(JSON.stringify(req.body || {}));
+  const expected = 'sha256=' + crypto.createHmac('sha256', META_APP_SECRET).update(payloadBuffer).digest('hex');
+  const expectedBuf = Buffer.from(expected);
+  const providedBuf = Buffer.from(signature);
+  if (expectedBuf.length !== providedBuf.length) return false;
+  return crypto.timingSafeEqual(expectedBuf, providedBuf);
+};
+
+async function dedupeAndCreateLead(leadPayload, rawPayload = {}, attributionSteps = {}) {
+  const normalizedEmail = normalizeEmail(leadPayload.email);
+  const normalizedPhone = normalizePhone(leadPayload.telefono);
+  const dedupeCutoff = new Date(Date.now() - (DEDUPE_WINDOW_HOURS * 60 * 60 * 1000));
+
+  const payload = {
+    ...leadPayload,
+    email: normalizedEmail,
+    email_hash: normalizedEmail ? hashValue(normalizedEmail) : null,
+    telefono: normalizedPhone || leadPayload.telefono || null,
+    phone_hash: normalizedPhone ? hashValue(normalizedPhone) : null
+  };
+
+  if (payload.external_source && payload.external_id) {
+    const existingExternal = await LeadIntake.findOne({ where: { external_source: payload.external_source, external_id: payload.external_id } });
+    if (existingExternal) {
+      const err = new Error('Lead duplicado (external_id)');
+      err.status = 409;
+      err.existingId = existingExternal.id;
+      throw err;
+    }
+  }
+
+  if (payload.event_id) {
+    const existing = await LeadIntake.findOne({ where: { event_id: payload.event_id } });
+    if (existing) {
+      const err = new Error('Lead duplicado (event_id)');
+      err.status = 409;
+      err.existingId = existing.id;
+      throw err;
+    }
+  }
+
+  if (normalizedPhone || normalizedEmail) {
+    const dedupeWhere = {
+      created_at: { [Op.gte]: dedupeCutoff },
+      [Op.or]: []
+    };
+    if (normalizedPhone) dedupeWhere[Op.or].push({ phone_hash: payload.phone_hash });
+    if (normalizedEmail) dedupeWhere[Op.or].push({ email_hash: payload.email_hash });
+    if (dedupeWhere[Op.or].length > 0) {
+      const existingRecent = await LeadIntake.findOne({ where: dedupeWhere });
+      if (existingRecent) {
+        const err = new Error('Lead duplicado (contacto reciente)');
+        err.status = 409;
+        err.existingId = existingRecent.id;
+        throw err;
+      }
+    }
+  }
+
+  const lead = await LeadIntake.create(payload);
+
+  try {
+    await LeadAttributionAudit.create({
+      lead_intake_id: lead.id,
+      raw_payload: rawPayload || {},
+      attribution_steps: attributionSteps || {}
+    });
+  } catch (auditErr) {
+    console.warn('⚠️ No se pudo registrar la auditoría de LeadIntake:', auditErr.message || auditErr);
+  }
+
+  return lead;
+}
 
 exports.ingestLead = asyncHandler(async (req, res) => {
   if (!validateSignature(req)) {
@@ -163,41 +247,6 @@ exports.ingestLead = asyncHandler(async (req, res) => {
   const externalSource = external_source || source || null;
   const externalId = external_id || req.body?.meta_lead_id || req.body?.google_lead_id || req.body?.form_id || eventId || null;
 
-  const dedupeCutoff = new Date(Date.now() - (DEDUPE_WINDOW_HOURS * 60 * 60 * 1000));
-
-  if (externalSource && externalId) {
-    const existingExternal = await LeadIntake.findOne({ where: { external_source: externalSource, external_id: externalId } });
-    if (existingExternal) {
-      return res.status(409).json({ message: 'Lead duplicado (external_id)', id: existingExternal.id, reason: 'external_id' });
-    }
-  }
-
-  if (eventId) {
-    const existing = await LeadIntake.findOne({ where: { event_id: eventId } });
-    if (existing) {
-      return res.status(409).json({ message: 'Lead duplicado (event_id)', id: existing.id, reason: 'event_id' });
-    }
-  }
-
-  if (normalizedPhone || normalizedEmail) {
-    const dedupeWhere = {
-      created_at: { [Op.gte]: dedupeCutoff },
-      [Op.or]: []
-    };
-    if (normalizedPhone) {
-      dedupeWhere[Op.or].push({ phone_hash: hashValue(normalizedPhone) });
-    }
-    if (normalizedEmail) {
-      dedupeWhere[Op.or].push({ email_hash: hashValue(normalizedEmail) });
-    }
-    if (dedupeWhere[Op.or].length > 0) {
-      const existingRecent = await LeadIntake.findOne({ where: dedupeWhere });
-      if (existingRecent) {
-        return res.status(409).json({ message: 'Lead duplicado (contacto reciente)', id: existingRecent.id, reason: 'contact_window' });
-      }
-    }
-  }
-
   const leadPayload = {
     event_id: eventId,
     clinica_id: clinicaIdParsed,
@@ -222,10 +271,6 @@ exports.ingestLead = asyncHandler(async (req, res) => {
     user_agent: coalesce(user_agent, req.headers['user-agent']) || null,
     ip: coalesce(ip, req.headers['x-forwarded-for'], req.socket?.remoteAddress) || null,
     nombre: leadNombre || null,
-    email: normalizedEmail,
-    email_hash: normalizedEmail ? hashValue(normalizedEmail) : null,
-    telefono: normalizedPhone || leadTelefono || null,
-    phone_hash: normalizedPhone ? hashValue(normalizedPhone) : null,
     notas: leadNotas || null,
     status_lead: normalizedStatus,
     consentimiento_canal: consentValue || null,
@@ -238,23 +283,125 @@ exports.ingestLead = asyncHandler(async (req, res) => {
     intake_payload_hash: payloadHash
   };
 
-  const lead = await LeadIntake.create(leadPayload);
-
-  // Audit opcional para trazabilidad de atribución
+  let lead;
   try {
-    await LeadAttributionAudit.create({
-      lead_intake_id: lead.id,
-      raw_payload: req.body || {},
-      attribution_steps: {
-        clinic_match_source: clinic_match_source || null,
-        clinic_match_value: clinic_match_value || null
-      }
+    lead = await dedupeAndCreateLead(leadPayload, req.body || {}, {
+      clinic_match_source: clinic_match_source || null,
+      clinic_match_value: clinic_match_value || null
     });
-  } catch (auditErr) {
-    console.warn('⚠️ No se pudo registrar la auditoría de LeadIntake:', auditErr.message || auditErr);
+  } catch (err) {
+    if (err.status === 409) {
+      return res.status(409).json({ message: err.message, id: err.existingId, reason: err.message });
+    }
+    throw err;
   }
 
   res.status(201).json({ id: lead.id });
+});
+
+exports.verifyMetaWebhook = asyncHandler(async (req, res) => {
+  const mode = req.query['hub.mode'];
+  const token = req.query['hub.verify_token'];
+  const challenge = req.query['hub.challenge'];
+
+  if (mode === 'subscribe' && token && token === META_VERIFY_TOKEN) {
+    return res.status(200).send(challenge);
+  }
+  return res.sendStatus(403);
+});
+
+const mapMetaField = (fieldData = [], name) => {
+  const item = fieldData.find((f) => f.name === name);
+  if (!item || !Array.isArray(item.values)) return null;
+  return item.values[0] ?? null;
+};
+
+exports.receiveMetaWebhook = asyncHandler(async (req, res) => {
+  if (!validateMetaSignature(req)) {
+    return res.status(401).json({ message: 'Firma Meta inválida' });
+  }
+
+  const { object, entry } = req.body || {};
+  if (object !== 'page' || !Array.isArray(entry)) {
+    return res.status(200).json({ success: true });
+  }
+
+  for (const pageEntry of entry) {
+    if (!Array.isArray(pageEntry.changes)) continue;
+    for (const change of pageEntry.changes) {
+      if (change.field !== 'leadgen' || !change.value) continue;
+      const changeValue = change.value;
+      const leadId = changeValue.leadgen_id || changeValue.lead_id;
+      const formId = changeValue.form_id || null;
+      const adId = changeValue.ad_id || null;
+      const pageId = changeValue.page_id || pageEntry.id || null;
+      if (!leadId) continue;
+
+      let leadData = {};
+      try {
+        if (!META_GRAPH_TOKEN) throw new Error('META_GRAPH_TOKEN no configurado');
+        const fields = 'field_data,ad_id,form_id,created_time';
+        const { data } = await axios.get(`https://graph.facebook.com/v18.0/${leadId}`, {
+          params: { access_token: META_GRAPH_TOKEN, fields }
+        });
+        const fd = data?.field_data || [];
+        leadData = {
+          nombre: mapMetaField(fd, 'full_name') || mapMetaField(fd, 'first_name'),
+          email: mapMetaField(fd, 'email'),
+          telefono: mapMetaField(fd, 'phone_number'),
+          ref: data
+        };
+      } catch (fetchErr) {
+        console.warn('⚠️ No se pudo obtener datos del lead de Meta:', fetchErr.message || fetchErr);
+      }
+
+      // Buscar campaña por ad_id si es posible
+      let campanaId = null;
+      try {
+        if (adId && AdCache) {
+          const adCache = await AdCache.findOne({ where: { ad_id: adId } });
+          if (adCache) {
+            const camp = await Campana.findOne({ where: { campaign_id: adCache.campaign_id } });
+            if (camp) campanaId = camp.id;
+          }
+        }
+      } catch (mapErr) {
+        console.warn('⚠️ No se pudo mapear campana desde ad_id:', mapErr.message || mapErr);
+      }
+
+      const leadPayload = {
+        event_id: leadId,
+        campana_id: campanaId,
+        channel: 'paid',
+        source: 'meta_ads',
+        source_detail: `leadgen_form:${formId || 'unknown'}`,
+        utm_campaign: changeValue.campaign_name || null,
+        utm_source: 'meta',
+        utm_medium: 'leadgen',
+        nombre: leadData.nombre || null,
+        email: leadData.email || null,
+        telefono: leadData.telefono || null,
+        status_lead: 'nuevo',
+        external_source: 'meta_leadgen',
+        external_id: leadId,
+        intake_payload_hash: hashValue(stableStringify(changeValue)),
+        clinic_match_source: 'meta_page_id',
+        clinic_match_value: pageId || null
+      };
+
+      try {
+        await dedupeAndCreateLead(leadPayload, { change: changeValue, meta_lead_data: leadData }, { meta_page_id: pageId });
+      } catch (err) {
+        if (err.status === 409) {
+          console.info(`Lead Meta duplicado (${err.message}) -> ${err.existingId}`);
+          continue;
+        }
+        console.error('Error creando LeadIntake desde Meta webhook:', err.message || err);
+      }
+    }
+  }
+
+  return res.status(200).json({ success: true });
 });
 
 exports.listLeads = asyncHandler(async (req, res) => {

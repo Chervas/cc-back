@@ -5,6 +5,8 @@ const protect = require('./auth.middleware');
 
 // Ingesta pública (protegida por firma HMAC si se configura)
 router.post('/leads', intakeController.ingestLead);
+router.get('/leads/webhook', intakeController.verifyMetaWebhook);
+router.post('/leads/webhook', intakeController.receiveMetaWebhook);
 
 // Rutas protegidas
 router.use(protect);
