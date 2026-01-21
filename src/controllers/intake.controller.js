@@ -11,7 +11,8 @@ const Campana = db.Campana;
 
 const CHANNELS = new Set(['paid', 'organic', 'unknown']);
 const SOURCES = new Set(['meta_ads', 'google_ads', 'web', 'whatsapp', 'call_click', 'tiktok_ads', 'seo', 'direct', 'local_services']);
-const STATUSES = new Set(['nuevo', 'contactado', 'citado', 'convertido', 'descartado']);
+const STATUSES = new Set(['nuevo', 'contactado', 'esperando_info', 'info_recibida', 'citado', 'acudio_cita', 'convertido', 'descartado']);
+const DEDUPE_WINDOW_HOURS = parseInt(process.env.INTAKE_DEDUPE_WINDOW_HOURS || '24', 10);
 
 const SIGNATURE_HEADER = 'x-cc-signature';
 const SIGNATURE_HEADER_SHA = 'x-cc-signature-sha256';
@@ -32,6 +33,17 @@ const normalizePhone = (phone) => {
   if (!phone) return null;
   const digits = String(phone).replace(/\D/g, '');
   return digits || null;
+};
+const parseDate = (value) => {
+  const d = value ? new Date(value) : null;
+  return d && !isNaN(d.getTime()) ? d : null;
+};
+
+const stableStringify = (obj) => {
+  if (obj === null || typeof obj !== 'object') return JSON.stringify(obj);
+  if (Array.isArray(obj)) return `[${obj.map(stableStringify).join(',')}]`;
+  const keys = Object.keys(obj).sort();
+  return `{${keys.map(k => `${JSON.stringify(k)}:${stableStringify(obj[k])}`).join(',')}}`;
 };
 
 const validateSignature = (req) => {
@@ -87,7 +99,13 @@ exports.ingestLead = asyncHandler(async (req, res) => {
     telefono,
     notas,
     status_lead,
-    consentimiento_canal
+    consentimiento_canal,
+    consent_basis,
+    consent_captured_at,
+    consent_source,
+    consent_version,
+    external_source,
+    external_id
   } = req.body || {};
 
   const clinicaIdParsed = parseInteger(clinica_id);
@@ -141,11 +159,42 @@ exports.ingestLead = asyncHandler(async (req, res) => {
 
   const normalizedEmail = normalizeEmail(leadEmail);
   const normalizedPhone = normalizePhone(leadTelefono);
+  const payloadHash = hashValue(stableStringify(req.body || {}));
+  const externalSource = external_source || source || null;
+  const externalId = external_id || req.body?.meta_lead_id || req.body?.google_lead_id || req.body?.form_id || eventId || null;
+
+  const dedupeCutoff = new Date(Date.now() - (DEDUPE_WINDOW_HOURS * 60 * 60 * 1000));
+
+  if (externalSource && externalId) {
+    const existingExternal = await LeadIntake.findOne({ where: { external_source: externalSource, external_id: externalId } });
+    if (existingExternal) {
+      return res.status(409).json({ message: 'Lead duplicado (external_id)', id: existingExternal.id, reason: 'external_id' });
+    }
+  }
 
   if (eventId) {
     const existing = await LeadIntake.findOne({ where: { event_id: eventId } });
     if (existing) {
-      return res.status(200).json({ id: existing.id, deduped: true });
+      return res.status(409).json({ message: 'Lead duplicado (event_id)', id: existing.id, reason: 'event_id' });
+    }
+  }
+
+  if (normalizedPhone || normalizedEmail) {
+    const dedupeWhere = {
+      created_at: { [Op.gte]: dedupeCutoff },
+      [Op.or]: []
+    };
+    if (normalizedPhone) {
+      dedupeWhere[Op.or].push({ phone_hash: hashValue(normalizedPhone) });
+    }
+    if (normalizedEmail) {
+      dedupeWhere[Op.or].push({ email_hash: hashValue(normalizedEmail) });
+    }
+    if (dedupeWhere[Op.or].length > 0) {
+      const existingRecent = await LeadIntake.findOne({ where: dedupeWhere });
+      if (existingRecent) {
+        return res.status(409).json({ message: 'Lead duplicado (contacto reciente)', id: existingRecent.id, reason: 'contact_window' });
+      }
     }
   }
 
@@ -179,7 +228,14 @@ exports.ingestLead = asyncHandler(async (req, res) => {
     phone_hash: normalizedPhone ? hashValue(normalizedPhone) : null,
     notas: leadNotas || null,
     status_lead: normalizedStatus,
-    consentimiento_canal: consentValue || null
+    consentimiento_canal: consentValue || null,
+    consent_basis: consent_basis || null,
+    consent_captured_at: parseDate(consent_captured_at),
+    consent_source: consent_source || pageUrlValue || landingUrlValue || null,
+    consent_version: consent_version || null,
+    external_source: externalSource,
+    external_id: externalId,
+    intake_payload_hash: payloadHash
   };
 
   const lead = await LeadIntake.create(leadPayload);
