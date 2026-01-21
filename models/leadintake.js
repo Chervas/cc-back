@@ -58,7 +58,7 @@ module.exports = (sequelize, DataTypes) => {
     num_contactos: { type: DataTypes.INTEGER, allowNull: false, defaultValue: 0 },
     ultimo_contacto: { type: DataTypes.DATE, allowNull: true },
     status_lead: {
-      type: DataTypes.ENUM('nuevo', 'contactado', 'citado', 'convertido', 'descartado'),
+      type: DataTypes.ENUM('nuevo', 'contactado', 'esperando_info', 'info_recibida', 'citado', 'acudio_cita', 'convertido', 'descartado'),
       allowNull: false,
       defaultValue: 'nuevo'
     },
@@ -68,7 +68,18 @@ module.exports = (sequelize, DataTypes) => {
     // Flags de avisos del lead
     es_paciente: { type: DataTypes.BOOLEAN, allowNull: true, defaultValue: false },
     suele_cancelar: { type: DataTypes.BOOLEAN, allowNull: true, defaultValue: false },
-    no_acudio_cita: { type: DataTypes.BOOLEAN, allowNull: true, defaultValue: false }
+    no_acudio_cita: { type: DataTypes.BOOLEAN, allowNull: true, defaultValue: false },
+    agenda_ocupada: { type: DataTypes.BOOLEAN, allowNull: true, defaultValue: false },
+    info_requerida: { type: DataTypes.JSON, allowNull: true, defaultValue: [] },
+    info_recibida_items: { type: DataTypes.JSON, allowNull: true, defaultValue: [] },
+    cita_propuesta: { type: DataTypes.JSON, allowNull: true },
+    consent_basis: { type: DataTypes.ENUM('contract', 'legitimate_interest', 'consent'), allowNull: true },
+    consent_captured_at: { type: DataTypes.DATE, allowNull: true },
+    consent_source: { type: DataTypes.STRING(255), allowNull: true },
+    consent_version: { type: DataTypes.STRING(64), allowNull: true },
+    external_source: { type: DataTypes.STRING(64), allowNull: true },
+    external_id: { type: DataTypes.STRING(128), allowNull: true },
+    intake_payload_hash: { type: DataTypes.STRING(64), allowNull: true }
   }, {
     sequelize,
     modelName: 'LeadIntake',

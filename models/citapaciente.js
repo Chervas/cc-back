@@ -36,12 +36,14 @@ module.exports = (sequelize, DataTypes) => {
       defaultValue: 'continuacion'
     },
     estado: {
-      type: DataTypes.ENUM('pendiente', 'confirmada', 'cancelada'),
+      type: DataTypes.ENUM('pendiente', 'confirmada', 'cancelada', 'completada', 'no_asistio'),
       allowNull: false,
       defaultValue: 'pendiente'
     },
     inicio: { type: DataTypes.DATE, allowNull: false },
-    fin: { type: DataTypes.DATE, allowNull: false }
+    fin: { type: DataTypes.DATE, allowNull: false },
+    es_provisional: { type: DataTypes.BOOLEAN, allowNull: true, defaultValue: false },
+    hold_expires_at: { type: DataTypes.DATE, allowNull: true }
   }, {
     sequelize,
     modelName: 'CitaPaciente',
