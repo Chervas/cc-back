@@ -34,6 +34,7 @@ const tratamientosRoutes = require('./routes/tratamientos.routes');
 const especialidadesRoutes = require('./routes/especialidades.routes');
 const dependenciasRoutes = require('./routes/dependencias.routes');
 const jobScheduler = require('./services/jobScheduler.service');
+const intakeController = require('./controllers/intake.controller');
 
 
 // Importar db desde models/index.js que contiene sequelize y todos los modelos
@@ -99,6 +100,10 @@ app.use('/api/whatsapp', whatsappRoutes);
 console.log('Ruta /api/whatsapp configurada');
 app.use('/api/intake', intakeRoutes);
 console.log('Ruta /api/intake configurada');
+// Alias directo para webhook de Meta Lead Ads
+app.get('/api/leads/webhook', intakeController.verifyMetaWebhook);
+app.post('/api/leads/webhook', intakeController.receiveMetaWebhook);
+console.log('Ruta /api/leads/webhook configurada');
 app.use('/api/campaigns', campaignRoutes);
 console.log('Ruta /api/campaigns configurada');
 app.use('/api/campaign-requests', campaignRequestRoutes);
