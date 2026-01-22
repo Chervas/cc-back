@@ -40,6 +40,7 @@ const REDIRECT_URI = 'https://autenticacion.clinicaclick.com/oauth/meta/callback
 const FRONTEND_URL = 'https://app.clinicaclick.com';
 const FRONTEND_DEV_URL = 'http://localhost:4200'; // Para desarrollo local
 const META_API_BASE_URL = process.env.META_API_BASE_URL || 'https://graph.facebook.com/v24.0';
+const META_BUSINESS_ID = process.env.META_BUSINESS_ID || process.env.META_BM_ID || null;
 
 // Configuración Google OAuth (variables de entorno)
 const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID || '';
@@ -68,9 +69,22 @@ async function subscribeLeadgenToPage(pageId, pageAccessToken) {
     try {
         const url = `${META_API_BASE_URL}/${pageId}/subscribed_apps`;
         const params = { access_token: pageAccessToken };
+        if (META_BUSINESS_ID) params.business = META_BUSINESS_ID;
         const data = { subscribed_fields: 'leadgen' };
         const resp = await axios.post(url, data, { params });
         console.log(`✅ Subscrita la página ${pageId} a leadgen (${resp.data?.success ? 'success' : 'no success flag'})`);
+
+        // Verificación rápida opcional: comprobar que la app aparece en subscribed_apps
+        try {
+            const verify = await axios.get(`${META_API_BASE_URL}/${pageId}/subscribed_apps`, { params });
+            const apps = Array.isArray(verify.data?.data) ? verify.data.data : [];
+            const found = apps.find((a) => String(a.id || a.app_id) === META_APP_ID.toString());
+            if (!found) {
+                console.warn(`⚠️ La app no figura en subscribed_apps para la página ${pageId}. Requiere revisión manual en Lead Access Manager.`);
+            }
+        } catch (verErr) {
+            console.warn(`⚠️ No se pudo verificar subscribed_apps para la página ${pageId}:`, verErr.response?.data || verErr.message || verErr);
+        }
     } catch (err) {
         console.warn(`⚠️ No se pudo subscribir leadgen para la página ${pageId}:`, err.response?.data || err.message || err);
     }
