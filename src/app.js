@@ -71,6 +71,10 @@ app.use('/api/gruposclinicas', gruposClinicasRoutes);
 console.log('Ruta /api/gruposclinicas configurada');
 app.use('/api/pacientes', pacienteRoutes);
 console.log('Ruta /api/pacientes configurada');
+// Alias directo para webhook de Meta Lead Ads (antes de leadRoutes con auth)
+app.get('/api/leads/webhook', intakeController.verifyMetaWebhook);
+app.post('/api/leads/webhook', intakeController.receiveMetaWebhook);
+console.log('Ruta /api/leads/webhook configurada');
 app.use('/api/campanas', campanaRoutes);
 console.log('Ruta /api/campanas configurada');
 app.use('/api/leads', leadRoutes);
@@ -100,10 +104,6 @@ app.use('/api/whatsapp', whatsappRoutes);
 console.log('Ruta /api/whatsapp configurada');
 app.use('/api/intake', intakeRoutes);
 console.log('Ruta /api/intake configurada');
-// Alias directo para webhook de Meta Lead Ads
-app.get('/api/leads/webhook', intakeController.verifyMetaWebhook);
-app.post('/api/leads/webhook', intakeController.receiveMetaWebhook);
-console.log('Ruta /api/leads/webhook configurada');
 app.use('/api/campaigns', campaignRoutes);
 console.log('Ruta /api/campaigns configurada');
 app.use('/api/campaign-requests', campaignRequestRoutes);
