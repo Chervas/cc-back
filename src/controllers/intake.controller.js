@@ -2,7 +2,7 @@ const crypto = require('crypto');
 const axios = require('axios');
 const asyncHandler = require('express-async-handler');
 const db = require('../../models');
-const { Op } = db.Sequelize;
+const { Op, literal } = db.Sequelize;
 
 const LeadIntake = db.LeadIntake;
 const LeadAttributionAudit = db.LeadAttributionAudit;
@@ -478,17 +478,23 @@ exports.listLeads = asyncHandler(async (req, res) => {
   const parsedOffset = pageParsed > 0 ? (pageParsed - 1) * pageSizeParsed : Math.max(Number(offset) || 0, 0);
   const parsedLimit = pageSizeParsed;
 
-  const allowedOrderFields = new Set(['created_at', 'channel', 'source', 'status_lead', 'campana_id']);
-  const orderField = allowedOrderFields.has(sortBy) ? sortBy : 'created_at';
-  const orderDirection = (sortOrder || 'DESC').toUpperCase() === 'ASC' ? 'ASC' : 'DESC';
-
   const leads = await LeadIntake.findAndCountAll({
     where,
     include: [
       { model: Clinica, as: 'clinica', attributes: ['id_clinica', 'nombre_clinica'] },
       { model: GrupoClinica, as: 'grupoClinica', attributes: ['id_grupo', 'nombre_grupo'] }
     ].filter(Boolean),
-    order: [[orderField, orderDirection]],
+    // Ordenar priorizando los que requieren reagendar (info_recibida + agenda_ocupada)
+    order: [
+      [
+        literal(`CASE 
+            WHEN status_lead = 'info_recibida' AND agenda_ocupada = true THEN 0 
+            ELSE 1 
+        END`),
+        'ASC'
+      ],
+      ['created_at', 'DESC']
+    ],
     limit: parsedLimit,
     offset: parsedOffset
   });
@@ -551,7 +557,10 @@ exports.getLeadStats = asyncHandler(async (req, res) => {
   const total = await LeadIntake.count({ where });
   const nuevos = await LeadIntake.count({ where: { ...where, status_lead: 'nuevo' } });
   const contactados = await LeadIntake.count({ where: { ...where, status_lead: 'contactado' } });
+  const esperando_info = await LeadIntake.count({ where: { ...where, status_lead: 'esperando_info' } });
+  const info_recibida = await LeadIntake.count({ where: { ...where, status_lead: 'info_recibida' } });
   const citados = await LeadIntake.count({ where: { ...where, status_lead: 'citado' } });
+  const acudio_cita = await LeadIntake.count({ where: { ...where, status_lead: 'acudio_cita' } });
   const convertidos = await LeadIntake.count({ where: { ...where, status_lead: 'convertido' } });
   const descartados = await LeadIntake.count({ where: { ...where, status_lead: 'descartado' } });
 
@@ -561,7 +570,10 @@ exports.getLeadStats = asyncHandler(async (req, res) => {
     total,
     nuevos,
     contactados,
+    esperando_info,
+    info_recibida,
     citados,
+    acudio_cita,
     convertidos,
     descartados,
     tasa_conversion
