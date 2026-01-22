@@ -39,6 +39,7 @@ const META_APP_SECRET = 'bfcfedd6447dce4c3eb280067300e141'; // <-- App Secret co
 const REDIRECT_URI = 'https://autenticacion.clinicaclick.com/oauth/meta/callback';
 const FRONTEND_URL = 'https://app.clinicaclick.com';
 const FRONTEND_DEV_URL = 'http://localhost:4200'; // Para desarrollo local
+const META_API_BASE_URL = process.env.META_API_BASE_URL || 'https://graph.facebook.com/v24.0';
 
 // Configuración Google OAuth (variables de entorno)
 const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID || '';
@@ -57,6 +58,23 @@ const DEFAULT_GOOGLE_SCOPES = [
 const GOOGLE_SCOPES = (process.env.GOOGLE_OAUTH_SCOPES || DEFAULT_GOOGLE_SCOPES).split(/\s+/).join(' ');
 const GOOGLE_BUSINESS_INFORMATION_API = 'https://mybusinessbusinessinformation.googleapis.com/v1';
 const GOOGLE_BUSINESS_ACCOUNT_API = 'https://mybusinessaccountmanagement.googleapis.com/v1';
+
+/**
+ * Suscribir una página a leadgen con el page token proporcionado.
+ * No bloquea el flujo de guardado: loguea y continúa en caso de error.
+ */
+async function subscribeLeadgenToPage(pageId, pageAccessToken) {
+    if (!pageId || !pageAccessToken) return;
+    try {
+        const url = `${META_API_BASE_URL}/${pageId}/subscribed_apps`;
+        const params = { access_token: pageAccessToken };
+        const data = { subscribed_fields: 'leadgen' };
+        const resp = await axios.post(url, data, { params });
+        console.log(`✅ Subscrita la página ${pageId} a leadgen (${resp.data?.success ? 'success' : 'no success flag'})`);
+    } catch (err) {
+        console.warn(`⚠️ No se pudo subscribir leadgen para la página ${pageId}:`, err.response?.data || err.message || err);
+    }
+}
 
 const GOOGLE_ADS_SCOPE = 'https://www.googleapis.com/auth/adwords';
 
@@ -2137,6 +2155,12 @@ router.post('/meta/map-assets', async (req, res) => {
                 if (Number.isInteger(numericClinicId)) {
                     clinicsToSync.add(numericClinicId);
                 }
+            }
+
+            // Auto-suscripción a leadgen para páginas con pageAccessToken disponible
+            if (asset.type === 'facebook_page') {
+                const pageToken = asset.pageAccessToken || createdOrUpdated[createdOrUpdated.length - 1]?.pageAccessToken || found?.pageAccessToken;
+                await subscribeLeadgenToPage(asset.id, pageToken);
             }
         }
 
