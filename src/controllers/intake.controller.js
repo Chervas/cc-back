@@ -10,6 +10,7 @@ const Clinica = db.Clinica;
 const GrupoClinica = db.GrupoClinica;
 const Campana = db.Campana;
 const AdCache = db.AdCache;
+const ClinicMetaAsset = db.ClinicMetaAsset;
 
 const CHANNELS = new Set(['paid', 'organic', 'unknown']);
 const SOURCES = new Set(['meta_ads', 'google_ads', 'web', 'whatsapp', 'call_click', 'tiktok_ads', 'seo', 'direct', 'local_services']);
