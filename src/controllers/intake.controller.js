@@ -394,6 +394,21 @@ exports.receiveMetaWebhook = asyncHandler(async (req, res) => {
         clinic_match_value: pageId || null
       };
 
+      // Intentar asignar clínica por page_id si hay mapeo activo
+      try {
+        if (pageId && ClinicMetaAsset) {
+          const mappedPage = await ClinicMetaAsset.findOne({
+            where: { metaAssetId: String(pageId), assetType: 'facebook_page', isActive: true }
+          });
+          if (mappedPage) {
+            leadPayload.clinica_id = mappedPage.clinicaId || null;
+            leadPayload.grupo_clinica_id = mappedPage.grupoClinicaId || null;
+          }
+        }
+      } catch (mapClinicErr) {
+        console.warn('⚠️ No se pudo mapear clínica desde page_id:', mapClinicErr.message || mapClinicErr);
+      }
+
       try {
         await dedupeAndCreateLead(leadPayload, { change: changeValue, meta_lead_data: leadData }, { meta_page_id: pageId });
       } catch (err) {
