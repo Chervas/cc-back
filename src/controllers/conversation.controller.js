@@ -2,6 +2,7 @@
 const { Op } = require('sequelize');
 const db = require('../../models');
 const { queues } = require('../services/queue.service');
+const { getIO } = require('../services/socket.service');
 
 const { Conversation, Message, UsuarioClinica, Paciente, Lead } = db;
 
@@ -132,6 +133,16 @@ exports.markAsRead = async (req, res) => {
 
     conversation.unread_count = 0;
     await conversation.save();
+    const io = getIO();
+    if (io) {
+      const totalUnread = await Conversation.sum('unread_count');
+      io.emit('unread:updated', { totalUnreadCount: totalUnread || 0 });
+      io.emit('conversation:updated', {
+        id: conversation.id,
+        unread_count: conversation.unread_count,
+        last_message_at: conversation.last_message_at,
+      });
+    }
     return res.json({ success: true });
   } catch (err) {
     console.error('Error markAsRead', err);
@@ -191,6 +202,20 @@ exports.postMessage = async (req, res) => {
       { transaction }
     );
 
+    // Emit creación de mensaje outbound (aplica también a interno/instagram)
+    const io = getIO();
+    if (io) {
+      io.emit('message:created', {
+        id: msg.id,
+        conversation_id: conversation.id,
+        content: msg.content,
+        direction: msg.direction,
+        message_type: msg.message_type,
+        status: msg.status,
+        sent_at: msg.sent_at,
+      });
+    }
+
     if (conversation.channel === 'whatsapp') {
       const to = conversation.contact_id;
       if (!to) {
@@ -213,8 +238,16 @@ exports.postMessage = async (req, res) => {
     conversation.last_message_at = new Date();
     await conversation.save({ transaction });
 
+    if (conversation.channel !== 'whatsapp' && io) {
+      io.emit('conversation:updated', {
+        id: conversation.id,
+        unread_count: conversation.unread_count,
+        last_message_at: conversation.last_message_at,
+      });
+    }
+
     await transaction.commit();
-    return res.json({ message: msg, waResponse });
+    return res.json({ message: msg });
   } catch (err) {
     await transaction.rollback();
     console.error('Error postMessage', err);

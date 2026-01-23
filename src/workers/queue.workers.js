@@ -40,7 +40,7 @@ createWorker('outbound:whatsapp', async (job) => {
 
         const io = getIO();
         if (io) {
-            io.emit('message.updated', { conversationId, messageId: msg.id, status: msg.status });
+            io.emit('message:updated', { id: msg.id, conversation_id: conversationId, status: msg.status });
         }
     } catch (err) {
         msg.status = 'failed';
@@ -100,8 +100,21 @@ createWorker('webhook:whatsapp', async (job) => {
 
         const io = getIO();
         if (io) {
-            io.emit('conversation.updated', { conversationId: conv.id });
-            io.emit('message.created', { conversationId: conv.id });
+            io.emit('conversation:updated', {
+                id: conv.id,
+                unread_count: conv.unread_count,
+                last_message_at: conv.last_message_at,
+            });
+            io.emit('message:created', {
+                conversation_id: conv.id,
+                content,
+                direction: 'inbound',
+                message_type: msg.type || 'text',
+                status: 'sent',
+                sent_at: new Date(),
+            });
+            const totalUnread = await Conversation.sum('unread_count');
+            io.emit('unread:updated', { totalUnreadCount: totalUnread || 0 });
         }
     }
 });
