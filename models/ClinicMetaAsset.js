@@ -45,7 +45,7 @@ module.exports = (sequelize, DataTypes) => {
             onDelete: 'CASCADE',
         },
         assetType: { 
-            type: DataTypes.ENUM('facebook_page', 'instagram_business', 'ad_account'),
+            type: DataTypes.ENUM('facebook_page', 'instagram_business', 'ad_account', 'whatsapp_business_account', 'whatsapp_phone_number'),
             allowNull: false,
             comment: 'Tipo de activo de Meta'
         },
@@ -85,6 +85,14 @@ module.exports = (sequelize, DataTypes) => {
         ,ad_account_spend_cap: { type: DataTypes.DECIMAL(18,2), allowNull: true }
         ,ad_account_amount_spent: { type: DataTypes.DECIMAL(18,2), allowNull: true }
         ,ad_account_refreshed_at: { type: DataTypes.DATE, allowNull: true }
+        // WhatsApp fields
+        ,wabaId: { type: DataTypes.STRING(255), allowNull: true }
+        ,phoneNumberId: { type: DataTypes.STRING(255), allowNull: true }
+        ,waVerifiedName: { type: DataTypes.STRING(255), allowNull: true }
+        ,quality_rating: { type: DataTypes.STRING(64), allowNull: true }
+        ,messaging_limit: { type: DataTypes.STRING(64), allowNull: true }
+        ,waAccessToken: { type: DataTypes.TEXT, allowNull: true }
+        ,meta_billed_by: { type: DataTypes.BOOLEAN, allowNull: true }
     }, {
         tableName: 'ClinicMetaAssets',
         timestamps: true,

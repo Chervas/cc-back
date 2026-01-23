@@ -1,4 +1,6 @@
 const axios = require('axios');
+const db = require('../../models');
+const ClinicMetaAsset = db.ClinicMetaAsset;
 
 const FALLBACK_CONFIG = {
     phoneNumberId: '101717972850686',
@@ -44,6 +46,50 @@ class WhatsAppService {
         if (!lastInboundAt) return true;
         const delta = Date.now() - new Date(lastInboundAt).getTime();
         return delta <= 24 * 60 * 60 * 1000;
+    }
+
+    /**
+     * Obtiene credenciales y phoneNumberId por clínica desde ClinicMetaAssets
+     */
+    async getClinicConfig(clinicId) {
+        const asset = await ClinicMetaAsset.findOne({
+            where: {
+                clinicaId: clinicId,
+                isActive: true,
+                assetType: 'whatsapp_phone_number',
+            },
+            raw: true,
+        });
+
+        if (asset?.waAccessToken && asset?.phoneNumberId) {
+            return {
+                phoneNumberId: asset.phoneNumberId,
+                accessToken: asset.waAccessToken,
+            };
+        }
+
+        // fallback a WABA si no hay phone number específico
+        const waba = await ClinicMetaAsset.findOne({
+            where: {
+                clinicaId: clinicId,
+                isActive: true,
+                assetType: 'whatsapp_business_account',
+            },
+            raw: true,
+        });
+
+        if (waba?.waAccessToken && waba?.phoneNumberId) {
+            return {
+                phoneNumberId: waba.phoneNumberId,
+                accessToken: waba.waAccessToken,
+            };
+        }
+
+        // fallback global
+        return {
+            phoneNumberId: process.env.META_WHATSAPP_PHONE_NUMBER_ID || FALLBACK_CONFIG.phoneNumberId,
+            accessToken: process.env.META_WHATSAPP_ACCESS_TOKEN || FALLBACK_CONFIG.accessToken,
+        };
     }
 
     /**

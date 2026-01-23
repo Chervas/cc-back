@@ -3,6 +3,7 @@ const { Op } = require('sequelize');
 const db = require('../../models');
 const { queues } = require('../services/queue.service');
 const { getIO } = require('../services/socket.service');
+const whatsappService = require('../services/whatsapp.service');
 
 const { Conversation, Message, UsuarioClinica, Paciente, Lead } = db;
 
@@ -222,6 +223,11 @@ exports.postMessage = async (req, res) => {
         await transaction.rollback();
         return res.status(400).json({ error: 'contacto_sin_numero' });
       }
+      const clinicConfig = await whatsappService.getClinicConfig(conversation.clinic_id);
+      if (!clinicConfig?.accessToken || !clinicConfig?.phoneNumberId) {
+        await transaction.rollback();
+        return res.status(500).json({ error: 'whatsapp_config_missing' });
+      }
       await queues.outboundWhatsApp.add('send', {
         messageId: msg.id,
         conversationId: conversation.id,
@@ -231,7 +237,7 @@ exports.postMessage = async (req, res) => {
         useTemplate: isTemplate,
         templateName,
         templateLanguage,
-        clinicConfig: {}, // TODO: credenciales por clínica
+        clinicConfig,
       });
     }
 

@@ -5,7 +5,7 @@ const router = express.Router();
 const db = require('../../models');
 const { queues } = require('../services/queue.service');
 
-const { Conversation, Message } = db;
+const { Conversation, Message, ClinicMetaAsset } = db;
 const APP_SECRET = process.env.FACEBOOK_APP_SECRET || process.env.APP_SECRET;
 
 function verifySignature(req, res, buf) {
@@ -38,7 +38,25 @@ router.post('/whatsapp/webhook', async (req, res) => {
     if (!verifySignature(req, res, req.rawBody || Buffer.from(JSON.stringify(req.body || {})))) {
       return res.sendStatus(401);
     }
-    const clinicId = req.query.clinic_id || req.body?.clinic_id;
+    let clinicId = req.query.clinic_id || req.body?.clinic_id;
+    if (!clinicId) {
+      const phoneId = req.body?.entry?.[0]?.changes?.[0]?.value?.metadata?.phone_number_id;
+      if (phoneId) {
+        const asset = await ClinicMetaAsset.findOne({
+          where: { phoneNumberId: phoneId, isActive: true },
+          raw: true,
+        });
+        if (asset) {
+          clinicId = asset.clinicaId;
+        } else {
+          console.warn('Webhook WA sin mapeo de phoneNumberId', phoneId);
+        }
+      }
+    }
+    if (!clinicId) {
+      console.warn('Webhook WA sin clinic_id, descartando payload');
+      return res.sendStatus(200);
+    }
     await queues.webhookWhatsApp.add('incoming', { body: req.body, clinic_id: clinicId });
     return res.sendStatus(200);
   } catch (err) {
