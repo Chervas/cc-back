@@ -1,0 +1,251 @@
+'use strict';
+const { Op } = require('sequelize');
+const db = require('../../models');
+const whatsappService = require('../services/whatsapp.service');
+
+const { Conversation, Message, UsuarioClinica } = db;
+
+const ROLE_AGGREGATE = ['propietario', 'admin'];
+
+async function getUserClinics(userId) {
+  const memberships = await UsuarioClinica.findAll({
+    where: { id_usuario: userId },
+    attributes: ['id_clinica', 'rol_clinica'],
+    raw: true,
+  });
+  const clinicIds = memberships.map((m) => m.id_clinica);
+  const roles = memberships.map((m) => m.rol_clinica);
+  const isAggregateAllowed = roles.some((r) => ROLE_AGGREGATE.includes(r));
+  return { clinicIds, isAggregateAllowed };
+}
+
+function ensureAccess({ clinicIds, isAggregateAllowed }, requestedClinicId) {
+  if (!requestedClinicId) return false;
+  if (requestedClinicId === 'all') return isAggregateAllowed;
+  const numericId = Number(requestedClinicId);
+  return clinicIds.includes(numericId);
+}
+
+exports.listConversations = async (req, res) => {
+  try {
+    const userId = req.userData?.userId;
+    const { clinic_id, filter, channel } = req.query;
+
+    const { clinicIds, isAggregateAllowed } = await getUserClinics(userId);
+    if (!clinicIds.length) {
+      return res.status(403).json({ error: 'Sin clínicas asignadas' });
+    }
+
+    const where = {};
+    if (clinic_id && clinic_id !== 'all') {
+      if (!ensureAccess({ clinicIds, isAggregateAllowed }, clinic_id)) {
+        return res.status(403).json({ error: 'Acceso denegado a la clínica' });
+      }
+      where.clinic_id = Number(clinic_id);
+    } else if (!isAggregateAllowed) {
+      where.clinic_id = { [Op.in]: clinicIds };
+    }
+
+    if (channel) {
+      where.channel = channel;
+    }
+
+    if (filter === 'leads') {
+      where.lead_id = { [Op.not]: null };
+    } else if (filter === 'pacientes') {
+      where.patient_id = { [Op.not]: null };
+    } else if (filter === 'equipo') {
+      where.channel = 'internal';
+    }
+
+    const conversations = await Conversation.findAll({
+      where,
+      order: [['last_message_at', 'DESC']],
+      raw: true,
+    });
+
+    return res.json(conversations);
+  } catch (err) {
+    console.error('Error listConversations', err);
+    return res.status(500).json({ error: 'Error obteniendo conversaciones' });
+  }
+};
+
+exports.getMessages = async (req, res) => {
+  try {
+    const userId = req.userData?.userId;
+    const conversationId = req.params.id;
+    const conversation = await Conversation.findByPk(conversationId, { raw: true });
+    if (!conversation) {
+      return res.status(404).json({ error: 'Conversación no encontrada' });
+    }
+
+    const { clinicIds, isAggregateAllowed } = await getUserClinics(userId);
+    if (!ensureAccess({ clinicIds, isAggregateAllowed }, conversation.clinic_id)) {
+      return res.status(403).json({ error: 'Acceso denegado a la clínica' });
+    }
+
+    const messages = await Message.findAll({
+      where: { conversation_id: conversationId },
+      order: [['createdAt', 'ASC']],
+      raw: true,
+    });
+
+    return res.json({ conversation, messages });
+  } catch (err) {
+    console.error('Error getMessages', err);
+    return res.status(500).json({ error: 'Error obteniendo mensajes' });
+  }
+};
+
+exports.postMessage = async (req, res) => {
+  const transaction = await db.sequelize.transaction();
+  try {
+    const userId = req.userData?.userId;
+    const conversationId = req.params.id;
+    const {
+      message,
+      message_type = 'text',
+      useTemplate = false,
+      templateName,
+      templateLanguage,
+      previewUrl = false,
+      metadata = {},
+    } = req.body;
+
+    const conversation = await Conversation.findByPk(conversationId, { transaction });
+    if (!conversation) {
+      await transaction.rollback();
+      return res.status(404).json({ error: 'Conversación no encontrada' });
+    }
+
+    const { clinicIds, isAggregateAllowed } = await getUserClinics(userId);
+    if (!ensureAccess({ clinicIds, isAggregateAllowed }, conversation.clinic_id)) {
+      await transaction.rollback();
+      return res.status(403).json({ error: 'Acceso denegado a la clínica' });
+    }
+
+    const isTemplate = useTemplate || message_type === 'template';
+    const windowOpen =
+      !conversation.last_inbound_at ||
+      Date.now() - new Date(conversation.last_inbound_at).getTime() <= 24 * 60 * 60 * 1000;
+
+    if (!isTemplate && !windowOpen && conversation.channel === 'whatsapp') {
+      await transaction.rollback();
+      return res.status(400).json({ error: 'session_closed' });
+    }
+
+    // Crear registro de mensaje en estado sending
+    const msg = await Message.create(
+      {
+        conversation_id: conversation.id,
+        sender_id: userId || null,
+        direction: 'outbound',
+        content: message,
+        message_type: message_type === 'template' ? 'template' : 'text',
+        status: 'sending',
+        sent_at: new Date(),
+        metadata,
+      },
+      { transaction }
+    );
+
+    let waResponse = null;
+    if (conversation.channel === 'whatsapp') {
+      const to = conversation.contact_id;
+      if (!to) {
+        await transaction.rollback();
+        return res.status(400).json({ error: 'contacto_sin_numero' });
+      }
+      try {
+        waResponse = await whatsappService.sendMessage({
+          to,
+          body: message,
+          previewUrl,
+          useTemplate: isTemplate,
+          templateName,
+          templateLanguage,
+        });
+        msg.status = 'sent';
+        msg.metadata = { ...msg.metadata, wa_response: waResponse, wamid: waResponse?.messages?.[0]?.id };
+        await msg.save({ transaction });
+      } catch (err) {
+        console.error('Error enviando WhatsApp', err?.response?.data || err);
+        msg.status = 'failed';
+        msg.metadata = { ...msg.metadata, error: err?.response?.data || err.message };
+        await msg.save({ transaction });
+        await transaction.commit();
+        return res.status(502).json({ error: 'whatsapp_send_failed', details: err?.response?.data || err.message });
+      }
+    } else {
+      msg.status = 'sent';
+      await msg.save({ transaction });
+    }
+
+    conversation.last_message_at = new Date();
+    await conversation.save({ transaction });
+
+    await transaction.commit();
+    return res.json({ message: msg, waResponse });
+  } catch (err) {
+    await transaction.rollback();
+    console.error('Error postMessage', err);
+    return res.status(500).json({ error: 'Error enviando mensaje' });
+  }
+};
+
+exports.createInternalMessage = async (req, res) => {
+  const transaction = await db.sequelize.transaction();
+  try {
+    const userId = req.userData?.userId;
+    const { clinic_id, message } = req.body;
+    if (!clinic_id) {
+      await transaction.rollback();
+      return res.status(400).json({ error: 'clinic_id requerido' });
+    }
+
+    const { clinicIds, isAggregateAllowed } = await getUserClinics(userId);
+    if (!ensureAccess({ clinicIds, isAggregateAllowed }, clinic_id)) {
+      await transaction.rollback();
+      return res.status(403).json({ error: 'Acceso denegado a la clínica' });
+    }
+
+    const conversation =
+      (await Conversation.findOne({
+        where: { clinic_id, channel: 'internal', contact_id: 'team' },
+        transaction,
+      })) ||
+      (await Conversation.create(
+        {
+          clinic_id,
+          channel: 'internal',
+          contact_id: 'team',
+          last_message_at: new Date(),
+        },
+        { transaction }
+      ));
+
+    const msg = await Message.create(
+      {
+        conversation_id: conversation.id,
+        sender_id: userId || null,
+        direction: 'outbound',
+        content: message,
+        message_type: 'text',
+        status: 'sent',
+        sent_at: new Date(),
+      },
+      { transaction }
+    );
+
+    conversation.last_message_at = new Date();
+    await conversation.save({ transaction });
+
+    await transaction.commit();
+    return res.json({ conversation, message: msg });
+  } catch (err) {
+    await transaction.rollback();
+    console.error('Error createInternalMessage', err);
+    return res.status(500).json({ error: 'Error en chat interno' });
+  }
+};

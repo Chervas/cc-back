@@ -37,6 +37,31 @@ class WhatsAppService {
     }
 
     /**
+     * Calcula si la ventana de 24h está abierta
+     * @param {Date|string|null} lastInboundAt
+     */
+    checkSessionWindow(lastInboundAt) {
+        if (!lastInboundAt) return true;
+        const delta = Date.now() - new Date(lastInboundAt).getTime();
+        return delta <= 24 * 60 * 60 * 1000;
+    }
+
+    /**
+     * Permite usar credenciales por clínica (si se pasan)
+     * @param {*} clinicConfig { phoneNumberId, accessToken }
+     */
+    setClinicCredentials(clinicConfig = {}) {
+        this.phoneNumberId =
+            clinicConfig.phoneNumberId ||
+            process.env.META_WHATSAPP_PHONE_NUMBER_ID ||
+            FALLBACK_CONFIG.phoneNumberId;
+        this.accessToken =
+            clinicConfig.accessToken ||
+            process.env.META_WHATSAPP_ACCESS_TOKEN ||
+            FALLBACK_CONFIG.accessToken;
+    }
+
+    /**
      * Normaliza un número de teléfono al formato E.164
      * @param {string} raw
      * @returns {string|null}
@@ -86,7 +111,9 @@ class WhatsAppService {
         useTemplate,
         templateName,
         templateLanguage,
+        clinicConfig = {},
     }) {
+        this.setClinicCredentials(clinicConfig);
         const shouldUseTemplate =
             useTemplate !== undefined ? useTemplate : this.defaultUseTemplate;
 
@@ -96,10 +123,11 @@ class WhatsAppService {
                 templateName: templateName || this.defaultTemplateName,
                 templateLanguage:
                     templateLanguage || this.defaultTemplateLanguage,
+                clinicConfig,
             });
         }
 
-        return this.sendTextMessage({ to, body, previewUrl });
+        return this.sendTextMessage({ to, body, previewUrl, clinicConfig });
     }
 
     /**
@@ -109,7 +137,8 @@ class WhatsAppService {
      * @param {string} params.body
      * @param {boolean} [params.previewUrl=false]
      */
-    async sendTextMessage({ to, body, previewUrl = false }) {
+    async sendTextMessage({ to, body, previewUrl = false, clinicConfig = {} }) {
+        this.setClinicCredentials(clinicConfig);
         this.assertConfiguration();
 
         const payload = {
@@ -138,7 +167,8 @@ class WhatsAppService {
     /**
      * Envía una plantilla preaprobada
      */
-    async sendTemplateMessage({ to, templateName, templateLanguage }) {
+    async sendTemplateMessage({ to, templateName, templateLanguage, clinicConfig = {} }) {
+        this.setClinicCredentials(clinicConfig);
         this.assertConfiguration();
 
         const payload = {

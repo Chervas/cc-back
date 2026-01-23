@@ -33,6 +33,8 @@ const citasRoutes = require('./routes/citas.routes');
 const tratamientosRoutes = require('./routes/tratamientos.routes');
 const especialidadesRoutes = require('./routes/especialidades.routes');
 const dependenciasRoutes = require('./routes/dependencias.routes');
+const conversationRoutes = require('./routes/conversation.routes');
+const whatsappWebhookRoutes = require('./routes/whatsapp-webhook.routes');
 const jobScheduler = require('./services/jobScheduler.service');
 const intakeController = require('./controllers/intake.controller');
 
@@ -118,6 +120,10 @@ app.use('/api/especialidades', especialidadesRoutes);
 console.log('Ruta /api/especialidades configurada');
 app.use('/api/dependencias', dependenciasRoutes);
 console.log('Ruta /api/dependencias configurada');
+app.use('/api', conversationRoutes);
+console.log('Ruta /api/conversations configurada');
+app.use('/api', whatsappWebhookRoutes);
+console.log('Ruta /api/whatsapp/webhook configurada');
 console.log('Routes registered successfully');
 // Puerto del servidor
 const PORT = process.env.PORT || 3000;
