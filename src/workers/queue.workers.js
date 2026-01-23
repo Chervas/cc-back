@@ -7,7 +7,7 @@ const db = require('../../models');
 const { Conversation, Message } = db;
 
 // Procesa envíos salientes de WhatsApp
-createWorker('outbound:whatsapp', async (job) => {
+createWorker('outbound_whatsapp', async (job) => {
     const { messageId, conversationId, to, body, useTemplate, templateName, templateLanguage, clinicConfig } = job.data;
 
     const msg = await Message.findByPk(messageId);
@@ -51,7 +51,7 @@ createWorker('outbound:whatsapp', async (job) => {
 });
 
 // Procesa webhooks entrantes de WhatsApp
-createWorker('webhook:whatsapp', async (job) => {
+createWorker('webhook_whatsapp', async (job) => {
     const payload = job.data?.body;
     const clinicId = job.data?.clinic_id;
 

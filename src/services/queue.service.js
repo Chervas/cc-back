@@ -8,8 +8,8 @@ const connection = {
 };
 
 const queues = {
-    outboundWhatsApp: new Queue('outbound:whatsapp', connection),
-    webhookWhatsApp: new Queue('webhook:whatsapp', connection),
+    outboundWhatsApp: new Queue('outbound_whatsapp', connection),
+    webhookWhatsApp: new Queue('webhook_whatsapp', connection),
 };
 
 function createWorker(name, processor) {
