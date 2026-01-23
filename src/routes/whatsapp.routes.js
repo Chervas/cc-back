@@ -1,6 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const whatsappService = require('../services/whatsapp.service');
+const authMiddleware = require('./auth.middleware');
 
 /**
  * POST /api/whatsapp/messages
@@ -65,6 +66,22 @@ router.post('/messages', async (req, res) => {
             success: false,
             error: errorBody,
         });
+    }
+});
+
+/**
+ * GET /api/whatsapp/templates
+ * Devuelve plantillas disponibles (placeholder hasta integrar con Meta)
+ */
+router.get('/templates', authMiddleware, async (req, res) => {
+    try {
+        // TODO: integrar con Meta usando token por clínica.
+        const sample = [
+            { name: 'hello_world', language: 'en_US', category: 'UTILITY', status: 'approved', components: [], preview: 'Hello World' },
+        ];
+        return res.json(sample);
+    } catch (error) {
+        return res.status(500).json({ error: 'Error recuperando plantillas' });
     }
 });
 

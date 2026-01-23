@@ -3,7 +3,7 @@ const { Op } = require('sequelize');
 const db = require('../../models');
 const whatsappService = require('../services/whatsapp.service');
 
-const { Conversation, Message, UsuarioClinica } = db;
+const { Conversation, Message, UsuarioClinica, Paciente, Lead } = db;
 
 const ROLE_AGGREGATE = ['propietario', 'admin'];
 
@@ -61,10 +61,28 @@ exports.listConversations = async (req, res) => {
     const conversations = await Conversation.findAll({
       where,
       order: [['last_message_at', 'DESC']],
-      raw: true,
+      include: [
+        { model: Paciente, as: 'paciente', attributes: ['id_paciente', 'nombre', 'apellidos', 'foto', 'telefono_movil', 'email'] },
+        { model: Lead, as: 'lead', attributes: ['id', 'nombre', 'telefono', 'email'] },
+        {
+          model: Message,
+          as: 'messages',
+          separate: true,
+          limit: 1,
+          order: [['createdAt', 'DESC']],
+          attributes: ['id', 'direction', 'content', 'message_type', 'status', 'sent_at', 'createdAt', 'metadata'],
+        },
+      ],
     });
 
-    return res.json(conversations);
+    const payload = conversations.map((c) => {
+      const data = c.toJSON();
+      data.lastMessage = data.messages && data.messages.length ? data.messages[0] : null;
+      delete data.messages;
+      return data;
+    });
+
+    return res.json(payload);
   } catch (err) {
     console.error('Error listConversations', err);
     return res.status(500).json({ error: 'Error obteniendo conversaciones' });
