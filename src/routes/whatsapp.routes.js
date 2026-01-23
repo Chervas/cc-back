@@ -2,6 +2,7 @@ const express = require('express');
 const router = express.Router();
 const whatsappService = require('../services/whatsapp.service');
 const authMiddleware = require('./auth.middleware');
+const whatsappController = require('../controllers/whatsapp.controller');
 
 /**
  * POST /api/whatsapp/messages
@@ -84,5 +85,14 @@ router.get('/templates', authMiddleware, async (req, res) => {
         return res.status(500).json({ error: 'Error recuperando plantillas' });
     }
 });
+
+// Estado WABA por clínica
+router.get('/status', authMiddleware, whatsappController.getStatus);
+
+// Listado de cuentas WABA accesibles por el usuario
+router.get('/accounts', authMiddleware, whatsappController.listAccounts);
+
+// Resumen de plantillas por clínica
+router.get('/templates/summary', authMiddleware, whatsappController.templatesSummary);
 
 module.exports = router;
