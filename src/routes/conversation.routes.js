@@ -9,6 +9,7 @@ router.use(authMiddleware);
 router.get('/conversations', conversationController.listConversations);
 router.get('/conversations/:id/messages', conversationController.getMessages);
 router.post('/conversations/:id/messages', conversationController.postMessage);
+router.patch('/conversations/:id/read', conversationController.markAsRead);
 
 // Chat interno del equipo
 router.post('/chat/internal', conversationController.createInternalMessage);

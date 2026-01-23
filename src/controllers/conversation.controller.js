@@ -116,6 +116,29 @@ exports.getMessages = async (req, res) => {
   }
 };
 
+exports.markAsRead = async (req, res) => {
+  try {
+    const userId = req.userData?.userId;
+    const conversationId = req.params.id;
+    const conversation = await Conversation.findByPk(conversationId);
+    if (!conversation) {
+      return res.status(404).json({ error: 'Conversación no encontrada' });
+    }
+
+    const { clinicIds, isAggregateAllowed } = await getUserClinics(userId);
+    if (!ensureAccess({ clinicIds, isAggregateAllowed }, conversation.clinic_id)) {
+      return res.status(403).json({ error: 'Acceso denegado a la clínica' });
+    }
+
+    conversation.unread_count = 0;
+    await conversation.save();
+    return res.json({ success: true });
+  } catch (err) {
+    console.error('Error markAsRead', err);
+    return res.status(500).json({ error: 'Error marcando conversación como leída' });
+  }
+};
+
 exports.postMessage = async (req, res) => {
   const transaction = await db.sequelize.transaction();
   try {
