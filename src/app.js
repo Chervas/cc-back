@@ -129,6 +129,8 @@ app.use('/api', conversationRoutes);
 console.log('Ruta /api/conversations configurada');
 app.use('/api', whatsappWebhookRoutes);
 console.log('Ruta /api/whatsapp/webhook configurada');
+app.use('/api', require('./routes/whatsapp-embedded.routes'));
+console.log('Ruta /api/whatsapp embedded configurada');
 console.log('Routes registered successfully');
 // Puerto del servidor
 const PORT = process.env.PORT || 3000;
