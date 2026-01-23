@@ -46,7 +46,11 @@ createWorker('outbound_whatsapp', async (job) => {
         msg.status = 'failed';
         msg.metadata = { ...(msg.metadata || {}), error: err?.response?.data || err.message };
         await msg.save();
-        throw err;
+        const io = getIO();
+        if (io) {
+            io.emit('message:updated', { id: msg.id, conversation_id: conversationId, status: msg.status, error: msg.metadata?.error });
+        }
+        // No re-lanzamos para evitar reintentos infinitos con token inválido
     }
 });
 
