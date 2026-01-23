@@ -1,6 +1,8 @@
 require('dotenv').config(); // Asegúrate de que .env está en la raíz del proyecto
 const cors = require('cors');
 const express = require('express');
+const http = require('http');
+const { Server } = require('socket.io');
 const cookieParser = require('cookie-parser');
 // Importar rutas existentes
 const userRoutes = require('./routes/user.routes');
@@ -37,11 +39,14 @@ const conversationRoutes = require('./routes/conversation.routes');
 const whatsappWebhookRoutes = require('./routes/whatsapp-webhook.routes');
 const jobScheduler = require('./services/jobScheduler.service');
 const intakeController = require('./controllers/intake.controller');
+const { setIO } = require('./services/socket.service');
+require('./workers/queue.workers');
 
 
 // Importar db desde models/index.js que contiene sequelize y todos los modelos
 const db = require('../models'); // <-- Importa el objeto db de models/index.js
 const app = express();
+const server = http.createServer(app);
 // Configuración CORS (mantengo tu estructura)
 const corsOptions = {
     origin: ['https://app.clinicaclick.com', 'https://crm.clinicaclick.com', 'http://localhost:4200'],
@@ -127,6 +132,17 @@ console.log('Ruta /api/whatsapp/webhook configurada');
 console.log('Routes registered successfully');
 // Puerto del servidor
 const PORT = process.env.PORT || 3000;
+// Socket.io
+const io = new Server(server, {
+    cors: {
+        origin: ['https://app.clinicaclick.com', 'https://crm.clinicaclick.com', 'http://localhost:4200'],
+        credentials: true
+    }
+});
+setIO(io);
+io.on('connection', (socket) => {
+    console.log('Socket.io conectado', socket.id);
+});
 // Sincronizar modelos con la base de datos
 db.sequelize.authenticate() // <-- Usar db.sequelize
     .then(() => console.log('Conexión a la base de datos establecida correctamente.'))
@@ -135,7 +151,7 @@ db.sequelize.authenticate() // <-- Usar db.sequelize
 // db.sequelize.sync({ alter: true }) // <-- Usar db.sequelize
 //     .then(() => console.log('Modelos de la base de datos sincronizados.'))
 //     .catch(err => console.error('Error al sincronizar modelos de la base de datos:', err));
-app.listen(PORT, () => {
+server.listen(PORT, () => {
     console.log(`Servidor backend escuchando en el puerto ${PORT}`);
 });
 

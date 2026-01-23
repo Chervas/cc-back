@@ -1,7 +1,7 @@
 'use strict';
 const { Op } = require('sequelize');
 const db = require('../../models');
-const whatsappService = require('../services/whatsapp.service');
+const { queues } = require('../services/queue.service');
 
 const { Conversation, Message, UsuarioClinica, Paciente, Lead } = db;
 
@@ -184,43 +184,30 @@ exports.postMessage = async (req, res) => {
         direction: 'outbound',
         content: message,
         message_type: message_type === 'template' ? 'template' : 'text',
-        status: 'sending',
+        status: conversation.channel === 'whatsapp' ? 'pending' : 'sent',
         sent_at: new Date(),
         metadata,
       },
       { transaction }
     );
 
-    let waResponse = null;
     if (conversation.channel === 'whatsapp') {
       const to = conversation.contact_id;
       if (!to) {
         await transaction.rollback();
         return res.status(400).json({ error: 'contacto_sin_numero' });
       }
-      try {
-        waResponse = await whatsappService.sendMessage({
-          to,
-          body: message,
-          previewUrl,
-          useTemplate: isTemplate,
-          templateName,
-          templateLanguage,
-        });
-        msg.status = 'sent';
-        msg.metadata = { ...msg.metadata, wa_response: waResponse, wamid: waResponse?.messages?.[0]?.id };
-        await msg.save({ transaction });
-      } catch (err) {
-        console.error('Error enviando WhatsApp', err?.response?.data || err);
-        msg.status = 'failed';
-        msg.metadata = { ...msg.metadata, error: err?.response?.data || err.message };
-        await msg.save({ transaction });
-        await transaction.commit();
-        return res.status(502).json({ error: 'whatsapp_send_failed', details: err?.response?.data || err.message });
-      }
-    } else {
-      msg.status = 'sent';
-      await msg.save({ transaction });
+      await queues.outboundWhatsApp.add('send', {
+        messageId: msg.id,
+        conversationId: conversation.id,
+        to,
+        body: message,
+        previewUrl,
+        useTemplate: isTemplate,
+        templateName,
+        templateLanguage,
+        clinicConfig: {}, // TODO: credenciales por clínica
+      });
     }
 
     conversation.last_message_at = new Date();
