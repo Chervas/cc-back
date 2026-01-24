@@ -21,13 +21,19 @@ router.post('/embedded-signup/callback', authMiddleware, async (req, res) => {
       return res.status(500).json({ success: false, error: 'missing_client_secret' });
     }
 
+    const redirectUri =
+      redirect_uri ||
+      process.env.META_EMBEDDED_REDIRECT_URI ||
+      req.headers.origin ||
+      'https://app.clinicaclick.com';
+
     const tokenResp = await axios.get(`https://graph.facebook.com/v24.0/oauth/access_token`, {
       params: {
         grant_type: 'authorization_code',
         client_id: clientId,
         client_secret: clientSecret,
         code,
-        redirect_uri: redirect_uri || process.env.META_EMBEDDED_REDIRECT_URI || 'https://app.clinicaclick.com',
+        redirect_uri: redirectUri,
       },
     });
 
