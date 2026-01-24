@@ -15,17 +15,20 @@ router.post('/embedded-signup/callback', authMiddleware, async (req, res) => {
     }
 
     // Intercambiar code por token largo
-    const tokenResp = await axios.get(
-      `https://graph.facebook.com/v24.0/oauth/access_token`,
-      {
-        params: {
-          grant_type: 'fb_exchange_code',
-          client_id: process.env.FACEBOOK_APP_ID || process.env.META_APP_ID,
-          client_secret: process.env.FACEBOOK_APP_SECRET || process.env.META_APP_SECRET,
-          code,
-        },
-      }
-    );
+    const clientId = process.env.META_APP_ID || process.env.FACEBOOK_APP_ID || '1807844546609897';
+    const clientSecret = process.env.META_APP_SECRET || process.env.FACEBOOK_APP_SECRET;
+    if (!clientSecret) {
+      return res.status(500).json({ success: false, error: 'missing_client_secret' });
+    }
+
+    const tokenResp = await axios.get(`https://graph.facebook.com/v24.0/oauth/access_token`, {
+      params: {
+        grant_type: 'fb_exchange_code',
+        client_id: clientId,
+        client_secret: clientSecret,
+        code,
+      },
+    });
 
     const accessToken = tokenResp.data.access_token;
 
