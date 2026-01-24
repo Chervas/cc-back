@@ -29,7 +29,7 @@ module.exports = (sequelize, DataTypes) => {
             onDelete: 'SET NULL'
         },
         assignmentScope: {
-            type: DataTypes.ENUM('clinic', 'group'),
+            type: DataTypes.ENUM('unassigned', 'clinic', 'group'),
             allowNull: false,
             defaultValue: 'clinic',
             comment: 'Indica si el activo se asigna a una clínica específica o al grupo completo'

@@ -10,8 +10,8 @@ const ClinicMetaAsset = db.ClinicMetaAsset;
 router.post('/embedded-signup/callback', authMiddleware, async (req, res) => {
   try {
     const { code, clinic_id, redirect_uri, waba_id, phone_number_id } = req.body;
-    if (!code || !clinic_id) {
-      return res.status(400).json({ success: false, error: 'missing_code_or_clinic' });
+    if (!code) {
+      return res.status(400).json({ success: false, error: 'missing_code' });
     }
     if (!waba_id || !phone_number_id) {
       return res.status(400).json({ success: false, error: 'missing_waba_or_phone_number_id' });
@@ -21,6 +21,15 @@ router.post('/embedded-signup/callback', authMiddleware, async (req, res) => {
     const metaConnection = await db.MetaConnection.findOne({ where: { userId } });
     if (!metaConnection) {
       return res.status(400).json({ success: false, error: 'meta_not_connected' });
+    }
+
+    // Resolución de asignación: si no viene clinic_id => unassigned
+    const assignmentScope = clinic_id ? 'clinic' : 'unassigned';
+    const targetClinicId = clinic_id || null;
+    let targetGroupId = null;
+    if (clinic_id) {
+      const clinic = await db.Clinica.findOne({ where: { id_clinica: clinic_id }, raw: true });
+      targetGroupId = clinic?.id_grupo || null;
     }
 
     // Intercambiar code por token largo
@@ -127,7 +136,8 @@ router.post('/embedded-signup/callback', authMiddleware, async (req, res) => {
     await upsertAsset(
       { metaConnectionId: metaConnection.id, metaAssetId: waba_id },
       {
-        clinicaId: clinic_id,
+        clinicaId: targetClinicId,
+        grupoClinicaId: targetGroupId,
         assetType: 'whatsapp_business_account',
         metaAssetName: wabaName,
         wabaId: waba_id,
@@ -136,6 +146,7 @@ router.post('/embedded-signup/callback', authMiddleware, async (req, res) => {
         quality_rating: qualityRating,
         messaging_limit: messagingLimit,
         waAccessToken: accessToken,
+        assignmentScope,
         isActive: true,
       }
     );
@@ -144,7 +155,8 @@ router.post('/embedded-signup/callback', authMiddleware, async (req, res) => {
     await upsertAsset(
       { metaConnectionId: metaConnection.id, metaAssetId: phone_number_id },
       {
-        clinicaId: clinic_id,
+        clinicaId: targetClinicId,
+        grupoClinicaId: targetGroupId,
         assetType: 'whatsapp_phone_number',
         metaAssetName: displayPhoneNumber,
         wabaId: waba_id,
@@ -153,6 +165,7 @@ router.post('/embedded-signup/callback', authMiddleware, async (req, res) => {
         quality_rating: qualityRating,
         messaging_limit: messagingLimit,
         waAccessToken: accessToken,
+        assignmentScope,
         isActive: true,
       }
     );

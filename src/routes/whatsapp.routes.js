@@ -95,4 +95,10 @@ router.get('/accounts', authMiddleware, whatsappController.listAccounts);
 // Resumen de plantillas por clínica
 router.get('/templates/summary', authMiddleware, whatsappController.templatesSummary);
 
+// Listado de números de WhatsApp (con estado de asignación)
+router.get('/phones', authMiddleware, whatsappController.listPhones);
+
+// Asignar número a grupo o clínica
+router.post('/phones/:phoneNumberId/assign', authMiddleware, whatsappController.assignPhone);
+
 module.exports = router;

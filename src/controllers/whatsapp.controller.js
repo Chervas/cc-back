@@ -2,7 +2,7 @@
 const db = require('../../models');
 const { Op } = require('sequelize');
 
-const { ClinicMetaAsset, UsuarioClinica, Clinica, WhatsappTemplate } = db;
+const { ClinicMetaAsset, UsuarioClinica, Clinica, WhatsappTemplate, MetaConnection } = db;
 
 const ROLE_AGGREGATE = ['propietario', 'admin'];
 
@@ -62,11 +62,17 @@ exports.listAccounts = async (req, res) => {
       assetType: 'whatsapp_phone_number',
     };
     if (!isAggregateAllowed) {
-      where.clinicaId = { [Op.in]: clinicIds };
+      where[Op.or] = [
+        { clinicaId: { [Op.in]: clinicIds } },
+        { assignmentScope: 'unassigned', '$metaConnection.userId$': userId },
+      ];
     }
     const assets = await ClinicMetaAsset.findAll({
       where,
-      include: [{ model: Clinica, as: 'clinica', attributes: ['id_clinica', 'nombre_clinica'] }],
+      include: [
+        { model: Clinica, as: 'clinica', attributes: ['id_clinica', 'nombre_clinica'] },
+        { model: MetaConnection, as: 'metaConnection', attributes: ['userId'] },
+      ],
       raw: true,
     });
 
@@ -78,6 +84,7 @@ exports.listAccounts = async (req, res) => {
       waVerifiedName: a.waVerifiedName || null,
       quality_rating: a.quality_rating || null,
       messaging_limit: a.messaging_limit || null,
+      assignmentScope: a.assignmentScope || 'clinic',
     }));
     return res.json(payload);
   } catch (err) {
@@ -122,5 +129,148 @@ exports.templatesSummary = async (req, res) => {
   } catch (err) {
     console.error('Error templatesSummary', err);
     return res.status(500).json({ error: 'Error obteniendo resumen de plantillas' });
+  }
+};
+
+exports.listPhones = async (req, res) => {
+  try {
+    const userId = req.userData?.userId;
+    const { clinicIds, isAggregateAllowed } = await getUserClinics(userId);
+
+    const where = {
+      isActive: true,
+      assetType: 'whatsapp_phone_number',
+    };
+
+    if (!isAggregateAllowed) {
+      where[Op.or] = [
+        { clinicaId: { [Op.in]: clinicIds } },
+        { assignmentScope: 'unassigned', '$metaConnection.userId$': userId },
+      ];
+    }
+
+    const phones = await ClinicMetaAsset.findAll({
+      where,
+      include: [
+        { model: Clinica, as: 'clinica', attributes: ['id_clinica', 'nombre_clinica'] },
+        { model: MetaConnection, as: 'metaConnection', attributes: ['userId'] },
+      ],
+      order: [['createdAt', 'DESC']],
+      raw: true,
+    });
+
+    const payload = phones.map((p) => ({
+      id: p.id,
+      phoneNumberId: p.phoneNumberId,
+      wabaId: p.wabaId,
+      phoneNumber: p.metaAssetName || null,
+      waVerifiedName: p.waVerifiedName || null,
+      quality_rating: p.quality_rating || null,
+      messaging_limit: p.messaging_limit || null,
+      assignmentScope: p.assignmentScope,
+      clinic_id: p.clinicaId || null,
+      clinic_name: p['clinica.nombre_clinica'] || null,
+      createdAt: p.createdAt,
+    }));
+
+    return res.json({ phones: payload });
+  } catch (err) {
+    console.error('Error listPhones', err);
+    return res.status(500).json({ error: 'Error obteniendo números WhatsApp' });
+  }
+};
+
+exports.assignPhone = async (req, res) => {
+  try {
+    const userId = req.userData?.userId;
+    const phoneNumberId = req.params.phoneNumberId;
+    const { assignmentScope, clinic_id } = req.body || {};
+
+    if (!['group', 'clinic'].includes(assignmentScope)) {
+      return res.status(400).json({ success: false, error: 'invalid_assignment_scope' });
+    }
+
+    const phone = await ClinicMetaAsset.findOne({
+      where: {
+        assetType: 'whatsapp_phone_number',
+        phoneNumberId: phoneNumberId,
+        isActive: true,
+      },
+      include: [
+        { model: MetaConnection, as: 'metaConnection', attributes: ['userId'] },
+        { model: Clinica, as: 'clinica', attributes: ['id_clinica', 'id_grupo', 'nombre_clinica'] },
+      ],
+    });
+
+    if (!phone) {
+      return res.status(404).json({ success: false, error: 'phone_not_found' });
+    }
+
+    const { clinicIds, isAggregateAllowed } = await getUserClinics(userId);
+    const isOwner = phone.metaConnection?.userId === userId;
+    const canManage =
+      isOwner ||
+      isAggregateAllowed ||
+      (phone.clinicaId && clinicIds.includes(phone.clinicaId)) ||
+      assignmentScope === 'clinic';
+
+    if (!canManage) {
+      return res.status(403).json({ success: false, error: 'forbidden' });
+    }
+
+    let targetClinicId = null;
+    let targetGroupId = null;
+
+    if (assignmentScope === 'clinic') {
+      if (!clinic_id) {
+        return res.status(400).json({ success: false, error: 'clinic_id_required' });
+      }
+      const clinic = await Clinica.findOne({
+        where: { id_clinica: clinic_id },
+        attributes: ['id_clinica', 'id_grupo', 'nombre_clinica'],
+        raw: true,
+      });
+      if (!clinic) {
+        return res.status(404).json({ success: false, error: 'invalid_clinic' });
+      }
+      if (!isAggregateAllowed && !clinicIds.includes(clinic_id)) {
+        return res.status(403).json({ success: false, error: 'forbidden' });
+      }
+      targetClinicId = clinic_id;
+      targetGroupId = clinic.id_grupo || null;
+    } else if (assignmentScope === 'group') {
+      if (!clinic_id) {
+        return res.status(400).json({ success: false, error: 'clinic_id_required_for_group' });
+      }
+      const clinic = await Clinica.findOne({
+        where: { id_clinica: clinic_id },
+        attributes: ['id_grupo'],
+        raw: true,
+      });
+      if (!clinic) {
+        return res.status(404).json({ success: false, error: 'invalid_clinic' });
+      }
+      if (!isAggregateAllowed && !clinicIds.includes(clinic_id)) {
+        return res.status(403).json({ success: false, error: 'forbidden' });
+      }
+      targetGroupId = clinic.id_grupo || null;
+    }
+
+    await phone.update({
+      assignmentScope,
+      clinicaId: targetClinicId,
+      grupoClinicaId: targetGroupId,
+    });
+
+    return res.json({
+      success: true,
+      phoneNumberId,
+      assignmentScope,
+      clinic_id: targetClinicId,
+      clinic_name: phone.clinica?.nombre_clinica || null,
+    });
+  } catch (err) {
+    console.error('Error assignPhone', err);
+    return res.status(500).json({ success: false, error: 'assign_failed' });
   }
 };
