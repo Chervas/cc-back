@@ -10,8 +10,8 @@ const ClinicMetaAsset = db.ClinicMetaAsset;
 router.post('/embedded-signup/callback', authMiddleware, async (req, res) => {
   try {
     const { code, clinic_id, redirect_uri } = req.body;
-    if (!code || !clinic_id) {
-      return res.status(400).json({ success: false, error: 'missing_code_or_clinic' });
+    if (!code || !clinic_id || !redirect_uri) {
+      return res.status(400).json({ success: false, error: 'missing_code_clinic_or_redirect' });
     }
 
     // Intercambiar code por token largo
@@ -21,19 +21,13 @@ router.post('/embedded-signup/callback', authMiddleware, async (req, res) => {
       return res.status(500).json({ success: false, error: 'missing_client_secret' });
     }
 
-    const redirectUri =
-      redirect_uri ||
-      process.env.META_EMBEDDED_REDIRECT_URI ||
-      req.headers.origin ||
-      'https://app.clinicaclick.com';
-
     const tokenResp = await axios.get(`https://graph.facebook.com/v24.0/oauth/access_token`, {
       params: {
         grant_type: 'authorization_code',
         client_id: clientId,
         client_secret: clientSecret,
         code,
-        redirect_uri: redirectUri,
+        redirect_uri: redirect_uri,
       },
     });
 
