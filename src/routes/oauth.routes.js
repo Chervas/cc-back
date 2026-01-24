@@ -1842,11 +1842,34 @@ router.get('/meta/connection-status', async (req, res) => {
     try {
         const connection = await MetaConnection.findOne({ where: { userId: userId } });
         if (connection) {
+            // Intentar recuperar scopes actuales del token
+            let scopes = [];
+            let missingScopes = [];
+            try {
+                const dbg = await axios.get(`${META_API_BASE_URL}/debug_token`, {
+                    params: {
+                        input_token: connection.accessToken,
+                        access_token: connection.accessToken
+                    }
+                });
+                scopes = Array.isArray(dbg.data?.data?.scopes)
+                    ? dbg.data.data.scopes.map((s) => String(s).toLowerCase())
+                    : [];
+
+                // Scopes críticos para Lead Ads
+                const critical = ['pages_manage_ads', 'leads_retrieval'];
+                missingScopes = critical.filter((s) => !scopes.includes(s));
+            } catch (err) {
+                console.warn('⚠️ No se pudo obtener scopes de Meta (debug_token):', err.response?.data || err.message);
+            }
+
             return res.json({
                 connected: true,
                 metaUserId: connection.metaUserId,
                 userName: connection.userName,
                 userEmail: connection.userEmail,
+                scopes,
+                missingScopes,
                 message: 'Conexión Meta activa.'
             });
         } else {
