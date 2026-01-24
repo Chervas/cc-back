@@ -290,3 +290,57 @@ exports.assignPhone = async (req, res) => {
     return res.status(500).json({ success: false, error: 'assign_failed' });
   }
 };
+
+exports.deletePhone = async (req, res) => {
+  try {
+    const userId = req.userData?.userId;
+    const phoneNumberId = req.params.phoneNumberId;
+    if (!phoneNumberId) {
+      return res.status(400).json({ success: false, error: 'phone_number_id_required' });
+    }
+
+    const phone = await ClinicMetaAsset.findOne({
+      where: { assetType: 'whatsapp_phone_number', phoneNumberId, isActive: true },
+      include: [
+        { model: MetaConnection, as: 'metaConnection', attributes: ['userId'] },
+        { model: Clinica, as: 'clinica', attributes: ['id_clinica', 'grupoClinicaId', 'nombre_clinica'] },
+      ],
+    });
+
+    if (!phone) {
+      return res.status(404).json({ success: false, error: 'phone_not_found' });
+    }
+
+    const { clinicIds, isAggregateAllowed } = await getUserClinics(userId);
+    const isOwner = phone.metaConnection?.userId === userId;
+    const hasClinicAccess = phone.clinicaId ? clinicIds.includes(phone.clinicaId) : false;
+    const canManage = isOwner || isAggregateAllowed || hasClinicAccess;
+    if (!canManage) {
+      return res.status(403).json({ success: false, error: 'forbidden' });
+    }
+
+    await phone.update({
+      isActive: false,
+      assignmentScope: 'unassigned',
+      clinicaId: null,
+      grupoClinicaId: null,
+    });
+
+    if (phone.wabaId) {
+      await ClinicMetaAsset.update(
+        {
+          isActive: false,
+          assignmentScope: 'unassigned',
+          clinicaId: null,
+          grupoClinicaId: null,
+        },
+        { where: { assetType: 'whatsapp_business_account', wabaId: phone.wabaId } }
+      );
+    }
+
+    return res.json({ success: true, phoneNumberId });
+  } catch (err) {
+    console.error('Error deletePhone', err);
+    return res.status(500).json({ success: false, error: 'delete_failed' });
+  }
+};

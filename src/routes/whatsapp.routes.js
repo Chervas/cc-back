@@ -101,4 +101,7 @@ router.get('/phones', authMiddleware, whatsappController.listPhones);
 // Asignar número a grupo o clínica
 router.post('/phones/:phoneNumberId/assign', authMiddleware, whatsappController.assignPhone);
 
+// Desconectar número (desactiva y desasigna)
+router.delete('/phones/:phoneNumberId', authMiddleware, whatsappController.deletePhone);
+
 module.exports = router;
