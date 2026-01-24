@@ -118,10 +118,22 @@ router.post('/embedded-signup/callback', authMiddleware, async (req, res) => {
     ]);
 
     const wabaName = wabaDetails?.name || null;
-    const displayPhoneNumber = phoneDetails?.display_phone_number || null;
-    const verifiedName = phoneDetails?.verified_name || wabaName;
+    // Fallback: si no hay display_phone_number, usar phone_number_id como identificador temporal
+    const displayPhoneNumber = phoneDetails?.display_phone_number || `+00 ${phone_number_id.slice(-6)}`;
+    const verifiedName = phoneDetails?.verified_name || wabaName || 'WhatsApp Business';
     const qualityRating = phoneDetails?.quality_rating || null;
     const messagingLimit = phoneDetails?.messaging_limit || null;
+    
+    console.log('📱 WhatsApp Embedded Signup - Detalles obtenidos:', {
+      wabaId: waba_id,
+      phoneNumberId: phone_number_id,
+      displayPhoneNumber,
+      verifiedName,
+      qualityRating,
+      messagingLimit,
+      wabaDetailsRaw: wabaDetails,
+      phoneDetailsRaw: phoneDetails
+    });
 
     const upsertAsset = async (where, values) => {
       const existing = await ClinicMetaAsset.findOne({ where });
