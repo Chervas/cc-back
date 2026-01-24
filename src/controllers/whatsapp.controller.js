@@ -2,7 +2,7 @@
 const db = require('../../models');
 const { Op } = require('sequelize');
 
-const { ClinicMetaAsset, UsuarioClinica, Clinica, WhatsappTemplate, MetaConnection } = db;
+const { ClinicMetaAsset, UsuarioClinica, Clinica, WhatsappTemplate, MetaConnection, GrupoClinica } = db;
 
 const ROLE_AGGREGATE = ['propietario', 'admin'];
 
@@ -152,26 +152,41 @@ exports.listPhones = async (req, res) => {
     const phones = await ClinicMetaAsset.findAll({
       where,
       include: [
-        { model: Clinica, as: 'clinica', attributes: ['id_clinica', 'nombre_clinica'] },
+        { 
+          model: Clinica, 
+          as: 'clinica', 
+          attributes: ['id_clinica', 'nombre_clinica', 'url_avatar', 'grupoClinicaId'],
+          include: [{
+            model: GrupoClinica,
+            as: 'grupoClinica',
+            attributes: ['id_grupo', 'nombre_grupo']
+          }]
+        },
         { model: MetaConnection, as: 'metaConnection', attributes: ['userId'] },
       ],
       order: [['createdAt', 'DESC']],
-      raw: true,
     });
 
-    const payload = phones.map((p) => ({
-      id: p.id,
-      phoneNumberId: p.phoneNumberId,
-      wabaId: p.wabaId,
-      phoneNumber: p.metaAssetName || null,
-      waVerifiedName: p.waVerifiedName || null,
-      quality_rating: p.quality_rating || null,
-      messaging_limit: p.messaging_limit || null,
-      assignmentScope: p.assignmentScope,
-      clinic_id: p.clinicaId || null,
-      clinic_name: p['clinica.nombre_clinica'] || null,
-      createdAt: p.createdAt,
-    }));
+    const payload = phones.map((p) => {
+      const clinica = p.clinica || {};
+      const grupo = clinica.grupoClinica || {};
+      return {
+        id: p.id,
+        phoneNumberId: p.phoneNumberId,
+        wabaId: p.wabaId,
+        phoneNumber: p.metaAssetName || null,
+        waVerifiedName: p.waVerifiedName || null,
+        quality_rating: p.quality_rating || null,
+        messaging_limit: p.messaging_limit || null,
+        assignmentScope: p.assignmentScope,
+        clinic_id: p.clinicaId || null,
+        clinic_name: clinica.nombre_clinica || null,
+        clinic_avatar: clinica.url_avatar || null,
+        group_id: grupo.id_grupo || clinica.grupoClinicaId || null,
+        group_name: grupo.nombre_grupo || null,
+        createdAt: p.createdAt,
+      };
+    });
 
     return res.json({ phones: payload });
   } catch (err) {
