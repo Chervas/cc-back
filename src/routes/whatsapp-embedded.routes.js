@@ -9,7 +9,7 @@ const ClinicMetaAsset = db.ClinicMetaAsset;
 
 router.post('/embedded-signup/callback', authMiddleware, async (req, res) => {
   try {
-    const { code, clinic_id } = req.body;
+    const { code, clinic_id, redirect_uri } = req.body;
     if (!code || !clinic_id) {
       return res.status(400).json({ success: false, error: 'missing_code_or_clinic' });
     }
@@ -23,10 +23,11 @@ router.post('/embedded-signup/callback', authMiddleware, async (req, res) => {
 
     const tokenResp = await axios.get(`https://graph.facebook.com/v24.0/oauth/access_token`, {
       params: {
-        grant_type: 'fb_exchange_code',
+        grant_type: 'authorization_code',
         client_id: clientId,
         client_secret: clientSecret,
         code,
+        redirect_uri: redirect_uri || process.env.META_EMBEDDED_REDIRECT_URI || 'https://app.clinicaclick.com',
       },
     });
 
