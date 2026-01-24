@@ -198,7 +198,8 @@ exports.assignPhone = async (req, res) => {
       },
       include: [
         { model: MetaConnection, as: 'metaConnection', attributes: ['userId'] },
-        { model: Clinica, as: 'clinica', attributes: ['id_clinica', 'id_grupo', 'nombre_clinica'] },
+        // Ajustar a columna grupoClinicaId (no id_grupo)
+        { model: Clinica, as: 'clinica', attributes: ['id_clinica', 'grupoClinicaId', 'nombre_clinica'] },
       ],
     });
 
@@ -227,7 +228,7 @@ exports.assignPhone = async (req, res) => {
       }
       const clinic = await Clinica.findOne({
         where: { id_clinica: clinic_id },
-        attributes: ['id_clinica', 'id_grupo', 'nombre_clinica'],
+        attributes: ['id_clinica', 'grupoClinicaId', 'nombre_clinica'],
         raw: true,
       });
       if (!clinic) {
@@ -237,14 +238,14 @@ exports.assignPhone = async (req, res) => {
         return res.status(403).json({ success: false, error: 'forbidden' });
       }
       targetClinicId = clinic_id;
-      targetGroupId = clinic.id_grupo || null;
+      targetGroupId = clinic.grupoClinicaId || null;
     } else if (assignmentScope === 'group') {
       if (!clinic_id) {
         return res.status(400).json({ success: false, error: 'clinic_id_required_for_group' });
       }
       const clinic = await Clinica.findOne({
         where: { id_clinica: clinic_id },
-        attributes: ['id_grupo'],
+        attributes: ['grupoClinicaId'],
         raw: true,
       });
       if (!clinic) {
@@ -253,7 +254,7 @@ exports.assignPhone = async (req, res) => {
       if (!isAggregateAllowed && !clinicIds.includes(clinic_id)) {
         return res.status(403).json({ success: false, error: 'forbidden' });
       }
-      targetGroupId = clinic.id_grupo || null;
+      targetGroupId = clinic.grupoClinicaId || null;
     }
 
     await phone.update({
