@@ -9,9 +9,18 @@ const ClinicMetaAsset = db.ClinicMetaAsset;
 
 router.post('/embedded-signup/callback', authMiddleware, async (req, res) => {
   try {
-    const { code, clinic_id, redirect_uri } = req.body;
+    const { code, clinic_id, redirect_uri, waba_id, phone_number_id } = req.body;
     if (!code || !clinic_id) {
       return res.status(400).json({ success: false, error: 'missing_code_or_clinic' });
+    }
+    if (!waba_id || !phone_number_id) {
+      return res.status(400).json({ success: false, error: 'missing_waba_or_phone_number_id' });
+    }
+
+    const userId = req.userData?.userId;
+    const metaConnection = await db.MetaConnection.findOne({ where: { userId } });
+    if (!metaConnection) {
+      return res.status(400).json({ success: false, error: 'meta_not_connected' });
     }
 
     // Intercambiar code por token largo
@@ -80,42 +89,79 @@ router.post('/embedded-signup/callback', authMiddleware, async (req, res) => {
       });
     }
 
-    // Obtener WABA, phone_number_id y datos
-    const businessesResp = await axios.get(
-      `https://graph.facebook.com/v24.0/me/owned_whatsapp_business_accounts`,
-      { params: { access_token: accessToken } }
-    );
-    const waba = businessesResp.data?.data?.[0];
-    if (!waba) {
-      return res.status(400).json({ success: false, error: 'waba_not_found' });
-    }
+    // Obtener detalles del WABA y del número (usamos IDs proporcionados por WA_EMBEDDED_SIGNUP)
+    const [wabaDetails, phoneDetails] = await Promise.all([
+      axios
+        .get(`https://graph.facebook.com/v24.0/${waba_id}`, {
+          params: { access_token: accessToken, fields: 'id,name' },
+        })
+        .then((r) => r.data)
+        .catch(() => null),
+      axios
+        .get(`https://graph.facebook.com/v24.0/${phone_number_id}`, {
+          params: {
+            access_token: accessToken,
+            fields: 'id,display_phone_number,verified_name,quality_rating,messaging_limit',
+          },
+        })
+        .then((r) => r.data)
+        .catch(() => null),
+    ]);
 
-    const phoneResp = await axios.get(
-      `https://graph.facebook.com/v24.0/${waba.id}/phone_numbers`,
-      { params: { access_token: accessToken } }
-    );
-    const phone = phoneResp.data?.data?.[0];
+    const wabaName = wabaDetails?.name || null;
+    const displayPhoneNumber = phoneDetails?.display_phone_number || null;
+    const verifiedName = phoneDetails?.verified_name || wabaName;
+    const qualityRating = phoneDetails?.quality_rating || null;
+    const messagingLimit = phoneDetails?.messaging_limit || null;
 
-    await ClinicMetaAsset.create({
-      clinicaId: clinic_id,
-      metaConnectionId: null,
-      assetType: phone ? 'whatsapp_phone_number' : 'whatsapp_business_account',
-      metaAssetId: phone?.id || waba.id,
-      metaAssetName: phone?.display_phone_number || null,
-      wabaId: waba.id,
-      phoneNumberId: phone?.id || null,
-      waVerifiedName: waba.name || null,
-      quality_rating: phone?.quality_rating || null,
-      messaging_limit: phone?.messaging_limit || null,
-      waAccessToken: accessToken,
-      isActive: true,
-    });
+    const upsertAsset = async (where, values) => {
+      const existing = await ClinicMetaAsset.findOne({ where });
+      if (existing) {
+        await existing.update(values);
+        return existing;
+      }
+      return ClinicMetaAsset.create({ ...where, ...values });
+    };
+
+    // Guardar WABA
+    await upsertAsset(
+      { metaConnectionId: metaConnection.id, metaAssetId: waba_id },
+      {
+        clinicaId: clinic_id,
+        assetType: 'whatsapp_business_account',
+        metaAssetName: wabaName,
+        wabaId: waba_id,
+        phoneNumberId: phone_number_id,
+        waVerifiedName: wabaName,
+        quality_rating: qualityRating,
+        messaging_limit: messagingLimit,
+        waAccessToken: accessToken,
+        isActive: true,
+      }
+    );
+
+    // Guardar phone number
+    await upsertAsset(
+      { metaConnectionId: metaConnection.id, metaAssetId: phone_number_id },
+      {
+        clinicaId: clinic_id,
+        assetType: 'whatsapp_phone_number',
+        metaAssetName: displayPhoneNumber,
+        wabaId: waba_id,
+        phoneNumberId: phone_number_id,
+        waVerifiedName: verifiedName,
+        quality_rating: qualityRating,
+        messaging_limit: messagingLimit,
+        waAccessToken: accessToken,
+        isActive: true,
+      }
+    );
 
     return res.json({
       success: true,
-      wabaId: waba.id,
-      phoneNumberId: phone?.id || null,
-      waVerifiedName: waba.name || null,
+      wabaId: waba_id,
+      phoneNumberId: phone_number_id,
+      waVerifiedName: verifiedName,
     });
   } catch (err) {
     console.error('Embedded Signup callback error', err?.response?.data || err.message);
