@@ -157,6 +157,8 @@ class WhatsAppService {
         useTemplate,
         templateName,
         templateLanguage,
+        templateParams,
+        templateComponents,
         clinicConfig = {},
     }) {
         this.setClinicCredentials(clinicConfig);
@@ -169,6 +171,8 @@ class WhatsAppService {
                 templateName: templateName || this.defaultTemplateName,
                 templateLanguage:
                     templateLanguage || this.defaultTemplateLanguage,
+                templateParams,
+                templateComponents,
                 clinicConfig,
             });
         }
@@ -213,7 +217,51 @@ class WhatsAppService {
     /**
      * Envía una plantilla preaprobada
      */
-    async sendTemplateMessage({ to, templateName, templateLanguage, clinicConfig = {} }) {
+    buildTemplateComponents({ templateParams, templateComponents }) {
+        if (Array.isArray(templateComponents) && templateComponents.length) {
+            return templateComponents;
+        }
+
+        if (templateParams === undefined || templateParams === null) {
+            return null;
+        }
+
+        const normalizeParam = (value) => {
+            if (value && typeof value === 'object' && value.type && value.text) {
+                return value;
+            }
+            return { type: 'text', text: String(value ?? '') };
+        };
+
+        let ordered = [];
+        if (Array.isArray(templateParams)) {
+            ordered = templateParams.map(normalizeParam);
+        } else if (typeof templateParams === 'object') {
+            ordered = Object.keys(templateParams)
+                .sort((a, b) => Number(a) - Number(b))
+                .map((key) => normalizeParam(templateParams[key]));
+        }
+
+        if (!ordered.length) {
+            return null;
+        }
+
+        return [
+            {
+                type: 'body',
+                parameters: ordered,
+            },
+        ];
+    }
+
+    async sendTemplateMessage({
+        to,
+        templateName,
+        templateLanguage,
+        templateParams,
+        templateComponents,
+        clinicConfig = {},
+    }) {
         this.setClinicCredentials(clinicConfig);
         this.assertConfiguration();
 
@@ -228,6 +276,11 @@ class WhatsAppService {
                 },
             },
         };
+
+        const components = this.buildTemplateComponents({ templateParams, templateComponents });
+        if (components) {
+            payload.template.components = components;
+        }
 
         const url = `https://graph.facebook.com/${this.apiVersion}/${this.phoneNumberId}/messages`;
 

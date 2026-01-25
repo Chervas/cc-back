@@ -18,6 +18,8 @@ router.post('/messages', async (req, res) => {
             useTemplate,
             templateName,
             templateLanguage,
+            templateParams,
+            templateComponents,
         } = req.body;
 
         if (!to) {
@@ -49,6 +51,8 @@ router.post('/messages', async (req, res) => {
             useTemplate,
             templateName,
             templateLanguage,
+            templateParams,
+            templateComponents,
         });
 
         res.status(200).json({

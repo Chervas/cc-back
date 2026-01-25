@@ -162,6 +162,8 @@ exports.postMessage = async (req, res) => {
       useTemplate = false,
       templateName,
       templateLanguage,
+      templateParams,
+      templateComponents,
       previewUrl = false,
       metadata = {},
     } = req.body;
@@ -198,7 +200,11 @@ exports.postMessage = async (req, res) => {
         message_type: message_type === 'template' ? 'template' : 'text',
         status: conversation.channel === 'whatsapp' ? 'pending' : 'sent',
         sent_at: new Date(),
-        metadata,
+        metadata: {
+          ...(metadata || {}),
+          ...(templateParams ? { templateParams } : {}),
+          ...(templateComponents ? { templateComponents } : {}),
+        },
       },
       { transaction }
     );
@@ -237,6 +243,8 @@ exports.postMessage = async (req, res) => {
         useTemplate: isTemplate,
         templateName,
         templateLanguage,
+        templateParams,
+        templateComponents,
         clinicConfig,
       });
     }

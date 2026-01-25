@@ -9,7 +9,18 @@ const { Conversation, Message } = db;
 
 // Procesa envíos salientes de WhatsApp
 createWorker('outbound_whatsapp', async (job) => {
-    const { messageId, conversationId, to, body, useTemplate, templateName, templateLanguage, clinicConfig } = job.data;
+    const {
+        messageId,
+        conversationId,
+        to,
+        body,
+        useTemplate,
+        templateName,
+        templateLanguage,
+        templateParams,
+        templateComponents,
+        clinicConfig,
+    } = job.data;
 
     const msg = await Message.findByPk(messageId);
     if (!msg) {
@@ -26,6 +37,8 @@ createWorker('outbound_whatsapp', async (job) => {
             useTemplate,
             templateName,
             templateLanguage,
+            templateParams,
+            templateComponents,
             clinicConfig,
         });
         msg.status = 'sent';
