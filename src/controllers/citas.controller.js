@@ -204,3 +204,35 @@ exports.getCitas = asyncHandler(async (req, res) => {
 
     res.json(citas);
 });
+
+/**
+ * Obtener la próxima cita de un paciente en una clínica
+ */
+exports.getNextCita = asyncHandler(async (req, res) => {
+    const { clinica_id, paciente_id } = req.query;
+    const clinicaId = Number(clinica_id);
+    const pacienteId = Number(paciente_id);
+
+    if (!clinica_id || !paciente_id || Number.isNaN(clinicaId) || Number.isNaN(pacienteId)) {
+        return res.status(400).json({ message: 'clinica_id y paciente_id son obligatorios' });
+    }
+
+    const now = new Date();
+    const where = {
+        clinica_id: clinicaId,
+        paciente_id: pacienteId,
+        inicio: { [Op.gte]: now }
+    };
+
+    const cita = await CitaPaciente.findOne({
+        where,
+        order: [['inicio', 'ASC']],
+        include: [
+            { model: Paciente, as: 'paciente' },
+            { model: LeadIntake, as: 'lead' },
+            { model: Clinica, as: 'clinica' }
+        ]
+    });
+
+    return res.json(cita || null);
+});
