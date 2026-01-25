@@ -1,6 +1,7 @@
 'use strict';
 const { createWorker } = require('../services/queue.service');
 const whatsappService = require('../services/whatsapp.service');
+const whatsappTemplatesService = require('../services/whatsappTemplates.service');
 const { getIO } = require('../services/socket.service');
 const db = require('../../models');
 
@@ -121,4 +122,14 @@ createWorker('webhook_whatsapp', async (job) => {
             io.emit('unread:updated', { totalUnreadCount: totalUnread || 0 });
         }
     }
+});
+
+// Crea plantillas desde catálogo para un WABA
+createWorker('whatsapp_template_create', async (job) => {
+    await whatsappTemplatesService.createTemplatesFromCatalog(job.data || {});
+});
+
+// Sincroniza estados de plantillas desde Meta
+createWorker('whatsapp_template_sync', async (job) => {
+    await whatsappTemplatesService.syncTemplatesForWaba(job.data || {});
 });

@@ -10,6 +10,8 @@ const connection = {
 const queues = {
     outboundWhatsApp: new Queue('outbound_whatsapp', connection),
     webhookWhatsApp: new Queue('webhook_whatsapp', connection),
+    whatsappTemplateCreate: new Queue('whatsapp_template_create', connection),
+    whatsappTemplateSync: new Queue('whatsapp_template_sync', connection),
 };
 
 function createWorker(name, processor) {

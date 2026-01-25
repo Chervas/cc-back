@@ -72,6 +72,8 @@ router.post('/messages', async (req, res) => {
 
 // Plantillas del WABA según clinic_id o phone_number_id
 router.get('/templates', authMiddleware, whatsappController.listTemplatesForClinic);
+router.post('/templates/sync', authMiddleware, whatsappController.syncTemplates);
+router.post('/templates/create-from-catalog', authMiddleware, whatsappController.createTemplatesFromCatalog);
 
 // Catálogo maestro (solo admins)
 router.get('/template-catalog', authMiddleware, whatsappController.listCatalog);

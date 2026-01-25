@@ -6,6 +6,7 @@ const authMiddleware = require('./auth.middleware');
 
 const router = express.Router();
 const ClinicMetaAsset = db.ClinicMetaAsset;
+const { enqueueCreateTemplatesJob } = require('../services/whatsappTemplates.service');
 
 router.post('/embedded-signup/callback', authMiddleware, async (req, res) => {
   try {
@@ -29,7 +30,7 @@ router.post('/embedded-signup/callback', authMiddleware, async (req, res) => {
     let targetGroupId = null;
     if (clinic_id) {
       const clinic = await db.Clinica.findOne({ where: { id_clinica: clinic_id }, raw: true });
-      targetGroupId = clinic?.id_grupo || null;
+      targetGroupId = clinic?.grupoClinicaId || clinic?.id_grupo || null;
     }
 
     // Intercambiar code por token largo
@@ -181,6 +182,17 @@ router.post('/embedded-signup/callback', authMiddleware, async (req, res) => {
         isActive: true,
       }
     );
+
+    if (assignmentScope !== 'unassigned') {
+      enqueueCreateTemplatesJob({
+        wabaId: waba_id,
+        clinicId: targetClinicId,
+        groupId: targetGroupId,
+        assignmentScope,
+      }).catch((err) => {
+        console.error('[EmbeddedSignup] Error encolando plantillas', err?.message || err);
+      });
+    }
 
     return res.json({
       success: true,

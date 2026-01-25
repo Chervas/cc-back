@@ -212,6 +212,59 @@ exports.listTemplatesForClinic = async (req, res) => {
   }
 };
 
+exports.syncTemplates = async (req, res) => {
+  try {
+    const clinicId = req.query.clinic_id ? Number(req.query.clinic_id) : null;
+    const phoneNumberId = req.query.phone_number_id || null;
+    const userId = req.userData?.userId;
+
+    if (!clinicId && !phoneNumberId) {
+      return res.status(400).json({ error: 'clinic_id o phone_number_id requerido' });
+    }
+
+    const asset = await resolveWabaFromContext({ clinicId, phoneNumberId, userId });
+    if (!asset || !asset.wabaId || !asset.waAccessToken) {
+      return res.status(404).json({ error: 'waba_not_found' });
+    }
+
+    const { enqueueSyncTemplatesJob } = require('../services/whatsappTemplates.service');
+    const job = await enqueueSyncTemplatesJob({ wabaId: asset.wabaId, accessToken: asset.waAccessToken });
+    return res.json({ success: true, jobId: job?.id || null });
+  } catch (err) {
+    console.error('Error syncTemplates', err);
+    return res.status(500).json({ error: 'Error sincronizando plantillas' });
+  }
+};
+
+exports.createTemplatesFromCatalog = async (req, res) => {
+  try {
+    const clinicId = req.query.clinic_id ? Number(req.query.clinic_id) : null;
+    const phoneNumberId = req.query.phone_number_id || null;
+    const userId = req.userData?.userId;
+
+    if (!clinicId && !phoneNumberId) {
+      return res.status(400).json({ error: 'clinic_id o phone_number_id requerido' });
+    }
+
+    const asset = await resolveWabaFromContext({ clinicId, phoneNumberId, userId });
+    if (!asset || !asset.wabaId) {
+      return res.status(404).json({ error: 'waba_not_found' });
+    }
+
+    const { enqueueCreateTemplatesJob } = require('../services/whatsappTemplates.service');
+    const job = await enqueueCreateTemplatesJob({
+      wabaId: asset.wabaId,
+      clinicId: asset.clinicaId || null,
+      groupId: asset.grupoClinicaId || null,
+      assignmentScope: asset.assignmentScope || 'clinic',
+    });
+    return res.json({ success: true, jobId: job?.id || null });
+  } catch (err) {
+    console.error('Error createTemplatesFromCatalog', err);
+    return res.status(500).json({ error: 'Error creando plantillas' });
+  }
+};
+
 exports.listPhones = async (req, res) => {
   try {
     const userId = req.userData?.userId;
@@ -498,6 +551,19 @@ exports.assignPhone = async (req, res) => {
       clinicaId: targetClinicId,
       grupoClinicaId: targetGroupId,
     });
+
+    // Encolar creación automática de plantillas al asignar
+    const { enqueueCreateTemplatesJob } = require('../services/whatsappTemplates.service');
+    if (phone.wabaId && assignmentScope !== 'unassigned') {
+      enqueueCreateTemplatesJob({
+        wabaId: phone.wabaId,
+        clinicId: targetClinicId,
+        groupId: targetGroupId,
+        assignmentScope,
+      }).catch((err) => {
+        console.error('Error encolando plantillas al asignar número', err?.message || err);
+      });
+    }
 
     return res.json({
       success: true,

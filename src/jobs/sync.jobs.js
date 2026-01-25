@@ -29,6 +29,7 @@ const { metaGet } = require('../lib/metaClient');
 const { buildClinicMatcher } = require('../lib/clinicAttribution');
 const { googleAdsRequest, getGoogleAdsUsageStatus, resumeGoogleAdsUsage, ensureGoogleAdsConfig, normalizeCustomerId, formatCustomerId } = require('../lib/googleAdsClient');
 const notificationService = require('../services/notifications.service');
+const { enqueueSyncForAllWabas } = require('../services/whatsappTemplates.service');
 
 // Importar modelos
 const {
@@ -108,6 +109,7 @@ class MetaSyncJobs {
       webBackfill: 'Backfill histórico de Search Console (12–16 meses) para cache y rapidez.',
       analyticsSync: 'Sincroniza métricas de Google Analytics 4 (sesiones, usuarios, fuentes, audiencias).',
       analyticsBackfill: 'Backfill extendido de Analytics para nuevos mapeos o reprocesos.',
+      whatsappTemplatesSync: 'Sincroniza estados de plantillas WhatsApp para todos los WABA activos.',
       tokenValidation: 'Valida tokens (usuario/página) y registra estado/errores recientes.',
       dataCleanup: 'Limpia registros antiguos según retenciones configuradas (logs, validaciones, métricas).',
       healthCheck: 'Comprueba salud de BD, disponibilidad de Meta API y actividad reciente.'
@@ -128,7 +130,8 @@ class MetaSyncJobs {
         webSync: process.env.JOBS_WEB_SCHEDULE || '15 4 * * *',
         webBackfill: process.env.JOBS_WEB_BACKFILL_SCHEDULE || '30 4 * * 0',
         analyticsSync: process.env.JOBS_ANALYTICS_SCHEDULE || '45 4 * * *',
-        analyticsBackfill: process.env.JOBS_ANALYTICS_BACKFILL_SCHEDULE || '0 5 * * 0'
+        analyticsBackfill: process.env.JOBS_ANALYTICS_BACKFILL_SCHEDULE || '0 5 * * 0',
+        whatsappTemplatesSync: process.env.JOBS_WHATSAPP_TEMPLATES_SCHEDULE || '0 * * * *'
       },
       timezone: process.env.JOBS_TIMEZONE || 'Europe/Madrid',
       autoStart: process.env.JOBS_AUTO_START === 'true',
@@ -213,6 +216,7 @@ class MetaSyncJobs {
       this.registerJob('webBackfill', this.config.schedules.webBackfill, () => this.executeWebBackfill());
       this.registerJob('analyticsSync', this.config.schedules.analyticsSync, () => this.executeAnalyticsSync());
       this.registerJob('analyticsBackfill', this.config.schedules.analyticsBackfill, () => this.executeAnalyticsBackfill());
+      this.registerJob('whatsappTemplatesSync', this.config.schedules.whatsappTemplatesSync, () => this.executeWhatsappTemplatesSync());
 
       this.isInitialized = true;
       
@@ -1249,6 +1253,32 @@ class MetaSyncJobs {
     } finally {
       this._analyticsBackfillMode = prevMode;
       this.config.analytics.recentDays = prev;
+    }
+  }
+
+  async executeWhatsappTemplatesSync() {
+    console.log('💬 Ejecutando sincronización de plantillas WhatsApp...');
+    const syncLog = await SyncLog.create({
+      job_type: 'whatsapp_templates_sync',
+      status: 'running',
+      start_time: new Date(),
+      records_processed: 0
+    });
+
+    try {
+      await enqueueSyncForAllWabas();
+      await syncLog.update({
+        status: 'completed',
+        end_time: new Date(),
+        records_processed: 0,
+        status_report: { queued: true }
+      });
+      console.log('✅ Plantillas WhatsApp encoladas para sincronización');
+      return { status: 'completed', queued: true };
+    } catch (error) {
+      await syncLog.update({ status: 'failed', end_time: new Date(), error_message: error.message });
+      console.error('❌ Error sincronizando plantillas WhatsApp:', error);
+      throw error;
     }
   }
 
