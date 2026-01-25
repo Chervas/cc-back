@@ -269,15 +269,27 @@ exports.listPhones = async (req, res) => {
   try {
     const userId = req.userData?.userId;
     const { clinicIds, isAggregateAllowed } = await getUserClinics(userId);
+    const clinicIdFilter = req.query.clinic_id ? Number(req.query.clinic_id) : null;
+    let groupIdFromClinic = null;
+    if (clinicIdFilter) {
+      const clinic = await Clinica.findOne({ where: { id_clinica: clinicIdFilter }, attributes: ['grupoClinicaId'], raw: true });
+      groupIdFromClinic = clinic?.grupoClinicaId || null;
+    }
 
     const where = {
       isActive: true,
       assetType: 'whatsapp_phone_number',
     };
 
-    if (!isAggregateAllowed) {
+    if (clinicIdFilter) {
+      where[Op.or] = [
+        { clinicaId: clinicIdFilter },
+        { assignmentScope: 'group', grupoClinicaId: groupIdFromClinic },
+      ];
+    } else if (!isAggregateAllowed) {
       where[Op.or] = [
         { clinicaId: { [Op.in]: clinicIds } },
+        { assignmentScope: 'group', grupoClinicaId: { [Op.in]: clinicIds.length ? clinicIds : [-1] } },
         { assignmentScope: 'unassigned', '$metaConnection.userId$': userId },
       ];
     }
