@@ -17,8 +17,16 @@ const META_GRAPH_BASE = process.env.META_GRAPH_BASE_URL || process.env.META_API_
 const META_API_VERSION = process.env.META_API_VERSION || 'v24.0';
 const DEFAULT_LANGUAGE = process.env.META_WHATSAPP_TEMPLATE_LANGUAGE || 'es';
 
+function resolveGraphBase() {
+  const base = META_GRAPH_BASE.replace(/\/+$/, '');
+  if (/\/v\d+\.\d+$/i.test(base)) {
+    return base;
+  }
+  return `${base}/${META_API_VERSION}`;
+}
+
 function graphUrl(path) {
-  return `${META_GRAPH_BASE}/${META_API_VERSION}/${path}`;
+  return `${resolveGraphBase()}/${path}`;
 }
 
 function parseMaybeJson(value) {
