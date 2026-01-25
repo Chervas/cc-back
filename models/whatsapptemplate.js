@@ -4,7 +4,10 @@ const { Model } = require('sequelize');
 module.exports = (sequelize, DataTypes) => {
   class WhatsappTemplate extends Model {
     static associate(models) {
-      // opcional: asociación por wabaId si se quiere
+      WhatsappTemplate.belongsTo(models.WhatsappTemplateCatalog, {
+        foreignKey: 'catalog_template_id',
+        as: 'catalog',
+      });
     }
   }
 
@@ -42,6 +45,24 @@ module.exports = (sequelize, DataTypes) => {
       meta_template_id: {
         type: DataTypes.STRING,
         allowNull: true,
+      },
+      catalog_template_id: {
+        type: DataTypes.INTEGER,
+        allowNull: true,
+      },
+      origin: {
+        type: DataTypes.ENUM('catalog', 'custom', 'external'),
+        allowNull: false,
+        defaultValue: 'catalog',
+      },
+      rejection_reason: {
+        type: DataTypes.TEXT,
+        allowNull: true,
+      },
+      is_active: {
+        type: DataTypes.BOOLEAN,
+        allowNull: false,
+        defaultValue: true,
       },
       last_synced_at: {
         type: DataTypes.DATE,

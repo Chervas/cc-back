@@ -2,9 +2,19 @@
 const db = require('../../models');
 const { Op } = require('sequelize');
 
-const { ClinicMetaAsset, UsuarioClinica, Clinica, WhatsappTemplate, MetaConnection, GrupoClinica } = db;
+const {
+  ClinicMetaAsset,
+  UsuarioClinica,
+  Clinica,
+  WhatsappTemplate,
+  MetaConnection,
+  GrupoClinica,
+  WhatsappTemplateCatalog,
+  WhatsappTemplateCatalogDiscipline,
+} = db;
 
 const ROLE_AGGREGATE = ['propietario', 'admin'];
+const ADMIN_USER_IDS = (process.env.ADMIN_USER_IDS || '1').split(',').map((v) => parseInt(v.trim(), 10)).filter((n) => !Number.isNaN(n));
 
 async function getUserClinics(userId) {
   const memberships = await UsuarioClinica.findAll({
@@ -16,6 +26,15 @@ async function getUserClinics(userId) {
   const roles = memberships.map((m) => m.rol_clinica);
   const isAggregateAllowed = roles.some((r) => ROLE_AGGREGATE.includes(r));
   return { clinicIds, isAggregateAllowed };
+}
+
+function assertAdmin(req, res) {
+  const uid = Number(req.userData?.userId);
+  if (!uid || !ADMIN_USER_IDS.includes(uid)) {
+    res.status(403).json({ error: 'admin_only' });
+    return false;
+  }
+  return true;
 }
 
 exports.getStatus = async (req, res) => {
@@ -132,6 +151,67 @@ exports.templatesSummary = async (req, res) => {
   }
 };
 
+async function resolveWabaFromContext({ clinicId, phoneNumberId, userId }) {
+  const { clinicIds, isAggregateAllowed } = await getUserClinics(userId);
+  const where = {
+    isActive: true,
+    assetType: { [Op.in]: ['whatsapp_phone_number', 'whatsapp_business_account'] },
+  };
+
+  if (clinicId) {
+    where.clinicaId = clinicId;
+  }
+  if (phoneNumberId) {
+    where.phoneNumberId = phoneNumberId;
+  }
+
+  // Restricción por permisos si no es agregador
+  if (!isAggregateAllowed) {
+    where[Op.or] = [
+      { clinicaId: { [Op.in]: clinicIds } },
+      { assignmentScope: 'unassigned', '$metaConnection.userId$': userId },
+    ];
+  }
+
+  const asset = await ClinicMetaAsset.findOne({
+    where,
+    include: [{ model: MetaConnection, as: 'metaConnection', attributes: ['userId'] }],
+    order: [['updatedAt', 'DESC']],
+  });
+
+  return asset;
+}
+
+exports.listTemplatesForClinic = async (req, res) => {
+  try {
+    const clinicId = req.query.clinic_id ? Number(req.query.clinic_id) : null;
+    const phoneNumberId = req.query.phone_number_id || null;
+    const userId = req.userData?.userId;
+
+    if (!clinicId && !phoneNumberId) {
+      return res.status(400).json({ error: 'clinic_id o phone_number_id requerido' });
+    }
+
+    const asset = await resolveWabaFromContext({ clinicId, phoneNumberId, userId });
+    if (!asset || !asset.wabaId) {
+      return res.json([]);
+    }
+
+    const templates = await WhatsappTemplate.findAll({
+      where: {
+        waba_id: asset.wabaId,
+        is_active: true,
+      },
+      order: [['name', 'ASC']],
+    });
+
+    return res.json(templates);
+  } catch (err) {
+    console.error('Error listTemplatesForClinic', err);
+    return res.status(500).json({ error: 'Error obteniendo plantillas' });
+  }
+};
+
 exports.listPhones = async (req, res) => {
   try {
     const userId = req.userData?.userId;
@@ -192,6 +272,147 @@ exports.listPhones = async (req, res) => {
   } catch (err) {
     console.error('Error listPhones', err);
     return res.status(500).json({ error: 'Error obteniendo números WhatsApp' });
+  }
+};
+
+// =======================
+// Catálogo de plantillas
+// =======================
+
+exports.listCatalog = async (req, res) => {
+  if (!assertAdmin(req, res)) return;
+  try {
+    const items = await WhatsappTemplateCatalog.findAll({
+      include: [
+        {
+          model: WhatsappTemplateCatalogDiscipline,
+          as: 'disciplinas',
+          attributes: ['id', 'disciplina_code'],
+        },
+      ],
+      order: [['name', 'ASC']],
+    });
+    return res.json(items);
+  } catch (err) {
+    console.error('Error listCatalog', err);
+    return res.status(500).json({ error: 'Error obteniendo catálogo' });
+  }
+};
+
+exports.createCatalog = async (req, res) => {
+  if (!assertAdmin(req, res)) return;
+  try {
+    const { name, display_name, category, body_text, variables, components, is_generic = false, is_active = true } = req.body || {};
+    if (!name || !category || !body_text) {
+      return res.status(400).json({ error: 'name, category y body_text son obligatorios' });
+    }
+    const item = await WhatsappTemplateCatalog.create({
+      name,
+      display_name: display_name || null,
+      category,
+      body_text,
+      variables: variables || null,
+      components: components || null,
+      is_generic: !!is_generic,
+      is_active: !!is_active,
+    });
+    return res.status(201).json(item);
+  } catch (err) {
+    console.error('Error createCatalog', err);
+    return res.status(500).json({ error: 'Error creando catálogo' });
+  }
+};
+
+exports.updateCatalog = async (req, res) => {
+  if (!assertAdmin(req, res)) return;
+  try {
+    const id = Number(req.params.id);
+    const item = await WhatsappTemplateCatalog.findByPk(id);
+    if (!item) return res.status(404).json({ error: 'catalog_not_found' });
+
+    const { display_name, category, body_text, variables, components, is_generic, is_active, name } = req.body || {};
+    await item.update({
+      name: name || item.name,
+      display_name: display_name !== undefined ? display_name : item.display_name,
+      category: category || item.category,
+      body_text: body_text || item.body_text,
+      variables: variables !== undefined ? variables : item.variables,
+      components: components !== undefined ? components : item.components,
+      is_generic: is_generic !== undefined ? !!is_generic : item.is_generic,
+      is_active: is_active !== undefined ? !!is_active : item.is_active,
+    });
+    return res.json(item);
+  } catch (err) {
+    console.error('Error updateCatalog', err);
+    return res.status(500).json({ error: 'Error actualizando catálogo' });
+  }
+};
+
+exports.deleteCatalog = async (req, res) => {
+  if (!assertAdmin(req, res)) return;
+  try {
+    const id = Number(req.params.id);
+    const item = await WhatsappTemplateCatalog.findByPk(id);
+    if (!item) return res.status(404).json({ error: 'catalog_not_found' });
+
+    const inUse = await WhatsappTemplate.count({ where: { catalog_template_id: id } });
+    if (inUse > 0) {
+      return res.status(400).json({ error: 'catalog_in_use' });
+    }
+    await WhatsappTemplateCatalog.destroy({ where: { id } });
+    return res.json({ success: true });
+  } catch (err) {
+    console.error('Error deleteCatalog', err);
+    return res.status(500).json({ error: 'Error eliminando catálogo' });
+  }
+};
+
+exports.toggleCatalog = async (req, res) => {
+  if (!assertAdmin(req, res)) return;
+  try {
+    const id = Number(req.params.id);
+    const item = await WhatsappTemplateCatalog.findByPk(id);
+    if (!item) return res.status(404).json({ error: 'catalog_not_found' });
+    const newState = req.body?.is_active;
+    if (newState === undefined) {
+      item.is_active = !item.is_active;
+    } else {
+      item.is_active = !!newState;
+    }
+    await item.save();
+    return res.json(item);
+  } catch (err) {
+    console.error('Error toggleCatalog', err);
+    return res.status(500).json({ error: 'Error actualizando estado' });
+  }
+};
+
+exports.setCatalogDisciplines = async (req, res) => {
+  if (!assertAdmin(req, res)) return;
+  try {
+    const id = Number(req.params.id);
+    const item = await WhatsappTemplateCatalog.findByPk(id);
+    if (!item) return res.status(404).json({ error: 'catalog_not_found' });
+
+    const disciplinaCodes = Array.isArray(req.body?.disciplina_codes) ? req.body.disciplina_codes : [];
+    await WhatsappTemplateCatalogDiscipline.destroy({ where: { template_catalog_id: id } });
+
+    if (disciplinaCodes.length) {
+      const rows = disciplinaCodes.map((code) => ({
+        template_catalog_id: id,
+        disciplina_code: code,
+        created_at: new Date(),
+        updated_at: new Date(),
+      }));
+      await WhatsappTemplateCatalogDiscipline.bulkCreate(rows);
+    }
+    const updated = await WhatsappTemplateCatalog.findByPk(id, {
+      include: [{ model: WhatsappTemplateCatalogDiscipline, as: 'disciplinas', attributes: ['id', 'disciplina_code'] }],
+    });
+    return res.json(updated);
+  } catch (err) {
+    console.error('Error setCatalogDisciplines', err);
+    return res.status(500).json({ error: 'Error actualizando disciplinas' });
   }
 };
 

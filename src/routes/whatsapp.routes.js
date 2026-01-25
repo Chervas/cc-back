@@ -70,21 +70,16 @@ router.post('/messages', async (req, res) => {
     }
 });
 
-/**
- * GET /api/whatsapp/templates
- * Devuelve plantillas disponibles (placeholder hasta integrar con Meta)
- */
-router.get('/templates', authMiddleware, async (req, res) => {
-    try {
-        // TODO: integrar con Meta usando token por clínica.
-        const sample = [
-            { name: 'hello_world', language: 'en_US', category: 'UTILITY', status: 'approved', components: [], preview: 'Hello World' },
-        ];
-        return res.json(sample);
-    } catch (error) {
-        return res.status(500).json({ error: 'Error recuperando plantillas' });
-    }
-});
+// Plantillas del WABA según clinic_id o phone_number_id
+router.get('/templates', authMiddleware, whatsappController.listTemplatesForClinic);
+
+// Catálogo maestro (solo admins)
+router.get('/template-catalog', authMiddleware, whatsappController.listCatalog);
+router.post('/template-catalog', authMiddleware, whatsappController.createCatalog);
+router.put('/template-catalog/:id', authMiddleware, whatsappController.updateCatalog);
+router.delete('/template-catalog/:id', authMiddleware, whatsappController.deleteCatalog);
+router.put('/template-catalog/:id/toggle', authMiddleware, whatsappController.toggleCatalog);
+router.post('/template-catalog/:id/disciplines', authMiddleware, whatsappController.setCatalogDisciplines);
 
 // Estado WABA por clínica
 router.get('/status', authMiddleware, whatsappController.getStatus);
