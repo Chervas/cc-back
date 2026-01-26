@@ -21,11 +21,7 @@ function assertAdmin(req, res) {
 }
 
 function extractDisciplinaCodes(payload) {
-  const raw =
-    (Array.isArray(payload?.disciplina_codes) && payload.disciplina_codes) ||
-    (Array.isArray(payload?.disciplinas) && payload.disciplinas) ||
-    (Array.isArray(payload?.disciplines) && payload.disciplines) ||
-    [];
+  const raw = Array.isArray(payload?.disciplina_codes) ? payload.disciplina_codes : [];
   return raw
     .map((code) => (typeof code === 'string' ? code.trim() : null))
     .filter((code) => !!code);
@@ -115,10 +111,7 @@ exports.updateCatalog = async (req, res) => {
     const is_generic = typeof payload.is_generic === 'boolean' ? payload.is_generic : (typeof payload.isGeneric === 'boolean' ? payload.isGeneric : undefined);
     const is_active = typeof payload.is_active === 'boolean' ? payload.is_active : (typeof payload.isActive === 'boolean' ? payload.isActive : undefined);
     const disciplinaCodes = extractDisciplinaCodes(payload);
-    const disciplinesProvided =
-      Object.prototype.hasOwnProperty.call(payload, 'disciplina_codes') ||
-      Object.prototype.hasOwnProperty.call(payload, 'disciplinas') ||
-      Object.prototype.hasOwnProperty.call(payload, 'disciplines');
+    const disciplinesProvided = Object.prototype.hasOwnProperty.call(payload, 'disciplina_codes');
     await item.update({
       name: name ?? item.name,
       display_name: display_name ?? item.display_name,
