@@ -136,9 +136,10 @@ exports.markAsRead = async (req, res) => {
     await conversation.save();
     const io = getIO();
     if (io) {
+      const room = `clinic:${conversation.clinic_id}`;
       const totalUnread = await Conversation.sum('unread_count');
-      io.emit('unread:updated', { totalUnreadCount: totalUnread || 0 });
-      io.emit('conversation:updated', {
+      io.to(room).emit('unread:updated', { totalUnreadCount: totalUnread || 0 });
+      io.to(room).emit('conversation:updated', {
         id: conversation.id,
         unread_count: conversation.unread_count,
         last_message_at: conversation.last_message_at,
@@ -212,7 +213,8 @@ exports.postMessage = async (req, res) => {
     // Emit creación de mensaje outbound (aplica también a interno/instagram)
     const io = getIO();
     if (io) {
-      io.emit('message:created', {
+      const room = `clinic:${conversation.clinic_id}`;
+      io.to(room).emit('message:created', {
         id: msg.id,
         conversation_id: conversation.id,
         content: msg.content,
@@ -253,7 +255,8 @@ exports.postMessage = async (req, res) => {
     await conversation.save({ transaction });
 
     if (io) {
-      io.emit('conversation:updated', {
+      const room = `clinic:${conversation.clinic_id}`;
+      io.to(room).emit('conversation:updated', {
         id: conversation.id,
         unread_count: conversation.unread_count,
         last_message_at: conversation.last_message_at,
@@ -319,7 +322,8 @@ exports.createInternalMessage = async (req, res) => {
     await transaction.commit();
     const io = getIO();
     if (io) {
-      io.emit('message:created', {
+      const room = `clinic:${conversation.clinic_id}`;
+      io.to(room).emit('message:created', {
         id: msg.id,
         conversation_id: conversation.id,
         content: msg.content,
@@ -328,7 +332,7 @@ exports.createInternalMessage = async (req, res) => {
         status: msg.status,
         sent_at: msg.sent_at,
       });
-      io.emit('conversation:updated', {
+      io.to(room).emit('conversation:updated', {
         id: conversation.id,
         unread_count: conversation.unread_count,
         last_message_at: conversation.last_message_at,

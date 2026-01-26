@@ -3,6 +3,7 @@ const cors = require('cors');
 const express = require('express');
 const http = require('http');
 const { Server } = require('socket.io');
+const jwt = require('jsonwebtoken');
 const cookieParser = require('cookie-parser');
 // Importar rutas existentes
 const userRoutes = require('./routes/user.routes');
@@ -142,8 +143,67 @@ const io = new Server(server, {
     }
 });
 setIO(io);
-io.on('connection', (socket) => {
-    console.log('Socket.io conectado', socket.id);
+io.use((socket, next) => {
+    const token =
+        socket.handshake.auth?.token ||
+        socket.handshake.headers?.authorization?.split(' ')[1];
+    if (!token) {
+        return next(new Error('auth_required'));
+    }
+    try {
+        const decoded = jwt.verify(token, process.env.JWT_SECRET);
+        socket.userData = { userId: decoded.userId, email: decoded.email };
+        return next();
+    } catch (err) {
+        return next(new Error('auth_invalid'));
+    }
+});
+
+io.on('connection', async (socket) => {
+    const userId = socket.userData?.userId;
+    console.log('Socket.io conectado', socket.id, 'user', userId);
+
+    if (!userId) {
+        return;
+    }
+
+    // Unir al room del usuario
+    socket.join(`user:${userId}`);
+
+    // Cargar clínicas permitidas para el usuario
+    const memberships = await db.UsuarioClinica.findAll({
+        where: { id_usuario: userId },
+        attributes: ['id_clinica'],
+        raw: true
+    });
+    const allowedClinicIds = memberships
+        .map((m) => Number(m.id_clinica))
+        .filter((id) => Number.isFinite(id));
+
+    socket.data.allowedClinicIds = allowedClinicIds;
+
+    // Suscripción inicial: todas las clínicas permitidas
+    allowedClinicIds.forEach((clinicId) => socket.join(`clinic:${clinicId}`));
+    socket.data.clinicRooms = [...allowedClinicIds];
+
+    // Suscripción dinámica desde frontend
+    socket.on('subscribe', (requested = []) => {
+        const requestedIds = Array.isArray(requested)
+            ? requested
+                  .map((id) => Number(id))
+                  .filter((id) => Number.isFinite(id))
+            : [];
+
+        const targetIds =
+            requestedIds.length > 0
+                ? requestedIds.filter((id) => allowedClinicIds.includes(id))
+                : allowedClinicIds;
+
+        const previous = socket.data.clinicRooms || [];
+        previous.forEach((id) => socket.leave(`clinic:${id}`));
+        targetIds.forEach((id) => socket.join(`clinic:${id}`));
+        socket.data.clinicRooms = [...targetIds];
+    });
 });
 // Sincronizar modelos con la base de datos
 db.sequelize.authenticate() // <-- Usar db.sequelize

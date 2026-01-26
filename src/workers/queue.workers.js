@@ -54,7 +54,12 @@ createWorker('outbound_whatsapp', async (job) => {
 
         const io = getIO();
         if (io) {
-            io.emit('message:updated', { id: msg.id, conversation_id: conversationId, status: msg.status });
+            const room = conv ? `clinic:${conv.clinic_id}` : null;
+            if (room) {
+                io.to(room).emit('message:updated', { id: msg.id, conversation_id: conversationId, status: msg.status });
+            } else {
+                io.emit('message:updated', { id: msg.id, conversation_id: conversationId, status: msg.status });
+            }
         }
     } catch (err) {
         msg.status = 'failed';
@@ -137,12 +142,13 @@ createWorker('webhook_whatsapp', async (job) => {
 
         const io = getIO();
         if (io) {
-            io.emit('conversation:updated', {
+            const room = `clinic:${clinicId}`;
+            io.to(room).emit('conversation:updated', {
                 id: conv.id,
                 unread_count: conv.unread_count,
                 last_message_at: conv.last_message_at,
             });
-            io.emit('message:created', {
+            io.to(room).emit('message:created', {
                 conversation_id: conv.id,
                 content,
                 direction: 'inbound',
@@ -151,7 +157,7 @@ createWorker('webhook_whatsapp', async (job) => {
                 sent_at: new Date(),
             });
             const totalUnread = await Conversation.sum('unread_count');
-            io.emit('unread:updated', { totalUnreadCount: totalUnread || 0 });
+            io.to(room).emit('unread:updated', { totalUnreadCount: totalUnread || 0 });
         }
     }
 });
