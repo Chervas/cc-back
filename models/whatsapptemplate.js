@@ -20,7 +20,11 @@ module.exports = (sequelize, DataTypes) => {
       },
       waba_id: {
         type: DataTypes.STRING,
-        allowNull: false,
+        allowNull: true,
+      },
+      clinic_id: {
+        type: DataTypes.INTEGER,
+        allowNull: true,
       },
       name: {
         type: DataTypes.STRING,

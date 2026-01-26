@@ -6,6 +6,7 @@ const { Op } = require('sequelize');
 const { metaSyncJobs } = require('../jobs/sync.jobs');
 const jobRequestsService = require('../services/jobRequests.service');
 const jobScheduler = require('../services/jobScheduler.service');
+const automationDefaultsService = require('../services/automationDefaults.service');
 
 // Obtener todas las clínicas (con filtro opcional por clinica_id: id único, CSV o 'all')
 exports.getAllClinicas = async (req, res) => {
@@ -151,6 +152,15 @@ exports.createClinica = async (req, res) => {
             configuracion: configPayload,
             grupoClinicaId
         });
+
+        // Encolar creación de automatizaciones y plantillas predefinidas
+        try {
+            await automationDefaultsService.enqueueDefaultAutomations({
+                clinicId: newClinica.id_clinica
+            });
+        } catch (err) {
+            console.error('Error encolando automatizaciones por defecto', err?.message || err);
+        }
 
         res.status(201).json({
             message: 'Clinica creada exitosamente',

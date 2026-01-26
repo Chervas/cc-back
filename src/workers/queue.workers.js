@@ -2,6 +2,7 @@
 const { createWorker } = require('../services/queue.service');
 const whatsappService = require('../services/whatsapp.service');
 const whatsappTemplatesService = require('../services/whatsappTemplates.service');
+const automationDefaultsService = require('../services/automationDefaults.service');
 const { getIO } = require('../services/socket.service');
 const db = require('../../models');
 
@@ -163,4 +164,9 @@ createWorker('whatsapp_template_create', async (job) => {
 // Sincroniza estados de plantillas desde Meta
 createWorker('whatsapp_template_sync', async (job) => {
     await whatsappTemplatesService.syncTemplatesForWaba(job.data || {});
+});
+
+// Crea automatizaciones y plantillas predefinidas al crear clínica
+createWorker('automation_defaults', async (job) => {
+    await automationDefaultsService.createDefaultAutomationsForClinic(job.data || {});
 });

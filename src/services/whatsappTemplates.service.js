@@ -55,6 +55,71 @@ function isRetryableMetaError(err) {
   return false;
 }
 
+async function selectCatalogTemplatesByDisciplines(disciplinas) {
+  const generic = await WhatsappTemplateCatalog.findAll({
+    where: { is_active: true, is_generic: true },
+  });
+
+  let disciplineTemplates = [];
+  if (disciplinas.length) {
+    const links = await WhatsappTemplateCatalogDiscipline.findAll({
+      where: { disciplina_code: { [Op.in]: disciplinas } },
+      attributes: ['template_catalog_id'],
+      raw: true,
+    });
+    const ids = Array.from(new Set(links.map((l) => l.template_catalog_id)));
+    if (ids.length) {
+      disciplineTemplates = await WhatsappTemplateCatalog.findAll({
+        where: { id: { [Op.in]: ids }, is_active: true },
+      });
+    }
+  }
+
+  const templatesById = new Map();
+  [...generic, ...disciplineTemplates].forEach((t) => templatesById.set(t.id, t));
+  return Array.from(templatesById.values());
+}
+
+async function createPlaceholderTemplatesForClinic({ clinicId, assignmentScope, groupId }) {
+  if (!clinicId) return [];
+
+  const disciplinas = await resolveDisciplines({
+    clinicId: assignmentScope === 'clinic' ? clinicId : null,
+    groupId: assignmentScope === 'group' ? groupId : null,
+  });
+
+  const templates = await selectCatalogTemplatesByDisciplines(disciplinas);
+  const created = [];
+
+  for (const template of templates) {
+    const existing = await WhatsappTemplate.findOne({
+      where: {
+        clinic_id: clinicId,
+        name: template.name,
+        language: DEFAULT_LANGUAGE,
+        status: 'SIN_CONECTAR',
+      },
+    });
+    if (existing) continue;
+
+    const row = await WhatsappTemplate.create({
+      clinic_id: clinicId,
+      waba_id: null,
+      name: template.name,
+      language: DEFAULT_LANGUAGE,
+      category: template.category,
+      status: 'SIN_CONECTAR',
+      components: parseMaybeJson(template.components),
+      catalog_template_id: template.id,
+      origin: 'catalog',
+      is_active: true,
+    });
+    created.push(row);
+  }
+
+  return created;
+}
+
 async function resolveDisciplines({ clinicId, groupId }) {
   if (clinicId) {
     const clinic = await Clinica.findOne({ where: { id_clinica: clinicId }, raw: true });
@@ -118,30 +183,7 @@ async function createTemplatesFromCatalog({ wabaId, clinicId, groupId, assignmen
     groupId: assignmentScope === 'group' ? groupId : null,
   });
 
-  // Templates genéricas
-  const generic = await WhatsappTemplateCatalog.findAll({
-    where: { is_active: true, is_generic: true },
-  });
-
-  // Templates por disciplina
-  let disciplineTemplates = [];
-  if (disciplinas.length) {
-    const links = await WhatsappTemplateCatalogDiscipline.findAll({
-      where: { disciplina_code: { [Op.in]: disciplinas } },
-      attributes: ['template_catalog_id'],
-      raw: true,
-    });
-    const ids = Array.from(new Set(links.map((l) => l.template_catalog_id)));
-    if (ids.length) {
-      disciplineTemplates = await WhatsappTemplateCatalog.findAll({
-        where: { id: { [Op.in]: ids }, is_active: true },
-      });
-    }
-  }
-
-  const templatesById = new Map();
-  [...generic, ...disciplineTemplates].forEach((t) => templatesById.set(t.id, t));
-  const templates = Array.from(templatesById.values());
+  const templates = await selectCatalogTemplatesByDisciplines(disciplinas);
 
   for (const template of templates) {
     const existing = await WhatsappTemplate.findOne({
@@ -163,8 +205,34 @@ async function createTemplatesFromCatalog({ wabaId, clinicId, groupId, assignmen
         language: DEFAULT_LANGUAGE,
       });
 
+      const placeholder = clinicId
+        ? await WhatsappTemplate.findOne({
+            where: {
+              clinic_id: clinicId,
+              waba_id: null,
+              name: template.name,
+              language: DEFAULT_LANGUAGE,
+              status: 'SIN_CONECTAR',
+            },
+          })
+        : null;
+
+      if (placeholder) {
+        await placeholder.update({
+          waba_id: wabaId,
+          status: 'PENDING',
+          components: parseMaybeJson(template.components),
+          meta_template_id: metaResp?.id || null,
+          catalog_template_id: template.id,
+          origin: 'catalog',
+          is_active: true,
+        });
+        continue;
+      }
+
       await WhatsappTemplate.create({
         waba_id: wabaId,
+        clinic_id: clinicId || null,
         name: template.name,
         language: DEFAULT_LANGUAGE,
         category: template.category,
@@ -262,6 +330,7 @@ async function enqueueSyncForAllWabas() {
 
 module.exports = {
   createTemplatesFromCatalog,
+  createPlaceholderTemplatesForClinic,
   syncTemplatesForWaba,
   enqueueCreateTemplatesJob,
   enqueueSyncTemplatesJob,

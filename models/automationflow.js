@@ -6,6 +6,9 @@ module.exports = (sequelize, DataTypes) => {
     static associate(models) {
       AutomationFlow.belongsTo(models.Clinica, { foreignKey: 'clinica_id', targetKey: 'id_clinica', as: 'clinica' });
       AutomationFlow.hasMany(models.MessageLog, { foreignKey: 'flow_id', as: 'logs' });
+      if (models.AutomationFlowCatalog) {
+        AutomationFlow.belongsTo(models.AutomationFlowCatalog, { foreignKey: 'catalog_flow_id', as: 'catalog' });
+      }
     }
   }
 
@@ -20,7 +23,9 @@ module.exports = (sequelize, DataTypes) => {
     disparador: { type: DataTypes.STRING(128), allowNull: false },
     acciones: { type: DataTypes.JSON, allowNull: false },
     activo: { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: true },
-    clinica_id: { type: DataTypes.INTEGER, allowNull: true }
+    clinica_id: { type: DataTypes.INTEGER, allowNull: true },
+    catalog_flow_id: { type: DataTypes.INTEGER, allowNull: true },
+    origin: { type: DataTypes.ENUM('catalog', 'custom'), allowNull: false, defaultValue: 'custom' }
   }, {
     sequelize,
     modelName: 'AutomationFlow',

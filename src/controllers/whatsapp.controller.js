@@ -127,7 +127,19 @@ exports.templatesSummary = async (req, res) => {
       raw: true,
     });
     if (!asset?.wabaId) {
-      return res.json({ total: 0, approved: 0, pending: 0, rejected: 0 });
+      const placeholders = await WhatsappTemplate.findAll({
+        where: { clinic_id: clinicId, waba_id: null, is_active: true },
+        attributes: ['status', [db.Sequelize.fn('COUNT', db.Sequelize.col('id')), 'count']],
+        group: ['status'],
+        raw: true,
+      });
+      const summary = { total: 0, approved: 0, pending: 0, rejected: 0, sin_conectar: 0 };
+      placeholders.forEach((row) => {
+        summary.total += Number(row.count);
+        const st = (row.status || '').toLowerCase();
+        if (st === 'sin_conectar') summary.sin_conectar += Number(row.count);
+      });
+      return res.json(summary);
     }
     const wabaId = asset.wabaId;
     const totals = await WhatsappTemplate.findAll({
@@ -136,13 +148,14 @@ exports.templatesSummary = async (req, res) => {
       group: ['status'],
       raw: true,
     });
-    const summary = { total: 0, approved: 0, pending: 0, rejected: 0 };
+    const summary = { total: 0, approved: 0, pending: 0, rejected: 0, sin_conectar: 0 };
     totals.forEach((row) => {
       summary.total += Number(row.count);
       const st = (row.status || '').toLowerCase();
       if (st === 'approved' || st === 'approved_pending') summary.approved += Number(row.count);
       else if (st === 'pending' || st === 'in_review') summary.pending += Number(row.count);
       else if (st === 'rejected') summary.rejected += Number(row.count);
+      else if (st === 'sin_conectar') summary.sin_conectar += Number(row.count);
     });
     return res.json(summary);
   } catch (err) {
@@ -193,11 +206,23 @@ exports.listTemplatesForClinic = async (req, res) => {
     }
 
     const asset = await resolveWabaFromContext({ clinicId, phoneNumberId, userId });
+    let templates = [];
     if (!asset || !asset.wabaId) {
-      return res.json([]);
+      if (!clinicId) {
+        return res.json([]);
+      }
+      templates = await WhatsappTemplate.findAll({
+        where: {
+          clinic_id: clinicId,
+          waba_id: null,
+          is_active: true,
+        },
+        order: [['name', 'ASC']],
+      });
+      return res.json(templates);
     }
 
-    const templates = await WhatsappTemplate.findAll({
+    templates = await WhatsappTemplate.findAll({
       where: {
         waba_id: asset.wabaId,
         is_active: true,
