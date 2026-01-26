@@ -33,11 +33,25 @@ async function getUserClinics(userId) {
   return { clinicIds, isAggregateAllowed };
 }
 
+function parseClinicIdsParam(requestedClinicId) {
+  if (requestedClinicId === null || requestedClinicId === undefined) return null;
+  if (requestedClinicId === 'all') return 'all';
+  const rawParts = String(requestedClinicId)
+    .split(',')
+    .map((p) => p.trim())
+    .filter(Boolean);
+  if (!rawParts.length) return null;
+  const ids = rawParts.map((p) => Number(p)).filter((n) => Number.isFinite(n));
+  if (ids.length !== rawParts.length) return null;
+  return ids;
+}
+
 function ensureAccess({ clinicIds, isAggregateAllowed }, requestedClinicId) {
   if (!requestedClinicId) return false;
-  if (requestedClinicId === 'all') return isAggregateAllowed;
-  const numericId = Number(requestedClinicId);
-  return clinicIds.includes(numericId);
+  const parsed = parseClinicIdsParam(requestedClinicId);
+  if (parsed === 'all') return isAggregateAllowed;
+  if (!parsed) return false;
+  return parsed.every((id) => clinicIds.includes(id));
 }
 
 async function getReadMap(userId, conversationIds) {
@@ -75,10 +89,11 @@ async function getUnreadCountsByConversation(userId, conversationIds) {
 async function getTotalUnreadCountForUser(userId, clinicIds, isAggregateAllowed, requestedClinicId) {
   const where = {};
   if (requestedClinicId && requestedClinicId !== 'all') {
-    if (!ensureAccess({ clinicIds, isAggregateAllowed }, requestedClinicId)) {
+    const parsed = parseClinicIdsParam(requestedClinicId);
+    if (!parsed || !ensureAccess({ clinicIds, isAggregateAllowed }, requestedClinicId)) {
       return 0;
     }
-    where.clinic_id = Number(requestedClinicId);
+    where.clinic_id = parsed.length === 1 ? parsed[0] : { [Op.in]: parsed };
   } else if (!isAggregateAllowed) {
     where.clinic_id = { [Op.in]: clinicIds };
   }
@@ -111,10 +126,11 @@ exports.listConversations = async (req, res) => {
 
     const where = {};
     if (clinic_id && clinic_id !== 'all') {
-      if (!ensureAccess({ clinicIds, isAggregateAllowed }, clinic_id)) {
+      const parsed = parseClinicIdsParam(clinic_id);
+      if (!parsed || !ensureAccess({ clinicIds, isAggregateAllowed }, clinic_id)) {
         return res.status(403).json({ error: 'Acceso denegado a la clínica' });
       }
-      where.clinic_id = Number(clinic_id);
+      where.clinic_id = parsed.length === 1 ? parsed[0] : { [Op.in]: parsed };
     } else if (!isAggregateAllowed) {
       where.clinic_id = { [Op.in]: clinicIds };
     }
