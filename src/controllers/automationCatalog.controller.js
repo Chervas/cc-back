@@ -34,10 +34,34 @@ exports.listCatalog = async (req, res) => {
   }
 };
 
+exports.getCatalogById = async (req, res) => {
+  try {
+    if (!assertAdmin(req, res)) return;
+    const item = await AutomationFlowCatalog.findByPk(req.params.id, {
+      include: [{ model: AutomationFlowCatalogDiscipline, as: 'disciplinas' }],
+    });
+    if (!item) {
+      return res.status(404).json({ error: 'catalog_not_found' });
+    }
+    return res.json(item);
+  } catch (err) {
+    console.error('Error getCatalogById', err);
+    return res.status(500).json({ error: 'Error obteniendo catálogo' });
+  }
+};
+
 exports.createCatalog = async (req, res) => {
   try {
     if (!assertAdmin(req, res)) return;
-    const { name, display_name, description, trigger_type, steps, is_generic = false, is_active = true } = req.body || {};
+    const payload = req.body || {};
+    const name = payload.name || payload.internal_name || payload.slug;
+    const display_name = payload.display_name || payload.displayName || payload.nombre;
+    const description = payload.description || payload.descripcion || null;
+    const trigger_type = payload.trigger_type || payload.triggerType || payload.trigger || payload.disparador;
+    const steps = payload.steps || payload.pasos || payload.flow_steps || payload.flowSteps;
+    const is_generic = typeof payload.is_generic === 'boolean' ? payload.is_generic : !!payload.isGeneric;
+    const is_active = typeof payload.is_active === 'boolean' ? payload.is_active : (typeof payload.isActive === 'boolean' ? payload.isActive : true);
+
     if (!name || !trigger_type || !steps) {
       return res.status(400).json({ error: 'name, trigger_type y steps son obligatorios' });
     }
@@ -45,11 +69,11 @@ exports.createCatalog = async (req, res) => {
     const item = await AutomationFlowCatalog.create({
       name,
       display_name: display_name || null,
-      description: description || null,
+      description,
       trigger_type,
       steps,
-      is_generic: !!is_generic,
-      is_active: !!is_active,
+      is_generic,
+      is_active,
     });
     return res.status(201).json(item);
   } catch (err) {
@@ -66,7 +90,14 @@ exports.updateCatalog = async (req, res) => {
       return res.status(404).json({ error: 'catalog_not_found' });
     }
 
-    const { name, display_name, description, trigger_type, steps, is_generic, is_active } = req.body || {};
+    const payload = req.body || {};
+    const name = payload.name || payload.internal_name || payload.slug;
+    const display_name = payload.display_name || payload.displayName || payload.nombre;
+    const description = payload.description || payload.descripcion;
+    const trigger_type = payload.trigger_type || payload.triggerType || payload.trigger || payload.disparador;
+    const steps = payload.steps || payload.pasos || payload.flow_steps || payload.flowSteps;
+    const is_generic = typeof payload.is_generic === 'boolean' ? payload.is_generic : (typeof payload.isGeneric === 'boolean' ? payload.isGeneric : undefined);
+    const is_active = typeof payload.is_active === 'boolean' ? payload.is_active : (typeof payload.isActive === 'boolean' ? payload.isActive : undefined);
     await item.update({
       name: name ?? item.name,
       display_name: display_name ?? item.display_name,
@@ -121,7 +152,11 @@ exports.setCatalogDisciplines = async (req, res) => {
     if (!item) {
       return res.status(404).json({ error: 'catalog_not_found' });
     }
-    const disciplinaCodes = Array.isArray(req.body?.disciplina_codes) ? req.body.disciplina_codes : [];
+    const disciplinaCodes =
+      (Array.isArray(req.body?.disciplina_codes) && req.body.disciplina_codes) ||
+      (Array.isArray(req.body?.disciplinas) && req.body.disciplinas) ||
+      (Array.isArray(req.body?.disciplines) && req.body.disciplines) ||
+      [];
     await AutomationFlowCatalogDiscipline.destroy({ where: { flow_catalog_id: item.id } });
     if (disciplinaCodes.length) {
       const rows = disciplinaCodes.map((code) => ({ flow_catalog_id: item.id, disciplina_code: code }));
