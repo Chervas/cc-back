@@ -12,7 +12,6 @@ router.post('/catalog', automationCatalogController.createCatalog);
 router.put('/catalog/:id', automationCatalogController.updateCatalog);
 router.delete('/catalog/:id', automationCatalogController.deleteCatalog);
 router.put('/catalog/:id/toggle', automationCatalogController.toggleCatalog);
-router.post('/catalog/:id/disciplines', automationCatalogController.setCatalogDisciplines);
 
 // Activación con validación de canales
 router.post('/:id/activate', automationsController.activateAutomation);

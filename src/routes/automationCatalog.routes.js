@@ -13,6 +13,5 @@ router.put('/:id', automationCatalogController.updateCatalog);
 router.delete('/:id', automationCatalogController.deleteCatalog);
 router.put('/:id/toggle', automationCatalogController.toggleCatalog);
 router.patch('/:id/toggle', automationCatalogController.toggleCatalog);
-router.post('/:id/disciplines', automationCatalogController.setCatalogDisciplines);
 
 module.exports = router;
