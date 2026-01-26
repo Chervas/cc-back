@@ -20,6 +20,17 @@ function assertAdmin(req, res) {
   return true;
 }
 
+function extractDisciplinaCodes(payload) {
+  const raw =
+    (Array.isArray(payload?.disciplina_codes) && payload.disciplina_codes) ||
+    (Array.isArray(payload?.disciplinas) && payload.disciplinas) ||
+    (Array.isArray(payload?.disciplines) && payload.disciplines) ||
+    [];
+  return raw
+    .map((code) => (typeof code === 'string' ? code.trim() : null))
+    .filter((code) => !!code);
+}
+
 exports.listCatalog = async (req, res) => {
   try {
     if (!assertAdmin(req, res)) return;
@@ -61,6 +72,7 @@ exports.createCatalog = async (req, res) => {
     const steps = payload.steps || payload.pasos || payload.flow_steps || payload.flowSteps;
     const is_generic = typeof payload.is_generic === 'boolean' ? payload.is_generic : !!payload.isGeneric;
     const is_active = typeof payload.is_active === 'boolean' ? payload.is_active : (typeof payload.isActive === 'boolean' ? payload.isActive : true);
+    const disciplinaCodes = extractDisciplinaCodes(payload);
 
     if (!name || !trigger_type || !steps) {
       return res.status(400).json({ error: 'name, trigger_type y steps son obligatorios' });
@@ -75,6 +87,10 @@ exports.createCatalog = async (req, res) => {
       is_generic,
       is_active,
     });
+    if (!is_generic && disciplinaCodes.length) {
+      const rows = disciplinaCodes.map((code) => ({ flow_catalog_id: item.id, disciplina_code: code }));
+      await AutomationFlowCatalogDiscipline.bulkCreate(rows);
+    }
     return res.status(201).json(item);
   } catch (err) {
     console.error('Error createCatalog', err);
@@ -98,6 +114,11 @@ exports.updateCatalog = async (req, res) => {
     const steps = payload.steps || payload.pasos || payload.flow_steps || payload.flowSteps;
     const is_generic = typeof payload.is_generic === 'boolean' ? payload.is_generic : (typeof payload.isGeneric === 'boolean' ? payload.isGeneric : undefined);
     const is_active = typeof payload.is_active === 'boolean' ? payload.is_active : (typeof payload.isActive === 'boolean' ? payload.isActive : undefined);
+    const disciplinaCodes = extractDisciplinaCodes(payload);
+    const disciplinesProvided =
+      Object.prototype.hasOwnProperty.call(payload, 'disciplina_codes') ||
+      Object.prototype.hasOwnProperty.call(payload, 'disciplinas') ||
+      Object.prototype.hasOwnProperty.call(payload, 'disciplines');
     await item.update({
       name: name ?? item.name,
       display_name: display_name ?? item.display_name,
@@ -107,6 +128,14 @@ exports.updateCatalog = async (req, res) => {
       is_generic: typeof is_generic === 'boolean' ? is_generic : item.is_generic,
       is_active: typeof is_active === 'boolean' ? is_active : item.is_active,
     });
+    const nextIsGeneric = typeof is_generic === 'boolean' ? is_generic : item.is_generic;
+    if (nextIsGeneric || disciplinesProvided) {
+      await AutomationFlowCatalogDiscipline.destroy({ where: { flow_catalog_id: item.id } });
+      if (!nextIsGeneric && disciplinaCodes.length) {
+        const rows = disciplinaCodes.map((code) => ({ flow_catalog_id: item.id, disciplina_code: code }));
+        await AutomationFlowCatalogDiscipline.bulkCreate(rows);
+      }
+    }
     return res.json(item);
   } catch (err) {
     console.error('Error updateCatalog', err);
@@ -152,11 +181,7 @@ exports.setCatalogDisciplines = async (req, res) => {
     if (!item) {
       return res.status(404).json({ error: 'catalog_not_found' });
     }
-    const disciplinaCodes =
-      (Array.isArray(req.body?.disciplina_codes) && req.body.disciplina_codes) ||
-      (Array.isArray(req.body?.disciplinas) && req.body.disciplinas) ||
-      (Array.isArray(req.body?.disciplines) && req.body.disciplines) ||
-      [];
+    const disciplinaCodes = extractDisciplinaCodes(req.body || {});
     await AutomationFlowCatalogDiscipline.destroy({ where: { flow_catalog_id: item.id } });
     if (disciplinaCodes.length) {
       const rows = disciplinaCodes.map((code) => ({ flow_catalog_id: item.id, disciplina_code: code }));
