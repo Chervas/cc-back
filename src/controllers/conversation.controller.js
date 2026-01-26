@@ -5,7 +5,7 @@ const { queues } = require('../services/queue.service');
 const { getIO } = require('../services/socket.service');
 const whatsappService = require('../services/whatsapp.service');
 
-const { Conversation, Message, UsuarioClinica, Paciente, Lead } = db;
+const { Conversation, Message, UsuarioClinica, Paciente, Lead, ConversationRead } = db;
 
 const ROLE_AGGREGATE = ['propietario', 'admin'];
 
@@ -26,6 +26,65 @@ function ensureAccess({ clinicIds, isAggregateAllowed }, requestedClinicId) {
   if (requestedClinicId === 'all') return isAggregateAllowed;
   const numericId = Number(requestedClinicId);
   return clinicIds.includes(numericId);
+}
+
+async function getReadMap(userId, conversationIds) {
+  if (!conversationIds.length) return new Map();
+  const reads = await ConversationRead.findAll({
+    where: {
+      user_id: userId,
+      conversation_id: { [Op.in]: conversationIds },
+    },
+    raw: true,
+  });
+  return new Map(reads.map((r) => [r.conversation_id, r.last_read_at]));
+}
+
+async function getUnreadCountForConversation(conversationId, lastReadAt) {
+  const where = { conversation_id: conversationId, direction: 'inbound' };
+  if (lastReadAt) {
+    where.createdAt = { [Op.gt]: lastReadAt };
+  }
+  return Message.count({ where });
+}
+
+async function getUnreadCountsByConversation(userId, conversationIds) {
+  const readMap = await getReadMap(userId, conversationIds);
+  const counts = await Promise.all(
+    conversationIds.map(async (conversationId) => {
+      const lastReadAt = readMap.get(conversationId);
+      const count = await getUnreadCountForConversation(conversationId, lastReadAt);
+      return [conversationId, count];
+    })
+  );
+  return new Map(counts);
+}
+
+async function getTotalUnreadCountForUser(userId, clinicIds, isAggregateAllowed, requestedClinicId) {
+  const where = {};
+  if (requestedClinicId && requestedClinicId !== 'all') {
+    if (!ensureAccess({ clinicIds, isAggregateAllowed }, requestedClinicId)) {
+      return 0;
+    }
+    where.clinic_id = Number(requestedClinicId);
+  } else if (!isAggregateAllowed) {
+    where.clinic_id = { [Op.in]: clinicIds };
+  }
+
+  const conversations = await Conversation.findAll({
+    where,
+    attributes: ['id'],
+    raw: true,
+  });
+  const ids = conversations.map((c) => c.id);
+  if (!ids.length) return 0;
+
+  const unreadMap = await getUnreadCountsByConversation(userId, ids);
+  let total = 0;
+  unreadMap.forEach((count) => {
+    total += count || 0;
+  });
+  return total;
 }
 
 exports.listConversations = async (req, res) => {
@@ -77,10 +136,14 @@ exports.listConversations = async (req, res) => {
       ],
     });
 
+    const conversationIds = conversations.map((c) => c.id);
+    const unreadMap = await getUnreadCountsByConversation(userId, conversationIds);
+
     const payload = conversations.map((c) => {
       const data = c.toJSON();
       data.lastMessage = data.messages && data.messages.length ? data.messages[0] : null;
       delete data.messages;
+      data.unread_count = unreadMap.get(data.id) ?? 0;
       return data;
     });
 
@@ -132,16 +195,25 @@ exports.markAsRead = async (req, res) => {
       return res.status(403).json({ error: 'Acceso denegado a la clínica' });
     }
 
-    conversation.unread_count = 0;
-    await conversation.save();
+    await ConversationRead.upsert({
+      conversation_id: conversation.id,
+      user_id: userId,
+      last_read_at: new Date(),
+    });
+
+    const totalUnread = await getTotalUnreadCountForUser(
+      userId,
+      clinicIds,
+      isAggregateAllowed,
+      conversation.clinic_id
+    );
     const io = getIO();
     if (io) {
-      const room = `clinic:${conversation.clinic_id}`;
-      const totalUnread = await Conversation.sum('unread_count');
+      const room = `user:${userId}`;
       io.to(room).emit('unread:updated', { totalUnreadCount: totalUnread || 0 });
       io.to(room).emit('conversation:updated', {
         id: conversation.id,
-        unread_count: conversation.unread_count,
+        unread_count: 0,
         last_message_at: conversation.last_message_at,
       });
     }
@@ -254,14 +326,7 @@ exports.postMessage = async (req, res) => {
     conversation.last_message_at = new Date();
     await conversation.save({ transaction });
 
-    if (io) {
-      const room = `clinic:${conversation.clinic_id}`;
-      io.to(room).emit('conversation:updated', {
-        id: conversation.id,
-        unread_count: conversation.unread_count,
-        last_message_at: conversation.last_message_at,
-      });
-    }
+    // No emitir conversation:updated aquí para evitar sobrescribir unread_count del usuario.
 
     await transaction.commit();
     return res.json({ message: msg });
@@ -331,11 +396,6 @@ exports.createInternalMessage = async (req, res) => {
         message_type: msg.message_type,
         status: msg.status,
         sent_at: msg.sent_at,
-      });
-      io.to(room).emit('conversation:updated', {
-        id: conversation.id,
-        unread_count: conversation.unread_count,
-        last_message_at: conversation.last_message_at,
       });
     }
     return res.json({ conversation, message: msg });
