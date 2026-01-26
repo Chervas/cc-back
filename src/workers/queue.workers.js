@@ -72,6 +72,8 @@ createWorker('outbound_whatsapp', async (job) => {
 createWorker('webhook_whatsapp', async (job) => {
     const payload = job.data?.body;
     const clinicId = job.data?.clinic_id;
+    const patientId = job.data?.patient_id || null;
+    const leadId = job.data?.lead_id || null;
 
     if (!payload || !clinicId) {
         throw new Error('Payload o clinic_id ausente en webhook de WhatsApp');
@@ -88,7 +90,7 @@ createWorker('webhook_whatsapp', async (job) => {
         const wamid = msg.id;
         const content = msg.text?.body || msg.button?.text || msg.interactive?.text || '';
 
-        const [conv] = await Conversation.findOrCreate({
+        const [conv, created] = await Conversation.findOrCreate({
             where: { contact_id: `+${from}`.replace('++', '+'), channel: 'whatsapp', clinic_id: clinicId },
             defaults: {
                 clinic_id: clinicId,
@@ -97,8 +99,25 @@ createWorker('webhook_whatsapp', async (job) => {
                 last_message_at: new Date(),
                 last_inbound_at: new Date(),
                 unread_count: 1,
+                patient_id: patientId,
+                lead_id: leadId,
             },
         });
+
+        if (!created && (patientId || leadId)) {
+            let updated = false;
+            if (patientId && !conv.patient_id) {
+                conv.patient_id = patientId;
+                updated = true;
+            }
+            if (leadId && !conv.lead_id) {
+                conv.lead_id = leadId;
+                updated = true;
+            }
+            if (updated) {
+                await conv.save();
+            }
+        }
 
         await Message.create({
             conversation_id: conv.id,

@@ -1,6 +1,7 @@
 const axios = require('axios');
 const db = require('../../models');
 const ClinicMetaAsset = db.ClinicMetaAsset;
+const Clinica = db.Clinica;
 
 const FALLBACK_CONFIG = {
     phoneNumberId: '101717972850686',
@@ -68,6 +69,29 @@ class WhatsAppService {
             };
         }
 
+        // fallback a número de grupo si existe
+        const clinic = await Clinica.findByPk(clinicId, {
+            attributes: ['grupoClinicaId'],
+            raw: true,
+        });
+        if (clinic?.grupoClinicaId) {
+            const groupPhone = await ClinicMetaAsset.findOne({
+                where: {
+                    grupoClinicaId: clinic.grupoClinicaId,
+                    assignmentScope: 'group',
+                    isActive: true,
+                    assetType: 'whatsapp_phone_number',
+                },
+                raw: true,
+            });
+            if (groupPhone?.waAccessToken && groupPhone?.phoneNumberId) {
+                return {
+                    phoneNumberId: groupPhone.phoneNumberId,
+                    accessToken: groupPhone.waAccessToken,
+                };
+            }
+        }
+
         // fallback a WABA si no hay phone number específico
         const waba = await ClinicMetaAsset.findOne({
             where: {
@@ -83,6 +107,24 @@ class WhatsAppService {
                 phoneNumberId: waba.phoneNumberId,
                 accessToken: waba.waAccessToken,
             };
+        }
+
+        if (clinic?.grupoClinicaId) {
+            const groupWaba = await ClinicMetaAsset.findOne({
+                where: {
+                    grupoClinicaId: clinic.grupoClinicaId,
+                    assignmentScope: 'group',
+                    isActive: true,
+                    assetType: 'whatsapp_business_account',
+                },
+                raw: true,
+            });
+            if (groupWaba?.waAccessToken && groupWaba?.phoneNumberId) {
+                return {
+                    phoneNumberId: groupWaba.phoneNumberId,
+                    accessToken: groupWaba.waAccessToken,
+                };
+            }
         }
 
         // fallback global

@@ -252,7 +252,7 @@ exports.postMessage = async (req, res) => {
     conversation.last_message_at = new Date();
     await conversation.save({ transaction });
 
-    if (conversation.channel !== 'whatsapp' && io) {
+    if (io) {
       io.emit('conversation:updated', {
         id: conversation.id,
         unread_count: conversation.unread_count,
@@ -317,6 +317,23 @@ exports.createInternalMessage = async (req, res) => {
     await conversation.save({ transaction });
 
     await transaction.commit();
+    const io = getIO();
+    if (io) {
+      io.emit('message:created', {
+        id: msg.id,
+        conversation_id: conversation.id,
+        content: msg.content,
+        direction: msg.direction,
+        message_type: msg.message_type,
+        status: msg.status,
+        sent_at: msg.sent_at,
+      });
+      io.emit('conversation:updated', {
+        id: conversation.id,
+        unread_count: conversation.unread_count,
+        last_message_at: conversation.last_message_at,
+      });
+    }
     return res.json({ conversation, message: msg });
   } catch (err) {
     await transaction.rollback();

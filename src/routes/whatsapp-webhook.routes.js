@@ -4,9 +4,103 @@ const crypto = require('crypto');
 const router = express.Router();
 const db = require('../../models');
 const { queues } = require('../services/queue.service');
+const { Op } = require('sequelize');
 
-const { Conversation, Message, ClinicMetaAsset } = db;
+const { ClinicMetaAsset, Clinica, Paciente, Lead } = db;
 const APP_SECRET = process.env.FACEBOOK_APP_SECRET || process.env.APP_SECRET;
+
+function buildPhoneCandidates(raw) {
+  if (!raw) return [];
+  const digits = String(raw).replace(/\D/g, '');
+  const local = digits.length > 9 ? digits.slice(-9) : digits;
+  return Array.from(new Set([
+    digits,
+    `+${digits}`,
+    local,
+    `+${local}`,
+  ])).filter(Boolean);
+}
+
+async function resolveClinicAndContact({ clinicId, groupId, from }) {
+  const candidates = buildPhoneCandidates(from);
+  if (!candidates.length) {
+    return { clinicId: clinicId || null, patientId: null, leadId: null };
+  }
+
+  if (clinicId) {
+    const patient = await Paciente.findOne({
+      where: {
+        clinica_id: clinicId,
+        [Op.or]: [
+          { telefono_movil: { [Op.in]: candidates } },
+          { telefono_secundario: { [Op.in]: candidates } },
+        ],
+      },
+      attributes: ['id_paciente', 'clinica_id'],
+      raw: true,
+    });
+    if (patient) {
+      return { clinicId, patientId: patient.id_paciente, leadId: null };
+    }
+
+    const lead = await Lead.findOne({
+      where: {
+        clinica_id: clinicId,
+        telefono: { [Op.in]: candidates },
+      },
+      attributes: ['id', 'clinica_id'],
+      raw: true,
+    });
+    if (lead) {
+      return { clinicId, patientId: null, leadId: lead.id };
+    }
+
+    return { clinicId, patientId: null, leadId: null };
+  }
+
+  if (groupId) {
+    const clinics = await Clinica.findAll({
+      where: { grupoClinicaId: groupId },
+      attributes: ['id_clinica'],
+      raw: true,
+    });
+    const clinicIds = clinics.map((c) => c.id_clinica);
+    if (!clinicIds.length) {
+      return { clinicId: null, patientId: null, leadId: null };
+    }
+
+    const patient = await Paciente.findOne({
+      where: {
+        clinica_id: { [Op.in]: clinicIds },
+        [Op.or]: [
+          { telefono_movil: { [Op.in]: candidates } },
+          { telefono_secundario: { [Op.in]: candidates } },
+        ],
+      },
+      attributes: ['id_paciente', 'clinica_id'],
+      raw: true,
+    });
+    if (patient) {
+      return { clinicId: patient.clinica_id, patientId: patient.id_paciente, leadId: null };
+    }
+
+    const lead = await Lead.findOne({
+      where: {
+        clinica_id: { [Op.in]: clinicIds },
+        telefono: { [Op.in]: candidates },
+      },
+      attributes: ['id', 'clinica_id'],
+      raw: true,
+    });
+    if (lead) {
+      return { clinicId: lead.clinica_id, patientId: null, leadId: lead.id };
+    }
+
+    return { clinicId: clinicIds[0], patientId: null, leadId: null };
+  }
+
+  return { clinicId: null, patientId: null, leadId: null };
+}
 
 function verifySignature(req, res, buf) {
   if (!APP_SECRET) return true;
@@ -39,6 +133,7 @@ router.post('/whatsapp/webhook', async (req, res) => {
       return res.sendStatus(401);
     }
     let clinicId = req.query.clinic_id || req.body?.clinic_id;
+    let groupId = null;
     if (!clinicId) {
       const phoneId = req.body?.entry?.[0]?.changes?.[0]?.value?.metadata?.phone_number_id;
       if (phoneId) {
@@ -48,16 +143,35 @@ router.post('/whatsapp/webhook', async (req, res) => {
         });
         if (asset) {
           clinicId = asset.clinicaId;
+          groupId = asset.grupoClinicaId;
         } else {
           console.warn('Webhook WA sin mapeo de phoneNumberId', phoneId);
         }
       }
     }
+
+    if (!clinicId && groupId) {
+      const from = req.body?.entry?.[0]?.changes?.[0]?.value?.messages?.[0]?.from;
+      const resolved = await resolveClinicAndContact({ clinicId: null, groupId, from });
+      clinicId = resolved.clinicId;
+      req.resolvedContact = resolved;
+    }
+
     if (!clinicId) {
       console.warn('Webhook WA sin clinic_id, descartando payload');
       return res.sendStatus(200);
     }
-    await queues.webhookWhatsApp.add('incoming', { body: req.body, clinic_id: clinicId });
+    const from = req.body?.entry?.[0]?.changes?.[0]?.value?.messages?.[0]?.from;
+    const resolvedContact =
+      req.resolvedContact ||
+      (await resolveClinicAndContact({ clinicId, groupId, from }));
+
+    await queues.webhookWhatsApp.add('incoming', {
+      body: req.body,
+      clinic_id: clinicId,
+      patient_id: resolvedContact.patientId,
+      lead_id: resolvedContact.leadId,
+    });
     return res.sendStatus(200);
   } catch (err) {
     console.error('Error en webhook WhatsApp', err);
