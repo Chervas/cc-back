@@ -12,8 +12,20 @@ const {
 } = db;
 
 const ROLE_AGGREGATE = ['propietario', 'admin'];
+const ADMIN_USER_IDS = (process.env.ADMIN_USER_IDS || '1')
+  .split(',')
+  .map((v) => parseInt(v.trim(), 10))
+  .filter((n) => !Number.isNaN(n));
 
 async function getUserClinics(userId) {
+  const isAdmin = ADMIN_USER_IDS.includes(Number(userId));
+  if (isAdmin) {
+    const clinics = await Clinica.findAll({ attributes: ['id_clinica'], raw: true });
+    return {
+      clinicIds: clinics.map((c) => c.id_clinica),
+      isAggregateAllowed: true,
+    };
+  }
   const memberships = await UsuarioClinica.findAll({
     where: { id_usuario: userId },
     attributes: ['id_clinica', 'rol_clinica'],
