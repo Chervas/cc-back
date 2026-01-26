@@ -181,6 +181,39 @@ exports.getMessages = async (req, res) => {
   }
 };
 
+exports.getConversationByPatient = async (req, res) => {
+  try {
+    const userId = req.userData?.userId;
+    const patientId = req.params.patientId || req.params.patient_id;
+
+    const conversation = await Conversation.findOne({
+      where: { patient_id: patientId },
+      order: [['last_message_at', 'DESC']],
+      raw: true,
+    });
+
+    if (!conversation) {
+      return res.status(404).json({ error: 'Conversación no encontrada' });
+    }
+
+    const { clinicIds, isAggregateAllowed } = await getUserClinics(userId);
+    if (!ensureAccess({ clinicIds, isAggregateAllowed }, conversation.clinic_id)) {
+      return res.status(403).json({ error: 'Acceso denegado a la clínica' });
+    }
+
+    const messages = await Message.findAll({
+      where: { conversation_id: conversation.id },
+      order: [['createdAt', 'ASC']],
+      raw: true,
+    });
+
+    return res.json({ conversation, messages });
+  } catch (err) {
+    console.error('Error getConversationByPatient', err);
+    return res.status(500).json({ error: 'Error obteniendo conversación' });
+  }
+};
+
 exports.markAsRead = async (req, res) => {
   try {
     const userId = req.userData?.userId;

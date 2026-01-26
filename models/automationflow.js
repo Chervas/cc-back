@@ -12,6 +12,11 @@ module.exports = (sequelize, DataTypes) => {
   AutomationFlow.init({
     id: { type: DataTypes.INTEGER, primaryKey: true, autoIncrement: true },
     nombre: { type: DataTypes.STRING(255), allowNull: false },
+    descripcion: { type: DataTypes.TEXT, allowNull: true },
+    disciplina_id: { type: DataTypes.INTEGER, allowNull: true },
+    tratamiento_id: { type: DataTypes.INTEGER, allowNull: true },
+    estado: { type: DataTypes.ENUM('borrador', 'activo', 'pausado', 'archivado'), allowNull: false, defaultValue: 'borrador' },
+    pasos: { type: DataTypes.JSON, allowNull: true },
     disparador: { type: DataTypes.STRING(128), allowNull: false },
     acciones: { type: DataTypes.JSON, allowNull: false },
     activo: { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: true },

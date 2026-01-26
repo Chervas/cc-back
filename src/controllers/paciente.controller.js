@@ -1,5 +1,5 @@
 'use strict';
-const { Paciente, Clinica, PacienteRelacion, PacienteClinica } = require('../../models');
+const { Paciente, Clinica, PacienteRelacion, PacienteClinica, PacienteConsentimiento } = require('../../models');
 const { Op, literal } = require('sequelize');
 
 const normalizePhone = (phone) => {
@@ -226,6 +226,25 @@ exports.checkDuplicates = async (req, res) => {
     });
   } catch (error) {
     res.status(500).json({ message: 'Error al verificar duplicados', error: error.message });
+  }
+};
+
+exports.getConsents = async (req, res) => {
+  try {
+    const pacienteId = req.params.id;
+    const paciente = await Paciente.findByPk(pacienteId);
+    if (!paciente) {
+      return res.status(404).json({ message: 'Paciente no encontrado' });
+    }
+
+    const consents = await PacienteConsentimiento.findAll({
+      where: { paciente_id: pacienteId },
+      order: [['createdAt', 'DESC']]
+    });
+
+    return res.status(200).json(consents);
+  } catch (error) {
+    return res.status(500).json({ message: 'Error obteniendo consentimientos', error: error.message });
   }
 };
 

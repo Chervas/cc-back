@@ -13,6 +13,9 @@ module.exports = (sequelize, DataTypes) => {
         Paciente.hasMany(models.PacienteRelacion, { foreignKey: 'id_paciente', as: 'relaciones' });
         Paciente.hasMany(models.PacienteRelacion, { foreignKey: 'id_paciente_relacionado', as: 'tutorDe' });
       }
+      if (models.PacienteConsentimiento) {
+        Paciente.hasMany(models.PacienteConsentimiento, { foreignKey: 'paciente_id', as: 'consentimientos' });
+      }
     }
   }
   Paciente.init({
