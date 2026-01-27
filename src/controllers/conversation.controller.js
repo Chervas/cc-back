@@ -118,6 +118,7 @@ exports.listConversations = async (req, res) => {
   try {
     const userId = req.userData?.userId;
     const { clinic_id, filter, channel } = req.query;
+    const patientId = req.query.patient_id ? Number(req.query.patient_id) : null;
 
     const { clinicIds, isAggregateAllowed } = await getUserClinics(userId);
     if (!clinicIds.length) {
@@ -125,7 +126,22 @@ exports.listConversations = async (req, res) => {
     }
 
     const where = {};
-    if (clinic_id && clinic_id !== 'all') {
+    let patient = null;
+    if (patientId) {
+      patient = await Paciente.findByPk(patientId, {
+        attributes: ['id_paciente', 'clinica_id', 'telefono_movil'],
+        raw: true,
+      });
+      if (!patient) {
+        return res.status(404).json({ error: 'Paciente no encontrado' });
+      }
+      if (!ensureAccess({ clinicIds, isAggregateAllowed }, patient.clinica_id)) {
+        return res.status(403).json({ error: 'Acceso denegado a la clínica' });
+      }
+      // Forzar scope a la clínica del paciente para evitar cruces
+      where.clinic_id = patient.clinica_id;
+      where.patient_id = patientId;
+    } else if (clinic_id && clinic_id !== 'all') {
       const parsed = parseClinicIdsParam(clinic_id);
       if (!parsed || !ensureAccess({ clinicIds, isAggregateAllowed }, clinic_id)) {
         return res.status(403).json({ error: 'Acceso denegado a la clínica' });
@@ -163,6 +179,21 @@ exports.listConversations = async (req, res) => {
         },
       ],
     });
+
+    // Si se solicita por paciente y no existe conversación, crearla con su móvil
+    if (patientId && !conversations.length && patient?.telefono_movil) {
+      const normalized = whatsappService.normalizePhoneNumber(patient.telefono_movil) || patient.telefono_movil;
+      await Conversation.create({
+        clinic_id: patient.clinica_id,
+        channel: 'whatsapp',
+        contact_id: normalized,
+        patient_id: patientId,
+        last_message_at: new Date(),
+        unread_count: 0,
+      });
+      // Repetir la consulta ya con la conversación creada
+      return exports.listConversations(req, res);
+    }
 
     const conversationIds = conversations.map((c) => c.id);
     const unreadMap = await getUnreadCountsByConversation(userId, conversationIds);
