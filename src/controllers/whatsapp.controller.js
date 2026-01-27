@@ -179,19 +179,37 @@ async function resolveWabaFromContext({ clinicId, phoneNumberId, userId }) {
     assetType: { [Op.in]: ['whatsapp_phone_number', 'whatsapp_business_account'] },
   };
 
+  // Resolver grupo de la clinica para soportar numeros con scope de grupo
+  let clinicGroupId = null;
+  let userGroupIds = [];
   if (clinicId) {
-    where.clinicaId = clinicId;
-  }
-  if (phoneNumberId) {
-    where.phoneNumberId = phoneNumberId;
+    const clinic = await Clinica.findOne({
+      where: { id_clinica: clinicId },
+      attributes: ['grupoClinicaId'],
+      raw: true,
+    });
+    clinicGroupId = clinic?.grupoClinicaId || null;
   }
 
-  // Restricción por permisos si no es agregador
-  if (!isAggregateAllowed) {
-    where[Op.or] = [
-      { clinicaId: { [Op.in]: clinicIds } },
-      { assignmentScope: 'unassigned', '$metaConnection.userId$': userId },
-    ];
+  if (!isAggregateAllowed && clinicIds.length) {
+    const clinics = await Clinica.findAll({
+      where: { id_clinica: { [Op.in]: clinicIds } },
+      attributes: ['grupoClinicaId'],
+      raw: true,
+    });
+    userGroupIds = Array.from(
+      new Set(clinics.map((c) => c.grupoClinicaId).filter((g) => !!g))
+    );
+  }
+
+  if (phoneNumberId) {
+    where.phoneNumberId = phoneNumberId;
+  } else if (clinicId) {
+    const clinicScope = [{ clinicaId: clinicId }];
+    if (clinicGroupId) {
+      clinicScope.push({ assignmentScope: 'group', grupoClinicaId: clinicGroupId });
+    }
+    where[Op.or] = clinicScope;
   }
 
   const asset = await ClinicMetaAsset.findOne({
@@ -199,6 +217,22 @@ async function resolveWabaFromContext({ clinicId, phoneNumberId, userId }) {
     include: [{ model: MetaConnection, as: 'metaConnection', attributes: ['userId'] }],
     order: [['updatedAt', 'DESC']],
   });
+
+  if (!asset || isAggregateAllowed) {
+    return asset;
+  }
+
+  const hasClinicAccess = asset.clinicaId && clinicIds.includes(asset.clinicaId);
+  const hasGroupAccess =
+    asset.assignmentScope === 'group' &&
+    asset.grupoClinicaId &&
+    userGroupIds.includes(asset.grupoClinicaId);
+  const isUnassignedOwner =
+    asset.assignmentScope === 'unassigned' && asset.metaConnection?.userId === userId;
+
+  if (!hasClinicAccess && !hasGroupAccess && !isUnassignedOwner) {
+    return null;
+  }
 
   return asset;
 }
