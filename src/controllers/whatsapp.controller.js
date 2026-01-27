@@ -639,6 +639,12 @@ exports.listPhones = async (req, res) => {
             attributes: ['id_grupo', 'nombre_grupo']
           }]
         },
+        {
+          // Necesario cuando el scope es "group" y no hay clinicaId
+          model: GrupoClinica,
+          as: 'grupoClinica',
+          attributes: ['id_grupo', 'nombre_grupo'],
+        },
         { model: MetaConnection, as: 'metaConnection', attributes: ['userId'] },
       ],
       order: [['createdAt', 'DESC']],
@@ -667,7 +673,9 @@ exports.listPhones = async (req, res) => {
 
     for (const p of phones) {
       const clinica = p.clinica || {};
-      const grupo = clinica.grupoClinica || {};
+      const grupoDirecto = p.grupoClinica || {};
+      const grupoClinica = clinica.grupoClinica || {};
+      const grupo = grupoDirecto.id_grupo ? grupoDirecto : grupoClinica;
       let registration = p.additionalData?.registration || null;
 
       // Normaliza el estado si el numero ya aparece como CONNECTED en Meta
@@ -718,7 +726,7 @@ exports.listPhones = async (req, res) => {
         clinic_id: p.clinicaId || null,
         clinic_name: clinica.nombre_clinica || null,
         clinic_avatar: clinica.url_avatar || null,
-        group_id: grupo.id_grupo || clinica.grupoClinicaId || null,
+        group_id: grupo.id_grupo || p.grupoClinicaId || clinica.grupoClinicaId || null,
         group_name: grupo.nombre_grupo || null,
         registration_status: registration?.status || null,
         registration_requires_pin: registration?.requiresPin || false,
