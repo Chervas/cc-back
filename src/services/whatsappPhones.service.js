@@ -49,7 +49,7 @@ async function fetchNameStatus({ phoneNumberId, accessToken }) {
   const resp = await axios.get(`${getMetaBaseUrl()}/${phoneNumberId}`, {
     headers: { Authorization: `Bearer ${accessToken}` },
     params: {
-      fields: 'id,name_status,name_status_description',
+      fields: 'id,name_status',
     },
   });
   return resp.data || null;
@@ -148,7 +148,7 @@ async function syncPhonesForWaba({ wabaId, accessToken }) {
       if (statusInfo) {
         nameStatusMap.set(remote.id, {
           nameStatus: statusInfo.name_status || null,
-          nameStatusReason: statusInfo.name_status_description || null,
+          nameStatusReason: null,
         });
       }
     } catch (err) {
