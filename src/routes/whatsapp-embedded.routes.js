@@ -3,10 +3,97 @@ const express = require('express');
 const axios = require('axios');
 const db = require('../../models');
 const authMiddleware = require('./auth.middleware');
+const whatsappService = require('../services/whatsapp.service');
 
 const router = express.Router();
 const ClinicMetaAsset = db.ClinicMetaAsset;
 const { enqueueCreateTemplatesJob } = require('../services/whatsappTemplates.service');
+const META_API_VERSION = process.env.META_API_VERSION || 'v22.0';
+
+function parseWaError(err) {
+  const base = err?.response?.data || err?.message || err;
+  const nestedError = base?.error?.error || base?.error || base;
+  const code = nestedError?.code || null;
+  const message = nestedError?.message || String(base?.message || base || '');
+  return { code, message, raw: base };
+}
+
+async function updateRegistrationOnAsset(asset, registration) {
+  const additionalData = asset.additionalData || {};
+  additionalData.registration = {
+    ...(additionalData.registration || {}),
+    ...registration,
+  };
+  asset.additionalData = additionalData;
+  await asset.save();
+}
+
+async function fetchPhoneStatus({ phoneNumberId, accessToken }) {
+  if (!phoneNumberId || !accessToken) {
+    return null;
+  }
+  try {
+    const resp = await axios.get(
+      `https://graph.facebook.com/${META_API_VERSION}/${phoneNumberId}`,
+      {
+        headers: { Authorization: `Bearer ${accessToken}` },
+        params: {
+          fields:
+            'id,verified_name,display_phone_number,quality_rating,code_verification_status,status,platform_type',
+        },
+      }
+    );
+    return resp.data;
+  } catch (err) {
+    return null;
+  }
+}
+
+async function attemptPhoneRegistration({ asset, accessToken }) {
+  const nowIso = new Date().toISOString();
+  const phoneNumberId = asset.phoneNumberId;
+
+  if (!phoneNumberId || !accessToken) {
+    return { success: false, registration: null, status: null };
+  }
+
+  try {
+    await whatsappService.registerPhoneNumber({ phoneNumberId, accessToken });
+    const status = await whatsappService.getPhoneNumberStatus({
+      phoneNumberId,
+      accessToken,
+    });
+    const registration = {
+      status: 'registered',
+      requiresPin: false,
+      lastAttemptAt: nowIso,
+      registeredAt: nowIso,
+      phoneStatus: status?.status || null,
+      codeVerificationStatus: status?.code_verification_status || null,
+      lastErrorCode: null,
+      lastErrorMessage: null,
+    };
+    await updateRegistrationOnAsset(asset, registration);
+    return { success: true, registration, status };
+  } catch (err) {
+    const { code, message, raw } = parseWaError(err);
+    const lower = (message || '').toLowerCase();
+    const pinRequired = code === 100 && lower.includes('pin');
+    const status = await fetchPhoneStatus({ phoneNumberId, accessToken });
+    const registration = {
+      status: pinRequired ? 'pin_required' : 'error',
+      requiresPin: pinRequired,
+      lastAttemptAt: nowIso,
+      phoneStatus: status?.status || null,
+      codeVerificationStatus: status?.code_verification_status || null,
+      lastErrorCode: code,
+      lastErrorMessage: message,
+      lastErrorRaw: raw,
+    };
+    await updateRegistrationOnAsset(asset, registration);
+    return { success: false, registration, status };
+  }
+}
 
 router.post('/embedded-signup/callback', authMiddleware, async (req, res) => {
   try {
@@ -165,7 +252,7 @@ router.post('/embedded-signup/callback', authMiddleware, async (req, res) => {
     );
 
     // Guardar phone number
-    await upsertAsset(
+    const phoneAsset = await upsertAsset(
       { metaConnectionId: metaConnection.id, metaAssetId: phone_number_id },
       {
         clinicaId: targetClinicId,
@@ -183,6 +270,18 @@ router.post('/embedded-signup/callback', authMiddleware, async (req, res) => {
       }
     );
 
+    // Intentar registrar automaticamente el numero (sin PIN). Si requiere PIN,
+    // devolvemos el estado para que el frontend lo solicite.
+    let registrationResult = null;
+    try {
+      registrationResult = await attemptPhoneRegistration({
+        asset: phoneAsset,
+        accessToken,
+      });
+    } catch (regErr) {
+      console.warn('[EmbeddedSignup] No se pudo registrar el numero automaticamente', regErr?.message || regErr);
+    }
+
     if (assignmentScope !== 'unassigned') {
       enqueueCreateTemplatesJob({
         wabaId: waba_id,
@@ -199,6 +298,7 @@ router.post('/embedded-signup/callback', authMiddleware, async (req, res) => {
       wabaId: waba_id,
       phoneNumberId: phone_number_id,
       waVerifiedName: verifiedName,
+      registration: registrationResult?.registration || null,
     });
   } catch (err) {
     console.error('Embedded Signup callback error', err?.response?.data || err.message);

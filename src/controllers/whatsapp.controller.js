@@ -1,6 +1,8 @@
 'use strict';
 const db = require('../../models');
 const { Op } = require('sequelize');
+const axios = require('axios');
+const whatsappService = require('../services/whatsapp.service');
 
 const {
   ClinicMetaAsset,
@@ -15,6 +17,7 @@ const {
 
 const ROLE_AGGREGATE = ['propietario', 'admin'];
 const ADMIN_USER_IDS = (process.env.ADMIN_USER_IDS || '1').split(',').map((v) => parseInt(v.trim(), 10)).filter((n) => !Number.isNaN(n));
+const META_API_VERSION = process.env.META_API_VERSION || 'v22.0';
 
 async function getUserClinics(userId) {
   const isAdmin = ADMIN_USER_IDS.includes(Number(userId));
@@ -43,6 +46,150 @@ function assertAdmin(req, res) {
     return false;
   }
   return true;
+}
+
+async function getUserGroupIds({ clinicIds, isAggregateAllowed }) {
+  if (isAggregateAllowed) {
+    const clinics = await Clinica.findAll({
+      attributes: ['grupoClinicaId'],
+      raw: true,
+    });
+    return Array.from(
+      new Set(clinics.map((c) => c.grupoClinicaId).filter((g) => !!g))
+    );
+  }
+
+  if (!clinicIds.length) {
+    return [];
+  }
+
+  const clinics = await Clinica.findAll({
+    where: { id_clinica: { [Op.in]: clinicIds } },
+    attributes: ['grupoClinicaId'],
+    raw: true,
+  });
+  return Array.from(
+    new Set(clinics.map((c) => c.grupoClinicaId).filter((g) => !!g))
+  );
+}
+
+function parseWaError(err) {
+  const base = err?.response?.data || err?.message || err;
+  const nestedError = base?.error?.error || base?.error || base;
+  const code = nestedError?.code || null;
+  const message = nestedError?.message || String(base?.message || base || '');
+  return { code, message, raw: base };
+}
+
+async function updateRegistrationOnAsset(asset, registration) {
+  const additionalData = asset.additionalData || {};
+  additionalData.registration = {
+    ...(additionalData.registration || {}),
+    ...registration,
+  };
+  asset.additionalData = additionalData;
+  await asset.save();
+}
+
+async function fetchPhoneStatus({ phoneNumberId, accessToken }) {
+  if (!phoneNumberId || !accessToken) {
+    return null;
+  }
+  try {
+    const resp = await axios.get(
+      `https://graph.facebook.com/${META_API_VERSION}/${phoneNumberId}`,
+      {
+        headers: { Authorization: `Bearer ${accessToken}` },
+        params: {
+          fields:
+            'id,verified_name,display_phone_number,quality_rating,code_verification_status,status,platform_type',
+        },
+      }
+    );
+    return resp.data;
+  } catch (err) {
+    return null;
+  }
+}
+
+async function attemptPhoneRegistration({ asset, pin }) {
+  const nowIso = new Date().toISOString();
+  const accessToken = asset.waAccessToken;
+  const phoneNumberId = asset.phoneNumberId;
+
+  if (!accessToken || !phoneNumberId) {
+    const registration = {
+      status: 'error',
+      requiresPin: false,
+      lastAttemptAt: nowIso,
+      lastErrorMessage: 'missing_access_token_or_phone_number_id',
+      lastErrorCode: null,
+    };
+    await updateRegistrationOnAsset(asset, registration);
+    return { success: false, registration };
+  }
+
+  try {
+    await whatsappService.registerPhoneNumber({
+      phoneNumberId,
+      accessToken,
+      pin,
+    });
+    const status = await whatsappService.getPhoneNumberStatus({
+      phoneNumberId,
+      accessToken,
+    });
+    const registration = {
+      status: 'registered',
+      requiresPin: false,
+      lastAttemptAt: nowIso,
+      registeredAt: nowIso,
+      phoneStatus: status?.status || null,
+      codeVerificationStatus: status?.code_verification_status || null,
+      lastErrorCode: null,
+      lastErrorMessage: null,
+    };
+    await updateRegistrationOnAsset(asset, registration);
+    return { success: true, registration, status };
+  } catch (err) {
+    const { code, message, raw } = parseWaError(err);
+    const lower = (message || '').toLowerCase();
+    const pinRequired = code === 100 && lower.includes('pin');
+    const alreadyRegistered = lower.includes('already registered');
+
+    if (alreadyRegistered) {
+      const status = await whatsappService.getPhoneNumberStatus({
+        phoneNumberId,
+        accessToken,
+      });
+      const registration = {
+        status: 'registered',
+        requiresPin: false,
+        lastAttemptAt: nowIso,
+        registeredAt: nowIso,
+        phoneStatus: status?.status || null,
+        codeVerificationStatus: status?.code_verification_status || null,
+        lastErrorCode: null,
+        lastErrorMessage: null,
+      };
+      await updateRegistrationOnAsset(asset, registration);
+      return { success: true, registration, status };
+    }
+
+    const status = await fetchPhoneStatus({ phoneNumberId, accessToken });
+    const registration = {
+      status: pinRequired ? 'pin_required' : 'error',
+      requiresPin: pinRequired,
+      lastAttemptAt: nowIso,
+      phoneStatus: status?.status || null,
+      codeVerificationStatus: status?.code_verification_status || null,
+      lastErrorCode: code,
+      lastErrorMessage: message,
+      lastErrorRaw: raw,
+    };
+    await updateRegistrationOnAsset(asset, registration);
+    return { success: false, registration, status };
+  }
 }
 
 exports.getStatus = async (req, res) => {
@@ -382,6 +529,7 @@ exports.listPhones = async (req, res) => {
     const payload = phones.map((p) => {
       const clinica = p.clinica || {};
       const grupo = clinica.grupoClinica || {};
+      const registration = p.additionalData?.registration || null;
       return {
         id: p.id,
         phoneNumberId: p.phoneNumberId,
@@ -396,6 +544,10 @@ exports.listPhones = async (req, res) => {
         clinic_avatar: clinica.url_avatar || null,
         group_id: grupo.id_grupo || clinica.grupoClinicaId || null,
         group_name: grupo.nombre_grupo || null,
+        registration_status: registration?.status || null,
+        registration_requires_pin: registration?.requiresPin || false,
+        registration_phone_status: registration?.phoneStatus || null,
+        registration_last_error: registration?.lastErrorMessage || null,
         createdAt: p.createdAt,
       };
     });
@@ -644,16 +796,91 @@ exports.assignPhone = async (req, res) => {
       });
     }
 
+    // Intentar registrar automaticamente el numero en la Cloud API
+    let registrationResult = null;
+    try {
+      registrationResult = await attemptPhoneRegistration({ asset: phone });
+    } catch (regErr) {
+      console.warn('No se pudo registrar el numero automaticamente', regErr?.message || regErr);
+    }
+
     return res.json({
       success: true,
       phoneNumberId,
       assignmentScope,
       clinic_id: targetClinicId,
       clinic_name: phone.clinica?.nombre_clinica || null,
+      registration: registrationResult?.registration || null,
     });
   } catch (err) {
     console.error('Error assignPhone', err);
     return res.status(500).json({ success: false, error: 'assign_failed' });
+  }
+};
+
+exports.registerPhone = async (req, res) => {
+  try {
+    const userId = req.userData?.userId;
+    const phoneNumberId = req.params.phoneNumberId;
+    const pin = req.body?.pin;
+
+    if (!phoneNumberId) {
+      return res
+        .status(400)
+        .json({ success: false, error: 'phone_number_id_required' });
+    }
+
+    const phone = await ClinicMetaAsset.findOne({
+      where: {
+        assetType: 'whatsapp_phone_number',
+        phoneNumberId,
+        isActive: true,
+      },
+      include: [
+        { model: MetaConnection, as: 'metaConnection', attributes: ['userId'] },
+        {
+          model: Clinica,
+          as: 'clinica',
+          attributes: ['id_clinica', 'grupoClinicaId', 'nombre_clinica'],
+        },
+      ],
+    });
+
+    if (!phone) {
+      return res.status(404).json({ success: false, error: 'phone_not_found' });
+    }
+
+    const { clinicIds, isAggregateAllowed } = await getUserClinics(userId);
+    const userGroupIds = await getUserGroupIds({ clinicIds, isAggregateAllowed });
+    const isOwner = phone.metaConnection?.userId === userId;
+    const hasClinicAccess = phone.clinicaId && clinicIds.includes(phone.clinicaId);
+    const hasGroupAccess =
+      phone.assignmentScope === 'group' &&
+      phone.grupoClinicaId &&
+      userGroupIds.includes(phone.grupoClinicaId);
+
+    if (!isOwner && !isAggregateAllowed && !hasClinicAccess && !hasGroupAccess) {
+      return res.status(403).json({ success: false, error: 'forbidden' });
+    }
+
+    const result = await attemptPhoneRegistration({ asset: phone, pin });
+    const error =
+      result.success
+        ? null
+        : result.registration?.requiresPin
+        ? 'pin_required'
+        : 'registration_failed';
+
+    return res.json({
+      success: result.success,
+      phoneNumberId,
+      registration: result.registration,
+      status: result.status || null,
+      error,
+    });
+  } catch (err) {
+    console.error('Error registerPhone', err);
+    return res.status(500).json({ success: false, error: 'register_failed' });
   }
 };
 

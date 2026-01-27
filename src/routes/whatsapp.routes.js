@@ -102,6 +102,9 @@ router.get('/phones', authMiddleware, whatsappController.listPhones);
 // Asignar número a grupo o clínica
 router.post('/phones/:phoneNumberId/assign', authMiddleware, whatsappController.assignPhone);
 
+// Registrar número en Cloud API (PIN opcional)
+router.post('/phones/:phoneNumberId/register', authMiddleware, whatsappController.registerPhone);
+
 // Desconectar número (desactiva y desasigna)
 router.delete('/phones/:phoneNumberId', authMiddleware, whatsappController.deletePhone);
 

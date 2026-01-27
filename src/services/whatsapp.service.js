@@ -337,6 +337,56 @@ class WhatsAppService {
     }
 
     /**
+     * Registra un numero de telefono en la Cloud API
+     * Requiere el token del WABA/numero y, si aplica, el PIN de verificacion en dos pasos
+     */
+    async registerPhoneNumber({ phoneNumberId, accessToken, pin }) {
+        if (!phoneNumberId) {
+            throw new Error('phoneNumberId requerido');
+        }
+        if (!accessToken) {
+            throw new Error('accessToken requerido');
+        }
+
+        const url = `https://graph.facebook.com/${this.apiVersion}/${phoneNumberId}/register`;
+        const payload = { messaging_product: 'whatsapp' };
+        if (pin) {
+            payload.pin = String(pin).trim();
+        }
+
+        const response = await axios.post(url, payload, {
+            headers: {
+                Authorization: `Bearer ${accessToken}`,
+                'Content-Type': 'application/json',
+            },
+        });
+
+        return response.data;
+    }
+
+    /**
+     * Obtiene el estado del numero de telefono en la Cloud API
+     */
+    async getPhoneNumberStatus({ phoneNumberId, accessToken }) {
+        if (!phoneNumberId || !accessToken) {
+            return null;
+        }
+
+        const url = `https://graph.facebook.com/${this.apiVersion}/${phoneNumberId}`;
+        const response = await axios.get(url, {
+            headers: {
+                Authorization: `Bearer ${accessToken}`,
+            },
+            params: {
+                fields:
+                    'id,verified_name,display_phone_number,quality_rating,code_verification_status,status,platform_type',
+            },
+        });
+
+        return response.data;
+    }
+
+    /**
      * Asegura que la configuración mínima esté presente
      */
     assertConfiguration() {

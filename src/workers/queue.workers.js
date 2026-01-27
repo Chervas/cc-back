@@ -6,7 +6,7 @@ const automationDefaultsService = require('../services/automationDefaults.servic
 const { getIO } = require('../services/socket.service');
 const db = require('../../models');
 
-const { Conversation, Message } = db;
+const { Conversation, Message, ClinicMetaAsset } = db;
 
 // Procesa envíos salientes de WhatsApp
 createWorker('outbound_whatsapp', async (job) => {
@@ -66,6 +66,40 @@ createWorker('outbound_whatsapp', async (job) => {
         msg.status = 'failed';
         msg.metadata = { ...(msg.metadata || {}), error: err?.response?.data || err.message };
         await msg.save();
+
+        // Si Meta indica que el numero no esta registrado, marcamos el estado
+        // para forzar el paso de registro en el frontend.
+        try {
+            const rawError = err?.response?.data;
+            const nestedError = rawError?.error?.error || rawError?.error || {};
+            const errorCode = nestedError?.code || null;
+            const errorMessage = nestedError?.message || err?.message || 'whatsapp_send_failed';
+            if (errorCode === 133010 && clinicConfig?.phoneNumberId) {
+                const asset = await ClinicMetaAsset.findOne({
+                    where: {
+                        assetType: 'whatsapp_phone_number',
+                        phoneNumberId: clinicConfig.phoneNumberId,
+                        isActive: true,
+                    },
+                });
+                if (asset) {
+                    const additionalData = asset.additionalData || {};
+                    additionalData.registration = {
+                        ...(additionalData.registration || {}),
+                        status: 'not_registered',
+                        requiresPin: true,
+                        lastAttemptAt: new Date().toISOString(),
+                        lastErrorCode: errorCode,
+                        lastErrorMessage: errorMessage,
+                    };
+                    asset.additionalData = additionalData;
+                    await asset.save();
+                }
+            }
+        } catch (regErr) {
+            console.warn('[outbound_whatsapp] No se pudo actualizar estado de registro', regErr?.message || regErr);
+        }
+
         const io = getIO();
         if (io) {
             io.emit('message:updated', { id: msg.id, conversation_id: conversationId, status: msg.status, error: msg.metadata?.error });
