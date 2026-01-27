@@ -90,10 +90,10 @@ function generateAutoPin() {
   return String(n).padStart(6, '0');
 }
 
-async function ensureAutoPin(asset) {
+async function ensureAutoPin(asset, forceNew = false) {
   const additionalData = asset.additionalData || {};
   const registration = additionalData.registration || {};
-  if (registration.autoPin) {
+  if (registration.autoPin && !forceNew) {
     return registration.autoPin;
   }
   const autoPin = generateAutoPin();
@@ -137,12 +137,12 @@ async function fetchPhoneStatus({ phoneNumberId, accessToken }) {
   }
 }
 
-async function attemptPhoneRegistration({ asset, pin }) {
+async function attemptPhoneRegistration({ asset, pin, useAutoPin = false }) {
   const nowIso = new Date().toISOString();
   const accessToken = asset.waAccessToken;
   const phoneNumberId = asset.phoneNumberId;
   const explicitPin = pin ? String(pin).trim() : null;
-  const autoPin = await ensureAutoPin(asset);
+  const autoPin = await ensureAutoPin(asset, useAutoPin);
 
   if (!accessToken || !phoneNumberId) {
     const registration = {
@@ -179,10 +179,11 @@ async function attemptPhoneRegistration({ asset, pin }) {
       return { success: true, registration, status: currentStatus };
     }
 
+    const pinToUse = explicitPin || (useAutoPin ? autoPin : null);
     await whatsappService.registerPhoneNumber({
       phoneNumberId,
       accessToken,
-      pin: explicitPin || undefined,
+      pin: pinToUse || undefined,
     });
     const status = await whatsappService.getPhoneNumberStatus({
       phoneNumberId,
@@ -1028,6 +1029,7 @@ exports.registerPhone = async (req, res) => {
     const userId = req.userData?.userId;
     const phoneNumberId = req.params.phoneNumberId;
     const pin = req.body?.pin;
+    const useAutoPin = Boolean(req.body?.use_auto_pin || req.body?.reset_pin);
 
     if (!phoneNumberId) {
       return res
@@ -1068,7 +1070,7 @@ exports.registerPhone = async (req, res) => {
       return res.status(403).json({ success: false, error: 'forbidden' });
     }
 
-    const result = await attemptPhoneRegistration({ asset: phone, pin });
+    const result = await attemptPhoneRegistration({ asset: phone, pin, useAutoPin });
     const error =
       result.success
         ? null
