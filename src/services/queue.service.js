@@ -12,6 +12,7 @@ const queues = {
     webhookWhatsApp: new Queue('webhook_whatsapp', connection),
     whatsappTemplateCreate: new Queue('whatsapp_template_create', connection),
     whatsappTemplateSync: new Queue('whatsapp_template_sync', connection),
+    whatsappPhoneSync: new Queue('whatsapp_phone_sync', connection),
     automationDefaults: new Queue('automation_defaults', connection),
 };
 

@@ -3,6 +3,7 @@ const { QueryTypes } = require('sequelize');
 const { createWorker } = require('../services/queue.service');
 const whatsappService = require('../services/whatsapp.service');
 const whatsappTemplatesService = require('../services/whatsappTemplates.service');
+const whatsappPhonesService = require('../services/whatsappPhones.service');
 const automationDefaultsService = require('../services/automationDefaults.service');
 const { getIO } = require('../services/socket.service');
 const db = require('../../models');
@@ -311,6 +312,11 @@ createWorker('whatsapp_template_create', async (job) => {
 // Sincroniza estados de plantillas desde Meta
 createWorker('whatsapp_template_sync', async (job) => {
     await whatsappTemplatesService.syncTemplatesForWaba(job.data || {});
+});
+
+// Sincroniza numeros de telefono desde Meta para evitar estados stale
+createWorker('whatsapp_phone_sync', async (job) => {
+    await whatsappPhonesService.syncPhonesForWaba(job.data || {});
 });
 
 // Crea automatizaciones y plantillas predefinidas al crear clínica

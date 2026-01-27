@@ -356,7 +356,103 @@ exports.postMessage = async (req, res) => {
       return res.status(400).json({ error: 'session_closed' });
     }
 
-    // Crear registro de mensaje en estado sending
+    const io = getIO();
+    let clinicConfig = null;
+    let limitStatus = null;
+    let to = null;
+    if (conversation.channel === 'whatsapp') {
+      to = conversation.contact_id;
+      if (!to) {
+        await transaction.rollback();
+        return res.status(400).json({ error: 'contacto_sin_numero' });
+      }
+      clinicConfig = await whatsappService.getClinicConfig(conversation.clinic_id);
+      if (!clinicConfig?.accessToken || !clinicConfig?.phoneNumberId) {
+        await transaction.rollback();
+        return res.status(500).json({ error: 'whatsapp_config_missing' });
+      }
+      limitStatus = await whatsappService.checkOutboundLimit({
+        clinicConfig,
+        conversation,
+      });
+    }
+
+    const baseMetadata = {
+      ...(metadata || {}),
+      ...(templateParams ? { templateParams } : {}),
+      ...(templateComponents ? { templateComponents } : {}),
+      ...(clinicConfig?.phoneNumberId
+        ? { phoneNumberId: clinicConfig.phoneNumberId }
+        : {}),
+      ...(clinicConfig?.wabaId ? { wabaId: clinicConfig.wabaId } : {}),
+      ...(limitStatus?.limitedMode
+        ? {
+            limitedMode: true,
+            limitSnapshot: {
+              count: limitStatus.count,
+              limit: limitStatus.limit,
+            },
+          }
+        : {}),
+    };
+
+    // Si el numero esta en modo limitado y se alcanzo el cupo, cortamos el envio
+    if (limitStatus?.limitReached) {
+      const limitMeta = {
+        ...baseMetadata,
+        limitReason: 'limit_reached',
+        limitExceededAt: new Date().toISOString(),
+      };
+      const limitedMsg = await Message.create(
+        {
+          conversation_id: conversation.id,
+          sender_id: userId || null,
+          direction: 'outbound',
+          content: message,
+          message_type: message_type === 'template' ? 'template' : 'text',
+          status: 'failed',
+          sent_at: new Date(),
+          metadata: limitMeta,
+        },
+        { transaction }
+      );
+
+      conversation.last_message_at = new Date();
+      await conversation.save({ transaction });
+      await transaction.commit();
+
+      if (io) {
+        const room = `clinic:${conversation.clinic_id}`;
+        const payload = {
+          id: limitedMsg.id,
+          conversation_id: conversation.id,
+          content: limitedMsg.content,
+          direction: limitedMsg.direction,
+          message_type: limitedMsg.message_type,
+          status: limitedMsg.status,
+          sent_at: limitedMsg.sent_at,
+        };
+        io.to(room).emit('message:created', payload);
+        io.to(room).emit('message:updated', {
+          id: limitedMsg.id,
+          conversation_id: conversation.id,
+          status: 'failed',
+          error: 'limit_reached',
+          limit: {
+            count: limitStatus.count,
+            limit: limitStatus.limit,
+          },
+        });
+      }
+
+      return res.status(429).json({
+        error: 'limit_reached',
+        limit: limitStatus,
+        message: limitedMsg,
+      });
+    }
+
+    // Crear registro de mensaje en estado pending/sent
     const msg = await Message.create(
       {
         conversation_id: conversation.id,
@@ -366,17 +462,12 @@ exports.postMessage = async (req, res) => {
         message_type: message_type === 'template' ? 'template' : 'text',
         status: conversation.channel === 'whatsapp' ? 'pending' : 'sent',
         sent_at: new Date(),
-        metadata: {
-          ...(metadata || {}),
-          ...(templateParams ? { templateParams } : {}),
-          ...(templateComponents ? { templateComponents } : {}),
-        },
+        metadata: baseMetadata,
       },
       { transaction }
     );
 
     // Emit creación de mensaje outbound (aplica también a interno/instagram)
-    const io = getIO();
     if (io) {
       const room = `clinic:${conversation.clinic_id}`;
       io.to(room).emit('message:created', {
@@ -391,16 +482,6 @@ exports.postMessage = async (req, res) => {
     }
 
     if (conversation.channel === 'whatsapp') {
-      const to = conversation.contact_id;
-      if (!to) {
-        await transaction.rollback();
-        return res.status(400).json({ error: 'contacto_sin_numero' });
-      }
-      const clinicConfig = await whatsappService.getClinicConfig(conversation.clinic_id);
-      if (!clinicConfig?.accessToken || !clinicConfig?.phoneNumberId) {
-        await transaction.rollback();
-        return res.status(500).json({ error: 'whatsapp_config_missing' });
-      }
       // Encolar solo despues del commit para evitar carreras con la transaccion
       outboundJobPayload = {
         messageId: msg.id,

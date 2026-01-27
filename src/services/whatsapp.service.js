@@ -2,6 +2,7 @@ const axios = require('axios');
 const db = require('../../models');
 const ClinicMetaAsset = db.ClinicMetaAsset;
 const Clinica = db.Clinica;
+const sequelize = db.sequelize;
 
 const FALLBACK_CONFIG = {
     phoneNumberId: '101717972850686',
@@ -13,6 +14,11 @@ const FALLBACK_CONFIG = {
     templateLanguage: 'en_US',
     useTemplate: false,
 };
+
+const LIMITED_MODE_MAX_OUTBOUND_PER_24H = Number.parseInt(
+    process.env.WHATSAPP_LIMITED_MODE_MAX_OUTBOUND_24H || '5',
+    10
+);
 
 class WhatsAppService {
     constructor() {
@@ -66,6 +72,11 @@ class WhatsAppService {
             return {
                 phoneNumberId: asset.phoneNumberId,
                 accessToken: asset.waAccessToken,
+                wabaId: asset.wabaId || null,
+                assignmentScope: asset.assignmentScope || null,
+                clinicaId: asset.clinicaId || clinicId,
+                grupoClinicaId: asset.grupoClinicaId || null,
+                additionalData: asset.additionalData || {},
             };
         }
 
@@ -88,6 +99,11 @@ class WhatsAppService {
                 return {
                     phoneNumberId: groupPhone.phoneNumberId,
                     accessToken: groupPhone.waAccessToken,
+                    wabaId: groupPhone.wabaId || null,
+                    assignmentScope: groupPhone.assignmentScope || 'group',
+                    clinicaId: groupPhone.clinicaId || clinicId,
+                    grupoClinicaId: groupPhone.grupoClinicaId || clinic?.grupoClinicaId || null,
+                    additionalData: groupPhone.additionalData || {},
                 };
             }
         }
@@ -123,6 +139,11 @@ class WhatsAppService {
                 return {
                     phoneNumberId: groupWaba.phoneNumberId,
                     accessToken: groupWaba.waAccessToken,
+                    wabaId: groupWaba.wabaId || null,
+                    assignmentScope: groupWaba.assignmentScope || 'group',
+                    clinicaId: groupWaba.clinicaId || clinicId,
+                    grupoClinicaId: groupWaba.grupoClinicaId || clinic?.grupoClinicaId || null,
+                    additionalData: groupWaba.additionalData || {},
                 };
             }
         }
@@ -131,6 +152,11 @@ class WhatsAppService {
         return {
             phoneNumberId: process.env.META_WHATSAPP_PHONE_NUMBER_ID || FALLBACK_CONFIG.phoneNumberId,
             accessToken: process.env.META_WHATSAPP_ACCESS_TOKEN || FALLBACK_CONFIG.accessToken,
+            wabaId: null,
+            assignmentScope: null,
+            clinicaId: clinicId,
+            grupoClinicaId: null,
+            additionalData: {},
         };
     }
 
@@ -399,6 +425,129 @@ class WhatsAppService {
         if (!this.accessToken) {
             throw new Error('META_WHATSAPP_ACCESS_TOKEN no está configurado.');
         }
+    }
+
+    isLimitedMode(additionalData = {}, displayPhoneNumber = '') {
+        if (additionalData?.limitedMode || additionalData?.isTestNumber) {
+            return true;
+        }
+        const digits = String(displayPhoneNumber || '').replace(/\D/g, '');
+        return digits.startsWith('1555');
+    }
+
+    async getScopeClinicIds(config = {}) {
+        if (config.assignmentScope === 'clinic' && config.clinicaId) {
+            return [config.clinicaId];
+        }
+        if (config.assignmentScope === 'group' && config.grupoClinicaId) {
+            const clinics = await Clinica.findAll({
+                where: { grupoClinicaId: config.grupoClinicaId },
+                attributes: ['id_clinica'],
+                raw: true,
+            });
+            return clinics.map((c) => c.id_clinica);
+        }
+        if (config.clinicaId) {
+            return [config.clinicaId];
+        }
+        return [];
+    }
+
+    async countOutboundLast24hByClinics(clinicIds = []) {
+        if (!clinicIds.length) {
+            return 0;
+        }
+        const rows = await sequelize.query(
+            `
+            SELECT COUNT(*) AS total
+            FROM Messages m
+            JOIN Conversations c ON c.id = m.conversation_id
+            WHERE m.direction = 'outbound'
+              AND m.createdAt >= (NOW() - INTERVAL 24 HOUR)
+              AND c.clinic_id IN (:clinicIds)
+              AND COALESCE(JSON_UNQUOTE(JSON_EXTRACT(m.metadata, '$.limitReason')), '') != 'limit_reached'
+            `,
+            {
+                replacements: { clinicIds },
+                type: db.Sequelize.QueryTypes.SELECT,
+            }
+        );
+        return Number(rows?.[0]?.total || 0);
+    }
+
+    async getOutboundUsageForPhone({ clinicConfig, displayPhoneNumber }) {
+        const limitedMode = this.isLimitedMode(
+            clinicConfig?.additionalData,
+            displayPhoneNumber || clinicConfig?.additionalData?.displayPhoneNumber
+        );
+        if (!limitedMode) {
+            return { limitedMode: false, count: 0, limit: null, clinicIds: [] };
+        }
+
+        const clinicIds = await this.getScopeClinicIds(clinicConfig);
+        const count = await this.countOutboundLast24hByClinics(clinicIds);
+        return {
+            limitedMode: true,
+            count,
+            limit: LIMITED_MODE_MAX_OUTBOUND_PER_24H,
+            clinicIds,
+        };
+    }
+
+    async checkOutboundLimit({ clinicConfig, conversation }) {
+        let usage = await this.getOutboundUsageForPhone({ clinicConfig });
+
+        // Si aun no detectamos modo limitado, intentamos leer el display phone number en vivo
+        if (
+            !usage.limitedMode &&
+            clinicConfig?.phoneNumberId &&
+            clinicConfig?.accessToken
+        ) {
+            try {
+                const live = await this.getPhoneNumberStatus({
+                    phoneNumberId: clinicConfig.phoneNumberId,
+                    accessToken: clinicConfig.accessToken,
+                });
+                if (live?.display_phone_number) {
+                    const limitedLive = this.isLimitedMode(
+                        clinicConfig.additionalData,
+                        live.display_phone_number
+                    );
+                    if (limitedLive) {
+                        const asset = await ClinicMetaAsset.findOne({
+                            where: {
+                                phoneNumberId: clinicConfig.phoneNumberId,
+                            },
+                        });
+                        if (asset) {
+                            const additionalData = asset.additionalData || {};
+                            additionalData.isTestNumber = true;
+                            additionalData.limitedMode = true;
+                            additionalData.displayPhoneNumber =
+                                live.display_phone_number;
+                            asset.additionalData = additionalData;
+                            await asset.save();
+                            clinicConfig.additionalData = additionalData;
+                        }
+                        usage = await this.getOutboundUsageForPhone({
+                            clinicConfig,
+                            displayPhoneNumber: live.display_phone_number,
+                        });
+                    }
+                }
+            } catch (err) {
+                // no bloqueamos el envio si falla el check en vivo
+            }
+        }
+
+        const limitReached =
+            usage.limitedMode && usage.limit !== null && usage.count >= usage.limit;
+
+        return {
+            ...usage,
+            limitReached,
+            conversationId: conversation?.id || null,
+        };
     }
 }
 

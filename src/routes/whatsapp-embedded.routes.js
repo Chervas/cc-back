@@ -1,6 +1,7 @@
 'use strict';
 const express = require('express');
 const axios = require('axios');
+const crypto = require('crypto');
 const db = require('../../models');
 const authMiddleware = require('./auth.middleware');
 const whatsappService = require('../services/whatsapp.service');
@@ -16,6 +17,27 @@ function parseWaError(err) {
   const code = nestedError?.code || null;
   const message = nestedError?.message || String(base?.message || base || '');
   return { code, message, raw: base };
+}
+
+function generateAutoPin() {
+  const n = crypto.randomInt(0, 1_000_000);
+  return String(n).padStart(6, '0');
+}
+
+async function ensureAutoPin(asset) {
+  const additionalData = asset.additionalData || {};
+  const registration = additionalData.registration || {};
+  if (registration.autoPin) {
+    return registration.autoPin;
+  }
+  const autoPin = generateAutoPin();
+  additionalData.registration = {
+    ...registration,
+    autoPin,
+  };
+  asset.additionalData = additionalData;
+  await asset.save();
+  return autoPin;
 }
 
 async function updateRegistrationOnAsset(asset, registration) {
@@ -52,6 +74,7 @@ async function fetchPhoneStatus({ phoneNumberId, accessToken }) {
 async function attemptPhoneRegistration({ asset, accessToken }) {
   const nowIso = new Date().toISOString();
   const phoneNumberId = asset.phoneNumberId;
+  const autoPin = await ensureAutoPin(asset);
 
   if (!phoneNumberId || !accessToken) {
     return { success: false, registration: null, status: null };
@@ -72,6 +95,7 @@ async function attemptPhoneRegistration({ asset, accessToken }) {
         codeVerificationStatus: currentStatus.code_verification_status || null,
         lastErrorCode: null,
         lastErrorMessage: null,
+        autoPin,
       };
       await updateRegistrationOnAsset(asset, registration);
       return { success: true, registration, status: currentStatus };
@@ -91,6 +115,7 @@ async function attemptPhoneRegistration({ asset, accessToken }) {
       codeVerificationStatus: status?.code_verification_status || null,
       lastErrorCode: null,
       lastErrorMessage: null,
+      autoPin,
     };
     await updateRegistrationOnAsset(asset, registration);
     return { success: true, registration, status };
@@ -98,6 +123,51 @@ async function attemptPhoneRegistration({ asset, accessToken }) {
     const { code, message, raw } = parseWaError(err);
     const lower = (message || '').toLowerCase();
     const pinRequired = code === 100 && lower.includes('pin');
+
+    if (pinRequired) {
+      try {
+        await whatsappService.registerPhoneNumber({
+          phoneNumberId,
+          accessToken,
+          pin: autoPin,
+        });
+        const status = await whatsappService.getPhoneNumberStatus({
+          phoneNumberId,
+          accessToken,
+        });
+        const registration = {
+          status: 'registered',
+          requiresPin: false,
+          lastAttemptAt: nowIso,
+          registeredAt: nowIso,
+          phoneStatus: status?.status || null,
+          codeVerificationStatus: status?.code_verification_status || null,
+          lastErrorCode: null,
+          lastErrorMessage: null,
+          autoPinUsed: true,
+          autoPin,
+        };
+        await updateRegistrationOnAsset(asset, registration);
+        return { success: true, registration, status };
+      } catch (autoErr) {
+        const parsed = parseWaError(autoErr);
+        const status = await fetchPhoneStatus({ phoneNumberId, accessToken });
+        const registration = {
+          status: 'pin_required',
+          requiresPin: true,
+          lastAttemptAt: nowIso,
+          phoneStatus: status?.status || null,
+          codeVerificationStatus: status?.code_verification_status || null,
+          lastErrorCode: parsed.code,
+          lastErrorMessage: parsed.message,
+          lastErrorRaw: parsed.raw,
+          autoPinUsed: true,
+          autoPin,
+        };
+        await updateRegistrationOnAsset(asset, registration);
+        return { success: false, registration, status };
+      }
+    }
     const status = await fetchPhoneStatus({ phoneNumberId, accessToken });
     const registration = {
       status: pinRequired ? 'pin_required' : 'error',
@@ -108,6 +178,7 @@ async function attemptPhoneRegistration({ asset, accessToken }) {
       lastErrorCode: code,
       lastErrorMessage: message,
       lastErrorRaw: raw,
+      autoPin,
     };
     await updateRegistrationOnAsset(asset, registration);
     return { success: false, registration, status };

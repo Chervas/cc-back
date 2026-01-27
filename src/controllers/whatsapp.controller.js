@@ -2,7 +2,9 @@
 const db = require('../../models');
 const { Op } = require('sequelize');
 const axios = require('axios');
+const crypto = require('crypto');
 const whatsappService = require('../services/whatsapp.service');
+const { enqueueSyncPhonesJob } = require('../services/whatsappPhones.service');
 
 const {
   ClinicMetaAsset,
@@ -18,6 +20,8 @@ const {
 const ROLE_AGGREGATE = ['propietario', 'admin'];
 const ADMIN_USER_IDS = (process.env.ADMIN_USER_IDS || '1').split(',').map((v) => parseInt(v.trim(), 10)).filter((n) => !Number.isNaN(n));
 const META_API_VERSION = process.env.META_API_VERSION || 'v22.0';
+const PHONE_SYNC_THROTTLE_MS = 5 * 60 * 1000;
+const phoneSyncThrottle = new Map();
 
 async function getUserClinics(userId) {
   const isAdmin = ADMIN_USER_IDS.includes(Number(userId));
@@ -81,6 +85,27 @@ function parseWaError(err) {
   return { code, message, raw: base };
 }
 
+function generateAutoPin() {
+  const n = crypto.randomInt(0, 1_000_000);
+  return String(n).padStart(6, '0');
+}
+
+async function ensureAutoPin(asset) {
+  const additionalData = asset.additionalData || {};
+  const registration = additionalData.registration || {};
+  if (registration.autoPin) {
+    return registration.autoPin;
+  }
+  const autoPin = generateAutoPin();
+  additionalData.registration = {
+    ...registration,
+    autoPin,
+  };
+  asset.additionalData = additionalData;
+  await asset.save();
+  return autoPin;
+}
+
 async function updateRegistrationOnAsset(asset, registration) {
   const additionalData = asset.additionalData || {};
   additionalData.registration = {
@@ -116,6 +141,8 @@ async function attemptPhoneRegistration({ asset, pin }) {
   const nowIso = new Date().toISOString();
   const accessToken = asset.waAccessToken;
   const phoneNumberId = asset.phoneNumberId;
+  const explicitPin = pin ? String(pin).trim() : null;
+  const autoPin = await ensureAutoPin(asset);
 
   if (!accessToken || !phoneNumberId) {
     const registration = {
@@ -145,6 +172,7 @@ async function attemptPhoneRegistration({ asset, pin }) {
         codeVerificationStatus: currentStatus.code_verification_status || null,
         lastErrorCode: null,
         lastErrorMessage: null,
+        autoPin: explicitPin || autoPin,
       };
       await updateRegistrationOnAsset(asset, registration);
       return { success: true, registration, status: currentStatus };
@@ -153,7 +181,7 @@ async function attemptPhoneRegistration({ asset, pin }) {
     await whatsappService.registerPhoneNumber({
       phoneNumberId,
       accessToken,
-      pin,
+      pin: explicitPin || undefined,
     });
     const status = await whatsappService.getPhoneNumberStatus({
       phoneNumberId,
@@ -168,6 +196,7 @@ async function attemptPhoneRegistration({ asset, pin }) {
       codeVerificationStatus: status?.code_verification_status || null,
       lastErrorCode: null,
       lastErrorMessage: null,
+      autoPin: explicitPin || autoPin,
     };
     await updateRegistrationOnAsset(asset, registration);
     return { success: true, registration, status };
@@ -191,9 +220,77 @@ async function attemptPhoneRegistration({ asset, pin }) {
         codeVerificationStatus: status?.code_verification_status || null,
         lastErrorCode: null,
         lastErrorMessage: null,
+        autoPin: explicitPin || autoPin,
       };
       await updateRegistrationOnAsset(asset, registration);
       return { success: true, registration, status };
+    }
+
+    // Intento silencioso con PIN auto-generado antes de pedir intervención humana
+    if (pinRequired && !explicitPin) {
+      try {
+        await whatsappService.registerPhoneNumber({
+          phoneNumberId,
+          accessToken,
+          pin: autoPin,
+        });
+        const status = await whatsappService.getPhoneNumberStatus({
+          phoneNumberId,
+          accessToken,
+        });
+        const registration = {
+          status: 'registered',
+          requiresPin: false,
+          lastAttemptAt: nowIso,
+          registeredAt: nowIso,
+          phoneStatus: status?.status || null,
+          codeVerificationStatus: status?.code_verification_status || null,
+          lastErrorCode: null,
+          lastErrorMessage: null,
+          autoPinUsed: true,
+          autoPin: explicitPin || autoPin,
+        };
+        await updateRegistrationOnAsset(asset, registration);
+        return { success: true, registration, status };
+      } catch (autoErr) {
+        const autoParsed = parseWaError(autoErr);
+        const autoLower = (autoParsed.message || '').toLowerCase();
+        if (autoLower.includes('already registered')) {
+          const status = await whatsappService.getPhoneNumberStatus({
+            phoneNumberId,
+            accessToken,
+          });
+          const registration = {
+            status: 'registered',
+            requiresPin: false,
+            lastAttemptAt: nowIso,
+            registeredAt: nowIso,
+            phoneStatus: status?.status || null,
+            codeVerificationStatus: status?.code_verification_status || null,
+            lastErrorCode: null,
+            lastErrorMessage: null,
+            autoPinUsed: true,
+            autoPin: explicitPin || autoPin,
+          };
+          await updateRegistrationOnAsset(asset, registration);
+          return { success: true, registration, status };
+        }
+        const status = await fetchPhoneStatus({ phoneNumberId, accessToken });
+        const registration = {
+          status: 'pin_required',
+          requiresPin: true,
+          lastAttemptAt: nowIso,
+          phoneStatus: status?.status || null,
+          codeVerificationStatus: status?.code_verification_status || null,
+          lastErrorCode: autoParsed.code,
+          lastErrorMessage: autoParsed.message,
+          lastErrorRaw: autoParsed.raw,
+          autoPinUsed: true,
+          autoPin: explicitPin || autoPin,
+        };
+        await updateRegistrationOnAsset(asset, registration);
+        return { success: false, registration, status };
+      }
     }
 
     const status = await fetchPhoneStatus({ phoneNumberId, accessToken });
@@ -206,6 +303,7 @@ async function attemptPhoneRegistration({ asset, pin }) {
       lastErrorCode: code,
       lastErrorMessage: message,
       lastErrorRaw: raw,
+      autoPin: explicitPin || autoPin,
     };
     await updateRegistrationOnAsset(asset, registration);
     return { success: false, registration, status };
@@ -546,6 +644,25 @@ exports.listPhones = async (req, res) => {
       order: [['createdAt', 'DESC']],
     });
 
+    // Disparar sync on-demand con throttling para reducir estados stale
+    const now = Date.now();
+    const wabaTokens = new Map();
+    for (const p of phones) {
+      if (p.wabaId && p.waAccessToken && !wabaTokens.has(p.wabaId)) {
+        wabaTokens.set(p.wabaId, p.waAccessToken);
+      }
+    }
+    for (const [wabaId, accessToken] of wabaTokens.entries()) {
+      const lastTriggered = phoneSyncThrottle.get(wabaId) || 0;
+      if (now - lastTriggered < PHONE_SYNC_THROTTLE_MS) {
+        continue;
+      }
+      phoneSyncThrottle.set(wabaId, now);
+      enqueueSyncPhonesJob({ wabaId, accessToken }).catch((err) => {
+        console.warn('[whatsapp] No se pudo encolar sync de phones', err?.message || err);
+      });
+    }
+
     const payload = [];
 
     for (const p of phones) {
@@ -579,6 +696,16 @@ exports.listPhones = async (req, res) => {
         }
       }
 
+      const usage = await whatsappService.getOutboundUsageForPhone({
+        clinicConfig: {
+          assignmentScope: p.assignmentScope,
+          clinicaId: p.clinicaId,
+          grupoClinicaId: p.grupoClinicaId,
+          additionalData: p.additionalData || {},
+        },
+        displayPhoneNumber: p.metaAssetName || null,
+      });
+
       payload.push({
         id: p.id,
         phoneNumberId: p.phoneNumberId,
@@ -597,6 +724,9 @@ exports.listPhones = async (req, res) => {
         registration_requires_pin: registration?.requiresPin || false,
         registration_phone_status: registration?.phoneStatus || null,
         registration_last_error: registration?.lastErrorMessage || null,
+        limited_mode: usage?.limitedMode || false,
+        limited_mode_count: usage?.limitedMode ? usage.count : null,
+        limited_mode_limit: usage?.limitedMode ? usage.limit : null,
         createdAt: p.createdAt,
       });
     }
