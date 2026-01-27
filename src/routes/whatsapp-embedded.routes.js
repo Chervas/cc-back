@@ -114,6 +114,23 @@ async function attemptPhoneRegistration({ asset, accessToken }) {
   }
 }
 
+async function subscribeAppToWaba({ wabaId, accessToken }) {
+  if (!wabaId || !accessToken) return { success: false };
+  try {
+    const resp = await axios.post(
+      `https://graph.facebook.com/${META_API_VERSION}/${wabaId}/subscribed_apps`,
+      null,
+      {
+        params: { access_token: accessToken },
+      }
+    );
+    return { success: true, data: resp.data };
+  } catch (err) {
+    console.warn('[EmbeddedSignup] No se pudo suscribir la app al WABA', err?.response?.data || err?.message || err);
+    return { success: false, error: err?.response?.data || err?.message || err };
+  }
+}
+
 router.post('/embedded-signup/callback', authMiddleware, async (req, res) => {
   try {
     const { code, clinic_id, redirect_uri, waba_id, phone_number_id } = req.body;
@@ -301,6 +318,12 @@ router.post('/embedded-signup/callback', authMiddleware, async (req, res) => {
       console.warn('[EmbeddedSignup] No se pudo registrar el numero automaticamente', regErr?.message || regErr);
     }
 
+    // Suscribir la app para recibir webhooks de mensajes y estados
+    const subscriptionResult = await subscribeAppToWaba({
+      wabaId: waba_id,
+      accessToken,
+    });
+
     if (assignmentScope !== 'unassigned') {
       enqueueCreateTemplatesJob({
         wabaId: waba_id,
@@ -318,6 +341,7 @@ router.post('/embedded-signup/callback', authMiddleware, async (req, res) => {
       phoneNumberId: phone_number_id,
       waVerifiedName: verifiedName,
       registration: registrationResult?.registration || null,
+      subscribed: subscriptionResult?.success || false,
     });
   } catch (err) {
     console.error('Embedded Signup callback error', err?.response?.data || err.message);
