@@ -56,7 +56,7 @@ async function fetchNameStatus({ phoneNumberId, accessToken }) {
 }
 
 async function disableDeletedPhone(asset) {
-  const additionalData = asset.additionalData || {};
+  const additionalData = { ...(asset.additionalData || {}) };
   const registration = additionalData.registration || {};
   additionalData.registration = {
     ...registration,
@@ -66,7 +66,7 @@ async function disableDeletedPhone(asset) {
     lastErrorCode: 33,
     lastErrorMessage: 'phone_deleted_in_meta',
   };
-  asset.additionalData = additionalData;
+  asset.additionalData = { ...additionalData };
   asset.isActive = false;
   asset.assignmentScope = 'unassigned';
   asset.clinicaId = null;
@@ -75,7 +75,7 @@ async function disableDeletedPhone(asset) {
 }
 
 async function upsertRemoteState(asset, remote) {
-  const additionalData = asset.additionalData || {};
+  const additionalData = { ...(asset.additionalData || {}) };
   const registration = additionalData.registration || {};
   const testNumber = isTestDisplayNumber(remote?.display_phone_number);
 
@@ -97,7 +97,7 @@ async function upsertRemoteState(asset, remote) {
     };
   }
 
-  asset.additionalData = additionalData;
+  asset.additionalData = { ...additionalData };
   asset.metaAssetId = remote?.id || asset.metaAssetId;
   asset.metaAssetName = remote?.display_phone_number || asset.metaAssetName;
   asset.waVerifiedName = remote?.verified_name || asset.waVerifiedName;
@@ -174,10 +174,10 @@ async function syncPhonesForWaba({ wabaId, accessToken }) {
     // Inyectar nameStatus más fiable si existe
     const statusExtra = nameStatusMap.get(remote.id);
     if (statusExtra) {
-      const additionalData = asset.additionalData || {};
+      const additionalData = { ...(asset.additionalData || {}) };
       additionalData.nameStatus = statusExtra.nameStatus;
       additionalData.nameStatusReason = statusExtra.nameStatusReason;
-      asset.additionalData = additionalData;
+      asset.additionalData = { ...additionalData };
     }
     await upsertRemoteState(asset, remote);
   }
