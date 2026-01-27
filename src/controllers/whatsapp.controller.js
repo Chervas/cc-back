@@ -130,6 +130,26 @@ async function attemptPhoneRegistration({ asset, pin }) {
   }
 
   try {
+    // Si el numero ya esta conectado, no forzamos el registro ni pedimos PIN
+    const currentStatus = await whatsappService.getPhoneNumberStatus({
+      phoneNumberId,
+      accessToken,
+    });
+    if (currentStatus?.status === 'CONNECTED') {
+      const registration = {
+        status: 'registered',
+        requiresPin: false,
+        lastAttemptAt: nowIso,
+        registeredAt: nowIso,
+        phoneStatus: currentStatus.status,
+        codeVerificationStatus: currentStatus.code_verification_status || null,
+        lastErrorCode: null,
+        lastErrorMessage: null,
+      };
+      await updateRegistrationOnAsset(asset, registration);
+      return { success: true, registration, status: currentStatus };
+    }
+
     await whatsappService.registerPhoneNumber({
       phoneNumberId,
       accessToken,
