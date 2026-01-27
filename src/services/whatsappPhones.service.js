@@ -44,6 +44,17 @@ async function fetchRemotePhones({ wabaId, accessToken }) {
   return resp.data?.data || [];
 }
 
+async function fetchNameStatus({ phoneNumberId, accessToken }) {
+  if (!phoneNumberId) return null;
+  const resp = await axios.get(`${getMetaBaseUrl()}/${phoneNumberId}`, {
+    headers: { Authorization: `Bearer ${accessToken}` },
+    params: {
+      fields: 'id,name_status,name_status_description',
+    },
+  });
+  return resp.data || null;
+}
+
 async function disableDeletedPhone(asset) {
   const additionalData = asset.additionalData || {};
   const registration = additionalData.registration || {};
@@ -126,6 +137,26 @@ async function syncPhonesForWaba({ wabaId, accessToken }) {
   const remotePhones = await fetchRemotePhones({ wabaId, accessToken: token });
   const remoteMap = new Map(remotePhones.map((p) => [p.id, p]));
 
+  // Obtener name_status por phone_number_id (más fiable que el listado)
+  const nameStatusMap = new Map();
+  for (const remote of remotePhones) {
+    try {
+      const statusInfo = await fetchNameStatus({
+        phoneNumberId: remote.id,
+        accessToken: token,
+      });
+      if (statusInfo) {
+        nameStatusMap.set(remote.id, {
+          nameStatus: statusInfo.name_status || null,
+          nameStatusReason: statusInfo.name_status_description || null,
+        });
+      }
+    } catch (err) {
+      // No bloquear sync por fallos puntuales
+      console.warn('[whatsapp] No se pudo obtener name_status', remote?.id, err?.message || err);
+    }
+  }
+
   const localPhones = await ClinicMetaAsset.findAll({
     where: {
       wabaId,
@@ -139,6 +170,14 @@ async function syncPhonesForWaba({ wabaId, accessToken }) {
     if (!remote) {
       await disableDeletedPhone(asset);
       continue;
+    }
+    // Inyectar nameStatus más fiable si existe
+    const statusExtra = nameStatusMap.get(remote.id);
+    if (statusExtra) {
+      const additionalData = asset.additionalData || {};
+      additionalData.nameStatus = statusExtra.nameStatus;
+      additionalData.nameStatusReason = statusExtra.nameStatusReason;
+      asset.additionalData = additionalData;
     }
     await upsertRemoteState(asset, remote);
   }
