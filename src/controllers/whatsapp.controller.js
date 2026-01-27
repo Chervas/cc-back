@@ -546,11 +546,40 @@ exports.listPhones = async (req, res) => {
       order: [['createdAt', 'DESC']],
     });
 
-    const payload = phones.map((p) => {
+    const payload = [];
+
+    for (const p of phones) {
       const clinica = p.clinica || {};
       const grupo = clinica.grupoClinica || {};
-      const registration = p.additionalData?.registration || null;
-      return {
+      let registration = p.additionalData?.registration || null;
+
+      // Normaliza el estado si el numero ya aparece como CONNECTED en Meta
+      if (
+        registration?.status !== 'registered' &&
+        p.phoneNumberId &&
+        p.waAccessToken
+      ) {
+        const liveStatus = await fetchPhoneStatus({
+          phoneNumberId: p.phoneNumberId,
+          accessToken: p.waAccessToken,
+        });
+        if (liveStatus?.status === 'CONNECTED') {
+          const nowIso = new Date().toISOString();
+          registration = {
+            status: 'registered',
+            requiresPin: false,
+            lastAttemptAt: nowIso,
+            registeredAt: registration?.registeredAt || nowIso,
+            phoneStatus: liveStatus.status,
+            codeVerificationStatus: liveStatus.code_verification_status || null,
+            lastErrorCode: null,
+            lastErrorMessage: null,
+          };
+          await updateRegistrationOnAsset(p, registration);
+        }
+      }
+
+      payload.push({
         id: p.id,
         phoneNumberId: p.phoneNumberId,
         wabaId: p.wabaId,
@@ -569,8 +598,8 @@ exports.listPhones = async (req, res) => {
         registration_phone_status: registration?.phoneStatus || null,
         registration_last_error: registration?.lastErrorMessage || null,
         createdAt: p.createdAt,
-      };
-    });
+      });
+    }
 
     return res.json({ phones: payload });
   } catch (err) {
