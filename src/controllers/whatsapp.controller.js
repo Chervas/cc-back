@@ -162,7 +162,8 @@ async function attemptPhoneRegistration({ asset, pin }) {
       phoneNumberId,
       accessToken,
     });
-    if (currentStatus?.status === 'CONNECTED') {
+    const codeStatus = String(currentStatus?.code_verification_status || '').toUpperCase();
+    if (currentStatus?.status === 'CONNECTED' && codeStatus === 'VERIFIED') {
       const registration = {
         status: 'registered',
         requiresPin: false,
@@ -688,7 +689,8 @@ exports.listPhones = async (req, res) => {
           phoneNumberId: p.phoneNumberId,
           accessToken: p.waAccessToken,
         });
-        if (liveStatus?.status === 'CONNECTED') {
+        const codeStatus = String(liveStatus?.code_verification_status || '').toUpperCase();
+        if (liveStatus?.status === 'CONNECTED' && codeStatus === 'VERIFIED') {
           const nowIso = new Date().toISOString();
           registration = {
             status: 'registered',
@@ -699,6 +701,19 @@ exports.listPhones = async (req, res) => {
             codeVerificationStatus: liveStatus.code_verification_status || null,
             lastErrorCode: null,
             lastErrorMessage: null,
+          };
+          await updateRegistrationOnAsset(p, registration);
+        } else if (liveStatus?.status === 'CONNECTED' && codeStatus && registration?.status !== 'registered') {
+          const nowIso = new Date().toISOString();
+          registration = {
+            status: 'not_registered',
+            requiresPin: true,
+            lastAttemptAt: nowIso,
+            registeredAt: registration?.registeredAt || null,
+            phoneStatus: liveStatus.status,
+            codeVerificationStatus: liveStatus.code_verification_status || null,
+            lastErrorCode: null,
+            lastErrorMessage: registration?.lastErrorMessage || null,
           };
           await updateRegistrationOnAsset(p, registration);
         }
@@ -730,6 +745,7 @@ exports.listPhones = async (req, res) => {
         group_name: grupo.nombre_grupo || null,
         name_status: p.additionalData?.nameStatus || null,
         name_status_reason: p.additionalData?.nameStatusReason || null,
+        requested_display_name: p.additionalData?.requestedDisplayName || null,
         registration_status: registration?.status || null,
         registration_requires_pin: registration?.requiresPin || false,
         registration_phone_status: registration?.phoneStatus || null,
@@ -1070,6 +1086,81 @@ exports.registerPhone = async (req, res) => {
   } catch (err) {
     console.error('Error registerPhone', err);
     return res.status(500).json({ success: false, error: 'register_failed' });
+  }
+};
+
+exports.updatePhoneDisplayName = async (req, res) => {
+  try {
+    const userId = req.userData?.userId;
+    const phoneNumberId = req.params.phoneNumberId;
+    const displayName =
+      req.body?.display_name ||
+      req.body?.displayName ||
+      req.body?.name ||
+      null;
+
+    if (!phoneNumberId) {
+      return res
+        .status(400)
+        .json({ success: false, error: 'phone_number_id_required' });
+    }
+    if (!displayName) {
+      return res
+        .status(400)
+        .json({ success: false, error: 'display_name_required' });
+    }
+
+    const phone = await ClinicMetaAsset.findOne({
+      where: {
+        assetType: 'whatsapp_phone_number',
+        phoneNumberId,
+        isActive: true,
+      },
+      include: [
+        { model: MetaConnection, as: 'metaConnection', attributes: ['userId'] },
+        {
+          model: Clinica,
+          as: 'clinica',
+          attributes: ['id_clinica', 'grupoClinicaId', 'nombre_clinica'],
+        },
+      ],
+    });
+
+    if (!phone) {
+      return res.status(404).json({ success: false, error: 'phone_not_found' });
+    }
+
+    const { clinicIds, isAggregateAllowed } = await getUserClinics(userId);
+    const userGroupIds = await getUserGroupIds({ clinicIds, isAggregateAllowed });
+    const isOwner = phone.metaConnection?.userId === userId;
+    const hasClinicAccess = phone.clinicaId && clinicIds.includes(phone.clinicaId);
+    const hasGroupAccess =
+      phone.assignmentScope === 'group' &&
+      phone.grupoClinicaId &&
+      userGroupIds.includes(phone.grupoClinicaId);
+
+    if (!isOwner && !isAggregateAllowed && !hasClinicAccess && !hasGroupAccess) {
+      return res.status(403).json({ success: false, error: 'forbidden' });
+    }
+
+    const additionalData = phone.additionalData || {};
+    additionalData.requestedDisplayName = String(displayName).trim();
+    additionalData.requestedDisplayNameAt = new Date().toISOString();
+    phone.additionalData = additionalData;
+    await phone.save();
+
+    return res.json({
+      success: true,
+      phoneNumberId,
+      requestedDisplayName: additionalData.requestedDisplayName,
+      manualRequired: true,
+      managerUrl: 'https://business.facebook.com/wa/manage/phone-numbers/',
+    });
+  } catch (err) {
+    console.error('Error updatePhoneDisplayName', err);
+    return res
+      .status(500)
+      .json({ success: false, error: 'display_name_update_failed' });
   }
 };
 

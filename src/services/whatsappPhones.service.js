@@ -21,9 +21,23 @@ function isTestDisplayNumber(displayPhoneNumber) {
 
 function buildRegisteredSnapshot(remote, existingRegistration) {
   const nowIso = new Date().toISOString();
+  const codeStatus = String(remote?.code_verification_status || '').toUpperCase();
+  const isVerified = codeStatus === 'VERIFIED';
+  const isConnected = remote?.status === 'CONNECTED';
+  let status = existingRegistration?.status || null;
+  let requiresPin = existingRegistration?.requiresPin || false;
+
+  if (isConnected && isVerified) {
+    status = 'registered';
+    requiresPin = false;
+  } else if (isConnected && !isVerified) {
+    status = 'not_registered';
+    requiresPin = true;
+  }
+
   return {
-    status: remote?.status === 'CONNECTED' ? 'registered' : existingRegistration?.status || null,
-    requiresPin: false,
+    status,
+    requiresPin,
     lastAttemptAt: nowIso,
     registeredAt: existingRegistration?.registeredAt || nowIso,
     phoneStatus: remote?.status || null,

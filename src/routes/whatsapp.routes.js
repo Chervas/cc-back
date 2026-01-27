@@ -105,6 +105,9 @@ router.post('/phones/:phoneNumberId/assign', authMiddleware, whatsappController.
 // Registrar número en Cloud API (PIN opcional)
 router.post('/phones/:phoneNumberId/register', authMiddleware, whatsappController.registerPhone);
 
+// Solicitar cambio de nombre para mostrar (se guarda y guía al usuario)
+router.post('/phones/:phoneNumberId/display-name', authMiddleware, whatsappController.updatePhoneDisplayName);
+
 // Desconectar número (desactiva y desasigna)
 router.delete('/phones/:phoneNumberId', authMiddleware, whatsappController.deletePhone);
 
