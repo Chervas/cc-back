@@ -1,4 +1,5 @@
 'use strict';
+const { QueryTypes } = require('sequelize');
 const { createWorker } = require('../services/queue.service');
 const whatsappService = require('../services/whatsapp.service');
 const whatsappTemplatesService = require('../services/whatsappTemplates.service');
@@ -7,6 +8,62 @@ const { getIO } = require('../services/socket.service');
 const db = require('../../models');
 
 const { Conversation, Message, ClinicMetaAsset } = db;
+
+function mapWhatsAppStatus(status) {
+    switch ((status || '').toLowerCase()) {
+        case 'sent':
+            return 'sent';
+        case 'delivered':
+            return 'delivered';
+        case 'read':
+            return 'read';
+        case 'failed':
+            return 'failed';
+        default:
+            return null;
+    }
+}
+
+async function findMessageByWamid(wamid) {
+    if (!wamid) return null;
+    const rows = await db.sequelize.query(
+        `
+        SELECT m.id, m.conversation_id, c.clinic_id
+        FROM Messages m
+        JOIN Conversations c ON c.id = m.conversation_id
+        WHERE JSON_UNQUOTE(JSON_EXTRACT(m.metadata, '$.wamid')) = :wamid
+        ORDER BY m.id DESC
+        LIMIT 1
+        `,
+        {
+            replacements: { wamid },
+            type: QueryTypes.SELECT,
+        }
+    );
+    return rows?.[0] || null;
+}
+
+function mergeStatusMetadata(existingMetadata, status) {
+    const metadata = existingMetadata || {};
+    const history = Array.isArray(metadata.wa_status_history)
+        ? metadata.wa_status_history
+        : [];
+    const entry = {
+        status: status.status,
+        timestamp: status.timestamp,
+        recipient_id: status.recipient_id || null,
+        conversation: status.conversation || null,
+        pricing: status.pricing || null,
+        errors: status.errors || null,
+    };
+    history.push(entry);
+    return {
+        ...metadata,
+        wa_status: entry,
+        wa_status_history: history,
+        wa_error: status.errors || metadata.wa_error || null,
+    };
+}
 
 // Procesa envíos salientes de WhatsApp
 createWorker('outbound_whatsapp', async (job) => {
@@ -123,6 +180,7 @@ createWorker('webhook_whatsapp', async (job) => {
     const changes = entry?.changes?.[0];
     const value = changes?.value;
     const messages = value?.messages || [];
+    const statuses = value?.statuses || [];
 
     for (const msg of messages) {
         const phoneId = value?.metadata?.phone_number_id;
@@ -186,6 +244,61 @@ createWorker('webhook_whatsapp', async (job) => {
                 status: 'sent',
                 sent_at: new Date(),
             });
+        }
+    }
+
+    // Procesar estados de entrega/lectura/fallo
+    for (const status of statuses) {
+        const wamid = status?.id;
+        const mappedStatus = mapWhatsAppStatus(status?.status);
+        if (!wamid || !mappedStatus) {
+            continue;
+        }
+
+        const messageRef = await findMessageByWamid(wamid);
+        if (!messageRef) {
+            continue;
+        }
+
+        const message = await Message.findByPk(messageRef.id);
+        if (!message) {
+            continue;
+        }
+
+        // No degradar estados: solo avanzamos
+        const currentStatus = (message.status || '').toLowerCase();
+        const nextStatus = mappedStatus;
+        const order = ['pending', 'sending', 'sent', 'delivered', 'read', 'failed'];
+        const currentIdx = order.indexOf(currentStatus);
+        const nextIdx = order.indexOf(nextStatus);
+        if (currentIdx !== -1 && nextIdx !== -1 && nextIdx < currentIdx) {
+            continue;
+        }
+
+        message.status = nextStatus;
+        if (status?.timestamp) {
+            const tsMs = Number(status.timestamp) * 1000;
+            if (!Number.isNaN(tsMs)) {
+                message.sent_at = new Date(tsMs);
+            }
+        }
+        message.metadata = mergeStatusMetadata(message.metadata, status);
+        await message.save();
+
+        const io = getIO();
+        if (io) {
+            const roomClinicId = messageRef.clinic_id || clinicId;
+            const room = roomClinicId ? `clinic:${roomClinicId}` : null;
+            const payload = {
+                id: message.id,
+                conversation_id: message.conversation_id,
+                status: message.status,
+            };
+            if (room) {
+                io.to(room).emit('message:updated', payload);
+            } else {
+                io.emit('message:updated', payload);
+            }
         }
     }
 });
