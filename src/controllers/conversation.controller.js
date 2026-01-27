@@ -301,6 +301,7 @@ exports.postMessage = async (req, res) => {
       previewUrl = false,
       metadata = {},
     } = req.body;
+    let outboundJobPayload = null;
 
     const conversation = await Conversation.findByPk(conversationId, { transaction });
     if (!conversation) {
@@ -369,7 +370,8 @@ exports.postMessage = async (req, res) => {
         await transaction.rollback();
         return res.status(500).json({ error: 'whatsapp_config_missing' });
       }
-      await queues.outboundWhatsApp.add('send', {
+      // Encolar solo despues del commit para evitar carreras con la transaccion
+      outboundJobPayload = {
         messageId: msg.id,
         conversationId: conversation.id,
         to,
@@ -381,7 +383,7 @@ exports.postMessage = async (req, res) => {
         templateParams,
         templateComponents,
         clinicConfig,
-      });
+      };
     }
 
     conversation.last_message_at = new Date();
@@ -390,6 +392,34 @@ exports.postMessage = async (req, res) => {
     // No emitir conversation:updated aquí para evitar sobrescribir unread_count del usuario.
 
     await transaction.commit();
+
+    if (outboundJobPayload) {
+      try {
+        await queues.outboundWhatsApp.add('send', outboundJobPayload);
+      } catch (enqueueErr) {
+        console.error('Error encolando outbound WhatsApp', enqueueErr);
+        const errorMetadata = {
+          ...(msg.metadata || {}),
+          enqueue_error: enqueueErr?.message || 'enqueue_failed',
+        };
+        await Message.update(
+          { status: 'failed', metadata: errorMetadata },
+          { where: { id: msg.id } }
+        );
+        const io = getIO();
+        if (io) {
+          const room = `clinic:${conversation.clinic_id}`;
+          io.to(room).emit('message:updated', {
+            id: msg.id,
+            conversation_id: conversation.id,
+            status: 'failed',
+          });
+        }
+        msg.status = 'failed';
+        msg.metadata = errorMetadata;
+      }
+    }
+
     return res.json({ message: msg });
   } catch (err) {
     await transaction.rollback();
