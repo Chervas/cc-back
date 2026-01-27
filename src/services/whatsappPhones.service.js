@@ -38,7 +38,7 @@ async function fetchRemotePhones({ wabaId, accessToken }) {
     headers: { Authorization: `Bearer ${accessToken}` },
     params: {
       fields:
-        'id,display_phone_number,verified_name,status,code_verification_status,quality_rating,messaging_limit_tier',
+        'id,display_phone_number,verified_name,status,code_verification_status,quality_rating,messaging_limit_tier,name_status',
     },
   });
   return resp.data?.data || [];
@@ -70,6 +70,9 @@ async function upsertRemoteState(asset, remote) {
 
   additionalData.isTestNumber = testNumber;
   additionalData.limitedMode = testNumber;
+  if (remote?.name_status) {
+    additionalData.nameStatus = remote.name_status;
+  }
 
   if (remote?.status === 'CONNECTED') {
     additionalData.registration = buildRegisteredSnapshot(remote, registration);

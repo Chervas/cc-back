@@ -728,6 +728,8 @@ exports.listPhones = async (req, res) => {
         clinic_avatar: clinica.url_avatar || null,
         group_id: grupo.id_grupo || p.grupoClinicaId || clinica.grupoClinicaId || null,
         group_name: grupo.nombre_grupo || null,
+        name_status: p.additionalData?.nameStatus || null,
+        name_status_reason: p.additionalData?.nameStatusReason || null,
         registration_status: registration?.status || null,
         registration_requires_pin: registration?.requiresPin || false,
         registration_phone_status: registration?.phoneStatus || null,
