@@ -307,6 +307,11 @@ async function attemptPhoneRegistration({ asset, pin, useAutoPin = false }) {
       lastErrorRaw: raw,
       autoPin: explicitPin || autoPin,
     };
+    if (code === 133016 || String(message || '').toLowerCase().includes('too many attempts')) {
+      registration.status = 'blocked';
+      registration.blockedUntil = new Date(Date.now() + 10 * 60 * 1000).toISOString();
+      registration.requiresPin = false;
+    }
     await updateRegistrationOnAsset(asset, registration);
     return { success: false, registration, status };
   }
@@ -751,6 +756,7 @@ exports.listPhones = async (req, res) => {
         registration_requires_pin: registration?.requiresPin || false,
         registration_phone_status: registration?.phoneStatus || null,
         registration_code_verification_status: registration?.codeVerificationStatus || null,
+        registration_blocked_until: registration?.blockedUntil || null,
         registration_last_error: registration?.lastErrorMessage || null,
         limited_mode: usage?.limitedMode || false,
         limited_mode_count: usage?.limitedMode ? usage.count : null,
