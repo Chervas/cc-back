@@ -750,6 +750,7 @@ exports.listPhones = async (req, res) => {
         registration_status: registration?.status || null,
         registration_requires_pin: registration?.requiresPin || false,
         registration_phone_status: registration?.phoneStatus || null,
+        registration_code_verification_status: registration?.codeVerificationStatus || null,
         registration_last_error: registration?.lastErrorMessage || null,
         limited_mode: usage?.limitedMode || false,
         limited_mode_count: usage?.limitedMode ? usage.count : null,
