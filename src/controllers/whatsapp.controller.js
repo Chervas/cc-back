@@ -4,7 +4,7 @@ const { Op } = require('sequelize');
 const axios = require('axios');
 const crypto = require('crypto');
 const whatsappService = require('../services/whatsapp.service');
-const { enqueueSyncPhonesJob } = require('../services/whatsappPhones.service');
+const { enqueueSyncPhonesJob, syncPhonesForWaba } = require('../services/whatsappPhones.service');
 
 const {
   ClinicMetaAsset,
@@ -1095,6 +1095,61 @@ exports.registerPhone = async (req, res) => {
   } catch (err) {
     console.error('Error registerPhone', err);
     return res.status(500).json({ success: false, error: 'register_failed' });
+  }
+};
+
+exports.refreshPhoneStatus = async (req, res) => {
+  try {
+    const userId = req.userData?.userId;
+    const phoneNumberId = req.params.phoneNumberId;
+
+    if (!phoneNumberId) {
+      return res.status(400).json({ success: false, error: 'phone_number_id_required' });
+    }
+
+    const phone = await ClinicMetaAsset.findOne({
+      where: {
+        assetType: 'whatsapp_phone_number',
+        phoneNumberId,
+        isActive: true,
+      },
+      include: [
+        { model: MetaConnection, as: 'metaConnection', attributes: ['userId'] },
+        {
+          model: Clinica,
+          as: 'clinica',
+          attributes: ['id_clinica', 'grupoClinicaId', 'nombre_clinica'],
+        },
+      ],
+    });
+
+    if (!phone) {
+      return res.status(404).json({ success: false, error: 'phone_not_found' });
+    }
+
+    const { clinicIds, isAggregateAllowed } = await getUserClinics(userId);
+    const userGroupIds = await getUserGroupIds({ clinicIds, isAggregateAllowed });
+    const isOwner = phone.metaConnection?.userId === userId;
+    const hasClinicAccess = phone.clinicaId && clinicIds.includes(phone.clinicaId);
+    const hasGroupAccess =
+      phone.assignmentScope === 'group' &&
+      phone.grupoClinicaId &&
+      userGroupIds.includes(phone.grupoClinicaId);
+
+    if (!isOwner && !isAggregateAllowed && !hasClinicAccess && !hasGroupAccess) {
+      return res.status(403).json({ success: false, error: 'forbidden' });
+    }
+
+    if (!phone.wabaId || !phone.waAccessToken) {
+      return res.status(400).json({ success: false, error: 'missing_waba_or_token' });
+    }
+
+    await syncPhonesForWaba({ wabaId: phone.wabaId, accessToken: phone.waAccessToken });
+
+    return res.json({ success: true });
+  } catch (err) {
+    console.error('Error refreshPhoneStatus', err);
+    return res.status(500).json({ success: false, error: 'refresh_failed' });
   }
 };
 

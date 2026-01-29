@@ -108,6 +108,9 @@ router.post('/phones/:phoneNumberId/register', authMiddleware, whatsappControlle
 // Solicitar cambio de nombre para mostrar (se guarda y guía al usuario)
 router.post('/phones/:phoneNumberId/display-name', authMiddleware, whatsappController.updatePhoneDisplayName);
 
+// Refrescar estado del número en Meta (estado registro, nombre, calidad)
+router.post('/phones/:phoneNumberId/refresh', authMiddleware, whatsappController.refreshPhoneStatus);
+
 // Desconectar número (desactiva y desasigna)
 router.delete('/phones/:phoneNumberId', authMiddleware, whatsappController.deletePhone);
 
