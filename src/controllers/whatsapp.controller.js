@@ -786,6 +786,8 @@ exports.listPhones = async (req, res) => {
       const managerBusinessId =
         p.additionalData?.businessId || wabaBusinessMap.get(p.wabaId) || null;
 
+      const additionalData = p.additionalData || {};
+
       payload.push({
         id: p.id,
         phoneNumberId: p.phoneNumberId,
@@ -801,9 +803,9 @@ exports.listPhones = async (req, res) => {
         group_id: grupo.id_grupo || p.grupoClinicaId || clinica.grupoClinicaId || null,
         group_name: grupo.nombre_grupo || null,
         manager_business_id: managerBusinessId,
-        name_status: p.additionalData?.nameStatus || null,
-        name_status_reason: p.additionalData?.nameStatusReason || null,
-        requested_display_name: p.additionalData?.requestedDisplayName || null,
+        name_status: additionalData.nameStatus || null,
+        name_status_reason: additionalData.nameStatusReason || null,
+        requested_display_name: additionalData.requestedDisplayName || null,
         registration_status: registration?.status || null,
         registration_requires_pin: registration?.requiresPin || false,
         registration_phone_status: registration?.phoneStatus || null,
@@ -813,6 +815,9 @@ exports.listPhones = async (req, res) => {
         limited_mode: usage?.limitedMode || false,
         limited_mode_count: usage?.limitedMode ? usage.count : null,
         limited_mode_limit: usage?.limitedMode ? usage.limit : null,
+        is_test_number: !!additionalData.isTestNumber,
+        account_mode: additionalData.accountMode || null,
+        platform_type: additionalData.platformType || null,
         createdAt: p.createdAt,
       });
     }
