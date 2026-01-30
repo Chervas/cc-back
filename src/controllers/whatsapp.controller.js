@@ -681,6 +681,30 @@ exports.listPhones = async (req, res) => {
       order: [['createdAt', 'DESC']],
     });
 
+    const wabaIds = Array.from(
+      new Set(
+        phones
+          .map((p) => p.wabaId)
+          .filter((id) => id && String(id).trim().length > 0)
+      )
+    );
+    const wabaBusinessMap = new Map();
+    if (wabaIds.length) {
+      const wabaAssets = await ClinicMetaAsset.findAll({
+        where: {
+          assetType: 'whatsapp_business_account',
+          wabaId: { [Op.in]: wabaIds },
+        },
+        attributes: ['wabaId', 'additionalData'],
+      });
+      for (const wa of wabaAssets) {
+        const businessId = wa.additionalData?.businessId || null;
+        if (businessId) {
+          wabaBusinessMap.set(wa.wabaId, businessId);
+        }
+      }
+    }
+
     // Disparar sync on-demand con throttling para reducir estados stale
     const now = Date.now();
     const wabaTokens = new Map();
@@ -759,6 +783,9 @@ exports.listPhones = async (req, res) => {
         displayPhoneNumber: p.metaAssetName || null,
       });
 
+      const managerBusinessId =
+        p.additionalData?.businessId || wabaBusinessMap.get(p.wabaId) || null;
+
       payload.push({
         id: p.id,
         phoneNumberId: p.phoneNumberId,
@@ -773,6 +800,7 @@ exports.listPhones = async (req, res) => {
         clinic_avatar: clinica.url_avatar || null,
         group_id: grupo.id_grupo || p.grupoClinicaId || clinica.grupoClinicaId || null,
         group_name: grupo.nombre_grupo || null,
+        manager_business_id: managerBusinessId,
         name_status: p.additionalData?.nameStatus || null,
         name_status_reason: p.additionalData?.nameStatusReason || null,
         requested_display_name: p.additionalData?.requestedDisplayName || null,

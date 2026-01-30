@@ -101,7 +101,30 @@ async function attemptPhoneRegistration({ asset, accessToken }) {
       return { success: true, registration, status: currentStatus };
     }
 
-    await whatsappService.registerPhoneNumber({ phoneNumberId, accessToken });
+    try {
+      await whatsappService.setTwoStepVerification({
+        phoneNumberId,
+        accessToken,
+        pin: autoPin,
+      });
+    } catch (pinErr) {
+      const parsed = parseWaError(pinErr);
+      const registration = {
+        status: 'pin_required',
+        requiresPin: true,
+        lastAttemptAt: nowIso,
+        phoneStatus: currentStatus?.status || null,
+        codeVerificationStatus: currentStatus?.code_verification_status || null,
+        lastErrorCode: parsed.code,
+        lastErrorMessage: parsed.message,
+        lastErrorRaw: parsed.raw,
+        autoPin,
+      };
+      await updateRegistrationOnAsset(asset, registration);
+      return { success: false, registration, status: currentStatus };
+    }
+
+    await whatsappService.registerPhoneNumber({ phoneNumberId, accessToken, pin: autoPin });
     const status = await whatsappService.getPhoneNumberStatus({
       phoneNumberId,
       accessToken,
@@ -126,6 +149,11 @@ async function attemptPhoneRegistration({ asset, accessToken }) {
 
     if (pinRequired) {
       try {
+        await whatsappService.setTwoStepVerification({
+          phoneNumberId,
+          accessToken,
+          pin: autoPin,
+        });
         await whatsappService.registerPhoneNumber({
           phoneNumberId,
           accessToken,
@@ -204,7 +232,7 @@ async function subscribeAppToWaba({ wabaId, accessToken }) {
 
 router.post('/embedded-signup/callback', authMiddleware, async (req, res) => {
   try {
-    const { code, clinic_id, redirect_uri, waba_id, phone_number_id } = req.body;
+    const { code, clinic_id, redirect_uri, waba_id, phone_number_id, business_id } = req.body;
     if (!code) {
       return res.status(400).json({ success: false, error: 'missing_code' });
     }
@@ -305,7 +333,8 @@ router.post('/embedded-signup/callback', authMiddleware, async (req, res) => {
         .get(`https://graph.facebook.com/v24.0/${phone_number_id}`, {
           params: {
             access_token: accessToken,
-            fields: 'id,display_phone_number,verified_name,quality_rating,messaging_limit',
+            fields:
+              'id,display_phone_number,verified_name,quality_rating,messaging_limit_tier,name_status,code_verification_status,status,platform_type,account_mode',
           },
         })
         .then((r) => r.data)
@@ -317,7 +346,12 @@ router.post('/embedded-signup/callback', authMiddleware, async (req, res) => {
     const displayPhoneNumber = phoneDetails?.display_phone_number || `+00 ${phone_number_id.slice(-6)}`;
     const verifiedName = phoneDetails?.verified_name || wabaName || 'WhatsApp Business';
     const qualityRating = phoneDetails?.quality_rating || null;
-    const messagingLimit = phoneDetails?.messaging_limit || null;
+    const messagingLimit = phoneDetails?.messaging_limit_tier || phoneDetails?.messaging_limit || null;
+    const nameStatus = phoneDetails?.name_status || null;
+    const codeVerificationStatus = phoneDetails?.code_verification_status || null;
+    const phoneStatus = phoneDetails?.status || null;
+    const platformType = phoneDetails?.platform_type || null;
+    const accountMode = phoneDetails?.account_mode || null;
     
     console.log('📱 WhatsApp Embedded Signup - Detalles obtenidos:', {
       wabaId: waba_id,
@@ -327,7 +361,7 @@ router.post('/embedded-signup/callback', authMiddleware, async (req, res) => {
       qualityRating,
       messagingLimit,
       wabaDetailsRaw: wabaDetails,
-      phoneDetailsRaw: phoneDetails
+        phoneDetailsRaw: phoneDetails
     });
 
     const upsertAsset = async (where, values) => {
@@ -376,6 +410,42 @@ router.post('/embedded-signup/callback', authMiddleware, async (req, res) => {
         isActive: true,
       }
     );
+
+    const businessId = business_id || null;
+    if (businessId || nameStatus || codeVerificationStatus || platformType || accountMode) {
+      const applyMetaExtras = async (asset) => {
+        const additionalData = { ...(asset.additionalData || {}) };
+        if (businessId) {
+          additionalData.businessId = businessId;
+        }
+        if (nameStatus) {
+          additionalData.nameStatus = nameStatus;
+        }
+        if (platformType) {
+          additionalData.platformType = platformType;
+        }
+        if (accountMode) {
+          additionalData.accountMode = accountMode;
+        }
+        if (codeVerificationStatus || phoneStatus) {
+          additionalData.registration = {
+            ...(additionalData.registration || {}),
+            codeVerificationStatus: codeVerificationStatus || additionalData.registration?.codeVerificationStatus || null,
+            phoneStatus: phoneStatus || additionalData.registration?.phoneStatus || null,
+          };
+        }
+        asset.additionalData = additionalData;
+        await asset.save();
+      };
+
+      const wabaAsset = await ClinicMetaAsset.findOne({
+        where: { metaConnectionId: metaConnection.id, metaAssetId: waba_id },
+      });
+      if (wabaAsset) {
+        await applyMetaExtras(wabaAsset);
+      }
+      await applyMetaExtras(phoneAsset);
+    }
 
     // Intentar registrar automaticamente el numero (sin PIN). Si requiere PIN,
     // devolvemos el estado para que el frontend lo solicite.
