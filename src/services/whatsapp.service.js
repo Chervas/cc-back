@@ -391,6 +391,33 @@ class WhatsAppService {
     }
 
     /**
+     * Configura el PIN de verificación en dos pasos para un número de WhatsApp.
+     */
+    async setTwoStepVerification({ phoneNumberId, accessToken, pin }) {
+        if (!phoneNumberId) {
+            throw new Error('phoneNumberId requerido');
+        }
+        if (!accessToken) {
+            throw new Error('accessToken requerido');
+        }
+        if (!pin) {
+            throw new Error('pin requerido');
+        }
+
+        const url = `https://graph.facebook.com/${this.apiVersion}/${phoneNumberId}/two_step_verification`;
+        const payload = { pin: String(pin).trim() };
+
+        const response = await axios.post(url, payload, {
+            headers: {
+                Authorization: `Bearer ${accessToken}`,
+                'Content-Type': 'application/json',
+            },
+        });
+
+        return response.data;
+    }
+
+    /**
      * Obtiene el estado del numero de telefono en la Cloud API
      */
     async getPhoneNumberStatus({ phoneNumberId, accessToken }) {

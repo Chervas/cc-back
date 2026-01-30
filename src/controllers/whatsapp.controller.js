@@ -180,6 +180,30 @@ async function attemptPhoneRegistration({ asset, pin, useAutoPin = false }) {
     }
 
     const pinToUse = explicitPin || (useAutoPin ? autoPin : null);
+    if (pinToUse) {
+      try {
+        await whatsappService.setTwoStepVerification({
+          phoneNumberId,
+          accessToken,
+          pin: pinToUse,
+        });
+      } catch (pinErr) {
+        const parsed = parseWaError(pinErr);
+        const registration = {
+          status: 'pin_required',
+          requiresPin: true,
+          lastAttemptAt: nowIso,
+          phoneStatus: currentStatus?.status || null,
+          codeVerificationStatus: currentStatus?.code_verification_status || null,
+          lastErrorCode: parsed.code,
+          lastErrorMessage: parsed.message,
+          lastErrorRaw: parsed.raw,
+        };
+        await updateRegistrationOnAsset(asset, registration);
+        return { success: false, registration, error: parsed };
+      }
+    }
+
     await whatsappService.registerPhoneNumber({
       phoneNumberId,
       accessToken,
