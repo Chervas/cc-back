@@ -230,6 +230,32 @@ async function subscribeAppToWaba({ wabaId, accessToken }) {
   }
 }
 
+async function fetchWabaDetailsWithBusinessId({ wabaId, accessToken }) {
+  if (!wabaId || !accessToken) return null;
+  const fieldCandidates = ['id,name,business_id', 'id,name'];
+  let lastError = null;
+
+  for (const fields of fieldCandidates) {
+    try {
+      const resp = await axios.get(`https://graph.facebook.com/v24.0/${wabaId}`, {
+        params: { access_token: accessToken, fields },
+      });
+      return resp.data;
+    } catch (err) {
+      lastError = err?.response?.data || err?.message;
+      // Si el campo business_id no existe en esta versión/cuenta, probamos sin él
+      const message = err?.response?.data?.error?.message || '';
+      if (fields.includes('business_id') && message.includes('nonexisting field')) {
+        continue;
+      }
+      break;
+    }
+  }
+
+  console.warn('[EmbeddedSignup] No se pudo obtener detalles del WABA', lastError);
+  return null;
+}
+
 router.post('/embedded-signup/callback', authMiddleware, async (req, res) => {
   try {
     const { code, clinic_id, redirect_uri, waba_id, phone_number_id, business_id } = req.body;
@@ -323,12 +349,7 @@ router.post('/embedded-signup/callback', authMiddleware, async (req, res) => {
 
     // Obtener detalles del WABA y del número (usamos IDs proporcionados por WA_EMBEDDED_SIGNUP)
     const [wabaDetails, phoneDetails] = await Promise.all([
-      axios
-        .get(`https://graph.facebook.com/v24.0/${waba_id}`, {
-          params: { access_token: accessToken, fields: 'id,name' },
-        })
-        .then((r) => r.data)
-        .catch(() => null),
+      fetchWabaDetailsWithBusinessId({ wabaId: waba_id, accessToken }),
       axios
         .get(`https://graph.facebook.com/v24.0/${phone_number_id}`, {
           params: {
@@ -342,6 +363,7 @@ router.post('/embedded-signup/callback', authMiddleware, async (req, res) => {
     ]);
 
     const wabaName = wabaDetails?.name || null;
+    const resolvedBusinessId = business_id || wabaDetails?.business_id || null;
     // Fallback: si no hay display_phone_number, usar phone_number_id como identificador temporal
     const displayPhoneNumber = phoneDetails?.display_phone_number || `+00 ${phone_number_id.slice(-6)}`;
     const verifiedName = phoneDetails?.verified_name || wabaName || 'WhatsApp Business';
@@ -411,7 +433,7 @@ router.post('/embedded-signup/callback', authMiddleware, async (req, res) => {
       }
     );
 
-    const businessId = business_id || null;
+    const businessId = resolvedBusinessId || null;
     if (businessId || nameStatus || codeVerificationStatus || platformType || accountMode) {
       const applyMetaExtras = async (asset) => {
         const additionalData = { ...(asset.additionalData || {}) };
