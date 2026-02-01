@@ -63,7 +63,7 @@ async function fetchPhoneProfile({ phoneNumberId, accessToken }) {
   const resp = await axios.get(`${getMetaBaseUrl()}/${phoneNumberId}/whatsapp_business_profile`, {
     headers: { Authorization: `Bearer ${accessToken}` },
     params: {
-      fields: 'about,description,profile_picture_url,vertical',
+      fields: 'about,description,profile_picture_url,vertical,email,websites,address',
     },
   });
   return resp.data || null;
@@ -113,6 +113,9 @@ async function upsertRemoteState(asset, remote, profile) {
     additionalData.profileDescription = profile.description || profile.about || additionalData.profileDescription || null;
     additionalData.profileCategory = profile.vertical || additionalData.profileCategory || null;
     additionalData.profilePictureUrl = profile.profile_picture_url || additionalData.profilePictureUrl || null;
+    additionalData.profileEmail = profile.email || additionalData.profileEmail || null;
+    additionalData.profileWebsite = profile.websites?.[0] || additionalData.profileWebsite || null;
+    additionalData.profileAddress = profile.address || additionalData.profileAddress || null;
   }
 
   if (remote?.status === 'CONNECTED') {

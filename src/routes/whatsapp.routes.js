@@ -108,6 +108,9 @@ router.post('/phones/:phoneNumberId/register', authMiddleware, whatsappControlle
 // Solicitar cambio de nombre para mostrar (se guarda y guía al usuario)
 router.post('/phones/:phoneNumberId/display-name', authMiddleware, whatsappController.updatePhoneDisplayName);
 
+// Actualizar perfil del número (categoría, descripción, web, etc.)
+router.post('/phones/:phoneNumberId/profile', authMiddleware, whatsappController.updatePhoneProfile);
+
 // Refrescar estado del número en Meta (estado registro, nombre, calidad)
 router.post('/phones/:phoneNumberId/refresh', authMiddleware, whatsappController.refreshPhoneStatus);
 

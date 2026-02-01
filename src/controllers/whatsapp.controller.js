@@ -867,6 +867,9 @@ exports.listPhones = async (req, res) => {
         profile_picture_url: additionalData.profilePictureUrl || null,
         profile_description: additionalData.profileDescription || null,
         profile_category: additionalData.profileCategory || null,
+        profile_email: additionalData.profileEmail || null,
+        profile_website: additionalData.profileWebsite || null,
+        profile_address: additionalData.profileAddress || null,
         registration_status: registration?.status || null,
         registration_requires_pin: registration?.requiresPin || false,
         registration_phone_status: registration?.phoneStatus || null,
@@ -1345,6 +1348,99 @@ exports.updatePhoneDisplayName = async (req, res) => {
     return res
       .status(500)
       .json({ success: false, error: 'display_name_update_failed' });
+  }
+};
+
+exports.updatePhoneProfile = async (req, res) => {
+  try {
+    const userId = req.userData?.userId;
+    const phoneNumberId = req.params.phoneNumberId;
+    const category = req.body?.category || req.body?.vertical || null;
+    const description = req.body?.description || null;
+    const address = req.body?.address || null;
+    const email = req.body?.email || null;
+    const website = req.body?.website || null;
+    const profilePictureUrl = req.body?.profile_picture_url || req.body?.profilePictureUrl || null;
+
+    if (!phoneNumberId) {
+      return res
+        .status(400)
+        .json({ success: false, error: 'phone_number_id_required' });
+    }
+
+    if (!category && !description && !address && !email && !website && !profilePictureUrl) {
+      return res
+        .status(400)
+        .json({ success: false, error: 'profile_fields_required' });
+    }
+
+    const phone = await ClinicMetaAsset.findOne({
+      where: {
+        assetType: 'whatsapp_phone_number',
+        phoneNumberId,
+        isActive: true,
+      },
+      include: [
+        { model: MetaConnection, as: 'metaConnection', attributes: ['userId'] },
+        {
+          model: Clinica,
+          as: 'clinica',
+          attributes: ['id_clinica', 'grupoClinicaId', 'nombre_clinica'],
+        },
+      ],
+    });
+
+    if (!phone) {
+      return res.status(404).json({ success: false, error: 'phone_not_found' });
+    }
+
+    const { clinicIds, isAggregateAllowed } = await getUserClinics(userId);
+    const userGroupIds = await getUserGroupIds({ clinicIds, isAggregateAllowed });
+    const isOwner = phone.metaConnection?.userId === userId;
+    const hasClinicAccess = phone.clinicaId && clinicIds.includes(phone.clinicaId);
+    const hasGroupAccess =
+      phone.assignmentScope === 'group' &&
+      phone.grupoClinicaId &&
+      userGroupIds.includes(phone.grupoClinicaId);
+
+    if (!isOwner && !isAggregateAllowed && !hasClinicAccess && !hasGroupAccess) {
+      return res.status(403).json({ success: false, error: 'forbidden' });
+    }
+
+    if (!phone.wabaId || !phone.waAccessToken) {
+      return res.status(400).json({ success: false, error: 'missing_waba_or_token' });
+    }
+
+    const payload = {
+      messaging_product: 'whatsapp',
+    };
+    if (category) payload.vertical = String(category).trim();
+    if (description) payload.description = String(description).trim();
+    if (address) payload.address = String(address).trim();
+    if (email) payload.email = String(email).trim();
+    if (website) payload.websites = [String(website).trim()];
+    if (profilePictureUrl) payload.profile_picture_url = String(profilePictureUrl).trim();
+
+    await axios.post(
+      `https://graph.facebook.com/${META_API_VERSION}/${phoneNumberId}/whatsapp_business_profile`,
+      payload,
+      { headers: { Authorization: `Bearer ${phone.waAccessToken}` } }
+    );
+
+    const additionalData = phone.additionalData || {};
+    additionalData.profileCategory = payload.vertical || additionalData.profileCategory || null;
+    additionalData.profileDescription = payload.description || additionalData.profileDescription || null;
+    additionalData.profilePictureUrl = payload.profile_picture_url || additionalData.profilePictureUrl || null;
+    additionalData.profileEmail = payload.email || additionalData.profileEmail || null;
+    additionalData.profileWebsite = payload.websites?.[0] || additionalData.profileWebsite || null;
+    additionalData.profileAddress = payload.address || additionalData.profileAddress || null;
+    phone.additionalData = additionalData;
+    await phone.save();
+
+    return res.json({ success: true });
+  } catch (err) {
+    console.error('Error updatePhoneProfile', err);
+    return res.status(500).json({ success: false, error: 'profile_update_failed' });
   }
 };
 
