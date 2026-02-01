@@ -58,6 +58,17 @@ async function fetchRemotePhones({ wabaId, accessToken }) {
   return resp.data?.data || [];
 }
 
+async function fetchPhoneProfile({ phoneNumberId, accessToken }) {
+  if (!phoneNumberId) return null;
+  const resp = await axios.get(`${getMetaBaseUrl()}/${phoneNumberId}/whatsapp_business_profile`, {
+    headers: { Authorization: `Bearer ${accessToken}` },
+    params: {
+      fields: 'about,description,profile_picture_url,vertical',
+    },
+  });
+  return resp.data || null;
+}
+
 async function fetchNameStatus({ phoneNumberId, accessToken }) {
   if (!phoneNumberId) return null;
   const resp = await axios.get(`${getMetaBaseUrl()}/${phoneNumberId}`, {
@@ -88,7 +99,7 @@ async function disableDeletedPhone(asset) {
   await asset.save();
 }
 
-async function upsertRemoteState(asset, remote) {
+async function upsertRemoteState(asset, remote, profile) {
   const additionalData = { ...(asset.additionalData || {}) };
   const registration = additionalData.registration || {};
   const testNumber = isTestDisplayNumber(remote?.display_phone_number);
@@ -97,6 +108,11 @@ async function upsertRemoteState(asset, remote) {
   additionalData.limitedMode = testNumber;
   if (remote?.name_status) {
     additionalData.nameStatus = remote.name_status;
+  }
+  if (profile) {
+    additionalData.profileDescription = profile.description || profile.about || additionalData.profileDescription || null;
+    additionalData.profileCategory = profile.vertical || additionalData.profileCategory || null;
+    additionalData.profilePictureUrl = profile.profile_picture_url || additionalData.profilePictureUrl || null;
   }
 
   if (remote?.status === 'CONNECTED') {
@@ -153,6 +169,7 @@ async function syncPhonesForWaba({ wabaId, accessToken }) {
 
   // Obtener name_status por phone_number_id (más fiable que el listado)
   const nameStatusMap = new Map();
+  const profileMap = new Map();
   for (const remote of remotePhones) {
     try {
       const statusInfo = await fetchNameStatus({
@@ -168,6 +185,17 @@ async function syncPhonesForWaba({ wabaId, accessToken }) {
     } catch (err) {
       // No bloquear sync por fallos puntuales
       console.warn('[whatsapp] No se pudo obtener name_status', remote?.id, err?.message || err);
+    }
+    try {
+      const profileInfo = await fetchPhoneProfile({
+        phoneNumberId: remote.id,
+        accessToken: token,
+      });
+      if (profileInfo) {
+        profileMap.set(remote.id, profileInfo);
+      }
+    } catch (err) {
+      console.warn('[whatsapp] No se pudo obtener perfil', remote?.id, err?.message || err);
     }
   }
 
@@ -193,7 +221,8 @@ async function syncPhonesForWaba({ wabaId, accessToken }) {
       additionalData.nameStatusReason = statusExtra.nameStatusReason;
       asset.additionalData = { ...additionalData };
     }
-    await upsertRemoteState(asset, remote);
+    const profileInfo = profileMap.get(remote.id) || null;
+    await upsertRemoteState(asset, remote, profileInfo);
   }
 
   return {
