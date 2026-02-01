@@ -258,7 +258,7 @@ async function fetchWabaDetailsWithBusinessId({ wabaId, accessToken }) {
 
 router.post('/embedded-signup/callback', authMiddleware, async (req, res) => {
   try {
-    const { code, clinic_id, redirect_uri, waba_id, phone_number_id, business_id } = req.body;
+    const { code, clinic_id, redirect_uri, waba_id, phone_number_id, business_id, assignment_scope, group_id } = req.body;
     if (!code) {
       return res.status(400).json({ success: false, error: 'missing_code' });
     }
@@ -272,13 +272,32 @@ router.post('/embedded-signup/callback', authMiddleware, async (req, res) => {
       return res.status(400).json({ success: false, error: 'meta_not_connected' });
     }
 
-    // Resolución de asignación: si no viene clinic_id => unassigned
-    const assignmentScope = clinic_id ? 'clinic' : 'unassigned';
-    const targetClinicId = clinic_id || null;
+    // Resolución de asignación (preasignación opcional)
+    let assignmentScope = 'unassigned';
+    let targetClinicId = null;
     let targetGroupId = null;
-    if (clinic_id) {
-      const clinic = await db.Clinica.findOne({ where: { id_clinica: clinic_id }, raw: true });
-      targetGroupId = clinic?.grupoClinicaId || clinic?.id_grupo || null;
+
+    if (assignment_scope === 'group') {
+      assignmentScope = 'group';
+      if (group_id) {
+        targetGroupId = group_id;
+      }
+    } else if (assignment_scope === 'clinic' && clinic_id) {
+      assignmentScope = 'clinic';
+      targetClinicId = clinic_id;
+    } else if (clinic_id) {
+      // compatibilidad hacia atrás
+      assignmentScope = 'clinic';
+      targetClinicId = clinic_id;
+    }
+
+    if (targetClinicId) {
+      const clinic = await db.Clinica.findOne({ where: { id_clinica: targetClinicId }, raw: true });
+      targetGroupId = targetGroupId || clinic?.grupoClinicaId || clinic?.id_grupo || null;
+    }
+
+    if (assignmentScope === 'group' && !targetGroupId) {
+      assignmentScope = 'unassigned';
     }
 
     // Intercambiar code por token largo
