@@ -114,4 +114,9 @@ router.post('/phones/:phoneNumberId/refresh', authMiddleware, whatsappController
 // Desconectar número (desactiva y desasigna)
 router.delete('/phones/:phoneNumberId', authMiddleware, whatsappController.deletePhone);
 
+// Pre-verified numbers (solo si está habilitado)
+router.post('/preverified/start', authMiddleware, whatsappController.preverifiedStart);
+router.post('/preverified/verify', authMiddleware, whatsappController.preverifiedVerify);
+router.post('/preverified/profile', authMiddleware, whatsappController.preverifiedProfile);
+
 module.exports = router;

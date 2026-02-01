@@ -20,6 +20,9 @@ const {
 const ROLE_AGGREGATE = ['propietario', 'admin'];
 const ADMIN_USER_IDS = (process.env.ADMIN_USER_IDS || '1').split(',').map((v) => parseInt(v.trim(), 10)).filter((n) => !Number.isNaN(n));
 const META_API_VERSION = process.env.META_API_VERSION || 'v22.0';
+const META_GRAPH_TOKEN = process.env.META_GRAPH_TOKEN || process.env.META_SYSTEM_USER_TOKEN || null;
+const META_BUSINESS_ID = process.env.META_BUSINESS_ID || process.env.META_BM_ID || null;
+const PREVERIFIED_ENABLED = String(process.env.WHATSAPP_PREVERIFIED_ENABLED || 'false').toLowerCase() === 'true';
 const PHONE_SYNC_THROTTLE_MS = 5 * 60 * 1000;
 const phoneSyncThrottle = new Map();
 
@@ -83,6 +86,31 @@ function parseWaError(err) {
   const code = nestedError?.code || null;
   const message = nestedError?.message || String(base?.message || base || '');
   return { code, message, raw: base };
+}
+
+async function fetchBusinessVerificationStatus({ businessId }) {
+  if (!businessId || !META_GRAPH_TOKEN) return null;
+  try {
+    const resp = await axios.get(`https://graph.facebook.com/${META_API_VERSION}/${businessId}` , {
+      headers: { Authorization: `Bearer ${META_GRAPH_TOKEN}` },
+      params: { fields: 'verification_status' },
+    });
+    return resp.data?.verification_status || null;
+  } catch (err) {
+    return null;
+  }
+}
+
+function assertPreverifiedEnabled(req, res) {
+  if (!PREVERIFIED_ENABLED) {
+    res.status(403).json({ success: false, error: 'preverified_not_enabled' });
+    return false;
+  }
+  if (!META_BUSINESS_ID || !META_GRAPH_TOKEN) {
+    res.status(400).json({ success: false, error: 'preverified_not_configured' });
+    return false;
+  }
+  return true;
 }
 
 function generateAutoPin() {
@@ -705,6 +733,25 @@ exports.listPhones = async (req, res) => {
       }
     }
 
+    // Resolver estado de verificación de empresas (si hay token disponible)
+    const businessIds = new Set();
+    for (const p of phones) {
+      if (p.additionalData?.businessId) {
+        businessIds.add(p.additionalData.businessId);
+      }
+      const mapped = p.wabaId ? wabaBusinessMap.get(p.wabaId) : null;
+      if (mapped) businessIds.add(mapped);
+    }
+    const businessStatusMap = new Map();
+    if (META_GRAPH_TOKEN && businessIds.size) {
+      for (const businessId of businessIds.values()) {
+        const status = await fetchBusinessVerificationStatus({ businessId });
+        if (status) {
+          businessStatusMap.set(businessId, status);
+        }
+      }
+    }
+
     // Disparar sync on-demand con throttling para reducir estados stale
     const now = Date.now();
     const wabaTokens = new Map();
@@ -785,8 +832,18 @@ exports.listPhones = async (req, res) => {
 
       const managerBusinessId =
         p.additionalData?.businessId || wabaBusinessMap.get(p.wabaId) || null;
+      const businessVerificationStatus =
+        p.additionalData?.businessVerificationStatus ||
+        (managerBusinessId ? businessStatusMap.get(managerBusinessId) : null) ||
+        null;
 
       const additionalData = p.additionalData || {};
+
+      if (businessVerificationStatus && additionalData.businessVerificationStatus !== businessVerificationStatus) {
+        additionalData.businessVerificationStatus = businessVerificationStatus;
+        p.additionalData = additionalData;
+        await p.save();
+      }
 
       payload.push({
         id: p.id,
@@ -803,6 +860,7 @@ exports.listPhones = async (req, res) => {
         group_id: grupo.id_grupo || p.grupoClinicaId || clinica.grupoClinicaId || null,
         group_name: grupo.nombre_grupo || null,
         manager_business_id: managerBusinessId,
+        business_verification_status: businessVerificationStatus,
         name_status: additionalData.nameStatus || null,
         name_status_reason: additionalData.nameStatusReason || null,
         requested_display_name: additionalData.requestedDisplayName || null,
@@ -818,11 +876,13 @@ exports.listPhones = async (req, res) => {
         is_test_number: !!additionalData.isTestNumber,
         account_mode: additionalData.accountMode || null,
         platform_type: additionalData.platformType || null,
+        is_preverified: !!additionalData.isPreverified,
+        verification_expiry_time: additionalData.verificationExpiryTime || null,
         createdAt: p.createdAt,
       });
     }
 
-    return res.json({ phones: payload });
+    return res.json({ phones: payload, preverified_enabled: PREVERIFIED_ENABLED });
   } catch (err) {
     console.error('Error listPhones', err);
     return res.status(500).json({ error: 'Error obteniendo números WhatsApp' });
@@ -1282,6 +1342,160 @@ exports.updatePhoneDisplayName = async (req, res) => {
     return res
       .status(500)
       .json({ success: false, error: 'display_name_update_failed' });
+  }
+};
+
+// =======================
+// Pre-verified numbers API
+// =======================
+
+exports.preverifiedStart = async (req, res) => {
+  try {
+    if (!assertPreverifiedEnabled(req, res)) return;
+
+    const rawNumber =
+      req.body?.phone_number ||
+      req.body?.phoneNumber ||
+      req.body?.number ||
+      null;
+    const codeMethod = (req.body?.code_method || req.body?.codeMethod || 'SMS').toUpperCase();
+    const language = req.body?.language || 'es_ES';
+
+    if (!rawNumber) {
+      return res.status(400).json({ success: false, error: 'phone_number_required' });
+    }
+
+    const digits = String(rawNumber).replace(/\D/g, '');
+    if (!digits || digits.length < 8) {
+      return res.status(400).json({ success: false, error: 'invalid_phone_number' });
+    }
+
+    // 1) Crear número verificado previamente
+    const createResp = await axios.post(
+      `https://graph.facebook.com/${META_API_VERSION}/${META_BUSINESS_ID}/add_phone_numbers`,
+      null,
+      {
+        headers: { Authorization: `Bearer ${META_GRAPH_TOKEN}` },
+        params: { phone_number: digits },
+      }
+    );
+
+    const preverifiedId = createResp.data?.id;
+    if (!preverifiedId) {
+      return res.status(500).json({ success: false, error: 'preverified_id_missing' });
+    }
+
+    // 2) Solicitar código OTP
+    await axios.post(
+      `https://graph.facebook.com/${META_API_VERSION}/${preverifiedId}/request_code`,
+      null,
+      {
+        headers: { Authorization: `Bearer ${META_GRAPH_TOKEN}` },
+        params: { code_method: codeMethod, language },
+      }
+    );
+
+    return res.json({
+      success: true,
+      preverified_id: preverifiedId,
+      phone_number: digits,
+      code_method: codeMethod,
+      language,
+    });
+  } catch (err) {
+    const { code, message, raw } = parseWaError(err);
+    console.error('Error preverifiedStart', message || err);
+    return res.status(500).json({
+      success: false,
+      error: 'preverified_start_failed',
+      meta_error: { code, message, raw },
+    });
+  }
+};
+
+exports.preverifiedVerify = async (req, res) => {
+  try {
+    if (!assertPreverifiedEnabled(req, res)) return;
+
+    const preverifiedId =
+      req.body?.preverified_id ||
+      req.body?.preverifiedId ||
+      req.body?.phone_id ||
+      null;
+    const code = req.body?.code || req.body?.otp || null;
+
+    if (!preverifiedId || !code) {
+      return res.status(400).json({ success: false, error: 'preverified_id_and_code_required' });
+    }
+
+    const resp = await axios.post(
+      `https://graph.facebook.com/${META_API_VERSION}/${preverifiedId}/verify_code`,
+      null,
+      {
+        headers: { Authorization: `Bearer ${META_GRAPH_TOKEN}` },
+        params: { code: String(code).trim() },
+      }
+    );
+
+    return res.json({ success: true, response: resp.data || null });
+  } catch (err) {
+    const { code, message, raw } = parseWaError(err);
+    console.error('Error preverifiedVerify', message || err);
+    return res.status(500).json({
+      success: false,
+      error: 'preverified_verify_failed',
+      meta_error: { code, message, raw },
+    });
+  }
+};
+
+exports.preverifiedProfile = async (req, res) => {
+  try {
+    if (!assertPreverifiedEnabled(req, res)) return;
+
+    const phoneNumberId =
+      req.body?.phone_number_id ||
+      req.body?.phoneNumberId ||
+      null;
+    const displayName =
+      req.body?.display_name ||
+      req.body?.displayName ||
+      null;
+    const category = req.body?.category || req.body?.vertical || null;
+    const description = req.body?.description || null;
+
+    if (!phoneNumberId) {
+      return res.json({
+        success: true,
+        stored: false,
+        message: 'profile_data_should_be_sent_via_embedded_signup_extras',
+      });
+    }
+
+    const asset = await ClinicMetaAsset.findOne({
+      where: {
+        assetType: 'whatsapp_phone_number',
+        phoneNumberId,
+      },
+    });
+
+    if (asset) {
+      const additionalData = { ...(asset.additionalData || {}) };
+      if (displayName) additionalData.requestedDisplayName = displayName;
+      additionalData.preverifiedProfile = {
+        ...(additionalData.preverifiedProfile || {}),
+        displayName: displayName || additionalData.preverifiedProfile?.displayName || null,
+        category: category || additionalData.preverifiedProfile?.category || null,
+        description: description || additionalData.preverifiedProfile?.description || null,
+      };
+      asset.additionalData = additionalData;
+      await asset.save();
+    }
+
+    return res.json({ success: true });
+  } catch (err) {
+    console.error('Error preverifiedProfile', err);
+    return res.status(500).json({ success: false, error: 'preverified_profile_failed' });
   }
 };
 
