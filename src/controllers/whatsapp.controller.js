@@ -1431,21 +1431,58 @@ exports.updatePhoneProfile = async (req, res) => {
       { headers: { Authorization: `Bearer ${phone.waAccessToken}` } }
     );
 
+    // Obtener estado real tras el update para guardar lo que Meta devuelve
+    let profileRemote = null;
+    try {
+      const resp = await axios.get(
+        `https://graph.facebook.com/${META_API_VERSION}/${phoneNumberId}/whatsapp_business_profile`,
+        {
+          headers: { Authorization: `Bearer ${phone.waAccessToken}` },
+          params: { fields: 'about,description,profile_picture_url,vertical,email,websites,address' },
+        }
+      );
+      profileRemote = resp.data || null;
+    } catch (e) {
+      profileRemote = null;
+    }
+
     const additionalData = phone.additionalData || {};
-    additionalData.profileCategory = payload.vertical || additionalData.profileCategory || null;
+    additionalData.profileCategory =
+      profileRemote?.vertical ||
+      payload.vertical ||
+      additionalData.profileCategory ||
+      null;
     additionalData.profileDescription =
+      profileRemote?.description ||
+      profileRemote?.about ||
       payload.description ||
       payload.about ||
       additionalData.profileDescription ||
       null;
-    additionalData.profilePictureUrl = payload.profile_picture_url || additionalData.profilePictureUrl || null;
-    additionalData.profileEmail = payload.email || additionalData.profileEmail || null;
-    additionalData.profileWebsite = payload.websites?.[0] || additionalData.profileWebsite || null;
-    additionalData.profileAddress = payload.address || additionalData.profileAddress || null;
+    additionalData.profilePictureUrl =
+      profileRemote?.profile_picture_url ||
+      payload.profile_picture_url ||
+      additionalData.profilePictureUrl ||
+      null;
+    additionalData.profileEmail =
+      profileRemote?.email ||
+      payload.email ||
+      additionalData.profileEmail ||
+      null;
+    additionalData.profileWebsite =
+      profileRemote?.websites?.[0] ||
+      payload.websites?.[0] ||
+      additionalData.profileWebsite ||
+      null;
+    additionalData.profileAddress =
+      profileRemote?.address ||
+      payload.address ||
+      additionalData.profileAddress ||
+      null;
     phone.additionalData = additionalData;
     await phone.save();
 
-    return res.json({ success: true });
+    return res.json({ success: true, profile: additionalData });
   } catch (err) {
     console.error('Error updatePhoneProfile', err);
     return res.status(500).json({ success: false, error: 'profile_update_failed' });
