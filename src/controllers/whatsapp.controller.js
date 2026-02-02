@@ -1330,8 +1330,37 @@ exports.updatePhoneDisplayName = async (req, res) => {
       return res.status(403).json({ success: false, error: 'forbidden' });
     }
 
+    if (!phone.waAccessToken) {
+      return res.status(400).json({ success: false, error: 'missing_access_token' });
+    }
+
+    const trimmedName = String(displayName).trim();
     const additionalData = phone.additionalData || {};
-    additionalData.requestedDisplayName = String(displayName).trim();
+
+    // Intentar actualizar el nombre en Meta
+    try {
+      await axios.post(
+        `https://graph.facebook.com/${META_API_VERSION}/${phoneNumberId}`,
+        { verified_name: trimmedName },
+        { headers: { Authorization: `Bearer ${phone.waAccessToken}` } }
+      );
+      // Obtener estado actualizado
+      const statusResp = await axios.get(
+        `https://graph.facebook.com/${META_API_VERSION}/${phoneNumberId}`,
+        {
+          headers: { Authorization: `Bearer ${phone.waAccessToken}` },
+          params: { fields: 'id,name_status' },
+        }
+      );
+      additionalData.nameStatus = statusResp.data?.name_status || additionalData.nameStatus || null;
+      additionalData.nameStatusReason = null;
+    } catch (err) {
+      const parsed = parseWaError(err);
+      // Guardamos el motivo por si Meta rechaza inmediatamente
+      additionalData.nameStatusReason = parsed.message || null;
+    }
+
+    additionalData.requestedDisplayName = trimmedName;
     additionalData.requestedDisplayNameAt = new Date().toISOString();
     phone.additionalData = additionalData;
     await phone.save();
@@ -1340,7 +1369,8 @@ exports.updatePhoneDisplayName = async (req, res) => {
       success: true,
       phoneNumberId,
       requestedDisplayName: additionalData.requestedDisplayName,
-      manualRequired: true,
+      nameStatus: additionalData.nameStatus || null,
+      manualRequired: false,
       managerUrl: 'https://business.facebook.com/wa/manage/phone-numbers/',
     });
   } catch (err) {
