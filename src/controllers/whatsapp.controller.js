@@ -1415,7 +1415,11 @@ exports.updatePhoneProfile = async (req, res) => {
       messaging_product: 'whatsapp',
     };
     if (category) payload.vertical = String(category).trim();
-    if (description) payload.description = String(description).trim();
+    if (description) {
+      const desc = String(description).trim();
+      payload.description = desc;
+      payload.about = desc; // algunos perfiles devuelven/guardan en about
+    }
     if (address) payload.address = String(address).trim();
     if (email) payload.email = String(email).trim();
     if (website) payload.websites = [String(website).trim()];
@@ -1429,7 +1433,11 @@ exports.updatePhoneProfile = async (req, res) => {
 
     const additionalData = phone.additionalData || {};
     additionalData.profileCategory = payload.vertical || additionalData.profileCategory || null;
-    additionalData.profileDescription = payload.description || additionalData.profileDescription || null;
+    additionalData.profileDescription =
+      payload.description ||
+      payload.about ||
+      additionalData.profileDescription ||
+      null;
     additionalData.profilePictureUrl = payload.profile_picture_url || additionalData.profilePictureUrl || null;
     additionalData.profileEmail = payload.email || additionalData.profileEmail || null;
     additionalData.profileWebsite = payload.websites?.[0] || additionalData.profileWebsite || null;
