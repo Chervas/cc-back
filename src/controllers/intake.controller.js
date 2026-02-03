@@ -11,6 +11,9 @@ const GrupoClinica = db.GrupoClinica;
 const Campana = db.Campana;
 const AdCache = db.AdCache;
 const ClinicMetaAsset = db.ClinicMetaAsset;
+const IntakeConfig = db.IntakeConfig;
+const { sendMetaEvent, buildUserData: buildMetaUserData } = require('../services/metaCapi.service');
+const { uploadClickConversion } = require('../services/googleAdsConversion.service');
 
 const CHANNELS = new Set(['paid', 'organic', 'unknown']);
 const SOURCES = new Set(['meta_ads', 'google_ads', 'web', 'whatsapp', 'call_click', 'tiktok_ads', 'seo', 'direct', 'local_services']);
@@ -302,7 +305,217 @@ exports.ingestLead = asyncHandler(async (req, res) => {
     throw err;
   }
 
+  // Emitir a Meta CAPI si hay datos mínimos
+  try {
+    const userData = buildMetaUserData({
+      email: leadEmail,
+      phone: leadTelefono,
+      ip: coalesce(ip, req.headers['x-forwarded-for'], req.socket?.remoteAddress),
+      ua: coalesce(user_agent, req.headers['user-agent']),
+      externalId: lead.id
+    });
+    await sendMetaEvent({
+      eventName: 'Lead',
+      eventTime: Math.floor(Date.now() / 1000),
+      eventId: lead.event_id || `lead-${lead.id}`,
+      actionSource: 'website',
+      eventSourceUrl: pageUrlValue || landingUrlValue || null,
+      clinicId: clinicaIdParsed,
+      source: normalizedSource,
+      sourceDetail: source_detail || null,
+      utmCampaign: utmCampaign || null,
+      userData
+    });
+  } catch (e) {
+    console.warn('⚠️ No se pudo enviar evento Meta CAPI:', e.message || e);
+  }
+
   res.status(201).json({ id: lead.id });
+});
+
+// ===========================
+// Configuración del snippet
+// ===========================
+
+const defaultConfigPayload = (clinicId, groupId) => ({
+  clinic_id: clinicId || null,
+  group_id: groupId || null,
+  assignment_scope: groupId ? 'group' : 'clinic',
+  domains: [],
+  features: { chat_enabled: true, tel_modal_enabled: true, viewcontent_enabled: true, form_intercept_enabled: true },
+  flow: null,
+  texts: null,
+  locations: [],
+  has_hmac: false,
+  config: {}
+});
+
+exports.getIntakeConfig = asyncHandler(async (req, res) => {
+  const clinicIdRaw = req.query.clinic_id;
+  const groupIdRaw = req.query.group_id;
+  const domain = (req.query.domain || '').toLowerCase();
+  const clinicIdParsed = parseInteger(clinicIdRaw);
+  const groupIdParsed = parseInteger(groupIdRaw);
+
+  let record = null;
+  // Prioridad: clínica explícita > dominio (clínica) > grupo explícito > dominio (grupo)
+  if (clinicIdParsed !== null) {
+    record = await IntakeConfig.findOne({ where: { clinic_id: clinicIdParsed }, raw: true });
+  }
+  if (!record && domain) {
+    record = await IntakeConfig.findOne({
+      where: db.Sequelize.literal(`JSON_CONTAINS(COALESCE(domains,'[]'), '\"${domain}\"') AND assignment_scope='clinic'`)
+    });
+    if (record && record.get) record = record.get({ plain: true });
+  }
+  if (!record && groupIdParsed !== null) {
+    record = await IntakeConfig.findOne({ where: { group_id: groupIdParsed, assignment_scope: 'group' }, raw: true });
+  }
+  if (!record && domain) {
+    record = await IntakeConfig.findOne({
+      where: db.Sequelize.literal(`JSON_CONTAINS(COALESCE(domains,'[]'), '\"${domain}\"') AND assignment_scope='group'`)
+    });
+    if (record && record.get) record = record.get({ plain: true });
+  }
+
+  const payload = defaultConfigPayload(record?.clinic_id || clinicIdParsed, record?.group_id || groupIdParsed);
+  if (record) {
+    const cfg = record.config || {};
+    payload.clinic_id = record.clinic_id || null;
+    payload.group_id = record.group_id || null;
+    payload.assignment_scope = record.assignment_scope || payload.assignment_scope;
+    payload.domains = record.domains || [];
+    payload.features = cfg.features || payload.features;
+    payload.flow = cfg.flow || null;
+    payload.texts = cfg.texts || null;
+    payload.locations = cfg.locations || [];
+    payload.config = cfg;
+    payload.has_hmac = !!record.hmac_key;
+    if (domain && payload.domains.length > 0 && !payload.domains.includes(domain)) {
+      return res.status(403).json({ message: 'Domain not allowed' });
+    }
+  }
+
+  return res.json(payload);
+});
+
+exports.upsertIntakeConfig = asyncHandler(async (req, res) => {
+  const clinicId = parseInteger(req.params.clinicId);
+  const groupId = parseInteger(req.body?.group_id);
+  if (!clinicId && !groupId) return res.status(400).json({ message: 'clinicId o group_id requerido' });
+
+  const scope = groupId ? 'group' : 'clinic';
+  const { domains = [], config = {}, hmac_key } = req.body || {};
+  await IntakeConfig.upsert({
+    clinic_id: clinicId || null,
+    group_id: groupId || null,
+    assignment_scope: scope,
+    domains,
+    config,
+    hmac_key: hmac_key || null
+  });
+
+  res.json({ success: true });
+});
+
+// ===========================
+// Eventos genéricos (ViewContent, Contact, Schedule, Purchase)
+// ===========================
+
+const validateHmac = (body, secret, provided) => {
+  if (!secret) return true;
+  if (!provided) return false;
+  const expected = crypto.createHmac('sha256', secret).update(stableStringify(body)).digest('hex');
+  return expected === provided;
+};
+
+exports.receiveIntakeEvent = asyncHandler(async (req, res) => {
+  const {
+    event_name,
+    clinic_id,
+    domain,
+    event_time,
+    event_id,
+    action_source,
+    event_source_url,
+    custom_data = {},
+    user_data = {},
+    fbp,
+    fbc
+  } = req.body || {};
+
+  const clinicIdParsed = parseInteger(clinic_id);
+
+  let cfg = null;
+  if (clinicIdParsed !== null) {
+    cfg = await IntakeConfig.findOne({ where: { clinic_id: clinicIdParsed }, raw: true });
+  } else if (domain) {
+    cfg = await IntakeConfig.findOne({
+      where: db.Sequelize.literal(`JSON_CONTAINS(COALESCE(domains,'[]'), '\"${domain.toLowerCase()}\"')`)
+    });
+    if (cfg) cfg = cfg.get({ plain: true });
+  }
+
+  if (cfg && cfg.domains && cfg.domains.length > 0 && domain && !cfg.domains.includes(domain.toLowerCase())) {
+    return res.status(403).json({ message: 'Domain not allowed' });
+  }
+
+  if (cfg && cfg.hmac_key) {
+    const provided = req.headers['x-cc-signature'] || req.headers['x-cc-signature-sha256'];
+    if (!validateHmac(req.body || {}, cfg.hmac_key, provided)) {
+      return res.status(401).json({ message: 'Invalid signature' });
+    }
+  }
+
+  const userData = buildMetaUserData({
+    email: user_data.email,
+    phone: user_data.phone,
+    ip: user_data.ip || req.headers['x-forwarded-for'] || req.socket?.remoteAddress,
+    ua: user_data.ua || req.headers['user-agent'],
+    fbp: fbp || user_data.fbp,
+    fbc: fbc || user_data.fbc,
+    externalId: user_data.external_id
+  });
+
+  await sendMetaEvent({
+    eventName: event_name || 'ViewContent',
+    eventTime: event_time || Math.floor(Date.now() / 1000),
+    eventId: event_id || undefined,
+    actionSource: action_source || 'website',
+    eventSourceUrl: event_source_url || undefined,
+    clinicId: cfg?.clinic_id || clinicIdParsed || null,
+    source: custom_data.source,
+    sourceDetail: custom_data.source_detail,
+    utmCampaign: custom_data.utm_campaign,
+    value: custom_data.value,
+    currency: custom_data.currency || 'EUR',
+    userData
+  });
+
+  // Google Ads server-side (si hay gclid/gbraid/wbraid y conversionAction configurado)
+  try {
+    const sendTo = custom_data.send_to || null;
+    const conversionAction = custom_data.conversion_action || null;
+    if ((custom_data.gclid || custom_data.gbraid || custom_data.wbraid) && (sendTo || conversionAction)) {
+      const actionResource = conversionAction || `customers/${process.env.GOOGLE_ADS_CUSTOMER_ID.replace(/-/g, '')}/conversionActions/${(sendTo || '').split('/')[1] || ''}`;
+      await uploadClickConversion({
+        conversionAction: actionResource,
+        gclid: custom_data.gclid,
+        gbraid: custom_data.gbraid,
+        wbraid: custom_data.wbraid,
+        value: custom_data.value || 0,
+        currency: custom_data.currency || 'EUR',
+        conversionDateTime: custom_data.conversion_time || new Date().toISOString(),
+        externalId: user_data.external_id || event_id,
+        userAgent: user_data.ua || req.headers['user-agent'],
+        ipAddress: user_data.ip || req.headers['x-forwarded-for'] || req.socket?.remoteAddress
+      });
+    }
+  } catch (adsErr) {
+    console.warn('⚠️ Google Ads upload error:', adsErr.response?.data || adsErr.message || adsErr);
+  }
+
+  res.json({ success: true });
 });
 
 exports.verifyMetaWebhook = asyncHandler(async (req, res) => {
