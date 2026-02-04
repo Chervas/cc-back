@@ -7,6 +7,12 @@ const LeadIntake = db.LeadIntake;
 const Paciente = db.Paciente;
 const Clinica = db.Clinica;
 const Campana = db.Campana;
+const Instalacion = db.Instalacion;
+const InstalacionHorario = db.InstalacionHorario;
+const InstalacionBloqueo = db.InstalacionBloqueo;
+const DoctorClinica = db.DoctorClinica;
+const DoctorHorario = db.DoctorHorario;
+const DoctorBloqueo = db.DoctorBloqueo;
 
 /**
  * Helper: encontrar o crear paciente por teléfono/email en una clínica
@@ -94,6 +100,49 @@ async function findOrCreatePaciente({ clinica_id, nombre, apellidos, telefono, e
     return nuevoPaciente;
 }
 
+const parseBool = (v) => v === true || v === 'true' || v === '1';
+const overlap = (startA, endA, startB, endB) => startA < endB && startB < endA;
+const dayIndex = (date) => new Date(date).getDay();
+const toTime = (d) => d.toTimeString().slice(0,5);
+
+async function checkDisponibilidad({ clinica_id, inicio, fin, doctor_id, instalacion_id }) {
+    const conflicts = [];
+    const start = new Date(inicio);
+    const end = new Date(fin);
+    const dow = dayIndex(start);
+
+    if (instalacion_id) {
+        const inst = await Instalacion.findByPk(instalacion_id, { include: [{ model: InstalacionHorario, as: 'horarios' }, { model: InstalacionBloqueo, as: 'bloqueos' }] });
+        if (!inst || !inst.activo) conflicts.push({ type: 'not_found', message: 'Instalación no encontrada o inactiva' });
+        else {
+            if (inst.clinica_id !== clinica_id) conflicts.push({ type: 'not_in_clinic', message: 'Instalación fuera de la clínica' });
+            const h = (inst.horarios || []).find(h => h.dia_semana === dow);
+            const inRange = h && h.activo && `${h.hora_inicio}` <= toTime(start) && `${h.hora_fin}` >= toTime(end);
+            if (!inRange) conflicts.push({ type: 'out_of_hours', message: 'Instalación fuera de horario' });
+            (inst.bloqueos || []).forEach(b => {
+                if (overlap(start, end, b.fecha_inicio, b.fecha_fin)) conflicts.push({ type: 'blocked', message: b.motivo || 'Bloqueo instalación' });
+            });
+            const citasInst = await CitaPaciente.findAll({ where: { instalacion_id, inicio: { [db.Sequelize.Op.lt]: end }, fin: { [db.Sequelize.Op.gt]: start } }, attributes: ['id_cita'] });
+            if (citasInst.length) conflicts.push({ type: 'overlap', message: 'Instalación ocupada' });
+        }
+    }
+
+    if (doctor_id) {
+        const dc = await DoctorClinica.findOne({ where: { doctor_id, clinica_id }, include: [{ model: DoctorHorario, as: 'horarios' }] });
+        if (!dc || !dc.activo) conflicts.push({ type: 'doctor_unavailable', message: 'Doctor no asignado a la clínica' });
+        else {
+            const h = (dc.horarios || []).find(h => h.dia_semana === dow);
+            const inRange = h && h.activo && `${h.hora_inicio}` <= toTime(start) && `${h.hora_fin}` >= toTime(end);
+            if (!inRange) conflicts.push({ type: 'doctor_unavailable', message: 'Doctor fuera de horario' });
+        }
+        const bloqueos = await DoctorBloqueo.findAll({ where: { doctor_id, fecha_inicio: { [db.Sequelize.Op.lt]: end }, fecha_fin: { [db.Sequelize.Op.gt]: start } } });
+        if (bloqueos.length) conflicts.push({ type: 'doctor_unavailable', message: bloqueos[0].motivo || 'Bloqueo doctor' });
+        const citasDoc = await CitaPaciente.findAll({ where: { doctor_id, inicio: { [db.Sequelize.Op.lt]: end }, fin: { [db.Sequelize.Op.gt]: start } }, attributes: ['id_cita'] });
+        if (citasDoc.length) conflicts.push({ type: 'overlap', message: 'Doctor ocupado' });
+    }
+    return conflicts;
+}
+
 /**
  * Crear cita para paciente (y lead opcional)
  */
@@ -111,6 +160,7 @@ exports.createCita = asyncHandler(async (req, res) => {
         instalacion_id = null,
         tratamiento_id = null,
         campana_id = null,
+        force = false,
         paciente: datosPaciente
     } = req.body || {};
 
@@ -131,6 +181,12 @@ exports.createCita = asyncHandler(async (req, res) => {
         if (!lead) {
             return res.status(404).json({ message: 'Lead no encontrado' });
         }
+    }
+
+    // Chequear disponibilidad si hay doctor/instalación
+    const conflicts = await checkDisponibilidad({ clinica_id, inicio, fin, doctor_id, instalacion_id });
+    if (conflicts.length && !parseBool(force)) {
+        return res.status(409).json({ message: 'Conflicto de agenda', conflicts });
     }
 
     // Resolver/crear paciente
