@@ -158,7 +158,13 @@ exports.disponibilidad = asyncHandler(async (req, res) => {
         cursor = new Date(cursor.getTime() + durMin*60000);
       }
     });
-    return res.json({ available: true, conflicts, slots: slotsResp, duration_used: durMin });
+    return res.json({
+      available: true,
+      conflicts,
+      slots: slotsResp,
+      duration_used: durMin,
+      clinica: dc?.clinica ? { id: dc.clinica.id_clinica, nombre: dc.clinica.nombre_clinica, grupo: dc.clinica.id_grupo } : null
+    });
   }
 
   // Validation mode
@@ -180,6 +186,11 @@ exports.disponibilidad = asyncHandler(async (req, res) => {
     if (citasInst.length) conflicts.push({ type: 'overlap', message: 'Instalación ocupada' });
   }
 
-  if (conflicts.length) return res.status(409).json({ available: false, conflicts, duration_used: durMinParam || 30 });
-  res.json({ available: true, conflicts: [], duration_used: durMinParam || 30 });
+  if (conflicts.length) return res.status(409).json({ available: false, conflicts, duration_used: durMinParam || 30, clinica: dc?.clinica ? { id: dc.clinica.id_clinica, nombre: dc.clinica.nombre_clinica, grupo: dc.clinica.id_grupo } : null });
+  res.json({
+    available: true,
+    conflicts: [],
+    duration_used: durMinParam || 30,
+    clinica: dc?.clinica ? { id: dc.clinica.id_clinica, nombre: dc.clinica.nombre_clinica, grupo: dc.clinica.id_grupo } : null
+  });
 });

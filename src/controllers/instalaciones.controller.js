@@ -158,5 +158,10 @@ exports.disponibilidad = asyncHandler(async (req, res) => {
     return res.status(409).json({ available: false, conflicts, duration_used: durMinParam || instData?.default_duracion_minutos || 30 });
   }
 
-  res.json({ available: true, conflicts, duration_used: durMinParam || instData?.default_duracion_minutos || 30 });
+  res.json({
+    available: true,
+    conflicts,
+    duration_used: durMinParam || instData?.default_duracion_minutos || 30,
+    clinica: instData?.clinica ? { id: instData.clinica.id_clinica, nombre: instData.clinica.nombre_clinica, grupo: instData.clinica.id_grupo } : null
+  });
 });
