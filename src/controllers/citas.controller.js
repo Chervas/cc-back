@@ -151,6 +151,7 @@ exports.createCita = asyncHandler(async (req, res) => {
         clinica_id,
         inicio,
         fin,
+        duracion_min = null,
         estado = 'pendiente',
         nota,
         motivo,
@@ -164,8 +165,8 @@ exports.createCita = asyncHandler(async (req, res) => {
         paciente: datosPaciente
     } = req.body || {};
 
-    if (!clinica_id || !inicio || !fin || !datosPaciente) {
-        return res.status(400).json({ message: 'clinica_id, inicio, fin y paciente son obligatorios' });
+    if (!clinica_id || !inicio || (!fin && !duracion_min) || !datosPaciente) {
+        return res.status(400).json({ message: 'clinica_id, inicio, (fin o duracion_min) y paciente son obligatorios' });
     }
 
     // Validar clínica
@@ -183,8 +184,24 @@ exports.createCita = asyncHandler(async (req, res) => {
         }
     }
 
+    // Calcular fin si falta: prioridad cuerpo -> tratamiento -> instalación -> 30
+    const inicioDate = new Date(inicio);
+    let finDate = fin ? new Date(fin) : null;
+    let duracionEfectiva = duracion_min ? parseInt(duracion_min, 10) : null;
+
+    if (!duracionEfectiva && tratamiento_id) {
+        const trat = await Tratamiento.findByPk(tratamiento_id, { attributes: ['duracion_min'] });
+        if (trat?.duracion_min) duracionEfectiva = trat.duracion_min;
+    }
+    if (!duracionEfectiva && instalacion_id) {
+        const inst = await Instalacion.findByPk(instalacion_id, { attributes: ['default_duracion_minutos'] });
+        if (inst?.default_duracion_minutos) duracionEfectiva = inst.default_duracion_minutos;
+    }
+    if (!duracionEfectiva) duracionEfectiva = 30;
+    if (!finDate) finDate = new Date(inicioDate.getTime() + duracionEfectiva * 60000);
+
     // Chequear disponibilidad si hay doctor/instalación
-    const conflicts = await checkDisponibilidad({ clinica_id, inicio, fin, doctor_id, instalacion_id });
+    const conflicts = await checkDisponibilidad({ clinica_id, inicio: inicioDate, fin: finDate, doctor_id, instalacion_id });
     if (conflicts.length && !parseBool(force)) {
         return res.status(409).json({ message: 'Conflicto de agenda', conflicts });
     }
@@ -213,8 +230,8 @@ exports.createCita = asyncHandler(async (req, res) => {
         motivo: motivo || null,
         tipo_cita,
         estado,
-        inicio,
-        fin
+        inicio: inicioDate,
+        fin: finDate
     });
 
     // Marcar lead como citado si aplica
