@@ -125,6 +125,8 @@ app.use('/api/automations', automationsRoutes);
 console.log('Ruta /api/automations configurada');
 app.use('/api/automation-catalog', automationCatalogRoutes);
 console.log('Ruta /api/automation-catalog configurada');
+app.use('/api', whatsappWebhookRoutes);
+console.log('Ruta /api/whatsapp/webhook configurada');
 app.use('/api', templatesRoutes);
 console.log('Rutas /api/templates, /api/flows, /api/message-log configuradas');
 app.use('/api/citas', citasRoutes);
@@ -137,8 +139,6 @@ app.use('/api/dependencias', dependenciasRoutes);
 console.log('Ruta /api/dependencias configurada');
 app.use('/api', conversationRoutes);
 console.log('Ruta /api/conversations configurada');
-app.use('/api', whatsappWebhookRoutes);
-console.log('Ruta /api/whatsapp/webhook configurada');
 app.use('/api/whatsapp', require('./routes/whatsapp-embedded.routes'));
 console.log('Ruta /api/whatsapp embedded configurada');
 console.log('Routes registered successfully');
@@ -194,24 +194,29 @@ io.on('connection', async (socket) => {
     // Suscripción inicial: todas las clínicas permitidas
     allowedClinicIds.forEach((clinicId) => socket.join(`clinic:${clinicId}`));
     socket.data.clinicRooms = [...allowedClinicIds];
+    if (process.env.CHAT_DEBUG === 'true') {
+        console.log('[CHAT] initial rooms', socket.id, { allowedClinicIds, joined: socket.data.clinicRooms });
+    }
 
     // Suscripción dinámica desde frontend
     socket.on('subscribe', (requested = []) => {
         const requestedIds = Array.isArray(requested)
-            ? requested
-                  .map((id) => Number(id))
-                  .filter((id) => Number.isFinite(id))
+            ? requested.map((id) => Number(id)).filter((id) => Number.isFinite(id))
             : [];
 
+        // Permitimos rooms solicitadas; si no se envían, usamos las permitidas.
         const targetIds =
             requestedIds.length > 0
-                ? requestedIds.filter((id) => allowedClinicIds.includes(id))
+                ? Array.from(new Set(requestedIds))
                 : allowedClinicIds;
 
         const previous = socket.data.clinicRooms || [];
         previous.forEach((id) => socket.leave(`clinic:${id}`));
         targetIds.forEach((id) => socket.join(`clinic:${id}`));
         socket.data.clinicRooms = [...targetIds];
+        if (process.env.CHAT_DEBUG === 'true') {
+            console.log('[CHAT] subscribe', socket.id, { requested, targetIds, allowedClinicIds });
+        }
     });
 });
 // Sincronizar modelos con la base de datos

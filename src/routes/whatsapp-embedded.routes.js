@@ -9,7 +9,7 @@ const whatsappService = require('../services/whatsapp.service');
 const router = express.Router();
 const ClinicMetaAsset = db.ClinicMetaAsset;
 const { enqueueCreateTemplatesJob } = require('../services/whatsappTemplates.service');
-const META_API_VERSION = process.env.META_API_VERSION || 'v22.0';
+const META_API_VERSION = process.env.META_API_VERSION || 'v24.0';
 
 function parseWaError(err) {
   const base = err?.response?.data || err?.message || err;
@@ -214,20 +214,34 @@ async function attemptPhoneRegistration({ asset, accessToken }) {
 }
 
 async function subscribeAppToWaba({ wabaId, accessToken }) {
-  if (!wabaId || !accessToken) return { success: false };
-  try {
-    const resp = await axios.post(
-      `https://graph.facebook.com/${META_API_VERSION}/${wabaId}/subscribed_apps`,
-      null,
-      {
-        params: { access_token: accessToken },
-      }
-    );
-    return { success: true, data: resp.data };
-  } catch (err) {
-    console.warn('[EmbeddedSignup] No se pudo suscribir la app al WABA', err?.response?.data || err?.message || err);
-    return { success: false, error: err?.response?.data || err?.message || err };
+  if (!wabaId) return { success: false };
+  const tokenCandidates = [
+    { token: accessToken, label: 'oauth_user' },
+    { token: process.env.META_WHATSAPP_ACCESS_TOKEN, label: 'meta_whatsapp' },
+    { token: process.env.META_GRAPH_TOKEN, label: 'meta_graph' },
+  ].filter((entry) => !!entry.token);
+
+  let lastError = null;
+  for (const candidate of tokenCandidates) {
+    try {
+      const resp = await axios.post(
+        `https://graph.facebook.com/${META_API_VERSION}/${wabaId}/subscribed_apps`,
+        null,
+        {
+          params: { access_token: candidate.token },
+        }
+      );
+      return { success: true, data: resp.data, tokenSource: candidate.label };
+    } catch (err) {
+      lastError = err?.response?.data || err?.message || err;
+      console.warn(
+        `[EmbeddedSignup] No se pudo suscribir la app al WABA (token=${candidate.label})`,
+        lastError
+      );
+    }
   }
+
+  return { success: false, error: lastError };
 }
 
 async function fetchWabaDetailsWithBusinessId({ wabaId, accessToken }) {

@@ -10,6 +10,13 @@ const db = require('../../models');
 
 const { Conversation, Message, ClinicMetaAsset } = db;
 
+const CHAT_DEBUG = process.env.CHAT_DEBUG === 'true';
+const dlog = (...args) => {
+    if (CHAT_DEBUG) {
+        console.log('[CHAT]', ...args);
+    }
+};
+
 function mapWhatsAppStatus(status) {
     switch ((status || '').toLowerCase()) {
         case 'sent':
@@ -218,7 +225,7 @@ createWorker('webhook_whatsapp', async (job) => {
             }
         }
 
-        await Message.create({
+        const inboundMsg = await Message.create({
             conversation_id: conv.id,
             sender_id: null,
             direction: 'inbound',
@@ -236,15 +243,30 @@ createWorker('webhook_whatsapp', async (job) => {
 
         const io = getIO();
         if (io) {
-            const room = `clinic:${clinicId}`;
-            io.to(room).emit('message:created', {
-                conversation_id: conv.id,
+            const rooms = new Set();
+            if (clinicId) rooms.add(`clinic:${clinicId}`);
+            if (conv?.clinic_id && conv.clinic_id !== clinicId) rooms.add(`clinic:${conv.clinic_id}`);
+            if (conv?.assignee_id) rooms.add(`user:${conv.assignee_id}`);
+
+            const payload = {
+                id: inboundMsg.id,
+                conversation_id: String(conv.id),
                 content,
                 direction: 'inbound',
                 message_type: msg.type || 'text',
                 status: 'sent',
-                sent_at: new Date(),
-            });
+                sent_at: inboundMsg.sent_at,
+            };
+
+            if (rooms.size === 0) {
+                io.emit('message:created', payload);
+                dlog('Emit inbound message:created broadcast', { convId: conv.id, clinicId, assignee: conv.assignee_id, payload });
+            } else {
+                rooms.forEach((r) => io.to(r).emit('message:created', payload));
+                dlog('Emit inbound message:created rooms', { rooms: Array.from(rooms), payload });
+            }
+        } else {
+            dlog('Inbound message created but IO not available', conv.id);
         }
     }
 
@@ -288,17 +310,23 @@ createWorker('webhook_whatsapp', async (job) => {
 
         const io = getIO();
         if (io) {
+            const rooms = new Set();
             const roomClinicId = messageRef.clinic_id || clinicId;
-            const room = roomClinicId ? `clinic:${roomClinicId}` : null;
+            if (roomClinicId) rooms.add(`clinic:${roomClinicId}`);
+            if (messageRef.assignee_id) rooms.add(`user:${messageRef.assignee_id}`);
+
             const payload = {
                 id: message.id,
-                conversation_id: message.conversation_id,
+                conversation_id: String(message.conversation_id),
                 status: message.status,
             };
-            if (room) {
-                io.to(room).emit('message:updated', payload);
-            } else {
+
+            if (rooms.size === 0) {
                 io.emit('message:updated', payload);
+                dlog('Emit message:updated broadcast', { payload, rooms: [] });
+            } else {
+                rooms.forEach((r) => io.to(r).emit('message:updated', payload));
+                dlog('Emit message:updated rooms', { rooms: Array.from(rooms), payload });
             }
         }
     }

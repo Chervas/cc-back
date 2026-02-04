@@ -24,6 +24,15 @@ function buildPhoneCandidates(raw) {
 async function resolveClinicAndContact({ clinicId, groupId, from }) {
   const candidates = buildPhoneCandidates(from);
   if (!candidates.length) {
+    if (groupId) {
+      const clinics = await Clinica.findAll({
+        where: { grupoClinicaId: groupId },
+        attributes: ['id_clinica'],
+        raw: true,
+      });
+      const clinicIds = clinics.map((c) => c.id_clinica);
+      return { clinicId: clinicIds[0] || null, patientId: null, leadId: null };
+    }
     return { clinicId: clinicId || null, patientId: null, leadId: null };
   }
 
@@ -120,7 +129,13 @@ router.get('/whatsapp/webhook', (req, res) => {
   const token = req.query['hub.verify_token'];
   const challenge = req.query['hub.challenge'];
 
-  if (mode === 'subscribe' && token === process.env.WHATSAPP_VERIFY_TOKEN) {
+  const verifyTokens = [
+    process.env.WHATSAPP_VERIFY_TOKEN,
+    process.env.META_WEBHOOK_VERIFY_TOKEN,
+    process.env.META_VERIFY_TOKEN,
+  ].filter(Boolean);
+
+  if (mode === 'subscribe' && token && verifyTokens.includes(token)) {
     return res.status(200).send(challenge);
   }
 

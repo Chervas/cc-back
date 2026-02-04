@@ -469,16 +469,29 @@ exports.postMessage = async (req, res) => {
 
     // Emit creación de mensaje outbound (aplica también a interno/instagram)
     if (io) {
-      const room = `clinic:${conversation.clinic_id}`;
-      io.to(room).emit('message:created', {
+      const rooms = new Set();
+      if (conversation.clinic_id) rooms.add(`clinic:${conversation.clinic_id}`);
+      if (conversation.assignee_id) rooms.add(`user:${conversation.assignee_id}`);
+      const payload = {
         id: msg.id,
-        conversation_id: conversation.id,
+        conversation_id: String(conversation.id),
         content: msg.content,
         direction: msg.direction,
         message_type: msg.message_type,
         status: msg.status,
         sent_at: msg.sent_at,
-      });
+      };
+      if (rooms.size === 0) {
+        io.emit('message:created', payload);
+        if (process.env.CHAT_DEBUG === 'true') {
+          console.log('[CHAT] Emit outbound message:created broadcast', { payload });
+        }
+      } else {
+        rooms.forEach((r) => io.to(r).emit('message:created', payload));
+        if (process.env.CHAT_DEBUG === 'true') {
+          console.log('[CHAT] Emit outbound message:created rooms', { rooms: Array.from(rooms), payload });
+        }
+      }
     }
 
     if (conversation.channel === 'whatsapp') {

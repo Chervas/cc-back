@@ -6,7 +6,7 @@ const { queues } = require('./queue.service');
 
 const { ClinicMetaAsset } = db;
 
-const META_API_VERSION = process.env.META_API_VERSION || 'v22.0';
+const META_API_VERSION = process.env.META_API_VERSION || 'v24.0';
 
 function getMetaBaseUrl() {
   return `https://graph.facebook.com/${META_API_VERSION}`;
@@ -154,7 +154,12 @@ async function resolveAccessToken(wabaId) {
     },
     order: [['updatedAt', 'DESC']],
   });
-  return asset?.waAccessToken || null;
+  return (
+    asset?.waAccessToken ||
+    process.env.META_WHATSAPP_ACCESS_TOKEN ||
+    process.env.META_GRAPH_TOKEN ||
+    null
+  );
 }
 
 async function syncPhonesForWaba({ wabaId, accessToken }) {
