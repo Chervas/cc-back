@@ -96,20 +96,28 @@ exports.deleteBloqueo = asyncHandler(async (req, res) => {
 
 // Disponibilidad de doctor (slots o validación puntual)
 exports.disponibilidad = asyncHandler(async (req, res) => {
-  const { doctor_id, clinica_id, fecha, inicio, fin, duracion_min, instalacion_id, slots } = req.query;
+  const { doctor_id, clinica_id, group_id, fecha, inicio, fin, duracion_min, instalacion_id, slots } = req.query;
   if (!doctor_id) return res.status(400).json({ message: 'doctor_id requerido' });
   const wantsSlots = parseBool(slots) || (!inicio && !fin && fecha);
   if (!fecha && !(inicio && fin)) return res.status(400).json({ message: 'fecha o inicio/fin requeridos' });
 
   const start = inicio ? new Date(inicio) : new Date(`${fecha}T00:00:00Z`);
-  const end = fin ? new Date(fin) : new Date(start.getTime() + (parseInt(duracion_min || '30',10)*60000));
-  if (isNaN(start) || isNaN(end)) return res.status(400).json({ message: 'rango inválido' });
+  let durMinParam = duracion_min ? parseInt(duracion_min,10) : null;
+  let end = fin ? new Date(fin) : null;
+  if (isNaN(start) || (fin && isNaN(end))) return res.status(400).json({ message: 'rango inválido' });
   const dow = dayIndex(start);
   const conflicts = [];
 
   // Fetch doctor-clinica + horarios
-  const dc = await db.DoctorClinica.findOne({ where: clinica_id ? { doctor_id, clinica_id } : { doctor_id }, include: [{ model: db.DoctorHorario, as: 'horarios' }, { model: db.Clinica, as: 'clinica' }] });
+  const dc = await db.DoctorClinica.findOne({
+    where: clinica_id ? { doctor_id, clinica_id } : { doctor_id },
+    include: [
+      { model: db.DoctorHorario, as: 'horarios' },
+      { model: db.Clinica, as: 'clinica', attributes: ['id_clinica','id_grupo'] }
+    ]
+  });
   if (!dc || !dc.activo) conflicts.push({ type: 'doctor_unavailable', message: 'Doctor no asignado a la clínica' });
+  if (group_id && dc?.clinica?.id_grupo && dc.clinica.id_grupo !== parseInt(group_id,10)) conflicts.push({ type: 'not_in_group', message: 'Doctor fuera del grupo' });
 
   // Optional: fetch instalacion to intersect windows
   let inst = null;
@@ -117,12 +125,12 @@ exports.disponibilidad = asyncHandler(async (req, res) => {
     inst = await db.Instalacion.findByPk(instalacion_id, { include: [{ model: db.InstalacionHorario, as: 'horarios' }, { model: db.InstalacionBloqueo, as: 'bloqueos' }] });
     if (!inst || !inst.activo) return res.status(404).json({ message: 'Instalación no encontrada' });
     if (clinica_id && inst.clinica_id !== parseInt(clinica_id,10)) conflicts.push({ type: 'not_in_clinic', message: 'Instalación fuera de la clínica' });
+    if (group_id && inst.clinica_id && inst.clinica?.id_grupo && inst.clinica.id_grupo !== parseInt(group_id,10)) conflicts.push({ type: 'not_in_group', message: 'Instalación fuera del grupo' });
   }
 
   // Slots mode
   if (wantsSlots) {
-    const durMin = parseInt(duracion_min || '30', 10);
-    if (!durMin || durMin <= 0) return res.status(400).json({ message: 'duracion_min requerida para slots' });
+    const durMin = durMinParam && durMinParam > 0 ? durMinParam : 30;
     let windows = buildWindows(dc?.horarios || [], dow, fecha);
     if (inst) {
       const instWins = buildWindows(inst.horarios || [], dow, fecha);
@@ -150,27 +158,28 @@ exports.disponibilidad = asyncHandler(async (req, res) => {
         cursor = new Date(cursor.getTime() + durMin*60000);
       }
     });
-    return res.json({ available: true, conflicts, slots: slotsResp });
+    return res.json({ available: true, conflicts, slots: slotsResp, duration_used: durMin });
   }
 
   // Validation mode
+  const effectiveEnd = end || new Date(start.getTime() + (durMinParam || 30)*60000);
   const h = dc && (dc.horarios || []).find(h => h.dia_semana === dow);
-  const inRange = h && h.activo && `${h.hora_inicio}` <= toTime(start) && `${h.hora_fin}` >= toTime(end);
+  const inRange = h && h.activo && `${h.hora_inicio}` <= toTime(start) && `${h.hora_fin}` >= toTime(effectiveEnd);
   if (!inRange) conflicts.push({ type: 'doctor_unavailable', message: 'Doctor fuera de horario' });
-  const bloqueos = await db.DoctorBloqueo.findAll({ where: { doctor_id, fecha_inicio: { [Op.lt]: end }, fecha_fin: { [Op.gt]: start } } });
+  const bloqueos = await db.DoctorBloqueo.findAll({ where: { doctor_id, fecha_inicio: { [Op.lt]: effectiveEnd }, fecha_fin: { [Op.gt]: start } } });
   if (bloqueos.length) conflicts.push({ type: 'doctor_unavailable', message: bloqueos[0].motivo || 'Bloqueo doctor' });
-  const citasDoc = await db.CitaPaciente.findAll({ where: { doctor_id, inicio: { [Op.lt]: end }, fin: { [Op.gt]: start } }, attributes: ['id_cita','inicio','fin'] });
+  const citasDoc = await db.CitaPaciente.findAll({ where: { doctor_id, inicio: { [Op.lt]: effectiveEnd }, fin: { [Op.gt]: start } }, attributes: ['id_cita','inicio','fin'] });
   if (citasDoc.length) conflicts.push({ type: 'overlap', message: 'Doctor ocupado' });
 
   if (inst) {
     const hInst = (inst.horarios || []).find(h => h.dia_semana === dow);
-    const inRangeInst = hInst && hInst.activo && `${hInst.hora_inicio}` <= toTime(start) && `${hInst.hora_fin}` >= toTime(end);
+    const inRangeInst = hInst && hInst.activo && `${hInst.hora_inicio}` <= toTime(start) && `${hInst.hora_fin}` >= toTime(effectiveEnd);
     if (!inRangeInst) conflicts.push({ type: 'out_of_hours', message: 'Instalación fuera de horario' });
-    (inst.bloqueos || []).forEach(b => { if (overlap(start, end, b.fecha_inicio, b.fecha_fin)) conflicts.push({ type: 'blocked', message: b.motivo || 'Bloqueo instalación' }); });
-    const citasInst = await db.CitaPaciente.findAll({ where: { instalacion_id, inicio: { [Op.lt]: end }, fin: { [Op.gt]: start } }, attributes: ['id_cita','inicio','fin'] });
+    (inst.bloqueos || []).forEach(b => { if (overlap(start, effectiveEnd, b.fecha_inicio, b.fecha_fin)) conflicts.push({ type: 'blocked', message: b.motivo || 'Bloqueo instalación' }); });
+    const citasInst = await db.CitaPaciente.findAll({ where: { instalacion_id, inicio: { [Op.lt]: effectiveEnd }, fin: { [Op.gt]: start } }, attributes: ['id_cita','inicio','fin'] });
     if (citasInst.length) conflicts.push({ type: 'overlap', message: 'Instalación ocupada' });
   }
 
-  if (conflicts.length) return res.status(409).json({ available: false, conflicts });
-  res.json({ available: true, conflicts: [] });
+  if (conflicts.length) return res.status(409).json({ available: false, conflicts, duration_used: durMinParam || 30 });
+  res.json({ available: true, conflicts: [], duration_used: durMinParam || 30 });
 });
