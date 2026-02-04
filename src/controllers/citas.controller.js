@@ -243,7 +243,7 @@ exports.createCita = asyncHandler(async (req, res) => {
         include: [
             { model: Paciente, as: 'paciente' },
             { model: LeadIntake, as: 'lead' },
-            { model: Clinica, as: 'clinica' },
+            { model: Clinica, as: 'clinica', attributes: ['id_clinica','nombre_clinica','id_grupo'] },
             Campana ? { model: Campana, as: 'campana' } : null
         ].filter(Boolean)
     });
