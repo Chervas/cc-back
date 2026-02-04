@@ -21,6 +21,7 @@ module.exports = (sequelize, DataTypes) => {
     requiere_preparacion: { type: DataTypes.BOOLEAN, defaultValue: false },
     tiempo_preparacion_minutos: { type: DataTypes.INTEGER, defaultValue: 0 },
     es_exclusiva: { type: DataTypes.BOOLEAN, defaultValue: false },
+    default_duracion_minutos: { type: DataTypes.INTEGER, defaultValue: 30 },
     especialidades_permitidas: DataTypes.JSON,
     tratamientos_exclusivos: DataTypes.JSON,
     equipamiento: DataTypes.JSON,

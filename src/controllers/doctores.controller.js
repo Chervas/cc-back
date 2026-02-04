@@ -3,6 +3,30 @@ const db = require('../../models');
 const { Op } = db.Sequelize;
 
 const parseBool = (v) => v === true || v === 'true' || v === '1';
+const dayIndex = (date) => new Date(date).getDay();
+const toTime = (d) => d.toTimeString().slice(0,5);
+const overlap = (a1, a2, b1, b2) => a1 < b2 && b1 < a2;
+const timeStrToDate = (fecha, hhmm) => new Date(`${fecha}T${hhmm}:00Z`);
+
+const buildWindows = (horarios, dow, fecha) => {
+  return (horarios || [])
+    .filter(h => h.dia_semana === dow && h.activo)
+    .map(h => ({ start: timeStrToDate(fecha, h.hora_inicio), end: timeStrToDate(fecha, h.hora_fin) }));
+};
+
+const subtractIntervals = (windows, blocks) => {
+  let res = [...windows];
+  blocks.forEach(b => {
+    res = res.flatMap(w => {
+      if (!overlap(w.start, w.end, b.start, b.end)) return [w];
+      const out = [];
+      if (w.start < b.start) out.push({ start: w.start, end: b.start });
+      if (b.end < w.end) out.push({ start: b.end, end: w.end });
+      return out;
+    });
+  });
+  return res;
+};
 
 exports.list = asyncHandler(async (req, res) => {
   const { clinica_id, group_id, all } = req.query;
@@ -68,4 +92,85 @@ exports.createBloqueo = asyncHandler(async (req, res) => {
 exports.deleteBloqueo = asyncHandler(async (req, res) => {
   await db.DoctorBloqueo.destroy({ where: { id: req.params.id } });
   res.status(204).end();
+});
+
+// Disponibilidad de doctor (slots o validación puntual)
+exports.disponibilidad = asyncHandler(async (req, res) => {
+  const { doctor_id, clinica_id, fecha, inicio, fin, duracion_min, instalacion_id, slots } = req.query;
+  if (!doctor_id) return res.status(400).json({ message: 'doctor_id requerido' });
+  const wantsSlots = parseBool(slots) || (!inicio && !fin && fecha);
+  if (!fecha && !(inicio && fin)) return res.status(400).json({ message: 'fecha o inicio/fin requeridos' });
+
+  const start = inicio ? new Date(inicio) : new Date(`${fecha}T00:00:00Z`);
+  const end = fin ? new Date(fin) : new Date(start.getTime() + (parseInt(duracion_min || '30',10)*60000));
+  if (isNaN(start) || isNaN(end)) return res.status(400).json({ message: 'rango inválido' });
+  const dow = dayIndex(start);
+  const conflicts = [];
+
+  // Fetch doctor-clinica + horarios
+  const dc = await db.DoctorClinica.findOne({ where: clinica_id ? { doctor_id, clinica_id } : { doctor_id }, include: [{ model: db.DoctorHorario, as: 'horarios' }, { model: db.Clinica, as: 'clinica' }] });
+  if (!dc || !dc.activo) conflicts.push({ type: 'doctor_unavailable', message: 'Doctor no asignado a la clínica' });
+
+  // Optional: fetch instalacion to intersect windows
+  let inst = null;
+  if (instalacion_id) {
+    inst = await db.Instalacion.findByPk(instalacion_id, { include: [{ model: db.InstalacionHorario, as: 'horarios' }, { model: db.InstalacionBloqueo, as: 'bloqueos' }] });
+    if (!inst || !inst.activo) return res.status(404).json({ message: 'Instalación no encontrada' });
+    if (clinica_id && inst.clinica_id !== parseInt(clinica_id,10)) conflicts.push({ type: 'not_in_clinic', message: 'Instalación fuera de la clínica' });
+  }
+
+  // Slots mode
+  if (wantsSlots) {
+    const durMin = parseInt(duracion_min || '30', 10);
+    if (!durMin || durMin <= 0) return res.status(400).json({ message: 'duracion_min requerida para slots' });
+    let windows = buildWindows(dc?.horarios || [], dow, fecha);
+    if (inst) {
+      const instWins = buildWindows(inst.horarios || [], dow, fecha);
+      if (windows.length === 0) windows = instWins;
+      else windows = windows.flatMap(w => instWins.map(i => ({ start: new Date(Math.max(w.start, i.start)), end: new Date(Math.min(w.end, i.end)) }))).filter(w => w.start < w.end);
+    }
+    // Blocks
+    const blocks = [];
+    const bloqueosDoc = await db.DoctorBloqueo.findAll({ where: { doctor_id, fecha_inicio: { [Op.lt]: timeStrToDate(fecha,'23:59') }, fecha_fin: { [Op.gt]: timeStrToDate(fecha,'00:00') } } });
+    bloqueosDoc.forEach(b => blocks.push({ start: new Date(b.fecha_inicio), end: new Date(b.fecha_fin) }));
+    const citasDoc = await db.CitaPaciente.findAll({ where: { doctor_id, inicio: { [Op.lt]: timeStrToDate(fecha,'23:59') }, fin: { [Op.gt]: timeStrToDate(fecha,'00:00') } }, attributes: ['inicio','fin'] });
+    citasDoc.forEach(c => blocks.push({ start: new Date(c.inicio), end: new Date(c.fin) }));
+    if (inst) {
+      (inst.bloqueos || []).forEach(b => blocks.push({ start: new Date(b.fecha_inicio), end: new Date(b.fecha_fin) }));
+      const citasInst = await db.CitaPaciente.findAll({ where: { instalacion_id, inicio: { [Op.lt]: timeStrToDate(fecha,'23:59') }, fin: { [Op.gt]: timeStrToDate(fecha,'00:00') } }, attributes: ['inicio','fin'] });
+      citasInst.forEach(c => blocks.push({ start: new Date(c.inicio), end: new Date(c.fin) }));
+    }
+    const free = subtractIntervals(windows, blocks);
+    const slotsResp = [];
+    free.forEach(w => {
+      let cursor = new Date(w.start);
+      while (cursor.getTime() + durMin*60000 <= w.end.getTime()) {
+        const s = new Date(cursor); const e = new Date(cursor.getTime() + durMin*60000);
+        slotsResp.push({ start: s.toISOString(), end: e.toISOString() });
+        cursor = new Date(cursor.getTime() + durMin*60000);
+      }
+    });
+    return res.json({ available: true, conflicts, slots: slotsResp });
+  }
+
+  // Validation mode
+  const h = dc && (dc.horarios || []).find(h => h.dia_semana === dow);
+  const inRange = h && h.activo && `${h.hora_inicio}` <= toTime(start) && `${h.hora_fin}` >= toTime(end);
+  if (!inRange) conflicts.push({ type: 'doctor_unavailable', message: 'Doctor fuera de horario' });
+  const bloqueos = await db.DoctorBloqueo.findAll({ where: { doctor_id, fecha_inicio: { [Op.lt]: end }, fecha_fin: { [Op.gt]: start } } });
+  if (bloqueos.length) conflicts.push({ type: 'doctor_unavailable', message: bloqueos[0].motivo || 'Bloqueo doctor' });
+  const citasDoc = await db.CitaPaciente.findAll({ where: { doctor_id, inicio: { [Op.lt]: end }, fin: { [Op.gt]: start } }, attributes: ['id_cita','inicio','fin'] });
+  if (citasDoc.length) conflicts.push({ type: 'overlap', message: 'Doctor ocupado' });
+
+  if (inst) {
+    const hInst = (inst.horarios || []).find(h => h.dia_semana === dow);
+    const inRangeInst = hInst && hInst.activo && `${hInst.hora_inicio}` <= toTime(start) && `${hInst.hora_fin}` >= toTime(end);
+    if (!inRangeInst) conflicts.push({ type: 'out_of_hours', message: 'Instalación fuera de horario' });
+    (inst.bloqueos || []).forEach(b => { if (overlap(start, end, b.fecha_inicio, b.fecha_fin)) conflicts.push({ type: 'blocked', message: b.motivo || 'Bloqueo instalación' }); });
+    const citasInst = await db.CitaPaciente.findAll({ where: { instalacion_id, inicio: { [Op.lt]: end }, fin: { [Op.gt]: start } }, attributes: ['id_cita','inicio','fin'] });
+    if (citasInst.length) conflicts.push({ type: 'overlap', message: 'Instalación ocupada' });
+  }
+
+  if (conflicts.length) return res.status(409).json({ available: false, conflicts });
+  res.json({ available: true, conflicts: [] });
 });
