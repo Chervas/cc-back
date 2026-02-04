@@ -11,6 +11,7 @@ const GrupoClinica = db.GrupoClinica;
 const Campana = db.Campana;
 const AdCache = db.AdCache;
 const ClinicMetaAsset = db.ClinicMetaAsset;
+const ClinicGoogleAdsAccount = db.ClinicGoogleAdsAccount;
 const IntakeConfig = db.IntakeConfig;
 const { sendMetaEvent, buildUserData: buildMetaUserData } = require('../services/metaCapi.service');
 const { uploadClickConversion } = require('../services/googleAdsConversion.service');
@@ -43,6 +44,15 @@ const normalizePhone = (phone) => {
 const parseDate = (value) => {
   const d = value ? new Date(value) : null;
   return d && !isNaN(d.getTime()) ? d : null;
+};
+
+// Normaliza textos para evitar caracteres “exóticos” (p. ej. tipografías bold de unicode)
+const sanitizeText = (value) => {
+  if (!value || typeof value !== 'string') return value;
+  return value
+    .normalize('NFKD')              // descompone caracteres estilizados
+    .replace(/[^\p{L}\p{N}\s.,@'+-]/gu, '') // deja letras, números y signos básicos
+    .trim();
 };
 
 const stableStringify = (obj) => {
@@ -201,8 +211,8 @@ exports.ingestLead = asyncHandler(async (req, res) => {
     external_id
   } = req.body || {};
 
-  const clinicaIdParsed = parseInteger(clinica_id);
-  const grupoClinicaIdParsed = parseInteger(grupo_clinica_id);
+  let clinicaIdParsed = parseInteger(clinica_id);
+  let grupoClinicaIdParsed = parseInteger(grupo_clinica_id);
   const campanaIdParsed = parseInteger(campana_id);
   const attribution = req.body?.attribution || {};
   const leadData = req.body?.lead_data || {};
@@ -219,10 +229,10 @@ exports.ingestLead = asyncHandler(async (req, res) => {
   const pageUrlValue = coalesce(attribution.page_url, page_url);
   const landingUrlValue = coalesce(attribution.landing_url, landing_url);
 
-  const leadNombre = coalesce(leadData.nombre, nombre);
+  const leadNombre = sanitizeText(coalesce(leadData.nombre, nombre));
   const leadEmail = coalesce(leadData.email, email);
   const leadTelefono = coalesce(leadData.telefono, telefono);
-  const leadNotas = coalesce(leadData.notas, notas);
+  const leadNotas = sanitizeText(coalesce(leadData.notas, notas));
   const consentValue = coalesce(req.body?.consent, consentimiento_canal);
 
   if (clinicaIdParsed !== null) {
@@ -256,6 +266,66 @@ exports.ingestLead = asyncHandler(async (req, res) => {
   const externalSource = external_source || source || null;
   const externalId = external_id || req.body?.meta_lead_id || req.body?.google_lead_id || req.body?.form_id || eventId || null;
 
+  // Resolución automática de clínica por activo publicitario (Meta / Google Ads)
+  let clinicMatchSource = clinic_match_source || null;
+  let clinicMatchValue = clinic_match_value || null;
+
+  if (!clinicaIdParsed && normalizedSource === 'meta_ads') {
+    const pageId = coalesce(req.body?.page_id, req.body?.pageId, req.body?.page?.id, req.body?.payload?.page_id);
+    const adAccountId = coalesce(req.body?.ad_account_id, req.body?.adAccountId, req.body?.payload?.ad_account_id);
+
+    let assetFound = null;
+
+    if (pageId) {
+      assetFound = await ClinicMetaAsset.findOne({
+        where: { metaAssetId: String(pageId), assetType: 'facebook_page', isActive: true }
+      });
+      if (assetFound) {
+        clinicaIdParsed = assetFound.clinicaId || clinicaIdParsed;
+        grupoClinicaIdParsed = assetFound.grupoClinicaId || grupoClinicaIdParsed;
+        clinicMatchSource = clinicMatchSource || 'meta_page';
+        clinicMatchValue = clinicMatchValue || String(pageId);
+      }
+    }
+
+    if (!clinicaIdParsed && adAccountId) {
+      const asset = await ClinicMetaAsset.findOne({
+        where: { metaAssetId: String(adAccountId), assetType: 'ad_account', isActive: true }
+      });
+      if (asset) {
+        assetFound = asset;
+        clinicaIdParsed = asset.clinicaId || clinicaIdParsed;
+        grupoClinicaIdParsed = asset.grupoClinicaId || grupoClinicaIdParsed;
+        clinicMatchSource = clinicMatchSource || 'meta_ad_account';
+        clinicMatchValue = clinicMatchValue || String(adAccountId);
+      }
+    }
+
+    // Si no hay activo configurado para la página/cuenta, no ingerimos para evitar saturar
+    if (!clinicaIdParsed && (pageId || adAccountId)) {
+      return res.status(202).json({
+        message: 'Lead descartado: activo Meta no conectado en Settings',
+        page_id: pageId ? String(pageId) : null,
+        ad_account_id: adAccountId ? String(adAccountId) : null
+      });
+    }
+  }
+
+  if (!clinicaIdParsed && normalizedSource === 'google_ads') {
+    const customerId = coalesce(req.body?.customer_id, req.body?.customerId, req.body?.google_customer_id, req.body?.payload?.customer_id);
+    if (customerId && db.ClinicGoogleAdsAccount) {
+      const account = await db.ClinicGoogleAdsAccount.findOne({
+        where: { customerId: String(customerId), isActive: true }
+      });
+      if (account) {
+        clinicaIdParsed = account.clinicaId || clinicaIdParsed;
+        grupoClinicaIdParsed = account.grupoClinicaId || grupoClinicaIdParsed;
+        clinicMatchSource = clinicMatchSource || 'google_ads_customer';
+        clinicMatchValue = clinicMatchValue || String(customerId);
+      }
+    }
+  }
+
   const leadPayload = {
     event_id: eventId,
     clinica_id: clinicaIdParsed,
@@ -264,8 +334,8 @@ exports.ingestLead = asyncHandler(async (req, res) => {
     channel: normalizedChannel,
     source: normalizedSource,
     source_detail: source_detail || null,
-    clinic_match_source: clinic_match_source || null,
-    clinic_match_value: clinic_match_value || null,
+    clinic_match_source: clinicMatchSource,
+    clinic_match_value: clinicMatchValue,
     utm_source: utmSource || null,
     utm_medium: utmMedium || null,
     utm_campaign: utmCampaign || null,
