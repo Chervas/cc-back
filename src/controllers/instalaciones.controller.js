@@ -5,9 +5,45 @@ const { Op } = db.Sequelize;
 const parseBool = (v) => v === true || v === 'true' || v === '1';
 const dayIndex = (date) => new Date(date).getDay();
 const toTime = (d) => d.toTimeString().slice(0,5);
+const toInt = (v) => {
+  const n = Number(v);
+  return Number.isFinite(n) ? n : null;
+};
 
 const overlap = (startA, endA, startB, endB) => {
   return startA < endB && startB < endA;
+};
+
+const HORARIO_KEYS = ['domingo','lunes','martes','miercoles','jueves','viernes','sabado'];
+
+const buildHorarioRowsFromBody = (instalacionId, body) => {
+  if (!body) return [];
+  // Soportar `horarios` (array) o `horario` (objeto semanal)
+  if (Array.isArray(body.horarios)) {
+    return body.horarios
+      .filter((h) => h && h.dia_semana !== undefined)
+      .map((h) => ({
+        instalacion_id: instalacionId,
+        dia_semana: Number(h.dia_semana),
+        activo: Boolean(h.activo),
+        hora_inicio: h.hora_inicio || '09:00',
+        hora_fin: h.hora_fin || '20:00',
+      }));
+  }
+  if (body.horario && typeof body.horario === 'object') {
+    const horario = body.horario;
+    return HORARIO_KEYS.map((key, idx) => {
+      const dia = horario[key] || {};
+      return {
+        instalacion_id: instalacionId,
+        dia_semana: idx,
+        activo: Boolean(dia.activo),
+        hora_inicio: dia.inicio || '09:00',
+        hora_fin: dia.fin || '20:00',
+      };
+    });
+  }
+  return [];
 };
 
 exports.list = asyncHandler(async (req, res) => {
@@ -24,8 +60,210 @@ exports.list = asyncHandler(async (req, res) => {
     include.push({ model: db.Clinica, as: 'clinica', attributes: ['id_clinica','nombre_clinica','grupoClinicaId'] });
   }
 
+  include.push({ model: db.InstalacionHorario, as: 'horarios' });
+  include.push({ model: db.InstalacionBloqueo, as: 'bloqueos' });
+
   const items = await db.Instalacion.findAll({ where, include, order: [['orden_visualizacion','ASC'], ['id','ASC']] });
   res.json(items);
+});
+
+exports.getById = asyncHandler(async (req, res) => {
+  const id = toInt(req.params.id);
+  if (!id) return res.status(400).json({ message: 'id inválido' });
+  const item = await db.Instalacion.findByPk(id, {
+    include: [
+      { model: db.Clinica, as: 'clinica', attributes: ['id_clinica','nombre_clinica','grupoClinicaId'] },
+      { model: db.InstalacionHorario, as: 'horarios' },
+      { model: db.InstalacionBloqueo, as: 'bloqueos' },
+    ],
+  });
+  if (!item) return res.status(404).json({ message: 'Instalación no encontrada' });
+  res.json(item);
+});
+
+exports.create = asyncHandler(async (req, res) => {
+  const body = req.body || {};
+  const clinicaId = toInt(body.clinica_id ?? body.id_clinica);
+  if (!clinicaId) return res.status(400).json({ message: 'clinica_id requerido' });
+  if (!body.nombre) return res.status(400).json({ message: 'nombre requerido' });
+
+  const t = await db.sequelize.transaction();
+  try {
+    const created = await db.Instalacion.create({
+      clinica_id: clinicaId,
+      nombre: body.nombre,
+      tipo: body.tipo || 'box',
+      descripcion: body.descripcion || null,
+      piso: body.piso || null,
+      color: body.color || '#4CAF50',
+      capacidad: body.capacidad != null ? Number(body.capacidad) : 1,
+      activo: body.activo !== undefined ? Boolean(body.activo) : true,
+      requiere_preparacion: Boolean(body.requiere_preparacion),
+      tiempo_preparacion_minutos: body.tiempo_preparacion_minutos != null ? Number(body.tiempo_preparacion_minutos) : 0,
+      es_exclusiva: Boolean(body.es_exclusiva),
+      default_duracion_minutos: body.default_duracion_minutos != null ? Number(body.default_duracion_minutos) : 30,
+      especialidades_permitidas: body.especialidades_permitidas ?? [],
+      tratamientos_exclusivos: body.tratamientos_exclusivos ?? [],
+      equipamiento: body.equipamiento ?? [],
+      orden_visualizacion: body.orden_visualizacion != null ? Number(body.orden_visualizacion) : null,
+    }, { transaction: t });
+
+    const rows = buildHorarioRowsFromBody(created.id, body);
+    if (rows.length) {
+      await db.InstalacionHorario.bulkCreate(rows, { transaction: t });
+    }
+
+    await t.commit();
+
+    const item = await db.Instalacion.findByPk(created.id, {
+      include: [
+        { model: db.Clinica, as: 'clinica', attributes: ['id_clinica','nombre_clinica','grupoClinicaId'] },
+        { model: db.InstalacionHorario, as: 'horarios' },
+        { model: db.InstalacionBloqueo, as: 'bloqueos' },
+      ],
+    });
+    return res.status(201).json(item);
+  } catch (e) {
+    await t.rollback();
+    console.error('Error create instalacion', e);
+    return res.status(500).json({ message: 'Error creando instalación' });
+  }
+});
+
+exports.update = asyncHandler(async (req, res) => {
+  const id = toInt(req.params.id);
+  if (!id) return res.status(400).json({ message: 'id inválido' });
+  const body = req.body || {};
+
+  const item = await db.Instalacion.findByPk(id);
+  if (!item) return res.status(404).json({ message: 'Instalación no encontrada' });
+
+  const t = await db.sequelize.transaction();
+  try {
+    await item.update({
+      // No permitimos cambiar de clínica por ahora (evita movimientos inesperados)
+      nombre: body.nombre ?? item.nombre,
+      tipo: body.tipo ?? item.tipo,
+      descripcion: body.descripcion ?? item.descripcion,
+      piso: body.piso ?? item.piso,
+      color: body.color ?? item.color,
+      capacidad: body.capacidad != null ? Number(body.capacidad) : item.capacidad,
+      activo: body.activo !== undefined ? Boolean(body.activo) : item.activo,
+      requiere_preparacion: body.requiere_preparacion !== undefined ? Boolean(body.requiere_preparacion) : item.requiere_preparacion,
+      tiempo_preparacion_minutos: body.tiempo_preparacion_minutos != null ? Number(body.tiempo_preparacion_minutos) : item.tiempo_preparacion_minutos,
+      es_exclusiva: body.es_exclusiva !== undefined ? Boolean(body.es_exclusiva) : item.es_exclusiva,
+      default_duracion_minutos: body.default_duracion_minutos != null ? Number(body.default_duracion_minutos) : item.default_duracion_minutos,
+      especialidades_permitidas: body.especialidades_permitidas ?? item.especialidades_permitidas,
+      tratamientos_exclusivos: body.tratamientos_exclusivos ?? item.tratamientos_exclusivos,
+      equipamiento: body.equipamiento ?? item.equipamiento,
+      orden_visualizacion: body.orden_visualizacion != null ? Number(body.orden_visualizacion) : item.orden_visualizacion,
+    }, { transaction: t });
+
+    if (body.horario || body.horarios) {
+      const rows = buildHorarioRowsFromBody(id, body);
+      await db.InstalacionHorario.destroy({ where: { instalacion_id: id }, transaction: t });
+      if (rows.length) {
+        await db.InstalacionHorario.bulkCreate(rows, { transaction: t });
+      }
+    }
+
+    await t.commit();
+
+    const full = await db.Instalacion.findByPk(id, {
+      include: [
+        { model: db.Clinica, as: 'clinica', attributes: ['id_clinica','nombre_clinica','grupoClinicaId'] },
+        { model: db.InstalacionHorario, as: 'horarios' },
+        { model: db.InstalacionBloqueo, as: 'bloqueos' },
+      ],
+    });
+    return res.json(full);
+  } catch (e) {
+    await t.rollback();
+    console.error('Error update instalacion', e);
+    return res.status(500).json({ message: 'Error actualizando instalación' });
+  }
+});
+
+exports.remove = asyncHandler(async (req, res) => {
+  const id = toInt(req.params.id);
+  if (!id) return res.status(400).json({ message: 'id inválido' });
+  const item = await db.Instalacion.findByPk(id);
+  if (!item) return res.status(404).json({ message: 'Instalación no encontrada' });
+  await item.update({ activo: false });
+  res.status(204).send();
+});
+
+exports.getHorarios = asyncHandler(async (req, res) => {
+  const id = toInt(req.params.id);
+  if (!id) return res.status(400).json({ message: 'id inválido' });
+  const items = await db.InstalacionHorario.findAll({
+    where: { instalacion_id: id },
+    order: [['dia_semana','ASC']],
+  });
+  res.json(items);
+});
+
+exports.putHorarios = asyncHandler(async (req, res) => {
+  const id = toInt(req.params.id);
+  if (!id) return res.status(400).json({ message: 'id inválido' });
+  const horarios = Array.isArray(req.body) ? req.body : [];
+  const t = await db.sequelize.transaction();
+  try {
+    await db.InstalacionHorario.destroy({ where: { instalacion_id: id }, transaction: t });
+    const rows = horarios
+      .filter((h) => h && h.dia_semana !== undefined)
+      .map((h) => ({
+        instalacion_id: id,
+        dia_semana: Number(h.dia_semana),
+        activo: Boolean(h.activo),
+        hora_inicio: h.hora_inicio || '09:00',
+        hora_fin: h.hora_fin || '20:00',
+      }));
+    if (rows.length) await db.InstalacionHorario.bulkCreate(rows, { transaction: t });
+    await t.commit();
+    const out = await db.InstalacionHorario.findAll({ where: { instalacion_id: id }, order: [['dia_semana','ASC']] });
+    res.json(out);
+  } catch (e) {
+    await t.rollback();
+    console.error('Error putHorarios', e);
+    res.status(500).json({ message: 'Error actualizando horarios' });
+  }
+});
+
+exports.getBloqueos = asyncHandler(async (req, res) => {
+  const id = toInt(req.params.id);
+  if (!id) return res.status(400).json({ message: 'id inválido' });
+  const items = await db.InstalacionBloqueo.findAll({
+    where: { instalacion_id: id },
+    order: [['fecha_inicio','ASC']],
+  });
+  res.json(items);
+});
+
+exports.createBloqueo = asyncHandler(async (req, res) => {
+  const body = req.body || {};
+  const instalacionId = toInt(body.instalacion_id);
+  if (!instalacionId) return res.status(400).json({ message: 'instalacion_id requerido' });
+  if (!body.fecha_inicio || !body.fecha_fin) return res.status(400).json({ message: 'fecha_inicio y fecha_fin requeridos' });
+
+  const created = await db.InstalacionBloqueo.create({
+    instalacion_id: instalacionId,
+    fecha_inicio: new Date(body.fecha_inicio),
+    fecha_fin: new Date(body.fecha_fin),
+    motivo: body.motivo || null,
+    recurrente: body.recurrente || 'none',
+    creado_por: req.userData?.userId ? Number(req.userData.userId) : null,
+  });
+  res.status(201).json(created);
+});
+
+exports.deleteBloqueo = asyncHandler(async (req, res) => {
+  const id = toInt(req.params.id);
+  if (!id) return res.status(400).json({ message: 'id inválido' });
+  const item = await db.InstalacionBloqueo.findByPk(id);
+  if (!item) return res.status(404).json({ message: 'Bloqueo no encontrado' });
+  await item.destroy();
+  res.status(204).send();
 });
 
 const buildWindowsFromHorarios = (horarios, dow) => {
