@@ -117,7 +117,7 @@ exports.disponibilidad = asyncHandler(async (req, res) => {
     ]
   });
   if (!dc || !dc.activo) conflicts.push({ type: 'doctor_unavailable', message: 'Doctor no asignado a la clínica' });
-  if (group_id && dc?.clinica?.id_grupo && dc.clinica.id_grupo !== parseInt(group_id,10)) conflicts.push({ type: 'not_in_group', message: 'Doctor fuera del grupo' });
+  if (group_id && dc?.clinica?.grupoClinicaId && dc.clinica.grupoClinicaId !== parseInt(group_id,10)) conflicts.push({ type: 'not_in_group', message: 'Doctor fuera del grupo' });
 
   // Optional: fetch instalacion to intersect windows
   let inst = null;
@@ -125,7 +125,7 @@ exports.disponibilidad = asyncHandler(async (req, res) => {
     inst = await db.Instalacion.findByPk(instalacion_id, { include: [{ model: db.InstalacionHorario, as: 'horarios' }, { model: db.InstalacionBloqueo, as: 'bloqueos' }] });
     if (!inst || !inst.activo) return res.status(404).json({ message: 'Instalación no encontrada' });
     if (clinica_id && inst.clinica_id !== parseInt(clinica_id,10)) conflicts.push({ type: 'not_in_clinic', message: 'Instalación fuera de la clínica' });
-    if (group_id && inst.clinica_id && inst.clinica?.id_grupo && inst.clinica.id_grupo !== parseInt(group_id,10)) conflicts.push({ type: 'not_in_group', message: 'Instalación fuera del grupo' });
+    if (group_id && inst.clinica_id && inst.clinica?.grupoClinicaId && inst.clinica.grupoClinicaId !== parseInt(group_id,10)) conflicts.push({ type: 'not_in_group', message: 'Instalación fuera del grupo' });
   }
 
   // Slots mode
@@ -163,7 +163,7 @@ exports.disponibilidad = asyncHandler(async (req, res) => {
       conflicts,
       slots: slotsResp,
       duration_used: durMin,
-      clinica: dc?.clinica ? { id: dc.clinica.id_clinica, nombre: dc.clinica.nombre_clinica, grupo: dc.clinica.id_grupo } : null
+      clinica: dc?.clinica ? { id: dc.clinica.id_clinica, nombre: dc.clinica.nombre_clinica, grupo: dc.clinica.grupoClinicaId } : null
     });
   }
 
@@ -186,11 +186,11 @@ exports.disponibilidad = asyncHandler(async (req, res) => {
     if (citasInst.length) conflicts.push({ type: 'overlap', message: 'Instalación ocupada' });
   }
 
-  if (conflicts.length) return res.status(409).json({ available: false, conflicts, duration_used: durMinParam || 30, clinica: dc?.clinica ? { id: dc.clinica.id_clinica, nombre: dc.clinica.nombre_clinica, grupo: dc.clinica.id_grupo } : null });
+  if (conflicts.length) return res.status(409).json({ available: false, conflicts, duration_used: durMinParam || 30, clinica: dc?.clinica ? { id: dc.clinica.id_clinica, nombre: dc.clinica.nombre_clinica, grupo: dc.clinica.grupoClinicaId } : null });
   res.json({
     available: true,
     conflicts: [],
     duration_used: durMinParam || 30,
-    clinica: dc?.clinica ? { id: dc.clinica.id_clinica, nombre: dc.clinica.nombre_clinica, grupo: dc.clinica.id_grupo } : null
+    clinica: dc?.clinica ? { id: dc.clinica.id_clinica, nombre: dc.clinica.nombre_clinica, grupo: dc.clinica.grupoClinicaId } : null
   });
 });

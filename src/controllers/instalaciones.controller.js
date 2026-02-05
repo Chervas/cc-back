@@ -19,9 +19,9 @@ exports.list = asyncHandler(async (req, res) => {
   if (activa !== undefined) where.activo = parseBool(activa);
   const include = [];
   if (group_id) {
-    include.push({ model: db.Clinica, as: 'clinica', where: { id_grupo: group_id }, attributes: ['id_clinica','nombre_clinica','id_grupo'] });
+    include.push({ model: db.Clinica, as: 'clinica', where: { grupoClinicaId: group_id }, attributes: ['id_clinica','nombre_clinica','grupoClinicaId'] });
   } else {
-    include.push({ model: db.Clinica, as: 'clinica', attributes: ['id_clinica','nombre_clinica','id_grupo'] });
+    include.push({ model: db.Clinica, as: 'clinica', attributes: ['id_clinica','nombre_clinica','grupoClinicaId'] });
   }
 
   const items = await db.Instalacion.findAll({ where, include, order: [['orden_visualizacion','ASC'], ['id','ASC']] });
@@ -70,10 +70,10 @@ exports.disponibilidad = asyncHandler(async (req, res) => {
 
   // Instalacion checks
   if (instalacion_id) {
-    instData = await db.Instalacion.findByPk(instalacion_id, { include: [{ model: db.InstalacionHorario, as: 'horarios' }, { model: db.InstalacionBloqueo, as: 'bloqueos' }, { model: db.Clinica, as: 'clinica', attributes: ['id_clinica','id_grupo'] }] });
+    instData = await db.Instalacion.findByPk(instalacion_id, { include: [{ model: db.InstalacionHorario, as: 'horarios' }, { model: db.InstalacionBloqueo, as: 'bloqueos' }, { model: db.Clinica, as: 'clinica', attributes: ['id_clinica','nombre_clinica','grupoClinicaId'] }] });
     if (!instData || !instData.activo) return res.status(404).json({ message: 'Instalación no encontrada' });
     if (clinica_id && instData.clinica_id !== parseInt(clinica_id,10)) conflicts.push({ type: 'not_in_clinic', message: 'Instalación fuera de la clínica' });
-    if (group_id && instData.clinica?.id_grupo && instData.clinica.id_grupo !== parseInt(group_id,10)) conflicts.push({ type: 'not_in_group', message: 'Instalación fuera del grupo' });
+    if (group_id && instData.clinica?.grupoClinicaId && instData.clinica.grupoClinicaId !== parseInt(group_id,10)) conflicts.push({ type: 'not_in_group', message: 'Instalación fuera del grupo' });
     if (!durMinParam && instData.default_duracion_minutos) durMinParam = instData.default_duracion_minutos;
   }
 
@@ -162,6 +162,6 @@ exports.disponibilidad = asyncHandler(async (req, res) => {
     available: true,
     conflicts,
     duration_used: durMinParam || instData?.default_duracion_minutos || 30,
-    clinica: instData?.clinica ? { id: instData.clinica.id_clinica, nombre: instData.clinica.nombre_clinica, grupo: instData.clinica.id_grupo } : null
+    clinica: instData?.clinica ? { id: instData.clinica.id_clinica, nombre: instData.clinica.nombre_clinica, grupo: instData.clinica.grupoClinicaId } : null
   });
 });
