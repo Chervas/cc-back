@@ -16,6 +16,24 @@ const DoctorBloqueo = db.DoctorBloqueo;
 const Tratamiento = db.Tratamiento;
 
 /**
+ * Helper: asegurar vínculo paciente-clínica sin romper por duplicados
+ */
+async function ensurePacienteClinica({ paciente_id, clinica_id, es_principal }) {
+    try {
+        const [vinculo] = await db.PacienteClinica.findOrCreate({
+            where: { paciente_id, clinica_id },
+            defaults: { es_principal }
+        });
+        return vinculo;
+    } catch (err) {
+        if (err && err.name === 'SequelizeUniqueConstraintError') {
+            return db.PacienteClinica.findOne({ where: { paciente_id, clinica_id } });
+        }
+        throw err;
+    }
+}
+
+/**
  * Helper: encontrar o crear paciente por teléfono/email en una clínica
  */
 async function findOrCreatePaciente({ clinica_id, nombre, apellidos, telefono, email, id_paciente }) {
@@ -34,7 +52,7 @@ async function findOrCreatePaciente({ clinica_id, nombre, apellidos, telefono, e
         const yaVinculado = existente.clinica_id === clinica_id ||
             (existente.clinicasVinculadas || []).some(vc => vc.clinica_id === clinica_id);
         if (!yaVinculado) {
-            await db.PacienteClinica.create({
+            await ensurePacienteClinica({
                 paciente_id: existente.id_paciente,
                 clinica_id,
                 es_principal: false
@@ -75,7 +93,7 @@ async function findOrCreatePaciente({ clinica_id, nombre, apellidos, telefono, e
         // Asegurar vínculo explícito
         const yaVinculado = (paciente.clinicasVinculadas || []).some(vc => vc.clinica_id === clinica_id);
         if (!yaVinculado) {
-            await db.PacienteClinica.create({
+            await ensurePacienteClinica({
                 paciente_id: paciente.id_paciente,
                 clinica_id,
                 es_principal: false
@@ -92,7 +110,7 @@ async function findOrCreatePaciente({ clinica_id, nombre, apellidos, telefono, e
         clinica_id: clinica_id
     });
 
-    await db.PacienteClinica.create({
+    await ensurePacienteClinica({
         paciente_id: nuevoPaciente.id_paciente,
         clinica_id,
         es_principal: true
