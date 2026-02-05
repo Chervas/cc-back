@@ -76,7 +76,7 @@ exports.listBloqueos = asyncHandler(async (req, res) => {
 });
 
 exports.createBloqueo = asyncHandler(async (req, res) => {
-  const { doctorId } = req.params;
+  const doctorId = req.params.doctorId || req.userData?.userId;
   const bloqueo = await db.DoctorBloqueo.create({
     doctor_id: doctorId,
     fecha_inicio: req.body.fecha_inicio,

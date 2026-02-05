@@ -12,6 +12,8 @@ router.post('/:doctorId/bloqueos', controller.createBloqueo);
 router.delete('/bloqueos/:id', controller.deleteBloqueo);
 router.get('/disponibilidad', controller.disponibilidad);
 router.patch('/bloqueos/:id', controller.updateBloqueo);
+router.post('/me/bloqueos', controller.createBloqueo);
+router.patch('/me/bloqueos/:id', controller.updateBloqueo);
 // Schedules
 router.get('/me/schedule', controller.getScheduleForCurrent);
 router.get('/:doctorId/schedule', controller.getScheduleForDoctor);
