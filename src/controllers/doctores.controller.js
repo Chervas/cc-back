@@ -49,7 +49,8 @@ exports.list = asyncHandler(async (req, res) => {
   const doctorClinicas = await db.DoctorClinica.findAll({
     where: whereDoctorClinica,
     include: [
-      { model: db.Usuario, as: 'doctor', attributes: ['id_usuario', 'nombre', 'apellidos', 'email_usuario', 'especialidad'] },
+      // Nota: el modelo Usuario no tiene campo `especialidad` en BD; usamos `rol_en_clinica` de DoctorClinica como "especialidad" (label).
+      { model: db.Usuario, as: 'doctor', attributes: ['id_usuario', 'nombre', 'apellidos', 'email_usuario'] },
       includeClinica,
     ],
     order: [['clinica_id', 'ASC'], [{ model: db.Usuario, as: 'doctor' }, 'apellidos', 'ASC'], [{ model: db.Usuario, as: 'doctor' }, 'nombre', 'ASC']],
@@ -61,7 +62,7 @@ exports.list = asyncHandler(async (req, res) => {
     nombre: dc.doctor?.nombre || '',
     apellidos: dc.doctor?.apellidos || '',
     email: dc.doctor?.email_usuario || null,
-    especialidad: dc.doctor?.especialidad || null,
+    especialidad: dc.rol_en_clinica || null,
     activo: !!dc.activo,
     clinica_id: String(dc.clinica?.id_clinica ?? dc.clinica_id),
     clinica_nombre: dc.clinica?.nombre_clinica || '',
