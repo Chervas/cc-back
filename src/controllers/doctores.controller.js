@@ -30,28 +30,45 @@ const subtractIntervals = (windows, blocks) => {
 
 exports.list = asyncHandler(async (req, res) => {
   const { clinica_id, group_id, all } = req.query;
-  const whereClinica = {};
-  if (!parseBool(all)) {
-    if (clinica_id) whereClinica.id_clinica = clinica_id;
-    if (group_id) whereClinica.id_grupo = group_id;
+
+  // Filtrado por clinica_id directamente sobre DoctorClinica (evita depender de atributos inexistentes en Clinica)
+  const whereDoctorClinica = { activo: true };
+  if (!parseBool(all) && clinica_id) {
+    whereDoctorClinica.clinica_id = clinica_id;
+  }
+
+  const includeClinica = {
+    model: db.Clinica,
+    as: 'clinica',
+    attributes: ['id_clinica', 'nombre_clinica', 'grupoClinicaId'],
+  };
+  if (!parseBool(all) && group_id) {
+    includeClinica.where = { grupoClinicaId: group_id };
   }
 
   const doctorClinicas = await db.DoctorClinica.findAll({
-    where: { activo: true },
+    where: whereDoctorClinica,
     include: [
-      { model: db.Usuario, as: 'doctor', attributes: ['id_usuario','nombre','apellidos','email_usuario','especialidad'] },
-      { model: db.Clinica, as: 'clinica', attributes: ['id_clinica','nombre_clinica','id_grupo'], where: Object.keys(whereClinica).length ? whereClinica : undefined }
-    ]
+      { model: db.Usuario, as: 'doctor', attributes: ['id_usuario', 'nombre', 'apellidos', 'email_usuario', 'especialidad'] },
+      includeClinica,
+    ],
+    order: [['clinica_id', 'ASC'], [{ model: db.Usuario, as: 'doctor' }, 'apellidos', 'ASC'], [{ model: db.Usuario, as: 'doctor' }, 'nombre', 'ASC']],
   });
 
-  const result = doctorClinicas.map(dc => ({
-    id: dc.doctor?.id_usuario,
-    nombre: dc.doctor?.nombre,
-    apellidos: dc.doctor?.apellidos,
-    email: dc.doctor?.email_usuario,
+  // Respuesta compatible con el front (doctors.service.ts)
+  const result = doctorClinicas.map((dc) => ({
+    id: String(dc.doctor?.id_usuario ?? dc.doctor_id),
+    nombre: dc.doctor?.nombre || '',
+    apellidos: dc.doctor?.apellidos || '',
+    email: dc.doctor?.email_usuario || null,
     especialidad: dc.doctor?.especialidad || null,
-    clinica: dc.clinica
+    activo: !!dc.activo,
+    clinica_id: String(dc.clinica?.id_clinica ?? dc.clinica_id),
+    clinica_nombre: dc.clinica?.nombre_clinica || '',
+    grupo_clinica_id: dc.clinica?.grupoClinicaId ?? null,
+    clinica: dc.clinica || null,
   }));
+
   res.json(result);
 });
 
@@ -169,7 +186,7 @@ exports.disponibilidad = asyncHandler(async (req, res) => {
     where: clinica_id ? { doctor_id, clinica_id } : { doctor_id },
     include: [
       { model: db.DoctorHorario, as: 'horarios' },
-      { model: db.Clinica, as: 'clinica', attributes: ['id_clinica','id_grupo'] }
+      { model: db.Clinica, as: 'clinica', attributes: ['id_clinica','grupoClinicaId'] }
     ]
   });
   if (!dc || !dc.activo) conflicts.push({ type: 'doctor_unavailable', message: 'Doctor no asignado a la clínica' });
