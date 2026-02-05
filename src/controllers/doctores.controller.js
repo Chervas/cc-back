@@ -94,6 +94,62 @@ exports.deleteBloqueo = asyncHandler(async (req, res) => {
   res.status(204).end();
 });
 
+exports.updateBloqueo = asyncHandler(async (req, res) => {
+  const { id } = req.params;
+  const bloqueo = await db.DoctorBloqueo.findByPk(id);
+  if (!bloqueo) return res.status(404).json({ message: 'Bloqueo no encontrado' });
+  await bloqueo.update(req.body || {});
+  res.json(bloqueo);
+});
+
+async function buildSchedule(doctorId) {
+  const doctor = await db.Usuario.findByPk(doctorId, { attributes: ['id_usuario','nombre','apellidos','email_usuario'] });
+  const clinicas = await db.DoctorClinica.findAll({
+    where: { doctor_id: doctorId, activo: true },
+    include: [
+      { model: db.Clinica, as: 'clinica', attributes: ['id_clinica','nombre_clinica'] },
+      { model: db.DoctorHorario, as: 'horarios' }
+    ]
+  });
+  const bloqueos = await db.DoctorBloqueo.findAll({ where: { doctor_id: doctorId } });
+  return {
+    doctor_id: String(doctorId),
+    doctor_nombre: doctor ? `${doctor.nombre || ''} ${doctor.apellidos || ''}`.trim() : '',
+    clinicas: clinicas.map(c => ({
+      clinica_id: c.clinica_id,
+      nombre_clinica: c.clinica?.nombre_clinica || '',
+      activo: c.activo,
+      horarios: c.horarios || []
+    })),
+    bloqueos
+  };
+}
+
+exports.getScheduleForDoctor = asyncHandler(async (req, res) => {
+  const { doctorId } = req.params;
+  const schedule = await buildSchedule(doctorId);
+  res.json(schedule);
+});
+
+exports.getScheduleForCurrent = asyncHandler(async (req, res) => {
+  const doctorId = req.userData?.userId;
+  if (!doctorId) return res.status(401).json({ message: 'no_user' });
+  const schedule = await buildSchedule(doctorId);
+  res.json(schedule);
+});
+
+exports.updateHorariosClinica = asyncHandler(async (req, res) => {
+  const { doctorId, clinicaId } = req.params;
+  const horarios = Array.isArray(req.body?.horarios) ? req.body.horarios : [];
+  let dc = await db.DoctorClinica.findOne({ where: { doctor_id: doctorId, clinica_id: clinicaId } });
+  if (!dc) {
+    dc = await db.DoctorClinica.create({ doctor_id: doctorId, clinica_id: clinicaId, activo: true });
+  }
+  await db.DoctorHorario.destroy({ where: { doctor_clinica_id: dc.id } });
+  const created = await db.DoctorHorario.bulkCreate(horarios.map(h => ({ ...h, doctor_clinica_id: dc.id })));
+  res.json(created);
+});
+
 // Disponibilidad de doctor (slots o validación puntual)
 exports.disponibilidad = asyncHandler(async (req, res) => {
   const { doctor_id, clinica_id, group_id, fecha, inicio, fin, duracion_min, instalacion_id, slots } = req.query;

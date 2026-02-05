@@ -11,5 +11,11 @@ router.get('/:doctorId/bloqueos', controller.listBloqueos);
 router.post('/:doctorId/bloqueos', controller.createBloqueo);
 router.delete('/bloqueos/:id', controller.deleteBloqueo);
 router.get('/disponibilidad', controller.disponibilidad);
+router.patch('/bloqueos/:id', controller.updateBloqueo);
+// Schedules
+router.get('/me/schedule', controller.getScheduleForCurrent);
+router.get('/:doctorId/schedule', controller.getScheduleForDoctor);
+router.put('/me/clinicas/:clinicaId/horarios', controller.updateHorariosClinica);
+router.put('/:doctorId/clinicas/:clinicaId/horarios', controller.updateHorariosClinica);
 
 module.exports = router;

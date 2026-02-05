@@ -137,6 +137,9 @@ app.use('/api/instalaciones', instalacionesRoutes);
 console.log('Ruta /api/instalaciones configurada');
 app.use('/api/doctores', doctoresRoutes);
 console.log('Ruta /api/doctores configurada');
+// Alias en inglés para compatibilidad con front
+app.use('/api/doctors', doctoresRoutes);
+console.log('Ruta /api/doctors configurada');
 app.use('/api/tratamientos', tratamientosRoutes);
 console.log('Ruta /api/tratamientos configurada');
 app.use('/api/especialidades', especialidadesRoutes);
