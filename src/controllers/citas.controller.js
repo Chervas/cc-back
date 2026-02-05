@@ -311,133 +311,141 @@ async function checkDisponibilidadCanonica({ clinica_id, inicio, fin, doctor_id,
  * Crear cita para paciente (y lead opcional)
  */
 exports.createCita = asyncHandler(async (req, res) => {
-    const {
-        clinica_id,
-        inicio,
-        fin,
-        duracion_min = null,
-        estado = 'pendiente',
-        nota,
-        motivo,
-        tipo_cita = 'continuacion',
-        lead_intake_id = null,
-        doctor_id = null,
-        instalacion_id = null,
-        tratamiento_id = null,
-        campana_id = null,
-        force = false,
-        paciente: datosPaciente
-    } = req.body || {};
+    try {
+        const {
+            clinica_id,
+            inicio,
+            fin,
+            duracion_min = null,
+            estado = 'pendiente',
+            nota,
+            motivo,
+            tipo_cita = 'continuacion',
+            lead_intake_id = null,
+            doctor_id = null,
+            instalacion_id = null,
+            tratamiento_id = null,
+            campana_id = null,
+            force = false,
+            paciente: datosPaciente
+        } = req.body || {};
 
-    if (!clinica_id || !inicio || (!fin && !duracion_min) || !datosPaciente) {
-        return res.status(400).json({ message: 'clinica_id, inicio, (fin o duracion_min) y paciente son obligatorios' });
-    }
-
-    // Validar clínica
-    const clinica = await Clinica.findOne({ where: { id_clinica: clinica_id } });
-    if (!clinica) {
-        return res.status(400).json({ message: 'Clínica no encontrada' });
-    }
-
-    // Resolver lead si viene
-    let lead = null;
-    if (lead_intake_id) {
-        lead = await LeadIntake.findByPk(lead_intake_id);
-        if (!lead) {
-            return res.status(404).json({ message: 'Lead no encontrado' });
+        if (!clinica_id || !inicio || (!fin && !duracion_min) || !datosPaciente) {
+            return res.status(400).json({ message: 'clinica_id, inicio, (fin o duracion_min) y paciente son obligatorios' });
         }
-    }
 
-    // Calcular fin si falta: prioridad cuerpo -> tratamiento -> instalación -> 30
-    const inicioDate = new Date(inicio);
-    let finDate = fin ? new Date(fin) : null;
-    let duracionEfectiva = duracion_min ? parseInt(duracion_min, 10) : null;
-
-    if (!duracionEfectiva && tratamiento_id) {
-        const trat = await Tratamiento.findByPk(tratamiento_id, { attributes: ['duracion_min'] });
-        if (trat?.duracion_min) duracionEfectiva = trat.duracion_min;
-    }
-    if (!duracionEfectiva && instalacion_id) {
-        const inst = await Instalacion.findByPk(instalacion_id, { attributes: ['default_duracion_minutos'] });
-        if (inst?.default_duracion_minutos) duracionEfectiva = inst.default_duracion_minutos;
-    }
-    if (!duracionEfectiva) duracionEfectiva = 30;
-    if (!finDate) finDate = new Date(inicioDate.getTime() + duracionEfectiva * 60000);
-
-    // Chequear disponibilidad si hay doctor/instalación (canónico + legacy)
-    const { resourceConflicts, legacyConflicts, canForce } = await checkDisponibilidadCanonica({
-        clinica_id,
-        inicio: inicioDate,
-        fin: finDate,
-        doctor_id,
-        instalacion_id
-    });
-
-    if (resourceConflicts.length) {
-        const wantsForce = parseBool(force);
-
-        // Solo se puede forzar si el único conflicto es STAFF_OVERLAP (doctor).
-        if (!wantsForce || !canForce) {
-            const firstLegacy = legacyConflicts[0];
-            const reason = (firstLegacy && ['overlap', 'blocked', 'out_of_hours', 'doctor_unavailable'].includes(firstLegacy.type))
-                ? firstLegacy.type
-                : 'blocked';
-
-            return res.status(409).json({
-                reason,
-                message: 'No hay disponibilidad para el rango solicitado.',
-                can_force: canForce,
-                resource_conflicts: resourceConflicts,
-                // Compatibilidad con el frontend legacy actual
-                conflicts: legacyConflicts
-            });
+        // Validar clínica
+        const clinica = await Clinica.findOne({ where: { id_clinica: clinica_id } });
+        if (!clinica) {
+            return res.status(400).json({ message: 'Clínica no encontrada' });
         }
-        // wantsForce && canForce -> seguimos
+
+        // Resolver lead si viene
+        let lead = null;
+        if (lead_intake_id) {
+            lead = await LeadIntake.findByPk(lead_intake_id);
+            if (!lead) {
+                return res.status(404).json({ message: 'Lead no encontrado' });
+            }
+        }
+
+        // Calcular fin si falta: prioridad cuerpo -> tratamiento -> instalación -> 30
+        const inicioDate = new Date(inicio);
+        let finDate = fin ? new Date(fin) : null;
+        let duracionEfectiva = duracion_min ? parseInt(duracion_min, 10) : null;
+
+        if (!duracionEfectiva && tratamiento_id) {
+            const trat = await Tratamiento.findByPk(tratamiento_id, { attributes: ['duracion_min'] });
+            if (trat?.duracion_min) duracionEfectiva = trat.duracion_min;
+        }
+        if (!duracionEfectiva && instalacion_id) {
+            const inst = await Instalacion.findByPk(instalacion_id, { attributes: ['default_duracion_minutos'] });
+            if (inst?.default_duracion_minutos) duracionEfectiva = inst.default_duracion_minutos;
+        }
+        if (!duracionEfectiva) duracionEfectiva = 30;
+        if (!finDate) finDate = new Date(inicioDate.getTime() + duracionEfectiva * 60000);
+
+        // Chequear disponibilidad si hay doctor/instalación (canónico + legacy)
+        const { resourceConflicts, legacyConflicts, canForce } = await checkDisponibilidadCanonica({
+            clinica_id,
+            inicio: inicioDate,
+            fin: finDate,
+            doctor_id,
+            instalacion_id
+        });
+
+        if (resourceConflicts.length) {
+            const wantsForce = parseBool(force);
+
+            // Solo se puede forzar si el único conflicto es STAFF_OVERLAP (doctor).
+            if (!wantsForce || !canForce) {
+                const firstLegacy = legacyConflicts[0];
+                const reason = (firstLegacy && ['overlap', 'blocked', 'out_of_hours', 'doctor_unavailable'].includes(firstLegacy.type))
+                    ? firstLegacy.type
+                    : 'blocked';
+
+                return res.status(409).json({
+                    reason,
+                    message: 'No hay disponibilidad para el rango solicitado.',
+                    can_force: canForce,
+                    resource_conflicts: resourceConflicts,
+                    // Compatibilidad con el frontend legacy actual
+                    conflicts: legacyConflicts
+                });
+            }
+            // wantsForce && canForce -> seguimos
+        }
+
+        // Resolver/crear paciente
+        const paciente = await findOrCreatePaciente({
+            clinica_id,
+            nombre: datosPaciente.nombre,
+            apellidos: datosPaciente.apellidos,
+            telefono: datosPaciente.telefono,
+            email: datosPaciente.email,
+            id_paciente: datosPaciente.id_paciente || datosPaciente.id
+        });
+
+        // Crear cita
+        const cita = await CitaPaciente.create({
+            clinica_id,
+            paciente_id: paciente.id_paciente,
+            lead_intake_id: lead_intake_id || null,
+            doctor_id,
+            instalacion_id,
+            tratamiento_id,
+            campana_id: campana_id || lead?.campana_id || null,
+            titulo: datosPaciente.titulo || null,
+            nota: nota || null,
+            motivo: motivo || null,
+            tipo_cita,
+            estado,
+            inicio: inicioDate,
+            fin: finDate
+        });
+
+        // Marcar lead como citado si aplica
+        if (lead) {
+            await lead.update({ status_lead: 'citado' });
+        }
+
+        const citaCreada = await CitaPaciente.findByPk(cita.id_cita, {
+            include: [
+                { model: Paciente, as: 'paciente' },
+                { model: LeadIntake, as: 'lead' },
+                { model: Clinica, as: 'clinica', attributes: ['id_clinica','nombre_clinica','id_grupo'] },
+                Campana ? { model: Campana, as: 'campana' } : null
+            ].filter(Boolean)
+        });
+
+        return res.status(201).json(citaCreada);
+    } catch (err) {
+        console.error('❌ [createCita] Error:', err.message, err.original?.sqlMessage || '', err);
+        return res.status(500).json({
+            message: 'error_creating_cita',
+            detail: err.original?.sqlMessage || err.message
+        });
     }
-
-    // Resolver/crear paciente
-    const paciente = await findOrCreatePaciente({
-        clinica_id,
-        nombre: datosPaciente.nombre,
-        apellidos: datosPaciente.apellidos,
-        telefono: datosPaciente.telefono,
-        email: datosPaciente.email,
-        id_paciente: datosPaciente.id_paciente || datosPaciente.id
-    });
-
-    // Crear cita
-    const cita = await CitaPaciente.create({
-        clinica_id,
-        paciente_id: paciente.id_paciente,
-        lead_intake_id: lead_intake_id || null,
-        doctor_id,
-        instalacion_id,
-        tratamiento_id,
-        campana_id: campana_id || lead?.campana_id || null,
-        titulo: datosPaciente.titulo || null,
-        nota: nota || null,
-        motivo: motivo || null,
-        tipo_cita,
-        estado,
-        inicio: inicioDate,
-        fin: finDate
-    });
-
-    // Marcar lead como citado si aplica
-    if (lead) {
-        await lead.update({ status_lead: 'citado' });
-    }
-
-    const citaCreada = await CitaPaciente.findByPk(cita.id_cita, {
-        include: [
-            { model: Paciente, as: 'paciente' },
-            { model: LeadIntake, as: 'lead' },
-            { model: Clinica, as: 'clinica', attributes: ['id_clinica','nombre_clinica','id_grupo'] },
-            Campana ? { model: Campana, as: 'campana' } : null
-        ].filter(Boolean)
-    });
-
-    return res.status(201).json(citaCreada);
 });
 
 /**
