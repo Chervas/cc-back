@@ -22,8 +22,10 @@ module.exports = (sequelize, DataTypes) => {
       field: 'projectManager'
     },
     campaign_id: {
-      type: DataTypes.STRING,
-      allowNull: true
+      type: DataTypes.VIRTUAL,
+      get() {
+        return null;
+      }
     },
     estado: {
       type: DataTypes.STRING,
