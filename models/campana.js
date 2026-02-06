@@ -8,67 +8,98 @@ module.exports = (sequelize, DataTypes) => {
     },
     nombre: {
       type: DataTypes.STRING,
-      allowNull: false
+      allowNull: false,
+      field: 'nombre_campana'
+    },
+    cliente: {
+      type: DataTypes.STRING,
+      allowNull: true,
+      field: 'cliente'
+    },
+    projectManager: {
+      type: DataTypes.STRING,
+      allowNull: true,
+      field: 'projectManager'
     },
     campaign_id: {
       type: DataTypes.STRING,
       allowNull: true
     },
     estado: {
-      type: DataTypes.ENUM('ACTIVE', 'PAUSED', 'DELETED'),
-      defaultValue: 'ACTIVE'
+      type: DataTypes.STRING,
+      allowNull: true,
+      field: 'estado'
     },
     gastoTotal: {
       type: DataTypes.DECIMAL(10, 2),
-      defaultValue: 0
+      defaultValue: 0,
+      field: 'gastoTotal'
     },
     fechaInicio: {
       type: DataTypes.DATE,
-      allowNull: true
+      allowNull: true,
+      field: 'fechaInicio'
     },
     fechaFin: {
       type: DataTypes.DATE,
-      allowNull: true
+      allowNull: true,
+      field: 'fechaFin'
     },
     leads: {
       type: DataTypes.INTEGER,
-      defaultValue: 0
+      defaultValue: 0,
+      field: 'leads'
     },
     preset: {
       type: DataTypes.STRING,
-      allowNull: true
+      allowNull: true,
+      field: 'preset'
     },
     frecuenciaMaxima: {
       type: DataTypes.DECIMAL(10, 2),
-      allowNull: true
+      allowNull: true,
+      field: 'frecuenciaMaxima'
     },
     reproducciones75: {
       type: DataTypes.INTEGER,
-      defaultValue: 0
+      defaultValue: 0,
+      field: 'reproducciones75'
     },
     reproduccionesTotales: {
       type: DataTypes.INTEGER,
-      defaultValue: 0
+      defaultValue: 0,
+      field: 'reproduccionesTotales'
     },
     curvaVisionado: {
       type: DataTypes.TEXT,
-      allowNull: true
+      allowNull: true,
+      field: 'curvaVisionado'
     },
     orden: {
       type: DataTypes.STRING,
-      allowNull: true
+      allowNull: true,
+      field: 'orden'
     },
     precioPorLead: {
       type: DataTypes.DECIMAL(10, 2),
-      defaultValue: 0
+      defaultValue: 0,
+      field: 'precioPorLead'
     },
     mostrar: {
       type: DataTypes.BOOLEAN,
-      defaultValue: true
+      defaultValue: true,
+      field: 'mostrar'
+    },
+    clinica_id: {
+      type: DataTypes.INTEGER,
+      allowNull: false,
+      field: 'clinica_id'
     }
   }, {
     tableName: 'Campanas',
-    timestamps: true
+    timestamps: true,
+    createdAt: 'fecha_creacion',
+    updatedAt: 'fecha_actualizacion'
   });
 
   Campana.associate = function(models) {
