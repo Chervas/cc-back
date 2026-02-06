@@ -1,5 +1,11 @@
 module.exports = (sequelize, DataTypes) => {
   const Campana = sequelize.define('Campana', {
+    id: {
+      type: DataTypes.INTEGER,
+      primaryKey: true,
+      autoIncrement: true,
+      field: 'id_campana'
+    },
     nombre: {
       type: DataTypes.STRING,
       allowNull: false
@@ -61,6 +67,7 @@ module.exports = (sequelize, DataTypes) => {
       defaultValue: true
     }
   }, {
+    tableName: 'Campanas',
     timestamps: true
   });
 
