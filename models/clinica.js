@@ -84,6 +84,14 @@ module.exports = (sequelize, DataTypes) => {
     grupoClinicaId: {
       type: DataTypes.INTEGER,
       allowNull: true
+    },
+
+    // Campo virtual para API en snake_case
+    grupo_clinica_id: {
+      type: DataTypes.VIRTUAL,
+      get() {
+        return this.getDataValue('grupoClinicaId') ?? null;
+      }
     }
   }, {
     sequelize,

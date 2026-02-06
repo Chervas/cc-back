@@ -5,6 +5,12 @@ module.exports = (sequelize, DataTypes) => {
     id: { type: DataTypes.INTEGER, primaryKey: true, autoIncrement: true },
     clinicaId: { type: DataTypes.INTEGER, allowNull: true, field: 'clinicaId' },
     grupoClinicaId: { type: DataTypes.INTEGER, allowNull: true, field: 'grupoClinicaId' },
+    grupo_clinica_id: {
+      type: DataTypes.VIRTUAL,
+      get() {
+        return this.getDataValue('grupoClinicaId') ?? null;
+      }
+    },
     assignmentScope: { type: DataTypes.ENUM('clinic', 'group'), allowNull: false, defaultValue: 'clinic', field: 'assignmentScope' },
     googleConnectionId: { type: DataTypes.INTEGER, allowNull: false, field: 'googleConnectionId' },
     customerId: { type: DataTypes.STRING(32), allowNull: false, field: 'customerId' },

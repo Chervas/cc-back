@@ -28,6 +28,12 @@ module.exports = (sequelize, DataTypes) => {
             onUpdate: 'CASCADE',
             onDelete: 'SET NULL'
         },
+        grupo_clinica_id: {
+            type: DataTypes.VIRTUAL,
+            get() {
+                return this.getDataValue('grupoClinicaId') ?? null;
+            }
+        },
         assignmentScope: {
             type: DataTypes.ENUM('unassigned', 'clinic', 'group'),
             allowNull: false,

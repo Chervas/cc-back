@@ -6,6 +6,12 @@ module.exports = (sequelize, DataTypes) => {
     clinicGoogleAdsAccountId: { type: DataTypes.INTEGER, allowNull: false, field: 'clinicGoogleAdsAccountId' },
     clinicaId: { type: DataTypes.INTEGER, allowNull: true, field: 'clinicaId' },
     grupoClinicaId: { type: DataTypes.INTEGER, allowNull: true, field: 'grupoClinicaId' },
+    grupo_clinica_id: {
+      type: DataTypes.VIRTUAL,
+      get() {
+        return this.getDataValue('grupoClinicaId') ?? null;
+      }
+    },
     customerId: { type: DataTypes.STRING(32), allowNull: false, field: 'customerId' },
     campaignId: { type: DataTypes.STRING(64), allowNull: false, field: 'campaignId' },
     campaignName: { type: DataTypes.STRING(256), allowNull: true, field: 'campaignName' },
