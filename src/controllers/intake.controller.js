@@ -407,14 +407,34 @@ exports.ingestLead = asyncHandler(async (req, res) => {
 // Configuración del snippet
 // ===========================
 
+const DEFAULT_CHAT_FLOW = {
+  version: '1.0',
+  steps: [
+    { type: 'message', text: 'Hola. Te ayudamos a pedir cita.' },
+    { type: 'input', text: 'Como te llamas?', input_type: 'text', placeholder: 'Tu nombre', field: 'nombre' },
+    { type: 'input', text: 'Gracias {{nombre}}. Cual es tu telefono?', input_type: 'tel', placeholder: 'Tu telefono', field: 'telefono' },
+    { type: 'input', text: 'Y tu email? (opcional)', input_type: 'email', placeholder: 'Tu email', field: 'email' },
+    { type: 'cta', text: 'Confirma que quieres que te contactemos:', button_text: 'Ok, contactadme' }
+  ]
+};
+
+const DEFAULT_TEXTS = {
+  chat_title: 'WhatsApp',
+  chat_welcome: 'Hola. Quieres pedirnos una cita de valoracion sin coste?',
+  tel_modal_title: 'Antes de llamar...',
+  tel_modal_subtitle: 'Dejanos tus datos por si se corta la comunicacion.',
+  consent_text: 'Acepto la politica de privacidad',
+  privacy_url: '/politica-privacidad'
+};
+
 const defaultConfigPayload = (clinicId, groupId) => ({
   clinic_id: clinicId || null,
   group_id: groupId || null,
   assignment_scope: groupId ? 'group' : 'clinic',
   domains: [],
   features: { chat_enabled: true, tel_modal_enabled: true, viewcontent_enabled: true, form_intercept_enabled: true },
-  flow: null,
-  texts: null,
+  flow: DEFAULT_CHAT_FLOW,
+  texts: DEFAULT_TEXTS,
   locations: [],
   has_hmac: false,
   config: {}
@@ -455,9 +475,9 @@ exports.getIntakeConfig = asyncHandler(async (req, res) => {
     payload.group_id = record.group_id || null;
     payload.assignment_scope = record.assignment_scope || payload.assignment_scope;
     payload.domains = record.domains || [];
-    payload.features = cfg.features || payload.features;
-    payload.flow = cfg.flow || null;
-    payload.texts = cfg.texts || null;
+    payload.features = { ...payload.features, ...(cfg.features || {}) };
+    payload.flow = cfg.flow || payload.flow;
+    payload.texts = { ...payload.texts, ...(cfg.texts || {}) };
     payload.locations = cfg.locations || [];
     payload.config = cfg;
     payload.has_hmac = !!record.hmac_key;
@@ -475,7 +495,28 @@ exports.upsertIntakeConfig = asyncHandler(async (req, res) => {
   if (!clinicId && !groupId) return res.status(400).json({ message: 'clinicId o group_id requerido' });
 
   const scope = groupId ? 'group' : 'clinic';
-  const { domains = [], config = {}, hmac_key } = req.body || {};
+  const body = req.body && typeof req.body === 'object' ? req.body : {};
+  const domains = Array.isArray(body.domains) ? body.domains : [];
+  const hmac_key = body.hmac_key;
+
+  // Compatibilidad:
+  // - UI suele enviar features/flow/texts/locations en root.
+  // - Backwards: si viene body.config, lo respetamos.
+  let config = {};
+  if (body.config && typeof body.config === 'object' && !Array.isArray(body.config)) {
+    config = body.config;
+  } else {
+    const features = body.features && typeof body.features === 'object' ? body.features : undefined;
+    const flow = body.flow && typeof body.flow === 'object' ? body.flow : undefined;
+    const texts = body.texts && typeof body.texts === 'object' ? body.texts : undefined;
+    const locations = Array.isArray(body.locations) ? body.locations : undefined;
+    config = {
+      ...(features ? { features } : {}),
+      ...(flow ? { flow } : {}),
+      ...(texts ? { texts } : {}),
+      ...(locations ? { locations } : {})
+    };
+  }
   await IntakeConfig.upsert({
     clinic_id: clinicId || null,
     group_id: groupId || null,
