@@ -54,12 +54,49 @@ require('./workers/queue.workers');
 const db = require('../models'); // <-- Importa el objeto db de models/index.js
 const app = express();
 const server = http.createServer(app);
-// Configuración CORS (mantengo tu estructura)
-const corsOptions = {
-    origin: ['https://app.clinicaclick.com', 'https://crm.clinicaclick.com', 'http://localhost:4200'],
-    credentials: true
+// CORS:
+// - UI (app/crm/local) queda en allowlist.
+// - Snippet web (intake) necesita poder llamar desde dominios externos (validación real en /api/intake/*).
+const STATIC_CORS_ORIGINS = new Set([
+    'https://app.clinicaclick.com',
+    'https://crm.clinicaclick.com',
+    'http://localhost:4200',
+    'http://localhost:4201'
+]);
+
+function isPublicIntakePath(pathname = '') {
+    return (
+        typeof pathname === 'string' &&
+        (pathname === '/api/intake/config' ||
+            pathname === '/api/intake/leads' ||
+            pathname === '/api/intake/events' ||
+            pathname.startsWith('/api/intake/'))
+    );
+}
+
+const corsOptionsDelegate = (req, callback) => {
+    const origin = req.header('Origin');
+    const pathname = req.path || req.originalUrl || '';
+
+    // Requests without Origin header (server-to-server) don't need CORS headers.
+    if (!origin) {
+        return callback(null, { origin: false });
+    }
+
+    if (STATIC_CORS_ORIGINS.has(origin)) {
+        return callback(null, { origin: true, credentials: true });
+    }
+
+    // Allow external origins for the intake snippet endpoints. Security is enforced inside the controllers
+    // (domain allowlist + optional HMAC).
+    if (isPublicIntakePath(pathname)) {
+        return callback(null, { origin: true, credentials: false });
+    }
+
+    return callback(null, { origin: false });
 };
-app.use(cors(corsOptions));
+
+app.use(cors(corsOptionsDelegate));
 app.use(express.json({
     verify: (req, res, buf) => {
         // Guardar el cuerpo crudo para validar firmas HMAC de intake
@@ -83,6 +120,9 @@ app.use('/api/historialdeservicios', historialDeServiciosRoutes);
 console.log('Ruta /api/historialdeservicios configurada');
 app.use('/api/gruposclinicas', gruposClinicasRoutes);
 console.log('Ruta /api/gruposclinicas configurada');
+// Alias (compat) usado por algunos componentes del frontend
+app.use('/api/grupos-clinicas', gruposClinicasRoutes);
+console.log('Ruta /api/grupos-clinicas configurada');
 app.use('/api/pacientes', pacienteRoutes);
 console.log('Ruta /api/pacientes configurada');
 // Alias directo para webhook de Meta Lead Ads (antes de leadRoutes con auth)

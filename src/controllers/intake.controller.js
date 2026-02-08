@@ -492,33 +492,105 @@ exports.upsertIntakeConfig = asyncHandler(async (req, res) => {
 // Eventos genéricos (ViewContent, Contact, Schedule, Purchase)
 // ===========================
 
-const validateHmac = (body, secret, provided) => {
+const normalizeSignature = (provided) => {
+  if (!provided) return null;
+  if (typeof provided !== 'string') return null;
+  const trimmed = provided.trim();
+  if (!trimmed) return null;
+  // Accept "sha256=<hex>" just in case some clients send it like Meta.
+  return trimmed.toLowerCase().startsWith('sha256=') ? trimmed.slice(7).trim() : trimmed.toLowerCase();
+};
+
+const getHostnameFromUrl = (value) => {
+  if (!value || typeof value !== 'string') return null;
+  try {
+    return new URL(value).hostname.toLowerCase();
+  } catch {
+    return null;
+  }
+};
+
+// Validación HMAC sobre el payload "raw" (mejor: evita discrepancias por orden de keys).
+const validateHmac = (req, secret, provided) => {
   if (!secret) return true;
-  if (!provided) return false;
-  const expected = crypto.createHmac('sha256', secret).update(stableStringify(body)).digest('hex');
-  return expected === provided;
+  const signature = normalizeSignature(provided);
+  if (!signature) return false;
+
+  const rawPayload = req.rawBody
+    ? (Buffer.isBuffer(req.rawBody) ? req.rawBody : Buffer.from(req.rawBody))
+    : Buffer.from(stableStringify(req.body || {}));
+
+  const expected = crypto.createHmac('sha256', secret).update(rawPayload).digest('hex');
+  const expectedBuf = Buffer.from(expected);
+  const providedBuf = Buffer.from(signature);
+  if (expectedBuf.length !== providedBuf.length) {
+    return false;
+  }
+  return crypto.timingSafeEqual(expectedBuf, providedBuf);
 };
 
 exports.receiveIntakeEvent = asyncHandler(async (req, res) => {
-  const {
-    event_name,
-    clinic_id,
-    domain,
-    event_time,
-    event_id,
-    action_source,
-    event_source_url,
-    custom_data = {},
-    user_data = {},
-    fbp,
-    fbc
-  } = req.body || {};
+  const body = req.body || {};
 
-  const clinicIdParsed = parseInteger(clinic_id);
+  const eventName = body.event_name || body.eventName || 'ViewContent';
+  const clinicIdParsed = parseInteger(coalesce(body.clinic_id, body.clinica_id, body.clinicId));
+  const groupIdParsed = parseInteger(coalesce(body.group_id, body.grupo_clinica_id, body.groupId));
+
+  const eventSourceUrl = coalesce(
+    body.event_source_url,
+    body.eventSourceUrl,
+    body.page_url,
+    body.pageUrl,
+    body.event_data?.page_url,
+    body.event_data?.pageUrl
+  );
+
+  const domainFromBody = body.domain || null;
+  const derivedDomain = getHostnameFromUrl(eventSourceUrl || '');
+  const domain = (domainFromBody || derivedDomain || '').toLowerCase();
+
+  const customDataFromBody =
+    body.custom_data && typeof body.custom_data === 'object' && !Array.isArray(body.custom_data) ? body.custom_data : {};
+  const eventDataFromBody =
+    body.event_data && typeof body.event_data === 'object' && !Array.isArray(body.event_data) ? body.event_data : {};
+
+  // Aceptar el payload del snippet "v2" (campos planos + event_data) y el payload "canónico" (custom_data/user_data).
+  const custom_data = {
+    ...customDataFromBody,
+    ...eventDataFromBody
+  };
+
+  // Compat: campos planos (utm/gclid/etc.)
+  if (body.source && custom_data.source == null) custom_data.source = body.source;
+  if (body.source_detail && custom_data.source_detail == null) custom_data.source_detail = body.source_detail;
+  if (body.utm_campaign && custom_data.utm_campaign == null) custom_data.utm_campaign = body.utm_campaign;
+  if (body.gclid && custom_data.gclid == null) custom_data.gclid = body.gclid;
+  if (body.gbraid && custom_data.gbraid == null) custom_data.gbraid = body.gbraid;
+  if (body.wbraid && custom_data.wbraid == null) custom_data.wbraid = body.wbraid;
+  if (body.fbclid && custom_data.fbclid == null) custom_data.fbclid = body.fbclid;
+  if (body.value != null && custom_data.value == null) custom_data.value = body.value;
+  if (body.currency && custom_data.currency == null) custom_data.currency = body.currency;
+
+  const userDataFromBody =
+    body.user_data && typeof body.user_data === 'object' && !Array.isArray(body.user_data) ? body.user_data : {};
+
+  // Compat: algunos clientes pueden mandar lead_data (nombre/email/telefono) también en eventos.
+  const leadDataFromBody =
+    body.lead_data && typeof body.lead_data === 'object' && !Array.isArray(body.lead_data) ? body.lead_data : {};
+
+  const user_data = {
+    ...userDataFromBody,
+    ...leadDataFromBody
+  };
+
+  const fbp = body.fbp || user_data.fbp;
+  const fbc = body.fbc || user_data.fbc;
 
   let cfg = null;
   if (clinicIdParsed !== null) {
     cfg = await IntakeConfig.findOne({ where: { clinic_id: clinicIdParsed }, raw: true });
+  } else if (groupIdParsed !== null) {
+    cfg = await IntakeConfig.findOne({ where: { group_id: groupIdParsed, assignment_scope: 'group' }, raw: true });
   } else if (domain) {
     cfg = await IntakeConfig.findOne({
       where: db.Sequelize.literal(`JSON_CONTAINS(COALESCE(domains,'[]'), '\"${domain.toLowerCase()}\"')`)
@@ -526,20 +598,30 @@ exports.receiveIntakeEvent = asyncHandler(async (req, res) => {
     if (cfg) cfg = cfg.get({ plain: true });
   }
 
-  if (cfg && cfg.domains && cfg.domains.length > 0 && domain && !cfg.domains.includes(domain.toLowerCase())) {
-    return res.status(403).json({ message: 'Domain not allowed' });
+  if (cfg && Array.isArray(cfg.domains) && cfg.domains.length > 0) {
+    // Si hay allowlist configurada, el dominio es obligatorio.
+    if (!domain) {
+      return res.status(403).json({ message: 'Domain not allowed' });
+    }
+    if (!cfg.domains.includes(domain.toLowerCase())) {
+      return res.status(403).json({ message: 'Domain not allowed' });
+    }
   }
 
   if (cfg && cfg.hmac_key) {
     const provided = req.headers['x-cc-signature'] || req.headers['x-cc-signature-sha256'];
-    if (!validateHmac(req.body || {}, cfg.hmac_key, provided)) {
+    // ViewContent puede enviarse via sendBeacon (sin headers), así que toleramos firma ausente solo en ese evento.
+    if (!provided && String(eventName).toLowerCase() !== 'viewcontent') {
+      return res.status(401).json({ message: 'Invalid signature' });
+    }
+    if (provided && !validateHmac(req, cfg.hmac_key, provided)) {
       return res.status(401).json({ message: 'Invalid signature' });
     }
   }
 
   const userData = buildMetaUserData({
     email: user_data.email,
-    phone: user_data.phone,
+    phone: user_data.phone || user_data.telefono,
     ip: user_data.ip || req.headers['x-forwarded-for'] || req.socket?.remoteAddress,
     ua: user_data.ua || req.headers['user-agent'],
     fbp: fbp || user_data.fbp,
@@ -548,11 +630,11 @@ exports.receiveIntakeEvent = asyncHandler(async (req, res) => {
   });
 
   await sendMetaEvent({
-    eventName: event_name || 'ViewContent',
-    eventTime: event_time || Math.floor(Date.now() / 1000),
-    eventId: event_id || undefined,
-    actionSource: action_source || 'website',
-    eventSourceUrl: event_source_url || undefined,
+    eventName: eventName || 'ViewContent',
+    eventTime: body.event_time || Math.floor(Date.now() / 1000),
+    eventId: body.event_id || undefined,
+    actionSource: body.action_source || 'website',
+    eventSourceUrl: eventSourceUrl || undefined,
     clinicId: cfg?.clinic_id || clinicIdParsed || null,
     source: custom_data.source,
     sourceDetail: custom_data.source_detail,
@@ -576,7 +658,7 @@ exports.receiveIntakeEvent = asyncHandler(async (req, res) => {
         value: custom_data.value || 0,
         currency: custom_data.currency || 'EUR',
         conversionDateTime: custom_data.conversion_time || new Date().toISOString(),
-        externalId: user_data.external_id || event_id,
+        externalId: user_data.external_id || body.event_id,
         userAgent: user_data.ua || req.headers['user-agent'],
         ipAddress: user_data.ip || req.headers['x-forwarded-for'] || req.socket?.remoteAddress
       });
