@@ -406,7 +406,9 @@ exports.slots = asyncHandler(async (req, res) => {
   const instalacionIds = parseIntArray(instalacion_ids || req.query['instalacion_ids[]']);
   const doctorIds = parseIntArray(doctor_ids || req.query['doctor_ids[]']);
 
-  const MAX_BATCH_IDS = 30;
+  // Seguridad: evitamos "cross product" y ponemos un cap razonable para batch list.
+  // En entornos reales puede haber decenas de doctores; 100 mantiene el endpoint util sin disparar coste.
+  const MAX_BATCH_IDS = 100;
   if (instalacionIds.length > MAX_BATCH_IDS) {
     return res.status(400).json({ message: `instalacion_ids excede el máximo (${MAX_BATCH_IDS})` });
   }
