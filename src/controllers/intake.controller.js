@@ -169,15 +169,14 @@ async function dedupeAndCreateLead(leadPayload, rawPayload = {}, attributionStep
 }
 
 exports.ingestLead = asyncHandler(async (req, res) => {
-  if (!validateSignature(req)) {
-    return res.status(401).json({ message: 'Firma HMAC inválida o ausente' });
-  }
-
-  const eventId = (req.headers[EVENT_ID_HEADER] || req.body?.event_id || req.body?.eventId || null) || null;
+  const body = req.body || {};
+  const eventId = (req.headers[EVENT_ID_HEADER] || body?.event_id || body?.eventId || null) || null;
 
   const {
     clinica_id,
+    clinic_id,
     grupo_clinica_id,
+    group_id,
     campana_id,
     channel,
     source,
@@ -209,13 +208,59 @@ exports.ingestLead = asyncHandler(async (req, res) => {
     consent_version,
     external_source,
     external_id
-  } = req.body || {};
+  } = body;
 
-  let clinicaIdParsed = parseInteger(clinica_id);
-  let grupoClinicaIdParsed = parseInteger(grupo_clinica_id);
+  // Compat: intake.js usa clinic_id; el backend histórico usa clinica_id
+  let clinicaIdParsed = parseInteger(coalesce(clinica_id, clinic_id, body.clinicaId, body.clinicId));
+  let grupoClinicaIdParsed = parseInteger(coalesce(grupo_clinica_id, group_id, body.grupoClinicaId, body.groupId));
   const campanaIdParsed = parseInteger(campana_id);
-  const attribution = req.body?.attribution || {};
-  const leadData = req.body?.lead_data || {};
+  const attribution = body?.attribution || {};
+  const leadData = body?.lead_data || {};
+
+  // Validación por dominio + HMAC por clínica/grupo cuando hay IntakeConfig guardada.
+  // Fallback legacy: INTAKE_WEB_SECRET solo se usa si NO existe configuración.
+  const pageUrlForDomain = coalesce(
+    attribution.page_url,
+    body.page_url,
+    body.pageUrl,
+    attribution.landing_url,
+    body.landing_url,
+    body.landingUrl
+  );
+  const derivedDomain = getHostnameFromUrl(pageUrlForDomain || '');
+  const domain = (body.domain || derivedDomain || '').toLowerCase();
+
+  let cfg = null;
+  if (clinicaIdParsed !== null) {
+    cfg = await IntakeConfig.findOne({ where: { clinic_id: clinicaIdParsed }, raw: true });
+  } else if (grupoClinicaIdParsed !== null) {
+    cfg = await IntakeConfig.findOne({ where: { group_id: grupoClinicaIdParsed, assignment_scope: 'group' }, raw: true });
+  } else if (domain) {
+    cfg = await IntakeConfig.findOne({
+      where: db.Sequelize.literal(`JSON_CONTAINS(COALESCE(domains,'[]'), '\"${domain.toLowerCase()}\"')`)
+    });
+    if (cfg) cfg = cfg.get ? cfg.get({ plain: true }) : cfg;
+  }
+
+  if (cfg && Array.isArray(cfg.domains) && cfg.domains.length > 0) {
+    if (!domain) {
+      return res.status(403).json({ message: 'Domain not allowed' });
+    }
+    if (!cfg.domains.includes(domain.toLowerCase())) {
+      return res.status(403).json({ message: 'Domain not allowed' });
+    }
+  }
+
+  const providedSignature = req.headers[SIGNATURE_HEADER] || req.headers[SIGNATURE_HEADER_SHA];
+  if (cfg && cfg.hmac_key) {
+    if (!providedSignature || !validateHmac(req, cfg.hmac_key, providedSignature)) {
+      return res.status(401).json({ message: 'Firma HMAC inválida o ausente' });
+    }
+  } else if (!cfg && process.env.INTAKE_WEB_SECRET) {
+    if (!providedSignature || !validateHmac(req, process.env.INTAKE_WEB_SECRET, providedSignature)) {
+      return res.status(401).json({ message: 'Firma HMAC inválida o ausente' });
+    }
+  }
 
   const utmSource = coalesce(attribution.utm_source, utm_source);
   const utmMedium = coalesce(attribution.utm_medium, utm_medium);
@@ -407,14 +452,59 @@ exports.ingestLead = asyncHandler(async (req, res) => {
 // Configuración del snippet
 // ===========================
 
+const DEFAULT_CHAT_FLOW = {
+  version: '1.0',
+  steps: [
+    { type: 'message', text: 'Hola. Te ayudamos a pedir cita.' },
+    { type: 'input', text: 'Como te llamas?', input_type: 'text', placeholder: 'Tu nombre', field: 'nombre' },
+    { type: 'input', text: 'Gracias {{nombre}}. Cual es tu telefono?', input_type: 'tel', placeholder: 'Tu telefono', field: 'telefono' },
+    { type: 'input', text: 'Y tu email? (opcional)', input_type: 'email', placeholder: 'Tu email', field: 'email' },
+    { type: 'cta', text: 'Confirma que quieres que te contactemos:', button_text: 'Ok, contactadme' }
+  ]
+};
+
+const DEFAULT_TEXTS = {
+  chat_title: 'WhatsApp',
+  chat_welcome: 'Hola. Quieres pedirnos una cita de valoracion sin coste?',
+  tel_modal_title: 'Antes de llamar...',
+  tel_modal_subtitle: 'Dejanos tus datos por si se corta la comunicacion.',
+  consent_text: 'Acepto la politica de privacidad',
+  privacy_url: '/politica-privacidad'
+};
+
+const DEFAULT_APPEARANCE = {
+  position: 'bottom-right',
+  icon_type: 'whatsapp',
+  icon_color: '#FFFFFF',
+  icon_bg_color: '#25D366',
+  bubble_text: 'Necesitas ayuda?',
+  bubble_enabled: true,
+  bubble_delay: 3000,
+  bubble_bg_color: '#FFFFFF',
+  bubble_text_color: '#1F2937',
+  animation: 'bounce',
+  header_bg_color: '#075E54',
+  header_text_color: '#FFFFFF',
+  chat_width: 380,
+  chat_height: 520,
+  auto_open_delay: 0,
+  typing_delay: 1500,
+  mobile_fullscreen: true,
+  frequency: 'every_visit',
+  frequency_hours: 24,
+  show_branding: true
+};
+
 const defaultConfigPayload = (clinicId, groupId) => ({
   clinic_id: clinicId || null,
   group_id: groupId || null,
   assignment_scope: groupId ? 'group' : 'clinic',
   domains: [],
   features: { chat_enabled: true, tel_modal_enabled: true, viewcontent_enabled: true, form_intercept_enabled: true },
-  flow: null,
-  texts: null,
+  flow: DEFAULT_CHAT_FLOW,
+  flows: null,
+  appearance: DEFAULT_APPEARANCE,
+  texts: DEFAULT_TEXTS,
   locations: [],
   has_hmac: false,
   config: {}
@@ -455,9 +545,11 @@ exports.getIntakeConfig = asyncHandler(async (req, res) => {
     payload.group_id = record.group_id || null;
     payload.assignment_scope = record.assignment_scope || payload.assignment_scope;
     payload.domains = record.domains || [];
-    payload.features = cfg.features || payload.features;
-    payload.flow = cfg.flow || null;
-    payload.texts = cfg.texts || null;
+    payload.features = { ...payload.features, ...(cfg.features || {}) };
+    payload.flow = cfg.flow || payload.flow;
+    payload.flows = cfg.flows || payload.flows;
+    payload.appearance = { ...payload.appearance, ...(cfg.appearance || {}) };
+    payload.texts = { ...payload.texts, ...(cfg.texts || {}) };
     payload.locations = cfg.locations || [];
     payload.config = cfg;
     payload.has_hmac = !!record.hmac_key;
@@ -475,7 +567,32 @@ exports.upsertIntakeConfig = asyncHandler(async (req, res) => {
   if (!clinicId && !groupId) return res.status(400).json({ message: 'clinicId o group_id requerido' });
 
   const scope = groupId ? 'group' : 'clinic';
-  const { domains = [], config = {}, hmac_key } = req.body || {};
+  const body = req.body && typeof req.body === 'object' ? req.body : {};
+  const domains = Array.isArray(body.domains) ? body.domains : [];
+  const hmac_key = body.hmac_key;
+
+  // Compatibilidad:
+  // - UI suele enviar features/flow/texts/locations en root.
+  // - Backwards: si viene body.config, lo respetamos.
+  let config = {};
+  if (body.config && typeof body.config === 'object' && !Array.isArray(body.config)) {
+    config = body.config;
+  } else {
+    const features = body.features && typeof body.features === 'object' ? body.features : undefined;
+    const flow = body.flow && typeof body.flow === 'object' ? body.flow : undefined;
+    const flows = Array.isArray(body.flows) ? body.flows : undefined;
+    const appearance = body.appearance && typeof body.appearance === 'object' && !Array.isArray(body.appearance) ? body.appearance : undefined;
+    const texts = body.texts && typeof body.texts === 'object' ? body.texts : undefined;
+    const locations = Array.isArray(body.locations) ? body.locations : undefined;
+    config = {
+      ...(features ? { features } : {}),
+      ...(flow ? { flow } : {}),
+      ...(flows ? { flows } : {}),
+      ...(appearance ? { appearance } : {}),
+      ...(texts ? { texts } : {}),
+      ...(locations ? { locations } : {})
+    };
+  }
   await IntakeConfig.upsert({
     clinic_id: clinicId || null,
     group_id: groupId || null,
@@ -492,33 +609,105 @@ exports.upsertIntakeConfig = asyncHandler(async (req, res) => {
 // Eventos genéricos (ViewContent, Contact, Schedule, Purchase)
 // ===========================
 
-const validateHmac = (body, secret, provided) => {
+const normalizeSignature = (provided) => {
+  if (!provided) return null;
+  if (typeof provided !== 'string') return null;
+  const trimmed = provided.trim();
+  if (!trimmed) return null;
+  // Accept "sha256=<hex>" just in case some clients send it like Meta.
+  return trimmed.toLowerCase().startsWith('sha256=') ? trimmed.slice(7).trim() : trimmed.toLowerCase();
+};
+
+const getHostnameFromUrl = (value) => {
+  if (!value || typeof value !== 'string') return null;
+  try {
+    return new URL(value).hostname.toLowerCase();
+  } catch {
+    return null;
+  }
+};
+
+// Validación HMAC sobre el payload "raw" (mejor: evita discrepancias por orden de keys).
+const validateHmac = (req, secret, provided) => {
   if (!secret) return true;
-  if (!provided) return false;
-  const expected = crypto.createHmac('sha256', secret).update(stableStringify(body)).digest('hex');
-  return expected === provided;
+  const signature = normalizeSignature(provided);
+  if (!signature) return false;
+
+  const rawPayload = req.rawBody
+    ? (Buffer.isBuffer(req.rawBody) ? req.rawBody : Buffer.from(req.rawBody))
+    : Buffer.from(stableStringify(req.body || {}));
+
+  const expected = crypto.createHmac('sha256', secret).update(rawPayload).digest('hex');
+  const expectedBuf = Buffer.from(expected);
+  const providedBuf = Buffer.from(signature);
+  if (expectedBuf.length !== providedBuf.length) {
+    return false;
+  }
+  return crypto.timingSafeEqual(expectedBuf, providedBuf);
 };
 
 exports.receiveIntakeEvent = asyncHandler(async (req, res) => {
-  const {
-    event_name,
-    clinic_id,
-    domain,
-    event_time,
-    event_id,
-    action_source,
-    event_source_url,
-    custom_data = {},
-    user_data = {},
-    fbp,
-    fbc
-  } = req.body || {};
+  const body = req.body || {};
 
-  const clinicIdParsed = parseInteger(clinic_id);
+  const eventName = body.event_name || body.eventName || 'ViewContent';
+  const clinicIdParsed = parseInteger(coalesce(body.clinic_id, body.clinica_id, body.clinicId));
+  const groupIdParsed = parseInteger(coalesce(body.group_id, body.grupo_clinica_id, body.groupId));
+
+  const eventSourceUrl = coalesce(
+    body.event_source_url,
+    body.eventSourceUrl,
+    body.page_url,
+    body.pageUrl,
+    body.event_data?.page_url,
+    body.event_data?.pageUrl
+  );
+
+  const domainFromBody = body.domain || null;
+  const derivedDomain = getHostnameFromUrl(eventSourceUrl || '');
+  const domain = (domainFromBody || derivedDomain || '').toLowerCase();
+
+  const customDataFromBody =
+    body.custom_data && typeof body.custom_data === 'object' && !Array.isArray(body.custom_data) ? body.custom_data : {};
+  const eventDataFromBody =
+    body.event_data && typeof body.event_data === 'object' && !Array.isArray(body.event_data) ? body.event_data : {};
+
+  // Aceptar el payload del snippet "v2" (campos planos + event_data) y el payload "canónico" (custom_data/user_data).
+  const custom_data = {
+    ...customDataFromBody,
+    ...eventDataFromBody
+  };
+
+  // Compat: campos planos (utm/gclid/etc.)
+  if (body.source && custom_data.source == null) custom_data.source = body.source;
+  if (body.source_detail && custom_data.source_detail == null) custom_data.source_detail = body.source_detail;
+  if (body.utm_campaign && custom_data.utm_campaign == null) custom_data.utm_campaign = body.utm_campaign;
+  if (body.gclid && custom_data.gclid == null) custom_data.gclid = body.gclid;
+  if (body.gbraid && custom_data.gbraid == null) custom_data.gbraid = body.gbraid;
+  if (body.wbraid && custom_data.wbraid == null) custom_data.wbraid = body.wbraid;
+  if (body.fbclid && custom_data.fbclid == null) custom_data.fbclid = body.fbclid;
+  if (body.value != null && custom_data.value == null) custom_data.value = body.value;
+  if (body.currency && custom_data.currency == null) custom_data.currency = body.currency;
+
+  const userDataFromBody =
+    body.user_data && typeof body.user_data === 'object' && !Array.isArray(body.user_data) ? body.user_data : {};
+
+  // Compat: algunos clientes pueden mandar lead_data (nombre/email/telefono) también en eventos.
+  const leadDataFromBody =
+    body.lead_data && typeof body.lead_data === 'object' && !Array.isArray(body.lead_data) ? body.lead_data : {};
+
+  const user_data = {
+    ...userDataFromBody,
+    ...leadDataFromBody
+  };
+
+  const fbp = body.fbp || user_data.fbp;
+  const fbc = body.fbc || user_data.fbc;
 
   let cfg = null;
   if (clinicIdParsed !== null) {
     cfg = await IntakeConfig.findOne({ where: { clinic_id: clinicIdParsed }, raw: true });
+  } else if (groupIdParsed !== null) {
+    cfg = await IntakeConfig.findOne({ where: { group_id: groupIdParsed, assignment_scope: 'group' }, raw: true });
   } else if (domain) {
     cfg = await IntakeConfig.findOne({
       where: db.Sequelize.literal(`JSON_CONTAINS(COALESCE(domains,'[]'), '\"${domain.toLowerCase()}\"')`)
@@ -526,20 +715,30 @@ exports.receiveIntakeEvent = asyncHandler(async (req, res) => {
     if (cfg) cfg = cfg.get({ plain: true });
   }
 
-  if (cfg && cfg.domains && cfg.domains.length > 0 && domain && !cfg.domains.includes(domain.toLowerCase())) {
-    return res.status(403).json({ message: 'Domain not allowed' });
+  if (cfg && Array.isArray(cfg.domains) && cfg.domains.length > 0) {
+    // Si hay allowlist configurada, el dominio es obligatorio.
+    if (!domain) {
+      return res.status(403).json({ message: 'Domain not allowed' });
+    }
+    if (!cfg.domains.includes(domain.toLowerCase())) {
+      return res.status(403).json({ message: 'Domain not allowed' });
+    }
   }
 
   if (cfg && cfg.hmac_key) {
     const provided = req.headers['x-cc-signature'] || req.headers['x-cc-signature-sha256'];
-    if (!validateHmac(req.body || {}, cfg.hmac_key, provided)) {
+    // ViewContent puede enviarse via sendBeacon (sin headers), así que toleramos firma ausente solo en ese evento.
+    if (!provided && String(eventName).toLowerCase() !== 'viewcontent') {
+      return res.status(401).json({ message: 'Invalid signature' });
+    }
+    if (provided && !validateHmac(req, cfg.hmac_key, provided)) {
       return res.status(401).json({ message: 'Invalid signature' });
     }
   }
 
   const userData = buildMetaUserData({
     email: user_data.email,
-    phone: user_data.phone,
+    phone: user_data.phone || user_data.telefono,
     ip: user_data.ip || req.headers['x-forwarded-for'] || req.socket?.remoteAddress,
     ua: user_data.ua || req.headers['user-agent'],
     fbp: fbp || user_data.fbp,
@@ -548,11 +747,11 @@ exports.receiveIntakeEvent = asyncHandler(async (req, res) => {
   });
 
   await sendMetaEvent({
-    eventName: event_name || 'ViewContent',
-    eventTime: event_time || Math.floor(Date.now() / 1000),
-    eventId: event_id || undefined,
-    actionSource: action_source || 'website',
-    eventSourceUrl: event_source_url || undefined,
+    eventName: eventName || 'ViewContent',
+    eventTime: body.event_time || Math.floor(Date.now() / 1000),
+    eventId: body.event_id || undefined,
+    actionSource: body.action_source || 'website',
+    eventSourceUrl: eventSourceUrl || undefined,
     clinicId: cfg?.clinic_id || clinicIdParsed || null,
     source: custom_data.source,
     sourceDetail: custom_data.source_detail,
@@ -576,7 +775,7 @@ exports.receiveIntakeEvent = asyncHandler(async (req, res) => {
         value: custom_data.value || 0,
         currency: custom_data.currency || 'EUR',
         conversionDateTime: custom_data.conversion_time || new Date().toISOString(),
-        externalId: user_data.external_id || event_id,
+        externalId: user_data.external_id || body.event_id,
         userAgent: user_data.ua || req.headers['user-agent'],
         ipAddress: user_data.ip || req.headers['x-forwarded-for'] || req.socket?.remoteAddress
       });

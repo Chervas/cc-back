@@ -5,7 +5,8 @@ module.exports = (sequelize, DataTypes) => {
     id: { type: DataTypes.INTEGER, primaryKey: true, autoIncrement: true },
     clinic_id: {
       type: DataTypes.INTEGER,
-      allowNull: false,
+      // Puede ser null cuando la configuración es a nivel de grupo
+      allowNull: true,
       references: { model: 'Clinicas', key: 'id_clinica' },
       onUpdate: 'CASCADE',
       onDelete: 'CASCADE'
