@@ -12,6 +12,12 @@ module.exports = (sequelize, DataTypes) => {
       if (models.Usuario) {
         CitaPaciente.belongsTo(models.Usuario, { foreignKey: 'doctor_id', targetKey: 'id_usuario', as: 'doctor' });
       }
+      if (models.Instalacion) {
+        CitaPaciente.belongsTo(models.Instalacion, { foreignKey: 'instalacion_id', targetKey: 'id', as: 'instalacion' });
+      }
+      if (models.Tratamiento) {
+        CitaPaciente.belongsTo(models.Tratamiento, { foreignKey: 'tratamiento_id', targetKey: 'id_tratamiento', as: 'tratamiento' });
+      }
       if (models.Campana) {
         CitaPaciente.belongsTo(models.Campana, { foreignKey: 'campana_id', as: 'campana' });
       }
