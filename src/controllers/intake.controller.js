@@ -41,6 +41,44 @@ const normalizePhone = (phone) => {
   const digits = String(phone).replace(/\D/g, '');
   return digits || null;
 };
+const normalizeDomain = (domain) => {
+  if (!domain || typeof domain !== 'string') return null;
+  const d = domain.trim().toLowerCase();
+  if (!d) return null;
+  // Evitar valores con punto final (p. ej. "example.com.")
+  return d.endsWith('.') ? d.slice(0, -1) : d;
+};
+const stripWww = (host) => (host && host.startsWith('www.') ? host.slice(4) : host);
+const isDomainAllowed = (allowlist, domain) => {
+  // Sin allowlist configurada => permitido
+  if (!Array.isArray(allowlist) || allowlist.length === 0) return true;
+  const host = normalizeDomain(domain);
+  if (!host) return false;
+
+  for (const rawEntry of allowlist) {
+    const entry = normalizeDomain(String(rawEntry || ''));
+    if (!entry) continue;
+    if (entry === '*') return true;
+
+    // Soporte básico de wildcard "*.example.com" (equivale a cualquier subdominio, incluyendo "www")
+    if (entry.startsWith('*.')) {
+      const root = entry.slice(2);
+      if (!root) continue;
+      if (host === root || host.endsWith('.' + root)) return true;
+      continue;
+    }
+
+    // Por defecto: "example.com" permite:
+    // - example.com
+    // - www.example.com
+    // - cualquier subdominio (*.example.com)
+    const root = stripWww(entry);
+    if (host === entry || host === root || host === 'www.' + root) return true;
+    if (host.endsWith('.' + root)) return true;
+  }
+
+  return false;
+};
 const parseDate = (value) => {
   const d = value ? new Date(value) : null;
   return d && !isNaN(d.getTime()) ? d : null;
@@ -228,7 +266,7 @@ exports.ingestLead = asyncHandler(async (req, res) => {
     body.landingUrl
   );
   const derivedDomain = getHostnameFromUrl(pageUrlForDomain || '');
-  const domain = (body.domain || derivedDomain || '').toLowerCase();
+  const domain = normalizeDomain(body.domain || derivedDomain) || '';
 
   let cfg = null;
   if (clinicaIdParsed !== null) {
@@ -243,10 +281,7 @@ exports.ingestLead = asyncHandler(async (req, res) => {
   }
 
   if (cfg && Array.isArray(cfg.domains) && cfg.domains.length > 0) {
-    if (!domain) {
-      return res.status(403).json({ message: 'Domain not allowed' });
-    }
-    if (!cfg.domains.includes(domain.toLowerCase())) {
+    if (!domain || !isDomainAllowed(cfg.domains, domain)) {
       return res.status(403).json({ message: 'Domain not allowed' });
     }
   }
@@ -513,7 +548,7 @@ const defaultConfigPayload = (clinicId, groupId) => ({
 exports.getIntakeConfig = asyncHandler(async (req, res) => {
   const clinicIdRaw = req.query.clinic_id;
   const groupIdRaw = req.query.group_id;
-  const domain = (req.query.domain || '').toLowerCase();
+  const domain = normalizeDomain(String(req.query.domain || '')) || '';
   const clinicIdParsed = parseInteger(clinicIdRaw);
   const groupIdParsed = parseInteger(groupIdRaw);
 
@@ -553,7 +588,7 @@ exports.getIntakeConfig = asyncHandler(async (req, res) => {
     payload.locations = cfg.locations || [];
     payload.config = cfg;
     payload.has_hmac = !!record.hmac_key;
-    if (domain && payload.domains.length > 0 && !payload.domains.includes(domain)) {
+    if (domain && payload.domains.length > 0 && !isDomainAllowed(payload.domains, domain)) {
       return res.status(403).json({ message: 'Domain not allowed' });
     }
   }
@@ -664,7 +699,7 @@ exports.receiveIntakeEvent = asyncHandler(async (req, res) => {
 
   const domainFromBody = body.domain || null;
   const derivedDomain = getHostnameFromUrl(eventSourceUrl || '');
-  const domain = (domainFromBody || derivedDomain || '').toLowerCase();
+  const domain = normalizeDomain(domainFromBody || derivedDomain) || '';
 
   const customDataFromBody =
     body.custom_data && typeof body.custom_data === 'object' && !Array.isArray(body.custom_data) ? body.custom_data : {};
@@ -717,10 +752,7 @@ exports.receiveIntakeEvent = asyncHandler(async (req, res) => {
 
   if (cfg && Array.isArray(cfg.domains) && cfg.domains.length > 0) {
     // Si hay allowlist configurada, el dominio es obligatorio.
-    if (!domain) {
-      return res.status(403).json({ message: 'Domain not allowed' });
-    }
-    if (!cfg.domains.includes(domain.toLowerCase())) {
+    if (!domain || !isDomainAllowed(cfg.domains, domain)) {
       return res.status(403).json({ message: 'Domain not allowed' });
     }
   }
