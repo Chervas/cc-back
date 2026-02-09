@@ -283,15 +283,21 @@ server.listen(PORT, () => {
     console.log(`Servidor backend escuchando en el puerto ${PORT}`);
 });
 
-jobScheduler.start();
-console.log('🔁 Job scheduler iniciado');
+// Importante: staging puede levantar un backend separado en otro puerto.
+// Para evitar duplicar workers (jobs/colas), el scheduler se controla con JOBS_AUTO_START.
+const shouldAutoStart = process.env.NODE_ENV === 'production' || process.env.JOBS_AUTO_START === 'true';
+if (shouldAutoStart) {
+    jobScheduler.start();
+    console.log('🔁 Job scheduler iniciado');
+} else {
+    console.log('⏸️ Job scheduler deshabilitado (JOBS_AUTO_START=false)');
+}
 
 // Inicializar jobs automáticamente en producción
 const { metaSyncJobs } = require('./jobs/sync.jobs');
 metaSyncJobs.initialize().catch((error) => {
   console.error('⚠️ No se pudo inicializar el sistema de jobs al arranque:', error.message);
 });
-const shouldAutoStart = process.env.NODE_ENV === 'production' || process.env.JOBS_AUTO_START === 'true';
 if (shouldAutoStart) {
   setTimeout(async () => {
     try {
