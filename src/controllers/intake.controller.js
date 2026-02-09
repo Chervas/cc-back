@@ -1,5 +1,7 @@
 const crypto = require('crypto');
 const axios = require('axios');
+const dns = require('dns').promises;
+const net = require('net');
 const asyncHandler = require('express-async-handler');
 const db = require('../../models');
 const { Op, literal } = db.Sequelize;
@@ -684,6 +686,223 @@ exports.getIntakeConfigSecretGroup = asyncHandler(async (req, res) => {
     group_id: groupId,
     has_hmac: !!record?.hmac_key,
     hmac_key: record?.hmac_key || null
+  });
+});
+
+// ======================================
+// Verificador de instalación del snippet (solo UI autenticada)
+// ======================================
+
+const isPrivateIpv4 = (ip) => {
+  const parts = String(ip).split('.').map((p) => parseInt(p, 10));
+  if (parts.length !== 4 || parts.some((n) => !Number.isFinite(n) || n < 0 || n > 255)) return true;
+  const [a, b] = parts;
+  if (a === 10) return true;
+  if (a === 127) return true;
+  if (a === 0) return true;
+  if (a === 169 && b === 254) return true;
+  if (a === 192 && b === 168) return true;
+  if (a === 172 && b >= 16 && b <= 31) return true;
+  if (a === 100 && b >= 64 && b <= 127) return true; // CGNAT
+  return false;
+};
+
+const isPrivateIpv6 = (ip) => {
+  const v = String(ip).trim().toLowerCase();
+  if (!v) return true;
+  if (v === '::1' || v === '0:0:0:0:0:0:0:1') return true; // loopback
+  if (v === '::' || v === '0:0:0:0:0:0:0:0') return true; // unspecified
+  if (v.startsWith('fe80:')) return true; // link-local
+  if (v.startsWith('fc') || v.startsWith('fd')) return true; // unique local (fc00::/7)
+  return false;
+};
+
+const isPrivateIp = (ip) => {
+  const kind = net.isIP(ip);
+  if (kind === 4) return isPrivateIpv4(ip);
+  if (kind === 6) return isPrivateIpv6(ip);
+  return true;
+};
+
+const ensureSafePublicDomain = async (domain) => {
+  const host = normalizeDomain(domain);
+  if (!host) throw new Error('Domain requerido');
+
+  // No permitir IPs directas ni localhost (evita SSRF a red interna).
+  if (net.isIP(host)) throw new Error('Domain inválido (IP no permitida)');
+  if (host === 'localhost' || host.endsWith('.local')) throw new Error('Domain inválido (host local no permitido)');
+
+  const addrs = await dns.lookup(host, { all: true, verbatim: true });
+  if (!Array.isArray(addrs) || addrs.length === 0) throw new Error('No se pudo resolver el dominio');
+  for (const a of addrs) {
+    if (a?.address && isPrivateIp(a.address)) {
+      throw new Error('El dominio resuelve a una IP privada (no permitido)');
+    }
+  }
+};
+
+const isHostWithinRoot = (host, root) => {
+  const h = stripWww(normalizeDomain(host));
+  const r = stripWww(normalizeDomain(root));
+  if (!h || !r) return false;
+  return h === r || h.endsWith('.' + r);
+};
+
+const fetchHtmlWithRedirects = async (startUrl, rootDomain) => {
+  let currentUrl = startUrl;
+  for (let i = 0; i < 5; i += 1) {
+    const resp = await axios.get(currentUrl, {
+      timeout: 8000,
+      maxRedirects: 0,
+      responseType: 'text',
+      headers: {
+        'User-Agent': 'ClinicaClickSnippetVerifier/1.0',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8'
+      },
+      maxContentLength: 1024 * 1024,
+      maxBodyLength: 1024 * 1024,
+      validateStatus: (status) => status >= 200 && status < 400,
+    });
+
+    if (resp.status >= 300 && resp.status < 400 && resp.headers?.location) {
+      const next = new URL(resp.headers.location, currentUrl);
+      if (!['http:', 'https:'].includes(next.protocol)) {
+        throw new Error('Redirect no permitido');
+      }
+      if (!isHostWithinRoot(next.hostname, rootDomain)) {
+        throw new Error('Redirect a dominio no permitido');
+      }
+      currentUrl = next.toString();
+      continue;
+    }
+
+    if (resp.status >= 200 && resp.status < 300) {
+      return { final_url: currentUrl, html: String(resp.data || '') };
+    }
+
+    throw new Error(`Status inesperado: ${resp.status}`);
+  }
+  throw new Error('Demasiados redirects');
+};
+
+const findIntakeScripts = (html) => {
+  const scripts = [];
+  if (!html || typeof html !== 'string') return scripts;
+
+  const scriptTagRegex = /<script\b[^>]*\bsrc\s*=\s*(['"])([^'"]+)\1[^>]*>/gim;
+  let match;
+  while ((match = scriptTagRegex.exec(html)) !== null) {
+    const tag = match[0];
+    const src = match[2] || '';
+    if (!src.toLowerCase().includes('intake.js')) continue;
+
+    const clinicMatch = tag.match(/\bdata-clinic-id\s*=\s*(['"])([^'"]+)\1/i);
+    const groupMatch = tag.match(/\bdata-group-id\s*=\s*(['"])([^'"]+)\1/i);
+
+    scripts.push({
+      tag,
+      src,
+      data_clinic_id: clinicMatch ? clinicMatch[2] : null,
+      data_group_id: groupMatch ? groupMatch[2] : null
+    });
+  }
+  return scripts;
+};
+
+exports.verifySnippet = asyncHandler(async (req, res) => {
+  const domain = normalizeDomain(String(req.query.domain || '')) || '';
+  const clinicId = parseInteger(coalesce(req.query.clinic_id, req.query.clinicId));
+  const groupId = parseInteger(coalesce(req.query.group_id, req.query.groupId));
+
+  if (!domain) {
+    return res.status(400).json({ installed: false, details: 'domain es obligatorio' });
+  }
+  if (clinicId === null && groupId === null) {
+    return res.status(400).json({ installed: false, details: 'clinic_id o group_id es obligatorio' });
+  }
+  if (clinicId !== null && groupId !== null) {
+    return res.status(400).json({ installed: false, details: 'No se permite enviar clinic_id y group_id a la vez' });
+  }
+
+  const record = await IntakeConfig.findOne({
+    where: groupId !== null
+      ? { group_id: groupId, assignment_scope: 'group' }
+      : { clinic_id: clinicId },
+    raw: true
+  });
+
+  if (!record) {
+    return res.status(404).json({ installed: false, details: 'No existe configuración de intake para este scope (guarda primero)' });
+  }
+  if (!Array.isArray(record.domains) || record.domains.length === 0) {
+    return res.status(400).json({ installed: false, details: 'domains está vacío. Añade el dominio y guarda antes de verificar' });
+  }
+  if (!isDomainAllowed(record.domains, domain)) {
+    return res.status(403).json({ installed: false, details: 'Domain not allowed' });
+  }
+
+  try {
+    await ensureSafePublicDomain(domain);
+  } catch (e) {
+    return res.status(400).json({ installed: false, details: e.message || 'Domain inválido' });
+  }
+
+  const rootDomain = stripWww(domain);
+  const candidates = [`https://${domain}/`, `http://${domain}/`];
+  let lastError = null;
+
+  for (const url of candidates) {
+    try {
+      const { final_url, html } = await fetchHtmlWithRedirects(url, rootDomain);
+      const scripts = findIntakeScripts(html);
+
+      const expectedClinicId = clinicId !== null ? clinicId : null;
+      const expectedGroupId = groupId !== null ? groupId : null;
+      const matched = scripts.find((s) => {
+        if (expectedGroupId !== null) return parseInteger(s.data_group_id) === expectedGroupId;
+        return parseInteger(s.data_clinic_id) === expectedClinicId;
+      });
+
+      if (matched) {
+        return res.json({
+          installed: true,
+          checked_url: final_url,
+          match: {
+            snippet_src: matched.src,
+            data_clinic_id: matched.data_clinic_id,
+            data_group_id: matched.data_group_id
+          },
+          details: 'Snippet encontrado'
+        });
+      }
+
+      if (scripts.length > 0) {
+        return res.json({
+          installed: false,
+          checked_url: final_url,
+          details: 'Se encontró intake.js pero no coincide el data-clinic-id / data-group-id',
+          found: scripts.map((s) => ({
+            snippet_src: s.src,
+            data_clinic_id: s.data_clinic_id,
+            data_group_id: s.data_group_id
+          }))
+        });
+      }
+
+      return res.json({
+        installed: false,
+        checked_url: final_url,
+        details: 'No se encontró ningún <script> con intake.js en el HTML'
+      });
+    } catch (e) {
+      lastError = e;
+    }
+  }
+
+  return res.status(502).json({
+    installed: false,
+    details: 'No se pudo acceder al dominio para verificar',
+    error: lastError?.message || 'fetch error'
   });
 });
 
