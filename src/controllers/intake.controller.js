@@ -604,7 +604,8 @@ exports.upsertIntakeConfig = asyncHandler(async (req, res) => {
   const scope = groupId ? 'group' : 'clinic';
   const body = req.body && typeof req.body === 'object' ? req.body : {};
   const domains = Array.isArray(body.domains) ? body.domains : [];
-  const hmac_key = body.hmac_key;
+  const hasHmacKeyField = Object.prototype.hasOwnProperty.call(body, 'hmac_key');
+  const requestedHmacKey = body.hmac_key;
 
   // Compatibilidad:
   // - UI suele enviar features/flow/texts/locations en root.
@@ -628,16 +629,62 @@ exports.upsertIntakeConfig = asyncHandler(async (req, res) => {
       ...(locations ? { locations } : {})
     };
   }
+
+  // Importante: si el frontend no envía hmac_key, NO debemos borrar la clave existente.
+  // El endpoint público /api/intake/config no devuelve la clave por seguridad; el admin UI podría no tenerla en memoria.
+  let nextHmacKey = null;
+  if (hasHmacKeyField) {
+    // Permite rotación explícita (string) o borrado explícito (null / '').
+    nextHmacKey = requestedHmacKey ? String(requestedHmacKey) : null;
+  } else {
+    // Preservar clave actual si existe
+    const existing = await IntakeConfig.findOne({
+      where: scope === 'group'
+        ? { group_id: groupId, assignment_scope: 'group' }
+        : { clinic_id: clinicId },
+      raw: true
+    });
+    nextHmacKey = existing?.hmac_key || null;
+  }
+
   await IntakeConfig.upsert({
     clinic_id: clinicId || null,
     group_id: groupId || null,
     assignment_scope: scope,
     domains,
     config,
-    hmac_key: hmac_key || null
+    hmac_key: nextHmacKey
   });
 
   res.json({ success: true });
+});
+
+// ======================================
+// Config secreta (solo UI autenticada)
+// ======================================
+
+exports.getIntakeConfigSecretClinic = asyncHandler(async (req, res) => {
+  const clinicId = parseInteger(req.params.clinicId);
+  if (clinicId === null) return res.status(400).json({ message: 'clinicId requerido' });
+
+  const record = await IntakeConfig.findOne({ where: { clinic_id: clinicId }, raw: true });
+  return res.json({
+    clinic_id: clinicId,
+    has_hmac: !!record?.hmac_key,
+    hmac_key: record?.hmac_key || null
+  });
+});
+
+exports.getIntakeConfigSecretGroup = asyncHandler(async (req, res) => {
+  const groupId = parseInteger(req.params.groupId);
+  if (groupId === null) return res.status(400).json({ message: 'groupId requerido' });
+
+  const record = await IntakeConfig.findOne({ where: { group_id: groupId, assignment_scope: 'group' }, raw: true });
+  return res.json({
+    group_id: groupId,
+    has_hmac: !!record?.hmac_key,
+    hmac_key: record?.hmac_key || null
+  });
 });
 
 // ===========================

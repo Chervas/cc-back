@@ -12,6 +12,8 @@ router.post('/events', intakeController.receiveIntakeEvent);
 
 // Rutas protegidas
 router.use(protect);
+router.get('/config/:clinicId/secret', intakeController.getIntakeConfigSecretClinic);
+router.get('/config/group/:groupId/secret', intakeController.getIntakeConfigSecretGroup);
 router.get('/leads', intakeController.listLeads);
 router.get('/leads/stats', intakeController.getLeadStats);
 router.patch('/leads/:id', intakeController.updateLeadStatus);
