@@ -169,15 +169,14 @@ async function dedupeAndCreateLead(leadPayload, rawPayload = {}, attributionStep
 }
 
 exports.ingestLead = asyncHandler(async (req, res) => {
-  if (!validateSignature(req)) {
-    return res.status(401).json({ message: 'Firma HMAC inválida o ausente' });
-  }
-
-  const eventId = (req.headers[EVENT_ID_HEADER] || req.body?.event_id || req.body?.eventId || null) || null;
+  const body = req.body || {};
+  const eventId = (req.headers[EVENT_ID_HEADER] || body?.event_id || body?.eventId || null) || null;
 
   const {
     clinica_id,
+    clinic_id,
     grupo_clinica_id,
+    group_id,
     campana_id,
     channel,
     source,
@@ -209,13 +208,59 @@ exports.ingestLead = asyncHandler(async (req, res) => {
     consent_version,
     external_source,
     external_id
-  } = req.body || {};
+  } = body;
 
-  let clinicaIdParsed = parseInteger(clinica_id);
-  let grupoClinicaIdParsed = parseInteger(grupo_clinica_id);
+  // Compat: intake.js usa clinic_id; el backend histórico usa clinica_id
+  let clinicaIdParsed = parseInteger(coalesce(clinica_id, clinic_id, body.clinicaId, body.clinicId));
+  let grupoClinicaIdParsed = parseInteger(coalesce(grupo_clinica_id, group_id, body.grupoClinicaId, body.groupId));
   const campanaIdParsed = parseInteger(campana_id);
-  const attribution = req.body?.attribution || {};
-  const leadData = req.body?.lead_data || {};
+  const attribution = body?.attribution || {};
+  const leadData = body?.lead_data || {};
+
+  // Validación por dominio + HMAC por clínica/grupo cuando hay IntakeConfig guardada.
+  // Fallback legacy: INTAKE_WEB_SECRET solo se usa si NO existe configuración.
+  const pageUrlForDomain = coalesce(
+    attribution.page_url,
+    body.page_url,
+    body.pageUrl,
+    attribution.landing_url,
+    body.landing_url,
+    body.landingUrl
+  );
+  const derivedDomain = getHostnameFromUrl(pageUrlForDomain || '');
+  const domain = (body.domain || derivedDomain || '').toLowerCase();
+
+  let cfg = null;
+  if (clinicaIdParsed !== null) {
+    cfg = await IntakeConfig.findOne({ where: { clinic_id: clinicaIdParsed }, raw: true });
+  } else if (grupoClinicaIdParsed !== null) {
+    cfg = await IntakeConfig.findOne({ where: { group_id: grupoClinicaIdParsed, assignment_scope: 'group' }, raw: true });
+  } else if (domain) {
+    cfg = await IntakeConfig.findOne({
+      where: db.Sequelize.literal(`JSON_CONTAINS(COALESCE(domains,'[]'), '\"${domain.toLowerCase()}\"')`)
+    });
+    if (cfg) cfg = cfg.get ? cfg.get({ plain: true }) : cfg;
+  }
+
+  if (cfg && Array.isArray(cfg.domains) && cfg.domains.length > 0) {
+    if (!domain) {
+      return res.status(403).json({ message: 'Domain not allowed' });
+    }
+    if (!cfg.domains.includes(domain.toLowerCase())) {
+      return res.status(403).json({ message: 'Domain not allowed' });
+    }
+  }
+
+  const providedSignature = req.headers[SIGNATURE_HEADER] || req.headers[SIGNATURE_HEADER_SHA];
+  if (cfg && cfg.hmac_key) {
+    if (!providedSignature || !validateHmac(req, cfg.hmac_key, providedSignature)) {
+      return res.status(401).json({ message: 'Firma HMAC inválida o ausente' });
+    }
+  } else if (!cfg && process.env.INTAKE_WEB_SECRET) {
+    if (!providedSignature || !validateHmac(req, process.env.INTAKE_WEB_SECRET, providedSignature)) {
+      return res.status(401).json({ message: 'Firma HMAC inválida o ausente' });
+    }
+  }
 
   const utmSource = coalesce(attribution.utm_source, utm_source);
   const utmMedium = coalesce(attribution.utm_medium, utm_medium);
@@ -427,6 +472,29 @@ const DEFAULT_TEXTS = {
   privacy_url: '/politica-privacidad'
 };
 
+const DEFAULT_APPEARANCE = {
+  position: 'bottom-right',
+  icon_type: 'whatsapp',
+  icon_color: '#FFFFFF',
+  icon_bg_color: '#25D366',
+  bubble_text: 'Necesitas ayuda?',
+  bubble_enabled: true,
+  bubble_delay: 3000,
+  bubble_bg_color: '#FFFFFF',
+  bubble_text_color: '#1F2937',
+  animation: 'bounce',
+  header_bg_color: '#075E54',
+  header_text_color: '#FFFFFF',
+  chat_width: 380,
+  chat_height: 520,
+  auto_open_delay: 0,
+  typing_delay: 1500,
+  mobile_fullscreen: true,
+  frequency: 'every_visit',
+  frequency_hours: 24,
+  show_branding: true
+};
+
 const defaultConfigPayload = (clinicId, groupId) => ({
   clinic_id: clinicId || null,
   group_id: groupId || null,
@@ -434,6 +502,8 @@ const defaultConfigPayload = (clinicId, groupId) => ({
   domains: [],
   features: { chat_enabled: true, tel_modal_enabled: true, viewcontent_enabled: true, form_intercept_enabled: true },
   flow: DEFAULT_CHAT_FLOW,
+  flows: null,
+  appearance: DEFAULT_APPEARANCE,
   texts: DEFAULT_TEXTS,
   locations: [],
   has_hmac: false,
@@ -477,6 +547,8 @@ exports.getIntakeConfig = asyncHandler(async (req, res) => {
     payload.domains = record.domains || [];
     payload.features = { ...payload.features, ...(cfg.features || {}) };
     payload.flow = cfg.flow || payload.flow;
+    payload.flows = cfg.flows || payload.flows;
+    payload.appearance = { ...payload.appearance, ...(cfg.appearance || {}) };
     payload.texts = { ...payload.texts, ...(cfg.texts || {}) };
     payload.locations = cfg.locations || [];
     payload.config = cfg;
@@ -508,11 +580,15 @@ exports.upsertIntakeConfig = asyncHandler(async (req, res) => {
   } else {
     const features = body.features && typeof body.features === 'object' ? body.features : undefined;
     const flow = body.flow && typeof body.flow === 'object' ? body.flow : undefined;
+    const flows = Array.isArray(body.flows) ? body.flows : undefined;
+    const appearance = body.appearance && typeof body.appearance === 'object' && !Array.isArray(body.appearance) ? body.appearance : undefined;
     const texts = body.texts && typeof body.texts === 'object' ? body.texts : undefined;
     const locations = Array.isArray(body.locations) ? body.locations : undefined;
     config = {
       ...(features ? { features } : {}),
       ...(flow ? { flow } : {}),
+      ...(flows ? { flows } : {}),
+      ...(appearance ? { appearance } : {}),
       ...(texts ? { texts } : {}),
       ...(locations ? { locations } : {})
     };
