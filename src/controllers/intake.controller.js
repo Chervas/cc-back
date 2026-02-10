@@ -757,6 +757,11 @@ const defaultConfigPayload = (clinicId, groupId) => ({
 });
 
 exports.getIntakeConfig = asyncHandler(async (req, res) => {
+  // Evitar respuestas cacheadas (la config puede cambiar desde el panel y el snippet debe reflejarlo al instante).
+  res.set('Cache-Control', 'no-store');
+  res.set('Pragma', 'no-cache');
+  res.set('Expires', '0');
+
   const clinicIdRaw = req.query.clinic_id;
   const groupIdRaw = req.query.group_id;
   const domain = normalizeDomain(String(req.query.domain || '')) || '';
