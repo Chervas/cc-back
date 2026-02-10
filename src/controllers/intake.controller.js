@@ -17,6 +17,7 @@ const ClinicGoogleAdsAccount = db.ClinicGoogleAdsAccount;
 const IntakeConfig = db.IntakeConfig;
 const Conversation = db.Conversation;
 const Message = db.Message;
+const WhatsAppWebOrigin = db.WhatsAppWebOrigin;
 const { sendMetaEvent, buildUserData: buildMetaUserData } = require('../services/metaCapi.service');
 const { uploadClickConversion } = require('../services/googleAdsConversion.service');
 const whatsappService = require('../services/whatsapp.service');
@@ -1419,6 +1420,123 @@ exports.receiveIntakeEvent = asyncHandler(async (req, res) => {
   }
 
   res.json({ success: true });
+});
+
+// ===========================
+// WhatsApp web origin (sin teléfono)
+// ===========================
+
+const isValidWebOriginRef = (value) => {
+  if (!value || typeof value !== 'string') return false;
+  const v = value.trim();
+  if (!v) return false;
+  // Hex (12 chars recomendado, pero aceptamos más para futuras versiones).
+  return /^[a-f0-9]{8,64}$/i.test(v);
+};
+
+exports.createWhatsAppWebOrigin = asyncHandler(async (req, res) => {
+  if (!WhatsAppWebOrigin) {
+    return res.status(501).json({ message: 'WhatsApp web origin no soportado' });
+  }
+
+  const body = req.body || {};
+  const refRaw = coalesce(body.ref, body.cc_ref, body.ccRef);
+  const ref = typeof refRaw === 'string' ? refRaw.trim().toLowerCase() : '';
+  if (!isValidWebOriginRef(ref)) {
+    return res.status(400).json({ message: 'ref inválida' });
+  }
+
+  const clinicIdParsed = parseInteger(coalesce(body.clinic_id, body.clinica_id, body.clinicId));
+  const groupIdParsed = parseInteger(coalesce(body.group_id, body.grupo_clinica_id, body.groupId));
+  if (clinicIdParsed === null && groupIdParsed === null) {
+    return res.status(400).json({ message: 'clinic_id o group_id requerido' });
+  }
+
+  const pageUrl = coalesce(body.page_url, body.pageUrl) || null;
+  const referrerValue = coalesce(body.referrer, body.referrer_url, body.referrerUrl) || null;
+  const derivedDomain = getHostnameFromUrl(pageUrl || '');
+  const domain = normalizeDomain(body.domain || derivedDomain) || '';
+
+  // Validación por dominio + HMAC (mismo criterio que /api/intake/leads y /api/intake/events)
+  let cfg = null;
+  if (clinicIdParsed !== null) {
+    cfg = await IntakeConfig.findOne({ where: { clinic_id: clinicIdParsed }, raw: true });
+  } else if (groupIdParsed !== null) {
+    cfg = await IntakeConfig.findOne({ where: { group_id: groupIdParsed, assignment_scope: 'group' }, raw: true });
+  } else if (domain) {
+    cfg = await IntakeConfig.findOne({
+      where: db.Sequelize.literal(`JSON_CONTAINS(COALESCE(domains,'[]'), '\"${domain.toLowerCase()}\"')`)
+    });
+    if (cfg) cfg = cfg.get ? cfg.get({ plain: true }) : cfg;
+  }
+
+  if (cfg && Array.isArray(cfg.domains) && cfg.domains.length > 0) {
+    if (!domain || !isDomainAllowed(cfg.domains, domain)) {
+      return res.status(403).json({ message: 'Domain not allowed' });
+    }
+  }
+
+  const providedSignature = req.headers[SIGNATURE_HEADER] || req.headers[SIGNATURE_HEADER_SHA];
+  if (cfg && cfg.hmac_key) {
+    if (!providedSignature || !validateHmac(req, cfg.hmac_key, providedSignature)) {
+      return res.status(401).json({ message: 'Firma HMAC inválida o ausente' });
+    }
+  } else if (!cfg && process.env.INTAKE_WEB_SECRET) {
+    if (!providedSignature || !validateHmac(req, process.env.INTAKE_WEB_SECRET, providedSignature)) {
+      return res.status(401).json({ message: 'Firma HMAC inválida o ausente' });
+    }
+  }
+
+  const now = new Date();
+  const ttlDays = parseInt(process.env.WHATSAPP_WEB_ORIGIN_TTL_DAYS || '7', 10);
+  const expiresAt = new Date(now.getTime() + Math.max(1, ttlDays) * 24 * 60 * 60 * 1000);
+  const eventId = (req.headers[EVENT_ID_HEADER] || body?.event_id || body?.eventId || null) || null;
+
+  const defaults = {
+    ref,
+    clinic_id: clinicIdParsed,
+    group_id: groupIdParsed,
+    domain: domain || null,
+    page_url: pageUrl,
+    referrer: referrerValue,
+    utm_source: body.utm_source || null,
+    utm_medium: body.utm_medium || null,
+    utm_campaign: body.utm_campaign || null,
+    utm_content: body.utm_content || null,
+    utm_term: body.utm_term || null,
+    gclid: body.gclid || null,
+    fbclid: body.fbclid || null,
+    ttclid: body.ttclid || null,
+    event_id: eventId,
+    expires_at: expiresAt,
+    metadata: body.metadata && typeof body.metadata === 'object' && !Array.isArray(body.metadata) ? body.metadata : null
+  };
+
+  const [record, created] = await WhatsAppWebOrigin.findOrCreate({
+    where: { ref },
+    defaults,
+  });
+
+  // En caso de reintentos, completamos campos faltantes y extendemos TTL sin pisar "used_*".
+  const updates = {};
+  if (!record.clinic_id && clinicIdParsed) updates.clinic_id = clinicIdParsed;
+  if (!record.group_id && groupIdParsed) updates.group_id = groupIdParsed;
+  if (!record.domain && domain) updates.domain = domain;
+  if (!record.page_url && pageUrl) updates.page_url = pageUrl;
+  if (!record.referrer && referrerValue) updates.referrer = referrerValue;
+  if (!record.expires_at || new Date(record.expires_at).getTime() < expiresAt.getTime()) updates.expires_at = expiresAt;
+  if (!record.event_id && eventId) updates.event_id = eventId;
+  if (Object.keys(updates).length > 0) {
+    await record.update(updates);
+  }
+
+  return res.json({
+    success: true,
+    ref: record.ref,
+    id: record.id,
+    created,
+    expires_at: record.expires_at,
+  });
 });
 
 exports.verifyMetaWebhook = asyncHandler(async (req, res) => {
