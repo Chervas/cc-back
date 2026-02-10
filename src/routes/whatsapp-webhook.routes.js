@@ -7,6 +7,7 @@ const { queues } = require('../services/queue.service');
 const { Op } = require('sequelize');
 
 const { ClinicMetaAsset, Clinica, Paciente, Lead } = db;
+const { Conversation, LeadIntake } = db;
 const APP_SECRET = process.env.FACEBOOK_APP_SECRET || process.env.APP_SECRET;
 
 function buildPhoneCandidates(raw) {
@@ -19,6 +20,18 @@ function buildPhoneCandidates(raw) {
     local,
     `+${local}`,
   ])).filter(Boolean);
+}
+
+function buildContactIdCandidates(raw) {
+  const candidates = buildPhoneCandidates(raw);
+  const withPlus = candidates.map((c) => (String(c).startsWith('+') ? String(c) : `+${c}`));
+  return Array.from(new Set(withPlus)).filter(Boolean);
+}
+
+function buildDigitsCandidates(raw) {
+  const candidates = buildPhoneCandidates(raw);
+  const digits = candidates.map((c) => String(c).replace(/^\+/, ''));
+  return Array.from(new Set(digits)).filter(Boolean);
 }
 
 async function resolveClinicAndContact({ clinicId, groupId, from }) {
@@ -76,6 +89,48 @@ async function resolveClinicAndContact({ clinicId, groupId, from }) {
     const clinicIds = clinics.map((c) => c.id_clinica);
     if (!clinicIds.length) {
       return { clinicId: null, patientId: null, leadId: null };
+    }
+
+    // 1) Evitar duplicados: si ya existe una conversación de WhatsApp para este contacto en alguna clínica del grupo,
+    // reutilizamos esa clínica como destino.
+    const contactIdCandidates = buildContactIdCandidates(from);
+    if (Conversation && contactIdCandidates.length) {
+      const conv = await Conversation.findOne({
+        where: {
+          clinic_id: { [Op.in]: clinicIds },
+          channel: 'whatsapp',
+          contact_id: { [Op.in]: contactIdCandidates },
+        },
+        attributes: ['id', 'clinic_id', 'patient_id', 'lead_id', 'last_message_at', 'updatedAt'],
+        order: [
+          ['last_message_at', 'DESC'],
+          ['updatedAt', 'DESC'],
+        ],
+        raw: true,
+      });
+      if (conv) {
+        return { clinicId: conv.clinic_id, patientId: conv.patient_id || null, leadId: conv.lead_id || null };
+      }
+    }
+
+    // 2) Si hay un LeadIntake reciente para este teléfono en el grupo, asignar la conversación a esa clínica.
+    // Esto permite atribuir correctamente mensajes entrantes a la sede que originó el contacto (snippet/web/chatbot).
+    const digitsCandidates = buildDigitsCandidates(from);
+    if (LeadIntake && digitsCandidates.length) {
+      const cutoff = new Date(Date.now() - 24 * 60 * 60 * 1000);
+      const recentIntake = await LeadIntake.findOne({
+        where: {
+          clinica_id: { [Op.in]: clinicIds },
+          telefono: { [Op.in]: digitsCandidates },
+          created_at: { [Op.gte]: cutoff },
+        },
+        attributes: ['id', 'clinica_id', 'created_at'],
+        order: [['created_at', 'DESC']],
+        raw: true,
+      });
+      if (recentIntake?.clinica_id) {
+        return { clinicId: recentIntake.clinica_id, patientId: null, leadId: null };
+      }
     }
 
     const patient = await Paciente.findOne({
