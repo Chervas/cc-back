@@ -15,8 +15,12 @@ const AdCache = db.AdCache;
 const ClinicMetaAsset = db.ClinicMetaAsset;
 const ClinicGoogleAdsAccount = db.ClinicGoogleAdsAccount;
 const IntakeConfig = db.IntakeConfig;
+const Conversation = db.Conversation;
+const Message = db.Message;
 const { sendMetaEvent, buildUserData: buildMetaUserData } = require('../services/metaCapi.service');
 const { uploadClickConversion } = require('../services/googleAdsConversion.service');
+const whatsappService = require('../services/whatsapp.service');
+const { getIO } = require('../services/socket.service');
 
 const CHANNELS = new Set(['paid', 'organic', 'unknown']);
 const SOURCES = new Set(['meta_ads', 'google_ads', 'web', 'whatsapp', 'call_click', 'tiktok_ads', 'seo', 'direct', 'local_services']);
@@ -142,6 +146,125 @@ const validateMetaSignature = (req) => {
   return crypto.timingSafeEqual(expectedBuf, providedBuf);
 };
 
+// ======================================
+// QuickChat summary (chatbot)
+// ======================================
+
+function isQuickchatSummaryRequest(body = {}) {
+  const sourceRaw = coalesce(body.source, body.Source, body.source_type);
+  const sourceDetailRaw = coalesce(body.source_detail, body.sourceDetail, body.sourceDetailRaw);
+  return (
+    String(sourceRaw || '').toLowerCase() === 'chatbot_quickchat' ||
+    String(sourceDetailRaw || '').toLowerCase() === 'chatbot_quickchat'
+  );
+}
+
+function formatExtraPairs(pairs) {
+  if (!Array.isArray(pairs) || pairs.length === 0) return '';
+  const safe = pairs
+    .filter((p) => p && p.key && p.value !== undefined && p.value !== null)
+    .slice(0, 20)
+    .map((p) => {
+      let value = p.value;
+      if (typeof value === 'object') {
+        try {
+          value = JSON.stringify(value);
+        } catch {
+          value = '[object]';
+        }
+      }
+      value = String(value);
+      if (value.length > 140) value = value.slice(0, 140) + '...';
+      return `- ${p.key}: ${value}`;
+    });
+  return safe.length ? `\n\nDatos recogidos:\n${safe.join('\n')}` : '';
+}
+
+function buildQuickchatSummaryMessage({ nombre, telefono, email, pageUrl, extraPairs }) {
+  const lines = [];
+  lines.push('Nuevo paciente potencial desde el chatbot de la web.');
+  if (pageUrl) lines.push(`Pagina: ${pageUrl}`);
+  lines.push(`Nombre: ${nombre || '-'}`);
+  lines.push(`Telf: ${telefono || '-'}`);
+  lines.push(`Email: ${email || '-'}`);
+  lines.push('Puedes contestarle por aqui directamente (WhatsApp), aunque recomiendo intentar llamarle primero.');
+  return lines.join('\n') + formatExtraPairs(extraPairs);
+}
+
+async function sendQuickchatSummaryToQuickChat({
+  clinicId,
+  leadIntakeId,
+  nombre,
+  telefono,
+  email,
+  pageUrl,
+  extraPairs
+}) {
+  if (!clinicId) {
+    return { sent: false, reason: 'clinic_id requerido para QuickChat' };
+  }
+
+  const phoneE164 = whatsappService.normalizePhoneNumber(telefono);
+  const channel = phoneE164 ? 'whatsapp' : 'internal';
+  const contactId = phoneE164 || 'web-leads';
+
+  const [conversation] = await Conversation.findOrCreate({
+    where: { clinic_id: clinicId, channel, contact_id: contactId },
+    defaults: {
+      clinic_id: clinicId,
+      channel,
+      contact_id: contactId,
+      last_message_at: new Date(),
+      unread_count: 0,
+      // Nota: no seteamos last_inbound_at. Para WhatsApp, esto fuerza el flujo de plantilla si no hay inbound real.
+      last_inbound_at: null,
+    }
+  });
+
+  const content = buildQuickchatSummaryMessage({
+    nombre,
+    telefono: phoneE164 || telefono || null,
+    email,
+    pageUrl,
+    extraPairs
+  });
+
+  const msg = await Message.create({
+    conversation_id: conversation.id,
+    sender_id: null,
+    direction: 'inbound',
+    content,
+    message_type: 'event',
+    status: 'sent',
+    sent_at: new Date(),
+    metadata: {
+      source: 'snippet_chatbot',
+      kind: 'quickchat_summary',
+      lead_intake_id: leadIntakeId || null,
+    }
+  });
+
+  conversation.last_message_at = new Date();
+  await conversation.save();
+
+  // Socket event (si está activo). Si la conversación es nueva, QuickChat la verá por polling.
+  const io = getIO();
+  if (io) {
+    const room = `clinic:${clinicId}`;
+    io.to(room).emit('message:created', {
+      id: msg.id,
+      conversation_id: String(conversation.id),
+      content: msg.content,
+      direction: msg.direction,
+      message_type: msg.message_type,
+      status: msg.status,
+      sent_at: msg.sent_at,
+    });
+  }
+
+  return { sent: true, channel, conversation_id: conversation.id, message_id: msg.id };
+}
+
 async function dedupeAndCreateLead(leadPayload, rawPayload = {}, attributionSteps = {}) {
   const normalizedEmail = normalizeEmail(leadPayload.email);
   const normalizedPhone = normalizePhone(leadPayload.telefono);
@@ -211,6 +334,7 @@ async function dedupeAndCreateLead(leadPayload, rawPayload = {}, attributionStep
 exports.ingestLead = asyncHandler(async (req, res) => {
   const body = req.body || {};
   const eventId = (req.headers[EVENT_ID_HEADER] || body?.event_id || body?.eventId || null) || null;
+  const wantsQuickchatSummary = isQuickchatSummaryRequest(body);
 
   const {
     clinica_id,
@@ -416,6 +540,8 @@ exports.ingestLead = asyncHandler(async (req, res) => {
     channel: normalizedChannel,
     source: normalizedSource,
     source_detail: source_detail || null,
+    email: leadEmail || null,
+    telefono: leadTelefono || null,
     clinic_match_source: clinicMatchSource,
     clinic_match_value: clinicMatchValue,
     utm_source: utmSource || null,
@@ -452,6 +578,56 @@ exports.ingestLead = asyncHandler(async (req, res) => {
     });
   } catch (err) {
     if (err.status === 409) {
+      if (wantsQuickchatSummary && err.existingId) {
+        let existing = null;
+        try {
+          existing = await LeadIntake.findByPk(err.existingId, { raw: true });
+        } catch {
+          existing = null;
+        }
+
+        const clinicIdForChat = coalesce(clinicaIdParsed, existing?.clinica_id);
+        const nombreForChat = coalesce(leadNombre, existing?.nombre);
+        const telefonoForChat = coalesce(leadTelefono, existing?.telefono);
+        const emailForChat = coalesce(leadEmail, existing?.email);
+
+        const chatStateData =
+          (body.chat_state && typeof body.chat_state === 'object' ? body.chat_state.data : null) ||
+          (body.chatState && typeof body.chatState === 'object' ? body.chatState.data : null) ||
+          null;
+        const extraPairs = [];
+        const addPairs = (obj) => {
+          if (!obj || typeof obj !== 'object' || Array.isArray(obj)) return;
+          Object.entries(obj).forEach(([k, v]) => {
+            if (['nombre', 'email', 'telefono', 'notas', 'notes', 'message', 'phone', 'tel', 'name'].includes(String(k))) return;
+            extraPairs.push({ key: String(k), value: v });
+          });
+        };
+        addPairs(chatStateData);
+        addPairs(leadData);
+
+        let summaryResult = { sent: false };
+        try {
+          summaryResult = await sendQuickchatSummaryToQuickChat({
+            clinicId: clinicIdForChat,
+            leadIntakeId: err.existingId,
+            nombre: nombreForChat,
+            telefono: telefonoForChat,
+            email: emailForChat,
+            pageUrl: pageUrlValue || landingUrlValue || null,
+            extraPairs
+          });
+        } catch (e) {
+          console.warn('⚠️ No se pudo enviar resumen a QuickChat:', e.message || e);
+        }
+
+        return res.status(200).json({
+          id: err.existingId,
+          deduped: true,
+          quickchat_summary_sent: !!summaryResult?.sent
+        });
+      }
+
       return res.status(409).json({ message: err.message, id: err.existingId, reason: err.message });
     }
     throw err;
@@ -482,7 +658,40 @@ exports.ingestLead = asyncHandler(async (req, res) => {
     console.warn('⚠️ No se pudo enviar evento Meta CAPI:', e.message || e);
   }
 
-  res.status(201).json({ id: lead.id });
+  let quickchatSummarySent = false;
+  if (wantsQuickchatSummary) {
+    const chatStateData =
+      (body.chat_state && typeof body.chat_state === 'object' ? body.chat_state.data : null) ||
+      (body.chatState && typeof body.chatState === 'object' ? body.chatState.data : null) ||
+      null;
+    const extraPairs = [];
+    const addPairs = (obj) => {
+      if (!obj || typeof obj !== 'object' || Array.isArray(obj)) return;
+      Object.entries(obj).forEach(([k, v]) => {
+        if (['nombre', 'email', 'telefono', 'notas', 'notes', 'message', 'phone', 'tel', 'name'].includes(String(k))) return;
+        extraPairs.push({ key: String(k), value: v });
+      });
+    };
+    addPairs(chatStateData);
+    addPairs(leadData);
+
+    try {
+      const summaryResult = await sendQuickchatSummaryToQuickChat({
+        clinicId: clinicaIdParsed,
+        leadIntakeId: lead.id,
+        nombre: leadNombre,
+        telefono: leadTelefono,
+        email: leadEmail,
+        pageUrl: pageUrlValue || landingUrlValue || null,
+        extraPairs
+      });
+      quickchatSummarySent = !!summaryResult?.sent;
+    } catch (e) {
+      console.warn('⚠️ No se pudo enviar resumen a QuickChat:', e.message || e);
+    }
+  }
+
+  res.status(201).json({ id: lead.id, quickchat_summary_sent: quickchatSummarySent });
 });
 
 // ===========================
