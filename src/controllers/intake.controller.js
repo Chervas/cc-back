@@ -47,6 +47,18 @@ const normalizePhone = (phone) => {
   const digits = String(phone).replace(/\D/g, '');
   return digits || null;
 };
+// Número de WhatsApp "público" para wa.me (dígitos, con prefijo de país si existe).
+// En ClinicMetaAssets solemos tenerlo en additionalData.displayPhoneNumber o en metaAssetName.
+const extractWhatsAppNumber = (asset) => {
+  if (!asset) return null;
+  const additional = asset.additionalData && typeof asset.additionalData === 'object' ? asset.additionalData : {};
+  const raw =
+    additional.displayPhoneNumber ||
+    additional.display_phone_number ||
+    asset.metaAssetName ||
+    null;
+  return normalizePhone(raw);
+};
 const normalizeDomain = (domain) => {
   if (!domain || typeof domain !== 'string') return null;
   const d = domain.trim().toLowerCase();
@@ -828,16 +840,64 @@ exports.getIntakeConfig = asyncHandler(async (req, res) => {
     }
 
     if (resolvedGroupId) {
+      // WhatsApp por grupo (fallback si una clínica no tiene número específico).
+      let groupWhatsApp = null;
+      try {
+        const groupPhone = await ClinicMetaAsset.findOne({
+          where: {
+            grupoClinicaId: resolvedGroupId,
+            assignmentScope: 'group',
+            isActive: true,
+            assetType: 'whatsapp_phone_number'
+          },
+          attributes: ['metaAssetName', 'additionalData', 'updatedAt'],
+          order: [['updatedAt', 'DESC']],
+          raw: true
+        });
+        groupWhatsApp = extractWhatsAppNumber(groupPhone);
+      } catch (e) {
+        // No bloquear el snippet/editor por un fallo en soporte extra.
+        groupWhatsApp = null;
+      }
+
       const clinics = await Clinica.findAll({
         where: { grupoClinicaId: resolvedGroupId },
         attributes: ['id_clinica', 'nombre_clinica'],
         order: [['nombre_clinica', 'ASC']],
         raw: true
       });
-      payload.available_locations = clinics.map((c) => ({
-        id: c.id_clinica,
-        label: c.nombre_clinica
-      }));
+
+      // WhatsApp por clínica (si existe), con fallback al número del grupo.
+      const clinicIds = clinics.map((c) => c.id_clinica).filter(Boolean);
+      const whatsappByClinicId = new Map();
+      if (clinicIds.length) {
+        const clinicPhones = await ClinicMetaAsset.findAll({
+          where: {
+            assetType: 'whatsapp_phone_number',
+            isActive: true,
+            clinicaId: { [Op.in]: clinicIds }
+          },
+          attributes: ['clinicaId', 'metaAssetName', 'additionalData', 'updatedAt'],
+          order: [['updatedAt', 'DESC']],
+          raw: true
+        });
+        for (const asset of clinicPhones) {
+          const cid = asset?.clinicaId;
+          if (!cid) continue;
+          if (whatsappByClinicId.has(cid)) continue; // ya tenemos el más reciente por el order
+          const wa = extractWhatsAppNumber(asset);
+          if (wa) whatsappByClinicId.set(cid, wa);
+        }
+      }
+
+      payload.available_locations = clinics.map((c) => {
+        const whatsapp = whatsappByClinicId.get(c.id_clinica) || groupWhatsApp || null;
+        return {
+          id: c.id_clinica,
+          label: c.nombre_clinica,
+          whatsapp
+        };
+      });
     } else if (payload.clinic_id) {
       if (!clinicRow) {
         clinicRow = await Clinica.findOne({
@@ -847,7 +907,23 @@ exports.getIntakeConfig = asyncHandler(async (req, res) => {
         });
       }
       if (clinicRow) {
-        payload.available_locations = [{ id: clinicRow.id_clinica, label: clinicRow.nombre_clinica }];
+        let whatsapp = null;
+        try {
+          const clinicPhone = await ClinicMetaAsset.findOne({
+            where: {
+              clinicaId: clinicRow.id_clinica,
+              isActive: true,
+              assetType: 'whatsapp_phone_number'
+            },
+            attributes: ['metaAssetName', 'additionalData', 'updatedAt'],
+            order: [['updatedAt', 'DESC']],
+            raw: true
+          });
+          whatsapp = extractWhatsAppNumber(clinicPhone);
+        } catch (e) {
+          whatsapp = null;
+        }
+        payload.available_locations = [{ id: clinicRow.id_clinica, label: clinicRow.nombre_clinica, whatsapp }];
       }
     }
   } catch (e) {
