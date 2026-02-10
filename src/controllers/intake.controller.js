@@ -804,6 +804,52 @@ exports.getIntakeConfig = asyncHandler(async (req, res) => {
     }
   }
 
+  // Locations disponibles para el editor (sedes = clínicas del mismo grupo).
+  // - Si la config es por grupo => todas las clínicas del grupo.
+  // - Si la config es por clínica y pertenece a un grupo => todas las clínicas del grupo.
+  // - Si no pertenece a un grupo => solo la propia clínica.
+  payload.available_locations = [];
+  try {
+    let resolvedGroupId = payload.group_id || null;
+    let clinicRow = null;
+
+    if (!resolvedGroupId && payload.clinic_id) {
+      clinicRow = await Clinica.findOne({
+        where: { id_clinica: payload.clinic_id },
+        attributes: ['id_clinica', 'nombre_clinica', 'grupoClinicaId'],
+        raw: true
+      });
+      resolvedGroupId = clinicRow?.grupoClinicaId || null;
+    }
+
+    if (resolvedGroupId) {
+      const clinics = await Clinica.findAll({
+        where: { grupoClinicaId: resolvedGroupId },
+        attributes: ['id_clinica', 'nombre_clinica'],
+        order: [['nombre_clinica', 'ASC']],
+        raw: true
+      });
+      payload.available_locations = clinics.map((c) => ({
+        id: c.id_clinica,
+        label: c.nombre_clinica
+      }));
+    } else if (payload.clinic_id) {
+      if (!clinicRow) {
+        clinicRow = await Clinica.findOne({
+          where: { id_clinica: payload.clinic_id },
+          attributes: ['id_clinica', 'nombre_clinica'],
+          raw: true
+        });
+      }
+      if (clinicRow) {
+        payload.available_locations = [{ id: clinicRow.id_clinica, label: clinicRow.nombre_clinica }];
+      }
+    }
+  } catch (e) {
+    // No bloquear el snippet por un fallo de soporte UI.
+    payload.available_locations = [];
+  }
+
   return res.json(payload);
 });
 
