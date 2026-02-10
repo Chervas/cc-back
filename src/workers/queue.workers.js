@@ -8,7 +8,7 @@ const automationDefaultsService = require('../services/automationDefaults.servic
 const { getIO } = require('../services/socket.service');
 const db = require('../../models');
 
-const { Conversation, Message, ClinicMetaAsset } = db;
+const { Conversation, Message, ClinicMetaAsset, WhatsAppWebOrigin } = db;
 
 const CHAT_DEBUG = process.env.CHAT_DEBUG === 'true';
 const dlog = (...args) => {
@@ -16,6 +16,25 @@ const dlog = (...args) => {
         console.log('[CHAT]', ...args);
     }
 };
+
+const CC_WEB_REF_REGEX = /\[cc_ref:([a-f0-9]{8,64})\]/ig;
+function extractAndStripWebOriginRef(rawContent) {
+    const content = typeof rawContent === 'string' ? rawContent : '';
+    if (!content) {
+        return { ref: null, content: '' };
+    }
+    let ref = null;
+    const cleaned = content
+        .replace(CC_WEB_REF_REGEX, (_match, g1) => {
+            if (!ref && g1) ref = String(g1).toLowerCase();
+            return '';
+        })
+        .replace(/\s+\n/g, '\n')
+        .replace(/\n\s+/g, '\n')
+        .replace(/[ \t]{2,}/g, ' ')
+        .trim();
+    return { ref, content: cleaned };
+}
 
 function mapWhatsAppStatus(status) {
     switch ((status || '').toLowerCase()) {
@@ -179,6 +198,7 @@ createWorker('webhook_whatsapp', async (job) => {
     const clinicId = job.data?.clinic_id;
     const patientId = job.data?.patient_id || null;
     const leadId = job.data?.lead_id || null;
+    const webOriginRefFromJob = job.data?.web_origin_ref || null;
 
     if (!payload || !clinicId) {
         throw new Error('Payload o clinic_id ausente en webhook de WhatsApp');
@@ -190,11 +210,38 @@ createWorker('webhook_whatsapp', async (job) => {
     const messages = value?.messages || [];
     const statuses = value?.statuses || [];
 
+    let webOrigin = null;
+    if (webOriginRefFromJob && WhatsAppWebOrigin) {
+        try {
+            webOrigin = await WhatsAppWebOrigin.findOne({ where: { ref: String(webOriginRefFromJob).toLowerCase() }, raw: true });
+            if (webOrigin?.expires_at && new Date(webOrigin.expires_at).getTime() < Date.now()) {
+                webOrigin = null;
+            }
+        } catch (e) {
+            webOrigin = null;
+        }
+    }
+
     for (const msg of messages) {
         const phoneId = value?.metadata?.phone_number_id;
         const from = msg.from;
         const wamid = msg.id;
-        const content = msg.text?.body || msg.button?.text || msg.interactive?.text || '';
+        const rawContent = msg.text?.body || msg.button?.text || msg.interactive?.text || '';
+        const stripped = extractAndStripWebOriginRef(rawContent);
+        const webOriginRefFromMsg = stripped.ref || null;
+        const content = stripped.content;
+
+        // Si no venía en el job, intentamos recuperar por token del propio mensaje (primer mensaje típicamente).
+        if (!webOrigin && webOriginRefFromMsg && WhatsAppWebOrigin) {
+            try {
+                webOrigin = await WhatsAppWebOrigin.findOne({ where: { ref: String(webOriginRefFromMsg).toLowerCase() }, raw: true });
+                if (webOrigin?.expires_at && new Date(webOrigin.expires_at).getTime() < Date.now()) {
+                    webOrigin = null;
+                }
+            } catch (e) {
+                webOrigin = null;
+            }
+        }
 
         const [conv, created] = await Conversation.findOrCreate({
             where: { contact_id: `+${from}`.replace('++', '+'), channel: 'whatsapp', clinic_id: clinicId },
@@ -232,9 +279,45 @@ createWorker('webhook_whatsapp', async (job) => {
             content,
             message_type: msg.type || 'text',
             status: 'sent',
-            metadata: { wamid, phoneId },
+            metadata: {
+                wamid,
+                phoneId,
+                ...(webOrigin ? { web_origin_ref: webOrigin.ref, web_origin: {
+                    id: webOrigin.id || null,
+                    clinic_id: webOrigin.clinic_id || null,
+                    group_id: webOrigin.group_id || null,
+                    domain: webOrigin.domain || null,
+                    page_url: webOrigin.page_url || null,
+                    referrer: webOrigin.referrer || null,
+                    utm_source: webOrigin.utm_source || null,
+                    utm_medium: webOrigin.utm_medium || null,
+                    utm_campaign: webOrigin.utm_campaign || null,
+                    gclid: webOrigin.gclid || null,
+                    fbclid: webOrigin.fbclid || null,
+                    ttclid: webOrigin.ttclid || null,
+                } } : {}),
+            },
             sent_at: new Date(),
         });
+
+        // Marcar el origen como "usado" para depuración/dedupe. No bloqueamos si falla.
+        if (webOrigin && WhatsAppWebOrigin && !webOrigin.used_at) {
+            try {
+                await WhatsAppWebOrigin.update(
+                    {
+                        used_at: new Date(),
+                        used_conversation_id: conv.id,
+                        used_message_id: inboundMsg.id,
+                        from_phone: from || null,
+                        phone_number_id: phoneId || null,
+                    },
+                    { where: { id: webOrigin.id, used_at: null } }
+                );
+                webOrigin.used_at = new Date();
+            } catch (e) {
+                // ignore
+            }
+        }
 
         conv.last_message_at = new Date();
         conv.last_inbound_at = new Date();

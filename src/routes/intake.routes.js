@@ -9,6 +9,7 @@ router.get('/leads/webhook', intakeController.verifyMetaWebhook);
 router.post('/leads/webhook', intakeController.receiveMetaWebhook);
 router.get('/config', intakeController.getIntakeConfig);
 router.post('/events', intakeController.receiveIntakeEvent);
+router.post('/whatsapp-origin', intakeController.createWhatsAppWebOrigin);
 
 // Rutas protegidas
 router.use(protect);
