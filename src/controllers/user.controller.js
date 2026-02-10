@@ -6,6 +6,7 @@ const { Op } = require('sequelize');
 exports.getAllUsers = async (req, res) => {
   try {
     const users = await Usuario.findAll({
+      attributes: { exclude: ['password_usuario'] },
       include: {
         model: Clinica,
         as: 'Clinicas',
@@ -24,6 +25,7 @@ exports.searchUsers = async (req, res) => {
   try {
     const query = req.query.query;
     const users = await Usuario.findAll({
+      attributes: { exclude: ['password_usuario'] },
       where: {
         [Op.or]: [
           { nombre: { [Op.like]: `%${query}%` } },
@@ -43,6 +45,7 @@ exports.searchUsers = async (req, res) => {
 exports.getUserById = async (req, res) => {
   try {
     const user = await Usuario.findByPk(req.params.id, {
+      attributes: { exclude: ['password_usuario'] },
       include: {
         model: Clinica,
         as: 'Clinicas',
@@ -112,7 +115,13 @@ exports.createUser = async (req, res) => {
 
     res.status(201).json({
       message: 'Usuario creado exitosamente',
-      user: newUser
+      user: (() => {
+        const json = newUser?.toJSON ? newUser.toJSON() : newUser;
+        if (json && typeof json === 'object') {
+          delete json.password_usuario;
+        }
+        return json;
+      })()
     });
   } catch (error) {
     console.error('Error al crear el usuario:', error);
@@ -163,6 +172,7 @@ exports.updateUser = async (req, res) => {
     }
 
     const updatedUser = await Usuario.findByPk(user.id_usuario, {
+      attributes: { exclude: ['password_usuario'] },
       include: {
         model: Clinica,
         as: 'Clinicas',
