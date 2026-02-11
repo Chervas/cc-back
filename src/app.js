@@ -44,6 +44,7 @@ const whatsappWebhookRoutes = require('./routes/whatsapp-webhook.routes');
 const instalacionesRoutes = require('./routes/instalaciones.routes');
 const doctoresRoutes = require('./routes/doctores.routes');
 const disponibilidadRoutes = require('./routes/disponibilidad.routes');
+const personalRoutes = require('./routes/personal.routes');
 const jobScheduler = require('./services/jobScheduler.service');
 const intakeController = require('./controllers/intake.controller');
 const { setIO } = require('./services/socket.service');
@@ -181,6 +182,8 @@ console.log('Ruta /api/doctores configurada');
 // Alias en inglés para compatibilidad con front
 app.use('/api/doctors', doctoresRoutes);
 console.log('Ruta /api/doctors configurada');
+app.use('/api/personal', personalRoutes);
+console.log('Ruta /api/personal configurada');
 app.use('/api/disponibilidad', disponibilidadRoutes);
 console.log('Ruta /api/disponibilidad configurada');
 app.use('/api/tratamientos', tratamientosRoutes);

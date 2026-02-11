@@ -6,6 +6,7 @@ const authMiddleware = require('./auth.middleware');
 // Protegemos rutas con auth si middleware está disponible
 router.post('/', authMiddleware, citasController.createCita);
 router.get('/next', authMiddleware, citasController.getNextCita);
+router.get('/:id', authMiddleware, citasController.getCitaById);
 router.get('/', authMiddleware, citasController.getCitas);
 
 module.exports = router;
