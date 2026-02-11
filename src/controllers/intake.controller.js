@@ -254,6 +254,13 @@ async function sendQuickchatSummaryToQuickChat({
       source: 'snippet_chatbot',
       kind: 'quickchat_summary',
       lead_intake_id: leadIntakeId || null,
+      summary: {
+        page_url: pageUrl || null,
+        nombre: nombre || null,
+        telefono: phoneE164 || telefono || null,
+        email: email || null,
+        extra_pairs: Array.isArray(extraPairs) ? extraPairs.slice(0, 20) : [],
+      },
     }
   });
 
@@ -272,6 +279,7 @@ async function sendQuickchatSummaryToQuickChat({
       message_type: msg.message_type,
       status: msg.status,
       sent_at: msg.sent_at,
+      metadata: msg.metadata || null,
     });
   }
 
