@@ -13,6 +13,9 @@ module.exports = (sequelize, DataTypes) => {
       id: { type: DataTypes.INTEGER, primaryKey: true, autoIncrement: true },
       name: { type: DataTypes.STRING(255), allowNull: false, unique: true },
       tags: { type: DataTypes.JSON, allowNull: true },
+      // Códigos de disciplina (sector) para controlar visibilidad por tipo de clínica.
+      // Si es null o [] => visible para todas.
+      disciplina_codes: { type: DataTypes.JSON, allowNull: true },
       is_active: { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: true },
       flow: { type: DataTypes.JSON, allowNull: true },
       flows: { type: DataTypes.JSON, allowNull: true },
@@ -32,4 +35,3 @@ module.exports = (sequelize, DataTypes) => {
 
   return ChatFlowTemplate;
 };
-

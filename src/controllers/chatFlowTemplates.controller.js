@@ -4,6 +4,25 @@ const { Op } = require('sequelize');
 const db = require('../../models');
 
 const ChatFlowTemplate = db.ChatFlowTemplate;
+const Clinica = db.Clinica;
+
+const ADMIN_USER_IDS = (process.env.ADMIN_USER_IDS || '1')
+  .split(',')
+  .map((v) => parseInt(String(v).trim(), 10))
+  .filter((n) => Number.isFinite(n));
+
+function isAdmin(req) {
+  const uid = Number(req.userData?.userId);
+  return !!uid && ADMIN_USER_IDS.includes(uid);
+}
+
+function assertAdmin(req, res) {
+  if (!isAdmin(req)) {
+    res.status(403).json({ error: 'admin_only' });
+    return false;
+  }
+  return true;
+}
 
 function toBool(value, fallback = undefined) {
   if (value === undefined) return fallback;
@@ -28,12 +47,58 @@ function normalizeTags(tags) {
   return tags;
 }
 
+function normalizeDisciplinaCodes(value) {
+  if (value === undefined) return undefined;
+  if (value === null) return null;
+  if (Array.isArray(value)) {
+    return value
+      .map((v) => (typeof v === 'string' ? v.trim().toLowerCase() : String(v).trim().toLowerCase()))
+      .filter(Boolean);
+  }
+  if (typeof value === 'string') {
+    return value
+      .split(',')
+      .map((t) => t.trim().toLowerCase())
+      .filter(Boolean);
+  }
+  return value;
+}
+
+function normalizeDisciplinesFromClinicConfig(configuracion) {
+  const cfg = configuracion && typeof configuracion === 'object' ? configuracion : {};
+  const raw = Array.isArray(cfg.disciplinas) ? cfg.disciplinas : (cfg.disciplina ? [cfg.disciplina] : []);
+  return raw
+    .map((d) => (typeof d === 'string' ? d.trim().toLowerCase() : String(d).trim().toLowerCase()))
+    .filter(Boolean);
+}
+
+function matchesDisciplines(templateDisciplinaCodes, clinicDisciplinaCodes) {
+  const templateCodes = Array.isArray(templateDisciplinaCodes)
+    ? templateDisciplinaCodes
+      .map((c) => (typeof c === 'string' ? c.trim().toLowerCase() : String(c).trim().toLowerCase()))
+      .filter(Boolean)
+    : [];
+  const clinicCodes = Array.isArray(clinicDisciplinaCodes)
+    ? clinicDisciplinaCodes
+      .map((c) => (typeof c === 'string' ? c.trim().toLowerCase() : String(c).trim().toLowerCase()))
+      .filter(Boolean)
+    : [];
+
+  // Sin filtro de clínica => no filtrar.
+  if (clinicCodes.length === 0) return true;
+  // Plantilla "general" (sin disciplinas asignadas) => visible para todas.
+  if (templateCodes.length === 0) return true;
+  // Intersección
+  return templateCodes.some((code) => clinicCodes.includes(code));
+}
+
 function mapTemplate(row) {
   const data = row?.toJSON ? row.toJSON() : row;
   return {
     id: data.id,
     name: data.name,
     tags: data.tags ?? null,
+    disciplina_codes: data.disciplina_codes ?? null,
     is_active: !!data.is_active,
     flow: data.flow ?? null,
     flows: data.flows ?? null,
@@ -46,14 +111,31 @@ function mapTemplate(row) {
 
 exports.listChatFlowTemplates = async (req, res) => {
   try {
-    const { active, search } = req.query || {};
+    const { active, search, clinic_id } = req.query || {};
     const where = {};
+    const admin = isAdmin(req);
 
+    // Para clínicas (no admin): solo plantillas activas.
     const isActive = toBool(active, undefined);
-    if (isActive !== undefined) where.is_active = isActive;
+    if (!admin) {
+      where.is_active = true;
+    } else if (isActive !== undefined) {
+      where.is_active = isActive;
+    }
 
     if (search && String(search).trim()) {
       where.name = { [Op.like]: `%${String(search).trim()}%` };
+    }
+
+    const clinicIdParsed = clinic_id ? parseInt(String(clinic_id), 10) : null;
+    let clinicDisciplinaCodes = [];
+    if (Number.isFinite(clinicIdParsed) && clinicIdParsed > 0) {
+      const clinica = await Clinica.findOne({
+        where: { id_clinica: clinicIdParsed },
+        attributes: ['id_clinica', 'configuracion'],
+        raw: true,
+      });
+      clinicDisciplinaCodes = normalizeDisciplinesFromClinicConfig(clinica?.configuracion);
     }
 
     const rows = await ChatFlowTemplate.findAll({
@@ -61,7 +143,8 @@ exports.listChatFlowTemplates = async (req, res) => {
       order: [['updated_at', 'DESC']],
     });
 
-    res.status(200).json(rows.map(mapTemplate));
+    const filtered = (rows || []).filter((row) => matchesDisciplines(row?.disciplina_codes, clinicDisciplinaCodes));
+    res.status(200).json(filtered.map(mapTemplate));
   } catch (error) {
     res.status(500).json({ message: 'Error obteniendo plantillas de flujo', error: error.message });
   }
@@ -69,8 +152,10 @@ exports.listChatFlowTemplates = async (req, res) => {
 
 exports.getChatFlowTemplate = async (req, res) => {
   try {
+    const admin = isAdmin(req);
     const row = await ChatFlowTemplate.findByPk(req.params.id);
     if (!row) return res.status(404).json({ message: 'Plantilla no encontrada' });
+    if (!admin && !row.is_active) return res.status(404).json({ message: 'Plantilla no encontrada' });
     res.status(200).json(mapTemplate(row));
   } catch (error) {
     res.status(500).json({ message: 'Error obteniendo plantilla', error: error.message });
@@ -78,6 +163,7 @@ exports.getChatFlowTemplate = async (req, res) => {
 };
 
 exports.createChatFlowTemplate = async (req, res) => {
+  if (!assertAdmin(req, res)) return;
   try {
     const body = req.body || {};
     const name = body.name ? String(body.name).trim() : '';
@@ -85,6 +171,7 @@ exports.createChatFlowTemplate = async (req, res) => {
     if (!name) return res.status(400).json({ message: 'name es obligatorio' });
 
     const tags = normalizeTags(body.tags);
+    const disciplina_codes = normalizeDisciplinaCodes(body.disciplina_codes);
     const is_active = toBool(body.is_active, true);
 
     const flow = body.flow ?? null;
@@ -101,6 +188,7 @@ exports.createChatFlowTemplate = async (req, res) => {
     const created = await ChatFlowTemplate.create({
       name,
       tags: tags === undefined ? null : tags,
+      disciplina_codes: disciplina_codes === undefined ? null : disciplina_codes,
       is_active,
       flow,
       flows,
@@ -118,6 +206,7 @@ exports.createChatFlowTemplate = async (req, res) => {
 };
 
 exports.updateChatFlowTemplate = async (req, res) => {
+  if (!assertAdmin(req, res)) return;
   try {
     const row = await ChatFlowTemplate.findByPk(req.params.id);
     if (!row) return res.status(404).json({ message: 'Plantilla no encontrada' });
@@ -131,6 +220,7 @@ exports.updateChatFlowTemplate = async (req, res) => {
       updates.name = name;
     }
     if (body.tags !== undefined) updates.tags = normalizeTags(body.tags);
+    if (body.disciplina_codes !== undefined) updates.disciplina_codes = normalizeDisciplinaCodes(body.disciplina_codes);
     if (body.is_active !== undefined) updates.is_active = toBool(body.is_active, row.is_active);
     if (body.flow !== undefined) updates.flow = body.flow;
     if (body.flows !== undefined) updates.flows = body.flows;
@@ -156,6 +246,7 @@ exports.updateChatFlowTemplate = async (req, res) => {
 };
 
 exports.deleteChatFlowTemplate = async (req, res) => {
+  if (!assertAdmin(req, res)) return;
   try {
     const row = await ChatFlowTemplate.findByPk(req.params.id);
     if (!row) return res.status(404).json({ message: 'Plantilla no encontrada' });
@@ -168,6 +259,7 @@ exports.deleteChatFlowTemplate = async (req, res) => {
 };
 
 exports.duplicateChatFlowTemplate = async (req, res) => {
+  if (!assertAdmin(req, res)) return;
   try {
     const row = await ChatFlowTemplate.findByPk(req.params.id);
     if (!row) return res.status(404).json({ message: 'Plantilla no encontrada' });
@@ -175,6 +267,7 @@ exports.duplicateChatFlowTemplate = async (req, res) => {
     const baseName = (req.body?.name ? String(req.body.name).trim() : '') || `${row.name} (copia)`;
 
     const tags = row.tags ?? null;
+    const disciplina_codes = row.disciplina_codes ?? null;
     const is_active = row.is_active;
     const flow = row.flow ?? null;
     const flows = row.flows ?? null;
@@ -187,6 +280,7 @@ exports.duplicateChatFlowTemplate = async (req, res) => {
         const created = await ChatFlowTemplate.create({
           name,
           tags,
+          disciplina_codes,
           is_active,
           flow,
           flows,
@@ -205,4 +299,3 @@ exports.duplicateChatFlowTemplate = async (req, res) => {
     res.status(500).json({ message: 'Error duplicando plantilla', error: error.message });
   }
 };
-
