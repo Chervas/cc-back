@@ -4,6 +4,7 @@ const bcrypt = require('bcryptjs');
 
 // Mantener consistente con userclinicas.routes.js
 const ADMIN_USER_IDS = [1];
+const BLOQUEO_TIPOS = new Set(['vacaciones', 'ausencia', 'formacion', 'congreso', 'otro']);
 
 const isAdmin = (userId) => ADMIN_USER_IDS.includes(Number(userId));
 
@@ -90,6 +91,17 @@ function toDay(dateValue) {
     return date.toISOString().slice(0, 10);
 }
 
+function normalizeBloqueoTipo(value) {
+    if (value == null || String(value).trim() === '') {
+        return 'ausencia';
+    }
+    const tipo = String(value).trim().toLowerCase();
+    if (!BLOQUEO_TIPOS.has(tipo)) {
+        return null;
+    }
+    return tipo;
+}
+
 async function canAccessTargetPersonal(actorId, targetUserId, clinicId) {
     if (isAdmin(actorId)) {
         return true;
@@ -128,6 +140,7 @@ async function canAccessTargetPersonal(actorId, targetUserId, clinicId) {
 function serializeBloqueo(bloqueo) {
     return {
         id: bloqueo.id,
+        id_usuario: bloqueo.doctor_id,
         personal_id: bloqueo.doctor_id,
         doctor_id: bloqueo.doctor_id,
         clinica_id: bloqueo.clinica_id ?? null,
@@ -474,9 +487,17 @@ exports.createPersonalBloqueo = async (req, res) => {
 
         const fechaInicio = buildDateTime(fechaInicioInput, horaInicio, '00:00');
         const fechaFin = buildDateTime(fechaFinInput, horaFin, '23:59');
+        const tipo = normalizeBloqueoTipo(req.body?.tipo);
 
         if (!fechaInicio || !fechaFin) {
             return res.status(400).json({ message: 'fecha_inicio/fecha_fin inválidas' });
+        }
+
+        if (!tipo) {
+            return res.status(400).json({
+                message: 'tipo inválido',
+                allowed: Array.from(BLOQUEO_TIPOS),
+            });
         }
 
         if (fechaInicio >= fechaFin) {
@@ -506,7 +527,7 @@ exports.createPersonalBloqueo = async (req, res) => {
             clinica_id: clinicaId,
             fecha_inicio: fechaInicio,
             fecha_fin: fechaFin,
-            tipo: (req.body?.tipo || 'ausencia').toString().slice(0, 32),
+            tipo,
             motivo: (req.body?.motivo || '').toString().slice(0, 255),
             recurrente: req.body?.recurrente || 'none',
             aplica_a_todas_clinicas: clinicaId == null ? true : false,
