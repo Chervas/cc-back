@@ -97,11 +97,13 @@ exports.createBloqueo = asyncHandler(async (req, res) => {
   const doctorId = req.params.doctorId || req.userData?.userId;
   const bloqueo = await db.DoctorBloqueo.create({
     doctor_id: doctorId,
+    clinica_id: req.body.clinica_id ?? null,
     fecha_inicio: req.body.fecha_inicio,
     fecha_fin: req.body.fecha_fin,
+    tipo: req.body.tipo || 'ausencia',
     motivo: req.body.motivo,
     recurrente: req.body.recurrente || 'none',
-    aplica_a_todas_clinicas: !!req.body.aplica_a_todas_clinicas,
+    aplica_a_todas_clinicas: req.body.clinica_id == null ? !!req.body.aplica_a_todas_clinicas : false,
     creado_por: req.user?.id || null
   });
   res.status(201).json(bloqueo);

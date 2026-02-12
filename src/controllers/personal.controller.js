@@ -130,13 +130,14 @@ function serializeBloqueo(bloqueo) {
         id: bloqueo.id,
         personal_id: bloqueo.doctor_id,
         doctor_id: bloqueo.doctor_id,
+        clinica_id: bloqueo.clinica_id ?? null,
         fecha_inicio: bloqueo.fecha_inicio,
         fecha_fin: bloqueo.fecha_fin,
         fecha: toDay(bloqueo.fecha_inicio),
         hora_inicio: toHm(bloqueo.fecha_inicio),
         hora_fin: toHm(bloqueo.fecha_fin),
         motivo: bloqueo.motivo || '',
-        tipo: 'ausencia',
+        tipo: bloqueo.tipo || 'ausencia',
         recurrente: bloqueo.recurrente || 'none',
         aplica_a_todas_clinicas: !!bloqueo.aplica_a_todas_clinicas,
         created_at: bloqueo.created_at,
@@ -419,6 +420,12 @@ exports.getPersonalBloqueos = async (req, res) => {
         const toDate = buildDateTime(toRaw, null, '23:59');
 
         const where = { doctor_id: targetUserId };
+        if (Number.isFinite(clinicaId)) {
+            where[Op.or] = [
+                { clinica_id: clinicaId },
+                { clinica_id: null },
+            ];
+        }
         if (fromDate && toDate) {
             where[Op.and] = [
                 { fecha_inicio: { [Op.lte]: toDate } },
@@ -496,8 +503,10 @@ exports.createPersonalBloqueo = async (req, res) => {
 
         const bloqueo = await DoctorBloqueo.create({
             doctor_id: targetUserId,
+            clinica_id: clinicaId,
             fecha_inicio: fechaInicio,
             fecha_fin: fechaFin,
+            tipo: (req.body?.tipo || 'ausencia').toString().slice(0, 32),
             motivo: (req.body?.motivo || '').toString().slice(0, 255),
             recurrente: req.body?.recurrente || 'none',
             aplica_a_todas_clinicas: clinicaId == null ? true : false,
@@ -505,12 +514,6 @@ exports.createPersonalBloqueo = async (req, res) => {
         });
 
         const serialized = serializeBloqueo(bloqueo);
-        if (clinicaId != null) {
-            serialized.clinica_id = clinicaId;
-        }
-        if (req.body?.tipo) {
-            serialized.tipo = String(req.body.tipo);
-        }
 
         return res.status(201).json(serialized);
     } catch (error) {
