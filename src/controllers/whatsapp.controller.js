@@ -975,10 +975,8 @@ exports.deleteCatalog = async (req, res) => {
     const item = await WhatsappTemplateCatalog.findByPk(id);
     if (!item) return res.status(404).json({ error: 'catalog_not_found' });
 
-    const inUse = await WhatsappTemplate.count({ where: { catalog_template_id: id } });
-    if (inUse > 0) {
-      return res.status(400).json({ error: 'catalog_in_use' });
-    }
+    // El FK de WhatsappTemplates.catalog_template_id está en SET NULL, por lo que
+    // se permite borrar plantillas del catálogo aunque estén referenciadas.
     await WhatsappTemplateCatalog.destroy({ where: { id } });
     return res.json({ success: true });
   } catch (err) {

@@ -247,10 +247,15 @@ exports.updateChatFlowTemplate = async (req, res) => {
 
 exports.deleteChatFlowTemplate = async (req, res) => {
   if (!assertAdmin(req, res)) return;
-  return res.status(405).json({
-    error: 'delete_disabled',
-    message: 'Las plantillas del catálogo no se pueden borrar. Desactiva la plantilla o crea una copia.',
-  });
+  try {
+    const row = await ChatFlowTemplate.findByPk(req.params.id);
+    if (!row) return res.status(404).json({ message: 'Plantilla no encontrada' });
+
+    await row.destroy();
+    return res.status(200).json({ success: true, id: Number(req.params.id) });
+  } catch (error) {
+    return res.status(500).json({ message: 'Error eliminando plantilla', error: error.message });
+  }
 };
 
 exports.duplicateChatFlowTemplate = async (req, res) => {
