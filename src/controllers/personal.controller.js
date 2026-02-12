@@ -1,5 +1,5 @@
 const { Op } = require('sequelize');
-const { Usuario, Clinica, UsuarioClinica } = require('../../models');
+const { Usuario, Clinica, UsuarioClinica, DoctorBloqueo, CitaPaciente } = require('../../models');
 const bcrypt = require('bcryptjs');
 
 // Mantener consistente con userclinicas.routes.js
@@ -43,6 +43,105 @@ function parseBool(value) {
 function parseIntOrNull(value) {
     const n = Number(value);
     return Number.isFinite(n) ? n : null;
+}
+
+function parseDateOrNull(value) {
+    if (!value) return null;
+    const date = new Date(value);
+    return Number.isFinite(date.getTime()) ? date : null;
+}
+
+function normalizeHm(value) {
+    if (value == null) return null;
+    const raw = String(value).trim();
+    const match = raw.match(/^([01]?\d|2[0-3]):([0-5]\d)$/);
+    if (!match) return null;
+    const hh = match[1].padStart(2, '0');
+    const mm = match[2];
+    return `${hh}:${mm}`;
+}
+
+function buildDateTime(dateOrIso, hm, fallbackHm) {
+    if (!dateOrIso) return null;
+    if (hm) {
+        const day = String(dateOrIso).slice(0, 10);
+        return parseDateOrNull(`${day}T${hm}:00`);
+    }
+
+    const parsed = parseDateOrNull(dateOrIso);
+    if (parsed) return parsed;
+
+    if (String(dateOrIso).length === 10 && fallbackHm) {
+        return parseDateOrNull(`${String(dateOrIso)}T${fallbackHm}:00`);
+    }
+
+    return null;
+}
+
+function toHm(dateValue) {
+    const date = parseDateOrNull(dateValue);
+    if (!date) return null;
+    return `${String(date.getHours()).padStart(2, '0')}:${String(date.getMinutes()).padStart(2, '0')}`;
+}
+
+function toDay(dateValue) {
+    const date = parseDateOrNull(dateValue);
+    if (!date) return null;
+    return date.toISOString().slice(0, 10);
+}
+
+async function canAccessTargetPersonal(actorId, targetUserId, clinicId) {
+    if (isAdmin(actorId)) {
+        return true;
+    }
+
+    if (Number(actorId) === Number(targetUserId)) {
+        return true;
+    }
+
+    const actorClinicIds = await getAccessibleClinicIdsForUser(actorId);
+    if (!actorClinicIds.length) {
+        return false;
+    }
+
+    let allowedClinicIds = actorClinicIds;
+    if (Number.isFinite(clinicId)) {
+        if (!actorClinicIds.includes(clinicId)) {
+            return false;
+        }
+        allowedClinicIds = [clinicId];
+    }
+
+    const match = await UsuarioClinica.findOne({
+        where: {
+            id_usuario: Number(targetUserId),
+            rol_clinica: { [Op.in]: ['propietario', 'personaldeclinica'] },
+            id_clinica: { [Op.in]: allowedClinicIds },
+        },
+        attributes: ['id_clinica'],
+        raw: true,
+    });
+
+    return !!match;
+}
+
+function serializeBloqueo(bloqueo) {
+    return {
+        id: bloqueo.id,
+        personal_id: bloqueo.doctor_id,
+        doctor_id: bloqueo.doctor_id,
+        fecha_inicio: bloqueo.fecha_inicio,
+        fecha_fin: bloqueo.fecha_fin,
+        fecha: toDay(bloqueo.fecha_inicio),
+        hora_inicio: toHm(bloqueo.fecha_inicio),
+        hora_fin: toHm(bloqueo.fecha_fin),
+        motivo: bloqueo.motivo || '',
+        tipo: 'ausencia',
+        recurrente: bloqueo.recurrente || 'none',
+        aplica_a_todas_clinicas: !!bloqueo.aplica_a_todas_clinicas,
+        created_at: bloqueo.created_at,
+        updated_at: bloqueo.updated_at,
+    };
 }
 
 exports.getPersonal = async (req, res) => {
@@ -296,3 +395,159 @@ exports.updatePersonalMember = async (req, res) => {
     }
 };
 
+exports.getPersonalBloqueos = async (req, res) => {
+    try {
+        const actorId = Number(req.userData?.userId);
+        if (!Number.isFinite(actorId)) {
+            return res.status(401).json({ message: 'Auth failed!' });
+        }
+
+        const targetUserId = Number(req.params.id);
+        if (!Number.isFinite(targetUserId)) {
+            return res.status(400).json({ message: 'Invalid id' });
+        }
+
+        const clinicaId = parseIntOrNull(req.query?.clinica_id ?? req.query?.clinic_id);
+        const canAccess = await canAccessTargetPersonal(actorId, targetUserId, clinicaId);
+        if (!canAccess) {
+            return res.status(403).json({ message: 'Forbidden' });
+        }
+
+        const fromRaw = req.query?.from || req.query?.fecha_inicio;
+        const toRaw = req.query?.to || req.query?.fecha_fin;
+        const fromDate = buildDateTime(fromRaw, null, '00:00');
+        const toDate = buildDateTime(toRaw, null, '23:59');
+
+        const where = { doctor_id: targetUserId };
+        if (fromDate && toDate) {
+            where[Op.and] = [
+                { fecha_inicio: { [Op.lte]: toDate } },
+                { fecha_fin: { [Op.gte]: fromDate } },
+            ];
+        } else if (fromDate) {
+            where.fecha_fin = { [Op.gte]: fromDate };
+        } else if (toDate) {
+            where.fecha_inicio = { [Op.lte]: toDate };
+        }
+
+        const rows = await DoctorBloqueo.findAll({
+            where,
+            order: [['fecha_inicio', 'ASC']],
+        });
+
+        return res.json(rows.map(serializeBloqueo));
+    } catch (error) {
+        console.error('[personal.getPersonalBloqueos] Error:', error);
+        return res.status(500).json({ message: 'Error retrieving personal bloqueos', error: error.message });
+    }
+};
+
+exports.createPersonalBloqueo = async (req, res) => {
+    try {
+        const actorId = Number(req.userData?.userId);
+        if (!Number.isFinite(actorId)) {
+            return res.status(401).json({ message: 'Auth failed!' });
+        }
+
+        const targetUserId = Number(req.params.id);
+        if (!Number.isFinite(targetUserId)) {
+            return res.status(400).json({ message: 'Invalid id' });
+        }
+
+        const clinicaId = parseIntOrNull(req.body?.clinica_id ?? req.body?.clinic_id);
+        const canAccess = await canAccessTargetPersonal(actorId, targetUserId, clinicaId);
+        if (!canAccess) {
+            return res.status(403).json({ message: 'Forbidden' });
+        }
+
+        const horaInicio = normalizeHm(req.body?.hora_inicio);
+        const horaFin = normalizeHm(req.body?.hora_fin);
+        const fechaInicioInput = req.body?.fecha_inicio || req.body?.fecha;
+        const fechaFinInput = req.body?.fecha_fin || req.body?.fecha;
+
+        const fechaInicio = buildDateTime(fechaInicioInput, horaInicio, '00:00');
+        const fechaFin = buildDateTime(fechaFinInput, horaFin, '23:59');
+
+        if (!fechaInicio || !fechaFin) {
+            return res.status(400).json({ message: 'fecha_inicio/fecha_fin inválidas' });
+        }
+
+        if (fechaInicio >= fechaFin) {
+            return res.status(400).json({ message: 'Rango inválido: fecha_fin debe ser mayor que fecha_inicio' });
+        }
+
+        const overlapCita = await CitaPaciente.findOne({
+            where: {
+                doctor_id: targetUserId,
+                inicio: { [Op.lt]: fechaFin },
+                fin: { [Op.gt]: fechaInicio },
+            },
+            attributes: ['id_cita', 'inicio', 'fin'],
+            raw: true,
+        });
+
+        if (overlapCita) {
+            return res.status(409).json({
+                message: 'No se puede bloquear: hay citas en ese rango',
+                reason: 'STAFF_HAS_APPOINTMENTS',
+                cita_conflictiva: overlapCita,
+            });
+        }
+
+        const bloqueo = await DoctorBloqueo.create({
+            doctor_id: targetUserId,
+            fecha_inicio: fechaInicio,
+            fecha_fin: fechaFin,
+            motivo: (req.body?.motivo || '').toString().slice(0, 255),
+            recurrente: req.body?.recurrente || 'none',
+            aplica_a_todas_clinicas: clinicaId == null ? true : false,
+            creado_por: actorId,
+        });
+
+        const serialized = serializeBloqueo(bloqueo);
+        if (clinicaId != null) {
+            serialized.clinica_id = clinicaId;
+        }
+        if (req.body?.tipo) {
+            serialized.tipo = String(req.body.tipo);
+        }
+
+        return res.status(201).json(serialized);
+    } catch (error) {
+        console.error('[personal.createPersonalBloqueo] Error:', error);
+        return res.status(500).json({ message: 'Error creating personal bloqueo', error: error.message });
+    }
+};
+
+exports.deletePersonalBloqueo = async (req, res) => {
+    try {
+        const actorId = Number(req.userData?.userId);
+        if (!Number.isFinite(actorId)) {
+            return res.status(401).json({ message: 'Auth failed!' });
+        }
+
+        const targetUserId = Number(req.params.id);
+        const bloqueoId = Number(req.params.bloqueoId);
+        if (!Number.isFinite(targetUserId) || !Number.isFinite(bloqueoId)) {
+            return res.status(400).json({ message: 'Invalid id' });
+        }
+
+        const bloqueo = await DoctorBloqueo.findOne({
+            where: { id: bloqueoId, doctor_id: targetUserId },
+        });
+        if (!bloqueo) {
+            return res.status(404).json({ message: 'Bloqueo no encontrado' });
+        }
+
+        const canAccess = await canAccessTargetPersonal(actorId, targetUserId, null);
+        if (!canAccess) {
+            return res.status(403).json({ message: 'Forbidden' });
+        }
+
+        await bloqueo.destroy();
+        return res.status(204).end();
+    } catch (error) {
+        console.error('[personal.deletePersonalBloqueo] Error:', error);
+        return res.status(500).json({ message: 'Error deleting personal bloqueo', error: error.message });
+    }
+};
