@@ -16,6 +16,8 @@ module.exports = (sequelize, DataTypes) => {
       // Códigos de disciplina (sector) para controlar visibilidad por tipo de clínica.
       // Si es null o [] => visible para todas.
       disciplina_codes: { type: DataTypes.JSON, allowNull: true },
+      // Tipo de icono sugerido para la plantilla (UI).
+      icon_type: { type: DataTypes.STRING(50), allowNull: true, defaultValue: 'whatsapp' },
       is_active: { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: true },
       flow: { type: DataTypes.JSON, allowNull: true },
       flows: { type: DataTypes.JSON, allowNull: true },

@@ -64,6 +64,13 @@ function normalizeDisciplinaCodes(value) {
   return value;
 }
 
+function normalizeIconType(value, fallback = undefined) {
+  if (value === undefined) return fallback;
+  if (value === null) return null;
+  const normalized = String(value).trim().toLowerCase();
+  return normalized || fallback;
+}
+
 function normalizeDisciplinesFromClinicConfig(configuracion) {
   const cfg = configuracion && typeof configuracion === 'object' ? configuracion : {};
   const raw = Array.isArray(cfg.disciplinas) ? cfg.disciplinas : (cfg.disciplina ? [cfg.disciplina] : []);
@@ -99,6 +106,7 @@ function mapTemplate(row) {
     name: data.name,
     tags: data.tags ?? null,
     disciplina_codes: data.disciplina_codes ?? null,
+    icon_type: data.icon_type ?? 'whatsapp',
     is_active: !!data.is_active,
     flow: data.flow ?? null,
     flows: data.flows ?? null,
@@ -172,6 +180,7 @@ exports.createChatFlowTemplate = async (req, res) => {
 
     const tags = normalizeTags(body.tags);
     const disciplina_codes = normalizeDisciplinaCodes(body.disciplina_codes);
+    const icon_type = normalizeIconType(body.icon_type, 'whatsapp');
     const is_active = toBool(body.is_active, true);
 
     const flow = body.flow ?? null;
@@ -189,6 +198,7 @@ exports.createChatFlowTemplate = async (req, res) => {
       name,
       tags: tags === undefined ? null : tags,
       disciplina_codes: disciplina_codes === undefined ? null : disciplina_codes,
+      icon_type,
       is_active,
       flow,
       flows,
@@ -221,6 +231,7 @@ exports.updateChatFlowTemplate = async (req, res) => {
     }
     if (body.tags !== undefined) updates.tags = normalizeTags(body.tags);
     if (body.disciplina_codes !== undefined) updates.disciplina_codes = normalizeDisciplinaCodes(body.disciplina_codes);
+    if (body.icon_type !== undefined) updates.icon_type = normalizeIconType(body.icon_type, null);
     if (body.is_active !== undefined) updates.is_active = toBool(body.is_active, row.is_active);
     if (body.flow !== undefined) updates.flow = body.flow;
     if (body.flows !== undefined) updates.flows = body.flows;
@@ -263,6 +274,7 @@ exports.duplicateChatFlowTemplate = async (req, res) => {
 
     const tags = row.tags ?? null;
     const disciplina_codes = row.disciplina_codes ?? null;
+    const icon_type = row.icon_type ?? 'whatsapp';
     const is_active = row.is_active;
     const flow = row.flow ?? null;
     const flows = row.flows ?? null;
@@ -276,6 +288,7 @@ exports.duplicateChatFlowTemplate = async (req, res) => {
           name,
           tags,
           disciplina_codes,
+          icon_type,
           is_active,
           flow,
           flows,
