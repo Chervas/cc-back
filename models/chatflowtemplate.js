@@ -16,6 +16,9 @@ module.exports = (sequelize, DataTypes) => {
       // Códigos de disciplina (sector) para controlar visibilidad por tipo de clínica.
       // Si es null o [] => visible para todas.
       disciplina_codes: { type: DataTypes.JSON, allowNull: true },
+      // Disciplinas para las que esta plantilla es la predeterminada.
+      // Solo debe existir 1 plantilla por disciplina (se garantiza en controlador).
+      is_default_for: { type: DataTypes.JSON, allowNull: true, defaultValue: null },
       // Tipo de icono sugerido para la plantilla (UI).
       icon_type: { type: DataTypes.STRING(50), allowNull: true, defaultValue: 'whatsapp' },
       is_active: { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: true },
