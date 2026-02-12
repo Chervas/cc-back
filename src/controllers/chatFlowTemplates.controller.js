@@ -50,18 +50,52 @@ function normalizeTags(tags) {
 function normalizeDisciplinaCodes(value) {
   if (value === undefined) return undefined;
   if (value === null) return null;
+  const dedupe = (arr) => {
+    const out = [];
+    const seen = new Set();
+    for (const item of arr) {
+      if (!seen.has(item)) {
+        seen.add(item);
+        out.push(item);
+      }
+    }
+    return out;
+  };
   if (Array.isArray(value)) {
-    return value
+    return dedupe(value
       .map((v) => (typeof v === 'string' ? v.trim().toLowerCase() : String(v).trim().toLowerCase()))
-      .filter(Boolean);
+      .filter(Boolean));
   }
   if (typeof value === 'string') {
-    return value
+    return dedupe(value
       .split(',')
       .map((t) => t.trim().toLowerCase())
-      .filter(Boolean);
+      .filter(Boolean));
   }
   return value;
+}
+
+async function removeDefaultDisciplinesFromOtherTemplates({ excludeTemplateId, disciplinaCodes, transaction }) {
+  const targetCodes = normalizeDisciplinaCodes(disciplinaCodes) || [];
+  if (!Array.isArray(targetCodes) || targetCodes.length === 0) return;
+
+  const where = {
+    is_default_for: { [Op.ne]: null },
+  };
+  if (excludeTemplateId !== undefined && excludeTemplateId !== null) {
+    where.id = { [Op.ne]: Number(excludeTemplateId) };
+  }
+
+  const allTemplates = await ChatFlowTemplate.findAll({ where, transaction });
+  for (const other of allTemplates) {
+    const otherDefaults = Array.isArray(other.is_default_for)
+      ? normalizeDisciplinaCodes(other.is_default_for) || []
+      : [];
+    const cleaned = otherDefaults.filter((code) => !targetCodes.includes(code));
+    if (cleaned.length !== otherDefaults.length) {
+      await other.update({ is_default_for: cleaned.length > 0 ? cleaned : null }, { transaction });
+    }
+  }
 }
 
 function normalizeDisciplinesFromClinicConfig(configuracion) {
@@ -99,6 +133,7 @@ function mapTemplate(row) {
     name: data.name,
     tags: data.tags ?? null,
     disciplina_codes: data.disciplina_codes ?? null,
+    is_default_for: data.is_default_for ?? null,
     is_active: !!data.is_active,
     flow: data.flow ?? null,
     flows: data.flows ?? null,
@@ -172,6 +207,7 @@ exports.createChatFlowTemplate = async (req, res) => {
 
     const tags = normalizeTags(body.tags);
     const disciplina_codes = normalizeDisciplinaCodes(body.disciplina_codes);
+    const is_default_for = normalizeDisciplinaCodes(body.is_default_for);
     const is_active = toBool(body.is_active, true);
 
     const flow = body.flow ?? null;
@@ -185,15 +221,27 @@ exports.createChatFlowTemplate = async (req, res) => {
       return res.status(400).json({ message: 'Debe incluirse flow o flows (no vacío)' });
     }
 
-    const created = await ChatFlowTemplate.create({
-      name,
-      tags: tags === undefined ? null : tags,
-      disciplina_codes: disciplina_codes === undefined ? null : disciplina_codes,
-      is_active,
-      flow,
-      flows,
-      texts,
-      appearance,
+    const created = await db.sequelize.transaction(async (transaction) => {
+      const defaults = Array.isArray(is_default_for) && is_default_for.length > 0 ? is_default_for : null;
+      if (defaults) {
+        await removeDefaultDisciplinesFromOtherTemplates({
+          excludeTemplateId: null,
+          disciplinaCodes: defaults,
+          transaction,
+        });
+      }
+
+      return ChatFlowTemplate.create({
+        name,
+        tags: tags === undefined ? null : tags,
+        disciplina_codes: disciplina_codes === undefined ? null : disciplina_codes,
+        is_default_for: defaults,
+        is_active,
+        flow,
+        flows,
+        texts,
+        appearance,
+      }, { transaction });
     });
 
     res.status(201).json(mapTemplate(created));
@@ -213,6 +261,7 @@ exports.updateChatFlowTemplate = async (req, res) => {
 
     const body = req.body || {};
     const updates = {};
+    let newDefaultDisciplines = undefined;
 
     if (body.name !== undefined) {
       const name = body.name ? String(body.name).trim() : '';
@@ -221,6 +270,11 @@ exports.updateChatFlowTemplate = async (req, res) => {
     }
     if (body.tags !== undefined) updates.tags = normalizeTags(body.tags);
     if (body.disciplina_codes !== undefined) updates.disciplina_codes = normalizeDisciplinaCodes(body.disciplina_codes);
+    if (body.is_default_for !== undefined) {
+      const defaults = normalizeDisciplinaCodes(body.is_default_for) || [];
+      updates.is_default_for = defaults.length > 0 ? defaults : null;
+      newDefaultDisciplines = defaults;
+    }
     if (body.is_active !== undefined) updates.is_active = toBool(body.is_active, row.is_active);
     if (body.flow !== undefined) updates.flow = body.flow;
     if (body.flows !== undefined) updates.flows = body.flows;
@@ -235,7 +289,17 @@ exports.updateChatFlowTemplate = async (req, res) => {
       return res.status(400).json({ message: 'Debe incluirse flow o flows (no vacío)' });
     }
 
-    await row.update(updates);
+    await db.sequelize.transaction(async (transaction) => {
+      if (Array.isArray(newDefaultDisciplines) && newDefaultDisciplines.length > 0) {
+        await removeDefaultDisciplinesFromOtherTemplates({
+          excludeTemplateId: row.id,
+          disciplinaCodes: newDefaultDisciplines,
+          transaction,
+        });
+      }
+      await row.update(updates, { transaction });
+    });
+    await row.reload();
     res.status(200).json(mapTemplate(row));
   } catch (error) {
     if (error?.name === 'SequelizeUniqueConstraintError') {
@@ -268,6 +332,8 @@ exports.duplicateChatFlowTemplate = async (req, res) => {
 
     const tags = row.tags ?? null;
     const disciplina_codes = row.disciplina_codes ?? null;
+    // Una copia nunca debe heredar defaults por disciplina para evitar colisiones.
+    const is_default_for = null;
     const is_active = row.is_active;
     const flow = row.flow ?? null;
     const flows = row.flows ?? null;
@@ -281,6 +347,7 @@ exports.duplicateChatFlowTemplate = async (req, res) => {
           name,
           tags,
           disciplina_codes,
+          is_default_for,
           is_active,
           flow,
           flows,
