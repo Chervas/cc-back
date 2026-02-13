@@ -40,7 +40,7 @@ exports.list = asyncHandler(async (req, res) => {
   const includeClinica = {
     model: db.Clinica,
     as: 'clinica',
-    attributes: ['id_clinica', 'nombre_clinica', 'grupoClinicaId'],
+    attributes: ['id_clinica', 'nombre_clinica', 'url_avatar', 'grupoClinicaId'],
   };
   if (!parseBool(all) && group_id) {
     includeClinica.where = { grupoClinicaId: group_id };
@@ -127,7 +127,7 @@ async function buildSchedule(doctorId) {
   const clinicas = await db.DoctorClinica.findAll({
     where: { doctor_id: doctorId, activo: true },
     include: [
-      { model: db.Clinica, as: 'clinica', attributes: ['id_clinica','nombre_clinica'] },
+      { model: db.Clinica, as: 'clinica', attributes: ['id_clinica','nombre_clinica','url_avatar'] },
       { model: db.DoctorHorario, as: 'horarios' }
     ]
   });
@@ -138,6 +138,7 @@ async function buildSchedule(doctorId) {
     clinicas: clinicas.map(c => ({
       clinica_id: c.clinica_id,
       nombre_clinica: c.clinica?.nombre_clinica || '',
+      url_avatar: c.clinica?.url_avatar || null,
       activo: c.activo,
       horarios: c.horarios || []
     })),
