@@ -779,6 +779,11 @@ exports.upsertIntakeConfig = asyncHandler(async (req, res) => {
       raw: true
     });
     nextHmacKey = existing?.hmac_key || null;
+
+    // Auto-generación: si se está configurando una allowlist de dominios y aún no hay clave, crearla.
+    if (!nextHmacKey && Array.isArray(domains) && domains.length > 0) {
+      nextHmacKey = crypto.randomBytes(32).toString('hex');
+    }
   }
 
   await IntakeConfig.upsert({
