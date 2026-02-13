@@ -29,21 +29,6 @@ module.exports = (sequelize, DataTypes) => {
     },
     url_web: DataTypes.STRING,
     url_avatar: DataTypes.STRING,
-    // Alias canónico para UI (cabeceras /personal, etc.). Mantiene compatibilidad con el campo legacy `url_avatar`.
-    logo_clinica: {
-      type: DataTypes.VIRTUAL,
-      get() {
-        const avatar = this.getDataValue('url_avatar');
-        return avatar && String(avatar).trim() !== '' ? avatar : null;
-      }
-    },
-    avatar_clinica: {
-      type: DataTypes.VIRTUAL,
-      get() {
-        const avatar = this.getDataValue('url_avatar');
-        return avatar && String(avatar).trim() !== '' ? avatar : null;
-      }
-    },
     url_fondo: DataTypes.STRING,
     url_ficha_local: DataTypes.STRING,
     nombre_clinica: DataTypes.STRING,
