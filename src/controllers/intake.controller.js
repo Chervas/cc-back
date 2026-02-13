@@ -469,6 +469,16 @@ exports.ingestLead = asyncHandler(async (req, res) => {
 
   // Emitir a Meta CAPI si hay datos mínimos
   try {
+    // Permite al snippet solicitar un evento concreto (p. ej. Contact para tel_modal).
+    // Si viene vacío o es inválido, mantenemos Lead por defecto (compatibilidad).
+    const requestedEventNameRaw = coalesce(body.event_name, body.eventName);
+    const requestedEventName = requestedEventNameRaw ? String(requestedEventNameRaw).trim().toLowerCase() : '';
+    const metaEventName =
+      requestedEventName === 'contact' ? 'Contact' :
+      requestedEventName === 'schedule' ? 'Schedule' :
+      requestedEventName === 'purchase' ? 'Purchase' :
+      'Lead';
+
     const userData = buildMetaUserData({
       email: leadEmail,
       phone: leadTelefono,
@@ -477,7 +487,7 @@ exports.ingestLead = asyncHandler(async (req, res) => {
       externalId: lead.id
     });
     await sendMetaEvent({
-      eventName: 'Lead',
+      eventName: metaEventName,
       eventTime: Math.floor(Date.now() / 1000),
       eventId: lead.event_id || `lead-${lead.id}`,
       actionSource: 'website',
@@ -617,7 +627,7 @@ exports.getIntakeConfig = asyncHandler(async (req, res) => {
     if (!resolvedGroupId && payload.clinic_id) {
       clinicRow = await Clinica.findOne({
         where: { id_clinica: payload.clinic_id },
-        attributes: ['id_clinica', 'nombre_clinica', 'grupoClinicaId'],
+        attributes: ['id_clinica', 'nombre_clinica', 'telefono', 'grupoClinicaId'],
         raw: true
       });
       resolvedGroupId = clinicRow?.grupoClinicaId || null;
@@ -646,7 +656,7 @@ exports.getIntakeConfig = asyncHandler(async (req, res) => {
 
       const clinics = await Clinica.findAll({
         where: { grupoClinicaId: resolvedGroupId },
-        attributes: ['id_clinica', 'nombre_clinica'],
+        attributes: ['id_clinica', 'nombre_clinica', 'telefono'],
         order: [['nombre_clinica', 'ASC']],
         raw: true
       });
@@ -675,10 +685,12 @@ exports.getIntakeConfig = asyncHandler(async (req, res) => {
       }
 
       payload.available_locations = clinics.map((c) => {
+        const phone = c.telefono || null;
         const whatsapp = whatsappByClinicId.get(c.id_clinica) || groupWhatsApp || null;
         return {
           id: c.id_clinica,
           label: c.nombre_clinica,
+          phone,
           whatsapp
         };
       });
@@ -686,7 +698,7 @@ exports.getIntakeConfig = asyncHandler(async (req, res) => {
       if (!clinicRow) {
         clinicRow = await Clinica.findOne({
           where: { id_clinica: payload.clinic_id },
-          attributes: ['id_clinica', 'nombre_clinica'],
+          attributes: ['id_clinica', 'nombre_clinica', 'telefono'],
           raw: true
         });
       }
@@ -707,7 +719,7 @@ exports.getIntakeConfig = asyncHandler(async (req, res) => {
         } catch (e) {
           whatsapp = null;
         }
-        payload.available_locations = [{ id: clinicRow.id_clinica, label: clinicRow.nombre_clinica, whatsapp }];
+        payload.available_locations = [{ id: clinicRow.id_clinica, label: clinicRow.nombre_clinica, phone: clinicRow.telefono || null, whatsapp }];
       }
     }
   } catch (e) {
