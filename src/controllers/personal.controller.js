@@ -574,11 +574,23 @@ exports.updatePersonalBloqueo = async (req, res) => {
             return res.status(404).json({ message: 'Bloqueo no encontrado' });
         }
 
-        // Si clinica_id llega explícitamente como null/'' => bloqueo global (todas las clínicas).
-        const clinicaIdRaw = req.body?.clinica_id ?? req.body?.clinic_id;
-        const clinicaId = (clinicaIdRaw === null || clinicaIdRaw === undefined || String(clinicaIdRaw).trim() === '')
-            ? null
-            : parseIntOrNull(clinicaIdRaw);
+        // PATCH semantics:
+        // - Si clinica_id/clinic_id NO viene en el body, conservar el valor actual del bloqueo.
+        // - Si viene explícitamente como null/'' => bloqueo global (todas las clínicas).
+        const body = req.body || {};
+        const hasClinicaField =
+            Object.prototype.hasOwnProperty.call(body, 'clinica_id') ||
+            Object.prototype.hasOwnProperty.call(body, 'clinic_id');
+
+        let clinicaId;
+        if (hasClinicaField) {
+            const clinicaIdRaw = body.clinica_id ?? body.clinic_id;
+            clinicaId = (clinicaIdRaw === null || clinicaIdRaw === undefined || String(clinicaIdRaw).trim() === '')
+                ? null
+                : parseIntOrNull(clinicaIdRaw);
+        } else {
+            clinicaId = bloqueo.clinica_id ?? null;
+        }
 
         const canEdit = await canEditBloqueos(actorId, targetUserId, clinicaId);
         if (!canEdit) {
