@@ -6,6 +6,7 @@ const bcrypt = require('bcryptjs');
 const ADMIN_USER_IDS = [1];
 // Nota: columna DoctorBloqueos.tipo es STRING(32) (sin ENUM). Mantener lista alineada con el front.
 const BLOQUEO_TIPOS = new Set(['vacaciones', 'enfermedad', 'ausencia', 'formacion', 'congreso', 'otro']);
+const MODO_DISPONIBILIDAD = new Set(['avanzado', 'basico']);
 
 const isAdmin = (userId) => ADMIN_USER_IDS.includes(Number(userId));
 
@@ -101,6 +102,17 @@ function normalizeBloqueoTipo(value) {
         return null;
     }
     return tipo;
+}
+
+function normalizeModoDisponibilidad(value) {
+    if (value == null || String(value).trim() === '') {
+        return null;
+    }
+    const modo = String(value).trim().toLowerCase();
+    if (!MODO_DISPONIBILIDAD.has(modo)) {
+        return null;
+    }
+    return modo;
 }
 
 async function canAccessTargetPersonal(actorId, targetUserId, clinicId) {
@@ -896,6 +908,7 @@ async function buildScheduleResponse(actorId, targetUserId) {
             nombre_clinica: c.clinica?.nombre_clinica || '',
             url_avatar: c.clinica?.url_avatar || null,
             activo: !!c.activo,
+            modo_disponibilidad: c.modo_disponibilidad || 'avanzado',
             horarios: c.horarios || [],
         })),
         bloqueos: bloqueos.map(serializeBloqueo),
@@ -1047,6 +1060,70 @@ exports.updateHorariosClinica = async (req, res) => {
     } catch (error) {
         console.error('[personal.updateHorariosClinica] Error:', error);
         return res.status(500).json({ message: 'Error updating horarios', error: error.message });
+    }
+};
+
+exports.updateModoDisponibilidadClinicaForCurrent = async (req, res) => {
+    req.params.id = String(req.userData?.userId || '');
+    return exports.updateModoDisponibilidadClinica(req, res);
+};
+
+exports.updateModoDisponibilidadClinica = async (req, res) => {
+    try {
+        const actorId = Number(req.userData?.userId);
+        if (!Number.isFinite(actorId)) {
+            return res.status(401).json({ message: 'Auth failed!' });
+        }
+
+        const targetUserId = Number(req.params.id);
+        const clinicaId = Number(req.params.clinicaId);
+        if (!Number.isFinite(targetUserId) || !Number.isFinite(clinicaId)) {
+            return res.status(400).json({ message: 'Invalid id' });
+        }
+
+        const modo = normalizeModoDisponibilidad(req.body?.modo_disponibilidad ?? req.body?.modo);
+        if (!modo) {
+            return res.status(400).json({
+                message: 'modo_disponibilidad inválido',
+                allowed: Array.from(MODO_DISPONIBILIDAD),
+            });
+        }
+
+        // Reglas MVP: same gate as horarios (self in clinic, or owner/admin for others).
+        const canEdit = await canEditHorarios(actorId, targetUserId, clinicaId);
+        if (!canEdit) {
+            return res.status(403).json({ message: 'Forbidden' });
+        }
+
+        let dc = await DoctorClinica.findOne({
+            where: { doctor_id: targetUserId, clinica_id: clinicaId },
+        });
+
+        if (!dc) {
+            dc = await DoctorClinica.create({
+                doctor_id: targetUserId,
+                clinica_id: clinicaId,
+                activo: true,
+                modo_disponibilidad: modo,
+            });
+        } else {
+            dc.modo_disponibilidad = modo;
+            if (!dc.activo) {
+                dc.activo = true;
+            }
+            await dc.save();
+        }
+
+        return res.json({
+            id: dc.id,
+            doctor_id: dc.doctor_id,
+            clinica_id: dc.clinica_id,
+            activo: !!dc.activo,
+            modo_disponibilidad: dc.modo_disponibilidad || 'avanzado',
+        });
+    } catch (error) {
+        console.error('[personal.updateModoDisponibilidadClinica] Error:', error);
+        return res.status(500).json({ message: 'Error updating modo_disponibilidad', error: error.message });
     }
 };
 

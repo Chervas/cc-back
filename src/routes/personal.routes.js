@@ -17,8 +17,10 @@ router.get('/:id/schedule', personalController.getScheduleForPersonal);
 // Horarios por clínica (compat con /api/doctors/*)
 router.get('/me/clinicas/:clinicaId/horarios', personalController.getHorariosClinicaForCurrent);
 router.put('/me/clinicas/:clinicaId/horarios', personalController.updateHorariosClinicaForCurrent);
+router.patch('/me/clinicas/:clinicaId/modo-disponibilidad', personalController.updateModoDisponibilidadClinicaForCurrent);
 router.get('/:id/clinicas/:clinicaId/horarios', personalController.getHorariosClinica);
 router.put('/:id/clinicas/:clinicaId/horarios', personalController.updateHorariosClinica);
+router.patch('/:id/clinicas/:clinicaId/modo-disponibilidad', personalController.updateModoDisponibilidadClinica);
 
 // Convenience wrapper (compat con front que usa query param clinica_id)
 router.get('/:id/horarios', personalController.getHorarios);

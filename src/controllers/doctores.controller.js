@@ -33,6 +33,18 @@ exports.list = asyncHandler(async (req, res) => {
 
   // Filtrado por clinica_id directamente sobre DoctorClinica (evita depender de atributos inexistentes en Clinica)
   const whereDoctorClinica = { activo: true };
+  // Mantener /api/doctors legacy limitado a doctores reales:
+  // Solo filas donde el pivot UsuarioClinica marca subrol_clinica='Doctores' en esa clinica.
+  whereDoctorClinica[Op.and] = db.Sequelize.literal(`
+    EXISTS (
+      SELECT 1
+      FROM UsuarioClinica uc
+      WHERE uc.id_usuario = \`DoctorClinica\`.\`doctor_id\`
+        AND uc.id_clinica = \`DoctorClinica\`.\`clinica_id\`
+        AND uc.rol_clinica = 'personaldeclinica'
+        AND uc.subrol_clinica = 'Doctores'
+    )
+  `);
   if (!parseBool(all) && clinica_id) {
     whereDoctorClinica.clinica_id = clinica_id;
   }

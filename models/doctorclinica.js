@@ -13,6 +13,9 @@ module.exports = (sequelize, DataTypes) => {
     doctor_id: { type: DataTypes.INTEGER, allowNull: false },
     clinica_id: { type: DataTypes.INTEGER, allowNull: false },
     rol_en_clinica: DataTypes.STRING(64),
+    // Alias semantico: modo de disponibilidad del miembro en esta clinica
+    // Valores validos: 'avanzado' | 'basico' (string por compatibilidad futura).
+    modo_disponibilidad: { type: DataTypes.STRING(16), allowNull: false, defaultValue: 'avanzado' },
     activo: { type: DataTypes.BOOLEAN, defaultValue: true }
   }, {
     sequelize,
