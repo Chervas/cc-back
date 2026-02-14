@@ -745,8 +745,8 @@ const DEFAULT_TEXTS = {
   chat_welcome: 'Hola. Quieres pedirnos una cita de valoracion sin coste?',
   // Tel modal (bloqueante): capturamos datos antes de abrir tel:
   // Nota: el snippet soporta variables {nombre_clinica} y {telefono}.
-  tel_modal_title: 'Estas llamando a {nombre_clinica}',
-  tel_modal_subtitle: 'Conectando con la recepción de {nombre_clinica}',
+  tel_modal_title: 'Conectando con la recepción de {nombre_clinica}',
+  tel_modal_subtitle: 'Déjanos tu teléfono por si se pierde la conexión',
   consent_text: 'Acepto la politica de privacidad',
   privacy_url: '/politica-privacidad'
 };
