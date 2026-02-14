@@ -463,6 +463,11 @@ exports.getPersonalBloqueos = async (req, res) => {
     }
 };
 
+exports.getPersonalBloqueosForCurrent = async (req, res) => {
+    req.params.id = String(req.userData?.userId || '');
+    return exports.getPersonalBloqueos(req, res);
+};
+
 exports.createPersonalBloqueo = async (req, res) => {
     try {
         const actorId = Number(req.userData?.userId);
@@ -544,6 +549,11 @@ exports.createPersonalBloqueo = async (req, res) => {
     }
 };
 
+exports.createPersonalBloqueoForCurrent = async (req, res) => {
+    req.params.id = String(req.userData?.userId || '');
+    return exports.createPersonalBloqueo(req, res);
+};
+
 exports.deletePersonalBloqueo = async (req, res) => {
     try {
         const actorId = Number(req.userData?.userId);
@@ -575,6 +585,11 @@ exports.deletePersonalBloqueo = async (req, res) => {
         console.error('[personal.deletePersonalBloqueo] Error:', error);
         return res.status(500).json({ message: 'Error deleting personal bloqueo', error: error.message });
     }
+};
+
+exports.deletePersonalBloqueoForCurrent = async (req, res) => {
+    req.params.id = String(req.userData?.userId || '');
+    return exports.deletePersonalBloqueo(req, res);
 };
 
 // ────────────────────────────────────────────────────────────────
