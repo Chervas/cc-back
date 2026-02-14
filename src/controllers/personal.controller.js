@@ -554,6 +554,117 @@ exports.createPersonalBloqueoForCurrent = async (req, res) => {
     return exports.createPersonalBloqueo(req, res);
 };
 
+exports.updatePersonalBloqueo = async (req, res) => {
+    try {
+        const actorId = Number(req.userData?.userId);
+        if (!Number.isFinite(actorId)) {
+            return res.status(401).json({ message: 'Auth failed!' });
+        }
+
+        const targetUserId = Number(req.params.id);
+        const bloqueoId = Number(req.params.bloqueoId);
+        if (!Number.isFinite(targetUserId) || !Number.isFinite(bloqueoId)) {
+            return res.status(400).json({ message: 'Invalid id' });
+        }
+
+        const bloqueo = await DoctorBloqueo.findOne({
+            where: { id: bloqueoId, doctor_id: targetUserId },
+        });
+        if (!bloqueo) {
+            return res.status(404).json({ message: 'Bloqueo no encontrado' });
+        }
+
+        // Si clinica_id llega explícitamente como null/'' => bloqueo global (todas las clínicas).
+        const clinicaIdRaw = req.body?.clinica_id ?? req.body?.clinic_id;
+        const clinicaId = (clinicaIdRaw === null || clinicaIdRaw === undefined || String(clinicaIdRaw).trim() === '')
+            ? null
+            : parseIntOrNull(clinicaIdRaw);
+
+        const canAccess = await canAccessTargetPersonal(actorId, targetUserId, clinicaId);
+        if (!canAccess) {
+            return res.status(403).json({ message: 'Forbidden' });
+        }
+
+        // Preservar horas actuales si no se envían.
+        const horaInicio = req.body?.hora_inicio !== undefined
+            ? normalizeHm(req.body?.hora_inicio)
+            : toHm(bloqueo.fecha_inicio);
+        const horaFin = req.body?.hora_fin !== undefined
+            ? normalizeHm(req.body?.hora_fin)
+            : toHm(bloqueo.fecha_fin);
+
+        if (req.body?.hora_inicio !== undefined && !horaInicio) {
+            return res.status(400).json({ message: 'hora_inicio inválida' });
+        }
+        if (req.body?.hora_fin !== undefined && !horaFin) {
+            return res.status(400).json({ message: 'hora_fin inválida' });
+        }
+
+        const fechaInicioInput = req.body?.fecha_inicio || req.body?.fecha || toDay(bloqueo.fecha_inicio);
+        const fechaFinInput = req.body?.fecha_fin || req.body?.fecha || toDay(bloqueo.fecha_fin);
+
+        const fechaInicio = buildDateTime(fechaInicioInput, horaInicio, '00:00');
+        const fechaFin = buildDateTime(fechaFinInput, horaFin, '23:59');
+
+        if (!fechaInicio || !fechaFin) {
+            return res.status(400).json({ message: 'fecha_inicio/fecha_fin inválidas' });
+        }
+        if (fechaInicio >= fechaFin) {
+            return res.status(400).json({ message: 'Rango inválido: fecha_fin debe ser mayor que fecha_inicio' });
+        }
+
+        const tipo = req.body?.tipo !== undefined
+            ? normalizeBloqueoTipo(req.body?.tipo)
+            : (normalizeBloqueoTipo(bloqueo.tipo) || 'ausencia');
+
+        if (req.body?.tipo !== undefined && !tipo) {
+            return res.status(400).json({
+                message: 'tipo inválido',
+                allowed: Array.from(BLOQUEO_TIPOS),
+            });
+        }
+
+        // Evitar crear/editar bloqueos que oculten citas existentes.
+        const overlapCita = await CitaPaciente.findOne({
+            where: {
+                doctor_id: targetUserId,
+                inicio: { [Op.lt]: fechaFin },
+                fin: { [Op.gt]: fechaInicio },
+            },
+            attributes: ['id_cita', 'inicio', 'fin'],
+            raw: true,
+        });
+
+        if (overlapCita) {
+            return res.status(409).json({
+                message: 'No se puede actualizar el bloqueo: hay citas en ese rango',
+                reason: 'STAFF_HAS_APPOINTMENTS',
+                cita_conflictiva: overlapCita,
+            });
+        }
+
+        await bloqueo.update({
+            clinica_id: clinicaId,
+            fecha_inicio: fechaInicio,
+            fecha_fin: fechaFin,
+            tipo: tipo || 'ausencia',
+            motivo: (req.body?.motivo ?? bloqueo.motivo ?? '').toString().slice(0, 255),
+            recurrente: req.body?.recurrente ?? bloqueo.recurrente ?? 'none',
+            aplica_a_todas_clinicas: clinicaId == null ? true : false,
+        });
+
+        return res.json(serializeBloqueo(bloqueo));
+    } catch (error) {
+        console.error('[personal.updatePersonalBloqueo] Error:', error);
+        return res.status(500).json({ message: 'Error updating personal bloqueo', error: error.message });
+    }
+};
+
+exports.updatePersonalBloqueoForCurrent = async (req, res) => {
+    req.params.id = String(req.userData?.userId || '');
+    return exports.updatePersonalBloqueo(req, res);
+};
+
 exports.deletePersonalBloqueo = async (req, res) => {
     try {
         const actorId = Number(req.userData?.userId);
