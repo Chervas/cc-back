@@ -4,7 +4,8 @@ const bcrypt = require('bcryptjs');
 
 // Mantener consistente con userclinicas.routes.js
 const ADMIN_USER_IDS = [1];
-const BLOQUEO_TIPOS = new Set(['vacaciones', 'ausencia', 'formacion', 'congreso', 'otro']);
+// Nota: columna DoctorBloqueos.tipo es STRING(32) (sin ENUM). Mantener lista alineada con el front.
+const BLOQUEO_TIPOS = new Set(['vacaciones', 'enfermedad', 'ausencia', 'formacion', 'congreso', 'otro']);
 
 const isAdmin = (userId) => ADMIN_USER_IDS.includes(Number(userId));
 
