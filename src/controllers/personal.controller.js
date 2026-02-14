@@ -481,8 +481,8 @@ exports.createPersonalBloqueo = async (req, res) => {
         }
 
         const clinicaId = parseIntOrNull(req.body?.clinica_id ?? req.body?.clinic_id);
-        const canAccess = await canAccessTargetPersonal(actorId, targetUserId, clinicaId);
-        if (!canAccess) {
+        const canEdit = await canEditBloqueos(actorId, targetUserId, clinicaId);
+        if (!canEdit) {
             return res.status(403).json({ message: 'Forbidden' });
         }
 
@@ -580,8 +580,8 @@ exports.updatePersonalBloqueo = async (req, res) => {
             ? null
             : parseIntOrNull(clinicaIdRaw);
 
-        const canAccess = await canAccessTargetPersonal(actorId, targetUserId, clinicaId);
-        if (!canAccess) {
+        const canEdit = await canEditBloqueos(actorId, targetUserId, clinicaId);
+        if (!canEdit) {
             return res.status(403).json({ message: 'Forbidden' });
         }
 
@@ -685,8 +685,8 @@ exports.deletePersonalBloqueo = async (req, res) => {
             return res.status(404).json({ message: 'Bloqueo no encontrado' });
         }
 
-        const canAccess = await canAccessTargetPersonal(actorId, targetUserId, null);
-        if (!canAccess) {
+        const canEdit = await canEditBloqueos(actorId, targetUserId, bloqueo.clinica_id ?? null);
+        if (!canEdit) {
             return res.status(403).json({ message: 'Forbidden' });
         }
 
@@ -758,6 +758,52 @@ async function canEditHorarios(actorId, targetUserId, clinicId) {
 
     // Evitar generar schedules "huérfanos" en clínicas donde el usuario no pertenece
     return hasStaffPivot(targetUserId, clinicId);
+}
+
+async function getOwnerClinicIdsForUser(userId) {
+    if (!Number.isFinite(Number(userId))) return [];
+    const rows = await UsuarioClinica.findAll({
+        where: {
+            id_usuario: Number(userId),
+            rol_clinica: 'propietario',
+        },
+        attributes: ['id_clinica'],
+        raw: true,
+    });
+    return rows
+        .map((r) => Number(r.id_clinica))
+        .filter((id) => Number.isFinite(id));
+}
+
+async function canEditBloqueos(actorId, targetUserId, clinicaId) {
+    if (isAdmin(actorId)) return true;
+
+    // Self: puede gestionar sus bloqueos. Si clinica_id es específico, debe pertenecer a esa clínica.
+    if (Number(actorId) === Number(targetUserId)) {
+        if (Number.isFinite(Number(clinicaId))) {
+            return hasStaffPivot(actorId, Number(clinicaId));
+        }
+        return true;
+    }
+
+    const ownerClinicIds = await getOwnerClinicIdsForUser(actorId);
+    if (!ownerClinicIds.length) return false;
+
+    // Bloqueo global (clinica_id=null): permitir solo si el actor es propietario de *todas* las clínicas
+    // donde el usuario objetivo trabaja (evita bloquear en clínicas ajenas).
+    if (clinicaId == null) {
+        const targetClinicIds = await getAccessibleClinicIdsForUser(targetUserId);
+        if (!targetClinicIds.length) return false;
+        const ownerSet = new Set(ownerClinicIds);
+        return targetClinicIds.every((id) => ownerSet.has(id));
+    }
+
+    const cid = Number(clinicaId);
+    if (!Number.isFinite(cid)) return false;
+    if (!ownerClinicIds.includes(cid)) return false;
+
+    // Evitar bloqueos huérfanos: el usuario objetivo debe pertenecer a la clínica.
+    return hasStaffPivot(targetUserId, cid);
 }
 
 function normalizeHorarioRows(body) {
