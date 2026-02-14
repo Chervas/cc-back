@@ -523,8 +523,10 @@ const DEFAULT_CHAT_FLOW = {
 const DEFAULT_TEXTS = {
   chat_title: 'WhatsApp',
   chat_welcome: 'Hola. Quieres pedirnos una cita de valoracion sin coste?',
-  tel_modal_title: 'Antes de llamar...',
-  tel_modal_subtitle: 'Dejanos tus datos por si se corta la comunicacion.',
+  // Tel modal (bloqueante): capturamos datos antes de abrir tel:
+  // Nota: el snippet soporta variables {nombre_clinica} y {telefono}.
+  tel_modal_title: 'Estas llamando a {nombre_clinica}',
+  tel_modal_subtitle: 'Conectando con la recepción de {nombre_clinica}',
   consent_text: 'Acepto la politica de privacidad',
   privacy_url: '/politica-privacidad'
 };
@@ -549,7 +551,9 @@ const DEFAULT_APPEARANCE = {
   mobile_fullscreen: true,
   frequency: 'every_visit',
   frequency_hours: 24,
-  show_branding: true
+  show_branding: true,
+  // Tel modal header color (used for gradient + button styling in snippet)
+  tel_modal_header_color: '#3B82F6'
 };
 
 const defaultConfigPayload = (clinicId, groupId) => ({
@@ -568,6 +572,9 @@ const defaultConfigPayload = (clinicId, groupId) => ({
 });
 
 exports.getIntakeConfig = asyncHandler(async (req, res) => {
+  // La config es “source of truth” para el snippet; evitar 304/ETag y cachés agresivas.
+  res.set('Cache-Control', 'no-store');
+
   const clinicIdRaw = req.query.clinic_id;
   const groupIdRaw = req.query.group_id;
   const domain = normalizeDomain(String(req.query.domain || '')) || '';
