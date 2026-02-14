@@ -656,7 +656,7 @@ exports.getIntakeConfig = asyncHandler(async (req, res) => {
 
       const clinics = await Clinica.findAll({
         where: { grupoClinicaId: resolvedGroupId },
-        attributes: ['id_clinica', 'nombre_clinica', 'telefono'],
+        attributes: ['id_clinica', 'nombre_clinica', 'telefono', 'url_avatar'],
         order: [['nombre_clinica', 'ASC']],
         raw: true
       });
@@ -691,14 +691,15 @@ exports.getIntakeConfig = asyncHandler(async (req, res) => {
           id: c.id_clinica,
           label: c.nombre_clinica,
           phone,
-          whatsapp
+          whatsapp,
+          url_avatar: c.url_avatar || null
         };
       });
     } else if (payload.clinic_id) {
       if (!clinicRow) {
         clinicRow = await Clinica.findOne({
           where: { id_clinica: payload.clinic_id },
-          attributes: ['id_clinica', 'nombre_clinica', 'telefono'],
+          attributes: ['id_clinica', 'nombre_clinica', 'telefono', 'url_avatar'],
           raw: true
         });
       }
@@ -719,7 +720,13 @@ exports.getIntakeConfig = asyncHandler(async (req, res) => {
         } catch (e) {
           whatsapp = null;
         }
-        payload.available_locations = [{ id: clinicRow.id_clinica, label: clinicRow.nombre_clinica, phone: clinicRow.telefono || null, whatsapp }];
+        payload.available_locations = [{
+          id: clinicRow.id_clinica,
+          label: clinicRow.nombre_clinica,
+          phone: clinicRow.telefono || null,
+          whatsapp,
+          url_avatar: clinicRow.url_avatar || null
+        }];
       }
     }
   } catch (e) {
