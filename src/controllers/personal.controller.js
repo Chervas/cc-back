@@ -1,5 +1,5 @@
 const { Op } = require('sequelize');
-const { Usuario, Clinica, UsuarioClinica, DoctorBloqueo, CitaPaciente } = require('../../models');
+const { Usuario, Clinica, UsuarioClinica, DoctorClinica, DoctorHorario, DoctorBloqueo, CitaPaciente } = require('../../models');
 const bcrypt = require('bcryptjs');
 
 // Mantener consistente con userclinicas.routes.js
@@ -574,5 +574,323 @@ exports.deletePersonalBloqueo = async (req, res) => {
     } catch (error) {
         console.error('[personal.deletePersonalBloqueo] Error:', error);
         return res.status(500).json({ message: 'Error deleting personal bloqueo', error: error.message });
+    }
+};
+
+// ────────────────────────────────────────────────────────────────
+// Schedule / Horarios (canónico /api/personal/*)
+// Persistencia actual: DoctorClinicas + DoctorHorarios (alias semántico "personal")
+// ────────────────────────────────────────────────────────────────
+
+function normalizeDiaSemana(value) {
+    const n = Number(value);
+    if (!Number.isFinite(n)) return null;
+    if (n < 0 || n > 6) return null;
+    return Math.trunc(n);
+}
+
+async function hasStaffPivot(userId, clinicId) {
+    if (!Number.isFinite(Number(userId)) || !Number.isFinite(Number(clinicId))) return false;
+    const row = await UsuarioClinica.findOne({
+        where: {
+            id_usuario: Number(userId),
+            id_clinica: Number(clinicId),
+            rol_clinica: { [Op.in]: ['propietario', 'personaldeclinica'] },
+        },
+        attributes: ['id_usuario'],
+        raw: true,
+    });
+    return !!row;
+}
+
+async function isOwnerPivot(userId, clinicId) {
+    if (!Number.isFinite(Number(userId)) || !Number.isFinite(Number(clinicId))) return false;
+    const row = await UsuarioClinica.findOne({
+        where: {
+            id_usuario: Number(userId),
+            id_clinica: Number(clinicId),
+            rol_clinica: 'propietario',
+        },
+        attributes: ['id_usuario'],
+        raw: true,
+    });
+    return !!row;
+}
+
+async function canEditHorarios(actorId, targetUserId, clinicId) {
+    if (isAdmin(actorId)) return true;
+    if (!Number.isFinite(Number(clinicId))) return false;
+
+    // Un usuario puede editar sus propios horarios en clínicas donde trabaja
+    if (Number(actorId) === Number(targetUserId)) {
+        return hasStaffPivot(actorId, clinicId);
+    }
+
+    // Editar horarios de otros: solo propietario de la clínica (MVP; AccessPolicy granular va en Bloque 2)
+    const actorIsOwner = await isOwnerPivot(actorId, clinicId);
+    if (!actorIsOwner) return false;
+
+    // Evitar generar schedules "huérfanos" en clínicas donde el usuario no pertenece
+    return hasStaffPivot(targetUserId, clinicId);
+}
+
+function normalizeHorarioRows(body) {
+    const rows = Array.isArray(body)
+        ? body
+        : (Array.isArray(body?.horarios) ? body.horarios : []);
+
+    const out = [];
+    for (const r of rows) {
+        const dia = normalizeDiaSemana(r?.dia_semana);
+        const inicio = normalizeHm(r?.hora_inicio);
+        const fin = normalizeHm(r?.hora_fin);
+        if (dia == null || !inicio || !fin) continue;
+        if (inicio >= fin) continue;
+        out.push({
+            dia_semana: dia,
+            hora_inicio: inicio,
+            hora_fin: fin,
+            activo: r?.activo === false ? false : true,
+        });
+    }
+    return out;
+}
+
+async function getAllowedClinicIdsForActorTarget(actorId, targetUserId) {
+    const targetClinicIds = await getAccessibleClinicIdsForUser(targetUserId);
+    if (isAdmin(actorId) || Number(actorId) === Number(targetUserId)) {
+        return targetClinicIds;
+    }
+
+    const actorClinicIds = await getAccessibleClinicIdsForUser(actorId);
+    const actorSet = new Set(actorClinicIds);
+    return targetClinicIds.filter((id) => actorSet.has(id));
+}
+
+async function buildScheduleResponse(actorId, targetUserId) {
+    const user = await Usuario.findByPk(targetUserId, {
+        attributes: ['id_usuario', 'nombre', 'apellidos', 'email_usuario'],
+        raw: true,
+    });
+
+    const allowedClinicIds = await getAllowedClinicIdsForActorTarget(actorId, targetUserId);
+
+    const clinicas = allowedClinicIds.length
+        ? await DoctorClinica.findAll({
+            where: {
+                doctor_id: targetUserId,
+                clinica_id: { [Op.in]: allowedClinicIds },
+                activo: true,
+            },
+            include: [
+                { model: Clinica, as: 'clinica', attributes: ['id_clinica', 'nombre_clinica', 'url_avatar'] },
+                { model: DoctorHorario, as: 'horarios' },
+            ],
+            order: [['clinica_id', 'ASC']],
+        })
+        : [];
+
+    // Bloqueos: limitar a las clínicas visibles (o global) cuando no es admin / self
+    const bloqueosWhere = { doctor_id: targetUserId };
+    if (!isAdmin(actorId) && Number(actorId) !== Number(targetUserId) && allowedClinicIds.length) {
+        bloqueosWhere[Op.or] = [
+            { clinica_id: null },
+            { clinica_id: { [Op.in]: allowedClinicIds } },
+        ];
+    }
+
+    const bloqueos = await DoctorBloqueo.findAll({
+        where: bloqueosWhere,
+        order: [['fecha_inicio', 'ASC']],
+    });
+
+    return {
+        doctor_id: String(targetUserId),
+        doctor_nombre: user ? `${user.nombre || ''} ${user.apellidos || ''}`.trim() : '',
+        clinicas: clinicas.map((c) => ({
+            clinica_id: c.clinica_id,
+            nombre_clinica: c.clinica?.nombre_clinica || '',
+            url_avatar: c.clinica?.url_avatar || null,
+            activo: !!c.activo,
+            horarios: c.horarios || [],
+        })),
+        bloqueos: bloqueos.map(serializeBloqueo),
+    };
+}
+
+exports.getScheduleForCurrent = async (req, res) => {
+    try {
+        const actorId = Number(req.userData?.userId);
+        if (!Number.isFinite(actorId)) {
+            return res.status(401).json({ message: 'Auth failed!' });
+        }
+
+        const schedule = await buildScheduleResponse(actorId, actorId);
+        return res.json(schedule);
+    } catch (error) {
+        console.error('[personal.getScheduleForCurrent] Error:', error);
+        return res.status(500).json({ message: 'Error retrieving personal schedule', error: error.message });
+    }
+};
+
+exports.getScheduleForPersonal = async (req, res) => {
+    try {
+        const actorId = Number(req.userData?.userId);
+        if (!Number.isFinite(actorId)) {
+            return res.status(401).json({ message: 'Auth failed!' });
+        }
+
+        const targetUserId = Number(req.params.id);
+        if (!Number.isFinite(targetUserId)) {
+            return res.status(400).json({ message: 'Invalid id' });
+        }
+
+        const canAccess = await canAccessTargetPersonal(actorId, targetUserId, null);
+        if (!canAccess) {
+            return res.status(403).json({ message: 'Forbidden' });
+        }
+
+        const schedule = await buildScheduleResponse(actorId, targetUserId);
+        return res.json(schedule);
+    } catch (error) {
+        console.error('[personal.getScheduleForPersonal] Error:', error);
+        return res.status(500).json({ message: 'Error retrieving personal schedule', error: error.message });
+    }
+};
+
+async function getHorariosFor(targetUserId, clinicId) {
+    const dc = await DoctorClinica.findOne({
+        where: {
+            doctor_id: targetUserId,
+            clinica_id: clinicId,
+        },
+        attributes: ['id', 'doctor_id', 'clinica_id', 'activo'],
+        raw: true,
+    });
+
+    if (!dc) {
+        return { doctor_clinica_id: null, horarios: [] };
+    }
+
+    const horarios = await DoctorHorario.findAll({
+        where: { doctor_clinica_id: dc.id },
+        order: [['dia_semana', 'ASC'], ['hora_inicio', 'ASC']],
+    });
+
+    return { doctor_clinica_id: dc.id, horarios };
+}
+
+exports.getHorariosClinicaForCurrent = async (req, res) => {
+    req.params.id = String(req.userData?.userId || '');
+    return exports.getHorariosClinica(req, res);
+};
+
+exports.getHorariosClinica = async (req, res) => {
+    try {
+        const actorId = Number(req.userData?.userId);
+        if (!Number.isFinite(actorId)) {
+            return res.status(401).json({ message: 'Auth failed!' });
+        }
+
+        const targetUserId = Number(req.params.id);
+        const clinicaId = Number(req.params.clinicaId);
+        if (!Number.isFinite(targetUserId) || !Number.isFinite(clinicaId)) {
+            return res.status(400).json({ message: 'Invalid id' });
+        }
+
+        const canAccess = await canAccessTargetPersonal(actorId, targetUserId, clinicaId);
+        if (!canAccess) {
+            return res.status(403).json({ message: 'Forbidden' });
+        }
+
+        const data = await getHorariosFor(targetUserId, clinicaId);
+        return res.json(data);
+    } catch (error) {
+        console.error('[personal.getHorariosClinica] Error:', error);
+        return res.status(500).json({ message: 'Error retrieving horarios', error: error.message });
+    }
+};
+
+exports.updateHorariosClinicaForCurrent = async (req, res) => {
+    req.params.id = String(req.userData?.userId || '');
+    return exports.updateHorariosClinica(req, res);
+};
+
+exports.updateHorariosClinica = async (req, res) => {
+    try {
+        const actorId = Number(req.userData?.userId);
+        if (!Number.isFinite(actorId)) {
+            return res.status(401).json({ message: 'Auth failed!' });
+        }
+
+        const targetUserId = Number(req.params.id);
+        const clinicaId = Number(req.params.clinicaId);
+        if (!Number.isFinite(targetUserId) || !Number.isFinite(clinicaId)) {
+            return res.status(400).json({ message: 'Invalid id' });
+        }
+
+        const canEdit = await canEditHorarios(actorId, targetUserId, clinicaId);
+        if (!canEdit) {
+            return res.status(403).json({ message: 'Forbidden' });
+        }
+
+        const horarios = normalizeHorarioRows(req.body);
+        if (!horarios.length && Array.isArray(req.body?.horarios) && req.body.horarios.length) {
+            return res.status(400).json({ message: 'horarios inválidos' });
+        }
+
+        let dc = await DoctorClinica.findOne({
+            where: { doctor_id: targetUserId, clinica_id: clinicaId },
+        });
+
+        if (!dc) {
+            dc = await DoctorClinica.create({
+                doctor_id: targetUserId,
+                clinica_id: clinicaId,
+                activo: true,
+            });
+        } else if (!dc.activo) {
+            dc.activo = true;
+            await dc.save();
+        }
+
+        await DoctorHorario.destroy({ where: { doctor_clinica_id: dc.id } });
+        const created = await DoctorHorario.bulkCreate(
+            horarios.map((h) => ({ ...h, doctor_clinica_id: dc.id })),
+        );
+
+        return res.json(created);
+    } catch (error) {
+        console.error('[personal.updateHorariosClinica] Error:', error);
+        return res.status(500).json({ message: 'Error updating horarios', error: error.message });
+    }
+};
+
+// Wrapper: /api/personal/:id/horarios?clinica_id=...
+exports.getHorarios = async (req, res) => {
+    try {
+        const clinicaId = parseIntOrNull(req.query?.clinica_id ?? req.query?.clinic_id);
+        if (!Number.isFinite(clinicaId)) {
+            return res.status(400).json({ message: 'clinica_id is required' });
+        }
+        req.params.clinicaId = String(clinicaId);
+        return exports.getHorariosClinica(req, res);
+    } catch (error) {
+        console.error('[personal.getHorarios] Error:', error);
+        return res.status(500).json({ message: 'Error retrieving horarios', error: error.message });
+    }
+};
+
+exports.updateHorarios = async (req, res) => {
+    try {
+        const clinicaId = parseIntOrNull(req.query?.clinica_id ?? req.query?.clinic_id);
+        if (!Number.isFinite(clinicaId)) {
+            return res.status(400).json({ message: 'clinica_id is required' });
+        }
+        req.params.clinicaId = String(clinicaId);
+        return exports.updateHorariosClinica(req, res);
+    } catch (error) {
+        console.error('[personal.updateHorarios] Error:', error);
+        return res.status(500).json({ message: 'Error updating horarios', error: error.message });
     }
 };
