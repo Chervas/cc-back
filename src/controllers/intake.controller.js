@@ -582,18 +582,25 @@ exports.getIntakeConfig = asyncHandler(async (req, res) => {
   const groupIdParsed = parseInteger(groupIdRaw);
 
   let record = null;
-  // Prioridad: clínica explícita > dominio (clínica) > grupo explícito > dominio (grupo)
+  // Prioridad:
+  // - Si el snippet pasa clinic_id explícito => config de clínica.
+  // - Si el snippet pasa group_id explícito => config de grupo.
+  // - Si no hay IDs => resolver por dominio (primero clínica, luego grupo).
+  //
+  // Motivo: el HMAC se configura por scope (clínica vs grupo). Si el snippet se instala con
+  // data-group-id, NO debemos devolver config de clínica solo por el dominio, o el snippet firmará
+  // con la key de grupo pero el backend esperará la key de clínica (401).
   if (clinicIdParsed !== null) {
     record = await IntakeConfig.findOne({ where: { clinic_id: clinicIdParsed }, raw: true });
+  }
+  if (!record && groupIdParsed !== null) {
+    record = await IntakeConfig.findOne({ where: { group_id: groupIdParsed, assignment_scope: 'group' }, raw: true });
   }
   if (!record && domain) {
     record = await IntakeConfig.findOne({
       where: db.Sequelize.literal(`JSON_CONTAINS(COALESCE(domains,'[]'), '\"${domain}\"') AND assignment_scope='clinic'`)
     });
     if (record && record.get) record = record.get({ plain: true });
-  }
-  if (!record && groupIdParsed !== null) {
-    record = await IntakeConfig.findOne({ where: { group_id: groupIdParsed, assignment_scope: 'group' }, raw: true });
   }
   if (!record && domain) {
     record = await IntakeConfig.findOne({
