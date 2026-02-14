@@ -4,7 +4,7 @@
   "main": "index.js",
   "scripts": {
     "test": "echo \"No tests configured; skipping\"",
-    "start": "ng serve --proxy-config proxy.conf.json"
+    "start": "node src/app.js"
   },
   "keywords": [],
   "author": "",
