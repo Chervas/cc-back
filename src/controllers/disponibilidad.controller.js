@@ -283,7 +283,13 @@ exports.check = asyncHandler(async (req, res) => {
         clinica_id: clinicaId,
         code: 'STAFF_BLOCKED',
         can_force: false,
-        details: { bloqueo_id: b.id, message: b.motivo || 'Bloqueo doctor' }
+        details: {
+          bloqueo_id: b.id,
+          tipo: b.tipo || null,
+          // Importante: el front usa este campo para mostrar el motivo del bloqueo en los "shadows".
+          message: b.motivo || 'Bloqueo doctor',
+          clinica_id: b.clinica_id ?? null,
+        }
       });
     }
 
