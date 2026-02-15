@@ -44,7 +44,10 @@ function parseBool(value) {
 }
 
 function parseIntOrNull(value) {
-    const n = Number(value);
+    if (value === null || value === undefined) return null;
+    const raw = String(value).trim();
+    if (!raw) return null;
+    const n = Number(raw);
     return Number.isFinite(n) ? n : null;
 }
 
@@ -853,7 +856,7 @@ async function canEditBloqueos(actorId, targetUserId, clinicaId) {
 
     // Self: puede gestionar sus bloqueos. Si clinica_id es específico, debe pertenecer a esa clínica.
     if (Number(actorId) === Number(targetUserId)) {
-        if (Number.isFinite(Number(clinicaId))) {
+        if (clinicaId != null && Number.isFinite(Number(clinicaId))) {
             return hasStaffPivot(actorId, Number(clinicaId));
         }
         return true;
