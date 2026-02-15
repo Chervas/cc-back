@@ -187,6 +187,51 @@ function isQuickchatSummaryRequest(body = {}) {
   );
 }
 
+function getChatStateData(body = {}) {
+  const state =
+    (body.chat_state && typeof body.chat_state === 'object' ? body.chat_state : null) ||
+    (body.chatState && typeof body.chatState === 'object' ? body.chatState : null) ||
+    null;
+  const data = state && state.data && typeof state.data === 'object' && !Array.isArray(state.data) ? state.data : null;
+  return data || null;
+}
+
+async function resolveClinicIdForGroupChat({ groupId, chatStateData }) {
+  const gid = parseInteger(groupId);
+  if (!gid) return null;
+
+  // 1) Preferir sede elegida en el chat (locations step => chat_state.data.location = clinic_id)
+  const candidateId = chatStateData
+    ? parseInteger(coalesce(
+      chatStateData.location,
+      chatStateData.location_id,
+      chatStateData.locationId,
+      chatStateData.clinic_id,
+      chatStateData.clinica_id,
+      chatStateData.clinicId,
+      chatStateData.clinicaId
+    ))
+    : null;
+
+  if (candidateId) {
+    const row = await Clinica.findOne({
+      where: { id_clinica: candidateId, grupoClinicaId: gid },
+      attributes: ['id_clinica'],
+      raw: true
+    });
+    if (row) return candidateId;
+  }
+
+  // 2) Fallback determinista: primera clínica del grupo (mismo orden que available_locations)
+  const first = await Clinica.findOne({
+    where: { grupoClinicaId: gid },
+    attributes: ['id_clinica'],
+    order: [['nombre_clinica', 'ASC']],
+    raw: true
+  });
+  return parseInteger(first?.id_clinica) || null;
+}
+
 function formatExtraPairs(pairs) {
   if (!Array.isArray(pairs) || pairs.length === 0) return '';
   const safe = pairs
@@ -371,6 +416,7 @@ exports.ingestLead = asyncHandler(async (req, res) => {
   const body = req.body || {};
   const eventId = (req.headers[EVENT_ID_HEADER] || body?.event_id || body?.eventId || null) || null;
   const wantsQuickchatSummary = isQuickchatSummaryRequest(body);
+  const chatStateData = getChatStateData(body);
 
   const {
     clinica_id,
@@ -458,6 +504,23 @@ exports.ingestLead = asyncHandler(async (req, res) => {
       return res.status(401).json({ message: 'Firma HMAC inválida o ausente' });
     }
   }
+
+  const sourceDetailLower = String(source_detail || '').toLowerCase();
+  const isChatRelated = sourceDetailLower === 'chatbot' || sourceDetailLower === 'chatbot_quickchat' || wantsQuickchatSummary;
+
+  let derivedClinicIdForChat = null;
+  if (clinicaIdParsed === null && grupoClinicaIdParsed !== null && isChatRelated) {
+    try {
+      derivedClinicIdForChat = await resolveClinicIdForGroupChat({
+        groupId: grupoClinicaIdParsed,
+        chatStateData
+      });
+    } catch (e) {
+      derivedClinicIdForChat = null;
+      console.warn('⚠️ No se pudo resolver clinic_id desde chat_state/group:', e.message || e);
+    }
+  }
+  const clinicIdForChat = coalesce(clinicaIdParsed, derivedClinicIdForChat);
 
   const utmSource = coalesce(attribution.utm_source, utm_source);
   const utmMedium = coalesce(attribution.utm_medium, utm_medium);
@@ -570,7 +633,7 @@ exports.ingestLead = asyncHandler(async (req, res) => {
 
   const leadPayload = {
     event_id: eventId,
-    clinica_id: clinicaIdParsed,
+    clinica_id: isChatRelated ? clinicIdForChat : clinicaIdParsed,
     grupo_clinica_id: grupoClinicaIdParsed,
     campana_id: campanaIdParsed,
     channel: normalizedChannel,
@@ -622,15 +685,11 @@ exports.ingestLead = asyncHandler(async (req, res) => {
           existing = null;
         }
 
-        const clinicIdForChat = coalesce(clinicaIdParsed, existing?.clinica_id);
+        const clinicIdForChat = coalesce(clinicaIdParsed, derivedClinicIdForChat, existing?.clinica_id);
         const nombreForChat = coalesce(leadNombre, existing?.nombre);
         const telefonoForChat = coalesce(leadTelefono, existing?.telefono);
         const emailForChat = coalesce(leadEmail, existing?.email);
 
-        const chatStateData =
-          (body.chat_state && typeof body.chat_state === 'object' ? body.chat_state.data : null) ||
-          (body.chatState && typeof body.chatState === 'object' ? body.chatState.data : null) ||
-          null;
         const extraPairs = [];
         const addPairs = (obj) => {
           if (!obj || typeof obj !== 'object' || Array.isArray(obj)) return;
@@ -694,7 +753,7 @@ exports.ingestLead = asyncHandler(async (req, res) => {
       eventId: lead.event_id || `lead-${lead.id}`,
       actionSource: 'website',
       eventSourceUrl: pageUrlValue || landingUrlValue || null,
-      clinicId: clinicaIdParsed,
+      clinicId: clinicIdForChat,
       source: normalizedSource,
       sourceDetail: source_detail || null,
       utmCampaign: utmCampaign || null,
@@ -706,10 +765,6 @@ exports.ingestLead = asyncHandler(async (req, res) => {
 
   let quickchatSummarySent = false;
   if (wantsQuickchatSummary) {
-    const chatStateData =
-      (body.chat_state && typeof body.chat_state === 'object' ? body.chat_state.data : null) ||
-      (body.chatState && typeof body.chatState === 'object' ? body.chatState.data : null) ||
-      null;
     const extraPairs = [];
     const addPairs = (obj) => {
       if (!obj || typeof obj !== 'object' || Array.isArray(obj)) return;
@@ -723,7 +778,7 @@ exports.ingestLead = asyncHandler(async (req, res) => {
 
     try {
       const summaryResult = await sendQuickchatSummaryToQuickChat({
-        clinicId: clinicaIdParsed,
+        clinicId: clinicIdForChat,
         leadIntakeId: lead.id,
         nombre: leadNombre,
         telefono: leadTelefono,
@@ -1744,10 +1799,43 @@ exports.listLeads = asyncHandler(async (req, res) => {
   const groupIdParsed = groupIdRaw === 'all' ? null : parseInteger(groupIdRaw);
   const campanaIdParsed = parseInteger(campanaId || req.query.campana_id);
 
-  if (clinicIdsParsed !== null) {
-    where.clinica_id = clinicIdsParsed.length === 1 ? clinicIdsParsed[0] : { [Op.in]: clinicIdsParsed };
+  const clinicFilter =
+    clinicIdsParsed !== null
+      ? (clinicIdsParsed.length === 1 ? { clinica_id: clinicIdsParsed[0] } : { clinica_id: { [Op.in]: clinicIdsParsed } })
+      : null;
+
+  let effectiveGroupId = groupIdParsed;
+  // Caso típico del selector global: clinicId viene como CSV (grupo), pero el front no conoce el groupId.
+  // Para mostrar también leads "a nivel grupo" (clinica_id NULL + grupo_clinica_id=X), derivamos el grupo
+  // a partir de la primera clínica.
+  if (!effectiveGroupId && Array.isArray(clinicIdsParsed) && clinicIdsParsed.length > 1) {
+    try {
+      const firstClinicId = clinicIdsParsed[0];
+      const clinicRow = await Clinica.findOne({
+        where: { id_clinica: firstClinicId },
+        attributes: ['grupoClinicaId'],
+        raw: true
+      });
+      effectiveGroupId = parseInteger(clinicRow?.grupoClinicaId) || null;
+    } catch {
+      effectiveGroupId = null;
+    }
   }
-  if (groupIdParsed !== null) where.grupo_clinica_id = groupIdParsed;
+
+  const groupFilter = effectiveGroupId ? { grupo_clinica_id: effectiveGroupId } : null;
+
+  // Si hay un CSV de clínicas + grupo resuelto => queremos UNION (OR):
+  // - leads de esas clínicas
+  // - leads guardados a nivel grupo (clinica_id NULL)
+  const hasMultiClinicCsv = Array.isArray(clinicIdsParsed) && clinicIdsParsed.length > 1;
+  let scopeOrFilter = null;
+  if (groupFilter && clinicFilter && hasMultiClinicCsv) {
+    scopeOrFilter = [groupFilter, clinicFilter];
+  } else {
+    if (clinicFilter) Object.assign(where, clinicFilter);
+    if (groupFilter) Object.assign(where, groupFilter);
+  }
+
   if (campanaIdParsed !== null) where.campana_id = campanaIdParsed;
   if (channel && CHANNELS.has(channel)) where.channel = channel;
   if (source && SOURCES.has(source)) where.source = source;
@@ -1761,11 +1849,21 @@ exports.listLeads = asyncHandler(async (req, res) => {
 
   if (search) {
     const term = `%${search}%`;
-    where[Op.or] = [
+    const searchOr = [
       { nombre: { [Op.like]: term } },
       { email: { [Op.like]: term } },
       { telefono: { [Op.like]: term } }
     ];
+    if (scopeOrFilter) {
+      where[Op.and] = [
+        { [Op.or]: scopeOrFilter },
+        { [Op.or]: searchOr }
+      ];
+    } else {
+      where[Op.or] = searchOr;
+    }
+  } else if (scopeOrFilter) {
+    where[Op.or] = scopeOrFilter;
   }
 
   const pageSizeParsed = Math.max(parseInteger(pageSize) || Math.min(Math.max(Number(limit) || 50, 1), 200), 1);
@@ -1827,10 +1925,36 @@ exports.getLeadStats = asyncHandler(async (req, res) => {
   const groupIdParsed = groupIdRaw === 'all' ? null : parseInteger(groupIdRaw);
   const campanaIdParsed = parseInteger(campanaId || req.query.campana_id);
 
-  if (clinicIdsParsed !== null) {
-    where.clinica_id = clinicIdsParsed.length === 1 ? clinicIdsParsed[0] : { [Op.in]: clinicIdsParsed };
+  const clinicFilter =
+    clinicIdsParsed !== null
+      ? (clinicIdsParsed.length === 1 ? { clinica_id: clinicIdsParsed[0] } : { clinica_id: { [Op.in]: clinicIdsParsed } })
+      : null;
+
+  let effectiveGroupId = groupIdParsed;
+  if (!effectiveGroupId && Array.isArray(clinicIdsParsed) && clinicIdsParsed.length > 1) {
+    try {
+      const firstClinicId = clinicIdsParsed[0];
+      const clinicRow = await Clinica.findOne({
+        where: { id_clinica: firstClinicId },
+        attributes: ['grupoClinicaId'],
+        raw: true
+      });
+      effectiveGroupId = parseInteger(clinicRow?.grupoClinicaId) || null;
+    } catch {
+      effectiveGroupId = null;
+    }
   }
-  if (groupIdParsed !== null) where.grupo_clinica_id = groupIdParsed;
+
+  const groupFilter = effectiveGroupId ? { grupo_clinica_id: effectiveGroupId } : null;
+  const hasMultiClinicCsv = Array.isArray(clinicIdsParsed) && clinicIdsParsed.length > 1;
+  let scopeOrFilter = null;
+  if (groupFilter && clinicFilter && hasMultiClinicCsv) {
+    scopeOrFilter = [groupFilter, clinicFilter];
+  } else {
+    if (clinicFilter) Object.assign(where, clinicFilter);
+    if (groupFilter) Object.assign(where, groupFilter);
+  }
+
   if (campanaIdParsed !== null) where.campana_id = campanaIdParsed;
   if (channel && CHANNELS.has(channel)) where.channel = channel;
   if (source && SOURCES.has(source)) where.source = source;
@@ -1843,11 +1967,21 @@ exports.getLeadStats = asyncHandler(async (req, res) => {
 
   if (search) {
     const term = `%${search}%`;
-    where[Op.or] = [
+    const searchOr = [
       { nombre: { [Op.like]: term } },
       { email: { [Op.like]: term } },
       { telefono: { [Op.like]: term } }
     ];
+    if (scopeOrFilter) {
+      where[Op.and] = [
+        { [Op.or]: scopeOrFilter },
+        { [Op.or]: searchOr }
+      ];
+    } else {
+      where[Op.or] = searchOr;
+    }
+  } else if (scopeOrFilter) {
+    where[Op.or] = scopeOrFilter;
   }
 
   // Obtener conteos por estado
