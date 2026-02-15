@@ -788,7 +788,8 @@ exports.slots = asyncHandler(async (req, res) => {
 
     const instBloqRows = await db.InstalacionBloqueo.findAll({
       where: { instalacion_id: { [Op.in]: instalacionIds }, fecha_inicio: { [Op.lt]: baseEnd }, fecha_fin: { [Op.gt]: baseStart } },
-      attributes: ['instalacion_id', 'fecha_inicio', 'fecha_fin', 'motivo', 'tipo', 'clinica_id']
+      // InstalacionBloqueos no tiene columnas `tipo`/`clinica_id` (a diferencia de DoctorBloqueos).
+      attributes: ['instalacion_id', 'fecha_inicio', 'fecha_fin', 'motivo']
     });
     const instCitasRows = await db.CitaPaciente.findAll({
       where: { instalacion_id: { [Op.in]: instalacionIds }, inicio: { [Op.lt]: baseEnd }, fin: { [Op.gt]: baseStart } },
@@ -876,7 +877,8 @@ exports.slots = asyncHandler(async (req, res) => {
 
     const instBloqRows = await db.InstalacionBloqueo.findAll({
       where: { instalacion_id: instalacionId, fecha_inicio: { [Op.lt]: baseEnd }, fecha_fin: { [Op.gt]: baseStart } },
-      attributes: ['fecha_inicio', 'fecha_fin', 'motivo', 'tipo', 'clinica_id']
+      // InstalacionBloqueos no tiene columnas `tipo`/`clinica_id`.
+      attributes: ['fecha_inicio', 'fecha_fin', 'motivo']
     });
     const instCitasRows = await db.CitaPaciente.findAll({
       where: { instalacion_id: instalacionId, inicio: { [Op.lt]: baseEnd }, fin: { [Op.gt]: baseStart } },
@@ -975,7 +977,8 @@ exports.slots = asyncHandler(async (req, res) => {
 
     instBloqRows = await db.InstalacionBloqueo.findAll({
       where: { instalacion_id: instalacionId, fecha_inicio: { [Op.lt]: baseEnd }, fecha_fin: { [Op.gt]: baseStart } },
-      attributes: ['fecha_inicio', 'fecha_fin', 'motivo', 'tipo', 'clinica_id']
+      // InstalacionBloqueos no tiene columnas `tipo`/`clinica_id`.
+      attributes: ['fecha_inicio', 'fecha_fin', 'motivo']
     });
     instCitasRows = await db.CitaPaciente.findAll({
       where: { instalacion_id: instalacionId, inicio: { [Op.lt]: baseEnd }, fin: { [Op.gt]: baseStart } },
