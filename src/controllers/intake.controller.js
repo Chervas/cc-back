@@ -847,6 +847,155 @@ exports.getIntakeConfigSecretGroup = asyncHandler(async (req, res) => {
   });
 });
 
+// ======================================
+// Verificación de instalación del snippet
+// (UI autenticada)
+// ======================================
+
+exports.verifySnippetInstalled = asyncHandler(async (req, res) => {
+  const domainRaw = String(req.query.domain || '').trim();
+  const clinicId = parseInteger(req.query.clinic_id);
+  const groupId = parseInteger(req.query.group_id);
+  const pageUrlRaw = String(req.query.url || req.query.page_url || '').trim();
+
+  if (!domainRaw) {
+    return res.status(400).json({ installed: false, details: 'Falta el parámetro domain' });
+  }
+  const domain = normalizeDomain(domainRaw);
+  if (!domain) {
+    return res.status(400).json({ installed: false, details: 'Dominio inválido' });
+  }
+  if (domain === 'localhost' || domain.endsWith('.local') || domain === '127.0.0.1') {
+    return res.status(400).json({ installed: false, details: 'Dominio no permitido para verificación' });
+  }
+
+  // Requerimos un scope explícito para evitar verificar config de terceros por "solo dominio".
+  if (clinicId === null && groupId === null) {
+    return res.status(400).json({ installed: false, details: 'clinic_id o group_id requerido' });
+  }
+
+  let record = null;
+  if (clinicId !== null) {
+    record = await IntakeConfig.findOne({ where: { clinic_id: clinicId }, raw: true });
+  }
+  if (!record && groupId !== null) {
+    record = await IntakeConfig.findOne({ where: { group_id: groupId, assignment_scope: 'group' }, raw: true });
+  }
+  if (!record) {
+    return res.status(404).json({ installed: false, details: 'No hay configuración de intake para este scope' });
+  }
+
+  const allowlist = Array.isArray(record.domains) ? record.domains : [];
+  if (allowlist.length === 0) {
+    return res.status(400).json({ installed: false, details: 'Añade al menos un dominio en la configuración antes de verificar' });
+  }
+  if (!isDomainAllowed(allowlist, domain)) {
+    return res.status(403).json({ installed: false, details: 'Dominio no permitido para esta configuración' });
+  }
+
+  const scope = groupId !== null ? 'group' : 'clinic';
+  const expectedId = scope === 'group' ? (record.group_id || groupId) : (record.clinic_id || clinicId);
+  const expectedAttr = scope === 'group' ? 'data-group-id' : 'data-clinic-id';
+
+  // Construir URLs candidatas a verificar.
+  // Si el usuario pasa una URL completa, la respetamos (pero debe coincidir el host allowlisted).
+  const candidates = [];
+  if (pageUrlRaw) {
+    try {
+      const u = new URL(pageUrlRaw);
+      const host = normalizeDomain(u.hostname);
+      if (!host || !isDomainAllowed(allowlist, host)) {
+        return res.status(400).json({ installed: false, details: 'La URL no coincide con el dominio allowlisteado' });
+      }
+      candidates.push(u.toString());
+    } catch {
+      return res.status(400).json({ installed: false, details: 'URL inválida' });
+    }
+  } else {
+    const base = stripWww(domain);
+    candidates.push(`https://${base}/`);
+    if (!base.startsWith('www.')) {
+      candidates.push(`https://www.${base}/`);
+    }
+    candidates.push(`http://${base}/`);
+    if (!base.startsWith('www.')) {
+      candidates.push(`http://www.${base}/`);
+    }
+  }
+  const uniqueCandidates = Array.from(new Set(candidates));
+
+  let html = null;
+  let finalUrl = null;
+  let lastError = null;
+
+  for (const url of uniqueCandidates) {
+    try {
+      const resp = await axios.get(url, {
+        timeout: 8000,
+        maxRedirects: 5,
+        maxContentLength: 2 * 1024 * 1024,
+        maxBodyLength: 2 * 1024 * 1024,
+        headers: {
+          'User-Agent': 'ClinicaClick Snippet Verifier/1.0',
+          'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8'
+        },
+        validateStatus: (s) => s >= 200 && s < 400
+      });
+      if (typeof resp.data === 'string' && resp.data.length > 0) {
+        html = resp.data;
+        // axios no expone siempre la URL final; guardamos la candidate.
+        finalUrl = url;
+        break;
+      }
+    } catch (e) {
+      lastError = e;
+    }
+  }
+
+  if (!html) {
+    const code = lastError?.response?.status || null;
+    return res.status(502).json({
+      installed: false,
+      details: `No se pudo acceder a ${domain} para verificar${code ? ` (HTTP ${code})` : ''}`
+    });
+  }
+
+  const scriptTags = html.match(/<script\b[^>]*>/gi) || [];
+  const intakeTags = scriptTags.filter((t) => /intake\.js/i.test(t));
+  if (intakeTags.length === 0) {
+    return res.json({ installed: false, details: `No se encontró intake.js en ${finalUrl || domain}` });
+  }
+
+  const idRe = new RegExp(`${expectedAttr}\\s*=\\s*['"]?${expectedId}['"]?`, 'i');
+  const tagForScope = intakeTags.find((t) => idRe.test(t));
+  if (!tagForScope) {
+    // Pista útil: ¿hay intake.js pero con otro scope/id?
+    const clinicIdMatch = intakeTags.map((t) => t.match(/data-clinic-id\s*=\s*['"]?(\d+)['"]?/i)).find(Boolean);
+    const groupIdMatch = intakeTags.map((t) => t.match(/data-group-id\s*=\s*['"]?(\d+)['"]?/i)).find(Boolean);
+    const hint = clinicIdMatch?.[1]
+      ? `Se detectó data-clinic-id="${clinicIdMatch[1]}".`
+      : (groupIdMatch?.[1] ? `Se detectó data-group-id="${groupIdMatch[1]}".` : null);
+    return res.json({
+      installed: false,
+      details: `Se encontró intake.js pero no el atributo ${expectedAttr}="${expectedId}" (scope incorrecto o ID distinto).${hint ? ` ${hint}` : ''}`
+    });
+  }
+
+  // Si existe HMAC en backend, exigir data-hmac-key y que coincida.
+  if (record.hmac_key) {
+    const m = tagForScope.match(/data-hmac-key\s*=\s*['"]([^'"]+)['"]/i);
+    const installedKey = m?.[1] ? String(m[1]).trim() : null;
+    if (!installedKey) {
+      return res.json({ installed: false, details: 'Se encontró intake.js pero falta data-hmac-key en el script tag.' });
+    }
+    if (installedKey !== record.hmac_key) {
+      return res.json({ installed: false, details: 'Se encontró intake.js pero la clave HMAC no coincide con la del CRM (quizá rotaste la clave y no actualizaste la web).' });
+    }
+  }
+
+  return res.json({ installed: true });
+});
+
 // ===========================
 // Eventos genéricos (ViewContent, Contact, Schedule, Purchase)
 // ===========================
