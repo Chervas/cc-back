@@ -27,6 +27,8 @@ router.get('/:id/horarios', personalController.getHorarios);
 router.put('/:id/horarios', personalController.updateHorarios);
 
 // Bloqueos del personal (alias canónico sobre DoctorBloqueos)
+router.get('/me/bloqueos/permissions', personalController.getPersonalBloqueosPermissionsForCurrent);
+router.get('/:id/bloqueos/permissions', personalController.getPersonalBloqueosPermissions);
 router.get('/me/bloqueos', personalController.getPersonalBloqueosForCurrent);
 router.post('/me/bloqueos', personalController.createPersonalBloqueoForCurrent);
 router.patch('/me/bloqueos/:bloqueoId', personalController.updatePersonalBloqueoForCurrent);

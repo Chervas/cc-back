@@ -422,6 +422,55 @@ exports.updatePersonalMember = async (req, res) => {
     }
 };
 
+// ────────────────────────────────────────────────────────────────
+// Bloqueos permissions (server-truth)
+// ────────────────────────────────────────────────────────────────
+
+exports.getPersonalBloqueosPermissions = async (req, res) => {
+    try {
+        const actorId = Number(req.userData?.userId);
+        if (!Number.isFinite(actorId)) {
+            return res.status(401).json({ message: 'Auth failed!' });
+        }
+
+        const targetUserId = Number(req.params.id);
+        if (!Number.isFinite(targetUserId)) {
+            return res.status(400).json({ message: 'Invalid id' });
+        }
+
+        const canAccess = await canAccessTargetPersonal(actorId, targetUserId, null);
+        if (!canAccess) {
+            return res.status(403).json({ message: 'Forbidden' });
+        }
+
+        const canCreateGlobal = await canEditBloqueos(actorId, targetUserId, null);
+        const targetClinicIds = await getAccessibleClinicIdsForUser(targetUserId);
+
+        let allowedClinicIds = [];
+        if (isAdmin(actorId) || Number(actorId) === Number(targetUserId)) {
+            allowedClinicIds = targetClinicIds;
+        } else {
+            const ownerClinicIds = await getOwnerClinicIdsForUser(actorId);
+            const ownerSet = new Set(ownerClinicIds);
+            allowedClinicIds = targetClinicIds.filter((id) => ownerSet.has(id));
+        }
+
+        return res.json({
+            can_write_bloqueos: allowedClinicIds.length > 0 || !!canCreateGlobal,
+            can_create_global_bloqueo: !!canCreateGlobal,
+            allowed_clinic_ids_for_bloqueos: allowedClinicIds,
+        });
+    } catch (error) {
+        console.error('[personal.getPersonalBloqueosPermissions] Error:', error);
+        return res.status(500).json({ message: 'Error retrieving bloqueos permissions', error: error.message });
+    }
+};
+
+exports.getPersonalBloqueosPermissionsForCurrent = async (req, res) => {
+    req.params.id = String(req.userData?.userId || '');
+    return exports.getPersonalBloqueosPermissions(req, res);
+};
+
 exports.getPersonalBloqueos = async (req, res) => {
     try {
         const actorId = Number(req.userData?.userId);
