@@ -28,6 +28,21 @@ const parseInteger = (value) => {
   const n = Number(value);
   return Number.isFinite(n) ? n : null;
 };
+// Acepta IDs separados por coma (ej: "36,37,38") y también "all" (=> null, sin filtro).
+const parseIntegerList = (value) => {
+  if (value === undefined || value === null) return null;
+  const raw = String(value).trim();
+  if (!raw) return null;
+  if (raw.toLowerCase() === 'all') return null;
+  const parts = raw.split(',').map(p => p.trim()).filter(Boolean);
+  const ids = [];
+  for (const part of parts) {
+    const n = parseInteger(part);
+    if (n !== null) ids.push(n);
+  }
+  const unique = Array.from(new Set(ids));
+  return unique.length ? unique : null;
+};
 const coalesce = (...values) => values.find(v => v !== undefined && v !== null);
 
 const hashValue = (value) => {
@@ -1317,11 +1332,13 @@ exports.listLeads = asyncHandler(async (req, res) => {
   const where = {};
   const clinicIdRaw = clinicId || req.query.clinica_id;
   const groupIdRaw = groupId || req.query.grupo_clinica_id;
-  const clinicIdParsed = clinicIdRaw === 'all' ? null : parseInteger(clinicIdRaw);
+  const clinicIdsParsed = parseIntegerList(clinicIdRaw);
   const groupIdParsed = groupIdRaw === 'all' ? null : parseInteger(groupIdRaw);
   const campanaIdParsed = parseInteger(campanaId || req.query.campana_id);
 
-  if (clinicIdParsed !== null) where.clinica_id = clinicIdParsed;
+  if (clinicIdsParsed !== null) {
+    where.clinica_id = clinicIdsParsed.length === 1 ? clinicIdsParsed[0] : { [Op.in]: clinicIdsParsed };
+  }
   if (groupIdParsed !== null) where.grupo_clinica_id = groupIdParsed;
   if (campanaIdParsed !== null) where.campana_id = campanaIdParsed;
   if (channel && CHANNELS.has(channel)) where.channel = channel;
@@ -1398,11 +1415,13 @@ exports.getLeadStats = asyncHandler(async (req, res) => {
   const where = {};
   const clinicIdRaw = clinicId || req.query.clinica_id;
   const groupIdRaw = groupId || req.query.grupo_clinica_id;
-  const clinicIdParsed = clinicIdRaw === 'all' ? null : parseInteger(clinicIdRaw);
+  const clinicIdsParsed = parseIntegerList(clinicIdRaw);
   const groupIdParsed = groupIdRaw === 'all' ? null : parseInteger(groupIdRaw);
   const campanaIdParsed = parseInteger(campanaId || req.query.campana_id);
 
-  if (clinicIdParsed !== null) where.clinica_id = clinicIdParsed;
+  if (clinicIdsParsed !== null) {
+    where.clinica_id = clinicIdsParsed.length === 1 ? clinicIdsParsed[0] : { [Op.in]: clinicIdsParsed };
+  }
   if (groupIdParsed !== null) where.grupo_clinica_id = groupIdParsed;
   if (campanaIdParsed !== null) where.campana_id = campanaIdParsed;
   if (channel && CHANNELS.has(channel)) where.channel = channel;
