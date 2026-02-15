@@ -116,6 +116,246 @@ const build409 = ({ message, conflicts }) => {
   };
 };
 
+const inAnyWindow = (windows, start, end) => {
+  if (!Array.isArray(windows) || windows.length === 0) return false;
+  return windows.some((w) => start >= w.start && end <= w.end);
+};
+
+const normalizeTimeRangeRows = (rows, startKey, endKey) => {
+  return (rows || [])
+    .map((r) => ({
+      ...r,
+      start: new Date(r[startKey]),
+      end: new Date(r[endKey])
+    }))
+    .filter((r) => Number.isFinite(r.start.getTime()) && Number.isFinite(r.end.getTime()) && r.start < r.end)
+    .sort((a, b) => a.start - b.start);
+};
+
+const firstOverlap = (ranges, start, end) => {
+  if (!Array.isArray(ranges) || ranges.length === 0) return null;
+  // ranges debe estar ordenado por start.
+  for (let i = 0; i < ranges.length; i++) {
+    const r = ranges[i];
+    if (r.start >= end) break;
+    if (overlap(start, end, r.start, r.end)) return r;
+  }
+  return null;
+};
+
+const conflictsForSlot = ({
+  clinicaId,
+  instalacionId,
+  doctorId,
+  instWins,
+  docWins,
+  dcMissing,
+  instBlocks,
+  instCitas,
+  docBlocks,
+  docCitas,
+  start,
+  end
+}) => {
+  const conflicts = [];
+
+  if (instalacionId) {
+    if (!inAnyWindow(instWins, start, end)) {
+      conflicts.push({
+        resource_type: 'installation',
+        resource_id: instalacionId,
+        clinica_id: clinicaId,
+        code: 'INSTALLATION_OUT_OF_HOURS',
+        can_force: false,
+        details: { message: 'Instalación fuera de horario' }
+      });
+    }
+  }
+
+  if (doctorId) {
+    if (dcMissing) {
+      conflicts.push({
+        resource_type: 'staff',
+        resource_role: 'doctor',
+        resource_id: doctorId,
+        clinica_id: clinicaId,
+        code: 'STAFF_OUT_OF_HOURS',
+        can_force: false,
+        details: { message: 'Doctor no asignado a la clínica' }
+      });
+    } else if (!inAnyWindow(docWins, start, end)) {
+      conflicts.push({
+        resource_type: 'staff',
+        resource_role: 'doctor',
+        resource_id: doctorId,
+        clinica_id: clinicaId,
+        code: 'STAFF_OUT_OF_HOURS',
+        can_force: false,
+        details: { message: 'Doctor fuera de horario' }
+      });
+    }
+  }
+
+  if (instalacionId) {
+    const ib = firstOverlap(instBlocks, start, end);
+    if (ib) {
+      conflicts.push({
+        resource_type: 'installation',
+        resource_id: instalacionId,
+        clinica_id: clinicaId,
+        code: 'INSTALLATION_BLOCKED',
+        can_force: false,
+        details: { message: ib.motivo || 'Instalación bloqueada', tipo: ib.tipo || null, clinica_id: ib.clinica_id ?? null }
+      });
+    }
+
+    const ic = firstOverlap(instCitas, start, end);
+    if (ic) {
+      conflicts.push({
+        resource_type: 'installation',
+        resource_id: instalacionId,
+        clinica_id: clinicaId,
+        code: 'INSTALLATION_OVERLAP',
+        can_force: false,
+        details: { message: 'Instalación ocupada' }
+      });
+    }
+  }
+
+  if (doctorId) {
+    const db = firstOverlap(docBlocks, start, end);
+    if (db) {
+      conflicts.push({
+        resource_type: 'staff',
+        resource_role: 'doctor',
+        resource_id: doctorId,
+        clinica_id: clinicaId,
+        code: 'STAFF_BLOCKED',
+        can_force: false,
+        details: {
+          tipo: db.tipo || null,
+          message: db.motivo || 'Bloqueo doctor',
+          clinica_id: db.clinica_id ?? null,
+        }
+      });
+    }
+
+    const dc = firstOverlap(docCitas, start, end);
+    if (dc) {
+      conflicts.push({
+        resource_type: 'staff',
+        resource_role: 'doctor',
+        resource_id: doctorId,
+        clinica_id: clinicaId,
+        code: 'STAFF_OVERLAP',
+        can_force: true,
+        details: { message: 'Doctor ocupado' }
+      });
+    }
+  }
+
+  return conflicts;
+};
+
+const conflictSetKey = (conflicts) => {
+  return (conflicts || [])
+    .map((c) => {
+      const base = `${c.resource_type}|${c.code}|${c.resource_id ?? ''}|${c.clinica_id ?? ''}`;
+      if (c.code === 'STAFF_BLOCKED' || c.code === 'INSTALLATION_BLOCKED') {
+        const t = c.details && c.details.tipo ? String(c.details.tipo) : '';
+        const m = c.details && c.details.message ? String(c.details.message) : '';
+        const cd = c.details && c.details.clinica_id != null ? String(c.details.clinica_id) : '';
+        return `${base}|${t}|${m}|${cd}`;
+      }
+      return base;
+    })
+    .sort()
+    .join(';');
+};
+
+const buildUnavailableIntervals = ({
+  clinicaId,
+  fecha_local,
+  dow,
+  baseStart,
+  baseEnd,
+  durMin,
+  stepMin,
+  instalacionId,
+  doctorId,
+  inst,
+  dc,
+  instBlocksRows,
+  instCitasRows,
+  docBlocksRows,
+  docCitasRows
+}) => {
+  const instWins = inst ? buildWindowsFromHorarios(inst.horarios || [], dow, fecha_local) : [];
+  const docWins = dc && dc !== null ? buildWindowsFromHorarios(dc.horarios || [], dow, fecha_local) : [];
+  const dcMissing = doctorId && dc === null;
+
+  const instBlocks = normalizeTimeRangeRows(instBlocksRows, 'fecha_inicio', 'fecha_fin');
+  const instCitas = normalizeTimeRangeRows(instCitasRows, 'inicio', 'fin');
+  const docBlocks = normalizeTimeRangeRows(docBlocksRows, 'fecha_inicio', 'fecha_fin');
+  const docCitas = normalizeTimeRangeRows(docCitasRows, 'inicio', 'fin');
+
+  const durMs = durMin * 60000;
+  const stepMs = stepMin * 60000;
+
+  const intervals = [];
+  let current = null;
+
+  for (let t = baseStart.getTime(); t + durMs <= baseEnd.getTime(); t += stepMs) {
+    const start = new Date(t);
+    const end = new Date(t + durMs);
+    const conflicts = conflictsForSlot({
+      clinicaId,
+      instalacionId,
+      doctorId,
+      instWins,
+      docWins,
+      dcMissing,
+      instBlocks,
+      instCitas,
+      docBlocks,
+      docCitas,
+      start,
+      end
+    });
+
+    if (!conflicts.length) {
+      if (current) {
+        intervals.push(current);
+        current = null;
+      }
+      continue;
+    }
+
+    const key = conflictSetKey(conflicts);
+    if (!current || current._key !== key) {
+      if (current) intervals.push(current);
+      current = {
+        start_local: formatLocal(start),
+        end_local: formatLocal(end),
+        resource_conflicts: conflicts,
+        _key: key
+      };
+    } else {
+      current.end_local = formatLocal(end);
+    }
+  }
+
+  if (current) {
+    intervals.push(current);
+  }
+
+  // Limpiar keys internas
+  return intervals.map((it) => {
+    const { _key, ...rest } = it;
+    return rest;
+  });
+};
+
 /**
  * GET /api/disponibilidad/check
  * Contrato canónico: ver Documentacion/17.6-disponibilidad-recursos.md
@@ -364,7 +604,8 @@ exports.slots = asyncHandler(async (req, res) => {
     instalacion_ids,
     doctor_id,
     doctor_ids,
-    limit
+    limit,
+    include_unavailable
   } = req.query || {};
 
   const clinicaId = parseIntSafe(clinica_id);
@@ -378,6 +619,7 @@ exports.slots = asyncHandler(async (req, res) => {
 
   const stepMin = parseIntSafe(granularity_min) || 15;
   const requestedLimit = parseIntSafe(limit);
+  const includeUnavailable = parseBool(include_unavailable);
 
   const clinica = await db.Clinica.findByPk(clinicaId, { attributes: ['id_clinica', 'nombre_clinica'] });
   if (!clinica) return res.status(404).json({ message: 'Clínica no encontrada' });
@@ -500,6 +742,28 @@ exports.slots = asyncHandler(async (req, res) => {
       instalacionIds.forEach((id) => {
         slotsByInst[String(id)] = [];
       });
+      const unavailableByInst = {};
+      if (includeUnavailable) {
+        instalacionIds.forEach((id) => {
+          unavailableByInst[String(id)] = [
+            {
+              start_local: formatLocal(baseStart),
+              end_local: formatLocal(baseEnd),
+              resource_conflicts: [
+                {
+                  resource_type: 'staff',
+                  resource_role: 'doctor',
+                  resource_id: doctorId,
+                  clinica_id: clinicaId,
+                  code: 'STAFF_OUT_OF_HOURS',
+                  can_force: false,
+                  details: { message: 'Doctor no asignado a la clínica' }
+                }
+              ]
+            }
+          ];
+        });
+      }
       return res.json({
         timezone: DEFAULT_TIMEZONE,
         clinica_id: clinica.id_clinica,
@@ -508,7 +772,8 @@ exports.slots = asyncHandler(async (req, res) => {
         granularity_min: stepMin,
         doctor_id: doctorId,
         instalacion_ids: instalacionIds,
-        slots_by_instalacion: slotsByInst
+        slots_by_instalacion: slotsByInst,
+        ...(includeUnavailable ? { unavailable_by_instalacion: unavailableByInst } : {})
       });
     }
 
@@ -523,7 +788,7 @@ exports.slots = asyncHandler(async (req, res) => {
 
     const instBloqRows = await db.InstalacionBloqueo.findAll({
       where: { instalacion_id: { [Op.in]: instalacionIds }, fecha_inicio: { [Op.lt]: baseEnd }, fecha_fin: { [Op.gt]: baseStart } },
-      attributes: ['instalacion_id', 'fecha_inicio', 'fecha_fin']
+      attributes: ['instalacion_id', 'fecha_inicio', 'fecha_fin', 'motivo', 'tipo', 'clinica_id']
     });
     const instCitasRows = await db.CitaPaciente.findAll({
       where: { instalacion_id: { [Op.in]: instalacionIds }, inicio: { [Op.lt]: baseEnd }, fin: { [Op.gt]: baseStart } },
@@ -545,7 +810,7 @@ exports.slots = asyncHandler(async (req, res) => {
 
     const docBloqRows = await db.DoctorBloqueo.findAll({
       where: { doctor_id: doctorId, fecha_inicio: { [Op.lt]: baseEnd }, fecha_fin: { [Op.gt]: baseStart } },
-      attributes: ['fecha_inicio', 'fecha_fin']
+      attributes: ['fecha_inicio', 'fecha_fin', 'motivo', 'tipo', 'clinica_id']
     });
     const docCitasRows = await db.CitaPaciente.findAll({
       where: { doctor_id: doctorId, inicio: { [Op.lt]: baseEnd }, fin: { [Op.gt]: baseStart } },
@@ -553,6 +818,7 @@ exports.slots = asyncHandler(async (req, res) => {
     });
 
     const slotsByInst = {};
+    const unavailableByInst = {};
     instalacionIds.forEach((id) => {
       const inst = instMap.get(id);
       const slots = buildSlots({
@@ -564,6 +830,25 @@ exports.slots = asyncHandler(async (req, res) => {
         docCitasRows: docCitasRows
       });
       slotsByInst[String(id)] = slots;
+      if (includeUnavailable) {
+        unavailableByInst[String(id)] = buildUnavailableIntervals({
+          clinicaId,
+          fecha_local,
+          dow,
+          baseStart,
+          baseEnd,
+          durMin,
+          stepMin,
+          instalacionId: id,
+          doctorId,
+          inst,
+          dc,
+          instBlocksRows: instBloqById.get(id) || [],
+          instCitasRows: instCitasById.get(id) || [],
+          docBlocksRows: docBloqRows,
+          docCitasRows: docCitasRows
+        });
+      }
     });
 
     return res.json({
@@ -574,7 +859,8 @@ exports.slots = asyncHandler(async (req, res) => {
       granularity_min: stepMin,
       doctor_id: doctorId,
       instalacion_ids: instalacionIds,
-      slots_by_instalacion: slotsByInst
+      slots_by_instalacion: slotsByInst,
+      ...(includeUnavailable ? { unavailable_by_instalacion: unavailableByInst } : {})
     });
   }
 
@@ -590,7 +876,7 @@ exports.slots = asyncHandler(async (req, res) => {
 
     const instBloqRows = await db.InstalacionBloqueo.findAll({
       where: { instalacion_id: instalacionId, fecha_inicio: { [Op.lt]: baseEnd }, fecha_fin: { [Op.gt]: baseStart } },
-      attributes: ['fecha_inicio', 'fecha_fin']
+      attributes: ['fecha_inicio', 'fecha_fin', 'motivo', 'tipo', 'clinica_id']
     });
     const instCitasRows = await db.CitaPaciente.findAll({
       where: { instalacion_id: instalacionId, inicio: { [Op.lt]: baseEnd }, fin: { [Op.gt]: baseStart } },
@@ -605,7 +891,7 @@ exports.slots = asyncHandler(async (req, res) => {
 
     const docBloqRows = await db.DoctorBloqueo.findAll({
       where: { doctor_id: { [Op.in]: doctorIds }, fecha_inicio: { [Op.lt]: baseEnd }, fecha_fin: { [Op.gt]: baseStart } },
-      attributes: ['doctor_id', 'fecha_inicio', 'fecha_fin']
+      attributes: ['doctor_id', 'fecha_inicio', 'fecha_fin', 'motivo', 'tipo', 'clinica_id']
     });
     const docCitasRows = await db.CitaPaciente.findAll({
       where: { doctor_id: { [Op.in]: doctorIds }, inicio: { [Op.lt]: baseEnd }, fin: { [Op.gt]: baseStart } },
@@ -626,6 +912,7 @@ exports.slots = asyncHandler(async (req, res) => {
     });
 
     const slotsByDoctor = {};
+    const unavailableByDoctor = {};
     doctorIds.forEach((id) => {
       const dc = dcByDoctor.get(id) || null;
       const slots = buildSlots({
@@ -637,6 +924,25 @@ exports.slots = asyncHandler(async (req, res) => {
         docCitasRows: docCitasById.get(id) || []
       });
       slotsByDoctor[String(id)] = slots;
+      if (includeUnavailable) {
+        unavailableByDoctor[String(id)] = buildUnavailableIntervals({
+          clinicaId,
+          fecha_local,
+          dow,
+          baseStart,
+          baseEnd,
+          durMin,
+          stepMin,
+          instalacionId,
+          doctorId: id,
+          inst,
+          dc,
+          instBlocksRows: instBloqRows,
+          instCitasRows: instCitasRows,
+          docBlocksRows: docBloqById.get(id) || [],
+          docCitasRows: docCitasById.get(id) || []
+        });
+      }
     });
 
     return res.json({
@@ -647,7 +953,8 @@ exports.slots = asyncHandler(async (req, res) => {
       granularity_min: stepMin,
       instalacion_id: instalacionId,
       doctor_ids: doctorIds,
-      slots_by_doctor: slotsByDoctor
+      slots_by_doctor: slotsByDoctor,
+      ...(includeUnavailable ? { unavailable_by_doctor: unavailableByDoctor } : {})
     });
   }
 
@@ -668,7 +975,7 @@ exports.slots = asyncHandler(async (req, res) => {
 
     instBloqRows = await db.InstalacionBloqueo.findAll({
       where: { instalacion_id: instalacionId, fecha_inicio: { [Op.lt]: baseEnd }, fecha_fin: { [Op.gt]: baseStart } },
-      attributes: ['fecha_inicio', 'fecha_fin']
+      attributes: ['fecha_inicio', 'fecha_fin', 'motivo', 'tipo', 'clinica_id']
     });
     instCitasRows = await db.CitaPaciente.findAll({
       where: { instalacion_id: instalacionId, inicio: { [Op.lt]: baseEnd }, fin: { [Op.gt]: baseStart } },
@@ -685,7 +992,7 @@ exports.slots = asyncHandler(async (req, res) => {
 
     docBloqRows = await db.DoctorBloqueo.findAll({
       where: { doctor_id: doctorId, fecha_inicio: { [Op.lt]: baseEnd }, fecha_fin: { [Op.gt]: baseStart } },
-      attributes: ['fecha_inicio', 'fecha_fin']
+      attributes: ['fecha_inicio', 'fecha_fin', 'motivo', 'tipo', 'clinica_id']
     });
     docCitasRows = await db.CitaPaciente.findAll({
       where: { doctor_id: doctorId, inicio: { [Op.lt]: baseEnd }, fin: { [Op.gt]: baseStart } },
@@ -708,6 +1015,25 @@ exports.slots = asyncHandler(async (req, res) => {
     fecha_local,
     duracion_min: durMin,
     granularity_min: stepMin,
-    slots
+    slots,
+    ...(includeUnavailable ? {
+      unavailable_intervals: buildUnavailableIntervals({
+        clinicaId,
+        fecha_local,
+        dow,
+        baseStart,
+        baseEnd,
+        durMin,
+        stepMin,
+        instalacionId,
+        doctorId,
+        inst: inst || undefined,
+        dc,
+        instBlocksRows: instBloqRows,
+        instCitasRows: instCitasRows,
+        docBlocksRows: docBloqRows,
+        docCitasRows: docCitasRows
+      })
+    } : {})
   });
 });
