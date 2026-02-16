@@ -14,8 +14,15 @@ router.use(authMiddleware);
 router.get('/', personalController.getPersonal);
 
 // Onboarding de personal
-router.post('/buscar', personalController.searchPersonal);
-router.post('/invitar', personalController.invitePersonal);
+// Canónico v6.1 (usado por front onboarding actual)
+router.post('/buscar', personalController.buscarPersonal);
+router.post('/invitar', personalController.invitarPersonal);
+router.get('/invitaciones', personalController.getInvitaciones);
+router.post('/:id/invitacion/responder', personalController.responderInvitacion);
+
+// Compat legacy / transición
+router.post('/search', personalController.searchPersonal);
+router.post('/invite', personalController.invitePersonal);
 router.post('/fusionar', personalController.mergePersonalAccounts);
 router.get('/me/invitaciones', personalController.getMyInvitations);
 router.post('/me/invitaciones/:clinicaId/aceptar', personalController.acceptMyInvitation);
@@ -49,9 +56,6 @@ router.get('/:id/bloqueos', personalController.getPersonalBloqueos);
 router.post('/:id/bloqueos', personalController.createPersonalBloqueo);
 router.patch('/:id/bloqueos/:bloqueoId', personalController.updatePersonalBloqueo);
 router.delete('/:id/bloqueos/:bloqueoId', personalController.deletePersonalBloqueo);
-
-// Onboarding: aceptar/rechazar invitación
-router.post('/:id/invitacion/responder', personalController.responderInvitacion);
 
 // Detalle de miembro (filtrado por accesos del usuario)
 router.get('/:id', personalController.getPersonalById);
