@@ -160,6 +160,59 @@ const appendInternalLeadNote = async (lead, line) => {
   await lead.update({ notas_internas: next });
 };
 
+const resolveRealtimeLeadRooms = async ({ clinicId, groupId }) => {
+  const clinicIds = new Set();
+  const clinicParsed = parseInteger(clinicId);
+  const groupParsed = parseInteger(groupId);
+
+  if (clinicParsed) {
+    clinicIds.add(clinicParsed);
+  }
+
+  if (!clinicIds.size && groupParsed) {
+    const groupClinics = await Clinica.findAll({
+      where: { grupoClinicaId: groupParsed },
+      attributes: ['id_clinica'],
+      raw: true
+    });
+    groupClinics.forEach((row) => {
+      const id = parseInteger(row?.id_clinica);
+      if (id) clinicIds.add(id);
+    });
+  }
+
+  return Array.from(clinicIds).map((id) => `clinic:${id}`);
+};
+
+const emitLeadRealtimeEvent = async ({ type, lead, payload = {} }) => {
+  try {
+    const io = getIO();
+    if (!io || !lead) return;
+
+    const rooms = await resolveRealtimeLeadRooms({
+      clinicId: lead.clinica_id,
+      groupId: lead.grupo_clinica_id
+    });
+    if (!rooms.length) return;
+
+    const basePayload = {
+      type,
+      lead_id: parseInteger(lead.id),
+      clinic_id: parseInteger(lead.clinica_id),
+      group_id: parseInteger(lead.grupo_clinica_id),
+      emitted_at: new Date().toISOString(),
+      ...payload
+    };
+
+    rooms.forEach((room) => {
+      io.to(room).emit('lead:call_event', basePayload);
+      io.to(room).emit(`lead:${type}`, basePayload);
+    });
+  } catch (emitErr) {
+    console.warn('⚠️ No se pudo emitir evento realtime de lead:', emitErr.message || emitErr);
+  }
+};
+
 const validateSignature = (req) => {
   const secret = process.env.INTAKE_WEB_SECRET;
   if (!secret) return true; // Sin secreto configurado, no validamos la firma
@@ -1697,6 +1750,20 @@ exports.receiveIntakeEvent = asyncHandler(async (req, res) => {
       });
       await appendInternalLeadNote(leadForCall, noteLine);
 
+      await emitLeadRealtimeEvent({
+        type: 'call_initiated',
+        lead: leadForCall,
+        payload: {
+          call_initiated: true,
+          call_initiated_at: callAt.toISOString(),
+          clicked_tel: clickedTel || null,
+          page_url: eventSourceUrl || null,
+          source: custom_data.source || body.source || null,
+          source_detail: custom_data.source_detail || body.source_detail || null,
+          linked_by: leadIdParsed ? 'lead_id' : 'fallback_contact_hash'
+        }
+      });
+
       try {
         await LeadAttributionAudit.create({
           lead_intake_id: leadForCall.id,
@@ -2478,6 +2545,19 @@ exports.updateLeadCallOutcome = asyncHandler(async (req, res) => {
     updatePayload.status_lead = 'citado';
   }
   await lead.update(updatePayload);
+
+  await emitLeadRealtimeEvent({
+    type: 'call_outcome',
+    lead,
+    payload: {
+      call_initiated: !!lead.call_initiated,
+      call_initiated_at: lead.call_initiated_at ? new Date(lead.call_initiated_at).toISOString() : null,
+      call_outcome: outcomeRaw,
+      call_outcome_at: now.toISOString(),
+      call_outcome_notes: notes,
+      call_outcome_appointment_id: appointmentId
+    }
+  });
 
   try {
     await LeadAttributionAudit.create({
