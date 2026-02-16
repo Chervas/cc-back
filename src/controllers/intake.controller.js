@@ -18,6 +18,8 @@ const IntakeConfig = db.IntakeConfig;
 const Conversation = db.Conversation;
 const Message = db.Message;
 const WhatsAppWebOrigin = db.WhatsAppWebOrigin;
+const CitaPaciente = db.CitaPaciente;
+const Paciente = db.Paciente;
 const { sendMetaEvent, buildUserData: buildMetaUserData } = require('../services/metaCapi.service');
 const { uploadClickConversion } = require('../services/googleAdsConversion.service');
 const whatsappService = require('../services/whatsapp.service');
@@ -27,6 +29,7 @@ const CHANNELS = new Set(['paid', 'organic', 'unknown']);
 const SOURCES = new Set(['meta_ads', 'google_ads', 'web', 'whatsapp', 'call_click', 'tiktok_ads', 'seo', 'direct', 'local_services']);
 const STATUSES = new Set(['nuevo', 'contactado', 'esperando_info', 'info_recibida', 'citado', 'acudio_cita', 'convertido', 'descartado']);
 const DEDUPE_WINDOW_HOURS = parseInt(process.env.INTAKE_DEDUPE_WINDOW_HOURS || '24', 10);
+const CALL_OUTCOMES = new Set(['citado', 'informacion', 'no_contactado']);
 
 const SIGNATURE_HEADER = 'x-cc-signature';
 const SIGNATURE_HEADER_SHA = 'x-cc-signature-sha256';
@@ -132,6 +135,29 @@ const stableStringify = (obj) => {
   if (Array.isArray(obj)) return `[${obj.map(stableStringify).join(',')}]`;
   const keys = Object.keys(obj).sort();
   return `{${keys.map(k => `${JSON.stringify(k)}:${stableStringify(obj[k])}`).join(',')}}`;
+};
+
+const formatMadridDateTime = (value) => {
+  try {
+    return new Date(value).toLocaleString('es-ES', {
+      timeZone: 'Europe/Madrid',
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit'
+    });
+  } catch {
+    return new Date(value).toISOString();
+  }
+};
+
+const appendInternalLeadNote = async (lead, line) => {
+  if (!lead || !line) return;
+  const base = (lead.notas_internas || '').trim();
+  const next = base ? `${base}\n${line}` : line;
+  await lead.update({ notas_internas: next });
 };
 
 const validateSignature = (req) => {
@@ -1218,7 +1244,10 @@ exports.upsertIntakeConfig = asyncHandler(async (req, res) => {
     hmac_key: nextHmacKey
   });
 
-  res.json({ success: true });
+  res.json({
+    success: true,
+    linked_lead_id: linkedLeadId
+  });
 });
 
 // ======================================
@@ -1511,6 +1540,7 @@ exports.receiveIntakeEvent = asyncHandler(async (req, res) => {
   const body = req.body || {};
 
   const eventName = body.event_name || body.eventName || 'ViewContent';
+  const eventNameLower = String(eventName || '').toLowerCase();
   const clinicIdParsed = parseInteger(coalesce(body.clinic_id, body.clinica_id, body.clinicId));
   const groupIdParsed = parseInteger(coalesce(body.group_id, body.grupo_clinica_id, body.groupId));
 
@@ -1531,6 +1561,16 @@ exports.receiveIntakeEvent = asyncHandler(async (req, res) => {
     body.custom_data && typeof body.custom_data === 'object' && !Array.isArray(body.custom_data) ? body.custom_data : {};
   const eventDataFromBody =
     body.event_data && typeof body.event_data === 'object' && !Array.isArray(body.event_data) ? body.event_data : {};
+  const leadIdParsed = parseInteger(
+    coalesce(
+      body.lead_id,
+      body.leadId,
+      eventDataFromBody.lead_id,
+      eventDataFromBody.leadId,
+      customDataFromBody.lead_id,
+      customDataFromBody.leadId
+    )
+  );
 
   // Aceptar el payload del snippet "v2" (campos planos + event_data) y el payload "canónico" (custom_data/user_data).
   const custom_data = {
@@ -1560,6 +1600,14 @@ exports.receiveIntakeEvent = asyncHandler(async (req, res) => {
     ...userDataFromBody,
     ...leadDataFromBody
   };
+  const clickedTel = coalesce(
+    body.clicked_tel,
+    body.clickedTel,
+    eventDataFromBody.clicked_tel,
+    eventDataFromBody.clickedTel,
+    custom_data.clicked_tel,
+    custom_data.clickedTel
+  ) || null;
 
   const fbp = body.fbp || user_data.fbp;
   const fbc = body.fbc || user_data.fbc;
@@ -1592,6 +1640,88 @@ exports.receiveIntakeEvent = asyncHandler(async (req, res) => {
     }
     if (provided && !validateHmac(req, cfg.hmac_key, provided)) {
       return res.status(401).json({ message: 'Invalid signature' });
+    }
+  }
+
+  // Evento interno: inicio real de llamada desde tel_modal (al finalizar countdown).
+  // Debe dejar traza sobre el lead para que recepción pueda resolver si hubo contacto.
+  let linkedLeadId = null;
+  if (eventNameLower === 'callinitiated') {
+    let leadForCall = null;
+
+    if (leadIdParsed) {
+      leadForCall = await LeadIntake.findByPk(leadIdParsed);
+    }
+
+    // Fallback defensivo: si no llega lead_id, intentar vincular por phone/email + scope + ventana.
+    if (!leadForCall) {
+      const emailCandidate = normalizeEmail(coalesce(user_data.email, body.email, body.lead_data?.email));
+      const phoneCandidate = normalizePhone(coalesce(user_data.phone, user_data.telefono, body.phone, body.telefono, body.lead_data?.telefono));
+      const dedupeCutoff = new Date(Date.now() - (DEDUPE_WINDOW_HOURS * 60 * 60 * 1000));
+      const lookupWhere = {
+        created_at: { [Op.gte]: dedupeCutoff },
+        [Op.or]: []
+      };
+
+      if (phoneCandidate) lookupWhere[Op.or].push({ phone_hash: hashValue(phoneCandidate) });
+      if (emailCandidate) lookupWhere[Op.or].push({ email_hash: hashValue(emailCandidate) });
+
+      if (lookupWhere[Op.or].length > 0) {
+        if (clinicIdParsed !== null) lookupWhere.clinica_id = clinicIdParsed;
+        if (groupIdParsed !== null) lookupWhere.grupo_clinica_id = groupIdParsed;
+        leadForCall = await LeadIntake.findOne({
+          where: lookupWhere,
+          order: [['created_at', 'DESC']]
+        });
+      }
+    }
+
+    if (leadForCall) {
+      linkedLeadId = leadForCall.id;
+
+      const eventTimeRaw = coalesce(body.event_time, body.eventTime, custom_data.event_time);
+      let callAt = new Date();
+      const eventTimeNum = Number(eventTimeRaw);
+      if (Number.isFinite(eventTimeNum)) {
+        callAt = new Date(eventTimeNum > 1e12 ? eventTimeNum : eventTimeNum * 1000);
+      } else if (eventTimeRaw) {
+        const parsed = new Date(eventTimeRaw);
+        if (!Number.isNaN(parsed.getTime())) callAt = parsed;
+      }
+
+      const noteLine = `Este lead inició una llamada el ${formatMadridDateTime(callAt)}. ¿Se le contestó?`;
+
+      await leadForCall.update({
+        call_initiated: true,
+        call_initiated_at: callAt
+      });
+      await appendInternalLeadNote(leadForCall, noteLine);
+
+      try {
+        await LeadAttributionAudit.create({
+          lead_intake_id: leadForCall.id,
+          raw_payload: body || {},
+          attribution_steps: {
+            kind: 'call_initiated',
+            source: custom_data.source || body.source || null,
+            source_detail: custom_data.source_detail || body.source_detail || null,
+            channel: custom_data.channel || body.channel || null,
+            page_url: eventSourceUrl || null,
+            referrer: body.referrer || null,
+            clicked_tel: clickedTel || null,
+            linked_by: leadIdParsed ? 'lead_id' : 'fallback_contact_hash',
+            linked_at: new Date().toISOString()
+          }
+        });
+      } catch (auditErr) {
+        console.warn('⚠️ No se pudo registrar auditoría call_initiated:', auditErr.message || auditErr);
+      }
+    } else {
+      console.warn('⚠️ CallInitiated recibido sin lead vinculado', {
+        clinicIdParsed,
+        groupIdParsed,
+        leadIdParsed: leadIdParsed || null
+      });
     }
   }
 
@@ -1643,7 +1773,10 @@ exports.receiveIntakeEvent = asyncHandler(async (req, res) => {
     console.warn('⚠️ Google Ads upload error:', adsErr.response?.data || adsErr.message || adsErr);
   }
 
-  res.json({ success: true });
+  res.json({
+    success: true,
+    linked_lead_id: linkedLeadId
+  });
 });
 
 // ===========================
@@ -2077,6 +2210,20 @@ exports.listLeads = asyncHandler(async (req, res) => {
     };
     item.dedupe_count = dedupeCount;
     item.last_dedupe = lastDedupe;
+    item.call_initiated = !!item.call_initiated;
+    item.call_initiated_at = item.call_initiated_at || null;
+    item.call_outcome = item.call_outcome || null;
+    item.call_outcome_at = item.call_outcome_at || null;
+    item.call_outcome_notes = item.call_outcome_notes || null;
+    item.call_outcome_appointment_id = parseInteger(item.call_outcome_appointment_id);
+
+    if (item.call_initiated && !item.call_outcome) {
+      item.call_status = 'nos_llamo';
+    } else if (item.call_outcome) {
+      item.call_status = item.call_outcome;
+    } else {
+      item.call_status = null;
+    }
     return item;
   });
 
@@ -2279,6 +2426,205 @@ exports.updateLeadStatus = asyncHandler(async (req, res) => {
   }
 
   res.status(200).json(lead);
+});
+
+exports.updateLeadCallOutcome = asyncHandler(async (req, res) => {
+  const leadId = parseInteger(req.params.id);
+  if (!leadId) {
+    return res.status(400).json({ message: 'ID de lead inválido' });
+  }
+
+  const lead = await LeadIntake.findByPk(leadId);
+  if (!lead) {
+    return res.status(404).json({ message: 'Lead no encontrado' });
+  }
+
+  const outcomeRaw = String(coalesce(req.body?.outcome, req.body?.call_outcome, '') || '').trim().toLowerCase();
+  if (!CALL_OUTCOMES.has(outcomeRaw)) {
+    return res.status(400).json({ message: 'outcome inválido. Usa: citado | informacion | no_contactado' });
+  }
+
+  const notes = sanitizeText(String(coalesce(req.body?.notes, req.body?.notas, '') || '').trim()) || null;
+  const appointmentId = parseInteger(coalesce(req.body?.appointment_id, req.body?.appointmentId));
+
+  let linkedAppointment = null;
+  if (outcomeRaw === 'citado' && appointmentId !== null) {
+    const cita = await CitaPaciente.findByPk(appointmentId);
+    if (!cita) {
+      return res.status(404).json({ message: 'appointment_id no encontrado' });
+    }
+    if (lead.clinica_id && cita.clinica_id && Number(cita.clinica_id) !== Number(lead.clinica_id)) {
+      return res.status(400).json({ message: 'La cita no pertenece a la misma clínica del lead' });
+    }
+    await cita.update({ lead_intake_id: lead.id });
+    linkedAppointment = cita;
+  }
+
+  const now = new Date();
+  const noteParts = [
+    `Resolución de llamada (${formatMadridDateTime(now)}): ${outcomeRaw}`
+  ];
+  if (notes) noteParts.push(`Notas: ${notes}`);
+  if (appointmentId !== null) noteParts.push(`Cita vinculada: #${appointmentId}`);
+  await appendInternalLeadNote(lead, noteParts.join(' | '));
+
+  const updatePayload = {
+    call_outcome: outcomeRaw,
+    call_outcome_at: now,
+    call_outcome_notes: notes,
+    call_outcome_appointment_id: appointmentId
+  };
+  if (outcomeRaw === 'citado') {
+    updatePayload.status_lead = 'citado';
+  }
+  await lead.update(updatePayload);
+
+  try {
+    await LeadAttributionAudit.create({
+      lead_intake_id: lead.id,
+      raw_payload: req.body || {},
+      attribution_steps: {
+        kind: 'call_outcome',
+        outcome: outcomeRaw,
+        appointment_id: appointmentId,
+        notes: notes || null,
+        userId: req.userData?.userId || null
+      }
+    });
+  } catch (auditErr) {
+    console.warn('⚠️ No se pudo registrar auditoría de call_outcome:', auditErr.message || auditErr);
+  }
+
+  const refreshed = await LeadIntake.findByPk(lead.id);
+  return res.status(200).json({
+    success: true,
+    lead: refreshed,
+    linked_appointment: linkedAppointment
+      ? {
+          id_cita: linkedAppointment.id_cita,
+          inicio: linkedAppointment.inicio,
+          estado: linkedAppointment.estado,
+          clinica_id: linkedAppointment.clinica_id
+        }
+      : null
+  });
+});
+
+exports.getLeadCandidateAppointments = asyncHandler(async (req, res) => {
+  const leadId = parseInteger(req.params.id);
+  if (!leadId) {
+    return res.status(400).json({ message: 'ID de lead inválido' });
+  }
+
+  const lead = await LeadIntake.findByPk(leadId);
+  if (!lead) {
+    return res.status(404).json({ message: 'Lead no encontrado' });
+  }
+
+  const hoursRaw = parseInteger(req.query.hours);
+  const hours = Math.max(1, Math.min(hoursRaw || 24, 24 * 14));
+  const now = new Date();
+  const from = new Date(now.getTime() - (hours * 60 * 60 * 1000));
+  const to = new Date(now.getTime() + (hours * 60 * 60 * 1000));
+
+  let clinicIds = [];
+  if (lead.clinica_id) {
+    clinicIds = [Number(lead.clinica_id)];
+  } else if (lead.grupo_clinica_id) {
+    const clinics = await Clinica.findAll({
+      where: { grupoClinicaId: lead.grupo_clinica_id },
+      attributes: ['id_clinica'],
+      raw: true
+    });
+    clinicIds = clinics.map((c) => Number(c.id_clinica)).filter(Number.isFinite);
+  }
+
+  if (!clinicIds.length) {
+    return res.status(200).json({
+      success: true,
+      lead_id: lead.id,
+      window_hours: hours,
+      total: 0,
+      items: []
+    });
+  }
+
+  const citas = await CitaPaciente.findAll({
+    where: {
+      clinica_id: { [Op.in]: clinicIds },
+      inicio: { [Op.between]: [from, to] }
+    },
+    include: [
+      { model: Paciente, as: 'paciente', attributes: ['id_paciente', 'nombre', 'apellidos', 'telefono_movil', 'email'], required: false },
+      { model: Clinica, as: 'clinica', attributes: ['id_clinica', 'nombre_clinica'], required: false }
+    ],
+    order: [['inicio', 'DESC']],
+    limit: 120
+  });
+
+  const leadPhoneDigits = normalizePhone(lead.telefono);
+  const leadEmail = normalizeEmail(lead.email);
+  const leadName = sanitizeText(`${lead.nombre || ''}`.toLowerCase()).trim();
+
+  const items = citas.map((row) => {
+    const cita = row?.toJSON ? row.toJSON() : row;
+    const paciente = cita?.paciente || {};
+    const pacientePhone = normalizePhone(paciente.telefono_movil);
+    const pacienteEmail = normalizeEmail(paciente.email);
+    const pacienteName = sanitizeText(`${paciente.nombre || ''} ${paciente.apellidos || ''}`.toLowerCase()).trim();
+
+    let score = 0;
+    const reasons = [];
+    if (leadPhoneDigits && pacientePhone && leadPhoneDigits === pacientePhone) {
+      score += 4;
+      reasons.push('telefono');
+    }
+    if (leadEmail && pacienteEmail && leadEmail === pacienteEmail) {
+      score += 3;
+      reasons.push('email');
+    }
+    if (leadName && pacienteName && (pacienteName.includes(leadName) || leadName.includes(pacienteName))) {
+      score += 1;
+      reasons.push('nombre');
+    }
+
+    return {
+      id_cita: cita.id_cita,
+      clinica_id: cita.clinica_id,
+      clinic_name: cita.clinica?.nombre_clinica || null,
+      inicio: cita.inicio,
+      fin: cita.fin,
+      estado: cita.estado,
+      tipo_cita: cita.tipo_cita,
+      titulo: cita.titulo || null,
+      lead_intake_id: cita.lead_intake_id || null,
+      linked_to_this_lead: Number(cita.lead_intake_id) === Number(lead.id),
+      paciente: paciente && paciente.id_paciente
+        ? {
+            id_paciente: paciente.id_paciente,
+            nombre: paciente.nombre || null,
+            apellidos: paciente.apellidos || null,
+            telefono_movil: paciente.telefono_movil || null,
+            email: paciente.email || null
+          }
+        : null,
+      match_score: score,
+      match_reasons: reasons
+    };
+  });
+
+  items.sort((a, b) => {
+    if (b.match_score !== a.match_score) return b.match_score - a.match_score;
+    return new Date(b.inicio).getTime() - new Date(a.inicio).getTime();
+  });
+
+  return res.status(200).json({
+    success: true,
+    lead_id: lead.id,
+    window_hours: hours,
+    total: items.length,
+    items: items.slice(0, 50)
+  });
 });
 
 exports.registrarContacto = asyncHandler(async (req, res) => {

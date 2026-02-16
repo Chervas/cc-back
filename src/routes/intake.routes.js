@@ -18,8 +18,10 @@ router.get('/config/:clinicId/secret', intakeController.getIntakeConfigSecretCli
 router.get('/config/group/:groupId/secret', intakeController.getIntakeConfigSecretGroup);
 router.get('/leads', intakeController.listLeads);
 router.get('/leads/:id/audits', intakeController.getLeadAudits);
+router.get('/leads/:id/candidate-appointments', intakeController.getLeadCandidateAppointments);
 router.get('/leads/stats', intakeController.getLeadStats);
 router.patch('/leads/:id', intakeController.updateLeadStatus);
+router.put('/leads/:id/call-outcome', intakeController.updateLeadCallOutcome);
 router.post('/leads/:id/contacto', intakeController.registrarContacto);
 router.delete('/leads/:id', intakeController.deleteLead);
 router.put('/config/:clinicId', intakeController.upsertIntakeConfig);
