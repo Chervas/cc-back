@@ -778,344 +778,56 @@ exports.updatePersonalMember = async (req, res) => {
 // Onboarding: búsqueda / invitación / reclamación
 // ────────────────────────────────────────────────────────────────
 
+// Compat legacy: /api/personal/search
 exports.searchPersonal = async (req, res) => {
     try {
+        const body = req.body || {};
         const actorId = Number(req.userData?.userId);
-        if (!Number.isFinite(actorId)) {
-            return res.status(401).json({ message: 'Auth failed!' });
+
+        let clinicaId = parseIntOrNull(body.clinica_id ?? body.id_clinica ?? body.clinic_id);
+        if (!Number.isFinite(clinicaId) && Number.isFinite(actorId)) {
+            const clinicIds = await getAccessibleClinicIdsForUser(actorId);
+            clinicaId = clinicIds[0] || null;
         }
 
-        if (!isAdmin(actorId)) {
-            const ownerClinicIds = await getOwnerClinicIdsForUser(actorId);
-            if (!ownerClinicIds.length) {
-                return res.status(403).json({ message: 'Forbidden' });
-            }
-        }
+        const query = normalizeTrimmed(
+            body.query
+            || body.q
+            || body.email
+            || body.email_usuario
+            || body.telefono
+            || [body.nombre, body.apellidos].filter(Boolean).join(' '),
+        );
 
-        const q = normalizeTrimmed(req.body?.q);
-        const email = normalizeEmail(req.body?.email || (q && q.includes('@') ? q : null));
-        const telefono = normalizePhone(req.body?.telefono);
-        const nombre = normalizeTrimmed(req.body?.nombre);
-        const apellidos = normalizeTrimmed(req.body?.apellidos);
-        const limitInput = parseIntOrNull(req.body?.limit);
-        const limit = Math.max(1, Math.min(limitInput || 20, 50));
+        req.body = {
+            ...body,
+            query,
+            clinica_id: clinicaId,
+        };
 
-        if (!q && !email && !telefono && !nombre && !apellidos) {
-            return res.status(400).json({ message: 'At least one search criterion is required' });
-        }
-
-        const orClauses = [];
-        const andClauses = [];
-
-        if (email) {
-            orClauses.push({ email_usuario: email });
-            orClauses.push({ emails_alternativos: { [Op.like]: `%"${escapeJsonString(email)}%"` } });
-        }
-
-        if (telefono) {
-            orClauses.push({ telefono: { [Op.like]: `%${escapeLike(telefono)}%` } });
-        }
-
-        if (nombre) {
-            orClauses.push({ nombre: { [Op.like]: `%${escapeLike(nombre)}%` } });
-        }
-
-        if (apellidos) {
-            orClauses.push({ apellidos: { [Op.like]: `%${escapeLike(apellidos)}%` } });
-        }
-
-        if (q) {
-            const qLike = `%${escapeLike(q)}%`;
-            orClauses.push({ nombre: { [Op.like]: qLike } });
-            orClauses.push({ apellidos: { [Op.like]: qLike } });
-            orClauses.push({ email_usuario: { [Op.like]: qLike } });
-
-            const tokens = q
-                .split(/\s+/)
-                .map((t) => normalizeTrimmed(t))
-                .filter((t) => t && t.length >= 2)
-                .slice(0, 4);
-
-            for (const token of tokens) {
-                const tokenLike = `%${escapeLike(token)}%`;
-                andClauses.push({
-                    [Op.or]: [
-                        { nombre: { [Op.like]: tokenLike } },
-                        { apellidos: { [Op.like]: tokenLike } },
-                        where(fn('concat', col('nombre'), ' ', col('apellidos')), { [Op.like]: tokenLike }),
-                    ],
-                });
-            }
-        }
-
-        const whereUser = {};
-        if (orClauses.length && andClauses.length) {
-            whereUser[Op.and] = [{ [Op.or]: orClauses }, ...andClauses];
-        } else if (orClauses.length) {
-            whereUser[Op.or] = orClauses;
-        } else if (andClauses.length) {
-            whereUser[Op.and] = andClauses;
-        }
-
-        const rows = await Usuario.findAll({
-            where: whereUser,
-            attributes: [
-                'id_usuario',
-                'nombre',
-                'apellidos',
-                'email_usuario',
-                'telefono',
-                'estado_cuenta',
-                'emails_alternativos',
-            ],
-            include: [
-                {
-                    model: Clinica,
-                    as: 'Clinicas',
-                    required: true,
-                    attributes: ['id_clinica', 'nombre_clinica'],
-                    through: {
-                        attributes: ['rol_clinica', 'subrol_clinica', 'estado_invitacion'],
-                        where: {
-                            rol_clinica: { [Op.in]: ['propietario', 'personaldeclinica'] },
-                        },
-                    },
-                },
-            ],
-            order: [['nombre', 'ASC'], ['apellidos', 'ASC']],
-            limit: Math.min(limit * 3, 150),
-        });
-
-        const out = [];
-        const seen = new Set();
-
-        for (const row of rows) {
-            const item = row.toJSON ? row.toJSON() : row;
-            const userId = Number(item.id_usuario);
-            if (!Number.isFinite(userId) || seen.has(userId)) continue;
-
-            const altEmails = Array.isArray(item.emails_alternativos)
-                ? item.emails_alternativos.map((e) => normalizeEmail(e)).filter(Boolean)
-                : [];
-            const mainEmail = normalizeEmail(item.email_usuario);
-            const candidateEmail = mainEmail || altEmails[0] || null;
-
-            out.push({
-                id_usuario: userId,
-                nombre: item.nombre || '',
-                apellidos: item.apellidos || '',
-                email_masked: maskEmail(candidateEmail),
-                telefono_masked: maskPhone(item.telefono),
-                estado_cuenta: normalizeEstadoCuenta(item.estado_cuenta, 'activo') || 'activo',
-                clinicas: (item.Clinicas || []).map((c) => ({
-                    id_clinica: Number(c.id_clinica),
-                    nombre_clinica: c.nombre_clinica,
-                    rol_clinica: c.UsuarioClinica?.rol_clinica || null,
-                    subrol_clinica: c.UsuarioClinica?.subrol_clinica || null,
-                    estado_invitacion: normalizeEstadoInvitacion(c.UsuarioClinica?.estado_invitacion, 'aceptada'),
-                })),
-            });
-            seen.add(userId);
-            if (out.length >= limit) break;
-        }
-
-        return res.json({
-            items: out,
-            count: out.length,
-        });
+        return exports.buscarPersonal(req, res);
     } catch (error) {
-        console.error('[personal.searchPersonal] Error:', error);
+        console.error('[personal.searchPersonal.compat] Error:', error);
         return res.status(500).json({ message: 'Error searching personal', error: error.message });
     }
 };
 
+// Compat legacy: /api/personal/invite
 exports.invitePersonal = async (req, res) => {
     try {
-        const actorId = Number(req.userData?.userId);
-        if (!Number.isFinite(actorId)) {
-            return res.status(401).json({ message: 'Auth failed!' });
-        }
+        const body = req.body || {};
+        const idUsuario = parseIntOrNull(body.id_usuario ?? body.usuario_id ?? body.user_id);
 
-        const clinicaId = parseIntOrNull(req.body?.clinica_id ?? req.body?.id_clinica ?? req.body?.clinic_id);
-        if (!Number.isFinite(clinicaId)) {
-            return res.status(400).json({ message: 'clinica_id is required' });
-        }
+        req.body = {
+            ...body,
+            clinica_id: parseIntOrNull(body.clinica_id ?? body.id_clinica ?? body.clinic_id),
+            id_usuario: Number.isFinite(idUsuario) ? idUsuario : undefined,
+            email_usuario: body.email_usuario ?? body.email,
+        };
 
-        const canManage = await canManagePersonalInClinic(actorId, clinicaId);
-        if (!canManage) {
-            return res.status(403).json({ message: 'Forbidden' });
-        }
-
-        const clinica = await Clinica.findByPk(clinicaId, {
-            attributes: ['id_clinica', 'nombre_clinica'],
-            raw: true,
-        });
-        if (!clinica) {
-            return res.status(404).json({ message: 'Clinic not found' });
-        }
-
-        const rolClinica = normalizeRolClinica(req.body?.rol_clinica, 'personaldeclinica');
-        if (!rolClinica) {
-            return res.status(400).json({ message: 'rol_clinica is invalid' });
-        }
-
-        const subrolClinica = normalizeSubrolClinica(req.body?.subrol_clinica);
-        if (rolClinica === 'personaldeclinica' && !subrolClinica) {
-            return res.status(400).json({ message: 'subrol_clinica is required for personal role' });
-        }
-
-        const targetUserId = parseIntOrNull(req.body?.id_usuario ?? req.body?.usuario_id ?? req.body?.user_id);
-        const targetEmail = normalizeEmail(req.body?.email_usuario ?? req.body?.email);
-        const createProvisional = parseBool(req.body?.crear_provisional ?? req.body?.create_provisional);
-
-        let targetUser = null;
-        if (Number.isFinite(targetUserId)) {
-            targetUser = await Usuario.findByPk(targetUserId);
-        } else if (targetEmail) {
-            targetUser = await findUserByEmailIncludingAlternatives(targetEmail);
-        }
-
-        if (!targetUser && !createProvisional) {
-            return res.status(404).json({
-                message: 'User not found. Use crear_provisional=true to create a provisional account.',
-                code: 'user_not_found',
-            });
-        }
-
-        const now = new Date();
-
-        if (targetUser) {
-            const existingPivot = await UsuarioClinica.findOne({
-                where: {
-                    id_usuario: Number(targetUser.id_usuario),
-                    id_clinica: Number(clinicaId),
-                },
-            });
-
-            const existingEstado = normalizeEstadoInvitacion(existingPivot?.estado_invitacion, 'aceptada');
-            const existingRole = existingPivot?.rol_clinica || null;
-            const existingAcceptedAsMember = existingPivot
-                && existingRole !== 'paciente'
-                && existingEstado === 'aceptada';
-
-            if (existingAcceptedAsMember) {
-                return res.status(409).json({
-                    message: 'User is already accepted in this clinic',
-                    code: 'already_member',
-                    id_usuario: Number(targetUser.id_usuario),
-                });
-            }
-
-            await UsuarioClinica.upsert({
-                id_usuario: Number(targetUser.id_usuario),
-                id_clinica: Number(clinicaId),
-                rol_clinica: rolClinica,
-                subrol_clinica: subrolClinica,
-                estado_invitacion: 'pendiente',
-                invitado_por: actorId,
-                fecha_invitacion: now,
-            });
-
-            await ensureDoctorClinicaRow({
-                userId: targetUser.id_usuario,
-                clinicaId,
-                subrolClinica,
-                activo: false,
-            });
-
-            return res.status(200).json({
-                message: 'Invitation created',
-                kind: 'invitacion_existente',
-                invitacion: {
-                    id_usuario: Number(targetUser.id_usuario),
-                    clinica_id: Number(clinicaId),
-                    rol_clinica: rolClinica,
-                    subrol_clinica: subrolClinica,
-                    estado_invitacion: 'pendiente',
-                    fecha_invitacion: now,
-                },
-                usuario: {
-                    id_usuario: Number(targetUser.id_usuario),
-                    nombre: targetUser.nombre || '',
-                    apellidos: targetUser.apellidos || '',
-                    email_masked: maskEmail(targetUser.email_usuario),
-                    estado_cuenta: normalizeEstadoCuenta(targetUser.estado_cuenta, 'activo') || 'activo',
-                },
-            });
-        }
-
-        const provisionalNombre = normalizeTrimmed(req.body?.nombre);
-        const provisionalApellidos = normalizeTrimmed(req.body?.apellidos);
-        const provisionalTelefono = normalizeTrimmed(req.body?.telefono);
-
-        if (!targetEmail || !provisionalNombre) {
-            return res.status(400).json({
-                message: 'For provisional account, email_usuario and nombre are required',
-            });
-        }
-
-        const existingByEmail = await findUserByEmailIncludingAlternatives(targetEmail);
-        if (existingByEmail) {
-            return res.status(409).json({
-                message: 'A user with this email already exists',
-                code: 'email_already_exists',
-                id_usuario: Number(existingByEmail.id_usuario),
-            });
-        }
-
-        const provisionalUser = await Usuario.create({
-            nombre: provisionalNombre,
-            apellidos: provisionalApellidos || '',
-            email_usuario: targetEmail,
-            email_factura: req.body?.email_factura ? normalizeEmail(req.body.email_factura) : null,
-            email_notificacion: req.body?.email_notificacion ? normalizeEmail(req.body.email_notificacion) : targetEmail,
-            telefono: provisionalTelefono || null,
-            isProfesional: true,
-            estado_cuenta: 'provisional',
-            creado_por: actorId,
-            password_usuario: null,
-            fecha_creacion: now,
-        });
-
-        await UsuarioClinica.upsert({
-            id_usuario: Number(provisionalUser.id_usuario),
-            id_clinica: Number(clinicaId),
-            rol_clinica: rolClinica,
-            subrol_clinica: subrolClinica,
-            estado_invitacion: 'aceptada',
-            invitado_por: actorId,
-            fecha_invitacion: now,
-        });
-
-        await ensureDoctorClinicaRow({
-            userId: provisionalUser.id_usuario,
-            clinicaId,
-            subrolClinica,
-            activo: true,
-        });
-
-        return res.status(201).json({
-            message: 'Provisional account created',
-            kind: 'cuenta_provisional',
-            claim_required: true,
-            usuario: {
-                id_usuario: Number(provisionalUser.id_usuario),
-                nombre: provisionalUser.nombre || '',
-                apellidos: provisionalUser.apellidos || '',
-                email_masked: maskEmail(provisionalUser.email_usuario),
-                estado_cuenta: 'provisional',
-                creado_por: actorId,
-            },
-            asignacion: {
-                clinica_id: Number(clinicaId),
-                clinica_nombre: clinica.nombre_clinica,
-                rol_clinica: rolClinica,
-                subrol_clinica: subrolClinica,
-                estado_invitacion: 'aceptada',
-            },
-        });
+        return exports.invitarPersonal(req, res);
     } catch (error) {
-        console.error('[personal.invitePersonal] Error:', error);
+        console.error('[personal.invitePersonal.compat] Error:', error);
         return res.status(500).json({ message: 'Error inviting personal', error: error.message });
     }
 };
