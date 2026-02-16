@@ -253,6 +253,77 @@ function formatExtraPairs(pairs) {
   return safe.length ? `\n\nDatos recogidos:\n${safe.join('\n')}` : '';
 }
 
+async function registerDedupeAttemptAudit({
+  existingLeadId,
+  reqBody,
+  dedupeReason,
+  eventId,
+  normalizedSource,
+  sourceDetail,
+  normalizedChannel,
+  clinicId,
+  groupId,
+  pageUrl,
+  landingUrl,
+  referrer,
+  utmSource,
+  utmMedium,
+  utmCampaign,
+  utmContent,
+  utmTerm,
+  gclid,
+  fbclid,
+  ttclid,
+  externalSource,
+  externalId,
+  normalizedPhone,
+  normalizedEmail
+}) {
+  const leadId = parseInteger(existingLeadId);
+  if (!leadId) return;
+
+  try {
+    await LeadAttributionAudit.create({
+      lead_intake_id: leadId,
+      raw_payload: reqBody || {},
+      attribution_steps: {
+        kind: 'dedupe_attempt',
+        dedupe_reason: dedupeReason || 'Lead duplicado',
+        deduped_at: new Date().toISOString(),
+        source: normalizedSource || null,
+        source_detail: sourceDetail || null,
+        channel: normalizedChannel || null,
+        clinic_id: clinicId || null,
+        group_id: groupId || null,
+        page_url: pageUrl || null,
+        landing_url: landingUrl || null,
+        referrer: referrer || null,
+        utm: {
+          source: utmSource || null,
+          medium: utmMedium || null,
+          campaign: utmCampaign || null,
+          content: utmContent || null,
+          term: utmTerm || null
+        },
+        click_ids: {
+          gclid: gclid || null,
+          fbclid: fbclid || null,
+          ttclid: ttclid || null
+        },
+        keys: {
+          event_id: eventId || null,
+          external_source: externalSource || null,
+          external_id: externalId || null,
+          phone_hash: normalizedPhone ? hashValue(normalizedPhone) : null,
+          email_hash: normalizedEmail ? hashValue(normalizedEmail) : null
+        }
+      }
+    });
+  } catch (auditErr) {
+    console.warn('⚠️ No se pudo registrar auditoría de dedupe:', auditErr.message || auditErr);
+  }
+}
+
 function buildQuickchatSummaryMessage({ nombre, telefono, email, pageUrl, landingUrl, extraPairs }) {
   const lines = [];
   lines.push('Nuevo paciente potencial desde el chatbot de la web.');
@@ -686,6 +757,33 @@ exports.ingestLead = asyncHandler(async (req, res) => {
     });
   } catch (err) {
     if (err.status === 409) {
+      await registerDedupeAttemptAudit({
+        existingLeadId: err.existingId,
+        reqBody: req.body || {},
+        dedupeReason: err.message,
+        eventId,
+        normalizedSource,
+        sourceDetail: source_detail || null,
+        normalizedChannel,
+        clinicId: coalesce(clinicaIdParsed, derivedClinicIdForChat),
+        groupId: grupoClinicaIdParsed,
+        pageUrl: pageUrlValue || null,
+        landingUrl: landingUrlValue || null,
+        referrer: referrerValue || null,
+        utmSource,
+        utmMedium,
+        utmCampaign,
+        utmContent,
+        utmTerm,
+        gclid: gclidValue,
+        fbclid: fbclidValue,
+        ttclid: ttclidValue,
+        externalSource,
+        externalId,
+        normalizedPhone,
+        normalizedEmail
+      });
+
       if (wantsQuickchatSummary && err.existingId) {
         let existing = null;
         try {
@@ -1904,6 +2002,84 @@ exports.listLeads = asyncHandler(async (req, res) => {
     offset: parsedOffset
   });
 
+  const leadRows = Array.isArray(leads.rows) ? leads.rows : [];
+  const leadIds = leadRows
+    .map((row) => parseInteger(row?.id))
+    .filter((id) => id !== null);
+
+  const dedupeInfoByLeadId = new Map();
+  const dedupeCountByLeadId = new Map();
+
+  if (leadIds.length > 0) {
+    const audits = await LeadAttributionAudit.findAll({
+      where: { lead_intake_id: { [Op.in]: leadIds } },
+      attributes: ['id', 'lead_intake_id', 'created_at', 'attribution_steps'],
+      order: [['created_at', 'DESC']],
+      raw: true
+    });
+
+    audits.forEach((audit) => {
+      const leadId = parseInteger(audit?.lead_intake_id);
+      if (!leadId) return;
+
+      const steps = audit?.attribution_steps && typeof audit.attribution_steps === 'object'
+        ? audit.attribution_steps
+        : {};
+      const kind = String(steps.kind || '').toLowerCase();
+      if (kind !== 'dedupe_attempt') return;
+
+      const currentCount = dedupeCountByLeadId.get(leadId) || 0;
+      dedupeCountByLeadId.set(leadId, currentCount + 1);
+
+      if (!dedupeInfoByLeadId.has(leadId)) {
+        dedupeInfoByLeadId.set(leadId, {
+          at: audit.created_at || null,
+          reason: steps.dedupe_reason || null,
+          source: steps.source || null,
+          source_detail: steps.source_detail || null,
+          channel: steps.channel || null,
+          page_url: steps.page_url || null,
+          landing_url: steps.landing_url || null
+        });
+      }
+    });
+  }
+
+  const mappedItems = leadRows.map((row) => {
+    const item = row?.toJSON ? row.toJSON() : { ...(row || {}) };
+    const leadId = parseInteger(item.id);
+    const lastDedupe = leadId ? (dedupeInfoByLeadId.get(leadId) || null) : null;
+    const dedupeCount = leadId ? (dedupeCountByLeadId.get(leadId) || 0) : 0;
+
+    item.source_trace = {
+      source: item.source || null,
+      source_detail: item.source_detail || null,
+      channel: item.channel || null,
+      page_url: item.page_url || null,
+      landing_url: item.landing_url || null,
+      referrer: item.referrer || null,
+      utm: {
+        source: item.utm_source || null,
+        medium: item.utm_medium || null,
+        campaign: item.utm_campaign || null,
+        content: item.utm_content || null,
+        term: item.utm_term || null
+      },
+      click_ids: {
+        gclid: item.gclid || null,
+        fbclid: item.fbclid || null,
+        ttclid: item.ttclid || null
+      },
+      dedupe: {
+        count: dedupeCount,
+        last: lastDedupe
+      }
+    };
+    item.dedupe_count = dedupeCount;
+    item.last_dedupe = lastDedupe;
+    return item;
+  });
+
   const pageNumber = pageParsed > 0 ? pageParsed : Math.floor(parsedOffset / parsedLimit) + 1;
   const totalPages = parsedLimit > 0 ? Math.ceil(leads.count / parsedLimit) : 0;
 
@@ -1914,7 +2090,51 @@ exports.listLeads = asyncHandler(async (req, res) => {
     page: pageNumber,
     pageSize: parsedLimit,
     totalPages,
-    items: leads.rows
+    items: mappedItems
+  });
+});
+
+exports.getLeadAudits = asyncHandler(async (req, res) => {
+  const leadId = parseInteger(req.params.id);
+  if (!leadId) {
+    return res.status(400).json({ message: 'ID de lead inválido' });
+  }
+
+  const limitParsed = Math.max(1, Math.min(parseInteger(req.query.limit) || 50, 500));
+  const audits = await LeadAttributionAudit.findAll({
+    where: { lead_intake_id: leadId },
+    attributes: ['id', 'lead_intake_id', 'raw_payload', 'attribution_steps', 'created_at'],
+    order: [['created_at', 'DESC']],
+    limit: limitParsed,
+    raw: true
+  });
+
+  const items = audits.map((audit) => {
+    const steps = audit?.attribution_steps && typeof audit.attribution_steps === 'object'
+      ? audit.attribution_steps
+      : {};
+    return {
+      id: audit.id,
+      lead_intake_id: audit.lead_intake_id,
+      created_at: audit.created_at,
+      kind: steps.kind || null,
+      summary: {
+        reason: steps.dedupe_reason || null,
+        source: steps.source || null,
+        source_detail: steps.source_detail || null,
+        channel: steps.channel || null,
+        page_url: steps.page_url || null,
+        landing_url: steps.landing_url || null
+      },
+      attribution_steps: audit.attribution_steps || null,
+      raw_payload: audit.raw_payload || null
+    };
+  });
+
+  res.status(200).json({
+    lead_id: leadId,
+    total: items.length,
+    items
   });
 });
 
