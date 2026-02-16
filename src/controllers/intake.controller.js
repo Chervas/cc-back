@@ -2308,6 +2308,92 @@ exports.listLeads = asyncHandler(async (req, res) => {
   });
 });
 
+exports.getLeadById = asyncHandler(async (req, res) => {
+  const leadId = parseInteger(req.params.id);
+  if (!leadId) {
+    return res.status(400).json({ message: 'ID de lead inválido' });
+  }
+
+  const lead = await LeadIntake.findByPk(leadId, {
+    include: [
+      { model: Clinica, as: 'clinica', attributes: ['id_clinica', 'nombre_clinica'] },
+      { model: GrupoClinica, as: 'grupoClinica', attributes: ['id_grupo', 'nombre_grupo'] }
+    ]
+  });
+
+  if (!lead) {
+    return res.status(404).json({ message: 'Lead no encontrado' });
+  }
+
+  const item = lead.toJSON ? lead.toJSON() : { ...(lead || {}) };
+  item.call_initiated = !!item.call_initiated;
+  item.call_initiated_at = item.call_initiated_at || null;
+  item.call_outcome = item.call_outcome || null;
+  item.call_outcome_at = item.call_outcome_at || null;
+  item.call_outcome_notes = item.call_outcome_notes || null;
+  item.call_outcome_appointment_id = parseInteger(item.call_outcome_appointment_id);
+  item.clinica_nombre = item.clinica?.nombre_clinica || item.nombre_clinica || null;
+
+  // Resumen de deduplicación para tooltip/UI.
+  const dedupeAudits = await LeadAttributionAudit.findAll({
+    where: { lead_intake_id: leadId },
+    attributes: ['created_at', 'attribution_steps'],
+    order: [['created_at', 'DESC']],
+    raw: true
+  });
+
+  let dedupeCount = 0;
+  let lastDedupe = null;
+  for (const audit of dedupeAudits) {
+    const steps = audit?.attribution_steps && typeof audit.attribution_steps === 'object'
+      ? audit.attribution_steps
+      : {};
+    const kind = String(steps.kind || '').toLowerCase();
+    if (kind !== 'dedupe_attempt') continue;
+    dedupeCount += 1;
+    if (!lastDedupe) {
+      lastDedupe = {
+        at: audit.created_at || null,
+        reason: steps.dedupe_reason || null,
+        source: steps.source || null,
+        source_detail: steps.source_detail || null,
+        channel: steps.channel || null,
+        page_url: steps.page_url || null,
+        landing_url: steps.landing_url || null
+      };
+    }
+  }
+
+  item.dedupe_count = dedupeCount;
+  item.last_dedupe = lastDedupe;
+  item.source_trace = {
+    source: item.source || null,
+    source_detail: item.source_detail || null,
+    channel: item.channel || null,
+    page_url: item.page_url || null,
+    landing_url: item.landing_url || null,
+    referrer: item.referrer || null,
+    utm: {
+      source: item.utm_source || null,
+      medium: item.utm_medium || null,
+      campaign: item.utm_campaign || null,
+      content: item.utm_content || null,
+      term: item.utm_term || null
+    },
+    click_ids: {
+      gclid: item.gclid || null,
+      fbclid: item.fbclid || null,
+      ttclid: item.ttclid || null
+    },
+    dedupe: {
+      count: dedupeCount,
+      last: lastDedupe
+    }
+  };
+
+  return res.status(200).json(item);
+});
+
 exports.getLeadAudits = asyncHandler(async (req, res) => {
   const leadId = parseInteger(req.params.id);
   if (!leadId) {
