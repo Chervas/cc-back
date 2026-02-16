@@ -4,6 +4,7 @@ const bcrypt = require('bcryptjs');
 
 // Mantener consistente con userclinicas.routes.js
 const ADMIN_USER_IDS = [1];
+const DEFAULT_TIMEZONE = 'Europe/Madrid';
 // Nota: columna DoctorBloqueos.tipo es STRING(32) (sin ENUM). Mantener lista alineada con el front.
 const BLOQUEO_TIPOS = new Set(['vacaciones', 'enfermedad', 'ausencia', 'formacion', 'congreso', 'otro']);
 const MODO_DISPONIBILIDAD = new Set(['avanzado', 'basico']);
@@ -57,6 +58,76 @@ function parseDateOrNull(value) {
     return Number.isFinite(date.getTime()) ? date : null;
 }
 
+function parseClinicConfig(value) {
+    if (!value) return null;
+    if (typeof value === 'object') return value;
+    if (typeof value === 'string') {
+        try {
+            const parsed = JSON.parse(value);
+            return parsed && typeof parsed === 'object' ? parsed : null;
+        } catch (error) {
+            return null;
+        }
+    }
+    return null;
+}
+
+function isValidTimeZone(value) {
+    if (!value || typeof value !== 'string') return false;
+    try {
+        Intl.DateTimeFormat('en-US', { timeZone: value }).format(new Date());
+        return true;
+    } catch (error) {
+        return false;
+    }
+}
+
+function resolveClinicTimezone(clinica) {
+    const cfg = parseClinicConfig(clinica && clinica.configuracion);
+    const candidates = [
+        cfg && (cfg.timezone || cfg.timeZone || cfg.tz),
+        clinica && (clinica.timezone || clinica.time_zone || clinica.tz),
+    ];
+
+    for (const candidate of candidates) {
+        if (isValidTimeZone(candidate)) return candidate;
+    }
+    return DEFAULT_TIMEZONE;
+}
+
+function formatPartsInTimeZone(date, timeZone) {
+    const parts = new Intl.DateTimeFormat('en-CA', {
+        timeZone,
+        hour12: false,
+        year: 'numeric',
+        month: '2-digit',
+        day: '2-digit',
+        hour: '2-digit',
+        minute: '2-digit',
+        second: '2-digit',
+    }).formatToParts(date);
+
+    const bag = {};
+    parts.forEach((p) => {
+        if (p.type !== 'literal') bag[p.type] = p.value;
+    });
+
+    return {
+        year: Number(bag.year),
+        month: Number(bag.month),
+        day: Number(bag.day),
+        hour: Number(bag.hour),
+        minute: Number(bag.minute),
+        second: Number(bag.second),
+    };
+}
+
+function offsetMinutesForTimeZone(date, timeZone) {
+    const p = formatPartsInTimeZone(date, timeZone);
+    const asUtc = Date.UTC(p.year, p.month - 1, p.day, p.hour, p.minute, p.second);
+    return Math.round((asUtc - date.getTime()) / 60000);
+}
+
 function normalizeHm(value) {
     if (value == null) return null;
     const raw = String(value).trim();
@@ -67,33 +138,115 @@ function normalizeHm(value) {
     return `${hh}:${mm}`;
 }
 
-function buildDateTime(dateOrIso, hm, fallbackHm) {
+function localDateTimeToUtc(fechaLocal, timeValue, timeZone) {
+    if (!fechaLocal || typeof fechaLocal !== 'string') return null;
+    const d = fechaLocal.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+    if (!d) return null;
+
+    const rawTime = String(timeValue || '').trim();
+    const t = rawTime.match(/^(\d{2}):(\d{2})(?::(\d{2}))?$/);
+    if (!t) return null;
+
+    const year = Number(d[1]);
+    const month = Number(d[2]);
+    const day = Number(d[3]);
+    const hour = Number(t[1]);
+    const minute = Number(t[2]);
+    const second = Number(t[3] || '00');
+
+    const naiveUtc = Date.UTC(year, month - 1, day, hour, minute, second);
+    let ts = naiveUtc;
+    for (let i = 0; i < 2; i++) {
+        const offsetMin = offsetMinutesForTimeZone(new Date(ts), timeZone);
+        ts = naiveUtc - offsetMin * 60000;
+    }
+    return new Date(ts);
+}
+
+function buildDateTime(dateOrIso, hm, fallbackHm, timeZone = DEFAULT_TIMEZONE) {
     if (!dateOrIso) return null;
+
+    const raw = String(dateOrIso).trim();
+    const hasExplicitTz = /[Zz]$|[+-]\d{2}:\d{2}$/.test(raw);
+    const localMatch = raw.match(/^(\d{4}-\d{2}-\d{2})(?:[T ](\d{2}:\d{2}(?::\d{2})?))?$/);
+
     if (hm) {
-        const day = String(dateOrIso).slice(0, 10);
-        return parseDateOrNull(`${day}T${hm}:00`);
+        const day = localMatch ? localMatch[1] : raw.slice(0, 10);
+        return localDateTimeToUtc(day, `${hm}:00`, timeZone);
     }
 
-    const parsed = parseDateOrNull(dateOrIso);
+    if (localMatch && !hasExplicitTz && localMatch[2]) {
+        return localDateTimeToUtc(localMatch[1], localMatch[2], timeZone);
+    }
+
+    const parsed = parseDateOrNull(raw);
     if (parsed) return parsed;
 
-    if (String(dateOrIso).length === 10 && fallbackHm) {
-        return parseDateOrNull(`${String(dateOrIso)}T${fallbackHm}:00`);
+    if (localMatch && fallbackHm) {
+        return localDateTimeToUtc(localMatch[1], `${fallbackHm}:00`, timeZone);
+    }
+
+    if (raw.length === 10 && fallbackHm) {
+        return localDateTimeToUtc(raw, `${fallbackHm}:00`, timeZone);
     }
 
     return null;
 }
 
-function toHm(dateValue) {
+function toHm(dateValue, timeZone = DEFAULT_TIMEZONE) {
     const date = parseDateOrNull(dateValue);
     if (!date) return null;
-    return `${String(date.getHours()).padStart(2, '0')}:${String(date.getMinutes()).padStart(2, '0')}`;
+    const p = formatPartsInTimeZone(date, timeZone);
+    return `${String(p.hour).padStart(2, '0')}:${String(p.minute).padStart(2, '0')}`;
 }
 
-function toDay(dateValue) {
+function toDay(dateValue, timeZone = DEFAULT_TIMEZONE) {
     const date = parseDateOrNull(dateValue);
     if (!date) return null;
-    return date.toISOString().slice(0, 10);
+    const p = formatPartsInTimeZone(date, timeZone);
+    return `${String(p.year).padStart(4, '0')}-${String(p.month).padStart(2, '0')}-${String(p.day).padStart(2, '0')}`;
+}
+
+async function getClinicTimezoneById(clinicaId) {
+    const id = Number(clinicaId);
+    if (!Number.isFinite(id)) return DEFAULT_TIMEZONE;
+    const clinica = await Clinica.findByPk(id, {
+        attributes: ['id_clinica', 'configuracion'],
+        raw: true,
+    });
+    return resolveClinicTimezone(clinica);
+}
+
+async function buildClinicTimezoneMap(clinicIds) {
+    const ids = Array.from(new Set(
+        (clinicIds || [])
+            .map((id) => Number(id))
+            .filter((id) => Number.isFinite(id))
+    ));
+
+    if (!ids.length) {
+        return new Map();
+    }
+
+    const rows = await Clinica.findAll({
+        where: { id_clinica: { [Op.in]: ids } },
+        attributes: ['id_clinica', 'configuracion'],
+        raw: true,
+    });
+
+    const map = new Map();
+    rows.forEach((row) => {
+        map.set(Number(row.id_clinica), resolveClinicTimezone(row));
+    });
+    return map;
+}
+
+function timezoneForClinicId(clinicaId, timezoneMap) {
+    const id = Number(clinicaId);
+    if (Number.isFinite(id) && timezoneMap && timezoneMap.has(id)) {
+        return timezoneMap.get(id);
+    }
+    return DEFAULT_TIMEZONE;
 }
 
 function normalizeBloqueoTipo(value) {
@@ -153,7 +306,7 @@ async function canAccessTargetPersonal(actorId, targetUserId, clinicId) {
     return !!match;
 }
 
-function serializeBloqueo(bloqueo) {
+function serializeBloqueo(bloqueo, timeZone = DEFAULT_TIMEZONE) {
     return {
         id: bloqueo.id,
         id_usuario: bloqueo.doctor_id,
@@ -162,9 +315,9 @@ function serializeBloqueo(bloqueo) {
         clinica_id: bloqueo.clinica_id ?? null,
         fecha_inicio: bloqueo.fecha_inicio,
         fecha_fin: bloqueo.fecha_fin,
-        fecha: toDay(bloqueo.fecha_inicio),
-        hora_inicio: toHm(bloqueo.fecha_inicio),
-        hora_fin: toHm(bloqueo.fecha_fin),
+        fecha: toDay(bloqueo.fecha_inicio, timeZone),
+        hora_inicio: toHm(bloqueo.fecha_inicio, timeZone),
+        hora_fin: toHm(bloqueo.fecha_fin, timeZone),
         motivo: bloqueo.motivo || '',
         tipo: bloqueo.tipo || 'ausencia',
         recurrente: bloqueo.recurrente || 'none',
@@ -494,8 +647,11 @@ exports.getPersonalBloqueos = async (req, res) => {
 
         const fromRaw = req.query?.from || req.query?.fecha_inicio;
         const toRaw = req.query?.to || req.query?.fecha_fin;
-        const fromDate = buildDateTime(fromRaw, null, '00:00');
-        const toDate = buildDateTime(toRaw, null, '23:59');
+        const queryTimezone = Number.isFinite(clinicaId)
+            ? await getClinicTimezoneById(clinicaId)
+            : DEFAULT_TIMEZONE;
+        const fromDate = buildDateTime(fromRaw, null, '00:00', queryTimezone);
+        const toDate = buildDateTime(toRaw, null, '23:59', queryTimezone);
 
         const where = { doctor_id: targetUserId };
         if (Number.isFinite(clinicaId)) {
@@ -520,7 +676,10 @@ exports.getPersonalBloqueos = async (req, res) => {
             order: [['fecha_inicio', 'ASC']],
         });
 
-        return res.json(rows.map(serializeBloqueo));
+        const timezoneMap = await buildClinicTimezoneMap(rows.map((r) => r.clinica_id));
+        return res.json(
+            rows.map((row) => serializeBloqueo(row, timezoneForClinicId(row.clinica_id, timezoneMap)))
+        );
     } catch (error) {
         console.error('[personal.getPersonalBloqueos] Error:', error);
         return res.status(500).json({ message: 'Error retrieving personal bloqueos', error: error.message });
@@ -554,9 +713,12 @@ exports.createPersonalBloqueo = async (req, res) => {
         const horaFin = normalizeHm(req.body?.hora_fin);
         const fechaInicioInput = req.body?.fecha_inicio || req.body?.fecha;
         const fechaFinInput = req.body?.fecha_fin || req.body?.fecha;
+        const clinicTimezone = clinicaId == null
+            ? DEFAULT_TIMEZONE
+            : await getClinicTimezoneById(clinicaId);
 
-        const fechaInicio = buildDateTime(fechaInicioInput, horaInicio, '00:00');
-        const fechaFin = buildDateTime(fechaFinInput, horaFin, '23:59');
+        const fechaInicio = buildDateTime(fechaInicioInput, horaInicio, '00:00', clinicTimezone);
+        const fechaFin = buildDateTime(fechaFinInput, horaFin, '23:59', clinicTimezone);
         const tipo = normalizeBloqueoTipo(req.body?.tipo);
 
         if (!fechaInicio || !fechaFin) {
@@ -604,7 +766,7 @@ exports.createPersonalBloqueo = async (req, res) => {
             creado_por: actorId,
         });
 
-        const serialized = serializeBloqueo(bloqueo);
+        const serialized = serializeBloqueo(bloqueo, clinicTimezone);
 
         return res.status(201).json(serialized);
     } catch (error) {
@@ -661,13 +823,17 @@ exports.updatePersonalBloqueo = async (req, res) => {
             return res.status(403).json({ message: 'Forbidden' });
         }
 
+        const clinicTimezone = clinicaId == null
+            ? DEFAULT_TIMEZONE
+            : await getClinicTimezoneById(clinicaId);
+
         // Preservar horas actuales si no se envían.
         const horaInicio = req.body?.hora_inicio !== undefined
             ? normalizeHm(req.body?.hora_inicio)
-            : toHm(bloqueo.fecha_inicio);
+            : toHm(bloqueo.fecha_inicio, clinicTimezone);
         const horaFin = req.body?.hora_fin !== undefined
             ? normalizeHm(req.body?.hora_fin)
-            : toHm(bloqueo.fecha_fin);
+            : toHm(bloqueo.fecha_fin, clinicTimezone);
 
         if (req.body?.hora_inicio !== undefined && !horaInicio) {
             return res.status(400).json({ message: 'hora_inicio inválida' });
@@ -676,11 +842,11 @@ exports.updatePersonalBloqueo = async (req, res) => {
             return res.status(400).json({ message: 'hora_fin inválida' });
         }
 
-        const fechaInicioInput = req.body?.fecha_inicio || req.body?.fecha || toDay(bloqueo.fecha_inicio);
-        const fechaFinInput = req.body?.fecha_fin || req.body?.fecha || toDay(bloqueo.fecha_fin);
+        const fechaInicioInput = req.body?.fecha_inicio || req.body?.fecha || toDay(bloqueo.fecha_inicio, clinicTimezone);
+        const fechaFinInput = req.body?.fecha_fin || req.body?.fecha || toDay(bloqueo.fecha_fin, clinicTimezone);
 
-        const fechaInicio = buildDateTime(fechaInicioInput, horaInicio, '00:00');
-        const fechaFin = buildDateTime(fechaFinInput, horaFin, '23:59');
+        const fechaInicio = buildDateTime(fechaInicioInput, horaInicio, '00:00', clinicTimezone);
+        const fechaFin = buildDateTime(fechaFinInput, horaFin, '23:59', clinicTimezone);
 
         if (!fechaInicio || !fechaFin) {
             return res.status(400).json({ message: 'fecha_inicio/fecha_fin inválidas' });
@@ -729,7 +895,7 @@ exports.updatePersonalBloqueo = async (req, res) => {
             aplica_a_todas_clinicas: clinicaId == null ? true : false,
         });
 
-        return res.json(serializeBloqueo(bloqueo));
+        return res.json(serializeBloqueo(bloqueo, clinicTimezone));
     } catch (error) {
         console.error('[personal.updatePersonalBloqueo] Error:', error);
         return res.status(500).json({ message: 'Error updating personal bloqueo', error: error.message });
@@ -951,6 +1117,7 @@ async function buildScheduleResponse(actorId, targetUserId) {
         where: bloqueosWhere,
         order: [['fecha_inicio', 'ASC']],
     });
+    const timezoneMap = await buildClinicTimezoneMap(bloqueos.map((b) => b.clinica_id));
 
     return {
         doctor_id: String(targetUserId),
@@ -963,7 +1130,7 @@ async function buildScheduleResponse(actorId, targetUserId) {
             modo_disponibilidad: c.modo_disponibilidad || 'avanzado',
             horarios: c.horarios || [],
         })),
-        bloqueos: bloqueos.map(serializeBloqueo),
+        bloqueos: bloqueos.map((b) => serializeBloqueo(b, timezoneForClinicId(b.clinica_id, timezoneMap))),
     };
 }
 
