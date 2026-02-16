@@ -253,10 +253,15 @@ function formatExtraPairs(pairs) {
   return safe.length ? `\n\nDatos recogidos:\n${safe.join('\n')}` : '';
 }
 
-function buildQuickchatSummaryMessage({ nombre, telefono, email, pageUrl, extraPairs }) {
+function buildQuickchatSummaryMessage({ nombre, telefono, email, pageUrl, landingUrl, extraPairs }) {
   const lines = [];
   lines.push('Nuevo paciente potencial desde el chatbot de la web.');
-  if (pageUrl) lines.push(`Pagina: ${pageUrl}`);
+  if (landingUrl && pageUrl && landingUrl !== pageUrl) {
+    lines.push(`Página origen: ${landingUrl}`);
+    lines.push(`Página envío: ${pageUrl}`);
+  } else if (pageUrl || landingUrl) {
+    lines.push(`Página: ${pageUrl || landingUrl}`);
+  }
   lines.push(`Nombre: ${nombre || '-'}`);
   lines.push(`Telf: ${telefono || '-'}`);
   lines.push(`Email: ${email || '-'}`);
@@ -271,6 +276,7 @@ async function sendQuickchatSummaryToQuickChat({
   telefono,
   email,
   pageUrl,
+  landingUrl,
   extraPairs
 }) {
   if (!clinicId) {
@@ -299,6 +305,7 @@ async function sendQuickchatSummaryToQuickChat({
     telefono: phoneE164 || telefono || null,
     email,
     pageUrl,
+    landingUrl,
     extraPairs
   });
 
@@ -316,6 +323,7 @@ async function sendQuickchatSummaryToQuickChat({
       lead_intake_id: leadIntakeId || null,
       summary: {
         page_url: pageUrl || null,
+        landing_url: landingUrl || null,
         nombre: nombre || null,
         telefono: phoneE164 || telefono || null,
         email: email || null,
@@ -508,9 +516,6 @@ exports.ingestLead = asyncHandler(async (req, res) => {
 
   const sourceDetailLower = String(source_detail || '').toLowerCase();
   const isChatRelated = sourceDetailLower === 'chatbot' || sourceDetailLower === 'chatbot_quickchat' || wantsQuickchatSummary;
-  // Capturamos TODAS las conversiones web (tel_modal, web_form, chatbot), salvo el "lead técnico"
-  // de chatbot_quickchat que se usa para enviar resumen y sí debe poder deduplicar.
-  const skipRecentContactDedupe = normalizedSource === 'web' && sourceDetailLower !== 'chatbot_quickchat';
 
   let derivedClinicIdForChat = null;
   if (clinicaIdParsed === null && grupoClinicaIdParsed !== null && isChatRelated) {
@@ -678,8 +683,6 @@ exports.ingestLead = asyncHandler(async (req, res) => {
     lead = await dedupeAndCreateLead(leadPayload, req.body || {}, {
       clinic_match_source: clinic_match_source || null,
       clinic_match_value: clinic_match_value || null
-    }, {
-      skipRecentContactDedupe
     });
   } catch (err) {
     if (err.status === 409) {
@@ -715,7 +718,8 @@ exports.ingestLead = asyncHandler(async (req, res) => {
             nombre: nombreForChat,
             telefono: telefonoForChat,
             email: emailForChat,
-            pageUrl: pageUrlValue || landingUrlValue || null,
+            pageUrl: pageUrlValue || null,
+            landingUrl: landingUrlValue || null,
             extraPairs
           });
         } catch (e) {
@@ -789,7 +793,8 @@ exports.ingestLead = asyncHandler(async (req, res) => {
         nombre: leadNombre,
         telefono: leadTelefono,
         email: leadEmail,
-        pageUrl: pageUrlValue || landingUrlValue || null,
+        pageUrl: pageUrlValue || null,
+        landingUrl: landingUrlValue || null,
         extraPairs
       });
       quickchatSummarySent = !!summaryResult?.sent;
@@ -1580,10 +1585,10 @@ exports.createWhatsAppWebOrigin = asyncHandler(async (req, res) => {
 
   // Validación por dominio + HMAC (mismo criterio que /api/intake/leads y /api/intake/events)
   let cfg = null;
-  if (clinicIdParsed !== null) {
-    cfg = await IntakeConfig.findOne({ where: { clinic_id: clinicIdParsed }, raw: true });
-  } else if (groupIdParsed !== null) {
+  if (groupIdParsed !== null) {
     cfg = await IntakeConfig.findOne({ where: { group_id: groupIdParsed, assignment_scope: 'group' }, raw: true });
+  } else if (clinicIdParsed !== null) {
+    cfg = await IntakeConfig.findOne({ where: { clinic_id: clinicIdParsed }, raw: true });
   } else if (domain) {
     cfg = await IntakeConfig.findOne({
       where: db.Sequelize.literal(`JSON_CONTAINS(COALESCE(domains,'[]'), '\"${domain.toLowerCase()}\"')`)
