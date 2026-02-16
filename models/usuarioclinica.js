@@ -29,9 +29,9 @@ module.exports = (sequelize, DataTypes) => {
       type: DataTypes.INTEGER,
       primaryKey: true,
     },
-    // Rol principal: 'paciente', 'personaldeclinica' o 'propietario'
+    // Rol principal: 'paciente', 'personaldeclinica', 'propietario' o 'agencia'
     rol_clinica: {
-      type: DataTypes.ENUM('paciente', 'personaldeclinica', 'propietario'),
+      type: DataTypes.ENUM('paciente', 'personaldeclinica', 'propietario', 'agencia'),
       allowNull: false,
       defaultValue: 'paciente'
     },
@@ -41,6 +41,7 @@ module.exports = (sequelize, DataTypes) => {
       allowNull: true,
       defaultValue: null
     },
+    // Onboarding
     estado_invitacion: {
       type: DataTypes.STRING(32),
       allowNull: false,
@@ -57,12 +58,6 @@ module.exports = (sequelize, DataTypes) => {
     datos_fiscales_clinica: {
       type: DataTypes.JSON,
       allowNull: true
-    },
-    // ── Onboarding (Bloque 6.1) ──
-    estado_invitacion: {
-      type: DataTypes.ENUM('pendiente', 'aceptada', 'rechazada'),
-      allowNull: true,
-      defaultValue: null
     },
     invite_token: {
       type: DataTypes.STRING(64),

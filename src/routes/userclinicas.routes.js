@@ -2,15 +2,9 @@
 const express = require('express');
 const jwt = require('jsonwebtoken');
 const { Clinica, UsuarioClinica, Usuario, GrupoClinica } = require('../../models');
+const { ADMIN_USER_IDS, STAFF_ROLES, isGlobalAdmin } = require('../lib/role-helpers');
 
 const router = express.Router();
-
-/**
- * Array de IDs de usuarios administradores
- * Estos usuarios tienen acceso a TODAS las clínicas del sistema
- */
-// ✅ CAMBIO 1: Se define la lista de IDs de administradores
-const ADMIN_USER_IDS = [1]; // Añadir más IDs según sea necesario
 
 /**
  * Función auxiliar para obtener el userId del token JWT
@@ -197,7 +191,7 @@ router.get('/list', async (req, res) => {
                     }],
                     through: {
                         where: {
-                            rol_clinica: ['propietario', 'personaldeclinica'] // Solo roles apropiados
+                            rol_clinica: STAFF_ROLES // Solo roles apropiados
                         }
                     }
                 }],
@@ -244,9 +238,9 @@ router.get('/list', async (req, res) => {
                 userSubRole: clinica.UsuarioClinica.subrol_clinica,
                 // Permisos basados en el rol asignado
                 permissions: {
-                    canMapAssets: ['propietario', 'personaldeclinica'].includes(clinica.UsuarioClinica.rol_clinica),
+                    canMapAssets: STAFF_ROLES.includes(clinica.UsuarioClinica.rol_clinica),
                     canManageSettings: clinica.UsuarioClinica.rol_clinica === 'propietario',
-                    canViewReports: ['propietario', 'personaldeclinica'].includes(clinica.UsuarioClinica.rol_clinica),
+                    canViewReports: STAFF_ROLES.includes(clinica.UsuarioClinica.rol_clinica),
                     isSystemAdmin: false
                 }
             }));
@@ -314,7 +308,7 @@ router.get('/:id', async (req, res) => {
                     where: { id_clinica: id },
                     through: {
                         where: {
-                            rol_clinica: ['propietario', 'personaldeclinica']
+                            rol_clinica: STAFF_ROLES
                         }
                     }
                 }]

@@ -1,24 +1,31 @@
 const { Op, fn, col, where } = require('sequelize');
 const { Usuario, Clinica, UsuarioClinica, DoctorClinica, DoctorHorario, DoctorBloqueo, CitaPaciente, sequelize } = require('../../models');
 const bcrypt = require('bcryptjs');
+const {
+    ADMIN_USER_IDS,
+    STAFF_ROLES,
+    ADMIN_ROLES,
+    INVITABLE_ROLES,
+    ROLES_CLINICA: ROLES_CLINICA_ARR,
+    SUBROLES_CLINICA: SUBROLES_CLINICA_ARR,
+    ESTADO_CUENTA: ESTADO_CUENTA_ARR,
+    ESTADO_INVITACION: ESTADO_INVITACION_ARR,
+    isGlobalAdmin,
+    isStaffRole,
+    isAdminRole,
+    canManagePersonal: canManagePersonalHelper,
+} = require('../lib/role-helpers');
 
-// Mantener consistente con userclinicas.routes.js
-const ADMIN_USER_IDS = [1];
 const DEFAULT_TIMEZONE = 'Europe/Madrid';
 // Nota: columna DoctorBloqueos.tipo es STRING(32) (sin ENUM). Mantener lista alineada con el front.
 const BLOQUEO_TIPOS = new Set(['vacaciones', 'enfermedad', 'ausencia', 'formacion', 'congreso', 'otro']);
 const MODO_DISPONIBILIDAD = new Set(['avanzado', 'basico']);
-const ESTADO_CUENTA = new Set(['activo', 'provisional', 'suspendido']);
-const ESTADO_INVITACION = new Set(['pendiente', 'aceptada', 'rechazada', 'cancelada']);
-const ROLES_CLINICA = new Set(['paciente', 'personaldeclinica', 'propietario']);
-const SUBROLES_CLINICA = new Set([
-    'Auxiliares y enfermeros',
-    'Doctores',
-    'Administrativos',
-    'Recepción / Comercial ventas',
-]);
+const ESTADO_CUENTA = new Set(ESTADO_CUENTA_ARR);
+const ESTADO_INVITACION = new Set(ESTADO_INVITACION_ARR);
+const ROLES_CLINICA = new Set(ROLES_CLINICA_ARR);
+const SUBROLES_CLINICA = new Set(SUBROLES_CLINICA_ARR);
 
-const isAdmin = (userId) => ADMIN_USER_IDS.includes(Number(userId));
+const isAdmin = (userId) => isGlobalAdmin(userId);
 
 async function getAccessibleClinicIdsForUser(userId) {
     // Admin: puede acceder a todas las clinicas (pero seguimos filtrando por query para evitar dumps enormes)
@@ -35,7 +42,7 @@ async function getAccessibleClinicIdsForUser(userId) {
     const rows = await UsuarioClinica.findAll({
         where: {
             id_usuario: userId,
-            rol_clinica: { [Op.in]: ['propietario', 'personaldeclinica'] },
+            rol_clinica: { [Op.in]: STAFF_ROLES },
         },
         attributes: ['id_clinica'],
         raw: true,
@@ -403,7 +410,7 @@ async function actorCanMergeUsers(actorId, primaryUserId, secondaryUserId) {
     const rows = await UsuarioClinica.findAll({
         where: {
             id_usuario: { [Op.in]: [Number(primaryUserId), Number(secondaryUserId)] },
-            rol_clinica: { [Op.in]: ['propietario', 'personaldeclinica'] },
+            rol_clinica: { [Op.in]: STAFF_ROLES },
         },
         attributes: ['id_clinica'],
         raw: true,
@@ -492,7 +499,7 @@ async function canAccessTargetPersonal(actorId, targetUserId, clinicId) {
     const match = await UsuarioClinica.findOne({
         where: {
             id_usuario: Number(targetUserId),
-            rol_clinica: { [Op.in]: ['propietario', 'personaldeclinica'] },
+            rol_clinica: { [Op.in]: STAFF_ROLES },
             id_clinica: { [Op.in]: allowedClinicIds },
         },
         attributes: ['id_clinica'],
@@ -586,7 +593,7 @@ exports.getPersonal = async (req, res) => {
                     through: {
                         attributes: ['rol_clinica', 'subrol_clinica'],
                         where: {
-                            rol_clinica: { [Op.in]: ['propietario', 'personaldeclinica'] },
+                            rol_clinica: { [Op.in]: STAFF_ROLES },
                         },
                     },
                 },
@@ -628,7 +635,7 @@ exports.getPersonalById = async (req, res) => {
                     through: {
                         attributes: ['rol_clinica', 'subrol_clinica'],
                         where: {
-                            rol_clinica: { [Op.in]: ['propietario', 'personaldeclinica'] },
+                            rol_clinica: { [Op.in]: STAFF_ROLES },
                         },
                     },
                 },
@@ -890,7 +897,7 @@ exports.getMyInvitations = async (req, res) => {
             where: {
                 id_usuario: actorId,
                 estado_invitacion: 'pendiente',
-                rol_clinica: { [Op.in]: ['propietario', 'personaldeclinica'] },
+                rol_clinica: { [Op.in]: STAFF_ROLES },
             },
             attributes: [
                 'id_usuario',
@@ -1655,7 +1662,7 @@ async function hasStaffPivot(userId, clinicId) {
         where: {
             id_usuario: Number(userId),
             id_clinica: Number(clinicId),
-            rol_clinica: { [Op.in]: ['propietario', 'personaldeclinica'] },
+            rol_clinica: { [Op.in]: STAFF_ROLES },
         },
         attributes: ['id_usuario'],
         raw: true,
@@ -2209,9 +2216,8 @@ exports.invitarPersonal = async (req, res) => {
             return res.status(404).json({ message: 'Clínica no encontrada' });
         }
 
-        const validRoles = ['personaldeclinica', 'propietario'];
-        if (!validRoles.includes(rol_clinica)) {
-            return res.status(400).json({ message: `rol_clinica debe ser uno de: ${validRoles.join(', ')}` });
+        if (!INVITABLE_ROLES.includes(rol_clinica)) {
+            return res.status(400).json({ message: `rol_clinica debe ser uno de: ${INVITABLE_ROLES.join(', ')}` });
         }
 
         let targetUser;

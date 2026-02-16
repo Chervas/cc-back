@@ -2,8 +2,7 @@
 
 const { Op } = require('sequelize');
 const { AccessPolicyOverride, UsuarioClinica, Clinica } = require('../../models');
-
-const ADMIN_USER_IDS = [1];
+const { ADMIN_USER_IDS, STAFF_ROLES, isGlobalAdmin } = require('../lib/role-helpers');
 const ALLOWED_SCOPE_TYPES = new Set(['group', 'clinic']);
 const ALLOWED_FEATURE_KEYS = new Set(['marketing']);
 const ALLOWED_ROLE_CODES = new Set(['doctor', 'assistant', 'reception', 'admin_staff', 'unknown']);
@@ -43,7 +42,7 @@ async function getScopeAccess(actorId) {
   const rows = await UsuarioClinica.findAll({
     where: {
       id_usuario: actorId,
-      rol_clinica: { [Op.in]: ['propietario', 'personaldeclinica'] },
+      rol_clinica: { [Op.in]: STAFF_ROLES },
     },
     attributes: ['id_clinica', 'rol_clinica'],
     raw: true,
