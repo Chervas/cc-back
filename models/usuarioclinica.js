@@ -57,6 +57,27 @@ module.exports = (sequelize, DataTypes) => {
     datos_fiscales_clinica: {
       type: DataTypes.JSON,
       allowNull: true
+    },
+    // ── Onboarding (Bloque 6.1) ──
+    estado_invitacion: {
+      type: DataTypes.ENUM('pendiente', 'aceptada', 'rechazada'),
+      allowNull: true,
+      defaultValue: null
+    },
+    invite_token: {
+      type: DataTypes.STRING(64),
+      allowNull: true,
+      defaultValue: null
+    },
+    invited_at: {
+      type: DataTypes.DATE,
+      allowNull: true,
+      defaultValue: null
+    },
+    responded_at: {
+      type: DataTypes.DATE,
+      allowNull: true,
+      defaultValue: null
     }
   }, {
     sequelize,

@@ -2354,3 +2354,442 @@ exports.updateHorarios = async (req, res) => {
         return res.status(500).json({ message: 'Error updating horarios', error: error.message });
     }
 };
+
+// ═══════════════════════════════════════════════════════════════
+// Bloque 6.1 — Onboarding / Invitación de personal
+// ═══════════════════════════════════════════════════════════════
+
+const crypto = require('crypto');
+
+/**
+ * POST /api/personal/buscar
+ * Busca usuarios por email, nombre o teléfono.
+ * Devuelve coincidencias con su estado de vinculación a la clínica solicitada.
+ *
+ * Body: { query: string, clinica_id: number }
+ */
+exports.buscarPersonal = async (req, res) => {
+    try {
+        const actorId = Number(req.userData?.userId);
+        if (!Number.isFinite(actorId)) {
+            return res.status(401).json({ message: 'Auth failed!' });
+        }
+
+        const { query, clinica_id } = req.body;
+        if (!query || typeof query !== 'string' || query.trim().length < 2) {
+            return res.status(400).json({ message: 'query debe tener al menos 2 caracteres' });
+        }
+        const clinicaId = parseIntOrNull(clinica_id);
+        if (!Number.isFinite(clinicaId)) {
+            return res.status(400).json({ message: 'clinica_id es obligatorio' });
+        }
+
+        // Verificar que el actor tiene acceso a la clínica
+        const accessibleClinicIds = await getAccessibleClinicIdsForUser(actorId);
+        if (!accessibleClinicIds.includes(clinicaId) && !isAdmin(actorId)) {
+            return res.status(403).json({ message: 'Forbidden' });
+        }
+
+        const q = query.trim();
+        const users = await Usuario.findAll({
+            attributes: { exclude: ['password_usuario'] },
+            where: {
+                [Op.or]: [
+                    { nombre: { [Op.like]: `%${q}%` } },
+                    { apellidos: { [Op.like]: `%${q}%` } },
+                    { email_usuario: { [Op.like]: `%${q}%` } },
+                    { telefono: { [Op.like]: `%${q}%` } },
+                ],
+            },
+            include: [
+                {
+                    model: Clinica,
+                    as: 'Clinicas',
+                    required: false,
+                    through: {
+                        attributes: ['rol_clinica', 'subrol_clinica', 'estado_invitacion'],
+                    },
+                },
+            ],
+            order: [['nombre', 'ASC']],
+            limit: 20,
+        });
+
+        // Enriquecer cada resultado con su estado respecto a la clínica solicitada
+        const results = users.map((u) => {
+            const json = u.toJSON();
+            delete json.password_usuario;
+
+            const clinicas = json.Clinicas || [];
+            const pivot = clinicas.find(
+                (c) => Number(c.id_clinica) === clinicaId,
+            );
+
+            return {
+                ...json,
+                vinculacion_clinica: pivot
+                    ? {
+                          ya_vinculado: true,
+                          rol_clinica: pivot.UsuarioClinica?.rol_clinica || null,
+                          subrol_clinica: pivot.UsuarioClinica?.subrol_clinica || null,
+                          estado_invitacion: pivot.UsuarioClinica?.estado_invitacion || null,
+                      }
+                    : { ya_vinculado: false },
+            };
+        });
+
+        return res.json(results);
+    } catch (error) {
+        console.error('[personal.buscarPersonal] Error:', error);
+        return res.status(500).json({ message: 'Error en búsqueda', error: error.message });
+    }
+};
+
+/**
+ * POST /api/personal/invitar
+ * Invita a un usuario existente o crea uno provisional y lo vincula a la clínica.
+ *
+ * Body: {
+ *   clinica_id: number,
+ *   rol_clinica: 'personaldeclinica' | 'propietario',
+ *   subrol_clinica: string | null,
+ *   // Si el usuario ya existe:
+ *   id_usuario?: number,
+ *   // Si es nuevo (provisional):
+ *   nombre?: string,
+ *   apellidos?: string,
+ *   email_usuario?: string,
+ *   telefono?: string,
+ * }
+ */
+exports.invitarPersonal = async (req, res) => {
+    try {
+        const actorId = Number(req.userData?.userId);
+        if (!Number.isFinite(actorId)) {
+            return res.status(401).json({ message: 'Auth failed!' });
+        }
+
+        const {
+            clinica_id,
+            rol_clinica = 'personaldeclinica',
+            subrol_clinica = null,
+            id_usuario,
+            nombre,
+            apellidos,
+            email_usuario,
+            telefono,
+        } = req.body;
+
+        const clinicaId = parseIntOrNull(clinica_id);
+        if (!Number.isFinite(clinicaId)) {
+            return res.status(400).json({ message: 'clinica_id es obligatorio' });
+        }
+
+        // Verificar acceso del actor a la clínica
+        const accessibleClinicIds = await getAccessibleClinicIdsForUser(actorId);
+        if (!accessibleClinicIds.includes(clinicaId) && !isAdmin(actorId)) {
+            return res.status(403).json({ message: 'Forbidden' });
+        }
+
+        // Verificar que la clínica existe
+        const clinica = await Clinica.findByPk(clinicaId);
+        if (!clinica) {
+            return res.status(404).json({ message: 'Clínica no encontrada' });
+        }
+
+        const validRoles = ['personaldeclinica', 'propietario'];
+        if (!validRoles.includes(rol_clinica)) {
+            return res.status(400).json({ message: `rol_clinica debe ser uno de: ${validRoles.join(', ')}` });
+        }
+
+        let targetUser;
+        let isNewProvisional = false;
+
+        if (id_usuario) {
+            // ── Invitar usuario existente ──
+            targetUser = await Usuario.findByPk(id_usuario, {
+                attributes: { exclude: ['password_usuario'] },
+            });
+            if (!targetUser) {
+                return res.status(404).json({ message: 'Usuario no encontrado' });
+            }
+
+            // Verificar si ya está vinculado a esta clínica
+            const existingPivot = await UsuarioClinica.findOne({
+                where: { id_usuario: targetUser.id_usuario, id_clinica: clinicaId },
+            });
+            if (existingPivot) {
+                return res.status(409).json({
+                    message: 'El usuario ya está vinculado a esta clínica',
+                    estado_invitacion: existingPivot.estado_invitacion,
+                });
+            }
+        } else {
+            // ── Crear usuario provisional ──
+            if (!nombre || typeof nombre !== 'string' || !nombre.trim()) {
+                return res.status(400).json({ message: 'nombre es obligatorio para crear usuario provisional' });
+            }
+
+            // Verificar email único si se proporciona
+            if (email_usuario) {
+                const existingByEmail = await Usuario.findOne({
+                    where: { email_usuario: email_usuario.trim().toLowerCase() },
+                });
+                if (existingByEmail) {
+                    return res.status(409).json({
+                        message: 'Ya existe un usuario con ese email. Usa id_usuario para invitarlo.',
+                        id_usuario_existente: existingByEmail.id_usuario,
+                    });
+                }
+            }
+
+            // Crear usuario provisional (sin password real)
+            const placeholderPassword = await bcrypt.hash(crypto.randomBytes(32).toString('hex'), 8);
+            targetUser = await Usuario.create({
+                nombre: nombre.trim(),
+                apellidos: (apellidos || '').trim(),
+                email_usuario: email_usuario ? email_usuario.trim().toLowerCase() : '',
+                telefono: (telefono || '').trim(),
+                password_usuario: placeholderPassword,
+                es_provisional: true,
+                isProfesional: subrol_clinica === 'Doctores',
+                fecha_creacion: new Date(),
+            });
+            isNewProvisional = true;
+        }
+
+        // Generar token de invitación
+        const inviteToken = crypto.randomBytes(32).toString('hex');
+
+        // Crear la vinculación con estado 'pendiente'
+        await UsuarioClinica.create({
+            id_usuario: targetUser.id_usuario,
+            id_clinica: clinicaId,
+            rol_clinica,
+            subrol_clinica: subrol_clinica || null,
+            estado_invitacion: 'pendiente',
+            invite_token: inviteToken,
+            invited_at: new Date(),
+        });
+
+        // Devolver respuesta
+        const userJson = targetUser.toJSON ? targetUser.toJSON() : { ...targetUser };
+        delete userJson.password_usuario;
+
+        return res.status(201).json({
+            message: isNewProvisional
+                ? 'Usuario provisional creado e invitación enviada'
+                : 'Invitación enviada al usuario existente',
+            usuario: userJson,
+            clinica_id: clinicaId,
+            estado_invitacion: 'pendiente',
+            invite_token: inviteToken,
+            es_provisional: isNewProvisional,
+        });
+    } catch (error) {
+        console.error('[personal.invitarPersonal] Error:', error);
+        return res.status(500).json({ message: 'Error al invitar personal', error: error.message });
+    }
+};
+
+/**
+ * GET /api/personal/invitaciones?clinica_id=...
+ * Lista las invitaciones pendientes/recientes de una clínica.
+ */
+exports.getInvitaciones = async (req, res) => {
+    try {
+        const actorId = Number(req.userData?.userId);
+        if (!Number.isFinite(actorId)) {
+            return res.status(401).json({ message: 'Auth failed!' });
+        }
+
+        const clinicaId = parseIntOrNull(req.query?.clinica_id);
+        if (!Number.isFinite(clinicaId)) {
+            return res.status(400).json({ message: 'clinica_id es obligatorio' });
+        }
+
+        const accessibleClinicIds = await getAccessibleClinicIdsForUser(actorId);
+        if (!accessibleClinicIds.includes(clinicaId) && !isAdmin(actorId)) {
+            return res.status(403).json({ message: 'Forbidden' });
+        }
+
+        const pivots = await UsuarioClinica.findAll({
+            where: {
+                id_clinica: clinicaId,
+                estado_invitacion: { [Op.ne]: null },
+            },
+            include: [
+                {
+                    model: Usuario,
+                    as: 'Usuario',
+                    attributes: { exclude: ['password_usuario'] },
+                },
+            ],
+            order: [['invited_at', 'DESC']],
+        });
+
+        const results = pivots.map((p) => {
+            const json = p.toJSON();
+            return {
+                id_usuario: json.id_usuario,
+                id_clinica: json.id_clinica,
+                rol_clinica: json.rol_clinica,
+                subrol_clinica: json.subrol_clinica,
+                estado_invitacion: json.estado_invitacion,
+                invited_at: json.invited_at,
+                responded_at: json.responded_at,
+                usuario: json.Usuario || null,
+            };
+        });
+
+        return res.json(results);
+    } catch (error) {
+        console.error('[personal.getInvitaciones] Error:', error);
+        return res.status(500).json({ message: 'Error al obtener invitaciones', error: error.message });
+    }
+};
+
+/**
+ * POST /api/personal/:id/invitacion/responder
+ * Acepta o rechaza una invitación pendiente.
+ *
+ * Body: { clinica_id: number, accion: 'aceptar' | 'rechazar' }
+ */
+exports.responderInvitacion = async (req, res) => {
+    try {
+        const actorId = Number(req.userData?.userId);
+        const targetId = Number(req.params.id);
+        if (!Number.isFinite(actorId) || !Number.isFinite(targetId)) {
+            return res.status(400).json({ message: 'IDs inválidos' });
+        }
+
+        // Solo el propio usuario o un admin puede responder
+        if (actorId !== targetId && !isAdmin(actorId)) {
+            return res.status(403).json({ message: 'Forbidden' });
+        }
+
+        const { clinica_id, accion } = req.body;
+        const clinicaId = parseIntOrNull(clinica_id);
+        if (!Number.isFinite(clinicaId)) {
+            return res.status(400).json({ message: 'clinica_id es obligatorio' });
+        }
+        if (!['aceptar', 'rechazar'].includes(accion)) {
+            return res.status(400).json({ message: "accion debe ser 'aceptar' o 'rechazar'" });
+        }
+
+        const pivot = await UsuarioClinica.findOne({
+            where: {
+                id_usuario: targetId,
+                id_clinica: clinicaId,
+                estado_invitacion: 'pendiente',
+            },
+        });
+
+        if (!pivot) {
+            return res.status(404).json({ message: 'No hay invitación pendiente para esta clínica' });
+        }
+
+        pivot.estado_invitacion = accion === 'aceptar' ? 'aceptada' : 'rechazada';
+        pivot.responded_at = new Date();
+        pivot.invite_token = null; // Invalidar token
+        await pivot.save();
+
+        return res.json({
+            message: `Invitación ${pivot.estado_invitacion}`,
+            estado_invitacion: pivot.estado_invitacion,
+        });
+    } catch (error) {
+        console.error('[personal.responderInvitacion] Error:', error);
+        return res.status(500).json({ message: 'Error al responder invitación', error: error.message });
+    }
+};
+
+/**
+ * POST /api/auth/claim-invite  (público, sin JWT)
+ * Permite a un usuario provisional reclamar su cuenta estableciendo email y contraseña.
+ *
+ * Body: { invite_token: string, email_usuario: string, password: string, nombre?: string, apellidos?: string }
+ */
+exports.reclamarCuenta = async (req, res) => {
+    try {
+        const { invite_token, email_usuario, password, nombre, apellidos } = req.body;
+
+        if (!invite_token || typeof invite_token !== 'string') {
+            return res.status(400).json({ message: 'invite_token es obligatorio' });
+        }
+        if (!email_usuario || typeof email_usuario !== 'string') {
+            return res.status(400).json({ message: 'email_usuario es obligatorio' });
+        }
+        if (!password || typeof password !== 'string' || password.length < 6) {
+            return res.status(400).json({ message: 'password debe tener al menos 6 caracteres' });
+        }
+
+        // Buscar el pivot con ese token
+        const pivot = await UsuarioClinica.findOne({
+            where: { invite_token: invite_token.trim() },
+        });
+
+        if (!pivot) {
+            return res.status(404).json({ message: 'Token de invitación inválido o expirado' });
+        }
+
+        // Buscar el usuario asociado
+        const user = await Usuario.findByPk(pivot.id_usuario);
+        if (!user) {
+            return res.status(404).json({ message: 'Usuario no encontrado' });
+        }
+
+        // Verificar que es provisional
+        if (!user.es_provisional) {
+            return res.status(409).json({ message: 'Esta cuenta ya fue reclamada' });
+        }
+
+        // Verificar email único
+        const emailNormalized = email_usuario.trim().toLowerCase();
+        const existingByEmail = await Usuario.findOne({
+            where: {
+                email_usuario: emailNormalized,
+                id_usuario: { [Op.ne]: user.id_usuario },
+            },
+        });
+        if (existingByEmail) {
+            return res.status(409).json({ message: 'Ya existe otro usuario con ese email' });
+        }
+
+        // Actualizar usuario
+        const hashedPassword = await bcrypt.hash(password, 8);
+        user.email_usuario = emailNormalized;
+        user.password_usuario = hashedPassword;
+        user.es_provisional = false;
+        if (nombre) user.nombre = nombre.trim();
+        if (apellidos) user.apellidos = apellidos.trim();
+        await user.save();
+
+        // Marcar invitación como aceptada
+        pivot.estado_invitacion = 'aceptada';
+        pivot.responded_at = new Date();
+        pivot.invite_token = null;
+        await pivot.save();
+
+        // Generar JWT para login inmediato
+        const jwt = require('jsonwebtoken');
+        const secret = process.env.JWT_SECRET;
+        const token = jwt.sign(
+            { userId: user.id_usuario, email: user.email_usuario },
+            secret,
+            { expiresIn: '24h' },
+        );
+
+        const userJson = user.toJSON();
+        delete userJson.password_usuario;
+
+        return res.json({
+            message: 'Cuenta reclamada exitosamente',
+            user: userJson,
+            token,
+        });
+    } catch (error) {
+        console.error('[personal.reclamarCuenta] Error:', error);
+        return res.status(500).json({ message: 'Error al reclamar cuenta', error: error.message });
+    }
+};

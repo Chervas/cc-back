@@ -59,6 +59,11 @@ module.exports = (sequelize, DataTypes) => {
     creado_por: {
       type: DataTypes.INTEGER,
       allowNull: true
+    },
+    es_provisional: {
+      type: DataTypes.BOOLEAN,
+      allowNull: false,
+      defaultValue: false
     }
   }, {
     sequelize,

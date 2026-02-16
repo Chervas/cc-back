@@ -50,6 +50,9 @@ router.post('/:id/bloqueos', personalController.createPersonalBloqueo);
 router.patch('/:id/bloqueos/:bloqueoId', personalController.updatePersonalBloqueo);
 router.delete('/:id/bloqueos/:bloqueoId', personalController.deletePersonalBloqueo);
 
+// Onboarding: aceptar/rechazar invitación
+router.post('/:id/invitacion/responder', personalController.responderInvitacion);
+
 // Detalle de miembro (filtrado por accesos del usuario)
 router.get('/:id', personalController.getPersonalById);
 
