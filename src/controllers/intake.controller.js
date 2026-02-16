@@ -213,6 +213,44 @@ const emitLeadRealtimeEvent = async ({ type, lead, payload = {} }) => {
   }
 };
 
+const emitLeadCreatedRealtimeEvent = async (lead) => {
+  try {
+    const io = getIO();
+    if (!io || !lead) return;
+
+    const rooms = await resolveRealtimeLeadRooms({
+      clinicId: lead.clinica_id,
+      groupId: lead.grupo_clinica_id
+    });
+    if (!rooms.length) return;
+
+    const payload = {
+      type: 'created',
+      lead_id: parseInteger(lead.id),
+      clinic_id: parseInteger(lead.clinica_id),
+      group_id: parseInteger(lead.grupo_clinica_id),
+      campaign_id: parseInteger(lead.campana_id),
+      source: lead.source || null,
+      source_detail: lead.source_detail || null,
+      channel: lead.channel || null,
+      status_lead: lead.status_lead || 'nuevo',
+      nombre: lead.nombre || null,
+      email: lead.email || null,
+      telefono: lead.telefono || null,
+      page_url: lead.page_url || null,
+      created_at: lead.created_at ? new Date(lead.created_at).toISOString() : new Date().toISOString(),
+      emitted_at: new Date().toISOString()
+    };
+
+    rooms.forEach((room) => {
+      io.to(room).emit('lead:created', payload);
+      io.to(room).emit('lead:event', payload);
+    });
+  } catch (emitErr) {
+    console.warn('⚠️ No se pudo emitir evento realtime lead:created:', emitErr.message || emitErr);
+  }
+};
+
 const validateSignature = (req) => {
   const secret = process.env.INTAKE_WEB_SECRET;
   if (!secret) return true; // Sin secreto configurado, no validamos la firma
@@ -567,6 +605,8 @@ async function dedupeAndCreateLead(leadPayload, rawPayload = {}, attributionStep
   } catch (auditErr) {
     console.warn('⚠️ No se pudo registrar la auditoría de LeadIntake:', auditErr.message || auditErr);
   }
+
+  await emitLeadCreatedRealtimeEvent(lead);
 
   return lead;
 }
