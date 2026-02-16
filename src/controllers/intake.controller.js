@@ -346,7 +346,8 @@ async function sendQuickchatSummaryToQuickChat({
   return { sent: true, channel, conversation_id: conversation.id, message_id: msg.id };
 }
 
-async function dedupeAndCreateLead(leadPayload, rawPayload = {}, attributionSteps = {}) {
+async function dedupeAndCreateLead(leadPayload, rawPayload = {}, attributionSteps = {}, options = {}) {
+  const skipRecentContactDedupe = !!options.skipRecentContactDedupe;
   const normalizedEmail = normalizeEmail(leadPayload.email);
   const normalizedPhone = normalizePhone(leadPayload.telefono);
   const dedupeCutoff = new Date(Date.now() - (DEDUPE_WINDOW_HOURS * 60 * 60 * 1000));
@@ -379,7 +380,7 @@ async function dedupeAndCreateLead(leadPayload, rawPayload = {}, attributionStep
     }
   }
 
-  if (normalizedPhone || normalizedEmail) {
+  if (!skipRecentContactDedupe && (normalizedPhone || normalizedEmail)) {
     const dedupeWhere = {
       created_at: { [Op.gte]: dedupeCutoff },
       [Op.or]: []
@@ -507,6 +508,9 @@ exports.ingestLead = asyncHandler(async (req, res) => {
 
   const sourceDetailLower = String(source_detail || '').toLowerCase();
   const isChatRelated = sourceDetailLower === 'chatbot' || sourceDetailLower === 'chatbot_quickchat' || wantsQuickchatSummary;
+  // Capturamos TODAS las conversiones web (tel_modal, web_form, chatbot), salvo el "lead técnico"
+  // de chatbot_quickchat que se usa para enviar resumen y sí debe poder deduplicar.
+  const skipRecentContactDedupe = normalizedSource === 'web' && sourceDetailLower !== 'chatbot_quickchat';
 
   let derivedClinicIdForChat = null;
   if (clinicaIdParsed === null && grupoClinicaIdParsed !== null && isChatRelated) {
@@ -674,6 +678,8 @@ exports.ingestLead = asyncHandler(async (req, res) => {
     lead = await dedupeAndCreateLead(leadPayload, req.body || {}, {
       clinic_match_source: clinic_match_source || null,
       clinic_match_value: clinic_match_value || null
+    }, {
+      skipRecentContactDedupe
     });
   } catch (err) {
     if (err.status === 409) {
@@ -1456,10 +1462,11 @@ exports.receiveIntakeEvent = asyncHandler(async (req, res) => {
   const fbc = body.fbc || user_data.fbc;
 
   let cfg = null;
-  if (clinicIdParsed !== null) {
-    cfg = await IntakeConfig.findOne({ where: { clinic_id: clinicIdParsed }, raw: true });
-  } else if (groupIdParsed !== null) {
+  // Si vienen ambos IDs (caso snippet scope grupo con sede seleccionada), validamos HMAC por grupo.
+  if (groupIdParsed !== null) {
     cfg = await IntakeConfig.findOne({ where: { group_id: groupIdParsed, assignment_scope: 'group' }, raw: true });
+  } else if (clinicIdParsed !== null) {
+    cfg = await IntakeConfig.findOne({ where: { clinic_id: clinicIdParsed }, raw: true });
   } else if (domain) {
     cfg = await IntakeConfig.findOne({
       where: db.Sequelize.literal(`JSON_CONTAINS(COALESCE(domains,'[]'), '\"${domain.toLowerCase()}\"')`)
