@@ -8,8 +8,7 @@ const parseBool = (v) => v === true || v === 'true' || v === '1';
 
 const overlap = (startA, endA, startB, endB) => startA < endB && startB < endA;
 
-const dayIndex = (date) => new Date(date).getDay();
-const toTime = (d) => d.toTimeString().slice(0, 5);
+const dayIndexFromLocalDate = (fechaLocal) => new Date(`${fechaLocal}T12:00:00Z`).getUTCDay();
 
 const parseIntSafe = (v) => {
   const n = Number.parseInt(String(v), 10);
@@ -36,11 +35,123 @@ const parseIntArray = (value) => {
 
 const isIsoLike = (value) => typeof value === 'string' && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/.test(value);
 
+const parseClinicConfig = (value) => {
+  if (!value) return null;
+  if (typeof value === 'object') return value;
+  if (typeof value === 'string') {
+    try {
+      const parsed = JSON.parse(value);
+      return parsed && typeof parsed === 'object' ? parsed : null;
+    } catch (err) {
+      return null;
+    }
+  }
+  return null;
+};
+
+const isValidTimeZone = (value) => {
+  if (!value || typeof value !== 'string') return false;
+  try {
+    Intl.DateTimeFormat('en-US', { timeZone: value }).format(new Date());
+    return true;
+  } catch (err) {
+    return false;
+  }
+};
+
+const resolveClinicTimezone = (clinica) => {
+  const cfg = parseClinicConfig(clinica && clinica.configuracion);
+  const candidates = [
+    cfg && (cfg.timezone || cfg.timeZone || cfg.tz),
+    clinica && (clinica.timezone || clinica.time_zone || clinica.tz)
+  ];
+
+  for (const candidate of candidates) {
+    if (isValidTimeZone(candidate)) return candidate;
+  }
+  return DEFAULT_TIMEZONE;
+};
+
+const formatPartsInTimeZone = (date, timeZone) => {
+  const parts = new Intl.DateTimeFormat('en-CA', {
+    timeZone,
+    hour12: false,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit'
+  }).formatToParts(date);
+
+  const bag = {};
+  parts.forEach((p) => {
+    if (p.type !== 'literal') bag[p.type] = p.value;
+  });
+
+  return {
+    year: Number(bag.year),
+    month: Number(bag.month),
+    day: Number(bag.day),
+    hour: Number(bag.hour),
+    minute: Number(bag.minute),
+    second: Number(bag.second)
+  };
+};
+
+const offsetMinutesForTimeZone = (date, timeZone) => {
+  const p = formatPartsInTimeZone(date, timeZone);
+  const asUtc = Date.UTC(p.year, p.month - 1, p.day, p.hour, p.minute, p.second);
+  return Math.round((asUtc - date.getTime()) / 60000);
+};
+
+const normalizeHms = (value, fallback = '00:00:00') => {
+  const raw = String(value || fallback).trim();
+  const m = raw.match(/^(\d{2}):(\d{2})(?::(\d{2}))?$/);
+  if (!m) return null;
+  return `${m[1]}:${m[2]}:${m[3] || '00'}`;
+};
+
+const localDateTimeToUtc = (fechaLocal, timeValue, timeZone) => {
+  if (!fechaLocal || typeof fechaLocal !== 'string') return null;
+  const d = fechaLocal.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (!d) return null;
+
+  const hms = normalizeHms(timeValue);
+  if (!hms) return null;
+  const t = hms.match(/^(\d{2}):(\d{2}):(\d{2})$/);
+  if (!t) return null;
+
+  const year = Number(d[1]);
+  const month = Number(d[2]);
+  const day = Number(d[3]);
+  const hour = Number(t[1]);
+  const minute = Number(t[2]);
+  const second = Number(t[3]);
+
+  const naiveUtc = Date.UTC(year, month - 1, day, hour, minute, second);
+  let ts = naiveUtc;
+
+  // Dos iteraciones son suficientes para converger en cambios de DST.
+  for (let i = 0; i < 2; i++) {
+    const offsetMin = offsetMinutesForTimeZone(new Date(ts), timeZone);
+    ts = naiveUtc - offsetMin * 60000;
+  }
+
+  return new Date(ts);
+};
+
+const formatDateLocal = (date, timeZone) => {
+  const p = formatPartsInTimeZone(date, timeZone);
+  const pad = (n) => String(n).padStart(2, '0');
+  return `${p.year}-${pad(p.month)}-${pad(p.day)}`;
+};
+
 /**
- * Parse "YYYY-MM-DDTHH:mm" (sin offset) como UTC para ser consistente con el motor legacy.
+ * Parse "YYYY-MM-DDTHH:mm" sin offset como hora local de clínica.
  * Si el string incluye zona (Z o +/-hh:mm), se respeta.
  */
-const parseDateTime = (value) => {
+const parseDateTime = (value, timeZone) => {
   if (!value || typeof value !== 'string') return null;
 
   // Con timezone explícita (Z o +/-hh:mm)
@@ -49,14 +160,10 @@ const parseDateTime = (value) => {
     return Number.isNaN(d.getTime()) ? null : d;
   }
 
-  // "YYYY-MM-DDTHH:mm" o "YYYY-MM-DDTHH:mm:ss" sin timezone -> UTC
-  if (/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/.test(value)) {
-    const d = new Date(`${value}:00Z`);
-    return Number.isNaN(d.getTime()) ? null : d;
-  }
-  if (/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}$/.test(value)) {
-    const d = new Date(`${value}Z`);
-    return Number.isNaN(d.getTime()) ? null : d;
+  // "YYYY-MM-DDTHH:mm" o "YYYY-MM-DDTHH:mm:ss" sin timezone -> hora local de la clínica.
+  const m = value.match(/^(\d{4}-\d{2}-\d{2})T(\d{2}:\d{2}(?::\d{2})?)$/);
+  if (m) {
+    return localDateTimeToUtc(m[1], m[2], timeZone);
   }
 
   // Fallback: intentar parse nativo
@@ -64,17 +171,22 @@ const parseDateTime = (value) => {
   return Number.isNaN(d.getTime()) ? null : d;
 };
 
-const formatLocal = (date) => date.toISOString().slice(0, 16);
+const formatLocal = (date, timeZone) => {
+  const p = formatPartsInTimeZone(date, timeZone);
+  const pad = (n) => String(n).padStart(2, '0');
+  return `${p.year}-${pad(p.month)}-${pad(p.day)}T${pad(p.hour)}:${pad(p.minute)}`;
+};
 
-const buildWindowsFromHorarios = (horarios, dow, fechaLocal) => {
+const buildWindowsFromHorarios = (horarios, dow, fechaLocal, timeZone) => {
   // horario: { dia_semana, activo, hora_inicio, hora_fin }
   const base = (horarios || [])
     .filter((h) => h.dia_semana === dow && h.activo)
-    .map((h) => ({
-      start: new Date(`${fechaLocal}T${h.hora_inicio}:00Z`),
-      end: new Date(`${fechaLocal}T${h.hora_fin}:00Z`)
-    }))
-    .filter((w) => Number.isFinite(w.start.getTime()) && Number.isFinite(w.end.getTime()) && w.start < w.end);
+    .map((h) => {
+      const start = localDateTimeToUtc(fechaLocal, h.hora_inicio, timeZone);
+      const end = localDateTimeToUtc(fechaLocal, h.hora_fin, timeZone);
+      return { start, end };
+    })
+    .filter((w) => w.start && w.end && Number.isFinite(w.start.getTime()) && Number.isFinite(w.end.getTime()) && w.start < w.end);
   return base;
 };
 
@@ -275,6 +387,7 @@ const conflictSetKey = (conflicts) => {
 
 const buildUnavailableIntervals = ({
   clinicaId,
+  timeZone,
   fecha_local,
   dow,
   baseStart,
@@ -290,8 +403,8 @@ const buildUnavailableIntervals = ({
   docBlocksRows,
   docCitasRows
 }) => {
-  const instWins = inst ? buildWindowsFromHorarios(inst.horarios || [], dow, fecha_local) : [];
-  const docWins = dc && dc !== null ? buildWindowsFromHorarios(dc.horarios || [], dow, fecha_local) : [];
+  const instWins = inst ? buildWindowsFromHorarios(inst.horarios || [], dow, fecha_local, timeZone) : [];
+  const docWins = dc && dc !== null ? buildWindowsFromHorarios(dc.horarios || [], dow, fecha_local, timeZone) : [];
   const dcMissing = doctorId && dc === null;
 
   const instBlocks = normalizeTimeRangeRows(instBlocksRows, 'fecha_inicio', 'fecha_fin');
@@ -335,13 +448,16 @@ const buildUnavailableIntervals = ({
     if (!current || current._key !== key) {
       if (current) intervals.push(current);
       current = {
-        start_local: formatLocal(start),
-        end_local: formatLocal(end),
+        start_local: formatLocal(start, timeZone),
+        end_local: formatLocal(end, timeZone),
+        start_utc: start.toISOString(),
+        end_utc: end.toISOString(),
         resource_conflicts: conflicts,
         _key: key
       };
     } else {
-      current.end_local = formatLocal(end);
+      current.end_local = formatLocal(end, timeZone);
+      current.end_utc = end.toISOString();
     }
   }
 
@@ -382,14 +498,19 @@ exports.check = asyncHandler(async (req, res) => {
     return res.status(400).json({ message: 'inicio_local requerido (YYYY-MM-DDTHH:mm)' });
   }
 
-  const start = parseDateTime(inicio_local);
+  const clinica = await db.Clinica.findByPk(clinicaId, { attributes: ['id_clinica', 'nombre_clinica', 'configuracion'] });
+  if (!clinica) return res.status(404).json({ message: 'Clínica no encontrada' });
+
+  const clinicTimezone = resolveClinicTimezone(clinica);
+
+  const start = parseDateTime(inicio_local, clinicTimezone);
   if (!start) {
     return res.status(400).json({ message: 'inicio_local inválido' });
   }
 
   let end = null;
   if (fin_local) {
-    end = parseDateTime(fin_local);
+    end = parseDateTime(fin_local, clinicTimezone);
     if (!end) return res.status(400).json({ message: 'fin_local inválido' });
   } else {
     const dur = parseIntSafe(duracion_min);
@@ -401,11 +522,10 @@ exports.check = asyncHandler(async (req, res) => {
     return res.status(400).json({ message: 'rango inválido (fin <= inicio)' });
   }
 
-  const clinica = await db.Clinica.findByPk(clinicaId, { attributes: ['id_clinica', 'nombre_clinica'] });
-  if (!clinica) return res.status(404).json({ message: 'Clínica no encontrada' });
-
   const conflicts = [];
   const warnings = [];
+  const fechaLocalCheck = formatDateLocal(start, clinicTimezone);
+  const dow = dayIndexFromLocalDate(fechaLocalCheck);
 
   const ignoreId = ignore_cita_id ? parseIntSafe(ignore_cita_id) : null;
 
@@ -424,9 +544,8 @@ exports.check = asyncHandler(async (req, res) => {
       return res.status(400).json({ message: 'instalacion_id no pertenece a clinica_id' });
     }
 
-    const dow = dayIndex(start);
-    const h = (inst.horarios || []).find((row) => row.dia_semana === dow);
-    const inRange = h && h.activo && `${h.hora_inicio}` <= toTime(start) && `${h.hora_fin}` >= toTime(end);
+    const instWins = buildWindowsFromHorarios(inst.horarios || [], dow, fechaLocalCheck, clinicTimezone);
+    const inRange = inAnyWindow(instWins, start, end);
     if (!inRange) {
       conflicts.push({
         resource_type: 'installation',
@@ -491,9 +610,8 @@ exports.check = asyncHandler(async (req, res) => {
         details: { message: 'Doctor no asignado a la clínica' }
       });
     } else {
-      const dow = dayIndex(start);
-      const h = (dc.horarios || []).find((row) => row.dia_semana === dow);
-      const inRange = h && h.activo && `${h.hora_inicio}` <= toTime(start) && `${h.hora_fin}` >= toTime(end);
+      const docWins = buildWindowsFromHorarios(dc.horarios || [], dow, fechaLocalCheck, clinicTimezone);
+      const inRange = inAnyWindow(docWins, start, end);
       if (!inRange) {
         conflicts.push({
           resource_type: 'staff',
@@ -570,11 +688,11 @@ exports.check = asyncHandler(async (req, res) => {
     clinica: {
       clinica_id: clinica.id_clinica,
       nombre: clinica.nombre_clinica,
-      timezone: DEFAULT_TIMEZONE
+      timezone: clinicTimezone
     },
     range: {
-      inicio_local: String(inicio_local),
-      fin_local: fin_local ? String(fin_local) : formatLocal(end),
+      inicio_local: formatLocal(start, clinicTimezone),
+      fin_local: formatLocal(end, clinicTimezone),
       inicio_utc: start.toISOString(),
       fin_utc: end.toISOString()
     },
@@ -590,7 +708,7 @@ exports.check = asyncHandler(async (req, res) => {
  * GET /api/disponibilidad/slots
  * Devuelve slots sugeridos (huecos libres) para una fecha local.
  *
- * Nota: en esta fase, el "local" se interpreta como UTC (consistente con legacy).
+ * Nota: el rango y los slots se interpretan en hora local de clínica.
  */
 exports.slots = asyncHandler(async (req, res) => {
   const {
@@ -621,21 +739,22 @@ exports.slots = asyncHandler(async (req, res) => {
   const requestedLimit = parseIntSafe(limit);
   const includeUnavailable = parseBool(include_unavailable);
 
-  const clinica = await db.Clinica.findByPk(clinicaId, { attributes: ['id_clinica', 'nombre_clinica'] });
+  const clinica = await db.Clinica.findByPk(clinicaId, { attributes: ['id_clinica', 'nombre_clinica', 'configuracion'] });
   if (!clinica) return res.status(404).json({ message: 'Clínica no encontrada' });
+  const clinicTimezone = resolveClinicTimezone(clinica);
 
-  // Base window: día completo (UTC) + recorte opcional from/to
-  let baseStart = new Date(`${fecha_local}T00:00:00Z`);
-  let baseEnd = new Date(`${fecha_local}T23:59:59Z`);
+  // Base window: día local completo de clínica + recorte opcional from/to.
+  let baseStart = localDateTimeToUtc(fecha_local, '00:00:00', clinicTimezone);
+  let baseEnd = localDateTimeToUtc(fecha_local, '23:59:59', clinicTimezone);
 
   if (from_local && typeof from_local === 'string' && /^\d{2}:\d{2}$/.test(from_local)) {
-    baseStart = new Date(`${fecha_local}T${from_local}:00Z`);
+    baseStart = localDateTimeToUtc(fecha_local, `${from_local}:00`, clinicTimezone);
   }
   if (to_local && typeof to_local === 'string' && /^\d{2}:\d{2}$/.test(to_local)) {
-    baseEnd = new Date(`${fecha_local}T${to_local}:00Z`);
+    baseEnd = localDateTimeToUtc(fecha_local, `${to_local}:00`, clinicTimezone);
   }
 
-  if (!Number.isFinite(baseStart.getTime()) || !Number.isFinite(baseEnd.getTime()) || baseEnd <= baseStart) {
+  if (!baseStart || !baseEnd || !Number.isFinite(baseStart.getTime()) || !Number.isFinite(baseEnd.getTime()) || baseEnd <= baseStart) {
     return res.status(400).json({ message: 'rango from_local/to_local inválido' });
   }
 
@@ -645,7 +764,7 @@ exports.slots = asyncHandler(async (req, res) => {
   const theoreticalMax = rangeMinutes >= durMin ? Math.floor((rangeMinutes - durMin) / stepMin) + 1 : 0;
   const maxSlots = requestedLimit && requestedLimit > 0 ? requestedLimit : Math.min(theoreticalMax, 2000);
 
-  const dow = dayIndex(baseStart);
+  const dow = dayIndexFromLocalDate(fecha_local);
   const baseWindows = [{ start: baseStart, end: baseEnd }];
 
   const instalacionId = instalacion_id ? parseIntSafe(instalacion_id) : null;
@@ -690,14 +809,14 @@ exports.slots = asyncHandler(async (req, res) => {
     let windows = [...baseWindows];
 
     if (inst) {
-      const instWins = buildWindowsFromHorarios(inst.horarios || [], dow, fecha_local);
+      const instWins = buildWindowsFromHorarios(inst.horarios || [], dow, fecha_local, clinicTimezone);
       windows = intersectWindows(windows, instWins);
     }
     if (dc === null) {
       // Se pidió doctor, pero no existe asignación/horario en la clínica
       windows = [];
     } else if (dc) {
-      const docWins = buildWindowsFromHorarios(dc.horarios || [], dow, fecha_local);
+      const docWins = buildWindowsFromHorarios(dc.horarios || [], dow, fecha_local, clinicTimezone);
       windows = intersectWindows(windows, docWins);
     }
 
@@ -716,8 +835,8 @@ exports.slots = asyncHandler(async (req, res) => {
         const s = new Date(cursor);
         const e = new Date(cursor.getTime() + durMin * 60000);
         slots.push({
-          start_local: formatLocal(s),
-          end_local: formatLocal(e),
+          start_local: formatLocal(s, clinicTimezone),
+          end_local: formatLocal(e, clinicTimezone),
           start_utc: s.toISOString(),
           end_utc: e.toISOString()
         });
@@ -747,8 +866,10 @@ exports.slots = asyncHandler(async (req, res) => {
         instalacionIds.forEach((id) => {
           unavailableByInst[String(id)] = [
             {
-              start_local: formatLocal(baseStart),
-              end_local: formatLocal(baseEnd),
+              start_local: formatLocal(baseStart, clinicTimezone),
+              end_local: formatLocal(baseEnd, clinicTimezone),
+              start_utc: baseStart.toISOString(),
+              end_utc: baseEnd.toISOString(),
               resource_conflicts: [
                 {
                   resource_type: 'staff',
@@ -765,7 +886,7 @@ exports.slots = asyncHandler(async (req, res) => {
         });
       }
       return res.json({
-        timezone: DEFAULT_TIMEZONE,
+        timezone: clinicTimezone,
         clinica_id: clinica.id_clinica,
         fecha_local,
         duracion_min: durMin,
@@ -834,6 +955,7 @@ exports.slots = asyncHandler(async (req, res) => {
       if (includeUnavailable) {
         unavailableByInst[String(id)] = buildUnavailableIntervals({
           clinicaId,
+          timeZone: clinicTimezone,
           fecha_local,
           dow,
           baseStart,
@@ -853,7 +975,7 @@ exports.slots = asyncHandler(async (req, res) => {
     });
 
     return res.json({
-      timezone: DEFAULT_TIMEZONE,
+      timezone: clinicTimezone,
       clinica_id: clinica.id_clinica,
       fecha_local,
       duracion_min: durMin,
@@ -929,6 +1051,7 @@ exports.slots = asyncHandler(async (req, res) => {
       if (includeUnavailable) {
         unavailableByDoctor[String(id)] = buildUnavailableIntervals({
           clinicaId,
+          timeZone: clinicTimezone,
           fecha_local,
           dow,
           baseStart,
@@ -948,7 +1071,7 @@ exports.slots = asyncHandler(async (req, res) => {
     });
 
     return res.json({
-      timezone: DEFAULT_TIMEZONE,
+      timezone: clinicTimezone,
       clinica_id: clinica.id_clinica,
       fecha_local,
       duracion_min: durMin,
@@ -1013,7 +1136,7 @@ exports.slots = asyncHandler(async (req, res) => {
   });
 
   return res.json({
-    timezone: DEFAULT_TIMEZONE,
+    timezone: clinicTimezone,
     clinica_id: clinica.id_clinica,
     fecha_local,
     duracion_min: durMin,
@@ -1022,6 +1145,7 @@ exports.slots = asyncHandler(async (req, res) => {
     ...(includeUnavailable ? {
       unavailable_intervals: buildUnavailableIntervals({
         clinicaId,
+        timeZone: clinicTimezone,
         fecha_local,
         dow,
         baseStart,
