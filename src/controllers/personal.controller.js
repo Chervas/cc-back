@@ -1,5 +1,5 @@
 const { Op, fn, col, where } = require('sequelize');
-const { Usuario, Clinica, UsuarioClinica, DoctorClinica, DoctorHorario, DoctorBloqueo, CitaPaciente } = require('../../models');
+const { Usuario, Clinica, UsuarioClinica, DoctorClinica, DoctorHorario, DoctorBloqueo, CitaPaciente, sequelize } = require('../../models');
 const bcrypt = require('bcryptjs');
 
 // Mantener consistente con userclinicas.routes.js
@@ -368,6 +368,55 @@ function normalizeModoDisponibilidad(value) {
 async function canManagePersonalInClinic(actorId, clinicaId) {
     if (isAdmin(actorId)) return true;
     return isOwnerPivot(actorId, clinicaId);
+}
+
+function invitationStateRank(value) {
+    const estado = normalizeEstadoInvitacion(value, 'aceptada');
+    if (estado === 'aceptada') return 4;
+    if (estado === 'pendiente') return 3;
+    if (estado === 'rechazada') return 2;
+    if (estado === 'cancelada') return 1;
+    return 0;
+}
+
+function pickBetterInvitationState(a, b) {
+    return invitationStateRank(a) >= invitationStateRank(b) ? a : b;
+}
+
+function roleRank(value) {
+    if (value === 'propietario') return 3;
+    if (value === 'personaldeclinica') return 2;
+    if (value === 'paciente') return 1;
+    return 0;
+}
+
+function pickBetterRole(a, b) {
+    return roleRank(a) >= roleRank(b) ? a : b;
+}
+
+async function actorCanMergeUsers(actorId, primaryUserId, secondaryUserId) {
+    if (isAdmin(actorId)) return true;
+    const ownerClinicIds = await getOwnerClinicIdsForUser(actorId);
+    if (!ownerClinicIds.length) return false;
+    const ownerSet = new Set(ownerClinicIds);
+
+    const rows = await UsuarioClinica.findAll({
+        where: {
+            id_usuario: { [Op.in]: [Number(primaryUserId), Number(secondaryUserId)] },
+            rol_clinica: { [Op.in]: ['propietario', 'personaldeclinica'] },
+        },
+        attributes: ['id_clinica'],
+        raw: true,
+    });
+    const neededClinicIds = Array.from(new Set(
+        rows
+            .map((r) => Number(r.id_clinica))
+            .filter((id) => Number.isFinite(id))
+    ));
+    if (!neededClinicIds.length) {
+        return false;
+    }
+    return neededClinicIds.every((id) => ownerSet.has(id));
 }
 
 async function findUserByEmailIncludingAlternatives(email) {
@@ -1115,6 +1164,397 @@ exports.claimProvisionalAccount = async (req, res) => {
     } catch (error) {
         console.error('[personal.claimProvisionalAccount] Error:', error);
         return res.status(500).json({ message: 'Error claiming provisional account', error: error.message });
+    }
+};
+
+exports.getMyInvitations = async (req, res) => {
+    try {
+        const actorId = Number(req.userData?.userId);
+        if (!Number.isFinite(actorId)) {
+            return res.status(401).json({ message: 'Auth failed!' });
+        }
+
+        const rows = await UsuarioClinica.findAll({
+            where: {
+                id_usuario: actorId,
+                estado_invitacion: 'pendiente',
+                rol_clinica: { [Op.in]: ['propietario', 'personaldeclinica'] },
+            },
+            attributes: [
+                'id_usuario',
+                'id_clinica',
+                'rol_clinica',
+                'subrol_clinica',
+                'estado_invitacion',
+                'invitado_por',
+                'fecha_invitacion',
+            ],
+            include: [
+                {
+                    model: Clinica,
+                    as: 'Clinica',
+                    required: false,
+                    attributes: ['id_clinica', 'nombre_clinica', 'url_avatar'],
+                },
+                {
+                    model: Usuario,
+                    as: 'Invitador',
+                    required: false,
+                    attributes: ['id_usuario', 'nombre', 'apellidos', 'email_usuario'],
+                },
+            ],
+            order: [['fecha_invitacion', 'DESC']],
+        });
+
+        return res.json({
+            items: rows.map((row) => ({
+                id_usuario: Number(row.id_usuario),
+                clinica_id: Number(row.id_clinica),
+                clinica_nombre: row.Clinica?.nombre_clinica || '',
+                clinica_avatar: row.Clinica?.url_avatar || null,
+                rol_clinica: row.rol_clinica,
+                subrol_clinica: row.subrol_clinica || null,
+                estado_invitacion: normalizeEstadoInvitacion(row.estado_invitacion, 'pendiente') || 'pendiente',
+                fecha_invitacion: row.fecha_invitacion || null,
+                invitado_por: row.invitado_por ? Number(row.invitado_por) : null,
+                invitador: row.Invitador
+                    ? {
+                        id_usuario: Number(row.Invitador.id_usuario),
+                        nombre: row.Invitador.nombre || '',
+                        apellidos: row.Invitador.apellidos || '',
+                        email_masked: maskEmail(row.Invitador.email_usuario),
+                    }
+                    : null,
+            })),
+        });
+    } catch (error) {
+        console.error('[personal.getMyInvitations] Error:', error);
+        return res.status(500).json({ message: 'Error retrieving invitations', error: error.message });
+    }
+};
+
+exports.acceptMyInvitation = async (req, res) => {
+    try {
+        const actorId = Number(req.userData?.userId);
+        if (!Number.isFinite(actorId)) {
+            return res.status(401).json({ message: 'Auth failed!' });
+        }
+
+        const clinicaId = parseIntOrNull(req.params?.clinicaId);
+        if (!Number.isFinite(clinicaId)) {
+            return res.status(400).json({ message: 'Invalid clinicaId' });
+        }
+
+        const pivot = await UsuarioClinica.findOne({
+            where: {
+                id_usuario: actorId,
+                id_clinica: clinicaId,
+            },
+        });
+        if (!pivot) {
+            return res.status(404).json({ message: 'Invitation not found' });
+        }
+
+        const estado = normalizeEstadoInvitacion(pivot.estado_invitacion, 'aceptada');
+        if (estado !== 'pendiente' && estado !== 'rechazada') {
+            return res.status(409).json({
+                message: `Invitation is in state "${estado}" and cannot be accepted`,
+                code: 'invitation_invalid_state',
+            });
+        }
+
+        pivot.estado_invitacion = 'aceptada';
+        await pivot.save({ fields: ['estado_invitacion', 'updated_at'] });
+
+        await ensureDoctorClinicaRow({
+            userId: actorId,
+            clinicaId,
+            subrolClinica: pivot.subrol_clinica,
+            activo: true,
+        });
+
+        return res.status(200).json({
+            message: 'Invitation accepted',
+            clinica_id: clinicaId,
+            estado_invitacion: 'aceptada',
+        });
+    } catch (error) {
+        console.error('[personal.acceptMyInvitation] Error:', error);
+        return res.status(500).json({ message: 'Error accepting invitation', error: error.message });
+    }
+};
+
+exports.rejectMyInvitation = async (req, res) => {
+    try {
+        const actorId = Number(req.userData?.userId);
+        if (!Number.isFinite(actorId)) {
+            return res.status(401).json({ message: 'Auth failed!' });
+        }
+
+        const clinicaId = parseIntOrNull(req.params?.clinicaId);
+        if (!Number.isFinite(clinicaId)) {
+            return res.status(400).json({ message: 'Invalid clinicaId' });
+        }
+
+        const pivot = await UsuarioClinica.findOne({
+            where: {
+                id_usuario: actorId,
+                id_clinica: clinicaId,
+            },
+        });
+        if (!pivot) {
+            return res.status(404).json({ message: 'Invitation not found' });
+        }
+
+        const estado = normalizeEstadoInvitacion(pivot.estado_invitacion, 'aceptada');
+        if (estado !== 'pendiente') {
+            return res.status(409).json({
+                message: `Invitation is in state "${estado}" and cannot be rejected`,
+                code: 'invitation_invalid_state',
+            });
+        }
+
+        pivot.estado_invitacion = 'rechazada';
+        await pivot.save({ fields: ['estado_invitacion', 'updated_at'] });
+
+        const doctorClinica = await DoctorClinica.findOne({
+            where: {
+                doctor_id: actorId,
+                clinica_id: clinicaId,
+            },
+        });
+        if (doctorClinica) {
+            doctorClinica.activo = false;
+            await doctorClinica.save({ fields: ['activo', 'updated_at'] });
+        }
+
+        return res.status(200).json({
+            message: 'Invitation rejected',
+            clinica_id: clinicaId,
+            estado_invitacion: 'rechazada',
+        });
+    } catch (error) {
+        console.error('[personal.rejectMyInvitation] Error:', error);
+        return res.status(500).json({ message: 'Error rejecting invitation', error: error.message });
+    }
+};
+
+exports.cancelInvitation = async (req, res) => {
+    try {
+        const actorId = Number(req.userData?.userId);
+        if (!Number.isFinite(actorId)) {
+            return res.status(401).json({ message: 'Auth failed!' });
+        }
+
+        const targetUserId = parseIntOrNull(req.params?.id);
+        const clinicaId = parseIntOrNull(req.params?.clinicaId);
+        if (!Number.isFinite(targetUserId) || !Number.isFinite(clinicaId)) {
+            return res.status(400).json({ message: 'Invalid params' });
+        }
+
+        const canManage = await canManagePersonalInClinic(actorId, clinicaId);
+        if (!canManage) {
+            return res.status(403).json({ message: 'Forbidden' });
+        }
+
+        const pivot = await UsuarioClinica.findOne({
+            where: {
+                id_usuario: targetUserId,
+                id_clinica: clinicaId,
+            },
+        });
+        if (!pivot) {
+            return res.status(404).json({ message: 'Invitation not found' });
+        }
+
+        const estado = normalizeEstadoInvitacion(pivot.estado_invitacion, 'aceptada');
+        if (estado !== 'pendiente') {
+            return res.status(409).json({
+                message: `Invitation is in state "${estado}" and cannot be cancelled`,
+                code: 'invitation_invalid_state',
+            });
+        }
+
+        pivot.estado_invitacion = 'cancelada';
+        await pivot.save({ fields: ['estado_invitacion', 'updated_at'] });
+
+        const doctorClinica = await DoctorClinica.findOne({
+            where: {
+                doctor_id: targetUserId,
+                clinica_id: clinicaId,
+            },
+        });
+        if (doctorClinica) {
+            doctorClinica.activo = false;
+            await doctorClinica.save({ fields: ['activo', 'updated_at'] });
+        }
+
+        return res.status(200).json({
+            message: 'Invitation cancelled',
+            id_usuario: targetUserId,
+            clinica_id: clinicaId,
+            estado_invitacion: 'cancelada',
+        });
+    } catch (error) {
+        console.error('[personal.cancelInvitation] Error:', error);
+        return res.status(500).json({ message: 'Error cancelling invitation', error: error.message });
+    }
+};
+
+exports.mergePersonalAccounts = async (req, res) => {
+    const transaction = await sequelize.transaction();
+    try {
+        const actorId = Number(req.userData?.userId);
+        if (!Number.isFinite(actorId)) {
+            await transaction.rollback();
+            return res.status(401).json({ message: 'Auth failed!' });
+        }
+
+        const principalUserId = parseIntOrNull(req.body?.principal_user_id);
+        const secondaryUserId = parseIntOrNull(req.body?.secondary_user_id);
+
+        if (!Number.isFinite(principalUserId) || !Number.isFinite(secondaryUserId) || principalUserId === secondaryUserId) {
+            await transaction.rollback();
+            return res.status(400).json({ message: 'principal_user_id and secondary_user_id are required and must be different' });
+        }
+
+        const canMerge = await actorCanMergeUsers(actorId, principalUserId, secondaryUserId);
+        if (!canMerge) {
+            await transaction.rollback();
+            return res.status(403).json({ message: 'Forbidden' });
+        }
+
+        const [principal, secondary] = await Promise.all([
+            Usuario.findByPk(principalUserId, { transaction }),
+            Usuario.findByPk(secondaryUserId, { transaction }),
+        ]);
+        if (!principal || !secondary) {
+            await transaction.rollback();
+            return res.status(404).json({ message: 'One or both users not found' });
+        }
+
+        const secondaryPivotRows = await UsuarioClinica.findAll({
+            where: { id_usuario: secondaryUserId },
+            transaction,
+        });
+        for (const row of secondaryPivotRows) {
+            const existing = await UsuarioClinica.findOne({
+                where: {
+                    id_usuario: principalUserId,
+                    id_clinica: row.id_clinica,
+                },
+                transaction,
+            });
+
+            if (!existing) {
+                row.id_usuario = principalUserId;
+                await row.save({ transaction });
+                continue;
+            }
+
+            existing.rol_clinica = pickBetterRole(existing.rol_clinica, row.rol_clinica);
+            existing.subrol_clinica = existing.subrol_clinica || row.subrol_clinica || null;
+            existing.estado_invitacion = pickBetterInvitationState(existing.estado_invitacion, row.estado_invitacion);
+            existing.invitado_por = existing.invitado_por || row.invitado_por || null;
+            existing.fecha_invitacion = existing.fecha_invitacion || row.fecha_invitacion || null;
+            await existing.save({ transaction });
+            await row.destroy({ transaction });
+        }
+
+        const secondaryDoctorClinicas = await DoctorClinica.findAll({
+            where: { doctor_id: secondaryUserId },
+            transaction,
+        });
+        for (const row of secondaryDoctorClinicas) {
+            const existing = await DoctorClinica.findOne({
+                where: {
+                    doctor_id: principalUserId,
+                    clinica_id: row.clinica_id,
+                },
+                transaction,
+            });
+
+            if (!existing) {
+                row.doctor_id = principalUserId;
+                await row.save({ transaction });
+                continue;
+            }
+
+            await DoctorHorario.update(
+                { doctor_clinica_id: existing.id },
+                {
+                    where: { doctor_clinica_id: row.id },
+                    transaction,
+                }
+            );
+
+            existing.activo = !!(existing.activo || row.activo);
+            existing.modo_disponibilidad = existing.modo_disponibilidad || row.modo_disponibilidad || 'avanzado';
+            existing.rol_en_clinica = existing.rol_en_clinica || row.rol_en_clinica || null;
+            await existing.save({ transaction });
+
+            await row.destroy({ transaction });
+        }
+
+        await DoctorBloqueo.update(
+            { doctor_id: principalUserId },
+            {
+                where: { doctor_id: secondaryUserId },
+                transaction,
+            }
+        );
+
+        await CitaPaciente.update(
+            { doctor_id: principalUserId },
+            {
+                where: { doctor_id: secondaryUserId },
+                transaction,
+            }
+        );
+
+        const principalAlt = Array.isArray(principal.emails_alternativos)
+            ? principal.emails_alternativos.map((e) => normalizeEmail(e)).filter(Boolean)
+            : [];
+        const extraEmails = [secondary.email_usuario]
+            .concat(Array.isArray(secondary.emails_alternativos) ? secondary.emails_alternativos : [])
+            .map((e) => normalizeEmail(e))
+            .filter(Boolean);
+        const altSet = new Set([...principalAlt, ...extraEmails].filter((e) => e && e !== normalizeEmail(principal.email_usuario)));
+        principal.emails_alternativos = Array.from(altSet);
+        await principal.save({ fields: ['emails_alternativos', 'updated_at'], transaction });
+
+        const nowStamp = Date.now();
+        const fallbackMail = `merged+${secondaryUserId}.${nowStamp}@invalid.local`;
+        secondary.estado_cuenta = 'suspendido';
+        secondary.email_usuario = fallbackMail;
+        secondary.password_usuario = null;
+        secondary.email_notificacion = null;
+        secondary.email_factura = null;
+        secondary.notas_usuario = `${secondary.notas_usuario ? `${secondary.notas_usuario}\n` : ''}[MERGED] Migrada a usuario ${principalUserId} el ${new Date().toISOString()} por actor ${actorId}`;
+        await secondary.save({
+            fields: [
+                'estado_cuenta',
+                'email_usuario',
+                'password_usuario',
+                'email_notificacion',
+                'email_factura',
+                'notas_usuario',
+                'updated_at',
+            ],
+            transaction,
+        });
+
+        await transaction.commit();
+
+        return res.status(200).json({
+            message: 'Accounts merged successfully',
+            principal_user_id: principalUserId,
+            secondary_user_id: secondaryUserId,
+        });
+    } catch (error) {
+        await transaction.rollback();
+        console.error('[personal.mergePersonalAccounts] Error:', error);
+        return res.status(500).json({ message: 'Error merging accounts', error: error.message });
     }
 };
 

@@ -8,6 +8,16 @@ module.exports = (sequelize, DataTypes) => {
         targetKey: 'id_usuario',
         as: 'Usuario'
       });
+      UsuarioClinica.belongsTo(models.Clinica, {
+        foreignKey: 'id_clinica',
+        targetKey: 'id_clinica',
+        as: 'Clinica'
+      });
+      UsuarioClinica.belongsTo(models.Usuario, {
+        foreignKey: 'invitado_por',
+        targetKey: 'id_usuario',
+        as: 'Invitador'
+      });
     }
   }
   UsuarioClinica.init({

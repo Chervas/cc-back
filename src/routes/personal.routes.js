@@ -16,6 +16,11 @@ router.get('/', personalController.getPersonal);
 // Onboarding de personal
 router.post('/buscar', personalController.searchPersonal);
 router.post('/invitar', personalController.invitePersonal);
+router.post('/fusionar', personalController.mergePersonalAccounts);
+router.get('/me/invitaciones', personalController.getMyInvitations);
+router.post('/me/invitaciones/:clinicaId/aceptar', personalController.acceptMyInvitation);
+router.post('/me/invitaciones/:clinicaId/rechazar', personalController.rejectMyInvitation);
+router.post('/:id/invitaciones/:clinicaId/cancelar', personalController.cancelInvitation);
 
 // Schedule/Horarios (canónico para todo el personal)
 router.get('/me/schedule', personalController.getScheduleForCurrent);
