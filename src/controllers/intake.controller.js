@@ -127,6 +127,220 @@ const stableStringify = (obj) => {
   return `{${keys.map(k => `${JSON.stringify(k)}:${stableStringify(obj[k])}`).join(',')}}`;
 };
 
+const cleanGoogleCustomerId = (value) => {
+  if (value === undefined || value === null) return null;
+  const clean = String(value).replace(/\D/g, '');
+  return clean || null;
+};
+
+const GOOGLE_DATETIME_REGEX = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}[+-]\d{2}:\d{2}$/;
+const toGoogleAdsDateTime = (value) => {
+  if (typeof value === 'string' && GOOGLE_DATETIME_REGEX.test(value.trim())) {
+    return value.trim();
+  }
+  const parsed = parseDate(value) || new Date();
+  const d = parsed;
+  const pad = (n) => String(n).padStart(2, '0');
+  const year = d.getFullYear();
+  const month = pad(d.getMonth() + 1);
+  const day = pad(d.getDate());
+  const hours = pad(d.getHours());
+  const minutes = pad(d.getMinutes());
+  const seconds = pad(d.getSeconds());
+  const offsetMinutes = -d.getTimezoneOffset();
+  const sign = offsetMinutes >= 0 ? '+' : '-';
+  const abs = Math.abs(offsetMinutes);
+  const tzH = pad(Math.floor(abs / 60));
+  const tzM = pad(abs % 60);
+  return `${year}-${month}-${day} ${hours}:${minutes}:${seconds}${sign}${tzH}:${tzM}`;
+};
+
+const normalizeGoogleConsent = (consent) => {
+  if (consent === undefined || consent === null) return null;
+  const fromValue = (v) => {
+    if (v === undefined || v === null) return null;
+    if (typeof v === 'boolean') return v ? 'GRANTED' : 'DENIED';
+    const s = String(v).trim().toLowerCase();
+    if (!s) return null;
+    if (['granted', 'grant', 'accepted', 'accept', 'yes', 'true', '1', 'optin', 'opt_in'].includes(s)) return 'GRANTED';
+    if (['denied', 'deny', 'rejected', 'reject', 'no', 'false', '0', 'optout', 'opt_out'].includes(s)) return 'DENIED';
+    return null;
+  };
+  if (typeof consent !== 'object' || Array.isArray(consent)) {
+    return fromValue(consent);
+  }
+  return fromValue(
+    consent.ad_user_data ??
+    consent.adUserData ??
+    consent.marketing ??
+    consent.analytics ??
+    consent.value
+  );
+};
+
+const parseSendToActionId = (sendTo) => {
+  if (!sendTo) return null;
+  const parts = String(sendTo).trim().split('/');
+  if (parts.length < 2) return null;
+  const maybeId = String(parts[1] || '').trim();
+  if (/^\d+$/.test(maybeId)) return maybeId;
+  return null;
+};
+
+const buildConversionActionResource = ({ customerId, conversionAction, conversionActionId, sendTo }) => {
+  const cleanCustomer = cleanGoogleCustomerId(customerId);
+  const rawAction = conversionAction ? String(conversionAction).trim() : '';
+  if (rawAction.startsWith('customers/')) return rawAction;
+  if (/^\d+$/.test(rawAction) && cleanCustomer) {
+    return `customers/${cleanCustomer}/conversionActions/${rawAction}`;
+  }
+
+  const actionId =
+    (conversionActionId && /^\d+$/.test(String(conversionActionId).trim()) ? String(conversionActionId).trim() : null) ||
+    parseSendToActionId(sendTo);
+  if (actionId && cleanCustomer) {
+    return `customers/${cleanCustomer}/conversionActions/${actionId}`;
+  }
+  return null;
+};
+
+const normalizeGoogleAdsConfig = (rawConfig) => {
+  if (!rawConfig || typeof rawConfig !== 'object' || Array.isArray(rawConfig)) return {};
+  return {
+    ...rawConfig,
+    customer_id: cleanGoogleCustomerId(rawConfig.customer_id) || rawConfig.customer_id || null,
+    conversion_action: rawConfig.conversion_action || null,
+    conversion_action_id: rawConfig.conversion_action_id || null,
+    send_to: rawConfig.send_to || null,
+    currency: rawConfig.currency || null
+  };
+};
+
+const getGoogleAdsEventConfig = (googleAdsCfg, eventName) => {
+  const eventKey = String(eventName || '').trim().toLowerCase();
+  const mapped =
+    eventKey === 'contact' ? 'contact'
+      : eventKey === 'schedule' ? 'schedule'
+        : eventKey === 'purchase' ? 'purchase'
+          : 'lead';
+
+  const nested = googleAdsCfg?.events && typeof googleAdsCfg.events === 'object'
+    ? (googleAdsCfg.events[mapped] || {})
+    : {};
+
+  return {
+    enabled: nested.enabled !== undefined ? !!nested.enabled : (googleAdsCfg.enabled !== false),
+    customer_id: cleanGoogleCustomerId(
+      nested.customer_id ??
+      googleAdsCfg[`${mapped}_customer_id`] ??
+      googleAdsCfg.customer_id ??
+      process.env.GOOGLE_ADS_CUSTOMER_ID
+    ),
+    conversion_action:
+      nested.conversion_action ??
+      googleAdsCfg[`${mapped}_conversion_action`] ??
+      googleAdsCfg.conversion_action ??
+      null,
+    conversion_action_id:
+      nested.conversion_action_id ??
+      googleAdsCfg[`${mapped}_conversion_action_id`] ??
+      googleAdsCfg.conversion_action_id ??
+      null,
+    send_to:
+      nested.send_to ??
+      googleAdsCfg[`${mapped}_send_to`] ??
+      googleAdsCfg.send_to ??
+      null,
+    value: coalesce(
+      nested.value,
+      googleAdsCfg[`${mapped}_value`],
+      googleAdsCfg.value,
+      mapped === 'purchase' ? null : 0
+    ),
+    currency: coalesce(
+      nested.currency,
+      googleAdsCfg[`${mapped}_currency`],
+      googleAdsCfg.currency,
+      'EUR'
+    ),
+    consent: normalizeGoogleConsent(
+      nested.consent ??
+      googleAdsCfg[`${mapped}_consent`] ??
+      googleAdsCfg.consent
+    )
+  };
+};
+
+const maybeUploadGoogleConversion = async ({
+  cfgRecord,
+  eventName,
+  customData,
+  userData,
+  consent,
+  eventId
+}) => {
+  const cfgObj = cfgRecord && typeof cfgRecord.config === 'object' ? cfgRecord.config : {};
+  const googleCfg = normalizeGoogleAdsConfig(cfgObj.google_ads || {});
+  const eventCfg = getGoogleAdsEventConfig(googleCfg, eventName);
+
+  if (!eventCfg.enabled) {
+    return { sent: false, reason: 'google_ads_disabled' };
+  }
+
+  const gclid = customData.gclid || null;
+  const gbraid = customData.gbraid || null;
+  const wbraid = customData.wbraid || null;
+  if (!gclid && !gbraid && !wbraid) {
+    return { sent: false, reason: 'no_click_id' };
+  }
+
+  const customerId = cleanGoogleCustomerId(
+    customData.customer_id ||
+    customData.google_customer_id ||
+    eventCfg.customer_id
+  );
+  if (!customerId) {
+    return { sent: false, reason: 'missing_customer_id' };
+  }
+
+  const conversionAction = buildConversionActionResource({
+    customerId,
+    conversionAction: customData.conversion_action || eventCfg.conversion_action,
+    conversionActionId: customData.conversion_action_id || eventCfg.conversion_action_id,
+    sendTo: customData.send_to || eventCfg.send_to
+  });
+  if (!conversionAction) {
+    return { sent: false, reason: 'missing_conversion_action' };
+  }
+
+  const valueRaw = coalesce(customData.value, eventCfg.value, 0);
+  const value = Number.isFinite(Number(valueRaw)) ? Number(valueRaw) : 0;
+  const currency = String(coalesce(customData.currency, eventCfg.currency, 'EUR') || 'EUR').toUpperCase();
+  const conversionDateTime = toGoogleAdsDateTime(customData.conversion_time || customData.conversionDateTime || new Date());
+
+  const consentStatus =
+    normalizeGoogleConsent(customData.consent) ||
+    normalizeGoogleConsent(consent) ||
+    eventCfg.consent ||
+    null;
+
+  const result = await uploadClickConversion({
+    customerId,
+    conversionAction,
+    gclid,
+    gbraid,
+    wbraid,
+    value,
+    currency,
+    conversionDateTime,
+    externalId: eventId || null,
+    email: userData?.email || null,
+    phone: userData?.phone || userData?.telefono || null,
+    consentStatus
+  });
+  return { sent: true, result };
+};
+
 const validateSignature = (req) => {
   const secret = process.env.INTAKE_WEB_SECRET;
   if (!secret) return true; // Sin secreto configurado, no validamos la firma
@@ -482,18 +696,18 @@ exports.ingestLead = asyncHandler(async (req, res) => {
     throw err;
   }
 
+  // Permite al snippet solicitar un evento concreto (p. ej. Contact para tel_modal).
+  // Si viene vacío o es inválido, mantenemos Lead por defecto (compatibilidad).
+  const requestedEventNameRaw = coalesce(body.event_name, body.eventName);
+  const requestedEventName = requestedEventNameRaw ? String(requestedEventNameRaw).trim().toLowerCase() : '';
+  const normalizedEventNameForCapi =
+    requestedEventName === 'contact' ? 'Contact' :
+      requestedEventName === 'schedule' ? 'Schedule' :
+        requestedEventName === 'purchase' ? 'Purchase' :
+          'Lead';
+
   // Emitir a Meta CAPI si hay datos mínimos
   try {
-    // Permite al snippet solicitar un evento concreto (p. ej. Contact para tel_modal).
-    // Si viene vacío o es inválido, mantenemos Lead por defecto (compatibilidad).
-    const requestedEventNameRaw = coalesce(body.event_name, body.eventName);
-    const requestedEventName = requestedEventNameRaw ? String(requestedEventNameRaw).trim().toLowerCase() : '';
-    const metaEventName =
-      requestedEventName === 'contact' ? 'Contact' :
-      requestedEventName === 'schedule' ? 'Schedule' :
-      requestedEventName === 'purchase' ? 'Purchase' :
-      'Lead';
-
     const userData = buildMetaUserData({
       email: leadEmail,
       phone: leadTelefono,
@@ -502,7 +716,7 @@ exports.ingestLead = asyncHandler(async (req, res) => {
       externalId: lead.id
     });
     await sendMetaEvent({
-      eventName: metaEventName,
+      eventName: normalizedEventNameForCapi,
       eventTime: Math.floor(Date.now() / 1000),
       eventId: lead.event_id || `lead-${lead.id}`,
       actionSource: 'website',
@@ -515,6 +729,37 @@ exports.ingestLead = asyncHandler(async (req, res) => {
     });
   } catch (e) {
     console.warn('⚠️ No se pudo enviar evento Meta CAPI:', e.message || e);
+  }
+
+  // Google Ads Enhanced Conversions (server-side) al capturar lead/contact.
+  // Solo aplica cuando existe click id (gclid/gbraid/wbraid) y conversión configurada.
+  try {
+    const googleCustomData = {
+      gclid: gclidValue || null,
+      gbraid: coalesce(attribution.gbraid, body.gbraid, body.gBraid) || null,
+      wbraid: coalesce(attribution.wbraid, body.wbraid, body.wBraid) || null,
+      value: coalesce(body.value, body.conversion_value),
+      currency: coalesce(body.currency, body.conversion_currency),
+      conversion_time: coalesce(body.conversion_time, body.conversionDateTime, new Date()),
+      customer_id: coalesce(body.customer_id, body.customerId, body.google_customer_id),
+      conversion_action: coalesce(body.conversion_action, body.conversionAction),
+      conversion_action_id: coalesce(body.conversion_action_id, body.conversionActionId),
+      send_to: coalesce(body.send_to, body.sendTo),
+      consent: coalesce(body.consent, body.consentimiento_canal)
+    };
+    await maybeUploadGoogleConversion({
+      cfgRecord: cfg,
+      eventName: normalizedEventNameForCapi,
+      customData: googleCustomData,
+      userData: {
+        email: leadEmail,
+        phone: leadTelefono
+      },
+      consent: coalesce(body.consent, body.consentimiento_canal),
+      eventId: lead.event_id || `lead-${lead.id}`
+    });
+  } catch (adsErr) {
+    console.warn('⚠️ Google Ads upload error (ingestLead):', adsErr.response?.data || adsErr.message || adsErr);
   }
 
   res.status(201).json({ id: lead.id });
@@ -571,6 +816,15 @@ const DEFAULT_APPEARANCE = {
   tel_modal_header_color: '#3B82F6'
 };
 
+const DEFAULT_GOOGLE_ADS = {
+  enabled: false,
+  customer_id: null,
+  conversion_action: null,
+  conversion_action_id: null,
+  send_to: null,
+  currency: 'EUR'
+};
+
 const defaultConfigPayload = (clinicId, groupId) => ({
   clinic_id: clinicId || null,
   group_id: groupId || null,
@@ -580,6 +834,7 @@ const defaultConfigPayload = (clinicId, groupId) => ({
   flow: DEFAULT_CHAT_FLOW,
   flows: null,
   appearance: DEFAULT_APPEARANCE,
+  google_ads: DEFAULT_GOOGLE_ADS,
   texts: DEFAULT_TEXTS,
   locations: [],
   has_hmac: false,
@@ -635,6 +890,7 @@ exports.getIntakeConfig = asyncHandler(async (req, res) => {
     payload.flow = cfg.flow || payload.flow;
     payload.flows = cfg.flows || payload.flows;
     payload.appearance = { ...payload.appearance, ...(cfg.appearance || {}) };
+    payload.google_ads = { ...payload.google_ads, ...normalizeGoogleAdsConfig(cfg.google_ads || {}) };
     payload.texts = { ...payload.texts, ...(cfg.texts || {}) };
     payload.locations = cfg.locations || [];
     payload.config = cfg;
@@ -782,12 +1038,18 @@ exports.upsertIntakeConfig = asyncHandler(async (req, res) => {
   // - Backwards: si viene body.config, lo respetamos.
   let config = {};
   if (body.config && typeof body.config === 'object' && !Array.isArray(body.config)) {
-    config = body.config;
+    config = {
+      ...body.config,
+      ...(body.config.google_ads ? { google_ads: normalizeGoogleAdsConfig(body.config.google_ads) } : {})
+    };
   } else {
     const features = body.features && typeof body.features === 'object' ? body.features : undefined;
     const flow = body.flow && typeof body.flow === 'object' ? body.flow : undefined;
     const flows = Array.isArray(body.flows) ? body.flows : undefined;
     const appearance = body.appearance && typeof body.appearance === 'object' && !Array.isArray(body.appearance) ? body.appearance : undefined;
+    const googleAds = body.google_ads && typeof body.google_ads === 'object' && !Array.isArray(body.google_ads)
+      ? normalizeGoogleAdsConfig(body.google_ads)
+      : undefined;
     const texts = body.texts && typeof body.texts === 'object' ? body.texts : undefined;
     const locations = Array.isArray(body.locations) ? body.locations : undefined;
     config = {
@@ -795,6 +1057,7 @@ exports.upsertIntakeConfig = asyncHandler(async (req, res) => {
       ...(flow ? { flow } : {}),
       ...(flows ? { flows } : {}),
       ...(appearance ? { appearance } : {}),
+      ...(googleAds ? { google_ads: googleAds } : {}),
       ...(texts ? { texts } : {}),
       ...(locations ? { locations } : {})
     };
@@ -1164,27 +1427,25 @@ exports.receiveIntakeEvent = asyncHandler(async (req, res) => {
     userData
   });
 
-  // Google Ads server-side (si hay gclid/gbraid/wbraid y conversionAction configurado)
+  // Google Ads Enhanced Conversions (server-side)
+  // Prioridad de configuración:
+  // 1) custom_data del propio evento
+  // 2) config.google_ads (clínica/grupo)
+  // 3) variables de entorno
   try {
-    const sendTo = custom_data.send_to || null;
-    const conversionAction = custom_data.conversion_action || null;
-    if ((custom_data.gclid || custom_data.gbraid || custom_data.wbraid) && (sendTo || conversionAction)) {
-      const actionResource = conversionAction || `customers/${process.env.GOOGLE_ADS_CUSTOMER_ID.replace(/-/g, '')}/conversionActions/${(sendTo || '').split('/')[1] || ''}`;
-      await uploadClickConversion({
-        conversionAction: actionResource,
-        gclid: custom_data.gclid,
-        gbraid: custom_data.gbraid,
-        wbraid: custom_data.wbraid,
-        value: custom_data.value || 0,
-        currency: custom_data.currency || 'EUR',
-        conversionDateTime: custom_data.conversion_time || new Date().toISOString(),
-        externalId: user_data.external_id || body.event_id,
-        userAgent: user_data.ua || req.headers['user-agent'],
-        ipAddress: user_data.ip || req.headers['x-forwarded-for'] || req.socket?.remoteAddress
-      });
-    }
+    await maybeUploadGoogleConversion({
+      cfgRecord: cfg,
+      eventName: eventName || 'ViewContent',
+      customData: {
+        ...custom_data,
+        conversion_time: coalesce(custom_data.conversion_time, custom_data.conversionDateTime, body.event_time)
+      },
+      userData: user_data,
+      consent: body.consent || null,
+      eventId: body.event_id || user_data.external_id || null
+    });
   } catch (adsErr) {
-    console.warn('⚠️ Google Ads upload error:', adsErr.response?.data || adsErr.message || adsErr);
+    console.warn('⚠️ Google Ads upload error (events):', adsErr.response?.data || adsErr.message || adsErr);
   }
 
   res.json({ success: true });
