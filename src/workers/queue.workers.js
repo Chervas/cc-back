@@ -17,18 +17,17 @@ const dlog = (...args) => {
     }
 };
 
-const CC_WEB_REF_REGEX = /\[cc_ref:([a-f0-9]{8,64})\]/ig;
+const CC_WEB_REF_CAPTURE_REGEX = /\[cc_ref:([a-f0-9]{8,64})\]/i;
+const CC_WEB_REF_STRIP_REGEX = /\[cc_ref:[a-f0-9]{8,64}\]/ig;
 function extractAndStripWebOriginRef(rawContent) {
     const content = typeof rawContent === 'string' ? rawContent : '';
     if (!content) {
         return { ref: null, content: '' };
     }
-    let ref = null;
+    const match = content.match(CC_WEB_REF_CAPTURE_REGEX);
+    const ref = match?.[1] ? String(match[1]).toLowerCase() : null;
     const cleaned = content
-        .replace(CC_WEB_REF_REGEX, (_match, g1) => {
-            if (!ref && g1) ref = String(g1).toLowerCase();
-            return '';
-        })
+        .replace(CC_WEB_REF_STRIP_REGEX, '')
         .replace(/\s+\n/g, '\n')
         .replace(/\n\s+/g, '\n')
         .replace(/[ \t]{2,}/g, ' ')
