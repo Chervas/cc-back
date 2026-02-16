@@ -33,6 +33,18 @@ exports.list = asyncHandler(async (req, res) => {
 
   // Filtrado por clinica_id directamente sobre DoctorClinica (evita depender de atributos inexistentes en Clinica)
   const whereDoctorClinica = { activo: true };
+  // Mantener /api/doctors legacy limitado a doctores reales:
+  // Solo filas donde el pivot UsuarioClinica marca subrol_clinica='Doctores' en esa clinica.
+  whereDoctorClinica[Op.and] = db.Sequelize.literal(`
+    EXISTS (
+      SELECT 1
+      FROM UsuarioClinica uc
+      WHERE uc.id_usuario = \`DoctorClinica\`.\`doctor_id\`
+        AND uc.id_clinica = \`DoctorClinica\`.\`clinica_id\`
+        AND uc.rol_clinica = 'personaldeclinica'
+        AND uc.subrol_clinica = 'Doctores'
+    )
+  `);
   if (!parseBool(all) && clinica_id) {
     whereDoctorClinica.clinica_id = clinica_id;
   }
@@ -40,7 +52,7 @@ exports.list = asyncHandler(async (req, res) => {
   const includeClinica = {
     model: db.Clinica,
     as: 'clinica',
-    attributes: ['id_clinica', 'nombre_clinica', 'grupoClinicaId'],
+    attributes: ['id_clinica', 'nombre_clinica', 'url_avatar', 'grupoClinicaId'],
   };
   if (!parseBool(all) && group_id) {
     includeClinica.where = { grupoClinicaId: group_id };
@@ -97,11 +109,13 @@ exports.createBloqueo = asyncHandler(async (req, res) => {
   const doctorId = req.params.doctorId || req.userData?.userId;
   const bloqueo = await db.DoctorBloqueo.create({
     doctor_id: doctorId,
+    clinica_id: req.body.clinica_id ?? null,
     fecha_inicio: req.body.fecha_inicio,
     fecha_fin: req.body.fecha_fin,
+    tipo: req.body.tipo || 'ausencia',
     motivo: req.body.motivo,
     recurrente: req.body.recurrente || 'none',
-    aplica_a_todas_clinicas: !!req.body.aplica_a_todas_clinicas,
+    aplica_a_todas_clinicas: req.body.clinica_id == null ? !!req.body.aplica_a_todas_clinicas : false,
     creado_por: req.user?.id || null
   });
   res.status(201).json(bloqueo);
@@ -125,7 +139,7 @@ async function buildSchedule(doctorId) {
   const clinicas = await db.DoctorClinica.findAll({
     where: { doctor_id: doctorId, activo: true },
     include: [
-      { model: db.Clinica, as: 'clinica', attributes: ['id_clinica','nombre_clinica'] },
+      { model: db.Clinica, as: 'clinica', attributes: ['id_clinica','nombre_clinica','url_avatar'] },
       { model: db.DoctorHorario, as: 'horarios' }
     ]
   });
@@ -136,6 +150,7 @@ async function buildSchedule(doctorId) {
     clinicas: clinicas.map(c => ({
       clinica_id: c.clinica_id,
       nombre_clinica: c.clinica?.nombre_clinica || '',
+      url_avatar: c.clinica?.url_avatar || null,
       activo: c.activo,
       horarios: c.horarios || []
     })),

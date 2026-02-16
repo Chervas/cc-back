@@ -14,6 +14,7 @@ const DoctorClinica = db.DoctorClinica;
 const DoctorHorario = db.DoctorHorario;
 const DoctorBloqueo = db.DoctorBloqueo;
 const Tratamiento = db.Tratamiento;
+const DEFAULT_TIMEZONE = 'Europe/Madrid';
 
 /**
  * Helper: asegurar vínculo paciente-clínica sin romper por duplicados
@@ -121,22 +122,146 @@ async function findOrCreatePaciente({ clinica_id, nombre, apellidos, telefono, e
 
 const parseBool = (v) => v === true || v === 'true' || v === '1';
 const overlap = (startA, endA, startB, endB) => startA < endB && startB < endA;
-const dayIndex = (date) => new Date(date).getDay();
-const toTime = (d) => d.toTimeString().slice(0,5);
+const dayIndexFromLocalDate = (fechaLocal) => new Date(`${fechaLocal}T12:00:00Z`).getUTCDay();
 
-async function checkDisponibilidad({ clinica_id, inicio, fin, doctor_id, instalacion_id }) {
+const parseClinicConfig = (value) => {
+    if (!value) return null;
+    if (typeof value === 'object') return value;
+    if (typeof value === 'string') {
+        try {
+            const parsed = JSON.parse(value);
+            return parsed && typeof parsed === 'object' ? parsed : null;
+        } catch (err) {
+            return null;
+        }
+    }
+    return null;
+};
+
+const isValidTimeZone = (value) => {
+    if (!value || typeof value !== 'string') return false;
+    try {
+        Intl.DateTimeFormat('en-US', { timeZone: value }).format(new Date());
+        return true;
+    } catch (err) {
+        return false;
+    }
+};
+
+const resolveClinicTimezone = (clinica) => {
+    const cfg = parseClinicConfig(clinica && clinica.configuracion);
+    const candidates = [
+        cfg && (cfg.timezone || cfg.timeZone || cfg.tz),
+        clinica && (clinica.timezone || clinica.time_zone || clinica.tz)
+    ];
+
+    for (const candidate of candidates) {
+        if (isValidTimeZone(candidate)) return candidate;
+    }
+    return DEFAULT_TIMEZONE;
+};
+
+const formatPartsInTimeZone = (date, timeZone) => {
+    const parts = new Intl.DateTimeFormat('en-CA', {
+        timeZone,
+        hour12: false,
+        year: 'numeric',
+        month: '2-digit',
+        day: '2-digit',
+        hour: '2-digit',
+        minute: '2-digit',
+        second: '2-digit'
+    }).formatToParts(date);
+
+    const bag = {};
+    parts.forEach((p) => {
+        if (p.type !== 'literal') bag[p.type] = p.value;
+    });
+
+    return {
+        year: Number(bag.year),
+        month: Number(bag.month),
+        day: Number(bag.day),
+        hour: Number(bag.hour),
+        minute: Number(bag.minute),
+        second: Number(bag.second)
+    };
+};
+
+const offsetMinutesForTimeZone = (date, timeZone) => {
+    const p = formatPartsInTimeZone(date, timeZone);
+    const asUtc = Date.UTC(p.year, p.month - 1, p.day, p.hour, p.minute, p.second);
+    return Math.round((asUtc - date.getTime()) / 60000);
+};
+
+const normalizeHms = (value, fallback = '00:00:00') => {
+    const raw = String(value || fallback).trim();
+    const m = raw.match(/^(\d{2}):(\d{2})(?::(\d{2}))?$/);
+    if (!m) return null;
+    return `${m[1]}:${m[2]}:${m[3] || '00'}`;
+};
+
+const localDateTimeToUtc = (fechaLocal, timeValue, timeZone) => {
+    if (!fechaLocal || typeof fechaLocal !== 'string') return null;
+    const d = fechaLocal.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+    if (!d) return null;
+
+    const hms = normalizeHms(timeValue);
+    if (!hms) return null;
+    const t = hms.match(/^(\d{2}):(\d{2}):(\d{2})$/);
+    if (!t) return null;
+
+    const year = Number(d[1]);
+    const month = Number(d[2]);
+    const day = Number(d[3]);
+    const hour = Number(t[1]);
+    const minute = Number(t[2]);
+    const second = Number(t[3]);
+
+    const naiveUtc = Date.UTC(year, month - 1, day, hour, minute, second);
+    let ts = naiveUtc;
+    for (let i = 0; i < 2; i++) {
+        const offsetMin = offsetMinutesForTimeZone(new Date(ts), timeZone);
+        ts = naiveUtc - offsetMin * 60000;
+    }
+    return new Date(ts);
+};
+
+const formatDateLocal = (date, timeZone) => {
+    const p = formatPartsInTimeZone(date, timeZone);
+    const pad = (n) => String(n).padStart(2, '0');
+    return `${p.year}-${pad(p.month)}-${pad(p.day)}`;
+};
+
+const buildWindowsFromHorarios = (horarios, dow, fechaIso, timeZone) => {
+    return (horarios || [])
+        .filter((h) => h.dia_semana === dow && h.activo)
+        .map((h) => ({
+            start: localDateTimeToUtc(fechaIso, h.hora_inicio, timeZone),
+            end: localDateTimeToUtc(fechaIso, h.hora_fin, timeZone)
+        }))
+        .filter((w) => w.start && w.end && Number.isFinite(w.start.getTime()) && Number.isFinite(w.end.getTime()) && w.start < w.end);
+};
+
+const inAnyWindow = (windows, start, end) => {
+    if (!Array.isArray(windows) || windows.length === 0) return false;
+    return windows.some((w) => start >= w.start && end <= w.end);
+};
+
+async function checkDisponibilidad({ clinica_id, inicio, fin, doctor_id, instalacion_id, clinicTimezone = DEFAULT_TIMEZONE }) {
     const conflicts = [];
     const start = new Date(inicio);
     const end = new Date(fin);
-    const dow = dayIndex(start);
+    const fechaIso = formatDateLocal(start, clinicTimezone);
+    const dow = dayIndexFromLocalDate(fechaIso);
 
     if (instalacion_id) {
         const inst = await Instalacion.findByPk(instalacion_id, { include: [{ model: InstalacionHorario, as: 'horarios' }, { model: InstalacionBloqueo, as: 'bloqueos' }] });
         if (!inst || !inst.activo) conflicts.push({ type: 'not_found', message: 'Instalación no encontrada o inactiva' });
         else {
             if (inst.clinica_id !== clinica_id) conflicts.push({ type: 'not_in_clinic', message: 'Instalación fuera de la clínica' });
-            const h = (inst.horarios || []).find(h => h.dia_semana === dow);
-            const inRange = h && h.activo && `${h.hora_inicio}` <= toTime(start) && `${h.hora_fin}` >= toTime(end);
+            const instWins = buildWindowsFromHorarios(inst.horarios || [], dow, fechaIso, clinicTimezone);
+            const inRange = inAnyWindow(instWins, start, end);
             if (!inRange) conflicts.push({ type: 'out_of_hours', message: 'Instalación fuera de horario' });
             (inst.bloqueos || []).forEach(b => {
                 if (overlap(start, end, b.fecha_inicio, b.fecha_fin)) conflicts.push({ type: 'blocked', message: b.motivo || 'Bloqueo instalación' });
@@ -150,8 +275,8 @@ async function checkDisponibilidad({ clinica_id, inicio, fin, doctor_id, instala
         const dc = await DoctorClinica.findOne({ where: { doctor_id, clinica_id }, include: [{ model: DoctorHorario, as: 'horarios' }] });
         if (!dc || !dc.activo) conflicts.push({ type: 'doctor_unavailable', message: 'Doctor no asignado a la clínica' });
         else {
-            const h = (dc.horarios || []).find(h => h.dia_semana === dow);
-            const inRange = h && h.activo && `${h.hora_inicio}` <= toTime(start) && `${h.hora_fin}` >= toTime(end);
+            const docWins = buildWindowsFromHorarios(dc.horarios || [], dow, fechaIso, clinicTimezone);
+            const inRange = inAnyWindow(docWins, start, end);
             if (!inRange) conflicts.push({ type: 'doctor_unavailable', message: 'Doctor fuera de horario' });
         }
         const bloqueos = await DoctorBloqueo.findAll({ where: { doctor_id, fecha_inicio: { [db.Sequelize.Op.lt]: end }, fecha_fin: { [db.Sequelize.Op.gt]: start } } });
@@ -166,11 +291,12 @@ async function checkDisponibilidad({ clinica_id, inicio, fin, doctor_id, instala
  * Helper: conflictos canónicos (17.6) + compatibilidad legacy para el 409 de POST /citas.
  * Fuente de verdad: solo se permite `force=true` cuando el único conflicto es `STAFF_OVERLAP` (doctor).
  */
-async function checkDisponibilidadCanonica({ clinica_id, inicio, fin, doctor_id, instalacion_id, ignore_cita_id = null }) {
+async function checkDisponibilidadCanonica({ clinica_id, inicio, fin, doctor_id, instalacion_id, ignore_cita_id = null, clinicTimezone = DEFAULT_TIMEZONE }) {
     const clinicaId = Number(clinica_id);
     const start = new Date(inicio);
     const end = new Date(fin);
-    const dow = dayIndex(start);
+    const fechaIso = formatDateLocal(start, clinicTimezone);
+    const dow = dayIndexFromLocalDate(fechaIso);
 
     const resourceConflicts = [];
     const legacyConflicts = [];
@@ -208,8 +334,8 @@ async function checkDisponibilidadCanonica({ clinica_id, inicio, fin, doctor_id,
                 details: { message: 'Instalación fuera de la clínica' }
             });
         } else {
-            const h = (inst.horarios || []).find(h => h.dia_semana === dow);
-            const inRange = h && h.activo && `${h.hora_inicio}` <= toTime(start) && `${h.hora_fin}` >= toTime(end);
+            const instWins = buildWindowsFromHorarios(inst.horarios || [], dow, fechaIso, clinicTimezone);
+            const inRange = inAnyWindow(instWins, start, end);
             if (!inRange) {
                 addLegacy('out_of_hours', 'Instalación fuera de horario');
                 addResource({
@@ -273,8 +399,8 @@ async function checkDisponibilidadCanonica({ clinica_id, inicio, fin, doctor_id,
                 details: { message: 'Doctor no asignado a la clínica' }
             });
         } else {
-            const h = (dc.horarios || []).find(h => h.dia_semana === dow);
-            const inRange = h && h.activo && `${h.hora_inicio}` <= toTime(start) && `${h.hora_fin}` >= toTime(end);
+            const docWins = buildWindowsFromHorarios(dc.horarios || [], dow, fechaIso, clinicTimezone);
+            const inRange = inAnyWindow(docWins, start, end);
             if (!inRange) {
                 addLegacy('doctor_unavailable', 'Doctor fuera de horario');
                 addResource({
@@ -357,6 +483,7 @@ exports.createCita = asyncHandler(async (req, res) => {
         if (!clinica) {
             return res.status(400).json({ message: 'Clínica no encontrada' });
         }
+        const clinicTimezone = resolveClinicTimezone(clinica);
 
         // Resolver lead si viene
         let lead = null;
@@ -389,7 +516,8 @@ exports.createCita = asyncHandler(async (req, res) => {
             inicio: inicioDate,
             fin: finDate,
             doctor_id,
-            instalacion_id
+            instalacion_id,
+            clinicTimezone
         });
 
         if (resourceConflicts.length) {
