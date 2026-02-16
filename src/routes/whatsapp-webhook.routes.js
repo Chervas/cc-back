@@ -6,7 +6,7 @@ const db = require('../../models');
 const { queues } = require('../services/queue.service');
 const { Op } = require('sequelize');
 
-const { ClinicMetaAsset, Clinica, Paciente, Lead } = db;
+const { ClinicMetaAsset, Clinica, Paciente, Lead, Conversation, LeadIntake, WhatsAppWebOrigin } = db;
 const APP_SECRET = process.env.FACEBOOK_APP_SECRET || process.env.APP_SECRET;
 
 function buildPhoneCandidates(raw) {
@@ -19,6 +19,35 @@ function buildPhoneCandidates(raw) {
     local,
     `+${local}`,
   ])).filter(Boolean);
+}
+
+function buildContactIdCandidates(raw) {
+  const candidates = buildPhoneCandidates(raw);
+  const withPlus = candidates.map((c) => (String(c).startsWith('+') ? String(c) : `+${c}`));
+  return Array.from(new Set(withPlus)).filter(Boolean);
+}
+
+function buildDigitsCandidates(raw) {
+  const candidates = buildPhoneCandidates(raw);
+  const digits = candidates.map((c) => String(c).replace(/^\+/, ''));
+  return Array.from(new Set(digits)).filter(Boolean);
+}
+
+const CC_WEB_REF_REGEX = /\[cc_ref:([a-f0-9]{8,64})\]/i;
+function extractWebOriginRefFromText(text) {
+  if (!text || typeof text !== 'string') return null;
+  const match = text.match(CC_WEB_REF_REGEX);
+  return match?.[1] ? String(match[1]).toLowerCase() : null;
+}
+
+function extractWebOriginRefFromWebhookBody(body) {
+  const messages = body?.entry?.[0]?.changes?.[0]?.value?.messages || [];
+  for (const msg of messages) {
+    const content = msg?.text?.body || msg?.button?.text || msg?.interactive?.text || '';
+    const ref = extractWebOriginRefFromText(content);
+    if (ref) return ref;
+  }
+  return null;
 }
 
 async function resolveClinicAndContact({ clinicId, groupId, from }) {
@@ -76,6 +105,48 @@ async function resolveClinicAndContact({ clinicId, groupId, from }) {
     const clinicIds = clinics.map((c) => c.id_clinica);
     if (!clinicIds.length) {
       return { clinicId: null, patientId: null, leadId: null };
+    }
+
+    // 1) Evitar duplicados: si ya existe una conversación de WhatsApp para este contacto en alguna clínica del grupo,
+    // reutilizamos esa clínica como destino.
+    const contactIdCandidates = buildContactIdCandidates(from);
+    if (Conversation && contactIdCandidates.length) {
+      const conv = await Conversation.findOne({
+        where: {
+          clinic_id: { [Op.in]: clinicIds },
+          channel: 'whatsapp',
+          contact_id: { [Op.in]: contactIdCandidates },
+        },
+        attributes: ['id', 'clinic_id', 'patient_id', 'lead_id', 'last_message_at', 'updatedAt'],
+        order: [
+          ['last_message_at', 'DESC'],
+          ['updatedAt', 'DESC'],
+        ],
+        raw: true,
+      });
+      if (conv) {
+        return { clinicId: conv.clinic_id, patientId: conv.patient_id || null, leadId: conv.lead_id || null };
+      }
+    }
+
+    // 2) Si hay un LeadIntake reciente para este teléfono en el grupo, asignar la conversación a esa clínica.
+    // Esto permite atribuir correctamente mensajes entrantes a la sede que originó el contacto (snippet/web/chatbot).
+    const digitsCandidates = buildDigitsCandidates(from);
+    if (LeadIntake && digitsCandidates.length) {
+      const cutoff = new Date(Date.now() - 24 * 60 * 60 * 1000);
+      const recentIntake = await LeadIntake.findOne({
+        where: {
+          clinica_id: { [Op.in]: clinicIds },
+          telefono: { [Op.in]: digitsCandidates },
+          created_at: { [Op.gte]: cutoff },
+        },
+        attributes: ['id', 'clinica_id', 'created_at'],
+        order: [['created_at', 'DESC']],
+        raw: true,
+      });
+      if (recentIntake?.clinica_id) {
+        return { clinicId: recentIntake.clinica_id, patientId: null, leadId: null };
+      }
     }
 
     const patient = await Paciente.findOne({
@@ -147,8 +218,35 @@ router.post('/whatsapp/webhook', async (req, res) => {
     if (!verifySignature(req, res, req.rawBody || Buffer.from(JSON.stringify(req.body || {})))) {
       return res.sendStatus(401);
     }
+
+    // Tracking: si el usuario viene desde el widget web, el mensaje incluye un token [cc_ref:...]
+    // que permite asignar el inbound a la sede correcta incluso si el número de WhatsApp es compartido por grupo.
+    const webOriginRef = extractWebOriginRefFromWebhookBody(req.body);
+    let webOrigin = null;
+    if (webOriginRef && WhatsAppWebOrigin) {
+      try {
+        webOrigin = await WhatsAppWebOrigin.findOne({
+          where: { ref: webOriginRef },
+          attributes: ['id', 'ref', 'clinic_id', 'group_id', 'expires_at', 'used_at'],
+          raw: true,
+        });
+        if (webOrigin?.expires_at && new Date(webOrigin.expires_at).getTime() < Date.now()) {
+          webOrigin = null;
+        }
+      } catch (e) {
+        webOrigin = null;
+      }
+    }
+
     let clinicId = req.query.clinic_id || req.body?.clinic_id;
     let groupId = null;
+
+    // Si el token viene, priorizamos esa sede/grupo.
+    if (webOrigin) {
+      if (webOrigin.clinic_id) clinicId = webOrigin.clinic_id;
+      if (webOrigin.group_id) groupId = webOrigin.group_id;
+    }
+
     if (!clinicId) {
       const phoneId = req.body?.entry?.[0]?.changes?.[0]?.value?.metadata?.phone_number_id;
       if (phoneId) {
@@ -186,6 +284,7 @@ router.post('/whatsapp/webhook', async (req, res) => {
       clinic_id: clinicId,
       patient_id: resolvedContact.patientId,
       lead_id: resolvedContact.leadId,
+      web_origin_ref: webOriginRef || null,
     });
     return res.sendStatus(200);
   } catch (err) {
