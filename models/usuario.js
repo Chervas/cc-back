@@ -46,6 +46,19 @@ module.exports = (sequelize, DataTypes) => {
     ultimo_login: {
       type: DataTypes.DATE,
       allowNull: true
+    },
+    estado_cuenta: {
+      type: DataTypes.STRING(32),
+      allowNull: false,
+      defaultValue: 'activo'
+    },
+    emails_alternativos: {
+      type: DataTypes.JSON,
+      allowNull: true
+    },
+    creado_por: {
+      type: DataTypes.INTEGER,
+      allowNull: true
     }
   }, {
     sequelize,

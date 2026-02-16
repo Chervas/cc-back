@@ -31,6 +31,19 @@ module.exports = (sequelize, DataTypes) => {
       allowNull: true,
       defaultValue: null
     },
+    estado_invitacion: {
+      type: DataTypes.STRING(32),
+      allowNull: false,
+      defaultValue: 'aceptada'
+    },
+    invitado_por: {
+      type: DataTypes.INTEGER,
+      allowNull: true
+    },
+    fecha_invitacion: {
+      type: DataTypes.DATE,
+      allowNull: true
+    },
     datos_fiscales_clinica: {
       type: DataTypes.JSON,
       allowNull: true

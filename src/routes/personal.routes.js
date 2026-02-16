@@ -4,11 +4,18 @@ const router = express.Router();
 const authMiddleware = require('./auth.middleware');
 const personalController = require('../controllers/personal.controller');
 
-// Todas las rutas requieren JWT
+// Reclamación de cuenta provisional (flujo onboarding por email)
+router.post('/reclamar', personalController.claimProvisionalAccount);
+
+// El resto de rutas requieren JWT
 router.use(authMiddleware);
 
 // Listado filtrable por clinica/grupo (no hace dump global salvo admin/all)
 router.get('/', personalController.getPersonal);
+
+// Onboarding de personal
+router.post('/buscar', personalController.searchPersonal);
+router.post('/invitar', personalController.invitePersonal);
 
 // Schedule/Horarios (canónico para todo el personal)
 router.get('/me/schedule', personalController.getScheduleForCurrent);
