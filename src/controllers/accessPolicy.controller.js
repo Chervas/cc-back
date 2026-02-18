@@ -4,7 +4,11 @@ const { Op } = require('sequelize');
 const { AccessPolicyOverride, UsuarioClinica, Clinica } = require('../../models');
 const { ADMIN_USER_IDS, STAFF_ROLES, isGlobalAdmin } = require('../lib/role-helpers');
 const ALLOWED_SCOPE_TYPES = new Set(['group', 'clinic']);
-const ALLOWED_FEATURE_KEYS = new Set(['marketing']);
+const ALLOWED_FEATURE_KEYS = new Set([
+  'marketing',
+  'quickchat.read_patients',
+  'quickchat.read_team',
+]);
 const ALLOWED_ROLE_CODES = new Set(['doctor', 'assistant', 'reception', 'admin_staff', 'unknown']);
 const ALLOWED_EFFECTS = new Set(['allow', 'deny']);
 

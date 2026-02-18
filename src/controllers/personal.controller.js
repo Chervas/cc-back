@@ -374,7 +374,7 @@ function normalizeModoDisponibilidad(value) {
 
 async function canManagePersonalInClinic(actorId, clinicaId) {
     if (isAdmin(actorId)) return true;
-    return isOwnerPivot(actorId, clinicaId);
+    return hasAdminScopePivot(actorId, clinicaId);
 }
 
 function invitationStateRank(value) {
@@ -392,6 +392,7 @@ function pickBetterInvitationState(a, b) {
 
 function roleRank(value) {
     if (value === 'propietario') return 3;
+    if (value === 'agencia') return 3;
     if (value === 'personaldeclinica') return 2;
     if (value === 'paciente') return 1;
     return 0;
@@ -403,9 +404,9 @@ function pickBetterRole(a, b) {
 
 async function actorCanMergeUsers(actorId, primaryUserId, secondaryUserId) {
     if (isAdmin(actorId)) return true;
-    const ownerClinicIds = await getOwnerClinicIdsForUser(actorId);
-    if (!ownerClinicIds.length) return false;
-    const ownerSet = new Set(ownerClinicIds);
+    const agencyClinicIds = await getAgencyClinicIdsForUser(actorId);
+    if (!agencyClinicIds.length) return false;
+    const agencySet = new Set(agencyClinicIds);
 
     const rows = await UsuarioClinica.findAll({
         where: {
@@ -423,7 +424,7 @@ async function actorCanMergeUsers(actorId, primaryUserId, secondaryUserId) {
     if (!neededClinicIds.length) {
         return false;
     }
-    return neededClinicIds.every((id) => ownerSet.has(id));
+    return neededClinicIds.every((id) => agencySet.has(id));
 }
 
 async function findUserByEmailIncludingAlternatives(email) {
@@ -1305,9 +1306,9 @@ exports.getPersonalBloqueosPermissions = async (req, res) => {
         if (isAdmin(actorId) || Number(actorId) === Number(targetUserId)) {
             allowedClinicIds = targetClinicIds;
         } else {
-            const ownerClinicIds = await getOwnerClinicIdsForUser(actorId);
-            const ownerSet = new Set(ownerClinicIds);
-            allowedClinicIds = targetClinicIds.filter((id) => ownerSet.has(id));
+            const adminScopedClinicIds = await getAdminScopedClinicIdsForUser(actorId);
+            const adminScopedSet = new Set(adminScopedClinicIds);
+            allowedClinicIds = targetClinicIds.filter((id) => adminScopedSet.has(id));
         }
 
         return res.json({
@@ -1684,6 +1685,20 @@ async function isOwnerPivot(userId, clinicId) {
     return !!row;
 }
 
+async function hasAdminScopePivot(userId, clinicId) {
+    if (!Number.isFinite(Number(userId)) || !Number.isFinite(Number(clinicId))) return false;
+    const row = await UsuarioClinica.findOne({
+        where: {
+            id_usuario: Number(userId),
+            id_clinica: Number(clinicId),
+            rol_clinica: { [Op.in]: ADMIN_ROLES },
+        },
+        attributes: ['id_usuario'],
+        raw: true,
+    });
+    return !!row;
+}
+
 async function canEditHorarios(actorId, targetUserId, clinicId) {
     if (isAdmin(actorId)) return true;
     if (!Number.isFinite(Number(clinicId))) return false;
@@ -1693,9 +1708,9 @@ async function canEditHorarios(actorId, targetUserId, clinicId) {
         return hasStaffPivot(actorId, clinicId);
     }
 
-    // Editar horarios de otros: solo propietario de la clínica (MVP; AccessPolicy granular va en Bloque 2)
-    const actorIsOwner = await isOwnerPivot(actorId, clinicId);
-    if (!actorIsOwner) return false;
+    // Editar horarios de otros: propietario/agencia con alcance sobre la clínica.
+    const actorHasAdminScope = await hasAdminScopePivot(actorId, clinicId);
+    if (!actorHasAdminScope) return false;
 
     // Evitar generar schedules "huérfanos" en clínicas donde el usuario no pertenece
     return hasStaffPivot(targetUserId, clinicId);
@@ -1716,6 +1731,36 @@ async function getOwnerClinicIdsForUser(userId) {
         .filter((id) => Number.isFinite(id));
 }
 
+async function getAgencyClinicIdsForUser(userId) {
+    if (!Number.isFinite(Number(userId))) return [];
+    const rows = await UsuarioClinica.findAll({
+        where: {
+            id_usuario: Number(userId),
+            rol_clinica: 'agencia',
+        },
+        attributes: ['id_clinica'],
+        raw: true,
+    });
+    return rows
+        .map((r) => Number(r.id_clinica))
+        .filter((id) => Number.isFinite(id));
+}
+
+async function getAdminScopedClinicIdsForUser(userId) {
+    if (!Number.isFinite(Number(userId))) return [];
+    const rows = await UsuarioClinica.findAll({
+        where: {
+            id_usuario: Number(userId),
+            rol_clinica: { [Op.in]: ADMIN_ROLES },
+        },
+        attributes: ['id_clinica'],
+        raw: true,
+    });
+    return rows
+        .map((r) => Number(r.id_clinica))
+        .filter((id) => Number.isFinite(id));
+}
+
 async function canEditBloqueos(actorId, targetUserId, clinicaId) {
     if (isAdmin(actorId)) return true;
 
@@ -1727,21 +1772,22 @@ async function canEditBloqueos(actorId, targetUserId, clinicaId) {
         return true;
     }
 
-    const ownerClinicIds = await getOwnerClinicIdsForUser(actorId);
-    if (!ownerClinicIds.length) return false;
+    const adminScopedClinicIds = await getAdminScopedClinicIdsForUser(actorId);
+    if (!adminScopedClinicIds.length) return false;
 
-    // Bloqueo global (clinica_id=null): permitir solo si el actor es propietario de *todas* las clínicas
+    // Bloqueo global (clinica_id=null): permitir solo si el actor (propietario/agencia)
+    // tiene alcance en *todas* las clínicas donde trabaja el objetivo
     // donde el usuario objetivo trabaja (evita bloquear en clínicas ajenas).
     if (clinicaId == null) {
         const targetClinicIds = await getAccessibleClinicIdsForUser(targetUserId);
         if (!targetClinicIds.length) return false;
-        const ownerSet = new Set(ownerClinicIds);
-        return targetClinicIds.every((id) => ownerSet.has(id));
+        const adminScopedSet = new Set(adminScopedClinicIds);
+        return targetClinicIds.every((id) => adminScopedSet.has(id));
     }
 
     const cid = Number(clinicaId);
     if (!Number.isFinite(cid)) return false;
-    if (!ownerClinicIds.includes(cid)) return false;
+    if (!adminScopedClinicIds.includes(cid)) return false;
 
     // Evitar bloqueos huérfanos: el usuario objetivo debe pertenecer a la clínica.
     return hasStaffPivot(targetUserId, cid);
