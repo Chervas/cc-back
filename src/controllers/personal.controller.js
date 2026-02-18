@@ -1776,8 +1776,7 @@ async function canEditBloqueos(actorId, targetUserId, clinicaId) {
     if (!adminScopedClinicIds.length) return false;
 
     // Bloqueo global (clinica_id=null): permitir solo si el actor (propietario/agencia)
-    // tiene alcance en *todas* las clínicas donde trabaja el objetivo
-    // donde el usuario objetivo trabaja (evita bloquear en clínicas ajenas).
+    // tiene alcance en *todas* las clínicas donde trabaja el objetivo.
     if (clinicaId == null) {
         const targetClinicIds = await getAccessibleClinicIdsForUser(targetUserId);
         if (!targetClinicIds.length) return false;
