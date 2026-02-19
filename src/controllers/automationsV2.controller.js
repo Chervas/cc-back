@@ -8,6 +8,7 @@ const FlowExecutionV2 = db.FlowExecutionV2;
 const FlowExecutionLogV2 = db.FlowExecutionLogV2;
 const UsuarioClinica = db.UsuarioClinica;
 const Clinica = db.Clinica;
+const flowEngineV2Service = require('../services/flowEngineV2.service');
 
 const ADMIN_USER_IDS = (process.env.ADMIN_USER_IDS || '1')
   .split(',')
@@ -715,7 +716,7 @@ exports.executeTemplateVersion = async (req, res) => {
       ...initialContext,
     };
 
-    const execution = await FlowExecutionV2.create({
+    const createdExecution = await FlowExecutionV2.create({
       idempotency_key: idempotencyKey,
       template_version_id: row.id,
       engine_version: row.engine_version || 'v2',
@@ -730,37 +731,7 @@ exports.executeTemplateVersion = async (req, res) => {
       created_by: access.user_id,
     });
 
-    // Fase 1: ejecución manual mínima (stub) para poder validar idempotencia y trazabilidad.
-    // El worker real por nodos llega en el siguiente bloque.
-    const now = new Date();
-    await FlowExecutionLogV2.create({
-      flow_execution_id: execution.id,
-      node_id: row.entry_node_id,
-      node_type: 'system/execute_stub',
-      status: 'success',
-      started_at: now,
-      finished_at: now,
-      audit_snapshot: {
-        note: 'execution_stub_completed',
-        entry_node_id: row.entry_node_id,
-      },
-    });
-
-    await execution.update({
-      status: 'completed',
-      current_node_id: null,
-      context: {
-        ...context,
-        outputs: {
-          ...(context.outputs || {}),
-          [row.entry_node_id]: {
-            status: 'success',
-            at: now.toISOString(),
-            kind: 'execution_stub',
-          },
-        },
-      },
-    });
+    const execution = await flowEngineV2Service.runExecution(createdExecution.id);
 
     return res.status(202).json({
       success: true,
@@ -770,6 +741,52 @@ exports.executeTemplateVersion = async (req, res) => {
   } catch (err) {
     console.error('Error executeTemplateVersion v2', err);
     return res.status(500).json({ success: false, error: 'execute_failed', message: err.message });
+  }
+};
+
+exports.resumeExecution = async (req, res) => {
+  try {
+    const access = await resolveAccess(req);
+    const executionId = parseIntOrNull(req.params?.id);
+    if (!executionId) {
+      return res.status(400).json({ success: false, error: 'invalid_execution_id' });
+    }
+
+    const execution = await FlowExecutionV2.findByPk(executionId);
+    if (!execution || !hasScopeAccess(access, execution)) {
+      return res.status(404).json({ success: false, error: 'execution_not_found' });
+    }
+
+    if (execution.status !== 'waiting') {
+      return res.status(409).json({
+        success: false,
+        error: 'execution_not_waiting',
+        message: `La ejecución ${execution.id} no está en espera (status=${execution.status})`,
+      });
+    }
+
+    const mode = cleanString(req.body?.mode) || 'timeout';
+    if (!['timeout', 'response'].includes(mode)) {
+      return res.status(400).json({
+        success: false,
+        error: 'invalid_resume_mode',
+        message: "mode debe ser 'timeout' o 'response'",
+      });
+    }
+
+    const responseText = req.body?.response_text ?? null;
+    const updatedExecution = await flowEngineV2Service.runExecution(execution.id, {
+      resumeMode: mode,
+      responseText,
+    });
+
+    return res.json({
+      success: true,
+      data: updatedExecution,
+    });
+  } catch (err) {
+    console.error('Error resumeExecution v2', err);
+    return res.status(500).json({ success: false, error: 'resume_failed', message: err.message });
   }
 };
 

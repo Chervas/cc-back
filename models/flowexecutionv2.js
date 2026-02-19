@@ -52,6 +52,8 @@ module.exports = (sequelize, DataTypes) => {
     trigger_entity_id: { type: DataTypes.INTEGER, allowNull: true },
     clinic_id: { type: DataTypes.INTEGER, allowNull: true },
     group_id: { type: DataTypes.INTEGER, allowNull: true },
+    wait_until: { type: DataTypes.DATE, allowNull: true },
+    waiting_meta: { type: DataTypes.JSON, allowNull: true },
     last_error: { type: DataTypes.TEXT, allowNull: true },
     created_by: { type: DataTypes.INTEGER, allowNull: false },
   }, {
