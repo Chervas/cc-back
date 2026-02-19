@@ -5,6 +5,7 @@ const whatsappService = require('../services/whatsapp.service');
 const whatsappTemplatesService = require('../services/whatsappTemplates.service');
 const whatsappPhonesService = require('../services/whatsappPhones.service');
 const automationDefaultsService = require('../services/automationDefaults.service');
+const automationsV2ResumeService = require('../services/automationsV2Resume.service');
 const { getIO } = require('../services/socket.service');
 const db = require('../../models');
 
@@ -322,6 +323,26 @@ createWorker('webhook_whatsapp', async (job) => {
         conv.last_inbound_at = new Date();
         conv.unread_count = (conv.unread_count || 0) + 1;
         await conv.save();
+
+        try {
+            const resumeResult = await automationsV2ResumeService.enqueueInboundResponseResume({
+                clinicId: conv.clinic_id || clinicId,
+                conversationId: conv.id,
+                patientId: conv.patient_id || null,
+                leadId: conv.lead_id || null,
+                messageText: content,
+                inboundMessageId: inboundMsg.id,
+                channel: 'whatsapp',
+            });
+
+            dlog('Automations v2 inbound auto-resume', {
+                conversationId: conv.id,
+                clinicId: conv.clinic_id || clinicId,
+                ...resumeResult,
+            });
+        } catch (resumeErr) {
+            console.error('[automations-v2] Error en auto-resume inbound', resumeErr?.message || resumeErr);
+        }
 
         const io = getIO();
         if (io) {

@@ -1,5 +1,6 @@
 'use strict';
 const axios = require('axios');
+const crypto = require('crypto');
 
 const DEV_TOKEN = process.env.GOOGLE_ADS_DEVELOPER_TOKEN;
 const CLIENT_ID = process.env.GOOGLE_CLIENT_ID;
@@ -52,13 +53,15 @@ async function uploadClickConversion({
   currency = 'EUR',
   conversionDateTime,
   externalId,
-  userAgent,
-  ipAddress
+  email,
+  phone,
+  consentStatus
 }) {
   if (!DEV_TOKEN) throw new Error('Falta GOOGLE_ADS_DEVELOPER_TOKEN');
   const accessToken = await getAccessToken();
   const url = `https://googleads.googleapis.com/${API_VERSION}/customers/${String(customerId).replace(/-/g, '')}:uploadClickConversions`;
-  const conversions = [{
+  const userIdentifiers = buildUserIdentifiers({ email, phone });
+  const conversion = {
     conversionAction,
     conversionDateTime,
     currencyCode: currency,
@@ -66,16 +69,66 @@ async function uploadClickConversion({
     gclid,
     gbraid,
     wbraid,
-    orderId: externalId,
-    userIdentifiers: [
-      externalId ? { userIdentifierSource: 'FIRST_PARTY', hashedUserId: externalId } : null,
-      userAgent ? { userIdentifierSource: 'FIRST_PARTY', userAgent } : null,
-      ipAddress ? { userIdentifierSource: 'FIRST_PARTY', ipAddress } : null
-    ].filter(Boolean)
-  }];
+    orderId: externalId
+  };
+  if (userIdentifiers.length) {
+    conversion.userIdentifiers = userIdentifiers;
+  }
+  if (consentStatus) {
+    conversion.consent = { adUserData: consentStatus };
+  }
+  const conversions = [conversion];
   const body = { customerId: String(customerId).replace(/-/g, ''), conversions, partialFailure: true, validateOnly: false };
   const { data } = await axios.post(url, body, { headers: buildHeaders(accessToken), timeout: 10000 });
   return data;
+}
+
+function sha256(value) {
+  return crypto.createHash('sha256').update(value).digest('hex');
+}
+
+function normalizeAndHashEmail(email) {
+  if (!email) return null;
+  const raw = String(email).trim().toLowerCase();
+  const at = raw.indexOf('@');
+  if (at <= 0 || at === raw.length - 1) return null;
+  let local = raw.slice(0, at);
+  const domain = raw.slice(at + 1);
+  if (!domain) return null;
+  if (domain === 'gmail.com' || domain === 'googlemail.com') {
+    local = local.replace(/\./g, '');
+  }
+  return sha256(`${local}@${domain}`);
+}
+
+function normalizeAndHashPhone(phone) {
+  if (!phone) return null;
+  let digits = String(phone).replace(/\D/g, '');
+  if (!digits) return null;
+  if (digits.startsWith('00')) {
+    digits = digits.slice(2);
+  }
+  // E.164 (incluyendo + prefijo país)
+  return sha256(`+${digits}`);
+}
+
+function buildUserIdentifiers({ email, phone }) {
+  const out = [];
+  const hashedEmail = normalizeAndHashEmail(email);
+  if (hashedEmail) {
+    out.push({
+      hashedEmail,
+      userIdentifierSource: 'FIRST_PARTY'
+    });
+  }
+  const hashedPhone = normalizeAndHashPhone(phone);
+  if (hashedPhone) {
+    out.push({
+      hashedPhoneNumber: hashedPhone,
+      userIdentifierSource: 'FIRST_PARTY'
+    });
+  }
+  return out;
 }
 
 function leadActionPayload(name = 'Lead – ClinicaClick') {
