@@ -9,6 +9,7 @@ const FlowExecutionLogV2 = db.FlowExecutionLogV2;
 const UsuarioClinica = db.UsuarioClinica;
 const Clinica = db.Clinica;
 const jobRequestsService = require('../services/jobRequests.service');
+const jobScheduler = require('../services/jobScheduler.service');
 
 const ADMIN_USER_IDS = (process.env.ADMIN_USER_IDS || '1')
   .split(',')
@@ -790,6 +791,7 @@ exports.executeTemplateVersion = async (req, res) => {
       requestedByName,
       requestedByRole: cleanString(req.userData?.role || req.userData?.rol || 'admin'),
     });
+    jobScheduler.triggerImmediate(queueJob.id).catch(() => {});
 
     return res.status(202).json({
       success: true,
@@ -858,6 +860,7 @@ exports.resumeExecution = async (req, res) => {
       requestedByName,
       requestedByRole: cleanString(req.userData?.role || req.userData?.rol || 'admin'),
     });
+    jobScheduler.triggerImmediate(queueJob.id).catch(() => {});
 
     return res.status(202).json({
       success: true,
