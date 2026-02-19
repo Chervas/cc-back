@@ -90,6 +90,22 @@ function resolvePermissionScope(context, clinicIds) {
   };
 }
 
+function getEffectiveRole(context, selectedClinicIds = []) {
+  const selected = Array.isArray(selectedClinicIds) && selectedClinicIds.length
+    ? selectedClinicIds
+    : context.clinicIds;
+
+  const roles = Array.from(new Set(
+    selected
+      .map((clinicId) => context.roleByClinic.get(Number(clinicId))?.rol_clinica || null)
+      .filter(Boolean)
+  ));
+
+  if (!roles.length) return 'unknown';
+  if (roles.length === 1) return roles[0];
+  return 'mixed';
+}
+
 function getScopeErrorResponse(reason) {
   if (reason === 'invalid') {
     return { status: 400, body: { error: 'clinic_id inválido' } };
@@ -211,9 +227,21 @@ exports.getConversationPermissions = async (req, res) => {
 
     const selectedClinicIds = scope.ok ? scope.clinicIds : [];
     const selectedPermissions = resolvePermissionScope(context, selectedClinicIds);
+    const readTeam = selectedPermissions.teamClinicIds.length > 0;
+    const readPatients = selectedPermissions.patientClinicIds.length > 0;
+    const selectedClinicId = selectedClinicIds.length === 1 ? selectedClinicIds[0] : null;
+    const effectiveRole = getEffectiveRole(context, selectedClinicIds);
 
     return res.json({
+      // Contrato canónico (front)
+      selected_clinic_id: selectedClinicId,
+      read_patients: readPatients,
+      read_team: readTeam,
+      read_leads: readPatients,
       can_use_all_clinics: context.canUseAllClinics,
+      effective_role: effectiveRole,
+
+      // Payload extendido (debug / futura UI)
       has_quickchat_access: context.hasAnyRead,
       has_agencia_role: context.hasAgenciaRole,
       clinics: context.clinicIds.map((clinicId) => {
@@ -231,8 +259,8 @@ exports.getConversationPermissions = async (req, res) => {
       }),
       selected: {
         clinic_ids: selectedClinicIds,
-        read_team: selectedPermissions.teamClinicIds.length > 0,
-        read_patients: selectedPermissions.patientClinicIds.length > 0,
+        read_team: readTeam,
+        read_patients: readPatients,
       },
     });
   } catch (err) {
