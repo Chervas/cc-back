@@ -7,6 +7,13 @@ module.exports = (sequelize, DataTypes) => {
       if (models.Clinica) {
         Tratamiento.belongsTo(models.Clinica, { foreignKey: 'clinica_id', targetKey: 'id_clinica', as: 'clinica' });
       }
+      if (models.AppointmentFlowTemplate) {
+        Tratamiento.belongsTo(models.AppointmentFlowTemplate, {
+          foreignKey: 'appointment_flow_template_id',
+          targetKey: 'id',
+          as: 'appointmentFlowTemplate'
+        });
+      }
        if (models.DependenciaTratamiento) {
         Tratamiento.hasMany(models.DependenciaTratamiento, { foreignKey: 'id_tratamiento_origen', as: 'dependenciasOrigen' });
         Tratamiento.hasMany(models.DependenciaTratamiento, { foreignKey: 'id_tratamiento_destino', as: 'dependenciasDestino' });
@@ -99,6 +106,10 @@ module.exports = (sequelize, DataTypes) => {
       allowNull: true
     },
     grupo_clinica_id: {
+      type: DataTypes.INTEGER,
+      allowNull: true
+    },
+    appointment_flow_template_id: {
       type: DataTypes.INTEGER,
       allowNull: true
     }

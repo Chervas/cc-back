@@ -11,5 +11,7 @@ router.delete('/:id', tratamientosController.deleteTratamiento);
 router.post('/:id/ocultar', tratamientosController.ocultarTratamiento);
 router.post('/:id/restaurar', tratamientosController.restaurarTratamiento);
 router.post('/:id/personalizar', tratamientosController.personalizarTratamiento);
+router.get('/:id/flow', tratamientosController.getTratamientoFlow);
+router.put('/:id/flow', tratamientosController.setTratamientoFlow);
 
 module.exports = router;
