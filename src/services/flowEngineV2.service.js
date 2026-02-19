@@ -395,6 +395,14 @@ async function runExecution(executionId, options = {}) {
   }
 
   if (execution.status === 'waiting' && resumeMode) {
+    if (
+      resumeMode === 'timeout'
+      && execution.wait_until
+      && new Date(execution.wait_until).getTime() > Date.now()
+    ) {
+      return execution;
+    }
+
     const waitingNodeId = cleanString(execution.current_node_id);
     const waitingNode = waitingNodeId ? nodeMap.get(waitingNodeId) : null;
 

@@ -8,7 +8,7 @@ const FlowExecutionV2 = db.FlowExecutionV2;
 const FlowExecutionLogV2 = db.FlowExecutionLogV2;
 const UsuarioClinica = db.UsuarioClinica;
 const Clinica = db.Clinica;
-const flowEngineV2Service = require('../services/flowEngineV2.service');
+const jobRequestsService = require('../services/jobRequests.service');
 
 const ADMIN_USER_IDS = (process.env.ADMIN_USER_IDS || '1')
   .split(',')
@@ -163,6 +163,46 @@ function mapTemplate(row, { includeNodes = true } = {}) {
 
   if (includeNodes) {
     base.nodes = Array.isArray(item.nodes) ? item.nodes : [];
+  }
+
+  return base;
+}
+
+function mapExecution(row, { includeContext = true } = {}) {
+  const item = row?.toJSON ? row.toJSON() : row;
+  const base = {
+    id: item.id,
+    idempotency_key: item.idempotency_key,
+    template_version_id: item.template_version_id,
+    engine_version: item.engine_version,
+    status: item.status,
+    current_node_id: item.current_node_id ?? null,
+    trigger_type: item.trigger_type,
+    trigger_entity_type: item.trigger_entity_type ?? null,
+    trigger_entity_id: item.trigger_entity_id ?? null,
+    clinic_id: item.clinic_id ?? null,
+    group_id: item.group_id ?? null,
+    wait_until: item.wait_until ?? null,
+    waiting_meta: item.waiting_meta ?? null,
+    last_error: item.last_error ?? null,
+    created_by: item.created_by,
+    created_at: item.created_at,
+    updated_at: item.updated_at,
+  };
+
+  if (includeContext) {
+    base.context = item.context ?? {};
+  }
+
+  if (item.templateVersion) {
+    const t = item.templateVersion;
+    base.template = {
+      id: t.id,
+      template_key: t.template_key,
+      version: t.version,
+      name: t.name,
+      trigger_type: t.trigger_type,
+    };
   }
 
   return base;
@@ -731,12 +771,35 @@ exports.executeTemplateVersion = async (req, res) => {
       created_by: access.user_id,
     });
 
-    const execution = await flowEngineV2Service.runExecution(createdExecution.id);
+    const requestedByName = cleanString(
+      req.userData?.name
+      || req.userData?.nombre
+      || req.userData?.username
+      || req.userData?.email
+      || null
+    );
+
+    const queueJob = await jobRequestsService.enqueueJobRequest({
+      type: 'automations_v2_execute',
+      priority: 'high',
+      origin: 'automations_v2',
+      payload: {
+        execution_id: createdExecution.id,
+      },
+      requestedBy: access.user_id,
+      requestedByName,
+      requestedByRole: cleanString(req.userData?.role || req.userData?.rol || 'admin'),
+    });
 
     return res.status(202).json({
       success: true,
       deduplicated: false,
-      data: execution,
+      data: mapExecution(createdExecution, { includeContext: true }),
+      queue: {
+        enqueued: true,
+        job_request_id: queueJob.id,
+        status: queueJob.status,
+      },
     });
   } catch (err) {
     console.error('Error executeTemplateVersion v2', err);
@@ -774,19 +837,124 @@ exports.resumeExecution = async (req, res) => {
       });
     }
 
-    const responseText = req.body?.response_text ?? null;
-    const updatedExecution = await flowEngineV2Service.runExecution(execution.id, {
-      resumeMode: mode,
-      responseText,
+    const requestedByName = cleanString(
+      req.userData?.name
+      || req.userData?.nombre
+      || req.userData?.username
+      || req.userData?.email
+      || null
+    );
+
+    const queueJob = await jobRequestsService.enqueueJobRequest({
+      type: 'automations_v2_execute',
+      priority: 'high',
+      origin: 'automations_v2_resume',
+      payload: {
+        execution_id: execution.id,
+        resume_mode: mode,
+        response_text: req.body?.response_text ?? null,
+      },
+      requestedBy: access.user_id,
+      requestedByName,
+      requestedByRole: cleanString(req.userData?.role || req.userData?.rol || 'admin'),
     });
 
-    return res.json({
+    return res.status(202).json({
       success: true,
-      data: updatedExecution,
+      data: mapExecution(execution, { includeContext: true }),
+      queue: {
+        enqueued: true,
+        job_request_id: queueJob.id,
+        status: queueJob.status,
+      },
     });
   } catch (err) {
     console.error('Error resumeExecution v2', err);
     return res.status(500).json({ success: false, error: 'resume_failed', message: err.message });
+  }
+};
+
+exports.listExecutions = async (req, res) => {
+  try {
+    const access = await resolveAccess(req);
+    if (!access.is_admin && access.clinic_ids.size === 0 && access.group_ids.size === 0) {
+      return res.status(403).json({ success: false, error: 'forbidden' });
+    }
+
+    const limit = parseLimit(req.query?.limit, 25);
+    const offset = parseOffset(req.query?.offset);
+    const includeContext = parseBool(req.query?.include_context, false);
+
+    const where = {};
+    const status = cleanString(req.query?.status);
+    if (status) where.status = status;
+
+    const triggerType = cleanString(req.query?.trigger_type);
+    if (triggerType) where.trigger_type = triggerType;
+
+    const triggerEntityId = parseIntOrNull(req.query?.trigger_entity_id);
+    if (triggerEntityId) where.trigger_entity_id = triggerEntityId;
+
+    const clinicId = parseIntOrNull(req.query?.clinic_id);
+    if (clinicId) {
+      if (!access.is_admin && !access.clinic_ids.has(clinicId)) {
+        return res.status(403).json({ success: false, error: 'forbidden_scope' });
+      }
+      where.clinic_id = clinicId;
+    }
+
+    const groupId = parseIntOrNull(req.query?.group_id);
+    if (groupId) {
+      if (!access.is_admin && !access.group_ids.has(groupId)) {
+        return res.status(403).json({ success: false, error: 'forbidden_scope' });
+      }
+      where.group_id = groupId;
+    }
+
+    if (!access.is_admin && !clinicId && !groupId) {
+      const scopeFilters = [];
+      if (access.clinic_ids.size) {
+        scopeFilters.push({ clinic_id: { [Op.in]: Array.from(access.clinic_ids) } });
+      }
+      if (access.group_ids.size) {
+        scopeFilters.push({ group_id: { [Op.in]: Array.from(access.group_ids) } });
+      }
+      scopeFilters.push({ created_by: access.user_id });
+
+      where[Op.and] = where[Op.and] || [];
+      where[Op.and].push({ [Op.or]: scopeFilters });
+    }
+
+    const templateKey = sanitizeTemplateKey(req.query?.template_key);
+    const templateWhere = {};
+    if (templateKey) templateWhere.template_key = templateKey;
+
+    const { count, rows } = await FlowExecutionV2.findAndCountAll({
+      where,
+      include: [{
+        model: AutomationFlowTemplateV2,
+        as: 'templateVersion',
+        attributes: ['id', 'template_key', 'version', 'name', 'trigger_type'],
+        required: !!templateKey,
+        ...(templateKey ? { where: templateWhere } : {}),
+      }],
+      order: [['id', 'DESC']],
+      limit,
+      offset,
+    });
+
+    return res.json({
+      success: true,
+      data: rows.map((row) => mapExecution(row, { includeContext })),
+      pagination: {
+        total: count,
+        limit,
+        offset,
+      },
+    });
+  } catch (err) {
+    console.error('Error listExecutions v2', err);
+    return res.status(500).json({ success: false, error: 'list_executions_failed', message: err.message });
   }
 };
 

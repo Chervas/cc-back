@@ -23,6 +23,7 @@ router.get('/v2/templates/:template_key/versions/:version', automationsV2Control
 router.put('/v2/templates/:template_key/versions/:version', automationsV2Controller.updateTemplateDraft);
 router.post('/v2/templates/:template_key/versions/:version/publish', automationsV2Controller.publishTemplateVersion);
 router.post('/v2/templates/:template_key/versions/:version/execute', automationsV2Controller.executeTemplateVersion);
+router.get('/v2/executions', automationsV2Controller.listExecutions);
 router.get('/v2/executions/:id', automationsV2Controller.getExecution);
 router.get('/v2/executions/:id/logs', automationsV2Controller.getExecutionLogs);
 router.post('/v2/executions/:id/resume', automationsV2Controller.resumeExecution);
