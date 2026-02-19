@@ -26,6 +26,12 @@ const ROLES_CLINICA = new Set(ROLES_CLINICA_ARR);
 const SUBROLES_CLINICA = new Set(SUBROLES_CLINICA_ARR);
 
 const isAdmin = (userId) => isGlobalAdmin(userId);
+const ACTIVE_STAFF_INVITATION_WHERE = {
+    [Op.or]: [
+        { estado_invitacion: 'aceptada' },
+        { estado_invitacion: null },
+    ],
+};
 
 async function getAccessibleClinicIdsForUser(userId) {
     // Admin: puede acceder a todas las clinicas (pero seguimos filtrando por query para evitar dumps enormes)
@@ -43,6 +49,7 @@ async function getAccessibleClinicIdsForUser(userId) {
         where: {
             id_usuario: userId,
             rol_clinica: { [Op.in]: STAFF_ROLES },
+            ...ACTIVE_STAFF_INVITATION_WHERE,
         },
         attributes: ['id_clinica'],
         raw: true,
@@ -412,6 +419,7 @@ async function actorCanMergeUsers(actorId, primaryUserId, secondaryUserId) {
         where: {
             id_usuario: { [Op.in]: [Number(primaryUserId), Number(secondaryUserId)] },
             rol_clinica: { [Op.in]: STAFF_ROLES },
+            ...ACTIVE_STAFF_INVITATION_WHERE,
         },
         attributes: ['id_clinica'],
         raw: true,
@@ -592,9 +600,10 @@ exports.getPersonal = async (req, res) => {
                         id_clinica: { [Op.in]: targetClinicIds },
                     },
                     through: {
-                        attributes: ['rol_clinica', 'subrol_clinica'],
+                        attributes: ['rol_clinica', 'subrol_clinica', 'estado_invitacion'],
                         where: {
                             rol_clinica: { [Op.in]: STAFF_ROLES },
+                            ...ACTIVE_STAFF_INVITATION_WHERE,
                         },
                     },
                 },
@@ -634,9 +643,10 @@ exports.getPersonalById = async (req, res) => {
                         ? undefined
                         : { id_clinica: { [Op.in]: accessibleClinicIds } },
                     through: {
-                        attributes: ['rol_clinica', 'subrol_clinica'],
+                        attributes: ['rol_clinica', 'subrol_clinica', 'estado_invitacion'],
                         where: {
                             rol_clinica: { [Op.in]: STAFF_ROLES },
+                            ...ACTIVE_STAFF_INVITATION_WHERE,
                         },
                     },
                 },
@@ -673,6 +683,7 @@ exports.updatePersonalMember = async (req, res) => {
             where: {
                 id_usuario: actorId,
                 rol_clinica: 'propietario',
+                ...ACTIVE_STAFF_INVITATION_WHERE,
             },
             attributes: ['id_clinica'],
             raw: true,
@@ -695,6 +706,8 @@ exports.updatePersonalMember = async (req, res) => {
                 where: {
                     id_usuario: targetUserId,
                     id_clinica: { [Op.in]: actorOwnerClinicIds },
+                    rol_clinica: { [Op.in]: STAFF_ROLES },
+                    ...ACTIVE_STAFF_INVITATION_WHERE,
                 },
                 attributes: ['id_clinica'],
                 raw: true,
@@ -1664,6 +1677,7 @@ async function hasStaffPivot(userId, clinicId) {
             id_usuario: Number(userId),
             id_clinica: Number(clinicId),
             rol_clinica: { [Op.in]: STAFF_ROLES },
+            ...ACTIVE_STAFF_INVITATION_WHERE,
         },
         attributes: ['id_usuario'],
         raw: true,
@@ -1678,6 +1692,7 @@ async function isOwnerPivot(userId, clinicId) {
             id_usuario: Number(userId),
             id_clinica: Number(clinicId),
             rol_clinica: 'propietario',
+            ...ACTIVE_STAFF_INVITATION_WHERE,
         },
         attributes: ['id_usuario'],
         raw: true,
@@ -1692,6 +1707,7 @@ async function hasAdminScopePivot(userId, clinicId) {
             id_usuario: Number(userId),
             id_clinica: Number(clinicId),
             rol_clinica: { [Op.in]: ADMIN_ROLES },
+            ...ACTIVE_STAFF_INVITATION_WHERE,
         },
         attributes: ['id_usuario'],
         raw: true,
@@ -1722,6 +1738,7 @@ async function getOwnerClinicIdsForUser(userId) {
         where: {
             id_usuario: Number(userId),
             rol_clinica: 'propietario',
+            ...ACTIVE_STAFF_INVITATION_WHERE,
         },
         attributes: ['id_clinica'],
         raw: true,
@@ -1737,6 +1754,7 @@ async function getAgencyClinicIdsForUser(userId) {
         where: {
             id_usuario: Number(userId),
             rol_clinica: 'agencia',
+            ...ACTIVE_STAFF_INVITATION_WHERE,
         },
         attributes: ['id_clinica'],
         raw: true,
@@ -1752,6 +1770,7 @@ async function getAdminScopedClinicIdsForUser(userId) {
         where: {
             id_usuario: Number(userId),
             rol_clinica: { [Op.in]: ADMIN_ROLES },
+            ...ACTIVE_STAFF_INVITATION_WHERE,
         },
         attributes: ['id_clinica'],
         raw: true,
@@ -2127,7 +2146,7 @@ const crypto = require('crypto');
 
 /**
  * POST /api/personal/buscar
- * Busca usuarios por email, nombre o teléfono.
+ * Busca usuarios existentes por email exacto.
  * Devuelve coincidencias con su estado de vinculación a la clínica solicitada.
  *
  * Body: { query: string, clinica_id: number }
@@ -2140,8 +2159,12 @@ exports.buscarPersonal = async (req, res) => {
         }
 
         const { query, clinica_id } = req.body;
-        if (!query || typeof query !== 'string' || query.trim().length < 2) {
-            return res.status(400).json({ message: 'query debe tener al menos 2 caracteres' });
+        if (!query || typeof query !== 'string') {
+            return res.status(400).json({ message: 'query es obligatorio' });
+        }
+        const email = normalizeEmail(query);
+        if (!email) {
+            return res.status(400).json({ message: 'Debes introducir un email completo' });
         }
         const clinicaId = parseIntOrNull(clinica_id);
         if (!Number.isFinite(clinicaId)) {
@@ -2154,21 +2177,20 @@ exports.buscarPersonal = async (req, res) => {
             return res.status(403).json({ message: 'Forbidden' });
         }
 
-        const q = query.trim();
+        const escapedEmail = escapeJsonString(email);
         const users = await Usuario.findAll({
-            attributes: { exclude: ['password_usuario'] },
+            attributes: ['id_usuario', 'nombre', 'apellidos', 'email_usuario', 'telefono', 'avatar', 'es_provisional'],
             where: {
                 [Op.or]: [
-                    { nombre: { [Op.like]: `%${q}%` } },
-                    { apellidos: { [Op.like]: `%${q}%` } },
-                    { email_usuario: { [Op.like]: `%${q}%` } },
-                    { telefono: { [Op.like]: `%${q}%` } },
+                    { email_usuario: email },
+                    { emails_alternativos: { [Op.like]: `%"${escapedEmail}"%` } },
                 ],
             },
             include: [
                 {
                     model: Clinica,
                     as: 'Clinicas',
+                    attributes: ['id_clinica'],
                     required: false,
                     through: {
                         attributes: ['rol_clinica', 'subrol_clinica', 'estado_invitacion'],
@@ -2176,13 +2198,12 @@ exports.buscarPersonal = async (req, res) => {
                 },
             ],
             order: [['nombre', 'ASC']],
-            limit: 20,
+            limit: 1,
         });
 
         // Enriquecer cada resultado con su estado respecto a la clínica solicitada
         const results = users.map((u) => {
             const json = u.toJSON();
-            delete json.password_usuario;
 
             const clinicas = json.Clinicas || [];
             const pivot = clinicas.find(
@@ -2190,7 +2211,13 @@ exports.buscarPersonal = async (req, res) => {
             );
 
             return {
-                ...json,
+                id_usuario: json.id_usuario,
+                nombre: json.nombre,
+                apellidos: json.apellidos || '',
+                email_usuario: json.email_usuario || '',
+                telefono: json.telefono || '',
+                avatar: json.avatar || null,
+                es_provisional: !!json.es_provisional,
                 vinculacion_clinica: pivot
                     ? {
                           ya_vinculado: true,

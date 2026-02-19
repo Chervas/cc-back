@@ -1,10 +1,17 @@
 // src/routes/userclinicas.routes.js
 const express = require('express');
 const jwt = require('jsonwebtoken');
+const { Op } = require('sequelize');
 const { Clinica, UsuarioClinica, Usuario, GrupoClinica } = require('../../models');
 const { ADMIN_USER_IDS, STAFF_ROLES, isGlobalAdmin } = require('../lib/role-helpers');
 
 const router = express.Router();
+const ACTIVE_STAFF_INVITATION_WHERE = {
+    [Op.or]: [
+        { estado_invitacion: 'aceptada' },
+        { estado_invitacion: null },
+    ],
+};
 
 /**
  * Función auxiliar para obtener el userId del token JWT
@@ -77,7 +84,10 @@ router.get('/list', async (req, res) => {
 
             // Para administradores: obtener TODAS las clínicas
             const adminAssignments = await UsuarioClinica.findAll({
-                where: { id_usuario: userId },
+                where: {
+                    id_usuario: userId,
+                    ...ACTIVE_STAFF_INVITATION_WHERE,
+                },
                 attributes: ['id_clinica', 'rol_clinica', 'subrol_clinica']
             });
 
@@ -191,7 +201,8 @@ router.get('/list', async (req, res) => {
                     }],
                     through: {
                         where: {
-                            rol_clinica: STAFF_ROLES // Solo roles apropiados
+                            rol_clinica: STAFF_ROLES, // Solo roles apropiados
+                            ...ACTIVE_STAFF_INVITATION_WHERE,
                         }
                     }
                 }],
@@ -308,7 +319,8 @@ router.get('/:id', async (req, res) => {
                     where: { id_clinica: id },
                     through: {
                         where: {
-                            rol_clinica: STAFF_ROLES
+                            rol_clinica: STAFF_ROLES,
+                            ...ACTIVE_STAFF_INVITATION_WHERE,
                         }
                     }
                 }]

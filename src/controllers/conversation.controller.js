@@ -14,7 +14,13 @@ const { Conversation, Message, UsuarioClinica, Paciente, Lead, ConversationRead 
 
 async function getUserQuickChatContext(userId) {
   const memberships = await UsuarioClinica.findAll({
-    where: { id_usuario: userId },
+    where: {
+      id_usuario: userId,
+      [Op.or]: [
+        { estado_invitacion: 'aceptada' },
+        { estado_invitacion: null },
+      ],
+    },
     attributes: ['id_clinica', 'rol_clinica', 'subrol_clinica'],
     raw: true,
   });
