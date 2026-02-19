@@ -2294,7 +2294,6 @@ exports.invitarPersonal = async (req, res) => {
 
         let targetUser;
         let isNewProvisional = false;
-
         if (id_usuario) {
             // ── Invitar usuario existente ──
             targetUser = await Usuario.findByPk(id_usuario, {
@@ -2309,9 +2308,55 @@ exports.invitarPersonal = async (req, res) => {
                 where: { id_usuario: targetUser.id_usuario, id_clinica: clinicaId },
             });
             if (existingPivot) {
+                const existingEstado = normalizeEstadoInvitacion(existingPivot.estado_invitacion, 'aceptada') || 'aceptada';
+
+                // Si está pendiente/rechazada, se permite reenviar la invitación.
+                if (existingEstado === 'pendiente' || existingEstado === 'rechazada') {
+                    const resentToken = crypto.randomBytes(32).toString('hex');
+                    const now = new Date();
+                    const nextSubrol = (subrol_clinica !== undefined)
+                        ? (subrol_clinica || null)
+                        : existingPivot.subrol_clinica;
+
+                    existingPivot.rol_clinica = rol_clinica || existingPivot.rol_clinica;
+                    existingPivot.subrol_clinica = nextSubrol;
+                    existingPivot.estado_invitacion = 'pendiente';
+                    existingPivot.invite_token = resentToken;
+                    existingPivot.invited_at = now;
+                    existingPivot.responded_at = null;
+                    existingPivot.invitado_por = actorId;
+                    existingPivot.fecha_invitacion = now;
+                    await existingPivot.save({
+                        fields: [
+                            'rol_clinica',
+                            'subrol_clinica',
+                            'estado_invitacion',
+                            'invite_token',
+                            'invited_at',
+                            'responded_at',
+                            'invitado_por',
+                            'fecha_invitacion',
+                            'updated_at',
+                        ],
+                    });
+
+                    const userJson = targetUser.toJSON ? targetUser.toJSON() : { ...targetUser };
+                    delete userJson.password_usuario;
+
+                    return res.status(200).json({
+                        message: 'Invitación reenviada',
+                        usuario: userJson,
+                        clinica_id: clinicaId,
+                        estado_invitacion: 'pendiente',
+                        invite_token: resentToken,
+                        es_provisional: !!targetUser.es_provisional,
+                        resent: true,
+                    });
+                }
+
                 return res.status(409).json({
                     message: 'El usuario ya está vinculado a esta clínica',
-                    estado_invitacion: existingPivot.estado_invitacion,
+                    estado_invitacion: existingEstado,
                 });
             }
         } else {
@@ -2359,6 +2404,8 @@ exports.invitarPersonal = async (req, res) => {
             subrol_clinica: subrol_clinica || null,
             estado_invitacion: 'pendiente',
             invite_token: inviteToken,
+            invitado_por: actorId,
+            fecha_invitacion: new Date(),
             invited_at: new Date(),
         });
 
