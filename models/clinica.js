@@ -7,6 +7,9 @@ module.exports = (sequelize, DataTypes) => {
     static associate(models) {
       // Asociación con GrupoClinica: cada clínica puede pertenecer a un grupo (opcional)
       Clinica.belongsTo(models.GrupoClinica, { foreignKey: 'grupoClinicaId', as: 'grupoClinica' });
+      if (models.ClinicaHorario) {
+        Clinica.hasMany(models.ClinicaHorario, { foreignKey: 'clinica_id', as: 'horarios' });
+      }
       if (models.PacienteClinica) {
         Clinica.hasMany(models.PacienteClinica, { foreignKey: 'clinica_id', as: 'pacientesVinculados' });
       }

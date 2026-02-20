@@ -1,12 +1,17 @@
 const express = require('express');
 const router = express.Router();
 const clinicaController = require('../controllers/clinica.controller');
+const authMiddleware = require('./auth.middleware');
 
 // Ruta para obtener todas las clínicas
 router.get('/', clinicaController.getAllClinicas);
 
 // Ruta para buscar una clínica
 router.get('/search', clinicaController.searchClinicas);
+
+// Horarios estructurados de clínica (requiere autenticación)
+router.get('/:id/horarios', authMiddleware, clinicaController.getHorarios);
+router.put('/:id/horarios', authMiddleware, clinicaController.putHorarios);
 
 // Ruta para obtener una clínica por ID
 router.get('/:id', clinicaController.getClinicaById);
