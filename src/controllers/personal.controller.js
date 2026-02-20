@@ -933,7 +933,7 @@ exports.getMyInvitations = async (req, res) => {
                     model: Usuario,
                     as: 'Invitador',
                     required: false,
-                    attributes: ['id_usuario', 'nombre', 'apellidos', 'email_usuario'],
+                    attributes: ['id_usuario', 'nombre', 'apellidos', 'email_usuario', 'avatar'],
                 },
             ],
             order: [['fecha_invitacion', 'DESC']],
@@ -956,6 +956,7 @@ exports.getMyInvitations = async (req, res) => {
                         nombre: row.Invitador.nombre || '',
                         apellidos: row.Invitador.apellidos || '',
                         email_masked: maskEmail(row.Invitador.email_usuario),
+                        avatar: row.Invitador.avatar || null,
                     }
                     : null,
             })),
