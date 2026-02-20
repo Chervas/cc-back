@@ -1135,6 +1135,91 @@ exports.cancelInvitation = async (req, res) => {
     }
 };
 
+exports.removeClinicCollaboration = async (req, res) => {
+    const transaction = await sequelize.transaction();
+    try {
+        const actorId = Number(req.userData?.userId);
+        if (!Number.isFinite(actorId)) {
+            await transaction.rollback();
+            return res.status(401).json({ message: 'Auth failed!' });
+        }
+
+        const targetUserId = parseIntOrNull(req.params?.id);
+        const clinicaId = parseIntOrNull(req.params?.clinicaId);
+        if (!Number.isFinite(targetUserId) || !Number.isFinite(clinicaId)) {
+            await transaction.rollback();
+            return res.status(400).json({ message: 'Invalid params' });
+        }
+
+        const canManage = await canManagePersonalInClinic(actorId, clinicaId);
+        if (!canManage) {
+            await transaction.rollback();
+            return res.status(403).json({ message: 'Forbidden' });
+        }
+
+        // Evita que owner/agencia se desvinculen a sí mismos por accidente en UI.
+        if (!isAdmin(actorId) && Number(actorId) === Number(targetUserId)) {
+            await transaction.rollback();
+            return res.status(409).json({
+                message: 'No puedes eliminar tu propia colaboración desde esta acción.',
+                code: 'self_unlink_forbidden',
+            });
+        }
+
+        const pivot = await UsuarioClinica.findOne({
+            where: {
+                id_usuario: targetUserId,
+                id_clinica: clinicaId,
+                rol_clinica: { [Op.in]: STAFF_ROLES },
+            },
+            transaction,
+        });
+
+        if (!pivot) {
+            await transaction.rollback();
+            return res.status(404).json({ message: 'Collaboration not found' });
+        }
+
+        const doctorClinicaRows = await DoctorClinica.findAll({
+            where: { doctor_id: targetUserId, clinica_id: clinicaId },
+            attributes: ['id'],
+            transaction,
+        });
+        const doctorClinicaIds = doctorClinicaRows.map((row) => Number(row.id)).filter((id) => Number.isFinite(id));
+
+        if (doctorClinicaIds.length) {
+            await DoctorHorario.destroy({
+                where: { doctor_clinica_id: { [Op.in]: doctorClinicaIds } },
+                transaction,
+            });
+        }
+
+        await DoctorClinica.destroy({
+            where: { doctor_id: targetUserId, clinica_id: clinicaId },
+            transaction,
+        });
+
+        // Limpiar bloqueos scoped a la clínica removida.
+        await DoctorBloqueo.destroy({
+            where: { doctor_id: targetUserId, clinica_id: clinicaId },
+            transaction,
+        });
+
+        await pivot.destroy({ transaction });
+
+        await transaction.commit();
+        return res.status(200).json({
+            message: 'Collaboration removed successfully',
+            id_usuario: targetUserId,
+            clinica_id: clinicaId,
+        });
+    } catch (error) {
+        await transaction.rollback();
+        console.error('[personal.removeClinicCollaboration] Error:', error);
+        return res.status(500).json({ message: 'Error removing clinic collaboration', error: error.message });
+    }
+};
+
 exports.mergePersonalAccounts = async (req, res) => {
     const transaction = await sequelize.transaction();
     try {

@@ -28,6 +28,7 @@ router.get('/me/invitaciones', personalController.getMyInvitations);
 router.post('/me/invitaciones/:clinicaId/aceptar', personalController.acceptMyInvitation);
 router.post('/me/invitaciones/:clinicaId/rechazar', personalController.rejectMyInvitation);
 router.post('/:id/invitaciones/:clinicaId/cancelar', personalController.cancelInvitation);
+router.delete('/:id/clinicas/:clinicaId', personalController.removeClinicCollaboration);
 
 // Schedule/Horarios (canónico para todo el personal)
 router.get('/me/schedule', personalController.getScheduleForCurrent);
