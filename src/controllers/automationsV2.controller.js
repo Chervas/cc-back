@@ -52,6 +52,251 @@ function cleanString(raw) {
   return out || null;
 }
 
+function isObject(value) {
+  return !!value && typeof value === 'object' && !Array.isArray(value);
+}
+
+const TRIGGER_TYPES_V2 = [
+  { value: 'appointment_created', label: 'Cita creada' },
+  { value: 'appointment_reminder_window', label: 'Ventana de recordatorio' },
+  { value: 'lead_nuevo', label: 'Lead nuevo' },
+  { value: 'manual', label: 'Manual' },
+];
+
+const NODE_TYPES_V2 = [
+  {
+    type: 'action/change_status',
+    category: 'action',
+    label: 'Cambiar estado',
+    description: 'Cambia el estado de la cita y opcionalmente el icono en la agenda.',
+    output_keys: ['on_success', 'on_fail'],
+    default_config: { new_status: 'Agendada', agenda_icon: null },
+    config_schema: [
+      { key: 'new_status', label: 'Nuevo estado', input_type: 'string', required: true },
+      { key: 'agenda_icon', label: 'Icono agenda', input_type: 'string', required: false },
+    ],
+  },
+  {
+    type: 'action/send_whatsapp',
+    category: 'action',
+    label: 'Enviar WhatsApp',
+    description: 'Envía un mensaje de WhatsApp usando una plantilla aprobada.',
+    output_keys: ['on_success', 'on_fail'],
+    default_config: { template_id: '', language_code: 'es_ES', variables: {} },
+    config_schema: [
+      { key: 'template_id', label: 'Template ID', input_type: 'string', required: true },
+      { key: 'language_code', label: 'Idioma', input_type: 'string', required: false },
+      { key: 'variables', label: 'Variables', input_type: 'json', required: false },
+    ],
+  },
+  {
+    type: 'action/send_email',
+    category: 'action',
+    label: 'Enviar Email',
+    description: 'Envía un correo electrónico al paciente.',
+    output_keys: ['on_success', 'on_fail'],
+    default_config: { template_id: '', subject: '', body_html: '', variables: {} },
+    config_schema: [
+      { key: 'template_id', label: 'Template ID', input_type: 'string', required: false },
+      { key: 'subject', label: 'Asunto', input_type: 'string', required: false },
+      { key: 'body_html', label: 'Contenido HTML', input_type: 'text', required: false },
+      { key: 'variables', label: 'Variables', input_type: 'json', required: false },
+    ],
+  },
+  {
+    type: 'action/create_task',
+    category: 'action',
+    label: 'Crear tarea',
+    description: 'Crea una tarea manual para un usuario o rol.',
+    output_keys: ['on_success', 'on_fail'],
+    default_config: {
+      title: '',
+      description: '',
+      assignee_type: 'role',
+      assignee_id: null,
+      due_date_offset: '1 day',
+    },
+    config_schema: [
+      { key: 'title', label: 'Título', input_type: 'string', required: true },
+      { key: 'description', label: 'Descripción', input_type: 'text', required: false },
+      { key: 'assignee_type', label: 'Asignar a', input_type: 'select', required: true, options: ['user', 'role'] },
+      { key: 'assignee_id', label: 'ID usuario/rol', input_type: 'number', required: true },
+      { key: 'due_date_offset', label: 'Vencimiento', input_type: 'string', required: false },
+    ],
+  },
+  {
+    type: 'action/write_note',
+    category: 'action',
+    label: 'Escribir nota',
+    description: 'Escribe una nota interna en el historial.',
+    output_keys: ['on_success'],
+    default_config: { content: '' },
+    config_schema: [
+      { key: 'content', label: 'Contenido', input_type: 'text', required: true },
+    ],
+  },
+  {
+    type: 'action/api_call',
+    category: 'action',
+    label: 'Llamada API',
+    description: 'Realiza una llamada a una API externa.',
+    output_keys: ['on_success', 'on_fail'],
+    default_config: { method: 'GET', url: '', headers: {}, body: {} },
+    config_schema: [
+      { key: 'method', label: 'Método', input_type: 'select', required: true, options: ['GET', 'POST', 'PUT', 'DELETE'] },
+      { key: 'url', label: 'URL', input_type: 'string', required: true },
+      { key: 'headers', label: 'Headers', input_type: 'json', required: false },
+      { key: 'body', label: 'Body', input_type: 'json', required: false },
+    ],
+  },
+  {
+    type: 'delay/fixed',
+    category: 'delay',
+    label: 'Espera fija',
+    description: 'Espera un periodo de tiempo fijo.',
+    output_keys: ['on_complete'],
+    default_config: { duration: 1, unit: 'hours' },
+    config_schema: [
+      { key: 'duration', label: 'Duración', input_type: 'number', required: true },
+      { key: 'unit', label: 'Unidad', input_type: 'select', required: true, options: ['seconds', 'minutes', 'hours', 'days'] },
+    ],
+  },
+  {
+    type: 'delay/wait_response',
+    category: 'delay',
+    label: 'Esperar respuesta',
+    description: 'Espera una respuesta con timeout.',
+    output_keys: ['on_response', 'on_timeout'],
+    default_config: { timeout_duration: 1, timeout_unit: 'hours', listens_to_node_id: null },
+    config_schema: [
+      { key: 'timeout_duration', label: 'Timeout', input_type: 'number', required: true },
+      { key: 'timeout_unit', label: 'Unidad timeout', input_type: 'select', required: true, options: ['minutes', 'hours'] },
+      { key: 'listens_to_node_id', label: 'Nodo escuchado', input_type: 'string', required: false },
+    ],
+  },
+  {
+    type: 'delay/wait_until',
+    category: 'delay',
+    label: 'Esperar hasta',
+    description: 'Espera hasta fecha/hora específica.',
+    output_keys: ['on_complete'],
+    default_config: { datetime_expression: '' },
+    config_schema: [
+      { key: 'datetime_expression', label: 'Expresión fecha/hora', input_type: 'string', required: true },
+    ],
+  },
+  {
+    type: 'condition/field_check',
+    category: 'condition',
+    label: 'Comprobar campo',
+    description: 'Evalúa una condición simple sobre un campo.',
+    output_keys: ['on_true', 'on_false'],
+    default_config: { field: '', operator: 'equals', value: '' },
+    config_schema: [
+      { key: 'field', label: 'Campo', input_type: 'string', required: true },
+      {
+        key: 'operator',
+        label: 'Operador',
+        input_type: 'select',
+        required: true,
+        options: ['equals', 'not_equals', 'contains', 'greater_than', 'less_than', 'exists'],
+      },
+      { key: 'value', label: 'Valor', input_type: 'string', required: false },
+    ],
+  },
+  {
+    type: 'condition/ai_analysis',
+    category: 'condition',
+    label: 'Análisis IA',
+    description: 'Analiza texto con IA y devuelve una decisión.',
+    output_keys: ['on_success', 'on_fail'],
+    default_config: {
+      provider: 'openai',
+      model: 'gpt-4.1-mini',
+      prompt: '',
+      input_text: '',
+      output_format: { decision: { type: 'string' }, reason: { type: 'string' } },
+    },
+    config_schema: [
+      { key: 'provider', label: 'Proveedor', input_type: 'select', required: true, options: ['openai', 'gemini'] },
+      { key: 'model', label: 'Modelo', input_type: 'string', required: true },
+      { key: 'prompt', label: 'Prompt', input_type: 'text', required: true },
+      { key: 'input_text', label: 'Texto entrada', input_type: 'text', required: true },
+      { key: 'output_format', label: 'Formato salida', input_type: 'json', required: true },
+    ],
+  },
+  {
+    type: 'condition/response_check',
+    category: 'condition',
+    label: 'Comprobar respuesta',
+    description: 'Comprueba si ya existe respuesta para un nodo.',
+    output_keys: ['on_response', 'on_no_response'],
+    default_config: { listens_to_node_id: null },
+    config_schema: [
+      { key: 'listens_to_node_id', label: 'Nodo escuchado', input_type: 'string', required: true },
+    ],
+  },
+];
+
+function getNodeTypeMeta(type) {
+  return NODE_TYPES_V2.find((n) => n.type === type) || null;
+}
+
+function isSupportedTriggerType(triggerType) {
+  return TRIGGER_TYPES_V2.some((t) => t.value === triggerType);
+}
+
+function collectUnsupportedNodeTypes(nodes) {
+  if (!Array.isArray(nodes)) return [];
+  return Array.from(
+    new Set(
+      nodes
+        .map((node) => cleanString(node?.type))
+        .filter((type) => type && !getNodeTypeMeta(type))
+    )
+  );
+}
+
+function normalizeNodesInput(nodes) {
+  if (!Array.isArray(nodes)) return [];
+  return nodes
+    .map((rawNode, index) => {
+      if (!isObject(rawNode)) return null;
+      const type = cleanString(rawNode.type);
+      if (!type) return null;
+      const nodeMeta = getNodeTypeMeta(type);
+      const defaultConfig = isObject(nodeMeta?.default_config) ? nodeMeta.default_config : {};
+
+      const position = isObject(rawNode.position)
+        ? {
+            x: Number(rawNode.position.x) || 100,
+            y: Number(rawNode.position.y) || (index + 1) * 120,
+          }
+        : { x: 100, y: (index + 1) * 120 };
+
+      const config = {
+        ...defaultConfig,
+        ...(isObject(rawNode.config) ? rawNode.config : {}),
+      };
+
+      const outputs = isObject(rawNode.outputs) ? { ...rawNode.outputs } : {};
+      const expectedKeys = Array.isArray(nodeMeta?.output_keys) ? nodeMeta.output_keys : [];
+      expectedKeys.forEach((key) => {
+        if (!(key in outputs)) outputs[key] = null;
+      });
+
+      return {
+        id: cleanString(rawNode.id) || `N${index + 1}`,
+        type,
+        position,
+        config,
+        outputs,
+        output_schema: isObject(rawNode.output_schema) ? rawNode.output_schema : undefined,
+      };
+    })
+    .filter(Boolean);
+}
+
 function sanitizeTemplateKey(raw) {
   const base = String(raw || '')
     .toLowerCase()
@@ -341,6 +586,53 @@ function validateFlowGraph({ entry_node_id, nodes }) {
   return { ok: errors.length === 0, errors };
 }
 
+exports.getFlowMeta = async (_req, res) => {
+  return res.json({
+    success: true,
+    data: {
+      triggers: TRIGGER_TYPES_V2,
+      node_types: NODE_TYPES_V2,
+    },
+  });
+};
+
+exports.getNodeTypesCatalog = async (_req, res) => {
+  return res.json({
+    success: true,
+    data: NODE_TYPES_V2,
+  });
+};
+
+exports.validateTemplateGraph = async (req, res) => {
+  try {
+    const body = req.body || {};
+    const entryNodeId = cleanString(body.entry_node_id);
+    const nodes = normalizeNodesInput(body.nodes);
+    const validation = validateFlowGraph({
+      entry_node_id: entryNodeId,
+      nodes,
+    });
+    if (!validation.ok) {
+      return res.status(400).json({
+        success: false,
+        error: 'graph_validation_failed',
+        validation_errors: validation.errors,
+      });
+    }
+    return res.json({
+      success: true,
+      data: { ok: true },
+    });
+  } catch (err) {
+    console.error('Error validateTemplateGraph v2', err);
+    return res.status(500).json({
+      success: false,
+      error: 'validate_failed',
+      message: err.message,
+    });
+  }
+};
+
 exports.listTemplates = async (req, res) => {
   try {
     const access = await resolveAccess(req);
@@ -435,13 +727,44 @@ exports.createTemplateDraft = async (req, res) => {
     const name = cleanString(body.name);
     const triggerType = cleanString(body.trigger_type);
     const entryNodeId = cleanString(body.entry_node_id);
-    const nodes = Array.isArray(body.nodes) ? body.nodes : null;
+    const nodes = Array.isArray(body.nodes) ? normalizeNodesInput(body.nodes) : null;
 
     if (!name || !triggerType || !entryNodeId || !nodes) {
       return res.status(400).json({
         success: false,
         error: 'invalid_payload',
         message: 'name, trigger_type, entry_node_id y nodes son obligatorios',
+      });
+    }
+    if (!isSupportedTriggerType(triggerType)) {
+      return res.status(400).json({
+        success: false,
+        error: 'invalid_trigger_type',
+        message: `trigger_type no soportado: ${triggerType}`,
+        allowed: TRIGGER_TYPES_V2.map((item) => item.value),
+      });
+    }
+    if (!nodes.length) {
+      return res.status(400).json({
+        success: false,
+        error: 'invalid_nodes',
+        message: 'El flujo debe tener al menos un nodo válido',
+      });
+    }
+    const unsupportedNodeTypes = collectUnsupportedNodeTypes(nodes);
+    if (unsupportedNodeTypes.length) {
+      return res.status(400).json({
+        success: false,
+        error: 'invalid_node_types',
+        message: 'Hay tipos de nodo no soportados',
+        unsupported: unsupportedNodeTypes,
+      });
+    }
+    if (!nodes.some((node) => node.id === entryNodeId)) {
+      return res.status(400).json({
+        success: false,
+        error: 'invalid_entry_node',
+        message: 'entry_node_id debe existir en nodes',
       });
     }
 
@@ -632,6 +955,14 @@ exports.updateTemplateDraft = async (req, res) => {
     if (body.trigger_type !== undefined) {
       const triggerType = cleanString(body.trigger_type);
       if (!triggerType) return res.status(400).json({ success: false, error: 'invalid_trigger_type' });
+      if (!isSupportedTriggerType(triggerType)) {
+        return res.status(400).json({
+          success: false,
+          error: 'invalid_trigger_type',
+          message: `trigger_type no soportado: ${triggerType}`,
+          allowed: TRIGGER_TYPES_V2.map((item) => item.value),
+        });
+      }
       updates.trigger_type = triggerType;
     }
     if (body.entry_node_id !== undefined) {
@@ -641,10 +972,37 @@ exports.updateTemplateDraft = async (req, res) => {
     }
     if (body.nodes !== undefined) {
       if (!Array.isArray(body.nodes)) return res.status(400).json({ success: false, error: 'invalid_nodes' });
-      updates.nodes = body.nodes;
+      const normalizedNodes = normalizeNodesInput(body.nodes);
+      if (!normalizedNodes.length) {
+        return res.status(400).json({
+          success: false,
+          error: 'invalid_nodes',
+          message: 'El flujo debe tener al menos un nodo válido',
+        });
+      }
+      const unsupportedNodeTypes = collectUnsupportedNodeTypes(normalizedNodes);
+      if (unsupportedNodeTypes.length) {
+        return res.status(400).json({
+          success: false,
+          error: 'invalid_node_types',
+          message: 'Hay tipos de nodo no soportados',
+          unsupported: unsupportedNodeTypes,
+        });
+      }
+      updates.nodes = normalizedNodes;
     }
     if (body.is_active !== undefined) updates.is_active = parseBool(body.is_active, row.is_active);
     if (access.is_admin && body.is_system !== undefined) updates.is_system = parseBool(body.is_system, row.is_system);
+
+    const candidateNodes = Array.isArray(updates.nodes) ? updates.nodes : (Array.isArray(row.nodes) ? row.nodes : []);
+    const candidateEntry = updates.entry_node_id || row.entry_node_id;
+    if (!candidateEntry || !candidateNodes.some((node) => node.id === candidateEntry)) {
+      return res.status(400).json({
+        success: false,
+        error: 'invalid_entry_node',
+        message: 'entry_node_id debe existir en nodes',
+      });
+    }
 
     await row.update(updates);
 
