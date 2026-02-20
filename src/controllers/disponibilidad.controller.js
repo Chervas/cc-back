@@ -49,6 +49,14 @@ const parseClinicConfig = (value) => {
   return null;
 };
 
+const isMissingClinicScheduleTableError = (error) => {
+  if (!error) return false;
+  const code = error?.original?.code || error?.parent?.code || error?.code;
+  if (code === 'ER_NO_SUCH_TABLE') return true;
+  const msg = String(error?.original?.message || error?.message || '').toLowerCase();
+  return msg.includes('clinicahorarios') && (msg.includes("doesn't exist") || msg.includes('no such table'));
+};
+
 const isValidTimeZone = (value) => {
   if (!value || typeof value !== 'string') return false;
   try {
@@ -190,6 +198,26 @@ const buildWindowsFromHorarios = (horarios, dow, fechaLocal, timeZone) => {
   return base;
 };
 
+const hasActiveSchedule = (horarios) => {
+  return Array.isArray(horarios) && horarios.some((h) => !!h.activo);
+};
+
+const fetchClinicHorarios = async (clinicaId) => {
+  if (!db.ClinicaHorario) return [];
+  try {
+    return await db.ClinicaHorario.findAll({
+      where: { clinica_id: clinicaId },
+      attributes: ['dia_semana', 'activo', 'hora_inicio', 'hora_fin']
+    });
+  } catch (error) {
+    if (isMissingClinicScheduleTableError(error)) {
+      // Compatibilidad en despliegues donde el código se publica antes que la migración.
+      return [];
+    }
+    throw error;
+  }
+};
+
 const subtractIntervals = (windows, blocks) => {
   let res = [...windows];
   blocks.forEach((b) => {
@@ -257,6 +285,8 @@ const firstOverlap = (ranges, start, end) => {
 
 const conflictsForSlot = ({
   clinicaId,
+  clinicWins,
+  clinicHasSchedule,
   instalacionId,
   doctorId,
   instWins,
@@ -270,6 +300,17 @@ const conflictsForSlot = ({
   end
 }) => {
   const conflicts = [];
+
+  if (clinicHasSchedule && !inAnyWindow(clinicWins, start, end)) {
+    conflicts.push({
+      resource_type: 'clinic',
+      resource_id: clinicaId,
+      clinica_id: clinicaId,
+      code: 'CLINIC_OUT_OF_HOURS',
+      can_force: false,
+      details: { message: 'Clínica fuera de horario' }
+    });
+  }
 
   if (instalacionId) {
     if (!inAnyWindow(instWins, start, end)) {
@@ -390,6 +431,8 @@ const buildUnavailableIntervals = ({
   timeZone,
   fecha_local,
   dow,
+  clinicHasSchedule,
+  clinicWins,
   baseStart,
   baseEnd,
   durMin,
@@ -423,6 +466,8 @@ const buildUnavailableIntervals = ({
     const end = new Date(t + durMs);
     const conflicts = conflictsForSlot({
       clinicaId,
+      clinicWins,
+      clinicHasSchedule,
       instalacionId,
       doctorId,
       instWins,
@@ -526,6 +571,22 @@ exports.check = asyncHandler(async (req, res) => {
   const warnings = [];
   const fechaLocalCheck = formatDateLocal(start, clinicTimezone);
   const dow = dayIndexFromLocalDate(fechaLocalCheck);
+  const clinicHorarios = await fetchClinicHorarios(clinicaId);
+  const clinicHasSchedule = hasActiveSchedule(clinicHorarios);
+  const clinicWins = clinicHasSchedule
+    ? buildWindowsFromHorarios(clinicHorarios, dow, fechaLocalCheck, clinicTimezone)
+    : [];
+
+  if (clinicHasSchedule && !inAnyWindow(clinicWins, start, end)) {
+    conflicts.push({
+      resource_type: 'clinic',
+      resource_id: clinicaId,
+      clinica_id: clinicaId,
+      code: 'CLINIC_OUT_OF_HOURS',
+      can_force: false,
+      details: { message: 'Clínica fuera de horario' }
+    });
+  }
 
   const ignoreId = ignore_cita_id ? parseIntSafe(ignore_cita_id) : null;
 
@@ -766,6 +827,11 @@ exports.slots = asyncHandler(async (req, res) => {
 
   const dow = dayIndexFromLocalDate(fecha_local);
   const baseWindows = [{ start: baseStart, end: baseEnd }];
+  const clinicHorarios = await fetchClinicHorarios(clinicaId);
+  const clinicHasSchedule = hasActiveSchedule(clinicHorarios);
+  const clinicWins = clinicHasSchedule
+    ? buildWindowsFromHorarios(clinicHorarios, dow, fecha_local, clinicTimezone)
+    : [];
 
   const instalacionId = instalacion_id ? parseIntSafe(instalacion_id) : null;
   const doctorId = doctor_id ? parseIntSafe(doctor_id) : null;
@@ -807,6 +873,10 @@ exports.slots = asyncHandler(async (req, res) => {
     docCitasRows
   }) => {
     let windows = [...baseWindows];
+
+    if (clinicHasSchedule) {
+      windows = clinicWins.length ? intersectWindows(windows, clinicWins) : [];
+    }
 
     if (inst) {
       const instWins = buildWindowsFromHorarios(inst.horarios || [], dow, fecha_local, clinicTimezone);
@@ -958,6 +1028,8 @@ exports.slots = asyncHandler(async (req, res) => {
           timeZone: clinicTimezone,
           fecha_local,
           dow,
+          clinicHasSchedule,
+          clinicWins,
           baseStart,
           baseEnd,
           durMin,
@@ -1054,6 +1126,8 @@ exports.slots = asyncHandler(async (req, res) => {
           timeZone: clinicTimezone,
           fecha_local,
           dow,
+          clinicHasSchedule,
+          clinicWins,
           baseStart,
           baseEnd,
           durMin,
@@ -1148,6 +1222,8 @@ exports.slots = asyncHandler(async (req, res) => {
         timeZone: clinicTimezone,
         fecha_local,
         dow,
+        clinicHasSchedule,
+        clinicWins,
         baseStart,
         baseEnd,
         durMin,

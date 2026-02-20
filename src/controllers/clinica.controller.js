@@ -1,12 +1,123 @@
 'use strict';
 
-const { Clinica, GrupoClinica, Servicio, ClinicMetaAsset, ClinicGoogleAdsAccount, Usuario } = require('../../models');
+const { Clinica, GrupoClinica, Servicio, ClinicMetaAsset, ClinicGoogleAdsAccount, Usuario, UsuarioClinica, ClinicaHorario } = require('../../models');
 const bcrypt = require('bcryptjs');
 const { Op } = require('sequelize');
 const { metaSyncJobs } = require('../jobs/sync.jobs');
 const jobRequestsService = require('../services/jobRequests.service');
 const jobScheduler = require('../services/jobScheduler.service');
 const automationDefaultsService = require('../services/automationDefaults.service');
+const { STAFF_ROLES, ADMIN_ROLES, isGlobalAdmin } = require('../lib/role-helpers');
+
+const ACTIVE_STAFF_INVITATION_WHERE = {
+    [Op.or]: [
+        { estado_invitacion: 'aceptada' },
+        { estado_invitacion: null },
+    ],
+};
+
+const parseIntOrNull = (value) => {
+    const n = Number.parseInt(String(value), 10);
+    return Number.isFinite(n) ? n : null;
+};
+
+const toBool = (value, fallback = false) => {
+    if (value === undefined || value === null) return fallback;
+    if (typeof value === 'boolean') return value;
+    const normalized = String(value).trim().toLowerCase();
+    return normalized === '1' || normalized === 'true' || normalized === 'yes';
+};
+
+const isValidHHmm = (value) => /^([01]\d|2[0-3]):([0-5]\d)$/.test(String(value || ''));
+
+async function canReadClinicSchedule(userId, clinicId) {
+    if (!Number.isFinite(Number(userId)) || !Number.isFinite(Number(clinicId))) return false;
+    if (isGlobalAdmin(userId)) return true;
+    const row = await UsuarioClinica.findOne({
+        where: {
+            id_usuario: Number(userId),
+            id_clinica: Number(clinicId),
+            rol_clinica: { [Op.in]: STAFF_ROLES },
+            ...ACTIVE_STAFF_INVITATION_WHERE,
+        },
+        attributes: ['id_usuario'],
+        raw: true,
+    });
+    return !!row;
+}
+
+async function canWriteClinicSchedule(userId, clinicId) {
+    if (!Number.isFinite(Number(userId)) || !Number.isFinite(Number(clinicId))) return false;
+    if (isGlobalAdmin(userId)) return true;
+    const row = await UsuarioClinica.findOne({
+        where: {
+            id_usuario: Number(userId),
+            id_clinica: Number(clinicId),
+            rol_clinica: { [Op.in]: ADMIN_ROLES },
+            ...ACTIVE_STAFF_INVITATION_WHERE,
+        },
+        attributes: ['id_usuario'],
+        raw: true,
+    });
+    return !!row;
+}
+
+function normalizeHorariosPayload(clinicaId, body) {
+    const raw = Array.isArray(body) ? body : (Array.isArray(body?.horarios) ? body.horarios : null);
+    if (!Array.isArray(raw)) {
+        return { error: 'horarios debe ser un array o { horarios: [] }' };
+    }
+
+    const rows = [];
+    for (let i = 0; i < raw.length; i++) {
+        const h = raw[i] || {};
+        const dia = parseIntOrNull(h.dia_semana);
+        const activo = toBool(h.activo, true);
+        const horaInicio = String(h.hora_inicio || '').trim();
+        const horaFin = String(h.hora_fin || '').trim();
+
+        if (dia === null || dia < 0 || dia > 6) {
+            return { error: `horarios[${i}].dia_semana inválido (0-6)` };
+        }
+        if (!isValidHHmm(horaInicio)) {
+            return { error: `horarios[${i}].hora_inicio inválido (HH:mm)` };
+        }
+        if (!isValidHHmm(horaFin)) {
+            return { error: `horarios[${i}].hora_fin inválido (HH:mm)` };
+        }
+        if (horaFin <= horaInicio) {
+            return { error: `horarios[${i}] rango inválido (hora_fin debe ser > hora_inicio)` };
+        }
+
+        rows.push({
+            clinica_id: Number(clinicaId),
+            dia_semana: dia,
+            activo,
+            hora_inicio: horaInicio,
+            hora_fin: horaFin,
+        });
+    }
+
+    const activeByDay = new Map();
+    rows
+        .filter((r) => r.activo)
+        .forEach((r) => {
+            const list = activeByDay.get(r.dia_semana) || [];
+            list.push(r);
+            activeByDay.set(r.dia_semana, list);
+        });
+
+    for (const [day, list] of activeByDay.entries()) {
+        const sorted = [...list].sort((a, b) => a.hora_inicio.localeCompare(b.hora_inicio));
+        for (let idx = 1; idx < sorted.length; idx++) {
+            if (sorted[idx].hora_inicio < sorted[idx - 1].hora_fin) {
+                return { error: `horarios solapados para dia_semana=${day}` };
+            }
+        }
+    }
+
+    return { rows };
+}
 
 // Obtener todas las clínicas (con filtro opcional por clinica_id: id único, CSV o 'all')
 exports.getAllClinicas = async (req, res) => {
@@ -99,6 +210,88 @@ exports.getClinicaById = async (req, res) => {
         res.json(clinicaData);
     } catch (error) {
         res.status(500).json({ message: 'Error retrieving clinica', error: error.message });
+    }
+};
+
+// Obtener horarios estructurados de clínica
+exports.getHorarios = async (req, res) => {
+    try {
+        const clinicId = parseIntOrNull(req.params.id);
+        if (!clinicId) {
+            return res.status(400).json({ message: 'id inválido' });
+        }
+
+        const actorId = parseIntOrNull(req.userData?.userId);
+        const canRead = await canReadClinicSchedule(actorId, clinicId);
+        if (!canRead) {
+            return res.status(403).json({ message: 'Sin permisos para ver horarios de esta clínica' });
+        }
+
+        const clinica = await Clinica.findByPk(clinicId, { attributes: ['id_clinica'] });
+        if (!clinica) {
+            return res.status(404).json({ message: 'Clínica no encontrada' });
+        }
+
+        const horarios = await ClinicaHorario.findAll({
+            where: { clinica_id: clinicId },
+            order: [['dia_semana', 'ASC'], ['hora_inicio', 'ASC'], ['id', 'ASC']]
+        });
+        return res.json(horarios);
+    } catch (error) {
+        console.error('Error getHorarios clínica:', error);
+        return res.status(500).json({ message: 'Error al obtener horarios de la clínica' });
+    }
+};
+
+// Reemplazar horarios estructurados de clínica
+exports.putHorarios = async (req, res) => {
+    const t = await Clinica.sequelize.transaction();
+    try {
+        const clinicId = parseIntOrNull(req.params.id);
+        if (!clinicId) {
+            await t.rollback();
+            return res.status(400).json({ message: 'id inválido' });
+        }
+
+        const actorId = parseIntOrNull(req.userData?.userId);
+        const canWrite = await canWriteClinicSchedule(actorId, clinicId);
+        if (!canWrite) {
+            await t.rollback();
+            return res.status(403).json({ message: 'Sin permisos para editar horarios de esta clínica' });
+        }
+
+        const clinica = await Clinica.findByPk(clinicId, { attributes: ['id_clinica'], transaction: t });
+        if (!clinica) {
+            await t.rollback();
+            return res.status(404).json({ message: 'Clínica no encontrada' });
+        }
+
+        const normalized = normalizeHorariosPayload(clinicId, req.body);
+        if (normalized.error) {
+            await t.rollback();
+            return res.status(400).json({ message: normalized.error });
+        }
+
+        await ClinicaHorario.destroy({
+            where: { clinica_id: clinicId },
+            transaction: t,
+        });
+
+        if (normalized.rows.length) {
+            await ClinicaHorario.bulkCreate(normalized.rows, { transaction: t });
+        }
+
+        await t.commit();
+
+        const horarios = await ClinicaHorario.findAll({
+            where: { clinica_id: clinicId },
+            order: [['dia_semana', 'ASC'], ['hora_inicio', 'ASC'], ['id', 'ASC']]
+        });
+        return res.json(horarios);
+    } catch (error) {
+        await t.rollback();
+        console.error('Error putHorarios clínica:', error);
+        return res.status(500).json({ message: 'Error al actualizar horarios de la clínica' });
     }
 };
 
