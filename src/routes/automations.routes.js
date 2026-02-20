@@ -24,6 +24,7 @@ router.get('/v2/templates/:template_key', automationsV2Controller.getTemplateLat
 router.get('/v2/templates/:template_key/versions', automationsV2Controller.listTemplateVersions);
 router.get('/v2/templates/:template_key/versions/:version', automationsV2Controller.getTemplateVersion);
 router.put('/v2/templates/:template_key/versions/:version', automationsV2Controller.updateTemplateDraft);
+router.delete('/v2/templates/:template_key', automationsV2Controller.deleteTemplate);
 router.post('/v2/templates/:template_key/versions/:version/publish', automationsV2Controller.publishTemplateVersion);
 router.post('/v2/templates/:template_key/versions/:version/execute', automationsV2Controller.executeTemplateVersion);
 router.get('/v2/executions', automationsV2Controller.listExecutions);
