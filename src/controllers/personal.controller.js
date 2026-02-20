@@ -24,6 +24,8 @@ const ESTADO_CUENTA = new Set(ESTADO_CUENTA_ARR);
 const ESTADO_INVITACION = new Set(ESTADO_INVITACION_ARR);
 const ROLES_CLINICA = new Set(ROLES_CLINICA_ARR);
 const SUBROLES_CLINICA = new Set(SUBROLES_CLINICA_ARR);
+const INVITE_RESEND_COOLDOWN_HOURS = Math.max(1, Number(process.env.INVITE_RESEND_COOLDOWN_HOURS || 4));
+const INVITE_RESEND_COOLDOWN_MS = INVITE_RESEND_COOLDOWN_HOURS * 60 * 60 * 1000;
 
 const isAdmin = (userId) => isGlobalAdmin(userId);
 const ACTIVE_STAFF_INVITATION_WHERE = {
@@ -160,6 +162,23 @@ function normalizeEstadoInvitacion(value, defaultValue = 'aceptada') {
     const estado = String(value).trim().toLowerCase();
     if (!ESTADO_INVITACION.has(estado)) return null;
     return estado;
+}
+
+function getInviteResendRemainingMs(lastInvitedAt, now = new Date()) {
+    if (!lastInvitedAt) return 0;
+    const last = new Date(lastInvitedAt);
+    if (!Number.isFinite(last.getTime())) return 0;
+    const elapsed = now.getTime() - last.getTime();
+    return Math.max(0, INVITE_RESEND_COOLDOWN_MS - elapsed);
+}
+
+function formatCooldownWindowLabel(ms) {
+    const totalMinutes = Math.max(1, Math.ceil(ms / 60000));
+    const hours = Math.floor(totalMinutes / 60);
+    const minutes = totalMinutes % 60;
+    if (hours <= 0) return `${minutes} min`;
+    if (minutes <= 0) return `${hours} h`;
+    return `${hours} h ${minutes} min`;
 }
 
 function defaultModoDisponibilidadFromSubrol(subrolClinica) {
@@ -2400,6 +2419,19 @@ exports.invitarPersonal = async (req, res) => {
 
                 // Si está pendiente/rechazada, se permite reenviar la invitación.
                 if (existingEstado === 'pendiente' || existingEstado === 'rechazada') {
+                    const cooldownRemainingMs = getInviteResendRemainingMs(existingPivot.invited_at);
+                    if (cooldownRemainingMs > 0) {
+                        const retryAfterSeconds = Math.ceil(cooldownRemainingMs / 1000);
+                        const waitLabel = formatCooldownWindowLabel(cooldownRemainingMs);
+                        res.set('Retry-After', String(retryAfterSeconds));
+                        return res.status(429).json({
+                            message: `Debes esperar ${waitLabel} para reenviar esta invitación.`,
+                            code: 'invite_resend_cooldown',
+                            retry_after_seconds: retryAfterSeconds,
+                            retry_after_ms: cooldownRemainingMs,
+                        });
+                    }
+
                     const resentToken = crypto.randomBytes(32).toString('hex');
                     const now = new Date();
                     const nextSubrol = (subrol_clinica !== undefined)
