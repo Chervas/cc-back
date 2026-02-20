@@ -2171,9 +2171,10 @@ exports.buscarPersonal = async (req, res) => {
             return res.status(400).json({ message: 'clinica_id es obligatorio' });
         }
 
-        // Verificar que el actor tiene acceso a la clínica
-        const accessibleClinicIds = await getAccessibleClinicIdsForUser(actorId);
-        if (!accessibleClinicIds.includes(clinicaId) && !isAdmin(actorId)) {
+        // Invitar/buscar personal es una acción de gestión: solo admin global
+        // o roles de administración en la clínica (propietario/agencia).
+        const canManageClinicPersonal = isAdmin(actorId) || await hasAdminScopePivot(actorId, clinicaId);
+        if (!canManageClinicPersonal) {
             return res.status(403).json({ message: 'Forbidden' });
         }
 
@@ -2276,9 +2277,10 @@ exports.invitarPersonal = async (req, res) => {
             return res.status(400).json({ message: 'clinica_id es obligatorio' });
         }
 
-        // Verificar acceso del actor a la clínica
-        const accessibleClinicIds = await getAccessibleClinicIdsForUser(actorId);
-        if (!accessibleClinicIds.includes(clinicaId) && !isAdmin(actorId)) {
+        // Invitar personal es una acción de gestión: solo admin global
+        // o roles de administración en la clínica (propietario/agencia).
+        const canManageClinicPersonal = isAdmin(actorId) || await hasAdminScopePivot(actorId, clinicaId);
+        if (!canManageClinicPersonal) {
             return res.status(403).json({ message: 'Forbidden' });
         }
 
@@ -2445,8 +2447,8 @@ exports.getInvitaciones = async (req, res) => {
             return res.status(400).json({ message: 'clinica_id es obligatorio' });
         }
 
-        const accessibleClinicIds = await getAccessibleClinicIdsForUser(actorId);
-        if (!accessibleClinicIds.includes(clinicaId) && !isAdmin(actorId)) {
+        const canManageClinicPersonal = isAdmin(actorId) || await hasAdminScopePivot(actorId, clinicaId);
+        if (!canManageClinicPersonal) {
             return res.status(403).json({ message: 'Forbidden' });
         }
 
