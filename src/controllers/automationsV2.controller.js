@@ -70,6 +70,7 @@ const NODE_TYPES_V2 = [
     label: 'Cambiar estado',
     description: 'Cambia el estado de la cita y opcionalmente el icono en la agenda.',
     output_keys: ['on_success', 'on_fail'],
+    runtime_status: 'real',
     default_config: { new_status: 'Agendada', agenda_icon: null },
     config_schema: [
       { key: 'new_status', label: 'Nuevo estado', input_type: 'string', required: true },
@@ -82,6 +83,7 @@ const NODE_TYPES_V2 = [
     label: 'Enviar WhatsApp',
     description: 'Envía un mensaje de WhatsApp usando una plantilla aprobada.',
     output_keys: ['on_success', 'on_fail'],
+    runtime_status: 'stub',
     default_config: { template_id: '', language_code: 'es_ES', variables: {} },
     config_schema: [
       { key: 'template_id', label: 'Template ID', input_type: 'string', required: true },
@@ -95,6 +97,7 @@ const NODE_TYPES_V2 = [
     label: 'Enviar Email',
     description: 'Envía un correo electrónico al paciente.',
     output_keys: ['on_success', 'on_fail'],
+    runtime_status: 'stub',
     default_config: { template_id: '', subject: '', body_html: '', variables: {} },
     config_schema: [
       { key: 'template_id', label: 'Template ID', input_type: 'string', required: false },
@@ -109,6 +112,7 @@ const NODE_TYPES_V2 = [
     label: 'Crear tarea',
     description: 'Crea una tarea manual para un usuario o rol.',
     output_keys: ['on_success', 'on_fail'],
+    runtime_status: 'real',
     default_config: {
       title: '',
       description: '',
@@ -130,6 +134,7 @@ const NODE_TYPES_V2 = [
     label: 'Escribir nota',
     description: 'Escribe una nota interna en el historial.',
     output_keys: ['on_success'],
+    runtime_status: 'real',
     default_config: { content: '' },
     config_schema: [
       { key: 'content', label: 'Contenido', input_type: 'text', required: true },
@@ -141,6 +146,7 @@ const NODE_TYPES_V2 = [
     label: 'Llamada API',
     description: 'Realiza una llamada a una API externa.',
     output_keys: ['on_success', 'on_fail'],
+    runtime_status: 'stub',
     default_config: { method: 'GET', url: '', headers: {}, body: {} },
     config_schema: [
       { key: 'method', label: 'Método', input_type: 'select', required: true, options: ['GET', 'POST', 'PUT', 'DELETE'] },
@@ -155,6 +161,7 @@ const NODE_TYPES_V2 = [
     label: 'Espera fija',
     description: 'Espera un periodo de tiempo fijo.',
     output_keys: ['on_complete'],
+    runtime_status: 'real',
     default_config: { duration: 1, unit: 'hours' },
     config_schema: [
       { key: 'duration', label: 'Duración', input_type: 'number', required: true },
@@ -167,6 +174,7 @@ const NODE_TYPES_V2 = [
     label: 'Esperar respuesta',
     description: 'Espera una respuesta con timeout.',
     output_keys: ['on_response', 'on_timeout'],
+    runtime_status: 'real',
     default_config: { timeout_duration: 1, timeout_unit: 'hours', listens_to_node_id: null },
     config_schema: [
       { key: 'timeout_duration', label: 'Timeout', input_type: 'number', required: true },
@@ -180,6 +188,7 @@ const NODE_TYPES_V2 = [
     label: 'Esperar hasta',
     description: 'Espera hasta fecha/hora específica.',
     output_keys: ['on_complete'],
+    runtime_status: 'real',
     default_config: { datetime_expression: '' },
     config_schema: [
       { key: 'datetime_expression', label: 'Expresión fecha/hora', input_type: 'string', required: true },
@@ -191,6 +200,7 @@ const NODE_TYPES_V2 = [
     label: 'Comprobar campo',
     description: 'Evalúa una condición simple sobre un campo.',
     output_keys: ['on_true', 'on_false'],
+    runtime_status: 'real',
     default_config: { field: '', operator: 'equals', value: '' },
     config_schema: [
       { key: 'field', label: 'Campo', input_type: 'string', required: true },
@@ -210,6 +220,7 @@ const NODE_TYPES_V2 = [
     label: 'Análisis IA',
     description: 'Analiza texto con IA y devuelve una decisión.',
     output_keys: ['on_success', 'on_fail'],
+    runtime_status: 'stub',
     default_config: {
       provider: 'openai',
       model: 'gpt-4.1-mini',
@@ -231,6 +242,7 @@ const NODE_TYPES_V2 = [
     label: 'Comprobar respuesta',
     description: 'Comprueba si ya existe respuesta para un nodo.',
     output_keys: ['on_response', 'on_no_response'],
+    runtime_status: 'real',
     default_config: { listens_to_node_id: null },
     config_schema: [
       { key: 'listens_to_node_id', label: 'Nodo escuchado', input_type: 'string', required: true },

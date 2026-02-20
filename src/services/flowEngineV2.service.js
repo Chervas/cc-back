@@ -1,10 +1,18 @@
 'use strict';
 
+const { Op } = require('sequelize');
 const db = require('../../models');
+const { getIO } = require('./socket.service');
 
 const AutomationFlowTemplateV2 = db.AutomationFlowTemplateV2;
 const FlowExecutionV2 = db.FlowExecutionV2;
 const FlowExecutionLogV2 = db.FlowExecutionLogV2;
+const CitaPaciente = db.CitaPaciente;
+const LeadIntake = db.LeadIntake;
+const Conversation = db.Conversation;
+const Message = db.Message;
+const Notification = db.Notification;
+const UsuarioClinica = db.UsuarioClinica;
 
 function clone(value) {
   return JSON.parse(JSON.stringify(value ?? null));
@@ -14,6 +22,12 @@ function cleanString(value) {
   if (value === undefined || value === null) return null;
   const normalized = String(value).trim();
   return normalized || null;
+}
+
+function toIntOrNull(value) {
+  if (value === undefined || value === null || value === '') return null;
+  const parsed = Number.parseInt(String(value), 10);
+  return Number.isInteger(parsed) ? parsed : null;
 }
 
 function getByPath(obj, path) {
@@ -47,6 +61,437 @@ function resolveTemplateValue(value, context) {
   }
 
   return value;
+}
+
+function normalizeKey(value) {
+  return String(value || '')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '_')
+    .replace(/^_+|_+$/g, '');
+}
+
+function readFirstIntFromPaths(context, paths) {
+  for (const path of paths) {
+    const value = getByPath(context, path);
+    const parsed = toIntOrNull(value);
+    if (parsed) return parsed;
+  }
+  return null;
+}
+
+function resolveRuntimeTargets(execution, context) {
+  const triggerType = normalizeKey(execution?.trigger_entity_type);
+  const triggerEntityId = toIntOrNull(execution?.trigger_entity_id);
+
+  const clinicId = toIntOrNull(execution?.clinic_id) || readFirstIntFromPaths(context, [
+    'trigger.data.clinic_id',
+    'trigger.data.clinica_id',
+    'clinic.id',
+    'clinic.id_clinica',
+    'appointment.clinic_id',
+    'appointment.clinica_id',
+    'conversation.clinic_id',
+    'lead.clinica_id',
+  ]);
+
+  let appointmentId = readFirstIntFromPaths(context, [
+    'appointment.id',
+    'appointment.id_cita',
+    'cita.id',
+    'cita.id_cita',
+    'trigger.data.appointment_id',
+    'trigger.data.cita_id',
+    'trigger.data.id_cita',
+  ]);
+  if (!appointmentId && ['appointment', 'appointment_created', 'cita', 'cita_creada'].includes(triggerType)) {
+    appointmentId = triggerEntityId;
+  }
+
+  let leadIntakeId = readFirstIntFromPaths(context, [
+    'lead.id',
+    'lead.lead_intake_id',
+    'lead.id_lead',
+    'trigger.data.lead_intake_id',
+    'trigger.data.lead_id',
+    'trigger.data.id_lead',
+  ]);
+  if (!leadIntakeId && ['lead', 'lead_intake', 'leadintake', 'lead_nuevo'].includes(triggerType)) {
+    leadIntakeId = triggerEntityId;
+  }
+
+  let conversationId = readFirstIntFromPaths(context, [
+    'conversation.id',
+    'trigger.data.conversation_id',
+    'trigger.data.chat_conversation_id',
+    'trigger.data.conversationId',
+  ]);
+  if (!conversationId && ['conversation', 'chat_conversation', 'whatsapp_conversation'].includes(triggerType)) {
+    conversationId = triggerEntityId;
+  }
+
+  const patientId = readFirstIntFromPaths(context, [
+    'patient.id',
+    'patient.id_paciente',
+    'appointment.paciente_id',
+    'trigger.data.patient_id',
+    'trigger.data.paciente_id',
+  ]);
+
+  return {
+    clinic_id: clinicId,
+    appointment_id: appointmentId,
+    lead_intake_id: leadIntakeId,
+    conversation_id: conversationId,
+    patient_id: patientId,
+  };
+}
+
+function normalizeAppointmentStatus(value) {
+  const key = normalizeKey(value);
+  if (!key) return null;
+  const map = {
+    pendiente: 'pendiente',
+    agendada: 'pendiente',
+    confirmada: 'confirmada',
+    confirmado: 'confirmada',
+    cancelada: 'cancelada',
+    cancelado: 'cancelada',
+    completada: 'completada',
+    completado: 'completada',
+    realizada: 'completada',
+    no_asistio: 'no_asistio',
+    no_show: 'no_asistio',
+    no_showed: 'no_asistio',
+    ausente: 'no_asistio',
+  };
+  return map[key] || null;
+}
+
+function normalizeLeadStatus(value) {
+  const key = normalizeKey(value);
+  if (!key) return null;
+  const map = {
+    nuevo: 'nuevo',
+    contactado: 'contactado',
+    esperando_info: 'esperando_info',
+    info_recibida: 'info_recibida',
+    citado: 'citado',
+    acudio_cita: 'acudio_cita',
+    convertido: 'convertido',
+    descartado: 'descartado',
+  };
+  return map[key] || null;
+}
+
+function appendText(base, text) {
+  const cleanBase = cleanString(base);
+  const cleanText = cleanString(text);
+  if (!cleanText) return cleanBase || null;
+  if (!cleanBase) return cleanText;
+  return `${cleanBase}\n${cleanText}`;
+}
+
+function parseDueDateOffset(rawOffset) {
+  const value = cleanString(rawOffset);
+  if (!value) return null;
+  const match = value.match(/^(\d+)\s*(second|seconds|minute|minutes|hour|hours|day|days)$/i);
+  if (!match) return null;
+  const amount = Number.parseInt(match[1], 10);
+  if (!Number.isInteger(amount) || amount <= 0) return null;
+  const unit = match[2].toLowerCase();
+  const ms = resolveDurationMs(amount, unit);
+  return ms > 0 ? new Date(Date.now() + ms) : null;
+}
+
+function resolveRoleCode(raw) {
+  const key = normalizeKey(raw);
+  if (!key) return null;
+  if (['1', 'owner', 'propietario', 'administrador', 'admin'].includes(key)) return 'propietario';
+  if (['2', 'staff', 'personal', 'personaldeclinica', 'clinic_staff', 'recepcion', 'recepcion_comercial_ventas'].includes(key)) {
+    return 'personaldeclinica';
+  }
+  if (['3', 'patient', 'paciente'].includes(key)) return 'paciente';
+  return null;
+}
+
+async function resolveTaskAssigneeUserIds({ clinicId, assigneeType, assigneeId, roleCode, subrole }) {
+  if (!clinicId) return [];
+
+  const normalizedAssigneeType = normalizeKey(assigneeType) || 'role';
+  if (normalizedAssigneeType === 'user') {
+    const userId = toIntOrNull(assigneeId);
+    if (!userId) return [];
+    const membership = await UsuarioClinica.findOne({
+      where: { id_clinica: clinicId, id_usuario: userId },
+      attributes: ['id_usuario'],
+      raw: true,
+    });
+    return membership ? [userId] : [];
+  }
+
+  const effectiveRole = roleCode || resolveRoleCode(assigneeId);
+  const where = { id_clinica: clinicId };
+  if (effectiveRole) {
+    where.rol_clinica = effectiveRole;
+  } else {
+    where.rol_clinica = { [Op.in]: ['propietario', 'personaldeclinica'] };
+  }
+
+  const normalizedSubrole = cleanString(subrole);
+  if (normalizedSubrole) {
+    where.subrol_clinica = normalizedSubrole;
+  }
+
+  const rows = await UsuarioClinica.findAll({
+    where,
+    attributes: ['id_usuario'],
+    raw: true,
+    limit: 50,
+  });
+
+  return Array.from(new Set(rows.map((row) => toIntOrNull(row.id_usuario)).filter(Boolean)));
+}
+
+async function handleChangeStatus(node, context, runtime) {
+  const config = node?.config && typeof node.config === 'object' ? node.config : {};
+  const targets = resolveRuntimeTargets(runtime?.execution, context);
+  const requestedStatus = resolveTemplateValue(config?.new_status, context);
+  const rawStatus = cleanString(requestedStatus);
+  if (!rawStatus) {
+    throw new Error('change_status_missing_new_status');
+  }
+
+  const appointmentStatus = normalizeAppointmentStatus(rawStatus);
+  const leadStatus = normalizeLeadStatus(rawStatus);
+  const agendaIcon = cleanString(resolveTemplateValue(config?.agenda_icon, context));
+  const now = new Date().toISOString();
+
+  if (targets.appointment_id) {
+    const appointment = await CitaPaciente.findByPk(targets.appointment_id);
+    if (!appointment) {
+      throw new Error(`appointment_not_found:${targets.appointment_id}`);
+    }
+    if (!appointmentStatus) {
+      throw new Error(`invalid_appointment_status:${rawStatus}`);
+    }
+
+    const previousStatus = cleanString(appointment.estado);
+    const updates = { estado: appointmentStatus };
+    if (agendaIcon) {
+      const iconLine = `[${now}] Icono agenda: ${agendaIcon}`;
+      updates.nota = appendText(appointment.nota, iconLine);
+    }
+    await appointment.update(updates);
+
+    return {
+      kind: 'success',
+      output: {
+        target_type: 'appointment',
+        target_id: appointment.id_cita,
+        previous_status: previousStatus,
+        new_status: appointmentStatus,
+        agenda_icon: agendaIcon,
+      },
+      next_node_id: readOutputTarget(node, 'on_success'),
+    };
+  }
+
+  if (targets.lead_intake_id) {
+    const lead = await LeadIntake.findByPk(targets.lead_intake_id);
+    if (!lead) {
+      throw new Error(`lead_not_found:${targets.lead_intake_id}`);
+    }
+    if (!leadStatus) {
+      throw new Error(`invalid_lead_status:${rawStatus}`);
+    }
+
+    const previousStatus = cleanString(lead.status_lead);
+    await lead.update({ status_lead: leadStatus });
+
+    return {
+      kind: 'success',
+      output: {
+        target_type: 'lead',
+        target_id: lead.id,
+        previous_status: previousStatus,
+        new_status: leadStatus,
+        agenda_icon: null,
+      },
+      next_node_id: readOutputTarget(node, 'on_success'),
+    };
+  }
+
+  throw new Error('change_status_target_not_found');
+}
+
+async function handleWriteNote(node, context, runtime) {
+  const config = node?.config && typeof node.config === 'object' ? node.config : {};
+  const targets = resolveRuntimeTargets(runtime?.execution, context);
+  const contentValue = resolveTemplateValue(config?.content, context);
+  const content = cleanString(contentValue);
+  if (!content) {
+    throw new Error('write_note_empty_content');
+  }
+
+  const timestamp = new Date().toISOString();
+  const noteLine = `[${timestamp}] ${content}`;
+  const result = {
+    content,
+    written: false,
+    writes: 0,
+    targets,
+  };
+
+  if (targets.conversation_id) {
+    const conversation = await Conversation.findByPk(targets.conversation_id);
+    if (conversation) {
+      const msg = await Message.create({
+        conversation_id: conversation.id,
+        sender_id: null,
+        direction: 'inbound',
+        content: noteLine,
+        message_type: 'event',
+        status: 'sent',
+        sent_at: new Date(),
+        metadata: {
+          source: 'automations_v2',
+          kind: 'automation_note',
+          execution_id: runtime?.execution?.id || null,
+          node_id: cleanString(node?.id),
+        },
+      });
+      conversation.last_message_at = new Date();
+      await conversation.save();
+
+      const io = getIO();
+      if (io && conversation.clinic_id) {
+        io.to(`clinic:${conversation.clinic_id}`).emit('message:created', {
+          id: msg.id,
+          conversation_id: String(conversation.id),
+          content: msg.content,
+          direction: msg.direction,
+          message_type: msg.message_type,
+          status: msg.status,
+          sent_at: msg.sent_at,
+          metadata: msg.metadata || null,
+        });
+      }
+
+      result.written = true;
+      result.writes += 1;
+      result.message_id = msg.id;
+    }
+  }
+
+  if (targets.lead_intake_id) {
+    const lead = await LeadIntake.findByPk(targets.lead_intake_id);
+    if (lead) {
+      await lead.update({
+        notas_internas: appendText(lead.notas_internas, noteLine),
+      });
+      result.written = true;
+      result.writes += 1;
+      result.lead_id = lead.id;
+    }
+  }
+
+  if (targets.appointment_id) {
+    const appointment = await CitaPaciente.findByPk(targets.appointment_id);
+    if (appointment) {
+      await appointment.update({
+        nota: appendText(appointment.nota, noteLine),
+      });
+      result.written = true;
+      result.writes += 1;
+      result.appointment_id = appointment.id_cita;
+    }
+  }
+
+  if (!result.written) {
+    result.status = 'skipped_no_target';
+  } else {
+    result.status = 'ok';
+  }
+
+  return {
+    kind: 'success',
+    output: result,
+    next_node_id: readOutputTarget(node, 'on_success'),
+  };
+}
+
+async function handleCreateTask(node, context, runtime) {
+  const config = node?.config && typeof node.config === 'object' ? node.config : {};
+  const targets = resolveRuntimeTargets(runtime?.execution, context);
+  const clinicId = toIntOrNull(targets.clinic_id);
+  if (!clinicId) {
+    throw new Error('create_task_missing_clinic_id');
+  }
+
+  const title = cleanString(resolveTemplateValue(config?.title, context)) || 'Tarea de automatización';
+  const description = cleanString(resolveTemplateValue(config?.description, context));
+  const assigneeType = cleanString(resolveTemplateValue(config?.assignee_type, context)) || 'role';
+  const assigneeId = resolveTemplateValue(config?.assignee_id, context);
+  const roleCode = resolveRoleCode(
+    resolveTemplateValue(config?.role_code, context)
+      || resolveTemplateValue(config?.role, context)
+      || resolveTemplateValue(config?.assignee_role, context)
+  );
+  const subrole = cleanString(resolveTemplateValue(config?.subrole, context));
+  const dueDate = parseDueDateOffset(resolveTemplateValue(config?.due_date_offset, context));
+
+  const userIds = await resolveTaskAssigneeUserIds({
+    clinicId,
+    assigneeType,
+    assigneeId,
+    roleCode,
+    subrole,
+  });
+
+  if (!userIds.length) {
+    throw new Error('create_task_no_assignees');
+  }
+
+  const message = description || title;
+  const createdNotifications = [];
+  for (const userId of userIds) {
+    const notification = await Notification.create({
+      userId,
+      role: roleCode || null,
+      subrole: subrole || null,
+      category: 'general',
+      event: 'automation.task_created',
+      title,
+      message,
+      icon: 'heroicons_outline:clipboard-document-list',
+      level: 'info',
+      data: {
+        source: 'automations_v2',
+        execution_id: runtime?.execution?.id || null,
+        node_id: cleanString(node?.id),
+        trigger_type: cleanString(runtime?.execution?.trigger_type),
+        trigger_entity_type: cleanString(runtime?.execution?.trigger_entity_type),
+        trigger_entity_id: toIntOrNull(runtime?.execution?.trigger_entity_id),
+        due_at: dueDate ? dueDate.toISOString() : null,
+      },
+      clinicaId: clinicId,
+    });
+    createdNotifications.push(notification);
+  }
+
+  return {
+    kind: 'success',
+    output: {
+      task_id: createdNotifications[0]?.id || null,
+      assignee_user_ids: userIds,
+      notifications_created: createdNotifications.length,
+      due_at: dueDate ? dueDate.toISOString() : null,
+      status: 'created',
+    },
+    next_node_id: readOutputTarget(node, 'on_success'),
+  };
 }
 
 function mergeNodeOutput(context, nodeId, patch) {
@@ -139,34 +584,17 @@ function parseWaitUntilExpression(expression, context) {
   return null;
 }
 
-async function processNode(node, context) {
+async function processNode(node, context, runtime = {}) {
   const nodeType = cleanString(node?.type) || 'unknown';
   const config = node?.config && typeof node.config === 'object' ? node.config : {};
 
   switch (nodeType) {
     case 'action/write_note': {
-      const content = resolveTemplateValue(config?.content, context);
-      return {
-        kind: 'success',
-        output: {
-          content: content ?? null,
-          written: true,
-          status: 'ok',
-        },
-        next_node_id: readOutputTarget(node, 'on_success'),
-      };
+      return handleWriteNote(node, context, runtime);
     }
 
     case 'action/change_status': {
-      return {
-        kind: 'success',
-        output: {
-          previous_status: resolveTemplateValue(config?.previous_status, context) ?? null,
-          new_status: resolveTemplateValue(config?.new_status, context) ?? null,
-          agenda_icon: resolveTemplateValue(config?.agenda_icon, context) ?? null,
-        },
-        next_node_id: readOutputTarget(node, 'on_success'),
-      };
+      return handleChangeStatus(node, context, runtime);
     }
 
     case 'action/send_whatsapp': {
@@ -195,17 +623,7 @@ async function processNode(node, context) {
     }
 
     case 'action/create_task': {
-      return {
-        kind: 'success',
-        output: {
-          task_id: null,
-          title: resolveTemplateValue(config?.title, context) || null,
-          assignee_type: config?.assignee_type || null,
-          assignee_id: config?.assignee_id || null,
-          status: 'created_stub',
-        },
-        next_node_id: readOutputTarget(node, 'on_success'),
-      };
+      return handleCreateTask(node, context, runtime);
     }
 
     case 'action/api_call': {
@@ -463,7 +881,7 @@ async function runExecution(executionId, options = {}) {
     });
 
     try {
-      const result = await processNode(node, context);
+      const result = await processNode(node, context, { execution });
       const finishedAt = new Date();
 
       if (result.kind === 'waiting') {
