@@ -8,6 +8,16 @@ module.exports = (sequelize, DataTypes) => {
         targetKey: 'id_usuario',
         as: 'Usuario'
       });
+      UsuarioClinica.belongsTo(models.Clinica, {
+        foreignKey: 'id_clinica',
+        targetKey: 'id_clinica',
+        as: 'Clinica'
+      });
+      UsuarioClinica.belongsTo(models.Usuario, {
+        foreignKey: 'invitado_por',
+        targetKey: 'id_usuario',
+        as: 'Invitador'
+      });
     }
   }
   UsuarioClinica.init({
@@ -19,9 +29,9 @@ module.exports = (sequelize, DataTypes) => {
       type: DataTypes.INTEGER,
       primaryKey: true,
     },
-    // Rol principal: 'paciente', 'personaldeclinica' o 'propietario'
+    // Rol principal: 'paciente', 'personaldeclinica', 'propietario' o 'agencia'
     rol_clinica: {
-      type: DataTypes.ENUM('paciente', 'personaldeclinica', 'propietario'),
+      type: DataTypes.ENUM('paciente', 'personaldeclinica', 'propietario', 'agencia'),
       allowNull: false,
       defaultValue: 'paciente'
     },
@@ -31,9 +41,38 @@ module.exports = (sequelize, DataTypes) => {
       allowNull: true,
       defaultValue: null
     },
+    // Onboarding
+    estado_invitacion: {
+      type: DataTypes.STRING(32),
+      allowNull: false,
+      defaultValue: 'aceptada'
+    },
+    invitado_por: {
+      type: DataTypes.INTEGER,
+      allowNull: true
+    },
+    fecha_invitacion: {
+      type: DataTypes.DATE,
+      allowNull: true
+    },
     datos_fiscales_clinica: {
       type: DataTypes.JSON,
       allowNull: true
+    },
+    invite_token: {
+      type: DataTypes.STRING(64),
+      allowNull: true,
+      defaultValue: null
+    },
+    invited_at: {
+      type: DataTypes.DATE,
+      allowNull: true,
+      defaultValue: null
+    },
+    responded_at: {
+      type: DataTypes.DATE,
+      allowNull: true,
+      defaultValue: null
     }
   }, {
     sequelize,

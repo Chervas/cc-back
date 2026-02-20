@@ -4,11 +4,31 @@ const router = express.Router();
 const authMiddleware = require('./auth.middleware');
 const personalController = require('../controllers/personal.controller');
 
-// Todas las rutas requieren JWT
+// Reclamación de cuenta provisional (flujo onboarding por email)
+router.post('/reclamar', personalController.claimProvisionalAccount);
+
+// El resto de rutas requieren JWT
 router.use(authMiddleware);
 
 // Listado filtrable por clinica/grupo (no hace dump global salvo admin/all)
 router.get('/', personalController.getPersonal);
+
+// Onboarding de personal
+// Canónico v6.1 (usado por front onboarding actual)
+router.post('/buscar', personalController.buscarPersonal);
+router.post('/invitar', personalController.invitarPersonal);
+router.get('/invitaciones', personalController.getInvitaciones);
+router.post('/:id/invitacion/responder', personalController.responderInvitacion);
+
+// Compat legacy / transición
+router.post('/search', personalController.searchPersonal);
+router.post('/invite', personalController.invitePersonal);
+router.post('/fusionar', personalController.mergePersonalAccounts);
+router.get('/me/invitaciones', personalController.getMyInvitations);
+router.post('/me/invitaciones/:clinicaId/aceptar', personalController.acceptMyInvitation);
+router.post('/me/invitaciones/:clinicaId/rechazar', personalController.rejectMyInvitation);
+router.post('/:id/invitaciones/:clinicaId/cancelar', personalController.cancelInvitation);
+router.delete('/:id/clinicas/:clinicaId', personalController.removeClinicCollaboration);
 
 // Schedule/Horarios (canónico para todo el personal)
 router.get('/me/schedule', personalController.getScheduleForCurrent);

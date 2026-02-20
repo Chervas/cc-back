@@ -50,6 +50,8 @@ const accessPolicyRoutes = require('./routes/access-policy.routes');
 const jobScheduler = require('./services/jobScheduler.service');
 const intakeController = require('./controllers/intake.controller');
 const { setIO } = require('./services/socket.service');
+const { isGlobalAdmin } = require('./lib/role-helpers');
+const { buildQuickChatContextFromMemberships } = require('./lib/quickchat-helpers');
 require('./workers/queue.workers');
 
 
@@ -243,20 +245,31 @@ io.on('connection', async (socket) => {
     // Cargar clínicas permitidas para el usuario
     const memberships = await db.UsuarioClinica.findAll({
         where: { id_usuario: userId },
-        attributes: ['id_clinica'],
+        attributes: ['id_clinica', 'rol_clinica', 'subrol_clinica'],
         raw: true
     });
-    const allowedClinicIds = memberships
-        .map((m) => Number(m.id_clinica))
-        .filter((id) => Number.isFinite(id));
+    const quickChatContext = buildQuickChatContextFromMemberships(memberships, {
+        isGlobalAdmin: isGlobalAdmin(userId),
+    });
+    const allowedClinicIds = quickChatContext.clinicIds.filter((clinicId) => {
+        const permissions = quickChatContext.permissionsByClinic.get(clinicId);
+        return !!permissions && (permissions.readTeam || permissions.readPatients);
+    });
+    const canUseAllClinics = quickChatContext.canUseAllClinics;
 
     socket.data.allowedClinicIds = allowedClinicIds;
+    socket.data.canUseAllClinics = canUseAllClinics;
 
-    // Suscripción inicial: todas las clínicas permitidas
-    allowedClinicIds.forEach((clinicId) => socket.join(`clinic:${clinicId}`));
-    socket.data.clinicRooms = [...allowedClinicIds];
+    // Suscripción inicial: solo "todas" si el perfil lo permite.
+    const initialRooms = canUseAllClinics ? [...allowedClinicIds] : [];
+    initialRooms.forEach((clinicId) => socket.join(`clinic:${clinicId}`));
+    socket.data.clinicRooms = initialRooms;
     if (process.env.CHAT_DEBUG === 'true') {
-        console.log('[CHAT] initial rooms', socket.id, { allowedClinicIds, joined: socket.data.clinicRooms });
+        console.log('[CHAT] initial rooms', socket.id, {
+            allowedClinicIds,
+            canUseAllClinics,
+            joined: socket.data.clinicRooms,
+        });
     }
 
     // Suscripción dinámica desde frontend
@@ -265,18 +278,25 @@ io.on('connection', async (socket) => {
             ? requested.map((id) => Number(id)).filter((id) => Number.isFinite(id))
             : [];
 
-        // Permitimos rooms solicitadas; si no se envían, usamos las permitidas.
+        const requestedAllowed = Array.from(new Set(requestedIds))
+            .filter((id) => allowedClinicIds.includes(id));
         const targetIds =
-            requestedIds.length > 0
-                ? Array.from(new Set(requestedIds))
-                : allowedClinicIds;
+            requestedAllowed.length > 0
+                ? requestedAllowed
+                : (canUseAllClinics ? allowedClinicIds : []);
 
         const previous = socket.data.clinicRooms || [];
         previous.forEach((id) => socket.leave(`clinic:${id}`));
         targetIds.forEach((id) => socket.join(`clinic:${id}`));
         socket.data.clinicRooms = [...targetIds];
         if (process.env.CHAT_DEBUG === 'true') {
-            console.log('[CHAT] subscribe', socket.id, { requested, targetIds, allowedClinicIds });
+            console.log('[CHAT] subscribe', socket.id, {
+                requested,
+                requestedAllowed,
+                targetIds,
+                allowedClinicIds,
+                canUseAllClinics,
+            });
         }
     });
 });

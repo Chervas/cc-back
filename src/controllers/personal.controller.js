@@ -1,15 +1,39 @@
-const { Op } = require('sequelize');
-const { Usuario, Clinica, UsuarioClinica, DoctorClinica, DoctorHorario, DoctorBloqueo, CitaPaciente } = require('../../models');
+const { Op, fn, col, where } = require('sequelize');
+const { Usuario, Clinica, UsuarioClinica, DoctorClinica, DoctorHorario, DoctorBloqueo, CitaPaciente, sequelize } = require('../../models');
 const bcrypt = require('bcryptjs');
+const {
+    ADMIN_USER_IDS,
+    STAFF_ROLES,
+    ADMIN_ROLES,
+    INVITABLE_ROLES,
+    ROLES_CLINICA: ROLES_CLINICA_ARR,
+    SUBROLES_CLINICA: SUBROLES_CLINICA_ARR,
+    ESTADO_CUENTA: ESTADO_CUENTA_ARR,
+    ESTADO_INVITACION: ESTADO_INVITACION_ARR,
+    isGlobalAdmin,
+    isStaffRole,
+    isAdminRole,
+    canManagePersonal: canManagePersonalHelper,
+} = require('../lib/role-helpers');
 
-// Mantener consistente con userclinicas.routes.js
-const ADMIN_USER_IDS = [1];
 const DEFAULT_TIMEZONE = 'Europe/Madrid';
 // Nota: columna DoctorBloqueos.tipo es STRING(32) (sin ENUM). Mantener lista alineada con el front.
 const BLOQUEO_TIPOS = new Set(['vacaciones', 'enfermedad', 'ausencia', 'formacion', 'congreso', 'otro']);
 const MODO_DISPONIBILIDAD = new Set(['avanzado', 'basico']);
+const ESTADO_CUENTA = new Set(ESTADO_CUENTA_ARR);
+const ESTADO_INVITACION = new Set(ESTADO_INVITACION_ARR);
+const ROLES_CLINICA = new Set(ROLES_CLINICA_ARR);
+const SUBROLES_CLINICA = new Set(SUBROLES_CLINICA_ARR);
+const INVITE_RESEND_COOLDOWN_HOURS = Math.max(1, Number(process.env.INVITE_RESEND_COOLDOWN_HOURS || 4));
+const INVITE_RESEND_COOLDOWN_MS = INVITE_RESEND_COOLDOWN_HOURS * 60 * 60 * 1000;
 
-const isAdmin = (userId) => ADMIN_USER_IDS.includes(Number(userId));
+const isAdmin = (userId) => isGlobalAdmin(userId);
+const ACTIVE_STAFF_INVITATION_WHERE = {
+    [Op.or]: [
+        { estado_invitacion: 'aceptada' },
+        { estado_invitacion: null },
+    ],
+};
 
 async function getAccessibleClinicIdsForUser(userId) {
     // Admin: puede acceder a todas las clinicas (pero seguimos filtrando por query para evitar dumps enormes)
@@ -26,7 +50,8 @@ async function getAccessibleClinicIdsForUser(userId) {
     const rows = await UsuarioClinica.findAll({
         where: {
             id_usuario: userId,
-            rol_clinica: { [Op.in]: ['propietario', 'personaldeclinica'] },
+            rol_clinica: { [Op.in]: STAFF_ROLES },
+            ...ACTIVE_STAFF_INVITATION_WHERE,
         },
         attributes: ['id_clinica'],
         raw: true,
@@ -56,6 +81,108 @@ function parseDateOrNull(value) {
     if (!value) return null;
     const date = new Date(value);
     return Number.isFinite(date.getTime()) ? date : null;
+}
+
+function normalizeEmail(value) {
+    if (value == null) return null;
+    const email = String(value).trim().toLowerCase();
+    if (!email || !email.includes('@')) return null;
+    return email;
+}
+
+function normalizePhone(value) {
+    if (value == null) return null;
+    const digits = String(value).replace(/[^\d+]/g, '');
+    return digits || null;
+}
+
+function normalizeTrimmed(value) {
+    if (value == null) return null;
+    const s = String(value).trim();
+    return s || null;
+}
+
+function escapeLike(value) {
+    return String(value).replace(/[\\%_]/g, '\\$&');
+}
+
+function escapeJsonString(value) {
+    return String(value).replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+}
+
+function maskEmail(value) {
+    const email = normalizeEmail(value);
+    if (!email) return null;
+    const [local, domain] = email.split('@');
+    if (!local || !domain) return null;
+    if (local.length <= 2) {
+        return `${local[0] || '*'}***@${domain}`;
+    }
+    return `${local[0]}***${local[local.length - 1]}@${domain}`;
+}
+
+function maskPhone(value) {
+    const phone = normalizePhone(value);
+    if (!phone) return null;
+    if (phone.length <= 4) return `***${phone.slice(-2)}`;
+    return `${phone.slice(0, 2)}***${phone.slice(-2)}`;
+}
+
+function normalizeRolClinica(value, defaultValue = 'personaldeclinica') {
+    if (value == null || String(value).trim() === '') {
+        return defaultValue;
+    }
+    const rol = String(value).trim();
+    if (!ROLES_CLINICA.has(rol)) return null;
+    return rol;
+}
+
+function normalizeSubrolClinica(value) {
+    if (value == null || String(value).trim() === '') {
+        return null;
+    }
+    const subrol = String(value).trim();
+    if (!SUBROLES_CLINICA.has(subrol)) return null;
+    return subrol;
+}
+
+function normalizeEstadoCuenta(value, defaultValue = 'activo') {
+    if (value == null || String(value).trim() === '') {
+        return defaultValue;
+    }
+    const estado = String(value).trim().toLowerCase();
+    if (!ESTADO_CUENTA.has(estado)) return null;
+    return estado;
+}
+
+function normalizeEstadoInvitacion(value, defaultValue = 'aceptada') {
+    if (value == null || String(value).trim() === '') {
+        return defaultValue;
+    }
+    const estado = String(value).trim().toLowerCase();
+    if (!ESTADO_INVITACION.has(estado)) return null;
+    return estado;
+}
+
+function getInviteResendRemainingMs(lastInvitedAt, now = new Date()) {
+    if (!lastInvitedAt) return 0;
+    const last = new Date(lastInvitedAt);
+    if (!Number.isFinite(last.getTime())) return 0;
+    const elapsed = now.getTime() - last.getTime();
+    return Math.max(0, INVITE_RESEND_COOLDOWN_MS - elapsed);
+}
+
+function formatCooldownWindowLabel(ms) {
+    const totalMinutes = Math.max(1, Math.ceil(ms / 60000));
+    const hours = Math.floor(totalMinutes / 60);
+    const minutes = totalMinutes % 60;
+    if (hours <= 0) return `${minutes} min`;
+    if (minutes <= 0) return `${hours} h`;
+    return `${hours} h ${minutes} min`;
+}
+
+function defaultModoDisponibilidadFromSubrol(subrolClinica) {
+    return subrolClinica === 'Doctores' ? 'avanzado' : 'basico';
 }
 
 function parseClinicConfig(value) {
@@ -271,6 +398,110 @@ function normalizeModoDisponibilidad(value) {
     return modo;
 }
 
+async function canManagePersonalInClinic(actorId, clinicaId) {
+    if (isAdmin(actorId)) return true;
+    return hasAdminScopePivot(actorId, clinicaId);
+}
+
+function invitationStateRank(value) {
+    const estado = normalizeEstadoInvitacion(value, 'aceptada');
+    if (estado === 'aceptada') return 4;
+    if (estado === 'pendiente') return 3;
+    if (estado === 'rechazada') return 2;
+    if (estado === 'cancelada') return 1;
+    return 0;
+}
+
+function pickBetterInvitationState(a, b) {
+    return invitationStateRank(a) >= invitationStateRank(b) ? a : b;
+}
+
+function roleRank(value) {
+    if (value === 'propietario') return 3;
+    if (value === 'agencia') return 3;
+    if (value === 'personaldeclinica') return 2;
+    if (value === 'paciente') return 1;
+    return 0;
+}
+
+function pickBetterRole(a, b) {
+    return roleRank(a) >= roleRank(b) ? a : b;
+}
+
+async function actorCanMergeUsers(actorId, primaryUserId, secondaryUserId) {
+    if (isAdmin(actorId)) return true;
+    const agencyClinicIds = await getAgencyClinicIdsForUser(actorId);
+    if (!agencyClinicIds.length) return false;
+    const agencySet = new Set(agencyClinicIds);
+
+    const rows = await UsuarioClinica.findAll({
+        where: {
+            id_usuario: { [Op.in]: [Number(primaryUserId), Number(secondaryUserId)] },
+            rol_clinica: { [Op.in]: STAFF_ROLES },
+            ...ACTIVE_STAFF_INVITATION_WHERE,
+        },
+        attributes: ['id_clinica'],
+        raw: true,
+    });
+    const neededClinicIds = Array.from(new Set(
+        rows
+            .map((r) => Number(r.id_clinica))
+            .filter((id) => Number.isFinite(id))
+    ));
+    if (!neededClinicIds.length) {
+        return false;
+    }
+    return neededClinicIds.every((id) => agencySet.has(id));
+}
+
+async function findUserByEmailIncludingAlternatives(email) {
+    const normalized = normalizeEmail(email);
+    if (!normalized) return null;
+
+    const altLike = `%"${escapeJsonString(normalized)}%"`;
+    return Usuario.findOne({
+        where: {
+            [Op.or]: [
+                { email_usuario: normalized },
+                { emails_alternativos: { [Op.like]: altLike } },
+            ],
+        },
+    });
+}
+
+async function ensureDoctorClinicaRow({
+    userId,
+    clinicaId,
+    subrolClinica,
+    activo,
+}) {
+    const doctorClinica = await DoctorClinica.findOne({
+        where: {
+            doctor_id: Number(userId),
+            clinica_id: Number(clinicaId),
+        },
+    });
+
+    const modo = defaultModoDisponibilidadFromSubrol(subrolClinica);
+    const rolEnClinica = normalizeTrimmed(subrolClinica) || 'personal';
+
+    if (!doctorClinica) {
+        await DoctorClinica.create({
+            doctor_id: Number(userId),
+            clinica_id: Number(clinicaId),
+            rol_en_clinica: rolEnClinica,
+            modo_disponibilidad: modo,
+            activo: !!activo,
+        });
+        return;
+    }
+
+    doctorClinica.rol_en_clinica = rolEnClinica;
+    doctorClinica.modo_disponibilidad = doctorClinica.modo_disponibilidad || modo;
+    doctorClinica.activo = !!activo;
+    await doctorClinica.save();
+}
+
 async function canAccessTargetPersonal(actorId, targetUserId, clinicId) {
     if (isAdmin(actorId)) {
         return true;
@@ -296,7 +527,7 @@ async function canAccessTargetPersonal(actorId, targetUserId, clinicId) {
     const match = await UsuarioClinica.findOne({
         where: {
             id_usuario: Number(targetUserId),
-            rol_clinica: { [Op.in]: ['propietario', 'personaldeclinica'] },
+            rol_clinica: { [Op.in]: STAFF_ROLES },
             id_clinica: { [Op.in]: allowedClinicIds },
         },
         attributes: ['id_clinica'],
@@ -388,9 +619,10 @@ exports.getPersonal = async (req, res) => {
                         id_clinica: { [Op.in]: targetClinicIds },
                     },
                     through: {
-                        attributes: ['rol_clinica', 'subrol_clinica'],
+                        attributes: ['rol_clinica', 'subrol_clinica', 'estado_invitacion'],
                         where: {
-                            rol_clinica: { [Op.in]: ['propietario', 'personaldeclinica'] },
+                            rol_clinica: { [Op.in]: STAFF_ROLES },
+                            ...ACTIVE_STAFF_INVITATION_WHERE,
                         },
                     },
                 },
@@ -430,9 +662,10 @@ exports.getPersonalById = async (req, res) => {
                         ? undefined
                         : { id_clinica: { [Op.in]: accessibleClinicIds } },
                     through: {
-                        attributes: ['rol_clinica', 'subrol_clinica'],
+                        attributes: ['rol_clinica', 'subrol_clinica', 'estado_invitacion'],
                         where: {
-                            rol_clinica: { [Op.in]: ['propietario', 'personaldeclinica'] },
+                            rol_clinica: { [Op.in]: STAFF_ROLES },
+                            ...ACTIVE_STAFF_INVITATION_WHERE,
                         },
                     },
                 },
@@ -469,6 +702,7 @@ exports.updatePersonalMember = async (req, res) => {
             where: {
                 id_usuario: actorId,
                 rol_clinica: 'propietario',
+                ...ACTIVE_STAFF_INVITATION_WHERE,
             },
             attributes: ['id_clinica'],
             raw: true,
@@ -491,6 +725,8 @@ exports.updatePersonalMember = async (req, res) => {
                 where: {
                     id_usuario: targetUserId,
                     id_clinica: { [Op.in]: actorOwnerClinicIds },
+                    rol_clinica: { [Op.in]: STAFF_ROLES },
+                    ...ACTIVE_STAFF_INVITATION_WHERE,
                 },
                 attributes: ['id_clinica'],
                 raw: true,
@@ -579,6 +815,588 @@ exports.updatePersonalMember = async (req, res) => {
 };
 
 // ────────────────────────────────────────────────────────────────
+// Onboarding: búsqueda / invitación / reclamación
+// ────────────────────────────────────────────────────────────────
+
+// Compat legacy: /api/personal/search
+exports.searchPersonal = async (req, res) => {
+    try {
+        const body = req.body || {};
+        const actorId = Number(req.userData?.userId);
+
+        let clinicaId = parseIntOrNull(body.clinica_id ?? body.id_clinica ?? body.clinic_id);
+        if (!Number.isFinite(clinicaId) && Number.isFinite(actorId)) {
+            const clinicIds = await getAccessibleClinicIdsForUser(actorId);
+            clinicaId = clinicIds[0] || null;
+        }
+
+        const query = normalizeTrimmed(
+            body.query
+            || body.q
+            || body.email
+            || body.email_usuario
+            || body.telefono
+            || [body.nombre, body.apellidos].filter(Boolean).join(' '),
+        );
+
+        req.body = {
+            ...body,
+            query,
+            clinica_id: clinicaId,
+        };
+
+        return exports.buscarPersonal(req, res);
+    } catch (error) {
+        console.error('[personal.searchPersonal.compat] Error:', error);
+        return res.status(500).json({ message: 'Error searching personal', error: error.message });
+    }
+};
+
+// Compat legacy: /api/personal/invite
+exports.invitePersonal = async (req, res) => {
+    try {
+        const body = req.body || {};
+        const idUsuario = parseIntOrNull(body.id_usuario ?? body.usuario_id ?? body.user_id);
+
+        req.body = {
+            ...body,
+            clinica_id: parseIntOrNull(body.clinica_id ?? body.id_clinica ?? body.clinic_id),
+            id_usuario: Number.isFinite(idUsuario) ? idUsuario : undefined,
+            email_usuario: body.email_usuario ?? body.email,
+        };
+
+        return exports.invitarPersonal(req, res);
+    } catch (error) {
+        console.error('[personal.invitePersonal.compat] Error:', error);
+        return res.status(500).json({ message: 'Error inviting personal', error: error.message });
+    }
+};
+
+exports.claimProvisionalAccount = async (req, res) => {
+    try {
+        const email = normalizeEmail(req.body?.email_usuario ?? req.body?.email);
+        const requestedUserId = parseIntOrNull(req.body?.id_usuario ?? req.body?.usuario_id ?? req.body?.user_id);
+        const password = String(req.body?.password || '').trim();
+
+        if (!email || password.length < 8) {
+            return res.status(400).json({
+                message: 'email and password (min 8 chars) are required',
+            });
+        }
+
+        const user = await findUserByEmailIncludingAlternatives(email);
+        if (!user) {
+            return res.status(404).json({ message: 'User not found' });
+        }
+
+        if (Number.isFinite(requestedUserId) && Number(requestedUserId) !== Number(user.id_usuario)) {
+            return res.status(403).json({ message: 'User mismatch for claim request' });
+        }
+
+        const estadoCuenta = normalizeEstadoCuenta(user.estado_cuenta, 'activo');
+        if (estadoCuenta !== 'provisional') {
+            return res.status(409).json({
+                message: 'Account is not provisional',
+                code: 'account_not_provisional',
+            });
+        }
+
+        user.password_usuario = await bcrypt.hash(password, 8);
+        user.estado_cuenta = 'activo';
+        user.ultimo_login = new Date();
+        await user.save({ fields: ['password_usuario', 'estado_cuenta', 'ultimo_login'] });
+
+        return res.status(200).json({
+            message: 'Account claimed successfully',
+            user: {
+                id_usuario: Number(user.id_usuario),
+                estado_cuenta: 'activo',
+            },
+        });
+    } catch (error) {
+        console.error('[personal.claimProvisionalAccount] Error:', error);
+        return res.status(500).json({ message: 'Error claiming provisional account', error: error.message });
+    }
+};
+
+exports.getMyInvitations = async (req, res) => {
+    try {
+        const actorId = Number(req.userData?.userId);
+        if (!Number.isFinite(actorId)) {
+            return res.status(401).json({ message: 'Auth failed!' });
+        }
+
+        const rows = await UsuarioClinica.findAll({
+            where: {
+                id_usuario: actorId,
+                estado_invitacion: 'pendiente',
+                rol_clinica: { [Op.in]: STAFF_ROLES },
+            },
+            attributes: [
+                'id_usuario',
+                'id_clinica',
+                'rol_clinica',
+                'subrol_clinica',
+                'estado_invitacion',
+                'invitado_por',
+                'fecha_invitacion',
+            ],
+            include: [
+                {
+                    model: Clinica,
+                    as: 'Clinica',
+                    required: false,
+                    attributes: ['id_clinica', 'nombre_clinica', 'url_avatar'],
+                },
+                {
+                    model: Usuario,
+                    as: 'Invitador',
+                    required: false,
+                    attributes: ['id_usuario', 'nombre', 'apellidos', 'email_usuario', 'avatar'],
+                },
+            ],
+            order: [['fecha_invitacion', 'DESC']],
+        });
+
+        return res.json({
+            items: rows.map((row) => ({
+                id_usuario: Number(row.id_usuario),
+                clinica_id: Number(row.id_clinica),
+                clinica_nombre: row.Clinica?.nombre_clinica || '',
+                clinica_avatar: row.Clinica?.url_avatar || null,
+                rol_clinica: row.rol_clinica,
+                subrol_clinica: row.subrol_clinica || null,
+                estado_invitacion: normalizeEstadoInvitacion(row.estado_invitacion, 'pendiente') || 'pendiente',
+                fecha_invitacion: row.fecha_invitacion || null,
+                invitado_por: row.invitado_por ? Number(row.invitado_por) : null,
+                invitador: row.Invitador
+                    ? {
+                        id_usuario: Number(row.Invitador.id_usuario),
+                        nombre: row.Invitador.nombre || '',
+                        apellidos: row.Invitador.apellidos || '',
+                        email_masked: maskEmail(row.Invitador.email_usuario),
+                        avatar: row.Invitador.avatar || null,
+                    }
+                    : null,
+            })),
+        });
+    } catch (error) {
+        console.error('[personal.getMyInvitations] Error:', error);
+        return res.status(500).json({ message: 'Error retrieving invitations', error: error.message });
+    }
+};
+
+exports.acceptMyInvitation = async (req, res) => {
+    try {
+        const actorId = Number(req.userData?.userId);
+        if (!Number.isFinite(actorId)) {
+            return res.status(401).json({ message: 'Auth failed!' });
+        }
+
+        const clinicaId = parseIntOrNull(req.params?.clinicaId);
+        if (!Number.isFinite(clinicaId)) {
+            return res.status(400).json({ message: 'Invalid clinicaId' });
+        }
+
+        const pivot = await UsuarioClinica.findOne({
+            where: {
+                id_usuario: actorId,
+                id_clinica: clinicaId,
+            },
+        });
+        if (!pivot) {
+            return res.status(404).json({ message: 'Invitation not found' });
+        }
+
+        const estado = normalizeEstadoInvitacion(pivot.estado_invitacion, 'aceptada');
+        if (estado !== 'pendiente' && estado !== 'rechazada') {
+            return res.status(409).json({
+                message: `Invitation is in state "${estado}" and cannot be accepted`,
+                code: 'invitation_invalid_state',
+            });
+        }
+
+        pivot.estado_invitacion = 'aceptada';
+        await pivot.save({ fields: ['estado_invitacion', 'updated_at'] });
+
+        await ensureDoctorClinicaRow({
+            userId: actorId,
+            clinicaId,
+            subrolClinica: pivot.subrol_clinica,
+            activo: true,
+        });
+
+        return res.status(200).json({
+            message: 'Invitation accepted',
+            clinica_id: clinicaId,
+            estado_invitacion: 'aceptada',
+        });
+    } catch (error) {
+        console.error('[personal.acceptMyInvitation] Error:', error);
+        return res.status(500).json({ message: 'Error accepting invitation', error: error.message });
+    }
+};
+
+exports.rejectMyInvitation = async (req, res) => {
+    try {
+        const actorId = Number(req.userData?.userId);
+        if (!Number.isFinite(actorId)) {
+            return res.status(401).json({ message: 'Auth failed!' });
+        }
+
+        const clinicaId = parseIntOrNull(req.params?.clinicaId);
+        if (!Number.isFinite(clinicaId)) {
+            return res.status(400).json({ message: 'Invalid clinicaId' });
+        }
+
+        const pivot = await UsuarioClinica.findOne({
+            where: {
+                id_usuario: actorId,
+                id_clinica: clinicaId,
+            },
+        });
+        if (!pivot) {
+            return res.status(404).json({ message: 'Invitation not found' });
+        }
+
+        const estado = normalizeEstadoInvitacion(pivot.estado_invitacion, 'aceptada');
+        if (estado !== 'pendiente') {
+            return res.status(409).json({
+                message: `Invitation is in state "${estado}" and cannot be rejected`,
+                code: 'invitation_invalid_state',
+            });
+        }
+
+        pivot.estado_invitacion = 'rechazada';
+        await pivot.save({ fields: ['estado_invitacion', 'updated_at'] });
+
+        const doctorClinica = await DoctorClinica.findOne({
+            where: {
+                doctor_id: actorId,
+                clinica_id: clinicaId,
+            },
+        });
+        if (doctorClinica) {
+            doctorClinica.activo = false;
+            await doctorClinica.save({ fields: ['activo', 'updated_at'] });
+        }
+
+        return res.status(200).json({
+            message: 'Invitation rejected',
+            clinica_id: clinicaId,
+            estado_invitacion: 'rechazada',
+        });
+    } catch (error) {
+        console.error('[personal.rejectMyInvitation] Error:', error);
+        return res.status(500).json({ message: 'Error rejecting invitation', error: error.message });
+    }
+};
+
+exports.cancelInvitation = async (req, res) => {
+    try {
+        const actorId = Number(req.userData?.userId);
+        if (!Number.isFinite(actorId)) {
+            return res.status(401).json({ message: 'Auth failed!' });
+        }
+
+        const targetUserId = parseIntOrNull(req.params?.id);
+        const clinicaId = parseIntOrNull(req.params?.clinicaId);
+        if (!Number.isFinite(targetUserId) || !Number.isFinite(clinicaId)) {
+            return res.status(400).json({ message: 'Invalid params' });
+        }
+
+        const canManage = await canManagePersonalInClinic(actorId, clinicaId);
+        if (!canManage) {
+            return res.status(403).json({ message: 'Forbidden' });
+        }
+
+        const pivot = await UsuarioClinica.findOne({
+            where: {
+                id_usuario: targetUserId,
+                id_clinica: clinicaId,
+            },
+        });
+        if (!pivot) {
+            return res.status(404).json({ message: 'Invitation not found' });
+        }
+
+        const estado = normalizeEstadoInvitacion(pivot.estado_invitacion, 'aceptada');
+        if (estado !== 'pendiente') {
+            return res.status(409).json({
+                message: `Invitation is in state "${estado}" and cannot be cancelled`,
+                code: 'invitation_invalid_state',
+            });
+        }
+
+        pivot.estado_invitacion = 'cancelada';
+        await pivot.save({ fields: ['estado_invitacion', 'updated_at'] });
+
+        const doctorClinica = await DoctorClinica.findOne({
+            where: {
+                doctor_id: targetUserId,
+                clinica_id: clinicaId,
+            },
+        });
+        if (doctorClinica) {
+            doctorClinica.activo = false;
+            await doctorClinica.save({ fields: ['activo', 'updated_at'] });
+        }
+
+        return res.status(200).json({
+            message: 'Invitation cancelled',
+            id_usuario: targetUserId,
+            clinica_id: clinicaId,
+            estado_invitacion: 'cancelada',
+        });
+    } catch (error) {
+        console.error('[personal.cancelInvitation] Error:', error);
+        return res.status(500).json({ message: 'Error cancelling invitation', error: error.message });
+    }
+};
+
+exports.removeClinicCollaboration = async (req, res) => {
+    const transaction = await sequelize.transaction();
+    try {
+        const actorId = Number(req.userData?.userId);
+        if (!Number.isFinite(actorId)) {
+            await transaction.rollback();
+            return res.status(401).json({ message: 'Auth failed!' });
+        }
+
+        const targetUserId = parseIntOrNull(req.params?.id);
+        const clinicaId = parseIntOrNull(req.params?.clinicaId);
+        if (!Number.isFinite(targetUserId) || !Number.isFinite(clinicaId)) {
+            await transaction.rollback();
+            return res.status(400).json({ message: 'Invalid params' });
+        }
+
+        const canManage = await canManagePersonalInClinic(actorId, clinicaId);
+        if (!canManage) {
+            await transaction.rollback();
+            return res.status(403).json({ message: 'Forbidden' });
+        }
+
+        // Evita que owner/agencia se desvinculen a sí mismos por accidente en UI.
+        if (!isAdmin(actorId) && Number(actorId) === Number(targetUserId)) {
+            await transaction.rollback();
+            return res.status(409).json({
+                message: 'No puedes eliminar tu propia colaboración desde esta acción.',
+                code: 'self_unlink_forbidden',
+            });
+        }
+
+        const pivot = await UsuarioClinica.findOne({
+            where: {
+                id_usuario: targetUserId,
+                id_clinica: clinicaId,
+                rol_clinica: { [Op.in]: STAFF_ROLES },
+            },
+            transaction,
+        });
+
+        if (!pivot) {
+            await transaction.rollback();
+            return res.status(404).json({ message: 'Collaboration not found' });
+        }
+
+        const doctorClinicaRows = await DoctorClinica.findAll({
+            where: { doctor_id: targetUserId, clinica_id: clinicaId },
+            attributes: ['id'],
+            transaction,
+        });
+        const doctorClinicaIds = doctorClinicaRows.map((row) => Number(row.id)).filter((id) => Number.isFinite(id));
+
+        if (doctorClinicaIds.length) {
+            await DoctorHorario.destroy({
+                where: { doctor_clinica_id: { [Op.in]: doctorClinicaIds } },
+                transaction,
+            });
+        }
+
+        await DoctorClinica.destroy({
+            where: { doctor_id: targetUserId, clinica_id: clinicaId },
+            transaction,
+        });
+
+        // Limpiar bloqueos scoped a la clínica removida.
+        await DoctorBloqueo.destroy({
+            where: { doctor_id: targetUserId, clinica_id: clinicaId },
+            transaction,
+        });
+
+        await pivot.destroy({ transaction });
+
+        await transaction.commit();
+        return res.status(200).json({
+            message: 'Collaboration removed successfully',
+            id_usuario: targetUserId,
+            clinica_id: clinicaId,
+        });
+    } catch (error) {
+        await transaction.rollback();
+        console.error('[personal.removeClinicCollaboration] Error:', error);
+        return res.status(500).json({ message: 'Error removing clinic collaboration', error: error.message });
+    }
+};
+
+exports.mergePersonalAccounts = async (req, res) => {
+    const transaction = await sequelize.transaction();
+    try {
+        const actorId = Number(req.userData?.userId);
+        if (!Number.isFinite(actorId)) {
+            await transaction.rollback();
+            return res.status(401).json({ message: 'Auth failed!' });
+        }
+
+        const principalUserId = parseIntOrNull(req.body?.principal_user_id);
+        const secondaryUserId = parseIntOrNull(req.body?.secondary_user_id);
+
+        if (!Number.isFinite(principalUserId) || !Number.isFinite(secondaryUserId) || principalUserId === secondaryUserId) {
+            await transaction.rollback();
+            return res.status(400).json({ message: 'principal_user_id and secondary_user_id are required and must be different' });
+        }
+
+        const canMerge = await actorCanMergeUsers(actorId, principalUserId, secondaryUserId);
+        if (!canMerge) {
+            await transaction.rollback();
+            return res.status(403).json({ message: 'Forbidden' });
+        }
+
+        const [principal, secondary] = await Promise.all([
+            Usuario.findByPk(principalUserId, { transaction }),
+            Usuario.findByPk(secondaryUserId, { transaction }),
+        ]);
+        if (!principal || !secondary) {
+            await transaction.rollback();
+            return res.status(404).json({ message: 'One or both users not found' });
+        }
+
+        const secondaryPivotRows = await UsuarioClinica.findAll({
+            where: { id_usuario: secondaryUserId },
+            transaction,
+        });
+        for (const row of secondaryPivotRows) {
+            const existing = await UsuarioClinica.findOne({
+                where: {
+                    id_usuario: principalUserId,
+                    id_clinica: row.id_clinica,
+                },
+                transaction,
+            });
+
+            if (!existing) {
+                row.id_usuario = principalUserId;
+                await row.save({ transaction });
+                continue;
+            }
+
+            existing.rol_clinica = pickBetterRole(existing.rol_clinica, row.rol_clinica);
+            existing.subrol_clinica = existing.subrol_clinica || row.subrol_clinica || null;
+            existing.estado_invitacion = pickBetterInvitationState(existing.estado_invitacion, row.estado_invitacion);
+            existing.invitado_por = existing.invitado_por || row.invitado_por || null;
+            existing.fecha_invitacion = existing.fecha_invitacion || row.fecha_invitacion || null;
+            await existing.save({ transaction });
+            await row.destroy({ transaction });
+        }
+
+        const secondaryDoctorClinicas = await DoctorClinica.findAll({
+            where: { doctor_id: secondaryUserId },
+            transaction,
+        });
+        for (const row of secondaryDoctorClinicas) {
+            const existing = await DoctorClinica.findOne({
+                where: {
+                    doctor_id: principalUserId,
+                    clinica_id: row.clinica_id,
+                },
+                transaction,
+            });
+
+            if (!existing) {
+                row.doctor_id = principalUserId;
+                await row.save({ transaction });
+                continue;
+            }
+
+            await DoctorHorario.update(
+                { doctor_clinica_id: existing.id },
+                {
+                    where: { doctor_clinica_id: row.id },
+                    transaction,
+                }
+            );
+
+            existing.activo = !!(existing.activo || row.activo);
+            existing.modo_disponibilidad = existing.modo_disponibilidad || row.modo_disponibilidad || 'avanzado';
+            existing.rol_en_clinica = existing.rol_en_clinica || row.rol_en_clinica || null;
+            await existing.save({ transaction });
+
+            await row.destroy({ transaction });
+        }
+
+        await DoctorBloqueo.update(
+            { doctor_id: principalUserId },
+            {
+                where: { doctor_id: secondaryUserId },
+                transaction,
+            }
+        );
+
+        await CitaPaciente.update(
+            { doctor_id: principalUserId },
+            {
+                where: { doctor_id: secondaryUserId },
+                transaction,
+            }
+        );
+
+        const principalAlt = Array.isArray(principal.emails_alternativos)
+            ? principal.emails_alternativos.map((e) => normalizeEmail(e)).filter(Boolean)
+            : [];
+        const extraEmails = [secondary.email_usuario]
+            .concat(Array.isArray(secondary.emails_alternativos) ? secondary.emails_alternativos : [])
+            .map((e) => normalizeEmail(e))
+            .filter(Boolean);
+        const altSet = new Set([...principalAlt, ...extraEmails].filter((e) => e && e !== normalizeEmail(principal.email_usuario)));
+        principal.emails_alternativos = Array.from(altSet);
+        await principal.save({ fields: ['emails_alternativos', 'updated_at'], transaction });
+
+        const nowStamp = Date.now();
+        const fallbackMail = `merged+${secondaryUserId}.${nowStamp}@invalid.local`;
+        secondary.estado_cuenta = 'suspendido';
+        secondary.email_usuario = fallbackMail;
+        secondary.password_usuario = null;
+        secondary.email_notificacion = null;
+        secondary.email_factura = null;
+        secondary.notas_usuario = `${secondary.notas_usuario ? `${secondary.notas_usuario}\n` : ''}[MERGED] Migrada a usuario ${principalUserId} el ${new Date().toISOString()} por actor ${actorId}`;
+        await secondary.save({
+            fields: [
+                'estado_cuenta',
+                'email_usuario',
+                'password_usuario',
+                'email_notificacion',
+                'email_factura',
+                'notas_usuario',
+                'updated_at',
+            ],
+            transaction,
+        });
+
+        await transaction.commit();
+
+        return res.status(200).json({
+            message: 'Accounts merged successfully',
+            principal_user_id: principalUserId,
+            secondary_user_id: secondaryUserId,
+        });
+    } catch (error) {
+        await transaction.rollback();
+        console.error('[personal.mergePersonalAccounts] Error:', error);
+        return res.status(500).json({ message: 'Error merging accounts', error: error.message });
+    }
+};
+
+// ────────────────────────────────────────────────────────────────
 // Bloqueos permissions (server-truth)
 // ────────────────────────────────────────────────────────────────
 
@@ -606,9 +1424,9 @@ exports.getPersonalBloqueosPermissions = async (req, res) => {
         if (isAdmin(actorId) || Number(actorId) === Number(targetUserId)) {
             allowedClinicIds = targetClinicIds;
         } else {
-            const ownerClinicIds = await getOwnerClinicIdsForUser(actorId);
-            const ownerSet = new Set(ownerClinicIds);
-            allowedClinicIds = targetClinicIds.filter((id) => ownerSet.has(id));
+            const adminScopedClinicIds = await getAdminScopedClinicIdsForUser(actorId);
+            const adminScopedSet = new Set(adminScopedClinicIds);
+            allowedClinicIds = targetClinicIds.filter((id) => adminScopedSet.has(id));
         }
 
         return res.json({
@@ -963,7 +1781,8 @@ async function hasStaffPivot(userId, clinicId) {
         where: {
             id_usuario: Number(userId),
             id_clinica: Number(clinicId),
-            rol_clinica: { [Op.in]: ['propietario', 'personaldeclinica'] },
+            rol_clinica: { [Op.in]: STAFF_ROLES },
+            ...ACTIVE_STAFF_INVITATION_WHERE,
         },
         attributes: ['id_usuario'],
         raw: true,
@@ -978,6 +1797,22 @@ async function isOwnerPivot(userId, clinicId) {
             id_usuario: Number(userId),
             id_clinica: Number(clinicId),
             rol_clinica: 'propietario',
+            ...ACTIVE_STAFF_INVITATION_WHERE,
+        },
+        attributes: ['id_usuario'],
+        raw: true,
+    });
+    return !!row;
+}
+
+async function hasAdminScopePivot(userId, clinicId) {
+    if (!Number.isFinite(Number(userId)) || !Number.isFinite(Number(clinicId))) return false;
+    const row = await UsuarioClinica.findOne({
+        where: {
+            id_usuario: Number(userId),
+            id_clinica: Number(clinicId),
+            rol_clinica: { [Op.in]: ADMIN_ROLES },
+            ...ACTIVE_STAFF_INVITATION_WHERE,
         },
         attributes: ['id_usuario'],
         raw: true,
@@ -994,9 +1829,9 @@ async function canEditHorarios(actorId, targetUserId, clinicId) {
         return hasStaffPivot(actorId, clinicId);
     }
 
-    // Editar horarios de otros: solo propietario de la clínica (MVP; AccessPolicy granular va en Bloque 2)
-    const actorIsOwner = await isOwnerPivot(actorId, clinicId);
-    if (!actorIsOwner) return false;
+    // Editar horarios de otros: propietario/agencia con alcance sobre la clínica.
+    const actorHasAdminScope = await hasAdminScopePivot(actorId, clinicId);
+    if (!actorHasAdminScope) return false;
 
     // Evitar generar schedules "huérfanos" en clínicas donde el usuario no pertenece
     return hasStaffPivot(targetUserId, clinicId);
@@ -1008,6 +1843,39 @@ async function getOwnerClinicIdsForUser(userId) {
         where: {
             id_usuario: Number(userId),
             rol_clinica: 'propietario',
+            ...ACTIVE_STAFF_INVITATION_WHERE,
+        },
+        attributes: ['id_clinica'],
+        raw: true,
+    });
+    return rows
+        .map((r) => Number(r.id_clinica))
+        .filter((id) => Number.isFinite(id));
+}
+
+async function getAgencyClinicIdsForUser(userId) {
+    if (!Number.isFinite(Number(userId))) return [];
+    const rows = await UsuarioClinica.findAll({
+        where: {
+            id_usuario: Number(userId),
+            rol_clinica: 'agencia',
+            ...ACTIVE_STAFF_INVITATION_WHERE,
+        },
+        attributes: ['id_clinica'],
+        raw: true,
+    });
+    return rows
+        .map((r) => Number(r.id_clinica))
+        .filter((id) => Number.isFinite(id));
+}
+
+async function getAdminScopedClinicIdsForUser(userId) {
+    if (!Number.isFinite(Number(userId))) return [];
+    const rows = await UsuarioClinica.findAll({
+        where: {
+            id_usuario: Number(userId),
+            rol_clinica: { [Op.in]: ADMIN_ROLES },
+            ...ACTIVE_STAFF_INVITATION_WHERE,
         },
         attributes: ['id_clinica'],
         raw: true,
@@ -1028,21 +1896,21 @@ async function canEditBloqueos(actorId, targetUserId, clinicaId) {
         return true;
     }
 
-    const ownerClinicIds = await getOwnerClinicIdsForUser(actorId);
-    if (!ownerClinicIds.length) return false;
+    const adminScopedClinicIds = await getAdminScopedClinicIdsForUser(actorId);
+    if (!adminScopedClinicIds.length) return false;
 
-    // Bloqueo global (clinica_id=null): permitir solo si el actor es propietario de *todas* las clínicas
-    // donde el usuario objetivo trabaja (evita bloquear en clínicas ajenas).
+    // Bloqueo global (clinica_id=null): permitir solo si el actor (propietario/agencia)
+    // tiene alcance en *todas* las clínicas donde trabaja el objetivo.
     if (clinicaId == null) {
         const targetClinicIds = await getAccessibleClinicIdsForUser(targetUserId);
         if (!targetClinicIds.length) return false;
-        const ownerSet = new Set(ownerClinicIds);
-        return targetClinicIds.every((id) => ownerSet.has(id));
+        const adminScopedSet = new Set(adminScopedClinicIds);
+        return targetClinicIds.every((id) => adminScopedSet.has(id));
     }
 
     const cid = Number(clinicaId);
     if (!Number.isFinite(cid)) return false;
-    if (!ownerClinicIds.includes(cid)) return false;
+    if (!adminScopedClinicIds.includes(cid)) return false;
 
     // Evitar bloqueos huérfanos: el usuario objetivo debe pertenecer a la clínica.
     return hasStaffPivot(targetUserId, cid);
@@ -1372,5 +2240,513 @@ exports.updateHorarios = async (req, res) => {
     } catch (error) {
         console.error('[personal.updateHorarios] Error:', error);
         return res.status(500).json({ message: 'Error updating horarios', error: error.message });
+    }
+};
+
+// ═══════════════════════════════════════════════════════════════
+// Bloque 6.1 — Onboarding / Invitación de personal
+// ═══════════════════════════════════════════════════════════════
+
+const crypto = require('crypto');
+
+/**
+ * POST /api/personal/buscar
+ * Busca usuarios existentes por email exacto.
+ * Devuelve coincidencias con su estado de vinculación a la clínica solicitada.
+ *
+ * Body: { query: string, clinica_id: number }
+ */
+exports.buscarPersonal = async (req, res) => {
+    try {
+        const actorId = Number(req.userData?.userId);
+        if (!Number.isFinite(actorId)) {
+            return res.status(401).json({ message: 'Auth failed!' });
+        }
+
+        const { query, clinica_id } = req.body;
+        if (!query || typeof query !== 'string') {
+            return res.status(400).json({ message: 'query es obligatorio' });
+        }
+        const email = normalizeEmail(query);
+        if (!email) {
+            return res.status(400).json({ message: 'Debes introducir un email completo' });
+        }
+        const clinicaId = parseIntOrNull(clinica_id);
+        if (!Number.isFinite(clinicaId)) {
+            return res.status(400).json({ message: 'clinica_id es obligatorio' });
+        }
+
+        // Invitar/buscar personal es una acción de gestión: solo admin global
+        // o roles de administración en la clínica (propietario/agencia).
+        const canManageClinicPersonal = isAdmin(actorId) || await hasAdminScopePivot(actorId, clinicaId);
+        if (!canManageClinicPersonal) {
+            return res.status(403).json({ message: 'Forbidden' });
+        }
+
+        const escapedEmail = escapeJsonString(email);
+        const users = await Usuario.findAll({
+            attributes: ['id_usuario', 'nombre', 'apellidos', 'email_usuario', 'telefono', 'avatar', 'es_provisional'],
+            where: {
+                [Op.or]: [
+                    { email_usuario: email },
+                    { emails_alternativos: { [Op.like]: `%"${escapedEmail}"%` } },
+                ],
+            },
+            include: [
+                {
+                    model: Clinica,
+                    as: 'Clinicas',
+                    attributes: ['id_clinica'],
+                    required: false,
+                    through: {
+                        attributes: ['rol_clinica', 'subrol_clinica', 'estado_invitacion'],
+                    },
+                },
+            ],
+            order: [['nombre', 'ASC']],
+            limit: 1,
+        });
+
+        // Enriquecer cada resultado con su estado respecto a la clínica solicitada
+        const results = users.map((u) => {
+            const json = u.toJSON();
+
+            const clinicas = json.Clinicas || [];
+            const pivot = clinicas.find(
+                (c) => Number(c.id_clinica) === clinicaId,
+            );
+
+            return {
+                id_usuario: json.id_usuario,
+                nombre: json.nombre,
+                apellidos: json.apellidos || '',
+                email_usuario: json.email_usuario || '',
+                telefono: json.telefono || '',
+                avatar: json.avatar || null,
+                es_provisional: !!json.es_provisional,
+                vinculacion_clinica: pivot
+                    ? {
+                          ya_vinculado: true,
+                          rol_clinica: pivot.UsuarioClinica?.rol_clinica || null,
+                          subrol_clinica: pivot.UsuarioClinica?.subrol_clinica || null,
+                          estado_invitacion: pivot.UsuarioClinica?.estado_invitacion || null,
+                      }
+                    : { ya_vinculado: false },
+            };
+        });
+
+        return res.json(results);
+    } catch (error) {
+        console.error('[personal.buscarPersonal] Error:', error);
+        return res.status(500).json({ message: 'Error en búsqueda', error: error.message });
+    }
+};
+
+/**
+ * POST /api/personal/invitar
+ * Invita a un usuario existente o crea uno provisional y lo vincula a la clínica.
+ *
+ * Body: {
+ *   clinica_id: number,
+ *   rol_clinica: 'personaldeclinica' | 'propietario',
+ *   subrol_clinica: string | null,
+ *   // Si el usuario ya existe:
+ *   id_usuario?: number,
+ *   // Si es nuevo (provisional):
+ *   nombre?: string,
+ *   apellidos?: string,
+ *   email_usuario?: string,
+ *   telefono?: string,
+ * }
+ */
+exports.invitarPersonal = async (req, res) => {
+    try {
+        const actorId = Number(req.userData?.userId);
+        if (!Number.isFinite(actorId)) {
+            return res.status(401).json({ message: 'Auth failed!' });
+        }
+
+        const {
+            clinica_id,
+            rol_clinica = 'personaldeclinica',
+            subrol_clinica = null,
+            id_usuario,
+            nombre,
+            apellidos,
+            email_usuario,
+            telefono,
+        } = req.body;
+
+        const clinicaId = parseIntOrNull(clinica_id);
+        if (!Number.isFinite(clinicaId)) {
+            return res.status(400).json({ message: 'clinica_id es obligatorio' });
+        }
+
+        // Invitar personal es una acción de gestión: solo admin global
+        // o roles de administración en la clínica (propietario/agencia).
+        const canManageClinicPersonal = isAdmin(actorId) || await hasAdminScopePivot(actorId, clinicaId);
+        if (!canManageClinicPersonal) {
+            return res.status(403).json({ message: 'Forbidden' });
+        }
+
+        // Verificar que la clínica existe
+        const clinica = await Clinica.findByPk(clinicaId);
+        if (!clinica) {
+            return res.status(404).json({ message: 'Clínica no encontrada' });
+        }
+
+        if (!INVITABLE_ROLES.includes(rol_clinica)) {
+            return res.status(400).json({ message: `rol_clinica debe ser uno de: ${INVITABLE_ROLES.join(', ')}` });
+        }
+
+        let targetUser;
+        let isNewProvisional = false;
+        if (id_usuario) {
+            // ── Invitar usuario existente ──
+            targetUser = await Usuario.findByPk(id_usuario, {
+                attributes: { exclude: ['password_usuario'] },
+            });
+            if (!targetUser) {
+                return res.status(404).json({ message: 'Usuario no encontrado' });
+            }
+
+            // Verificar si ya está vinculado a esta clínica
+            const existingPivot = await UsuarioClinica.findOne({
+                where: { id_usuario: targetUser.id_usuario, id_clinica: clinicaId },
+            });
+            if (existingPivot) {
+                const existingEstado = normalizeEstadoInvitacion(existingPivot.estado_invitacion, 'aceptada') || 'aceptada';
+
+                // Si está pendiente/rechazada, se permite reenviar la invitación.
+                if (existingEstado === 'pendiente' || existingEstado === 'rechazada') {
+                    const cooldownRemainingMs = getInviteResendRemainingMs(existingPivot.invited_at);
+                    if (cooldownRemainingMs > 0) {
+                        const retryAfterSeconds = Math.ceil(cooldownRemainingMs / 1000);
+                        const waitLabel = formatCooldownWindowLabel(cooldownRemainingMs);
+                        res.set('Retry-After', String(retryAfterSeconds));
+                        return res.status(429).json({
+                            message: `Debes esperar ${waitLabel} para reenviar esta invitación.`,
+                            code: 'invite_resend_cooldown',
+                            retry_after_seconds: retryAfterSeconds,
+                            retry_after_ms: cooldownRemainingMs,
+                        });
+                    }
+
+                    const resentToken = crypto.randomBytes(32).toString('hex');
+                    const now = new Date();
+                    const nextSubrol = (subrol_clinica !== undefined)
+                        ? (subrol_clinica || null)
+                        : existingPivot.subrol_clinica;
+
+                    existingPivot.rol_clinica = rol_clinica || existingPivot.rol_clinica;
+                    existingPivot.subrol_clinica = nextSubrol;
+                    existingPivot.estado_invitacion = 'pendiente';
+                    existingPivot.invite_token = resentToken;
+                    existingPivot.invited_at = now;
+                    existingPivot.responded_at = null;
+                    existingPivot.invitado_por = actorId;
+                    existingPivot.fecha_invitacion = now;
+                    await existingPivot.save({
+                        fields: [
+                            'rol_clinica',
+                            'subrol_clinica',
+                            'estado_invitacion',
+                            'invite_token',
+                            'invited_at',
+                            'responded_at',
+                            'invitado_por',
+                            'fecha_invitacion',
+                            'updated_at',
+                        ],
+                    });
+
+                    const userJson = targetUser.toJSON ? targetUser.toJSON() : { ...targetUser };
+                    delete userJson.password_usuario;
+
+                    return res.status(200).json({
+                        message: 'Invitación reenviada',
+                        usuario: userJson,
+                        clinica_id: clinicaId,
+                        estado_invitacion: 'pendiente',
+                        invite_token: resentToken,
+                        es_provisional: !!targetUser.es_provisional,
+                        resent: true,
+                    });
+                }
+
+                return res.status(409).json({
+                    message: 'El usuario ya está vinculado a esta clínica',
+                    estado_invitacion: existingEstado,
+                });
+            }
+        } else {
+            // ── Crear usuario provisional ──
+            if (!nombre || typeof nombre !== 'string' || !nombre.trim()) {
+                return res.status(400).json({ message: 'nombre es obligatorio para crear usuario provisional' });
+            }
+
+            // Verificar email único si se proporciona
+            if (email_usuario) {
+                const existingByEmail = await Usuario.findOne({
+                    where: { email_usuario: email_usuario.trim().toLowerCase() },
+                });
+                if (existingByEmail) {
+                    return res.status(409).json({
+                        message: 'Ya existe un usuario con ese email. Usa id_usuario para invitarlo.',
+                        id_usuario_existente: existingByEmail.id_usuario,
+                    });
+                }
+            }
+
+            // Crear usuario provisional (sin password real)
+            const placeholderPassword = await bcrypt.hash(crypto.randomBytes(32).toString('hex'), 8);
+            targetUser = await Usuario.create({
+                nombre: nombre.trim(),
+                apellidos: (apellidos || '').trim(),
+                email_usuario: email_usuario ? email_usuario.trim().toLowerCase() : '',
+                telefono: (telefono || '').trim(),
+                password_usuario: placeholderPassword,
+                es_provisional: true,
+                isProfesional: subrol_clinica === 'Doctores',
+                fecha_creacion: new Date(),
+            });
+            isNewProvisional = true;
+        }
+
+        // Generar token de invitación
+        const inviteToken = crypto.randomBytes(32).toString('hex');
+
+        // Crear la vinculación con estado 'pendiente'
+        await UsuarioClinica.create({
+            id_usuario: targetUser.id_usuario,
+            id_clinica: clinicaId,
+            rol_clinica,
+            subrol_clinica: subrol_clinica || null,
+            estado_invitacion: 'pendiente',
+            invite_token: inviteToken,
+            invitado_por: actorId,
+            fecha_invitacion: new Date(),
+            invited_at: new Date(),
+        });
+
+        // Devolver respuesta
+        const userJson = targetUser.toJSON ? targetUser.toJSON() : { ...targetUser };
+        delete userJson.password_usuario;
+
+        return res.status(201).json({
+            message: isNewProvisional
+                ? 'Usuario provisional creado e invitación enviada'
+                : 'Invitación enviada al usuario existente',
+            usuario: userJson,
+            clinica_id: clinicaId,
+            estado_invitacion: 'pendiente',
+            invite_token: inviteToken,
+            es_provisional: isNewProvisional,
+        });
+    } catch (error) {
+        console.error('[personal.invitarPersonal] Error:', error);
+        return res.status(500).json({ message: 'Error al invitar personal', error: error.message });
+    }
+};
+
+/**
+ * GET /api/personal/invitaciones?clinica_id=...
+ * Lista las invitaciones pendientes/recientes de una clínica.
+ */
+exports.getInvitaciones = async (req, res) => {
+    try {
+        const actorId = Number(req.userData?.userId);
+        if (!Number.isFinite(actorId)) {
+            return res.status(401).json({ message: 'Auth failed!' });
+        }
+
+        const clinicaId = parseIntOrNull(req.query?.clinica_id);
+        if (!Number.isFinite(clinicaId)) {
+            return res.status(400).json({ message: 'clinica_id es obligatorio' });
+        }
+
+        const canManageClinicPersonal = isAdmin(actorId) || await hasAdminScopePivot(actorId, clinicaId);
+        if (!canManageClinicPersonal) {
+            return res.status(403).json({ message: 'Forbidden' });
+        }
+
+        const pivots = await UsuarioClinica.findAll({
+            where: {
+                id_clinica: clinicaId,
+                estado_invitacion: { [Op.ne]: null },
+            },
+            include: [
+                {
+                    model: Usuario,
+                    as: 'Usuario',
+                    attributes: { exclude: ['password_usuario'] },
+                },
+            ],
+            order: [['invited_at', 'DESC']],
+        });
+
+        const results = pivots.map((p) => {
+            const json = p.toJSON();
+            return {
+                id_usuario: json.id_usuario,
+                id_clinica: json.id_clinica,
+                rol_clinica: json.rol_clinica,
+                subrol_clinica: json.subrol_clinica,
+                estado_invitacion: json.estado_invitacion,
+                invited_at: json.invited_at,
+                responded_at: json.responded_at,
+                usuario: json.Usuario || null,
+            };
+        });
+
+        return res.json(results);
+    } catch (error) {
+        console.error('[personal.getInvitaciones] Error:', error);
+        return res.status(500).json({ message: 'Error al obtener invitaciones', error: error.message });
+    }
+};
+
+/**
+ * POST /api/personal/:id/invitacion/responder
+ * Acepta o rechaza una invitación pendiente.
+ *
+ * Body: { clinica_id: number, accion: 'aceptar' | 'rechazar' }
+ */
+exports.responderInvitacion = async (req, res) => {
+    try {
+        const actorId = Number(req.userData?.userId);
+        const targetId = Number(req.params.id);
+        if (!Number.isFinite(actorId) || !Number.isFinite(targetId)) {
+            return res.status(400).json({ message: 'IDs inválidos' });
+        }
+
+        // Solo el propio usuario o un admin puede responder
+        if (actorId !== targetId && !isAdmin(actorId)) {
+            return res.status(403).json({ message: 'Forbidden' });
+        }
+
+        const { clinica_id, accion } = req.body;
+        const clinicaId = parseIntOrNull(clinica_id);
+        if (!Number.isFinite(clinicaId)) {
+            return res.status(400).json({ message: 'clinica_id es obligatorio' });
+        }
+        if (!['aceptar', 'rechazar'].includes(accion)) {
+            return res.status(400).json({ message: "accion debe ser 'aceptar' o 'rechazar'" });
+        }
+
+        const pivot = await UsuarioClinica.findOne({
+            where: {
+                id_usuario: targetId,
+                id_clinica: clinicaId,
+                estado_invitacion: 'pendiente',
+            },
+        });
+
+        if (!pivot) {
+            return res.status(404).json({ message: 'No hay invitación pendiente para esta clínica' });
+        }
+
+        pivot.estado_invitacion = accion === 'aceptar' ? 'aceptada' : 'rechazada';
+        pivot.responded_at = new Date();
+        pivot.invite_token = null; // Invalidar token
+        await pivot.save();
+
+        return res.json({
+            message: `Invitación ${pivot.estado_invitacion}`,
+            estado_invitacion: pivot.estado_invitacion,
+        });
+    } catch (error) {
+        console.error('[personal.responderInvitacion] Error:', error);
+        return res.status(500).json({ message: 'Error al responder invitación', error: error.message });
+    }
+};
+
+/**
+ * POST /api/auth/claim-invite  (público, sin JWT)
+ * Permite a un usuario provisional reclamar su cuenta estableciendo email y contraseña.
+ *
+ * Body: { invite_token: string, email_usuario: string, password: string, nombre?: string, apellidos?: string }
+ */
+exports.reclamarCuenta = async (req, res) => {
+    try {
+        const { invite_token, email_usuario, password, nombre, apellidos } = req.body;
+
+        if (!invite_token || typeof invite_token !== 'string') {
+            return res.status(400).json({ message: 'invite_token es obligatorio' });
+        }
+        if (!email_usuario || typeof email_usuario !== 'string') {
+            return res.status(400).json({ message: 'email_usuario es obligatorio' });
+        }
+        if (!password || typeof password !== 'string' || password.length < 6) {
+            return res.status(400).json({ message: 'password debe tener al menos 6 caracteres' });
+        }
+
+        // Buscar el pivot con ese token
+        const pivot = await UsuarioClinica.findOne({
+            where: { invite_token: invite_token.trim() },
+        });
+
+        if (!pivot) {
+            return res.status(404).json({ message: 'Token de invitación inválido o expirado' });
+        }
+
+        // Buscar el usuario asociado
+        const user = await Usuario.findByPk(pivot.id_usuario);
+        if (!user) {
+            return res.status(404).json({ message: 'Usuario no encontrado' });
+        }
+
+        // Verificar que es provisional
+        if (!user.es_provisional) {
+            return res.status(409).json({ message: 'Esta cuenta ya fue reclamada' });
+        }
+
+        // Verificar email único
+        const emailNormalized = email_usuario.trim().toLowerCase();
+        const existingByEmail = await Usuario.findOne({
+            where: {
+                email_usuario: emailNormalized,
+                id_usuario: { [Op.ne]: user.id_usuario },
+            },
+        });
+        if (existingByEmail) {
+            return res.status(409).json({ message: 'Ya existe otro usuario con ese email' });
+        }
+
+        // Actualizar usuario
+        const hashedPassword = await bcrypt.hash(password, 8);
+        user.email_usuario = emailNormalized;
+        user.password_usuario = hashedPassword;
+        user.es_provisional = false;
+        if (nombre) user.nombre = nombre.trim();
+        if (apellidos) user.apellidos = apellidos.trim();
+        await user.save();
+
+        // Marcar invitación como aceptada
+        pivot.estado_invitacion = 'aceptada';
+        pivot.responded_at = new Date();
+        pivot.invite_token = null;
+        await pivot.save();
+
+        // Generar JWT para login inmediato
+        const jwt = require('jsonwebtoken');
+        const secret = process.env.JWT_SECRET;
+        const token = jwt.sign(
+            { userId: user.id_usuario, email: user.email_usuario },
+            secret,
+            { expiresIn: '24h' },
+        );
+
+        const userJson = user.toJSON();
+        delete userJson.password_usuario;
+
+        return res.json({
+            message: 'Cuenta reclamada exitosamente',
+            user: userJson,
+            token,
+        });
+    } catch (error) {
+        console.error('[personal.reclamarCuenta] Error:', error);
+        return res.status(500).json({ message: 'Error al reclamar cuenta', error: error.message });
     }
 };
