@@ -1,14 +1,83 @@
 'use strict';
-const { GrupoClinica, Clinica } = require('../../models');
+const { Op } = require('sequelize');
+const { GrupoClinica, Clinica, UsuarioClinica } = require('../../models');
 const { metaSyncJobs } = require('../jobs/sync.jobs');
 const groupAssetsService = require('../services/groupAssets.service');
 const jobRequestsService = require('../services/jobRequests.service');
 const jobScheduler = require('../services/jobScheduler.service');
+const { STAFF_ROLES, ADMIN_ROLES, isGlobalAdmin } = require('../lib/role-helpers');
+
+const ACTIVE_STAFF_INVITATION_WHERE = {
+  [Op.or]: [
+    { estado_invitacion: 'aceptada' },
+    { estado_invitacion: null },
+  ],
+};
+
+async function getScopedGroupIdsForUser(userId) {
+  if (isGlobalAdmin(userId)) {
+    return null;
+  }
+
+  const memberships = await UsuarioClinica.findAll({
+    where: {
+      id_usuario: Number(userId),
+      rol_clinica: { [Op.in]: STAFF_ROLES },
+      ...ACTIVE_STAFF_INVITATION_WHERE,
+    },
+    attributes: ['id_clinica'],
+    include: [
+      {
+        model: Clinica,
+        as: 'Clinica',
+        attributes: ['grupoClinicaId'],
+      },
+    ],
+  });
+
+  const groupIds = memberships
+    .map((row) => Number(row?.Clinica?.grupoClinicaId))
+    .filter((id) => Number.isFinite(id) && id > 0);
+
+  return Array.from(new Set(groupIds));
+}
+
+async function getManageableClinicIdsForUser(userId) {
+  if (isGlobalAdmin(userId)) {
+    return null;
+  }
+
+  const memberships = await UsuarioClinica.findAll({
+    where: {
+      id_usuario: Number(userId),
+      rol_clinica: { [Op.in]: ADMIN_ROLES },
+      ...ACTIVE_STAFF_INVITATION_WHERE,
+    },
+    attributes: ['id_clinica'],
+    raw: true,
+  });
+
+  const clinicIds = memberships
+    .map((row) => Number(row.id_clinica))
+    .filter((id) => Number.isFinite(id) && id > 0);
+
+  return Array.from(new Set(clinicIds));
+}
 
 exports.getAllGroups = async (req, res) => {
   try {
     console.log("Obteniendo todos los grupos de clínicas");
-    const grupos = await GrupoClinica.findAll({ order: [['nombre_grupo', 'ASC']] });
+    const userId = Number(req.userData?.userId);
+    if (!Number.isFinite(userId) || userId <= 0) {
+      return res.status(401).json({ message: 'No autenticado' });
+    }
+
+    const scopedGroupIds = await getScopedGroupIdsForUser(userId);
+    const where = Array.isArray(scopedGroupIds) ? { id_grupo: { [Op.in]: scopedGroupIds } } : undefined;
+    const grupos = await GrupoClinica.findAll({
+      where,
+      order: [['nombre_grupo', 'ASC']],
+    });
     console.log("Grupos recuperados:", grupos);
     res.json(grupos);
   } catch (error) {
@@ -20,7 +89,23 @@ exports.getAllGroups = async (req, res) => {
 exports.createGroup = async (req, res) => {
   try {
     console.log("Creando nuevo grupo con datos:", req.body);
-    const { nombre_grupo } = req.body;
+    const userId = Number(req.userData?.userId);
+    if (!Number.isFinite(userId) || userId <= 0) {
+      return res.status(401).json({ message: 'No autenticado' });
+    }
+
+    if (!isGlobalAdmin(userId)) {
+      const manageableClinicIds = await getManageableClinicIdsForUser(userId);
+      if (!Array.isArray(manageableClinicIds) || manageableClinicIds.length < 2) {
+        return res.status(403).json({
+          message: 'Necesitas al menos 2 clínicas en tu ámbito para crear grupos.',
+          error: 'GROUP_CREATE_SCOPE_TOO_SMALL',
+        });
+      }
+    }
+
+    const nombreGrupo = String(req.body?.nombre_grupo || '').trim();
+    const nombre_grupo = nombreGrupo || 'Nuevo grupo';
     const newGroup = await GrupoClinica.create({ nombre_grupo });
     console.log("Grupo creado exitosamente:", newGroup);
     res.status(201).json(newGroup);
