@@ -950,12 +950,24 @@ exports.deleteTemplate = async (req, res) => {
     }
 
     if (owner.is_system) {
-      await transaction.rollback();
-      return res.status(405).json({
-        success: false,
-        error: 'delete_disabled_system',
-        message: 'Las plantillas de sistema no se pueden borrar',
-      });
+      if (!access.is_admin) {
+        await transaction.rollback();
+        return res.status(405).json({
+          success: false,
+          error: 'delete_disabled_system',
+          message: 'Las plantillas de sistema no se pueden borrar',
+        });
+      }
+
+      const confirmed = parseBool(req.query?.confirm_system_delete, false);
+      if (!confirmed) {
+        await transaction.rollback();
+        return res.status(409).json({
+          success: false,
+          error: 'confirm_system_delete_required',
+          message: 'Debes confirmar explícitamente el borrado de una plantilla de sistema',
+        });
+      }
     }
 
     const ownerClinicId = parseIntOrNull(owner.clinic_id);
