@@ -13,6 +13,7 @@ const {
 const { Conversation, Message, UsuarioClinica, Paciente, Lead, ConversationRead } = db;
 
 async function getUserQuickChatContext(userId) {
+  const globalAdmin = isGlobalAdmin(userId);
   const memberships = await UsuarioClinica.findAll({
     where: {
       id_usuario: userId,
@@ -25,9 +26,39 @@ async function getUserQuickChatContext(userId) {
     raw: true,
   });
 
-  return buildQuickChatContextFromMemberships(memberships, {
-    isGlobalAdmin: isGlobalAdmin(userId),
+  const context = buildQuickChatContextFromMemberships(memberships, {
+    isGlobalAdmin: globalAdmin,
   });
+
+  // Admin global: puede consultar QuickChat por clínica seleccionada sin usar vista agregada.
+  // Para ello ampliamos su scope a todas las clínicas, manteniendo can_use_all_clinics=false.
+  if (globalAdmin) {
+    const allClinics = await db.Clinica.findAll({
+      attributes: ['id_clinica'],
+      raw: true,
+    });
+
+    const clinicIds = allClinics
+      .map((row) => Number(row.id_clinica))
+      .filter((id) => Number.isFinite(id));
+
+    clinicIds.forEach((clinicId) => {
+      context.permissionsByClinic.set(clinicId, { readTeam: true, readPatients: true });
+      if (!context.roleByClinic.has(clinicId)) {
+        context.roleByClinic.set(clinicId, {
+          rol_clinica: 'administrador',
+          subrol_clinica: null,
+        });
+      }
+    });
+
+    context.clinicIds = Array.from(new Set([...(context.clinicIds || []), ...clinicIds])).sort((a, b) => a - b);
+    context.teamClinicIds = [...context.clinicIds];
+    context.patientClinicIds = [...context.clinicIds];
+    context.hasAnyRead = context.clinicIds.length > 0;
+  }
+
+  return context;
 }
 
 function parseClinicIdsParam(requestedClinicId) {

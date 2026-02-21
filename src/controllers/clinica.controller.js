@@ -381,16 +381,11 @@ exports.updateClinica = async (req, res) => {
         console.log('==================');
         
         // ✅ INTENTAR AMBAS OPCIONES
-        let id_clinica = req.params.id_clinica || req.params.id;
+        const idFromBody = req.body?.id_clinica ?? req.body?.id;
+        let id_clinica = req.params.id_clinica || req.params.id || idFromBody;
         
         console.log('ID de clínica final:', id_clinica);
 
-        const clinicaExistente = await Clinica.findByPk(id_clinica);
-        if (!clinicaExistente) {
-            return res.status(404).json({ message: 'Clínica no encontrada' });
-        }
-        const previousGroupId = clinicaExistente.grupoClinicaId || null;
-        
         // ✅ INCLUIR TODOS LOS CAMPOS que pueden venir del frontend
         const {
             nombre_clinica,
@@ -437,6 +432,12 @@ exports.updateClinica = async (req, res) => {
             });
         }
 
+        const clinicaExistente = await Clinica.findByPk(id_clinica);
+        if (!clinicaExistente) {
+            return res.status(404).json({ message: 'Clínica no encontrada' });
+        }
+        const previousGroupId = clinicaExistente.grupoClinicaId || null;
+
         let configToSave = configuracion !== undefined ? configuracion : (clinicaExistente.configuracion || {});
         if (!Array.isArray(configToSave?.disciplinas) || configToSave.disciplinas.length === 0) {
             configToSave = { ...configToSave, disciplinas: ['dental'] };
@@ -475,8 +476,10 @@ exports.updateClinica = async (req, res) => {
             where: { id_clinica: id_clinica }
         });
 
+        // MySQL puede devolver 0 filas afectadas si no hubo cambios en los valores.
+        // Ya verificamos existencia arriba, así que no tratamos este caso como "no encontrada".
         if (updatedRowsCount === 0) {
-            return res.status(404).json({ message: 'Clínica no encontrada' });
+            console.log('ℹ️ Clínica sin cambios detectados en update, devolviendo entidad actual.');
         }
 
         // ✅ OBTENER la clínica actualizada con TODOS los campos
