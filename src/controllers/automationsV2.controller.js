@@ -421,6 +421,19 @@ async function getGroupIdsForClinicIds(clinicIds) {
   return uniqueInts(clinics.map((c) => c.grupoClinicaId));
 }
 
+async function getClinicIdsForGroupIds(groupIds) {
+  const normalizedGroupIds = uniqueInts(groupIds);
+  if (!normalizedGroupIds.length) return [];
+
+  const clinics = await Clinica.findAll({
+    where: { grupoClinicaId: { [Op.in]: normalizedGroupIds } },
+    attributes: ['id_clinica'],
+    raw: true,
+  });
+
+  return uniqueInts(clinics.map((c) => c.id_clinica));
+}
+
 function buildTemplateVisibilityScopeClause({ clinicIds, groupIds, includeSystem = true }) {
   const clauses = [];
   if (includeSystem) clauses.push({ is_system: true });
@@ -788,8 +801,11 @@ exports.listTemplates = async (req, res) => {
 
     const hasExplicitScope = !!requestedScope.raw_scope;
     if (hasExplicitScope) {
+      // Si el scope es una clínica, también mostrar plantillas de otras clínicas del mismo grupo.
+      const siblingClinicIds = await getClinicIdsForGroupIds(requestedScope.group_ids);
+      const scopeClinicIds = uniqueInts([...(requestedScope.clinic_ids || []), ...siblingClinicIds]);
       const visibilityClauses = buildTemplateVisibilityScopeClause({
-        clinicIds: requestedScope.clinic_ids,
+        clinicIds: scopeClinicIds,
         groupIds: requestedScope.group_ids,
         includeSystem: true,
       });
@@ -1024,8 +1040,53 @@ exports.createTemplateDraft = async (req, res) => {
     }
 
     const templateKey = buildTemplateKey({ templateKey: body.template_key, name });
-    const clinicId = parseIntOrNull(body.clinic_id);
-    const groupId = parseIntOrNull(body.group_id);
+    let clinicId = parseIntOrNull(body.clinic_id);
+    let groupId = parseIntOrNull(body.group_id);
+    const scopeRaw = cleanString(body.scope);
+
+    if (scopeRaw) {
+      const resolvedScope = await resolveClinicScope(scopeRaw, { allowAll: false });
+      if (!resolvedScope?.isValid || resolvedScope?.notFound) {
+        return res.status(400).json({
+          success: false,
+          error: 'invalid_scope',
+          message: `Scope inválido: ${scopeRaw}`,
+        });
+      }
+
+      if (resolvedScope.scope === 'group') {
+        groupId = parseIntOrNull(resolvedScope.groupId);
+        clinicId = null;
+      } else {
+        const scopeClinicIds = uniqueInts(resolvedScope.clinicIds);
+        if (!scopeClinicIds.length) {
+          return res.status(400).json({
+            success: false,
+            error: 'invalid_scope',
+            message: `Scope inválido: ${scopeRaw}`,
+          });
+        }
+
+        if (scopeClinicIds.length > 1) {
+          const scopeGroupIds = await getGroupIdsForClinicIds(scopeClinicIds);
+          if (scopeGroupIds.length === 1) {
+            groupId = scopeGroupIds[0];
+            clinicId = null;
+          } else {
+            clinicId = scopeClinicIds[0];
+            groupId = null;
+          }
+        } else {
+          clinicId = scopeClinicIds[0];
+          groupId = null;
+        }
+      }
+    }
+
+    if (groupId) {
+      clinicId = null;
+    }
+
     const isSystem = access.is_admin ? parseBool(body.is_system, false) : false;
 
     if (!assertCreateScopeAllowed(access, { clinic_id: clinicId, group_id: groupId, is_system: isSystem })) {
