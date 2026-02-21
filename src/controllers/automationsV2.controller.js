@@ -385,6 +385,50 @@ function hasScopeAccess(access, { clinic_id, group_id, is_system }) {
   return false;
 }
 
+function canOperateTemplateInRequestedScope(template, requestedScope) {
+  if (!requestedScope || !requestedScope.raw_scope) return true;
+
+  const ownerClinicId = parseIntOrNull(template?.clinic_id);
+  const ownerGroupId = parseIntOrNull(template?.group_id);
+
+  if (ownerGroupId) {
+    return requestedScope.scope_type === 'group'
+      && requestedScope.scope_group_id === ownerGroupId;
+  }
+
+  if (ownerClinicId) {
+    return Array.isArray(requestedScope.clinic_ids)
+      && requestedScope.clinic_ids.includes(ownerClinicId);
+  }
+
+  // Plantilla sin owner explícito: no restringir por scope contextual.
+  return true;
+}
+
+function buildTemplatePermissions({ access, template, requestedScope = null }) {
+  const canView = hasScopeAccess(access, template);
+  if (!canView) {
+    return {
+      can_edit: false,
+      can_delete: false,
+      can_publish: false,
+      can_execute: false,
+    };
+  }
+
+  const isSystem = !!template?.is_system;
+  const isPublished = !!template?.published_at;
+  const canOperateInScope = canOperateTemplateInRequestedScope(template, requestedScope);
+  const canManage = canView && !isSystem && canOperateInScope;
+
+  return {
+    can_edit: canManage && !isPublished,
+    can_delete: canManage,
+    can_publish: canManage && !isPublished,
+    can_execute: canView && isPublished,
+  };
+}
+
 function assertCreateScopeAllowed(access, { clinic_id, group_id, is_system }) {
   if (access.is_admin) return true;
   if (is_system) return false;
@@ -509,7 +553,7 @@ async function resolveTemplatesScopeFromQuery(req, access) {
   };
 }
 
-function mapTemplate(row, { includeNodes = true } = {}) {
+function mapTemplate(row, { includeNodes = true, permissions = null } = {}) {
   const item = row?.toJSON ? row.toJSON() : row;
   const base = {
     id: item.id,
@@ -534,6 +578,13 @@ function mapTemplate(row, { includeNodes = true } = {}) {
 
   if (includeNodes) {
     base.nodes = Array.isArray(item.nodes) ? item.nodes : [];
+  }
+
+  if (permissions && typeof permissions === 'object') {
+    base.can_edit = !!permissions.can_edit;
+    base.can_delete = !!permissions.can_delete;
+    base.can_publish = !!permissions.can_publish;
+    base.can_execute = !!permissions.can_execute;
   }
 
   return base;
@@ -839,7 +890,14 @@ exports.listTemplates = async (req, res) => {
 
     return res.json({
       success: true,
-      data: rows.map((row) => mapTemplate(row, { includeNodes })),
+      data: rows.map((row) => mapTemplate(row, {
+        includeNodes,
+        permissions: buildTemplatePermissions({
+          access,
+          template: row,
+          requestedScope,
+        }),
+      })),
       pagination: {
         total: count,
         limit,
@@ -1143,7 +1201,16 @@ exports.createTemplateDraft = async (req, res) => {
       created_by: access.user_id,
     });
 
-    return res.status(201).json({ success: true, data: mapTemplate(created, { includeNodes: true }) });
+    return res.status(201).json({
+      success: true,
+      data: mapTemplate(created, {
+        includeNodes: true,
+        permissions: buildTemplatePermissions({
+          access,
+          template: created,
+        }),
+      }),
+    });
   } catch (err) {
     console.error('Error createTemplateDraft v2', err);
     return res.status(500).json({ success: false, error: 'create_failed', message: err.message });
@@ -1172,7 +1239,26 @@ exports.getTemplateLatestPublished = async (req, res) => {
       return res.status(404).json({ success: false, error: 'template_not_found' });
     }
 
-    return res.json({ success: true, data: mapTemplate(row, { includeNodes: true }) });
+    const requestedScope = await resolveTemplatesScopeFromQuery(req, access);
+    if (requestedScope.error) {
+      return res.status(requestedScope.status || 400).json({
+        success: false,
+        error: requestedScope.error,
+        message: requestedScope.message || 'Scope inválido',
+      });
+    }
+
+    return res.json({
+      success: true,
+      data: mapTemplate(row, {
+        includeNodes: true,
+        permissions: buildTemplatePermissions({
+          access,
+          template: row,
+          requestedScope,
+        }),
+      }),
+    });
   } catch (err) {
     console.error('Error getTemplateLatestPublished v2', err);
     return res.status(500).json({ success: false, error: 'get_failed', message: err.message });
@@ -1200,9 +1286,25 @@ exports.listTemplateVersions = async (req, res) => {
 
     const visible = rows.filter((row) => hasScopeAccess(access, row));
 
+    const requestedScope = await resolveTemplatesScopeFromQuery(req, access);
+    if (requestedScope.error) {
+      return res.status(requestedScope.status || 400).json({
+        success: false,
+        error: requestedScope.error,
+        message: requestedScope.message || 'Scope inválido',
+      });
+    }
+
     return res.json({
       success: true,
-      data: visible.map((row) => mapTemplate(row, { includeNodes })),
+      data: visible.map((row) => mapTemplate(row, {
+        includeNodes,
+        permissions: buildTemplatePermissions({
+          access,
+          template: row,
+          requestedScope,
+        }),
+      })),
       pagination: {
         total: count,
         limit,
@@ -1233,7 +1335,26 @@ exports.getTemplateVersion = async (req, res) => {
       return res.status(404).json({ success: false, error: 'template_version_not_found' });
     }
 
-    return res.json({ success: true, data: mapTemplate(row, { includeNodes: true }) });
+    const requestedScope = await resolveTemplatesScopeFromQuery(req, access);
+    if (requestedScope.error) {
+      return res.status(requestedScope.status || 400).json({
+        success: false,
+        error: requestedScope.error,
+        message: requestedScope.message || 'Scope inválido',
+      });
+    }
+
+    return res.json({
+      success: true,
+      data: mapTemplate(row, {
+        includeNodes: true,
+        permissions: buildTemplatePermissions({
+          access,
+          template: row,
+          requestedScope,
+        }),
+      }),
+    });
   } catch (err) {
     console.error('Error getTemplateVersion v2', err);
     return res.status(500).json({ success: false, error: 'get_version_failed', message: err.message });
@@ -1329,7 +1450,16 @@ exports.updateTemplateDraft = async (req, res) => {
 
     await row.update(updates);
 
-    return res.json({ success: true, data: mapTemplate(row, { includeNodes: true }) });
+    return res.json({
+      success: true,
+      data: mapTemplate(row, {
+        includeNodes: true,
+        permissions: buildTemplatePermissions({
+          access,
+          template: row,
+        }),
+      }),
+    });
   } catch (err) {
     console.error('Error updateTemplateDraft v2', err);
     return res.status(500).json({ success: false, error: 'update_failed', message: err.message });
@@ -1376,7 +1506,16 @@ exports.publishTemplateVersion = async (req, res) => {
       published_by: access.user_id,
     });
 
-    return res.json({ success: true, data: mapTemplate(row, { includeNodes: true }) });
+    return res.json({
+      success: true,
+      data: mapTemplate(row, {
+        includeNodes: true,
+        permissions: buildTemplatePermissions({
+          access,
+          template: row,
+        }),
+      }),
+    });
   } catch (err) {
     console.error('Error publishTemplateVersion v2', err);
     return res.status(500).json({ success: false, error: 'publish_failed', message: err.message });
