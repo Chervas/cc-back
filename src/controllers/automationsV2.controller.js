@@ -522,6 +522,7 @@ function mapTemplate(row, { includeNodes = true } = {}) {
     is_active: item.is_active !== false,
     is_system: !!item.is_system,
     clinic_id: item.clinic_id ?? null,
+    clinic_name: item.clinic?.nombre_clinica || item.clinic_name || null,
     group_id: item.group_id ?? null,
     entry_node_id: item.entry_node_id,
     published_at: item.published_at ?? null,
@@ -825,6 +826,12 @@ exports.listTemplates = async (req, res) => {
 
     const { count, rows } = await AutomationFlowTemplateV2.findAndCountAll({
       where,
+      include: [{
+        model: Clinica,
+        as: 'clinic',
+        attributes: ['id_clinica', 'nombre_clinica'],
+        required: false,
+      }],
       limit,
       offset,
       order: [['template_key', 'ASC'], ['version', 'DESC']],
