@@ -1938,6 +1938,71 @@ function normalizeHorarioRows(body) {
     return out;
 }
 
+function hmToMinutes(hm) {
+    const normalized = normalizeHm(hm);
+    if (!normalized) return null;
+    const [hh, mm] = normalized.split(':').map(Number);
+    return hh * 60 + mm;
+}
+
+function hmRangesOverlap(aInicio, aFin, bInicio, bFin) {
+    const aStart = hmToMinutes(aInicio);
+    const aEnd = hmToMinutes(aFin);
+    const bStart = hmToMinutes(bInicio);
+    const bEnd = hmToMinutes(bFin);
+    if ([aStart, aEnd, bStart, bEnd].some((v) => v == null)) return false;
+    return aStart < bEnd && bStart < aEnd;
+}
+
+async function findCrossClinicScheduleConflicts({ targetUserId, clinicaId, candidateHorarios }) {
+    const activeCandidate = (candidateHorarios || []).filter((h) => h && h.activo !== false);
+    if (!activeCandidate.length) return [];
+
+    const otherDoctorClinicas = await DoctorClinica.findAll({
+        where: {
+            doctor_id: Number(targetUserId),
+            activo: true,
+            clinica_id: { [Op.ne]: Number(clinicaId) },
+        },
+        include: [
+            {
+                model: Clinica,
+                as: 'clinica',
+                attributes: ['id_clinica', 'nombre_clinica'],
+            },
+            {
+                model: DoctorHorario,
+                as: 'horarios',
+                attributes: ['dia_semana', 'hora_inicio', 'hora_fin', 'activo'],
+            },
+        ],
+    });
+
+    const conflicts = [];
+    for (const candidate of activeCandidate) {
+        for (const dc of otherDoctorClinicas) {
+            const horarios = Array.isArray(dc.horarios) ? dc.horarios : [];
+            for (const existing of horarios) {
+                if (existing?.activo === false) continue;
+                if (Number(existing?.dia_semana) !== Number(candidate.dia_semana)) continue;
+                if (!hmRangesOverlap(candidate.hora_inicio, candidate.hora_fin, existing.hora_inicio, existing.hora_fin)) continue;
+
+                conflicts.push({
+                    clinica_id: Number(dc.clinica_id),
+                    nombre_clinica: dc?.clinica?.nombre_clinica || null,
+                    dia_semana: Number(candidate.dia_semana),
+                    nuevo_hora_inicio: candidate.hora_inicio,
+                    nuevo_hora_fin: candidate.hora_fin,
+                    conflicto_hora_inicio: existing.hora_inicio,
+                    conflicto_hora_fin: existing.hora_fin,
+                });
+            }
+        }
+    }
+
+    return conflicts;
+}
+
 async function getAllowedClinicIdsForActorTarget(actorId, targetUserId) {
     const targetClinicIds = await getAccessibleClinicIdsForUser(targetUserId);
     if (isAdmin(actorId) || Number(actorId) === Number(targetUserId)) {
@@ -2121,6 +2186,20 @@ exports.updateHorariosClinica = async (req, res) => {
         const horarios = normalizeHorarioRows(req.body);
         if (!horarios.length && Array.isArray(req.body?.horarios) && req.body.horarios.length) {
             return res.status(400).json({ message: 'horarios inválidos' });
+        }
+
+        const crossClinicConflicts = await findCrossClinicScheduleConflicts({
+            targetUserId,
+            clinicaId,
+            candidateHorarios: horarios,
+        });
+        if (crossClinicConflicts.length) {
+            return res.status(409).json({
+                message: 'El horario se solapa con la disponibilidad del profesional en otra clínica.',
+                code: 'STAFF_SCHEDULE_OVERLAP_OTHER_CLINIC',
+                can_force: false,
+                conflicts: crossClinicConflicts,
+            });
         }
 
         let dc = await DoctorClinica.findOne({

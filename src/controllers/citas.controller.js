@@ -281,8 +281,16 @@ async function checkDisponibilidad({ clinica_id, inicio, fin, doctor_id, instala
         }
         const bloqueos = await DoctorBloqueo.findAll({ where: { doctor_id, fecha_inicio: { [db.Sequelize.Op.lt]: end }, fecha_fin: { [db.Sequelize.Op.gt]: start } } });
         if (bloqueos.length) conflicts.push({ type: 'doctor_unavailable', message: bloqueos[0].motivo || 'Bloqueo doctor' });
-        const citasDoc = await CitaPaciente.findAll({ where: { doctor_id, inicio: { [db.Sequelize.Op.lt]: end }, fin: { [db.Sequelize.Op.gt]: start } }, attributes: ['id_cita'] });
-        if (citasDoc.length) conflicts.push({ type: 'overlap', message: 'Doctor ocupado' });
+        const citasDoc = await CitaPaciente.findAll({
+            where: { doctor_id, inicio: { [db.Sequelize.Op.lt]: end }, fin: { [db.Sequelize.Op.gt]: start } },
+            attributes: ['id_cita', 'clinica_id']
+        });
+        if (citasDoc.some((c) => Number(c.clinica_id) !== Number(clinica_id))) {
+            conflicts.push({ type: 'doctor_unavailable', message: 'Doctor ocupado en otra clínica' });
+        }
+        if (citasDoc.some((c) => Number(c.clinica_id) === Number(clinica_id))) {
+            conflicts.push({ type: 'overlap', message: 'Doctor ocupado' });
+        }
     }
     return conflicts;
 }
@@ -431,8 +439,34 @@ async function checkDisponibilidadCanonica({ clinica_id, inicio, fin, doctor_id,
 
         const citasDocWhere = { doctor_id, inicio: { [db.Sequelize.Op.lt]: end }, fin: { [db.Sequelize.Op.gt]: start } };
         if (ignore_cita_id) citasDocWhere.id_cita = { [db.Sequelize.Op.ne]: ignore_cita_id };
-        const citasDoc = await CitaPaciente.findAll({ where: citasDocWhere, attributes: ['id_cita'] });
-        if (citasDoc.length) {
+        const citasDoc = await CitaPaciente.findAll({ where: citasDocWhere, attributes: ['id_cita', 'clinica_id'] });
+        const citasDocOtherClinics = citasDoc.filter((c) => Number(c.clinica_id) !== Number(clinicaId));
+        const citasDocSameClinic = citasDoc.filter((c) => Number(c.clinica_id) === Number(clinicaId));
+
+        if (citasDocOtherClinics.length) {
+            addLegacy('doctor_unavailable', 'Doctor ocupado en otra clínica');
+            addResource({
+                resource_type: 'staff',
+                resource_role: 'doctor',
+                resource_id: Number(doctor_id),
+                clinica_id: clinicaId,
+                code: 'STAFF_OVERLAP',
+                can_force: false,
+                details: {
+                    cita_ids: citasDocOtherClinics.map((c) => c.id_cita),
+                    clinica_ids: Array.from(
+                        new Set(
+                            citasDocOtherClinics
+                                .map((c) => Number(c.clinica_id))
+                                .filter((id) => Number.isFinite(id))
+                        )
+                    ),
+                    message: 'Doctor ocupado en otra clínica'
+                }
+            });
+        }
+
+        if (citasDocSameClinic.length) {
             addLegacy('overlap', 'Doctor ocupado');
             addResource({
                 resource_type: 'staff',
@@ -441,7 +475,7 @@ async function checkDisponibilidadCanonica({ clinica_id, inicio, fin, doctor_id,
                 clinica_id: clinicaId,
                 code: 'STAFF_OVERLAP',
                 can_force: true,
-                details: { cita_ids: citasDoc.map(c => c.id_cita), message: 'Doctor ocupado' }
+                details: { cita_ids: citasDocSameClinic.map(c => c.id_cita), message: 'Doctor ocupado' }
             });
         }
     }

@@ -395,14 +395,19 @@ const conflictsForSlot = ({
 
     const dc = firstOverlap(docCitas, start, end);
     if (dc) {
+      const citaClinicId = Number(dc.clinica_id);
+      const sameClinic = Number.isFinite(citaClinicId) && citaClinicId === Number(clinicaId);
       conflicts.push({
         resource_type: 'staff',
         resource_role: 'doctor',
         resource_id: doctorId,
         clinica_id: clinicaId,
         code: 'STAFF_OVERLAP',
-        can_force: true,
-        details: { message: 'Doctor ocupado' }
+        can_force: sameClinic,
+        details: {
+          message: sameClinic ? 'Doctor ocupado' : 'Doctor ocupado en otra clínica',
+          clinica_id: Number.isFinite(citaClinicId) ? citaClinicId : null
+        }
       });
     }
   }
@@ -718,8 +723,11 @@ exports.check = asyncHandler(async (req, res) => {
       fin: { [Op.gt]: start }
     };
     if (ignoreId) citasDocWhere.id_cita = { [Op.ne]: ignoreId };
-    const citasDoc = await db.CitaPaciente.findAll({ where: citasDocWhere, attributes: ['id_cita'] });
-    if (citasDoc.length) {
+    const citasDoc = await db.CitaPaciente.findAll({ where: citasDocWhere, attributes: ['id_cita', 'clinica_id'] });
+    const citasDocSameClinic = citasDoc.filter((c) => Number(c.clinica_id) === clinicaId);
+    const citasDocOtherClinics = citasDoc.filter((c) => Number(c.clinica_id) !== clinicaId);
+
+    if (citasDocSameClinic.length) {
       conflicts.push({
         resource_type: 'staff',
         resource_role: 'doctor',
@@ -728,7 +736,31 @@ exports.check = asyncHandler(async (req, res) => {
         code: 'STAFF_OVERLAP',
         // Overbooking doctor permitido -> forzable
         can_force: true,
-        details: { cita_ids: citasDoc.map((c) => c.id_cita), message: 'Doctor ocupado' }
+        details: { cita_ids: citasDocSameClinic.map((c) => c.id_cita), message: 'Doctor ocupado' }
+      });
+    }
+
+    if (citasDocOtherClinics.length) {
+      const otherClinicIds = Array.from(
+        new Set(
+          citasDocOtherClinics
+            .map((c) => Number(c.clinica_id))
+            .filter((id) => Number.isFinite(id))
+        )
+      );
+      conflicts.push({
+        resource_type: 'staff',
+        resource_role: 'doctor',
+        resource_id: doctorId,
+        clinica_id: clinicaId,
+        code: 'STAFF_OVERLAP',
+        // No se permite forzar cuando el choque es en otra clínica.
+        can_force: false,
+        details: {
+          cita_ids: citasDocOtherClinics.map((c) => c.id_cita),
+          clinica_ids: otherClinicIds,
+          message: 'Doctor ocupado en otra clínica'
+        }
       });
     }
   }
@@ -1006,7 +1038,7 @@ exports.slots = asyncHandler(async (req, res) => {
     });
     const docCitasRows = await db.CitaPaciente.findAll({
       where: { doctor_id: doctorId, inicio: { [Op.lt]: baseEnd }, fin: { [Op.gt]: baseStart } },
-      attributes: ['inicio', 'fin']
+      attributes: ['inicio', 'fin', 'clinica_id']
     });
 
     const slotsByInst = {};
@@ -1091,7 +1123,7 @@ exports.slots = asyncHandler(async (req, res) => {
     });
     const docCitasRows = await db.CitaPaciente.findAll({
       where: { doctor_id: { [Op.in]: doctorIds }, inicio: { [Op.lt]: baseEnd }, fin: { [Op.gt]: baseStart } },
-      attributes: ['doctor_id', 'inicio', 'fin']
+      attributes: ['doctor_id', 'inicio', 'fin', 'clinica_id']
     });
 
     const docBloqById = new Map();
@@ -1196,7 +1228,7 @@ exports.slots = asyncHandler(async (req, res) => {
     });
     docCitasRows = await db.CitaPaciente.findAll({
       where: { doctor_id: doctorId, inicio: { [Op.lt]: baseEnd }, fin: { [Op.gt]: baseStart } },
-      attributes: ['inicio', 'fin']
+      attributes: ['inicio', 'fin', 'clinica_id']
     });
   }
 
