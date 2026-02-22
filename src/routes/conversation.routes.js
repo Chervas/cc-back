@@ -6,6 +6,7 @@ const conversationController = require('../controllers/conversation.controller')
 
 router.use(authMiddleware);
 
+router.get('/conversations/permissions', conversationController.getPermissions);
 router.get('/conversations', conversationController.listConversations);
 router.get('/conversations/by-patient/:patientId', conversationController.getConversationByPatient);
 router.get('/conversations/:id/messages', conversationController.getMessages);

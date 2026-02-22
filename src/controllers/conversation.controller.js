@@ -33,6 +33,20 @@ async function getUserClinics(userId) {
   return { clinicIds, isAggregateAllowed };
 }
 
+function roleToPermissions(role) {
+  const normalized = String(role || '').toLowerCase();
+  if (ROLE_AGGREGATE.includes(normalized)) {
+    return { read_patients: true, read_team: true, read_leads: true };
+  }
+  if (['administrador', 'admin', 'personaldeclinica', 'recepcion', 'assistant', 'auxiliar'].includes(normalized)) {
+    return { read_patients: true, read_team: true, read_leads: true };
+  }
+  if (['doctor', 'medico'].includes(normalized)) {
+    return { read_patients: true, read_team: false, read_leads: true };
+  }
+  return { read_patients: false, read_team: false, read_leads: false };
+}
+
 function parseClinicIdsParam(requestedClinicId) {
   if (requestedClinicId === null || requestedClinicId === undefined) return null;
   if (requestedClinicId === 'all') return 'all';
@@ -210,6 +224,55 @@ exports.listConversations = async (req, res) => {
   } catch (err) {
     console.error('Error listConversations', err);
     return res.status(500).json({ error: 'Error obteniendo conversaciones' });
+  }
+};
+
+exports.getPermissions = async (req, res) => {
+  try {
+    const userId = req.userData?.userId;
+    const requestedClinic = req.query?.clinic_id;
+    const { clinicIds, isAggregateAllowed } = await getUserClinics(userId);
+
+    if (!clinicIds.length) {
+      return res.status(403).json({
+        selected_clinic_id: null,
+        read_patients: false,
+        read_team: false,
+        read_leads: false,
+        can_use_all_clinics: false,
+        effective_role: 'unknown',
+      });
+    }
+
+    let selectedClinicId = null;
+    const parsed = parseClinicIdsParam(requestedClinic);
+    if (Array.isArray(parsed) && parsed.length === 1) {
+      selectedClinicId = parsed[0];
+    }
+
+    const memberships = await UsuarioClinica.findAll({
+      where: { id_usuario: userId },
+      attributes: ['id_clinica', 'rol_clinica'],
+      raw: true,
+    });
+    const selectedMembership =
+      memberships.find((m) => Number(m.id_clinica) === Number(selectedClinicId)) ||
+      memberships[0] ||
+      null;
+    const effectiveRole = String(selectedMembership?.rol_clinica || 'unknown').toLowerCase();
+    const perms = roleToPermissions(effectiveRole);
+
+    return res.json({
+      selected_clinic_id: selectedClinicId,
+      read_patients: perms.read_patients,
+      read_team: perms.read_team,
+      read_leads: perms.read_leads,
+      can_use_all_clinics: !!isAggregateAllowed,
+      effective_role: effectiveRole,
+    });
+  } catch (err) {
+    console.error('Error getPermissions', err);
+    return res.status(500).json({ error: 'Error obteniendo permisos de conversaciones' });
   }
 };
 

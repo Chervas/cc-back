@@ -20,6 +20,7 @@ router.get('/v2/node-types', automationsV2Controller.getNodeTypesCatalog);
 router.post('/v2/validate', automationsV2Controller.validateTemplateGraph);
 router.get('/v2/templates', automationsV2Controller.listTemplates);
 router.post('/v2/templates', automationsV2Controller.createTemplateDraft);
+router.delete('/v2/templates/:template_key', automationsV2Controller.deleteTemplate);
 router.get('/v2/templates/:template_key', automationsV2Controller.getTemplateLatestPublished);
 router.get('/v2/templates/:template_key/versions', automationsV2Controller.listTemplateVersions);
 router.get('/v2/templates/:template_key/versions/:version', automationsV2Controller.getTemplateVersion);

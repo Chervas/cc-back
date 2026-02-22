@@ -25,6 +25,14 @@ function parseIntOrNull(raw) {
   return Number.isInteger(parsed) ? parsed : null;
 }
 
+function parseIntList(raw) {
+  if (raw === undefined || raw === null || raw === '') return [];
+  return String(raw)
+    .split(',')
+    .map((part) => Number.parseInt(part.trim(), 10))
+    .filter((value) => Number.isInteger(value) && value > 0);
+}
+
 function parseBool(raw, fallback = undefined) {
   if (raw === undefined || raw === null || raw === '') return fallback;
   if (typeof raw === 'boolean') return raw;
@@ -50,6 +58,29 @@ function cleanString(raw) {
   if (raw === undefined || raw === null) return null;
   const out = String(raw).trim();
   return out || null;
+}
+
+function parseTemplateScopeQuery(query) {
+  const explicitScope = cleanString(query?.scope) || cleanString(query?.clinic_id);
+  let clinicIds = [];
+  let groupId = parseIntOrNull(query?.group_id);
+
+  if (explicitScope) {
+    const lowered = explicitScope.toLowerCase();
+    if (lowered !== 'all') {
+      const groupMatch = explicitScope.match(/^group:(\d+)$/i);
+      if (groupMatch) {
+        groupId = Number.parseInt(groupMatch[1], 10);
+      } else {
+        clinicIds = parseIntList(explicitScope);
+      }
+    }
+  }
+
+  return {
+    clinic_ids: clinicIds,
+    group_id: Number.isInteger(groupId) && groupId > 0 ? groupId : null,
+  };
 }
 
 function isObject(value) {
@@ -372,12 +403,18 @@ async function resolveAccess(req) {
   return { user_id: userId, is_admin: false, clinic_ids: clinicIds, group_ids: groupIds };
 }
 
-function hasScopeAccess(access, { clinic_id, group_id, is_system }) {
+function hasScopeAccess(access, { clinic_id, group_id, is_system, created_by }) {
   if (access.is_admin) return true;
   if (is_system) return true;
 
   const clinicId = parseIntOrNull(clinic_id);
   const groupId = parseIntOrNull(group_id);
+  const createdBy = parseIntOrNull(created_by);
+
+  // Plantillas legacy sin scope explícito: el creador conserva acceso.
+  if (!clinicId && !groupId && createdBy && access.user_id === createdBy) {
+    return true;
+  }
 
   if (clinicId && access.clinic_ids.has(clinicId)) return true;
   if (groupId && access.group_ids.has(groupId)) return true;
@@ -763,14 +800,31 @@ exports.listTemplates = async (req, res) => {
       ];
     }
 
-    const clinicId = parseIntOrNull(req.query?.clinic_id);
-    const groupId = parseIntOrNull(req.query?.group_id);
+    const parsedScope = parseTemplateScopeQuery(req.query);
+    const clinicIds = parsedScope.clinic_ids;
+    const groupId = parsedScope.group_id;
 
-    if (clinicId) {
-      if (!access.is_admin && !access.clinic_ids.has(clinicId)) {
-        return res.status(403).json({ success: false, error: 'forbidden_scope' });
+    if (clinicIds.length) {
+      if (!access.is_admin) {
+        const hasForbidden = clinicIds.some((clinicId) => !access.clinic_ids.has(clinicId));
+        if (hasForbidden) {
+          return res.status(403).json({ success: false, error: 'forbidden_scope' });
+        }
       }
-      where.clinic_id = clinicId;
+
+      where[Op.and] = where[Op.and] || [];
+      where[Op.and].push({
+        [Op.or]: [
+          { clinic_id: clinicIds.length === 1 ? clinicIds[0] : { [Op.in]: clinicIds } },
+          {
+            [Op.and]: [
+              { clinic_id: null },
+              { group_id: null },
+              { created_by: access.user_id },
+            ],
+          },
+        ],
+      });
     }
 
     if (groupId) {
@@ -780,7 +834,7 @@ exports.listTemplates = async (req, res) => {
       where.group_id = groupId;
     }
 
-    if (!access.is_admin && !clinicId && !groupId) {
+    if (!access.is_admin && !clinicIds.length && !groupId) {
       where[Op.and] = where[Op.and] || [];
       where[Op.and].push({
         [Op.or]: [
@@ -1182,6 +1236,125 @@ exports.publishTemplateVersion = async (req, res) => {
   } catch (err) {
     console.error('Error publishTemplateVersion v2', err);
     return res.status(500).json({ success: false, error: 'publish_failed', message: err.message });
+  }
+};
+
+exports.deleteTemplate = async (req, res) => {
+  try {
+    const access = await resolveAccess(req);
+    const templateKey = sanitizeTemplateKey(req.params?.template_key);
+    if (!templateKey) {
+      return res.status(400).json({ success: false, error: 'invalid_template_key' });
+    }
+
+    const rows = await AutomationFlowTemplateV2.findAll({
+      where: { template_key: templateKey },
+      order: [['version', 'DESC']],
+    });
+
+    if (!rows.length) {
+      return res.status(404).json({ success: false, error: 'template_not_found' });
+    }
+
+    const parsedScope = parseTemplateScopeQuery(req.query);
+    const scopeClinicIds = parsedScope.clinic_ids;
+    const scopeGroupId = parsedScope.group_id;
+
+    if (scopeClinicIds.length) {
+      const matchesClinicScope = rows.some((row) => {
+        const rowClinicId = parseIntOrNull(row.clinic_id);
+        return rowClinicId && scopeClinicIds.includes(rowClinicId);
+      });
+      if (!matchesClinicScope) {
+        return res.status(404).json({ success: false, error: 'template_not_found' });
+      }
+    }
+
+    if (scopeGroupId) {
+      const matchesGroupScope = rows.some((row) => parseIntOrNull(row.group_id) === scopeGroupId);
+      if (!matchesGroupScope) {
+        return res.status(404).json({ success: false, error: 'template_not_found' });
+      }
+    }
+
+    const hasForbiddenScope = rows.some((row) => !hasScopeAccess(access, row));
+    if (hasForbiddenScope) {
+      return res.status(403).json({ success: false, error: 'forbidden_scope' });
+    }
+
+    const isSystemTemplate = rows.some((row) => !!row.is_system);
+    if (isSystemTemplate && !access.is_admin) {
+      return res.status(405).json({
+        success: false,
+        error: 'delete_disabled_system',
+        message: 'Las plantillas de sistema solo pueden borrarse por admins',
+      });
+    }
+
+    if (isSystemTemplate && access.is_admin) {
+      const confirmSystemDelete = parseBool(req.query?.confirm_system_delete, false);
+      if (!confirmSystemDelete) {
+        return res.status(409).json({
+          success: false,
+          error: 'confirm_system_delete_required',
+          message: 'Confirma el borrado de plantilla de sistema',
+        });
+      }
+    }
+
+    const versionIds = rows.map((row) => row.id);
+    const activeStatuses = ['running', 'waiting', 'paused'];
+    const activeExecutions = await FlowExecutionV2.findAll({
+      where: {
+        template_version_id: { [Op.in]: versionIds },
+        status: { [Op.in]: activeStatuses },
+      },
+      attributes: ['id', 'clinic_id', 'group_id', 'status'],
+      raw: true,
+      limit: 200,
+    });
+
+    if (activeExecutions.length > 0) {
+      const clinicIds = Array.from(
+        new Set(
+          activeExecutions
+            .map((execution) => parseIntOrNull(execution.clinic_id))
+            .filter((value) => Number.isInteger(value))
+        )
+      );
+      const groupIds = Array.from(
+        new Set(
+          activeExecutions
+            .map((execution) => parseIntOrNull(execution.group_id))
+            .filter((value) => Number.isInteger(value))
+        )
+      );
+      const statuses = Array.from(new Set(activeExecutions.map((execution) => execution.status).filter(Boolean)));
+
+      return res.status(409).json({
+        success: false,
+        error: 'template_in_use',
+        message: 'No se puede borrar: hay ejecuciones activas',
+        details: {
+          active_executions: activeExecutions.length,
+          clinic_ids: clinicIds,
+          group_ids: groupIds,
+          statuses,
+        },
+      });
+    }
+
+    await AutomationFlowTemplateV2.destroy({ where: { template_key: templateKey } });
+    return res.json({
+      success: true,
+      data: {
+        template_key: templateKey,
+        deleted_versions: versionIds.length,
+      },
+    });
+  } catch (err) {
+    console.error('Error deleteTemplate v2', err);
+    return res.status(500).json({ success: false, error: 'delete_failed', message: err.message });
   }
 };
 
