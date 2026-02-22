@@ -1957,7 +1957,7 @@ async function buildScheduleResponse(actorId, targetUserId) {
 
     const allowedClinicIds = await getAllowedClinicIdsForActorTarget(actorId, targetUserId);
 
-    const clinicas = allowedClinicIds.length
+    const doctorClinicaRows = allowedClinicIds.length
         ? await DoctorClinica.findAll({
             where: {
                 doctor_id: targetUserId,
@@ -1972,6 +1972,106 @@ async function buildScheduleResponse(actorId, targetUserId) {
         })
         : [];
 
+    // Fuente de verdad de pertenencia de staff por clínica: UsuarioClinica.
+    // Esto permite devolver filas de Gantt en modo básico aunque aún no existan horarios
+    // persistidos en DoctorClinica/DoctorHorario para ese miembro.
+    const staffPivots = allowedClinicIds.length
+        ? await UsuarioClinica.findAll({
+            where: {
+                id_usuario: Number(targetUserId),
+                id_clinica: { [Op.in]: allowedClinicIds },
+                rol_clinica: { [Op.in]: STAFF_ROLES },
+                ...ACTIVE_STAFF_INVITATION_WHERE,
+            },
+            attributes: ['id_clinica', 'rol_clinica', 'subrol_clinica'],
+            include: [
+                { model: Clinica, as: 'Clinica', attributes: ['id_clinica', 'nombre_clinica', 'url_avatar'] },
+            ],
+            order: [['id_clinica', 'ASC']],
+        })
+        : [];
+
+    const clinicasById = new Map();
+
+    for (const row of doctorClinicaRows) {
+        const clinicId = Number(row.clinica_id);
+        if (!Number.isFinite(clinicId)) continue;
+
+        clinicasById.set(clinicId, {
+            clinica_id: clinicId,
+            nombre_clinica: row.clinica?.nombre_clinica || '',
+            url_avatar: row.clinica?.url_avatar || null,
+            activo: !!row.activo,
+            modo_disponibilidad: normalizeModoDisponibilidad(row.modo_disponibilidad) || null,
+            horarios: row.horarios || [],
+            rol_clinica: null,
+            subrol_clinica: null,
+            agenda_capable: true,
+        });
+    }
+
+    for (const pivot of staffPivots) {
+        const clinicId = Number(pivot.id_clinica);
+        if (!Number.isFinite(clinicId)) continue;
+
+        const rolClinica = pivot.rol_clinica || null;
+        const subrolClinica = pivot.subrol_clinica || null;
+        const defaultModo = defaultModoDisponibilidadFromSubrol(subrolClinica);
+        const existing = clinicasById.get(clinicId);
+
+        if (existing) {
+            existing.rol_clinica = existing.rol_clinica || rolClinica;
+            existing.subrol_clinica = existing.subrol_clinica || subrolClinica;
+            existing.modo_disponibilidad = existing.modo_disponibilidad || defaultModo;
+            if (!existing.nombre_clinica) {
+                existing.nombre_clinica = pivot.Clinica?.nombre_clinica || '';
+            }
+            if (!existing.url_avatar) {
+                existing.url_avatar = pivot.Clinica?.url_avatar || null;
+            }
+            continue;
+        }
+
+        clinicasById.set(clinicId, {
+            clinica_id: clinicId,
+            nombre_clinica: pivot.Clinica?.nombre_clinica || '',
+            url_avatar: pivot.Clinica?.url_avatar || null,
+            activo: true,
+            modo_disponibilidad: defaultModo,
+            horarios: [],
+            rol_clinica: rolClinica,
+            subrol_clinica: subrolClinica,
+            agenda_capable: true,
+        });
+    }
+
+    const hasActiveHorarios = (horarios = []) =>
+        Array.isArray(horarios) && horarios.some((h) => h && h.activo !== false);
+
+    const clinicas = Array.from(clinicasById.values())
+        .sort((a, b) => Number(a.clinica_id) - Number(b.clinica_id))
+        .map((c) => {
+            const modoDisponibilidad = c.modo_disponibilidad || defaultModoDisponibilidadFromSubrol(c.subrol_clinica);
+            const horarios = Array.isArray(c.horarios) ? c.horarios : [];
+            const onboardingPendiente = (c.agenda_capable !== false)
+                && modoDisponibilidad === 'avanzado'
+                && !hasActiveHorarios(horarios);
+
+            return {
+                ...c,
+                modo_disponibilidad: modoDisponibilidad,
+                horarios,
+                onboarding_horario_pendiente: onboardingPendiente,
+                onboarding_horario_completado: !onboardingPendiente,
+            };
+        });
+
+    const onboardingClinicasPendientes = clinicas
+        .filter((c) => c.onboarding_horario_pendiente)
+        .map((c) => ({
+            clinica_id: Number(c.clinica_id),
+            nombre_clinica: c.nombre_clinica || '',
+        }));
     // Bloqueos: limitar a las clínicas visibles (o global) cuando no es admin / self
     const bloqueosWhere = { doctor_id: targetUserId };
     if (!isAdmin(actorId) && Number(actorId) !== Number(targetUserId) && allowedClinicIds.length) {
@@ -1999,6 +2099,8 @@ async function buildScheduleResponse(actorId, targetUserId) {
             horarios: c.horarios || [],
         })),
         bloqueos: bloqueos.map((b) => serializeBloqueo(b, timezoneForClinicId(b.clinica_id, timezoneMap))),
+        onboarding_horario_pendiente: onboardingClinicasPendientes.length > 0,
+        onboarding_horario_clinicas_pendientes: onboardingClinicasPendientes,
     };
 }
 
