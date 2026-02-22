@@ -384,6 +384,53 @@ function hasScopeAccess(access, { clinic_id, group_id, is_system }) {
   return false;
 }
 
+function buildTemplatePermissions(access, item) {
+  if (!access || !access.user_id) {
+    return {
+      can_edit: false,
+      can_delete: false,
+      can_publish: false,
+      can_execute: false,
+    };
+  }
+
+  const scopeAllowed = hasScopeAccess(access, item);
+  const isDraft = !item?.published_at;
+  const isSystem = !!item?.is_system;
+
+  return {
+    can_edit: scopeAllowed && isDraft,
+    can_delete: scopeAllowed && (!isSystem || access.is_admin),
+    can_publish: scopeAllowed && isDraft,
+    can_execute: scopeAllowed && !isDraft,
+  };
+}
+
+async function loadClinicNameMapFromRows(rows) {
+  const clinicIds = Array.from(
+    new Set(
+      (Array.isArray(rows) ? rows : [])
+        .map((row) => Number.parseInt(String(row?.clinic_id), 10))
+        .filter((id) => Number.isInteger(id) && id > 0)
+    )
+  );
+
+  if (!clinicIds.length) return new Map();
+
+  const clinics = await Clinica.findAll({
+    where: { id_clinica: { [Op.in]: clinicIds } },
+    attributes: ['id_clinica', 'nombre'],
+    raw: true,
+  });
+
+  return new Map(
+    clinics.map((clinic) => [
+      Number.parseInt(String(clinic.id_clinica), 10),
+      clinic.nombre || null,
+    ])
+  );
+}
+
 function assertCreateScopeAllowed(access, { clinic_id, group_id, is_system }) {
   if (access.is_admin) return true;
   if (is_system) return false;
@@ -397,8 +444,16 @@ function assertCreateScopeAllowed(access, { clinic_id, group_id, is_system }) {
   return true;
 }
 
-function mapTemplate(row, { includeNodes = true } = {}) {
+function mapTemplate(row, { includeNodes = true, access = null, clinicNameMap = null } = {}) {
   const item = row?.toJSON ? row.toJSON() : row;
+  const clinicId = Number.parseInt(String(item.clinic_id), 10);
+  const clinicName =
+    item.clinic_name ??
+    (clinicNameMap instanceof Map && Number.isInteger(clinicId)
+      ? (clinicNameMap.get(clinicId) || null)
+      : null);
+  const permissions = buildTemplatePermissions(access, item);
+
   const base = {
     id: item.id,
     template_key: item.template_key,
@@ -410,6 +465,7 @@ function mapTemplate(row, { includeNodes = true } = {}) {
     is_active: item.is_active !== false,
     is_system: !!item.is_system,
     clinic_id: item.clinic_id ?? null,
+    clinic_name: clinicName,
     group_id: item.group_id ?? null,
     entry_node_id: item.entry_node_id,
     published_at: item.published_at ?? null,
@@ -417,6 +473,10 @@ function mapTemplate(row, { includeNodes = true } = {}) {
     created_by: item.created_by,
     created_at: item.created_at,
     updated_at: item.updated_at,
+    can_edit: permissions.can_edit,
+    can_delete: permissions.can_delete,
+    can_publish: permissions.can_publish,
+    can_execute: permissions.can_execute,
   };
 
   if (includeNodes) {
@@ -738,9 +798,13 @@ exports.listTemplates = async (req, res) => {
       order: [['template_key', 'ASC'], ['version', 'DESC']],
     });
 
+    const clinicNameMap = await loadClinicNameMapFromRows(rows);
+
     return res.json({
       success: true,
-      data: rows.map((row) => mapTemplate(row, { includeNodes })),
+      data: rows.map((row) =>
+        mapTemplate(row, { includeNodes, access, clinicNameMap })
+      ),
       pagination: {
         total: count,
         limit,
@@ -857,7 +921,11 @@ exports.createTemplateDraft = async (req, res) => {
       created_by: access.user_id,
     });
 
-    return res.status(201).json({ success: true, data: mapTemplate(created, { includeNodes: true }) });
+    const clinicNameMap = await loadClinicNameMapFromRows([created]);
+    return res.status(201).json({
+      success: true,
+      data: mapTemplate(created, { includeNodes: true, access, clinicNameMap }),
+    });
   } catch (err) {
     console.error('Error createTemplateDraft v2', err);
     return res.status(500).json({ success: false, error: 'create_failed', message: err.message });
@@ -886,7 +954,11 @@ exports.getTemplateLatestPublished = async (req, res) => {
       return res.status(404).json({ success: false, error: 'template_not_found' });
     }
 
-    return res.json({ success: true, data: mapTemplate(row, { includeNodes: true }) });
+    const clinicNameMap = await loadClinicNameMapFromRows([row]);
+    return res.json({
+      success: true,
+      data: mapTemplate(row, { includeNodes: true, access, clinicNameMap }),
+    });
   } catch (err) {
     console.error('Error getTemplateLatestPublished v2', err);
     return res.status(500).json({ success: false, error: 'get_failed', message: err.message });
@@ -914,9 +986,13 @@ exports.listTemplateVersions = async (req, res) => {
 
     const visible = rows.filter((row) => hasScopeAccess(access, row));
 
+    const clinicNameMap = await loadClinicNameMapFromRows(visible);
+
     return res.json({
       success: true,
-      data: visible.map((row) => mapTemplate(row, { includeNodes })),
+      data: visible.map((row) =>
+        mapTemplate(row, { includeNodes, access, clinicNameMap })
+      ),
       pagination: {
         total: count,
         limit,
@@ -947,7 +1023,11 @@ exports.getTemplateVersion = async (req, res) => {
       return res.status(404).json({ success: false, error: 'template_version_not_found' });
     }
 
-    return res.json({ success: true, data: mapTemplate(row, { includeNodes: true }) });
+    const clinicNameMap = await loadClinicNameMapFromRows([row]);
+    return res.json({
+      success: true,
+      data: mapTemplate(row, { includeNodes: true, access, clinicNameMap }),
+    });
   } catch (err) {
     console.error('Error getTemplateVersion v2', err);
     return res.status(500).json({ success: false, error: 'get_version_failed', message: err.message });
@@ -1043,7 +1123,11 @@ exports.updateTemplateDraft = async (req, res) => {
 
     await row.update(updates);
 
-    return res.json({ success: true, data: mapTemplate(row, { includeNodes: true }) });
+    const clinicNameMap = await loadClinicNameMapFromRows([row]);
+    return res.json({
+      success: true,
+      data: mapTemplate(row, { includeNodes: true, access, clinicNameMap }),
+    });
   } catch (err) {
     console.error('Error updateTemplateDraft v2', err);
     return res.status(500).json({ success: false, error: 'update_failed', message: err.message });
@@ -1090,7 +1174,11 @@ exports.publishTemplateVersion = async (req, res) => {
       published_by: access.user_id,
     });
 
-    return res.json({ success: true, data: mapTemplate(row, { includeNodes: true }) });
+    const clinicNameMap = await loadClinicNameMapFromRows([row]);
+    return res.json({
+      success: true,
+      data: mapTemplate(row, { includeNodes: true, access, clinicNameMap }),
+    });
   } catch (err) {
     console.error('Error publishTemplateVersion v2', err);
     return res.status(500).json({ success: false, error: 'publish_failed', message: err.message });
