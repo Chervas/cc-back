@@ -2110,12 +2110,32 @@ async function buildScheduleResponse(actorId, targetUserId) {
         });
     }
 
+    const hasActiveHorarios = (horarios = []) =>
+        Array.isArray(horarios) && horarios.some((h) => h && h.activo !== false);
+
     const clinicas = Array.from(clinicasById.values())
         .sort((a, b) => Number(a.clinica_id) - Number(b.clinica_id))
+        .map((c) => {
+            const modoDisponibilidad = c.modo_disponibilidad || defaultModoDisponibilidadFromSubrol(c.subrol_clinica);
+            const horarios = Array.isArray(c.horarios) ? c.horarios : [];
+            const onboardingPendiente = (c.agenda_capable !== false)
+                && modoDisponibilidad === 'avanzado'
+                && !hasActiveHorarios(horarios);
+
+            return {
+                ...c,
+                modo_disponibilidad: modoDisponibilidad,
+                horarios,
+                onboarding_horario_pendiente: onboardingPendiente,
+                onboarding_horario_completado: !onboardingPendiente,
+            };
+        });
+
+    const onboardingClinicasPendientes = clinicas
+        .filter((c) => c.onboarding_horario_pendiente)
         .map((c) => ({
-            ...c,
-            modo_disponibilidad: c.modo_disponibilidad || defaultModoDisponibilidadFromSubrol(c.subrol_clinica),
-            horarios: Array.isArray(c.horarios) ? c.horarios : [],
+            clinica_id: Number(c.clinica_id),
+            nombre_clinica: c.nombre_clinica || '',
         }));
 
     // Bloqueos: limitar a las clínicas visibles (o global) cuando no es admin / self
@@ -2138,6 +2158,8 @@ async function buildScheduleResponse(actorId, targetUserId) {
         doctor_nombre: user ? `${user.nombre || ''} ${user.apellidos || ''}`.trim() : '',
         clinicas,
         bloqueos: bloqueos.map((b) => serializeBloqueo(b, timezoneForClinicId(b.clinica_id, timezoneMap))),
+        onboarding_horario_pendiente: onboardingClinicasPendientes.length > 0,
+        onboarding_horario_clinicas_pendientes: onboardingClinicasPendientes,
     };
 }
 
