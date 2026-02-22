@@ -507,6 +507,40 @@ function mergeNodeOutput(context, nodeId, patch) {
   return nextContext;
 }
 
+function sanitizeAuditValue(value, depth = 0) {
+  if (value === undefined || value === null) return value;
+  if (typeof value === 'string') {
+    return value.length > 300 ? `${value.slice(0, 300)}…` : value;
+  }
+  if (typeof value === 'number' || typeof value === 'boolean') {
+    return value;
+  }
+  if (depth >= 3) {
+    return '[truncated]';
+  }
+  if (Array.isArray(value)) {
+    const out = value.slice(0, 10).map((item) => sanitizeAuditValue(item, depth + 1));
+    if (value.length > 10) out.push(`[+${value.length - 10} items]`);
+    return out;
+  }
+  if (typeof value === 'object') {
+    const out = {};
+    const entries = Object.entries(value);
+    for (const [key, val] of entries.slice(0, 20)) {
+      out[key] = sanitizeAuditValue(val, depth + 1);
+    }
+    if (entries.length > 20) {
+      out.__truncated_keys = entries.length - 20;
+    }
+    return out;
+  }
+  return String(value);
+}
+
+function summarizeNodeOutputForAudit(context, nodeId) {
+  return sanitizeAuditValue(context?.outputs?.[nodeId] ?? null);
+}
+
 function readOutputTarget(node, key) {
   const outputs = node?.outputs && typeof node.outputs === 'object' ? node.outputs : {};
   if (!(key in outputs)) return null;
@@ -869,6 +903,7 @@ async function runExecution(executionId, options = {}) {
     }
 
     const startedAt = new Date();
+    const nodeOutputBefore = summarizeNodeOutputForAudit(context, currentNodeId);
     const log = await FlowExecutionLogV2.create({
       flow_execution_id: execution.id,
       node_id: currentNodeId,
@@ -877,6 +912,7 @@ async function runExecution(executionId, options = {}) {
       started_at: startedAt,
       audit_snapshot: {
         started_at: startedAt.toISOString(),
+        node_output_before: nodeOutputBefore,
       },
     });
 
@@ -890,6 +926,7 @@ async function runExecution(executionId, options = {}) {
           status: 'waiting',
           at: finishedAt.toISOString(),
         });
+        const nodeOutputAfter = summarizeNodeOutputForAudit(context, currentNodeId);
 
         await log.update({
           status: 'success',
@@ -898,6 +935,8 @@ async function runExecution(executionId, options = {}) {
             kind: 'waiting',
             wait_until: result.wait_until ? result.wait_until.toISOString() : null,
             waiting_meta: result.waiting_meta || null,
+            node_output_before: nodeOutputBefore,
+            node_output_after: nodeOutputAfter,
           },
         });
 
@@ -919,6 +958,7 @@ async function runExecution(executionId, options = {}) {
         status: 'success',
         at: finishedAt.toISOString(),
       });
+      const nodeOutputAfter = summarizeNodeOutputForAudit(context, currentNodeId);
 
       const nextNodeId = cleanString(result.next_node_id);
 
@@ -928,6 +968,8 @@ async function runExecution(executionId, options = {}) {
         audit_snapshot: {
           kind: 'success',
           next_node_id: nextNodeId,
+          node_output_before: nodeOutputBefore,
+          node_output_after: nodeOutputAfter,
         },
       });
 
@@ -963,6 +1005,7 @@ async function runExecution(executionId, options = {}) {
         error_message: errorMessage,
         at: finishedAt.toISOString(),
       });
+      const nodeOutputAfter = summarizeNodeOutputForAudit(context, currentNodeId);
 
       await log.update({
         status: 'error',
@@ -971,6 +1014,8 @@ async function runExecution(executionId, options = {}) {
         audit_snapshot: {
           kind: 'error',
           on_fail: onFailNode,
+          node_output_before: nodeOutputBefore,
+          node_output_after: nodeOutputAfter,
         },
       });
 

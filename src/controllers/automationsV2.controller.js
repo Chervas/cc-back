@@ -630,6 +630,31 @@ function mapExecution(row, { includeContext = true } = {}) {
   return base;
 }
 
+function mapExecutionLog(row, { includeAudit = true } = {}) {
+  const item = row?.toJSON ? row.toJSON() : row;
+  const startedAt = item.started_at ? new Date(item.started_at) : null;
+  const finishedAt = item.finished_at ? new Date(item.finished_at) : null;
+  const durationMs = startedAt && finishedAt ? (finishedAt.getTime() - startedAt.getTime()) : null;
+
+  const base = {
+    id: item.id,
+    flow_execution_id: item.flow_execution_id,
+    node_id: item.node_id,
+    node_type: item.node_type ?? null,
+    status: item.status,
+    started_at: item.started_at,
+    finished_at: item.finished_at ?? null,
+    duration_ms: Number.isFinite(durationMs) ? durationMs : null,
+    error_message: item.error_message ?? null,
+  };
+
+  if (includeAudit) {
+    base.audit_snapshot = item.audit_snapshot ?? null;
+  }
+
+  return base;
+}
+
 function buildIdempotencyKey({ trigger_type, trigger_entity_id, template_version_id, window_identifier }) {
   const parts = [
     cleanString(trigger_type) || 'manual',
@@ -1730,6 +1755,9 @@ exports.listExecutions = async (req, res) => {
     const triggerEntityId = parseIntOrNull(req.query?.trigger_entity_id);
     if (triggerEntityId) where.trigger_entity_id = triggerEntityId;
 
+    const idempotencyKey = cleanString(req.query?.idempotency_key);
+    if (idempotencyKey) where.idempotency_key = idempotencyKey;
+
     const clinicId = parseIntOrNull(req.query?.clinic_id);
     if (clinicId) {
       if (!access.is_admin && !access.clinic_ids.has(clinicId)) {
@@ -1760,9 +1788,16 @@ exports.listExecutions = async (req, res) => {
       where[Op.and].push({ [Op.or]: scopeFilters });
     }
 
+    const templateVersionId = parseIntOrNull(req.query?.template_version_id);
+    if (templateVersionId) {
+      where.template_version_id = templateVersionId;
+    }
+
     const templateKey = sanitizeTemplateKey(req.query?.template_key);
+    const templateVersion = parseIntOrNull(req.query?.template_version);
     const templateWhere = {};
     if (templateKey) templateWhere.template_key = templateKey;
+    if (templateVersion) templateWhere.version = templateVersion;
 
     const { count, rows } = await FlowExecutionV2.findAndCountAll({
       where,
@@ -1770,8 +1805,8 @@ exports.listExecutions = async (req, res) => {
         model: AutomationFlowTemplateV2,
         as: 'templateVersion',
         attributes: ['id', 'template_key', 'version', 'name', 'trigger_type'],
-        required: !!templateKey,
-        ...(templateKey ? { where: templateWhere } : {}),
+        required: !!templateKey || !!templateVersion,
+        ...((templateKey || templateVersion) ? { where: templateWhere } : {}),
       }],
       order: [['id', 'DESC']],
       limit,
@@ -1797,6 +1832,7 @@ exports.getExecution = async (req, res) => {
   try {
     const access = await resolveAccess(req);
     const executionId = parseIntOrNull(req.params?.id);
+    const includeContext = parseBool(req.query?.include_context, true);
     if (!executionId) {
       return res.status(400).json({ success: false, error: 'invalid_execution_id' });
     }
@@ -1813,7 +1849,7 @@ exports.getExecution = async (req, res) => {
       return res.status(404).json({ success: false, error: 'execution_not_found' });
     }
 
-    return res.json({ success: true, data: execution });
+    return res.json({ success: true, data: mapExecution(execution, { includeContext }) });
   } catch (err) {
     console.error('Error getExecution v2', err);
     return res.status(500).json({ success: false, error: 'get_execution_failed', message: err.message });
@@ -1824,6 +1860,7 @@ exports.getExecutionLogs = async (req, res) => {
   try {
     const access = await resolveAccess(req);
     const executionId = parseIntOrNull(req.params?.id);
+    const includeAudit = parseBool(req.query?.include_audit, true);
     if (!executionId) {
       return res.status(400).json({ success: false, error: 'invalid_execution_id' });
     }
@@ -1835,9 +1872,15 @@ exports.getExecutionLogs = async (req, res) => {
 
     const limit = parseLimit(req.query?.limit, 100);
     const offset = parseOffset(req.query?.offset);
+    const where = { flow_execution_id: executionId };
+    const nodeId = cleanString(req.query?.node_id);
+    if (nodeId) where.node_id = nodeId;
+
+    const status = cleanString(req.query?.status);
+    if (status) where.status = status;
 
     const { count, rows } = await FlowExecutionLogV2.findAndCountAll({
-      where: { flow_execution_id: executionId },
+      where,
       limit,
       offset,
       order: [['id', 'ASC']],
@@ -1845,7 +1888,7 @@ exports.getExecutionLogs = async (req, res) => {
 
     return res.json({
       success: true,
-      data: rows,
+      data: rows.map((row) => mapExecutionLog(row, { includeAudit })),
       pagination: {
         total: count,
         limit,
