@@ -1,6 +1,7 @@
 const asyncHandler = require('express-async-handler');
 const db = require('../../models');
 const { Op } = db.Sequelize;
+const { STAFF_ROLES } = require('../lib/role-helpers');
 
 const parseBool = (v) => v === true || v === 'true' || v === '1';
 const dayIndex = (date) => new Date(date).getDay();
@@ -34,14 +35,16 @@ exports.list = asyncHandler(async (req, res) => {
   // Filtrado por clinica_id directamente sobre DoctorClinica (evita depender de atributos inexistentes en Clinica)
   const whereDoctorClinica = { activo: true };
   // Mantener /api/doctors legacy limitado a doctores reales:
-  // Solo filas donde el pivot UsuarioClinica marca subrol_clinica='Doctores' en esa clinica.
+  // incluir cualquier rol de staff (propietario/personal/agencia) con subrol Doctores
+  // para soportar casos propietario+doctor sin perder visibilidad en agenda.
+  const staffRolesSql = STAFF_ROLES.map((role) => db.sequelize.escape(role)).join(', ');
   whereDoctorClinica[Op.and] = db.Sequelize.literal(`
     EXISTS (
       SELECT 1
       FROM UsuarioClinica uc
       WHERE uc.id_usuario = \`DoctorClinica\`.\`doctor_id\`
         AND uc.id_clinica = \`DoctorClinica\`.\`clinica_id\`
-        AND uc.rol_clinica = 'personaldeclinica'
+        AND uc.rol_clinica IN (${staffRolesSql})
         AND uc.subrol_clinica = 'Doctores'
     )
   `);
