@@ -468,6 +468,70 @@ async function loadClinicNameMapFromRows(rows) {
   );
 }
 
+async function resolveGroupContextForClinicIds(inputClinicIds) {
+  const clinicIds = Array.from(
+    new Set(
+      (Array.isArray(inputClinicIds) ? inputClinicIds : [])
+        .map((id) => Number.parseInt(String(id), 10))
+        .filter((id) => Number.isInteger(id) && id > 0)
+    )
+  );
+
+  if (!clinicIds.length) {
+    return { clinic_ids: [], group_ids: [] };
+  }
+
+  const selectedClinics = await Clinica.findAll({
+    where: { id_clinica: { [Op.in]: clinicIds } },
+    attributes: ['id_clinica', 'grupoClinicaId'],
+    raw: true,
+  });
+
+  const groupIds = Array.from(
+    new Set(
+      selectedClinics
+        .map((clinic) => Number.parseInt(String(clinic.grupoClinicaId), 10))
+        .filter((id) => Number.isInteger(id) && id > 0)
+    )
+  );
+
+  let expandedClinicIds = [...clinicIds];
+  if (groupIds.length) {
+    const siblingClinics = await Clinica.findAll({
+      where: { grupoClinicaId: { [Op.in]: groupIds } },
+      attributes: ['id_clinica'],
+      raw: true,
+    });
+    expandedClinicIds = Array.from(
+      new Set([
+        ...clinicIds,
+        ...siblingClinics
+          .map((clinic) => Number.parseInt(String(clinic.id_clinica), 10))
+          .filter((id) => Number.isInteger(id) && id > 0),
+      ])
+    );
+  }
+
+  return { clinic_ids: expandedClinicIds, group_ids: groupIds };
+}
+
+async function resolveClinicIdsForGroup(groupId) {
+  const normalizedGroupId = Number.parseInt(String(groupId), 10);
+  if (!Number.isInteger(normalizedGroupId) || normalizedGroupId <= 0) {
+    return [];
+  }
+
+  const clinics = await Clinica.findAll({
+    where: { grupoClinicaId: normalizedGroupId },
+    attributes: ['id_clinica'],
+    raw: true,
+  });
+
+  return clinics
+    .map((clinic) => Number.parseInt(String(clinic.id_clinica), 10))
+    .filter((id) => Number.isInteger(id) && id > 0);
+}
+
 function assertCreateScopeAllowed(access, { clinic_id, group_id, is_system }) {
   if (access.is_admin) return true;
   if (is_system) return false;
@@ -812,10 +876,23 @@ exports.listTemplates = async (req, res) => {
         }
       }
 
+      const expandedScope = await resolveGroupContextForClinicIds(clinicIds);
+      const expandedClinicIds = expandedScope.clinic_ids;
+      const relatedGroupIds = expandedScope.group_ids;
+
       where[Op.and] = where[Op.and] || [];
       where[Op.and].push({
         [Op.or]: [
-          { clinic_id: clinicIds.length === 1 ? clinicIds[0] : { [Op.in]: clinicIds } },
+          {
+            clinic_id:
+              expandedClinicIds.length === 1
+                ? expandedClinicIds[0]
+                : { [Op.in]: expandedClinicIds },
+          },
+          ...(relatedGroupIds.length
+            ? [{ group_id: relatedGroupIds.length === 1 ? relatedGroupIds[0] : { [Op.in]: relatedGroupIds } }]
+            : []),
+          { is_system: true },
           {
             [Op.and]: [
               { clinic_id: null },
@@ -831,7 +908,24 @@ exports.listTemplates = async (req, res) => {
       if (!access.is_admin && !access.group_ids.has(groupId)) {
         return res.status(403).json({ success: false, error: 'forbidden_scope' });
       }
-      where.group_id = groupId;
+
+      const clinicIdsInGroup = await resolveClinicIdsForGroup(groupId);
+
+      where[Op.and] = where[Op.and] || [];
+      where[Op.and].push({
+        [Op.or]: [
+          { group_id: groupId },
+          ...(clinicIdsInGroup.length ? [{ clinic_id: { [Op.in]: clinicIdsInGroup } }] : []),
+          { is_system: true },
+          {
+            [Op.and]: [
+              { clinic_id: null },
+              { group_id: null },
+              { created_by: access.user_id },
+            ],
+          },
+        ],
+      });
     }
 
     if (!access.is_admin && !clinicIds.length && !groupId) {
@@ -924,9 +1018,22 @@ exports.createTemplateDraft = async (req, res) => {
     }
 
     const templateKey = buildTemplateKey({ templateKey: body.template_key, name });
-    const clinicId = parseIntOrNull(body.clinic_id);
-    const groupId = parseIntOrNull(body.group_id);
+    let clinicId = parseIntOrNull(body.clinic_id);
+    let groupId = parseIntOrNull(body.group_id);
     const isSystem = access.is_admin ? parseBool(body.is_system, false) : false;
+
+    // Si se crea en scope clínica y no viene group_id, inferir el grupo de la clínica.
+    if (clinicId && !groupId) {
+      const clinic = await Clinica.findOne({
+        where: { id_clinica: clinicId },
+        attributes: ['grupoClinicaId'],
+        raw: true,
+      });
+      const inferredGroupId = parseIntOrNull(clinic?.grupoClinicaId);
+      if (inferredGroupId) {
+        groupId = inferredGroupId;
+      }
+    }
 
     if (!assertCreateScopeAllowed(access, { clinic_id: clinicId, group_id: groupId, is_system: isSystem })) {
       return res.status(403).json({ success: false, error: 'forbidden_scope' });
@@ -1261,9 +1368,24 @@ exports.deleteTemplate = async (req, res) => {
     const scopeGroupId = parsedScope.group_id;
 
     if (scopeClinicIds.length) {
+      const expandedScope = await resolveGroupContextForClinicIds(scopeClinicIds);
+      const expandedClinicIds = expandedScope.clinic_ids;
+      const relatedGroupIds = expandedScope.group_ids;
+
       const matchesClinicScope = rows.some((row) => {
         const rowClinicId = parseIntOrNull(row.clinic_id);
-        return rowClinicId && scopeClinicIds.includes(rowClinicId);
+        const rowGroupId = parseIntOrNull(row.group_id);
+        const isLegacyOwner =
+          !rowClinicId &&
+          !rowGroupId &&
+          parseIntOrNull(row.created_by) === access.user_id;
+
+        return (
+          (rowClinicId && expandedClinicIds.includes(rowClinicId)) ||
+          (rowGroupId && relatedGroupIds.includes(rowGroupId)) ||
+          row.is_system === true ||
+          isLegacyOwner
+        );
       });
       if (!matchesClinicScope) {
         return res.status(404).json({ success: false, error: 'template_not_found' });
@@ -1271,7 +1393,22 @@ exports.deleteTemplate = async (req, res) => {
     }
 
     if (scopeGroupId) {
-      const matchesGroupScope = rows.some((row) => parseIntOrNull(row.group_id) === scopeGroupId);
+      const clinicIdsInGroup = await resolveClinicIdsForGroup(scopeGroupId);
+      const matchesGroupScope = rows.some((row) => {
+        const rowClinicId = parseIntOrNull(row.clinic_id);
+        const rowGroupId = parseIntOrNull(row.group_id);
+        const isLegacyOwner =
+          !rowClinicId &&
+          !rowGroupId &&
+          parseIntOrNull(row.created_by) === access.user_id;
+
+        return (
+          rowGroupId === scopeGroupId ||
+          (rowClinicId && clinicIdsInGroup.includes(rowClinicId)) ||
+          row.is_system === true ||
+          isLegacyOwner
+        );
+      });
       if (!matchesGroupScope) {
         return res.status(404).json({ success: false, error: 'template_not_found' });
       }
