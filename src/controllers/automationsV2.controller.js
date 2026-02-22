@@ -421,6 +421,20 @@ function hasScopeAccess(access, { clinic_id, group_id, is_system, created_by }) 
   return false;
 }
 
+function canCreateDraftFromTemplate(access, { clinic_id, group_id }) {
+  if (!access?.user_id) return false;
+  if (access.is_admin) return true;
+
+  const clinicId = parseIntOrNull(clinic_id);
+  const groupId = parseIntOrNull(group_id);
+
+  // Para no-admin, crear draft exige scope explícito.
+  if (!clinicId && !groupId) return false;
+  if (clinicId && !access.clinic_ids.has(clinicId)) return false;
+  if (groupId && !access.group_ids.has(groupId)) return false;
+  return true;
+}
+
 function buildTemplatePermissions(access, item) {
   if (!access || !access.user_id) {
     return {
@@ -428,6 +442,7 @@ function buildTemplatePermissions(access, item) {
       can_delete: false,
       can_publish: false,
       can_execute: false,
+      can_create_draft: false,
     };
   }
 
@@ -440,6 +455,7 @@ function buildTemplatePermissions(access, item) {
     can_delete: scopeAllowed && (!isSystem || access.is_admin),
     can_publish: scopeAllowed && isDraft,
     can_execute: scopeAllowed && !isDraft,
+    can_create_draft: !isDraft && canCreateDraftFromTemplate(access, item),
   };
 }
 
@@ -578,6 +594,7 @@ function mapTemplate(row, { includeNodes = true, access = null, clinicNameMap = 
     can_delete: permissions.can_delete,
     can_publish: permissions.can_publish,
     can_execute: permissions.can_execute,
+    can_create_draft: permissions.can_create_draft,
   };
 
   if (includeNodes) {
