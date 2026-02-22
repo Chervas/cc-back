@@ -419,14 +419,14 @@ async function loadClinicNameMapFromRows(rows) {
 
   const clinics = await Clinica.findAll({
     where: { id_clinica: { [Op.in]: clinicIds } },
-    attributes: ['id_clinica', 'nombre'],
+    attributes: ['id_clinica', 'nombre_clinica'],
     raw: true,
   });
 
   return new Map(
     clinics.map((clinic) => [
       Number.parseInt(String(clinic.id_clinica), 10),
-      clinic.nombre || null,
+      clinic.nombre_clinica || null,
     ])
   );
 }
