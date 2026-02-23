@@ -248,6 +248,126 @@ const inAnyWindow = (windows, start, end) => {
     return windows.some((w) => start >= w.start && end <= w.end);
 };
 
+const normalizeModoDisponibilidad = (value) => {
+    const mode = String(value || '').trim().toLowerCase();
+    return mode === 'basico' ? 'basico' : 'avanzado';
+};
+
+const mergeWindows = (windows) => {
+    const sorted = (windows || [])
+        .filter((w) => w?.start && w?.end && w.start < w.end)
+        .sort((a, b) => a.start - b.start);
+    if (!sorted.length) return [];
+
+    const merged = [sorted[0]];
+    for (let i = 1; i < sorted.length; i++) {
+        const curr = sorted[i];
+        const last = merged[merged.length - 1];
+        if (curr.start <= last.end) {
+            last.end = new Date(Math.max(last.end.getTime(), curr.end.getTime()));
+            continue;
+        }
+        merged.push({ start: curr.start, end: curr.end });
+    }
+    return merged;
+};
+
+const intersectWindows = (a, b) => {
+    if (!a.length || !b.length) return [];
+    return a
+        .flatMap((w) =>
+            b.map((d) => ({
+                start: new Date(Math.max(w.start, d.start)),
+                end: new Date(Math.min(w.end, d.end))
+            }))
+        )
+        .filter((w) => w.start < w.end);
+};
+
+async function fetchDoctorGlobalWindowsMap({ doctorIds, dow, fechaIso, clinicTimezone }) {
+    const ids = Array.from(new Set((doctorIds || []).map((id) => Number(id)).filter((id) => Number.isFinite(id) && id > 0)));
+    const out = new Map();
+    ids.forEach((id) => out.set(id, []));
+    if (!ids.length) return out;
+
+    const rows = await DoctorClinica.findAll({
+        where: {
+            doctor_id: { [Op.in]: ids },
+            activo: true
+        },
+        attributes: ['doctor_id'],
+        include: [{ model: DoctorHorario, as: 'horarios', attributes: ['dia_semana', 'activo', 'hora_inicio', 'hora_fin'] }]
+    });
+
+    rows.forEach((dc) => {
+        const doctorId = Number(dc.doctor_id);
+        if (!Number.isFinite(doctorId)) return;
+        const windows = buildWindowsFromHorarios(dc.horarios || [], dow, fechaIso, clinicTimezone);
+        if (!windows.length) return;
+        const prev = out.get(doctorId) || [];
+        out.set(doctorId, prev.concat(windows));
+    });
+
+    for (const [id, windows] of out.entries()) {
+        out.set(id, mergeWindows(windows));
+    }
+    return out;
+}
+
+function buildDoctorAvailabilityContext({
+    doctorId,
+    dc,
+    dow,
+    fechaIso,
+    clinicTimezone,
+    globalWindowsMap
+}) {
+    if (!doctorId) {
+        return {
+            docWins: [],
+            dcMissing: false,
+            mode: null,
+            outOfHoursMessage: 'Doctor fuera de horario'
+        };
+    }
+
+    if (!dc) {
+        return {
+            docWins: [],
+            dcMissing: true,
+            mode: null,
+            outOfHoursMessage: 'Doctor no asignado a la clínica'
+        };
+    }
+
+    const mode = normalizeModoDisponibilidad(dc.modo_disponibilidad);
+    const globalWins = mergeWindows(globalWindowsMap?.get(Number(doctorId)) || []);
+    const clinicWins = buildWindowsFromHorarios(dc.horarios || [], dow, fechaIso, clinicTimezone);
+
+    if (mode === 'basico') {
+        return {
+            docWins: globalWins,
+            dcMissing: false,
+            mode,
+            outOfHoursMessage: globalWins.length
+                ? 'Profesional fuera de su disponibilidad base'
+                : 'Profesional sin horario base configurado'
+        };
+    }
+
+    const effective = intersectWindows(globalWins, clinicWins);
+    let outOfHoursMessage = 'Profesional fuera de su disponibilidad en esta clínica';
+    if (!globalWins.length) outOfHoursMessage = 'Profesional sin horario base configurado';
+    else if (!clinicWins.length) outOfHoursMessage = 'Profesional sin horario configurado en esta clínica';
+
+    return {
+        docWins: effective,
+        dcMissing: false,
+        mode,
+        outOfHoursMessage
+    };
+}
+
 async function checkDisponibilidad({ clinica_id, inicio, fin, doctor_id, instalacion_id, clinicTimezone = DEFAULT_TIMEZONE }) {
     const conflicts = [];
     const start = new Date(inicio);
@@ -272,12 +392,29 @@ async function checkDisponibilidad({ clinica_id, inicio, fin, doctor_id, instala
     }
 
     if (doctor_id) {
-        const dc = await DoctorClinica.findOne({ where: { doctor_id, clinica_id }, include: [{ model: DoctorHorario, as: 'horarios' }] });
-        if (!dc || !dc.activo) conflicts.push({ type: 'doctor_unavailable', message: 'Doctor no asignado a la clínica' });
-        else {
-            const docWins = buildWindowsFromHorarios(dc.horarios || [], dow, fechaIso, clinicTimezone);
-            const inRange = inAnyWindow(docWins, start, end);
-            if (!inRange) conflicts.push({ type: 'doctor_unavailable', message: 'Doctor fuera de horario' });
+        const doctorGlobalWindowsMap = await fetchDoctorGlobalWindowsMap({
+            doctorIds: [doctor_id],
+            dow,
+            fechaIso,
+            clinicTimezone
+        });
+        const dc = await DoctorClinica.findOne({
+            where: { doctor_id, clinica_id, activo: true },
+            include: [{ model: DoctorHorario, as: 'horarios' }]
+        });
+        const doctorCtx = buildDoctorAvailabilityContext({
+            doctorId: doctor_id,
+            dc: dc || null,
+            dow,
+            fechaIso,
+            clinicTimezone,
+            globalWindowsMap: doctorGlobalWindowsMap
+        });
+        if (doctorCtx.dcMissing) {
+            conflicts.push({ type: 'doctor_unavailable', message: 'Doctor no asignado a la clínica' });
+        } else {
+            const inRange = inAnyWindow(doctorCtx.docWins, start, end);
+            if (!inRange) conflicts.push({ type: 'doctor_unavailable', message: doctorCtx.outOfHoursMessage });
         }
         const bloqueos = await DoctorBloqueo.findAll({ where: { doctor_id, fecha_inicio: { [db.Sequelize.Op.lt]: end }, fecha_fin: { [db.Sequelize.Op.gt]: start } } });
         if (bloqueos.length) conflicts.push({ type: 'doctor_unavailable', message: bloqueos[0].motivo || 'Bloqueo doctor' });
@@ -393,9 +530,26 @@ async function checkDisponibilidadCanonica({ clinica_id, inicio, fin, doctor_id,
 
     // Staff (doctor)
     if (doctor_id) {
-        const dc = await DoctorClinica.findOne({ where: { doctor_id, clinica_id: clinicaId, activo: true }, include: [{ model: DoctorHorario, as: 'horarios' }] });
+        const doctorGlobalWindowsMap = await fetchDoctorGlobalWindowsMap({
+            doctorIds: [doctor_id],
+            dow,
+            fechaIso,
+            clinicTimezone
+        });
+        const dc = await DoctorClinica.findOne({
+            where: { doctor_id, clinica_id: clinicaId, activo: true },
+            include: [{ model: DoctorHorario, as: 'horarios' }]
+        });
+        const doctorCtx = buildDoctorAvailabilityContext({
+            doctorId: doctor_id,
+            dc: dc || null,
+            dow,
+            fechaIso,
+            clinicTimezone,
+            globalWindowsMap: doctorGlobalWindowsMap
+        });
 
-        if (!dc) {
+        if (doctorCtx.dcMissing) {
             addLegacy('doctor_unavailable', 'Doctor no asignado a la clínica');
             addResource({
                 resource_type: 'staff',
@@ -407,10 +561,9 @@ async function checkDisponibilidadCanonica({ clinica_id, inicio, fin, doctor_id,
                 details: { message: 'Doctor no asignado a la clínica' }
             });
         } else {
-            const docWins = buildWindowsFromHorarios(dc.horarios || [], dow, fechaIso, clinicTimezone);
-            const inRange = inAnyWindow(docWins, start, end);
+            const inRange = inAnyWindow(doctorCtx.docWins, start, end);
             if (!inRange) {
-                addLegacy('doctor_unavailable', 'Doctor fuera de horario');
+                addLegacy('doctor_unavailable', doctorCtx.outOfHoursMessage);
                 addResource({
                     resource_type: 'staff',
                     resource_role: 'doctor',
@@ -418,7 +571,7 @@ async function checkDisponibilidadCanonica({ clinica_id, inicio, fin, doctor_id,
                     clinica_id: clinicaId,
                     code: 'STAFF_OUT_OF_HOURS',
                     can_force: false,
-                    details: { message: 'Doctor fuera de horario' }
+                    details: { message: doctorCtx.outOfHoursMessage }
                 });
             }
         }

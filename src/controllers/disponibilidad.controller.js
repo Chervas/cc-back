@@ -233,8 +233,7 @@ const subtractIntervals = (windows, blocks) => {
 };
 
 const intersectWindows = (a, b) => {
-  if (!a.length) return [...b];
-  if (!b.length) return [...a];
+  if (!a.length || !b.length) return [];
   return a
     .flatMap((w) =>
       b.map((d) => ({
@@ -243,6 +242,123 @@ const intersectWindows = (a, b) => {
       }))
     )
     .filter((w) => w.start < w.end);
+};
+
+const normalizeModoDisponibilidad = (value) => {
+  const mode = String(value || '').trim().toLowerCase();
+  return mode === 'basico' ? 'basico' : 'avanzado';
+};
+
+const mergeWindows = (windows) => {
+  const sorted = (windows || [])
+    .filter((w) => w?.start && w?.end && w.start < w.end)
+    .sort((a, b) => a.start - b.start);
+
+  if (!sorted.length) return [];
+
+  const merged = [sorted[0]];
+  for (let i = 1; i < sorted.length; i++) {
+    const curr = sorted[i];
+    const last = merged[merged.length - 1];
+    if (curr.start <= last.end) {
+      last.end = new Date(Math.max(last.end.getTime(), curr.end.getTime()));
+      continue;
+    }
+    merged.push({ start: curr.start, end: curr.end });
+  }
+  return merged;
+};
+
+const fetchDoctorGlobalWindowsMap = async ({ doctorIds, dow, fechaLocal, timeZone }) => {
+  const ids = Array.from(new Set((doctorIds || []).map((id) => Number(id)).filter((id) => Number.isFinite(id) && id > 0)));
+  const out = new Map();
+  ids.forEach((id) => out.set(id, []));
+  if (!ids.length) return out;
+
+  const rows = await db.DoctorClinica.findAll({
+    where: {
+      doctor_id: { [Op.in]: ids },
+      activo: true
+    },
+    attributes: ['doctor_id'],
+    include: [
+      { model: db.DoctorHorario, as: 'horarios', attributes: ['dia_semana', 'activo', 'hora_inicio', 'hora_fin'] }
+    ]
+  });
+
+  rows.forEach((dc) => {
+    const doctorId = Number(dc.doctor_id);
+    if (!Number.isFinite(doctorId)) return;
+    const windows = buildWindowsFromHorarios(dc.horarios || [], dow, fechaLocal, timeZone);
+    if (!windows.length) return;
+    const prev = out.get(doctorId) || [];
+    out.set(doctorId, prev.concat(windows));
+  });
+
+  for (const [doctorId, windows] of out.entries()) {
+    out.set(doctorId, mergeWindows(windows));
+  }
+
+  return out;
+};
+
+const buildDoctorAvailabilityContext = ({
+  doctorId,
+  clinicaId,
+  dc,
+  dow,
+  fechaLocal,
+  timeZone,
+  globalWindowsMap
+}) => {
+  if (!doctorId) {
+    return {
+      docWins: [],
+      dcMissing: false,
+      mode: null,
+      outOfHoursMessage: 'Doctor fuera de horario'
+    };
+  }
+
+  if (dc === null) {
+    return {
+      docWins: [],
+      dcMissing: true,
+      mode: null,
+      outOfHoursMessage: 'Doctor no asignado a la clínica'
+    };
+  }
+
+  const mode = normalizeModoDisponibilidad(dc?.modo_disponibilidad);
+  const globalWins = mergeWindows(globalWindowsMap?.get(Number(doctorId)) || []);
+  const clinicWins = buildWindowsFromHorarios(dc?.horarios || [], dow, fechaLocal, timeZone);
+
+  if (mode === 'basico') {
+    const hasGlobal = globalWins.length > 0;
+    return {
+      docWins: globalWins,
+      dcMissing: false,
+      mode,
+      outOfHoursMessage: hasGlobal
+        ? 'Profesional fuera de su disponibilidad base'
+        : 'Profesional sin horario base configurado'
+    };
+  }
+
+  const effective = intersectWindows(globalWins, clinicWins);
+  let message = 'Profesional fuera de su disponibilidad en esta clínica';
+  if (!globalWins.length) {
+    message = 'Profesional sin horario base configurado';
+  } else if (!clinicWins.length) {
+    message = 'Profesional sin horario configurado en esta clínica';
+  }
+
+  return {
+    docWins: effective,
+    dcMissing: false,
+    mode,
+    outOfHoursMessage: message
+  };
 };
 
 const build409 = ({ message, conflicts }) => {
@@ -292,6 +408,7 @@ const conflictsForSlot = ({
   instWins,
   docWins,
   dcMissing,
+  doctorOutOfHoursMessage,
   instBlocks,
   instCitas,
   docBlocks,
@@ -344,7 +461,7 @@ const conflictsForSlot = ({
         clinica_id: clinicaId,
         code: 'STAFF_OUT_OF_HOURS',
         can_force: false,
-        details: { message: 'Doctor fuera de horario' }
+        details: { message: doctorOutOfHoursMessage || 'Doctor fuera de horario' }
       });
     }
   }
@@ -449,11 +566,21 @@ const buildUnavailableIntervals = ({
   instBlocksRows,
   instCitasRows,
   docBlocksRows,
-  docCitasRows
+  docCitasRows,
+  doctorGlobalWindowsMap
 }) => {
   const instWins = inst ? buildWindowsFromHorarios(inst.horarios || [], dow, fecha_local, timeZone) : [];
-  const docWins = dc && dc !== null ? buildWindowsFromHorarios(dc.horarios || [], dow, fecha_local, timeZone) : [];
-  const dcMissing = doctorId && dc === null;
+  const doctorCtx = buildDoctorAvailabilityContext({
+    doctorId,
+    clinicaId,
+    dc,
+    dow,
+    fechaLocal: fecha_local,
+    timeZone,
+    globalWindowsMap: doctorGlobalWindowsMap
+  });
+  const docWins = doctorCtx.docWins;
+  const dcMissing = doctorCtx.dcMissing;
 
   const instBlocks = normalizeTimeRangeRows(instBlocksRows, 'fecha_inicio', 'fecha_fin');
   const instCitas = normalizeTimeRangeRows(instCitasRows, 'inicio', 'fin');
@@ -478,6 +605,7 @@ const buildUnavailableIntervals = ({
       instWins,
       docWins,
       dcMissing,
+      doctorOutOfHoursMessage: doctorCtx.outOfHoursMessage,
       instBlocks,
       instCitas,
       docBlocks,
@@ -660,12 +788,29 @@ exports.check = asyncHandler(async (req, res) => {
   // Staff (doctor) - de momento solo doctor_id (personal_ids[] vendrá en 18.12)
   const doctorId = doctor_id ? parseIntSafe(doctor_id) : null;
   if (doctorId) {
+    const doctorGlobalWindowsMap = await fetchDoctorGlobalWindowsMap({
+      doctorIds: [doctorId],
+      dow,
+      fechaLocal: fechaLocalCheck,
+      timeZone: clinicTimezone
+    });
+
     const dc = await db.DoctorClinica.findOne({
       where: { doctor_id: doctorId, clinica_id: clinicaId, activo: true },
       include: [{ model: db.DoctorHorario, as: 'horarios' }]
     });
 
-    if (!dc) {
+    const doctorCtx = buildDoctorAvailabilityContext({
+      doctorId,
+      clinicaId,
+      dc: dc || null,
+      dow,
+      fechaLocal: fechaLocalCheck,
+      timeZone: clinicTimezone,
+      globalWindowsMap: doctorGlobalWindowsMap
+    });
+
+    if (doctorCtx.dcMissing) {
       conflicts.push({
         resource_type: 'staff',
         resource_role: 'doctor',
@@ -676,8 +821,7 @@ exports.check = asyncHandler(async (req, res) => {
         details: { message: 'Doctor no asignado a la clínica' }
       });
     } else {
-      const docWins = buildWindowsFromHorarios(dc.horarios || [], dow, fechaLocalCheck, clinicTimezone);
-      const inRange = inAnyWindow(docWins, start, end);
+      const inRange = inAnyWindow(doctorCtx.docWins, start, end);
       if (!inRange) {
         conflicts.push({
           resource_type: 'staff',
@@ -686,7 +830,7 @@ exports.check = asyncHandler(async (req, res) => {
           clinica_id: clinicaId,
           code: 'STAFF_OUT_OF_HOURS',
           can_force: false,
-          details: { message: 'Doctor fuera de horario' }
+          details: { message: doctorCtx.outOfHoursMessage || 'Doctor fuera de horario' }
         });
       }
     }
@@ -896,9 +1040,19 @@ exports.slots = asyncHandler(async (req, res) => {
     return res.status(400).json({ message: 'Batch por doctores requiere instalacion_id' });
   }
 
+  const doctorIdsForGlobal = [];
+  if (doctorId) doctorIdsForGlobal.push(doctorId);
+  if (doctorIds.length) doctorIdsForGlobal.push(...doctorIds);
+  const doctorGlobalWindowsMap = await fetchDoctorGlobalWindowsMap({
+    doctorIds: doctorIdsForGlobal,
+    dow,
+    fechaLocal: fecha_local,
+    timeZone: clinicTimezone
+  });
+
   const buildSlots = ({
     inst,
-    dc,
+    doctorCtx,
     instBlocksRows,
     instCitasRows,
     docBlocksRows,
@@ -914,12 +1068,11 @@ exports.slots = asyncHandler(async (req, res) => {
       const instWins = buildWindowsFromHorarios(inst.horarios || [], dow, fecha_local, clinicTimezone);
       windows = intersectWindows(windows, instWins);
     }
-    if (dc === null) {
-      // Se pidió doctor, pero no existe asignación/horario en la clínica
+    if (doctorCtx && doctorCtx.dcMissing) {
+      // Se pidió doctor, pero no existe asignación en la clínica
       windows = [];
-    } else if (dc) {
-      const docWins = buildWindowsFromHorarios(dc.horarios || [], dow, fecha_local, clinicTimezone);
-      windows = intersectWindows(windows, docWins);
+    } else if (doctorCtx && Array.isArray(doctorCtx.docWins)) {
+      windows = intersectWindows(windows, doctorCtx.docWins);
     }
 
     const blocks = [];
@@ -956,9 +1109,18 @@ exports.slots = asyncHandler(async (req, res) => {
       where: { doctor_id: doctorId, clinica_id: clinicaId, activo: true },
       include: [{ model: db.DoctorHorario, as: 'horarios' }]
     });
+    const doctorCtx = buildDoctorAvailabilityContext({
+      doctorId,
+      clinicaId,
+      dc: dc || null,
+      dow,
+      fechaLocal: fecha_local,
+      timeZone: clinicTimezone,
+      globalWindowsMap: doctorGlobalWindowsMap
+    });
 
     // Si no hay asignación del doctor, devolvemos vacío para todas las instalaciones.
-    if (!dc) {
+    if (doctorCtx.dcMissing) {
       const slotsByInst = {};
       instalacionIds.forEach((id) => {
         slotsByInst[String(id)] = [];
@@ -1047,7 +1209,7 @@ exports.slots = asyncHandler(async (req, res) => {
       const inst = instMap.get(id);
       const slots = buildSlots({
         inst,
-        dc,
+        doctorCtx,
         instBlocksRows: instBloqById.get(id) || [],
         instCitasRows: instCitasById.get(id) || [],
         docBlocksRows: docBloqRows,
@@ -1073,7 +1235,8 @@ exports.slots = asyncHandler(async (req, res) => {
           instBlocksRows: instBloqById.get(id) || [],
           instCitasRows: instCitasById.get(id) || [],
           docBlocksRows: docBloqRows,
-          docCitasRows: docCitasRows
+          docCitasRows: docCitasRows,
+          doctorGlobalWindowsMap
         });
       }
     });
@@ -1143,9 +1306,18 @@ exports.slots = asyncHandler(async (req, res) => {
     const unavailableByDoctor = {};
     doctorIds.forEach((id) => {
       const dc = dcByDoctor.get(id) || null;
+      const doctorCtx = buildDoctorAvailabilityContext({
+        doctorId: id,
+        clinicaId,
+        dc,
+        dow,
+        fechaLocal: fecha_local,
+        timeZone: clinicTimezone,
+        globalWindowsMap: doctorGlobalWindowsMap
+      });
       const slots = buildSlots({
         inst,
-        dc,
+        doctorCtx,
         instBlocksRows: instBloqRows,
         instCitasRows: instCitasRows,
         docBlocksRows: docBloqById.get(id) || [],
@@ -1171,7 +1343,8 @@ exports.slots = asyncHandler(async (req, res) => {
           instBlocksRows: instBloqRows,
           instCitasRows: instCitasRows,
           docBlocksRows: docBloqById.get(id) || [],
-          docCitasRows: docCitasById.get(id) || []
+          docCitasRows: docCitasById.get(id) || [],
+          doctorGlobalWindowsMap
         });
       }
     });
@@ -1196,6 +1369,7 @@ exports.slots = asyncHandler(async (req, res) => {
   let instCitasRows = [];
   let docBloqRows = [];
   let docCitasRows = [];
+  let doctorCtx = null;
 
   if (instalacionId) {
     inst = await db.Instalacion.findByPk(instalacionId, {
@@ -1221,6 +1395,15 @@ exports.slots = asyncHandler(async (req, res) => {
       include: [{ model: db.DoctorHorario, as: 'horarios' }]
     });
     dc = dcRow || null;
+    doctorCtx = buildDoctorAvailabilityContext({
+      doctorId,
+      clinicaId,
+      dc,
+      dow,
+      fechaLocal: fecha_local,
+      timeZone: clinicTimezone,
+      globalWindowsMap: doctorGlobalWindowsMap
+    });
 
     docBloqRows = await db.DoctorBloqueo.findAll({
       where: { doctor_id: doctorId, fecha_inicio: { [Op.lt]: baseEnd }, fecha_fin: { [Op.gt]: baseStart } },
@@ -1234,7 +1417,7 @@ exports.slots = asyncHandler(async (req, res) => {
 
   const slots = buildSlots({
     inst: inst || undefined,
-    dc,
+    doctorCtx,
     instBlocksRows: instBloqRows,
     instCitasRows: instCitasRows,
     docBlocksRows: docBloqRows,
@@ -1267,7 +1450,8 @@ exports.slots = asyncHandler(async (req, res) => {
         instBlocksRows: instBloqRows,
         instCitasRows: instCitasRows,
         docBlocksRows: docBloqRows,
-        docCitasRows: docCitasRows
+        docCitasRows: docCitasRows,
+        doctorGlobalWindowsMap
       })
     } : {})
   });
