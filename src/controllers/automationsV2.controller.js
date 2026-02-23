@@ -496,7 +496,7 @@ function buildTemplatePermissions(access, item) {
     can_edit: scopeAllowed && isDraft,
     can_delete: scopeAllowed && (!isSystem || access.is_admin),
     can_publish: scopeAllowed && isDraft,
-    can_execute: scopeAllowed && !isDraft,
+    can_execute: scopeAllowed,
     can_create_draft: !isDraft && canCreateDraftFromTemplate(access, item),
   };
 }
@@ -1763,10 +1763,6 @@ exports.executeTemplateVersion = async (req, res) => {
 
     if (!row || !hasScopeAccess(access, row)) {
       return res.status(404).json({ success: false, error: 'template_version_not_found' });
-    }
-
-    if (!row.published_at) {
-      return res.status(409).json({ success: false, error: 'draft_not_executable' });
     }
 
     const body = req.body || {};
