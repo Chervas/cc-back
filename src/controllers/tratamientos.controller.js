@@ -42,6 +42,17 @@ async function resolveEffectiveGroupId(tratamiento) {
     return toIntOrNull(clinica?.grupoClinicaId);
 }
 
+async function resolveGroupIdForClinicId(clinicId) {
+    const parsedClinicId = toIntOrNull(clinicId);
+    if (!parsedClinicId) return null;
+    const clinica = await Clinica.findOne({
+        where: { id_clinica: parsedClinicId },
+        attributes: ['grupoClinicaId'],
+        raw: true,
+    });
+    return toIntOrNull(clinica?.grupoClinicaId);
+}
+
 // Listar tratamientos con filtros
 exports.getTratamientos = asyncHandler(async (req, res) => {
     const {
@@ -585,10 +596,15 @@ exports.setTratamientoAutomationTemplate = asyncHandler(async (req, res) => {
         const effectiveGroupId = await resolveEffectiveGroupId(tratamiento);
         const templateClinicId = toIntOrNull(template.clinic_id);
         const templateGroupId = toIntOrNull(template.group_id);
+        const templateClinicGroupId = templateClinicId
+            ? await resolveGroupIdForClinicId(templateClinicId)
+            : null;
 
         const isSameClinic = !!templateClinicId && !!tratamientoClinicId && templateClinicId === tratamientoClinicId;
         const isSameGroup = !!templateGroupId && !!effectiveGroupId && templateGroupId === effectiveGroupId;
-        if (!isSameClinic && !isSameGroup) {
+        const isClinicFromSameGroup =
+            !!templateClinicGroupId && !!effectiveGroupId && templateClinicGroupId === effectiveGroupId;
+        if (!isSameClinic && !isSameGroup && !isClinicFromSameGroup) {
             return res.status(403).json({
                 success: false,
                 message: 'La plantilla v2 no pertenece al mismo alcance (clínica/grupo) del tratamiento',
