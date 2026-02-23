@@ -7,6 +7,7 @@ const AutomationFlowTemplateV2 = db.AutomationFlowTemplateV2;
 const FlowExecutionV2 = db.FlowExecutionV2;
 const FlowExecutionLogV2 = db.FlowExecutionLogV2;
 const UsuarioClinica = db.UsuarioClinica;
+const Usuario = db.Usuario;
 const Clinica = db.Clinica;
 const jobRequestsService = require('../services/jobRequests.service');
 const jobScheduler = require('../services/jobScheduler.service');
@@ -17,6 +18,10 @@ const ADMIN_USER_IDS = (process.env.ADMIN_USER_IDS || '1')
   .filter((n) => Number.isInteger(n));
 
 const MANAGER_ROLES = new Set(['propietario', 'personaldeclinica', 'administrador', 'admin']);
+const TASK_ASSIGNEE_ROLE_OPTIONS = [
+  { id: 1, code: 'propietario', label: 'Propietario' },
+  { id: 2, code: 'personaldeclinica', label: 'Personal clínica' },
+];
 
 function parseIntOrNull(raw) {
   if (raw === undefined || raw === null || raw === '') return null;
@@ -840,6 +845,133 @@ exports.getNodeTypesCatalog = async (_req, res) => {
     success: true,
     data: NODE_TYPES_V2,
   });
+};
+
+exports.getAssigneesCatalog = async (req, res) => {
+  try {
+    const access = await resolveAccess(req);
+    if (!access.user_id) {
+      return res.status(401).json({ success: false, error: 'auth_required' });
+    }
+
+    const parsedScope = parseTemplateScopeQuery(req.query);
+    let clinicIds = [];
+
+    if (parsedScope.group_id) {
+      if (!access.is_admin && !access.group_ids.has(parsedScope.group_id)) {
+        return res.status(403).json({ success: false, error: 'forbidden_scope' });
+      }
+      clinicIds = await resolveClinicIdsForGroup(parsedScope.group_id);
+    } else if (parsedScope.clinic_ids.length) {
+      if (!access.is_admin) {
+        const hasForbidden = parsedScope.clinic_ids.some((clinicId) => !access.clinic_ids.has(clinicId));
+        if (hasForbidden) {
+          return res.status(403).json({ success: false, error: 'forbidden_scope' });
+        }
+      }
+      clinicIds = parsedScope.clinic_ids;
+    } else if (!access.is_admin) {
+      clinicIds = Array.from(access.clinic_ids);
+    }
+
+    clinicIds = Array.from(
+      new Set(
+        clinicIds
+          .map((id) => Number.parseInt(String(id), 10))
+          .filter((id) => Number.isInteger(id) && id > 0)
+      )
+    );
+
+    if (!clinicIds.length) {
+      return res.json({
+        success: true,
+        data: {
+          clinic_ids: [],
+          roles: TASK_ASSIGNEE_ROLE_OPTIONS,
+          users: [],
+        },
+      });
+    }
+
+    const memberships = await UsuarioClinica.findAll({
+      where: {
+        id_clinica: { [Op.in]: clinicIds },
+        rol_clinica: { [Op.in]: ['propietario', 'personaldeclinica', 'admin', 'administrador'] },
+      },
+      attributes: ['id_usuario', 'id_clinica', 'rol_clinica', 'subrol_clinica'],
+      raw: true,
+    });
+
+    const userIds = Array.from(
+      new Set(
+        memberships
+          .map((row) => Number.parseInt(String(row.id_usuario), 10))
+          .filter((id) => Number.isInteger(id) && id > 0)
+      )
+    );
+
+    const users = userIds.length
+      ? await Usuario.findAll({
+          where: { id_usuario: { [Op.in]: userIds } },
+          attributes: ['id_usuario', 'nombre', 'apellidos', 'email_usuario'],
+          raw: true,
+        })
+      : [];
+
+    const userById = new Map(
+      users.map((row) => [
+        Number.parseInt(String(row.id_usuario), 10),
+        row,
+      ])
+    );
+
+    const userMetaMap = new Map();
+    for (const membership of memberships) {
+      const userId = Number.parseInt(String(membership.id_usuario), 10);
+      if (!Number.isInteger(userId) || userId <= 0) continue;
+      if (!userMetaMap.has(userId)) {
+        userMetaMap.set(userId, { clinic_ids: new Set(), roles: new Set() });
+      }
+      const meta = userMetaMap.get(userId);
+      const clinicId = Number.parseInt(String(membership.id_clinica), 10);
+      if (Number.isInteger(clinicId) && clinicId > 0) {
+        meta.clinic_ids.add(clinicId);
+      }
+      const role = String(membership.rol_clinica || '').toLowerCase();
+      if (role) meta.roles.add(role);
+    }
+
+    const userOptions = Array.from(userMetaMap.entries())
+      .map(([userId, meta]) => {
+        const user = userById.get(userId);
+        const firstName = String(user?.nombre || '').trim();
+        const lastName = String(user?.apellidos || '').trim();
+        const fullName = `${firstName} ${lastName}`.trim();
+        const email = String(user?.email_usuario || '').trim() || null;
+        const labelBase = fullName || email || `Usuario ${userId}`;
+        return {
+          id: userId,
+          label: email ? `${labelBase} (${email})` : labelBase,
+          name: fullName || null,
+          email,
+          clinic_ids: Array.from(meta.clinic_ids).sort((a, b) => a - b),
+          roles: Array.from(meta.roles),
+        };
+      })
+      .sort((a, b) => String(a.label || '').localeCompare(String(b.label || ''), 'es'));
+
+    return res.json({
+      success: true,
+      data: {
+        clinic_ids: clinicIds,
+        roles: TASK_ASSIGNEE_ROLE_OPTIONS,
+        users: userOptions,
+      },
+    });
+  } catch (err) {
+    console.error('Error getAssigneesCatalog v2', err);
+    return res.status(500).json({ success: false, error: 'assignees_failed', message: err.message });
+  }
 };
 
 exports.validateTemplateGraph = async (req, res) => {

@@ -17,6 +17,7 @@ router.put('/catalog/:id/toggle', automationCatalogController.toggleCatalog);
 // Motor de flujos v2 (draft/publish/versiones/ejecuciones)
 router.get('/v2/meta', automationsV2Controller.getFlowMeta);
 router.get('/v2/node-types', automationsV2Controller.getNodeTypesCatalog);
+router.get('/v2/assignees', automationsV2Controller.getAssigneesCatalog);
 router.post('/v2/validate', automationsV2Controller.validateTemplateGraph);
 router.get('/v2/templates', automationsV2Controller.listTemplates);
 router.post('/v2/templates', automationsV2Controller.createTemplateDraft);
