@@ -112,6 +112,14 @@ module.exports = (sequelize, DataTypes) => {
     appointment_flow_template_id: {
       type: DataTypes.INTEGER,
       allowNull: true
+    },
+    appointment_automation_template_key: {
+      type: DataTypes.STRING(120),
+      allowNull: true
+    },
+    appointment_automation_template_version: {
+      type: DataTypes.INTEGER,
+      allowNull: true
     }
   }, {
     sequelize,

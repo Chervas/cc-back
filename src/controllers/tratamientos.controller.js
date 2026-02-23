@@ -5,6 +5,42 @@ const db = require('../../models');
 const Tratamiento = db.Tratamiento;
 const Clinica = db.Clinica;
 const AppointmentFlowTemplate = db.AppointmentFlowTemplate;
+const AutomationFlowTemplateV2 = db.AutomationFlowTemplateV2;
+
+const APPOINTMENT_TRIGGER_TYPES = new Set([
+    'appointment_created',
+    'appointment_reminder_window',
+    'appointment_confirmed',
+    'appointment_no_show',
+    'appointment_rescheduled',
+]);
+
+function toIntOrNull(value) {
+    if (value === undefined || value === null || value === '') return null;
+    const parsed = Number.parseInt(String(value), 10);
+    return Number.isInteger(parsed) ? parsed : null;
+}
+
+function toCleanString(value) {
+    if (value === undefined || value === null) return null;
+    const cleaned = String(value).trim();
+    return cleaned || null;
+}
+
+async function resolveEffectiveGroupId(tratamiento) {
+    const directGroupId = toIntOrNull(tratamiento?.grupo_clinica_id);
+    if (directGroupId) return directGroupId;
+
+    const clinicId = toIntOrNull(tratamiento?.clinica_id);
+    if (!clinicId) return null;
+
+    const clinica = await Clinica.findOne({
+        where: { id_clinica: clinicId },
+        attributes: ['grupoClinicaId'],
+        raw: true,
+    });
+    return toIntOrNull(clinica?.grupoClinicaId);
+}
 
 // Listar tratamientos con filtros
 exports.getTratamientos = asyncHandler(async (req, res) => {
@@ -69,6 +105,8 @@ exports.createTratamiento = asyncHandler(async (req, res) => {
         requiere_zona = false,
         activo = true,
         appointment_flow_template_id = null,
+        appointment_automation_template_key = null,
+        appointment_automation_template_version = null,
         clinica_id,
         grupo_clinica_id
     } = req.body || {};
@@ -100,6 +138,8 @@ exports.createTratamiento = asyncHandler(async (req, res) => {
         requiere_zona: !!requiere_zona,
         activo: activo !== false,
         appointment_flow_template_id: appointment_flow_template_id || null,
+        appointment_automation_template_key: appointment_automation_template_key || null,
+        appointment_automation_template_version: appointment_automation_template_version || null,
         clinica_id: clinicaIdNum || null,
         grupo_clinica_id: grupo_clinica_id || null
     });
@@ -133,6 +173,8 @@ exports.updateTratamiento = asyncHandler(async (req, res) => {
         'requiere_zona',
         'activo',
         'appointment_flow_template_id',
+        'appointment_automation_template_key',
+        'appointment_automation_template_version',
         'clinica_id',
         'grupo_clinica_id'
     ];
@@ -247,13 +289,46 @@ exports.getTratamientoFlow = asyncHandler(async (req, res) => {
         return res.status(404).json({ success: false, message: 'Tratamiento no encontrado' });
     }
 
+    const automationTemplateKey = toCleanString(tratamiento.appointment_automation_template_key);
+    const automationTemplateVersion = toIntOrNull(tratamiento.appointment_automation_template_version);
+    let automationTemplateAssignment = null;
+    if (automationTemplateKey) {
+        const where = {
+            template_key: automationTemplateKey,
+            published_at: { [db.Sequelize.Op.ne]: null },
+        };
+        if (automationTemplateVersion) where.version = automationTemplateVersion;
+
+        const templateV2 = await AutomationFlowTemplateV2.findOne({
+            where,
+            order: [['version', 'DESC']],
+            raw: true,
+        });
+
+        if (templateV2 && APPOINTMENT_TRIGGER_TYPES.has(templateV2.trigger_type)) {
+            automationTemplateAssignment = {
+                template_key: templateV2.template_key,
+                template_version: Number(templateV2.version),
+                template_id: Number(templateV2.id),
+                name: templateV2.name,
+                trigger_type: templateV2.trigger_type,
+                clinic_id: templateV2.clinic_id ?? null,
+                group_id: templateV2.group_id ?? null,
+                is_system: !!templateV2.is_system,
+                is_active: templateV2.is_active !== false,
+                published_at: templateV2.published_at ?? null,
+            };
+        }
+    }
+
     if (!tratamiento.appointment_flow_template_id) {
         return res.json({
             success: true,
             data: {
                 tratamiento_id: Number(tratamiento.id_tratamiento),
                 appointment_flow_template_id: null,
-                template: null
+                template: null,
+                automation_template_assignment: automationTemplateAssignment,
             }
         });
     }
@@ -265,7 +340,8 @@ exports.getTratamientoFlow = asyncHandler(async (req, res) => {
             data: {
                 tratamiento_id: Number(tratamiento.id_tratamiento),
                 appointment_flow_template_id: null,
-                template: null
+                template: null,
+                automation_template_assignment: automationTemplateAssignment,
             }
         });
     }
@@ -288,7 +364,8 @@ exports.getTratamientoFlow = asyncHandler(async (req, res) => {
                 is_active: template.is_active !== false,
                 created_at: template.created_at,
                 updated_at: template.updated_at
-            }
+            },
+            automation_template_assignment: automationTemplateAssignment,
         }
     });
 });
@@ -372,5 +449,110 @@ exports.setTratamientoFlow = asyncHandler(async (req, res) => {
             tratamiento_id: Number(tratamiento.id_tratamiento),
             appointment_flow_template_id: templateId
         }
+    });
+});
+
+// Asignar/desasignar plantilla v2 (automation-v2) a un tratamiento
+exports.setTratamientoAutomationTemplate = asyncHandler(async (req, res) => {
+    const { id } = req.params;
+    const tratamiento = await Tratamiento.findByPk(id);
+    if (!tratamiento) {
+        return res.status(404).json({ success: false, message: 'Tratamiento no encontrado' });
+    }
+
+    const templateKeyRaw = req.body?.template_key;
+    const versionRaw = req.body?.template_version;
+    if (templateKeyRaw === undefined) {
+        return res.status(400).json({
+            success: false,
+            message: 'template_key es obligatorio (usar null para quitar asignación)',
+        });
+    }
+
+    const templateKey = toCleanString(templateKeyRaw);
+    if (!templateKey) {
+        tratamiento.appointment_automation_template_key = null;
+        tratamiento.appointment_automation_template_version = null;
+        await tratamiento.save();
+        return res.json({
+            success: true,
+            data: {
+                tratamiento_id: Number(tratamiento.id_tratamiento),
+                automation_template: null,
+            },
+        });
+    }
+
+    const requestedVersion = toIntOrNull(versionRaw);
+    if (versionRaw !== undefined && versionRaw !== null && versionRaw !== '' && !requestedVersion) {
+        return res.status(400).json({ success: false, message: 'template_version inválido' });
+    }
+
+    const where = {
+        template_key: templateKey,
+        is_active: true,
+        published_at: { [db.Sequelize.Op.ne]: null },
+    };
+    if (requestedVersion) {
+        where.version = requestedVersion;
+    }
+
+    const template = await AutomationFlowTemplateV2.findOne({
+        where,
+        order: [['version', 'DESC']],
+    });
+    if (!template) {
+        return res.status(404).json({
+            success: false,
+            message: requestedVersion
+                ? 'Plantilla v2 no encontrada para template_key/version'
+                : 'Plantilla v2 no encontrada para template_key',
+        });
+    }
+
+    if (!APPOINTMENT_TRIGGER_TYPES.has(template.trigger_type)) {
+        return res.status(400).json({
+            success: false,
+            message: 'La plantilla no pertenece al dominio de cita (appointment)',
+        });
+    }
+
+    if (!template.is_system) {
+        const tratamientoClinicId = toIntOrNull(tratamiento.clinica_id);
+        const effectiveGroupId = await resolveEffectiveGroupId(tratamiento);
+        const templateClinicId = toIntOrNull(template.clinic_id);
+        const templateGroupId = toIntOrNull(template.group_id);
+
+        const isSameClinic = !!templateClinicId && !!tratamientoClinicId && templateClinicId === tratamientoClinicId;
+        const isSameGroup = !!templateGroupId && !!effectiveGroupId && templateGroupId === effectiveGroupId;
+        if (!isSameClinic && !isSameGroup) {
+            return res.status(403).json({
+                success: false,
+                message: 'La plantilla v2 no pertenece al mismo alcance (clínica/grupo) del tratamiento',
+            });
+        }
+    }
+
+    tratamiento.appointment_automation_template_key = template.template_key;
+    tratamiento.appointment_automation_template_version = Number(template.version);
+    await tratamiento.save();
+
+    return res.json({
+        success: true,
+        data: {
+            tratamiento_id: Number(tratamiento.id_tratamiento),
+            automation_template: {
+                template_key: template.template_key,
+                template_version: Number(template.version),
+                template_id: Number(template.id),
+                name: template.name,
+                trigger_type: template.trigger_type,
+                clinic_id: template.clinic_id ?? null,
+                group_id: template.group_id ?? null,
+                is_system: !!template.is_system,
+                is_active: template.is_active !== false,
+                published_at: template.published_at ?? null,
+            },
+        },
     });
 });

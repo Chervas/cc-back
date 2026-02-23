@@ -90,9 +90,32 @@ function isObject(value) {
 const TRIGGER_TYPES_V2 = [
   { value: 'appointment_created', label: 'Cita creada' },
   { value: 'appointment_reminder_window', label: 'Ventana de recordatorio' },
+  { value: 'appointment_confirmed', label: 'Cita confirmada' },
+  { value: 'appointment_no_show', label: 'Cita no show' },
+  { value: 'appointment_rescheduled', label: 'Cita reagendada' },
   { value: 'lead_nuevo', label: 'Lead nuevo' },
   { value: 'manual', label: 'Manual' },
 ];
+
+const APPOINTMENT_TRIGGER_TYPES = new Set([
+  'appointment_created',
+  'appointment_reminder_window',
+  'appointment_confirmed',
+  'appointment_no_show',
+  'appointment_rescheduled',
+]);
+
+function normalizeDomain(raw) {
+  const value = cleanString(raw);
+  if (!value) return null;
+  const normalized = value.toLowerCase();
+  return ['appointment', 'marketing'].includes(normalized) ? normalized : null;
+}
+
+function resolveDomainFromTriggerType(triggerType) {
+  if (APPOINTMENT_TRIGGER_TYPES.has(triggerType)) return 'appointment';
+  return 'marketing';
+}
 
 const NODE_TYPES_V2 = [
   {
@@ -579,6 +602,7 @@ function mapTemplate(row, { includeNodes = true, access = null, clinicNameMap = 
     name: item.name,
     description: item.description ?? null,
     trigger_type: item.trigger_type,
+    domain: resolveDomainFromTriggerType(item.trigger_type),
     is_active: item.is_active !== false,
     is_system: !!item.is_system,
     clinic_id: item.clinic_id ?? null,
@@ -863,6 +887,30 @@ exports.listTemplates = async (req, res) => {
 
     const triggerType = cleanString(req.query?.trigger_type);
     if (triggerType) where.trigger_type = triggerType;
+    const domainRaw = cleanString(req.query?.domain);
+    if (domainRaw) {
+      const domain = normalizeDomain(domainRaw);
+      if (!domain) {
+        return res.status(400).json({
+          success: false,
+          error: 'invalid_domain',
+          allowed: ['appointment', 'marketing'],
+        });
+      }
+      if (triggerType) {
+        if (resolveDomainFromTriggerType(triggerType) !== domain) {
+          return res.json({
+            success: true,
+            data: [],
+            pagination: { total: 0, limit, offset },
+          });
+        }
+      } else if (domain === 'appointment') {
+        where.trigger_type = { [Op.in]: Array.from(APPOINTMENT_TRIGGER_TYPES) };
+      } else if (domain === 'marketing') {
+        where.trigger_type = { [Op.notIn]: Array.from(APPOINTMENT_TRIGGER_TYPES) };
+      }
+    }
 
     const engineVersion = cleanString(req.query?.engine_version);
     if (engineVersion) where.engine_version = engineVersion;
