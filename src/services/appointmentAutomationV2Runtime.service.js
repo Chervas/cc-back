@@ -9,6 +9,7 @@ const Clinica = db.Clinica;
 const AutomationFlowTemplateV2 = db.AutomationFlowTemplateV2;
 const FlowExecutionV2 = db.FlowExecutionV2;
 const FlowExecutionLogV2 = db.FlowExecutionLogV2;
+const { getIO } = require('./socket.service');
 
 const APPOINTMENT_TRIGGER_TYPES = new Set([
   'appointment_created',
@@ -176,6 +177,24 @@ async function enqueueExecutionForCita(cita, options = {}) {
     group_id: scope.group_id,
     created_by: requestedBy,
   });
+  const io = getIO();
+  if (io) {
+    const clinicId = toIntOrNull(createdExecution.clinic_id);
+    const payload = {
+      execution_id: createdExecution.id,
+      template_version_id: createdExecution.template_version_id,
+      status: createdExecution.status,
+      current_node_id: createdExecution.current_node_id,
+      clinic_id: clinicId,
+      group_id: createdExecution.group_id || null,
+      trigger_type: createdExecution.trigger_type,
+      trigger_entity_type: createdExecution.trigger_entity_type,
+      trigger_entity_id: createdExecution.trigger_entity_id,
+      created_at: createdExecution.created_at,
+    };
+    if (clinicId) io.to(`clinic:${clinicId}`).emit('flow_execution:created', payload);
+    else io.emit('flow_execution:created', payload);
+  }
 
   const queueJob = await jobRequestsService.enqueueJobRequest({
     type: 'automations_v2_execute',

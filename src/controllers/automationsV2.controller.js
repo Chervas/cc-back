@@ -11,6 +11,7 @@ const Usuario = db.Usuario;
 const Clinica = db.Clinica;
 const jobRequestsService = require('../services/jobRequests.service');
 const jobScheduler = require('../services/jobScheduler.service');
+const { getIO } = require('../services/socket.service');
 
 const ADMIN_USER_IDS = (process.env.ADMIN_USER_IDS || '1')
   .split(',')
@@ -115,6 +116,7 @@ const APPOINTMENT_TRIGGER_TYPES = new Set([
   'appointment_no_show',
   'appointment_rescheduled',
 ]);
+const DUE_DATE_OFFSET_REGEX = /^(\d+)\s*(second|seconds|minute|minutes|hour|hours|day|days)$/i;
 
 function normalizeDomain(raw) {
   const value = cleanString(raw);
@@ -844,6 +846,160 @@ function validateFlowGraph({ entry_node_id, nodes }) {
   return { ok: errors.length === 0, errors };
 }
 
+function isConfigValueEmpty(value) {
+  if (value === undefined || value === null) return true;
+  if (typeof value === 'string') return value.trim() === '';
+  if (Array.isArray(value)) return value.length === 0;
+  if (typeof value === 'object') return Object.keys(value).length === 0;
+  return false;
+}
+
+function validateNodeConfig(node, nodeMap) {
+  const errors = [];
+  const nodeId = cleanString(node?.id) || 'unknown';
+  const nodeType = cleanString(node?.type) || 'unknown';
+  const config = isObject(node?.config) ? node.config : {};
+  const meta = getNodeTypeMeta(nodeType);
+
+  if (!meta) {
+    return errors;
+  }
+
+  const schema = Array.isArray(meta.config_schema) ? meta.config_schema : [];
+  for (const field of schema) {
+    if (!field?.required) continue;
+    const key = cleanString(field.key);
+    if (!key) continue;
+    if (isConfigValueEmpty(config[key])) {
+      errors.push(
+        buildValidationError(
+          'node_config_required',
+          `El nodo ${nodeId} requiere '${key}'`,
+          { node_id: nodeId, node_type: nodeType, key }
+        )
+      );
+    }
+  }
+
+  if (nodeType === 'action/create_task') {
+    const assigneeType = cleanString(config.assignee_type);
+    if (!['user', 'role'].includes(assigneeType || '')) {
+      errors.push(
+        buildValidationError(
+          'node_config_invalid',
+          `El nodo ${nodeId} requiere assignee_type = 'user' o 'role'`,
+          { node_id: nodeId, node_type: nodeType, key: 'assignee_type' }
+        )
+      );
+    }
+    if (isConfigValueEmpty(config.assignee_id)) {
+      errors.push(
+        buildValidationError(
+          'node_config_required',
+          `El nodo ${nodeId} requiere 'assignee_id'`,
+          { node_id: nodeId, node_type: nodeType, key: 'assignee_id' }
+        )
+      );
+    }
+    const dueOffset = cleanString(config.due_date_offset);
+    if (dueOffset && !DUE_DATE_OFFSET_REGEX.test(dueOffset)) {
+      errors.push(
+        buildValidationError(
+          'node_config_invalid',
+          `El nodo ${nodeId} tiene due_date_offset inválido (ej: '2 hours', '1 day')`,
+          { node_id: nodeId, node_type: nodeType, key: 'due_date_offset', value: dueOffset }
+        )
+      );
+    }
+  }
+
+  if (nodeType === 'delay/fixed') {
+    const duration = Number(config.duration);
+    const unit = cleanString(config.unit);
+    if (!Number.isFinite(duration) || duration <= 0) {
+      errors.push(
+        buildValidationError(
+          'node_config_invalid',
+          `El nodo ${nodeId} requiere duration > 0`,
+          { node_id: nodeId, node_type: nodeType, key: 'duration' }
+        )
+      );
+    }
+    if (!['seconds', 'minutes', 'hours', 'days'].includes(unit || '')) {
+      errors.push(
+        buildValidationError(
+          'node_config_invalid',
+          `El nodo ${nodeId} requiere unit válida`,
+          { node_id: nodeId, node_type: nodeType, key: 'unit' }
+        )
+      );
+    }
+  }
+
+  if (nodeType === 'delay/wait_response') {
+    const timeoutDuration = Number(config.timeout_duration);
+    const timeoutUnit = cleanString(config.timeout_unit);
+    const listensTo = cleanString(config.listens_to_node_id);
+    if (!Number.isFinite(timeoutDuration) || timeoutDuration <= 0) {
+      errors.push(
+        buildValidationError(
+          'node_config_invalid',
+          `El nodo ${nodeId} requiere timeout_duration > 0`,
+          { node_id: nodeId, node_type: nodeType, key: 'timeout_duration' }
+        )
+      );
+    }
+    if (!['minutes', 'hours'].includes(timeoutUnit || '')) {
+      errors.push(
+        buildValidationError(
+          'node_config_invalid',
+          `El nodo ${nodeId} requiere timeout_unit válida`,
+          { node_id: nodeId, node_type: nodeType, key: 'timeout_unit' }
+        )
+      );
+    }
+    if (!listensTo || !nodeMap.has(listensTo)) {
+      errors.push(
+        buildValidationError(
+          'node_config_invalid',
+          `El nodo ${nodeId} requiere listens_to_node_id existente`,
+          { node_id: nodeId, node_type: nodeType, key: 'listens_to_node_id', value: listensTo || null }
+        )
+      );
+    }
+  }
+
+  if (nodeType === 'condition/response_check') {
+    const listensTo = cleanString(config.listens_to_node_id);
+    if (!listensTo || !nodeMap.has(listensTo)) {
+      errors.push(
+        buildValidationError(
+          'node_config_invalid',
+          `El nodo ${nodeId} requiere listens_to_node_id existente`,
+          { node_id: nodeId, node_type: nodeType, key: 'listens_to_node_id', value: listensTo || null }
+        )
+      );
+    }
+  }
+
+  return errors;
+}
+
+function validateNodeConfigs(nodes) {
+  const safeNodes = Array.isArray(nodes) ? nodes : [];
+  const nodeMap = new Map(
+    safeNodes
+      .map((node) => [cleanString(node?.id), node])
+      .filter(([nodeId]) => !!nodeId)
+  );
+
+  const errors = [];
+  for (const node of safeNodes) {
+    errors.push(...validateNodeConfig(node, nodeMap));
+  }
+  return { ok: errors.length === 0, errors };
+}
+
 exports.getFlowMeta = async (_req, res) => {
   return res.json({
     success: true,
@@ -1034,15 +1190,21 @@ exports.validateTemplateGraph = async (req, res) => {
     const body = req.body || {};
     const entryNodeId = cleanString(body.entry_node_id);
     const nodes = normalizeNodesInput(body.nodes);
-    const validation = validateFlowGraph({
+    const graphValidation = validateFlowGraph({
       entry_node_id: entryNodeId,
       nodes,
     });
-    if (!validation.ok) {
+    const nodeConfigValidation = validateNodeConfigs(nodes);
+    const validationErrors = [
+      ...(graphValidation.errors || []),
+      ...(nodeConfigValidation.errors || []),
+    ];
+
+    if (validationErrors.length) {
       return res.status(400).json({
         success: false,
-        error: 'graph_validation_failed',
-        validation_errors: validation.errors,
+        error: 'validation_failed',
+        validation_errors: validationErrors,
       });
     }
     return res.json({
@@ -1569,16 +1731,22 @@ exports.publishTemplateVersion = async (req, res) => {
       return res.status(409).json({ success: false, error: 'already_published' });
     }
 
-    const validation = validateFlowGraph({
+    const normalizedNodes = normalizeNodesInput(Array.isArray(row.nodes) ? row.nodes : []);
+    const graphValidation = validateFlowGraph({
       entry_node_id: row.entry_node_id,
-      nodes: Array.isArray(row.nodes) ? row.nodes : [],
+      nodes: normalizedNodes,
     });
+    const nodeConfigValidation = validateNodeConfigs(normalizedNodes);
+    const validationErrors = [
+      ...(graphValidation.errors || []),
+      ...(nodeConfigValidation.errors || []),
+    ];
 
-    if (!validation.ok) {
+    if (validationErrors.length) {
       return res.status(400).json({
         success: false,
-        error: 'graph_validation_failed',
-        validation_errors: validation.errors,
+        error: 'validation_failed',
+        validation_errors: validationErrors,
       });
     }
 
@@ -1765,6 +1933,32 @@ exports.executeTemplateVersion = async (req, res) => {
       return res.status(404).json({ success: false, error: 'template_version_not_found' });
     }
 
+    if (!row.published_at) {
+      return res.status(409).json({
+        success: false,
+        error: 'draft_not_executable',
+        message: 'No se puede ejecutar una versión draft. Publica primero.',
+      });
+    }
+
+    const normalizedNodes = normalizeNodesInput(Array.isArray(row.nodes) ? row.nodes : []);
+    const graphValidation = validateFlowGraph({
+      entry_node_id: row.entry_node_id,
+      nodes: normalizedNodes,
+    });
+    const nodeConfigValidation = validateNodeConfigs(normalizedNodes);
+    const validationErrors = [
+      ...(graphValidation.errors || []),
+      ...(nodeConfigValidation.errors || []),
+    ];
+    if (validationErrors.length) {
+      return res.status(400).json({
+        success: false,
+        error: 'validation_failed',
+        validation_errors: validationErrors,
+      });
+    }
+
     const body = req.body || {};
     const triggerEntityId = parseIntOrNull(body.trigger_entity_id);
     const triggerEntityType = cleanString(body.trigger_entity_type) || 'entity';
@@ -1812,6 +2006,24 @@ exports.executeTemplateVersion = async (req, res) => {
       group_id: row.group_id || null,
       created_by: access.user_id,
     });
+    const io = getIO();
+    if (io) {
+      const clinicId = parseIntOrNull(createdExecution.clinic_id);
+      const payload = {
+        execution_id: createdExecution.id,
+        template_version_id: createdExecution.template_version_id,
+        status: createdExecution.status,
+        current_node_id: createdExecution.current_node_id,
+        clinic_id: clinicId,
+        group_id: createdExecution.group_id || null,
+        trigger_type: createdExecution.trigger_type,
+        trigger_entity_type: createdExecution.trigger_entity_type,
+        trigger_entity_id: createdExecution.trigger_entity_id,
+        created_at: createdExecution.created_at,
+      };
+      if (clinicId) io.to(`clinic:${clinicId}`).emit('flow_execution:created', payload);
+      else io.emit('flow_execution:created', payload);
+    }
 
     const requestedByName = cleanString(
       req.userData?.name

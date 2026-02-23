@@ -30,6 +30,82 @@ function toIntOrNull(value) {
   return Number.isInteger(parsed) ? parsed : null;
 }
 
+function buildExecutionSocketPayload(execution, extra = {}) {
+  const template = execution?.templateVersion || null;
+  const payload = {
+    execution_id: toIntOrNull(execution?.id),
+    template_version_id: toIntOrNull(execution?.template_version_id),
+    status: cleanString(execution?.status) || null,
+    current_node_id: cleanString(execution?.current_node_id),
+    wait_until: execution?.wait_until || null,
+    last_error: cleanString(execution?.last_error),
+    trigger_type: cleanString(execution?.trigger_type),
+    trigger_entity_type: cleanString(execution?.trigger_entity_type),
+    trigger_entity_id: toIntOrNull(execution?.trigger_entity_id),
+    clinic_id: toIntOrNull(execution?.clinic_id),
+    group_id: toIntOrNull(execution?.group_id),
+    updated_at: execution?.updated_at || new Date().toISOString(),
+  };
+
+  if (template) {
+    payload.template = {
+      id: toIntOrNull(template.id),
+      template_key: cleanString(template.template_key),
+      version: toIntOrNull(template.version),
+      name: cleanString(template.name),
+      trigger_type: cleanString(template.trigger_type),
+    };
+  }
+
+  return { ...payload, ...extra };
+}
+
+function emitExecutionEvent(execution, eventName = 'flow_execution:updated', extra = {}) {
+  const io = getIO();
+  if (!io) return;
+  const payload = buildExecutionSocketPayload(execution, extra);
+  const clinicId = toIntOrNull(payload.clinic_id);
+  if (clinicId) {
+    io.to(`clinic:${clinicId}`).emit(eventName, payload);
+    return;
+  }
+  io.emit(eventName, payload);
+}
+
+function emitExecutionLogEvent(execution, log, extra = {}) {
+  const io = getIO();
+  if (!io) return;
+
+  const payload = {
+    execution_id: toIntOrNull(execution?.id),
+    clinic_id: toIntOrNull(execution?.clinic_id),
+    group_id: toIntOrNull(execution?.group_id),
+    log: {
+      id: toIntOrNull(log?.id),
+      node_id: cleanString(log?.node_id),
+      node_type: cleanString(log?.node_type),
+      status: cleanString(log?.status),
+      error_message: cleanString(log?.error_message),
+      started_at: log?.started_at || null,
+      finished_at: log?.finished_at || null,
+      audit_snapshot: log?.audit_snapshot ?? null,
+    },
+    ...extra,
+  };
+
+  const clinicId = toIntOrNull(payload.clinic_id);
+  if (clinicId) {
+    io.to(`clinic:${clinicId}`).emit('flow_execution:log', payload);
+    return;
+  }
+  io.emit('flow_execution:log', payload);
+}
+
+async function updateExecutionAndEmit(execution, patch, eventName = 'flow_execution:updated', extra = {}) {
+  await execution.update(patch);
+  emitExecutionEvent(execution, eventName, extra);
+}
+
 function getByPath(obj, path) {
   if (!path) return undefined;
   const safePath = String(path)
@@ -783,37 +859,37 @@ async function resumeWaitingNode(execution, node, context, { mode, responseText 
       });
     }
 
-    await execution.update({
+    await updateExecutionAndEmit(execution, {
       status: 'running',
       wait_until: null,
       waiting_meta: null,
       current_node_id: nextNode,
       context: nextContext,
       last_error: null,
-    });
+    }, 'flow_execution:resumed', { resume_mode: mode || 'response' });
 
     return { resumed: true, context: nextContext };
   }
 
   if (nodeType === 'delay/fixed' || nodeType === 'delay/wait_until') {
     const nextNode = readOutputTarget(node, 'on_complete');
-    await execution.update({
+    await updateExecutionAndEmit(execution, {
       status: 'running',
       wait_until: null,
       waiting_meta: null,
       current_node_id: nextNode,
       context,
       last_error: null,
-    });
+    }, 'flow_execution:resumed', { resume_mode: mode || 'timeout' });
     return { resumed: true, context };
   }
 
-  await execution.update({
+  await updateExecutionAndEmit(execution, {
     status: 'running',
     wait_until: null,
     waiting_meta: null,
     last_error: null,
-  });
+  }, 'flow_execution:resumed', { resume_mode: mode || 'timeout' });
 
   return { resumed: true, context };
 }
@@ -834,9 +910,15 @@ async function runExecution(executionId, options = {}) {
     throw new Error('execution_not_found');
   }
 
+  emitExecutionEvent(execution, 'flow_execution:engine_start');
+
   const template = execution.templateVersion;
   if (!template) {
-    await execution.update({ status: 'failed', last_error: 'template_version_not_found' });
+    await updateExecutionAndEmit(
+      execution,
+      { status: 'failed', last_error: 'template_version_not_found' },
+      'flow_execution:updated'
+    );
     return execution;
   }
 
@@ -861,7 +943,11 @@ async function runExecution(executionId, options = {}) {
     const waitingNode = waitingNodeId ? nodeMap.get(waitingNodeId) : null;
 
     if (!waitingNode) {
-      await execution.update({ status: 'failed', last_error: 'waiting_node_not_found' });
+      await updateExecutionAndEmit(
+        execution,
+        { status: 'failed', last_error: 'waiting_node_not_found' },
+        'flow_execution:updated'
+      );
       return execution;
     }
 
@@ -880,26 +966,26 @@ async function runExecution(executionId, options = {}) {
     if (localStatus !== 'running') break;
 
     if (!currentNodeId) {
-      await execution.update({
+      await updateExecutionAndEmit(execution, {
         status: 'completed',
         current_node_id: null,
         context,
         wait_until: null,
         waiting_meta: null,
         last_error: null,
-      });
+      }, 'flow_execution:completed');
       localStatus = 'completed';
       break;
     }
 
     const node = nodeMap.get(currentNodeId);
     if (!node) {
-      await execution.update({
+      await updateExecutionAndEmit(execution, {
         status: 'failed',
         current_node_id: null,
         context,
         last_error: `node_not_found:${currentNodeId}`,
-      });
+      }, 'flow_execution:updated');
       localStatus = 'failed';
       break;
     }
@@ -941,15 +1027,16 @@ async function runExecution(executionId, options = {}) {
             node_output_after: nodeOutputAfter,
           },
         });
+        emitExecutionLogEvent(execution, log, { kind: 'waiting' });
 
-        await execution.update({
+        await updateExecutionAndEmit(execution, {
           status: 'waiting',
           current_node_id: currentNodeId,
           context,
           wait_until: result.wait_until || null,
           waiting_meta: result.waiting_meta || null,
           last_error: null,
-        });
+        }, 'flow_execution:updated');
 
         localStatus = 'waiting';
         break;
@@ -974,29 +1061,30 @@ async function runExecution(executionId, options = {}) {
           node_output_after: nodeOutputAfter,
         },
       });
+      emitExecutionLogEvent(execution, log, { kind: 'success' });
 
       if (!nextNodeId) {
-        await execution.update({
+        await updateExecutionAndEmit(execution, {
           status: 'completed',
           current_node_id: null,
           context,
           wait_until: null,
           waiting_meta: null,
           last_error: null,
-        });
+        }, 'flow_execution:completed');
         localStatus = 'completed';
         break;
       }
 
       currentNodeId = nextNodeId;
-      await execution.update({
+      await updateExecutionAndEmit(execution, {
         status: 'running',
         current_node_id: currentNodeId,
         context,
         wait_until: null,
         waiting_meta: null,
         last_error: null,
-      });
+      }, 'flow_execution:updated');
     } catch (error) {
       const finishedAt = new Date();
       const errorMessage = cleanString(error?.message) || 'node_execution_error';
@@ -1020,22 +1108,23 @@ async function runExecution(executionId, options = {}) {
           node_output_after: nodeOutputAfter,
         },
       });
+      emitExecutionLogEvent(execution, log, { kind: 'error' });
 
       if (onFailNode) {
         currentNodeId = onFailNode;
-        await execution.update({
+        await updateExecutionAndEmit(execution, {
           status: 'running',
           current_node_id: currentNodeId,
           context,
           last_error: errorMessage,
-        });
+        }, 'flow_execution:updated');
       } else {
-        await execution.update({
+        await updateExecutionAndEmit(execution, {
           status: 'failed',
           current_node_id: null,
           context,
           last_error: errorMessage,
-        });
+        }, 'flow_execution:failed');
         localStatus = 'failed';
         break;
       }
@@ -1043,11 +1132,11 @@ async function runExecution(executionId, options = {}) {
   }
 
   if (localStatus === 'running') {
-    await execution.update({
+    await updateExecutionAndEmit(execution, {
       status: 'dead_letter',
       last_error: 'max_steps_exceeded',
       context,
-    });
+    }, 'flow_execution:dead_letter');
   }
 
   await execution.reload();
