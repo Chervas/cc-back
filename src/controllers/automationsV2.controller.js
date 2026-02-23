@@ -19,9 +19,15 @@ const ADMIN_USER_IDS = (process.env.ADMIN_USER_IDS || '1')
 
 const MANAGER_ROLES = new Set(['propietario', 'personaldeclinica', 'administrador', 'admin']);
 const TASK_ASSIGNEE_ROLE_OPTIONS = [
-  { id: 1, code: 'propietario', label: 'Propietario' },
-  { id: 2, code: 'personaldeclinica', label: 'Personal clínica' },
+  { id: 'propietario', code: 'propietario', label: 'Propietario' },
+  { id: 'personaldeclinica', code: 'personaldeclinica', label: 'Personal clínica' },
 ];
+const TASK_ROLE_LABELS = {
+  propietario: 'Propietario',
+  personaldeclinica: 'Personal clínica',
+  administrador: 'Administrador',
+  admin: 'Administrador',
+};
 
 function parseIntOrNull(raw) {
   if (raw === undefined || raw === null || raw === '') return null;
@@ -177,13 +183,15 @@ const NODE_TYPES_V2 = [
       description: '',
       assignee_type: 'role',
       assignee_id: null,
+      subrole: null,
       due_date_offset: '1 day',
     },
     config_schema: [
       { key: 'title', label: 'Título', input_type: 'string', required: true },
       { key: 'description', label: 'Descripción', input_type: 'text', required: false },
       { key: 'assignee_type', label: 'Asignar a', input_type: 'select', required: true, options: ['user', 'role'] },
-      { key: 'assignee_id', label: 'ID usuario/rol', input_type: 'number', required: true },
+      { key: 'assignee_id', label: 'Usuario / rol', input_type: 'select', required: true },
+      { key: 'subrole', label: 'Subrol (opcional)', input_type: 'select', required: false, options: [] },
       { key: 'due_date_offset', label: 'Vencimiento', input_type: 'string', required: false },
     ],
   },
@@ -890,6 +898,7 @@ exports.getAssigneesCatalog = async (req, res) => {
         data: {
           clinic_ids: [],
           roles: TASK_ASSIGNEE_ROLE_OPTIONS,
+          subroles: [],
           users: [],
         },
       });
@@ -898,7 +907,9 @@ exports.getAssigneesCatalog = async (req, res) => {
     const memberships = await UsuarioClinica.findAll({
       where: {
         id_clinica: { [Op.in]: clinicIds },
-        rol_clinica: { [Op.in]: ['propietario', 'personaldeclinica', 'admin', 'administrador'] },
+        rol_clinica: {
+          [Op.notIn]: ['paciente'],
+        },
       },
       attributes: ['id_usuario', 'id_clinica', 'rol_clinica', 'subrol_clinica'],
       raw: true,
@@ -962,12 +973,46 @@ exports.getAssigneesCatalog = async (req, res) => {
       })
       .sort((a, b) => String(a.label || '').localeCompare(String(b.label || ''), 'es'));
     const userOptions = allUserOptions.slice(0, limit);
+    const roleCodes = Array.from(
+      new Set(
+        memberships
+          .map((row) => String(row.rol_clinica || '').trim().toLowerCase())
+          .filter(Boolean)
+      )
+    );
+    const rolePriority = ['propietario', 'administrador', 'admin', 'personaldeclinica'];
+    roleCodes.sort((a, b) => {
+      const ia = rolePriority.indexOf(a);
+      const ib = rolePriority.indexOf(b);
+      if (ia !== -1 && ib !== -1) return ia - ib;
+      if (ia !== -1) return -1;
+      if (ib !== -1) return 1;
+      return a.localeCompare(b, 'es');
+    });
+
+    const roleOptions = roleCodes.length
+      ? roleCodes.map((code) => ({
+          id: code,
+          code,
+          label: TASK_ROLE_LABELS[code] || code,
+        }))
+      : TASK_ASSIGNEE_ROLE_OPTIONS;
+
+    const subroleCodes = Array.from(
+      new Set(
+        memberships
+          .map((row) => String(row.subrol_clinica || '').trim())
+          .filter(Boolean)
+      )
+    ).sort((a, b) => a.localeCompare(b, 'es'));
+    const subroleOptions = subroleCodes.map((code) => ({ code, label: code }));
 
     return res.json({
       success: true,
       data: {
         clinic_ids: clinicIds,
-        roles: TASK_ASSIGNEE_ROLE_OPTIONS,
+        roles: roleOptions,
+        subroles: subroleOptions,
         users: userOptions,
         users_truncated: allUserOptions.length > userOptions.length,
       },
