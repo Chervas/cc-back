@@ -452,6 +452,69 @@ exports.setTratamientoFlow = asyncHandler(async (req, res) => {
     });
 });
 
+// Obtener asignación v2 (automation-template) de un tratamiento
+exports.getTratamientoAutomationTemplate = asyncHandler(async (req, res) => {
+    const { id } = req.params;
+    const tratamiento = await Tratamiento.findByPk(id);
+    if (!tratamiento) {
+        return res.status(404).json({ success: false, message: 'Tratamiento no encontrado' });
+    }
+
+    const templateKey = toCleanString(tratamiento.appointment_automation_template_key);
+    const templateVersion = toIntOrNull(tratamiento.appointment_automation_template_version);
+
+    if (!templateKey) {
+        return res.json({
+            success: true,
+            data: {
+                tratamiento_id: Number(tratamiento.id_tratamiento),
+                automation_template: null,
+            },
+        });
+    }
+
+    const where = {
+        template_key: templateKey,
+        published_at: { [db.Sequelize.Op.ne]: null },
+    };
+    if (templateVersion) where.version = templateVersion;
+
+    const template = await AutomationFlowTemplateV2.findOne({
+        where,
+        order: [['version', 'DESC']],
+        raw: true,
+    });
+
+    if (!template || !APPOINTMENT_TRIGGER_TYPES.has(template.trigger_type)) {
+        return res.json({
+            success: true,
+            data: {
+                tratamiento_id: Number(tratamiento.id_tratamiento),
+                automation_template: null,
+            },
+        });
+    }
+
+    return res.json({
+        success: true,
+        data: {
+            tratamiento_id: Number(tratamiento.id_tratamiento),
+            automation_template: {
+                template_key: template.template_key,
+                template_version: Number(template.version),
+                template_id: Number(template.id),
+                name: template.name,
+                trigger_type: template.trigger_type,
+                clinic_id: template.clinic_id ?? null,
+                group_id: template.group_id ?? null,
+                is_system: !!template.is_system,
+                is_active: template.is_active !== false,
+                published_at: template.published_at ?? null,
+            },
+        },
+    });
+});
+
 // Asignar/desasignar plantilla v2 (automation-v2) a un tratamiento
 exports.setTratamientoAutomationTemplate = asyncHandler(async (req, res) => {
     const { id } = req.params;
