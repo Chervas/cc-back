@@ -455,12 +455,14 @@ async function handleCreateTask(node, context, runtime) {
   }
 
   const message = description || title;
+  const notificationRole = roleCode || '';
+  const notificationSubrole = subrole || '';
   const createdNotifications = [];
   for (const userId of userIds) {
     const notification = await Notification.create({
       userId,
-      role: roleCode || null,
-      subrole: subrole || null,
+      role: notificationRole,
+      subrole: notificationSubrole,
       category: 'general',
       event: 'automation.task_created',
       title,
