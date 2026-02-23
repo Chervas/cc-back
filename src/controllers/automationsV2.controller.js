@@ -192,7 +192,13 @@ const NODE_TYPES_V2 = [
       { key: 'assignee_type', label: 'Asignar a', input_type: 'select', required: true, options: ['user', 'role'] },
       { key: 'assignee_id', label: 'Usuario / rol', input_type: 'select', required: true },
       { key: 'subrole', label: 'Subrol (opcional)', input_type: 'select', required: false, options: [] },
-      { key: 'due_date_offset', label: 'Vencimiento', input_type: 'string', required: false },
+      {
+        key: 'due_date_offset',
+        label: 'Vencimiento de tarea',
+        input_type: 'string',
+        required: false,
+        placeholder: 'Ej: 2 hours, 1 day',
+      },
     ],
   },
   {
