@@ -854,6 +854,8 @@ exports.getAssigneesCatalog = async (req, res) => {
       return res.status(401).json({ success: false, error: 'auth_required' });
     }
 
+    const limit = Math.max(50, Math.min(500, parseIntOrNull(req.query?.limit) || 300));
+
     const parsedScope = parseTemplateScopeQuery(req.query);
     let clinicIds = [];
 
@@ -941,7 +943,7 @@ exports.getAssigneesCatalog = async (req, res) => {
       if (role) meta.roles.add(role);
     }
 
-    const userOptions = Array.from(userMetaMap.entries())
+    const allUserOptions = Array.from(userMetaMap.entries())
       .map(([userId, meta]) => {
         const user = userById.get(userId);
         const firstName = String(user?.nombre || '').trim();
@@ -959,6 +961,7 @@ exports.getAssigneesCatalog = async (req, res) => {
         };
       })
       .sort((a, b) => String(a.label || '').localeCompare(String(b.label || ''), 'es'));
+    const userOptions = allUserOptions.slice(0, limit);
 
     return res.json({
       success: true,
@@ -966,6 +969,7 @@ exports.getAssigneesCatalog = async (req, res) => {
         clinic_ids: clinicIds,
         roles: TASK_ASSIGNEE_ROLE_OPTIONS,
         users: userOptions,
+        users_truncated: allUserOptions.length > userOptions.length,
       },
     });
   } catch (err) {
