@@ -103,6 +103,24 @@ function mapLog(row) {
   };
 }
 
+function mapNodeTypeLabel(nodeType) {
+  const key = String(nodeType || '').trim();
+  const labels = {
+    'action/change_status': 'Cambiar estado',
+    'action/write_note': 'Escribir nota',
+    'action/create_task': 'Crear tarea',
+    'action/send_whatsapp': 'Enviar WhatsApp',
+    'action/send_email': 'Enviar email',
+    'delay/fixed': 'Espera fija',
+    'delay/wait_until': 'Esperar hasta fecha',
+    'delay/wait_response': 'Esperar respuesta',
+    'condition/field_check': 'Condición por campo',
+    'condition/response_check': 'Condición por respuesta',
+    'condition/ai_analysis': 'Análisis IA',
+  };
+  return labels[key] || key || 'Nodo';
+}
+
 function mapLogV2(row, execution) {
   const item = row?.toJSON ? row.toJSON() : row;
   const startedAt = item.started_at ? new Date(item.started_at) : null;
@@ -110,6 +128,10 @@ function mapLogV2(row, execution) {
   const durationMs = startedAt && finishedAt ? finishedAt.getTime() - startedAt.getTime() : null;
   const nodeId = String(item.node_id || '').trim();
   const stepIndex = /^N(\d+)$/.test(nodeId) ? Number(nodeId.slice(1)) - 1 : null;
+  const templateNodes = Array.isArray(execution?.templateVersion?.nodes) ? execution.templateVersion.nodes : [];
+  const nodeDef = nodeId ? templateNodes.find((node) => String(node?.id || '').trim() === nodeId) : null;
+  const nodeLabel = String(nodeDef?.label || nodeDef?.name || '').trim();
+  const nodeTypeLabel = mapNodeTypeLabel(item.node_type);
   const statusMap = {
     success: 'success',
     error: 'failed',
@@ -122,7 +144,7 @@ function mapLogV2(row, execution) {
     cita_id: execution?.trigger_entity_id ?? null,
     step_index: Number.isFinite(stepIndex) ? stepIndex : null,
     step_type: item.node_type ?? null,
-    step_label: nodeId || null,
+    step_label: nodeLabel || nodeId || null,
     event_type: 'node_execution',
     status_before: null,
     status_after: item.status || null,
@@ -130,7 +152,7 @@ function mapLogV2(row, execution) {
     created_at: item.started_at || item.created_at,
     duration_ms: Number.isFinite(durationMs) ? durationMs : null,
     status: statusMap[item.status] || 'info',
-    message: nodeId ? `Nodo ${nodeId}` : 'Ejecución de nodo',
+    message: nodeLabel || nodeTypeLabel || (nodeId ? `Nodo ${nodeId}` : 'Ejecución de nodo'),
   };
 }
 
@@ -271,7 +293,7 @@ exports.getLogs = async (req, res) => {
         {
           model: AutomationFlowTemplateV2,
           as: 'templateVersion',
-          attributes: ['id', 'template_key', 'version', 'name'],
+          attributes: ['id', 'template_key', 'version', 'name', 'nodes'],
           required: false,
         },
       ],
