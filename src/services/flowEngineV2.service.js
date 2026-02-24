@@ -30,6 +30,22 @@ function toIntOrNull(value) {
   return Number.isInteger(parsed) ? parsed : null;
 }
 
+function formatAutomationTimestamp(date = new Date()) {
+  try {
+    return new Intl.DateTimeFormat('es-ES', {
+      timeZone: 'Europe/Madrid',
+      day: '2-digit',
+      month: '2-digit',
+      year: 'numeric',
+      hour: '2-digit',
+      minute: '2-digit',
+      hour12: false,
+    }).format(date).replace(',', '');
+  } catch (_err) {
+    return date.toISOString();
+  }
+}
+
 function buildExecutionSocketPayload(execution, extra = {}) {
   const template = execution?.templateVersion || null;
   const payload = {
@@ -411,7 +427,7 @@ async function handleWriteNote(node, context, runtime) {
     throw new Error('write_note_empty_content');
   }
 
-  const timestamp = new Date().toISOString();
+  const timestamp = formatAutomationTimestamp(new Date());
   const noteLine = `[${timestamp}] ${content}`;
   const result = {
     content,
