@@ -16,6 +16,14 @@ const DoctorBloqueo = db.DoctorBloqueo;
 const Tratamiento = db.Tratamiento;
 const DEFAULT_TIMEZONE = 'Europe/Madrid';
 
+const isMissingPersonalGeneralTableError = (error) => {
+    if (!error) return false;
+    const code = error?.original?.code || error?.parent?.code || error?.code;
+    if (code === 'ER_NO_SUCH_TABLE') return true;
+    const message = String(error?.original?.message || error?.message || '').toLowerCase();
+    return message.includes('personaldisponibilidadgenerales') && (message.includes("doesn't exist") || message.includes('no such table'));
+};
+
 /**
  * Helper: asegurar vínculo paciente-clínica sin romper por duplicados
  */
@@ -290,23 +298,59 @@ async function fetchDoctorGlobalWindowsMap({ doctorIds, dow, fechaIso, clinicTim
     ids.forEach((id) => out.set(id, []));
     if (!ids.length) return out;
 
-    const rows = await DoctorClinica.findAll({
-        where: {
-            doctor_id: { [Op.in]: ids },
-            activo: true
-        },
-        attributes: ['doctor_id'],
-        include: [{ model: DoctorHorario, as: 'horarios', attributes: ['dia_semana', 'activo', 'hora_inicio', 'hora_fin'] }]
-    });
+    let missingDoctorIds = [...ids];
+    let capa1ReadOk = false;
+    if (db.PersonalDisponibilidadGeneral) {
+        try {
+            const generalRows = await db.PersonalDisponibilidadGeneral.findAll({
+                where: {
+                    doctor_id: { [Op.in]: ids },
+                    dia_semana: dow,
+                    activo: true
+                },
+                attributes: ['doctor_id', 'dia_semana', 'activo', 'hora_inicio', 'hora_fin'],
+                raw: true
+            });
 
-    rows.forEach((dc) => {
-        const doctorId = Number(dc.doctor_id);
-        if (!Number.isFinite(doctorId)) return;
-        const windows = buildWindowsFromHorarios(dc.horarios || [], dow, fechaIso, clinicTimezone);
-        if (!windows.length) return;
-        const prev = out.get(doctorId) || [];
-        out.set(doctorId, prev.concat(windows));
-    });
+            capa1ReadOk = true;
+            const withGeneral = new Set();
+            generalRows.forEach((row) => {
+                const doctorId = Number(row.doctor_id);
+                if (!Number.isFinite(doctorId)) return;
+                withGeneral.add(doctorId);
+                const windows = buildWindowsFromHorarios([row], dow, fechaIso, clinicTimezone);
+                if (!windows.length) return;
+                const prev = out.get(doctorId) || [];
+                out.set(doctorId, prev.concat(windows));
+            });
+
+            missingDoctorIds = ids.filter((doctorId) => !withGeneral.has(doctorId));
+        } catch (error) {
+            if (!isMissingPersonalGeneralTableError(error)) {
+                throw error;
+            }
+        }
+    }
+
+    if (!capa1ReadOk || missingDoctorIds.length) {
+        const rows = await DoctorClinica.findAll({
+            where: {
+                doctor_id: { [Op.in]: capa1ReadOk ? missingDoctorIds : ids },
+                activo: true
+            },
+            attributes: ['doctor_id'],
+            include: [{ model: DoctorHorario, as: 'horarios', attributes: ['dia_semana', 'activo', 'hora_inicio', 'hora_fin'] }]
+        });
+
+        rows.forEach((dc) => {
+            const doctorId = Number(dc.doctor_id);
+            if (!Number.isFinite(doctorId)) return;
+            const windows = buildWindowsFromHorarios(dc.horarios || [], dow, fechaIso, clinicTimezone);
+            if (!windows.length) return;
+            const prev = out.get(doctorId) || [];
+            out.set(doctorId, prev.concat(windows));
+        });
+    }
 
     for (const [id, windows] of out.entries()) {
         out.set(id, mergeWindows(windows));
@@ -350,14 +394,14 @@ function buildDoctorAvailabilityContext({
             dcMissing: false,
             mode,
             outOfHoursMessage: globalWins.length
-                ? 'Profesional fuera de su disponibilidad base'
-                : 'Profesional sin horario base configurado'
+                ? 'Profesional fuera de su disponibilidad general'
+                : 'Profesional sin disponibilidad general configurada'
         };
     }
 
     const effective = intersectWindows(globalWins, clinicWins);
     let outOfHoursMessage = 'Profesional fuera de su disponibilidad en esta clínica';
-    if (!globalWins.length) outOfHoursMessage = 'Profesional sin horario base configurado';
+    if (!globalWins.length) outOfHoursMessage = 'Profesional sin disponibilidad general configurada';
     else if (!clinicWins.length) outOfHoursMessage = 'Profesional sin horario configurado en esta clínica';
 
     return {

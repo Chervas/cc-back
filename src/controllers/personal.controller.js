@@ -1,5 +1,16 @@
 const { Op, fn, col, where } = require('sequelize');
-const { Usuario, Clinica, UsuarioClinica, DoctorClinica, DoctorHorario, DoctorBloqueo, CitaPaciente, sequelize } = require('../../models');
+const {
+    Usuario,
+    Clinica,
+    ClinicaHorario,
+    UsuarioClinica,
+    DoctorClinica,
+    DoctorHorario,
+    DoctorBloqueo,
+    PersonalDisponibilidadGeneral,
+    CitaPaciente,
+    sequelize,
+} = require('../../models');
 const bcrypt = require('bcryptjs');
 const {
     ADMIN_USER_IDS,
@@ -26,6 +37,14 @@ const ROLES_CLINICA = new Set(ROLES_CLINICA_ARR);
 const SUBROLES_CLINICA = new Set(SUBROLES_CLINICA_ARR);
 const INVITE_RESEND_COOLDOWN_HOURS = Math.max(1, Number(process.env.INVITE_RESEND_COOLDOWN_HOURS || 4));
 const INVITE_RESEND_COOLDOWN_MS = INVITE_RESEND_COOLDOWN_HOURS * 60 * 60 * 1000;
+const GANTT_DAY_START_HM = '07:00';
+const GANTT_DAY_END_HM = '22:00';
+
+const UNAVAILABLE_REASONS = {
+    CLINIC_CLOSED: 'CLINIC_CLOSED',
+    PROFESSIONAL_OUT: 'PROFESSIONAL_OUT_OF_GENERAL_AVAILABILITY',
+    ADVANCED_MISSING: 'ADVANCED_MISSING_CLINIC_SCHEDULE',
+};
 
 const isAdmin = (userId) => isGlobalAdmin(userId);
 const ACTIVE_STAFF_INVITATION_WHERE = {
@@ -34,6 +53,22 @@ const ACTIVE_STAFF_INVITATION_WHERE = {
         { estado_invitacion: null },
     ],
 };
+
+function isMissingPersonalDisponibilidadTableError(error) {
+    if (!error) return false;
+    const code = error?.original?.code || error?.parent?.code || error?.code;
+    if (code === 'ER_NO_SUCH_TABLE') return true;
+    const message = String(error?.original?.message || error?.message || '').toLowerCase();
+    return message.includes('personaldisponibilidadgenerales') && (message.includes("doesn't exist") || message.includes('no such table'));
+}
+
+function isMissingClinicaHorarioTableError(error) {
+    if (!error) return false;
+    const code = error?.original?.code || error?.parent?.code || error?.code;
+    if (code === 'ER_NO_SUCH_TABLE') return true;
+    const message = String(error?.original?.message || error?.message || '').toLowerCase();
+    return message.includes('clinicahorarios') && (message.includes("doesn't exist") || message.includes('no such table'));
+}
 
 async function getAccessibleClinicIdsForUser(userId) {
     // Admin: puede acceder a todas las clinicas (pero seguimos filtrando por query para evitar dumps enormes)
@@ -1916,6 +1951,25 @@ async function canEditBloqueos(actorId, targetUserId, clinicaId) {
     return hasStaffPivot(targetUserId, cid);
 }
 
+/**
+ * Capa 1: edición de disponibilidad general.
+ * - Self/admin: permitido
+ * - Propietario/agencia: solo si tiene alcance admin en TODAS las clínicas del objetivo.
+ */
+async function canEditDisponibilidadGeneral(actorId, targetUserId) {
+    if (isAdmin(actorId)) return true;
+    if (Number(actorId) === Number(targetUserId)) return true;
+
+    const adminScopedClinicIds = await getAdminScopedClinicIdsForUser(actorId);
+    if (!adminScopedClinicIds.length) return false;
+
+    const targetClinicIds = await getAccessibleClinicIdsForUser(targetUserId);
+    if (!targetClinicIds.length) return false;
+
+    const adminScopedSet = new Set(adminScopedClinicIds);
+    return targetClinicIds.every((id) => adminScopedSet.has(id));
+}
+
 function normalizeHorarioRows(body) {
     const rows = Array.isArray(body)
         ? body
@@ -1952,6 +2006,237 @@ function hmRangesOverlap(aInicio, aFin, bInicio, bFin) {
     const bEnd = hmToMinutes(bFin);
     if ([aStart, aEnd, bStart, bEnd].some((v) => v == null)) return false;
     return aStart < bEnd && bStart < aEnd;
+}
+
+function mergeIntervalsByDay(rows = []) {
+    const byDay = new Map();
+    for (const row of rows) {
+        if (!row || row.activo === false) continue;
+        const dia = normalizeDiaSemana(row.dia_semana);
+        const inicio = normalizeHm(row.hora_inicio);
+        const fin = normalizeHm(row.hora_fin);
+        if (dia == null || !inicio || !fin) continue;
+        if (inicio >= fin) continue;
+
+        const list = byDay.get(dia) || [];
+        list.push({
+            startMin: hmToMinutes(inicio),
+            endMin: hmToMinutes(fin),
+        });
+        byDay.set(dia, list);
+    }
+
+    const out = [];
+    for (const [dia, intervals] of byDay.entries()) {
+        const sorted = intervals
+            .filter((it) => Number.isFinite(it.startMin) && Number.isFinite(it.endMin) && it.startMin < it.endMin)
+            .sort((a, b) => a.startMin - b.startMin);
+        if (!sorted.length) continue;
+
+        const merged = [sorted[0]];
+        for (let i = 1; i < sorted.length; i++) {
+            const curr = sorted[i];
+            const last = merged[merged.length - 1];
+            if (curr.startMin <= last.endMin) {
+                last.endMin = Math.max(last.endMin, curr.endMin);
+            } else {
+                merged.push({ ...curr });
+            }
+        }
+
+        merged.forEach((it) => {
+            const startHh = String(Math.floor(it.startMin / 60)).padStart(2, '0');
+            const startMm = String(it.startMin % 60).padStart(2, '0');
+            const endHh = String(Math.floor(it.endMin / 60)).padStart(2, '0');
+            const endMm = String(it.endMin % 60).padStart(2, '0');
+            out.push({
+                dia_semana: Number(dia),
+                hora_inicio: `${startHh}:${startMm}`,
+                hora_fin: `${endHh}:${endMm}`,
+                activo: true,
+            });
+        });
+    }
+
+    return out.sort((a, b) => {
+        if (a.dia_semana !== b.dia_semana) return a.dia_semana - b.dia_semana;
+        if (a.hora_inicio !== b.hora_inicio) return a.hora_inicio.localeCompare(b.hora_inicio);
+        return a.hora_fin.localeCompare(b.hora_fin);
+    });
+}
+
+function findOverlappingRows(rows = []) {
+    const byDay = new Map();
+    for (const row of rows) {
+        if (!row || row.activo === false) continue;
+        const dia = normalizeDiaSemana(row.dia_semana);
+        const inicio = normalizeHm(row.hora_inicio);
+        const fin = normalizeHm(row.hora_fin);
+        if (dia == null || !inicio || !fin) continue;
+        if (inicio >= fin) continue;
+        const list = byDay.get(dia) || [];
+        list.push({ dia_semana: dia, hora_inicio: inicio, hora_fin: fin });
+        byDay.set(dia, list);
+    }
+
+    for (const [dia, intervals] of byDay.entries()) {
+        const sorted = intervals.sort((a, b) => a.hora_inicio.localeCompare(b.hora_inicio));
+        for (let i = 0; i < sorted.length - 1; i++) {
+            const current = sorted[i];
+            const next = sorted[i + 1];
+            if (hmRangesOverlap(current.hora_inicio, current.hora_fin, next.hora_inicio, next.hora_fin)) {
+                return { dia_semana: dia, left: current, right: next };
+            }
+        }
+    }
+    return null;
+}
+
+function serializeDisponibilidadGeneralRows(rows = []) {
+    return (rows || [])
+        .map((row) => ({
+            id: row.id != null ? Number(row.id) : undefined,
+            doctor_id: Number(row.doctor_id),
+            dia_semana: Number(row.dia_semana),
+            activo: row.activo !== false,
+            hora_inicio: row.hora_inicio,
+            hora_fin: row.hora_fin,
+            created_at: row.created_at,
+            updated_at: row.updated_at,
+        }))
+        .sort((a, b) => {
+            if (a.dia_semana !== b.dia_semana) return a.dia_semana - b.dia_semana;
+            if (a.hora_inicio !== b.hora_inicio) return String(a.hora_inicio).localeCompare(String(b.hora_inicio));
+            return String(a.hora_fin).localeCompare(String(b.hora_fin));
+        });
+}
+
+async function getPersistedDisponibilidadGeneralRows(doctorId) {
+    try {
+        return await PersonalDisponibilidadGeneral.findAll({
+            where: { doctor_id: Number(doctorId) },
+            order: [['dia_semana', 'ASC'], ['hora_inicio', 'ASC'], ['id', 'ASC']],
+        });
+    } catch (error) {
+        if (isMissingPersonalDisponibilidadTableError(error)) {
+            return null;
+        }
+        throw error;
+    }
+}
+
+async function deriveLegacyDisponibilidadGeneralRows(doctorId) {
+    const doctorClinicas = await DoctorClinica.findAll({
+        where: {
+            doctor_id: Number(doctorId),
+            activo: true,
+        },
+        include: [
+            {
+                model: DoctorHorario,
+                as: 'horarios',
+                attributes: ['dia_semana', 'activo', 'hora_inicio', 'hora_fin'],
+            },
+        ],
+    });
+
+    const legacyRows = [];
+    for (const dc of doctorClinicas) {
+        const horarios = Array.isArray(dc.horarios) ? dc.horarios : [];
+        for (const horario of horarios) {
+            if (horario?.activo === false) continue;
+            const dia = normalizeDiaSemana(horario?.dia_semana);
+            const inicio = normalizeHm(horario?.hora_inicio);
+            const fin = normalizeHm(horario?.hora_fin);
+            if (dia == null || !inicio || !fin || inicio >= fin) continue;
+            legacyRows.push({
+                doctor_id: Number(doctorId),
+                dia_semana: dia,
+                activo: true,
+                hora_inicio: inicio,
+                hora_fin: fin,
+            });
+        }
+    }
+
+    return mergeIntervalsByDay(legacyRows);
+}
+
+async function getDisponibilidadGeneralForDoctor(doctorId) {
+    const persistedRows = await getPersistedDisponibilidadGeneralRows(doctorId);
+    if (persistedRows === null) {
+        const legacy = await deriveLegacyDisponibilidadGeneralRows(doctorId);
+        return {
+            source: 'legacy_doctor_horarios',
+            horarios: legacy,
+        };
+    }
+
+    if (persistedRows.length > 0) {
+        return {
+            source: 'personal_disponibilidad_general',
+            horarios: serializeDisponibilidadGeneralRows(persistedRows),
+        };
+    }
+
+    const legacy = await deriveLegacyDisponibilidadGeneralRows(doctorId);
+    return {
+        source: legacy.length ? 'legacy_doctor_horarios' : 'personal_disponibilidad_general',
+        horarios: legacy,
+    };
+}
+
+async function getClinicaHorariosMap(clinicIds = []) {
+    const ids = Array.from(new Set(
+        (clinicIds || [])
+            .map((id) => Number(id))
+            .filter((id) => Number.isFinite(id))
+    ));
+    if (!ids.length) {
+        return new Map();
+    }
+
+    let rows = [];
+    try {
+        rows = await ClinicaHorario.findAll({
+            where: {
+                clinica_id: { [Op.in]: ids },
+            },
+            attributes: ['clinica_id', 'dia_semana', 'activo', 'hora_inicio', 'hora_fin'],
+            order: [['clinica_id', 'ASC'], ['dia_semana', 'ASC'], ['hora_inicio', 'ASC']],
+            raw: true,
+        });
+    } catch (error) {
+        if (isMissingClinicaHorarioTableError(error)) {
+            return new Map();
+        }
+        throw error;
+    }
+
+    const map = new Map();
+    for (const row of rows) {
+        const clinicId = Number(row.clinica_id);
+        if (!Number.isFinite(clinicId)) continue;
+        const dia = normalizeDiaSemana(row.dia_semana);
+        const inicio = normalizeHm(row.hora_inicio);
+        const fin = normalizeHm(row.hora_fin);
+        if (dia == null || !inicio || !fin || inicio >= fin) continue;
+
+        const list = map.get(clinicId) || [];
+        list.push({
+            dia_semana: dia,
+            activo: row.activo !== false,
+            hora_inicio: inicio,
+            hora_fin: fin,
+        });
+        map.set(clinicId, list);
+    }
+
+    for (const [clinicId, clinicRows] of map.entries()) {
+        map.set(clinicId, mergeIntervalsByDay(clinicRows));
+    }
+
+    return map;
 }
 
 async function findCrossClinicScheduleConflicts({ targetUserId, clinicaId, candidateHorarios }) {
@@ -2020,7 +2305,10 @@ async function buildScheduleResponse(actorId, targetUserId) {
         raw: true,
     });
 
+    const disponibilidadGeneral = await getDisponibilidadGeneralForDoctor(targetUserId);
+
     const allowedClinicIds = await getAllowedClinicIdsForActorTarget(actorId, targetUserId);
+    const clinicaHorariosMap = await getClinicaHorariosMap(allowedClinicIds);
 
     const doctorClinicaRows = allowedClinicIds.length
         ? await DoctorClinica.findAll({
@@ -2118,6 +2406,7 @@ async function buildScheduleResponse(actorId, targetUserId) {
         .map((c) => {
             const modoDisponibilidad = c.modo_disponibilidad || defaultModoDisponibilidadFromSubrol(c.subrol_clinica);
             const horarios = Array.isArray(c.horarios) ? c.horarios : [];
+            const horariosApertura = clinicaHorariosMap.get(Number(c.clinica_id)) || [];
             const onboardingPendiente = (c.agenda_capable !== false)
                 && modoDisponibilidad === 'avanzado'
                 && !hasActiveHorarios(horarios);
@@ -2126,6 +2415,7 @@ async function buildScheduleResponse(actorId, targetUserId) {
                 ...c,
                 modo_disponibilidad: modoDisponibilidad,
                 horarios,
+                horarios_apertura: horariosApertura,
                 onboarding_horario_pendiente: onboardingPendiente,
                 onboarding_horario_completado: !onboardingPendiente,
             };
@@ -2156,6 +2446,13 @@ async function buildScheduleResponse(actorId, targetUserId) {
     return {
         doctor_id: String(targetUserId),
         doctor_nombre: user ? `${user.nombre || ''} ${user.apellidos || ''}`.trim() : '',
+        disponibilidad_general_fuente: disponibilidadGeneral.source,
+        disponibilidad_general: disponibilidadGeneral.horarios,
+        gantt_range: {
+            day_start_hm: GANTT_DAY_START_HM,
+            day_end_hm: GANTT_DAY_END_HM,
+        },
+        unavailable_reasons: UNAVAILABLE_REASONS,
         clinicas,
         bloqueos: bloqueos.map((b) => serializeBloqueo(b, timezoneForClinicId(b.clinica_id, timezoneMap))),
         onboarding_horario_pendiente: onboardingClinicasPendientes.length > 0,
@@ -2200,6 +2497,121 @@ exports.getScheduleForPersonal = async (req, res) => {
     } catch (error) {
         console.error('[personal.getScheduleForPersonal] Error:', error);
         return res.status(500).json({ message: 'Error retrieving personal schedule', error: error.message });
+    }
+};
+
+exports.getDisponibilidadGeneralForCurrent = async (req, res) => {
+    req.params.id = String(req.userData?.userId || '');
+    return exports.getDisponibilidadGeneral(req, res);
+};
+
+exports.getDisponibilidadGeneral = async (req, res) => {
+    try {
+        const actorId = Number(req.userData?.userId);
+        if (!Number.isFinite(actorId)) {
+            return res.status(401).json({ message: 'Auth failed!' });
+        }
+
+        const targetUserId = Number(req.params.id);
+        if (!Number.isFinite(targetUserId)) {
+            return res.status(400).json({ message: 'Invalid id' });
+        }
+
+        const canAccess = await canAccessTargetPersonal(actorId, targetUserId, null);
+        if (!canAccess) {
+            return res.status(403).json({ message: 'Forbidden' });
+        }
+
+        const disponibilidad = await getDisponibilidadGeneralForDoctor(targetUserId);
+        return res.json({
+            doctor_id: String(targetUserId),
+            source: disponibilidad.source,
+            horarios: disponibilidad.horarios,
+        });
+    } catch (error) {
+        console.error('[personal.getDisponibilidadGeneral] Error:', error);
+        return res.status(500).json({ message: 'Error retrieving disponibilidad general', error: error.message });
+    }
+};
+
+exports.updateDisponibilidadGeneralForCurrent = async (req, res) => {
+    req.params.id = String(req.userData?.userId || '');
+    return exports.updateDisponibilidadGeneral(req, res);
+};
+
+exports.updateDisponibilidadGeneral = async (req, res) => {
+    try {
+        const actorId = Number(req.userData?.userId);
+        if (!Number.isFinite(actorId)) {
+            return res.status(401).json({ message: 'Auth failed!' });
+        }
+
+        const targetUserId = Number(req.params.id);
+        if (!Number.isFinite(targetUserId)) {
+            return res.status(400).json({ message: 'Invalid id' });
+        }
+
+        const canEdit = await canEditDisponibilidadGeneral(actorId, targetUserId);
+        if (!canEdit) {
+            return res.status(403).json({ message: 'Forbidden' });
+        }
+
+        const horarios = normalizeHorarioRows(req.body);
+        if (!horarios.length && Array.isArray(req.body?.horarios) && req.body.horarios.length) {
+            return res.status(400).json({ message: 'horarios inválidos' });
+        }
+
+        const overlap = findOverlappingRows(horarios);
+        if (overlap) {
+            return res.status(409).json({
+                message: 'Hay tramos solapados en la disponibilidad general.',
+                code: 'STAFF_GENERAL_AVAILABILITY_OVERLAP',
+                can_force: false,
+                conflict: overlap,
+            });
+        }
+
+        const tx = await sequelize.transaction();
+        try {
+            await PersonalDisponibilidadGeneral.destroy({
+                where: { doctor_id: Number(targetUserId) },
+                transaction: tx,
+            });
+
+            if (horarios.length) {
+                await PersonalDisponibilidadGeneral.bulkCreate(
+                    horarios.map((h) => ({
+                        doctor_id: Number(targetUserId),
+                        dia_semana: h.dia_semana,
+                        activo: h.activo !== false,
+                        hora_inicio: h.hora_inicio,
+                        hora_fin: h.hora_fin,
+                    })),
+                    { transaction: tx },
+                );
+            }
+
+            await tx.commit();
+        } catch (error) {
+            await tx.rollback();
+            if (isMissingPersonalDisponibilidadTableError(error)) {
+                return res.status(503).json({
+                    message: 'La tabla de disponibilidad general aún no está disponible. Ejecuta migraciones.',
+                    code: 'PERSONAL_GENERAL_AVAILABILITY_TABLE_MISSING',
+                });
+            }
+            throw error;
+        }
+
+        const disponibilidad = await getDisponibilidadGeneralForDoctor(targetUserId);
+        return res.json({
+            doctor_id: String(targetUserId),
+            source: disponibilidad.source,
+            horarios: disponibilidad.horarios,
+        });
+    } catch (error) {
+        console.error('[personal.updateDisponibilidadGeneral] Error:', error);
+        return res.status(500).json({ message: 'Error updating disponibilidad general', error: error.message });
     }
 };
 
