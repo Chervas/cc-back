@@ -151,10 +151,26 @@ const NODE_TYPES_V2 = [
     description: 'Envía un mensaje de WhatsApp usando una plantilla aprobada.',
     output_keys: ['on_success', 'on_fail'],
     runtime_status: 'stub',
-    default_config: { template_id: '', language_code: 'es_ES', variables: {} },
+    default_config: {
+      template_id: '',
+      language_code: 'es_ES',
+      recipient_mode: 'flow_phone',
+      phone_field: '{{paciente.telefono}}',
+      to: '',
+      variables: {},
+    },
     config_schema: [
       { key: 'template_id', label: 'Template ID', input_type: 'string', required: true },
       { key: 'language_code', label: 'Idioma', input_type: 'string', required: false },
+      {
+        key: 'recipient_mode',
+        label: 'Modo destinatario',
+        input_type: 'select',
+        required: false,
+        options: ['flow_phone', 'manual_number'],
+      },
+      { key: 'phone_field', label: 'Campo teléfono (contexto)', input_type: 'string', required: false },
+      { key: 'to', label: 'Número manual (E.164)', input_type: 'string', required: false },
       { key: 'variables', label: 'Variables', input_type: 'json', required: false },
     ],
   },
@@ -908,6 +924,37 @@ function validateNodeConfig(node, nodeMap) {
           'node_config_invalid',
           `El nodo ${nodeId} tiene due_date_offset inválido (ej: '2 hours', '1 day')`,
           { node_id: nodeId, node_type: nodeType, key: 'due_date_offset', value: dueOffset }
+        )
+      );
+    }
+  }
+
+  if (nodeType === 'action/send_whatsapp') {
+    const recipientMode = cleanString(config.recipient_mode) || 'flow_phone';
+    if (!['flow_phone', 'manual_number'].includes(recipientMode)) {
+      errors.push(
+        buildValidationError(
+          'node_config_invalid',
+          `El nodo ${nodeId} requiere recipient_mode válido`,
+          { node_id: nodeId, node_type: nodeType, key: 'recipient_mode', value: recipientMode }
+        )
+      );
+    }
+    if (recipientMode === 'manual_number' && isConfigValueEmpty(config.to)) {
+      errors.push(
+        buildValidationError(
+          'node_config_required',
+          `El nodo ${nodeId} requiere 'to' cuando recipient_mode = manual_number`,
+          { node_id: nodeId, node_type: nodeType, key: 'to' }
+        )
+      );
+    }
+    if (recipientMode === 'flow_phone' && isConfigValueEmpty(config.phone_field)) {
+      errors.push(
+        buildValidationError(
+          'node_config_required',
+          `El nodo ${nodeId} requiere 'phone_field' cuando recipient_mode = flow_phone`,
+          { node_id: nodeId, node_type: nodeType, key: 'phone_field' }
         )
       );
     }

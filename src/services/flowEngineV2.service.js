@@ -726,12 +726,19 @@ async function processNode(node, context, runtime = {}) {
     }
 
     case 'action/send_whatsapp': {
+      const recipientMode = String(config?.recipient_mode || 'flow_phone').toLowerCase();
+      const recipient =
+        recipientMode === 'manual_number'
+          ? resolveTemplateValue(config?.to, context) || null
+          : resolveTemplateValue(config?.phone_field, context) || null;
       return {
         kind: 'success',
         output: {
           message_id: `stub_wa_${Date.now()}`,
           status: 'queued_stub',
           template_id: config?.template_id || null,
+          recipient_mode: recipientMode,
+          recipient,
         },
         next_node_id: readOutputTarget(node, 'on_success'),
       };
