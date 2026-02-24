@@ -1,6 +1,7 @@
 'use strict';
 const asyncHandler = require('express-async-handler');
 const db = require('../../models');
+const { Op } = db.Sequelize;
 
 const Tratamiento = db.Tratamiento;
 const Clinica = db.Clinica;
@@ -67,24 +68,56 @@ exports.getTratamientos = asyncHandler(async (req, res) => {
     } = req.query;
 
     const where = {};
-    if (clinica_id) where.clinica_id = clinica_id;
-    if (grupo_clinica_id) where.grupo_clinica_id = grupo_clinica_id;
+    const clinicIdNum = toIntOrNull(clinica_id);
+    const groupIdNum = toIntOrNull(grupo_clinica_id);
+
+    // Scope por clínica: devolver catálogo visible para esa clínica
+    // (plantillas de clínica + grupo de su clínica + sistema), salvo que se pida
+    // un origen concreto en query.
+    if (clinicIdNum && !groupIdNum) {
+        const effectiveGroupId = await resolveGroupIdForClinicId(clinicIdNum);
+        const scopeOr = [];
+
+        if (!origen || origen === 'clinica') {
+            scopeOr.push({ origen: 'clinica', clinica_id: clinicIdNum });
+        }
+        if ((!origen || origen === 'grupo') && effectiveGroupId) {
+            scopeOr.push({ origen: 'grupo', grupo_clinica_id: effectiveGroupId });
+        }
+        if (!origen || origen === 'sistema') {
+            scopeOr.push({ origen: 'sistema' });
+        }
+
+        if (scopeOr.length > 0) {
+            where[Op.or] = scopeOr;
+        }
+    } else {
+        if (clinicIdNum) where.clinica_id = clinicIdNum;
+        if (groupIdNum) where.grupo_clinica_id = groupIdNum;
+        if (origen) where.origen = origen;
+    }
+
     if (disciplina) where.disciplina = disciplina;
     if (categoria) where.categoria = categoria;
     if (especialidad) where.especialidad = especialidad;
-    if (origen) where.origen = origen;
     if (activo !== undefined) {
         if (activo === 'true' || activo === true) where.activo = true;
         else if (activo === 'false' || activo === false) where.activo = false;
     }
     if (q) {
-        where[db.Sequelize.Op.or] = [
+        const searchOr = [
             { nombre: { [db.Sequelize.Op.like]: `%${q}%` } },
             { descripcion: { [db.Sequelize.Op.like]: `%${q}%` } },
             { categoria: { [db.Sequelize.Op.like]: `%${q}%` } },
             { especialidad: { [db.Sequelize.Op.like]: `%${q}%` } },
             { codigo: { [db.Sequelize.Op.like]: `%${q}%` } }
         ];
+        if (where[Op.or]) {
+            where[Op.and] = where[Op.and] || [];
+            where[Op.and].push({ [Op.or]: searchOr });
+        } else {
+            where[Op.or] = searchOr;
+        }
     }
 
     const tratamientos = await Tratamiento.findAll({
