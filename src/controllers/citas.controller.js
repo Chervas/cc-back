@@ -36,6 +36,8 @@ function mapEstadoToAutomationV2Event(estado) {
     if (estado === 'confirmada') return 'appointment_confirmed';
     if (estado === 'reprogramada') return 'appointment_rescheduled';
     if (estado === 'no_asistio') return 'appointment_no_show';
+    if (estado === 'cancelada') return 'appointment_cancelled';
+    if (estado === 'completada') return 'appointment_completed';
     return null;
 }
 

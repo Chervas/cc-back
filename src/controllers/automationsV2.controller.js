@@ -151,6 +151,8 @@ const TRIGGER_TYPES_V2 = [
   { value: 'appointment_confirmed', label: 'Cita confirmada' },
   { value: 'appointment_no_show', label: 'Cita no show' },
   { value: 'appointment_rescheduled', label: 'Cita reagendada' },
+  { value: 'appointment_cancelled', label: 'Cita cancelada' },
+  { value: 'appointment_completed', label: 'Cita completada' },
   { value: 'lead_nuevo', label: 'Lead nuevo' },
   { value: 'manual', label: 'Manual' },
 ];
@@ -172,6 +174,8 @@ const APPOINTMENT_TRIGGER_TYPES = new Set([
   'appointment_confirmed',
   'appointment_no_show',
   'appointment_rescheduled',
+  'appointment_cancelled',
+  'appointment_completed',
 ]);
 const DUE_DATE_OFFSET_REGEX = /^(\d+)\s*(second|seconds|minute|minutes|hour|hours|day|days)$/i;
 
@@ -446,9 +450,8 @@ function resolveTriggerTypeFromEntryNode({ entryNodeId, nodes }) {
   return parseTriggerTypeFromNodeType(entryNode?.type);
 }
 
-function resolveTriggerTypeForTemplate({ explicitTriggerType, entryNodeId, nodes, currentTriggerType = null }) {
+function resolveTriggerTypeForTemplate({ explicitTriggerType, entryNodeId, nodes }) {
   const normalizedExplicit = cleanString(explicitTriggerType);
-  const normalizedCurrent = cleanString(currentTriggerType);
 
   if (normalizedExplicit && !isSupportedTriggerType(normalizedExplicit)) {
     return {
@@ -460,6 +463,14 @@ function resolveTriggerTypeForTemplate({ explicitTriggerType, entryNodeId, nodes
   }
 
   const inferredFromEntry = resolveTriggerTypeFromEntryNode({ entryNodeId, nodes });
+  if (!inferredFromEntry) {
+    return {
+      ok: false,
+      error: 'trigger_node_required',
+      message: 'El nodo de entrada (entry_node_id) debe ser un nodo activador trigger/* válido',
+      allowed: TRIGGER_TYPES_V2.map((item) => `${TRIGGER_NODE_PREFIX}${item.value}`),
+    };
+  }
 
   if (normalizedExplicit && inferredFromEntry && normalizedExplicit !== inferredFromEntry) {
     return {
@@ -473,15 +484,7 @@ function resolveTriggerTypeForTemplate({ explicitTriggerType, entryNodeId, nodes
     };
   }
 
-  const finalTriggerType = normalizedExplicit || inferredFromEntry || normalizedCurrent;
-  if (!finalTriggerType) {
-    return {
-      ok: false,
-      error: 'invalid_trigger_type',
-      message: 'trigger_type es obligatorio (o define un nodo activador trigger/* como entry_node_id)',
-      allowed: TRIGGER_TYPES_V2.map((item) => item.value),
-    };
-  }
+  const finalTriggerType = inferredFromEntry;
 
   return {
     ok: true,
@@ -1540,6 +1543,20 @@ exports.validateTemplateGraph = async (req, res) => {
       nodes,
     });
     const nodeConfigValidation = validateNodeConfigs(nodes);
+    const triggerResolution = resolveTriggerTypeForTemplate({
+      explicitTriggerType: undefined,
+      entryNodeId,
+      nodes,
+    });
+    if (!triggerResolution.ok) {
+      return res.status(400).json({
+        success: false,
+        error: triggerResolution.error,
+        message: triggerResolution.message,
+        allowed: triggerResolution.allowed,
+        details: triggerResolution.details,
+      });
+    }
     const validationErrors = [
       ...(graphValidation.errors || []),
       ...(nodeConfigValidation.errors || []),
@@ -2046,7 +2063,6 @@ exports.updateTemplateDraft = async (req, res) => {
       explicitTriggerType,
       entryNodeId: candidateEntry,
       nodes: candidateNodes,
-      currentTriggerType: row.trigger_type,
     });
     if (!triggerResolution.ok) {
       return res.status(400).json({
@@ -2100,6 +2116,20 @@ exports.publishTemplateVersion = async (req, res) => {
       nodes: normalizedNodes,
     });
     const nodeConfigValidation = validateNodeConfigs(normalizedNodes);
+    const triggerResolution = resolveTriggerTypeForTemplate({
+      explicitTriggerType: row.trigger_type,
+      entryNodeId: row.entry_node_id,
+      nodes: normalizedNodes,
+    });
+    if (!triggerResolution.ok) {
+      return res.status(400).json({
+        success: false,
+        error: triggerResolution.error,
+        message: triggerResolution.message,
+        allowed: triggerResolution.allowed,
+        details: triggerResolution.details,
+      });
+    }
     const validationErrors = [
       ...(graphValidation.errors || []),
       ...(nodeConfigValidation.errors || []),

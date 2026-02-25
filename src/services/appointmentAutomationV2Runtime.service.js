@@ -16,6 +16,8 @@ const APPOINTMENT_TRIGGER_TYPES = new Set([
   'appointment_confirmed',
   'appointment_no_show',
   'appointment_rescheduled',
+  'appointment_cancelled',
+  'appointment_completed',
 ]);
 
 function toIntOrNull(value) {
@@ -39,6 +41,8 @@ function mapEstadoToEvent(estado) {
   if (normalized === 'confirmada') return 'appointment_confirmed';
   if (normalized === 'reprogramada') return 'appointment_rescheduled';
   if (normalized === 'no_asistio') return 'appointment_no_show';
+  if (normalized === 'cancelada') return 'appointment_cancelled';
+  if (normalized === 'completada') return 'appointment_completed';
   return null;
 }
 
