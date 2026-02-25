@@ -19,11 +19,13 @@ const FlowExecutionV2 = db.FlowExecutionV2;
 const AutomationFlowTemplateV2 = db.AutomationFlowTemplateV2;
 const appointmentFlowRuntime = require('../services/appointmentFlowRuntime.service');
 const appointmentAutomationV2Runtime = require('../services/appointmentAutomationV2Runtime.service');
+const { CITA_STATUS_VALUES } = require('../lib/status-catalog');
 
-const CITA_ESTADOS_VALIDOS = new Set(['pendiente', 'confirmada', 'cancelada', 'completada', 'no_asistio']);
+const CITA_ESTADOS_VALIDOS = new Set(CITA_STATUS_VALUES);
 
 function mapEstadoToFlowEvent(estado) {
     if (estado === 'confirmada') return 'appointment_confirmed';
+    if (estado === 'reprogramada') return 'appointment_rescheduled';
     if (estado === 'no_asistio') return 'appointment_no_show';
     if (estado === 'cancelada') return 'appointment_cancelled';
     if (estado === 'completada') return 'appointment_completed';
@@ -32,6 +34,7 @@ function mapEstadoToFlowEvent(estado) {
 
 function mapEstadoToAutomationV2Event(estado) {
     if (estado === 'confirmada') return 'appointment_confirmed';
+    if (estado === 'reprogramada') return 'appointment_rescheduled';
     if (estado === 'no_asistio') return 'appointment_no_show';
     return null;
 }
@@ -627,6 +630,14 @@ exports.createCita = asyncHandler(async (req, res) => {
             return res.status(400).json({ message: 'clinica_id, inicio, (fin o duracion_min) y paciente son obligatorios' });
         }
 
+        const estadoRaw = String(estado || '').trim().toLowerCase();
+        if (!CITA_ESTADOS_VALIDOS.has(estadoRaw)) {
+            return res.status(400).json({
+                message: 'estado inválido',
+                allowed: Array.from(CITA_ESTADOS_VALIDOS),
+            });
+        }
+
         // Validar clínica
         const clinica = await Clinica.findOne({ where: { id_clinica: clinica_id } });
         if (!clinica) {
@@ -714,7 +725,7 @@ exports.createCita = asyncHandler(async (req, res) => {
             nota: nota || null,
             motivo: motivo || null,
             tipo_cita,
-            estado,
+            estado: estadoRaw,
             inicio: inicioDate,
             fin: finDate
         });
@@ -935,8 +946,17 @@ exports.reagendarCita = asyncHandler(async (req, res) => {
 
     cita.inicio = inicio;
     cita.fin = fin;
-    if (req.body?.estado && CITA_ESTADOS_VALIDOS.has(String(req.body.estado).trim().toLowerCase())) {
-        cita.estado = String(req.body.estado).trim().toLowerCase();
+    const estadoRaw = String(req.body?.estado || '').trim().toLowerCase();
+    if (estadoRaw) {
+        if (!CITA_ESTADOS_VALIDOS.has(estadoRaw)) {
+            return res.status(400).json({
+                message: 'estado inválido',
+                allowed: Array.from(CITA_ESTADOS_VALIDOS),
+            });
+        }
+        cita.estado = estadoRaw;
+    } else {
+        cita.estado = 'reprogramada';
     }
     await cita.save();
 

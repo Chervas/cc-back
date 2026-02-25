@@ -36,7 +36,15 @@ module.exports = (sequelize, DataTypes) => {
       defaultValue: 'continuacion'
     },
     estado: {
-      type: DataTypes.ENUM('pendiente', 'confirmada', 'cancelada', 'completada', 'no_asistio'),
+      type: DataTypes.ENUM(
+        'pendiente',
+        'pendiente_confirmada',
+        'confirmada',
+        'reprogramada',
+        'cancelada',
+        'completada',
+        'no_asistio'
+      ),
       allowNull: false,
       defaultValue: 'pendiente'
     },

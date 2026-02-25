@@ -7,6 +7,7 @@ const AppointmentFlowInstance = db.AppointmentFlowInstance;
 const AppointmentFlowInstanceLog = db.AppointmentFlowInstanceLog;
 const CitaPaciente = db.CitaPaciente;
 const Tratamiento = db.Tratamiento;
+const { normalizeCitaStatus } = require('../lib/status-catalog');
 
 function toNumberOrNull(value) {
   if (value === undefined || value === null || value === '') return null;
@@ -21,17 +22,7 @@ function toDateOrNull(value) {
 }
 
 function normalizeEstado(estado) {
-  const raw = String(estado || '').trim().toLowerCase();
-  const map = {
-    pendiente: 'pendiente',
-    confirmada: 'confirmada',
-    cancelada: 'cancelada',
-    completada: 'completada',
-    no_asistio: 'no_asistio',
-    no_show: 'no_asistio',
-    noasistio: 'no_asistio',
-  };
-  return map[raw] || 'pendiente';
+  return normalizeCitaStatus(estado) || 'pendiente';
 }
 
 function mapEstadoToFlowStatus(estado) {
@@ -41,7 +32,9 @@ function mapEstadoToFlowStatus(estado) {
 }
 
 function mapEstadoToAgendaIcon(estado) {
+  if (estado === 'pendiente_confirmada') return 'reminder-confirmed';
   if (estado === 'confirmada') return 'confirmed';
+  if (estado === 'reprogramada') return 'pending_confirmation';
   if (estado === 'cancelada') return 'not_confirmed';
   if (estado === 'no_asistio') return 'no_show';
   if (estado === 'completada') return 'completed';

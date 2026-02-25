@@ -3,6 +3,7 @@
 const { Op } = require('sequelize');
 const db = require('../../models');
 const { getIO } = require('./socket.service');
+const { normalizeCitaStatus, normalizeLeadStatus } = require('../lib/status-catalog');
 
 const AutomationFlowTemplateV2 = db.AutomationFlowTemplateV2;
 const FlowExecutionV2 = db.FlowExecutionV2;
@@ -240,41 +241,12 @@ function resolveRuntimeTargets(execution, context) {
   };
 }
 
-function normalizeAppointmentStatus(value) {
+function normalizeStatusTarget(value) {
   const key = normalizeKey(value);
   if (!key) return null;
-  const map = {
-    pendiente: 'pendiente',
-    agendada: 'pendiente',
-    confirmada: 'confirmada',
-    confirmado: 'confirmada',
-    cancelada: 'cancelada',
-    cancelado: 'cancelada',
-    completada: 'completada',
-    completado: 'completada',
-    realizada: 'completada',
-    no_asistio: 'no_asistio',
-    no_show: 'no_asistio',
-    no_showed: 'no_asistio',
-    ausente: 'no_asistio',
-  };
-  return map[key] || null;
-}
-
-function normalizeLeadStatus(value) {
-  const key = normalizeKey(value);
-  if (!key) return null;
-  const map = {
-    nuevo: 'nuevo',
-    contactado: 'contactado',
-    esperando_info: 'esperando_info',
-    info_recibida: 'info_recibida',
-    citado: 'citado',
-    acudio_cita: 'acudio_cita',
-    convertido: 'convertido',
-    descartado: 'descartado',
-  };
-  return map[key] || null;
+  if (['appointment', 'cita'].includes(key)) return 'appointment';
+  if (key === 'lead') return 'lead';
+  return null;
 }
 
 function appendText(base, text) {
@@ -355,12 +327,19 @@ async function handleChangeStatus(node, context, runtime) {
     throw new Error('change_status_missing_new_status');
   }
 
-  const appointmentStatus = normalizeAppointmentStatus(rawStatus);
+  const appointmentStatus = normalizeCitaStatus(rawStatus);
   const leadStatus = normalizeLeadStatus(rawStatus);
+  const requestedTarget = normalizeStatusTarget(resolveTemplateValue(config?.target_entity, context));
   const agendaIcon = cleanString(resolveTemplateValue(config?.agenda_icon, context));
   const now = new Date().toISOString();
 
-  if (targets.appointment_id) {
+  const canUpdateAppointment = requestedTarget ? requestedTarget === 'appointment' : !!targets.appointment_id;
+  const canUpdateLead = requestedTarget ? requestedTarget === 'lead' : !!targets.lead_intake_id;
+
+  if (canUpdateAppointment) {
+    if (!targets.appointment_id) {
+      throw new Error('change_status_target_not_found:appointment');
+    }
     const appointment = await CitaPaciente.findByPk(targets.appointment_id);
     if (!appointment) {
       throw new Error(`appointment_not_found:${targets.appointment_id}`);
@@ -382,6 +361,7 @@ async function handleChangeStatus(node, context, runtime) {
       output: {
         target_type: 'appointment',
         target_id: appointment.id_cita,
+        target_entity: 'appointment',
         previous_status: previousStatus,
         new_status: appointmentStatus,
         agenda_icon: agendaIcon,
@@ -390,7 +370,10 @@ async function handleChangeStatus(node, context, runtime) {
     };
   }
 
-  if (targets.lead_intake_id) {
+  if (canUpdateLead) {
+    if (!targets.lead_intake_id) {
+      throw new Error('change_status_target_not_found:lead');
+    }
     const lead = await LeadIntake.findByPk(targets.lead_intake_id);
     if (!lead) {
       throw new Error(`lead_not_found:${targets.lead_intake_id}`);
@@ -407,6 +390,7 @@ async function handleChangeStatus(node, context, runtime) {
       output: {
         target_type: 'lead',
         target_id: lead.id,
+        target_entity: 'lead',
         previous_status: previousStatus,
         new_status: leadStatus,
         agenda_icon: null,
@@ -415,7 +399,7 @@ async function handleChangeStatus(node, context, runtime) {
     };
   }
 
-  throw new Error('change_status_target_not_found');
+  throw new Error(`change_status_target_not_found${requestedTarget ? `:${requestedTarget}` : ''}`);
 }
 
 async function handleWriteNote(node, context, runtime) {

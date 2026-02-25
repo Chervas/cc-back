@@ -37,6 +37,7 @@ function normalizeEventName(eventName) {
 function mapEstadoToEvent(estado) {
   const normalized = cleanString(estado).toLowerCase();
   if (normalized === 'confirmada') return 'appointment_confirmed';
+  if (normalized === 'reprogramada') return 'appointment_rescheduled';
   if (normalized === 'no_asistio') return 'appointment_no_show';
   return null;
 }

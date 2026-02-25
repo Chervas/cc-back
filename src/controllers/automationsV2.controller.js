@@ -12,6 +12,7 @@ const Clinica = db.Clinica;
 const jobRequestsService = require('../services/jobRequests.service');
 const jobScheduler = require('../services/jobScheduler.service');
 const { getIO } = require('../services/socket.service');
+const { CITA_STATUS_VALUES, LEAD_STATUS_VALUES } = require('../lib/status-catalog');
 
 const ADMIN_USER_IDS = (process.env.ADMIN_USER_IDS || '1')
   .split(',')
@@ -29,6 +30,10 @@ const TASK_ROLE_LABELS = {
   administrador: 'Administrador',
   admin: 'Administrador',
 };
+const CHANGE_STATUS_TARGET_OPTIONS = ['appointment', 'lead'];
+const CITA_STATUS_SET = new Set(CITA_STATUS_VALUES);
+const LEAD_STATUS_SET = new Set(LEAD_STATUS_VALUES);
+const ANY_CHANGE_STATUS_SET = new Set([...CITA_STATUS_VALUES, ...LEAD_STATUS_VALUES]);
 
 function parseIntOrNull(raw) {
   if (raw === undefined || raw === null || raw === '') return null;
@@ -135,11 +140,12 @@ const NODE_TYPES_V2 = [
     type: 'action/change_status',
     category: 'action',
     label: 'Cambiar estado',
-    description: 'Cambia el estado de la cita y opcionalmente el icono en la agenda.',
+    description: 'Cambia el estado de una cita o lead según target_entity.',
     output_keys: ['on_success', 'on_fail'],
     runtime_status: 'real',
-    default_config: { new_status: 'Agendada', agenda_icon: null },
+    default_config: { target_entity: 'appointment', new_status: 'pendiente', agenda_icon: null },
     config_schema: [
+      { key: 'target_entity', label: 'Entidad destino', input_type: 'select', required: false, options: CHANGE_STATUS_TARGET_OPTIONS },
       { key: 'new_status', label: 'Nuevo estado', input_type: 'string', required: true },
       { key: 'agenda_icon', label: 'Icono agenda', input_type: 'string', required: false },
     ],
@@ -894,6 +900,77 @@ function validateNodeConfig(node, nodeMap) {
           { node_id: nodeId, node_type: nodeType, key }
         )
       );
+    }
+  }
+
+  if (nodeType === 'action/change_status') {
+    const targetEntity = cleanString(config.target_entity);
+    const newStatus = cleanString(config.new_status);
+
+    if (targetEntity && !CHANGE_STATUS_TARGET_OPTIONS.includes(targetEntity)) {
+      errors.push(
+        buildValidationError(
+          'node_config_invalid',
+          `El nodo ${nodeId} requiere target_entity válido`,
+          {
+            node_id: nodeId,
+            node_type: nodeType,
+            key: 'target_entity',
+            value: targetEntity,
+            allowed: CHANGE_STATUS_TARGET_OPTIONS,
+          }
+        )
+      );
+    }
+
+    if (newStatus) {
+      if (targetEntity === 'appointment' && !CITA_STATUS_SET.has(newStatus)) {
+        errors.push(
+          buildValidationError(
+            'node_config_invalid',
+            `El nodo ${nodeId} requiere new_status de cita válido`,
+            {
+              node_id: nodeId,
+              node_type: nodeType,
+              key: 'new_status',
+              value: newStatus,
+              target_entity: 'appointment',
+              allowed: CITA_STATUS_VALUES,
+            }
+          )
+        );
+      }
+      if (targetEntity === 'lead' && !LEAD_STATUS_SET.has(newStatus)) {
+        errors.push(
+          buildValidationError(
+            'node_config_invalid',
+            `El nodo ${nodeId} requiere new_status de lead válido`,
+            {
+              node_id: nodeId,
+              node_type: nodeType,
+              key: 'new_status',
+              value: newStatus,
+              target_entity: 'lead',
+              allowed: LEAD_STATUS_VALUES,
+            }
+          )
+        );
+      }
+      if (!targetEntity && !ANY_CHANGE_STATUS_SET.has(newStatus)) {
+        errors.push(
+          buildValidationError(
+            'node_config_invalid',
+            `El nodo ${nodeId} requiere new_status válido`,
+            {
+              node_id: nodeId,
+              node_type: nodeType,
+              key: 'new_status',
+              value: newStatus,
+              allowed: Array.from(ANY_CHANGE_STATUS_SET),
+            }
+          )
+        );
+      }
     }
   }
 
