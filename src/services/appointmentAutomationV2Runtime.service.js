@@ -107,6 +107,9 @@ async function resolveClinicScope(cita) {
 }
 
 function buildExecutionContext({ cita, eventName }) {
+  const leadIntakeId = toIntOrNull(cita?.lead_intake_id);
+  const appointmentOrigin = leadIntakeId ? 'lead' : 'manual';
+
   return {
     trigger: {
       type: eventName,
@@ -117,6 +120,10 @@ function buildExecutionContext({ cita, eventName }) {
         clinic_id: toIntOrNull(cita?.clinica_id),
         paciente_id: toIntOrNull(cita?.paciente_id),
         tratamiento_id: toIntOrNull(cita?.tratamiento_id),
+        lead_intake_id: leadIntakeId,
+        lead_id: leadIntakeId,
+        appointment_origin: appointmentOrigin,
+        origin: appointmentOrigin,
         estado: cleanString(cita?.estado).toLowerCase() || null,
         inicio: cita?.inicio || null,
         fin: cita?.fin || null,
@@ -127,10 +134,18 @@ function buildExecutionContext({ cita, eventName }) {
       clinica_id: toIntOrNull(cita?.clinica_id),
       paciente_id: toIntOrNull(cita?.paciente_id),
       tratamiento_id: toIntOrNull(cita?.tratamiento_id),
+      lead_intake_id: leadIntakeId,
+      origin: appointmentOrigin,
       estado: cleanString(cita?.estado).toLowerCase() || null,
       inicio: cita?.inicio || null,
       fin: cita?.fin || null,
     },
+    ...(leadIntakeId ? {
+      lead: {
+        id: leadIntakeId,
+        lead_intake_id: leadIntakeId,
+      },
+    } : {}),
     outputs: {},
   };
 }
