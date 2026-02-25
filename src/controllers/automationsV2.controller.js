@@ -146,7 +146,7 @@ function isObject(value) {
 }
 
 const TRIGGER_TYPES_V2 = [
-  { value: 'appointment_created', label: 'Cita creada' },
+  { value: 'appointment_created', label: 'Cita creada (manual o desde lead)' },
   { value: 'appointment_reminder_window', label: 'Ventana de recordatorio' },
   { value: 'appointment_confirmed', label: 'Cita confirmada' },
   { value: 'appointment_no_show', label: 'Cita no show' },
