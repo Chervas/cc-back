@@ -14,6 +14,14 @@ const Conversation = db.Conversation;
 const Message = db.Message;
 const Notification = db.Notification;
 const UsuarioClinica = db.UsuarioClinica;
+const UPDATE_LEAD_INFO_MODES = new Set([
+  'set_required',
+  'set_received',
+  'append_received',
+  'clear_required',
+  'clear_received',
+  'clear_all',
+]);
 
 function clone(value) {
   return JSON.parse(JSON.stringify(value ?? null));
@@ -23,6 +31,15 @@ function cleanString(value) {
   if (value === undefined || value === null) return null;
   const normalized = String(value).trim();
   return normalized || null;
+}
+
+function parseBool(value, fallback = false) {
+  if (value === undefined || value === null || value === '') return fallback;
+  if (typeof value === 'boolean') return value;
+  const normalized = String(value).trim().toLowerCase();
+  if (['1', 'true', 'yes', 'y', 'on'].includes(normalized)) return true;
+  if (['0', 'false', 'no', 'n', 'off'].includes(normalized)) return false;
+  return fallback;
 }
 
 function toIntOrNull(value) {
@@ -249,6 +266,53 @@ function normalizeStatusTarget(value) {
   return null;
 }
 
+function normalizeStringArray(value) {
+  if (value === undefined || value === null) return [];
+
+  if (Array.isArray(value)) {
+    return Array.from(
+      new Set(
+        value
+          .map((item) => cleanString(item))
+          .filter(Boolean)
+      )
+    );
+  }
+
+  if (typeof value === 'string') {
+    const trimmed = value.trim();
+    if (!trimmed) return [];
+
+    if (trimmed.startsWith('[') && trimmed.endsWith(']')) {
+      try {
+        const parsed = JSON.parse(trimmed);
+        if (Array.isArray(parsed)) {
+          return Array.from(
+            new Set(
+              parsed
+                .map((item) => cleanString(item))
+                .filter(Boolean)
+            )
+          );
+        }
+      } catch (_err) {
+        // Fall through to comma parsing below.
+      }
+    }
+
+    return Array.from(
+      new Set(
+        trimmed
+          .split(',')
+          .map((item) => cleanString(item))
+          .filter(Boolean)
+      )
+    );
+  }
+
+  return [];
+}
+
 function appendText(base, text) {
   const cleanBase = cleanString(base);
   const cleanText = cleanString(text);
@@ -400,6 +464,106 @@ async function handleChangeStatus(node, context, runtime) {
   }
 
   throw new Error(`change_status_target_not_found${requestedTarget ? `:${requestedTarget}` : ''}`);
+}
+
+async function handleUpdateLeadInfo(node, context, runtime) {
+  const config = node?.config && typeof node.config === 'object' ? node.config : {};
+  const targets = resolveRuntimeTargets(runtime?.execution, context);
+  const explicitLeadId = toIntOrNull(resolveTemplateValue(config?.lead_id, context));
+  const leadId = explicitLeadId || targets.lead_intake_id;
+  if (!leadId) {
+    throw new Error('update_lead_info_target_not_found:lead');
+  }
+
+  const lead = await LeadIntake.findByPk(leadId);
+  if (!lead) {
+    throw new Error(`lead_not_found:${leadId}`);
+  }
+
+  const mode = cleanString(resolveTemplateValue(config?.mode, context)) || 'set_required';
+  if (!UPDATE_LEAD_INFO_MODES.has(mode)) {
+    throw new Error(`update_lead_info_invalid_mode:${mode}`);
+  }
+
+  const inputRequired = normalizeStringArray(resolveTemplateValue(config?.info_requerida, context));
+  const inputReceived = normalizeStringArray(resolveTemplateValue(config?.info_recibida_items, context));
+  const autoTransition = parseBool(resolveTemplateValue(config?.auto_transition, context), true);
+
+  const waitingStatus = normalizeLeadStatus(
+    resolveTemplateValue(config?.status_when_waiting, context) || 'esperando_info'
+  ) || 'esperando_info';
+  const completeStatus = normalizeLeadStatus(
+    resolveTemplateValue(config?.status_when_complete, context) || 'info_recibida'
+  ) || 'info_recibida';
+
+  const previousRequired = normalizeStringArray(lead.info_requerida);
+  const previousReceived = normalizeStringArray(lead.info_recibida_items);
+  const previousStatus = cleanString(lead.status_lead);
+
+  let nextRequired = [...previousRequired];
+  let nextReceived = [...previousReceived];
+
+  switch (mode) {
+    case 'set_required':
+      nextRequired = inputRequired;
+      break;
+    case 'set_received':
+      nextReceived = inputReceived;
+      break;
+    case 'append_received':
+      nextReceived = normalizeStringArray([...previousReceived, ...inputReceived]);
+      break;
+    case 'clear_required':
+      nextRequired = [];
+      break;
+    case 'clear_received':
+      nextReceived = [];
+      break;
+    case 'clear_all':
+      nextRequired = [];
+      nextReceived = [];
+      break;
+    default:
+      break;
+  }
+
+  let nextStatus = previousStatus;
+  const clearMode = mode.startsWith('clear_');
+  if (autoTransition && !clearMode) {
+    const hasRequired = nextRequired.length > 0;
+    const hasAllRequired = hasRequired && nextRequired.every((item) => nextReceived.includes(item));
+    if (hasRequired) {
+      nextStatus = hasAllRequired ? completeStatus : waitingStatus;
+    } else if (nextReceived.length > 0) {
+      nextStatus = completeStatus;
+    }
+  }
+
+  const updatePayload = {
+    info_requerida: nextRequired,
+    info_recibida_items: nextReceived,
+  };
+  if (nextStatus && nextStatus !== previousStatus) {
+    updatePayload.status_lead = nextStatus;
+  }
+  await lead.update(updatePayload);
+
+  return {
+    kind: 'success',
+    output: {
+      target_type: 'lead',
+      target_id: lead.id,
+      mode,
+      auto_transition: autoTransition,
+      previous_status: previousStatus,
+      new_status: cleanString(lead.status_lead),
+      previous_info_requerida: previousRequired,
+      new_info_requerida: nextRequired,
+      previous_info_recibida_items: previousReceived,
+      new_info_recibida_items: nextReceived,
+    },
+    next_node_id: readOutputTarget(node, 'on_success'),
+  };
 }
 
 async function handleWriteNote(node, context, runtime) {
@@ -707,6 +871,10 @@ async function processNode(node, context, runtime = {}) {
 
     case 'action/change_status': {
       return handleChangeStatus(node, context, runtime);
+    }
+
+    case 'action/update_lead_info': {
+      return handleUpdateLeadInfo(node, context, runtime);
     }
 
     case 'action/send_whatsapp': {

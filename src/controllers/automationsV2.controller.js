@@ -31,6 +31,14 @@ const TASK_ROLE_LABELS = {
   admin: 'Administrador',
 };
 const CHANGE_STATUS_TARGET_OPTIONS = ['appointment', 'lead'];
+const UPDATE_LEAD_INFO_MODE_OPTIONS = [
+  'set_required',
+  'set_received',
+  'append_received',
+  'clear_required',
+  'clear_received',
+  'clear_all',
+];
 const CITA_STATUS_SET = new Set(CITA_STATUS_VALUES);
 const LEAD_STATUS_SET = new Set(LEAD_STATUS_VALUES);
 const ANY_CHANGE_STATUS_SET = new Set([...CITA_STATUS_VALUES, ...LEAD_STATUS_VALUES]);
@@ -57,6 +65,39 @@ function parseBool(raw, fallback = undefined) {
   if (['1', 'true', 'yes', 'y', 'on'].includes(normalized)) return true;
   if (['0', 'false', 'no', 'n', 'off'].includes(normalized)) return false;
   return fallback;
+}
+
+function parseStringArrayLike(raw) {
+  if (raw === undefined || raw === null) return [];
+
+  if (Array.isArray(raw)) {
+    return raw
+      .map((item) => cleanString(item))
+      .filter(Boolean);
+  }
+
+  if (typeof raw === 'string') {
+    const trimmed = raw.trim();
+    if (!trimmed) return [];
+    if (trimmed.startsWith('[') && trimmed.endsWith(']')) {
+      try {
+        const parsed = JSON.parse(trimmed);
+        if (Array.isArray(parsed)) {
+          return parsed
+            .map((item) => cleanString(item))
+            .filter(Boolean);
+        }
+      } catch (_err) {
+        // Fallback to comma parsing below.
+      }
+    }
+    return trimmed
+      .split(',')
+      .map((item) => cleanString(item))
+      .filter(Boolean);
+  }
+
+  return [];
 }
 
 function parseLimit(raw, fallback = 20) {
@@ -148,6 +189,30 @@ const NODE_TYPES_V2 = [
       { key: 'target_entity', label: 'Entidad destino', input_type: 'select', required: false, options: CHANGE_STATUS_TARGET_OPTIONS },
       { key: 'new_status', label: 'Nuevo estado', input_type: 'string', required: true },
       { key: 'agenda_icon', label: 'Icono agenda', input_type: 'string', required: false },
+    ],
+  },
+  {
+    type: 'action/update_lead_info',
+    category: 'action',
+    label: 'Actualizar info del lead',
+    description: 'Actualiza info_requerida/info_recibida_items de un lead y puede transicionar estado automáticamente.',
+    output_keys: ['on_success', 'on_fail'],
+    runtime_status: 'real',
+    default_config: {
+      mode: 'set_required',
+      info_requerida: [],
+      info_recibida_items: [],
+      auto_transition: true,
+      status_when_waiting: 'esperando_info',
+      status_when_complete: 'info_recibida',
+    },
+    config_schema: [
+      { key: 'mode', label: 'Modo', input_type: 'select', required: true, options: UPDATE_LEAD_INFO_MODE_OPTIONS },
+      { key: 'info_requerida', label: 'Información requerida', input_type: 'json', required: false },
+      { key: 'info_recibida_items', label: 'Información recibida', input_type: 'json', required: false },
+      { key: 'auto_transition', label: 'Transición automática de estado', input_type: 'boolean', required: false },
+      { key: 'status_when_waiting', label: 'Estado cuando falta info', input_type: 'string', required: false },
+      { key: 'status_when_complete', label: 'Estado cuando está completa', input_type: 'string', required: false },
     ],
   },
   {
@@ -971,6 +1036,92 @@ function validateNodeConfig(node, nodeMap) {
           )
         );
       }
+    }
+  }
+
+  if (nodeType === 'action/update_lead_info') {
+    const mode = cleanString(config.mode) || 'set_required';
+    const infoRequerida = parseStringArrayLike(config.info_requerida);
+    const infoRecibida = parseStringArrayLike(config.info_recibida_items);
+    const statusWhenWaiting = cleanString(config.status_when_waiting);
+    const statusWhenComplete = cleanString(config.status_when_complete);
+
+    if (!UPDATE_LEAD_INFO_MODE_OPTIONS.includes(mode)) {
+      errors.push(
+        buildValidationError(
+          'node_config_invalid',
+          `El nodo ${nodeId} requiere mode válido`,
+          {
+            node_id: nodeId,
+            node_type: nodeType,
+            key: 'mode',
+            value: mode,
+            allowed: UPDATE_LEAD_INFO_MODE_OPTIONS,
+          }
+        )
+      );
+    }
+
+    if (['set_required'].includes(mode) && infoRequerida.length === 0) {
+      errors.push(
+        buildValidationError(
+          'node_config_required',
+          `El nodo ${nodeId} requiere info_requerida en modo ${mode}`,
+          {
+            node_id: nodeId,
+            node_type: nodeType,
+            key: 'info_requerida',
+            mode,
+          }
+        )
+      );
+    }
+
+    if (['set_received', 'append_received'].includes(mode) && infoRecibida.length === 0) {
+      errors.push(
+        buildValidationError(
+          'node_config_required',
+          `El nodo ${nodeId} requiere info_recibida_items en modo ${mode}`,
+          {
+            node_id: nodeId,
+            node_type: nodeType,
+            key: 'info_recibida_items',
+            mode,
+          }
+        )
+      );
+    }
+
+    if (statusWhenWaiting && !LEAD_STATUS_SET.has(statusWhenWaiting)) {
+      errors.push(
+        buildValidationError(
+          'node_config_invalid',
+          `El nodo ${nodeId} requiere status_when_waiting de lead válido`,
+          {
+            node_id: nodeId,
+            node_type: nodeType,
+            key: 'status_when_waiting',
+            value: statusWhenWaiting,
+            allowed: LEAD_STATUS_VALUES,
+          }
+        )
+      );
+    }
+
+    if (statusWhenComplete && !LEAD_STATUS_SET.has(statusWhenComplete)) {
+      errors.push(
+        buildValidationError(
+          'node_config_invalid',
+          `El nodo ${nodeId} requiere status_when_complete de lead válido`,
+          {
+            node_id: nodeId,
+            node_type: nodeType,
+            key: 'status_when_complete',
+            value: statusWhenComplete,
+            allowed: LEAD_STATUS_VALUES,
+          }
+        )
+      );
     }
   }
 
