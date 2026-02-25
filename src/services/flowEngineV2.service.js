@@ -864,6 +864,17 @@ async function processNode(node, context, runtime = {}) {
   const nodeType = cleanString(node?.type) || 'unknown';
   const config = node?.config && typeof node.config === 'object' ? node.config : {};
 
+  if (nodeType.startsWith('trigger/')) {
+    return {
+      kind: 'success',
+      output: {
+        trigger_type: cleanString(nodeType.slice('trigger/'.length)),
+        status: 'trigger_passed',
+      },
+      next_node_id: readOutputTarget(node, 'on_success'),
+    };
+  }
+
   switch (nodeType) {
     case 'action/write_note': {
       return handleWriteNote(node, context, runtime);

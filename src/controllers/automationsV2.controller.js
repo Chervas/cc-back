@@ -154,6 +154,17 @@ const TRIGGER_TYPES_V2 = [
   { value: 'lead_nuevo', label: 'Lead nuevo' },
   { value: 'manual', label: 'Manual' },
 ];
+const TRIGGER_NODE_PREFIX = 'trigger/';
+const TRIGGER_NODE_TYPES_V2 = TRIGGER_TYPES_V2.map((trigger) => ({
+  type: `${TRIGGER_NODE_PREFIX}${trigger.value}`,
+  category: 'trigger',
+  label: trigger.label,
+  description: `Activa el flujo con evento '${trigger.value}'.`,
+  output_keys: ['on_success'],
+  runtime_status: 'real',
+  default_config: {},
+  config_schema: [],
+}));
 
 const APPOINTMENT_TRIGGER_TYPES = new Set([
   'appointment_created',
@@ -177,6 +188,7 @@ function resolveDomainFromTriggerType(triggerType) {
 }
 
 const NODE_TYPES_V2 = [
+  ...TRIGGER_NODE_TYPES_V2,
   {
     type: 'action/change_status',
     category: 'action',
@@ -418,6 +430,64 @@ function getNodeTypeMeta(type) {
 
 function isSupportedTriggerType(triggerType) {
   return TRIGGER_TYPES_V2.some((t) => t.value === triggerType);
+}
+
+function parseTriggerTypeFromNodeType(nodeType) {
+  const rawType = cleanString(nodeType);
+  if (!rawType || !rawType.startsWith(TRIGGER_NODE_PREFIX)) return null;
+  const triggerType = cleanString(rawType.slice(TRIGGER_NODE_PREFIX.length));
+  if (!triggerType || !isSupportedTriggerType(triggerType)) return null;
+  return triggerType;
+}
+
+function resolveTriggerTypeFromEntryNode({ entryNodeId, nodes }) {
+  if (!entryNodeId || !Array.isArray(nodes)) return null;
+  const entryNode = nodes.find((node) => cleanString(node?.id) === entryNodeId);
+  return parseTriggerTypeFromNodeType(entryNode?.type);
+}
+
+function resolveTriggerTypeForTemplate({ explicitTriggerType, entryNodeId, nodes, currentTriggerType = null }) {
+  const normalizedExplicit = cleanString(explicitTriggerType);
+  const normalizedCurrent = cleanString(currentTriggerType);
+
+  if (normalizedExplicit && !isSupportedTriggerType(normalizedExplicit)) {
+    return {
+      ok: false,
+      error: 'invalid_trigger_type',
+      message: `trigger_type no soportado: ${normalizedExplicit}`,
+      allowed: TRIGGER_TYPES_V2.map((item) => item.value),
+    };
+  }
+
+  const inferredFromEntry = resolveTriggerTypeFromEntryNode({ entryNodeId, nodes });
+
+  if (normalizedExplicit && inferredFromEntry && normalizedExplicit !== inferredFromEntry) {
+    return {
+      ok: false,
+      error: 'trigger_mismatch',
+      message: `El trigger_type (${normalizedExplicit}) no coincide con el nodo activador (${inferredFromEntry})`,
+      details: {
+        trigger_type: normalizedExplicit,
+        entry_node_trigger_type: inferredFromEntry,
+      },
+    };
+  }
+
+  const finalTriggerType = normalizedExplicit || inferredFromEntry || normalizedCurrent;
+  if (!finalTriggerType) {
+    return {
+      ok: false,
+      error: 'invalid_trigger_type',
+      message: 'trigger_type es obligatorio (o define un nodo activador trigger/* como entry_node_id)',
+      allowed: TRIGGER_TYPES_V2.map((item) => item.value),
+    };
+  }
+
+  return {
+    ok: true,
+    trigger_type: finalTriggerType,
+    inferred_from_entry_node: !normalizedExplicit && !!inferredFromEntry,
+  };
 }
 
 function collectUnsupportedNodeTypes(nodes) {
@@ -1667,19 +1737,11 @@ exports.createTemplateDraft = async (req, res) => {
     const entryNodeId = cleanString(body.entry_node_id);
     const nodes = Array.isArray(body.nodes) ? normalizeNodesInput(body.nodes) : null;
 
-    if (!name || !triggerType || !entryNodeId || !nodes) {
+    if (!name || !entryNodeId || !nodes) {
       return res.status(400).json({
         success: false,
         error: 'invalid_payload',
-        message: 'name, trigger_type, entry_node_id y nodes son obligatorios',
-      });
-    }
-    if (!isSupportedTriggerType(triggerType)) {
-      return res.status(400).json({
-        success: false,
-        error: 'invalid_trigger_type',
-        message: `trigger_type no soportado: ${triggerType}`,
-        allowed: TRIGGER_TYPES_V2.map((item) => item.value),
+        message: 'name, entry_node_id y nodes son obligatorios',
       });
     }
     if (!nodes.length) {
@@ -1705,6 +1767,22 @@ exports.createTemplateDraft = async (req, res) => {
         message: 'entry_node_id debe existir en nodes',
       });
     }
+
+    const triggerResolution = resolveTriggerTypeForTemplate({
+      explicitTriggerType: triggerType,
+      entryNodeId,
+      nodes,
+    });
+    if (!triggerResolution.ok) {
+      return res.status(400).json({
+        success: false,
+        error: triggerResolution.error,
+        message: triggerResolution.message,
+        allowed: triggerResolution.allowed,
+        details: triggerResolution.details,
+      });
+    }
+    const resolvedTriggerType = triggerResolution.trigger_type;
 
     const templateKey = buildTemplateKey({ templateKey: body.template_key, name });
     let clinicId = parseIntOrNull(body.clinic_id);
@@ -1759,7 +1837,7 @@ exports.createTemplateDraft = async (req, res) => {
       engine_version: cleanString(body.engine_version) || 'v2',
       name,
       description: cleanString(body.description),
-      trigger_type: triggerType,
+      trigger_type: resolvedTriggerType,
       is_active: parseBool(body.is_active, true),
       is_system: !!isSystem,
       clinic_id: clinicId,
@@ -1912,6 +1990,7 @@ exports.updateTemplateDraft = async (req, res) => {
 
     const body = req.body || {};
     const updates = {};
+    let explicitTriggerType = undefined;
 
     if (body.name !== undefined) {
       const name = cleanString(body.name);
@@ -1922,15 +2001,7 @@ exports.updateTemplateDraft = async (req, res) => {
     if (body.trigger_type !== undefined) {
       const triggerType = cleanString(body.trigger_type);
       if (!triggerType) return res.status(400).json({ success: false, error: 'invalid_trigger_type' });
-      if (!isSupportedTriggerType(triggerType)) {
-        return res.status(400).json({
-          success: false,
-          error: 'invalid_trigger_type',
-          message: `trigger_type no soportado: ${triggerType}`,
-          allowed: TRIGGER_TYPES_V2.map((item) => item.value),
-        });
-      }
-      updates.trigger_type = triggerType;
+      explicitTriggerType = triggerType;
     }
     if (body.entry_node_id !== undefined) {
       const entry = cleanString(body.entry_node_id);
@@ -1970,6 +2041,23 @@ exports.updateTemplateDraft = async (req, res) => {
         message: 'entry_node_id debe existir en nodes',
       });
     }
+
+    const triggerResolution = resolveTriggerTypeForTemplate({
+      explicitTriggerType,
+      entryNodeId: candidateEntry,
+      nodes: candidateNodes,
+      currentTriggerType: row.trigger_type,
+    });
+    if (!triggerResolution.ok) {
+      return res.status(400).json({
+        success: false,
+        error: triggerResolution.error,
+        message: triggerResolution.message,
+        allowed: triggerResolution.allowed,
+        details: triggerResolution.details,
+      });
+    }
+    updates.trigger_type = triggerResolution.trigger_type;
 
     await row.update(updates);
 
