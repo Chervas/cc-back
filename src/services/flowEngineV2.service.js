@@ -889,11 +889,30 @@ async function processNode(node, context, runtime = {}) {
     }
 
     case 'action/send_whatsapp': {
-      const recipientMode = String(config?.recipient_mode || 'flow_phone').toLowerCase();
-      const recipient =
-        recipientMode === 'manual_number'
-          ? resolveTemplateValue(config?.to, context) || null
-          : resolveTemplateValue(config?.phone_field, context) || null;
+      const rawRecipientMode = String(config?.recipient_mode || 'context_patient').toLowerCase();
+      const recipientMode = rawRecipientMode === 'flow_phone' ? 'context_patient' : rawRecipientMode;
+      const senderMode = String(config?.sender_mode || 'clinic_default').toLowerCase();
+
+      let recipient = null;
+      if (recipientMode === 'manual_number') {
+        recipient = resolveTemplateValue(config?.recipient_to, context) || resolveTemplateValue(config?.to, context) || null;
+      } else if (recipientMode === 'context_lead') {
+        recipient =
+          resolveTemplateValue('{{lead.telefono}}', context) ||
+          resolveTemplateValue(config?.phone_field, context) ||
+          null;
+      } else {
+        recipient =
+          resolveTemplateValue('{{paciente.telefono}}', context) ||
+          resolveTemplateValue(config?.phone_field, context) ||
+          null;
+      }
+
+      const senderOriginId =
+        senderMode === 'specific_origin'
+          ? (toIntOrNull(resolveTemplateValue(config?.sender_origin_id, context)) || null)
+          : null;
+
       return {
         kind: 'success',
         output: {
@@ -902,6 +921,9 @@ async function processNode(node, context, runtime = {}) {
           template_id: config?.template_id || null,
           recipient_mode: recipientMode,
           recipient,
+          sender_mode: senderMode,
+          sender_origin_id: senderOriginId,
+          language_code: config?.language_code || null,
         },
         next_node_id: readOutputTarget(node, 'on_success'),
       };

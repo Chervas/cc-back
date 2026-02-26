@@ -241,9 +241,10 @@ const NODE_TYPES_V2 = [
     default_config: {
       template_id: '',
       language_code: 'es_ES',
-      recipient_mode: 'flow_phone',
-      phone_field: '{{paciente.telefono}}',
-      to: '',
+      recipient_mode: 'context_patient',
+      recipient_to: '',
+      sender_mode: 'clinic_default',
+      sender_origin_id: null,
       variables: {},
     },
     config_schema: [
@@ -254,10 +255,17 @@ const NODE_TYPES_V2 = [
         label: 'Modo destinatario',
         input_type: 'select',
         required: false,
-        options: ['flow_phone', 'manual_number'],
+        options: ['context_patient', 'context_lead', 'manual_number'],
       },
-      { key: 'phone_field', label: 'Campo teléfono (contexto)', input_type: 'string', required: false },
-      { key: 'to', label: 'Número manual (E.164)', input_type: 'string', required: false },
+      { key: 'recipient_to', label: 'Número destino manual (E.164)', input_type: 'string', required: false },
+      {
+        key: 'sender_mode',
+        label: 'Modo remitente',
+        input_type: 'select',
+        required: false,
+        options: ['clinic_default', 'specific_origin'],
+      },
+      { key: 'sender_origin_id', label: 'Origen específico (ID phone)', input_type: 'number', required: false },
       { key: 'variables', label: 'Variables', input_type: 'json', required: false },
     ],
   },
@@ -1231,8 +1239,19 @@ function validateNodeConfig(node, nodeMap) {
   }
 
   if (nodeType === 'action/send_whatsapp') {
-    const recipientMode = cleanString(config.recipient_mode) || 'flow_phone';
-    if (!['flow_phone', 'manual_number'].includes(recipientMode)) {
+    if (isConfigValueEmpty(config.template_id)) {
+      errors.push(
+        buildValidationError(
+          'node_config_required',
+          `El nodo ${nodeId} requiere 'template_id'`,
+          { node_id: nodeId, node_type: nodeType, key: 'template_id' }
+        )
+      );
+    }
+
+    const rawRecipientMode = cleanString(config.recipient_mode) || 'context_patient';
+    const recipientMode = rawRecipientMode === 'flow_phone' ? 'context_patient' : rawRecipientMode;
+    if (!['context_patient', 'context_lead', 'manual_number'].includes(recipientMode)) {
       errors.push(
         buildValidationError(
           'node_config_invalid',
@@ -1241,23 +1260,40 @@ function validateNodeConfig(node, nodeMap) {
         )
       );
     }
-    if (recipientMode === 'manual_number' && isConfigValueEmpty(config.to)) {
+
+    const recipientTo = cleanString(config.recipient_to) || cleanString(config.to);
+    if (recipientMode === 'manual_number' && !recipientTo) {
       errors.push(
         buildValidationError(
           'node_config_required',
-          `El nodo ${nodeId} requiere 'to' cuando recipient_mode = manual_number`,
-          { node_id: nodeId, node_type: nodeType, key: 'to' }
+          `El nodo ${nodeId} requiere 'recipient_to' cuando recipient_mode = manual_number`,
+          { node_id: nodeId, node_type: nodeType, key: 'recipient_to' }
         )
       );
     }
-    if (recipientMode === 'flow_phone' && isConfigValueEmpty(config.phone_field)) {
+
+    const senderMode = cleanString(config.sender_mode) || 'clinic_default';
+    if (!['clinic_default', 'specific_origin'].includes(senderMode)) {
       errors.push(
         buildValidationError(
-          'node_config_required',
-          `El nodo ${nodeId} requiere 'phone_field' cuando recipient_mode = flow_phone`,
-          { node_id: nodeId, node_type: nodeType, key: 'phone_field' }
+          'node_config_invalid',
+          `El nodo ${nodeId} requiere sender_mode válido`,
+          { node_id: nodeId, node_type: nodeType, key: 'sender_mode', value: senderMode }
         )
       );
+    }
+
+    if (senderMode === 'specific_origin') {
+      const senderOriginId = Number(config.sender_origin_id);
+      if (!Number.isFinite(senderOriginId) || senderOriginId <= 0) {
+        errors.push(
+          buildValidationError(
+            'node_config_required',
+            `El nodo ${nodeId} requiere 'sender_origin_id' cuando sender_mode = specific_origin`,
+            { node_id: nodeId, node_type: nodeType, key: 'sender_origin_id' }
+          )
+        );
+      }
     }
   }
 
