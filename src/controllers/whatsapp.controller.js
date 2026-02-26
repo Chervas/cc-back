@@ -588,11 +588,22 @@ exports.listTemplatesForClinic = async (req, res) => {
       return res.json(templates);
     }
 
+    const where = {
+      is_active: true,
+      [Op.or]: [
+        { waba_id: asset.wabaId },
+      ],
+    };
+    // Compatibilidad: incluir plantillas locales sin waba_id para la clínica solicitada.
+    if (clinicId) {
+      where[Op.or].push({
+        clinic_id: clinicId,
+        waba_id: null,
+      });
+    }
+
     templates = await WhatsappTemplate.findAll({
-      where: {
-        waba_id: asset.wabaId,
-        is_active: true,
-      },
+      where,
       order: [['name', 'ASC']],
     });
 
