@@ -43,14 +43,20 @@ function buildPhoneCandidates(raw) {
     digits,
     `+${digits}`,
     local,
-    `+${local}`,
   ])).filter(Boolean);
 }
 
 function buildContactIdCandidates(raw) {
-  const candidates = buildPhoneCandidates(raw);
-  const withPlus = candidates.map((c) => (String(c).startsWith('+') ? String(c) : `+${c}`));
-  return Array.from(new Set(withPlus)).filter(Boolean);
+  if (!raw) return [];
+  const digits = String(raw).replace(/\D/g, '');
+  if (!digits) return [];
+  const local = digits.length > 9 ? digits.slice(-9) : digits;
+  // Evitar candidatos tipo +<local> (p.ej. +617...), que pueden enrutar a conversaciones erróneas.
+  return Array.from(new Set([
+    `+${digits}`,
+    digits,
+    local,
+  ])).filter(Boolean);
 }
 
 async function findConversationByContextWamid({ clinicIds = [], contextWamid }) {
@@ -93,7 +99,12 @@ async function findLatestOutboundConversationByContact({ clinicIds = [], contact
   let phoneFilter = '';
   if (phoneId) {
     replacements.phoneId = String(phoneId);
-    phoneFilter = ` AND JSON_UNQUOTE(JSON_EXTRACT(m.metadata, '$.phoneId')) = :phoneId `;
+    phoneFilter = `
+      AND (
+        JSON_UNQUOTE(JSON_EXTRACT(m.metadata, '$.phoneId')) = :phoneId
+        OR JSON_UNQUOTE(JSON_EXTRACT(m.metadata, '$.phoneNumberId')) = :phoneId
+      )
+    `;
   }
 
   const rows = await db.sequelize.query(
@@ -117,6 +128,35 @@ async function findLatestOutboundConversationByContact({ clinicIds = [], contact
     `,
     {
       replacements,
+      type: QueryTypes.SELECT,
+    }
+  );
+
+  return rows?.[0] || null;
+}
+
+async function findLatestConversationByContact({ clinicIds = [], contactIds = [] }) {
+  if (!Array.isArray(clinicIds) || !clinicIds.length || !Array.isArray(contactIds) || !contactIds.length) {
+    return null;
+  }
+
+  const rows = await db.sequelize.query(
+    `
+    SELECT
+      c.id AS conversation_id,
+      c.clinic_id,
+      c.patient_id,
+      c.lead_id
+    FROM Conversations c
+    WHERE
+      c.channel = 'whatsapp'
+      AND c.clinic_id IN (:clinicIds)
+      AND c.contact_id IN (:contactIds)
+    ORDER BY COALESCE(c.last_message_at, c.updatedAt, c.createdAt) DESC, c.id DESC
+    LIMIT 1
+    `,
+    {
+      replacements: { clinicIds, contactIds },
       type: QueryTypes.SELECT,
     }
   );
@@ -251,6 +291,20 @@ async function resolveClinicAndContact({
           reason: 'group_by_latest_outbound_conversation',
           matchedConversationId: byOutbound.conversation_id,
           matchedMessageId: byOutbound.message_id,
+        });
+      }
+
+      const byConversation = await findLatestConversationByContact({
+        clinicIds,
+        contactIds: buildContactIdCandidates(from),
+      });
+      if (byConversation) {
+        return resolvedResult({
+          clinicId: byConversation.clinic_id,
+          patientId: byConversation.patient_id || null,
+          leadId: byConversation.lead_id || null,
+          reason: 'group_by_latest_conversation',
+          matchedConversationId: byConversation.conversation_id,
         });
       }
     }
