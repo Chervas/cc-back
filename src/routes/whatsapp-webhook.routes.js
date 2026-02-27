@@ -8,6 +8,7 @@ const { Op, QueryTypes } = require('sequelize');
 
 const { ClinicMetaAsset, Clinica, Paciente, Lead, Conversation, LeadIntake, WhatsAppWebOrigin } = db;
 const APP_SECRET = process.env.FACEBOOK_APP_SECRET || process.env.APP_SECRET;
+const INTERNAL_RELAY_TOKEN = process.env.WHATSAPP_INTERNAL_RELAY_TOKEN || '';
 
 function resolvedResult({
   clinicId = null,
@@ -355,6 +356,12 @@ function verifySignature(req, res, buf) {
   return signatureHash === expectedHash;
 }
 
+function isInternalRelayRequest(req) {
+  if (!INTERNAL_RELAY_TOKEN) return false;
+  const headerToken = req.headers['x-cc-internal-relay-token'];
+  return Boolean(headerToken) && String(headerToken) === INTERNAL_RELAY_TOKEN;
+}
+
 router.get('/whatsapp/webhook', (req, res) => {
   const mode = req.query['hub.mode'];
   const token = req.query['hub.verify_token'];
@@ -375,7 +382,8 @@ router.get('/whatsapp/webhook', (req, res) => {
 
 router.post('/whatsapp/webhook', async (req, res) => {
   try {
-    if (!verifySignature(req, res, req.rawBody || Buffer.from(JSON.stringify(req.body || {})))) {
+    const internalRelay = isInternalRelayRequest(req);
+    if (!internalRelay && !verifySignature(req, res, req.rawBody || Buffer.from(JSON.stringify(req.body || {})))) {
       return res.sendStatus(401);
     }
 
