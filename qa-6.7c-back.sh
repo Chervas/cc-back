@@ -108,7 +108,6 @@ clinicas = data.get('clinicas', [])
 for c in clinicas:
     if c.get('clinica_id') == $CLINICA_ID:
         horarios = c.get('horarios', [])
-        # Keep only relevant fields
         clean = []
         for h in horarios:
             clean.append({
@@ -179,87 +178,76 @@ echo ""
 echo "▸ Descubriendo datos de schedule..."
 
 # Shape real de /schedule:
-#   disponibilidad_general: [] (array directo)
-#   clinicas: [] (array de clínicas, cada una con horarios_apertura, horarios, etc.)
+#   disponibilidad_general: [] (array directo, cada item: dia_semana, hora_inicio, hora_fin, activo)
+#   clinicas: [] (array de clínicas, cada una con horarios_apertura, horarios, modo_disponibilidad, etc.)
 
-# Extraer un día con disponibilidad general (capa 1)
-CAPA1_INFO=$(python3 -c "
+# Helper Python: valida que un horario tenga hora_inicio/hora_fin no vacíos y con formato HH:MM válido
+# Se reutiliza en todos los bloques de descubrimiento.
+VALID_HM_CHECK='
+import re
+def is_valid_hm(s):
+    """Returns True if s is a non-empty string matching HH:MM with valid values."""
+    if not s or not isinstance(s, str):
+        return False
+    m = re.match(r"^(\d{1,2}):(\d{2})$", s.strip())
+    if not m:
+        return False
+    hh, mm = int(m.group(1)), int(m.group(2))
+    return 0 <= hh <= 23 and 0 <= mm <= 59
+
+def is_valid_horario(h):
+    """Returns True if h has valid, non-empty hora_inicio < hora_fin."""
+    return is_valid_hm(h.get("hora_inicio","")) and is_valid_hm(h.get("hora_fin","")) and h["hora_inicio"] < h["hora_fin"]
+'
+
+# Discover all valid (day, c1_start, c1_end, c2_start, c2_end) combos
+# Output: one line per valid combo "dia|c1s|c1e|c2s|c2e"
+ALL_COMBOS=$(python3 -c "
 import json
-data = json.load(open('$BACKUP_FILE'))
-dg = data.get('disponibilidad_general', [])
-active = [h for h in dg if h.get('activo', True)]
-if not active:
-    print('NONE')
-else:
-    h = active[0]
-    print(f\"{h['dia_semana']}|{h['hora_inicio']}|{h['hora_fin']}\")
-" 2>/dev/null || echo "NONE")
+$VALID_HM_CHECK
 
-if [ "$CAPA1_INFO" = "NONE" ]; then
-    echo "  ❌ No hay disponibilidad general configurada. Abortando."
-    exit 1
-fi
-
-IFS='|' read -r C1_DIA C1_INICIO C1_FIN <<< "$CAPA1_INFO"
-echo "  Capa 1 (día $C1_DIA): $C1_INICIO – $C1_FIN"
-
-# Extraer apertura de clínica (capa 2) para el mismo día
-CAPA2_INFO=$(python3 -c "
-import json
-data = json.load(open('$BACKUP_FILE'))
-clinicas = data.get('clinicas', [])
-target_clinica = $CLINICA_ID
-target_dia = $C1_DIA
-for c in clinicas:
-    if c.get('clinica_id') != target_clinica:
-        continue
-    apertura = c.get('horarios_apertura', [])
-    for h in apertura:
-        if h.get('dia_semana') == target_dia and h.get('activo', True):
-            print(f\"{h['hora_inicio']}|{h['hora_fin']}\")
-            break
-    break
-else:
-    print('NONE')
-" 2>/dev/null || echo "NONE")
-
-if [ "$CAPA2_INFO" = "NONE" ]; then
-    echo "  ⚠️  No hay apertura de clínica para día $C1_DIA. Buscando día alternativo..."
-    # Try to find a day that has both capa1 and capa2
-    BOTH_INFO=$(python3 -c "
-import json
 data = json.load(open('$BACKUP_FILE'))
 dg = data.get('disponibilidad_general', [])
 clinicas = data.get('clinicas', [])
 target_clinica = $CLINICA_ID
+
+# Build capa2 map: day -> list of (start, end)
 apertura_by_day = {}
 for c in clinicas:
     if c.get('clinica_id') != target_clinica:
         continue
     for h in c.get('horarios_apertura', []):
-        if h.get('activo', True):
-            apertura_by_day[h['dia_semana']] = (h['hora_inicio'], h['hora_fin'])
+        if not h.get('activo', True):
+            continue
+        if not is_valid_horario(h):
+            continue
+        d = h['dia_semana']
+        if d not in apertura_by_day:
+            apertura_by_day[d] = []
+        apertura_by_day[d].append((h['hora_inicio'], h['hora_fin']))
     break
+
+# Find combos: capa1 day that also has valid capa2
 for h in dg:
     if not h.get('activo', True):
         continue
+    if not is_valid_horario(h):
+        continue
     dia = h['dia_semana']
     if dia in apertura_by_day:
-        c2 = apertura_by_day[dia]
-        print(f\"{dia}|{h['hora_inicio']}|{h['hora_fin']}|{c2[0]}|{c2[1]}\")
-        break
-else:
-    print('NONE')
-" 2>/dev/null || echo "NONE")
-    if [ "$BOTH_INFO" = "NONE" ]; then
-        echo "  ❌ No hay día con capa1 + capa2. Abortando."
-        exit 1
-    fi
-    IFS='|' read -r C1_DIA C1_INICIO C1_FIN C2_INICIO C2_FIN <<< "$BOTH_INFO"
-else
-    IFS='|' read -r C2_INICIO C2_FIN <<< "$CAPA2_INFO"
+        for c2s, c2e in apertura_by_day[dia]:
+            print(f\"{dia}|{h['hora_inicio']}|{h['hora_fin']}|{c2s}|{c2e}\")
+" 2>/dev/null || echo "")
+
+if [ -z "$ALL_COMBOS" ]; then
+    echo "  ❌ No hay día con capa1 + capa2 válidas. Abortando."
+    exit 1
 fi
 
+# Pick the first combo as primary
+FIRST_COMBO=$(echo "$ALL_COMBOS" | head -1)
+IFS='|' read -r C1_DIA C1_INICIO C1_FIN C2_INICIO C2_FIN <<< "$FIRST_COMBO"
+echo "  Capa 1 (día $C1_DIA): $C1_INICIO – $C1_FIN"
 echo "  Capa 2 (día $C1_DIA): $C2_INICIO – $C2_FIN"
 
 # Compute a valid slot: intersection of capa1 and capa2, take first hour
@@ -268,16 +256,13 @@ c1s, c1e = '$C1_INICIO', '$C1_FIN'
 c2s, c2e = '$C2_INICIO', '$C2_FIN'
 start = max(c1s, c2s)
 end = min(c1e, c2e)
-# Take a 1-hour slot from the start of the intersection
 sh, sm = int(start.split(':')[0]), int(start.split(':')[1])
 eh = sh + 1
-if eh > 23: eh = sh
 em = sm
 slot_end = f'{eh:02d}:{em:02d}'
 if slot_end <= end and start < slot_end:
     print(f'{start}|{slot_end}')
 else:
-    # Just use start + 30min
     em2 = sm + 30
     eh2 = sh
     if em2 >= 60:
@@ -292,9 +277,10 @@ echo "  Tramo válido: día $C1_DIA $VALID_START – $VALID_END"
 # Find a day WITHOUT capa 1 (for NO_GENERAL_AVAILABILITY_FOR_DAY test)
 NO_C1_DIA=$(python3 -c "
 import json
+$VALID_HM_CHECK
 data = json.load(open('$BACKUP_FILE'))
 dg = data.get('disponibilidad_general', [])
-used_days = set(h['dia_semana'] for h in dg if h.get('activo', True))
+used_days = set(h['dia_semana'] for h in dg if h.get('activo', True) and is_valid_horario(h))
 for d in range(7):
     if d not in used_days:
         print(d)
@@ -315,24 +301,108 @@ echo "  OK"
 echo ""
 
 # ─── Caso 1: Tramo válido en avanzado → 200 ───
+# Si devuelve 409 STAFF_SCHEDULE_OVERLAP_OTHER_CLINIC, probar con otros combos/tramos.
 echo "▸ Caso 1: Tramo válido dentro de capa1 ∩ capa2 (esperado: 200)"
+
+CASO1_RESOLVED=false
+
+# Try primary slot first
 HTTP=$(curl -s -o /tmp/qa-67c-1.json -w "%{http_code}" -X PUT "$URL_HORARIOS" \
   -H "Authorization: $TOKEN" \
   -H "Content-Type: application/json" \
   -d "[{\"dia_semana\":$C1_DIA,\"hora_inicio\":\"$VALID_START\",\"hora_fin\":\"$VALID_END\",\"activo\":true}]")
-assert_http "Caso 1 HTTP" "200" "$HTTP" "/tmp/qa-67c-1.json"
+
+if [ "$HTTP" = "200" ]; then
+    CASO1_RESOLVED=true
+    assert_http "Caso 1 HTTP" "200" "$HTTP" "/tmp/qa-67c-1.json"
+elif [ "$HTTP" = "409" ]; then
+    OVERLAP_CODE=$(python3 -c "
+import json
+data = json.load(open('/tmp/qa-67c-1.json'))
+print(data.get('code',''))
+" 2>/dev/null || echo "")
+    if [ "$OVERLAP_CODE" = "STAFF_SCHEDULE_OVERLAP_OTHER_CLINIC" ]; then
+        echo "  ⚠️  409 cross-clinic en tramo primario. Probando alternativas..."
+        # Try each combo with progressively smaller/shifted slots
+        while IFS='|' read -r ALT_DIA ALT_C1S ALT_C1E ALT_C2S ALT_C2E; do
+            ALT_SLOT=$(python3 -c "
+start = max('$ALT_C1S', '$ALT_C2S')
+end = min('$ALT_C1E', '$ALT_C2E')
+if start >= end:
+    print('SKIP')
+    exit()
+sh, sm = int(start.split(':')[0]), int(start.split(':')[1])
+# Try multiple offsets: +0h, +1h, +2h from intersection start
+for offset in [0, 1, 2]:
+    s_h = sh + offset
+    s_m = sm
+    e_h = s_h + 1
+    e_m = sm
+    s_str = f'{s_h:02d}:{s_m:02d}'
+    e_str = f'{e_h:02d}:{e_m:02d}'
+    if s_str >= start and e_str <= end and s_str < e_str:
+        print(f'{s_str}|{e_str}')
+        exit()
+print('SKIP')
+" 2>/dev/null || echo "SKIP")
+            if [ "$ALT_SLOT" = "SKIP" ]; then
+                continue
+            fi
+            IFS='|' read -r ALT_START ALT_END <<< "$ALT_SLOT"
+            HTTP2=$(curl -s -o /tmp/qa-67c-1.json -w "%{http_code}" -X PUT "$URL_HORARIOS" \
+              -H "Authorization: $TOKEN" \
+              -H "Content-Type: application/json" \
+              -d "[{\"dia_semana\":$ALT_DIA,\"hora_inicio\":\"$ALT_START\",\"hora_fin\":\"$ALT_END\",\"activo\":true}]")
+            if [ "$HTTP2" = "200" ]; then
+                CASO1_RESOLVED=true
+                echo "  ✅ Caso 1 HTTP — HTTP 200 (alternativa día $ALT_DIA $ALT_START-$ALT_END)"
+                TOTAL=$((TOTAL + 1))
+                PASS=$((PASS + 1))
+                break
+            fi
+            # Check if still 409 cross-clinic — try next combo
+            OVERLAP2=$(python3 -c "
+import json
+data = json.load(open('/tmp/qa-67c-1.json'))
+print(data.get('code',''))
+" 2>/dev/null || echo "")
+            if [ "$OVERLAP2" != "STAFF_SCHEDULE_OVERLAP_OTHER_CLINIC" ]; then
+                # Different error — stop trying
+                break
+            fi
+        done <<< "$ALL_COMBOS"
+    fi
+fi
+
+if [ "$CASO1_RESOLVED" = "false" ]; then
+    # Check if it was a non-cross-clinic error
+    if [ "$HTTP" = "409" ] && [ "$OVERLAP_CODE" = "STAFF_SCHEDULE_OVERLAP_OTHER_CLINIC" ]; then
+        echo "  ⚠️  SKIP: Todos los tramos válidos colisionan con otra clínica."
+        TOTAL=$((TOTAL + 1))
+        echo "  ⏭️  Caso 1 omitido (cross-clinic en todos los combos)"
+    else
+        assert_http "Caso 1 HTTP" "200" "$HTTP" "/tmp/qa-67c-1.json"
+    fi
+fi
 echo ""
 
 # ─── Caso 2: Tramo fuera de capa 1 → 422 OUTSIDE_GENERAL_AVAILABILITY ───
 echo "▸ Caso 2: Tramo fuera de capa 1 (esperado: 422 OUTSIDE_GENERAL_AVAILABILITY)"
-# Use 1 hour before capa1 start (or 04:00-05:00 if capa1 starts at 00:00)
 OUT_C1_SLOT=$(python3 -c "
 c1s = '$C1_INICIO'
 sh = int(c1s.split(':')[0])
 if sh >= 2:
     print(f'{sh-2:02d}:00|{sh-1:02d}:00')
+elif sh == 1:
+    print('00:00|01:00')
 else:
-    print('04:00|05:00')
+    # c1s starts at 00:00 — use after c1e
+    c1e = '$C1_FIN'
+    eh = int(c1e.split(':')[0])
+    if eh <= 22:
+        print(f'{eh+1:02d}:00|{eh+2:02d}:00')
+    else:
+        print('23:00|23:59')
 ")
 IFS='|' read -r OUT_C1_START OUT_C1_END <<< "$OUT_C1_SLOT"
 HTTP=$(curl -s -o /tmp/qa-67c-2.json -w "%{http_code}" -X PUT "$URL_HORARIOS" \
@@ -347,30 +417,42 @@ echo ""
 # ─── Caso 3: Tramo fuera de apertura clínica → 422 OUTSIDE_CLINIC_OPENING ───
 echo "▸ Caso 3: Tramo dentro de capa 1 pero fuera de capa 2 (esperado: 422 OUTSIDE_CLINIC_OPENING)"
 OUT_C2_SLOT=$(python3 -c "
+import re
+$VALID_HM_CHECK
+
 c1s, c1e = '$C1_INICIO', '$C1_FIN'
 c2s, c2e = '$C2_INICIO', '$C2_FIN'
-# Try after capa2 end but within capa1
+
+# Validate inputs before int() parsing
+if not is_valid_hm(c1s) or not is_valid_hm(c1e) or not is_valid_hm(c2s) or not is_valid_hm(c2e):
+    print('SKIP')
+    exit()
+
 c2e_h = int(c2e.split(':')[0])
 c2e_m = int(c2e.split(':')[1])
 c1e_h = int(c1e.split(':')[0])
 c1e_m = int(c1e.split(':')[1])
+
+# Try after capa2 end but within capa1
 slot_s = f'{c2e_h:02d}:{c2e_m:02d}'
 slot_e_h = c2e_h + 1
 slot_e = f'{slot_e_h:02d}:{c2e_m:02d}'
 if slot_s >= c1s and slot_e <= c1e and slot_s < slot_e:
     print(f'{slot_s}|{slot_e}')
-else:
-    # Try before capa2 start but within capa1
-    c2s_h = int(c2s.split(':')[0])
-    c2s_m = int(c2s.split(':')[1])
-    slot_e2 = f'{c2s_h:02d}:{c2s_m:02d}'
-    slot_s2_h = c2s_h - 1
-    if slot_s2_h < 0: slot_s2_h = 0
+    exit()
+
+# Try before capa2 start but within capa1
+c2s_h = int(c2s.split(':')[0])
+c2s_m = int(c2s.split(':')[1])
+slot_e2 = f'{c2s_h:02d}:{c2s_m:02d}'
+slot_s2_h = c2s_h - 1
+if slot_s2_h >= 0:
     slot_s2 = f'{slot_s2_h:02d}:{c2s_m:02d}'
     if slot_s2 >= c1s and slot_e2 <= c1e and slot_s2 < slot_e2:
         print(f'{slot_s2}|{slot_e2}')
-    else:
-        print('SKIP')
+        exit()
+
+print('SKIP')
 ")
 if [ "$OUT_C2_SLOT" = "SKIP" ]; then
     echo "  ⚠️  SKIP: capa 1 no se extiende más allá de capa 2 en día $C1_DIA. No se puede probar OUTSIDE_CLINIC_OPENING."
@@ -429,7 +511,9 @@ curl -s -X PATCH "$URL_MODO" \
 
 # Check if capa 1 has contiguous intervals for any day
 CONTIGUOUS_SLOT=$(python3 -c "
-import json
+import json, re
+$VALID_HM_CHECK
+
 data = json.load(open('$BACKUP_FILE'))
 dg = data.get('disponibilidad_general', [])
 clinicas = data.get('clinicas', [])
@@ -439,16 +523,20 @@ for c in clinicas:
     if c.get('clinica_id') != target_clinica:
         continue
     for h in c.get('horarios_apertura', []):
-        if h.get('activo', True):
-            d = h['dia_semana']
-            if d not in apertura_by_day:
-                apertura_by_day[d] = []
-            apertura_by_day[d].append((h['hora_inicio'], h['hora_fin']))
+        if not h.get('activo', True):
+            continue
+        if not is_valid_horario(h):
+            continue
+        d = h['dia_semana']
+        if d not in apertura_by_day:
+            apertura_by_day[d] = []
+        apertura_by_day[d].append((h['hora_inicio'], h['hora_fin']))
     break
 
 by_day = {}
 for h in dg:
     if not h.get('activo', True): continue
+    if not is_valid_horario(h): continue
     d = h['dia_semana']
     if d not in by_day: by_day[d] = []
     by_day[d].append((h['hora_inicio'], h['hora_fin']))
@@ -457,9 +545,7 @@ for d, intervals in by_day.items():
     if len(intervals) < 2: continue
     intervals.sort()
     for i in range(len(intervals)-1):
-        # Check if end of interval i == start of interval i+1 (contiguous)
         if intervals[i][1] == intervals[i+1][0]:
-            # Found contiguous pair — build a slot that crosses the boundary
             boundary = intervals[i][1]
             bh, bm = int(boundary.split(':')[0]), int(boundary.split(':')[1])
             slot_s_m = bm - 30
@@ -474,13 +560,11 @@ for d, intervals in by_day.items():
                 slot_e_h += 1
             slot_s = f'{slot_s_h:02d}:{slot_s_m:02d}'
             slot_e = f'{slot_e_h:02d}:{slot_e_m:02d}'
-            # Verify within capa2
             if d in apertura_by_day:
                 for c2s, c2e in apertura_by_day[d]:
                     if slot_s >= c2s and slot_e <= c2e:
                         print(f'{d}|{slot_s}|{slot_e}')
                         exit()
-            # Even without capa2 check, print it
             print(f'{d}|{slot_s}|{slot_e}')
             exit()
 print('SKIP')
