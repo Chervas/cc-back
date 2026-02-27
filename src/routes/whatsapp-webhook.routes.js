@@ -8,6 +8,14 @@ const { Op, QueryTypes } = require('sequelize');
 
 const { ClinicMetaAsset, Clinica, Paciente, Lead, Conversation } = db;
 const APP_SECRET = process.env.FACEBOOK_APP_SECRET || process.env.APP_SECRET;
+const INTERNAL_RELAY_TOKEN = process.env.WHATSAPP_INTERNAL_RELAY_TOKEN || '';
+const RELAY_URL = process.env.WHATSAPP_WEBHOOK_RELAY_URL || '';
+const RELAY_MODE = (process.env.WHATSAPP_WEBHOOK_RELAY_MODE || 'off').toLowerCase(); // off | mirror | forward
+const RELAY_PHONE_IDS = (process.env.WHATSAPP_WEBHOOK_RELAY_PHONE_IDS || '')
+  .split(',')
+  .map((v) => v.trim())
+  .filter(Boolean);
+const RELAY_TIMEOUT_MS = Number(process.env.WHATSAPP_WEBHOOK_RELAY_TIMEOUT_MS || 4000);
 
 function resolvedResult({
   clinicId = null,
@@ -307,6 +315,51 @@ function verifySignature(req, res, buf) {
   return signatureHash === expectedHash;
 }
 
+function isInternalRelayRequest(req) {
+  if (!INTERNAL_RELAY_TOKEN) return false;
+  const headerToken = req.headers['x-cc-internal-relay-token'];
+  return Boolean(headerToken) && String(headerToken) === INTERNAL_RELAY_TOKEN;
+}
+
+function shouldRelay(phoneId) {
+  if (!RELAY_URL || RELAY_MODE === 'off') return false;
+  if (!RELAY_PHONE_IDS.length) return true;
+  return Boolean(phoneId) && RELAY_PHONE_IDS.includes(String(phoneId));
+}
+
+async function relayWebhookToTarget({ body, query, phoneId }) {
+  if (!shouldRelay(phoneId)) return { relayed: false, reason: 'disabled_or_not_matching_phone' };
+  if (!INTERNAL_RELAY_TOKEN) return { relayed: false, reason: 'missing_internal_relay_token' };
+
+  const target = new URL(RELAY_URL);
+  if (query && typeof query === 'object') {
+    Object.entries(query).forEach(([key, value]) => {
+      if (value !== undefined && value !== null) {
+        target.searchParams.set(key, String(value));
+      }
+    });
+  }
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), RELAY_TIMEOUT_MS);
+  try {
+    const response = await fetch(target.toString(), {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'x-cc-internal-relay-token': INTERNAL_RELAY_TOKEN,
+      },
+      body: JSON.stringify(body || {}),
+      signal: controller.signal,
+    });
+    return { relayed: true, status: response.status };
+  } catch (error) {
+    return { relayed: false, reason: error?.message || 'relay_error' };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 router.get('/whatsapp/webhook', (req, res) => {
   const mode = req.query['hub.mode'];
   const token = req.query['hub.verify_token'];
@@ -327,16 +380,35 @@ router.get('/whatsapp/webhook', (req, res) => {
 
 router.post('/whatsapp/webhook', async (req, res) => {
   try {
-    if (!verifySignature(req, res, req.rawBody || Buffer.from(JSON.stringify(req.body || {})))) {
+    const internalRelay = isInternalRelayRequest(req);
+    if (!internalRelay && !verifySignature(req, res, req.rawBody || Buffer.from(JSON.stringify(req.body || {})))) {
       return res.sendStatus(401);
     }
+
+    const phoneId = req.body?.entry?.[0]?.changes?.[0]?.value?.metadata?.phone_number_id || null;
+    if (!internalRelay && shouldRelay(phoneId)) {
+      const relayResult = await relayWebhookToTarget({
+        body: req.body,
+        query: req.query,
+        phoneId,
+      });
+      console.info('[whatsapp-webhook] relay result', {
+        mode: RELAY_MODE,
+        phone_id: phoneId,
+        relay_url: RELAY_URL,
+        ...relayResult,
+      });
+      if (RELAY_MODE === 'forward') {
+        return res.sendStatus(relayResult.relayed ? 200 : 202);
+      }
+    }
+
     let clinicId = req.query.clinic_id || req.body?.clinic_id;
     let groupId = null;
     let resolutionSource = clinicId ? 'explicit_clinic' : 'unknown';
     const inboundMessage = req.body?.entry?.[0]?.changes?.[0]?.value?.messages?.[0] || null;
     const from = inboundMessage?.from || null;
     const messageContextWamid = inboundMessage?.context?.id || null;
-    const phoneId = req.body?.entry?.[0]?.changes?.[0]?.value?.metadata?.phone_number_id || null;
     if (!clinicId) {
       if (phoneId) {
         const asset = await ClinicMetaAsset.findOne({
