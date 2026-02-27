@@ -108,7 +108,12 @@ createWorker('outbound_whatsapp', async (job) => {
             clinicConfig,
         });
         msg.status = 'sent';
-        msg.metadata = { ...(msg.metadata || {}), wa_response: waResponse, wamid: waResponse?.messages?.[0]?.id };
+        msg.metadata = {
+            ...(msg.metadata || {}),
+            wa_response: waResponse,
+            wamid: waResponse?.messages?.[0]?.id,
+            phoneId: clinicConfig?.phoneNumberId || msg?.metadata?.phoneId || null,
+        };
         msg.sent_at = new Date();
         await msg.save();
 
@@ -179,6 +184,7 @@ createWorker('webhook_whatsapp', async (job) => {
     const clinicId = job.data?.clinic_id;
     const patientId = job.data?.patient_id || null;
     const leadId = job.data?.lead_id || null;
+    const routing = job.data?.routing || null;
 
     if (!payload || !clinicId) {
         throw new Error('Payload o clinic_id ausente en webhook de WhatsApp');
@@ -232,7 +238,7 @@ createWorker('webhook_whatsapp', async (job) => {
             content,
             message_type: msg.type || 'text',
             status: 'sent',
-            metadata: { wamid, phoneId },
+            metadata: { wamid, phoneId, routing: routing || null },
             sent_at: new Date(),
         });
 

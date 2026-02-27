@@ -4,10 +4,28 @@ const crypto = require('crypto');
 const router = express.Router();
 const db = require('../../models');
 const { queues } = require('../services/queue.service');
-const { Op } = require('sequelize');
+const { Op, QueryTypes } = require('sequelize');
 
-const { ClinicMetaAsset, Clinica, Paciente, Lead } = db;
+const { ClinicMetaAsset, Clinica, Paciente, Lead, Conversation } = db;
 const APP_SECRET = process.env.FACEBOOK_APP_SECRET || process.env.APP_SECRET;
+
+function resolvedResult({
+  clinicId = null,
+  patientId = null,
+  leadId = null,
+  reason = 'unresolved',
+  matchedConversationId = null,
+  matchedMessageId = null,
+} = {}) {
+  return {
+    clinicId,
+    patientId,
+    leadId,
+    reason,
+    matchedConversationId,
+    matchedMessageId,
+  };
+}
 
 function buildPhoneCandidates(raw) {
   if (!raw) return [];
@@ -21,7 +39,90 @@ function buildPhoneCandidates(raw) {
   ])).filter(Boolean);
 }
 
-async function resolveClinicAndContact({ clinicId, groupId, from }) {
+function buildContactIdCandidates(raw) {
+  const candidates = buildPhoneCandidates(raw);
+  const withPlus = candidates.map((c) => (String(c).startsWith('+') ? String(c) : `+${c}`));
+  return Array.from(new Set(withPlus)).filter(Boolean);
+}
+
+async function findConversationByContextWamid({ clinicIds = [], contextWamid }) {
+  if (!Array.isArray(clinicIds) || !clinicIds.length || !contextWamid) {
+    return null;
+  }
+
+  const rows = await db.sequelize.query(
+    `
+    SELECT
+      c.id AS conversation_id,
+      c.clinic_id,
+      c.patient_id,
+      c.lead_id,
+      m.id AS message_id
+    FROM Messages m
+    JOIN Conversations c ON c.id = m.conversation_id
+    WHERE
+      c.channel = 'whatsapp'
+      AND c.clinic_id IN (:clinicIds)
+      AND JSON_UNQUOTE(JSON_EXTRACT(m.metadata, '$.wamid')) = :contextWamid
+    ORDER BY m.id DESC
+    LIMIT 1
+    `,
+    {
+      replacements: { clinicIds, contextWamid },
+      type: QueryTypes.SELECT,
+    }
+  );
+
+  return rows?.[0] || null;
+}
+
+async function findLatestOutboundConversationByContact({ clinicIds = [], contactIds = [], phoneId = null }) {
+  if (!Array.isArray(clinicIds) || !clinicIds.length || !Array.isArray(contactIds) || !contactIds.length) {
+    return null;
+  }
+
+  const replacements = { clinicIds, contactIds };
+  let phoneFilter = '';
+  if (phoneId) {
+    replacements.phoneId = String(phoneId);
+    phoneFilter = ` AND JSON_UNQUOTE(JSON_EXTRACT(m.metadata, '$.phoneId')) = :phoneId `;
+  }
+
+  const rows = await db.sequelize.query(
+    `
+    SELECT
+      c.id AS conversation_id,
+      c.clinic_id,
+      c.patient_id,
+      c.lead_id,
+      m.id AS message_id
+    FROM Conversations c
+    JOIN Messages m ON m.conversation_id = c.id
+    WHERE
+      c.channel = 'whatsapp'
+      AND c.clinic_id IN (:clinicIds)
+      AND c.contact_id IN (:contactIds)
+      AND m.direction = 'outbound'
+      ${phoneFilter}
+    ORDER BY COALESCE(m.sent_at, m.createdAt) DESC, m.id DESC
+    LIMIT 1
+    `,
+    {
+      replacements,
+      type: QueryTypes.SELECT,
+    }
+  );
+
+  return rows?.[0] || null;
+}
+
+async function resolveClinicAndContact({
+  clinicId,
+  groupId,
+  from,
+  messageContextWamid = null,
+  phoneId = null,
+}) {
   const candidates = buildPhoneCandidates(from);
   if (!candidates.length) {
     if (groupId) {
@@ -31,9 +132,15 @@ async function resolveClinicAndContact({ clinicId, groupId, from }) {
         raw: true,
       });
       const clinicIds = clinics.map((c) => c.id_clinica);
-      return { clinicId: clinicIds[0] || null, patientId: null, leadId: null };
+      return resolvedResult({
+        clinicId: clinicIds[0] || null,
+        reason: 'group_default_no_phone',
+      });
     }
-    return { clinicId: clinicId || null, patientId: null, leadId: null };
+    return resolvedResult({
+      clinicId: clinicId || null,
+      reason: clinicId ? 'direct_clinic_no_phone' : 'unresolved_no_phone',
+    });
   }
 
   if (clinicId) {
@@ -49,7 +156,11 @@ async function resolveClinicAndContact({ clinicId, groupId, from }) {
       raw: true,
     });
     if (patient) {
-      return { clinicId, patientId: patient.id_paciente, leadId: null };
+      return resolvedResult({
+        clinicId,
+        patientId: patient.id_paciente,
+        reason: 'direct_clinic_patient_match',
+      });
     }
 
     const lead = await Lead.findOne({
@@ -61,10 +172,17 @@ async function resolveClinicAndContact({ clinicId, groupId, from }) {
       raw: true,
     });
     if (lead) {
-      return { clinicId, patientId: null, leadId: lead.id };
+      return resolvedResult({
+        clinicId,
+        leadId: lead.id,
+        reason: 'direct_clinic_lead_match',
+      });
     }
 
-    return { clinicId, patientId: null, leadId: null };
+    return resolvedResult({
+      clinicId,
+      reason: 'direct_clinic_no_contact_match',
+    });
   }
 
   if (groupId) {
@@ -75,7 +193,58 @@ async function resolveClinicAndContact({ clinicId, groupId, from }) {
     });
     const clinicIds = clinics.map((c) => c.id_clinica);
     if (!clinicIds.length) {
-      return { clinicId: null, patientId: null, leadId: null };
+      return resolvedResult({
+        clinicId: null,
+        reason: 'group_without_clinics',
+      });
+    }
+
+    // 1) Si viene context.id (wamid del mensaje al que responde), usar esa conversación.
+    if (messageContextWamid) {
+      const byContext = await findConversationByContextWamid({
+        clinicIds,
+        contextWamid: String(messageContextWamid),
+      });
+      if (byContext) {
+        return resolvedResult({
+          clinicId: byContext.clinic_id,
+          patientId: byContext.patient_id || null,
+          leadId: byContext.lead_id || null,
+          reason: 'group_by_context_wamid',
+          matchedConversationId: byContext.conversation_id,
+          matchedMessageId: byContext.message_id,
+        });
+      }
+    }
+
+    // 2) Sin context: usar la conversación con último outbound a este contacto.
+    const contactIdCandidates = buildContactIdCandidates(from);
+    if (contactIdCandidates.length) {
+      let byOutbound = await findLatestOutboundConversationByContact({
+        clinicIds,
+        contactIds: contactIdCandidates,
+        phoneId: phoneId ? String(phoneId) : null,
+      });
+
+      // Fallback si mensajes históricos no guardaban phoneId.
+      if (!byOutbound && phoneId) {
+        byOutbound = await findLatestOutboundConversationByContact({
+          clinicIds,
+          contactIds: contactIdCandidates,
+          phoneId: null,
+        });
+      }
+
+      if (byOutbound) {
+        return resolvedResult({
+          clinicId: byOutbound.clinic_id,
+          patientId: byOutbound.patient_id || null,
+          leadId: byOutbound.lead_id || null,
+          reason: 'group_by_latest_outbound_conversation',
+          matchedConversationId: byOutbound.conversation_id,
+          matchedMessageId: byOutbound.message_id,
+        });
+      }
     }
 
     const patient = await Paciente.findOne({
@@ -90,7 +259,11 @@ async function resolveClinicAndContact({ clinicId, groupId, from }) {
       raw: true,
     });
     if (patient) {
-      return { clinicId: patient.clinica_id, patientId: patient.id_paciente, leadId: null };
+      return resolvedResult({
+        clinicId: patient.clinica_id,
+        patientId: patient.id_paciente,
+        reason: 'group_by_patient_match',
+      });
     }
 
     const lead = await Lead.findOne({
@@ -102,13 +275,23 @@ async function resolveClinicAndContact({ clinicId, groupId, from }) {
       raw: true,
     });
     if (lead) {
-      return { clinicId: lead.clinica_id, patientId: null, leadId: lead.id };
+      return resolvedResult({
+        clinicId: lead.clinica_id,
+        leadId: lead.id,
+        reason: 'group_by_lead_match',
+      });
     }
 
-    return { clinicId: clinicIds[0], patientId: null, leadId: null };
+    return resolvedResult({
+      clinicId: clinicIds[0],
+      reason: 'group_default_first_clinic',
+    });
   }
 
-  return { clinicId: null, patientId: null, leadId: null };
+  return resolvedResult({
+    clinicId: null,
+    reason: 'unresolved_without_scope',
+  });
 }
 
 function verifySignature(req, res, buf) {
@@ -149,8 +332,12 @@ router.post('/whatsapp/webhook', async (req, res) => {
     }
     let clinicId = req.query.clinic_id || req.body?.clinic_id;
     let groupId = null;
+    let resolutionSource = clinicId ? 'explicit_clinic' : 'unknown';
+    const inboundMessage = req.body?.entry?.[0]?.changes?.[0]?.value?.messages?.[0] || null;
+    const from = inboundMessage?.from || null;
+    const messageContextWamid = inboundMessage?.context?.id || null;
+    const phoneId = req.body?.entry?.[0]?.changes?.[0]?.value?.metadata?.phone_number_id || null;
     if (!clinicId) {
-      const phoneId = req.body?.entry?.[0]?.changes?.[0]?.value?.metadata?.phone_number_id;
       if (phoneId) {
         const asset = await ClinicMetaAsset.findOne({
           where: { phoneNumberId: phoneId, isActive: true },
@@ -159,33 +346,80 @@ router.post('/whatsapp/webhook', async (req, res) => {
         if (asset) {
           clinicId = asset.clinicaId;
           groupId = asset.grupoClinicaId;
+          resolutionSource = 'phone_number_mapping';
         } else {
           console.warn('Webhook WA sin mapeo de phoneNumberId', phoneId);
         }
       }
     }
 
+    let resolvedContact = resolvedResult({
+      clinicId: clinicId || null,
+      reason: clinicId ? 'pre_resolved_clinic' : 'pre_resolved_unset',
+    });
+
     if (!clinicId && groupId) {
-      const from = req.body?.entry?.[0]?.changes?.[0]?.value?.messages?.[0]?.from;
-      const resolved = await resolveClinicAndContact({ clinicId: null, groupId, from });
-      clinicId = resolved.clinicId;
-      req.resolvedContact = resolved;
+      resolvedContact = await resolveClinicAndContact({
+        clinicId: null,
+        groupId,
+        from,
+        messageContextWamid,
+        phoneId,
+      });
+      clinicId = resolvedContact.clinicId;
     }
 
     if (!clinicId) {
-      console.warn('Webhook WA sin clinic_id, descartando payload');
+      console.warn('Webhook WA sin clinic_id, descartando payload', {
+        from,
+        phone_id: phoneId,
+        context_wamid: messageContextWamid,
+        source: resolutionSource,
+        reason: resolvedContact.reason,
+      });
       return res.sendStatus(200);
     }
-    const from = req.body?.entry?.[0]?.changes?.[0]?.value?.messages?.[0]?.from;
-    const resolvedContact =
-      req.resolvedContact ||
-      (await resolveClinicAndContact({ clinicId, groupId, from }));
+
+    if (
+      (resolvedContact?.reason === 'pre_resolved_clinic' || resolvedContact?.reason === 'pre_resolved_unset') &&
+      !resolvedContact?.patientId &&
+      !resolvedContact?.leadId
+    ) {
+      resolvedContact = await resolveClinicAndContact({
+        clinicId,
+        groupId,
+        from,
+        messageContextWamid,
+        phoneId,
+      });
+    }
+
+    console.info('[whatsapp-webhook] inbound resolved', {
+      from,
+      phone_id: phoneId,
+      context_wamid: messageContextWamid,
+      clinic_id: clinicId,
+      patient_id: resolvedContact.patientId || null,
+      lead_id: resolvedContact.leadId || null,
+      reason: resolvedContact.reason,
+      matched_conversation_id: resolvedContact.matchedConversationId || null,
+      matched_message_id: resolvedContact.matchedMessageId || null,
+      source: resolutionSource,
+    });
 
     await queues.webhookWhatsApp.add('incoming', {
       body: req.body,
       clinic_id: clinicId,
       patient_id: resolvedContact.patientId,
       lead_id: resolvedContact.leadId,
+      routing: {
+        source: resolutionSource,
+        reason: resolvedContact.reason || null,
+        matched_conversation_id: resolvedContact.matchedConversationId || null,
+        matched_message_id: resolvedContact.matchedMessageId || null,
+        context_wamid: messageContextWamid || null,
+        phone_number_id: phoneId || null,
+      },
     });
     return res.sendStatus(200);
   } catch (err) {
