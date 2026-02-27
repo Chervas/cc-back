@@ -6,6 +6,9 @@ const db = require('../../models');
 const AutomationFlowTemplateV2 = db.AutomationFlowTemplateV2;
 const FlowExecutionV2 = db.FlowExecutionV2;
 const FlowExecutionLogV2 = db.FlowExecutionLogV2;
+const CitaPaciente = db.CitaPaciente;
+const Paciente = db.Paciente;
+const LeadIntake = db.LeadIntake;
 const UsuarioClinica = db.UsuarioClinica;
 const Usuario = db.Usuario;
 const Clinica = db.Clinica;
@@ -116,6 +119,20 @@ function cleanString(raw) {
   if (raw === undefined || raw === null) return null;
   const out = String(raw).trim();
   return out || null;
+}
+
+function formatDateTimeEs(rawDate) {
+  if (!rawDate) return null;
+  const date = rawDate instanceof Date ? rawDate : new Date(rawDate);
+  if (!Number.isFinite(date.getTime())) return null;
+  return new Intl.DateTimeFormat('es-ES', {
+    timeZone: 'Europe/Madrid',
+    day: '2-digit',
+    month: '2-digit',
+    year: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+  }).format(date);
 }
 
 function parseTemplateScopeQuery(query) {
@@ -1399,6 +1416,227 @@ exports.getNodeTypesCatalog = async (_req, res) => {
     success: true,
     data: NODE_TYPES_V2,
   });
+};
+
+exports.searchEntities = async (req, res) => {
+  try {
+    const access = await resolveAccess(req);
+    if (!access.user_id) {
+      return res.status(401).json({ success: false, error: 'auth_required' });
+    }
+
+    const type = cleanString(req.query?.type)?.toLowerCase();
+    const allowedTypes = new Set(['appointment', 'patient', 'lead', 'conversation']);
+    if (!type || !allowedTypes.has(type)) {
+      return res.status(400).json({
+        success: false,
+        error: 'invalid_type',
+        message: "type debe ser 'appointment', 'patient', 'lead' o 'conversation'",
+      });
+    }
+
+    const queryText = cleanString(req.query?.query) || '';
+    const queryLike = `%${queryText}%`;
+    const limit = parseLimit(req.query?.limit, 10);
+    const presetRaw = cleanString(req.query?.preset)?.toLowerCase() || 'none';
+    const preset = ['upcoming', 'recent', 'none'].includes(presetRaw) ? presetRaw : 'none';
+
+    const requestedClinicIds = parseIntList(req.query?.clinic_id);
+    const requestedGroupId = parseIntOrNull(req.query?.group_id);
+    let clinicIds = [];
+
+    if (requestedGroupId) {
+      if (!access.is_admin && !access.group_ids.has(requestedGroupId)) {
+        return res.status(403).json({ success: false, error: 'forbidden_scope' });
+      }
+      clinicIds = await resolveClinicIdsForGroup(requestedGroupId);
+    } else if (requestedClinicIds.length) {
+      if (!access.is_admin) {
+        const hasForbidden = requestedClinicIds.some((clinicId) => !access.clinic_ids.has(clinicId));
+        if (hasForbidden) {
+          return res.status(403).json({ success: false, error: 'forbidden_scope' });
+        }
+      }
+      clinicIds = requestedClinicIds;
+    } else if (!access.is_admin) {
+      clinicIds = Array.from(access.clinic_ids);
+      if (!clinicIds.length && access.group_ids.size) {
+        const groupClinicIds = await Promise.all(
+          Array.from(access.group_ids).map((groupId) => resolveClinicIdsForGroup(groupId))
+        );
+        clinicIds = groupClinicIds.flat();
+      }
+    }
+
+    clinicIds = Array.from(
+      new Set(
+        clinicIds
+          .map((id) => Number.parseInt(String(id), 10))
+          .filter((id) => Number.isInteger(id) && id > 0)
+      )
+    );
+
+    if (!access.is_admin && !clinicIds.length) {
+      return res.status(403).json({ success: false, error: 'forbidden' });
+    }
+
+    let items = [];
+
+    if (type === 'appointment') {
+      const where = {};
+      if (clinicIds.length) {
+        where.clinica_id = { [Op.in]: clinicIds };
+      }
+      if (preset === 'upcoming') {
+        where.inicio = { [Op.gte]: new Date() };
+      } else if (preset === 'recent') {
+        where.inicio = { [Op.lte]: new Date() };
+      }
+
+      const patientWhere = queryText
+        ? {
+            [Op.or]: [
+              { nombre: { [Op.like]: queryLike } },
+              { apellidos: { [Op.like]: queryLike } },
+              { email: { [Op.like]: queryLike } },
+              { telefono_movil: { [Op.like]: queryLike } },
+            ],
+          }
+        : undefined;
+
+      const rows = await CitaPaciente.findAll({
+        where,
+        include: [
+          {
+            model: Paciente,
+            as: 'paciente',
+            required: !!patientWhere,
+            ...(patientWhere ? { where: patientWhere } : {}),
+            attributes: ['id_paciente', 'nombre', 'apellidos', 'email', 'telefono_movil'],
+          },
+          {
+            model: Clinica,
+            as: 'clinica',
+            required: false,
+            attributes: ['id_clinica', 'nombre_clinica'],
+          },
+        ],
+        order: [['inicio', preset === 'upcoming' ? 'ASC' : 'DESC']],
+        limit,
+      });
+
+      items = rows.map((row) => {
+        const paciente = row.paciente || null;
+        const clinic = row.clinica || null;
+        const patientName = [paciente?.nombre, paciente?.apellidos].filter(Boolean).join(' ').trim() || `Paciente #${row.paciente_id}`;
+        const clinicName = clinic?.nombre_clinica || `Clínica ${row.clinica_id}`;
+        const dateLabel = formatDateTimeEs(row.inicio) || '-';
+        return {
+          id: row.id_cita,
+          label: `Cita · ${patientName}`,
+          subtitle: `${dateLabel} · ${clinicName}`,
+          search_tokens: [patientName, paciente?.email, paciente?.telefono_movil].filter(Boolean),
+          context: {
+            clinic_id: row.clinica_id,
+            estado: row.estado,
+            inicio: row.inicio,
+            paciente_id: row.paciente_id,
+          },
+        };
+      });
+    } else if (type === 'patient') {
+      const where = {};
+      if (clinicIds.length) {
+        where.clinica_id = { [Op.in]: clinicIds };
+      }
+      if (queryText) {
+        where[Op.or] = [
+          { nombre: { [Op.like]: queryLike } },
+          { apellidos: { [Op.like]: queryLike } },
+          { email: { [Op.like]: queryLike } },
+          { telefono_movil: { [Op.like]: queryLike } },
+        ];
+      }
+
+      const rows = await Paciente.findAll({
+        where,
+        attributes: ['id_paciente', 'clinica_id', 'nombre', 'apellidos', 'email', 'telefono_movil', 'updatedAt'],
+        order: [['updatedAt', 'DESC']],
+        limit,
+      });
+
+      items = rows.map((row) => {
+        const fullName = [row.nombre, row.apellidos].filter(Boolean).join(' ').trim() || `Paciente #${row.id_paciente}`;
+        return {
+          id: row.id_paciente,
+          label: fullName,
+          subtitle: [row.email, row.telefono_movil].filter(Boolean).join(' · ') || `Clínica ${row.clinica_id}`,
+          search_tokens: [fullName, row.email, row.telefono_movil].filter(Boolean),
+          context: {
+            clinic_id: row.clinica_id,
+          },
+        };
+      });
+    } else if (type === 'lead') {
+      const where = {};
+      if (clinicIds.length) {
+        where.clinica_id = { [Op.in]: clinicIds };
+      }
+      if (queryText) {
+        where[Op.or] = [
+          { nombre: { [Op.like]: queryLike } },
+          { email: { [Op.like]: queryLike } },
+          { telefono: { [Op.like]: queryLike } },
+          { status_lead: { [Op.like]: queryLike } },
+        ];
+      }
+
+      const rows = await LeadIntake.findAll({
+        where,
+        attributes: ['id', 'clinica_id', 'nombre', 'email', 'telefono', 'status_lead', 'created_at'],
+        order: [['created_at', 'DESC']],
+        limit,
+      });
+
+      items = rows.map((row) => {
+        const leadName = cleanString(row.nombre) || `Lead #${row.id}`;
+        return {
+          id: row.id,
+          label: `Lead · ${leadName}`,
+          subtitle: [row.status_lead, row.telefono || row.email].filter(Boolean).join(' · ') || null,
+          search_tokens: [leadName, row.email, row.telefono, row.status_lead].filter(Boolean),
+          context: {
+            clinic_id: row.clinica_id,
+            status_lead: row.status_lead,
+          },
+        };
+      });
+    } else {
+      items = [];
+    }
+
+    return res.json({
+      success: true,
+      type,
+      data: {
+        items,
+        total: items.length,
+      },
+      meta: {
+        query: queryText,
+        limit,
+        preset,
+        source: 'db',
+      },
+    });
+  } catch (err) {
+    console.error('Error searchEntities v2', err);
+    return res.status(500).json({
+      success: false,
+      error: 'search_entities_failed',
+      message: err.message,
+    });
+  }
 };
 
 exports.getAssigneesCatalog = async (req, res) => {
