@@ -2687,8 +2687,24 @@ async function validateHorariosAgainstEffectiveAvailability(targetUserId, clinic
     const dispGeneral = await getDisponibilidadGeneralForDoctor(targetUserId);
     const dispGeneralRows = dispGeneral?.horarios || [];
 
-    // Index capa 1 by day -> merged intervals in minutes
-    const capa1ByDay = new Map();
+    // Helper: merge overlapping/contiguous intervals sorted by startMin
+    function mergeMinuteIntervals(intervals) {
+        if (!intervals || !intervals.length) return [];
+        const sorted = [...intervals].sort((a, b) => a.startMin - b.startMin);
+        const merged = [{ ...sorted[0] }];
+        for (let i = 1; i < sorted.length; i++) {
+            const last = merged[merged.length - 1];
+            if (sorted[i].startMin <= last.endMin) {
+                last.endMin = Math.max(last.endMin, sorted[i].endMin);
+            } else {
+                merged.push({ ...sorted[i] });
+            }
+        }
+        return merged;
+    }
+
+    // Index capa 1 by day -> collect raw intervals
+    const capa1RawByDay = new Map();
     for (const row of dispGeneralRows) {
         if (row.activo === false) continue;
         const dia = normalizeDiaSemana(row.dia_semana);
@@ -2696,17 +2712,22 @@ async function validateHorariosAgainstEffectiveAvailability(targetUserId, clinic
         const startMin = hmToMinutes(row.hora_inicio);
         const endMin = hmToMinutes(row.hora_fin);
         if (startMin == null || endMin == null || startMin >= endMin) continue;
-        const list = capa1ByDay.get(dia) || [];
+        const list = capa1RawByDay.get(dia) || [];
         list.push({ startMin, endMin });
-        capa1ByDay.set(dia, list);
+        capa1RawByDay.set(dia, list);
+    }
+    // Merge contiguous/overlapping intervals per day
+    const capa1ByDay = new Map();
+    for (const [dia, intervals] of capa1RawByDay.entries()) {
+        capa1ByDay.set(dia, mergeMinuteIntervals(intervals));
     }
 
     // Load capa 2: horarios de apertura de la clínica
     const clinicaHorariosMap = await getClinicaHorariosMap([clinicaId]);
     const clinicaHorarios = clinicaHorariosMap.get(Number(clinicaId)) || [];
 
-    // Index capa 2 by day -> merged intervals in minutes
-    const capa2ByDay = new Map();
+    // Index capa 2 by day -> collect raw intervals
+    const capa2RawByDay = new Map();
     for (const row of clinicaHorarios) {
         if (row.activo === false) continue;
         const dia = normalizeDiaSemana(row.dia_semana);
@@ -2714,12 +2735,17 @@ async function validateHorariosAgainstEffectiveAvailability(targetUserId, clinic
         const startMin = hmToMinutes(row.hora_inicio);
         const endMin = hmToMinutes(row.hora_fin);
         if (startMin == null || endMin == null || startMin >= endMin) continue;
-        const list = capa2ByDay.get(dia) || [];
+        const list = capa2RawByDay.get(dia) || [];
         list.push({ startMin, endMin });
-        capa2ByDay.set(dia, list);
+        capa2RawByDay.set(dia, list);
+    }
+    // Merge contiguous/overlapping intervals per day
+    const capa2ByDay = new Map();
+    for (const [dia, intervals] of capa2RawByDay.entries()) {
+        capa2ByDay.set(dia, mergeMinuteIntervals(intervals));
     }
 
-    // Helper: check if [startMin, endMin) is fully contained within at least one merged interval
+    // Helper: check if [startMin, endMin] is fully contained within at least one merged interval
     function isContainedInIntervals(intervals, startMin, endMin) {
         if (!intervals || !intervals.length) return false;
         return intervals.some((iv) => iv.startMin <= startMin && iv.endMin >= endMin);
