@@ -110,7 +110,17 @@ async function findLatestOutboundConversationByContact({ clinicIds = [], contact
     return null;
   }
 
-  const replacements = { clinicIds, contactIds };
+  const contactDigits = Array.from(
+    new Set(contactIds.map((value) => String(value || '').replace(/^\+/, '')).filter(Boolean))
+  );
+  const localDigits = contactDigits.length
+    ? contactDigits.reduce((acc, value) => {
+        if (!acc) return value.length > 9 ? value.slice(-9) : value;
+        return acc;
+      }, '')
+    : '';
+
+  const replacements = { clinicIds, contactIds, contactDigits, localDigits };
   let phoneFilter = '';
   if (phoneId) {
     replacements.phoneId = String(phoneId);
@@ -135,10 +145,17 @@ async function findLatestOutboundConversationByContact({ clinicIds = [], contact
     WHERE
       c.channel = 'whatsapp'
       AND c.clinic_id IN (:clinicIds)
-      AND c.contact_id IN (:contactIds)
+      AND (
+        c.contact_id IN (:contactIds)
+        OR REPLACE(c.contact_id, '+', '') IN (:contactDigits)
+        OR (:localDigits <> '' AND RIGHT(REPLACE(c.contact_id, '+', ''), 9) = :localDigits)
+        OR JSON_UNQUOTE(JSON_EXTRACT(m.metadata, '$.recipient')) IN (:contactIds)
+        OR REPLACE(JSON_UNQUOTE(JSON_EXTRACT(m.metadata, '$.recipient')), '+', '') IN (:contactDigits)
+        OR (:localDigits <> '' AND RIGHT(REPLACE(JSON_UNQUOTE(JSON_EXTRACT(m.metadata, '$.recipient')), '+', ''), 9) = :localDigits)
+      )
       AND m.direction = 'outbound'
       ${phoneFilter}
-    ORDER BY COALESCE(m.sent_at, m.createdAt) DESC, m.id DESC
+    ORDER BY m.id DESC
     LIMIT 1
     `,
     {
@@ -309,18 +326,22 @@ async function resolveClinicAndContact({
         });
       }
 
-      const byConversation = await findLatestConversationByContact({
-        clinicIds,
-        contactIds: buildContactIdCandidates(from),
-      });
-      if (byConversation) {
-        return resolvedResult({
-          clinicId: byConversation.clinic_id,
-          patientId: byConversation.patient_id || null,
-          leadId: byConversation.lead_id || null,
-          reason: 'group_by_latest_conversation',
-          matchedConversationId: byConversation.conversation_id,
+      // Evitar en grupos multi-clínica el fallback por "última conversación" porque puede
+      // perpetuar enrutados cruzados si hubo asignaciones erróneas previas.
+      if (clinicIds.length === 1) {
+        const byConversation = await findLatestConversationByContact({
+          clinicIds,
+          contactIds: buildContactIdCandidates(from),
         });
+        if (byConversation) {
+          return resolvedResult({
+            clinicId: byConversation.clinic_id,
+            patientId: byConversation.patient_id || null,
+            leadId: byConversation.lead_id || null,
+            reason: 'group_by_latest_conversation',
+            matchedConversationId: byConversation.conversation_id,
+          });
+        }
       }
     }
 
