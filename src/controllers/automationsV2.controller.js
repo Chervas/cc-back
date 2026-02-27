@@ -135,6 +135,28 @@ function formatDateTimeEs(rawDate) {
   }).format(date);
 }
 
+const TEST_ENTITY_MARKERS = ['test', 'prueba', 'qa', 'dummy', 'sandbox'];
+
+function normalizeSearchText(raw) {
+  const value = cleanString(raw);
+  if (!value) return null;
+  return value
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase();
+}
+
+function looksLikeTestEntity(...values) {
+  for (const candidate of values) {
+    const normalized = normalizeSearchText(candidate);
+    if (!normalized) continue;
+    if (TEST_ENTITY_MARKERS.some((marker) => normalized.includes(marker))) {
+      return true;
+    }
+  }
+  return false;
+}
+
 function parseTemplateScopeQuery(query) {
   const explicitScope = cleanString(query?.scope) || cleanString(query?.clinic_id);
   let clinicIds = [];
@@ -1532,16 +1554,25 @@ exports.searchEntities = async (req, res) => {
         const patientName = [paciente?.nombre, paciente?.apellidos].filter(Boolean).join(' ').trim() || `Paciente #${row.paciente_id}`;
         const clinicName = clinic?.nombre_clinica || `Clínica ${row.clinica_id}`;
         const dateLabel = formatDateTimeEs(row.inicio) || '-';
+        const isTest = looksLikeTestEntity(
+          patientName,
+          paciente?.email,
+          paciente?.telefono_movil,
+          row.titulo,
+          row.motivo
+        );
         return {
           id: row.id_cita,
           label: `Cita · ${patientName}`,
           subtitle: `${dateLabel} · ${clinicName}`,
           search_tokens: [patientName, paciente?.email, paciente?.telefono_movil].filter(Boolean),
+          is_test: isTest,
           context: {
             clinic_id: row.clinica_id,
             estado: row.estado,
             inicio: row.inicio,
             paciente_id: row.paciente_id,
+            is_test: isTest,
           },
         };
       });
@@ -1568,13 +1599,16 @@ exports.searchEntities = async (req, res) => {
 
       items = rows.map((row) => {
         const fullName = [row.nombre, row.apellidos].filter(Boolean).join(' ').trim() || `Paciente #${row.id_paciente}`;
+        const isTest = looksLikeTestEntity(fullName, row.email, row.telefono_movil);
         return {
           id: row.id_paciente,
           label: fullName,
           subtitle: [row.email, row.telefono_movil].filter(Boolean).join(' · ') || `Clínica ${row.clinica_id}`,
           search_tokens: [fullName, row.email, row.telefono_movil].filter(Boolean),
+          is_test: isTest,
           context: {
             clinic_id: row.clinica_id,
+            is_test: isTest,
           },
         };
       });
@@ -1601,14 +1635,17 @@ exports.searchEntities = async (req, res) => {
 
       items = rows.map((row) => {
         const leadName = cleanString(row.nombre) || `Lead #${row.id}`;
+        const isTest = looksLikeTestEntity(leadName, row.email, row.telefono);
         return {
           id: row.id,
           label: `Lead · ${leadName}`,
           subtitle: [row.status_lead, row.telefono || row.email].filter(Boolean).join(' · ') || null,
           search_tokens: [leadName, row.email, row.telefono, row.status_lead].filter(Boolean),
+          is_test: isTest,
           context: {
             clinic_id: row.clinica_id,
             status_lead: row.status_lead,
+            is_test: isTest,
           },
         };
       });
