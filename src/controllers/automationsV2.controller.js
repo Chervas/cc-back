@@ -121,6 +121,296 @@ function cleanString(raw) {
   return out || null;
 }
 
+function normalizeToken(raw) {
+  return String(raw || '')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '_')
+    .replace(/^_+|_+$/g, '');
+}
+
+function formatDateEs(rawDate) {
+  if (!rawDate) return null;
+  const date = rawDate instanceof Date ? rawDate : new Date(rawDate);
+  if (!Number.isFinite(date.getTime())) return null;
+  return new Intl.DateTimeFormat('es-ES', {
+    timeZone: 'Europe/Madrid',
+    day: '2-digit',
+    month: '2-digit',
+    year: 'numeric',
+  }).format(date);
+}
+
+function formatTimeEs(rawDate) {
+  if (!rawDate) return null;
+  const date = rawDate instanceof Date ? rawDate : new Date(rawDate);
+  if (!Number.isFinite(date.getTime())) return null;
+  return new Intl.DateTimeFormat('es-ES', {
+    timeZone: 'Europe/Madrid',
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false,
+  }).format(date);
+}
+
+function joinName(...parts) {
+  return parts
+    .map((part) => cleanString(part))
+    .filter(Boolean)
+    .join(' ')
+    .trim();
+}
+
+async function buildHydratedExecutionContext({
+  triggerType,
+  triggerEntityType,
+  triggerEntityId,
+  triggerData,
+}) {
+  const out = {
+    trigger: {
+      type: cleanString(triggerType) || 'manual',
+      data: isObject(triggerData) ? { ...triggerData } : {},
+    },
+  };
+
+  const normalizedType = normalizeToken(triggerEntityType);
+  const normalizedTrigger = normalizeToken(triggerType);
+
+  const appointmentCandidateId = parseIntOrNull(triggerEntityId)
+    || parseIntOrNull(triggerData?.appointment_id)
+    || parseIntOrNull(triggerData?.cita_id)
+    || parseIntOrNull(triggerData?.id_cita);
+
+  const leadCandidateId = parseIntOrNull(triggerEntityId)
+    || parseIntOrNull(triggerData?.lead_id)
+    || parseIntOrNull(triggerData?.lead_intake_id);
+
+  const patientCandidateId = parseIntOrNull(triggerEntityId)
+    || parseIntOrNull(triggerData?.patient_id)
+    || parseIntOrNull(triggerData?.paciente_id);
+
+  const mustHydrateAppointment = (
+    appointmentCandidateId
+    && (
+      normalizedType === 'appointment'
+      || normalizedType === 'cita'
+      || normalizedTrigger.startsWith('appointment_')
+    )
+  );
+
+  if (mustHydrateAppointment) {
+    const cita = await CitaPaciente.findByPk(appointmentCandidateId, {
+      include: [
+        {
+          model: Paciente,
+          as: 'paciente',
+          required: false,
+          attributes: ['id_paciente', 'clinica_id', 'nombre', 'apellidos', 'telefono_movil', 'email'],
+        },
+        {
+          model: Clinica,
+          as: 'clinica',
+          required: false,
+          attributes: ['id_clinica', 'grupoClinicaId', 'nombre_clinica'],
+        },
+      ],
+      attributes: ['id_cita', 'clinica_id', 'paciente_id', 'lead_intake_id', 'estado', 'inicio', 'fin', 'titulo', 'motivo'],
+    });
+
+    if (cita) {
+      const citaJson = cita.toJSON ? cita.toJSON() : cita;
+      const citaPatch = {
+        id: parseIntOrNull(citaJson.id_cita),
+        id_cita: parseIntOrNull(citaJson.id_cita),
+        clinic_id: parseIntOrNull(citaJson.clinica_id),
+        clinica_id: parseIntOrNull(citaJson.clinica_id),
+        patient_id: parseIntOrNull(citaJson.paciente_id),
+        paciente_id: parseIntOrNull(citaJson.paciente_id),
+        lead_intake_id: parseIntOrNull(citaJson.lead_intake_id),
+        estado: cleanString(citaJson.estado),
+        status: cleanString(citaJson.estado),
+        inicio: citaJson.inicio || null,
+        fin: citaJson.fin || null,
+        fecha: formatDateEs(citaJson.inicio),
+        hora: formatTimeEs(citaJson.inicio),
+        titulo: cleanString(citaJson.titulo),
+        motivo: cleanString(citaJson.motivo),
+        origin: parseIntOrNull(citaJson.lead_intake_id) ? 'lead' : 'manual',
+      };
+      out.appointment = {
+        ...(isObject(out.appointment) ? out.appointment : {}),
+        ...citaPatch,
+      };
+      out.cita = {
+        ...(isObject(out.cita) ? out.cita : {}),
+        ...citaPatch,
+      };
+
+      if (citaJson.paciente) {
+        const paciente = citaJson.paciente;
+        const patientPatch = {
+          id: parseIntOrNull(paciente.id_paciente),
+          id_paciente: parseIntOrNull(paciente.id_paciente),
+          clinic_id: parseIntOrNull(paciente.clinica_id),
+          clinica_id: parseIntOrNull(paciente.clinica_id),
+          nombre: cleanString(paciente.nombre),
+          apellidos: cleanString(paciente.apellidos),
+          nombre_completo: joinName(paciente.nombre, paciente.apellidos) || null,
+          telefono: cleanString(paciente.telefono_movil),
+          telefono_movil: cleanString(paciente.telefono_movil),
+          email: cleanString(paciente.email),
+        };
+        out.patient = {
+          ...(isObject(out.patient) ? out.patient : {}),
+          ...patientPatch,
+        };
+        out.paciente = {
+          ...(isObject(out.paciente) ? out.paciente : {}),
+          ...patientPatch,
+        };
+      }
+
+      if (citaJson.clinica) {
+        const clinica = citaJson.clinica;
+        const clinicPatch = {
+          id: parseIntOrNull(clinica.id_clinica),
+          id_clinica: parseIntOrNull(clinica.id_clinica),
+          clinic_id: parseIntOrNull(clinica.id_clinica),
+          clinica_id: parseIntOrNull(clinica.id_clinica),
+          group_id: parseIntOrNull(clinica.grupoClinicaId),
+          grupo_id: parseIntOrNull(clinica.grupoClinicaId),
+          nombre: cleanString(clinica.nombre_clinica),
+          nombre_clinica: cleanString(clinica.nombre_clinica),
+        };
+        out.clinic = {
+          ...(isObject(out.clinic) ? out.clinic : {}),
+          ...clinicPatch,
+        };
+        out.clinica = {
+          ...(isObject(out.clinica) ? out.clinica : {}),
+          ...clinicPatch,
+        };
+      }
+
+      if (parseIntOrNull(citaJson.lead_intake_id)) {
+        const lead = await LeadIntake.findByPk(parseIntOrNull(citaJson.lead_intake_id), {
+          attributes: ['id', 'clinica_id', 'nombre', 'telefono', 'email', 'status_lead'],
+          raw: true,
+        });
+        if (lead) {
+          out.lead = {
+            ...(isObject(out.lead) ? out.lead : {}),
+            id: parseIntOrNull(lead.id),
+            lead_intake_id: parseIntOrNull(lead.id),
+            clinica_id: parseIntOrNull(lead.clinica_id),
+            clinic_id: parseIntOrNull(lead.clinica_id),
+            nombre: cleanString(lead.nombre),
+            telefono: cleanString(lead.telefono),
+            email: cleanString(lead.email),
+            status: cleanString(lead.status_lead),
+            status_lead: cleanString(lead.status_lead),
+          };
+        }
+      }
+    }
+  } else if (leadCandidateId && ['lead', 'lead_intake', 'leadintake', 'lead_nuevo'].includes(normalizedType)) {
+    const lead = await LeadIntake.findByPk(leadCandidateId, {
+      attributes: ['id', 'clinica_id', 'nombre', 'telefono', 'email', 'status_lead'],
+      raw: true,
+    });
+    if (lead) {
+      out.lead = {
+        ...(isObject(out.lead) ? out.lead : {}),
+        id: parseIntOrNull(lead.id),
+        lead_intake_id: parseIntOrNull(lead.id),
+        clinica_id: parseIntOrNull(lead.clinica_id),
+        clinic_id: parseIntOrNull(lead.clinica_id),
+        nombre: cleanString(lead.nombre),
+        telefono: cleanString(lead.telefono),
+        email: cleanString(lead.email),
+        status: cleanString(lead.status_lead),
+        status_lead: cleanString(lead.status_lead),
+      };
+    }
+  } else if (patientCandidateId && ['patient', 'paciente'].includes(normalizedType)) {
+    const patient = await Paciente.findByPk(patientCandidateId, {
+      attributes: ['id_paciente', 'clinica_id', 'nombre', 'apellidos', 'telefono_movil', 'email'],
+      raw: true,
+    });
+    if (patient) {
+      const patientPatch = {
+        id: parseIntOrNull(patient.id_paciente),
+        id_paciente: parseIntOrNull(patient.id_paciente),
+        clinic_id: parseIntOrNull(patient.clinica_id),
+        clinica_id: parseIntOrNull(patient.clinica_id),
+        nombre: cleanString(patient.nombre),
+        apellidos: cleanString(patient.apellidos),
+        nombre_completo: joinName(patient.nombre, patient.apellidos) || null,
+        telefono: cleanString(patient.telefono_movil),
+        telefono_movil: cleanString(patient.telefono_movil),
+        email: cleanString(patient.email),
+      };
+      out.patient = {
+        ...(isObject(out.patient) ? out.patient : {}),
+        ...patientPatch,
+      };
+      out.paciente = {
+        ...(isObject(out.paciente) ? out.paciente : {}),
+        ...patientPatch,
+      };
+    }
+  }
+
+  const hydratedClinicId = parseIntOrNull(out?.clinic?.id_clinica)
+    || parseIntOrNull(out?.clinica?.id_clinica)
+    || parseIntOrNull(out?.appointment?.clinica_id)
+    || parseIntOrNull(out?.patient?.clinica_id)
+    || parseIntOrNull(out?.lead?.clinica_id);
+
+  if (hydratedClinicId && !out.clinic) {
+    const clinic = await Clinica.findByPk(hydratedClinicId, {
+      attributes: ['id_clinica', 'grupoClinicaId', 'nombre_clinica'],
+      raw: true,
+    });
+    if (clinic) {
+      const clinicPatch = {
+        id: parseIntOrNull(clinic.id_clinica),
+        id_clinica: parseIntOrNull(clinic.id_clinica),
+        clinic_id: parseIntOrNull(clinic.id_clinica),
+        clinica_id: parseIntOrNull(clinic.id_clinica),
+        group_id: parseIntOrNull(clinic.grupoClinicaId),
+        grupo_id: parseIntOrNull(clinic.grupoClinicaId),
+        nombre: cleanString(clinic.nombre_clinica),
+        nombre_clinica: cleanString(clinic.nombre_clinica),
+      };
+      out.clinic = clinicPatch;
+      out.clinica = { ...clinicPatch };
+    }
+  }
+
+  if (!out.trigger || !isObject(out.trigger)) {
+    out.trigger = { type: cleanString(triggerType) || 'manual', data: {} };
+  }
+  if (!isObject(out.trigger.data)) {
+    out.trigger.data = {};
+  }
+  out.trigger.data = {
+    ...(out.trigger.data || {}),
+    appointment_id: parseIntOrNull(out?.appointment?.id_cita) || parseIntOrNull(out?.cita?.id_cita) || null,
+    cita_id: parseIntOrNull(out?.appointment?.id_cita) || parseIntOrNull(out?.cita?.id_cita) || null,
+    patient_id: parseIntOrNull(out?.patient?.id_paciente) || parseIntOrNull(out?.paciente?.id_paciente) || null,
+    paciente_id: parseIntOrNull(out?.patient?.id_paciente) || parseIntOrNull(out?.paciente?.id_paciente) || null,
+    clinic_id: parseIntOrNull(out?.clinic?.id_clinica) || parseIntOrNull(out?.clinica?.id_clinica) || null,
+    clinica_id: parseIntOrNull(out?.clinic?.id_clinica) || parseIntOrNull(out?.clinica?.id_clinica) || null,
+    lead_intake_id: parseIntOrNull(out?.lead?.id) || null,
+    lead_id: parseIntOrNull(out?.lead?.id) || null,
+  };
+
+  return out;
+}
+
 function formatDateTimeEs(rawDate) {
   if (!rawDate) return null;
   const date = rawDate instanceof Date ? rawDate : new Date(rawDate);
@@ -2708,16 +2998,68 @@ exports.executeTemplateVersion = async (req, res) => {
     const initialContext = body.initial_context && typeof body.initial_context === 'object' && !Array.isArray(body.initial_context)
       ? body.initial_context
       : {};
+    const triggerData = body.trigger_data && typeof body.trigger_data === 'object' ? body.trigger_data : {};
+
+    const hydratedContext = await buildHydratedExecutionContext({
+      triggerType: row.trigger_type,
+      triggerEntityType,
+      triggerEntityId,
+      triggerData,
+    });
 
     const context = {
       trigger: {
         type: row.trigger_type,
-        data: body.trigger_data && typeof body.trigger_data === 'object' ? body.trigger_data : {},
+        data: {
+          ...triggerData,
+          ...(hydratedContext?.trigger?.data && typeof hydratedContext.trigger.data === 'object'
+            ? hydratedContext.trigger.data
+            : {}),
+        },
       },
       __simulation: isSimulation,
       outputs: {},
+      ...hydratedContext,
       ...initialContext,
     };
+    if (!context.outputs || typeof context.outputs !== 'object' || Array.isArray(context.outputs)) {
+      context.outputs = {};
+    }
+    if (!context.trigger || typeof context.trigger !== 'object' || Array.isArray(context.trigger)) {
+      context.trigger = { type: row.trigger_type, data: {} };
+    }
+    if (!context.trigger.data || typeof context.trigger.data !== 'object' || Array.isArray(context.trigger.data)) {
+      context.trigger.data = {};
+    }
+    context.trigger = {
+      ...context.trigger,
+      type: row.trigger_type,
+      data: {
+        ...triggerData,
+        ...(hydratedContext?.trigger?.data && typeof hydratedContext.trigger.data === 'object'
+          ? hydratedContext.trigger.data
+          : {}),
+        ...(initialContext?.trigger?.data && typeof initialContext.trigger.data === 'object'
+          ? initialContext.trigger.data
+          : {}),
+      },
+    };
+
+    const hydratedClinicId = parseIntOrNull(
+      hydratedContext?.clinic?.id_clinica
+      || hydratedContext?.clinica?.id_clinica
+      || hydratedContext?.appointment?.clinica_id
+      || hydratedContext?.patient?.clinica_id
+      || hydratedContext?.lead?.clinica_id
+      || hydratedContext?.trigger?.data?.clinic_id
+      || hydratedContext?.trigger?.data?.clinica_id
+    );
+    const hydratedGroupId = parseIntOrNull(
+      hydratedContext?.clinic?.group_id
+      || hydratedContext?.clinica?.group_id
+      || hydratedContext?.clinic?.grupo_id
+      || hydratedContext?.clinica?.grupo_id
+    );
 
     const createdExecution = await FlowExecutionV2.create({
       idempotency_key: idempotencyKey,
@@ -2729,8 +3071,8 @@ exports.executeTemplateVersion = async (req, res) => {
       trigger_type: row.trigger_type,
       trigger_entity_type: triggerEntityType,
       trigger_entity_id: triggerEntityId,
-      clinic_id: row.clinic_id || null,
-      group_id: row.group_id || null,
+      clinic_id: row.clinic_id || hydratedClinicId || null,
+      group_id: row.group_id || hydratedGroupId || null,
       created_by: access.user_id,
     });
     const io = getIO();

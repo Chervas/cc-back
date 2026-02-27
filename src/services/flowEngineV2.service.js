@@ -17,7 +17,6 @@ const UsuarioClinica = db.UsuarioClinica;
 const Clinica = db.Clinica;
 const ClinicMetaAsset = db.ClinicMetaAsset;
 const WhatsappTemplate = db.WhatsappTemplate;
-const { queues } = require('./queue.service');
 const whatsappService = require('./whatsapp.service');
 const UPDATE_LEAD_INFO_MODES = new Set([
   'set_required',
@@ -67,6 +66,194 @@ function formatAutomationTimestamp(date = new Date()) {
   } catch (_err) {
     return date.toISOString();
   }
+}
+
+function formatDateEs(rawDate) {
+  if (!rawDate) return null;
+  const date = rawDate instanceof Date ? rawDate : new Date(rawDate);
+  if (!Number.isFinite(date.getTime())) return null;
+  return new Intl.DateTimeFormat('es-ES', {
+    timeZone: 'Europe/Madrid',
+    day: '2-digit',
+    month: '2-digit',
+    year: 'numeric',
+  }).format(date);
+}
+
+function formatTimeEs(rawDate) {
+  if (!rawDate) return null;
+  const date = rawDate instanceof Date ? rawDate : new Date(rawDate);
+  if (!Number.isFinite(date.getTime())) return null;
+  return new Intl.DateTimeFormat('es-ES', {
+    timeZone: 'Europe/Madrid',
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false,
+  }).format(date);
+}
+
+function buildDisplayName(...parts) {
+  return parts
+    .map((part) => cleanString(part))
+    .filter(Boolean)
+    .join(' ')
+    .trim();
+}
+
+function mergeContextObject(base, patch) {
+  if (!patch || typeof patch !== 'object' || Array.isArray(patch)) return base || {};
+  if (!base || typeof base !== 'object' || Array.isArray(base)) return clone(patch) || {};
+  return {
+    ...base,
+    ...patch,
+  };
+}
+
+async function enrichContextForTemplateResolution(context, targets = {}) {
+  const out = clone(context) || {};
+  const appointmentId = toIntOrNull(targets.appointment_id);
+  const patientId = toIntOrNull(targets.patient_id);
+  const clinicId = toIntOrNull(targets.clinic_id);
+  const leadIntakeId = toIntOrNull(targets.lead_intake_id);
+
+  if (appointmentId) {
+    const appointment = await CitaPaciente.findByPk(appointmentId, {
+      attributes: ['id_cita', 'clinica_id', 'paciente_id', 'lead_intake_id', 'estado', 'inicio', 'fin', 'titulo', 'motivo'],
+      raw: true,
+    });
+    if (appointment) {
+      const appointmentPatch = {
+        id: toIntOrNull(appointment.id_cita),
+        id_cita: toIntOrNull(appointment.id_cita),
+        clinic_id: toIntOrNull(appointment.clinica_id),
+        clinica_id: toIntOrNull(appointment.clinica_id),
+        patient_id: toIntOrNull(appointment.paciente_id),
+        paciente_id: toIntOrNull(appointment.paciente_id),
+        lead_intake_id: toIntOrNull(appointment.lead_intake_id),
+        estado: cleanString(appointment.estado),
+        status: cleanString(appointment.estado),
+        inicio: appointment.inicio || null,
+        fin: appointment.fin || null,
+        fecha: formatDateEs(appointment.inicio),
+        hora: formatTimeEs(appointment.inicio),
+        titulo: cleanString(appointment.titulo),
+        motivo: cleanString(appointment.motivo),
+      };
+
+      out.appointment = mergeContextObject(out.appointment, appointmentPatch);
+      out.cita = mergeContextObject(out.cita, {
+        ...appointmentPatch,
+      });
+    }
+  }
+
+  const effectivePatientId = patientId
+    || toIntOrNull(out?.appointment?.paciente_id)
+    || toIntOrNull(out?.cita?.paciente_id)
+    || toIntOrNull(out?.trigger?.data?.paciente_id)
+    || toIntOrNull(out?.trigger?.data?.patient_id);
+
+  if (effectivePatientId) {
+    const patient = await db.Paciente.findByPk(effectivePatientId, {
+      attributes: ['id_paciente', 'clinica_id', 'nombre', 'apellidos', 'telefono_movil', 'email'],
+      raw: true,
+    });
+    if (patient) {
+      const fullName = buildDisplayName(patient.nombre, patient.apellidos);
+      const patientPatch = {
+        id: toIntOrNull(patient.id_paciente),
+        id_paciente: toIntOrNull(patient.id_paciente),
+        clinic_id: toIntOrNull(patient.clinica_id),
+        clinica_id: toIntOrNull(patient.clinica_id),
+        nombre: cleanString(patient.nombre),
+        apellidos: cleanString(patient.apellidos),
+        nombre_completo: fullName || null,
+        telefono: cleanString(patient.telefono_movil),
+        telefono_movil: cleanString(patient.telefono_movil),
+        email: cleanString(patient.email),
+      };
+      out.patient = mergeContextObject(out.patient, patientPatch);
+      out.paciente = mergeContextObject(out.paciente, {
+        ...patientPatch,
+      });
+    }
+  }
+
+  const effectiveClinicId = clinicId
+    || toIntOrNull(out?.appointment?.clinica_id)
+    || toIntOrNull(out?.cita?.clinica_id)
+    || toIntOrNull(out?.patient?.clinica_id)
+    || toIntOrNull(out?.paciente?.clinica_id)
+    || toIntOrNull(out?.trigger?.data?.clinica_id)
+    || toIntOrNull(out?.trigger?.data?.clinic_id);
+
+  if (effectiveClinicId) {
+    const clinic = await Clinica.findByPk(effectiveClinicId, {
+      attributes: ['id_clinica', 'nombre_clinica'],
+      raw: true,
+    });
+    if (clinic) {
+      const clinicPatch = {
+        id: toIntOrNull(clinic.id_clinica),
+        id_clinica: toIntOrNull(clinic.id_clinica),
+        clinic_id: toIntOrNull(clinic.id_clinica),
+        clinica_id: toIntOrNull(clinic.id_clinica),
+        nombre: cleanString(clinic.nombre_clinica),
+        nombre_clinica: cleanString(clinic.nombre_clinica),
+      };
+      out.clinic = mergeContextObject(out.clinic, clinicPatch);
+      out.clinica = mergeContextObject(out.clinica, {
+        ...clinicPatch,
+      });
+    }
+  }
+
+  const effectiveLeadIntakeId = leadIntakeId
+    || toIntOrNull(out?.appointment?.lead_intake_id)
+    || toIntOrNull(out?.cita?.lead_intake_id)
+    || toIntOrNull(out?.trigger?.data?.lead_intake_id)
+    || toIntOrNull(out?.trigger?.data?.lead_id);
+
+  if (effectiveLeadIntakeId) {
+    const lead = await LeadIntake.findByPk(effectiveLeadIntakeId, {
+      attributes: ['id', 'clinica_id', 'nombre', 'telefono', 'email', 'status_lead'],
+      raw: true,
+    });
+    if (lead) {
+      const leadPatch = {
+        id: toIntOrNull(lead.id),
+        lead_intake_id: toIntOrNull(lead.id),
+        clinica_id: toIntOrNull(lead.clinica_id),
+        clinic_id: toIntOrNull(lead.clinica_id),
+        nombre: cleanString(lead.nombre),
+        telefono: cleanString(lead.telefono),
+        email: cleanString(lead.email),
+        status: cleanString(lead.status_lead),
+        status_lead: cleanString(lead.status_lead),
+      };
+      out.lead = mergeContextObject(out.lead, leadPatch);
+    }
+  }
+
+  if (!out.trigger || typeof out.trigger !== 'object') {
+    out.trigger = {};
+  }
+  if (!out.trigger.data || typeof out.trigger.data !== 'object') {
+    out.trigger.data = {};
+  }
+  out.trigger.data = {
+    ...(out.trigger.data || {}),
+    appointment_id: toIntOrNull(out?.appointment?.id_cita) || toIntOrNull(out?.cita?.id_cita) || null,
+    cita_id: toIntOrNull(out?.appointment?.id_cita) || toIntOrNull(out?.cita?.id_cita) || null,
+    patient_id: toIntOrNull(out?.patient?.id_paciente) || toIntOrNull(out?.paciente?.id_paciente) || null,
+    paciente_id: toIntOrNull(out?.patient?.id_paciente) || toIntOrNull(out?.paciente?.id_paciente) || null,
+    clinic_id: toIntOrNull(out?.clinic?.id_clinica) || toIntOrNull(out?.clinica?.id_clinica) || null,
+    clinica_id: toIntOrNull(out?.clinic?.id_clinica) || toIntOrNull(out?.clinica?.id_clinica) || null,
+    lead_intake_id: toIntOrNull(out?.lead?.id) || null,
+    lead_id: toIntOrNull(out?.lead?.id) || null,
+  };
+
+  return out;
 }
 
 function buildExecutionSocketPayload(execution, extra = {}) {
@@ -923,9 +1110,10 @@ async function handleSendWhatsapp(node, context, runtime) {
     throw new Error(`whatsapp_template_blocked:${template.status}`);
   }
 
-  const recipientData = await resolveWhatsAppRecipient({ node, config, context, targets });
-  const senderData = await resolveWhatsAppSenderConfig({ config, context, clinicId });
-  const templateParams = resolveTemplateVariables(config, context);
+  const templateContext = await enrichContextForTemplateResolution(context, targets);
+  const recipientData = await resolveWhatsAppRecipient({ node, config, context: templateContext, targets });
+  const senderData = await resolveWhatsAppSenderConfig({ config, context: templateContext, clinicId });
+  const templateParams = resolveTemplateVariables(config, templateContext);
 
   let conversation = await Conversation.findOne({
     where: {
@@ -992,33 +1180,96 @@ async function handleSendWhatsapp(node, context, runtime) {
     metadata,
   });
 
-  await conversation.update({ last_message_at: new Date() });
-
-  const outboundJobPayload = {
-    messageId: msg.id,
-    conversationId: conversation.id,
-    to: recipientData.recipient,
-    body: messageContent,
-    useTemplate: true,
-    templateName: template.name,
-    templateLanguage: metadata.template_language,
-    templateParams,
-    templateComponents: null,
-    clinicConfig: senderData.clinic_config,
-  };
-
   try {
-    await queues.outboundWhatsApp.add('send', outboundJobPayload);
-  } catch (enqueueErr) {
-    const enqueueError = cleanString(enqueueErr?.message) || 'whatsapp_enqueue_failed';
+    const waResponse = await whatsappService.sendMessage({
+      to: recipientData.recipient,
+      body: messageContent,
+      useTemplate: true,
+      templateName: template.name,
+      templateLanguage: metadata.template_language,
+      templateParams,
+      templateComponents: null,
+      clinicConfig: senderData.clinic_config,
+    });
+
+    await msg.update({
+      status: 'sent',
+      metadata: {
+        ...(msg.metadata || {}),
+        wa_response: waResponse,
+        wamid: waResponse?.messages?.[0]?.id || null,
+      },
+      sent_at: new Date(),
+    });
+
+    await conversation.update({ last_message_at: new Date() });
+    const io = getIO();
+    if (io) {
+      const room = conversation?.clinic_id ? `clinic:${conversation.clinic_id}` : null;
+      const payload = {
+        id: msg.id,
+        conversation_id: conversation.id,
+        status: 'sent',
+      };
+      if (room) io.to(room).emit('message:updated', payload);
+      else io.emit('message:updated', payload);
+    }
+  } catch (sendErr) {
+    const providerError = sendErr?.response?.data || sendErr?.message || 'whatsapp_send_failed';
     await msg.update({
       status: 'failed',
       metadata: {
         ...(msg.metadata || {}),
-        enqueue_error: enqueueError,
+        error: providerError,
       },
     });
-    throw new Error(enqueueError);
+
+    try {
+      const nestedError = providerError?.error?.error || providerError?.error || {};
+      const errorCode = nestedError?.code || null;
+      const errorMessage = nestedError?.message || cleanString(sendErr?.message) || 'whatsapp_send_failed';
+      if (errorCode === 133010 && senderData?.clinic_config?.phoneNumberId) {
+        const asset = await ClinicMetaAsset.findOne({
+          where: {
+            assetType: 'whatsapp_phone_number',
+            phoneNumberId: senderData.clinic_config.phoneNumberId,
+            isActive: true,
+          },
+        });
+        if (asset) {
+          const additionalData = asset.additionalData || {};
+          additionalData.registration = {
+            ...(additionalData.registration || {}),
+            status: 'not_registered',
+            requiresPin: true,
+            lastAttemptAt: new Date().toISOString(),
+            lastErrorCode: errorCode,
+            lastErrorMessage: errorMessage,
+          };
+          asset.additionalData = additionalData;
+          await asset.save();
+        }
+      }
+    } catch (_regErr) {
+      // No bloquea el flujo: la causa principal del error ya se propagará.
+    }
+
+    const io = getIO();
+    if (io) {
+      const room = conversation?.clinic_id ? `clinic:${conversation.clinic_id}` : null;
+      const payload = {
+        id: msg.id,
+        conversation_id: conversation.id,
+        status: 'failed',
+        error: providerError,
+      };
+      if (room) io.to(room).emit('message:updated', payload);
+      else io.emit('message:updated', payload);
+    }
+
+    const nestedError = providerError?.error?.error || providerError?.error || {};
+    const providerMessage = cleanString(nestedError?.message) || cleanString(sendErr?.message) || 'whatsapp_send_failed';
+    throw new Error(`whatsapp_send_failed:${providerMessage}`);
   }
 
   return {
