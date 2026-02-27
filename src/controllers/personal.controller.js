@@ -2668,6 +2668,98 @@ exports.getHorariosClinica = async (req, res) => {
     }
 };
 
+/**
+ * Bloque 6.7c: Validates capa-3 schedule rows against effective availability
+ * (capa 1 = disponibilidad general, capa 2 = apertura clínica).
+ * Only applies when modo_disponibilidad === 'avanzado'.
+ *
+ * @param {number} targetUserId
+ * @param {number} clinicaId
+ * @param {Array<{dia_semana:number, hora_inicio:string, hora_fin:string, activo:boolean}>} horarios
+ * @returns {Promise<Array<{dia_semana:number, hora_inicio:string, hora_fin:string, reason:string}>>} errors (empty = valid)
+ */
+async function validateHorariosAgainstEffectiveAvailability(targetUserId, clinicaId, horarios) {
+    const errors = [];
+    const activeHorarios = (horarios || []).filter((h) => h && h.activo !== false);
+    if (!activeHorarios.length) return errors;
+
+    // Load capa 1: disponibilidad general del profesional
+    const dispGeneral = await getDisponibilidadGeneralForDoctor(targetUserId);
+    const dispGeneralRows = dispGeneral?.horarios || [];
+
+    // Index capa 1 by day -> merged intervals in minutes
+    const capa1ByDay = new Map();
+    for (const row of dispGeneralRows) {
+        if (row.activo === false) continue;
+        const dia = normalizeDiaSemana(row.dia_semana);
+        if (dia == null) continue;
+        const startMin = hmToMinutes(row.hora_inicio);
+        const endMin = hmToMinutes(row.hora_fin);
+        if (startMin == null || endMin == null || startMin >= endMin) continue;
+        const list = capa1ByDay.get(dia) || [];
+        list.push({ startMin, endMin });
+        capa1ByDay.set(dia, list);
+    }
+
+    // Load capa 2: horarios de apertura de la clínica
+    const clinicaHorariosMap = await getClinicaHorariosMap([clinicaId]);
+    const clinicaHorarios = clinicaHorariosMap.get(Number(clinicaId)) || [];
+
+    // Index capa 2 by day -> merged intervals in minutes
+    const capa2ByDay = new Map();
+    for (const row of clinicaHorarios) {
+        if (row.activo === false) continue;
+        const dia = normalizeDiaSemana(row.dia_semana);
+        if (dia == null) continue;
+        const startMin = hmToMinutes(row.hora_inicio);
+        const endMin = hmToMinutes(row.hora_fin);
+        if (startMin == null || endMin == null || startMin >= endMin) continue;
+        const list = capa2ByDay.get(dia) || [];
+        list.push({ startMin, endMin });
+        capa2ByDay.set(dia, list);
+    }
+
+    // Helper: check if [startMin, endMin) is fully contained within at least one merged interval
+    function isContainedInIntervals(intervals, startMin, endMin) {
+        if (!intervals || !intervals.length) return false;
+        return intervals.some((iv) => iv.startMin <= startMin && iv.endMin >= endMin);
+    }
+
+    for (const h of activeHorarios) {
+        const dia = normalizeDiaSemana(h.dia_semana);
+        const inicio = normalizeHm(h.hora_inicio);
+        const fin = normalizeHm(h.hora_fin);
+        if (dia == null || !inicio || !fin) continue;
+
+        const startMin = hmToMinutes(inicio);
+        const endMin = hmToMinutes(fin);
+        if (startMin == null || endMin == null || startMin >= endMin) continue;
+
+        // Check capa 1
+        const capa1Intervals = capa1ByDay.get(dia);
+        if (!capa1Intervals || !capa1Intervals.length) {
+            errors.push({ dia_semana: dia, hora_inicio: inicio, hora_fin: fin, reason: 'NO_GENERAL_AVAILABILITY_FOR_DAY' });
+            continue; // No need to check capa 2 if capa 1 fails
+        }
+        if (!isContainedInIntervals(capa1Intervals, startMin, endMin)) {
+            errors.push({ dia_semana: dia, hora_inicio: inicio, hora_fin: fin, reason: 'OUTSIDE_GENERAL_AVAILABILITY' });
+            continue;
+        }
+
+        // Check capa 2
+        const capa2Intervals = capa2ByDay.get(dia);
+        if (!capa2Intervals || !capa2Intervals.length) {
+            errors.push({ dia_semana: dia, hora_inicio: inicio, hora_fin: fin, reason: 'CLINIC_CLOSED_DAY' });
+            continue;
+        }
+        if (!isContainedInIntervals(capa2Intervals, startMin, endMin)) {
+            errors.push({ dia_semana: dia, hora_inicio: inicio, hora_fin: fin, reason: 'OUTSIDE_CLINIC_OPENING' });
+        }
+    }
+
+    return errors;
+}
+
 exports.updateHorariosClinicaForCurrent = async (req, res) => {
     req.params.id = String(req.userData?.userId || '');
     return exports.updateHorariosClinica(req, res);
@@ -2708,6 +2800,26 @@ exports.updateHorariosClinica = async (req, res) => {
                 can_force: false,
                 conflicts: crossClinicConflicts,
             });
+        }
+
+        // Bloque 6.7c: Validate capa 3 against capa 1 + capa 2 (only in avanzado mode)
+        const existingDc = await DoctorClinica.findOne({
+            where: { doctor_id: targetUserId, clinica_id: clinicaId },
+            attributes: ['id', 'modo_disponibilidad'],
+            raw: true,
+        });
+        const currentModo = existingDc?.modo_disponibilidad || 'basico';
+        if (currentModo === 'avanzado' && horarios.length > 0) {
+            const effectiveErrors = await validateHorariosAgainstEffectiveAvailability(
+                targetUserId, clinicaId, horarios,
+            );
+            if (effectiveErrors.length) {
+                return res.status(422).json({
+                    message: 'Algunos tramos del horario están fuera de la disponibilidad efectiva.',
+                    code: 'SCHEDULE_OUT_OF_EFFECTIVE_AVAILABILITY',
+                    errors: effectiveErrors,
+                });
+            }
         }
 
         let dc = await DoctorClinica.findOne({
