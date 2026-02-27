@@ -1,10 +1,12 @@
 'use strict';
 const { Queue, Worker, QueueEvents } = require('bullmq');
 
+const queuePrefix = process.env.BULLMQ_PREFIX || `cc:${process.env.DB_NAME || 'default'}`;
 const connection = {
     connection: {
         url: process.env.REDIS_URL || 'redis://127.0.0.1:6379',
     },
+    prefix: queuePrefix,
 };
 
 const queues = {
