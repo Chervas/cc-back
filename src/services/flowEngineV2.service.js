@@ -263,6 +263,67 @@ function resolveRuntimeTargets(execution, context) {
   };
 }
 
+async function backfillRuntimeTargets(execution, targets = {}) {
+  const out = { ...(targets || {}) };
+  const triggerType = normalizeKey(execution?.trigger_entity_type);
+  const triggerEntityId = toIntOrNull(execution?.trigger_entity_id);
+
+  const hydrateFromAppointment = async (appointmentId) => {
+    if (!appointmentId) return;
+    const appointment = await CitaPaciente.findByPk(appointmentId, {
+      attributes: ['id_cita', 'clinica_id', 'paciente_id', 'lead_intake_id'],
+      raw: true,
+    });
+    if (!appointment) return;
+    out.appointment_id = out.appointment_id || toIntOrNull(appointment.id_cita);
+    out.clinic_id = out.clinic_id || toIntOrNull(appointment.clinica_id);
+    out.patient_id = out.patient_id || toIntOrNull(appointment.paciente_id);
+    out.lead_intake_id = out.lead_intake_id || toIntOrNull(appointment.lead_intake_id);
+  };
+
+  if (out.appointment_id && (!out.clinic_id || !out.patient_id || !out.lead_intake_id)) {
+    await hydrateFromAppointment(out.appointment_id);
+  }
+
+  if (triggerEntityId) {
+    if (['appointment', 'appointment_created', 'cita', 'cita_creada'].includes(triggerType)) {
+      out.appointment_id = out.appointment_id || triggerEntityId;
+      await hydrateFromAppointment(out.appointment_id);
+    } else if (['patient', 'paciente'].includes(triggerType)) {
+      const patient = await db.Paciente.findByPk(triggerEntityId, {
+        attributes: ['id_paciente', 'clinica_id'],
+        raw: true,
+      });
+      if (patient) {
+        out.patient_id = out.patient_id || toIntOrNull(patient.id_paciente);
+        out.clinic_id = out.clinic_id || toIntOrNull(patient.clinica_id);
+      }
+    } else if (['lead', 'lead_intake', 'leadintake', 'lead_nuevo'].includes(triggerType)) {
+      const lead = await LeadIntake.findByPk(triggerEntityId, {
+        attributes: ['id', 'clinica_id'],
+        raw: true,
+      });
+      if (lead) {
+        out.lead_intake_id = out.lead_intake_id || toIntOrNull(lead.id);
+        out.clinic_id = out.clinic_id || toIntOrNull(lead.clinica_id);
+      }
+    } else if (['conversation', 'chat_conversation', 'whatsapp_conversation'].includes(triggerType)) {
+      const conversation = await Conversation.findByPk(triggerEntityId, {
+        attributes: ['id', 'clinic_id', 'patient_id'],
+        raw: true,
+      });
+      if (conversation) {
+        out.conversation_id = out.conversation_id || toIntOrNull(conversation.id);
+        out.clinic_id = out.clinic_id || toIntOrNull(conversation.clinic_id);
+        out.patient_id = out.patient_id || toIntOrNull(conversation.patient_id);
+      }
+    }
+  }
+
+  out.clinic_id = out.clinic_id || toIntOrNull(execution?.clinic_id);
+  return out;
+}
+
 function normalizeStatusTarget(value) {
   const key = normalizeKey(value);
   if (!key) return null;
@@ -832,7 +893,8 @@ function resolveTemplateVariables(config, context) {
 async function handleSendWhatsapp(node, context, runtime) {
   const config = node?.config && typeof node.config === 'object' ? node.config : {};
   const execution = runtime?.execution || null;
-  const targets = resolveRuntimeTargets(execution, context);
+  let targets = resolveRuntimeTargets(execution, context);
+  targets = await backfillRuntimeTargets(execution, targets);
   const clinicId = toIntOrNull(targets.clinic_id);
   if (!clinicId) {
     throw new Error('whatsapp_clinic_not_found');
