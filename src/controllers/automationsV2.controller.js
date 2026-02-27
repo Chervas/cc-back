@@ -820,6 +820,7 @@ function mapTemplate(row, { includeNodes = true, access = null, clinicNameMap = 
     created_by: item.created_by,
     created_at: item.created_at,
     updated_at: item.updated_at,
+    node_count: Array.isArray(item.nodes) ? item.nodes.length : 0,
     can_edit: permissions.can_edit,
     can_delete: permissions.can_delete,
     can_publish: permissions.can_publish,

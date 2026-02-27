@@ -749,6 +749,24 @@ function mergeNodeOutput(context, nodeId, patch) {
   return nextContext;
 }
 
+function deepMergeObject(target, source) {
+  if (!source || typeof source !== 'object' || Array.isArray(source)) return target;
+  const out = target && typeof target === 'object' && !Array.isArray(target) ? target : {};
+  for (const [key, value] of Object.entries(source)) {
+    if (value && typeof value === 'object' && !Array.isArray(value)) {
+      out[key] = deepMergeObject(out[key], value);
+    } else {
+      out[key] = value;
+    }
+  }
+  return out;
+}
+
+function mergeContextPatch(context, patch) {
+  const nextContext = clone(context) || {};
+  return deepMergeObject(nextContext, patch);
+}
+
 function sanitizeAuditValue(value, depth = 0) {
   if (value === undefined || value === null) return value;
   if (typeof value === 'string') {
@@ -901,15 +919,33 @@ async function processNode(node, context, runtime = {}) {
 
     case 'action/change_status': {
       if (simulation) {
+        const targetEntity = normalizeStatusTarget(resolveTemplateValue(config?.target_entity, context)) || null;
+        const nextStatus = cleanString(resolveTemplateValue(config?.new_status, context)) || null;
+        const contextPatch = {};
+        if (targetEntity === 'appointment' && nextStatus) {
+          contextPatch.appointment = {
+            ...(context?.appointment && typeof context.appointment === 'object' ? context.appointment : {}),
+            estado: nextStatus,
+            status: nextStatus,
+          };
+        }
+        if (targetEntity === 'lead' && nextStatus) {
+          contextPatch.lead = {
+            ...(context?.lead && typeof context.lead === 'object' ? context.lead : {}),
+            status_lead: nextStatus,
+            status: nextStatus,
+          };
+        }
         return {
           kind: 'success',
           output: {
             status: 'simulated',
             simulated: true,
-            target_entity: normalizeStatusTarget(resolveTemplateValue(config?.target_entity, context)) || null,
-            new_status: cleanString(resolveTemplateValue(config?.new_status, context)) || null,
+            target_entity: targetEntity,
+            new_status: nextStatus,
             agenda_icon: cleanString(resolveTemplateValue(config?.agenda_icon, context)) || null,
           },
+          context_patch: contextPatch,
           next_node_id: readOutputTarget(node, 'on_success'),
         };
       }
@@ -918,12 +954,35 @@ async function processNode(node, context, runtime = {}) {
 
     case 'action/update_lead_info': {
       if (simulation) {
+        const mode = cleanString(resolveTemplateValue(config?.mode, context)) || 'set_required';
+        const requiredList = normalizeStringArray(resolveTemplateValue(config?.info_requerida, context));
+        const receivedList = normalizeStringArray(resolveTemplateValue(config?.info_recibida_items, context));
+        const leadPatch = {};
+        if (['set_required', 'clear_required', 'clear_all'].includes(mode)) {
+          leadPatch.info_requerida = mode === 'set_required' ? requiredList : [];
+        }
+        if (['set_received', 'append_received', 'clear_received', 'clear_all'].includes(mode)) {
+          const previous = normalizeStringArray(context?.lead?.info_recibida_items);
+          if (mode === 'append_received') {
+            leadPatch.info_recibida_items = normalizeStringArray([...previous, ...receivedList]);
+          } else if (mode === 'set_received') {
+            leadPatch.info_recibida_items = receivedList;
+          } else {
+            leadPatch.info_recibida_items = [];
+          }
+        }
         return {
           kind: 'success',
           output: {
             status: 'simulated',
             simulated: true,
-            mode: cleanString(resolveTemplateValue(config?.mode, context)) || 'set_required',
+            mode,
+          },
+          context_patch: {
+            lead: {
+              ...(context?.lead && typeof context.lead === 'object' ? context.lead : {}),
+              ...leadPatch,
+            },
           },
           next_node_id: readOutputTarget(node, 'on_success'),
         };
@@ -1302,6 +1361,10 @@ async function runExecution(executionId, options = {}) {
 
         localStatus = 'waiting';
         break;
+      }
+
+      if (result.context_patch && typeof result.context_patch === 'object') {
+        context = mergeContextPatch(context, result.context_patch);
       }
 
       context = mergeNodeOutput(context, currentNodeId, {
