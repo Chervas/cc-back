@@ -9,6 +9,8 @@ const FlowExecutionLogV2 = db.FlowExecutionLogV2;
 const CitaPaciente = db.CitaPaciente;
 const Paciente = db.Paciente;
 const LeadIntake = db.LeadIntake;
+const Conversation = db.Conversation;
+const Message = db.Message;
 const UsuarioClinica = db.UsuarioClinica;
 const Usuario = db.Usuario;
 const Clinica = db.Clinica;
@@ -3363,5 +3365,86 @@ exports.getExecutionLogs = async (req, res) => {
   } catch (err) {
     console.error('Error getExecutionLogs v2', err);
     return res.status(500).json({ success: false, error: 'get_execution_logs_failed', message: err.message });
+  }
+};
+
+exports.getMessageDeliveryStatus = async (req, res) => {
+  try {
+    const access = await resolveAccess(req);
+    const messageId = parseIntOrNull(req.params?.message_id);
+    if (!messageId) {
+      return res.status(400).json({ success: false, error: 'invalid_message_id' });
+    }
+
+    const message = await Message.findByPk(messageId, {
+      attributes: [
+        'id',
+        'conversation_id',
+        'direction',
+        'message_type',
+        'status',
+        'metadata',
+        'createdAt',
+        'updatedAt',
+      ],
+      raw: true,
+    });
+
+    if (!message) {
+      return res.status(404).json({ success: false, error: 'message_not_found' });
+    }
+
+    const conversationId = parseIntOrNull(message.conversation_id);
+    let clinicId = null;
+    let groupId = null;
+    if (conversationId) {
+      const conversation = await Conversation.findByPk(conversationId, {
+        attributes: ['id', 'clinic_id'],
+        raw: true,
+      });
+      clinicId = parseIntOrNull(conversation?.clinic_id);
+      if (clinicId) {
+        const clinic = await Clinica.findByPk(clinicId, {
+          attributes: ['id_clinica', 'grupoClinicaId'],
+          raw: true,
+        });
+        groupId = parseIntOrNull(clinic?.grupoClinicaId);
+      }
+    }
+
+    if (!hasScopeAccess(access, { clinic_id: clinicId, group_id: groupId, is_system: false })) {
+      return res.status(403).json({ success: false, error: 'forbidden_scope' });
+    }
+
+    const metadata = isObject(message.metadata) ? message.metadata : {};
+    const waStatus = isObject(metadata.wa_status) ? metadata.wa_status : null;
+    const waStatusHistory = Array.isArray(metadata.wa_status_history) ? metadata.wa_status_history : [];
+    const providerError = metadata.error || metadata.wa_error || null;
+
+    return res.json({
+      success: true,
+      data: {
+        id: message.id,
+        conversation_id: conversationId,
+        clinic_id: clinicId,
+        group_id: groupId,
+        direction: message.direction,
+        message_type: message.message_type,
+        status: cleanString(message.status),
+        provider_status: cleanString(waStatus?.status) || null,
+        provider_timestamp: waStatus?.timestamp || null,
+        template_name: cleanString(metadata.template_name),
+        template_id: parseIntOrNull(metadata.template_id),
+        recipient: cleanString(metadata.recipient),
+        wamid: cleanString(metadata.wamid),
+        error: providerError,
+        status_history: waStatusHistory,
+        created_at: message.createdAt || null,
+        updated_at: message.updatedAt || null,
+      },
+    });
+  } catch (err) {
+    console.error('Error getMessageDeliveryStatus v2', err);
+    return res.status(500).json({ success: false, error: 'get_message_status_failed', message: err.message });
   }
 };

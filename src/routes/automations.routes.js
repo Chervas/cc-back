@@ -33,6 +33,7 @@ router.get('/v2/executions', automationsV2Controller.listExecutions);
 router.get('/v2/executions/:id', automationsV2Controller.getExecution);
 router.get('/v2/executions/:id/logs', automationsV2Controller.getExecutionLogs);
 router.post('/v2/executions/:id/resume', automationsV2Controller.resumeExecution);
+router.get('/v2/messages/:message_id/status', automationsV2Controller.getMessageDeliveryStatus);
 
 // Activación con validación de canales
 router.post('/:id/activate', automationsController.activateAutomation);
