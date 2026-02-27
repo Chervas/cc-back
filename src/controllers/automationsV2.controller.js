@@ -2271,15 +2271,33 @@ exports.updateTemplateDraft = async (req, res) => {
       return res.status(404).json({ success: false, error: 'template_version_not_found' });
     }
 
+    const body = req.body || {};
+    const bodyKeys = Object.keys(body || {});
+
     if (row.published_at) {
-      return res.status(409).json({
-        success: false,
-        error: 'published_immutable',
-        message: 'No se puede editar una versión publicada. Crea un nuevo draft.',
+      const allowsOnlyActiveToggle =
+        bodyKeys.length > 0 &&
+        bodyKeys.every((key) => key === 'is_active');
+
+      if (!allowsOnlyActiveToggle) {
+        return res.status(409).json({
+          success: false,
+          error: 'published_immutable',
+          message: 'No se puede editar una versión publicada. Crea un nuevo draft.',
+        });
+      }
+
+      await row.update({
+        is_active: parseBool(body.is_active, row.is_active),
+      });
+
+      const clinicNameMap = await loadClinicNameMapFromRows([row]);
+      return res.json({
+        success: true,
+        data: mapTemplate(row, { includeNodes: true, access, clinicNameMap }),
       });
     }
 
-    const body = req.body || {};
     const updates = {};
     let explicitTriggerType = undefined;
 
@@ -2600,7 +2618,11 @@ exports.executeTemplateVersion = async (req, res) => {
       return res.status(404).json({ success: false, error: 'template_version_not_found' });
     }
 
-    if (!row.published_at) {
+    const body = req.body || {};
+    const isSimulation = parseBool(body.simulation, false);
+    const allowDraftExecution = parseBool(body.allow_draft_execution, false);
+
+    if (!row.published_at && !(isSimulation && allowDraftExecution)) {
       return res.status(409).json({
         success: false,
         error: 'draft_not_executable',
@@ -2626,7 +2648,6 @@ exports.executeTemplateVersion = async (req, res) => {
       });
     }
 
-    const body = req.body || {};
     const triggerEntityId = parseIntOrNull(body.trigger_entity_id);
     const triggerEntityType = cleanString(body.trigger_entity_type) || 'entity';
 
@@ -2655,6 +2676,7 @@ exports.executeTemplateVersion = async (req, res) => {
         type: row.trigger_type,
         data: body.trigger_data && typeof body.trigger_data === 'object' ? body.trigger_data : {},
       },
+      __simulation: isSimulation,
       outputs: {},
       ...initialContext,
     };

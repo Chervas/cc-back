@@ -860,9 +860,17 @@ function parseWaitUntilExpression(expression, context) {
   return null;
 }
 
+function isSimulationRuntime(runtime = {}, context = {}) {
+  if (parseBool(runtime?.simulation, false)) return true;
+  if (parseBool(context?.__simulation, false)) return true;
+  if (parseBool(getByPath(context, 'trigger.data.__simulation'), false)) return true;
+  return false;
+}
+
 async function processNode(node, context, runtime = {}) {
   const nodeType = cleanString(node?.type) || 'unknown';
   const config = node?.config && typeof node.config === 'object' ? node.config : {};
+  const simulation = isSimulationRuntime(runtime, context);
 
   if (nodeType.startsWith('trigger/')) {
     return {
@@ -877,14 +885,49 @@ async function processNode(node, context, runtime = {}) {
 
   switch (nodeType) {
     case 'action/write_note': {
+      if (simulation) {
+        return {
+          kind: 'success',
+          output: {
+            status: 'simulated',
+            simulated: true,
+            content: cleanString(resolveTemplateValue(config?.content, context)) || null,
+          },
+          next_node_id: readOutputTarget(node, 'on_success'),
+        };
+      }
       return handleWriteNote(node, context, runtime);
     }
 
     case 'action/change_status': {
+      if (simulation) {
+        return {
+          kind: 'success',
+          output: {
+            status: 'simulated',
+            simulated: true,
+            target_entity: normalizeStatusTarget(resolveTemplateValue(config?.target_entity, context)) || null,
+            new_status: cleanString(resolveTemplateValue(config?.new_status, context)) || null,
+            agenda_icon: cleanString(resolveTemplateValue(config?.agenda_icon, context)) || null,
+          },
+          next_node_id: readOutputTarget(node, 'on_success'),
+        };
+      }
       return handleChangeStatus(node, context, runtime);
     }
 
     case 'action/update_lead_info': {
+      if (simulation) {
+        return {
+          kind: 'success',
+          output: {
+            status: 'simulated',
+            simulated: true,
+            mode: cleanString(resolveTemplateValue(config?.mode, context)) || 'set_required',
+          },
+          next_node_id: readOutputTarget(node, 'on_success'),
+        };
+      }
       return handleUpdateLeadInfo(node, context, runtime);
     }
 
@@ -943,6 +986,17 @@ async function processNode(node, context, runtime = {}) {
     }
 
     case 'action/create_task': {
+      if (simulation) {
+        return {
+          kind: 'success',
+          output: {
+            status: 'simulated',
+            simulated: true,
+            title: cleanString(resolveTemplateValue(config?.title, context)) || 'Tarea de automatización',
+          },
+          next_node_id: readOutputTarget(node, 'on_success'),
+        };
+      }
       return handleCreateTask(node, context, runtime);
     }
 
