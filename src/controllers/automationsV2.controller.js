@@ -276,7 +276,7 @@ const NODE_TYPES_V2 = [
     label: 'Enviar WhatsApp',
     description: 'Envía un mensaje de WhatsApp usando una plantilla aprobada.',
     output_keys: ['on_success', 'on_fail'],
-    runtime_status: 'stub',
+    runtime_status: 'real',
     default_config: {
       template_id: '',
       language_code: 'es_ES',

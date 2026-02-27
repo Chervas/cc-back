@@ -14,6 +14,11 @@ const Conversation = db.Conversation;
 const Message = db.Message;
 const Notification = db.Notification;
 const UsuarioClinica = db.UsuarioClinica;
+const Clinica = db.Clinica;
+const ClinicMetaAsset = db.ClinicMetaAsset;
+const WhatsappTemplate = db.WhatsappTemplate;
+const { queues } = require('./queue.service');
+const whatsappService = require('./whatsapp.service');
 const UPDATE_LEAD_INFO_MODES = new Set([
   'set_required',
   'set_received',
@@ -264,6 +269,20 @@ function normalizeStatusTarget(value) {
   if (['appointment', 'cita'].includes(key)) return 'appointment';
   if (key === 'lead') return 'lead';
   return null;
+}
+
+function normalizeRecipientMode(value) {
+  const normalized = normalizeKey(value);
+  if (['manual_number', 'manualnumber', 'manual'].includes(normalized)) return 'manual_number';
+  if (['context_lead', 'lead', 'lead_phone', 'leadphone'].includes(normalized)) return 'context_lead';
+  if (['context_patient', 'patient', 'flow_phone', 'patient_phone', 'flowphone', 'patientphone'].includes(normalized)) {
+    return 'context_patient';
+  }
+  return 'context_patient';
+}
+
+function toLowerSafe(value) {
+  return String(value || '').trim().toLowerCase();
 }
 
 function normalizeStringArray(value) {
@@ -662,6 +681,297 @@ async function handleWriteNote(node, context, runtime) {
   };
 }
 
+async function resolveWhatsAppRecipient({ node, config, context, targets }) {
+  const recipientMode = normalizeRecipientMode(resolveTemplateValue(config?.recipient_mode, context));
+  let rawRecipient = null;
+
+  if (recipientMode === 'manual_number') {
+    rawRecipient =
+      resolveTemplateValue(config?.recipient_to, context) ||
+      resolveTemplateValue(config?.to, context) ||
+      null;
+  } else if (recipientMode === 'context_lead') {
+    rawRecipient =
+      resolveTemplateValue('{{lead.telefono}}', context) ||
+      resolveTemplateValue(config?.phone_field, context) ||
+      null;
+
+    if (!rawRecipient && targets.lead_intake_id) {
+      const lead = await LeadIntake.findByPk(targets.lead_intake_id, {
+        attributes: ['telefono'],
+      });
+      rawRecipient = lead?.telefono || null;
+    }
+  } else {
+    rawRecipient =
+      resolveTemplateValue('{{paciente.telefono}}', context) ||
+      resolveTemplateValue(config?.phone_field, context) ||
+      null;
+
+    if (!rawRecipient && targets.patient_id) {
+      const patient = await db.Paciente.findByPk(targets.patient_id, {
+        attributes: ['telefono_movil'],
+      });
+      rawRecipient = patient?.telefono_movil || null;
+    }
+  }
+
+  const normalizedRecipient = whatsappService.normalizePhoneNumber(rawRecipient);
+  if (!normalizedRecipient) {
+    throw new Error('whatsapp_recipient_not_found');
+  }
+
+  return {
+    recipient_mode: recipientMode,
+    raw_recipient: cleanString(rawRecipient),
+    recipient: normalizedRecipient,
+  };
+}
+
+async function resolveSpecificSenderConfig({ senderOriginId, clinicId }) {
+  const originId = toIntOrNull(senderOriginId);
+  if (!originId) {
+    throw new Error('whatsapp_sender_origin_missing');
+  }
+
+  const origin = await ClinicMetaAsset.findByPk(originId, {
+    attributes: [
+      'id',
+      'assetType',
+      'isActive',
+      'assignmentScope',
+      'clinicaId',
+      'grupoClinicaId',
+      'phoneNumberId',
+      'waAccessToken',
+      'wabaId',
+      'additionalData',
+      'metaAssetName',
+    ],
+  });
+
+  if (!origin || origin.assetType !== 'whatsapp_phone_number' || !origin.isActive) {
+    throw new Error('whatsapp_sender_origin_not_found');
+  }
+
+  let allowed = false;
+  if (origin.assignmentScope === 'clinic') {
+    allowed = !!clinicId && Number(origin.clinicaId) === Number(clinicId);
+  } else if (origin.assignmentScope === 'group') {
+    const clinic = clinicId
+      ? await Clinica.findOne({
+          where: { id_clinica: clinicId },
+          attributes: ['grupoClinicaId'],
+          raw: true,
+        })
+      : null;
+    allowed = !!clinic?.grupoClinicaId && Number(clinic.grupoClinicaId) === Number(origin.grupoClinicaId);
+  } else {
+    allowed = !!clinicId && Number(origin.clinicaId) === Number(clinicId);
+  }
+
+  if (!allowed) {
+    throw new Error('whatsapp_sender_origin_scope_mismatch');
+  }
+
+  return {
+    phoneNumberId: cleanString(origin.phoneNumberId),
+    accessToken: cleanString(origin.waAccessToken),
+    wabaId: cleanString(origin.wabaId),
+    assignmentScope: cleanString(origin.assignmentScope),
+    clinicaId: toIntOrNull(origin.clinicaId) || clinicId || null,
+    grupoClinicaId: toIntOrNull(origin.grupoClinicaId),
+    additionalData: origin.additionalData || {},
+    originLabel: cleanString(origin.metaAssetName),
+    originId: origin.id,
+  };
+}
+
+async function resolveWhatsAppSenderConfig({ config, context, clinicId }) {
+  const senderMode = toLowerSafe(resolveTemplateValue(config?.sender_mode, context)) || 'clinic_default';
+  if (senderMode === 'specific_origin') {
+    const senderOriginId = toIntOrNull(resolveTemplateValue(config?.sender_origin_id, context));
+    const specific = await resolveSpecificSenderConfig({
+      senderOriginId,
+      clinicId,
+    });
+    if (!specific?.accessToken || !specific?.phoneNumberId) {
+      throw new Error('whatsapp_sender_origin_missing_credentials');
+    }
+    return {
+      sender_mode: 'specific_origin',
+      sender_origin_id: specific.originId,
+      clinic_config: specific,
+    };
+  }
+
+  const clinicConfig = await whatsappService.getClinicConfig(clinicId);
+  if (!clinicConfig?.accessToken || !clinicConfig?.phoneNumberId) {
+    throw new Error('whatsapp_config_missing');
+  }
+
+  return {
+    sender_mode: 'clinic_default',
+    sender_origin_id: null,
+    clinic_config: clinicConfig,
+  };
+}
+
+function resolveTemplateVariables(config, context) {
+  const raw = config?.variables;
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return {};
+  const output = {};
+  for (const [key, value] of Object.entries(raw)) {
+    const resolved = resolveTemplateValue(value, context);
+    if (resolved === undefined || resolved === null || resolved === '') continue;
+    output[key] = String(resolved);
+  }
+  return output;
+}
+
+async function handleSendWhatsapp(node, context, runtime) {
+  const config = node?.config && typeof node.config === 'object' ? node.config : {};
+  const execution = runtime?.execution || null;
+  const targets = resolveRuntimeTargets(execution, context);
+  const clinicId = toIntOrNull(targets.clinic_id);
+  if (!clinicId) {
+    throw new Error('whatsapp_clinic_not_found');
+  }
+
+  const templateId = toIntOrNull(resolveTemplateValue(config?.template_id, context));
+  if (!templateId) {
+    throw new Error('whatsapp_template_id_missing');
+  }
+
+  const template = await WhatsappTemplate.findByPk(templateId, {
+    attributes: ['id', 'name', 'language', 'status', 'components'],
+  });
+  if (!template) {
+    throw new Error(`whatsapp_template_not_found:${templateId}`);
+  }
+
+  const templateStatus = toLowerSafe(template.status);
+  if (templateStatus && !['approved', 'active'].includes(templateStatus)) {
+    throw new Error(`whatsapp_template_not_approved:${template.status}`);
+  }
+
+  const recipientData = await resolveWhatsAppRecipient({ node, config, context, targets });
+  const senderData = await resolveWhatsAppSenderConfig({ config, context, clinicId });
+  const templateParams = resolveTemplateVariables(config, context);
+
+  let conversation = await Conversation.findOne({
+    where: {
+      clinic_id: clinicId,
+      channel: 'whatsapp',
+      contact_id: recipientData.recipient,
+    },
+  });
+
+  if (!conversation) {
+    conversation = await Conversation.create({
+      clinic_id: clinicId,
+      channel: 'whatsapp',
+      contact_id: recipientData.recipient,
+      patient_id: toIntOrNull(targets.patient_id),
+      unread_count: 0,
+      last_message_at: new Date(),
+    });
+  } else if (!conversation.patient_id && targets.patient_id) {
+    await conversation.update({ patient_id: toIntOrNull(targets.patient_id) });
+  }
+
+  const limitStatus = await whatsappService.checkOutboundLimit({
+    clinicConfig: senderData.clinic_config,
+    conversation,
+  });
+  if (limitStatus?.limitReached) {
+    throw new Error('whatsapp_limit_reached');
+  }
+
+  const messageContent = `[Plantilla WhatsApp] ${template.name}`;
+  const metadata = {
+    source: 'automations_v2',
+    kind: 'flow_send_whatsapp',
+    execution_id: execution?.id || null,
+    node_id: cleanString(node?.id),
+    template_id: template.id,
+    template_name: template.name,
+    template_language: cleanString(resolveTemplateValue(config?.language_code, context)) || template.language || 'es_ES',
+    template_params: templateParams,
+    recipient_mode: recipientData.recipient_mode,
+    recipient: recipientData.recipient,
+    sender_mode: senderData.sender_mode,
+    sender_origin_id: senderData.sender_origin_id,
+    phoneNumberId: senderData.clinic_config?.phoneNumberId || null,
+    wabaId: senderData.clinic_config?.wabaId || null,
+    limitMode: !!limitStatus?.limitedMode,
+    limitSnapshot: limitStatus?.limitedMode
+      ? {
+          count: limitStatus.count,
+          limit: limitStatus.limit,
+        }
+      : null,
+  };
+
+  const msg = await Message.create({
+    conversation_id: conversation.id,
+    sender_id: null,
+    direction: 'outbound',
+    content: messageContent,
+    message_type: 'template',
+    status: 'pending',
+    sent_at: new Date(),
+    metadata,
+  });
+
+  await conversation.update({ last_message_at: new Date() });
+
+  const outboundJobPayload = {
+    messageId: msg.id,
+    conversationId: conversation.id,
+    to: recipientData.recipient,
+    body: messageContent,
+    useTemplate: true,
+    templateName: template.name,
+    templateLanguage: metadata.template_language,
+    templateParams,
+    templateComponents: null,
+    clinicConfig: senderData.clinic_config,
+  };
+
+  try {
+    await queues.outboundWhatsApp.add('send', outboundJobPayload);
+  } catch (enqueueErr) {
+    const enqueueError = cleanString(enqueueErr?.message) || 'whatsapp_enqueue_failed';
+    await msg.update({
+      status: 'failed',
+      metadata: {
+        ...(msg.metadata || {}),
+        enqueue_error: enqueueError,
+      },
+    });
+    throw new Error(enqueueError);
+  }
+
+  return {
+    kind: 'success',
+    output: {
+      message_id: msg.id,
+      status: 'queued',
+      template_id: template.id,
+      template_name: template.name,
+      recipient_mode: recipientData.recipient_mode,
+      recipient: recipientData.recipient,
+      sender_mode: senderData.sender_mode,
+      sender_origin_id: senderData.sender_origin_id,
+      conversation_id: conversation.id,
+      phone_number_id: senderData.clinic_config?.phoneNumberId || null,
+      limited_mode: !!limitStatus?.limitedMode,
+    },
+    next_node_id: readOutputTarget(node, 'on_success'),
+  };
+}
+
 async function handleCreateTask(node, context, runtime) {
   const config = node?.config && typeof node.config === 'object' ? node.config : {};
   const targets = resolveRuntimeTargets(runtime?.execution, context);
@@ -991,44 +1301,25 @@ async function processNode(node, context, runtime = {}) {
     }
 
     case 'action/send_whatsapp': {
-      const rawRecipientMode = String(config?.recipient_mode || 'context_patient').toLowerCase();
-      const recipientMode = rawRecipientMode === 'flow_phone' ? 'context_patient' : rawRecipientMode;
-      const senderMode = String(config?.sender_mode || 'clinic_default').toLowerCase();
-
-      let recipient = null;
-      if (recipientMode === 'manual_number') {
-        recipient = resolveTemplateValue(config?.recipient_to, context) || resolveTemplateValue(config?.to, context) || null;
-      } else if (recipientMode === 'context_lead') {
-        recipient =
-          resolveTemplateValue('{{lead.telefono}}', context) ||
-          resolveTemplateValue(config?.phone_field, context) ||
-          null;
-      } else {
-        recipient =
-          resolveTemplateValue('{{paciente.telefono}}', context) ||
-          resolveTemplateValue(config?.phone_field, context) ||
-          null;
+      if (simulation) {
+        const recipientMode = normalizeRecipientMode(resolveTemplateValue(config?.recipient_mode, context));
+        const senderMode = toLowerSafe(resolveTemplateValue(config?.sender_mode, context)) || 'clinic_default';
+        return {
+          kind: 'success',
+          output: {
+            status: 'simulated',
+            simulated: true,
+            template_id: toIntOrNull(resolveTemplateValue(config?.template_id, context)),
+            recipient_mode: recipientMode,
+            sender_mode: senderMode,
+            sender_origin_id: senderMode === 'specific_origin'
+              ? (toIntOrNull(resolveTemplateValue(config?.sender_origin_id, context)) || null)
+              : null,
+          },
+          next_node_id: readOutputTarget(node, 'on_success'),
+        };
       }
-
-      const senderOriginId =
-        senderMode === 'specific_origin'
-          ? (toIntOrNull(resolveTemplateValue(config?.sender_origin_id, context)) || null)
-          : null;
-
-      return {
-        kind: 'success',
-        output: {
-          message_id: `stub_wa_${Date.now()}`,
-          status: 'queued_stub',
-          template_id: config?.template_id || null,
-          recipient_mode: recipientMode,
-          recipient,
-          sender_mode: senderMode,
-          sender_origin_id: senderOriginId,
-          language_code: config?.language_code || null,
-        },
-        next_node_id: readOutputTarget(node, 'on_success'),
-      };
+      return handleSendWhatsapp(node, context, runtime);
     }
 
     case 'action/send_email': {
