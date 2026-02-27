@@ -1159,6 +1159,7 @@ async function handleSendWhatsapp(node, context, runtime) {
     sender_mode: senderData.sender_mode,
     sender_origin_id: senderData.sender_origin_id,
     phoneNumberId: senderData.clinic_config?.phoneNumberId || null,
+    phoneId: senderData.clinic_config?.phoneNumberId || null,
     wabaId: senderData.clinic_config?.wabaId || null,
     limitMode: !!limitStatus?.limitedMode,
     limitSnapshot: limitStatus?.limitedMode
@@ -1198,6 +1199,7 @@ async function handleSendWhatsapp(node, context, runtime) {
         ...(msg.metadata || {}),
         wa_response: waResponse,
         wamid: waResponse?.messages?.[0]?.id || null,
+        phoneId: senderData.clinic_config?.phoneNumberId || msg?.metadata?.phoneId || null,
       },
       sent_at: new Date(),
     });

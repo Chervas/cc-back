@@ -205,6 +205,7 @@ createWorker('webhook_whatsapp', async (job) => {
     const leadId = job.data?.lead_id || null;
     const webOriginRefFromJob = job.data?.web_origin_ref || null;
     const routing = job.data?.routing || null;
+    const matchedConversationId = Number(routing?.matched_conversation_id || 0) || null;
 
     if (!payload || !clinicId) {
         throw new Error('Payload o clinic_id ausente en webhook de WhatsApp');
@@ -249,19 +250,42 @@ createWorker('webhook_whatsapp', async (job) => {
             }
         }
 
-        const [conv, created] = await Conversation.findOrCreate({
-            where: { contact_id: `+${from}`.replace('++', '+'), channel: 'whatsapp', clinic_id: clinicId },
-            defaults: {
-                clinic_id: clinicId,
-                channel: 'whatsapp',
-                contact_id: `+${from}`.replace('++', '+'),
-                last_message_at: new Date(),
-                last_inbound_at: new Date(),
-                unread_count: 1,
-                patient_id: patientId,
-                lead_id: leadId,
-            },
-        });
+        const normalizedContact = `+${from}`.replace('++', '+');
+        let conv = null;
+        let created = false;
+
+        // Si el router ya encontró conversación exacta (por contexto/outbound), priorizarla.
+        // Evita enrutados cruzados cuando el mismo teléfono existe en varias clínicas del grupo.
+        if (matchedConversationId) {
+            const matched = await Conversation.findOne({
+                where: {
+                    id: matchedConversationId,
+                    channel: 'whatsapp',
+                },
+            });
+
+            if (matched && (!normalizedContact || matched.contact_id === normalizedContact)) {
+                conv = matched;
+            }
+        }
+
+        if (!conv) {
+            const tuple = await Conversation.findOrCreate({
+                where: { contact_id: normalizedContact, channel: 'whatsapp', clinic_id: clinicId },
+                defaults: {
+                    clinic_id: clinicId,
+                    channel: 'whatsapp',
+                    contact_id: normalizedContact,
+                    last_message_at: new Date(),
+                    last_inbound_at: new Date(),
+                    unread_count: 1,
+                    patient_id: patientId,
+                    lead_id: leadId,
+                },
+            });
+            conv = tuple[0];
+            created = tuple[1];
+        }
 
         if (!created && (patientId || leadId)) {
             let updated = false;
