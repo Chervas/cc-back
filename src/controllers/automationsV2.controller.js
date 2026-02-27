@@ -2660,11 +2660,11 @@ exports.executeTemplateVersion = async (req, res) => {
     const isSimulation = parseBool(body.simulation, false);
     const allowDraftExecution = parseBool(body.allow_draft_execution, false);
 
-    if (!row.published_at && !(isSimulation && allowDraftExecution)) {
+    if (!row.published_at && !allowDraftExecution) {
       return res.status(409).json({
         success: false,
         error: 'draft_not_executable',
-        message: 'No se puede ejecutar una versión draft. Publica primero.',
+        message: 'No se puede ejecutar una versión draft sin permiso explícito.',
       });
     }
 
