@@ -346,6 +346,12 @@ function toLowerSafe(value) {
   return String(value || '').trim().toLowerCase();
 }
 
+function isTemplateBlockedForSend(statusValue) {
+  const status = toLowerSafe(statusValue);
+  if (!status) return false;
+  return ['rejected', 'disabled', 'deleted', 'archived'].includes(status);
+}
+
 function normalizeStringArray(value) {
   if (value === undefined || value === null) return [];
 
@@ -913,8 +919,8 @@ async function handleSendWhatsapp(node, context, runtime) {
   }
 
   const templateStatus = toLowerSafe(template.status);
-  if (templateStatus && !['approved', 'active'].includes(templateStatus)) {
-    throw new Error(`whatsapp_template_not_approved:${template.status}`);
+  if (isTemplateBlockedForSend(templateStatus)) {
+    throw new Error(`whatsapp_template_blocked:${template.status}`);
   }
 
   const recipientData = await resolveWhatsAppRecipient({ node, config, context, targets });
