@@ -30,7 +30,7 @@ const {
 const DEFAULT_TIMEZONE = 'Europe/Madrid';
 // Nota: columna DoctorBloqueos.tipo es STRING(32) (sin ENUM). Mantener lista alineada con el front.
 const BLOQUEO_TIPOS = new Set(['vacaciones', 'enfermedad', 'ausencia', 'formacion', 'congreso', 'otro']);
-const MODO_DISPONIBILIDAD = new Set(['avanzado', 'basico']);
+const MODO_DISPONIBILIDAD = new Set(['avanzado', 'basico', 'solo_registro']);
 const ESTADO_CUENTA = new Set(ESTADO_CUENTA_ARR);
 const ESTADO_INVITACION = new Set(ESTADO_INVITACION_ARR);
 const ROLES_CLINICA = new Set(ROLES_CLINICA_ARR);

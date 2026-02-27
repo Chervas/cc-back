@@ -33,7 +33,13 @@ exports.list = asyncHandler(async (req, res) => {
   const { clinica_id, group_id, all } = req.query;
 
   // Filtrado por clinica_id directamente sobre DoctorClinica (evita depender de atributos inexistentes en Clinica)
-  const whereDoctorClinica = { activo: true };
+  const whereDoctorClinica = {
+    activo: true,
+    [Op.or]: [
+      { modo_disponibilidad: { [Op.ne]: 'solo_registro' } },
+      { modo_disponibilidad: null }
+    ]
+  };
   // Mantener /api/doctors legacy limitado a doctores reales:
   // incluir cualquier rol de staff (propietario/personal/agencia) con subrol Doctores
   // para soportar casos propietario+doctor sin perder visibilidad en agenda.

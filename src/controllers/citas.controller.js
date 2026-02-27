@@ -258,7 +258,9 @@ const inAnyWindow = (windows, start, end) => {
 
 const normalizeModoDisponibilidad = (value) => {
     const mode = String(value || '').trim().toLowerCase();
-    return mode === 'basico' ? 'basico' : 'avanzado';
+    if (mode === 'basico') return 'basico';
+    if (mode === 'solo_registro') return 'solo_registro';
+    return 'avanzado';
 };
 
 const mergeWindows = (windows) => {
@@ -396,6 +398,15 @@ function buildDoctorAvailabilityContext({
             outOfHoursMessage: globalWins.length
                 ? 'Profesional fuera de su disponibilidad general'
                 : 'Profesional sin disponibilidad general configurada'
+        };
+    }
+
+    if (mode === 'solo_registro') {
+        return {
+            docWins: [],
+            dcMissing: false,
+            mode,
+            outOfHoursMessage: 'Profesional en modo solo registro (no aparece en agenda de citas)'
         };
     }
 
