@@ -6,7 +6,6 @@
 # Prerequisitos:
 #   - Backend corriendo en localhost:3002 (o ajustar BASE)
 #   - Un doctor con id=$DOCTOR_ID asociado a clínica $CLINICA_ID
-#   - El doctor en modo 'avanzado' en esa clínica
 #   - Disponibilidad general (capa 1) configurada para al menos un día
 #   - Horarios de apertura de clínica (capa 2) configurados
 #   - Un JWT válido en $TOKEN
@@ -20,6 +19,7 @@
 # El script descubre dinámicamente los datos de capa 1 y capa 2
 # y construye los tramos de prueba a partir de ellos.
 # Cada caso verifica HTTP code y/o JSON code con aserciones automáticas.
+# Al inicio hace backup completo del estado; al final (o en error) restaura.
 
 set -euo pipefail
 
@@ -31,11 +31,14 @@ TOKEN="${TOKEN:?Falta TOKEN}"
 URL_HORARIOS="$BASE/api/personal/$DOCTOR_ID/clinicas/$CLINICA_ID/horarios"
 URL_MODO="$BASE/api/personal/$DOCTOR_ID/clinicas/$CLINICA_ID/modo-disponibilidad"
 URL_SCHEDULE="$BASE/api/personal/$DOCTOR_ID/schedule"
+URL_DISP_GENERAL="$BASE/api/personal/$DOCTOR_ID/disponibilidad-general"
 
+BACKUP_FILE="/tmp/qa-67c-backup.json"
 PASS=0
 FAIL=0
 TOTAL=0
 
+# ─── Assertion helpers ───
 assert_http() {
     local label="$1" expected_http="$2" actual_http="$3" body_file="$4"
     TOTAL=$((TOTAL + 1))
@@ -68,27 +71,122 @@ print(result)
     fi
 }
 
+# ─── Restore function (called via trap) ───
+restore_state() {
+    echo ""
+    echo "▸ Restaurando estado original..."
+    if [ ! -f "$BACKUP_FILE" ]; then
+        echo "  ⚠️  No hay backup — no se puede restaurar."
+        return
+    fi
+
+    # Restore modo_disponibilidad
+    local ORIG_MODO
+    ORIG_MODO=$(python3 -c "
+import json
+data = json.load(open('$BACKUP_FILE'))
+clinicas = data.get('clinicas', [])
+for c in clinicas:
+    if c.get('clinica_id') == $CLINICA_ID:
+        print(c.get('modo_disponibilidad', 'basico'))
+        break
+else:
+    print('basico')
+" 2>/dev/null || echo "basico")
+    echo "  Modo original: $ORIG_MODO"
+    curl -s -X PATCH "$URL_MODO" \
+      -H "Authorization: $TOKEN" \
+      -H "Content-Type: application/json" \
+      -d "{\"modo_disponibilidad\":\"$ORIG_MODO\"}" > /dev/null
+
+    # Restore horarios de clínica (capa 3)
+    local ORIG_HORARIOS
+    ORIG_HORARIOS=$(python3 -c "
+import json
+data = json.load(open('$BACKUP_FILE'))
+clinicas = data.get('clinicas', [])
+for c in clinicas:
+    if c.get('clinica_id') == $CLINICA_ID:
+        horarios = c.get('horarios', [])
+        # Keep only relevant fields
+        clean = []
+        for h in horarios:
+            clean.append({
+                'dia_semana': h['dia_semana'],
+                'hora_inicio': h['hora_inicio'],
+                'hora_fin': h['hora_fin'],
+                'activo': h.get('activo', True)
+            })
+        print(json.dumps(clean))
+        break
+else:
+    print('[]')
+" 2>/dev/null || echo "[]")
+    echo "  Restaurando horarios clínica ($CLINICA_ID)..."
+    curl -s -X PUT "$URL_HORARIOS" \
+      -H "Authorization: $TOKEN" \
+      -H "Content-Type: application/json" \
+      -d "$ORIG_HORARIOS" > /dev/null
+
+    # Restore disponibilidad general (capa 1)
+    local ORIG_DISP_GENERAL
+    ORIG_DISP_GENERAL=$(python3 -c "
+import json
+data = json.load(open('$BACKUP_FILE'))
+dg = data.get('disponibilidad_general', [])
+clean = []
+for h in dg:
+    clean.append({
+        'dia_semana': h['dia_semana'],
+        'hora_inicio': h['hora_inicio'],
+        'hora_fin': h['hora_fin'],
+        'activo': h.get('activo', True)
+    })
+print(json.dumps(clean))
+" 2>/dev/null || echo "[]")
+    echo "  Restaurando disponibilidad general..."
+    curl -s -X PUT "$URL_DISP_GENERAL" \
+      -H "Authorization: $TOKEN" \
+      -H "Content-Type: application/json" \
+      -d "$ORIG_DISP_GENERAL" > /dev/null
+
+    echo "  ✅ Estado restaurado."
+    rm -f "$BACKUP_FILE"
+}
+
+# Register trap for cleanup on exit (success, error, or interrupt)
+trap restore_state EXIT
+
 echo "═══════════════════════════════════════════════════"
 echo " QA 6.7c-back — Validación capa 3 vs capa 1 + 2"
 echo "═══════════════════════════════════════════════════"
 echo "Doctor: $DOCTOR_ID | Clínica: $CLINICA_ID"
 echo ""
 
-# ─── Paso 0: Descubrir datos dinámicos de capa 1 y capa 2 ───
-echo "▸ Descubriendo datos de schedule..."
-HTTP_SCHED=$(curl -s -o /tmp/qa-sched.json -w "%{http_code}" \
+# ─── Paso 0: Backup completo del estado actual ───
+echo "▸ Haciendo backup del estado actual..."
+HTTP_SCHED=$(curl -s -o "$BACKUP_FILE" -w "%{http_code}" \
   "$URL_SCHEDULE" -H "Authorization: $TOKEN")
 
 if [ "$HTTP_SCHED" != "200" ]; then
     echo "  ❌ No se pudo obtener schedule (HTTP $HTTP_SCHED). Abortando."
     exit 1
 fi
+echo "  ✅ Backup guardado en $BACKUP_FILE"
+echo ""
+
+# ─── Paso 1: Descubrir datos dinámicos de capa 1 y capa 2 ───
+echo "▸ Descubriendo datos de schedule..."
+
+# Shape real de /schedule:
+#   disponibilidad_general: [] (array directo)
+#   clinicas: [] (array de clínicas, cada una con horarios_apertura, horarios, etc.)
 
 # Extraer un día con disponibilidad general (capa 1)
 CAPA1_INFO=$(python3 -c "
 import json
-data = json.load(open('/tmp/qa-sched.json'))
-dg = data.get('disponibilidad_general', {}).get('horarios', [])
+data = json.load(open('$BACKUP_FILE'))
+dg = data.get('disponibilidad_general', [])
 active = [h for h in dg if h.get('activo', True)]
 if not active:
     print('NONE')
@@ -108,8 +206,8 @@ echo "  Capa 1 (día $C1_DIA): $C1_INICIO – $C1_FIN"
 # Extraer apertura de clínica (capa 2) para el mismo día
 CAPA2_INFO=$(python3 -c "
 import json
-data = json.load(open('/tmp/qa-sched.json'))
-clinicas = data.get('schedule_clinicas', [])
+data = json.load(open('$BACKUP_FILE'))
+clinicas = data.get('clinicas', [])
 target_clinica = $CLINICA_ID
 target_dia = $C1_DIA
 for c in clinicas:
@@ -126,13 +224,13 @@ else:
 " 2>/dev/null || echo "NONE")
 
 if [ "$CAPA2_INFO" = "NONE" ]; then
-    echo "  ⚠️  No hay apertura de clínica para día $C1_DIA. Usando día alternativo..."
+    echo "  ⚠️  No hay apertura de clínica para día $C1_DIA. Buscando día alternativo..."
     # Try to find a day that has both capa1 and capa2
     BOTH_INFO=$(python3 -c "
 import json
-data = json.load(open('/tmp/qa-sched.json'))
-dg = data.get('disponibilidad_general', {}).get('horarios', [])
-clinicas = data.get('schedule_clinicas', [])
+data = json.load(open('$BACKUP_FILE'))
+dg = data.get('disponibilidad_general', [])
+clinicas = data.get('clinicas', [])
 target_clinica = $CLINICA_ID
 apertura_by_day = {}
 for c in clinicas:
@@ -194,8 +292,8 @@ echo "  Tramo válido: día $C1_DIA $VALID_START – $VALID_END"
 # Find a day WITHOUT capa 1 (for NO_GENERAL_AVAILABILITY_FOR_DAY test)
 NO_C1_DIA=$(python3 -c "
 import json
-data = json.load(open('/tmp/qa-sched.json'))
-dg = data.get('disponibilidad_general', {}).get('horarios', [])
+data = json.load(open('$BACKUP_FILE'))
+dg = data.get('disponibilidad_general', [])
 used_days = set(h['dia_semana'] for h in dg if h.get('activo', True))
 for d in range(7):
     if d not in used_days:
@@ -207,8 +305,8 @@ else:
 echo "  Día sin capa 1: $NO_C1_DIA"
 echo ""
 
-# ─── Paso 1: Asegurar modo avanzado ───
-echo "▸ Paso 0: Poner modo avanzado"
+# ─── Paso 2: Asegurar modo avanzado ───
+echo "▸ Paso 2: Poner modo avanzado"
 curl -s -X PATCH "$URL_MODO" \
   -H "Authorization: $TOKEN" \
   -H "Content-Type: application/json" \
@@ -248,7 +346,6 @@ echo ""
 
 # ─── Caso 3: Tramo fuera de apertura clínica → 422 OUTSIDE_CLINIC_OPENING ───
 echo "▸ Caso 3: Tramo dentro de capa 1 pero fuera de capa 2 (esperado: 422 OUTSIDE_CLINIC_OPENING)"
-# We need a slot inside capa1 but outside capa2. This only works if capa1 extends beyond capa2.
 OUT_C2_SLOT=$(python3 -c "
 c1s, c1e = '$C1_INICIO', '$C1_FIN'
 c2s, c2e = '$C2_INICIO', '$C2_FIN'
@@ -257,7 +354,6 @@ c2e_h = int(c2e.split(':')[0])
 c2e_m = int(c2e.split(':')[1])
 c1e_h = int(c1e.split(':')[0])
 c1e_m = int(c1e.split(':')[1])
-# Slot: c2e + 0:00 to c2e + 1:00 (if within capa1)
 slot_s = f'{c2e_h:02d}:{c2e_m:02d}'
 slot_e_h = c2e_h + 1
 slot_e = f'{slot_e_h:02d}:{c2e_m:02d}'
@@ -267,8 +363,6 @@ else:
     # Try before capa2 start but within capa1
     c2s_h = int(c2s.split(':')[0])
     c2s_m = int(c2s.split(':')[1])
-    c1s_h = int(c1s.split(':')[0])
-    c1s_m = int(c1s.split(':')[1])
     slot_e2 = f'{c2s_h:02d}:{c2s_m:02d}'
     slot_s2_h = c2s_h - 1
     if slot_s2_h < 0: slot_s2_h = 0
@@ -327,7 +421,7 @@ echo ""
 
 # ─── Caso 6 (bonus): Tramo que cruza intervalos contiguos de capa 1 → 200 ───
 echo "▸ Caso 6 (bonus): Tramo que cruza intervalos contiguos de capa 1 (esperado: 200)"
-# Restore avanzado
+# Restore avanzado for this test
 curl -s -X PATCH "$URL_MODO" \
   -H "Authorization: $TOKEN" \
   -H "Content-Type: application/json" \
@@ -336,9 +430,9 @@ curl -s -X PATCH "$URL_MODO" \
 # Check if capa 1 has contiguous intervals for any day
 CONTIGUOUS_SLOT=$(python3 -c "
 import json
-data = json.load(open('/tmp/qa-sched.json'))
-dg = data.get('disponibilidad_general', {}).get('horarios', [])
-clinicas = data.get('schedule_clinicas', [])
+data = json.load(open('$BACKUP_FILE'))
+dg = data.get('disponibilidad_general', [])
+clinicas = data.get('clinicas', [])
 target_clinica = $CLINICA_ID
 apertura_by_day = {}
 for c in clinicas:
@@ -406,21 +500,8 @@ else
 fi
 echo ""
 
-# ─── Restaurar modo avanzado ───
-echo "▸ Restaurando modo avanzado..."
-curl -s -X PATCH "$URL_MODO" \
-  -H "Authorization: $TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{"modo_disponibilidad":"avanzado"}' > /dev/null
-
-# ─── Restaurar horario válido ───
-echo "▸ Restaurando horario válido..."
-curl -s -X PUT "$URL_HORARIOS" \
-  -H "Authorization: $TOKEN" \
-  -H "Content-Type: application/json" \
-  -d "[{\"dia_semana\":$C1_DIA,\"hora_inicio\":\"$VALID_START\",\"hora_fin\":\"$VALID_END\",\"activo\":true}]" > /dev/null
-
-echo ""
+# ─── Resultados ───
+# (restore_state se ejecuta automáticamente via trap EXIT)
 echo "═══════════════════════════════════════════════════"
 echo " Resultados: $PASS/$TOTAL passed, $FAIL failed"
 echo "═══════════════════════════════════════════════════"
