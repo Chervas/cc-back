@@ -419,8 +419,13 @@ exports.listConversations = async (req, res) => {
     // Si se solicita por paciente y no existe conversación, crearla con su móvil
     if (patientId && !visibleConversations.length && patient?.telefono_movil) {
       const normalized = whatsappService.normalizePhoneNumber(patient.telefono_movil) || patient.telefono_movil;
+      const parsed = parseClinicIdsParam(clinic_id);
+      const clinicToCreate =
+        Array.isArray(parsed) && parsed.length > 0
+          ? parsed[0]
+          : (scopedClinicIds.includes(Number(patient.clinica_id)) ? Number(patient.clinica_id) : scopedClinicIds[0]);
       await Conversation.create({
-        clinic_id: patient.clinica_id,
+        clinic_id: clinicToCreate,
         channel: 'whatsapp',
         contact_id: normalized,
         patient_id: patientId,

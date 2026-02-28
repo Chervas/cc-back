@@ -1335,6 +1335,41 @@ async function handleSendWhatsapp(node, context, runtime) {
     await conversation.update({ patient_id: targetPatientId });
   }
 
+  const senderClinic = await Clinica.findByPk(clinicId, {
+    attributes: ['id_clinica', 'nombre_clinica'],
+    raw: true,
+  });
+
+  let recipientPatientId = toIntOrNull(conversation?.patient_id) || targetPatientId;
+  let recipientPatientName = null;
+  if (recipientPatientId) {
+    const patient = await db.Paciente.findByPk(recipientPatientId, {
+      attributes: ['id_paciente', 'nombre', 'apellidos', 'clinica_id'],
+      raw: true,
+    });
+    if (patient) {
+      let belongsToClinic = Number(patient.clinica_id) === Number(clinicId);
+      if (!belongsToClinic && db.PacienteClinica) {
+        const relation = await db.PacienteClinica.findOne({
+          where: {
+            paciente_id: recipientPatientId,
+            clinica_id: clinicId,
+          },
+          attributes: ['id'],
+          raw: true,
+        });
+        belongsToClinic = !!relation;
+      }
+      if (belongsToClinic) {
+        recipientPatientName = buildDisplayName(patient.nombre, patient.apellidos) || cleanString(patient.nombre) || null;
+      } else {
+        recipientPatientId = null;
+      }
+    } else {
+      recipientPatientId = null;
+    }
+  }
+
   const limitStatus = await whatsappService.checkOutboundLimit({
     clinicConfig: senderData.clinic_config,
     conversation,
@@ -1485,6 +1520,10 @@ async function handleSendWhatsapp(node, context, runtime) {
         limited_mode: !!limitStatus?.limitedMode,
         quiet_hours_applied: true,
         scheduled_for: quietWindow.scheduledAt ? quietWindow.scheduledAt.toISOString() : null,
+        sender_clinic_id: clinicId,
+        sender_clinic_name: cleanString(senderClinic?.nombre_clinica),
+        recipient_patient_id: recipientPatientId,
+        recipient_patient_name: recipientPatientName,
       },
       next_node_id: readOutputTarget(node, 'on_success'),
     };
@@ -1601,6 +1640,10 @@ async function handleSendWhatsapp(node, context, runtime) {
       limited_mode: !!limitStatus?.limitedMode,
       quiet_hours_applied: false,
       scheduled_for: null,
+      sender_clinic_id: clinicId,
+      sender_clinic_name: cleanString(senderClinic?.nombre_clinica),
+      recipient_patient_id: recipientPatientId,
+      recipient_patient_name: recipientPatientName,
     },
     next_node_id: readOutputTarget(node, 'on_success'),
   };
