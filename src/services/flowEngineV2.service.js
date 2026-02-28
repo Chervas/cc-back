@@ -1385,30 +1385,6 @@ async function handleSendWhatsapp(node, context, runtime) {
   emitMessageCreatedToConversationRooms(conversation, eventMsg);
   emitMessageCreatedToConversationRooms(conversation, msg);
 
-  const trackingLineBase = `[${formatAutomationTimestamp(new Date())}] WhatsApp automático (${flowName || 'flujo'}) · plantilla "${template.name}" · destinatario ${recipientData.recipient}`;
-  if (targets.appointment_id) {
-    const appointment = await CitaPaciente.findByPk(targets.appointment_id);
-    if (appointment) {
-      const noteLine = quietWindow.delayMs > 0 && quietWindow.scheduledAt
-        ? `${trackingLineBase} · programado para ${formatAutomationTimestamp(quietWindow.scheduledAt)}`
-        : `${trackingLineBase} · enviado`;
-      await appointment.update({
-        nota: appendText(appointment.nota, noteLine),
-      });
-    }
-  }
-  if (targets.lead_intake_id) {
-    const lead = await LeadIntake.findByPk(targets.lead_intake_id);
-    if (lead) {
-      const noteLine = quietWindow.delayMs > 0 && quietWindow.scheduledAt
-        ? `${trackingLineBase} · programado para ${formatAutomationTimestamp(quietWindow.scheduledAt)}`
-        : `${trackingLineBase} · enviado`;
-      await lead.update({
-        notas_internas: appendText(lead.notas_internas, noteLine),
-      });
-    }
-  }
-
   if (quietWindow.delayMs > 0) {
     try {
       await queues.outboundWhatsApp.add(
