@@ -3,6 +3,7 @@
 const { Op } = require('sequelize');
 const db = require('../../models');
 const { getIO } = require('./socket.service');
+const { queues } = require('./queue.service');
 const { normalizeCitaStatus, normalizeLeadStatus } = require('../lib/status-catalog');
 
 const AutomationFlowTemplateV2 = db.AutomationFlowTemplateV2;
@@ -90,6 +91,166 @@ function formatTimeEs(rawDate) {
     minute: '2-digit',
     hour12: false,
   }).format(date);
+}
+
+function extractWhatsappTemplateBodyText(template) {
+  const components = Array.isArray(template?.components) ? template.components : [];
+  const bodyParts = components
+    .filter((comp) => String(comp?.type || '').toUpperCase() === 'BODY')
+    .map((comp) => cleanString(comp?.text))
+    .filter(Boolean);
+
+  if (bodyParts.length) {
+    return bodyParts.join('\n');
+  }
+
+  return null;
+}
+
+function renderWhatsappTemplatePreviewText(template, templateParams = {}) {
+  const rawText = extractWhatsappTemplateBodyText(template);
+  if (!rawText) {
+    return `[Plantilla WhatsApp] ${cleanString(template?.name) || 'Sin nombre'}`;
+  }
+
+  return rawText.replace(/{{\s*(\d+)\s*}}/g, (_match, idx) => {
+    const key = String(idx);
+    const value = cleanString(templateParams?.[key]);
+    return value || `{{${key}}}`;
+  });
+}
+
+function getMadridDateParts(date = new Date()) {
+  const parts = new Intl.DateTimeFormat('en-GB', {
+    timeZone: 'Europe/Madrid',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hourCycle: 'h23',
+  }).formatToParts(date);
+
+  const get = (type) => Number(parts.find((part) => part.type === type)?.value || '0');
+  return {
+    year: get('year'),
+    month: get('month'),
+    day: get('day'),
+    hour: get('hour'),
+    minute: get('minute'),
+    second: get('second'),
+  };
+}
+
+function buildDateFromMadridParts(parts) {
+  const desired = {
+    year: Number(parts?.year),
+    month: Number(parts?.month),
+    day: Number(parts?.day),
+    hour: Number(parts?.hour || 0),
+    minute: Number(parts?.minute || 0),
+    second: Number(parts?.second || 0),
+  };
+
+  const guess = new Date(Date.UTC(
+    desired.year,
+    Math.max(0, desired.month - 1),
+    desired.day,
+    desired.hour,
+    desired.minute,
+    desired.second
+  ));
+
+  const actual = getMadridDateParts(guess);
+  const desiredMinutes = Date.UTC(
+    desired.year,
+    Math.max(0, desired.month - 1),
+    desired.day,
+    desired.hour,
+    desired.minute,
+    desired.second
+  ) / 60000;
+  const actualMinutes = Date.UTC(
+    actual.year,
+    Math.max(0, actual.month - 1),
+    actual.day,
+    actual.hour,
+    actual.minute,
+    actual.second
+  ) / 60000;
+
+  return new Date(guess.getTime() + ((desiredMinutes - actualMinutes) * 60000));
+}
+
+function addMadridDays(parts, days) {
+  const utcAnchor = new Date(Date.UTC(parts.year, Math.max(0, parts.month - 1), parts.day + days, 12, 0, 0));
+  return getMadridDateParts(utcAnchor);
+}
+
+function isHourWithinQuietWindow(hour, startHour, endHour) {
+  if (startHour === endHour) return true;
+  if (startHour < endHour) {
+    return hour >= startHour && hour < endHour;
+  }
+  return hour >= startHour || hour < endHour;
+}
+
+function computeQuietHoursDelayMs({
+  now = new Date(),
+  enabled = true,
+  startHour = 22,
+  endHour = 7,
+}) {
+  if (!enabled) {
+    return { delayMs: 0, scheduledAt: null };
+  }
+
+  const madridNow = getMadridDateParts(now);
+  const inQuietWindow = isHourWithinQuietWindow(madridNow.hour, startHour, endHour);
+  if (!inQuietWindow) {
+    return { delayMs: 0, scheduledAt: null };
+  }
+
+  const targetBase = madridNow.hour >= startHour
+    ? addMadridDays(madridNow, 1)
+    : madridNow;
+  const scheduledAt = buildDateFromMadridParts({
+    ...targetBase,
+    hour: endHour,
+    minute: 0,
+    second: 0,
+  });
+  const delayMs = Math.max(0, scheduledAt.getTime() - now.getTime());
+
+  return { delayMs, scheduledAt };
+}
+
+function emitMessageCreatedToConversationRooms(conversation, message) {
+  const io = getIO();
+  if (!io || !conversation || !message) return;
+
+  const rooms = new Set();
+  if (conversation.clinic_id) rooms.add(`clinic:${conversation.clinic_id}`);
+  if (conversation.assignee_id) rooms.add(`user:${conversation.assignee_id}`);
+
+  const payload = {
+    id: message.id,
+    conversation_id: String(conversation.id),
+    content: message.content,
+    direction: message.direction,
+    message_type: message.message_type,
+    status: message.status,
+    sent_at: message.sent_at,
+    metadata: message.metadata || null,
+  };
+
+  if (rooms.size === 0) {
+    io.emit('message:created', payload);
+    return;
+  }
+
+  rooms.forEach((room) => io.to(room).emit('message:created', payload));
 }
 
 function buildDisplayName(...parts) {
@@ -1114,6 +1275,14 @@ async function handleSendWhatsapp(node, context, runtime) {
   const recipientData = await resolveWhatsAppRecipient({ node, config, context: templateContext, targets });
   const senderData = await resolveWhatsAppSenderConfig({ config, context: templateContext, clinicId });
   const templateParams = resolveTemplateVariables(config, templateContext);
+  const previewText = renderWhatsappTemplatePreviewText(template, templateParams);
+  const quietHoursEnabled = parseBool(resolveTemplateValue(config?.quiet_hours_enabled, context), true);
+  const quietWindow = computeQuietHoursDelayMs({
+    now: new Date(),
+    enabled: quietHoursEnabled,
+    startHour: 22,
+    endHour: 7,
+  });
 
   let conversation = await Conversation.findOne({
     where: {
@@ -1144,16 +1313,47 @@ async function handleSendWhatsapp(node, context, runtime) {
     throw new Error('whatsapp_limit_reached');
   }
 
-  const messageContent = `[Plantilla WhatsApp] ${template.name}`;
+  const flowName =
+    cleanString(runtime?.execution?.templateVersion?.name)
+    || cleanString(runtime?.execution?.template_name)
+    || `Flujo #${toIntOrNull(runtime?.execution?.id) || ''}`.trim();
+  const eventMessageContent = `Mensaje enviado automáticamente por activarse el flujo ${flowName ? `"${flowName}"` : ''}. El paciente no ve este texto, solo el mensaje a continuación.`;
+  const messageContent = previewText;
+  const nowIso = new Date().toISOString();
+
+  const eventMsg = await Message.create({
+    conversation_id: conversation.id,
+    sender_id: null,
+    direction: 'outbound',
+    content: eventMessageContent,
+    message_type: 'event',
+    status: 'sent',
+    sent_at: new Date(),
+    metadata: {
+      source: 'automations_v2',
+      kind: 'automation_flow_event',
+      reason: 'flow_send_whatsapp',
+      execution_id: runtime?.execution?.id || null,
+      node_id: cleanString(node?.id),
+      flow_name: flowName || null,
+      template_id: template.id,
+      template_name: template.name,
+      generated_at: nowIso,
+    },
+  });
+
   const metadata = {
     source: 'automations_v2',
     kind: 'flow_send_whatsapp',
     execution_id: execution?.id || null,
     node_id: cleanString(node?.id),
+    flow_name: flowName || null,
+    flow_reason: 'flow_send_whatsapp',
     template_id: template.id,
     template_name: template.name,
     template_language: cleanString(resolveTemplateValue(config?.language_code, context)) || template.language || 'es_ES',
     template_params: templateParams,
+    preview_text: previewText,
     recipient_mode: recipientData.recipient_mode,
     recipient: recipientData.recipient,
     sender_mode: senderData.sender_mode,
@@ -1161,6 +1361,8 @@ async function handleSendWhatsapp(node, context, runtime) {
     phoneNumberId: senderData.clinic_config?.phoneNumberId || null,
     phoneId: senderData.clinic_config?.phoneNumberId || null,
     wabaId: senderData.clinic_config?.wabaId || null,
+    quiet_hours_enabled: quietHoursEnabled,
+    quiet_hours_window: '22:00-07:00',
     limitMode: !!limitStatus?.limitedMode,
     limitSnapshot: limitStatus?.limitedMode
       ? {
@@ -1180,6 +1382,107 @@ async function handleSendWhatsapp(node, context, runtime) {
     sent_at: new Date(),
     metadata,
   });
+  emitMessageCreatedToConversationRooms(conversation, eventMsg);
+  emitMessageCreatedToConversationRooms(conversation, msg);
+
+  const trackingLineBase = `[${formatAutomationTimestamp(new Date())}] WhatsApp automático (${flowName || 'flujo'}) · plantilla "${template.name}" · destinatario ${recipientData.recipient}`;
+  if (targets.appointment_id) {
+    const appointment = await CitaPaciente.findByPk(targets.appointment_id);
+    if (appointment) {
+      const noteLine = quietWindow.delayMs > 0 && quietWindow.scheduledAt
+        ? `${trackingLineBase} · programado para ${formatAutomationTimestamp(quietWindow.scheduledAt)}`
+        : `${trackingLineBase} · enviado`;
+      await appointment.update({
+        nota: appendText(appointment.nota, noteLine),
+      });
+    }
+  }
+  if (targets.lead_intake_id) {
+    const lead = await LeadIntake.findByPk(targets.lead_intake_id);
+    if (lead) {
+      const noteLine = quietWindow.delayMs > 0 && quietWindow.scheduledAt
+        ? `${trackingLineBase} · programado para ${formatAutomationTimestamp(quietWindow.scheduledAt)}`
+        : `${trackingLineBase} · enviado`;
+      await lead.update({
+        notas_internas: appendText(lead.notas_internas, noteLine),
+      });
+    }
+  }
+
+  if (quietWindow.delayMs > 0) {
+    try {
+      await queues.outboundWhatsApp.add(
+        'send',
+        {
+          messageId: msg.id,
+          conversationId: conversation.id,
+          to: recipientData.recipient,
+          body: messageContent,
+          useTemplate: true,
+          templateName: template.name,
+          templateLanguage: metadata.template_language,
+          templateParams,
+          templateComponents: null,
+          clinicConfig: senderData.clinic_config,
+        },
+        { delay: quietWindow.delayMs }
+      );
+    } catch (enqueueErr) {
+      const enqueueError = enqueueErr?.message || 'enqueue_failed';
+      await msg.update({
+        status: 'failed',
+        metadata: {
+          ...(msg.metadata || {}),
+          enqueue_error: enqueueError,
+        },
+      });
+      const io = getIO();
+      if (io) {
+        const room = conversation?.clinic_id ? `clinic:${conversation.clinic_id}` : null;
+        const payload = {
+          id: msg.id,
+          conversation_id: conversation.id,
+          status: 'failed',
+          error: enqueueError,
+        };
+        if (room) io.to(room).emit('message:updated', payload);
+        else io.emit('message:updated', payload);
+      }
+      throw new Error(`whatsapp_enqueue_failed:${enqueueError}`);
+    }
+
+    await msg.update({
+      status: 'pending',
+      metadata: {
+        ...(msg.metadata || {}),
+        scheduled_for: quietWindow.scheduledAt ? quietWindow.scheduledAt.toISOString() : null,
+        queued_by_quiet_hours: true,
+      },
+    });
+    await conversation.update({ last_message_at: new Date() });
+
+    return {
+      kind: 'success',
+      output: {
+        message_id: msg.id,
+        event_message_id: eventMsg.id,
+        status: 'scheduled',
+        template_id: template.id,
+        template_name: template.name,
+        message_preview: previewText,
+        recipient_mode: recipientData.recipient_mode,
+        recipient: recipientData.recipient,
+        sender_mode: senderData.sender_mode,
+        sender_origin_id: senderData.sender_origin_id,
+        conversation_id: conversation.id,
+        phone_number_id: senderData.clinic_config?.phoneNumberId || null,
+        limited_mode: !!limitStatus?.limitedMode,
+        quiet_hours_applied: true,
+        scheduled_for: quietWindow.scheduledAt ? quietWindow.scheduledAt.toISOString() : null,
+      },
+      next_node_id: readOutputTarget(node, 'on_success'),
+    };
+  }
 
   try {
     const waResponse = await whatsappService.sendMessage({
@@ -1278,9 +1581,11 @@ async function handleSendWhatsapp(node, context, runtime) {
     kind: 'success',
     output: {
       message_id: msg.id,
-      status: 'queued',
+      event_message_id: eventMsg.id,
+      status: 'sent',
       template_id: template.id,
       template_name: template.name,
+      message_preview: previewText,
       recipient_mode: recipientData.recipient_mode,
       recipient: recipientData.recipient,
       sender_mode: senderData.sender_mode,
@@ -1288,6 +1593,8 @@ async function handleSendWhatsapp(node, context, runtime) {
       conversation_id: conversation.id,
       phone_number_id: senderData.clinic_config?.phoneNumberId || null,
       limited_mode: !!limitStatus?.limitedMode,
+      quiet_hours_applied: false,
+      scheduled_for: null,
     },
     next_node_id: readOutputTarget(node, 'on_success'),
   };

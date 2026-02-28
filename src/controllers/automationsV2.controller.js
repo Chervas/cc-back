@@ -576,6 +576,7 @@ const NODE_TYPES_V2 = [
       recipient_to: '',
       sender_mode: 'clinic_default',
       sender_origin_id: null,
+      quiet_hours_enabled: true,
       variables: {},
     },
     config_schema: [
@@ -597,6 +598,7 @@ const NODE_TYPES_V2 = [
         options: ['clinic_default', 'specific_origin'],
       },
       { key: 'sender_origin_id', label: 'Origen específico (ID phone)', input_type: 'number', required: false },
+      { key: 'quiet_hours_enabled', label: 'No enviar entre las 22 y las 7h', input_type: 'boolean', required: false },
       { key: 'variables', label: 'Variables', input_type: 'json', required: false },
     ],
   },
