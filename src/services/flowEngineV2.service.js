@@ -1284,25 +1284,55 @@ async function handleSendWhatsapp(node, context, runtime) {
     endHour: 7,
   });
 
-  let conversation = await Conversation.findOne({
-    where: {
+  const targetPatientId = toIntOrNull(targets.patient_id);
+  let conversation = null;
+
+  // 1) Si tenemos paciente objetivo, priorizar siempre su propia conversación en la clínica.
+  if (targetPatientId) {
+    conversation = await Conversation.findOne({
+      where: {
+        clinic_id: clinicId,
+        channel: 'whatsapp',
+        patient_id: targetPatientId,
+      },
+      order: [['id', 'DESC']],
+    });
+  }
+
+  // 2) Fallback por teléfono, pero sin cruzar con otro paciente.
+  if (!conversation) {
+    const phoneWhere = {
       clinic_id: clinicId,
       channel: 'whatsapp',
       contact_id: recipientData.recipient,
-    },
-  });
+    };
 
+    if (targetPatientId) {
+      phoneWhere[Op.or] = [
+        { patient_id: null },
+        { patient_id: targetPatientId },
+      ];
+    }
+
+    conversation = await Conversation.findOne({
+      where: phoneWhere,
+      order: [['id', 'DESC']],
+    });
+  }
+
+  // 3) Si no existe, crear conversación del paciente objetivo.
   if (!conversation) {
     conversation = await Conversation.create({
       clinic_id: clinicId,
       channel: 'whatsapp',
       contact_id: recipientData.recipient,
-      patient_id: toIntOrNull(targets.patient_id),
+      patient_id: targetPatientId,
       unread_count: 0,
       last_message_at: new Date(),
     });
-  } else if (!conversation.patient_id && targets.patient_id) {
-    await conversation.update({ patient_id: toIntOrNull(targets.patient_id) });
+  } else if (!conversation.patient_id && targetPatientId) {
+    // 4) Si era conversación sin paciente, vincularla.
+    await conversation.update({ patient_id: targetPatientId });
   }
 
   const limitStatus = await whatsappService.checkOutboundLimit({
