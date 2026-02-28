@@ -149,12 +149,16 @@ exports.listConversations = async (req, res) => {
       if (!patient) {
         return res.status(404).json({ error: 'Paciente no encontrado' });
       }
-      if (!ensureAccess({ clinicIds, isAggregateAllowed }, patient.clinica_id)) {
-        return res.status(403).json({ error: 'Acceso denegado a la clínica' });
-      }
-      // Forzar scope a la clínica del paciente para evitar cruces
-      where.clinic_id = patient.clinica_id;
       where.patient_id = patientId;
+      if (clinic_id && clinic_id !== 'all') {
+        const parsed = parseClinicIdsParam(clinic_id);
+        if (!parsed || !ensureAccess({ clinicIds, isAggregateAllowed }, clinic_id)) {
+          return res.status(403).json({ error: 'Acceso denegado a la clínica' });
+        }
+        where.clinic_id = parsed.length === 1 ? parsed[0] : { [Op.in]: parsed };
+      } else if (!isAggregateAllowed) {
+        where.clinic_id = { [Op.in]: clinicIds };
+      }
     } else if (clinic_id && clinic_id !== 'all') {
       const parsed = parseClinicIdsParam(clinic_id);
       if (!parsed || !ensureAccess({ clinicIds, isAggregateAllowed }, clinic_id)) {
@@ -197,8 +201,13 @@ exports.listConversations = async (req, res) => {
     // Si se solicita por paciente y no existe conversación, crearla con su móvil
     if (patientId && !conversations.length && patient?.telefono_movil) {
       const normalized = whatsappService.normalizePhoneNumber(patient.telefono_movil) || patient.telefono_movil;
+      const parsed = parseClinicIdsParam(clinic_id);
+      const clinicToCreate =
+        Array.isArray(parsed) && parsed.length > 0
+          ? parsed[0]
+          : (clinicIds.includes(patient.clinica_id) ? patient.clinica_id : clinicIds[0]);
       await Conversation.create({
-        clinic_id: patient.clinica_id,
+        clinic_id: clinicToCreate,
         channel: 'whatsapp',
         contact_id: normalized,
         patient_id: patientId,
