@@ -256,11 +256,11 @@ const inAnyWindow = (windows, start, end) => {
     return windows.some((w) => start >= w.start && end <= w.end);
 };
 
+const LEGACY_MODO_MAP = { avanzado: 'citas_personalizadas', basico: 'citas_automaticas', solo_registro: 'sin_citas' };
 const normalizeModoDisponibilidad = (value) => {
     const mode = String(value || '').trim().toLowerCase();
-    if (mode === 'basico') return 'basico';
-    if (mode === 'solo_registro') return 'solo_registro';
-    return 'avanzado';
+    if (['citas_personalizadas', 'citas_automaticas', 'sin_citas'].includes(mode)) return mode;
+    return LEGACY_MODO_MAP[mode] || 'citas_personalizadas';
 };
 
 const mergeWindows = (windows) => {
@@ -390,7 +390,7 @@ function buildDoctorAvailabilityContext({
     const globalWins = mergeWindows(globalWindowsMap?.get(Number(doctorId)) || []);
     const clinicWins = buildWindowsFromHorarios(dc.horarios || [], dow, fechaIso, clinicTimezone);
 
-    if (mode === 'basico') {
+    if (mode === 'citas_automaticas') {
         return {
             docWins: globalWins,
             dcMissing: false,
@@ -401,12 +401,12 @@ function buildDoctorAvailabilityContext({
         };
     }
 
-    if (mode === 'solo_registro') {
+    if (mode === 'sin_citas') {
         return {
             docWins: [],
             dcMissing: false,
             mode,
-            outOfHoursMessage: 'Profesional en modo solo registro (no aparece en agenda de citas)'
+            outOfHoursMessage: 'Profesional en modo sin citas (no aparece en agenda de citas)'
         };
     }
 

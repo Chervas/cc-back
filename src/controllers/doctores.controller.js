@@ -36,7 +36,7 @@ exports.list = asyncHandler(async (req, res) => {
   const whereDoctorClinica = {
     activo: true,
     [Op.or]: [
-      { modo_disponibilidad: { [Op.ne]: 'solo_registro' } },
+      { modo_disponibilidad: { [Op.notIn]: ['sin_citas', 'solo_registro'] } },
       { modo_disponibilidad: null }
     ]
   };
