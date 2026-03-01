@@ -2039,6 +2039,17 @@ async function processNode(node, context, runtime = {}) {
       };
     }
 
+    case 'control/join': {
+      return {
+        kind: 'success',
+        output: {
+          status: 'joined',
+          mode: cleanString(resolveTemplateValue(config?.mode, context)) || 'any',
+        },
+        next_node_id: readOutputTarget(node, 'on_joined') || readOutputTarget(node, 'on_success'),
+      };
+    }
+
     case 'delay/fixed': {
       const ms = resolveDurationMs(config?.duration ?? 0, config?.unit || 'seconds');
       const waitUntil = new Date(Date.now() + ms);

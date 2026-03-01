@@ -111,6 +111,7 @@ function mapNodeTypeLabel(nodeType) {
     'action/create_task': 'Crear tarea',
     'action/send_whatsapp': 'Enviar WhatsApp',
     'action/send_email': 'Enviar email',
+    'control/join': 'Unir bifurcación',
     'delay/fixed': 'Espera fija',
     'delay/wait_until': 'Esperar hasta fecha',
     'delay/wait_response': 'Esperar respuesta',

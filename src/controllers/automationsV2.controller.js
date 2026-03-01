@@ -675,6 +675,18 @@ const NODE_TYPES_V2 = [
     ],
   },
   {
+    type: 'control/join',
+    category: 'control',
+    label: 'Unir bifurcación',
+    description: 'Une dos ramas en una única salida.',
+    output_keys: ['on_joined'],
+    runtime_status: 'real',
+    default_config: { mode: 'any' },
+    config_schema: [
+      { key: 'mode', label: 'Modo unión', input_type: 'select', required: false, options: ['any'] },
+    ],
+  },
+  {
     type: 'delay/fixed',
     category: 'delay',
     label: 'Espera fija',
@@ -1649,6 +1661,19 @@ function validateNodeConfig(node, nodeMap) {
           'node_config_invalid',
           `El nodo ${nodeId} requiere unit válida`,
           { node_id: nodeId, node_type: nodeType, key: 'unit' }
+        )
+      );
+    }
+  }
+
+  if (nodeType === 'control/join') {
+    const mode = cleanString(config.mode) || 'any';
+    if (mode !== 'any') {
+      errors.push(
+        buildValidationError(
+          'node_config_invalid',
+          `El nodo ${nodeId} requiere mode = 'any'`,
+          { node_id: nodeId, node_type: nodeType, key: 'mode', value: mode, allowed: ['any'] }
         )
       );
     }
