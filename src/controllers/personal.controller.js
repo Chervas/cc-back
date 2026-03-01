@@ -30,13 +30,31 @@ const {
 const DEFAULT_TIMEZONE = 'Europe/Madrid';
 // Nota: columna DoctorBloqueos.tipo es STRING(32) (sin ENUM). Mantener lista alineada con el front.
 const BLOQUEO_TIPOS = new Set(['vacaciones', 'enfermedad', 'ausencia', 'formacion', 'congreso', 'otro']);
-const MODO_DISPONIBILIDAD = new Set(['citas_personalizadas', 'citas_automaticas', 'sin_citas']);
-// Compat legacy: mapear valores antiguos a canónicos
-const LEGACY_MODO_MAP = { avanzado: 'citas_personalizadas', basico: 'citas_automaticas', solo_registro: 'sin_citas' };
-function normalizeModo(val) {
-    if (!val) return 'citas_personalizadas';
-    if (MODO_DISPONIBILIDAD.has(val)) return val;
-    return LEGACY_MODO_MAP[val] || 'citas_personalizadas';
+const MODO_HORARIO = new Set(['citas_automaticas', 'citas_personalizadas']);
+
+function normalizeModoHorario(val) {
+    const modo = String(val || '').trim().toLowerCase();
+    if (!modo) return 'citas_automaticas';
+    if (MODO_HORARIO.has(modo)) return modo;
+    return 'citas_automaticas';
+}
+
+function normalizeRecibeCitas(val, defaultValue = false) {
+    if (val == null) return !!defaultValue;
+    if (typeof val === 'boolean') return val;
+    const normalized = String(val).trim().toLowerCase();
+    if (['1', 'true', 'si', 'sí', 'yes'].includes(normalized)) return true;
+    if (['0', 'false', 'no'].includes(normalized)) return false;
+    return !!defaultValue;
+}
+
+function parseRecibeCitasInput(value) {
+    if (value == null) return null;
+    if (typeof value === 'boolean') return value;
+    const normalized = String(value).trim().toLowerCase();
+    if (['1', 'true', 'si', 'sí', 'yes'].includes(normalized)) return true;
+    if (['0', 'false', 'no'].includes(normalized)) return false;
+    return null;
 }
 const ESTADO_CUENTA = new Set(ESTADO_CUENTA_ARR);
 const ESTADO_INVITACION = new Set(ESTADO_INVITACION_ARR);
@@ -223,8 +241,14 @@ function formatCooldownWindowLabel(ms) {
     return `${hours} h ${minutes} min`;
 }
 
-function defaultModoDisponibilidadFromSubrol(subrolClinica) {
-    return subrolClinica === 'Doctores' ? 'citas_personalizadas' : 'citas_automaticas';
+function defaultDisponibilidadConfigFromSubrol(subrolClinica) {
+    // Regla de producto:
+    // - Doctores: visibles en agenda por defecto
+    // - Resto del personal: no visibles en agenda por defecto
+    if (subrolClinica === 'Doctores') {
+        return { recibe_citas: true, modo_horario: 'citas_automaticas' };
+    }
+    return { recibe_citas: false, modo_horario: 'citas_automaticas' };
 }
 
 function parseClinicConfig(value) {
@@ -429,15 +453,11 @@ function normalizeBloqueoTipo(value) {
     return tipo;
 }
 
-function normalizeModoDisponibilidad(value) {
-    if (value == null || String(value).trim() === '') {
-        return null;
-    }
+function normalizeModoHorarioInput(value) {
+    if (value == null || String(value).trim() === '') return null;
     const modo = String(value).trim().toLowerCase();
-    if (MODO_DISPONIBILIDAD.has(modo)) return modo;
-    // Compat legacy: aceptar valores antiguos y mapear a canónicos
-    if (LEGACY_MODO_MAP[modo]) return LEGACY_MODO_MAP[modo];
-    return null;
+    if (!MODO_HORARIO.has(modo)) return null;
+    return modo;
 }
 
 async function canManagePersonalInClinic(actorId, clinicaId) {
@@ -524,7 +544,7 @@ async function ensureDoctorClinicaRow({
         },
     });
 
-    const modo = defaultModoDisponibilidadFromSubrol(subrolClinica);
+    const defaultConfig = defaultDisponibilidadConfigFromSubrol(subrolClinica);
     const rolEnClinica = normalizeTrimmed(subrolClinica) || 'personal';
 
     if (!doctorClinica) {
@@ -532,14 +552,18 @@ async function ensureDoctorClinicaRow({
             doctor_id: Number(userId),
             clinica_id: Number(clinicaId),
             rol_en_clinica: rolEnClinica,
-            modo_disponibilidad: modo,
+            recibe_citas: defaultConfig.recibe_citas,
+            modo_horario: defaultConfig.modo_horario,
             activo: !!activo,
         });
         return;
     }
 
     doctorClinica.rol_en_clinica = rolEnClinica;
-    doctorClinica.modo_disponibilidad = doctorClinica.modo_disponibilidad || modo;
+    if (doctorClinica.recibe_citas == null) {
+        doctorClinica.recibe_citas = defaultConfig.recibe_citas;
+    }
+    doctorClinica.modo_horario = normalizeModoHorario(doctorClinica.modo_horario || defaultConfig.modo_horario);
     doctorClinica.activo = !!activo;
     await doctorClinica.save();
 }
@@ -1369,7 +1393,15 @@ exports.mergePersonalAccounts = async (req, res) => {
             );
 
             existing.activo = !!(existing.activo || row.activo);
-            existing.modo_disponibilidad = normalizeModo(existing.modo_disponibilidad || row.modo_disponibilidad);
+            existing.recibe_citas = normalizeRecibeCitas(
+                existing.recibe_citas || row.recibe_citas,
+                false,
+            );
+            const existingModoHorario = normalizeModoHorario(existing.modo_horario);
+            const rowModoHorario = normalizeModoHorario(row.modo_horario);
+            existing.modo_horario = (
+                existingModoHorario === 'citas_personalizadas' || rowModoHorario === 'citas_personalizadas'
+            ) ? 'citas_personalizadas' : 'citas_automaticas';
             existing.rol_en_clinica = existing.rol_en_clinica || row.rol_en_clinica || null;
             await existing.save({ transaction });
 
@@ -1961,11 +1993,27 @@ async function canEditBloqueos(actorId, targetUserId, clinicaId) {
 /**
  * Capa 1: edición de disponibilidad general.
  * - Self/admin: permitido
- * - Propietario/agencia: solo si tiene alcance admin en TODAS las clínicas del objetivo.
+ * - Propietario/agencia:
+ *   - solo si el perfil objetivo aún no fue reclamado, y
+ *   - solo si tiene alcance admin en TODAS las clínicas del objetivo.
  */
 async function canEditDisponibilidadGeneral(actorId, targetUserId) {
     if (isAdmin(actorId)) return true;
     if (Number(actorId) === Number(targetUserId)) return true;
+
+    // Propietario/agencia solo puede editar la capa 1 de perfiles aún no reclamados.
+    // Consideramos "no reclamado" cuando:
+    // - es_provisional=true, o
+    // - estado_cuenta=provisional (compatibilidad con flujos legacy).
+    const targetUser = await Usuario.findByPk(Number(targetUserId), {
+        attributes: ['id_usuario', 'es_provisional', 'estado_cuenta'],
+        raw: true,
+    });
+    if (!targetUser) return false;
+
+    const targetEstadoCuenta = normalizeEstadoCuenta(targetUser.estado_cuenta, 'activo');
+    const targetUnclaimed = Boolean(targetUser.es_provisional) || targetEstadoCuenta === 'provisional';
+    if (!targetUnclaimed) return false;
 
     const adminScopedClinicIds = await getAdminScopedClinicIdsForUser(actorId);
     if (!adminScopedClinicIds.length) return false;
@@ -2362,7 +2410,8 @@ async function buildScheduleResponse(actorId, targetUserId) {
             nombre_clinica: row.clinica?.nombre_clinica || '',
             url_avatar: row.clinica?.url_avatar || null,
             activo: !!row.activo,
-            modo_disponibilidad: normalizeModoDisponibilidad(row.modo_disponibilidad) || null,
+            recibe_citas: normalizeRecibeCitas(row.recibe_citas, false),
+            modo_horario: normalizeModoHorario(row.modo_horario),
             horarios: row.horarios || [],
             rol_clinica: null,
             subrol_clinica: null,
@@ -2376,13 +2425,16 @@ async function buildScheduleResponse(actorId, targetUserId) {
 
         const rolClinica = pivot.rol_clinica || null;
         const subrolClinica = pivot.subrol_clinica || null;
-        const defaultModo = defaultModoDisponibilidadFromSubrol(subrolClinica);
+        const defaultConfig = defaultDisponibilidadConfigFromSubrol(subrolClinica);
         const existing = clinicasById.get(clinicId);
 
         if (existing) {
             existing.rol_clinica = existing.rol_clinica || rolClinica;
             existing.subrol_clinica = existing.subrol_clinica || subrolClinica;
-            existing.modo_disponibilidad = existing.modo_disponibilidad || defaultModo;
+            if (existing.recibe_citas == null) {
+                existing.recibe_citas = defaultConfig.recibe_citas;
+            }
+            existing.modo_horario = normalizeModoHorario(existing.modo_horario || defaultConfig.modo_horario);
             if (!existing.nombre_clinica) {
                 existing.nombre_clinica = pivot.Clinica?.nombre_clinica || '';
             }
@@ -2397,7 +2449,8 @@ async function buildScheduleResponse(actorId, targetUserId) {
             nombre_clinica: pivot.Clinica?.nombre_clinica || '',
             url_avatar: pivot.Clinica?.url_avatar || null,
             activo: true,
-            modo_disponibilidad: defaultModo,
+            recibe_citas: defaultConfig.recibe_citas,
+            modo_horario: defaultConfig.modo_horario,
             horarios: [],
             rol_clinica: rolClinica,
             subrol_clinica: subrolClinica,
@@ -2411,16 +2464,20 @@ async function buildScheduleResponse(actorId, targetUserId) {
     const clinicasBase = Array.from(clinicasById.values())
         .sort((a, b) => Number(a.clinica_id) - Number(b.clinica_id))
         .map((c) => {
-            const modoDisponibilidad = normalizeModo(c.modo_disponibilidad || defaultModoDisponibilidadFromSubrol(c.subrol_clinica));
+            const defaultConfig = defaultDisponibilidadConfigFromSubrol(c.subrol_clinica);
+            const recibeCitas = normalizeRecibeCitas(c.recibe_citas, defaultConfig.recibe_citas);
+            const modoHorario = normalizeModoHorario(c.modo_horario || defaultConfig.modo_horario);
             const horarios = Array.isArray(c.horarios) ? c.horarios : [];
             const horariosApertura = clinicaHorariosMap.get(Number(c.clinica_id)) || [];
             const onboardingPendiente = (c.agenda_capable !== false)
-                && modoDisponibilidad === 'citas_personalizadas'
+                && recibeCitas === true
+                && modoHorario === 'citas_personalizadas'
                 && !hasActiveHorarios(horarios);
 
             return {
                 ...c,
-                modo_disponibilidad: modoDisponibilidad,
+                recibe_citas: recibeCitas,
+                modo_horario: modoHorario,
                 horarios,
                 horarios_apertura: horariosApertura,
                 onboarding_horario_pendiente: onboardingPendiente,
@@ -2450,7 +2507,7 @@ async function buildScheduleResponse(actorId, targetUserId) {
             ...c,
             permissions: {
                 can_edit_horarios: canEditClinic,
-                can_edit_modo_disponibilidad: canEditClinic,
+                can_edit_disponibilidad_config: canEditClinic,
             },
         };
     });
@@ -2658,12 +2715,12 @@ async function getHorariosFor(targetUserId, clinicId) {
             doctor_id: targetUserId,
             clinica_id: clinicId,
         },
-        attributes: ['id', 'doctor_id', 'clinica_id', 'activo'],
+        attributes: ['id', 'doctor_id', 'clinica_id', 'activo', 'recibe_citas', 'modo_horario'],
         raw: true,
     });
 
     if (!dc) {
-        return { doctor_clinica_id: null, horarios: [] };
+        return { doctor_clinica_id: null, horarios: [], recibe_citas: false, modo_horario: 'citas_automaticas' };
     }
 
     const horarios = await DoctorHorario.findAll({
@@ -2671,7 +2728,12 @@ async function getHorariosFor(targetUserId, clinicId) {
         order: [['dia_semana', 'ASC'], ['hora_inicio', 'ASC']],
     });
 
-    return { doctor_clinica_id: dc.id, horarios };
+    return {
+        doctor_clinica_id: dc.id,
+        horarios,
+        recibe_citas: normalizeRecibeCitas(dc.recibe_citas, false),
+        modo_horario: normalizeModoHorario(dc.modo_horario),
+    };
 }
 
 function serializeHorarioRow(row) {
@@ -2693,9 +2755,22 @@ async function getOrCreateDoctorClinica(targetUserId, clinicaId) {
         where: { doctor_id: Number(targetUserId), clinica_id: Number(clinicaId) },
     });
     if (!dc) {
+        const pivot = await UsuarioClinica.findOne({
+            where: {
+                id_usuario: Number(targetUserId),
+                id_clinica: Number(clinicaId),
+                rol_clinica: { [Op.in]: STAFF_ROLES },
+                ...ACTIVE_STAFF_INVITATION_WHERE,
+            },
+            attributes: ['subrol_clinica'],
+            raw: true,
+        });
+        const defaultConfig = defaultDisponibilidadConfigFromSubrol(pivot?.subrol_clinica || null);
         dc = await DoctorClinica.create({
             doctor_id: Number(targetUserId),
             clinica_id: Number(clinicaId),
+            recibe_citas: defaultConfig.recibe_citas,
+            modo_horario: defaultConfig.modo_horario,
             activo: true,
         });
         return dc;
@@ -2707,7 +2782,7 @@ async function getOrCreateDoctorClinica(targetUserId, clinicaId) {
     return dc;
 }
 
-async function validateSingleHorarioCandidate({ targetUserId, clinicaId, modoDisponibilidad, candidateHorario }) {
+async function validateSingleHorarioCandidate({ targetUserId, clinicaId, modoHorario, candidateHorario }) {
     if (!candidateHorario || candidateHorario.activo === false) {
         return null;
     }
@@ -2729,7 +2804,7 @@ async function validateSingleHorarioCandidate({ targetUserId, clinicaId, modoDis
         };
     }
 
-    if (normalizeModo(modoDisponibilidad) === 'citas_personalizadas') {
+    if (normalizeModoHorario(modoHorario) === 'citas_personalizadas') {
         const effectiveErrors = await validateHorariosAgainstEffectiveAvailability(
             Number(targetUserId),
             Number(clinicaId),
@@ -2814,7 +2889,7 @@ exports.createHorarioClinica = async (req, res) => {
         const validationError = await validateSingleHorarioCandidate({
             targetUserId,
             clinicaId,
-            modoDisponibilidad: dc.modo_disponibilidad,
+            modoHorario: dc.modo_horario,
             candidateHorario: candidate,
         });
         if (validationError) {
@@ -2867,7 +2942,7 @@ exports.patchHorarioClinica = async (req, res) => {
                     model: DoctorClinica,
                     as: 'doctorClinica',
                     where: { doctor_id: targetUserId, clinica_id: clinicaId },
-                    attributes: ['id', 'modo_disponibilidad'],
+                    attributes: ['id', 'modo_horario'],
                     required: true,
                 },
             ],
@@ -2891,7 +2966,7 @@ exports.patchHorarioClinica = async (req, res) => {
         const validationError = await validateSingleHorarioCandidate({
             targetUserId,
             clinicaId,
-            modoDisponibilidad: existing.doctorClinica?.modo_disponibilidad,
+            modoHorario: existing.doctorClinica?.modo_horario,
             candidateHorario: candidate,
         });
         if (validationError) {
@@ -2962,7 +3037,7 @@ exports.deleteHorarioClinica = async (req, res) => {
 /**
  * Bloque 6.7c: Validates capa-3 schedule rows against effective availability
  * (capa 1 = disponibilidad general, capa 2 = apertura clínica).
- * Only applies when modo_disponibilidad === 'citas_personalizadas'.
+ * Only applies when modo_horario === 'citas_personalizadas'.
  *
  * @param {number} targetUserId
  * @param {number} clinicaId
@@ -3119,13 +3194,13 @@ exports.updateHorariosClinica = async (req, res) => {
             });
         }
 
-        // Bloque 6.7c: Validate capa 3 against capa 1 + capa 2 (only in avanzado mode)
+        // Bloque 6.7c: Validate capa 3 against capa 1 + capa 2 (only in modo_horario personalizado)
         const existingDc = await DoctorClinica.findOne({
             where: { doctor_id: targetUserId, clinica_id: clinicaId },
-            attributes: ['id', 'modo_disponibilidad'],
+            attributes: ['id', 'modo_horario'],
             raw: true,
         });
-        const currentModo = normalizeModo(existingDc?.modo_disponibilidad);
+        const currentModo = normalizeModoHorario(existingDc?.modo_horario);
         if (currentModo === 'citas_personalizadas' && horarios.length > 0) {
             const effectiveErrors = await validateHorariosAgainstEffectiveAvailability(
                 targetUserId, clinicaId, horarios,
@@ -3166,12 +3241,12 @@ exports.updateHorariosClinica = async (req, res) => {
     }
 };
 
-exports.updateModoDisponibilidadClinicaForCurrent = async (req, res) => {
+exports.updateDisponibilidadConfigClinicaForCurrent = async (req, res) => {
     req.params.id = String(req.userData?.userId || '');
-    return exports.updateModoDisponibilidadClinica(req, res);
+    return exports.updateDisponibilidadConfigClinica(req, res);
 };
 
-exports.updateModoDisponibilidadClinica = async (req, res) => {
+exports.updateDisponibilidadConfigClinica = async (req, res) => {
     try {
         const actorId = Number(req.userData?.userId);
         if (!Number.isFinite(actorId)) {
@@ -3184,11 +3259,27 @@ exports.updateModoDisponibilidadClinica = async (req, res) => {
             return res.status(400).json({ message: 'Invalid id' });
         }
 
-        const modo = normalizeModoDisponibilidad(req.body?.modo_disponibilidad ?? req.body?.modo);
-        if (!modo) {
+        const hasRecibeCitasInput = Object.prototype.hasOwnProperty.call(req.body || {}, 'recibe_citas');
+        const hasModoHorarioInput = Object.prototype.hasOwnProperty.call(req.body || {}, 'modo_horario');
+        if (!hasRecibeCitasInput && !hasModoHorarioInput) {
             return res.status(400).json({
-                message: 'modo_disponibilidad inválido',
-                allowed: Array.from(MODO_DISPONIBILIDAD),
+                message: 'recibe_citas o modo_horario son obligatorios',
+            });
+        }
+
+        const recibeCitas = hasRecibeCitasInput ? parseRecibeCitasInput(req.body?.recibe_citas) : null;
+        if (hasRecibeCitasInput && recibeCitas == null) {
+            return res.status(400).json({
+                message: 'recibe_citas inválido',
+                allowed: [true, false],
+            });
+        }
+
+        const modoHorario = hasModoHorarioInput ? normalizeModoHorarioInput(req.body?.modo_horario) : null;
+        if (hasModoHorarioInput && !modoHorario) {
+            return res.status(400).json({
+                message: 'modo_horario inválido',
+                allowed: Array.from(MODO_HORARIO),
             });
         }
 
@@ -3203,14 +3294,17 @@ exports.updateModoDisponibilidadClinica = async (req, res) => {
         });
 
         if (!dc) {
+            const defaultConfig = defaultDisponibilidadConfigFromSubrol(null);
             dc = await DoctorClinica.create({
                 doctor_id: targetUserId,
                 clinica_id: clinicaId,
                 activo: true,
-                modo_disponibilidad: modo,
+                recibe_citas: hasRecibeCitasInput ? recibeCitas : defaultConfig.recibe_citas,
+                modo_horario: hasModoHorarioInput ? modoHorario : defaultConfig.modo_horario,
             });
         } else {
-            dc.modo_disponibilidad = modo;
+            if (hasRecibeCitasInput) dc.recibe_citas = recibeCitas;
+            if (hasModoHorarioInput) dc.modo_horario = modoHorario;
             if (!dc.activo) {
                 dc.activo = true;
             }
@@ -3222,11 +3316,12 @@ exports.updateModoDisponibilidadClinica = async (req, res) => {
             doctor_id: dc.doctor_id,
             clinica_id: dc.clinica_id,
             activo: !!dc.activo,
-            modo_disponibilidad: normalizeModo(dc.modo_disponibilidad),
+            recibe_citas: normalizeRecibeCitas(dc.recibe_citas, false),
+            modo_horario: normalizeModoHorario(dc.modo_horario),
         });
     } catch (error) {
-        console.error('[personal.updateModoDisponibilidadClinica] Error:', error);
-        return res.status(500).json({ message: 'Error updating modo_disponibilidad', error: error.message });
+        console.error('[personal.updateDisponibilidadConfigClinica] Error:', error);
+        return res.status(500).json({ message: 'Error updating disponibilidad config', error: error.message });
     }
 };
 

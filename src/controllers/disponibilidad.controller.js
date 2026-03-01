@@ -252,11 +252,17 @@ const intersectWindows = (a, b) => {
     .filter((w) => w.start < w.end);
 };
 
-const LEGACY_MODO_MAP = { avanzado: 'citas_personalizadas', basico: 'citas_automaticas', solo_registro: 'sin_citas' };
-const normalizeModoDisponibilidad = (value) => {
+const normalizeModoHorario = (value) => {
   const mode = String(value || '').trim().toLowerCase();
-  if (['citas_personalizadas', 'citas_automaticas', 'sin_citas'].includes(mode)) return mode;
-  return LEGACY_MODO_MAP[mode] || 'citas_personalizadas';
+  if (['citas_personalizadas', 'citas_automaticas'].includes(mode)) return mode;
+  return 'citas_automaticas';
+};
+const normalizeRecibeCitas = (value) => {
+  if (typeof value === 'boolean') return value;
+  const normalized = String(value || '').trim().toLowerCase();
+  if (['1', 'true', 'si', 'sí', 'yes'].includes(normalized)) return true;
+  if (['0', 'false', 'no'].includes(normalized)) return false;
+  return false;
 };
 
 const mergeWindows = (windows) => {
@@ -374,9 +380,19 @@ const buildDoctorAvailabilityContext = ({
     };
   }
 
-  const mode = normalizeModoDisponibilidad(dc?.modo_disponibilidad);
+  const receiveAppointments = normalizeRecibeCitas(dc?.recibe_citas);
+  const mode = normalizeModoHorario(dc?.modo_horario);
   const globalWins = mergeWindows(globalWindowsMap?.get(Number(doctorId)) || []);
   const clinicWins = buildWindowsFromHorarios(dc?.horarios || [], dow, fechaLocal, timeZone);
+
+  if (!receiveAppointments) {
+    return {
+      docWins: [],
+      dcMissing: false,
+      mode,
+      outOfHoursMessage: 'Profesional en modo sin citas (no aparece en agenda de citas)'
+    };
+  }
 
   if (mode === 'citas_automaticas') {
     const hasGlobal = globalWins.length > 0;
@@ -387,15 +403,6 @@ const buildDoctorAvailabilityContext = ({
       outOfHoursMessage: hasGlobal
         ? 'Profesional fuera de su disponibilidad general'
         : 'Profesional sin disponibilidad general configurada'
-    };
-  }
-
-  if (mode === 'sin_citas') {
-    return {
-      docWins: [],
-      dcMissing: false,
-      mode,
-      outOfHoursMessage: 'Profesional en modo sin citas (no aparece en agenda de citas)'
     };
   }
 

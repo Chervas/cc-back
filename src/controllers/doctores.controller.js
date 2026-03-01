@@ -35,10 +35,7 @@ exports.list = asyncHandler(async (req, res) => {
   // Filtrado por clinica_id directamente sobre DoctorClinica (evita depender de atributos inexistentes en Clinica)
   const whereDoctorClinica = {
     activo: true,
-    [Op.or]: [
-      { modo_disponibilidad: { [Op.notIn]: ['sin_citas', 'solo_registro'] } },
-      { modo_disponibilidad: null }
-    ]
+    recibe_citas: true
   };
   // Mantener /api/doctors legacy limitado a doctores reales:
   // incluir cualquier rol de staff (propietario/personal/agencia) con subrol Doctores
@@ -185,7 +182,13 @@ exports.updateHorariosClinica = asyncHandler(async (req, res) => {
   const horarios = Array.isArray(req.body?.horarios) ? req.body.horarios : [];
   let dc = await db.DoctorClinica.findOne({ where: { doctor_id: doctorId, clinica_id: clinicaId } });
   if (!dc) {
-    dc = await db.DoctorClinica.create({ doctor_id: doctorId, clinica_id: clinicaId, activo: true });
+    dc = await db.DoctorClinica.create({
+      doctor_id: doctorId,
+      clinica_id: clinicaId,
+      recibe_citas: true,
+      modo_horario: 'citas_automaticas',
+      activo: true
+    });
   }
   await db.DoctorHorario.destroy({ where: { doctor_clinica_id: dc.id } });
   const created = await db.DoctorHorario.bulkCreate(horarios.map(h => ({ ...h, doctor_clinica_id: dc.id })));

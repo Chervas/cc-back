@@ -13,10 +13,11 @@ module.exports = (sequelize, DataTypes) => {
     doctor_id: { type: DataTypes.INTEGER, allowNull: false },
     clinica_id: { type: DataTypes.INTEGER, allowNull: false },
     rol_en_clinica: DataTypes.STRING(64),
-    // Modo de disponibilidad del miembro en esta clínica.
-    // Valores canónicos: 'sin_citas' | 'citas_automaticas' | 'citas_personalizadas'.
-    // Legacy (compat temporal): 'solo_registro' | 'basico' | 'avanzado' — mapeados en controllers.
-    modo_disponibilidad: { type: DataTypes.STRING(32), allowNull: false, defaultValue: 'citas_personalizadas' },
+    // Eje 1: si el profesional recibe citas en esta clínica (agenda).
+    recibe_citas: { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: false },
+    // Eje 2: modo de cálculo horario cuando recibe citas.
+    // Valores: 'citas_automaticas' | 'citas_personalizadas'
+    modo_horario: { type: DataTypes.STRING(32), allowNull: false, defaultValue: 'citas_automaticas' },
     activo: { type: DataTypes.BOOLEAN, defaultValue: true }
   }, {
     sequelize,
