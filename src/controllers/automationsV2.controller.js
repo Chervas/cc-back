@@ -44,6 +44,7 @@ const UPDATE_LEAD_INFO_MODE_OPTIONS = [
   'clear_received',
   'clear_all',
 ];
+const AI_ANALYSIS_MODE_OPTIONS = ['quick_qa', 'complex_reasoning', 'auto'];
 const CITA_STATUS_SET = new Set(CITA_STATUS_VALUES);
 const LEAD_STATUS_SET = new Set(LEAD_STATUS_VALUES);
 const ANY_CHANGE_STATUS_SET = new Set([...CITA_STATUS_VALUES, ...LEAD_STATUS_VALUES]);
@@ -751,19 +752,25 @@ const NODE_TYPES_V2 = [
     label: 'Análisis IA',
     description: 'Analiza texto con IA y devuelve una decisión.',
     output_keys: ['on_success', 'on_fail'],
-    runtime_status: 'stub',
+    runtime_status: 'real',
     default_config: {
-      provider: 'openai',
-      model: 'gpt-4.1-mini',
+      analysis_mode: 'complex_reasoning',
       prompt: '',
       input_text: '',
+      max_tokens: 700,
       output_format: { decision: { type: 'string' }, reason: { type: 'string' } },
     },
     config_schema: [
-      { key: 'provider', label: 'Proveedor', input_type: 'select', required: true, options: ['openai', 'gemini'] },
-      { key: 'model', label: 'Modelo', input_type: 'string', required: true },
+      {
+        key: 'analysis_mode',
+        label: 'Modo de análisis',
+        input_type: 'select',
+        required: false,
+        options: AI_ANALYSIS_MODE_OPTIONS,
+      },
       { key: 'prompt', label: 'Prompt', input_type: 'text', required: true },
       { key: 'input_text', label: 'Texto entrada', input_type: 'text', required: true },
+      { key: 'max_tokens', label: 'Límite de tokens', input_type: 'number', required: false },
       { key: 'output_format', label: 'Formato salida', input_type: 'json', required: true },
     ],
   },
@@ -1722,6 +1729,83 @@ function validateNodeConfig(node, nodeMap) {
           { node_id: nodeId, node_type: nodeType, key: 'listens_to_node_id', value: listensTo || null }
         )
       );
+    }
+  }
+
+  if (nodeType === 'condition/ai_analysis') {
+    const analysisMode = cleanString(config.analysis_mode) || 'complex_reasoning';
+    if (!AI_ANALYSIS_MODE_OPTIONS.includes(analysisMode)) {
+      errors.push(
+        buildValidationError(
+          'node_config_invalid',
+          `El nodo ${nodeId} requiere analysis_mode válido`,
+          {
+            node_id: nodeId,
+            node_type: nodeType,
+            key: 'analysis_mode',
+            value: analysisMode,
+            allowed: AI_ANALYSIS_MODE_OPTIONS,
+          }
+        )
+      );
+    }
+
+    const maxTokens = Number(config.max_tokens);
+    if (config.max_tokens !== undefined && config.max_tokens !== null && config.max_tokens !== '') {
+      if (!Number.isFinite(maxTokens) || maxTokens <= 0 || maxTokens > 4096) {
+        errors.push(
+          buildValidationError(
+            'node_config_invalid',
+            `El nodo ${nodeId} requiere max_tokens entre 1 y 4096`,
+            { node_id: nodeId, node_type: nodeType, key: 'max_tokens', value: config.max_tokens }
+          )
+        );
+      }
+    }
+
+    let outputFormat = config.output_format;
+    if (typeof outputFormat === 'string') {
+      try {
+        outputFormat = JSON.parse(outputFormat);
+      } catch (_err) {
+        outputFormat = null;
+      }
+    }
+
+    const validTypes = new Set(['string', 'number', 'boolean']);
+    const outputEntries = outputFormat && typeof outputFormat === 'object' && !Array.isArray(outputFormat)
+      ? Object.entries(outputFormat)
+      : [];
+
+    if (!outputEntries.length) {
+      errors.push(
+        buildValidationError(
+          'node_config_invalid',
+          `El nodo ${nodeId} requiere output_format con al menos un campo`,
+          { node_id: nodeId, node_type: nodeType, key: 'output_format' }
+        )
+      );
+    } else {
+      for (const [field, rawDef] of outputEntries) {
+        const key = cleanString(field);
+        const type = cleanString(rawDef?.type);
+        if (!key || !type || !validTypes.has(type)) {
+          errors.push(
+            buildValidationError(
+              'node_config_invalid',
+              `El nodo ${nodeId} tiene output_format inválido en '${field}'`,
+              {
+                node_id: nodeId,
+                node_type: nodeType,
+                key: 'output_format',
+                field,
+                value: rawDef,
+                allowed_types: Array.from(validTypes),
+              }
+            )
+          );
+        }
+      }
     }
   }
 

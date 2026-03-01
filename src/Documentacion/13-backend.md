@@ -44,3 +44,57 @@ async function handleWriteNote(node, context, runtime) {
 ```
 
 Este cambio asegura que cuando el personal clínico revise el historial de notas, pueda identificar rápidamente cuándo se registró cada evento automático, mejorando la trazabilidad y la auditoría de las interacciones del flujo-automatizadas.
+
+---
+
+## Automation v2: Nodo `condition/ai_analysis` (Groq)
+
+El nodo `condition/ai_analysis` quedó operativo en runtime real sobre Groq, con selección de modelo gestionada internamente por backend.
+
+### Política de modelos (no configurable por usuario)
+
+- `llama-3.1-70b-versatile`: tareas complejas (razonamiento clínico-operativo, más contexto, extracción amplia).
+- `llama-3.1-8b-instant`: tareas rápidas de soporte/Q&A simple.
+- El usuario del editor **no selecciona modelo**. Solo define el `analysis_mode` del nodo:
+  - `quick_qa`
+  - `complex_reasoning`
+  - `auto` (heurística de backend)
+
+### Contrato de configuración del nodo
+
+`config` mínimo esperado:
+
+```json
+{
+  "analysis_mode": "complex_reasoning",
+  "prompt": "Instrucción del análisis",
+  "input_text": "{{context.last_response}}",
+  "max_tokens": 700,
+  "output_format": {
+    "decision": { "type": "string" },
+    "reason": { "type": "string" }
+  }
+}
+```
+
+Reglas de validación relevantes:
+
+- `analysis_mode` debe estar en `quick_qa | complex_reasoning | auto`.
+- `max_tokens` (si se envía) debe estar entre `1` y `4096`.
+- `output_format` debe tener al menos 1 campo y tipos válidos (`string | number | boolean`).
+
+### Variables de entorno
+
+En `.env` / `.env.example`:
+
+- `GROQ_API_KEY`
+- `GROQ_API_BASE_URL` (default `https://api.groq.com/openai/v1`)
+- `GROQ_MODEL_COMPLEX` (default `llama-3.1-70b-versatile`)
+- `GROQ_MODEL_FAST` (default `llama-3.1-8b-instant`)
+- `GROQ_TIMEOUT_MS` (default `20000`)
+
+### Notas operativas
+
+- La API key de Groq se usa **solo en backend**.
+- El output del nodo guarda además metadatos técnicos (`_ai_provider`, `_ai_model`, `_ai_analysis_mode`, `_ai_usage`) para auditoría y depuración.
+- Requisito de producto pendiente: persistir consumo por usuario/clinic para facturación por uso.

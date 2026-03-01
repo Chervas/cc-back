@@ -1,6 +1,7 @@
 'use strict';
 
 const { Op } = require('sequelize');
+const axios = require('axios');
 const db = require('../../models');
 const { getIO } = require('./socket.service');
 const { queues } = require('./queue.service');
@@ -524,6 +525,222 @@ function resolveTemplateValue(value, context) {
   }
 
   return value;
+}
+
+function normalizeAiAnalysisMode(rawMode) {
+  const mode = cleanString(rawMode) || 'complex_reasoning';
+  if (['quick_qa', 'complex_reasoning', 'auto'].includes(mode)) {
+    return mode;
+  }
+  return 'complex_reasoning';
+}
+
+function normalizeAiOutputFormat(rawFormat) {
+  let parsed = rawFormat;
+  if (typeof parsed === 'string') {
+    try {
+      parsed = JSON.parse(parsed);
+    } catch (_err) {
+      parsed = null;
+    }
+  }
+
+  const out = {};
+  if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+    for (const [rawKey, rawDef] of Object.entries(parsed)) {
+      const key = cleanString(rawKey);
+      const type = cleanString(rawDef?.type);
+      if (!key) continue;
+      out[key] = ['string', 'number', 'boolean'].includes(type || '') ? type : 'string';
+    }
+  }
+
+  if (!Object.keys(out).length) {
+    out.decision = 'string';
+    out.reason = 'string';
+  }
+
+  return out;
+}
+
+function parseAiJsonContent(rawContent) {
+  if (rawContent && typeof rawContent === 'object' && !Array.isArray(rawContent)) {
+    return rawContent;
+  }
+  const content = cleanString(rawContent);
+  if (!content) return null;
+
+  const directCandidate = content
+    .replace(/^```json\s*/i, '')
+    .replace(/^```\s*/i, '')
+    .replace(/\s*```$/i, '')
+    .trim();
+
+  try {
+    return JSON.parse(directCandidate);
+  } catch (_err) {
+    // Try extracting the first JSON object block.
+  }
+
+  const firstBrace = directCandidate.indexOf('{');
+  const lastBrace = directCandidate.lastIndexOf('}');
+  if (firstBrace >= 0 && lastBrace > firstBrace) {
+    const objectCandidate = directCandidate.slice(firstBrace, lastBrace + 1);
+    try {
+      return JSON.parse(objectCandidate);
+    } catch (_err) {
+      return null;
+    }
+  }
+
+  return null;
+}
+
+function coerceAiOutputByFormat(rawOutput, outputFormat) {
+  const output = {};
+  const source = rawOutput && typeof rawOutput === 'object' ? rawOutput : {};
+  for (const [key, type] of Object.entries(outputFormat || {})) {
+    const value = source[key];
+    if (type === 'number') {
+      const parsed = Number(value);
+      output[key] = Number.isFinite(parsed) ? parsed : 0;
+      continue;
+    }
+    if (type === 'boolean') {
+      output[key] = parseBool(value, false);
+      continue;
+    }
+    output[key] = cleanString(value) || '';
+  }
+  return output;
+}
+
+function pickGroqModel({ analysisMode, prompt, inputText, outputFormat }) {
+  const fastModel = cleanString(process.env.GROQ_MODEL_FAST) || 'llama-3.1-8b-instant';
+  const complexModel = cleanString(process.env.GROQ_MODEL_COMPLEX) || 'llama-3.1-70b-versatile';
+
+  if (analysisMode === 'quick_qa') return fastModel;
+  if (analysisMode === 'complex_reasoning') return complexModel;
+
+  const totalChars = String(prompt || '').length + String(inputText || '').length;
+  const outputFields = Object.keys(outputFormat || {}).length;
+  const complexityKeywords = /cita|appointment|historial|database|base de datos|sql|clasifica|analiza|resume|extrae|diagnost/i;
+  const joined = `${prompt || ''} ${inputText || ''}`;
+  const isComplex = totalChars > 900 || outputFields > 3 || complexityKeywords.test(joined);
+  return isComplex ? complexModel : fastModel;
+}
+
+function buildAiSystemPrompt(outputFormat) {
+  const fields = Object.entries(outputFormat || {})
+    .map(([key, type]) => `- ${key}: ${type}`)
+    .join('\n');
+
+  return [
+    'Eres un motor de análisis para automatizaciones clínicas.',
+    'Responde exclusivamente con JSON válido, sin markdown ni texto adicional.',
+    'Debes devolver exactamente los campos indicados con sus tipos.',
+    'Si no dispones de un dato, devuelve un valor vacío válido para su tipo.',
+    'Campos esperados:',
+    fields || '- decision: string',
+  ].join('\n');
+}
+
+function buildAiSimulatedOutput(outputFormat, analysisMode, model) {
+  const base = {};
+  for (const [key, type] of Object.entries(outputFormat || {})) {
+    if (type === 'number') {
+      base[key] = 0;
+      continue;
+    }
+    if (type === 'boolean') {
+      base[key] = false;
+      continue;
+    }
+    base[key] = key === 'decision' ? 'simulado' : '';
+  }
+  return {
+    ...base,
+    _ai_provider: 'groq',
+    _ai_model: model,
+    _ai_analysis_mode: analysisMode,
+    _ai_simulated: true,
+  };
+}
+
+async function runGroqAiAnalysis({ prompt, inputText, outputFormat, analysisMode, maxTokens }) {
+  const apiKey = cleanString(process.env.GROQ_API_KEY);
+  if (!apiKey) {
+    throw new Error('groq_api_key_not_configured');
+  }
+
+  const baseUrl = (cleanString(process.env.GROQ_API_BASE_URL) || 'https://api.groq.com/openai/v1').replace(/\/+$/, '');
+  const timeoutMs = Math.max(1000, Number.parseInt(String(process.env.GROQ_TIMEOUT_MS || '20000'), 10) || 20000);
+  const normalizedMode = normalizeAiAnalysisMode(analysisMode);
+  const normalizedFormat = normalizeAiOutputFormat(outputFormat);
+  const model = pickGroqModel({
+    analysisMode: normalizedMode,
+    prompt,
+    inputText,
+    outputFormat: normalizedFormat,
+  });
+
+  const resolvedMaxTokens = Number(maxTokens);
+  const finalMaxTokens = Number.isFinite(resolvedMaxTokens) && resolvedMaxTokens > 0
+    ? Math.min(4096, Math.floor(resolvedMaxTokens))
+    : 700;
+
+  let response;
+  try {
+    response = await axios.post(
+      `${baseUrl}/chat/completions`,
+      {
+        model,
+        temperature: 0.1,
+        max_tokens: finalMaxTokens,
+        response_format: { type: 'json_object' },
+        messages: [
+          {
+            role: 'system',
+            content: buildAiSystemPrompt(normalizedFormat),
+          },
+          {
+            role: 'user',
+            content: `Instrucción:\n${prompt}\n\nTexto a analizar:\n${inputText}`,
+          },
+        ],
+      },
+      {
+        timeout: timeoutMs,
+        headers: {
+          Authorization: `Bearer ${apiKey}`,
+          'Content-Type': 'application/json',
+        },
+      }
+    );
+  } catch (err) {
+    const statusCode = err?.response?.status;
+    const providerMessage = cleanString(
+      err?.response?.data?.error?.message
+      || err?.response?.data?.message
+      || err?.message
+    ) || 'groq_request_failed';
+    throw new Error(`groq_request_failed:${statusCode || 'network'}:${providerMessage}`);
+  }
+
+  const rawContent = response?.data?.choices?.[0]?.message?.content;
+  const parsedJson = parseAiJsonContent(rawContent);
+  if (!parsedJson || typeof parsedJson !== 'object' || Array.isArray(parsedJson)) {
+    throw new Error('groq_invalid_json_response');
+  }
+
+  const coercedOutput = coerceAiOutputByFormat(parsedJson, normalizedFormat);
+  return {
+    ...coercedOutput,
+    _ai_provider: 'groq',
+    _ai_model: model,
+    _ai_analysis_mode: normalizedMode,
+    _ai_usage: response?.data?.usage || null,
+  };
 }
 
 function normalizeKey(value) {
@@ -2100,6 +2317,53 @@ async function processNode(node, context, runtime = {}) {
           on_timeout: readOutputTarget(node, 'on_timeout'),
         },
         wait_until: waitUntil,
+      };
+    }
+
+    case 'condition/ai_analysis': {
+      const resolvedPrompt = cleanString(resolveTemplateValue(config?.prompt, context));
+      const resolvedInputRaw = resolveTemplateValue(config?.input_text, context);
+      const resolvedInputText = typeof resolvedInputRaw === 'string'
+        ? resolvedInputRaw
+        : JSON.stringify(resolvedInputRaw ?? '');
+
+      if (!resolvedPrompt) {
+        throw new Error('ai_analysis_prompt_required');
+      }
+
+      if (!cleanString(resolvedInputText)) {
+        throw new Error('ai_analysis_input_text_required');
+      }
+
+      const analysisMode = normalizeAiAnalysisMode(resolveTemplateValue(config?.analysis_mode, context));
+      const outputFormat = normalizeAiOutputFormat(resolveTemplateValue(config?.output_format, context));
+      const selectedModel = pickGroqModel({
+        analysisMode,
+        prompt: resolvedPrompt,
+        inputText: resolvedInputText,
+        outputFormat,
+      });
+
+      if (simulation) {
+        return {
+          kind: 'success',
+          output: buildAiSimulatedOutput(outputFormat, analysisMode, selectedModel),
+          next_node_id: readOutputTarget(node, 'on_success'),
+        };
+      }
+
+      const aiOutput = await runGroqAiAnalysis({
+        prompt: resolvedPrompt,
+        inputText: resolvedInputText,
+        outputFormat,
+        analysisMode,
+        maxTokens: resolveTemplateValue(config?.max_tokens, context),
+      });
+
+      return {
+        kind: 'success',
+        output: aiOutput,
+        next_node_id: readOutputTarget(node, 'on_success'),
       };
     }
 
