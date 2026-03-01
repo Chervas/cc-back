@@ -43,9 +43,15 @@ router.put('/:id/disponibilidad-general', personalController.updateDisponibilida
 // Horarios por clínica (compat con /api/doctors/*)
 router.get('/me/clinicas/:clinicaId/horarios', personalController.getHorariosClinicaForCurrent);
 router.put('/me/clinicas/:clinicaId/horarios', personalController.updateHorariosClinicaForCurrent);
+router.post('/me/clinicas/:clinicaId/horarios', personalController.createHorarioClinicaForCurrent);
+router.patch('/me/clinicas/:clinicaId/horarios/:horarioId', personalController.patchHorarioClinicaForCurrent);
+router.delete('/me/clinicas/:clinicaId/horarios/:horarioId', personalController.deleteHorarioClinicaForCurrent);
 router.patch('/me/clinicas/:clinicaId/modo-disponibilidad', personalController.updateModoDisponibilidadClinicaForCurrent);
 router.get('/:id/clinicas/:clinicaId/horarios', personalController.getHorariosClinica);
 router.put('/:id/clinicas/:clinicaId/horarios', personalController.updateHorariosClinica);
+router.post('/:id/clinicas/:clinicaId/horarios', personalController.createHorarioClinica);
+router.patch('/:id/clinicas/:clinicaId/horarios/:horarioId', personalController.patchHorarioClinica);
+router.delete('/:id/clinicas/:clinicaId/horarios/:horarioId', personalController.deleteHorarioClinica);
 router.patch('/:id/clinicas/:clinicaId/modo-disponibilidad', personalController.updateModoDisponibilidadClinica);
 
 // Convenience wrapper (compat con front que usa query param clinica_id)
