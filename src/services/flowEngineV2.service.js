@@ -532,6 +532,24 @@ function resolveTemplateValue(value, context) {
     return getByPath(context, value);
   }
 
+  // Interpolación inline: permite mezclar texto libre con múltiples {{variables}}.
+  // Ejemplo:
+  // "Mensaje: {{context.last_prompt}}\nRespuesta: {{context.last_response}}"
+  if (value.includes('{{') && value.includes('}}')) {
+    return value.replace(/\{\{\s*([^}]+)\s*\}\}/g, (_match, pathExpr) => {
+      const resolved = getByPath(context, pathExpr);
+      if (resolved === undefined || resolved === null) return '';
+      if (typeof resolved === 'object') {
+        try {
+          return JSON.stringify(resolved);
+        } catch (_err) {
+          return '';
+        }
+      }
+      return String(resolved);
+    });
+  }
+
   return value;
 }
 

@@ -82,6 +82,8 @@ Reglas de validación relevantes:
 - `analysis_mode` debe estar en `quick_qa | complex_reasoning | auto`.
 - `max_tokens` (si se envía) debe estar entre `1` y `4096`.
 - `output_format` debe tener al menos 1 campo y tipos válidos (`string | number | boolean`).
+- `input_text` acepta placeholders inline en formato `{{ruta.variable}}`, combinados con texto libre.
+  - Ejemplo: `Mensaje previo: {{context.last_prompt}}\nRespuesta: {{context.last_response}}`
 
 ### Variables de entorno
 
