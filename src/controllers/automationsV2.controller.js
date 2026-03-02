@@ -44,7 +44,16 @@ const UPDATE_LEAD_INFO_MODE_OPTIONS = [
   'clear_received',
   'clear_all',
 ];
-const AI_ANALYSIS_MODE_OPTIONS = ['quick_qa', 'complex_reasoning', 'auto'];
+const AI_ANALYSIS_MODE_OPTIONS = ['auto', 'quick_qa', 'complex_reasoning'];
+const AI_OUTPUT_FIELD_TYPES = ['string', 'number', 'boolean'];
+const FIELD_CHECK_LEFT_REF_SOURCES = ['node_output', 'trigger_data', 'context', 'manual'];
+const FIELD_CHECK_VALUE_TYPES = ['string', 'number', 'boolean'];
+const FIELD_CHECK_OPERATOR_OPTIONS = ['equals', 'not_equals', 'contains', 'greater_than', 'less_than', 'exists'];
+const FIELD_CHECK_OPERATOR_TYPE_COMPAT = {
+  string: ['equals', 'not_equals', 'contains', 'exists'],
+  number: ['equals', 'not_equals', 'greater_than', 'less_than', 'exists'],
+  boolean: ['equals', 'not_equals', 'exists'],
+};
 const CITA_STATUS_SET = new Set(CITA_STATUS_VALUES);
 const LEAD_STATUS_SET = new Set(LEAD_STATUS_VALUES);
 const ANY_CHANGE_STATUS_SET = new Set([...CITA_STATUS_VALUES, ...LEAD_STATUS_VALUES]);
@@ -741,20 +750,24 @@ const NODE_TYPES_V2 = [
     type: 'condition/field_check',
     category: 'condition',
     label: 'Comprobar campo',
-    description: 'Evalúa una condición simple sobre un campo.',
+    description: 'Evalúa una condición sobre un campo del contexto.',
     output_keys: ['on_true', 'on_false'],
     runtime_status: 'real',
-    default_config: { field: '', operator: 'equals', value: '' },
+    default_config: {
+      left_ref: { source: '', node_id: null, path: '', value_type: 'string', label: '' },
+      operator: 'equals',
+      right_value: '',
+    },
     config_schema: [
-      { key: 'field', label: 'Campo', input_type: 'string', required: true },
+      { key: 'left_ref', label: 'Campo a evaluar', input_type: 'json', required: true },
       {
         key: 'operator',
         label: 'Operador',
         input_type: 'select',
         required: true,
-        options: ['equals', 'not_equals', 'contains', 'greater_than', 'less_than', 'exists'],
+        options: FIELD_CHECK_OPERATOR_OPTIONS,
       },
-      { key: 'value', label: 'Valor', input_type: 'string', required: false },
+      { key: 'right_value', label: 'Valor esperado', input_type: 'string', required: false },
     ],
   },
   {
@@ -765,24 +778,29 @@ const NODE_TYPES_V2 = [
     output_keys: ['on_success', 'on_fail'],
     runtime_status: 'real',
     default_config: {
-      analysis_mode: 'complex_reasoning',
-      prompt: '',
-      input_text: '',
+      preset_key: null,
+      instruction: '',
+      context_sources: [],
+      output_fields: [
+        { name: 'decision', type: 'string', description: '' },
+        { name: 'motivo', type: 'string', description: '' },
+      ],
+      mode: 'auto',
       max_tokens: 700,
-      output_format: { decision: { type: 'string' }, reason: { type: 'string' } },
     },
     config_schema: [
+      { key: 'preset_key', label: 'Receta', input_type: 'string', required: false },
+      { key: 'instruction', label: 'Instrucción', input_type: 'text', required: true },
+      { key: 'context_sources', label: 'Fuentes de contexto', input_type: 'json', required: true },
+      { key: 'output_fields', label: 'Campos de salida', input_type: 'json', required: true },
       {
-        key: 'analysis_mode',
+        key: 'mode',
         label: 'Modo de análisis',
         input_type: 'select',
         required: false,
         options: AI_ANALYSIS_MODE_OPTIONS,
       },
-      { key: 'prompt', label: 'Prompt', input_type: 'text', required: true },
-      { key: 'input_text', label: 'Texto entrada', input_type: 'text', required: true },
       { key: 'max_tokens', label: 'Límite de tokens', input_type: 'number', required: false },
-      { key: 'output_format', label: 'Formato salida', input_type: 'json', required: true },
     ],
   },
   {
@@ -1386,6 +1404,21 @@ function isConfigValueEmpty(value) {
   return false;
 }
 
+function parseJsonIfString(raw) {
+  if (typeof raw !== 'string') return raw;
+  try {
+    return JSON.parse(raw);
+  } catch (_err) {
+    return null;
+  }
+}
+
+function isOperatorCompatible(operator, valueType) {
+  const type = cleanString(valueType);
+  if (!type || !FIELD_CHECK_OPERATOR_TYPE_COMPAT[type]) return true;
+  return FIELD_CHECK_OPERATOR_TYPE_COMPAT[type].includes(operator);
+}
+
 function validateNodeConfig(node, nodeMap) {
   const errors = [];
   const nodeId = cleanString(node?.id) || 'unknown';
@@ -1743,18 +1776,199 @@ function validateNodeConfig(node, nodeMap) {
     }
   }
 
-  if (nodeType === 'condition/ai_analysis') {
-    const analysisMode = cleanString(config.analysis_mode) || 'complex_reasoning';
-    if (!AI_ANALYSIS_MODE_OPTIONS.includes(analysisMode)) {
+  if (nodeType === 'condition/field_check') {
+    const leftRefRaw = parseJsonIfString(config.left_ref);
+    const leftRef = isObject(leftRefRaw) ? leftRefRaw : null;
+
+    if (!leftRef || !cleanString(leftRef.source)) {
       errors.push(
         buildValidationError(
           'node_config_invalid',
-          `El nodo ${nodeId} requiere analysis_mode válido`,
+          `El nodo ${nodeId} requiere left_ref con source válido`,
+          { node_id: nodeId, node_type: nodeType, key: 'left_ref' }
+        )
+      );
+    } else {
+      const source = cleanString(leftRef.source);
+      if (!FIELD_CHECK_LEFT_REF_SOURCES.includes(source)) {
+        errors.push(
+          buildValidationError(
+            'node_config_invalid',
+            `El nodo ${nodeId} tiene left_ref.source inválido: '${source}'`,
+            {
+              node_id: nodeId,
+              node_type: nodeType,
+              key: 'left_ref.source',
+              value: source,
+              allowed: FIELD_CHECK_LEFT_REF_SOURCES,
+            }
+          )
+        );
+      }
+
+      if (source === 'node_output') {
+        const refNodeId = cleanString(leftRef.node_id);
+        if (!refNodeId) {
+          errors.push(
+            buildValidationError(
+              'node_config_invalid',
+              `El nodo ${nodeId} requiere left_ref.node_id cuando source es node_output`,
+              { node_id: nodeId, node_type: nodeType, key: 'left_ref.node_id' }
+            )
+          );
+        } else if (!nodeMap.has(refNodeId)) {
+          errors.push(
+            buildValidationError(
+              'node_config_invalid',
+              `El nodo ${nodeId} referencia node_id '${refNodeId}' que no existe en el flujo`,
+              { node_id: nodeId, node_type: nodeType, key: 'left_ref.node_id', value: refNodeId }
+            )
+          );
+        }
+      }
+
+      if (!cleanString(leftRef.path)) {
+        errors.push(
+          buildValidationError(
+            'node_config_invalid',
+            `El nodo ${nodeId} requiere left_ref.path no vacío`,
+            { node_id: nodeId, node_type: nodeType, key: 'left_ref.path' }
+          )
+        );
+      }
+
+      const valueType = cleanString(leftRef.value_type) || 'string';
+      if (!FIELD_CHECK_VALUE_TYPES.includes(valueType)) {
+        errors.push(
+          buildValidationError(
+            'node_config_invalid',
+            `El nodo ${nodeId} tiene left_ref.value_type inválido`,
+            {
+              node_id: nodeId,
+              node_type: nodeType,
+              key: 'left_ref.value_type',
+              value: valueType,
+              allowed: FIELD_CHECK_VALUE_TYPES,
+            }
+          )
+        );
+      }
+    }
+
+    const operator = cleanString(config?.operator) || 'equals';
+    if (!FIELD_CHECK_OPERATOR_OPTIONS.includes(operator)) {
+      errors.push(
+        buildValidationError(
+          'node_config_invalid',
+          `El nodo ${nodeId} requiere operador válido`,
           {
             node_id: nodeId,
             node_type: nodeType,
-            key: 'analysis_mode',
-            value: analysisMode,
+            key: 'operator',
+            value: operator,
+            allowed: FIELD_CHECK_OPERATOR_OPTIONS,
+          }
+        )
+      );
+    }
+
+    const effectiveValueType = cleanString(leftRef?.value_type) || 'string';
+    if (!isOperatorCompatible(operator, effectiveValueType)) {
+      errors.push(
+        buildValidationError(
+          'node_config_invalid',
+          `El nodo ${nodeId} usa operador '${operator}' incompatible con tipo '${effectiveValueType}'`,
+          {
+            node_id: nodeId,
+            node_type: nodeType,
+            key: 'operator',
+            value: operator,
+            value_type: effectiveValueType,
+            allowed: FIELD_CHECK_OPERATOR_TYPE_COMPAT[effectiveValueType] || null,
+          }
+        )
+      );
+    }
+
+    if (operator !== 'exists') {
+      const rightValue = config?.right_value;
+      if (rightValue === undefined || rightValue === null || rightValue === '') {
+        errors.push(
+          buildValidationError(
+            'node_config_invalid',
+            `El nodo ${nodeId} requiere right_value para operador '${operator}'`,
+            { node_id: nodeId, node_type: nodeType, key: 'right_value' }
+          )
+        );
+      }
+    }
+
+    if (config.field !== undefined || config.value !== undefined) {
+      errors.push(
+        buildValidationError(
+          'node_config_invalid',
+          `El nodo ${nodeId} usa campos legacy (field/value). Re-configurar con el nuevo contrato.`,
+          { node_id: nodeId, node_type: nodeType, key: 'legacy_fields' }
+        )
+      );
+    }
+  }
+
+  if (nodeType === 'condition/ai_analysis') {
+    if (!cleanString(config.instruction)) {
+      errors.push(
+        buildValidationError(
+          'node_config_invalid',
+          `El nodo ${nodeId} requiere instruction`,
+          { node_id: nodeId, node_type: nodeType, key: 'instruction' }
+        )
+      );
+    }
+
+    const sourcesRaw = parseJsonIfString(config.context_sources);
+    const sources = Array.isArray(sourcesRaw) ? sourcesRaw : [];
+    const validSources = sources.filter((source) =>
+      isObject(source) && cleanString(source.key) && cleanString(source.path)
+    );
+    if (!validSources.length) {
+      errors.push(
+        buildValidationError(
+          'node_config_invalid',
+          `El nodo ${nodeId} requiere al menos una fuente de contexto con key y path válidos`,
+          { node_id: nodeId, node_type: nodeType, key: 'context_sources' }
+        )
+      );
+    }
+
+    const outputFieldsRaw = parseJsonIfString(config.output_fields);
+    const outputFields = Array.isArray(outputFieldsRaw) ? outputFieldsRaw : [];
+    const validOutputFields = outputFields.filter((field) =>
+      isObject(field)
+      && cleanString(field.name)
+      && AI_OUTPUT_FIELD_TYPES.includes(cleanString(field.type))
+      && cleanString(field.description)
+    );
+    if (!validOutputFields.length) {
+      errors.push(
+        buildValidationError(
+          'node_config_invalid',
+          `El nodo ${nodeId} requiere al menos un campo de salida válido (name, type, description)`,
+          { node_id: nodeId, node_type: nodeType, key: 'output_fields' }
+        )
+      );
+    }
+
+    const mode = cleanString(config.mode) || 'auto';
+    if (!AI_ANALYSIS_MODE_OPTIONS.includes(mode)) {
+      errors.push(
+        buildValidationError(
+          'node_config_invalid',
+          `El nodo ${nodeId} requiere mode válido`,
+          {
+            node_id: nodeId,
+            node_type: nodeType,
+            key: 'mode',
+            value: mode,
             allowed: AI_ANALYSIS_MODE_OPTIONS,
           }
         )
@@ -1774,49 +1988,21 @@ function validateNodeConfig(node, nodeMap) {
       }
     }
 
-    let outputFormat = config.output_format;
-    if (typeof outputFormat === 'string') {
-      try {
-        outputFormat = JSON.parse(outputFormat);
-      } catch (_err) {
-        outputFormat = null;
-      }
-    }
-
-    const validTypes = new Set(['string', 'number', 'boolean']);
-    const outputEntries = outputFormat && typeof outputFormat === 'object' && !Array.isArray(outputFormat)
-      ? Object.entries(outputFormat)
-      : [];
-
-    if (!outputEntries.length) {
+    if (
+      config.prompt !== undefined
+      || config.input_text !== undefined
+      || config.output_format !== undefined
+      || config.analysis_mode !== undefined
+      || config.provider !== undefined
+      || config.model !== undefined
+    ) {
       errors.push(
         buildValidationError(
           'node_config_invalid',
-          `El nodo ${nodeId} requiere output_format con al menos un campo`,
-          { node_id: nodeId, node_type: nodeType, key: 'output_format' }
+          `El nodo ${nodeId} usa campos legacy (prompt/input_text/output_format/analysis_mode/provider/model). Re-configurar con el nuevo contrato.`,
+          { node_id: nodeId, node_type: nodeType, key: 'legacy_fields' }
         )
       );
-    } else {
-      for (const [field, rawDef] of outputEntries) {
-        const key = cleanString(field);
-        const type = cleanString(rawDef?.type);
-        if (!key || !type || !validTypes.has(type)) {
-          errors.push(
-            buildValidationError(
-              'node_config_invalid',
-              `El nodo ${nodeId} tiene output_format inválido en '${field}'`,
-              {
-                node_id: nodeId,
-                node_type: nodeType,
-                key: 'output_format',
-                field,
-                value: rawDef,
-                allowed_types: Array.from(validTypes),
-              }
-            )
-          );
-        }
-      }
     }
   }
 

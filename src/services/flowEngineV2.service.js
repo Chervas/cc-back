@@ -28,6 +28,15 @@ const UPDATE_LEAD_INFO_MODES = new Set([
   'clear_received',
   'clear_all',
 ]);
+const AI_FIELD_TYPES = new Set(['string', 'number', 'boolean']);
+const AI_ANALYSIS_MODES = new Set(['auto', 'quick_qa', 'complex_reasoning']);
+const FIELD_CHECK_LEFT_REF_SOURCES = new Set(['node_output', 'trigger_data', 'context', 'manual']);
+const FIELD_CHECK_VALUE_TYPES = new Set(['string', 'number', 'boolean']);
+const FIELD_CHECK_OPERATOR_TYPE_COMPAT = {
+  string: ['equals', 'not_equals', 'contains', 'exists'],
+  number: ['equals', 'not_equals', 'greater_than', 'less_than', 'exists'],
+  boolean: ['equals', 'not_equals', 'exists'],
+};
 
 function clone(value) {
   return JSON.parse(JSON.stringify(value ?? null));
@@ -554,11 +563,40 @@ function resolveTemplateValue(value, context) {
 }
 
 function normalizeAiAnalysisMode(rawMode) {
-  const mode = cleanString(rawMode) || 'complex_reasoning';
-  if (['quick_qa', 'complex_reasoning', 'auto'].includes(mode)) {
+  const mode = cleanString(rawMode) || 'auto';
+  if (AI_ANALYSIS_MODES.has(mode)) {
     return mode;
   }
-  return 'complex_reasoning';
+  return 'auto';
+}
+
+function normalizeOutputFieldEntries(rawFields) {
+  const parsed = typeof rawFields === 'string'
+    ? (() => {
+        try { return JSON.parse(rawFields); } catch (_err) { return null; }
+      })()
+    : rawFields;
+  const fields = Array.isArray(parsed) ? parsed : [];
+
+  return fields
+    .map((field) => {
+      const name = cleanString(field?.name);
+      const typeRaw = cleanString(field?.type) || 'string';
+      const type = AI_FIELD_TYPES.has(typeRaw) ? typeRaw : 'string';
+      const description = cleanString(field?.description) || '';
+      if (!name) return null;
+      return { name, type, description };
+    })
+    .filter(Boolean);
+}
+
+function normalizeOutputFieldsToFormat(rawFields) {
+  const out = {};
+  const fields = normalizeOutputFieldEntries(rawFields);
+  for (const field of fields) {
+    out[field.name] = { type: field.type };
+  }
+  return out;
 }
 
 function normalizeAiOutputFormat(rawFormat) {
@@ -575,15 +613,16 @@ function normalizeAiOutputFormat(rawFormat) {
   if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
     for (const [rawKey, rawDef] of Object.entries(parsed)) {
       const key = cleanString(rawKey);
-      const type = cleanString(rawDef?.type);
+      const rawType = typeof rawDef === 'string' ? rawDef : rawDef?.type;
+      const type = cleanString(rawType);
       if (!key) continue;
-      out[key] = ['string', 'number', 'boolean'].includes(type || '') ? type : 'string';
+      out[key] = AI_FIELD_TYPES.has(type || '') ? type : 'string';
     }
   }
 
   if (!Object.keys(out).length) {
     out.decision = 'string';
-    out.reason = 'string';
+    out.motivo = 'string';
   }
 
   return out;
@@ -656,10 +695,22 @@ function pickGroqModel({ analysisMode, prompt, inputText, outputFormat }) {
   return isComplex ? complexModel : fastModel;
 }
 
-function buildAiSystemPrompt(outputFormat) {
-  const fields = Object.entries(outputFormat || {})
-    .map(([key, type]) => `- ${key}: ${type}`)
-    .join('\n');
+function buildAiSystemPrompt(outputFormat, outputFields = []) {
+  const hasFieldDescriptions = Array.isArray(outputFields) && outputFields.length > 0;
+  const fields = hasFieldDescriptions
+    ? outputFields
+      .map((field) => {
+        if (!field?.name) return null;
+        const desc = cleanString(field.description);
+        return desc
+          ? `- ${field.name} (${field.type}): ${desc}`
+          : `- ${field.name} (${field.type})`;
+      })
+      .filter(Boolean)
+      .join('\n')
+    : Object.entries(outputFormat || {})
+      .map(([key, type]) => `- ${key} (${type})`)
+      .join('\n');
 
   return [
     'Eres un motor de análisis para automatizaciones clínicas.',
@@ -693,7 +744,7 @@ function buildAiSimulatedOutput(outputFormat, analysisMode, model) {
   };
 }
 
-async function runGroqAiAnalysis({ prompt, inputText, outputFormat, analysisMode, maxTokens }) {
+async function runGroqAiAnalysis({ prompt, inputText, outputFormat, outputFields, analysisMode, maxTokens }) {
   const apiKey = cleanString(process.env.GROQ_API_KEY);
   if (!apiKey) {
     throw new Error('groq_api_key_not_configured');
@@ -703,6 +754,7 @@ async function runGroqAiAnalysis({ prompt, inputText, outputFormat, analysisMode
   const timeoutMs = Math.max(1000, Number.parseInt(String(process.env.GROQ_TIMEOUT_MS || '20000'), 10) || 20000);
   const normalizedMode = normalizeAiAnalysisMode(analysisMode);
   const normalizedFormat = normalizeAiOutputFormat(outputFormat);
+  const normalizedOutputFields = normalizeOutputFieldEntries(outputFields);
   const model = pickGroqModel({
     analysisMode: normalizedMode,
     prompt,
@@ -727,7 +779,7 @@ async function runGroqAiAnalysis({ prompt, inputText, outputFormat, analysisMode
         messages: [
           {
             role: 'system',
-            content: buildAiSystemPrompt(normalizedFormat),
+            content: buildAiSystemPrompt(normalizedFormat, normalizedOutputFields),
           },
           {
             role: 'user',
@@ -2051,33 +2103,105 @@ function resolveDurationMs(duration, unit) {
   return qty * 1000;
 }
 
-function evaluateFieldCheck(config, context) {
-  const left = resolveTemplateValue(config?.field, context);
-  const right = resolveTemplateValue(config?.value, context);
-  const operator = String(config?.operator || 'equals').toLowerCase();
+function toBool(value) {
+  if (typeof value === 'boolean') return value;
+  if (typeof value === 'number') return value !== 0;
+  const normalized = String(value || '').trim().toLowerCase();
+  return ['1', 'true', 'yes', 'y', 'on', 'si', 'sí'].includes(normalized);
+}
 
+function isFieldCheckOperatorCompatible(operator, valueType) {
+  const normalizedType = cleanString(valueType) || 'string';
+  const allowed = FIELD_CHECK_OPERATOR_TYPE_COMPAT[normalizedType];
+  if (!allowed) return true;
+  return allowed.includes(operator);
+}
+
+function evaluateFieldCheck(config, context) {
+  const leftRef = config?.left_ref;
+  if (!leftRef || typeof leftRef !== 'object') {
+    throw new Error('field_check_left_ref_required');
+  }
+
+  const source = cleanString(leftRef.source);
+  if (!source || !FIELD_CHECK_LEFT_REF_SOURCES.has(source)) {
+    throw new Error(`field_check_invalid_source:${source || 'empty'}`);
+  }
+
+  const path = cleanString(leftRef.path);
+  if (!path) {
+    throw new Error('field_check_left_ref_path_required');
+  }
+
+  let left;
+  switch (source) {
+    case 'node_output': {
+      const nodeId = cleanString(leftRef.node_id);
+      if (!nodeId) throw new Error('field_check_node_id_required');
+      left = getByPath(context, `outputs.${nodeId}.${path}`);
+      break;
+    }
+    case 'trigger_data':
+      left = getByPath(context, `trigger.data.${path}`);
+      if (left === undefined) left = getByPath(context, path);
+      break;
+    case 'context':
+      left = getByPath(context, path);
+      break;
+    case 'manual': {
+      const templatePath = path.includes('{{') ? path : `{{${path}}}`;
+      left = resolveTemplateValue(templatePath, context);
+      break;
+    }
+    default:
+      throw new Error(`field_check_invalid_source:${source}`);
+  }
+
+  const operator = String(config?.operator || 'equals').toLowerCase();
   if (operator === 'exists') {
     return left !== undefined && left !== null && left !== '';
+  }
+
+  const valueTypeRaw = cleanString(leftRef.value_type) || 'string';
+  const valueType = FIELD_CHECK_VALUE_TYPES.has(valueTypeRaw) ? valueTypeRaw : 'string';
+  if (!isFieldCheckOperatorCompatible(operator, valueType)) {
+    throw new Error(`field_check_operator_incompatible:${operator}:${valueType}`);
+  }
+
+  let right = config?.right_value;
+  if (typeof right === 'string') {
+    right = resolveTemplateValue(right, context);
+  }
+
+  if (valueType === 'number') {
+    const leftNum = Number(left);
+    const rightNum = Number(right);
+    if (!Number.isFinite(leftNum) || !Number.isFinite(rightNum)) {
+      throw new Error('field_check_number_cast_failed');
+    }
+    if (operator === 'equals') return leftNum === rightNum;
+    if (operator === 'not_equals') return leftNum !== rightNum;
+    if (operator === 'greater_than') return leftNum > rightNum;
+    if (operator === 'less_than') return leftNum < rightNum;
+    return false;
+  }
+
+  if (valueType === 'boolean') {
+    const leftBool = toBool(left);
+    const rightBool = toBool(right);
+    if (operator === 'equals') return leftBool === rightBool;
+    if (operator === 'not_equals') return leftBool !== rightBool;
+    return false;
   }
 
   if (operator === 'equals') {
     return String(left) === String(right);
   }
-
   if (operator === 'not_equals') {
     return String(left) !== String(right);
   }
-
   if (operator === 'contains') {
     return String(left || '').toLowerCase().includes(String(right || '').toLowerCase());
-  }
-
-  if (operator === 'greater_than') {
-    return Number(left) > Number(right);
-  }
-
-  if (operator === 'less_than') {
-    return Number(left) < Number(right);
   }
 
   return false;
@@ -2350,41 +2474,84 @@ async function processNode(node, context, runtime = {}) {
     }
 
     case 'condition/ai_analysis': {
-      const resolvedPrompt = cleanString(resolveTemplateValue(config?.prompt, context));
-      const resolvedInputRaw = resolveTemplateValue(config?.input_text, context);
-      const resolvedInputText = typeof resolvedInputRaw === 'string'
-        ? resolvedInputRaw
-        : JSON.stringify(resolvedInputRaw ?? '');
-
-      if (!resolvedPrompt) {
-        throw new Error('ai_analysis_prompt_required');
+      if (
+        config?.prompt !== undefined
+        || config?.input_text !== undefined
+        || config?.output_format !== undefined
+        || config?.analysis_mode !== undefined
+        || config?.provider !== undefined
+        || config?.model !== undefined
+      ) {
+        throw new Error('ai_analysis_legacy_config_not_supported');
       }
 
-      if (!cleanString(resolvedInputText)) {
-        throw new Error('ai_analysis_input_text_required');
+      const resolvedInstruction = cleanString(resolveTemplateValue(config?.instruction, context));
+      if (!resolvedInstruction) {
+        throw new Error('ai_analysis_instruction_required');
       }
 
-      const analysisMode = normalizeAiAnalysisMode(resolveTemplateValue(config?.analysis_mode, context));
-      const outputFormat = normalizeAiOutputFormat(resolveTemplateValue(config?.output_format, context));
+      const sourceEntries = Array.isArray(config?.context_sources) ? config.context_sources : [];
+      if (!sourceEntries.length) {
+        throw new Error('ai_analysis_context_sources_required');
+      }
+
+      const resolvedSources = sourceEntries
+        .map((source) => {
+          const key = cleanString(source?.key) || 'input';
+          const path = cleanString(source?.path);
+          if (!path) return null;
+          return {
+            key,
+            value: resolveTemplateValue(path, context),
+          };
+        })
+        .filter((source) => source && source.value !== undefined && source.value !== null);
+
+      if (!resolvedSources.length) {
+        throw new Error('ai_analysis_context_sources_empty');
+      }
+
+      const inputText = resolvedSources
+        .map((source) => {
+          const rendered = typeof source.value === 'object'
+            ? JSON.stringify(source.value)
+            : String(source.value);
+          return `${source.key}: ${rendered}`;
+        })
+        .join('\n');
+
+      if (!cleanString(inputText)) {
+        throw new Error('ai_analysis_context_empty');
+      }
+
+      const normalizedOutputFields = normalizeOutputFieldEntries(config?.output_fields);
+      if (!normalizedOutputFields.length) {
+        throw new Error('ai_analysis_output_fields_required');
+      }
+
+      const outputFormat = normalizeOutputFieldsToFormat(normalizedOutputFields);
+      const outputFormatSimple = normalizeAiOutputFormat(outputFormat);
+      const analysisMode = normalizeAiAnalysisMode(resolveTemplateValue(config?.mode, context));
       const selectedModel = pickGroqModel({
         analysisMode,
-        prompt: resolvedPrompt,
-        inputText: resolvedInputText,
-        outputFormat,
+        prompt: resolvedInstruction,
+        inputText,
+        outputFormat: outputFormatSimple,
       });
 
       if (simulation) {
         return {
           kind: 'success',
-          output: buildAiSimulatedOutput(outputFormat, analysisMode, selectedModel),
+          output: buildAiSimulatedOutput(outputFormatSimple, analysisMode, selectedModel),
           next_node_id: readOutputTarget(node, 'on_success'),
         };
       }
 
       const aiOutput = await runGroqAiAnalysis({
-        prompt: resolvedPrompt,
-        inputText: resolvedInputText,
+        prompt: resolvedInstruction,
+        inputText,
         outputFormat,
+        outputFields: normalizedOutputFields,
         analysisMode,
         maxTokens: resolveTemplateValue(config?.max_tokens, context),
       });
