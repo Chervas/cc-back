@@ -92,9 +92,21 @@ En `.env` / `.env.example`:
 - `GROQ_MODEL_COMPLEX` (default `llama-3.1-70b-versatile`)
 - `GROQ_MODEL_FAST` (default `llama-3.1-8b-instant`)
 - `GROQ_TIMEOUT_MS` (default `20000`)
+- `GROQ_STT_MODEL` (default `whisper-large-v3-turbo`, para transcripción de audio inbound WhatsApp)
 
 ### Notas operativas
 
 - La API key de Groq se usa **solo en backend**.
 - El output del nodo guarda además metadatos técnicos (`_ai_provider`, `_ai_model`, `_ai_analysis_mode`, `_ai_usage`) para auditoría y depuración.
 - Requisito de producto pendiente: persistir consumo por usuario/clinic para facturación por uso.
+
+### Audio inbound (WhatsApp) y hoja de ruta local
+
+- Estado actual:
+  - Los audios entrantes de WhatsApp se transcriben en backend usando Groq STT (`GROQ_STT_MODEL`).
+  - Se persiste la transcripción en `Messages.content` y metadata técnica en `Messages.metadata`.
+  - **No** se persiste aún el binario de audio ni media estática propia.
+- Objetivo futuro (servidor local):
+  - Sustituir la llamada cloud STT por un servicio local de transcripción (p.ej. `faster-whisper`/`whisper.cpp`) detrás de un endpoint interno.
+  - Mantener el mismo contrato de salida (`content` + `metadata.audio_transcription`) para no romper QuickChat ni automations.
+  - Llama 3.1 seguirá para razonamiento de texto (`condition/ai_analysis`), y STT quedará desacoplado en el servicio de audio local.
