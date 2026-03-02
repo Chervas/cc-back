@@ -48,6 +48,14 @@ function parseBool(value, fallback = false) {
   return fallback;
 }
 
+function appendMultilineText(baseText, nextText) {
+  const base = cleanString(baseText);
+  const next = cleanString(nextText);
+  if (!next) return base || '';
+  if (!base) return next;
+  return `${base}\n${next}`;
+}
+
 function toIntOrNull(value) {
   if (value === undefined || value === null || value === '') return null;
   const parsed = Number.parseInt(String(value), 10);
@@ -2303,18 +2311,21 @@ async function processNode(node, context, runtime = {}) {
     case 'delay/wait_response': {
       const timeoutMs = resolveDurationMs(config?.timeout_duration ?? 60, config?.timeout_unit || 'minutes');
       const waitUntil = timeoutMs > 0 ? new Date(Date.now() + timeoutMs) : null;
+      const responseBufferEnabled = parseBool(resolveTemplateValue(config?.response_buffer_enabled, context), true);
       return {
         kind: 'waiting',
         output: {
           waits_for_response: true,
           listens_to_node_id: cleanString(config?.listens_to_node_id),
           timeout_at: waitUntil ? waitUntil.toISOString() : null,
+          response_buffer_enabled: responseBufferEnabled,
         },
         waiting_meta: {
           type: nodeType,
           listens_to_node_id: cleanString(config?.listens_to_node_id),
           on_response: readOutputTarget(node, 'on_response'),
           on_timeout: readOutputTarget(node, 'on_timeout'),
+          response_buffer_enabled: responseBufferEnabled,
         },
         wait_until: waitUntil,
       };
@@ -2417,10 +2428,37 @@ async function resumeWaitingNode(execution, node, context, { mode, responseText 
 
     let nextContext = context;
     if (useResponse) {
+      const listensTo = cleanString(node?.config?.listens_to_node_id);
+      const listenedOutput = listensTo ? getByPath(context, `outputs.${listensTo}`) : null;
+      const listenedMessagePreview = cleanString(
+        listenedOutput?.message_preview
+        || listenedOutput?.content
+        || listenedOutput?.body
+      );
+      const respondedAt = new Date().toISOString();
       nextContext = mergeNodeOutput(nextContext, node.id, {
         response_text: responseText ?? null,
-        responded_at: new Date().toISOString(),
+        response_lines: String(responseText || '')
+          .split(/\r?\n/)
+          .map((line) => cleanString(line))
+          .filter(Boolean),
+        listens_to_node_id: listensTo,
+        listened_message_preview: listenedMessagePreview,
+        responded_at: respondedAt,
       });
+      // Alias de contexto para simplificar plantillas IA sin depender de IDs de nodos.
+      nextContext = {
+        ...(nextContext || {}),
+        last_response: responseText ?? null,
+        last_prompt: listenedMessagePreview || null,
+        last_response_context: {
+          response_text: responseText ?? null,
+          listened_message_preview: listenedMessagePreview || null,
+          wait_node_id: node.id,
+          listens_to_node_id: listensTo || null,
+          responded_at: respondedAt,
+        },
+      };
     }
 
     await updateExecutionAndEmit(execution, {
@@ -2461,7 +2499,6 @@ async function resumeWaitingNode(execution, node, context, { mode, responseText 
 async function runExecution(executionId, options = {}) {
   const maxSteps = Number.isInteger(options.maxSteps) ? options.maxSteps : 100;
   const resumeMode = cleanString(options.resumeMode) || null;
-  const responseText = options.responseText ?? null;
 
   const execution = await FlowExecutionV2.findByPk(executionId, {
     include: [{
@@ -2502,6 +2539,8 @@ async function runExecution(executionId, options = {}) {
     ) {
       return execution;
     }
+
+    const responseText = options.responseText ?? getByPath(execution.waiting_meta, 'pending_response_text') ?? null;
 
     const waitingNodeId = cleanString(execution.current_node_id);
     const waitingNode = waitingNodeId ? nodeMap.get(waitingNodeId) : null;

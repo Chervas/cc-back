@@ -1,4 +1,5 @@
 'use strict';
+const axios = require('axios');
 const { QueryTypes } = require('sequelize');
 const { createWorker } = require('../services/queue.service');
 const whatsappService = require('../services/whatsapp.service');
@@ -10,6 +11,9 @@ const { getIO } = require('../services/socket.service');
 const db = require('../../models');
 
 const { Conversation, Message, ClinicMetaAsset, WhatsAppWebOrigin } = db;
+const GROQ_API_BASE_URL = (process.env.GROQ_API_BASE_URL || 'https://api.groq.com/openai/v1').replace(/\/+$/, '');
+const GROQ_STT_MODEL = process.env.GROQ_STT_MODEL || 'whisper-large-v3-turbo';
+const META_API_VERSION = process.env.META_API_VERSION || 'v22.0';
 
 const CHAT_DEBUG = process.env.CHAT_DEBUG === 'true';
 const dlog = (...args) => {
@@ -49,6 +53,267 @@ function mapWhatsAppStatus(status) {
         default:
             return null;
     }
+}
+
+function cleanString(value) {
+    if (value === undefined || value === null) return '';
+    return String(value).trim();
+}
+
+function normalizeInboundMessageType(rawType) {
+    const type = String(rawType || '').toLowerCase();
+    if (type === 'image') return 'image';
+    if (type === 'template') return 'template';
+    if (type === 'event') return 'event';
+    return 'text';
+}
+
+async function fetchWhatsAppMediaMeta({ mediaId, accessToken }) {
+    if (!mediaId || !accessToken) {
+        throw new Error('media_meta_missing_params');
+    }
+    const url = `https://graph.facebook.com/${META_API_VERSION}/${mediaId}`;
+    const { data } = await axios.get(url, {
+        headers: {
+            Authorization: `Bearer ${accessToken}`,
+        },
+        params: {
+            fields: 'id,mime_type,sha256,file_size,url',
+        },
+    });
+    return data || {};
+}
+
+async function downloadWhatsAppMediaBuffer({ mediaUrl, accessToken }) {
+    if (!mediaUrl || !accessToken) {
+        throw new Error('media_download_missing_params');
+    }
+    const { data } = await axios.get(mediaUrl, {
+        responseType: 'arraybuffer',
+        headers: {
+            Authorization: `Bearer ${accessToken}`,
+        },
+    });
+    return Buffer.from(data);
+}
+
+async function transcribeAudioWithGroq({ audioBuffer, mimeType = 'audio/ogg', fileName = 'audio.ogg' }) {
+    const apiKey = cleanString(process.env.GROQ_API_KEY);
+    if (!apiKey) {
+        return { ok: false, error: 'groq_api_key_not_configured', text: '' };
+    }
+    if (!audioBuffer || !Buffer.isBuffer(audioBuffer) || !audioBuffer.length) {
+        return { ok: false, error: 'audio_buffer_empty', text: '' };
+    }
+
+    const form = new FormData();
+    form.append('model', GROQ_STT_MODEL);
+    form.append('response_format', 'verbose_json');
+    form.append('temperature', '0');
+    form.append('file', new Blob([audioBuffer], { type: mimeType }), fileName);
+
+    const response = await fetch(`${GROQ_API_BASE_URL}/audio/transcriptions`, {
+        method: 'POST',
+        headers: {
+            Authorization: `Bearer ${apiKey}`,
+        },
+        body: form,
+    });
+
+    if (!response.ok) {
+        const errText = await response.text().catch(() => '');
+        return {
+            ok: false,
+            error: `groq_stt_failed:${response.status}:${cleanString(errText) || 'unknown'}`,
+            text: '',
+        };
+    }
+
+    const payload = await response.json().catch(() => ({}));
+    const text = cleanString(payload?.text);
+    return {
+        ok: Boolean(text),
+        text,
+        language: cleanString(payload?.language) || null,
+        duration: payload?.duration ?? null,
+        provider_payload: payload,
+    };
+}
+
+function buildImageContent(image = {}) {
+    const caption = cleanString(image.caption);
+    return caption ? `[Imagen recibida]\n${caption}` : '[Imagen recibida]';
+}
+
+function buildDocumentContent(document = {}) {
+    const fileName = cleanString(document.filename);
+    return fileName ? `[Documento recibido] ${fileName}` : '[Documento recibido]';
+}
+
+function buildGenericMediaContent(rawType) {
+    const type = String(rawType || '').toLowerCase();
+    if (type === 'audio') return '[Audio recibido]';
+    if (type === 'video') return '[Video recibido]';
+    if (type === 'sticker') return '[Sticker recibido]';
+    if (type === 'document') return '[Documento recibido]';
+    if (type === 'image') return '[Imagen recibida]';
+    return '[Mensaje recibido]';
+}
+
+async function resolveInboundMessagePayload({ msg, clinicId }) {
+    const rawType = String(msg?.type || 'text').toLowerCase();
+    const rawText = msg?.text?.body || msg?.button?.text || msg?.interactive?.text || '';
+    const stripped = extractAndStripWebOriginRef(rawText);
+    const out = {
+        content: cleanString(stripped.content),
+        resumeText: cleanString(stripped.content),
+        messageType: normalizeInboundMessageType(rawType),
+        metadataPatch: {},
+        webOriginRefFromMsg: stripped.ref || null,
+    };
+
+    if (rawType === 'image') {
+        const image = msg?.image || {};
+        out.content = buildImageContent(image);
+        out.resumeText = out.content;
+        out.messageType = 'image';
+        out.metadataPatch = {
+            media: {
+                kind: 'image',
+                media_id: image.id || null,
+                mime_type: image.mime_type || null,
+                sha256: image.sha256 || null,
+                caption: cleanString(image.caption) || null,
+                hosting: 'pending_static_hosting',
+            },
+        };
+        return out;
+    }
+
+    if (rawType === 'document') {
+        const document = msg?.document || {};
+        out.content = buildDocumentContent(document);
+        out.resumeText = out.content;
+        out.metadataPatch = {
+            media: {
+                kind: 'document',
+                media_id: document.id || null,
+                mime_type: document.mime_type || null,
+                sha256: document.sha256 || null,
+                filename: cleanString(document.filename) || null,
+                caption: cleanString(document.caption) || null,
+                hosting: 'pending_static_hosting',
+            },
+        };
+        return out;
+    }
+
+    if (rawType === 'audio') {
+        const audio = msg?.audio || {};
+        const mediaId = cleanString(audio.id);
+        out.content = '[Audio recibido: procesando transcripción]';
+        out.resumeText = out.content;
+        out.metadataPatch = {
+            media: {
+                kind: 'audio',
+                media_id: mediaId || null,
+                mime_type: audio.mime_type || null,
+                sha256: audio.sha256 || null,
+            },
+            audio_transcribed: false,
+            audio_transcription: {
+                provider: 'groq',
+                model: GROQ_STT_MODEL,
+                status: 'pending',
+            },
+        };
+
+        try {
+            const clinicConfig = await whatsappService.getClinicConfig(clinicId);
+            const accessToken = cleanString(clinicConfig?.accessToken);
+            if (!mediaId || !accessToken) {
+                throw new Error('audio_media_or_token_missing');
+            }
+
+            const mediaMeta = await fetchWhatsAppMediaMeta({ mediaId, accessToken });
+            const mediaUrl = cleanString(mediaMeta?.url);
+            const mediaMime = cleanString(audio.mime_type || mediaMeta?.mime_type) || 'audio/ogg';
+            const fileExt = mediaMime.includes('/') ? mediaMime.split('/')[1] : 'ogg';
+            const fileName = `wa-audio-${mediaId || Date.now()}.${fileExt || 'ogg'}`;
+            const mediaBuffer = await downloadWhatsAppMediaBuffer({ mediaUrl, accessToken });
+            const transcription = await transcribeAudioWithGroq({
+                audioBuffer: mediaBuffer,
+                mimeType: mediaMime,
+                fileName,
+            });
+
+            if (transcription.ok && cleanString(transcription.text)) {
+                out.content = transcription.text;
+                out.resumeText = transcription.text;
+                out.metadataPatch = {
+                    ...out.metadataPatch,
+                    media: {
+                        ...(out.metadataPatch.media || {}),
+                        mime_type: mediaMime || null,
+                        file_size: mediaMeta?.file_size || null,
+                        sha256: mediaMeta?.sha256 || audio.sha256 || null,
+                        hosting: 'external_meta_pending_static',
+                    },
+                    audio_transcribed: true,
+                    audio_transcription: {
+                        provider: 'groq',
+                        model: GROQ_STT_MODEL,
+                        status: 'success',
+                        language: transcription.language || null,
+                        duration: transcription.duration || null,
+                    },
+                };
+            } else {
+                out.content = '[Audio recibido: transcripción no disponible]';
+                out.resumeText = out.content;
+                out.metadataPatch = {
+                    ...out.metadataPatch,
+                    audio_transcribed: false,
+                    audio_transcription: {
+                        provider: 'groq',
+                        model: GROQ_STT_MODEL,
+                        status: 'failed',
+                        error: transcription.error || 'transcription_failed',
+                    },
+                };
+            }
+        } catch (error) {
+            out.content = '[Audio recibido: transcripción no disponible]';
+            out.resumeText = out.content;
+            out.metadataPatch = {
+                ...out.metadataPatch,
+                audio_transcribed: false,
+                audio_transcription: {
+                    provider: 'groq',
+                    model: GROQ_STT_MODEL,
+                    status: 'failed',
+                    error: cleanString(error?.message) || 'transcription_failed',
+                },
+            };
+        }
+
+        return out;
+    }
+
+    if (!out.content) {
+        out.content = buildGenericMediaContent(rawType);
+        out.resumeText = out.content;
+        if (rawType && rawType !== 'text') {
+            out.metadataPatch = {
+                media: {
+                    kind: rawType,
+                    hosting: 'pending_static_hosting',
+                },
+            };
+        }
+    }
+
+    return out;
 }
 
 async function findMessageByWamid(wamid) {
@@ -233,10 +498,15 @@ createWorker('webhook_whatsapp', async (job) => {
         const phoneId = value?.metadata?.phone_number_id;
         const from = msg.from;
         const wamid = msg.id;
-        const rawContent = msg.text?.body || msg.button?.text || msg.interactive?.text || '';
-        const stripped = extractAndStripWebOriginRef(rawContent);
-        const webOriginRefFromMsg = stripped.ref || null;
-        const content = stripped.content;
+        const inboundPayload = await resolveInboundMessagePayload({
+            msg,
+            clinicId,
+        });
+        const webOriginRefFromMsg = inboundPayload.webOriginRefFromMsg || null;
+        const content = inboundPayload.content;
+        const resumeText = cleanString(inboundPayload.resumeText || inboundPayload.content);
+        const inboundMessageType = inboundPayload.messageType || 'text';
+        const inboundMetadataPatch = inboundPayload.metadataPatch || {};
 
         // Si no venía en el job, intentamos recuperar por token del propio mensaje (primer mensaje típicamente).
         if (!webOrigin && webOriginRefFromMsg && WhatsAppWebOrigin) {
@@ -307,12 +577,13 @@ createWorker('webhook_whatsapp', async (job) => {
             sender_id: null,
             direction: 'inbound',
             content,
-            message_type: msg.type || 'text',
+            message_type: inboundMessageType,
             status: 'sent',
             metadata: {
                 wamid,
                 phoneId,
                 routing: routing || null,
+                ...inboundMetadataPatch,
                 ...(webOrigin ? { web_origin_ref: webOrigin.ref, web_origin: {
                     id: webOrigin.id || null,
                     clinic_id: webOrigin.clinic_id || null,
@@ -361,7 +632,7 @@ createWorker('webhook_whatsapp', async (job) => {
                 conversationId: conv.id,
                 patientId: conv.patient_id || null,
                 leadId: conv.lead_id || null,
-                messageText: content,
+                messageText: resumeText || content,
                 inboundMessageId: inboundMsg.id,
                 channel: 'whatsapp',
             });
@@ -387,9 +658,10 @@ createWorker('webhook_whatsapp', async (job) => {
                 conversation_id: String(conv.id),
                 content,
                 direction: 'inbound',
-                message_type: msg.type || 'text',
+                message_type: inboundMessageType,
                 status: 'sent',
                 sent_at: inboundMsg.sent_at,
+                metadata: inboundMsg.metadata || null,
             };
 
             if (rooms.size === 0) {

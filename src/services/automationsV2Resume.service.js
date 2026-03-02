@@ -6,6 +6,7 @@ const jobScheduler = require('./jobScheduler.service');
 
 const FlowExecutionV2 = db.FlowExecutionV2;
 const AutomationFlowTemplateV2 = db.AutomationFlowTemplateV2;
+const JobRequest = db.JobRequest;
 
 function cleanString(value) {
   if (value === undefined || value === null) return null;
@@ -20,6 +21,15 @@ function normalizeType(value) {
 function toIntOrNull(value) {
   const parsed = Number.parseInt(String(value), 10);
   return Number.isInteger(parsed) ? parsed : null;
+}
+
+function parseBool(value, fallback = false) {
+  if (value === undefined || value === null || value === '') return fallback;
+  if (typeof value === 'boolean') return value;
+  const normalized = String(value).trim().toLowerCase();
+  if (['1', 'true', 'yes', 'y', 'on'].includes(normalized)) return true;
+  if (['0', 'false', 'no', 'n', 'off'].includes(normalized)) return false;
+  return fallback;
 }
 
 function getByPath(obj, path) {
@@ -87,15 +97,56 @@ function collectContextIds(execution) {
   return ids;
 }
 
-function isWaitResponseNode(execution) {
+function getWaitResponseNode(execution) {
   const nodeId = cleanString(execution?.current_node_id);
-  if (!nodeId) return false;
+  if (!nodeId) return null;
 
   const nodes = Array.isArray(execution?.templateVersion?.nodes)
     ? execution.templateVersion.nodes
     : [];
   const currentNode = nodes.find((n) => cleanString(n?.id) === nodeId);
-  return cleanString(currentNode?.type) === 'delay/wait_response';
+  if (cleanString(currentNode?.type) !== 'delay/wait_response') {
+    return null;
+  }
+  return currentNode;
+}
+
+function appendMultilineText(baseText, nextText) {
+  const base = cleanString(baseText);
+  const next = cleanString(nextText);
+  if (!next) return base || '';
+  if (!base) return next;
+  return `${base}\n${next}`;
+}
+
+function getResponseBufferConfig(waitNode) {
+  const cfg = waitNode?.config && typeof waitNode.config === 'object' ? waitNode.config : {};
+  return {
+    enabled: parseBool(cfg.response_buffer_enabled, true),
+    delayMs: 60 * 1000,
+  };
+}
+
+async function findQueuedResponseResumeJob(executionId) {
+  const execution = toIntOrNull(executionId);
+  if (!execution) return null;
+  const rows = await db.sequelize.query(
+    `
+    SELECT id, status, next_run_at
+    FROM JobRequests
+    WHERE type = 'automations_v2_execute'
+      AND status IN ('pending', 'waiting', 'running')
+      AND JSON_EXTRACT(payload, '$.execution_id') = :executionId
+      AND JSON_UNQUOTE(JSON_EXTRACT(payload, '$.resume_mode')) = 'response'
+    ORDER BY id DESC
+    LIMIT 1
+    `,
+    {
+      replacements: { executionId: execution },
+      type: db.sequelize.QueryTypes.SELECT,
+    }
+  );
+  return rows?.[0] || null;
 }
 
 function matchesExecutionTarget(execution, { conversationId, patientId, leadId }) {
@@ -165,7 +216,7 @@ async function enqueueInboundResponseResume({
   });
 
   const matched = candidates.filter((execution) => {
-    if (!isWaitResponseNode(execution)) return false;
+    if (!getWaitResponseNode(execution)) return false;
     return matchesExecutionTarget(execution, {
       conversationId: normalizedConversationId,
       patientId: normalizedPatientId,
@@ -180,25 +231,82 @@ async function enqueueInboundResponseResume({
   for (const execution of matched) {
     executionIds.push(execution.id);
     try {
-      const job = await jobRequestsService.enqueueJobRequest({
-        type: 'automations_v2_execute',
-        priority: 'critical',
-        origin: 'automations_v2_inbound',
-        payload: {
-          execution_id: execution.id,
-          resume_mode: 'response',
-          response_text: text,
-          inbound_channel: channel,
-          inbound_conversation_id: normalizedConversationId,
-          inbound_message_id: inboundMessageId || null,
-          inbound_patient_id: normalizedPatientId || null,
-          inbound_lead_id: normalizedLeadId || null,
-        },
-      });
+      const waitNode = getWaitResponseNode(execution);
+      const buffer = getResponseBufferConfig(waitNode);
 
-      // Menor latencia: intentamos disparo inmediato además del scheduler periódico.
-      jobScheduler.triggerImmediate(job.id).catch(() => {});
-      enqueued += 1;
+      if (buffer.enabled) {
+        const waitUntil = new Date(Date.now() + buffer.delayMs);
+        const existingWaitingMeta = execution.waiting_meta && typeof execution.waiting_meta === 'object'
+          ? execution.waiting_meta
+          : {};
+        const mergedText = appendMultilineText(existingWaitingMeta.pending_response_text, text);
+        const pendingCount = Number(existingWaitingMeta.pending_response_count || 0) + 1;
+
+        await execution.update({
+          status: 'waiting',
+          wait_until: waitUntil,
+          waiting_meta: {
+            ...existingWaitingMeta,
+            resume_mode: 'response',
+            pending_response_text: mergedText,
+            pending_response_count: pendingCount,
+            last_inbound_message_at: new Date().toISOString(),
+            last_inbound_message_id: inboundMessageId || null,
+            inbound_channel: channel,
+          },
+        });
+
+        const queuedJob = await findQueuedResponseResumeJob(execution.id);
+        if (queuedJob) {
+          if (cleanString(queuedJob.status) === 'waiting') {
+            await JobRequest.update(
+              {
+                next_run_at: waitUntil,
+                updated_at: new Date(),
+              },
+              { where: { id: queuedJob.id } }
+            );
+          }
+        } else {
+          await jobRequestsService.enqueueJobRequest({
+            type: 'automations_v2_execute',
+            priority: 'critical',
+            status: 'waiting',
+            nextRunAt: waitUntil,
+            origin: 'automations_v2_inbound_buffer',
+            payload: {
+              execution_id: execution.id,
+              resume_mode: 'response',
+              inbound_channel: channel,
+              inbound_conversation_id: normalizedConversationId,
+              inbound_message_id: inboundMessageId || null,
+              inbound_patient_id: normalizedPatientId || null,
+              inbound_lead_id: normalizedLeadId || null,
+            },
+          });
+          enqueued += 1;
+        }
+      } else {
+        const job = await jobRequestsService.enqueueJobRequest({
+          type: 'automations_v2_execute',
+          priority: 'critical',
+          origin: 'automations_v2_inbound',
+          payload: {
+            execution_id: execution.id,
+            resume_mode: 'response',
+            response_text: text,
+            inbound_channel: channel,
+            inbound_conversation_id: normalizedConversationId,
+            inbound_message_id: inboundMessageId || null,
+            inbound_patient_id: normalizedPatientId || null,
+            inbound_lead_id: normalizedLeadId || null,
+          },
+        });
+
+        // Menor latencia: intentamos disparo inmediato además del scheduler periódico.
+        jobScheduler.triggerImmediate(job.id).catch(() => {});
+        enqueued += 1;
+      }
     } catch (error) {
       errors.push({
         execution_id: execution.id,
@@ -219,4 +327,3 @@ async function enqueueInboundResponseResume({
 module.exports = {
   enqueueInboundResponseResume,
 };
-

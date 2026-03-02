@@ -46,6 +46,11 @@ async function runAutomationFlowV2Job(payload = {}) {
 
   if (payload.response_text !== undefined) {
     options.responseText = payload.response_text;
+  } else if (options.resumeMode === 'response') {
+    const pendingText = execution?.waiting_meta?.pending_response_text;
+    if (pendingText !== undefined && pendingText !== null) {
+      options.responseText = pendingText;
+    }
   }
 
   const updated = await flowEngineV2Service.runExecution(execution.id, options);
