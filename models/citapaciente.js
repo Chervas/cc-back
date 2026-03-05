@@ -38,12 +38,14 @@ module.exports = (sequelize, DataTypes) => {
     estado: {
       type: DataTypes.ENUM(
         'pendiente',
-        'pendiente_confirmada',
-        'confirmada',
-        'reprogramada',
-        'cancelada',
+        'info_enviada',
+        'info_confirmada',
+        'recordatorio_enviado',
+        'recordatorio_confirmado',
         'completada',
-        'no_asistio'
+        'no_asistio',
+        'cancelada',
+        'reprogramada'
       ),
       allowNull: false,
       defaultValue: 'pendiente'

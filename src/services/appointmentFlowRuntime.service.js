@@ -32,8 +32,10 @@ function mapEstadoToFlowStatus(estado) {
 }
 
 function mapEstadoToAgendaIcon(estado) {
-  if (estado === 'pendiente_confirmada') return 'reminder-confirmed';
-  if (estado === 'confirmada') return 'confirmed';
+  if (estado === 'info_enviada') return 'sent';
+  if (estado === 'info_confirmada') return 'confirmed';
+  if (estado === 'recordatorio_enviado') return 'reminder-sent';
+  if (estado === 'recordatorio_confirmado') return 'reminder-confirmed';
   if (estado === 'reprogramada') return 'pending_confirmation';
   if (estado === 'cancelada') return 'not_confirmed';
   if (estado === 'no_asistio') return 'no_show';

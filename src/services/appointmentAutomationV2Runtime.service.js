@@ -13,6 +13,7 @@ const { getIO } = require('./socket.service');
 
 const APPOINTMENT_TRIGGER_TYPES = new Set([
   'appointment_created',
+  'appointment_reminder_window',
   'appointment_confirmed',
   'appointment_no_show',
   'appointment_rescheduled',
@@ -38,7 +39,10 @@ function normalizeEventName(eventName) {
 
 function mapEstadoToEvent(estado) {
   const normalized = cleanString(estado).toLowerCase();
-  if (normalized === 'confirmada') return 'appointment_confirmed';
+  if (normalized === 'info_enviada') return 'appointment_created';
+  if (normalized === 'info_confirmada') return 'appointment_confirmed';
+  if (normalized === 'recordatorio_enviado') return 'appointment_reminder_window';
+  if (normalized === 'recordatorio_confirmado') return 'appointment_confirmed';
   if (normalized === 'reprogramada') return 'appointment_rescheduled';
   if (normalized === 'no_asistio') return 'appointment_no_show';
   if (normalized === 'cancelada') return 'appointment_cancelled';
