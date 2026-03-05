@@ -24,7 +24,8 @@ const { CITA_STATUS_VALUES } = require('../lib/status-catalog');
 const CITA_ESTADOS_VALIDOS = new Set(CITA_STATUS_VALUES);
 
 function mapEstadoToFlowEvent(estado) {
-    if (estado === 'info_enviada') return 'appointment_updated';
+    if (estado === 'pendiente') return 'appointment_created';
+    if (estado === 'info_enviada') return 'appointment_created';
     if (estado === 'info_confirmada') return 'appointment_confirmed';
     if (estado === 'recordatorio_enviado') return 'appointment_reminder_window';
     if (estado === 'recordatorio_confirmado') return 'appointment_confirmed';
@@ -32,10 +33,11 @@ function mapEstadoToFlowEvent(estado) {
     if (estado === 'no_asistio') return 'appointment_no_show';
     if (estado === 'cancelada') return 'appointment_cancelled';
     if (estado === 'completada') return 'appointment_completed';
-    return 'appointment_updated';
+    return 'appointment_created';
 }
 
 function mapEstadoToAutomationV2Event(estado) {
+    if (estado === 'pendiente') return 'appointment_created';
     if (estado === 'info_enviada') return 'appointment_created';
     if (estado === 'info_confirmada') return 'appointment_confirmed';
     if (estado === 'recordatorio_enviado') return 'appointment_reminder_window';
