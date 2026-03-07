@@ -256,11 +256,6 @@ const inAnyWindow = (windows, start, end) => {
     return windows.some((w) => start >= w.start && end <= w.end);
 };
 
-const normalizeModoHorario = (value) => {
-    const mode = String(value || '').trim().toLowerCase();
-    if (['citas_personalizadas', 'citas_automaticas'].includes(mode)) return mode;
-    return 'citas_automaticas';
-};
 const normalizeRecibeCitas = (value) => {
     if (typeof value === 'boolean') return value;
     const normalized = String(value || '').trim().toLowerCase();
@@ -306,7 +301,6 @@ async function fetchDoctorGlobalWindowsMap({ doctorIds, dow, fechaIso, clinicTim
     ids.forEach((id) => out.set(id, []));
     if (!ids.length) return out;
 
-    let missingDoctorIds = [...ids];
     let capa1ReadOk = false;
     if (db.PersonalDisponibilidadGeneral) {
         try {
@@ -321,43 +315,19 @@ async function fetchDoctorGlobalWindowsMap({ doctorIds, dow, fechaIso, clinicTim
             });
 
             capa1ReadOk = true;
-            const withGeneral = new Set();
             generalRows.forEach((row) => {
                 const doctorId = Number(row.doctor_id);
                 if (!Number.isFinite(doctorId)) return;
-                withGeneral.add(doctorId);
                 const windows = buildWindowsFromHorarios([row], dow, fechaIso, clinicTimezone);
                 if (!windows.length) return;
                 const prev = out.get(doctorId) || [];
                 out.set(doctorId, prev.concat(windows));
             });
-
-            missingDoctorIds = ids.filter((doctorId) => !withGeneral.has(doctorId));
         } catch (error) {
             if (!isMissingPersonalGeneralTableError(error)) {
                 throw error;
             }
         }
-    }
-
-    if (!capa1ReadOk || missingDoctorIds.length) {
-        const rows = await DoctorClinica.findAll({
-            where: {
-                doctor_id: { [Op.in]: capa1ReadOk ? missingDoctorIds : ids },
-                activo: true
-            },
-            attributes: ['doctor_id'],
-            include: [{ model: DoctorHorario, as: 'horarios', attributes: ['dia_semana', 'activo', 'hora_inicio', 'hora_fin'] }]
-        });
-
-        rows.forEach((dc) => {
-            const doctorId = Number(dc.doctor_id);
-            if (!Number.isFinite(doctorId)) return;
-            const windows = buildWindowsFromHorarios(dc.horarios || [], dow, fechaIso, clinicTimezone);
-            if (!windows.length) return;
-            const prev = out.get(doctorId) || [];
-            out.set(doctorId, prev.concat(windows));
-        });
     }
 
     for (const [id, windows] of out.entries()) {
@@ -378,7 +348,6 @@ function buildDoctorAvailabilityContext({
         return {
             docWins: [],
             dcMissing: false,
-            mode: null,
             outOfHoursMessage: 'Doctor fuera de horario'
         };
     }
@@ -387,13 +356,11 @@ function buildDoctorAvailabilityContext({
         return {
             docWins: [],
             dcMissing: true,
-            mode: null,
             outOfHoursMessage: 'Doctor no asignado a la clínica'
         };
     }
 
     const receiveAppointments = normalizeRecibeCitas(dc.recibe_citas);
-    const mode = normalizeModoHorario(dc.modo_horario);
     const globalWins = mergeWindows(globalWindowsMap?.get(Number(doctorId)) || []);
     const clinicWins = buildWindowsFromHorarios(dc.horarios || [], dow, fechaIso, clinicTimezone);
 
@@ -401,19 +368,7 @@ function buildDoctorAvailabilityContext({
         return {
             docWins: [],
             dcMissing: false,
-            mode,
             outOfHoursMessage: 'Profesional en modo sin citas (no aparece en agenda de citas)'
-        };
-    }
-
-    if (mode === 'citas_automaticas') {
-        return {
-            docWins: globalWins,
-            dcMissing: false,
-            mode,
-            outOfHoursMessage: globalWins.length
-                ? 'Profesional fuera de su disponibilidad general'
-                : 'Profesional sin disponibilidad general configurada'
         };
     }
 
@@ -425,7 +380,6 @@ function buildDoctorAvailabilityContext({
     return {
         docWins: effective,
         dcMissing: false,
-        mode,
         outOfHoursMessage
     };
 }

@@ -15,9 +15,6 @@ module.exports = (sequelize, DataTypes) => {
     rol_en_clinica: DataTypes.STRING(64),
     // Eje 1: si el profesional recibe citas en esta clínica (agenda).
     recibe_citas: { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: false },
-    // Eje 2: modo de cálculo horario cuando recibe citas.
-    // Valores: 'citas_automaticas' | 'citas_personalizadas'
-    modo_horario: { type: DataTypes.STRING(32), allowNull: false, defaultValue: 'citas_automaticas' },
     activo: { type: DataTypes.BOOLEAN, defaultValue: true }
   }, {
     sequelize,

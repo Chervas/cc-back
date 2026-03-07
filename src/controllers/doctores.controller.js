@@ -186,7 +186,6 @@ exports.updateHorariosClinica = asyncHandler(async (req, res) => {
       doctor_id: doctorId,
       clinica_id: clinicaId,
       recibe_citas: true,
-      modo_horario: 'citas_automaticas',
       activo: true
     });
   }

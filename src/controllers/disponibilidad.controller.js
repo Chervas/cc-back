@@ -252,11 +252,6 @@ const intersectWindows = (a, b) => {
     .filter((w) => w.start < w.end);
 };
 
-const normalizeModoHorario = (value) => {
-  const mode = String(value || '').trim().toLowerCase();
-  if (['citas_personalizadas', 'citas_automaticas'].includes(mode)) return mode;
-  return 'citas_automaticas';
-};
 const normalizeRecibeCitas = (value) => {
   if (typeof value === 'boolean') return value;
   const normalized = String(value || '').trim().toLowerCase();
@@ -291,7 +286,6 @@ const fetchDoctorGlobalWindowsMap = async ({ doctorIds, dow, fechaLocal, timeZon
   ids.forEach((id) => out.set(id, []));
   if (!ids.length) return out;
 
-  let missingDoctorIds = [...ids];
   let capa1ReadOk = false;
   if (db.PersonalDisponibilidadGeneral) {
     try {
@@ -306,44 +300,19 @@ const fetchDoctorGlobalWindowsMap = async ({ doctorIds, dow, fechaLocal, timeZon
       });
 
       capa1ReadOk = true;
-      const withGeneral = new Set();
       generalRows.forEach((row) => {
         const doctorId = Number(row.doctor_id);
         if (!Number.isFinite(doctorId)) return;
-        withGeneral.add(doctorId);
         const windows = buildWindowsFromHorarios([row], dow, fechaLocal, timeZone);
         if (!windows.length) return;
         const prev = out.get(doctorId) || [];
         out.set(doctorId, prev.concat(windows));
       });
-      missingDoctorIds = ids.filter((doctorId) => !withGeneral.has(doctorId));
     } catch (error) {
       if (!isMissingPersonalGeneralTableError(error)) {
         throw error;
       }
     }
-  }
-
-  if (!capa1ReadOk || missingDoctorIds.length) {
-    const rows = await db.DoctorClinica.findAll({
-      where: {
-        doctor_id: { [Op.in]: capa1ReadOk ? missingDoctorIds : ids },
-        activo: true
-      },
-      attributes: ['doctor_id'],
-      include: [
-        { model: db.DoctorHorario, as: 'horarios', attributes: ['dia_semana', 'activo', 'hora_inicio', 'hora_fin'] }
-      ]
-    });
-
-    rows.forEach((dc) => {
-      const doctorId = Number(dc.doctor_id);
-      if (!Number.isFinite(doctorId)) return;
-      const windows = buildWindowsFromHorarios(dc.horarios || [], dow, fechaLocal, timeZone);
-      if (!windows.length) return;
-      const prev = out.get(doctorId) || [];
-      out.set(doctorId, prev.concat(windows));
-    });
   }
 
   for (const [doctorId, windows] of out.entries()) {
@@ -363,25 +332,22 @@ const buildDoctorAvailabilityContext = ({
   globalWindowsMap
 }) => {
   if (!doctorId) {
-    return {
-      docWins: [],
-      dcMissing: false,
-      mode: null,
-      outOfHoursMessage: 'Doctor fuera de horario'
-    };
-  }
+      return {
+        docWins: [],
+        dcMissing: false,
+        outOfHoursMessage: 'Doctor fuera de horario'
+      };
+    }
 
   if (dc === null) {
-    return {
-      docWins: [],
-      dcMissing: true,
-      mode: null,
-      outOfHoursMessage: 'Doctor no asignado a la clínica'
-    };
-  }
+      return {
+        docWins: [],
+        dcMissing: true,
+        outOfHoursMessage: 'Doctor no asignado a la clínica'
+      };
+    }
 
   const receiveAppointments = normalizeRecibeCitas(dc?.recibe_citas);
-  const mode = normalizeModoHorario(dc?.modo_horario);
   const globalWins = mergeWindows(globalWindowsMap?.get(Number(doctorId)) || []);
   const clinicWins = buildWindowsFromHorarios(dc?.horarios || [], dow, fechaLocal, timeZone);
 
@@ -389,20 +355,7 @@ const buildDoctorAvailabilityContext = ({
     return {
       docWins: [],
       dcMissing: false,
-      mode,
       outOfHoursMessage: 'Profesional en modo sin citas (no aparece en agenda de citas)'
-    };
-  }
-
-  if (mode === 'citas_automaticas') {
-    const hasGlobal = globalWins.length > 0;
-    return {
-      docWins: globalWins,
-      dcMissing: false,
-      mode,
-      outOfHoursMessage: hasGlobal
-        ? 'Profesional fuera de su disponibilidad general'
-        : 'Profesional sin disponibilidad general configurada'
     };
   }
 
@@ -417,7 +370,6 @@ const buildDoctorAvailabilityContext = ({
   return {
     docWins: effective,
     dcMissing: false,
-    mode,
     outOfHoursMessage: message
   };
 };
