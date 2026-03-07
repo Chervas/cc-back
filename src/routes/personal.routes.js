@@ -46,6 +46,10 @@ router.put('/me/clinicas/:clinicaId/horarios', personalController.updateHorarios
 router.post('/me/clinicas/:clinicaId/horarios', personalController.createHorarioClinicaForCurrent);
 router.patch('/me/clinicas/:clinicaId/horarios/:horarioId', personalController.patchHorarioClinicaForCurrent);
 router.delete('/me/clinicas/:clinicaId/horarios/:horarioId', personalController.deleteHorarioClinicaForCurrent);
+router.get('/me/clinicas/:clinicaId/horarios/:horarioId/excepciones', personalController.getHorarioExcepcionesForCurrent);
+router.post('/me/clinicas/:clinicaId/horarios/:horarioId/excepciones', personalController.createHorarioExcepcionForCurrent);
+router.patch('/me/clinicas/:clinicaId/horarios/:horarioId/excepciones/:exceptionId', personalController.patchHorarioExcepcionForCurrent);
+router.delete('/me/clinicas/:clinicaId/horarios/:horarioId/excepciones/:exceptionId', personalController.deleteHorarioExcepcionForCurrent);
 router.post('/me/horarios/move', personalController.moveHorarioClinicaForCurrent);
 router.post('/me/horarios/copy', personalController.copyHorarioClinicaForCurrent);
 router.patch('/me/clinicas/:clinicaId/disponibilidad-config', personalController.updateDisponibilidadConfigClinicaForCurrent);
@@ -54,6 +58,10 @@ router.put('/:id/clinicas/:clinicaId/horarios', personalController.updateHorario
 router.post('/:id/clinicas/:clinicaId/horarios', personalController.createHorarioClinica);
 router.patch('/:id/clinicas/:clinicaId/horarios/:horarioId', personalController.patchHorarioClinica);
 router.delete('/:id/clinicas/:clinicaId/horarios/:horarioId', personalController.deleteHorarioClinica);
+router.get('/:id/clinicas/:clinicaId/horarios/:horarioId/excepciones', personalController.getHorarioExcepciones);
+router.post('/:id/clinicas/:clinicaId/horarios/:horarioId/excepciones', personalController.createHorarioExcepcion);
+router.patch('/:id/clinicas/:clinicaId/horarios/:horarioId/excepciones/:exceptionId', personalController.patchHorarioExcepcion);
+router.delete('/:id/clinicas/:clinicaId/horarios/:horarioId/excepciones/:exceptionId', personalController.deleteHorarioExcepcion);
 router.post('/:id/horarios/move', personalController.moveHorarioClinica);
 router.post('/:id/horarios/copy', personalController.copyHorarioClinica);
 router.patch('/:id/clinicas/:clinicaId/disponibilidad-config', personalController.updateDisponibilidadConfigClinica);
@@ -69,10 +77,18 @@ router.get('/me/bloqueos', personalController.getPersonalBloqueosForCurrent);
 router.post('/me/bloqueos', personalController.createPersonalBloqueoForCurrent);
 router.patch('/me/bloqueos/:bloqueoId', personalController.updatePersonalBloqueoForCurrent);
 router.delete('/me/bloqueos/:bloqueoId', personalController.deletePersonalBloqueoForCurrent);
+router.get('/me/bloqueos/:bloqueoId/excepciones', personalController.getPersonalBloqueoExcepcionesForCurrent);
+router.post('/me/bloqueos/:bloqueoId/excepciones', personalController.createPersonalBloqueoExcepcionForCurrent);
+router.patch('/me/bloqueos/:bloqueoId/excepciones/:exceptionId', personalController.patchPersonalBloqueoExcepcionForCurrent);
+router.delete('/me/bloqueos/:bloqueoId/excepciones/:exceptionId', personalController.deletePersonalBloqueoExcepcionForCurrent);
 router.get('/:id/bloqueos', personalController.getPersonalBloqueos);
 router.post('/:id/bloqueos', personalController.createPersonalBloqueo);
 router.patch('/:id/bloqueos/:bloqueoId', personalController.updatePersonalBloqueo);
 router.delete('/:id/bloqueos/:bloqueoId', personalController.deletePersonalBloqueo);
+router.get('/:id/bloqueos/:bloqueoId/excepciones', personalController.getPersonalBloqueoExcepciones);
+router.post('/:id/bloqueos/:bloqueoId/excepciones', personalController.createPersonalBloqueoExcepcion);
+router.patch('/:id/bloqueos/:bloqueoId/excepciones/:exceptionId', personalController.patchPersonalBloqueoExcepcion);
+router.delete('/:id/bloqueos/:bloqueoId/excepciones/:exceptionId', personalController.deletePersonalBloqueoExcepcion);
 
 // Detalle de miembro (filtrado por accesos del usuario)
 router.get('/:id', personalController.getPersonalById);

@@ -1,6 +1,7 @@
 const asyncHandler = require('express-async-handler');
 const db = require('../../models');
 const { Op } = db.Sequelize;
+const { buildHorarioExceptionMap, expandHorariosForDate } = require('../lib/personal-schedule-recurring');
 
 const DEFAULT_TIMEZONE = 'Europe/Madrid';
 
@@ -194,9 +195,12 @@ const formatLocal = (date, timeZone) => {
 };
 
 const buildWindowsFromHorarios = (horarios, dow, fechaLocal, timeZone) => {
-  // horario: { dia_semana, activo, hora_inicio, hora_fin }
-  const base = (horarios || [])
-    .filter((h) => h.dia_semana === dow && h.activo)
+  const exceptionMap = buildHorarioExceptionMap(
+    (horarios || []).flatMap((h) => Array.isArray(h?.excepciones) ? h.excepciones : [])
+  );
+  const expanded = expandHorariosForDate(horarios || [], fechaLocal, exceptionMap)
+    .filter((h) => h.dia_semana === dow && h.activo);
+  const base = expanded
     .map((h) => {
       const start = localDateTimeToUtc(fechaLocal, h.hora_inicio, timeZone);
       const end = localDateTimeToUtc(fechaLocal, h.hora_fin, timeZone);
@@ -204,6 +208,51 @@ const buildWindowsFromHorarios = (horarios, dow, fechaLocal, timeZone) => {
     })
     .filter((w) => w.start && w.end && Number.isFinite(w.start.getTime()) && Number.isFinite(w.end.getTime()) && w.start < w.end);
   return base;
+};
+
+const buildDoctorBloqueoRowsForDate = (bloqueos, fechaLocal, timeZone) => {
+  const targetDow = dayIndexFromLocalDate(fechaLocal);
+  return (bloqueos || []).flatMap((bloqueo) => {
+    const exceptions = Array.isArray(bloqueo?.excepciones) ? bloqueo.excepciones : [];
+    const canceled = exceptions.some((row) => String(row?.fecha || '') === fechaLocal && row?.cancelado !== false);
+    if (canceled) return [];
+
+    const startDay = formatDateLocal(bloqueo.fecha_inicio, timeZone);
+    const endDay = formatDateLocal(bloqueo.fecha_fin, timeZone);
+    const startParts = formatPartsInTimeZone(bloqueo.fecha_inicio, timeZone);
+    const endParts = formatPartsInTimeZone(bloqueo.fecha_fin, timeZone);
+    const startHm = `${String(startParts.hour).padStart(2, '0')}:${String(startParts.minute).padStart(2, '0')}`;
+    const endHm = `${String(endParts.hour).padStart(2, '0')}:${String(endParts.minute).padStart(2, '0')}`;
+    const recurrente = String(bloqueo.recurrente || 'none');
+
+    let applies = false;
+    if (recurrente === 'none') {
+      applies = fechaLocal >= startDay && fechaLocal <= endDay;
+    } else if (recurrente === 'daily') {
+      applies = fechaLocal >= startDay;
+    } else if (recurrente === 'weekly') {
+      applies = fechaLocal >= startDay && targetDow === dayIndexFromLocalDate(startDay);
+    } else if (recurrente === 'monthly') {
+      applies = fechaLocal >= startDay && Number(fechaLocal.slice(8, 10)) === Number(startDay.slice(8, 10));
+    }
+    if (!applies) return [];
+
+    const occStartHm = recurrente === 'none'
+      ? (fechaLocal === startDay ? startHm : '00:00')
+      : startHm;
+    const occEndHm = recurrente === 'none'
+      ? (fechaLocal === endDay ? endHm : '23:59')
+      : endHm;
+    const start = localDateTimeToUtc(fechaLocal, occStartHm, timeZone);
+    const end = localDateTimeToUtc(fechaLocal, occEndHm, timeZone);
+    if (!start || !end || start >= end) return [];
+
+    return [{
+      ...bloqueo.toJSON?.() || bloqueo,
+      fecha_inicio: start,
+      fecha_fin: end,
+    }];
+  });
 };
 
 const hasActiveSchedule = (horarios) => {
@@ -810,7 +859,7 @@ exports.check = asyncHandler(async (req, res) => {
 
     const dc = await db.DoctorClinica.findOne({
       where: { doctor_id: doctorId, clinica_id: clinicaId, activo: true },
-      include: [{ model: db.DoctorHorario, as: 'horarios' }]
+      include: [{ model: db.DoctorHorario, as: 'horarios', include: [{ model: db.DoctorHorarioExcepcion, as: 'excepciones' }] }]
     });
 
     const doctorCtx = buildDoctorAvailabilityContext({
@@ -848,13 +897,17 @@ exports.check = asyncHandler(async (req, res) => {
       }
     }
 
-    const bloqueos = await db.DoctorBloqueo.findAll({
+    const bloqueoDefs = await db.DoctorBloqueo.findAll({
       where: {
         doctor_id: doctorId,
-        fecha_inicio: { [Op.lt]: end },
-        fecha_fin: { [Op.gt]: start }
-      }
+        [Op.or]: [
+          { recurrente: 'none', fecha_inicio: { [Op.lt]: end }, fecha_fin: { [Op.gt]: start } },
+          { recurrente: { [Op.ne]: 'none' }, fecha_inicio: { [Op.lte]: end } },
+        ],
+      },
+      include: [{ model: db.DoctorBloqueoExcepcion, as: 'excepciones' }],
     });
+    const bloqueos = buildDoctorBloqueoRowsForDate(bloqueoDefs, fechaLocalCheck, clinicTimezone);
     if (bloqueos.length) {
       const b = bloqueos[0];
       conflicts.push({
@@ -1120,7 +1173,7 @@ exports.slots = asyncHandler(async (req, res) => {
   if (doctorId && instalacionIds.length) {
     const dc = await db.DoctorClinica.findOne({
       where: { doctor_id: doctorId, clinica_id: clinicaId, activo: true },
-      include: [{ model: db.DoctorHorario, as: 'horarios' }]
+      include: [{ model: db.DoctorHorario, as: 'horarios', include: [{ model: db.DoctorHorarioExcepcion, as: 'excepciones' }] }]
     });
     const doctorCtx = buildDoctorAvailabilityContext({
       doctorId,
@@ -1207,10 +1260,18 @@ exports.slots = asyncHandler(async (req, res) => {
       instCitasById.get(id).push(c);
     });
 
-    const docBloqRows = await db.DoctorBloqueo.findAll({
-      where: { doctor_id: doctorId, fecha_inicio: { [Op.lt]: baseEnd }, fecha_fin: { [Op.gt]: baseStart } },
-      attributes: ['fecha_inicio', 'fecha_fin', 'motivo', 'tipo', 'clinica_id']
+    const docBloqDefs = await db.DoctorBloqueo.findAll({
+      where: {
+        doctor_id: doctorId,
+        [Op.or]: [
+          { recurrente: 'none', fecha_inicio: { [Op.lt]: baseEnd }, fecha_fin: { [Op.gt]: baseStart } },
+          { recurrente: { [Op.ne]: 'none' }, fecha_inicio: { [Op.lte]: baseEnd } },
+        ],
+      },
+      attributes: ['id', 'doctor_id', 'fecha_inicio', 'fecha_fin', 'motivo', 'tipo', 'clinica_id', 'recurrente'],
+      include: [{ model: db.DoctorBloqueoExcepcion, as: 'excepciones' }],
     });
+    const docBloqRows = buildDoctorBloqueoRowsForDate(docBloqDefs, fecha_local, clinicTimezone);
     const docCitasRows = await db.CitaPaciente.findAll({
       where: { doctor_id: doctorId, inicio: { [Op.lt]: baseEnd }, fin: { [Op.gt]: baseStart } },
       attributes: ['inicio', 'fin', 'clinica_id']
@@ -1289,14 +1350,22 @@ exports.slots = asyncHandler(async (req, res) => {
 
     const dcRows = await db.DoctorClinica.findAll({
       where: { doctor_id: { [Op.in]: doctorIds }, clinica_id: clinicaId, activo: true },
-      include: [{ model: db.DoctorHorario, as: 'horarios' }]
+      include: [{ model: db.DoctorHorario, as: 'horarios', include: [{ model: db.DoctorHorarioExcepcion, as: 'excepciones' }] }]
     });
     const dcByDoctor = new Map(dcRows.map((r) => [r.doctor_id, r]));
 
-    const docBloqRows = await db.DoctorBloqueo.findAll({
-      where: { doctor_id: { [Op.in]: doctorIds }, fecha_inicio: { [Op.lt]: baseEnd }, fecha_fin: { [Op.gt]: baseStart } },
-      attributes: ['doctor_id', 'fecha_inicio', 'fecha_fin', 'motivo', 'tipo', 'clinica_id']
+    const docBloqDefs = await db.DoctorBloqueo.findAll({
+      where: {
+        doctor_id: { [Op.in]: doctorIds },
+        [Op.or]: [
+          { recurrente: 'none', fecha_inicio: { [Op.lt]: baseEnd }, fecha_fin: { [Op.gt]: baseStart } },
+          { recurrente: { [Op.ne]: 'none' }, fecha_inicio: { [Op.lte]: baseEnd } },
+        ],
+      },
+      attributes: ['id', 'doctor_id', 'fecha_inicio', 'fecha_fin', 'motivo', 'tipo', 'clinica_id', 'recurrente'],
+      include: [{ model: db.DoctorBloqueoExcepcion, as: 'excepciones' }],
     });
+    const docBloqRows = buildDoctorBloqueoRowsForDate(docBloqDefs, fecha_local, clinicTimezone);
     const docCitasRows = await db.CitaPaciente.findAll({
       where: { doctor_id: { [Op.in]: doctorIds }, inicio: { [Op.lt]: baseEnd }, fin: { [Op.gt]: baseStart } },
       attributes: ['doctor_id', 'inicio', 'fin', 'clinica_id']
@@ -1405,7 +1474,7 @@ exports.slots = asyncHandler(async (req, res) => {
   if (doctorId) {
     const dcRow = await db.DoctorClinica.findOne({
       where: { doctor_id: doctorId, clinica_id: clinicaId, activo: true },
-      include: [{ model: db.DoctorHorario, as: 'horarios' }]
+      include: [{ model: db.DoctorHorario, as: 'horarios', include: [{ model: db.DoctorHorarioExcepcion, as: 'excepciones' }] }]
     });
     dc = dcRow || null;
     doctorCtx = buildDoctorAvailabilityContext({
@@ -1418,10 +1487,18 @@ exports.slots = asyncHandler(async (req, res) => {
       globalWindowsMap: doctorGlobalWindowsMap
     });
 
-    docBloqRows = await db.DoctorBloqueo.findAll({
-      where: { doctor_id: doctorId, fecha_inicio: { [Op.lt]: baseEnd }, fecha_fin: { [Op.gt]: baseStart } },
-      attributes: ['fecha_inicio', 'fecha_fin', 'motivo', 'tipo', 'clinica_id']
+    const docBloqDefs = await db.DoctorBloqueo.findAll({
+      where: {
+        doctor_id: doctorId,
+        [Op.or]: [
+          { recurrente: 'none', fecha_inicio: { [Op.lt]: baseEnd }, fecha_fin: { [Op.gt]: baseStart } },
+          { recurrente: { [Op.ne]: 'none' }, fecha_inicio: { [Op.lte]: baseEnd } },
+        ],
+      },
+      attributes: ['id', 'doctor_id', 'fecha_inicio', 'fecha_fin', 'motivo', 'tipo', 'clinica_id', 'recurrente'],
+      include: [{ model: db.DoctorBloqueoExcepcion, as: 'excepciones' }],
     });
+    docBloqRows = buildDoctorBloqueoRowsForDate(docBloqDefs, fecha_local, clinicTimezone);
     docCitasRows = await db.CitaPaciente.findAll({
       where: { doctor_id: doctorId, inicio: { [Op.lt]: baseEnd }, fin: { [Op.gt]: baseStart } },
       attributes: ['inicio', 'fin', 'clinica_id']

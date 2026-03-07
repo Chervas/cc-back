@@ -14,6 +14,7 @@ const DoctorClinica = db.DoctorClinica;
 const DoctorHorario = db.DoctorHorario;
 const DoctorBloqueo = db.DoctorBloqueo;
 const Tratamiento = db.Tratamiento;
+const { buildHorarioExceptionMap, expandHorariosForDate } = require('../lib/personal-schedule-recurring');
 const DEFAULT_TIMEZONE = 'Europe/Madrid';
 
 const isMissingPersonalGeneralTableError = (error) => {
@@ -242,13 +243,56 @@ const formatDateLocal = (date, timeZone) => {
 };
 
 const buildWindowsFromHorarios = (horarios, dow, fechaIso, timeZone) => {
-    return (horarios || [])
+    const exceptionMap = buildHorarioExceptionMap(
+        (horarios || []).flatMap((h) => Array.isArray(h?.excepciones) ? h.excepciones : [])
+    );
+    return expandHorariosForDate(horarios || [], fechaIso, exceptionMap)
         .filter((h) => h.dia_semana === dow && h.activo)
         .map((h) => ({
             start: localDateTimeToUtc(fechaIso, h.hora_inicio, timeZone),
             end: localDateTimeToUtc(fechaIso, h.hora_fin, timeZone)
         }))
         .filter((w) => w.start && w.end && Number.isFinite(w.start.getTime()) && Number.isFinite(w.end.getTime()) && w.start < w.end);
+};
+
+const buildBlockWindowsFromBloqueos = (bloqueos, fechaIso, timeZone) => {
+    const targetDow = dayIndexFromLocalDate(fechaIso);
+    return (bloqueos || []).flatMap((bloqueo) => {
+        const exceptions = Array.isArray(bloqueo?.excepciones) ? bloqueo.excepciones : [];
+        const canceled = exceptions.some((row) => String(row?.fecha || '') === fechaIso && row?.cancelado !== false);
+        if (canceled) return [];
+
+        const startDay = formatDateLocal(bloqueo.fecha_inicio, timeZone);
+        const endDay = formatDateLocal(bloqueo.fecha_fin, timeZone);
+        const startParts = formatPartsInTimeZone(bloqueo.fecha_inicio, timeZone);
+        const endParts = formatPartsInTimeZone(bloqueo.fecha_fin, timeZone);
+        const startHm = `${String(startParts.hour).padStart(2, '0')}:${String(startParts.minute).padStart(2, '0')}`;
+        const endHm = `${String(endParts.hour).padStart(2, '0')}:${String(endParts.minute).padStart(2, '0')}`;
+        const recurrente = String(bloqueo.recurrente || 'none');
+
+        let applies = false;
+        if (recurrente === 'none') {
+            applies = fechaIso >= startDay && fechaIso <= endDay;
+        } else if (recurrente === 'daily') {
+            applies = fechaIso >= startDay;
+        } else if (recurrente === 'weekly') {
+            applies = fechaIso >= startDay && targetDow === dayIndexFromLocalDate(startDay);
+        } else if (recurrente === 'monthly') {
+            applies = fechaIso >= startDay && Number(fechaIso.slice(8, 10)) === Number(startDay.slice(8, 10));
+        }
+        if (!applies) return [];
+
+        const occStartHm = recurrente === 'none'
+            ? (fechaIso === startDay ? startHm : '00:00')
+            : startHm;
+        const occEndHm = recurrente === 'none'
+            ? (fechaIso === endDay ? endHm : '23:59')
+            : endHm;
+        const start = localDateTimeToUtc(fechaIso, occStartHm, timeZone);
+        const end = localDateTimeToUtc(fechaIso, occEndHm, timeZone);
+        if (!start || !end || start >= end) return [];
+        return [{ start, end }];
+    });
 };
 
 const inAnyWindow = (windows, start, end) => {
@@ -416,7 +460,7 @@ async function checkDisponibilidad({ clinica_id, inicio, fin, doctor_id, instala
         });
         const dc = await DoctorClinica.findOne({
             where: { doctor_id, clinica_id, activo: true },
-            include: [{ model: DoctorHorario, as: 'horarios' }]
+            include: [{ model: DoctorHorario, as: 'horarios', include: [{ model: db.DoctorHorarioExcepcion, as: 'excepciones' }] }]
         });
         const doctorCtx = buildDoctorAvailabilityContext({
             doctorId: doctor_id,
@@ -432,8 +476,20 @@ async function checkDisponibilidad({ clinica_id, inicio, fin, doctor_id, instala
             const inRange = inAnyWindow(doctorCtx.docWins, start, end);
             if (!inRange) conflicts.push({ type: 'doctor_unavailable', message: doctorCtx.outOfHoursMessage });
         }
-        const bloqueos = await DoctorBloqueo.findAll({ where: { doctor_id, fecha_inicio: { [db.Sequelize.Op.lt]: end }, fecha_fin: { [db.Sequelize.Op.gt]: start } } });
-        if (bloqueos.length) conflicts.push({ type: 'doctor_unavailable', message: bloqueos[0].motivo || 'Bloqueo doctor' });
+        const bloqueos = await DoctorBloqueo.findAll({
+            where: {
+                doctor_id,
+                [Op.or]: [
+                    { recurrente: 'none', fecha_inicio: { [db.Sequelize.Op.lt]: end }, fecha_fin: { [db.Sequelize.Op.gt]: start } },
+                    { recurrente: { [Op.ne]: 'none' }, fecha_inicio: { [db.Sequelize.Op.lte]: end } },
+                ],
+            },
+            include: [{ model: db.DoctorBloqueoExcepcion, as: 'excepciones' }],
+        });
+        const bloqueoWindows = buildBlockWindowsFromBloqueos(bloqueos, fechaIso, clinicTimezone);
+        if (bloqueoWindows.some((w) => overlap(start, end, w.start, w.end))) {
+            conflicts.push({ type: 'doctor_unavailable', message: (bloqueos[0] && bloqueos[0].motivo) || 'Bloqueo doctor' });
+        }
         const citasDoc = await CitaPaciente.findAll({
             where: { doctor_id, inicio: { [db.Sequelize.Op.lt]: end }, fin: { [db.Sequelize.Op.gt]: start } },
             attributes: ['id_cita', 'clinica_id']
@@ -554,7 +610,7 @@ async function checkDisponibilidadCanonica({ clinica_id, inicio, fin, doctor_id,
         });
         const dc = await DoctorClinica.findOne({
             where: { doctor_id, clinica_id: clinicaId, activo: true },
-            include: [{ model: DoctorHorario, as: 'horarios' }]
+            include: [{ model: DoctorHorario, as: 'horarios', include: [{ model: db.DoctorHorarioExcepcion, as: 'excepciones' }] }]
         });
         const doctorCtx = buildDoctorAvailabilityContext({
             doctorId: doctor_id,
@@ -592,9 +648,19 @@ async function checkDisponibilidadCanonica({ clinica_id, inicio, fin, doctor_id,
             }
         }
 
-        const bloqueos = await DoctorBloqueo.findAll({ where: { doctor_id, fecha_inicio: { [db.Sequelize.Op.lt]: end }, fecha_fin: { [db.Sequelize.Op.gt]: start } } });
-        if (bloqueos.length) {
-            addLegacy('doctor_unavailable', bloqueos[0].motivo || 'Bloqueo doctor');
+        const bloqueos = await DoctorBloqueo.findAll({
+            where: {
+                doctor_id,
+                [Op.or]: [
+                    { recurrente: 'none', fecha_inicio: { [db.Sequelize.Op.lt]: end }, fecha_fin: { [db.Sequelize.Op.gt]: start } },
+                    { recurrente: { [Op.ne]: 'none' }, fecha_inicio: { [db.Sequelize.Op.lte]: end } },
+                ],
+            },
+            include: [{ model: db.DoctorBloqueoExcepcion, as: 'excepciones' }],
+        });
+        const bloqueoWindows = buildBlockWindowsFromBloqueos(bloqueos, fechaIso, clinicTimezone);
+        if (bloqueoWindows.some((w) => overlap(start, end, w.start, w.end))) {
+            addLegacy('doctor_unavailable', (bloqueos[0] && bloqueos[0].motivo) || 'Bloqueo doctor');
             addResource({
                 resource_type: 'staff',
                 resource_role: 'doctor',
@@ -602,7 +668,7 @@ async function checkDisponibilidadCanonica({ clinica_id, inicio, fin, doctor_id,
                 clinica_id: clinicaId,
                 code: 'STAFF_BLOCKED',
                 can_force: false,
-                details: { bloqueo_id: bloqueos[0].id, message: bloqueos[0].motivo || 'Bloqueo doctor' }
+                details: { bloqueo_id: bloqueos[0].id, message: (bloqueos[0] && bloqueos[0].motivo) || 'Bloqueo doctor' }
             });
         }
 
