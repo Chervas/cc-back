@@ -3005,6 +3005,101 @@ exports.moveHorarioClinicaForCurrent = async (req, res) => {
     return exports.moveHorarioClinica(req, res);
 };
 
+exports.copyHorarioClinicaForCurrent = async (req, res) => {
+    req.params.id = String(req.userData?.userId || '');
+    return exports.copyHorarioClinica(req, res);
+};
+
+exports.copyHorarioClinica = async (req, res) => {
+    try {
+        const actorId = Number(req.userData?.userId);
+        if (!Number.isFinite(actorId)) {
+            return res.status(401).json({ message: 'Auth failed!' });
+        }
+
+        const targetUserId = Number(req.params.id);
+        const sourceDoctorId = Number(req.body?.source_doctor_id);
+        const sourceHorarioId = Number(req.body?.source_horario_id);
+        const sourceClinicaId = Number(req.body?.source_clinica_id);
+        const toClinicaId = Number(req.body?.to_clinica_id);
+        if (
+            !Number.isFinite(targetUserId) ||
+            !Number.isFinite(sourceDoctorId) ||
+            !Number.isFinite(sourceHorarioId) ||
+            !Number.isFinite(sourceClinicaId) ||
+            !Number.isFinite(toClinicaId)
+        ) {
+            return res.status(400).json({ message: 'Invalid copy payload' });
+        }
+
+        const canReadSource = await canEditHorarios(actorId, sourceDoctorId, sourceClinicaId);
+        const canEditTarget = await canEditHorarios(actorId, targetUserId, toClinicaId);
+        if (!canReadSource || !canEditTarget) {
+            return res.status(403).json({ message: 'Forbidden' });
+        }
+
+        const source = await DoctorHorario.findOne({
+            where: { id: sourceHorarioId },
+            include: [
+                {
+                    model: DoctorClinica,
+                    as: 'doctorClinica',
+                    where: { doctor_id: sourceDoctorId, clinica_id: sourceClinicaId },
+                    attributes: ['id', 'clinica_id'],
+                    required: true,
+                },
+            ],
+        });
+        if (!source) {
+            return res.status(404).json({ message: 'Horario not found' });
+        }
+
+        const normalizedRows = normalizeHorarioRows([{
+            dia_semana: req.body?.dia_semana ?? source.dia_semana,
+            hora_inicio: req.body?.hora_inicio ?? source.hora_inicio,
+            hora_fin: req.body?.hora_fin ?? source.hora_fin,
+            activo: req.body?.activo ?? source.activo,
+        }]);
+        if (normalizedRows.length !== 1) {
+            return res.status(400).json({ message: 'horario inválido' });
+        }
+        const candidate = normalizedRows[0];
+
+        const validationError = await validateSingleHorarioCandidate({
+            targetUserId,
+            clinicaId: toClinicaId,
+            candidateHorario: candidate,
+        });
+        if (validationError) {
+            return res.status(validationError.status).json(validationError.body);
+        }
+
+        const targetDc = await getOrCreateDoctorClinica(targetUserId, toClinicaId);
+        const created = await DoctorHorario.create({
+            doctor_clinica_id: targetDc.id,
+            dia_semana: candidate.dia_semana,
+            hora_inicio: candidate.hora_inicio,
+            hora_fin: candidate.hora_fin,
+            activo: candidate.activo !== false,
+        });
+
+        return res.status(201).json({
+            message: 'Horario copiado correctamente.',
+            copied: {
+                source_doctor_id: sourceDoctorId,
+                source_horario_id: sourceHorarioId,
+                source_clinica_id: sourceClinicaId,
+                target_doctor_id: targetUserId,
+                target_clinica_id: toClinicaId,
+                horario: serializeHorarioRow(created),
+            },
+        });
+    } catch (error) {
+        console.error('[personal.copyHorarioClinica] Error:', error);
+        return res.status(500).json({ message: 'Error copying horario', error: error.message });
+    }
+};
+
 exports.moveHorarioClinica = async (req, res) => {
     let tx;
     try {

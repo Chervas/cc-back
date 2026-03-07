@@ -47,6 +47,7 @@ router.post('/me/clinicas/:clinicaId/horarios', personalController.createHorario
 router.patch('/me/clinicas/:clinicaId/horarios/:horarioId', personalController.patchHorarioClinicaForCurrent);
 router.delete('/me/clinicas/:clinicaId/horarios/:horarioId', personalController.deleteHorarioClinicaForCurrent);
 router.post('/me/horarios/move', personalController.moveHorarioClinicaForCurrent);
+router.post('/me/horarios/copy', personalController.copyHorarioClinicaForCurrent);
 router.patch('/me/clinicas/:clinicaId/disponibilidad-config', personalController.updateDisponibilidadConfigClinicaForCurrent);
 router.get('/:id/clinicas/:clinicaId/horarios', personalController.getHorariosClinica);
 router.put('/:id/clinicas/:clinicaId/horarios', personalController.updateHorariosClinica);
@@ -54,6 +55,7 @@ router.post('/:id/clinicas/:clinicaId/horarios', personalController.createHorari
 router.patch('/:id/clinicas/:clinicaId/horarios/:horarioId', personalController.patchHorarioClinica);
 router.delete('/:id/clinicas/:clinicaId/horarios/:horarioId', personalController.deleteHorarioClinica);
 router.post('/:id/horarios/move', personalController.moveHorarioClinica);
+router.post('/:id/horarios/copy', personalController.copyHorarioClinica);
 router.patch('/:id/clinicas/:clinicaId/disponibilidad-config', personalController.updateDisponibilidadConfigClinica);
 
 // Convenience wrapper (compat con front que usa query param clinica_id)
