@@ -34,7 +34,7 @@ router.delete('/:id/clinicas/:clinicaId', personalController.removeClinicCollabo
 router.get('/me/schedule', personalController.getScheduleForCurrent);
 router.get('/:id/schedule', personalController.getScheduleForPersonal);
 
-// Capa 1: disponibilidad general del profesional (global, independiente de clínica)
+// Endpoints legacy retirados: disponibilidad general del profesional
 router.get('/me/disponibilidad-general', personalController.getDisponibilidadGeneralForCurrent);
 router.put('/me/disponibilidad-general', personalController.updateDisponibilidadGeneralForCurrent);
 router.get('/:id/disponibilidad-general', personalController.getDisponibilidadGeneral);

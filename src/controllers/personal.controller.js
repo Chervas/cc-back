@@ -9,7 +9,6 @@ const {
     DoctorHorarioExcepcion,
     DoctorBloqueo,
     DoctorBloqueoExcepcion,
-    PersonalDisponibilidadGeneral,
     CitaPaciente,
     sequelize,
 } = require('../../models');
@@ -71,7 +70,6 @@ const GANTT_DAY_END_HM = '22:00';
 
 const UNAVAILABLE_REASONS = {
     CLINIC_CLOSED: 'CLINIC_CLOSED',
-    PROFESSIONAL_OUT: 'PROFESSIONAL_OUT_OF_GENERAL_AVAILABILITY',
     ADVANCED_MISSING: 'ADVANCED_MISSING_CLINIC_SCHEDULE',
 };
 
@@ -83,13 +81,6 @@ const ACTIVE_STAFF_INVITATION_WHERE = {
     ],
 };
 
-function isMissingPersonalDisponibilidadTableError(error) {
-    if (!error) return false;
-    const code = error?.original?.code || error?.parent?.code || error?.code;
-    if (code === 'ER_NO_SUCH_TABLE') return true;
-    const message = String(error?.original?.message || error?.message || '').toLowerCase();
-    return message.includes('personaldisponibilidadgenerales') && (message.includes("doesn't exist") || message.includes('no such table'));
-}
 
 function isMissingClinicaHorarioTableError(error) {
     if (!error) return false;
@@ -2164,40 +2155,6 @@ async function canEditBloqueos(actorId, targetUserId, clinicaId) {
     return hasStaffPivot(targetUserId, cid);
 }
 
-/**
- * Capa 1: edición de disponibilidad general.
- * - Self/admin: permitido
- * - Propietario/agencia:
- *   - solo si el perfil objetivo aún no fue reclamado, y
- *   - solo si tiene alcance admin en TODAS las clínicas del objetivo.
- */
-async function canEditDisponibilidadGeneral(actorId, targetUserId) {
-    if (isAdmin(actorId)) return true;
-    if (Number(actorId) === Number(targetUserId)) return true;
-
-    // Propietario/agencia solo puede editar la capa 1 de perfiles aún no reclamados.
-    // Consideramos "no reclamado" cuando:
-    // - es_provisional=true, o
-    // - estado_cuenta=provisional (compatibilidad con flujos legacy).
-    const targetUser = await Usuario.findByPk(Number(targetUserId), {
-        attributes: ['id_usuario', 'es_provisional', 'estado_cuenta'],
-        raw: true,
-    });
-    if (!targetUser) return false;
-
-    const targetEstadoCuenta = normalizeEstadoCuenta(targetUser.estado_cuenta, 'activo');
-    const targetUnclaimed = Boolean(targetUser.es_provisional) || targetEstadoCuenta === 'provisional';
-    if (!targetUnclaimed) return false;
-
-    const adminScopedClinicIds = await getAdminScopedClinicIdsForUser(actorId);
-    if (!adminScopedClinicIds.length) return false;
-
-    const targetClinicIds = await getAccessibleClinicIdsForUser(targetUserId);
-    if (!targetClinicIds.length) return false;
-
-    const adminScopedSet = new Set(adminScopedClinicIds);
-    return targetClinicIds.every((id) => adminScopedSet.has(id));
-}
 
 function normalizeHorarioRows(body) {
     const rows = Array.isArray(body)
@@ -2331,90 +2288,6 @@ function findOverlappingRows(rows = []) {
     return null;
 }
 
-function serializeDisponibilidadGeneralRows(rows = []) {
-    return (rows || [])
-        .map((row) => ({
-            id: row.id != null ? Number(row.id) : undefined,
-            doctor_id: Number(row.doctor_id),
-            dia_semana: Number(row.dia_semana),
-            activo: row.activo !== false,
-            hora_inicio: row.hora_inicio,
-            hora_fin: row.hora_fin,
-            created_at: row.created_at,
-            updated_at: row.updated_at,
-        }))
-        .sort((a, b) => {
-            if (a.dia_semana !== b.dia_semana) return a.dia_semana - b.dia_semana;
-            if (a.hora_inicio !== b.hora_inicio) return String(a.hora_inicio).localeCompare(String(b.hora_inicio));
-            return String(a.hora_fin).localeCompare(String(b.hora_fin));
-        });
-}
-
-async function getPersistedDisponibilidadGeneralRows(doctorId) {
-    try {
-        return await PersonalDisponibilidadGeneral.findAll({
-            where: { doctor_id: Number(doctorId) },
-            order: [['dia_semana', 'ASC'], ['hora_inicio', 'ASC'], ['id', 'ASC']],
-        });
-    } catch (error) {
-        if (isMissingPersonalDisponibilidadTableError(error)) {
-            return null;
-        }
-        throw error;
-    }
-}
-
-async function deriveLegacyDisponibilidadGeneralRows(doctorId) {
-    const doctorClinicas = await DoctorClinica.findAll({
-        where: {
-            doctor_id: Number(doctorId),
-            activo: true,
-        },
-        include: [
-            {
-                model: DoctorHorario,
-                as: 'horarios',
-                attributes: ['dia_semana', 'activo', 'hora_inicio', 'hora_fin'],
-            },
-        ],
-    });
-
-    const legacyRows = [];
-    for (const dc of doctorClinicas) {
-        const horarios = Array.isArray(dc.horarios) ? dc.horarios : [];
-        for (const horario of horarios) {
-            if (horario?.activo === false) continue;
-            const dia = normalizeDiaSemana(horario?.dia_semana);
-            const inicio = normalizeHm(horario?.hora_inicio);
-            const fin = normalizeHm(horario?.hora_fin);
-            if (dia == null || !inicio || !fin || inicio >= fin) continue;
-            legacyRows.push({
-                doctor_id: Number(doctorId),
-                dia_semana: dia,
-                activo: true,
-                hora_inicio: inicio,
-                hora_fin: fin,
-            });
-        }
-    }
-
-    return mergeIntervalsByDay(legacyRows);
-}
-
-async function getDisponibilidadGeneralForDoctor(doctorId) {
-    const persistedRows = await getPersistedDisponibilidadGeneralRows(doctorId);
-    if (Array.isArray(persistedRows) && persistedRows.length > 0) {
-        return {
-            source: 'personal_disponibilidad_general',
-            horarios: serializeDisponibilidadGeneralRows(persistedRows),
-        };
-    }
-
-    return {
-        source: 'personal_disponibilidad_general',
-        horarios: [],
-    };
-}
 
 async function getClinicaHorariosMap(clinicIds = []) {
     const ids = Array.from(new Set(
@@ -2612,7 +2485,7 @@ async function validateHorarioExceptionCandidate({ targetUserId, clinicaId, hora
         return {
             status: 422,
             body: {
-                message: 'Algunos tramos del horario están fuera de la disponibilidad efectiva.',
+                message: 'Algunos tramos del horario están fuera del horario permitido en la clínica.',
                 code: 'SCHEDULE_OUT_OF_EFFECTIVE_AVAILABILITY',
                 errors: effectiveErrors,
             },
@@ -2639,8 +2512,6 @@ async function buildScheduleResponse(actorId, targetUserId, query = {}) {
         attributes: ['id_usuario', 'nombre', 'apellidos', 'email_usuario'],
         raw: true,
     });
-
-    const disponibilidadGeneral = await getDisponibilidadGeneralForDoctor(targetUserId);
 
     const allowedClinicIds = await getAllowedClinicIdsForActorTarget(actorId, targetUserId);
     const clinicaHorariosMap = await getClinicaHorariosMap(allowedClinicIds);
@@ -2762,7 +2633,6 @@ async function buildScheduleResponse(actorId, targetUserId, query = {}) {
             };
         });
 
-    const canEditDispGeneral = await canEditDisponibilidadGeneral(actorId, targetUserId);
     const editableClinicIds = new Set();
     if (isAdmin(actorId) || Number(actorId) === Number(targetUserId)) {
         clinicasBase.forEach((c) => editableClinicIds.add(Number(c.clinica_id)));
@@ -2838,17 +2708,12 @@ async function buildScheduleResponse(actorId, targetUserId, query = {}) {
     return {
         doctor_id: String(targetUserId),
         doctor_nombre: user ? `${user.nombre || ''} ${user.apellidos || ''}`.trim() : '',
-        disponibilidad_general_fuente: disponibilidadGeneral.source,
-        disponibilidad_general: disponibilidadGeneral.horarios,
         schedule_range: scheduleRange,
         gantt_range: {
             day_start_hm: GANTT_DAY_START_HM,
             day_end_hm: GANTT_DAY_END_HM,
         },
         unavailable_reasons: UNAVAILABLE_REASONS,
-        permissions: {
-            can_edit_disponibilidad_general: canEditDispGeneral,
-        },
         clinicas,
         bloqueos: bloqueos.map((b) => serializeBloqueo(b, timezoneForClinicId(b.clinica_id, timezoneMap))),
         bloqueos_expandidos: bloqueosExpandidos,
@@ -2897,120 +2762,13 @@ exports.getScheduleForPersonal = async (req, res) => {
     }
 };
 
-exports.getDisponibilidadGeneralForCurrent = async (req, res) => {
-    req.params.id = String(req.userData?.userId || '');
-    return exports.getDisponibilidadGeneral(req, res);
-};
+exports.getDisponibilidadGeneralForCurrent = async (req, res) => res.status(410).json({ message: 'Disponibilidad general eliminada del modelo.', code: 'GENERAL_AVAILABILITY_REMOVED' });
 
-exports.getDisponibilidadGeneral = async (req, res) => {
-    try {
-        const actorId = Number(req.userData?.userId);
-        if (!Number.isFinite(actorId)) {
-            return res.status(401).json({ message: 'Auth failed!' });
-        }
+exports.getDisponibilidadGeneral = async (req, res) => res.status(410).json({ message: 'Disponibilidad general eliminada del modelo.', code: 'GENERAL_AVAILABILITY_REMOVED' });
 
-        const targetUserId = Number(req.params.id);
-        if (!Number.isFinite(targetUserId)) {
-            return res.status(400).json({ message: 'Invalid id' });
-        }
+exports.updateDisponibilidadGeneralForCurrent = async (req, res) => res.status(410).json({ message: 'Disponibilidad general eliminada del modelo.', code: 'GENERAL_AVAILABILITY_REMOVED' });
 
-        const canAccess = await canAccessTargetPersonal(actorId, targetUserId, null);
-        if (!canAccess) {
-            return res.status(403).json({ message: 'Forbidden' });
-        }
-
-        const disponibilidad = await getDisponibilidadGeneralForDoctor(targetUserId);
-        return res.json({
-            doctor_id: String(targetUserId),
-            source: disponibilidad.source,
-            horarios: disponibilidad.horarios,
-        });
-    } catch (error) {
-        console.error('[personal.getDisponibilidadGeneral] Error:', error);
-        return res.status(500).json({ message: 'Error retrieving disponibilidad general', error: error.message });
-    }
-};
-
-exports.updateDisponibilidadGeneralForCurrent = async (req, res) => {
-    req.params.id = String(req.userData?.userId || '');
-    return exports.updateDisponibilidadGeneral(req, res);
-};
-
-exports.updateDisponibilidadGeneral = async (req, res) => {
-    try {
-        const actorId = Number(req.userData?.userId);
-        if (!Number.isFinite(actorId)) {
-            return res.status(401).json({ message: 'Auth failed!' });
-        }
-
-        const targetUserId = Number(req.params.id);
-        if (!Number.isFinite(targetUserId)) {
-            return res.status(400).json({ message: 'Invalid id' });
-        }
-
-        const canEdit = await canEditDisponibilidadGeneral(actorId, targetUserId);
-        if (!canEdit) {
-            return res.status(403).json({ message: 'Forbidden' });
-        }
-
-        const horarios = normalizeHorarioRows(req.body);
-        if (!horarios.length && Array.isArray(req.body?.horarios) && req.body.horarios.length) {
-            return res.status(400).json({ message: 'horarios inválidos' });
-        }
-
-        const overlap = findOverlappingRows(horarios);
-        if (overlap) {
-            return res.status(409).json({
-                message: 'Hay tramos solapados en la disponibilidad general.',
-                code: 'STAFF_GENERAL_AVAILABILITY_OVERLAP',
-                can_force: false,
-                conflict: overlap,
-            });
-        }
-
-        const tx = await sequelize.transaction();
-        try {
-            await PersonalDisponibilidadGeneral.destroy({
-                where: { doctor_id: Number(targetUserId) },
-                transaction: tx,
-            });
-
-            if (horarios.length) {
-                await PersonalDisponibilidadGeneral.bulkCreate(
-                    horarios.map((h) => ({
-                        doctor_id: Number(targetUserId),
-                        dia_semana: h.dia_semana,
-                        activo: h.activo !== false,
-                        hora_inicio: h.hora_inicio,
-                        hora_fin: h.hora_fin,
-                    })),
-                    { transaction: tx },
-                );
-            }
-
-            await tx.commit();
-        } catch (error) {
-            await tx.rollback();
-            if (isMissingPersonalDisponibilidadTableError(error)) {
-                return res.status(503).json({
-                    message: 'La tabla de disponibilidad general aún no está disponible. Ejecuta migraciones.',
-                    code: 'PERSONAL_GENERAL_AVAILABILITY_TABLE_MISSING',
-                });
-            }
-            throw error;
-        }
-
-        const disponibilidad = await getDisponibilidadGeneralForDoctor(targetUserId);
-        return res.json({
-            doctor_id: String(targetUserId),
-            source: disponibilidad.source,
-            horarios: disponibilidad.horarios,
-        });
-    } catch (error) {
-        console.error('[personal.updateDisponibilidadGeneral] Error:', error);
-        return res.status(500).json({ message: 'Error updating disponibilidad general', error: error.message });
-    }
-};
+exports.updateDisponibilidadGeneral = async (req, res) => res.status(410).json({ message: 'Disponibilidad general eliminada del modelo.', code: 'GENERAL_AVAILABILITY_REMOVED' });
 
 async function getHorariosFor(targetUserId, clinicId) {
     const dc = await DoctorClinica.findOne({
@@ -3238,7 +2996,7 @@ async function validateSingleHorarioCandidate({ targetUserId, clinicaId, candida
         return {
             status: 422,
             body: {
-                message: 'Algunos tramos del horario están fuera de la disponibilidad efectiva.',
+                message: 'Algunos tramos del horario están fuera del horario permitido en la clínica.',
                 code: 'SCHEDULE_OUT_OF_EFFECTIVE_AVAILABILITY',
                 errors: effectiveErrors,
             },
@@ -3881,25 +3639,20 @@ exports.moveHorarioClinica = async (req, res) => {
 };
 
 /**
- * Bloque 6.7c: Validates capa-3 schedule rows against effective availability
- * (capa 1 = disponibilidad general, capa 2 = apertura clínica).
+ * Valida que los horarios candidatos estén contenidos dentro del horario permitido
+ * por la clínica (apertura del centro).
  * Se aplica siempre: todos los horarios por clínica son explícitos.
  *
- * @param {number} targetUserId
+ * @param {number} _targetUserId
  * @param {number} clinicaId
  * @param {Array<{dia_semana:number, hora_inicio:string, hora_fin:string, activo:boolean}>} horarios
  * @returns {Promise<Array<{dia_semana:number, hora_inicio:string, hora_fin:string, reason:string}>>} errors (empty = valid)
  */
-async function validateHorariosAgainstEffectiveAvailability(targetUserId, clinicaId, horarios) {
+async function validateHorariosAgainstEffectiveAvailability(_targetUserId, clinicaId, horarios) {
     const errors = [];
     const activeHorarios = (horarios || []).filter((h) => h && h.activo !== false);
     if (!activeHorarios.length) return errors;
 
-    // Load capa 1: disponibilidad general del profesional
-    const dispGeneral = await getDisponibilidadGeneralForDoctor(targetUserId);
-    const dispGeneralRows = dispGeneral?.horarios || [];
-
-    // Helper: merge overlapping/contiguous intervals sorted by startMin
     function mergeMinuteIntervals(intervals) {
         if (!intervals || !intervals.length) return [];
         const sorted = [...intervals].sort((a, b) => a.startMin - b.startMin);
@@ -3915,31 +3668,10 @@ async function validateHorariosAgainstEffectiveAvailability(targetUserId, clinic
         return merged;
     }
 
-    // Index capa 1 by day -> collect raw intervals
-    const capa1RawByDay = new Map();
-    for (const row of dispGeneralRows) {
-        if (row.activo === false) continue;
-        const dia = normalizeDiaSemana(row.dia_semana);
-        if (dia == null) continue;
-        const startMin = hmToMinutes(row.hora_inicio);
-        const endMin = hmToMinutes(row.hora_fin);
-        if (startMin == null || endMin == null || startMin >= endMin) continue;
-        const list = capa1RawByDay.get(dia) || [];
-        list.push({ startMin, endMin });
-        capa1RawByDay.set(dia, list);
-    }
-    // Merge contiguous/overlapping intervals per day
-    const capa1ByDay = new Map();
-    for (const [dia, intervals] of capa1RawByDay.entries()) {
-        capa1ByDay.set(dia, mergeMinuteIntervals(intervals));
-    }
-
-    // Load capa 2: horarios de apertura de la clínica
     const clinicaHorariosMap = await getClinicaHorariosMap([clinicaId]);
     const clinicaHorarios = clinicaHorariosMap.get(Number(clinicaId)) || [];
 
-    // Index capa 2 by day -> collect raw intervals
-    const capa2RawByDay = new Map();
+    const openingRawByDay = new Map();
     for (const row of clinicaHorarios) {
         if (row.activo === false) continue;
         const dia = normalizeDiaSemana(row.dia_semana);
@@ -3947,17 +3679,16 @@ async function validateHorariosAgainstEffectiveAvailability(targetUserId, clinic
         const startMin = hmToMinutes(row.hora_inicio);
         const endMin = hmToMinutes(row.hora_fin);
         if (startMin == null || endMin == null || startMin >= endMin) continue;
-        const list = capa2RawByDay.get(dia) || [];
+        const list = openingRawByDay.get(dia) || [];
         list.push({ startMin, endMin });
-        capa2RawByDay.set(dia, list);
-    }
-    // Merge contiguous/overlapping intervals per day
-    const capa2ByDay = new Map();
-    for (const [dia, intervals] of capa2RawByDay.entries()) {
-        capa2ByDay.set(dia, mergeMinuteIntervals(intervals));
+        openingRawByDay.set(dia, list);
     }
 
-    // Helper: check if [startMin, endMin] is fully contained within at least one merged interval
+    const openingByDay = new Map();
+    for (const [dia, intervals] of openingRawByDay.entries()) {
+        openingByDay.set(dia, mergeMinuteIntervals(intervals));
+    }
+
     function isContainedInIntervals(intervals, startMin, endMin) {
         if (!intervals || !intervals.length) return false;
         return intervals.some((iv) => iv.startMin <= startMin && iv.endMin >= endMin);
@@ -3973,24 +3704,12 @@ async function validateHorariosAgainstEffectiveAvailability(targetUserId, clinic
         const endMin = hmToMinutes(fin);
         if (startMin == null || endMin == null || startMin >= endMin) continue;
 
-        // Check capa 1
-        const capa1Intervals = capa1ByDay.get(dia);
-        if (!capa1Intervals || !capa1Intervals.length) {
-            errors.push({ dia_semana: dia, hora_inicio: inicio, hora_fin: fin, reason: 'NO_GENERAL_AVAILABILITY_FOR_DAY' });
-            continue; // No need to check capa 2 if capa 1 fails
-        }
-        if (!isContainedInIntervals(capa1Intervals, startMin, endMin)) {
-            errors.push({ dia_semana: dia, hora_inicio: inicio, hora_fin: fin, reason: 'OUTSIDE_GENERAL_AVAILABILITY' });
-            continue;
-        }
-
-        // Check capa 2
-        const capa2Intervals = capa2ByDay.get(dia);
-        if (!capa2Intervals || !capa2Intervals.length) {
+        const openingIntervals = openingByDay.get(dia);
+        if (!openingIntervals || !openingIntervals.length) {
             errors.push({ dia_semana: dia, hora_inicio: inicio, hora_fin: fin, reason: 'CLINIC_CLOSED_DAY' });
             continue;
         }
-        if (!isContainedInIntervals(capa2Intervals, startMin, endMin)) {
+        if (!isContainedInIntervals(openingIntervals, startMin, endMin)) {
             errors.push({ dia_semana: dia, hora_inicio: inicio, hora_fin: fin, reason: 'OUTSIDE_CLINIC_OPENING' });
         }
     }
@@ -4040,14 +3759,14 @@ exports.updateHorariosClinica = async (req, res) => {
             });
         }
 
-        // Validar siempre contra disponibilidad general + apertura clínica.
+        // Validar siempre contra apertura clínica.
         if (horarios.length > 0) {
             const effectiveErrors = await validateHorariosAgainstEffectiveAvailability(
                 targetUserId, clinicaId, horarios,
             );
             if (effectiveErrors.length) {
                 return res.status(422).json({
-                    message: 'Algunos tramos del horario están fuera de la disponibilidad efectiva.',
+                    message: 'Algunos tramos del horario están fuera del horario permitido en la clínica.',
                     code: 'SCHEDULE_OUT_OF_EFFECTIVE_AVAILABILITY',
                     errors: effectiveErrors,
                 });
