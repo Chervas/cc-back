@@ -2962,6 +2962,63 @@ async function validateSingleHorarioCandidate({ targetUserId, clinicaId, candida
         return null;
     }
 
+    const sameClinicDoctorPivot = await DoctorClinica.findOne({
+        where: {
+            doctor_id: Number(targetUserId),
+            clinica_id: Number(clinicaId),
+        },
+        attributes: ['id'],
+        raw: true,
+    });
+
+    if (sameClinicDoctorPivot) {
+        const dia = normalizeDiaSemana(candidateHorario.dia_semana);
+        const inicio = normalizeHm(candidateHorario.hora_inicio);
+        const fin = normalizeHm(candidateHorario.hora_fin);
+        const excludeIds = Array.isArray(excludeHorarioIds)
+            ? excludeHorarioIds.map((id) => Number(id)).filter((id) => Number.isFinite(id))
+            : [];
+
+        const whereExisting = {
+            doctor_clinica_id: sameClinicDoctorPivot.id,
+            activo: true,
+            dia_semana: dia,
+        };
+
+        if (excludeIds.length) {
+            whereExisting.id = { [Op.notIn]: excludeIds };
+        }
+
+        const sameClinicRows = await DoctorHorario.findAll({
+            where: whereExisting,
+            attributes: ['id', 'hora_inicio', 'hora_fin'],
+            raw: true,
+        });
+
+        const overlapSameClinic = sameClinicRows.find((row) =>
+            hmRangesOverlap(inicio, fin, normalizeHm(row.hora_inicio), normalizeHm(row.hora_fin))
+        );
+
+        if (overlapSameClinic) {
+            return {
+                status: 409,
+                body: {
+                    message: 'El horario se solapa con otro tramo en esta clínica.',
+                    code: 'STAFF_SCHEDULE_OVERLAP_SAME_CLINIC',
+                    can_force: false,
+                    conflicts: [{
+                        clinica_id: Number(clinicaId),
+                        dia_semana: dia,
+                        nuevo_hora_inicio: inicio,
+                        nuevo_hora_fin: fin,
+                        conflicto_hora_inicio: normalizeHm(overlapSameClinic.hora_inicio),
+                        conflicto_hora_fin: normalizeHm(overlapSameClinic.hora_fin),
+                    }],
+                },
+            };
+        }
+    }
+
     const crossClinicConflicts = await findCrossClinicScheduleConflicts({
         targetUserId: Number(targetUserId),
         clinicaId: Number(clinicaId),
@@ -3736,6 +3793,23 @@ exports.updateHorariosClinica = async (req, res) => {
         const horarios = normalizeHorarioRows(req.body);
         if (!horarios.length && Array.isArray(req.body?.horarios) && req.body.horarios.length) {
             return res.status(400).json({ message: 'horarios inválidos' });
+        }
+
+        const sameClinicOverlap = findOverlappingRows(horarios);
+        if (sameClinicOverlap) {
+            return res.status(409).json({
+                message: 'El horario se solapa con otro tramo en esta clínica.',
+                code: 'STAFF_SCHEDULE_OVERLAP_SAME_CLINIC',
+                can_force: false,
+                conflicts: [{
+                    clinica_id: clinicaId,
+                    dia_semana: sameClinicOverlap.dia_semana,
+                    nuevo_hora_inicio: sameClinicOverlap.right.hora_inicio,
+                    nuevo_hora_fin: sameClinicOverlap.right.hora_fin,
+                    conflicto_hora_inicio: sameClinicOverlap.left.hora_inicio,
+                    conflicto_hora_fin: sameClinicOverlap.left.hora_fin,
+                }],
+            });
         }
 
         const crossClinicConflicts = await findCrossClinicScheduleConflicts({
