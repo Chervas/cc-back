@@ -2762,13 +2762,6 @@ exports.getScheduleForPersonal = async (req, res) => {
     }
 };
 
-exports.getDisponibilidadGeneralForCurrent = async (req, res) => res.status(410).json({ message: 'Disponibilidad general eliminada del modelo.', code: 'GENERAL_AVAILABILITY_REMOVED' });
-
-exports.getDisponibilidadGeneral = async (req, res) => res.status(410).json({ message: 'Disponibilidad general eliminada del modelo.', code: 'GENERAL_AVAILABILITY_REMOVED' });
-
-exports.updateDisponibilidadGeneralForCurrent = async (req, res) => res.status(410).json({ message: 'Disponibilidad general eliminada del modelo.', code: 'GENERAL_AVAILABILITY_REMOVED' });
-
-exports.updateDisponibilidadGeneral = async (req, res) => res.status(410).json({ message: 'Disponibilidad general eliminada del modelo.', code: 'GENERAL_AVAILABILITY_REMOVED' });
 
 async function getHorariosFor(targetUserId, clinicId) {
     const dc = await DoctorClinica.findOne({

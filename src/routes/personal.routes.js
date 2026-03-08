@@ -34,11 +34,6 @@ router.delete('/:id/clinicas/:clinicaId', personalController.removeClinicCollabo
 router.get('/me/schedule', personalController.getScheduleForCurrent);
 router.get('/:id/schedule', personalController.getScheduleForPersonal);
 
-// Endpoints legacy retirados: disponibilidad general del profesional
-router.get('/me/disponibilidad-general', personalController.getDisponibilidadGeneralForCurrent);
-router.put('/me/disponibilidad-general', personalController.updateDisponibilidadGeneralForCurrent);
-router.get('/:id/disponibilidad-general', personalController.getDisponibilidadGeneral);
-router.put('/:id/disponibilidad-general', personalController.updateDisponibilidadGeneral);
 
 // Horarios por clínica (compat con /api/doctors/*)
 router.get('/me/clinicas/:clinicaId/horarios', personalController.getHorariosClinicaForCurrent);

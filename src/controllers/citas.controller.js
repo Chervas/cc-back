@@ -332,20 +332,12 @@ const intersectWindows = (a, b) => {
         .filter((w) => w.start < w.end);
 };
 
-async function fetchDoctorGlobalWindowsMap({ doctorIds }) {
-    const ids = Array.from(new Set((doctorIds || []).map((id) => Number(id)).filter((id) => Number.isFinite(id) && id > 0)));
-    const out = new Map();
-    ids.forEach((id) => out.set(id, []));
-    return out;
-}
-
 function buildDoctorAvailabilityContext({
     doctorId,
     dc,
     dow,
     fechaIso,
-    clinicTimezone,
-    globalWindowsMap
+    clinicTimezone
 }) {
     if (!doctorId) {
         return {
@@ -409,12 +401,6 @@ async function checkDisponibilidad({ clinica_id, inicio, fin, doctor_id, instala
     }
 
     if (doctor_id) {
-        const doctorGlobalWindowsMap = await fetchDoctorGlobalWindowsMap({
-            doctorIds: [doctor_id],
-            dow,
-            fechaIso,
-            clinicTimezone
-        });
         const dc = await DoctorClinica.findOne({
             where: { doctor_id, clinica_id, activo: true },
             include: [{ model: DoctorHorario, as: 'horarios', include: [{ model: db.DoctorHorarioExcepcion, as: 'excepciones' }] }]
@@ -425,7 +411,6 @@ async function checkDisponibilidad({ clinica_id, inicio, fin, doctor_id, instala
             dow,
             fechaIso,
             clinicTimezone,
-            globalWindowsMap: doctorGlobalWindowsMap
         });
         if (doctorCtx.dcMissing) {
             conflicts.push({ type: 'doctor_unavailable', message: 'Doctor no asignado a la clínica' });
@@ -559,12 +544,6 @@ async function checkDisponibilidadCanonica({ clinica_id, inicio, fin, doctor_id,
 
     // Staff (doctor)
     if (doctor_id) {
-        const doctorGlobalWindowsMap = await fetchDoctorGlobalWindowsMap({
-            doctorIds: [doctor_id],
-            dow,
-            fechaIso,
-            clinicTimezone
-        });
         const dc = await DoctorClinica.findOne({
             where: { doctor_id, clinica_id: clinicaId, activo: true },
             include: [{ model: DoctorHorario, as: 'horarios', include: [{ model: db.DoctorHorarioExcepcion, as: 'excepciones' }] }]
@@ -575,7 +554,6 @@ async function checkDisponibilidadCanonica({ clinica_id, inicio, fin, doctor_id,
             dow,
             fechaIso,
             clinicTimezone,
-            globalWindowsMap: doctorGlobalWindowsMap
         });
 
         if (doctorCtx.dcMissing) {

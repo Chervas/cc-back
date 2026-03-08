@@ -322,21 +322,13 @@ const mergeWindows = (windows) => {
   return merged;
 };
 
-const fetchDoctorGlobalWindowsMap = async ({ doctorIds }) => {
-  const ids = Array.from(new Set((doctorIds || []).map((id) => Number(id)).filter((id) => Number.isFinite(id) && id > 0)));
-  const out = new Map();
-  ids.forEach((id) => out.set(id, []));
-  return out;
-};
-
 const buildDoctorAvailabilityContext = ({
   doctorId,
   clinicaId,
   dc,
   dow,
   fechaLocal,
-  timeZone,
-  globalWindowsMap
+  timeZone
 }) => {
   if (!doctorId) {
       return {
@@ -592,7 +584,6 @@ const buildUnavailableIntervals = ({
     dow,
     fechaLocal: fecha_local,
     timeZone,
-    globalWindowsMap: doctorGlobalWindowsMap
   });
   const docWins = doctorCtx.docWins;
   const dcMissing = doctorCtx.dcMissing;
@@ -803,12 +794,6 @@ exports.check = asyncHandler(async (req, res) => {
   // Staff (doctor) - de momento solo doctor_id (personal_ids[] vendrá en 18.12)
   const doctorId = doctor_id ? parseIntSafe(doctor_id) : null;
   if (doctorId) {
-    const doctorGlobalWindowsMap = await fetchDoctorGlobalWindowsMap({
-      doctorIds: [doctorId],
-      dow,
-      fechaLocal: fechaLocalCheck,
-      timeZone: clinicTimezone
-    });
 
     const dc = await db.DoctorClinica.findOne({
       where: { doctor_id: doctorId, clinica_id: clinicaId, activo: true },
@@ -822,8 +807,7 @@ exports.check = asyncHandler(async (req, res) => {
       dow,
       fechaLocal: fechaLocalCheck,
       timeZone: clinicTimezone,
-      globalWindowsMap: doctorGlobalWindowsMap
-    });
+      });
 
     if (doctorCtx.dcMissing) {
       conflicts.push({
@@ -1062,12 +1046,6 @@ exports.slots = asyncHandler(async (req, res) => {
   const doctorIdsForGlobal = [];
   if (doctorId) doctorIdsForGlobal.push(doctorId);
   if (doctorIds.length) doctorIdsForGlobal.push(...doctorIds);
-  const doctorGlobalWindowsMap = await fetchDoctorGlobalWindowsMap({
-    doctorIds: doctorIdsForGlobal,
-    dow,
-    fechaLocal: fecha_local,
-    timeZone: clinicTimezone
-  });
 
   const buildSlots = ({
     inst,
@@ -1135,8 +1113,7 @@ exports.slots = asyncHandler(async (req, res) => {
       dow,
       fechaLocal: fecha_local,
       timeZone: clinicTimezone,
-      globalWindowsMap: doctorGlobalWindowsMap
-    });
+      });
 
     // Si no hay asignación del doctor, devolvemos vacío para todas las instalaciones.
     if (doctorCtx.dcMissing) {
@@ -1348,8 +1325,7 @@ exports.slots = asyncHandler(async (req, res) => {
         dow,
         fechaLocal: fecha_local,
         timeZone: clinicTimezone,
-        globalWindowsMap: doctorGlobalWindowsMap
-      });
+          });
       const slots = buildSlots({
         inst,
         doctorCtx,
@@ -1437,8 +1413,7 @@ exports.slots = asyncHandler(async (req, res) => {
       dow,
       fechaLocal: fecha_local,
       timeZone: clinicTimezone,
-      globalWindowsMap: doctorGlobalWindowsMap
-    });
+      });
 
     const docBloqDefs = await db.DoctorBloqueo.findAll({
       where: {
