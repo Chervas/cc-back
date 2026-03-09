@@ -4,61 +4,47 @@ const db = require('../../models');
 const { queues } = require('../services/queue.service');
 const { getIO } = require('../services/socket.service');
 const whatsappService = require('../services/whatsapp.service');
-const { isGlobalAdmin } = require('../lib/role-helpers');
-const {
-  buildQuickChatContextFromMemberships,
-  canReadConversationInClinic,
-} = require('../lib/quickchat-helpers');
 
-const { Conversation, Message, UsuarioClinica, Paciente, Lead, ConversationRead } = db;
+const { Conversation, Message, UsuarioClinica, Paciente, LeadIntake, ConversationRead, Clinica } = db;
 
-async function getUserQuickChatContext(userId) {
-  const globalAdmin = isGlobalAdmin(userId);
+const ROLE_AGGREGATE = ['propietario', 'admin'];
+const ADMIN_USER_IDS = (process.env.ADMIN_USER_IDS || '1')
+  .split(',')
+  .map((v) => parseInt(v.trim(), 10))
+  .filter((n) => !Number.isNaN(n));
+
+async function getUserClinics(userId) {
+  const isAdmin = ADMIN_USER_IDS.includes(Number(userId));
+  if (isAdmin) {
+    const clinics = await Clinica.findAll({ attributes: ['id_clinica'], raw: true });
+    return {
+      clinicIds: clinics.map((c) => c.id_clinica),
+      isAggregateAllowed: true,
+    };
+  }
   const memberships = await UsuarioClinica.findAll({
-    where: {
-      id_usuario: userId,
-      [Op.or]: [
-        { estado_invitacion: 'aceptada' },
-        { estado_invitacion: null },
-      ],
-    },
-    attributes: ['id_clinica', 'rol_clinica', 'subrol_clinica'],
+    where: { id_usuario: userId },
+    attributes: ['id_clinica', 'rol_clinica'],
     raw: true,
   });
+  const clinicIds = memberships.map((m) => m.id_clinica);
+  const roles = memberships.map((m) => m.rol_clinica);
+  const isAggregateAllowed = roles.some((r) => ROLE_AGGREGATE.includes(r));
+  return { clinicIds, isAggregateAllowed };
+}
 
-  const context = buildQuickChatContextFromMemberships(memberships, {
-    isGlobalAdmin: globalAdmin,
-  });
-
-  // Admin global: puede consultar QuickChat por clínica seleccionada sin usar vista agregada.
-  // Para ello ampliamos su scope a todas las clínicas, manteniendo can_use_all_clinics=false.
-  if (globalAdmin) {
-    const allClinics = await db.Clinica.findAll({
-      attributes: ['id_clinica'],
-      raw: true,
-    });
-
-    const clinicIds = allClinics
-      .map((row) => Number(row.id_clinica))
-      .filter((id) => Number.isFinite(id));
-
-    clinicIds.forEach((clinicId) => {
-      context.permissionsByClinic.set(clinicId, { readTeam: true, readPatients: true });
-      if (!context.roleByClinic.has(clinicId)) {
-        context.roleByClinic.set(clinicId, {
-          rol_clinica: 'administrador',
-          subrol_clinica: null,
-        });
-      }
-    });
-
-    context.clinicIds = Array.from(new Set([...(context.clinicIds || []), ...clinicIds])).sort((a, b) => a - b);
-    context.teamClinicIds = [...context.clinicIds];
-    context.patientClinicIds = [...context.clinicIds];
-    context.hasAnyRead = context.clinicIds.length > 0;
+function roleToPermissions(role) {
+  const normalized = String(role || '').toLowerCase();
+  if (ROLE_AGGREGATE.includes(normalized)) {
+    return { read_patients: true, read_team: true, read_leads: true };
   }
-
-  return context;
+  if (['administrador', 'admin', 'personaldeclinica', 'recepcion', 'assistant', 'auxiliar'].includes(normalized)) {
+    return { read_patients: true, read_team: true, read_leads: true };
+  }
+  if (['doctor', 'medico'].includes(normalized)) {
+    return { read_patients: true, read_team: false, read_leads: true };
+  }
+  return { read_patients: false, read_team: false, read_leads: false };
 }
 
 function parseClinicIdsParam(requestedClinicId) {
@@ -74,101 +60,12 @@ function parseClinicIdsParam(requestedClinicId) {
   return ids;
 }
 
-function parseRequestedClinicScope(context, requestedClinicId) {
-  const hasValue =
-    requestedClinicId !== null &&
-    requestedClinicId !== undefined &&
-    String(requestedClinicId).trim() !== '';
-
+function ensureAccess({ clinicIds, isAggregateAllowed }, requestedClinicId) {
+  if (!requestedClinicId) return false;
   const parsed = parseClinicIdsParam(requestedClinicId);
-  if (parsed === 'all') {
-    if (!context.canUseAllClinics) {
-      return { ok: false, reason: 'aggregate_disabled' };
-    }
-    return { ok: true, clinicIds: context.clinicIds };
-  }
-
-  if (!hasValue) {
-    if (!context.canUseAllClinics) {
-      return { ok: false, reason: 'clinic_required' };
-    }
-    return { ok: true, clinicIds: context.clinicIds };
-  }
-
-  if (!parsed) {
-    return { ok: false, reason: 'invalid' };
-  }
-
-  const uniqueIds = Array.from(new Set(parsed));
-  const allAllowed = uniqueIds.every((id) => context.clinicIds.includes(id));
-  if (!allAllowed) {
-    return { ok: false, reason: 'forbidden' };
-  }
-
-  return { ok: true, clinicIds: uniqueIds };
-}
-
-function canReadTeamInClinic(context, clinicId) {
-  return !!context.permissionsByClinic.get(Number(clinicId))?.readTeam;
-}
-
-function canReadPatientsInClinic(context, clinicId) {
-  return !!context.permissionsByClinic.get(Number(clinicId))?.readPatients;
-}
-
-function resolvePermissionScope(context, clinicIds) {
-  const selected = new Set((clinicIds || []).map((id) => Number(id)).filter((id) => Number.isFinite(id)));
-  const teamClinicIds = context.teamClinicIds.filter((id) => selected.has(id));
-  const patientClinicIds = context.patientClinicIds.filter((id) => selected.has(id));
-  return {
-    teamClinicIds,
-    patientClinicIds,
-    readableClinicIds: Array.from(new Set([...teamClinicIds, ...patientClinicIds])),
-  };
-}
-
-function getEffectiveRole(context, selectedClinicIds = []) {
-  const selected = Array.isArray(selectedClinicIds) && selectedClinicIds.length
-    ? selectedClinicIds
-    : context.clinicIds;
-
-  const roles = Array.from(new Set(
-    selected
-      .map((clinicId) => context.roleByClinic.get(Number(clinicId))?.rol_clinica || null)
-      .filter(Boolean)
-  ));
-
-  if (!roles.length) return 'unknown';
-  if (roles.length === 1) return roles[0];
-  return 'mixed';
-}
-
-function getScopeErrorResponse(reason) {
-  if (reason === 'invalid') {
-    return { status: 400, body: { error: 'clinic_id inválido' } };
-  }
-  if (reason === 'forbidden') {
-    return { status: 403, body: { error: 'Acceso denegado a la clínica' } };
-  }
-  return null;
-}
-
-async function requireConversationReadAccess(userId, conversation) {
-  const context = await getUserQuickChatContext(userId);
-  if (!context.hasAnyRead) {
-    return { ok: false, status: 403, error: 'QuickChat no habilitado para este usuario' };
-  }
-
-  const clinicId = Number(conversation?.clinic_id);
-  if (!Number.isFinite(clinicId) || !context.clinicIds.includes(clinicId)) {
-    return { ok: false, status: 403, error: 'Acceso denegado a la clínica' };
-  }
-
-  if (!canReadConversationInClinic(context.permissionsByClinic, clinicId, conversation)) {
-    return { ok: false, status: 403, error: 'No tienes permisos para este tipo de conversación' };
-  }
-
-  return { ok: true, context };
+  if (parsed === 'all') return isAggregateAllowed;
+  if (!parsed) return false;
+  return parsed.every((id) => clinicIds.includes(id));
 }
 
 async function getReadMap(userId, conversationIds) {
@@ -203,38 +100,17 @@ async function getUnreadCountsByConversation(userId, conversationIds) {
   return new Map(counts);
 }
 
-async function getTotalUnreadCountForUser(userId, context, requestedClinicId) {
-  if (!context?.hasAnyRead) return 0;
-
-  let scopeClinicIds = context.clinicIds;
+async function getTotalUnreadCountForUser(userId, clinicIds, isAggregateAllowed, requestedClinicId) {
+  const where = {};
   if (requestedClinicId && requestedClinicId !== 'all') {
     const parsed = parseClinicIdsParam(requestedClinicId);
-    if (!parsed) return 0;
-    const uniqueIds = Array.from(new Set(parsed));
-    const allAllowed = uniqueIds.every((id) => context.clinicIds.includes(id));
-    if (!allAllowed) return 0;
-    scopeClinicIds = uniqueIds;
+    if (!parsed || !ensureAccess({ clinicIds, isAggregateAllowed }, requestedClinicId)) {
+      return 0;
+    }
+    where.clinic_id = parsed.length === 1 ? parsed[0] : { [Op.in]: parsed };
+  } else if (!isAggregateAllowed) {
+    where.clinic_id = { [Op.in]: clinicIds };
   }
-
-  const permissionScope = resolvePermissionScope(context, scopeClinicIds);
-  if (!permissionScope.readableClinicIds.length) return 0;
-
-  const clauses = [];
-  if (permissionScope.teamClinicIds.length) {
-    clauses.push({
-      clinic_id: { [Op.in]: permissionScope.teamClinicIds },
-      channel: 'internal',
-    });
-  }
-  if (permissionScope.patientClinicIds.length) {
-    clauses.push({
-      clinic_id: { [Op.in]: permissionScope.patientClinicIds },
-      channel: { [Op.ne]: 'internal' },
-    });
-  }
-  if (!clauses.length) return 0;
-
-  const where = clauses.length === 1 ? clauses[0] : { [Op.or]: clauses };
 
   const conversations = await Conversation.findAll({
     where,
@@ -252,83 +128,21 @@ async function getTotalUnreadCountForUser(userId, context, requestedClinicId) {
   return total;
 }
 
-exports.getConversationPermissions = async (req, res) => {
-  try {
-    const userId = req.userData?.userId;
-    const context = await getUserQuickChatContext(userId);
-    const scope = parseRequestedClinicScope(context, req.query?.clinic_id);
-    const scopeError = getScopeErrorResponse(scope.reason);
-    if (scopeError) {
-      return res.status(scopeError.status).json(scopeError.body);
-    }
-
-    const selectedClinicIds = scope.ok ? scope.clinicIds : [];
-    const selectedPermissions = resolvePermissionScope(context, selectedClinicIds);
-    const readTeam = selectedPermissions.teamClinicIds.length > 0;
-    const readPatients = selectedPermissions.patientClinicIds.length > 0;
-    const selectedClinicId = selectedClinicIds.length === 1 ? selectedClinicIds[0] : null;
-    const effectiveRole = getEffectiveRole(context, selectedClinicIds);
-
-    return res.json({
-      // Contrato canónico (front)
-      selected_clinic_id: selectedClinicId,
-      read_patients: readPatients,
-      read_team: readTeam,
-      read_leads: readPatients,
-      can_use_all_clinics: context.canUseAllClinics,
-      effective_role: effectiveRole,
-
-      // Payload extendido (debug / futura UI)
-      has_quickchat_access: context.hasAnyRead,
-      has_agencia_role: context.hasAgenciaRole,
-      clinics: context.clinicIds.map((clinicId) => {
-        const role = context.roleByClinic.get(clinicId) || {};
-        const permissions = context.permissionsByClinic.get(clinicId) || {};
-        return {
-          clinic_id: clinicId,
-          rol_clinica: role.rol_clinica || null,
-          subrol_clinica: role.subrol_clinica || null,
-          quickchat: {
-            read_team: !!permissions.readTeam,
-            read_patients: !!permissions.readPatients,
-          },
-        };
-      }),
-      selected: {
-        clinic_ids: selectedClinicIds,
-        read_team: readTeam,
-        read_patients: readPatients,
-      },
-    });
-  } catch (err) {
-    console.error('Error getConversationPermissions', err);
-    return res.status(500).json({ error: 'Error obteniendo permisos de QuickChat' });
-  }
-};
-
 exports.listConversations = async (req, res) => {
   try {
     const userId = req.userData?.userId;
     const { clinic_id, filter, channel } = req.query;
     const patientId = req.query.patient_id ? Number(req.query.patient_id) : null;
+    const leadId = req.query.lead_id ? Number(req.query.lead_id) : null;
 
-    const context = await getUserQuickChatContext(userId);
-    if (!context.hasAnyRead) {
-      return res.json([]);
+    const { clinicIds, isAggregateAllowed } = await getUserClinics(userId);
+    if (!clinicIds.length) {
+      return res.status(403).json({ error: 'Sin clínicas asignadas' });
     }
 
-    const clinicScope = parseRequestedClinicScope(context, clinic_id);
-    const scopeError = getScopeErrorResponse(clinicScope.reason);
-    if (scopeError) {
-      return res.status(scopeError.status).json(scopeError.body);
-    }
-    if (!clinicScope.ok) {
-      return res.json([]);
-    }
-
-    let scopedClinicIds = clinicScope.clinicIds;
     const where = {};
     let patient = null;
+    let lead = null;
     if (patientId) {
       patient = await Paciente.findByPk(patientId, {
         attributes: ['id_paciente', 'clinica_id', 'telefono_movil'],
@@ -337,62 +151,54 @@ exports.listConversations = async (req, res) => {
       if (!patient) {
         return res.status(404).json({ error: 'Paciente no encontrado' });
       }
-      const patientClinicId = Number(patient.clinica_id);
-      if (!scopedClinicIds.includes(patientClinicId)) {
+      where.patient_id = patientId;
+      if (clinic_id && clinic_id !== 'all') {
+        const parsed = parseClinicIdsParam(clinic_id);
+        if (!parsed || !ensureAccess({ clinicIds, isAggregateAllowed }, clinic_id)) {
+          return res.status(403).json({ error: 'Acceso denegado a la clínica' });
+        }
+        where.clinic_id = parsed.length === 1 ? parsed[0] : { [Op.in]: parsed };
+      } else if (!isAggregateAllowed) {
+        where.clinic_id = { [Op.in]: clinicIds };
+      }
+    } else if (leadId) {
+      lead = await LeadIntake.findByPk(leadId, {
+        attributes: ['id', 'clinica_id', 'telefono'],
+        raw: true,
+      });
+      if (!lead) {
+        return res.status(404).json({ error: 'Lead no encontrado' });
+      }
+      where.lead_id = leadId;
+      if (clinic_id && clinic_id !== 'all') {
+        const parsed = parseClinicIdsParam(clinic_id);
+        if (!parsed || !ensureAccess({ clinicIds, isAggregateAllowed }, clinic_id)) {
+          return res.status(403).json({ error: 'Acceso denegado a la clínica' });
+        }
+        where.clinic_id = parsed.length === 1 ? parsed[0] : { [Op.in]: parsed };
+      } else if (!isAggregateAllowed) {
+        where.clinic_id = { [Op.in]: clinicIds };
+      }
+    } else if (clinic_id && clinic_id !== 'all') {
+      const parsed = parseClinicIdsParam(clinic_id);
+      if (!parsed || !ensureAccess({ clinicIds, isAggregateAllowed }, clinic_id)) {
         return res.status(403).json({ error: 'Acceso denegado a la clínica' });
       }
-      if (!canReadPatientsInClinic(context, patientClinicId)) {
-        return res.status(403).json({ error: 'No tienes permisos para ver conversaciones de pacientes' });
-      }
-
-      // Forzar scope a la clínica del paciente para evitar cruces
-      where.clinic_id = patientClinicId;
-      where.patient_id = patientId;
-      scopedClinicIds = [patientClinicId];
+      where.clinic_id = parsed.length === 1 ? parsed[0] : { [Op.in]: parsed };
+    } else if (!isAggregateAllowed) {
+      where.clinic_id = { [Op.in]: clinicIds };
     }
 
     if (channel) {
       where.channel = channel;
     }
 
-    const permissionScope = resolvePermissionScope(context, scopedClinicIds);
-    if (!patientId) {
-      if (filter === 'equipo') {
-        if (!permissionScope.teamClinicIds.length) {
-          return res.json([]);
-        }
-        where.clinic_id =
-          permissionScope.teamClinicIds.length === 1
-            ? permissionScope.teamClinicIds[0]
-            : { [Op.in]: permissionScope.teamClinicIds };
-        where.channel = 'internal';
-      } else if (filter === 'pacientes') {
-        if (!permissionScope.patientClinicIds.length) {
-          return res.json([]);
-        }
-        where.clinic_id =
-          permissionScope.patientClinicIds.length === 1
-            ? permissionScope.patientClinicIds[0]
-            : { [Op.in]: permissionScope.patientClinicIds };
-        where.patient_id = { [Op.not]: null };
-      } else if (filter === 'leads') {
-        if (!permissionScope.patientClinicIds.length) {
-          return res.json([]);
-        }
-        where.clinic_id =
-          permissionScope.patientClinicIds.length === 1
-            ? permissionScope.patientClinicIds[0]
-            : { [Op.in]: permissionScope.patientClinicIds };
-        where.lead_id = { [Op.not]: null };
-      } else {
-        if (!permissionScope.readableClinicIds.length) {
-          return res.json([]);
-        }
-        where.clinic_id =
-          permissionScope.readableClinicIds.length === 1
-            ? permissionScope.readableClinicIds[0]
-            : { [Op.in]: permissionScope.readableClinicIds };
-      }
+    if (filter === 'leads') {
+      where.lead_id = { [Op.not]: null };
+    } else if (filter === 'pacientes') {
+      where.patient_id = { [Op.not]: null };
+    } else if (filter === 'equipo') {
+      where.channel = 'internal';
     }
 
     const conversations = await Conversation.findAll({
@@ -400,7 +206,7 @@ exports.listConversations = async (req, res) => {
       order: [['last_message_at', 'DESC']],
       include: [
         { model: Paciente, as: 'paciente', attributes: ['id_paciente', 'nombre', 'apellidos', 'foto', 'telefono_movil', 'email'] },
-        { model: Lead, as: 'lead', attributes: ['id', 'nombre', 'telefono', 'email'] },
+        { model: LeadIntake, as: 'lead', attributes: ['id', 'nombre', 'telefono', 'email'] },
         {
           model: Message,
           as: 'messages',
@@ -412,15 +218,16 @@ exports.listConversations = async (req, res) => {
       ],
     });
 
-    const visibleConversations = conversations.filter((conversation) =>
-      canReadConversationInClinic(context.permissionsByClinic, conversation.clinic_id, conversation)
-    );
-
     // Si se solicita por paciente y no existe conversación, crearla con su móvil
-    if (patientId && !visibleConversations.length && patient?.telefono_movil) {
+    if (patientId && !conversations.length && patient?.telefono_movil) {
       const normalized = whatsappService.normalizePhoneNumber(patient.telefono_movil) || patient.telefono_movil;
+      const parsed = parseClinicIdsParam(clinic_id);
+      const clinicToCreate =
+        Array.isArray(parsed) && parsed.length > 0
+          ? parsed[0]
+          : (clinicIds.includes(patient.clinica_id) ? patient.clinica_id : clinicIds[0]);
       await Conversation.create({
-        clinic_id: patient.clinica_id,
+        clinic_id: clinicToCreate,
         channel: 'whatsapp',
         contact_id: normalized,
         patient_id: patientId,
@@ -431,10 +238,29 @@ exports.listConversations = async (req, res) => {
       return exports.listConversations(req, res);
     }
 
-    const conversationIds = visibleConversations.map((c) => c.id);
+    // Si se solicita por lead y no existe conversación, crearla con su móvil
+    if (leadId && !conversations.length && lead?.telefono) {
+      const normalized = whatsappService.normalizePhoneNumber(lead.telefono) || lead.telefono;
+      const parsed = parseClinicIdsParam(clinic_id);
+      const clinicToCreate =
+        Array.isArray(parsed) && parsed.length > 0
+          ? parsed[0]
+          : (clinicIds.includes(lead.clinica_id) ? lead.clinica_id : clinicIds[0]);
+      await Conversation.create({
+        clinic_id: clinicToCreate,
+        channel: 'whatsapp',
+        contact_id: normalized,
+        lead_id: leadId,
+        last_message_at: new Date(),
+        unread_count: 0,
+      });
+      return exports.listConversations(req, res);
+    }
+
+    const conversationIds = conversations.map((c) => c.id);
     const unreadMap = await getUnreadCountsByConversation(userId, conversationIds);
 
-    const payload = visibleConversations.map((c) => {
+    const payload = conversations.map((c) => {
       const data = c.toJSON();
       data.lastMessage = data.messages && data.messages.length ? data.messages[0] : null;
       delete data.messages;
@@ -449,6 +275,55 @@ exports.listConversations = async (req, res) => {
   }
 };
 
+exports.getPermissions = async (req, res) => {
+  try {
+    const userId = req.userData?.userId;
+    const requestedClinic = req.query?.clinic_id;
+    const { clinicIds, isAggregateAllowed } = await getUserClinics(userId);
+
+    if (!clinicIds.length) {
+      return res.status(403).json({
+        selected_clinic_id: null,
+        read_patients: false,
+        read_team: false,
+        read_leads: false,
+        can_use_all_clinics: false,
+        effective_role: 'unknown',
+      });
+    }
+
+    let selectedClinicId = null;
+    const parsed = parseClinicIdsParam(requestedClinic);
+    if (Array.isArray(parsed) && parsed.length === 1) {
+      selectedClinicId = parsed[0];
+    }
+
+    const memberships = await UsuarioClinica.findAll({
+      where: { id_usuario: userId },
+      attributes: ['id_clinica', 'rol_clinica'],
+      raw: true,
+    });
+    const selectedMembership =
+      memberships.find((m) => Number(m.id_clinica) === Number(selectedClinicId)) ||
+      memberships[0] ||
+      null;
+    const effectiveRole = String(selectedMembership?.rol_clinica || 'unknown').toLowerCase();
+    const perms = roleToPermissions(effectiveRole);
+
+    return res.json({
+      selected_clinic_id: selectedClinicId,
+      read_patients: perms.read_patients,
+      read_team: perms.read_team,
+      read_leads: perms.read_leads,
+      can_use_all_clinics: !!isAggregateAllowed,
+      effective_role: effectiveRole,
+    });
+  } catch (err) {
+    console.error('Error getPermissions', err);
+    return res.status(500).json({ error: 'Error obteniendo permisos de conversaciones' });
+  }
+};
+
 exports.getMessages = async (req, res) => {
   try {
     const userId = req.userData?.userId;
@@ -458,9 +333,9 @@ exports.getMessages = async (req, res) => {
       return res.status(404).json({ error: 'Conversación no encontrada' });
     }
 
-    const access = await requireConversationReadAccess(userId, conversation);
-    if (!access.ok) {
-      return res.status(access.status).json({ error: access.error });
+    const { clinicIds, isAggregateAllowed } = await getUserClinics(userId);
+    if (!ensureAccess({ clinicIds, isAggregateAllowed }, conversation.clinic_id)) {
+      return res.status(403).json({ error: 'Acceso denegado a la clínica' });
     }
 
     const messages = await Message.findAll({
@@ -491,9 +366,9 @@ exports.getConversationByPatient = async (req, res) => {
       return res.status(404).json({ error: 'Conversación no encontrada' });
     }
 
-    const access = await requireConversationReadAccess(userId, conversation);
-    if (!access.ok) {
-      return res.status(access.status).json({ error: access.error });
+    const { clinicIds, isAggregateAllowed } = await getUserClinics(userId);
+    if (!ensureAccess({ clinicIds, isAggregateAllowed }, conversation.clinic_id)) {
+      return res.status(403).json({ error: 'Acceso denegado a la clínica' });
     }
 
     const messages = await Message.findAll({
@@ -518,9 +393,9 @@ exports.markAsRead = async (req, res) => {
       return res.status(404).json({ error: 'Conversación no encontrada' });
     }
 
-    const access = await requireConversationReadAccess(userId, conversation);
-    if (!access.ok) {
-      return res.status(access.status).json({ error: access.error });
+    const { clinicIds, isAggregateAllowed } = await getUserClinics(userId);
+    if (!ensureAccess({ clinicIds, isAggregateAllowed }, conversation.clinic_id)) {
+      return res.status(403).json({ error: 'Acceso denegado a la clínica' });
     }
 
     await ConversationRead.upsert({
@@ -531,7 +406,8 @@ exports.markAsRead = async (req, res) => {
 
     const totalUnread = await getTotalUnreadCountForUser(
       userId,
-      access.context,
+      clinicIds,
+      isAggregateAllowed,
       conversation.clinic_id
     );
     const io = getIO();
@@ -575,10 +451,10 @@ exports.postMessage = async (req, res) => {
       return res.status(404).json({ error: 'Conversación no encontrada' });
     }
 
-    const access = await requireConversationReadAccess(userId, conversation);
-    if (!access.ok) {
+    const { clinicIds, isAggregateAllowed } = await getUserClinics(userId);
+    if (!ensureAccess({ clinicIds, isAggregateAllowed }, conversation.clinic_id)) {
       await transaction.rollback();
-      return res.status(access.status).json({ error: access.error });
+      return res.status(403).json({ error: 'Acceso denegado a la clínica' });
     }
 
     const isTemplate = useTemplate || message_type === 'template';
@@ -798,25 +674,20 @@ exports.createInternalMessage = async (req, res) => {
       return res.status(400).json({ error: 'clinic_id requerido' });
     }
 
-    const context = await getUserQuickChatContext(userId);
-    const clinicId = Number(clinic_id);
-    if (!Number.isFinite(clinicId) || !context.clinicIds.includes(clinicId)) {
+    const { clinicIds, isAggregateAllowed } = await getUserClinics(userId);
+    if (!ensureAccess({ clinicIds, isAggregateAllowed }, clinic_id)) {
       await transaction.rollback();
       return res.status(403).json({ error: 'Acceso denegado a la clínica' });
-    }
-    if (!canReadTeamInClinic(context, clinicId)) {
-      await transaction.rollback();
-      return res.status(403).json({ error: 'No tienes permisos para conversaciones de equipo' });
     }
 
     const conversation =
       (await Conversation.findOne({
-        where: { clinic_id: clinicId, channel: 'internal', contact_id: 'team' },
+        where: { clinic_id, channel: 'internal', contact_id: 'team' },
         transaction,
       })) ||
       (await Conversation.create(
         {
-          clinic_id: clinicId,
+          clinic_id,
           channel: 'internal',
           contact_id: 'team',
           last_message_at: new Date(),

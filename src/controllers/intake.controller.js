@@ -1,13 +1,15 @@
 const crypto = require('crypto');
 const axios = require('axios');
-const dns = require('dns').promises;
-const net = require('net');
 const asyncHandler = require('express-async-handler');
 const db = require('../../models');
 const { Op, literal } = db.Sequelize;
 
 const LeadIntake = db.LeadIntake;
 const LeadAttributionAudit = db.LeadAttributionAudit;
+const FormSubmissionEvent = db.FormSubmissionEvent;
+const Conversation = db.Conversation;
+const Message = db.Message;
+const Usuario = db.Usuario;
 const Clinica = db.Clinica;
 const GrupoClinica = db.GrupoClinica;
 const Campana = db.Campana;
@@ -15,21 +17,14 @@ const AdCache = db.AdCache;
 const ClinicMetaAsset = db.ClinicMetaAsset;
 const ClinicGoogleAdsAccount = db.ClinicGoogleAdsAccount;
 const IntakeConfig = db.IntakeConfig;
-const Conversation = db.Conversation;
-const Message = db.Message;
-const WhatsAppWebOrigin = db.WhatsAppWebOrigin;
-const CitaPaciente = db.CitaPaciente;
-const Paciente = db.Paciente;
+const { enqueueInboundFormSubmissionResume } = require('../services/automationsV2Resume.service');
 const { sendMetaEvent, buildUserData: buildMetaUserData } = require('../services/metaCapi.service');
 const { uploadClickConversion } = require('../services/googleAdsConversion.service');
-const whatsappService = require('../services/whatsapp.service');
-const { getIO } = require('../services/socket.service');
 
 const CHANNELS = new Set(['paid', 'organic', 'unknown']);
 const SOURCES = new Set(['meta_ads', 'google_ads', 'web', 'whatsapp', 'call_click', 'tiktok_ads', 'seo', 'direct', 'local_services']);
 const STATUSES = new Set(['nuevo', 'contactado', 'esperando_info', 'info_recibida', 'citado', 'acudio_cita', 'convertido', 'descartado']);
 const DEDUPE_WINDOW_HOURS = parseInt(process.env.INTAKE_DEDUPE_WINDOW_HOURS || '24', 10);
-const CALL_OUTCOMES = new Set(['citado', 'informacion', 'no_contactado']);
 
 const SIGNATURE_HEADER = 'x-cc-signature';
 const SIGNATURE_HEADER_SHA = 'x-cc-signature-sha256';
@@ -37,6 +32,17 @@ const EVENT_ID_HEADER = 'x-cc-event-id';
 const parseInteger = (value) => {
   const n = Number(value);
   return Number.isFinite(n) ? n : null;
+};
+const cleanString = (value) => {
+  if (value === undefined || value === null) return null;
+  const normalized = String(value).trim();
+  return normalized || null;
+};
+const buildActorLabel = (usuario) => {
+  if (!usuario) return 'Sistema';
+  return usuario.email_usuario
+    || [usuario.nombre, usuario.apellidos].filter(Boolean).join(' ').trim()
+    || `Usuario ${usuario.id_usuario}`;
 };
 // Acepta IDs separados por coma (ej: "36,37,38") y también "all" (=> null, sin filtro).
 const parseIntegerList = (value) => {
@@ -130,125 +136,94 @@ const sanitizeText = (value) => {
     .trim();
 };
 
+const sanitizeFormSubmissionValue = (value, depth = 0) => {
+  if (depth > 3) return null;
+  if (value === undefined || value === null) return null;
+  if (typeof value === 'string') {
+    const normalized = value.normalize('NFKC').trim();
+    return normalized.length > 2000 ? normalized.slice(0, 2000) : normalized;
+  }
+  if (typeof value === 'number' || typeof value === 'boolean') return value;
+  if (Array.isArray(value)) {
+    return value
+      .map((item) => sanitizeFormSubmissionValue(item, depth + 1))
+      .filter((item) => item !== null);
+  }
+  if (typeof value === 'object') {
+    const out = {};
+    for (const [key, item] of Object.entries(value)) {
+      const normalized = sanitizeFormSubmissionValue(item, depth + 1);
+      if (normalized !== null) out[key] = normalized;
+    }
+    return out;
+  }
+  return null;
+};
+
+const normalizeFormSubmission = (input) => {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) return null;
+  const fields = input.fields && typeof input.fields === 'object' && !Array.isArray(input.fields)
+    ? sanitizeFormSubmissionValue(input.fields)
+    : {};
+  return {
+    page_url: cleanString(input.page_url || input.pageUrl),
+    form_id: cleanString(input.form_id || input.formId),
+    form_name: cleanString(input.form_name || input.formName),
+    form_selector: cleanString(input.form_selector || input.formSelector),
+    submitted_at: parseDate(input.submitted_at || input.submittedAt) || new Date(),
+    fields: fields && typeof fields === 'object' && !Array.isArray(fields) ? fields : {},
+    payload: sanitizeFormSubmissionValue(input.payload || null),
+  };
+};
+
+const extractLeadDataFromFormFields = (fields) => {
+  if (!fields || typeof fields !== 'object' || Array.isArray(fields)) {
+    return {};
+  }
+
+  const entries = Object.entries(fields)
+    .map(([key, value]) => [String(key || '').trim(), cleanString(value)] )
+    .filter(([key, value]) => key && value);
+
+  const findValue = (matcher) => {
+    const hit = entries.find(([key]) => matcher(key.toLowerCase()));
+    return hit?.[1] || null;
+  };
+
+  const findByValue = (matcher) => {
+    const hit = entries.find(([, value]) => matcher(String(value || '').trim()));
+    return hit?.[1] || null;
+  };
+
+  const email =
+    findValue((key) => key.includes('email') || key.includes('correo')) ||
+    findByValue((value) => /.+@.+\..+/.test(value));
+
+  const phone =
+    findValue((key) => key.includes('phone') || key.includes('telefono') || key.includes('teléfono') || key.includes('mobile') || key.includes('movil') || key.includes('móvil') || key.includes('whatsapp')) ||
+    (() => {
+      const messageLike = findValue((key) => key.includes('message') || key.includes('mensaje'));
+      if (messageLike && normalizePhone(messageLike)) return messageLike;
+      return null;
+    })() ||
+    findByValue((value) => !!normalizePhone(value));
+
+  const nombre =
+    findValue((key) => key.includes('full_name') || key.includes('nombre_completo')) ||
+    findValue((key) => (key.includes('name') || key.includes('nombre')) && !key.includes('company') && !key.includes('empresa'));
+
+  return {
+    nombre,
+    email,
+    telefono: phone,
+  };
+};
+
 const stableStringify = (obj) => {
   if (obj === null || typeof obj !== 'object') return JSON.stringify(obj);
   if (Array.isArray(obj)) return `[${obj.map(stableStringify).join(',')}]`;
   const keys = Object.keys(obj).sort();
   return `{${keys.map(k => `${JSON.stringify(k)}:${stableStringify(obj[k])}`).join(',')}}`;
-};
-
-const formatMadridDateTime = (value) => {
-  try {
-    return new Date(value).toLocaleString('es-ES', {
-      timeZone: 'Europe/Madrid',
-      year: 'numeric',
-      month: '2-digit',
-      day: '2-digit',
-      hour: '2-digit',
-      minute: '2-digit',
-      second: '2-digit'
-    });
-  } catch {
-    return new Date(value).toISOString();
-  }
-};
-
-const appendInternalLeadNote = async (lead, line) => {
-  if (!lead || !line) return;
-  const base = (lead.notas_internas || '').trim();
-  const next = base ? `${base}\n${line}` : line;
-  await lead.update({ notas_internas: next });
-};
-
-const resolveRealtimeLeadRooms = async ({ clinicId, groupId }) => {
-  const clinicIds = new Set();
-  const clinicParsed = parseInteger(clinicId);
-  const groupParsed = parseInteger(groupId);
-
-  if (clinicParsed) {
-    clinicIds.add(clinicParsed);
-  }
-
-  if (!clinicIds.size && groupParsed) {
-    const groupClinics = await Clinica.findAll({
-      where: { grupoClinicaId: groupParsed },
-      attributes: ['id_clinica'],
-      raw: true
-    });
-    groupClinics.forEach((row) => {
-      const id = parseInteger(row?.id_clinica);
-      if (id) clinicIds.add(id);
-    });
-  }
-
-  return Array.from(clinicIds).map((id) => `clinic:${id}`);
-};
-
-const emitLeadRealtimeEvent = async ({ type, lead, payload = {} }) => {
-  try {
-    const io = getIO();
-    if (!io || !lead) return;
-
-    const rooms = await resolveRealtimeLeadRooms({
-      clinicId: lead.clinica_id,
-      groupId: lead.grupo_clinica_id
-    });
-    if (!rooms.length) return;
-
-    const basePayload = {
-      type,
-      lead_id: parseInteger(lead.id),
-      clinic_id: parseInteger(lead.clinica_id),
-      group_id: parseInteger(lead.grupo_clinica_id),
-      emitted_at: new Date().toISOString(),
-      ...payload
-    };
-
-    rooms.forEach((room) => {
-      io.to(room).emit('lead:call_event', basePayload);
-      io.to(room).emit(`lead:${type}`, basePayload);
-    });
-  } catch (emitErr) {
-    console.warn('⚠️ No se pudo emitir evento realtime de lead:', emitErr.message || emitErr);
-  }
-};
-
-const emitLeadCreatedRealtimeEvent = async (lead) => {
-  try {
-    const io = getIO();
-    if (!io || !lead) return;
-
-    const rooms = await resolveRealtimeLeadRooms({
-      clinicId: lead.clinica_id,
-      groupId: lead.grupo_clinica_id
-    });
-    if (!rooms.length) return;
-
-    const payload = {
-      type: 'created',
-      lead_id: parseInteger(lead.id),
-      clinic_id: parseInteger(lead.clinica_id),
-      group_id: parseInteger(lead.grupo_clinica_id),
-      campaign_id: parseInteger(lead.campana_id),
-      source: lead.source || null,
-      source_detail: lead.source_detail || null,
-      channel: lead.channel || null,
-      status_lead: lead.status_lead || 'nuevo',
-      nombre: lead.nombre || null,
-      email: lead.email || null,
-      telefono: lead.telefono || null,
-      page_url: lead.page_url || null,
-      created_at: lead.created_at ? new Date(lead.created_at).toISOString() : new Date().toISOString(),
-      emitted_at: new Date().toISOString()
-    };
-
-    rooms.forEach((room) => {
-      io.to(room).emit('lead:created', payload);
-      io.to(room).emit('lead:event', payload);
-    });
-  } catch (emitErr) {
-    console.warn('⚠️ No se pudo emitir evento realtime lead:created:', emitErr.message || emitErr);
-  }
 };
 
 const cleanGoogleCustomerId = (value) => {
@@ -505,259 +480,7 @@ const validateMetaSignature = (req) => {
   return crypto.timingSafeEqual(expectedBuf, providedBuf);
 };
 
-// ======================================
-// QuickChat summary (chatbot)
-// ======================================
-
-function isQuickchatSummaryRequest(body = {}) {
-  const sourceRaw = coalesce(body.source, body.Source, body.source_type);
-  const sourceDetailRaw = coalesce(body.source_detail, body.sourceDetail, body.sourceDetailRaw);
-  return (
-    String(sourceRaw || '').toLowerCase() === 'chatbot_quickchat' ||
-    String(sourceDetailRaw || '').toLowerCase() === 'chatbot_quickchat'
-  );
-}
-
-function getChatStateData(body = {}) {
-  const state =
-    (body.chat_state && typeof body.chat_state === 'object' ? body.chat_state : null) ||
-    (body.chatState && typeof body.chatState === 'object' ? body.chatState : null) ||
-    null;
-  const data = state && state.data && typeof state.data === 'object' && !Array.isArray(state.data) ? state.data : null;
-  return data || null;
-}
-
-async function resolveClinicIdForGroupChat({ groupId, chatStateData }) {
-  const gid = parseInteger(groupId);
-  if (!gid) return null;
-
-  // 1) Preferir sede elegida en el chat (locations step => chat_state.data.location = clinic_id)
-  const candidateId = chatStateData
-    ? parseInteger(coalesce(
-      chatStateData.location,
-      chatStateData.location_id,
-      chatStateData.locationId,
-      chatStateData.clinic_id,
-      chatStateData.clinica_id,
-      chatStateData.clinicId,
-      chatStateData.clinicaId
-    ))
-    : null;
-
-  if (candidateId) {
-    const row = await Clinica.findOne({
-      where: { id_clinica: candidateId, grupoClinicaId: gid },
-      attributes: ['id_clinica'],
-      raw: true
-    });
-    if (row) return candidateId;
-  }
-
-  // 2) Fallback determinista: primera clínica del grupo (mismo orden que available_locations)
-  const first = await Clinica.findOne({
-    where: { grupoClinicaId: gid },
-    attributes: ['id_clinica'],
-    order: [['nombre_clinica', 'ASC']],
-    raw: true
-  });
-  return parseInteger(first?.id_clinica) || null;
-}
-
-function formatExtraPairs(pairs) {
-  if (!Array.isArray(pairs) || pairs.length === 0) return '';
-  const safe = pairs
-    .filter((p) => p && p.key && p.value !== undefined && p.value !== null)
-    .slice(0, 20)
-    .map((p) => {
-      let value = p.value;
-      if (typeof value === 'object') {
-        try {
-          value = JSON.stringify(value);
-        } catch {
-          value = '[object]';
-        }
-      }
-      value = String(value);
-      if (value.length > 140) value = value.slice(0, 140) + '...';
-      return `- ${p.key}: ${value}`;
-    });
-  return safe.length ? `\n\nDatos recogidos:\n${safe.join('\n')}` : '';
-}
-
-async function registerDedupeAttemptAudit({
-  existingLeadId,
-  reqBody,
-  dedupeReason,
-  eventId,
-  normalizedSource,
-  sourceDetail,
-  normalizedChannel,
-  clinicId,
-  groupId,
-  pageUrl,
-  landingUrl,
-  referrer,
-  utmSource,
-  utmMedium,
-  utmCampaign,
-  utmContent,
-  utmTerm,
-  gclid,
-  fbclid,
-  ttclid,
-  externalSource,
-  externalId,
-  normalizedPhone,
-  normalizedEmail
-}) {
-  const leadId = parseInteger(existingLeadId);
-  if (!leadId) return;
-
-  try {
-    await LeadAttributionAudit.create({
-      lead_intake_id: leadId,
-      raw_payload: reqBody || {},
-      attribution_steps: {
-        kind: 'dedupe_attempt',
-        dedupe_reason: dedupeReason || 'Lead duplicado',
-        deduped_at: new Date().toISOString(),
-        source: normalizedSource || null,
-        source_detail: sourceDetail || null,
-        channel: normalizedChannel || null,
-        clinic_id: clinicId || null,
-        group_id: groupId || null,
-        page_url: pageUrl || null,
-        landing_url: landingUrl || null,
-        referrer: referrer || null,
-        utm: {
-          source: utmSource || null,
-          medium: utmMedium || null,
-          campaign: utmCampaign || null,
-          content: utmContent || null,
-          term: utmTerm || null
-        },
-        click_ids: {
-          gclid: gclid || null,
-          fbclid: fbclid || null,
-          ttclid: ttclid || null
-        },
-        keys: {
-          event_id: eventId || null,
-          external_source: externalSource || null,
-          external_id: externalId || null,
-          phone_hash: normalizedPhone ? hashValue(normalizedPhone) : null,
-          email_hash: normalizedEmail ? hashValue(normalizedEmail) : null
-        }
-      }
-    });
-  } catch (auditErr) {
-    console.warn('⚠️ No se pudo registrar auditoría de dedupe:', auditErr.message || auditErr);
-  }
-}
-
-function buildQuickchatSummaryMessage({ nombre, telefono, email, pageUrl, landingUrl, extraPairs }) {
-  const lines = [];
-  lines.push('Nuevo paciente potencial desde el chatbot de la web.');
-  if (landingUrl && pageUrl && landingUrl !== pageUrl) {
-    lines.push(`Página origen: ${landingUrl}`);
-    lines.push(`Página envío: ${pageUrl}`);
-  } else if (pageUrl || landingUrl) {
-    lines.push(`Página: ${pageUrl || landingUrl}`);
-  }
-  lines.push(`Nombre: ${nombre || '-'}`);
-  lines.push(`Telf: ${telefono || '-'}`);
-  lines.push(`Email: ${email || '-'}`);
-  lines.push('Puedes contestarle por aqui directamente (WhatsApp), aunque recomiendo intentar llamarle primero.');
-  return lines.join('\n') + formatExtraPairs(extraPairs);
-}
-
-async function sendQuickchatSummaryToQuickChat({
-  clinicId,
-  leadIntakeId,
-  nombre,
-  telefono,
-  email,
-  pageUrl,
-  landingUrl,
-  extraPairs
-}) {
-  if (!clinicId) {
-    return { sent: false, reason: 'clinic_id requerido para QuickChat' };
-  }
-
-  const phoneE164 = whatsappService.normalizePhoneNumber(telefono);
-  const channel = phoneE164 ? 'whatsapp' : 'internal';
-  const contactId = phoneE164 || 'web-leads';
-
-  const [conversation] = await Conversation.findOrCreate({
-    where: { clinic_id: clinicId, channel, contact_id: contactId },
-    defaults: {
-      clinic_id: clinicId,
-      channel,
-      contact_id: contactId,
-      last_message_at: new Date(),
-      unread_count: 0,
-      // Nota: no seteamos last_inbound_at. Para WhatsApp, esto fuerza el flujo de plantilla si no hay inbound real.
-      last_inbound_at: null,
-    }
-  });
-
-  const content = buildQuickchatSummaryMessage({
-    nombre,
-    telefono: phoneE164 || telefono || null,
-    email,
-    pageUrl,
-    landingUrl,
-    extraPairs
-  });
-
-  const msg = await Message.create({
-    conversation_id: conversation.id,
-    sender_id: null,
-    direction: 'inbound',
-    content,
-    message_type: 'event',
-    status: 'sent',
-    sent_at: new Date(),
-    metadata: {
-      source: 'snippet_chatbot',
-      kind: 'quickchat_summary',
-      lead_intake_id: leadIntakeId || null,
-      summary: {
-        page_url: pageUrl || null,
-        landing_url: landingUrl || null,
-        nombre: nombre || null,
-        telefono: phoneE164 || telefono || null,
-        email: email || null,
-        extra_pairs: Array.isArray(extraPairs) ? extraPairs.slice(0, 20) : [],
-      },
-    }
-  });
-
-  conversation.last_message_at = new Date();
-  await conversation.save();
-
-  // Socket event (si está activo). Si la conversación es nueva, QuickChat la verá por polling.
-  const io = getIO();
-  if (io) {
-    const room = `clinic:${clinicId}`;
-    io.to(room).emit('message:created', {
-      id: msg.id,
-      conversation_id: String(conversation.id),
-      content: msg.content,
-      direction: msg.direction,
-      message_type: msg.message_type,
-      status: msg.status,
-      sent_at: msg.sent_at,
-      metadata: msg.metadata || null,
-    });
-  }
-
-  return { sent: true, channel, conversation_id: conversation.id, message_id: msg.id };
-}
-
-async function dedupeAndCreateLead(leadPayload, rawPayload = {}, attributionSteps = {}, options = {}) {
-  const skipRecentContactDedupe = !!options.skipRecentContactDedupe;
+async function dedupeAndCreateLead(leadPayload, rawPayload = {}, attributionSteps = {}) {
   const normalizedEmail = normalizeEmail(leadPayload.email);
   const normalizedPhone = normalizePhone(leadPayload.telefono);
   const dedupeCutoff = new Date(Date.now() - (DEDUPE_WINDOW_HOURS * 60 * 60 * 1000));
@@ -790,7 +513,7 @@ async function dedupeAndCreateLead(leadPayload, rawPayload = {}, attributionStep
     }
   }
 
-  if (!skipRecentContactDedupe && (normalizedPhone || normalizedEmail)) {
+  if (normalizedPhone || normalizedEmail) {
     const dedupeWhere = {
       created_at: { [Op.gte]: dedupeCutoff },
       [Op.or]: []
@@ -820,16 +543,12 @@ async function dedupeAndCreateLead(leadPayload, rawPayload = {}, attributionStep
     console.warn('⚠️ No se pudo registrar la auditoría de LeadIntake:', auditErr.message || auditErr);
   }
 
-  await emitLeadCreatedRealtimeEvent(lead);
-
   return lead;
 }
 
 exports.ingestLead = asyncHandler(async (req, res) => {
   const body = req.body || {};
   const eventId = (req.headers[EVENT_ID_HEADER] || body?.event_id || body?.eventId || null) || null;
-  const wantsQuickchatSummary = isQuickchatSummaryRequest(body);
-  const chatStateData = getChatStateData(body);
 
   const {
     clinica_id,
@@ -875,6 +594,8 @@ exports.ingestLead = asyncHandler(async (req, res) => {
   const campanaIdParsed = parseInteger(campana_id);
   const attribution = body?.attribution || {};
   const leadData = body?.lead_data || {};
+  const formSubmission = normalizeFormSubmission(body?.form_submission || body?.formSubmission);
+  const formLeadData = extractLeadDataFromFormFields(formSubmission?.fields || {});
 
   // Validación por dominio + HMAC por clínica/grupo cuando hay IntakeConfig guardada.
   // Fallback legacy: INTAKE_WEB_SECRET solo se usa si NO existe configuración.
@@ -918,23 +639,6 @@ exports.ingestLead = asyncHandler(async (req, res) => {
     }
   }
 
-  const sourceDetailLower = String(source_detail || '').toLowerCase();
-  const isChatRelated = sourceDetailLower === 'chatbot' || sourceDetailLower === 'chatbot_quickchat' || wantsQuickchatSummary;
-
-  let derivedClinicIdForChat = null;
-  if (clinicaIdParsed === null && grupoClinicaIdParsed !== null && isChatRelated) {
-    try {
-      derivedClinicIdForChat = await resolveClinicIdForGroupChat({
-        groupId: grupoClinicaIdParsed,
-        chatStateData
-      });
-    } catch (e) {
-      derivedClinicIdForChat = null;
-      console.warn('⚠️ No se pudo resolver clinic_id desde chat_state/group:', e.message || e);
-    }
-  }
-  const clinicIdForChat = coalesce(clinicaIdParsed, derivedClinicIdForChat);
-
   const utmSource = coalesce(attribution.utm_source, utm_source);
   const utmMedium = coalesce(attribution.utm_medium, utm_medium);
   const utmCampaign = coalesce(attribution.utm_campaign, utm_campaign);
@@ -947,9 +651,9 @@ exports.ingestLead = asyncHandler(async (req, res) => {
   const pageUrlValue = coalesce(attribution.page_url, page_url);
   const landingUrlValue = coalesce(attribution.landing_url, landing_url);
 
-  const leadNombre = sanitizeText(coalesce(leadData.nombre, nombre));
-  const leadEmail = coalesce(leadData.email, email);
-  const leadTelefono = coalesce(leadData.telefono, telefono);
+  const leadNombre = sanitizeText(coalesce(leadData.nombre, formLeadData.nombre, nombre));
+  const leadEmail = coalesce(leadData.email, formLeadData.email, email);
+  const leadTelefono = coalesce(leadData.telefono, formLeadData.telefono, telefono);
   const leadNotas = sanitizeText(coalesce(leadData.notas, notas));
   const consentValue = coalesce(req.body?.consent, consentimiento_canal);
 
@@ -1046,14 +750,12 @@ exports.ingestLead = asyncHandler(async (req, res) => {
 
   const leadPayload = {
     event_id: eventId,
-    clinica_id: isChatRelated ? clinicIdForChat : clinicaIdParsed,
+    clinica_id: clinicaIdParsed,
     grupo_clinica_id: grupoClinicaIdParsed,
     campana_id: campanaIdParsed,
     channel: normalizedChannel,
     source: normalizedSource,
     source_detail: source_detail || null,
-    email: leadEmail || null,
-    telefono: leadTelefono || null,
     clinic_match_source: clinicMatchSource,
     clinic_match_value: clinicMatchValue,
     utm_source: utmSource || null,
@@ -1070,6 +772,8 @@ exports.ingestLead = asyncHandler(async (req, res) => {
     user_agent: coalesce(user_agent, req.headers['user-agent']) || null,
     ip: coalesce(ip, req.headers['x-forwarded-for'], req.socket?.remoteAddress) || null,
     nombre: leadNombre || null,
+    email: leadEmail || null,
+    telefono: leadTelefono || null,
     notas: leadNotas || null,
     status_lead: normalizedStatus,
     consentimiento_canal: consentValue || null,
@@ -1083,6 +787,7 @@ exports.ingestLead = asyncHandler(async (req, res) => {
   };
 
   let lead;
+  let dedupeConflict = null;
   try {
     lead = await dedupeAndCreateLead(leadPayload, req.body || {}, {
       clinic_match_source: clinic_match_source || null,
@@ -1090,83 +795,57 @@ exports.ingestLead = asyncHandler(async (req, res) => {
     });
   } catch (err) {
     if (err.status === 409) {
-      await registerDedupeAttemptAudit({
-        existingLeadId: err.existingId,
-        reqBody: req.body || {},
-        dedupeReason: err.message,
-        eventId,
-        normalizedSource,
-        sourceDetail: source_detail || null,
-        normalizedChannel,
-        clinicId: coalesce(clinicaIdParsed, derivedClinicIdForChat),
-        groupId: grupoClinicaIdParsed,
-        pageUrl: pageUrlValue || null,
-        landingUrl: landingUrlValue || null,
-        referrer: referrerValue || null,
-        utmSource,
-        utmMedium,
-        utmCampaign,
-        utmContent,
-        utmTerm,
-        gclid: gclidValue,
-        fbclid: fbclidValue,
-        ttclid: ttclidValue,
-        externalSource,
-        externalId,
-        normalizedPhone,
-        normalizedEmail
+      dedupeConflict = err;
+      lead = err.existingId ? await LeadIntake.findByPk(err.existingId) : null;
+    } else {
+      throw err;
+    }
+  }
+
+  let formSubmissionEvent = null;
+  if (formSubmission && FormSubmissionEvent) {
+    try {
+      formSubmissionEvent = await FormSubmissionEvent.create({
+        clinic_id: lead?.clinica_id || clinicaIdParsed,
+        group_id: lead?.grupo_clinica_id || grupoClinicaIdParsed,
+        lead_intake_id: lead?.id || null,
+        page_url: formSubmission.page_url || pageUrlValue || landingUrlValue || null,
+        form_id: formSubmission.form_id || null,
+        form_name: formSubmission.form_name || null,
+        form_selector: formSubmission.form_selector || null,
+        match_domain: normalizeDomain(getHostnameFromUrl(formSubmission.page_url || pageUrlValue || '')),
+        source_detail: source_detail || 'web_form',
+        email_normalized: normalizedEmail,
+        phone_normalized: normalizedPhone,
+        fields_json: formSubmission.fields || {},
+        payload_json: formSubmission.payload || req.body || {},
+        submitted_at: formSubmission.submitted_at || new Date(),
       });
 
-      if (wantsQuickchatSummary && err.existingId) {
-        let existing = null;
-        try {
-          existing = await LeadIntake.findByPk(err.existingId, { raw: true });
-        } catch {
-          existing = null;
-        }
-
-        const clinicIdForChat = coalesce(clinicaIdParsed, derivedClinicIdForChat, existing?.clinica_id);
-        const nombreForChat = coalesce(leadNombre, existing?.nombre);
-        const telefonoForChat = coalesce(leadTelefono, existing?.telefono);
-        const emailForChat = coalesce(leadEmail, existing?.email);
-
-        const extraPairs = [];
-        const addPairs = (obj) => {
-          if (!obj || typeof obj !== 'object' || Array.isArray(obj)) return;
-          Object.entries(obj).forEach(([k, v]) => {
-            if (['nombre', 'email', 'telefono', 'notas', 'notes', 'message', 'phone', 'tel', 'name'].includes(String(k))) return;
-            extraPairs.push({ key: String(k), value: v });
-          });
-        };
-        addPairs(chatStateData);
-        addPairs(leadData);
-
-        let summaryResult = { sent: false };
-        try {
-          summaryResult = await sendQuickchatSummaryToQuickChat({
-            clinicId: clinicIdForChat,
-            leadIntakeId: err.existingId,
-            nombre: nombreForChat,
-            telefono: telefonoForChat,
-            email: emailForChat,
-            pageUrl: pageUrlValue || null,
-            landingUrl: landingUrlValue || null,
-            extraPairs
-          });
-        } catch (e) {
-          console.warn('⚠️ No se pudo enviar resumen a QuickChat:', e.message || e);
-        }
-
-        return res.status(200).json({
-          id: err.existingId,
-          deduped: true,
-          quickchat_summary_sent: !!summaryResult?.sent
-        });
-      }
-
-      return res.status(409).json({ message: err.message, id: err.existingId, reason: err.message });
+      await enqueueInboundFormSubmissionResume({
+        clinicId: lead?.clinica_id || clinicaIdParsed,
+        leadId: lead?.id || null,
+        email: normalizedEmail,
+        phone: normalizedPhone,
+        pageUrl: formSubmission.page_url || pageUrlValue || null,
+        formId: formSubmission.form_id || null,
+        formName: formSubmission.form_name || null,
+        formSelector: formSubmission.form_selector || null,
+        fields: formSubmission.fields || {},
+        submittedAt: formSubmission.submitted_at instanceof Date
+          ? formSubmission.submitted_at.toISOString()
+          : String(formSubmission.submitted_at || ''),
+        formSubmissionEventId: formSubmissionEvent.id,
+        sourceDetail: source_detail || 'web_form',
+        payload: formSubmission.payload || req.body || {},
+      });
+    } catch (formErr) {
+      console.warn('⚠️ No se pudo registrar/reanudar envío de formulario:', formErr.message || formErr);
     }
-    throw err;
+  }
+
+  if (dedupeConflict) {
+    return res.status(409).json({ message: dedupeConflict.message, id: dedupeConflict.existingId, reason: dedupeConflict.message });
   }
 
   // Permite al snippet solicitar un evento concreto (p. ej. Contact para tel_modal).
@@ -1194,7 +873,7 @@ exports.ingestLead = asyncHandler(async (req, res) => {
       eventId: lead.event_id || `lead-${lead.id}`,
       actionSource: 'website',
       eventSourceUrl: pageUrlValue || landingUrlValue || null,
-      clinicId: clinicIdForChat,
+      clinicId: clinicaIdParsed,
       source: normalizedSource,
       sourceDetail: source_detail || null,
       utmCampaign: utmCampaign || null,
@@ -1204,37 +883,6 @@ exports.ingestLead = asyncHandler(async (req, res) => {
     console.warn('⚠️ No se pudo enviar evento Meta CAPI:', e.message || e);
   }
 
-  let quickchatSummarySent = false;
-  if (wantsQuickchatSummary) {
-    const extraPairs = [];
-    const addPairs = (obj) => {
-      if (!obj || typeof obj !== 'object' || Array.isArray(obj)) return;
-      Object.entries(obj).forEach(([k, v]) => {
-        if (['nombre', 'email', 'telefono', 'notas', 'notes', 'message', 'phone', 'tel', 'name'].includes(String(k))) return;
-        extraPairs.push({ key: String(k), value: v });
-      });
-    };
-    addPairs(chatStateData);
-    addPairs(leadData);
-
-    try {
-      const summaryResult = await sendQuickchatSummaryToQuickChat({
-        clinicId: clinicIdForChat,
-        leadIntakeId: lead.id,
-        nombre: leadNombre,
-        telefono: leadTelefono,
-        email: leadEmail,
-        pageUrl: pageUrlValue || null,
-        landingUrl: landingUrlValue || null,
-        extraPairs
-      });
-      quickchatSummarySent = !!summaryResult?.sent;
-    } catch (e) {
-      console.warn('⚠️ No se pudo enviar resumen a QuickChat:', e.message || e);
-    }
-  }
-
-  let googleConversionSent = false;
   // Google Ads Enhanced Conversions (server-side) al capturar lead/contact.
   // Solo aplica cuando existe click id (gclid/gbraid/wbraid) y conversión configurada.
   try {
@@ -1262,16 +910,11 @@ exports.ingestLead = asyncHandler(async (req, res) => {
       consent: coalesce(body.consent, body.consentimiento_canal),
       eventId: lead.event_id || `lead-${lead.id}`
     });
-    googleConversionSent = true;
   } catch (adsErr) {
     console.warn('⚠️ Google Ads upload error (ingestLead):', adsErr.response?.data || adsErr.message || adsErr);
   }
 
-  res.status(201).json({
-    id: lead.id,
-    quickchat_summary_sent: quickchatSummarySent,
-    google_conversion_sent: googleConversionSent
-  });
+  res.status(201).json({ id: lead.id });
 });
 
 // ===========================
@@ -1351,10 +994,8 @@ const defaultConfigPayload = (clinicId, groupId) => ({
 });
 
 exports.getIntakeConfig = asyncHandler(async (req, res) => {
-  // Evitar respuestas cacheadas (la config puede cambiar desde el panel y el snippet debe reflejarlo al instante).
+  // La config es “source of truth” para el snippet; evitar 304/ETag y cachés agresivas.
   res.set('Cache-Control', 'no-store');
-  res.set('Pragma', 'no-cache');
-  res.set('Expires', '0');
 
   const clinicIdRaw = req.query.clinic_id;
   const groupIdRaw = req.query.group_id;
@@ -1591,7 +1232,6 @@ exports.upsertIntakeConfig = asyncHandler(async (req, res) => {
     nextHmacKey = existing?.hmac_key || null;
 
     // Auto-generación: si se está configurando una allowlist de dominios y aún no hay clave, crearla.
-    // Evita que el usuario tenga que "generar HMAC" manualmente: copia el snippet y ya está firmado.
     if (!nextHmacKey && Array.isArray(domains) && domains.length > 0) {
       nextHmacKey = crypto.randomBytes(32).toString('hex');
     }
@@ -1606,10 +1246,7 @@ exports.upsertIntakeConfig = asyncHandler(async (req, res) => {
     hmac_key: nextHmacKey
   });
 
-  res.json({
-    success: true,
-    linked_lead_id: linkedLeadId
-  });
+  res.json({ success: true });
 });
 
 // ======================================
@@ -1641,220 +1278,152 @@ exports.getIntakeConfigSecretGroup = asyncHandler(async (req, res) => {
 });
 
 // ======================================
-// Verificador de instalación del snippet (solo UI autenticada)
+// Verificación de instalación del snippet
+// (UI autenticada)
 // ======================================
 
-const isPrivateIpv4 = (ip) => {
-  const parts = String(ip).split('.').map((p) => parseInt(p, 10));
-  if (parts.length !== 4 || parts.some((n) => !Number.isFinite(n) || n < 0 || n > 255)) return true;
-  const [a, b] = parts;
-  if (a === 10) return true;
-  if (a === 127) return true;
-  if (a === 0) return true;
-  if (a === 169 && b === 254) return true;
-  if (a === 192 && b === 168) return true;
-  if (a === 172 && b >= 16 && b <= 31) return true;
-  if (a === 100 && b >= 64 && b <= 127) return true; // CGNAT
-  return false;
-};
+exports.verifySnippetInstalled = asyncHandler(async (req, res) => {
+  const domainRaw = String(req.query.domain || '').trim();
+  const clinicId = parseInteger(req.query.clinic_id);
+  const groupId = parseInteger(req.query.group_id);
+  const pageUrlRaw = String(req.query.url || req.query.page_url || '').trim();
 
-const isPrivateIpv6 = (ip) => {
-  const v = String(ip).trim().toLowerCase();
-  if (!v) return true;
-  if (v === '::1' || v === '0:0:0:0:0:0:0:1') return true; // loopback
-  if (v === '::' || v === '0:0:0:0:0:0:0:0') return true; // unspecified
-  if (v.startsWith('fe80:')) return true; // link-local
-  if (v.startsWith('fc') || v.startsWith('fd')) return true; // unique local (fc00::/7)
-  return false;
-};
-
-const isPrivateIp = (ip) => {
-  const kind = net.isIP(ip);
-  if (kind === 4) return isPrivateIpv4(ip);
-  if (kind === 6) return isPrivateIpv6(ip);
-  return true;
-};
-
-const ensureSafePublicDomain = async (domain) => {
-  const host = normalizeDomain(domain);
-  if (!host) throw new Error('Domain requerido');
-
-  // No permitir IPs directas ni localhost (evita SSRF a red interna).
-  if (net.isIP(host)) throw new Error('Domain inválido (IP no permitida)');
-  if (host === 'localhost' || host.endsWith('.local')) throw new Error('Domain inválido (host local no permitido)');
-
-  const addrs = await dns.lookup(host, { all: true, verbatim: true });
-  if (!Array.isArray(addrs) || addrs.length === 0) throw new Error('No se pudo resolver el dominio');
-  for (const a of addrs) {
-    if (a?.address && isPrivateIp(a.address)) {
-      throw new Error('El dominio resuelve a una IP privada (no permitido)');
-    }
+  if (!domainRaw) {
+    return res.status(400).json({ installed: false, details: 'Falta el parámetro domain' });
   }
-};
-
-const isHostWithinRoot = (host, root) => {
-  const h = stripWww(normalizeDomain(host));
-  const r = stripWww(normalizeDomain(root));
-  if (!h || !r) return false;
-  return h === r || h.endsWith('.' + r);
-};
-
-const fetchHtmlWithRedirects = async (startUrl, rootDomain) => {
-  let currentUrl = startUrl;
-  for (let i = 0; i < 5; i += 1) {
-    const resp = await axios.get(currentUrl, {
-      timeout: 8000,
-      maxRedirects: 0,
-      responseType: 'text',
-      headers: {
-        'User-Agent': 'ClinicaClickSnippetVerifier/1.0',
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8'
-      },
-      maxContentLength: 1024 * 1024,
-      maxBodyLength: 1024 * 1024,
-      validateStatus: (status) => status >= 200 && status < 400,
-    });
-
-    if (resp.status >= 300 && resp.status < 400 && resp.headers?.location) {
-      const next = new URL(resp.headers.location, currentUrl);
-      if (!['http:', 'https:'].includes(next.protocol)) {
-        throw new Error('Redirect no permitido');
-      }
-      if (!isHostWithinRoot(next.hostname, rootDomain)) {
-        throw new Error('Redirect a dominio no permitido');
-      }
-      currentUrl = next.toString();
-      continue;
-    }
-
-    if (resp.status >= 200 && resp.status < 300) {
-      return { final_url: currentUrl, html: String(resp.data || '') };
-    }
-
-    throw new Error(`Status inesperado: ${resp.status}`);
-  }
-  throw new Error('Demasiados redirects');
-};
-
-const findIntakeScripts = (html) => {
-  const scripts = [];
-  if (!html || typeof html !== 'string') return scripts;
-
-  const scriptTagRegex = /<script\b[^>]*\bsrc\s*=\s*(['"])([^'"]+)\1[^>]*>/gim;
-  let match;
-  while ((match = scriptTagRegex.exec(html)) !== null) {
-    const tag = match[0];
-    const src = match[2] || '';
-    if (!src.toLowerCase().includes('intake.js')) continue;
-
-    const clinicMatch = tag.match(/\bdata-clinic-id\s*=\s*(['"])([^'"]+)\1/i);
-    const groupMatch = tag.match(/\bdata-group-id\s*=\s*(['"])([^'"]+)\1/i);
-
-    scripts.push({
-      tag,
-      src,
-      data_clinic_id: clinicMatch ? clinicMatch[2] : null,
-      data_group_id: groupMatch ? groupMatch[2] : null
-    });
-  }
-  return scripts;
-};
-
-exports.verifySnippet = asyncHandler(async (req, res) => {
-  const domain = normalizeDomain(String(req.query.domain || '')) || '';
-  const clinicId = parseInteger(coalesce(req.query.clinic_id, req.query.clinicId));
-  const groupId = parseInteger(coalesce(req.query.group_id, req.query.groupId));
-
+  const domain = normalizeDomain(domainRaw);
   if (!domain) {
-    return res.status(400).json({ installed: false, details: 'domain es obligatorio' });
+    return res.status(400).json({ installed: false, details: 'Dominio inválido' });
   }
+  if (domain === 'localhost' || domain.endsWith('.local') || domain === '127.0.0.1') {
+    return res.status(400).json({ installed: false, details: 'Dominio no permitido para verificación' });
+  }
+
+  // Requerimos un scope explícito para evitar verificar config de terceros por "solo dominio".
   if (clinicId === null && groupId === null) {
-    return res.status(400).json({ installed: false, details: 'clinic_id o group_id es obligatorio' });
-  }
-  if (clinicId !== null && groupId !== null) {
-    return res.status(400).json({ installed: false, details: 'No se permite enviar clinic_id y group_id a la vez' });
+    return res.status(400).json({ installed: false, details: 'clinic_id o group_id requerido' });
   }
 
-  const record = await IntakeConfig.findOne({
-    where: groupId !== null
-      ? { group_id: groupId, assignment_scope: 'group' }
-      : { clinic_id: clinicId },
-    raw: true
-  });
-
+  let record = null;
+  if (clinicId !== null) {
+    record = await IntakeConfig.findOne({ where: { clinic_id: clinicId }, raw: true });
+  }
+  if (!record && groupId !== null) {
+    record = await IntakeConfig.findOne({ where: { group_id: groupId, assignment_scope: 'group' }, raw: true });
+  }
   if (!record) {
-    return res.status(404).json({ installed: false, details: 'No existe configuración de intake para este scope (guarda primero)' });
-  }
-  if (!Array.isArray(record.domains) || record.domains.length === 0) {
-    return res.status(400).json({ installed: false, details: 'domains está vacío. Añade el dominio y guarda antes de verificar' });
-  }
-  if (!isDomainAllowed(record.domains, domain)) {
-    return res.status(403).json({ installed: false, details: 'Domain not allowed' });
+    return res.status(404).json({ installed: false, details: 'No hay configuración de intake para este scope' });
   }
 
-  try {
-    await ensureSafePublicDomain(domain);
-  } catch (e) {
-    return res.status(400).json({ installed: false, details: e.message || 'Domain inválido' });
+  const allowlist = Array.isArray(record.domains) ? record.domains : [];
+  if (allowlist.length === 0) {
+    return res.status(400).json({ installed: false, details: 'Añade al menos un dominio en la configuración antes de verificar' });
+  }
+  if (!isDomainAllowed(allowlist, domain)) {
+    return res.status(403).json({ installed: false, details: 'Dominio no permitido para esta configuración' });
   }
 
-  const rootDomain = stripWww(domain);
-  const candidates = [`https://${domain}/`, `http://${domain}/`];
+  const scope = groupId !== null ? 'group' : 'clinic';
+  const expectedId = scope === 'group' ? (record.group_id || groupId) : (record.clinic_id || clinicId);
+  const expectedAttr = scope === 'group' ? 'data-group-id' : 'data-clinic-id';
+
+  // Construir URLs candidatas a verificar.
+  // Si el usuario pasa una URL completa, la respetamos (pero debe coincidir el host allowlisted).
+  const candidates = [];
+  if (pageUrlRaw) {
+    try {
+      const u = new URL(pageUrlRaw);
+      const host = normalizeDomain(u.hostname);
+      if (!host || !isDomainAllowed(allowlist, host)) {
+        return res.status(400).json({ installed: false, details: 'La URL no coincide con el dominio allowlisteado' });
+      }
+      candidates.push(u.toString());
+    } catch {
+      return res.status(400).json({ installed: false, details: 'URL inválida' });
+    }
+  } else {
+    const base = stripWww(domain);
+    candidates.push(`https://${base}/`);
+    if (!base.startsWith('www.')) {
+      candidates.push(`https://www.${base}/`);
+    }
+    candidates.push(`http://${base}/`);
+    if (!base.startsWith('www.')) {
+      candidates.push(`http://www.${base}/`);
+    }
+  }
+  const uniqueCandidates = Array.from(new Set(candidates));
+
+  let html = null;
+  let finalUrl = null;
   let lastError = null;
 
-  for (const url of candidates) {
+  for (const url of uniqueCandidates) {
     try {
-      const { final_url, html } = await fetchHtmlWithRedirects(url, rootDomain);
-      const scripts = findIntakeScripts(html);
-
-      const expectedClinicId = clinicId !== null ? clinicId : null;
-      const expectedGroupId = groupId !== null ? groupId : null;
-      const matched = scripts.find((s) => {
-        if (expectedGroupId !== null) return parseInteger(s.data_group_id) === expectedGroupId;
-        return parseInteger(s.data_clinic_id) === expectedClinicId;
+      const resp = await axios.get(url, {
+        timeout: 8000,
+        maxRedirects: 5,
+        maxContentLength: 2 * 1024 * 1024,
+        maxBodyLength: 2 * 1024 * 1024,
+        headers: {
+          'User-Agent': 'ClinicaClick Snippet Verifier/1.0',
+          'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8'
+        },
+        validateStatus: (s) => s >= 200 && s < 400
       });
-
-      if (matched) {
-        return res.json({
-          installed: true,
-          checked_url: final_url,
-          match: {
-            snippet_src: matched.src,
-            data_clinic_id: matched.data_clinic_id,
-            data_group_id: matched.data_group_id
-          },
-          details: 'Snippet encontrado'
-        });
+      if (typeof resp.data === 'string' && resp.data.length > 0) {
+        html = resp.data;
+        // axios no expone siempre la URL final; guardamos la candidate.
+        finalUrl = url;
+        break;
       }
-
-      if (scripts.length > 0) {
-        return res.json({
-          installed: false,
-          checked_url: final_url,
-          details: 'Se encontró intake.js pero no coincide el data-clinic-id / data-group-id',
-          found: scripts.map((s) => ({
-            snippet_src: s.src,
-            data_clinic_id: s.data_clinic_id,
-            data_group_id: s.data_group_id
-          }))
-        });
-      }
-
-      return res.json({
-        installed: false,
-        checked_url: final_url,
-        details: 'No se encontró ningún <script> con intake.js en el HTML'
-      });
     } catch (e) {
       lastError = e;
     }
   }
 
-  return res.status(502).json({
-    installed: false,
-    details: 'No se pudo acceder al dominio para verificar',
-    error: lastError?.message || 'fetch error'
-  });
+  if (!html) {
+    const code = lastError?.response?.status || null;
+    return res.status(502).json({
+      installed: false,
+      details: `No se pudo acceder a ${domain} para verificar${code ? ` (HTTP ${code})` : ''}`
+    });
+  }
+
+  const scriptTags = html.match(/<script\b[^>]*>/gi) || [];
+  const intakeTags = scriptTags.filter((t) => /intake\.js/i.test(t));
+  if (intakeTags.length === 0) {
+    return res.json({ installed: false, details: `No se encontró intake.js en ${finalUrl || domain}` });
+  }
+
+  const idRe = new RegExp(`${expectedAttr}\\s*=\\s*['"]?${expectedId}['"]?`, 'i');
+  const tagForScope = intakeTags.find((t) => idRe.test(t));
+  if (!tagForScope) {
+    // Pista útil: ¿hay intake.js pero con otro scope/id?
+    const clinicIdMatch = intakeTags.map((t) => t.match(/data-clinic-id\s*=\s*['"]?(\d+)['"]?/i)).find(Boolean);
+    const groupIdMatch = intakeTags.map((t) => t.match(/data-group-id\s*=\s*['"]?(\d+)['"]?/i)).find(Boolean);
+    const hint = clinicIdMatch?.[1]
+      ? `Se detectó data-clinic-id="${clinicIdMatch[1]}".`
+      : (groupIdMatch?.[1] ? `Se detectó data-group-id="${groupIdMatch[1]}".` : null);
+    return res.json({
+      installed: false,
+      details: `Se encontró intake.js pero no el atributo ${expectedAttr}="${expectedId}" (scope incorrecto o ID distinto).${hint ? ` ${hint}` : ''}`
+    });
+  }
+
+  // Si existe HMAC en backend, exigir data-hmac-key y que coincida.
+  if (record.hmac_key) {
+    const m = tagForScope.match(/data-hmac-key\s*=\s*['"]([^'"]+)['"]/i);
+    const installedKey = m?.[1] ? String(m[1]).trim() : null;
+    if (!installedKey) {
+      return res.json({ installed: false, details: 'Se encontró intake.js pero falta data-hmac-key en el script tag.' });
+    }
+    if (installedKey !== record.hmac_key) {
+      return res.json({ installed: false, details: 'Se encontró intake.js pero la clave HMAC no coincide con la del CRM (quizá rotaste la clave y no actualizaste la web).' });
+    }
+  }
+
+  return res.json({ installed: true });
 });
 
 // ===========================
@@ -1902,7 +1471,6 @@ exports.receiveIntakeEvent = asyncHandler(async (req, res) => {
   const body = req.body || {};
 
   const eventName = body.event_name || body.eventName || 'ViewContent';
-  const eventNameLower = String(eventName || '').toLowerCase();
   const clinicIdParsed = parseInteger(coalesce(body.clinic_id, body.clinica_id, body.clinicId));
   const groupIdParsed = parseInteger(coalesce(body.group_id, body.grupo_clinica_id, body.groupId));
 
@@ -1923,16 +1491,6 @@ exports.receiveIntakeEvent = asyncHandler(async (req, res) => {
     body.custom_data && typeof body.custom_data === 'object' && !Array.isArray(body.custom_data) ? body.custom_data : {};
   const eventDataFromBody =
     body.event_data && typeof body.event_data === 'object' && !Array.isArray(body.event_data) ? body.event_data : {};
-  const leadIdParsed = parseInteger(
-    coalesce(
-      body.lead_id,
-      body.leadId,
-      eventDataFromBody.lead_id,
-      eventDataFromBody.leadId,
-      customDataFromBody.lead_id,
-      customDataFromBody.leadId
-    )
-  );
 
   // Aceptar el payload del snippet "v2" (campos planos + event_data) y el payload "canónico" (custom_data/user_data).
   const custom_data = {
@@ -1962,24 +1520,15 @@ exports.receiveIntakeEvent = asyncHandler(async (req, res) => {
     ...userDataFromBody,
     ...leadDataFromBody
   };
-  const clickedTel = coalesce(
-    body.clicked_tel,
-    body.clickedTel,
-    eventDataFromBody.clicked_tel,
-    eventDataFromBody.clickedTel,
-    custom_data.clicked_tel,
-    custom_data.clickedTel
-  ) || null;
 
   const fbp = body.fbp || user_data.fbp;
   const fbc = body.fbc || user_data.fbc;
 
   let cfg = null;
-  // Si vienen ambos IDs (caso snippet scope grupo con sede seleccionada), validamos HMAC por grupo.
-  if (groupIdParsed !== null) {
-    cfg = await IntakeConfig.findOne({ where: { group_id: groupIdParsed, assignment_scope: 'group' }, raw: true });
-  } else if (clinicIdParsed !== null) {
+  if (clinicIdParsed !== null) {
     cfg = await IntakeConfig.findOne({ where: { clinic_id: clinicIdParsed }, raw: true });
+  } else if (groupIdParsed !== null) {
+    cfg = await IntakeConfig.findOne({ where: { group_id: groupIdParsed, assignment_scope: 'group' }, raw: true });
   } else if (domain) {
     cfg = await IntakeConfig.findOne({
       where: db.Sequelize.literal(`JSON_CONTAINS(COALESCE(domains,'[]'), '\"${domain.toLowerCase()}\"')`)
@@ -2002,102 +1551,6 @@ exports.receiveIntakeEvent = asyncHandler(async (req, res) => {
     }
     if (provided && !validateHmac(req, cfg.hmac_key, provided)) {
       return res.status(401).json({ message: 'Invalid signature' });
-    }
-  }
-
-  // Evento interno: inicio real de llamada desde tel_modal (al finalizar countdown).
-  // Debe dejar traza sobre el lead para que recepción pueda resolver si hubo contacto.
-  let linkedLeadId = null;
-  if (eventNameLower === 'callinitiated') {
-    let leadForCall = null;
-
-    if (leadIdParsed) {
-      leadForCall = await LeadIntake.findByPk(leadIdParsed);
-    }
-
-    // Fallback defensivo: si no llega lead_id, intentar vincular por phone/email + scope + ventana.
-    if (!leadForCall) {
-      const emailCandidate = normalizeEmail(coalesce(user_data.email, body.email, body.lead_data?.email));
-      const phoneCandidate = normalizePhone(coalesce(user_data.phone, user_data.telefono, body.phone, body.telefono, body.lead_data?.telefono));
-      const dedupeCutoff = new Date(Date.now() - (DEDUPE_WINDOW_HOURS * 60 * 60 * 1000));
-      const lookupWhere = {
-        created_at: { [Op.gte]: dedupeCutoff },
-        [Op.or]: []
-      };
-
-      if (phoneCandidate) lookupWhere[Op.or].push({ phone_hash: hashValue(phoneCandidate) });
-      if (emailCandidate) lookupWhere[Op.or].push({ email_hash: hashValue(emailCandidate) });
-
-      if (lookupWhere[Op.or].length > 0) {
-        if (clinicIdParsed !== null) lookupWhere.clinica_id = clinicIdParsed;
-        if (groupIdParsed !== null) lookupWhere.grupo_clinica_id = groupIdParsed;
-        leadForCall = await LeadIntake.findOne({
-          where: lookupWhere,
-          order: [['created_at', 'DESC']]
-        });
-      }
-    }
-
-    if (leadForCall) {
-      linkedLeadId = leadForCall.id;
-
-      const eventTimeRaw = coalesce(body.event_time, body.eventTime, custom_data.event_time);
-      let callAt = new Date();
-      const eventTimeNum = Number(eventTimeRaw);
-      if (Number.isFinite(eventTimeNum)) {
-        callAt = new Date(eventTimeNum > 1e12 ? eventTimeNum : eventTimeNum * 1000);
-      } else if (eventTimeRaw) {
-        const parsed = new Date(eventTimeRaw);
-        if (!Number.isNaN(parsed.getTime())) callAt = parsed;
-      }
-
-      const noteLine = `Este lead inició una llamada el ${formatMadridDateTime(callAt)}. ¿Se le contestó?`;
-
-      await leadForCall.update({
-        call_initiated: true,
-        call_initiated_at: callAt
-      });
-      await appendInternalLeadNote(leadForCall, noteLine);
-
-      await emitLeadRealtimeEvent({
-        type: 'call_initiated',
-        lead: leadForCall,
-        payload: {
-          call_initiated: true,
-          call_initiated_at: callAt.toISOString(),
-          clicked_tel: clickedTel || null,
-          page_url: eventSourceUrl || null,
-          source: custom_data.source || body.source || null,
-          source_detail: custom_data.source_detail || body.source_detail || null,
-          linked_by: leadIdParsed ? 'lead_id' : 'fallback_contact_hash'
-        }
-      });
-
-      try {
-        await LeadAttributionAudit.create({
-          lead_intake_id: leadForCall.id,
-          raw_payload: body || {},
-          attribution_steps: {
-            kind: 'call_initiated',
-            source: custom_data.source || body.source || null,
-            source_detail: custom_data.source_detail || body.source_detail || null,
-            channel: custom_data.channel || body.channel || null,
-            page_url: eventSourceUrl || null,
-            referrer: body.referrer || null,
-            clicked_tel: clickedTel || null,
-            linked_by: leadIdParsed ? 'lead_id' : 'fallback_contact_hash',
-            linked_at: new Date().toISOString()
-          }
-        });
-      } catch (auditErr) {
-        console.warn('⚠️ No se pudo registrar auditoría call_initiated:', auditErr.message || auditErr);
-      }
-    } else {
-      console.warn('⚠️ CallInitiated recibido sin lead vinculado', {
-        clinicIdParsed,
-        groupIdParsed,
-        leadIdParsed: leadIdParsed || null
-      });
     }
   }
 
@@ -2147,127 +1600,7 @@ exports.receiveIntakeEvent = asyncHandler(async (req, res) => {
     console.warn('⚠️ Google Ads upload error (events):', adsErr.response?.data || adsErr.message || adsErr);
   }
 
-  res.json({
-    success: true,
-    linked_lead_id: linkedLeadId
-  });
-});
-
-// ===========================
-// WhatsApp web origin (sin teléfono)
-// ===========================
-
-const isValidWebOriginRef = (value) => {
-  if (!value || typeof value !== 'string') return false;
-  const v = value.trim();
-  if (!v) return false;
-  // Hex (12 chars recomendado, pero aceptamos más para futuras versiones).
-  return /^[a-f0-9]{8,64}$/i.test(v);
-};
-
-exports.createWhatsAppWebOrigin = asyncHandler(async (req, res) => {
-  if (!WhatsAppWebOrigin) {
-    return res.status(501).json({ message: 'WhatsApp web origin no soportado' });
-  }
-
-  const body = req.body || {};
-  const refRaw = coalesce(body.ref, body.cc_ref, body.ccRef);
-  const ref = typeof refRaw === 'string' ? refRaw.trim().toLowerCase() : '';
-  if (!isValidWebOriginRef(ref)) {
-    return res.status(400).json({ message: 'ref inválida' });
-  }
-
-  const clinicIdParsed = parseInteger(coalesce(body.clinic_id, body.clinica_id, body.clinicId));
-  const groupIdParsed = parseInteger(coalesce(body.group_id, body.grupo_clinica_id, body.groupId));
-  if (clinicIdParsed === null && groupIdParsed === null) {
-    return res.status(400).json({ message: 'clinic_id o group_id requerido' });
-  }
-
-  const pageUrl = coalesce(body.page_url, body.pageUrl) || null;
-  const referrerValue = coalesce(body.referrer, body.referrer_url, body.referrerUrl) || null;
-  const derivedDomain = getHostnameFromUrl(pageUrl || '');
-  const domain = normalizeDomain(body.domain || derivedDomain) || '';
-
-  // Validación por dominio + HMAC (mismo criterio que /api/intake/leads y /api/intake/events)
-  let cfg = null;
-  if (groupIdParsed !== null) {
-    cfg = await IntakeConfig.findOne({ where: { group_id: groupIdParsed, assignment_scope: 'group' }, raw: true });
-  } else if (clinicIdParsed !== null) {
-    cfg = await IntakeConfig.findOne({ where: { clinic_id: clinicIdParsed }, raw: true });
-  } else if (domain) {
-    cfg = await IntakeConfig.findOne({
-      where: db.Sequelize.literal(`JSON_CONTAINS(COALESCE(domains,'[]'), '\"${domain.toLowerCase()}\"')`)
-    });
-    if (cfg) cfg = cfg.get ? cfg.get({ plain: true }) : cfg;
-  }
-
-  if (cfg && Array.isArray(cfg.domains) && cfg.domains.length > 0) {
-    if (!domain || !isDomainAllowed(cfg.domains, domain)) {
-      return res.status(403).json({ message: 'Domain not allowed' });
-    }
-  }
-
-  const providedSignature = req.headers[SIGNATURE_HEADER] || req.headers[SIGNATURE_HEADER_SHA];
-  if (cfg && cfg.hmac_key) {
-    if (!providedSignature || !validateHmac(req, cfg.hmac_key, providedSignature)) {
-      return res.status(401).json({ message: 'Firma HMAC inválida o ausente' });
-    }
-  } else if (!cfg && process.env.INTAKE_WEB_SECRET) {
-    if (!providedSignature || !validateHmac(req, process.env.INTAKE_WEB_SECRET, providedSignature)) {
-      return res.status(401).json({ message: 'Firma HMAC inválida o ausente' });
-    }
-  }
-
-  const now = new Date();
-  const ttlDays = parseInt(process.env.WHATSAPP_WEB_ORIGIN_TTL_DAYS || '7', 10);
-  const expiresAt = new Date(now.getTime() + Math.max(1, ttlDays) * 24 * 60 * 60 * 1000);
-  const eventId = (req.headers[EVENT_ID_HEADER] || body?.event_id || body?.eventId || null) || null;
-
-  const defaults = {
-    ref,
-    clinic_id: clinicIdParsed,
-    group_id: groupIdParsed,
-    domain: domain || null,
-    page_url: pageUrl,
-    referrer: referrerValue,
-    utm_source: body.utm_source || null,
-    utm_medium: body.utm_medium || null,
-    utm_campaign: body.utm_campaign || null,
-    utm_content: body.utm_content || null,
-    utm_term: body.utm_term || null,
-    gclid: body.gclid || null,
-    fbclid: body.fbclid || null,
-    ttclid: body.ttclid || null,
-    event_id: eventId,
-    expires_at: expiresAt,
-    metadata: body.metadata && typeof body.metadata === 'object' && !Array.isArray(body.metadata) ? body.metadata : null
-  };
-
-  const [record, created] = await WhatsAppWebOrigin.findOrCreate({
-    where: { ref },
-    defaults,
-  });
-
-  // En caso de reintentos, completamos campos faltantes y extendemos TTL sin pisar "used_*".
-  const updates = {};
-  if (!record.clinic_id && clinicIdParsed) updates.clinic_id = clinicIdParsed;
-  if (!record.group_id && groupIdParsed) updates.group_id = groupIdParsed;
-  if (!record.domain && domain) updates.domain = domain;
-  if (!record.page_url && pageUrl) updates.page_url = pageUrl;
-  if (!record.referrer && referrerValue) updates.referrer = referrerValue;
-  if (!record.expires_at || new Date(record.expires_at).getTime() < expiresAt.getTime()) updates.expires_at = expiresAt;
-  if (!record.event_id && eventId) updates.event_id = eventId;
-  if (Object.keys(updates).length > 0) {
-    await record.update(updates);
-  }
-
-  return res.json({
-    success: true,
-    ref: record.ref,
-    id: record.id,
-    created,
-    expires_at: record.expires_at,
-  });
+  res.json({ success: true });
 });
 
 exports.verifyMetaWebhook = asyncHandler(async (req, res) => {
@@ -2416,42 +1749,10 @@ exports.listLeads = asyncHandler(async (req, res) => {
   const groupIdParsed = groupIdRaw === 'all' ? null : parseInteger(groupIdRaw);
   const campanaIdParsed = parseInteger(campanaId || req.query.campana_id);
 
-  const clinicFilter =
-    clinicIdsParsed !== null
-      ? (clinicIdsParsed.length === 1 ? { clinica_id: clinicIdsParsed[0] } : { clinica_id: { [Op.in]: clinicIdsParsed } })
-      : null;
-
-  let effectiveGroupId = groupIdParsed;
-  // Caso típico del selector global: clinicId viene como CSV (grupo), pero el front no conoce el groupId.
-  // Para mostrar también leads "a nivel grupo" (clinica_id NULL + grupo_clinica_id=X), derivamos el grupo
-  // a partir de la primera clínica.
-  if (!effectiveGroupId && Array.isArray(clinicIdsParsed) && clinicIdsParsed.length > 1) {
-    try {
-      const firstClinicId = clinicIdsParsed[0];
-      const clinicRow = await Clinica.findOne({
-        where: { id_clinica: firstClinicId },
-        attributes: ['grupoClinicaId'],
-        raw: true
-      });
-      effectiveGroupId = parseInteger(clinicRow?.grupoClinicaId) || null;
-    } catch {
-      effectiveGroupId = null;
-    }
+  if (clinicIdsParsed !== null) {
+    where.clinica_id = clinicIdsParsed.length === 1 ? clinicIdsParsed[0] : { [Op.in]: clinicIdsParsed };
   }
-
-  const groupFilter = effectiveGroupId ? { grupo_clinica_id: effectiveGroupId } : null;
-
-  // Si hay un CSV de clínicas + grupo resuelto => queremos UNION (OR):
-  // - leads de esas clínicas
-  // - leads guardados a nivel grupo (clinica_id NULL)
-  const hasMultiClinicCsv = Array.isArray(clinicIdsParsed) && clinicIdsParsed.length > 1;
-  let scopeOrFilter = null;
-  if (groupFilter && clinicFilter && hasMultiClinicCsv) {
-    scopeOrFilter = [groupFilter, clinicFilter];
-  } else {
-    if (clinicFilter) Object.assign(where, clinicFilter);
-    if (groupFilter) Object.assign(where, groupFilter);
-  }
+  if (groupIdParsed !== null) where.grupo_clinica_id = groupIdParsed;
   if (campanaIdParsed !== null) where.campana_id = campanaIdParsed;
   if (channel && CHANNELS.has(channel)) where.channel = channel;
   if (source && SOURCES.has(source)) where.source = source;
@@ -2465,21 +1766,11 @@ exports.listLeads = asyncHandler(async (req, res) => {
 
   if (search) {
     const term = `%${search}%`;
-    const searchOr = [
+    where[Op.or] = [
       { nombre: { [Op.like]: term } },
       { email: { [Op.like]: term } },
       { telefono: { [Op.like]: term } }
     ];
-    if (scopeOrFilter) {
-      where[Op.and] = [
-        { [Op.or]: scopeOrFilter },
-        { [Op.or]: searchOr }
-      ];
-    } else {
-      where[Op.or] = searchOr;
-    }
-  } else if (scopeOrFilter) {
-    where[Op.or] = scopeOrFilter;
   }
 
   const pageSizeParsed = Math.max(parseInteger(pageSize) || Math.min(Math.max(Number(limit) || 50, 1), 200), 1);
@@ -2508,98 +1799,6 @@ exports.listLeads = asyncHandler(async (req, res) => {
     offset: parsedOffset
   });
 
-  const leadRows = Array.isArray(leads.rows) ? leads.rows : [];
-  const leadIds = leadRows
-    .map((row) => parseInteger(row?.id))
-    .filter((id) => id !== null);
-
-  const dedupeInfoByLeadId = new Map();
-  const dedupeCountByLeadId = new Map();
-
-  if (leadIds.length > 0) {
-    const audits = await LeadAttributionAudit.findAll({
-      where: { lead_intake_id: { [Op.in]: leadIds } },
-      attributes: ['id', 'lead_intake_id', 'created_at', 'attribution_steps'],
-      order: [['created_at', 'DESC']],
-      raw: true
-    });
-
-    audits.forEach((audit) => {
-      const leadId = parseInteger(audit?.lead_intake_id);
-      if (!leadId) return;
-
-      const steps = audit?.attribution_steps && typeof audit.attribution_steps === 'object'
-        ? audit.attribution_steps
-        : {};
-      const kind = String(steps.kind || '').toLowerCase();
-      if (kind !== 'dedupe_attempt') return;
-
-      const currentCount = dedupeCountByLeadId.get(leadId) || 0;
-      dedupeCountByLeadId.set(leadId, currentCount + 1);
-
-      if (!dedupeInfoByLeadId.has(leadId)) {
-        dedupeInfoByLeadId.set(leadId, {
-          at: audit.created_at || null,
-          reason: steps.dedupe_reason || null,
-          source: steps.source || null,
-          source_detail: steps.source_detail || null,
-          channel: steps.channel || null,
-          page_url: steps.page_url || null,
-          landing_url: steps.landing_url || null
-        });
-      }
-    });
-  }
-
-  const mappedItems = leadRows.map((row) => {
-    const item = row?.toJSON ? row.toJSON() : { ...(row || {}) };
-    const leadId = parseInteger(item.id);
-    const lastDedupe = leadId ? (dedupeInfoByLeadId.get(leadId) || null) : null;
-    const dedupeCount = leadId ? (dedupeCountByLeadId.get(leadId) || 0) : 0;
-
-    item.source_trace = {
-      source: item.source || null,
-      source_detail: item.source_detail || null,
-      channel: item.channel || null,
-      page_url: item.page_url || null,
-      landing_url: item.landing_url || null,
-      referrer: item.referrer || null,
-      utm: {
-        source: item.utm_source || null,
-        medium: item.utm_medium || null,
-        campaign: item.utm_campaign || null,
-        content: item.utm_content || null,
-        term: item.utm_term || null
-      },
-      click_ids: {
-        gclid: item.gclid || null,
-        fbclid: item.fbclid || null,
-        ttclid: item.ttclid || null
-      },
-      dedupe: {
-        count: dedupeCount,
-        last: lastDedupe
-      }
-    };
-    item.dedupe_count = dedupeCount;
-    item.last_dedupe = lastDedupe;
-    item.call_initiated = !!item.call_initiated;
-    item.call_initiated_at = item.call_initiated_at || null;
-    item.call_outcome = item.call_outcome || null;
-    item.call_outcome_at = item.call_outcome_at || null;
-    item.call_outcome_notes = item.call_outcome_notes || null;
-    item.call_outcome_appointment_id = parseInteger(item.call_outcome_appointment_id);
-
-    if (item.call_initiated && !item.call_outcome) {
-      item.call_status = 'nos_llamo';
-    } else if (item.call_outcome) {
-      item.call_status = item.call_outcome;
-    } else {
-      item.call_status = null;
-    }
-    return item;
-  });
-
   const pageNumber = pageParsed > 0 ? pageParsed : Math.floor(parsedOffset / parsedLimit) + 1;
   const totalPages = parsedLimit > 0 ? Math.ceil(leads.count / parsedLimit) : 0;
 
@@ -2610,138 +1809,229 @@ exports.listLeads = asyncHandler(async (req, res) => {
     page: pageNumber,
     pageSize: parsedLimit,
     totalPages,
-    items: mappedItems
+    items: leads.rows
   });
 });
 
 exports.getLeadById = asyncHandler(async (req, res) => {
   const leadId = parseInteger(req.params.id);
   if (!leadId) {
-    return res.status(400).json({ message: 'ID de lead inválido' });
+    return res.status(400).json({ message: 'Lead inválido' });
   }
 
   const lead = await LeadIntake.findByPk(leadId, {
     include: [
       { model: Clinica, as: 'clinica', attributes: ['id_clinica', 'nombre_clinica'] },
-      { model: GrupoClinica, as: 'grupoClinica', attributes: ['id_grupo', 'nombre_grupo'] }
-    ]
+      { model: GrupoClinica, as: 'grupoClinica', attributes: ['id_grupo', 'nombre_grupo'] },
+      { model: Campana, as: 'campana', attributes: ['id', 'nombre', 'campaign_id'], required: false },
+      {
+        model: FormSubmissionEvent,
+        as: 'formSubmissionEvents',
+        separate: true,
+        order: [['submitted_at', 'DESC']],
+        limit: 10,
+      },
+    ],
   });
 
   if (!lead) {
     return res.status(404).json({ message: 'Lead no encontrado' });
   }
 
-  const item = lead.toJSON ? lead.toJSON() : { ...(lead || {}) };
-  item.call_initiated = !!item.call_initiated;
-  item.call_initiated_at = item.call_initiated_at || null;
-  item.call_outcome = item.call_outcome || null;
-  item.call_outcome_at = item.call_outcome_at || null;
-  item.call_outcome_notes = item.call_outcome_notes || null;
-  item.call_outcome_appointment_id = parseInteger(item.call_outcome_appointment_id);
-  item.clinica_nombre = item.clinica?.nombre_clinica || item.nombre_clinica || null;
+  const out = lead.toJSON();
+  const latestFormSubmission = Array.isArray(out.formSubmissionEvents) && out.formSubmissionEvents.length
+    ? out.formSubmissionEvents[0]
+    : null;
+  const fallbackLeadData = latestFormSubmission?.payload_json?.lead_data && typeof latestFormSubmission.payload_json.lead_data === 'object'
+    ? latestFormSubmission.payload_json.lead_data
+    : {};
 
-  // Resumen de deduplicación para tooltip/UI.
-  const dedupeAudits = await LeadAttributionAudit.findAll({
-    where: { lead_intake_id: leadId },
-    attributes: ['created_at', 'attribution_steps'],
-    order: [['created_at', 'DESC']],
-    raw: true
-  });
+  if (!out.nombre && fallbackLeadData.nombre) out.nombre = fallbackLeadData.nombre;
+  if (!out.email && fallbackLeadData.email) out.email = normalizeEmail(fallbackLeadData.email) || fallbackLeadData.email;
+  if (!out.telefono && fallbackLeadData.telefono) out.telefono = normalizePhone(fallbackLeadData.telefono) || fallbackLeadData.telefono;
 
-  let dedupeCount = 0;
-  let lastDedupe = null;
-  for (const audit of dedupeAudits) {
-    const steps = audit?.attribution_steps && typeof audit.attribution_steps === 'object'
-      ? audit.attribution_steps
-      : {};
-    const kind = String(steps.kind || '').toLowerCase();
-    if (kind !== 'dedupe_attempt') continue;
-    dedupeCount += 1;
-    if (!lastDedupe) {
-      lastDedupe = {
-        at: audit.created_at || null,
-        reason: steps.dedupe_reason || null,
-        source: steps.source || null,
-        source_detail: steps.source_detail || null,
-        channel: steps.channel || null,
-        page_url: steps.page_url || null,
-        landing_url: steps.landing_url || null
-      };
-    }
+  if (Conversation) {
+    const conversation = await Conversation.findOne({
+      where: { lead_id: leadId },
+      order: [['last_message_at', 'DESC']],
+      raw: true,
+    });
+    out.conversation_id = conversation?.id || null;
   }
 
-  item.dedupe_count = dedupeCount;
-  item.last_dedupe = lastDedupe;
-  item.source_trace = {
-    source: item.source || null,
-    source_detail: item.source_detail || null,
-    channel: item.channel || null,
-    page_url: item.page_url || null,
-    landing_url: item.landing_url || null,
-    referrer: item.referrer || null,
-    utm: {
-      source: item.utm_source || null,
-      medium: item.utm_medium || null,
-      campaign: item.utm_campaign || null,
-      content: item.utm_content || null,
-      term: item.utm_term || null
-    },
-    click_ids: {
-      gclid: item.gclid || null,
-      fbclid: item.fbclid || null,
-      ttclid: item.ttclid || null
-    },
-    dedupe: {
-      count: dedupeCount,
-      last: lastDedupe
-    }
-  };
-
-  return res.status(200).json(item);
+  res.status(200).json(out);
 });
 
-exports.getLeadAudits = asyncHandler(async (req, res) => {
+exports.getLeadActivity = asyncHandler(async (req, res) => {
   const leadId = parseInteger(req.params.id);
   if (!leadId) {
-    return res.status(400).json({ message: 'ID de lead inválido' });
+    return res.status(400).json({ message: 'Lead inválido' });
   }
 
-  const limitParsed = Math.max(1, Math.min(parseInteger(req.query.limit) || 50, 500));
-  const audits = await LeadAttributionAudit.findAll({
-    where: { lead_intake_id: leadId },
-    attributes: ['id', 'lead_intake_id', 'raw_payload', 'attribution_steps', 'created_at'],
-    order: [['created_at', 'DESC']],
-    limit: limitParsed,
-    raw: true
-  });
-
-  const items = audits.map((audit) => {
-    const steps = audit?.attribution_steps && typeof audit.attribution_steps === 'object'
-      ? audit.attribution_steps
-      : {};
-    return {
-      id: audit.id,
-      lead_intake_id: audit.lead_intake_id,
-      created_at: audit.created_at,
-      kind: steps.kind || null,
-      summary: {
-        reason: steps.dedupe_reason || null,
-        source: steps.source || null,
-        source_detail: steps.source_detail || null,
-        channel: steps.channel || null,
-        page_url: steps.page_url || null,
-        landing_url: steps.landing_url || null
+  const lead = await LeadIntake.findByPk(leadId, {
+    include: [
+      {
+        model: FormSubmissionEvent,
+        as: 'formSubmissionEvents',
+        separate: true,
+        order: [['submitted_at', 'DESC']],
+        limit: 20,
       },
-      attribution_steps: audit.attribution_steps || null,
-      raw_payload: audit.raw_payload || null
-    };
+    ],
   });
 
-  res.status(200).json({
-    lead_id: leadId,
-    total: items.length,
-    items
+  if (!lead) {
+    return res.status(404).json({ message: 'Lead no encontrado' });
+  }
+
+  const conversations = await Conversation.findAll({
+    where: { lead_id: leadId },
+    attributes: ['id', 'channel'],
+    raw: true,
   });
+  const conversationIds = conversations.map((row) => Number(row.id)).filter((id) => Number.isFinite(id) && id > 0);
+
+  const messages = conversationIds.length
+    ? await Message.findAll({
+        where: { conversation_id: { [Op.in]: conversationIds } },
+        attributes: [
+          'id',
+          'conversation_id',
+          'sender_id',
+          'direction',
+          'content',
+          'message_type',
+          'status',
+          'metadata',
+          'sent_at',
+          'createdAt',
+        ],
+        order: [['createdAt', 'DESC']],
+        raw: true,
+        limit: 100,
+      })
+    : [];
+
+  const actorIds = Array.from(new Set(
+    messages
+      .map((message) => Number(message.sender_id))
+      .filter((id) => Number.isFinite(id) && id > 0)
+  ));
+
+  const usuarios = actorIds.length
+    ? await Usuario.findAll({
+        where: { id_usuario: { [Op.in]: actorIds } },
+        attributes: ['id_usuario', 'nombre', 'apellidos', 'email_usuario'],
+        raw: true,
+      })
+    : [];
+  const usuariosById = new Map(usuarios.map((usuario) => [Number(usuario.id_usuario), usuario]));
+
+  const items = [];
+
+  for (const event of lead.formSubmissionEvents || []) {
+    const detailParts = [];
+    if (event.form_name) detailParts.push(event.form_name);
+    if (event.page_url) detailParts.push(event.page_url);
+    items.push({
+      id: `lead-form-${event.id}`,
+      leadId: String(leadId),
+      fecha: event.submitted_at || event.created_at || lead.created_at,
+      tipo: 'lead_form_submitted',
+      titulo: 'Formulario enviado',
+      descripcion: detailParts.join(' · ') || 'Envío de formulario web',
+      icono: 'heroicons_outline:document-text',
+      color: 'info',
+      detalles: {
+        form_id: event.form_id || null,
+        form_name: event.form_name || null,
+        page_url: event.page_url || null,
+      },
+    });
+  }
+
+  for (const contacto of Array.isArray(lead.historial_contactos) ? lead.historial_contactos : []) {
+    items.push({
+      id: `lead-contact-${leadId}-${contacto.fecha}`,
+      leadId: String(leadId),
+      fecha: contacto.fecha || lead.updated_at || lead.created_at,
+      tipo: 'lead_contact_attempt',
+      titulo: 'Contacto registrado',
+      descripcion: contacto.notas || contacto.motivo || 'Intento de contacto',
+      icono: 'heroicons_outline:phone',
+      color: 'warning',
+      usuarioId: contacto.usuario_id ? String(contacto.usuario_id) : null,
+      detalles: {
+        motivo: contacto.motivo || null,
+      },
+    });
+  }
+
+  items.push({
+    id: `lead-created-${leadId}`,
+    leadId: String(leadId),
+    fecha: lead.created_at,
+    tipo: 'lead_created',
+    titulo: 'Lead creado',
+    descripcion: cleanString(lead.source_detail) || cleanString(lead.source) || cleanString(lead.channel) || 'Nuevo lead',
+    icono: 'heroicons_outline:user-plus',
+    color: 'success',
+  });
+
+  for (const message of messages) {
+    const actor = usuariosById.get(Number(message.sender_id));
+    const createdAt = message.sent_at || message.createdAt || lead.updated_at || lead.created_at;
+    const text = cleanString(message.content) || '—';
+    const isFailed = String(message.status || '').toLowerCase() === 'failed';
+    const metadata = message.metadata && typeof message.metadata === 'object' ? message.metadata : {};
+    const waError = Array.isArray(metadata.wa_error) && metadata.wa_error.length
+      ? cleanString(metadata.wa_error[0]?.message) || cleanString(metadata.wa_error[0]?.title)
+      : null;
+
+    if (message.direction === 'outbound') {
+      const isTemplate = message.message_type === 'template';
+      items.push({
+        id: `lead-message-${message.id}`,
+        leadId: String(leadId),
+        fecha: createdAt,
+        tipo: isTemplate ? 'lead_whatsapp_template_sent' : 'lead_whatsapp_message_sent',
+        titulo: isTemplate ? 'Plantilla de WhatsApp enviada' : 'Mensaje de WhatsApp enviado',
+        descripcion: isFailed && waError ? `${text} · ${waError}` : text,
+        icono: isTemplate ? 'heroicons_outline:document-text' : 'heroicons_outline:chat-bubble-left-right',
+        color: isFailed ? 'warning' : 'info',
+        usuarioId: actor ? String(actor.id_usuario) : null,
+        usuarioNombre: buildActorLabel(actor),
+        detalles: {
+          status: message.status || null,
+          message_type: message.message_type || null,
+          conversation_id: message.conversation_id || null,
+        },
+      });
+      continue;
+    }
+
+    items.push({
+      id: `lead-message-${message.id}`,
+      leadId: String(leadId),
+      fecha: createdAt,
+      tipo: 'lead_whatsapp_reply',
+      titulo: 'Respuesta recibida por WhatsApp',
+      descripcion: text,
+      icono: 'heroicons_outline:chat-bubble-left-right',
+      color: 'info',
+      usuarioId: null,
+      usuarioNombre: cleanString(lead.nombre) || 'Lead',
+      detalles: {
+        status: message.status || null,
+        message_type: message.message_type || null,
+        conversation_id: message.conversation_id || null,
+      },
+    });
+  }
+
+  return res.status(200).json(
+    items.sort((a, b) => new Date(b.fecha).getTime() - new Date(a.fecha).getTime())
+  );
 });
 
 exports.getLeadStats = asyncHandler(async (req, res) => {
@@ -2763,35 +2053,10 @@ exports.getLeadStats = asyncHandler(async (req, res) => {
   const groupIdParsed = groupIdRaw === 'all' ? null : parseInteger(groupIdRaw);
   const campanaIdParsed = parseInteger(campanaId || req.query.campana_id);
 
-  const clinicFilter =
-    clinicIdsParsed !== null
-      ? (clinicIdsParsed.length === 1 ? { clinica_id: clinicIdsParsed[0] } : { clinica_id: { [Op.in]: clinicIdsParsed } })
-      : null;
-
-  let effectiveGroupId = groupIdParsed;
-  if (!effectiveGroupId && Array.isArray(clinicIdsParsed) && clinicIdsParsed.length > 1) {
-    try {
-      const firstClinicId = clinicIdsParsed[0];
-      const clinicRow = await Clinica.findOne({
-        where: { id_clinica: firstClinicId },
-        attributes: ['grupoClinicaId'],
-        raw: true
-      });
-      effectiveGroupId = parseInteger(clinicRow?.grupoClinicaId) || null;
-    } catch {
-      effectiveGroupId = null;
-    }
+  if (clinicIdsParsed !== null) {
+    where.clinica_id = clinicIdsParsed.length === 1 ? clinicIdsParsed[0] : { [Op.in]: clinicIdsParsed };
   }
-
-  const groupFilter = effectiveGroupId ? { grupo_clinica_id: effectiveGroupId } : null;
-  const hasMultiClinicCsv = Array.isArray(clinicIdsParsed) && clinicIdsParsed.length > 1;
-  let scopeOrFilter = null;
-  if (groupFilter && clinicFilter && hasMultiClinicCsv) {
-    scopeOrFilter = [groupFilter, clinicFilter];
-  } else {
-    if (clinicFilter) Object.assign(where, clinicFilter);
-    if (groupFilter) Object.assign(where, groupFilter);
-  }
+  if (groupIdParsed !== null) where.grupo_clinica_id = groupIdParsed;
   if (campanaIdParsed !== null) where.campana_id = campanaIdParsed;
   if (channel && CHANNELS.has(channel)) where.channel = channel;
   if (source && SOURCES.has(source)) where.source = source;
@@ -2804,21 +2069,11 @@ exports.getLeadStats = asyncHandler(async (req, res) => {
 
   if (search) {
     const term = `%${search}%`;
-    const searchOr = [
+    where[Op.or] = [
       { nombre: { [Op.like]: term } },
       { email: { [Op.like]: term } },
       { telefono: { [Op.like]: term } }
     ];
-    if (scopeOrFilter) {
-      where[Op.and] = [
-        { [Op.or]: scopeOrFilter },
-        { [Op.or]: searchOr }
-      ];
-    } else {
-      where[Op.or] = searchOr;
-    }
-  } else if (scopeOrFilter) {
-    where[Op.or] = scopeOrFilter;
   }
 
   // Obtener conteos por estado
@@ -2884,218 +2139,6 @@ exports.updateLeadStatus = asyncHandler(async (req, res) => {
   }
 
   res.status(200).json(lead);
-});
-
-exports.updateLeadCallOutcome = asyncHandler(async (req, res) => {
-  const leadId = parseInteger(req.params.id);
-  if (!leadId) {
-    return res.status(400).json({ message: 'ID de lead inválido' });
-  }
-
-  const lead = await LeadIntake.findByPk(leadId);
-  if (!lead) {
-    return res.status(404).json({ message: 'Lead no encontrado' });
-  }
-
-  const outcomeRaw = String(coalesce(req.body?.outcome, req.body?.call_outcome, '') || '').trim().toLowerCase();
-  if (!CALL_OUTCOMES.has(outcomeRaw)) {
-    return res.status(400).json({ message: 'outcome inválido. Usa: citado | informacion | no_contactado' });
-  }
-
-  const notes = sanitizeText(String(coalesce(req.body?.notes, req.body?.notas, '') || '').trim()) || null;
-  const appointmentId = parseInteger(coalesce(req.body?.appointment_id, req.body?.appointmentId));
-
-  let linkedAppointment = null;
-  if (outcomeRaw === 'citado' && appointmentId !== null) {
-    const cita = await CitaPaciente.findByPk(appointmentId);
-    if (!cita) {
-      return res.status(404).json({ message: 'appointment_id no encontrado' });
-    }
-    if (lead.clinica_id && cita.clinica_id && Number(cita.clinica_id) !== Number(lead.clinica_id)) {
-      return res.status(400).json({ message: 'La cita no pertenece a la misma clínica del lead' });
-    }
-    await cita.update({ lead_intake_id: lead.id });
-    linkedAppointment = cita;
-  }
-
-  const now = new Date();
-  const noteParts = [
-    `Resolución de llamada (${formatMadridDateTime(now)}): ${outcomeRaw}`
-  ];
-  if (notes) noteParts.push(`Notas: ${notes}`);
-  if (appointmentId !== null) noteParts.push(`Cita vinculada: #${appointmentId}`);
-  await appendInternalLeadNote(lead, noteParts.join(' | '));
-
-  const updatePayload = {
-    call_outcome: outcomeRaw,
-    call_outcome_at: now,
-    call_outcome_notes: notes,
-    call_outcome_appointment_id: appointmentId
-  };
-  if (outcomeRaw === 'citado') {
-    updatePayload.status_lead = 'citado';
-  }
-  await lead.update(updatePayload);
-
-  await emitLeadRealtimeEvent({
-    type: 'call_outcome',
-    lead,
-    payload: {
-      call_initiated: !!lead.call_initiated,
-      call_initiated_at: lead.call_initiated_at ? new Date(lead.call_initiated_at).toISOString() : null,
-      call_outcome: outcomeRaw,
-      call_outcome_at: now.toISOString(),
-      call_outcome_notes: notes,
-      call_outcome_appointment_id: appointmentId
-    }
-  });
-
-  try {
-    await LeadAttributionAudit.create({
-      lead_intake_id: lead.id,
-      raw_payload: req.body || {},
-      attribution_steps: {
-        kind: 'call_outcome',
-        outcome: outcomeRaw,
-        appointment_id: appointmentId,
-        notes: notes || null,
-        userId: req.userData?.userId || null
-      }
-    });
-  } catch (auditErr) {
-    console.warn('⚠️ No se pudo registrar auditoría de call_outcome:', auditErr.message || auditErr);
-  }
-
-  const refreshed = await LeadIntake.findByPk(lead.id);
-  return res.status(200).json({
-    success: true,
-    lead: refreshed,
-    linked_appointment: linkedAppointment
-      ? {
-          id_cita: linkedAppointment.id_cita,
-          inicio: linkedAppointment.inicio,
-          estado: linkedAppointment.estado,
-          clinica_id: linkedAppointment.clinica_id
-        }
-      : null
-  });
-});
-
-exports.getLeadCandidateAppointments = asyncHandler(async (req, res) => {
-  const leadId = parseInteger(req.params.id);
-  if (!leadId) {
-    return res.status(400).json({ message: 'ID de lead inválido' });
-  }
-
-  const lead = await LeadIntake.findByPk(leadId);
-  if (!lead) {
-    return res.status(404).json({ message: 'Lead no encontrado' });
-  }
-
-  const hoursRaw = parseInteger(req.query.hours);
-  const hours = Math.max(1, Math.min(hoursRaw || 24, 24 * 14));
-  const now = new Date();
-  const from = new Date(now.getTime() - (hours * 60 * 60 * 1000));
-  const to = new Date(now.getTime() + (hours * 60 * 60 * 1000));
-
-  let clinicIds = [];
-  if (lead.clinica_id) {
-    clinicIds = [Number(lead.clinica_id)];
-  } else if (lead.grupo_clinica_id) {
-    const clinics = await Clinica.findAll({
-      where: { grupoClinicaId: lead.grupo_clinica_id },
-      attributes: ['id_clinica'],
-      raw: true
-    });
-    clinicIds = clinics.map((c) => Number(c.id_clinica)).filter(Number.isFinite);
-  }
-
-  if (!clinicIds.length) {
-    return res.status(200).json({
-      success: true,
-      lead_id: lead.id,
-      window_hours: hours,
-      total: 0,
-      items: []
-    });
-  }
-
-  const citas = await CitaPaciente.findAll({
-    where: {
-      clinica_id: { [Op.in]: clinicIds },
-      inicio: { [Op.between]: [from, to] }
-    },
-    include: [
-      { model: Paciente, as: 'paciente', attributes: ['id_paciente', 'nombre', 'apellidos', 'telefono_movil', 'email'], required: false },
-      { model: Clinica, as: 'clinica', attributes: ['id_clinica', 'nombre_clinica'], required: false }
-    ],
-    order: [['inicio', 'DESC']],
-    limit: 120
-  });
-
-  const leadPhoneDigits = normalizePhone(lead.telefono);
-  const leadEmail = normalizeEmail(lead.email);
-  const leadName = sanitizeText(`${lead.nombre || ''}`.toLowerCase()).trim();
-
-  const items = citas.map((row) => {
-    const cita = row?.toJSON ? row.toJSON() : row;
-    const paciente = cita?.paciente || {};
-    const pacientePhone = normalizePhone(paciente.telefono_movil);
-    const pacienteEmail = normalizeEmail(paciente.email);
-    const pacienteName = sanitizeText(`${paciente.nombre || ''} ${paciente.apellidos || ''}`.toLowerCase()).trim();
-
-    let score = 0;
-    const reasons = [];
-    if (leadPhoneDigits && pacientePhone && leadPhoneDigits === pacientePhone) {
-      score += 4;
-      reasons.push('telefono');
-    }
-    if (leadEmail && pacienteEmail && leadEmail === pacienteEmail) {
-      score += 3;
-      reasons.push('email');
-    }
-    if (leadName && pacienteName && (pacienteName.includes(leadName) || leadName.includes(pacienteName))) {
-      score += 1;
-      reasons.push('nombre');
-    }
-
-    return {
-      id_cita: cita.id_cita,
-      clinica_id: cita.clinica_id,
-      clinic_name: cita.clinica?.nombre_clinica || null,
-      inicio: cita.inicio,
-      fin: cita.fin,
-      estado: cita.estado,
-      tipo_cita: cita.tipo_cita,
-      titulo: cita.titulo || null,
-      lead_intake_id: cita.lead_intake_id || null,
-      linked_to_this_lead: Number(cita.lead_intake_id) === Number(lead.id),
-      paciente: paciente && paciente.id_paciente
-        ? {
-            id_paciente: paciente.id_paciente,
-            nombre: paciente.nombre || null,
-            apellidos: paciente.apellidos || null,
-            telefono_movil: paciente.telefono_movil || null,
-            email: paciente.email || null
-          }
-        : null,
-      match_score: score,
-      match_reasons: reasons
-    };
-  });
-
-  items.sort((a, b) => {
-    if (b.match_score !== a.match_score) return b.match_score - a.match_score;
-    return new Date(b.inicio).getTime() - new Date(a.inicio).getTime();
-  });
-
-  return res.status(200).json({
-    success: true,
-    lead_id: lead.id,
-    window_hours: hours,
-    total: items.length,
-    items: items.slice(0, 50)
-  });
 });
 
 exports.registrarContacto = asyncHandler(async (req, res) => {

@@ -17,20 +17,24 @@ router.put('/catalog/:id/toggle', automationCatalogController.toggleCatalog);
 // Motor de flujos v2 (draft/publish/versiones/ejecuciones)
 router.get('/v2/meta', automationsV2Controller.getFlowMeta);
 router.get('/v2/node-types', automationsV2Controller.getNodeTypesCatalog);
+router.get('/v2/search-entities', automationsV2Controller.searchEntities);
+router.get('/v2/assignees', automationsV2Controller.getAssigneesCatalog);
+router.get('/v2/forms/recent', automationsV2Controller.getRecentFormMatches);
 router.post('/v2/validate', automationsV2Controller.validateTemplateGraph);
 router.get('/v2/templates', automationsV2Controller.listTemplates);
 router.post('/v2/templates', automationsV2Controller.createTemplateDraft);
+router.delete('/v2/templates/:template_key', automationsV2Controller.deleteTemplate);
 router.get('/v2/templates/:template_key', automationsV2Controller.getTemplateLatestPublished);
 router.get('/v2/templates/:template_key/versions', automationsV2Controller.listTemplateVersions);
 router.get('/v2/templates/:template_key/versions/:version', automationsV2Controller.getTemplateVersion);
 router.put('/v2/templates/:template_key/versions/:version', automationsV2Controller.updateTemplateDraft);
-router.delete('/v2/templates/:template_key', automationsV2Controller.deleteTemplate);
 router.post('/v2/templates/:template_key/versions/:version/publish', automationsV2Controller.publishTemplateVersion);
 router.post('/v2/templates/:template_key/versions/:version/execute', automationsV2Controller.executeTemplateVersion);
 router.get('/v2/executions', automationsV2Controller.listExecutions);
 router.get('/v2/executions/:id', automationsV2Controller.getExecution);
 router.get('/v2/executions/:id/logs', automationsV2Controller.getExecutionLogs);
 router.post('/v2/executions/:id/resume', automationsV2Controller.resumeExecution);
+router.get('/v2/messages/:message_id/status', automationsV2Controller.getMessageDeliveryStatus);
 
 // Activación con validación de canales
 router.post('/:id/activate', automationsController.activateAutomation);

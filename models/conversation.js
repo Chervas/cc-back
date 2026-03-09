@@ -7,7 +7,7 @@ module.exports = (sequelize, DataTypes) => {
       Conversation.hasMany(models.Message, { foreignKey: 'conversation_id', as: 'messages' });
       Conversation.belongsTo(models.Clinica, { foreignKey: 'clinic_id', as: 'clinica' });
       Conversation.belongsTo(models.Paciente, { foreignKey: 'patient_id', as: 'paciente' });
-      Conversation.belongsTo(models.Lead, { foreignKey: 'lead_id', as: 'lead' });
+      Conversation.belongsTo(models.LeadIntake, { foreignKey: 'lead_id', as: 'lead' });
     }
   }
 
@@ -52,7 +52,7 @@ module.exports = (sequelize, DataTypes) => {
         type: DataTypes.INTEGER,
         allowNull: true,
         references: {
-          model: 'Leads',
+          model: 'LeadIntakes',
           key: 'id',
         },
         onUpdate: 'SET NULL',

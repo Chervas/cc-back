@@ -14,6 +14,168 @@ const DoctorClinica = db.DoctorClinica;
 const DoctorHorario = db.DoctorHorario;
 const DoctorBloqueo = db.DoctorBloqueo;
 const Tratamiento = db.Tratamiento;
+const AppointmentFlowInstance = db.AppointmentFlowInstance;
+const FlowExecutionV2 = db.FlowExecutionV2;
+const AutomationFlowTemplateV2 = db.AutomationFlowTemplateV2;
+const appointmentFlowRuntime = require('../services/appointmentFlowRuntime.service');
+const appointmentAutomationV2Runtime = require('../services/appointmentAutomationV2Runtime.service');
+const { CITA_STATUS_VALUES } = require('../lib/status-catalog');
+
+const CITA_ESTADOS_VALIDOS = new Set(CITA_STATUS_VALUES);
+
+function mapEstadoToFlowEvent(estado) {
+    if (estado === 'pendiente') return 'appointment_created';
+    if (estado === 'info_enviada') return 'appointment_created';
+    if (estado === 'info_confirmada') return 'appointment_confirmed';
+    if (estado === 'recordatorio_enviado') return 'appointment_reminder_window';
+    if (estado === 'recordatorio_confirmado') return 'appointment_confirmed';
+    if (estado === 'reprogramada') return 'appointment_rescheduled';
+    if (estado === 'no_asistio') return 'appointment_no_show';
+    if (estado === 'cancelada') return 'appointment_cancelled';
+    if (estado === 'completada') return 'appointment_completed';
+    return 'appointment_created';
+}
+
+function mapEstadoToAutomationV2Event(estado) {
+    if (estado === 'pendiente') return 'appointment_created';
+    if (estado === 'info_enviada') return 'appointment_created';
+    if (estado === 'info_confirmada') return 'appointment_confirmed';
+    if (estado === 'recordatorio_enviado') return 'appointment_reminder_window';
+    if (estado === 'recordatorio_confirmado') return 'appointment_confirmed';
+    if (estado === 'reprogramada') return 'appointment_rescheduled';
+    if (estado === 'no_asistio') return 'appointment_no_show';
+    if (estado === 'cancelada') return 'appointment_cancelled';
+    if (estado === 'completada') return 'appointment_completed';
+    return null;
+}
+
+function mapFlowSummary(flow) {
+    if (!flow) return null;
+    return {
+        flow_instance_id: flow.id,
+        flow_status: flow.status,
+        current_step_index: flow.current_step_index,
+        current_step_type: flow.current_step_type,
+        current_step_label: flow.current_step_label,
+        current_state: flow.current_state,
+        agenda_icon: flow.agenda_icon,
+        next_action_at: flow.next_action_at,
+        last_transition_at: flow.last_transition_at,
+        error_message: flow.last_error || null,
+        template_id: flow.template_id,
+        template_version: flow.template_version || null
+    };
+}
+
+function mapFlowSummaryV2(execution) {
+    if (!execution) return null;
+    const item = execution?.toJSON ? execution.toJSON() : execution;
+    const template = item?.templateVersion || null;
+    const nodes = Array.isArray(template?.nodes) ? template.nodes : [];
+    const currentNodeId = item.current_node_id || null;
+    const currentNode = currentNodeId ? nodes.find((node) => String(node?.id || '') === String(currentNodeId)) : null;
+    const waitUntil = item.wait_until || item.waiting_meta?.wait_until || null;
+
+    return {
+        flow_instance_id: item.id,
+        flow_status: item.status,
+        current_step_index: null,
+        current_step_type: currentNode?.type || null,
+        current_step_label: currentNode?.label || currentNodeId || null,
+        current_state: item.status,
+        agenda_icon: null,
+        next_action_at: waitUntil,
+        last_transition_at: item.updated_at || item.created_at || null,
+        error_message: item.last_error || null,
+        template_id: item.template_version_id || null,
+        template_version: template?.version || null,
+        template_name: template?.name || null,
+    };
+}
+
+async function attachFlowSummaryToCitas(citas) {
+    const list = Array.isArray(citas) ? citas : (citas ? [citas] : []);
+    if (!list.length) return citas;
+
+    const citaIds = list
+        .map((cita) => Number(cita?.id_cita))
+        .filter((id) => Number.isFinite(id) && id > 0);
+    if (!citaIds.length) return citas;
+
+    const [legacyRows, v2Rows] = await Promise.all([
+        AppointmentFlowInstance.findAll({
+            where: {
+                cita_id: {
+                    [db.Sequelize.Op.in]: citaIds
+                }
+            },
+            attributes: [
+                'id',
+                'cita_id',
+                'template_id',
+                'template_version',
+                'status',
+                'current_step_index',
+                'current_step_type',
+                'current_step_label',
+                'current_state',
+                'agenda_icon',
+                'next_action_at',
+                'last_transition_at',
+                'last_error'
+            ]
+        }),
+        FlowExecutionV2.findAll({
+            where: {
+                trigger_entity_type: 'appointment',
+                trigger_entity_id: {
+                    [db.Sequelize.Op.in]: citaIds
+                }
+            },
+            include: [
+                {
+                    model: AutomationFlowTemplateV2,
+                    as: 'templateVersion',
+                    attributes: ['id', 'version', 'name', 'nodes'],
+                    required: false,
+                },
+            ],
+            order: [['updated_at', 'DESC']],
+            limit: Math.max(50, citaIds.length * 3),
+        })
+    ]);
+
+    const byCitaIdLegacy = new Map(legacyRows.map((row) => [Number(row.cita_id), row]));
+    const byCitaIdV2 = new Map();
+    for (const row of v2Rows) {
+        const citaId = Number(row.trigger_entity_id);
+        if (!Number.isFinite(citaId) || citaId <= 0) continue;
+        if (!byCitaIdV2.has(citaId)) {
+            byCitaIdV2.set(citaId, row);
+            continue;
+        }
+        const current = byCitaIdV2.get(citaId);
+        const currentIsActive = ['running', 'waiting', 'paused'].includes(String(current?.status || '').toLowerCase());
+        const rowIsActive = ['running', 'waiting', 'paused'].includes(String(row?.status || '').toLowerCase());
+        if (!currentIsActive && rowIsActive) {
+            byCitaIdV2.set(citaId, row);
+        }
+    }
+
+    list.forEach((cita) => {
+        const key = Number(cita?.id_cita);
+        const flowV2 = byCitaIdV2.get(key) || null;
+        const flowLegacy = byCitaIdLegacy.get(key) || null;
+        const summary = flowV2 ? mapFlowSummaryV2(flowV2) : mapFlowSummary(flowLegacy);
+        if (typeof cita?.setDataValue === 'function') {
+            cita.setDataValue('appointment_flow', summary);
+        } else if (cita && typeof cita === 'object') {
+            cita.appointment_flow = summary;
+        }
+    });
+
+    return citas;
+}
 const DEFAULT_TIMEZONE = 'Europe/Madrid';
 
 /**
@@ -478,6 +640,14 @@ exports.createCita = asyncHandler(async (req, res) => {
             return res.status(400).json({ message: 'clinica_id, inicio, (fin o duracion_min) y paciente son obligatorios' });
         }
 
+        const estadoRaw = String(estado || '').trim().toLowerCase();
+        if (!CITA_ESTADOS_VALIDOS.has(estadoRaw)) {
+            return res.status(400).json({
+                message: 'estado inválido',
+                allowed: Array.from(CITA_ESTADOS_VALIDOS),
+            });
+        }
+
         // Validar clínica
         const clinica = await Clinica.findOne({ where: { id_clinica: clinica_id } });
         if (!clinica) {
@@ -561,14 +731,38 @@ exports.createCita = asyncHandler(async (req, res) => {
             instalacion_id,
             tratamiento_id,
             campana_id: campana_id || lead?.campana_id || null,
+            created_by: req.userData?.userId || null,
+            updated_by: req.userData?.userId || null,
             titulo: datosPaciente.titulo || null,
             nota: nota || null,
             motivo: motivo || null,
             tipo_cita,
-            estado,
+            estado: estadoRaw,
             inicio: inicioDate,
             fin: finDate
         });
+
+        // Inicializar/sincronizar flujo de cita real si el tratamiento tiene plantilla asignada.
+        try {
+            await appointmentFlowRuntime.syncInstanceForCita(cita, {
+                event_name: 'appointment_created',
+                user_id: req.userData?.userId || null
+            });
+        } catch (flowErr) {
+            console.error('⚠️ [createCita] Error inicializando flujo de cita:', flowErr.message);
+        }
+
+        // Disparar motor v2 de automatizaciones de cita (si el tratamiento tiene plantilla v2 asignada).
+        try {
+            await appointmentAutomationV2Runtime.enqueueExecutionForCita(cita, {
+                event_name: 'appointment_created',
+                user_id: req.userData?.userId || null,
+                user_name: req.userData?.name || req.userData?.nombre || req.userData?.email || null,
+                user_role: req.userData?.role || req.userData?.rol || 'admin',
+            });
+        } catch (automationErr) {
+            console.error('⚠️ [createCita] Error disparando automation v2:', automationErr.message);
+        }
 
         // Marcar lead como citado si aplica
         if (lead) {
@@ -583,6 +777,8 @@ exports.createCita = asyncHandler(async (req, res) => {
                 Campana ? { model: Campana, as: 'campana' } : null
             ].filter(Boolean)
         });
+
+        await attachFlowSummaryToCitas(citaCreada);
 
         return res.status(201).json(citaCreada);
     } catch (err) {
@@ -618,56 +814,8 @@ exports.getCitas = asyncHandler(async (req, res) => {
         ]
     });
 
+    await attachFlowSummaryToCitas(citas);
     res.json(citas);
-});
-
-/**
- * Obtener detalle de una cita por id
- * Usado por el drawer de "ver cita" en frontend (records + whatsapp thread).
- */
-exports.getCitaById = asyncHandler(async (req, res) => {
-    const { id } = req.params;
-    const citaId = Number(id);
-
-    if (!id || Number.isNaN(citaId)) {
-        return res.status(400).json({ message: 'id_cita inválido' });
-    }
-
-    const cita = await CitaPaciente.findByPk(citaId, {
-        include: [
-            { model: Paciente, as: 'paciente' },
-            { model: LeadIntake, as: 'lead' },
-            { model: Clinica, as: 'clinica', attributes: ['id_clinica', 'nombre_clinica', ['grupoClinicaId', 'grupo_clinica_id']] },
-            { model: Instalacion, as: 'instalacion', required: false },
-            { model: Tratamiento, as: 'tratamiento', required: false },
-            db.Usuario ? { model: db.Usuario, as: 'doctor', required: false } : null,
-            Campana ? { model: Campana, as: 'campana' } : null
-        ].filter(Boolean)
-    });
-
-    if (!cita) {
-        return res.status(404).json({ message: 'cita_not_found' });
-    }
-
-    // Best-effort: devolver conversation_id de WhatsApp si existe para el paciente en esta clínica.
-    let conversation_id = null;
-    try {
-        if (db.Conversation && cita.paciente_id && cita.clinica_id) {
-            const conv = await db.Conversation.findOne({
-                where: { patient_id: cita.paciente_id, clinic_id: cita.clinica_id, channel: 'whatsapp' },
-                attributes: ['id']
-            });
-            conversation_id = conv ? conv.id : null;
-        }
-    } catch (e) {
-        // No bloquear el endpoint por fallo de join/busqueda de conversacion.
-        conversation_id = null;
-    }
-
-    return res.json({
-        ...cita.toJSON(),
-        conversation_id,
-    });
 });
 
 /**
@@ -699,5 +847,161 @@ exports.getNextCita = asyncHandler(async (req, res) => {
         ]
     });
 
+    await attachFlowSummaryToCitas(cita);
     return res.json(cita || null);
+});
+
+/**
+ * Actualizar estado de una cita y sincronizar su flujo asociado.
+ */
+exports.updateCitaEstado = asyncHandler(async (req, res) => {
+    const { id } = req.params;
+    const citaId = Number(id);
+    if (!Number.isFinite(citaId) || citaId <= 0) {
+        return res.status(400).json({ message: 'id inválido' });
+    }
+
+    const estadoRaw = String(req.body?.estado || '').trim().toLowerCase();
+    if (!CITA_ESTADOS_VALIDOS.has(estadoRaw)) {
+        return res.status(400).json({
+            message: 'estado inválido',
+            allowed: Array.from(CITA_ESTADOS_VALIDOS)
+        });
+    }
+
+    const cita = await CitaPaciente.findByPk(citaId);
+    if (!cita) {
+        return res.status(404).json({ message: 'Cita no encontrada' });
+    }
+
+    cita.estado = estadoRaw;
+    cita.updated_by = req.userData?.userId || null;
+    await cita.save();
+
+    try {
+        await appointmentFlowRuntime.syncInstanceForCita(cita, {
+            event_name: mapEstadoToFlowEvent(estadoRaw),
+            user_id: req.userData?.userId || null
+        });
+    } catch (flowErr) {
+        console.error('⚠️ [updateCitaEstado] Error sincronizando flujo:', flowErr.message);
+    }
+
+    try {
+        const automationEvent = mapEstadoToAutomationV2Event(estadoRaw);
+        if (automationEvent) {
+            await appointmentAutomationV2Runtime.enqueueExecutionForCita(cita, {
+                event_name: automationEvent,
+                user_id: req.userData?.userId || null,
+                user_name: req.userData?.name || req.userData?.nombre || req.userData?.email || null,
+                user_role: req.userData?.role || req.userData?.rol || 'admin',
+            });
+        }
+    } catch (automationErr) {
+        console.error('⚠️ [updateCitaEstado] Error disparando automation v2:', automationErr.message);
+    }
+
+    const citaActualizada = await CitaPaciente.findByPk(citaId, {
+        include: [
+            { model: Paciente, as: 'paciente' },
+            { model: LeadIntake, as: 'lead' },
+            { model: Clinica, as: 'clinica' }
+        ]
+    });
+
+    await attachFlowSummaryToCitas(citaActualizada);
+    return res.json(citaActualizada);
+});
+
+/**
+ * Reagendar una cita (inicio/fin) y sincronizar su flujo asociado.
+ */
+exports.reagendarCita = asyncHandler(async (req, res) => {
+    const { id } = req.params;
+    const citaId = Number(id);
+    if (!Number.isFinite(citaId) || citaId <= 0) {
+        return res.status(400).json({ message: 'id inválido' });
+    }
+
+    const cita = await CitaPaciente.findByPk(citaId);
+    if (!cita) {
+        return res.status(404).json({ message: 'Cita no encontrada' });
+    }
+
+    const inicio = req.body?.inicio ? new Date(req.body.inicio) : null;
+    const fin = req.body?.fin ? new Date(req.body.fin) : null;
+    if (!inicio || !fin || !Number.isFinite(inicio.getTime()) || !Number.isFinite(fin.getTime()) || fin <= inicio) {
+        return res.status(400).json({ message: 'inicio/fin inválidos' });
+    }
+
+    const { resourceConflicts, legacyConflicts, canForce } = await checkDisponibilidadCanonica({
+        clinica_id: cita.clinica_id,
+        inicio,
+        fin,
+        doctor_id: cita.doctor_id,
+        instalacion_id: cita.instalacion_id,
+        ignore_cita_id: cita.id_cita
+    });
+
+    if (resourceConflicts.length && !parseBool(req.body?.force)) {
+        const firstLegacy = legacyConflicts[0];
+        const reason = (firstLegacy && ['overlap', 'blocked', 'out_of_hours', 'doctor_unavailable'].includes(firstLegacy.type))
+            ? firstLegacy.type
+            : 'blocked';
+        return res.status(409).json({
+            reason,
+            message: 'No hay disponibilidad para el rango solicitado.',
+            can_force: canForce,
+            resource_conflicts: resourceConflicts,
+            conflicts: legacyConflicts
+        });
+    }
+
+    cita.inicio = inicio;
+    cita.fin = fin;
+    const estadoRaw = String(req.body?.estado || '').trim().toLowerCase();
+    if (estadoRaw) {
+        if (!CITA_ESTADOS_VALIDOS.has(estadoRaw)) {
+            return res.status(400).json({
+                message: 'estado inválido',
+                allowed: Array.from(CITA_ESTADOS_VALIDOS),
+            });
+        }
+        cita.estado = estadoRaw;
+    } else {
+        cita.estado = 'reprogramada';
+    }
+    cita.updated_by = req.userData?.userId || null;
+    await cita.save();
+
+    try {
+        await appointmentFlowRuntime.syncInstanceForCita(cita, {
+            event_name: 'appointment_rescheduled',
+            user_id: req.userData?.userId || null
+        });
+    } catch (flowErr) {
+        console.error('⚠️ [reagendarCita] Error sincronizando flujo:', flowErr.message);
+    }
+
+    try {
+        await appointmentAutomationV2Runtime.enqueueExecutionForCita(cita, {
+            event_name: 'appointment_rescheduled',
+            user_id: req.userData?.userId || null,
+            user_name: req.userData?.name || req.userData?.nombre || req.userData?.email || null,
+            user_role: req.userData?.role || req.userData?.rol || 'admin',
+        });
+    } catch (automationErr) {
+        console.error('⚠️ [reagendarCita] Error disparando automation v2:', automationErr.message);
+    }
+
+    const citaActualizada = await CitaPaciente.findByPk(citaId, {
+        include: [
+            { model: Paciente, as: 'paciente' },
+            { model: LeadIntake, as: 'lead' },
+            { model: Clinica, as: 'clinica' }
+        ]
+    });
+
+    await attachFlowSummaryToCitas(citaActualizada);
+    return res.json(citaActualizada);
 });

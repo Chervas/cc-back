@@ -6,6 +6,7 @@ router.get('/', pacienteController.getAllPacientes);
 router.get('/search', pacienteController.searchPacientes); // Ruta de búsqueda
 router.get('/check-duplicates', pacienteController.checkDuplicates);
 router.get('/:id/consents', pacienteController.getConsents);
+router.get('/:id/activity', pacienteController.getPacienteActivity);
 router.get('/:id', pacienteController.getPacienteById);
 router.post('/', pacienteController.createPaciente);
 router.patch('/:id', pacienteController.updatePaciente);

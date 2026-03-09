@@ -86,6 +86,7 @@ router.put('/template-catalog/:id', authMiddleware, whatsappController.updateCat
 router.delete('/template-catalog/:id', authMiddleware, whatsappController.deleteCatalog);
 router.put('/template-catalog/:id/toggle', authMiddleware, whatsappController.toggleCatalog);
 router.post('/template-catalog/:id/disciplines', authMiddleware, whatsappController.setCatalogDisciplines);
+router.post('/template-catalog/:id/propagate', authMiddleware, whatsappController.propagateCatalogToClinics);
 
 // Estado WABA por clínica
 router.get('/status', authMiddleware, whatsappController.getStatus);

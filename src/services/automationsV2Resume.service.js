@@ -6,6 +6,8 @@ const jobScheduler = require('./jobScheduler.service');
 
 const FlowExecutionV2 = db.FlowExecutionV2;
 const AutomationFlowTemplateV2 = db.AutomationFlowTemplateV2;
+const JobRequest = db.JobRequest;
+const FORM_MATCH_MODES = new Set(['url_contains', 'url_equals', 'form_id', 'selector']);
 
 function cleanString(value) {
   if (value === undefined || value === null) return null;
@@ -20,6 +22,24 @@ function normalizeType(value) {
 function toIntOrNull(value) {
   const parsed = Number.parseInt(String(value), 10);
   return Number.isInteger(parsed) ? parsed : null;
+}
+
+function parseBool(value, fallback = false) {
+  if (value === undefined || value === null || value === '') return fallback;
+  if (typeof value === 'boolean') return value;
+  const normalized = String(value).trim().toLowerCase();
+  if (['1', 'true', 'yes', 'y', 'on'].includes(normalized)) return true;
+  if (['0', 'false', 'no', 'n', 'off'].includes(normalized)) return false;
+  return fallback;
+}
+
+function normalizeEmail(value) {
+  return cleanString(value)?.toLowerCase() || null;
+}
+
+function normalizePhone(value) {
+  const digits = String(value || '').replace(/\D/g, '');
+  return digits || null;
 }
 
 function getByPath(obj, path) {
@@ -87,15 +107,75 @@ function collectContextIds(execution) {
   return ids;
 }
 
-function isWaitResponseNode(execution) {
+function getWaitResponseNode(execution) {
   const nodeId = cleanString(execution?.current_node_id);
-  if (!nodeId) return false;
+  if (!nodeId) return null;
 
   const nodes = Array.isArray(execution?.templateVersion?.nodes)
     ? execution.templateVersion.nodes
     : [];
   const currentNode = nodes.find((n) => cleanString(n?.id) === nodeId);
-  return cleanString(currentNode?.type) === 'delay/wait_response';
+  if (cleanString(currentNode?.type) !== 'delay/wait_response') {
+    return null;
+  }
+  return currentNode;
+}
+
+function getWaitFormSubmissionNode(execution) {
+  const nodeId = cleanString(execution?.current_node_id);
+  if (!nodeId) return null;
+
+  const nodes = Array.isArray(execution?.templateVersion?.nodes)
+    ? execution.templateVersion.nodes
+    : [];
+  const currentNode = nodes.find((n) => cleanString(n?.id) === nodeId);
+  if (cleanString(currentNode?.type) !== 'delay/wait_form_submission') {
+    return null;
+  }
+  return currentNode;
+}
+
+function appendMultilineText(baseText, nextText) {
+  const base = cleanString(baseText);
+  const next = cleanString(nextText);
+  if (!next) return base || '';
+  if (!base) return next;
+  return `${base}\n${next}`;
+}
+
+function getResponseBufferConfig(waitNode) {
+  const cfg = waitNode?.config && typeof waitNode.config === 'object' ? waitNode.config : {};
+  return {
+    enabled: parseBool(cfg.response_buffer_enabled, true),
+    delayMs: 60 * 1000,
+  };
+}
+
+async function findQueuedResumeJob(executionId, resumeMode) {
+  const execution = toIntOrNull(executionId);
+  const normalizedMode = cleanString(resumeMode);
+  if (!execution || !normalizedMode) return null;
+  const rows = await db.sequelize.query(
+    `
+    SELECT id, status, next_run_at
+    FROM JobRequests
+    WHERE type = 'automations_v2_execute'
+      AND status IN ('pending', 'waiting', 'running')
+      AND JSON_EXTRACT(payload, '$.execution_id') = :executionId
+      AND JSON_UNQUOTE(JSON_EXTRACT(payload, '$.resume_mode')) = :resumeMode
+    ORDER BY id DESC
+    LIMIT 1
+    `,
+    {
+      replacements: { executionId: execution, resumeMode: normalizedMode },
+      type: db.sequelize.QueryTypes.SELECT,
+    }
+  );
+  return rows?.[0] || null;
+}
+
+async function findQueuedResponseResumeJob(executionId) {
+  return findQueuedResumeJob(executionId, 'response');
 }
 
 function matchesExecutionTarget(execution, { conversationId, patientId, leadId }) {
@@ -124,6 +204,92 @@ function matchesExecutionTarget(execution, { conversationId, patientId, leadId }
   if (patientId && contextIds.patient_id && contextIds.patient_id === patientId) return true;
 
   return false;
+}
+
+function collectExecutionContactPoints(execution) {
+  const context = execution?.context && typeof execution.context === 'object'
+    ? execution.context
+    : {};
+
+  const phoneCandidates = [
+    getByPath(context, 'patient.telefono'),
+    getByPath(context, 'patient.telefono_movil'),
+    getByPath(context, 'paciente.telefono'),
+    getByPath(context, 'paciente.telefono_movil'),
+    getByPath(context, 'lead.telefono'),
+    getByPath(context, 'appointment.telefono'),
+    getByPath(context, 'trigger.data.telefono'),
+  ]
+    .map((value) => normalizePhone(value))
+    .filter(Boolean);
+
+  const emailCandidates = [
+    getByPath(context, 'patient.email'),
+    getByPath(context, 'paciente.email'),
+    getByPath(context, 'lead.email'),
+    getByPath(context, 'appointment.email'),
+    getByPath(context, 'trigger.data.email'),
+  ]
+    .map((value) => normalizeEmail(value))
+    .filter(Boolean);
+
+  const leadIdCandidates = [
+    getByPath(context, 'lead.id'),
+    getByPath(context, 'lead.lead_intake_id'),
+    getByPath(context, 'trigger.data.lead_id'),
+    getByPath(context, 'trigger.data.lead_intake_id'),
+  ]
+    .map((value) => toIntOrNull(value))
+    .filter(Boolean);
+
+  return {
+    phones: Array.from(new Set(phoneCandidates)),
+    emails: Array.from(new Set(emailCandidates)),
+    lead_ids: Array.from(new Set(leadIdCandidates)),
+  };
+}
+
+function matchesFormSubmissionTarget(execution, { leadId, phone, email }) {
+  const target = collectExecutionContactPoints(execution);
+  if (leadId && target.lead_ids.includes(leadId)) return true;
+  if (phone && target.phones.includes(phone)) return true;
+  if (email && target.emails.includes(email)) return true;
+  return false;
+}
+
+function normalizeFormMatchMode(value) {
+  const normalized = normalizeType(value);
+  return FORM_MATCH_MODES.has(normalized) ? normalized : null;
+}
+
+function matchesFormSubmissionRule(execution, waitNode, submission) {
+  const waitingMeta = execution?.waiting_meta && typeof execution.waiting_meta === 'object'
+    ? execution.waiting_meta
+    : {};
+  const config = waitNode?.config && typeof waitNode.config === 'object'
+    ? waitNode.config
+    : {};
+
+  const matchMode = normalizeFormMatchMode(waitingMeta.match_mode || config.match_mode);
+  const matchValue = cleanString(waitingMeta.match_value || config.match_value);
+  if (!matchMode || !matchValue) return false;
+
+  const pageUrl = cleanString(submission?.page_url) || '';
+  const formId = cleanString(submission?.form_id) || '';
+  const selector = cleanString(submission?.form_selector) || '';
+
+  switch (matchMode) {
+    case 'url_contains':
+      return pageUrl.toLowerCase().includes(matchValue.toLowerCase());
+    case 'url_equals':
+      return pageUrl.toLowerCase() === matchValue.toLowerCase();
+    case 'form_id':
+      return formId.toLowerCase() === matchValue.toLowerCase();
+    case 'selector':
+      return selector.toLowerCase() === matchValue.toLowerCase();
+    default:
+      return false;
+  }
 }
 
 async function enqueueInboundResponseResume({
@@ -165,7 +331,7 @@ async function enqueueInboundResponseResume({
   });
 
   const matched = candidates.filter((execution) => {
-    if (!isWaitResponseNode(execution)) return false;
+    if (!getWaitResponseNode(execution)) return false;
     return matchesExecutionTarget(execution, {
       conversationId: normalizedConversationId,
       patientId: normalizedPatientId,
@@ -180,25 +346,227 @@ async function enqueueInboundResponseResume({
   for (const execution of matched) {
     executionIds.push(execution.id);
     try {
-      const job = await jobRequestsService.enqueueJobRequest({
-        type: 'automations_v2_execute',
-        priority: 'critical',
-        origin: 'automations_v2_inbound',
-        payload: {
-          execution_id: execution.id,
-          resume_mode: 'response',
-          response_text: text,
-          inbound_channel: channel,
-          inbound_conversation_id: normalizedConversationId,
-          inbound_message_id: inboundMessageId || null,
-          inbound_patient_id: normalizedPatientId || null,
-          inbound_lead_id: normalizedLeadId || null,
+      const waitNode = getWaitResponseNode(execution);
+      const buffer = getResponseBufferConfig(waitNode);
+
+      if (buffer.enabled) {
+        const waitUntil = new Date(Date.now() + buffer.delayMs);
+        const existingWaitingMeta = execution.waiting_meta && typeof execution.waiting_meta === 'object'
+          ? execution.waiting_meta
+          : {};
+        const mergedText = appendMultilineText(existingWaitingMeta.pending_response_text, text);
+        const pendingCount = Number(existingWaitingMeta.pending_response_count || 0) + 1;
+
+        await execution.update({
+          status: 'waiting',
+          wait_until: waitUntil,
+          waiting_meta: {
+            ...existingWaitingMeta,
+            resume_mode: 'response',
+            pending_response_text: mergedText,
+            pending_response_count: pendingCount,
+            last_inbound_message_at: new Date().toISOString(),
+            last_inbound_message_id: inboundMessageId || null,
+            inbound_channel: channel,
+          },
+        });
+
+        const queuedJob = await findQueuedResponseResumeJob(execution.id);
+        if (queuedJob) {
+          if (cleanString(queuedJob.status) === 'waiting') {
+            await JobRequest.update(
+              {
+                next_run_at: waitUntil,
+                updated_at: new Date(),
+              },
+              { where: { id: queuedJob.id } }
+            );
+          }
+        } else {
+          await jobRequestsService.enqueueJobRequest({
+            type: 'automations_v2_execute',
+            priority: 'critical',
+            status: 'waiting',
+            nextRunAt: waitUntil,
+            origin: 'automations_v2_inbound_buffer',
+            payload: {
+              execution_id: execution.id,
+              resume_mode: 'response',
+              inbound_channel: channel,
+              inbound_conversation_id: normalizedConversationId,
+              inbound_message_id: inboundMessageId || null,
+              inbound_patient_id: normalizedPatientId || null,
+              inbound_lead_id: normalizedLeadId || null,
+            },
+          });
+          enqueued += 1;
+        }
+      } else {
+        const job = await jobRequestsService.enqueueJobRequest({
+          type: 'automations_v2_execute',
+          priority: 'critical',
+          origin: 'automations_v2_inbound',
+          payload: {
+            execution_id: execution.id,
+            resume_mode: 'response',
+            response_text: text,
+            inbound_channel: channel,
+            inbound_conversation_id: normalizedConversationId,
+            inbound_message_id: inboundMessageId || null,
+            inbound_patient_id: normalizedPatientId || null,
+            inbound_lead_id: normalizedLeadId || null,
+          },
+        });
+
+        // Menor latencia: intentamos disparo inmediato además del scheduler periódico.
+        jobScheduler.triggerImmediate(job.id).catch(() => {});
+        enqueued += 1;
+      }
+    } catch (error) {
+      errors.push({
+        execution_id: execution.id,
+        message: cleanString(error?.message) || 'enqueue_failed',
+      });
+    }
+  }
+
+  return {
+    enabled: true,
+    matched: matched.length,
+    enqueued,
+    execution_ids: executionIds,
+    errors,
+  };
+}
+
+async function enqueueInboundFormSubmissionResume({
+  clinicId,
+  leadId = null,
+  email = null,
+  phone = null,
+  pageUrl = null,
+  formId = null,
+  formName = null,
+  formSelector = null,
+  fields = null,
+  submittedAt = null,
+  formSubmissionEventId = null,
+  sourceDetail = 'web_form',
+  payload = null,
+}) {
+  const enabled = String(process.env.AUTOMATIONS_V2_AUTO_RESUME_FORM || 'true').toLowerCase();
+  if (enabled === '0' || enabled === 'false' || enabled === 'off') {
+    return { enabled: false, matched: 0, enqueued: 0, execution_ids: [] };
+  }
+
+  const normalizedClinicId = toIntOrNull(clinicId);
+  const normalizedLeadId = toIntOrNull(leadId);
+  const normalizedEmail = normalizeEmail(email);
+  const normalizedPhone = normalizePhone(phone);
+  const normalizedPageUrl = cleanString(pageUrl);
+  const normalizedFormId = cleanString(formId);
+  const normalizedFormName = cleanString(formName);
+  const normalizedFormSelector = cleanString(formSelector);
+  const normalizedSubmittedAt = cleanString(submittedAt) || new Date().toISOString();
+  const normalizedFields = fields && typeof fields === 'object' && !Array.isArray(fields) ? fields : {};
+
+  if (!normalizedClinicId || (!normalizedLeadId && !normalizedEmail && !normalizedPhone)) {
+    return { enabled: true, matched: 0, enqueued: 0, execution_ids: [] };
+  }
+
+  const candidates = await FlowExecutionV2.findAll({
+    where: {
+      status: 'waiting',
+      clinic_id: normalizedClinicId,
+    },
+    include: [{
+      model: AutomationFlowTemplateV2,
+      as: 'templateVersion',
+      attributes: ['id', 'nodes'],
+    }],
+    order: [['id', 'ASC']],
+    limit: 100,
+  });
+
+  const submission = {
+    page_url: normalizedPageUrl,
+    form_id: normalizedFormId,
+    form_name: normalizedFormName,
+    form_selector: normalizedFormSelector,
+    fields: normalizedFields,
+    submitted_at: normalizedSubmittedAt,
+    lead_intake_id: normalizedLeadId,
+    email: normalizedEmail,
+    telefono: normalizedPhone,
+    form_submission_event_id: toIntOrNull(formSubmissionEventId),
+    source_detail: cleanString(sourceDetail) || 'web_form',
+    payload: payload && typeof payload === 'object' ? payload : null,
+  };
+
+  const matched = candidates.filter((execution) => {
+    const waitNode = getWaitFormSubmissionNode(execution);
+    if (!waitNode) return false;
+    if (!matchesFormSubmissionTarget(execution, {
+      leadId: normalizedLeadId,
+      phone: normalizedPhone,
+      email: normalizedEmail,
+    })) {
+      return false;
+    }
+    return matchesFormSubmissionRule(execution, waitNode, submission);
+  });
+
+  let enqueued = 0;
+  const executionIds = [];
+  const errors = [];
+
+  for (const execution of matched) {
+    executionIds.push(execution.id);
+    try {
+      const existingWaitingMeta = execution.waiting_meta && typeof execution.waiting_meta === 'object'
+        ? execution.waiting_meta
+        : {};
+
+      await execution.update({
+        status: 'waiting',
+        wait_until: new Date(),
+        waiting_meta: {
+          ...existingWaitingMeta,
+          resume_mode: 'form_submission',
+          pending_form_submission: submission,
+          last_form_submission_at: normalizedSubmittedAt,
+          last_form_submission_event_id: toIntOrNull(formSubmissionEventId),
         },
       });
 
-      // Menor latencia: intentamos disparo inmediato además del scheduler periódico.
-      jobScheduler.triggerImmediate(job.id).catch(() => {});
-      enqueued += 1;
+      const queuedJob = await findQueuedResumeJob(execution.id, 'form_submission');
+      if (queuedJob) {
+        if (cleanString(queuedJob.status) === 'waiting') {
+          await JobRequest.update(
+            {
+              next_run_at: new Date(),
+              updated_at: new Date(),
+            },
+            { where: { id: queuedJob.id } }
+          );
+        }
+      } else {
+        const job = await jobRequestsService.enqueueJobRequest({
+          type: 'automations_v2_execute',
+          priority: 'critical',
+          origin: 'automations_v2_form_submission',
+          payload: {
+            execution_id: execution.id,
+            resume_mode: 'form_submission',
+            form_submission_event_id: toIntOrNull(formSubmissionEventId),
+            lead_intake_id: normalizedLeadId,
+            email: normalizedEmail,
+            phone: normalizedPhone,
+          },
+        });
+        jobScheduler.triggerImmediate(job.id).catch(() => {});
+        enqueued += 1;
+      }
     } catch (error) {
       errors.push({
         execution_id: execution.id,
@@ -218,5 +586,5 @@ async function enqueueInboundResponseResume({
 
 module.exports = {
   enqueueInboundResponseResume,
+  enqueueInboundFormSubmissionResume,
 };
-

@@ -6,11 +6,19 @@ const db = require('../../models');
 const AutomationFlowTemplateV2 = db.AutomationFlowTemplateV2;
 const FlowExecutionV2 = db.FlowExecutionV2;
 const FlowExecutionLogV2 = db.FlowExecutionLogV2;
+const CitaPaciente = db.CitaPaciente;
+const Paciente = db.Paciente;
+const LeadIntake = db.LeadIntake;
+const Conversation = db.Conversation;
+const Message = db.Message;
+const FormSubmissionEvent = db.FormSubmissionEvent;
 const UsuarioClinica = db.UsuarioClinica;
+const Usuario = db.Usuario;
 const Clinica = db.Clinica;
-const { resolveClinicScope } = require('../lib/clinicScope');
 const jobRequestsService = require('../services/jobRequests.service');
 const jobScheduler = require('../services/jobScheduler.service');
+const { getIO } = require('../services/socket.service');
+const { CITA_STATUS_VALUES, LEAD_STATUS_VALUES } = require('../lib/status-catalog');
 
 const ADMIN_USER_IDS = (process.env.ADMIN_USER_IDS || '1')
   .split(',')
@@ -18,12 +26,53 @@ const ADMIN_USER_IDS = (process.env.ADMIN_USER_IDS || '1')
   .filter((n) => Number.isInteger(n));
 
 const MANAGER_ROLES = new Set(['propietario', 'personaldeclinica', 'administrador', 'admin']);
+const TASK_ASSIGNEE_ROLE_OPTIONS = [
+  { id: 'propietario', code: 'propietario', label: 'Propietario' },
+  { id: 'personaldeclinica', code: 'personaldeclinica', label: 'Personal clínica' },
+];
+const TASK_ROLE_LABELS = {
+  propietario: 'Propietario',
+  personaldeclinica: 'Personal clínica',
+  administrador: 'Administrador',
+  admin: 'Administrador',
+};
+const CHANGE_STATUS_TARGET_OPTIONS = ['appointment', 'lead'];
+const UPDATE_LEAD_INFO_MODE_OPTIONS = [
+  'set_required',
+  'set_received',
+  'append_received',
+  'clear_required',
+  'clear_received',
+  'clear_all',
+];
+const AI_ANALYSIS_MODE_OPTIONS = ['auto', 'quick_qa', 'complex_reasoning'];
+const AI_OUTPUT_FIELD_TYPES = ['string', 'number', 'boolean'];
+const FORM_MATCH_MODE_OPTIONS = ['url_contains', 'url_equals', 'form_id', 'selector'];
+const FIELD_CHECK_LEFT_REF_SOURCES = ['node_output', 'trigger_data', 'context', 'manual'];
+const FIELD_CHECK_VALUE_TYPES = ['string', 'number', 'boolean'];
+const FIELD_CHECK_OPERATOR_OPTIONS = ['equals', 'not_equals', 'contains', 'greater_than', 'less_than', 'exists'];
+const FIELD_CHECK_OPERATOR_TYPE_COMPAT = {
+  string: ['equals', 'not_equals', 'contains', 'exists'],
+  number: ['equals', 'not_equals', 'greater_than', 'less_than', 'exists'],
+  boolean: ['equals', 'not_equals', 'exists'],
+};
+const CITA_STATUS_SET = new Set(CITA_STATUS_VALUES);
+const LEAD_STATUS_SET = new Set(LEAD_STATUS_VALUES);
+const ANY_CHANGE_STATUS_SET = new Set([...CITA_STATUS_VALUES, ...LEAD_STATUS_VALUES]);
 
 function parseIntOrNull(raw) {
   if (raw === undefined || raw === null || raw === '') return null;
   const normalized = typeof raw === 'string' && raw.includes(',') ? raw.split(',')[0].trim() : raw;
   const parsed = Number.parseInt(String(normalized), 10);
   return Number.isInteger(parsed) ? parsed : null;
+}
+
+function parseIntList(raw) {
+  if (raw === undefined || raw === null || raw === '') return [];
+  return String(raw)
+    .split(',')
+    .map((part) => Number.parseInt(part.trim(), 10))
+    .filter((value) => Number.isInteger(value) && value > 0);
 }
 
 function parseBool(raw, fallback = undefined) {
@@ -33,6 +82,39 @@ function parseBool(raw, fallback = undefined) {
   if (['1', 'true', 'yes', 'y', 'on'].includes(normalized)) return true;
   if (['0', 'false', 'no', 'n', 'off'].includes(normalized)) return false;
   return fallback;
+}
+
+function parseStringArrayLike(raw) {
+  if (raw === undefined || raw === null) return [];
+
+  if (Array.isArray(raw)) {
+    return raw
+      .map((item) => cleanString(item))
+      .filter(Boolean);
+  }
+
+  if (typeof raw === 'string') {
+    const trimmed = raw.trim();
+    if (!trimmed) return [];
+    if (trimmed.startsWith('[') && trimmed.endsWith(']')) {
+      try {
+        const parsed = JSON.parse(trimmed);
+        if (Array.isArray(parsed)) {
+          return parsed
+            .map((item) => cleanString(item))
+            .filter(Boolean);
+        }
+      } catch (_err) {
+        // Fallback to comma parsing below.
+      }
+    }
+    return trimmed
+      .split(',')
+      .map((item) => cleanString(item))
+      .filter(Boolean);
+  }
+
+  return [];
 }
 
 function parseLimit(raw, fallback = 20) {
@@ -53,42 +135,485 @@ function cleanString(raw) {
   return out || null;
 }
 
+function normalizeToken(raw) {
+  return String(raw || '')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '_')
+    .replace(/^_+|_+$/g, '');
+}
+
+function formatDateEs(rawDate) {
+  if (!rawDate) return null;
+  const date = rawDate instanceof Date ? rawDate : new Date(rawDate);
+  if (!Number.isFinite(date.getTime())) return null;
+  return new Intl.DateTimeFormat('es-ES', {
+    timeZone: 'Europe/Madrid',
+    day: '2-digit',
+    month: '2-digit',
+    year: 'numeric',
+  }).format(date);
+}
+
+function formatTimeEs(rawDate) {
+  if (!rawDate) return null;
+  const date = rawDate instanceof Date ? rawDate : new Date(rawDate);
+  if (!Number.isFinite(date.getTime())) return null;
+  return new Intl.DateTimeFormat('es-ES', {
+    timeZone: 'Europe/Madrid',
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false,
+  }).format(date);
+}
+
+function joinName(...parts) {
+  return parts
+    .map((part) => cleanString(part))
+    .filter(Boolean)
+    .join(' ')
+    .trim();
+}
+
+async function buildHydratedExecutionContext({
+  triggerType,
+  triggerEntityType,
+  triggerEntityId,
+  triggerData,
+}) {
+  const out = {
+    trigger: {
+      type: cleanString(triggerType) || 'manual',
+      data: isObject(triggerData) ? { ...triggerData } : {},
+    },
+  };
+
+  const normalizedType = normalizeToken(triggerEntityType);
+  const normalizedTrigger = normalizeToken(triggerType);
+
+  const appointmentCandidateId = parseIntOrNull(triggerEntityId)
+    || parseIntOrNull(triggerData?.appointment_id)
+    || parseIntOrNull(triggerData?.cita_id)
+    || parseIntOrNull(triggerData?.id_cita);
+
+  const leadCandidateId = parseIntOrNull(triggerEntityId)
+    || parseIntOrNull(triggerData?.lead_id)
+    || parseIntOrNull(triggerData?.lead_intake_id);
+
+  const patientCandidateId = parseIntOrNull(triggerEntityId)
+    || parseIntOrNull(triggerData?.patient_id)
+    || parseIntOrNull(triggerData?.paciente_id);
+
+  const mustHydrateAppointment = (
+    appointmentCandidateId
+    && (
+      normalizedType === 'appointment'
+      || normalizedType === 'cita'
+      || normalizedTrigger.startsWith('appointment_')
+    )
+  );
+
+  if (mustHydrateAppointment) {
+    const cita = await CitaPaciente.findByPk(appointmentCandidateId, {
+      include: [
+        {
+          model: Paciente,
+          as: 'paciente',
+          required: false,
+          attributes: ['id_paciente', 'clinica_id', 'nombre', 'apellidos', 'telefono_movil', 'email'],
+        },
+        {
+          model: Clinica,
+          as: 'clinica',
+          required: false,
+          attributes: ['id_clinica', 'grupoClinicaId', 'nombre_clinica'],
+        },
+      ],
+      attributes: ['id_cita', 'clinica_id', 'paciente_id', 'lead_intake_id', 'estado', 'inicio', 'fin', 'titulo', 'motivo'],
+    });
+
+    if (cita) {
+      const citaJson = cita.toJSON ? cita.toJSON() : cita;
+      const citaPatch = {
+        id: parseIntOrNull(citaJson.id_cita),
+        id_cita: parseIntOrNull(citaJson.id_cita),
+        clinic_id: parseIntOrNull(citaJson.clinica_id),
+        clinica_id: parseIntOrNull(citaJson.clinica_id),
+        patient_id: parseIntOrNull(citaJson.paciente_id),
+        paciente_id: parseIntOrNull(citaJson.paciente_id),
+        lead_intake_id: parseIntOrNull(citaJson.lead_intake_id),
+        estado: cleanString(citaJson.estado),
+        status: cleanString(citaJson.estado),
+        inicio: citaJson.inicio || null,
+        fin: citaJson.fin || null,
+        fecha: formatDateEs(citaJson.inicio),
+        hora: formatTimeEs(citaJson.inicio),
+        titulo: cleanString(citaJson.titulo),
+        motivo: cleanString(citaJson.motivo),
+        origin: parseIntOrNull(citaJson.lead_intake_id) ? 'lead' : 'manual',
+      };
+      out.appointment = {
+        ...(isObject(out.appointment) ? out.appointment : {}),
+        ...citaPatch,
+      };
+      out.cita = {
+        ...(isObject(out.cita) ? out.cita : {}),
+        ...citaPatch,
+      };
+
+      if (citaJson.paciente) {
+        const paciente = citaJson.paciente;
+        const patientPatch = {
+          id: parseIntOrNull(paciente.id_paciente),
+          id_paciente: parseIntOrNull(paciente.id_paciente),
+          clinic_id: parseIntOrNull(paciente.clinica_id),
+          clinica_id: parseIntOrNull(paciente.clinica_id),
+          nombre: cleanString(paciente.nombre),
+          apellidos: cleanString(paciente.apellidos),
+          nombre_completo: joinName(paciente.nombre, paciente.apellidos) || null,
+          telefono: cleanString(paciente.telefono_movil),
+          telefono_movil: cleanString(paciente.telefono_movil),
+          email: cleanString(paciente.email),
+        };
+        out.patient = {
+          ...(isObject(out.patient) ? out.patient : {}),
+          ...patientPatch,
+        };
+        out.paciente = {
+          ...(isObject(out.paciente) ? out.paciente : {}),
+          ...patientPatch,
+        };
+      }
+
+      if (citaJson.clinica) {
+        const clinica = citaJson.clinica;
+        const clinicPatch = {
+          id: parseIntOrNull(clinica.id_clinica),
+          id_clinica: parseIntOrNull(clinica.id_clinica),
+          clinic_id: parseIntOrNull(clinica.id_clinica),
+          clinica_id: parseIntOrNull(clinica.id_clinica),
+          group_id: parseIntOrNull(clinica.grupoClinicaId),
+          grupo_id: parseIntOrNull(clinica.grupoClinicaId),
+          nombre: cleanString(clinica.nombre_clinica),
+          nombre_clinica: cleanString(clinica.nombre_clinica),
+        };
+        out.clinic = {
+          ...(isObject(out.clinic) ? out.clinic : {}),
+          ...clinicPatch,
+        };
+        out.clinica = {
+          ...(isObject(out.clinica) ? out.clinica : {}),
+          ...clinicPatch,
+        };
+      }
+
+      if (parseIntOrNull(citaJson.lead_intake_id)) {
+        const lead = await LeadIntake.findByPk(parseIntOrNull(citaJson.lead_intake_id), {
+          attributes: ['id', 'clinica_id', 'nombre', 'telefono', 'email', 'status_lead'],
+          raw: true,
+        });
+        if (lead) {
+          out.lead = {
+            ...(isObject(out.lead) ? out.lead : {}),
+            id: parseIntOrNull(lead.id),
+            lead_intake_id: parseIntOrNull(lead.id),
+            clinica_id: parseIntOrNull(lead.clinica_id),
+            clinic_id: parseIntOrNull(lead.clinica_id),
+            nombre: cleanString(lead.nombre),
+            telefono: cleanString(lead.telefono),
+            email: cleanString(lead.email),
+            status: cleanString(lead.status_lead),
+            status_lead: cleanString(lead.status_lead),
+          };
+        }
+      }
+    }
+  } else if (leadCandidateId && ['lead', 'lead_intake', 'leadintake', 'lead_nuevo'].includes(normalizedType)) {
+    const lead = await LeadIntake.findByPk(leadCandidateId, {
+      attributes: ['id', 'clinica_id', 'nombre', 'telefono', 'email', 'status_lead'],
+      raw: true,
+    });
+    if (lead) {
+      out.lead = {
+        ...(isObject(out.lead) ? out.lead : {}),
+        id: parseIntOrNull(lead.id),
+        lead_intake_id: parseIntOrNull(lead.id),
+        clinica_id: parseIntOrNull(lead.clinica_id),
+        clinic_id: parseIntOrNull(lead.clinica_id),
+        nombre: cleanString(lead.nombre),
+        telefono: cleanString(lead.telefono),
+        email: cleanString(lead.email),
+        status: cleanString(lead.status_lead),
+        status_lead: cleanString(lead.status_lead),
+      };
+    }
+  } else if (patientCandidateId && ['patient', 'paciente'].includes(normalizedType)) {
+    const patient = await Paciente.findByPk(patientCandidateId, {
+      attributes: ['id_paciente', 'clinica_id', 'nombre', 'apellidos', 'telefono_movil', 'email'],
+      raw: true,
+    });
+    if (patient) {
+      const patientPatch = {
+        id: parseIntOrNull(patient.id_paciente),
+        id_paciente: parseIntOrNull(patient.id_paciente),
+        clinic_id: parseIntOrNull(patient.clinica_id),
+        clinica_id: parseIntOrNull(patient.clinica_id),
+        nombre: cleanString(patient.nombre),
+        apellidos: cleanString(patient.apellidos),
+        nombre_completo: joinName(patient.nombre, patient.apellidos) || null,
+        telefono: cleanString(patient.telefono_movil),
+        telefono_movil: cleanString(patient.telefono_movil),
+        email: cleanString(patient.email),
+      };
+      out.patient = {
+        ...(isObject(out.patient) ? out.patient : {}),
+        ...patientPatch,
+      };
+      out.paciente = {
+        ...(isObject(out.paciente) ? out.paciente : {}),
+        ...patientPatch,
+      };
+    }
+  }
+
+  const hydratedClinicId = parseIntOrNull(out?.clinic?.id_clinica)
+    || parseIntOrNull(out?.clinica?.id_clinica)
+    || parseIntOrNull(out?.appointment?.clinica_id)
+    || parseIntOrNull(out?.patient?.clinica_id)
+    || parseIntOrNull(out?.lead?.clinica_id);
+
+  if (hydratedClinicId && !out.clinic) {
+    const clinic = await Clinica.findByPk(hydratedClinicId, {
+      attributes: ['id_clinica', 'grupoClinicaId', 'nombre_clinica'],
+      raw: true,
+    });
+    if (clinic) {
+      const clinicPatch = {
+        id: parseIntOrNull(clinic.id_clinica),
+        id_clinica: parseIntOrNull(clinic.id_clinica),
+        clinic_id: parseIntOrNull(clinic.id_clinica),
+        clinica_id: parseIntOrNull(clinic.id_clinica),
+        group_id: parseIntOrNull(clinic.grupoClinicaId),
+        grupo_id: parseIntOrNull(clinic.grupoClinicaId),
+        nombre: cleanString(clinic.nombre_clinica),
+        nombre_clinica: cleanString(clinic.nombre_clinica),
+      };
+      out.clinic = clinicPatch;
+      out.clinica = { ...clinicPatch };
+    }
+  }
+
+  if (!out.trigger || !isObject(out.trigger)) {
+    out.trigger = { type: cleanString(triggerType) || 'manual', data: {} };
+  }
+  if (!isObject(out.trigger.data)) {
+    out.trigger.data = {};
+  }
+  out.trigger.data = {
+    ...(out.trigger.data || {}),
+    appointment_id: parseIntOrNull(out?.appointment?.id_cita) || parseIntOrNull(out?.cita?.id_cita) || null,
+    cita_id: parseIntOrNull(out?.appointment?.id_cita) || parseIntOrNull(out?.cita?.id_cita) || null,
+    patient_id: parseIntOrNull(out?.patient?.id_paciente) || parseIntOrNull(out?.paciente?.id_paciente) || null,
+    paciente_id: parseIntOrNull(out?.patient?.id_paciente) || parseIntOrNull(out?.paciente?.id_paciente) || null,
+    clinic_id: parseIntOrNull(out?.clinic?.id_clinica) || parseIntOrNull(out?.clinica?.id_clinica) || null,
+    clinica_id: parseIntOrNull(out?.clinic?.id_clinica) || parseIntOrNull(out?.clinica?.id_clinica) || null,
+    lead_intake_id: parseIntOrNull(out?.lead?.id) || null,
+    lead_id: parseIntOrNull(out?.lead?.id) || null,
+  };
+
+  return out;
+}
+
+function formatDateTimeEs(rawDate) {
+  if (!rawDate) return null;
+  const date = rawDate instanceof Date ? rawDate : new Date(rawDate);
+  if (!Number.isFinite(date.getTime())) return null;
+  return new Intl.DateTimeFormat('es-ES', {
+    timeZone: 'Europe/Madrid',
+    day: '2-digit',
+    month: '2-digit',
+    year: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+  }).format(date);
+}
+
+const TEST_ENTITY_MARKERS = ['test', 'prueba', 'qa', 'dummy', 'sandbox'];
+
+function normalizeSearchText(raw) {
+  const value = cleanString(raw);
+  if (!value) return null;
+  return value
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase();
+}
+
+function looksLikeTestEntity(...values) {
+  for (const candidate of values) {
+    const normalized = normalizeSearchText(candidate);
+    if (!normalized) continue;
+    if (TEST_ENTITY_MARKERS.some((marker) => normalized.includes(marker))) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function parseTemplateScopeQuery(query) {
+  const explicitScope = cleanString(query?.scope) || cleanString(query?.clinic_id);
+  let clinicIds = [];
+  let groupId = parseIntOrNull(query?.group_id);
+
+  if (explicitScope) {
+    const lowered = explicitScope.toLowerCase();
+    if (lowered !== 'all') {
+      const groupMatch = explicitScope.match(/^group:(\d+)$/i);
+      if (groupMatch) {
+        groupId = Number.parseInt(groupMatch[1], 10);
+      } else {
+        clinicIds = parseIntList(explicitScope);
+      }
+    }
+  }
+
+  return {
+    clinic_ids: clinicIds,
+    group_id: Number.isInteger(groupId) && groupId > 0 ? groupId : null,
+  };
+}
+
 function isObject(value) {
   return !!value && typeof value === 'object' && !Array.isArray(value);
 }
 
 const TRIGGER_TYPES_V2 = [
-  { value: 'appointment_created', label: 'Cita creada' },
+  { value: 'appointment_created', label: 'Cita creada (manual o desde lead)' },
   { value: 'appointment_reminder_window', label: 'Ventana de recordatorio' },
+  { value: 'appointment_confirmed', label: 'Cita confirmada' },
+  { value: 'appointment_no_show', label: 'Cita no show' },
+  { value: 'appointment_rescheduled', label: 'Cita reagendada' },
+  { value: 'appointment_cancelled', label: 'Cita cancelada' },
+  { value: 'appointment_completed', label: 'Cita completada' },
   { value: 'lead_nuevo', label: 'Lead nuevo' },
   { value: 'manual', label: 'Manual' },
 ];
+const TRIGGER_NODE_PREFIX = 'trigger/';
+const TRIGGER_NODE_TYPES_V2 = TRIGGER_TYPES_V2.map((trigger) => ({
+  type: `${TRIGGER_NODE_PREFIX}${trigger.value}`,
+  category: 'trigger',
+  label: trigger.label,
+  description: `Activa el flujo con evento '${trigger.value}'.`,
+  output_keys: ['on_success'],
+  runtime_status: 'real',
+  default_config: {},
+  config_schema: [],
+}));
+
+const APPOINTMENT_TRIGGER_TYPES = new Set([
+  'appointment_created',
+  'appointment_reminder_window',
+  'appointment_confirmed',
+  'appointment_no_show',
+  'appointment_rescheduled',
+  'appointment_cancelled',
+  'appointment_completed',
+]);
+const DUE_DATE_OFFSET_REGEX = /^(\d+)\s*(second|seconds|minute|minutes|hour|hours|day|days)$/i;
+
+function normalizeDomain(raw) {
+  const value = cleanString(raw);
+  if (!value) return null;
+  const normalized = value.toLowerCase();
+  return ['appointment', 'marketing'].includes(normalized) ? normalized : null;
+}
+
+function resolveDomainFromTriggerType(triggerType) {
+  if (APPOINTMENT_TRIGGER_TYPES.has(triggerType)) return 'appointment';
+  return 'marketing';
+}
 
 const NODE_TYPES_V2 = [
+  ...TRIGGER_NODE_TYPES_V2,
   {
     type: 'action/change_status',
     category: 'action',
     label: 'Cambiar estado',
-    description: 'Cambia el estado de la cita y opcionalmente el icono en la agenda.',
+    description: 'Cambia el estado de una cita o lead según target_entity.',
     output_keys: ['on_success', 'on_fail'],
     runtime_status: 'real',
-    default_config: { new_status: 'Agendada', agenda_icon: null },
+    default_config: { target_entity: 'appointment', new_status: 'pendiente' },
     config_schema: [
+      { key: 'target_entity', label: 'Entidad destino', input_type: 'select', required: false, options: CHANGE_STATUS_TARGET_OPTIONS },
       { key: 'new_status', label: 'Nuevo estado', input_type: 'string', required: true },
-      { key: 'agenda_icon', label: 'Icono agenda', input_type: 'string', required: false },
+    ],
+  },
+  {
+    type: 'action/update_lead_info',
+    category: 'action',
+    label: 'Actualizar info del lead',
+    description: 'Actualiza info_requerida/info_recibida_items de un lead y puede transicionar estado automáticamente.',
+    output_keys: ['on_success', 'on_fail'],
+    runtime_status: 'real',
+    default_config: {
+      mode: 'set_required',
+      info_requerida: [],
+      info_recibida_items: [],
+      auto_transition: true,
+      status_when_waiting: 'esperando_info',
+      status_when_complete: 'info_recibida',
+    },
+    config_schema: [
+      { key: 'mode', label: 'Modo', input_type: 'select', required: true, options: UPDATE_LEAD_INFO_MODE_OPTIONS },
+      { key: 'info_requerida', label: 'Información requerida', input_type: 'json', required: false },
+      { key: 'info_recibida_items', label: 'Información recibida', input_type: 'json', required: false },
+      { key: 'auto_transition', label: 'Transición automática de estado', input_type: 'boolean', required: false },
+      { key: 'status_when_waiting', label: 'Estado cuando falta info', input_type: 'string', required: false },
+      { key: 'status_when_complete', label: 'Estado cuando está completa', input_type: 'string', required: false },
     ],
   },
   {
     type: 'action/send_whatsapp',
     category: 'action',
     label: 'Enviar WhatsApp',
-    description: 'Envía un mensaje de WhatsApp usando una plantilla aprobada.',
+    description: 'Envía un mensaje de WhatsApp con plantilla aprobada o texto manual (si hay ventana activa 24h).',
     output_keys: ['on_success', 'on_fail'],
-    runtime_status: 'stub',
-    default_config: { template_id: '', language_code: 'es_ES', variables: {} },
+    runtime_status: 'real',
+    default_config: {
+      message_mode: 'template',
+      template_id: '',
+      manual_message_text: '',
+      language_code: 'es_ES',
+      recipient_mode: 'context_patient',
+      recipient_to: '',
+      sender_mode: 'clinic_default',
+      sender_origin_id: null,
+      quiet_hours_enabled: true,
+      variables: {},
+    },
     config_schema: [
-      { key: 'template_id', label: 'Template ID', input_type: 'string', required: true },
+      { key: 'message_mode', label: 'Modo de mensaje', input_type: 'select', required: false, options: ['template', 'manual'] },
+      { key: 'template_id', label: 'Template ID', input_type: 'string', required: false },
+      { key: 'manual_message_text', label: 'Mensaje manual', input_type: 'text', required: false },
       { key: 'language_code', label: 'Idioma', input_type: 'string', required: false },
+      {
+        key: 'recipient_mode',
+        label: 'Modo destinatario',
+        input_type: 'select',
+        required: false,
+        options: ['context_patient', 'context_lead', 'manual_number'],
+      },
+      { key: 'recipient_to', label: 'Número destino manual (E.164)', input_type: 'string', required: false },
+      {
+        key: 'sender_mode',
+        label: 'Modo remitente',
+        input_type: 'select',
+        required: false,
+        options: ['clinic_default', 'specific_origin'],
+      },
+      { key: 'sender_origin_id', label: 'Origen específico (ID phone)', input_type: 'number', required: false },
+      { key: 'quiet_hours_enabled', label: 'No enviar entre las 22 y las 7h', input_type: 'boolean', required: false },
       { key: 'variables', label: 'Variables', input_type: 'json', required: false },
     ],
   },
@@ -119,14 +644,22 @@ const NODE_TYPES_V2 = [
       description: '',
       assignee_type: 'role',
       assignee_id: null,
+      subrole: null,
       due_date_offset: '1 day',
     },
     config_schema: [
       { key: 'title', label: 'Título', input_type: 'string', required: true },
       { key: 'description', label: 'Descripción', input_type: 'text', required: false },
       { key: 'assignee_type', label: 'Asignar a', input_type: 'select', required: true, options: ['user', 'role'] },
-      { key: 'assignee_id', label: 'ID usuario/rol', input_type: 'number', required: true },
-      { key: 'due_date_offset', label: 'Vencimiento', input_type: 'string', required: false },
+      { key: 'assignee_id', label: 'Usuario / rol', input_type: 'select', required: true },
+      { key: 'subrole', label: 'Subrol (opcional)', input_type: 'select', required: false, options: [] },
+      {
+        key: 'due_date_offset',
+        label: 'Vencimiento de tarea',
+        input_type: 'string',
+        required: false,
+        placeholder: 'Ej: 2 hours, 1 day',
+      },
     ],
   },
   {
@@ -157,6 +690,18 @@ const NODE_TYPES_V2 = [
     ],
   },
   {
+    type: 'control/join',
+    category: 'control',
+    label: 'Unir bifurcación',
+    description: 'Une dos ramas en una única salida.',
+    output_keys: ['on_joined'],
+    runtime_status: 'real',
+    default_config: { mode: 'any' },
+    config_schema: [
+      { key: 'mode', label: 'Modo unión', input_type: 'select', required: false, options: ['any'] },
+    ],
+  },
+  {
     type: 'delay/fixed',
     category: 'delay',
     label: 'Espera fija',
@@ -173,14 +718,51 @@ const NODE_TYPES_V2 = [
     type: 'delay/wait_response',
     category: 'delay',
     label: 'Esperar respuesta',
-    description: 'Espera una respuesta con timeout.',
+    description: 'Espera una respuesta y continúa cuando se cumple el tiempo de espera o llega respuesta.',
     output_keys: ['on_response', 'on_timeout'],
     runtime_status: 'real',
-    default_config: { timeout_duration: 1, timeout_unit: 'hours', listens_to_node_id: null },
+    default_config: {
+      timeout_duration: 1,
+      timeout_unit: 'hours',
+      listens_to_node_id: null,
+      response_buffer_enabled: true,
+    },
     config_schema: [
-      { key: 'timeout_duration', label: 'Timeout', input_type: 'number', required: true },
-      { key: 'timeout_unit', label: 'Unidad timeout', input_type: 'select', required: true, options: ['minutes', 'hours'] },
+      { key: 'timeout_duration', label: 'Tiempo de espera', input_type: 'number', required: true },
+      { key: 'timeout_unit', label: 'Unidad de tiempo de espera', input_type: 'select', required: true, options: ['minutes', 'hours'] },
       { key: 'listens_to_node_id', label: 'Nodo escuchado', input_type: 'string', required: false },
+      {
+        key: 'response_buffer_enabled',
+        label: 'Si hay respuesta, esperar 1 minuto antes de pasar al siguiente paso. A veces los pacientes contestan en varias líneas',
+        input_type: 'boolean',
+        required: false,
+      },
+    ],
+  },
+  {
+    type: 'delay/wait_form_submission',
+    category: 'delay',
+    label: 'Esperar envío de formulario',
+    description: 'Espera a que el mismo paciente o lead envíe un formulario interceptado por el snippet.',
+    output_keys: ['on_submit', 'on_timeout'],
+    runtime_status: 'real',
+    default_config: {
+      match_mode: 'url_contains',
+      match_value: '',
+      timeout_duration: 24,
+      timeout_unit: 'hours',
+    },
+    config_schema: [
+      {
+        key: 'match_mode',
+        label: '¿Cómo identificas el formulario?',
+        input_type: 'select',
+        required: true,
+        options: FORM_MATCH_MODE_OPTIONS,
+      },
+      { key: 'match_value', label: 'Valor a buscar', input_type: 'string', required: true },
+      { key: 'timeout_duration', label: 'Tiempo de espera', input_type: 'number', required: true },
+      { key: 'timeout_unit', label: 'Unidad de tiempo de espera', input_type: 'select', required: true, options: ['minutes', 'hours', 'days'] },
     ],
   },
   {
@@ -199,20 +781,24 @@ const NODE_TYPES_V2 = [
     type: 'condition/field_check',
     category: 'condition',
     label: 'Comprobar campo',
-    description: 'Evalúa una condición simple sobre un campo.',
+    description: 'Evalúa una condición sobre un campo del contexto.',
     output_keys: ['on_true', 'on_false'],
     runtime_status: 'real',
-    default_config: { field: '', operator: 'equals', value: '' },
+    default_config: {
+      left_ref: { source: '', node_id: null, path: '', value_type: 'string', label: '' },
+      operator: 'equals',
+      right_value: '',
+    },
     config_schema: [
-      { key: 'field', label: 'Campo', input_type: 'string', required: true },
+      { key: 'left_ref', label: 'Campo a evaluar', input_type: 'json', required: true },
       {
         key: 'operator',
         label: 'Operador',
         input_type: 'select',
         required: true,
-        options: ['equals', 'not_equals', 'contains', 'greater_than', 'less_than', 'exists'],
+        options: FIELD_CHECK_OPERATOR_OPTIONS,
       },
-      { key: 'value', label: 'Valor', input_type: 'string', required: false },
+      { key: 'right_value', label: 'Valor esperado', input_type: 'string', required: false },
     ],
   },
   {
@@ -221,20 +807,31 @@ const NODE_TYPES_V2 = [
     label: 'Análisis IA',
     description: 'Analiza texto con IA y devuelve una decisión.',
     output_keys: ['on_success', 'on_fail'],
-    runtime_status: 'stub',
+    runtime_status: 'real',
     default_config: {
-      provider: 'openai',
-      model: 'gpt-4.1-mini',
-      prompt: '',
-      input_text: '',
-      output_format: { decision: { type: 'string' }, reason: { type: 'string' } },
+      preset_key: null,
+      instruction: '',
+      context_sources: [],
+      output_fields: [
+        { name: 'decision', type: 'string', description: '' },
+        { name: 'motivo', type: 'string', description: '' },
+      ],
+      mode: 'auto',
+      max_tokens: 700,
     },
     config_schema: [
-      { key: 'provider', label: 'Proveedor', input_type: 'select', required: true, options: ['openai', 'gemini'] },
-      { key: 'model', label: 'Modelo', input_type: 'string', required: true },
-      { key: 'prompt', label: 'Prompt', input_type: 'text', required: true },
-      { key: 'input_text', label: 'Texto entrada', input_type: 'text', required: true },
-      { key: 'output_format', label: 'Formato salida', input_type: 'json', required: true },
+      { key: 'preset_key', label: 'Receta', input_type: 'string', required: false },
+      { key: 'instruction', label: 'Instrucción', input_type: 'text', required: true },
+      { key: 'context_sources', label: 'Fuentes de contexto', input_type: 'json', required: true },
+      { key: 'output_fields', label: 'Campos de salida', input_type: 'json', required: true },
+      {
+        key: 'mode',
+        label: 'Modo de análisis',
+        input_type: 'select',
+        required: false,
+        options: AI_ANALYSIS_MODE_OPTIONS,
+      },
+      { key: 'max_tokens', label: 'Límite de tokens', input_type: 'number', required: false },
     ],
   },
   {
@@ -257,6 +854,63 @@ function getNodeTypeMeta(type) {
 
 function isSupportedTriggerType(triggerType) {
   return TRIGGER_TYPES_V2.some((t) => t.value === triggerType);
+}
+
+function parseTriggerTypeFromNodeType(nodeType) {
+  const rawType = cleanString(nodeType);
+  if (!rawType || !rawType.startsWith(TRIGGER_NODE_PREFIX)) return null;
+  const triggerType = cleanString(rawType.slice(TRIGGER_NODE_PREFIX.length));
+  if (!triggerType || !isSupportedTriggerType(triggerType)) return null;
+  return triggerType;
+}
+
+function resolveTriggerTypeFromEntryNode({ entryNodeId, nodes }) {
+  if (!entryNodeId || !Array.isArray(nodes)) return null;
+  const entryNode = nodes.find((node) => cleanString(node?.id) === entryNodeId);
+  return parseTriggerTypeFromNodeType(entryNode?.type);
+}
+
+function resolveTriggerTypeForTemplate({ explicitTriggerType, entryNodeId, nodes }) {
+  const normalizedExplicit = cleanString(explicitTriggerType);
+
+  if (normalizedExplicit && !isSupportedTriggerType(normalizedExplicit)) {
+    return {
+      ok: false,
+      error: 'invalid_trigger_type',
+      message: `trigger_type no soportado: ${normalizedExplicit}`,
+      allowed: TRIGGER_TYPES_V2.map((item) => item.value),
+    };
+  }
+
+  const inferredFromEntry = resolveTriggerTypeFromEntryNode({ entryNodeId, nodes });
+  if (!inferredFromEntry) {
+    return {
+      ok: false,
+      error: 'trigger_node_required',
+      message: 'El nodo de entrada (entry_node_id) debe ser un nodo activador trigger/* válido',
+      allowed: TRIGGER_TYPES_V2.map((item) => `${TRIGGER_NODE_PREFIX}${item.value}`),
+    };
+  }
+
+  if (normalizedExplicit && inferredFromEntry && normalizedExplicit !== inferredFromEntry) {
+    return {
+      ok: false,
+      error: 'trigger_mismatch',
+      message: `El trigger_type (${normalizedExplicit}) no coincide con el nodo activador (${inferredFromEntry})`,
+      details: {
+        trigger_type: normalizedExplicit,
+        entry_node_trigger_type: inferredFromEntry,
+      },
+    };
+  }
+
+  const finalTriggerType = inferredFromEntry;
+
+  return {
+    ok: true,
+    trigger_type: finalTriggerType,
+    inferred_from_entry_node: !normalizedExplicit && !!inferredFromEntry,
+  };
 }
 
 function collectUnsupportedNodeTypes(nodes) {
@@ -373,60 +1027,149 @@ async function resolveAccess(req) {
   return { user_id: userId, is_admin: false, clinic_ids: clinicIds, group_ids: groupIds };
 }
 
-function hasScopeAccess(access, { clinic_id, group_id, is_system }) {
+function hasScopeAccess(access, { clinic_id, group_id, is_system, created_by }) {
   if (access.is_admin) return true;
   if (is_system) return true;
 
   const clinicId = parseIntOrNull(clinic_id);
   const groupId = parseIntOrNull(group_id);
+  const createdBy = parseIntOrNull(created_by);
+
+  // Plantillas legacy sin scope explícito: el creador conserva acceso.
+  if (!clinicId && !groupId && createdBy && access.user_id === createdBy) {
+    return true;
+  }
 
   if (clinicId && access.clinic_ids.has(clinicId)) return true;
   if (groupId && access.group_ids.has(groupId)) return true;
   return false;
 }
 
-function canOperateTemplateInRequestedScope(template, requestedScope) {
-  if (!requestedScope || !requestedScope.raw_scope) return true;
+function canCreateDraftFromTemplate(access, { clinic_id, group_id }) {
+  if (!access?.user_id) return false;
+  if (access.is_admin) return true;
 
-  const ownerClinicId = parseIntOrNull(template?.clinic_id);
-  const ownerGroupId = parseIntOrNull(template?.group_id);
+  const clinicId = parseIntOrNull(clinic_id);
+  const groupId = parseIntOrNull(group_id);
 
-  if (ownerGroupId) {
-    return requestedScope.scope_type === 'group'
-      && requestedScope.scope_group_id === ownerGroupId;
-  }
-
-  if (ownerClinicId) {
-    return Array.isArray(requestedScope.clinic_ids)
-      && requestedScope.clinic_ids.includes(ownerClinicId);
-  }
-
-  // Plantilla sin owner explícito: no restringir por scope contextual.
+  // Para no-admin, crear draft exige scope explícito.
+  if (!clinicId && !groupId) return false;
+  if (clinicId && !access.clinic_ids.has(clinicId)) return false;
+  if (groupId && !access.group_ids.has(groupId)) return false;
   return true;
 }
 
-function buildTemplatePermissions({ access, template, requestedScope = null }) {
-  const canView = hasScopeAccess(access, template);
-  if (!canView) {
+function buildTemplatePermissions(access, item) {
+  if (!access || !access.user_id) {
     return {
       can_edit: false,
       can_delete: false,
       can_publish: false,
       can_execute: false,
+      can_create_draft: false,
     };
   }
 
-  const isSystem = !!template?.is_system;
-  const isPublished = !!template?.published_at;
-  const canOperateInScope = canOperateTemplateInRequestedScope(template, requestedScope);
-  const canManage = canView && !isSystem && canOperateInScope;
+  const scopeAllowed = hasScopeAccess(access, item);
+  const isDraft = !item?.published_at;
+  const isSystem = !!item?.is_system;
 
   return {
-    can_edit: canManage && !isPublished,
-    can_delete: canManage,
-    can_publish: canManage && !isPublished,
-    can_execute: canView && isPublished,
+    can_edit: scopeAllowed && isDraft,
+    can_delete: scopeAllowed && (!isSystem || access.is_admin),
+    can_publish: scopeAllowed && isDraft,
+    can_execute: scopeAllowed,
+    can_create_draft: !isDraft && canCreateDraftFromTemplate(access, item),
   };
+}
+
+async function loadClinicNameMapFromRows(rows) {
+  const clinicIds = Array.from(
+    new Set(
+      (Array.isArray(rows) ? rows : [])
+        .map((row) => Number.parseInt(String(row?.clinic_id), 10))
+        .filter((id) => Number.isInteger(id) && id > 0)
+    )
+  );
+
+  if (!clinicIds.length) return new Map();
+
+  const clinics = await Clinica.findAll({
+    where: { id_clinica: { [Op.in]: clinicIds } },
+    attributes: ['id_clinica', 'nombre_clinica'],
+    raw: true,
+  });
+
+  return new Map(
+    clinics.map((clinic) => [
+      Number.parseInt(String(clinic.id_clinica), 10),
+      clinic.nombre_clinica || null,
+    ])
+  );
+}
+
+async function resolveGroupContextForClinicIds(inputClinicIds) {
+  const clinicIds = Array.from(
+    new Set(
+      (Array.isArray(inputClinicIds) ? inputClinicIds : [])
+        .map((id) => Number.parseInt(String(id), 10))
+        .filter((id) => Number.isInteger(id) && id > 0)
+    )
+  );
+
+  if (!clinicIds.length) {
+    return { clinic_ids: [], group_ids: [] };
+  }
+
+  const selectedClinics = await Clinica.findAll({
+    where: { id_clinica: { [Op.in]: clinicIds } },
+    attributes: ['id_clinica', 'grupoClinicaId'],
+    raw: true,
+  });
+
+  const groupIds = Array.from(
+    new Set(
+      selectedClinics
+        .map((clinic) => Number.parseInt(String(clinic.grupoClinicaId), 10))
+        .filter((id) => Number.isInteger(id) && id > 0)
+    )
+  );
+
+  let expandedClinicIds = [...clinicIds];
+  if (groupIds.length) {
+    const siblingClinics = await Clinica.findAll({
+      where: { grupoClinicaId: { [Op.in]: groupIds } },
+      attributes: ['id_clinica'],
+      raw: true,
+    });
+    expandedClinicIds = Array.from(
+      new Set([
+        ...clinicIds,
+        ...siblingClinics
+          .map((clinic) => Number.parseInt(String(clinic.id_clinica), 10))
+          .filter((id) => Number.isInteger(id) && id > 0),
+      ])
+    );
+  }
+
+  return { clinic_ids: expandedClinicIds, group_ids: groupIds };
+}
+
+async function resolveClinicIdsForGroup(groupId) {
+  const normalizedGroupId = Number.parseInt(String(groupId), 10);
+  if (!Number.isInteger(normalizedGroupId) || normalizedGroupId <= 0) {
+    return [];
+  }
+
+  const clinics = await Clinica.findAll({
+    where: { grupoClinicaId: normalizedGroupId },
+    attributes: ['id_clinica'],
+    raw: true,
+  });
+
+  return clinics
+    .map((clinic) => Number.parseInt(String(clinic.id_clinica), 10))
+    .filter((id) => Number.isInteger(id) && id > 0);
 }
 
 function assertCreateScopeAllowed(access, { clinic_id, group_id, is_system }) {
@@ -442,119 +1185,16 @@ function assertCreateScopeAllowed(access, { clinic_id, group_id, is_system }) {
   return true;
 }
 
-function uniqueInts(values) {
-  return Array.from(
-    new Set(
-      (Array.isArray(values) ? values : [])
-        .map((value) => Number.parseInt(String(value), 10))
-        .filter((n) => Number.isInteger(n) && n > 0)
-    )
-  );
-}
-
-async function getGroupIdsForClinicIds(clinicIds) {
-  const normalizedClinicIds = uniqueInts(clinicIds);
-  if (!normalizedClinicIds.length) return [];
-
-  const clinics = await Clinica.findAll({
-    where: { id_clinica: { [Op.in]: normalizedClinicIds } },
-    attributes: ['grupoClinicaId'],
-    raw: true,
-  });
-
-  return uniqueInts(clinics.map((c) => c.grupoClinicaId));
-}
-
-async function getClinicIdsForGroupIds(groupIds) {
-  const normalizedGroupIds = uniqueInts(groupIds);
-  if (!normalizedGroupIds.length) return [];
-
-  const clinics = await Clinica.findAll({
-    where: { grupoClinicaId: { [Op.in]: normalizedGroupIds } },
-    attributes: ['id_clinica'],
-    raw: true,
-  });
-
-  return uniqueInts(clinics.map((c) => c.id_clinica));
-}
-
-function buildTemplateVisibilityScopeClause({ clinicIds, groupIds, includeSystem = true }) {
-  const clauses = [];
-  if (includeSystem) clauses.push({ is_system: true });
-
-  const normalizedClinicIds = uniqueInts(clinicIds);
-  const normalizedGroupIds = uniqueInts(groupIds);
-
-  if (normalizedClinicIds.length === 1) {
-    clauses.push({ clinic_id: normalizedClinicIds[0] });
-  } else if (normalizedClinicIds.length > 1) {
-    clauses.push({ clinic_id: { [Op.in]: normalizedClinicIds } });
-  }
-
-  if (normalizedGroupIds.length === 1) {
-    clauses.push({ group_id: normalizedGroupIds[0] });
-  } else if (normalizedGroupIds.length > 1) {
-    clauses.push({ group_id: { [Op.in]: normalizedGroupIds } });
-  }
-
-  return clauses;
-}
-
-async function resolveTemplatesScopeFromQuery(req, access) {
-  const rawScope = cleanString(req.query?.scope)
-    || cleanString(req.query?.clinic_id)
-    || (() => {
-      const rawGroupId = cleanString(req.query?.group_id);
-      return rawGroupId ? `group:${rawGroupId}` : null;
-    })();
-
-  if (!rawScope) {
-    return {
-      raw_scope: null,
-      clinic_ids: [],
-      group_ids: [],
-      scope_type: null,
-      scope_group_id: null,
-    };
-  }
-
-  const resolvedScope = await resolveClinicScope(rawScope, { allowAll: false });
-  if (!resolvedScope?.isValid || resolvedScope?.notFound) {
-    return { error: 'invalid_scope', status: 400, message: `Scope inválido: ${rawScope}` };
-  }
-
-  const scopeClinicIds = uniqueInts(resolvedScope.clinicIds);
-  let scopeGroupIds = [];
-
-  if (resolvedScope.scope === 'group') {
-    const scopeGroupId = Number.parseInt(String(resolvedScope.groupId), 10);
-    if (!Number.isInteger(scopeGroupId) || scopeGroupId <= 0) {
-      return { error: 'invalid_scope', status: 400, message: `Group scope inválido: ${rawScope}` };
-    }
-    scopeGroupIds = [scopeGroupId];
-  } else {
-    scopeGroupIds = await getGroupIdsForClinicIds(scopeClinicIds);
-  }
-
-  if (!access.is_admin) {
-    const forbiddenClinicIds = scopeClinicIds.filter((id) => !access.clinic_ids.has(id));
-    const forbiddenGroupIds = scopeGroupIds.filter((id) => !access.group_ids.has(id));
-    if (forbiddenClinicIds.length || forbiddenGroupIds.length) {
-      return { error: 'forbidden_scope', status: 403, message: 'No tienes acceso al scope solicitado' };
-    }
-  }
-
-  return {
-    raw_scope: rawScope,
-    clinic_ids: scopeClinicIds,
-    group_ids: scopeGroupIds,
-    scope_type: resolvedScope.scope,
-    scope_group_id: resolvedScope.scope === 'group' ? uniqueInts([resolvedScope.groupId])[0] || null : null,
-  };
-}
-
-function mapTemplate(row, { includeNodes = true, permissions = null } = {}) {
+function mapTemplate(row, { includeNodes = true, access = null, clinicNameMap = null } = {}) {
   const item = row?.toJSON ? row.toJSON() : row;
+  const clinicId = Number.parseInt(String(item.clinic_id), 10);
+  const clinicName =
+    item.clinic_name ??
+    (clinicNameMap instanceof Map && Number.isInteger(clinicId)
+      ? (clinicNameMap.get(clinicId) || null)
+      : null);
+  const permissions = buildTemplatePermissions(access, item);
+
   const base = {
     id: item.id,
     template_key: item.template_key,
@@ -563,10 +1203,11 @@ function mapTemplate(row, { includeNodes = true, permissions = null } = {}) {
     name: item.name,
     description: item.description ?? null,
     trigger_type: item.trigger_type,
+    domain: resolveDomainFromTriggerType(item.trigger_type),
     is_active: item.is_active !== false,
     is_system: !!item.is_system,
     clinic_id: item.clinic_id ?? null,
-    clinic_name: item.clinic?.nombre_clinica || item.clinic_name || null,
+    clinic_name: clinicName,
     group_id: item.group_id ?? null,
     entry_node_id: item.entry_node_id,
     published_at: item.published_at ?? null,
@@ -574,17 +1215,16 @@ function mapTemplate(row, { includeNodes = true, permissions = null } = {}) {
     created_by: item.created_by,
     created_at: item.created_at,
     updated_at: item.updated_at,
+    node_count: Array.isArray(item.nodes) ? item.nodes.length : 0,
+    can_edit: permissions.can_edit,
+    can_delete: permissions.can_delete,
+    can_publish: permissions.can_publish,
+    can_execute: permissions.can_execute,
+    can_create_draft: permissions.can_create_draft,
   };
 
   if (includeNodes) {
     base.nodes = Array.isArray(item.nodes) ? item.nodes : [];
-  }
-
-  if (permissions && typeof permissions === 'object') {
-    base.can_edit = !!permissions.can_edit;
-    base.can_delete = !!permissions.can_delete;
-    base.can_publish = !!permissions.can_publish;
-    base.can_execute = !!permissions.can_execute;
   }
 
   return base;
@@ -787,6 +1427,716 @@ function validateFlowGraph({ entry_node_id, nodes }) {
   return { ok: errors.length === 0, errors };
 }
 
+function isConfigValueEmpty(value) {
+  if (value === undefined || value === null) return true;
+  if (typeof value === 'string') return value.trim() === '';
+  if (Array.isArray(value)) return value.length === 0;
+  if (typeof value === 'object') return Object.keys(value).length === 0;
+  return false;
+}
+
+function parseJsonIfString(raw) {
+  if (typeof raw !== 'string') return raw;
+  try {
+    return JSON.parse(raw);
+  } catch (_err) {
+    return null;
+  }
+}
+
+function isOperatorCompatible(operator, valueType) {
+  const type = cleanString(valueType);
+  if (!type || !FIELD_CHECK_OPERATOR_TYPE_COMPAT[type]) return true;
+  return FIELD_CHECK_OPERATOR_TYPE_COMPAT[type].includes(operator);
+}
+
+function validateNodeConfig(node, nodeMap) {
+  const errors = [];
+  const nodeId = cleanString(node?.id) || 'unknown';
+  const nodeType = cleanString(node?.type) || 'unknown';
+  const config = isObject(node?.config) ? node.config : {};
+  const meta = getNodeTypeMeta(nodeType);
+
+  if (!meta) {
+    return errors;
+  }
+
+  const schema = Array.isArray(meta.config_schema) ? meta.config_schema : [];
+  for (const field of schema) {
+    if (!field?.required) continue;
+    const key = cleanString(field.key);
+    if (!key) continue;
+    if (isConfigValueEmpty(config[key])) {
+      errors.push(
+        buildValidationError(
+          'node_config_required',
+          `El nodo ${nodeId} requiere '${key}'`,
+          { node_id: nodeId, node_type: nodeType, key }
+        )
+      );
+    }
+  }
+
+  if (nodeType === 'action/change_status') {
+    const targetEntity = cleanString(config.target_entity);
+    const newStatus = cleanString(config.new_status);
+
+    if (targetEntity && !CHANGE_STATUS_TARGET_OPTIONS.includes(targetEntity)) {
+      errors.push(
+        buildValidationError(
+          'node_config_invalid',
+          `El nodo ${nodeId} requiere target_entity válido`,
+          {
+            node_id: nodeId,
+            node_type: nodeType,
+            key: 'target_entity',
+            value: targetEntity,
+            allowed: CHANGE_STATUS_TARGET_OPTIONS,
+          }
+        )
+      );
+    }
+
+    if (newStatus) {
+      if (targetEntity === 'appointment' && !CITA_STATUS_SET.has(newStatus)) {
+        errors.push(
+          buildValidationError(
+            'node_config_invalid',
+            `El nodo ${nodeId} requiere new_status de cita válido`,
+            {
+              node_id: nodeId,
+              node_type: nodeType,
+              key: 'new_status',
+              value: newStatus,
+              target_entity: 'appointment',
+              allowed: CITA_STATUS_VALUES,
+            }
+          )
+        );
+      }
+      if (targetEntity === 'lead' && !LEAD_STATUS_SET.has(newStatus)) {
+        errors.push(
+          buildValidationError(
+            'node_config_invalid',
+            `El nodo ${nodeId} requiere new_status de lead válido`,
+            {
+              node_id: nodeId,
+              node_type: nodeType,
+              key: 'new_status',
+              value: newStatus,
+              target_entity: 'lead',
+              allowed: LEAD_STATUS_VALUES,
+            }
+          )
+        );
+      }
+      if (!targetEntity && !ANY_CHANGE_STATUS_SET.has(newStatus)) {
+        errors.push(
+          buildValidationError(
+            'node_config_invalid',
+            `El nodo ${nodeId} requiere new_status válido`,
+            {
+              node_id: nodeId,
+              node_type: nodeType,
+              key: 'new_status',
+              value: newStatus,
+              allowed: Array.from(ANY_CHANGE_STATUS_SET),
+            }
+          )
+        );
+      }
+    }
+  }
+
+  if (nodeType === 'action/update_lead_info') {
+    const mode = cleanString(config.mode) || 'set_required';
+    const infoRequerida = parseStringArrayLike(config.info_requerida);
+    const infoRecibida = parseStringArrayLike(config.info_recibida_items);
+    const statusWhenWaiting = cleanString(config.status_when_waiting);
+    const statusWhenComplete = cleanString(config.status_when_complete);
+
+    if (!UPDATE_LEAD_INFO_MODE_OPTIONS.includes(mode)) {
+      errors.push(
+        buildValidationError(
+          'node_config_invalid',
+          `El nodo ${nodeId} requiere mode válido`,
+          {
+            node_id: nodeId,
+            node_type: nodeType,
+            key: 'mode',
+            value: mode,
+            allowed: UPDATE_LEAD_INFO_MODE_OPTIONS,
+          }
+        )
+      );
+    }
+
+    if (['set_required'].includes(mode) && infoRequerida.length === 0) {
+      errors.push(
+        buildValidationError(
+          'node_config_required',
+          `El nodo ${nodeId} requiere info_requerida en modo ${mode}`,
+          {
+            node_id: nodeId,
+            node_type: nodeType,
+            key: 'info_requerida',
+            mode,
+          }
+        )
+      );
+    }
+
+    if (['set_received', 'append_received'].includes(mode) && infoRecibida.length === 0) {
+      errors.push(
+        buildValidationError(
+          'node_config_required',
+          `El nodo ${nodeId} requiere info_recibida_items en modo ${mode}`,
+          {
+            node_id: nodeId,
+            node_type: nodeType,
+            key: 'info_recibida_items',
+            mode,
+          }
+        )
+      );
+    }
+
+    if (statusWhenWaiting && !LEAD_STATUS_SET.has(statusWhenWaiting)) {
+      errors.push(
+        buildValidationError(
+          'node_config_invalid',
+          `El nodo ${nodeId} requiere status_when_waiting de lead válido`,
+          {
+            node_id: nodeId,
+            node_type: nodeType,
+            key: 'status_when_waiting',
+            value: statusWhenWaiting,
+            allowed: LEAD_STATUS_VALUES,
+          }
+        )
+      );
+    }
+
+    if (statusWhenComplete && !LEAD_STATUS_SET.has(statusWhenComplete)) {
+      errors.push(
+        buildValidationError(
+          'node_config_invalid',
+          `El nodo ${nodeId} requiere status_when_complete de lead válido`,
+          {
+            node_id: nodeId,
+            node_type: nodeType,
+            key: 'status_when_complete',
+            value: statusWhenComplete,
+            allowed: LEAD_STATUS_VALUES,
+          }
+        )
+      );
+    }
+  }
+
+  if (nodeType === 'action/create_task') {
+    const assigneeType = cleanString(config.assignee_type);
+    if (!['user', 'role'].includes(assigneeType || '')) {
+      errors.push(
+        buildValidationError(
+          'node_config_invalid',
+          `El nodo ${nodeId} requiere assignee_type = 'user' o 'role'`,
+          { node_id: nodeId, node_type: nodeType, key: 'assignee_type' }
+        )
+      );
+    }
+    if (isConfigValueEmpty(config.assignee_id)) {
+      errors.push(
+        buildValidationError(
+          'node_config_required',
+          `El nodo ${nodeId} requiere 'assignee_id'`,
+          { node_id: nodeId, node_type: nodeType, key: 'assignee_id' }
+        )
+      );
+    }
+    const dueOffset = cleanString(config.due_date_offset);
+    if (dueOffset && !DUE_DATE_OFFSET_REGEX.test(dueOffset)) {
+      errors.push(
+        buildValidationError(
+          'node_config_invalid',
+          `El nodo ${nodeId} tiene due_date_offset inválido (ej: '2 hours', '1 day')`,
+          { node_id: nodeId, node_type: nodeType, key: 'due_date_offset', value: dueOffset }
+        )
+      );
+    }
+  }
+
+  if (nodeType === 'action/send_whatsapp') {
+    const messageModeRaw = cleanString(config.message_mode) || '';
+    const hasTemplateId = !isConfigValueEmpty(config.template_id);
+    const manualMessageText =
+      cleanString(config.manual_message_text) ||
+      cleanString(config.manual_text) ||
+      cleanString(config.message_text) ||
+      '';
+    const hasManualMessageText = !!manualMessageText;
+
+    let messageMode = 'template';
+    if (messageModeRaw === 'manual' || messageModeRaw === 'template') {
+      messageMode = messageModeRaw;
+    } else if (!hasTemplateId && hasManualMessageText) {
+      // Fallback robusto: si hay texto manual y no hay plantilla, asumimos modo manual.
+      messageMode = 'manual';
+    } else if (hasTemplateId) {
+      messageMode = 'template';
+    }
+
+    if (messageModeRaw && !['template', 'manual'].includes(messageModeRaw)) {
+      errors.push(
+        buildValidationError(
+          'node_config_invalid',
+          `El nodo ${nodeId} requiere message_mode válido`,
+          { node_id: nodeId, node_type: nodeType, key: 'message_mode', value: messageModeRaw }
+        )
+      );
+    }
+
+    if (messageMode === 'template' && !hasTemplateId) {
+      errors.push(
+        buildValidationError(
+          'node_config_required',
+          `El nodo ${nodeId} requiere 'template_id' cuando message_mode = template`,
+          { node_id: nodeId, node_type: nodeType, key: 'template_id' }
+        )
+      );
+    }
+
+    if (messageMode === 'manual' && !hasManualMessageText) {
+      errors.push(
+        buildValidationError(
+          'node_config_required',
+          `El nodo ${nodeId} requiere 'manual_message_text' cuando message_mode = manual`,
+          { node_id: nodeId, node_type: nodeType, key: 'manual_message_text' }
+        )
+      );
+    }
+
+    const rawRecipientMode = cleanString(config.recipient_mode) || 'context_patient';
+    const recipientMode = rawRecipientMode === 'flow_phone' ? 'context_patient' : rawRecipientMode;
+    if (!['context_patient', 'context_lead', 'manual_number'].includes(recipientMode)) {
+      errors.push(
+        buildValidationError(
+          'node_config_invalid',
+          `El nodo ${nodeId} requiere recipient_mode válido`,
+          { node_id: nodeId, node_type: nodeType, key: 'recipient_mode', value: recipientMode }
+        )
+      );
+    }
+
+    const recipientTo = cleanString(config.recipient_to) || cleanString(config.to);
+    if (recipientMode === 'manual_number' && !recipientTo) {
+      errors.push(
+        buildValidationError(
+          'node_config_required',
+          `El nodo ${nodeId} requiere 'recipient_to' cuando recipient_mode = manual_number`,
+          { node_id: nodeId, node_type: nodeType, key: 'recipient_to' }
+        )
+      );
+    }
+
+    const senderMode = cleanString(config.sender_mode) || 'clinic_default';
+    if (!['clinic_default', 'specific_origin'].includes(senderMode)) {
+      errors.push(
+        buildValidationError(
+          'node_config_invalid',
+          `El nodo ${nodeId} requiere sender_mode válido`,
+          { node_id: nodeId, node_type: nodeType, key: 'sender_mode', value: senderMode }
+        )
+      );
+    }
+
+    if (senderMode === 'specific_origin') {
+      const senderOriginId = Number(config.sender_origin_id);
+      if (!Number.isFinite(senderOriginId) || senderOriginId <= 0) {
+        errors.push(
+          buildValidationError(
+            'node_config_required',
+            `El nodo ${nodeId} requiere 'sender_origin_id' cuando sender_mode = specific_origin`,
+            { node_id: nodeId, node_type: nodeType, key: 'sender_origin_id' }
+          )
+        );
+      }
+    }
+  }
+
+  if (nodeType === 'delay/fixed') {
+    const duration = Number(config.duration);
+    const unit = cleanString(config.unit);
+    if (!Number.isFinite(duration) || duration <= 0) {
+      errors.push(
+        buildValidationError(
+          'node_config_invalid',
+          `El nodo ${nodeId} requiere duration > 0`,
+          { node_id: nodeId, node_type: nodeType, key: 'duration' }
+        )
+      );
+    }
+    if (!['seconds', 'minutes', 'hours', 'days'].includes(unit || '')) {
+      errors.push(
+        buildValidationError(
+          'node_config_invalid',
+          `El nodo ${nodeId} requiere unit válida`,
+          { node_id: nodeId, node_type: nodeType, key: 'unit' }
+        )
+      );
+    }
+  }
+
+  if (nodeType === 'control/join') {
+    const mode = cleanString(config.mode) || 'any';
+    if (mode !== 'any') {
+      errors.push(
+        buildValidationError(
+          'node_config_invalid',
+          `El nodo ${nodeId} requiere mode = 'any'`,
+          { node_id: nodeId, node_type: nodeType, key: 'mode', value: mode, allowed: ['any'] }
+        )
+      );
+    }
+  }
+
+  if (nodeType === 'delay/wait_response') {
+    const timeoutDuration = Number(config.timeout_duration);
+    const timeoutUnit = cleanString(config.timeout_unit);
+    const listensTo = cleanString(config.listens_to_node_id);
+    if (!Number.isFinite(timeoutDuration) || timeoutDuration <= 0) {
+      errors.push(
+        buildValidationError(
+          'node_config_invalid',
+          `El nodo ${nodeId} requiere timeout_duration > 0`,
+          { node_id: nodeId, node_type: nodeType, key: 'timeout_duration' }
+        )
+      );
+    }
+    if (!['minutes', 'hours'].includes(timeoutUnit || '')) {
+      errors.push(
+        buildValidationError(
+          'node_config_invalid',
+          `El nodo ${nodeId} requiere timeout_unit válida`,
+          { node_id: nodeId, node_type: nodeType, key: 'timeout_unit' }
+        )
+      );
+    }
+    if (!listensTo || !nodeMap.has(listensTo)) {
+      errors.push(
+        buildValidationError(
+          'node_config_invalid',
+          `El nodo ${nodeId} requiere listens_to_node_id existente`,
+          { node_id: nodeId, node_type: nodeType, key: 'listens_to_node_id', value: listensTo || null }
+        )
+      );
+    }
+  }
+
+  if (nodeType === 'delay/wait_form_submission') {
+    const timeoutDuration = Number(config.timeout_duration);
+    const timeoutUnit = cleanString(config.timeout_unit);
+    const matchMode = cleanString(config.match_mode);
+    const matchValue = cleanString(config.match_value);
+    if (!Number.isFinite(timeoutDuration) || timeoutDuration <= 0) {
+      errors.push(
+        buildValidationError(
+          'node_config_invalid',
+          `El nodo ${nodeId} requiere timeout_duration > 0`,
+          { node_id: nodeId, node_type: nodeType, key: 'timeout_duration' }
+        )
+      );
+    }
+    if (!['minutes', 'hours', 'days'].includes(timeoutUnit || '')) {
+      errors.push(
+        buildValidationError(
+          'node_config_invalid',
+          `El nodo ${nodeId} requiere timeout_unit válida`,
+          { node_id: nodeId, node_type: nodeType, key: 'timeout_unit' }
+        )
+      );
+    }
+    if (!FORM_MATCH_MODE_OPTIONS.includes(matchMode || '')) {
+      errors.push(
+        buildValidationError(
+          'node_config_invalid',
+          `El nodo ${nodeId} requiere match_mode válido`,
+          { node_id: nodeId, node_type: nodeType, key: 'match_mode', value: matchMode || null, allowed: FORM_MATCH_MODE_OPTIONS }
+        )
+      );
+    }
+    if (!matchValue) {
+      errors.push(
+        buildValidationError(
+          'node_config_invalid',
+          `El nodo ${nodeId} requiere match_value`,
+          { node_id: nodeId, node_type: nodeType, key: 'match_value' }
+        )
+      );
+    }
+  }
+
+  if (nodeType === 'condition/response_check') {
+    const listensTo = cleanString(config.listens_to_node_id);
+    if (!listensTo || !nodeMap.has(listensTo)) {
+      errors.push(
+        buildValidationError(
+          'node_config_invalid',
+          `El nodo ${nodeId} requiere listens_to_node_id existente`,
+          { node_id: nodeId, node_type: nodeType, key: 'listens_to_node_id', value: listensTo || null }
+        )
+      );
+    }
+  }
+
+  if (nodeType === 'condition/field_check') {
+    const leftRefRaw = parseJsonIfString(config.left_ref);
+    const leftRef = isObject(leftRefRaw) ? leftRefRaw : null;
+
+    if (!leftRef || !cleanString(leftRef.source)) {
+      errors.push(
+        buildValidationError(
+          'node_config_invalid',
+          `El nodo ${nodeId} requiere left_ref con source válido`,
+          { node_id: nodeId, node_type: nodeType, key: 'left_ref' }
+        )
+      );
+    } else {
+      const source = cleanString(leftRef.source);
+      if (!FIELD_CHECK_LEFT_REF_SOURCES.includes(source)) {
+        errors.push(
+          buildValidationError(
+            'node_config_invalid',
+            `El nodo ${nodeId} tiene left_ref.source inválido: '${source}'`,
+            {
+              node_id: nodeId,
+              node_type: nodeType,
+              key: 'left_ref.source',
+              value: source,
+              allowed: FIELD_CHECK_LEFT_REF_SOURCES,
+            }
+          )
+        );
+      }
+
+      if (source === 'node_output') {
+        const refNodeId = cleanString(leftRef.node_id);
+        if (!refNodeId) {
+          errors.push(
+            buildValidationError(
+              'node_config_invalid',
+              `El nodo ${nodeId} requiere left_ref.node_id cuando source es node_output`,
+              { node_id: nodeId, node_type: nodeType, key: 'left_ref.node_id' }
+            )
+          );
+        } else if (!nodeMap.has(refNodeId)) {
+          errors.push(
+            buildValidationError(
+              'node_config_invalid',
+              `El nodo ${nodeId} referencia node_id '${refNodeId}' que no existe en el flujo`,
+              { node_id: nodeId, node_type: nodeType, key: 'left_ref.node_id', value: refNodeId }
+            )
+          );
+        }
+      }
+
+      if (!cleanString(leftRef.path)) {
+        errors.push(
+          buildValidationError(
+            'node_config_invalid',
+            `El nodo ${nodeId} requiere left_ref.path no vacío`,
+            { node_id: nodeId, node_type: nodeType, key: 'left_ref.path' }
+          )
+        );
+      }
+
+      const valueType = cleanString(leftRef.value_type) || 'string';
+      if (!FIELD_CHECK_VALUE_TYPES.includes(valueType)) {
+        errors.push(
+          buildValidationError(
+            'node_config_invalid',
+            `El nodo ${nodeId} tiene left_ref.value_type inválido`,
+            {
+              node_id: nodeId,
+              node_type: nodeType,
+              key: 'left_ref.value_type',
+              value: valueType,
+              allowed: FIELD_CHECK_VALUE_TYPES,
+            }
+          )
+        );
+      }
+    }
+
+    const operator = cleanString(config?.operator) || 'equals';
+    if (!FIELD_CHECK_OPERATOR_OPTIONS.includes(operator)) {
+      errors.push(
+        buildValidationError(
+          'node_config_invalid',
+          `El nodo ${nodeId} requiere operador válido`,
+          {
+            node_id: nodeId,
+            node_type: nodeType,
+            key: 'operator',
+            value: operator,
+            allowed: FIELD_CHECK_OPERATOR_OPTIONS,
+          }
+        )
+      );
+    }
+
+    const effectiveValueType = cleanString(leftRef?.value_type) || 'string';
+    if (!isOperatorCompatible(operator, effectiveValueType)) {
+      errors.push(
+        buildValidationError(
+          'node_config_invalid',
+          `El nodo ${nodeId} usa operador '${operator}' incompatible con tipo '${effectiveValueType}'`,
+          {
+            node_id: nodeId,
+            node_type: nodeType,
+            key: 'operator',
+            value: operator,
+            value_type: effectiveValueType,
+            allowed: FIELD_CHECK_OPERATOR_TYPE_COMPAT[effectiveValueType] || null,
+          }
+        )
+      );
+    }
+
+    if (operator !== 'exists') {
+      const rightValue = config?.right_value;
+      if (rightValue === undefined || rightValue === null || rightValue === '') {
+        errors.push(
+          buildValidationError(
+            'node_config_invalid',
+            `El nodo ${nodeId} requiere right_value para operador '${operator}'`,
+            { node_id: nodeId, node_type: nodeType, key: 'right_value' }
+          )
+        );
+      }
+    }
+
+    if (config.field !== undefined || config.value !== undefined) {
+      errors.push(
+        buildValidationError(
+          'node_config_invalid',
+          `El nodo ${nodeId} usa campos legacy (field/value). Re-configurar con el nuevo contrato.`,
+          { node_id: nodeId, node_type: nodeType, key: 'legacy_fields' }
+        )
+      );
+    }
+  }
+
+  if (nodeType === 'condition/ai_analysis') {
+    if (!cleanString(config.instruction)) {
+      errors.push(
+        buildValidationError(
+          'node_config_invalid',
+          `El nodo ${nodeId} requiere instruction`,
+          { node_id: nodeId, node_type: nodeType, key: 'instruction' }
+        )
+      );
+    }
+
+    const sourcesRaw = parseJsonIfString(config.context_sources);
+    const sources = Array.isArray(sourcesRaw) ? sourcesRaw : [];
+    const validSources = sources.filter((source) =>
+      isObject(source) && cleanString(source.key) && cleanString(source.path)
+    );
+    if (!validSources.length) {
+      errors.push(
+        buildValidationError(
+          'node_config_invalid',
+          `El nodo ${nodeId} requiere al menos una fuente de contexto con key y path válidos`,
+          { node_id: nodeId, node_type: nodeType, key: 'context_sources' }
+        )
+      );
+    }
+
+    const outputFieldsRaw = parseJsonIfString(config.output_fields);
+    const outputFields = Array.isArray(outputFieldsRaw) ? outputFieldsRaw : [];
+    const validOutputFields = outputFields.filter((field) =>
+      isObject(field)
+      && cleanString(field.name)
+      && AI_OUTPUT_FIELD_TYPES.includes(cleanString(field.type))
+      && cleanString(field.description)
+    );
+    if (!validOutputFields.length) {
+      errors.push(
+        buildValidationError(
+          'node_config_invalid',
+          `El nodo ${nodeId} requiere al menos un campo de salida válido (name, type, description)`,
+          { node_id: nodeId, node_type: nodeType, key: 'output_fields' }
+        )
+      );
+    }
+
+    const mode = cleanString(config.mode) || 'auto';
+    if (!AI_ANALYSIS_MODE_OPTIONS.includes(mode)) {
+      errors.push(
+        buildValidationError(
+          'node_config_invalid',
+          `El nodo ${nodeId} requiere mode válido`,
+          {
+            node_id: nodeId,
+            node_type: nodeType,
+            key: 'mode',
+            value: mode,
+            allowed: AI_ANALYSIS_MODE_OPTIONS,
+          }
+        )
+      );
+    }
+
+    const maxTokens = Number(config.max_tokens);
+    if (config.max_tokens !== undefined && config.max_tokens !== null && config.max_tokens !== '') {
+      if (!Number.isFinite(maxTokens) || maxTokens <= 0 || maxTokens > 4096) {
+        errors.push(
+          buildValidationError(
+            'node_config_invalid',
+            `El nodo ${nodeId} requiere max_tokens entre 1 y 4096`,
+            { node_id: nodeId, node_type: nodeType, key: 'max_tokens', value: config.max_tokens }
+          )
+        );
+      }
+    }
+
+    if (
+      config.prompt !== undefined
+      || config.input_text !== undefined
+      || config.output_format !== undefined
+      || config.analysis_mode !== undefined
+      || config.provider !== undefined
+      || config.model !== undefined
+    ) {
+      errors.push(
+        buildValidationError(
+          'node_config_invalid',
+          `El nodo ${nodeId} usa campos legacy (prompt/input_text/output_format/analysis_mode/provider/model). Re-configurar con el nuevo contrato.`,
+          { node_id: nodeId, node_type: nodeType, key: 'legacy_fields' }
+        )
+      );
+    }
+  }
+
+  return errors;
+}
+
+function validateNodeConfigs(nodes) {
+  const safeNodes = Array.isArray(nodes) ? nodes : [];
+  const nodeMap = new Map(
+    safeNodes
+      .map((node) => [cleanString(node?.id), node])
+      .filter(([nodeId]) => !!nodeId)
+  );
+
+  const errors = [];
+  for (const node of safeNodes) {
+    errors.push(...validateNodeConfig(node, nodeMap));
+  }
+  return { ok: errors.length === 0, errors };
+}
+
 exports.getFlowMeta = async (_req, res) => {
   return res.json({
     success: true,
@@ -804,20 +2154,538 @@ exports.getNodeTypesCatalog = async (_req, res) => {
   });
 };
 
+exports.searchEntities = async (req, res) => {
+  try {
+    const access = await resolveAccess(req);
+    if (!access.user_id) {
+      return res.status(401).json({ success: false, error: 'auth_required' });
+    }
+
+    const type = cleanString(req.query?.type)?.toLowerCase();
+    const allowedTypes = new Set(['appointment', 'patient', 'lead', 'conversation']);
+    if (!type || !allowedTypes.has(type)) {
+      return res.status(400).json({
+        success: false,
+        error: 'invalid_type',
+        message: "type debe ser 'appointment', 'patient', 'lead' o 'conversation'",
+      });
+    }
+
+    const queryText = cleanString(req.query?.query) || '';
+    const queryLike = `%${queryText}%`;
+    const limit = parseLimit(req.query?.limit, 10);
+    const presetRaw = cleanString(req.query?.preset)?.toLowerCase() || 'none';
+    const preset = ['upcoming', 'recent', 'none'].includes(presetRaw) ? presetRaw : 'none';
+
+    const requestedClinicIds = parseIntList(req.query?.clinic_id);
+    const requestedGroupId = parseIntOrNull(req.query?.group_id);
+    let clinicIds = [];
+
+    if (requestedGroupId) {
+      if (!access.is_admin && !access.group_ids.has(requestedGroupId)) {
+        return res.status(403).json({ success: false, error: 'forbidden_scope' });
+      }
+      clinicIds = await resolveClinicIdsForGroup(requestedGroupId);
+    } else if (requestedClinicIds.length) {
+      if (!access.is_admin) {
+        const hasForbidden = requestedClinicIds.some((clinicId) => !access.clinic_ids.has(clinicId));
+        if (hasForbidden) {
+          return res.status(403).json({ success: false, error: 'forbidden_scope' });
+        }
+      }
+      clinicIds = requestedClinicIds;
+    } else if (!access.is_admin) {
+      clinicIds = Array.from(access.clinic_ids);
+      if (!clinicIds.length && access.group_ids.size) {
+        const groupClinicIds = await Promise.all(
+          Array.from(access.group_ids).map((groupId) => resolveClinicIdsForGroup(groupId))
+        );
+        clinicIds = groupClinicIds.flat();
+      }
+    }
+
+    clinicIds = Array.from(
+      new Set(
+        clinicIds
+          .map((id) => Number.parseInt(String(id), 10))
+          .filter((id) => Number.isInteger(id) && id > 0)
+      )
+    );
+
+    if (!access.is_admin && !clinicIds.length) {
+      return res.status(403).json({ success: false, error: 'forbidden' });
+    }
+
+    let items = [];
+
+    if (type === 'appointment') {
+      const where = {};
+      if (clinicIds.length) {
+        where.clinica_id = { [Op.in]: clinicIds };
+      }
+      if (preset === 'upcoming') {
+        where.inicio = { [Op.gte]: new Date() };
+      } else if (preset === 'recent') {
+        where.inicio = { [Op.lte]: new Date() };
+      }
+
+      const patientWhere = queryText
+        ? {
+            [Op.or]: [
+              { nombre: { [Op.like]: queryLike } },
+              { apellidos: { [Op.like]: queryLike } },
+              { email: { [Op.like]: queryLike } },
+              { telefono_movil: { [Op.like]: queryLike } },
+            ],
+          }
+        : undefined;
+
+      const rows = await CitaPaciente.findAll({
+        where,
+        include: [
+          {
+            model: Paciente,
+            as: 'paciente',
+            required: !!patientWhere,
+            ...(patientWhere ? { where: patientWhere } : {}),
+            attributes: ['id_paciente', 'nombre', 'apellidos', 'email', 'telefono_movil'],
+          },
+          {
+            model: Clinica,
+            as: 'clinica',
+            required: false,
+            attributes: ['id_clinica', 'nombre_clinica'],
+          },
+        ],
+        order: [['inicio', preset === 'upcoming' ? 'ASC' : 'DESC']],
+        limit,
+      });
+
+      items = rows.map((row) => {
+        const paciente = row.paciente || null;
+        const clinic = row.clinica || null;
+        const patientName = [paciente?.nombre, paciente?.apellidos].filter(Boolean).join(' ').trim() || `Paciente #${row.paciente_id}`;
+        const clinicName = clinic?.nombre_clinica || `Clínica ${row.clinica_id}`;
+        const dateLabel = formatDateTimeEs(row.inicio) || '-';
+        const isTest = looksLikeTestEntity(
+          patientName,
+          paciente?.email,
+          paciente?.telefono_movil,
+          row.titulo,
+          row.motivo
+        );
+        return {
+          id: row.id_cita,
+          label: `Cita · ${patientName}`,
+          subtitle: `${dateLabel} · ${clinicName}`,
+          search_tokens: [patientName, paciente?.email, paciente?.telefono_movil].filter(Boolean),
+          is_test: isTest,
+          context: {
+            clinic_id: row.clinica_id,
+            estado: row.estado,
+            inicio: row.inicio,
+            paciente_id: row.paciente_id,
+            is_test: isTest,
+          },
+        };
+      });
+    } else if (type === 'patient') {
+      const where = {};
+      if (clinicIds.length) {
+        where.clinica_id = { [Op.in]: clinicIds };
+      }
+      if (queryText) {
+        where[Op.or] = [
+          { nombre: { [Op.like]: queryLike } },
+          { apellidos: { [Op.like]: queryLike } },
+          { email: { [Op.like]: queryLike } },
+          { telefono_movil: { [Op.like]: queryLike } },
+        ];
+      }
+
+      const rows = await Paciente.findAll({
+        where,
+        attributes: ['id_paciente', 'clinica_id', 'nombre', 'apellidos', 'email', 'telefono_movil', 'updatedAt'],
+        order: [['updatedAt', 'DESC']],
+        limit,
+      });
+
+      items = rows.map((row) => {
+        const fullName = [row.nombre, row.apellidos].filter(Boolean).join(' ').trim() || `Paciente #${row.id_paciente}`;
+        const isTest = looksLikeTestEntity(fullName, row.email, row.telefono_movil);
+        return {
+          id: row.id_paciente,
+          label: fullName,
+          subtitle: [row.email, row.telefono_movil].filter(Boolean).join(' · ') || `Clínica ${row.clinica_id}`,
+          search_tokens: [fullName, row.email, row.telefono_movil].filter(Boolean),
+          is_test: isTest,
+          context: {
+            clinic_id: row.clinica_id,
+            is_test: isTest,
+          },
+        };
+      });
+    } else if (type === 'lead') {
+      const where = {};
+      if (clinicIds.length) {
+        where.clinica_id = { [Op.in]: clinicIds };
+      }
+      if (queryText) {
+        where[Op.or] = [
+          { nombre: { [Op.like]: queryLike } },
+          { email: { [Op.like]: queryLike } },
+          { telefono: { [Op.like]: queryLike } },
+          { status_lead: { [Op.like]: queryLike } },
+        ];
+      }
+
+      const rows = await LeadIntake.findAll({
+        where,
+        attributes: ['id', 'clinica_id', 'nombre', 'email', 'telefono', 'status_lead', 'created_at'],
+        order: [['created_at', 'DESC']],
+        limit,
+      });
+
+      items = rows.map((row) => {
+        const leadName = cleanString(row.nombre) || `Lead #${row.id}`;
+        const isTest = looksLikeTestEntity(leadName, row.email, row.telefono);
+        return {
+          id: row.id,
+          label: `Lead · ${leadName}`,
+          subtitle: [row.status_lead, row.telefono || row.email].filter(Boolean).join(' · ') || null,
+          search_tokens: [leadName, row.email, row.telefono, row.status_lead].filter(Boolean),
+          is_test: isTest,
+          context: {
+            clinic_id: row.clinica_id,
+            status_lead: row.status_lead,
+            is_test: isTest,
+          },
+        };
+      });
+    } else {
+      items = [];
+    }
+
+    return res.json({
+      success: true,
+      type,
+      data: {
+        items,
+        total: items.length,
+      },
+      meta: {
+        query: queryText,
+        limit,
+        preset,
+        source: 'db',
+      },
+    });
+  } catch (err) {
+    console.error('Error searchEntities v2', err);
+    return res.status(500).json({
+      success: false,
+      error: 'search_entities_failed',
+      message: err.message,
+    });
+  }
+};
+
+exports.getAssigneesCatalog = async (req, res) => {
+  try {
+    const access = await resolveAccess(req);
+    if (!access.user_id) {
+      return res.status(401).json({ success: false, error: 'auth_required' });
+    }
+
+    const limit = Math.max(50, Math.min(500, parseIntOrNull(req.query?.limit) || 300));
+
+    const parsedScope = parseTemplateScopeQuery(req.query);
+    let clinicIds = [];
+
+    if (parsedScope.group_id) {
+      if (!access.is_admin && !access.group_ids.has(parsedScope.group_id)) {
+        return res.status(403).json({ success: false, error: 'forbidden_scope' });
+      }
+      clinicIds = await resolveClinicIdsForGroup(parsedScope.group_id);
+    } else if (parsedScope.clinic_ids.length) {
+      if (!access.is_admin) {
+        const hasForbidden = parsedScope.clinic_ids.some((clinicId) => !access.clinic_ids.has(clinicId));
+        if (hasForbidden) {
+          return res.status(403).json({ success: false, error: 'forbidden_scope' });
+        }
+      }
+      clinicIds = parsedScope.clinic_ids;
+    } else if (!access.is_admin) {
+      clinicIds = Array.from(access.clinic_ids);
+    }
+
+    clinicIds = Array.from(
+      new Set(
+        clinicIds
+          .map((id) => Number.parseInt(String(id), 10))
+          .filter((id) => Number.isInteger(id) && id > 0)
+      )
+    );
+
+    if (!clinicIds.length) {
+      return res.json({
+        success: true,
+        data: {
+          clinic_ids: [],
+          roles: TASK_ASSIGNEE_ROLE_OPTIONS,
+          subroles: [],
+          users: [],
+        },
+      });
+    }
+
+    const memberships = await UsuarioClinica.findAll({
+      where: {
+        id_clinica: { [Op.in]: clinicIds },
+        rol_clinica: {
+          [Op.notIn]: ['paciente'],
+        },
+      },
+      attributes: ['id_usuario', 'id_clinica', 'rol_clinica', 'subrol_clinica'],
+      raw: true,
+    });
+
+    const userIds = Array.from(
+      new Set(
+        memberships
+          .map((row) => Number.parseInt(String(row.id_usuario), 10))
+          .filter((id) => Number.isInteger(id) && id > 0)
+      )
+    );
+
+    const users = userIds.length
+      ? await Usuario.findAll({
+          where: { id_usuario: { [Op.in]: userIds } },
+          attributes: ['id_usuario', 'nombre', 'apellidos', 'email_usuario'],
+          raw: true,
+        })
+      : [];
+
+    const userById = new Map(
+      users.map((row) => [
+        Number.parseInt(String(row.id_usuario), 10),
+        row,
+      ])
+    );
+
+    const userMetaMap = new Map();
+    for (const membership of memberships) {
+      const userId = Number.parseInt(String(membership.id_usuario), 10);
+      if (!Number.isInteger(userId) || userId <= 0) continue;
+      if (!userMetaMap.has(userId)) {
+        userMetaMap.set(userId, { clinic_ids: new Set(), roles: new Set() });
+      }
+      const meta = userMetaMap.get(userId);
+      const clinicId = Number.parseInt(String(membership.id_clinica), 10);
+      if (Number.isInteger(clinicId) && clinicId > 0) {
+        meta.clinic_ids.add(clinicId);
+      }
+      const role = String(membership.rol_clinica || '').toLowerCase();
+      if (role) meta.roles.add(role);
+    }
+
+    const allUserOptions = Array.from(userMetaMap.entries())
+      .map(([userId, meta]) => {
+        const user = userById.get(userId);
+        const firstName = String(user?.nombre || '').trim();
+        const lastName = String(user?.apellidos || '').trim();
+        const fullName = `${firstName} ${lastName}`.trim();
+        const email = String(user?.email_usuario || '').trim() || null;
+        const labelBase = fullName || email || `Usuario ${userId}`;
+        return {
+          id: userId,
+          label: email ? `${labelBase} (${email})` : labelBase,
+          name: fullName || null,
+          email,
+          clinic_ids: Array.from(meta.clinic_ids).sort((a, b) => a - b),
+          roles: Array.from(meta.roles),
+        };
+      })
+      .sort((a, b) => String(a.label || '').localeCompare(String(b.label || ''), 'es'));
+    const userOptions = allUserOptions.slice(0, limit);
+    const roleCodes = Array.from(
+      new Set(
+        memberships
+          .map((row) => String(row.rol_clinica || '').trim().toLowerCase())
+          .filter(Boolean)
+      )
+    );
+    const rolePriority = ['propietario', 'administrador', 'admin', 'personaldeclinica'];
+    roleCodes.sort((a, b) => {
+      const ia = rolePriority.indexOf(a);
+      const ib = rolePriority.indexOf(b);
+      if (ia !== -1 && ib !== -1) return ia - ib;
+      if (ia !== -1) return -1;
+      if (ib !== -1) return 1;
+      return a.localeCompare(b, 'es');
+    });
+
+    const roleOptions = roleCodes.length
+      ? roleCodes.map((code) => ({
+          id: code,
+          code,
+          label: TASK_ROLE_LABELS[code] || code,
+        }))
+      : TASK_ASSIGNEE_ROLE_OPTIONS;
+
+    const subroleCodes = Array.from(
+      new Set(
+        memberships
+          .map((row) => String(row.subrol_clinica || '').trim())
+          .filter(Boolean)
+      )
+    ).sort((a, b) => a.localeCompare(b, 'es'));
+    const subroleOptions = subroleCodes.map((code) => ({ code, label: code }));
+
+    return res.json({
+      success: true,
+      data: {
+        clinic_ids: clinicIds,
+        roles: roleOptions,
+        subroles: subroleOptions,
+        users: userOptions,
+        users_truncated: allUserOptions.length > userOptions.length,
+      },
+    });
+  } catch (err) {
+    console.error('Error getAssigneesCatalog v2', err);
+    return res.status(500).json({ success: false, error: 'assignees_failed', message: err.message });
+  }
+};
+
+exports.getRecentFormMatches = async (req, res) => {
+  try {
+    const access = await resolveAccess(req);
+    if (!access.user_id) {
+      return res.status(401).json({ success: false, error: 'auth_required' });
+    }
+
+    const limit = Math.max(8, Math.min(40, parseIntOrNull(req.query?.limit) || 24));
+    const parsedScope = parseTemplateScopeQuery(req.query);
+    let clinicIds = [];
+
+    if (parsedScope.group_id) {
+      if (!access.is_admin && !access.group_ids.has(parsedScope.group_id)) {
+        return res.status(403).json({ success: false, error: 'forbidden_scope' });
+      }
+      clinicIds = await resolveClinicIdsForGroup(parsedScope.group_id);
+    } else if (parsedScope.clinic_ids.length) {
+      if (!access.is_admin) {
+        const hasForbidden = parsedScope.clinic_ids.some((clinicId) => !access.clinic_ids.has(clinicId));
+        if (hasForbidden) {
+          return res.status(403).json({ success: false, error: 'forbidden_scope' });
+        }
+      }
+      clinicIds = parsedScope.clinic_ids;
+    } else if (!access.is_admin) {
+      clinicIds = Array.from(access.clinic_ids);
+    }
+
+    clinicIds = Array.from(
+      new Set(
+        clinicIds
+          .map((id) => Number.parseInt(String(id), 10))
+          .filter((id) => Number.isInteger(id) && id > 0)
+      )
+    );
+
+    if (!clinicIds.length) {
+      return res.json({
+        success: true,
+        data: {
+          clinic_ids: [],
+          items: [],
+        },
+      });
+    }
+
+    const rows = await FormSubmissionEvent.findAll({
+      where: {
+        clinic_id: { [Op.in]: clinicIds },
+      },
+      attributes: ['clinic_id', 'page_url', 'form_id', 'form_name', 'form_selector', 'submitted_at'],
+      order: [['submitted_at', 'DESC']],
+      limit: limit * 4,
+      raw: true,
+    });
+
+    const seen = new Set();
+    const items = [];
+    for (const row of rows) {
+      const signature = [
+        cleanString(row.page_url) || '',
+        cleanString(row.form_id) || '',
+        cleanString(row.form_selector) || '',
+      ].join('|');
+      if (!signature || seen.has(signature)) {
+        continue;
+      }
+      seen.add(signature);
+      items.push({
+        clinic_id: parseIntOrNull(row.clinic_id),
+        page_url: cleanString(row.page_url),
+        form_id: cleanString(row.form_id),
+        form_name: cleanString(row.form_name),
+        form_selector: cleanString(row.form_selector),
+        submitted_at: row.submitted_at || null,
+      });
+      if (items.length >= limit) {
+        break;
+      }
+    }
+
+    return res.json({
+      success: true,
+      data: {
+        clinic_ids: clinicIds,
+        items,
+      },
+    });
+  } catch (error) {
+    console.error('[automations-v2] getRecentFormMatches error', error);
+    return res.status(500).json({ success: false, error: 'recent_form_matches_failed' });
+  }
+};
+
 exports.validateTemplateGraph = async (req, res) => {
   try {
     const body = req.body || {};
     const entryNodeId = cleanString(body.entry_node_id);
     const nodes = normalizeNodesInput(body.nodes);
-    const validation = validateFlowGraph({
+    const graphValidation = validateFlowGraph({
       entry_node_id: entryNodeId,
       nodes,
     });
-    if (!validation.ok) {
+    const nodeConfigValidation = validateNodeConfigs(nodes);
+    const triggerResolution = resolveTriggerTypeForTemplate({
+      explicitTriggerType: undefined,
+      entryNodeId,
+      nodes,
+    });
+    if (!triggerResolution.ok) {
       return res.status(400).json({
         success: false,
-        error: 'graph_validation_failed',
-        validation_errors: validation.errors,
+        error: triggerResolution.error,
+        message: triggerResolution.message,
+        allowed: triggerResolution.allowed,
+        details: triggerResolution.details,
+      });
+    }
+    const validationErrors = [
+      ...(graphValidation.errors || []),
+      ...(nodeConfigValidation.errors || []),
+    ];
+
+    if (validationErrors.length) {
+      return res.status(400).json({
+        success: false,
+        error: 'validation_failed',
+        validation_errors: validationErrors,
       });
     }
     return res.json({
@@ -849,6 +2717,30 @@ exports.listTemplates = async (req, res) => {
 
     const triggerType = cleanString(req.query?.trigger_type);
     if (triggerType) where.trigger_type = triggerType;
+    const domainRaw = cleanString(req.query?.domain);
+    if (domainRaw) {
+      const domain = normalizeDomain(domainRaw);
+      if (!domain) {
+        return res.status(400).json({
+          success: false,
+          error: 'invalid_domain',
+          allowed: ['appointment', 'marketing'],
+        });
+      }
+      if (triggerType) {
+        if (resolveDomainFromTriggerType(triggerType) !== domain) {
+          return res.json({
+            success: true,
+            data: [],
+            pagination: { total: 0, limit, offset },
+          });
+        }
+      } else if (domain === 'appointment') {
+        where.trigger_type = { [Op.in]: Array.from(APPOINTMENT_TRIGGER_TYPES) };
+      } else if (domain === 'marketing') {
+        where.trigger_type = { [Op.notIn]: Array.from(APPOINTMENT_TRIGGER_TYPES) };
+      }
+    }
 
     const engineVersion = cleanString(req.query?.engine_version);
     if (engineVersion) where.engine_version = engineVersion;
@@ -867,29 +2759,71 @@ exports.listTemplates = async (req, res) => {
       ];
     }
 
-    const requestedScope = await resolveTemplatesScopeFromQuery(req, access);
-    if (requestedScope.error) {
-      return res.status(requestedScope.status || 400).json({
-        success: false,
-        error: requestedScope.error,
-        message: requestedScope.message || 'Scope inválido',
+    const parsedScope = parseTemplateScopeQuery(req.query);
+    const clinicIds = parsedScope.clinic_ids;
+    const groupId = parsedScope.group_id;
+
+    if (clinicIds.length) {
+      if (!access.is_admin) {
+        const hasForbidden = clinicIds.some((clinicId) => !access.clinic_ids.has(clinicId));
+        if (hasForbidden) {
+          return res.status(403).json({ success: false, error: 'forbidden_scope' });
+        }
+      }
+
+      const expandedScope = await resolveGroupContextForClinicIds(clinicIds);
+      const expandedClinicIds = expandedScope.clinic_ids;
+      const relatedGroupIds = expandedScope.group_ids;
+
+      where[Op.and] = where[Op.and] || [];
+      where[Op.and].push({
+        [Op.or]: [
+          {
+            clinic_id:
+              expandedClinicIds.length === 1
+                ? expandedClinicIds[0]
+                : { [Op.in]: expandedClinicIds },
+          },
+          ...(relatedGroupIds.length
+            ? [{ group_id: relatedGroupIds.length === 1 ? relatedGroupIds[0] : { [Op.in]: relatedGroupIds } }]
+            : []),
+          { is_system: true },
+          {
+            [Op.and]: [
+              { clinic_id: null },
+              { group_id: null },
+              { created_by: access.user_id },
+            ],
+          },
+        ],
       });
     }
 
-    const hasExplicitScope = !!requestedScope.raw_scope;
-    if (hasExplicitScope) {
-      // Si el scope es una clínica, también mostrar plantillas de otras clínicas del mismo grupo.
-      const siblingClinicIds = await getClinicIdsForGroupIds(requestedScope.group_ids);
-      const scopeClinicIds = uniqueInts([...(requestedScope.clinic_ids || []), ...siblingClinicIds]);
-      const visibilityClauses = buildTemplateVisibilityScopeClause({
-        clinicIds: scopeClinicIds,
-        groupIds: requestedScope.group_ids,
-        includeSystem: true,
-      });
+    if (groupId) {
+      if (!access.is_admin && !access.group_ids.has(groupId)) {
+        return res.status(403).json({ success: false, error: 'forbidden_scope' });
+      }
+
+      const clinicIdsInGroup = await resolveClinicIdsForGroup(groupId);
 
       where[Op.and] = where[Op.and] || [];
-      where[Op.and].push({ [Op.or]: visibilityClauses });
-    } else if (!access.is_admin) {
+      where[Op.and].push({
+        [Op.or]: [
+          { group_id: groupId },
+          ...(clinicIdsInGroup.length ? [{ clinic_id: { [Op.in]: clinicIdsInGroup } }] : []),
+          { is_system: true },
+          {
+            [Op.and]: [
+              { clinic_id: null },
+              { group_id: null },
+              { created_by: access.user_id },
+            ],
+          },
+        ],
+      });
+    }
+
+    if (!access.is_admin && !clinicIds.length && !groupId) {
       where[Op.and] = where[Op.and] || [];
       where[Op.and].push({
         [Op.or]: [
@@ -902,27 +2836,18 @@ exports.listTemplates = async (req, res) => {
 
     const { count, rows } = await AutomationFlowTemplateV2.findAndCountAll({
       where,
-      include: [{
-        model: Clinica,
-        as: 'clinic',
-        attributes: ['id_clinica', 'nombre_clinica'],
-        required: false,
-      }],
       limit,
       offset,
       order: [['template_key', 'ASC'], ['version', 'DESC']],
     });
 
+    const clinicNameMap = await loadClinicNameMapFromRows(rows);
+
     return res.json({
       success: true,
-      data: rows.map((row) => mapTemplate(row, {
-        includeNodes,
-        permissions: buildTemplatePermissions({
-          access,
-          template: row,
-          requestedScope,
-        }),
-      })),
+      data: rows.map((row) =>
+        mapTemplate(row, { includeNodes, access, clinicNameMap })
+      ),
       pagination: {
         total: count,
         limit,
@@ -932,160 +2857,6 @@ exports.listTemplates = async (req, res) => {
   } catch (err) {
     console.error('Error listTemplates v2', err);
     return res.status(500).json({ success: false, error: 'list_failed', message: err.message });
-  }
-};
-
-exports.deleteTemplate = async (req, res) => {
-  let transaction = null;
-  try {
-    transaction = await db.sequelize.transaction();
-    const access = await resolveAccess(req);
-    const templateKey = sanitizeTemplateKey(req.params?.template_key);
-    if (!templateKey) {
-      await transaction.rollback();
-      return res.status(400).json({ success: false, error: 'invalid_template_key' });
-    }
-
-    const requestedScope = await resolveTemplatesScopeFromQuery(req, access);
-    if (requestedScope.error) {
-      await transaction.rollback();
-      return res.status(requestedScope.status || 400).json({
-        success: false,
-        error: requestedScope.error,
-        message: requestedScope.message || 'Scope inválido',
-      });
-    }
-
-    const versions = await AutomationFlowTemplateV2.findAll({
-      where: { template_key: templateKey },
-      order: [['version', 'DESC']],
-      transaction,
-      lock: transaction.LOCK.UPDATE,
-    });
-
-    if (!versions.length) {
-      await transaction.rollback();
-      return res.status(404).json({ success: false, error: 'template_not_found' });
-    }
-
-    const owner = versions[0];
-    if (!hasScopeAccess(access, owner)) {
-      await transaction.rollback();
-      return res.status(404).json({ success: false, error: 'template_not_found' });
-    }
-
-    if (owner.is_system) {
-      if (!access.is_admin) {
-        await transaction.rollback();
-        return res.status(405).json({
-          success: false,
-          error: 'delete_disabled_system',
-          message: 'Las plantillas de sistema no se pueden borrar',
-        });
-      }
-
-      const confirmed = parseBool(req.query?.confirm_system_delete, false);
-      if (!confirmed) {
-        await transaction.rollback();
-        return res.status(409).json({
-          success: false,
-          error: 'confirm_system_delete_required',
-          message: 'Debes confirmar explícitamente el borrado de una plantilla de sistema',
-        });
-      }
-    }
-
-    const ownerClinicId = parseIntOrNull(owner.clinic_id);
-    const ownerGroupId = parseIntOrNull(owner.group_id);
-    if (requestedScope.raw_scope) {
-      if (ownerGroupId) {
-        if (requestedScope.scope_type !== 'group' || requestedScope.scope_group_id !== ownerGroupId) {
-          await transaction.rollback();
-          return res.status(403).json({
-            success: false,
-            error: 'forbidden_scope',
-            message: 'Para borrar una plantilla de grupo debes estar posicionado en ese grupo',
-          });
-        }
-      } else if (ownerClinicId) {
-        if (!requestedScope.clinic_ids.includes(ownerClinicId)) {
-          await transaction.rollback();
-          return res.status(403).json({
-            success: false,
-            error: 'forbidden_scope',
-            message: 'Para borrar una plantilla de clínica debes estar posicionado en esa clínica',
-          });
-        }
-      }
-    }
-
-    const versionIds = versions.map((v) => Number(v.id)).filter((id) => Number.isInteger(id));
-    const activeExecutions = await FlowExecutionV2.findAll({
-      where: {
-        template_version_id: { [Op.in]: versionIds },
-        status: { [Op.in]: ['running', 'waiting', 'paused'] },
-      },
-      attributes: ['id', 'status', 'clinic_id', 'group_id', 'template_version_id'],
-      raw: true,
-      transaction,
-      lock: transaction.LOCK.UPDATE,
-    });
-
-    if (activeExecutions.length) {
-      await transaction.rollback();
-      return res.status(409).json({
-        success: false,
-        error: 'template_in_use',
-        message: 'La plantilla no se puede borrar porque tiene ejecuciones activas',
-        details: {
-          active_executions: activeExecutions.length,
-          clinic_ids: uniqueInts(activeExecutions.map((item) => item.clinic_id)),
-          group_ids: uniqueInts(activeExecutions.map((item) => item.group_id)),
-          statuses: Array.from(new Set(activeExecutions.map((item) => item.status).filter(Boolean))),
-        },
-      });
-    }
-
-    const allExecutions = await FlowExecutionV2.findAll({
-      where: {
-        template_version_id: { [Op.in]: versionIds },
-      },
-      attributes: ['id'],
-      raw: true,
-      transaction,
-      lock: transaction.LOCK.UPDATE,
-    });
-    const executionIds = allExecutions.map((item) => Number(item.id)).filter((id) => Number.isInteger(id));
-
-    if (executionIds.length) {
-      await FlowExecutionLogV2.destroy({
-        where: { flow_execution_id: { [Op.in]: executionIds } },
-        transaction,
-      });
-      await FlowExecutionV2.destroy({
-        where: { id: { [Op.in]: executionIds } },
-        transaction,
-      });
-    }
-
-    await AutomationFlowTemplateV2.destroy({
-      where: { id: { [Op.in]: versionIds } },
-      transaction,
-    });
-
-    await transaction.commit();
-    return res.json({
-      success: true,
-      data: {
-        template_key: templateKey,
-        deleted_versions: versionIds.length,
-        deleted_executions: executionIds.length,
-      },
-    });
-  } catch (err) {
-    if (transaction) await transaction.rollback();
-    console.error('Error deleteTemplate v2', err);
-    return res.status(500).json({ success: false, error: 'delete_failed', message: err.message });
   }
 };
 
@@ -1102,19 +2873,11 @@ exports.createTemplateDraft = async (req, res) => {
     const entryNodeId = cleanString(body.entry_node_id);
     const nodes = Array.isArray(body.nodes) ? normalizeNodesInput(body.nodes) : null;
 
-    if (!name || !triggerType || !entryNodeId || !nodes) {
+    if (!name || !entryNodeId || !nodes) {
       return res.status(400).json({
         success: false,
         error: 'invalid_payload',
-        message: 'name, trigger_type, entry_node_id y nodes son obligatorios',
-      });
-    }
-    if (!isSupportedTriggerType(triggerType)) {
-      return res.status(400).json({
-        success: false,
-        error: 'invalid_trigger_type',
-        message: `trigger_type no soportado: ${triggerType}`,
-        allowed: TRIGGER_TYPES_V2.map((item) => item.value),
+        message: 'name, entry_node_id y nodes son obligatorios',
       });
     }
     if (!nodes.length) {
@@ -1141,55 +2904,39 @@ exports.createTemplateDraft = async (req, res) => {
       });
     }
 
+    const triggerResolution = resolveTriggerTypeForTemplate({
+      explicitTriggerType: triggerType,
+      entryNodeId,
+      nodes,
+    });
+    if (!triggerResolution.ok) {
+      return res.status(400).json({
+        success: false,
+        error: triggerResolution.error,
+        message: triggerResolution.message,
+        allowed: triggerResolution.allowed,
+        details: triggerResolution.details,
+      });
+    }
+    const resolvedTriggerType = triggerResolution.trigger_type;
+
     const templateKey = buildTemplateKey({ templateKey: body.template_key, name });
     let clinicId = parseIntOrNull(body.clinic_id);
     let groupId = parseIntOrNull(body.group_id);
-    const scopeRaw = cleanString(body.scope);
-
-    if (scopeRaw) {
-      const resolvedScope = await resolveClinicScope(scopeRaw, { allowAll: false });
-      if (!resolvedScope?.isValid || resolvedScope?.notFound) {
-        return res.status(400).json({
-          success: false,
-          error: 'invalid_scope',
-          message: `Scope inválido: ${scopeRaw}`,
-        });
-      }
-
-      if (resolvedScope.scope === 'group') {
-        groupId = parseIntOrNull(resolvedScope.groupId);
-        clinicId = null;
-      } else {
-        const scopeClinicIds = uniqueInts(resolvedScope.clinicIds);
-        if (!scopeClinicIds.length) {
-          return res.status(400).json({
-            success: false,
-            error: 'invalid_scope',
-            message: `Scope inválido: ${scopeRaw}`,
-          });
-        }
-
-        if (scopeClinicIds.length > 1) {
-          const scopeGroupIds = await getGroupIdsForClinicIds(scopeClinicIds);
-          if (scopeGroupIds.length === 1) {
-            groupId = scopeGroupIds[0];
-            clinicId = null;
-          } else {
-            clinicId = scopeClinicIds[0];
-            groupId = null;
-          }
-        } else {
-          clinicId = scopeClinicIds[0];
-          groupId = null;
-        }
-      }
-    }
-
-    if (groupId) {
-      clinicId = null;
-    }
-
     const isSystem = access.is_admin ? parseBool(body.is_system, false) : false;
+
+    // Si se crea en scope clínica y no viene group_id, inferir el grupo de la clínica.
+    if (clinicId && !groupId) {
+      const clinic = await Clinica.findOne({
+        where: { id_clinica: clinicId },
+        attributes: ['grupoClinicaId'],
+        raw: true,
+      });
+      const inferredGroupId = parseIntOrNull(clinic?.grupoClinicaId);
+      if (inferredGroupId) {
+        groupId = inferredGroupId;
+      }
+    }
 
     if (!assertCreateScopeAllowed(access, { clinic_id: clinicId, group_id: groupId, is_system: isSystem })) {
       return res.status(403).json({ success: false, error: 'forbidden_scope' });
@@ -1226,7 +2973,7 @@ exports.createTemplateDraft = async (req, res) => {
       engine_version: cleanString(body.engine_version) || 'v2',
       name,
       description: cleanString(body.description),
-      trigger_type: triggerType,
+      trigger_type: resolvedTriggerType,
       is_active: parseBool(body.is_active, true),
       is_system: !!isSystem,
       clinic_id: clinicId,
@@ -1238,15 +2985,10 @@ exports.createTemplateDraft = async (req, res) => {
       created_by: access.user_id,
     });
 
+    const clinicNameMap = await loadClinicNameMapFromRows([created]);
     return res.status(201).json({
       success: true,
-      data: mapTemplate(created, {
-        includeNodes: true,
-        permissions: buildTemplatePermissions({
-          access,
-          template: created,
-        }),
-      }),
+      data: mapTemplate(created, { includeNodes: true, access, clinicNameMap }),
     });
   } catch (err) {
     console.error('Error createTemplateDraft v2', err);
@@ -1276,25 +3018,10 @@ exports.getTemplateLatestPublished = async (req, res) => {
       return res.status(404).json({ success: false, error: 'template_not_found' });
     }
 
-    const requestedScope = await resolveTemplatesScopeFromQuery(req, access);
-    if (requestedScope.error) {
-      return res.status(requestedScope.status || 400).json({
-        success: false,
-        error: requestedScope.error,
-        message: requestedScope.message || 'Scope inválido',
-      });
-    }
-
+    const clinicNameMap = await loadClinicNameMapFromRows([row]);
     return res.json({
       success: true,
-      data: mapTemplate(row, {
-        includeNodes: true,
-        permissions: buildTemplatePermissions({
-          access,
-          template: row,
-          requestedScope,
-        }),
-      }),
+      data: mapTemplate(row, { includeNodes: true, access, clinicNameMap }),
     });
   } catch (err) {
     console.error('Error getTemplateLatestPublished v2', err);
@@ -1323,25 +3050,13 @@ exports.listTemplateVersions = async (req, res) => {
 
     const visible = rows.filter((row) => hasScopeAccess(access, row));
 
-    const requestedScope = await resolveTemplatesScopeFromQuery(req, access);
-    if (requestedScope.error) {
-      return res.status(requestedScope.status || 400).json({
-        success: false,
-        error: requestedScope.error,
-        message: requestedScope.message || 'Scope inválido',
-      });
-    }
+    const clinicNameMap = await loadClinicNameMapFromRows(visible);
 
     return res.json({
       success: true,
-      data: visible.map((row) => mapTemplate(row, {
-        includeNodes,
-        permissions: buildTemplatePermissions({
-          access,
-          template: row,
-          requestedScope,
-        }),
-      })),
+      data: visible.map((row) =>
+        mapTemplate(row, { includeNodes, access, clinicNameMap })
+      ),
       pagination: {
         total: count,
         limit,
@@ -1372,25 +3087,10 @@ exports.getTemplateVersion = async (req, res) => {
       return res.status(404).json({ success: false, error: 'template_version_not_found' });
     }
 
-    const requestedScope = await resolveTemplatesScopeFromQuery(req, access);
-    if (requestedScope.error) {
-      return res.status(requestedScope.status || 400).json({
-        success: false,
-        error: requestedScope.error,
-        message: requestedScope.message || 'Scope inválido',
-      });
-    }
-
+    const clinicNameMap = await loadClinicNameMapFromRows([row]);
     return res.json({
       success: true,
-      data: mapTemplate(row, {
-        includeNodes: true,
-        permissions: buildTemplatePermissions({
-          access,
-          template: row,
-          requestedScope,
-        }),
-      }),
+      data: mapTemplate(row, { includeNodes: true, access, clinicNameMap }),
     });
   } catch (err) {
     console.error('Error getTemplateVersion v2', err);
@@ -1416,16 +3116,35 @@ exports.updateTemplateDraft = async (req, res) => {
       return res.status(404).json({ success: false, error: 'template_version_not_found' });
     }
 
+    const body = req.body || {};
+    const bodyKeys = Object.keys(body || {});
+
     if (row.published_at) {
-      return res.status(409).json({
-        success: false,
-        error: 'published_immutable',
-        message: 'No se puede editar una versión publicada. Crea un nuevo draft.',
+      const allowsOnlyActiveToggle =
+        bodyKeys.length > 0 &&
+        bodyKeys.every((key) => key === 'is_active');
+
+      if (!allowsOnlyActiveToggle) {
+        return res.status(409).json({
+          success: false,
+          error: 'published_immutable',
+          message: 'No se puede editar una versión publicada. Crea un nuevo draft.',
+        });
+      }
+
+      await row.update({
+        is_active: parseBool(body.is_active, row.is_active),
+      });
+
+      const clinicNameMap = await loadClinicNameMapFromRows([row]);
+      return res.json({
+        success: true,
+        data: mapTemplate(row, { includeNodes: true, access, clinicNameMap }),
       });
     }
 
-    const body = req.body || {};
     const updates = {};
+    let explicitTriggerType = undefined;
 
     if (body.name !== undefined) {
       const name = cleanString(body.name);
@@ -1436,15 +3155,7 @@ exports.updateTemplateDraft = async (req, res) => {
     if (body.trigger_type !== undefined) {
       const triggerType = cleanString(body.trigger_type);
       if (!triggerType) return res.status(400).json({ success: false, error: 'invalid_trigger_type' });
-      if (!isSupportedTriggerType(triggerType)) {
-        return res.status(400).json({
-          success: false,
-          error: 'invalid_trigger_type',
-          message: `trigger_type no soportado: ${triggerType}`,
-          allowed: TRIGGER_TYPES_V2.map((item) => item.value),
-        });
-      }
-      updates.trigger_type = triggerType;
+      explicitTriggerType = triggerType;
     }
     if (body.entry_node_id !== undefined) {
       const entry = cleanString(body.entry_node_id);
@@ -1485,17 +3196,28 @@ exports.updateTemplateDraft = async (req, res) => {
       });
     }
 
+    const triggerResolution = resolveTriggerTypeForTemplate({
+      explicitTriggerType,
+      entryNodeId: candidateEntry,
+      nodes: candidateNodes,
+    });
+    if (!triggerResolution.ok) {
+      return res.status(400).json({
+        success: false,
+        error: triggerResolution.error,
+        message: triggerResolution.message,
+        allowed: triggerResolution.allowed,
+        details: triggerResolution.details,
+      });
+    }
+    updates.trigger_type = triggerResolution.trigger_type;
+
     await row.update(updates);
 
+    const clinicNameMap = await loadClinicNameMapFromRows([row]);
     return res.json({
       success: true,
-      data: mapTemplate(row, {
-        includeNodes: true,
-        permissions: buildTemplatePermissions({
-          access,
-          template: row,
-        }),
-      }),
+      data: mapTemplate(row, { includeNodes: true, access, clinicNameMap }),
     });
   } catch (err) {
     console.error('Error updateTemplateDraft v2', err);
@@ -1525,16 +3247,36 @@ exports.publishTemplateVersion = async (req, res) => {
       return res.status(409).json({ success: false, error: 'already_published' });
     }
 
-    const validation = validateFlowGraph({
+    const normalizedNodes = normalizeNodesInput(Array.isArray(row.nodes) ? row.nodes : []);
+    const graphValidation = validateFlowGraph({
       entry_node_id: row.entry_node_id,
-      nodes: Array.isArray(row.nodes) ? row.nodes : [],
+      nodes: normalizedNodes,
     });
-
-    if (!validation.ok) {
+    const nodeConfigValidation = validateNodeConfigs(normalizedNodes);
+    const triggerResolution = resolveTriggerTypeForTemplate({
+      explicitTriggerType: row.trigger_type,
+      entryNodeId: row.entry_node_id,
+      nodes: normalizedNodes,
+    });
+    if (!triggerResolution.ok) {
       return res.status(400).json({
         success: false,
-        error: 'graph_validation_failed',
-        validation_errors: validation.errors,
+        error: triggerResolution.error,
+        message: triggerResolution.message,
+        allowed: triggerResolution.allowed,
+        details: triggerResolution.details,
+      });
+    }
+    const validationErrors = [
+      ...(graphValidation.errors || []),
+      ...(nodeConfigValidation.errors || []),
+    ];
+
+    if (validationErrors.length) {
+      return res.status(400).json({
+        success: false,
+        error: 'validation_failed',
+        validation_errors: validationErrors,
       });
     }
 
@@ -1543,19 +3285,163 @@ exports.publishTemplateVersion = async (req, res) => {
       published_by: access.user_id,
     });
 
+    const clinicNameMap = await loadClinicNameMapFromRows([row]);
     return res.json({
       success: true,
-      data: mapTemplate(row, {
-        includeNodes: true,
-        permissions: buildTemplatePermissions({
-          access,
-          template: row,
-        }),
-      }),
+      data: mapTemplate(row, { includeNodes: true, access, clinicNameMap }),
     });
   } catch (err) {
     console.error('Error publishTemplateVersion v2', err);
     return res.status(500).json({ success: false, error: 'publish_failed', message: err.message });
+  }
+};
+
+exports.deleteTemplate = async (req, res) => {
+  try {
+    const access = await resolveAccess(req);
+    const templateKey = sanitizeTemplateKey(req.params?.template_key);
+    if (!templateKey) {
+      return res.status(400).json({ success: false, error: 'invalid_template_key' });
+    }
+
+    const rows = await AutomationFlowTemplateV2.findAll({
+      where: { template_key: templateKey },
+      order: [['version', 'DESC']],
+    });
+
+    if (!rows.length) {
+      return res.status(404).json({ success: false, error: 'template_not_found' });
+    }
+
+    const parsedScope = parseTemplateScopeQuery(req.query);
+    const scopeClinicIds = parsedScope.clinic_ids;
+    const scopeGroupId = parsedScope.group_id;
+
+    if (scopeClinicIds.length) {
+      const expandedScope = await resolveGroupContextForClinicIds(scopeClinicIds);
+      const expandedClinicIds = expandedScope.clinic_ids;
+      const relatedGroupIds = expandedScope.group_ids;
+
+      const matchesClinicScope = rows.some((row) => {
+        const rowClinicId = parseIntOrNull(row.clinic_id);
+        const rowGroupId = parseIntOrNull(row.group_id);
+        const isLegacyOwner =
+          !rowClinicId &&
+          !rowGroupId &&
+          parseIntOrNull(row.created_by) === access.user_id;
+
+        return (
+          (rowClinicId && expandedClinicIds.includes(rowClinicId)) ||
+          (rowGroupId && relatedGroupIds.includes(rowGroupId)) ||
+          row.is_system === true ||
+          isLegacyOwner
+        );
+      });
+      if (!matchesClinicScope) {
+        return res.status(404).json({ success: false, error: 'template_not_found' });
+      }
+    }
+
+    if (scopeGroupId) {
+      const clinicIdsInGroup = await resolveClinicIdsForGroup(scopeGroupId);
+      const matchesGroupScope = rows.some((row) => {
+        const rowClinicId = parseIntOrNull(row.clinic_id);
+        const rowGroupId = parseIntOrNull(row.group_id);
+        const isLegacyOwner =
+          !rowClinicId &&
+          !rowGroupId &&
+          parseIntOrNull(row.created_by) === access.user_id;
+
+        return (
+          rowGroupId === scopeGroupId ||
+          (rowClinicId && clinicIdsInGroup.includes(rowClinicId)) ||
+          row.is_system === true ||
+          isLegacyOwner
+        );
+      });
+      if (!matchesGroupScope) {
+        return res.status(404).json({ success: false, error: 'template_not_found' });
+      }
+    }
+
+    const hasForbiddenScope = rows.some((row) => !hasScopeAccess(access, row));
+    if (hasForbiddenScope) {
+      return res.status(403).json({ success: false, error: 'forbidden_scope' });
+    }
+
+    const isSystemTemplate = rows.some((row) => !!row.is_system);
+    if (isSystemTemplate && !access.is_admin) {
+      return res.status(405).json({
+        success: false,
+        error: 'delete_disabled_system',
+        message: 'Las plantillas de sistema solo pueden borrarse por admins',
+      });
+    }
+
+    if (isSystemTemplate && access.is_admin) {
+      const confirmSystemDelete = parseBool(req.query?.confirm_system_delete, false);
+      if (!confirmSystemDelete) {
+        return res.status(409).json({
+          success: false,
+          error: 'confirm_system_delete_required',
+          message: 'Confirma el borrado de plantilla de sistema',
+        });
+      }
+    }
+
+    const versionIds = rows.map((row) => row.id);
+    const activeStatuses = ['running', 'waiting', 'paused'];
+    const activeExecutions = await FlowExecutionV2.findAll({
+      where: {
+        template_version_id: { [Op.in]: versionIds },
+        status: { [Op.in]: activeStatuses },
+      },
+      attributes: ['id', 'clinic_id', 'group_id', 'status'],
+      raw: true,
+      limit: 200,
+    });
+
+    if (activeExecutions.length > 0) {
+      const clinicIds = Array.from(
+        new Set(
+          activeExecutions
+            .map((execution) => parseIntOrNull(execution.clinic_id))
+            .filter((value) => Number.isInteger(value))
+        )
+      );
+      const groupIds = Array.from(
+        new Set(
+          activeExecutions
+            .map((execution) => parseIntOrNull(execution.group_id))
+            .filter((value) => Number.isInteger(value))
+        )
+      );
+      const statuses = Array.from(new Set(activeExecutions.map((execution) => execution.status).filter(Boolean)));
+
+      return res.status(409).json({
+        success: false,
+        error: 'template_in_use',
+        message: 'No se puede borrar: hay ejecuciones activas',
+        details: {
+          active_executions: activeExecutions.length,
+          clinic_ids: clinicIds,
+          group_ids: groupIds,
+          statuses,
+        },
+      });
+    }
+
+    await AutomationFlowTemplateV2.destroy({ where: { template_key: templateKey } });
+    return res.json({
+      success: true,
+      data: {
+        template_key: templateKey,
+        deleted_versions: versionIds.length,
+      },
+    });
+  } catch (err) {
+    console.error('Error deleteTemplate v2', err);
+    return res.status(500).json({ success: false, error: 'delete_failed', message: err.message });
   }
 };
 
@@ -1577,11 +3463,36 @@ exports.executeTemplateVersion = async (req, res) => {
       return res.status(404).json({ success: false, error: 'template_version_not_found' });
     }
 
-    if (!row.published_at) {
-      return res.status(409).json({ success: false, error: 'draft_not_executable' });
+    const body = req.body || {};
+    const isSimulation = parseBool(body.simulation, false);
+    const allowDraftExecution = parseBool(body.allow_draft_execution, false);
+
+    if (!row.published_at && !allowDraftExecution) {
+      return res.status(409).json({
+        success: false,
+        error: 'draft_not_executable',
+        message: 'No se puede ejecutar una versión draft sin permiso explícito.',
+      });
     }
 
-    const body = req.body || {};
+    const normalizedNodes = normalizeNodesInput(Array.isArray(row.nodes) ? row.nodes : []);
+    const graphValidation = validateFlowGraph({
+      entry_node_id: row.entry_node_id,
+      nodes: normalizedNodes,
+    });
+    const nodeConfigValidation = validateNodeConfigs(normalizedNodes);
+    const validationErrors = [
+      ...(graphValidation.errors || []),
+      ...(nodeConfigValidation.errors || []),
+    ];
+    if (validationErrors.length) {
+      return res.status(400).json({
+        success: false,
+        error: 'validation_failed',
+        validation_errors: validationErrors,
+      });
+    }
+
     const triggerEntityId = parseIntOrNull(body.trigger_entity_id);
     const triggerEntityType = cleanString(body.trigger_entity_type) || 'entity';
 
@@ -1604,15 +3515,68 @@ exports.executeTemplateVersion = async (req, res) => {
     const initialContext = body.initial_context && typeof body.initial_context === 'object' && !Array.isArray(body.initial_context)
       ? body.initial_context
       : {};
+    const triggerData = body.trigger_data && typeof body.trigger_data === 'object' ? body.trigger_data : {};
+
+    const hydratedContext = await buildHydratedExecutionContext({
+      triggerType: row.trigger_type,
+      triggerEntityType,
+      triggerEntityId,
+      triggerData,
+    });
 
     const context = {
       trigger: {
         type: row.trigger_type,
-        data: body.trigger_data && typeof body.trigger_data === 'object' ? body.trigger_data : {},
+        data: {
+          ...triggerData,
+          ...(hydratedContext?.trigger?.data && typeof hydratedContext.trigger.data === 'object'
+            ? hydratedContext.trigger.data
+            : {}),
+        },
       },
+      __simulation: isSimulation,
       outputs: {},
+      ...hydratedContext,
       ...initialContext,
     };
+    if (!context.outputs || typeof context.outputs !== 'object' || Array.isArray(context.outputs)) {
+      context.outputs = {};
+    }
+    if (!context.trigger || typeof context.trigger !== 'object' || Array.isArray(context.trigger)) {
+      context.trigger = { type: row.trigger_type, data: {} };
+    }
+    if (!context.trigger.data || typeof context.trigger.data !== 'object' || Array.isArray(context.trigger.data)) {
+      context.trigger.data = {};
+    }
+    context.trigger = {
+      ...context.trigger,
+      type: row.trigger_type,
+      data: {
+        ...triggerData,
+        ...(hydratedContext?.trigger?.data && typeof hydratedContext.trigger.data === 'object'
+          ? hydratedContext.trigger.data
+          : {}),
+        ...(initialContext?.trigger?.data && typeof initialContext.trigger.data === 'object'
+          ? initialContext.trigger.data
+          : {}),
+      },
+    };
+
+    const hydratedClinicId = parseIntOrNull(
+      hydratedContext?.clinic?.id_clinica
+      || hydratedContext?.clinica?.id_clinica
+      || hydratedContext?.appointment?.clinica_id
+      || hydratedContext?.patient?.clinica_id
+      || hydratedContext?.lead?.clinica_id
+      || hydratedContext?.trigger?.data?.clinic_id
+      || hydratedContext?.trigger?.data?.clinica_id
+    );
+    const hydratedGroupId = parseIntOrNull(
+      hydratedContext?.clinic?.group_id
+      || hydratedContext?.clinica?.group_id
+      || hydratedContext?.clinic?.grupo_id
+      || hydratedContext?.clinica?.grupo_id
+    );
 
     const createdExecution = await FlowExecutionV2.create({
       idempotency_key: idempotencyKey,
@@ -1624,10 +3588,28 @@ exports.executeTemplateVersion = async (req, res) => {
       trigger_type: row.trigger_type,
       trigger_entity_type: triggerEntityType,
       trigger_entity_id: triggerEntityId,
-      clinic_id: row.clinic_id || null,
-      group_id: row.group_id || null,
+      clinic_id: row.clinic_id || hydratedClinicId || null,
+      group_id: row.group_id || hydratedGroupId || null,
       created_by: access.user_id,
     });
+    const io = getIO();
+    if (io) {
+      const clinicId = parseIntOrNull(createdExecution.clinic_id);
+      const payload = {
+        execution_id: createdExecution.id,
+        template_version_id: createdExecution.template_version_id,
+        status: createdExecution.status,
+        current_node_id: createdExecution.current_node_id,
+        clinic_id: clinicId,
+        group_id: createdExecution.group_id || null,
+        trigger_type: createdExecution.trigger_type,
+        trigger_entity_type: createdExecution.trigger_entity_type,
+        trigger_entity_id: createdExecution.trigger_entity_id,
+        created_at: createdExecution.created_at,
+      };
+      if (clinicId) io.to(`clinic:${clinicId}`).emit('flow_execution:created', payload);
+      else io.emit('flow_execution:created', payload);
+    }
 
     const requestedByName = cleanString(
       req.userData?.name
@@ -1898,5 +3880,86 @@ exports.getExecutionLogs = async (req, res) => {
   } catch (err) {
     console.error('Error getExecutionLogs v2', err);
     return res.status(500).json({ success: false, error: 'get_execution_logs_failed', message: err.message });
+  }
+};
+
+exports.getMessageDeliveryStatus = async (req, res) => {
+  try {
+    const access = await resolveAccess(req);
+    const messageId = parseIntOrNull(req.params?.message_id);
+    if (!messageId) {
+      return res.status(400).json({ success: false, error: 'invalid_message_id' });
+    }
+
+    const message = await Message.findByPk(messageId, {
+      attributes: [
+        'id',
+        'conversation_id',
+        'direction',
+        'message_type',
+        'status',
+        'metadata',
+        'createdAt',
+        'updatedAt',
+      ],
+      raw: true,
+    });
+
+    if (!message) {
+      return res.status(404).json({ success: false, error: 'message_not_found' });
+    }
+
+    const conversationId = parseIntOrNull(message.conversation_id);
+    let clinicId = null;
+    let groupId = null;
+    if (conversationId) {
+      const conversation = await Conversation.findByPk(conversationId, {
+        attributes: ['id', 'clinic_id'],
+        raw: true,
+      });
+      clinicId = parseIntOrNull(conversation?.clinic_id);
+      if (clinicId) {
+        const clinic = await Clinica.findByPk(clinicId, {
+          attributes: ['id_clinica', 'grupoClinicaId'],
+          raw: true,
+        });
+        groupId = parseIntOrNull(clinic?.grupoClinicaId);
+      }
+    }
+
+    if (!hasScopeAccess(access, { clinic_id: clinicId, group_id: groupId, is_system: false })) {
+      return res.status(403).json({ success: false, error: 'forbidden_scope' });
+    }
+
+    const metadata = isObject(message.metadata) ? message.metadata : {};
+    const waStatus = isObject(metadata.wa_status) ? metadata.wa_status : null;
+    const waStatusHistory = Array.isArray(metadata.wa_status_history) ? metadata.wa_status_history : [];
+    const providerError = metadata.error || metadata.wa_error || null;
+
+    return res.json({
+      success: true,
+      data: {
+        id: message.id,
+        conversation_id: conversationId,
+        clinic_id: clinicId,
+        group_id: groupId,
+        direction: message.direction,
+        message_type: message.message_type,
+        status: cleanString(message.status),
+        provider_status: cleanString(waStatus?.status) || null,
+        provider_timestamp: waStatus?.timestamp || null,
+        template_name: cleanString(metadata.template_name),
+        template_id: parseIntOrNull(metadata.template_id),
+        recipient: cleanString(metadata.recipient),
+        wamid: cleanString(metadata.wamid),
+        error: providerError,
+        status_history: waStatusHistory,
+        created_at: message.createdAt || null,
+        updated_at: message.updatedAt || null,
+      },
+    });
+  } catch (err) {
+    console.error('Error getMessageDeliveryStatus v2', err);
+    return res.status(500).json({ success: false, error: 'get_message_status_failed', message: err.message });
   }
 };

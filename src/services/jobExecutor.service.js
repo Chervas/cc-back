@@ -38,7 +38,7 @@ async function runAutomationFlowV2Job(payload = {}) {
   }
 
   const options = {};
-  if (payload.resume_mode === 'response' || payload.resume_mode === 'timeout') {
+  if (payload.resume_mode === 'response' || payload.resume_mode === 'timeout' || payload.resume_mode === 'form_submission') {
     options.resumeMode = payload.resume_mode;
   } else if (execution.status === 'waiting') {
     options.resumeMode = 'timeout';
@@ -46,6 +46,15 @@ async function runAutomationFlowV2Job(payload = {}) {
 
   if (payload.response_text !== undefined) {
     options.responseText = payload.response_text;
+  }
+
+  if (payload.form_submission !== undefined) {
+    options.formSubmission = payload.form_submission;
+  } else if (options.resumeMode === 'form_submission') {
+    const pendingForm = execution?.waiting_meta?.pending_form_submission;
+    if (pendingForm && typeof pendingForm === 'object') {
+      options.formSubmission = pendingForm;
+    }
   }
 
   const updated = await flowEngineV2Service.runExecution(execution.id, options);
