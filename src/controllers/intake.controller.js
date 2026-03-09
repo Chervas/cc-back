@@ -6,6 +6,10 @@ const { Op, literal } = db.Sequelize;
 
 const LeadIntake = db.LeadIntake;
 const LeadAttributionAudit = db.LeadAttributionAudit;
+const FormSubmissionEvent = db.FormSubmissionEvent;
+const Conversation = db.Conversation;
+const Message = db.Message;
+const Usuario = db.Usuario;
 const Clinica = db.Clinica;
 const GrupoClinica = db.GrupoClinica;
 const Campana = db.Campana;
@@ -13,6 +17,7 @@ const AdCache = db.AdCache;
 const ClinicMetaAsset = db.ClinicMetaAsset;
 const ClinicGoogleAdsAccount = db.ClinicGoogleAdsAccount;
 const IntakeConfig = db.IntakeConfig;
+const { enqueueInboundFormSubmissionResume } = require('../services/automationsV2Resume.service');
 const { sendMetaEvent, buildUserData: buildMetaUserData } = require('../services/metaCapi.service');
 const { uploadClickConversion } = require('../services/googleAdsConversion.service');
 
@@ -27,6 +32,17 @@ const EVENT_ID_HEADER = 'x-cc-event-id';
 const parseInteger = (value) => {
   const n = Number(value);
   return Number.isFinite(n) ? n : null;
+};
+const cleanString = (value) => {
+  if (value === undefined || value === null) return null;
+  const normalized = String(value).trim();
+  return normalized || null;
+};
+const buildActorLabel = (usuario) => {
+  if (!usuario) return 'Sistema';
+  return usuario.email_usuario
+    || [usuario.nombre, usuario.apellidos].filter(Boolean).join(' ').trim()
+    || `Usuario ${usuario.id_usuario}`;
 };
 // Acepta IDs separados por coma (ej: "36,37,38") y también "all" (=> null, sin filtro).
 const parseIntegerList = (value) => {
@@ -118,6 +134,89 @@ const sanitizeText = (value) => {
     .normalize('NFKD')              // descompone caracteres estilizados
     .replace(/[^\p{L}\p{N}\s.,@'+-]/gu, '') // deja letras, números y signos básicos
     .trim();
+};
+
+const sanitizeFormSubmissionValue = (value, depth = 0) => {
+  if (depth > 3) return null;
+  if (value === undefined || value === null) return null;
+  if (typeof value === 'string') {
+    const normalized = value.normalize('NFKC').trim();
+    return normalized.length > 2000 ? normalized.slice(0, 2000) : normalized;
+  }
+  if (typeof value === 'number' || typeof value === 'boolean') return value;
+  if (Array.isArray(value)) {
+    return value
+      .map((item) => sanitizeFormSubmissionValue(item, depth + 1))
+      .filter((item) => item !== null);
+  }
+  if (typeof value === 'object') {
+    const out = {};
+    for (const [key, item] of Object.entries(value)) {
+      const normalized = sanitizeFormSubmissionValue(item, depth + 1);
+      if (normalized !== null) out[key] = normalized;
+    }
+    return out;
+  }
+  return null;
+};
+
+const normalizeFormSubmission = (input) => {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) return null;
+  const fields = input.fields && typeof input.fields === 'object' && !Array.isArray(input.fields)
+    ? sanitizeFormSubmissionValue(input.fields)
+    : {};
+  return {
+    page_url: cleanString(input.page_url || input.pageUrl),
+    form_id: cleanString(input.form_id || input.formId),
+    form_name: cleanString(input.form_name || input.formName),
+    form_selector: cleanString(input.form_selector || input.formSelector),
+    submitted_at: parseDate(input.submitted_at || input.submittedAt) || new Date(),
+    fields: fields && typeof fields === 'object' && !Array.isArray(fields) ? fields : {},
+    payload: sanitizeFormSubmissionValue(input.payload || null),
+  };
+};
+
+const extractLeadDataFromFormFields = (fields) => {
+  if (!fields || typeof fields !== 'object' || Array.isArray(fields)) {
+    return {};
+  }
+
+  const entries = Object.entries(fields)
+    .map(([key, value]) => [String(key || '').trim(), cleanString(value)] )
+    .filter(([key, value]) => key && value);
+
+  const findValue = (matcher) => {
+    const hit = entries.find(([key]) => matcher(key.toLowerCase()));
+    return hit?.[1] || null;
+  };
+
+  const findByValue = (matcher) => {
+    const hit = entries.find(([, value]) => matcher(String(value || '').trim()));
+    return hit?.[1] || null;
+  };
+
+  const email =
+    findValue((key) => key.includes('email') || key.includes('correo')) ||
+    findByValue((value) => /.+@.+\..+/.test(value));
+
+  const phone =
+    findValue((key) => key.includes('phone') || key.includes('telefono') || key.includes('teléfono') || key.includes('mobile') || key.includes('movil') || key.includes('móvil') || key.includes('whatsapp')) ||
+    (() => {
+      const messageLike = findValue((key) => key.includes('message') || key.includes('mensaje'));
+      if (messageLike && normalizePhone(messageLike)) return messageLike;
+      return null;
+    })() ||
+    findByValue((value) => !!normalizePhone(value));
+
+  const nombre =
+    findValue((key) => key.includes('full_name') || key.includes('nombre_completo')) ||
+    findValue((key) => (key.includes('name') || key.includes('nombre')) && !key.includes('company') && !key.includes('empresa'));
+
+  return {
+    nombre,
+    email,
+    telefono: phone,
+  };
 };
 
 const stableStringify = (obj) => {
@@ -495,6 +594,8 @@ exports.ingestLead = asyncHandler(async (req, res) => {
   const campanaIdParsed = parseInteger(campana_id);
   const attribution = body?.attribution || {};
   const leadData = body?.lead_data || {};
+  const formSubmission = normalizeFormSubmission(body?.form_submission || body?.formSubmission);
+  const formLeadData = extractLeadDataFromFormFields(formSubmission?.fields || {});
 
   // Validación por dominio + HMAC por clínica/grupo cuando hay IntakeConfig guardada.
   // Fallback legacy: INTAKE_WEB_SECRET solo se usa si NO existe configuración.
@@ -550,9 +651,9 @@ exports.ingestLead = asyncHandler(async (req, res) => {
   const pageUrlValue = coalesce(attribution.page_url, page_url);
   const landingUrlValue = coalesce(attribution.landing_url, landing_url);
 
-  const leadNombre = sanitizeText(coalesce(leadData.nombre, nombre));
-  const leadEmail = coalesce(leadData.email, email);
-  const leadTelefono = coalesce(leadData.telefono, telefono);
+  const leadNombre = sanitizeText(coalesce(leadData.nombre, formLeadData.nombre, nombre));
+  const leadEmail = coalesce(leadData.email, formLeadData.email, email);
+  const leadTelefono = coalesce(leadData.telefono, formLeadData.telefono, telefono);
   const leadNotas = sanitizeText(coalesce(leadData.notas, notas));
   const consentValue = coalesce(req.body?.consent, consentimiento_canal);
 
@@ -671,6 +772,8 @@ exports.ingestLead = asyncHandler(async (req, res) => {
     user_agent: coalesce(user_agent, req.headers['user-agent']) || null,
     ip: coalesce(ip, req.headers['x-forwarded-for'], req.socket?.remoteAddress) || null,
     nombre: leadNombre || null,
+    email: leadEmail || null,
+    telefono: leadTelefono || null,
     notas: leadNotas || null,
     status_lead: normalizedStatus,
     consentimiento_canal: consentValue || null,
@@ -684,6 +787,7 @@ exports.ingestLead = asyncHandler(async (req, res) => {
   };
 
   let lead;
+  let dedupeConflict = null;
   try {
     lead = await dedupeAndCreateLead(leadPayload, req.body || {}, {
       clinic_match_source: clinic_match_source || null,
@@ -691,9 +795,57 @@ exports.ingestLead = asyncHandler(async (req, res) => {
     });
   } catch (err) {
     if (err.status === 409) {
-      return res.status(409).json({ message: err.message, id: err.existingId, reason: err.message });
+      dedupeConflict = err;
+      lead = err.existingId ? await LeadIntake.findByPk(err.existingId) : null;
+    } else {
+      throw err;
     }
-    throw err;
+  }
+
+  let formSubmissionEvent = null;
+  if (formSubmission && FormSubmissionEvent) {
+    try {
+      formSubmissionEvent = await FormSubmissionEvent.create({
+        clinic_id: lead?.clinica_id || clinicaIdParsed,
+        group_id: lead?.grupo_clinica_id || grupoClinicaIdParsed,
+        lead_intake_id: lead?.id || null,
+        page_url: formSubmission.page_url || pageUrlValue || landingUrlValue || null,
+        form_id: formSubmission.form_id || null,
+        form_name: formSubmission.form_name || null,
+        form_selector: formSubmission.form_selector || null,
+        match_domain: normalizeDomain(getHostnameFromUrl(formSubmission.page_url || pageUrlValue || '')),
+        source_detail: source_detail || 'web_form',
+        email_normalized: normalizedEmail,
+        phone_normalized: normalizedPhone,
+        fields_json: formSubmission.fields || {},
+        payload_json: formSubmission.payload || req.body || {},
+        submitted_at: formSubmission.submitted_at || new Date(),
+      });
+
+      await enqueueInboundFormSubmissionResume({
+        clinicId: lead?.clinica_id || clinicaIdParsed,
+        leadId: lead?.id || null,
+        email: normalizedEmail,
+        phone: normalizedPhone,
+        pageUrl: formSubmission.page_url || pageUrlValue || null,
+        formId: formSubmission.form_id || null,
+        formName: formSubmission.form_name || null,
+        formSelector: formSubmission.form_selector || null,
+        fields: formSubmission.fields || {},
+        submittedAt: formSubmission.submitted_at instanceof Date
+          ? formSubmission.submitted_at.toISOString()
+          : String(formSubmission.submitted_at || ''),
+        formSubmissionEventId: formSubmissionEvent.id,
+        sourceDetail: source_detail || 'web_form',
+        payload: formSubmission.payload || req.body || {},
+      });
+    } catch (formErr) {
+      console.warn('⚠️ No se pudo registrar/reanudar envío de formulario:', formErr.message || formErr);
+    }
+  }
+
+  if (dedupeConflict) {
+    return res.status(409).json({ message: dedupeConflict.message, id: dedupeConflict.existingId, reason: dedupeConflict.message });
   }
 
   // Permite al snippet solicitar un evento concreto (p. ej. Contact para tel_modal).
@@ -1659,6 +1811,227 @@ exports.listLeads = asyncHandler(async (req, res) => {
     totalPages,
     items: leads.rows
   });
+});
+
+exports.getLeadById = asyncHandler(async (req, res) => {
+  const leadId = parseInteger(req.params.id);
+  if (!leadId) {
+    return res.status(400).json({ message: 'Lead inválido' });
+  }
+
+  const lead = await LeadIntake.findByPk(leadId, {
+    include: [
+      { model: Clinica, as: 'clinica', attributes: ['id_clinica', 'nombre_clinica'] },
+      { model: GrupoClinica, as: 'grupoClinica', attributes: ['id_grupo', 'nombre_grupo'] },
+      { model: Campana, as: 'campana', attributes: ['id', 'nombre', 'campaign_id'], required: false },
+      {
+        model: FormSubmissionEvent,
+        as: 'formSubmissionEvents',
+        separate: true,
+        order: [['submitted_at', 'DESC']],
+        limit: 10,
+      },
+    ],
+  });
+
+  if (!lead) {
+    return res.status(404).json({ message: 'Lead no encontrado' });
+  }
+
+  const out = lead.toJSON();
+  const latestFormSubmission = Array.isArray(out.formSubmissionEvents) && out.formSubmissionEvents.length
+    ? out.formSubmissionEvents[0]
+    : null;
+  const fallbackLeadData = latestFormSubmission?.payload_json?.lead_data && typeof latestFormSubmission.payload_json.lead_data === 'object'
+    ? latestFormSubmission.payload_json.lead_data
+    : {};
+
+  if (!out.nombre && fallbackLeadData.nombre) out.nombre = fallbackLeadData.nombre;
+  if (!out.email && fallbackLeadData.email) out.email = normalizeEmail(fallbackLeadData.email) || fallbackLeadData.email;
+  if (!out.telefono && fallbackLeadData.telefono) out.telefono = normalizePhone(fallbackLeadData.telefono) || fallbackLeadData.telefono;
+
+  if (Conversation) {
+    const conversation = await Conversation.findOne({
+      where: { lead_id: leadId },
+      order: [['last_message_at', 'DESC']],
+      raw: true,
+    });
+    out.conversation_id = conversation?.id || null;
+  }
+
+  res.status(200).json(out);
+});
+
+exports.getLeadActivity = asyncHandler(async (req, res) => {
+  const leadId = parseInteger(req.params.id);
+  if (!leadId) {
+    return res.status(400).json({ message: 'Lead inválido' });
+  }
+
+  const lead = await LeadIntake.findByPk(leadId, {
+    include: [
+      {
+        model: FormSubmissionEvent,
+        as: 'formSubmissionEvents',
+        separate: true,
+        order: [['submitted_at', 'DESC']],
+        limit: 20,
+      },
+    ],
+  });
+
+  if (!lead) {
+    return res.status(404).json({ message: 'Lead no encontrado' });
+  }
+
+  const conversations = await Conversation.findAll({
+    where: { lead_id: leadId },
+    attributes: ['id', 'channel'],
+    raw: true,
+  });
+  const conversationIds = conversations.map((row) => Number(row.id)).filter((id) => Number.isFinite(id) && id > 0);
+
+  const messages = conversationIds.length
+    ? await Message.findAll({
+        where: { conversation_id: { [Op.in]: conversationIds } },
+        attributes: [
+          'id',
+          'conversation_id',
+          'sender_id',
+          'direction',
+          'content',
+          'message_type',
+          'status',
+          'metadata',
+          'sent_at',
+          'createdAt',
+        ],
+        order: [['createdAt', 'DESC']],
+        raw: true,
+        limit: 100,
+      })
+    : [];
+
+  const actorIds = Array.from(new Set(
+    messages
+      .map((message) => Number(message.sender_id))
+      .filter((id) => Number.isFinite(id) && id > 0)
+  ));
+
+  const usuarios = actorIds.length
+    ? await Usuario.findAll({
+        where: { id_usuario: { [Op.in]: actorIds } },
+        attributes: ['id_usuario', 'nombre', 'apellidos', 'email_usuario'],
+        raw: true,
+      })
+    : [];
+  const usuariosById = new Map(usuarios.map((usuario) => [Number(usuario.id_usuario), usuario]));
+
+  const items = [];
+
+  for (const event of lead.formSubmissionEvents || []) {
+    const detailParts = [];
+    if (event.form_name) detailParts.push(event.form_name);
+    if (event.page_url) detailParts.push(event.page_url);
+    items.push({
+      id: `lead-form-${event.id}`,
+      leadId: String(leadId),
+      fecha: event.submitted_at || event.created_at || lead.created_at,
+      tipo: 'lead_form_submitted',
+      titulo: 'Formulario enviado',
+      descripcion: detailParts.join(' · ') || 'Envío de formulario web',
+      icono: 'heroicons_outline:document-text',
+      color: 'info',
+      detalles: {
+        form_id: event.form_id || null,
+        form_name: event.form_name || null,
+        page_url: event.page_url || null,
+      },
+    });
+  }
+
+  for (const contacto of Array.isArray(lead.historial_contactos) ? lead.historial_contactos : []) {
+    items.push({
+      id: `lead-contact-${leadId}-${contacto.fecha}`,
+      leadId: String(leadId),
+      fecha: contacto.fecha || lead.updated_at || lead.created_at,
+      tipo: 'lead_contact_attempt',
+      titulo: 'Contacto registrado',
+      descripcion: contacto.notas || contacto.motivo || 'Intento de contacto',
+      icono: 'heroicons_outline:phone',
+      color: 'warning',
+      usuarioId: contacto.usuario_id ? String(contacto.usuario_id) : null,
+      detalles: {
+        motivo: contacto.motivo || null,
+      },
+    });
+  }
+
+  items.push({
+    id: `lead-created-${leadId}`,
+    leadId: String(leadId),
+    fecha: lead.created_at,
+    tipo: 'lead_created',
+    titulo: 'Lead creado',
+    descripcion: cleanString(lead.source_detail) || cleanString(lead.source) || cleanString(lead.channel) || 'Nuevo lead',
+    icono: 'heroicons_outline:user-plus',
+    color: 'success',
+  });
+
+  for (const message of messages) {
+    const actor = usuariosById.get(Number(message.sender_id));
+    const createdAt = message.sent_at || message.createdAt || lead.updated_at || lead.created_at;
+    const text = cleanString(message.content) || '—';
+    const isFailed = String(message.status || '').toLowerCase() === 'failed';
+    const metadata = message.metadata && typeof message.metadata === 'object' ? message.metadata : {};
+    const waError = Array.isArray(metadata.wa_error) && metadata.wa_error.length
+      ? cleanString(metadata.wa_error[0]?.message) || cleanString(metadata.wa_error[0]?.title)
+      : null;
+
+    if (message.direction === 'outbound') {
+      const isTemplate = message.message_type === 'template';
+      items.push({
+        id: `lead-message-${message.id}`,
+        leadId: String(leadId),
+        fecha: createdAt,
+        tipo: isTemplate ? 'lead_whatsapp_template_sent' : 'lead_whatsapp_message_sent',
+        titulo: isTemplate ? 'Plantilla de WhatsApp enviada' : 'Mensaje de WhatsApp enviado',
+        descripcion: isFailed && waError ? `${text} · ${waError}` : text,
+        icono: isTemplate ? 'heroicons_outline:document-text' : 'heroicons_outline:chat-bubble-left-right',
+        color: isFailed ? 'warning' : 'info',
+        usuarioId: actor ? String(actor.id_usuario) : null,
+        usuarioNombre: buildActorLabel(actor),
+        detalles: {
+          status: message.status || null,
+          message_type: message.message_type || null,
+          conversation_id: message.conversation_id || null,
+        },
+      });
+      continue;
+    }
+
+    items.push({
+      id: `lead-message-${message.id}`,
+      leadId: String(leadId),
+      fecha: createdAt,
+      tipo: 'lead_whatsapp_reply',
+      titulo: 'Respuesta recibida por WhatsApp',
+      descripcion: text,
+      icono: 'heroicons_outline:chat-bubble-left-right',
+      color: 'info',
+      usuarioId: null,
+      usuarioNombre: cleanString(lead.nombre) || 'Lead',
+      detalles: {
+        status: message.status || null,
+        message_type: message.message_type || null,
+        conversation_id: message.conversation_id || null,
+      },
+    });
+  }
+
+  return res.status(200).json(
+    items.sort((a, b) => new Date(b.fecha).getTime() - new Date(a.fecha).getTime())
+  );
 });
 
 exports.getLeadStats = asyncHandler(async (req, res) => {

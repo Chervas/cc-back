@@ -12,6 +12,9 @@ module.exports = (sequelize, DataTypes) => {
       if (models.LeadAttributionAudit) {
         LeadIntake.hasMany(models.LeadAttributionAudit, { foreignKey: 'lead_intake_id', as: 'attributionAudits' });
       }
+      if (models.FormSubmissionEvent) {
+        LeadIntake.hasMany(models.FormSubmissionEvent, { foreignKey: 'lead_intake_id', as: 'formSubmissionEvents' });
+      }
     }
   }
 

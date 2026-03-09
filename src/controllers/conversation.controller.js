@@ -5,7 +5,7 @@ const { queues } = require('../services/queue.service');
 const { getIO } = require('../services/socket.service');
 const whatsappService = require('../services/whatsapp.service');
 
-const { Conversation, Message, UsuarioClinica, Paciente, Lead, ConversationRead, Clinica } = db;
+const { Conversation, Message, UsuarioClinica, Paciente, LeadIntake, ConversationRead, Clinica } = db;
 
 const ROLE_AGGREGATE = ['propietario', 'admin'];
 const ADMIN_USER_IDS = (process.env.ADMIN_USER_IDS || '1')
@@ -133,6 +133,7 @@ exports.listConversations = async (req, res) => {
     const userId = req.userData?.userId;
     const { clinic_id, filter, channel } = req.query;
     const patientId = req.query.patient_id ? Number(req.query.patient_id) : null;
+    const leadId = req.query.lead_id ? Number(req.query.lead_id) : null;
 
     const { clinicIds, isAggregateAllowed } = await getUserClinics(userId);
     if (!clinicIds.length) {
@@ -141,6 +142,7 @@ exports.listConversations = async (req, res) => {
 
     const where = {};
     let patient = null;
+    let lead = null;
     if (patientId) {
       patient = await Paciente.findByPk(patientId, {
         attributes: ['id_paciente', 'clinica_id', 'telefono_movil'],
@@ -150,6 +152,24 @@ exports.listConversations = async (req, res) => {
         return res.status(404).json({ error: 'Paciente no encontrado' });
       }
       where.patient_id = patientId;
+      if (clinic_id && clinic_id !== 'all') {
+        const parsed = parseClinicIdsParam(clinic_id);
+        if (!parsed || !ensureAccess({ clinicIds, isAggregateAllowed }, clinic_id)) {
+          return res.status(403).json({ error: 'Acceso denegado a la clínica' });
+        }
+        where.clinic_id = parsed.length === 1 ? parsed[0] : { [Op.in]: parsed };
+      } else if (!isAggregateAllowed) {
+        where.clinic_id = { [Op.in]: clinicIds };
+      }
+    } else if (leadId) {
+      lead = await LeadIntake.findByPk(leadId, {
+        attributes: ['id', 'clinica_id', 'telefono'],
+        raw: true,
+      });
+      if (!lead) {
+        return res.status(404).json({ error: 'Lead no encontrado' });
+      }
+      where.lead_id = leadId;
       if (clinic_id && clinic_id !== 'all') {
         const parsed = parseClinicIdsParam(clinic_id);
         if (!parsed || !ensureAccess({ clinicIds, isAggregateAllowed }, clinic_id)) {
@@ -186,7 +206,7 @@ exports.listConversations = async (req, res) => {
       order: [['last_message_at', 'DESC']],
       include: [
         { model: Paciente, as: 'paciente', attributes: ['id_paciente', 'nombre', 'apellidos', 'foto', 'telefono_movil', 'email'] },
-        { model: Lead, as: 'lead', attributes: ['id', 'nombre', 'telefono', 'email'] },
+        { model: LeadIntake, as: 'lead', attributes: ['id', 'nombre', 'telefono', 'email'] },
         {
           model: Message,
           as: 'messages',
@@ -215,6 +235,25 @@ exports.listConversations = async (req, res) => {
         unread_count: 0,
       });
       // Repetir la consulta ya con la conversación creada
+      return exports.listConversations(req, res);
+    }
+
+    // Si se solicita por lead y no existe conversación, crearla con su móvil
+    if (leadId && !conversations.length && lead?.telefono) {
+      const normalized = whatsappService.normalizePhoneNumber(lead.telefono) || lead.telefono;
+      const parsed = parseClinicIdsParam(clinic_id);
+      const clinicToCreate =
+        Array.isArray(parsed) && parsed.length > 0
+          ? parsed[0]
+          : (clinicIds.includes(lead.clinica_id) ? lead.clinica_id : clinicIds[0]);
+      await Conversation.create({
+        clinic_id: clinicToCreate,
+        channel: 'whatsapp',
+        contact_id: normalized,
+        lead_id: leadId,
+        last_message_at: new Date(),
+        unread_count: 0,
+      });
       return exports.listConversations(req, res);
     }
 

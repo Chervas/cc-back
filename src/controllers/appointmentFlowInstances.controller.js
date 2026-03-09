@@ -115,6 +115,7 @@ function mapNodeTypeLabel(nodeType) {
     'delay/fixed': 'Espera fija',
     'delay/wait_until': 'Esperar hasta fecha',
     'delay/wait_response': 'Esperar respuesta',
+    'delay/wait_form_submission': 'Esperar envío de formulario',
     'condition/field_check': 'Condición por campo',
     'condition/response_check': 'Condición por respuesta',
     'condition/ai_analysis': 'Análisis IA',

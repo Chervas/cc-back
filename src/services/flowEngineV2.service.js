@@ -30,6 +30,7 @@ const UPDATE_LEAD_INFO_MODES = new Set([
 ]);
 const AI_FIELD_TYPES = new Set(['string', 'number', 'boolean']);
 const AI_ANALYSIS_MODES = new Set(['auto', 'quick_qa', 'complex_reasoning']);
+const FORM_SUBMISSION_MATCH_MODES = new Set(['url_contains', 'url_equals', 'form_id', 'selector']);
 const FIELD_CHECK_LEFT_REF_SOURCES = new Set(['node_output', 'trigger_data', 'context', 'manual']);
 const FIELD_CHECK_VALUE_TYPES = new Set(['string', 'number', 'boolean']);
 const FIELD_CHECK_OPERATOR_TYPE_COMPAT = {
@@ -136,6 +137,24 @@ function renderWhatsappTemplatePreviewText(template, templateParams = {}) {
     const value = cleanString(templateParams?.[key]);
     return value || `{{${key}}}`;
   });
+}
+
+function extractWhatsappTemplatePlaceholderIndexes(template) {
+  const components = Array.isArray(template?.components) ? template.components : [];
+  const indexes = new Set();
+
+  for (const component of components) {
+    const text = cleanString(component?.text);
+    if (!text) continue;
+    const matches = text.matchAll(/{{\s*(\d+)\s*}}/g);
+    for (const match of matches) {
+      const rawIdx = cleanString(match?.[1]);
+      if (!rawIdx) continue;
+      indexes.add(rawIdx);
+    }
+  }
+
+  return Array.from(indexes).sort((a, b) => Number(a) - Number(b));
 }
 
 function getMadridDateParts(date = new Date()) {
@@ -682,7 +701,7 @@ function coerceAiOutputByFormat(rawOutput, outputFormat) {
 
 function pickGroqModel({ analysisMode, prompt, inputText, outputFormat }) {
   const fastModel = cleanString(process.env.GROQ_MODEL_FAST) || 'llama-3.1-8b-instant';
-  const complexModel = cleanString(process.env.GROQ_MODEL_COMPLEX) || 'llama-3.1-70b-versatile';
+  const complexModel = cleanString(process.env.GROQ_MODEL_COMPLEX) || 'llama-3.3-70b-versatile';
 
   if (analysisMode === 'quick_qa') return fastModel;
   if (analysisMode === 'complex_reasoning') return complexModel;
@@ -693,6 +712,43 @@ function pickGroqModel({ analysisMode, prompt, inputText, outputFormat }) {
   const joined = `${prompt || ''} ${inputText || ''}`;
   const isComplex = totalChars > 900 || outputFields > 3 || complexityKeywords.test(joined);
   return isComplex ? complexModel : fastModel;
+}
+
+function isGroqModelUnavailableError(err) {
+  const statusCode = err?.response?.status;
+  const providerMessage = cleanString(
+    err?.response?.data?.error?.message
+    || err?.response?.data?.message
+    || err?.message
+  ).toLowerCase();
+
+  if (!providerMessage) return false;
+  if (![400, 404].includes(Number(statusCode))) return false;
+
+  return (
+    providerMessage.includes('decommissioned')
+    || providerMessage.includes('no longer supported')
+    || providerMessage.includes('model_not_found')
+    || providerMessage.includes('model not found')
+    || providerMessage.includes('does not exist')
+  );
+}
+
+function getGroqModelCandidates(primaryModel) {
+  const fallbackEnv = cleanString(process.env.GROQ_MODEL_FALLBACKS);
+  const fallbackFromEnv = fallbackEnv
+    ? fallbackEnv.split(',').map((item) => cleanString(item)).filter(Boolean)
+    : [];
+
+  const defaults = [
+    'llama-3.3-70b-versatile',
+    'qwen/qwen3-32b',
+    'meta-llama/llama-4-scout-17b-16e-instruct',
+    'llama-3.1-8b-instant',
+  ];
+
+  const deduped = new Set([cleanString(primaryModel), ...fallbackFromEnv, ...defaults].filter(Boolean));
+  return Array.from(deduped);
 }
 
 function buildAiSystemPrompt(outputFormat, outputFields = []) {
@@ -755,52 +811,68 @@ async function runGroqAiAnalysis({ prompt, inputText, outputFormat, outputFields
   const normalizedMode = normalizeAiAnalysisMode(analysisMode);
   const normalizedFormat = normalizeAiOutputFormat(outputFormat);
   const normalizedOutputFields = normalizeOutputFieldEntries(outputFields);
-  const model = pickGroqModel({
+  const preferredModel = pickGroqModel({
     analysisMode: normalizedMode,
     prompt,
     inputText,
     outputFormat: normalizedFormat,
   });
+  const modelCandidates = getGroqModelCandidates(preferredModel);
 
   const resolvedMaxTokens = Number(maxTokens);
   const finalMaxTokens = Number.isFinite(resolvedMaxTokens) && resolvedMaxTokens > 0
     ? Math.min(4096, Math.floor(resolvedMaxTokens))
     : 700;
 
-  let response;
-  try {
-    response = await axios.post(
-      `${baseUrl}/chat/completions`,
-      {
-        model,
-        temperature: 0.1,
-        max_tokens: finalMaxTokens,
-        response_format: { type: 'json_object' },
-        messages: [
-          {
-            role: 'system',
-            content: buildAiSystemPrompt(normalizedFormat, normalizedOutputFields),
-          },
-          {
-            role: 'user',
-            content: `Instrucción:\n${prompt}\n\nTexto a analizar:\n${inputText}`,
-          },
-        ],
-      },
-      {
-        timeout: timeoutMs,
-        headers: {
-          Authorization: `Bearer ${apiKey}`,
-          'Content-Type': 'application/json',
+  let response = null;
+  let usedModel = preferredModel;
+  let lastErr = null;
+
+  for (const candidateModel of modelCandidates) {
+    try {
+      response = await axios.post(
+        `${baseUrl}/chat/completions`,
+        {
+          model: candidateModel,
+          temperature: 0.1,
+          max_tokens: finalMaxTokens,
+          response_format: { type: 'json_object' },
+          messages: [
+            {
+              role: 'system',
+              content: buildAiSystemPrompt(normalizedFormat, normalizedOutputFields),
+            },
+            {
+              role: 'user',
+              content: `Instrucción:\n${prompt}\n\nTexto a analizar:\n${inputText}`,
+            },
+          ],
         },
+        {
+          timeout: timeoutMs,
+          headers: {
+            Authorization: `Bearer ${apiKey}`,
+            'Content-Type': 'application/json',
+          },
+        }
+      );
+      usedModel = candidateModel;
+      lastErr = null;
+      break;
+    } catch (err) {
+      lastErr = err;
+      if (!isGroqModelUnavailableError(err)) {
+        break;
       }
-    );
-  } catch (err) {
-    const statusCode = err?.response?.status;
+    }
+  }
+
+  if (!response) {
+    const statusCode = lastErr?.response?.status;
     const providerMessage = cleanString(
-      err?.response?.data?.error?.message
-      || err?.response?.data?.message
-      || err?.message
+      lastErr?.response?.data?.error?.message
+      || lastErr?.response?.data?.message
+      || lastErr?.message
     ) || 'groq_request_failed';
     throw new Error(`groq_request_failed:${statusCode || 'network'}:${providerMessage}`);
   }
@@ -815,7 +887,7 @@ async function runGroqAiAnalysis({ prompt, inputText, outputFormat, outputFields
   return {
     ...coercedOutput,
     _ai_provider: 'groq',
-    _ai_model: model,
+    _ai_model: usedModel,
     _ai_analysis_mode: normalizedMode,
     _ai_usage: response?.data?.usage || null,
   };
@@ -985,6 +1057,25 @@ function normalizeRecipientMode(value) {
   return 'context_patient';
 }
 
+function normalizeWhatsappMessageMode(value) {
+  const normalized = normalizeKey(value);
+  if (['manual', 'text', 'free_text', 'freetext'].includes(normalized)) return 'manual';
+  return 'template';
+}
+
+function normalizeFormSubmissionMatchMode(value) {
+  const normalized = normalizeKey(value);
+  if (FORM_SUBMISSION_MATCH_MODES.has(normalized)) return normalized;
+  return 'url_contains';
+}
+
+function hasActiveInboundWindow(lastInboundAt) {
+  if (!lastInboundAt) return false;
+  const timestamp = new Date(lastInboundAt).getTime();
+  if (!Number.isFinite(timestamp)) return false;
+  return (Date.now() - timestamp) <= 24 * 60 * 60 * 1000;
+}
+
 function toLowerSafe(value) {
   return String(value || '').trim().toLowerCase();
 }
@@ -1123,8 +1214,6 @@ async function handleChangeStatus(node, context, runtime) {
   const appointmentStatus = normalizeCitaStatus(rawStatus);
   const leadStatus = normalizeLeadStatus(rawStatus);
   const requestedTarget = normalizeStatusTarget(resolveTemplateValue(config?.target_entity, context));
-  const agendaIcon = cleanString(resolveTemplateValue(config?.agenda_icon, context));
-  const now = new Date().toISOString();
 
   const canUpdateAppointment = requestedTarget ? requestedTarget === 'appointment' : !!targets.appointment_id;
   const canUpdateLead = requestedTarget ? requestedTarget === 'lead' : !!targets.lead_intake_id;
@@ -1142,12 +1231,7 @@ async function handleChangeStatus(node, context, runtime) {
     }
 
     const previousStatus = cleanString(appointment.estado);
-    const updates = { estado: appointmentStatus };
-    if (agendaIcon) {
-      const iconLine = `[${now}] Icono agenda: ${agendaIcon}`;
-      updates.nota = appendText(appointment.nota, iconLine);
-    }
-    await appointment.update(updates);
+    await appointment.update({ estado: appointmentStatus });
 
     return {
       kind: 'success',
@@ -1157,7 +1241,6 @@ async function handleChangeStatus(node, context, runtime) {
         target_entity: 'appointment',
         previous_status: previousStatus,
         new_status: appointmentStatus,
-        agenda_icon: agendaIcon,
       },
       next_node_id: readOutputTarget(node, 'on_success'),
     };
@@ -1186,7 +1269,6 @@ async function handleChangeStatus(node, context, runtime) {
         target_entity: 'lead',
         previous_status: previousStatus,
         new_status: leadStatus,
-        agenda_icon: null,
       },
       next_node_id: readOutputTarget(node, 'on_success'),
     };
@@ -1549,28 +1631,61 @@ async function handleSendWhatsapp(node, context, runtime) {
     throw new Error('whatsapp_clinic_not_found');
   }
 
-  const templateId = toIntOrNull(resolveTemplateValue(config?.template_id, context));
-  if (!templateId) {
-    throw new Error('whatsapp_template_id_missing');
-  }
-
-  const template = await WhatsappTemplate.findByPk(templateId, {
-    attributes: ['id', 'name', 'language', 'status', 'components'],
-  });
-  if (!template) {
-    throw new Error(`whatsapp_template_not_found:${templateId}`);
-  }
-
-  const templateStatus = toLowerSafe(template.status);
-  if (isTemplateBlockedForSend(templateStatus)) {
-    throw new Error(`whatsapp_template_blocked:${template.status}`);
-  }
-
+  const messageMode = normalizeWhatsappMessageMode(resolveTemplateValue(config?.message_mode, context));
   const templateContext = await enrichContextForTemplateResolution(context, targets);
   const recipientData = await resolveWhatsAppRecipient({ node, config, context: templateContext, targets });
-  const senderData = await resolveWhatsAppSenderConfig({ config, context: templateContext, clinicId });
-  const templateParams = resolveTemplateVariables(config, templateContext);
-  const previewText = renderWhatsappTemplatePreviewText(template, templateParams);
+
+  let template = null;
+  let templateParams = {};
+  let previewText = '';
+  let messageContent = '';
+  let messageType = 'text';
+  let templateLanguage = cleanString(resolveTemplateValue(config?.language_code, context)) || 'es_ES';
+
+  if (messageMode === 'template') {
+    const templateId = toIntOrNull(resolveTemplateValue(config?.template_id, context));
+    if (!templateId) {
+      throw new Error('whatsapp_template_id_missing');
+    }
+
+    template = await WhatsappTemplate.findByPk(templateId, {
+      attributes: ['id', 'name', 'language', 'status', 'components'],
+    });
+    if (!template) {
+      throw new Error(`whatsapp_template_not_found:${templateId}`);
+    }
+
+    const templateStatus = toLowerSafe(template.status);
+    if (isTemplateBlockedForSend(templateStatus)) {
+      throw new Error(`whatsapp_template_blocked:${template.status}`);
+    }
+
+    templateParams = resolveTemplateVariables(config, templateContext);
+    const expectedTemplateParamIndexes = extractWhatsappTemplatePlaceholderIndexes(template);
+    const missingTemplateParamIndexes = expectedTemplateParamIndexes.filter((paramIdx) => {
+      const value = cleanString(templateParams?.[paramIdx]);
+      return !value;
+    });
+    if (missingTemplateParamIndexes.length) {
+      throw new Error(
+        `whatsapp_template_params_missing:${missingTemplateParamIndexes.join(',')}`
+      );
+    }
+
+    previewText = renderWhatsappTemplatePreviewText(template, templateParams);
+    messageContent = previewText;
+    messageType = 'template';
+    templateLanguage = templateLanguage || template.language || 'es_ES';
+  } else {
+    const manualText = cleanString(resolveTemplateValue(config?.manual_message_text, templateContext));
+    if (!manualText) {
+      throw new Error('whatsapp_manual_message_text_missing');
+    }
+    previewText = manualText;
+    messageContent = manualText;
+    messageType = 'text';
+  }
+
   const quietHoursEnabled = parseBool(resolveTemplateValue(config?.quiet_hours_enabled, context), true);
   const quietWindow = computeQuietHoursDelayMs({
     now: new Date(),
@@ -1615,8 +1730,26 @@ async function handleSendWhatsapp(node, context, runtime) {
     });
   }
 
-  // 3) Si no existe, crear conversación del paciente objetivo.
+  // 3) Si no existe:
+  // - modo template: crear conversación del paciente objetivo.
+  // - modo manual: no enviar (se exige conversación activa en últimas 24h).
   if (!conversation) {
+    if (messageMode === 'manual') {
+      return {
+        kind: 'success',
+        output: {
+          status: 'skipped_no_active_conversation_24h',
+          reason: 'conversation_not_found',
+          message_mode: messageMode,
+          message_preview: previewText,
+          recipient_mode: recipientData.recipient_mode,
+          recipient: recipientData.recipient,
+          conversation_id: null,
+          last_inbound_at: null,
+        },
+        next_node_id: readOutputTarget(node, 'on_success'),
+      };
+    }
     conversation = await Conversation.create({
       clinic_id: clinicId,
       channel: 'whatsapp',
@@ -1629,6 +1762,25 @@ async function handleSendWhatsapp(node, context, runtime) {
     // 4) Si era conversación sin paciente, vincularla.
     await conversation.update({ patient_id: targetPatientId });
   }
+
+  if (messageMode === 'manual' && !hasActiveInboundWindow(conversation?.last_inbound_at)) {
+    return {
+      kind: 'success',
+      output: {
+        status: 'skipped_no_active_conversation_24h',
+        reason: 'conversation_outside_24h_window',
+        message_mode: messageMode,
+        message_preview: previewText,
+        recipient_mode: recipientData.recipient_mode,
+        recipient: recipientData.recipient,
+        conversation_id: conversation?.id || null,
+        last_inbound_at: conversation?.last_inbound_at || null,
+      },
+      next_node_id: readOutputTarget(node, 'on_success'),
+    };
+  }
+
+  const senderData = await resolveWhatsAppSenderConfig({ config, context: templateContext, clinicId });
 
   const senderClinic = await Clinica.findByPk(clinicId, {
     attributes: ['id_clinica', 'nombre_clinica'],
@@ -1678,7 +1830,6 @@ async function handleSendWhatsapp(node, context, runtime) {
     || cleanString(runtime?.execution?.template_name)
     || `Flujo #${toIntOrNull(runtime?.execution?.id) || ''}`.trim();
   const eventMessageContent = `Mensaje enviado automáticamente por activarse el flujo ${flowName ? `"${flowName}"` : ''}. El paciente no ve este texto, solo el mensaje a continuación.`;
-  const messageContent = previewText;
   const nowIso = new Date().toISOString();
 
   const eventMsg = await Message.create({
@@ -1696,8 +1847,9 @@ async function handleSendWhatsapp(node, context, runtime) {
       execution_id: runtime?.execution?.id || null,
       node_id: cleanString(node?.id),
       flow_name: flowName || null,
-      template_id: template.id,
-      template_name: template.name,
+      message_mode: messageMode,
+      template_id: template?.id || null,
+      template_name: template?.name || null,
       generated_at: nowIso,
     },
   });
@@ -1709,9 +1861,10 @@ async function handleSendWhatsapp(node, context, runtime) {
     node_id: cleanString(node?.id),
     flow_name: flowName || null,
     flow_reason: 'flow_send_whatsapp',
-    template_id: template.id,
-    template_name: template.name,
-    template_language: cleanString(resolveTemplateValue(config?.language_code, context)) || template.language || 'es_ES',
+    message_mode: messageMode,
+    template_id: template?.id || null,
+    template_name: template?.name || null,
+    template_language: templateLanguage || template?.language || 'es_ES',
     template_params: templateParams,
     preview_text: previewText,
     recipient_mode: recipientData.recipient_mode,
@@ -1737,7 +1890,7 @@ async function handleSendWhatsapp(node, context, runtime) {
     sender_id: null,
     direction: 'outbound',
     content: messageContent,
-    message_type: 'template',
+    message_type: messageType,
     status: 'pending',
     sent_at: new Date(),
     metadata,
@@ -1754,8 +1907,8 @@ async function handleSendWhatsapp(node, context, runtime) {
           conversationId: conversation.id,
           to: recipientData.recipient,
           body: messageContent,
-          useTemplate: true,
-          templateName: template.name,
+          useTemplate: messageMode === 'template',
+          templateName: template?.name || null,
           templateLanguage: metadata.template_language,
           templateParams,
           templateComponents: null,
@@ -1803,8 +1956,9 @@ async function handleSendWhatsapp(node, context, runtime) {
         message_id: msg.id,
         event_message_id: eventMsg.id,
         status: 'scheduled',
-        template_id: template.id,
-        template_name: template.name,
+        message_mode: messageMode,
+        template_id: template?.id || null,
+        template_name: template?.name || null,
         message_preview: previewText,
         recipient_mode: recipientData.recipient_mode,
         recipient: recipientData.recipient,
@@ -1828,8 +1982,8 @@ async function handleSendWhatsapp(node, context, runtime) {
     const waResponse = await whatsappService.sendMessage({
       to: recipientData.recipient,
       body: messageContent,
-      useTemplate: true,
-      templateName: template.name,
+      useTemplate: messageMode === 'template',
+      templateName: template?.name || null,
       templateLanguage: metadata.template_language,
       templateParams,
       templateComponents: null,
@@ -1923,8 +2077,9 @@ async function handleSendWhatsapp(node, context, runtime) {
       message_id: msg.id,
       event_message_id: eventMsg.id,
       status: 'sent',
-      template_id: template.id,
-      template_name: template.name,
+      message_mode: messageMode,
+      template_id: template?.id || null,
+      template_name: template?.name || null,
       message_preview: previewText,
       recipient_mode: recipientData.recipient_mode,
       recipient: recipientData.recipient,
@@ -2292,16 +2447,15 @@ async function processNode(node, context, runtime = {}) {
         }
         return {
           kind: 'success',
-          output: {
-            status: 'simulated',
-            simulated: true,
-            target_entity: targetEntity,
-            new_status: nextStatus,
-            agenda_icon: cleanString(resolveTemplateValue(config?.agenda_icon, context)) || null,
-          },
-          context_patch: contextPatch,
-          next_node_id: readOutputTarget(node, 'on_success'),
-        };
+        output: {
+          status: 'simulated',
+          simulated: true,
+          target_entity: targetEntity,
+          new_status: nextStatus,
+        },
+        context_patch: contextPatch,
+        next_node_id: readOutputTarget(node, 'on_success'),
+      };
       }
       return handleChangeStatus(node, context, runtime);
     }
@@ -2348,12 +2502,18 @@ async function processNode(node, context, runtime = {}) {
       if (simulation) {
         const recipientMode = normalizeRecipientMode(resolveTemplateValue(config?.recipient_mode, context));
         const senderMode = toLowerSafe(resolveTemplateValue(config?.sender_mode, context)) || 'clinic_default';
+        const messageMode = normalizeWhatsappMessageMode(resolveTemplateValue(config?.message_mode, context));
+        const manualText = cleanString(resolveTemplateValue(config?.manual_message_text, context));
         return {
           kind: 'success',
           output: {
             status: 'simulated',
             simulated: true,
+            message_mode: messageMode,
             template_id: toIntOrNull(resolveTemplateValue(config?.template_id, context)),
+            message_preview: messageMode === 'manual'
+              ? (manualText || null)
+              : null,
             recipient_mode: recipientMode,
             sender_mode: senderMode,
             sender_origin_id: senderMode === 'specific_origin'
@@ -2468,6 +2628,33 @@ async function processNode(node, context, runtime = {}) {
           on_response: readOutputTarget(node, 'on_response'),
           on_timeout: readOutputTarget(node, 'on_timeout'),
           response_buffer_enabled: responseBufferEnabled,
+        },
+        wait_until: waitUntil,
+      };
+    }
+
+    case 'delay/wait_form_submission': {
+      const timeoutMs = resolveDurationMs(config?.timeout_duration ?? 24, config?.timeout_unit || 'hours');
+      const waitUntil = timeoutMs > 0 ? new Date(Date.now() + timeoutMs) : null;
+      const matchMode = normalizeFormSubmissionMatchMode(resolveTemplateValue(config?.match_mode, context));
+      const matchValue = cleanString(resolveTemplateValue(config?.match_value, context));
+      if (!matchValue) {
+        throw new Error('wait_form_submission_match_value_required');
+      }
+      return {
+        kind: 'waiting',
+        output: {
+          waits_for_form_submission: true,
+          match_mode: matchMode,
+          match_value: matchValue,
+          timeout_at: waitUntil ? waitUntil.toISOString() : null,
+        },
+        waiting_meta: {
+          type: nodeType,
+          match_mode: matchMode,
+          match_value: matchValue,
+          on_submit: readOutputTarget(node, 'on_submit'),
+          on_timeout: readOutputTarget(node, 'on_timeout'),
         },
         wait_until: waitUntil,
       };
@@ -2602,7 +2789,7 @@ async function processNode(node, context, runtime = {}) {
   }
 }
 
-async function resumeWaitingNode(execution, node, context, { mode, responseText }) {
+async function resumeWaitingNode(execution, node, context, { mode, responseText, formSubmission }) {
   const nodeType = cleanString(node?.type) || '';
 
   if (nodeType === 'delay/wait_response') {
@@ -2654,6 +2841,66 @@ async function resumeWaitingNode(execution, node, context, { mode, responseText 
       context: nextContext,
       last_error: null,
     }, 'flow_execution:resumed', { resume_mode: mode || 'response' });
+
+    return { resumed: true, context: nextContext };
+  }
+
+  if (nodeType === 'delay/wait_form_submission') {
+    const useSubmission = mode === 'form_submission';
+    const nextNode = useSubmission
+      ? readOutputTarget(node, 'on_submit')
+      : readOutputTarget(node, 'on_timeout');
+    const waitingMeta = execution?.waiting_meta && typeof execution.waiting_meta === 'object'
+      ? execution.waiting_meta
+      : {};
+    const resolvedMatchMode = cleanString(waitingMeta.match_mode) || cleanString(node?.config?.match_mode) || null;
+    const resolvedMatchValue = cleanString(waitingMeta.match_value) || cleanString(node?.config?.match_value) || null;
+
+    let nextContext = context;
+    if (useSubmission) {
+      const submittedAt = cleanString(formSubmission?.submitted_at) || new Date().toISOString();
+      const normalizedFields = formSubmission?.fields && typeof formSubmission.fields === 'object' && !Array.isArray(formSubmission.fields)
+        ? formSubmission.fields
+        : {};
+      const outputPatch = {
+        submitted: true,
+        submitted_at: submittedAt,
+        page_url: cleanString(formSubmission?.page_url) || null,
+        form_id: cleanString(formSubmission?.form_id) || null,
+        form_name: cleanString(formSubmission?.form_name) || null,
+        form_selector: cleanString(formSubmission?.form_selector) || null,
+        match_mode: resolvedMatchMode,
+        match_value: resolvedMatchValue,
+        fields: normalizedFields,
+        field_names: Object.keys(normalizedFields),
+        lead_intake_id: toIntOrNull(formSubmission?.lead_intake_id),
+        email: cleanString(formSubmission?.email) || null,
+        telefono: cleanString(formSubmission?.telefono) || null,
+        form_submission_event_id: toIntOrNull(formSubmission?.form_submission_event_id),
+        source_detail: cleanString(formSubmission?.source_detail) || 'web_form',
+      };
+      nextContext = mergeNodeOutput(nextContext, node.id, outputPatch);
+      nextContext = {
+        ...(nextContext || {}),
+        last_form_submission: outputPatch,
+      };
+    } else {
+      nextContext = mergeNodeOutput(nextContext, node.id, {
+        submitted: false,
+        timed_out_at: new Date().toISOString(),
+        match_mode: resolvedMatchMode,
+        match_value: resolvedMatchValue,
+      });
+    }
+
+    await updateExecutionAndEmit(execution, {
+      status: 'running',
+      wait_until: null,
+      waiting_meta: null,
+      current_node_id: nextNode,
+      context: nextContext,
+      last_error: null,
+    }, 'flow_execution:resumed', { resume_mode: mode || 'form_submission' });
 
     return { resumed: true, context: nextContext };
   }
@@ -2726,6 +2973,7 @@ async function runExecution(executionId, options = {}) {
     }
 
     const responseText = options.responseText ?? getByPath(execution.waiting_meta, 'pending_response_text') ?? null;
+    const formSubmission = options.formSubmission ?? getByPath(execution.waiting_meta, 'pending_form_submission') ?? null;
 
     const waitingNodeId = cleanString(execution.current_node_id);
     const waitingNode = waitingNodeId ? nodeMap.get(waitingNodeId) : null;
@@ -2742,13 +2990,17 @@ async function runExecution(executionId, options = {}) {
     const resumeInfo = await resumeWaitingNode(execution, waitingNode, context, {
       mode: resumeMode,
       responseText,
+      formSubmission,
     });
 
     context = resumeInfo.context;
   }
 
   let localStatus = execution.status;
-  let currentNodeId = cleanString(execution.current_node_id) || cleanString(template.entry_node_id);
+  // `current_node_id` is always set when an execution is created. Falling back to
+  // `entry_node_id` here causes resumed waits with no next node (e.g. timeout with
+  // no `on_timeout`) to restart the whole flow from the trigger.
+  let currentNodeId = cleanString(execution.current_node_id);
 
   for (let step = 0; step < maxSteps; step += 1) {
     if (localStatus !== 'running') break;

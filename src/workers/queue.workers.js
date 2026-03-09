@@ -740,6 +740,10 @@ createWorker('webhook_whatsapp', async (job) => {
 
 // Crea plantillas desde catálogo para un WABA
 createWorker('whatsapp_template_create', async (job) => {
+    if (job.name === 'propagate_catalog_item') {
+        await whatsappTemplatesService.propagateCatalogTemplateToAllClinics(job.data || {});
+        return;
+    }
     await whatsappTemplatesService.createTemplatesFromCatalog(job.data || {});
 });
 

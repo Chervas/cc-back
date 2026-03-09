@@ -4,6 +4,32 @@
 
 ---
 
+## 2026-03-08 - Conversaciones lead y actividad de paciente
+
+- **Nomenclatura canónica en marketing/chat**
+  - `LeadIntake` es el modelo canónico de lead para marketing, formularios y automatizaciones.
+  - `LeadIntake` usa `clinica_id`.
+  - `Conversation` pertenece al subsistema de chat y usa `clinic_id`.
+  - `Conversation.lead_id` debe resolver contra `LeadIntake.id`.
+  - El modelo histórico `Lead` no debe usarse en nuevo código de marketing ni en el runtime de conversaciones asociado a leads.
+
+- `GET /api/conversations`
+  - Cuando se consulta por `lead_id` y todavía no existe conversación, backend puede crear una conversación WhatsApp on-demand si el lead tiene teléfono.
+  - El objetivo es que drawers y vistas embebidas no queden bloqueados en estado vacío cuando el lead ya es contactable pero aún no ha abierto hilo.
+
+- `CitasPacientes`
+  - Se añaden `created_by` y `updated_by` para persistir el actor operativo que crea o modifica la cita.
+  - Estos campos se rellenan en:
+    - creación de cita
+    - cambio de estado
+    - reagendado
+
+- `GET /api/pacientes/:id/activity`
+  - Nuevo endpoint de actividad operativa del paciente.
+  - Devuelve eventos de cita construidos desde `CitasPacientes` con actor resuelto desde `Usuarios`.
+  - Esto permite que el registro del paciente muestre acciones como `Cita agendada` indicando qué usuario ejecutó la operación.
+
+
 ## Automation v2: Nodos y Acciones
 
 ### Nodo `action/write_note`
@@ -112,3 +138,25 @@ En `.env` / `.env.example`:
   - Sustituir la llamada cloud STT por un servicio local de transcripción (p.ej. `faster-whisper`/`whisper.cpp`) detrás de un endpoint interno.
   - Mantener el mismo contrato de salida (`content` + `metadata.audio_transcription`) para no romper QuickChat ni automations.
   - Llama 3.1 seguirá para razonamiento de texto (`condition/ai_analysis`), y STT quedará desacoplado en el servicio de audio local.
+
+## Leads: actividad operativa y conversación
+
+- `GET /api/intake/leads/:id/activity`
+  - Nuevo endpoint de actividad operativa del lead.
+  - Agrega:
+    - formularios (`FormSubmissionEvents`),
+    - contactos registrados,
+    - mensajes y plantillas de WhatsApp,
+    - actor interno si existe (`Messages.sender_id -> Usuarios`).
+
+- Conversaciones de lead
+  - El modelo canónico para marketing es `LeadIntake`.
+  - La vinculación correcta queda así:
+    - `LeadIntake.clinica_id`
+    - `Conversation.clinic_id`
+    - `Conversation.lead_id -> LeadIntake.id`
+  - `Lead` legacy no debe usarse ya en código nuevo de marketing/chat.
+
+- Ventana de 24h en WhatsApp
+  - Enviar una plantilla no abre la sesión libre.
+  - La sesión pasa a abierta solo cuando entra una respuesta inbound del lead (`last_inbound_at`).

@@ -8,6 +8,23 @@
 module.exports = {
   async up(queryInterface) {
     await queryInterface.sequelize.query(`
+      ALTER TABLE CitasPacientes
+      MODIFY COLUMN estado ENUM(
+        'pendiente',
+        'pendiente_confirmada',
+        'confirmada',
+        'info_enviada',
+        'info_confirmada',
+        'recordatorio_enviado',
+        'recordatorio_confirmado',
+        'completada',
+        'no_asistio',
+        'cancelada',
+        'reprogramada'
+      ) NOT NULL DEFAULT 'pendiente';
+    `);
+
+    await queryInterface.sequelize.query(`
       UPDATE CitasPacientes
       SET estado = CASE LOWER(TRIM(estado))
         WHEN 'programada' THEN 'pendiente'
@@ -40,6 +57,23 @@ module.exports = {
 
   async down(queryInterface) {
     await queryInterface.sequelize.query(`
+      ALTER TABLE CitasPacientes
+      MODIFY COLUMN estado ENUM(
+        'pendiente',
+        'pendiente_confirmada',
+        'confirmada',
+        'info_enviada',
+        'info_confirmada',
+        'recordatorio_enviado',
+        'recordatorio_confirmado',
+        'reprogramada',
+        'cancelada',
+        'completada',
+        'no_asistio'
+      ) NOT NULL DEFAULT 'pendiente';
+    `);
+
+    await queryInterface.sequelize.query(`
       UPDATE CitasPacientes
       SET estado = CASE estado
         WHEN 'info_enviada' THEN 'pendiente'
@@ -70,4 +104,3 @@ module.exports = {
     `);
   },
 };
-

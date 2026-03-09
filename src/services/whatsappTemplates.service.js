@@ -47,6 +47,17 @@ function normalizeDisciplines(raw) {
   return [];
 }
 
+function templateAppliesToDisciplines(template, disciplinas) {
+  if (!template) return false;
+  if (template.is_generic) return true;
+  const templateDisciplines = normalizeDisciplines(
+    template.disciplinas?.map((d) => d.disciplina_code)
+  );
+  if (!templateDisciplines.length) return false;
+  const effectiveDisciplines = normalizeDisciplines(disciplinas);
+  return effectiveDisciplines.some((code) => templateDisciplines.includes(code));
+}
+
 function isRetryableMetaError(err) {
   const status = err?.response?.status;
   if (status && (status >= 500 || status === 429)) {
@@ -78,6 +89,18 @@ async function selectCatalogTemplatesByDisciplines(disciplinas) {
   const templatesById = new Map();
   [...generic, ...disciplineTemplates].forEach((t) => templatesById.set(t.id, t));
   return Array.from(templatesById.values());
+}
+
+async function getCatalogTemplateById(templateCatalogId) {
+  return WhatsappTemplateCatalog.findByPk(templateCatalogId, {
+    include: [
+      {
+        model: WhatsappTemplateCatalogDiscipline,
+        as: 'disciplinas',
+        attributes: ['id', 'disciplina_code'],
+      },
+    ],
+  });
 }
 
 async function createPlaceholderTemplatesForClinic({ clinicId, assignmentScope, groupId }) {
@@ -118,6 +141,41 @@ async function createPlaceholderTemplatesForClinic({ clinicId, assignmentScope, 
   }
 
   return created;
+}
+
+async function upsertPlaceholderTemplateForClinic({ clinicId, template }) {
+  if (!clinicId || !template) return { action: 'skipped' };
+
+  const existing = await WhatsappTemplate.findOne({
+    where: {
+      clinic_id: clinicId,
+      waba_id: null,
+      name: template.name,
+      language: DEFAULT_LANGUAGE,
+    },
+    order: [['updatedAt', 'DESC']],
+  });
+
+  const payload = {
+    clinic_id: clinicId,
+    waba_id: null,
+    name: template.name,
+    language: DEFAULT_LANGUAGE,
+    category: template.category,
+    status: 'SIN_CONECTAR',
+    components: parseMaybeJson(template.components),
+    catalog_template_id: template.id,
+    origin: 'catalog',
+    is_active: !!template.is_active,
+  };
+
+  if (existing) {
+    await existing.update(payload);
+    return { action: 'updated', row: existing };
+  }
+
+  const row = await WhatsappTemplate.create(payload);
+  return { action: 'created', row };
 }
 
 async function resolveDisciplines({ clinicId, groupId }) {
@@ -256,6 +314,183 @@ async function createTemplatesFromCatalog({ wabaId, clinicId, groupId, assignmen
   }
 }
 
+async function propagateCatalogTemplateToAllClinics({ templateCatalogId, logger = console }) {
+  const template = await getCatalogTemplateById(templateCatalogId);
+  if (!template) {
+    throw new Error('catalog_not_found');
+  }
+
+  const clinics = await Clinica.findAll({
+    attributes: ['id_clinica', 'configuracion'],
+    order: [['id_clinica', 'ASC']],
+    raw: true,
+  });
+
+  const whatsappService = require('./whatsapp.service');
+  const summary = {
+    catalog_template_id: template.id,
+    clinics_total: clinics.length,
+    clinics_targeted: 0,
+    skipped_not_applicable: 0,
+    placeholders_created: 0,
+    placeholders_updated: 0,
+    placeholders_deactivated: 0,
+    waba_templates_updated: 0,
+    created_in_meta: 0,
+    errors: [],
+  };
+  const syncedWabas = new Set();
+
+  for (const clinic of clinics) {
+    const clinicId = Number(clinic.id_clinica);
+    const clinicDisciplines = normalizeDisciplines(clinic?.configuracion?.disciplinas);
+    const effectiveDisciplines = clinicDisciplines.length ? clinicDisciplines : ['dental'];
+
+    if (!templateAppliesToDisciplines(template, effectiveDisciplines)) {
+      summary.skipped_not_applicable += 1;
+      continue;
+    }
+
+    summary.clinics_targeted += 1;
+
+    try {
+      const clinicConfig = await whatsappService.getClinicConfig(clinicId);
+      const placeholder = await WhatsappTemplate.findOne({
+        where: {
+          clinic_id: clinicId,
+          waba_id: null,
+          name: template.name,
+          language: DEFAULT_LANGUAGE,
+        },
+        order: [['updatedAt', 'DESC']],
+      });
+
+      const wabaId = clinicConfig?.wabaId ? String(clinicConfig.wabaId) : null;
+      if (!wabaId) {
+        const result = await upsertPlaceholderTemplateForClinic({ clinicId, template });
+        if (result.action === 'created') summary.placeholders_created += 1;
+        if (result.action === 'updated') summary.placeholders_updated += 1;
+        continue;
+      }
+
+      const existingWabaTemplate = await WhatsappTemplate.findOne({
+        where: {
+          waba_id: wabaId,
+          name: template.name,
+          language: DEFAULT_LANGUAGE,
+        },
+        order: [['updatedAt', 'DESC']],
+      });
+
+      if (existingWabaTemplate) {
+        await existingWabaTemplate.update({
+          category: template.category,
+          components: parseMaybeJson(template.components),
+          catalog_template_id: template.id,
+          origin: 'catalog',
+          is_active: !!template.is_active,
+        });
+        summary.waba_templates_updated += 1;
+
+        if (placeholder?.is_active) {
+          await placeholder.update({ is_active: false });
+          summary.placeholders_deactivated += 1;
+        }
+        continue;
+      }
+
+      if (!syncedWabas.has(wabaId) && clinicConfig.accessToken) {
+        await syncTemplatesForWaba({ wabaId, accessToken: clinicConfig.accessToken });
+        syncedWabas.add(wabaId);
+
+        const syncedTemplate = await WhatsappTemplate.findOne({
+          where: {
+            waba_id: wabaId,
+            name: template.name,
+            language: DEFAULT_LANGUAGE,
+          },
+          order: [['updatedAt', 'DESC']],
+        });
+
+        if (syncedTemplate) {
+          await syncedTemplate.update({
+            category: template.category,
+            components: parseMaybeJson(template.components),
+            catalog_template_id: template.id,
+            origin: 'catalog',
+            is_active: !!template.is_active,
+          });
+          summary.waba_templates_updated += 1;
+
+          if (placeholder?.is_active) {
+            await placeholder.update({ is_active: false });
+            summary.placeholders_deactivated += 1;
+          }
+          continue;
+        }
+      }
+
+      if (!template.is_active) {
+        const result = await upsertPlaceholderTemplateForClinic({ clinicId, template });
+        if (result.action === 'created') summary.placeholders_created += 1;
+        if (result.action === 'updated') summary.placeholders_updated += 1;
+        continue;
+      }
+
+      const metaResp = await createTemplateInMeta({
+        wabaId,
+        accessToken: clinicConfig.accessToken,
+        template,
+        language: DEFAULT_LANGUAGE,
+      });
+
+      if (placeholder) {
+        await placeholder.update({
+          waba_id: wabaId,
+          status: 'PENDING',
+          components: parseMaybeJson(template.components),
+          meta_template_id: metaResp?.id || null,
+          catalog_template_id: template.id,
+          origin: 'catalog',
+          is_active: !!template.is_active,
+        });
+        summary.placeholders_updated += 1;
+      } else {
+        await WhatsappTemplate.create({
+          waba_id: wabaId,
+          clinic_id: clinicId,
+          name: template.name,
+          language: DEFAULT_LANGUAGE,
+          category: template.category,
+          status: 'PENDING',
+          components: parseMaybeJson(template.components),
+          meta_template_id: metaResp?.id || null,
+          catalog_template_id: template.id,
+          origin: 'catalog',
+          is_active: !!template.is_active,
+        });
+      }
+
+      summary.created_in_meta += 1;
+    } catch (err) {
+      const errorMessage = err?.response?.data || err?.message || 'unknown_error';
+      logger.error('Error propagando plantilla de catálogo a clínica', {
+        clinicId,
+        templateCatalogId,
+        error: errorMessage,
+      });
+      if (summary.errors.length < 25) {
+        summary.errors.push({
+          clinic_id: clinicId,
+          error: typeof errorMessage === 'string' ? errorMessage : JSON.stringify(errorMessage),
+        });
+      }
+    }
+  }
+
+  return summary;
+}
+
 async function syncTemplatesForWaba({ wabaId, accessToken }) {
   if (!wabaId || !accessToken) {
     throw new Error('missing_waba_or_token');
@@ -302,6 +537,15 @@ async function enqueueCreateTemplatesJob(data) {
   });
 }
 
+async function enqueuePropagateCatalogTemplateJob(data) {
+  return queues.whatsappTemplateCreate.add('propagate_catalog_item', data, {
+    attempts: 5,
+    backoff: { type: 'exponential', delay: 60000 },
+    removeOnComplete: true,
+    removeOnFail: false,
+  });
+}
+
 async function enqueueSyncTemplatesJob(data) {
   return queues.whatsappTemplateSync.add('sync', data, {
     attempts: 5,
@@ -331,8 +575,10 @@ async function enqueueSyncForAllWabas() {
 module.exports = {
   createTemplatesFromCatalog,
   createPlaceholderTemplatesForClinic,
+  propagateCatalogTemplateToAllClinics,
   syncTemplatesForWaba,
   enqueueCreateTemplatesJob,
+  enqueuePropagateCatalogTemplateJob,
   enqueueSyncTemplatesJob,
   enqueueSyncForAllWabas,
 };

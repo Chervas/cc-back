@@ -1,5 +1,5 @@
 'use strict';
-const { Paciente, Clinica, PacienteRelacion, PacienteClinica, PacienteConsentimiento } = require('../../models');
+const { Paciente, Clinica, PacienteRelacion, PacienteClinica, PacienteConsentimiento, CitaPaciente, Usuario } = require('../../models');
 const { Op, literal } = require('sequelize');
 
 const normalizePhone = (phone) => {
@@ -10,6 +10,13 @@ const normalizePhone = (phone) => {
 const normalizeEmail = (email) => {
   if (!email) return null;
   return email.toString().trim().toLowerCase();
+};
+
+const buildActorLabel = (usuario) => {
+  if (!usuario) return 'Sistema';
+  return usuario.email_usuario
+    || [usuario.nombre, usuario.apellidos].filter(Boolean).join(' ').trim()
+    || `Usuario ${usuario.id_usuario}`;
 };
 
 const getClinicaIdsForScope = async (clinicaId, scope) => {
@@ -272,6 +279,109 @@ exports.getPacienteById = async (req, res) => {
     res.json(paciente);
   } catch (error) {
     res.status(500).json({ message: 'Error retrieving paciente', error: error.message });
+  }
+};
+
+exports.getPacienteActivity = async (req, res) => {
+  try {
+    const pacienteId = Number(req.params.id);
+    if (!Number.isFinite(pacienteId) || pacienteId <= 0) {
+      return res.status(400).json({ message: 'Paciente inválido' });
+    }
+
+    const citas = await CitaPaciente.findAll({
+      where: { paciente_id: pacienteId },
+      attributes: [
+        'id_cita',
+        'paciente_id',
+        'estado',
+        'inicio',
+        'created_at',
+        'updated_at',
+        'created_by',
+        'updated_by',
+      ],
+      order: [['inicio', 'DESC']],
+      raw: true,
+    });
+
+    const actorIds = Array.from(new Set(
+      citas
+        .flatMap((cita) => [Number(cita.created_by), Number(cita.updated_by)])
+        .filter((id) => Number.isFinite(id) && id > 0)
+    ));
+
+    const usuarios = actorIds.length
+      ? await Usuario.findAll({
+          where: { id_usuario: { [Op.in]: actorIds } },
+          attributes: ['id_usuario', 'nombre', 'apellidos', 'email_usuario'],
+          raw: true,
+        })
+      : [];
+
+    const usuariosById = new Map(usuarios.map((usuario) => [Number(usuario.id_usuario), usuario]));
+    const items = [];
+
+    for (const cita of citas) {
+      const createdByUser = usuariosById.get(Number(cita.created_by));
+      items.push({
+        id: `appointment-created-${cita.id_cita}`,
+        pacienteId: String(pacienteId),
+        fecha: cita.created_at || cita.inicio,
+        tipo: 'cita_creada',
+        titulo: 'Cita agendada',
+        descripcion: cita.inicio ? `Cita programada para ${new Date(cita.inicio).toLocaleString('es-ES')}` : 'Cita creada',
+        icono: 'heroicons_outline:calendar-days',
+        color: 'info',
+        citaId: String(cita.id_cita),
+        usuarioId: createdByUser ? String(createdByUser.id_usuario) : 'system',
+        usuarioNombre: buildActorLabel(createdByUser),
+        detalles: {
+          estado: cita.estado || null,
+        },
+      });
+
+      const updatedById = Number(cita.updated_by);
+      const updatedAt = cita.updated_at ? new Date(cita.updated_at).getTime() : null;
+      const createdAt = cita.created_at ? new Date(cita.created_at).getTime() : null;
+      if (!updatedById || !updatedAt || !createdAt || updatedAt <= createdAt) {
+        continue;
+      }
+
+      const eventTypeByStatus = {
+        info_confirmada: 'cita_confirmada',
+        recordatorio_confirmado: 'cita_confirmada',
+        completada: 'cita_completada',
+        cancelada: 'cita_cancelada',
+        no_asistio: 'cita_no_asistio',
+      };
+      const eventType = eventTypeByStatus[cita.estado];
+      if (!eventType) {
+        continue;
+      }
+
+      const updatedByUser = usuariosById.get(updatedById);
+      items.push({
+        id: `appointment-status-${cita.id_cita}-${cita.estado}`,
+        pacienteId: String(pacienteId),
+        fecha: cita.updated_at,
+        tipo: eventType,
+        titulo: 'Estado de cita actualizado',
+        descripcion: `Nuevo estado: ${cita.estado}`,
+        icono: 'heroicons_outline:check-badge',
+        color: ['cancelada', 'no_asistio'].includes(cita.estado) ? 'warning' : 'success',
+        citaId: String(cita.id_cita),
+        usuarioId: updatedByUser ? String(updatedByUser.id_usuario) : 'system',
+        usuarioNombre: buildActorLabel(updatedByUser),
+        detalles: {
+          estado: cita.estado,
+        },
+      });
+    }
+
+    return res.json(items.sort((a, b) => new Date(b.fecha).getTime() - new Date(a.fecha).getTime()));
+  } catch (error) {
+    return res.status(500).json({ message: 'Error retrieving paciente activity', error: error.message });
   }
 };
 

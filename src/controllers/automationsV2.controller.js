@@ -11,6 +11,7 @@ const Paciente = db.Paciente;
 const LeadIntake = db.LeadIntake;
 const Conversation = db.Conversation;
 const Message = db.Message;
+const FormSubmissionEvent = db.FormSubmissionEvent;
 const UsuarioClinica = db.UsuarioClinica;
 const Usuario = db.Usuario;
 const Clinica = db.Clinica;
@@ -46,6 +47,7 @@ const UPDATE_LEAD_INFO_MODE_OPTIONS = [
 ];
 const AI_ANALYSIS_MODE_OPTIONS = ['auto', 'quick_qa', 'complex_reasoning'];
 const AI_OUTPUT_FIELD_TYPES = ['string', 'number', 'boolean'];
+const FORM_MATCH_MODE_OPTIONS = ['url_contains', 'url_equals', 'form_id', 'selector'];
 const FIELD_CHECK_LEFT_REF_SOURCES = ['node_output', 'trigger_data', 'context', 'manual'];
 const FIELD_CHECK_VALUE_TYPES = ['string', 'number', 'boolean'];
 const FIELD_CHECK_OPERATOR_OPTIONS = ['equals', 'not_equals', 'contains', 'greater_than', 'less_than', 'exists'];
@@ -541,11 +543,10 @@ const NODE_TYPES_V2 = [
     description: 'Cambia el estado de una cita o lead según target_entity.',
     output_keys: ['on_success', 'on_fail'],
     runtime_status: 'real',
-    default_config: { target_entity: 'appointment', new_status: 'pendiente', agenda_icon: null },
+    default_config: { target_entity: 'appointment', new_status: 'pendiente' },
     config_schema: [
       { key: 'target_entity', label: 'Entidad destino', input_type: 'select', required: false, options: CHANGE_STATUS_TARGET_OPTIONS },
       { key: 'new_status', label: 'Nuevo estado', input_type: 'string', required: true },
-      { key: 'agenda_icon', label: 'Icono agenda', input_type: 'string', required: false },
     ],
   },
   {
@@ -576,11 +577,13 @@ const NODE_TYPES_V2 = [
     type: 'action/send_whatsapp',
     category: 'action',
     label: 'Enviar WhatsApp',
-    description: 'Envía un mensaje de WhatsApp usando una plantilla aprobada.',
+    description: 'Envía un mensaje de WhatsApp con plantilla aprobada o texto manual (si hay ventana activa 24h).',
     output_keys: ['on_success', 'on_fail'],
     runtime_status: 'real',
     default_config: {
+      message_mode: 'template',
       template_id: '',
+      manual_message_text: '',
       language_code: 'es_ES',
       recipient_mode: 'context_patient',
       recipient_to: '',
@@ -590,7 +593,9 @@ const NODE_TYPES_V2 = [
       variables: {},
     },
     config_schema: [
-      { key: 'template_id', label: 'Template ID', input_type: 'string', required: true },
+      { key: 'message_mode', label: 'Modo de mensaje', input_type: 'select', required: false, options: ['template', 'manual'] },
+      { key: 'template_id', label: 'Template ID', input_type: 'string', required: false },
+      { key: 'manual_message_text', label: 'Mensaje manual', input_type: 'text', required: false },
       { key: 'language_code', label: 'Idioma', input_type: 'string', required: false },
       {
         key: 'recipient_mode',
@@ -732,6 +737,32 @@ const NODE_TYPES_V2 = [
         input_type: 'boolean',
         required: false,
       },
+    ],
+  },
+  {
+    type: 'delay/wait_form_submission',
+    category: 'delay',
+    label: 'Esperar envío de formulario',
+    description: 'Espera a que el mismo paciente o lead envíe un formulario interceptado por el snippet.',
+    output_keys: ['on_submit', 'on_timeout'],
+    runtime_status: 'real',
+    default_config: {
+      match_mode: 'url_contains',
+      match_value: '',
+      timeout_duration: 24,
+      timeout_unit: 'hours',
+    },
+    config_schema: [
+      {
+        key: 'match_mode',
+        label: '¿Cómo identificas el formulario?',
+        input_type: 'select',
+        required: true,
+        options: FORM_MATCH_MODE_OPTIONS,
+      },
+      { key: 'match_value', label: 'Valor a buscar', input_type: 'string', required: true },
+      { key: 'timeout_duration', label: 'Tiempo de espera', input_type: 'number', required: true },
+      { key: 'timeout_unit', label: 'Unidad de tiempo de espera', input_type: 'select', required: true, options: ['minutes', 'hours', 'days'] },
     ],
   },
   {
@@ -1636,12 +1667,51 @@ function validateNodeConfig(node, nodeMap) {
   }
 
   if (nodeType === 'action/send_whatsapp') {
-    if (isConfigValueEmpty(config.template_id)) {
+    const messageModeRaw = cleanString(config.message_mode) || '';
+    const hasTemplateId = !isConfigValueEmpty(config.template_id);
+    const manualMessageText =
+      cleanString(config.manual_message_text) ||
+      cleanString(config.manual_text) ||
+      cleanString(config.message_text) ||
+      '';
+    const hasManualMessageText = !!manualMessageText;
+
+    let messageMode = 'template';
+    if (messageModeRaw === 'manual' || messageModeRaw === 'template') {
+      messageMode = messageModeRaw;
+    } else if (!hasTemplateId && hasManualMessageText) {
+      // Fallback robusto: si hay texto manual y no hay plantilla, asumimos modo manual.
+      messageMode = 'manual';
+    } else if (hasTemplateId) {
+      messageMode = 'template';
+    }
+
+    if (messageModeRaw && !['template', 'manual'].includes(messageModeRaw)) {
+      errors.push(
+        buildValidationError(
+          'node_config_invalid',
+          `El nodo ${nodeId} requiere message_mode válido`,
+          { node_id: nodeId, node_type: nodeType, key: 'message_mode', value: messageModeRaw }
+        )
+      );
+    }
+
+    if (messageMode === 'template' && !hasTemplateId) {
       errors.push(
         buildValidationError(
           'node_config_required',
-          `El nodo ${nodeId} requiere 'template_id'`,
+          `El nodo ${nodeId} requiere 'template_id' cuando message_mode = template`,
           { node_id: nodeId, node_type: nodeType, key: 'template_id' }
+        )
+      );
+    }
+
+    if (messageMode === 'manual' && !hasManualMessageText) {
+      errors.push(
+        buildValidationError(
+          'node_config_required',
+          `El nodo ${nodeId} requiere 'manual_message_text' cuando message_mode = manual`,
+          { node_id: nodeId, node_type: nodeType, key: 'manual_message_text' }
         )
       );
     }
@@ -1758,6 +1828,49 @@ function validateNodeConfig(node, nodeMap) {
           'node_config_invalid',
           `El nodo ${nodeId} requiere listens_to_node_id existente`,
           { node_id: nodeId, node_type: nodeType, key: 'listens_to_node_id', value: listensTo || null }
+        )
+      );
+    }
+  }
+
+  if (nodeType === 'delay/wait_form_submission') {
+    const timeoutDuration = Number(config.timeout_duration);
+    const timeoutUnit = cleanString(config.timeout_unit);
+    const matchMode = cleanString(config.match_mode);
+    const matchValue = cleanString(config.match_value);
+    if (!Number.isFinite(timeoutDuration) || timeoutDuration <= 0) {
+      errors.push(
+        buildValidationError(
+          'node_config_invalid',
+          `El nodo ${nodeId} requiere timeout_duration > 0`,
+          { node_id: nodeId, node_type: nodeType, key: 'timeout_duration' }
+        )
+      );
+    }
+    if (!['minutes', 'hours', 'days'].includes(timeoutUnit || '')) {
+      errors.push(
+        buildValidationError(
+          'node_config_invalid',
+          `El nodo ${nodeId} requiere timeout_unit válida`,
+          { node_id: nodeId, node_type: nodeType, key: 'timeout_unit' }
+        )
+      );
+    }
+    if (!FORM_MATCH_MODE_OPTIONS.includes(matchMode || '')) {
+      errors.push(
+        buildValidationError(
+          'node_config_invalid',
+          `El nodo ${nodeId} requiere match_mode válido`,
+          { node_id: nodeId, node_type: nodeType, key: 'match_mode', value: matchMode || null, allowed: FORM_MATCH_MODE_OPTIONS }
+        )
+      );
+    }
+    if (!matchValue) {
+      errors.push(
+        buildValidationError(
+          'node_config_invalid',
+          `El nodo ${nodeId} requiere match_value`,
+          { node_id: nodeId, node_type: nodeType, key: 'match_value' }
         )
       );
     }
@@ -2442,6 +2555,100 @@ exports.getAssigneesCatalog = async (req, res) => {
   } catch (err) {
     console.error('Error getAssigneesCatalog v2', err);
     return res.status(500).json({ success: false, error: 'assignees_failed', message: err.message });
+  }
+};
+
+exports.getRecentFormMatches = async (req, res) => {
+  try {
+    const access = await resolveAccess(req);
+    if (!access.user_id) {
+      return res.status(401).json({ success: false, error: 'auth_required' });
+    }
+
+    const limit = Math.max(8, Math.min(40, parseIntOrNull(req.query?.limit) || 24));
+    const parsedScope = parseTemplateScopeQuery(req.query);
+    let clinicIds = [];
+
+    if (parsedScope.group_id) {
+      if (!access.is_admin && !access.group_ids.has(parsedScope.group_id)) {
+        return res.status(403).json({ success: false, error: 'forbidden_scope' });
+      }
+      clinicIds = await resolveClinicIdsForGroup(parsedScope.group_id);
+    } else if (parsedScope.clinic_ids.length) {
+      if (!access.is_admin) {
+        const hasForbidden = parsedScope.clinic_ids.some((clinicId) => !access.clinic_ids.has(clinicId));
+        if (hasForbidden) {
+          return res.status(403).json({ success: false, error: 'forbidden_scope' });
+        }
+      }
+      clinicIds = parsedScope.clinic_ids;
+    } else if (!access.is_admin) {
+      clinicIds = Array.from(access.clinic_ids);
+    }
+
+    clinicIds = Array.from(
+      new Set(
+        clinicIds
+          .map((id) => Number.parseInt(String(id), 10))
+          .filter((id) => Number.isInteger(id) && id > 0)
+      )
+    );
+
+    if (!clinicIds.length) {
+      return res.json({
+        success: true,
+        data: {
+          clinic_ids: [],
+          items: [],
+        },
+      });
+    }
+
+    const rows = await FormSubmissionEvent.findAll({
+      where: {
+        clinic_id: { [Op.in]: clinicIds },
+      },
+      attributes: ['clinic_id', 'page_url', 'form_id', 'form_name', 'form_selector', 'submitted_at'],
+      order: [['submitted_at', 'DESC']],
+      limit: limit * 4,
+      raw: true,
+    });
+
+    const seen = new Set();
+    const items = [];
+    for (const row of rows) {
+      const signature = [
+        cleanString(row.page_url) || '',
+        cleanString(row.form_id) || '',
+        cleanString(row.form_selector) || '',
+      ].join('|');
+      if (!signature || seen.has(signature)) {
+        continue;
+      }
+      seen.add(signature);
+      items.push({
+        clinic_id: parseIntOrNull(row.clinic_id),
+        page_url: cleanString(row.page_url),
+        form_id: cleanString(row.form_id),
+        form_name: cleanString(row.form_name),
+        form_selector: cleanString(row.form_selector),
+        submitted_at: row.submitted_at || null,
+      });
+      if (items.length >= limit) {
+        break;
+      }
+    }
+
+    return res.json({
+      success: true,
+      data: {
+        clinic_ids: clinicIds,
+        items,
+      },
+    });
+  } catch (error) {
+    console.error('[automations-v2] getRecentFormMatches error', error);
+    return res.status(500).json({ success: false, error: 'recent_form_matches_failed' });
   }
 };
 

@@ -1045,6 +1045,41 @@ exports.setCatalogDisciplines = async (req, res) => {
   }
 };
 
+exports.propagateCatalogToClinics = async (req, res) => {
+  if (!assertAdmin(req, res)) return;
+  try {
+    const id = Number(req.params.id);
+    if (!id) {
+      return res.status(400).json({ error: 'catalog_id_required' });
+    }
+
+    const item = await WhatsappTemplateCatalog.findByPk(id, {
+      attributes: ['id', 'name', 'display_name', 'is_active'],
+      raw: true,
+    });
+    if (!item) {
+      return res.status(404).json({ error: 'catalog_not_found' });
+    }
+
+    const { enqueuePropagateCatalogTemplateJob } = require('../services/whatsappTemplates.service');
+    const job = await enqueuePropagateCatalogTemplateJob({
+      templateCatalogId: id,
+      requestedBy: req.userData?.userId || null,
+    });
+
+    return res.json({
+      success: true,
+      jobId: job?.id || null,
+      catalog_template_id: id,
+      template_name: item.display_name || item.name,
+      is_active: !!item.is_active,
+    });
+  } catch (err) {
+    console.error('Error propagateCatalogToClinics', err);
+    return res.status(500).json({ error: 'Error propagando plantilla a clínicas' });
+  }
+};
+
 exports.assignPhone = async (req, res) => {
   try {
     const userId = req.userData?.userId;

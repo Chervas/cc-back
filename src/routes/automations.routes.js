@@ -19,6 +19,7 @@ router.get('/v2/meta', automationsV2Controller.getFlowMeta);
 router.get('/v2/node-types', automationsV2Controller.getNodeTypesCatalog);
 router.get('/v2/search-entities', automationsV2Controller.searchEntities);
 router.get('/v2/assignees', automationsV2Controller.getAssigneesCatalog);
+router.get('/v2/forms/recent', automationsV2Controller.getRecentFormMatches);
 router.post('/v2/validate', automationsV2Controller.validateTemplateGraph);
 router.get('/v2/templates', automationsV2Controller.listTemplates);
 router.post('/v2/templates', automationsV2Controller.createTemplateDraft);

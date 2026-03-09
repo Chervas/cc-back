@@ -27,6 +27,8 @@ module.exports = (sequelize, DataTypes) => {
     instalacion_id: { type: DataTypes.INTEGER, allowNull: true },
     tratamiento_id: { type: DataTypes.INTEGER, allowNull: true },
     campana_id: { type: DataTypes.INTEGER, allowNull: true },
+    created_by: { type: DataTypes.INTEGER, allowNull: true },
+    updated_by: { type: DataTypes.INTEGER, allowNull: true },
     titulo: { type: DataTypes.STRING(255), allowNull: true },
     nota: { type: DataTypes.TEXT, allowNull: true },
     motivo: { type: DataTypes.STRING(255), allowNull: true },

@@ -731,6 +731,8 @@ exports.createCita = asyncHandler(async (req, res) => {
             instalacion_id,
             tratamiento_id,
             campana_id: campana_id || lead?.campana_id || null,
+            created_by: req.userData?.userId || null,
+            updated_by: req.userData?.userId || null,
             titulo: datosPaciente.titulo || null,
             nota: nota || null,
             motivo: motivo || null,
@@ -873,6 +875,7 @@ exports.updateCitaEstado = asyncHandler(async (req, res) => {
     }
 
     cita.estado = estadoRaw;
+    cita.updated_by = req.userData?.userId || null;
     await cita.save();
 
     try {
@@ -968,6 +971,7 @@ exports.reagendarCita = asyncHandler(async (req, res) => {
     } else {
         cita.estado = 'reprogramada';
     }
+    cita.updated_by = req.userData?.userId || null;
     await cita.save();
 
     try {
