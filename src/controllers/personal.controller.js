@@ -3121,6 +3121,7 @@ exports.createHorarioClinica = async (req, res) => {
             targetUserId,
             clinicaId,
             candidateHorario: candidate,
+            excludeHorarioIds: [horarioId],
         });
         if (validationError) {
             return res.status(validationError.status).json(validationError.body);
