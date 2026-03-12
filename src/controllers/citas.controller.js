@@ -72,26 +72,21 @@ async function findOrCreatePaciente({ clinica_id, nombre, apellidos, telefono, e
         whereContacto.push({ email });
     }
 
-    const paciente = await Paciente.findOne({
-        where: {
-            [Op.and]: [
-                { [Op.or]: whereContacto },
-                {
-                    [Op.or]: [
-                        { clinica_id },
-                        { '$clinicasVinculadas.clinica_id$': clinica_id }
-                    ]
-                }
-            ]
-        },
+    const candidatos = await Paciente.findAll({
+        where: { [Op.or]: whereContacto },
         include: [
             {
                 model: db.PacienteClinica,
                 as: 'clinicasVinculadas',
                 required: false
             }
-        ]
+        ],
+        limit: 20
     });
+    const paciente = candidatos.find((row) =>
+        row.clinica_id === clinica_id ||
+        (row.clinicasVinculadas || []).some((vc) => vc.clinica_id === clinica_id)
+    ) || null;
     if (paciente) {
         // Asegurar vínculo explícito
         const yaVinculado = (paciente.clinicasVinculadas || []).some(vc => vc.clinica_id === clinica_id);
