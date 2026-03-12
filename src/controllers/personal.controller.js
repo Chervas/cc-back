@@ -3745,6 +3745,16 @@ async function validateHorariosAgainstEffectiveAvailability(_targetUserId, clini
         return intervals.some((iv) => iv.startMin <= startMin && iv.endMin >= endMin);
     }
 
+    function buildAllowedIntervals(intervals) {
+        if (!intervals || !intervals.length) return [];
+        const allowed = intervals.map((iv) => ({ ...iv }));
+        const first = allowed[0];
+        const last = allowed[allowed.length - 1];
+        first.startMin = Math.max(0, first.startMin - 60);
+        last.endMin = Math.min(24 * 60, last.endMin + 60);
+        return allowed;
+    }
+
     for (const h of activeHorarios) {
         const dia = normalizeDiaSemana(h.dia_semana);
         const inicio = normalizeHm(h.hora_inicio);
@@ -3760,7 +3770,8 @@ async function validateHorariosAgainstEffectiveAvailability(_targetUserId, clini
             errors.push({ dia_semana: dia, hora_inicio: inicio, hora_fin: fin, reason: 'CLINIC_CLOSED_DAY' });
             continue;
         }
-        if (!isContainedInIntervals(openingIntervals, startMin, endMin)) {
+        const allowedIntervals = buildAllowedIntervals(openingIntervals);
+        if (!isContainedInIntervals(allowedIntervals, startMin, endMin)) {
             errors.push({ dia_semana: dia, hora_inicio: inicio, hora_fin: fin, reason: 'OUTSIDE_CLINIC_OPENING' });
         }
     }
