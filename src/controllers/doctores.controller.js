@@ -70,23 +70,37 @@ exports.list = asyncHandler(async (req, res) => {
       // Nota: el modelo Usuario no tiene campo `especialidad` en BD; usamos `rol_en_clinica` de DoctorClinica como "especialidad" (label).
       { model: db.Usuario, as: 'doctor', attributes: ['id_usuario', 'nombre', 'apellidos', 'email_usuario'] },
       includeClinica,
+      {
+        model: db.DoctorHorario,
+        as: 'horarios',
+        attributes: ['id'],
+        where: { activo: true },
+        required: true,
+      },
     ],
     order: [['clinica_id', 'ASC'], [{ model: db.Usuario, as: 'doctor' }, 'apellidos', 'ASC'], [{ model: db.Usuario, as: 'doctor' }, 'nombre', 'ASC']],
   });
 
   // Respuesta compatible con el front (doctors.service.ts)
-  const result = doctorClinicas.map((dc) => ({
-    id: String(dc.doctor?.id_usuario ?? dc.doctor_id),
-    nombre: dc.doctor?.nombre || '',
-    apellidos: dc.doctor?.apellidos || '',
-    email: dc.doctor?.email_usuario || null,
-    especialidad: dc.rol_en_clinica || null,
-    activo: !!dc.activo,
-    clinica_id: String(dc.clinica?.id_clinica ?? dc.clinica_id),
-    clinica_nombre: dc.clinica?.nombre_clinica || '',
-    grupo_clinica_id: dc.clinica?.grupoClinicaId ?? null,
-    clinica: dc.clinica || null,
-  }));
+  const uniqueByPivot = new Map();
+  doctorClinicas.forEach((dc) => {
+    const key = `${dc.doctor_id}:${dc.clinica_id}`;
+    if (uniqueByPivot.has(key)) return;
+    uniqueByPivot.set(key, {
+      id: String(dc.doctor?.id_usuario ?? dc.doctor_id),
+      nombre: dc.doctor?.nombre || '',
+      apellidos: dc.doctor?.apellidos || '',
+      email: dc.doctor?.email_usuario || null,
+      especialidad: dc.rol_en_clinica || null,
+      activo: !!dc.activo,
+      clinica_id: String(dc.clinica?.id_clinica ?? dc.clinica_id),
+      clinica_nombre: dc.clinica?.nombre_clinica || '',
+      grupo_clinica_id: dc.clinica?.grupoClinicaId ?? null,
+      clinica: dc.clinica || null,
+    });
+  });
+
+  const result = Array.from(uniqueByPivot.values());
 
   res.json(result);
 });
