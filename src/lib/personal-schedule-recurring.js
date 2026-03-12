@@ -38,6 +38,22 @@ function addDays(dateIso, days) {
   return date.toISOString().slice(0, 10);
 }
 
+const RRULE_WEEKDAY_MAP = ['SU', 'MO', 'TU', 'WE', 'TH', 'FR', 'SA'];
+
+function weekdayCodeFromDayIndex(dayIndex) {
+  const idx = Number(dayIndex);
+  if (!Number.isFinite(idx) || idx < 0 || idx > 6) return null;
+  return RRULE_WEEKDAY_MAP[idx] || null;
+}
+
+function nthWeekdayOfMonth(dateIso) {
+  const normalized = normalizeDateOnly(dateIso);
+  if (!normalized) return null;
+  const date = new Date(`${normalized}T12:00:00Z`);
+  const dayOfMonth = date.getUTCDate();
+  return Math.floor((dayOfMonth - 1) / 7) + 1;
+}
+
 function eachDateInclusive(fromIso, toIso) {
   const fromDay = toEpochDay(fromIso);
   const toDay = toEpochDay(toIso);
@@ -66,7 +82,7 @@ function parseRRule(rrule) {
   }
 
   const freq = String(map.FREQ || '').toUpperCase();
-  if (freq !== 'WEEKLY') return null;
+  if (freq !== 'WEEKLY' && freq !== 'MONTHLY') return null;
 
   const interval = Number(map.INTERVAL || 1);
   if (!Number.isFinite(interval) || interval < 1) return null;
@@ -82,11 +98,21 @@ function parseRRule(rrule) {
   const count = map.COUNT != null ? Number(map.COUNT) : null;
   if (map.COUNT != null && (!Number.isFinite(count) || count < 1)) return null;
 
+  const byday = map.BYDAY ? String(map.BYDAY).toUpperCase() : null;
+  const bysetpos = map.BYSETPOS != null ? Number(map.BYSETPOS) : null;
+
+  if (freq === 'MONTHLY') {
+    if (!byday || !RRULE_WEEKDAY_MAP.includes(byday)) return null;
+    if (!Number.isFinite(bysetpos) || bysetpos < 1 || bysetpos > 5) return null;
+  }
+
   return {
     freq,
     interval,
     until,
     count,
+    byday,
+    bysetpos,
   };
 }
 
@@ -106,7 +132,7 @@ function validateHorarioRecurrenceFields({ dia_semana, rrule, fecha_inicio_vigen
   if (!rrule) return null;
   const parsed = parseRRule(rrule);
   if (!parsed) {
-    return 'rrule inválido. Solo se soporta FREQ=WEEKLY;INTERVAL=N[;UNTIL=YYYY-MM-DD][;COUNT=N]';
+    return 'rrule inválido. Solo se soporta FREQ=WEEKLY o FREQ=MONTHLY con INTERVAL y opcionalmente UNTIL/COUNT.';
   }
 
   if (!startDate) {
@@ -116,6 +142,17 @@ function validateHorarioRecurrenceFields({ dia_semana, rrule, fecha_inicio_vigen
   const expectedDow = dayIndexFromDate(startDate);
   if (expectedDow == null || Number(expectedDow) !== Number(dia_semana)) {
     return 'fecha_inicio_vigencia debe coincidir con dia_semana';
+  }
+
+  if (parsed.freq === 'MONTHLY') {
+    const expectedByDay = weekdayCodeFromDayIndex(expectedDow);
+    if (parsed.byday !== expectedByDay) {
+      return 'rrule mensual inválido: BYDAY debe coincidir con dia_semana';
+    }
+    const expectedSetPos = nthWeekdayOfMonth(startDate);
+    if (!expectedSetPos || Number(parsed.bysetpos) !== expectedSetPos) {
+      return 'rrule mensual inválido: BYSETPOS debe coincidir con la fecha de inicio';
+    }
   }
 
   return null;
@@ -168,14 +205,41 @@ function matchesHorarioOnDate(horario, dateIso) {
   if (!anchor || date < anchor) return false;
   if (parsed.until && date > parsed.until) return false;
 
-  const weeksSinceAnchor = Math.floor((toEpochDay(date) - toEpochDay(anchor)) / 7);
-  if (weeksSinceAnchor < 0) return false;
-  if (weeksSinceAnchor % parsed.interval !== 0) return false;
-  if (parsed.count != null) {
-    const occurrenceIndex = Math.floor(weeksSinceAnchor / parsed.interval);
-    if (occurrenceIndex >= parsed.count) return false;
+  if (parsed.freq === 'WEEKLY') {
+    const weeksSinceAnchor = Math.floor((toEpochDay(date) - toEpochDay(anchor)) / 7);
+    if (weeksSinceAnchor < 0) return false;
+    if (weeksSinceAnchor % parsed.interval !== 0) return false;
+    if (parsed.count != null) {
+      const occurrenceIndex = Math.floor(weeksSinceAnchor / parsed.interval);
+      if (occurrenceIndex >= parsed.count) return false;
+    }
+    return true;
   }
-  return true;
+
+  if (parsed.freq === 'MONTHLY') {
+    const dateDow = dayIndexFromDate(date);
+    const anchorDow = dayIndexFromDate(anchor);
+    if (dateDow == null || anchorDow == null || dateDow !== anchorDow) return false;
+
+    const anchorSetPos = nthWeekdayOfMonth(anchor);
+    const dateSetPos = nthWeekdayOfMonth(date);
+    if (!anchorSetPos || !dateSetPos || dateSetPos !== anchorSetPos) return false;
+
+    const anchorDate = new Date(`${anchor}T12:00:00Z`);
+    const targetDate = new Date(`${date}T12:00:00Z`);
+    const monthsSinceAnchor =
+      (targetDate.getUTCFullYear() - anchorDate.getUTCFullYear()) * 12 +
+      (targetDate.getUTCMonth() - anchorDate.getUTCMonth());
+    if (monthsSinceAnchor < 0) return false;
+    if (monthsSinceAnchor % parsed.interval !== 0) return false;
+    if (parsed.count != null) {
+      const occurrenceIndex = Math.floor(monthsSinceAnchor / parsed.interval);
+      if (occurrenceIndex >= parsed.count) return false;
+    }
+    return true;
+  }
+
+  return false;
 }
 
 function expandHorariosForDate(horarios = [], dateIso, exceptionMap = new Map()) {
