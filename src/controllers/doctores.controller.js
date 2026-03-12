@@ -41,16 +41,26 @@ exports.list = asyncHandler(async (req, res) => {
   // incluir cualquier rol de staff (propietario/personal/agencia) con subrol Doctores
   // para soportar casos propietario+doctor sin perder visibilidad en agenda.
   const staffRolesSql = STAFF_ROLES.map((role) => db.sequelize.escape(role)).join(', ');
-  whereDoctorClinica[Op.and] = db.Sequelize.literal(`
-    EXISTS (
-      SELECT 1
-      FROM UsuarioClinica uc
-      WHERE uc.id_usuario = \`DoctorClinica\`.\`doctor_id\`
-        AND uc.id_clinica = \`DoctorClinica\`.\`clinica_id\`
-        AND uc.rol_clinica IN (${staffRolesSql})
-        AND uc.subrol_clinica = 'Doctores'
-    )
-  `);
+  whereDoctorClinica[Op.and] = [
+    db.Sequelize.literal(`
+      EXISTS (
+        SELECT 1
+        FROM UsuarioClinica uc
+        WHERE uc.id_usuario = \`DoctorClinica\`.\`doctor_id\`
+          AND uc.id_clinica = \`DoctorClinica\`.\`clinica_id\`
+          AND uc.rol_clinica IN (${staffRolesSql})
+          AND uc.subrol_clinica = 'Doctores'
+      )
+    `),
+    db.Sequelize.literal(`
+      EXISTS (
+        SELECT 1
+        FROM ClinicaHorarios ch
+        WHERE ch.clinica_id = \`DoctorClinica\`.\`clinica_id\`
+          AND ch.activo = 1
+      )
+    `)
+  ];
   if (!parseBool(all) && clinica_id) {
     whereDoctorClinica.clinica_id = clinica_id;
   }
