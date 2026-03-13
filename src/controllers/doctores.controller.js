@@ -30,18 +30,21 @@ const subtractIntervals = (windows, blocks) => {
 };
 
 exports.list = asyncHandler(async (req, res) => {
-  const { clinica_id, group_id, all } = req.query;
+  const { clinica_id, group_id, all, agenda_context } = req.query;
+  const agendaContext = parseBool(agenda_context);
 
   // Filtrado por clinica_id directamente sobre DoctorClinica (evita depender de atributos inexistentes en Clinica)
   const whereDoctorClinica = {
-    activo: true,
-    recibe_citas: true
+    activo: true
   };
+  if (!agendaContext) {
+    whereDoctorClinica.recibe_citas = true;
+  }
   // Mantener /api/doctors legacy limitado a doctores reales:
   // incluir cualquier rol de staff (propietario/personal/agencia) con subrol Doctores
   // para soportar casos propietario+doctor sin perder visibilidad en agenda.
   const staffRolesSql = STAFF_ROLES.map((role) => db.sequelize.escape(role)).join(', ');
-  whereDoctorClinica[Op.and] = [
+  const andConditions = [
     db.Sequelize.literal(`
       EXISTS (
         SELECT 1
@@ -51,16 +54,21 @@ exports.list = asyncHandler(async (req, res) => {
           AND uc.rol_clinica IN (${staffRolesSql})
           AND uc.subrol_clinica = 'Doctores'
       )
-    `),
-    db.Sequelize.literal(`
-      EXISTS (
-        SELECT 1
-        FROM ClinicaHorarios ch
-        WHERE ch.clinica_id = \`DoctorClinica\`.\`clinica_id\`
-          AND ch.activo = 1
-      )
     `)
   ];
+  if (!agendaContext) {
+    andConditions.push(
+      db.Sequelize.literal(`
+        EXISTS (
+          SELECT 1
+          FROM ClinicaHorarios ch
+          WHERE ch.clinica_id = \`DoctorClinica\`.\`clinica_id\`
+            AND ch.activo = 1
+        )
+      `)
+    );
+  }
+  whereDoctorClinica[Op.and] = andConditions;
   if (!parseBool(all) && clinica_id) {
     whereDoctorClinica.clinica_id = clinica_id;
   }
@@ -70,6 +78,17 @@ exports.list = asyncHandler(async (req, res) => {
     as: 'clinica',
     attributes: ['id_clinica', 'nombre_clinica', 'url_avatar', 'grupoClinicaId'],
   };
+  if (agendaContext) {
+    includeClinica.include = [
+      {
+        model: db.ClinicaHorario,
+        as: 'horarios',
+        attributes: ['id', 'activo'],
+        where: { activo: true },
+        required: false
+      }
+    ];
+  }
   if (!parseBool(all) && group_id) {
     includeClinica.where = { grupoClinicaId: group_id };
   }
@@ -85,7 +104,7 @@ exports.list = asyncHandler(async (req, res) => {
         as: 'horarios',
         attributes: ['id'],
         where: { activo: true },
-        required: true,
+        required: !agendaContext,
       },
     ],
     order: [['clinica_id', 'ASC'], [{ model: db.Usuario, as: 'doctor' }, 'apellidos', 'ASC'], [{ model: db.Usuario, as: 'doctor' }, 'nombre', 'ASC']],
@@ -96,6 +115,9 @@ exports.list = asyncHandler(async (req, res) => {
   doctorClinicas.forEach((dc) => {
     const key = `${dc.doctor_id}:${dc.clinica_id}`;
     if (uniqueByPivot.has(key)) return;
+    const hasSchedule = Array.isArray(dc.horarios) && dc.horarios.some((horario) => horario?.id != null);
+    const clinicHasOpening = Array.isArray(dc.clinica?.horarios) && dc.clinica.horarios.length > 0;
+    const receivesAppointments = !!dc.recibe_citas;
     uniqueByPivot.set(key, {
       id: String(dc.doctor?.id_usuario ?? dc.doctor_id),
       nombre: dc.doctor?.nombre || '',
@@ -107,6 +129,10 @@ exports.list = asyncHandler(async (req, res) => {
       clinica_nombre: dc.clinica?.nombre_clinica || '',
       grupo_clinica_id: dc.clinica?.grupoClinicaId ?? null,
       clinica: dc.clinica || null,
+      recibe_citas: receivesAppointments,
+      has_schedule: hasSchedule,
+      clinic_has_opening: clinicHasOpening,
+      agendable: receivesAppointments && hasSchedule && clinicHasOpening,
     });
   });
 
