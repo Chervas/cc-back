@@ -182,6 +182,11 @@ La migración `20260313134000-hard-cut-automation-catalog-trigger-types.js` norm
 - `AutomationFlows.pasos`
 - `AutomationFlows.acciones`
 
+Cleanup de integración:
+
+- `/api/flows` deja de exponerse como superficie legacy.
+- El circuito canónico de flujos queda en `automations/v2`.
+
 - Ventana de 24h en WhatsApp
   - Enviar una plantilla no abre la sesión libre.
   - La sesión pasa a abierta solo cuando entra una respuesta inbound del lead (`last_inbound_at`).

@@ -1,17 +1,10 @@
 const express = require('express');
 const router = express.Router();
 const authMiddleware = require('./auth.middleware');
-const marketingFlowsController = require('../controllers/marketingFlows.controller');
 const chatFlowTemplatesController = require('../controllers/chatFlowTemplates.controller');
 const campaignOnboardingController = require('../controllers/campaignOnboarding.controller');
 
 router.use(authMiddleware);
-
-router.get('/flows', marketingFlowsController.listFlows);
-router.get('/flows/:id', marketingFlowsController.getFlow);
-router.post('/flows', marketingFlowsController.createFlow);
-router.put('/flows/:id', marketingFlowsController.updateFlow);
-router.delete('/flows/:id', marketingFlowsController.deleteFlow);
 
 // Catálogo de plantillas de flujos de chat (snippet web)
 router.get('/chat-flow-templates', chatFlowTemplatesController.listChatFlowTemplates);

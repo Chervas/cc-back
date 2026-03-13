@@ -935,7 +935,7 @@ function resolveRuntimeTargets(execution, context) {
     'trigger.data.cita_id',
     'trigger.data.id_cita',
   ]);
-  if (!appointmentId && ['appointment', 'appointment_created', 'cita', 'cita_creada'].includes(triggerType)) {
+  if (!appointmentId && ['appointment', 'appointment_created'].includes(triggerType)) {
     appointmentId = triggerEntityId;
   }
 
@@ -1001,7 +1001,7 @@ async function backfillRuntimeTargets(execution, targets = {}) {
   }
 
   if (triggerEntityId) {
-    if (['appointment', 'appointment_created', 'cita', 'cita_creada'].includes(triggerType)) {
+    if (['appointment', 'appointment_created'].includes(triggerType)) {
       out.appointment_id = out.appointment_id || triggerEntityId;
       await hydrateFromAppointment(out.appointment_id);
     } else if (['patient', 'paciente'].includes(triggerType)) {

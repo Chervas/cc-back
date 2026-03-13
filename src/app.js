@@ -174,7 +174,7 @@ console.log('Ruta /api/automation-catalog configurada');
 app.use('/api', whatsappWebhookRoutes);
 console.log('Ruta /api/whatsapp/webhook configurada');
 app.use('/api', templatesRoutes);
-console.log('Rutas /api/templates, /api/flows, /api/message-log configuradas');
+console.log('Rutas /api/templates y /api/message-log configuradas');
 app.use('/api/citas', citasRoutes);
 console.log('Ruta /api/citas configurada');
 app.use('/api/instalaciones', instalacionesRoutes);

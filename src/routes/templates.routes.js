@@ -8,9 +8,6 @@ const templatesController = require('../controllers/templates.controller');
 router.get('/templates', protect, templatesController.listTemplates);
 router.post('/templates', protect, templatesController.upsertTemplate);
 
-router.get('/flows', protect, templatesController.listFlows);
-router.post('/flows', protect, templatesController.upsertFlow);
-
 router.get('/message-log', protect, templatesController.listMessageLogs);
 
 module.exports = router;

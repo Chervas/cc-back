@@ -49,49 +49,6 @@ exports.upsertTemplate = asyncHandler(async (req, res) => {
   res.status(201).json(template);
 });
 
-exports.listFlows = asyncHandler(async (req, res) => {
-  const flows = await AutomationFlow.findAll({
-    include: [{ model: Clinica, as: 'clinica', attributes: ['id_clinica', 'nombre_clinica'] }],
-    order: [['created_at', 'DESC']]
-  });
-  res.status(200).json(flows);
-});
-
-exports.upsertFlow = asyncHandler(async (req, res) => {
-  const { id, nombre, disparador, acciones, activo, clinica_id } = req.body || {};
-
-  if (!nombre || !disparador || !acciones) {
-    return res.status(400).json({ message: 'nombre, disparador y acciones son obligatorios' });
-  }
-
-  if (clinica_id) {
-    const clinic = await Clinica.findOne({ where: { id_clinica: clinica_id } });
-    if (!clinic) return res.status(400).json({ message: 'Clínica no encontrada' });
-  }
-
-  if (id) {
-    const existing = await AutomationFlow.findByPk(id);
-    if (!existing) return res.status(404).json({ message: 'Flujo no encontrado' });
-    await existing.update({
-      nombre,
-      disparador,
-      acciones,
-      activo: activo === false || activo === 'false' ? false : true,
-      clinica_id: clinica_id || null
-    });
-    return res.status(200).json(existing);
-  }
-
-  const flow = await AutomationFlow.create({
-    nombre,
-    disparador,
-    acciones,
-    activo: activo === false || activo === 'false' ? false : true,
-    clinica_id: clinica_id || null
-  });
-  res.status(201).json(flow);
-});
-
 exports.listMessageLogs = asyncHandler(async (req, res) => {
   const { tipo, estado, destinatario } = req.query;
   const where = {};
