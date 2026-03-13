@@ -1235,35 +1235,37 @@ exports.cancelInvitation = async (req, res) => {
     }
 };
 
-exports.removeClinicCollaboration = async (req, res) => {
+async function removeClinicCollaborationInternal({ actorId, targetUserId, clinicaId, allowSelf = false }) {
     const transaction = await sequelize.transaction();
     try {
-        const actorId = Number(req.userData?.userId);
         if (!Number.isFinite(actorId)) {
             await transaction.rollback();
-            return res.status(401).json({ message: 'Auth failed!' });
+            return { status: 401, body: { message: 'Auth failed!' } };
         }
 
-        const targetUserId = parseIntOrNull(req.params?.id);
-        const clinicaId = parseIntOrNull(req.params?.clinicaId);
         if (!Number.isFinite(targetUserId) || !Number.isFinite(clinicaId)) {
             await transaction.rollback();
-            return res.status(400).json({ message: 'Invalid params' });
+            return { status: 400, body: { message: 'Invalid params' } };
         }
 
-        const canManage = await canManagePersonalInClinic(actorId, clinicaId);
-        if (!canManage) {
-            await transaction.rollback();
-            return res.status(403).json({ message: 'Forbidden' });
-        }
+        const isSelf = Number(actorId) === Number(targetUserId);
+        if (!(allowSelf && isSelf)) {
+            const canManage = await canManagePersonalInClinic(actorId, clinicaId);
+            if (!canManage) {
+                await transaction.rollback();
+                return { status: 403, body: { message: 'Forbidden' } };
+            }
 
-        // Evita que owner/agencia se desvinculen a sí mismos por accidente en UI.
-        if (!isAdmin(actorId) && Number(actorId) === Number(targetUserId)) {
-            await transaction.rollback();
-            return res.status(409).json({
-                message: 'No puedes eliminar tu propia colaboración desde esta acción.',
-                code: 'self_unlink_forbidden',
-            });
+            if (!isAdmin(actorId) && isSelf) {
+                await transaction.rollback();
+                return {
+                    status: 409,
+                    body: {
+                        message: 'No puedes eliminar tu propia colaboración desde esta acción.',
+                        code: 'self_unlink_forbidden',
+                    },
+                };
+            }
         }
 
         const pivot = await UsuarioClinica.findOne({
@@ -1277,7 +1279,7 @@ exports.removeClinicCollaboration = async (req, res) => {
 
         if (!pivot) {
             await transaction.rollback();
-            return res.status(404).json({ message: 'Collaboration not found' });
+            return { status: 404, body: { message: 'Collaboration not found' } };
         }
 
         const doctorClinicaRows = await DoctorClinica.findAll({
@@ -1299,25 +1301,55 @@ exports.removeClinicCollaboration = async (req, res) => {
             transaction,
         });
 
-        // Limpiar bloqueos scoped a la clínica removida.
         await DoctorBloqueo.destroy({
             where: { doctor_id: targetUserId, clinica_id: clinicaId },
             transaction,
         });
 
         await pivot.destroy({ transaction });
-
         await transaction.commit();
-        return res.status(200).json({
-            message: 'Collaboration removed successfully',
-            id_usuario: targetUserId,
-            clinica_id: clinicaId,
-        });
+
+        return {
+            status: 200,
+            body: {
+                message: 'Collaboration removed successfully',
+                id_usuario: targetUserId,
+                clinica_id: clinicaId,
+            },
+        };
     } catch (error) {
         await transaction.rollback();
         console.error('[personal.removeClinicCollaboration] Error:', error);
-        return res.status(500).json({ message: 'Error removing clinic collaboration', error: error.message });
+        return {
+            status: 500,
+            body: { message: 'Error removing clinic collaboration', error: error.message },
+        };
     }
+}
+
+exports.removeClinicCollaboration = async (req, res) => {
+    const actorId = Number(req.userData?.userId);
+    const targetUserId = parseIntOrNull(req.params?.id);
+    const clinicaId = parseIntOrNull(req.params?.clinicaId);
+    const result = await removeClinicCollaborationInternal({
+        actorId,
+        targetUserId,
+        clinicaId,
+        allowSelf: false,
+    });
+    return res.status(result.status).json(result.body);
+};
+
+exports.leaveMyClinicCollaboration = async (req, res) => {
+    const actorId = Number(req.userData?.userId);
+    const clinicaId = parseIntOrNull(req.params?.clinicaId);
+    const result = await removeClinicCollaborationInternal({
+        actorId,
+        targetUserId: actorId,
+        clinicaId,
+        allowSelf: true,
+    });
+    return res.status(result.status).json(result.body);
 };
 
 exports.mergePersonalAccounts = async (req, res) => {

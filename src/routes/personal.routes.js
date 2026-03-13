@@ -27,6 +27,7 @@ router.post('/fusionar', personalController.mergePersonalAccounts);
 router.get('/me/invitaciones', personalController.getMyInvitations);
 router.post('/me/invitaciones/:clinicaId/aceptar', personalController.acceptMyInvitation);
 router.post('/me/invitaciones/:clinicaId/rechazar', personalController.rejectMyInvitation);
+router.delete('/me/clinicas/:clinicaId', personalController.leaveMyClinicCollaboration);
 router.post('/:id/invitaciones/:clinicaId/cancelar', personalController.cancelInvitation);
 router.delete('/:id/clinicas/:clinicaId', personalController.removeClinicCollaboration);
 
