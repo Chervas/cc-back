@@ -328,7 +328,7 @@ exports.getPacienteActivity = async (req, res) => {
         id: `appointment-created-${cita.id_cita}`,
         pacienteId: String(pacienteId),
         fecha: cita.created_at || cita.inicio,
-        tipo: 'cita_creada',
+        tipo: 'appointment_created',
         titulo: 'Cita agendada',
         descripcion: cita.inicio ? `Cita programada para ${new Date(cita.inicio).toLocaleString('es-ES')}` : 'Cita creada',
         icono: 'heroicons_outline:calendar-days',
@@ -349,11 +349,12 @@ exports.getPacienteActivity = async (req, res) => {
       }
 
       const eventTypeByStatus = {
-        info_confirmada: 'cita_confirmada',
-        recordatorio_confirmado: 'cita_confirmada',
-        completada: 'cita_completada',
-        cancelada: 'cita_cancelada',
-        no_asistio: 'cita_no_asistio',
+        info_confirmada: 'appointment_confirmed',
+        recordatorio_confirmado: 'appointment_confirmed',
+        completada: 'appointment_completed',
+        cancelada: 'appointment_cancelled',
+        no_asistio: 'appointment_no_show',
+        reprogramada: 'appointment_rescheduled',
       };
       const eventType = eventTypeByStatus[cita.estado];
       if (!eventType) {

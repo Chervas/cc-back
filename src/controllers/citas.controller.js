@@ -102,8 +102,8 @@ async function attachFlowSummaryToCitas(citas) {
         .filter((id) => Number.isFinite(id) && id > 0);
     if (!citaIds.length) return citas;
 
-    const [legacyRows, v2Rows] = await Promise.all([
-        AppointmentFlowInstance.findAll({
+    const legacyPromise = AppointmentFlowInstance?.findAll
+        ? AppointmentFlowInstance.findAll({
             where: {
                 cita_id: {
                     [db.Sequelize.Op.in]: citaIds
@@ -124,26 +124,32 @@ async function attachFlowSummaryToCitas(citas) {
                 'last_transition_at',
                 'last_error'
             ]
-        }),
-        FlowExecutionV2.findAll({
-            where: {
-                trigger_entity_type: 'appointment',
-                trigger_entity_id: {
-                    [db.Sequelize.Op.in]: citaIds
-                }
-            },
-            include: [
-                {
-                    model: AutomationFlowTemplateV2,
-                    as: 'templateVersion',
-                    attributes: ['id', 'version', 'name', 'nodes'],
-                    required: false,
-                },
-            ],
-            order: [['updated_at', 'DESC']],
-            limit: Math.max(50, citaIds.length * 3),
+        }).catch((error) => {
+            console.warn('[citas] attachFlowSummaryToCitas: ignorando resumen legacy por error:', error?.message || error);
+            return [];
         })
-    ]);
+        : Promise.resolve([]);
+
+    const v2Promise = FlowExecutionV2.findAll({
+        where: {
+            trigger_entity_type: 'appointment',
+            trigger_entity_id: {
+                [db.Sequelize.Op.in]: citaIds
+            }
+        },
+        include: [
+            {
+                model: AutomationFlowTemplateV2,
+                as: 'templateVersion',
+                attributes: ['id', 'version', 'name', 'nodes'],
+                required: false,
+            },
+        ],
+        order: [['updated_at', 'DESC']],
+        limit: Math.max(50, citaIds.length * 3),
+    });
+
+    const [legacyRows, v2Rows] = await Promise.all([legacyPromise, v2Promise]);
 
     const byCitaIdLegacy = new Map(legacyRows.map((row) => [Number(row.cita_id), row]));
     const byCitaIdV2 = new Map();

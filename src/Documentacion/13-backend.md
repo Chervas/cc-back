@@ -15,6 +15,8 @@
   - El CRUD legacy `/api/leads` queda retirado en integración. El canónico de leads vive en `/api/intake/leads`.
   - Se mantiene únicamente el alias `/api/leads/webhook`, resuelto por `intakeController`.
   - `automation-catalog` sigue expuesto, pero con hard-cut de `trigger_type`: ya no acepta nombres legacy como `cita_creada` o `recordatorio_cita`.
+  - La actividad operativa de paciente normaliza sus eventos de cita a claves `appointment_*` (`appointment_created`, `appointment_confirmed`, `appointment_completed`, etc.).
+  - En `/api/citas`, el resumen legacy `AppointmentFlowInstance` se trata como best-effort: si falla, no puede tumbar la respuesta.
 
 - `GET /api/conversations`
   - Cuando se consulta por `lead_id` y todavía no existe conversación, backend puede crear una conversación WhatsApp on-demand si el lead tiene teléfono.
