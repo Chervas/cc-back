@@ -573,8 +573,7 @@ const buildUnavailableIntervals = ({
   instBlocksRows,
   instCitasRows,
   docBlocksRows,
-  docCitasRows,
-  doctorGlobalWindowsMap
+  docCitasRows
 }) => {
   const instWins = inst ? buildWindowsFromHorarios(inst.horarios || [], dow, fecha_local, timeZone) : [];
   const doctorCtx = buildDoctorAvailabilityContext({
@@ -1239,8 +1238,7 @@ exports.slots = asyncHandler(async (req, res) => {
           instBlocksRows: instBloqById.get(id) || [],
           instCitasRows: instCitasById.get(id) || [],
           docBlocksRows: docBloqRows,
-          docCitasRows: docCitasRows,
-          doctorGlobalWindowsMap
+          docCitasRows: docCitasRows
         });
       }
     });
@@ -1354,8 +1352,7 @@ exports.slots = asyncHandler(async (req, res) => {
           instBlocksRows: instBloqRows,
           instCitasRows: instCitasRows,
           docBlocksRows: docBloqById.get(id) || [],
-          docCitasRows: docCitasById.get(id) || [],
-          doctorGlobalWindowsMap
+          docCitasRows: docCitasById.get(id) || []
         });
       }
     });
@@ -1468,8 +1465,7 @@ exports.slots = asyncHandler(async (req, res) => {
         instBlocksRows: instBloqRows,
         instCitasRows: instCitasRows,
         docBlocksRows: docBloqRows,
-        docCitasRows: docCitasRows,
-        doctorGlobalWindowsMap
+        docCitasRows: docCitasRows
       })
     } : {})
   });
