@@ -15,7 +15,6 @@ const historialDeServiciosRoutes = require('./routes/historialdeservicios.route'
 const gruposClinicasRoutes = require('./routes/gruposclinicas.routes');
 const pacienteRoutes = require('./routes/paciente.routes');
 const campanaRoutes = require('./routes/campana.routes');
-const leadRoutes = require('./routes/lead.routes');
 const panelesRoutes = require('./routes/paneles.routes');
 const userClinicasRoutes = require('./routes/userclinicas.routes');
 const notificationsRoutes = require('./routes/notifications.routes');
@@ -130,14 +129,13 @@ app.use('/api/grupos-clinicas', gruposClinicasRoutes);
 console.log('Ruta /api/grupos-clinicas configurada');
 app.use('/api/pacientes', pacienteRoutes);
 console.log('Ruta /api/pacientes configurada');
-// Alias directo para webhook de Meta Lead Ads (antes de leadRoutes con auth)
+// Alias directo para webhook de Meta Lead Ads.
+// El CRUD canónico de leads vive en /api/intake/leads.
 app.get('/api/leads/webhook', intakeController.verifyMetaWebhook);
 app.post('/api/leads/webhook', intakeController.receiveMetaWebhook);
 console.log('Ruta /api/leads/webhook configurada');
 app.use('/api/campanas', campanaRoutes);
 console.log('Ruta /api/campanas configurada');
-app.use('/api/leads', leadRoutes);
-console.log('Ruta /api/leads configurada');
 app.use('/api/paneles', panelesRoutes);
 console.log('Ruta /api/paneles configurada');
 app.use('/api/userclinicas', userClinicasRoutes);

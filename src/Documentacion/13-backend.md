@@ -12,6 +12,8 @@
   - `Conversation` pertenece al subsistema de chat y usa `clinic_id`.
   - `Conversation.lead_id` debe resolver contra `LeadIntake.id`.
   - El modelo histórico `Lead` no debe usarse en nuevo código de marketing ni en el runtime de conversaciones asociado a leads.
+  - El CRUD legacy `/api/leads` queda retirado en integración. El canónico de leads vive en `/api/intake/leads`.
+  - Se mantiene únicamente el alias `/api/leads/webhook`, resuelto por `intakeController`.
 
 - `GET /api/conversations`
   - Cuando se consulta por `lead_id` y todavía no existe conversación, backend puede crear una conversación WhatsApp on-demand si el lead tiene teléfono.
