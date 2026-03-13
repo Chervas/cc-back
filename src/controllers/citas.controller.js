@@ -813,8 +813,12 @@ exports.getCitas = asyncHandler(async (req, res) => {
         include: [
             { model: Paciente, as: 'paciente' },
             { model: LeadIntake, as: 'lead' },
-            { model: Clinica, as: 'clinica' }
+            { model: Clinica, as: 'clinica' },
+            { model: Instalacion, as: 'instalacion', required: false },
+            { model: Tratamiento, as: 'tratamiento', required: false },
+            db.Usuario ? { model: db.Usuario, as: 'doctor', required: false, attributes: ['id_usuario', 'nombre', 'apellidos'] } : null
         ]
+        .filter(Boolean)
     });
 
     res.json(citas);
