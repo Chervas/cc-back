@@ -208,7 +208,7 @@ function normalizeLeadStatus(raw) {
 
 function getStatusesByEntity(entity) {
   const normalized = normalizeValue(entity);
-  if (normalized === 'cita') {
+  if (normalized === 'appointment') {
     return {
       statuses: CITA_STATUSES,
       allowed_transitions: CITA_ALLOWED_TRANSITIONS,
