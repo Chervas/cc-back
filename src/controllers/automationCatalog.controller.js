@@ -6,6 +6,20 @@ const {
   AutomationFlowCatalogDiscipline,
 } = db;
 
+const CATALOG_TRIGGER_TYPES = [
+  'lead_nuevo',
+  'appointment_created',
+  'appointment_confirmed',
+  'appointment_cancelled',
+  'appointment_reminder_window',
+  'patient_inactive',
+  'quote_accepted',
+  'treatment_completed',
+  'birthday',
+];
+
+const CATALOG_TRIGGER_TYPE_SET = new Set(CATALOG_TRIGGER_TYPES);
+
 const ADMIN_USER_IDS = (process.env.ADMIN_USER_IDS || '1')
   .split(',')
   .map((v) => parseInt(v.trim(), 10))
@@ -27,6 +41,19 @@ function extractDisciplinaCodes(payload) {
     .filter((code) => !!code);
 }
 
+function normalizeCatalogTriggerType(raw) {
+  const value = typeof raw === 'string' ? raw.trim() : '';
+  return value || null;
+}
+
+function serializeCatalogItem(item) {
+  const data = item?.toJSON ? item.toJSON() : item;
+  return {
+    ...data,
+    trigger_type: normalizeCatalogTriggerType(data?.trigger_type),
+  };
+}
+
 exports.listCatalog = async (req, res) => {
   try {
     if (!assertAdmin(req, res)) return;
@@ -34,7 +61,7 @@ exports.listCatalog = async (req, res) => {
       include: [{ model: AutomationFlowCatalogDiscipline, as: 'disciplinas' }],
       order: [['display_name', 'ASC']],
     });
-    return res.json(items);
+    return res.json(items.map(serializeCatalogItem));
   } catch (err) {
     console.error('Error listCatalog', err);
     return res.status(500).json({ error: 'Error obteniendo catálogo' });
@@ -50,7 +77,7 @@ exports.getCatalogById = async (req, res) => {
     if (!item) {
       return res.status(404).json({ error: 'catalog_not_found' });
     }
-    return res.json(item);
+    return res.json(serializeCatalogItem(item));
   } catch (err) {
     console.error('Error getCatalogById', err);
     return res.status(500).json({ error: 'Error obteniendo catálogo' });
@@ -64,7 +91,7 @@ exports.createCatalog = async (req, res) => {
     const name = payload.name || payload.internal_name || payload.slug;
     const display_name = payload.display_name || payload.displayName || payload.nombre;
     const description = payload.description || payload.descripcion || null;
-    const trigger_type = payload.trigger_type || payload.triggerType || payload.trigger || payload.disparador;
+    const trigger_type = normalizeCatalogTriggerType(payload.trigger_type || payload.triggerType || payload.trigger || payload.disparador);
     const steps = payload.steps || payload.pasos || payload.flow_steps || payload.flowSteps;
     const is_generic = typeof payload.is_generic === 'boolean' ? payload.is_generic : !!payload.isGeneric;
     const is_active = typeof payload.is_active === 'boolean' ? payload.is_active : (typeof payload.isActive === 'boolean' ? payload.isActive : true);
@@ -72,6 +99,13 @@ exports.createCatalog = async (req, res) => {
 
     if (!name || !trigger_type || !steps) {
       return res.status(400).json({ error: 'name, trigger_type y steps son obligatorios' });
+    }
+    if (!CATALOG_TRIGGER_TYPE_SET.has(trigger_type)) {
+      return res.status(400).json({
+        error: 'invalid_trigger_type',
+        message: `trigger_type no soportado: ${trigger_type}`,
+        allowed: CATALOG_TRIGGER_TYPES,
+      });
     }
 
     const item = await AutomationFlowCatalog.create({
@@ -87,7 +121,7 @@ exports.createCatalog = async (req, res) => {
       const rows = disciplinaCodes.map((code) => ({ flow_catalog_id: item.id, disciplina_code: code }));
       await AutomationFlowCatalogDiscipline.bulkCreate(rows);
     }
-    return res.status(201).json(item);
+    return res.status(201).json(serializeCatalogItem(item));
   } catch (err) {
     console.error('Error createCatalog', err);
     return res.status(500).json({ error: 'Error creando automatización de catálogo' });
@@ -106,12 +140,22 @@ exports.updateCatalog = async (req, res) => {
     const name = payload.name || payload.internal_name || payload.slug;
     const display_name = payload.display_name || payload.displayName || payload.nombre;
     const description = payload.description || payload.descripcion;
-    const trigger_type = payload.trigger_type || payload.triggerType || payload.trigger || payload.disparador;
+    const trigger_type = payload.trigger_type !== undefined
+      ? normalizeCatalogTriggerType(payload.trigger_type || payload.triggerType || payload.trigger || payload.disparador)
+      : undefined;
     const steps = payload.steps || payload.pasos || payload.flow_steps || payload.flowSteps;
     const is_generic = typeof payload.is_generic === 'boolean' ? payload.is_generic : (typeof payload.isGeneric === 'boolean' ? payload.isGeneric : undefined);
     const is_active = typeof payload.is_active === 'boolean' ? payload.is_active : (typeof payload.isActive === 'boolean' ? payload.isActive : undefined);
     const disciplinaCodes = extractDisciplinaCodes(payload);
     const disciplinesProvided = Object.prototype.hasOwnProperty.call(payload, 'disciplina_codes');
+    if (trigger_type !== undefined && (!trigger_type || !CATALOG_TRIGGER_TYPE_SET.has(trigger_type))) {
+      return res.status(400).json({
+        error: 'invalid_trigger_type',
+        message: `trigger_type no soportado: ${String(trigger_type)}`,
+        allowed: CATALOG_TRIGGER_TYPES,
+      });
+    }
+
     await item.update({
       name: name ?? item.name,
       display_name: display_name ?? item.display_name,
@@ -129,7 +173,7 @@ exports.updateCatalog = async (req, res) => {
         await AutomationFlowCatalogDiscipline.bulkCreate(rows);
       }
     }
-    return res.json(item);
+    return res.json(serializeCatalogItem(item));
   } catch (err) {
     console.error('Error updateCatalog', err);
     return res.status(500).json({ error: 'Error actualizando catálogo' });

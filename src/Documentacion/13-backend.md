@@ -14,6 +14,7 @@
   - El modelo histórico `Lead` no debe usarse en nuevo código de marketing ni en el runtime de conversaciones asociado a leads.
   - El CRUD legacy `/api/leads` queda retirado en integración. El canónico de leads vive en `/api/intake/leads`.
   - Se mantiene únicamente el alias `/api/leads/webhook`, resuelto por `intakeController`.
+  - `automation-catalog` sigue expuesto, pero con hard-cut de `trigger_type`: ya no acepta nombres legacy como `cita_creada` o `recordatorio_cita`.
 
 - `GET /api/conversations`
   - Cuando se consulta por `lead_id` y todavía no existe conversación, backend puede crear una conversación WhatsApp on-demand si el lead tiene teléfono.
@@ -158,6 +159,28 @@ En `.env` / `.env.example`:
     - `Conversation.clinic_id`
     - `Conversation.lead_id -> LeadIntake.id`
   - `Lead` legacy no debe usarse ya en código nuevo de marketing/chat.
+
+### Contrato canónico del catálogo de automatizaciones
+
+El endpoint `/api/automation-catalog` acepta solo estos `trigger_type`:
+
+- `lead_nuevo`
+- `appointment_created`
+- `appointment_confirmed`
+- `appointment_cancelled`
+- `appointment_reminder_window`
+- `patient_inactive`
+- `quote_accepted`
+- `treatment_completed`
+- `birthday`
+
+La migración `20260313134000-hard-cut-automation-catalog-trigger-types.js` normaliza:
+
+- `AutomationFlowCatalog.trigger_type`
+- `AutomationFlowCatalog.steps`
+- `AutomationFlows.disparador`
+- `AutomationFlows.pasos`
+- `AutomationFlows.acciones`
 
 - Ventana de 24h en WhatsApp
   - Enviar una plantilla no abre la sesión libre.
