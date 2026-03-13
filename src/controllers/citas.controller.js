@@ -1021,6 +1021,51 @@ exports.getCitas = asyncHandler(async (req, res) => {
     res.json(citas);
 });
 
+exports.getCitaById = asyncHandler(async (req, res) => {
+    const { id } = req.params;
+    const citaId = Number(id);
+
+    if (!id || Number.isNaN(citaId)) {
+        return res.status(400).json({ message: 'id_cita inválido' });
+    }
+
+    const cita = await CitaPaciente.findByPk(citaId, {
+        include: [
+            { model: Paciente, as: 'paciente' },
+            { model: LeadIntake, as: 'lead' },
+            { model: Clinica, as: 'clinica', attributes: ['id_clinica', 'nombre_clinica', ['grupoClinicaId', 'grupo_clinica_id']] },
+            { model: Instalacion, as: 'instalacion', required: false },
+            { model: Tratamiento, as: 'tratamiento', required: false },
+            db.Usuario ? { model: db.Usuario, as: 'doctor', required: false } : null,
+            Campana ? { model: Campana, as: 'campana' } : null
+        ].filter(Boolean)
+    });
+
+    if (!cita) {
+        return res.status(404).json({ message: 'cita_not_found' });
+    }
+
+    await attachFlowSummaryToCitas(cita);
+
+    let conversation_id = null;
+    try {
+        if (db.Conversation && cita.paciente_id && cita.clinica_id) {
+            const conv = await db.Conversation.findOne({
+                where: { patient_id: cita.paciente_id, clinic_id: cita.clinica_id, channel: 'whatsapp' },
+                attributes: ['id']
+            });
+            conversation_id = conv ? conv.id : null;
+        }
+    } catch (e) {
+        conversation_id = null;
+    }
+
+    return res.json({
+        ...cita.toJSON(),
+        conversation_id,
+    });
+});
+
 /**
  * Obtener la próxima cita de un paciente en una clínica
  */
