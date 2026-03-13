@@ -1,5 +1,17 @@
 const { Op, fn, col, where } = require('sequelize');
-const { Usuario, Clinica, UsuarioClinica, DoctorClinica, DoctorHorario, DoctorBloqueo, CitaPaciente, sequelize } = require('../../models');
+const {
+    Usuario,
+    Clinica,
+    ClinicaHorario,
+    UsuarioClinica,
+    DoctorClinica,
+    DoctorHorario,
+    DoctorHorarioExcepcion,
+    DoctorBloqueo,
+    DoctorBloqueoExcepcion,
+    CitaPaciente,
+    sequelize,
+} = require('../../models');
 const bcrypt = require('bcryptjs');
 const {
     ADMIN_USER_IDS,
@@ -15,17 +27,51 @@ const {
     isAdminRole,
     canManagePersonal: canManagePersonalHelper,
 } = require('../lib/role-helpers');
+const {
+    normalizeDateOnly,
+    addDays,
+    validateHorarioRecurrenceFields,
+    buildHorarioExceptionMap,
+    buildBloqueoExceptionMap,
+    expandHorariosForDate,
+    expandHorariosForRange,
+    matchesHorarioOnDate,
+} = require('../lib/personal-schedule-recurring');
 
 const DEFAULT_TIMEZONE = 'Europe/Madrid';
 // Nota: columna DoctorBloqueos.tipo es STRING(32) (sin ENUM). Mantener lista alineada con el front.
 const BLOQUEO_TIPOS = new Set(['vacaciones', 'enfermedad', 'ausencia', 'formacion', 'congreso', 'otro']);
-const MODO_DISPONIBILIDAD = new Set(['avanzado', 'basico']);
+
+function normalizeRecibeCitas(val, defaultValue = false) {
+    if (val == null) return !!defaultValue;
+    if (typeof val === 'boolean') return val;
+    const normalized = String(val).trim().toLowerCase();
+    if (['1', 'true', 'si', 'sí', 'yes'].includes(normalized)) return true;
+    if (['0', 'false', 'no'].includes(normalized)) return false;
+    return !!defaultValue;
+}
+
+function parseRecibeCitasInput(value) {
+    if (value == null) return null;
+    if (typeof value === 'boolean') return value;
+    const normalized = String(value).trim().toLowerCase();
+    if (['1', 'true', 'si', 'sí', 'yes'].includes(normalized)) return true;
+    if (['0', 'false', 'no'].includes(normalized)) return false;
+    return null;
+}
 const ESTADO_CUENTA = new Set(ESTADO_CUENTA_ARR);
 const ESTADO_INVITACION = new Set(ESTADO_INVITACION_ARR);
 const ROLES_CLINICA = new Set(ROLES_CLINICA_ARR);
 const SUBROLES_CLINICA = new Set(SUBROLES_CLINICA_ARR);
 const INVITE_RESEND_COOLDOWN_HOURS = Math.max(1, Number(process.env.INVITE_RESEND_COOLDOWN_HOURS || 4));
 const INVITE_RESEND_COOLDOWN_MS = INVITE_RESEND_COOLDOWN_HOURS * 60 * 60 * 1000;
+const GANTT_DAY_START_HM = '07:00';
+const GANTT_DAY_END_HM = '22:00';
+
+const UNAVAILABLE_REASONS = {
+    CLINIC_CLOSED: 'CLINIC_CLOSED',
+    ADVANCED_MISSING: 'ADVANCED_MISSING_CLINIC_SCHEDULE',
+};
 
 const isAdmin = (userId) => isGlobalAdmin(userId);
 const ACTIVE_STAFF_INVITATION_WHERE = {
@@ -34,6 +80,15 @@ const ACTIVE_STAFF_INVITATION_WHERE = {
         { estado_invitacion: null },
     ],
 };
+
+
+function isMissingClinicaHorarioTableError(error) {
+    if (!error) return false;
+    const code = error?.original?.code || error?.parent?.code || error?.code;
+    if (code === 'ER_NO_SUCH_TABLE') return true;
+    const message = String(error?.original?.message || error?.message || '').toLowerCase();
+    return message.includes('clinicahorarios') && (message.includes("doesn't exist") || message.includes('no such table'));
+}
 
 async function getAccessibleClinicIdsForUser(userId) {
     // Admin: puede acceder a todas las clinicas (pero seguimos filtrando por query para evitar dumps enormes)
@@ -181,8 +236,14 @@ function formatCooldownWindowLabel(ms) {
     return `${hours} h ${minutes} min`;
 }
 
-function defaultModoDisponibilidadFromSubrol(subrolClinica) {
-    return subrolClinica === 'Doctores' ? 'avanzado' : 'basico';
+function defaultDisponibilidadConfigFromSubrol(subrolClinica) {
+    // Regla de producto:
+    // - Doctores: visibles en agenda por defecto
+    // - Resto del personal: no visibles en agenda por defecto
+    if (subrolClinica === 'Doctores') {
+        return { recibe_citas: true };
+    }
+    return { recibe_citas: false };
 }
 
 function parseClinicConfig(value) {
@@ -387,17 +448,6 @@ function normalizeBloqueoTipo(value) {
     return tipo;
 }
 
-function normalizeModoDisponibilidad(value) {
-    if (value == null || String(value).trim() === '') {
-        return null;
-    }
-    const modo = String(value).trim().toLowerCase();
-    if (!MODO_DISPONIBILIDAD.has(modo)) {
-        return null;
-    }
-    return modo;
-}
-
 async function canManagePersonalInClinic(actorId, clinicaId) {
     if (isAdmin(actorId)) return true;
     return hasAdminScopePivot(actorId, clinicaId);
@@ -482,7 +532,7 @@ async function ensureDoctorClinicaRow({
         },
     });
 
-    const modo = defaultModoDisponibilidadFromSubrol(subrolClinica);
+    const defaultConfig = defaultDisponibilidadConfigFromSubrol(subrolClinica);
     const rolEnClinica = normalizeTrimmed(subrolClinica) || 'personal';
 
     if (!doctorClinica) {
@@ -490,14 +540,16 @@ async function ensureDoctorClinicaRow({
             doctor_id: Number(userId),
             clinica_id: Number(clinicaId),
             rol_en_clinica: rolEnClinica,
-            modo_disponibilidad: modo,
+            recibe_citas: defaultConfig.recibe_citas,
             activo: !!activo,
         });
         return;
     }
 
     doctorClinica.rol_en_clinica = rolEnClinica;
-    doctorClinica.modo_disponibilidad = doctorClinica.modo_disponibilidad || modo;
+    if (doctorClinica.recibe_citas == null) {
+        doctorClinica.recibe_citas = defaultConfig.recibe_citas;
+    }
     doctorClinica.activo = !!activo;
     await doctorClinica.save();
 }
@@ -553,8 +605,37 @@ function serializeBloqueo(bloqueo, timeZone = DEFAULT_TIMEZONE) {
         tipo: bloqueo.tipo || 'ausencia',
         recurrente: bloqueo.recurrente || 'none',
         aplica_a_todas_clinicas: !!bloqueo.aplica_a_todas_clinicas,
+        excepciones: Array.isArray(bloqueo.excepciones)
+            ? bloqueo.excepciones.map((row) => serializeBloqueoExceptionRow(row))
+            : [],
         created_at: bloqueo.created_at,
         updated_at: bloqueo.updated_at,
+    };
+}
+
+function serializeHorarioExceptionRow(row) {
+    if (!row) return null;
+    return {
+        id: Number(row.id),
+        doctor_horario_id: Number(row.doctor_horario_id),
+        fecha: normalizeDateOnly(row.fecha),
+        cancelado: row.cancelado === true,
+        hora_inicio_override: row.hora_inicio_override || null,
+        hora_fin_override: row.hora_fin_override || null,
+        created_at: row.created_at,
+        updated_at: row.updated_at,
+    };
+}
+
+function serializeBloqueoExceptionRow(row) {
+    if (!row) return null;
+    return {
+        id: Number(row.id),
+        doctor_bloqueo_id: Number(row.doctor_bloqueo_id),
+        fecha: normalizeDateOnly(row.fecha),
+        cancelado: row.cancelado !== false,
+        created_at: row.created_at,
+        updated_at: row.updated_at,
     };
 }
 
@@ -1154,35 +1235,37 @@ exports.cancelInvitation = async (req, res) => {
     }
 };
 
-exports.removeClinicCollaboration = async (req, res) => {
+async function removeClinicCollaborationInternal({ actorId, targetUserId, clinicaId, allowSelf = false }) {
     const transaction = await sequelize.transaction();
     try {
-        const actorId = Number(req.userData?.userId);
         if (!Number.isFinite(actorId)) {
             await transaction.rollback();
-            return res.status(401).json({ message: 'Auth failed!' });
+            return { status: 401, body: { message: 'Auth failed!' } };
         }
 
-        const targetUserId = parseIntOrNull(req.params?.id);
-        const clinicaId = parseIntOrNull(req.params?.clinicaId);
         if (!Number.isFinite(targetUserId) || !Number.isFinite(clinicaId)) {
             await transaction.rollback();
-            return res.status(400).json({ message: 'Invalid params' });
+            return { status: 400, body: { message: 'Invalid params' } };
         }
 
-        const canManage = await canManagePersonalInClinic(actorId, clinicaId);
-        if (!canManage) {
-            await transaction.rollback();
-            return res.status(403).json({ message: 'Forbidden' });
-        }
+        const isSelf = Number(actorId) === Number(targetUserId);
+        if (!(allowSelf && isSelf)) {
+            const canManage = await canManagePersonalInClinic(actorId, clinicaId);
+            if (!canManage) {
+                await transaction.rollback();
+                return { status: 403, body: { message: 'Forbidden' } };
+            }
 
-        // Evita que owner/agencia se desvinculen a sí mismos por accidente en UI.
-        if (!isAdmin(actorId) && Number(actorId) === Number(targetUserId)) {
-            await transaction.rollback();
-            return res.status(409).json({
-                message: 'No puedes eliminar tu propia colaboración desde esta acción.',
-                code: 'self_unlink_forbidden',
-            });
+            if (!isAdmin(actorId) && isSelf) {
+                await transaction.rollback();
+                return {
+                    status: 409,
+                    body: {
+                        message: 'No puedes eliminar tu propia colaboración desde esta acción.',
+                        code: 'self_unlink_forbidden',
+                    },
+                };
+            }
         }
 
         const pivot = await UsuarioClinica.findOne({
@@ -1196,7 +1279,7 @@ exports.removeClinicCollaboration = async (req, res) => {
 
         if (!pivot) {
             await transaction.rollback();
-            return res.status(404).json({ message: 'Collaboration not found' });
+            return { status: 404, body: { message: 'Collaboration not found' } };
         }
 
         const doctorClinicaRows = await DoctorClinica.findAll({
@@ -1218,25 +1301,55 @@ exports.removeClinicCollaboration = async (req, res) => {
             transaction,
         });
 
-        // Limpiar bloqueos scoped a la clínica removida.
         await DoctorBloqueo.destroy({
             where: { doctor_id: targetUserId, clinica_id: clinicaId },
             transaction,
         });
 
         await pivot.destroy({ transaction });
-
         await transaction.commit();
-        return res.status(200).json({
-            message: 'Collaboration removed successfully',
-            id_usuario: targetUserId,
-            clinica_id: clinicaId,
-        });
+
+        return {
+            status: 200,
+            body: {
+                message: 'Collaboration removed successfully',
+                id_usuario: targetUserId,
+                clinica_id: clinicaId,
+            },
+        };
     } catch (error) {
         await transaction.rollback();
         console.error('[personal.removeClinicCollaboration] Error:', error);
-        return res.status(500).json({ message: 'Error removing clinic collaboration', error: error.message });
+        return {
+            status: 500,
+            body: { message: 'Error removing clinic collaboration', error: error.message },
+        };
     }
+}
+
+exports.removeClinicCollaboration = async (req, res) => {
+    const actorId = Number(req.userData?.userId);
+    const targetUserId = parseIntOrNull(req.params?.id);
+    const clinicaId = parseIntOrNull(req.params?.clinicaId);
+    const result = await removeClinicCollaborationInternal({
+        actorId,
+        targetUserId,
+        clinicaId,
+        allowSelf: false,
+    });
+    return res.status(result.status).json(result.body);
+};
+
+exports.leaveMyClinicCollaboration = async (req, res) => {
+    const actorId = Number(req.userData?.userId);
+    const clinicaId = parseIntOrNull(req.params?.clinicaId);
+    const result = await removeClinicCollaborationInternal({
+        actorId,
+        targetUserId: actorId,
+        clinicaId,
+        allowSelf: true,
+    });
+    return res.status(result.status).json(result.body);
 };
 
 exports.mergePersonalAccounts = async (req, res) => {
@@ -1327,7 +1440,10 @@ exports.mergePersonalAccounts = async (req, res) => {
             );
 
             existing.activo = !!(existing.activo || row.activo);
-            existing.modo_disponibilidad = existing.modo_disponibilidad || row.modo_disponibilidad || 'avanzado';
+            existing.recibe_citas = normalizeRecibeCitas(
+                existing.recibe_citas || row.recibe_citas,
+                false,
+            );
             existing.rol_en_clinica = existing.rol_en_clinica || row.rol_en_clinica || null;
             await existing.save({ transaction });
 
@@ -1491,6 +1607,7 @@ exports.getPersonalBloqueos = async (req, res) => {
 
         const rows = await DoctorBloqueo.findAll({
             where,
+            include: [{ model: DoctorBloqueoExcepcion, as: 'excepciones' }],
             order: [['fecha_inicio', 'ASC']],
         });
 
@@ -1763,6 +1880,160 @@ exports.deletePersonalBloqueoForCurrent = async (req, res) => {
     return exports.deletePersonalBloqueo(req, res);
 };
 
+exports.getPersonalBloqueoExcepcionesForCurrent = async (req, res) => {
+    req.params.id = String(req.userData?.userId || '');
+    return exports.getPersonalBloqueoExcepciones(req, res);
+};
+
+exports.getPersonalBloqueoExcepciones = async (req, res) => {
+    try {
+        const actorId = Number(req.userData?.userId);
+        const targetUserId = Number(req.params.id);
+        const bloqueoId = Number(req.params.bloqueoId);
+        if (![actorId, targetUserId, bloqueoId].every((v) => Number.isFinite(v))) {
+            return res.status(400).json({ message: 'Invalid id' });
+        }
+
+        const bloqueo = await DoctorBloqueo.findOne({
+            where: { id: bloqueoId, doctor_id: targetUserId },
+        });
+        if (!bloqueo) return res.status(404).json({ message: 'Bloqueo no encontrado' });
+
+        const canEdit = await canEditBloqueos(actorId, targetUserId, bloqueo.clinica_id ?? null);
+        if (!canEdit) return res.status(403).json({ message: 'Forbidden' });
+
+        const rows = await DoctorBloqueoExcepcion.findAll({
+            where: { doctor_bloqueo_id: bloqueoId },
+            order: [['fecha', 'ASC'], ['id', 'ASC']],
+        });
+        return res.json(rows.map((row) => serializeBloqueoExceptionRow(row)));
+    } catch (error) {
+        console.error('[personal.getPersonalBloqueoExcepciones] Error:', error);
+        return res.status(500).json({ message: 'Error retrieving bloqueo exceptions', error: error.message });
+    }
+};
+
+exports.createPersonalBloqueoExcepcionForCurrent = async (req, res) => {
+    req.params.id = String(req.userData?.userId || '');
+    return exports.createPersonalBloqueoExcepcion(req, res);
+};
+
+exports.createPersonalBloqueoExcepcion = async (req, res) => {
+    try {
+        const actorId = Number(req.userData?.userId);
+        const targetUserId = Number(req.params.id);
+        const bloqueoId = Number(req.params.bloqueoId);
+        if (![actorId, targetUserId, bloqueoId].every((v) => Number.isFinite(v))) {
+            return res.status(400).json({ message: 'Invalid id' });
+        }
+
+        const bloqueo = await DoctorBloqueo.findOne({
+            where: { id: bloqueoId, doctor_id: targetUserId },
+        });
+        if (!bloqueo) return res.status(404).json({ message: 'Bloqueo no encontrado' });
+
+        const canEdit = await canEditBloqueos(actorId, targetUserId, bloqueo.clinica_id ?? null);
+        if (!canEdit) return res.status(403).json({ message: 'Forbidden' });
+
+        const payload = normalizeBloqueoExceptionInput(req.body || {});
+        if (payload.error) return res.status(400).json({ message: payload.error });
+
+        const [row] = await DoctorBloqueoExcepcion.upsert({
+            doctor_bloqueo_id: bloqueoId,
+            fecha: payload.fecha,
+            cancelado: payload.cancelado,
+            creado_por: actorId,
+        }, { returning: true });
+
+        const persisted = row || await DoctorBloqueoExcepcion.findOne({
+            where: { doctor_bloqueo_id: bloqueoId, fecha: payload.fecha },
+        });
+        return res.status(201).json(serializeBloqueoExceptionRow(persisted));
+    } catch (error) {
+        console.error('[personal.createPersonalBloqueoExcepcion] Error:', error);
+        return res.status(500).json({ message: 'Error creating bloqueo exception', error: error.message });
+    }
+};
+
+exports.patchPersonalBloqueoExcepcionForCurrent = async (req, res) => {
+    req.params.id = String(req.userData?.userId || '');
+    return exports.patchPersonalBloqueoExcepcion(req, res);
+};
+
+exports.patchPersonalBloqueoExcepcion = async (req, res) => {
+    try {
+        const actorId = Number(req.userData?.userId);
+        const targetUserId = Number(req.params.id);
+        const bloqueoId = Number(req.params.bloqueoId);
+        const exceptionId = Number(req.params.exceptionId);
+        if (![actorId, targetUserId, bloqueoId, exceptionId].every((v) => Number.isFinite(v))) {
+            return res.status(400).json({ message: 'Invalid id' });
+        }
+
+        const bloqueo = await DoctorBloqueo.findOne({
+            where: { id: bloqueoId, doctor_id: targetUserId },
+        });
+        if (!bloqueo) return res.status(404).json({ message: 'Bloqueo no encontrado' });
+
+        const canEdit = await canEditBloqueos(actorId, targetUserId, bloqueo.clinica_id ?? null);
+        if (!canEdit) return res.status(403).json({ message: 'Forbidden' });
+
+        const exception = await DoctorBloqueoExcepcion.findOne({
+            where: { id: exceptionId, doctor_bloqueo_id: bloqueoId },
+        });
+        if (!exception) return res.status(404).json({ message: 'Bloqueo exception not found' });
+
+        const payload = normalizeBloqueoExceptionInput({
+            fecha: req.body?.fecha ?? exception.fecha,
+            cancelado: Object.prototype.hasOwnProperty.call(req.body || {}, 'cancelado') ? req.body.cancelado : exception.cancelado,
+        });
+        if (payload.error) return res.status(400).json({ message: payload.error });
+
+        await exception.update({
+            fecha: payload.fecha,
+            cancelado: payload.cancelado,
+        });
+        return res.json(serializeBloqueoExceptionRow(exception));
+    } catch (error) {
+        console.error('[personal.patchPersonalBloqueoExcepcion] Error:', error);
+        return res.status(500).json({ message: 'Error updating bloqueo exception', error: error.message });
+    }
+};
+
+exports.deletePersonalBloqueoExcepcionForCurrent = async (req, res) => {
+    req.params.id = String(req.userData?.userId || '');
+    return exports.deletePersonalBloqueoExcepcion(req, res);
+};
+
+exports.deletePersonalBloqueoExcepcion = async (req, res) => {
+    try {
+        const actorId = Number(req.userData?.userId);
+        const targetUserId = Number(req.params.id);
+        const bloqueoId = Number(req.params.bloqueoId);
+        const exceptionId = Number(req.params.exceptionId);
+        if (![actorId, targetUserId, bloqueoId, exceptionId].every((v) => Number.isFinite(v))) {
+            return res.status(400).json({ message: 'Invalid id' });
+        }
+
+        const bloqueo = await DoctorBloqueo.findOne({
+            where: { id: bloqueoId, doctor_id: targetUserId },
+        });
+        if (!bloqueo) return res.status(404).json({ message: 'Bloqueo no encontrado' });
+
+        const canEdit = await canEditBloqueos(actorId, targetUserId, bloqueo.clinica_id ?? null);
+        if (!canEdit) return res.status(403).json({ message: 'Forbidden' });
+
+        const deleted = await DoctorBloqueoExcepcion.destroy({
+            where: { id: exceptionId, doctor_bloqueo_id: bloqueoId },
+        });
+        if (!deleted) return res.status(404).json({ message: 'Bloqueo exception not found' });
+        return res.status(204).end();
+    } catch (error) {
+        console.error('[personal.deletePersonalBloqueoExcepcion] Error:', error);
+        return res.status(500).json({ message: 'Error deleting bloqueo exception', error: error.message });
+    }
+};
+
 // ────────────────────────────────────────────────────────────────
 // Schedule / Horarios (canónico /api/personal/*)
 // Persistencia actual: DoctorClinicas + DoctorHorarios (alias semántico "personal")
@@ -1916,6 +2187,7 @@ async function canEditBloqueos(actorId, targetUserId, clinicaId) {
     return hasStaffPivot(targetUserId, cid);
 }
 
+
 function normalizeHorarioRows(body) {
     const rows = Array.isArray(body)
         ? body
@@ -1928,14 +2200,331 @@ function normalizeHorarioRows(body) {
         const fin = normalizeHm(r?.hora_fin);
         if (dia == null || !inicio || !fin) continue;
         if (inicio >= fin) continue;
+        const recurrenceError = validateHorarioRecurrenceFields({
+            dia_semana: dia,
+            rrule: r?.rrule ?? null,
+            fecha_inicio_vigencia: r?.fecha_inicio_vigencia ?? null,
+            fecha_fin_vigencia: r?.fecha_fin_vigencia ?? null,
+        });
+        if (recurrenceError) continue;
         out.push({
             dia_semana: dia,
             hora_inicio: inicio,
             hora_fin: fin,
             activo: r?.activo === false ? false : true,
+            rrule: typeof r?.rrule === 'string' && r.rrule.trim() ? r.rrule.trim() : null,
+            fecha_inicio_vigencia: normalizeDateOnly(r?.fecha_inicio_vigencia),
+            fecha_fin_vigencia: normalizeDateOnly(r?.fecha_fin_vigencia),
         });
     }
     return out;
+}
+
+function hmToMinutes(hm) {
+    const normalized = normalizeHm(hm);
+    if (!normalized) return null;
+    const [hh, mm] = normalized.split(':').map(Number);
+    return hh * 60 + mm;
+}
+
+function hmRangesOverlap(aInicio, aFin, bInicio, bFin) {
+    const aStart = hmToMinutes(aInicio);
+    const aEnd = hmToMinutes(aFin);
+    const bStart = hmToMinutes(bInicio);
+    const bEnd = hmToMinutes(bFin);
+    if ([aStart, aEnd, bStart, bEnd].some((v) => v == null)) return false;
+    return aStart < bEnd && bStart < aEnd;
+}
+
+function mergeIntervalsByDay(rows = []) {
+    const byDay = new Map();
+    for (const row of rows) {
+        if (!row || row.activo === false) continue;
+        const dia = normalizeDiaSemana(row.dia_semana);
+        const inicio = normalizeHm(row.hora_inicio);
+        const fin = normalizeHm(row.hora_fin);
+        if (dia == null || !inicio || !fin) continue;
+        if (inicio >= fin) continue;
+
+        const list = byDay.get(dia) || [];
+        list.push({
+            startMin: hmToMinutes(inicio),
+            endMin: hmToMinutes(fin),
+        });
+        byDay.set(dia, list);
+    }
+
+    const out = [];
+    for (const [dia, intervals] of byDay.entries()) {
+        const sorted = intervals
+            .filter((it) => Number.isFinite(it.startMin) && Number.isFinite(it.endMin) && it.startMin < it.endMin)
+            .sort((a, b) => a.startMin - b.startMin);
+        if (!sorted.length) continue;
+
+        const merged = [sorted[0]];
+        for (let i = 1; i < sorted.length; i++) {
+            const curr = sorted[i];
+            const last = merged[merged.length - 1];
+            if (curr.startMin <= last.endMin) {
+                last.endMin = Math.max(last.endMin, curr.endMin);
+            } else {
+                merged.push({ ...curr });
+            }
+        }
+
+        merged.forEach((it) => {
+            const startHh = String(Math.floor(it.startMin / 60)).padStart(2, '0');
+            const startMm = String(it.startMin % 60).padStart(2, '0');
+            const endHh = String(Math.floor(it.endMin / 60)).padStart(2, '0');
+            const endMm = String(it.endMin % 60).padStart(2, '0');
+            out.push({
+                dia_semana: Number(dia),
+                hora_inicio: `${startHh}:${startMm}`,
+                hora_fin: `${endHh}:${endMm}`,
+                activo: true,
+            });
+        });
+    }
+
+    return out.sort((a, b) => {
+        if (a.dia_semana !== b.dia_semana) return a.dia_semana - b.dia_semana;
+        if (a.hora_inicio !== b.hora_inicio) return a.hora_inicio.localeCompare(b.hora_inicio);
+        return a.hora_fin.localeCompare(b.hora_fin);
+    });
+}
+
+function findOverlappingRows(rows = []) {
+    const byDay = new Map();
+    for (const row of rows) {
+        if (!row || row.activo === false) continue;
+        const dia = normalizeDiaSemana(row.dia_semana);
+        const inicio = normalizeHm(row.hora_inicio);
+        const fin = normalizeHm(row.hora_fin);
+        if (dia == null || !inicio || !fin) continue;
+        if (inicio >= fin) continue;
+        const list = byDay.get(dia) || [];
+        list.push({ dia_semana: dia, hora_inicio: inicio, hora_fin: fin });
+        byDay.set(dia, list);
+    }
+
+    for (const [dia, intervals] of byDay.entries()) {
+        const sorted = intervals.sort((a, b) => a.hora_inicio.localeCompare(b.hora_inicio));
+        for (let i = 0; i < sorted.length - 1; i++) {
+            const current = sorted[i];
+            const next = sorted[i + 1];
+            if (hmRangesOverlap(current.hora_inicio, current.hora_fin, next.hora_inicio, next.hora_fin)) {
+                return { dia_semana: dia, left: current, right: next };
+            }
+        }
+    }
+    return null;
+}
+
+
+async function getClinicaHorariosMap(clinicIds = []) {
+    const ids = Array.from(new Set(
+        (clinicIds || [])
+            .map((id) => Number(id))
+            .filter((id) => Number.isFinite(id))
+    ));
+    if (!ids.length) {
+        return new Map();
+    }
+
+    let rows = [];
+    try {
+        rows = await ClinicaHorario.findAll({
+            where: {
+                clinica_id: { [Op.in]: ids },
+            },
+            attributes: ['clinica_id', 'dia_semana', 'activo', 'hora_inicio', 'hora_fin'],
+            order: [['clinica_id', 'ASC'], ['dia_semana', 'ASC'], ['hora_inicio', 'ASC']],
+            raw: true,
+        });
+    } catch (error) {
+        if (isMissingClinicaHorarioTableError(error)) {
+            return new Map();
+        }
+        throw error;
+    }
+
+    const map = new Map();
+    for (const row of rows) {
+        const clinicId = Number(row.clinica_id);
+        if (!Number.isFinite(clinicId)) continue;
+        const dia = normalizeDiaSemana(row.dia_semana);
+        const inicio = normalizeHm(row.hora_inicio);
+        const fin = normalizeHm(row.hora_fin);
+        if (dia == null || !inicio || !fin || inicio >= fin) continue;
+
+        const list = map.get(clinicId) || [];
+        list.push({
+            dia_semana: dia,
+            activo: row.activo !== false,
+            hora_inicio: inicio,
+            hora_fin: fin,
+        });
+        map.set(clinicId, list);
+    }
+
+    for (const [clinicId, clinicRows] of map.entries()) {
+        map.set(clinicId, mergeIntervalsByDay(clinicRows));
+    }
+
+    return map;
+}
+
+async function findCrossClinicScheduleConflicts({ targetUserId, clinicaId, candidateHorarios, excludeHorarioIds = [] }) {
+    const activeCandidate = (candidateHorarios || []).filter((h) => h && h.activo !== false);
+    if (!activeCandidate.length) return [];
+    const excludedHorarioIdSet = new Set(
+        (Array.isArray(excludeHorarioIds) ? excludeHorarioIds : [excludeHorarioIds])
+            .map((id) => Number(id))
+            .filter((id) => Number.isFinite(id)),
+    );
+
+    const otherDoctorClinicas = await DoctorClinica.findAll({
+        where: {
+            doctor_id: Number(targetUserId),
+            activo: true,
+            clinica_id: { [Op.ne]: Number(clinicaId) },
+        },
+        include: [
+            {
+                model: Clinica,
+                as: 'clinica',
+                attributes: ['id_clinica', 'nombre_clinica'],
+            },
+            {
+                model: DoctorHorario,
+                as: 'horarios',
+                attributes: ['id', 'doctor_clinica_id', 'dia_semana', 'hora_inicio', 'hora_fin', 'activo', 'rrule', 'fecha_inicio_vigencia', 'fecha_fin_vigencia', 'created_at'],
+                include: [{ model: DoctorHorarioExcepcion, as: 'excepciones' }],
+            },
+        ],
+    });
+
+    const horizon = resolveScheduleRange({});
+    const conflicts = [];
+    for (const candidate of activeCandidate) {
+        const candidateExceptionMap = new Map();
+        const candidateOccurrences = expandHorariosForRange(
+            [{ id: -1, doctor_clinica_id: null, ...candidate, created_at: new Date() }],
+            candidate.fecha_inicio_vigencia || horizon.from,
+            candidate.fecha_fin_vigencia || horizon.to,
+            candidateExceptionMap,
+        );
+        for (const dc of otherDoctorClinicas) {
+            const horarios = Array.isArray(dc.horarios) ? dc.horarios : [];
+            const existingExceptionMap = buildHorarioExceptionMap(
+                horarios.flatMap((row) => Array.isArray(row.excepciones) ? row.excepciones : [])
+            );
+            for (const existing of horarios) {
+                if (existing?.activo === false) continue;
+                if (excludedHorarioIdSet.has(Number(existing?.id))) continue;
+                const existingOccurrences = expandHorariosForRange(
+                    [existing],
+                    candidate.fecha_inicio_vigencia || horizon.from,
+                    candidate.fecha_fin_vigencia || horizon.to,
+                    existingExceptionMap,
+                );
+
+                for (const occurrence of candidateOccurrences) {
+                    const overlapExisting = existingOccurrences.find((it) =>
+                        it.fecha === occurrence.fecha
+                        && hmRangesOverlap(occurrence.hora_inicio, occurrence.hora_fin, it.hora_inicio, it.hora_fin)
+                    );
+                    if (!overlapExisting) continue;
+
+                    conflicts.push({
+                        clinica_id: Number(dc.clinica_id),
+                        nombre_clinica: dc?.clinica?.nombre_clinica || null,
+                        dia_semana: Number(candidate.dia_semana),
+                        fecha: occurrence.fecha,
+                        nuevo_hora_inicio: occurrence.hora_inicio,
+                        nuevo_hora_fin: occurrence.hora_fin,
+                        conflicto_hora_inicio: overlapExisting.hora_inicio,
+                        conflicto_hora_fin: overlapExisting.hora_fin,
+                    });
+                    break;
+                }
+            }
+        }
+    }
+
+    return conflicts;
+}
+
+async function validateHorarioExceptionCandidate({ targetUserId, clinicaId, horarioId, fecha, hora_inicio, hora_fin }) {
+    const otherDoctorClinicas = await DoctorClinica.findAll({
+        where: {
+            doctor_id: Number(targetUserId),
+            activo: true,
+            clinica_id: { [Op.ne]: Number(clinicaId) },
+        },
+        include: [
+            {
+                model: Clinica,
+                as: 'clinica',
+                attributes: ['id_clinica', 'nombre_clinica'],
+            },
+            {
+                model: DoctorHorario,
+                as: 'horarios',
+                attributes: ['id', 'doctor_clinica_id', 'dia_semana', 'hora_inicio', 'hora_fin', 'activo', 'rrule', 'fecha_inicio_vigencia', 'fecha_fin_vigencia', 'created_at'],
+                include: [{ model: DoctorHorarioExcepcion, as: 'excepciones' }],
+            },
+        ],
+    });
+
+    for (const dc of otherDoctorClinicas) {
+        const exceptionMap = buildHorarioExceptionMap(
+            (dc.horarios || []).flatMap((row) => Array.isArray(row.excepciones) ? row.excepciones : [])
+        );
+        const existingOccurrences = expandHorariosForDate(dc.horarios || [], fecha, exceptionMap);
+        const overlapExisting = existingOccurrences.find((it) =>
+            Number(it.horario_id) !== Number(horarioId)
+            && hmRangesOverlap(hora_inicio, hora_fin, it.hora_inicio, it.hora_fin)
+        );
+        if (overlapExisting) {
+            return {
+                status: 409,
+                body: {
+                    message: 'El horario se solapa con la disponibilidad del profesional en otra clínica.',
+                    code: 'STAFF_SCHEDULE_OVERLAP_OTHER_CLINIC',
+                    can_force: false,
+                    conflicts: [{
+                        clinica_id: Number(dc.clinica_id),
+                        nombre_clinica: dc?.clinica?.nombre_clinica || null,
+                        fecha,
+                        nuevo_hora_inicio: hora_inicio,
+                        nuevo_hora_fin: hora_fin,
+                        conflicto_hora_inicio: overlapExisting.hora_inicio,
+                        conflicto_hora_fin: overlapExisting.hora_fin,
+                    }],
+                },
+            };
+        }
+    }
+
+    const effectiveErrors = await validateHorariosAgainstEffectiveAvailability(Number(targetUserId), Number(clinicaId), [{
+        dia_semana: new Date(`${fecha}T12:00:00Z`).getUTCDay(),
+        hora_inicio,
+        hora_fin,
+        activo: true,
+    }]);
+    if (effectiveErrors.length) {
+        return {
+            status: 422,
+            body: {
+                message: 'Algunos tramos del horario están fuera del horario permitido en la clínica.',
+                code: 'SCHEDULE_OUT_OF_EFFECTIVE_AVAILABILITY',
+                errors: effectiveErrors,
+            },
+        };
+    }
+
+    return null;
 }
 
 async function getAllowedClinicIdsForActorTarget(actorId, targetUserId) {
@@ -1949,13 +2538,15 @@ async function getAllowedClinicIdsForActorTarget(actorId, targetUserId) {
     return targetClinicIds.filter((id) => actorSet.has(id));
 }
 
-async function buildScheduleResponse(actorId, targetUserId) {
+async function buildScheduleResponse(actorId, targetUserId, query = {}) {
+    const scheduleRange = resolveScheduleRange(query);
     const user = await Usuario.findByPk(targetUserId, {
         attributes: ['id_usuario', 'nombre', 'apellidos', 'email_usuario'],
         raw: true,
     });
 
     const allowedClinicIds = await getAllowedClinicIdsForActorTarget(actorId, targetUserId);
+    const clinicaHorariosMap = await getClinicaHorariosMap(allowedClinicIds);
 
     const doctorClinicaRows = allowedClinicIds.length
         ? await DoctorClinica.findAll({
@@ -1966,7 +2557,11 @@ async function buildScheduleResponse(actorId, targetUserId) {
             },
             include: [
                 { model: Clinica, as: 'clinica', attributes: ['id_clinica', 'nombre_clinica', 'url_avatar'] },
-                { model: DoctorHorario, as: 'horarios' },
+                {
+                    model: DoctorHorario,
+                    as: 'horarios',
+                    include: [{ model: DoctorHorarioExcepcion, as: 'excepciones' }],
+                },
             ],
             order: [['clinica_id', 'ASC']],
         })
@@ -2002,7 +2597,7 @@ async function buildScheduleResponse(actorId, targetUserId) {
             nombre_clinica: row.clinica?.nombre_clinica || '',
             url_avatar: row.clinica?.url_avatar || null,
             activo: !!row.activo,
-            modo_disponibilidad: normalizeModoDisponibilidad(row.modo_disponibilidad) || null,
+            recibe_citas: normalizeRecibeCitas(row.recibe_citas, false),
             horarios: row.horarios || [],
             rol_clinica: null,
             subrol_clinica: null,
@@ -2016,13 +2611,15 @@ async function buildScheduleResponse(actorId, targetUserId) {
 
         const rolClinica = pivot.rol_clinica || null;
         const subrolClinica = pivot.subrol_clinica || null;
-        const defaultModo = defaultModoDisponibilidadFromSubrol(subrolClinica);
+        const defaultConfig = defaultDisponibilidadConfigFromSubrol(subrolClinica);
         const existing = clinicasById.get(clinicId);
 
         if (existing) {
             existing.rol_clinica = existing.rol_clinica || rolClinica;
             existing.subrol_clinica = existing.subrol_clinica || subrolClinica;
-            existing.modo_disponibilidad = existing.modo_disponibilidad || defaultModo;
+            if (existing.recibe_citas == null) {
+                existing.recibe_citas = defaultConfig.recibe_citas;
+            }
             if (!existing.nombre_clinica) {
                 existing.nombre_clinica = pivot.Clinica?.nombre_clinica || '';
             }
@@ -2037,7 +2634,7 @@ async function buildScheduleResponse(actorId, targetUserId) {
             nombre_clinica: pivot.Clinica?.nombre_clinica || '',
             url_avatar: pivot.Clinica?.url_avatar || null,
             activo: true,
-            modo_disponibilidad: defaultModo,
+            recibe_citas: defaultConfig.recibe_citas,
             horarios: [],
             rol_clinica: rolClinica,
             subrol_clinica: subrolClinica,
@@ -2048,23 +2645,62 @@ async function buildScheduleResponse(actorId, targetUserId) {
     const hasActiveHorarios = (horarios = []) =>
         Array.isArray(horarios) && horarios.some((h) => h && h.activo !== false);
 
-    const clinicas = Array.from(clinicasById.values())
+    const clinicasBase = Array.from(clinicasById.values())
         .sort((a, b) => Number(a.clinica_id) - Number(b.clinica_id))
         .map((c) => {
-            const modoDisponibilidad = c.modo_disponibilidad || defaultModoDisponibilidadFromSubrol(c.subrol_clinica);
+            const defaultConfig = defaultDisponibilidadConfigFromSubrol(c.subrol_clinica);
+            const recibeCitas = normalizeRecibeCitas(c.recibe_citas, defaultConfig.recibe_citas);
             const horarios = Array.isArray(c.horarios) ? c.horarios : [];
+            const horariosApertura = clinicaHorariosMap.get(Number(c.clinica_id)) || [];
             const onboardingPendiente = (c.agenda_capable !== false)
-                && modoDisponibilidad === 'avanzado'
                 && !hasActiveHorarios(horarios);
 
             return {
                 ...c,
-                modo_disponibilidad: modoDisponibilidad,
+                recibe_citas: recibeCitas,
                 horarios,
+                horarios_apertura: horariosApertura,
                 onboarding_horario_pendiente: onboardingPendiente,
                 onboarding_horario_completado: !onboardingPendiente,
             };
         });
+
+    const editableClinicIds = new Set();
+    if (isAdmin(actorId) || Number(actorId) === Number(targetUserId)) {
+        clinicasBase.forEach((c) => editableClinicIds.add(Number(c.clinica_id)));
+    } else {
+        const adminScopedClinicIds = await getAdminScopedClinicIdsForUser(actorId);
+        const adminScopedSet = new Set(adminScopedClinicIds.map((id) => Number(id)));
+        clinicasBase.forEach((c) => {
+            const clinicId = Number(c.clinica_id);
+            if (adminScopedSet.has(clinicId)) {
+                editableClinicIds.add(clinicId);
+            }
+        });
+    }
+
+    const clinicas = clinicasBase.map((c) => {
+        const clinicId = Number(c.clinica_id);
+        const canEditClinic = editableClinicIds.has(clinicId);
+        const horarioExceptionMap = buildHorarioExceptionMap(
+            (c.horarios || []).flatMap((h) => Array.isArray(h.excepciones) ? h.excepciones : [])
+        );
+        const horariosExpandidos = expandHorariosForRange(
+            c.horarios || [],
+            scheduleRange.from,
+            scheduleRange.to,
+            horarioExceptionMap,
+        );
+        return {
+            ...c,
+            horarios: (c.horarios || []).map((h) => serializeHorarioRow(h)),
+            horarios_expandidos: horariosExpandidos,
+            permissions: {
+                can_edit_horarios: canEditClinic,
+                can_edit_disponibilidad_config: canEditClinic,
+            },
+        };
+    });
 
     const onboardingClinicasPendientes = clinicas
         .filter((c) => c.onboarding_horario_pendiente)
@@ -2072,6 +2708,7 @@ async function buildScheduleResponse(actorId, targetUserId) {
             clinica_id: Number(c.clinica_id),
             nombre_clinica: c.nombre_clinica || '',
         }));
+
     // Bloqueos: limitar a las clínicas visibles (o global) cuando no es admin / self
     const bloqueosWhere = { doctor_id: targetUserId };
     if (!isAdmin(actorId) && Number(actorId) !== Number(targetUserId) && allowedClinicIds.length) {
@@ -2083,22 +2720,35 @@ async function buildScheduleResponse(actorId, targetUserId) {
 
     const bloqueos = await DoctorBloqueo.findAll({
         where: bloqueosWhere,
+        include: [{ model: DoctorBloqueoExcepcion, as: 'excepciones' }],
         order: [['fecha_inicio', 'ASC']],
     });
     const timezoneMap = await buildClinicTimezoneMap(bloqueos.map((b) => b.clinica_id));
+    const bloqueoExceptionMap = buildBloqueoExceptionMap(
+        bloqueos.flatMap((b) => Array.isArray(b.excepciones) ? b.excepciones : [])
+    );
+    const bloqueosExpandidos = bloqueos.flatMap((b) =>
+        expandBloqueoForRange(
+            b,
+            scheduleRange.from,
+            scheduleRange.to,
+            timezoneForClinicId(b.clinica_id, timezoneMap),
+            bloqueoExceptionMap,
+        )
+    );
 
     return {
         doctor_id: String(targetUserId),
         doctor_nombre: user ? `${user.nombre || ''} ${user.apellidos || ''}`.trim() : '',
-        clinicas: clinicas.map((c) => ({
-            clinica_id: c.clinica_id,
-            nombre_clinica: c.clinica?.nombre_clinica || '',
-            url_avatar: c.clinica?.url_avatar || null,
-            activo: !!c.activo,
-            modo_disponibilidad: c.modo_disponibilidad || 'avanzado',
-            horarios: c.horarios || [],
-        })),
+        schedule_range: scheduleRange,
+        gantt_range: {
+            day_start_hm: GANTT_DAY_START_HM,
+            day_end_hm: GANTT_DAY_END_HM,
+        },
+        unavailable_reasons: UNAVAILABLE_REASONS,
+        clinicas,
         bloqueos: bloqueos.map((b) => serializeBloqueo(b, timezoneForClinicId(b.clinica_id, timezoneMap))),
+        bloqueos_expandidos: bloqueosExpandidos,
         onboarding_horario_pendiente: onboardingClinicasPendientes.length > 0,
         onboarding_horario_clinicas_pendientes: onboardingClinicasPendientes,
     };
@@ -2111,7 +2761,7 @@ exports.getScheduleForCurrent = async (req, res) => {
             return res.status(401).json({ message: 'Auth failed!' });
         }
 
-        const schedule = await buildScheduleResponse(actorId, actorId);
+        const schedule = await buildScheduleResponse(actorId, actorId, req.query || {});
         return res.json(schedule);
     } catch (error) {
         console.error('[personal.getScheduleForCurrent] Error:', error);
@@ -2136,7 +2786,7 @@ exports.getScheduleForPersonal = async (req, res) => {
             return res.status(403).json({ message: 'Forbidden' });
         }
 
-        const schedule = await buildScheduleResponse(actorId, targetUserId);
+        const schedule = await buildScheduleResponse(actorId, targetUserId, req.query || {});
         return res.json(schedule);
     } catch (error) {
         console.error('[personal.getScheduleForPersonal] Error:', error);
@@ -2144,26 +2794,298 @@ exports.getScheduleForPersonal = async (req, res) => {
     }
 };
 
+
 async function getHorariosFor(targetUserId, clinicId) {
     const dc = await DoctorClinica.findOne({
         where: {
             doctor_id: targetUserId,
             clinica_id: clinicId,
         },
-        attributes: ['id', 'doctor_id', 'clinica_id', 'activo'],
+        attributes: ['id', 'doctor_id', 'clinica_id', 'activo', 'recibe_citas'],
         raw: true,
     });
 
     if (!dc) {
-        return { doctor_clinica_id: null, horarios: [] };
+        return { doctor_clinica_id: null, horarios: [], recibe_citas: false };
     }
 
     const horarios = await DoctorHorario.findAll({
         where: { doctor_clinica_id: dc.id },
+        include: [{ model: DoctorHorarioExcepcion, as: 'excepciones' }],
         order: [['dia_semana', 'ASC'], ['hora_inicio', 'ASC']],
     });
 
-    return { doctor_clinica_id: dc.id, horarios };
+    return {
+        doctor_clinica_id: dc.id,
+        horarios: horarios.map((row) => serializeHorarioRow(row)),
+        recibe_citas: normalizeRecibeCitas(dc.recibe_citas, false),
+    };
+}
+
+function serializeHorarioRow(row) {
+    if (!row) return null;
+    return {
+        id: Number(row.id),
+        doctor_clinica_id: Number(row.doctor_clinica_id),
+        dia_semana: Number(row.dia_semana),
+        hora_inicio: row.hora_inicio,
+        hora_fin: row.hora_fin,
+        activo: row.activo !== false,
+        rrule: row.rrule || null,
+        fecha_inicio_vigencia: normalizeDateOnly(row.fecha_inicio_vigencia),
+        fecha_fin_vigencia: normalizeDateOnly(row.fecha_fin_vigencia),
+        excepciones: Array.isArray(row.excepciones)
+            ? row.excepciones.map((exception) => serializeHorarioExceptionRow(exception))
+            : [],
+        created_at: row.created_at,
+        updated_at: row.updated_at,
+    };
+}
+
+function resolveScheduleRange(query = {}) {
+    const today = new Date().toISOString().slice(0, 10);
+    const from = normalizeDateOnly(query?.from || query?.date_from || today) || today;
+    let to = normalizeDateOnly(query?.to || query?.date_to || addDays(from, 27)) || addDays(from, 27);
+    if (to < from) {
+        to = from;
+    }
+    const maxTo = addDays(from, 92);
+    if (to > maxTo) {
+        to = maxTo;
+    }
+    return { from, to };
+}
+
+function normalizeHorarioExceptionInput(body = {}) {
+    const fecha = normalizeDateOnly(body?.fecha);
+    if (!fecha) return { error: 'fecha inválida' };
+    const hasCancelado = Object.prototype.hasOwnProperty.call(body, 'cancelado');
+    const cancelado = hasCancelado ? body.cancelado === true || String(body.cancelado).toLowerCase() === 'true' : false;
+    const horaInicio = normalizeHm(body?.hora_inicio_override);
+    const horaFin = normalizeHm(body?.hora_fin_override);
+
+    if (!cancelado) {
+        if (!horaInicio || !horaFin || horaInicio >= horaFin) {
+            return { error: 'hora_inicio_override/hora_fin_override inválidas' };
+        }
+    }
+
+    return {
+        fecha,
+        cancelado,
+        hora_inicio_override: cancelado ? null : horaInicio,
+        hora_fin_override: cancelado ? null : horaFin,
+    };
+}
+
+function normalizeBloqueoExceptionInput(body = {}) {
+    const fecha = normalizeDateOnly(body?.fecha);
+    if (!fecha) return { error: 'fecha inválida' };
+    const cancelado = !Object.prototype.hasOwnProperty.call(body, 'cancelado')
+        ? true
+        : body.cancelado === true || String(body.cancelado).toLowerCase() === 'true';
+    return { fecha, cancelado };
+}
+
+function expandBloqueoForRange(bloqueo, fromDate, toDate, timeZone = DEFAULT_TIMEZONE, exceptionMap = new Map()) {
+    if (!bloqueo) return [];
+    const rangeDates = [];
+    const startDay = normalizeDateOnly(toDay(bloqueo.fecha_inicio, timeZone));
+    const endDay = normalizeDateOnly(toDay(bloqueo.fecha_fin, timeZone));
+    const startHm = normalizeHm(toHm(bloqueo.fecha_inicio, timeZone));
+    const endHm = normalizeHm(toHm(bloqueo.fecha_fin, timeZone));
+    if (!startDay || !startHm || !endHm) return [];
+
+    const recurrente = String(bloqueo.recurrente || 'none');
+    const from = normalizeDateOnly(fromDate);
+    const to = normalizeDateOnly(toDate);
+    if (!from || !to || from > to) return [];
+
+    if (recurrente === 'none') {
+        const dates = [];
+        let date = startDay < from ? from : startDay;
+        const last = endDay && endDay > startDay ? endDay : startDay;
+        while (date && date <= to && date <= last) {
+            dates.push(date);
+            date = addDays(date, 1);
+        }
+        rangeDates.push(...dates);
+    } else {
+        let date = from > startDay ? from : startDay;
+        while (date && date <= to) {
+            const dowMatches = new Date(`${date}T12:00:00Z`).getUTCDay() === new Date(`${startDay}T12:00:00Z`).getUTCDay();
+            const weeksSinceStart = Math.floor((new Date(`${date}T00:00:00Z`) - new Date(`${startDay}T00:00:00Z`)) / (7 * 86400000));
+            const dayOfMonthMatches = Number(date.slice(8, 10)) === Number(startDay.slice(8, 10));
+            const include =
+                recurrente === 'daily'
+                    ? true
+                    : recurrente === 'weekly'
+                        ? dowMatches && weeksSinceStart >= 0
+                        : recurrente === 'monthly'
+                            ? dayOfMonthMatches && date >= startDay
+                            : false;
+            if (include) {
+                rangeDates.push(date);
+            }
+            date = addDays(date, 1);
+        }
+    }
+
+    const exceptions = exceptionMap.get(Number(bloqueo.id)) || [];
+    return rangeDates
+        .filter((date) => {
+            const exception = exceptions
+                .filter((row) => normalizeDateOnly(row.fecha) === date)
+                .sort((a, b) => Number(b.id || 0) - Number(a.id || 0))[0];
+            return !(exception && exception.cancelado !== false);
+        })
+        .map((date) => ({
+            bloqueo_id: Number(bloqueo.id),
+            doctor_id: Number(bloqueo.doctor_id),
+            clinica_id: bloqueo.clinica_id ?? null,
+            fecha: date,
+            hora_inicio: date === startDay && recurrente === 'none' ? startHm : (recurrente === 'none' && date !== startDay ? '00:00' : startHm),
+            hora_fin: recurrente === 'none'
+                ? (date === (endDay || startDay) ? endHm : '23:59')
+                : endHm,
+            motivo: bloqueo.motivo || '',
+            tipo: bloqueo.tipo || 'ausencia',
+            recurrente,
+        }))
+        .filter((row) => row.hora_inicio < row.hora_fin);
+}
+
+async function getOrCreateDoctorClinica(targetUserId, clinicaId, options = {}) {
+    const transaction = options?.transaction;
+    let dc = await DoctorClinica.findOne({
+        where: { doctor_id: Number(targetUserId), clinica_id: Number(clinicaId) },
+        transaction,
+    });
+    if (!dc) {
+        const pivot = await UsuarioClinica.findOne({
+            where: {
+                id_usuario: Number(targetUserId),
+                id_clinica: Number(clinicaId),
+                rol_clinica: { [Op.in]: STAFF_ROLES },
+                ...ACTIVE_STAFF_INVITATION_WHERE,
+            },
+            attributes: ['subrol_clinica'],
+            raw: true,
+            transaction,
+        });
+        const defaultConfig = defaultDisponibilidadConfigFromSubrol(pivot?.subrol_clinica || null);
+        dc = await DoctorClinica.create({
+            doctor_id: Number(targetUserId),
+            clinica_id: Number(clinicaId),
+            recibe_citas: defaultConfig.recibe_citas,
+            activo: true,
+        }, { transaction });
+        return dc;
+    }
+    if (!dc.activo) {
+        dc.activo = true;
+        await dc.save({ transaction });
+    }
+    return dc;
+}
+
+async function validateSingleHorarioCandidate({ targetUserId, clinicaId, candidateHorario, excludeHorarioIds = [] }) {
+    if (!candidateHorario || candidateHorario.activo === false) {
+        return null;
+    }
+
+    const sameClinicDoctorPivot = await DoctorClinica.findOne({
+        where: {
+            doctor_id: Number(targetUserId),
+            clinica_id: Number(clinicaId),
+        },
+        attributes: ['id'],
+        raw: true,
+    });
+
+    if (sameClinicDoctorPivot) {
+        const dia = normalizeDiaSemana(candidateHorario.dia_semana);
+        const inicio = normalizeHm(candidateHorario.hora_inicio);
+        const fin = normalizeHm(candidateHorario.hora_fin);
+        const excludeIds = Array.isArray(excludeHorarioIds)
+            ? excludeHorarioIds.map((id) => Number(id)).filter((id) => Number.isFinite(id))
+            : [];
+
+        const whereExisting = {
+            doctor_clinica_id: sameClinicDoctorPivot.id,
+            activo: true,
+            dia_semana: dia,
+        };
+
+        if (excludeIds.length) {
+            whereExisting.id = { [Op.notIn]: excludeIds };
+        }
+
+        const sameClinicRows = await DoctorHorario.findAll({
+            where: whereExisting,
+            attributes: ['id', 'hora_inicio', 'hora_fin'],
+            raw: true,
+        });
+
+        const overlapSameClinic = sameClinicRows.find((row) =>
+            hmRangesOverlap(inicio, fin, normalizeHm(row.hora_inicio), normalizeHm(row.hora_fin))
+        );
+
+        if (overlapSameClinic) {
+            return {
+                status: 409,
+                body: {
+                    message: 'El horario se solapa con otro tramo en esta clínica.',
+                    code: 'STAFF_SCHEDULE_OVERLAP_SAME_CLINIC',
+                    can_force: false,
+                    conflicts: [{
+                        clinica_id: Number(clinicaId),
+                        dia_semana: dia,
+                        nuevo_hora_inicio: inicio,
+                        nuevo_hora_fin: fin,
+                        conflicto_hora_inicio: normalizeHm(overlapSameClinic.hora_inicio),
+                        conflicto_hora_fin: normalizeHm(overlapSameClinic.hora_fin),
+                    }],
+                },
+            };
+        }
+    }
+
+    const crossClinicConflicts = await findCrossClinicScheduleConflicts({
+        targetUserId: Number(targetUserId),
+        clinicaId: Number(clinicaId),
+        candidateHorarios: [candidateHorario],
+        excludeHorarioIds,
+    });
+    if (crossClinicConflicts.length) {
+        return {
+            status: 409,
+            body: {
+                message: 'El horario se solapa con la disponibilidad del profesional en otra clínica.',
+                code: 'STAFF_SCHEDULE_OVERLAP_OTHER_CLINIC',
+                can_force: false,
+                conflicts: crossClinicConflicts,
+            },
+        };
+    }
+
+    const effectiveErrors = await validateHorariosAgainstEffectiveAvailability(
+        Number(targetUserId),
+        Number(clinicaId),
+        [candidateHorario],
+    );
+    if (effectiveErrors.length) {
+        return {
+            status: 422,
+            body: {
+                message: 'Algunos tramos del horario están fuera del horario permitido en la clínica.',
+                code: 'SCHEDULE_OUT_OF_EFFECTIVE_AVAILABILITY',
+                errors: effectiveErrors,
+            },
+        };
+    }
+
+    return null;
 }
 
 exports.getHorariosClinicaForCurrent = async (req, res) => {
@@ -2197,6 +3119,698 @@ exports.getHorariosClinica = async (req, res) => {
     }
 };
 
+exports.createHorarioClinicaForCurrent = async (req, res) => {
+    req.params.id = String(req.userData?.userId || '');
+    return exports.createHorarioClinica(req, res);
+};
+
+exports.createHorarioClinica = async (req, res) => {
+    try {
+        const actorId = Number(req.userData?.userId);
+        if (!Number.isFinite(actorId)) {
+            return res.status(401).json({ message: 'Auth failed!' });
+        }
+
+        const targetUserId = Number(req.params.id);
+        const clinicaId = Number(req.params.clinicaId);
+        if (!Number.isFinite(targetUserId) || !Number.isFinite(clinicaId)) {
+            return res.status(400).json({ message: 'Invalid id' });
+        }
+
+        const canEdit = await canEditHorarios(actorId, targetUserId, clinicaId);
+        if (!canEdit) {
+            return res.status(403).json({ message: 'Forbidden' });
+        }
+
+        const horarios = normalizeHorarioRows(Array.isArray(req.body) ? req.body : [req.body]);
+        if (horarios.length !== 1) {
+            return res.status(400).json({ message: 'horario inválido' });
+        }
+        const candidate = horarios[0];
+
+        const dc = await getOrCreateDoctorClinica(targetUserId, clinicaId);
+        const validationError = await validateSingleHorarioCandidate({
+            targetUserId,
+            clinicaId,
+            candidateHorario: candidate,
+        });
+        if (validationError) {
+            return res.status(validationError.status).json(validationError.body);
+        }
+
+        const created = await DoctorHorario.create({
+            doctor_clinica_id: dc.id,
+            dia_semana: candidate.dia_semana,
+            hora_inicio: candidate.hora_inicio,
+            hora_fin: candidate.hora_fin,
+            activo: candidate.activo !== false,
+            rrule: candidate.rrule,
+            fecha_inicio_vigencia: candidate.fecha_inicio_vigencia,
+            fecha_fin_vigencia: candidate.fecha_fin_vigencia,
+        });
+
+        return res.status(201).json(serializeHorarioRow(created));
+    } catch (error) {
+        console.error('[personal.createHorarioClinica] Error:', error);
+        return res.status(500).json({ message: 'Error creating horario', error: error.message });
+    }
+};
+
+exports.patchHorarioClinicaForCurrent = async (req, res) => {
+    req.params.id = String(req.userData?.userId || '');
+    return exports.patchHorarioClinica(req, res);
+};
+
+exports.patchHorarioClinica = async (req, res) => {
+    try {
+        const actorId = Number(req.userData?.userId);
+        if (!Number.isFinite(actorId)) {
+            return res.status(401).json({ message: 'Auth failed!' });
+        }
+
+        const targetUserId = Number(req.params.id);
+        const clinicaId = Number(req.params.clinicaId);
+        const horarioId = Number(req.params.horarioId);
+        if (!Number.isFinite(targetUserId) || !Number.isFinite(clinicaId) || !Number.isFinite(horarioId)) {
+            return res.status(400).json({ message: 'Invalid id' });
+        }
+
+        const canEdit = await canEditHorarios(actorId, targetUserId, clinicaId);
+        if (!canEdit) {
+            return res.status(403).json({ message: 'Forbidden' });
+        }
+
+        const existing = await DoctorHorario.findOne({
+            where: { id: horarioId },
+            include: [
+                {
+                    model: DoctorClinica,
+                    as: 'doctorClinica',
+                    where: { doctor_id: targetUserId, clinica_id: clinicaId },
+                    attributes: ['id'],
+                    required: true,
+                },
+            ],
+        });
+        if (!existing) {
+            return res.status(404).json({ message: 'Horario not found' });
+        }
+
+        const mergedRaw = {
+            dia_semana: req.body?.dia_semana ?? existing.dia_semana,
+            hora_inicio: req.body?.hora_inicio ?? existing.hora_inicio,
+            hora_fin: req.body?.hora_fin ?? existing.hora_fin,
+            activo: req.body?.activo ?? existing.activo,
+        };
+        const merged = normalizeHorarioRows([mergedRaw]);
+        if (merged.length !== 1) {
+            return res.status(400).json({ message: 'horario inválido' });
+        }
+        const candidate = merged[0];
+
+        const validationError = await validateSingleHorarioCandidate({
+            targetUserId,
+            clinicaId,
+            candidateHorario: candidate,
+            excludeHorarioIds: [horarioId],
+        });
+        if (validationError) {
+            return res.status(validationError.status).json(validationError.body);
+        }
+
+        existing.dia_semana = candidate.dia_semana;
+        existing.hora_inicio = candidate.hora_inicio;
+        existing.hora_fin = candidate.hora_fin;
+        existing.activo = candidate.activo !== false;
+        existing.rrule = candidate.rrule;
+        existing.fecha_inicio_vigencia = candidate.fecha_inicio_vigencia;
+        existing.fecha_fin_vigencia = candidate.fecha_fin_vigencia;
+        await existing.save();
+
+        return res.json(serializeHorarioRow(existing));
+    } catch (error) {
+        console.error('[personal.patchHorarioClinica] Error:', error);
+        return res.status(500).json({ message: 'Error patching horario', error: error.message });
+    }
+};
+
+exports.deleteHorarioClinicaForCurrent = async (req, res) => {
+    req.params.id = String(req.userData?.userId || '');
+    return exports.deleteHorarioClinica(req, res);
+};
+
+exports.deleteHorarioClinica = async (req, res) => {
+    try {
+        const actorId = Number(req.userData?.userId);
+        if (!Number.isFinite(actorId)) {
+            return res.status(401).json({ message: 'Auth failed!' });
+        }
+
+        const targetUserId = Number(req.params.id);
+        const clinicaId = Number(req.params.clinicaId);
+        const horarioId = Number(req.params.horarioId);
+        if (!Number.isFinite(targetUserId) || !Number.isFinite(clinicaId) || !Number.isFinite(horarioId)) {
+            return res.status(400).json({ message: 'Invalid id' });
+        }
+
+        const canEdit = await canEditHorarios(actorId, targetUserId, clinicaId);
+        if (!canEdit) {
+            return res.status(403).json({ message: 'Forbidden' });
+        }
+
+        const existing = await DoctorHorario.findOne({
+            where: { id: horarioId },
+            include: [
+                {
+                    model: DoctorClinica,
+                    as: 'doctorClinica',
+                    where: { doctor_id: targetUserId, clinica_id: clinicaId },
+                    required: true,
+                },
+            ],
+        });
+        if (!existing) {
+            return res.status(404).json({ message: 'Horario not found' });
+        }
+
+        await existing.destroy();
+
+        return res.status(204).end();
+    } catch (error) {
+        console.error('[personal.deleteHorarioClinica] Error:', error);
+        return res.status(500).json({ message: 'Error deleting horario', error: error.message });
+    }
+};
+
+exports.getHorarioExcepcionesForCurrent = async (req, res) => {
+    req.params.id = String(req.userData?.userId || '');
+    return exports.getHorarioExcepciones(req, res);
+};
+
+exports.getHorarioExcepciones = async (req, res) => {
+    try {
+        const actorId = Number(req.userData?.userId);
+        const targetUserId = Number(req.params.id);
+        const clinicaId = Number(req.params.clinicaId);
+        const horarioId = Number(req.params.horarioId);
+        if (![actorId, targetUserId, clinicaId, horarioId].every((v) => Number.isFinite(v))) {
+            return res.status(400).json({ message: 'Invalid id' });
+        }
+        const canEdit = await canEditHorarios(actorId, targetUserId, clinicaId);
+        if (!canEdit) return res.status(403).json({ message: 'Forbidden' });
+
+        const horario = await DoctorHorario.findOne({
+            where: { id: horarioId },
+            include: [{
+                model: DoctorClinica,
+                as: 'doctorClinica',
+                where: { doctor_id: targetUserId, clinica_id: clinicaId },
+                required: true,
+            }],
+        });
+        if (!horario) return res.status(404).json({ message: 'Horario not found' });
+
+        const rows = await DoctorHorarioExcepcion.findAll({
+            where: { doctor_horario_id: horarioId },
+            order: [['fecha', 'ASC'], ['id', 'ASC']],
+        });
+        return res.json(rows.map((row) => serializeHorarioExceptionRow(row)));
+    } catch (error) {
+        console.error('[personal.getHorarioExcepciones] Error:', error);
+        return res.status(500).json({ message: 'Error retrieving horario exceptions', error: error.message });
+    }
+};
+
+exports.createHorarioExcepcionForCurrent = async (req, res) => {
+    req.params.id = String(req.userData?.userId || '');
+    return exports.createHorarioExcepcion(req, res);
+};
+
+exports.createHorarioExcepcion = async (req, res) => {
+    try {
+        const actorId = Number(req.userData?.userId);
+        const targetUserId = Number(req.params.id);
+        const clinicaId = Number(req.params.clinicaId);
+        const horarioId = Number(req.params.horarioId);
+        if (![actorId, targetUserId, clinicaId, horarioId].every((v) => Number.isFinite(v))) {
+            return res.status(400).json({ message: 'Invalid id' });
+        }
+        const canEdit = await canEditHorarios(actorId, targetUserId, clinicaId);
+        if (!canEdit) return res.status(403).json({ message: 'Forbidden' });
+
+        const horario = await DoctorHorario.findOne({
+            where: { id: horarioId },
+            include: [{
+                model: DoctorClinica,
+                as: 'doctorClinica',
+                where: { doctor_id: targetUserId, clinica_id: clinicaId },
+                required: true,
+            }],
+        });
+        if (!horario) return res.status(404).json({ message: 'Horario not found' });
+
+        const payload = normalizeHorarioExceptionInput(req.body || {});
+        if (payload.error) {
+            return res.status(400).json({ message: payload.error });
+        }
+        if (!matchesHorarioOnDate(horario, payload.fecha)) {
+            return res.status(422).json({ message: 'La excepción debe corresponder a una ocurrencia válida del horario.' });
+        }
+
+        const validationError = payload.cancelado
+            ? null
+            : await validateHorarioExceptionCandidate({
+                targetUserId,
+                clinicaId,
+                horarioId,
+                fecha: payload.fecha,
+                hora_inicio: payload.hora_inicio_override || horario.hora_inicio,
+                hora_fin: payload.hora_fin_override || horario.hora_fin,
+            });
+        if (validationError && !payload.cancelado) {
+            return res.status(validationError.status).json(validationError.body);
+        }
+
+        const [row] = await DoctorHorarioExcepcion.upsert({
+            doctor_horario_id: horarioId,
+            fecha: payload.fecha,
+            cancelado: payload.cancelado,
+            hora_inicio_override: payload.hora_inicio_override,
+            hora_fin_override: payload.hora_fin_override,
+            creado_por: actorId,
+        }, { returning: true });
+
+        const persisted = row || await DoctorHorarioExcepcion.findOne({
+            where: { doctor_horario_id: horarioId, fecha: payload.fecha },
+        });
+        return res.status(201).json(serializeHorarioExceptionRow(persisted));
+    } catch (error) {
+        console.error('[personal.createHorarioExcepcion] Error:', error);
+        return res.status(500).json({ message: 'Error creating horario exception', error: error.message });
+    }
+};
+
+exports.patchHorarioExcepcionForCurrent = async (req, res) => {
+    req.params.id = String(req.userData?.userId || '');
+    return exports.patchHorarioExcepcion(req, res);
+};
+
+exports.patchHorarioExcepcion = async (req, res) => {
+    try {
+        const actorId = Number(req.userData?.userId);
+        const targetUserId = Number(req.params.id);
+        const clinicaId = Number(req.params.clinicaId);
+        const horarioId = Number(req.params.horarioId);
+        const exceptionId = Number(req.params.exceptionId);
+        if (![actorId, targetUserId, clinicaId, horarioId, exceptionId].every((v) => Number.isFinite(v))) {
+            return res.status(400).json({ message: 'Invalid id' });
+        }
+        const canEdit = await canEditHorarios(actorId, targetUserId, clinicaId);
+        if (!canEdit) return res.status(403).json({ message: 'Forbidden' });
+
+        const horario = await DoctorHorario.findOne({
+            where: { id: horarioId },
+            include: [{
+                model: DoctorClinica,
+                as: 'doctorClinica',
+                where: { doctor_id: targetUserId, clinica_id: clinicaId },
+                required: true,
+            }],
+        });
+        if (!horario) return res.status(404).json({ message: 'Horario not found' });
+
+        const exception = await DoctorHorarioExcepcion.findOne({
+            where: { id: exceptionId, doctor_horario_id: horarioId },
+        });
+        if (!exception) return res.status(404).json({ message: 'Horario exception not found' });
+
+        const payload = normalizeHorarioExceptionInput({
+            fecha: req.body?.fecha ?? exception.fecha,
+            cancelado: Object.prototype.hasOwnProperty.call(req.body || {}, 'cancelado') ? req.body.cancelado : exception.cancelado,
+            hora_inicio_override: req.body?.hora_inicio_override ?? exception.hora_inicio_override,
+            hora_fin_override: req.body?.hora_fin_override ?? exception.hora_fin_override,
+        });
+        if (payload.error) {
+            return res.status(400).json({ message: payload.error });
+        }
+        if (!matchesHorarioOnDate(horario, payload.fecha)) {
+            return res.status(422).json({ message: 'La excepción debe corresponder a una ocurrencia válida del horario.' });
+        }
+
+        const validationError = payload.cancelado
+            ? null
+            : await validateHorarioExceptionCandidate({
+                targetUserId,
+                clinicaId,
+                horarioId,
+                fecha: payload.fecha,
+                hora_inicio: payload.hora_inicio_override || horario.hora_inicio,
+                hora_fin: payload.hora_fin_override || horario.hora_fin,
+            });
+        if (validationError && !payload.cancelado) {
+            return res.status(validationError.status).json(validationError.body);
+        }
+
+        await exception.update({
+            fecha: payload.fecha,
+            cancelado: payload.cancelado,
+            hora_inicio_override: payload.hora_inicio_override,
+            hora_fin_override: payload.hora_fin_override,
+        });
+        return res.json(serializeHorarioExceptionRow(exception));
+    } catch (error) {
+        console.error('[personal.patchHorarioExcepcion] Error:', error);
+        return res.status(500).json({ message: 'Error updating horario exception', error: error.message });
+    }
+};
+
+exports.deleteHorarioExcepcionForCurrent = async (req, res) => {
+    req.params.id = String(req.userData?.userId || '');
+    return exports.deleteHorarioExcepcion(req, res);
+};
+
+exports.deleteHorarioExcepcion = async (req, res) => {
+    try {
+        const actorId = Number(req.userData?.userId);
+        const targetUserId = Number(req.params.id);
+        const clinicaId = Number(req.params.clinicaId);
+        const horarioId = Number(req.params.horarioId);
+        const exceptionId = Number(req.params.exceptionId);
+        if (![actorId, targetUserId, clinicaId, horarioId, exceptionId].every((v) => Number.isFinite(v))) {
+            return res.status(400).json({ message: 'Invalid id' });
+        }
+        const canEdit = await canEditHorarios(actorId, targetUserId, clinicaId);
+        if (!canEdit) return res.status(403).json({ message: 'Forbidden' });
+
+        const deleted = await DoctorHorarioExcepcion.destroy({
+            where: { id: exceptionId, doctor_horario_id: horarioId },
+        });
+        if (!deleted) return res.status(404).json({ message: 'Horario exception not found' });
+        return res.status(204).end();
+    } catch (error) {
+        console.error('[personal.deleteHorarioExcepcion] Error:', error);
+        return res.status(500).json({ message: 'Error deleting horario exception', error: error.message });
+    }
+};
+
+exports.moveHorarioClinicaForCurrent = async (req, res) => {
+    req.params.id = String(req.userData?.userId || '');
+    return exports.moveHorarioClinica(req, res);
+};
+
+exports.copyHorarioClinicaForCurrent = async (req, res) => {
+    req.params.id = String(req.userData?.userId || '');
+    return exports.copyHorarioClinica(req, res);
+};
+
+exports.copyHorarioClinica = async (req, res) => {
+    try {
+        const actorId = Number(req.userData?.userId);
+        if (!Number.isFinite(actorId)) {
+            return res.status(401).json({ message: 'Auth failed!' });
+        }
+
+        const targetUserId = Number(req.params.id);
+        const sourceDoctorId = Number(req.body?.source_doctor_id);
+        const sourceHorarioId = Number(req.body?.source_horario_id);
+        const sourceClinicaId = Number(req.body?.source_clinica_id);
+        const toClinicaId = Number(req.body?.to_clinica_id);
+        if (
+            !Number.isFinite(targetUserId) ||
+            !Number.isFinite(sourceDoctorId) ||
+            !Number.isFinite(sourceHorarioId) ||
+            !Number.isFinite(sourceClinicaId) ||
+            !Number.isFinite(toClinicaId)
+        ) {
+            return res.status(400).json({ message: 'Invalid copy payload' });
+        }
+
+        const canReadSource = await canEditHorarios(actorId, sourceDoctorId, sourceClinicaId);
+        const canEditTarget = await canEditHorarios(actorId, targetUserId, toClinicaId);
+        if (!canReadSource || !canEditTarget) {
+            return res.status(403).json({ message: 'Forbidden' });
+        }
+
+        const source = await DoctorHorario.findOne({
+            where: { id: sourceHorarioId },
+            include: [
+                {
+                    model: DoctorClinica,
+                    as: 'doctorClinica',
+                    where: { doctor_id: sourceDoctorId, clinica_id: sourceClinicaId },
+                    attributes: ['id', 'clinica_id'],
+                    required: true,
+                },
+            ],
+        });
+        if (!source) {
+            return res.status(404).json({ message: 'Horario not found' });
+        }
+
+        const normalizedRows = normalizeHorarioRows([{
+            dia_semana: req.body?.dia_semana ?? source.dia_semana,
+            hora_inicio: req.body?.hora_inicio ?? source.hora_inicio,
+            hora_fin: req.body?.hora_fin ?? source.hora_fin,
+            activo: req.body?.activo ?? source.activo,
+        }]);
+        if (normalizedRows.length !== 1) {
+            return res.status(400).json({ message: 'horario inválido' });
+        }
+        const candidate = normalizedRows[0];
+
+        const validationError = await validateSingleHorarioCandidate({
+            targetUserId,
+            clinicaId: toClinicaId,
+            candidateHorario: candidate,
+        });
+        if (validationError) {
+            return res.status(validationError.status).json(validationError.body);
+        }
+
+        const targetDc = await getOrCreateDoctorClinica(targetUserId, toClinicaId);
+        const created = await DoctorHorario.create({
+            doctor_clinica_id: targetDc.id,
+            dia_semana: candidate.dia_semana,
+            hora_inicio: candidate.hora_inicio,
+            hora_fin: candidate.hora_fin,
+            activo: candidate.activo !== false,
+            rrule: candidate.rrule,
+            fecha_inicio_vigencia: candidate.fecha_inicio_vigencia,
+            fecha_fin_vigencia: candidate.fecha_fin_vigencia,
+        });
+
+        return res.status(201).json({
+            message: 'Horario copiado correctamente.',
+            copied: {
+                source_doctor_id: sourceDoctorId,
+                source_horario_id: sourceHorarioId,
+                source_clinica_id: sourceClinicaId,
+                target_doctor_id: targetUserId,
+                target_clinica_id: toClinicaId,
+                horario: serializeHorarioRow(created),
+            },
+        });
+    } catch (error) {
+        console.error('[personal.copyHorarioClinica] Error:', error);
+        return res.status(500).json({ message: 'Error copying horario', error: error.message });
+    }
+};
+
+exports.moveHorarioClinica = async (req, res) => {
+    let tx;
+    try {
+        const actorId = Number(req.userData?.userId);
+        if (!Number.isFinite(actorId)) {
+            return res.status(401).json({ message: 'Auth failed!' });
+        }
+
+        const targetUserId = Number(req.params.id);
+        const horarioId = Number(req.body?.horario_id);
+        const fromClinicaId = Number(req.body?.from_clinica_id);
+        const toClinicaId = Number(req.body?.to_clinica_id);
+        if (!Number.isFinite(targetUserId) || !Number.isFinite(horarioId) || !Number.isFinite(fromClinicaId) || !Number.isFinite(toClinicaId)) {
+            return res.status(400).json({ message: 'Invalid move payload' });
+        }
+        if (fromClinicaId === toClinicaId) {
+            return res.status(400).json({
+                message: 'La clínica origen y destino no pueden ser la misma.',
+                code: 'SAME_SOURCE_AND_TARGET_CLINIC',
+            });
+        }
+
+        const canEditSource = await canEditHorarios(actorId, targetUserId, fromClinicaId);
+        const canEditTarget = await canEditHorarios(actorId, targetUserId, toClinicaId);
+        if (!canEditSource || !canEditTarget) {
+            return res.status(403).json({ message: 'Forbidden' });
+        }
+
+        const existing = await DoctorHorario.findOne({
+            where: { id: horarioId },
+            include: [
+                {
+                    model: DoctorClinica,
+                    as: 'doctorClinica',
+                    where: { doctor_id: targetUserId, clinica_id: fromClinicaId },
+                    attributes: ['id', 'clinica_id'],
+                    required: true,
+                },
+            ],
+        });
+        if (!existing) {
+            return res.status(404).json({ message: 'Horario not found' });
+        }
+
+        const normalizedRows = normalizeHorarioRows([{
+            dia_semana: req.body?.dia_semana ?? existing.dia_semana,
+            hora_inicio: req.body?.hora_inicio ?? existing.hora_inicio,
+            hora_fin: req.body?.hora_fin ?? existing.hora_fin,
+            activo: req.body?.activo ?? existing.activo,
+        }]);
+        if (normalizedRows.length !== 1) {
+            return res.status(400).json({ message: 'horario inválido' });
+        }
+        const candidate = normalizedRows[0];
+
+        const validationError = await validateSingleHorarioCandidate({
+            targetUserId,
+            clinicaId: toClinicaId,
+            candidateHorario: candidate,
+            excludeHorarioIds: [horarioId],
+        });
+        if (validationError) {
+            return res.status(validationError.status).json(validationError.body);
+        }
+
+        tx = await sequelize.transaction();
+
+        const destinationDc = await getOrCreateDoctorClinica(targetUserId, toClinicaId, { transaction: tx });
+        const created = await DoctorHorario.create({
+            doctor_clinica_id: destinationDc.id,
+            dia_semana: candidate.dia_semana,
+            hora_inicio: candidate.hora_inicio,
+            hora_fin: candidate.hora_fin,
+            activo: candidate.activo !== false,
+            rrule: candidate.rrule,
+            fecha_inicio_vigencia: candidate.fecha_inicio_vigencia,
+            fecha_fin_vigencia: candidate.fecha_fin_vigencia,
+        }, { transaction: tx });
+
+        await existing.destroy({ transaction: tx });
+        await tx.commit();
+        tx = null;
+
+        return res.json({
+            message: 'Horario movido correctamente.',
+            moved: {
+                horario_id_origen: horarioId,
+                clinica_id_origen: fromClinicaId,
+                clinica_id_destino: toClinicaId,
+                horario: serializeHorarioRow(created),
+            },
+        });
+    } catch (error) {
+        if (tx) {
+            try {
+                await tx.rollback();
+            } catch (rollbackError) {
+                console.error('[personal.moveHorarioClinica] Rollback error:', rollbackError);
+            }
+        }
+        console.error('[personal.moveHorarioClinica] Error:', error);
+        return res.status(500).json({ message: 'Error moving horario', error: error.message });
+    }
+};
+
+/**
+ * Valida que los horarios candidatos estén contenidos dentro del horario permitido
+ * por la clínica (apertura del centro).
+ * Se aplica siempre: todos los horarios por clínica son explícitos.
+ *
+ * @param {number} _targetUserId
+ * @param {number} clinicaId
+ * @param {Array<{dia_semana:number, hora_inicio:string, hora_fin:string, activo:boolean}>} horarios
+ * @returns {Promise<Array<{dia_semana:number, hora_inicio:string, hora_fin:string, reason:string}>>} errors (empty = valid)
+ */
+async function validateHorariosAgainstEffectiveAvailability(_targetUserId, clinicaId, horarios) {
+    const errors = [];
+    const activeHorarios = (horarios || []).filter((h) => h && h.activo !== false);
+    if (!activeHorarios.length) return errors;
+
+    function mergeMinuteIntervals(intervals) {
+        if (!intervals || !intervals.length) return [];
+        const sorted = [...intervals].sort((a, b) => a.startMin - b.startMin);
+        const merged = [{ ...sorted[0] }];
+        for (let i = 1; i < sorted.length; i++) {
+            const last = merged[merged.length - 1];
+            if (sorted[i].startMin <= last.endMin) {
+                last.endMin = Math.max(last.endMin, sorted[i].endMin);
+            } else {
+                merged.push({ ...sorted[i] });
+            }
+        }
+        return merged;
+    }
+
+    const clinicaHorariosMap = await getClinicaHorariosMap([clinicaId]);
+    const clinicaHorarios = clinicaHorariosMap.get(Number(clinicaId)) || [];
+
+    const openingRawByDay = new Map();
+    for (const row of clinicaHorarios) {
+        if (row.activo === false) continue;
+        const dia = normalizeDiaSemana(row.dia_semana);
+        if (dia == null) continue;
+        const startMin = hmToMinutes(row.hora_inicio);
+        const endMin = hmToMinutes(row.hora_fin);
+        if (startMin == null || endMin == null || startMin >= endMin) continue;
+        const list = openingRawByDay.get(dia) || [];
+        list.push({ startMin, endMin });
+        openingRawByDay.set(dia, list);
+    }
+
+    const openingByDay = new Map();
+    for (const [dia, intervals] of openingRawByDay.entries()) {
+        openingByDay.set(dia, mergeMinuteIntervals(intervals));
+    }
+
+    function isContainedInIntervals(intervals, startMin, endMin) {
+        if (!intervals || !intervals.length) return false;
+        return intervals.some((iv) => iv.startMin <= startMin && iv.endMin >= endMin);
+    }
+
+    function buildAllowedIntervals(intervals) {
+        if (!intervals || !intervals.length) return [];
+        const allowed = intervals.map((iv) => ({ ...iv }));
+        const first = allowed[0];
+        const last = allowed[allowed.length - 1];
+        first.startMin = Math.max(0, first.startMin - 60);
+        last.endMin = Math.min(24 * 60, last.endMin + 60);
+        return allowed;
+    }
+
+    for (const h of activeHorarios) {
+        const dia = normalizeDiaSemana(h.dia_semana);
+        const inicio = normalizeHm(h.hora_inicio);
+        const fin = normalizeHm(h.hora_fin);
+        if (dia == null || !inicio || !fin) continue;
+
+        const startMin = hmToMinutes(inicio);
+        const endMin = hmToMinutes(fin);
+        if (startMin == null || endMin == null || startMin >= endMin) continue;
+
+        const openingIntervals = openingByDay.get(dia);
+        if (!openingIntervals || !openingIntervals.length) {
+            errors.push({ dia_semana: dia, hora_inicio: inicio, hora_fin: fin, reason: 'CLINIC_CLOSED_DAY' });
+            continue;
+        }
+        const allowedIntervals = buildAllowedIntervals(openingIntervals);
+        if (!isContainedInIntervals(allowedIntervals, startMin, endMin)) {
+            errors.push({ dia_semana: dia, hora_inicio: inicio, hora_fin: fin, reason: 'OUTSIDE_CLINIC_OPENING' });
+        }
+    }
+
+    return errors;
+}
+
 exports.updateHorariosClinicaForCurrent = async (req, res) => {
     req.params.id = String(req.userData?.userId || '');
     return exports.updateHorariosClinica(req, res);
@@ -2225,6 +3839,51 @@ exports.updateHorariosClinica = async (req, res) => {
             return res.status(400).json({ message: 'horarios inválidos' });
         }
 
+        const sameClinicOverlap = findOverlappingRows(horarios);
+        if (sameClinicOverlap) {
+            return res.status(409).json({
+                message: 'El horario se solapa con otro tramo en esta clínica.',
+                code: 'STAFF_SCHEDULE_OVERLAP_SAME_CLINIC',
+                can_force: false,
+                conflicts: [{
+                    clinica_id: clinicaId,
+                    dia_semana: sameClinicOverlap.dia_semana,
+                    nuevo_hora_inicio: sameClinicOverlap.right.hora_inicio,
+                    nuevo_hora_fin: sameClinicOverlap.right.hora_fin,
+                    conflicto_hora_inicio: sameClinicOverlap.left.hora_inicio,
+                    conflicto_hora_fin: sameClinicOverlap.left.hora_fin,
+                }],
+            });
+        }
+
+        const crossClinicConflicts = await findCrossClinicScheduleConflicts({
+            targetUserId,
+            clinicaId,
+            candidateHorarios: horarios,
+        });
+        if (crossClinicConflicts.length) {
+            return res.status(409).json({
+                message: 'El horario se solapa con la disponibilidad del profesional en otra clínica.',
+                code: 'STAFF_SCHEDULE_OVERLAP_OTHER_CLINIC',
+                can_force: false,
+                conflicts: crossClinicConflicts,
+            });
+        }
+
+        // Validar siempre contra apertura clínica.
+        if (horarios.length > 0) {
+            const effectiveErrors = await validateHorariosAgainstEffectiveAvailability(
+                targetUserId, clinicaId, horarios,
+            );
+            if (effectiveErrors.length) {
+                return res.status(422).json({
+                    message: 'Algunos tramos del horario están fuera del horario permitido en la clínica.',
+                    code: 'SCHEDULE_OUT_OF_EFFECTIVE_AVAILABILITY',
+                    errors: effectiveErrors,
+                });
+            }
+        }
+
         let dc = await DoctorClinica.findOne({
             where: { doctor_id: targetUserId, clinica_id: clinicaId },
         });
@@ -2245,19 +3904,19 @@ exports.updateHorariosClinica = async (req, res) => {
             horarios.map((h) => ({ ...h, doctor_clinica_id: dc.id })),
         );
 
-        return res.json(created);
+        return res.json(created.map((row) => serializeHorarioRow(row)));
     } catch (error) {
         console.error('[personal.updateHorariosClinica] Error:', error);
         return res.status(500).json({ message: 'Error updating horarios', error: error.message });
     }
 };
 
-exports.updateModoDisponibilidadClinicaForCurrent = async (req, res) => {
+exports.updateDisponibilidadConfigClinicaForCurrent = async (req, res) => {
     req.params.id = String(req.userData?.userId || '');
-    return exports.updateModoDisponibilidadClinica(req, res);
+    return exports.updateDisponibilidadConfigClinica(req, res);
 };
 
-exports.updateModoDisponibilidadClinica = async (req, res) => {
+exports.updateDisponibilidadConfigClinica = async (req, res) => {
     try {
         const actorId = Number(req.userData?.userId);
         if (!Number.isFinite(actorId)) {
@@ -2270,11 +3929,18 @@ exports.updateModoDisponibilidadClinica = async (req, res) => {
             return res.status(400).json({ message: 'Invalid id' });
         }
 
-        const modo = normalizeModoDisponibilidad(req.body?.modo_disponibilidad ?? req.body?.modo);
-        if (!modo) {
+        const hasRecibeCitasInput = Object.prototype.hasOwnProperty.call(req.body || {}, 'recibe_citas');
+        if (!hasRecibeCitasInput) {
             return res.status(400).json({
-                message: 'modo_disponibilidad inválido',
-                allowed: Array.from(MODO_DISPONIBILIDAD),
+                message: 'recibe_citas es obligatorio',
+            });
+        }
+
+        const recibeCitas = parseRecibeCitasInput(req.body?.recibe_citas);
+        if (recibeCitas == null) {
+            return res.status(400).json({
+                message: 'recibe_citas inválido',
+                allowed: [true, false],
             });
         }
 
@@ -2289,14 +3955,15 @@ exports.updateModoDisponibilidadClinica = async (req, res) => {
         });
 
         if (!dc) {
+            const defaultConfig = defaultDisponibilidadConfigFromSubrol(null);
             dc = await DoctorClinica.create({
                 doctor_id: targetUserId,
                 clinica_id: clinicaId,
                 activo: true,
-                modo_disponibilidad: modo,
+                recibe_citas: recibeCitas ?? defaultConfig.recibe_citas,
             });
         } else {
-            dc.modo_disponibilidad = modo;
+            dc.recibe_citas = recibeCitas;
             if (!dc.activo) {
                 dc.activo = true;
             }
@@ -2308,11 +3975,11 @@ exports.updateModoDisponibilidadClinica = async (req, res) => {
             doctor_id: dc.doctor_id,
             clinica_id: dc.clinica_id,
             activo: !!dc.activo,
-            modo_disponibilidad: dc.modo_disponibilidad || 'avanzado',
+            recibe_citas: normalizeRecibeCitas(dc.recibe_citas, false),
         });
     } catch (error) {
-        console.error('[personal.updateModoDisponibilidadClinica] Error:', error);
-        return res.status(500).json({ message: 'Error updating modo_disponibilidad', error: error.message });
+        console.error('[personal.updateDisponibilidadConfigClinica] Error:', error);
+        return res.status(500).json({ message: 'Error updating disponibilidad config', error: error.message });
     }
 };
 

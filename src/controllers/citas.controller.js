@@ -176,7 +176,9 @@ async function attachFlowSummaryToCitas(citas) {
 
     return citas;
 }
+const { buildHorarioExceptionMap, expandHorariosForDate } = require('../lib/personal-schedule-recurring');
 const DEFAULT_TIMEZONE = 'Europe/Madrid';
+
 
 /**
  * Helper: asegurar vínculo paciente-clínica sin romper por duplicados
@@ -232,26 +234,21 @@ async function findOrCreatePaciente({ clinica_id, nombre, apellidos, telefono, e
         whereContacto.push({ email });
     }
 
-    const paciente = await Paciente.findOne({
-        where: {
-            [Op.and]: [
-                { [Op.or]: whereContacto },
-                {
-                    [Op.or]: [
-                        { clinica_id },
-                        { '$clinicasVinculadas.clinica_id$': clinica_id }
-                    ]
-                }
-            ]
-        },
+    const candidatos = await Paciente.findAll({
+        where: { [Op.or]: whereContacto },
         include: [
             {
                 model: db.PacienteClinica,
                 as: 'clinicasVinculadas',
                 required: false
             }
-        ]
+        ],
+        limit: 20
     });
+    const paciente = candidatos.find((row) =>
+        row.clinica_id === clinica_id ||
+        (row.clinicasVinculadas || []).some((vc) => vc.clinica_id === clinica_id)
+    ) || null;
     if (paciente) {
         // Asegurar vínculo explícito
         const yaVinculado = (paciente.clinicasVinculadas || []).some(vc => vc.clinica_id === clinica_id);
@@ -396,7 +393,10 @@ const formatDateLocal = (date, timeZone) => {
 };
 
 const buildWindowsFromHorarios = (horarios, dow, fechaIso, timeZone) => {
-    return (horarios || [])
+    const exceptionMap = buildHorarioExceptionMap(
+        (horarios || []).flatMap((h) => Array.isArray(h?.excepciones) ? h.excepciones : [])
+    );
+    return expandHorariosForDate(horarios || [], fechaIso, exceptionMap)
         .filter((h) => h.dia_semana === dow && h.activo)
         .map((h) => ({
             start: localDateTimeToUtc(fechaIso, h.hora_inicio, timeZone),
@@ -405,10 +405,134 @@ const buildWindowsFromHorarios = (horarios, dow, fechaIso, timeZone) => {
         .filter((w) => w.start && w.end && Number.isFinite(w.start.getTime()) && Number.isFinite(w.end.getTime()) && w.start < w.end);
 };
 
+const buildBlockWindowsFromBloqueos = (bloqueos, fechaIso, timeZone) => {
+    const targetDow = dayIndexFromLocalDate(fechaIso);
+    return (bloqueos || []).flatMap((bloqueo) => {
+        const exceptions = Array.isArray(bloqueo?.excepciones) ? bloqueo.excepciones : [];
+        const canceled = exceptions.some((row) => String(row?.fecha || '') === fechaIso && row?.cancelado !== false);
+        if (canceled) return [];
+
+        const startDay = formatDateLocal(bloqueo.fecha_inicio, timeZone);
+        const endDay = formatDateLocal(bloqueo.fecha_fin, timeZone);
+        const startParts = formatPartsInTimeZone(bloqueo.fecha_inicio, timeZone);
+        const endParts = formatPartsInTimeZone(bloqueo.fecha_fin, timeZone);
+        const startHm = `${String(startParts.hour).padStart(2, '0')}:${String(startParts.minute).padStart(2, '0')}`;
+        const endHm = `${String(endParts.hour).padStart(2, '0')}:${String(endParts.minute).padStart(2, '0')}`;
+        const recurrente = String(bloqueo.recurrente || 'none');
+
+        let applies = false;
+        if (recurrente === 'none') {
+            applies = fechaIso >= startDay && fechaIso <= endDay;
+        } else if (recurrente === 'daily') {
+            applies = fechaIso >= startDay;
+        } else if (recurrente === 'weekly') {
+            applies = fechaIso >= startDay && targetDow === dayIndexFromLocalDate(startDay);
+        } else if (recurrente === 'monthly') {
+            applies = fechaIso >= startDay && Number(fechaIso.slice(8, 10)) === Number(startDay.slice(8, 10));
+        }
+        if (!applies) return [];
+
+        const occStartHm = recurrente === 'none'
+            ? (fechaIso === startDay ? startHm : '00:00')
+            : startHm;
+        const occEndHm = recurrente === 'none'
+            ? (fechaIso === endDay ? endHm : '23:59')
+            : endHm;
+        const start = localDateTimeToUtc(fechaIso, occStartHm, timeZone);
+        const end = localDateTimeToUtc(fechaIso, occEndHm, timeZone);
+        if (!start || !end || start >= end) return [];
+        return [{ start, end }];
+    });
+};
+
 const inAnyWindow = (windows, start, end) => {
     if (!Array.isArray(windows) || windows.length === 0) return false;
     return windows.some((w) => start >= w.start && end <= w.end);
 };
+
+const normalizeRecibeCitas = (value) => {
+    if (typeof value === 'boolean') return value;
+    const normalized = String(value || '').trim().toLowerCase();
+    if (['1', 'true', 'si', 'sí', 'yes'].includes(normalized)) return true;
+    if (['0', 'false', 'no'].includes(normalized)) return false;
+    return false;
+};
+
+const mergeWindows = (windows) => {
+    const sorted = (windows || [])
+        .filter((w) => w?.start && w?.end && w.start < w.end)
+        .sort((a, b) => a.start - b.start);
+    if (!sorted.length) return [];
+
+    const merged = [sorted[0]];
+    for (let i = 1; i < sorted.length; i++) {
+        const curr = sorted[i];
+        const last = merged[merged.length - 1];
+        if (curr.start <= last.end) {
+            last.end = new Date(Math.max(last.end.getTime(), curr.end.getTime()));
+            continue;
+        }
+        merged.push({ start: curr.start, end: curr.end });
+    }
+    return merged;
+};
+
+const intersectWindows = (a, b) => {
+    if (!a.length || !b.length) return [];
+    return a
+        .flatMap((w) =>
+            b.map((d) => ({
+                start: new Date(Math.max(w.start, d.start)),
+                end: new Date(Math.min(w.end, d.end))
+            }))
+        )
+        .filter((w) => w.start < w.end);
+};
+
+function buildDoctorAvailabilityContext({
+    doctorId,
+    dc,
+    dow,
+    fechaIso,
+    clinicTimezone
+}) {
+    if (!doctorId) {
+        return {
+            docWins: [],
+            dcMissing: false,
+            outOfHoursMessage: 'Doctor fuera de horario'
+        };
+    }
+
+    if (!dc) {
+        return {
+            docWins: [],
+            dcMissing: true,
+            outOfHoursMessage: 'Doctor no asignado a la clínica'
+        };
+    }
+
+    const receiveAppointments = normalizeRecibeCitas(dc.recibe_citas);
+    const clinicWins = buildWindowsFromHorarios(dc.horarios || [], dow, fechaIso, clinicTimezone);
+
+    if (!receiveAppointments) {
+        return {
+            docWins: [],
+            dcMissing: false,
+            outOfHoursMessage: 'Profesional en modo sin citas (no aparece en agenda de citas)'
+        };
+    }
+
+    const outOfHoursMessage = clinicWins.length
+        ? 'Profesional fuera de su horario en esta clínica'
+        : 'Profesional sin horario configurado en esta clínica';
+
+    return {
+        docWins: mergeWindows(clinicWins),
+        dcMissing: false,
+        outOfHoursMessage
+    };
+}
 
 async function checkDisponibilidad({ clinica_id, inicio, fin, doctor_id, instalacion_id, clinicTimezone = DEFAULT_TIMEZONE }) {
     const conflicts = [];
@@ -434,17 +558,47 @@ async function checkDisponibilidad({ clinica_id, inicio, fin, doctor_id, instala
     }
 
     if (doctor_id) {
-        const dc = await DoctorClinica.findOne({ where: { doctor_id, clinica_id }, include: [{ model: DoctorHorario, as: 'horarios' }] });
-        if (!dc || !dc.activo) conflicts.push({ type: 'doctor_unavailable', message: 'Doctor no asignado a la clínica' });
-        else {
-            const docWins = buildWindowsFromHorarios(dc.horarios || [], dow, fechaIso, clinicTimezone);
-            const inRange = inAnyWindow(docWins, start, end);
-            if (!inRange) conflicts.push({ type: 'doctor_unavailable', message: 'Doctor fuera de horario' });
+        const dc = await DoctorClinica.findOne({
+            where: { doctor_id, clinica_id, activo: true },
+            include: [{ model: DoctorHorario, as: 'horarios', include: [{ model: db.DoctorHorarioExcepcion, as: 'excepciones' }] }]
+        });
+        const doctorCtx = buildDoctorAvailabilityContext({
+            doctorId: doctor_id,
+            dc: dc || null,
+            dow,
+            fechaIso,
+            clinicTimezone,
+        });
+        if (doctorCtx.dcMissing) {
+            conflicts.push({ type: 'doctor_unavailable', message: 'Doctor no asignado a la clínica' });
+        } else {
+            const inRange = inAnyWindow(doctorCtx.docWins, start, end);
+            if (!inRange) conflicts.push({ type: 'doctor_unavailable', message: doctorCtx.outOfHoursMessage });
         }
-        const bloqueos = await DoctorBloqueo.findAll({ where: { doctor_id, fecha_inicio: { [db.Sequelize.Op.lt]: end }, fecha_fin: { [db.Sequelize.Op.gt]: start } } });
-        if (bloqueos.length) conflicts.push({ type: 'doctor_unavailable', message: bloqueos[0].motivo || 'Bloqueo doctor' });
-        const citasDoc = await CitaPaciente.findAll({ where: { doctor_id, inicio: { [db.Sequelize.Op.lt]: end }, fin: { [db.Sequelize.Op.gt]: start } }, attributes: ['id_cita'] });
-        if (citasDoc.length) conflicts.push({ type: 'overlap', message: 'Doctor ocupado' });
+        const bloqueos = await DoctorBloqueo.findAll({
+            where: {
+                doctor_id,
+                [Op.or]: [
+                    { recurrente: 'none', fecha_inicio: { [db.Sequelize.Op.lt]: end }, fecha_fin: { [db.Sequelize.Op.gt]: start } },
+                    { recurrente: { [Op.ne]: 'none' }, fecha_inicio: { [db.Sequelize.Op.lte]: end } },
+                ],
+            },
+            include: [{ model: db.DoctorBloqueoExcepcion, as: 'excepciones' }],
+        });
+        const bloqueoWindows = buildBlockWindowsFromBloqueos(bloqueos, fechaIso, clinicTimezone);
+        if (bloqueoWindows.some((w) => overlap(start, end, w.start, w.end))) {
+            conflicts.push({ type: 'doctor_unavailable', message: (bloqueos[0] && bloqueos[0].motivo) || 'Bloqueo doctor' });
+        }
+        const citasDoc = await CitaPaciente.findAll({
+            where: { doctor_id, inicio: { [db.Sequelize.Op.lt]: end }, fin: { [db.Sequelize.Op.gt]: start } },
+            attributes: ['id_cita', 'clinica_id']
+        });
+        if (citasDoc.some((c) => Number(c.clinica_id) !== Number(clinica_id))) {
+            conflicts.push({ type: 'doctor_unavailable', message: 'Doctor ocupado en otra clínica' });
+        }
+        if (citasDoc.some((c) => Number(c.clinica_id) === Number(clinica_id))) {
+            conflicts.push({ type: 'overlap', message: 'Doctor ocupado' });
+        }
     }
     return conflicts;
 }
@@ -547,9 +701,19 @@ async function checkDisponibilidadCanonica({ clinica_id, inicio, fin, doctor_id,
 
     // Staff (doctor)
     if (doctor_id) {
-        const dc = await DoctorClinica.findOne({ where: { doctor_id, clinica_id: clinicaId, activo: true }, include: [{ model: DoctorHorario, as: 'horarios' }] });
+        const dc = await DoctorClinica.findOne({
+            where: { doctor_id, clinica_id: clinicaId, activo: true },
+            include: [{ model: DoctorHorario, as: 'horarios', include: [{ model: db.DoctorHorarioExcepcion, as: 'excepciones' }] }]
+        });
+        const doctorCtx = buildDoctorAvailabilityContext({
+            doctorId: doctor_id,
+            dc: dc || null,
+            dow,
+            fechaIso,
+            clinicTimezone,
+        });
 
-        if (!dc) {
+        if (doctorCtx.dcMissing) {
             addLegacy('doctor_unavailable', 'Doctor no asignado a la clínica');
             addResource({
                 resource_type: 'staff',
@@ -561,10 +725,9 @@ async function checkDisponibilidadCanonica({ clinica_id, inicio, fin, doctor_id,
                 details: { message: 'Doctor no asignado a la clínica' }
             });
         } else {
-            const docWins = buildWindowsFromHorarios(dc.horarios || [], dow, fechaIso, clinicTimezone);
-            const inRange = inAnyWindow(docWins, start, end);
+            const inRange = inAnyWindow(doctorCtx.docWins, start, end);
             if (!inRange) {
-                addLegacy('doctor_unavailable', 'Doctor fuera de horario');
+                addLegacy('doctor_unavailable', doctorCtx.outOfHoursMessage);
                 addResource({
                     resource_type: 'staff',
                     resource_role: 'doctor',
@@ -572,14 +735,24 @@ async function checkDisponibilidadCanonica({ clinica_id, inicio, fin, doctor_id,
                     clinica_id: clinicaId,
                     code: 'STAFF_OUT_OF_HOURS',
                     can_force: false,
-                    details: { message: 'Doctor fuera de horario' }
+                    details: { message: doctorCtx.outOfHoursMessage }
                 });
             }
         }
 
-        const bloqueos = await DoctorBloqueo.findAll({ where: { doctor_id, fecha_inicio: { [db.Sequelize.Op.lt]: end }, fecha_fin: { [db.Sequelize.Op.gt]: start } } });
-        if (bloqueos.length) {
-            addLegacy('doctor_unavailable', bloqueos[0].motivo || 'Bloqueo doctor');
+        const bloqueos = await DoctorBloqueo.findAll({
+            where: {
+                doctor_id,
+                [Op.or]: [
+                    { recurrente: 'none', fecha_inicio: { [db.Sequelize.Op.lt]: end }, fecha_fin: { [db.Sequelize.Op.gt]: start } },
+                    { recurrente: { [Op.ne]: 'none' }, fecha_inicio: { [db.Sequelize.Op.lte]: end } },
+                ],
+            },
+            include: [{ model: db.DoctorBloqueoExcepcion, as: 'excepciones' }],
+        });
+        const bloqueoWindows = buildBlockWindowsFromBloqueos(bloqueos, fechaIso, clinicTimezone);
+        if (bloqueoWindows.some((w) => overlap(start, end, w.start, w.end))) {
+            addLegacy('doctor_unavailable', (bloqueos[0] && bloqueos[0].motivo) || 'Bloqueo doctor');
             addResource({
                 resource_type: 'staff',
                 resource_role: 'doctor',
@@ -587,14 +760,40 @@ async function checkDisponibilidadCanonica({ clinica_id, inicio, fin, doctor_id,
                 clinica_id: clinicaId,
                 code: 'STAFF_BLOCKED',
                 can_force: false,
-                details: { bloqueo_id: bloqueos[0].id, message: bloqueos[0].motivo || 'Bloqueo doctor' }
+                details: { bloqueo_id: bloqueos[0].id, message: (bloqueos[0] && bloqueos[0].motivo) || 'Bloqueo doctor' }
             });
         }
 
         const citasDocWhere = { doctor_id, inicio: { [db.Sequelize.Op.lt]: end }, fin: { [db.Sequelize.Op.gt]: start } };
         if (ignore_cita_id) citasDocWhere.id_cita = { [db.Sequelize.Op.ne]: ignore_cita_id };
-        const citasDoc = await CitaPaciente.findAll({ where: citasDocWhere, attributes: ['id_cita'] });
-        if (citasDoc.length) {
+        const citasDoc = await CitaPaciente.findAll({ where: citasDocWhere, attributes: ['id_cita', 'clinica_id'] });
+        const citasDocOtherClinics = citasDoc.filter((c) => Number(c.clinica_id) !== Number(clinicaId));
+        const citasDocSameClinic = citasDoc.filter((c) => Number(c.clinica_id) === Number(clinicaId));
+
+        if (citasDocOtherClinics.length) {
+            addLegacy('doctor_unavailable', 'Doctor ocupado en otra clínica');
+            addResource({
+                resource_type: 'staff',
+                resource_role: 'doctor',
+                resource_id: Number(doctor_id),
+                clinica_id: clinicaId,
+                code: 'STAFF_OVERLAP',
+                can_force: false,
+                details: {
+                    cita_ids: citasDocOtherClinics.map((c) => c.id_cita),
+                    clinica_ids: Array.from(
+                        new Set(
+                            citasDocOtherClinics
+                                .map((c) => Number(c.clinica_id))
+                                .filter((id) => Number.isFinite(id))
+                        )
+                    ),
+                    message: 'Doctor ocupado en otra clínica'
+                }
+            });
+        }
+
+        if (citasDocSameClinic.length) {
             addLegacy('overlap', 'Doctor ocupado');
             addResource({
                 resource_type: 'staff',
@@ -603,7 +802,7 @@ async function checkDisponibilidadCanonica({ clinica_id, inicio, fin, doctor_id,
                 clinica_id: clinicaId,
                 code: 'STAFF_OVERLAP',
                 can_force: true,
-                details: { cita_ids: citasDoc.map(c => c.id_cita), message: 'Doctor ocupado' }
+                details: { cita_ids: citasDocSameClinic.map(c => c.id_cita), message: 'Doctor ocupado' }
             });
         }
     }
@@ -810,8 +1009,12 @@ exports.getCitas = asyncHandler(async (req, res) => {
         include: [
             { model: Paciente, as: 'paciente' },
             { model: LeadIntake, as: 'lead' },
-            { model: Clinica, as: 'clinica' }
+            { model: Clinica, as: 'clinica' },
+            { model: Instalacion, as: 'instalacion', required: false },
+            { model: Tratamiento, as: 'tratamiento', required: false },
+            db.Usuario ? { model: db.Usuario, as: 'doctor', required: false, attributes: ['id_usuario', 'nombre', 'apellidos'] } : null
         ]
+        .filter(Boolean)
     });
 
     await attachFlowSummaryToCitas(citas);

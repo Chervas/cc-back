@@ -1,6 +1,7 @@
 const asyncHandler = require('express-async-handler');
 const db = require('../../models');
 const { Op } = db.Sequelize;
+const { STAFF_ROLES } = require('../lib/role-helpers');
 
 const parseBool = (v) => v === true || v === 'true' || v === '1';
 const dayIndex = (date) => new Date(date).getDay();
@@ -29,22 +30,48 @@ const subtractIntervals = (windows, blocks) => {
 };
 
 exports.list = asyncHandler(async (req, res) => {
-  const { clinica_id, group_id, all } = req.query;
+  const { clinica_id, group_id, all, agenda_context } = req.query;
+  const agendaContext = parseBool(agenda_context);
 
   // Filtrado por clinica_id directamente sobre DoctorClinica (evita depender de atributos inexistentes en Clinica)
-  const whereDoctorClinica = { activo: true };
+  const whereDoctorClinica = {
+    activo: true
+  };
+  if (!agendaContext) {
+    whereDoctorClinica.recibe_citas = true;
+  }
   // Mantener /api/doctors legacy limitado a doctores reales:
-  // Solo filas donde el pivot UsuarioClinica marca subrol_clinica='Doctores' en esa clinica.
-  whereDoctorClinica[Op.and] = db.Sequelize.literal(`
-    EXISTS (
-      SELECT 1
-      FROM UsuarioClinica uc
-      WHERE uc.id_usuario = \`DoctorClinica\`.\`doctor_id\`
-        AND uc.id_clinica = \`DoctorClinica\`.\`clinica_id\`
-        AND uc.rol_clinica = 'personaldeclinica'
-        AND uc.subrol_clinica = 'Doctores'
-    )
-  `);
+  // incluir cualquier rol de staff (propietario/personal/agencia) con subrol Doctores
+  // para soportar casos propietario+doctor sin perder visibilidad en agenda.
+  const staffRolesSql = STAFF_ROLES.map((role) => db.sequelize.escape(role)).join(', ');
+  const andConditions = [];
+  if (!agendaContext) {
+    andConditions.push(
+      db.Sequelize.literal(`
+        EXISTS (
+          SELECT 1
+          FROM UsuarioClinica uc
+          WHERE uc.id_usuario = \`DoctorClinica\`.\`doctor_id\`
+            AND uc.id_clinica = \`DoctorClinica\`.\`clinica_id\`
+            AND uc.rol_clinica IN (${staffRolesSql})
+            AND uc.subrol_clinica = 'Doctores'
+        )
+      `)
+    );
+  }
+  if (!agendaContext) {
+    andConditions.push(
+      db.Sequelize.literal(`
+        EXISTS (
+          SELECT 1
+          FROM ClinicaHorarios ch
+          WHERE ch.clinica_id = \`DoctorClinica\`.\`clinica_id\`
+            AND ch.activo = 1
+        )
+      `)
+    );
+  }
+  whereDoctorClinica[Op.and] = andConditions;
   if (!parseBool(all) && clinica_id) {
     whereDoctorClinica.clinica_id = clinica_id;
   }
@@ -54,6 +81,17 @@ exports.list = asyncHandler(async (req, res) => {
     as: 'clinica',
     attributes: ['id_clinica', 'nombre_clinica', 'url_avatar', 'grupoClinicaId'],
   };
+  if (agendaContext) {
+    includeClinica.include = [
+      {
+        model: db.ClinicaHorario,
+        as: 'horarios',
+        attributes: ['id', 'activo'],
+        where: { activo: true },
+        required: false
+      }
+    ];
+  }
   if (!parseBool(all) && group_id) {
     includeClinica.where = { grupoClinicaId: group_id };
   }
@@ -64,23 +102,44 @@ exports.list = asyncHandler(async (req, res) => {
       // Nota: el modelo Usuario no tiene campo `especialidad` en BD; usamos `rol_en_clinica` de DoctorClinica como "especialidad" (label).
       { model: db.Usuario, as: 'doctor', attributes: ['id_usuario', 'nombre', 'apellidos', 'email_usuario'] },
       includeClinica,
+      {
+        model: db.DoctorHorario,
+        as: 'horarios',
+        attributes: ['id'],
+        where: { activo: true },
+        required: !agendaContext,
+      },
     ],
     order: [['clinica_id', 'ASC'], [{ model: db.Usuario, as: 'doctor' }, 'apellidos', 'ASC'], [{ model: db.Usuario, as: 'doctor' }, 'nombre', 'ASC']],
   });
 
   // Respuesta compatible con el front (doctors.service.ts)
-  const result = doctorClinicas.map((dc) => ({
-    id: String(dc.doctor?.id_usuario ?? dc.doctor_id),
-    nombre: dc.doctor?.nombre || '',
-    apellidos: dc.doctor?.apellidos || '',
-    email: dc.doctor?.email_usuario || null,
-    especialidad: dc.rol_en_clinica || null,
-    activo: !!dc.activo,
-    clinica_id: String(dc.clinica?.id_clinica ?? dc.clinica_id),
-    clinica_nombre: dc.clinica?.nombre_clinica || '',
-    grupo_clinica_id: dc.clinica?.grupoClinicaId ?? null,
-    clinica: dc.clinica || null,
-  }));
+  const uniqueByPivot = new Map();
+  doctorClinicas.forEach((dc) => {
+    const key = `${dc.doctor_id}:${dc.clinica_id}`;
+    if (uniqueByPivot.has(key)) return;
+    const hasSchedule = Array.isArray(dc.horarios) && dc.horarios.some((horario) => horario?.id != null);
+    const clinicHasOpening = Array.isArray(dc.clinica?.horarios) && dc.clinica.horarios.length > 0;
+    const receivesAppointments = !!dc.recibe_citas;
+    uniqueByPivot.set(key, {
+      id: String(dc.doctor?.id_usuario ?? dc.doctor_id),
+      nombre: dc.doctor?.nombre || '',
+      apellidos: dc.doctor?.apellidos || '',
+      email: dc.doctor?.email_usuario || null,
+      especialidad: dc.rol_en_clinica || null,
+      activo: !!dc.activo,
+      clinica_id: String(dc.clinica?.id_clinica ?? dc.clinica_id),
+      clinica_nombre: dc.clinica?.nombre_clinica || '',
+      grupo_clinica_id: dc.clinica?.grupoClinicaId ?? null,
+      clinica: dc.clinica || null,
+      recibe_citas: receivesAppointments,
+      has_schedule: hasSchedule,
+      clinic_has_opening: clinicHasOpening,
+      agendable: receivesAppointments && hasSchedule && clinicHasOpening,
+    });
+  });
+
+  const result = Array.from(uniqueByPivot.values());
 
   res.json(result);
 });
@@ -176,7 +235,12 @@ exports.updateHorariosClinica = asyncHandler(async (req, res) => {
   const horarios = Array.isArray(req.body?.horarios) ? req.body.horarios : [];
   let dc = await db.DoctorClinica.findOne({ where: { doctor_id: doctorId, clinica_id: clinicaId } });
   if (!dc) {
-    dc = await db.DoctorClinica.create({ doctor_id: doctorId, clinica_id: clinicaId, activo: true });
+    dc = await db.DoctorClinica.create({
+      doctor_id: doctorId,
+      clinica_id: clinicaId,
+      recibe_citas: true,
+      activo: true
+    });
   }
   await db.DoctorHorario.destroy({ where: { doctor_clinica_id: dc.id } });
   const created = await db.DoctorHorario.bulkCreate(horarios.map(h => ({ ...h, doctor_clinica_id: dc.id })));
