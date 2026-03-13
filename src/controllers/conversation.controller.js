@@ -324,6 +324,8 @@ exports.getPermissions = async (req, res) => {
   }
 };
 
+exports.getConversationPermissions = exports.getPermissions;
+
 exports.getMessages = async (req, res) => {
   try {
     const userId = req.userData?.userId;
