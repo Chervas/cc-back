@@ -66,7 +66,9 @@ const STATIC_CORS_ORIGINS = new Set([
     'https://app.clinicaclick.com',
     'https://crm.clinicaclick.com',
     'http://localhost:4200',
-    'http://localhost:4201'
+    'http://localhost:4201',
+    'http://localhost:4202',
+    'http://localhost:4203'
 ]);
 
 function isPublicIntakePath(pathname = '') {
@@ -211,7 +213,7 @@ const PORT = process.env.PORT || 3000;
 // Socket.io
 const io = new Server(server, {
     cors: {
-        origin: ['https://app.clinicaclick.com', 'https://crm.clinicaclick.com', 'http://localhost:4200'],
+        origin: Array.from(STATIC_CORS_ORIGINS),
         credentials: true
     }
 });
