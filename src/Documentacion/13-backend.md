@@ -161,6 +161,7 @@ En `.env` / `.env.example`:
 - `PUT /api/intake/leads/:id/call-outcome`
   - Registra el resultado operativo de la llamada (`citado`, `informacion`, `no_contactado`).
   - Emite `lead:call_outcome` por socket para cerrar alertas pendientes en UI.
+  - El scope realtime debe ser coherente con el scope HTTP de conversaciones/leads. Para admin global, `socket.io` debe suscribirse a todas las clínicas del sistema, no solo a las presentes en `UsuarioClinica`; si no, el usuario ve la clínica en la API pero no recibe `lead:created` ni `lead:call_initiated` en vivo.
 
 - Conversaciones de lead
   - El modelo canónico para marketing es `LeadIntake`.

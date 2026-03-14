@@ -2,6 +2,7 @@
 
 const TEAM_READER_ROLES = new Set(['propietario', 'agencia', 'personaldeclinica']);
 const PATIENT_READER_ROLES = new Set(['propietario']);
+const AGGREGATE_ROLES = new Set(['propietario', 'admin']);
 
 function normalizeRole(value) {
     return String(value || '').trim().toLowerCase();
@@ -38,11 +39,11 @@ function resolveQuickChatPermissions({ rol_clinica, subrol_clinica }) {
     return { readTeam, readPatients };
 }
 
-function buildQuickChatContextFromMemberships(memberships, { isGlobalAdmin = false } = {}) {
+function buildQuickChatContextFromMemberships(memberships, { isGlobalAdmin = false, allClinicIds = [] } = {}) {
     const clinicIdsSet = new Set();
     const permissionsByClinic = new Map();
     const roleByClinic = new Map();
-    let hasAgenciaRole = false;
+    const rolesSeen = new Set();
 
     for (const row of memberships || []) {
         const clinicId = Number(row?.id_clinica);
@@ -50,10 +51,10 @@ function buildQuickChatContextFromMemberships(memberships, { isGlobalAdmin = fal
 
         clinicIdsSet.add(clinicId);
         const role = normalizeRole(row?.rol_clinica);
-        const subrole = row?.subrol_clinica || null;
-        if (role === 'agencia') {
-            hasAgenciaRole = true;
+        if (role) {
+            rolesSeen.add(role);
         }
+        const subrole = row?.subrol_clinica || null;
 
         const current = permissionsByClinic.get(clinicId) || { readTeam: false, readPatients: false };
         const next = resolveQuickChatPermissions({ rol_clinica: role, subrol_clinica: subrole });
@@ -70,8 +71,24 @@ function buildQuickChatContextFromMemberships(memberships, { isGlobalAdmin = fal
         }
     }
 
+    if (isGlobalAdmin) {
+        for (const rawClinicId of allClinicIds || []) {
+            const clinicId = Number(rawClinicId);
+            if (!Number.isFinite(clinicId)) continue;
+
+            clinicIdsSet.add(clinicId);
+            permissionsByClinic.set(clinicId, { readTeam: true, readPatients: true });
+            if (!roleByClinic.has(clinicId)) {
+                roleByClinic.set(clinicId, {
+                    rol_clinica: 'admin',
+                    subrol_clinica: null,
+                });
+            }
+        }
+    }
+
     const clinicIds = Array.from(clinicIdsSet).sort((a, b) => a - b);
-    const canUseAllClinics = !isGlobalAdmin && !hasAgenciaRole;
+    const canUseAllClinics = !!isGlobalAdmin || Array.from(rolesSeen).some((role) => AGGREGATE_ROLES.has(role));
 
     const teamClinicIds = clinicIds.filter((id) => permissionsByClinic.get(id)?.readTeam);
     const patientClinicIds = clinicIds.filter((id) => permissionsByClinic.get(id)?.readPatients);
@@ -82,7 +99,7 @@ function buildQuickChatContextFromMemberships(memberships, { isGlobalAdmin = fal
         permissionsByClinic,
         teamClinicIds,
         patientClinicIds,
-        hasAgenciaRole,
+        hasAgenciaRole: rolesSeen.has('agencia'),
         isGlobalAdmin: !!isGlobalAdmin,
         canUseAllClinics,
         hasAnyRead: teamClinicIds.length > 0 || patientClinicIds.length > 0,

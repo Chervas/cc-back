@@ -242,6 +242,8 @@ io.on('connection', async (socket) => {
         return;
     }
 
+    const userIsGlobalAdmin = isGlobalAdmin(userId);
+
     // Unir al room del usuario
     socket.join(`user:${userId}`);
 
@@ -251,8 +253,12 @@ io.on('connection', async (socket) => {
         attributes: ['id_clinica', 'rol_clinica', 'subrol_clinica'],
         raw: true
     });
+    const allClinicIds = userIsGlobalAdmin
+        ? (await db.Clinica.findAll({ attributes: ['id_clinica'], raw: true })).map((row) => row.id_clinica)
+        : [];
     const quickChatContext = buildQuickChatContextFromMemberships(memberships, {
-        isGlobalAdmin: isGlobalAdmin(userId),
+        isGlobalAdmin: userIsGlobalAdmin,
+        allClinicIds,
     });
     const allowedClinicIds = quickChatContext.clinicIds.filter((clinicId) => {
         const permissions = quickChatContext.permissionsByClinic.get(clinicId);
