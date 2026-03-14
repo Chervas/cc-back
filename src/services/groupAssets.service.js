@@ -565,7 +565,7 @@ async function _updateMetaAssignments({ type, mode, primaryAssetId, clinicAssign
         grupoClinicaId: groupId,
         assetType: assetTypeKey,
         assetId,
-        clinicaId
+        clinicaId: clinicId
       }))
     );
 
@@ -802,7 +802,7 @@ async function _updateMetaAdAccounts({ mode, primaryAccountId, clinicAssignments
         grupoClinicaId: groupId,
         assetType: GROUP_ASSET_TYPES.META_AD_ACCOUNT,
         assetId: accountId,
-        clinicaId
+        clinicaId: clinicId
       }))
     );
 
