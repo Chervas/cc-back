@@ -20,6 +20,7 @@ const IntakeConfig = db.IntakeConfig;
 const { enqueueInboundFormSubmissionResume } = require('../services/automationsV2Resume.service');
 const { sendMetaEvent, buildUserData: buildMetaUserData } = require('../services/metaCapi.service');
 const { uploadClickConversion } = require('../services/googleAdsConversion.service');
+const { getIO } = require('../services/socket.service');
 
 const CHANNELS = new Set(['paid', 'organic', 'unknown']);
 const SOURCES = new Set(['meta_ads', 'google_ads', 'web', 'whatsapp', 'call_click', 'tiktok_ads', 'seo', 'direct', 'local_services']);
@@ -61,6 +62,8 @@ const parseIntegerList = (value) => {
 };
 const coalesce = (...values) => values.find(v => v !== undefined && v !== null);
 
+const toPlain = (row) => (row && typeof row.get === 'function' ? row.get({ plain: true }) : row);
+
 const hashValue = (value) => {
   if (!value) return null;
   return crypto.createHash('sha256').update(value).digest('hex');
@@ -71,6 +74,133 @@ const normalizePhone = (phone) => {
   if (!phone) return null;
   const digits = String(phone).replace(/\D/g, '');
   return digits || null;
+};
+
+const resolveClinicIdsForSocket = async ({ clinicId, groupId }) => {
+  const parsedClinicId = parseInteger(clinicId);
+  if (parsedClinicId !== null) {
+    return [parsedClinicId];
+  }
+
+  const parsedGroupId = parseInteger(groupId);
+  if (parsedGroupId === null) {
+    return [];
+  }
+
+  const clinics = await Clinica.findAll({
+    where: { grupoClinicaId: parsedGroupId },
+    attributes: ['id_clinica'],
+    raw: true,
+  });
+
+  return clinics
+    .map((row) => parseInteger(row.id_clinica))
+    .filter((id) => id !== null);
+};
+
+const emitLeadSocketEvent = async (eventName, payload, { clinicId, groupId } = {}) => {
+  const io = getIO();
+  if (!io) return;
+
+  const clinicIds = await resolveClinicIdsForSocket({ clinicId, groupId });
+  if (!clinicIds.length) return;
+
+  const uniqueClinicIds = Array.from(new Set(clinicIds));
+  uniqueClinicIds.forEach((id) => {
+    io.to(`clinic:${id}`).emit(eventName, payload);
+  });
+};
+
+const buildLeadCreatedSocketPayload = (lead) => {
+  const plain = toPlain(lead);
+  return {
+    type: 'created',
+    lead_id: plain.id,
+    clinic_id: plain.clinica_id || null,
+    group_id: plain.grupo_clinica_id || null,
+    campaign_id: plain.campana_id || null,
+    source: plain.source || null,
+    source_detail: plain.source_detail || null,
+    channel: plain.channel || null,
+    status_lead: plain.status_lead || 'nuevo',
+    nombre: plain.nombre || null,
+    email: plain.email || null,
+    telefono: plain.telefono || null,
+    page_url: plain.page_url || null,
+    created_at: plain.created_at instanceof Date ? plain.created_at.toISOString() : String(plain.created_at || ''),
+    emitted_at: new Date().toISOString(),
+  };
+};
+
+const buildLeadCallInitiatedSocketPayload = ({ lead, clinicId, groupId, clickedTel, pageUrl, source, sourceDetail, linkedBy = 'lead_id' }) => {
+  const plain = toPlain(lead);
+  const callInitiatedAt = plain.call_initiated_at instanceof Date
+    ? plain.call_initiated_at.toISOString()
+    : String(plain.call_initiated_at || new Date().toISOString());
+
+  return {
+    type: 'call_initiated',
+    lead_id: plain.id,
+    clinic_id: parseInteger(clinicId) || plain.clinica_id || null,
+    group_id: parseInteger(groupId) || plain.grupo_clinica_id || null,
+    emitted_at: new Date().toISOString(),
+    call_initiated: true,
+    call_initiated_at: callInitiatedAt,
+    clicked_tel: clickedTel || null,
+    page_url: pageUrl || plain.page_url || null,
+    source: source || plain.source || 'web',
+    source_detail: sourceDetail || 'tel_modal_call',
+    linked_by: linkedBy,
+  };
+};
+
+const buildLeadCallOutcomeSocketPayload = ({ lead, clinicId, groupId }) => {
+  const plain = toPlain(lead);
+  return {
+    type: 'call_outcome',
+    lead_id: plain.id,
+    clinic_id: parseInteger(clinicId) || plain.clinica_id || null,
+    group_id: parseInteger(groupId) || plain.grupo_clinica_id || null,
+    emitted_at: new Date().toISOString(),
+    call_initiated: !!plain.call_initiated,
+    call_initiated_at: plain.call_initiated_at instanceof Date ? plain.call_initiated_at.toISOString() : String(plain.call_initiated_at || ''),
+    call_outcome: plain.call_outcome || null,
+    call_outcome_at: plain.call_outcome_at instanceof Date ? plain.call_outcome_at.toISOString() : String(plain.call_outcome_at || ''),
+    call_outcome_notes: plain.call_outcome_notes || null,
+    call_outcome_appointment_id: plain.call_outcome_appointment_id || null,
+  };
+};
+
+const resolveClinicByPhoneWithinGroup = async (groupId, phone) => {
+  const parsedGroupId = parseInteger(groupId);
+  const normalizedPhone = normalizePhone(phone);
+  if (parsedGroupId === null || !normalizedPhone) {
+    return null;
+  }
+
+  const clinics = await Clinica.findAll({
+    where: { grupoClinicaId: parsedGroupId },
+    attributes: ['id_clinica', 'grupoClinicaId', 'telefono'],
+    raw: true,
+  });
+
+  return clinics.find((clinic) => normalizePhone(clinic.telefono) === normalizedPhone) || null;
+};
+
+const CALL_OUTCOMES = new Set(['citado', 'informacion', 'no_contactado']);
+
+const pickMatchingIntakeConfig = ({ req, providedSignature, clinicCfg, groupCfg, domainCfg }) => {
+  const candidates = [clinicCfg, groupCfg, domainCfg].filter(Boolean);
+  if (!candidates.length) return null;
+
+  if (providedSignature) {
+    const matched = candidates.find((cfg) => cfg.hmac_key && validateHmac(req, cfg.hmac_key, providedSignature));
+    if (matched) {
+      return matched;
+    }
+  }
+
+  return clinicCfg || groupCfg || domainCfg || null;
 };
 // Número de WhatsApp "público" para wa.me (dígitos, con prefijo de país si existe).
 // En ClinicMetaAssets solemos tenerlo en additionalData.displayPhoneNumber o en metaAssetName.
@@ -610,17 +740,30 @@ exports.ingestLead = asyncHandler(async (req, res) => {
   const derivedDomain = getHostnameFromUrl(pageUrlForDomain || '');
   const domain = normalizeDomain(body.domain || derivedDomain) || '';
 
-  let cfg = null;
+  let clinicCfg = null;
+  let groupCfg = null;
+  let domainCfg = null;
   if (clinicaIdParsed !== null) {
-    cfg = await IntakeConfig.findOne({ where: { clinic_id: clinicaIdParsed }, raw: true });
-  } else if (grupoClinicaIdParsed !== null) {
-    cfg = await IntakeConfig.findOne({ where: { group_id: grupoClinicaIdParsed, assignment_scope: 'group' }, raw: true });
-  } else if (domain) {
-    cfg = await IntakeConfig.findOne({
+    clinicCfg = await IntakeConfig.findOne({ where: { clinic_id: clinicaIdParsed }, raw: true });
+  }
+  if (grupoClinicaIdParsed !== null) {
+    groupCfg = await IntakeConfig.findOne({ where: { group_id: grupoClinicaIdParsed, assignment_scope: 'group' }, raw: true });
+  }
+  if (!clinicCfg && !groupCfg && domain) {
+    domainCfg = await IntakeConfig.findOne({
       where: db.Sequelize.literal(`JSON_CONTAINS(COALESCE(domains,'[]'), '\"${domain.toLowerCase()}\"')`)
     });
-    if (cfg) cfg = cfg.get ? cfg.get({ plain: true }) : cfg;
+    if (domainCfg) domainCfg = domainCfg.get ? domainCfg.get({ plain: true }) : domainCfg;
   }
+
+  const providedSignature = req.headers[SIGNATURE_HEADER] || req.headers[SIGNATURE_HEADER_SHA];
+  const cfg = pickMatchingIntakeConfig({
+    req,
+    providedSignature,
+    clinicCfg,
+    groupCfg,
+    domainCfg
+  });
 
   if (cfg && Array.isArray(cfg.domains) && cfg.domains.length > 0) {
     if (!domain || !isDomainAllowed(cfg.domains, domain)) {
@@ -628,7 +771,6 @@ exports.ingestLead = asyncHandler(async (req, res) => {
     }
   }
 
-  const providedSignature = req.headers[SIGNATURE_HEADER] || req.headers[SIGNATURE_HEADER_SHA];
   if (cfg && cfg.hmac_key) {
     if (!providedSignature || !validateHmac(req, cfg.hmac_key, providedSignature)) {
       return res.status(401).json({ message: 'Firma HMAC inválida o ausente' });
@@ -788,15 +930,36 @@ exports.ingestLead = asyncHandler(async (req, res) => {
 
   let lead;
   let dedupeConflict = null;
+  let shouldEmitLeadCreated = false;
   try {
     lead = await dedupeAndCreateLead(leadPayload, req.body || {}, {
       clinic_match_source: clinic_match_source || null,
       clinic_match_value: clinic_match_value || null
     });
+    shouldEmitLeadCreated = true;
   } catch (err) {
     if (err.status === 409) {
       dedupeConflict = err;
       lead = err.existingId ? await LeadIntake.findByPk(err.existingId) : null;
+      if (lead) {
+        const leadUpdates = {};
+        if (!lead.clinica_id && clinicaIdParsed !== null) {
+          leadUpdates.clinica_id = clinicaIdParsed;
+        }
+        if (!lead.grupo_clinica_id && grupoClinicaIdParsed !== null) {
+          leadUpdates.grupo_clinica_id = grupoClinicaIdParsed;
+        }
+        if (!lead.clinic_match_source && clinicMatchSource) {
+          leadUpdates.clinic_match_source = clinicMatchSource;
+        }
+        if (!lead.clinic_match_value && clinicMatchValue) {
+          leadUpdates.clinic_match_value = clinicMatchValue;
+        }
+        if (Object.keys(leadUpdates).length) {
+          await lead.update(leadUpdates);
+          shouldEmitLeadCreated = true;
+        }
+      }
     } else {
       throw err;
     }
@@ -841,6 +1004,17 @@ exports.ingestLead = asyncHandler(async (req, res) => {
       });
     } catch (formErr) {
       console.warn('⚠️ No se pudo registrar/reanudar envío de formulario:', formErr.message || formErr);
+    }
+  }
+
+  if (lead && shouldEmitLeadCreated) {
+    try {
+      await emitLeadSocketEvent('lead:created', buildLeadCreatedSocketPayload(lead), {
+        clinicId: lead.clinica_id || clinicaIdParsed,
+        groupId: lead.grupo_clinica_id || grupoClinicaIdParsed
+      });
+    } catch (emitErr) {
+      console.warn('⚠️ No se pudo emitir lead:created:', emitErr.message || emitErr);
     }
   }
 
@@ -1524,17 +1698,30 @@ exports.receiveIntakeEvent = asyncHandler(async (req, res) => {
   const fbp = body.fbp || user_data.fbp;
   const fbc = body.fbc || user_data.fbc;
 
-  let cfg = null;
+  let clinicCfg = null;
+  let groupCfg = null;
+  let domainCfg = null;
   if (clinicIdParsed !== null) {
-    cfg = await IntakeConfig.findOne({ where: { clinic_id: clinicIdParsed }, raw: true });
-  } else if (groupIdParsed !== null) {
-    cfg = await IntakeConfig.findOne({ where: { group_id: groupIdParsed, assignment_scope: 'group' }, raw: true });
-  } else if (domain) {
-    cfg = await IntakeConfig.findOne({
+    clinicCfg = await IntakeConfig.findOne({ where: { clinic_id: clinicIdParsed }, raw: true });
+  }
+  if (groupIdParsed !== null) {
+    groupCfg = await IntakeConfig.findOne({ where: { group_id: groupIdParsed, assignment_scope: 'group' }, raw: true });
+  }
+  if (!clinicCfg && !groupCfg && domain) {
+    domainCfg = await IntakeConfig.findOne({
       where: db.Sequelize.literal(`JSON_CONTAINS(COALESCE(domains,'[]'), '\"${domain.toLowerCase()}\"')`)
     });
-    if (cfg) cfg = cfg.get({ plain: true });
+    if (domainCfg) domainCfg = domainCfg.get ? domainCfg.get({ plain: true }) : domainCfg;
   }
+
+  const provided = req.headers['x-cc-signature'] || req.headers['x-cc-signature-sha256'];
+  const cfg = pickMatchingIntakeConfig({
+    req,
+    providedSignature: provided,
+    clinicCfg,
+    groupCfg,
+    domainCfg
+  });
 
   if (cfg && Array.isArray(cfg.domains) && cfg.domains.length > 0) {
     // Si hay allowlist configurada, el dominio es obligatorio.
@@ -1544,7 +1731,6 @@ exports.receiveIntakeEvent = asyncHandler(async (req, res) => {
   }
 
   if (cfg && cfg.hmac_key) {
-    const provided = req.headers['x-cc-signature'] || req.headers['x-cc-signature-sha256'];
     // ViewContent puede enviarse via sendBeacon (sin headers), así que toleramos firma ausente solo en ese evento.
     if (!provided && String(eventName).toLowerCase() !== 'viewcontent') {
       return res.status(401).json({ message: 'Invalid signature' });
@@ -1598,6 +1784,79 @@ exports.receiveIntakeEvent = asyncHandler(async (req, res) => {
     });
   } catch (adsErr) {
     console.warn('⚠️ Google Ads upload error (events):', adsErr.response?.data || adsErr.message || adsErr);
+  }
+
+  const normalizedEventName = String(eventName || '').trim().toLowerCase();
+  if (normalizedEventName === 'callinitiated') {
+    const leadId = parseInteger(coalesce(body.lead_id, body.leadId, eventDataFromBody.lead_id, eventDataFromBody.leadId));
+    const clickedTel = cleanString(coalesce(body.clicked_tel, body.clickedTel, eventDataFromBody.clicked_tel, eventDataFromBody.clickedTel));
+    const pageUrl = cleanString(coalesce(body.page_url, body.pageUrl, eventDataFromBody.page_url, eventDataFromBody.pageUrl, eventSourceUrl));
+    let lead = leadId !== null ? await LeadIntake.findByPk(leadId) : null;
+
+    let resolvedClinicId = clinicIdParsed;
+    let resolvedGroupId = groupIdParsed;
+
+    if (!resolvedClinicId && lead?.clinica_id) {
+      resolvedClinicId = parseInteger(lead.clinica_id);
+    }
+    if (!resolvedGroupId && lead?.grupo_clinica_id) {
+      resolvedGroupId = parseInteger(lead.grupo_clinica_id);
+    }
+
+    if (!resolvedClinicId && resolvedGroupId !== null && clickedTel) {
+      const matchedClinic = await resolveClinicByPhoneWithinGroup(resolvedGroupId, clickedTel);
+      if (matchedClinic) {
+        resolvedClinicId = parseInteger(matchedClinic.id_clinica);
+        resolvedGroupId = parseInteger(matchedClinic.grupoClinicaId) || resolvedGroupId;
+      }
+    }
+
+    if (lead) {
+      const updatePayload = {
+        call_initiated: true,
+        call_initiated_at: new Date(),
+        call_outcome: null,
+        call_outcome_at: null,
+        call_outcome_notes: null,
+        call_outcome_appointment_id: null,
+      };
+      if (!lead.clinica_id && resolvedClinicId !== null) {
+        updatePayload.clinica_id = resolvedClinicId;
+      }
+      if (!lead.grupo_clinica_id && resolvedGroupId !== null) {
+        updatePayload.grupo_clinica_id = resolvedGroupId;
+      }
+      await lead.update(updatePayload);
+
+      try {
+        await LeadAttributionAudit.create({
+          lead_intake_id: lead.id,
+          raw_payload: body || {},
+          attribution_steps: { action: 'call_initiated', clinic_id: resolvedClinicId, group_id: resolvedGroupId }
+        });
+      } catch (auditErr) {
+        console.warn('⚠️ No se pudo registrar auditoría de llamada iniciada:', auditErr.message || auditErr);
+      }
+
+      try {
+        await emitLeadSocketEvent(
+          'lead:call_initiated',
+          buildLeadCallInitiatedSocketPayload({
+            lead,
+            clinicId: resolvedClinicId,
+            groupId: resolvedGroupId,
+            clickedTel,
+            pageUrl,
+            source: body.source || 'web',
+            sourceDetail: eventDataFromBody.source_detail || body.source_detail || 'tel_modal_call',
+            linkedBy: leadId !== null ? 'lead_id' : 'phone'
+          }),
+          { clinicId: resolvedClinicId, groupId: resolvedGroupId }
+        );
+      } catch (emitErr) {
+        console.warn('⚠️ No se pudo emitir lead:call_initiated:', emitErr.message || emitErr);
+      }
+    }
   }
 
   res.json({ success: true });
@@ -2183,6 +2442,71 @@ exports.registrarContacto = asyncHandler(async (req, res) => {
   }
 
   res.status(200).json(lead);
+});
+
+exports.saveCallOutcome = asyncHandler(async (req, res) => {
+  const leadId = parseInteger(req.params.id);
+  const outcome = cleanString(req.body?.outcome);
+  const appointmentId = parseInteger(req.body?.appointment_id);
+  const notes = cleanString(req.body?.notes);
+
+  if (leadId === null) {
+    return res.status(400).json({ message: 'Lead inválido' });
+  }
+
+  if (!CALL_OUTCOMES.has(outcome)) {
+    return res.status(400).json({ message: 'call_outcome inválido' });
+  }
+
+  const lead = await LeadIntake.findByPk(leadId);
+  if (!lead) {
+    return res.status(404).json({ message: 'Lead no encontrado' });
+  }
+
+  const updatePayload = {
+    call_initiated: true,
+    call_outcome: outcome,
+    call_outcome_at: new Date(),
+    call_outcome_notes: notes || null,
+    call_outcome_appointment_id: appointmentId || null,
+  };
+
+  if (!lead.call_initiated_at) {
+    updatePayload.call_initiated_at = new Date();
+  }
+  if (outcome === 'citado') {
+    updatePayload.status_lead = 'citado';
+  } else if (outcome === 'informacion' && lead.status_lead === 'nuevo') {
+    updatePayload.status_lead = 'contactado';
+  }
+
+  await lead.update(updatePayload);
+
+  try {
+    await LeadAttributionAudit.create({
+      lead_intake_id: lead.id,
+      raw_payload: { outcome, appointment_id: appointmentId, notes },
+      attribution_steps: { action: 'call_outcome', userId: req.userData?.userId || null }
+    });
+  } catch (auditErr) {
+    console.warn('⚠️ No se pudo registrar auditoría de call_outcome:', auditErr.message || auditErr);
+  }
+
+  try {
+    await emitLeadSocketEvent(
+      'lead:call_outcome',
+      buildLeadCallOutcomeSocketPayload({
+        lead,
+        clinicId: lead.clinica_id,
+        groupId: lead.grupo_clinica_id
+      }),
+      { clinicId: lead.clinica_id, groupId: lead.grupo_clinica_id }
+    );
+  } catch (emitErr) {
+    console.warn('⚠️ No se pudo emitir lead:call_outcome:', emitErr.message || emitErr);
+  }
+
+  return res.status(200).json({ lead });
 });
 
 exports.deleteLead = asyncHandler(async (req, res) => {

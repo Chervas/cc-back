@@ -17,6 +17,7 @@
   - `automation-catalog` sigue expuesto, pero con hard-cut de `trigger_type`: ya no acepta nombres legacy como `cita_creada` o `recordatorio_cita`.
   - La actividad operativa de paciente normaliza sus eventos de cita a claves `appointment_*` (`appointment_created`, `appointment_confirmed`, `appointment_completed`, etc.).
   - En `/api/citas`, el resumen legacy `AppointmentFlowInstance` se trata como best-effort: si falla, no puede tumbar la respuesta.
+  - En intake web multi-sede, si el snippet envía `clinica_id` resuelto por teléfono y además `grupo_clinica_id`, backend puede validar la firma HMAC con la configuración de grupo. Esto evita rechazar leads o `CallInitiated` cuando el widget se ha cargado con secreto de grupo pero la sede final se resuelve en cliente.
 
 - `GET /api/conversations`
   - Cuando se consulta por `lead_id` y todavía no existe conversación, backend puede crear una conversación WhatsApp on-demand si el lead tiene teléfono.
@@ -153,6 +154,13 @@ En `.env` / `.env.example`:
     - contactos registrados,
     - mensajes y plantillas de WhatsApp,
     - actor interno si existe (`Messages.sender_id -> Usuarios`).
+- `POST /api/intake/events`
+  - Procesa `CallInitiated` para tel-modal.
+  - Si el lead deduplicado todavía no tenía `clinica_id`, el runtime lo enriquece a partir del request o del teléfono pulsado dentro del grupo.
+  - Emite `lead:call_initiated` por socket a la clínica resuelta.
+- `PUT /api/intake/leads/:id/call-outcome`
+  - Registra el resultado operativo de la llamada (`citado`, `informacion`, `no_contactado`).
+  - Emite `lead:call_outcome` por socket para cerrar alertas pendientes en UI.
 
 - Conversaciones de lead
   - El modelo canónico para marketing es `LeadIntake`.
