@@ -321,6 +321,10 @@ async function buildHydratedExecutionContext({
         });
         if (creator) {
           const creatorName = joinName(creator.nombre, creator.apellidos) || cleanString(creator.nombre) || cleanString(creator.email_usuario);
+          const professionalPatch = {
+            nombre: creatorName,
+            email: cleanString(creator.email_usuario),
+          };
           out.appointment = {
             ...(isObject(out.appointment) ? out.appointment : {}),
             usuario_nombre: creatorName,
@@ -330,6 +334,10 @@ async function buildHydratedExecutionContext({
             ...(isObject(out.cita) ? out.cita : {}),
             usuario_nombre: creatorName,
             usuario_email: cleanString(creator.email_usuario),
+          };
+          out.profesional = {
+            ...(isObject(out.profesional) ? out.profesional : {}),
+            ...professionalPatch,
           };
         }
       }

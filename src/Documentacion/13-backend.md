@@ -361,6 +361,8 @@ Consecuencias:
 
 - `buildHydratedExecutionContext`
   - Para triggers de cita ya expone:
+    - `profesional.nombre`
+    - `profesional.email`
     - `cita.usuario_nombre`
     - `cita.usuario_email`
     - `clinica.direccion`
@@ -369,8 +371,31 @@ Consecuencias:
     - `clinica.url_ficha_local`
 
 - Criterio
-  - `cita.usuario_*` representa al usuario operativo que agenda la cita (`created_by` de `CitasPacientes`).
+  - `profesional.*` es el alias público recomendado para el usuario operativo que agenda la cita.
+  - `cita.usuario_*` se conserva como alias de compatibilidad para plantillas anteriores.
   - No se inventan valores derivados: la URL de ficha local solo se expone si existe en `Clinicas.url_ficha_local`.
+
+## 2026-03-15 - Timeline y acciones de cita en integración
+
+- `GET /api/pacientes/:id/activity`
+  - Devuelve eventos `appointment_*` con:
+    - `descripcion` multilinea legible;
+    - `descripcion_html` para drawers que quieran resaltar fecha, hora, teléfono y tratamiento;
+    - `usuarioNombre` en formato `Nombre Apellidos <email>`.
+
+- `GET /api/intake/leads/:id/activity`
+  - Añade también:
+    - formularios;
+    - llamadas y recordatorios;
+    - mensajes WhatsApp;
+    - citas vinculadas al lead con el mismo formato rico (`descripcion_html`).
+
+- `PATCH /api/citas/:id/estado`
+  - Es el contrato canónico para cancelar o cambiar estado de una cita desde agenda.
+  - Persistencia:
+    - actualiza `CitasPacientes.estado`;
+    - guarda actor en `updated_by`;
+    - dispara `appointmentAutomationV2Runtime` si el nuevo estado mapea a un evento V2.
 
 ## 2026-03-15 - Catálogo V2 y legado retirado en integración
 

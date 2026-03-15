@@ -44,10 +44,34 @@ const cleanString = (value) => {
   const normalized = String(value).trim();
   return normalized || null;
 };
+const escapeHtml = (value) => String(value ?? '')
+  .replace(/&/g, '&amp;')
+  .replace(/</g, '&lt;')
+  .replace(/>/g, '&gt;')
+  .replace(/"/g, '&quot;')
+  .replace(/'/g, '&#39;');
+const formatDateEs = (value) => {
+  if (!value) return null;
+  const date = new Date(value);
+  return Number.isFinite(date.getTime())
+    ? date.toLocaleDateString('es-ES')
+    : null;
+};
+const formatTimeEs = (value) => {
+  if (!value) return null;
+  const date = new Date(value);
+  return Number.isFinite(date.getTime())
+    ? date.toLocaleTimeString('es-ES', { hour: '2-digit', minute: '2-digit' })
+    : null;
+};
 const buildActorLabel = (usuario) => {
   if (!usuario) return 'Sistema';
-  return usuario.email_usuario
-    || [usuario.nombre, usuario.apellidos].filter(Boolean).join(' ').trim()
+  const name = [usuario.nombre, usuario.apellidos].filter(Boolean).join(' ').trim();
+  if (name && usuario.email_usuario) {
+    return `${name} <${usuario.email_usuario}>`;
+  }
+  return name
+    || usuario.email_usuario
     || `Usuario ${usuario.id_usuario}`;
 };
 // Acepta IDs separados por coma (ej: "36,37,38") y también "all" (=> null, sin filtro).
@@ -538,7 +562,14 @@ const buildLeadCreatedDescription = (lead) => {
   const sourceKey = cleanString(lead?.source);
   const detailLabel = detailKey ? LEAD_SOURCE_DETAIL_LABELS[detailKey] : null;
   if (detailLabel) {
-    return `Origen: ${detailLabel}`;
+    const lines = [`Origen: ${detailLabel}`];
+    if (detailKey === 'tel_modal' || detailKey === 'tel_modal_call') {
+      const clickedPhone = cleanString(lead?.telefono);
+      const pageUrl = cleanString(lead?.page_url || lead?.landing_url);
+      if (clickedPhone) lines.push(`Teléfono pulsado: ${clickedPhone}`);
+      if (pageUrl) lines.push(`Página de origen: ${pageUrl}`);
+    }
+    return lines.join('\n');
   }
   const sourceLabel = sourceKey ? LEAD_SOURCE_LABELS[sourceKey] || sourceKey : null;
   if (sourceLabel) {
@@ -550,6 +581,43 @@ const buildLeadCreatedDescription = (lead) => {
 const formatLeadContactReason = (value) => {
   const normalized = cleanString(value);
   return normalized ? (LEAD_CONTACT_REASON_LABELS[normalized] || normalized.replace(/_/g, ' ')) : null;
+};
+
+const formatAppointmentStateLabel = (estado) => {
+  const normalized = cleanString(estado);
+  if (!normalized) return null;
+  const labels = {
+    pendiente: 'Pendiente',
+    info_enviada: 'Info enviada',
+    info_confirmada: 'Info confirmada',
+    recordatorio_enviado: 'Recordatorio enviado',
+    recordatorio_confirmado: 'Recordatorio confirmado',
+    completada: 'Completada',
+    no_asistio: 'No asistió',
+    cancelada: 'Cancelada',
+    reprogramada: 'Reprogramada',
+  };
+  return labels[normalized] || normalized.replace(/_/g, ' ');
+};
+
+const buildAppointmentActivityDescription = ({ telefono, inicio, tratamiento, estado }) => {
+  const fields = [];
+  const phoneValue = cleanString(telefono);
+  const dateValue = formatDateEs(inicio);
+  const timeValue = formatTimeEs(inicio);
+  const treatmentValue = cleanString(tratamiento);
+  const stateValue = formatAppointmentStateLabel(estado);
+
+  if (phoneValue) fields.push({ label: 'Teléfono', value: phoneValue });
+  if (dateValue) fields.push({ label: 'Fecha', value: dateValue });
+  if (timeValue) fields.push({ label: 'Hora', value: timeValue });
+  if (treatmentValue) fields.push({ label: 'Tratamiento', value: treatmentValue });
+  if (stateValue) fields.push({ label: 'Estado', value: stateValue });
+
+  return {
+    plain: fields.map(({ label, value }) => `${label}: ${value}`).join('\n') || 'Sin detalles',
+    html: fields.map(({ label, value }) => `<div><strong>${escapeHtml(label)}:</strong> ${escapeHtml(value)}</div>`).join('') || '<div>Sin detalles</div>',
+  };
 };
 
 const sanitizeFormSubmissionValue = (value, depth = 0) => {
@@ -2454,6 +2522,7 @@ exports.getLeadActivity = asyncHandler(async (req, res) => {
     where: { lead_intake_id: leadId },
     attributes: [
       'id_cita',
+      'paciente_id',
       'created_by',
       'updated_by',
       'created_at',
@@ -2463,6 +2532,7 @@ exports.getLeadActivity = asyncHandler(async (req, res) => {
       'tipo_cita',
     ],
     include: [
+      db.Paciente ? { model: db.Paciente, as: 'paciente', attributes: ['id_paciente', 'nombre', 'apellidos', 'telefono_movil'], required: false } : null,
       db.Tratamiento ? { model: db.Tratamiento, as: 'tratamiento', attributes: ['id_tratamiento', 'nombre'], required: false } : null,
     ].filter(Boolean),
     order: [['inicio', 'ASC'], ['id_cita', 'ASC']],
@@ -2575,21 +2645,20 @@ exports.getLeadActivity = asyncHandler(async (req, res) => {
     const plain = toPlain(appointment);
     const createdByUser = usuariosById.get(Number(plain.created_by));
     const updatedByUser = usuariosById.get(Number(plain.updated_by));
-    const appointmentDate = plain.inicio ? new Date(plain.inicio) : null;
-    const appointmentDateLabel = appointmentDate && Number.isFinite(appointmentDate.getTime())
-      ? appointmentDate.toLocaleString('es-ES')
-      : 'fecha no disponible';
+    const createdDescriptions = buildAppointmentActivityDescription({
+      telefono: cleanString(plain?.paciente?.telefono_movil) || cleanString(lead.telefono),
+      inicio: plain.inicio,
+      tratamiento: plain?.tratamiento?.nombre,
+    });
 
     items.push({
       id: `lead-appointment-created-${plain.id_cita}`,
       leadId: String(leadId),
       fecha: plain.created_at || plain.inicio || lead.updated_at || lead.created_at,
-      tipo: 'lead_contact_attempt',
+      tipo: 'appointment_created',
       titulo: 'Cita agendada',
-      descripcion: [
-        `Cita programada para ${appointmentDateLabel}`,
-        cleanString(plain?.tratamiento?.nombre) ? `Tratamiento: ${cleanString(plain.tratamiento.nombre)}` : null,
-      ].filter(Boolean).join(' · '),
+      descripcion: createdDescriptions.plain,
+      descripcion_html: createdDescriptions.html,
       icono: 'heroicons_outline:calendar-days',
       color: 'info',
       usuarioId: createdByUser ? String(createdByUser.id_usuario) : null,
@@ -2607,13 +2676,32 @@ exports.getLeadActivity = asyncHandler(async (req, res) => {
       continue;
     }
 
+    const statusToEventType = {
+      info_enviada: 'appointment_created',
+      info_confirmada: 'appointment_confirmed',
+      recordatorio_enviado: 'appointment_reminder_window',
+      recordatorio_confirmado: 'appointment_confirmed',
+      completada: 'appointment_completed',
+      cancelada: 'appointment_cancelled',
+      no_asistio: 'appointment_no_show',
+      reprogramada: 'appointment_rescheduled',
+    };
+    const eventType = statusToEventType[String(plain.estado || '').toLowerCase()] || 'appointment_created';
+    const statusDescriptions = buildAppointmentActivityDescription({
+      telefono: cleanString(plain?.paciente?.telefono_movil) || cleanString(lead.telefono),
+      inicio: plain.inicio,
+      tratamiento: plain?.tratamiento?.nombre,
+      estado: plain.estado,
+    });
+
     items.push({
       id: `lead-appointment-status-${plain.id_cita}`,
       leadId: String(leadId),
       fecha: plain.updated_at,
-      tipo: 'lead_contact_attempt',
+      tipo: eventType,
       titulo: 'Estado de cita actualizado',
-      descripcion: cleanString(plain.estado) ? `Nuevo estado: ${cleanString(plain.estado)}` : 'Estado de cita actualizado',
+      descripcion: statusDescriptions.plain,
+      descripcion_html: statusDescriptions.html,
       icono: 'heroicons_outline:check-badge',
       color: ['cancelada', 'no_asistio'].includes(String(plain.estado || '').toLowerCase()) ? 'warning' : 'success',
       usuarioId: updatedByUser ? String(updatedByUser.id_usuario) : null,

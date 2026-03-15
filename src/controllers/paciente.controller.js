@@ -1,5 +1,5 @@
 'use strict';
-const { Paciente, Clinica, PacienteRelacion, PacienteClinica, PacienteConsentimiento, CitaPaciente, Usuario } = require('../../models');
+const { Paciente, Clinica, PacienteRelacion, PacienteClinica, PacienteConsentimiento, CitaPaciente, Usuario, Tratamiento } = require('../../models');
 const { Op, literal } = require('sequelize');
 
 const normalizePhone = (phone) => {
@@ -12,11 +12,70 @@ const normalizeEmail = (email) => {
   return email.toString().trim().toLowerCase();
 };
 
+const escapeHtml = (value) => String(value ?? '')
+  .replace(/&/g, '&amp;')
+  .replace(/</g, '&lt;')
+  .replace(/>/g, '&gt;')
+  .replace(/"/g, '&quot;')
+  .replace(/'/g, '&#39;');
+
+const formatDateEs = (value) => {
+  if (!value) return null;
+  const date = new Date(value);
+  return Number.isFinite(date.getTime()) ? date.toLocaleDateString('es-ES') : null;
+};
+
+const formatTimeEs = (value) => {
+  if (!value) return null;
+  const date = new Date(value);
+  return Number.isFinite(date.getTime())
+    ? date.toLocaleTimeString('es-ES', { hour: '2-digit', minute: '2-digit' })
+    : null;
+};
+
 const buildActorLabel = (usuario) => {
   if (!usuario) return 'Sistema';
-  return usuario.email_usuario
-    || [usuario.nombre, usuario.apellidos].filter(Boolean).join(' ').trim()
+  const name = [usuario.nombre, usuario.apellidos].filter(Boolean).join(' ').trim();
+  if (name && usuario.email_usuario) {
+    return `${name} <${usuario.email_usuario}>`;
+  }
+  return name
+    || usuario.email_usuario
     || `Usuario ${usuario.id_usuario}`;
+};
+
+const formatAppointmentStateLabel = (estado) => {
+  const normalized = (estado || '').toString().trim().toLowerCase();
+  if (!normalized) return null;
+  const labels = {
+    pendiente: 'Pendiente',
+    info_enviada: 'Info enviada',
+    info_confirmada: 'Info confirmada',
+    recordatorio_enviado: 'Recordatorio enviado',
+    recordatorio_confirmado: 'Recordatorio confirmado',
+    completada: 'Completada',
+    no_asistio: 'No asistió',
+    cancelada: 'Cancelada',
+    reprogramada: 'Reprogramada',
+  };
+  return labels[normalized] || normalized.replace(/_/g, ' ');
+};
+
+const buildAppointmentActivityDescription = ({ telefono, inicio, tratamiento, estado }) => {
+  const fields = [];
+  if (telefono) fields.push({ label: 'Teléfono', value: telefono });
+  const dateValue = formatDateEs(inicio);
+  const timeValue = formatTimeEs(inicio);
+  if (dateValue) fields.push({ label: 'Fecha', value: dateValue });
+  if (timeValue) fields.push({ label: 'Hora', value: timeValue });
+  if (tratamiento) fields.push({ label: 'Tratamiento', value: tratamiento });
+  const stateValue = formatAppointmentStateLabel(estado);
+  if (stateValue) fields.push({ label: 'Estado', value: stateValue });
+
+  return {
+    plain: fields.map(({ label, value }) => `${label}: ${value}`).join('\n') || 'Sin detalles',
+    html: fields.map(({ label, value }) => `<div><strong>${escapeHtml(label)}:</strong> ${escapeHtml(value)}</div>`).join('') || '<div>Sin detalles</div>',
+  };
 };
 
 const collectPacienteClinics = (paciente) => {
@@ -411,8 +470,11 @@ exports.getPacienteActivity = async (req, res) => {
         'created_by',
         'updated_by',
       ],
+      include: [
+        { model: Paciente, as: 'paciente', attributes: ['id_paciente', 'telefono_movil'], required: false },
+        { model: Tratamiento, as: 'tratamiento', attributes: ['id_tratamiento', 'nombre'], required: false },
+      ],
       order: [['inicio', 'DESC']],
-      raw: true,
     });
 
     const actorIds = Array.from(new Set(
@@ -432,15 +494,22 @@ exports.getPacienteActivity = async (req, res) => {
     const usuariosById = new Map(usuarios.map((usuario) => [Number(usuario.id_usuario), usuario]));
     const items = [];
 
-    for (const cita of citas) {
+    for (const citaRow of citas) {
+      const cita = typeof citaRow.get === 'function' ? citaRow.get({ plain: true }) : citaRow;
       const createdByUser = usuariosById.get(Number(cita.created_by));
+      const createdDescriptions = buildAppointmentActivityDescription({
+        telefono: cita?.paciente?.telefono_movil || null,
+        inicio: cita.inicio,
+        tratamiento: cita?.tratamiento?.nombre || null,
+      });
       items.push({
         id: `appointment-created-${cita.id_cita}`,
         pacienteId: String(pacienteId),
         fecha: cita.created_at || cita.inicio,
         tipo: 'appointment_created',
         titulo: 'Cita agendada',
-        descripcion: cita.inicio ? `Cita programada para ${new Date(cita.inicio).toLocaleString('es-ES')}` : 'Cita creada',
+        descripcion: createdDescriptions.plain,
+        descripcion_html: createdDescriptions.html,
         icono: 'heroicons_outline:calendar-days',
         color: 'info',
         citaId: String(cita.id_cita),
@@ -472,13 +541,20 @@ exports.getPacienteActivity = async (req, res) => {
       }
 
       const updatedByUser = usuariosById.get(updatedById);
+      const updatedDescriptions = buildAppointmentActivityDescription({
+        telefono: cita?.paciente?.telefono_movil || null,
+        inicio: cita.inicio,
+        tratamiento: cita?.tratamiento?.nombre || null,
+        estado: cita.estado,
+      });
       items.push({
         id: `appointment-status-${cita.id_cita}-${cita.estado}`,
         pacienteId: String(pacienteId),
         fecha: cita.updated_at,
         tipo: eventType,
         titulo: 'Estado de cita actualizado',
-        descripcion: `Nuevo estado: ${cita.estado}`,
+        descripcion: updatedDescriptions.plain,
+        descripcion_html: updatedDescriptions.html,
         icono: 'heroicons_outline:check-badge',
         color: ['cancelada', 'no_asistio'].includes(cita.estado) ? 'warning' : 'success',
         citaId: String(cita.id_cita),
