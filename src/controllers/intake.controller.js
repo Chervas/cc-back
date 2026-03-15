@@ -266,6 +266,48 @@ const sanitizeText = (value) => {
     .trim();
 };
 
+const sanitizeLeadNoteText = (value) => {
+  if (!value || typeof value !== 'string') return value;
+  return value
+    .normalize('NFKD')
+    .replace(/[^\p{L}\p{N}\s.,@'+\-:/?&=#()%_]/gu, '')
+    .trim();
+};
+
+const LEAD_SOURCE_LABELS = {
+  web: 'web',
+  google_ads: 'Google Ads',
+  meta_ads: 'Meta Ads',
+  tiktok_ads: 'TikTok Ads',
+  whatsapp: 'WhatsApp',
+  call_click: 'llamada',
+  seo: 'SEO',
+  direct: 'directo',
+  local_services: 'Local Services',
+};
+
+const LEAD_SOURCE_DETAIL_LABELS = {
+  tel_modal: 'web por teléfono',
+  tel_modal_call: 'llamada desde la web',
+  web_form: 'formulario web',
+  chat: 'chat web',
+  whatsapp_inbound: 'WhatsApp',
+};
+
+const buildLeadCreatedDescription = (lead) => {
+  const detailKey = cleanString(lead?.source_detail);
+  const sourceKey = cleanString(lead?.source);
+  const detailLabel = detailKey ? LEAD_SOURCE_DETAIL_LABELS[detailKey] : null;
+  if (detailLabel) {
+    return `Origen: ${detailLabel}`;
+  }
+  const sourceLabel = sourceKey ? LEAD_SOURCE_LABELS[sourceKey] || sourceKey : null;
+  if (sourceLabel) {
+    return `Origen: ${sourceLabel}`;
+  }
+  return 'Nuevo lead';
+};
+
 const sanitizeFormSubmissionValue = (value, depth = 0) => {
   if (depth > 3) return null;
   if (value === undefined || value === null) return null;
@@ -796,7 +838,7 @@ exports.ingestLead = asyncHandler(async (req, res) => {
   const leadNombre = sanitizeText(coalesce(leadData.nombre, formLeadData.nombre, nombre));
   const leadEmail = coalesce(leadData.email, formLeadData.email, email);
   const leadTelefono = coalesce(leadData.telefono, formLeadData.telefono, telefono);
-  const leadNotas = sanitizeText(coalesce(leadData.notas, notas));
+  const leadNotas = sanitizeLeadNoteText(coalesce(leadData.notas, notas));
   const consentValue = coalesce(req.body?.consent, consentimiento_canal);
 
   if (clinicaIdParsed !== null) {
@@ -2232,7 +2274,7 @@ exports.getLeadActivity = asyncHandler(async (req, res) => {
     fecha: lead.created_at,
     tipo: 'lead_created',
     titulo: 'Lead creado',
-    descripcion: cleanString(lead.source_detail) || cleanString(lead.source) || cleanString(lead.channel) || 'Nuevo lead',
+    descripcion: buildLeadCreatedDescription(lead),
     icono: 'heroicons_outline:user-plus',
     color: 'success',
   });
