@@ -57,27 +57,54 @@ function collectContextIds(execution) {
   const context = execution?.context && typeof execution.context === 'object'
     ? execution.context
     : {};
+  const outputs = context?.outputs && typeof context.outputs === 'object'
+    ? Object.values(context.outputs).filter((value) => value && typeof value === 'object')
+    : [];
 
   const ids = {
     conversation_id: null,
     lead_id: null,
     patient_id: null,
+    appointment_id: null,
   };
 
   const conversationCandidates = [
     getByPath(context, 'conversation.id'),
     getByPath(context, 'trigger.data.conversation_id'),
     getByPath(context, 'trigger.data.conversationId'),
+    ...outputs.map((output) => output.conversation_id),
+    ...outputs.map((output) => output.chat_conversation_id),
   ];
   const leadCandidates = [
     getByPath(context, 'lead.id'),
+    getByPath(context, 'lead.lead_intake_id'),
     getByPath(context, 'trigger.data.lead_id'),
     getByPath(context, 'trigger.data.leadId'),
+    getByPath(context, 'trigger.data.lead_intake_id'),
+    ...outputs.map((output) => output.lead_id),
+    ...outputs.map((output) => output.recipient_lead_id),
   ];
   const patientCandidates = [
     getByPath(context, 'patient.id'),
+    getByPath(context, 'patient.id_paciente'),
+    getByPath(context, 'paciente.id'),
+    getByPath(context, 'paciente.id_paciente'),
     getByPath(context, 'trigger.data.patient_id'),
     getByPath(context, 'trigger.data.patientId'),
+    getByPath(context, 'trigger.data.paciente_id'),
+    getByPath(context, 'appointment.paciente_id'),
+    ...outputs.map((output) => output.patient_id),
+    ...outputs.map((output) => output.recipient_patient_id),
+  ];
+  const appointmentCandidates = [
+    getByPath(context, 'appointment.id'),
+    getByPath(context, 'appointment.id_cita'),
+    getByPath(context, 'trigger.data.appointment_id'),
+    getByPath(context, 'trigger.data.cita_id'),
+    ...outputs.map((output) => output.appointment_id),
+    ...outputs
+      .filter((output) => normalizeType(output?.target_type || output?.target_entity) === 'appointment')
+      .map((output) => output.target_id),
   ];
 
   for (const candidate of conversationCandidates) {
@@ -100,6 +127,14 @@ function collectContextIds(execution) {
     const normalized = toIntOrNull(candidate);
     if (normalized) {
       ids.patient_id = normalized;
+      break;
+    }
+  }
+
+  for (const candidate of appointmentCandidates) {
+    const normalized = toIntOrNull(candidate);
+    if (normalized) {
+      ids.appointment_id = normalized;
       break;
     }
   }
@@ -199,6 +234,9 @@ function matchesExecutionTarget(execution, { conversationId, patientId, leadId }
 
   // Fallback por contexto cuando el trigger_entity_type no esté normalizado todavía.
   const contextIds = collectContextIds(execution);
+  if (['appointment', 'cita'].includes(triggerType) && triggerEntityId) {
+    if (contextIds.appointment_id && contextIds.appointment_id === triggerEntityId) return true;
+  }
   if (contextIds.conversation_id && contextIds.conversation_id === conversationId) return true;
   if (leadId && contextIds.lead_id && contextIds.lead_id === leadId) return true;
   if (patientId && contextIds.patient_id && contextIds.patient_id === patientId) return true;
