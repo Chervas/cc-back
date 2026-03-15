@@ -1278,7 +1278,7 @@ function mapTemplate(row, { includeNodes = true, access = null, clinicNameMap = 
       ? (clinicNameMap.get(clinicId) || null)
       : null);
   const permissions = buildTemplatePermissions(access, item);
-  const triggerConfigResolution = resolveTriggerConfigForTemplate({
+  const triggerConfigResolution = normalizeTriggerConfigForTemplate({
     triggerType: item.trigger_type,
     entryNodeId: item.entry_node_id,
     nodes: Array.isArray(item.nodes) ? item.nodes : [],

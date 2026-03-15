@@ -461,7 +461,7 @@ exports.postMessage = async (req, res) => {
 
     const isTemplate = useTemplate || message_type === 'template';
     const windowOpen =
-      !conversation.last_inbound_at ||
+      !!conversation.last_inbound_at &&
       Date.now() - new Date(conversation.last_inbound_at).getTime() <= 24 * 60 * 60 * 1000;
 
     if (!isTemplate && !windowOpen && conversation.channel === 'whatsapp') {
