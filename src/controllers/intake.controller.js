@@ -14,6 +14,7 @@ const Clinica = db.Clinica;
 const GrupoClinica = db.GrupoClinica;
 const Paciente = db.Paciente;
 const PacienteClinica = db.PacienteClinica;
+const CitaPaciente = db.CitaPaciente;
 const Campana = db.Campana;
 const AdCache = db.AdCache;
 const ClinicMetaAsset = db.ClinicMetaAsset;
@@ -207,6 +208,106 @@ const enrichLeadsWithPatientMatches = async (leadRows = []) => {
       es_paciente: !!patientMatch
     };
   });
+};
+
+const buildLinkedAppointmentSummary = (appointmentRow) => {
+  const appointment = toPlain(appointmentRow);
+  if (!appointment?.id_cita) {
+    return null;
+  }
+
+  const inicio = appointment.inicio ? new Date(appointment.inicio) : null;
+  return {
+    id: appointment.id_cita,
+    fecha: inicio && Number.isFinite(inicio.getTime()) ? inicio.toISOString() : appointment.inicio || null,
+    hora: inicio && Number.isFinite(inicio.getTime())
+      ? inicio.toLocaleTimeString('es-ES', { hour: '2-digit', minute: '2-digit' })
+      : null,
+    tipo_cita: cleanString(appointment.tipo_cita),
+    estado: cleanString(appointment.estado),
+    tratamiento: cleanString(appointment?.tratamiento?.nombre),
+    clinica_id: parseInteger(appointment.clinica_id),
+    clinica_nombre: cleanString(appointment?.clinica?.nombre_clinica),
+    paciente_id: parseInteger(appointment.paciente_id),
+    paciente_nombre: [
+      cleanString(appointment?.paciente?.nombre),
+      cleanString(appointment?.paciente?.apellidos),
+    ].filter(Boolean).join(' ').trim() || cleanString(appointment?.paciente?.nombre),
+  };
+};
+
+const enrichLeadsWithLinkedAppointments = async (leadRows = []) => {
+  const leads = leadRows.map((lead) => toPlain(lead));
+  if (!leads.length || !CitaPaciente) {
+    return leads.map((lead) => ({ ...lead, linked_appointment: null }));
+  }
+
+  const explicitAppointmentIds = Array.from(new Set(
+    leads
+      .map((lead) => parseInteger(lead?.call_outcome_appointment_id))
+      .filter((id) => id !== null)
+  ));
+  const leadIds = Array.from(new Set(
+    leads
+      .map((lead) => parseInteger(lead?.id))
+      .filter((id) => id !== null)
+  ));
+
+  const include = [
+    { model: Clinica, as: 'clinica', attributes: ['id_clinica', 'nombre_clinica'], required: false },
+    { model: Paciente, as: 'paciente', attributes: ['id_paciente', 'nombre', 'apellidos'], required: false },
+    db.Tratamiento ? { model: db.Tratamiento, as: 'tratamiento', attributes: ['id_tratamiento', 'nombre'], required: false } : null,
+  ].filter(Boolean);
+
+  const explicitAppointments = explicitAppointmentIds.length
+    ? await CitaPaciente.findAll({
+        where: { id_cita: { [Op.in]: explicitAppointmentIds } },
+        include,
+      })
+    : [];
+
+  const latestAppointmentsByLead = leadIds.length
+    ? await CitaPaciente.findAll({
+        where: { lead_intake_id: { [Op.in]: leadIds } },
+        include,
+        order: [['inicio', 'DESC'], ['id_cita', 'DESC']],
+      })
+    : [];
+
+  const explicitById = new Map(
+    explicitAppointments
+      .map((row) => [parseInteger(toPlain(row)?.id_cita), buildLinkedAppointmentSummary(row)])
+      .filter(([id, summary]) => id !== null && summary)
+  );
+
+  const latestByLead = new Map();
+  for (const row of latestAppointmentsByLead) {
+    const plain = toPlain(row);
+    const leadId = parseInteger(plain?.lead_intake_id);
+    if (leadId === null || latestByLead.has(leadId)) {
+      continue;
+    }
+    const summary = buildLinkedAppointmentSummary(row);
+    if (summary) {
+      latestByLead.set(leadId, summary);
+    }
+  }
+
+  return leads.map((lead) => {
+    const explicitAppointmentId = parseInteger(lead?.call_outcome_appointment_id);
+    const linkedAppointment = (explicitAppointmentId !== null ? explicitById.get(explicitAppointmentId) : null)
+      || latestByLead.get(parseInteger(lead?.id))
+      || null;
+    return {
+      ...lead,
+      linked_appointment: linkedAppointment,
+    };
+  });
+};
+
+const enrichLeadsForUi = async (leadRows = []) => {
+  const withPatientMatches = await enrichLeadsWithPatientMatches(leadRows);
+  return enrichLeadsWithLinkedAppointments(withPatientMatches);
 };
 
 const resolveClinicIdsForSocket = async ({ clinicId, groupId }) => {
@@ -2246,7 +2347,7 @@ exports.listLeads = asyncHandler(async (req, res) => {
   const pageNumber = pageParsed > 0 ? pageParsed : Math.floor(parsedOffset / parsedLimit) + 1;
   const totalPages = parsedLimit > 0 ? Math.ceil(leads.count / parsedLimit) : 0;
 
-  const items = await enrichLeadsWithPatientMatches(leads.rows);
+  const items = await enrichLeadsForUi(leads.rows);
 
   res.status(200).json({
     total: leads.count,
@@ -2306,7 +2407,7 @@ exports.getLeadById = asyncHandler(async (req, res) => {
     out.conversation_id = conversation?.id || null;
   }
 
-  const [enrichedLead] = await enrichLeadsWithPatientMatches([out]);
+  const [enrichedLead] = await enrichLeadsForUi([out]);
 
   res.status(200).json(enrichedLead || out);
 });
@@ -2349,6 +2450,24 @@ exports.getLeadActivity = asyncHandler(async (req, res) => {
   });
   const conversationIds = conversations.map((row) => Number(row.id)).filter((id) => Number.isFinite(id) && id > 0);
 
+  const appointments = await CitaPaciente.findAll({
+    where: { lead_intake_id: leadId },
+    attributes: [
+      'id_cita',
+      'created_by',
+      'updated_by',
+      'created_at',
+      'updated_at',
+      'inicio',
+      'estado',
+      'tipo_cita',
+    ],
+    include: [
+      db.Tratamiento ? { model: db.Tratamiento, as: 'tratamiento', attributes: ['id_tratamiento', 'nombre'], required: false } : null,
+    ].filter(Boolean),
+    order: [['inicio', 'ASC'], ['id_cita', 'ASC']],
+  });
+
   const messages = conversationIds.length
     ? await Message.findAll({
         where: { conversation_id: { [Op.in]: conversationIds } },
@@ -2371,8 +2490,11 @@ exports.getLeadActivity = asyncHandler(async (req, res) => {
     : [];
 
   const actorIds = Array.from(new Set(
-    messages
-      .map((message) => Number(message.sender_id))
+    [
+      ...messages.map((message) => Number(message.sender_id)),
+      ...appointments.map((appointment) => Number(toPlain(appointment)?.created_by)),
+      ...appointments.map((appointment) => Number(toPlain(appointment)?.updated_by)),
+    ]
       .filter((id) => Number.isFinite(id) && id > 0)
   ));
 
@@ -2448,6 +2570,60 @@ exports.getLeadActivity = asyncHandler(async (req, res) => {
     icono: 'heroicons_outline:user-plus',
     color: 'success',
   });
+
+  for (const appointment of appointments) {
+    const plain = toPlain(appointment);
+    const createdByUser = usuariosById.get(Number(plain.created_by));
+    const updatedByUser = usuariosById.get(Number(plain.updated_by));
+    const appointmentDate = plain.inicio ? new Date(plain.inicio) : null;
+    const appointmentDateLabel = appointmentDate && Number.isFinite(appointmentDate.getTime())
+      ? appointmentDate.toLocaleString('es-ES')
+      : 'fecha no disponible';
+
+    items.push({
+      id: `lead-appointment-created-${plain.id_cita}`,
+      leadId: String(leadId),
+      fecha: plain.created_at || plain.inicio || lead.updated_at || lead.created_at,
+      tipo: 'lead_contact_attempt',
+      titulo: 'Cita agendada',
+      descripcion: [
+        `Cita programada para ${appointmentDateLabel}`,
+        cleanString(plain?.tratamiento?.nombre) ? `Tratamiento: ${cleanString(plain.tratamiento.nombre)}` : null,
+      ].filter(Boolean).join(' · '),
+      icono: 'heroicons_outline:calendar-days',
+      color: 'info',
+      usuarioId: createdByUser ? String(createdByUser.id_usuario) : null,
+      usuarioNombre: buildActorLabel(createdByUser),
+      detalles: {
+        cita_id: plain.id_cita,
+        estado: plain.estado || null,
+        tipo_cita: plain.tipo_cita || null,
+      },
+    });
+
+    const updatedAt = plain.updated_at ? new Date(plain.updated_at).getTime() : null;
+    const createdAt = plain.created_at ? new Date(plain.created_at).getTime() : null;
+    if (!updatedAt || !createdAt || updatedAt <= createdAt) {
+      continue;
+    }
+
+    items.push({
+      id: `lead-appointment-status-${plain.id_cita}`,
+      leadId: String(leadId),
+      fecha: plain.updated_at,
+      tipo: 'lead_contact_attempt',
+      titulo: 'Estado de cita actualizado',
+      descripcion: cleanString(plain.estado) ? `Nuevo estado: ${cleanString(plain.estado)}` : 'Estado de cita actualizado',
+      icono: 'heroicons_outline:check-badge',
+      color: ['cancelada', 'no_asistio'].includes(String(plain.estado || '').toLowerCase()) ? 'warning' : 'success',
+      usuarioId: updatedByUser ? String(updatedByUser.id_usuario) : null,
+      usuarioNombre: buildActorLabel(updatedByUser),
+      detalles: {
+        cita_id: plain.id_cita,
+        estado: plain.estado || null,
+      },
+    });
+  }
 
   for (const message of messages) {
     const actor = usuariosById.get(Number(message.sender_id));
@@ -2723,6 +2899,69 @@ exports.registrarContacto = asyncHandler(async (req, res) => {
   }
 
   res.status(200).json(lead);
+});
+
+exports.getCandidateAppointments = asyncHandler(async (req, res) => {
+  const leadId = parseInteger(req.params.id);
+  const hours = Math.max(1, Math.min(parseInteger(req.query.hours) || 48, 168));
+
+  if (leadId === null) {
+    return res.status(400).json({ message: 'Lead inválido' });
+  }
+
+  const lead = await LeadIntake.findByPk(leadId);
+  if (!lead) {
+    return res.status(404).json({ message: 'Lead no encontrado' });
+  }
+
+  const clinicId = parseInteger(lead.clinica_id);
+  const normalizedPhone = normalizePhone(lead.telefono);
+  const now = new Date();
+  const from = new Date(now.getTime() - hours * 60 * 60 * 1000);
+  const to = new Date(now.getTime() + hours * 60 * 60 * 1000);
+
+  const appointmentWhere = {
+    clinica_id: clinicId,
+    inicio: { [Op.between]: [from, to] },
+  };
+
+  const appointments = await CitaPaciente.findAll({
+    where: appointmentWhere,
+    include: [
+      {
+        model: Paciente,
+        as: 'paciente',
+        attributes: ['id_paciente', 'nombre', 'apellidos', 'telefono_movil'],
+        required: false,
+      },
+      db.Tratamiento ? { model: db.Tratamiento, as: 'tratamiento', attributes: ['id_tratamiento', 'nombre'], required: false } : null,
+    ].filter(Boolean),
+    order: [['inicio', 'DESC'], ['id_cita', 'DESC']],
+  });
+
+  const items = (appointments || []).map((appointment) => {
+    const plain = toPlain(appointment);
+    const phone = normalizePhone(plain?.paciente?.telefono_movil);
+    const matchesLead = parseInteger(plain?.lead_intake_id) === leadId;
+    const matchesPhone = !!normalizedPhone && !!phone && phone === normalizedPhone;
+    if (!matchesLead && !matchesPhone) {
+      return null;
+    }
+    const start = plain?.inicio ? new Date(plain.inicio) : null;
+    return {
+      id: parseInteger(plain?.id_cita),
+      fecha: start && Number.isFinite(start.getTime()) ? start.toISOString() : plain?.inicio || null,
+      hora: start && Number.isFinite(start.getTime())
+        ? start.toLocaleTimeString('es-ES', { hour: '2-digit', minute: '2-digit' })
+        : null,
+      paciente_nombre: [cleanString(plain?.paciente?.nombre), cleanString(plain?.paciente?.apellidos)].filter(Boolean).join(' ').trim() || cleanString(plain?.paciente?.nombre) || 'Paciente',
+      paciente_telefono: cleanString(plain?.paciente?.telefono_movil),
+      tratamiento: cleanString(plain?.tratamiento?.nombre),
+      phone_match: matchesPhone,
+    };
+  }).filter((item) => item && item.id !== null);
+
+  return res.status(200).json({ success: true, items });
 });
 
 exports.saveCallOutcome = asyncHandler(async (req, res) => {

@@ -227,7 +227,7 @@ async function buildHydratedExecutionContext({
           model: Clinica,
           as: 'clinica',
           required: false,
-          attributes: ['id_clinica', 'grupoClinicaId', 'nombre_clinica'],
+          attributes: ['id_clinica', 'grupoClinicaId', 'nombre_clinica', 'direccion', 'telefono', 'url_web', 'url_ficha_local'],
         },
       ],
       attributes: ['id_cita', 'clinica_id', 'paciente_id', 'lead_intake_id', 'created_by', 'estado', 'inicio', 'fin', 'titulo', 'motivo', 'tipo_cita'],
@@ -299,6 +299,10 @@ async function buildHydratedExecutionContext({
           grupo_id: parseIntOrNull(clinica.grupoClinicaId),
           nombre: cleanString(clinica.nombre_clinica),
           nombre_clinica: cleanString(clinica.nombre_clinica),
+          direccion: cleanString(clinica.direccion),
+          telefono: cleanString(clinica.telefono),
+          url_web: cleanString(clinica.url_web),
+          url_ficha_local: cleanString(clinica.url_ficha_local),
         };
         out.clinic = {
           ...(isObject(out.clinic) ? out.clinic : {}),
@@ -407,7 +411,7 @@ async function buildHydratedExecutionContext({
 
   if (hydratedClinicId && !out.clinic) {
     const clinic = await Clinica.findByPk(hydratedClinicId, {
-      attributes: ['id_clinica', 'grupoClinicaId', 'nombre_clinica'],
+      attributes: ['id_clinica', 'grupoClinicaId', 'nombre_clinica', 'direccion', 'telefono', 'url_web', 'url_ficha_local'],
       raw: true,
     });
     if (clinic) {
@@ -420,6 +424,10 @@ async function buildHydratedExecutionContext({
         grupo_id: parseIntOrNull(clinic.grupoClinicaId),
         nombre: cleanString(clinic.nombre_clinica),
         nombre_clinica: cleanString(clinic.nombre_clinica),
+        direccion: cleanString(clinic.direccion),
+        telefono: cleanString(clinic.telefono),
+        url_web: cleanString(clinic.url_web),
+        url_ficha_local: cleanString(clinic.url_ficha_local),
       };
       out.clinic = clinicPatch;
       out.clinica = { ...clinicPatch };

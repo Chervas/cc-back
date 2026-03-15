@@ -19,6 +19,7 @@ router.get('/leads', intakeController.listLeads);
 router.get('/leads/stats', intakeController.getLeadStats);
 router.get('/leads/:id', intakeController.getLeadById);
 router.get('/leads/:id/activity', intakeController.getLeadActivity);
+router.get('/leads/:id/candidate-appointments', intakeController.getCandidateAppointments);
 router.patch('/leads/:id', intakeController.updateLeadStatus);
 router.post('/leads/:id/contacto', intakeController.registrarContacto);
 router.put('/leads/:id/call-outcome', intakeController.saveCallOutcome);

@@ -49,6 +49,7 @@
 
 - **Leads**
   - `GET /api/intake/leads` y `GET /api/intake/leads/:id` enriquecen la respuesta con `patient_match`.
+  - `GET /api/intake/leads` y `GET /api/intake/leads/:id` enriquecen además `linked_appointment` para no depender de lógica local en frontend al decidir si un lead ya está agendado.
   - Contrato de `patient_match`:
     - `exists`
     - `patient_id`
@@ -60,6 +61,21 @@
     - `Ya paciente`
     - `Ya paciente de <clínica>`
   - `es_paciente` queda derivado de `patient_match` para no mantener dos fuentes de verdad.
+  - `GET /api/intake/leads/:id/candidate-appointments`
+    - Devuelve citas recientes del mismo contexto clínico susceptibles de vincularse a un lead que llamó.
+    - Prioriza coincidencia por `lead_intake_id` y, en su defecto, por teléfono normalizado del paciente.
+    - Contrato mínimo devuelto:
+      - `id`
+      - `fecha`
+      - `hora`
+      - `paciente_nombre`
+      - `paciente_telefono`
+      - `tratamiento`
+      - `phone_match`
+  - `GET /api/intake/leads/:id/activity`
+    - Añade actividad de cita (`Cita agendada`, `Estado de cita actualizado`) construida desde `CitasPacientes`.
+    - Resuelve actor con `created_by` / `updated_by -> Usuarios`.
+    - Esto evita que lead, agenda y ficha de paciente muestren cronologías distintas del mismo hecho operativo.
 
 
 ## Automation v2: Nodos y Acciones
@@ -314,6 +330,47 @@ Consecuencias:
   - Categoría: `crm`
   - Evento: `crm.call_back_reminder`
   - Destinatario: el usuario que creó el recordatorio (`callback_reminder_created_by`)
+
+## 2026-03-15 - Lead enlazado a cita y agenda operativa
+
+- `GET /api/intake/leads` y `GET /api/intake/leads/:id`
+  - Enriquecen cada lead con `linked_appointment`.
+  - Resolución:
+    1. `call_outcome_appointment_id` si existe
+    2. última cita por `lead_intake_id`
+  - Objetivo: que el frontend no vuelva a ofrecer `Agendar` cuando ya existe una cita asociada.
+
+- `GET /api/intake/leads/:id/candidate-appointments`
+  - Devuelve citas recientes del mismo contexto clínico para resolver manualmente una llamada (`call_outcome = citado`).
+  - Matching actual:
+    - misma clínica del lead
+    - ventana configurable por query `hours` (default `48`)
+    - prioridad implícita a citas enlazadas por `lead_intake_id`
+    - fallback por coincidencia de teléfono del paciente
+
+- `GET /api/intake/leads/:id/activity`
+  - Ya no refleja solo formularios y WhatsApp.
+  - Agrega también la cita creada desde ese lead, con actor (`created_by` / `updated_by`) resuelto desde `Usuarios`.
+  - Esto alinea el timeline del lead con agenda y ficha de paciente.
+
+- `GET /api/citas/:id`
+  - Sigue siendo el detalle operativo de la cita.
+  - El drawer de agenda en integración usa `GET /api/pacientes/:id/activity` como fuente principal de `Registros`, filtrando por `citaId`, para no reconstruir actividad local divergente.
+
+## 2026-03-15 - Contexto V2 enriquecido con datos clínicos
+
+- `buildHydratedExecutionContext`
+  - Para triggers de cita ya expone:
+    - `cita.usuario_nombre`
+    - `cita.usuario_email`
+    - `clinica.direccion`
+    - `clinica.telefono`
+    - `clinica.url_web`
+    - `clinica.url_ficha_local`
+
+- Criterio
+  - `cita.usuario_*` representa al usuario operativo que agenda la cita (`created_by` de `CitasPacientes`).
+  - No se inventan valores derivados: la URL de ficha local solo se expone si existe en `Clinicas.url_ficha_local`.
 
 ## 2026-03-15 - Catálogo V2 y legado retirado en integración
 
