@@ -406,6 +406,45 @@ exports.getConversationByPatient = async (req, res) => {
   }
 };
 
+exports.getConversationByLead = async (req, res) => {
+  try {
+    const userId = req.userData?.userId;
+    const leadId = req.params.leadId || req.params.lead_id;
+    const lead = await LeadIntake.findByPk(leadId, {
+      attributes: ['id', 'clinica_id', 'telefono'],
+      raw: true,
+    });
+    const conversation = lead
+      ? await findCanonicalWhatsappConversation({
+          clinicId: lead.clinica_id,
+          contactId: lead.telefono,
+          leadId: Number(leadId),
+          createIfMissing: !!lead.telefono,
+        })
+      : null;
+
+    if (!conversation) {
+      return res.status(404).json({ error: 'Conversación no encontrada' });
+    }
+
+    const { clinicIds, isAggregateAllowed } = await getUserClinics(userId);
+    if (!ensureAccess({ clinicIds, isAggregateAllowed }, conversation.clinic_id)) {
+      return res.status(403).json({ error: 'Acceso denegado a la clínica' });
+    }
+
+    const messages = await Message.findAll({
+      where: { conversation_id: conversation.id },
+      order: [['createdAt', 'ASC']],
+      raw: true,
+    });
+
+    return res.json({ conversation, messages });
+  } catch (err) {
+    console.error('Error getConversationByLead', err);
+    return res.status(500).json({ error: 'Error obteniendo conversación' });
+  }
+};
+
 exports.markAsRead = async (req, res) => {
   try {
     const userId = req.userData?.userId;

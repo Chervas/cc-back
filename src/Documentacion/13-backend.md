@@ -23,6 +23,14 @@
 - `GET /api/conversations`
   - Cuando se consulta por `lead_id` y todavía no existe conversación, backend puede crear una conversación WhatsApp on-demand si el lead tiene teléfono.
   - El objetivo es que drawers y vistas embebidas no queden bloqueados en estado vacío cuando el lead ya es contactable pero aún no ha abierto hilo.
+- `GET /api/conversations/by-patient/:patientId`
+  - Ruta canónica para drawers embebidos de agenda y ficha de paciente.
+  - Debe resolver la conversación a partir del propio `Paciente`, sin depender del `clinic_id` que lleve el estado UI en frontend.
+  - Devuelve `{ conversation, messages }`.
+- `GET /api/conversations/by-lead/:leadId`
+  - Ruta canónica para drawers embebidos de leads.
+  - Debe resolver la conversación a partir del propio `LeadIntake`, sin depender del `clinic_id` activo en frontend.
+  - Devuelve `{ conversation, messages }`.
 
 - `CitasPacientes`
   - Se añaden `created_by` y `updated_by` para persistir el actor operativo que crea o modifica la cita.
@@ -226,6 +234,9 @@ En `.env` / `.env.example`:
     - `Conversation.lead_id -> LeadIntake.id`
   - `Lead` legacy no debe usarse ya en código nuevo de marketing/chat.
   - `GET /api/intake/leads/:id` y `GET /api/intake/leads/:id/activity` deben resolver `conversation_id` contra la conversación canónica, no contra una conversación arbitraria por `lead_id`.
+  - Regla de integración:
+    - los drawers que parten de `patient_id` o `lead_id` deben resolver por estas rutas canónicas (`by-patient`, `by-lead`) y no reenviar `clinic_id` desde el frontend salvo que estén listando conversaciones.
+    - si se mezcla lookup por entidad con un `clinic_id` desfasado, el síntoma típico es chat vacío en agenda/leads aunque el inbound haya entrado y la conversación exista.
 
 ### Contrato canónico del catálogo de automatizaciones
 

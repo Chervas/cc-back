@@ -9,6 +9,7 @@ router.use(authMiddleware);
 router.get('/conversations', conversationController.listConversations);
 router.get('/conversations/permissions', conversationController.getConversationPermissions);
 router.get('/conversations/by-patient/:patientId', conversationController.getConversationByPatient);
+router.get('/conversations/by-lead/:leadId', conversationController.getConversationByLead);
 router.get('/conversations/:id/messages', conversationController.getMessages);
 router.post('/conversations/:id/messages', conversationController.postMessage);
 router.patch('/conversations/:id/read', conversationController.markAsRead);
