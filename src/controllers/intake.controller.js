@@ -12,6 +12,8 @@ const Message = db.Message;
 const Usuario = db.Usuario;
 const Clinica = db.Clinica;
 const GrupoClinica = db.GrupoClinica;
+const Paciente = db.Paciente;
+const PacienteClinica = db.PacienteClinica;
 const Campana = db.Campana;
 const AdCache = db.AdCache;
 const ClinicMetaAsset = db.ClinicMetaAsset;
@@ -74,6 +76,135 @@ const normalizePhone = (phone) => {
   if (!phone) return null;
   const digits = String(phone).replace(/\D/g, '');
   return digits || null;
+};
+
+const collectPacienteClinics = (paciente) => {
+  const clinics = new Map();
+
+  const addClinic = (clinicLike) => {
+    const clinicId = parseInteger(clinicLike?.clinica_id ?? clinicLike?.id_clinica);
+    if (!clinicId) return;
+    clinics.set(clinicId, {
+      clinica_id: clinicId,
+      nombre_clinica: clinicLike?.nombre_clinica || clinicLike?.clinica?.nombre_clinica || null,
+      grupo_clinica_id: parseInteger(clinicLike?.grupoClinicaId ?? clinicLike?.clinica?.grupoClinicaId)
+    });
+  };
+
+  addClinic({
+    clinica_id: paciente?.clinica_id,
+    nombre_clinica: paciente?.clinica?.nombre_clinica,
+    grupoClinicaId: paciente?.clinica?.grupoClinicaId
+  });
+
+  for (const vinculo of (paciente?.clinicasVinculadas || [])) {
+    addClinic({
+      clinica_id: vinculo?.clinica_id,
+      nombre_clinica: vinculo?.clinica?.nombre_clinica,
+      grupoClinicaId: vinculo?.clinica?.grupoClinicaId
+    });
+  }
+
+  return Array.from(clinics.values());
+};
+
+const buildLeadPatientMatch = (lead, pacientes = []) => {
+  const normPhone = normalizePhone(lead?.telefono);
+  const normEmail = normalizeEmail(lead?.email);
+  if (!normPhone && !normEmail) return null;
+
+  const targetClinicaId = parseInteger(lead?.clinica_id ?? lead?.clinica?.id_clinica);
+  const targetGrupoId = parseInteger(lead?.grupo_clinica_id ?? lead?.grupoClinica?.id_grupo);
+
+  let bestMatch = null;
+
+  for (const pacienteRaw of pacientes) {
+    const paciente = toPlain(pacienteRaw);
+    const matchedBy = normPhone && normalizePhone(paciente?.telefono_movil) === normPhone
+      ? 'phone'
+      : normEmail && normalizeEmail(paciente?.email) === normEmail
+        ? 'email'
+        : null;
+    if (!matchedBy) continue;
+
+    const coverage = collectPacienteClinics(paciente);
+    const sameClinic = !!targetClinicaId && coverage.some((clinic) => clinic.clinica_id === targetClinicaId);
+    const sameGroupClinic = !sameClinic && !!targetGrupoId
+      ? coverage.find((clinic) => clinic.grupo_clinica_id === targetGrupoId)
+      : null;
+
+    if (!sameClinic && !sameGroupClinic) continue;
+
+    const candidate = {
+      exists: true,
+      patient_id: parseInteger(paciente?.id_paciente),
+      same_clinic: sameClinic,
+      clinic_id: sameClinic ? targetClinicaId : sameGroupClinic?.clinica_id || null,
+      clinic_name: sameClinic
+        ? (lead?.clinica?.nombre_clinica || null)
+        : (sameGroupClinic?.nombre_clinica || paciente?.clinica?.nombre_clinica || null),
+      match_field: matchedBy,
+    };
+
+    const score = sameClinic ? 2 : 1;
+    if (!bestMatch || score > bestMatch.score) {
+      bestMatch = { score, data: candidate };
+    }
+  }
+
+  return bestMatch?.data || null;
+};
+
+const enrichLeadsWithPatientMatches = async (leadRows = []) => {
+  const leads = leadRows.map((lead) => toPlain(lead));
+  if (!leads.length) return leads;
+
+  const phoneSet = new Set();
+  const emailSet = new Set();
+  for (const lead of leads) {
+    const normPhone = normalizePhone(lead?.telefono);
+    const normEmail = normalizeEmail(lead?.email);
+    if (normPhone) phoneSet.add(normPhone);
+    if (normEmail) emailSet.add(normEmail);
+  }
+
+  if (!phoneSet.size && !emailSet.size) {
+    return leads.map((lead) => ({
+      ...lead,
+      patient_match: null
+    }));
+  }
+
+  const contactOr = [];
+  if (phoneSet.size) {
+    contactOr.push({ telefono_movil: { [Op.in]: Array.from(phoneSet) } });
+  }
+  if (emailSet.size) {
+    contactOr.push({ email: { [Op.in]: Array.from(emailSet) } });
+  }
+
+  const pacientes = await Paciente.findAll({
+    where: { [Op.or]: contactOr },
+    include: [
+      { model: Clinica, as: 'clinica', attributes: ['id_clinica', 'nombre_clinica', 'grupoClinicaId'] },
+      {
+        model: PacienteClinica,
+        as: 'clinicasVinculadas',
+        required: false,
+        attributes: ['clinica_id', 'es_principal'],
+        include: [{ model: Clinica, as: 'clinica', attributes: ['id_clinica', 'nombre_clinica', 'grupoClinicaId'] }]
+      }
+    ]
+  });
+
+  return leads.map((lead) => {
+    const patientMatch = buildLeadPatientMatch(lead, pacientes);
+    return {
+      ...lead,
+      patient_match: patientMatch,
+      es_paciente: !!patientMatch
+    };
+  });
 };
 
 const resolveClinicIdsForSocket = async ({ clinicId, groupId }) => {
@@ -2103,6 +2234,8 @@ exports.listLeads = asyncHandler(async (req, res) => {
   const pageNumber = pageParsed > 0 ? pageParsed : Math.floor(parsedOffset / parsedLimit) + 1;
   const totalPages = parsedLimit > 0 ? Math.ceil(leads.count / parsedLimit) : 0;
 
+  const items = await enrichLeadsWithPatientMatches(leads.rows);
+
   res.status(200).json({
     total: leads.count,
     limit: parsedLimit,
@@ -2110,7 +2243,7 @@ exports.listLeads = asyncHandler(async (req, res) => {
     page: pageNumber,
     pageSize: parsedLimit,
     totalPages,
-    items: leads.rows
+    items
   });
 });
 
@@ -2160,7 +2293,9 @@ exports.getLeadById = asyncHandler(async (req, res) => {
     out.conversation_id = conversation?.id || null;
   }
 
-  res.status(200).json(out);
+  const [enrichedLead] = await enrichLeadsWithPatientMatches([out]);
+
+  res.status(200).json(enrichedLead || out);
 });
 
 exports.getLeadActivity = asyncHandler(async (req, res) => {

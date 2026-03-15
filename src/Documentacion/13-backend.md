@@ -38,6 +38,29 @@
   - Devuelve eventos de cita construidos desde `CitasPacientes` con actor resuelto desde `Usuarios`.
   - Esto permite que el registro del paciente muestre acciones como `Cita agendada` indicando qué usuario ejecutó la operación.
 
+## 2026-03-15 - Duplicidad canónica de paciente y señalización de leads
+
+- **Paciente**
+  - No se permite crear ni actualizar un paciente con el mismo teléfono/email que otro paciente ya existente dentro del scope de grupo clínico.
+  - Si el duplicado ya está vinculado a la clínica de trabajo, backend responde `409 PACIENTE_DUPLICADO` con mensaje de `esta clínica`.
+  - Si el duplicado pertenece a otra clínica del mismo grupo, backend responde `409 PACIENTE_DUPLICADO` indicando la clínica de origen.
+  - El alta ya no reutiliza ni vincula pacientes de forma implícita. La reutilización queda como acción explícita de UI usando `checkDuplicates` + `vincularPacienteAClinica`.
+  - La excepción funcional para compartir contacto no es “crear otro paciente con el mismo móvil”, sino modelar relación de tutor/guardián.
+
+- **Leads**
+  - `GET /api/intake/leads` y `GET /api/intake/leads/:id` enriquecen la respuesta con `patient_match`.
+  - Contrato de `patient_match`:
+    - `exists`
+    - `patient_id`
+    - `same_clinic`
+    - `clinic_id`
+    - `clinic_name`
+    - `match_field` (`phone | email`)
+  - Este bloque permite marcar en UI:
+    - `Ya paciente`
+    - `Ya paciente de <clínica>`
+  - `es_paciente` queda derivado de `patient_match` para no mantener dos fuentes de verdad.
+
 
 ## Automation v2: Nodos y Acciones
 
