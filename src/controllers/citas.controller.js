@@ -14,27 +14,12 @@ const DoctorClinica = db.DoctorClinica;
 const DoctorHorario = db.DoctorHorario;
 const DoctorBloqueo = db.DoctorBloqueo;
 const Tratamiento = db.Tratamiento;
-const AppointmentFlowInstance = db.AppointmentFlowInstance;
 const FlowExecutionV2 = db.FlowExecutionV2;
 const AutomationFlowTemplateV2 = db.AutomationFlowTemplateV2;
-const appointmentFlowRuntime = require('../services/appointmentFlowRuntime.service');
 const appointmentAutomationV2Runtime = require('../services/appointmentAutomationV2Runtime.service');
 const { CITA_STATUS_VALUES } = require('../lib/status-catalog');
 
 const CITA_ESTADOS_VALIDOS = new Set(CITA_STATUS_VALUES);
-
-function mapEstadoToFlowEvent(estado) {
-    if (estado === 'pendiente') return 'appointment_created';
-    if (estado === 'info_enviada') return 'appointment_created';
-    if (estado === 'info_confirmada') return 'appointment_confirmed';
-    if (estado === 'recordatorio_enviado') return 'appointment_reminder_window';
-    if (estado === 'recordatorio_confirmado') return 'appointment_confirmed';
-    if (estado === 'reprogramada') return 'appointment_rescheduled';
-    if (estado === 'no_asistio') return 'appointment_no_show';
-    if (estado === 'cancelada') return 'appointment_cancelled';
-    if (estado === 'completada') return 'appointment_completed';
-    return 'appointment_created';
-}
 
 function mapEstadoToAutomationV2Event(estado) {
     if (estado === 'pendiente') return 'appointment_created';
@@ -102,34 +87,6 @@ async function attachFlowSummaryToCitas(citas) {
         .filter((id) => Number.isFinite(id) && id > 0);
     if (!citaIds.length) return citas;
 
-    const legacyPromise = AppointmentFlowInstance?.findAll
-        ? AppointmentFlowInstance.findAll({
-            where: {
-                cita_id: {
-                    [db.Sequelize.Op.in]: citaIds
-                }
-            },
-            attributes: [
-                'id',
-                'cita_id',
-                'template_id',
-                'template_version',
-                'status',
-                'current_step_index',
-                'current_step_type',
-                'current_step_label',
-                'current_state',
-                'agenda_icon',
-                'next_action_at',
-                'last_transition_at',
-                'last_error'
-            ]
-        }).catch((error) => {
-            console.warn('[citas] attachFlowSummaryToCitas: ignorando resumen legacy por error:', error?.message || error);
-            return [];
-        })
-        : Promise.resolve([]);
-
     const v2Promise = FlowExecutionV2.findAll({
         where: {
             trigger_entity_type: 'appointment',
@@ -149,9 +106,7 @@ async function attachFlowSummaryToCitas(citas) {
         limit: Math.max(50, citaIds.length * 3),
     });
 
-    const [legacyRows, v2Rows] = await Promise.all([legacyPromise, v2Promise]);
-
-    const byCitaIdLegacy = new Map(legacyRows.map((row) => [Number(row.cita_id), row]));
+    const v2Rows = await v2Promise;
     const byCitaIdV2 = new Map();
     for (const row of v2Rows) {
         const citaId = Number(row.trigger_entity_id);
@@ -171,8 +126,7 @@ async function attachFlowSummaryToCitas(citas) {
     list.forEach((cita) => {
         const key = Number(cita?.id_cita);
         const flowV2 = byCitaIdV2.get(key) || null;
-        const flowLegacy = byCitaIdLegacy.get(key) || null;
-        const summary = flowV2 ? mapFlowSummaryV2(flowV2) : mapFlowSummary(flowLegacy);
+        const summary = flowV2 ? mapFlowSummaryV2(flowV2) : null;
         if (typeof cita?.setDataValue === 'function') {
             cita.setDataValue('appointment_flow', summary);
         } else if (cita && typeof cita === 'object') {
@@ -947,16 +901,6 @@ exports.createCita = asyncHandler(async (req, res) => {
             fin: finDate
         });
 
-        // Inicializar/sincronizar flujo de cita real si el tratamiento tiene plantilla asignada.
-        try {
-            await appointmentFlowRuntime.syncInstanceForCita(cita, {
-                event_name: 'appointment_created',
-                user_id: req.userData?.userId || null
-            });
-        } catch (flowErr) {
-            console.error('⚠️ [createCita] Error inicializando flujo de cita:', flowErr.message);
-        }
-
         // Disparar motor v2 de automatizaciones de cita (si el tratamiento tiene plantilla v2 asignada).
         try {
             await appointmentAutomationV2Runtime.enqueueExecutionForCita(cita, {
@@ -1133,15 +1077,6 @@ exports.updateCitaEstado = asyncHandler(async (req, res) => {
     await cita.save();
 
     try {
-        await appointmentFlowRuntime.syncInstanceForCita(cita, {
-            event_name: mapEstadoToFlowEvent(estadoRaw),
-            user_id: req.userData?.userId || null
-        });
-    } catch (flowErr) {
-        console.error('⚠️ [updateCitaEstado] Error sincronizando flujo:', flowErr.message);
-    }
-
-    try {
         const automationEvent = mapEstadoToAutomationV2Event(estadoRaw);
         if (automationEvent) {
             await appointmentAutomationV2Runtime.enqueueExecutionForCita(cita, {
@@ -1227,15 +1162,6 @@ exports.reagendarCita = asyncHandler(async (req, res) => {
     }
     cita.updated_by = req.userData?.userId || null;
     await cita.save();
-
-    try {
-        await appointmentFlowRuntime.syncInstanceForCita(cita, {
-            event_name: 'appointment_rescheduled',
-            user_id: req.userData?.userId || null
-        });
-    } catch (flowErr) {
-        console.error('⚠️ [reagendarCita] Error sincronizando flujo:', flowErr.message);
-    }
 
     try {
         await appointmentAutomationV2Runtime.enqueueExecutionForCita(cita, {

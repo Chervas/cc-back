@@ -5,7 +5,6 @@ const { Op } = db.Sequelize;
 
 const Tratamiento = db.Tratamiento;
 const Clinica = db.Clinica;
-const AppointmentFlowTemplate = db.AppointmentFlowTemplate;
 const AutomationFlowTemplateV2 = db.AutomationFlowTemplateV2;
 
 const APPOINTMENT_TRIGGER_TYPES = new Set([
@@ -145,7 +144,6 @@ exports.createTratamiento = asyncHandler(async (req, res) => {
         requiere_pieza = false,
         requiere_zona = false,
         activo = true,
-        appointment_flow_template_id = null,
         appointment_automation_template_key = null,
         appointment_automation_template_version = null,
         clinica_id,
@@ -178,7 +176,6 @@ exports.createTratamiento = asyncHandler(async (req, res) => {
         requiere_pieza: !!requiere_pieza,
         requiere_zona: !!requiere_zona,
         activo: activo !== false,
-        appointment_flow_template_id: appointment_flow_template_id || null,
         appointment_automation_template_key: appointment_automation_template_key || null,
         appointment_automation_template_version: appointment_automation_template_version || null,
         clinica_id: clinicaIdNum || null,
@@ -213,7 +210,6 @@ exports.updateTratamiento = asyncHandler(async (req, res) => {
         'requiere_pieza',
         'requiere_zona',
         'activo',
-        'appointment_flow_template_id',
         'appointment_automation_template_key',
         'appointment_automation_template_version',
         'clinica_id',
@@ -320,177 +316,6 @@ exports.getTratamientoById = asyncHandler(async (req, res) => {
         return res.status(404).json({ message: 'Tratamiento no encontrado' });
     }
     res.json(tratamiento);
-});
-
-// Obtener flujo de cita asignado a un tratamiento
-exports.getTratamientoFlow = asyncHandler(async (req, res) => {
-    const { id } = req.params;
-    const tratamiento = await Tratamiento.findByPk(id);
-    if (!tratamiento) {
-        return res.status(404).json({ success: false, message: 'Tratamiento no encontrado' });
-    }
-
-    const automationTemplateKey = toCleanString(tratamiento.appointment_automation_template_key);
-    const automationTemplateVersion = toIntOrNull(tratamiento.appointment_automation_template_version);
-    let automationTemplateAssignment = null;
-    if (automationTemplateKey) {
-        const where = {
-            template_key: automationTemplateKey,
-            published_at: { [db.Sequelize.Op.ne]: null },
-        };
-        if (automationTemplateVersion) where.version = automationTemplateVersion;
-
-        const templateV2 = await AutomationFlowTemplateV2.findOne({
-            where,
-            order: [['version', 'DESC']],
-            raw: true,
-        });
-
-        if (templateV2 && APPOINTMENT_TRIGGER_TYPES.has(templateV2.trigger_type)) {
-            automationTemplateAssignment = {
-                template_key: templateV2.template_key,
-                template_version: Number(templateV2.version),
-                template_id: Number(templateV2.id),
-                name: templateV2.name,
-                trigger_type: templateV2.trigger_type,
-                clinic_id: templateV2.clinic_id ?? null,
-                group_id: templateV2.group_id ?? null,
-                is_system: !!templateV2.is_system,
-                is_active: templateV2.is_active !== false,
-                published_at: templateV2.published_at ?? null,
-            };
-        }
-    }
-
-    if (!tratamiento.appointment_flow_template_id) {
-        return res.json({
-            success: true,
-            data: {
-                tratamiento_id: Number(tratamiento.id_tratamiento),
-                appointment_flow_template_id: null,
-                template: null,
-                automation_template_assignment: automationTemplateAssignment,
-            }
-        });
-    }
-
-    const template = await AppointmentFlowTemplate.findByPk(tratamiento.appointment_flow_template_id);
-    if (!template) {
-        return res.json({
-            success: true,
-            data: {
-                tratamiento_id: Number(tratamiento.id_tratamiento),
-                appointment_flow_template_id: null,
-                template: null,
-                automation_template_assignment: automationTemplateAssignment,
-            }
-        });
-    }
-
-    return res.json({
-        success: true,
-        data: {
-            tratamiento_id: Number(tratamiento.id_tratamiento),
-            appointment_flow_template_id: Number(template.id),
-            template: {
-                id: Number(template.id),
-                name: template.name,
-                description: template.description ?? null,
-                discipline: template.discipline,
-                version: template.version || '1.0',
-                steps: Array.isArray(template.steps) ? template.steps : [],
-                is_system: !!template.is_system,
-                clinic_id: template.clinic_id ?? null,
-                group_id: template.group_id ?? null,
-                is_active: template.is_active !== false,
-                created_at: template.created_at,
-                updated_at: template.updated_at
-            },
-            automation_template_assignment: automationTemplateAssignment,
-        }
-    });
-});
-
-// Asignar/desasignar flujo de cita a un tratamiento
-exports.setTratamientoFlow = asyncHandler(async (req, res) => {
-    const { id } = req.params;
-    const tratamiento = await Tratamiento.findByPk(id);
-    if (!tratamiento) {
-        return res.status(404).json({ success: false, message: 'Tratamiento no encontrado' });
-    }
-
-    const templateIdRaw = req.body?.template_id;
-    if (templateIdRaw === undefined) {
-        return res.status(400).json({ success: false, message: 'template_id es obligatorio (usar null para quitar asignación)' });
-    }
-
-    if (templateIdRaw === null || templateIdRaw === '') {
-        tratamiento.appointment_flow_template_id = null;
-        await tratamiento.save();
-        return res.json({
-            success: true,
-            data: {
-                tratamiento_id: Number(tratamiento.id_tratamiento),
-                appointment_flow_template_id: null
-            }
-        });
-    }
-
-    const templateId = Number(templateIdRaw);
-    if (!Number.isFinite(templateId) || templateId <= 0) {
-        return res.status(400).json({ success: false, message: 'template_id inválido' });
-    }
-
-    const template = await AppointmentFlowTemplate.findByPk(templateId);
-    if (!template) {
-        return res.status(404).json({ success: false, message: 'Plantilla de flujo no encontrada' });
-    }
-    if (template.is_active === false) {
-        return res.status(400).json({ success: false, message: 'La plantilla está desactivada' });
-    }
-
-    // Validación de alcance:
-    // - sistema: válida siempre
-    // - de clínica: debe coincidir con la clínica del tratamiento
-    // - de grupo: debe coincidir con el grupo del tratamiento
-    if (!template.is_system) {
-        const tratamientoClinicId = tratamiento.clinica_id ? Number(tratamiento.clinica_id) : null;
-        const tratamientoGroupId = tratamiento.grupo_clinica_id ? Number(tratamiento.grupo_clinica_id) : null;
-        const templateClinicId = template.clinic_id ? Number(template.clinic_id) : null;
-        const templateGroupId = template.group_id ? Number(template.group_id) : null;
-
-        let groupFromClinic = null;
-        if (!tratamientoGroupId && tratamientoClinicId) {
-            const clinica = await Clinica.findOne({
-                where: { id_clinica: tratamientoClinicId },
-                attributes: ['grupoClinicaId'],
-                raw: true
-            });
-            groupFromClinic = clinica?.grupoClinicaId ? Number(clinica.grupoClinicaId) : null;
-        }
-
-        const effectiveGroupId = tratamientoGroupId || groupFromClinic || null;
-        const isSameClinic = !!templateClinicId && !!tratamientoClinicId && templateClinicId === tratamientoClinicId;
-        const isSameGroup = !!templateGroupId && !!effectiveGroupId && templateGroupId === effectiveGroupId;
-
-        if (!isSameClinic && !isSameGroup) {
-            return res.status(403).json({
-                success: false,
-                message: 'La plantilla no pertenece al mismo alcance (clínica/grupo) del tratamiento'
-            });
-        }
-    }
-
-    tratamiento.appointment_flow_template_id = templateId;
-    await tratamiento.save();
-
-    return res.json({
-        success: true,
-        data: {
-            tratamiento_id: Number(tratamiento.id_tratamiento),
-            appointment_flow_template_id: templateId
-        }
-    });
 });
 
 exports.getTratamientoAutomationTemplate = asyncHandler(async (req, res) => {

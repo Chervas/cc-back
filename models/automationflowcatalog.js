@@ -19,6 +19,8 @@ module.exports = (sequelize, DataTypes) => {
       description: { type: DataTypes.TEXT, allowNull: true },
       trigger_type: { type: DataTypes.STRING(50), allowNull: false },
       steps: { type: DataTypes.JSON, allowNull: false },
+      template_key: { type: DataTypes.STRING(120), allowNull: true },
+      template_version: { type: DataTypes.INTEGER, allowNull: true },
       is_generic: { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: false },
       is_active: { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: true },
     },
