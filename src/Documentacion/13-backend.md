@@ -1,5 +1,5 @@
 > **Módulo:** Arquitectura del Backend
-> **Última actualización:** 2026-02-24
+> **Última actualización:** 2026-03-15
 > **Relacionado con:** [20.1-motor-flujos-v2](./20.1-motor-flujos-v2.md)
 
 ---
@@ -30,6 +30,8 @@
     - creación de cita
     - cambio de estado
     - reagendado
+  - Si la cita nace desde marketing con `lead_intake_id`, backend copia `campana_id` desde `LeadIntake` cuando no llega un valor explícito.
+  - El bloque completo de atribución (`source`, `source_detail`, `landing_url`, UTMs) sigue siendo canónico en `LeadIntake`; `CitasPacientes` no lo duplica como columnas propias.
 
 - `GET /api/pacientes/:id/activity`
   - Nuevo endpoint de actividad operativa del paciente.
@@ -200,5 +202,20 @@ Cleanup de integración:
 - El circuito canónico de flujos queda en `automations/v2`.
 
 - Ventana de 24h en WhatsApp
-  - Enviar una plantilla no abre la sesión libre.
-  - La sesión pasa a abierta solo cuando entra una respuesta inbound del lead (`last_inbound_at`).
+  - En integración, la UX de chat considera abierta la sesión tras enviar correctamente una plantilla aprobada por Meta.
+  - El objetivo es permitir continuidad operativa inmediata en QuickChat y drawers tras el template de apertura.
+  - Si este criterio cambia a futuro, debe cambiarse de forma coordinada en backend/docs/frontend; no conviene volver a mezclar dos reglas distintas en la UI.
+
+## 2026-03-15 - Catálogo V2 y legado retirado en integración
+
+- `catalogo-automatizaciones`
+  - Sigue expuesto como catálogo de metadatos.
+  - Ya no debe crear ni editar `AutomationFlow` legacy.
+  - La propagación a clínicas crea o actualiza borradores V2 por clínica, enlazados por `template_key` y `template_version`.
+
+- Tratamientos y cita
+  - El contrato vigente es `GET/PUT /api/tratamientos/:id/automation-template`.
+  - Las superficies v1 de flujos de cita (`AppointmentFlowTemplate`, `AppointmentFlowInstance`, `/api/tratamientos/:id/flow`, `/api/appointment-flow-templates`) se consideran retiradas en integración.
+
+- Merge hygiene
+  - Si reaparecen referencias activas a `Lead`, `AutomationFlow`, `AppointmentFlowTemplate` o `/api/flows` en este circuito, tratarlo como regresión de integración y no como compatibilidad legítima.
