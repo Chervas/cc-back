@@ -9,6 +9,7 @@ router.use(authMiddleware);
 router.get('/', automationCatalogController.listCatalog);
 router.get('/:id', automationCatalogController.getCatalogById);
 router.post('/', automationCatalogController.createCatalog);
+router.post('/:id/propagate', automationCatalogController.propagateCatalog);
 router.put('/:id', automationCatalogController.updateCatalog);
 router.delete('/:id', automationCatalogController.deleteCatalog);
 router.put('/:id/toggle', automationCatalogController.toggleCatalog);

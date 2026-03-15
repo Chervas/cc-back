@@ -1,6 +1,7 @@
 'use strict';
 
 const db = require('../../models');
+const automationDefaultsService = require('../services/automationDefaults.service');
 const {
   AutomationFlowCatalog,
   AutomationFlowCatalogDiscipline,
@@ -348,5 +349,29 @@ exports.setCatalogDisciplines = async (req, res) => {
   } catch (err) {
     console.error('Error setCatalogDisciplines', err);
     return res.status(500).json({ error: 'Error actualizando disciplinas' });
+  }
+};
+
+exports.propagateCatalog = async (req, res) => {
+  try {
+    if (!assertAdmin(req, res)) return;
+    const catalogId = Number(req.params.id);
+    if (!Number.isFinite(catalogId) || catalogId <= 0) {
+      return res.status(400).json({ error: 'invalid_catalog_id' });
+    }
+
+    const result = await automationDefaultsService.propagateCatalogAutomationToClinics({
+      catalogId,
+      actorUserId: Number(req.userData?.userId) || null,
+    });
+
+    if (!result?.success) {
+      return res.status(404).json({ error: result?.error || 'catalog_not_found' });
+    }
+
+    return res.json(result);
+  } catch (err) {
+    console.error('Error propagateCatalog', err);
+    return res.status(500).json({ error: 'Error propagando automatización a clínicas' });
   }
 };
