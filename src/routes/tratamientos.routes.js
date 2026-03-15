@@ -13,5 +13,7 @@ router.post('/:id/restaurar', tratamientosController.restaurarTratamiento);
 router.post('/:id/personalizar', tratamientosController.personalizarTratamiento);
 router.get('/:id/flow', tratamientosController.getTratamientoFlow);
 router.put('/:id/flow', tratamientosController.setTratamientoFlow);
+router.get('/:id/automation-template', tratamientosController.getTratamientoAutomationTemplate);
+router.put('/:id/automation-template', tratamientosController.setTratamientoAutomationTemplate);
 
 module.exports = router;
