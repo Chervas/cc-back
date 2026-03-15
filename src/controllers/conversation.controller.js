@@ -330,7 +330,12 @@ exports.getMessages = async (req, res) => {
   try {
     const userId = req.userData?.userId;
     const conversationId = req.params.id;
-    const conversation = await Conversation.findByPk(conversationId, { raw: true });
+    const conversation = await Conversation.findByPk(conversationId, {
+      include: [
+        { model: Paciente, as: 'paciente', attributes: ['id_paciente', 'nombre', 'apellidos', 'foto', 'telefono_movil', 'email'] },
+        { model: LeadIntake, as: 'lead', attributes: ['id', 'nombre', 'telefono', 'email'] },
+      ],
+    });
     if (!conversation) {
       return res.status(404).json({ error: 'Conversación no encontrada' });
     }
@@ -346,7 +351,7 @@ exports.getMessages = async (req, res) => {
       raw: true,
     });
 
-    return res.json({ conversation, messages });
+    return res.json({ conversation: conversation.toJSON(), messages });
   } catch (err) {
     console.error('Error getMessages', err);
     return res.status(500).json({ error: 'Error obteniendo mensajes' });
