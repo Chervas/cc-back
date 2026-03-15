@@ -165,6 +165,14 @@ En `.env` / `.env.example`:
   - Registra el resultado operativo de la llamada (`citado`, `informacion`, `no_contactado`).
   - Emite `lead:call_outcome` por socket para cerrar alertas pendientes en UI.
   - El scope realtime debe ser coherente con el scope HTTP de conversaciones/leads. Para admin global, `socket.io` debe suscribirse a todas las clínicas del sistema, no solo a las presentes en `UsuarioClinica`; si no, el usuario ve la clínica en la API pero no recibe `lead:created` ni `lead:call_initiated` en vivo.
+  - En integración, esto se validó expresamente porque era posible ver una clínica por API pero no recibir sus eventos en vivo si el socket no entraba en `clinic:{id}`.
+
+- Socket / conversaciones
+  - `src/app.js` crea el servidor `socket.io` y resuelve el scope inicial de clínicas por usuario.
+  - `QuickChat` depende de que `/socket.io` y `/api` apunten al mismo backend; si no, los mensajes siguen entrando en BD pero no llegan a la UI en tiempo real.
+  - `conversation.controller.js` emite eventos salientes (`message:created`, `message:updated`) en el mismo proceso HTTP.
+  - `workers/queue.workers.js` emite eventos entrantes de WhatsApp (`message:created`) desde el worker BullMQ usando `getIO()` del mismo proceso backend.
+  - Si el backend de integración se fragmenta en procesos separados sin adapter de Socket.io compartido, los jobs podrían persistir mensajes sin notificar a los clientes conectados a otro proceso. En el runtime actual de integración se asume proceso único (`fork_mode`).
 
 - Conversaciones de lead
   - El modelo canónico para marketing es `LeadIntake`.
