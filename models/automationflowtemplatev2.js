@@ -36,6 +36,7 @@ module.exports = (sequelize, DataTypes) => {
     name: { type: DataTypes.STRING(255), allowNull: false },
     description: { type: DataTypes.TEXT, allowNull: true },
     trigger_type: { type: DataTypes.STRING(80), allowNull: false },
+    trigger_config: { type: DataTypes.JSON, allowNull: true },
     is_active: { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: true },
     is_system: { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: false },
     clinic_id: { type: DataTypes.INTEGER, allowNull: true },

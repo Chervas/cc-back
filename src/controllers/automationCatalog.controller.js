@@ -117,12 +117,13 @@ function serializeCatalogItem(item, linkedTemplate = null) {
     steps: effectiveSteps,
     template_key: typeof data?.template_key === 'string' ? data.template_key : null,
     template_version: Number.isInteger(Number(data?.template_version)) ? Number(data.template_version) : null,
-    linked_template: linkedTemplate
+        linked_template: linkedTemplate
       ? {
           template_key: linkedTemplate.template_key,
           template_version: Number(linkedTemplate.version),
           name: linkedTemplate.name,
           trigger_type: linkedTemplate.trigger_type,
+          trigger_config: linkedTemplate.trigger_config ?? null,
           node_count: Array.isArray(linkedTemplate.nodes) ? linkedTemplate.nodes.length : 0,
           is_system: !!linkedTemplate.is_system,
           is_active: linkedTemplate.is_active !== false,

@@ -13,7 +13,10 @@ const APPOINTMENT_TRIGGER_TYPES = new Set([
     'appointment_confirmed',
     'appointment_no_show',
     'appointment_rescheduled',
+    'appointment_cancelled',
+    'appointment_completed',
 ]);
+const APPOINTMENT_CREATED_WITHOUT_TREATMENT_SCOPE = 'without_treatment';
 
 function toIntOrNull(value) {
     if (value === undefined || value === null || value === '') return null;
@@ -25,6 +28,18 @@ function toCleanString(value) {
     if (value === undefined || value === null) return null;
     const cleaned = String(value).trim();
     return cleaned || null;
+}
+
+function extractTriggerConfig(template) {
+    const rawConfig = template?.trigger_config && typeof template.trigger_config === 'object'
+        ? template.trigger_config
+        : null;
+    if (rawConfig) return rawConfig;
+
+    const nodes = Array.isArray(template?.nodes) ? template.nodes : [];
+    const entryNodeId = toCleanString(template?.entry_node_id);
+    const entryNode = nodes.find((node) => toCleanString(node?.id) === entryNodeId);
+    return entryNode?.config && typeof entryNode.config === 'object' ? entryNode.config : null;
 }
 
 async function resolveEffectiveGroupId(tratamiento) {
@@ -370,6 +385,7 @@ exports.getTratamientoAutomationTemplate = asyncHandler(async (req, res) => {
                 template_id: Number(template.id),
                 name: template.name,
                 trigger_type: template.trigger_type,
+                trigger_config: extractTriggerConfig(template),
                 clinic_id: template.clinic_id ?? null,
                 group_id: template.group_id ?? null,
                 is_system: !!template.is_system,
@@ -444,6 +460,17 @@ exports.setTratamientoAutomationTemplate = asyncHandler(async (req, res) => {
         });
     }
 
+    const triggerConfig = extractTriggerConfig(template);
+    if (
+        template.trigger_type === 'appointment_created' &&
+        String(triggerConfig?.appointment_scope || '').trim().toLowerCase() === APPOINTMENT_CREATED_WITHOUT_TREATMENT_SCOPE
+    ) {
+        return res.status(400).json({
+            success: false,
+            message: 'No puedes asignar a un tratamiento un flujo configurado solo para citas sin tratamiento.',
+        });
+    }
+
     if (!template.is_system) {
         const tratamientoClinicId = toIntOrNull(tratamiento.clinica_id);
         const effectiveGroupId = await resolveEffectiveGroupId(tratamiento);
@@ -479,6 +506,7 @@ exports.setTratamientoAutomationTemplate = asyncHandler(async (req, res) => {
                 template_id: Number(template.id),
                 name: template.name,
                 trigger_type: template.trigger_type,
+                trigger_config: triggerConfig,
                 clinic_id: template.clinic_id ?? null,
                 group_id: template.group_id ?? null,
                 is_system: !!template.is_system,

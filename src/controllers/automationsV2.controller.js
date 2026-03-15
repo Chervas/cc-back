@@ -520,6 +520,17 @@ const APPOINTMENT_TRIGGER_TYPES = new Set([
   'appointment_cancelled',
   'appointment_completed',
 ]);
+const APPOINTMENT_CREATED_SCOPE_VALUES = new Set([
+  'all',
+  'with_treatment',
+  'without_treatment',
+]);
+const APPOINTMENT_CREATED_WITHOUT_TREATMENT_TYPES = new Set([
+  'any',
+  'primera_sin_trat',
+  'urgencia',
+  'revision',
+]);
 const DUE_DATE_OFFSET_REGEX = /^(\d+)\s*(second|seconds|minute|minutes|hour|hours|day|days)$/i;
 
 function normalizeDomain(raw) {
@@ -913,6 +924,79 @@ function resolveTriggerTypeForTemplate({ explicitTriggerType, entryNodeId, nodes
   };
 }
 
+function resolveTriggerNode({ entryNodeId, nodes }) {
+  if (!entryNodeId || !Array.isArray(nodes)) return null;
+  return nodes.find((node) => cleanString(node?.id) === entryNodeId) || null;
+}
+
+function normalizeTriggerConfigForTemplate({ triggerType, entryNodeId, nodes }) {
+  const normalizedTriggerType = cleanString(triggerType);
+  const triggerNode = resolveTriggerNode({ entryNodeId, nodes });
+  const rawConfig = isObject(triggerNode?.config) ? triggerNode.config : {};
+
+  if (normalizedTriggerType !== 'appointment_created') {
+    return { ok: true, trigger_config: null };
+  }
+
+  const appointmentScope = cleanString(rawConfig.appointment_scope || 'all').toLowerCase() || 'all';
+  if (!APPOINTMENT_CREATED_SCOPE_VALUES.has(appointmentScope)) {
+    return {
+      ok: false,
+      error: 'invalid_trigger_config',
+      message: `appointment_scope no soportado: ${appointmentScope}`,
+      details: {
+        allowed_appointment_scope: Array.from(APPOINTMENT_CREATED_SCOPE_VALUES),
+      },
+    };
+  }
+
+  let appointmentTypeWithoutTreatment =
+    cleanString(rawConfig.appointment_type_without_treatment || 'any').toLowerCase() || 'any';
+
+  if (appointmentScope !== 'without_treatment') {
+    appointmentTypeWithoutTreatment = 'any';
+  }
+
+  if (!APPOINTMENT_CREATED_WITHOUT_TREATMENT_TYPES.has(appointmentTypeWithoutTreatment)) {
+    return {
+      ok: false,
+      error: 'invalid_trigger_config',
+      message: `appointment_type_without_treatment no soportado: ${appointmentTypeWithoutTreatment}`,
+      details: {
+        allowed_appointment_type_without_treatment: Array.from(APPOINTMENT_CREATED_WITHOUT_TREATMENT_TYPES),
+      },
+    };
+  }
+
+  return {
+    ok: true,
+    trigger_config: {
+      appointment_scope: appointmentScope,
+      appointment_type_without_treatment: appointmentTypeWithoutTreatment,
+    },
+  };
+}
+
+function applyTriggerConfigToNodes({ triggerType, entryNodeId, nodes, triggerConfig }) {
+  if (!Array.isArray(nodes)) return [];
+  const normalizedTriggerType = cleanString(triggerType);
+  const sanitizedTriggerConfig = normalizedTriggerType === 'appointment_created' && isObject(triggerConfig)
+    ? {
+        appointment_scope: cleanString(triggerConfig.appointment_scope || 'all').toLowerCase() || 'all',
+        appointment_type_without_treatment:
+          cleanString(triggerConfig.appointment_type_without_treatment || 'any').toLowerCase() || 'any',
+      }
+    : {};
+
+  return nodes.map((node) => {
+    if (cleanString(node?.id) !== cleanString(entryNodeId)) return node;
+    return {
+      ...node,
+      config: sanitizedTriggerConfig,
+    };
+  });
+}
+
 function collectUnsupportedNodeTypes(nodes) {
   if (!Array.isArray(nodes)) return [];
   return Array.from(
@@ -1194,6 +1278,14 @@ function mapTemplate(row, { includeNodes = true, access = null, clinicNameMap = 
       ? (clinicNameMap.get(clinicId) || null)
       : null);
   const permissions = buildTemplatePermissions(access, item);
+  const triggerConfigResolution = resolveTriggerConfigForTemplate({
+    triggerType: item.trigger_type,
+    entryNodeId: item.entry_node_id,
+    nodes: Array.isArray(item.nodes) ? item.nodes : [],
+  });
+  const triggerConfig = isObject(item.trigger_config)
+    ? item.trigger_config
+    : (triggerConfigResolution.ok ? triggerConfigResolution.trigger_config : null);
 
   const base = {
     id: item.id,
@@ -1203,6 +1295,7 @@ function mapTemplate(row, { includeNodes = true, access = null, clinicNameMap = 
     name: item.name,
     description: item.description ?? null,
     trigger_type: item.trigger_type,
+    trigger_config: triggerConfig,
     domain: resolveDomainFromTriggerType(item.trigger_type),
     is_active: item.is_active !== false,
     is_system: !!item.is_system,
@@ -1224,7 +1317,13 @@ function mapTemplate(row, { includeNodes = true, access = null, clinicNameMap = 
   };
 
   if (includeNodes) {
-    base.nodes = Array.isArray(item.nodes) ? item.nodes : [];
+    const rawNodes = Array.isArray(item.nodes) ? item.nodes : [];
+    base.nodes = applyTriggerConfigToNodes({
+      triggerType: item.trigger_type,
+      entryNodeId: item.entry_node_id,
+      nodes: rawNodes,
+      triggerConfig,
+    });
   }
 
   return base;
@@ -2919,6 +3018,26 @@ exports.createTemplateDraft = async (req, res) => {
       });
     }
     const resolvedTriggerType = triggerResolution.trigger_type;
+    const triggerConfigResolution = normalizeTriggerConfigForTemplate({
+      triggerType: resolvedTriggerType,
+      entryNodeId,
+      nodes,
+    });
+    if (!triggerConfigResolution.ok) {
+      return res.status(400).json({
+        success: false,
+        error: triggerConfigResolution.error,
+        message: triggerConfigResolution.message,
+        details: triggerConfigResolution.details,
+      });
+    }
+    const normalizedTriggerConfig = triggerConfigResolution.trigger_config;
+    const nodesWithTriggerConfig = applyTriggerConfigToNodes({
+      triggerType: resolvedTriggerType,
+      entryNodeId,
+      nodes,
+      triggerConfig: normalizedTriggerConfig,
+    });
 
     const templateKey = buildTemplateKey({ templateKey: body.template_key, name });
     let clinicId = parseIntOrNull(body.clinic_id);
@@ -2974,12 +3093,13 @@ exports.createTemplateDraft = async (req, res) => {
       name,
       description: cleanString(body.description),
       trigger_type: resolvedTriggerType,
+      trigger_config: normalizedTriggerConfig,
       is_active: parseBool(body.is_active, true),
       is_system: !!isSystem,
       clinic_id: clinicId,
       group_id: groupId,
       entry_node_id: entryNodeId,
-      nodes,
+      nodes: nodesWithTriggerConfig,
       published_at: null,
       published_by: null,
       created_by: access.user_id,
@@ -3211,6 +3331,26 @@ exports.updateTemplateDraft = async (req, res) => {
       });
     }
     updates.trigger_type = triggerResolution.trigger_type;
+    const triggerConfigResolution = normalizeTriggerConfigForTemplate({
+      triggerType: triggerResolution.trigger_type,
+      entryNodeId: candidateEntry,
+      nodes: candidateNodes,
+    });
+    if (!triggerConfigResolution.ok) {
+      return res.status(400).json({
+        success: false,
+        error: triggerConfigResolution.error,
+        message: triggerConfigResolution.message,
+        details: triggerConfigResolution.details,
+      });
+    }
+    updates.trigger_config = triggerConfigResolution.trigger_config;
+    updates.nodes = applyTriggerConfigToNodes({
+      triggerType: triggerResolution.trigger_type,
+      entryNodeId: candidateEntry,
+      nodes: candidateNodes,
+      triggerConfig: triggerConfigResolution.trigger_config,
+    });
 
     await row.update(updates);
 
@@ -3267,6 +3407,19 @@ exports.publishTemplateVersion = async (req, res) => {
         details: triggerResolution.details,
       });
     }
+    const triggerConfigResolution = normalizeTriggerConfigForTemplate({
+      triggerType: triggerResolution.trigger_type,
+      entryNodeId: row.entry_node_id,
+      nodes: normalizedNodes,
+    });
+    if (!triggerConfigResolution.ok) {
+      return res.status(400).json({
+        success: false,
+        error: triggerConfigResolution.error,
+        message: triggerConfigResolution.message,
+        details: triggerConfigResolution.details,
+      });
+    }
     const validationErrors = [
       ...(graphValidation.errors || []),
       ...(nodeConfigValidation.errors || []),
@@ -3281,6 +3434,14 @@ exports.publishTemplateVersion = async (req, res) => {
     }
 
     await row.update({
+      nodes: applyTriggerConfigToNodes({
+        triggerType: triggerResolution.trigger_type,
+        entryNodeId: row.entry_node_id,
+        nodes: normalizedNodes,
+        triggerConfig: triggerConfigResolution.trigger_config,
+      }),
+      trigger_type: triggerResolution.trigger_type,
+      trigger_config: triggerConfigResolution.trigger_config,
       published_at: new Date(),
       published_by: access.user_id,
     });

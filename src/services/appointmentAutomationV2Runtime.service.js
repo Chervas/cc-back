@@ -20,6 +20,17 @@ const APPOINTMENT_TRIGGER_TYPES = new Set([
   'appointment_cancelled',
   'appointment_completed',
 ]);
+const APPOINTMENT_CREATED_SCOPE_VALUES = new Set([
+  'all',
+  'with_treatment',
+  'without_treatment',
+]);
+const APPOINTMENT_CREATED_WITHOUT_TREATMENT_TYPES = new Set([
+  'any',
+  'primera_sin_trat',
+  'urgencia',
+  'revision',
+]);
 
 function toIntOrNull(value) {
   if (value === undefined || value === null || value === '') return null;
@@ -68,6 +79,15 @@ function pickPreferredExecution(rows) {
 }
 
 async function resolveTemplateForCitaEvent(cita, eventName) {
+  const boundTemplate = await resolveTemplateBoundToTratamiento(cita, eventName);
+  if (boundTemplate) {
+    return boundTemplate;
+  }
+
+  return resolveClinicFallbackTemplate(cita, eventName);
+}
+
+async function resolveTemplateBoundToTratamiento(cita, eventName) {
   const tratamientoId = toIntOrNull(cita?.tratamiento_id);
   if (!tratamientoId) return null;
 
@@ -92,10 +112,184 @@ async function resolveTemplateForCitaEvent(cita, eventName) {
   };
   if (templateVersion) where.version = templateVersion;
 
-  return AutomationFlowTemplateV2.findOne({
+  const template = await AutomationFlowTemplateV2.findOne({
     where,
     order: [['version', 'DESC']],
   });
+  if (!template) return null;
+
+  if (eventName === 'appointment_created') {
+    const triggerConfig = getTemplateTriggerConfig(template);
+    if (triggerConfig?.appointment_scope === 'without_treatment') {
+      return null;
+    }
+  }
+
+  return template;
+}
+
+function normalizeAppointmentCreatedTriggerConfig(rawConfig) {
+  const config = rawConfig && typeof rawConfig === 'object' ? rawConfig : {};
+  const appointmentScope = cleanString(config.appointment_scope || 'all').toLowerCase() || 'all';
+  const safeScope = APPOINTMENT_CREATED_SCOPE_VALUES.has(appointmentScope) ? appointmentScope : 'all';
+  let appointmentTypeWithoutTreatment =
+    cleanString(config.appointment_type_without_treatment || 'any').toLowerCase() || 'any';
+  if (!APPOINTMENT_CREATED_WITHOUT_TREATMENT_TYPES.has(appointmentTypeWithoutTreatment)) {
+    appointmentTypeWithoutTreatment = 'any';
+  }
+  if (safeScope !== 'without_treatment') {
+    appointmentTypeWithoutTreatment = 'any';
+  }
+  return {
+    appointment_scope: safeScope,
+    appointment_type_without_treatment: appointmentTypeWithoutTreatment,
+  };
+}
+
+function getTemplateTriggerConfig(template) {
+  const rawConfig =
+    (template && typeof template.trigger_config === 'object' && template.trigger_config)
+      ? template.trigger_config
+      : null;
+
+  if (cleanString(template?.trigger_type) !== 'appointment_created') {
+    return null;
+  }
+
+  if (rawConfig) {
+    return normalizeAppointmentCreatedTriggerConfig(rawConfig);
+  }
+
+  const nodes = Array.isArray(template?.nodes) ? template.nodes : [];
+  const entryNodeId = cleanString(template?.entry_node_id);
+  const entryNode = nodes.find((node) => cleanString(node?.id) === entryNodeId);
+  return normalizeAppointmentCreatedTriggerConfig(entryNode?.config);
+}
+
+async function resolveClinicFallbackTemplate(cita, eventName) {
+  const clinicId = toIntOrNull(cita?.clinica_id);
+  if (!clinicId) return null;
+
+  const clinic = await Clinica.findByPk(clinicId, {
+    attributes: ['id_clinica', 'grupoClinicaId'],
+    raw: true,
+  });
+  const groupId = toIntOrNull(clinic?.grupoClinicaId);
+
+  const candidates = await AutomationFlowTemplateV2.findAll({
+    where: {
+      trigger_type: eventName,
+      is_active: true,
+      published_at: { [db.Sequelize.Op.ne]: null },
+      [db.Sequelize.Op.or]: [
+        { clinic_id: clinicId },
+        ...(groupId ? [{ group_id: groupId }] : []),
+        { is_system: true },
+      ],
+    },
+    order: [
+      ['published_at', 'DESC'],
+      ['version', 'DESC'],
+      ['id', 'DESC'],
+    ],
+  });
+
+  if (!Array.isArray(candidates) || !candidates.length) {
+    return null;
+  }
+
+  const candidateKeys = Array.from(
+    new Set(
+      candidates
+        .map((template) => cleanString(template?.template_key))
+        .filter(Boolean)
+    )
+  );
+
+  const assignedRows = candidateKeys.length
+    ? await Tratamiento.findAll({
+        attributes: [
+          'appointment_automation_template_key',
+          'appointment_automation_template_version',
+        ],
+        where: {
+          appointment_automation_template_key: { [db.Sequelize.Op.in]: candidateKeys },
+        },
+        raw: true,
+      })
+    : [];
+
+  const assignedTemplateRefs = new Set(
+    (assignedRows || [])
+      .map((row) => {
+        const key = cleanString(row?.appointment_automation_template_key);
+        const version = toIntOrNull(row?.appointment_automation_template_version);
+        if (!key || !version) return null;
+        return `${key}:${version}`;
+      })
+      .filter(Boolean)
+  );
+
+  const citaHasTreatment = !!toIntOrNull(cita?.tratamiento_id);
+  const citaTipo = cleanString(cita?.tipo_cita).toLowerCase() || 'continuacion';
+
+  const scored = candidates
+    .filter((template) => {
+      const key = cleanString(template?.template_key);
+      const version = toIntOrNull(template?.version);
+      if (key && version && assignedTemplateRefs.has(`${key}:${version}`)) {
+        return false;
+      }
+
+      if (cleanString(template?.trigger_type) !== 'appointment_created') {
+        return true;
+      }
+
+      const triggerConfig = getTemplateTriggerConfig(template);
+      const scope = triggerConfig?.appointment_scope || 'all';
+
+      if (citaHasTreatment) {
+        return scope === 'all' || scope === 'with_treatment';
+      }
+
+      if (scope === 'with_treatment') {
+        return false;
+      }
+      if (scope === 'all') {
+        return true;
+      }
+      const appointmentType = triggerConfig?.appointment_type_without_treatment || 'any';
+      return appointmentType === 'any' || appointmentType === citaTipo;
+    })
+    .map((template) => {
+      let score = 0;
+      const templateClinicId = toIntOrNull(template?.clinic_id);
+      const templateGroupId = toIntOrNull(template?.group_id);
+
+      if (templateClinicId && templateClinicId === clinicId) score += 100;
+      else if (templateGroupId && groupId && templateGroupId === groupId) score += 50;
+      else if (template?.is_system) score += 10;
+
+      if (cleanString(template?.trigger_type) === 'appointment_created') {
+        const triggerConfig = getTemplateTriggerConfig(template);
+        const scope = triggerConfig?.appointment_scope || 'all';
+        const appointmentType = triggerConfig?.appointment_type_without_treatment || 'any';
+
+        if (citaHasTreatment) {
+          if (scope === 'with_treatment') score += 20;
+          else if (scope === 'all') score += 5;
+        } else {
+          if (scope === 'without_treatment' && appointmentType === citaTipo) score += 30;
+          else if (scope === 'without_treatment' && appointmentType === 'any') score += 20;
+          else if (scope === 'all') score += 5;
+        }
+      }
+
+      return { template, score };
+    })
+    .sort((a, b) => b.score - a.score);
+
+  return scored[0]?.template || null;
 }
 
 async function resolveClinicScope(cita) {
@@ -128,6 +322,7 @@ function buildExecutionContext({ cita, eventName }) {
         clinic_id: toIntOrNull(cita?.clinica_id),
         paciente_id: toIntOrNull(cita?.paciente_id),
         tratamiento_id: toIntOrNull(cita?.tratamiento_id),
+        tipo_cita: cleanString(cita?.tipo_cita).toLowerCase() || null,
         lead_intake_id: leadIntakeId,
         lead_id: leadIntakeId,
         appointment_origin: appointmentOrigin,
@@ -142,6 +337,7 @@ function buildExecutionContext({ cita, eventName }) {
       clinica_id: toIntOrNull(cita?.clinica_id),
       paciente_id: toIntOrNull(cita?.paciente_id),
       tratamiento_id: toIntOrNull(cita?.tratamiento_id),
+      tipo_cita: cleanString(cita?.tipo_cita).toLowerCase() || null,
       lead_intake_id: leadIntakeId,
       origin: appointmentOrigin,
       estado: cleanString(cita?.estado).toLowerCase() || null,

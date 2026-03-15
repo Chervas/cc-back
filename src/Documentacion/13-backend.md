@@ -201,6 +201,47 @@ Cleanup de integración:
 - `/api/flows` deja de exponerse como superficie legacy.
 - El circuito canónico de flujos queda en `automations/v2`.
 
+### Contrato de `trigger_config` en `AutomationFlowTemplatesV2`
+
+En integración, `AutomationFlowTemplatesV2` incorpora `trigger_config` como copia normalizada del `config` del nodo trigger. No es una segunda capa editable: backend la deriva al crear, actualizar y publicar una versión.
+
+Contrato actual:
+
+```json
+{
+  "appointment_scope": "all | with_treatment | without_treatment",
+  "appointment_type_without_treatment": "any | primera_sin_trat | urgencia | revision"
+}
+```
+
+Reglas:
+
+- Solo aplica a `trigger_type = appointment_created`.
+- Para el resto de triggers, `trigger_config = null`.
+- Si `appointment_scope !== without_treatment`, `appointment_type_without_treatment` se normaliza a `any`.
+
+### Resolución de flujos de cita V2
+
+`appointmentAutomationV2Runtime` usa esta precedencia:
+
+1. **Flujo asignado al tratamiento**
+   - Si la cita tiene `tratamiento_id` y ese tratamiento tiene `appointment_automation_template_key/version`, ese flujo gana.
+2. **Fallback clinic/group/system**
+   - Si no hay flujo por tratamiento, se buscan templates V2 publicados en el scope de clínica, grupo o sistema.
+   - Solo se consideran como fallback los templates no asignados ya a tratamientos.
+3. **Matching de `appointment_created`**
+   - `with_treatment` solo matchea con citas que tienen tratamiento.
+   - `without_treatment` solo matchea con citas sin tratamiento.
+   - Para `without_treatment`, la prioridad es:
+     - tipo exacto (`primera_sin_trat`, `urgencia`, `revision`)
+     - `any`
+     - `all`
+
+Consecuencias:
+
+- No debe dispararse más de un flujo V2 por el mismo `appointment_created`.
+- Un template `without_treatment` no debe asignarse desde `PUT /api/tratamientos/:id/automation-template`.
+
 - Ventana de 24h en WhatsApp
   - En integración, la UX de chat considera abierta la sesión tras enviar correctamente una plantilla aprobada por Meta.
   - El objetivo es permitir continuidad operativa inmediata en QuickChat y drawers tras el template de apertura.
