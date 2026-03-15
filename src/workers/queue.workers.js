@@ -7,6 +7,7 @@ const whatsappPhonesService = require('../services/whatsappPhones.service');
 const automationDefaultsService = require('../services/automationDefaults.service');
 const automationsV2ResumeService = require('../services/automationsV2Resume.service');
 const { getIO } = require('../services/socket.service');
+const { findCanonicalWhatsappConversation } = require('../lib/canonical-conversation');
 const db = require('../../models');
 
 const { Conversation, Message, ClinicMetaAsset, WhatsAppWebOrigin } = db;
@@ -243,34 +244,14 @@ createWorker('webhook_whatsapp', async (job) => {
             }
         }
 
-        const [conv, created] = await Conversation.findOrCreate({
-            where: { contact_id: `+${from}`.replace('++', '+'), channel: 'whatsapp', clinic_id: clinicId },
-            defaults: {
-                clinic_id: clinicId,
-                channel: 'whatsapp',
-                contact_id: `+${from}`.replace('++', '+'),
-                last_message_at: new Date(),
-                last_inbound_at: new Date(),
-                unread_count: 1,
-                patient_id: patientId,
-                lead_id: leadId,
-            },
+        const conv = await findCanonicalWhatsappConversation({
+            clinicId,
+            contactId: `+${from}`.replace('++', '+'),
+            patientId,
+            leadId,
+            createIfMissing: true,
+            lastMessageAt: new Date(),
         });
-
-        if (!created && (patientId || leadId)) {
-            let updated = false;
-            if (patientId && !conv.patient_id) {
-                conv.patient_id = patientId;
-                updated = true;
-            }
-            if (leadId && !conv.lead_id) {
-                conv.lead_id = leadId;
-                updated = true;
-            }
-            if (updated) {
-                await conv.save();
-            }
-        }
 
         const inboundMsg = await Message.create({
             conversation_id: conv.id,

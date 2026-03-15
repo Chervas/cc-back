@@ -23,6 +23,8 @@ const { enqueueInboundFormSubmissionResume } = require('../services/automationsV
 const { sendMetaEvent, buildUserData: buildMetaUserData } = require('../services/metaCapi.service');
 const { uploadClickConversion } = require('../services/googleAdsConversion.service');
 const { getIO } = require('../services/socket.service');
+const jobRequestsService = require('../services/jobRequests.service');
+const { findCanonicalWhatsappConversation } = require('../lib/canonical-conversation');
 
 const CHANNELS = new Set(['paid', 'organic', 'unknown']);
 const SOURCES = new Set(['meta_ads', 'google_ads', 'web', 'whatsapp', 'call_click', 'tiktok_ads', 'seo', 'direct', 'local_services']);
@@ -425,6 +427,11 @@ const LEAD_SOURCE_DETAIL_LABELS = {
   whatsapp_inbound: 'WhatsApp',
 };
 
+const LEAD_CONTACT_REASON_LABELS = {
+  no_contesta: 'No contesta',
+  otro: 'Otro motivo',
+};
+
 const buildLeadCreatedDescription = (lead) => {
   const detailKey = cleanString(lead?.source_detail);
   const sourceKey = cleanString(lead?.source);
@@ -437,6 +444,11 @@ const buildLeadCreatedDescription = (lead) => {
     return `Origen: ${sourceLabel}`;
   }
   return 'Nuevo lead';
+};
+
+const formatLeadContactReason = (value) => {
+  const normalized = cleanString(value);
+  return normalized ? (LEAD_CONTACT_REASON_LABELS[normalized] || normalized.replace(/_/g, ' ')) : null;
 };
 
 const sanitizeFormSubmissionValue = (value, depth = 0) => {
@@ -2285,10 +2297,11 @@ exports.getLeadById = asyncHandler(async (req, res) => {
   if (!out.telefono && fallbackLeadData.telefono) out.telefono = normalizePhone(fallbackLeadData.telefono) || fallbackLeadData.telefono;
 
   if (Conversation) {
-    const conversation = await Conversation.findOne({
-      where: { lead_id: leadId },
-      order: [['last_message_at', 'DESC']],
-      raw: true,
+    const conversation = await findCanonicalWhatsappConversation({
+      clinicId: out.clinica_id,
+      contactId: out.telefono,
+      leadId,
+      createIfMissing: false,
     });
     out.conversation_id = conversation?.id || null;
   }
@@ -2318,6 +2331,15 @@ exports.getLeadActivity = asyncHandler(async (req, res) => {
 
   if (!lead) {
     return res.status(404).json({ message: 'Lead no encontrado' });
+  }
+
+  if (lead.telefono && lead.clinica_id) {
+    await findCanonicalWhatsappConversation({
+      clinicId: lead.clinica_id,
+      contactId: lead.telefono,
+      leadId,
+      createIfMissing: false,
+    });
   }
 
   const conversations = await Conversation.findAll({
@@ -2393,13 +2415,26 @@ exports.getLeadActivity = asyncHandler(async (req, res) => {
       fecha: contacto.fecha || lead.updated_at || lead.created_at,
       tipo: 'lead_contact_attempt',
       titulo: 'Contacto registrado',
-      descripcion: contacto.notas || contacto.motivo || 'Intento de contacto',
+      descripcion: contacto.notas || formatLeadContactReason(contacto.motivo) || 'Intento de contacto',
       icono: 'heroicons_outline:phone',
       color: 'warning',
       usuarioId: contacto.usuario_id ? String(contacto.usuario_id) : null,
       detalles: {
         motivo: contacto.motivo || null,
       },
+    });
+  }
+
+  if (lead.callback_reminder_at) {
+    items.push({
+      id: `lead-callback-reminder-${leadId}`,
+      leadId: String(leadId),
+      fecha: lead.callback_reminder_at,
+      tipo: 'lead_contact_attempt',
+      titulo: 'Recordatorio para volver a llamar',
+      descripcion: lead.callback_reminder_reason || lead.callback_reminder_notes || 'Seguimiento pendiente',
+      icono: 'heroicons_outline:clock',
+      color: 'warning',
     });
   }
 
@@ -2423,6 +2458,10 @@ exports.getLeadActivity = asyncHandler(async (req, res) => {
     const waError = Array.isArray(metadata.wa_error) && metadata.wa_error.length
       ? cleanString(metadata.wa_error[0]?.message) || cleanString(metadata.wa_error[0]?.title)
       : null;
+    const isAutomationEvent = message.message_type === 'event' && metadata.kind === 'automation_flow_event';
+    if (isAutomationEvent && String(metadata.reason || '').toLowerCase() === 'flow_send_whatsapp') {
+      continue;
+    }
 
     if (message.direction === 'outbound') {
       const isTemplate = message.message_type === 'template';
@@ -2431,9 +2470,9 @@ exports.getLeadActivity = asyncHandler(async (req, res) => {
         leadId: String(leadId),
         fecha: createdAt,
         tipo: isTemplate ? 'lead_whatsapp_template_sent' : 'lead_whatsapp_message_sent',
-        titulo: isTemplate ? 'Plantilla de WhatsApp enviada' : 'Mensaje de WhatsApp enviado',
+        titulo: isTemplate ? 'Plantilla de WhatsApp enviada' : (isAutomationEvent ? 'Evento automático' : 'Mensaje de WhatsApp enviado'),
         descripcion: isFailed && waError ? `${text} · ${waError}` : text,
-        icono: isTemplate ? 'heroicons_outline:document-text' : 'heroicons_outline:chat-bubble-left-right',
+        icono: isTemplate ? 'heroicons_outline:document-text' : (isAutomationEvent ? 'heroicons_outline:bolt' : 'heroicons_outline:chat-bubble-left-right'),
         color: isFailed ? 'warning' : 'info',
         usuarioId: actor ? String(actor.id_usuario) : null,
         usuarioNombre: buildActorLabel(actor),
@@ -2466,7 +2505,7 @@ exports.getLeadActivity = asyncHandler(async (req, res) => {
   }
 
   return res.status(200).json(
-    items.sort((a, b) => new Date(b.fecha).getTime() - new Date(a.fecha).getTime())
+    items.sort((a, b) => new Date(a.fecha).getTime() - new Date(b.fecha).getTime())
   );
 });
 
@@ -2580,10 +2619,22 @@ exports.updateLeadStatus = asyncHandler(async (req, res) => {
 exports.registrarContacto = asyncHandler(async (req, res) => {
   const { id } = req.params;
   const { motivo, notas } = req.body || {};
+  const reminderAtRaw = req.body?.callback_reminder_at;
+  const reminderReason = cleanString(req.body?.callback_reminder_reason) || formatLeadContactReason(motivo) || 'Volver a llamar';
+  const reminderNotes = cleanString(req.body?.callback_reminder_notes) || cleanString(notas);
+  const hasReminderField = Object.prototype.hasOwnProperty.call(req.body || {}, 'callback_reminder_at');
 
   const lead = await LeadIntake.findByPk(id);
   if (!lead) {
     return res.status(404).json({ message: 'Lead no encontrado' });
+  }
+
+  let reminderAt = null;
+  if (hasReminderField && reminderAtRaw) {
+    reminderAt = new Date(reminderAtRaw);
+    if (!Number.isFinite(reminderAt.getTime())) {
+      return res.status(400).json({ message: 'callback_reminder_at inválido' });
+    }
   }
 
   // Obtener historial actual o inicializar
@@ -2599,19 +2650,72 @@ exports.registrarContacto = asyncHandler(async (req, res) => {
   
   historial.push(nuevoContacto);
 
+  if (lead.callback_reminder_job_id) {
+    try {
+      await jobRequestsService.markCancelled(lead.callback_reminder_job_id, {
+        errorMessage: 'Recordatorio sustituido por una nueva programación',
+      });
+    } catch (_err) {
+      // no bloqueamos el update del lead si no encontramos el job previo
+    }
+  }
+
+  let reminderJob = null;
+  if (reminderAt) {
+    reminderJob = await jobRequestsService.enqueueJobRequest({
+      type: 'lead_callback_reminder_notify',
+      priority: 'normal',
+      status: 'waiting',
+      origin: 'lead_callback_reminder',
+      requestedBy: req.userData?.userId || null,
+      requestedByName: cleanString(
+        req.userData?.name
+        || req.userData?.nombre
+        || req.userData?.username
+        || req.userData?.email
+        || null
+      ),
+      requestedByRole: cleanString(req.userData?.role || req.userData?.rol || 'admin'),
+      nextRunAt: reminderAt,
+      payload: {
+        lead_id: lead.id,
+        user_id: req.userData?.userId || null,
+        clinic_id: lead.clinica_id || null,
+        reason: reminderReason,
+        notes: reminderNotes,
+      },
+    });
+  }
+
   // Actualizar el lead
-  await lead.update({
+  const updatePayload = {
     historial_contactos: historial,
     num_contactos: (lead.num_contactos || 0) + 1,
     ultimo_contacto: new Date(),
-    status_lead: 'contactado'
-  });
+    status_lead: 'contactado',
+  };
+  if (hasReminderField) {
+    updatePayload.callback_reminder_at = reminderAt ? reminderAt.toISOString() : null;
+    updatePayload.callback_reminder_reason = reminderAt ? reminderReason : null;
+    updatePayload.callback_reminder_notes = reminderAt ? reminderNotes : null;
+    updatePayload.callback_reminder_created_by = reminderAt ? (req.userData?.userId || null) : null;
+    updatePayload.callback_reminder_job_id = reminderAt ? reminderJob?.id || null : null;
+    updatePayload.callback_reminder_notified_at = null;
+  }
+
+  await lead.update(updatePayload);
 
   // Registrar auditoría
   try {
     await LeadAttributionAudit.create({
       lead_intake_id: lead.id,
-      raw_payload: { action: 'registrar_contacto', motivo, notas },
+      raw_payload: {
+        action: 'registrar_contacto',
+        motivo,
+        notas,
+        callback_reminder_at: reminderAt ? reminderAt.toISOString() : null,
+        callback_reminder_reason: reminderAt ? reminderReason : null,
+      },
       attribution_steps: { action: 'registrar_contacto', userId: req.userData?.userId || null }
     });
   } catch (auditErr) {
@@ -2646,7 +2750,22 @@ exports.saveCallOutcome = asyncHandler(async (req, res) => {
     call_outcome_at: new Date(),
     call_outcome_notes: notes || null,
     call_outcome_appointment_id: appointmentId || null,
+    callback_reminder_at: null,
+    callback_reminder_reason: null,
+    callback_reminder_notes: null,
+    callback_reminder_created_by: null,
+    callback_reminder_job_id: null,
   };
+
+  if (lead.callback_reminder_job_id) {
+    try {
+      await jobRequestsService.markCancelled(lead.callback_reminder_job_id, {
+        errorMessage: 'Recordatorio cancelado por resolución manual de la llamada',
+      });
+    } catch (_err) {
+      // no bloqueamos el guardado del outcome
+    }
+  }
 
   if (!lead.call_initiated_at) {
     updatePayload.call_initiated_at = new Date();

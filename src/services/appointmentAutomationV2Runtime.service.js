@@ -308,7 +308,7 @@ async function resolveClinicScope(cita) {
   };
 }
 
-function buildExecutionContext({ cita, eventName }) {
+function buildExecutionContext({ cita, eventName, userName = null, userEmail = null }) {
   const leadIntakeId = toIntOrNull(cita?.lead_intake_id);
   const appointmentOrigin = leadIntakeId ? 'lead' : 'manual';
 
@@ -328,6 +328,8 @@ function buildExecutionContext({ cita, eventName }) {
         appointment_origin: appointmentOrigin,
         origin: appointmentOrigin,
         estado: cleanString(cita?.estado).toLowerCase() || null,
+        usuario_nombre: cleanString(userName),
+        usuario_email: cleanString(userEmail),
         inicio: cita?.inicio || null,
         fin: cita?.fin || null,
       },
@@ -341,6 +343,8 @@ function buildExecutionContext({ cita, eventName }) {
       lead_intake_id: leadIntakeId,
       origin: appointmentOrigin,
       estado: cleanString(cita?.estado).toLowerCase() || null,
+      usuario_nombre: cleanString(userName),
+      usuario_email: cleanString(userEmail),
       inicio: cita?.inicio || null,
       fin: cita?.fin || null,
     },
@@ -381,7 +385,12 @@ async function enqueueExecutionForCita(cita, options = {}) {
 
   const scope = await resolveClinicScope(cita);
   const requestedBy = toIntOrNull(options.user_id) || toIntOrNull(template.created_by) || 1;
-  const context = buildExecutionContext({ cita, eventName });
+  const context = buildExecutionContext({
+    cita,
+    eventName,
+    userName: options.user_name || null,
+    userEmail: options.user_email || null,
+  });
 
   const createdExecution = await FlowExecutionV2.create({
     idempotency_key: idempotencyKey,

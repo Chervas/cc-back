@@ -4,6 +4,7 @@ const db = require('../../models');
 
 const CitaPaciente = db.CitaPaciente;
 const LeadIntake = db.LeadIntake;
+const { findCanonicalWhatsappConversation } = require('../lib/canonical-conversation');
 const Paciente = db.Paciente;
 const Clinica = db.Clinica;
 const Campana = db.Campana;
@@ -1000,9 +1001,12 @@ exports.getCitaById = asyncHandler(async (req, res) => {
     let conversation_id = null;
     try {
         if (db.Conversation && cita.paciente_id && cita.clinica_id) {
-            const conv = await db.Conversation.findOne({
-                where: { patient_id: cita.paciente_id, clinic_id: cita.clinica_id, channel: 'whatsapp' },
-                attributes: ['id']
+            const conv = await findCanonicalWhatsappConversation({
+                clinicId: cita.clinica_id,
+                contactId: cita?.paciente?.telefono_movil || null,
+                patientId: cita.paciente_id,
+                leadId: cita.lead_intake_id || null,
+                createIfMissing: false,
             });
             conversation_id = conv ? conv.id : null;
         }

@@ -67,6 +67,18 @@ function buildNotificationContent(event, payload = {}) {
         level: defaults.level || 'error'
       };
     }
+    case 'crm.call_back_reminder': {
+      const leadName = payload.leadName || 'este lead';
+      const clinic = payload.clinicName ? ` en ${payload.clinicName}` : '';
+      const reason = payload.reason ? ` Motivo: ${payload.reason}.` : '';
+      const when = payload.reminderAtLabel ? ` Recordatorio programado para ${payload.reminderAtLabel}.` : '';
+      return {
+        title: `Volver a llamar a ${leadName}`,
+        message: `Tienes un recordatorio pendiente para retomar el contacto con ${leadName}${clinic}.${reason}${when}`.trim(),
+        icon: 'heroicons_outline:phone-arrow-up-right',
+        level: defaults.level || 'info'
+      };
+    }
     default:
       return {
         title: defaults.label || 'Notificación',

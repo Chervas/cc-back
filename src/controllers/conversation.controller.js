@@ -4,6 +4,7 @@ const db = require('../../models');
 const { queues } = require('../services/queue.service');
 const { getIO } = require('../services/socket.service');
 const whatsappService = require('../services/whatsapp.service');
+const { findCanonicalWhatsappConversation } = require('../lib/canonical-conversation');
 
 const { Conversation, Message, UsuarioClinica, Paciente, LeadIntake, ConversationRead, Clinica } = db;
 
@@ -143,6 +144,7 @@ exports.listConversations = async (req, res) => {
     const where = {};
     let patient = null;
     let lead = null;
+    let canonicalConversationId = null;
     if (patientId) {
       patient = await Paciente.findByPk(patientId, {
         attributes: ['id_paciente', 'clinica_id', 'telefono_movil'],
@@ -151,9 +153,19 @@ exports.listConversations = async (req, res) => {
       if (!patient) {
         return res.status(404).json({ error: 'Paciente no encontrado' });
       }
-      where.patient_id = patientId;
+      const parsed = clinic_id && clinic_id !== 'all' ? parseClinicIdsParam(clinic_id) : null;
+      const clinicToResolve =
+        Array.isArray(parsed) && parsed.length
+          ? parsed[0]
+          : (clinicIds.includes(patient.clinica_id) ? patient.clinica_id : clinicIds[0]);
+      const canonical = await findCanonicalWhatsappConversation({
+        clinicId: clinicToResolve,
+        contactId: patient.telefono_movil,
+        patientId,
+        createIfMissing: !!patient.telefono_movil,
+      });
+      canonicalConversationId = canonical?.id || null;
       if (clinic_id && clinic_id !== 'all') {
-        const parsed = parseClinicIdsParam(clinic_id);
         if (!parsed || !ensureAccess({ clinicIds, isAggregateAllowed }, clinic_id)) {
           return res.status(403).json({ error: 'Acceso denegado a la clínica' });
         }
@@ -169,9 +181,19 @@ exports.listConversations = async (req, res) => {
       if (!lead) {
         return res.status(404).json({ error: 'Lead no encontrado' });
       }
-      where.lead_id = leadId;
+      const parsed = clinic_id && clinic_id !== 'all' ? parseClinicIdsParam(clinic_id) : null;
+      const clinicToResolve =
+        Array.isArray(parsed) && parsed.length
+          ? parsed[0]
+          : (clinicIds.includes(lead.clinica_id) ? lead.clinica_id : clinicIds[0]);
+      const canonical = await findCanonicalWhatsappConversation({
+        clinicId: clinicToResolve,
+        contactId: lead.telefono,
+        leadId,
+        createIfMissing: !!lead.telefono,
+      });
+      canonicalConversationId = canonical?.id || null;
       if (clinic_id && clinic_id !== 'all') {
-        const parsed = parseClinicIdsParam(clinic_id);
         if (!parsed || !ensureAccess({ clinicIds, isAggregateAllowed }, clinic_id)) {
           return res.status(403).json({ error: 'Acceso denegado a la clínica' });
         }
@@ -201,6 +223,14 @@ exports.listConversations = async (req, res) => {
       where.channel = 'internal';
     }
 
+    if (canonicalConversationId) {
+      where.id = canonicalConversationId;
+    } else if (patientId) {
+      where.patient_id = patientId;
+    } else if (leadId) {
+      where.lead_id = leadId;
+    }
+
     const conversations = await Conversation.findAll({
       where,
       order: [['last_message_at', 'DESC']],
@@ -217,45 +247,6 @@ exports.listConversations = async (req, res) => {
         },
       ],
     });
-
-    // Si se solicita por paciente y no existe conversación, crearla con su móvil
-    if (patientId && !conversations.length && patient?.telefono_movil) {
-      const normalized = whatsappService.normalizePhoneNumber(patient.telefono_movil) || patient.telefono_movil;
-      const parsed = parseClinicIdsParam(clinic_id);
-      const clinicToCreate =
-        Array.isArray(parsed) && parsed.length > 0
-          ? parsed[0]
-          : (clinicIds.includes(patient.clinica_id) ? patient.clinica_id : clinicIds[0]);
-      await Conversation.create({
-        clinic_id: clinicToCreate,
-        channel: 'whatsapp',
-        contact_id: normalized,
-        patient_id: patientId,
-        last_message_at: new Date(),
-        unread_count: 0,
-      });
-      // Repetir la consulta ya con la conversación creada
-      return exports.listConversations(req, res);
-    }
-
-    // Si se solicita por lead y no existe conversación, crearla con su móvil
-    if (leadId && !conversations.length && lead?.telefono) {
-      const normalized = whatsappService.normalizePhoneNumber(lead.telefono) || lead.telefono;
-      const parsed = parseClinicIdsParam(clinic_id);
-      const clinicToCreate =
-        Array.isArray(parsed) && parsed.length > 0
-          ? parsed[0]
-          : (clinicIds.includes(lead.clinica_id) ? lead.clinica_id : clinicIds[0]);
-      await Conversation.create({
-        clinic_id: clinicToCreate,
-        channel: 'whatsapp',
-        contact_id: normalized,
-        lead_id: leadId,
-        last_message_at: new Date(),
-        unread_count: 0,
-      });
-      return exports.listConversations(req, res);
-    }
 
     const conversationIds = conversations.map((c) => c.id);
     const unreadMap = await getUnreadCountsByConversation(userId, conversationIds);
@@ -330,7 +321,7 @@ exports.getMessages = async (req, res) => {
   try {
     const userId = req.userData?.userId;
     const conversationId = req.params.id;
-    const conversation = await Conversation.findByPk(conversationId, {
+    let conversation = await Conversation.findByPk(conversationId, {
       include: [
         { model: Paciente, as: 'paciente', attributes: ['id_paciente', 'nombre', 'apellidos', 'foto', 'telefono_movil', 'email'] },
         { model: LeadIntake, as: 'lead', attributes: ['id', 'nombre', 'telefono', 'email'] },
@@ -340,13 +331,31 @@ exports.getMessages = async (req, res) => {
       return res.status(404).json({ error: 'Conversación no encontrada' });
     }
 
+    if (conversation.channel === 'whatsapp' && conversation.contact_id) {
+      const canonical = await findCanonicalWhatsappConversation({
+        clinicId: conversation.clinic_id,
+        contactId: conversation.contact_id,
+        patientId: conversation.patient_id || null,
+        leadId: conversation.lead_id || null,
+        createIfMissing: false,
+      });
+      if (canonical?.id && Number(canonical.id) !== Number(conversation.id)) {
+        conversation = await Conversation.findByPk(canonical.id, {
+          include: [
+            { model: Paciente, as: 'paciente', attributes: ['id_paciente', 'nombre', 'apellidos', 'foto', 'telefono_movil', 'email'] },
+            { model: LeadIntake, as: 'lead', attributes: ['id', 'nombre', 'telefono', 'email'] },
+          ],
+        });
+      }
+    }
+
     const { clinicIds, isAggregateAllowed } = await getUserClinics(userId);
     if (!ensureAccess({ clinicIds, isAggregateAllowed }, conversation.clinic_id)) {
       return res.status(403).json({ error: 'Acceso denegado a la clínica' });
     }
 
     const messages = await Message.findAll({
-      where: { conversation_id: conversationId },
+      where: { conversation_id: conversation.id },
       order: [['createdAt', 'ASC']],
       raw: true,
     });
@@ -362,12 +371,18 @@ exports.getConversationByPatient = async (req, res) => {
   try {
     const userId = req.userData?.userId;
     const patientId = req.params.patientId || req.params.patient_id;
-
-    const conversation = await Conversation.findOne({
-      where: { patient_id: patientId },
-      order: [['last_message_at', 'DESC']],
+    const patient = await Paciente.findByPk(patientId, {
+      attributes: ['id_paciente', 'clinica_id', 'telefono_movil'],
       raw: true,
     });
+    const conversation = patient
+      ? await findCanonicalWhatsappConversation({
+          clinicId: patient.clinica_id,
+          contactId: patient.telefono_movil,
+          patientId: Number(patientId),
+          createIfMissing: !!patient.telefono_movil,
+        })
+      : null;
 
     if (!conversation) {
       return res.status(404).json({ error: 'Conversación no encontrada' });
@@ -452,10 +467,24 @@ exports.postMessage = async (req, res) => {
     } = req.body;
     let outboundJobPayload = null;
 
-    const conversation = await Conversation.findByPk(conversationId, { transaction });
+    let conversation = await Conversation.findByPk(conversationId, { transaction });
     if (!conversation) {
       await transaction.rollback();
       return res.status(404).json({ error: 'Conversación no encontrada' });
+    }
+
+    if (conversation.channel === 'whatsapp' && conversation.contact_id) {
+      const canonical = await findCanonicalWhatsappConversation({
+        clinicId: conversation.clinic_id,
+        contactId: conversation.contact_id,
+        patientId: conversation.patient_id || null,
+        leadId: conversation.lead_id || null,
+        createIfMissing: false,
+        transaction,
+      });
+      if (canonical?.id) {
+        conversation = canonical;
+      }
     }
 
     const { clinicIds, isAggregateAllowed } = await getUserClinics(userId);

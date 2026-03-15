@@ -230,7 +230,7 @@ async function buildHydratedExecutionContext({
           attributes: ['id_clinica', 'grupoClinicaId', 'nombre_clinica'],
         },
       ],
-      attributes: ['id_cita', 'clinica_id', 'paciente_id', 'lead_intake_id', 'estado', 'inicio', 'fin', 'titulo', 'motivo'],
+      attributes: ['id_cita', 'clinica_id', 'paciente_id', 'lead_intake_id', 'created_by', 'estado', 'inicio', 'fin', 'titulo', 'motivo', 'tipo_cita'],
     });
 
     if (cita) {
@@ -243,8 +243,10 @@ async function buildHydratedExecutionContext({
         patient_id: parseIntOrNull(citaJson.paciente_id),
         paciente_id: parseIntOrNull(citaJson.paciente_id),
         lead_intake_id: parseIntOrNull(citaJson.lead_intake_id),
+        created_by: parseIntOrNull(citaJson.created_by),
         estado: cleanString(citaJson.estado),
         status: cleanString(citaJson.estado),
+        tipo_cita: cleanString(citaJson.tipo_cita),
         inicio: citaJson.inicio || null,
         fin: citaJson.fin || null,
         fecha: formatDateEs(citaJson.inicio),
@@ -306,6 +308,26 @@ async function buildHydratedExecutionContext({
           ...(isObject(out.clinica) ? out.clinica : {}),
           ...clinicPatch,
         };
+      }
+
+      if (parseIntOrNull(citaJson.created_by)) {
+        const creator = await Usuario.findByPk(parseIntOrNull(citaJson.created_by), {
+          attributes: ['id_usuario', 'nombre', 'apellidos', 'email_usuario'],
+          raw: true,
+        });
+        if (creator) {
+          const creatorName = joinName(creator.nombre, creator.apellidos) || cleanString(creator.nombre) || cleanString(creator.email_usuario);
+          out.appointment = {
+            ...(isObject(out.appointment) ? out.appointment : {}),
+            usuario_nombre: creatorName,
+            usuario_email: cleanString(creator.email_usuario),
+          };
+          out.cita = {
+            ...(isObject(out.cita) ? out.cita : {}),
+            usuario_nombre: creatorName,
+            usuario_email: cleanString(creator.email_usuario),
+          };
+        }
       }
 
       if (parseIntOrNull(citaJson.lead_intake_id)) {

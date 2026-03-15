@@ -1,12 +1,16 @@
 const { metaSyncJobs } = require('../jobs/sync.jobs');
 const db = require('../../models');
 const flowEngineV2Service = require('./flowEngineV2.service');
+const { buildNotificationContent } = require('./notifications.service');
 
 const DEFAULT_TIMEOUT_MS = Number(process.env.JOB_EXECUTOR_MAX_RUNTIME_MS || 30 * 60 * 1000);
 const DEFAULT_WAITING_BACKOFF_MS = Number(process.env.JOB_SCHEDULER_WAITING_BACKOFF_MS || 15 * 60 * 1000);
 const DEFAULT_FLOW_WAITING_BACKOFF_MS = Number(process.env.FLOW_V2_WAITING_BACKOFF_MS || 60 * 1000);
 
 const FlowExecutionV2 = db.FlowExecutionV2;
+const LeadIntake = db.LeadIntake;
+const Notification = db.Notification;
+const Clinica = db.Clinica;
 
 async function runAutomationFlowV2Job(payload = {}) {
   const executionId = Number(payload.execution_id || 0);
@@ -95,6 +99,128 @@ async function runAutomationFlowV2Job(payload = {}) {
   };
 }
 
+async function runLeadCallbackReminderJob(payload = {}, jobRequest = null) {
+  const leadId = Number(payload.lead_id || 0);
+  if (!Number.isInteger(leadId) || leadId <= 0) {
+    throw new Error('lead_callback_reminder_notify requires payload.lead_id');
+  }
+
+  const lead = await LeadIntake.findByPk(leadId, {
+    attributes: [
+      'id',
+      'clinica_id',
+      'nombre',
+      'callback_reminder_at',
+      'callback_reminder_reason',
+      'callback_reminder_notes',
+      'callback_reminder_created_by',
+      'callback_reminder_job_id',
+      'callback_reminder_notified_at',
+    ],
+    raw: true,
+  });
+
+  if (!lead) {
+    return {
+      status: 'completed',
+      result: { skipped: true, reason: 'lead_not_found', lead_id: leadId },
+    };
+  }
+
+  const expectedJobId = Number(lead.callback_reminder_job_id || 0);
+  if (jobRequest?.id && expectedJobId && expectedJobId !== Number(jobRequest.id)) {
+    return {
+      status: 'completed',
+      result: { skipped: true, reason: 'stale_job', lead_id: leadId },
+    };
+  }
+
+  if (!lead.callback_reminder_at) {
+    return {
+      status: 'completed',
+      result: { skipped: true, reason: 'reminder_cleared', lead_id: leadId },
+    };
+  }
+
+  const reminderAt = new Date(lead.callback_reminder_at);
+  if (!Number.isFinite(reminderAt.getTime())) {
+    return {
+      status: 'completed',
+      result: { skipped: true, reason: 'invalid_reminder_at', lead_id: leadId },
+    };
+  }
+
+  if (reminderAt.getTime() > Date.now()) {
+    return {
+      status: 'waiting',
+      nextAllowedAt: reminderAt,
+      result: { waiting: true, lead_id: leadId },
+    };
+  }
+
+  const userId = Number(lead.callback_reminder_created_by || payload.user_id || 0);
+  if (!Number.isInteger(userId) || userId <= 0) {
+    return {
+      status: 'completed',
+      result: { skipped: true, reason: 'missing_target_user', lead_id: leadId },
+    };
+  }
+
+  const clinic = lead.clinica_id
+    ? await Clinica.findByPk(lead.clinica_id, { attributes: ['id_clinica', 'nombre_clinica'], raw: true })
+    : null;
+  const reminderAtLabel = new Intl.DateTimeFormat('es-ES', {
+    timeZone: 'Europe/Madrid',
+    day: '2-digit',
+    month: '2-digit',
+    year: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false,
+  }).format(reminderAt);
+  const content = buildNotificationContent('crm.call_back_reminder', {
+    leadName: lead.nombre || 'Lead',
+    clinicName: clinic?.nombre_clinica || null,
+    reason: lead.callback_reminder_reason || null,
+    reminderAtLabel,
+  });
+
+  await Notification.create({
+    userId,
+    category: 'crm',
+    event: 'crm.call_back_reminder',
+    title: content.title,
+    message: content.message,
+    icon: content.icon,
+    level: content.level,
+    clinicaId: lead.clinica_id || null,
+    data: {
+      link: '/marketing/leads',
+      useRouter: true,
+      leadId: lead.id,
+      clinicId: lead.clinica_id || null,
+      reminderAt: reminderAt.toISOString(),
+      reason: lead.callback_reminder_reason || null,
+      notes: lead.callback_reminder_notes || null,
+    },
+  });
+
+  await LeadIntake.update({
+    callback_reminder_job_id: null,
+    callback_reminder_notified_at: new Date(),
+  }, {
+    where: { id: lead.id },
+  });
+
+  return {
+    status: 'completed',
+    result: {
+      lead_id: lead.id,
+      notified_user_id: userId,
+    },
+  };
+}
+
 const JOB_HANDLERS = {
   meta_ads_recent: async (payload = {}) => metaSyncJobs.executeAdsSync(payload),
   meta_ads_midday: async (payload = {}) => metaSyncJobs.executeAdsSync({ ...payload, windowLabel: 'midday' }),
@@ -108,6 +234,7 @@ const JOB_HANDLERS = {
   analytics_backfill: async (payload = {}) => metaSyncJobs.executeAnalyticsBackfill(payload),
   analytics_backfill_properties: async (payload = {}) => metaSyncJobs.executeAnalyticsBackfillForProperties(payload.mappings || []),
   automations_v2_execute: async (payload = {}) => runAutomationFlowV2Job(payload),
+  lead_callback_reminder_notify: async (payload = {}, jobRequest) => runLeadCallbackReminderJob(payload, jobRequest),
 };
 
 const asPromiseWithTimeout = (promise, timeoutMs) => {

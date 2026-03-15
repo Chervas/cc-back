@@ -196,6 +196,11 @@ En `.env` / `.env.example`:
   - `conversation.controller.js` emite eventos salientes (`message:created`, `message:updated`) en el mismo proceso HTTP.
   - `workers/queue.workers.js` emite eventos entrantes de WhatsApp (`message:created`) desde el worker BullMQ usando `getIO()` del mismo proceso backend.
   - Si el backend de integración se fragmenta en procesos separados sin adapter de Socket.io compartido, los jobs podrían persistir mensajes sin notificar a los clientes conectados a otro proceso. En el runtime actual de integración se asume proceso único (`fork_mode`).
+  - Regla canónica de conversación WhatsApp:
+    - debe existir una sola conversación por `clinic_id + contact_id`.
+    - si el sistema detecta duplicados, backend los fusiona en lectura/escritura y reutiliza la conversación canónica.
+    - inbound WhatsApp, QuickChat, drawers y runtime de flujos deben resolver siempre contra la misma conversación canónica.
+    - si reaparecen dos conversaciones para el mismo número en la misma clínica, tratarlo como regresión porque rompe trazabilidad, ventana 24h y reanudación de `wait_response`.
 
 - Conversaciones de lead
   - El modelo canónico para marketing es `LeadIntake`.
@@ -204,6 +209,7 @@ En `.env` / `.env.example`:
     - `Conversation.clinic_id`
     - `Conversation.lead_id -> LeadIntake.id`
   - `Lead` legacy no debe usarse ya en código nuevo de marketing/chat.
+  - `GET /api/intake/leads/:id` y `GET /api/intake/leads/:id/activity` deben resolver `conversation_id` contra la conversación canónica, no contra una conversación arbitraria por `lead_id`.
 
 ### Contrato canónico del catálogo de automatizaciones
 
@@ -274,9 +280,40 @@ Consecuencias:
 - Un template `without_treatment` no debe asignarse desde `PUT /api/tratamientos/:id/automation-template`.
 
 - Ventana de 24h en WhatsApp
-  - En integración, la UX de chat considera abierta la sesión tras enviar correctamente una plantilla aprobada por Meta.
-  - El objetivo es permitir continuidad operativa inmediata en QuickChat y drawers tras el template de apertura.
-  - Si este criterio cambia a futuro, debe cambiarse de forma coordinada en backend/docs/frontend; no conviene volver a mezclar dos reglas distintas en la UI.
+  - La ventana de texto libre se considera abierta solo si existe `last_inbound_at` real dentro de las últimas 24 horas.
+  - Enviar una plantilla aprobada por Meta no abre por sí solo el chat libre.
+  - Tras enviar una plantilla, la UI debe permitir seguir enviando plantillas, pero no texto libre, hasta que el paciente responda.
+  - Si frontend vuelve a tratar una plantilla outbound como apertura de sesión, reaparecerán mensajes `failed` en Meta y estados visuales incoherentes entre QuickChat y drawers.
+
+## 2026-03-15 - Recordatorios reales de volver a llamar
+
+- `LeadIntake`
+  - Nuevos campos:
+    - `callback_reminder_at`
+    - `callback_reminder_reason`
+    - `callback_reminder_notes`
+    - `callback_reminder_created_by`
+    - `callback_reminder_job_id`
+    - `callback_reminder_notified_at`
+  - Migración: `20260315193000-add-callback-reminder-to-leadintakes.js`
+
+- `POST /api/intake/leads/:id/contact`
+  - Acepta:
+    - `callback_reminder_at`
+    - `callback_reminder_reason`
+    - `callback_reminder_notes`
+  - Si se informa recordatorio, backend:
+    - cancela el job anterior si existía
+    - agenda un `JobRequest` de tipo `lead_callback_reminder_notify`
+    - persiste el recordatorio sobre el lead
+
+- `PUT /api/intake/leads/:id/call-outcome`
+  - Al resolver el resultado operativo de la llamada, backend limpia el recordatorio pendiente y cancela el job si seguía vivo.
+
+- Notificaciones
+  - Categoría: `crm`
+  - Evento: `crm.call_back_reminder`
+  - Destinatario: el usuario que creó el recordatorio (`callback_reminder_created_by`)
 
 ## 2026-03-15 - Catálogo V2 y legado retirado en integración
 

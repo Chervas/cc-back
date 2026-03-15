@@ -20,6 +20,7 @@ const Clinica = db.Clinica;
 const ClinicMetaAsset = db.ClinicMetaAsset;
 const WhatsappTemplate = db.WhatsappTemplate;
 const whatsappService = require('./whatsapp.service');
+const { findCanonicalWhatsappConversation } = require('../lib/canonical-conversation');
 const UPDATE_LEAD_INFO_MODES = new Set([
   'set_required',
   'set_received',
@@ -1695,42 +1696,18 @@ async function handleSendWhatsapp(node, context, runtime) {
   });
 
   const targetPatientId = toIntOrNull(targets.patient_id);
+  const targetLeadId = toIntOrNull(targets.lead_id);
   let conversation = null;
 
-  // 1) Si tenemos paciente objetivo, priorizar siempre su propia conversación en la clínica.
-  if (targetPatientId) {
-    conversation = await Conversation.findOne({
-      where: {
-        clinic_id: clinicId,
-        channel: 'whatsapp',
-        patient_id: targetPatientId,
-      },
-      order: [['id', 'DESC']],
-    });
-  }
+  conversation = await findCanonicalWhatsappConversation({
+    clinicId,
+    contactId: recipientData.recipient,
+    patientId: targetPatientId,
+    leadId: targetLeadId,
+    createIfMissing: false,
+  });
 
-  // 2) Fallback por teléfono, pero sin cruzar con otro paciente.
-  if (!conversation) {
-    const phoneWhere = {
-      clinic_id: clinicId,
-      channel: 'whatsapp',
-      contact_id: recipientData.recipient,
-    };
-
-    if (targetPatientId) {
-      phoneWhere[Op.or] = [
-        { patient_id: null },
-        { patient_id: targetPatientId },
-      ];
-    }
-
-    conversation = await Conversation.findOne({
-      where: phoneWhere,
-      order: [['id', 'DESC']],
-    });
-  }
-
-  // 3) Si no existe:
+  // 2) Si no existe:
   // - modo template: crear conversación del paciente objetivo.
   // - modo manual: no enviar (se exige conversación activa en últimas 24h).
   if (!conversation) {
@@ -1750,17 +1727,14 @@ async function handleSendWhatsapp(node, context, runtime) {
         next_node_id: readOutputTarget(node, 'on_success'),
       };
     }
-    conversation = await Conversation.create({
-      clinic_id: clinicId,
-      channel: 'whatsapp',
-      contact_id: recipientData.recipient,
-      patient_id: targetPatientId,
-      unread_count: 0,
-      last_message_at: new Date(),
+    conversation = await findCanonicalWhatsappConversation({
+      clinicId,
+      contactId: recipientData.recipient,
+      patientId: targetPatientId,
+      leadId: targetLeadId,
+      createIfMissing: true,
+      lastMessageAt: new Date(),
     });
-  } else if (!conversation.patient_id && targetPatientId) {
-    // 4) Si era conversación sin paciente, vincularla.
-    await conversation.update({ patient_id: targetPatientId });
   }
 
   if (messageMode === 'manual' && !hasActiveInboundWindow(conversation?.last_inbound_at)) {

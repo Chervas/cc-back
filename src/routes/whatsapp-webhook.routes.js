@@ -6,7 +6,7 @@ const db = require('../../models');
 const { queues } = require('../services/queue.service');
 const { Op } = require('sequelize');
 
-const { ClinicMetaAsset, Clinica, Paciente, Lead, Conversation, LeadIntake, WhatsAppWebOrigin } = db;
+const { ClinicMetaAsset, Clinica, Paciente, Conversation, LeadIntake, WhatsAppWebOrigin } = db;
 const APP_SECRET = process.env.FACEBOOK_APP_SECRET || process.env.APP_SECRET;
 
 function buildPhoneCandidates(raw) {
@@ -81,7 +81,7 @@ async function resolveClinicAndContact({ clinicId, groupId, from }) {
       return { clinicId, patientId: patient.id_paciente, leadId: null };
     }
 
-    const lead = await Lead.findOne({
+    const lead = await LeadIntake.findOne({
       where: {
         clinica_id: clinicId,
         telefono: { [Op.in]: candidates },
@@ -164,7 +164,7 @@ async function resolveClinicAndContact({ clinicId, groupId, from }) {
       return { clinicId: patient.clinica_id, patientId: patient.id_paciente, leadId: null };
     }
 
-    const lead = await Lead.findOne({
+    const lead = await LeadIntake.findOne({
       where: {
         clinica_id: { [Op.in]: clinicIds },
         telefono: { [Op.in]: candidates },

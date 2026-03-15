@@ -15,6 +15,11 @@ const NOTIFICATION_CATEGORIES = [
     id: 'jobs',
     label: 'Jobs del sistema',
     icon: 'heroicons_outline:cpu-chip'
+  },
+  {
+    id: 'crm',
+    label: 'CRM y seguimiento',
+    icon: 'heroicons_outline:phone-arrow-up-right'
   }
 ];
 
@@ -42,6 +47,12 @@ const NOTIFICATION_EVENTS = [
     category: 'jobs',
     label: 'Ejecución de job fallida',
     level: 'error'
+  },
+  {
+    event: 'crm.call_back_reminder',
+    category: 'crm',
+    label: 'Recordatorio de volver a llamar',
+    level: 'info'
   }
 ];
 
@@ -87,7 +98,10 @@ const DEFAULT_NOTIFICATION_PREFERENCES = [
   { role: 'admin', subrole: null, event: 'jobs.failed', enabled: true },
   { role: 'admin', subrole: null, event: 'ads.sync_error', enabled: true },
   { role: 'admin', subrole: null, event: 'ads.new_lead', enabled: true },
-  { role: 'admin', subrole: null, event: 'ads.health_issue', enabled: true }
+  { role: 'admin', subrole: null, event: 'ads.health_issue', enabled: true },
+  { role: 'admin', subrole: null, event: 'crm.call_back_reminder', enabled: true },
+  { role: 'propietario', subrole: null, event: 'crm.call_back_reminder', enabled: true },
+  { role: 'personaldeclinica', subrole: 'Recepción / Comercial ventas', event: 'crm.call_back_reminder', enabled: true }
 ];
 
 module.exports = {
