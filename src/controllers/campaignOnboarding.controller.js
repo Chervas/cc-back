@@ -19,6 +19,7 @@ const IntakeConfig = db.IntakeConfig;
 const ClinicGoogleAdsAccount = db.ClinicGoogleAdsAccount;
 const ClinicMetaAsset = db.ClinicMetaAsset;
 const CampaignRequest = db.CampaignRequest;
+const Campaign = db.Campaign;
 
 const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID || '';
 const GOOGLE_CLIENT_SECRET = process.env.GOOGLE_CLIENT_SECRET || '';
@@ -27,6 +28,8 @@ const GOOGLE_ADS_SCOPE = 'https://www.googleapis.com/auth/adwords';
 const VALID_MODES = new Set(['connect_only', 'managed_self', 'managed_service']);
 const VALID_PROVIDERS = new Set(['google_ads', 'meta_ads']);
 const VALID_EVENTS = ['lead', 'contact', 'schedule', 'purchase'];
+const VALID_STRATEGY_OBJECTIVES = new Set(['new_patients']);
+const VALID_STRATEGY_CHANNELS = new Set(['meta_ads', 'google_ads', 'whatsapp', 'email', 'remarketing', 'landing', 'youtube', 'phone']);
 
 const EVENT_CATALOG = {
   lead: {
@@ -105,6 +108,23 @@ function normalizeGoogleAdsConfig(rawConfig) {
     };
   }
   return normalized;
+}
+
+function normalizeCampaignConfig(rawConfig) {
+  if (!rawConfig || typeof rawConfig !== 'object' || Array.isArray(rawConfig)) {
+    return {
+      active_mode: null,
+      last_onboarding_id: null,
+      last_onboarding_at: null
+    };
+  }
+
+  const activeMode = String(rawConfig.active_mode || rawConfig.activeMode || '').trim().toLowerCase();
+  return {
+    active_mode: VALID_MODES.has(activeMode) ? activeMode : null,
+    last_onboarding_id: parseInteger(rawConfig.last_onboarding_id || rawConfig.lastOnboardingId) || null,
+    last_onboarding_at: rawConfig.last_onboarding_at || rawConfig.lastOnboardingAt || null
+  };
 }
 
 function mergeGoogleAdsEvents(baseEvents, patchEvents) {
@@ -303,6 +323,43 @@ async function loadIntakeRecordForScope(scope) {
   return record || null;
 }
 
+async function upsertCampaignSettingsForScope(scope, campaignPatch) {
+  const where = scope.assignment_scope === 'group'
+    ? { group_id: scope.group_id, assignment_scope: 'group' }
+    : { clinic_id: scope.clinic_id };
+
+  const existing = await IntakeConfig.findOne({ where });
+  const patch = normalizeCampaignConfig(campaignPatch || {});
+
+  if (!existing) {
+    await IntakeConfig.create({
+      clinic_id: scope.assignment_scope === 'clinic' ? scope.clinic_id : null,
+      group_id: scope.assignment_scope === 'group' ? scope.group_id : null,
+      assignment_scope: scope.assignment_scope,
+      domains: [],
+      config: { campaigns: patch },
+      hmac_key: null
+    });
+    return patch;
+  }
+
+  const existingConfig = existing.config && typeof existing.config === 'object' ? existing.config : {};
+  const currentCampaigns = normalizeCampaignConfig(existingConfig.campaigns || {});
+  const nextCampaigns = {
+    ...currentCampaigns,
+    ...patch
+  };
+
+  await existing.update({
+    config: {
+      ...existingConfig,
+      campaigns: nextCampaigns
+    }
+  });
+
+  return nextCampaigns;
+}
+
 async function listClinicIdsForGroup(groupId) {
   if (!groupId) return [];
   const clinics = await Clinica.findAll({
@@ -347,6 +404,26 @@ async function resolveActiveModeForScope(scope) {
   if (!scope || typeof scope !== 'object') return null;
 
   if (scope.assignment_scope === 'clinic' && scope.clinic_id) {
+    const clinicRecord = await loadIntakeRecordForScope({
+      assignment_scope: 'clinic',
+      clinic_id: scope.clinic_id
+    });
+    const clinicConfig = normalizeCampaignConfig(clinicRecord?.config?.campaigns || {});
+    if (clinicConfig.active_mode) {
+      return clinicConfig.active_mode;
+    }
+
+    if (scope.group_id) {
+      const groupRecord = await loadIntakeRecordForScope({
+        assignment_scope: 'group',
+        group_id: scope.group_id
+      });
+      const groupConfig = normalizeCampaignConfig(groupRecord?.config?.campaigns || {});
+      if (groupConfig.active_mode) {
+        return groupConfig.active_mode;
+      }
+    }
+
     const clinicMode = await findLatestCampaignMode(
       { clinica_id: scope.clinic_id },
       (payload) => {
@@ -378,6 +455,15 @@ async function resolveActiveModeForScope(scope) {
   }
 
   if (scope.assignment_scope === 'group' && scope.group_id) {
+    const groupRecord = await loadIntakeRecordForScope({
+      assignment_scope: 'group',
+      group_id: scope.group_id
+    });
+    const groupConfig = normalizeCampaignConfig(groupRecord?.config?.campaigns || {});
+    if (groupConfig.active_mode) {
+      return groupConfig.active_mode;
+    }
+
     const groupClinicIds = Array.isArray(scope.clinic_ids) && scope.clinic_ids.length > 0
       ? scope.clinic_ids
       : await listClinicIdsForGroup(scope.group_id);
@@ -502,6 +588,98 @@ function buildGoogleAdsCapabilities(connected, hasAdsScope) {
     can_create_conversion_actions: enabled,
     can_upload_enhanced_conversions: enabled
   };
+}
+
+function parseClinicIds(rawValue) {
+  if (!Array.isArray(rawValue)) return [];
+  return Array.from(new Set(rawValue
+    .map((value) => parseInteger(value))
+    .filter((value) => Number.isInteger(value) && value > 0)));
+}
+
+function normalizeStrategyChannels(rawChannels) {
+  if (!Array.isArray(rawChannels)) return [];
+  return rawChannels
+    .filter((channel) => channel && typeof channel === 'object')
+    .map((channel) => ({
+      channel: String(channel.channel || '').trim().toLowerCase(),
+      enabled: channel.enabled !== false,
+      percentage: Number(channel.percentage || 0)
+    }))
+    .filter((channel) => channel.enabled && VALID_STRATEGY_CHANNELS.has(channel.channel))
+    .sort((a, b) => Number(b.percentage || 0) - Number(a.percentage || 0));
+}
+
+function normalizeStrategyTreatments(rawTreatments) {
+  if (!Array.isArray(rawTreatments)) return [];
+  return rawTreatments
+    .filter((item) => item && typeof item === 'object')
+    .map((item) => ({
+      id: parseInteger(item.id),
+      nombre: String(item.nombre || '').trim(),
+      precio_base: item.precio_base ?? null
+    }))
+    .filter((item) => item.id && item.nombre);
+}
+
+function pickLegacyCampaignTypeFromChannels(channels) {
+  const top = Array.isArray(channels) && channels.length > 0 ? channels[0].channel : null;
+  return top === 'google_ads' ? 'google_ads' : 'meta_ads';
+}
+
+function buildStrategyName({ objectiveId, treatments, clinicCount }) {
+  const objectiveName = objectiveId === 'new_patients' ? 'Captar Nuevos Pacientes' : objectiveId;
+  const treatmentNames = Array.isArray(treatments) ? treatments.map((item) => item.nombre).filter(Boolean) : [];
+  const treatmentLabel = treatmentNames.length > 0
+    ? treatmentNames.slice(0, 2).join(', ')
+    : 'General';
+  const scopeLabel = clinicCount > 1 ? ` · ${clinicCount} clínicas` : '';
+  return `${objectiveName} · ${treatmentLabel}${scopeLabel}`;
+}
+
+async function resolveModeForClinic(clinicId) {
+  if (!clinicId) return null;
+  const clinic = await Clinica.findOne({
+    where: { id_clinica: clinicId },
+    attributes: ['id_clinica', 'grupoClinicaId'],
+    raw: true
+  });
+
+  if (!clinic) return null;
+
+  return resolveActiveModeForScope({
+    assignment_scope: 'clinic',
+    clinic_id: clinic.id_clinica,
+    group_id: clinic.grupoClinicaId || null,
+    clinics: [],
+    clinic_ids: [clinic.id_clinica],
+    group: null
+  });
+}
+
+async function findActiveStrategyConflicts(clinicIds) {
+  if (!Array.isArray(clinicIds) || clinicIds.length === 0) return [];
+
+  const rows = await CampaignRequest.findAll({
+    where: {
+      clinica_id: { [Op.in]: clinicIds },
+      estado: 'activa'
+    },
+    attributes: ['id', 'clinica_id', 'campaign_id', 'solicitud', 'created_at'],
+    order: [['created_at', 'DESC']],
+    raw: true
+  });
+
+  return rows
+    .filter((row) => {
+      const payload = row?.solicitud && typeof row.solicitud === 'object' ? row.solicitud : {};
+      return payload.kind === 'marketing_strategy' && payload.status === 'active';
+    })
+    .map((row) => ({
+      request_id: row.id,
+      clinica_id: row.clinica_id,
+      campaign_id: row.campaign_id || null
+    }));
 }
 
 async function findMappedGoogleAccountsForScope(connectionId, scope) {
@@ -1121,6 +1299,11 @@ exports.startCampaignOnboarding = asyncHandler(async (req, res) => {
       estado: 'aprobada',
       solicitud: finalPayload
     });
+    await upsertCampaignSettingsForScope(scope, {
+      active_mode: mode,
+      last_onboarding_id: request.id,
+      last_onboarding_at: new Date().toISOString()
+    });
 
     return res.status(201).json({
       success: true,
@@ -1174,5 +1357,232 @@ exports.getCampaignOnboardingStatus = asyncHandler(async (req, res) => {
     mode: payload.mode || null,
     steps: Array.isArray(payload.steps) ? payload.steps : [],
     result: payload.result || {}
+  });
+});
+
+exports.listMarketingStrategies = asyncHandler(async (req, res) => {
+  const userId = getUserId(req);
+  if (!userId) return res.status(401).json({ success: false, error: 'unauthenticated' });
+
+  const scope = await resolveScopeFromInput({
+    clinicIdRaw: req.query.clinic_id,
+    groupIdRaw: req.query.group_id,
+    assignmentScopeRaw: req.query.assignment_scope
+  });
+
+  const targetClinicIds = scope.assignment_scope === 'clinic'
+    ? [scope.clinic_id].filter(Boolean)
+    : scope.clinic_ids;
+
+  const requests = await CampaignRequest.findAll({
+    where: {
+      clinica_id: { [Op.in]: targetClinicIds },
+      estado: 'activa'
+    },
+    order: [['created_at', 'DESC']],
+    raw: true
+  });
+
+  const campaignIds = Array.from(new Set(requests.map((row) => row.campaign_id).filter(Boolean)));
+  const campaigns = campaignIds.length > 0
+    ? await Campaign.findAll({
+      where: { id: { [Op.in]: campaignIds } },
+      raw: true
+    })
+    : [];
+  const campaignsById = new Map(campaigns.map((item) => [item.id, item]));
+
+  const strategyMap = new Map();
+  for (const row of requests) {
+    const payload = row?.solicitud && typeof row.solicitud === 'object' ? row.solicitud : {};
+    if (payload.kind !== 'marketing_strategy' || payload.status !== 'active') {
+      continue;
+    }
+
+    const campaignId = row.campaign_id || `request-${row.id}`;
+    const existing = strategyMap.get(campaignId);
+    const clinicIds = existing?.clinic_ids || [];
+    if (!clinicIds.includes(row.clinica_id)) {
+      clinicIds.push(row.clinica_id);
+    }
+
+    strategyMap.set(campaignId, {
+      id: campaignId,
+      request_id: existing?.request_id || row.id,
+      campaign_id: row.campaign_id || null,
+      name: existing?.name || campaignsById.get(row.campaign_id)?.nombre || payload.summary?.name || 'Estrategia',
+      objective_id: payload.objective_id || null,
+      mode: payload.mode_snapshot || payload.mode || null,
+      status: payload.status || 'active',
+      budget_monthly: payload.summary?.budget_monthly ?? campaignsById.get(row.campaign_id)?.presupuesto ?? null,
+      clinic_ids: clinicIds,
+      channel_count: Array.isArray(payload.channels) ? payload.channels.length : 0,
+      created_at: existing?.created_at || row.created_at
+    });
+  }
+
+  return res.json({
+    success: true,
+    items: Array.from(strategyMap.values()).sort((a, b) => String(b.created_at).localeCompare(String(a.created_at)))
+  });
+});
+
+exports.createMarketingStrategy = asyncHandler(async (req, res) => {
+  const userId = getUserId(req);
+  if (!userId) return res.status(401).json({ success: false, error: 'unauthenticated' });
+
+  const objectiveId = String(req.body?.objective_id || '').trim().toLowerCase();
+  if (!VALID_STRATEGY_OBJECTIVES.has(objectiveId)) {
+    return res.status(400).json({ success: false, error: 'validation_error', message: 'objective_id inválido o no disponible' });
+  }
+
+  const scope = await resolveScopeFromInput({
+    clinicIdRaw: req.body?.clinic_id,
+    groupIdRaw: req.body?.group_id,
+    assignmentScopeRaw: req.body?.assignment_scope
+  });
+
+  const selectedClinicIds = parseClinicIds(req.body?.clinic_ids);
+  const targetClinicIds = scope.assignment_scope === 'clinic'
+    ? [scope.clinic_id].filter(Boolean)
+    : (selectedClinicIds.length > 0
+      ? selectedClinicIds.filter((id) => scope.clinic_ids.includes(id))
+      : scope.clinic_ids);
+
+  if (!targetClinicIds.length) {
+    return res.status(400).json({ success: false, error: 'validation_error', message: 'No hay clínicas válidas en el scope seleccionado' });
+  }
+
+  const clinicModes = await Promise.all(targetClinicIds.map((clinicId) => resolveModeForClinic(clinicId)));
+  const uniqueClinicModes = Array.from(new Set(clinicModes.filter((mode) => VALID_MODES.has(mode))));
+  if (uniqueClinicModes.length > 1) {
+    return res.status(409).json({
+      success: false,
+      error: 'mixed_modes',
+      message: 'Las clínicas seleccionadas no comparten el mismo modo de gestión. Alinea el modo desde Configuración o reduce la selección.'
+    });
+  }
+
+  const requestedMode = String(req.body?.mode || '').trim().toLowerCase();
+  const scopeMode = await resolveActiveModeForScope(scope);
+  const effectiveMode = uniqueClinicModes[0]
+    || (VALID_MODES.has(scopeMode) ? scopeMode : null)
+    || (VALID_MODES.has(requestedMode) ? requestedMode : null);
+
+  if (!effectiveMode) {
+    return res.status(409).json({
+      success: false,
+      error: 'mode_not_configured',
+      message: 'Antes de crear una estrategia debes completar la configuración técnica del scope.'
+    });
+  }
+
+  const treatments = normalizeStrategyTreatments(req.body?.treatments);
+  if (!treatments.length) {
+    return res.status(400).json({ success: false, error: 'validation_error', message: 'Selecciona al menos un tratamiento' });
+  }
+
+  const budgetMonthly = Number(req.body?.budget_monthly || 0);
+  if (!Number.isFinite(budgetMonthly) || budgetMonthly <= 0) {
+    return res.status(400).json({ success: false, error: 'validation_error', message: 'budget_monthly debe ser mayor que 0' });
+  }
+
+  const channels = normalizeStrategyChannels(req.body?.channels);
+  if (!channels.length) {
+    return res.status(400).json({ success: false, error: 'validation_error', message: 'Selecciona al menos un canal' });
+  }
+
+  const conflicts = await findActiveStrategyConflicts(targetClinicIds);
+  if (conflicts.length > 0) {
+    return res.status(409).json({
+      success: false,
+      error: 'active_strategy_exists',
+      message: 'Ya existe una estrategia activa para al menos una de las clínicas seleccionadas.',
+      conflicts
+    });
+  }
+
+  const dominantType = pickLegacyCampaignTypeFromChannels(channels);
+  const campaignName = buildStrategyName({
+    objectiveId,
+    treatments,
+    clinicCount: targetClinicIds.length
+  });
+
+  const campaign = await Campaign.create({
+    nombre: campaignName,
+    tipo: dominantType,
+    clinica_id: scope.assignment_scope === 'clinic' ? scope.clinic_id : null,
+    grupo_clinica_id: scope.group_id || null,
+    campaign_id_externo: null,
+    gestionada: effectiveMode !== 'connect_only',
+    activa: true,
+    fecha_inicio: new Date(),
+    fecha_fin: null,
+    presupuesto: budgetMonthly
+  });
+
+  const geo = req.body?.geo && typeof req.body.geo === 'object' ? req.body.geo : {};
+  const automation = req.body?.automation && typeof req.body.automation === 'object' ? req.body.automation : null;
+  const addonCalls = effectiveMode === 'managed_service' ? req.body?.addon_calls === true : false;
+
+  const createdRequests = [];
+  for (const clinicId of targetClinicIds) {
+    const payload = {
+      kind: 'marketing_strategy',
+      status: 'active',
+      objective_id: objectiveId,
+      mode_snapshot: effectiveMode,
+      scope: {
+        assignment_scope: scope.assignment_scope,
+        clinic_id: scope.assignment_scope === 'clinic' ? clinicId : null,
+        group_id: scope.group_id || null,
+        clinic_ids: targetClinicIds
+      },
+      summary: {
+        name: campaignName,
+        budget_monthly: budgetMonthly
+      },
+      treatments,
+      geo,
+      channels,
+      automation,
+      addons: {
+        call_leads: addonCalls
+      }
+    };
+
+    const request = await CampaignRequest.create({
+      clinica_id: clinicId,
+      campaign_id: campaign.id,
+      estado: 'activa',
+      solicitud: payload
+    });
+
+    createdRequests.push({
+      id: request.id,
+      clinica_id: clinicId
+    });
+  }
+
+  return res.status(201).json({
+    success: true,
+    campaign: {
+      id: campaign.id,
+      nombre: campaign.nombre,
+      tipo: campaign.tipo,
+      clinica_id: campaign.clinica_id,
+      grupo_clinica_id: campaign.grupo_clinica_id,
+      presupuesto: campaign.presupuesto,
+      gestionada: campaign.gestionada,
+      activa: campaign.activa
+    },
+    strategy: {
+      objective_id: objectiveId,
+      mode: effectiveMode,
+      clinic_ids: targetClinicIds,
+      addon_calls: addonCalls,
+      request_ids: createdRequests.map((item) => item.id)
+    }
   });
 });
