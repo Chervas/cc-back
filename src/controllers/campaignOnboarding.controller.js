@@ -303,6 +303,102 @@ async function loadIntakeRecordForScope(scope) {
   return record || null;
 }
 
+async function listClinicIdsForGroup(groupId) {
+  if (!groupId) return [];
+  const clinics = await Clinica.findAll({
+    where: { grupoClinicaId: groupId },
+    attributes: ['id_clinica'],
+    raw: true
+  });
+  return clinics
+    .map((clinic) => parseInteger(clinic.id_clinica))
+    .filter((value) => Number.isInteger(value) && value > 0);
+}
+
+async function findLatestCampaignMode(where, matcher) {
+  const rows = await CampaignRequest.findAll({
+    where,
+    attributes: ['id', 'clinica_id', 'solicitud', 'created_at'],
+    order: [['created_at', 'DESC']],
+    limit: 50,
+    raw: true
+  });
+
+  for (const row of rows) {
+    const payload = row?.solicitud && typeof row.solicitud === 'object' ? row.solicitud : {};
+    if (payload.kind !== 'campaign_onboarding' || payload.status !== 'completed') {
+      continue;
+    }
+
+    const mode = String(payload.mode || '').trim().toLowerCase();
+    if (!VALID_MODES.has(mode)) {
+      continue;
+    }
+
+    if (matcher(payload)) {
+      return mode;
+    }
+  }
+
+  return null;
+}
+
+async function resolveActiveModeForScope(scope) {
+  if (!scope || typeof scope !== 'object') return null;
+
+  if (scope.assignment_scope === 'clinic' && scope.clinic_id) {
+    const clinicMode = await findLatestCampaignMode(
+      { clinica_id: scope.clinic_id },
+      (payload) => {
+        const payloadScope = payload.scope && typeof payload.scope === 'object' ? payload.scope : {};
+        return payloadScope.assignment_scope === 'clinic'
+          && parseInteger(payloadScope.clinic_id) === scope.clinic_id;
+      }
+    );
+
+    if (clinicMode) {
+      return clinicMode;
+    }
+
+    if (scope.group_id) {
+      const groupClinicIds = await listClinicIdsForGroup(scope.group_id);
+      if (groupClinicIds.length > 0) {
+        return findLatestCampaignMode(
+          { clinica_id: { [Op.in]: groupClinicIds } },
+          (payload) => {
+            const payloadScope = payload.scope && typeof payload.scope === 'object' ? payload.scope : {};
+            return payloadScope.assignment_scope === 'group'
+              && parseInteger(payloadScope.group_id) === scope.group_id;
+          }
+        );
+      }
+    }
+
+    return null;
+  }
+
+  if (scope.assignment_scope === 'group' && scope.group_id) {
+    const groupClinicIds = Array.isArray(scope.clinic_ids) && scope.clinic_ids.length > 0
+      ? scope.clinic_ids
+      : await listClinicIdsForGroup(scope.group_id);
+
+    if (groupClinicIds.length === 0) {
+      return null;
+    }
+
+    return findLatestCampaignMode(
+      { clinica_id: { [Op.in]: groupClinicIds } },
+      (payload) => {
+        const payloadScope = payload.scope && typeof payload.scope === 'object' ? payload.scope : {};
+        return payloadScope.assignment_scope === 'group'
+          && parseInteger(payloadScope.group_id) === scope.group_id;
+      }
+    );
+  }
+
+  return null;
+}
+
 async function upsertIntakeGoogleAdsForScope(scope, googleAdsPatch) {
   const where = scope.assignment_scope === 'group'
     ? { group_id: scope.group_id, assignment_scope: 'group' }
@@ -688,6 +784,7 @@ exports.getCampaignOnboardingBootstrap = asyncHandler(async (req, res) => {
     groupIdRaw: req.query.group_id,
     assignmentScopeRaw: req.query.assignment_scope
   });
+  const activeMode = await resolveActiveModeForScope(scope);
 
   const intakeRecord = await loadIntakeRecordForScope(scope);
   const intakeConfig = intakeRecord?.config && typeof intakeRecord.config === 'object' ? intakeRecord.config : {};
@@ -750,6 +847,7 @@ exports.getCampaignOnboardingBootstrap = asyncHandler(async (req, res) => {
       group_id: scope.group_id || null
     },
     modes: ['connect_only', 'managed_self', 'managed_service'],
+    active_mode: activeMode,
     google_ads: {
       connected: googleConnected,
       reason: googleReason,
