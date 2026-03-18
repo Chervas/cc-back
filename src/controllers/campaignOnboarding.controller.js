@@ -10,6 +10,10 @@ const {
   formatCustomerId,
   ensureGoogleAdsConfig
 } = require('../lib/googleAdsClient');
+const {
+  resolveGoogleConnectionForScope,
+  resolveMetaConnectionForScope
+} = require('../services/scopeConnectionResolver.service');
 
 const GoogleConnection = db.GoogleConnection;
 const MetaConnection = db.MetaConnection;
@@ -30,6 +34,21 @@ const VALID_PROVIDERS = new Set(['google_ads', 'meta_ads']);
 const VALID_EVENTS = ['lead', 'contact', 'schedule', 'purchase'];
 const VALID_STRATEGY_OBJECTIVES = new Set(['new_patients']);
 const VALID_STRATEGY_CHANNELS = new Set(['meta_ads', 'google_ads', 'whatsapp', 'email', 'remarketing', 'landing', 'youtube', 'phone']);
+const VALID_STRATEGY_STATUSES = new Set(['draft', 'pending_approval', 'active', 'paused', 'completed']);
+const STRATEGY_STATUS_TRANSITIONS = {
+  draft: ['pending_approval'],
+  pending_approval: ['active', 'draft'],
+  active: ['paused', 'completed'],
+  paused: ['active', 'completed'],
+  completed: []
+};
+const STRATEGY_REQUEST_STATE_MAP = {
+  draft: 'pendiente_aceptacion',
+  pending_approval: 'pendiente_aceptacion',
+  active: 'activa',
+  paused: 'pausada',
+  completed: 'finalizada'
+};
 
 const EVENT_CATALOG = {
   lead: {
@@ -125,6 +144,55 @@ function normalizeCampaignConfig(rawConfig) {
     last_onboarding_id: parseInteger(rawConfig.last_onboarding_id || rawConfig.lastOnboardingId) || null,
     last_onboarding_at: rawConfig.last_onboarding_at || rawConfig.lastOnboardingAt || null
   };
+}
+
+function normalizeStrategyStatus(rawStatus) {
+  const status = String(rawStatus || '').trim().toLowerCase();
+  if (VALID_STRATEGY_STATUSES.has(status)) {
+    return status;
+  }
+  const legacyMap = {
+    borrador: 'draft',
+    pendiente_aceptacion: 'pending_approval',
+    activa: 'active',
+    pausada: 'paused',
+    finalizada: 'completed'
+  };
+  return legacyMap[status] || 'draft';
+}
+
+function mapStrategyStatusToRequestState(status) {
+  return STRATEGY_REQUEST_STATE_MAP[normalizeStrategyStatus(status)] || 'pendiente_aceptacion';
+}
+
+function canTransitionStrategy(fromStatus, toStatus) {
+  const from = normalizeStrategyStatus(fromStatus);
+  const to = normalizeStrategyStatus(toStatus);
+  return (STRATEGY_STATUS_TRANSITIONS[from] || []).includes(to);
+}
+
+function createEmptyStrategyMetrics() {
+  return {
+    investment: 0,
+    leads: 0,
+    conversions: 0,
+    revenue: 0,
+    cpl: null,
+    cost_per_conversion: null
+  };
+}
+
+function asPositiveNumber(rawValue) {
+  const value = Number(rawValue);
+  return Number.isFinite(value) && value > 0 ? value : 0;
+}
+
+function asNullableNumber(rawValue) {
+  if (rawValue === null || rawValue === undefined || rawValue === '') {
+    return null;
+  }
+  const value = Number(rawValue);
+  return Number.isFinite(value) ? value : null;
 }
 
 function mergeGoogleAdsEvents(baseEvents, patchEvents) {
@@ -637,6 +705,98 @@ function buildStrategyName({ objectiveId, treatments, clinicCount }) {
   return `${objectiveName} · ${treatmentLabel}${scopeLabel}`;
 }
 
+function buildStrategyMetrics(campaign, payload) {
+  const payloadMetrics = payload?.metrics && typeof payload.metrics === 'object' ? payload.metrics : {};
+  const investment = asPositiveNumber(payloadMetrics.investment ?? campaign?.gasto ?? 0);
+  const leads = asPositiveNumber(payloadMetrics.leads ?? campaign?.total_leads ?? 0);
+  const conversions = asPositiveNumber(payloadMetrics.conversions ?? 0);
+  const revenue = asPositiveNumber(payloadMetrics.revenue ?? 0);
+
+  const cpl = asNullableNumber(
+    payloadMetrics.cpl
+    ?? campaign?.cpl
+    ?? (leads > 0 ? Number((investment / leads).toFixed(2)) : null)
+  );
+  const costPerConversion = asNullableNumber(
+    payloadMetrics.cost_per_conversion
+    ?? payloadMetrics.costPerConversion
+    ?? (conversions > 0 ? Number((investment / conversions).toFixed(2)) : null)
+  );
+
+  return {
+    investment,
+    leads,
+    conversions,
+    revenue,
+    cpl,
+    cost_per_conversion: costPerConversion
+  };
+}
+
+function buildStrategyItemFromRows(rows, campaignsById) {
+  const normalizedRows = Array.isArray(rows) ? rows.filter(Boolean) : [];
+  if (!normalizedRows.length) return null;
+
+  const orderedRows = [...normalizedRows].sort((a, b) => String(b.updated_at || b.created_at || '').localeCompare(String(a.updated_at || a.created_at || '')));
+  const representative = orderedRows[0];
+  const payload = representative?.solicitud && typeof representative.solicitud === 'object' ? representative.solicitud : {};
+  const campaignId = representative.campaign_id || null;
+  const campaign = campaignId ? campaignsById.get(campaignId) || null : null;
+  const clinicIds = Array.from(new Set(orderedRows.map((row) => parseInteger(row.clinica_id)).filter((value) => value)));
+
+  return {
+    id: campaignId || representative.id,
+    request_id: representative.id,
+    campaign_id: campaignId,
+    name: campaign?.nombre || payload.summary?.name || 'Estrategia',
+    objective_id: payload.objective_id || null,
+    mode: payload.mode_snapshot || payload.mode || null,
+    status: normalizeStrategyStatus(payload.status || representative.estado),
+    budget_monthly: Number(payload.summary?.budget_monthly ?? campaign?.presupuesto ?? 0) || 0,
+    clinic_ids: clinicIds,
+    treatments: Array.isArray(payload.treatments) ? payload.treatments : [],
+    channels: Array.isArray(payload.channels) ? payload.channels : [],
+    geo: payload.geo && typeof payload.geo === 'object' ? payload.geo : {},
+    automation: payload.automation && typeof payload.automation === 'object' ? payload.automation : null,
+    addons: payload.addons && typeof payload.addons === 'object' ? payload.addons : {},
+    metrics: buildStrategyMetrics(campaign, payload),
+    created_at: representative.created_at,
+    updated_at: representative.updated_at || representative.created_at
+  };
+}
+
+async function loadCampaignsByIds(campaignIds) {
+  const uniqueIds = Array.from(new Set((campaignIds || []).map((id) => parseInteger(id)).filter((id) => id)));
+  if (!uniqueIds.length) {
+    return new Map();
+  }
+
+  const campaigns = await Campaign.findAll({
+    where: { id: { [Op.in]: uniqueIds } },
+    raw: true
+  });
+  return new Map(campaigns.map((item) => [item.id, item]));
+}
+
+async function loadStrategyRowsByIdentifier(strategyId) {
+  const numericId = parseInteger(strategyId);
+  if (!numericId) {
+    return [];
+  }
+
+  const campaignRows = await CampaignRequest.findAll({
+    where: { campaign_id: numericId },
+    order: [['updated_at', 'DESC'], ['created_at', 'DESC']],
+    raw: true
+  });
+  if (campaignRows.length > 0) {
+    return campaignRows;
+  }
+
+  const directRequest = await CampaignRequest.findByPk(numericId, { raw: true });
+  return directRequest ? [directRequest] : [];
+}
+
 async function resolveModeForClinic(clinicId) {
   if (!clinicId) return null;
   const clinic = await Clinica.findOne({
@@ -657,15 +817,14 @@ async function resolveModeForClinic(clinicId) {
   });
 }
 
-async function findActiveStrategyConflicts(clinicIds) {
+async function findBlockingStrategyConflicts(clinicIds, { excludeCampaignId = null, excludeRequestIds = [] } = {}) {
   if (!Array.isArray(clinicIds) || clinicIds.length === 0) return [];
 
   const rows = await CampaignRequest.findAll({
     where: {
-      clinica_id: { [Op.in]: clinicIds },
-      estado: 'activa'
+      clinica_id: { [Op.in]: clinicIds }
     },
-    attributes: ['id', 'clinica_id', 'campaign_id', 'solicitud', 'created_at'],
+    attributes: ['id', 'clinica_id', 'campaign_id', 'solicitud', 'estado', 'created_at', 'updated_at'],
     order: [['created_at', 'DESC']],
     raw: true
   });
@@ -673,12 +832,26 @@ async function findActiveStrategyConflicts(clinicIds) {
   return rows
     .filter((row) => {
       const payload = row?.solicitud && typeof row.solicitud === 'object' ? row.solicitud : {};
-      return payload.kind === 'marketing_strategy' && payload.status === 'active';
+      if (payload.kind !== 'marketing_strategy') {
+        return false;
+      }
+
+      if (excludeCampaignId && parseInteger(row.campaign_id) === parseInteger(excludeCampaignId)) {
+        return false;
+      }
+
+      if (excludeRequestIds.includes(parseInteger(row.id))) {
+        return false;
+      }
+
+      const status = normalizeStrategyStatus(payload.status || row.estado);
+      return status === 'active' || status === 'pending_approval';
     })
     .map((row) => ({
       request_id: row.id,
       clinica_id: row.clinica_id,
-      campaign_id: row.campaign_id || null
+      campaign_id: row.campaign_id || null,
+      status: normalizeStrategyStatus((row?.solicitud || {}).status || row.estado)
     }));
 }
 
@@ -974,7 +1147,14 @@ exports.getCampaignOnboardingBootstrap = asyncHandler(async (req, res) => {
   let googleAccounts = [];
   let selectedCustomerId = intakeGoogleAds.customer_id || null;
 
-  const googleConnection = await GoogleConnection.findOne({ where: { userId } });
+  const googleResolved = await resolveGoogleConnectionForScope({
+    userId,
+    clinicIdRaw: scope.clinic_id,
+    groupIdRaw: scope.group_id,
+    assignmentScopeRaw: scope.assignment_scope,
+    allowLegacyUserFallback: true
+  });
+  const googleConnection = googleResolved.connection;
   if (!googleConnection) {
     googleReason = 'no_connection';
   } else {
@@ -1005,7 +1185,14 @@ exports.getCampaignOnboardingBootstrap = asyncHandler(async (req, res) => {
   let metaConnected = false;
   let metaReason = null;
   let metaAssets = { ad_accounts: [], pixels: [] };
-  const metaConnection = await MetaConnection.findOne({ where: { userId } });
+  const metaResolved = await resolveMetaConnectionForScope({
+    userId,
+    clinicIdRaw: scope.clinic_id,
+    groupIdRaw: scope.group_id,
+    assignmentScopeRaw: scope.assignment_scope,
+    allowLegacyUserFallback: true
+  });
+  const metaConnection = metaResolved.connection;
   if (!metaConnection) {
     metaReason = 'no_connection';
   } else {
@@ -1373,57 +1560,179 @@ exports.listMarketingStrategies = asyncHandler(async (req, res) => {
   const targetClinicIds = scope.assignment_scope === 'clinic'
     ? [scope.clinic_id].filter(Boolean)
     : scope.clinic_ids;
+  const objectiveFilter = String(req.query.objective_id || '').trim().toLowerCase() || null;
 
   const requests = await CampaignRequest.findAll({
     where: {
-      clinica_id: { [Op.in]: targetClinicIds },
-      estado: 'activa'
+      clinica_id: { [Op.in]: targetClinicIds }
     },
-    order: [['created_at', 'DESC']],
+    order: [['updated_at', 'DESC'], ['created_at', 'DESC']],
     raw: true
   });
 
-  const campaignIds = Array.from(new Set(requests.map((row) => row.campaign_id).filter(Boolean)));
-  const campaigns = campaignIds.length > 0
-    ? await Campaign.findAll({
-      where: { id: { [Op.in]: campaignIds } },
-      raw: true
-    })
-    : [];
-  const campaignsById = new Map(campaigns.map((item) => [item.id, item]));
-
-  const strategyMap = new Map();
-  for (const row of requests) {
+  const strategyRows = requests.filter((row) => {
     const payload = row?.solicitud && typeof row.solicitud === 'object' ? row.solicitud : {};
-    if (payload.kind !== 'marketing_strategy' || payload.status !== 'active') {
-      continue;
-    }
+    return payload.kind === 'marketing_strategy';
+  });
 
-    const campaignId = row.campaign_id || `request-${row.id}`;
-    const existing = strategyMap.get(campaignId);
-    const clinicIds = existing?.clinic_ids || [];
-    if (!clinicIds.includes(row.clinica_id)) {
-      clinicIds.push(row.clinica_id);
+  const campaignsById = await loadCampaignsByIds(strategyRows.map((row) => row.campaign_id));
+  const strategyMap = new Map();
+  for (const row of strategyRows) {
+    const key = row.campaign_id || row.id;
+    if (!strategyMap.has(key)) {
+      strategyMap.set(key, []);
     }
+    strategyMap.get(key).push(row);
+  }
 
-    strategyMap.set(campaignId, {
-      id: campaignId,
-      request_id: existing?.request_id || row.id,
-      campaign_id: row.campaign_id || null,
-      name: existing?.name || campaignsById.get(row.campaign_id)?.nombre || payload.summary?.name || 'Estrategia',
-      objective_id: payload.objective_id || null,
-      mode: payload.mode_snapshot || payload.mode || null,
-      status: payload.status || 'active',
-      budget_monthly: payload.summary?.budget_monthly ?? campaignsById.get(row.campaign_id)?.presupuesto ?? null,
-      clinic_ids: clinicIds,
-      channel_count: Array.isArray(payload.channels) ? payload.channels.length : 0,
-      created_at: existing?.created_at || row.created_at
+  const items = Array.from(strategyMap.values())
+    .map((rows) => buildStrategyItemFromRows(rows, campaignsById))
+    .filter(Boolean)
+    .filter((item) => !objectiveFilter || item.objective_id === objectiveFilter)
+    .sort((a, b) => String(b.updated_at || b.created_at).localeCompare(String(a.updated_at || a.created_at)));
+
+  return res.json({
+    success: true,
+    items
+  });
+});
+
+exports.getMarketingStrategyDetail = asyncHandler(async (req, res) => {
+  const userId = getUserId(req);
+  if (!userId) return res.status(401).json({ success: false, error: 'unauthenticated' });
+
+  const rows = await loadStrategyRowsByIdentifier(req.params.id);
+  if (!rows.length) {
+    return res.status(404).json({ success: false, error: 'not_found', message: 'Estrategia no encontrada' });
+  }
+
+  const campaignsById = await loadCampaignsByIds(rows.map((row) => row.campaign_id));
+  const strategy = buildStrategyItemFromRows(rows, campaignsById);
+  if (!strategy) {
+    return res.status(404).json({ success: false, error: 'not_found', message: 'Estrategia no encontrada' });
+  }
+
+  return res.json({
+    success: true,
+    strategy
+  });
+});
+
+exports.getMarketingStrategyMetrics = asyncHandler(async (req, res) => {
+  const userId = getUserId(req);
+  if (!userId) return res.status(401).json({ success: false, error: 'unauthenticated' });
+
+  const rows = await loadStrategyRowsByIdentifier(req.params.id);
+  if (!rows.length) {
+    return res.status(404).json({ success: false, error: 'not_found', message: 'Estrategia no encontrada' });
+  }
+
+  const campaignsById = await loadCampaignsByIds(rows.map((row) => row.campaign_id));
+  const strategy = buildStrategyItemFromRows(rows, campaignsById);
+  const now = new Date();
+  const from = new Date(now.getTime() - (30 * 24 * 60 * 60 * 1000));
+
+  return res.json({
+    success: true,
+    strategy_id: strategy.id,
+    metrics: strategy.metrics || createEmptyStrategyMetrics(),
+    period: {
+      from: from.toISOString(),
+      to: now.toISOString()
+    }
+  });
+});
+
+exports.transitionMarketingStrategyStatus = asyncHandler(async (req, res) => {
+  const userId = getUserId(req);
+  if (!userId) return res.status(401).json({ success: false, error: 'unauthenticated' });
+
+  const requestedStatus = String(req.body?.status || '').trim().toLowerCase();
+  if (!VALID_STRATEGY_STATUSES.has(requestedStatus)) {
+    return res.status(400).json({ success: false, error: 'validation_error', message: 'status inválido' });
+  }
+  const nextStatus = normalizeStrategyStatus(requestedStatus);
+
+  const rows = await loadStrategyRowsByIdentifier(req.params.id);
+  if (!rows.length) {
+    return res.status(404).json({ success: false, error: 'not_found', message: 'Estrategia no encontrada' });
+  }
+
+  const campaignsById = await loadCampaignsByIds(rows.map((row) => row.campaign_id));
+  const strategy = buildStrategyItemFromRows(rows, campaignsById);
+  const currentStatus = normalizeStrategyStatus(strategy?.status);
+
+  if (!canTransitionStrategy(currentStatus, nextStatus)) {
+    return res.status(409).json({
+      success: false,
+      error: 'invalid_transition',
+      message: `Transición no permitida: ${currentStatus} → ${nextStatus}`
+    });
+  }
+
+  if (nextStatus === 'pending_approval' || nextStatus === 'active') {
+    const conflicts = await findBlockingStrategyConflicts(strategy.clinic_ids, {
+      excludeCampaignId: strategy.campaign_id,
+      excludeRequestIds: rows.map((row) => parseInteger(row.id)).filter((value) => value)
+    });
+
+    if (conflicts.length > 0) {
+      return res.status(409).json({
+        success: false,
+        error: 'active_strategy_exists',
+        message: 'Ya existe una estrategia activa o pendiente de aprobación para al menos una de las clínicas seleccionadas.',
+        conflicts
+      });
+    }
+  }
+
+  const now = new Date();
+  const nowIso = now.toISOString();
+  const requestState = mapStrategyStatusToRequestState(nextStatus);
+
+  for (const row of rows) {
+    const payload = row?.solicitud && typeof row.solicitud === 'object' ? row.solicitud : {};
+    const history = Array.isArray(payload.status_history) ? [...payload.status_history] : [];
+    history.push({
+      from: currentStatus,
+      to: nextStatus,
+      changed_at: nowIso,
+      user_id: userId
+    });
+
+    await CampaignRequest.update({
+      estado: requestState,
+      solicitud: {
+        ...payload,
+        status: nextStatus,
+        status_history: history,
+        updated_at: nowIso
+      },
+      updated_at: now
+    }, {
+      where: { id: row.id }
+    });
+  }
+
+  if (strategy.campaign_id) {
+    await Campaign.update({
+      activa: nextStatus === 'active',
+      fecha_inicio: nextStatus === 'active'
+        ? (campaignsById.get(strategy.campaign_id)?.fecha_inicio || now)
+        : campaignsById.get(strategy.campaign_id)?.fecha_inicio || null,
+      fecha_fin: nextStatus === 'completed' ? now : null
+    }, {
+      where: { id: strategy.campaign_id }
     });
   }
 
   return res.json({
     success: true,
-    items: Array.from(strategyMap.values()).sort((a, b) => String(b.created_at).localeCompare(String(a.created_at)))
+    strategy: {
+      id: strategy.id,
+      status: nextStatus,
+      updated_at: nowIso
+    }
   });
 });
 
@@ -1492,12 +1801,12 @@ exports.createMarketingStrategy = asyncHandler(async (req, res) => {
     return res.status(400).json({ success: false, error: 'validation_error', message: 'Selecciona al menos un canal' });
   }
 
-  const conflicts = await findActiveStrategyConflicts(targetClinicIds);
+  const conflicts = await findBlockingStrategyConflicts(targetClinicIds);
   if (conflicts.length > 0) {
     return res.status(409).json({
       success: false,
       error: 'active_strategy_exists',
-      message: 'Ya existe una estrategia activa para al menos una de las clínicas seleccionadas.',
+      message: 'Ya existe una estrategia activa o pendiente de aprobación para al menos una de las clínicas seleccionadas.',
       conflicts
     });
   }
@@ -1516,8 +1825,8 @@ exports.createMarketingStrategy = asyncHandler(async (req, res) => {
     grupo_clinica_id: scope.group_id || null,
     campaign_id_externo: null,
     gestionada: effectiveMode !== 'connect_only',
-    activa: true,
-    fecha_inicio: new Date(),
+    activa: false,
+    fecha_inicio: null,
     fecha_fin: null,
     presupuesto: budgetMonthly
   });
@@ -1530,7 +1839,7 @@ exports.createMarketingStrategy = asyncHandler(async (req, res) => {
   for (const clinicId of targetClinicIds) {
     const payload = {
       kind: 'marketing_strategy',
-      status: 'active',
+      status: 'draft',
       objective_id: objectiveId,
       mode_snapshot: effectiveMode,
       scope: {
@@ -1555,7 +1864,7 @@ exports.createMarketingStrategy = asyncHandler(async (req, res) => {
     const request = await CampaignRequest.create({
       clinica_id: clinicId,
       campaign_id: campaign.id,
-      estado: 'activa',
+      estado: mapStrategyStatusToRequestState('draft'),
       solicitud: payload
     });
 
@@ -1578,8 +1887,10 @@ exports.createMarketingStrategy = asyncHandler(async (req, res) => {
       activa: campaign.activa
     },
     strategy: {
+      id: campaign.id,
       objective_id: objectiveId,
       mode: effectiveMode,
+      status: 'draft',
       clinic_ids: targetClinicIds,
       addon_calls: addonCalls,
       request_ids: createdRequests.map((item) => item.id)

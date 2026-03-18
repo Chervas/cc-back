@@ -20,6 +20,9 @@ router.post('/campaign-onboarding/start', campaignOnboardingController.startCamp
 router.get('/campaign-onboarding/:onboardingId/status', campaignOnboardingController.getCampaignOnboardingStatus);
 router.get('/strategies', campaignOnboardingController.listMarketingStrategies);
 router.post('/strategies', campaignOnboardingController.createMarketingStrategy);
+router.get('/strategies/:id', campaignOnboardingController.getMarketingStrategyDetail);
+router.patch('/strategies/:id/status', campaignOnboardingController.transitionMarketingStrategyStatus);
+router.get('/strategies/:id/metrics', campaignOnboardingController.getMarketingStrategyMetrics);
 
 // Google Ads onboarding helpers
 router.get('/google-ads/conversion-actions', campaignOnboardingController.listGoogleAdsConversionActions);
