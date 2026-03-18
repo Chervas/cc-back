@@ -42,20 +42,33 @@ async function runAutomationFlowV2Job(payload = {}) {
   }
 
   const options = {};
+  const waitingMeta = execution?.waiting_meta && typeof execution.waiting_meta === 'object'
+    ? execution.waiting_meta
+    : {};
+  const waitingResumeMode = typeof waitingMeta.resume_mode === 'string'
+    ? waitingMeta.resume_mode.trim().toLowerCase()
+    : '';
+
   if (payload.resume_mode === 'response' || payload.resume_mode === 'timeout' || payload.resume_mode === 'form_submission') {
     options.resumeMode = payload.resume_mode;
   } else if (execution.status === 'waiting') {
-    options.resumeMode = 'timeout';
+    if (waitingResumeMode === 'response' || waitingResumeMode === 'timeout' || waitingResumeMode === 'form_submission') {
+      options.resumeMode = waitingResumeMode;
+    } else {
+      options.resumeMode = 'timeout';
+    }
   }
 
   if (payload.response_text !== undefined) {
     options.responseText = payload.response_text;
+  } else if (options.resumeMode === 'response' && waitingMeta.pending_response_text !== undefined) {
+    options.responseText = waitingMeta.pending_response_text;
   }
 
   if (payload.form_submission !== undefined) {
     options.formSubmission = payload.form_submission;
   } else if (options.resumeMode === 'form_submission') {
-    const pendingForm = execution?.waiting_meta?.pending_form_submission;
+    const pendingForm = waitingMeta.pending_form_submission;
     if (pendingForm && typeof pendingForm === 'object') {
       options.formSubmission = pendingForm;
     }
@@ -221,6 +234,30 @@ async function runLeadCallbackReminderJob(payload = {}, jobRequest = null) {
   };
 }
 
+async function runAppointmentAutomationScheduleJob(payload = {}) {
+  const appointmentId = Number(payload.appointment_id || 0);
+  if (!Number.isInteger(appointmentId) || appointmentId <= 0) {
+    throw new Error('appointment_automation_schedule_fire requires payload.appointment_id');
+  }
+
+  // Carga diferida para evitar circularidad con appointmentAutomationV2Runtime -> jobScheduler -> jobExecutor.
+  const appointmentAutomationV2Runtime = require('./appointmentAutomationV2Runtime.service');
+  const result = await appointmentAutomationV2Runtime.fireScheduledTrigger(payload);
+
+  if (result?.waiting && result?.scheduled_for) {
+    return {
+      status: 'waiting',
+      nextAllowedAt: new Date(result.scheduled_for),
+      result,
+    };
+  }
+
+  return {
+    status: 'completed',
+    result,
+  };
+}
+
 const JOB_HANDLERS = {
   meta_ads_recent: async (payload = {}) => metaSyncJobs.executeAdsSync(payload),
   meta_ads_midday: async (payload = {}) => metaSyncJobs.executeAdsSync({ ...payload, windowLabel: 'midday' }),
@@ -234,8 +271,13 @@ const JOB_HANDLERS = {
   analytics_backfill: async (payload = {}) => metaSyncJobs.executeAnalyticsBackfill(payload),
   analytics_backfill_properties: async (payload = {}) => metaSyncJobs.executeAnalyticsBackfillForProperties(payload.mappings || []),
   automations_v2_execute: async (payload = {}) => runAutomationFlowV2Job(payload),
+  appointment_automation_schedule_fire: async (payload = {}) => runAppointmentAutomationScheduleJob(payload),
   lead_callback_reminder_notify: async (payload = {}, jobRequest) => runLeadCallbackReminderJob(payload, jobRequest),
 };
+
+function normalizeJobType(value) {
+  return String(value || '').trim().toLowerCase();
+}
 
 const asPromiseWithTimeout = (promise, timeoutMs) => {
   let timeoutId;
@@ -262,9 +304,14 @@ function resolveNextRun({ pauseUntil, backoffMs }) {
 }
 
 async function runJob(jobRequest) {
-  const handler = JOB_HANDLERS[jobRequest.type];
+  const jobType = normalizeJobType(jobRequest?.type);
+  let handler = JOB_HANDLERS[jobType];
+  if (!handler && jobType === 'automations_v2_execute') {
+    // Salvaguarda frente a estados parciales de carga del módulo en arranque.
+    handler = async (payload = {}) => runAutomationFlowV2Job(payload);
+  }
   if (!handler) {
-    throw new Error(`No handler registered for job type '${jobRequest.type}'`);
+    throw new Error(`No handler registered for job type '${jobType || jobRequest?.type || 'unknown'}'`);
   }
 
   try {

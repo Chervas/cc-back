@@ -109,6 +109,19 @@ module.exports = (sequelize, DataTypes) => {
     appointment_automation_template_version: {
       type: DataTypes.INTEGER,
       allowNull: true
+    },
+    asignacion_instalacion_tipo: {
+      type: DataTypes.ENUM('cualquiera', 'especificas'),
+      allowNull: false,
+      defaultValue: 'cualquiera'
+    },
+    tipo_instalacion_requerida: {
+      type: DataTypes.ENUM('box', 'quirofano', 'sala', 'consulta', 'laboratorio', 'sala_pruebas', 'sala_polivalente', 'otro'),
+      allowNull: true
+    },
+    instalaciones_habilitadas: {
+      type: DataTypes.JSON,
+      allowNull: true
     }
   }, {
     sequelize,

@@ -8,6 +8,7 @@ const FlowExecutionV2 = db.FlowExecutionV2;
 const AutomationFlowTemplateV2 = db.AutomationFlowTemplateV2;
 const JobRequest = db.JobRequest;
 const FORM_MATCH_MODES = new Set(['url_contains', 'url_equals', 'form_id', 'selector']);
+const BUFFERED_RESPONSE_TIMERS = new Map();
 
 function cleanString(value) {
   if (value === undefined || value === null) return null;
@@ -186,6 +187,66 @@ function getResponseBufferConfig(waitNode) {
   };
 }
 
+function clearBufferedResponseTimer(executionId) {
+  const normalizedExecutionId = toIntOrNull(executionId);
+  if (!normalizedExecutionId) return;
+  const existing = BUFFERED_RESPONSE_TIMERS.get(normalizedExecutionId);
+  if (existing) {
+    clearTimeout(existing);
+    BUFFERED_RESPONSE_TIMERS.delete(normalizedExecutionId);
+  }
+}
+
+async function triggerBufferedResponseResume(executionId) {
+  const normalizedExecutionId = toIntOrNull(executionId);
+  clearBufferedResponseTimer(normalizedExecutionId);
+  if (!normalizedExecutionId) return;
+
+  const execution = await FlowExecutionV2.findByPk(normalizedExecutionId);
+  if (!execution || execution.status !== 'waiting') {
+    return;
+  }
+
+  const waitingMeta = execution.waiting_meta && typeof execution.waiting_meta === 'object'
+    ? execution.waiting_meta
+    : {};
+
+  if (cleanString(waitingMeta.resume_mode) !== 'response') {
+    return;
+  }
+
+  const responseText = cleanString(waitingMeta.pending_response_text);
+  if (!responseText) {
+    return;
+  }
+
+  const flowEngineV2Service = require('./flowEngineV2.service');
+  await flowEngineV2Service.runExecution(normalizedExecutionId, {
+    resumeMode: 'response',
+    responseText,
+  });
+}
+
+function scheduleBufferedResponseResume(executionId, waitUntil) {
+  const parsedExecutionId = toIntOrNull(executionId);
+  const targetAt = waitUntil ? new Date(waitUntil).getTime() : NaN;
+  if (!parsedExecutionId || !Number.isFinite(targetAt)) {
+    return;
+  }
+
+  clearBufferedResponseTimer(parsedExecutionId);
+  const delayMs = Math.max(0, targetAt - Date.now()) + 150;
+  const timer = setTimeout(() => {
+    triggerBufferedResponseResume(parsedExecutionId).catch(() => {});
+  }, delayMs);
+
+  if (typeof timer.unref === 'function') {
+    timer.unref();
+  }
+
+  BUFFERED_RESPONSE_TIMERS.set(parsedExecutionId, timer);
+}
+
 async function findQueuedResumeJob(executionId, resumeMode) {
   const execution = toIntOrNull(executionId);
   const normalizedMode = cleanString(resumeMode);
@@ -213,6 +274,38 @@ async function findQueuedResponseResumeJob(executionId) {
   return findQueuedResumeJob(executionId, 'response');
 }
 
+async function findQueuedExecutionJob(executionId) {
+  const execution = toIntOrNull(executionId);
+  if (!execution) return null;
+  const rows = await db.sequelize.query(
+    `
+    SELECT id, status, next_run_at, payload
+    FROM JobRequests
+    WHERE type = 'automations_v2_execute'
+      AND status IN ('pending', 'waiting', 'running')
+      AND JSON_EXTRACT(payload, '$.execution_id') = :executionId
+    ORDER BY id DESC
+    LIMIT 1
+    `,
+    {
+      replacements: { executionId: execution },
+      type: db.sequelize.QueryTypes.SELECT,
+    }
+  );
+  return rows?.[0] || null;
+}
+
+async function cancelQueuedExecutionJob(executionId, reason) {
+  const queuedJob = await findQueuedExecutionJob(executionId);
+  if (!queuedJob) return;
+  const queuedStatus = cleanString(queuedJob.status);
+  if (queuedStatus === 'waiting' || queuedStatus === 'pending' || queuedStatus === 'running') {
+    await jobRequestsService.markCancelled(queuedJob.id, {
+      errorMessage: reason || 'cancelled',
+    });
+  }
+}
+
 function matchesExecutionTarget(execution, { conversationId, patientId, leadId }) {
   const triggerType = normalizeType(execution?.trigger_entity_type);
   const triggerEntityId = toIntOrNull(execution?.trigger_entity_id);
@@ -233,10 +326,10 @@ function matchesExecutionTarget(execution, { conversationId, patientId, leadId }
   }
 
   // Fallback por contexto cuando el trigger_entity_type no esté normalizado todavía.
+  // Para respuestas inbound no debemos hacer match por appointment_id: una ejecución
+  // disparada por cita siempre cumple su propio trigger_entity_id y eso abriría el
+  // flujo a cualquier mensaje entrante de la clínica.
   const contextIds = collectContextIds(execution);
-  if (['appointment', 'cita'].includes(triggerType) && triggerEntityId) {
-    if (contextIds.appointment_id && contextIds.appointment_id === triggerEntityId) return true;
-  }
   if (contextIds.conversation_id && contextIds.conversation_id === conversationId) return true;
   if (leadId && contextIds.lead_id && contextIds.lead_id === leadId) return true;
   if (patientId && contextIds.patient_id && contextIds.patient_id === patientId) return true;
@@ -377,11 +470,49 @@ async function enqueueInboundResponseResume({
     });
   });
 
+  let effectiveMatches = matched;
+  const supersededExecutionIds = [];
+
+  if (normalizedConversationId && matched.length > 1) {
+    const sorted = [...matched].sort((a, b) => {
+      const byId = Number(b.id || 0) - Number(a.id || 0);
+      if (byId !== 0) return byId;
+      return new Date(b.created_at || 0).getTime() - new Date(a.created_at || 0).getTime();
+    });
+
+    const newest = sorted[0];
+    const staleExecutions = sorted.slice(1);
+
+    for (const staleExecution of staleExecutions) {
+      supersededExecutionIds.push(staleExecution.id);
+      const existingWaitingMeta = staleExecution.waiting_meta && typeof staleExecution.waiting_meta === 'object'
+        ? staleExecution.waiting_meta
+        : {};
+
+      await staleExecution.update({
+        status: 'cancelled',
+        current_node_id: null,
+        wait_until: null,
+        waiting_meta: {
+          ...existingWaitingMeta,
+          cancelled_reason: 'superseded_by_newer_waiting_execution',
+          superseded_by_execution_id: newest.id,
+          cancelled_at: new Date().toISOString(),
+        },
+      });
+
+      clearBufferedResponseTimer(staleExecution.id);
+      await cancelQueuedExecutionJob(staleExecution.id, 'superseded_by_newer_waiting_execution');
+    }
+
+    effectiveMatches = newest ? [newest] : [];
+  }
+
   let enqueued = 0;
   const executionIds = [];
   const errors = [];
 
-  for (const execution of matched) {
+  for (const execution of effectiveMatches) {
     executionIds.push(execution.id);
     try {
       const waitNode = getWaitResponseNode(execution);
@@ -409,36 +540,30 @@ async function enqueueInboundResponseResume({
           },
         });
 
-        const queuedJob = await findQueuedResponseResumeJob(execution.id);
+        const queuedJob = await findQueuedExecutionJob(execution.id);
+        const queuedPayload = queuedJob?.payload && typeof queuedJob.payload === 'object'
+          ? queuedJob.payload
+          : {};
+        const responsePayload = {
+          ...queuedPayload,
+          execution_id: execution.id,
+          resume_mode: 'response',
+          inbound_channel: channel,
+          inbound_conversation_id: normalizedConversationId,
+          inbound_message_id: inboundMessageId || null,
+          inbound_patient_id: normalizedPatientId || null,
+          inbound_lead_id: normalizedLeadId || null,
+        };
         if (queuedJob) {
-          if (cleanString(queuedJob.status) === 'waiting') {
-            await JobRequest.update(
-              {
-                next_run_at: waitUntil,
-                updated_at: new Date(),
-              },
-              { where: { id: queuedJob.id } }
-            );
+          const queuedStatus = cleanString(queuedJob.status);
+          if (queuedStatus === 'waiting' || queuedStatus === 'pending' || queuedStatus === 'running') {
+            await jobRequestsService.markCancelled(queuedJob.id, {
+              errorMessage: 'superseded_by_local_buffered_response_resume',
+            });
           }
-        } else {
-          await jobRequestsService.enqueueJobRequest({
-            type: 'automations_v2_execute',
-            priority: 'critical',
-            status: 'waiting',
-            nextRunAt: waitUntil,
-            origin: 'automations_v2_inbound_buffer',
-            payload: {
-              execution_id: execution.id,
-              resume_mode: 'response',
-              inbound_channel: channel,
-              inbound_conversation_id: normalizedConversationId,
-              inbound_message_id: inboundMessageId || null,
-              inbound_patient_id: normalizedPatientId || null,
-              inbound_lead_id: normalizedLeadId || null,
-            },
-          });
-          enqueued += 1;
         }
+
+        scheduleBufferedResponseResume(execution.id, waitUntil);
       } else {
         const job = await jobRequestsService.enqueueJobRequest({
           type: 'automations_v2_execute',
@@ -470,9 +595,10 @@ async function enqueueInboundResponseResume({
 
   return {
     enabled: true,
-    matched: matched.length,
+    matched: effectiveMatches.length,
     enqueued,
     execution_ids: executionIds,
+    superseded_execution_ids: supersededExecutionIds,
     errors,
   };
 }

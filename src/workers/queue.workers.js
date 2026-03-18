@@ -37,6 +37,104 @@ function extractAndStripWebOriginRef(rawContent) {
     return { ref, content: cleaned };
 }
 
+function cleanString(value) {
+    if (value === undefined || value === null) {
+        return '';
+    }
+    return String(value).trim();
+}
+
+function truncateText(value, max = 120) {
+    const normalized = cleanString(value);
+    if (!normalized || normalized.length <= max) {
+        return normalized;
+    }
+    return `${normalized.slice(0, max - 1)}…`;
+}
+
+function normalizeInboundMessageType(rawType) {
+    const normalized = cleanString(rawType).toLowerCase();
+    if (['text', 'image', 'template', 'event', 'reaction'].includes(normalized)) {
+        return normalized;
+    }
+    return 'text';
+}
+
+async function buildInboundMessageDescriptor({ msg, clinicId }) {
+    const rawType = cleanString(msg?.type).toLowerCase() || 'text';
+    const normalizedType = normalizeInboundMessageType(rawType);
+
+    if (rawType === 'reaction') {
+        const emoji = cleanString(msg?.reaction?.emoji);
+        const targetWamid = cleanString(msg?.reaction?.message_id) || null;
+
+        let targetPreview = null;
+        let targetMessageId = null;
+        let targetDirection = null;
+        let targetType = null;
+
+        if (targetWamid) {
+            const targetRef = await findMessageByWamid(targetWamid);
+            if (targetRef?.id && Number(targetRef.clinic_id) === Number(clinicId)) {
+                const targetMessage = await Message.findByPk(targetRef.id, {
+                    attributes: ['id', 'content', 'direction', 'message_type'],
+                    raw: true,
+                });
+                if (targetMessage) {
+                    targetMessageId = targetMessage.id;
+                    targetDirection = targetMessage.direction || null;
+                    targetType = targetMessage.message_type || null;
+                    targetPreview = truncateText(targetMessage.content, 120) || null;
+                }
+            }
+        }
+
+        const resumeText = targetPreview
+            ? `El paciente reaccionó ${emoji || 'con un emoji'} al mensaje: ${targetPreview}`
+            : `El paciente reaccionó ${emoji || 'con un emoji'} a tu mensaje`;
+
+        return {
+            rawType,
+            messageType: normalizedType,
+            content: emoji || 'Reacción',
+            webOriginRef: null,
+            resumeText,
+            metadataExtra: {
+                kind: 'whatsapp_reaction',
+                resume_text: resumeText,
+                reaction: {
+                    emoji: emoji || null,
+                    message_id: targetWamid,
+                    target_message_id: targetMessageId,
+                    target_message_preview: targetPreview,
+                    target_message_direction: targetDirection,
+                    target_message_type: targetType,
+                },
+            },
+        };
+    }
+
+    const rawContent = msg?.text?.body || msg?.button?.text || msg?.interactive?.text || msg?.image?.caption || msg?.document?.caption || msg?.video?.caption || '';
+    const stripped = extractAndStripWebOriginRef(rawContent);
+    const content = stripped.content;
+    const metadataExtra = {};
+
+    if (rawType && !['text', 'button', 'interactive'].includes(rawType)) {
+        metadataExtra.media = {
+            kind: rawType,
+        };
+    }
+
+    return {
+        rawType,
+        messageType: normalizedType,
+        content,
+        webOriginRef: stripped.ref || null,
+        resumeText: content,
+        metadataExtra,
+    };
+}
+
 function mapWhatsAppStatus(status) {
     switch ((status || '').toLowerCase()) {
         case 'sent':
@@ -227,10 +325,10 @@ createWorker('webhook_whatsapp', async (job) => {
         const phoneId = value?.metadata?.phone_number_id;
         const from = msg.from;
         const wamid = msg.id;
-        const rawContent = msg.text?.body || msg.button?.text || msg.interactive?.text || '';
-        const stripped = extractAndStripWebOriginRef(rawContent);
-        const webOriginRefFromMsg = stripped.ref || null;
-        const content = stripped.content;
+        const descriptor = await buildInboundMessageDescriptor({ msg, clinicId });
+        const webOriginRefFromMsg = descriptor.webOriginRef || null;
+        const content = descriptor.content;
+        const resumeText = descriptor.resumeText;
 
         // Si no venía en el job, intentamos recuperar por token del propio mensaje (primer mensaje típicamente).
         if (!webOrigin && webOriginRefFromMsg && WhatsAppWebOrigin) {
@@ -258,11 +356,12 @@ createWorker('webhook_whatsapp', async (job) => {
             sender_id: null,
             direction: 'inbound',
             content,
-            message_type: msg.type || 'text',
+            message_type: descriptor.messageType,
             status: 'sent',
             metadata: {
                 wamid,
                 phoneId,
+                ...descriptor.metadataExtra,
                 ...(webOrigin ? { web_origin_ref: webOrigin.ref, web_origin: {
                     id: webOrigin.id || null,
                     clinic_id: webOrigin.clinic_id || null,
@@ -306,21 +405,46 @@ createWorker('webhook_whatsapp', async (job) => {
         await conv.save();
 
         try {
-            const resumeResult = await automationsV2ResumeService.enqueueInboundResponseResume({
+            let resumeResult = await automationsV2ResumeService.enqueueInboundResponseResume({
                 clinicId: conv.clinic_id || clinicId,
                 conversationId: conv.id,
                 patientId: conv.patient_id || null,
                 leadId: conv.lead_id || null,
-                messageText: content,
+                messageText: resumeText,
                 inboundMessageId: inboundMsg.id,
                 channel: 'whatsapp',
             });
+
+            if ((!resumeResult?.matched || resumeResult?.errors?.length) && conv?.id) {
+                await new Promise((resolve) => setTimeout(resolve, 250));
+                const retryResult = await automationsV2ResumeService.enqueueInboundResponseResume({
+                    clinicId: conv.clinic_id || clinicId,
+                    conversationId: conv.id,
+                    patientId: conv.patient_id || null,
+                    leadId: conv.lead_id || null,
+                    messageText: resumeText,
+                    inboundMessageId: inboundMsg.id,
+                    channel: 'whatsapp',
+                });
+                resumeResult = retryResult;
+            }
 
             dlog('Automations v2 inbound auto-resume', {
                 conversationId: conv.id,
                 clinicId: conv.clinic_id || clinicId,
                 ...resumeResult,
             });
+
+            if (!resumeResult?.matched || resumeResult?.errors?.length) {
+                console.warn('[automations-v2] Inbound auto-resume without effective match', {
+                    conversationId: conv.id,
+                    clinicId: conv.clinic_id || clinicId,
+                    patientId: conv.patient_id || null,
+                    leadId: conv.lead_id || null,
+                    matched: resumeResult?.matched || 0,
+                    errors: resumeResult?.errors || [],
+                });
+            }
         } catch (resumeErr) {
             console.error('[automations-v2] Error en auto-resume inbound', resumeErr?.message || resumeErr);
         }
@@ -337,9 +461,11 @@ createWorker('webhook_whatsapp', async (job) => {
                 conversation_id: String(conv.id),
                 content,
                 direction: 'inbound',
-                message_type: msg.type || 'text',
+                message_type: descriptor.messageType,
                 status: 'sent',
                 sent_at: inboundMsg.sent_at,
+                metadata: inboundMsg.metadata || null,
+                resume_text: resumeText,
             };
 
             if (rooms.size === 0) {

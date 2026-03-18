@@ -19,14 +19,50 @@ const FlowExecutionV2 = db.FlowExecutionV2;
 const AutomationFlowTemplateV2 = db.AutomationFlowTemplateV2;
 const appointmentAutomationV2Runtime = require('../services/appointmentAutomationV2Runtime.service');
 const { CITA_STATUS_VALUES } = require('../lib/status-catalog');
+const { getIO } = require('../services/socket.service');
 
 const CITA_ESTADOS_VALIDOS = new Set(CITA_STATUS_VALUES);
+const LEAD_ACTIVE_APPOINTMENT_STATES = new Set([
+    'pendiente',
+    'info_enviada',
+    'info_confirmada',
+    'recordatorio_enviado',
+    'recordatorio_confirmado',
+    'reprogramada',
+]);
+
+function emitAppointmentSocketEvent(eventName, citaLike) {
+    const io = getIO();
+    if (!io || !citaLike) return;
+
+    const clinicId = Number(citaLike.clinica_id || citaLike.clinic_id || 0);
+    const appointmentId = Number(citaLike.id_cita || citaLike.id || 0);
+    if (!Number.isFinite(clinicId) || clinicId <= 0 || !Number.isFinite(appointmentId) || appointmentId <= 0) {
+        return;
+    }
+
+    const payload = {
+        appointment_id: appointmentId,
+        clinic_id: clinicId,
+        patient_id: Number(citaLike.paciente_id || citaLike.patient_id || 0) || null,
+        lead_intake_id: Number(citaLike.lead_intake_id || 0) || null,
+        doctor_id: Number(citaLike.doctor_id || 0) || null,
+        instalacion_id: Number(citaLike.instalacion_id || 0) || null,
+        tratamiento_id: Number(citaLike.tratamiento_id || 0) || null,
+        estado: citaLike.estado || null,
+        inicio: citaLike.inicio || null,
+        fin: citaLike.fin || null,
+        updated_at: citaLike.updated_at || citaLike.updatedAt || new Date().toISOString(),
+        created_at: citaLike.created_at || citaLike.createdAt || new Date().toISOString(),
+    };
+
+    io.to(`clinic:${clinicId}`).emit(eventName, payload);
+}
 
 function mapEstadoToAutomationV2Event(estado) {
     if (estado === 'pendiente') return 'appointment_created';
     if (estado === 'info_enviada') return 'appointment_created';
     if (estado === 'info_confirmada') return 'appointment_confirmed';
-    if (estado === 'recordatorio_enviado') return 'appointment_reminder_window';
     if (estado === 'recordatorio_confirmado') return 'appointment_confirmed';
     if (estado === 'reprogramada') return 'appointment_rescheduled';
     if (estado === 'no_asistio') return 'appointment_no_show';
@@ -77,6 +113,65 @@ function mapFlowSummaryV2(execution) {
         template_version: template?.version || null,
         template_name: template?.name || null,
     };
+}
+
+function parsePositiveInt(value) {
+    const parsed = Number.parseInt(String(value), 10);
+    return Number.isInteger(parsed) && parsed > 0 ? parsed : null;
+}
+
+function normalizePhone(value) {
+    if (!value) return null;
+    const digits = String(value).replace(/\D+/g, '');
+    return digits || null;
+}
+
+async function syncLeadStatusFromAppointments(leadId) {
+    const normalizedLeadId = parsePositiveInt(leadId);
+    if (!normalizedLeadId || !LeadIntake) return null;
+
+    const lead = await LeadIntake.findByPk(normalizedLeadId);
+    if (!lead) return null;
+
+    if (['convertido', 'descartado', 'acudio_cita'].includes(String(lead.status_lead || '').toLowerCase())) {
+        return lead;
+    }
+
+    const citas = await CitaPaciente.findAll({
+        where: { lead_intake_id: normalizedLeadId },
+        attributes: ['id_cita', 'estado', 'inicio'],
+        order: [['inicio', 'DESC'], ['id_cita', 'DESC']],
+        raw: true,
+    });
+
+    const activeAppointment = citas.find((row) =>
+        LEAD_ACTIVE_APPOINTMENT_STATES.has(String(row?.estado || '').toLowerCase())
+    ) || null;
+
+    let nextStatus = String(lead.status_lead || '').toLowerCase() || 'nuevo';
+    let nextAppointmentId = parsePositiveInt(lead.call_outcome_appointment_id);
+
+    if (activeAppointment) {
+        nextStatus = 'citado';
+        nextAppointmentId = parsePositiveInt(activeAppointment.id_cita);
+    } else {
+        if (nextStatus === 'citado') {
+            nextStatus = 'info_recibida';
+        }
+        nextAppointmentId = null;
+    }
+
+    const changedStatus = nextStatus !== String(lead.status_lead || '').toLowerCase();
+    const changedAppointmentId = nextAppointmentId !== parsePositiveInt(lead.call_outcome_appointment_id);
+    if (!changedStatus && !changedAppointmentId) {
+        return lead;
+    }
+
+    await lead.update({
+        status_lead: nextStatus,
+        call_outcome_appointment_id: nextAppointmentId,
+    });
+    return lead;
 }
 
 async function attachFlowSummaryToCitas(citas) {
@@ -188,8 +283,19 @@ async function findOrCreatePaciente({ clinica_id, nombre, apellidos, telefono, e
     }
 
     const whereContacto = [];
+    const normalizedPhone = normalizePhone(telefono);
+    const localPhone = normalizedPhone && normalizedPhone.length > 9 ? normalizedPhone.slice(-9) : normalizedPhone;
+
     if (telefono) {
         whereContacto.push({ telefono_movil: telefono });
+    }
+    if (normalizedPhone) {
+        whereContacto.push({ telefono_movil: normalizedPhone });
+        whereContacto.push({ telefono_movil: { [Op.like]: `%${normalizedPhone}` } });
+    }
+    if (localPhone) {
+        whereContacto.push({ telefono_movil: localPhone });
+        whereContacto.push({ telefono_movil: { [Op.like]: `%${localPhone}` } });
     }
     if (email) {
         whereContacto.push({ email });
@@ -206,10 +312,19 @@ async function findOrCreatePaciente({ clinica_id, nombre, apellidos, telefono, e
         ],
         limit: 20
     });
-    const paciente = candidatos.find((row) =>
+    const paciente = candidatos.find((row) => {
+        const candidatePhone = normalizePhone(row.telefono_movil);
+        const phoneMatches = !normalizedPhone || !candidatePhone
+            ? true
+            : candidatePhone === normalizedPhone || candidatePhone.endsWith(localPhone || normalizedPhone);
+        if (!phoneMatches && email && row.email && String(row.email).trim().toLowerCase() !== String(email).trim().toLowerCase()) {
+            return false;
+        }
+        return (
         row.clinica_id === clinica_id ||
         (row.clinicasVinculadas || []).some((vc) => vc.clinica_id === clinica_id)
-    ) || null;
+        );
+    }) || null;
     if (paciente) {
         // Asegurar vínculo explícito
         const yaVinculado = (paciente.clinicasVinculadas || []).some(vc => vc.clinica_id === clinica_id);
@@ -910,13 +1025,21 @@ exports.createCita = asyncHandler(async (req, res) => {
                 user_name: req.userData?.name || req.userData?.nombre || req.userData?.email || null,
                 user_role: req.userData?.role || req.userData?.rol || 'admin',
             });
+            await appointmentAutomationV2Runtime.syncScheduledTriggersForCita(cita, {
+                user_id: req.userData?.userId || null,
+                user_name: req.userData?.name || req.userData?.nombre || req.userData?.email || null,
+                user_role: req.userData?.role || req.userData?.rol || 'admin',
+            });
         } catch (automationErr) {
             console.error('⚠️ [createCita] Error disparando automation v2:', automationErr.message);
         }
 
         // Marcar lead como citado si aplica
         if (lead) {
-            await lead.update({ status_lead: 'citado' });
+            await lead.update({
+                status_lead: 'citado',
+                call_outcome_appointment_id: cita.id_cita,
+            });
         }
 
         const citaCreada = await CitaPaciente.findByPk(cita.id_cita, {
@@ -929,6 +1052,7 @@ exports.createCita = asyncHandler(async (req, res) => {
         });
 
         await attachFlowSummaryToCitas(citaCreada);
+        emitAppointmentSocketEvent('appointment:created', citaCreada?.toJSON ? citaCreada.toJSON() : citaCreada);
 
         return res.status(201).json(citaCreada);
     } catch (err) {
@@ -1080,6 +1204,8 @@ exports.updateCitaEstado = asyncHandler(async (req, res) => {
     cita.updated_by = req.userData?.userId || null;
     await cita.save();
 
+    await syncLeadStatusFromAppointments(cita.lead_intake_id);
+
     try {
         const automationEvent = mapEstadoToAutomationV2Event(estadoRaw);
         if (automationEvent) {
@@ -1090,6 +1216,11 @@ exports.updateCitaEstado = asyncHandler(async (req, res) => {
                 user_role: req.userData?.role || req.userData?.rol || 'admin',
             });
         }
+        await appointmentAutomationV2Runtime.syncScheduledTriggersForCita(cita, {
+            user_id: req.userData?.userId || null,
+            user_name: req.userData?.name || req.userData?.nombre || req.userData?.email || null,
+            user_role: req.userData?.role || req.userData?.rol || 'admin',
+        });
     } catch (automationErr) {
         console.error('⚠️ [updateCitaEstado] Error disparando automation v2:', automationErr.message);
     }
@@ -1103,6 +1234,7 @@ exports.updateCitaEstado = asyncHandler(async (req, res) => {
     });
 
     await attachFlowSummaryToCitas(citaActualizada);
+    emitAppointmentSocketEvent('appointment:updated', citaActualizada?.toJSON ? citaActualizada.toJSON() : citaActualizada);
     return res.json(citaActualizada);
 });
 
@@ -1167,9 +1299,16 @@ exports.reagendarCita = asyncHandler(async (req, res) => {
     cita.updated_by = req.userData?.userId || null;
     await cita.save();
 
+    await syncLeadStatusFromAppointments(cita.lead_intake_id);
+
     try {
         await appointmentAutomationV2Runtime.enqueueExecutionForCita(cita, {
             event_name: 'appointment_rescheduled',
+            user_id: req.userData?.userId || null,
+            user_name: req.userData?.name || req.userData?.nombre || req.userData?.email || null,
+            user_role: req.userData?.role || req.userData?.rol || 'admin',
+        });
+        await appointmentAutomationV2Runtime.syncScheduledTriggersForCita(cita, {
             user_id: req.userData?.userId || null,
             user_name: req.userData?.name || req.userData?.nombre || req.userData?.email || null,
             user_role: req.userData?.role || req.userData?.rol || 'admin',
@@ -1187,5 +1326,6 @@ exports.reagendarCita = asyncHandler(async (req, res) => {
     });
 
     await attachFlowSummaryToCitas(citaActualizada);
+    emitAppointmentSocketEvent('appointment:updated', citaActualizada?.toJSON ? citaActualizada.toJSON() : citaActualizada);
     return res.json(citaActualizada);
 });

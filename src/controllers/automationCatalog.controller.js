@@ -1,5 +1,6 @@
 'use strict';
 
+const { Op } = require('sequelize');
 const db = require('../../models');
 const automationDefaultsService = require('../services/automationDefaults.service');
 const {
@@ -14,6 +15,7 @@ const CATALOG_TRIGGER_TYPES = [
   'appointment_confirmed',
   'appointment_cancelled',
   'appointment_reminder_window',
+  'appointment_after',
   'patient_inactive',
   'quote_accepted',
   'treatment_completed',
@@ -59,18 +61,17 @@ function mapNodesToCatalogSteps(nodes) {
   }));
 }
 
-async function resolveLinkedTemplateByKey(templateKey, templateVersion) {
+async function resolveLinkedTemplateByKey(templateKey) {
   const cleanKey = typeof templateKey === 'string' ? templateKey.trim() : '';
   if (!cleanKey) return null;
 
-  const where = { template_key: cleanKey };
-  if (templateVersion) {
-    where.version = templateVersion;
-  }
-
   return AutomationFlowTemplateV2.findOne({
-    where,
-    order: [['version', 'DESC']],
+    where: {
+      template_key: cleanKey,
+      published_at: { [Op.ne]: null },
+      is_active: true,
+    },
+    order: [['version', 'DESC'], ['id', 'DESC']],
     raw: true,
   });
 }
@@ -81,12 +82,10 @@ async function loadLinkedTemplatesForItems(items) {
     .map((item) => {
       const data = item?.toJSON ? item.toJSON() : item;
       const templateKey = typeof data?.template_key === 'string' ? data.template_key.trim() : '';
-      const templateVersion = Number.isInteger(Number(data?.template_version)) ? Number(data.template_version) : null;
       if (!templateKey) return null;
       return {
         itemId: Number(data.id),
         templateKey,
-        templateVersion,
       };
     })
     .filter(Boolean);
@@ -94,7 +93,7 @@ async function loadLinkedTemplatesForItems(items) {
   const results = await Promise.all(
     requests.map(async (request) => ({
       itemId: request.itemId,
-      template: await resolveLinkedTemplateByKey(request.templateKey, request.templateVersion),
+      template: await resolveLinkedTemplateByKey(request.templateKey),
     }))
   );
 
@@ -116,8 +115,8 @@ function serializeCatalogItem(item, linkedTemplate = null) {
     trigger_type: normalizeCatalogTriggerType(effectiveTriggerType),
     steps: effectiveSteps,
     template_key: typeof data?.template_key === 'string' ? data.template_key : null,
-    template_version: Number.isInteger(Number(data?.template_version)) ? Number(data.template_version) : null,
-        linked_template: linkedTemplate
+    template_version: null,
+    linked_template: linkedTemplate
       ? {
           template_key: linkedTemplate.template_key,
           template_version: Number(linkedTemplate.version),
@@ -161,7 +160,7 @@ exports.getCatalogById = async (req, res) => {
     if (!item) {
       return res.status(404).json({ error: 'catalog_not_found' });
     }
-    const linkedTemplate = await resolveLinkedTemplateByKey(item.template_key, item.template_version);
+    const linkedTemplate = await resolveLinkedTemplateByKey(item.template_key);
     return res.json(serializeCatalogItem(item, linkedTemplate));
   } catch (err) {
     console.error('Error getCatalogById', err);
@@ -177,11 +176,10 @@ exports.createCatalog = async (req, res) => {
     const display_name = payload.display_name || payload.displayName || payload.nombre;
     const description = payload.description || payload.descripcion || null;
     const template_key = typeof payload.template_key === 'string' ? payload.template_key.trim() : null;
-    const template_version = Number.isInteger(Number(payload.template_version)) ? Number(payload.template_version) : null;
     const is_generic = typeof payload.is_generic === 'boolean' ? payload.is_generic : !!payload.isGeneric;
     const is_active = typeof payload.is_active === 'boolean' ? payload.is_active : (typeof payload.isActive === 'boolean' ? payload.isActive : true);
     const disciplinaCodes = extractDisciplinaCodes(payload);
-    const linkedTemplate = await resolveLinkedTemplateByKey(template_key, template_version);
+    const linkedTemplate = await resolveLinkedTemplateByKey(template_key);
 
     if (!name || !template_key) {
       return res.status(400).json({ error: 'name y template_key son obligatorios' });
@@ -207,7 +205,7 @@ exports.createCatalog = async (req, res) => {
       trigger_type,
       steps,
       template_key,
-      template_version: template_version || Number(linkedTemplate.version),
+      template_version: null,
       is_generic,
       is_active,
     });
@@ -240,17 +238,13 @@ exports.updateCatalog = async (req, res) => {
     const template_key = payload.template_key !== undefined
       ? (typeof payload.template_key === 'string' ? payload.template_key.trim() : null)
       : undefined;
-    const template_version = payload.template_version !== undefined
-      ? (Number.isInteger(Number(payload.template_version)) ? Number(payload.template_version) : null)
-      : undefined;
     const is_generic = typeof payload.is_generic === 'boolean' ? payload.is_generic : (typeof payload.isGeneric === 'boolean' ? payload.isGeneric : undefined);
     const is_active = typeof payload.is_active === 'boolean' ? payload.is_active : (typeof payload.isActive === 'boolean' ? payload.isActive : undefined);
     const disciplinaCodes = extractDisciplinaCodes(payload);
     const disciplinesProvided = Object.prototype.hasOwnProperty.call(payload, 'disciplina_codes');
     const effectiveTemplateKey = template_key !== undefined ? template_key : item.template_key;
-    const effectiveTemplateVersion = template_version !== undefined ? template_version : item.template_version;
     const linkedTemplate = effectiveTemplateKey
-      ? await resolveLinkedTemplateByKey(effectiveTemplateKey, effectiveTemplateVersion)
+      ? await resolveLinkedTemplateByKey(effectiveTemplateKey)
       : null;
     const trigger_type = linkedTemplate?.trigger_type ? normalizeCatalogTriggerType(linkedTemplate.trigger_type) : item.trigger_type;
     const steps = linkedTemplate ? mapNodesToCatalogSteps(linkedTemplate.nodes) : item.steps;
@@ -276,7 +270,7 @@ exports.updateCatalog = async (req, res) => {
       trigger_type: trigger_type ?? item.trigger_type,
       steps: steps ?? item.steps,
       template_key: effectiveTemplateKey,
-      template_version: effectiveTemplateVersion || Number(linkedTemplate.version),
+      template_version: null,
       is_generic: typeof is_generic === 'boolean' ? is_generic : item.is_generic,
       is_active: typeof is_active === 'boolean' ? is_active : item.is_active,
     });
@@ -307,7 +301,7 @@ exports.toggleCatalog = async (req, res) => {
     }
     const next = !item.is_active;
     await item.update({ is_active: next });
-    const linkedTemplate = await resolveLinkedTemplateByKey(item.template_key, item.template_version);
+    const linkedTemplate = await resolveLinkedTemplateByKey(item.template_key);
     const updatedItem = await AutomationFlowCatalog.findByPk(item.id, {
       include: [{ model: AutomationFlowCatalogDiscipline, as: 'disciplinas' }],
     });

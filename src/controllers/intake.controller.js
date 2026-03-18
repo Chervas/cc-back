@@ -31,6 +31,14 @@ const CHANNELS = new Set(['paid', 'organic', 'unknown']);
 const SOURCES = new Set(['meta_ads', 'google_ads', 'web', 'whatsapp', 'call_click', 'tiktok_ads', 'seo', 'direct', 'local_services']);
 const STATUSES = new Set(['nuevo', 'contactado', 'esperando_info', 'info_recibida', 'citado', 'acudio_cita', 'convertido', 'descartado']);
 const DEDUPE_WINDOW_HOURS = parseInt(process.env.INTAKE_DEDUPE_WINDOW_HOURS || '24', 10);
+const LEAD_ACTIVE_APPOINTMENT_STATES = new Set([
+  'pendiente',
+  'info_enviada',
+  'info_confirmada',
+  'recordatorio_enviado',
+  'recordatorio_confirmado',
+  'reprogramada',
+]);
 
 const SIGNATURE_HEADER = 'x-cc-signature';
 const SIGNATURE_HEADER_SHA = 'x-cc-signature-sha256';
@@ -103,6 +111,23 @@ const normalizePhone = (phone) => {
   if (!phone) return null;
   const digits = String(phone).replace(/\D/g, '');
   return digits || null;
+};
+
+const resolveFallbackClinicForGroup = async (groupId) => {
+  const normalizedGroupId = parseInteger(groupId);
+  if (!normalizedGroupId) return null;
+
+  const clinic = await Clinica.findOne({
+    where: { grupoClinicaId: normalizedGroupId },
+    attributes: ['id_clinica', 'fecha_creacion'],
+    order: [
+      ['fecha_creacion', 'ASC'],
+      ['id_clinica', 'ASC'],
+    ],
+    raw: true,
+  });
+
+  return parseInteger(clinic?.id_clinica);
 };
 
 const collectPacienteClinics = (paciente) => {
@@ -263,7 +288,7 @@ const buildLinkedAppointmentSummary = (appointmentRow) => {
 const enrichLeadsWithLinkedAppointments = async (leadRows = []) => {
   const leads = leadRows.map((lead) => toPlain(lead));
   if (!leads.length || !CitaPaciente) {
-    return leads.map((lead) => ({ ...lead, linked_appointment: null }));
+    return leads.map((lead) => ({ ...lead, linked_appointment: null, recent_appointment: null }));
   }
 
   const explicitAppointmentIds = Array.from(new Set(
@@ -285,7 +310,10 @@ const enrichLeadsWithLinkedAppointments = async (leadRows = []) => {
 
   const explicitAppointments = explicitAppointmentIds.length
     ? await CitaPaciente.findAll({
-        where: { id_cita: { [Op.in]: explicitAppointmentIds } },
+        where: {
+          id_cita: { [Op.in]: explicitAppointmentIds },
+          estado: { [Op.in]: Array.from(LEAD_ACTIVE_APPOINTMENT_STATES) },
+        },
         include,
       })
     : [];
@@ -305,14 +333,24 @@ const enrichLeadsWithLinkedAppointments = async (leadRows = []) => {
   );
 
   const latestByLead = new Map();
+  const recentByLead = new Map();
   for (const row of latestAppointmentsByLead) {
     const plain = toPlain(row);
     const leadId = parseInteger(plain?.lead_intake_id);
     if (leadId === null || latestByLead.has(leadId)) {
+      if (!recentByLead.has(leadId)) {
+        const summary = buildLinkedAppointmentSummary(row);
+        if (summary) {
+          recentByLead.set(leadId, summary);
+        }
+      }
       continue;
     }
     const summary = buildLinkedAppointmentSummary(row);
-    if (summary) {
+    if (summary && !recentByLead.has(leadId)) {
+      recentByLead.set(leadId, summary);
+    }
+    if (summary && LEAD_ACTIVE_APPOINTMENT_STATES.has(String(summary.estado || '').toLowerCase())) {
       latestByLead.set(leadId, summary);
     }
   }
@@ -322,9 +360,11 @@ const enrichLeadsWithLinkedAppointments = async (leadRows = []) => {
     const linkedAppointment = (explicitAppointmentId !== null ? explicitById.get(explicitAppointmentId) : null)
       || latestByLead.get(parseInteger(lead?.id))
       || null;
+    const recentAppointment = recentByLead.get(parseInteger(lead?.id)) || null;
     return {
       ...lead,
       linked_appointment: linkedAppointment,
+      recent_appointment: recentAppointment,
     };
   });
 };
@@ -1094,6 +1134,10 @@ exports.ingestLead = asyncHandler(async (req, res) => {
   const derivedDomain = getHostnameFromUrl(pageUrlForDomain || '');
   const domain = normalizeDomain(body.domain || derivedDomain) || '';
 
+  // Resolución automática de clínica por activo publicitario (Meta / Google Ads)
+  let clinicMatchSource = clinic_match_source || null;
+  let clinicMatchValue = clinic_match_value || null;
+
   let clinicCfg = null;
   let groupCfg = null;
   let domainCfg = null;
@@ -1103,10 +1147,17 @@ exports.ingestLead = asyncHandler(async (req, res) => {
   if (grupoClinicaIdParsed !== null) {
     groupCfg = await IntakeConfig.findOne({ where: { group_id: grupoClinicaIdParsed, assignment_scope: 'group' }, raw: true });
   }
-  if (!clinicCfg && !groupCfg && domain) {
+  if (domain) {
     domainCfg = await IntakeConfig.findOne({
-      where: db.Sequelize.literal(`JSON_CONTAINS(COALESCE(domains,'[]'), '\"${domain.toLowerCase()}\"')`)
+      where: db.Sequelize.literal(`JSON_CONTAINS(COALESCE(domains,'[]'), '\"${domain.toLowerCase()}\"') AND assignment_scope='clinic'`),
+      order: [['created_at', 'ASC'], ['id', 'ASC']],
     });
+    if (!domainCfg) {
+      domainCfg = await IntakeConfig.findOne({
+        where: db.Sequelize.literal(`JSON_CONTAINS(COALESCE(domains,'[]'), '\"${domain.toLowerCase()}\"') AND assignment_scope='group'`),
+        order: [['created_at', 'ASC'], ['id', 'ASC']],
+      });
+    }
     if (domainCfg) domainCfg = domainCfg.get ? domainCfg.get({ plain: true }) : domainCfg;
   }
 
@@ -1132,6 +1183,39 @@ exports.ingestLead = asyncHandler(async (req, res) => {
   } else if (!cfg && process.env.INTAKE_WEB_SECRET) {
     if (!providedSignature || !validateHmac(req, process.env.INTAKE_WEB_SECRET, providedSignature)) {
       return res.status(401).json({ message: 'Firma HMAC inválida o ausente' });
+    }
+  }
+
+  // Si el widget llegó firmado a nivel grupo pero el dominio está mapeado a una clínica
+  // concreta, la atribución clínica debe prevalecer sobre el scope genérico.
+  const domainClinicId = parseInteger(domainCfg?.clinic_id);
+  const domainGroupId = parseInteger(domainCfg?.group_id);
+  if (!clinicaIdParsed && domainClinicId !== null) {
+    clinicaIdParsed = domainClinicId;
+    clinicMatchSource = clinicMatchSource || 'intake_domain';
+    clinicMatchValue = clinicMatchValue || domain;
+  }
+  if (!grupoClinicaIdParsed && domainGroupId !== null) {
+    grupoClinicaIdParsed = domainGroupId;
+  }
+
+  if (clinicaIdParsed === null && grupoClinicaIdParsed !== null) {
+    const fallbackClinicId = await resolveFallbackClinicForGroup(grupoClinicaIdParsed);
+    if (fallbackClinicId !== null) {
+      clinicaIdParsed = fallbackClinicId;
+      clinicMatchSource = clinicMatchSource || 'group_default_clinic';
+      clinicMatchValue = clinicMatchValue || String(grupoClinicaIdParsed);
+    }
+  }
+
+  if (clinicaIdParsed !== null && grupoClinicaIdParsed === null) {
+    const clinicScope = await Clinica.findOne({
+      where: { id_clinica: clinicaIdParsed },
+      attributes: ['id_clinica', 'grupoClinicaId'],
+      raw: true,
+    });
+    if (clinicScope?.grupoClinicaId) {
+      grupoClinicaIdParsed = parseInteger(clinicScope.grupoClinicaId);
     }
   }
 
@@ -1183,10 +1267,6 @@ exports.ingestLead = asyncHandler(async (req, res) => {
   const payloadHash = hashValue(stableStringify(req.body || {}));
   const externalSource = external_source || source || null;
   const externalId = external_id || req.body?.meta_lead_id || req.body?.google_lead_id || req.body?.form_id || eventId || null;
-
-  // Resolución automática de clínica por activo publicitario (Meta / Google Ads)
-  let clinicMatchSource = clinic_match_source || null;
-  let clinicMatchValue = clinic_match_value || null;
 
   if (!clinicaIdParsed && normalizedSource === 'meta_ads') {
     const pageId = coalesce(req.body?.page_id, req.body?.pageId, req.body?.page?.id, req.body?.payload?.page_id);
@@ -1999,8 +2079,8 @@ exports.receiveIntakeEvent = asyncHandler(async (req, res) => {
   const body = req.body || {};
 
   const eventName = body.event_name || body.eventName || 'ViewContent';
-  const clinicIdParsed = parseInteger(coalesce(body.clinic_id, body.clinica_id, body.clinicId));
-  const groupIdParsed = parseInteger(coalesce(body.group_id, body.grupo_clinica_id, body.groupId));
+  let clinicIdParsed = parseInteger(coalesce(body.clinic_id, body.clinica_id, body.clinicId));
+  let groupIdParsed = parseInteger(coalesce(body.group_id, body.grupo_clinica_id, body.groupId));
 
   const eventSourceUrl = coalesce(
     body.event_source_url,
@@ -2061,10 +2141,17 @@ exports.receiveIntakeEvent = asyncHandler(async (req, res) => {
   if (groupIdParsed !== null) {
     groupCfg = await IntakeConfig.findOne({ where: { group_id: groupIdParsed, assignment_scope: 'group' }, raw: true });
   }
-  if (!clinicCfg && !groupCfg && domain) {
+  if (domain) {
     domainCfg = await IntakeConfig.findOne({
-      where: db.Sequelize.literal(`JSON_CONTAINS(COALESCE(domains,'[]'), '\"${domain.toLowerCase()}\"')`)
+      where: db.Sequelize.literal(`JSON_CONTAINS(COALESCE(domains,'[]'), '\"${domain.toLowerCase()}\"') AND assignment_scope='clinic'`),
+      order: [['created_at', 'ASC'], ['id', 'ASC']],
     });
+    if (!domainCfg) {
+      domainCfg = await IntakeConfig.findOne({
+        where: db.Sequelize.literal(`JSON_CONTAINS(COALESCE(domains,'[]'), '\"${domain.toLowerCase()}\"') AND assignment_scope='group'`),
+        order: [['created_at', 'ASC'], ['id', 'ASC']],
+      });
+    }
     if (domainCfg) domainCfg = domainCfg.get ? domainCfg.get({ plain: true }) : domainCfg;
   }
 
@@ -2082,6 +2169,18 @@ exports.receiveIntakeEvent = asyncHandler(async (req, res) => {
     if (!domain || !isDomainAllowed(cfg.domains, domain)) {
       return res.status(403).json({ message: 'Domain not allowed' });
     }
+  }
+
+  const domainClinicId = parseInteger(domainCfg?.clinic_id);
+  const domainGroupId = parseInteger(domainCfg?.group_id);
+  if (clinicIdParsed === null && domainClinicId !== null) {
+    clinicIdParsed = domainClinicId;
+  }
+  if (groupIdParsed === null && domainGroupId !== null) {
+    groupIdParsed = domainGroupId;
+  }
+  if (clinicIdParsed === null && groupIdParsed !== null) {
+    clinicIdParsed = await resolveFallbackClinicForGroup(groupIdParsed);
   }
 
   if (cfg && cfg.hmac_key) {

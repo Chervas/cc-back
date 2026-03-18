@@ -101,6 +101,26 @@ async function getUnreadCountsByConversation(userId, conversationIds) {
   return new Map(counts);
 }
 
+async function enrichConversationUnreadForUser(userId, conversationLike) {
+  if (!conversationLike) {
+    return conversationLike;
+  }
+
+  const plain =
+    typeof conversationLike.toJSON === 'function'
+      ? conversationLike.toJSON()
+      : { ...conversationLike };
+
+  const conversationId = Number(plain.id);
+  if (!Number.isFinite(conversationId) || !userId) {
+    return plain;
+  }
+
+  const unreadMap = await getUnreadCountsByConversation(userId, [conversationId]);
+  plain.unread_count = unreadMap.get(conversationId) ?? 0;
+  return plain;
+}
+
 async function getTotalUnreadCountForUser(userId, clinicIds, isAggregateAllowed, requestedClinicId) {
   const where = {};
   if (requestedClinicId && requestedClinicId !== 'all') {
@@ -360,7 +380,8 @@ exports.getMessages = async (req, res) => {
       raw: true,
     });
 
-    return res.json({ conversation: conversation.toJSON(), messages });
+    const conversationPayload = await enrichConversationUnreadForUser(userId, conversation);
+    return res.json({ conversation: conversationPayload, messages });
   } catch (err) {
     console.error('Error getMessages', err);
     return res.status(500).json({ error: 'Error obteniendo mensajes' });
@@ -399,7 +420,8 @@ exports.getConversationByPatient = async (req, res) => {
       raw: true,
     });
 
-    return res.json({ conversation, messages });
+    const conversationPayload = await enrichConversationUnreadForUser(userId, conversation);
+    return res.json({ conversation: conversationPayload, messages });
   } catch (err) {
     console.error('Error getConversationByPatient', err);
     return res.status(500).json({ error: 'Error obteniendo conversación' });
@@ -438,7 +460,8 @@ exports.getConversationByLead = async (req, res) => {
       raw: true,
     });
 
-    return res.json({ conversation, messages });
+    const conversationPayload = await enrichConversationUnreadForUser(userId, conversation);
+    return res.json({ conversation: conversationPayload, messages });
   } catch (err) {
     console.error('Error getConversationByLead', err);
     return res.status(500).json({ error: 'Error obteniendo conversación' });

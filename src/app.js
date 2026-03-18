@@ -48,7 +48,7 @@ const personalRoutes = require('./routes/personal.routes');
 const accessPolicyRoutes = require('./routes/access-policy.routes');
 const jobScheduler = require('./services/jobScheduler.service');
 const intakeController = require('./controllers/intake.controller');
-const { setIO } = require('./services/socket.service');
+const { setIO, onBusEvent } = require('./services/socket.service');
 const { isGlobalAdmin } = require('./lib/role-helpers');
 const { buildQuickChatContextFromMemberships } = require('./lib/quickchat-helpers');
 require('./workers/queue.workers');
@@ -215,6 +215,66 @@ const io = new Server(server, {
     }
 });
 setIO(io);
+const automationsV2ResumeService = require('./services/automationsV2Resume.service');
+
+// Si el inbound de WhatsApp lo procesa otro backend, integración recibe el evento por Redis
+// y reanuda aquí los waits V2 para no depender del proceso que recibió el webhook.
+onBusEvent(async (envelope) => {
+    if (envelope?.event !== 'message:created') {
+        return;
+    }
+
+    const payload = envelope?.payload && typeof envelope.payload === 'object'
+        ? envelope.payload
+        : null;
+    if (!payload || String(payload.direction || '').toLowerCase() !== 'inbound') {
+        return;
+    }
+
+    const conversationId = Number.parseInt(String(payload.conversation_id || payload.conversationId || ''), 10);
+    if (!Number.isInteger(conversationId) || conversationId <= 0) {
+        return;
+    }
+
+    let text = typeof payload.resume_text === 'string'
+        ? payload.resume_text.trim()
+        : (typeof payload?.metadata?.resume_text === 'string'
+            ? payload.metadata.resume_text.trim()
+            : (typeof payload.content === 'string' ? payload.content.trim() : ''));
+
+    if (!text && String(payload?.message_type || '').toLowerCase() === 'reaction') {
+        const emoji = String(payload?.metadata?.reaction?.emoji || '').trim();
+        text = emoji
+            ? `El paciente reaccionó ${emoji} a tu mensaje`
+            : 'El paciente reaccionó a tu mensaje';
+    }
+    if (!text) {
+        return;
+    }
+
+    try {
+        const conv = await db.Conversation.findByPk(conversationId, {
+            attributes: ['id', 'clinic_id', 'patient_id', 'lead_id'],
+            raw: true,
+        });
+
+        if (!conv?.clinic_id) {
+            return;
+        }
+
+        await automationsV2ResumeService.enqueueInboundResponseResume({
+            clinicId: conv.clinic_id,
+            conversationId: conv.id,
+            patientId: conv.patient_id || null,
+            leadId: conv.lead_id || null,
+            messageText: text,
+            inboundMessageId: payload.id || null,
+            channel: 'whatsapp',
+        });
+    } catch (error) {
+        console.warn('[automations-v2] No se pudo reanudar wait_response desde socket-bus:', error?.message || error);
+    }
+});
 io.use((socket, next) => {
     const token =
         socket.handshake.auth?.token ||

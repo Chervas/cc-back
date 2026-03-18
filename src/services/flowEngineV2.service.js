@@ -16,6 +16,7 @@ const Conversation = db.Conversation;
 const Message = db.Message;
 const Notification = db.Notification;
 const UsuarioClinica = db.UsuarioClinica;
+const Usuario = db.Usuario;
 const Clinica = db.Clinica;
 const ClinicMetaAsset = db.ClinicMetaAsset;
 const WhatsappTemplate = db.WhatsappTemplate;
@@ -317,10 +318,20 @@ async function enrichContextForTemplateResolution(context, targets = {}) {
 
   if (appointmentId) {
     const appointment = await CitaPaciente.findByPk(appointmentId, {
-      attributes: ['id_cita', 'clinica_id', 'paciente_id', 'lead_intake_id', 'estado', 'inicio', 'fin', 'titulo', 'motivo'],
+      attributes: ['id_cita', 'clinica_id', 'paciente_id', 'lead_intake_id', 'created_by', 'estado', 'inicio', 'fin', 'titulo', 'motivo'],
       raw: true,
     });
     if (appointment) {
+      const existingAppointment = out?.appointment && typeof out.appointment === 'object' ? out.appointment : {};
+      const existingTriggerData = out?.trigger?.data && typeof out.trigger.data === 'object' ? out.trigger.data : {};
+      const creatorNameCandidate =
+        cleanString(existingAppointment.usuario_nombre)
+        || cleanString(existingTriggerData.usuario_nombre)
+        || cleanString(existingTriggerData['profesional.nombre']);
+      const creatorEmailCandidate =
+        cleanString(existingAppointment.usuario_email)
+        || cleanString(existingTriggerData.usuario_email)
+        || cleanString(existingTriggerData['profesional.email']);
       const appointmentPatch = {
         id: toIntOrNull(appointment.id_cita),
         id_cita: toIntOrNull(appointment.id_cita),
@@ -337,12 +348,46 @@ async function enrichContextForTemplateResolution(context, targets = {}) {
         hora: formatTimeEs(appointment.inicio),
         titulo: cleanString(appointment.titulo),
         motivo: cleanString(appointment.motivo),
+        usuario_nombre: creatorNameCandidate || null,
+        usuario_email: creatorEmailCandidate || null,
       };
 
       out.appointment = mergeContextObject(out.appointment, appointmentPatch);
       out.cita = mergeContextObject(out.cita, {
         ...appointmentPatch,
       });
+
+      const creatorId = toIntOrNull(appointment.created_by);
+      if (creatorId) {
+        const creator = await Usuario.findByPk(creatorId, {
+          attributes: ['id_usuario', 'nombre', 'apellidos', 'email_usuario'],
+          raw: true,
+        });
+        if (creator) {
+          const creatorName =
+            buildDisplayName(creator.nombre, creator.apellidos)
+            || cleanString(creator.nombre)
+            || cleanString(creator.email_usuario);
+          const creatorEmail = cleanString(creator.email_usuario);
+          out.appointment = mergeContextObject(out.appointment, {
+            usuario_nombre: creatorName || null,
+            usuario_email: creatorEmail || null,
+          });
+          out.cita = mergeContextObject(out.cita, {
+            usuario_nombre: creatorName || null,
+            usuario_email: creatorEmail || null,
+          });
+          out.profesional = mergeContextObject(out.profesional, {
+            nombre: creatorName || null,
+            email: creatorEmail || null,
+          });
+        }
+      } else if (creatorNameCandidate || creatorEmailCandidate) {
+        out.profesional = mergeContextObject(out.profesional, {
+          nombre: creatorNameCandidate || null,
+          email: creatorEmailCandidate || null,
+        });
+      }
     }
   }
 
@@ -388,7 +433,7 @@ async function enrichContextForTemplateResolution(context, targets = {}) {
 
   if (effectiveClinicId) {
     const clinic = await Clinica.findByPk(effectiveClinicId, {
-      attributes: ['id_clinica', 'nombre_clinica'],
+      attributes: ['id_clinica', 'grupoClinicaId', 'nombre_clinica', 'direccion', 'telefono', 'url_web', 'url_ficha_local'],
       raw: true,
     });
     if (clinic) {
@@ -397,8 +442,14 @@ async function enrichContextForTemplateResolution(context, targets = {}) {
         id_clinica: toIntOrNull(clinic.id_clinica),
         clinic_id: toIntOrNull(clinic.id_clinica),
         clinica_id: toIntOrNull(clinic.id_clinica),
+        group_id: toIntOrNull(clinic.grupoClinicaId),
+        grupo_id: toIntOrNull(clinic.grupoClinicaId),
         nombre: cleanString(clinic.nombre_clinica),
         nombre_clinica: cleanString(clinic.nombre_clinica),
+        direccion: cleanString(clinic.direccion),
+        telefono: cleanString(clinic.telefono),
+        url_web: cleanString(clinic.url_web),
+        url_ficha_local: cleanString(clinic.url_ficha_local),
       };
       out.clinic = mergeContextObject(out.clinic, clinicPatch);
       out.clinica = mergeContextObject(out.clinica, {
@@ -495,6 +546,32 @@ function emitExecutionEvent(execution, eventName = 'flow_execution:updated', ext
     return;
   }
   io.emit(eventName, payload);
+}
+
+function emitAppointmentSocketEvent(appointment, eventName = 'appointment:updated') {
+  const io = getIO();
+  if (!io || !appointment) return;
+
+  const clinicId = toIntOrNull(appointment.clinica_id || appointment.clinic_id);
+  const appointmentId = toIntOrNull(appointment.id_cita || appointment.id);
+  if (!clinicId || !appointmentId) return;
+
+  const payload = {
+    appointment_id: appointmentId,
+    clinic_id: clinicId,
+    patient_id: toIntOrNull(appointment.paciente_id || appointment.patient_id),
+    lead_intake_id: toIntOrNull(appointment.lead_intake_id),
+    doctor_id: toIntOrNull(appointment.doctor_id),
+    instalacion_id: toIntOrNull(appointment.instalacion_id),
+    tratamiento_id: toIntOrNull(appointment.tratamiento_id),
+    estado: cleanString(appointment.estado),
+    inicio: appointment.inicio || null,
+    fin: appointment.fin || null,
+    updated_at: appointment.updated_at || appointment.updatedAt || new Date().toISOString(),
+    created_at: appointment.created_at || appointment.createdAt || new Date().toISOString(),
+  };
+
+  io.to(`clinic:${clinicId}`).emit(eventName, payload);
 }
 
 function emitExecutionLogEvent(execution, log, extra = {}) {
@@ -1233,6 +1310,7 @@ async function handleChangeStatus(node, context, runtime) {
 
     const previousStatus = cleanString(appointment.estado);
     await appointment.update({ estado: appointmentStatus });
+    emitAppointmentSocketEvent(appointment, 'appointment:updated');
 
     return {
       kind: 'success',

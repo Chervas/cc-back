@@ -9,11 +9,15 @@ const Clinica = db.Clinica;
 const AutomationFlowTemplateV2 = db.AutomationFlowTemplateV2;
 const FlowExecutionV2 = db.FlowExecutionV2;
 const FlowExecutionLogV2 = db.FlowExecutionLogV2;
+const JobRequest = db.JobRequest;
 const { getIO } = require('./socket.service');
+const { Op } = db.Sequelize;
+const DEFAULT_TIMEZONE = 'Europe/Madrid';
 
 const APPOINTMENT_TRIGGER_TYPES = new Set([
   'appointment_created',
   'appointment_reminder_window',
+  'appointment_after',
   'appointment_confirmed',
   'appointment_no_show',
   'appointment_rescheduled',
@@ -31,6 +35,36 @@ const APPOINTMENT_CREATED_WITHOUT_TREATMENT_TYPES = new Set([
   'urgencia',
   'revision',
 ]);
+const SCHEDULED_APPOINTMENT_TRIGGER_TYPES = new Set([
+  'appointment_reminder_window',
+  'appointment_after',
+]);
+const APPOINTMENT_BEFORE_MOMENT_VALUES = new Set([
+  'same_day',
+  'day_before',
+  'week_before',
+]);
+const APPOINTMENT_BEFORE_TIME_MODE_VALUES = new Set([
+  'custom',
+  'one_hour_before',
+]);
+const APPOINTMENT_AFTER_MOMENT_VALUES = new Set([
+  'same_day',
+  'day_after',
+  'week_after',
+]);
+const APPOINTMENT_AFTER_TIME_MODE_VALUES = new Set([
+  'custom',
+  'one_hour_after',
+]);
+const ACTIVE_APPOINTMENT_STATUSES = new Set([
+  'pendiente',
+  'info_enviada',
+  'info_confirmada',
+  'recordatorio_enviado',
+  'recordatorio_confirmado',
+  'reprogramada',
+]);
 
 function toIntOrNull(value) {
   if (value === undefined || value === null || value === '') return null;
@@ -43,6 +77,131 @@ function cleanString(value) {
   return String(value).trim();
 }
 
+function parseClinicConfig(value) {
+  if (!value) return null;
+  if (typeof value === 'object') return value;
+  if (typeof value === 'string') {
+    try {
+      const parsed = JSON.parse(value);
+      return parsed && typeof parsed === 'object' ? parsed : null;
+    } catch (err) {
+      return null;
+    }
+  }
+  return null;
+}
+
+function isValidTimeZone(value) {
+  if (!value || typeof value !== 'string') return false;
+  try {
+    Intl.DateTimeFormat('en-US', { timeZone: value }).format(new Date());
+    return true;
+  } catch (err) {
+    return false;
+  }
+}
+
+function resolveClinicTimezone(clinica) {
+  const cfg = parseClinicConfig(clinica && clinica.configuracion);
+  const candidates = [
+    cfg && (cfg.timezone || cfg.timeZone || cfg.tz),
+    clinica && (clinica.timezone || clinica.time_zone || clinica.tz),
+  ];
+
+  for (const candidate of candidates) {
+    if (isValidTimeZone(candidate)) return candidate;
+  }
+  return DEFAULT_TIMEZONE;
+}
+
+function formatPartsInTimeZone(date, timeZone) {
+  const parts = new Intl.DateTimeFormat('en-CA', {
+    timeZone,
+    hour12: false,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+  }).formatToParts(date);
+
+  const bag = {};
+  parts.forEach((p) => {
+    if (p.type !== 'literal') bag[p.type] = p.value;
+  });
+
+  return {
+    year: Number(bag.year),
+    month: Number(bag.month),
+    day: Number(bag.day),
+    hour: Number(bag.hour),
+    minute: Number(bag.minute),
+    second: Number(bag.second),
+  };
+}
+
+function offsetMinutesForTimeZone(date, timeZone) {
+  const p = formatPartsInTimeZone(date, timeZone);
+  const asUtc = Date.UTC(p.year, p.month - 1, p.day, p.hour, p.minute, p.second);
+  return Math.round((asUtc - date.getTime()) / 60000);
+}
+
+function normalizeHms(value, fallback = '00:00:00') {
+  const raw = String(value || fallback).trim();
+  const match = raw.match(/^(\d{2}):(\d{2})(?::(\d{2}))?$/);
+  if (!match) return null;
+  return `${match[1]}:${match[2]}:${match[3] || '00'}`;
+}
+
+function localDateTimeToUtc(fechaLocal, timeValue, timeZone) {
+  if (!fechaLocal || typeof fechaLocal !== 'string') return null;
+  const d = fechaLocal.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (!d) return null;
+
+  const hms = normalizeHms(timeValue);
+  if (!hms) return null;
+  const t = hms.match(/^(\d{2}):(\d{2}):(\d{2})$/);
+  if (!t) return null;
+
+  const year = Number(d[1]);
+  const month = Number(d[2]);
+  const day = Number(d[3]);
+  const hour = Number(t[1]);
+  const minute = Number(t[2]);
+  const second = Number(t[3]);
+
+  const naiveUtc = Date.UTC(year, month - 1, day, hour, minute, second);
+  let ts = naiveUtc;
+  for (let i = 0; i < 2; i += 1) {
+    const offsetMin = offsetMinutesForTimeZone(new Date(ts), timeZone);
+    ts = naiveUtc - offsetMin * 60000;
+  }
+  return new Date(ts);
+}
+
+function formatDateLocal(date, timeZone) {
+  const p = formatPartsInTimeZone(date, timeZone);
+  const pad = (n) => String(n).padStart(2, '0');
+  return `${p.year}-${pad(p.month)}-${pad(p.day)}`;
+}
+
+function addDaysToLocalDate(fechaLocal, deltaDays) {
+  const match = String(fechaLocal || '').match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (!match) return null;
+  const utc = new Date(Date.UTC(Number(match[1]), Number(match[2]) - 1, Number(match[3])));
+  utc.setUTCDate(utc.getUTCDate() + Number(deltaDays || 0));
+  const pad = (n) => String(n).padStart(2, '0');
+  return `${utc.getUTCFullYear()}-${pad(utc.getUTCMonth() + 1)}-${pad(utc.getUTCDate())}`;
+}
+
+function normalizeScheduledDate(date) {
+  if (!(date instanceof Date) || !Number.isFinite(date.getTime())) return null;
+  const normalized = new Date(date.getTime());
+  normalized.setMilliseconds(0);
+  return normalized;
+}
+
 function normalizeEventName(eventName) {
   const normalized = cleanString(eventName).toLowerCase();
   return APPOINTMENT_TRIGGER_TYPES.has(normalized) ? normalized : null;
@@ -52,7 +211,6 @@ function mapEstadoToEvent(estado) {
   const normalized = cleanString(estado).toLowerCase();
   if (normalized === 'info_enviada') return 'appointment_created';
   if (normalized === 'info_confirmada') return 'appointment_confirmed';
-  if (normalized === 'recordatorio_enviado') return 'appointment_reminder_window';
   if (normalized === 'recordatorio_confirmado') return 'appointment_confirmed';
   if (normalized === 'reprogramada') return 'appointment_rescheduled';
   if (normalized === 'no_asistio') return 'appointment_no_show';
@@ -95,13 +253,11 @@ async function resolveTemplateBoundToTratamiento(cita, eventName) {
     attributes: [
       'id_tratamiento',
       'appointment_automation_template_key',
-      'appointment_automation_template_version',
     ],
   });
   if (!tratamiento) return null;
 
   const templateKey = cleanString(tratamiento.appointment_automation_template_key);
-  const templateVersion = toIntOrNull(tratamiento.appointment_automation_template_version);
   if (!templateKey) return null;
 
   const where = {
@@ -110,7 +266,6 @@ async function resolveTemplateBoundToTratamiento(cita, eventName) {
     is_active: true,
     trigger_type: eventName,
   };
-  if (templateVersion) where.version = templateVersion;
 
   const template = await AutomationFlowTemplateV2.findOne({
     where,
@@ -146,23 +301,61 @@ function normalizeAppointmentCreatedTriggerConfig(rawConfig) {
   };
 }
 
+function normalizeAppointmentBeforeTriggerConfig(rawConfig) {
+  const config = rawConfig && typeof rawConfig === 'object' ? rawConfig : {};
+  const scheduleMoment = cleanString(config.schedule_moment || 'day_before').toLowerCase() || 'day_before';
+  const safeMoment = APPOINTMENT_BEFORE_MOMENT_VALUES.has(scheduleMoment) ? scheduleMoment : 'day_before';
+  const scheduleTimeMode = cleanString(config.schedule_time_mode || 'custom').toLowerCase() || 'custom';
+  const safeTimeMode = APPOINTMENT_BEFORE_TIME_MODE_VALUES.has(scheduleTimeMode) ? scheduleTimeMode : 'custom';
+  const customTime = safeTimeMode === 'custom' && /^\d{2}:\d{2}$/.test(cleanString(config.custom_time))
+    ? cleanString(config.custom_time)
+    : (safeTimeMode === 'custom' ? '09:00' : null);
+  return {
+    schedule_moment: safeMoment,
+    schedule_time_mode: safeTimeMode,
+    custom_time: customTime,
+  };
+}
+
+function normalizeAppointmentAfterTriggerConfig(rawConfig) {
+  const config = rawConfig && typeof rawConfig === 'object' ? rawConfig : {};
+  const scheduleMoment = cleanString(config.schedule_moment || 'day_after').toLowerCase() || 'day_after';
+  const safeMoment = APPOINTMENT_AFTER_MOMENT_VALUES.has(scheduleMoment) ? scheduleMoment : 'day_after';
+  const scheduleTimeMode = cleanString(config.schedule_time_mode || 'custom').toLowerCase() || 'custom';
+  const safeTimeMode = APPOINTMENT_AFTER_TIME_MODE_VALUES.has(scheduleTimeMode) ? scheduleTimeMode : 'custom';
+  const customTime = safeTimeMode === 'custom' && /^\d{2}:\d{2}$/.test(cleanString(config.custom_time))
+    ? cleanString(config.custom_time)
+    : (safeTimeMode === 'custom' ? '09:00' : null);
+  return {
+    schedule_moment: safeMoment,
+    schedule_time_mode: safeTimeMode,
+    custom_time: customTime,
+  };
+}
+
 function getTemplateTriggerConfig(template) {
   const rawConfig =
     (template && typeof template.trigger_config === 'object' && template.trigger_config)
       ? template.trigger_config
       : null;
+  const nodes = Array.isArray(template?.nodes) ? template.nodes : [];
+  const entryNodeId = cleanString(template?.entry_node_id);
+  const entryNode = nodes.find((node) => cleanString(node?.id) === entryNodeId);
 
   if (cleanString(template?.trigger_type) !== 'appointment_created') {
+    const triggerType = cleanString(template?.trigger_type);
+    if (triggerType === 'appointment_reminder_window') {
+      return normalizeAppointmentBeforeTriggerConfig(rawConfig || entryNode?.config);
+    }
+    if (triggerType === 'appointment_after') {
+      return normalizeAppointmentAfterTriggerConfig(rawConfig || entryNode?.config);
+    }
     return null;
   }
 
   if (rawConfig) {
     return normalizeAppointmentCreatedTriggerConfig(rawConfig);
   }
-
-  const nodes = Array.isArray(template?.nodes) ? template.nodes : [];
-  const entryNodeId = cleanString(template?.entry_node_id);
-  const entryNode = nodes.find((node) => cleanString(node?.id) === entryNodeId);
   return normalizeAppointmentCreatedTriggerConfig(entryNode?.config);
 }
 
@@ -198,49 +391,11 @@ async function resolveClinicFallbackTemplate(cita, eventName) {
     return null;
   }
 
-  const candidateKeys = Array.from(
-    new Set(
-      candidates
-        .map((template) => cleanString(template?.template_key))
-        .filter(Boolean)
-    )
-  );
-
-  const assignedRows = candidateKeys.length
-    ? await Tratamiento.findAll({
-        attributes: [
-          'appointment_automation_template_key',
-          'appointment_automation_template_version',
-        ],
-        where: {
-          appointment_automation_template_key: { [db.Sequelize.Op.in]: candidateKeys },
-        },
-        raw: true,
-      })
-    : [];
-
-  const assignedTemplateRefs = new Set(
-    (assignedRows || [])
-      .map((row) => {
-        const key = cleanString(row?.appointment_automation_template_key);
-        const version = toIntOrNull(row?.appointment_automation_template_version);
-        if (!key || !version) return null;
-        return `${key}:${version}`;
-      })
-      .filter(Boolean)
-  );
-
   const citaHasTreatment = !!toIntOrNull(cita?.tratamiento_id);
   const citaTipo = cleanString(cita?.tipo_cita).toLowerCase() || 'continuacion';
 
   const scored = candidates
     .filter((template) => {
-      const key = cleanString(template?.template_key);
-      const version = toIntOrNull(template?.version);
-      if (key && version && assignedTemplateRefs.has(`${key}:${version}`)) {
-        return false;
-      }
-
       if (cleanString(template?.trigger_type) !== 'appointment_created') {
         return true;
       }
@@ -290,6 +445,170 @@ async function resolveClinicFallbackTemplate(cita, eventName) {
     .sort((a, b) => b.score - a.score);
 
   return scored[0]?.template || null;
+}
+
+async function fetchClinicScopedTemplates(cita, eventName) {
+  const clinicId = toIntOrNull(cita?.clinica_id);
+  if (!clinicId) {
+    return { clinicId: null, groupId: null, candidates: [] };
+  }
+
+  const clinic = await Clinica.findByPk(clinicId, {
+    attributes: ['id_clinica', 'grupoClinicaId', 'configuracion'],
+    raw: true,
+  });
+  const groupId = toIntOrNull(clinic?.grupoClinicaId);
+  const candidates = await AutomationFlowTemplateV2.findAll({
+    where: {
+      trigger_type: eventName,
+      is_active: true,
+      published_at: { [Op.ne]: null },
+      [Op.or]: [
+        { clinic_id: clinicId },
+        ...(groupId ? [{ group_id: groupId }] : []),
+        { is_system: true },
+      ],
+    },
+    order: [
+      ['published_at', 'DESC'],
+      ['version', 'DESC'],
+      ['id', 'DESC'],
+    ],
+  });
+
+  return { clinicId, groupId, clinic, candidates };
+}
+
+function getScopeScoreForTemplate(template, clinicId, groupId) {
+  const templateClinicId = toIntOrNull(template?.clinic_id);
+  const templateGroupId = toIntOrNull(template?.group_id);
+
+  if (templateClinicId && templateClinicId === clinicId) return 100;
+  if (templateGroupId && groupId && templateGroupId === groupId) return 50;
+  if (template?.is_system) return 10;
+  return 0;
+}
+
+function buildScheduledSlotKey(triggerType, triggerConfig) {
+  return [
+    cleanString(triggerType).toLowerCase(),
+    cleanString(triggerConfig?.schedule_moment || '').toLowerCase(),
+    cleanString(triggerConfig?.schedule_time_mode || '').toLowerCase(),
+    cleanString(triggerConfig?.custom_time || '').toLowerCase(),
+  ].join('|');
+}
+
+function computeScheduledRunAt({ cita, triggerType, triggerConfig, timeZone }) {
+  const start = cita?.inicio ? new Date(cita.inicio) : null;
+  const end = cita?.fin ? new Date(cita.fin) : start;
+  if (!start || !Number.isFinite(start.getTime()) || !end || !Number.isFinite(end.getTime())) {
+    return null;
+  }
+  const nowTs = Date.now();
+
+  if (triggerType === 'appointment_reminder_window') {
+    // No se programan disparos retroactivos "antes de la cita" si la cita ya ha comenzado.
+    if (start.getTime() <= nowTs) {
+      return null;
+    }
+    if (triggerConfig?.schedule_time_mode === 'one_hour_before') {
+      return normalizeScheduledDate(new Date(start.getTime() - (60 * 60 * 1000)));
+    }
+    const baseDateLocal = formatDateLocal(start, timeZone);
+    const targetDateLocal = triggerConfig?.schedule_moment === 'week_before'
+      ? addDaysToLocalDate(baseDateLocal, -7)
+      : triggerConfig?.schedule_moment === 'day_before'
+        ? addDaysToLocalDate(baseDateLocal, -1)
+        : baseDateLocal;
+    if (!targetDateLocal) return null;
+    const runAt = localDateTimeToUtc(targetDateLocal, `${triggerConfig?.custom_time || '09:00'}:00`, timeZone);
+    if (!runAt || runAt.getTime() >= start.getTime()) return null;
+    return normalizeScheduledDate(runAt);
+  }
+
+  if (triggerType === 'appointment_after') {
+    if (triggerConfig?.schedule_time_mode === 'one_hour_after') {
+      return normalizeScheduledDate(new Date(end.getTime() + (60 * 60 * 1000)));
+    }
+    const baseDateLocal = formatDateLocal(end, timeZone);
+    const targetDateLocal = triggerConfig?.schedule_moment === 'week_after'
+      ? addDaysToLocalDate(baseDateLocal, 7)
+      : triggerConfig?.schedule_moment === 'day_after'
+        ? addDaysToLocalDate(baseDateLocal, 1)
+        : baseDateLocal;
+    if (!targetDateLocal) return null;
+    const runAt = localDateTimeToUtc(targetDateLocal, `${triggerConfig?.custom_time || '09:00'}:00`, timeZone);
+    if (!runAt || runAt.getTime() <= end.getTime()) return null;
+    return normalizeScheduledDate(runAt);
+  }
+
+  return null;
+}
+
+function buildScheduledWindowIdentifier({ triggerType, triggerConfig, scheduledFor }) {
+  return [
+    'schedule',
+    cleanString(triggerType).toLowerCase(),
+    cleanString(triggerConfig?.schedule_moment || '').toLowerCase(),
+    cleanString(triggerConfig?.schedule_time_mode || '').toLowerCase(),
+    cleanString(triggerConfig?.custom_time || '').toLowerCase() || 'auto',
+    scheduledFor instanceof Date && Number.isFinite(scheduledFor.getTime()) ? scheduledFor.toISOString() : '',
+  ].join(':');
+}
+
+async function resolveScheduledTemplatesForCita(cita, eventName) {
+  if (!SCHEDULED_APPOINTMENT_TRIGGER_TYPES.has(cleanString(eventName))) {
+    return [];
+  }
+
+  const { clinicId, groupId, candidates } = await fetchClinicScopedTemplates(cita, eventName);
+  const byTemplateKey = new Map();
+  for (const row of candidates || []) {
+    const key = cleanString(row?.template_key);
+    if (!key || byTemplateKey.has(key)) continue;
+    byTemplateKey.set(key, row);
+  }
+
+  const boundTemplate = await resolveTemplateBoundToTratamiento(cita, eventName);
+  if (boundTemplate) {
+    byTemplateKey.set(cleanString(boundTemplate.template_key), boundTemplate);
+  }
+
+  const bestBySlot = new Map();
+  Array.from(byTemplateKey.values()).forEach((template) => {
+    const triggerConfig = getTemplateTriggerConfig(template);
+    if (!triggerConfig) return;
+    const slotKey = buildScheduledSlotKey(eventName, triggerConfig);
+    const candidate = {
+      template,
+      slotKey,
+      score: template.id === boundTemplate?.id
+        ? 1000
+        : getScopeScoreForTemplate(template, clinicId, groupId),
+    };
+    const current = bestBySlot.get(slotKey);
+    if (!current || candidate.score > current.score || (candidate.score === current.score && Number(template.version || 0) > Number(current.template.version || 0))) {
+      bestBySlot.set(slotKey, candidate);
+    }
+  });
+
+  return Array.from(bestBySlot.values()).map((item) => item.template);
+}
+
+async function listExistingScheduledJobs(citaId) {
+  const numericCitaId = toIntOrNull(citaId);
+  if (!numericCitaId) return [];
+
+  return JobRequest.findAll({
+    where: {
+      origin: 'appointment_automation_schedule',
+      status: { [Op.in]: ['pending', 'waiting'] },
+      [Op.and]: [
+        db.Sequelize.literal(`CAST(JSON_UNQUOTE(JSON_EXTRACT(payload, '$.appointment_id')) AS UNSIGNED) = ${numericCitaId}`),
+      ],
+    },
+    order: [['id', 'DESC']],
+  });
 }
 
 async function resolveClinicScope(cita) {
@@ -358,16 +677,14 @@ function buildExecutionContext({ cita, eventName, userName = null, userEmail = n
   };
 }
 
-async function enqueueExecutionForCita(cita, options = {}) {
+async function enqueueExecutionForTemplate(cita, template, options = {}) {
   const citaId = toIntOrNull(cita?.id_cita);
-  if (!citaId) {
+  if (!citaId || !template) {
     return { success: false, skipped: true, reason: 'invalid_cita' };
   }
 
-  const eventName = normalizeEventName(options.event_name) || mapEstadoToEvent(cita?.estado) || 'appointment_created';
-
-  const template = await resolveTemplateForCitaEvent(cita, eventName);
-  if (!template || !APPOINTMENT_TRIGGER_TYPES.has(cleanString(template.trigger_type))) {
+  const eventName = normalizeEventName(options.event_name) || cleanString(template?.trigger_type) || mapEstadoToEvent(cita?.estado) || 'appointment_created';
+  if (!APPOINTMENT_TRIGGER_TYPES.has(cleanString(template.trigger_type))) {
     return { success: false, skipped: true, reason: 'no_template_for_event' };
   }
 
@@ -427,7 +744,7 @@ async function enqueueExecutionForCita(cita, options = {}) {
 
   const queueJob = await jobRequestsService.enqueueJobRequest({
     type: 'automations_v2_execute',
-    priority: 'high',
+    priority: 'critical',
     origin: 'appointment_automation_v2',
     payload: { execution_id: createdExecution.id },
     requestedBy,
@@ -442,6 +759,142 @@ async function enqueueExecutionForCita(cita, options = {}) {
     execution: createdExecution,
     template,
     queue_job_id: queueJob.id,
+  };
+}
+
+async function enqueueExecutionForCita(cita, options = {}) {
+  const citaId = toIntOrNull(cita?.id_cita);
+  if (!citaId) {
+    return { success: false, skipped: true, reason: 'invalid_cita' };
+  }
+
+  const eventName = normalizeEventName(options.event_name) || mapEstadoToEvent(cita?.estado) || 'appointment_created';
+  const template = await resolveTemplateForCitaEvent(cita, eventName);
+  if (!template || !APPOINTMENT_TRIGGER_TYPES.has(cleanString(template.trigger_type))) {
+    return { success: false, skipped: true, reason: 'no_template_for_event' };
+  }
+
+  return enqueueExecutionForTemplate(cita, template, {
+    ...options,
+    event_name: eventName,
+  });
+}
+
+async function syncScheduledTriggersForCita(cita, options = {}) {
+  const citaId = toIntOrNull(cita?.id_cita);
+  if (!citaId) return { success: false, skipped: true, reason: 'invalid_cita' };
+
+  const normalizedStatus = cleanString(cita?.estado).toLowerCase();
+  const existingJobs = await listExistingScheduledJobs(citaId);
+
+  if (normalizedStatus && !ACTIVE_APPOINTMENT_STATUSES.has(normalizedStatus)) {
+    await Promise.all(existingJobs.map((job) => jobRequestsService.markCancelled(job.id, {
+      errorMessage: `appointment_status_${normalizedStatus}_cancelled_schedule`,
+    })));
+    return {
+      success: true,
+      cancelled_jobs: existingJobs.map((job) => job.id),
+      scheduled_jobs: [],
+      skipped: true,
+      reason: 'inactive_appointment_status',
+    };
+  }
+
+  const clinic = cita?.clinica_id
+    ? await Clinica.findByPk(cita.clinica_id, {
+        attributes: ['id_clinica', 'configuracion'],
+        raw: true,
+      })
+    : null;
+  const timeZone = resolveClinicTimezone(clinic);
+
+  const desiredJobs = [];
+  for (const triggerType of Array.from(SCHEDULED_APPOINTMENT_TRIGGER_TYPES)) {
+    const templates = await resolveScheduledTemplatesForCita(cita, triggerType);
+    templates.forEach((template) => {
+      const triggerConfig = getTemplateTriggerConfig(template);
+      const scheduledFor = computeScheduledRunAt({
+        cita,
+        triggerType,
+        triggerConfig,
+        timeZone,
+      });
+      if (!scheduledFor || !Number.isFinite(scheduledFor.getTime())) return;
+      const windowIdentifier = buildScheduledWindowIdentifier({
+        triggerType,
+        triggerConfig,
+        scheduledFor,
+      });
+      desiredJobs.push({
+        triggerType,
+        templateKey: cleanString(template.template_key),
+        scheduledFor,
+        windowIdentifier,
+      });
+    });
+  }
+
+  const desiredKeySet = new Set(
+    desiredJobs.map((item) => `${item.triggerType}:${item.templateKey}:${item.windowIdentifier}`)
+  );
+
+  for (const job of existingJobs) {
+    const payload = job?.payload && typeof job.payload === 'object' ? job.payload : {};
+    const existingKey = [
+      cleanString(payload.trigger_type),
+      cleanString(payload.template_key),
+      cleanString(payload.window_identifier),
+    ].join(':');
+    if (!desiredKeySet.has(existingKey)) {
+      await jobRequestsService.markCancelled(job.id, {
+        errorMessage: 'superseded_by_appointment_resync',
+      });
+    }
+  }
+
+  const activeExistingJobs = await listExistingScheduledJobs(citaId);
+  const existingKeySet = new Set(activeExistingJobs.map((job) => {
+    const payload = job?.payload && typeof job.payload === 'object' ? job.payload : {};
+    return [
+      cleanString(payload.trigger_type),
+      cleanString(payload.template_key),
+      cleanString(payload.window_identifier),
+    ].join(':');
+  }));
+
+  const scheduledJobIds = [];
+  for (const item of desiredJobs) {
+    const dedupeKey = `${item.triggerType}:${item.templateKey}:${item.windowIdentifier}`;
+    if (existingKeySet.has(dedupeKey)) continue;
+
+    const runNow = item.scheduledFor.getTime() <= Date.now();
+    const job = await jobRequestsService.enqueueJobRequest({
+      type: 'appointment_automation_schedule_fire',
+      priority: 'high',
+      status: 'waiting',
+      origin: 'appointment_automation_schedule',
+      payload: {
+        appointment_id: citaId,
+        trigger_type: item.triggerType,
+        template_key: item.templateKey,
+        window_identifier: item.windowIdentifier,
+        scheduled_for: item.scheduledFor.toISOString(),
+      },
+      requestedBy: toIntOrNull(options.user_id) || null,
+      requestedByName: cleanString(options.user_name) || null,
+      requestedByRole: cleanString(options.user_role) || 'system',
+      nextRunAt: runNow ? new Date() : item.scheduledFor,
+    });
+    scheduledJobIds.push(job.id);
+    if (runNow) {
+      jobScheduler.triggerImmediate(job.id).catch(() => {});
+    }
+  }
+
+  return {
+    success: true,
+    scheduled_jobs: scheduledJobIds,
+    desired_count: desiredJobs.length,
   };
 }
 
@@ -485,9 +938,95 @@ async function getExecutionLogs(executionId, limit = 100) {
   });
 }
 
+async function fireScheduledTrigger(payload = {}) {
+  const citaId = toIntOrNull(payload.appointment_id);
+  const triggerType = normalizeEventName(payload.trigger_type);
+  const templateKey = cleanString(payload.template_key);
+  const expectedWindowIdentifier = cleanString(payload.window_identifier);
+  if (!citaId || !triggerType || !templateKey) {
+    return { success: false, skipped: true, reason: 'invalid_payload' };
+  }
+
+  const citaModel = await db.CitaPaciente.findByPk(citaId);
+  if (!citaModel) {
+    return { success: false, skipped: true, reason: 'appointment_not_found' };
+  }
+  const cita = citaModel.toJSON ? citaModel.toJSON() : citaModel;
+  const normalizedStatus = cleanString(cita?.estado).toLowerCase();
+  if (['cancelada', 'no_asistio'].includes(normalizedStatus)) {
+    return { success: true, skipped: true, reason: `appointment_${normalizedStatus}` };
+  }
+
+  const clinic = cita?.clinica_id
+    ? await Clinica.findByPk(cita.clinica_id, {
+        attributes: ['id_clinica', 'configuracion'],
+        raw: true,
+      })
+    : null;
+  const timeZone = resolveClinicTimezone(clinic);
+
+  const template = await AutomationFlowTemplateV2.findOne({
+    where: {
+      template_key: templateKey,
+      trigger_type: triggerType,
+      is_active: true,
+      published_at: { [Op.ne]: null },
+    },
+    order: [['version', 'DESC']],
+  });
+  if (!template) {
+    return { success: true, skipped: true, reason: 'template_not_active' };
+  }
+
+  const triggerConfig = getTemplateTriggerConfig(template);
+  const scheduledFor = computeScheduledRunAt({
+    cita,
+    triggerType,
+    triggerConfig,
+    timeZone,
+  });
+  if (!scheduledFor || !Number.isFinite(scheduledFor.getTime())) {
+    return { success: true, skipped: true, reason: 'invalid_schedule' };
+  }
+
+  const effectiveWindowIdentifier = buildScheduledWindowIdentifier({
+    triggerType,
+    triggerConfig,
+    scheduledFor,
+  });
+  if (expectedWindowIdentifier && effectiveWindowIdentifier !== expectedWindowIdentifier) {
+    return {
+      success: true,
+      skipped: true,
+      reason: 'stale_schedule_window',
+      expected_window_identifier: effectiveWindowIdentifier,
+    };
+  }
+
+  if (scheduledFor.getTime() > Date.now()) {
+    return {
+      success: true,
+      waiting: true,
+      scheduled_for: scheduledFor.toISOString(),
+    };
+  }
+
+  return enqueueExecutionForTemplate(cita, template, {
+    event_name: triggerType,
+    window_identifier: effectiveWindowIdentifier,
+    user_id: payload.user_id || null,
+    user_name: payload.user_name || 'scheduler',
+    user_role: payload.user_role || 'system',
+  });
+}
+
 module.exports = {
   APPOINTMENT_TRIGGER_TYPES,
+  SCHEDULED_APPOINTMENT_TRIGGER_TYPES,
   enqueueExecutionForCita,
+  enqueueExecutionForTemplate,
+  syncScheduledTriggersForCita,
+  fireScheduledTrigger,
   getExecutionsByAppointmentId,
   getLatestExecutionByAppointmentId,
   getExecutionLogs,

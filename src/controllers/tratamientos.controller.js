@@ -10,6 +10,7 @@ const AutomationFlowTemplateV2 = db.AutomationFlowTemplateV2;
 const APPOINTMENT_TRIGGER_TYPES = new Set([
     'appointment_created',
     'appointment_reminder_window',
+    'appointment_after',
     'appointment_confirmed',
     'appointment_no_show',
     'appointment_rescheduled',
@@ -28,6 +29,39 @@ function toCleanString(value) {
     if (value === undefined || value === null) return null;
     const cleaned = String(value).trim();
     return cleaned || null;
+}
+
+function normalizeInstallationAssignmentType(value) {
+    return value === 'especificas' ? 'especificas' : 'cualquiera';
+}
+
+const ALLOWED_INSTALLATION_TYPES = new Set([
+    'box',
+    'quirofano',
+    'sala',
+    'consulta',
+    'laboratorio',
+    'sala_pruebas',
+    'sala_polivalente',
+    'otro',
+]);
+
+function normalizeRequiredInstallationType(value) {
+    const normalized = toCleanString(value);
+    if (!normalized) return null;
+    return ALLOWED_INSTALLATION_TYPES.has(normalized) ? normalized : null;
+}
+
+function normalizeInstallationIds(value) {
+    if (!Array.isArray(value)) return [];
+    const uniqueIds = new Set();
+    value.forEach((item) => {
+        const parsed = toIntOrNull(item);
+        if (parsed) {
+            uniqueIds.add(parsed);
+        }
+    });
+    return Array.from(uniqueIds);
 }
 
 function extractTriggerConfig(template) {
@@ -161,6 +195,9 @@ exports.createTratamiento = asyncHandler(async (req, res) => {
         activo = true,
         appointment_automation_template_key = null,
         appointment_automation_template_version = null,
+        asignacion_instalacion_tipo = 'cualquiera',
+        tipo_instalacion_requerida = null,
+        instalaciones_habilitadas = null,
         clinica_id,
         grupo_clinica_id
     } = req.body || {};
@@ -172,6 +209,14 @@ exports.createTratamiento = asyncHandler(async (req, res) => {
     if (origen === 'clinica' && (!clinicaIdNum || Number.isNaN(clinicaIdNum))) {
         return res.status(400).json({ message: 'clinica_id válido es obligatorio para tratamientos de clínica' });
     }
+
+    const installationAssignmentType = normalizeInstallationAssignmentType(asignacion_instalacion_tipo);
+    const requiredInstallationType = installationAssignmentType === 'especificas'
+        ? null
+        : normalizeRequiredInstallationType(tipo_instalacion_requerida);
+    const enabledInstallationIds = installationAssignmentType === 'especificas'
+        ? normalizeInstallationIds(instalaciones_habilitadas)
+        : null;
 
     const tratamiento = await Tratamiento.create({
         nombre,
@@ -192,7 +237,10 @@ exports.createTratamiento = asyncHandler(async (req, res) => {
         requiere_zona: !!requiere_zona,
         activo: activo !== false,
         appointment_automation_template_key: appointment_automation_template_key || null,
-        appointment_automation_template_version: appointment_automation_template_version || null,
+        appointment_automation_template_version: null,
+        asignacion_instalacion_tipo: installationAssignmentType,
+        tipo_instalacion_requerida: requiredInstallationType,
+        instalaciones_habilitadas: enabledInstallationIds,
         clinica_id: clinicaIdNum || null,
         grupo_clinica_id: grupo_clinica_id || null
     });
@@ -227,14 +275,53 @@ exports.updateTratamiento = asyncHandler(async (req, res) => {
         'activo',
         'appointment_automation_template_key',
         'appointment_automation_template_version',
+        'asignacion_instalacion_tipo',
+        'tipo_instalacion_requerida',
+        'instalaciones_habilitadas',
         'clinica_id',
         'grupo_clinica_id'
     ];
     updatableFields.forEach((field) => {
         if (req.body[field] !== undefined) {
+            if (field === 'appointment_automation_template_version') {
+                tratamiento[field] = null;
+                return;
+            }
+            if (field === 'asignacion_instalacion_tipo') {
+                tratamiento[field] = normalizeInstallationAssignmentType(req.body[field]);
+                return;
+            }
+            if (field === 'instalaciones_habilitadas') {
+                const effectiveType = req.body.asignacion_instalacion_tipo !== undefined
+                    ? normalizeInstallationAssignmentType(req.body.asignacion_instalacion_tipo)
+                    : normalizeInstallationAssignmentType(tratamiento.asignacion_instalacion_tipo);
+                tratamiento[field] = effectiveType === 'especificas'
+                    ? normalizeInstallationIds(req.body[field])
+                    : null;
+                return;
+            }
+            if (field === 'tipo_instalacion_requerida') {
+                const effectiveType = req.body.asignacion_instalacion_tipo !== undefined
+                    ? normalizeInstallationAssignmentType(req.body.asignacion_instalacion_tipo)
+                    : normalizeInstallationAssignmentType(tratamiento.asignacion_instalacion_tipo);
+                tratamiento[field] = effectiveType === 'especificas'
+                    ? null
+                    : normalizeRequiredInstallationType(req.body[field]);
+                return;
+            }
             tratamiento[field] = req.body[field];
         }
     });
+
+    if (req.body.asignacion_instalacion_tipo !== undefined && req.body.instalaciones_habilitadas === undefined) {
+        const effectiveType = normalizeInstallationAssignmentType(req.body.asignacion_instalacion_tipo);
+        if (effectiveType !== 'especificas') {
+            tratamiento.instalaciones_habilitadas = null;
+        }
+        if (effectiveType === 'especificas') {
+            tratamiento.tipo_instalacion_requerida = null;
+        }
+    }
     await tratamiento.save();
     res.json(tratamiento);
 });
@@ -341,8 +428,6 @@ exports.getTratamientoAutomationTemplate = asyncHandler(async (req, res) => {
     }
 
     const templateKey = toCleanString(tratamiento.appointment_automation_template_key);
-    const templateVersion = toIntOrNull(tratamiento.appointment_automation_template_version);
-
     if (!templateKey) {
         return res.json({
             success: true,
@@ -355,9 +440,9 @@ exports.getTratamientoAutomationTemplate = asyncHandler(async (req, res) => {
 
     const where = {
         template_key: templateKey,
+        is_active: true,
         published_at: { [db.Sequelize.Op.ne]: null },
     };
-    if (templateVersion) where.version = templateVersion;
 
     const template = await AutomationFlowTemplateV2.findOne({
         where,
@@ -404,7 +489,6 @@ exports.setTratamientoAutomationTemplate = asyncHandler(async (req, res) => {
     }
 
     const templateKeyRaw = req.body?.template_key;
-    const versionRaw = req.body?.template_version;
     if (templateKeyRaw === undefined) {
         return res.status(400).json({
             success: false,
@@ -426,19 +510,11 @@ exports.setTratamientoAutomationTemplate = asyncHandler(async (req, res) => {
         });
     }
 
-    const requestedVersion = toIntOrNull(versionRaw);
-    if (versionRaw !== undefined && versionRaw !== null && versionRaw !== '' && !requestedVersion) {
-        return res.status(400).json({ success: false, message: 'template_version inválido' });
-    }
-
     const where = {
         template_key: templateKey,
         is_active: true,
         published_at: { [db.Sequelize.Op.ne]: null },
     };
-    if (requestedVersion) {
-        where.version = requestedVersion;
-    }
 
     const template = await AutomationFlowTemplateV2.findOne({
         where,
@@ -447,9 +523,7 @@ exports.setTratamientoAutomationTemplate = asyncHandler(async (req, res) => {
     if (!template) {
         return res.status(404).json({
             success: false,
-            message: requestedVersion
-                ? 'Plantilla v2 no encontrada para template_key/version'
-                : 'Plantilla v2 no encontrada para template_key',
+            message: 'Plantilla v2 no encontrada para template_key',
         });
     }
 
@@ -493,7 +567,7 @@ exports.setTratamientoAutomationTemplate = asyncHandler(async (req, res) => {
     }
 
     tratamiento.appointment_automation_template_key = template.template_key;
-    tratamiento.appointment_automation_template_version = Number(template.version);
+    tratamiento.appointment_automation_template_version = null;
     await tratamiento.save();
 
     return res.json({

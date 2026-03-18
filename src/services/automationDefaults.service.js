@@ -88,20 +88,16 @@ function buildCatalogTemplateKey(catalogFlowId, sourceTemplateKey, clinicId) {
 
 async function resolveLinkedTemplateForCatalog(catalogFlow) {
   const templateKey = String(catalogFlow?.template_key || '').trim();
-  const requestedVersion = Number.isInteger(Number(catalogFlow?.template_version))
-    ? Number(catalogFlow.template_version)
-    : null;
 
   if (!templateKey) return null;
 
-  const where = { template_key: templateKey };
-  if (requestedVersion) {
-    where.version = requestedVersion;
-  }
-
   return AutomationFlowTemplateV2.findOne({
-    where,
-    order: [['version', 'DESC']],
+    where: {
+      template_key: templateKey,
+      published_at: { [Op.ne]: null },
+      is_active: true,
+    },
+    order: [['version', 'DESC'], ['id', 'DESC']],
   });
 }
 

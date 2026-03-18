@@ -528,7 +528,8 @@ function isObject(value) {
 
 const TRIGGER_TYPES_V2 = [
   { value: 'appointment_created', label: 'Cita creada (manual o desde lead)' },
-  { value: 'appointment_reminder_window', label: 'Ventana de recordatorio' },
+  { value: 'appointment_reminder_window', label: 'Antes de la cita' },
+  { value: 'appointment_after', label: 'Después de la cita' },
   { value: 'appointment_confirmed', label: 'Cita confirmada' },
   { value: 'appointment_no_show', label: 'Cita no show' },
   { value: 'appointment_rescheduled', label: 'Cita reagendada' },
@@ -552,6 +553,7 @@ const TRIGGER_NODE_TYPES_V2 = TRIGGER_TYPES_V2.map((trigger) => ({
 const APPOINTMENT_TRIGGER_TYPES = new Set([
   'appointment_created',
   'appointment_reminder_window',
+  'appointment_after',
   'appointment_confirmed',
   'appointment_no_show',
   'appointment_rescheduled',
@@ -569,6 +571,25 @@ const APPOINTMENT_CREATED_WITHOUT_TREATMENT_TYPES = new Set([
   'urgencia',
   'revision',
 ]);
+const APPOINTMENT_BEFORE_MOMENT_VALUES = new Set([
+  'same_day',
+  'day_before',
+  'week_before',
+]);
+const APPOINTMENT_BEFORE_TIME_MODE_VALUES = new Set([
+  'custom',
+  'one_hour_before',
+]);
+const APPOINTMENT_AFTER_MOMENT_VALUES = new Set([
+  'same_day',
+  'day_after',
+  'week_after',
+]);
+const APPOINTMENT_AFTER_TIME_MODE_VALUES = new Set([
+  'custom',
+  'one_hour_after',
+]);
+const TRIGGER_SELECTION_PENDING_FLAG = '__trigger_unconfigured';
 const DUE_DATE_OFFSET_REGEX = /^(\d+)\s*(second|seconds|minute|minutes|hour|hours|day|days)$/i;
 
 function normalizeDomain(raw) {
@@ -967,10 +988,108 @@ function resolveTriggerNode({ entryNodeId, nodes }) {
   return nodes.find((node) => cleanString(node?.id) === entryNodeId) || null;
 }
 
+function isTriggerSelectionPendingConfig(config) {
+  return isObject(config) && parseBool(config[TRIGGER_SELECTION_PENDING_FLAG], false) === true;
+}
+
 function normalizeTriggerConfigForTemplate({ triggerType, entryNodeId, nodes }) {
   const normalizedTriggerType = cleanString(triggerType);
   const triggerNode = resolveTriggerNode({ entryNodeId, nodes });
   const rawConfig = isObject(triggerNode?.config) ? triggerNode.config : {};
+
+  if (isTriggerSelectionPendingConfig(rawConfig)) {
+    return { ok: true, trigger_config: null };
+  }
+
+  if (normalizedTriggerType === 'appointment_reminder_window') {
+    const scheduleMoment = cleanString(rawConfig.schedule_moment || 'day_before').toLowerCase() || 'day_before';
+    if (!APPOINTMENT_BEFORE_MOMENT_VALUES.has(scheduleMoment)) {
+      return {
+        ok: false,
+        error: 'invalid_trigger_config',
+        message: `schedule_moment no soportado para appointment_reminder_window: ${scheduleMoment}`,
+        details: {
+          allowed_schedule_moment: Array.from(APPOINTMENT_BEFORE_MOMENT_VALUES),
+        },
+      };
+    }
+
+    const scheduleTimeMode = cleanString(rawConfig.schedule_time_mode || 'custom').toLowerCase() || 'custom';
+    if (!APPOINTMENT_BEFORE_TIME_MODE_VALUES.has(scheduleTimeMode)) {
+      return {
+        ok: false,
+        error: 'invalid_trigger_config',
+        message: `schedule_time_mode no soportado para appointment_reminder_window: ${scheduleTimeMode}`,
+        details: {
+          allowed_schedule_time_mode: Array.from(APPOINTMENT_BEFORE_TIME_MODE_VALUES),
+        },
+      };
+    }
+
+    let customTime = cleanString(rawConfig.custom_time || '09:00');
+    if (scheduleTimeMode === 'custom' && !/^\d{2}:\d{2}$/.test(customTime)) {
+      return {
+        ok: false,
+        error: 'invalid_trigger_config',
+        message: `custom_time no soportado para appointment_reminder_window: ${customTime}`,
+      };
+    }
+    if (scheduleTimeMode !== 'custom') customTime = null;
+
+    return {
+      ok: true,
+      trigger_config: {
+        schedule_moment: scheduleMoment,
+        schedule_time_mode: scheduleTimeMode,
+        custom_time: customTime,
+      },
+    };
+  }
+
+  if (normalizedTriggerType === 'appointment_after') {
+    const scheduleMoment = cleanString(rawConfig.schedule_moment || 'day_after').toLowerCase() || 'day_after';
+    if (!APPOINTMENT_AFTER_MOMENT_VALUES.has(scheduleMoment)) {
+      return {
+        ok: false,
+        error: 'invalid_trigger_config',
+        message: `schedule_moment no soportado para appointment_after: ${scheduleMoment}`,
+        details: {
+          allowed_schedule_moment: Array.from(APPOINTMENT_AFTER_MOMENT_VALUES),
+        },
+      };
+    }
+
+    const scheduleTimeMode = cleanString(rawConfig.schedule_time_mode || 'custom').toLowerCase() || 'custom';
+    if (!APPOINTMENT_AFTER_TIME_MODE_VALUES.has(scheduleTimeMode)) {
+      return {
+        ok: false,
+        error: 'invalid_trigger_config',
+        message: `schedule_time_mode no soportado para appointment_after: ${scheduleTimeMode}`,
+        details: {
+          allowed_schedule_time_mode: Array.from(APPOINTMENT_AFTER_TIME_MODE_VALUES),
+        },
+      };
+    }
+
+    let customTime = cleanString(rawConfig.custom_time || '09:00');
+    if (scheduleTimeMode === 'custom' && !/^\d{2}:\d{2}$/.test(customTime)) {
+      return {
+        ok: false,
+        error: 'invalid_trigger_config',
+        message: `custom_time no soportado para appointment_after: ${customTime}`,
+      };
+    }
+    if (scheduleTimeMode !== 'custom') customTime = null;
+
+    return {
+      ok: true,
+      trigger_config: {
+        schedule_moment: scheduleMoment,
+        schedule_time_mode: scheduleTimeMode,
+        custom_time: customTime,
+      },
+    };
+  }
 
   if (normalizedTriggerType !== 'appointment_created') {
     return { ok: true, trigger_config: null };
@@ -1018,19 +1137,37 @@ function normalizeTriggerConfigForTemplate({ triggerType, entryNodeId, nodes }) 
 function applyTriggerConfigToNodes({ triggerType, entryNodeId, nodes, triggerConfig }) {
   if (!Array.isArray(nodes)) return [];
   const normalizedTriggerType = cleanString(triggerType);
-  const sanitizedTriggerConfig = normalizedTriggerType === 'appointment_created' && isObject(triggerConfig)
-    ? {
-        appointment_scope: cleanString(triggerConfig.appointment_scope || 'all').toLowerCase() || 'all',
-        appointment_type_without_treatment:
-          cleanString(triggerConfig.appointment_type_without_treatment || 'any').toLowerCase() || 'any',
-      }
-    : {};
+  const triggerNode = resolveTriggerNode({ entryNodeId, nodes });
+  const preservePendingSelection = isTriggerSelectionPendingConfig(triggerNode?.config);
+  let sanitizedTriggerConfig = {};
+
+  if (normalizedTriggerType === 'appointment_created' && isObject(triggerConfig)) {
+    sanitizedTriggerConfig = {
+      appointment_scope: cleanString(triggerConfig.appointment_scope || 'all').toLowerCase() || 'all',
+      appointment_type_without_treatment:
+        cleanString(triggerConfig.appointment_type_without_treatment || 'any').toLowerCase() || 'any',
+    };
+  } else if (normalizedTriggerType === 'appointment_reminder_window' && isObject(triggerConfig)) {
+    sanitizedTriggerConfig = {
+      schedule_moment: cleanString(triggerConfig.schedule_moment || 'day_before').toLowerCase() || 'day_before',
+      schedule_time_mode: cleanString(triggerConfig.schedule_time_mode || 'custom').toLowerCase() || 'custom',
+      custom_time: cleanString(triggerConfig.custom_time || '09:00') || null,
+    };
+  } else if (normalizedTriggerType === 'appointment_after' && isObject(triggerConfig)) {
+    sanitizedTriggerConfig = {
+      schedule_moment: cleanString(triggerConfig.schedule_moment || 'day_after').toLowerCase() || 'day_after',
+      schedule_time_mode: cleanString(triggerConfig.schedule_time_mode || 'custom').toLowerCase() || 'custom',
+      custom_time: cleanString(triggerConfig.custom_time || '09:00') || null,
+    };
+  }
 
   return nodes.map((node) => {
     if (cleanString(node?.id) !== cleanString(entryNodeId)) return node;
     return {
       ...node,
-      config: sanitizedTriggerConfig,
+      config: preservePendingSelection
+        ? { [TRIGGER_SELECTION_PENDING_FLAG]: true }
+        : sanitizedTriggerConfig,
     };
   });
 }
@@ -1365,6 +1502,72 @@ function mapTemplate(row, { includeNodes = true, access = null, clinicNameMap = 
   }
 
   return base;
+}
+
+async function loadLatestActivePublishedVersionMap(templateKeys) {
+  const keys = Array.from(
+    new Set(
+      (Array.isArray(templateKeys) ? templateKeys : [])
+        .map((value) => cleanString(value))
+        .filter(Boolean)
+    )
+  );
+
+  if (!keys.length) {
+    return new Map();
+  }
+
+  const rows = await AutomationFlowTemplateV2.findAll({
+    attributes: ['template_key', 'version'],
+    where: {
+      template_key: { [Op.in]: keys },
+      published_at: { [Op.ne]: null },
+      is_active: true,
+    },
+    order: [['template_key', 'ASC'], ['version', 'DESC']],
+    raw: true,
+  });
+
+  const result = new Map();
+  for (const row of rows) {
+    const templateKey = cleanString(row?.template_key);
+    const version = parseIntOrNull(row?.version);
+    if (!templateKey || !version || result.has(templateKey)) {
+      continue;
+    }
+    result.set(templateKey, version);
+  }
+  return result;
+}
+
+function computeLifecycleStatus(item, latestActivePublishedVersionMap = null) {
+  if (!item?.published_at) {
+    return 'draft';
+  }
+
+  const latestActiveVersion =
+    latestActivePublishedVersionMap instanceof Map
+      ? parseIntOrNull(latestActivePublishedVersionMap.get(cleanString(item.template_key)))
+      : null;
+
+  if (item.is_active === false) {
+    return 'deprecated';
+  }
+
+  if (latestActiveVersion && Number(item.version) !== latestActiveVersion) {
+    return 'deprecated';
+  }
+
+  return 'active';
+}
+
+function mapTemplateWithLifecycle(row, options = {}) {
+  const mapped = mapTemplate(row, options);
+  mapped.lifecycle_status = computeLifecycleStatus(
+    row?.toJSON ? row.toJSON() : row,
+    options.latestActivePublishedVersionMap || null
+  );
+  return mapped;
 }
 
 function mapExecution(row, { includeContext = true } = {}) {
@@ -2980,10 +3183,19 @@ exports.listTemplates = async (req, res) => {
 
     const clinicNameMap = await loadClinicNameMapFromRows(rows);
 
+    const latestActivePublishedVersionMap = await loadLatestActivePublishedVersionMap(
+      rows.map((row) => row.template_key)
+    );
+
     return res.json({
       success: true,
       data: rows.map((row) =>
-        mapTemplate(row, { includeNodes, access, clinicNameMap })
+        mapTemplateWithLifecycle(row, {
+          includeNodes,
+          access,
+          clinicNameMap,
+          latestActivePublishedVersionMap,
+        })
       ),
       pagination: {
         total: count,
@@ -3146,7 +3358,7 @@ exports.createTemplateDraft = async (req, res) => {
     const clinicNameMap = await loadClinicNameMapFromRows([created]);
     return res.status(201).json({
       success: true,
-      data: mapTemplate(created, { includeNodes: true, access, clinicNameMap }),
+      data: mapTemplateWithLifecycle(created, { includeNodes: true, access, clinicNameMap }),
     });
   } catch (err) {
     console.error('Error createTemplateDraft v2', err);
@@ -3177,9 +3389,15 @@ exports.getTemplateLatestPublished = async (req, res) => {
     }
 
     const clinicNameMap = await loadClinicNameMapFromRows([row]);
+    const latestActivePublishedVersionMap = await loadLatestActivePublishedVersionMap([row.template_key]);
     return res.json({
       success: true,
-      data: mapTemplate(row, { includeNodes: true, access, clinicNameMap }),
+      data: mapTemplateWithLifecycle(row, {
+        includeNodes: true,
+        access,
+        clinicNameMap,
+        latestActivePublishedVersionMap,
+      }),
     });
   } catch (err) {
     console.error('Error getTemplateLatestPublished v2', err);
@@ -3210,10 +3428,19 @@ exports.listTemplateVersions = async (req, res) => {
 
     const clinicNameMap = await loadClinicNameMapFromRows(visible);
 
+    const latestActivePublishedVersionMap = await loadLatestActivePublishedVersionMap(
+      visible.map((row) => row.template_key)
+    );
+
     return res.json({
       success: true,
       data: visible.map((row) =>
-        mapTemplate(row, { includeNodes, access, clinicNameMap })
+        mapTemplateWithLifecycle(row, {
+          includeNodes,
+          access,
+          clinicNameMap,
+          latestActivePublishedVersionMap,
+        })
       ),
       pagination: {
         total: count,
@@ -3246,9 +3473,15 @@ exports.getTemplateVersion = async (req, res) => {
     }
 
     const clinicNameMap = await loadClinicNameMapFromRows([row]);
+    const latestActivePublishedVersionMap = await loadLatestActivePublishedVersionMap([row.template_key]);
     return res.json({
       success: true,
-      data: mapTemplate(row, { includeNodes: true, access, clinicNameMap }),
+      data: mapTemplateWithLifecycle(row, {
+        includeNodes: true,
+        access,
+        clinicNameMap,
+        latestActivePublishedVersionMap,
+      }),
     });
   } catch (err) {
     console.error('Error getTemplateVersion v2', err);
@@ -3295,9 +3528,15 @@ exports.updateTemplateDraft = async (req, res) => {
       });
 
       const clinicNameMap = await loadClinicNameMapFromRows([row]);
+      const latestActivePublishedVersionMap = await loadLatestActivePublishedVersionMap([row.template_key]);
       return res.json({
         success: true,
-        data: mapTemplate(row, { includeNodes: true, access, clinicNameMap }),
+        data: mapTemplateWithLifecycle(row, {
+          includeNodes: true,
+          access,
+          clinicNameMap,
+          latestActivePublishedVersionMap,
+        }),
       });
     }
 
@@ -3393,9 +3632,15 @@ exports.updateTemplateDraft = async (req, res) => {
     await row.update(updates);
 
     const clinicNameMap = await loadClinicNameMapFromRows([row]);
+    const latestActivePublishedVersionMap = await loadLatestActivePublishedVersionMap([row.template_key]);
     return res.json({
       success: true,
-      data: mapTemplate(row, { includeNodes: true, access, clinicNameMap }),
+      data: mapTemplateWithLifecycle(row, {
+        includeNodes: true,
+        access,
+        clinicNameMap,
+        latestActivePublishedVersionMap,
+      }),
     });
   } catch (err) {
     console.error('Error updateTemplateDraft v2', err);
@@ -3445,6 +3690,19 @@ exports.publishTemplateVersion = async (req, res) => {
         details: triggerResolution.details,
       });
     }
+    const triggerNode = resolveTriggerNode({ entryNodeId: row.entry_node_id, nodes: normalizedNodes });
+    if (isTriggerSelectionPendingConfig(triggerNode?.config)) {
+      return res.status(400).json({
+        success: false,
+        error: 'trigger_selection_required',
+        message: 'Selecciona un activador antes de publicar el flujo',
+        validation_errors: [{
+          code: 'trigger_selection_required',
+          node_id: row.entry_node_id,
+          message: 'Selecciona un activador antes de publicar el flujo',
+        }],
+      });
+    }
     const triggerConfigResolution = normalizeTriggerConfigForTemplate({
       triggerType: triggerResolution.trigger_type,
       entryNodeId: row.entry_node_id,
@@ -3471,23 +3729,44 @@ exports.publishTemplateVersion = async (req, res) => {
       });
     }
 
-    await row.update({
-      nodes: applyTriggerConfigToNodes({
-        triggerType: triggerResolution.trigger_type,
-        entryNodeId: row.entry_node_id,
-        nodes: normalizedNodes,
-        triggerConfig: triggerConfigResolution.trigger_config,
-      }),
-      trigger_type: triggerResolution.trigger_type,
-      trigger_config: triggerConfigResolution.trigger_config,
-      published_at: new Date(),
-      published_by: access.user_id,
+    await db.sequelize.transaction(async (transaction) => {
+      await AutomationFlowTemplateV2.update(
+        { is_active: false },
+        {
+          where: {
+            template_key: templateKey,
+            published_at: { [Op.ne]: null },
+            id: { [Op.ne]: row.id },
+          },
+          transaction,
+        }
+      );
+
+      await row.update({
+        nodes: applyTriggerConfigToNodes({
+          triggerType: triggerResolution.trigger_type,
+          entryNodeId: row.entry_node_id,
+          nodes: normalizedNodes,
+          triggerConfig: triggerConfigResolution.trigger_config,
+        }),
+        trigger_type: triggerResolution.trigger_type,
+        trigger_config: triggerConfigResolution.trigger_config,
+        published_at: new Date(),
+        published_by: access.user_id,
+        is_active: true,
+      }, { transaction });
     });
 
     const clinicNameMap = await loadClinicNameMapFromRows([row]);
+    const latestActivePublishedVersionMap = await loadLatestActivePublishedVersionMap([row.template_key]);
     return res.json({
       success: true,
-      data: mapTemplate(row, { includeNodes: true, access, clinicNameMap }),
+      data: mapTemplateWithLifecycle(row, {
+        includeNodes: true,
+        access,
+        clinicNameMap,
+        latestActivePublishedVersionMap,
+      }),
     });
   } catch (err) {
     console.error('Error publishTemplateVersion v2', err);
@@ -3820,7 +4099,7 @@ exports.executeTemplateVersion = async (req, res) => {
 
     const queueJob = await jobRequestsService.enqueueJobRequest({
       type: 'automations_v2_execute',
-      priority: 'high',
+      priority: 'critical',
       origin: 'automations_v2',
       payload: {
         execution_id: createdExecution.id,
@@ -3887,7 +4166,7 @@ exports.resumeExecution = async (req, res) => {
 
     const queueJob = await jobRequestsService.enqueueJobRequest({
       type: 'automations_v2_execute',
-      priority: 'high',
+      priority: 'critical',
       origin: 'automations_v2_resume',
       payload: {
         execution_id: execution.id,

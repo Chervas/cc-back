@@ -236,10 +236,14 @@ async function findCanonicalWhatsappConversation({
   if (contactCandidates.length && !canonical.contact_id) {
     patch.contact_id = contactCandidates[0];
   }
-  if (patientId && !canonical.patient_id) {
+  // Regla canónica en integración: una única conversación WhatsApp por
+  // `clinic_id + contact_id`. Si reentra el mismo teléfono vinculado a un nuevo
+  // lead/paciente de la misma clínica, la conversación debe re-vincularse al
+  // contexto actual en lugar de quedarse colgada de una entidad antigua.
+  if (patientId && Number(canonical.patient_id || 0) !== Number(patientId)) {
     patch.patient_id = patientId;
   }
-  if (leadId && !canonical.lead_id) {
+  if (leadId && Number(canonical.lead_id || 0) !== Number(leadId)) {
     patch.lead_id = leadId;
   }
   if (lastMessageAt && (!canonical.last_message_at || new Date(lastMessageAt).getTime() > new Date(canonical.last_message_at).getTime())) {
