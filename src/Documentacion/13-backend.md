@@ -6,7 +6,7 @@
 
 ## 2026-03-18 - Diseño objetivo de conexiones OAuth por scope
 
-> **Estado:** diseño aprobado, pendiente de implementación.
+> **Estado:** implementado y alineado entre runtime OAuth, `Ajustes` y `back-integracion`.
 
 ### Limitación del modelo actual
 
@@ -95,6 +95,20 @@ Precedencia:
 1. conexión propia de clínica
 2. si no existe, conexión heredada del grupo
 3. si no existe ninguna, scope sin conexión
+
+### Regla operativa aplicada
+
+En la implementación activa para Meta y Google:
+
+- la conexión de una clínica perteneciente a grupo se **promociona** a conexión compartida del grupo;
+- la vista clínica hereda esa conexión de grupo;
+- la desconexión desde clínica o grupo actúa sobre la conexión compartida del grupo;
+- los mappings permanecen por clínica y se limpian por clínica afectada cuando se desconecta una conexión compartida.
+
+Esto fija una separación explícita:
+
+- **OAuth connection**: compartida por grupo por defecto;
+- **asset mapping**: independiente por clínica.
 
 Este resolver debe usarse en:
 

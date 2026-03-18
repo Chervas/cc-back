@@ -6,12 +6,12 @@ module.exports = (sequelize, DataTypes) => {
     id: { type: DataTypes.INTEGER, primaryKey: true, autoIncrement: true },
     userId: {
       type: DataTypes.INTEGER,
-      allowNull: false,
+      allowNull: true,
       unique: true,
       field: 'userId', // la columna existe en camelCase por migración
       references: { model: 'Usuarios', key: 'id_usuario' },
       onUpdate: 'CASCADE',
-      onDelete: 'CASCADE'
+      onDelete: 'SET NULL'
     },
     googleUserId: { type: DataTypes.STRING(128), allowNull: false, field: 'googleUserId' },
     userEmail: { type: DataTypes.STRING(256), allowNull: true, field: 'userEmail' },
@@ -30,6 +30,9 @@ module.exports = (sequelize, DataTypes) => {
 
   GoogleConnection.associate = function(models) {
     GoogleConnection.belongsTo(models.Usuario, { foreignKey: 'userId', targetKey: 'id_usuario', as: 'usuario' });
+    if (models.GoogleConnectionAssignment) {
+      GoogleConnection.hasMany(models.GoogleConnectionAssignment, { foreignKey: 'googleConnectionId', as: 'assignments' });
+    }
   };
 
   return GoogleConnection;
