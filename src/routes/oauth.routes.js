@@ -7,6 +7,8 @@ const { Op } = require('sequelize');
 const db = require('../../models'); // <-- Importa el objeto db de models/index.js
 const MetaConnection = db.MetaConnection; // <-- Accede al modelo MetaConnection
 const GoogleConnection = db.GoogleConnection; // <-- Modelo GoogleConnection
+const MetaConnectionAssignment = db.MetaConnectionAssignment;
+const GoogleConnectionAssignment = db.GoogleConnectionAssignment;
 const ClinicWebAsset = db.ClinicWebAsset; // <-- Modelo de mapeo de sitios web
 const ClinicAnalyticsProperty = db.ClinicAnalyticsProperty;
 const Clinica = db.Clinica;
@@ -32,6 +34,15 @@ const { metaSyncJobs } = require('../jobs/sync.jobs');
 const { triggerHistoricalSync } = require('../controllers/metasync.controller');
 const jobRequestsService = require('../services/jobRequests.service');
 const jobScheduler = require('../services/jobScheduler.service');
+const {
+    buildScopeKey,
+    normalizeScope,
+    buildSharedConnectionScope,
+    upsertMetaAssignment,
+    upsertGoogleAssignment,
+    resolveMetaConnectionForScope,
+    resolveGoogleConnectionForScope
+} = require('../services/scopeConnectionResolver.service');
 
 // Configuración de la App de Meta
 const META_APP_ID = '1807844546609897'; // <-- App ID correcto
@@ -39,8 +50,15 @@ const META_APP_SECRET = 'bfcfedd6447dce4c3eb280067300e141'; // <-- App Secret co
 const REDIRECT_URI = 'https://autenticacion.clinicaclick.com/oauth/meta/callback';
 const FRONTEND_URL = 'https://app.clinicaclick.com';
 const FRONTEND_DEV_URL = 'http://localhost:4200'; // Para desarrollo local
+const FRONTEND_DEV_INTEGRATION_URL = 'http://localhost:4203';
 const META_API_BASE_URL = process.env.META_API_BASE_URL || 'https://graph.facebook.com/v24.0';
 const META_BUSINESS_ID = process.env.META_BUSINESS_ID || process.env.META_BM_ID || null;
+const ALLOWED_FRONTEND_ORIGINS = new Set([
+    FRONTEND_URL,
+    'https://crm.clinicaclick.com',
+    FRONTEND_DEV_URL,
+    FRONTEND_DEV_INTEGRATION_URL
+]);
 
 // Configuración Google OAuth (variables de entorno)
 const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID || '';
@@ -91,6 +109,126 @@ async function subscribeLeadgenToPage(pageId, pageAccessToken) {
 }
 
 const GOOGLE_ADS_SCOPE = 'https://www.googleapis.com/auth/adwords';
+
+function normalizeFrontendReturnTo(candidate) {
+    try {
+        if (!candidate) return FRONTEND_URL;
+        const parsed = new URL(String(candidate));
+        const origin = parsed.origin;
+        return ALLOWED_FRONTEND_ORIGINS.has(origin) ? origin : FRONTEND_URL;
+    } catch (error) {
+        return FRONTEND_URL;
+    }
+}
+
+function parseOAuthState(rawState) {
+    const fallback = {
+        userId: String(rawState || '').trim(),
+        returnTo: FRONTEND_URL,
+        clinicId: null,
+        groupId: null,
+        assignmentScope: null
+    };
+    if (!rawState) {
+        return fallback;
+    }
+
+    const asString = String(rawState);
+    const tryParse = (value) => {
+        try {
+            const parsed = JSON.parse(value);
+            if (parsed && typeof parsed === 'object') {
+                const userId = String(parsed.userId || parsed.u || '').trim();
+                return {
+                    userId: userId || fallback.userId,
+                    returnTo: normalizeFrontendReturnTo(parsed.returnTo || parsed.r || null),
+                    clinicId: parsed.clinicId || parsed.clinic_id || parsed.c || null,
+                    groupId: parsed.groupId || parsed.group_id || parsed.g || null,
+                    assignmentScope: parsed.assignmentScope || parsed.assignment_scope || parsed.s || null
+                };
+            }
+        } catch (error) {
+            return null;
+        }
+        return null;
+    };
+
+    const direct = tryParse(asString);
+    if (direct) {
+        return direct;
+    }
+
+    try {
+        const decoded = Buffer.from(asString, 'base64url').toString('utf8');
+        const parsed = tryParse(decoded);
+        if (parsed) {
+            return parsed;
+        }
+    } catch (error) {
+        // noop
+    }
+
+    return fallback;
+}
+
+function buildFrontendSettingsRedirect(origin, query) {
+    const baseOrigin = normalizeFrontendReturnTo(origin);
+    return `${baseOrigin}/pages/settings${query}`;
+}
+
+function getScopeInputFromRequest(req) {
+    return {
+        clinicIdRaw: req.query?.clinic_id ?? req.body?.clinic_id ?? req.body?.clinicId ?? null,
+        groupIdRaw: req.query?.group_id ?? req.body?.group_id ?? req.body?.groupId ?? null,
+        assignmentScopeRaw: req.query?.assignment_scope ?? req.body?.assignment_scope ?? req.body?.assignmentScope ?? null
+    };
+}
+
+function hasRequestedScope(req) {
+    const { clinicIdRaw, groupIdRaw, assignmentScopeRaw } = getScopeInputFromRequest(req);
+    return Boolean(clinicIdRaw || groupIdRaw || assignmentScopeRaw);
+}
+
+async function getClinicIdsForGroup(groupId) {
+    if (!groupId) return [];
+    const clinics = await Clinica.findAll({
+        where: { grupoClinicaId: groupId },
+        attributes: ['id_clinica'],
+        raw: true
+    });
+    return clinics
+        .map((clinic) => Number(clinic.id_clinica))
+        .filter((id) => Number.isInteger(id));
+}
+
+function buildScopeResponse(scope, assignment) {
+    return {
+        assignment_scope: assignment?.assignmentScope || scope?.assignmentScope || null,
+        clinic_id: assignment?.clinicaId || scope?.clinicId || null,
+        group_id: assignment?.grupoClinicaId || scope?.groupId || null,
+        scope_key: assignment?.scopeKey || scope?.scopeKey || null
+    };
+}
+
+async function resolveGoogleRequestConnection(req, { allowLegacyUserFallback = true } = {}) {
+    const userId = getUserIdFromToken(req);
+    const resolved = await resolveGoogleConnectionForScope({
+        userId,
+        ...getScopeInputFromRequest(req),
+        allowLegacyUserFallback
+    });
+    return { userId, ...resolved };
+}
+
+async function resolveMetaRequestConnection(req, { allowLegacyUserFallback = true } = {}) {
+    const userId = getUserIdFromToken(req);
+    const resolved = await resolveMetaConnectionForScope({
+        userId,
+        ...getScopeInputFromRequest(req),
+        allowLegacyUserFallback
+    });
+    return { userId, ...resolved };
+}
 
 function googleTokenError(code, message) {
     const err = new Error(message);
@@ -369,22 +507,66 @@ function normalizeBusinessLocation(location, account) {
 }
 
 /**
+ * GET /oauth/meta/connect
+ * Devuelve la URL de autorización para iniciar el flujo OAuth de Meta.
+ */
+router.get('/meta/connect', async (req, res) => {
+    try {
+        const userId = getUserIdFromToken(req);
+        if (!userId) return res.status(401).json({ success: false, error: 'Usuario no autenticado' });
+
+        const returnTo = normalizeFrontendReturnTo(req.query?.return_to || null);
+        const state = JSON.stringify({
+            userId: String(userId),
+            returnTo,
+            clinicId: req.query?.clinic_id || null,
+            groupId: req.query?.group_id || null,
+            assignmentScope: req.query?.assignment_scope || null
+        });
+        const scope = [
+            'pages_read_engagement',
+            'pages_show_list',
+            'pages_manage_ads',
+            'pages_manage_metadata',
+            'ads_read',
+            'leads_retrieval',
+            'instagram_basic',
+            'instagram_manage_insights'
+        ].join(',');
+
+        const authUrl =
+            `https://www.facebook.com/v24.0/dialog/oauth?client_id=${META_APP_ID}` +
+            `&redirect_uri=${encodeURIComponent(REDIRECT_URI)}` +
+            `&scope=${encodeURIComponent(scope)}` +
+            `&response_type=code` +
+            `&state=${encodeURIComponent(state)}`;
+
+        return res.json({ success: true, authUrl });
+    } catch (e) {
+        console.error('❌ Error generando authUrl de Meta:', e.message);
+        return res.status(500).json({ success: false, error: 'No se pudo generar authUrl' });
+    }
+});
+
+/**
  * GET /oauth/meta/callback
  * Maneja el callback de la autorización de Meta (Facebook).
  */
 router.get('/meta/callback', async (req, res) => {
     const { code, state, error, error_reason, error_description } = req.query;
+    const oauthState = parseOAuthState(state);
+    const frontendOrigin = oauthState.returnTo;
 
     console.log('➡️  Callback de Meta recibido.');
 
     if (error) {
         console.error('❌ Error en el callback de Meta:', { error, error_reason, error_description });
-        return res.redirect(`${FRONTEND_URL}/pages/settings?error=${encodeURIComponent(error_description || error)}`);
+        return res.redirect(buildFrontendSettingsRedirect(frontendOrigin, `?error=${encodeURIComponent(error_description || error)}`));
     }
 
     if (!code) {
         console.error('❌ No se recibió el código de autorización.');
-        return res.redirect(`${FRONTEND_URL}/pages/settings?error=${encodeURIComponent('No se recibió el código de autorización.')}`);
+        return res.redirect(buildFrontendSettingsRedirect(frontendOrigin, `?error=${encodeURIComponent('No se recibió el código de autorización.')}`));
     }
 
     console.log('✅ Código de autorización recibido: ' + code.substring(0, 20) + '...');
@@ -442,7 +624,7 @@ router.get('/meta/callback', async (req, res) => {
         // - metaUserId = ID del usuario en Meta (userData.id)
         
         // Obtener el userId del parámetro state que viene del frontend
-        const userId = state; // El frontend debe enviar el userId de la aplicación en el state
+        const userId = oauthState.userId; // El frontend debe enviar el userId de la aplicación en el state
         const metaUserId = userData.id; // ID del usuario de Meta
         
         console.log('🔍 userId (aplicación):', userId);
@@ -450,7 +632,7 @@ router.get('/meta/callback', async (req, res) => {
         
         if (!userId) {
             console.error('❌ No se pudo obtener el userId del parámetro state');
-            return res.redirect(`${FRONTEND_URL}/pages/settings?error=${encodeURIComponent('No se pudo identificar al usuario logueado. Por favor, inicie sesión en la aplicación antes de conectar Meta.')}`);
+            return res.redirect(buildFrontendSettingsRedirect(frontendOrigin, `?error=${encodeURIComponent('No se pudo identificar al usuario logueado. Por favor, inicie sesión en la aplicación antes de conectar Meta.')}`));
         }
 
         // Calcular fecha de expiración del token de larga duración
@@ -479,13 +661,29 @@ router.get('/meta/callback', async (req, res) => {
         });
         console.log('✅ Conexión Meta almacenada/actualizada en la base de datos.');
 
+        const storedConnection = await MetaConnection.findOne({ where: { userId } });
+        const scope = await normalizeScope({
+            clinicIdRaw: oauthState.clinicId,
+            groupIdRaw: oauthState.groupId,
+            assignmentScopeRaw: oauthState.assignmentScope
+        });
+        const connectionScope = buildSharedConnectionScope(scope);
+        if (storedConnection && connectionScope?.scopeKey) {
+            await upsertMetaAssignment({
+                connection: storedConnection,
+                scope: connectionScope,
+                authorizedByUserId: userId
+            });
+        }
+
         // 5. Redirigir de vuelta al frontend con un indicador de éxito
-        console.log(`🚀 Redirigiendo al frontend: ${FRONTEND_URL}/pages/settings?connected=meta&metaUserId=${userData.id}`);
-        res.redirect(`${FRONTEND_URL}/pages/settings?connected=meta&metaUserId=${userData.id}`);
+        const redirectUrl = buildFrontendSettingsRedirect(frontendOrigin, `?connected=meta&metaUserId=${userData.id}`);
+        console.log(`🚀 Redirigiendo al frontend: ${redirectUrl}`);
+        res.redirect(redirectUrl);
 
     } catch (err) {
         console.error('❌ Error fatal en el proceso de OAuth:', err.response ? err.response.data : err.message);
-        res.redirect(`${FRONTEND_URL}/pages/settings?error=${encodeURIComponent('Error en el proceso de autenticación.')}`);
+        res.redirect(buildFrontendSettingsRedirect(frontendOrigin, `?error=${encodeURIComponent('Error en el proceso de autenticación.')}`));
     }
 });
 
@@ -498,6 +696,7 @@ router.get('/google/connect', async (req, res) => {
     try {
         const userId = getUserIdFromToken(req);
         if (!userId) return res.status(401).json({ success: false, error: 'Usuario no autenticado' });
+        const returnTo = normalizeFrontendReturnTo(req.query?.return_to || null);
 
         const params = new URLSearchParams({
             client_id: GOOGLE_CLIENT_ID,
@@ -507,7 +706,13 @@ router.get('/google/connect', async (req, res) => {
             access_type: 'offline',
             include_granted_scopes: 'true',
             prompt: 'consent',
-            state: String(userId)
+            state: JSON.stringify({
+                userId: String(userId),
+                returnTo,
+                clinicId: req.query?.clinic_id || null,
+                groupId: req.query?.group_id || null,
+                assignmentScope: req.query?.assignment_scope || null
+            })
         });
         const authUrl = `https://accounts.google.com/o/oauth2/v2/auth?${params.toString()}`;
         return res.json({ success: true, authUrl });
@@ -524,12 +729,14 @@ router.get('/google/connect', async (req, res) => {
 router.get('/google/callback', async (req, res) => {
     try {
         const { code, state, error } = req.query;
+        const oauthState = parseOAuthState(state);
+        const frontendOrigin = oauthState.returnTo;
         if (error) {
             console.error('❌ Error en callback Google:', error);
-            return res.redirect(`${FRONTEND_URL}/pages/settings?error=${encodeURIComponent(String(error))}`);
+            return res.redirect(buildFrontendSettingsRedirect(frontendOrigin, `?error=${encodeURIComponent(String(error))}`));
         }
         if (!code) {
-            return res.redirect(`${FRONTEND_URL}/pages/settings?error=${encodeURIComponent('Código no proporcionado')}`);
+            return res.redirect(buildFrontendSettingsRedirect(frontendOrigin, `?error=${encodeURIComponent('Código no proporcionado')}`));
         }
 
         // 1) Intercambiar code por tokens
@@ -555,7 +762,7 @@ router.get('/google/callback', async (req, res) => {
         const userName = ui.data?.name || [ui.data?.given_name, ui.data?.family_name].filter(Boolean).join(' ') || null;
 
         // 3) Guardar/actualizar conexión
-        const userId = String(state || '').trim();
+        const userId = String(oauthState.userId || '').trim();
         if (!userId) {
             console.warn('⚠️ state vacío en callback Google');
         }
@@ -576,11 +783,26 @@ router.get('/google/callback', async (req, res) => {
             await GoogleConnection.create(payload);
         }
 
+        const storedConnection = await GoogleConnection.findOne({ where: { userId } });
+        const scope = await normalizeScope({
+            clinicIdRaw: oauthState.clinicId,
+            groupIdRaw: oauthState.groupId,
+            assignmentScopeRaw: oauthState.assignmentScope
+        });
+        const connectionScope = buildSharedConnectionScope(scope);
+        if (storedConnection && connectionScope?.scopeKey) {
+            await upsertGoogleAssignment({
+                connection: storedConnection,
+                scope: connectionScope,
+                authorizedByUserId: userId
+            });
+        }
+
         // 4) Redirigir al frontend
-        return res.redirect(`${FRONTEND_URL}/pages/settings?connected=google&googleUserId=${googleUserId}`);
+        return res.redirect(buildFrontendSettingsRedirect(frontendOrigin, `?connected=google&googleUserId=${googleUserId}`));
     } catch (err) {
         console.error('❌ Error en /oauth/google/callback:', err.response?.data || err.message);
-        return res.redirect(`${FRONTEND_URL}/pages/settings?error=${encodeURIComponent('Error en autenticación de Google')}`);
+        return res.redirect(buildFrontendSettingsRedirect(frontendOrigin, `?error=${encodeURIComponent('Error en autenticación de Google')}`));
     }
 });
 
@@ -590,14 +812,11 @@ router.get('/google/callback', async (req, res) => {
  */
 router.get('/google/connection-status', async (req, res) => {
     try {
-        const userId = getUserIdFromToken(req);
+        const scopedRequest = hasRequestedScope(req);
+        const { userId, connection: conn, assignment, scope, source } = await resolveGoogleRequestConnection(req, {
+            allowLegacyUserFallback: !scopedRequest
+        });
         if (!userId) return res.status(401).json({ connected: false, message: 'Usuario no autenticado' });
-        let conn;
-        try {
-            conn = await GoogleConnection.findOne({ where: { userId } });
-        } catch (e) {
-            console.warn('⚠️ Error obteniendo conexión Google:', e.message);
-        }
         if (!conn) return res.json({ connected: false });
 
         const tokenInfo = await ensureGoogleAccessToken(conn, { allowExpired: true });
@@ -607,9 +826,14 @@ router.get('/google/connection-status', async (req, res) => {
             userEmail: conn.userEmail,
             googleUserId: conn.googleUserId,
             userName: conn.userName || null,
+            authorizedByUserId: assignment?.authorizedByUserId || conn.userId || null,
+            authorizedByName: assignment?.authorizedByName || conn.userName || null,
+            authorizedByEmail: assignment?.authorizedByEmail || conn.userEmail || null,
             expiresAt: conn.expiresAt,
             scopes: conn.scopes,
-            expired: tokenInfo.expired
+            expired: tokenInfo.expired,
+            scope: buildScopeResponse(scope, assignment),
+            source
         });
     } catch (e) {
         console.error('❌ Error en connection-status Google:', e.message);
@@ -623,10 +847,10 @@ router.get('/google/connection-status', async (req, res) => {
  */
 router.get('/google/assets', async (req, res) => {
     try {
-        const userId = getUserIdFromToken(req);
+        const { userId, connection: conn } = await resolveGoogleRequestConnection(req, {
+            allowLegacyUserFallback: true
+        });
         if (!userId) return res.status(401).json({ success: false, error: 'Usuario no autenticado' });
-
-        const conn = await GoogleConnection.findOne({ where: { userId } });
         if (!conn) return res.status(404).json({ success: false, error: 'No hay conexión Google' });
 
         let accessToken;
@@ -659,10 +883,10 @@ router.get('/google/assets', async (req, res) => {
  */
 router.get('/google/analytics/connection-status', async (req, res) => {
     try {
-        const userId = getUserIdFromToken(req);
+        const { userId, connection: conn, assignment, scope, source } = await resolveGoogleRequestConnection(req, {
+            allowLegacyUserFallback: true
+        });
         if (!userId) return res.status(401).json({ connected: false, reason: 'unauthenticated' });
-
-        const conn = await GoogleConnection.findOne({ where: { userId } });
         if (!conn) return res.json({ connected: false, reason: 'no_connection' });
 
         let accessToken;
@@ -685,7 +909,9 @@ router.get('/google/analytics/connection-status', async (req, res) => {
                 connected: true,
                 hasAccounts: summaries.length > 0,
                 accounts: summaries.length,
-                expiresAt: conn.expiresAt
+                expiresAt: conn.expiresAt,
+                scope: buildScopeResponse(scope, assignment),
+                source
             });
         } catch (apiErr) {
             const status = apiErr.response?.status;
@@ -709,10 +935,10 @@ router.get('/google/analytics/connection-status', async (req, res) => {
  */
 router.get('/google/analytics/properties', async (req, res) => {
     try {
-        const userId = getUserIdFromToken(req);
+        const { userId, connection: conn } = await resolveGoogleRequestConnection(req, {
+            allowLegacyUserFallback: true
+        });
         if (!userId) return res.status(401).json({ success: false, error: 'Usuario no autenticado' });
-
-        const conn = await GoogleConnection.findOne({ where: { userId } });
         if (!conn) return res.status(404).json({ success: false, error: 'No hay conexión Google' });
 
         let accessToken;
@@ -763,10 +989,10 @@ router.get('/google/analytics/properties', async (req, res) => {
  */
 router.post('/google/analytics/map-properties', async (req, res) => {
     try {
-        const userId = getUserIdFromToken(req);
+        const { userId, connection: conn } = await resolveGoogleRequestConnection(req, {
+            allowLegacyUserFallback: true
+        });
         if (!userId) return res.status(401).json({ success: false, error: 'Usuario no autenticado' });
-
-        const conn = await GoogleConnection.findOne({ where: { userId } });
         if (!conn) return res.status(404).json({ success: false, error: 'No hay conexión Google' });
 
         const mappings = Array.isArray(req.body?.mappings) ? req.body.mappings : [];
@@ -831,12 +1057,12 @@ router.post('/google/analytics/map-properties', async (req, res) => {
  */
 router.get('/google/local/locations', async (req, res) => {
     try {
-        const userId = getUserIdFromToken(req);
+        const { userId, connection: conn } = await resolveGoogleRequestConnection(req, {
+            allowLegacyUserFallback: true
+        });
         if (!userId) {
             return res.status(401).json({ success: false, error: 'Usuario no autenticado' });
         }
-
-        const conn = await GoogleConnection.findOne({ where: { userId } });
         if (!conn) {
             return res.status(404).json({ success: false, error: 'No hay conexión Google' });
         }
@@ -888,12 +1114,12 @@ router.get('/google/local/locations', async (req, res) => {
  */
 router.post('/google/local/map-locations', async (req, res) => {
     try {
-        const userId = getUserIdFromToken(req);
+        const { userId, connection: conn } = await resolveGoogleRequestConnection(req, {
+            allowLegacyUserFallback: true
+        });
         if (!userId) {
             return res.status(401).json({ success: false, error: 'Usuario no autenticado' });
         }
-
-        const conn = await GoogleConnection.findOne({ where: { userId } });
         if (!conn) {
             return res.status(404).json({ success: false, error: 'No hay conexión Google' });
         }
@@ -947,12 +1173,12 @@ router.post('/google/local/map-locations', async (req, res) => {
  */
 router.get('/google/local/mappings', async (req, res) => {
     try {
-        const userId = getUserIdFromToken(req);
+        const { userId, connection: conn } = await resolveGoogleRequestConnection(req, {
+            allowLegacyUserFallback: true
+        });
         if (!userId) {
             return res.status(401).json({ success: false, error: 'Usuario no autenticado' });
         }
-
-        const conn = await GoogleConnection.findOne({ where: { userId } });
         if (!conn) {
             return res.json({ success: true, mappings: [] });
         }
@@ -998,12 +1224,12 @@ router.get('/google/local/mappings', async (req, res) => {
  */
 router.get('/google/ads/connection-status', async (req, res) => {
     try {
-        const userId = getUserIdFromToken(req);
+        const { userId, connection: conn, assignment, scope, source } = await resolveGoogleRequestConnection(req, {
+            allowLegacyUserFallback: true
+        });
         if (!userId) {
             return res.status(401).json({ connected: false, reason: 'unauthenticated' });
         }
-
-        const conn = await GoogleConnection.findOne({ where: { userId } });
         if (!conn) {
             return res.json({ connected: false, reason: 'no_connection' });
         }
@@ -1041,7 +1267,9 @@ router.get('/google/ads/connection-status', async (req, res) => {
             connected: true,
             managerId: formatCustomerId(getGoogleManagerId()),
             customersCount: customers.length,
-            customers
+            customers,
+            scope: buildScopeResponse(scope, assignment),
+            source
         });
     } catch (err) {
         if (err.code === 'ADS_CONFIG_MISSING') {
@@ -1057,12 +1285,12 @@ router.get('/google/ads/connection-status', async (req, res) => {
  */
 router.get('/google/ads/accounts', async (req, res) => {
     try {
-        const userId = getUserIdFromToken(req);
+        const { userId, connection: conn } = await resolveGoogleRequestConnection(req, {
+            allowLegacyUserFallback: true
+        });
         if (!userId) {
             return res.status(401).json({ success: false, error: 'Usuario no autenticado' });
         }
-
-        const conn = await GoogleConnection.findOne({ where: { userId } });
         if (!conn) {
             return res.status(404).json({ success: false, error: 'No hay conexión Google' });
         }
@@ -1247,12 +1475,12 @@ router.get('/google/ads/accounts', async (req, res) => {
  */
 router.post('/google/ads/request-link', async (req, res) => {
     try {
-        const userId = getUserIdFromToken(req);
+        const { userId, connection: conn } = await resolveGoogleRequestConnection(req, {
+            allowLegacyUserFallback: true
+        });
         if (!userId) {
             return res.status(401).json({ success: false, error: 'Usuario no autenticado' });
         }
-
-        const conn = await GoogleConnection.findOne({ where: { userId } });
         if (!conn) {
             return res.status(404).json({ success: false, error: 'No hay conexión Google' });
         }
@@ -1316,12 +1544,12 @@ router.post('/google/ads/request-link', async (req, res) => {
  */
 router.post('/google/ads/accept-link', async (req, res) => {
     try {
-        const userId = getUserIdFromToken(req);
+        const { userId, connection: conn } = await resolveGoogleRequestConnection(req, {
+            allowLegacyUserFallback: true
+        });
         if (!userId) {
             return res.status(401).json({ success: false, error: 'Usuario no autenticado' });
         }
-
-        const conn = await GoogleConnection.findOne({ where: { userId } });
         if (!conn) {
             return res.status(404).json({ success: false, error: 'No hay conexión Google' });
         }
@@ -1394,12 +1622,12 @@ router.post('/google/ads/accept-link', async (req, res) => {
  */
 router.post('/google/ads/map-accounts', async (req, res) => {
     try {
-        const userId = getUserIdFromToken(req);
+        const { userId, connection: conn } = await resolveGoogleRequestConnection(req, {
+            allowLegacyUserFallback: true
+        });
         if (!userId) {
             return res.status(401).json({ success: false, error: 'Usuario no autenticado' });
         }
-
-        const conn = await GoogleConnection.findOne({ where: { userId } });
         if (!conn) {
             return res.status(404).json({ success: false, error: 'No hay conexión Google' });
         }
@@ -1413,7 +1641,6 @@ router.post('/google/ads/map-accounts', async (req, res) => {
         const results = [];
         const clinicsToSync = new Set();
         const clinicAssignmentCache = new Map();
-        const groupCache = new Map();
 
         async function resolveAssignment(clinicaId) {
             if (!clinicaId) {
@@ -1428,26 +1655,10 @@ router.post('/google/ads/map-accounts', async (req, res) => {
                 attributes: ['id_clinica', 'grupoClinicaId']
             });
 
-            let assignmentScope = 'clinic';
-            let grupoClinicaId = null;
-
-            if (clinic?.grupoClinicaId) {
-                const groupId = clinic.grupoClinicaId;
-                let group = groupCache.get(groupId);
-                if (!group) {
-                    group = await GrupoClinica.findByPk(groupId, {
-                        attributes: ['id_grupo', 'ads_assignment_mode']
-                    });
-                    groupCache.set(groupId, group);
-                }
-
-                if (group?.ads_assignment_mode === 'automatic') {
-                    assignmentScope = 'group';
-                    grupoClinicaId = group.id_grupo;
-                }
-            }
-
-            const resolved = { assignmentScope, grupoClinicaId };
+            const resolved = {
+                assignmentScope: 'clinic',
+                grupoClinicaId: clinic?.grupoClinicaId || null
+            };
             clinicAssignmentCache.set(clinicaId, resolved);
             return resolved;
         }
@@ -1540,12 +1751,12 @@ router.post('/google/ads/map-accounts', async (req, res) => {
  */
 router.get('/google/ads/mappings', async (req, res) => {
     try {
-        const userId = getUserIdFromToken(req);
+        const { userId, connection: conn } = await resolveGoogleRequestConnection(req, {
+            allowLegacyUserFallback: true
+        });
         if (!userId) {
             return res.status(401).json({ success: false, error: 'Usuario no autenticado' });
         }
-
-        const conn = await GoogleConnection.findOne({ where: { userId } });
         if (!conn) {
             return res.status(404).json({ success: false, error: 'No hay conexión Google' });
         }
@@ -1600,12 +1811,12 @@ router.delete('/google/ads/mappings/:mappingId', async (req, res) => {
         return res.status(400).json({ success: false, error: 'mappingId inválido' });
     }
     try {
-        const userId = getUserIdFromToken(req);
+        const { userId, connection: conn } = await resolveGoogleRequestConnection(req, {
+            allowLegacyUserFallback: true
+        });
         if (!userId) {
             return res.status(401).json({ success: false, error: 'Usuario no autenticado' });
         }
-
-        const conn = await GoogleConnection.findOne({ where: { userId } });
         if (!conn) {
             return res.status(404).json({ success: false, error: 'No hay conexión Google' });
         }
@@ -1633,10 +1844,10 @@ router.delete('/google/ads/mappings/:mappingId', async (req, res) => {
  */
 router.get('/google/analytics/mappings', async (req, res) => {
     try {
-        const userId = getUserIdFromToken(req);
+        const { userId, connection: conn } = await resolveGoogleRequestConnection(req, {
+            allowLegacyUserFallback: true
+        });
         if (!userId) return res.status(401).json({ success: false, error: 'Usuario no autenticado' });
-
-        const conn = await GoogleConnection.findOne({ where: { userId } });
         if (!conn) return res.status(404).json({ success: false, error: 'No hay conexión Google' });
 
         const items = await ClinicAnalyticsProperty.findAll({
@@ -1668,10 +1879,10 @@ router.delete('/google/analytics/mappings/:mappingId', async (req, res) => {
         return res.status(400).json({ success: false, error: 'mappingId inválido' });
     }
     try {
-        const userId = getUserIdFromToken(req);
+        const { userId, connection: conn } = await resolveGoogleRequestConnection(req, {
+            allowLegacyUserFallback: true
+        });
         if (!userId) return res.status(401).json({ success: false, error: 'Usuario no autenticado' });
-
-        const conn = await GoogleConnection.findOne({ where: { userId } });
         if (!conn) return res.status(404).json({ success: false, error: 'No hay conexión Google' });
 
         const mapping = await ClinicAnalyticsProperty.findOne({ where: { id: mappingId, googleConnectionId: conn.id } });
@@ -1699,9 +1910,10 @@ router.delete('/google/analytics/mappings/:mappingId', async (req, res) => {
  */
 router.post('/google/map-assets', async (req, res) => {
     try {
-        const userId = getUserIdFromToken(req);
+        const { userId, connection: conn } = await resolveGoogleRequestConnection(req, {
+            allowLegacyUserFallback: true
+        });
         if (!userId) return res.status(401).json({ success: false, error: 'Usuario no autenticado' });
-        const conn = await GoogleConnection.findOne({ where: { userId } });
         if (!conn) return res.status(404).json({ success: false, error: 'No hay conexión Google' });
 
         const mappings = Array.isArray(req.body?.mappings) ? req.body.mappings : [];
@@ -1744,9 +1956,10 @@ router.post('/google/map-assets', async (req, res) => {
  */
 router.get('/google/mappings', async (req, res) => {
     try {
-        const userId = getUserIdFromToken(req);
+        const { userId, connection: conn } = await resolveGoogleRequestConnection(req, {
+            allowLegacyUserFallback: true
+        });
         if (!userId) return res.status(401).json({ success: false, error: 'Usuario no autenticado' });
-        const conn = await GoogleConnection.findOne({ where: { userId } });
         if (!conn) return res.status(404).json({ success: false, error: 'No hay conexión Google' });
 
         const rows = await ClinicWebAsset.findAll({ where: { googleConnectionId: conn.id, isActive: true }, raw: true });
@@ -1783,10 +1996,10 @@ router.delete('/google/mappings/:mappingId', async (req, res) => {
         return res.status(400).json({ success: false, error: 'mappingId inválido' });
     }
     try {
-        const userId = getUserIdFromToken(req);
+        const { userId, connection: conn } = await resolveGoogleRequestConnection(req, {
+            allowLegacyUserFallback: true
+        });
         if (!userId) return res.status(401).json({ success: false, error: 'Usuario no autenticado' });
-
-        const conn = await GoogleConnection.findOne({ where: { userId } });
         if (!conn) return res.status(404).json({ success: false, error: 'No hay conexión Google' });
 
         const mapping = await ClinicWebAsset.findOne({ where: { id: mappingId, googleConnectionId: conn.id } });
@@ -1815,12 +2028,82 @@ router.delete('/google/disconnect', async (req, res) => {
     try {
         const userId = getUserIdFromToken(req);
         if (!userId) return res.status(401).json({ success: false, error: 'Usuario no autenticado' });
+        const scopeInput = getScopeInputFromRequest(req);
+        const requestedScope = await normalizeScope(scopeInput);
+        const scope = buildSharedConnectionScope(requestedScope);
+
+        if (scope.scopeKey) {
+            const { connection, assignment } = await resolveGoogleRequestConnection(req, {
+                allowLegacyUserFallback: true
+            });
+
+            if (!connection && !assignment) {
+                return res.status(404).json({ success: false, error: 'No hay conexión Google para este scope' });
+            }
+
+            if (scope.assignmentScope === 'clinic' && scope.clinicId) {
+                await ClinicWebAsset.destroy({ where: { clinicaId: scope.clinicId } });
+                await ClinicAnalyticsProperty.destroy({ where: { clinicaId: scope.clinicId } });
+                await ClinicBusinessLocation.destroy({ where: { clinica_id: scope.clinicId } });
+                await ClinicGoogleAdsAccount.destroy({ where: { clinicaId: scope.clinicId } });
+            }
+
+            if (scope.assignmentScope === 'group' && scope.groupId) {
+                const clinicIds = await getClinicIdsForGroup(scope.groupId);
+                if (clinicIds.length) {
+                    await ClinicWebAsset.destroy({ where: { clinicaId: { [Op.in]: clinicIds } } });
+                    await ClinicAnalyticsProperty.destroy({ where: { clinicaId: { [Op.in]: clinicIds } } });
+                    await ClinicBusinessLocation.destroy({ where: { clinica_id: { [Op.in]: clinicIds } } });
+                    await ClinicGoogleAdsAccount.destroy({ where: { clinicaId: { [Op.in]: clinicIds } } });
+                    await GoogleConnectionAssignment.update(
+                        {
+                            status: 'disconnected',
+                            lastValidatedAt: new Date(),
+                            lastErrorCode: 'DISCONNECTED_BY_USER',
+                            lastErrorMessage: 'Disconnected from group settings'
+                        },
+                        {
+                            where: {
+                                [Op.or]: [
+                                    { scopeKey: scope.scopeKey },
+                                    { clinicaId: { [Op.in]: clinicIds } }
+                                ]
+                            }
+                        }
+                    );
+                }
+                await ClinicGoogleAdsAccount.destroy({ where: { assignmentScope: 'group', grupoClinicaId: scope.groupId } });
+            }
+
+            const connectionId = connection?.id || assignment?.googleConnectionId || null;
+            if (connectionId) {
+                await GoogleConnectionAssignment.upsert({
+                    scopeKey: scope.scopeKey,
+                    assignmentScope: scope.assignmentScope,
+                    clinicaId: scope.assignmentScope === 'clinic' ? scope.clinicId : null,
+                    grupoClinicaId: scope.groupId || null,
+                    googleConnectionId: connectionId,
+                    status: 'disconnected',
+                    authorizedByUserId: userId,
+                    authorizedByName: connection?.userName || assignment?.authorizedByName || null,
+                    authorizedByEmail: connection?.userEmail || assignment?.authorizedByEmail || null,
+                    connectedAt: assignment?.connectedAt || connection?.updatedAt || connection?.createdAt || new Date(),
+                    lastValidatedAt: new Date(),
+                    lastErrorCode: 'DISCONNECTED_BY_USER',
+                    lastErrorMessage: 'Disconnected from scope settings'
+                });
+            }
+
+            return res.json({ success: true, message: scope.assignmentScope === 'group' ? 'Conexión Google desconectada para todo el grupo' : 'Conexión Google desconectada para esta clínica' });
+        }
+
         const conn = await GoogleConnection.findOne({ where: { userId } });
         if (!conn) return res.status(404).json({ success: false, error: 'No hay conexión Google' });
         await ClinicWebAsset.destroy({ where: { googleConnectionId: conn.id } });
         await ClinicAnalyticsProperty.destroy({ where: { googleConnectionId: conn.id } });
         await ClinicBusinessLocation.destroy({ where: { google_connection_id: conn.id } });
         await ClinicGoogleAdsAccount.destroy({ where: { googleConnectionId: conn.id } });
+        await GoogleConnectionAssignment.destroy({ where: { googleConnectionId: conn.id } });
         await conn.destroy();
         return res.json({ success: true, message: 'Conexión Google desconectada y mapeos eliminados' });
     } catch (e) {
@@ -1834,13 +2117,15 @@ router.delete('/google/disconnect', async (req, res) => {
  * Endpoint para que el frontend consulte el estado de conexión de Meta para el usuario actual.
  */
 router.get('/meta/connection-status', async (req, res) => {
-    const userId = getUserIdFromToken(req); // Obtén el ID de tu usuario logueado
+    const scopedRequest = hasRequestedScope(req);
+    const { userId, connection, assignment, scope, source } = await resolveMetaRequestConnection(req, {
+        allowLegacyUserFallback: !scopedRequest
+    });
     if (!userId) {
         return res.status(401).json({ connected: false, message: 'Usuario no autenticado.' });
     }
 
     try {
-        const connection = await MetaConnection.findOne({ where: { userId: userId } });
         if (connection) {
             // Intentar recuperar scopes actuales del token
             let scopes = [];
@@ -1868,9 +2153,14 @@ router.get('/meta/connection-status', async (req, res) => {
                 metaUserId: connection.metaUserId,
                 userName: connection.userName,
                 userEmail: connection.userEmail,
+                authorizedByUserId: assignment?.authorizedByUserId || connection.userId || null,
+                authorizedByName: assignment?.authorizedByName || connection.userName || null,
+                authorizedByEmail: assignment?.authorizedByEmail || connection.userEmail || null,
                 scopes,
                 missingScopes,
-                message: 'Conexión Meta activa.'
+                message: 'Conexión Meta activa.',
+                scope: buildScopeResponse(scope, assignment),
+                source
             });
         } else {
             return res.json({ connected: false, message: 'No hay conexión Meta para este usuario.' });
@@ -1890,7 +2180,9 @@ router.get('/meta/assets', async (req, res) => {
         console.log('📋 Obteniendo activos de Meta con paginación completa...');
         
         // 1. Obtener userId del JWT
-        const userId = getUserIdFromToken(req);
+        const { userId, connection: metaConnection } = await resolveMetaRequestConnection(req, {
+            allowLegacyUserFallback: true
+        });
         if (!userId) {
             console.log('❌ No se pudo obtener userId del token JWT');
             return res.status(401).json({ 
@@ -1898,13 +2190,6 @@ router.get('/meta/assets', async (req, res) => {
                 error: 'Usuario no autenticado' 
             });
         }
-
-        console.log('🔍 Token JWT decodificado para assets:', { userId });
-
-        // 2. Buscar conexión Meta del usuario
-        const metaConnection = await MetaConnection.findOne({
-            where: { userId: userId }
-        });
 
         if (!metaConnection) {
             console.log('❌ No se encontró conexión Meta para este usuario');
@@ -2080,7 +2365,9 @@ router.get('/meta/assets', async (req, res) => {
  * Requiere que el usuario esté autenticado en tu app y tenga los roles adecuados.
  */
 router.post('/meta/map-assets', async (req, res) => {
-    const userId = getUserIdFromToken(req);
+    const { userId, connection: metaConnection, scope } = await resolveMetaRequestConnection(req, {
+        allowLegacyUserFallback: true
+    });
     if (!userId) {
         return res.status(401).json({ message: 'Usuario no autenticado.' });
     }
@@ -2098,7 +2385,6 @@ router.post('/meta/map-assets', async (req, res) => {
     // }
 
     try {
-        const metaConnection = await MetaConnection.findOne({ where: { userId: userId } });
         if (!metaConnection) {
             return res.status(404).json({ message: 'No hay conexión Meta activa para este usuario.' });
         }
@@ -2109,7 +2395,6 @@ router.post('/meta/map-assets', async (req, res) => {
         const selectedKeySet = new Set();
         const clinicsToSync = new Set();
         const clinicAssignmentCache = new Map();
-        const groupCache = new Map();
 
         async function resolveAssignment(clinicId) {
             if (!clinicId) {
@@ -2124,26 +2409,10 @@ router.post('/meta/map-assets', async (req, res) => {
                 attributes: ['id_clinica', 'grupoClinicaId']
             });
 
-            let assignmentScope = 'clinic';
-            let grupoClinicaId = null;
-
-            if (clinic?.grupoClinicaId) {
-                const groupId = clinic.grupoClinicaId;
-                let group = groupCache.get(groupId);
-                if (!group) {
-                    group = await GrupoClinica.findByPk(groupId, {
-                        attributes: ['id_grupo', 'ads_assignment_mode']
-                    });
-                    groupCache.set(groupId, group);
-                }
-
-                if (group?.ads_assignment_mode === 'automatic') {
-                    assignmentScope = 'group';
-                    grupoClinicaId = group.id_grupo;
-                }
-            }
-
-            const resolved = { assignmentScope, grupoClinicaId };
+            const resolved = {
+                assignmentScope: 'clinic',
+                grupoClinicaId: clinic?.grupoClinicaId || null
+            };
             clinicAssignmentCache.set(clinicId, resolved);
             return resolved;
         }
@@ -2310,6 +2579,22 @@ router.post('/meta/map-assets', async (req, res) => {
 
         console.log(`✅ Mapeo actualizado para clínica ${clinicaId}: ${createdOrUpdated.length} activos activos, ${toDeactivate.length} inactivos (unicidad aplicada para IG/FB/Ads)`);
 
+        const assignmentScope = scope?.assignmentScope || 'clinic';
+        const assignmentClinicId = Number(clinicaId) || scope?.clinicId || null;
+        const assignmentGroupId = assignmentScope === 'group' ? (scope?.groupId || null) : null;
+        if (assignmentClinicId || assignmentGroupId) {
+            await upsertMetaAssignment({
+                connection: metaConnection,
+                scope: {
+                    clinicId: assignmentClinicId,
+                    groupId: assignmentGroupId,
+                    assignmentScope,
+                    scopeKey: buildScopeKey(assignmentScope, assignmentScope === 'group' ? assignmentGroupId : assignmentClinicId)
+                },
+                authorizedByUserId: userId
+            });
+        }
+
         const clinicIds = Array.from(clinicsToSync).filter((id) => Number.isInteger(id));
         if (clinicIds.length) {
             try {
@@ -2460,7 +2745,9 @@ router.get('/meta/mappings', async (req, res) => {
         console.log('🔍 Obteniendo mapeos de activos Meta...');
         
         // Obtener el userId del token JWT
-        const userId = getUserIdFromToken(req);
+        const { userId, connection: metaConnection } = await resolveMetaRequestConnection(req, {
+            allowLegacyUserFallback: true
+        });
         
         if (!userId) {
             console.log('❌ No se pudo obtener userId del token JWT');
@@ -2471,11 +2758,6 @@ router.get('/meta/mappings', async (req, res) => {
         }
         
         console.log('🔍 Buscando mapeos para userId:', userId);
-        
-        // Buscar la conexión Meta del usuario
-        const metaConnection = await MetaConnection.findOne({
-            where: { userId: userId }
-        });
         
         if (!metaConnection) {
             console.log('❌ No se encontró conexión Meta para este usuario');
@@ -2588,12 +2870,12 @@ router.delete('/meta/mappings/:mappingId', async (req, res) => {
     }
 
     try {
-        const userId = getUserIdFromToken(req);
+        const { userId, connection: metaConnection } = await resolveMetaRequestConnection(req, {
+            allowLegacyUserFallback: true
+        });
         if (!userId) {
             return res.status(401).json({ success: false, error: 'Usuario no autenticado' });
         }
-
-        const metaConnection = await MetaConnection.findOne({ where: { userId } });
         if (!metaConnection) {
             return res.status(404).json({ success: false, error: 'Usuario no conectado a Meta' });
         }
@@ -2688,26 +2970,102 @@ router.delete('/meta/disconnect', async (req, res) => {
             });
         }
         
-        console.log('🔍 Eliminando conexión Meta para userId:', userId);
-        
-        // Eliminar la conexión Meta de la base de datos
-        const deletedRows = await MetaConnection.destroy({
-            where: { userId: userId }
-        });
-        
-        if (deletedRows > 0) {
-            console.log('✅ Conexión Meta eliminada correctamente');
+        const scopeInput = getScopeInputFromRequest(req);
+        const requestedScope = await normalizeScope(scopeInput);
+        const scope = buildSharedConnectionScope(requestedScope);
+
+        if (scope.scopeKey) {
+            const { connection, assignment } = await resolveMetaRequestConnection(req, {
+                allowLegacyUserFallback: true
+            });
+
+            if (!connection && !assignment) {
+                return res.status(404).json({
+                    success: false,
+                    error: 'No hay conexión Meta para este scope'
+                });
+            }
+
+            if (scope.assignmentScope === 'clinic' && scope.clinicId) {
+                await ClinicMetaAsset.destroy({
+                    where: { clinicaId: scope.clinicId }
+                });
+            }
+
+            if (scope.assignmentScope === 'group' && scope.groupId) {
+                const clinicIds = await getClinicIdsForGroup(scope.groupId);
+                if (clinicIds.length) {
+                    await ClinicMetaAsset.destroy({
+                        where: { clinicaId: { [Op.in]: clinicIds } }
+                    });
+                    await MetaConnectionAssignment.update(
+                        {
+                            status: 'disconnected',
+                            lastValidatedAt: new Date(),
+                            lastErrorCode: 'DISCONNECTED_BY_USER',
+                            lastErrorMessage: 'Disconnected from group settings'
+                        },
+                        {
+                            where: {
+                                [Op.or]: [
+                                    { scopeKey: scope.scopeKey },
+                                    { clinicaId: { [Op.in]: clinicIds } }
+                                ]
+                            }
+                        }
+                    );
+                }
+                await ClinicMetaAsset.destroy({
+                    where: { grupoClinicaId: scope.groupId, assignmentScope: 'group' }
+                });
+            }
+
+            const connectionId = connection?.id || assignment?.metaConnectionId || null;
+            if (connectionId) {
+                await MetaConnectionAssignment.upsert({
+                    scopeKey: scope.scopeKey,
+                    assignmentScope: scope.assignmentScope,
+                    clinicaId: scope.assignmentScope === 'clinic' ? scope.clinicId : null,
+                    grupoClinicaId: scope.groupId || null,
+                    metaConnectionId: connectionId,
+                    status: 'disconnected',
+                    authorizedByUserId: userId,
+                    authorizedByName: connection?.userName || assignment?.authorizedByName || null,
+                    authorizedByEmail: connection?.userEmail || assignment?.authorizedByEmail || null,
+                    connectedAt: assignment?.connectedAt || connection?.updatedAt || connection?.createdAt || new Date(),
+                    lastValidatedAt: new Date(),
+                    lastErrorCode: 'DISCONNECTED_BY_USER',
+                    lastErrorMessage: 'Disconnected from scope settings'
+                });
+            }
+
             return res.json({
                 success: true,
-                message: 'Conexión Meta desconectada correctamente'
+                message: scope.assignmentScope === 'group' ? 'Conexión Meta desconectada para todo el grupo' : 'Conexión Meta desconectada para esta clínica'
             });
-        } else {
+        }
+
+        console.log('🔍 Eliminando conexión Meta para userId:', userId);
+
+        const connection = await MetaConnection.findOne({ where: { userId: userId } });
+        if (!connection) {
             console.log('⚠️ No se encontró conexión Meta para eliminar');
             return res.json({
                 success: false,
                 error: 'No se encontró conexión Meta para este usuario'
             });
         }
+
+        await MetaConnectionAssignment.destroy({
+            where: { metaConnectionId: connection.id }
+        });
+        await connection.destroy();
+
+        console.log('✅ Conexión Meta eliminada correctamente');
+        return res.json({
+            success: true,
+            message: 'Conexión Meta desconectada correctamente'
+        });
         
     } catch (error) {
         console.error('❌ Error eliminando conexión Meta:', error);

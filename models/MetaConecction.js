@@ -10,14 +10,14 @@ module.exports = (sequelize, DataTypes) => { // <-- Recibe sequelize y DataTypes
         },
         userId: { 
             type: DataTypes.INTEGER,
-            allowNull: false,
+            allowNull: true,
             unique: true,
             references: {
                 model: 'Usuarios', // Nombre de la tabla, no el modelo
                 key: 'id_usuario', 
             },
             onUpdate: 'CASCADE',
-            onDelete: 'CASCADE',
+            onDelete: 'SET NULL',
         },
         metaUserId: { 
             type: DataTypes.STRING,
@@ -53,8 +53,13 @@ module.exports = (sequelize, DataTypes) => { // <-- Recibe sequelize y DataTypes
             targetKey: 'id_usuario',
             as: 'usuario'
         });
+        if (models.MetaConnectionAssignment) {
+            MetaConnection.hasMany(models.MetaConnectionAssignment, {
+                foreignKey: 'metaConnectionId',
+                as: 'assignments'
+            });
+        }
     };
 
     return MetaConnection;
 };
-
