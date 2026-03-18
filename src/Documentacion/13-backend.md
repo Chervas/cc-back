@@ -193,6 +193,256 @@ Fases:
 5. Desconectar una clínica no rompe otra clínica/grupo que comparta el grant.
 6. La UI deja de presentar “Conectado como X” como fuente principal de verdad en scopes clínicos.
 
+### Plan ejecutable de implementación
+
+> **Objetivo:** ejecutar la migración sin tumbar runtime ni romper las conexiones ya activas.
+
+#### Fase 0. Preparación
+
+Antes de tocar runtime:
+
+1. inventariar endpoints legacy que hoy resuelven por `userId`;
+2. centralizar la lógica de resolución en un servicio nuevo;
+3. no mezclar este bloque con refactors de campañas/chat/agendas.
+
+Servicio nuevo recomendado:
+
+- `src/services/scopeConnectionResolver.service.js`
+
+Funciones mínimas:
+
+- `resolveEffectiveMetaConnection({ clinicaId, grupoClinicaId })`
+- `resolveEffectiveGoogleConnection({ clinicaId, grupoClinicaId })`
+- `getScopeConnectionStatus({ provider, clinicaId, grupoClinicaId })`
+
+#### Fase 1. Esquema
+
+Migraciones nuevas recomendadas:
+
+1. `20260318090000-create-meta-connection-assignments.js`
+2. `20260318091000-create-google-connection-assignments.js`
+3. `20260318092000-make-meta-connections-userid-nullable.js`
+4. `20260318093000-make-google-connections-userid-nullable.js`
+
+Tablas nuevas:
+
+- `MetaConnectionAssignments`
+- `GoogleConnectionAssignments`
+
+Índices mínimos:
+
+- único por:
+  - `assignmentScope + clinicaId + provider(active)`
+  - `assignmentScope + grupoClinicaId + provider(active)`
+- índice por `metaConnectionId`
+- índice por `googleConnectionId`
+- índice por `status`
+
+Contrato sugerido:
+
+- `assignmentScope`
+- `clinicaId`
+- `grupoClinicaId`
+- `status`
+- `authorizedByUserId`
+- `authorizedByName`
+- `authorizedByEmail`
+- `connectedAt`
+- `lastValidatedAt`
+- `lastErrorCode`
+- `lastErrorMessage`
+- `createdBy`
+- `updatedBy`
+
+#### Fase 2. Backfill
+
+No meter backfill complejo dentro de migraciones destructivas.
+
+Recomendado:
+
+- script explícito:
+  - `src/scripts/backfill_scope_connection_assignments.js`
+
+Reglas del backfill:
+
+1. por cada mapping clínico existente, crear assignment al grant técnico correspondiente si no existe;
+2. si hay mappings de grupo, crear assignment de grupo;
+3. copiar snapshots de auditoría desde `MetaConnection` / `GoogleConnection`;
+4. no tocar aún los mappings existentes.
+
+Resultado esperado tras backfill:
+
+- todo scope con mappings activos tiene assignment resoluble;
+- todavía siguen existiendo grants legacy por `userId`.
+
+#### Fase 3. Dual-read
+
+Todos los lectores de estado deben pasar por `scopeConnectionResolver`.
+
+Regla:
+
+1. primero assignment por scope;
+2. si no existe, fallback legacy por `userId`;
+3. si no existe ninguno, `not_connected`.
+
+Endpoints a introducir:
+
+- `GET /oauth/meta/scope-connection-status`
+- `GET /oauth/google/scope-connection-status`
+
+Parámetros:
+
+- `clinic_id`
+- `group_id`
+
+Respuesta mínima:
+
+```json
+{
+  "connected": true,
+  "status": "active",
+  "ownership_mode": "scope",
+  "connection_source": "clinic",
+  "inherited_from_group": false,
+  "authorized_by": {
+    "user_id": 12,
+    "name": "Carlos Hervas",
+    "email": "car.hervas@gmail.com"
+  },
+  "connected_at": "2026-03-18T10:00:00.000Z",
+  "last_validated_at": "2026-03-18T11:00:00.000Z",
+  "last_error_code": null,
+  "last_error_message": null
+}
+```
+
+#### Fase 4. Dual-write
+
+Al conectar o reautorizar:
+
+1. guardar/actualizar grant técnico (`MetaConnection` / `GoogleConnection`);
+2. crear o actualizar assignment del scope actual;
+3. actualizar snapshots:
+   - `authorizedByUserId`
+   - `authorizedByName`
+   - `authorizedByEmail`
+   - `connectedAt`
+
+Endpoints a introducir:
+
+- `POST /oauth/meta/assign-scope`
+- `POST /oauth/google/assign-scope`
+
+Payload mínimo:
+
+```json
+{
+  "assignment_scope": "clinic",
+  "clinic_id": 36,
+  "group_id": null
+}
+```
+
+#### Fase 5. Disconnect seguro
+
+Reemplazar el `disconnect` por `userId` con disconnect por scope.
+
+Nuevos endpoints:
+
+- `DELETE /oauth/meta/scope-connection`
+- `DELETE /oauth/google/scope-connection`
+
+Regla:
+
+1. desactivar/eliminar assignment del scope;
+2. revisar si el grant técnico queda referenciado por otros assignments;
+3. solo si queda huérfano, limpiar el grant técnico;
+4. nunca borrar de golpe mappings de otros scopes por desconectar uno.
+
+#### Fase 6. Mapeos
+
+Los controladores de mappings deben validar contra la conexión efectiva del scope, no contra el `userId` actual.
+
+Zonas a revisar:
+
+- `src/routes/oauth.routes.js`
+- `src/controllers/whatsapp.controller.js`
+- `src/controllers/googleads.controller.js`
+- `src/controllers/socialstats.controller.js`
+- `src/controllers/campaignOnboarding.controller.js`
+
+Regla operativa:
+
+- el usuario actual debe tener permisos internos sobre el scope;
+- no hace falta que sea el owner histórico del grant.
+
+#### Fase 7. Jobs y sync
+
+Los jobs no deben buscar “la conexión del usuario”.
+Deben usar:
+
+- `metaConnectionId` / `googleConnectionId` resueltos desde assignment o mapping;
+- o el resolver de scope cuando el trabajo nazca desde clínica/grupo.
+
+Zonas a revisar:
+
+- `src/jobs/sync.jobs.js`
+- `src/controllers/metasync.controller.js`
+- `src/services/whatsapp*.js`
+
+#### Fase 8. Limpieza legacy
+
+Cuando dual-read y dual-write estén estables:
+
+1. retirar fallbacks directos por `userId` en endpoints de estado;
+2. retirar copy/UI basada en “Conectado como X”;
+3. dejar `MetaConnection` / `GoogleConnection` como grant técnico, no como concepto de producto.
+
+### Riesgos y mitigaciones
+
+#### Riesgo 1. Usuario borrado
+
+Mitigación:
+
+- `userId` nullable en grants;
+- snapshots de auditoría persistidos;
+- permissions por scope, no por owner histórico.
+
+#### Riesgo 2. Meta revoca el grant
+
+Mitigación:
+
+- validación periódica;
+- `status = reauthorization_required`;
+- UI y jobs deben degradar con error explícito.
+
+#### Riesgo 3. Disconnect destructivo
+
+Mitigación:
+
+- disconnect por scope;
+- reference counting lógico antes de borrar grant técnico.
+
+#### Riesgo 4. Despliegue parcial
+
+Mitigación:
+
+- este bloque debe desplegarse coordinado entre:
+  - `wt/back-integracion`
+  - `/home/ubuntu/backendclinicaclick`
+  - frontend de `Ajustes`
+
+### Orden recomendado de ejecución
+
+1. migraciones de schema;
+2. script de backfill;
+3. servicio `scopeConnectionResolver`;
+4. endpoints nuevos de `scope-connection-status`;
+5. dual-write en callbacks OAuth;
+6. disconnect por scope;
+7. adaptación de `Ajustes`;
+8. limpieza legacy.
+
 ## 2026-03-08 - Conversaciones lead y actividad de paciente
 
 - **Nomenclatura canónica en marketing/chat**
