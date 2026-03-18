@@ -207,6 +207,23 @@ Fases:
 5. Desconectar una clínica no rompe otra clínica/grupo que comparta el grant.
 6. La UI deja de presentar “Conectado como X” como fuente principal de verdad en scopes clínicos.
 
+### Regla de integración a staging/producción
+
+Este bloque no se despliega solo desde `cc-back`.
+
+Además de `wt/back-integracion`, hay que integrar el runtime OAuth dedicado que sirve:
+
+- `https://autenticacion.clinicaclick.com`
+- repo local actual: `/home/ubuntu/backendclinicaclick`
+
+Si se mueve solo `cc-back` y no se mueve el auth runtime:
+
+- los callbacks OAuth pueden seguir en lógica antigua;
+- `connection-status` puede no reflejar el modelo por scope;
+- `disconnect` puede seguir operando con semántica legacy.
+
+Para cualquier migración de este bloque, tratar `cc-back` + auth runtime como un único paquete funcional.
+
 ### Plan ejecutable de implementación
 
 > **Objetivo:** ejecutar la migración sin tumbar runtime ni romper las conexiones ya activas.
