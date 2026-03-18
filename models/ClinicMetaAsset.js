@@ -105,7 +105,8 @@ module.exports = (sequelize, DataTypes) => {
         indexes: [ 
             {
                 unique: true,
-                fields: ['metaConnectionId', 'metaAssetId']
+                fields: ['clinicaId', 'assetType', 'metaAssetId'],
+                name: 'unique_clinic_asset'
             },
             {
                 fields: ['isActive']

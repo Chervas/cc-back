@@ -2666,8 +2666,15 @@ router.post('/meta/map-assets', async (req, res) => {
         });
 
     } catch (error) {
-        console.error('Error al mapear activos de Meta:', error.response ? error.response.data : error.message);
-        res.status(500).json({ message: 'Error al mapear activos de Meta.', details: error.response ? error.response.data : error.message });
+        const sequelizeDetails = Array.isArray(error?.errors)
+            ? error.errors.map((item) => item?.message).filter(Boolean)
+            : [];
+        const details = sequelizeDetails.length
+            ? sequelizeDetails.join('; ')
+            : (error.response ? error.response.data : error.message);
+        const statusCode = error?.name === 'SequelizeUniqueConstraintError' ? 409 : 500;
+        console.error('Error al mapear activos de Meta:', details);
+        res.status(statusCode).json({ message: 'Error al mapear activos de Meta.', details });
     }
 });
 
