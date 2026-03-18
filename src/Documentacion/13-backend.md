@@ -1121,15 +1121,46 @@ Transiciones válidas:
 | `active` | `completed` | `complete` |
 | `paused` | `completed` | `complete` |
 
-### Cascada de recomendación de automatizaciones
+### Cascada de recomendación de automatizaciones (v2 con scope)
 
-El endpoint `GET /api/marketing/strategies/recommend-automation` recibe `objective_id`, `treatment_id?`, `discipline_id?`, `clinic_id?` y devuelve la automatización recomendada según la cascada:
+El endpoint `GET /api/marketing/strategies/recommend-automation` recibe el contexto de la estrategia y devuelve la recomendación de automatización más adecuada.
 
-1. `objective_id` + `treatment_id`
-2. `objective_id` + `discipline_id`
-3. `objective_id` + `clinic_id`
-4. `objective_id` solo
-5. Sin recomendación (respuesta vacía)
+**Request:**
+```
+GET /api/marketing/strategies/recommend-automation
+  ?objective_id=new_patients
+  &treatment_ids=42,43       // opcional, puede ser múltiple
+  &scope_type=group
+  &scope_id=5
+```
+
+**Lógica de resolución:**
+
+La resolución se realiza **siempre por clínica**, incluso si el `scope_type` es `group`. Para cada clínica en el scope, se evalúa la siguiente cascada de 9 niveles para encontrar el primer match.
+
+**Cascada de precedencia canónica (`clínica > grupo > global`):
+
+| Prioridad | Criterio de búsqueda (de más a menos específico) |
+|---|---|
+| 1 | `objective` + `treatment` + `clinic` |
+| 2 | `objective` + `treatment` + `group` |
+| 3 | `objective` + `treatment` + `global` |
+| 4 | `objective` + `discipline` + `clinic` |
+| 5 | `objective` + `discipline` + `group` |
+| 6 | `objective` + `discipline` + `global` |
+| 7 | `objective` + `clinic` |
+| 8 | `objective` + `group` |
+| 9 | `objective` + `global` |
+| 10 | Sin recomendación (fallback) |
+
+**Response:**
+
+El endpoint devuelve un objeto `AutomationRecommendationResponse` (ver `20.10-modelo-datos-campanas-v4.md` §4.4) que contiene:
+- `primary_recommendation`: La recomendación más frecuente.
+- `clinic_recommendations`: La lista completa de recomendaciones, una por clínica.
+- `group_recommendation`: La recomendación a nivel de grupo (si existe).
+- `global_recommendation`: La recomendación global (si existe).
+- `is_fully_uniform`: Flag para el frontend.
 
 ### Notas de implementación
 
