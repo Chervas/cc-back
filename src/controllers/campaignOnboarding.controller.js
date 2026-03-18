@@ -1136,6 +1136,7 @@ exports.getCampaignOnboardingBootstrap = asyncHandler(async (req, res) => {
     assignmentScopeRaw: req.query.assignment_scope
   });
   const activeMode = await resolveActiveModeForScope(scope);
+  const scopedRequest = Boolean(scope.clinic_id || scope.group_id);
 
   const intakeRecord = await loadIntakeRecordForScope(scope);
   const intakeConfig = intakeRecord?.config && typeof intakeRecord.config === 'object' ? intakeRecord.config : {};
@@ -1152,7 +1153,7 @@ exports.getCampaignOnboardingBootstrap = asyncHandler(async (req, res) => {
     clinicIdRaw: scope.clinic_id,
     groupIdRaw: scope.group_id,
     assignmentScopeRaw: scope.assignment_scope,
-    allowLegacyUserFallback: true
+    allowLegacyUserFallback: !scopedRequest
   });
   const googleConnection = googleResolved.connection;
   if (!googleConnection) {
@@ -1190,7 +1191,7 @@ exports.getCampaignOnboardingBootstrap = asyncHandler(async (req, res) => {
     clinicIdRaw: scope.clinic_id,
     groupIdRaw: scope.group_id,
     assignmentScopeRaw: scope.assignment_scope,
-    allowLegacyUserFallback: true
+    allowLegacyUserFallback: !scopedRequest
   });
   const metaConnection = metaResolved.connection;
   if (!metaConnection) {

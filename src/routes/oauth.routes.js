@@ -114,8 +114,7 @@ function normalizeFrontendReturnTo(candidate) {
     try {
         if (!candidate) return FRONTEND_URL;
         const parsed = new URL(String(candidate));
-        const origin = parsed.origin;
-        return ALLOWED_FRONTEND_ORIGINS.has(origin) ? origin : FRONTEND_URL;
+        return ALLOWED_FRONTEND_ORIGINS.has(parsed.origin) ? parsed.toString() : FRONTEND_URL;
     } catch (error) {
         return FRONTEND_URL;
     }
@@ -172,8 +171,24 @@ function parseOAuthState(rawState) {
 }
 
 function buildFrontendSettingsRedirect(origin, query) {
-    const baseOrigin = normalizeFrontendReturnTo(origin);
-    return `${baseOrigin}/pages/settings${query}`;
+    let target;
+    try {
+        target = new URL(normalizeFrontendReturnTo(origin));
+    } catch (error) {
+        target = new URL(FRONTEND_URL);
+    }
+
+    if (!target.pathname || target.pathname === '/') {
+        target.pathname = '/pages/settings';
+        target.search = '';
+    }
+
+    if (query) {
+        const extraParams = new URLSearchParams(String(query).replace(/^\?/, ''));
+        extraParams.forEach((value, key) => target.searchParams.set(key, value));
+    }
+
+    return target.toString();
 }
 
 function getScopeInputFromRequest(req) {
@@ -2667,74 +2682,6 @@ const getUserIdFromToken = (req) => {
     }
     return null;
 };
-
-/**
- * GET /oauth/meta/connection-status
- * Consulta el estado de conexión de Meta para el usuario logueado
- */
-router.get('/meta/connection-status', async (req, res) => {
-    try {
-        console.log('🔍 Consultando estado de conexión Meta...');
-        
-        // Obtener el userId del token JWT
-        const userId = getUserIdFromToken(req);
-        
-        if (!userId) {
-            console.log('❌ No se pudo obtener userId del token JWT');
-            return res.json({
-                connected: false,
-                error: 'Usuario no autenticado'
-            });
-        }
-        
-        console.log('🔍 Buscando conexión Meta para userId:', userId);
-        
-        // Buscar la conexión Meta en la base de datos
-        const metaConnection = await MetaConnection.findOne({
-            where: { userId: userId }
-        });
-        
-        if (metaConnection) {
-            console.log('✅ Conexión Meta encontrada:', {
-                metaUserId: metaConnection.metaUserId,
-                userName: metaConnection.userName,
-                userEmail: metaConnection.userEmail
-            });
-            
-            // Verificar si el token no ha expirado
-            const now = new Date();
-            const isExpired = metaConnection.expiresAt && metaConnection.expiresAt < now;
-            
-            if (isExpired) {
-                console.log('⚠️ Token de Meta expirado');
-                return res.json({
-                    connected: false,
-                    error: 'Token expirado'
-                });
-            }
-            
-            return res.json({
-                connected: true,
-                metaUserId: metaConnection.metaUserId,
-                userName: metaConnection.userName,
-                userEmail: metaConnection.userEmail,
-                expiresAt: metaConnection.expiresAt
-            });
-        } else {
-            console.log('❌ No se encontró conexión Meta para este usuario');
-            return res.json({
-                connected: false
-            });
-        }
-        
-    } catch (error) {
-        console.error('❌ Error consultando estado de conexión Meta:', error);
-        res.status(500).json({
-            connected: false,
-            error: 'Error interno del servidor'
-        });
-    }
-});
 
 /**
  * GET /oauth/meta/mappings
