@@ -1,8 +1,197 @@
 > **Módulo:** Arquitectura del Backend
-> **Última actualización:** 2026-03-15
+> **Última actualización:** 2026-03-18
 > **Relacionado con:** [20.1-motor-flujos-v2](./20.1-motor-flujos-v2.md)
 
 ---
+
+## 2026-03-18 - Diseño objetivo de conexiones OAuth por scope
+
+> **Estado:** diseño aprobado, pendiente de implementación.
+
+### Limitación del modelo actual
+
+El backend actual sigue siendo principalmente **owner-centric**:
+
+- `MetaConnection` y `GoogleConnection` se resuelven por `userId`;
+- gran parte de los endpoints de estado, conexión y desconexión usan `findOne({ where: { userId } })`;
+- los mappings clínicos (`ClinicMetaAsset`, `ClinicGoogleAdsAccount`, etc.) cuelgan de esas conexiones técnicas.
+
+Eso permite operar hoy, pero no resuelve correctamente el caso de negocio:
+
+- un usuario autoriza la app;
+- luego deja de ser admin interno o abandona la empresa;
+- la integración debería seguir viva para la clínica o el grupo.
+
+### Objetivo
+
+Pasar a un modelo **scope-centric**:
+
+1. el grant OAuth lo ejecuta un usuario humano;
+2. la conexión efectiva pertenece a un **scope**:
+   - clínica
+   - o grupo
+3. el usuario autorizador queda solo como trazabilidad;
+4. la operativa y los permisos se resuelven por scope, no por owner humano.
+
+### Modelo objetivo
+
+Se mantiene temporalmente el almacenamiento técnico de tokens por proveedor:
+
+- `MetaConnection`
+- `GoogleConnection`
+
+Pero producto y runtime dejarán de tratarlos como “la conexión del usuario”.
+Pasarán a ser el **grant técnico**.
+
+Encima de ese grant deben añadirse asignaciones canónicas por scope:
+
+- `MetaConnectionAssignments`
+- `GoogleConnectionAssignments`
+
+Contrato mínimo de cada assignment:
+
+- `id`
+- `metaConnectionId` / `googleConnectionId`
+- `assignmentScope` = `clinic | group`
+- `clinicaId` nullable
+- `grupoClinicaId` nullable
+- `status` = `active | reauthorization_required | revoked | disconnected`
+- `authorizedByUserId` nullable
+- `authorizedByName`
+- `authorizedByEmail`
+- `connectedAt`
+- `lastValidatedAt`
+- `lastErrorCode`
+- `lastErrorMessage`
+- `createdBy`
+- `updatedBy`
+
+Restricción funcional:
+
+- una sola conexión activa por proveedor y scope.
+
+### Ajuste necesario de los grants técnicos
+
+Para que la conexión no se rompa al salir el usuario autorizador:
+
+- `MetaConnection.userId` y `GoogleConnection.userId` deben dejar de implicar borrado en cascada de la conexión efectiva del negocio;
+- la relación con `Usuario` debe tolerar que el owner humano desaparezca:
+  - `SET NULL` o equivalente;
+- deben conservarse snapshots de auditoría:
+  - `userName`
+  - `userEmail`
+
+Si esto no se cambia, la capa de assignments no bastará: al borrar el usuario, el grant técnico seguiría cayéndose.
+
+### Resolución canónica
+
+Debe existir un resolver unificado por proveedor:
+
+- `resolveEffectiveMetaConnection(scope)`
+- `resolveEffectiveGoogleConnection(scope)`
+
+Precedencia:
+
+1. conexión propia de clínica
+2. si no existe, conexión heredada del grupo
+3. si no existe ninguna, scope sin conexión
+
+Este resolver debe usarse en:
+
+- `Ajustes > Cuentas conectadas`
+- onboarding técnico de campañas
+- WhatsApp/Meta
+- Google Ads / Search Console / Analytics / Business Profile
+- jobs de sync
+- reporting y métricas
+
+### Mappings
+
+Los mappings existentes pueden mantenerse en una fase transitoria:
+
+- `ClinicMetaAsset`
+- `ClinicGoogleAdsAccount`
+- `ClinicWebAsset`
+- `ClinicAnalyticsProperty`
+- `ClinicBusinessLocation`
+
+Pero dejan de estar legitimados por “mi `userId` conectado”.
+La fuente de verdad pasa a ser:
+
+- existe una conexión efectiva válida para ese scope;
+- el mapping está asignado a ese scope;
+- el usuario actual tiene permisos internos para operar en ese scope.
+
+### Desconexión segura
+
+El comportamiento actual de `disconnect` por `userId` es demasiado destructivo.
+
+Nuevo contrato:
+
+1. `disconnect` actúa sobre el **scope actual**;
+2. desactiva o elimina el assignment del scope;
+3. solo si el grant técnico queda sin referencias activas:
+   - se limpia el grant;
+   - y se decide si limpiar mappings dependientes.
+
+Esto evita romper otras clínicas o grupos que reutilicen el mismo grant técnico.
+
+### Permisos
+
+Niveles mínimos recomendados:
+
+- `view_connected_assets`
+- `manage_connected_assets`
+- `manage_provider_connection`
+
+Ninguna de estas acciones debe depender de ser el owner original del grant.
+Debe depender de los permisos internos del usuario sobre la clínica o el grupo.
+
+### Diferencias por proveedor
+
+- **Google**
+  - ya existe `refreshToken` y el backend sabe refrescar tokens;
+  - el problema principal no es técnico de token, sino de ownership de la conexión.
+- **Meta**
+  - no hay refresh token clásico equivalente;
+  - el runtime depende de:
+    - `long-lived user token`
+    - `pageAccessToken`
+    - `waAccessToken`
+  - el sistema debe marcar `reauthorization_required` cuando el grant o los permisos reales de Meta dejen de ser válidos.
+
+### Comportamiento de grupos
+
+Regla aprobada:
+
+1. una clínica puede heredar la conexión del grupo;
+2. una clínica puede sobrescribir con conexión propia;
+3. si ambas existen, manda la de clínica.
+
+### Estrategia de migración
+
+No hacer big bang.
+
+Fases:
+
+1. crear tablas de assignments;
+2. ajustar FK/ownership de `MetaConnection` y `GoogleConnection`;
+3. backfill de assignments desde el estado real existente;
+4. dual-read:
+   - primero assignment nuevo
+   - fallback legacy;
+5. dual-write al conectar y mapear;
+6. mover `disconnect` a scope;
+7. retirar gradualmente el uso directo de `findOne({ where: { userId } })`.
+
+### Criterios de aceptación de la remodelación
+
+1. Usuario A conecta Meta o Google para clínica X.
+2. Usuario B, admin de clínica X, puede operar sin reautorizar.
+3. Si Usuario A deja de ser admin interno, la clínica sigue operativa.
+4. Si el proveedor revoca el grant, el scope queda en `reauthorization_required`.
+5. Desconectar una clínica no rompe otra clínica/grupo que comparta el grant.
+6. La UI deja de presentar “Conectado como X” como fuente principal de verdad en scopes clínicos.
 
 ## 2026-03-08 - Conversaciones lead y actividad de paciente
 
@@ -85,6 +274,28 @@
     - Resuelve actor con `created_by` / `updated_by -> Usuarios`.
     - Esto evita que lead, agenda y ficha de paciente muestren cronologías distintas del mismo hecho operativo.
 
+## 2026-03-16 - Trigger explícito en flujos V2
+
+- **Trigger V2 sin activador por defecto operativo**
+  - Un borrador nuevo puede persistirse con el flag interno `__trigger_unconfigured` en el nodo trigger.
+  - Ese estado representa únicamente un placeholder de editor.
+  - Backend permite guardar el borrador, pero bloquea `publishTemplateVersion` con `trigger_selection_required` mientras el flag siga presente.
+  - El placeholder nunca debe llegar al runtime operativo.
+
+## 2026-03-16 - Tratamientos e instalaciones permitidas
+
+- `Tratamientos`
+  - Nuevo contrato persistido para restringir dónde puede agendarse un tratamiento:
+    - `asignacion_instalacion_tipo`: `cualquiera | especificas`
+    - `tipo_instalacion_requerida`: tipo mínimo exigido cuando el modo es `cualquiera`
+    - `instalaciones_habilitadas`: IDs explícitos cuando el modo es `especificas`
+  - Migraciones:
+    - `20260316113000-add-installation-assignment-to-tratamientos.js`
+    - `20260316120500-add-installation-type-to-tratamientos.js`
+- Agenda
+  - Si el tratamiento exige `instalaciones específicas`, frontend solo ofrece esas instalaciones en el drawer y en la autoasignación.
+  - Si el tratamiento exige `cualquier instalación de un tipo`, frontend filtra por `Installation.tipo`.
+  - Si el tratamiento no define restricción de instalaciones, se mantiene el comportamiento general de agenda.
 
 ## Automation v2: Nodos y Acciones
 
@@ -181,6 +392,7 @@ En `.env` / `.env.example`:
 ### Notas operativas
 
 - La API key de Groq se usa **solo en backend**.
+- Si `GROQ_API_KEY` falta, `condition/ai_analysis` falla en runtime con `groq_api_key_not_configured`. Eso no impide el trigger ni el envío inicial de WhatsApp; bloquea el avance al llegar al nodo IA.
 - El output del nodo guarda además metadatos técnicos (`_ai_provider`, `_ai_model`, `_ai_analysis_mode`, `_ai_usage`) para auditoría y depuración.
 - Requisito de producto pendiente: persistir consumo por usuario/clinic para facturación por uso.
 
@@ -215,8 +427,61 @@ En `.env` / `.env.example`:
   - En integración, esto se validó expresamente porque era posible ver una clínica por API pero no recibir sus eventos en vivo si el socket no entraba en `clinic:{id}`.
 
 - Socket / conversaciones
-  - `src/app.js` crea el servidor `socket.io` y resuelve el scope inicial de clínicas por usuario.
-  - `QuickChat` depende de que `/socket.io` y `/api` apunten al mismo backend; si no, los mensajes siguen entrando en BD pero no llegan a la UI en tiempo real.
+- `src/app.js` crea el servidor `socket.io` y resuelve el scope inicial de clínicas por usuario.
+- `QuickChat` depende de que `/socket.io` y `/api` apunten al mismo backend; si no, los mensajes siguen entrando en BD pero no llegan a la UI en tiempo real.
+- En integración, las colas `BullMQ` deben ir aisladas con `QUEUE_PREFIX=integracion`. Si el proceso comparte prefijo con `staging` u otro backend, los workers pueden consumir webhooks/mensajes en el proceso equivocado y el socket del entorno activo deja de emitir a su propia UI.
+- Además, el realtime ya no depende solo del `ioInstance` local del proceso. `src/services/socket.service.js` publica y suscribe eventos por Redis (`clinicaclick:socket:events:<db>`), de forma que si el webhook real entra por `clinicaclick-auth` o cualquier otro backend PM2, `clinicaclick-integracion` recibe el evento y lo reemite a sus sockets conectados.
+- Ese bus también cubre runtime V2. Cuando integración recibe por Redis un `message:created` inbound originado en otro backend, `src/app.js` reejecuta `enqueueInboundResponseResume(...)` con la conversación canónica. Sin este paso, el mensaje entra en BD y se ve en QuickChat, pero el flujo se queda en `wait_response` porque el backend que procesó el webhook no tiene por qué tener el runtime V2 activo.
+- `Conversations.unread_count` se mantiene como dato agregado, pero el valor canónico de no leídos en UI es por usuario. `conversation.controller.js` recalcula `unread_count` desde `ConversationReads.last_read_at` también en endpoints de detalle (`getMessages`, `getConversationByPatient`, `getConversationByLead`) para evitar que una conversación abierta vuelva a mostrar badge tras recargar el hilo.
+- El evento `message:created` ya no puede limitarse a `{ content, message_type }`. Debe incluir `metadata` y, cuando el inbound no es texto plano, un `resume_text` explícito para que el runtime V2 no dependa de reconstruir semántica desde la UI.
+
+#### Punto crítico de arquitectura: inbound remoto y reanudación V2
+
+Este comportamiento ya no debe tratarse como workaround local de integración. Forma parte del contrato técnico del sistema:
+
+1. un webhook inbound puede entrar por cualquier proceso PM2 con acceso a la cola;
+2. el mensaje debe persistirse una sola vez sobre la conversación canónica;
+3. el evento `message:created` se publica por Redis;
+4. el backend del entorno activo debe reintentar la reanudación `wait_response` usando `enqueueInboundResponseResume(...)`;
+5. la ejecución debe continuar con `resume_mode=response` y consumir `waiting_meta.pending_response_text`.
+
+Si falta el paso 4, el síntoma es engañoso:
+
+- la UI muestra el mensaje del paciente;
+- `last_inbound_at` queda bien en conversación;
+- pero `FlowExecutionsV2.status` sigue en `waiting` y la cita no cambia de estado.
+
+#### Reacciones de WhatsApp
+
+Las reacciones del paciente también forman parte del contrato de inbound.
+
+- WhatsApp Cloud API entrega esas respuestas como `messages[].type = reaction`, con `reaction.emoji` y `reaction.message_id`.
+- En backend se persisten como `Messages.message_type = reaction`.
+- `metadata.reaction` guarda:
+  - `emoji`
+  - `message_id`
+  - preview del mensaje objetivo si existe en la conversación canónica
+- Para `wait_response` e IA no se usa el emoji desnudo si procede de una reacción. Se genera un `resume_text` semántico del tipo:
+  - `El paciente reaccionó 👍 a tu mensaje`
+  - o, si se conoce el objetivo:
+  - `El paciente reaccionó 👍 al mensaje: ...`
+
+Esto evita dos regresiones:
+
+1. que la reacción se vea en chat pero no dispare `wait_response`;
+2. que el nodo IA reciba texto vacío al analizar la confirmación.
+3. que una misma respuesta reactive varias ejecuciones pendientes en la misma conversación. Si hay varias `wait_response` abiertas para el mismo chat, el backend reanuda solo la más reciente y cancela las anteriores con `cancelled_reason = superseded_by_newer_waiting_execution`.
+
+Checklist obligatorio al pasar a `staging` y luego a `main`:
+
+- validar que el backend del entorno usa `QUEUE_PREFIX` propio;
+- validar que `src/services/socket.service.js` publica y suscribe el bus Redis;
+- validar una cita real con:
+  - mensaje inicial,
+  - respuesta inbound,
+  - salida de `wait_response`,
+  - `appointment:updated` emitido,
+  - UI de agenda actualizando icono/estado sin abrir drawer.
   - `conversation.controller.js` emite eventos salientes (`message:created`, `message:updated`) en el mismo proceso HTTP.
   - `workers/queue.workers.js` emite eventos entrantes de WhatsApp (`message:created`) desde el worker BullMQ usando `getIO()` del mismo proceso backend.
   - Si el backend de integración se fragmenta en procesos separados sin adapter de Socket.io compartido, los jobs podrían persistir mensajes sin notificar a los clientes conectados a otro proceso. En el runtime actual de integración se asume proceso único (`fork_mode`).
@@ -225,6 +490,8 @@ En `.env` / `.env.example`:
     - si el sistema detecta duplicados, backend los fusiona en lectura/escritura y reutiliza la conversación canónica.
     - inbound WhatsApp, QuickChat, drawers y runtime de flujos deben resolver siempre contra la misma conversación canónica.
     - si reaparecen dos conversaciones para el mismo número en la misma clínica, tratarlo como regresión porque rompe trazabilidad, ventana 24h y reanudación de `wait_response`.
+    - al entrar una respuesta, `wait_response` reutiliza el job pendiente de la ejecución marcándolo con `resume_mode = response`; si el payload del job histórico no traía ese campo, el executor cae a `waiting_meta.resume_mode` y `waiting_meta.pending_response_text` antes de asumir `timeout`.
+    - el backend que reanuda no tiene que ser el mismo que recibió el webhook. En integración se da por correcto que el webhook pueda entrar por otro proceso PM2 y que la reanudación final la haga `clinicaclick-integracion` a través del bus Redis.
 
 - Conversaciones de lead
   - El modelo canónico para marketing es `LeadIntake`.
@@ -247,6 +514,7 @@ El endpoint `/api/automation-catalog` acepta solo estos `trigger_type`:
 - `appointment_confirmed`
 - `appointment_cancelled`
 - `appointment_reminder_window`
+- `appointment_after`
 - `patient_inactive`
 - `quote_accepted`
 - `treatment_completed`
@@ -284,6 +552,25 @@ Reglas:
 - Para el resto de triggers, `trigger_config = null`.
 - Si `appointment_scope !== without_treatment`, `appointment_type_without_treatment` se normaliza a `any`.
 
+Contratos temporales adicionales:
+
+- `appointment_reminder_window`
+  ```json
+  {
+    "schedule_moment": "same_day | day_before | week_before",
+    "schedule_time_mode": "custom | one_hour_before",
+    "custom_time": "HH:mm | null"
+  }
+  ```
+- `appointment_after`
+  ```json
+  {
+    "schedule_moment": "same_day | day_after | week_after",
+    "schedule_time_mode": "custom | one_hour_after",
+    "custom_time": "HH:mm | null"
+  }
+  ```
+
 ### Resolución de flujos de cita V2
 
 `appointmentAutomationV2Runtime` usa esta precedencia:
@@ -305,6 +592,28 @@ Consecuencias:
 
 - No debe dispararse más de un flujo V2 por el mismo `appointment_created`.
 - Un template `without_treatment` no debe asignarse desde `PUT /api/tratamientos/:id/automation-template`.
+
+### Scheduler de cita
+
+`appointment_reminder_window` y `appointment_after` se ejecutan mediante `JobRequests`, no por cambio de estado.
+
+Contrato operativo:
+
+- al crear, editar o reagendar una cita, backend llama a `syncScheduledTriggersForCita(cita)`;
+- se crean jobs `appointment_automation_schedule_fire` con `payload`:
+  - `appointment_id`
+  - `trigger_type`
+  - `template_key`
+  - `window_identifier`
+  - `scheduled_for`
+- cuando el job vence, `fireScheduledTrigger(payload)` resuelve la última versión publicada activa del `template_key` y crea una `FlowExecutionV2` normal.
+
+Reglas importantes:
+
+- `appointment_reminder_window` no debe programarse si la cita ya ha empezado;
+- `appointment_after` sí puede quedar programado desde la creación inicial de la cita;
+- el entorno debe aislar sus colas con `QUEUE_PREFIX` propio;
+- si varios procesos consumen la misma tabla/cola de jobs en un entorno, todos deben conocer `appointment_automation_schedule_fire` o bien solo uno de ellos debe actuar como scheduler. Si no, el síntoma es `No handler registered for job type 'appointment_automation_schedule_fire'`.
 
 - Ventana de 24h en WhatsApp
   - La ventana de texto libre se considera abierta solo si existe `last_inbound_at` real dentro de las últimas 24 horas.
@@ -413,11 +722,55 @@ Consecuencias:
 - `catalogo-automatizaciones`
   - Sigue expuesto como catálogo de metadatos.
   - Ya no debe crear ni editar `AutomationFlow` legacy.
-  - La propagación a clínicas crea o actualiza borradores V2 por clínica, enlazados por `template_key` y `template_version`.
+  - La propagación a clínicas crea o actualiza borradores V2 por clínica, enlazados operativamente por `template_key`.
+  - `template_version` queda como campo histórico de transición y deja de ser binding operativo.
 
 - Tratamientos y cita
   - El contrato vigente es `GET/PUT /api/tratamientos/:id/automation-template`.
+  - La resolución canónica es:
+    - tratamiento guarda `appointment_automation_template_key`;
+    - runtime resuelve la última versión publicada activa (`published_at != null`, `is_active = true`);
+    - las versiones publicadas anteriores del mismo `template_key` pasan a `deprecadas`.
   - Las superficies v1 de flujos de cita (`AppointmentFlowTemplate`, `AppointmentFlowInstance`, `/api/tratamientos/:id/flow`, `/api/appointment-flow-templates`) se consideran retiradas en integración.
 
 - Merge hygiene
   - Si reaparecen referencias activas a `Lead`, `AutomationFlow`, `AppointmentFlowTemplate` o `/api/flows` en este circuito, tratarlo como regresión de integración y no como compatibilidad legítima.
+## 2026-03-16 - Reglas de integración endurecidas
+
+### Lead y cita
+
+- `LeadIntake.status_lead = citado` requiere una cita activa real.
+- Estados de cita tratados como activos para el vínculo lead -> cita:
+  - `pendiente`
+  - `info_enviada`
+  - `info_confirmada`
+  - `recordatorio_enviado`
+  - `recordatorio_confirmado`
+  - `reprogramada`
+- `cancelada` no mantiene al lead como `citado`.
+- `enrichLeadsWithLinkedAppointments()` ignora citas no activas para `linked_appointment`.
+
+### Intake web: precedencia de scope
+
+- Un widget puede venir firmado con configuración de grupo y aun así resolverse a una clínica concreta.
+- Regla aplicada en integración:
+  - si el dominio del formulario tiene `IntakeConfig` de clínica, el lead persiste con `clinica_id` de esa clínica;
+  - la firma HMAC válida de grupo sigue siendo aceptada si fue la que firmó el widget;
+  - `grupo_clinica_id` se conserva si existe o se infiere desde la clínica.
+- Si solo se puede resolver `grupo_clinica_id` y no hay clínica inequívoca:
+  - el lead ya no se deja a nivel grupo “huérfano”;
+  - se asigna a la primera clínica creada del grupo como fallback operativo.
+- Esto evita que un lead de web quede invisible en `marketing/leads` cuando el usuario está filtrando por una clínica concreta del grupo.
+
+### wait_response
+
+- La reanudación automática por inbound debe matchear por identidad conversacional real:
+  - `conversation_id`
+  - `patient_id`
+  - `lead_id`
+- Se evita hacer match por `appointment_id` en respuestas WhatsApp.
+- El `JobRequest` de tipo `automations_v2_execute` se actualiza con `resume_mode=response` y el payload inbound consolidado antes de volver al scheduler.
+
+### Execution monitor
+
+- Aunque el acceso backend sigue siendo por permisos, la UX esperada en integración es que el front envíe `clinic_id` según el selector global para no mezclar ejecuciones de clínicas distintas en una misma pantalla.
