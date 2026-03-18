@@ -1097,16 +1097,28 @@ router.get('/google/local/locations', async (req, res) => {
             const accounts = await fetchAllGoogleBusinessAccounts(accessToken);
             const response = [];
             for (const account of accounts) {
-                const locations = await fetchAllGoogleBusinessLocations(accessToken, account.name);
-                const simplified = locations
-                    .map((loc) => normalizeBusinessLocation(loc, account))
-                    .filter(Boolean);
-                response.push({
-                    accountName: account.name,
-                    accountDisplayName: account.accountName || account.name,
-                    accountNumber: account.accountNumber || null,
-                    locations: simplified
-                });
+                try {
+                    const locations = await fetchAllGoogleBusinessLocations(accessToken, account.name);
+                    const simplified = locations
+                        .map((loc) => normalizeBusinessLocation(loc, account))
+                        .filter(Boolean);
+                    response.push({
+                        accountName: account.name,
+                        accountDisplayName: account.accountName || account.name,
+                        accountNumber: account.accountNumber || null,
+                        locations: simplified
+                    });
+                } catch (accountErr) {
+                    const status = accountErr.response?.status;
+                    if (status === 403) {
+                        throw accountErr;
+                    }
+                    console.warn('⚠️ Cuenta Google Business omitida al listar ubicaciones:', {
+                        accountName: account?.name,
+                        status,
+                        error: accountErr.response?.data || accountErr.message
+                    });
+                }
             }
 
             return res.json({ success: true, accounts: response });
@@ -2408,6 +2420,7 @@ router.post('/meta/map-assets', async (req, res) => {
         // (instagram_business) y limpiamos datos del activo desasociado.
         const createdOrUpdated = [];
         const selectedKeySet = new Set();
+        const selectedTypes = new Set(selectedAssets.map((asset) => asset?.type).filter(Boolean));
         const clinicsToSync = new Set();
         const clinicAssignmentCache = new Map();
 
@@ -2486,7 +2499,15 @@ router.post('/meta/map-assets', async (req, res) => {
         }
 
         // Desactivar los que ya no estén seleccionados y limpiar sus datos
-        const toDeactivate = existing.filter(a => !selectedKeySet.has(`${a.assetType}|${a.metaAssetId}`) && a.isActive);
+        const toDeactivate = existing.filter((a) => {
+            if (!a.isActive) {
+                return false;
+            }
+            if (!selectedTypes.has(a.assetType)) {
+                return false;
+            }
+            return !selectedKeySet.has(`${a.assetType}|${a.metaAssetId}`);
+        });
         if (toDeactivate.length) {
             await ClinicMetaAsset.update({ isActive: false }, { where: { id: toDeactivate.map(a => a.id) } });
             // Borrar datos asociados a IG/FB desactivados cuando aplica
