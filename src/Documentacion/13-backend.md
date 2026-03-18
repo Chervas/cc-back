@@ -1061,7 +1061,7 @@ Reglas importantes:
 
 ## 2026-03-18 - Contratos canónicos futuros: Estrategias de campaña
 
-> **Estado:** Diseño. Estos contratos documentan el modelo objetivo, no el runtime actual. No hay endpoints implementados todavía.
+> **Estado:** Diseño. Estos contratos documentan el modelo objetivo, no el modelo persistido canónico actual. El runtime de integración ya expone rutas `/api/marketing/strategies`, pero hoy funcionan como adapter sobre `Campaign` + `CampaignRequest`, no como implementación nativa del modelo `Strategy` descrito aquí.
 
 ### Modelo canónico de Strategy
 
@@ -1089,17 +1089,17 @@ Strategy {
 }
 ```
 
-### Endpoints previstos (no implementados)
+### Rutas expuestas hoy (adapter) y target canónico
 
 | Método | Ruta | Descripción |
 |---|---|---|
-| `POST /api/marketing/strategies` | Crear estrategia (draft) |
-| `GET /api/marketing/strategies` | Listar estrategias del scope con filtros |
-| `GET /api/marketing/strategies/:id` | Detalle de una estrategia |
-| `PATCH /api/marketing/strategies/:id` | Actualizar campos editables (draft) |
-| `PATCH /api/marketing/strategies/:id/status` | Transición de estado (ver máquina de estados) |
-| `GET /api/marketing/strategies/:id/metrics` | Métricas agregadas de la estrategia |
-| `POST /api/intake/pageview` | Registrar pageview para remarketing (snippet) |
+| `POST /api/marketing/strategies` | Existe hoy como adapter. El target canónico es crear una `Strategy` nativa en `draft`. |
+| `GET /api/marketing/strategies` | Existe hoy como adapter. El target canónico es listar `Strategy` por scope con filtros. |
+| `GET /api/marketing/strategies/:id` | Existe hoy como adapter. El target canónico es devolver detalle nativo de `Strategy`. |
+| `PATCH /api/marketing/strategies/:id` | Previsto para edición parcial de campos editables en `draft`. |
+| `PATCH /api/marketing/strategies/:id/status` | Existe hoy. El target canónico es transicionar el estado de `Strategy` según la máquina de estados. |
+| `GET /api/marketing/strategies/:id/metrics` | Existe hoy como adapter. El target canónico es devolver métricas agregadas de `Strategy`. |
+| `POST /api/intake/pageview` | Previsto para registrar pageviews de remarketing desde el snippet. |
 
 ### Máquina de estados
 
