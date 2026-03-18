@@ -750,12 +750,15 @@ function buildStrategyItemFromRows(rows, campaignsById) {
     campaign_id: campaignId,
     name: campaign?.nombre || payload.summary?.name || 'Estrategia',
     objective_id: payload.objective_id || null,
+    promotion_type: payload.promotion_type || 'treatment',
     mode: payload.mode_snapshot || payload.mode || null,
     status: normalizeStrategyStatus(payload.status || representative.estado),
     budget_monthly: Number(payload.summary?.budget_monthly ?? campaign?.presupuesto ?? 0) || 0,
     clinic_ids: clinicIds,
     treatments: Array.isArray(payload.treatments) ? payload.treatments : [],
+    destination: payload.destination && typeof payload.destination === 'object' ? payload.destination : null,
     channels: Array.isArray(payload.channels) ? payload.channels : [],
+    measurement: payload.measurement && typeof payload.measurement === 'object' ? payload.measurement : null,
     geo: payload.geo && typeof payload.geo === 'object' ? payload.geo : {},
     automation: payload.automation && typeof payload.automation === 'object' ? payload.automation : null,
     addons: payload.addons && typeof payload.addons === 'object' ? payload.addons : {},
@@ -1742,14 +1745,17 @@ exports.createMarketingStrategy = asyncHandler(async (req, res) => {
   if (!userId) return res.status(401).json({ success: false, error: 'unauthenticated' });
 
   const objectiveId = String(req.body?.objective_id || '').trim().toLowerCase();
+  const promotionType = String(req.body?.promotion_type || '').trim().toLowerCase() === 'generic'
+    ? 'generic'
+    : 'treatment';
   if (!VALID_STRATEGY_OBJECTIVES.has(objectiveId)) {
     return res.status(400).json({ success: false, error: 'validation_error', message: 'objective_id inválido o no disponible' });
   }
 
   const scope = await resolveScopeFromInput({
-    clinicIdRaw: req.body?.clinic_id,
-    groupIdRaw: req.body?.group_id,
-    assignmentScopeRaw: req.body?.assignment_scope
+    clinicIdRaw: req.body?.clinic_id ?? (req.body?.scope_type === 'clinic' ? req.body?.scope_id : null),
+    groupIdRaw: req.body?.group_id ?? (req.body?.scope_type === 'group' ? req.body?.scope_id : null),
+    assignmentScopeRaw: req.body?.assignment_scope ?? req.body?.scope_type
   });
 
   const selectedClinicIds = parseClinicIds(req.body?.clinic_ids);
@@ -1788,7 +1794,7 @@ exports.createMarketingStrategy = asyncHandler(async (req, res) => {
   }
 
   const treatments = normalizeStrategyTreatments(req.body?.treatments);
-  if (!treatments.length) {
+  if (promotionType !== 'generic' && !treatments.length) {
     return res.status(400).json({ success: false, error: 'validation_error', message: 'Selecciona al menos un tratamiento' });
   }
 
@@ -1833,6 +1839,8 @@ exports.createMarketingStrategy = asyncHandler(async (req, res) => {
   });
 
   const geo = req.body?.geo && typeof req.body.geo === 'object' ? req.body.geo : {};
+  const destination = req.body?.destination && typeof req.body.destination === 'object' ? req.body.destination : null;
+  const measurement = req.body?.measurement && typeof req.body.measurement === 'object' ? req.body.measurement : null;
   const automation = req.body?.automation && typeof req.body.automation === 'object' ? req.body.automation : null;
   const addonCalls = effectiveMode === 'managed_service' ? req.body?.addon_calls === true : false;
 
@@ -1853,7 +1861,10 @@ exports.createMarketingStrategy = asyncHandler(async (req, res) => {
         name: campaignName,
         budget_monthly: budgetMonthly
       },
+      promotion_type: promotionType,
       treatments,
+      destination,
+      measurement,
       geo,
       channels,
       automation,
@@ -1890,6 +1901,7 @@ exports.createMarketingStrategy = asyncHandler(async (req, res) => {
     strategy: {
       id: campaign.id,
       objective_id: objectiveId,
+      promotion_type: promotionType,
       mode: effectiveMode,
       status: 'draft',
       clinic_ids: targetClinicIds,
