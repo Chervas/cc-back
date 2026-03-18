@@ -1055,3 +1055,84 @@ Reglas importantes:
 ### Execution monitor
 
 - Aunque el acceso backend sigue siendo por permisos, la UX esperada en integración es que el front envíe `clinic_id` según el selector global para no mezclar ejecuciones de clínicas distintas en una misma pantalla.
+
+
+---
+
+## 2026-03-18 - Contratos canónicos futuros: Estrategias de campaña
+
+> **Estado:** Diseño. Estos contratos documentan el modelo objetivo, no el runtime actual. No hay endpoints implementados todavía.
+
+### Modelo canónico de Strategy
+
+Una estrategia es el contenedor principal de una campaña de marketing. Pertenece a un scope (clínica o grupo) y a un objetivo de negocio.
+
+```
+Strategy {
+    id: number
+    scope_type: 'clinic' | 'group'
+    scope_id: number
+    objective_id: string           // 'new_patients', 'reactivate_patients', etc.
+    mode_snapshot: string          // modo vigente al crear la estrategia
+    status: 'draft' | 'pending_approval' | 'active' | 'paused' | 'completed'
+    promotion_type: 'treatment' | 'generic'
+    treatment_ids: number[]        // vacío si generic
+    destination_config: JSON       // ver StrategyDestinationConfig en 20.10
+    measurement_config: JSON       // ver StrategyMeasurementConfig en 20.10
+    budget_monthly: number
+    channel_split: JSON            // { meta_ads: 70, google_ads: 30 }
+    automation_template_key: string | null
+    automation_template_version: number | null
+    created_by: number
+    created_at: string
+    updated_at: string
+}
+```
+
+### Endpoints previstos (no implementados)
+
+| Método | Ruta | Descripción |
+|---|---|---|
+| `POST /api/marketing/strategies` | Crear estrategia (draft) |
+| `GET /api/marketing/strategies` | Listar estrategias del scope con filtros |
+| `GET /api/marketing/strategies/:id` | Detalle de una estrategia |
+| `PATCH /api/marketing/strategies/:id` | Actualizar campos editables (draft) |
+| `PATCH /api/marketing/strategies/:id/status` | Transición de estado (ver máquina de estados) |
+| `GET /api/marketing/strategies/:id/metrics` | Métricas agregadas de la estrategia |
+| `POST /api/intake/pageview` | Registrar pageview para remarketing (snippet) |
+
+### Máquina de estados
+
+```
+draft → pending_approval → active ⇄ paused → completed
+                         ↗                  ↗
+              pending_approval → draft (revert)
+```
+
+Transiciones válidas:
+
+| Desde | Hacia | Acción |
+|---|---|---|
+| `draft` | `pending_approval` | `submit` |
+| `pending_approval` | `active` | `activate` |
+| `pending_approval` | `draft` | `revert` |
+| `active` | `paused` | `pause` |
+| `paused` | `active` | `resume` |
+| `active` | `completed` | `complete` |
+| `paused` | `completed` | `complete` |
+
+### Cascada de recomendación de automatizaciones
+
+El endpoint `GET /api/marketing/strategies/recommend-automation` recibe `objective_id`, `treatment_id?`, `discipline_id?`, `clinic_id?` y devuelve la automatización recomendada según la cascada:
+
+1. `objective_id` + `treatment_id`
+2. `objective_id` + `discipline_id`
+3. `objective_id` + `clinic_id`
+4. `objective_id` solo
+5. Sin recomendación (respuesta vacía)
+
+### Notas de implementación
+
+- **Llamadas desde anuncio:** Capacidad prevista y condicional a integración real con API de Google Ads para reporting de llamadas. No debe implementarse como operativa hasta que el backend soporte la lectura de call reporting de Google Ads.
+- **Pageview endpoint:** `POST /api/intake/pageview` es un endpoint ligero que registra URL, referrer, UTMs y timestamp. No requiere autenticación del visitante. Se usa para construir audiencias de remarketing.
+- **Estos contratos son modelo objetivo:** No deben implementarse como runtime hasta que el frontend esté listo para consumirlos. Se documentan aquí para alinear backend y frontend en la misma visión.
