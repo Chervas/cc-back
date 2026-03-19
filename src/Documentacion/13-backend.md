@@ -1181,20 +1181,25 @@ El endpoint devuelve un objeto `AutomationRecommendationResponse` (ver `20.10-mo
 
 El backend debe implementar el concepto de **Playbooks de Campaña**, que son la capa de vinculación entre los catálogos maestros (tratamientos, automatizaciones) y las estrategias de marketing. El wizard de creación de estrategia se alimenta de estos playbooks para pre-configurar los pasos.
 
+> El Catálogo de Tratamientos lo alimentará otra superficie (Codex). El Catálogo de Automatizaciones lo alimentará otra superficie. `Campañas (Admin)` es la capa de playbooks que vincula ambos.
+
 **Tareas Backend:**
-- [ ] Crear modelo `AdminCampaignPlaybook`.
-- [ ] Crear endpoints CRUD para gestionar los playbooks desde un panel de admin.
+- [ ] Crear modelo Sequelize `AdminCampaignPlaybook` + migración.
+- [ ] Crear controlador y rutas CRUD (`GET`, `POST`, `PUT`, `DELETE`).
+- [ ] Sin endpoint `toggle` — cambios de estado via `PUT`.
 
 
 ---
 
 ## 2026-03-19 - Admin Campaign Playbooks
 
-> **Estado:** Diseño. Backend no implementado, solo contrato definido para front.
+> **Estado:** Diseño. Backend no implementado, solo contrato canónico definido para front (fijado en `e02e5ab`).
 
 Se introduce el concepto de `AdminCampaignPlaybook` como una entidad gestionada por el equipo de ClinicaClick para estandarizar y pre-configurar las campañas que los clientes pueden lanzar desde el wizard.
 
-### Contrato (Backend)
+> El Catálogo de Tratamientos lo alimentará otra superficie (Codex). El Catálogo de Automatizaciones lo alimentará otra superficie. `Campañas (Admin)` es la capa de playbooks que vincula ambos.
+
+### Contrato canónico (Backend)
 
 El backend deberá exponer endpoints CRUD para gestionar estos playbooks. El contrato del modelo es el siguiente:
 
@@ -1207,7 +1212,7 @@ module.exports = (sequelize, DataTypes) => {
             defaultValue: DataTypes.UUIDV4,
             primaryKey: true
         },
-        catalog_key: { // Ej: new_patients_dental_implants_std
+        catalog_key: {
             type: DataTypes.STRING,
             allowNull: false,
             unique: true
@@ -1229,9 +1234,9 @@ module.exports = (sequelize, DataTypes) => {
             type: DataTypes.ENUM('treatment_specific', 'generic_campaign'),
             allowNull: false
         },
-        treatment_id: DataTypes.INTEGER, // FK a AdminTreatmentCatalogItem
-        discipline: DataTypes.STRING, // Para campañas genéricas
-        family_key: DataTypes.STRING, // Para agrupar campañas genéricas
+        treatment_id: DataTypes.INTEGER,     // Solo si promotion_kind === 'treatment_specific'
+        discipline: DataTypes.STRING,        // Solo si promotion_kind === 'generic_campaign'
+        family_key: DataTypes.STRING,        // Solo si promotion_kind === 'generic_campaign'
         channels_supported: {
             type: DataTypes.JSON,
             defaultValue: []
@@ -1246,19 +1251,19 @@ module.exports = (sequelize, DataTypes) => {
             type: DataTypes.JSON,
             defaultValue: {}
         },
-        measurement_profile: {
+        measurement_profile: {               // first_party, channel_native, business_outcomes, remarketing, ad_calls
             type: DataTypes.JSON,
             defaultValue: {}
         },
-        automation_strategy: {
+        automation_strategy: {               // mode: inherit_recommendation | force_template | none
             type: DataTypes.JSON,
             defaultValue: {}
         },
-        review_policy: {
+        review_policy: {                     // managed_review_required, client_approval_required
             type: DataTypes.JSON,
             defaultValue: {}
         },
-        internal_notes: DataTypes.TEXT
+        notes_internal: DataTypes.TEXT
     }, {
         tableName: 'admin_campaign_playbooks',
         timestamps: true
@@ -1268,22 +1273,35 @@ module.exports = (sequelize, DataTypes) => {
 };
 ```
 
-### Endpoints (CRUD)
+### Ruta API canónica
 
-Se necesitarán los siguientes endpoints, protegidos para `isSuperAdmin`:
+`/api/admin/campaign-playbooks` — protegidos para `isSuperAdmin`.
 
-- `GET /api/admin/campaign-playbooks`
-- `POST /api/admin/campaign-playbooks`
-- `GET /api/admin/campaign-playbooks/:id`
-- `PUT /api/admin/campaign-playbooks/:id`
-- `DELETE /api/admin/campaign-playbooks/:id`
+| Método | Ruta | Descripción |
+|--------|------|-------------|
+| GET | `/api/admin/campaign-playbooks` | Listar todos |
+| GET | `/api/admin/campaign-playbooks/:id` | Obtener por ID |
+| POST | `/api/admin/campaign-playbooks` | Crear |
+| PUT | `/api/admin/campaign-playbooks/:id` | Actualizar (incluye cambios de `status`) |
+| DELETE | `/api/admin/campaign-playbooks/:id` | Eliminar |
+
+> No existe endpoint `toggle`. Los cambios de estado se resuelven con `PUT` / update de `status`.
 
 ### Lógica de Negocio
 
 - **`catalog_key`:** Debe ser único y se puede auto-generar a partir del `display_name` (`slugify`).
 - **Validación:** Asegurar que `treatment_id` solo se use con `promotion_kind: 'treatment_specific'`, y `discipline`/`family_key` con `generic_campaign`.
-- **Relaciones:** El modelo debe tener relaciones (opcionales) con `AdminTreatmentCatalogItem` y `AdminAutomationCatalogItem` (a través de `template_key`).
+- **`notes_internal`:** Campo de texto libre (no `internal_notes`).
+- **`measurement_profile`:** Incluye `remarketing` y `ad_calls` como campos booleanos.
+- **`automation_strategy.mode`:** Valores válidos: `inherit_recommendation`, `force_template`, `none`.
+- **Relaciones:** El modelo debe tener relaciones (opcionales) con `AdminTreatmentCatalogItem` (via `treatment_id`) y `AdminAutomationCatalogItem` (via `template_key`). Ambas relaciones dependen de que los catálogos maestros estén implementados.
 
 ### Conexión con el Wizard de Cliente
 
-El wizard de creación de estrategias (`new_patients`) deberá poder recibir un `playbook_id` o `playbook_key` opcional. Si se proporciona, el backend (o el frontend, si el playbook se carga por separado) usará los valores del playbook para pre-rellenar los pasos del wizard, como se detalla en la documentación de producto `20.9`.
+El wizard de creación de estrategias (`new_patients`) acepta un `@Input() playbook` opcional en el frontend. El prefill es parcial y no destructivo.
+
+**No es una integración final cerrada con backend real.** El backend aún no sirve playbooks. Cuando se implemente:
+
+1. El frontend resolverá el playbook desde `campanas.component` según el tratamiento seleccionado.
+2. El backend podrá servir playbooks filtrados por `objective_id` y `status: 'active'`.
+3. El flujo completo (seleccionar tratamiento → resolver playbook → inyectar en wizard) se cerrará extremo a extremo.
