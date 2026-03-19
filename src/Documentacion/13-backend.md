@@ -1130,6 +1130,7 @@ El endpoint `GET /api/marketing/strategies/recommend-automation` recibe el conte
 GET /api/marketing/strategies/recommend-automation
   ?objective_id=new_patients
   &treatment_ids=42,43       // opcional, puede ser múltiple
+  &discipline_id=7            // opcional, usado en campañas genéricas
   &scope_type=group
   &scope_id=5
 ```
@@ -1137,6 +1138,8 @@ GET /api/marketing/strategies/recommend-automation
 **Lógica de resolución:**
 
 La resolución se realiza **siempre por clínica**, incluso si el `scope_type` es `group`. Para cada clínica en el scope, se evalúa la siguiente cascada de 9 niveles para encontrar el primer match.
+
+> **`discipline_id` en campañas genéricas:** Cuando no hay `treatment_ids`, los niveles 1–3 se saltan. Si se proporciona `discipline_id`, la cascada empieza en el nivel 4. Si no se proporciona, salta directamente al nivel 7. El frontend obtiene las disciplinas del scope vía `GET /api/especialidades/clinica?clinica_id=X` (endpoint existente) y envía la seleccionada por el usuario.
 
 **Cascada de precedencia canónica (`clínica > grupo > global`):
 
