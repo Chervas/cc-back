@@ -53,17 +53,17 @@ const STRATEGY_REQUEST_STATE_MAP = {
 const EVENT_CATALOG = {
   lead: {
     name: 'Lead - ClinicaClick',
-    category: 'LEAD',
+    category: 'SUBMIT_LEAD_FORM',
     detect: ['lead', 'leads', 'formulario']
   },
   contact: {
     name: 'Contact - ClinicaClick',
-    category: 'LEAD',
+    category: 'CONTACT',
     detect: ['contact', 'llamada', 'call']
   },
   schedule: {
     name: 'Schedule - ClinicaClick',
-    category: 'LEAD',
+    category: 'BOOK_APPOINTMENT',
     detect: ['schedule', 'appointment', 'cita', 'agenda']
   },
   purchase: {
