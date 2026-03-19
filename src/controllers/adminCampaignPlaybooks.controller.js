@@ -2,10 +2,11 @@
 
 const asyncHandler = require('express-async-handler');
 const crypto = require('crypto');
+const { Op } = require('sequelize');
 const db = require('../../models');
 const { isGlobalAdmin } = require('../lib/role-helpers');
 
-const { AdminCampaignPlaybook, Tratamiento } = db;
+const { AdminCampaignPlaybook, Tratamiento, AutomationFlowCatalog, AutomationFlowTemplateV2 } = db;
 
 const ALLOWED_PROMOTION_KINDS = new Set(['treatment_specific', 'generic_campaign']);
 const ALLOWED_STATUSES = new Set(['draft', 'active', 'archived']);
@@ -134,6 +135,42 @@ async function resolveTreatment(treatmentId) {
   });
 }
 
+async function resolveAutomationCatalogByTemplate(templateKey) {
+  const cleanTemplateKey = toCleanString(templateKey);
+  if (!cleanTemplateKey) return null;
+
+  return AutomationFlowCatalog.findOne({
+    where: {
+      template_key: cleanTemplateKey,
+      is_active: true,
+    },
+    attributes: ['id', 'name', 'display_name', 'template_key'],
+    raw: true,
+  });
+}
+
+async function resolvePublishedAutomationTemplate(templateKey, templateVersion = null) {
+  const cleanTemplateKey = toCleanString(templateKey);
+  if (!cleanTemplateKey) return null;
+
+  const where = {
+    template_key: cleanTemplateKey,
+    published_at: { [Op.ne]: null },
+    is_active: true,
+  };
+
+  if (templateVersion !== null) {
+    where.version = templateVersion;
+  }
+
+  return AutomationFlowTemplateV2.findOne({
+    where,
+    attributes: ['id', 'template_key', 'version', 'name'],
+    order: [['version', 'DESC'], ['id', 'DESC']],
+    raw: true,
+  });
+}
+
 async function normalizePlaybookPayload(payload, options = {}) {
   const { partial = false, current = null } = options;
   const source = payload && typeof payload === 'object' ? payload : {};
@@ -214,6 +251,30 @@ async function normalizePlaybookPayload(payload, options = {}) {
   const automationStrategy = source.automation_strategy !== undefined
     ? normalizeAutomationStrategy(source.automation_strategy)
     : (partial ? normalizeAutomationStrategy(current?.automation_strategy) : normalizeAutomationStrategy({}));
+  if (automationStrategy.mode === 'force_template') {
+    if (!automationStrategy.template_key) {
+      return { error: 'automation_template_required', message: 'automation_strategy.template_key es obligatorio para force_template' };
+    }
+
+    const catalogAutomation = await resolveAutomationCatalogByTemplate(automationStrategy.template_key);
+    if (!catalogAutomation) {
+      return { error: 'automation_catalog_item_not_found', message: 'La automatización forzada no existe o no está activa en el catálogo' };
+    }
+
+    const publishedTemplate = await resolvePublishedAutomationTemplate(
+      automationStrategy.template_key,
+      automationStrategy.template_version
+    );
+    if (!publishedTemplate) {
+      return { error: 'automation_template_not_found', message: 'La plantilla de automatización forzada no existe o no está publicada' };
+    }
+
+    automationStrategy.template_key = publishedTemplate.template_key;
+    automationStrategy.template_version = Number(publishedTemplate.version);
+  } else {
+    automationStrategy.template_key = null;
+    automationStrategy.template_version = null;
+  }
   const reviewPolicy = source.review_policy !== undefined
     ? normalizeReviewPolicy(source.review_policy)
     : (partial ? normalizeReviewPolicy(current?.review_policy) : normalizeReviewPolicy({}));
