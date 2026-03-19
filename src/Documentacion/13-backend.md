@@ -1169,4 +1169,9 @@ El endpoint devuelve un objeto `AutomationRecommendationResponse` (ver `20.10-mo
 
 - **Llamadas desde anuncio:** Capacidad prevista y condicional a integración real con API de Google Ads para reporting de llamadas. No debe implementarse como operativa hasta que el backend soporte la lectura de call reporting de Google Ads.
 - **Pageview endpoint:** `POST /api/intake/pageview` es un endpoint ligero que registra URL, referrer, UTMs y timestamp. No requiere autenticación del visitante. Se usa para construir audiencias de remarketing.
+- **WhatsApp desde Google Business Profile / Ficha Local (futuro):** No debe depender de `intake.js`, porque el click ocurre fuera de la web. La implementación objetivo es un tracked link bajo dominio ClinicaClick (ej. `https://chat.clinicaclick.com/w/<tracking_id>`) que:
+  1. registra el click en backend;
+  2. persiste `source = google_business_profile` y `source_detail = gbp_whatsapp_click`;
+  3. redirige al `wa.me/<numero>` final;
+  4. permite una atribución best-effort del inbound o conversación posterior sin mezclarla con `whatsapp_click_web`.
 - **Estos contratos son modelo objetivo:** No deben implementarse como runtime hasta que el frontend esté listo para consumirlos. Se documentan aquí para alinear backend y frontend en la misma visión.
