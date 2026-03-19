@@ -1795,6 +1795,13 @@ exports.createMarketingStrategy = asyncHandler(async (req, res) => {
   }
 
   const treatments = normalizeStrategyTreatments(req.body?.treatments);
+  const disciplineIdRaw = req.body?.discipline_id;
+  const disciplineId = Number.isFinite(Number(disciplineIdRaw)) && Number(disciplineIdRaw) > 0
+    ? Number(disciplineIdRaw)
+    : null;
+  const disciplineName = typeof req.body?.discipline_name === 'string'
+    ? req.body.discipline_name.trim() || null
+    : null;
   if (promotionType !== 'generic' && !treatments.length) {
     return res.status(400).json({ success: false, error: 'validation_error', message: 'Selecciona al menos un tratamiento' });
   }
@@ -1860,9 +1867,13 @@ exports.createMarketingStrategy = asyncHandler(async (req, res) => {
       },
       summary: {
         name: campaignName,
-        budget_monthly: budgetMonthly
+        budget_monthly: budgetMonthly,
+        discipline_id: disciplineId,
+        discipline_name: disciplineName
       },
       promotion_type: promotionType,
+      discipline_id: disciplineId,
+      discipline_name: disciplineName,
       treatments,
       destination,
       measurement,

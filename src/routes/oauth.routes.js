@@ -1768,7 +1768,27 @@ router.post('/google/ads/map-accounts', async (req, res) => {
 
         return res.json({ success: true, mapped: results.length, accounts: results });
     } catch (err) {
-        console.error('❌ Error en /oauth/google/ads/map-accounts:', err.details || err.message);
+        const detail = Array.isArray(err?.errors)
+            ? err.errors.map((item) => item.message).filter(Boolean).join('; ')
+            : (err.details || err.message);
+        console.error('❌ Error en /oauth/google/ads/map-accounts:', detail);
+
+        if (err?.name === 'SequelizeUniqueConstraintError') {
+            return res.status(409).json({
+                success: false,
+                error: 'duplicate_mapping',
+                message: 'Esa cuenta de Google Ads ya está vinculada y no se pudo guardar el mapeo.'
+            });
+        }
+
+        if (err?.name === 'SequelizeValidationError') {
+            return res.status(400).json({
+                success: false,
+                error: 'validation_error',
+                message: detail || 'No se pudo guardar el mapeo de Google Ads.'
+            });
+        }
+
         return res.status(500).json({ success: false, error: 'internal_error' });
     }
 });
