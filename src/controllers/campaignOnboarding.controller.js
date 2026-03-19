@@ -1018,16 +1018,12 @@ async function ensureConversionActionsInternal({ accessToken, customerId, loginC
           category: EVENT_CATALOG[key].category,
           type: 'UPLOAD_CLICKS',
           status: 'ENABLED',
-          includeInConversionsMetric: true,
           valueSettings: {
             defaultValue: 0,
             alwaysUseDefaultValue: false,
             defaultCurrencyCode: normalizeCurrency(currency)
           },
-          countingType: 'ONE_PER_CLICK',
-          attributionModelSettings: {
-            attributionModel: 'LAST_CLICK'
-          }
+          countingType: 'ONE_PER_CLICK'
         }
       });
     }
