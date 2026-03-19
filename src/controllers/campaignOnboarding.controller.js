@@ -1213,7 +1213,8 @@ exports.getCampaignOnboardingBootstrap = asyncHandler(async (req, res) => {
     scope: {
       assignment_scope: scope.assignment_scope,
       clinic_id: scope.clinic_id || null,
-      group_id: scope.group_id || null
+      group_id: scope.group_id || null,
+      group_web_primary_url: scope.group?.web_primary_url || null
     },
     modes: ['connect_only', 'managed_self', 'managed_service'],
     active_mode: activeMode,
