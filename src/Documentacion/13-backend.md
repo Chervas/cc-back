@@ -1175,3 +1175,115 @@ El endpoint devuelve un objeto `AutomationRecommendationResponse` (ver `20.10-mo
   3. redirige al `wa.me/<numero>` final;
   4. permite una atribución best-effort del inbound o conversación posterior sin mezclarla con `whatsapp_click_web`.
 - **Estos contratos son modelo objetivo:** No deben implementarse como runtime hasta que el frontend esté listo para consumirlos. Se documentan aquí para alinear backend y frontend en la misma visión.
+
+
+### `AdminCampaignPlaybook` (Playbooks de Campaña)
+
+El backend debe implementar el concepto de **Playbooks de Campaña**, que son la capa de vinculación entre los catálogos maestros (tratamientos, automatizaciones) y las estrategias de marketing. El wizard de creación de estrategia se alimenta de estos playbooks para pre-configurar los pasos.
+
+**Tareas Backend:**
+- [ ] Crear modelo `AdminCampaignPlaybook`.
+- [ ] Crear endpoints CRUD para gestionar los playbooks desde un panel de admin.
+
+
+---
+
+## 2026-03-19 - Admin Campaign Playbooks
+
+> **Estado:** Diseño. Backend no implementado, solo contrato definido para front.
+
+Se introduce el concepto de `AdminCampaignPlaybook` como una entidad gestionada por el equipo de ClinicaClick para estandarizar y pre-configurar las campañas que los clientes pueden lanzar desde el wizard.
+
+### Contrato (Backend)
+
+El backend deberá exponer endpoints CRUD para gestionar estos playbooks. El contrato del modelo es el siguiente:
+
+```javascript
+// Sequelize Model: AdminCampaignPlaybook
+module.exports = (sequelize, DataTypes) => {
+    const AdminCampaignPlaybook = sequelize.define('AdminCampaignPlaybook', {
+        id: {
+            type: DataTypes.UUID,
+            defaultValue: DataTypes.UUIDV4,
+            primaryKey: true
+        },
+        catalog_key: { // Ej: new_patients_dental_implants_std
+            type: DataTypes.STRING,
+            allowNull: false,
+            unique: true
+        },
+        display_name: {
+            type: DataTypes.STRING,
+            allowNull: false
+        },
+        objective_id: {
+            type: DataTypes.STRING,
+            allowNull: false
+        },
+        status: {
+            type: DataTypes.ENUM('draft', 'active', 'archived'),
+            defaultValue: 'draft',
+            allowNull: false
+        },
+        promotion_kind: {
+            type: DataTypes.ENUM('treatment_specific', 'generic_campaign'),
+            allowNull: false
+        },
+        treatment_id: DataTypes.INTEGER, // FK a AdminTreatmentCatalogItem
+        discipline: DataTypes.STRING, // Para campañas genéricas
+        family_key: DataTypes.STRING, // Para agrupar campañas genéricas
+        channels_supported: {
+            type: DataTypes.JSON,
+            defaultValue: []
+        },
+        channels_default: {
+            type: DataTypes.JSON,
+            defaultValue: []
+        },
+        recommended_budget_min: DataTypes.INTEGER,
+        recommended_budget_max: DataTypes.INTEGER,
+        destination_policy: {
+            type: DataTypes.JSON,
+            defaultValue: {}
+        },
+        measurement_profile: {
+            type: DataTypes.JSON,
+            defaultValue: {}
+        },
+        automation_strategy: {
+            type: DataTypes.JSON,
+            defaultValue: {}
+        },
+        review_policy: {
+            type: DataTypes.JSON,
+            defaultValue: {}
+        },
+        internal_notes: DataTypes.TEXT
+    }, {
+        tableName: 'admin_campaign_playbooks',
+        timestamps: true
+    });
+
+    return AdminCampaignPlaybook;
+};
+```
+
+### Endpoints (CRUD)
+
+Se necesitarán los siguientes endpoints, protegidos para `isSuperAdmin`:
+
+- `GET /api/admin/campaign-playbooks`
+- `POST /api/admin/campaign-playbooks`
+- `GET /api/admin/campaign-playbooks/:id`
+- `PUT /api/admin/campaign-playbooks/:id`
+- `DELETE /api/admin/campaign-playbooks/:id`
+
+### Lógica de Negocio
+
+- **`catalog_key`:** Debe ser único y se puede auto-generar a partir del `display_name` (`slugify`).
+- **Validación:** Asegurar que `treatment_id` solo se use con `promotion_kind: 'treatment_specific'`, y `discipline`/`family_key` con `generic_campaign`.
+- **Relaciones:** El modelo debe tener relaciones (opcionales) con `AdminTreatmentCatalogItem` y `AdminAutomationCatalogItem` (a través de `template_key`).
+
+### Conexión con el Wizard de Cliente
+
+El wizard de creación de estrategias (`new_patients`) deberá poder recibir un `playbook_id` o `playbook_key` opcional. Si se proporciona, el backend (o el frontend, si el playbook se carga por separado) usará los valores del playbook para pre-rellenar los pasos del wizard, como se detalla en la documentación de producto `20.9`.
