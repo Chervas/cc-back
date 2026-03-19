@@ -973,7 +973,7 @@ async function listConversionActionsInternal({ accessToken, customerId, loginCus
   const rows = Array.isArray(data?.results) ? data.results : [];
   const actions = rows
     .map(mapConversionActionRow)
-    .filter((item) => !!item.id)
+    .filter((item) => !!item.id && item.status !== 'REMOVED')
     .sort((a, b) => {
       const aEnabled = a.status === 'ENABLED' ? 1 : 0;
       const bEnabled = b.status === 'ENABLED' ? 1 : 0;
