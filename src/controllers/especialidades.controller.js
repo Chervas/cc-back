@@ -40,6 +40,85 @@ exports.getEspecialidadesSistema = asyncHandler(async (req, res) => {
     res.json(especialidades);
 });
 
+exports.createEspecialidadSistema = asyncHandler(async (req, res) => {
+    const nombre = String(req.body?.nombre || '').trim();
+    const disciplina = String(req.body?.disciplina || '').trim().toLowerCase();
+
+    if (!nombre || !disciplina) {
+        return res.status(400).json({ message: 'nombre y disciplina son obligatorios' });
+    }
+
+    const existing = await EspecialidadSistema.findOne({
+        where: {
+            nombre,
+            disciplina
+        }
+    });
+
+    if (existing) {
+        if (!existing.activo) {
+            existing.activo = true;
+            await existing.save();
+            return res.json(existing);
+        }
+
+        return res.status(409).json({ message: 'Ya existe una especialidad de sistema con ese nombre y disciplina' });
+    }
+
+    const especialidad = await EspecialidadSistema.create({
+        nombre,
+        disciplina,
+        activo: true
+    });
+
+    res.status(201).json(especialidad);
+});
+
+exports.updateEspecialidadSistema = asyncHandler(async (req, res) => {
+    const { id } = req.params;
+    const especialidad = await EspecialidadSistema.findByPk(id);
+    if (!especialidad) {
+        return res.status(404).json({ message: 'Especialidad de sistema no encontrada' });
+    }
+
+    const nombre = req.body?.nombre !== undefined ? String(req.body.nombre || '').trim() : undefined;
+    const disciplina = req.body?.disciplina !== undefined ? String(req.body.disciplina || '').trim().toLowerCase() : undefined;
+    const activo = req.body?.activo;
+
+    if (nombre !== undefined) {
+        if (!nombre) {
+            return res.status(400).json({ message: 'nombre no puede estar vacío' });
+        }
+        especialidad.nombre = nombre;
+    }
+
+    if (disciplina !== undefined) {
+        if (!disciplina) {
+            return res.status(400).json({ message: 'disciplina no puede estar vacía' });
+        }
+        especialidad.disciplina = disciplina;
+    }
+
+    if (activo !== undefined) {
+        especialidad.activo = !!activo;
+    }
+
+    await especialidad.save();
+    res.json(especialidad);
+});
+
+exports.deleteEspecialidadSistema = asyncHandler(async (req, res) => {
+    const { id } = req.params;
+    const especialidad = await EspecialidadSistema.findByPk(id);
+    if (!especialidad) {
+        return res.status(404).json({ message: 'Especialidad de sistema no encontrada' });
+    }
+
+    especialidad.activo = false;
+    await especialidad.save();
+    res.json({ message: 'Especialidad de sistema desactivada' });
+});
+
 // ============ ESPECIALIDADES DE CLÍNICA ============
 
 // Listar especialidades de una clínica (sistema + personalizadas)

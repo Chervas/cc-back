@@ -5,6 +5,9 @@ const ctrl = require('../controllers/especialidades.controller');
 
 // Especialidades de sistema (solo lectura)
 router.get('/sistema', ctrl.getEspecialidadesSistema);
+router.post('/sistema', ctrl.createEspecialidadSistema);
+router.patch('/sistema/:id', ctrl.updateEspecialidadSistema);
+router.delete('/sistema/:id', ctrl.deleteEspecialidadSistema);
 
 // Especialidades de clínica (sistema + personalizadas)
 router.get('/clinica/:id/en-uso', ctrl.checkEspecialidadClinicaEnUso);
