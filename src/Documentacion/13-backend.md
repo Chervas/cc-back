@@ -1130,7 +1130,7 @@ El endpoint `GET /api/marketing/strategies/recommend-automation` recibe el conte
 GET /api/marketing/strategies/recommend-automation
   ?objective_id=new_patients
   &treatment_ids=42,43       // opcional, puede ser múltiple
-  &discipline_id=7            // opcional, usado en campañas genéricas
+  &area_medica_id=7           // opcional, usado en campañas genéricas
   &scope_type=group
   &scope_id=5
 ```
@@ -1139,7 +1139,7 @@ GET /api/marketing/strategies/recommend-automation
 
 La resolución se realiza **siempre por clínica**, incluso si el `scope_type` es `group`. Para cada clínica en el scope, se evalúa la siguiente cascada de 9 niveles para encontrar el primer match.
 
-> **`discipline_id` en campañas genéricas:** Cuando no hay `treatment_ids`, los niveles 1–3 se saltan. Si se proporciona `discipline_id`, la cascada empieza en el nivel 4. Si no se proporciona, salta directamente al nivel 7. En producto, este concepto se presenta como **área médica**. El frontend obtiene las áreas médicas del scope vía `GET /api/especialidades/clinica?clinica_id=X` (endpoint existente) y envía la seleccionada por el usuario.
+> **`area_medica_id` en campañas genéricas:** Cuando no hay `treatment_ids`, los niveles 1–3 se saltan. Si se proporciona `area_medica_id`, la cascada empieza en el nivel 4. Si no se proporciona, salta directamente al nivel 7. En producto, este concepto se presenta como **área médica**. El frontend obtiene las áreas médicas del scope vía `GET /api/especialidades/clinica?clinica_id=X` (endpoint existente) y envía la seleccionada por el usuario. Por compatibilidad temporal, el backend sigue aceptando `discipline_id`.
 
 **Cascada de precedencia canónica (`clínica > grupo > global`):
 
@@ -1148,9 +1148,9 @@ La resolución se realiza **siempre por clínica**, incluso si el `scope_type` e
 | 1 | `objective` + `treatment` + `clinic` |
 | 2 | `objective` + `treatment` + `group` |
 | 3 | `objective` + `treatment` + `global` |
-| 4 | `objective` + `discipline` + `clinic` |
-| 5 | `objective` + `discipline` + `group` |
-| 6 | `objective` + `discipline` + `global` |
+| 4 | `objective` + `area_medica` + `clinic` |
+| 5 | `objective` + `area_medica` + `group` |
+| 6 | `objective` + `area_medica` + `global` |
 | 7 | `objective` + `clinic` |
 | 8 | `objective` + `group` |
 | 9 | `objective` + `global` |
@@ -1235,7 +1235,7 @@ module.exports = (sequelize, DataTypes) => {
             allowNull: false
         },
         treatment_id: DataTypes.INTEGER,     // Solo si promotion_kind === 'treatment_specific'
-        discipline: DataTypes.STRING,        // Solo si promotion_kind === 'generic_campaign'
+        discipline: DataTypes.STRING,        // Persistencia legacy. En contrato de aplicación se expone como area_medica
         family_key: DataTypes.STRING,        // Solo si promotion_kind === 'generic_campaign'
         channels_supported: {
             type: DataTypes.JSON,
@@ -1290,7 +1290,7 @@ module.exports = (sequelize, DataTypes) => {
 ### Lógica de Negocio
 
 - **`catalog_key`:** Debe ser único y se puede auto-generar a partir del `display_name` (`slugify`).
-- **Validación:** Asegurar que `treatment_id` solo se use con `promotion_kind: 'treatment_specific'`, y `discipline`/`family_key` con `generic_campaign`.
+- **Validación:** Asegurar que `treatment_id` solo se use con `promotion_kind: 'treatment_specific'`, y `area_medica`/`family_key` con `generic_campaign` (persistiendo `discipline` como alias legacy).
 - **`notes_internal`:** Campo de texto libre (no `internal_notes`).
 - **`measurement_profile`:** Incluye `remarketing` y `ad_calls` como campos booleanos.
 - **`automation_strategy.mode`:** Valores válidos: `inherit_recommendation`, `force_template`, `none`.

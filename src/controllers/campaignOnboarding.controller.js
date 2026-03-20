@@ -1791,12 +1791,12 @@ exports.createMarketingStrategy = asyncHandler(async (req, res) => {
   }
 
   const treatments = normalizeStrategyTreatments(req.body?.treatments);
-  const disciplineIdRaw = req.body?.discipline_id;
-  const disciplineId = Number.isFinite(Number(disciplineIdRaw)) && Number(disciplineIdRaw) > 0
-    ? Number(disciplineIdRaw)
+  const areaMedicaIdRaw = req.body?.area_medica_id ?? req.body?.discipline_id;
+  const areaMedicaId = Number.isFinite(Number(areaMedicaIdRaw)) && Number(areaMedicaIdRaw) > 0
+    ? Number(areaMedicaIdRaw)
     : null;
-  const disciplineName = typeof req.body?.discipline_name === 'string'
-    ? req.body.discipline_name.trim() || null
+  const areaMedicaNombre = typeof (req.body?.area_medica_nombre ?? req.body?.discipline_name) === 'string'
+    ? String(req.body?.area_medica_nombre ?? req.body?.discipline_name).trim() || null
     : null;
   if (promotionType !== 'generic' && !treatments.length) {
     return res.status(400).json({ success: false, error: 'validation_error', message: 'Selecciona al menos un tratamiento' });
@@ -1864,12 +1864,16 @@ exports.createMarketingStrategy = asyncHandler(async (req, res) => {
       summary: {
         name: campaignName,
         budget_monthly: budgetMonthly,
-        discipline_id: disciplineId,
-        discipline_name: disciplineName
+        area_medica_id: areaMedicaId,
+        area_medica_nombre: areaMedicaNombre,
+        discipline_id: areaMedicaId,
+        discipline_name: areaMedicaNombre
       },
       promotion_type: promotionType,
-      discipline_id: disciplineId,
-      discipline_name: disciplineName,
+      area_medica_id: areaMedicaId,
+      area_medica_nombre: areaMedicaNombre,
+      discipline_id: areaMedicaId,
+      discipline_name: areaMedicaNombre,
       treatments,
       destination,
       measurement,
