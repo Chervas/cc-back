@@ -1139,7 +1139,7 @@ GET /api/marketing/strategies/recommend-automation
 
 La resolución se realiza **siempre por clínica**, incluso si el `scope_type` es `group`. Para cada clínica en el scope, se evalúa la siguiente cascada de 9 niveles para encontrar el primer match.
 
-> **`discipline_id` en campañas genéricas:** Cuando no hay `treatment_ids`, los niveles 1–3 se saltan. Si se proporciona `discipline_id`, la cascada empieza en el nivel 4. Si no se proporciona, salta directamente al nivel 7. El frontend obtiene las disciplinas del scope vía `GET /api/especialidades/clinica?clinica_id=X` (endpoint existente) y envía la seleccionada por el usuario.
+> **`discipline_id` en campañas genéricas:** Cuando no hay `treatment_ids`, los niveles 1–3 se saltan. Si se proporciona `discipline_id`, la cascada empieza en el nivel 4. Si no se proporciona, salta directamente al nivel 7. En producto, este concepto se presenta como **área médica**. El frontend obtiene las áreas médicas del scope vía `GET /api/especialidades/clinica?clinica_id=X` (endpoint existente) y envía la seleccionada por el usuario.
 
 **Cascada de precedencia canónica (`clínica > grupo > global`):
 
