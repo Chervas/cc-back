@@ -24,6 +24,7 @@ const ClinicGoogleAdsAccount = db.ClinicGoogleAdsAccount;
 const ClinicMetaAsset = db.ClinicMetaAsset;
 const CampaignRequest = db.CampaignRequest;
 const Campaign = db.Campaign;
+const AdminCampaignPlaybook = db.AdminCampaignPlaybook;
 
 const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID || '';
 const GOOGLE_CLIENT_SECRET = process.env.GOOGLE_CLIENT_SECRET || '';
@@ -179,6 +180,38 @@ function createEmptyStrategyMetrics() {
     revenue: 0,
     cpl: null,
     cost_per_conversion: null
+  };
+}
+
+function serializeStrategyCatalogItem(item) {
+  const data = item?.toJSON ? item.toJSON() : item;
+  const treatment = data?.treatment || null;
+
+  return {
+    id: String(data.id),
+    display_name: data.display_name,
+    objective_id: data.objective_id,
+    promotion_kind: data.promotion_kind,
+    treatment_id: data.treatment_id ? Number(data.treatment_id) : null,
+    area_medica: data.area_medica || null,
+    family_key: data.family_key || null,
+    status: data.status,
+    channels_supported: Array.isArray(data.channels_supported) ? data.channels_supported : [],
+    channels_default: Array.isArray(data.channels_default) ? data.channels_default : [],
+    recommended_budget_min: data.recommended_budget_min ?? null,
+    recommended_budget_max: data.recommended_budget_max ?? null,
+    destination_policy: data.destination_policy || null,
+    measurement_profile: data.measurement_profile || null,
+    automation_strategy: data.automation_strategy || null,
+    treatment: treatment
+      ? {
+          id_tratamiento: Number(treatment.id_tratamiento),
+          nombre: treatment.nombre,
+          codigo: treatment.codigo || null,
+          area_medica: treatment.disciplina || null,
+          categoria: treatment.categoria || null
+        }
+      : null
   };
 }
 
@@ -1239,6 +1272,35 @@ exports.getCampaignOnboardingBootstrap = asyncHandler(async (req, res) => {
         missing: capiMissing
       }
     }
+  });
+});
+
+exports.listStrategyCatalog = asyncHandler(async (req, res) => {
+  const objectiveId = String(req.query.objective_id || '').trim().toLowerCase();
+
+  if (objectiveId && !VALID_STRATEGY_OBJECTIVES.has(objectiveId)) {
+    return res.status(400).json({ success: false, error: 'invalid_objective_id' });
+  }
+
+  const where = { status: 'active' };
+  if (objectiveId) {
+    where.objective_id = objectiveId;
+  }
+
+  const items = await AdminCampaignPlaybook.findAll({
+    where,
+    include: [{
+      model: Tratamiento,
+      as: 'treatment',
+      attributes: ['id_tratamiento', 'nombre', 'codigo', 'disciplina', 'categoria'],
+      required: false
+    }],
+    order: [['display_name', 'ASC'], ['createdAt', 'DESC']]
+  });
+
+  return res.json({
+    success: true,
+    items: items.map(serializeStrategyCatalogItem)
   });
 });
 
