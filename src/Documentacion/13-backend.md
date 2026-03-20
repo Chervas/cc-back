@@ -1139,7 +1139,7 @@ GET /api/marketing/strategies/recommend-automation
 
 La resolución se realiza **siempre por clínica**, incluso si el `scope_type` es `group`. Para cada clínica en el scope, se evalúa la siguiente cascada de 9 niveles para encontrar el primer match.
 
-> **`area_medica_id` en campañas genéricas:** Cuando no hay `treatment_ids`, los niveles 1–3 se saltan. Si se proporciona `area_medica_id`, la cascada empieza en el nivel 4. Si no se proporciona, salta directamente al nivel 7. En producto, este concepto se presenta como **área médica**. El frontend obtiene las áreas médicas del scope vía `GET /api/especialidades/clinica?clinica_id=X` (endpoint existente) y envía la seleccionada por el usuario. Por compatibilidad temporal, el backend sigue aceptando `discipline_id`.
+> **`area_medica_id` en campañas genéricas:** Cuando no hay `treatment_ids`, los niveles 1–3 se saltan. Si se proporciona `area_medica_id`, la cascada empieza en el nivel 4. Si no se proporciona, salta directamente al nivel 7. En producto, este concepto se presenta como **área médica**. El frontend obtiene las áreas médicas del scope vía `GET /api/especialidades/clinica?clinica_id=X` (endpoint existente) y envía la seleccionada por el usuario.
 
 **Cascada de precedencia canónica (`clínica > grupo > global`):
 
@@ -1235,7 +1235,7 @@ module.exports = (sequelize, DataTypes) => {
             allowNull: false
         },
         treatment_id: DataTypes.INTEGER,     // Solo si promotion_kind === 'treatment_specific'
-        discipline: DataTypes.STRING,        // Persistencia legacy. En contrato de aplicación se expone como area_medica
+        area_medica: DataTypes.STRING,       // Solo si promotion_kind === 'generic_campaign'
         family_key: DataTypes.STRING,        // Solo si promotion_kind === 'generic_campaign'
         channels_supported: {
             type: DataTypes.JSON,
@@ -1290,7 +1290,7 @@ module.exports = (sequelize, DataTypes) => {
 ### Lógica de Negocio
 
 - **`catalog_key`:** Debe ser único y se puede auto-generar a partir del `display_name` (`slugify`).
-- **Validación:** Asegurar que `treatment_id` solo se use con `promotion_kind: 'treatment_specific'`, y `area_medica`/`family_key` con `generic_campaign` (persistiendo `discipline` como alias legacy).
+- **Validación:** Asegurar que `treatment_id` solo se use con `promotion_kind: 'treatment_specific'`, y `area_medica`/`family_key` con `generic_campaign`.
 - **`notes_internal`:** Campo de texto libre (no `internal_notes`).
 - **`measurement_profile`:** Incluye `remarketing` y `ad_calls` como campos booleanos.
 - **`automation_strategy.mode`:** Valores válidos: `inherit_recommendation`, `force_template`, `none`.

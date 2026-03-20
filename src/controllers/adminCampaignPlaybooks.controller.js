@@ -215,9 +215,7 @@ async function normalizePlaybookPayload(payload, options = {}) {
     : (partial ? toNullableInt(current?.treatment_id) : null);
   const areaMedica = source.area_medica !== undefined
     ? toCleanString(source.area_medica)
-    : (source.discipline !== undefined
-      ? toCleanString(source.discipline)
-      : (partial ? toCleanString(current?.area_medica ?? current?.discipline) : null));
+    : (partial ? toCleanString(current?.area_medica) : null);
   const familyKey = source.family_key !== undefined
     ? toCleanString(source.family_key)
     : (partial ? toCleanString(current?.family_key) : null);
@@ -287,7 +285,7 @@ async function normalizePlaybookPayload(payload, options = {}) {
       objective_id: objectiveId,
       promotion_kind: resolvedPromotionKind,
       treatment_id: resolvedPromotionKind === 'treatment_specific' ? treatmentId : null,
-      discipline: resolvedPromotionKind === 'generic_campaign' ? areaMedica : null,
+      area_medica: resolvedPromotionKind === 'generic_campaign' ? areaMedica : null,
       family_key: resolvedPromotionKind === 'generic_campaign' ? familyKey : null,
       status,
       channels_supported: channelsSupported,
@@ -318,14 +316,13 @@ function serializePlaybook(item) {
   const treatment = data?.treatment || null;
   return {
     ...data,
-    area_medica: data?.discipline || null,
+    area_medica: data?.area_medica || null,
     treatment: treatment
       ? {
           id_tratamiento: Number(treatment.id_tratamiento),
           nombre: treatment.nombre,
           codigo: treatment.codigo || null,
           area_medica: treatment.disciplina || null,
-          disciplina: treatment.disciplina || null,
           categoria: treatment.categoria || null,
           activo: treatment.activo !== false,
         }

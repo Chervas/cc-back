@@ -42,7 +42,7 @@ module.exports = (sequelize, DataTypes) => {
         type: DataTypes.INTEGER,
         allowNull: true,
       },
-      discipline: {
+      area_medica: {
         type: DataTypes.STRING(64),
         allowNull: true,
       },
