@@ -1295,7 +1295,7 @@ exports.listStrategyCatalog = asyncHandler(async (req, res) => {
       attributes: ['id_tratamiento', 'nombre', 'codigo', 'disciplina', 'categoria'],
       required: false
     }],
-    order: [['display_name', 'ASC'], ['createdAt', 'DESC']]
+    order: [['display_name', 'ASC'], ['created_at', 'DESC']]
   });
 
   return res.json({
