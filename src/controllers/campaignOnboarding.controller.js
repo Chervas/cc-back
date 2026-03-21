@@ -10,6 +10,7 @@ const {
   formatCustomerId,
   ensureGoogleAdsConfig
 } = require('../lib/googleAdsClient');
+const { metaGet } = require('../lib/metaClient');
 const {
   resolveGoogleConnectionForScope,
   resolveMetaConnectionForScope
@@ -29,6 +30,7 @@ const Tratamiento = db.Tratamiento;
 const GoogleAdsInsightsDaily = db.GoogleAdsInsightsDaily;
 const SocialAdsEntity = db.SocialAdsEntity;
 const SocialAdsInsightsDaily = db.SocialAdsInsightsDaily;
+const SocialAdsActionsDaily = db.SocialAdsActionsDaily;
 
 const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID || '';
 const GOOGLE_CLIENT_SECRET = process.env.GOOGLE_CLIENT_SECRET || '';
@@ -561,6 +563,392 @@ function reduceExternalCampaignRows(rows, {
       spend: Number(item.metrics.spend.toFixed(2))
     }
   }));
+}
+
+function createUnknownDestinationDetection(reason = 'unknown') {
+  return {
+    kind: 'unknown',
+    confidence: 'low',
+    reason,
+    urls: [],
+    instant_form: null,
+    creative_preview: null
+  };
+}
+
+function createWebDestinationDetection(reason = 'web', confidence = 'medium', urls = []) {
+  return {
+    kind: 'web',
+    confidence,
+    reason,
+    urls: Array.isArray(urls) ? urls.filter(Boolean) : [],
+    instant_form: null,
+    creative_preview: null
+  };
+}
+
+function createMetaLeadFormDetection(reason = 'meta_lead_form_detected') {
+  return {
+    kind: 'lead_form',
+    confidence: 'medium',
+    reason,
+    urls: [],
+    instant_form: {
+      id: null,
+      name: null,
+      preview_available: false,
+      preview_summary: 'Formulario instantáneo detectado por señales de rendimiento sincronizadas.'
+    },
+    creative_preview: null
+  };
+}
+
+function createMetaCreativePreview({
+  adId = null,
+  adName = null,
+  title = null,
+  body = null,
+  mediaUrl = null,
+  permalinkUrl = null,
+  ctaType = null
+} = {}) {
+  const previewSummary = [title, body].filter(Boolean).join(' · ').slice(0, 280) || null;
+  return {
+    available: Boolean(title || body || mediaUrl || permalinkUrl),
+    ad_id: adId || null,
+    ad_name: adName || null,
+    title: title || null,
+    body: body || null,
+    media_url: mediaUrl || null,
+    permalink_url: permalinkUrl || null,
+    cta_type: ctaType || null,
+    preview_summary: previewSummary
+  };
+}
+
+function normalizeMetaUrl(rawUrl) {
+  const value = String(rawUrl || '').trim();
+  if (!value) return null;
+  if (/^https?:\/\/fb\.me\/?$/i.test(value)) return null;
+  if (/^https?:\/\/l\.facebook\.com\//i.test(value)) return value;
+  if (/^https?:\/\//i.test(value)) return value;
+  return null;
+}
+
+function pickMetaCreativeFields(creative = {}) {
+  const objectStorySpec = creative.object_story_spec && typeof creative.object_story_spec === 'object'
+    ? creative.object_story_spec
+    : {};
+  const linkData = objectStorySpec.link_data && typeof objectStorySpec.link_data === 'object'
+    ? objectStorySpec.link_data
+    : {};
+  const videoData = objectStorySpec.video_data && typeof objectStorySpec.video_data === 'object'
+    ? objectStorySpec.video_data
+    : {};
+  const templateData = objectStorySpec.template_data && typeof objectStorySpec.template_data === 'object'
+    ? objectStorySpec.template_data
+    : {};
+
+  const linkUrl = normalizeMetaUrl(
+    linkData.link
+    || templateData.link
+    || videoData.call_to_action?.value?.link
+    || linkData.call_to_action?.value?.link
+    || templateData.call_to_action?.value?.link
+    || creative.link_url
+    || null
+  );
+
+  const leadFormId = String(
+    videoData.call_to_action?.value?.lead_gen_form_id
+    || linkData.call_to_action?.value?.lead_gen_form_id
+    || templateData.call_to_action?.value?.lead_gen_form_id
+    || ''
+  ).trim() || null;
+
+  const title = videoData.title || linkData.name || templateData.name || creative.name || null;
+  const body = videoData.message || linkData.message || templateData.message || null;
+  const mediaUrl = videoData.image_url || linkData.picture || templateData.picture || creative.image_url || creative.thumbnail_url || null;
+  const permalinkUrl = creative.instagram_permalink_url || null;
+  const ctaType = videoData.call_to_action?.type
+    || linkData.call_to_action?.type
+    || templateData.call_to_action?.type
+    || creative.call_to_action_type
+    || null;
+
+  return {
+    linkUrl,
+    leadFormId,
+    preview: createMetaCreativePreview({
+      title,
+      body,
+      mediaUrl,
+      permalinkUrl,
+      ctaType
+    })
+  };
+}
+
+async function fetchMetaLeadFormDetails({ formId, accessToken }) {
+  if (!formId || !accessToken) return null;
+  try {
+    const resp = await metaGet(String(formId), {
+      params: {
+        fields: 'id,name,status,locale,follow_up_action_url,context_card,questions,privacy_policy_url'
+      },
+      accessToken,
+      timeout: 15000
+    });
+    const data = resp.data || {};
+    const contextTitle = String(data.context_card?.title || '').trim();
+    const firstContextLine = Array.isArray(data.context_card?.content)
+      ? String(data.context_card.content.find(Boolean) || '').trim()
+      : '';
+    const previewSummary = [contextTitle, firstContextLine].filter(Boolean).join(' · ').slice(0, 280) || null;
+    return {
+      id: String(data.id || formId),
+      name: data.name || null,
+      status: data.status || null,
+      locale: data.locale || null,
+      follow_up_action_url: normalizeMetaUrl(data.follow_up_action_url || null),
+      preview_available: Boolean(contextTitle || firstContextLine || Array.isArray(data.questions) && data.questions.length > 0),
+      preview_summary: previewSummary,
+      questions_preview: Array.isArray(data.questions)
+        ? data.questions.slice(0, 4).map((question) => ({
+            key: question?.key || null,
+            label: question?.label || null,
+            type: question?.type || null
+          }))
+        : []
+    };
+  } catch (err) {
+    return {
+      id: String(formId),
+      name: null,
+      status: null,
+      locale: null,
+      follow_up_action_url: null,
+      preview_available: false,
+      preview_summary: 'Formulario instantáneo detectado, pero no se pudo recuperar su ficha en Meta.',
+      questions_preview: []
+    };
+  }
+}
+
+async function enrichMetaCampaignDetections({
+  campaigns,
+  accessToken,
+  campaignAdRows
+}) {
+  if (!Array.isArray(campaigns) || !campaigns.length || !accessToken) {
+    return campaigns || [];
+  }
+
+  const formCache = new Map();
+  const enriched = [];
+
+  for (const campaign of campaigns) {
+    const adRows = Array.isArray(campaignAdRows.get(String(campaign.external_campaign_id || '').trim()))
+      ? campaignAdRows.get(String(campaign.external_campaign_id || '').trim())
+      : [];
+    const limit = Math.max(1, Math.min(adRows.length || 1, 10));
+    if (!limit) {
+      enriched.push(campaign);
+      continue;
+    }
+
+    try {
+      const adsResp = await metaGet(`${String(campaign.external_campaign_id || '').trim()}/ads`, {
+        params: {
+          fields: 'id,name,creative{id,name,effective_instagram_media_id,effective_object_story_id,instagram_permalink_url,object_story_spec,object_type,thumbnail_url,image_url,link_url,call_to_action_type}',
+          limit
+        },
+        accessToken,
+        timeout: 15000
+      });
+      const candidateAds = Array.isArray(adsResp.data?.data) ? adsResp.data.data : [];
+      if (!candidateAds.length) {
+        enriched.push(campaign);
+        continue;
+      }
+
+      let destinationDetection = campaign.destination_detection || createUnknownDestinationDetection('meta_not_enough_data');
+      let detectedWebUrl = null;
+      let detectedLeadForm = null;
+      let detectedPreview = null;
+      let hasWeb = false;
+      let hasLeadForm = false;
+
+      for (const adRow of candidateAds) {
+        const creative = adRow?.creative || {};
+        const extracted = pickMetaCreativeFields(creative);
+        extracted.preview.ad_id = String(adRow?.id || '');
+        extracted.preview.ad_name = adRow?.name || null;
+
+        if (!detectedPreview && extracted.preview?.available) {
+          detectedPreview = extracted.preview;
+        }
+
+        if (extracted.linkUrl) {
+          hasWeb = true;
+          if (!detectedWebUrl) {
+            detectedWebUrl = extracted.linkUrl;
+          }
+        }
+
+        if (extracted.leadFormId) {
+          hasLeadForm = true;
+          if (!formCache.has(extracted.leadFormId)) {
+            formCache.set(extracted.leadFormId, await fetchMetaLeadFormDetails({ formId: extracted.leadFormId, accessToken }));
+          }
+          if (!detectedLeadForm) {
+            detectedLeadForm = formCache.get(extracted.leadFormId);
+          }
+        }
+
+        if ((hasWeb && hasLeadForm) || (hasWeb && detectedPreview) || (hasLeadForm && detectedLeadForm && detectedPreview)) {
+          // Ya tenemos suficiente señal para clasificar o marcar mezcla.
+          if (hasWeb && hasLeadForm) break;
+        }
+      }
+
+      if (hasWeb && hasLeadForm) {
+        destinationDetection = {
+          kind: 'unknown',
+          confidence: 'medium',
+          reason: 'meta_mixed_destinations_detected',
+          urls: detectedWebUrl ? [detectedWebUrl] : [],
+          instant_form: detectedLeadForm,
+          creative_preview: detectedPreview
+        };
+      } else if (hasLeadForm) {
+        destinationDetection = {
+          kind: 'lead_form',
+          confidence: 'high',
+          reason: 'meta_lead_form_creative_detected',
+          urls: [],
+          instant_form: detectedLeadForm,
+          creative_preview: detectedPreview
+        };
+      } else if (hasWeb) {
+        destinationDetection = {
+          kind: 'web',
+          confidence: 'high',
+          reason: 'meta_destination_url_detected',
+          urls: detectedWebUrl ? [detectedWebUrl] : [],
+          instant_form: null,
+          creative_preview: detectedPreview
+        };
+      } else if (detectedPreview) {
+        destinationDetection = {
+          ...destinationDetection,
+          creative_preview: detectedPreview
+        };
+      }
+
+      enriched.push({
+        ...campaign,
+        destination_detection: destinationDetection
+      });
+    } catch (err) {
+      enriched.push(campaign);
+    }
+  }
+
+  return enriched;
+}
+
+function summarizeMetaCampaignActions(actionRows) {
+  const totals = {};
+  for (const row of actionRows || []) {
+    const actionType = String(row?.action_type || '').trim();
+    if (!actionType) continue;
+    totals[actionType] = (totals[actionType] || 0) + safeNumber(row.value);
+  }
+  return totals;
+}
+
+function inferMetaDestinationDetection({ actionTotals }) {
+  const totals = actionTotals && typeof actionTotals === 'object' ? actionTotals : {};
+  const linkClicks = safeNumber(totals.link_click);
+  const leadFormSignals = safeNumber(totals['onsite_conversion.lead_form'])
+    + safeNumber(totals['leadgen.other'])
+    + safeNumber(totals['onsite_conversion.lead_grouped']);
+
+  if (linkClicks > 0) {
+    return createWebDestinationDetection('meta_link_clicks_detected', 'high');
+  }
+  if (leadFormSignals > 0) {
+    return createMetaLeadFormDetection('meta_lead_form_actions_detected');
+  }
+  return createUnknownDestinationDetection('meta_not_enough_data');
+}
+
+async function rollupMetaAdActionRowsToCampaignSignals(actionRows, campaignEntitiesById) {
+  if (!Array.isArray(actionRows) || actionRows.length === 0) return [];
+
+  const byAdId = new Map();
+  for (const row of actionRows) {
+    const entityId = String(row?.entity_id || '').trim();
+    if (!entityId) continue;
+    if (!byAdId.has(entityId)) {
+      byAdId.set(entityId, []);
+    }
+    byAdId.get(entityId).push(row);
+  }
+
+  const adIds = Array.from(byAdId.keys());
+  if (!adIds.length) return [];
+
+  const adEntities = await SocialAdsEntity.findAll({
+    where: {
+      level: 'ad',
+      entity_id: { [Op.in]: adIds }
+    },
+    raw: true
+  });
+  const adEntityMap = new Map(adEntities.map((row) => [String(row.entity_id), row]));
+
+  const adsetIds = Array.from(new Set(adEntities
+    .map((row) => String(row.parent_id || '').trim())
+    .filter(Boolean)));
+  if (!adsetIds.length) return [];
+
+  const adsetEntities = await SocialAdsEntity.findAll({
+    where: {
+      level: 'adset',
+      entity_id: { [Op.in]: adsetIds }
+    },
+    raw: true
+  });
+  const adsetEntityMap = new Map(adsetEntities.map((row) => [String(row.entity_id), row]));
+
+  const rolledRows = [];
+  for (const [adId, rows] of byAdId.entries()) {
+    const adEntity = adEntityMap.get(adId);
+    const adsetEntity = adEntity
+      ? adsetEntityMap.get(String(adEntity.parent_id || '').trim())
+      : null;
+    const campaignId = String(adsetEntity?.parent_id || '').trim();
+    if (!campaignId) continue;
+
+    const campaignEntity = campaignEntitiesById.get(campaignId) || null;
+    for (const row of rows) {
+      rolledRows.push({
+        ad_account_id: row.ad_account_id,
+        entity_id: campaignId,
+        clinica_id: row.clinica_id ?? null,
+        grupo_clinica_id: row.grupo_clinica_id ?? null,
+        action_type: row.action_type,
+        value: row.value,
+        campaignName: campaignEntity?.name || null,
+        campaignStatus: campaignEntity?.effective_status || campaignEntity?.status || null,
+        objective: campaignEntity?.objective || null
+      });
+    }
+  }
+
+  return rolledRows;
 }
 
 function rollupMetaAdRowsToCampaignRows(adRows, campaignEntitiesById) {
@@ -1669,7 +2057,11 @@ exports.listExternalCampaigns = asyncHandler(async (req, res) => {
       extraMapper: (row) => ({
         account_name: googleAccountMap.get(normalizeCustomerId(row.customerId || ''))?.descriptive_name || null
       })
-    }).filter((item) => !activeOnly || isGoogleCampaignActive(item.status));
+    }).filter((item) => !activeOnly || isGoogleCampaignActive(item.status))
+      .map((item) => ({
+        ...item,
+        destination_detection: createWebDestinationDetection('google_ads_default', 'medium')
+      }));
   }
 
   const metaWhere = buildScopeWhere(scope);
@@ -1744,6 +2136,35 @@ exports.listExternalCampaigns = asyncHandler(async (req, res) => {
       raw: true
     });
 
+    const adActionRows = await SocialAdsActionsDaily.findAll({
+      attributes: [
+        'ad_account_id',
+        'entity_id',
+        'clinica_id',
+        'grupo_clinica_id',
+        'action_type',
+        [fn('SUM', col('value')), 'value']
+      ],
+      where: {
+        level: 'ad',
+        ad_account_id: { [Op.in]: Array.from(metaAccountMap.keys()) },
+        date: { [Op.between]: [startStr, endStr] },
+        ...buildMetricsScopeWhere(scope, { clinicField: 'clinica_id', groupField: 'grupo_clinica_id' })
+      },
+      group: ['ad_account_id', 'entity_id', 'clinica_id', 'grupo_clinica_id', 'action_type'],
+      raw: true
+    });
+    const adMetricsByEntityId = new Map();
+    for (const row of adInsightRows) {
+      const entityId = String(row.entity_id || '').trim();
+      if (!entityId) continue;
+      adMetricsByEntityId.set(entityId, {
+        spend: safeNumber(row.spend),
+        clicks: safeNumber(row.clicks),
+        last_seen_at: row.last_seen_at || null
+      });
+    }
+
     const entities = await SocialAdsEntity.findAll({
       where: {
         level: 'campaign',
@@ -1751,12 +2172,55 @@ exports.listExternalCampaigns = asyncHandler(async (req, res) => {
       },
       raw: true
     });
+    const campaignIds = entities.map((row) => String(row.entity_id || '').trim()).filter(Boolean);
+    const adsetRows = campaignIds.length
+      ? await SocialAdsEntity.findAll({
+          where: {
+            level: 'adset',
+            parent_id: { [Op.in]: campaignIds }
+          },
+          raw: true
+        })
+      : [];
+    const adsetIds = adsetRows.map((row) => String(row.entity_id || '').trim()).filter(Boolean);
+    const adRows = adsetIds.length
+      ? await SocialAdsEntity.findAll({
+          where: {
+            level: 'ad',
+            parent_id: { [Op.in]: adsetIds }
+          },
+          raw: true
+        })
+      : [];
+    const adsetToCampaign = new Map(adsetRows.map((row) => [String(row.entity_id || '').trim(), String(row.parent_id || '').trim()]));
+    const campaignAdRows = new Map();
+    for (const row of adRows) {
+      const campaignId = adsetToCampaign.get(String(row.parent_id || '').trim()) || null;
+      if (!campaignId) continue;
+      if (!campaignAdRows.has(campaignId)) {
+        campaignAdRows.set(campaignId, []);
+      }
+      campaignAdRows.get(campaignId).push({
+        ...row,
+        __metrics: adMetricsByEntityId.get(String(row.entity_id || '').trim()) || null
+      });
+    }
+    for (const rows of campaignAdRows.values()) {
+      rows.sort((a, b) => {
+        const spendDiff = safeNumber(b?.__metrics?.spend) - safeNumber(a?.__metrics?.spend);
+        if (spendDiff !== 0) return spendDiff;
+        const clickDiff = safeNumber(b?.__metrics?.clicks) - safeNumber(a?.__metrics?.clicks);
+        if (clickDiff !== 0) return clickDiff;
+        return String(b?.__metrics?.last_seen_at || b?.updated_time || '').localeCompare(String(a?.__metrics?.last_seen_at || a?.updated_time || ''));
+      });
+    }
     const entityMap = new Map(entities.map((row) => [String(row.entity_id), row]));
     const rowsByEntityId = new Map();
     for (const row of campaignInsightRows) {
       rowsByEntityId.set(String(row.entity_id || ''), row);
     }
     const adRolledRows = await rollupMetaAdRowsToCampaignRows(adInsightRows, entityMap);
+    const adRolledActionRows = await rollupMetaAdActionRowsToCampaignSignals(adActionRows, entityMap);
     const adRowsByEntityId = new Map();
     for (const row of adRolledRows) {
       const entityId = String(row.entity_id || '').trim();
@@ -1765,6 +2229,15 @@ exports.listExternalCampaigns = asyncHandler(async (req, res) => {
         adRowsByEntityId.set(entityId, []);
       }
       adRowsByEntityId.get(entityId).push(row);
+    }
+    const actionRowsByEntityId = new Map();
+    for (const row of adRolledActionRows) {
+      const entityId = String(row.entity_id || '').trim();
+      if (!entityId) continue;
+      if (!actionRowsByEntityId.has(entityId)) {
+        actionRowsByEntityId.set(entityId, []);
+      }
+      actionRowsByEntityId.get(entityId).push(row);
     }
 
     const stitchedRows = [];
@@ -1802,7 +2275,27 @@ exports.listExternalCampaigns = asyncHandler(async (req, res) => {
         account_name: metaAccountMap.get(String(row.ad_account_id || ''))?.name || null,
         objective: row.objective || null
       })
-    }).filter((item) => !activeOnly || isMetaCampaignActive(item.status));
+    }).filter((item) => !activeOnly || isMetaCampaignActive(item.status))
+      .map((item) => {
+        const entityId = String(item.external_campaign_id || '').trim();
+        const actionTotals = summarizeMetaCampaignActions(actionRowsByEntityId.get(entityId) || []);
+        return {
+          ...item,
+          destination_detection: inferMetaDestinationDetection({ actionTotals })
+        };
+      });
+
+    const metaResolved = await resolveMetaConnectionForScope({
+      clinicIdRaw: scope.clinic_id,
+      groupIdRaw: scope.group_id,
+      assignmentScopeRaw: scope.assignment_scope,
+      allowLegacyUserFallback: true
+    });
+    metaCampaigns = await enrichMetaCampaignDetections({
+      campaigns: metaCampaigns,
+      accessToken: metaResolved?.connection?.accessToken || null,
+      campaignAdRows
+    });
   }
 
   return res.json({
