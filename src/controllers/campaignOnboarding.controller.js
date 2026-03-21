@@ -1877,8 +1877,12 @@ exports.createMarketingStrategy = asyncHandler(async (req, res) => {
     return res.status(400).json({ success: false, error: 'validation_error', message: 'Selecciona al menos un tratamiento' });
   }
 
-  const budgetMonthly = Number(req.body?.budget_monthly || 0);
-  if (!Number.isFinite(budgetMonthly) || budgetMonthly <= 0) {
+  const rawBudgetMonthly = req.body?.budget_monthly;
+  const parsedBudgetMonthly = Number(rawBudgetMonthly ?? 0);
+  const budgetMonthly = effectiveMode === 'connect_only'
+    ? (Number.isFinite(parsedBudgetMonthly) && parsedBudgetMonthly > 0 ? parsedBudgetMonthly : null)
+    : parsedBudgetMonthly;
+  if (effectiveMode !== 'connect_only' && (!Number.isFinite(budgetMonthly) || budgetMonthly <= 0)) {
     return res.status(400).json({ success: false, error: 'validation_error', message: 'budget_monthly debe ser mayor que 0' });
   }
 
