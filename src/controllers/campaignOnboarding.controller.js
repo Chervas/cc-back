@@ -2,7 +2,7 @@
 
 const axios = require('axios');
 const asyncHandler = require('express-async-handler');
-const { Op } = require('sequelize');
+const { Op, fn, col, literal } = require('sequelize');
 const db = require('../../models');
 const {
   googleAdsRequest,
@@ -26,6 +26,9 @@ const CampaignRequest = db.CampaignRequest;
 const Campaign = db.Campaign;
 const AdminCampaignPlaybook = db.AdminCampaignPlaybook;
 const Tratamiento = db.Tratamiento;
+const GoogleAdsInsightsDaily = db.GoogleAdsInsightsDaily;
+const SocialAdsEntity = db.SocialAdsEntity;
+const SocialAdsInsightsDaily = db.SocialAdsInsightsDaily;
 
 const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID || '';
 const GOOGLE_CLIENT_SECRET = process.env.GOOGLE_CLIENT_SECRET || '';
@@ -79,6 +82,27 @@ function parseInteger(raw) {
   if (raw === undefined || raw === null || raw === '') return null;
   const parsed = Number.parseInt(raw, 10);
   return Number.isInteger(parsed) ? parsed : null;
+}
+
+function parseDate(raw, fallback) {
+  if (!raw) return fallback;
+  const parsed = new Date(raw);
+  if (Number.isNaN(parsed.getTime())) return fallback;
+  parsed.setHours(0, 0, 0, 0);
+  return parsed;
+}
+
+function formatDate(d) {
+  return d.toISOString().slice(0, 10);
+}
+
+function safeNumber(value) {
+  const n = Number(value || 0);
+  return Number.isFinite(n) ? n : 0;
+}
+
+function microsToCurrency(value) {
+  return safeNumber(value) / 1_000_000;
 }
 
 function normalizeCurrency(raw) {
@@ -423,6 +447,116 @@ function buildScopeWhere(scope) {
     });
   }
   return { [Op.or]: or };
+}
+
+function buildMetricsScopeWhere(scope, { clinicField, groupField }) {
+  if (!scope || typeof scope !== 'object') return {};
+
+  if (scope.assignment_scope === 'group') {
+    const or = [];
+    if (scope.group_id) {
+      or.push({ [groupField]: scope.group_id });
+    }
+    if (Array.isArray(scope.clinic_ids) && scope.clinic_ids.length > 0) {
+      or.push({ [clinicField]: { [Op.in]: scope.clinic_ids } });
+    }
+    return or.length > 0 ? { [Op.or]: or } : {};
+  }
+
+  const or = [];
+  if (scope.clinic_id) {
+    or.push({ [clinicField]: scope.clinic_id });
+  }
+  if (scope.group_id) {
+    or.push({
+      [groupField]: scope.group_id,
+      [clinicField]: { [Op.is]: null }
+    });
+  }
+  return or.length > 0 ? { [Op.or]: or } : {};
+}
+
+function isGoogleCampaignActive(status) {
+  const normalized = String(status || '').trim().toUpperCase();
+  if (!normalized) return true;
+  return normalized === 'ENABLED' || normalized === 'ACTIVE';
+}
+
+function isMetaCampaignActive(status) {
+  const normalized = String(status || '').trim().toUpperCase();
+  if (!normalized) return true;
+  return normalized === 'ACTIVE';
+}
+
+function reduceExternalCampaignRows(rows, {
+  provider,
+  idKey,
+  accountKey,
+  nameKey,
+  statusKey,
+  extraMapper
+}) {
+  const byCampaign = new Map();
+
+  for (const row of rows) {
+    const accountId = String(row?.[accountKey] || '').trim();
+    const campaignId = String(row?.[idKey] || '').trim();
+    if (!accountId || !campaignId) continue;
+
+    const mapKey = `${accountId}:${campaignId}`;
+    if (!byCampaign.has(mapKey)) {
+      byCampaign.set(mapKey, {
+        provider,
+        account_id: accountId,
+        external_campaign_id: campaignId,
+        name: row?.[nameKey] || null,
+        status: row?.[statusKey] || null,
+        clinic_ids: new Set(),
+        group_ids: new Set(),
+        metrics: {
+          impressions: 0,
+          clicks: 0,
+          spend: 0,
+          conversions: 0
+        },
+        last_seen_at: null,
+        ...((typeof extraMapper === 'function' ? extraMapper(row) : {}) || {})
+      });
+    }
+
+    const item = byCampaign.get(mapKey);
+    if (row?.clinicaId || row?.clinica_id) {
+      item.clinic_ids.add(Number(row.clinicaId || row.clinica_id));
+    }
+    if (row?.grupoClinicaId || row?.grupo_clinica_id) {
+      item.group_ids.add(Number(row.grupoClinicaId || row.grupo_clinica_id));
+    }
+
+    item.metrics.impressions += safeNumber(row.impressions);
+    item.metrics.clicks += safeNumber(row.clicks);
+    item.metrics.spend += safeNumber(row.spend);
+    item.metrics.conversions += safeNumber(row.conversions);
+
+    const lastSeen = row?.last_seen_at || row?.lastSeenAt || null;
+    if (lastSeen && (!item.last_seen_at || String(lastSeen) > String(item.last_seen_at))) {
+      item.last_seen_at = lastSeen;
+    }
+  }
+
+  return Array.from(byCampaign.values()).map((item) => ({
+    ...item,
+    clinic_ids: Array.from(item.clinic_ids.values()).filter(Number.isFinite),
+    group_ids: Array.from(item.group_ids.values()).filter(Number.isFinite),
+    assignment_origin: item.group_ids.length > 0 && item.clinic_ids.length === 0
+      ? 'group'
+      : item.clinic_ids.length > 0
+        ? 'clinic'
+        : 'unknown',
+    metrics: {
+      ...item.metrics,
+      spend: Number(item.metrics.spend.toFixed(2))
+    }
+  }));
 }
 
 async function loadIntakeRecordForScope(scope) {
@@ -1314,6 +1448,199 @@ exports.listStrategyCatalog = asyncHandler(async (req, res) => {
   return res.json({
     success: true,
     items: items.map(serializeStrategyCatalogItem)
+  });
+});
+
+exports.listExternalCampaigns = asyncHandler(async (req, res) => {
+  const scope = await resolveScopeFromInput({
+    clinicIdRaw: req.query.clinic_id,
+    groupIdRaw: req.query.group_id,
+    assignmentScopeRaw: req.query.assignment_scope
+  });
+
+  const providerFilter = String(req.query.provider || '').trim().toLowerCase();
+  const includeGoogle = !providerFilter || providerFilter === 'google_ads';
+  const includeMeta = !providerFilter || providerFilter === 'meta_ads';
+  if (providerFilter && !includeGoogle && !includeMeta) {
+    return res.status(400).json({ success: false, error: 'invalid_provider' });
+  }
+
+  const activeOnly = String(req.query.active_only || 'true').trim().toLowerCase() !== 'false';
+  const end = parseDate(req.query.end_date, (() => {
+    const d = new Date();
+    d.setHours(0, 0, 0, 0);
+    return d;
+  })());
+  const daysRaw = parseInteger(req.query.days) || 30;
+  const days = Math.max(1, Math.min(180, daysRaw));
+  const start = parseDate(req.query.start_date, new Date(end.getTime() - (days - 1) * 86400000));
+  const startStr = formatDate(start);
+  const endStr = formatDate(end);
+
+  const googleWhere = buildScopeWhere(scope);
+  const googleAccounts = includeGoogle
+    ? await ClinicGoogleAdsAccount.findAll({
+      where: { isActive: true, ...googleWhere },
+      raw: true
+    })
+    : [];
+  const googleAccountMap = new Map();
+  for (const row of googleAccounts) {
+    const customerId = normalizeCustomerId(row.customerId || '');
+    if (!customerId || googleAccountMap.has(customerId)) continue;
+    googleAccountMap.set(customerId, {
+      customer_id: customerId,
+      formatted_customer_id: formatCustomerId(customerId),
+      descriptive_name: row.descriptiveName || null
+    });
+  }
+
+  let googleCampaigns = [];
+  if (includeGoogle && googleAccountMap.size > 0) {
+    const rows = await GoogleAdsInsightsDaily.findAll({
+      attributes: [
+        'customerId',
+        'campaignId',
+        'clinicaId',
+        'grupoClinicaId',
+        [fn('MAX', col('campaignName')), 'campaignName'],
+        [fn('MAX', col('campaignStatus')), 'campaignStatus'],
+        [fn('MAX', col('date')), 'last_seen_at'],
+        [fn('SUM', col('impressions')), 'impressions'],
+        [fn('SUM', col('clicks')), 'clicks'],
+        [fn('SUM', col('costMicros')), 'costMicros'],
+        [fn('SUM', col('conversions')), 'conversions']
+      ],
+      where: {
+        customerId: { [Op.in]: Array.from(googleAccountMap.keys()) },
+        date: { [Op.between]: [startStr, endStr] },
+        ...buildMetricsScopeWhere(scope, { clinicField: 'clinicaId', groupField: 'grupoClinicaId' })
+      },
+      group: ['customerId', 'campaignId', 'clinicaId', 'grupoClinicaId'],
+      order: [[literal('SUM(costMicros)'), 'DESC']],
+      raw: true
+    });
+
+    googleCampaigns = reduceExternalCampaignRows(rows.map((row) => ({
+      ...row,
+      spend: microsToCurrency(row.costMicros)
+    })), {
+      provider: 'google_ads',
+      accountKey: 'customerId',
+      idKey: 'campaignId',
+      nameKey: 'campaignName',
+      statusKey: 'campaignStatus',
+      extraMapper: (row) => ({
+        account_name: googleAccountMap.get(normalizeCustomerId(row.customerId || ''))?.descriptive_name || null
+      })
+    }).filter((item) => !activeOnly || isGoogleCampaignActive(item.status));
+  }
+
+  const metaWhere = buildScopeWhere(scope);
+  const metaAssets = includeMeta
+    ? await ClinicMetaAsset.findAll({
+      where: {
+        isActive: true,
+        assetType: 'ad_account',
+        ...metaWhere
+      },
+      raw: true
+    })
+    : [];
+  const metaAccountMap = new Map();
+  for (const row of metaAssets) {
+    const rawId = String(row.metaAssetId || '').trim();
+    if (!rawId) continue;
+    const adAccountId = rawId.startsWith('act_') ? rawId : `act_${rawId}`;
+    if (!metaAccountMap.has(adAccountId)) {
+      metaAccountMap.set(adAccountId, {
+        ad_account_id: adAccountId,
+        name: row.metaAssetName || null
+      });
+    }
+  }
+
+  let metaCampaigns = [];
+  if (includeMeta && metaAccountMap.size > 0) {
+    const insightRows = await SocialAdsInsightsDaily.findAll({
+      attributes: [
+        'ad_account_id',
+        'entity_id',
+        'clinica_id',
+        'grupo_clinica_id',
+        [fn('MAX', col('date')), 'last_seen_at'],
+        [fn('SUM', col('impressions')), 'impressions'],
+        [fn('SUM', col('clicks')), 'clicks'],
+        [fn('SUM', col('spend')), 'spend']
+      ],
+      where: {
+        level: 'campaign',
+        ad_account_id: { [Op.in]: Array.from(metaAccountMap.keys()) },
+        date: { [Op.between]: [startStr, endStr] },
+        ...buildMetricsScopeWhere(scope, { clinicField: 'clinica_id', groupField: 'grupo_clinica_id' })
+      },
+      group: ['ad_account_id', 'entity_id', 'clinica_id', 'grupo_clinica_id'],
+      order: [[literal('SUM(spend)'), 'DESC']],
+      raw: true
+    });
+
+    const entityIds = Array.from(new Set(insightRows.map((row) => String(row.entity_id || '')).filter(Boolean)));
+    const entities = entityIds.length > 0
+      ? await SocialAdsEntity.findAll({
+        where: {
+          level: 'campaign',
+          entity_id: { [Op.in]: entityIds }
+        },
+        raw: true
+      })
+      : [];
+    const entityMap = new Map(entities.map((row) => [String(row.entity_id), row]));
+
+    metaCampaigns = reduceExternalCampaignRows(insightRows.map((row) => {
+      const entity = entityMap.get(String(row.entity_id || '')) || {};
+      return {
+        ...row,
+        campaignName: entity.name || null,
+        campaignStatus: entity.effective_status || entity.status || null,
+        objective: entity.objective || null,
+        conversions: 0
+      };
+    }), {
+      provider: 'meta_ads',
+      accountKey: 'ad_account_id',
+      idKey: 'entity_id',
+      nameKey: 'campaignName',
+      statusKey: 'campaignStatus',
+      extraMapper: (row) => ({
+        account_name: metaAccountMap.get(String(row.ad_account_id || ''))?.name || null,
+        objective: row.objective || null
+      })
+    }).filter((item) => !activeOnly || isMetaCampaignActive(item.status));
+  }
+
+  return res.json({
+    success: true,
+    scope: {
+      assignment_scope: scope.assignment_scope,
+      clinic_id: scope.clinic_id || null,
+      group_id: scope.group_id || null,
+      clinic_ids: scope.clinic_ids || []
+    },
+    period: {
+      start: startStr,
+      end: endStr,
+      days
+    },
+    providers: {
+      google_ads: {
+        available: googleAccountMap.size > 0,
+        campaigns: googleCampaigns
+      },
+      meta_ads: {
+        available: metaAccountMap.size > 0,
+        campaigns: metaCampaigns
+      }
+    }
   });
 });
 
