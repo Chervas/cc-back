@@ -210,6 +210,41 @@ function createEmptyStrategyMetrics() {
   };
 }
 
+function buildExternalCampaignMetrics(payload) {
+  const targets = Array.isArray(payload?.external_targets) ? payload.external_targets : [];
+  const uniqueCampaigns = new Map();
+
+  for (const target of targets) {
+    const campaigns = Array.isArray(target?.campaigns) ? target.campaigns : [];
+    for (const campaign of campaigns) {
+      const provider = String(campaign?.provider || '').trim().toLowerCase();
+      const externalCampaignId = String(campaign?.external_campaign_id || '').trim();
+      if (!externalCampaignId || (provider !== 'google_ads' && provider !== 'meta_ads')) {
+        continue;
+      }
+
+      const key = `${provider}:${externalCampaignId}`;
+      if (uniqueCampaigns.has(key)) {
+        continue;
+      }
+
+      const metrics = campaign?.metrics && typeof campaign.metrics === 'object'
+        ? campaign.metrics
+        : {};
+
+      uniqueCampaigns.set(key, {
+        investment: safeNumber(metrics.spend),
+        conversions: safeNumber(metrics.conversions)
+      });
+    }
+  }
+
+  return Array.from(uniqueCampaigns.values()).reduce((acc, item) => ({
+    investment: acc.investment + safeNumber(item.investment),
+    conversions: acc.conversions + safeNumber(item.conversions)
+  }), { investment: 0, conversions: 0 });
+}
+
 function serializeStrategyCatalogItem(item) {
   const data = item?.toJSON ? item.toJSON() : item;
   const treatment = data?.treatment || null;
@@ -1407,9 +1442,10 @@ function buildStrategyName({ objectiveId, treatments, clinicCount }) {
 
 function buildStrategyMetrics(campaign, payload) {
   const payloadMetrics = payload?.metrics && typeof payload.metrics === 'object' ? payload.metrics : {};
-  const investment = asPositiveNumber(payloadMetrics.investment ?? campaign?.gasto ?? 0);
+  const externalMetrics = buildExternalCampaignMetrics(payload);
+  const investment = asPositiveNumber(payloadMetrics.investment ?? campaign?.gasto ?? externalMetrics.investment ?? 0);
   const leads = asPositiveNumber(payloadMetrics.leads ?? campaign?.total_leads ?? 0);
-  const conversions = asPositiveNumber(payloadMetrics.conversions ?? 0);
+  const conversions = asPositiveNumber(payloadMetrics.conversions ?? externalMetrics.conversions ?? 0);
   const revenue = asPositiveNumber(payloadMetrics.revenue ?? 0);
 
   const cpl = asNullableNumber(
@@ -1443,6 +1479,11 @@ function buildStrategyItemFromRows(rows, campaignsById) {
   const campaignId = representative.campaign_id || null;
   const campaign = campaignId ? campaignsById.get(campaignId) || null : null;
   const clinicIds = Array.from(new Set(orderedRows.map((row) => parseInteger(row.clinica_id)).filter((value) => value)));
+  const mode = payload.mode_snapshot || payload.mode || null;
+  const normalizedStatus = normalizeStrategyStatus(payload.status || representative.estado);
+  const status = mode === 'connect_only' && (normalizedStatus === 'draft' || normalizedStatus === 'pending_approval')
+    ? 'active'
+    : normalizedStatus;
 
   return {
     id: campaignId || representative.id,
@@ -1451,8 +1492,8 @@ function buildStrategyItemFromRows(rows, campaignsById) {
     name: campaign?.nombre || payload.summary?.name || 'Estrategia',
     objective_id: payload.objective_id || null,
     promotion_type: payload.promotion_type || 'treatment',
-    mode: payload.mode_snapshot || payload.mode || null,
-    status: normalizeStrategyStatus(payload.status || representative.estado),
+    mode,
+    status,
     budget_monthly: Number(payload.summary?.budget_monthly ?? campaign?.presupuesto ?? 0) || 0,
     clinic_ids: clinicIds,
     treatments: Array.isArray(payload.treatments) ? payload.treatments : [],
@@ -2680,6 +2721,22 @@ exports.listMarketingStrategies = asyncHandler(async (req, res) => {
   });
 });
 
+exports.getMarketingStrategyAutomationRecommendation = asyncHandler(async (req, res) => {
+  const userId = getUserId(req);
+  if (!userId) {
+    return res.status(401).json({ success: false, error: 'unauthenticated' });
+  }
+
+  return res.json({
+    success: true,
+    primary_recommendation: null,
+    clinic_recommendations: [],
+    group_recommendation: null,
+    global_recommendation: null,
+    is_fully_uniform: true
+  });
+});
+
 exports.getMarketingStrategyDetail = asyncHandler(async (req, res) => {
   const userId = getUserId(req);
   if (!userId) return res.status(401).json({ success: false, error: 'unauthenticated' });
@@ -2974,6 +3031,8 @@ exports.createMarketingStrategy = asyncHandler(async (req, res) => {
     clinicCount: targetClinicIds.length
   });
 
+  const initialStatus = effectiveMode === 'connect_only' ? 'active' : 'draft';
+
   const campaign = await Campaign.create({
     nombre: campaignName,
     tipo: dominantType,
@@ -2981,7 +3040,7 @@ exports.createMarketingStrategy = asyncHandler(async (req, res) => {
     grupo_clinica_id: scope.group_id || null,
     campaign_id_externo: null,
     gestionada: effectiveMode !== 'connect_only',
-    activa: false,
+    activa: effectiveMode === 'connect_only',
     fecha_inicio: null,
     fecha_fin: null,
     presupuesto: budgetMonthly
@@ -2997,7 +3056,7 @@ exports.createMarketingStrategy = asyncHandler(async (req, res) => {
   for (const clinicId of targetClinicIds) {
     const payload = {
       kind: 'marketing_strategy',
-      status: 'draft',
+      status: initialStatus,
       objective_id: objectiveId,
       mode_snapshot: effectiveMode,
       scope: {
@@ -3031,7 +3090,7 @@ exports.createMarketingStrategy = asyncHandler(async (req, res) => {
     const request = await CampaignRequest.create({
       clinica_id: clinicId,
       campaign_id: campaign.id,
-      estado: mapStrategyStatusToRequestState('draft'),
+      estado: mapStrategyStatusToRequestState(initialStatus),
       solicitud: payload
     });
 
@@ -3058,7 +3117,7 @@ exports.createMarketingStrategy = asyncHandler(async (req, res) => {
       objective_id: objectiveId,
       promotion_type: promotionType,
       mode: effectiveMode,
-      status: 'draft',
+      status: initialStatus,
       clinic_ids: targetClinicIds,
       addon_calls: addonCalls,
       request_ids: createdRequests.map((item) => item.id)

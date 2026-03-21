@@ -18,6 +18,7 @@ router.post('/chat-flow-templates/:id/duplicate', chatFlowTemplatesController.du
 router.get('/campaign-onboarding/bootstrap', campaignOnboardingController.getCampaignOnboardingBootstrap);
 router.get('/campaign-onboarding/external-campaigns', campaignOnboardingController.listExternalCampaigns);
 router.get('/strategies/catalog', campaignOnboardingController.listStrategyCatalog);
+router.get('/strategies/recommend-automation', campaignOnboardingController.getMarketingStrategyAutomationRecommendation);
 router.post('/campaign-onboarding/start', campaignOnboardingController.startCampaignOnboarding);
 router.get('/campaign-onboarding/:onboardingId/status', campaignOnboardingController.getCampaignOnboardingStatus);
 router.get('/strategies', campaignOnboardingController.listMarketingStrategies);
