@@ -866,6 +866,73 @@ function normalizeStrategyTreatments(rawTreatments) {
     .filter((item) => item.id && item.nombre);
 }
 
+function normalizeExternalCampaignAssignments(rawAssignments) {
+  if (!Array.isArray(rawAssignments)) return [];
+  return rawAssignments
+    .filter((item) => item && typeof item === 'object')
+    .map((item) => ({
+      provider: String(item.provider || '').trim().toLowerCase(),
+      external_campaign_id: String(item.external_campaign_id || '').trim(),
+      account_id: String(item.account_id || '').trim(),
+      account_name: typeof item.account_name === 'string' ? String(item.account_name).trim() || null : null,
+      name: typeof item.name === 'string' ? String(item.name).trim() || null : null,
+      status: typeof item.status === 'string' ? String(item.status).trim() || null : null,
+      metrics: item.metrics && typeof item.metrics === 'object'
+        ? {
+            impressions: safeNumber(item.metrics.impressions),
+            clicks: safeNumber(item.metrics.clicks),
+            spend: safeNumber(item.metrics.spend),
+            conversions: safeNumber(item.metrics.conversions)
+          }
+        : {
+            impressions: 0,
+            clicks: 0,
+            spend: 0,
+            conversions: 0
+          }
+    }))
+    .filter((item) => (
+      (item.provider === 'google_ads' || item.provider === 'meta_ads')
+      && item.external_campaign_id
+    ));
+}
+
+function normalizeExternalTargets(rawTargets) {
+  if (!Array.isArray(rawTargets)) return [];
+  return rawTargets
+    .filter((item) => item && typeof item === 'object')
+    .map((item) => {
+      const kind = String(item.kind || '').trim().toLowerCase() === 'generic' ? 'generic' : 'treatment';
+      const treatmentId = kind === 'treatment' ? parseInteger(item.treatment_id) : null;
+      return {
+        kind,
+        treatment_id: treatmentId,
+        treatment_name: typeof item.treatment_name === 'string' ? String(item.treatment_name).trim() || null : null,
+        campaigns: normalizeExternalCampaignAssignments(item.campaigns)
+      };
+    })
+    .filter((item) => (item.kind === 'generic' || !!item.treatment_id));
+}
+
+function normalizeTargetDestinations(rawDestinations) {
+  if (!Array.isArray(rawDestinations)) return [];
+  return rawDestinations
+    .filter((item) => item && typeof item === 'object')
+    .map((item) => {
+      const kind = String(item.kind || '').trim().toLowerCase() === 'generic' ? 'generic' : 'treatment';
+      const treatmentId = kind === 'treatment' ? parseInteger(item.treatment_id) : null;
+      const rawUrl = typeof item.confirmed_url === 'string' ? String(item.confirmed_url).trim() : '';
+      return {
+        kind,
+        treatment_id: treatmentId,
+        treatment_name: typeof item.treatment_name === 'string' ? String(item.treatment_name).trim() || null : null,
+        confirmed_url: rawUrl || null,
+        uses_web: item.uses_web === true ? true : item.uses_web === false ? false : null
+      };
+    })
+    .filter((item) => (item.kind === 'generic' || !!item.treatment_id));
+}
+
 function pickLegacyCampaignTypeFromChannels(channels) {
   const top = Array.isArray(channels) && channels.length > 0 ? channels[0].channel : null;
   return top === 'google_ads' ? 'google_ads' : 'meta_ads';
@@ -2193,6 +2260,12 @@ exports.createMarketingStrategy = asyncHandler(async (req, res) => {
   }
 
   const treatments = normalizeStrategyTreatments(req.body?.treatments);
+  const externalTargets = effectiveMode === 'connect_only'
+    ? normalizeExternalTargets(req.body?.external_targets)
+    : [];
+  const targetDestinations = effectiveMode === 'connect_only'
+    ? normalizeTargetDestinations(req.body?.target_destinations)
+    : [];
   const areaMedicaIdRaw = req.body?.area_medica_id;
   const areaMedicaId = Number.isFinite(Number(areaMedicaIdRaw)) && Number(areaMedicaIdRaw) > 0
     ? Number(areaMedicaIdRaw)
@@ -2214,8 +2287,50 @@ exports.createMarketingStrategy = asyncHandler(async (req, res) => {
   }
 
   const channels = normalizeStrategyChannels(req.body?.channels);
-  if (!channels.length) {
+  if (!channels.length && effectiveMode !== 'connect_only') {
     return res.status(400).json({ success: false, error: 'validation_error', message: 'Selecciona al menos un canal' });
+  }
+
+  if (effectiveMode === 'connect_only') {
+    const treatmentIds = new Set(treatments.map((item) => item.id));
+    const targetKeys = new Set();
+    const assignedCampaignKeys = new Set();
+
+    for (const target of externalTargets) {
+      if (promotionType === 'generic' && target.kind !== 'generic') {
+        return res.status(400).json({ success: false, error: 'validation_error', message: 'Las campañas externas deben vincularse al target genérico de la estrategia.' });
+      }
+      if (promotionType !== 'generic' && (!target.treatment_id || !treatmentIds.has(target.treatment_id))) {
+        return res.status(400).json({ success: false, error: 'validation_error', message: 'Hay campañas externas vinculadas a tratamientos que no pertenecen a la estrategia.' });
+      }
+
+      const targetKey = `${target.kind}:${target.treatment_id || 'generic'}`;
+      targetKeys.add(targetKey);
+
+      for (const campaign of target.campaigns) {
+        const campaignKey = `${campaign.provider}:${campaign.external_campaign_id}`;
+        if (assignedCampaignKeys.has(campaignKey)) {
+          return res.status(400).json({ success: false, error: 'validation_error', message: 'La misma campaña externa no puede asignarse a dos targets distintos.' });
+        }
+        assignedCampaignKeys.add(campaignKey);
+      }
+    }
+
+    for (const destinationItem of targetDestinations) {
+      const targetKey = `${destinationItem.kind}:${destinationItem.treatment_id || 'generic'}`;
+      if (promotionType === 'generic' && destinationItem.kind !== 'generic') {
+        return res.status(400).json({ success: false, error: 'validation_error', message: 'Los destinos solo pueden definirse para el target genérico de la estrategia.' });
+      }
+      if (promotionType !== 'generic' && (!destinationItem.treatment_id || !treatmentIds.has(destinationItem.treatment_id))) {
+        return res.status(400).json({ success: false, error: 'validation_error', message: 'Hay destinos definidos para tratamientos que no pertenecen a la estrategia.' });
+      }
+      if (targetKeys.size > 0 && !targetKeys.has(targetKey)) {
+        return res.status(400).json({ success: false, error: 'validation_error', message: 'Hay destinos definidos para targets sin campañas externas vinculadas.' });
+      }
+      if (destinationItem.uses_web === true && !destinationItem.confirmed_url) {
+        return res.status(400).json({ success: false, error: 'validation_error', message: 'Confirma la URL de cada target que lleve tráfico a web.' });
+      }
+    }
   }
 
   const conflicts = await findBlockingStrategyConflicts(targetClinicIds);
@@ -2228,7 +2343,9 @@ exports.createMarketingStrategy = asyncHandler(async (req, res) => {
     });
   }
 
-  const dominantType = pickLegacyCampaignTypeFromChannels(channels);
+  const dominantType = channels.length > 0
+    ? pickLegacyCampaignTypeFromChannels(channels)
+    : 'web_snippet';
   const campaignName = buildStrategyName({
     objectiveId,
     treatments,
@@ -2277,6 +2394,8 @@ exports.createMarketingStrategy = asyncHandler(async (req, res) => {
       area_medica_id: areaMedicaId,
       area_medica_nombre: areaMedicaNombre,
       treatments,
+      external_targets: externalTargets,
+      target_destinations: targetDestinations,
       destination,
       measurement,
       geo,
