@@ -374,13 +374,21 @@ async function resolveScopeFromInput({ clinicIdRaw, groupIdRaw, assignmentScopeR
     throw err;
   }
 
+  let group = null;
+  if (clinic.grupoClinicaId) {
+    group = await GrupoClinica.findByPk(clinic.grupoClinicaId, {
+      attributes: ['id_grupo', 'nombre_grupo', 'ads_assignment_mode', 'web_assignment_mode', 'web_primary_url'],
+      raw: true
+    });
+  }
+
   return {
     assignment_scope: 'clinic',
     clinic_id: clinic.id_clinica,
     group_id: clinic.grupoClinicaId || null,
     clinics: [clinic],
     clinic_ids: [clinic.id_clinica],
-    group: null
+    group
   };
 }
 

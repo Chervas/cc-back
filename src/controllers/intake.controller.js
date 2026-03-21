@@ -2001,7 +2001,10 @@ exports.verifySnippetInstalled = asyncHandler(async (req, res) => {
   const scriptTags = html.match(/<script\b[^>]*>/gi) || [];
   const intakeTags = scriptTags.filter((t) => /intake\.js/i.test(t));
   if (intakeTags.length === 0) {
-    return res.json({ installed: false, details: `No se encontró intake.js en ${finalUrl || domain}` });
+    return res.json({
+      installed: false,
+      details: `No se encontró el fragmento de código de medición de ClinicaClick en ${finalUrl || domain}.`
+    });
   }
 
   const idRe = new RegExp(`${expectedAttr}\\s*=\\s*['"]?${expectedId}['"]?`, 'i');
@@ -2015,7 +2018,7 @@ exports.verifySnippetInstalled = asyncHandler(async (req, res) => {
       : (groupIdMatch?.[1] ? `Se detectó data-group-id="${groupIdMatch[1]}".` : null);
     return res.json({
       installed: false,
-      details: `Se encontró intake.js pero no el atributo ${expectedAttr}="${expectedId}" (scope incorrecto o ID distinto).${hint ? ` ${hint}` : ''}`
+      details: `Se encontró el fragmento de código de medición, pero no coincide con esta configuración (${expectedAttr}="${expectedId}").${hint ? ` ${hint}` : ''}`
     });
   }
 
@@ -2024,10 +2027,10 @@ exports.verifySnippetInstalled = asyncHandler(async (req, res) => {
     const m = tagForScope.match(/data-hmac-key\s*=\s*['"]([^'"]+)['"]/i);
     const installedKey = m?.[1] ? String(m[1]).trim() : null;
     if (!installedKey) {
-      return res.json({ installed: false, details: 'Se encontró intake.js pero falta data-hmac-key en el script tag.' });
+      return res.json({ installed: false, details: 'Se encontró el fragmento de código de medición, pero le falta la clave de seguridad (HMAC).' });
     }
     if (installedKey !== record.hmac_key) {
-      return res.json({ installed: false, details: 'Se encontró intake.js pero la clave HMAC no coincide con la del CRM (quizá rotaste la clave y no actualizaste la web).' });
+      return res.json({ installed: false, details: 'Se encontró el fragmento de código de medición, pero la clave de seguridad no coincide con la que tiene guardada ClinicaClick.' });
     }
   }
 
