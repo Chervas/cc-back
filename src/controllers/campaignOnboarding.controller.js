@@ -1622,7 +1622,9 @@ exports.listExternalCampaigns = asyncHandler(async (req, res) => {
     if (!metaAccountMap.has(adAccountId)) {
       metaAccountMap.set(adAccountId, {
         ad_account_id: adAccountId,
-        name: row.metaAssetName || null
+        name: row.metaAssetName || null,
+        clinicaId: row.clinicaId || null,
+        grupoClinicaId: row.grupoClinicaId || null
       });
     }
   }
@@ -1651,28 +1653,39 @@ exports.listExternalCampaigns = asyncHandler(async (req, res) => {
       raw: true
     });
 
-    const entityIds = Array.from(new Set(insightRows.map((row) => String(row.entity_id || '')).filter(Boolean)));
-    const entities = entityIds.length > 0
-      ? await SocialAdsEntity.findAll({
-        where: {
-          level: 'campaign',
-          entity_id: { [Op.in]: entityIds }
-        },
-        raw: true
-      })
-      : [];
+    const entities = await SocialAdsEntity.findAll({
+      where: {
+        level: 'campaign',
+        ad_account_id: { [Op.in]: Array.from(metaAccountMap.keys()) }
+      },
+      raw: true
+    });
     const entityMap = new Map(entities.map((row) => [String(row.entity_id), row]));
+    const rowsByEntityId = new Map();
+    for (const row of insightRows) {
+      rowsByEntityId.set(String(row.entity_id || ''), row);
+    }
 
-    metaCampaigns = reduceExternalCampaignRows(insightRows.map((row) => {
-      const entity = entityMap.get(String(row.entity_id || '')) || {};
+    const stitchedRows = entities.map((entity) => {
+      const existing = rowsByEntityId.get(String(entity.entity_id || ''));
+      const assetScope = metaAccountMap.get(String(entity.ad_account_id || '')) || {};
       return {
-        ...row,
+        ad_account_id: entity.ad_account_id,
+        entity_id: entity.entity_id,
+        clinica_id: existing?.clinica_id ?? assetScope.clinicaId ?? null,
+        grupo_clinica_id: existing?.grupo_clinica_id ?? assetScope.grupoClinicaId ?? null,
+        impressions: existing?.impressions ?? 0,
+        clicks: existing?.clicks ?? 0,
+        spend: existing?.spend ?? 0,
+        conversions: existing?.conversions ?? 0,
+        last_seen_at: existing?.last_seen_at || entity.updated_time || entity.updated_at || null,
         campaignName: entity.name || null,
         campaignStatus: entity.effective_status || entity.status || null,
-        objective: entity.objective || null,
-        conversions: 0
+        objective: entity.objective || null
       };
-    }), {
+    });
+
+    metaCampaigns = reduceExternalCampaignRows(stitchedRows, {
       provider: 'meta_ads',
       accountKey: 'ad_account_id',
       idKey: 'entity_id',
