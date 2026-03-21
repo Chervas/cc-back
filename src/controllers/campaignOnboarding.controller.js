@@ -547,16 +547,85 @@ function reduceExternalCampaignRows(rows, {
     ...item,
     clinic_ids: Array.from(item.clinic_ids.values()).filter(Number.isFinite),
     group_ids: Array.from(item.group_ids.values()).filter(Number.isFinite),
-    assignment_origin: item.group_ids.length > 0 && item.clinic_ids.length === 0
-      ? 'group'
-      : item.clinic_ids.length > 0
-        ? 'clinic'
-        : 'unknown',
+    assignment_origin: (() => {
+      const clinicIds = Array.from(item.clinic_ids.values()).filter(Number.isFinite);
+      const groupIds = Array.from(item.group_ids.values()).filter(Number.isFinite);
+      return groupIds.length > 0 && clinicIds.length === 0
+        ? 'group'
+        : clinicIds.length > 0
+          ? 'clinic'
+          : 'unknown';
+    })(),
     metrics: {
       ...item.metrics,
       spend: Number(item.metrics.spend.toFixed(2))
     }
   }));
+}
+
+function rollupMetaAdRowsToCampaignRows(adRows, campaignEntitiesById) {
+  if (!Array.isArray(adRows) || adRows.length === 0) return [];
+
+  const byAdId = new Map();
+  for (const row of adRows) {
+    const entityId = String(row?.entity_id || '').trim();
+    if (entityId) {
+      byAdId.set(entityId, row);
+    }
+  }
+
+  const adIds = Array.from(byAdId.keys());
+  if (!adIds.length) return [];
+
+  return SocialAdsEntity.findAll({
+    where: {
+      level: 'ad',
+      entity_id: { [Op.in]: adIds }
+    },
+    raw: true
+  }).then(async (adEntities) => {
+    const adEntityMap = new Map(adEntities.map((row) => [String(row.entity_id), row]));
+    const adsetIds = Array.from(new Set(adEntities
+      .map((row) => String(row.parent_id || '').trim())
+      .filter(Boolean)));
+    if (!adsetIds.length) return [];
+
+    const adsetEntities = await SocialAdsEntity.findAll({
+      where: {
+        level: 'adset',
+        entity_id: { [Op.in]: adsetIds }
+      },
+      raw: true
+    });
+    const adsetEntityMap = new Map(adsetEntities.map((row) => [String(row.entity_id), row]));
+
+    return adRows
+      .map((row) => {
+        const adEntity = adEntityMap.get(String(row.entity_id || '').trim());
+        const adsetEntity = adEntity
+          ? adsetEntityMap.get(String(adEntity.parent_id || '').trim())
+          : null;
+        const campaignId = String(adsetEntity?.parent_id || '').trim();
+        if (!campaignId) return null;
+
+        const campaignEntity = campaignEntitiesById.get(campaignId) || null;
+        return {
+          ad_account_id: row.ad_account_id,
+          entity_id: campaignId,
+          clinica_id: row.clinica_id ?? null,
+          grupo_clinica_id: row.grupo_clinica_id ?? null,
+          impressions: row.impressions ?? 0,
+          clicks: row.clicks ?? 0,
+          spend: row.spend ?? 0,
+          conversions: row.conversions ?? 0,
+          last_seen_at: row.last_seen_at || null,
+          campaignName: campaignEntity?.name || null,
+          campaignStatus: campaignEntity?.effective_status || campaignEntity?.status || null,
+          objective: campaignEntity?.objective || null
+        };
+      })
+      .filter(Boolean);
+  });
 }
 
 async function loadIntakeRecordForScope(scope) {
@@ -1631,7 +1700,7 @@ exports.listExternalCampaigns = asyncHandler(async (req, res) => {
 
   let metaCampaigns = [];
   if (includeMeta && metaAccountMap.size > 0) {
-    const insightRows = await SocialAdsInsightsDaily.findAll({
+    const campaignInsightRows = await SocialAdsInsightsDaily.findAll({
       attributes: [
         'ad_account_id',
         'entity_id',
@@ -1653,6 +1722,28 @@ exports.listExternalCampaigns = asyncHandler(async (req, res) => {
       raw: true
     });
 
+    const adInsightRows = await SocialAdsInsightsDaily.findAll({
+      attributes: [
+        'ad_account_id',
+        'entity_id',
+        'clinica_id',
+        'grupo_clinica_id',
+        [fn('MAX', col('date')), 'last_seen_at'],
+        [fn('SUM', col('impressions')), 'impressions'],
+        [fn('SUM', col('clicks')), 'clicks'],
+        [fn('SUM', col('spend')), 'spend']
+      ],
+      where: {
+        level: 'ad',
+        ad_account_id: { [Op.in]: Array.from(metaAccountMap.keys()) },
+        date: { [Op.between]: [startStr, endStr] },
+        ...buildMetricsScopeWhere(scope, { clinicField: 'clinica_id', groupField: 'grupo_clinica_id' })
+      },
+      group: ['ad_account_id', 'entity_id', 'clinica_id', 'grupo_clinica_id'],
+      order: [[literal('SUM(spend)'), 'DESC']],
+      raw: true
+    });
+
     const entities = await SocialAdsEntity.findAll({
       where: {
         level: 'campaign',
@@ -1662,28 +1753,44 @@ exports.listExternalCampaigns = asyncHandler(async (req, res) => {
     });
     const entityMap = new Map(entities.map((row) => [String(row.entity_id), row]));
     const rowsByEntityId = new Map();
-    for (const row of insightRows) {
+    for (const row of campaignInsightRows) {
       rowsByEntityId.set(String(row.entity_id || ''), row);
     }
+    const adRolledRows = await rollupMetaAdRowsToCampaignRows(adInsightRows, entityMap);
+    const adRowsByEntityId = new Map();
+    for (const row of adRolledRows) {
+      const entityId = String(row.entity_id || '').trim();
+      if (!entityId) continue;
+      if (!adRowsByEntityId.has(entityId)) {
+        adRowsByEntityId.set(entityId, []);
+      }
+      adRowsByEntityId.get(entityId).push(row);
+    }
 
-    const stitchedRows = entities.map((entity) => {
-      const existing = rowsByEntityId.get(String(entity.entity_id || ''));
+    const stitchedRows = [];
+    for (const entity of entities) {
+      const entityId = String(entity.entity_id || '').trim();
+      const campaignRows = rowsByEntityId.has(entityId)
+        ? [rowsByEntityId.get(entityId)]
+        : (adRowsByEntityId.get(entityId) || [null]);
       const assetScope = metaAccountMap.get(String(entity.ad_account_id || '')) || {};
-      return {
-        ad_account_id: entity.ad_account_id,
-        entity_id: entity.entity_id,
-        clinica_id: existing?.clinica_id ?? assetScope.clinicaId ?? null,
-        grupo_clinica_id: existing?.grupo_clinica_id ?? assetScope.grupoClinicaId ?? null,
-        impressions: existing?.impressions ?? 0,
-        clicks: existing?.clicks ?? 0,
-        spend: existing?.spend ?? 0,
-        conversions: existing?.conversions ?? 0,
-        last_seen_at: existing?.last_seen_at || entity.updated_time || entity.updated_at || null,
-        campaignName: entity.name || null,
-        campaignStatus: entity.effective_status || entity.status || null,
-        objective: entity.objective || null
-      };
-    });
+      for (const existing of campaignRows) {
+        stitchedRows.push({
+          ad_account_id: entity.ad_account_id,
+          entity_id: entity.entity_id,
+          clinica_id: existing?.clinica_id ?? assetScope.clinicaId ?? null,
+          grupo_clinica_id: existing?.grupo_clinica_id ?? assetScope.grupoClinicaId ?? null,
+          impressions: existing?.impressions ?? 0,
+          clicks: existing?.clicks ?? 0,
+          spend: existing?.spend ?? 0,
+          conversions: existing?.conversions ?? 0,
+          last_seen_at: existing?.last_seen_at || entity.updated_time || entity.updated_at || null,
+          campaignName: entity.name || null,
+          campaignStatus: entity.effective_status || entity.status || null,
+          objective: entity.objective || null
+        });
+      }
+    }
 
     metaCampaigns = reduceExternalCampaignRows(stitchedRows, {
       provider: 'meta_ads',
@@ -2308,6 +2415,15 @@ exports.createMarketingStrategy = asyncHandler(async (req, res) => {
     const treatmentIds = new Set(treatments.map((item) => item.id));
     const targetKeys = new Set();
     const assignedCampaignKeys = new Set();
+    const totalAssignedCampaigns = externalTargets.reduce((sum, target) => sum + target.campaigns.length, 0);
+
+    if (totalAssignedCampaigns === 0) {
+      return res.status(400).json({
+        success: false,
+        error: 'validation_error',
+        message: 'Vincula al menos una campaña externa para continuar con Solo Conectar.'
+      });
+    }
 
     for (const target of externalTargets) {
       if (promotionType === 'generic' && target.kind !== 'generic') {
