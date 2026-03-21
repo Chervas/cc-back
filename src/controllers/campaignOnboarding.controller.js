@@ -25,6 +25,7 @@ const ClinicMetaAsset = db.ClinicMetaAsset;
 const CampaignRequest = db.CampaignRequest;
 const Campaign = db.Campaign;
 const AdminCampaignPlaybook = db.AdminCampaignPlaybook;
+const Tratamiento = db.Tratamiento;
 
 const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID || '';
 const GOOGLE_CLIENT_SECRET = process.env.GOOGLE_CLIENT_SECRET || '';
