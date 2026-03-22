@@ -3741,6 +3741,14 @@ exports.createMarketingStrategy = asyncHandler(async (req, res) => {
     return res.status(400).json({ success: false, error: 'validation_error', message: 'No hay clínicas válidas en el scope seleccionado' });
   }
 
+  if (objectiveId === 'new_patients' && scope.assignment_scope !== 'clinic') {
+    return res.status(400).json({
+      success: false,
+      error: 'validation_error',
+      message: 'Captar Nuevos Pacientes se configura por clínica. Selecciona una clínica concreta para crear la estrategia.'
+    });
+  }
+
   const clinicModes = await Promise.all(targetClinicIds.map((clinicId) => resolveModeForClinic(clinicId)));
   const uniqueClinicModes = Array.from(new Set(clinicModes.filter((mode) => VALID_MODES.has(mode))));
   if (uniqueClinicModes.length > 1) {
