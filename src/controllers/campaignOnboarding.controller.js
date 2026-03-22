@@ -245,6 +245,89 @@ function buildExternalCampaignMetrics(payload) {
   }), { investment: 0, conversions: 0 });
 }
 
+function hydrateExternalTargetsWithMetrics(rawTargets, metricsIndex) {
+  const targets = normalizeExternalTargets(rawTargets);
+  if (!(metricsIndex instanceof Map) || metricsIndex.size === 0) {
+    return targets;
+  }
+
+  return targets.map((target) => ({
+    ...target,
+    campaigns: target.campaigns.map((campaign) => {
+      const key = `${campaign.provider}:${campaign.external_campaign_id}`;
+      const liveMetrics = metricsIndex.get(key);
+      if (!liveMetrics) {
+        return campaign;
+      }
+      return {
+        ...campaign,
+        metrics: {
+          ...campaign.metrics,
+          spend: safeNumber(liveMetrics.investment),
+          conversions: safeNumber(liveMetrics.conversions)
+        }
+      };
+    })
+  }));
+}
+
+function buildTargetSummaries(externalTargets, targetDestinations) {
+  const targets = normalizeExternalTargets(externalTargets);
+  const destinations = normalizeTargetDestinations(targetDestinations);
+  const destinationMap = new Map(
+    destinations.map((item) => [
+      `${item.kind}:${item.treatment_id || 'generic'}`,
+      item
+    ])
+  );
+
+  return targets.map((target) => {
+    const key = `${target.kind}:${target.treatment_id || 'generic'}`;
+    const destination = destinationMap.get(key) || null;
+    const providerSet = new Set();
+    const destinationKinds = new Set();
+    let investment = 0;
+    let channelConversions = 0;
+
+    for (const campaign of target.campaigns) {
+      providerSet.add(campaign.provider);
+      const detectedKind = String(campaign?.destination_detection?.kind || '').trim().toLowerCase();
+      if (detectedKind === 'web' || detectedKind === 'lead_form') {
+        destinationKinds.add(detectedKind);
+      }
+      investment += safeNumber(campaign?.metrics?.spend);
+      channelConversions += safeNumber(campaign?.metrics?.conversions);
+    }
+
+    let destinationKind = 'unknown';
+    if (destinationKinds.has('web') && destinationKinds.has('lead_form')) {
+      destinationKind = 'mixed';
+    } else if (destinationKinds.has('web')) {
+      destinationKind = 'web';
+    } else if (destinationKinds.has('lead_form')) {
+      destinationKind = 'lead_form';
+    } else if (destination?.uses_web === true) {
+      destinationKind = 'web';
+    } else if (destination?.uses_web === false) {
+      destinationKind = 'lead_form';
+    }
+
+    return {
+      kind: target.kind,
+      treatment_id: target.treatment_id || null,
+      treatment_name: target.treatment_name || null,
+      campaign_count: target.campaigns.length,
+      providers: Array.from(providerSet),
+      destination_kind: destinationKind,
+      destination_url: destination?.confirmed_url || null,
+      metrics: {
+        investment: Number(investment.toFixed(2)),
+        channel_conversions: channelConversions
+      }
+    };
+  });
+}
+
 function serializeStrategyCatalogItem(item) {
   const data = item?.toJSON ? item.toJSON() : item;
   const treatment = data?.treatment || null;
@@ -1743,6 +1826,8 @@ function buildStrategyItemFromRows(rows, campaignsById) {
   const status = mode === 'connect_only' && (normalizedStatus === 'draft' || normalizedStatus === 'pending_approval')
     ? 'active'
     : normalizedStatus;
+  const externalTargets = normalizeExternalTargets(payload.external_targets);
+  const targetDestinations = normalizeTargetDestinations(payload.target_destinations);
 
   return {
     id: campaignId || representative.id,
@@ -1769,8 +1854,9 @@ function buildStrategyItemFromRows(rows, campaignsById) {
     automation: payload.automation && typeof payload.automation === 'object' ? payload.automation : null,
     addons: payload.addons && typeof payload.addons === 'object' ? payload.addons : {},
     addon_calls: payload.addons?.call_leads === true,
-    external_targets: normalizeExternalTargets(payload.external_targets),
-    target_destinations: normalizeTargetDestinations(payload.target_destinations),
+    external_targets: externalTargets,
+    target_destinations: targetDestinations,
+    target_summaries: buildTargetSummaries(externalTargets, targetDestinations),
     metrics: buildStrategyMetrics(campaign, payload),
     created_at: representative.created_at,
     updated_at: representative.updated_at || representative.created_at
@@ -1857,7 +1943,7 @@ async function findBlockingStrategyConflicts(clinicIds, { excludeCampaignId = nu
       }
 
       const status = normalizeStrategyStatus(payload.status || row.estado);
-      return status === 'active' || status === 'pending_approval';
+      return status !== 'completed';
     })
     .map((row) => ({
       request_id: row.id,
@@ -1865,6 +1951,81 @@ async function findBlockingStrategyConflicts(clinicIds, { excludeCampaignId = nu
       campaign_id: row.campaign_id || null,
       status: normalizeStrategyStatus((row?.solicitud || {}).status || row.estado)
     }));
+}
+
+async function findExternalCampaignAssignmentConflicts(clinicIds, externalTargets, { excludeRequestIds = [] } = {}) {
+  if (!Array.isArray(clinicIds) || clinicIds.length === 0) return [];
+
+  const requestedKeys = new Set();
+  for (const target of normalizeExternalTargets(externalTargets)) {
+    for (const campaign of target.campaigns) {
+      const provider = String(campaign?.provider || '').trim().toLowerCase();
+      const externalCampaignId = String(campaign?.external_campaign_id || '').trim();
+      if (!externalCampaignId || (provider !== 'google_ads' && provider !== 'meta_ads')) {
+        continue;
+      }
+      requestedKeys.add(`${provider}:${externalCampaignId}`);
+    }
+  }
+
+  if (!requestedKeys.size) {
+    return [];
+  }
+
+  const rows = await CampaignRequest.findAll({
+    where: {
+      clinica_id: { [Op.in]: clinicIds }
+    },
+    attributes: ['id', 'clinica_id', 'campaign_id', 'solicitud', 'estado', 'created_at', 'updated_at'],
+    order: [['updated_at', 'DESC'], ['created_at', 'DESC']],
+    raw: true
+  });
+
+  const conflicts = [];
+  const seen = new Set();
+
+  for (const row of rows) {
+    const requestId = parseInteger(row.id);
+    if (excludeRequestIds.includes(requestId)) {
+      continue;
+    }
+
+    const payload = row?.solicitud && typeof row.solicitud === 'object' ? row.solicitud : {};
+    if (payload.kind !== 'marketing_strategy') {
+      continue;
+    }
+
+    const status = normalizeStrategyStatus(payload.status || row.estado);
+    if (status === 'completed') {
+      continue;
+    }
+
+    const rowTargets = normalizeExternalTargets(payload.external_targets);
+    for (const target of rowTargets) {
+      for (const campaign of target.campaigns) {
+        const provider = String(campaign?.provider || '').trim().toLowerCase();
+        const externalCampaignId = String(campaign?.external_campaign_id || '').trim();
+        const key = `${provider}:${externalCampaignId}`;
+        if (!requestedKeys.has(key) || seen.has(`${requestId}:${key}`)) {
+          continue;
+        }
+        seen.add(`${requestId}:${key}`);
+        conflicts.push({
+          request_id: requestId,
+          clinica_id: parseInteger(row.clinica_id) || null,
+          campaign_id: parseInteger(row.campaign_id) || null,
+          status,
+          provider,
+          external_campaign_id: externalCampaignId,
+          target_kind: target.kind,
+          treatment_id: target.treatment_id || null,
+          treatment_name: target.treatment_name || null
+        });
+      }
+    }
+  }
+
+  return conflicts;
 }
 
 async function findMappedGoogleAccountsForScope(connectionId, scope) {
@@ -2721,6 +2882,14 @@ exports.ensureGoogleAdsConversionActions = asyncHandler(async (req, res) => {
     createMissing
   });
 
+  if (scope.clinic_id || scope.group_id) {
+    await upsertIntakeGoogleAdsForScope(scope, {
+      ...ensured.recommended_google_ads_config,
+      enabled: true,
+      customer_id: customerId
+    });
+  }
+
   return res.json({
     success: true,
     customer_id: customerId,
@@ -3020,11 +3189,16 @@ exports.getMarketingStrategyDetail = asyncHandler(async (req, res) => {
     return res.status(404).json({ success: false, error: 'not_found', message: 'Estrategia no encontrada' });
   }
 
+  const payload = rows[0]?.solicitud && typeof rows[0].solicitud === 'object' ? rows[0].solicitud : {};
   strategy.metrics = await buildLiveStrategyMetrics(
     rows,
     strategy.campaign_id ? campaignsById.get(strategy.campaign_id) || null : null,
-    rows[0]?.solicitud && typeof rows[0].solicitud === 'object' ? rows[0].solicitud : {}
+    payload
   );
+  const scope = extractStrategyScopeFromPayload(payload, rows);
+  const liveExternalMetrics = await loadCurrentExternalCampaignMetricsIndex({ scope, payload });
+  strategy.external_targets = hydrateExternalTargetsWithMetrics(payload.external_targets, liveExternalMetrics);
+  strategy.target_summaries = buildTargetSummaries(strategy.external_targets, payload.target_destinations);
 
   return res.json({
     success: true,
@@ -3176,6 +3350,16 @@ exports.updateMarketingStrategy = asyncHandler(async (req, res) => {
         return res.status(400).json({ success: false, error: 'validation_error', message: 'Confirma la URL de cada target que lleve tráfico a web.' });
       }
     }
+
+    const externalCampaignConflicts = await findExternalCampaignAssignmentConflicts(targetClinicIds, externalTargets);
+    if (externalCampaignConflicts.length > 0) {
+      return res.status(409).json({
+        success: false,
+        error: 'external_campaign_already_assigned',
+        message: 'Alguna de las campañas externas ya está vinculada a otra estrategia. Desvincúlala antes de reutilizarla.',
+        conflicts: externalCampaignConflicts
+      });
+    }
   }
 
   const currentStatus = effectiveMode === 'connect_only'
@@ -3242,11 +3426,21 @@ exports.updateMarketingStrategy = asyncHandler(async (req, res) => {
   const refreshedRows = await loadStrategyRowsByIdentifier(req.params.id);
   const campaignsById = await loadCampaignsByIds(refreshedRows.map((row) => row.campaign_id));
   const strategy = buildStrategyItemFromRows(refreshedRows, campaignsById);
+  const refreshedPayload = refreshedRows[0]?.solicitud && typeof refreshedRows[0].solicitud === 'object'
+    ? refreshedRows[0].solicitud
+    : {};
   strategy.metrics = await buildLiveStrategyMetrics(
     refreshedRows,
     strategy?.campaign_id ? campaignsById.get(strategy.campaign_id) || null : null,
-    refreshedRows[0]?.solicitud && typeof refreshedRows[0].solicitud === 'object' ? refreshedRows[0].solicitud : {}
+    refreshedPayload
   );
+  const refreshedScope = extractStrategyScopeFromPayload(refreshedPayload, refreshedRows);
+  const refreshedLiveExternalMetrics = await loadCurrentExternalCampaignMetricsIndex({
+    scope: refreshedScope,
+    payload: refreshedPayload
+  });
+  strategy.external_targets = hydrateExternalTargetsWithMetrics(refreshedPayload.external_targets, refreshedLiveExternalMetrics);
+  strategy.target_summaries = buildTargetSummaries(strategy.external_targets, refreshedPayload.target_destinations);
 
   return res.json({
     success: true,
@@ -3291,7 +3485,7 @@ exports.transitionMarketingStrategyStatus = asyncHandler(async (req, res) => {
       return res.status(409).json({
         success: false,
         error: 'active_strategy_exists',
-        message: 'Ya existe una estrategia activa o pendiente de aprobación para al menos una de las clínicas seleccionadas.',
+        message: 'Ya existe una estrategia en curso para al menos una de las clínicas seleccionadas. Edita la actual o complétala antes de crear otra.',
         conflicts
       });
     }
@@ -3481,6 +3675,18 @@ exports.createMarketingStrategy = asyncHandler(async (req, res) => {
         return res.status(400).json({ success: false, error: 'validation_error', message: 'Confirma la URL de cada target que lleve tráfico a web.' });
       }
     }
+
+    const externalCampaignConflicts = await findExternalCampaignAssignmentConflicts(targetClinicIds, externalTargets, {
+      excludeRequestIds: rows.map((row) => parseInteger(row.id)).filter((value) => value)
+    });
+    if (externalCampaignConflicts.length > 0) {
+      return res.status(409).json({
+        success: false,
+        error: 'external_campaign_already_assigned',
+        message: 'Alguna de las campañas externas ya está vinculada a otra estrategia. Desvincúlala antes de reutilizarla.',
+        conflicts: externalCampaignConflicts
+      });
+    }
   }
 
   const conflicts = await findBlockingStrategyConflicts(targetClinicIds);
@@ -3488,7 +3694,7 @@ exports.createMarketingStrategy = asyncHandler(async (req, res) => {
     return res.status(409).json({
       success: false,
       error: 'active_strategy_exists',
-      message: 'Ya existe una estrategia activa o pendiente de aprobación para al menos una de las clínicas seleccionadas.',
+      message: 'Ya existe una estrategia en curso para al menos una de las clínicas seleccionadas. Edita la actual o complétala antes de crear otra.',
       conflicts
     });
   }
