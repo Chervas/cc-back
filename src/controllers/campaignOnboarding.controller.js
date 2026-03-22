@@ -27,6 +27,7 @@ const CampaignRequest = db.CampaignRequest;
 const Campaign = db.Campaign;
 const AdminCampaignPlaybook = db.AdminCampaignPlaybook;
 const Tratamiento = db.Tratamiento;
+const LeadIntake = db.LeadIntake;
 const GoogleAdsInsightsDaily = db.GoogleAdsInsightsDaily;
 const SocialAdsEntity = db.SocialAdsEntity;
 const SocialAdsInsightsDaily = db.SocialAdsInsightsDaily;
@@ -101,6 +102,30 @@ function formatDate(d) {
 function safeNumber(value) {
   const n = Number(value || 0);
   return Number.isFinite(n) ? n : 0;
+}
+
+function normalizeLookupToken(value) {
+  return String(value || '')
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, ' ');
+}
+
+function resolveLeadProvider(lead) {
+  const candidates = [
+    lead?.source,
+    lead?.external_source,
+    lead?.utm_source
+  ]
+    .map((value) => normalizeLookupToken(value))
+    .filter(Boolean);
+
+  for (const candidate of candidates) {
+    if (candidate.includes('google')) return 'google_ads';
+    if (candidate.includes('meta') || candidate.includes('facebook') || candidate.includes('instagram')) return 'meta_ads';
+  }
+
+  return null;
 }
 
 function microsToCurrency(value) {
@@ -271,7 +296,109 @@ function hydrateExternalTargetsWithMetrics(rawTargets, metricsIndex) {
   }));
 }
 
-function buildTargetSummaries(externalTargets, targetDestinations) {
+function buildExternalCampaignAliasIndex(rawTargets) {
+  const targets = normalizeExternalTargets(rawTargets);
+  const aliasIndex = new Map();
+
+  for (const target of targets) {
+    for (const campaign of target.campaigns) {
+      const campaignKey = `${campaign.provider}:${campaign.external_campaign_id}`;
+      const tokens = new Set([
+        normalizeLookupToken(campaign.external_campaign_id),
+        normalizeLookupToken(campaign.name)
+      ].filter(Boolean));
+
+      for (const token of tokens) {
+        const aliasKey = `${campaign.provider}:${token}`;
+        if (!aliasIndex.has(aliasKey)) {
+          aliasIndex.set(aliasKey, new Set());
+        }
+        aliasIndex.get(aliasKey).add(campaignKey);
+      }
+    }
+  }
+
+  return aliasIndex;
+}
+
+async function loadCurrentLeadAttributionMetricsIndex({ scope, payload, days = 30 }) {
+  if (!LeadIntake) {
+    return new Map();
+  }
+
+  const aliasIndex = buildExternalCampaignAliasIndex(payload?.external_targets);
+  if (aliasIndex.size === 0) {
+    return new Map();
+  }
+
+  const end = new Date();
+  const start = new Date(end.getTime() - (days * 24 * 60 * 60 * 1000));
+
+  const rows = await LeadIntake.findAll({
+    attributes: [
+      'id',
+      'source',
+      'external_source',
+      'utm_source',
+      'utm_campaign',
+      'source_detail',
+      'status_lead'
+    ],
+    where: {
+      created_at: { [Op.between]: [start, end] },
+      status_lead: { [Op.ne]: 'descartado' },
+      ...buildMetricsScopeWhere(scope, { clinicField: 'clinica_id', groupField: 'grupo_clinica_id' })
+    },
+    raw: true
+  });
+
+  const metricsIndex = new Map();
+
+  for (const row of rows) {
+    const provider = resolveLeadProvider(row);
+    if (!provider) {
+      continue;
+    }
+
+    const matchedCampaigns = new Set();
+    const tokens = [
+      normalizeLookupToken(row?.utm_campaign),
+      normalizeLookupToken(row?.source_detail)
+    ].filter(Boolean);
+
+    for (const token of tokens) {
+      const aliasKey = `${provider}:${token}`;
+      const campaignKeys = aliasIndex.get(aliasKey);
+      if (!campaignKeys || campaignKeys.size !== 1) {
+        continue;
+      }
+      for (const campaignKey of campaignKeys) {
+        matchedCampaigns.add(campaignKey);
+      }
+    }
+
+    if (matchedCampaigns.size !== 1) {
+      continue;
+    }
+
+    const [campaignKey] = Array.from(matchedCampaigns);
+    const current = metricsIndex.get(campaignKey) || {
+      leads: 0,
+      crm_conversions: 0
+    };
+
+    current.leads += 1;
+    if (String(row?.status_lead || '').trim().toLowerCase() === 'convertido') {
+      current.crm_conversions += 1;
+    }
+
+    metricsIndex.set(campaignKey, current);
+  }
+
+  return metricsIndex;
+}
+
+function buildTargetSummaries(externalTargets, targetDestinations, leadMetricsIndex = new Map()) {
   const targets = normalizeExternalTargets(externalTargets);
   const destinations = normalizeTargetDestinations(targetDestinations);
   const destinationMap = new Map(
@@ -287,7 +414,9 @@ function buildTargetSummaries(externalTargets, targetDestinations) {
     const providerSet = new Set();
     const destinationKinds = new Set();
     let investment = 0;
+    let leads = 0;
     let channelConversions = 0;
+    let crmConversions = 0;
 
     for (const campaign of target.campaigns) {
       providerSet.add(campaign.provider);
@@ -297,6 +426,14 @@ function buildTargetSummaries(externalTargets, targetDestinations) {
       }
       investment += safeNumber(campaign?.metrics?.spend);
       channelConversions += safeNumber(campaign?.metrics?.conversions);
+
+      const leadMetrics = leadMetricsIndex instanceof Map
+        ? leadMetricsIndex.get(`${campaign.provider}:${campaign.external_campaign_id}`)
+        : null;
+      if (leadMetrics) {
+        leads += safeNumber(leadMetrics.leads);
+        crmConversions += safeNumber(leadMetrics.crm_conversions);
+      }
     }
 
     let destinationKind = 'unknown';
@@ -322,7 +459,10 @@ function buildTargetSummaries(externalTargets, targetDestinations) {
       destination_url: destination?.confirmed_url || null,
       metrics: {
         investment: Number(investment.toFixed(2)),
-        channel_conversions: channelConversions
+        leads,
+        channel_conversions: channelConversions,
+        crm_conversions: crmConversions,
+        patients_converted: crmConversions > 0 ? crmConversions : channelConversions
       }
     };
   });
@@ -1776,14 +1916,17 @@ async function buildLiveStrategyMetrics(rows, campaign, payload) {
   const baseMetrics = buildStrategyMetrics(campaign, payload);
   const scope = extractStrategyScopeFromPayload(payload, rows);
   const currentExternalMetrics = await loadCurrentExternalCampaignMetricsIndex({ scope, payload });
+  const currentLeadMetrics = await loadCurrentLeadAttributionMetricsIndex({ scope, payload });
 
-  if (!currentExternalMetrics.size) {
+  if (!currentExternalMetrics.size && !currentLeadMetrics.size) {
     return baseMetrics;
   }
 
   const refs = collectExternalCampaignRefs(payload);
   let liveInvestment = 0;
   let liveConversions = 0;
+  let liveLeads = 0;
+  let liveCrmConversions = 0;
 
   for (const campaignId of refs.google_ads.campaignIds) {
     const metrics = currentExternalMetrics.get(`google_ads:${campaignId}`);
@@ -1799,14 +1942,37 @@ async function buildLiveStrategyMetrics(rows, campaign, payload) {
     liveConversions += safeNumber(metrics.conversions);
   }
 
-  const costPerConversion = liveConversions > 0
-    ? Number((liveInvestment / liveConversions).toFixed(2))
-    : null;
+  for (const campaignId of refs.google_ads.campaignIds) {
+    const metrics = currentLeadMetrics.get(`google_ads:${campaignId}`);
+    if (!metrics) continue;
+    liveLeads += safeNumber(metrics.leads);
+    liveCrmConversions += safeNumber(metrics.crm_conversions);
+  }
+
+  for (const campaignId of refs.meta_ads.campaignIds) {
+    const metrics = currentLeadMetrics.get(`meta_ads:${campaignId}`);
+    if (!metrics) continue;
+    liveLeads += safeNumber(metrics.leads);
+    liveCrmConversions += safeNumber(metrics.crm_conversions);
+  }
+
+  const resolvedInvestment = liveInvestment > 0 ? liveInvestment : baseMetrics.investment;
+  const resolvedLeads = liveLeads > 0 ? liveLeads : baseMetrics.leads;
+  const resolvedConversions = liveCrmConversions > 0 ? liveCrmConversions : liveConversions;
+  const cpl = resolvedLeads > 0
+    ? Number((resolvedInvestment / resolvedLeads).toFixed(2))
+    : baseMetrics.cpl;
+
+  const costPerConversion = resolvedConversions > 0
+    ? Number((resolvedInvestment / resolvedConversions).toFixed(2))
+    : baseMetrics.cost_per_conversion;
 
   return {
     ...baseMetrics,
-    investment: liveInvestment,
-    conversions: liveConversions,
+    investment: resolvedInvestment,
+    leads: resolvedLeads,
+    conversions: resolvedConversions,
+    cpl,
     cost_per_conversion: costPerConversion
   };
 }
@@ -3197,8 +3363,9 @@ exports.getMarketingStrategyDetail = asyncHandler(async (req, res) => {
   );
   const scope = extractStrategyScopeFromPayload(payload, rows);
   const liveExternalMetrics = await loadCurrentExternalCampaignMetricsIndex({ scope, payload });
+  const liveLeadMetrics = await loadCurrentLeadAttributionMetricsIndex({ scope, payload });
   strategy.external_targets = hydrateExternalTargetsWithMetrics(payload.external_targets, liveExternalMetrics);
-  strategy.target_summaries = buildTargetSummaries(strategy.external_targets, payload.target_destinations);
+  strategy.target_summaries = buildTargetSummaries(strategy.external_targets, payload.target_destinations, liveLeadMetrics);
 
   return res.json({
     success: true,
@@ -3439,8 +3606,12 @@ exports.updateMarketingStrategy = asyncHandler(async (req, res) => {
     scope: refreshedScope,
     payload: refreshedPayload
   });
+  const refreshedLeadMetrics = await loadCurrentLeadAttributionMetricsIndex({
+    scope: refreshedScope,
+    payload: refreshedPayload
+  });
   strategy.external_targets = hydrateExternalTargetsWithMetrics(refreshedPayload.external_targets, refreshedLiveExternalMetrics);
-  strategy.target_summaries = buildTargetSummaries(strategy.external_targets, refreshedPayload.target_destinations);
+  strategy.target_summaries = buildTargetSummaries(strategy.external_targets, refreshedPayload.target_destinations, refreshedLeadMetrics);
 
   return res.json({
     success: true,
