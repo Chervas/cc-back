@@ -1059,249 +1059,171 @@ Reglas importantes:
 
 ---
 
-## 2026-03-18 - Contratos canónicos futuros: Estrategias de campaña
+## 2026-03-22 - Runtime actual: estrategias de campaña y `Campañas Admin`
 
-> **Estado:** Diseño. Estos contratos documentan el modelo objetivo, no el modelo persistido canónico actual. El runtime de integración ya expone rutas `/api/marketing/strategies`, pero hoy funcionan como adapter sobre `Campaign` + `CampaignRequest`, no como implementación nativa del modelo `Strategy` descrito aquí.
+> **Estado:** Operativo en integración. El runtime sigue funcionando como adapter sobre `Campaign` + `CampaignRequest`, pero la capa de estrategias, edición, campañas externas y `Campañas Admin` ya está activa y consumida por el frontend.
 
-### Modelo canónico de Strategy
+### 1. Persistencia real hoy
 
-Una estrategia es el contenedor principal de una campaña de marketing. Pertenece a un scope (clínica o grupo) y a un objetivo de negocio.
+No existe todavía una tabla nativa `Strategy`. El runtime persiste sobre:
 
-```
-Strategy {
-    id: number
-    scope_type: 'clinic' | 'group'
-    scope_id: number
-    objective_id: string           // 'new_patients', 'reactivate_patients', etc.
-    mode_snapshot: string          // modo vigente al crear la estrategia
-    status: 'draft' | 'pending_approval' | 'active' | 'paused' | 'completed'
-    promotion_type: 'treatment' | 'generic'
-    treatment_ids: number[]        // vacío si generic
-    destination_config: JSON       // ver StrategyDestinationConfig en 20.10
-    measurement_config: JSON       // ver StrategyMeasurementConfig en 20.10
-    budget_monthly: number
-    channel_split: JSON            // { meta_ads: 70, google_ads: 30 }
-    automation_template_key: string | null
-    automation_template_version: number | null
-    created_by: number
-    created_at: string
-    updated_at: string
-}
-```
+- `Campaign`
+- `CampaignRequest`
+- JSON `solicitud`
 
-### Rutas expuestas hoy (adapter) y target canónico
+En esa carga se guardan, entre otros:
+
+- configuración base de la estrategia,
+- `external_targets`,
+- `target_destinations`,
+- `target_summaries`,
+- configuración de automatización.
+
+### 2. Rutas operativas de Marketing
+
+| Método | Ruta | Estado | Uso |
+|---|---|---|---|
+| GET | `/api/marketing/campaign-onboarding/bootstrap` | Operativo | scope, webs, cuentas y capacidades base |
+| GET | `/api/marketing/campaign-onboarding/external-campaigns` | Operativo | campañas externas Google/Meta por scope |
+| GET | `/api/marketing/strategies/catalog` | Operativo | catálogo consumido por el wizard |
+| GET | `/api/marketing/strategies/recommend-automation` | Operativo | recomendación de automatización |
+| GET | `/api/marketing/strategies` | Operativo | listado de estrategias |
+| POST | `/api/marketing/strategies` | Operativo | creación de estrategia |
+| GET | `/api/marketing/strategies/:id` | Operativo | detalle completo para rehidratar edición |
+| PATCH | `/api/marketing/strategies/:id` | Operativo | edición real |
+| PATCH | `/api/marketing/strategies/:id/status` | Operativo | transiciones de estado |
+| GET | `/api/marketing/strategies/:id/metrics` | Operativo | métricas live de estrategia |
+| GET | `/api/marketing/google-ads/conversion-actions` | Operativo | readiness de conversiones Google Ads |
+| POST | `/api/marketing/google-ads/conversion-actions/ensure` | Operativo | crea/reutiliza conversiones recomendadas |
+
+### 3. Reglas de negocio activas hoy
+
+- **Una estrategia en curso por objetivo y scope.** Backend bloquea crear otra estrategia activa/en curso para el mismo objetivo.
+- **`connect_only` requiere campañas externas vinculadas.** No es válido como estrategia "vacía".
+- **Una campaña externa no se reutiliza entre estrategias en curso.**
+- **`connect_only` nace activa.** No sigue workflow de aprobación.
+- **`managed_*` mantienen lifecycle clásico** (`draft`, `pending_approval`, `active`, `paused`, `completed`) donde aplica.
+
+### 4. `connect_only`: campañas externas por target
+
+La estrategia puede guardar varias campañas externas por target.
+
+**Targets soportados:**
+- tratamiento concreto
+- bloque genérico
+
+**Payload persistido:**
+- `external_targets`
+- `target_destinations`
+
+**Hydration de detalle:**
+- el backend devuelve `external_targets` ya enriquecidos con métricas live
+- además construye `target_summaries` para cards y detalle
+
+### 5. Detección de destino y datos enriquecidos
+
+`GET /api/marketing/campaign-onboarding/external-campaigns` ya devuelve campañas externas sincronizadas de Google Ads y Meta Ads con:
+
+- cuenta
+- estado
+- métricas
+- `destination_detection`
+
+`destination_detection` puede ser:
+
+- `web`
+- `lead_form`
+- `unknown`
+
+e incluye, cuando existe:
+
+- URLs detectadas
+- datos de formulario instantáneo de Meta
+- preview creativo resumido
+
+### 6. Métricas live y atribución CRM
+
+#### A nivel estrategia
+
+`buildLiveStrategyMetrics(...)` recalcula:
+
+- `investment`
+- `leads`
+- `conversions`
+- `cpl`
+- `cost_per_conversion`
+
+usando campañas externas vinculadas y, cuando hay señal suficiente, atribución CRM.
+
+#### A nivel target
+
+`buildTargetSummaries(...)` devuelve:
+
+- `investment`
+- `leads`
+- `channel_conversions`
+- `crm_conversions`
+- `patients_converted`
+
+La atribución CRM usa `LeadIntake` y solo se acepta cuando el match con la campaña externa es no ambiguo. Si no lo es, el lead no se atribuye.
+
+> **Pendiente real:** ingresos y rentabilidad por target. No están cerrados todavía y no deben documentarse como operativos.
+
+### 7. Recomendación de automatización
+
+`GET /api/marketing/strategies/recommend-automation` sigue resolviendo por clínica, incluso en scope grupo, con la cascada:
+
+1. `objective + treatment + clinic`
+2. `objective + treatment + group`
+3. `objective + treatment + global`
+4. `objective + area_medica + clinic`
+5. `objective + area_medica + group`
+6. `objective + area_medica + global`
+7. `objective + clinic`
+8. `objective + group`
+9. `objective + global`
+
+La respuesta se consume ya desde el wizard y no debe tratarse como contrato futuro.
+
+### 8. `Campañas Admin` (`AdminCampaignPlaybook`)
+
+Ya existe runtime real para la capa de campañas admin:
+
+- modelo Sequelize
+- migración
+- controlador
+- rutas CRUD
+
+**Rutas:**
 
 | Método | Ruta | Descripción |
 |---|---|---|
-| `POST /api/marketing/strategies` | Existe hoy como adapter. El target canónico es crear una `Strategy` nativa en `draft`. |
-| `GET /api/marketing/strategies` | Existe hoy como adapter. El target canónico es listar `Strategy` por scope con filtros. |
-| `GET /api/marketing/strategies/:id` | Existe hoy como adapter. El target canónico es devolver detalle nativo de `Strategy`. |
-| `PATCH /api/marketing/strategies/:id` | Previsto para edición parcial de campos editables en `draft`. |
-| `PATCH /api/marketing/strategies/:id/status` | Existe hoy. El target canónico es transicionar el estado de `Strategy` según la máquina de estados. |
-| `GET /api/marketing/strategies/:id/metrics` | Existe hoy como adapter. El target canónico es devolver métricas agregadas de `Strategy`. |
-| `POST /api/intake/pageview` | Previsto para registrar pageviews de remarketing desde el snippet. |
-
-### Máquina de estados
-
-```
-draft → pending_approval → active ⇄ paused → completed
-                         ↗                  ↗
-              pending_approval → draft (revert)
-```
-
-Transiciones válidas:
-
-| Desde | Hacia | Acción |
-|---|---|---|
-| `draft` | `pending_approval` | `submit` |
-| `pending_approval` | `active` | `activate` |
-| `pending_approval` | `draft` | `revert` |
-| `active` | `paused` | `pause` |
-| `paused` | `active` | `resume` |
-| `active` | `completed` | `complete` |
-| `paused` | `completed` | `complete` |
-
-### Cascada de recomendación de automatizaciones (v2 con scope)
-
-El endpoint `GET /api/marketing/strategies/recommend-automation` recibe el contexto de la estrategia y devuelve la recomendación de automatización más adecuada.
-
-**Request:**
-```
-GET /api/marketing/strategies/recommend-automation
-  ?objective_id=new_patients
-  &treatment_ids=42,43       // opcional, puede ser múltiple
-  &area_medica_id=7           // opcional, usado en campañas genéricas
-  &scope_type=group
-  &scope_id=5
-```
-
-**Lógica de resolución:**
-
-La resolución se realiza **siempre por clínica**, incluso si el `scope_type` es `group`. Para cada clínica en el scope, se evalúa la siguiente cascada de 9 niveles para encontrar el primer match.
-
-> **`area_medica_id` en campañas genéricas:** Cuando no hay `treatment_ids`, los niveles 1–3 se saltan. Si se proporciona `area_medica_id`, la cascada empieza en el nivel 4. Si no se proporciona, salta directamente al nivel 7. En producto, este concepto se presenta como **área médica**. El frontend obtiene las áreas médicas del scope vía `GET /api/especialidades/clinica?clinica_id=X` (endpoint existente) y envía la seleccionada por el usuario.
-
-**Cascada de precedencia canónica (`clínica > grupo > global`):
-
-| Prioridad | Criterio de búsqueda (de más a menos específico) |
-|---|---|
-| 1 | `objective` + `treatment` + `clinic` |
-| 2 | `objective` + `treatment` + `group` |
-| 3 | `objective` + `treatment` + `global` |
-| 4 | `objective` + `area_medica` + `clinic` |
-| 5 | `objective` + `area_medica` + `group` |
-| 6 | `objective` + `area_medica` + `global` |
-| 7 | `objective` + `clinic` |
-| 8 | `objective` + `group` |
-| 9 | `objective` + `global` |
-| 10 | Sin recomendación (fallback) |
-
-**Response:**
-
-El endpoint devuelve un objeto `AutomationRecommendationResponse` (ver `20.10-modelo-datos-campanas-v4.md` §4.4) que contiene:
-- `primary_recommendation`: La recomendación más frecuente.
-- `clinic_recommendations`: La lista completa de recomendaciones, una por clínica.
-- `group_recommendation`: La recomendación a nivel de grupo (si existe).
-- `global_recommendation`: La recomendación global (si existe).
-- `is_fully_uniform`: Flag para el frontend.
-
-### Notas de implementación
-
-- **Llamadas desde anuncio:** Capacidad prevista y condicional a integración real con API de Google Ads para reporting de llamadas. No debe implementarse como operativa hasta que el backend soporte la lectura de call reporting de Google Ads.
-- **Pageview endpoint:** `POST /api/intake/pageview` es un endpoint ligero que registra URL, referrer, UTMs y timestamp. No requiere autenticación del visitante. Se usa para construir audiencias de remarketing.
-- **WhatsApp desde Google Business Profile / Ficha Local (futuro):** No debe depender de `intake.js`, porque el click ocurre fuera de la web. La implementación objetivo es un tracked link bajo dominio ClinicaClick (ej. `https://chat.clinicaclick.com/w/<tracking_id>`) que:
-  1. registra el click en backend;
-  2. persiste `source = google_business_profile` y `source_detail = gbp_whatsapp_click`;
-  3. redirige al `wa.me/<numero>` final;
-  4. permite una atribución best-effort del inbound o conversación posterior sin mezclarla con `whatsapp_click_web`.
-- **Estos contratos son modelo objetivo:** No deben implementarse como runtime hasta que el frontend esté listo para consumirlos. Se documentan aquí para alinear backend y frontend en la misma visión.
-
-
-### `AdminCampaignPlaybook` (Playbooks de Campaña)
-
-El backend debe implementar el concepto de **Playbooks de Campaña**, que son la capa de vinculación entre los catálogos maestros (tratamientos, automatizaciones) y las estrategias de marketing. El wizard de creación de estrategia se alimenta de estos playbooks para pre-configurar los pasos.
-
-> El Catálogo de Tratamientos lo alimentará otra superficie (Codex). El Catálogo de Automatizaciones lo alimentará otra superficie. `Campañas (Admin)` es la capa de playbooks que vincula ambos.
-
-**Tareas Backend:**
-- [ ] Crear modelo Sequelize `AdminCampaignPlaybook` + migración.
-- [ ] Crear controlador y rutas CRUD (`GET`, `POST`, `PUT`, `DELETE`).
-- [ ] Sin endpoint `toggle` — cambios de estado via `PUT`.
-
-
----
-
-## 2026-03-19 - Admin Campaign Playbooks
-
-> **Estado:** Diseño. Backend no implementado, solo contrato canónico definido para front (fijado en `e02e5ab`).
-
-Se introduce el concepto de `AdminCampaignPlaybook` como una entidad gestionada por el equipo de ClinicaClick para estandarizar y pre-configurar las campañas que los clientes pueden lanzar desde el wizard.
-
-> El Catálogo de Tratamientos lo alimentará otra superficie (Codex). El Catálogo de Automatizaciones lo alimentará otra superficie. `Campañas (Admin)` es la capa de playbooks que vincula ambos.
-
-### Contrato canónico (Backend)
-
-El backend deberá exponer endpoints CRUD para gestionar estos playbooks. El contrato del modelo es el siguiente:
-
-```javascript
-// Sequelize Model: AdminCampaignPlaybook
-module.exports = (sequelize, DataTypes) => {
-    const AdminCampaignPlaybook = sequelize.define('AdminCampaignPlaybook', {
-        id: {
-            type: DataTypes.UUID,
-            defaultValue: DataTypes.UUIDV4,
-            primaryKey: true
-        },
-        catalog_key: {
-            type: DataTypes.STRING,
-            allowNull: false,
-            unique: true
-        },
-        display_name: {
-            type: DataTypes.STRING,
-            allowNull: false
-        },
-        objective_id: {
-            type: DataTypes.STRING,
-            allowNull: false
-        },
-        status: {
-            type: DataTypes.ENUM('draft', 'active', 'archived'),
-            defaultValue: 'draft',
-            allowNull: false
-        },
-        promotion_kind: {
-            type: DataTypes.ENUM('treatment_specific', 'generic_campaign'),
-            allowNull: false
-        },
-        treatment_id: DataTypes.INTEGER,     // Solo si promotion_kind === 'treatment_specific'
-        area_medica: DataTypes.STRING,       // Solo si promotion_kind === 'generic_campaign'
-        family_key: DataTypes.STRING,        // Solo si promotion_kind === 'generic_campaign'
-        channels_supported: {
-            type: DataTypes.JSON,
-            defaultValue: []
-        },
-        channels_default: {
-            type: DataTypes.JSON,
-            defaultValue: []
-        },
-        recommended_budget_min: DataTypes.INTEGER,
-        recommended_budget_max: DataTypes.INTEGER,
-        destination_policy: {
-            type: DataTypes.JSON,
-            defaultValue: {}
-        },
-        measurement_profile: {               // first_party, channel_native, business_outcomes, remarketing, ad_calls
-            type: DataTypes.JSON,
-            defaultValue: {}
-        },
-        automation_strategy: {               // mode: inherit_recommendation | force_template | none
-            type: DataTypes.JSON,
-            defaultValue: {}
-        },
-        review_policy: {                     // managed_review_required, client_approval_required
-            type: DataTypes.JSON,
-            defaultValue: {}
-        },
-        notes_internal: DataTypes.TEXT
-    }, {
-        tableName: 'admin_campaign_playbooks',
-        timestamps: true
-    });
-
-    return AdminCampaignPlaybook;
-};
-```
-
-### Ruta API canónica
-
-`/api/admin/campaign-playbooks` — protegidos para `isSuperAdmin`.
-
-| Método | Ruta | Descripción |
-|--------|------|-------------|
-| GET | `/api/admin/campaign-playbooks` | Listar todos |
-| GET | `/api/admin/campaign-playbooks/:id` | Obtener por ID |
+| GET | `/api/admin/campaign-playbooks` | Listar |
+| GET | `/api/admin/campaign-playbooks/:id` | Detalle |
 | POST | `/api/admin/campaign-playbooks` | Crear |
-| PUT | `/api/admin/campaign-playbooks/:id` | Actualizar (incluye cambios de `status`) |
+| PUT | `/api/admin/campaign-playbooks/:id` | Actualizar |
 | DELETE | `/api/admin/campaign-playbooks/:id` | Eliminar |
 
-> No existe endpoint `toggle`. Los cambios de estado se resuelven con `PUT` / update de `status`.
+**Reglas activas:**
 
-### Lógica de Negocio
+- `catalog_key` único
+- validación de `promotion_kind`
+- `treatment_id` solo para `treatment_specific`
+- `area_medica` / `family_key` solo para `generic_campaign`
+- `measurement_profile` incluye `remarketing` y `ad_calls`
+- `automation_strategy.mode` soporta `inherit_recommendation`, `force_template`, `none`
+- `force_template` valida automatización activa con plantilla publicada
 
-- **`catalog_key`:** Debe ser único y se puede auto-generar a partir del `display_name` (`slugify`).
-- **Validación:** Asegurar que `treatment_id` solo se use con `promotion_kind: 'treatment_specific'`, y `area_medica`/`family_key` con `generic_campaign`.
-- **`notes_internal`:** Campo de texto libre (no `internal_notes`).
-- **`measurement_profile`:** Incluye `remarketing` y `ad_calls` como campos booleanos.
-- **`automation_strategy.mode`:** Valores válidos: `inherit_recommendation`, `force_template`, `none`.
-- **Relaciones:** El modelo debe tener relaciones (opcionales) con `AdminTreatmentCatalogItem` (via `treatment_id`) y `AdminAutomationCatalogItem` (via `template_key`). Ambas relaciones dependen de que los catálogos maestros estén implementados.
+### 9. Conexión real con el wizard
 
-### Conexión con el Wizard de Cliente
+La conexión ya no es futura:
 
-El wizard de creación de estrategias (`new_patients`) acepta un `@Input() playbook` opcional en el frontend. El prefill es parcial y no destructivo.
+- el wizard de `new_patients` consume campañas admin activas para saber qué tratamientos o campaña general pueden promocionarse
+- `Campañas Admin` filtra el catálogo visible del wizard
+- `connect_only` usa además campañas externas reales por target
 
-**No es una integración final cerrada con backend real.** El backend aún no sirve playbooks. Cuando se implemente:
+La parte que sigue pendiente no es servir playbooks, sino cerrar capacidades avanzadas como:
 
-1. El frontend resolverá el playbook desde `campanas.component` según el tratamiento seleccionado.
-2. El backend podrá servir playbooks filtrados por `objective_id` y `status: 'active'`.
-3. El flujo completo (seleccionar tratamiento → resolver playbook → inyectar en wizard) se cerrará extremo a extremo.
+- ingresos por target,
+- formularios instantáneos operativos end-to-end,
+- ejecución fully-managed desde ClinicaClick.
