@@ -1328,7 +1328,11 @@ async function buildMetaAdPreviewFromCreative({
 
 async function fetchMetaAnalysisAdPreviews({ campaignId, adIds, accessToken }) {
   const normalizedCampaignId = String(campaignId || '').trim();
-  const targetIds = new Set((Array.isArray(adIds) ? adIds : []).map((item) => String(item || '').trim()).filter(Boolean));
+  const previewTargetIds = (Array.isArray(adIds) ? adIds : [])
+    .map((item) => String(item || '').trim())
+    .filter(Boolean)
+    .slice(0, 12);
+  const targetIds = new Set(previewTargetIds);
   const result = new Map();
   if (!normalizedCampaignId || !targetIds.size || !accessToken) {
     return result;
@@ -1338,44 +1342,37 @@ async function fetchMetaAnalysisAdPreviews({ campaignId, adIds, accessToken }) {
   const videoCache = new Map();
   const mediaCache = new Map();
   const storyCache = new Map();
-  let nextUrl = `${normalizedCampaignId}/ads`;
-  let page = 0;
-
-  while (nextUrl && targetIds.size > result.size && page < 10) {
-    page += 1;
-    try {
-      const resp = await metaGet(nextUrl, {
-        params: nextUrl.includes('?') ? {} : {
-          fields: 'id,name,creative{id,name,effective_instagram_media_id,effective_object_story_id,instagram_permalink_url,object_story_spec,object_type,thumbnail_url,image_url,link_url,call_to_action_type}',
-          limit: Math.min(Math.max(targetIds.size, 25), 100)
-        },
-        accessToken,
-        timeout: 15000
-      });
-      const payload = resp.data || {};
-      const rows = Array.isArray(payload.data) ? payload.data : [];
-      for (const adRow of rows) {
-        const adId = String(adRow?.id || '').trim();
-        if (!adId || !targetIds.has(adId) || result.has(adId)) {
-          continue;
-        }
-        const creative = adRow?.creative && typeof adRow.creative === 'object'
-          ? adRow.creative
-          : {};
-        result.set(adId, await buildMetaAdPreviewFromCreative({
-          adRow,
-          creative,
-          accessToken,
-          formCache,
-          videoCache,
-          mediaCache,
-          storyCache
-        }));
+  try {
+    const resp = await metaGet(`${normalizedCampaignId}/ads`, {
+      params: {
+        fields: 'id,name,creative{id,name,effective_instagram_media_id,effective_object_story_id,instagram_permalink_url,object_story_spec,object_type,thumbnail_url,image_url,link_url,call_to_action_type}',
+        limit: Math.min(Math.max(targetIds.size, 12), 25)
+      },
+      accessToken,
+      timeout: 15000
+    });
+    const payload = resp.data || {};
+    const rows = Array.isArray(payload.data) ? payload.data : [];
+    for (const adRow of rows) {
+      const adId = String(adRow?.id || '').trim();
+      if (!adId || !targetIds.has(adId) || result.has(adId)) {
+        continue;
       }
-      nextUrl = typeof payload.paging?.next === 'string' ? payload.paging.next : null;
-    } catch (_err) {
-      break;
+      const creative = adRow?.creative && typeof adRow.creative === 'object'
+        ? adRow.creative
+        : {};
+      result.set(adId, await buildMetaAdPreviewFromCreative({
+        adRow,
+        creative,
+        accessToken,
+        formCache,
+        videoCache,
+        mediaCache,
+        storyCache
+      }));
     }
+  } catch (_err) {
+    return result;
   }
 
   return result;
@@ -2494,16 +2491,15 @@ async function persistGoogleCampaignAnalysisAdRows({ account, scope, rows }) {
   return payloadRows.length;
 }
 
-async function warmGoogleCampaignAnalysisCache({ userId, scope, campaignRef, timeframe }) {
-  const customerId = normalizeCustomerId(campaignRef?.account_id || '');
-  const campaignId = String(campaignRef?.external_campaign_id || '').trim();
-  if (!userId || !customerId || !campaignId) {
-    return 0;
+async function resolveGoogleCampaignAnalysisAccess({ userId, scope, customerId }) {
+  const normalizedCustomerId = normalizeCustomerId(customerId);
+  if (!userId || !normalizedCustomerId) {
+    return null;
   }
 
   const account = await ClinicGoogleAdsAccount.findOne({
     where: {
-      customerId,
+      customerId: normalizedCustomerId,
       isActive: true,
       ...buildScopeWhere(scope)
     },
@@ -2511,7 +2507,7 @@ async function warmGoogleCampaignAnalysisCache({ userId, scope, campaignRef, tim
     raw: true
   });
   if (!account) {
-    return 0;
+    return null;
   }
 
   const googleResolved = await resolveGoogleConnectionForScope({
@@ -2522,23 +2518,174 @@ async function warmGoogleCampaignAnalysisCache({ userId, scope, campaignRef, tim
     allowLegacyUserFallback: true
   });
   if (!googleResolved?.connection) {
-    return 0;
+    return null;
   }
 
   const { accessToken } = await ensureGoogleAdsAccess(googleResolved.connection);
   const loginCustomerId = normalizeCustomerId(account.loginCustomerId || account.managerCustomerId || '')
-    || await resolveLoginCustomerId(googleResolved.connection.id, customerId, scope)
+    || await resolveLoginCustomerId(googleResolved.connection.id, normalizedCustomerId, scope)
     || undefined;
 
-  const liveRows = await fetchGoogleCampaignAnalysisAdRowsLive({
+  return {
+    account,
     accessToken,
     loginCustomerId,
-    customerId,
+    customerId: normalizedCustomerId
+  };
+}
+
+async function warmGoogleCampaignAnalysisCache({ userId, scope, campaignRef, timeframe }) {
+  const customerId = normalizeCustomerId(campaignRef?.account_id || '');
+  const campaignId = String(campaignRef?.external_campaign_id || '').trim();
+  if (!userId || !customerId || !campaignId) {
+    return 0;
+  }
+
+  const runtime = await resolveGoogleCampaignAnalysisAccess({ userId, scope, customerId });
+  if (!runtime?.account) {
+    return 0;
+  }
+
+  const liveRows = await fetchGoogleCampaignAnalysisAdRowsLive({
+    accessToken: runtime.accessToken,
+    loginCustomerId: runtime.loginCustomerId,
+    customerId: runtime.customerId,
     campaignId,
     timeframe
   });
 
-  return persistGoogleCampaignAnalysisAdRows({ account, scope, rows: liveRows });
+  return persistGoogleCampaignAnalysisAdRows({ account: runtime.account, scope, rows: liveRows });
+}
+
+async function fetchGooglePerformanceMaxAnalysisRowsLive({ accessToken, loginCustomerId, customerId, campaignId, timeframe, previewDestinationUrl }) {
+  const cleanCustomerId = normalizeCustomerId(customerId);
+  const cleanCampaignId = String(campaignId || '').trim();
+  if (!accessToken || !cleanCustomerId || !cleanCampaignId) {
+    return [];
+  }
+
+  const groupQuery = [
+    'SELECT',
+    '  campaign.id,',
+    '  campaign.name,',
+    '  asset_group.id,',
+    '  asset_group.name,',
+    '  metrics.impressions,',
+    '  metrics.clicks,',
+    '  metrics.cost_micros,',
+    '  metrics.conversions',
+    'FROM asset_group',
+    `WHERE campaign.id = '${cleanCampaignId}'`,
+    `  AND segments.date BETWEEN '${formatDate(timeframe.start)}' AND '${formatDate(timeframe.end)}'`
+  ].join('\n');
+
+  const assetQuery = [
+    'SELECT',
+    '  campaign.id,',
+    '  asset_group.id,',
+    '  asset_group.name,',
+    '  asset_group_asset.field_type,',
+    '  asset_group_asset.status,',
+    '  asset.id,',
+    '  asset.name,',
+    '  asset.type,',
+    '  asset.text_asset.text,',
+    '  asset.image_asset.full_size.url,',
+    '  asset.youtube_video_asset.youtube_video_id',
+    'FROM asset_group_asset',
+    `WHERE campaign.id = '${cleanCampaignId}'`
+  ].join('\n');
+
+  const [groupResp, assetResp] = await Promise.all([
+    googleAdsRequest('POST', `customers/${cleanCustomerId}/googleAds:search`, {
+      accessToken,
+      loginCustomerId: loginCustomerId || undefined,
+      data: { query: groupQuery }
+    }),
+    googleAdsRequest('POST', `customers/${cleanCustomerId}/googleAds:search`, {
+      accessToken,
+      loginCustomerId: loginCustomerId || undefined,
+      data: { query: assetQuery }
+    })
+  ]);
+
+  const metricRows = Array.isArray(groupResp?.results) ? groupResp.results : [];
+  const assetRows = Array.isArray(assetResp?.results) ? assetResp.results : [];
+  if (!metricRows.length) {
+    return [];
+  }
+
+  const assetsByGroupId = new Map();
+  for (const row of assetRows) {
+    const assetGroupId = String(row?.assetGroup?.id || '').trim();
+    if (!assetGroupId) continue;
+    if (!assetsByGroupId.has(assetGroupId)) {
+      assetsByGroupId.set(assetGroupId, []);
+    }
+    assetsByGroupId.get(assetGroupId).push(row);
+  }
+
+  return metricRows.map((row) => {
+    const assetGroupId = String(row?.assetGroup?.id || '').trim();
+    const assetGroupName = row?.assetGroup?.name || 'Asset group';
+    const spend = microsToCurrency(row?.metrics?.costMicros);
+    const leads = safeNumber(row?.metrics?.conversions);
+    const impressions = safeNumber(row?.metrics?.impressions);
+    const clicks = safeNumber(row?.metrics?.clicks);
+    const groupAssets = Array.isArray(assetsByGroupId.get(assetGroupId)) ? assetsByGroupId.get(assetGroupId) : [];
+
+    const enabledAssets = groupAssets.filter((assetRow) => String(assetRow?.assetGroupAsset?.status || '').trim().toUpperCase() !== 'REMOVED');
+    const headlines = enabledAssets
+      .filter((assetRow) => ['HEADLINE', 'LONG_HEADLINE', 'BUSINESS_NAME'].includes(String(assetRow?.assetGroupAsset?.fieldType || '').trim().toUpperCase()))
+      .map((assetRow) => String(assetRow?.asset?.textAsset?.text || '').trim())
+      .filter(Boolean);
+    const descriptions = enabledAssets
+      .filter((assetRow) => String(assetRow?.assetGroupAsset?.fieldType || '').trim().toUpperCase() === 'DESCRIPTION')
+      .map((assetRow) => String(assetRow?.asset?.textAsset?.text || '').trim())
+      .filter(Boolean);
+    const imageUrl = enabledAssets
+      .map((assetRow) => String(assetRow?.asset?.imageAsset?.fullSize?.url || '').trim())
+      .find(Boolean) || null;
+    const youtubeVideoId = enabledAssets
+      .map((assetRow) => String(assetRow?.asset?.youtubeVideoAsset?.youtubeVideoId || '').trim())
+      .find(Boolean) || null;
+    const mediaUrl = imageUrl || (youtubeVideoId ? `https://i.ytimg.com/vi/${youtubeVideoId}/hqdefault.jpg` : null);
+
+    const groupRow = buildAnalysisLeafRow({
+      kind: 'ad_group',
+      key: `google_ads:asset_group:${assetGroupId}`,
+      name: assetGroupName,
+      spend,
+      leads,
+      impressions,
+      clicks
+    });
+
+    const previewRow = buildAnalysisLeafRow({
+      kind: 'ad',
+      key: `google_ads:asset_preview:${assetGroupId}`,
+      name: headlines[0] || assetGroupName,
+      spend,
+      leads,
+      impressions,
+      clicks,
+      mock: false,
+      warningText: groupRow.warningText,
+      thumbnailUrl: mediaUrl,
+      creativeImageUrl: mediaUrl,
+      creativeText: descriptions.join(' ') || null,
+      creativeDestinationUrl: previewDestinationUrl,
+      googleAdsHeadlines: headlines,
+      googleAdsDescriptions: descriptions,
+      googleAdsDisplayUrl: previewDestinationUrl,
+      googleAdsSitelinks: []
+    });
+
+    return {
+      ...groupRow,
+      ads: [previewRow]
+    };
+  }).sort((a, b) => safeNumber(b.spend) - safeNumber(a.spend));
 }
 
 async function buildGoogleCampaignAnalysisRows({ scope, campaignRef, timeframe, userId }) {
@@ -2677,6 +2824,27 @@ async function buildGoogleCampaignAnalysisRows({ scope, campaignRef, timeframe, 
         };
       })
       .sort((a, b) => safeNumber(b.spend) - safeNumber(a.spend));
+  }
+
+  if (userId) {
+    try {
+      const runtime = await resolveGoogleCampaignAnalysisAccess({ userId, scope, customerId });
+      if (runtime?.accessToken) {
+        const pmaxRows = await fetchGooglePerformanceMaxAnalysisRowsLive({
+          accessToken: runtime.accessToken,
+          loginCustomerId: runtime.loginCustomerId,
+          customerId: runtime.customerId,
+          campaignId,
+          timeframe,
+          previewDestinationUrl
+        });
+        if (pmaxRows.length) {
+          return pmaxRows;
+        }
+      }
+    } catch (_err) {
+      // fallback to cached/ad_group summary below
+    }
   }
 
   const rows = await GoogleAdsInsightsDaily.findAll({
