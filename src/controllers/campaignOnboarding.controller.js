@@ -1805,7 +1805,29 @@ function resolveMetaLeadTotalFromActionTotals(totals) {
     + safeNumber(normalized['onsite_conversion.lead_grouped']);
 }
 
-function buildAnalysisLeafRow({ kind, key, name, spend, leads, impressions, clicks, mock = false, warningText = null }) {
+function buildAnalysisLeafRow({
+  kind,
+  key,
+  name,
+  spend,
+  leads,
+  impressions,
+  clicks,
+  mock = false,
+  warningText = null,
+  thumbnailUrl = null,
+  creativeImageUrl = null,
+  creativeText = null,
+  creativeCta = null,
+  creativeDestinationUrl = null,
+  googleAdsHeadlines = [],
+  googleAdsDescriptions = [],
+  googleAdsDisplayUrl = null,
+  googleAdsSitelinks = [],
+  instantFormName = null,
+  instantFormQuestions = [],
+  followUpUrl = null
+}) {
   const normalizedSpend = safeNumber(spend);
   const normalizedLeads = leads == null ? null : safeNumber(leads);
   const normalizedImpressions = safeNumber(impressions);
@@ -1825,7 +1847,19 @@ function buildAnalysisLeafRow({ kind, key, name, spend, leads, impressions, clic
     impressions: normalizedImpressions,
     clicks: normalizedClicks,
     hasWarning: normalizedSpend > 0 && !normalizedLeads,
-    warningText: warningText || (normalizedSpend > 0 && !normalizedLeads ? 'Sin leads' : null)
+    warningText: warningText || (normalizedSpend > 0 && !normalizedLeads ? 'Sin leads' : null),
+    thumbnail_url: thumbnailUrl || creativeImageUrl || null,
+    creative_image_url: creativeImageUrl || null,
+    creative_text: creativeText || null,
+    creative_cta: creativeCta || null,
+    creative_destination_url: creativeDestinationUrl || null,
+    google_ads_headlines: Array.isArray(googleAdsHeadlines) ? googleAdsHeadlines.filter(Boolean) : [],
+    google_ads_descriptions: Array.isArray(googleAdsDescriptions) ? googleAdsDescriptions.filter(Boolean) : [],
+    google_ads_display_url: googleAdsDisplayUrl || null,
+    google_ads_sitelinks: Array.isArray(googleAdsSitelinks) ? googleAdsSitelinks.filter((item) => item && item.title && item.url) : [],
+    instant_form_name: instantFormName || null,
+    instant_form_questions: Array.isArray(instantFormQuestions) ? instantFormQuestions : [],
+    follow_up_url: followUpUrl || null
   };
 }
 
@@ -1835,6 +1869,14 @@ async function buildGoogleCampaignAnalysisRows({ scope, campaignRef, timeframe }
   if (!customerId || !campaignId) {
     return [];
   }
+  const googlePreview = campaignRef?.destination_detection?.google_ads_preview && typeof campaignRef.destination_detection.google_ads_preview === 'object'
+    ? campaignRef.destination_detection.google_ads_preview
+    : {};
+  const previewDestinationUrl = typeof googlePreview.display_url === 'string' && googlePreview.display_url.trim()
+    ? String(googlePreview.display_url).trim()
+    : Array.isArray(campaignRef?.destination_detection?.urls) && campaignRef.destination_detection.urls[0]
+    ? String(campaignRef.destination_detection.urls[0]).trim()
+    : null;
 
   const rows = await GoogleAdsInsightsDaily.findAll({
     attributes: [
@@ -1883,7 +1925,13 @@ async function buildGoogleCampaignAnalysisRows({ scope, campaignRef, timeframe }
         impressions: row.impressions,
         clicks: row.clicks,
         mock: true,
-        warningText: groupRow.warningText
+        warningText: groupRow.warningText,
+        creativeText: Array.isArray(googlePreview.descriptions) ? googlePreview.descriptions.filter(Boolean).join(' ') : null,
+        creativeDestinationUrl: previewDestinationUrl,
+        googleAdsHeadlines: Array.isArray(googlePreview.headlines) ? googlePreview.headlines : [],
+        googleAdsDescriptions: Array.isArray(googlePreview.descriptions) ? googlePreview.descriptions : [],
+        googleAdsDisplayUrl: previewDestinationUrl,
+        googleAdsSitelinks: Array.isArray(googlePreview.sitelinks) ? googlePreview.sitelinks : []
       });
 
       return {
@@ -1899,6 +1947,20 @@ async function buildMetaCampaignAnalysisRows({ scope, campaignRef, timeframe }) 
   if (!campaignId) {
     return [];
   }
+  const detection = campaignRef?.destination_detection && typeof campaignRef.destination_detection === 'object'
+    ? campaignRef.destination_detection
+    : {};
+  const creativePreview = detection?.creative_preview && typeof detection.creative_preview === 'object'
+    ? detection.creative_preview
+    : {};
+  const instantForm = detection?.instant_form && typeof detection.instant_form === 'object'
+    ? detection.instant_form
+    : {};
+  const creativeDestinationUrl = Array.isArray(detection?.urls) && detection.urls[0]
+    ? String(detection.urls[0]).trim()
+    : typeof instantForm.follow_up_action_url === 'string'
+    ? String(instantForm.follow_up_action_url).trim()
+    : null;
 
   const adsetEntities = await SocialAdsEntity.findAll({
     where: {
@@ -2042,7 +2104,15 @@ async function buildMetaCampaignAnalysisRows({ scope, campaignRef, timeframe }) 
             spend: adInsight?.spend,
             leads: resolveMetaLeadTotalFromActionTotals(adActionTotals),
             impressions: adInsight?.impressions,
-            clicks: adInsight?.clicks
+            clicks: adInsight?.clicks,
+            thumbnailUrl: creativePreview.media_url || null,
+            creativeImageUrl: creativePreview.media_url || null,
+            creativeText: creativePreview.body || creativePreview.preview_summary || creativePreview.title || null,
+            creativeCta: creativePreview.cta_type || null,
+            creativeDestinationUrl,
+            instantFormName: instantForm.name || null,
+            instantFormQuestions: Array.isArray(instantForm.questions_preview) ? instantForm.questions_preview : [],
+            followUpUrl: instantForm.follow_up_action_url || null
           });
         })
         .sort((a, b) => safeNumber(b.spend) - safeNumber(a.spend));

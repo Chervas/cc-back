@@ -1161,6 +1161,17 @@ e incluye, cuando existe:
 - Google Ads: campaña → ad group real; preview creativo reutiliza el material ya detectado a nivel campaña
 - Meta Ads: campaña → ad set → ad con métricas reales cacheadas
 
+**Payload operativo actual:**
+- cada fila puede devolver `thumbnail_url`
+- cada fila de anuncio puede devolver `creative_image_url`, `creative_text`, `creative_cta`, `creative_destination_url`
+- Google puede devolver además `google_ads_headlines`, `google_ads_descriptions`, `google_ads_display_url` y `google_ads_sitelinks`
+- Meta puede devolver además `instant_form_name`, `instant_form_questions` y `follow_up_url`
+
+Esto permite:
+- modal de creatividad sin llamadas live adicionales
+- carga lazy del tab `Análisis`
+- reutilizar el mismo endpoint para recalcular métricas de las cards resumen por rango temporal
+
 **Límite actual:**
 - Google Ads todavía no tiene creatividad/ad-level persistida en cache con el mismo nivel de detalle que Meta, así que el último nivel visual puede seguir apoyándose en preview resumido de campaña
 
