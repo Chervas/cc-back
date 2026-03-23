@@ -25,6 +25,7 @@ router.get('/strategies', campaignOnboardingController.listMarketingStrategies);
 router.post('/strategies', campaignOnboardingController.createMarketingStrategy);
 router.patch('/strategies/:id', campaignOnboardingController.updateMarketingStrategy);
 router.get('/strategies/:id', campaignOnboardingController.getMarketingStrategyDetail);
+router.get('/strategies/:id/analysis/campaign', campaignOnboardingController.getMarketingStrategyAnalysisCampaign);
 router.patch('/strategies/:id/status', campaignOnboardingController.transitionMarketingStrategyStatus);
 router.get('/strategies/:id/metrics', campaignOnboardingController.getMarketingStrategyMetrics);
 

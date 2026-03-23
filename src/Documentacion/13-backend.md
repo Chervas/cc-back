@@ -1090,6 +1090,7 @@ En esa carga se guardan, entre otros:
 | GET | `/api/marketing/strategies` | Operativo | listado de estrategias |
 | POST | `/api/marketing/strategies` | Operativo | creación de estrategia |
 | GET | `/api/marketing/strategies/:id` | Operativo | detalle completo para rehidratar edición |
+| GET | `/api/marketing/strategies/:id/analysis/campaign` | Operativo | estructura lazy por campaña vinculada usando tablas cacheadas |
 | PATCH | `/api/marketing/strategies/:id` | Operativo | edición real |
 | PATCH | `/api/marketing/strategies/:id/status` | Operativo | transiciones de estado |
 | GET | `/api/marketing/strategies/:id/metrics` | Operativo | métricas live de estrategia |
@@ -1140,6 +1141,28 @@ e incluye, cuando existe:
 - URLs detectadas
 - datos de formulario instantáneo de Meta
 - preview creativo resumido
+- preview Google Ads (headlines, descriptions, display URL y sitelinks) cuando la sincronización ya lo conoce
+
+> **Nota operativa:** el detalle de estrategia ya preserva `destination_detection` dentro de `external_targets`. Antes se perdía al normalizar el payload; desde marzo 2026 se mantiene para que la UI pueda reutilizar previews y tipos de destino al reabrir una configuración.
+
+### 5.1. Análisis lazy por campaña
+
+`GET /api/marketing/strategies/:id/analysis/campaign` resuelve bajo demanda la estructura de análisis de una campaña externa vinculada:
+
+- `provider`
+- `external_campaign_id`
+- `timeframe` (`yesterday | last_week | last_7_days | last_month | all_time`)
+
+**Fuente de datos:**
+- Google Ads: `GoogleAdsInsightsDaily` cacheada
+- Meta Ads: `SocialAdsEntity`, `SocialAdsInsightsDaily` y `SocialAdsActionsDaily` cacheadas
+
+**Cobertura real actual:**
+- Google Ads: campaña → ad group real; preview creativo reutiliza el material ya detectado a nivel campaña
+- Meta Ads: campaña → ad set → ad con métricas reales cacheadas
+
+**Límite actual:**
+- Google Ads todavía no tiene creatividad/ad-level persistida en cache con el mismo nivel de detalle que Meta, así que el último nivel visual puede seguir apoyándose en preview resumido de campaña
 
 ### 6. Métricas live y atribución CRM
 

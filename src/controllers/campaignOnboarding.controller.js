@@ -1581,6 +1581,90 @@ function normalizeStrategyTreatments(rawTreatments) {
     .filter((item) => item.id && item.nombre);
 }
 
+function normalizeExternalCampaignDetection(rawDetection) {
+  if (!rawDetection || typeof rawDetection !== 'object') {
+    return null;
+  }
+
+  const instantForm = rawDetection.instant_form && typeof rawDetection.instant_form === 'object'
+    ? {
+        id: rawDetection.instant_form.id ? String(rawDetection.instant_form.id).trim() : null,
+        name: typeof rawDetection.instant_form.name === 'string' ? String(rawDetection.instant_form.name).trim() || null : null,
+        status: typeof rawDetection.instant_form.status === 'string' ? String(rawDetection.instant_form.status).trim() || null : null,
+        locale: typeof rawDetection.instant_form.locale === 'string' ? String(rawDetection.instant_form.locale).trim() || null : null,
+        follow_up_action_url: typeof rawDetection.instant_form.follow_up_action_url === 'string'
+          ? String(rawDetection.instant_form.follow_up_action_url).trim() || null
+          : null,
+        preview_available: rawDetection.instant_form.preview_available === true,
+        preview_summary: typeof rawDetection.instant_form.preview_summary === 'string'
+          ? String(rawDetection.instant_form.preview_summary).trim() || null
+          : null,
+        questions_preview: Array.isArray(rawDetection.instant_form.questions_preview)
+          ? rawDetection.instant_form.questions_preview
+              .filter((item) => item && typeof item === 'object')
+              .map((item) => ({
+                key: item.key ? String(item.key).trim() : null,
+                label: typeof item.label === 'string' ? String(item.label).trim() || null : null,
+                type: typeof item.type === 'string' ? String(item.type).trim() || null : null
+              }))
+          : []
+      }
+    : null;
+
+  const creativePreview = rawDetection.creative_preview && typeof rawDetection.creative_preview === 'object'
+    ? {
+        available: rawDetection.creative_preview.available !== false,
+        ad_id: rawDetection.creative_preview.ad_id ? String(rawDetection.creative_preview.ad_id).trim() : null,
+        ad_name: typeof rawDetection.creative_preview.ad_name === 'string' ? String(rawDetection.creative_preview.ad_name).trim() || null : null,
+        title: typeof rawDetection.creative_preview.title === 'string' ? String(rawDetection.creative_preview.title).trim() || null : null,
+        body: typeof rawDetection.creative_preview.body === 'string' ? String(rawDetection.creative_preview.body).trim() || null : null,
+        media_url: typeof rawDetection.creative_preview.media_url === 'string' ? String(rawDetection.creative_preview.media_url).trim() || null : null,
+        permalink_url: typeof rawDetection.creative_preview.permalink_url === 'string' ? String(rawDetection.creative_preview.permalink_url).trim() || null : null,
+        cta_type: typeof rawDetection.creative_preview.cta_type === 'string' ? String(rawDetection.creative_preview.cta_type).trim() || null : null,
+        preview_summary: typeof rawDetection.creative_preview.preview_summary === 'string'
+          ? String(rawDetection.creative_preview.preview_summary).trim() || null
+          : null
+      }
+    : null;
+
+  const googleAdsPreview = rawDetection.google_ads_preview && typeof rawDetection.google_ads_preview === 'object'
+    ? {
+        headlines: listToUniqueArray(Array.isArray(rawDetection.google_ads_preview.headlines) ? rawDetection.google_ads_preview.headlines : []),
+        descriptions: listToUniqueArray(Array.isArray(rawDetection.google_ads_preview.descriptions) ? rawDetection.google_ads_preview.descriptions : []),
+        display_url: typeof rawDetection.google_ads_preview.display_url === 'string'
+          ? String(rawDetection.google_ads_preview.display_url).trim() || null
+          : null,
+        sitelinks: Array.isArray(rawDetection.google_ads_preview.sitelinks)
+          ? rawDetection.google_ads_preview.sitelinks
+              .filter((item) => item && typeof item === 'object')
+              .map((item) => ({
+                title: typeof item.title === 'string' ? String(item.title).trim() || null : null,
+                url: typeof item.url === 'string' ? String(item.url).trim() || null : null
+              }))
+              .filter((item) => item.title || item.url)
+          : []
+      }
+    : null;
+
+  return {
+    kind: String(rawDetection.kind || '').trim().toLowerCase() === 'lead_form'
+      ? 'lead_form'
+      : String(rawDetection.kind || '').trim().toLowerCase() === 'web'
+      ? 'web'
+      : 'unknown',
+    confidence: String(rawDetection.confidence || '').trim().toLowerCase() === 'high'
+      ? 'high'
+      : String(rawDetection.confidence || '').trim().toLowerCase() === 'low'
+      ? 'low'
+      : 'medium',
+    reason: typeof rawDetection.reason === 'string' ? String(rawDetection.reason).trim() || null : null,
+    urls: listToUniqueArray(Array.isArray(rawDetection.urls) ? rawDetection.urls : []),
+    instant_form: instantForm,
+    creative_preview: creativePreview,
+    google_ads_preview: googleAdsPreview
+  };
+}
+
 function normalizeExternalCampaignAssignments(rawAssignments) {
   if (!Array.isArray(rawAssignments)) return [];
   return rawAssignments
@@ -1604,7 +1688,8 @@ function normalizeExternalCampaignAssignments(rawAssignments) {
             clicks: 0,
             spend: 0,
             conversions: 0
-          }
+          },
+      destination_detection: normalizeExternalCampaignDetection(item.destination_detection)
     }))
     .filter((item) => (
       (item.provider === 'google_ads' || item.provider === 'meta_ads')
@@ -1663,6 +1748,327 @@ function extractStrategyScopeFromPayload(payload, rows = []) {
     group_id: parseInteger(scope.group_id) || null,
     clinic_ids: parseClinicIds(scope.clinic_ids)
   };
+}
+
+function resolveAnalysisDateRange(timeframeRaw, startDateRaw, endDateRaw) {
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+
+  const normalized = String(timeframeRaw || '').trim().toLowerCase();
+  const explicitStart = startDateRaw ? parseDate(startDateRaw, null) : null;
+  const explicitEnd = endDateRaw ? parseDate(endDateRaw, null) : null;
+  if (explicitStart && explicitEnd) {
+    return {
+      key: normalized || 'custom',
+      start: explicitStart,
+      end: explicitEnd
+    };
+  }
+
+  const end = new Date(today);
+  const start = new Date(today);
+
+  switch (normalized) {
+    case 'yesterday':
+      start.setDate(start.getDate() - 1);
+      end.setDate(end.getDate() - 1);
+      break;
+    case 'last_week':
+      start.setDate(start.getDate() - 13);
+      end.setDate(end.getDate() - 7);
+      break;
+    case 'last_month':
+      start.setDate(start.getDate() - 29);
+      break;
+    case 'all_time':
+      start.setFullYear(2020, 0, 1);
+      break;
+    case 'last_7_days':
+    default:
+      start.setDate(start.getDate() - 6);
+      break;
+  }
+
+  return {
+    key: normalized || 'last_7_days',
+    start,
+    end
+  };
+}
+
+function resolveMetaLeadTotalFromActionTotals(totals) {
+  const normalized = totals && typeof totals === 'object' ? totals : {};
+  return safeNumber(normalized.lead)
+    + safeNumber(normalized['offsite_conversion.fb_pixel_lead'])
+    + safeNumber(normalized['onsite_conversion.lead_form'])
+    + safeNumber(normalized['leadgen.other'])
+    + safeNumber(normalized['onsite_conversion.lead_grouped']);
+}
+
+function buildAnalysisLeafRow({ kind, key, name, spend, leads, impressions, clicks, mock = false, warningText = null }) {
+  const normalizedSpend = safeNumber(spend);
+  const normalizedLeads = leads == null ? null : safeNumber(leads);
+  const normalizedImpressions = safeNumber(impressions);
+  const normalizedClicks = safeNumber(clicks);
+  const computedCtr = normalizedImpressions > 0 ? (normalizedClicks / normalizedImpressions) * 100 : null;
+
+  return {
+    kind,
+    key,
+    name: name || 'Sin nombre',
+    summary: null,
+    mock: mock === true,
+    spend: Number(normalizedSpend.toFixed(2)),
+    leads: normalizedLeads,
+    cpl: normalizedLeads && normalizedLeads > 0 ? Number((normalizedSpend / normalizedLeads).toFixed(2)) : null,
+    ctr: computedCtr != null ? Number(computedCtr.toFixed(2)) : null,
+    impressions: normalizedImpressions,
+    clicks: normalizedClicks,
+    hasWarning: normalizedSpend > 0 && !normalizedLeads,
+    warningText: warningText || (normalizedSpend > 0 && !normalizedLeads ? 'Sin leads' : null)
+  };
+}
+
+async function buildGoogleCampaignAnalysisRows({ scope, campaignRef, timeframe }) {
+  const customerId = normalizeCustomerId(campaignRef?.account_id || '');
+  const campaignId = String(campaignRef?.external_campaign_id || '').trim();
+  if (!customerId || !campaignId) {
+    return [];
+  }
+
+  const rows = await GoogleAdsInsightsDaily.findAll({
+    attributes: [
+      'adGroupId',
+      'adGroupName',
+      [fn('SUM', col('impressions')), 'impressions'],
+      [fn('SUM', col('clicks')), 'clicks'],
+      [fn('SUM', col('costMicros')), 'costMicros'],
+      [fn('SUM', col('conversions')), 'conversions']
+    ],
+    where: {
+      customerId,
+      campaignId,
+      date: { [Op.between]: [formatDate(timeframe.start), formatDate(timeframe.end)] },
+      ...buildMetricsScopeWhere(scope, { clinicField: 'clinicaId', groupField: 'grupoClinicaId' })
+    },
+    group: ['adGroupId', 'adGroupName'],
+    raw: true
+  });
+
+  return rows
+    .map((row, index) => {
+      const adGroupId = String(row.adGroupId || '').trim() || `ad-group-${index + 1}`;
+      const adGroupName = row.adGroupName || 'Grupo principal';
+      const spend = microsToCurrency(row.costMicros);
+      const leads = safeNumber(row.conversions);
+      const groupRow = buildAnalysisLeafRow({
+        kind: 'ad_group',
+        key: `google_ads:ad_group:${adGroupId}`,
+        name: adGroupName,
+        spend,
+        leads,
+        impressions: row.impressions,
+        clicks: row.clicks
+      });
+
+      const previewLabel = campaignRef?.destination_detection?.google_ads_preview?.headlines?.[0]
+        || campaignRef?.name
+        || adGroupName;
+      const previewRow = buildAnalysisLeafRow({
+        kind: 'ad',
+        key: `google_ads:ad_preview:${adGroupId}`,
+        name: previewLabel,
+        spend,
+        leads,
+        impressions: row.impressions,
+        clicks: row.clicks,
+        mock: true,
+        warningText: groupRow.warningText
+      });
+
+      return {
+        ...groupRow,
+        ads: [previewRow]
+      };
+    })
+    .sort((a, b) => safeNumber(b.spend) - safeNumber(a.spend));
+}
+
+async function buildMetaCampaignAnalysisRows({ scope, campaignRef, timeframe }) {
+  const campaignId = String(campaignRef?.external_campaign_id || '').trim();
+  if (!campaignId) {
+    return [];
+  }
+
+  const adsetEntities = await SocialAdsEntity.findAll({
+    where: {
+      level: 'adset',
+      parent_id: campaignId
+    },
+    raw: true
+  });
+  if (!adsetEntities.length) {
+    return [];
+  }
+
+  const adsetIds = adsetEntities.map((row) => String(row.entity_id || '').trim()).filter(Boolean);
+  const adEntities = adsetIds.length
+    ? await SocialAdsEntity.findAll({
+        where: {
+          level: 'ad',
+          parent_id: { [Op.in]: adsetIds }
+        },
+        raw: true
+      })
+    : [];
+
+  const scopeWhereInsights = buildMetricsScopeWhere(scope, { clinicField: 'clinica_id', groupField: 'grupo_clinica_id' });
+  const rangeWhere = { [Op.between]: [formatDate(timeframe.start), formatDate(timeframe.end)] };
+
+  const adsetInsightRows = adsetIds.length
+    ? await SocialAdsInsightsDaily.findAll({
+        attributes: [
+          'entity_id',
+          [fn('SUM', col('impressions')), 'impressions'],
+          [fn('SUM', col('clicks')), 'clicks'],
+          [fn('SUM', col('spend')), 'spend']
+        ],
+        where: {
+          level: 'adset',
+          entity_id: { [Op.in]: adsetIds },
+          date: rangeWhere,
+          ...scopeWhereInsights
+        },
+        group: ['entity_id'],
+        raw: true
+      })
+    : [];
+
+  const adsetActionRows = adsetIds.length
+    ? await SocialAdsActionsDaily.findAll({
+        attributes: [
+          'entity_id',
+          'action_type',
+          [fn('SUM', col('value')), 'value']
+        ],
+        where: {
+          level: 'adset',
+          entity_id: { [Op.in]: adsetIds },
+          date: rangeWhere,
+          ...buildMetricsScopeWhere(scope, { clinicField: 'clinica_id', groupField: 'grupo_clinica_id' })
+        },
+        group: ['entity_id', 'action_type'],
+        raw: true
+      })
+    : [];
+
+  const adIds = adEntities.map((row) => String(row.entity_id || '').trim()).filter(Boolean);
+  const adInsightRows = adIds.length
+    ? await SocialAdsInsightsDaily.findAll({
+        attributes: [
+          'entity_id',
+          [fn('SUM', col('impressions')), 'impressions'],
+          [fn('SUM', col('clicks')), 'clicks'],
+          [fn('SUM', col('spend')), 'spend']
+        ],
+        where: {
+          level: 'ad',
+          entity_id: { [Op.in]: adIds },
+          date: rangeWhere,
+          ...scopeWhereInsights
+        },
+        group: ['entity_id'],
+        raw: true
+      })
+    : [];
+
+  const adActionRows = adIds.length
+    ? await SocialAdsActionsDaily.findAll({
+        attributes: [
+          'entity_id',
+          'action_type',
+          [fn('SUM', col('value')), 'value']
+        ],
+        where: {
+          level: 'ad',
+          entity_id: { [Op.in]: adIds },
+          date: rangeWhere,
+          ...buildMetricsScopeWhere(scope, { clinicField: 'clinica_id', groupField: 'grupo_clinica_id' })
+        },
+        group: ['entity_id', 'action_type'],
+        raw: true
+      })
+    : [];
+
+  const insightByEntityId = new Map(adsetInsightRows.map((row) => [String(row.entity_id || '').trim(), row]));
+  const adInsightByEntityId = new Map(adInsightRows.map((row) => [String(row.entity_id || '').trim(), row]));
+  const actionsByEntityId = new Map();
+  for (const row of adsetActionRows) {
+    const key = String(row.entity_id || '').trim();
+    if (!key) continue;
+    if (!actionsByEntityId.has(key)) actionsByEntityId.set(key, []);
+    actionsByEntityId.get(key).push(row);
+  }
+  const adActionsByEntityId = new Map();
+  for (const row of adActionRows) {
+    const key = String(row.entity_id || '').trim();
+    if (!key) continue;
+    if (!adActionsByEntityId.has(key)) adActionsByEntityId.set(key, []);
+    adActionsByEntityId.get(key).push(row);
+  }
+
+  const adRowsByAdsetId = new Map();
+  for (const ad of adEntities) {
+    const adsetId = String(ad.parent_id || '').trim();
+    if (!adsetId) continue;
+    if (!adRowsByAdsetId.has(adsetId)) adRowsByAdsetId.set(adsetId, []);
+    adRowsByAdsetId.get(adsetId).push(ad);
+  }
+
+  return adsetEntities
+    .map((adset) => {
+      const adsetId = String(adset.entity_id || '').trim();
+      const adsetInsight = insightByEntityId.get(adsetId) || null;
+      const adsetActionTotals = summarizeMetaCampaignActions(actionsByEntityId.get(adsetId) || []);
+      const ads = (adRowsByAdsetId.get(adsetId) || [])
+        .map((ad, index) => {
+          const adId = String(ad.entity_id || '').trim();
+          const adInsight = adInsightByEntityId.get(adId) || null;
+          const adActionTotals = summarizeMetaCampaignActions(adActionsByEntityId.get(adId) || []);
+          return buildAnalysisLeafRow({
+            kind: 'ad',
+            key: `meta_ads:ad:${adId || index + 1}`,
+            name: ad.name || `Anuncio ${index + 1}`,
+            spend: adInsight?.spend,
+            leads: resolveMetaLeadTotalFromActionTotals(adActionTotals),
+            impressions: adInsight?.impressions,
+            clicks: adInsight?.clicks
+          });
+        })
+        .sort((a, b) => safeNumber(b.spend) - safeNumber(a.spend));
+
+      const rolledSpend = ads.reduce((sum, ad) => sum + safeNumber(ad.spend), 0);
+      const rolledLeads = ads.reduce((sum, ad) => sum + safeNumber(ad.leads), 0);
+      const rolledImpressions = ads.reduce((sum, ad) => sum + safeNumber(ad.impressions), 0);
+      const rolledClicks = ads.reduce((sum, ad) => sum + safeNumber(ad.clicks), 0);
+      const adsetLeads = resolveMetaLeadTotalFromActionTotals(adsetActionTotals) || rolledLeads;
+
+      const groupRow = buildAnalysisLeafRow({
+        kind: 'ad_set',
+        key: `meta_ads:ad_set:${adsetId}`,
+        name: adset.name || 'Conjunto principal',
+        spend: adsetInsight?.spend ?? rolledSpend,
+        leads: adsetLeads,
+        impressions: adsetInsight?.impressions ?? rolledImpressions,
+        clicks: adsetInsight?.clicks ?? rolledClicks
+      });
+
+      return {
+        ...groupRow,
+        ads
+      };
+    })
+    .sort((a, b) => safeNumber(b.spend) - safeNumber(a.spend));
 }
 
 function collectExternalCampaignRefs(payload) {
@@ -3401,6 +3807,73 @@ exports.getMarketingStrategyMetrics = asyncHandler(async (req, res) => {
       from: from.toISOString(),
       to: now.toISOString()
     }
+  });
+});
+
+exports.getMarketingStrategyAnalysisCampaign = asyncHandler(async (req, res) => {
+  const userId = getUserId(req);
+  if (!userId) return res.status(401).json({ success: false, error: 'unauthenticated' });
+
+  const provider = String(req.query?.provider || '').trim().toLowerCase();
+  const externalCampaignId = String(req.query?.external_campaign_id || '').trim();
+  if (!VALID_PROVIDERS.has(provider) || !externalCampaignId) {
+    return res.status(400).json({
+      success: false,
+      error: 'validation_error',
+      message: 'provider y external_campaign_id son obligatorios'
+    });
+  }
+
+  const rows = await loadStrategyRowsByIdentifier(req.params.id);
+  if (!rows.length) {
+    return res.status(404).json({ success: false, error: 'not_found', message: 'Estrategia no encontrada' });
+  }
+
+  const campaignsById = await loadCampaignsByIds(rows.map((row) => row.campaign_id));
+  const strategy = buildStrategyItemFromRows(rows, campaignsById);
+  if (!strategy) {
+    return res.status(404).json({ success: false, error: 'not_found', message: 'Estrategia no encontrada' });
+  }
+
+  const payload = rows[0]?.solicitud && typeof rows[0].solicitud === 'object' ? rows[0].solicitud : {};
+  const scope = extractStrategyScopeFromPayload(payload, rows);
+  const timeframe = resolveAnalysisDateRange(
+    req.query?.timeframe,
+    req.query?.start_date,
+    req.query?.end_date
+  );
+
+  const campaignRef = (Array.isArray(payload.external_targets) ? payload.external_targets : [])
+    .flatMap((target) => Array.isArray(target?.campaigns) ? target.campaigns : [])
+    .find((campaign) => (
+      String(campaign?.provider || '').trim().toLowerCase() === provider
+      && String(campaign?.external_campaign_id || '').trim() === externalCampaignId
+    ));
+
+  if (!campaignRef) {
+    return res.status(404).json({
+      success: false,
+      error: 'not_found',
+      message: 'Campaña externa no vinculada a esta configuración'
+    });
+  }
+
+  const rowsOut = provider === 'meta_ads'
+    ? await buildMetaCampaignAnalysisRows({ scope, campaignRef, timeframe })
+    : await buildGoogleCampaignAnalysisRows({ scope, campaignRef, timeframe });
+
+  return res.json({
+    success: true,
+    strategy_id: strategy.id,
+    provider,
+    external_campaign_id: externalCampaignId,
+    timeframe: {
+      key: timeframe.key,
+      start: formatDate(timeframe.start),
+      end: formatDate(timeframe.end)
+    },
+    cached: true,
+    rows: rowsOut
   });
 });
 
