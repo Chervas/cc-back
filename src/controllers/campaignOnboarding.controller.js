@@ -2767,7 +2767,7 @@ async function fetchGooglePerformanceMaxAnalysisRowsLive({ accessToken, loginCus
   }).sort((a, b) => safeNumber(b.spend) - safeNumber(a.spend));
 }
 
-async function buildGoogleCampaignAnalysisRows({ scope, campaignRef, timeframe, userId }) {
+async function buildGoogleCampaignAnalysisRows({ scope, campaignRef, timeframe }) {
   const customerId = normalizeCustomerId(campaignRef?.account_id || '');
   const campaignId = String(campaignRef?.external_campaign_id || '').trim();
   if (!customerId || !campaignId) {
@@ -2792,24 +2792,6 @@ async function buildGoogleCampaignAnalysisRows({ scope, campaignRef, timeframe, 
     order: [['adGroupName', 'ASC'], ['adName', 'ASC']],
     raw: true
   });
-
-  if (!adRows.length && userId) {
-    try {
-      await warmGoogleCampaignAnalysisCache({ userId, scope, campaignRef, timeframe });
-      adRows = await GoogleAdsAdInsightsDaily.findAll({
-        where: {
-          customerId,
-          campaignId,
-          date: { [Op.between]: [formatDate(timeframe.start), formatDate(timeframe.end)] },
-          ...buildMetricsScopeWhere(scope, { clinicField: 'clinicaId', groupField: 'grupoClinicaId' })
-        },
-        order: [['adGroupName', 'ASC'], ['adName', 'ASC']],
-        raw: true
-      });
-    } catch (_err) {
-      adRows = [];
-    }
-  }
 
   if (adRows.length) {
     const grouped = new Map();
@@ -2906,27 +2888,6 @@ async function buildGoogleCampaignAnalysisRows({ scope, campaignRef, timeframe, 
       .sort((a, b) => safeNumber(b.spend) - safeNumber(a.spend));
   }
 
-  if (userId) {
-    try {
-      const runtime = await resolveGoogleCampaignAnalysisAccess({ userId, scope, customerId });
-      if (runtime?.accessToken) {
-        const pmaxRows = await fetchGooglePerformanceMaxAnalysisRowsLive({
-          accessToken: runtime.accessToken,
-          loginCustomerId: runtime.loginCustomerId,
-          customerId: runtime.customerId,
-          campaignId,
-          timeframe,
-          previewDestinationUrl
-        });
-        if (pmaxRows.length) {
-          return pmaxRows;
-        }
-      }
-    } catch (_err) {
-      // fallback to cached/ad_group summary below
-    }
-  }
-
   const rows = await GoogleAdsInsightsDaily.findAll({
     attributes: [
       'adGroupId',
@@ -2991,7 +2952,7 @@ async function buildGoogleCampaignAnalysisRows({ scope, campaignRef, timeframe, 
     .sort((a, b) => safeNumber(b.spend) - safeNumber(a.spend));
 }
 
-async function buildMetaCampaignAnalysisRows({ scope, campaignRef, timeframe, accessToken = null }) {
+async function buildMetaCampaignAnalysisRows({ scope, campaignRef, timeframe }) {
   const campaignId = String(campaignRef?.external_campaign_id || '').trim();
   if (!campaignId) {
     return [];
@@ -3111,33 +3072,8 @@ async function buildMetaCampaignAnalysisRows({ scope, campaignRef, timeframe, ac
       })
     : [];
 
-  const shouldFetchLiveMetaPreviews = !!(
-    adIds.length
-    && accessToken
-    && !creativePreview.media_url
-    && !creativePreview.body
-    && !creativePreview.title
-  );
-  const shouldFetchLiveMetaMetrics = !!(
-    adIds.length
-    && accessToken
-    && !adInsightRows.length
-    && !adActionRows.length
-  );
-  const metaAdPreviews = shouldFetchLiveMetaPreviews
-    ? await fetchMetaAnalysisAdPreviews({
-        campaignId,
-        adIds,
-        accessToken
-      })
-    : { byAdId: new Map(), byAdsetId: new Map() };
-  const metaAdMetricsLive = shouldFetchLiveMetaMetrics
-    ? await fetchMetaAnalysisAdMetricsLive({
-        campaignId,
-        timeframe,
-        accessToken
-      })
-    : { byAdId: new Map(), byAdsetId: new Map() };
+  const metaAdPreviews = { byAdId: new Map(), byAdsetId: new Map() };
+  const metaAdMetricsLive = { byAdId: new Map(), byAdsetId: new Map() };
 
   const insightByEntityId = new Map(adsetInsightRows.map((row) => [String(row.entity_id || '').trim(), row]));
   const adInsightByEntityId = new Map(adInsightRows.map((row) => [String(row.entity_id || '').trim(), row]));
@@ -5039,24 +4975,9 @@ exports.getMarketingStrategyAnalysisCampaign = asyncHandler(async (req, res) => 
     });
   }
 
-  let metaAccessToken = null;
-  if (provider === 'meta_ads') {
-    try {
-      const metaResolved = await resolveMetaConnectionForScope({
-        clinicIdRaw: scope.clinic_id,
-        groupIdRaw: scope.group_id,
-        assignmentScopeRaw: scope.assignment_scope,
-        allowLegacyUserFallback: true
-      });
-      metaAccessToken = metaResolved?.connection?.accessToken || null;
-    } catch (_err) {
-      metaAccessToken = null;
-    }
-  }
-
   const rowsOut = provider === 'meta_ads'
-    ? await buildMetaCampaignAnalysisRows({ scope, campaignRef, timeframe, accessToken: metaAccessToken })
-    : await buildGoogleCampaignAnalysisRows({ scope, campaignRef, timeframe, userId });
+    ? await buildMetaCampaignAnalysisRows({ scope, campaignRef, timeframe })
+    : await buildGoogleCampaignAnalysisRows({ scope, campaignRef, timeframe });
 
   return res.json({
     success: true,
