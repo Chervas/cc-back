@@ -3074,20 +3074,6 @@ async function buildMetaCampaignAnalysisRows({ scope, campaignRef, timeframe, ac
     : [];
 
   const adIds = adEntities.map((row) => String(row.entity_id || '').trim()).filter(Boolean);
-  const metaAdPreviews = adIds.length
-    ? await fetchMetaAnalysisAdPreviews({
-        campaignId,
-        adIds,
-        accessToken
-      })
-    : { byAdId: new Map(), byAdsetId: new Map() };
-  const metaAdMetricsLive = adIds.length && accessToken
-    ? await fetchMetaAnalysisAdMetricsLive({
-        campaignId,
-        timeframe,
-        accessToken
-      })
-    : { byAdId: new Map(), byAdsetId: new Map() };
   const adInsightRows = adIds.length
     ? await SocialAdsInsightsDaily.findAll({
         attributes: [
@@ -3124,6 +3110,34 @@ async function buildMetaCampaignAnalysisRows({ scope, campaignRef, timeframe, ac
         raw: true
       })
     : [];
+
+  const shouldFetchLiveMetaPreviews = !!(
+    adIds.length
+    && accessToken
+    && !creativePreview.media_url
+    && !creativePreview.body
+    && !creativePreview.title
+  );
+  const shouldFetchLiveMetaMetrics = !!(
+    adIds.length
+    && accessToken
+    && !adInsightRows.length
+    && !adActionRows.length
+  );
+  const metaAdPreviews = shouldFetchLiveMetaPreviews
+    ? await fetchMetaAnalysisAdPreviews({
+        campaignId,
+        adIds,
+        accessToken
+      })
+    : { byAdId: new Map(), byAdsetId: new Map() };
+  const metaAdMetricsLive = shouldFetchLiveMetaMetrics
+    ? await fetchMetaAnalysisAdMetricsLive({
+        campaignId,
+        timeframe,
+        accessToken
+      })
+    : { byAdId: new Map(), byAdsetId: new Map() };
 
   const insightByEntityId = new Map(adsetInsightRows.map((row) => [String(row.entity_id || '').trim(), row]));
   const adInsightByEntityId = new Map(adInsightRows.map((row) => [String(row.entity_id || '').trim(), row]));
