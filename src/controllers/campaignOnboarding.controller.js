@@ -296,6 +296,134 @@ function hydrateExternalTargetsWithMetrics(rawTargets, metricsIndex) {
   }));
 }
 
+async function enrichSingleMetaCampaignReference({ scope, campaignRef }) {
+  const campaignId = String(campaignRef?.external_campaign_id || '').trim();
+  if (!campaignId) {
+    return campaignRef;
+  }
+
+  const baseDetection = normalizeExternalCampaignDetection(campaignRef?.destination_detection);
+  const adsetRows = await SocialAdsEntity.findAll({
+    where: {
+      level: 'adset',
+      parent_id: campaignId
+    },
+    raw: true
+  });
+  const adsetIds = adsetRows.map((row) => String(row.entity_id || '').trim()).filter(Boolean);
+  const adRows = adsetIds.length
+    ? await SocialAdsEntity.findAll({
+        where: {
+          level: 'ad',
+          parent_id: { [Op.in]: adsetIds }
+        },
+        raw: true
+      })
+    : [];
+
+  const adIds = adRows.map((row) => String(row.entity_id || '').trim()).filter(Boolean);
+  const campaignAdRows = new Map([
+    [campaignId, adRows]
+  ]);
+
+  let destinationDetection = baseDetection;
+  if (adIds.length) {
+    const end = new Date();
+    end.setHours(0, 0, 0, 0);
+    const start = new Date(end.getTime() - (29 * 86400000));
+    const adActionRows = await SocialAdsActionsDaily.findAll({
+      attributes: [
+        'ad_account_id',
+        'entity_id',
+        'clinica_id',
+        'grupo_clinica_id',
+        'action_type',
+        [fn('SUM', col('value')), 'value']
+      ],
+      where: {
+        level: 'ad',
+        entity_id: { [Op.in]: adIds },
+        date: { [Op.between]: [formatDate(start), formatDate(end)] },
+        ...buildMetricsScopeWhere(scope, { clinicField: 'clinica_id', groupField: 'grupo_clinica_id' })
+      },
+      group: ['ad_account_id', 'entity_id', 'clinica_id', 'grupo_clinica_id', 'action_type'],
+      raw: true
+    });
+    const campaignEntitiesById = new Map([[campaignId, {
+      entity_id: campaignId,
+      name: campaignRef?.name || null,
+      effective_status: campaignRef?.status || null,
+      status: campaignRef?.status || null
+    }]]);
+    const rolledActionRows = await rollupMetaAdActionRowsToCampaignSignals(adActionRows, campaignEntitiesById);
+    const actionTotals = summarizeMetaCampaignActions(rolledActionRows.filter((row) => String(row.entity_id || '').trim() === campaignId));
+    destinationDetection = inferMetaDestinationDetection({ actionTotals });
+  }
+
+  const metaResolved = await resolveMetaConnectionForScope({
+    clinicIdRaw: scope.clinic_id,
+    groupIdRaw: scope.group_id,
+    assignmentScopeRaw: scope.assignment_scope,
+    allowLegacyUserFallback: true
+  });
+
+  const [enrichedCampaign] = await enrichMetaCampaignDetections({
+    campaigns: [{
+      ...campaignRef,
+      destination_detection: destinationDetection
+    }],
+    accessToken: metaResolved?.connection?.accessToken || null,
+    campaignAdRows
+  });
+
+  return enrichedCampaign || {
+    ...campaignRef,
+    destination_detection: destinationDetection
+  };
+}
+
+async function resolveAnalysisCampaignReference({ strategy, payload, scope, provider, externalCampaignId }) {
+  const normalizedTargets = Array.isArray(strategy?.external_targets) && strategy.external_targets.length
+    ? strategy.external_targets
+    : normalizeExternalTargets(payload?.external_targets);
+  const baseRef = normalizedTargets
+    .flatMap((target) => Array.isArray(target?.campaigns) ? target.campaigns : [])
+    .find((campaign) => (
+      String(campaign?.provider || '').trim().toLowerCase() === provider
+      && String(campaign?.external_campaign_id || '').trim() === externalCampaignId
+    ));
+
+  if (!baseRef) {
+    return null;
+  }
+
+  if (provider === 'google_ads') {
+    return {
+      ...baseRef,
+      destination_detection: normalizeExternalCampaignDetection(baseRef.destination_detection || createWebDestinationDetection('google_ads_default', 'medium'))
+    };
+  }
+
+  const currentDetection = normalizeExternalCampaignDetection(baseRef.destination_detection)
+    || createUnknownDestinationDetection('meta_not_enough_data');
+  const hasUsefulDetection = currentDetection.kind === 'web'
+    || currentDetection.kind === 'lead_form'
+    || (Array.isArray(currentDetection.urls) && currentDetection.urls.length > 0)
+    || !!currentDetection.instant_form
+    || !!currentDetection.creative_preview?.media_url
+    || !!currentDetection.creative_preview?.body
+    || !!currentDetection.creative_preview?.title;
+
+  if (hasUsefulDetection) {
+    return {
+      ...baseRef,
+      destination_detection: currentDetection
+    };
+  }
+
+  return enrichSingleMetaCampaignReference({ scope, campaignRef: baseRef });
+}
+
 function buildExternalCampaignAliasIndex(rawTargets) {
   const targets = normalizeExternalTargets(rawTargets);
   const aliasIndex = new Map();
@@ -3913,12 +4041,13 @@ exports.getMarketingStrategyAnalysisCampaign = asyncHandler(async (req, res) => 
     req.query?.end_date
   );
 
-  const campaignRef = (Array.isArray(payload.external_targets) ? payload.external_targets : [])
-    .flatMap((target) => Array.isArray(target?.campaigns) ? target.campaigns : [])
-    .find((campaign) => (
-      String(campaign?.provider || '').trim().toLowerCase() === provider
-      && String(campaign?.external_campaign_id || '').trim() === externalCampaignId
-    ));
+  const campaignRef = await resolveAnalysisCampaignReference({
+    strategy,
+    payload,
+    scope,
+    provider,
+    externalCampaignId
+  });
 
   if (!campaignRef) {
     return res.status(404).json({

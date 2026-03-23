@@ -689,6 +689,7 @@ exports.getAdsHealth = async (req, res) => {
                         const d = resp.data || {};
                         accountStatusItems.push({
                             ad_account_id: actId,
+                            clinic_id: acc.clinicaId || null,
                             clinic_name: acc.clinica?.nombre_clinica || null,
                             account_status: d.account_status,
                             disable_reason: d.disable_reason ?? null,
@@ -710,6 +711,7 @@ exports.getAdsHealth = async (req, res) => {
                 const actId = String(acc.metaAssetId).startsWith('act_') ? String(acc.metaAssetId) : `act_${acc.metaAssetId}`;
                 accountStatusItems.push({
                     ad_account_id: actId,
+                    clinic_id: acc.clinicaId || null,
                     clinic_name: acc.clinica?.nombre_clinica || null,
                     account_status: acc.ad_account_status ?? null,
                     disable_reason: acc.ad_account_disable_reason ?? null,
