@@ -1022,6 +1022,16 @@ function normalizeMetaUrl(rawUrl) {
   return null;
 }
 
+function sanitizeCreativeCopy(rawValue) {
+  const value = String(rawValue || '')
+    .replace(/\{\{[^}]+\}\}/g, ' ')
+    .replace(/\b\d{4}-\d{2}-\d{2}-[a-f0-9]{24,}\b/gi, ' ')
+    .replace(/\b[a-f0-9]{24,}\b/gi, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  return value || null;
+}
+
 function pickMetaCreativeFields(creative = {}) {
   const objectStorySpec = creative.object_story_spec && typeof creative.object_story_spec === 'object'
     ? creative.object_story_spec
@@ -1053,8 +1063,14 @@ function pickMetaCreativeFields(creative = {}) {
     || ''
   ).trim() || null;
 
-  const title = videoData.title || linkData.name || templateData.name || creative.name || null;
-  const body = videoData.message || linkData.message || templateData.message || null;
+  const videoId = String(
+    videoData.video_id
+    || templateData.video_id
+    || ''
+  ).trim() || null;
+
+  const title = sanitizeCreativeCopy(videoData.title || linkData.name || templateData.name || creative.name || null);
+  const body = sanitizeCreativeCopy(videoData.message || linkData.message || templateData.message || null);
   const mediaUrl = videoData.image_url || linkData.picture || templateData.picture || creative.image_url || creative.thumbnail_url || null;
   const permalinkUrl = creative.instagram_permalink_url || null;
   const ctaType = videoData.call_to_action?.type
@@ -1066,6 +1082,7 @@ function pickMetaCreativeFields(creative = {}) {
   return {
     linkUrl,
     leadFormId,
+    videoId,
     preview: createMetaCreativePreview({
       title,
       body,
@@ -1120,6 +1137,248 @@ async function fetchMetaLeadFormDetails({ formId, accessToken }) {
       questions_preview: []
     };
   }
+}
+
+async function fetchMetaVideoMediaUrl({ videoId, accessToken, videoCache }) {
+  const normalizedVideoId = String(videoId || '').trim();
+  if (!normalizedVideoId || !accessToken) {
+    return null;
+  }
+  if (videoCache?.has(normalizedVideoId)) {
+    return videoCache.get(normalizedVideoId);
+  }
+
+  let resolved = null;
+  try {
+    const resp = await metaGet(normalizedVideoId, {
+      params: {
+        fields: 'id,source,picture,thumbnails'
+      },
+      accessToken,
+      timeout: 15000
+    });
+    const data = resp.data || {};
+    resolved = String(
+      data.source
+      || data.thumbnails?.data?.find((item) => item?.uri)?.uri
+      || data.picture
+      || ''
+    ).trim() || null;
+  } catch (_err) {
+    resolved = null;
+  }
+
+  if (videoCache) {
+    videoCache.set(normalizedVideoId, resolved);
+  }
+  return resolved;
+}
+
+async function fetchMetaInstagramMediaPreview({ mediaId, accessToken, mediaCache }) {
+  const normalizedMediaId = String(mediaId || '').trim();
+  if (!normalizedMediaId || !accessToken) {
+    return null;
+  }
+  if (mediaCache?.has(normalizedMediaId)) {
+    return mediaCache.get(normalizedMediaId);
+  }
+
+  let resolved = null;
+  try {
+    const resp = await metaGet(normalizedMediaId, {
+      params: {
+        fields: 'id,media_type,media_url,thumbnail_url,permalink,caption'
+      },
+      accessToken,
+      timeout: 15000
+    });
+    const data = resp.data || {};
+    resolved = {
+      mediaUrl: String(data.media_url || '').trim() || null,
+      thumbnailUrl: String(data.thumbnail_url || '').trim() || null,
+      permalinkUrl: String(data.permalink || '').trim() || null,
+      text: sanitizeCreativeCopy(data.caption || null)
+    };
+  } catch (_err) {
+    resolved = null;
+  }
+
+  if (mediaCache) {
+    mediaCache.set(normalizedMediaId, resolved);
+  }
+  return resolved;
+}
+
+async function fetchMetaStoryPreview({ storyId, accessToken, storyCache }) {
+  const normalizedStoryId = String(storyId || '').trim();
+  if (!normalizedStoryId || !accessToken) {
+    return null;
+  }
+  if (storyCache?.has(normalizedStoryId)) {
+    return storyCache.get(normalizedStoryId);
+  }
+
+  let resolved = null;
+  try {
+    const resp = await metaGet(normalizedStoryId, {
+      params: {
+        fields: 'id,message,permalink_url,full_picture,attachments{media,target,url,unshimmed_url,title,description}'
+      },
+      accessToken,
+      timeout: 15000
+    });
+    const data = resp.data || {};
+    const attachment = Array.isArray(data.attachments?.data) ? data.attachments.data[0] : null;
+    const mediaImage = attachment?.media?.image?.src || attachment?.media?.image?.uri || null;
+    resolved = {
+      mediaUrl: String(data.full_picture || mediaImage || '').trim() || null,
+      thumbnailUrl: String(mediaImage || data.full_picture || '').trim() || null,
+      permalinkUrl: String(data.permalink_url || attachment?.url || attachment?.unshimmed_url || '').trim() || null,
+      text: sanitizeCreativeCopy(data.message || attachment?.description || attachment?.title || null)
+    };
+  } catch (_err) {
+    resolved = null;
+  }
+
+  if (storyCache) {
+    storyCache.set(normalizedStoryId, resolved);
+  }
+  return resolved;
+}
+
+async function buildMetaAdPreviewFromCreative({
+  adRow,
+  creative,
+  accessToken,
+  formCache,
+  videoCache,
+  mediaCache,
+  storyCache
+}) {
+  const extracted = pickMetaCreativeFields(creative);
+  const preview = {
+    ...extracted.preview,
+    ad_id: String(adRow?.id || '').trim() || null,
+    ad_name: adRow?.name || null
+  };
+
+  let creativeImageUrl = preview.media_url || null;
+  let thumbnailUrl = preview.media_url || null;
+  let creativeText = preview.body || preview.preview_summary || preview.title || null;
+  let previewPermalinkUrl = preview.permalink_url || null;
+
+  const instagramMediaPreview = creative?.effective_instagram_media_id
+    ? await fetchMetaInstagramMediaPreview({
+        mediaId: creative.effective_instagram_media_id,
+        accessToken,
+        mediaCache
+      })
+    : null;
+  if (instagramMediaPreview) {
+    creativeImageUrl = instagramMediaPreview.mediaUrl || creativeImageUrl;
+    thumbnailUrl = instagramMediaPreview.thumbnailUrl || thumbnailUrl;
+    creativeText = instagramMediaPreview.text || creativeText;
+    previewPermalinkUrl = instagramMediaPreview.permalinkUrl || previewPermalinkUrl;
+  }
+
+  const storyPreview = !instagramMediaPreview && creative?.effective_object_story_id
+    ? await fetchMetaStoryPreview({
+        storyId: creative.effective_object_story_id,
+        accessToken,
+        storyCache
+      })
+    : null;
+  if (storyPreview) {
+    creativeImageUrl = storyPreview.mediaUrl || creativeImageUrl;
+    thumbnailUrl = storyPreview.thumbnailUrl || thumbnailUrl;
+    creativeText = storyPreview.text || creativeText;
+    previewPermalinkUrl = storyPreview.permalinkUrl || previewPermalinkUrl;
+  }
+
+  if (extracted.videoId) {
+    const videoMediaUrl = await fetchMetaVideoMediaUrl({
+      videoId: extracted.videoId,
+      accessToken,
+      videoCache
+    });
+    if (videoMediaUrl) {
+      creativeImageUrl = videoMediaUrl;
+    }
+  }
+
+  let instantForm = null;
+  if (extracted.leadFormId) {
+    if (!formCache.has(extracted.leadFormId)) {
+      formCache.set(extracted.leadFormId, await fetchMetaLeadFormDetails({ formId: extracted.leadFormId, accessToken }));
+    }
+    instantForm = formCache.get(extracted.leadFormId) || null;
+  }
+
+  return {
+    thumbnailUrl: thumbnailUrl || creativeImageUrl || null,
+    creativeImageUrl: creativeImageUrl || null,
+    creativeText: creativeText || null,
+    creativeCta: preview.cta_type || null,
+    creativeDestinationUrl: extracted.linkUrl || instantForm?.follow_up_action_url || previewPermalinkUrl || null,
+    instantFormName: instantForm?.name || null,
+    instantFormQuestions: Array.isArray(instantForm?.questions_preview) ? instantForm.questions_preview : [],
+    followUpUrl: instantForm?.follow_up_action_url || null
+  };
+}
+
+async function fetchMetaAnalysisAdPreviews({ campaignId, adIds, accessToken }) {
+  const normalizedCampaignId = String(campaignId || '').trim();
+  const targetIds = new Set((Array.isArray(adIds) ? adIds : []).map((item) => String(item || '').trim()).filter(Boolean));
+  const result = new Map();
+  if (!normalizedCampaignId || !targetIds.size || !accessToken) {
+    return result;
+  }
+
+  const formCache = new Map();
+  const videoCache = new Map();
+  const mediaCache = new Map();
+  const storyCache = new Map();
+  let nextUrl = `${normalizedCampaignId}/ads`;
+  let page = 0;
+
+  while (nextUrl && targetIds.size > result.size && page < 10) {
+    page += 1;
+    try {
+      const resp = await metaGet(nextUrl, {
+        params: nextUrl.includes('?') ? {} : {
+          fields: 'id,name,creative{id,name,effective_instagram_media_id,effective_object_story_id,instagram_permalink_url,object_story_spec,object_type,thumbnail_url,image_url,link_url,call_to_action_type}',
+          limit: Math.min(Math.max(targetIds.size, 25), 100)
+        },
+        accessToken,
+        timeout: 15000
+      });
+      const payload = resp.data || {};
+      const rows = Array.isArray(payload.data) ? payload.data : [];
+      for (const adRow of rows) {
+        const adId = String(adRow?.id || '').trim();
+        if (!adId || !targetIds.has(adId) || result.has(adId)) {
+          continue;
+        }
+        const creative = adRow?.creative && typeof adRow.creative === 'object'
+          ? adRow.creative
+          : {};
+        result.set(adId, await buildMetaAdPreviewFromCreative({
+          adRow,
+          creative,
+          accessToken,
+          formCache,
+          videoCache,
+          mediaCache,
+          storyCache
+        }));
+      }
+      nextUrl = typeof payload.paging?.next === 'string' ? payload.paging.next : null;
+    } catch (_err) {
+      break;
+    }
+  }
+
+  return result;
 }
 
 async function enrichMetaCampaignDetections({
@@ -2484,7 +2743,7 @@ async function buildGoogleCampaignAnalysisRows({ scope, campaignRef, timeframe, 
     .sort((a, b) => safeNumber(b.spend) - safeNumber(a.spend));
 }
 
-async function buildMetaCampaignAnalysisRows({ scope, campaignRef, timeframe }) {
+async function buildMetaCampaignAnalysisRows({ scope, campaignRef, timeframe, accessToken = null }) {
   const campaignId = String(campaignRef?.external_campaign_id || '').trim();
   if (!campaignId) {
     return [];
@@ -2567,6 +2826,13 @@ async function buildMetaCampaignAnalysisRows({ scope, campaignRef, timeframe }) 
     : [];
 
   const adIds = adEntities.map((row) => String(row.entity_id || '').trim()).filter(Boolean);
+  const adPreviewById = adIds.length
+    ? await fetchMetaAnalysisAdPreviews({
+        campaignId,
+        adIds,
+        accessToken
+      })
+    : new Map();
   const adInsightRows = adIds.length
     ? await SocialAdsInsightsDaily.findAll({
         attributes: [
@@ -2639,6 +2905,7 @@ async function buildMetaCampaignAnalysisRows({ scope, campaignRef, timeframe }) 
           const adId = String(ad.entity_id || '').trim();
           const adInsight = adInsightByEntityId.get(adId) || null;
           const adActionTotals = summarizeMetaCampaignActions(adActionsByEntityId.get(adId) || []);
+          const adPreview = adPreviewById.get(adId) || null;
           return buildAnalysisLeafRow({
             kind: 'ad',
             key: `meta_ads:ad:${adId || index + 1}`,
@@ -2647,14 +2914,18 @@ async function buildMetaCampaignAnalysisRows({ scope, campaignRef, timeframe }) 
             leads: resolveMetaLeadTotalFromActionTotals(adActionTotals),
             impressions: adInsight?.impressions,
             clicks: adInsight?.clicks,
-            thumbnailUrl: creativePreview.media_url || null,
-            creativeImageUrl: creativePreview.media_url || null,
-            creativeText: creativePreview.body || creativePreview.preview_summary || creativePreview.title || null,
-            creativeCta: creativePreview.cta_type || null,
-            creativeDestinationUrl,
-            instantFormName: instantForm.name || null,
-            instantFormQuestions: Array.isArray(instantForm.questions_preview) ? instantForm.questions_preview : [],
-            followUpUrl: instantForm.follow_up_action_url || null
+            thumbnailUrl: adPreview?.thumbnailUrl || creativePreview.media_url || null,
+            creativeImageUrl: adPreview?.creativeImageUrl || creativePreview.media_url || null,
+            creativeText: adPreview?.creativeText || creativePreview.body || creativePreview.preview_summary || creativePreview.title || null,
+            creativeCta: adPreview?.creativeCta || creativePreview.cta_type || null,
+            creativeDestinationUrl: adPreview?.creativeDestinationUrl || creativeDestinationUrl,
+            instantFormName: adPreview?.instantFormName || instantForm.name || null,
+            instantFormQuestions: Array.isArray(adPreview?.instantFormQuestions) && adPreview.instantFormQuestions.length
+              ? adPreview.instantFormQuestions
+              : Array.isArray(instantForm.questions_preview)
+                ? instantForm.questions_preview
+                : [],
+            followUpUrl: adPreview?.followUpUrl || instantForm.follow_up_action_url || null
           });
         })
         .sort((a, b) => safeNumber(b.spend) - safeNumber(a.spend));
@@ -4471,8 +4742,23 @@ exports.getMarketingStrategyAnalysisCampaign = asyncHandler(async (req, res) => 
     });
   }
 
+  let metaAccessToken = null;
+  if (provider === 'meta_ads') {
+    try {
+      const metaResolved = await resolveMetaConnectionForScope({
+        clinicIdRaw: scope.clinic_id,
+        groupIdRaw: scope.group_id,
+        assignmentScopeRaw: scope.assignment_scope,
+        allowLegacyUserFallback: true
+      });
+      metaAccessToken = metaResolved?.connection?.accessToken || null;
+    } catch (_err) {
+      metaAccessToken = null;
+    }
+  }
+
   const rowsOut = provider === 'meta_ads'
-    ? await buildMetaCampaignAnalysisRows({ scope, campaignRef, timeframe })
+    ? await buildMetaCampaignAnalysisRows({ scope, campaignRef, timeframe, accessToken: metaAccessToken })
     : await buildGoogleCampaignAnalysisRows({ scope, campaignRef, timeframe, userId });
 
   return res.json({
