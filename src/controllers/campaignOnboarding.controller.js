@@ -1315,6 +1315,8 @@ async function buildMetaAdPreviewFromCreative({
   }
 
   return {
+    adName: adRow?.name || null,
+    statusText: String(adRow?.effective_status || adRow?.status || '').trim() || null,
     thumbnailUrl: thumbnailUrl || creativeImageUrl || null,
     creativeImageUrl: creativeImageUrl || null,
     creativeText: creativeText || null,
@@ -1333,9 +1335,10 @@ async function fetchMetaAnalysisAdPreviews({ campaignId, adIds, accessToken }) {
     .filter(Boolean)
     .slice(0, 12);
   const targetIds = new Set(previewTargetIds);
-  const result = new Map();
+  const byAdId = new Map();
+  const byAdsetId = new Map();
   if (!normalizedCampaignId || !targetIds.size || !accessToken) {
-    return result;
+    return { byAdId, byAdsetId };
   }
 
   const formCache = new Map();
@@ -1345,8 +1348,8 @@ async function fetchMetaAnalysisAdPreviews({ campaignId, adIds, accessToken }) {
   try {
     const resp = await metaGet(`${normalizedCampaignId}/ads`, {
       params: {
-        fields: 'id,name,creative{id,name,effective_instagram_media_id,effective_object_story_id,instagram_permalink_url,object_story_spec,object_type,thumbnail_url,image_url,link_url,call_to_action_type}',
-        limit: Math.min(Math.max(targetIds.size, 12), 25)
+        fields: 'id,name,adset_id,status,effective_status,creative{id,name,effective_instagram_media_id,effective_object_story_id,instagram_permalink_url,object_story_spec,object_type,thumbnail_url,image_url,link_url,call_to_action_type}',
+        limit: Math.min(Math.max(targetIds.size, 12), 50)
       },
       accessToken,
       timeout: 15000
@@ -1355,13 +1358,10 @@ async function fetchMetaAnalysisAdPreviews({ campaignId, adIds, accessToken }) {
     const rows = Array.isArray(payload.data) ? payload.data : [];
     for (const adRow of rows) {
       const adId = String(adRow?.id || '').trim();
-      if (!adId || !targetIds.has(adId) || result.has(adId)) {
-        continue;
-      }
       const creative = adRow?.creative && typeof adRow.creative === 'object'
         ? adRow.creative
         : {};
-      result.set(adId, await buildMetaAdPreviewFromCreative({
+      const preview = await buildMetaAdPreviewFromCreative({
         adRow,
         creative,
         accessToken,
@@ -1369,13 +1369,20 @@ async function fetchMetaAnalysisAdPreviews({ campaignId, adIds, accessToken }) {
         videoCache,
         mediaCache,
         storyCache
-      }));
+      });
+      const adsetId = String(adRow?.adset_id || '').trim();
+      if (adId && targetIds.has(adId) && !byAdId.has(adId)) {
+        byAdId.set(adId, preview);
+      }
+      if (adsetId && !byAdsetId.has(adsetId)) {
+        byAdsetId.set(adsetId, preview);
+      }
     }
   } catch (_err) {
-    return result;
+    return { byAdId, byAdsetId };
   }
 
-  return result;
+  return { byAdId, byAdsetId };
 }
 
 async function enrichMetaCampaignDetections({
@@ -2211,7 +2218,8 @@ function buildAnalysisLeafRow({
   googleAdsSitelinks = [],
   instantFormName = null,
   instantFormQuestions = [],
-  followUpUrl = null
+  followUpUrl = null,
+  statusText = null
 }) {
   const normalizedSpend = safeNumber(spend);
   const normalizedLeads = leads == null ? null : safeNumber(leads);
@@ -2244,7 +2252,8 @@ function buildAnalysisLeafRow({
     google_ads_sitelinks: Array.isArray(googleAdsSitelinks) ? googleAdsSitelinks.filter((item) => item && item.title && item.url) : [],
     instant_form_name: instantFormName || null,
     instant_form_questions: Array.isArray(instantFormQuestions) ? instantFormQuestions : [],
-    follow_up_url: followUpUrl || null
+    follow_up_url: followUpUrl || null,
+    status_text: statusText || null
   };
 }
 
@@ -2814,7 +2823,8 @@ async function buildGoogleCampaignAnalysisRows({ scope, campaignRef, timeframe, 
             googleAdsHeadlines: Array.isArray(ad.headlines) ? ad.headlines : [],
             googleAdsDescriptions: Array.isArray(ad.descriptions) ? ad.descriptions : [],
             googleAdsDisplayUrl: ad.displayUrl || previewDestinationUrl,
-            googleAdsSitelinks: Array.isArray(googlePreview.sitelinks) ? googlePreview.sitelinks : []
+            googleAdsSitelinks: Array.isArray(googlePreview.sitelinks) ? googlePreview.sitelinks : [],
+            statusText: ad.adStatus || null
           }))
           .sort((a, b) => safeNumber(b.spend) - safeNumber(a.spend));
 
@@ -2994,13 +3004,13 @@ async function buildMetaCampaignAnalysisRows({ scope, campaignRef, timeframe, ac
     : [];
 
   const adIds = adEntities.map((row) => String(row.entity_id || '').trim()).filter(Boolean);
-  const adPreviewById = adIds.length
+  const metaAdPreviews = adIds.length
     ? await fetchMetaAnalysisAdPreviews({
         campaignId,
         adIds,
         accessToken
       })
-    : new Map();
+    : { byAdId: new Map(), byAdsetId: new Map() };
   const adInsightRows = adIds.length
     ? await SocialAdsInsightsDaily.findAll({
         attributes: [
@@ -3073,11 +3083,14 @@ async function buildMetaCampaignAnalysisRows({ scope, campaignRef, timeframe, ac
           const adId = String(ad.entity_id || '').trim();
           const adInsight = adInsightByEntityId.get(adId) || null;
           const adActionTotals = summarizeMetaCampaignActions(adActionsByEntityId.get(adId) || []);
-          const adPreview = adPreviewById.get(adId) || null;
+          const adsetId = String(ad.parent_id || '').trim();
+          const adPreview = metaAdPreviews.byAdId.get(adId)
+            || metaAdPreviews.byAdsetId.get(adsetId)
+            || null;
           return buildAnalysisLeafRow({
             kind: 'ad',
             key: `meta_ads:ad:${adId || index + 1}`,
-            name: ad.name || `Anuncio ${index + 1}`,
+            name: adPreview?.adName || ad.name || `Anuncio ${index + 1}`,
             spend: adInsight?.spend,
             leads: resolveMetaLeadTotalFromActionTotals(adActionTotals),
             impressions: adInsight?.impressions,
@@ -3093,7 +3106,8 @@ async function buildMetaCampaignAnalysisRows({ scope, campaignRef, timeframe, ac
               : Array.isArray(instantForm.questions_preview)
                 ? instantForm.questions_preview
                 : [],
-            followUpUrl: adPreview?.followUpUrl || instantForm.follow_up_action_url || null
+            followUpUrl: adPreview?.followUpUrl || instantForm.follow_up_action_url || null,
+            statusText: adPreview?.statusText || ad.delivery_status || ad.status || null
           });
         })
         .sort((a, b) => safeNumber(b.spend) - safeNumber(a.spend));
