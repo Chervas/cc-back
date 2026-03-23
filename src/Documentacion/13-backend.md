@@ -4,6 +4,101 @@
 
 ---
 
+## 2026-03-23 - Cache ad-level de Google Ads para análisis de campañas
+
+> **Estado:** implementado en `back-integracion`.
+
+### Qué faltaba
+
+En `Marketing > Campañas > Análisis`, Google Ads solo llegaba hasta:
+
+- campaña
+- grupo de anuncios
+- una preview resumida de campaña
+
+Eso no permitía enseñar un último nivel real por anuncio como sí hacíamos ya con Meta.
+
+### Qué se añadió
+
+Nueva tabla cacheada:
+
+- `GoogleAdsAdInsightsDaily`
+
+Guarda por anuncio y día:
+
+- `customerId`
+- `campaignId`
+- `adGroupId`
+- `adId`
+- nombre y tipo del anuncio
+- `finalUrl`
+- `displayUrl`
+- `headlines`
+- `descriptions`
+- métricas diarias:
+  - impresiones
+  - clics
+  - coste
+  - conversiones
+
+### Cómo se rellena
+
+No depende de llamadas live continuas en UI.
+
+El análisis de campaña hace:
+
+1. intenta leer `GoogleAdsAdInsightsDaily`
+2. si no hay cache para esa campaña/rango:
+   - hace un warm-up controlado contra Google Ads API
+   - persiste el resultado
+3. vuelve a leer desde cache
+
+Esto deja el patrón correcto:
+
+- primera carga: posible warm-up
+- siguientes cargas: cache local
+
+### Alcance actual
+
+Esto ya permite en `Campañas > Análisis` para Google Ads:
+
+- grupos de anuncios reales
+- anuncios reales
+- headlines reales
+- descriptions reales
+- URL destino real
+- métricas reales por anuncio
+
+### Límite actual
+
+Google no nos está dejando todavía una capa equivalente a Meta para:
+
+- thumbnails reales por anuncio
+- vídeo preview real por anuncio
+
+Por tanto:
+
+- Google queda resuelto a nivel de estructura + texto + URL + métricas
+- Meta sigue siendo la fuente rica para media preview
+
+### Regla importante
+
+Las métricas globales existentes no se recalculan desde esta tabla nueva.
+
+Seguimos usando:
+
+- `GoogleAdsInsightsDaily`
+
+para overview/reporting general, y:
+
+- `GoogleAdsAdInsightsDaily`
+
+solo para el nivel detallado de análisis por anuncio.
+
+Esto evita duplicidades de gasto o conversiones en otros endpoints.
+
+---
+
 ## 2026-03-18 - Diseño objetivo de conexiones OAuth por scope
 
 > **Estado:** implementado y alineado entre runtime OAuth, `Ajustes` y `back-integracion`.

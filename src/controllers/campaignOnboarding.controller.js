@@ -29,6 +29,7 @@ const AdminCampaignPlaybook = db.AdminCampaignPlaybook;
 const Tratamiento = db.Tratamiento;
 const LeadIntake = db.LeadIntake;
 const GoogleAdsInsightsDaily = db.GoogleAdsInsightsDaily;
+const GoogleAdsAdInsightsDaily = db.GoogleAdsAdInsightsDaily;
 const SocialAdsEntity = db.SocialAdsEntity;
 const SocialAdsInsightsDaily = db.SocialAdsInsightsDaily;
 const SocialAdsActionsDaily = db.SocialAdsActionsDaily;
@@ -1991,7 +1992,297 @@ function buildAnalysisLeafRow({
   };
 }
 
-async function buildGoogleCampaignAnalysisRows({ scope, campaignRef, timeframe }) {
+function normalizeJsonArray(rawValue) {
+  if (Array.isArray(rawValue)) {
+    return rawValue;
+  }
+  if (typeof rawValue === 'string') {
+    try {
+      const parsed = JSON.parse(rawValue);
+      return Array.isArray(parsed) ? parsed : [];
+    } catch (_err) {
+      return [];
+    }
+  }
+  return [];
+}
+
+function extractGoogleAdTextAssets(items) {
+  const list = Array.isArray(items) ? items : [];
+  return list
+    .map((item) => {
+      if (typeof item === 'string') return item.trim();
+      if (item && typeof item === 'object') {
+        return String(item.text || item.assetText || item.textAsset?.text || '').trim();
+      }
+      return '';
+    })
+    .filter(Boolean);
+}
+
+function buildGoogleDisplayUrl(rawUrl) {
+  const value = String(rawUrl || '').trim();
+  if (!value) return null;
+  try {
+    const parsed = new URL(value);
+    const path = parsed.pathname && parsed.pathname !== '/' ? parsed.pathname : '';
+    return `${parsed.host}${path}`;
+  } catch (_err) {
+    return value;
+  }
+}
+
+function extractGoogleAdPreviewFields(row) {
+  const adGroupAd = row?.adGroupAd || row?.ad_group_ad || {};
+  const ad = adGroupAd?.ad || {};
+  const responsiveSearchAd = ad?.responsiveSearchAd || ad?.responsive_search_ad || {};
+  const finalUrls = Array.isArray(ad?.finalUrls || ad?.final_urls) ? (ad.finalUrls || ad.final_urls) : [];
+  const finalMobileUrls = Array.isArray(ad?.finalMobileUrls || ad?.final_mobile_urls) ? (ad.finalMobileUrls || ad.final_mobile_urls) : [];
+  const finalUrl = String(finalUrls.find(Boolean) || finalMobileUrls.find(Boolean) || '').trim() || null;
+  const headlines = extractGoogleAdTextAssets(responsiveSearchAd?.headlines);
+  const descriptions = extractGoogleAdTextAssets(responsiveSearchAd?.descriptions);
+
+  return {
+    adId: ad?.id ? String(ad.id).trim() : null,
+    adName: typeof ad?.name === 'string' ? String(ad.name).trim() || null : null,
+    adType: typeof ad?.type === 'string' ? String(ad.type).trim() || null : null,
+    adStatus: typeof adGroupAd?.status === 'string' ? String(adGroupAd.status).trim() || null : null,
+    finalUrl,
+    displayUrl: buildGoogleDisplayUrl(finalUrl),
+    headlines,
+    descriptions
+  };
+}
+
+async function fetchGoogleCampaignAnalysisAdRowsLive({ accessToken, loginCustomerId, customerId, campaignId, timeframe }) {
+  const cleanCustomerId = normalizeCustomerId(customerId);
+  const cleanCampaignId = String(campaignId || '').trim();
+  if (!accessToken || !cleanCustomerId || !cleanCampaignId) {
+    return [];
+  }
+
+  const variants = [
+    {
+      name: 'full',
+      fields: [
+        'campaign.id',
+        'campaign.name',
+        'campaign.status',
+        'ad_group.id',
+        'ad_group.name',
+        'ad_group.status',
+        'ad_group_ad.status',
+        'ad_group_ad.ad.id',
+        'ad_group_ad.ad.name',
+        'ad_group_ad.ad.type',
+        'ad_group_ad.ad.final_urls',
+        'ad_group_ad.ad.final_mobile_urls',
+        'ad_group_ad.ad.responsive_search_ad.headlines',
+        'ad_group_ad.ad.responsive_search_ad.descriptions',
+        'segments.date',
+        'segments.ad_network_type',
+        'segments.device',
+        'metrics.impressions',
+        'metrics.clicks',
+        'metrics.cost_micros',
+        'metrics.conversions'
+      ]
+    },
+    {
+      name: 'basic',
+      fields: [
+        'campaign.id',
+        'campaign.name',
+        'campaign.status',
+        'ad_group.id',
+        'ad_group.name',
+        'ad_group.status',
+        'ad_group_ad.status',
+        'ad_group_ad.ad.id',
+        'ad_group_ad.ad.name',
+        'ad_group_ad.ad.type',
+        'segments.date',
+        'segments.ad_network_type',
+        'segments.device',
+        'metrics.impressions',
+        'metrics.clicks',
+        'metrics.cost_micros',
+        'metrics.conversions'
+      ]
+    }
+  ];
+
+  for (const variant of variants) {
+    const query = [
+      'SELECT',
+      ...variant.fields.map((field, index) => `  ${field}${index < variant.fields.length - 1 ? ',' : ''}`),
+      'FROM ad_group_ad',
+      `WHERE campaign.id = '${cleanCampaignId}'`,
+      `  AND segments.date BETWEEN '${formatDate(timeframe.start)}' AND '${formatDate(timeframe.end)}'`
+    ].join('\n');
+
+    try {
+      let pageToken = null;
+      const out = [];
+      do {
+        const resp = await googleAdsRequest('POST', `customers/${cleanCustomerId}/googleAds:search`, {
+          accessToken,
+          loginCustomerId: loginCustomerId || undefined,
+          data: { query, pageToken }
+        });
+        const results = Array.isArray(resp?.results) ? resp.results : [];
+        out.push(...results);
+        pageToken = resp?.nextPageToken || resp?.next_page_token || null;
+      } while (pageToken);
+      return out;
+    } catch (err) {
+      const invalidArgument = err?.response?.data?.error?.status === 'INVALID_ARGUMENT';
+      if (!invalidArgument || variant.name === variants[variants.length - 1].name) {
+        throw err;
+      }
+    }
+  }
+
+  return [];
+}
+
+async function persistGoogleCampaignAnalysisAdRows({ account, scope, rows }) {
+  if (!account?.id || !Array.isArray(rows) || !rows.length) {
+    return 0;
+  }
+
+  const payloadRows = rows
+    .map((row) => {
+      const campaign = row?.campaign || {};
+      const adGroup = row?.adGroup || row?.ad_group || {};
+      const segments = row?.segments || {};
+      const metrics = row?.metrics || {};
+      const preview = extractGoogleAdPreviewFields(row);
+      if (!segments?.date || !campaign?.id || !preview.adId) {
+        return null;
+      }
+      return {
+        clinicGoogleAdsAccountId: account.id,
+        clinicaId: scope?.clinic_id || account.clinicaId || null,
+        grupoClinicaId: scope?.group_id || account.grupoClinicaId || null,
+        customerId: normalizeCustomerId(account.customerId || ''),
+        campaignId: String(campaign.id),
+        campaignName: campaign.name || null,
+        campaignStatus: campaign.status || null,
+        adGroupId: adGroup?.id ? String(adGroup.id) : null,
+        adGroupName: adGroup?.name || null,
+        adId: preview.adId,
+        adName: preview.adName,
+        adType: preview.adType,
+        adStatus: preview.adStatus,
+        date: segments.date,
+        network: String(segments?.adNetworkType || segments?.ad_network_type || '').trim(),
+        device: String(segments?.device || '').trim(),
+        impressions: safeNumber(metrics?.impressions),
+        clicks: safeNumber(metrics?.clicks),
+        costMicros: safeNumber(metrics?.costMicros || metrics?.cost_micros),
+        conversions: safeNumber(metrics?.conversions),
+        ctr: safeNumber(metrics?.ctr),
+        finalUrl: preview.finalUrl,
+        displayUrl: preview.displayUrl,
+        headlines: preview.headlines,
+        descriptions: preview.descriptions
+      };
+    })
+    .filter(Boolean);
+
+  if (!payloadRows.length) {
+    return 0;
+  }
+
+  const dates = payloadRows.map((row) => row.date).filter(Boolean);
+  const campaignIds = Array.from(new Set(payloadRows.map((row) => row.campaignId).filter(Boolean)));
+  if (campaignIds.length && dates.length) {
+    await GoogleAdsAdInsightsDaily.destroy({
+      where: {
+        clinicGoogleAdsAccountId: account.id,
+        customerId: normalizeCustomerId(account.customerId || ''),
+        campaignId: { [Op.in]: campaignIds },
+        date: { [Op.between]: [dates.sort()[0], dates.sort().slice(-1)[0]] }
+      }
+    });
+  }
+
+  await GoogleAdsAdInsightsDaily.bulkCreate(payloadRows, {
+    updateOnDuplicate: [
+      'campaignName',
+      'campaignStatus',
+      'adGroupId',
+      'adGroupName',
+      'adName',
+      'adType',
+      'adStatus',
+      'clinicaId',
+      'grupoClinicaId',
+      'impressions',
+      'clicks',
+      'costMicros',
+      'conversions',
+      'ctr',
+      'finalUrl',
+      'displayUrl',
+      'headlines',
+      'descriptions',
+      'updated_at'
+    ]
+  });
+
+  return payloadRows.length;
+}
+
+async function warmGoogleCampaignAnalysisCache({ userId, scope, campaignRef, timeframe }) {
+  const customerId = normalizeCustomerId(campaignRef?.account_id || '');
+  const campaignId = String(campaignRef?.external_campaign_id || '').trim();
+  if (!userId || !customerId || !campaignId) {
+    return 0;
+  }
+
+  const account = await ClinicGoogleAdsAccount.findOne({
+    where: {
+      customerId,
+      isActive: true,
+      ...buildScopeWhere(scope)
+    },
+    order: [['updated_at', 'DESC']],
+    raw: true
+  });
+  if (!account) {
+    return 0;
+  }
+
+  const googleResolved = await resolveGoogleConnectionForScope({
+    userId,
+    clinicIdRaw: scope?.clinic_id,
+    groupIdRaw: scope?.group_id,
+    assignmentScopeRaw: scope?.assignment_scope,
+    allowLegacyUserFallback: true
+  });
+  if (!googleResolved?.connection) {
+    return 0;
+  }
+
+  const { accessToken } = await ensureGoogleAdsAccess(googleResolved.connection);
+  const loginCustomerId = normalizeCustomerId(account.loginCustomerId || account.managerCustomerId || '')
+    || await resolveLoginCustomerId(googleResolved.connection.id, customerId, scope)
+    || undefined;
+
+  const liveRows = await fetchGoogleCampaignAnalysisAdRowsLive({
+    accessToken,
+    loginCustomerId,
+    customerId,
+    campaignId,
+    timeframe
+  });
+
+  return persistGoogleCampaignAnalysisAdRows({ account, scope, rows: liveRows });
+}
+
+async function buildGoogleCampaignAnalysisRows({ scope, campaignRef, timeframe, userId }) {
   const customerId = normalizeCustomerId(campaignRef?.account_id || '');
   const campaignId = String(campaignRef?.external_campaign_id || '').trim();
   if (!customerId || !campaignId) {
@@ -2005,6 +2296,129 @@ async function buildGoogleCampaignAnalysisRows({ scope, campaignRef, timeframe }
     : Array.isArray(campaignRef?.destination_detection?.urls) && campaignRef.destination_detection.urls[0]
     ? String(campaignRef.destination_detection.urls[0]).trim()
     : null;
+
+  let adRows = await GoogleAdsAdInsightsDaily.findAll({
+    where: {
+      customerId,
+      campaignId,
+      date: { [Op.between]: [formatDate(timeframe.start), formatDate(timeframe.end)] },
+      ...buildMetricsScopeWhere(scope, { clinicField: 'clinicaId', groupField: 'grupoClinicaId' })
+    },
+    order: [['adGroupName', 'ASC'], ['adName', 'ASC']],
+    raw: true
+  });
+
+  if (!adRows.length && userId) {
+    try {
+      await warmGoogleCampaignAnalysisCache({ userId, scope, campaignRef, timeframe });
+      adRows = await GoogleAdsAdInsightsDaily.findAll({
+        where: {
+          customerId,
+          campaignId,
+          date: { [Op.between]: [formatDate(timeframe.start), formatDate(timeframe.end)] },
+          ...buildMetricsScopeWhere(scope, { clinicField: 'clinicaId', groupField: 'grupoClinicaId' })
+        },
+        order: [['adGroupName', 'ASC'], ['adName', 'ASC']],
+        raw: true
+      });
+    } catch (_err) {
+      adRows = [];
+    }
+  }
+
+  if (adRows.length) {
+    const grouped = new Map();
+    for (const row of adRows) {
+      const adGroupId = String(row.adGroupId || '').trim() || `group:${campaignId}`;
+      const adGroupName = row.adGroupName || 'Grupo principal';
+      const adId = String(row.adId || '').trim();
+      if (!adId) continue;
+      const groupKey = adGroupId;
+      if (!grouped.has(groupKey)) {
+        grouped.set(groupKey, {
+          adGroupId,
+          adGroupName,
+          spend: 0,
+          leads: 0,
+          impressions: 0,
+          clicks: 0,
+          ads: new Map()
+        });
+      }
+      const group = grouped.get(groupKey);
+      const adKey = adId;
+      if (!group.ads.has(adKey)) {
+        group.ads.set(adKey, {
+          adId,
+          adName: row.adName || null,
+          adType: row.adType || null,
+          adStatus: row.adStatus || null,
+          spend: 0,
+          leads: 0,
+          impressions: 0,
+          clicks: 0,
+          finalUrl: row.finalUrl || null,
+          displayUrl: row.displayUrl || null,
+          headlines: normalizeJsonArray(row.headlines),
+          descriptions: normalizeJsonArray(row.descriptions)
+        });
+      }
+      const ad = group.ads.get(adKey);
+      const spend = microsToCurrency(row.costMicros);
+      const leads = safeNumber(row.conversions);
+      const impressions = safeNumber(row.impressions);
+      const clicks = safeNumber(row.clicks);
+
+      ad.spend += spend;
+      ad.leads += leads;
+      ad.impressions += impressions;
+      ad.clicks += clicks;
+
+      group.spend += spend;
+      group.leads += leads;
+      group.impressions += impressions;
+      group.clicks += clicks;
+    }
+
+    return Array.from(grouped.values())
+      .map((group) => {
+        const groupRow = buildAnalysisLeafRow({
+          kind: 'ad_group',
+          key: `google_ads:ad_group:${group.adGroupId}`,
+          name: group.adGroupName,
+          spend: group.spend,
+          leads: group.leads,
+          impressions: group.impressions,
+          clicks: group.clicks
+        });
+
+        const ads = Array.from(group.ads.values())
+          .map((ad) => buildAnalysisLeafRow({
+            kind: 'ad',
+            key: `google_ads:ad:${ad.adId}`,
+            name: ad.adName || ad.headlines?.[0] || group.adGroupName,
+            spend: ad.spend,
+            leads: ad.leads,
+            impressions: ad.impressions,
+            clicks: ad.clicks,
+            mock: false,
+            warningText: ad.spend > 0 && !ad.leads ? 'Sin leads' : null,
+            creativeText: Array.isArray(ad.descriptions) ? ad.descriptions.filter(Boolean).join(' ') : null,
+            creativeDestinationUrl: ad.finalUrl || previewDestinationUrl,
+            googleAdsHeadlines: Array.isArray(ad.headlines) ? ad.headlines : [],
+            googleAdsDescriptions: Array.isArray(ad.descriptions) ? ad.descriptions : [],
+            googleAdsDisplayUrl: ad.displayUrl || previewDestinationUrl,
+            googleAdsSitelinks: Array.isArray(googlePreview.sitelinks) ? googlePreview.sitelinks : []
+          }))
+          .sort((a, b) => safeNumber(b.spend) - safeNumber(a.spend));
+
+        return {
+          ...groupRow,
+          ads
+        };
+      })
+      .sort((a, b) => safeNumber(b.spend) - safeNumber(a.spend));
+  }
 
   const rows = await GoogleAdsInsightsDaily.findAll({
     attributes: [
@@ -4059,7 +4473,7 @@ exports.getMarketingStrategyAnalysisCampaign = asyncHandler(async (req, res) => 
 
   const rowsOut = provider === 'meta_ads'
     ? await buildMetaCampaignAnalysisRows({ scope, campaignRef, timeframe })
-    : await buildGoogleCampaignAnalysisRows({ scope, campaignRef, timeframe });
+    : await buildGoogleCampaignAnalysisRows({ scope, campaignRef, timeframe, userId });
 
   return res.json({
     success: true,
