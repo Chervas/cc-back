@@ -1385,6 +1385,76 @@ async function fetchMetaAnalysisAdPreviews({ campaignId, adIds, accessToken }) {
   return { byAdId, byAdsetId };
 }
 
+async function fetchMetaAnalysisAdMetricsLive({ campaignId, timeframe, accessToken }) {
+  const normalizedCampaignId = String(campaignId || '').trim();
+  if (!normalizedCampaignId || !accessToken || !timeframe?.start || !timeframe?.end) {
+    return { byAdId: new Map(), byAdsetId: new Map() };
+  }
+
+  const byAdId = new Map();
+  const rawByAdsetId = new Map();
+  try {
+    const resp = await metaGet(`${normalizedCampaignId}/insights`, {
+      params: {
+        level: 'ad',
+        fields: 'ad_id,ad_name,adset_id,adset_name,impressions,clicks,spend,actions',
+        time_range: JSON.stringify({
+          since: formatDate(timeframe.start),
+          until: formatDate(timeframe.end)
+        }),
+        limit: 100
+      },
+      accessToken,
+      timeout: 15000
+    });
+    const rows = Array.isArray(resp.data?.data) ? resp.data.data : [];
+    for (const row of rows) {
+      const adId = String(row?.ad_id || '').trim();
+      const adsetId = String(row?.adset_id || '').trim();
+      const actionTotals = summarizeMetaCampaignActions(Array.isArray(row?.actions)
+        ? row.actions.map((action) => ({
+            action_type: action?.action_type,
+            value: action?.value
+          }))
+        : []);
+      const metric = {
+        name: String(row?.ad_name || '').trim() || null,
+        spend: safeNumber(row?.spend),
+        leads: resolveMetaLeadTotalFromActionTotals(actionTotals),
+        impressions: safeNumber(row?.impressions),
+        clicks: safeNumber(row?.clicks)
+      };
+      if (adId && !byAdId.has(adId)) {
+        byAdId.set(adId, metric);
+      }
+      if (adsetId) {
+        if (!rawByAdsetId.has(adsetId)) {
+          rawByAdsetId.set(adsetId, []);
+        }
+        rawByAdsetId.get(adsetId).push(metric);
+      }
+    }
+  } catch (_err) {
+    return { byAdId: new Map(), byAdsetId: new Map() };
+  }
+
+  const byAdsetId = new Map();
+  for (const [adsetId, metrics] of rawByAdsetId.entries()) {
+    const rows = Array.isArray(metrics) ? metrics : [];
+    const total = rows.reduce((acc, metric) => {
+      acc.spend += safeNumber(metric.spend);
+      acc.leads += safeNumber(metric.leads);
+      acc.impressions += safeNumber(metric.impressions);
+      acc.clicks += safeNumber(metric.clicks);
+      acc.count += 1;
+      return acc;
+    }, { spend: 0, leads: 0, impressions: 0, clicks: 0, count: 0 });
+    byAdsetId.set(adsetId, total);
+  }
+
+  return { byAdId, byAdsetId };
+}
+
 async function enrichMetaCampaignDetections({
   campaigns,
   accessToken,
@@ -3011,6 +3081,13 @@ async function buildMetaCampaignAnalysisRows({ scope, campaignRef, timeframe, ac
         accessToken
       })
     : { byAdId: new Map(), byAdsetId: new Map() };
+  const metaAdMetricsLive = adIds.length && accessToken
+    ? await fetchMetaAnalysisAdMetricsLive({
+        campaignId,
+        timeframe,
+        accessToken
+      })
+    : { byAdId: new Map(), byAdsetId: new Map() };
   const adInsightRows = adIds.length
     ? await SocialAdsInsightsDaily.findAll({
         attributes: [
@@ -3087,14 +3164,38 @@ async function buildMetaCampaignAnalysisRows({ scope, campaignRef, timeframe, ac
           const adPreview = metaAdPreviews.byAdId.get(adId)
             || metaAdPreviews.byAdsetId.get(adsetId)
             || null;
+          const liveAdMetrics = metaAdMetricsLive.byAdId.get(adId) || null;
+          const adsetLiveMetrics = metaAdMetricsLive.byAdsetId.get(adsetId) || null;
+          const cachedSpend = safeNumber(adInsight?.spend);
+          const cachedImpressions = safeNumber(adInsight?.impressions);
+          const cachedClicks = safeNumber(adInsight?.clicks);
+          const cachedLeads = resolveMetaLeadTotalFromActionTotals(adActionTotals);
+          const hasCachedMetrics = cachedSpend > 0 || cachedImpressions > 0 || cachedClicks > 0 || cachedLeads > 0;
+          const fallbackCount = Math.max(1, (adRowsByAdsetId.get(adsetId) || []).length);
+          const fallbackMetric = !hasCachedMetrics && !liveAdMetrics && adsetLiveMetrics
+            ? {
+                spend: safeNumber(adsetLiveMetrics.spend) / fallbackCount,
+                leads: safeNumber(adsetLiveMetrics.leads) / fallbackCount,
+                impressions: Math.round(safeNumber(adsetLiveMetrics.impressions) / fallbackCount),
+                clicks: Math.round(safeNumber(adsetLiveMetrics.clicks) / fallbackCount)
+              }
+            : null;
           return buildAnalysisLeafRow({
             kind: 'ad',
             key: `meta_ads:ad:${adId || index + 1}`,
             name: adPreview?.adName || ad.name || `Anuncio ${index + 1}`,
-            spend: adInsight?.spend,
-            leads: resolveMetaLeadTotalFromActionTotals(adActionTotals),
-            impressions: adInsight?.impressions,
-            clicks: adInsight?.clicks,
+            spend: hasCachedMetrics
+              ? adInsight?.spend
+              : liveAdMetrics?.spend ?? fallbackMetric?.spend ?? 0,
+            leads: hasCachedMetrics
+              ? cachedLeads
+              : liveAdMetrics?.leads ?? fallbackMetric?.leads ?? 0,
+            impressions: hasCachedMetrics
+              ? adInsight?.impressions
+              : liveAdMetrics?.impressions ?? fallbackMetric?.impressions ?? 0,
+            clicks: hasCachedMetrics
+              ? adInsight?.clicks
+              : liveAdMetrics?.clicks ?? fallbackMetric?.clicks ?? 0,
             thumbnailUrl: adPreview?.thumbnailUrl || creativePreview.media_url || null,
             creativeImageUrl: adPreview?.creativeImageUrl || creativePreview.media_url || null,
             creativeText: adPreview?.creativeText || creativePreview.body || creativePreview.preview_summary || creativePreview.title || null,
