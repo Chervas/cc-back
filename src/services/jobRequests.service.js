@@ -29,6 +29,16 @@ const priorityListToWhere = (priorityList) => {
   return normalized.length ? { [Op.in]: normalized } : undefined;
 };
 
+const typeListToWhere = (typeList) => {
+  if (!Array.isArray(typeList) || !typeList.length) {
+    return undefined;
+  }
+  const normalized = typeList
+    .map((type) => String(type || '').trim())
+    .filter((value, index, array) => value && array.indexOf(value) === index);
+  return normalized.length ? { [Op.in]: normalized } : undefined;
+};
+
 const baseOrder = [
   [sequelize.literal(PRIORITY_CASE_SQL), 'ASC'],
   [sequelize.literal("(CASE WHEN next_run_at IS NULL THEN 0 ELSE 1 END)"), 'ASC'],
@@ -95,7 +105,7 @@ function buildWaitingScope(now) {
   };
 }
 
-async function claimNextJob(priorityList) {
+async function claimNextJob(priorityList, typeList) {
   const now = new Date();
   return sequelize.transaction(
     {
@@ -106,6 +116,10 @@ async function claimNextJob(priorityList) {
       const priorityWhere = priorityListToWhere(priorityList);
       if (priorityWhere) {
         where.priority = priorityWhere;
+      }
+      const typeWhere = typeListToWhere(typeList);
+      if (typeWhere) {
+        where.type = typeWhere;
       }
 
       const job = await JobRequest.findOne({

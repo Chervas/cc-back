@@ -1153,6 +1153,7 @@ Reglas importantes:
 - `appointment_after` sí puede quedar programado desde la creación inicial de la cita;
 - el entorno debe aislar sus colas con `QUEUE_PREFIX` propio;
 - si varios procesos consumen la misma tabla/cola de jobs en un entorno, todos deben conocer `appointment_automation_schedule_fire` o bien solo uno de ellos debe actuar como scheduler. Si no, el síntoma es `No handler registered for job type 'appointment_automation_schedule_fire'`.
+- Regla aplicada desde el 2026-03-24: cada scheduler debe reclamar solo los tipos que sabe ejecutar (`claimNextJob(..., allowedTypes)`). Esto evita que runtimes auxiliares como `clinicaclick-auth` fallen jobs de automatización V2 que pertenecen al backend funcional.
 
 - Ventana de 24h en WhatsApp
   - La ventana de texto libre se considera abierta solo si existe `last_inbound_at` real dentro de las últimas 24 horas.
@@ -1309,6 +1310,7 @@ Reglas importantes:
   - `lead_id`
 - Se evita hacer match por `appointment_id` en respuestas WhatsApp.
 - El `JobRequest` de tipo `automations_v2_execute` se actualiza con `resume_mode=response` y el payload inbound consolidado antes de volver al scheduler.
+- Si una ejecución se queda en `waiting` pero el job asociado falla con `No handler registered for job type 'automations_v2_execute'`, el problema es de scheduler/claiming, no de plantilla ni del nodo `wait_response`.
 
 ### Execution monitor
 
