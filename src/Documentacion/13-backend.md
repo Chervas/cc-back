@@ -93,6 +93,20 @@ Además, los lectores de estado deben resolver herencia de grupo:
 
 si no encuentran un asset propio de clínica, deben intentar el asset `assignmentScope = group` del grupo de esa clínica antes de devolver "no configurado".
 
+Migración segura recomendada cuando CRM funciona pero `Ajustes` no refleja WhatsApp:
+
+1. inspeccionar `Messages.metadata` recientes para localizar `wabaId` y `phoneNumberId` realmente usados por el runtime;
+2. validar esos IDs contra Graph con el token actual;
+3. materializar ambos activos en `ClinicMetaAsset` para el scope correcto;
+4. sincronizar teléfonos y plantillas del `wabaId`;
+5. desactivar el asset test/legacy de la vista;
+6. mantener el fallback global hasta verificar la operativa en UI y envío real.
+
+Esto evita dos errores frecuentes:
+
+- reconectar a ciegas cuando el canal real ya existe y solo falta modelarlo;
+- retirar el fallback global antes de comprobar que el nuevo scope ya resuelve `phone_number_id`, `waba_id` y plantillas.
+
 ## 2026-03-24 - Salud de Google Ads: serving/billing cacheado
 
 La salud de Google Ads no debe depender solo de `ClinicGoogleAdsAccount.accountStatus`.

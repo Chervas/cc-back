@@ -106,36 +106,47 @@ async function resolveScopedWhatsappAssetForClinic({ clinicId, assetTypes }) {
     return null;
   }
 
-  const clinicAsset = await ClinicMetaAsset.findOne({
-    where: {
-      clinicaId: clinicId,
-      isActive: true,
-      assetType: { [Op.in]: assetTypes },
-    },
-    raw: true,
-  });
-  if (clinicAsset) {
-    return clinicAsset;
-  }
-
   const clinic = await Clinica.findOne({
     where: { id_clinica: clinicId },
     attributes: ['grupoClinicaId'],
     raw: true,
   });
-  if (!clinic?.grupoClinicaId) {
-    return null;
+  const groupId = clinic?.grupoClinicaId || null;
+
+  for (const assetType of assetTypes) {
+    const clinicAsset = await ClinicMetaAsset.findOne({
+      where: {
+        clinicaId: clinicId,
+        isActive: true,
+        assetType,
+      },
+      order: [['updatedAt', 'DESC']],
+      raw: true,
+    });
+    if (clinicAsset) {
+      return clinicAsset;
+    }
+
+    if (!groupId) {
+      continue;
+    }
+
+    const groupAsset = await ClinicMetaAsset.findOne({
+      where: {
+        assignmentScope: 'group',
+        grupoClinicaId: groupId,
+        isActive: true,
+        assetType,
+      },
+      order: [['updatedAt', 'DESC']],
+      raw: true,
+    });
+    if (groupAsset) {
+      return groupAsset;
+    }
   }
 
-  return ClinicMetaAsset.findOne({
-    where: {
-      assignmentScope: 'group',
-      grupoClinicaId: clinic.grupoClinicaId,
-      isActive: true,
-      assetType: { [Op.in]: assetTypes },
-    },
-    raw: true,
-  });
+  return null;
 }
 
 function assertPreverifiedEnabled(req, res) {

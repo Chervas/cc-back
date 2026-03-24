@@ -5,6 +5,8 @@ require('dotenv').config();
 
 const axios = require('axios');
 const db = require('../models');
+const { syncPhonesForWaba } = require('../src/services/whatsappPhones.service');
+const { syncTemplatesForWaba } = require('../src/services/whatsappTemplates.service');
 
 function parseArgs(argv) {
   const args = {};
@@ -42,6 +44,49 @@ async function fetchPhoneDetails({ phoneNumberId, accessToken, version }) {
   }
 }
 
+async function fetchPhoneProfile({ phoneNumberId, accessToken, version }) {
+  if (!phoneNumberId || !accessToken) {
+    return null;
+  }
+  try {
+    const { data } = await axios.get(`https://graph.facebook.com/${version}/${phoneNumberId}/whatsapp_business_profile`, {
+      headers: { Authorization: `Bearer ${accessToken}` },
+      params: {
+        fields: 'about,description,profile_picture_url,vertical,email,websites,address',
+      },
+      timeout: 20000,
+    });
+    return Array.isArray(data?.data) ? data.data[0] || null : data || null;
+  } catch (err) {
+    console.warn('[backfill-whatsapp-legacy-scope] No se pudo obtener el perfil del phone id', err?.response?.data || err?.message || err);
+    return null;
+  }
+}
+
+async function fetchWabaDetails({ wabaId, accessToken, version }) {
+  if (!wabaId || !accessToken) {
+    return null;
+  }
+  for (const fields of ['id,name,business_id', 'id,name']) {
+    try {
+      const { data } = await axios.get(`https://graph.facebook.com/${version}/${wabaId}`, {
+        headers: { Authorization: `Bearer ${accessToken}` },
+        params: { fields },
+        timeout: 20000,
+      });
+      return data;
+    } catch (err) {
+      const message = err?.response?.data?.error?.message || '';
+      if (fields.includes('business_id') && message.includes('nonexisting field')) {
+        continue;
+      }
+      console.warn('[backfill-whatsapp-legacy-scope] No se pudieron obtener detalles del WABA', err?.response?.data || err?.message || err);
+      return null;
+    }
+  }
+  return null;
+}
+
 async function main() {
   const args = parseArgs(process.argv);
   const groupId = Number(args['group-id']);
@@ -52,6 +97,9 @@ async function main() {
       '101717972850686'
   ).trim();
   const wabaId = args['waba-id'] ? String(args['waba-id']).trim() : null;
+  const deactivatePhoneId = args['deactivate-phone-id'] ? String(args['deactivate-phone-id']).trim() : null;
+  const markRegistered = !!args['mark-registered'];
+  const syncRemote = !args['skip-sync'];
   const accessToken = process.env.META_WHATSAPP_ACCESS_TOKEN || null;
   const graphVersion = process.env.META_GRAPH_VERSION || process.env.META_API_VERSION || 'v24.0';
 
@@ -89,30 +137,97 @@ async function main() {
     accessToken,
     version: graphVersion,
   });
+  const phoneProfile = await fetchPhoneProfile({
+    phoneNumberId,
+    accessToken,
+    version: graphVersion,
+  });
+  const wabaDetails = await fetchWabaDetails({
+    wabaId,
+    accessToken,
+    version: graphVersion,
+  });
+
+  const isConnected = phoneDetails?.status === 'CONNECTED';
+  const codeStatus = String(phoneDetails?.code_verification_status || '').toUpperCase();
+  const inferredRegistered = markRegistered || isConnected;
 
   const additionalData = {
-    source: 'legacy_global_backfill',
-    migratedFromEnvFallback: true,
+    source: wabaId ? 'runtime_whatsapp_backfill' : 'legacy_global_backfill',
+    migratedFromEnvFallback: !wabaId,
+    migratedFromRuntimeMetadata: !!wabaId,
     graphVersion,
     registration: {
-      status:
-        phoneDetails?.status === 'CONNECTED' &&
-        String(phoneDetails?.code_verification_status || '').toUpperCase() === 'VERIFIED'
-          ? 'registered'
-          : 'not_registered',
-      requiresPin: !(
-        phoneDetails?.status === 'CONNECTED' &&
-        String(phoneDetails?.code_verification_status || '').toUpperCase() === 'VERIFIED'
-      ),
+      status: inferredRegistered ? 'registered' : 'not_registered',
+      requiresPin: !inferredRegistered,
       phoneStatus: phoneDetails?.status || null,
       codeVerificationStatus: phoneDetails?.code_verification_status || null,
       lastAttemptAt: new Date().toISOString(),
+      registeredAt: inferredRegistered ? new Date().toISOString() : null,
     },
     nameStatus: phoneDetails?.name_status || null,
     platformType: phoneDetails?.platform_type || null,
     accountMode: phoneDetails?.account_mode || null,
     legacyGroupLabel: group.nombre_grupo || null,
+    profileDescription: phoneProfile?.description || phoneProfile?.about || null,
+    profileCategory: phoneProfile?.vertical || null,
+    profilePictureUrl: phoneProfile?.profile_picture_url || null,
+    profileEmail: phoneProfile?.email || null,
+    profileWebsite: phoneProfile?.websites?.[0] || null,
+    profileAddress: phoneProfile?.address || null,
+    runtimeEvidence: wabaId
+      ? {
+          phoneNumberId,
+          wabaId,
+          observedConnected: isConnected,
+          observedCodeStatus: codeStatus || null,
+        }
+      : undefined,
   };
+
+  let wabaAsset = null;
+  if (wabaId) {
+    const wabaDefaults = {
+      metaConnectionId,
+      assetType: 'whatsapp_business_account',
+      metaAssetId: wabaId,
+      metaAssetName: wabaDetails?.name || `WABA ${wabaId}`,
+      assignmentScope: 'group',
+      grupoClinicaId: groupId,
+      clinicaId: null,
+      isActive: true,
+      wabaId,
+      phoneNumberId,
+      waAccessToken: accessToken,
+      additionalData: {
+        source: 'runtime_whatsapp_backfill',
+        migratedFromRuntimeMetadata: true,
+        graphVersion,
+        businessId: wabaDetails?.business_id || null,
+        legacyGroupLabel: group.nombre_grupo || null,
+      },
+    };
+    const existingWaba = await ClinicMetaAsset.findOne({
+      where: {
+        assetType: 'whatsapp_business_account',
+        assignmentScope: 'group',
+        grupoClinicaId: groupId,
+        wabaId,
+      },
+    });
+    if (existingWaba) {
+      Object.assign(existingWaba, wabaDefaults, {
+        additionalData: {
+          ...(existingWaba.additionalData || {}),
+          ...wabaDefaults.additionalData,
+        },
+      });
+      await existingWaba.save();
+      wabaAsset = existingWaba;
+    } else {
+      wabaAsset = await ClinicMetaAsset.create(wabaDefaults);
+    }
+  }
 
   const defaults = {
     metaConnectionId,
@@ -154,6 +269,31 @@ async function main() {
     asset = await ClinicMetaAsset.create(defaults);
   }
 
+  if (deactivatePhoneId) {
+    await ClinicMetaAsset.update(
+      {
+        isActive: false,
+        additionalData: db.sequelize.literal(
+          `JSON_SET(COALESCE(additionalData, JSON_OBJECT()), '$.deactivatedReason', 'superseded_by_real_runtime_asset', '$.deactivatedAt', '${new Date().toISOString().slice(0, 19).replace('T', ' ')}')`
+        ),
+      },
+      {
+        where: {
+          assetType: 'whatsapp_phone_number',
+          assignmentScope: 'group',
+          grupoClinicaId: groupId,
+          phoneNumberId: deactivatePhoneId,
+          id: { [db.Sequelize.Op.ne]: asset.id },
+        },
+      }
+    );
+  }
+
+  if (syncRemote && wabaId) {
+    await syncPhonesForWaba({ wabaId, accessToken });
+    await syncTemplatesForWaba({ wabaId, accessToken });
+  }
+
   console.log(
     JSON.stringify(
       {
@@ -175,6 +315,16 @@ async function main() {
           messaging_limit: asset.messaging_limit || null,
           isActive: asset.isActive,
         },
+        wabaAsset: wabaAsset
+          ? {
+              id: wabaAsset.id,
+              metaAssetName: wabaAsset.metaAssetName,
+              wabaId: wabaAsset.wabaId,
+              assignmentScope: wabaAsset.assignmentScope,
+              grupoClinicaId: wabaAsset.grupoClinicaId,
+              isActive: wabaAsset.isActive,
+            }
+          : null,
       },
       null,
       2
