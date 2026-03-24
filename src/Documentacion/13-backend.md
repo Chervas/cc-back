@@ -4,6 +4,54 @@
 
 ---
 
+## 2026-03-24 - Intake inbound: descarte explícito de leads sin scope
+
+El intake inbound ya no debe crear `LeadIntake` huérfanos cuando una fuente externa no puede resolverse a clínica o grupo.
+
+### Problema que existía
+
+En conexiones históricas de Meta podían entrar leads con:
+
+- `source = meta_ads`
+- `clinic_match_source = meta_page_id`
+- `clinic_match_value = <page_id>`
+
+pero sin un `ClinicMetaAsset` activo que materializase esa página o formulario dentro del scope vigente.
+
+El resultado era inconsistente:
+
+- el lead se persistía;
+- `clinica_id` y `grupo_clinica_id` quedaban `null`;
+- CRM mostraba el contacto como `Sin clínica`;
+- las automatizaciones posteriores no tenían un scope fiable.
+
+### Comportamiento actual
+
+Tanto `ingestLead` como `receiveMetaWebhook` cortan la creación si, tras resolver activos y scope, no existe:
+
+- `clinica_id`, ni
+- `grupo_clinica_id`.
+
+En ese caso:
+
+- el webhook se considera procesado para evitar reintentos infinitos;
+- el backend responde con descarte explícito;
+- no se crea `LeadIntake`;
+- no se crea auditoría ni conversación colgando de un lead sin dueño.
+
+### Criterio operativo
+
+Esto es deliberado:
+
+- si la conexión está mal mapeada, el dato correcto no es “lead sin clínica”;
+- el dato correcto es “lead descartado por mapeo incompleto”.
+
+Por tanto, cuando aparezcan leads Meta/Google sin entrar en CRM, la primera revisión debe ser:
+
+- activos del scope (`ClinicMetaAsset`, `ClinicGoogleAdsAccount`, assignments);
+- page/form/account mapeados al grupo o clínica correctos;
+- coherencia entre el `clinic_match_*` guardado y los activos materializados.
+
 ## 2026-03-24 - Importación manual de leads sobre `LeadIntake`
 
 `Marketing > Leads` ya no necesita crear leads uno a uno cuando la fuente llega como CSV/Excel.
