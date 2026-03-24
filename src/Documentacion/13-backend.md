@@ -1,8 +1,83 @@
 > **Módulo:** Arquitectura del Backend
-> **Última actualización:** 2026-03-18
+> **Última actualización:** 2026-03-24
 > **Relacionado con:** [20.1-motor-flujos-v2](./20.1-motor-flujos-v2.md)
 
 ---
+
+## 2026-03-24 - Importación manual de leads sobre `LeadIntake`
+
+`Marketing > Leads` ya no necesita crear leads uno a uno cuando la fuente llega como CSV/Excel.
+El backend expone un flujo de importación en dos fases sobre el intake existente:
+
+- `POST /api/intake/leads/import/preview`
+- `POST /api/intake/leads/import/execute`
+
+### Principio de diseño
+
+El backend no parsea el binario del fichero.
+El navegador lee `csv/xls/xlsx`, lo convierte a filas JSON y backend se encarga de:
+
+- validar clínica y source de destino;
+- aplicar mapeo de columnas;
+- ejecutar exclusiones;
+- comprobar duplicados;
+- crear `LeadIntake` y `LeadAttributionAudit` cuando procede.
+
+Esto mantiene el contrato estable y evita acoplar Express a formatos de Excel.
+
+### Qué hace `preview`
+
+`preview` recalcula, fila a fila:
+
+- si la fila tiene identidad mínima (`nombre`, `email` o `telefono`);
+- si queda fuera por una regla de exclusión;
+- si ya existe un lead similar en la clínica destino;
+- si colisiona por `external_source + external_id`;
+- si el intake global ya tiene un contacto reciente igual dentro de la ventana de dedupe.
+
+La respuesta devuelve:
+
+- resumen global;
+- clínica y grupo resueltos;
+- estado por fila (`ready`, `excluded`, `invalid`);
+- motivos legibles de exclusión.
+
+### Qué hace `execute`
+
+`execute` no confía en el preview previo del cliente.
+Recalcula internamente el mismo análisis y solo intenta crear las filas que siguen en `ready`.
+
+Al importar:
+
+- crea `LeadIntake`;
+- registra `LeadAttributionAudit` con el raw de importación, mapping y contexto;
+- conserva `created_at` importado cuando la columna se ha mapeado como fecha de entrada;
+- materializa cita importada en `cita_propuesta` cuando el archivo trae fecha/hora/responsable/dirección.
+
+### Alcance del mapeo actual
+
+Campos canónicos soportados:
+
+- `external_id`
+- `created_at`
+- `source`
+- `source_detail`
+- `nombre`
+- `email`
+- `telefono`
+- `status_lead`
+- `notas`
+- `concern`
+- `appointment_date`
+- `appointment_time`
+- `appointment_clinic`
+- `appointment_responsible`
+- `appointment_address`
+
+Regla práctica:
+
+- si el archivo trae más columnas de negocio, hoy deben mapearse a `notas` o quedar fuera;
+- no se debe inventar una tabla paralela de importación para información que ya cabe razonablemente en `LeadIntake` o `cita_propuesta`.
 
 ## 2026-03-24 - Análisis de campañas cache-only
 

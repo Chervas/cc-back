@@ -25,6 +25,7 @@ const { sendMetaEvent, buildUserData: buildMetaUserData } = require('../services
 const { uploadClickConversion } = require('../services/googleAdsConversion.service');
 const { getIO } = require('../services/socket.service');
 const jobRequestsService = require('../services/jobRequests.service');
+const { previewLeadImport, executeLeadImport } = require('../services/leadImport.service');
 const { findCanonicalWhatsappConversation } = require('../lib/canonical-conversation');
 
 const CHANNELS = new Set(['paid', 'organic', 'unknown']);
@@ -1523,6 +1524,16 @@ exports.ingestLead = asyncHandler(async (req, res) => {
   }
 
   res.status(201).json({ id: lead.id });
+});
+
+exports.previewLeadImport = asyncHandler(async (req, res) => {
+  const preview = await previewLeadImport(req.body || {});
+  return res.json(preview);
+});
+
+exports.executeLeadImport = asyncHandler(async (req, res) => {
+  const result = await executeLeadImport(req.body || {});
+  return res.status(201).json(result);
 });
 
 // ===========================
