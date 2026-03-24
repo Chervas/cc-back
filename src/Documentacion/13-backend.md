@@ -1235,6 +1235,59 @@ Reglas importantes:
   - `cita.usuario_*` se conserva como alias de compatibilidad para plantillas anteriores.
   - No se inventan valores derivados: la URL de ficha local solo se expone si existe en `Clinicas.url_ficha_local`.
 
+## 2026-03-24 - Contexto conversacional canónico para IA
+
+- `buildHydratedExecutionContext` y el runtime de `wait_response` ya exponen:
+  - `last_prompt`
+  - `last_response`
+  - `last_response_context`
+  - `conversation_today`
+  - `conversation_this_year`
+  - `conversation_all_time`
+
+- `conversation_*` se construye desde `Conversations` + `Messages`:
+  - usando horario `Europe/Madrid`
+  - excluyendo mensajes `event` y `reaction`
+  - formateando cada línea con:
+    - fecha/hora
+    - autor (`Clínica` o `Paciente`)
+    - texto
+
+- Criterio operativo:
+  - `last_*` sirve como atajo tras `wait_response`
+  - para análisis conversacional real, la clave recomendada es `conversation_today`
+  - el runtime ya no soporta aliases `context.*`
+  - la corrección de aliases viejos se hace en:
+    - editor
+    - normalización backend
+    - migraciones de datos
+  - los presets IA conocidos que antes persistían `last_prompt/last_response` se reescriben a su forma canónica:
+    - `confirm_appointment` -> `conversation_today` + `last_response_context.responded_at`
+    - `summarize_conversation` -> `conversation_today`
+
+- Límites defensivos:
+  - `conversation_today`, `conversation_this_year` y `conversation_all_time` se truncan si el histórico crece demasiado
+  - el objetivo es evitar prompts infinitos, no ocultar mensajes recientes
+
+## 2026-03-24 - Identidad canónica de flujos V2
+
+- `AutomationFlowTemplatesV2` añade `public_id`.
+- `public_id` identifica la familia de flujo para navegación y lectura.
+- `template_key` sigue siendo la clave operativa de binding para:
+  - tratamientos
+  - catálogo
+  - resolución de la última versión activa
+
+Reglas:
+
+- varias versiones del mismo flujo comparten el mismo `public_id`
+- el editor y el frontend deben navegar por `public_id`
+- el backend acepta `template_ref` en rutas de lectura/escritura:
+  - puede ser `public_id`
+  - o `template_key` como compatibilidad beta
+- los flujos nuevos no deben depender de que el nombre genere un `template_key` único:
+  - si no llega `template_key` explícito, backend genera uno único para evitar colisiones por nombre
+
 ## 2026-03-15 - Timeline y acciones de cita en integración
 
 - `GET /api/pacientes/:id/activity`

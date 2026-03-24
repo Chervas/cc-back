@@ -1,5 +1,6 @@
 'use strict';
 
+const crypto = require('crypto');
 const { Op } = require('sequelize');
 const db = require('../../models');
 const { queues } = require('./queue.service');
@@ -86,6 +87,10 @@ function buildCatalogTemplateKey(catalogFlowId, sourceTemplateKey, clinicId) {
   return `${base}__clinic_${clinicId}`;
 }
 
+function buildPublicId() {
+  return `flw_${crypto.randomBytes(8).toString('hex')}`;
+}
+
 async function resolveLinkedTemplateForCatalog(catalogFlow) {
   const templateKey = String(catalogFlow?.template_key || '').trim();
 
@@ -149,6 +154,7 @@ async function ensureCatalogTemplateForClinic({ clinicId, catalogFlow, actorUser
 
   const version = latest?.version ? Number(latest.version) + 1 : 1;
   const created = await AutomationFlowTemplateV2.create({
+    public_id: latest?.public_id || linkedTemplate.public_id || buildPublicId(),
     template_key: templateKey,
     version,
     ...payload,

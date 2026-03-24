@@ -30,6 +30,7 @@ module.exports = (sequelize, DataTypes) => {
 
   AutomationFlowTemplateV2.init({
     id: { type: DataTypes.INTEGER, primaryKey: true, autoIncrement: true },
+    public_id: { type: DataTypes.STRING(64), allowNull: false },
     template_key: { type: DataTypes.STRING(120), allowNull: false },
     version: { type: DataTypes.INTEGER, allowNull: false },
     engine_version: { type: DataTypes.ENUM('v1', 'v2'), allowNull: false, defaultValue: 'v2' },

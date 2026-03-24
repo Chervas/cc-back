@@ -1,5 +1,6 @@
 'use strict';
 
+const crypto = require('crypto');
 const { Op } = require('sequelize');
 const db = require('../../models');
 
@@ -19,6 +20,7 @@ const jobRequestsService = require('../services/jobRequests.service');
 const jobScheduler = require('../services/jobScheduler.service');
 const { getIO } = require('../services/socket.service');
 const { CITA_STATUS_VALUES, LEAD_STATUS_VALUES } = require('../lib/status-catalog');
+const { buildConversationContext } = require('../lib/automation-conversation-context');
 
 const ADMIN_USER_IDS = (process.env.ADMIN_USER_IDS || '1,44')
   .split(',')
@@ -442,6 +444,34 @@ async function buildHydratedExecutionContext({
     }
   }
 
+  const conversationCandidateId = parseIntOrNull(triggerData?.conversation_id)
+    || parseIntOrNull(triggerData?.chat_conversation_id)
+    || parseIntOrNull(triggerData?.conversationId)
+    || (
+      ['conversation', 'chat_conversation', 'whatsapp_conversation'].includes(normalizedType)
+        ? parseIntOrNull(triggerEntityId)
+        : null
+    );
+
+  const conversationContext = await buildConversationContext({
+    Conversation,
+    Message,
+    conversationId: conversationCandidateId,
+    clinicId: hydratedClinicId,
+    leadId: parseIntOrNull(out?.lead?.id),
+    patientId: parseIntOrNull(out?.patient?.id_paciente) || parseIntOrNull(out?.paciente?.id_paciente),
+  });
+
+  if (conversationContext?.conversation) {
+    out.conversation = {
+      ...(isObject(out.conversation) ? out.conversation : {}),
+      ...conversationContext.conversation,
+    };
+    out.conversation_today = conversationContext.conversation_today || null;
+    out.conversation_this_year = conversationContext.conversation_this_year || null;
+    out.conversation_all_time = conversationContext.conversation_all_time || null;
+  }
+
   if (!out.trigger || !isObject(out.trigger)) {
     out.trigger = { type: cleanString(triggerType) || 'manual', data: {} };
   }
@@ -458,6 +488,7 @@ async function buildHydratedExecutionContext({
     clinica_id: parseIntOrNull(out?.clinic?.id_clinica) || parseIntOrNull(out?.clinica?.id_clinica) || null,
     lead_intake_id: parseIntOrNull(out?.lead?.id) || null,
     lead_id: parseIntOrNull(out?.lead?.id) || null,
+    conversation_id: parseIntOrNull(out?.conversation?.id) || null,
   };
 
   return out;
@@ -1183,6 +1214,83 @@ function collectUnsupportedNodeTypes(nodes) {
   );
 }
 
+const AI_PRESET_CANONICAL_CONFIG = {
+  confirm_appointment: {
+    instruction: 'Analiza la conversación de hoy entre clínica y paciente. Clasifica en una de estas decisiones: confirmado, no_confirmado, dudas. Ten en cuenta quién escribe cada mensaje y la hora. Devuelve también confianza (0-1) y motivo breve.',
+    context_sources: [
+      { key: 'conversation_today', path: '{{conversation_today}}' },
+      { key: 'responded_at', path: '{{last_response_context.responded_at}}' },
+    ],
+    output_fields: [
+      { name: 'decision', type: 'string', description: 'confirmado, no_confirmado o dudas' },
+      { name: 'confianza', type: 'number', description: 'Nivel de confianza de 0 a 1' },
+      { name: 'motivo', type: 'string', description: 'Razón breve de la decisión' },
+    ],
+    legacy_instructions: [
+      'Analiza la respuesta del paciente teniendo en cuenta el último mensaje enviado por la clínica. Clasifica en una de estas decisiones: confirmado, no_confirmado, dudas. Devuelve también confianza (0-1) y motivo breve.',
+    ],
+    legacy_source_sets: [
+      ['{{last_prompt}}', '{{last_response}}'],
+    ],
+  },
+  summarize_conversation: {
+    instruction: 'Resume la conversación de hoy entre clínica y paciente en máximo 2 frases. Identifica el tema principal y si quedó alguna acción pendiente.',
+    context_sources: [
+      { key: 'conversation_today', path: '{{conversation_today}}' },
+    ],
+    output_fields: [
+      { name: 'resumen', type: 'string', description: 'Resumen de la conversación en 2 frases' },
+      { name: 'accion_pendiente', type: 'boolean', description: 'true si quedó algo pendiente' },
+    ],
+    legacy_instructions: [],
+    legacy_source_sets: [
+      ['{{last_prompt}}', '{{last_response}}'],
+    ],
+  },
+};
+
+function normalizeContextSourcePath(raw) {
+  if (typeof raw === 'string') return normalizeLegacyContextAliasInString(raw);
+  if (isObject(raw)) return normalizeLegacyContextAliasInString(raw.path || raw.key || '');
+  return '';
+}
+
+function shouldUpgradeAiPresetConfig(config, canonical) {
+  if (!isObject(config) || !canonical) return false;
+
+  const instruction = cleanString(config.instruction);
+  if (instruction && canonical.legacy_instructions.includes(instruction)) return true;
+
+  const currentPaths = Array.isArray(config.context_sources)
+    ? config.context_sources
+        .map((source) => normalizeContextSourcePath(source))
+        .filter(Boolean)
+        .sort()
+    : [];
+
+  return canonical.legacy_source_sets.some((legacySet) => {
+    const normalizedLegacy = legacySet.map((item) => normalizeLegacyContextAliasInString(item)).sort();
+    return JSON.stringify(currentPaths) === JSON.stringify(normalizedLegacy);
+  });
+}
+
+function normalizeAiPresetConfig(config) {
+  if (!isObject(config)) return config;
+
+  const presetKey = cleanString(config.preset_key);
+  const canonical = AI_PRESET_CANONICAL_CONFIG[presetKey];
+  if (!canonical) return config;
+  if (!shouldUpgradeAiPresetConfig(config, canonical)) return config;
+
+  return {
+    ...config,
+    preset_key: presetKey,
+    instruction: canonical.instruction,
+    context_sources: canonical.context_sources.map((source) => ({ ...source })),
+    output_fields: canonical.output_fields.map((field) => ({ ...field })),
+  };
+}
+
 function normalizeNodesInput(nodes) {
   if (!Array.isArray(nodes)) return [];
   return nodes
@@ -1200,10 +1308,10 @@ function normalizeNodesInput(nodes) {
           }
         : { x: 100, y: (index + 1) * 120 };
 
-      const config = normalizeLegacyNodeConfigAliases({
+      const config = normalizeAiPresetConfig(normalizeLegacyNodeConfigAliases({
         ...defaultConfig,
         ...(isObject(rawNode.config) ? rawNode.config : {}),
-      });
+      }));
 
       const outputs = isObject(rawNode.outputs) ? { ...rawNode.outputs } : {};
       const expectedKeys = Array.isArray(nodeMeta?.output_keys) ? nodeMeta.output_keys : [];
@@ -1229,7 +1337,10 @@ function normalizeLegacyContextAliasInString(value) {
     .replace(/\{\{\s*context\.last_prompt\s*\}\}/g, '{{last_prompt}}')
     .replace(/\{\{\s*context\.last_response\s*\}\}/g, '{{last_response}}')
     .replace(/\{\{\s*context\.last_response_context\./g, '{{last_response_context.')
-    .replace(/\{\{\s*context\.last_form_submission\./g, '{{last_form_submission.');
+    .replace(/\{\{\s*context\.last_form_submission\./g, '{{last_form_submission.')
+    .replace(/\{\{\s*context\.conversation_today\s*\}\}/g, '{{conversation_today}}')
+    .replace(/\{\{\s*context\.conversation_this_year\s*\}\}/g, '{{conversation_this_year}}')
+    .replace(/\{\{\s*context\.conversation_all_time\s*\}\}/g, '{{conversation_all_time}}');
 }
 
 function normalizeLegacyNodeConfigAliases(value) {
@@ -1262,6 +1373,82 @@ function buildTemplateKey({ templateKey, name }) {
   const fromName = sanitizeTemplateKey(name);
   if (fromName) return fromName;
   return `flow_${Date.now()}`;
+}
+
+function sanitizeTemplateReference(raw) {
+  const base = String(raw || '')
+    .toLowerCase()
+    .trim()
+    .replace(/[^a-z0-9_-]+/g, '_')
+    .replace(/^_+|_+$/g, '');
+  return base || null;
+}
+
+function buildTemplateFamilyRef(item) {
+  return cleanString(item?.public_id) || cleanString(item?.template_key);
+}
+
+function buildTemplatePublicId() {
+  return `flw_${crypto.randomBytes(8).toString('hex')}`;
+}
+
+async function generateUniqueTemplatePublicId() {
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    const candidate = buildTemplatePublicId();
+    const existing = await AutomationFlowTemplateV2.findOne({
+      where: { public_id: candidate },
+      attributes: ['id'],
+      raw: true,
+    });
+    if (!existing) return candidate;
+  }
+  throw new Error('public_id_generation_failed');
+}
+
+function buildTemplateKeyWithSuffix(baseKey, suffix) {
+  const normalizedBase = sanitizeTemplateKey(baseKey) || 'flow';
+  const normalizedSuffix = sanitizeTemplateKey(suffix) || 'copy';
+  const room = 120 - normalizedSuffix.length - 1;
+  const trimmedBase = normalizedBase.slice(0, Math.max(1, room));
+  return `${trimmedBase}_${normalizedSuffix}`;
+}
+
+async function ensureUniqueTemplateKey(baseKey) {
+  let candidate = sanitizeTemplateKey(baseKey) || `flow_${Date.now()}`;
+  let existing = await AutomationFlowTemplateV2.findOne({
+    where: { template_key: candidate },
+    attributes: ['id'],
+    raw: true,
+  });
+
+  while (existing) {
+    candidate = buildTemplateKeyWithSuffix(candidate, crypto.randomBytes(3).toString('hex'));
+    existing = await AutomationFlowTemplateV2.findOne({
+      where: { template_key: candidate },
+      attributes: ['id'],
+      raw: true,
+    });
+  }
+
+  return candidate;
+}
+
+async function resolveTemplateFamilyWhere(rawReference) {
+  const normalizedReference = sanitizeTemplateReference(rawReference);
+  if (!normalizedReference) return null;
+
+  const byPublicId = await AutomationFlowTemplateV2.findOne({
+    where: { public_id: normalizedReference },
+    attributes: ['id'],
+    raw: true,
+  });
+  if (byPublicId) {
+    return { public_id: normalizedReference };
+  }
+
+  const templateKey = sanitizeTemplateKey(normalizedReference);
+  if (!templateKey) return null;
+  return { template_key: templateKey };
 }
 
 function isAdmin(req) {
@@ -1488,6 +1675,7 @@ function mapTemplate(row, { includeNodes = true, access = null, clinicNameMap = 
 
   const base = {
     id: item.id,
+    public_id: item.public_id,
     template_key: item.template_key,
     version: item.version,
     engine_version: item.engine_version,
@@ -1529,7 +1717,7 @@ function mapTemplate(row, { includeNodes = true, access = null, clinicNameMap = 
 }
 
 async function loadLatestActivePublishedVersionMap(templateKeys) {
-  const keys = Array.from(
+  const refs = Array.from(
     new Set(
       (Array.isArray(templateKeys) ? templateKeys : [])
         .map((value) => cleanString(value))
@@ -1537,29 +1725,32 @@ async function loadLatestActivePublishedVersionMap(templateKeys) {
     )
   );
 
-  if (!keys.length) {
+  if (!refs.length) {
     return new Map();
   }
 
   const rows = await AutomationFlowTemplateV2.findAll({
-    attributes: ['template_key', 'version'],
+    attributes: ['public_id', 'template_key', 'version'],
     where: {
-      template_key: { [Op.in]: keys },
+      [Op.or]: [
+        { public_id: { [Op.in]: refs } },
+        { template_key: { [Op.in]: refs } },
+      ],
       published_at: { [Op.ne]: null },
       is_active: true,
     },
-    order: [['template_key', 'ASC'], ['version', 'DESC']],
+    order: [['public_id', 'ASC'], ['template_key', 'ASC'], ['version', 'DESC']],
     raw: true,
   });
 
   const result = new Map();
   for (const row of rows) {
-    const templateKey = cleanString(row?.template_key);
+    const familyRef = buildTemplateFamilyRef(row);
     const version = parseIntOrNull(row?.version);
-    if (!templateKey || !version || result.has(templateKey)) {
+    if (!familyRef || !version || result.has(familyRef)) {
       continue;
     }
-    result.set(templateKey, version);
+    result.set(familyRef, version);
   }
   return result;
 }
@@ -1571,7 +1762,7 @@ function computeLifecycleStatus(item, latestActivePublishedVersionMap = null) {
 
   const latestActiveVersion =
     latestActivePublishedVersionMap instanceof Map
-      ? parseIntOrNull(latestActivePublishedVersionMap.get(cleanString(item.template_key)))
+      ? parseIntOrNull(latestActivePublishedVersionMap.get(buildTemplateFamilyRef(item)))
       : null;
 
   if (item.is_active === false) {
@@ -1624,6 +1815,7 @@ function mapExecution(row, { includeContext = true } = {}) {
     const t = item.templateVersion;
     base.template = {
       id: t.id,
+      public_id: t.public_id,
       template_key: t.template_key,
       version: t.version,
       name: t.name,
@@ -3208,7 +3400,7 @@ exports.listTemplates = async (req, res) => {
     const clinicNameMap = await loadClinicNameMapFromRows(rows);
 
     const latestActivePublishedVersionMap = await loadLatestActivePublishedVersionMap(
-      rows.map((row) => row.template_key)
+      rows.map((row) => row.public_id || row.template_key)
     );
 
     return res.json({
@@ -3313,7 +3505,11 @@ exports.createTemplateDraft = async (req, res) => {
       triggerConfig: normalizedTriggerConfig,
     });
 
-    const templateKey = buildTemplateKey({ templateKey: body.template_key, name });
+    const explicitTemplateKey = sanitizeTemplateKey(body.template_key);
+    let templateKey = buildTemplateKey({ templateKey: body.template_key, name });
+    if (!explicitTemplateKey) {
+      templateKey = await ensureUniqueTemplateKey(templateKey);
+    }
     let clinicId = parseIntOrNull(body.clinic_id);
     let groupId = parseIntOrNull(body.group_id);
     const isSystem = access.is_admin ? parseBool(body.is_system, false) : false;
@@ -3335,13 +3531,22 @@ exports.createTemplateDraft = async (req, res) => {
       return res.status(403).json({ success: false, error: 'forbidden_scope' });
     }
 
-    const existingDraft = await AutomationFlowTemplateV2.findOne({
-      where: {
-        template_key: templateKey,
-        published_at: null,
-      },
+    const latest = await AutomationFlowTemplateV2.findOne({
+      where: { template_key: templateKey },
+      attributes: ['version', 'public_id'],
       order: [['version', 'DESC']],
+      raw: true,
     });
+
+    const existingDraft = explicitTemplateKey
+      ? await AutomationFlowTemplateV2.findOne({
+          where: {
+            template_key: templateKey,
+            published_at: null,
+          },
+          order: [['version', 'DESC']],
+        })
+      : null;
 
     if (existingDraft) {
       return res.status(409).json({
@@ -3351,16 +3556,11 @@ exports.createTemplateDraft = async (req, res) => {
       });
     }
 
-    const latest = await AutomationFlowTemplateV2.findOne({
-      where: { template_key: templateKey },
-      attributes: ['version'],
-      order: [['version', 'DESC']],
-      raw: true,
-    });
-
     const version = latest?.version ? Number(latest.version) + 1 : 1;
+    const publicId = cleanString(latest?.public_id) || await generateUniqueTemplatePublicId();
 
     const created = await AutomationFlowTemplateV2.create({
+      public_id: publicId,
       template_key: templateKey,
       version,
       engine_version: cleanString(body.engine_version) || 'v2',
@@ -3393,15 +3593,15 @@ exports.createTemplateDraft = async (req, res) => {
 exports.getTemplateLatestPublished = async (req, res) => {
   try {
     const access = await resolveAccess(req);
-    const templateKey = sanitizeTemplateKey(req.params?.template_key);
+    const familyWhere = await resolveTemplateFamilyWhere(req.params?.template_ref || req.params?.template_key);
 
-    if (!templateKey) {
-      return res.status(400).json({ success: false, error: 'invalid_template_key' });
+    if (!familyWhere) {
+      return res.status(400).json({ success: false, error: 'invalid_template_ref' });
     }
 
     const row = await AutomationFlowTemplateV2.findOne({
       where: {
-        template_key: templateKey,
+        ...familyWhere,
         published_at: { [Op.ne]: null },
         is_active: true,
       },
@@ -3413,7 +3613,7 @@ exports.getTemplateLatestPublished = async (req, res) => {
     }
 
     const clinicNameMap = await loadClinicNameMapFromRows([row]);
-    const latestActivePublishedVersionMap = await loadLatestActivePublishedVersionMap([row.template_key]);
+    const latestActivePublishedVersionMap = await loadLatestActivePublishedVersionMap([row.public_id || row.template_key]);
     return res.json({
       success: true,
       data: mapTemplateWithLifecycle(row, {
@@ -3432,9 +3632,9 @@ exports.getTemplateLatestPublished = async (req, res) => {
 exports.listTemplateVersions = async (req, res) => {
   try {
     const access = await resolveAccess(req);
-    const templateKey = sanitizeTemplateKey(req.params?.template_key);
-    if (!templateKey) {
-      return res.status(400).json({ success: false, error: 'invalid_template_key' });
+    const familyWhere = await resolveTemplateFamilyWhere(req.params?.template_ref || req.params?.template_key);
+    if (!familyWhere) {
+      return res.status(400).json({ success: false, error: 'invalid_template_ref' });
     }
 
     const limit = parseLimit(req.query?.limit, 20);
@@ -3442,7 +3642,7 @@ exports.listTemplateVersions = async (req, res) => {
     const includeNodes = parseBool(req.query?.include_nodes, false);
 
     const { count, rows } = await AutomationFlowTemplateV2.findAndCountAll({
-      where: { template_key: templateKey },
+      where: familyWhere,
       limit,
       offset,
       order: [['version', 'DESC']],
@@ -3453,7 +3653,7 @@ exports.listTemplateVersions = async (req, res) => {
     const clinicNameMap = await loadClinicNameMapFromRows(visible);
 
     const latestActivePublishedVersionMap = await loadLatestActivePublishedVersionMap(
-      visible.map((row) => row.template_key)
+      visible.map((row) => row.public_id || row.template_key)
     );
 
     return res.json({
@@ -3481,15 +3681,15 @@ exports.listTemplateVersions = async (req, res) => {
 exports.getTemplateVersion = async (req, res) => {
   try {
     const access = await resolveAccess(req);
-    const templateKey = sanitizeTemplateKey(req.params?.template_key);
+    const familyWhere = await resolveTemplateFamilyWhere(req.params?.template_ref || req.params?.template_key);
     const version = parseIntOrNull(req.params?.version);
 
-    if (!templateKey || !version) {
+    if (!familyWhere || !version) {
       return res.status(400).json({ success: false, error: 'invalid_params' });
     }
 
     const row = await AutomationFlowTemplateV2.findOne({
-      where: { template_key: templateKey, version },
+      where: { ...familyWhere, version },
     });
 
     if (!row || !hasScopeAccess(access, row)) {
@@ -3497,7 +3697,7 @@ exports.getTemplateVersion = async (req, res) => {
     }
 
     const clinicNameMap = await loadClinicNameMapFromRows([row]);
-    const latestActivePublishedVersionMap = await loadLatestActivePublishedVersionMap([row.template_key]);
+    const latestActivePublishedVersionMap = await loadLatestActivePublishedVersionMap([row.public_id || row.template_key]);
     return res.json({
       success: true,
       data: mapTemplateWithLifecycle(row, {
@@ -3516,15 +3716,15 @@ exports.getTemplateVersion = async (req, res) => {
 exports.updateTemplateDraft = async (req, res) => {
   try {
     const access = await resolveAccess(req);
-    const templateKey = sanitizeTemplateKey(req.params?.template_key);
+    const familyWhere = await resolveTemplateFamilyWhere(req.params?.template_ref || req.params?.template_key);
     const version = parseIntOrNull(req.params?.version);
 
-    if (!templateKey || !version) {
+    if (!familyWhere || !version) {
       return res.status(400).json({ success: false, error: 'invalid_params' });
     }
 
     const row = await AutomationFlowTemplateV2.findOne({
-      where: { template_key: templateKey, version },
+      where: { ...familyWhere, version },
     });
 
     if (!row || !hasScopeAccess(access, row)) {
@@ -3552,7 +3752,7 @@ exports.updateTemplateDraft = async (req, res) => {
       });
 
       const clinicNameMap = await loadClinicNameMapFromRows([row]);
-      const latestActivePublishedVersionMap = await loadLatestActivePublishedVersionMap([row.template_key]);
+      const latestActivePublishedVersionMap = await loadLatestActivePublishedVersionMap([row.public_id || row.template_key]);
       return res.json({
         success: true,
         data: mapTemplateWithLifecycle(row, {
@@ -3656,7 +3856,7 @@ exports.updateTemplateDraft = async (req, res) => {
     await row.update(updates);
 
     const clinicNameMap = await loadClinicNameMapFromRows([row]);
-    const latestActivePublishedVersionMap = await loadLatestActivePublishedVersionMap([row.template_key]);
+    const latestActivePublishedVersionMap = await loadLatestActivePublishedVersionMap([row.public_id || row.template_key]);
     return res.json({
       success: true,
       data: mapTemplateWithLifecycle(row, {
@@ -3675,15 +3875,15 @@ exports.updateTemplateDraft = async (req, res) => {
 exports.publishTemplateVersion = async (req, res) => {
   try {
     const access = await resolveAccess(req);
-    const templateKey = sanitizeTemplateKey(req.params?.template_key);
+    const familyWhere = await resolveTemplateFamilyWhere(req.params?.template_ref || req.params?.template_key);
     const version = parseIntOrNull(req.params?.version);
 
-    if (!templateKey || !version) {
+    if (!familyWhere || !version) {
       return res.status(400).json({ success: false, error: 'invalid_params' });
     }
 
     const row = await AutomationFlowTemplateV2.findOne({
-      where: { template_key: templateKey, version },
+      where: { ...familyWhere, version },
     });
 
     if (!row || !hasScopeAccess(access, row)) {
@@ -3758,7 +3958,7 @@ exports.publishTemplateVersion = async (req, res) => {
         { is_active: false },
         {
           where: {
-            template_key: templateKey,
+            ...(cleanString(row.public_id) ? { public_id: cleanString(row.public_id) } : { template_key: row.template_key }),
             published_at: { [Op.ne]: null },
             id: { [Op.ne]: row.id },
           },
@@ -3782,7 +3982,7 @@ exports.publishTemplateVersion = async (req, res) => {
     });
 
     const clinicNameMap = await loadClinicNameMapFromRows([row]);
-    const latestActivePublishedVersionMap = await loadLatestActivePublishedVersionMap([row.template_key]);
+    const latestActivePublishedVersionMap = await loadLatestActivePublishedVersionMap([row.public_id || row.template_key]);
     return res.json({
       success: true,
       data: mapTemplateWithLifecycle(row, {
@@ -3801,13 +4001,13 @@ exports.publishTemplateVersion = async (req, res) => {
 exports.deleteTemplate = async (req, res) => {
   try {
     const access = await resolveAccess(req);
-    const templateKey = sanitizeTemplateKey(req.params?.template_key);
-    if (!templateKey) {
-      return res.status(400).json({ success: false, error: 'invalid_template_key' });
+    const familyWhere = await resolveTemplateFamilyWhere(req.params?.template_ref || req.params?.template_key);
+    if (!familyWhere) {
+      return res.status(400).json({ success: false, error: 'invalid_template_ref' });
     }
 
     const rows = await AutomationFlowTemplateV2.findAll({
-      where: { template_key: templateKey },
+      where: familyWhere,
       order: [['version', 'DESC']],
     });
 
@@ -3933,11 +4133,12 @@ exports.deleteTemplate = async (req, res) => {
       });
     }
 
-    await AutomationFlowTemplateV2.destroy({ where: { template_key: templateKey } });
+    await AutomationFlowTemplateV2.destroy({ where: familyWhere });
     return res.json({
       success: true,
       data: {
-        template_key: templateKey,
+        public_id: cleanString(rows[0]?.public_id) || null,
+        template_key: cleanString(rows[0]?.template_key) || null,
         deleted_versions: versionIds.length,
       },
     });
@@ -3950,15 +4151,15 @@ exports.deleteTemplate = async (req, res) => {
 exports.executeTemplateVersion = async (req, res) => {
   try {
     const access = await resolveAccess(req);
-    const templateKey = sanitizeTemplateKey(req.params?.template_key);
+    const familyWhere = await resolveTemplateFamilyWhere(req.params?.template_ref || req.params?.template_key);
     const version = parseIntOrNull(req.params?.version);
 
-    if (!templateKey || !version) {
+    if (!familyWhere || !version) {
       return res.status(400).json({ success: false, error: 'invalid_params' });
     }
 
     const row = await AutomationFlowTemplateV2.findOne({
-      where: { template_key: templateKey, version },
+      where: { ...familyWhere, version },
     });
 
     if (!row || !hasScopeAccess(access, row)) {
@@ -4288,7 +4489,7 @@ exports.listExecutions = async (req, res) => {
       include: [{
         model: AutomationFlowTemplateV2,
         as: 'templateVersion',
-        attributes: ['id', 'template_key', 'version', 'name', 'trigger_type'],
+        attributes: ['id', 'public_id', 'template_key', 'version', 'name', 'trigger_type'],
         required: !!templateKey || !!templateVersion,
         ...((templateKey || templateVersion) ? { where: templateWhere } : {}),
       }],
@@ -4325,7 +4526,7 @@ exports.getExecution = async (req, res) => {
       include: [{
         model: AutomationFlowTemplateV2,
         as: 'templateVersion',
-        attributes: ['id', 'template_key', 'version', 'name', 'trigger_type'],
+        attributes: ['id', 'public_id', 'template_key', 'version', 'name', 'trigger_type'],
       }],
     });
 

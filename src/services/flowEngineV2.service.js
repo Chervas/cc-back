@@ -22,6 +22,7 @@ const ClinicMetaAsset = db.ClinicMetaAsset;
 const WhatsappTemplate = db.WhatsappTemplate;
 const whatsappService = require('./whatsapp.service');
 const { findCanonicalWhatsappConversation } = require('../lib/canonical-conversation');
+const { buildConversationContext } = require('../lib/automation-conversation-context');
 const UPDATE_LEAD_INFO_MODES = new Set([
   'set_required',
   'set_received',
@@ -989,6 +990,20 @@ function readFirstIntFromPaths(context, paths) {
   return null;
 }
 
+function readFirstIntFromOutputValues(context, keys) {
+  const outputs = context?.outputs && typeof context.outputs === 'object'
+    ? Object.values(context.outputs).filter((value) => value && typeof value === 'object')
+    : [];
+
+  for (const output of outputs) {
+    for (const key of keys) {
+      const parsed = toIntOrNull(output?.[key]);
+      if (parsed) return parsed;
+    }
+  }
+  return null;
+}
+
 function resolveRuntimeTargets(execution, context) {
   const triggerType = normalizeKey(execution?.trigger_entity_type);
   const triggerEntityId = toIntOrNull(execution?.trigger_entity_id);
@@ -1002,6 +1017,10 @@ function resolveRuntimeTargets(execution, context) {
     'appointment.clinica_id',
     'conversation.clinic_id',
     'lead.clinica_id',
+  ]) || readFirstIntFromOutputValues(context, [
+    'clinic_id',
+    'clinica_id',
+    'sender_clinic_id',
   ]);
 
   let appointmentId = readFirstIntFromPaths(context, [
@@ -1024,6 +1043,10 @@ function resolveRuntimeTargets(execution, context) {
     'trigger.data.lead_intake_id',
     'trigger.data.lead_id',
     'trigger.data.id_lead',
+  ]) || readFirstIntFromOutputValues(context, [
+    'lead_id',
+    'lead_intake_id',
+    'recipient_lead_id',
   ]);
   if (!leadIntakeId && ['lead', 'lead_intake', 'leadintake', 'lead_nuevo'].includes(triggerType)) {
     leadIntakeId = triggerEntityId;
@@ -1034,6 +1057,9 @@ function resolveRuntimeTargets(execution, context) {
     'trigger.data.conversation_id',
     'trigger.data.chat_conversation_id',
     'trigger.data.conversationId',
+  ]) || readFirstIntFromOutputValues(context, [
+    'conversation_id',
+    'chat_conversation_id',
   ]);
   if (!conversationId && ['conversation', 'chat_conversation', 'whatsapp_conversation'].includes(triggerType)) {
     conversationId = triggerEntityId;
@@ -1045,6 +1071,10 @@ function resolveRuntimeTargets(execution, context) {
     'appointment.paciente_id',
     'trigger.data.patient_id',
     'trigger.data.paciente_id',
+  ]) || readFirstIntFromOutputValues(context, [
+    'patient_id',
+    'paciente_id',
+    'recipient_patient_id',
   ]);
 
   return {
@@ -1115,6 +1145,32 @@ async function backfillRuntimeTargets(execution, targets = {}) {
 
   out.clinic_id = out.clinic_id || toIntOrNull(execution?.clinic_id);
   return out;
+}
+
+async function enrichConversationContext(context, targets = {}) {
+  const baseContext = context && typeof context === 'object' ? context : {};
+  const conversationContext = await buildConversationContext({
+    Conversation,
+    Message,
+    conversationId: toIntOrNull(targets.conversation_id),
+    clinicId: toIntOrNull(targets.clinic_id),
+    leadId: toIntOrNull(targets.lead_intake_id),
+    patientId: toIntOrNull(targets.patient_id),
+  });
+
+  if (!conversationContext?.conversation) {
+    return baseContext;
+  }
+
+  return mergeContextPatch(baseContext, {
+    conversation: {
+      ...(baseContext?.conversation && typeof baseContext.conversation === 'object' ? baseContext.conversation : {}),
+      ...conversationContext.conversation,
+    },
+    conversation_today: conversationContext.conversation_today || null,
+    conversation_this_year: conversationContext.conversation_this_year || null,
+    conversation_all_time: conversationContext.conversation_all_time || null,
+  });
 }
 
 function normalizeStatusTarget(value) {
@@ -2724,7 +2780,10 @@ async function processNode(node, context, runtime = {}) {
         throw new Error('ai_analysis_legacy_config_not_supported');
       }
 
-      const resolvedInstruction = cleanString(resolveTemplateValue(config?.instruction, context));
+      const runtimeTargets = await backfillRuntimeTargets(runtime?.execution, resolveRuntimeTargets(runtime?.execution, context));
+      const aiContext = await enrichConversationContext(context, runtimeTargets);
+
+      const resolvedInstruction = cleanString(resolveTemplateValue(config?.instruction, aiContext));
       if (!resolvedInstruction) {
         throw new Error('ai_analysis_instruction_required');
       }
@@ -2741,7 +2800,7 @@ async function processNode(node, context, runtime = {}) {
           if (!path) return null;
           return {
             key,
-            value: resolveTemplateValue(path, context),
+            value: resolveTemplateValue(path, aiContext),
           };
         })
         .filter((source) => source && source.value !== undefined && source.value !== null);
@@ -2884,6 +2943,9 @@ async function resumeWaitingNode(execution, node, context, { mode, responseText,
         },
       };
     }
+
+    const refreshedTargets = await backfillRuntimeTargets(execution, resolveRuntimeTargets(execution, nextContext));
+    nextContext = await enrichConversationContext(nextContext, refreshedTargets);
 
     await updateExecutionAndEmit(execution, {
       status: 'running',
