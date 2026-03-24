@@ -2,7 +2,7 @@
 
 const { Op, fn, col, literal } = require('sequelize');
 const { ClinicGoogleAdsAccount, GoogleAdsInsightsDaily } = require('../../models');
-const { formatCustomerId } = require('../lib/googleAdsClient');
+const { formatCustomerId, normalizeCustomerId } = require('../lib/googleAdsClient');
 const { resolveClinicScope, buildAssetScopeWhere } = require('../lib/clinicScope');
 
 function parseDate(value, fallback) {
@@ -614,6 +614,31 @@ exports.getHealth = async (req, res) => {
     const campaignsRecent = aggregateCampaigns(recentRows);
 
     const cards = [];
+
+    // Card: account status
+    const accountStatusItems = accounts
+      .map((acc) => {
+        const rawStatus = String(getAttr(acc, 'accountStatus') || '').trim().toUpperCase();
+        if (!rawStatus || ['ENABLED', 'ACTIVE', 'SERVING'].includes(rawStatus)) {
+          return null;
+        }
+        return {
+          clinic_id: getAttr(acc, 'clinicaId') || null,
+          customerId: normalizeCustomerId(getAttr(acc, 'customerId') || ''),
+          campaignName: getAttr(acc, 'descriptiveName') || formatCustomerId(getAttr(acc, 'customerId') || ''),
+          status: rawStatus,
+          error: rawStatus
+        };
+      })
+      .filter(Boolean);
+
+    cards.push({
+      id: 'account-status',
+      title: 'Cuenta publicitaria (estado actual)',
+      status: accountStatusItems.length ? 'error' : 'ok',
+      rangeLabel: `${startStr} - ${endStr}`,
+      items: accountStatusItems
+    });
 
     // Card: account spend
     cards.push({
