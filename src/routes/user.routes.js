@@ -4,7 +4,7 @@ const userController = require('../controllers/user.controller');
 const authMiddleware = require('./auth.middleware');
 
 // Mantener consistente con userclinicas.routes.js
-const ADMIN_USER_IDS = [1];
+const ADMIN_USER_IDS = [1, 44];
 
 const isAdmin = (userId) => ADMIN_USER_IDS.includes(Number(userId));
 

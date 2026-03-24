@@ -18,7 +18,7 @@ const {
 } = db;
 
 const ROLE_AGGREGATE = ['propietario', 'admin'];
-const ADMIN_USER_IDS = (process.env.ADMIN_USER_IDS || '1').split(',').map((v) => parseInt(v.trim(), 10)).filter((n) => !Number.isNaN(n));
+const ADMIN_USER_IDS = (process.env.ADMIN_USER_IDS || '1,44').split(',').map((v) => parseInt(v.trim(), 10)).filter((n) => !Number.isNaN(n));
 const META_API_VERSION = process.env.META_API_VERSION || 'v22.0';
 const META_GRAPH_TOKEN = process.env.META_GRAPH_TOKEN || process.env.META_SYSTEM_USER_TOKEN || null;
 const META_BUSINESS_ID = process.env.META_BUSINESS_ID || process.env.META_BM_ID || null;
@@ -661,6 +661,10 @@ exports.listPhones = async (req, res) => {
     const userId = req.userData?.userId;
     const { clinicIds, isAggregateAllowed } = await getUserClinics(userId);
     const clinicIdFilter = req.query.clinic_id ? Number(req.query.clinic_id) : null;
+    const groupIdFilter = req.query.group_id ? Number(req.query.group_id) : null;
+    if (groupIdFilter && !isAggregateAllowed) {
+      return res.status(403).json({ error: 'group_scope_not_allowed' });
+    }
     let groupIdFromClinic = null;
     if (clinicIdFilter) {
       const clinic = await Clinica.findOne({ where: { id_clinica: clinicIdFilter }, attributes: ['grupoClinicaId'], raw: true });
@@ -672,7 +676,18 @@ exports.listPhones = async (req, res) => {
       assetType: 'whatsapp_phone_number',
     };
 
-    if (clinicIdFilter) {
+    if (groupIdFilter) {
+      const groupClinics = await Clinica.findAll({
+        where: { grupoClinicaId: groupIdFilter },
+        attributes: ['id_clinica'],
+        raw: true,
+      });
+      const groupClinicIds = groupClinics.map((c) => c.id_clinica).filter(Boolean);
+      where[Op.or] = [
+        { clinicaId: { [Op.in]: groupClinicIds.length ? groupClinicIds : [-1] } },
+        { assignmentScope: 'group', grupoClinicaId: groupIdFilter },
+      ];
+    } else if (clinicIdFilter) {
       where[Op.or] = [
         { clinicaId: clinicIdFilter },
         { assignmentScope: 'group', grupoClinicaId: groupIdFromClinic },

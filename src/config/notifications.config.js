@@ -1,6 +1,6 @@
 'use strict';
 
-const ADMIN_USER_IDS = (process.env.ADMIN_USER_IDS || '1')
+const ADMIN_USER_IDS = (process.env.ADMIN_USER_IDS || '1,44')
   .split(',')
   .map((id) => parseInt(id.trim(), 10))
   .filter((id) => Number.isInteger(id));

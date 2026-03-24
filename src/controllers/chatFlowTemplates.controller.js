@@ -6,7 +6,7 @@ const db = require('../../models');
 const ChatFlowTemplate = db.ChatFlowTemplate;
 const Clinica = db.Clinica;
 
-const ADMIN_USER_IDS = (process.env.ADMIN_USER_IDS || '1')
+const ADMIN_USER_IDS = (process.env.ADMIN_USER_IDS || '1,44')
   .split(',')
   .map((v) => parseInt(String(v).trim(), 10))
   .filter((n) => Number.isFinite(n));

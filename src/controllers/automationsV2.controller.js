@@ -20,7 +20,7 @@ const jobScheduler = require('../services/jobScheduler.service');
 const { getIO } = require('../services/socket.service');
 const { CITA_STATUS_VALUES, LEAD_STATUS_VALUES } = require('../lib/status-catalog');
 
-const ADMIN_USER_IDS = (process.env.ADMIN_USER_IDS || '1')
+const ADMIN_USER_IDS = (process.env.ADMIN_USER_IDS || '1,44')
   .split(',')
   .map((v) => Number.parseInt(String(v).trim(), 10))
   .filter((n) => Number.isInteger(n));

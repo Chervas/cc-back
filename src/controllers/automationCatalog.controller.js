@@ -24,7 +24,7 @@ const CATALOG_TRIGGER_TYPES = [
 
 const CATALOG_TRIGGER_TYPE_SET = new Set(CATALOG_TRIGGER_TYPES);
 
-const ADMIN_USER_IDS = (process.env.ADMIN_USER_IDS || '1')
+const ADMIN_USER_IDS = (process.env.ADMIN_USER_IDS || '1,44')
   .split(',')
   .map((v) => parseInt(v.trim(), 10))
   .filter((n) => !Number.isNaN(n));

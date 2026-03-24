@@ -35,7 +35,7 @@ const ESTADO_CUENTA = ['activo', 'provisional', 'suspendido'];
 const ESTADO_INVITACION = ['pendiente', 'aceptada', 'rechazada', 'cancelada'];
 
 // ── Admin global (por ID de usuario) ──────────────────────────
-const ADMIN_USER_IDS = [1];
+const ADMIN_USER_IDS = [1, 44];
 
 // ── Helpers ───────────────────────────────────────────────────
 

@@ -37,6 +37,31 @@ no:
 
 Esto reduce latencia, evita divergencias entre pantallas y elimina dependencia de cuotas/rate limits durante la navegación.
 
+### Ajuste importante del 2026-03-24
+
+El frontend ya no debe reconstruir un rango corto (`Ayer`, `Semana pasada`, etc.) usando fallback de `all_time`.
+
+Eso obliga a backend a ser claro:
+
+- si hay cache para ese rango, se devuelve;
+- si no la hay, se devuelve vacío/parcial;
+- el siguiente paso correcto es ejecutar/respetar la sincronización nocturna, no abrir una llamada live desde UI.
+
+## 2026-03-24 - Scope real de WhatsApp en Ajustes
+
+`GET /api/whatsapp/phones` ya debe aceptar y respetar:
+
+- `clinic_id`
+- `group_id`
+
+Semántica actual:
+
+- `clinic_id`: devuelve números propios de la clínica y números heredados del grupo;
+- `group_id`: devuelve números asignados al grupo y números clínicos de las clínicas que cuelgan de ese grupo;
+- sin scope: vista global según permisos del usuario.
+
+Esto alinea WhatsApp con el resto de activos conectados en `Ajustes`.
+
 ## 2026-03-23 - Cache ad-level de Google Ads para análisis de campañas
 
 > **Estado:** implementado en `back-integracion`.
