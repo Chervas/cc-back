@@ -8,12 +8,13 @@ const whatsappController = require('../controllers/whatsapp.controller');
  * POST /api/whatsapp/messages
  * Enviar un mensaje de WhatsApp usando la API de Meta
  */
-router.post('/messages', async (req, res) => {
+router.post('/messages', authMiddleware, async (req, res) => {
     try {
         const {
             to,
             message,
             previewUrl = false,
+            clinic_id,
             metadata = {},
             useTemplate,
             templateName,
@@ -36,11 +37,27 @@ router.post('/messages', async (req, res) => {
             });
         }
 
+        const clinicId = Number(clinic_id);
+        if (!clinicId) {
+            return res.status(400).json({
+                success: false,
+                error: 'El campo "clinic_id" es obligatorio.',
+            });
+        }
+
         const normalized = whatsappService.normalizePhoneNumber(to);
         if (!normalized) {
             return res.status(400).json({
                 success: false,
                 error: 'No se pudo normalizar el número de destino.',
+            });
+        }
+
+        const clinicConfig = await whatsappService.getClinicConfig(clinicId);
+        if (!clinicConfig?.phoneNumberId || !clinicConfig?.accessToken) {
+            return res.status(409).json({
+                success: false,
+                error: 'whatsapp_config_missing_for_scope',
             });
         }
 
@@ -53,13 +70,19 @@ router.post('/messages', async (req, res) => {
             templateLanguage,
             templateParams,
             templateComponents,
+            clinicConfig,
         });
 
         res.status(200).json({
             success: true,
             messageId: response.messages?.[0]?.id || null,
             to: normalized,
-            metadata,
+            metadata: {
+                ...metadata,
+                clinic_id: clinicId,
+                phoneNumberId: clinicConfig.phoneNumberId || null,
+                wabaId: clinicConfig.wabaId || null,
+            },
         });
     } catch (error) {
         const statusCode = error.response?.status || 500;

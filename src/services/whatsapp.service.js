@@ -4,17 +4,6 @@ const ClinicMetaAsset = db.ClinicMetaAsset;
 const Clinica = db.Clinica;
 const sequelize = db.sequelize;
 
-const FALLBACK_CONFIG = {
-    phoneNumberId: '101717972850686',
-    accessToken:
-        'EAAZAsOZAwCgukBPZBjIzcxUntETJTBYBP98DwdCZCgZBsmnxcLS7gN8hoiWMmMnyzaZBjwfRKimzsMKMQdpv3oo7XgWzJCZAzmKUvdWSfo9lCKaanDBRAoZA9RdpFJYbAImZCY5KWZAG85nedJpaap6FLCYbMKV4EkW6JZAeFEpjCFQZCKhzlXA6UuqDMPnuCRasOcs0NG6oL0bQEclTZASPYu3WLmhKV3yXDpTeClrPiuQHldEh1CPIZD',
-    apiVersion: 'v22.0',
-    defaultCountryCode: '+34',
-    templateName: 'hello_world',
-    templateLanguage: 'en_US',
-    useTemplate: false,
-};
-
 const LIMITED_MODE_MAX_OUTBOUND_PER_24H = Number.parseInt(
     process.env.WHATSAPP_LIMITED_MODE_MAX_OUTBOUND_24H || '5',
     10
@@ -22,27 +11,95 @@ const LIMITED_MODE_MAX_OUTBOUND_PER_24H = Number.parseInt(
 
 class WhatsAppService {
     constructor() {
-        this.phoneNumberId =
-            process.env.META_WHATSAPP_PHONE_NUMBER_ID ||
-            FALLBACK_CONFIG.phoneNumberId;
-        this.accessToken =
-            process.env.META_WHATSAPP_ACCESS_TOKEN ||
-            FALLBACK_CONFIG.accessToken;
-        this.apiVersion =
-            process.env.META_API_VERSION || FALLBACK_CONFIG.apiVersion;
+        this.phoneNumberId = null;
+        this.accessToken = null;
+        this.apiVersion = process.env.META_API_VERSION || 'v24.0';
         this.defaultCountryCode =
-            process.env.META_WHATSAPP_DEFAULT_COUNTRY_CODE ||
-            FALLBACK_CONFIG.defaultCountryCode;
+            process.env.META_WHATSAPP_DEFAULT_COUNTRY_CODE || '+34';
         this.defaultTemplateName =
-            process.env.META_WHATSAPP_TEMPLATE_NAME ||
-            FALLBACK_CONFIG.templateName;
+            process.env.META_WHATSAPP_TEMPLATE_NAME || 'hello_world';
         this.defaultTemplateLanguage =
-            process.env.META_WHATSAPP_TEMPLATE_LANGUAGE ||
-            FALLBACK_CONFIG.templateLanguage;
+            process.env.META_WHATSAPP_TEMPLATE_LANGUAGE || 'en_US';
         this.defaultUseTemplate =
             process.env.META_WHATSAPP_USE_TEMPLATE !== undefined
                 ? process.env.META_WHATSAPP_USE_TEMPLATE === 'true'
-                : FALLBACK_CONFIG.useTemplate;
+                : false;
+    }
+
+    async resolvePhoneAssetByClinic(clinicId) {
+        if (!clinicId) {
+            return null;
+        }
+
+        const clinicAsset = await ClinicMetaAsset.findOne({
+            where: {
+                clinicaId: clinicId,
+                isActive: true,
+                assetType: 'whatsapp_phone_number',
+            },
+            order: [['updatedAt', 'DESC']],
+            raw: true,
+        });
+        if (clinicAsset) {
+            return clinicAsset;
+        }
+
+        const clinic = await Clinica.findByPk(clinicId, {
+            attributes: ['grupoClinicaId'],
+            raw: true,
+        });
+        if (!clinic?.grupoClinicaId) {
+            return null;
+        }
+
+        return ClinicMetaAsset.findOne({
+            where: {
+                grupoClinicaId: clinic.grupoClinicaId,
+                assignmentScope: 'group',
+                isActive: true,
+                assetType: 'whatsapp_phone_number',
+            },
+            order: [['updatedAt', 'DESC']],
+            raw: true,
+        });
+    }
+
+    async resolveWabaAssetByClinic(clinicId) {
+        if (!clinicId) {
+            return null;
+        }
+
+        const clinicAsset = await ClinicMetaAsset.findOne({
+            where: {
+                clinicaId: clinicId,
+                isActive: true,
+                assetType: 'whatsapp_business_account',
+            },
+            order: [['updatedAt', 'DESC']],
+            raw: true,
+        });
+        if (clinicAsset) {
+            return clinicAsset;
+        }
+
+        const clinic = await Clinica.findByPk(clinicId, {
+            attributes: ['grupoClinicaId'],
+            raw: true,
+        });
+        if (!clinic?.grupoClinicaId) {
+            return null;
+        }
+
+        return ClinicMetaAsset.findOne({
+            where: {
+                grupoClinicaId: clinic.grupoClinicaId,
+                assignmentScope: 'group',
+                isActive: true,
+                assetType: 'whatsapp_business_account',
+            },
+            order: [['updatedAt', 'DESC']],
+            raw: true,
+        });
     }
 
     /**
@@ -59,14 +116,7 @@ class WhatsAppService {
      * Obtiene credenciales y phoneNumberId por clínica desde ClinicMetaAssets
      */
     async getClinicConfig(clinicId) {
-        const asset = await ClinicMetaAsset.findOne({
-            where: {
-                clinicaId: clinicId,
-                isActive: true,
-                assetType: 'whatsapp_phone_number',
-            },
-            raw: true,
-        });
+        const asset = await this.resolvePhoneAssetByClinic(clinicId);
 
         if (asset?.waAccessToken && asset?.phoneNumberId) {
             return {
@@ -80,84 +130,21 @@ class WhatsAppService {
             };
         }
 
-        // fallback a número de grupo si existe
-        const clinic = await Clinica.findByPk(clinicId, {
-            attributes: ['grupoClinicaId'],
-            raw: true,
-        });
-        if (clinic?.grupoClinicaId) {
-            const groupPhone = await ClinicMetaAsset.findOne({
-                where: {
-                    grupoClinicaId: clinic.grupoClinicaId,
-                    assignmentScope: 'group',
-                    isActive: true,
-                    assetType: 'whatsapp_phone_number',
-                },
-                raw: true,
-            });
-            if (groupPhone?.waAccessToken && groupPhone?.phoneNumberId) {
-                return {
-                    phoneNumberId: groupPhone.phoneNumberId,
-                    accessToken: groupPhone.waAccessToken,
-                    wabaId: groupPhone.wabaId || null,
-                    assignmentScope: groupPhone.assignmentScope || 'group',
-                    clinicaId: groupPhone.clinicaId || clinicId,
-                    grupoClinicaId: groupPhone.grupoClinicaId || clinic?.grupoClinicaId || null,
-                    additionalData: groupPhone.additionalData || {},
-                };
-            }
-        }
-
-        // fallback a WABA si no hay phone number específico
-        const waba = await ClinicMetaAsset.findOne({
-            where: {
-                clinicaId: clinicId,
-                isActive: true,
-                assetType: 'whatsapp_business_account',
-            },
-            raw: true,
-        });
+        const waba = await this.resolveWabaAssetByClinic(clinicId);
 
         if (waba?.waAccessToken && waba?.phoneNumberId) {
             return {
                 phoneNumberId: waba.phoneNumberId,
                 accessToken: waba.waAccessToken,
+                wabaId: waba.wabaId || null,
+                assignmentScope: waba.assignmentScope || null,
+                clinicaId: waba.clinicaId || clinicId,
+                grupoClinicaId: waba.grupoClinicaId || null,
+                additionalData: waba.additionalData || {},
             };
         }
 
-        if (clinic?.grupoClinicaId) {
-            const groupWaba = await ClinicMetaAsset.findOne({
-                where: {
-                    grupoClinicaId: clinic.grupoClinicaId,
-                    assignmentScope: 'group',
-                    isActive: true,
-                    assetType: 'whatsapp_business_account',
-                },
-                raw: true,
-            });
-            if (groupWaba?.waAccessToken && groupWaba?.phoneNumberId) {
-                return {
-                    phoneNumberId: groupWaba.phoneNumberId,
-                    accessToken: groupWaba.waAccessToken,
-                    wabaId: groupWaba.wabaId || null,
-                    assignmentScope: groupWaba.assignmentScope || 'group',
-                    clinicaId: groupWaba.clinicaId || clinicId,
-                    grupoClinicaId: groupWaba.grupoClinicaId || clinic?.grupoClinicaId || null,
-                    additionalData: groupWaba.additionalData || {},
-                };
-            }
-        }
-
-        // fallback global
-        return {
-            phoneNumberId: process.env.META_WHATSAPP_PHONE_NUMBER_ID || FALLBACK_CONFIG.phoneNumberId,
-            accessToken: process.env.META_WHATSAPP_ACCESS_TOKEN || FALLBACK_CONFIG.accessToken,
-            wabaId: null,
-            assignmentScope: null,
-            clinicaId: clinicId,
-            grupoClinicaId: null,
-            additionalData: {},
-        };
+        return null;
     }
 
     /**
@@ -165,14 +152,8 @@ class WhatsAppService {
      * @param {*} clinicConfig { phoneNumberId, accessToken }
      */
     setClinicCredentials(clinicConfig = {}) {
-        this.phoneNumberId =
-            clinicConfig.phoneNumberId ||
-            process.env.META_WHATSAPP_PHONE_NUMBER_ID ||
-            FALLBACK_CONFIG.phoneNumberId;
-        this.accessToken =
-            clinicConfig.accessToken ||
-            process.env.META_WHATSAPP_ACCESS_TOKEN ||
-            FALLBACK_CONFIG.accessToken;
+        this.phoneNumberId = clinicConfig.phoneNumberId || null;
+        this.accessToken = clinicConfig.accessToken || null;
     }
 
     /**
@@ -444,13 +425,11 @@ class WhatsAppService {
      */
     assertConfiguration() {
         if (!this.phoneNumberId) {
-            throw new Error(
-                'META_WHATSAPP_PHONE_NUMBER_ID no está configurado.'
-            );
+            throw new Error('whatsapp_phone_number_not_configured_for_scope');
         }
 
         if (!this.accessToken) {
-            throw new Error('META_WHATSAPP_ACCESS_TOKEN no está configurado.');
+            throw new Error('whatsapp_access_token_not_configured_for_scope');
         }
     }
 

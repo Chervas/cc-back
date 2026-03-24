@@ -79,12 +79,12 @@ Caso real detectado en integración:
 - la causa era un fallback legacy global en `src/services/whatsapp.service.js` (`META_WHATSAPP_ACCESS_TOKEN` + `META_WHATSAPP_PHONE_NUMBER_ID` o número por defecto);
 - por tanto, "funciona en runtime" no significaba "está modelado por scope".
 
-Regla aplicada desde esta iteración:
+Regla aplicada inicialmente:
 
 - si existe un número legacy operativo y se quiere que aparezca en `Ajustes`, hay que materializarlo como `ClinicMetaAsset` scoped;
 - para ese backfill existe el script:
   - `scripts/backfill-whatsapp-legacy-scope.js`
-- el script crea o actualiza un `whatsapp_phone_number` con `assignmentScope = group` o el scope indicado, sin retirar todavía el fallback global.
+- el script crea o actualiza un `whatsapp_phone_number` con `assignmentScope = group` o el scope indicado.
 
 Además, los lectores de estado deben resolver herencia de grupo:
 
@@ -93,19 +93,35 @@ Además, los lectores de estado deben resolver herencia de grupo:
 
 si no encuentran un asset propio de clínica, deben intentar el asset `assignmentScope = group` del grupo de esa clínica antes de devolver "no configurado".
 
-Migración segura recomendada cuando CRM funciona pero `Ajustes` no refleja WhatsApp:
+Migración segura aplicada cuando CRM funciona pero `Ajustes` no refleja WhatsApp:
 
 1. inspeccionar `Messages.metadata` recientes para localizar `wabaId` y `phoneNumberId` realmente usados por el runtime;
 2. validar esos IDs contra Graph con el token actual;
 3. materializar ambos activos en `ClinicMetaAsset` para el scope correcto;
 4. sincronizar teléfonos y plantillas del `wabaId`;
 5. desactivar el asset test/legacy de la vista;
-6. mantener el fallback global hasta verificar la operativa en UI y envío real.
+6. mantener temporalmente el fallback global hasta verificar la operativa en UI y envío real;
+7. cuando esa validación sea correcta, retirar el fallback global del runtime.
 
 Esto evita dos errores frecuentes:
 
 - reconectar a ciegas cuando el canal real ya existe y solo falta modelarlo;
 - retirar el fallback global antes de comprobar que el nuevo scope ya resuelve `phone_number_id`, `waba_id` y plantillas.
+
+Estado actual en integración:
+
+- el runtime operativo de envío ya no cae a `META_WHATSAPP_ACCESS_TOKEN` / `META_WHATSAPP_PHONE_NUMBER_ID` como ruta normal;
+- `src/services/whatsapp.service.js` resuelve exclusivamente activos scoped (`clinic` o herencia `group`);
+- el endpoint `POST /api/whatsapp/messages` exige `auth` y `clinic_id`;
+- los tokens de entorno de WhatsApp siguen siendo válidos para:
+  - embedded signup / bootstrap técnico;
+  - scripts de backfill o diagnóstico;
+  - sincronizaciones puntuales contra Graph cuando ya existe un WABA conocido.
+
+En otras palabras:
+
+- operar WhatsApp para una clínica/grupo ya no depende de `.env`;
+- bootstrapear o reparar una conexión sí puede seguir necesitando `.env`.
 
 ## 2026-03-24 - Salud de Google Ads: serving/billing cacheado
 
