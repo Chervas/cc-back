@@ -34,6 +34,37 @@ const parseIntArray = (value) => {
   return [];
 };
 
+const parseDateArray = (value) => {
+  const values = Array.isArray(value)
+    ? value
+    : typeof value === 'string'
+      ? value.split(',')
+      : [];
+
+  return values
+    .map((entry) => String(entry || '').trim())
+    .filter((entry) => /^\d{4}-\d{2}-\d{2}$/.test(entry));
+};
+
+const runWithConcurrency = async (items, limit, worker) => {
+  const safeLimit = Math.max(1, Number(limit) || 1);
+  const results = new Array(items.length);
+  let cursor = 0;
+
+  const runners = Array.from({ length: Math.min(safeLimit, items.length) }, async () => {
+    while (true) {
+      const current = cursor++;
+      if (current >= items.length) {
+        return;
+      }
+      results[current] = await worker(items[current], current);
+    }
+  });
+
+  await Promise.all(runners);
+  return results;
+};
+
 const isIsoLike = (value) => typeof value === 'string' && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/.test(value);
 
 const parseClinicConfig = (value) => {
@@ -1468,5 +1499,84 @@ exports.slots = asyncHandler(async (req, res) => {
         docCitasRows: docCitasRows
       })
     } : {})
+  });
+});
+
+const invokeSlotsForSummary = (query) => new Promise((resolve, reject) => {
+  const req = { query };
+  const res = {
+    statusCode: 200,
+    status(code) {
+      this.statusCode = code;
+      return this;
+    },
+    json(payload) {
+      if (this.statusCode >= 400) {
+        const error = new Error(payload?.message || 'slots_summary_failed');
+        error.statusCode = this.statusCode;
+        error.payload = payload;
+        reject(error);
+        return this;
+      }
+      resolve(payload);
+      return this;
+    }
+  };
+
+  Promise.resolve(exports.slots(req, res, reject)).catch(reject);
+});
+
+exports.summary = asyncHandler(async (req, res) => {
+  const { dates, duracion_min } = req.query || {};
+  const dateList = parseDateArray(dates || req.query['dates[]']);
+
+  if (!dateList.length) {
+    return res.status(400).json({ message: 'dates[] requerido (YYYY-MM-DD)' });
+  }
+
+  if (dateList.length > 42) {
+    return res.status(400).json({ message: 'dates[] excede el máximo (42)' });
+  }
+
+  if (!parseIntSafe(duracion_min)) {
+    return res.status(400).json({ message: 'duracion_min requerido' });
+  }
+
+  const uniqueDates = Array.from(new Set(dateList));
+  const baseQuery = { ...req.query };
+  delete baseQuery.dates;
+  delete baseQuery['dates[]'];
+
+  const summaryRows = await runWithConcurrency(uniqueDates, 8, async (dateIso) => {
+    try {
+      const payload = await invokeSlotsForSummary({
+        ...baseQuery,
+        fecha_local: dateIso,
+        limit: '1',
+      });
+      return {
+        date: dateIso,
+        has_availability: Array.isArray(payload?.slots) ? payload.slots.length > 0 : null,
+      };
+    } catch (error) {
+      console.warn('[Disponibilidad][summary] No se pudo calcular disponibilidad diaria.', {
+        dateIso,
+        message: error?.message || error,
+      });
+      return {
+        date: dateIso,
+        has_availability: null,
+      };
+    }
+  });
+
+  const byDay = {};
+  summaryRows.forEach((row) => {
+    byDay[row.date] = row.has_availability;
+  });
+
+  return res.json({
+    by_day: byDay,
+    dates: uniqueDates,
   });
 });
