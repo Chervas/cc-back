@@ -18,6 +18,7 @@ let standardTimer = null;
 let externalDispatcher = null;
 let drainingCritical = false;
 let drainingStandard = false;
+const SCHEDULER_ALLOWED_TYPES = Object.keys(jobExecutor.JOB_HANDLERS || {});
 
 async function settleJobResult(job, result) {
   try {
@@ -86,7 +87,7 @@ async function drainQueue(priorityList, marker) {
   try {
     let job;
     do {
-      job = await jobRequestsService.claimNextJob(priorityList);
+      job = await jobRequestsService.claimNextJob(priorityList, SCHEDULER_ALLOWED_TYPES);
       if (job) {
         processed += 1;
         await processJob(job);
