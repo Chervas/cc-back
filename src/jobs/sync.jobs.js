@@ -87,6 +87,39 @@ function diffInDaysInclusive(start, end) {
   return Math.floor((end.getTime() - start.getTime()) / MS_PER_DAY) + 1;
 }
 
+function parseGoogleReasons(raw) {
+  if (!raw) return [];
+  if (Array.isArray(raw)) return raw.filter(Boolean).map((value) => String(value));
+  return [String(raw)];
+}
+
+function evaluateGooglePublishingIssue(campaign) {
+  const servingStatus = String(campaign?.servingStatus || campaign?.serving_status || '').trim().toUpperCase();
+  const primaryStatus = String(campaign?.primaryStatus || campaign?.primary_status || '').trim().toUpperCase();
+  const reasons = parseGoogleReasons(campaign?.primaryStatusReasons || campaign?.primary_status_reasons || null)
+    .map((value) => value.toUpperCase());
+
+  if (reasons.some((value) => value.includes('BILLING') || value.includes('PAYMENT'))) {
+    return {
+      priority: 100,
+      status: 'Saldo pendiente o problema de facturación',
+      reason: 'Google Ads indica que la campaña no se está publicando por un bloqueo de billing o pago pendiente.',
+      reasons,
+    };
+  }
+
+  if (['SUSPENDED', 'ENDED', 'DISABLED'].includes(servingStatus) || primaryStatus === 'NOT_ELIGIBLE') {
+    return {
+      priority: 50,
+      status: primaryStatus || servingStatus || 'No publicando',
+      reason: reasons.length ? reasons.join(', ') : 'La campaña no está publicando actualmente.',
+      reasons,
+    };
+  }
+
+  return null;
+}
+
 class MetaSyncJobs {
   constructor() {
     this.jobs = new Map();
@@ -2521,7 +2554,18 @@ try {
 
     let variantIndex = 0;
 
-    const resourceFields = ['campaign.id', 'campaign.name', 'campaign.status', 'campaign.advertising_channel_type', 'ad_group.id', 'ad_group.name', 'ad_group.status'];
+    const resourceFields = [
+      'campaign.id',
+      'campaign.name',
+      'campaign.status',
+      'campaign.serving_status',
+      'campaign.primary_status',
+      'campaign.primary_status_reasons',
+      'campaign.advertising_channel_type',
+      'ad_group.id',
+      'ad_group.name',
+      'ad_group.status'
+    ];
     const segmentFields = ['segments.date', 'segments.ad_network_type', 'segments.device'];
 
     const buildQuery = (metrics, startDate, endDate) => {
@@ -2571,6 +2615,12 @@ try {
     let cursor = new Date(start);
 
     const processedCampaignDates = new Set();
+
+    await this._syncGoogleAdsPublishingState(account, {
+      accessToken,
+      effectiveLoginCustomerId,
+      report
+    });
 
     while (cursor <= end) {
       const chunkEnd = new Date(Math.min(end.getTime(), cursor.getTime() + (chunkDays - 1) * dayMs));
@@ -2665,6 +2715,60 @@ try {
     return { rows, metricVariant: metricVariants[variantIndex]?.name };
   }
 
+  async _syncGoogleAdsPublishingState(account, { accessToken, effectiveLoginCustomerId, report }) {
+    const customerId = normalizeCustomerId(account.customerId);
+    const query = [
+      'SELECT',
+      '  campaign.id,',
+      '  campaign.name,',
+      '  campaign.status,',
+      '  campaign.serving_status,',
+      '  campaign.primary_status,',
+      '  campaign.primary_status_reasons',
+      'FROM campaign',
+      "WHERE campaign.status != 'REMOVED'"
+    ].join('\n');
+
+    let pageToken = null;
+    let selectedIssue = null;
+    do {
+      const resp = await googleAdsRequest('POST', `customers/${customerId}/googleAds:search`, {
+        accessToken,
+        loginCustomerId: effectiveLoginCustomerId,
+        data: { query, pageToken }
+      });
+      const results = resp?.results || [];
+      for (const row of results) {
+        const campaign = row?.campaign || {};
+        const issue = evaluateGooglePublishingIssue(campaign);
+        if (!issue) {
+          continue;
+        }
+        if (!selectedIssue || issue.priority > selectedIssue.priority) {
+          selectedIssue = {
+            ...issue,
+            campaignId: campaign.id ? String(campaign.id) : null,
+            campaignName: campaign.name || null
+          };
+        }
+      }
+      pageToken = resp?.nextPageToken || resp?.next_page_token || null;
+    } while (pageToken);
+
+    await account.update({
+      publishingStatus: selectedIssue?.status || null,
+      publishingReason: selectedIssue?.reason || null,
+      publishingReasons: selectedIssue?.reasons ? JSON.stringify(selectedIssue.reasons) : null,
+      publishingCampaignId: selectedIssue?.campaignId || null,
+      publishingCampaignName: selectedIssue?.campaignName || null,
+      publishingSyncedAt: new Date()
+    });
+
+    if (selectedIssue && report && Array.isArray(report.notes)) {
+      report.notes.push(`Google Ads publishing issue ${account.customerId}: ${selectedIssue.status}`);
+    }
+  }
+
   async _fetchPerformanceMaxMetrics({
     account,
     assignment,
@@ -2683,6 +2787,9 @@ try {
       '  campaign.id,',
       '  campaign.name,',
       '  campaign.status,',
+      '  campaign.serving_status,',
+      '  campaign.primary_status,',
+      '  campaign.primary_status_reasons,',
       '  campaign.advertising_channel_type,',
       '  segments.date,',
       '  metrics.impressions,',
@@ -2964,6 +3071,12 @@ try {
           campaignId,
           campaignName,
           campaignStatus: campaign.status || null,
+          campaignServingStatus: campaign.servingStatus || campaign.serving_status || null,
+          campaignPrimaryStatus: campaign.primaryStatus || campaign.primary_status || null,
+          campaignPrimaryStatusReasons: (() => {
+            const reasons = campaign.primaryStatusReasons || campaign.primary_status_reasons || null;
+            return reasons ? JSON.stringify(reasons) : null;
+          })(),
           adGroupId,
           adGroupName: adGroupName || null,
           date,

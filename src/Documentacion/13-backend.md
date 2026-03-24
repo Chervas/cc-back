@@ -62,6 +62,68 @@ Semántica actual:
 
 Esto alinea WhatsApp con el resto de activos conectados en `Ajustes`.
 
+`GET /api/whatsapp/accounts` debe seguir la misma semántica de scope:
+
+- `clinic_id`: WABA/números propios de la clínica y heredados del grupo;
+- `group_id`: números y WABA asignados al grupo o a clínicas del grupo;
+- sin scope: vista global según permisos del usuario.
+
+Importante:
+
+- si en `Ajustes` no aparece nada de WhatsApp para un grupo, primero hay que validar si existen filas activas en `ClinicMetaAsset` para `whatsapp_phone_number` o `whatsapp_business_account`;
+- el frontend no debe inventar una conexión inexistente por scope.
+
+## 2026-03-24 - Salud de Google Ads: serving/billing cacheado
+
+La salud de Google Ads no debe depender solo de `ClinicGoogleAdsAccount.accountStatus`.
+
+Desde esta iteración, la sync diaria/backfill debe persistir también en `GoogleAdsInsightsDaily`:
+
+- `campaignServingStatus`
+- `campaignPrimaryStatus`
+- `campaignPrimaryStatusReasons`
+
+Fuente:
+
+- campos `campaign.serving_status`
+- `campaign.primary_status`
+- `campaign.primary_status_reasons`
+
+Objetivo:
+
+- detectar campañas que no están publicando aunque la cuenta siga figurando como `ENABLED`;
+- especialmente casos de billing o saldo pendiente que Google Ads muestra como motivo de serving a nivel campaña.
+
+La UI de `Marketing > Campañas > Salud` debe leer esto desde cache y no consultar live al proveedor.
+
+## 2026-03-24 - Cron y variables de entorno operativas
+
+Los horarios efectivos de sincronización salen de `src/jobs/sync.jobs.js`, pero pueden quedar sobreescritos por variables de entorno.
+
+Defaults actuales de interés:
+
+- `JOBS_ADS_SCHEDULE`: `30 0 * * *`
+- `JOBS_GOOGLE_ADS_SCHEDULE`: `20 0 * * *`
+- `JOBS_ADS_MIDDAY_SCHEDULE`: `0 12 * * *`
+- `JOBS_WHATSAPP_PHONES_SCHEDULE`: `*/15 * * * *`
+- `JOBS_WHATSAPP_TEMPLATES_SCHEDULE`: `0 * * * *`
+
+Ventanas y límites asociados:
+
+- `ADS_SYNC_INITIAL_DAYS`
+- `ADS_SYNC_RECENT_DAYS`
+- `ADS_SYNC_MIDDAY_DAYS`
+- `ADS_SYNC_BACKFILL_DAYS`
+- `GOOGLE_ADS_SYNC_INITIAL_DAYS`
+- `GOOGLE_ADS_SYNC_RECENT_DAYS`
+- `GOOGLE_ADS_BACKFILL_DAYS`
+- `GOOGLE_ADS_SYNC_CHUNK_DAYS`
+
+Regla operativa:
+
+- cambiar el default en código no modifica producción/integración si la variable ya existe en `.env` o en PM2;
+- si se ajusta el cron, hay que revisar también el valor efectivo en entorno y reiniciar con actualización de variables si aplica.
+
 ## 2026-03-23 - Cache ad-level de Google Ads para análisis de campañas
 
 > **Estado:** implementado en `back-integracion`.

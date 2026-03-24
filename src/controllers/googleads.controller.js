@@ -34,6 +34,46 @@ function getAttr(instance, key) {
   return instance[key];
 }
 
+function parseJsonArray(raw) {
+  if (!raw) return [];
+  if (Array.isArray(raw)) {
+    return raw.filter(Boolean).map((value) => String(value));
+  }
+  try {
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed.filter(Boolean).map((value) => String(value)) : [];
+  } catch (_err) {
+    return String(raw)
+      .split(',')
+      .map((value) => value.trim())
+      .filter(Boolean);
+  }
+}
+
+function describeServingIssue({ servingStatus, primaryStatus, reasons }) {
+  const normalizedServing = String(servingStatus || '').trim().toUpperCase();
+  const normalizedPrimary = String(primaryStatus || '').trim().toUpperCase();
+  const normalizedReasons = parseJsonArray(reasons).map((value) => value.toUpperCase());
+
+  if (normalizedReasons.some((value) => value.includes('BILLING') || value.includes('PAYMENT'))) {
+    return {
+      status: 'Saldo pendiente o problema de facturación',
+      error: 'Google Ads indica que la campaña no se está publicando por un bloqueo de billing o pago pendiente.',
+      action_hint: 'Revisa el saldo pendiente y el estado de facturación en Google Ads.'
+    };
+  }
+
+  if (['SUSPENDED', 'ENDED', 'DISABLED', 'NOT_ELIGIBLE'].includes(normalizedServing) || normalizedPrimary === 'NOT_ELIGIBLE') {
+    return {
+      status: normalizedPrimary || normalizedServing || 'No publicando',
+      error: normalizedReasons.length ? normalizedReasons.join(', ') : 'La campaña no está publicando actualmente.',
+      action_hint: 'Revisa el estado de publicación y los motivos en Google Ads.'
+    };
+  }
+
+  return null;
+}
+
 function dedupeAccounts(accounts) {
   const map = new Map();
   for (const acc of accounts) {
@@ -556,7 +596,18 @@ exports.getHealth = async (req, res) => {
 
     const rowsRaw = await GoogleAdsInsightsDaily.findAll({
       where: insightsWhere,
-      attributes: ['date', 'campaignId', 'campaignName', 'impressions', 'clicks', 'costMicros', 'conversions'],
+      attributes: [
+        'date',
+        'campaignId',
+        'campaignName',
+        'campaignServingStatus',
+        'campaignPrimaryStatus',
+        'campaignPrimaryStatusReasons',
+        'impressions',
+        'clicks',
+        'costMicros',
+        'conversions'
+      ],
       raw: true
     });
 
@@ -564,6 +615,9 @@ exports.getHealth = async (req, res) => {
       date: row.date,
       campaignId: row.campaignId ? String(row.campaignId) : null,
       campaignName: row.campaignName || 'Campaña sin nombre',
+      campaignServingStatus: row.campaignServingStatus || null,
+      campaignPrimaryStatus: row.campaignPrimaryStatus || null,
+      campaignPrimaryStatusReasons: row.campaignPrimaryStatusReasons || null,
       impressions: Number(row.impressions || 0),
       clicks: Number(row.clicks || 0),
       spend: microsToCurrency(row.costMicros),
@@ -612,6 +666,20 @@ exports.getHealth = async (req, res) => {
     const campaignsCurrent = aggregateCampaigns(currentRows);
     const campaignsPrevious = aggregateCampaigns(previousRows);
     const campaignsRecent = aggregateCampaigns(recentRows);
+    const latestCampaignHealth = new Map();
+    rows
+      .slice()
+      .sort((a, b) => String(b.date).localeCompare(String(a.date)))
+      .forEach((row) => {
+        const key = row.campaignId || `name:${row.campaignName}`;
+        if (!latestCampaignHealth.has(key)) {
+          latestCampaignHealth.set(key, {
+            campaignServingStatus: row.campaignServingStatus || null,
+            campaignPrimaryStatus: row.campaignPrimaryStatus || null,
+            campaignPrimaryStatusReasons: row.campaignPrimaryStatusReasons || null
+          });
+        }
+      });
 
     const cards = [];
 
@@ -619,6 +687,20 @@ exports.getHealth = async (req, res) => {
     const accountStatusItems = accounts
       .map((acc) => {
         const rawStatus = String(getAttr(acc, 'accountStatus') || '').trim().toUpperCase();
+        const publishingStatus = getAttr(acc, 'publishingStatus') || null;
+        const publishingReason = getAttr(acc, 'publishingReason') || null;
+        const publishingCampaignName = getAttr(acc, 'publishingCampaignName') || null;
+
+        if (publishingStatus) {
+          return {
+            clinic_id: getAttr(acc, 'clinicaId') || null,
+            customerId: normalizeCustomerId(getAttr(acc, 'customerId') || ''),
+            campaignName: publishingCampaignName || getAttr(acc, 'descriptiveName') || formatCustomerId(getAttr(acc, 'customerId') || ''),
+            status: publishingStatus,
+            error: publishingReason || publishingStatus
+          };
+        }
+
         if (!rawStatus || ['ENABLED', 'ACTIVE', 'SERVING'].includes(rawStatus)) {
           return null;
         }
@@ -638,6 +720,36 @@ exports.getHealth = async (req, res) => {
       status: accountStatusItems.length ? 'error' : 'ok',
       rangeLabel: `${startStr} - ${endStr}`,
       items: accountStatusItems
+    });
+
+    const servingIssueItems = [];
+    latestCampaignHealth.forEach((health, key) => {
+      const campaign = campaignsCurrent.get(key) || campaignsRecent.get(key) || null;
+      const issue = describeServingIssue({
+        servingStatus: health.campaignServingStatus,
+        primaryStatus: health.campaignPrimaryStatus,
+        reasons: health.campaignPrimaryStatusReasons
+      });
+      if (!issue) {
+        return;
+      }
+      servingIssueItems.push({
+        campaignName: campaign?.campaignName || String(key).replace(/^name:/, ''),
+        status: issue.status,
+        error: issue.error,
+        action_hint: issue.action_hint,
+        spend: campaign?.spend ?? null,
+        servingStatus: health.campaignServingStatus || null,
+        primaryStatus: health.campaignPrimaryStatus || null,
+        reasons: parseJsonArray(health.campaignPrimaryStatusReasons)
+      });
+    });
+    cards.push({
+      id: 'campaign-serving-status',
+      title: 'Campañas con problemas de publicación',
+      status: servingIssueItems.length ? 'error' : 'ok',
+      rangeLabel: `${startStr} - ${endStr}`,
+      items: servingIssueItems
     });
 
     // Card: account spend
