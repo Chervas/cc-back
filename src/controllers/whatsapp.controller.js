@@ -101,6 +101,43 @@ async function fetchBusinessVerificationStatus({ businessId }) {
   }
 }
 
+async function resolveScopedWhatsappAssetForClinic({ clinicId, assetTypes }) {
+  if (!clinicId) {
+    return null;
+  }
+
+  const clinicAsset = await ClinicMetaAsset.findOne({
+    where: {
+      clinicaId: clinicId,
+      isActive: true,
+      assetType: { [Op.in]: assetTypes },
+    },
+    raw: true,
+  });
+  if (clinicAsset) {
+    return clinicAsset;
+  }
+
+  const clinic = await Clinica.findOne({
+    where: { id_clinica: clinicId },
+    attributes: ['grupoClinicaId'],
+    raw: true,
+  });
+  if (!clinic?.grupoClinicaId) {
+    return null;
+  }
+
+  return ClinicMetaAsset.findOne({
+    where: {
+      assignmentScope: 'group',
+      grupoClinicaId: clinic.grupoClinicaId,
+      isActive: true,
+      assetType: { [Op.in]: assetTypes },
+    },
+    raw: true,
+  });
+}
+
 function assertPreverifiedEnabled(req, res) {
   if (!PREVERIFIED_ENABLED) {
     res.status(403).json({ success: false, error: 'preverified_not_enabled' });
@@ -376,13 +413,9 @@ exports.getStatus = async (req, res) => {
       return res.status(400).json({ error: 'clinic_id requerido' });
     }
 
-    const asset = await ClinicMetaAsset.findOne({
-      where: {
-        clinicaId: clinicId,
-        isActive: true,
-        assetType: { [Op.in]: ['whatsapp_phone_number', 'whatsapp_business_account'] },
-      },
-      raw: true,
+    const asset = await resolveScopedWhatsappAssetForClinic({
+      clinicId,
+      assetTypes: ['whatsapp_phone_number', 'whatsapp_business_account'],
     });
 
     if (!asset) {
@@ -480,13 +513,9 @@ exports.templatesSummary = async (req, res) => {
     if (!clinicId) {
       return res.status(400).json({ error: 'clinic_id requerido' });
     }
-    const asset = await ClinicMetaAsset.findOne({
-      where: {
-        clinicaId: clinicId,
-        isActive: true,
-        assetType: { [Op.in]: ['whatsapp_business_account', 'whatsapp_phone_number'] },
-      },
-      raw: true,
+    const asset = await resolveScopedWhatsappAssetForClinic({
+      clinicId,
+      assetTypes: ['whatsapp_business_account', 'whatsapp_phone_number'],
     });
     if (!asset?.wabaId) {
       const placeholders = await WhatsappTemplate.findAll({

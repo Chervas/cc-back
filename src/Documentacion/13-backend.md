@@ -73,6 +73,26 @@ Importante:
 - si en `Ajustes` no aparece nada de WhatsApp para un grupo, primero hay que validar si existen filas activas en `ClinicMetaAsset` para `whatsapp_phone_number` o `whatsapp_business_account`;
 - el frontend no debe inventar una conexión inexistente por scope.
 
+Caso real detectado en integración:
+
+- CRM podía seguir enviando WhatsApp aunque `Ajustes` no mostrase ningún activo scoped;
+- la causa era un fallback legacy global en `src/services/whatsapp.service.js` (`META_WHATSAPP_ACCESS_TOKEN` + `META_WHATSAPP_PHONE_NUMBER_ID` o número por defecto);
+- por tanto, "funciona en runtime" no significaba "está modelado por scope".
+
+Regla aplicada desde esta iteración:
+
+- si existe un número legacy operativo y se quiere que aparezca en `Ajustes`, hay que materializarlo como `ClinicMetaAsset` scoped;
+- para ese backfill existe el script:
+  - `scripts/backfill-whatsapp-legacy-scope.js`
+- el script crea o actualiza un `whatsapp_phone_number` con `assignmentScope = group` o el scope indicado, sin retirar todavía el fallback global.
+
+Además, los lectores de estado deben resolver herencia de grupo:
+
+- `GET /api/whatsapp/status?clinic_id=...`
+- `GET /api/whatsapp/templates/summary?clinic_id=...`
+
+si no encuentran un asset propio de clínica, deben intentar el asset `assignmentScope = group` del grupo de esa clínica antes de devolver "no configurado".
+
 ## 2026-03-24 - Salud de Google Ads: serving/billing cacheado
 
 La salud de Google Ads no debe depender solo de `ClinicGoogleAdsAccount.accountStatus`.
