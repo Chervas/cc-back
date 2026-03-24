@@ -764,6 +764,28 @@ const NODE_TYPES_V2 = [
     ],
   },
   {
+    type: 'action/send_system_notification',
+    category: 'action',
+    label: 'Notificación del sistema',
+    description: 'Envía una notificación interna a un usuario o rol de la clínica.',
+    output_keys: ['on_success', 'on_fail'],
+    runtime_status: 'real',
+    default_config: {
+      title: '',
+      message: '',
+      assignee_type: 'role',
+      assignee_id: null,
+      subrole: null,
+    },
+    config_schema: [
+      { key: 'title', label: 'Título', input_type: 'string', required: false },
+      { key: 'message', label: 'Mensaje', input_type: 'text', required: true },
+      { key: 'assignee_type', label: 'Enviar a', input_type: 'select', required: true, options: ['user', 'role'] },
+      { key: 'assignee_id', label: 'Usuario / rol', input_type: 'select', required: true },
+      { key: 'subrole', label: 'Subrol (opcional)', input_type: 'select', required: false, options: [] },
+    ],
+  },
+  {
     type: 'action/write_note',
     category: 'action',
     label: 'Escribir nota',
@@ -2217,6 +2239,37 @@ function validateNodeConfig(node, nodeMap) {
           'node_config_invalid',
           `El nodo ${nodeId} tiene due_date_offset inválido (ej: '2 hours', '1 day')`,
           { node_id: nodeId, node_type: nodeType, key: 'due_date_offset', value: dueOffset }
+        )
+      );
+    }
+  }
+
+  if (nodeType === 'action/send_system_notification') {
+    const assigneeType = cleanString(config.assignee_type);
+    if (!['user', 'role'].includes(assigneeType || '')) {
+      errors.push(
+        buildValidationError(
+          'node_config_invalid',
+          `El nodo ${nodeId} requiere assignee_type = 'user' o 'role'`,
+          { node_id: nodeId, node_type: nodeType, key: 'assignee_type' }
+        )
+      );
+    }
+    if (isConfigValueEmpty(config.assignee_id)) {
+      errors.push(
+        buildValidationError(
+          'node_config_required',
+          `El nodo ${nodeId} requiere 'assignee_id'`,
+          { node_id: nodeId, node_type: nodeType, key: 'assignee_id' }
+        )
+      );
+    }
+    if (isConfigValueEmpty(config.message)) {
+      errors.push(
+        buildValidationError(
+          'node_config_required',
+          `El nodo ${nodeId} requiere 'message'`,
+          { node_id: nodeId, node_type: nodeType, key: 'message' }
         )
       );
     }

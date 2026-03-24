@@ -183,6 +183,14 @@ function getMadridDateParts(date = new Date()) {
   };
 }
 
+function resolveMadridDayPartGreeting(date = new Date()) {
+  const madridNow = getMadridDateParts(date);
+  const hour = Number(madridNow?.hour || 0);
+  if (hour >= 6 && hour < 14) return 'Buenos días';
+  if (hour >= 14 && hour < 21) return 'Buenas tardes';
+  return 'Buenas noches';
+}
+
 function buildDateFromMadridParts(parts) {
   const desired = {
     year: Number(parts?.year),
@@ -1173,6 +1181,38 @@ async function enrichConversationContext(context, targets = {}) {
   });
 }
 
+function findFirstConversationIdInOutputs(context = {}) {
+  const outputs = context?.outputs && typeof context.outputs === 'object' ? context.outputs : {};
+  for (const entry of Object.values(outputs)) {
+    const conversationId = toIntOrNull(entry?.conversation_id);
+    if (conversationId) {
+      return conversationId;
+    }
+  }
+  return null;
+}
+
+function buildSystemNavigationContext(context = {}, targets = {}) {
+  const conversationId = toIntOrNull(
+    getByPath(context, 'conversation.id')
+    || findFirstConversationIdInOutputs(context)
+    || targets.conversation_id
+  );
+  const patientId = toIntOrNull(
+    getByPath(context, 'paciente.id')
+    || getByPath(context, 'paciente.id_paciente')
+    || getByPath(context, 'patient.id')
+    || targets.patient_id
+  );
+
+  return {
+    system: {
+      patient_conversation_link: conversationId ? `/chat/${conversationId}` : null,
+      patient_detail_link: patientId ? `/pacientes/detail/${patientId}` : null,
+    },
+  };
+}
+
 function normalizeStatusTarget(value) {
   const key = normalizeKey(value);
   if (!key) return null;
@@ -1767,7 +1807,20 @@ async function handleSendWhatsapp(node, context, runtime) {
   }
 
   const messageMode = normalizeWhatsappMessageMode(resolveTemplateValue(config?.message_mode, context));
-  const templateContext = await enrichContextForTemplateResolution(context, targets);
+  const quietHoursEnabled = parseBool(resolveTemplateValue(config?.quiet_hours_enabled, context), true);
+  const quietWindow = computeQuietHoursDelayMs({
+    now: new Date(),
+    enabled: quietHoursEnabled,
+    startHour: 22,
+    endHour: 7,
+  });
+  const effectiveSendAt = quietWindow.scheduledAt || new Date();
+  const templateContextBase = await enrichContextForTemplateResolution(context, targets);
+  const templateContext = mergeContextPatch(templateContextBase, {
+    runtime: {
+      day_part_greeting: resolveMadridDayPartGreeting(effectiveSendAt),
+    },
+  });
   const recipientData = await resolveWhatsAppRecipient({ node, config, context: templateContext, targets });
 
   let template = null;
@@ -1820,14 +1873,6 @@ async function handleSendWhatsapp(node, context, runtime) {
     messageContent = manualText;
     messageType = 'text';
   }
-
-  const quietHoursEnabled = parseBool(resolveTemplateValue(config?.quiet_hours_enabled, context), true);
-  const quietWindow = computeQuietHoursDelayMs({
-    now: new Date(),
-    enabled: quietHoursEnabled,
-    startHour: 22,
-    endHour: 7,
-  });
 
   const targetPatientId = toIntOrNull(targets.patient_id);
   const targetLeadId = toIntOrNull(targets.lead_id);
@@ -2281,6 +2326,104 @@ async function handleCreateTask(node, context, runtime) {
   };
 }
 
+async function handleSendSystemNotification(node, context, runtime) {
+  const config = node?.config && typeof node.config === 'object' ? node.config : {};
+  let targets = resolveRuntimeTargets(runtime?.execution, context);
+  targets = await backfillRuntimeTargets(runtime?.execution, targets);
+
+  const clinicId = toIntOrNull(targets.clinic_id);
+  if (!clinicId) {
+    throw new Error('system_notification_missing_clinic_id');
+  }
+
+  let notificationContext = await enrichConversationContext(context, targets);
+  notificationContext = mergeContextPatch(notificationContext, {
+    runtime: {
+      day_part_greeting: resolveMadridDayPartGreeting(new Date()),
+    },
+  });
+  notificationContext = mergeContextPatch(notificationContext, buildSystemNavigationContext(notificationContext, targets));
+
+  const title = cleanString(resolveTemplateValue(config?.title, notificationContext)) || 'Notificación del sistema';
+  const message = cleanString(resolveTemplateValue(config?.message, notificationContext));
+  const assigneeType = cleanString(resolveTemplateValue(config?.assignee_type, notificationContext)) || 'role';
+  const assigneeId = resolveTemplateValue(config?.assignee_id, notificationContext);
+  const roleCode = resolveRoleCode(
+    resolveTemplateValue(config?.role_code, notificationContext)
+      || resolveTemplateValue(config?.role, notificationContext)
+      || resolveTemplateValue(config?.assignee_role, notificationContext)
+  );
+  const subrole = cleanString(resolveTemplateValue(config?.subrole, notificationContext));
+
+  if (!message) {
+    throw new Error('system_notification_message_missing');
+  }
+
+  const userIds = await resolveTaskAssigneeUserIds({
+    clinicId,
+    assigneeType,
+    assigneeId,
+    roleCode,
+    subrole,
+  });
+
+  if (!userIds.length) {
+    throw new Error('system_notification_no_assignees');
+  }
+
+  const conversationLink = cleanString(getByPath(notificationContext, 'system.patient_conversation_link'));
+  const patientDetailLink = cleanString(getByPath(notificationContext, 'system.patient_detail_link'));
+  const quickChatConversationId = toIntOrNull(getByPath(notificationContext, 'conversation.id')) || null;
+  const primaryLink = conversationLink || patientDetailLink || null;
+  const createdNotifications = [];
+
+  for (const userId of userIds) {
+    const notification = await Notification.create({
+      userId,
+      role: roleCode || '',
+      subrole: subrole || '',
+      category: 'general',
+      event: 'automation.system_notification',
+      title,
+      message,
+      icon: 'heroicons_outline:bell-alert',
+      level: 'warning',
+      data: {
+        source: 'automations_v2',
+        execution_id: runtime?.execution?.id || null,
+        node_id: cleanString(node?.id),
+        trigger_type: cleanString(runtime?.execution?.trigger_type),
+        trigger_entity_type: cleanString(runtime?.execution?.trigger_entity_type),
+        trigger_entity_id: toIntOrNull(runtime?.execution?.trigger_entity_id),
+        link: primaryLink,
+        useRouter: !!primaryLink,
+        quickChatConversationId,
+        patientConversationLink: conversationLink,
+        patientDetailLink: patientDetailLink,
+        clinicId,
+      },
+      clinicaId: clinicId,
+    });
+    createdNotifications.push(notification);
+  }
+
+  return {
+    kind: 'success',
+    output: {
+      notification_id: createdNotifications[0]?.id || null,
+      notification_ids: createdNotifications.map((notification) => notification.id),
+      assignee_user_ids: userIds,
+      notifications_created: createdNotifications.length,
+      primary_link: primaryLink,
+      quick_chat_conversation_id: quickChatConversationId,
+      patient_conversation_link: conversationLink,
+      patient_detail_link: patientDetailLink,
+      status: 'created',
+    },
+    next_node_id: readOutputTarget(node, 'on_success'),
+  };
+}
+
 function mergeNodeOutput(context, nodeId, patch) {
   const nextContext = clone(context) || {};
   nextContext.outputs = nextContext.outputs && typeof nextContext.outputs === 'object' ? nextContext.outputs : {};
@@ -2660,6 +2803,21 @@ async function processNode(node, context, runtime = {}) {
         };
       }
       return handleCreateTask(node, context, runtime);
+    }
+
+    case 'action/send_system_notification': {
+      if (simulation) {
+        return {
+          kind: 'success',
+          output: {
+            status: 'simulated',
+            simulated: true,
+            title: cleanString(resolveTemplateValue(config?.title, context)) || 'Notificación del sistema',
+          },
+          next_node_id: readOutputTarget(node, 'on_success'),
+        };
+      }
+      return handleSendSystemNotification(node, context, runtime);
     }
 
     case 'action/api_call': {

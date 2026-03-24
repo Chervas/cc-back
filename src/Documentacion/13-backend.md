@@ -1697,3 +1697,73 @@ La parte que sigue pendiente no es servir playbooks, sino cerrar capacidades ava
 - ingresos por target,
 - formularios instantáneos operativos end-to-end,
 - ejecución fully-managed desde ClinicaClick.
+## Agenda: persistencia de ajustes por clínica
+
+La agenda ya persiste su configuración operativa en:
+- `Clinica.configuracion.agenda_settings`
+
+Estructura actual:
+
+```json
+{
+  "hideSaturdays": true,
+  "hideSundays": true,
+  "hideClosedHours": true,
+  "useDurationFirstNoTreatment": false,
+  "durationFirstNoTreatment": 30,
+  "useDurationUrgencia": false,
+  "durationUrgencia": 30,
+  "useDurationRevision": false,
+  "durationRevision": 30
+}
+```
+
+Criterio:
+- el backend no necesita tabla nueva
+- se apoya en `PATCH /api/clinicas/:id`
+- el merge sigue siendo no destructivo sobre `configuracion`
+
+## Automatizaciones v2: notificación interna y saludo horario
+
+### Variable canónica de saludo horario
+
+El motor soporta la variable:
+- `{{runtime.day_part_greeting}}`
+
+Resolución:
+- se calcula en hora `Europe/Madrid`
+- se resuelve con la hora efectiva de envío del nodo `action/send_whatsapp`
+- si el mensaje se reprograma por quiet hours, se usa la hora programada real, no la hora original del flujo
+
+Rangos actuales:
+- `06:00-13:59` → `Buenos días`
+- `14:00-20:59` → `Buenas tardes`
+- resto → `Buenas noches`
+
+### Nodo `action/send_system_notification`
+
+Nuevo nodo real del motor.
+
+Objetivo:
+- emitir una `Notification` interna a usuario/rol/subrol de la clínica
+
+Resolución de destinatarios:
+- reutiliza `resolveTaskAssigneeUserIds(...)`
+- por tanto respeta exactamente el mismo modelo de pertenencia clínica que `action/create_task`
+
+Campos:
+- `title`
+- `message`
+- `assignee_type`
+- `assignee_id`
+- `subrole`
+
+Contexto extra que inyecta antes de interpolar:
+- `runtime.day_part_greeting`
+- `system.patient_conversation_link`
+- `system.patient_detail_link`
+
+Comportamiento de navegación:
+- si existe conversación, la notificación guarda `quickChatConversationId`
+- el front puede abrir QuickChat directamente desde la notificación
+- si no hay conversación, el fallback navegable es la ficha del paciente
