@@ -4,6 +4,39 @@
 
 ---
 
+## 2026-03-24 - Análisis de campañas cache-only
+
+> **Estado:** implementado en `back-integracion`.
+
+`Marketing > Campañas > Análisis` ya no debe depender de llamadas live a Meta o Google.
+
+La regla operativa actual es:
+
+1. la sincronización/cron alimenta las tablas cacheadas;
+2. la UI consulta solo esas tablas;
+3. si falta detalle, la vista queda parcial o pendiente de sincronización;
+4. no se intenta "rellenar en caliente" desde la API del proveedor.
+
+### Tablas que actúan como fuente de verdad
+
+- `GoogleAdsInsightsDaily`
+- `GoogleAdsAdInsightsDaily`
+- `SocialAdsEntity`
+- `SocialAdsInsightsDaily`
+- `SocialAdsActionsDaily`
+
+### Implicación práctica
+
+Cuando QA detecta que falta detalle en `Análisis`, la pregunta correcta es:
+
+- si el cron/resync ya escribió ese nivel en cache,
+
+no:
+
+- si el frontend hizo una llamada live al proveedor.
+
+Esto reduce latencia, evita divergencias entre pantallas y elimina dependencia de cuotas/rate limits durante la navegación.
+
 ## 2026-03-23 - Cache ad-level de Google Ads para análisis de campañas
 
 > **Estado:** implementado en `back-integracion`.
@@ -41,26 +74,19 @@ Guarda por anuncio y día:
   - coste
   - conversiones
 
-### Cómo se rellena
+### Cómo se usa hoy
 
-No depende de llamadas live continuas en UI.
+La tabla se usa como cache persistente para el análisis detallado.
 
-El análisis de campaña hace:
+El endpoint de análisis:
 
-1. intenta leer `GoogleAdsAdInsightsDaily`
-2. si no hay cache para esa campaña/rango:
-   - hace un warm-up controlado contra Google Ads API
-   - persiste el resultado
-3. vuelve a leer desde cache
-
-Esto deja el patrón correcto:
-
-- primera carga: posible warm-up
-- siguientes cargas: cache local
+1. lee `GoogleAdsAdInsightsDaily`;
+2. si no hay suficiente detalle, devuelve el nivel parcial disponible;
+3. deja la responsabilidad de completar datos al resync/cron, no a la UI.
 
 ### Alcance actual
 
-Esto ya permite en `Campañas > Análisis` para Google Ads:
+Esto permite en `Campañas > Análisis` para Google Ads:
 
 - grupos de anuncios reales
 - anuncios reales
