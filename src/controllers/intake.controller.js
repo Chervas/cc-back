@@ -1325,6 +1325,15 @@ exports.ingestLead = asyncHandler(async (req, res) => {
     }
   }
 
+  if (clinicaIdParsed === null && grupoClinicaIdParsed === null) {
+    return res.status(202).json({
+      message: 'Lead descartado: no se pudo resolver clínica o grupo',
+      source: normalizedSource || null,
+      clinic_match_source: clinicMatchSource || null,
+      clinic_match_value: clinicMatchValue || null
+    });
+  }
+
   const leadPayload = {
     event_id: eventId,
     clinica_id: clinicaIdParsed,
@@ -2432,6 +2441,11 @@ exports.receiveMetaWebhook = asyncHandler(async (req, res) => {
         }
       } catch (mapClinicErr) {
         console.warn('⚠️ No se pudo mapear clínica desde page_id:', mapClinicErr.message || mapClinicErr);
+      }
+
+      if (!leadPayload.clinica_id && !leadPayload.grupo_clinica_id) {
+        console.info(`Lead Meta descartado por page_id sin mapeo activo: page_id=${pageId || 'unknown'} form_id=${formId || 'unknown'} lead_id=${leadId}`);
+        continue;
       }
 
       try {
