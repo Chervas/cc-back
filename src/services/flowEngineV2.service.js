@@ -630,37 +630,20 @@ function resolveTemplateValue(value, context) {
   if (typeof value !== 'string') return value;
   const fullTemplate = value.match(/^\{\{\s*([^}]+)\s*\}\}$/);
 
-  const resolvePathExpression = (pathExpr) => {
-    const normalizedPath = cleanString(pathExpr);
-    if (!normalizedPath) {
-      return undefined;
-    }
-    const directValue = getByPath(context, normalizedPath);
-    if (directValue !== undefined) {
-      return directValue;
-    }
-    // Compatibilidad con flujos publicados que guardaron alias bajo
-    // `context.last_*` en lugar de las variables top-level `last_*`.
-    if (normalizedPath.startsWith('context.')) {
-      return getByPath(context, normalizedPath.slice('context.'.length));
-    }
-    return undefined;
-  };
-
   if (fullTemplate) {
-    return resolvePathExpression(fullTemplate[1]);
+    return getByPath(context, fullTemplate[1]);
   }
 
   if (value.startsWith('context.')) {
-    return resolvePathExpression(value);
+    return getByPath(context, value);
   }
 
   // Interpolación inline: permite mezclar texto libre con múltiples {{variables}}.
   // Ejemplo:
-  // "Mensaje: {{context.last_prompt}}\nRespuesta: {{context.last_response}}"
+  // "Mensaje: {{last_prompt}}\nRespuesta: {{last_response}}"
   if (value.includes('{{') && value.includes('}}')) {
     return value.replace(/\{\{\s*([^}]+)\s*\}\}/g, (_match, pathExpr) => {
-      const resolved = resolvePathExpression(pathExpr);
+      const resolved = getByPath(context, pathExpr);
       if (resolved === undefined || resolved === null) return '';
       if (typeof resolved === 'object') {
         try {

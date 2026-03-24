@@ -1200,10 +1200,10 @@ function normalizeNodesInput(nodes) {
           }
         : { x: 100, y: (index + 1) * 120 };
 
-      const config = {
+      const config = normalizeLegacyNodeConfigAliases({
         ...defaultConfig,
         ...(isObject(rawNode.config) ? rawNode.config : {}),
-      };
+      });
 
       const outputs = isObject(rawNode.outputs) ? { ...rawNode.outputs } : {};
       const expectedKeys = Array.isArray(nodeMeta?.output_keys) ? nodeMeta.output_keys : [];
@@ -1221,6 +1221,30 @@ function normalizeNodesInput(nodes) {
       };
     })
     .filter(Boolean);
+}
+
+function normalizeLegacyContextAliasInString(value) {
+  const raw = String(value || '');
+  return raw
+    .replace(/\{\{\s*context\.last_prompt\s*\}\}/g, '{{last_prompt}}')
+    .replace(/\{\{\s*context\.last_response\s*\}\}/g, '{{last_response}}')
+    .replace(/\{\{\s*context\.last_response_context\./g, '{{last_response_context.')
+    .replace(/\{\{\s*context\.last_form_submission\./g, '{{last_form_submission.');
+}
+
+function normalizeLegacyNodeConfigAliases(value) {
+  if (Array.isArray(value)) {
+    return value.map((item) => normalizeLegacyNodeConfigAliases(item));
+  }
+  if (isObject(value)) {
+    return Object.fromEntries(
+      Object.entries(value).map(([key, nestedValue]) => [key, normalizeLegacyNodeConfigAliases(nestedValue)])
+    );
+  }
+  if (typeof value === 'string') {
+    return normalizeLegacyContextAliasInString(value);
+  }
+  return value;
 }
 
 function sanitizeTemplateKey(raw) {
@@ -1492,7 +1516,7 @@ function mapTemplate(row, { includeNodes = true, access = null, clinicNameMap = 
   };
 
   if (includeNodes) {
-    const rawNodes = Array.isArray(item.nodes) ? item.nodes : [];
+    const rawNodes = normalizeNodesInput(Array.isArray(item.nodes) ? item.nodes : []);
     base.nodes = applyTriggerConfigToNodes({
       triggerType: item.trigger_type,
       entryNodeId: item.entry_node_id,

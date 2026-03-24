@@ -900,7 +900,7 @@ El nodo `condition/ai_analysis` quedó operativo en runtime real sobre Groq, con
 {
   "analysis_mode": "complex_reasoning",
   "prompt": "Instrucción del análisis",
-  "input_text": "{{context.last_response}}",
+  "input_text": "{{last_response}}",
   "max_tokens": 700,
   "output_format": {
     "decision": { "type": "string" },
@@ -915,7 +915,7 @@ Reglas de validación relevantes:
 - `max_tokens` (si se envía) debe estar entre `1` y `4096`.
 - `output_format` debe tener al menos 1 campo y tipos válidos (`string | number | boolean`).
 - `input_text` acepta placeholders inline en formato `{{ruta.variable}}`, combinados con texto libre.
-  - Ejemplo: `Mensaje previo: {{context.last_prompt}}\nRespuesta: {{context.last_response}}`
+  - Ejemplo: `Mensaje previo: {{last_prompt}}\nRespuesta: {{last_response}}`
 
 ### Variables de entorno
 
