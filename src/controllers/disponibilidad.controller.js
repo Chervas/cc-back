@@ -65,6 +65,26 @@ const runWithConcurrency = async (items, limit, worker) => {
   return results;
 };
 
+const responseHasAnySlots = (payload) => {
+  if (!payload || typeof payload !== 'object') {
+    return null;
+  }
+
+  if (Array.isArray(payload.slots)) {
+    return payload.slots.length > 0;
+  }
+
+  if (payload.slots_by_instalacion && typeof payload.slots_by_instalacion === 'object') {
+    return Object.values(payload.slots_by_instalacion).some((slots) => Array.isArray(slots) && slots.length > 0);
+  }
+
+  if (payload.slots_by_doctor && typeof payload.slots_by_doctor === 'object') {
+    return Object.values(payload.slots_by_doctor).some((slots) => Array.isArray(slots) && slots.length > 0);
+  }
+
+  return null;
+};
+
 const isIsoLike = (value) => typeof value === 'string' && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/.test(value);
 
 const parseClinicConfig = (value) => {
@@ -1556,7 +1576,7 @@ exports.summary = asyncHandler(async (req, res) => {
       });
       return {
         date: dateIso,
-        has_availability: Array.isArray(payload?.slots) ? payload.slots.length > 0 : null,
+        has_availability: responseHasAnySlots(payload),
       };
     } catch (error) {
       console.warn('[Disponibilidad][summary] No se pudo calcular disponibilidad diaria.', {
