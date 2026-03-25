@@ -1212,7 +1212,8 @@ Contrato actual:
 ```json
 {
   "appointment_scope": "all | with_treatment | without_treatment",
-  "appointment_type_without_treatment": "any | primera_sin_trat | urgencia | revision"
+  "appointment_type_without_treatment": "any | primera_sin_trat | urgencia | revision",
+  "min_hours_before_start": "number | null"
 }
 ```
 
@@ -1221,6 +1222,9 @@ Reglas:
 - Solo aplica a `trigger_type = appointment_created`.
 - Para el resto de triggers, `trigger_config = null`.
 - Si `appointment_scope !== without_treatment`, `appointment_type_without_treatment` se normaliza a `any`.
+- `min_hours_before_start` delimita el trigger por antelación real respecto al inicio de la cita.
+  - Ejemplo: `24` significa que el flujo solo se evalúa si faltan **más de 24 horas** para la cita.
+  - Si la cita es para mañana o dentro de ese umbral, este template no matchea y el motor puede caer a otro fallback más genérico.
 
 Contratos temporales adicionales:
 
@@ -1253,10 +1257,12 @@ Contratos temporales adicionales:
 3. **Matching de `appointment_created`**
    - `with_treatment` solo matchea con citas que tienen tratamiento.
    - `without_treatment` solo matchea con citas sin tratamiento.
+   - si `min_hours_before_start` está definido, el template solo matchea cuando el inicio de la cita queda más allá de ese umbral.
    - Para `without_treatment`, la prioridad es:
      - tipo exacto (`primera_sin_trat`, `urgencia`, `revision`)
      - `any`
      - `all`
+   - Entre dos templates válidos del mismo scope, uno con umbral temporal más restrictivo gana frente al genérico sin umbral.
 
 Consecuencias:
 

@@ -64,6 +64,7 @@ const FIELD_CHECK_OPERATOR_TYPE_COMPAT = {
 const CITA_STATUS_SET = new Set(CITA_STATUS_VALUES);
 const LEAD_STATUS_SET = new Set(LEAD_STATUS_VALUES);
 const ANY_CHANGE_STATUS_SET = new Set([...CITA_STATUS_VALUES, ...LEAD_STATUS_VALUES]);
+const APPOINTMENT_CREATED_MIN_HOURS_BEFORE_START_MAX = 8760;
 
 function parseIntOrNull(raw) {
   if (raw === undefined || raw === null || raw === '') return null;
@@ -87,6 +88,15 @@ function parseBool(raw, fallback = undefined) {
   if (['1', 'true', 'yes', 'y', 'on'].includes(normalized)) return true;
   if (['0', 'false', 'no', 'n', 'off'].includes(normalized)) return false;
   return fallback;
+}
+
+function parseAppointmentCreatedMinHoursBeforeStart(raw) {
+  if (raw === undefined || raw === null || raw === '') return null;
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed)) return null;
+  const rounded = Math.floor(parsed);
+  if (rounded < 1) return null;
+  return Math.min(rounded, APPOINTMENT_CREATED_MIN_HOURS_BEFORE_START_MAX);
 }
 
 function parseStringArrayLike(raw) {
@@ -1181,11 +1191,30 @@ function normalizeTriggerConfigForTemplate({ triggerType, entryNodeId, nodes }) 
     };
   }
 
+  const minHoursBeforeStart = parseAppointmentCreatedMinHoursBeforeStart(rawConfig.min_hours_before_start);
+  if (
+    rawConfig.min_hours_before_start !== undefined
+    && rawConfig.min_hours_before_start !== null
+    && rawConfig.min_hours_before_start !== ''
+    && minHoursBeforeStart === null
+  ) {
+    return {
+      ok: false,
+      error: 'invalid_trigger_config',
+      message: 'min_hours_before_start debe ser un entero positivo',
+      details: {
+        min: 1,
+        max: APPOINTMENT_CREATED_MIN_HOURS_BEFORE_START_MAX,
+      },
+    };
+  }
+
   return {
     ok: true,
     trigger_config: {
       appointment_scope: appointmentScope,
       appointment_type_without_treatment: appointmentTypeWithoutTreatment,
+      min_hours_before_start: minHoursBeforeStart,
     },
   };
 }
@@ -1202,6 +1231,7 @@ function applyTriggerConfigToNodes({ triggerType, entryNodeId, nodes, triggerCon
       appointment_scope: cleanString(triggerConfig.appointment_scope || 'all').toLowerCase() || 'all',
       appointment_type_without_treatment:
         cleanString(triggerConfig.appointment_type_without_treatment || 'any').toLowerCase() || 'any',
+      min_hours_before_start: parseAppointmentCreatedMinHoursBeforeStart(triggerConfig.min_hours_before_start),
     };
   } else if (normalizedTriggerType === 'appointment_reminder_window' && isObject(triggerConfig)) {
     sanitizedTriggerConfig = {
