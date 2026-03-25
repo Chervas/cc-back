@@ -90,8 +90,10 @@ function parseBool(raw, fallback = undefined) {
 }
 
 function normalizeAppointmentCreatedDayProximityFilter(rawFilter, legacyMinHours) {
-  const normalized = cleanString(rawFilter).toLowerCase();
-  if (normalized) return normalized;
+  const normalized = (cleanString(rawFilter) || '').toLowerCase();
+  if (normalized && APPOINTMENT_CREATED_DAY_PROXIMITY_FILTER_VALUES.has(normalized)) {
+    return normalized;
+  }
   const parsedLegacyHours = Number(legacyMinHours);
   if (Number.isFinite(parsedLegacyHours) && parsedLegacyHours >= 24) {
     return 'exclude_same_day_and_day_before';
