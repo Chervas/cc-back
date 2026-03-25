@@ -9,6 +9,7 @@ const LeadIntake = db.LeadIntake;
 const LeadAttributionAudit = db.LeadAttributionAudit;
 const Clinica = db.Clinica;
 const GrupoClinica = db.GrupoClinica;
+const Campana = db.Campana;
 
 const CHANNELS = new Set(['paid', 'organic', 'unknown']);
 const SOURCES = new Set(['meta_ads', 'google_ads', 'web', 'whatsapp', 'call_click', 'tiktok_ads', 'seo', 'direct', 'local_services']);
@@ -118,6 +119,8 @@ const normalizeKey = (value) => String(value || '')
   .toLowerCase()
   .replace(/[^a-z0-9]+/g, '_')
   .replace(/^_+|_+$/g, '');
+
+const normalizeLookupToken = (value) => normalizeKey(value).replace(/_/g, ' ').trim();
 
 const inferChannelFromSource = (source) => {
   if (source === 'meta_ads' || source === 'google_ads' || source === 'tiktok_ads' || source === 'local_services') return 'paid';
@@ -258,7 +261,66 @@ const buildAppointmentPayload = (fields) => {
   };
 };
 
-const normalizeRowPayload = (row, mapping, config) => {
+const loadCampaignIndex = async (config) => {
+  if (!Campana || !config?.clinic_id) {
+    return { all: [], byCampaignId: new Map(), byName: new Map() };
+  }
+
+  const rows = await Campana.findAll({
+    where: { clinica_id: config.clinic_id },
+    attributes: ['id', 'nombre', 'campaign_id'],
+    raw: true,
+  });
+
+  const byCampaignId = new Map();
+  const byName = new Map();
+
+  rows.forEach((row) => {
+    const rawCampaignId = cleanString(row?.campaign_id);
+    const normalizedCampaignId = normalizeLookupToken(rawCampaignId);
+    const normalizedName = normalizeLookupToken(row?.nombre);
+
+    if (rawCampaignId && !byCampaignId.has(rawCampaignId)) byCampaignId.set(rawCampaignId, row);
+    if (normalizedCampaignId && !byCampaignId.has(normalizedCampaignId)) byCampaignId.set(normalizedCampaignId, row);
+    if (normalizedName && !byName.has(normalizedName)) byName.set(normalizedName, row);
+  });
+
+  return { all: rows, byCampaignId, byName };
+};
+
+const resolveImportedCampaign = (reference, campaignIndex) => {
+  const rawReference = cleanString(reference);
+  if (!rawReference || !campaignIndex) {
+    return { campaign: null, matched: false };
+  }
+
+  const exactCampaign = campaignIndex.byCampaignId.get(rawReference)
+    || campaignIndex.byCampaignId.get(normalizeLookupToken(rawReference))
+    || campaignIndex.byName.get(normalizeLookupToken(rawReference))
+    || null;
+
+  if (exactCampaign) {
+    return { campaign: exactCampaign, matched: true };
+  }
+
+  const normalizedRef = normalizeLookupToken(rawReference);
+  if (!normalizedRef) {
+    return { campaign: null, matched: false };
+  }
+
+  const fuzzyMatches = (campaignIndex.all || []).filter((row) => {
+    const normalizedName = normalizeLookupToken(row?.nombre);
+    return normalizedName && (normalizedName.includes(normalizedRef) || normalizedRef.includes(normalizedName));
+  });
+
+  if (fuzzyMatches.length === 1) {
+    return { campaign: fuzzyMatches[0], matched: true };
+  }
+
+  return { campaign: null, matched: false };
+};
+
+const normalizeRowPayload = (row, mapping, config, campaignIndex) => {
   const mapped = {
     nombre: null,
     email: null,
@@ -266,6 +328,7 @@ const normalizeRowPayload = (row, mapping, config) => {
     notas: null,
     source: null,
     source_detail: null,
+    campaign_reference: null,
     external_id: null,
     created_at: null,
     status_lead: null,
@@ -288,9 +351,21 @@ const normalizeRowPayload = (row, mapping, config) => {
   const sourceMeta = inferImportedSource(mapped.source, config.source, mapped.source_detail, config.source_detail);
   const createdAt = parseFlexibleDate(mapped.created_at);
   const appointment = buildAppointmentPayload(mapped);
+  const campaignReference = cleanString(mapped.campaign_reference);
+  const campaignResolution = resolveImportedCampaign(campaignReference, campaignIndex);
+  const isPaidImport = ['meta_ads', 'google_ads', 'tiktok_ads', 'local_services'].includes(sourceMeta.source);
+
+  let effectiveSourceDetail = sourceMeta.source_detail;
+  if (!effectiveSourceDetail && campaignResolution.campaign?.nombre) {
+    effectiveSourceDetail = campaignResolution.campaign.nombre;
+  }
+  if (!effectiveSourceDetail && isPaidImport && !campaignResolution.campaign) {
+    effectiveSourceDetail = 'import_manual_no_campaign';
+  }
 
   const noteLines = [];
   appendNoteLine(noteLines, 'Motivo o tratamiento', mapped.concern);
+  appendNoteLine(noteLines, 'Referencia de campaña importada', campaignReference);
   if (appointment?.fecha) appendNoteLine(noteLines, 'Fecha de la cita', appointment.fecha);
   if (appointment?.hora) appendNoteLine(noteLines, 'Hora de la cita', appointment.hora);
   if (appointment?.clinica) appendNoteLine(noteLines, 'Clínica de la cita', appointment.clinica);
@@ -310,9 +385,10 @@ const normalizeRowPayload = (row, mapping, config) => {
     leadPayload: {
       clinica_id: config.clinic_id,
       grupo_clinica_id: config.group_id,
+      campana_id: campaignResolution.campaign?.id || null,
       channel: CHANNELS.has(sourceMeta.channel) ? sourceMeta.channel : inferChannelFromSource(sourceMeta.source),
       source: sourceMeta.source,
-      source_detail: sourceMeta.source_detail,
+      source_detail: effectiveSourceDetail,
       clinic_match_source: 'manual_import',
       clinic_match_value: String(config.clinic_id),
       nombre: normalizedName || null,
@@ -333,7 +409,9 @@ const normalizeRowPayload = (row, mapping, config) => {
       telefono: normalizedPhone || '—',
       status_lead: normalizedStatus,
       source: sourceMeta.source,
-      source_detail: sourceMeta.source_detail || '—',
+      source_detail: effectiveSourceDetail || '—',
+      campaign_reference: campaignReference || null,
+      campaign_name: campaignResolution.campaign?.nombre || null,
       created_at: createdAt ? createdAt.toISOString() : null,
       cita: appointment ? `${appointment.fecha || '—'} ${appointment.hora || ''}`.trim() : null,
     },
@@ -574,7 +652,8 @@ const analyzeImportRows = async (input = {}) => {
     rules: Array.isArray(input.exclusions?.rules) ? input.exclusions.rules : [],
   };
 
-  const normalizedRows = rows.map((row) => normalizeRowPayload(row, mapping, config));
+  const campaignIndex = await loadCampaignIndex(config);
+  const normalizedRows = rows.map((row) => normalizeRowPayload(row, mapping, config, campaignIndex));
   const existingIndexes = await loadExistingIndexes(config, normalizedRows);
 
   const seenKeys = new Set();
@@ -631,6 +710,15 @@ const analyzeImportRows = async (input = {}) => {
     if (recentMatch) {
       reasons.push(`Ya existe un lead reciente con el mismo contacto (ID ${recentMatch.id}).`);
       state = 'excluded';
+    }
+
+    if (
+      state === 'ready'
+      && item.display?.campaign_reference
+      && ['meta_ads', 'google_ads', 'tiktok_ads', 'local_services'].includes(item.display?.source)
+      && !item.display?.campaign_name
+    ) {
+      reasons.push('No se ha podido vincular la referencia de campaña a una campaña seguida en Clinicaclick; se guardará como nota.');
     }
 
     if (state === 'ready') importable += 1;

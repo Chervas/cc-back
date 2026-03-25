@@ -2524,17 +2524,7 @@ exports.listLeads = asyncHandler(async (req, res) => {
       { model: Clinica, as: 'clinica', attributes: ['id_clinica', 'nombre_clinica'] },
       { model: GrupoClinica, as: 'grupoClinica', attributes: ['id_grupo', 'nombre_grupo'] }
     ].filter(Boolean),
-    // Ordenar priorizando los que requieren reagendar (info_recibida + agenda_ocupada)
-    order: [
-      [
-        literal(`CASE 
-            WHEN status_lead = 'info_recibida' AND agenda_ocupada = true THEN 0 
-            ELSE 1 
-        END`),
-        'ASC'
-      ],
-      ['created_at', 'DESC']
-    ],
+    order: [['created_at', 'DESC']],
     limit: parsedLimit,
     offset: parsedOffset
   });
