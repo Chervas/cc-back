@@ -35,6 +35,12 @@ const APPOINTMENT_CREATED_WITHOUT_TREATMENT_TYPES = new Set([
   'urgencia',
   'revision',
 ]);
+const APPOINTMENT_CREATED_DAY_PROXIMITY_FILTER_VALUES = new Set([
+  'all',
+  'exclude_day_before',
+  'exclude_same_day',
+  'exclude_same_day_and_day_before',
+]);
 const SCHEDULED_APPOINTMENT_TRIGGER_TYPES = new Set([
   'appointment_reminder_window',
   'appointment_after',
@@ -65,7 +71,6 @@ const ACTIVE_APPOINTMENT_STATUSES = new Set([
   'recordatorio_confirmado',
   'reprogramada',
 ]);
-const APPOINTMENT_CREATED_MIN_HOURS_BEFORE_START_MAX = 8760;
 
 function toIntOrNull(value) {
   if (value === undefined || value === null || value === '') return null;
@@ -78,13 +83,19 @@ function cleanString(value) {
   return String(value).trim();
 }
 
-function normalizeAppointmentCreatedMinHoursBeforeStart(value) {
-  if (value === undefined || value === null || value === '') return null;
-  const parsed = Number(value);
-  if (!Number.isFinite(parsed)) return null;
-  const rounded = Math.floor(parsed);
-  if (rounded < 1) return null;
-  return Math.min(rounded, APPOINTMENT_CREATED_MIN_HOURS_BEFORE_START_MAX);
+function normalizeAppointmentCreatedDayProximityFilter(value, legacyMinHours) {
+  const normalized = cleanString(value).toLowerCase();
+  if (APPOINTMENT_CREATED_DAY_PROXIMITY_FILTER_VALUES.has(normalized)) {
+    return normalized;
+  }
+  const parsedLegacyHours = Number(legacyMinHours);
+  if (Number.isFinite(parsedLegacyHours) && parsedLegacyHours >= 24) {
+    return 'exclude_same_day_and_day_before';
+  }
+  if (Number.isFinite(parsedLegacyHours) && parsedLegacyHours > 0) {
+    return 'exclude_same_day';
+  }
+  return 'all';
 }
 
 function parseClinicConfig(value) {
@@ -285,10 +296,14 @@ async function resolveTemplateBoundToTratamiento(cita, eventName) {
 
   if (eventName === 'appointment_created') {
     const triggerConfig = getTemplateTriggerConfig(template);
+    const clinic = cita?.clinica_id
+      ? await Clinica.findByPk(cita.clinica_id, { attributes: ['id_clinica', 'configuracion'], raw: true })
+      : null;
+    const timeZone = resolveClinicTimezone(clinic);
     if (triggerConfig?.appointment_scope === 'without_treatment') {
       return null;
     }
-    if (!isAppointmentCreatedTemplateEligibleForCita(triggerConfig, cita)) {
+    if (!isAppointmentCreatedTemplateEligibleForCita(triggerConfig, cita, timeZone)) {
       return null;
     }
   }
@@ -296,17 +311,37 @@ async function resolveTemplateBoundToTratamiento(cita, eventName) {
   return template;
 }
 
-function isAppointmentCreatedTemplateEligibleForCita(triggerConfig, cita) {
-  const minHoursBeforeStart = normalizeAppointmentCreatedMinHoursBeforeStart(triggerConfig?.min_hours_before_start);
-  if (!minHoursBeforeStart) return true;
+function isAppointmentCreatedTemplateEligibleForCita(triggerConfig, cita, timeZone = DEFAULT_TIMEZONE) {
+  const dayProximityFilter = normalizeAppointmentCreatedDayProximityFilter(
+    triggerConfig?.day_proximity_filter,
+    triggerConfig?.min_hours_before_start,
+  );
+  if (dayProximityFilter === 'all') return true;
 
   const start = cita?.inicio ? new Date(cita.inicio) : null;
   if (!start || !Number.isFinite(start.getTime())) {
     return false;
   }
 
-  const msUntilStart = start.getTime() - Date.now();
-  return msUntilStart > (minHoursBeforeStart * 60 * 60 * 1000);
+  const appointmentDateLocal = formatDateLocal(start, timeZone);
+  const todayLocal = formatDateLocal(new Date(), timeZone);
+  if (!appointmentDateLocal || !todayLocal) {
+    return false;
+  }
+
+  const isSameDay = appointmentDateLocal === todayLocal;
+  const isDayBefore = appointmentDateLocal === addDaysToLocalDate(todayLocal, 1);
+
+  if (dayProximityFilter === 'exclude_same_day') {
+    return !isSameDay;
+  }
+  if (dayProximityFilter === 'exclude_day_before') {
+    return !isDayBefore;
+  }
+  if (dayProximityFilter === 'exclude_same_day_and_day_before') {
+    return !isSameDay && !isDayBefore;
+  }
+  return true;
 }
 
 function normalizeAppointmentCreatedTriggerConfig(rawConfig) {
@@ -321,11 +356,14 @@ function normalizeAppointmentCreatedTriggerConfig(rawConfig) {
   if (safeScope !== 'without_treatment') {
     appointmentTypeWithoutTreatment = 'any';
   }
-  const minHoursBeforeStart = normalizeAppointmentCreatedMinHoursBeforeStart(config.min_hours_before_start);
+  const dayProximityFilter = normalizeAppointmentCreatedDayProximityFilter(
+    config.day_proximity_filter,
+    config.min_hours_before_start,
+  );
   return {
     appointment_scope: safeScope,
     appointment_type_without_treatment: appointmentTypeWithoutTreatment,
-    min_hours_before_start: minHoursBeforeStart,
+    day_proximity_filter: dayProximityFilter,
   };
 }
 
@@ -396,6 +434,7 @@ async function resolveClinicFallbackTemplate(cita, eventName) {
     raw: true,
   });
   const groupId = toIntOrNull(clinic?.grupoClinicaId);
+  const timeZone = resolveClinicTimezone(clinic);
 
   const candidates = await AutomationFlowTemplateV2.findAll({
     where: {
@@ -429,7 +468,7 @@ async function resolveClinicFallbackTemplate(cita, eventName) {
       }
 
       const triggerConfig = getTemplateTriggerConfig(template);
-      if (!isAppointmentCreatedTemplateEligibleForCita(triggerConfig, cita)) {
+      if (!isAppointmentCreatedTemplateEligibleForCita(triggerConfig, cita, timeZone)) {
         return false;
       }
       const scope = triggerConfig?.appointment_scope || 'all';
@@ -460,7 +499,10 @@ async function resolveClinicFallbackTemplate(cita, eventName) {
         const triggerConfig = getTemplateTriggerConfig(template);
         const scope = triggerConfig?.appointment_scope || 'all';
         const appointmentType = triggerConfig?.appointment_type_without_treatment || 'any';
-        const minHoursBeforeStart = normalizeAppointmentCreatedMinHoursBeforeStart(triggerConfig?.min_hours_before_start);
+        const dayProximityFilter = normalizeAppointmentCreatedDayProximityFilter(
+          triggerConfig?.day_proximity_filter,
+          triggerConfig?.min_hours_before_start,
+        );
 
         if (citaHasTreatment) {
           if (scope === 'with_treatment') score += 20;
@@ -471,8 +513,10 @@ async function resolveClinicFallbackTemplate(cita, eventName) {
           else if (scope === 'all') score += 5;
         }
 
-        if (minHoursBeforeStart) {
-          score += 1 + Math.min(minHoursBeforeStart, 240) / 1000;
+        if (dayProximityFilter === 'exclude_same_day_and_day_before') {
+          score += 1.2;
+        } else if (dayProximityFilter !== 'all') {
+          score += 1.1;
         }
       }
 
