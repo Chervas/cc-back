@@ -293,6 +293,9 @@ const resolveImportedCampaign = (reference, campaignIndex) => {
 };
 
 const normalizeRowPayload = (row, mapping, config, campaignIndex) => {
+  const noteColumnCount = Object.entries(mapping || {})
+    .filter(([, destination]) => destination === 'notas')
+    .length;
   const mapped = {
     nombre: null,
     apellidos: null,
@@ -307,7 +310,7 @@ const normalizeRowPayload = (row, mapping, config, campaignIndex) => {
     const value = row?.[column];
     if (destination === 'notas') {
       const cleanValue = sanitizeLeadNoteText(cleanString(value));
-      if (cleanValue) mapped.notas.push(cleanValue);
+      if (cleanValue) mapped.notas.push(noteColumnCount > 1 ? `${column}: ${cleanValue}` : cleanValue);
       continue;
     }
     if (mapped[destination] === null || mapped[destination] === undefined || mapped[destination] === '') {
