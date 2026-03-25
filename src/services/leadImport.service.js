@@ -353,14 +353,17 @@ const normalizeRowPayload = (row, mapping, config, campaignIndex) => {
   const appointment = buildAppointmentPayload(mapped);
   const campaignReference = cleanString(mapped.campaign_reference);
   const campaignResolution = resolveImportedCampaign(campaignReference, campaignIndex);
-  const isPaidImport = ['meta_ads', 'google_ads', 'tiktok_ads', 'local_services'].includes(sourceMeta.source);
+  const selectedCampaign = config.campana_id
+    ? {
+      id: config.campana_id,
+      nombre: config.campana_nombre || null,
+    }
+    : null;
+  const resolvedCampaign = selectedCampaign || campaignResolution.campaign || null;
 
   let effectiveSourceDetail = sourceMeta.source_detail;
-  if (!effectiveSourceDetail && campaignResolution.campaign?.nombre) {
-    effectiveSourceDetail = campaignResolution.campaign.nombre;
-  }
-  if (!effectiveSourceDetail && isPaidImport && !campaignResolution.campaign) {
-    effectiveSourceDetail = 'import_manual_no_campaign';
+  if (!effectiveSourceDetail && resolvedCampaign?.nombre) {
+    effectiveSourceDetail = resolvedCampaign.nombre;
   }
 
   const noteLines = [];
@@ -385,7 +388,7 @@ const normalizeRowPayload = (row, mapping, config, campaignIndex) => {
     leadPayload: {
       clinica_id: config.clinic_id,
       grupo_clinica_id: config.group_id,
-      campana_id: campaignResolution.campaign?.id || null,
+      campana_id: resolvedCampaign?.id || null,
       channel: CHANNELS.has(sourceMeta.channel) ? sourceMeta.channel : inferChannelFromSource(sourceMeta.source),
       source: sourceMeta.source,
       source_detail: effectiveSourceDetail,
@@ -411,7 +414,7 @@ const normalizeRowPayload = (row, mapping, config, campaignIndex) => {
       source: sourceMeta.source,
       source_detail: effectiveSourceDetail || '—',
       campaign_reference: campaignReference || null,
-      campaign_name: campaignResolution.campaign?.nombre || null,
+      campaign_name: resolvedCampaign?.nombre || null,
       created_at: createdAt ? createdAt.toISOString() : null,
       cita: appointment ? `${appointment.fecha || '—'} ${appointment.hora || ''}`.trim() : null,
     },
@@ -632,6 +635,31 @@ const validateImportConfig = async (input = {}) => {
   }
 
   const source = SOURCES.has(input.source) ? input.source : 'web';
+  const selectedCampaignId = parseInteger(input.campana_id);
+  let selectedCampaign = null;
+
+  if (selectedCampaignId && Campana) {
+    selectedCampaign = await Campana.findOne({
+      where: {
+        id: selectedCampaignId,
+        clinica_id: clinicId,
+      },
+      attributes: ['id', 'nombre'],
+      raw: true,
+    });
+
+    if (!selectedCampaign) {
+      const err = new Error('La campaña seleccionada no existe en la clínica elegida.');
+      err.status = 400;
+      throw err;
+    }
+  }
+
+  if ((source === 'google_ads' || source === 'meta_ads') && !selectedCampaign) {
+    const err = new Error('Debes elegir una campaña concreta para importaciones de Google Ads o Meta Ads.');
+    err.status = 400;
+    throw err;
+  }
 
   return {
     clinic_id: clinicId,
@@ -640,6 +668,8 @@ const validateImportConfig = async (input = {}) => {
     group_name: group?.nombre_grupo_clinicas || null,
     source,
     source_detail: cleanString(input.source_detail),
+    campana_id: selectedCampaign?.id || null,
+    campana_nombre: selectedCampaign?.nombre || null,
   };
 };
 
@@ -715,7 +745,6 @@ const analyzeImportRows = async (input = {}) => {
     if (
       state === 'ready'
       && item.display?.campaign_reference
-      && ['meta_ads', 'google_ads', 'tiktok_ads', 'local_services'].includes(item.display?.source)
       && !item.display?.campaign_name
     ) {
       reasons.push('No se ha podido vincular la referencia de campaña a una campaña seguida en Clinicaclick; se guardará como nota.');
