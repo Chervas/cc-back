@@ -21,6 +21,7 @@ const jobScheduler = require('../services/jobScheduler.service');
 const { getIO } = require('../services/socket.service');
 const { CITA_STATUS_VALUES, LEAD_STATUS_VALUES } = require('../lib/status-catalog');
 const { buildConversationContext } = require('../lib/automation-conversation-context');
+const { SUBROLES_CLINICA } = require('../lib/role-helpers');
 
 const ADMIN_USER_IDS = (process.env.ADMIN_USER_IDS || '1,44')
   .split(',')
@@ -31,10 +32,12 @@ const MANAGER_ROLES = new Set(['propietario', 'personaldeclinica', 'administrado
 const TASK_ASSIGNEE_ROLE_OPTIONS = [
   { id: 'propietario', code: 'propietario', label: 'Propietario' },
   { id: 'personaldeclinica', code: 'personaldeclinica', label: 'Personal clínica' },
+  { id: 'agencia', code: 'agencia', label: 'Agencia' },
 ];
 const TASK_ROLE_LABELS = {
   propietario: 'Propietario',
   personaldeclinica: 'Personal clínica',
+  agencia: 'Agencia',
   administrador: 'Administrador',
   admin: 'Administrador',
 };
@@ -3042,7 +3045,7 @@ exports.getAssigneesCatalog = async (req, res) => {
         data: {
           clinic_ids: [],
           roles: TASK_ASSIGNEE_ROLE_OPTIONS,
-          subroles: [],
+          subroles: (Array.isArray(SUBROLES_CLINICA) ? SUBROLES_CLINICA : []).map((code) => ({ code, label: code })),
           users: [],
         },
       });
@@ -3117,14 +3120,20 @@ exports.getAssigneesCatalog = async (req, res) => {
       })
       .sort((a, b) => String(a.label || '').localeCompare(String(b.label || ''), 'es'));
     const userOptions = allUserOptions.slice(0, limit);
-    const roleCodes = Array.from(
+    const membershipRoleCodes = Array.from(
       new Set(
         memberships
           .map((row) => String(row.rol_clinica || '').trim().toLowerCase())
           .filter(Boolean)
       )
     );
-    const rolePriority = ['propietario', 'administrador', 'admin', 'personaldeclinica'];
+    const rolePriority = ['propietario', 'agencia', 'administrador', 'admin', 'personaldeclinica'];
+    const roleCodes = Array.from(
+      new Set([
+        ...TASK_ASSIGNEE_ROLE_OPTIONS.map((option) => String(option.code || option.id || '').trim().toLowerCase()).filter(Boolean),
+        ...membershipRoleCodes,
+      ])
+    );
     roleCodes.sort((a, b) => {
       const ia = rolePriority.indexOf(a);
       const ib = rolePriority.indexOf(b);
@@ -3143,11 +3152,12 @@ exports.getAssigneesCatalog = async (req, res) => {
       : TASK_ASSIGNEE_ROLE_OPTIONS;
 
     const subroleCodes = Array.from(
-      new Set(
-        memberships
+      new Set([
+        ...(Array.isArray(SUBROLES_CLINICA) ? SUBROLES_CLINICA : []),
+        ...memberships
           .map((row) => String(row.subrol_clinica || '').trim())
-          .filter(Boolean)
-      )
+          .filter(Boolean),
+      ])
     ).sort((a, b) => a.localeCompare(b, 'es'));
     const subroleOptions = subroleCodes.map((code) => ({ code, label: code }));
 
