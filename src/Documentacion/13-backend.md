@@ -1213,7 +1213,7 @@ Contrato actual:
 {
   "appointment_scope": "all | with_treatment | without_treatment",
   "appointment_type_without_treatment": "any | primera_sin_trat | urgencia | revision",
-  "min_hours_before_start": "number | null"
+  "day_proximity_filter": "all | exclude_day_before | exclude_same_day | exclude_same_day_and_day_before"
 }
 ```
 
@@ -1222,9 +1222,10 @@ Reglas:
 - Solo aplica a `trigger_type = appointment_created`.
 - Para el resto de triggers, `trigger_config = null`.
 - Si `appointment_scope !== without_treatment`, `appointment_type_without_treatment` se normaliza a `any`.
-- `min_hours_before_start` delimita el trigger por antelación real respecto al inicio de la cita.
-  - Ejemplo: `24` significa que el flujo solo se evalúa si faltan **más de 24 horas** para la cita.
-  - Si la cita es para mañana o dentro de ese umbral, este template no matchea y el motor puede caer a otro fallback más genérico.
+- `day_proximity_filter` delimita el trigger por cercanía en días respecto al momento en que se crea la cita.
+  - `exclude_day_before`: no matchea si la cita se crea el día anterior.
+  - `exclude_same_day`: no matchea si la cita se crea el mismo día.
+  - `exclude_same_day_and_day_before`: no matchea ni el mismo día ni el día anterior.
 
 Contratos temporales adicionales:
 
@@ -1257,12 +1258,12 @@ Contratos temporales adicionales:
 3. **Matching de `appointment_created`**
    - `with_treatment` solo matchea con citas que tienen tratamiento.
    - `without_treatment` solo matchea con citas sin tratamiento.
-   - si `min_hours_before_start` está definido, el template solo matchea cuando el inicio de la cita queda más allá de ese umbral.
+   - si `day_proximity_filter` está definido, el template se descarta según la fecha local de creación frente a la fecha local de la cita.
    - Para `without_treatment`, la prioridad es:
      - tipo exacto (`primera_sin_trat`, `urgencia`, `revision`)
      - `any`
      - `all`
-   - Entre dos templates válidos del mismo scope, uno con umbral temporal más restrictivo gana frente al genérico sin umbral.
+   - Entre dos templates válidos del mismo scope, uno con filtro temporal explícito gana frente al genérico sin filtro.
 
 Consecuencias:
 
