@@ -182,7 +182,7 @@ exports.listConversations = async (req, res) => {
         clinicId: clinicToResolve,
         contactId: patient.telefono_movil,
         patientId,
-        createIfMissing: !!patient.telefono_movil,
+        createIfMissing: false,
       });
       canonicalConversationId = canonical?.id || null;
       if (clinic_id && clinic_id !== 'all') {
@@ -210,7 +210,7 @@ exports.listConversations = async (req, res) => {
         clinicId: clinicToResolve,
         contactId: lead.telefono,
         leadId,
-        createIfMissing: !!lead.telefono,
+        createIfMissing: false,
       });
       canonicalConversationId = canonical?.id || null;
       if (clinic_id && clinic_id !== 'all') {
@@ -401,7 +401,7 @@ exports.getConversationByPatient = async (req, res) => {
           clinicId: patient.clinica_id,
           contactId: patient.telefono_movil,
           patientId: Number(patientId),
-          createIfMissing: !!patient.telefono_movil,
+          createIfMissing: false,
         })
       : null;
 
@@ -441,7 +441,7 @@ exports.getConversationByLead = async (req, res) => {
           clinicId: lead.clinica_id,
           contactId: lead.telefono,
           leadId: Number(leadId),
-          createIfMissing: !!lead.telefono,
+          createIfMissing: false,
         })
       : null;
 

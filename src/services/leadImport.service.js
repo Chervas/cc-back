@@ -131,25 +131,25 @@ const parseFlexibleDate = (value) => {
   const raw = cleanString(value);
   if (!raw) return null;
 
-  const direct = new Date(raw);
-  if (!Number.isNaN(direct.getTime())) return direct;
-
   const match = raw.match(/^(\d{1,2})\/(\d{1,2})\/(\d{2,4})(?:\s+(\d{1,2})(?::(\d{1,2}))?(?::(\d{1,2}))?)?$/);
-  if (!match) return null;
+  if (match) {
+    const day = Number(match[1]);
+    const month = Number(match[2]);
+    let year = Number(match[3]);
+    const hours = Number(match[4] || 0);
+    const minutes = Number(match[5] || 0);
+    const seconds = Number(match[6] || 0);
 
-  const day = Number(match[1]);
-  const month = Number(match[2]);
-  let year = Number(match[3]);
-  const hours = Number(match[4] || 0);
-  const minutes = Number(match[5] || 0);
-  const seconds = Number(match[6] || 0);
+    if (year < 100) year += 2000;
+    if (!Number.isFinite(day) || !Number.isFinite(month) || !Number.isFinite(year)) return null;
+    if (month < 1 || month > 12 || day < 1 || day > 31) return null;
 
-  if (year < 100) year += 2000;
-  if (!Number.isFinite(day) || !Number.isFinite(month) || !Number.isFinite(year)) return null;
-  if (month < 1 || month > 12 || day < 1 || day > 31) return null;
+    const parsed = new Date(Date.UTC(year, month - 1, day, hours, minutes, seconds));
+    return Number.isNaN(parsed.getTime()) ? null : parsed;
+  }
 
-  const parsed = new Date(Date.UTC(year, month - 1, day, hours, minutes, seconds));
-  return Number.isNaN(parsed.getTime()) ? null : parsed;
+  const direct = new Date(raw);
+  return Number.isNaN(direct.getTime()) ? null : direct;
 };
 
 const parseFlexibleTime = (value) => {
@@ -471,15 +471,19 @@ const dedupeAndCreateImportedLead = async (leadPayload, rawPayload = {}, attribu
   const normalizedPhone = normalizePhone(leadPayload.telefono);
   const dedupeCutoff = new Date(Date.now() - (DEDUPE_WINDOW_HOURS * 60 * 60 * 1000));
 
+  const importedCreatedAt = options.created_at || null;
+
   const payload = {
     ...leadPayload,
     email: normalizedEmail,
     email_hash: normalizedEmail ? hashValue(normalizedEmail) : null,
     telefono: normalizedPhone || leadPayload.telefono || null,
     phone_hash: normalizedPhone ? hashValue(normalizedPhone) : null,
+    ...(importedCreatedAt ? {
+      created_at: importedCreatedAt,
+      updated_at: importedCreatedAt,
+    } : {}),
   };
-
-  const importedCreatedAt = options.created_at || null;
 
   if (payload.external_source && payload.external_id) {
     const existingExternal = await LeadIntake.findOne({ where: { external_source: payload.external_source, external_id: payload.external_id } });
@@ -509,11 +513,10 @@ const dedupeAndCreateImportedLead = async (leadPayload, rawPayload = {}, attribu
     }
   }
 
-  const lead = await LeadIntake.create(payload);
-
-  if (importedCreatedAt) {
-    await lead.update({ created_at: importedCreatedAt, updated_at: importedCreatedAt }, { silent: true, hooks: false });
-  }
+  const lead = await LeadIntake.create(payload, {
+    silent: !!importedCreatedAt,
+    hooks: !importedCreatedAt,
+  });
 
   try {
     await LeadAttributionAudit.create({
