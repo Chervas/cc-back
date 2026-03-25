@@ -34,10 +34,59 @@ const hashValue = (value) => {
 
 const normalizeEmail = (email) => (email || '').trim().toLowerCase() || null;
 
+const extractNormalizedPhoneCandidates = (phone) => {
+  if (!phone) return [];
+
+  const raw = String(phone);
+  const matches = raw.match(/(?:\+|00)?\d(?:[\s()./-]*\d){8,14}/g) || [];
+  const seeds = matches.length ? matches : [raw];
+  const ordered = [];
+  const seen = new Set();
+
+  const pushCandidate = (value) => {
+    const digits = String(value || '').replace(/\D/g, '');
+    if (!digits || digits.length < 9 || digits.length > 15) return;
+    if (seen.has(digits)) return;
+    seen.add(digits);
+    ordered.push(digits);
+  };
+
+  seeds.forEach((candidate) => {
+    const digits = String(candidate || '').replace(/\D/g, '');
+    if (!digits) return;
+    pushCandidate(digits);
+
+    if (digits.startsWith('00') && digits.length > 11) {
+      pushCandidate(digits.slice(2));
+    }
+
+    if (digits.length >= 12 && digits.slice(0, 2) === digits.slice(2, 4)) {
+      pushCandidate(digits.slice(2));
+    }
+
+    if (digits.length >= 14 && digits.slice(0, 3) === digits.slice(3, 6)) {
+      pushCandidate(digits.slice(3));
+    }
+  });
+
+  return ordered;
+};
+
 const normalizePhone = (phone) => {
-  if (!phone) return null;
-  const digits = String(phone).replace(/\D/g, '');
-  return digits || null;
+  const candidates = extractNormalizedPhoneCandidates(phone);
+  if (!candidates.length) return null;
+
+  const scored = candidates
+    .map((digits, index) => {
+      let score = 0;
+      if (digits.startsWith('34') && digits.length === 11) score += 100;
+      if (digits.length >= 9 && digits.length <= 15) score += 20;
+      score -= index;
+      return { digits, score };
+    })
+    .sort((left, right) => right.score - left.score);
+
+  return scored[0]?.digits || null;
 };
 
 const stableStringify = (obj) => {
