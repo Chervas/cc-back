@@ -94,6 +94,12 @@ const inferChannelFromSource = (source) => {
   return 'unknown';
 };
 
+const composeImportedFullName = (nombre, apellidos) => {
+  const cleanNombre = sanitizeText(cleanString(nombre));
+  const cleanApellidos = sanitizeText(cleanString(apellidos));
+  return [cleanNombre, cleanApellidos].filter(Boolean).join(' ').trim() || cleanNombre || cleanApellidos || null;
+};
+
 const parseFlexibleDate = (value) => {
   if (value instanceof Date && !Number.isNaN(value.getTime())) return value;
 
@@ -289,62 +295,46 @@ const resolveImportedCampaign = (reference, campaignIndex) => {
 const normalizeRowPayload = (row, mapping, config, campaignIndex) => {
   const mapped = {
     nombre: null,
+    apellidos: null,
     email: null,
     telefono: null,
-    notas: null,
-    source: null,
-    source_detail: null,
-    campaign_reference: null,
-    external_id: null,
+    notas: [],
     created_at: null,
-    status_lead: null,
-    concern: null,
-    appointment_date: null,
-    appointment_time: null,
-    appointment_clinic: null,
-    appointment_responsible: null,
-    appointment_address: null,
   };
 
   for (const [column, destination] of Object.entries(mapping || {})) {
     if (!destination || destination === 'ignore') continue;
     const value = row?.[column];
+    if (destination === 'notas') {
+      const cleanValue = sanitizeLeadNoteText(cleanString(value));
+      if (cleanValue) mapped.notas.push(cleanValue);
+      continue;
+    }
     if (mapped[destination] === null || mapped[destination] === undefined || mapped[destination] === '') {
       mapped[destination] = value;
     }
   }
 
-  const sourceMeta = inferImportedSource(mapped.source, config.source, mapped.source_detail, config.source_detail);
+  const sourceMeta = {
+    source: config.source,
+    source_detail: null,
+    channel: inferChannelFromSource(config.source),
+  };
   const createdAt = parseFlexibleDate(mapped.created_at);
-  const appointment = buildAppointmentPayload(mapped);
-  const campaignReference = cleanString(mapped.campaign_reference);
-  const campaignResolution = resolveImportedCampaign(campaignReference, campaignIndex);
   const selectedCampaign = config.campana_id
     ? {
       id: config.campana_id,
       nombre: config.campana_nombre || null,
     }
     : null;
-  const resolvedCampaign = selectedCampaign || campaignResolution.campaign || null;
-
-  let effectiveSourceDetail = sourceMeta.source_detail;
-  if (!effectiveSourceDetail && resolvedCampaign?.nombre) {
-    effectiveSourceDetail = resolvedCampaign.nombre;
-  }
+  const resolvedCampaign = selectedCampaign || null;
+  const effectiveSourceDetail = resolvedCampaign?.nombre || null;
 
   const noteLines = [];
-  appendNoteLine(noteLines, 'Motivo o tratamiento', mapped.concern);
-  appendNoteLine(noteLines, 'Referencia de campaña importada', campaignReference);
-  if (appointment?.fecha) appendNoteLine(noteLines, 'Fecha de la cita', appointment.fecha);
-  if (appointment?.hora) appendNoteLine(noteLines, 'Hora de la cita', appointment.hora);
-  if (appointment?.clinica) appendNoteLine(noteLines, 'Clínica de la cita', appointment.clinica);
-  if (appointment?.responsable) appendNoteLine(noteLines, 'Responsable', appointment.responsable);
-  if (appointment?.direccion) appendNoteLine(noteLines, 'Dirección de la clínica', appointment.direccion);
-
-  const baseNotes = sanitizeLeadNoteText(mapped.notas);
-  const mergedNotes = [baseNotes, ...noteLines].filter(Boolean).join('\n');
-  const normalizedStatus = normalizeImportedStatus(mapped.status_lead, appointment ? 'citado' : 'nuevo');
-  const normalizedName = sanitizeText(cleanString(mapped.nombre));
+  const baseNotes = Array.isArray(mapped.notas) ? mapped.notas.filter(Boolean) : [];
+  const mergedNotes = [...baseNotes, ...noteLines].filter(Boolean).join('\n');
+  const normalizedStatus = 'nuevo';
+  const normalizedName = composeImportedFullName(mapped.nombre, mapped.apellidos);
   const normalizedEmail = normalizeEmail(mapped.email);
   const normalizedPhone = normalizePhone(mapped.telefono);
 
@@ -365,13 +355,12 @@ const normalizeRowPayload = (row, mapping, config, campaignIndex) => {
       telefono: normalizedPhone || null,
       notas: mergedNotes || null,
       status_lead: normalizedStatus,
-      cita_propuesta: appointment,
+      cita_propuesta: null,
       external_source: 'csv_import',
-      external_id: cleanString(mapped.external_id),
+      external_id: null,
       intake_payload_hash: hashValue(stableStringify({ row, config, mapping })),
     },
     created_at: createdAt,
-    appointment,
     display: {
       nombre: normalizedName || 'Sin nombre',
       email: normalizedEmail || '—',
@@ -379,16 +368,15 @@ const normalizeRowPayload = (row, mapping, config, campaignIndex) => {
       status_lead: normalizedStatus,
       source: sourceMeta.source,
       source_detail: effectiveSourceDetail || '—',
-      campaign_reference: campaignReference || null,
       campaign_name: resolvedCampaign?.nombre || null,
       created_at: createdAt ? createdAt.toISOString() : null,
-      cita: appointment ? `${appointment.fecha || '—'} ${appointment.hora || ''}`.trim() : null,
+      cita: null,
     },
     dedupeKeys: {
       name: normalizedName ? normalizeKey(normalizedName) : null,
       email_hash: normalizedEmail ? hashValue(normalizedEmail) : null,
       phone_hash: normalizedPhone ? hashValue(normalizedPhone) : null,
-      external_key: cleanString(mapped.external_id) ? `csv_import:${cleanString(mapped.external_id)}` : null,
+      external_key: null,
     },
   };
 };
@@ -648,8 +636,7 @@ const analyzeImportRows = async (input = {}) => {
     rules: Array.isArray(input.exclusions?.rules) ? input.exclusions.rules : [],
   };
 
-  const campaignIndex = await loadCampaignIndex(config);
-  const normalizedRows = rows.map((row) => normalizeRowPayload(row, mapping, config, campaignIndex));
+  const normalizedRows = rows.map((row) => normalizeRowPayload(row, mapping, config, null));
   const existingIndexes = await loadExistingIndexes(config, normalizedRows);
 
   const seenKeys = new Set();
@@ -706,14 +693,6 @@ const analyzeImportRows = async (input = {}) => {
     if (recentMatch) {
       reasons.push(`Ya existe un lead reciente con el mismo contacto (ID ${recentMatch.id}).`);
       state = 'excluded';
-    }
-
-    if (
-      state === 'ready'
-      && item.display?.campaign_reference
-      && !item.display?.campaign_name
-    ) {
-      reasons.push('No se ha podido vincular la referencia de campaña a una campaña seguida en Clinicaclick; se guardará como nota.');
     }
 
     if (state === 'ready') importable += 1;
