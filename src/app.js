@@ -70,6 +70,7 @@ const STATIC_CORS_ORIGINS = new Set([
     'http://localhost:4202',
     'http://localhost:4203'
 ]);
+const HTTP_JSON_BODY_LIMIT = process.env.HTTP_JSON_BODY_LIMIT || '25mb';
 
 function isPublicIntakePath(pathname = '') {
     return (
@@ -105,11 +106,13 @@ const corsOptionsDelegate = (req, callback) => {
 
 app.use(cors(corsOptionsDelegate));
 app.use(express.json({
+    limit: HTTP_JSON_BODY_LIMIT,
     verify: (req, res, buf) => {
         // Guardar el cuerpo crudo para validar firmas HMAC de intake
         req.rawBody = buf;
     }
 }));
+app.use(express.urlencoded({ extended: true, limit: HTTP_JSON_BODY_LIMIT }));
 app.use(cookieParser());
 // ✅ CORREGIDO: Usar rutas con prefijo /api/ como en la versión que funcionaba
 console.log('Configurando rutas...');
