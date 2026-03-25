@@ -573,10 +573,31 @@ exports.postMessage = async (req, res) => {
     let limitStatus = null;
     let to = null;
     if (conversation.channel === 'whatsapp') {
-      to = conversation.contact_id;
+      let preferredPhone = null;
+      if (conversation.patient_id) {
+        const patient = await Paciente.findByPk(conversation.patient_id, {
+          attributes: ['telefono_movil'],
+          transaction,
+        });
+        preferredPhone = patient?.telefono_movil || null;
+      }
+      if (!preferredPhone && conversation.lead_id) {
+        const lead = await LeadIntake.findByPk(conversation.lead_id, {
+          attributes: ['telefono'],
+          transaction,
+        });
+        preferredPhone = lead?.telefono || null;
+      }
+      to = whatsappService.normalizePhoneNumber(preferredPhone)
+        || whatsappService.normalizePhoneNumber(conversation.contact_id)
+        || null;
       if (!to) {
         await transaction.rollback();
         return res.status(400).json({ error: 'contacto_sin_numero' });
+      }
+      if (conversation.contact_id !== to) {
+        conversation.contact_id = to;
+        await conversation.save({ transaction });
       }
       clinicConfig = await whatsappService.getClinicConfig(conversation.clinic_id);
       if (!clinicConfig?.accessToken || !clinicConfig?.phoneNumberId) {

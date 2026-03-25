@@ -1,10 +1,10 @@
 'use strict';
 const { Paciente, Clinica, PacienteRelacion, PacienteClinica, PacienteConsentimiento, CitaPaciente, Usuario, Tratamiento } = require('../../models');
 const { Op, literal } = require('sequelize');
+const { normalizePhoneDigits } = require('../lib/phone');
 
 const normalizePhone = (phone) => {
-  if (!phone) return null;
-  return phone.toString().replace(/\D+/g, '');
+  return normalizePhoneDigits(phone);
 };
 
 const normalizeEmail = (email) => {

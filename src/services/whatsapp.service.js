@@ -1,5 +1,6 @@
 const axios = require('axios');
 const db = require('../../models');
+const { normalizePhoneE164 } = require('../lib/phone');
 const ClinicMetaAsset = db.ClinicMetaAsset;
 const Clinica = db.Clinica;
 const sequelize = db.sequelize;
@@ -162,38 +163,9 @@ class WhatsAppService {
      * @returns {string|null}
      */
     normalizePhoneNumber(raw) {
-        if (!raw) {
-            return null;
-        }
-
-        const trimmed = String(raw).trim();
-        if (!trimmed) {
-            return null;
-        }
-
-        const cleaned = trimmed.replace(/[^\d+]/g, '');
-        if (!cleaned) {
-            return null;
-        }
-
-        if (cleaned.startsWith('+')) {
-            return cleaned;
-        }
-
-        if (cleaned.startsWith('00')) {
-            return `+${cleaned.slice(2)}`;
-        }
-
-        if (
-            this.defaultCountryCode &&
-            cleaned.startsWith(
-                this.defaultCountryCode.replace('+', '')
-            )
-        ) {
-            return `+${cleaned}`;
-        }
-
-        return `${this.defaultCountryCode}${cleaned}`;
+        return normalizePhoneE164(raw, {
+            defaultCountryCode: this.defaultCountryCode.replace(/\D/g, '') || undefined,
+        });
     }
 
     /**

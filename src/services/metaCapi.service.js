@@ -1,6 +1,7 @@
 'use strict';
 const axios = require('axios');
 const crypto = require('crypto');
+const { normalizePhoneDigits } = require('../lib/phone');
 
 const PIXEL_ID = process.env.META_PIXEL_ID;
 const CAPI_TOKEN = process.env.META_CAPI_TOKEN;
@@ -16,11 +17,7 @@ const hashSha256 = (value) => {
 };
 
 const normalizePhone = (phone) => {
-  if (!phone) return null;
-  const digits = String(phone).replace(/\D/g, '');
-  if (!digits) return null;
-  // If already has country code (>=11 digits) keep, otherwise return as is; caller should provide E.164 when posible
-  return digits.startsWith('0') ? digits.replace(/^0+/, '') : digits;
+  return normalizePhoneDigits(phone);
 };
 
 async function sendEvent(payload) {

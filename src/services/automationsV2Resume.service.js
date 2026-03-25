@@ -3,6 +3,7 @@
 const db = require('../../models');
 const jobRequestsService = require('./jobRequests.service');
 const jobScheduler = require('./jobScheduler.service');
+const { normalizePhoneDigits } = require('../lib/phone');
 
 const FlowExecutionV2 = db.FlowExecutionV2;
 const AutomationFlowTemplateV2 = db.AutomationFlowTemplateV2;
@@ -39,8 +40,7 @@ function normalizeEmail(value) {
 }
 
 function normalizePhone(value) {
-  const digits = String(value || '').replace(/\D/g, '');
-  return digits || null;
+  return normalizePhoneDigits(value);
 }
 
 function getByPath(obj, path) {

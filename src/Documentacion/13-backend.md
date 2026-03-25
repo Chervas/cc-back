@@ -1155,6 +1155,14 @@ Checklist obligatorio al pasar a `staging` y luego a `main`:
     - al entrar una respuesta, `wait_response` reutiliza el job pendiente de la ejecución marcándolo con `resume_mode = response`; si el payload del job histórico no traía ese campo, el executor cae a `waiting_meta.resume_mode` y `waiting_meta.pending_response_text` antes de asumir `timeout`.
     - el backend que reanuda no tiene que ser el mismo que recibió el webhook. En integración se da por correcto que el webhook pueda entrar por otro proceso PM2 y que la reanudación final la haga `clinicaclick-integracion` a través del bus Redis.
 
+  - Normalización de teléfono para CRM + WhatsApp:
+    - se centraliza en `src/lib/phone.js`;
+    - si el número llega con `+` o `00`, se respeta como internacional;
+    - si llega sin prefijo y tiene `9` dígitos, se asume local español y se normaliza con `34`;
+    - si llega sin `+` pero ya trae entre `10` y `15` dígitos, se trata como internacional tal cual, sin anteponer `34`.
+    - esto evita errores como convertir `31618027729` en `+3431618027729`.
+    - el mismo criterio se usa en intake, lead import, paciente, cita, runtime de automatizaciones, QuickChat y sender de WhatsApp.
+
 - Conversaciones de lead
   - El modelo canónico para marketing es `LeadIntake`.
   - La vinculación correcta queda así:

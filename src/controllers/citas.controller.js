@@ -20,6 +20,7 @@ const AutomationFlowTemplateV2 = db.AutomationFlowTemplateV2;
 const appointmentAutomationV2Runtime = require('../services/appointmentAutomationV2Runtime.service');
 const { CITA_STATUS_VALUES } = require('../lib/status-catalog');
 const { getIO } = require('../services/socket.service');
+const { normalizePhoneDigits } = require('../lib/phone');
 
 const CITA_ESTADOS_VALIDOS = new Set(CITA_STATUS_VALUES);
 const LEAD_ACTIVE_APPOINTMENT_STATES = new Set([
@@ -121,9 +122,7 @@ function parsePositiveInt(value) {
 }
 
 function normalizePhone(value) {
-    if (!value) return null;
-    const digits = String(value).replace(/\D+/g, '');
-    return digits || null;
+    return normalizePhoneDigits(value);
 }
 
 async function syncLeadStatusFromAppointments(leadId) {
@@ -283,7 +282,7 @@ async function findOrCreatePaciente({ clinica_id, nombre, apellidos, telefono, e
     }
 
     const whereContacto = [];
-    const normalizedPhone = normalizePhone(telefono);
+    const normalizedPhone = normalizePhoneDigits(telefono);
     const localPhone = normalizedPhone && normalizedPhone.length > 9 ? normalizedPhone.slice(-9) : normalizedPhone;
 
     if (telefono) {
@@ -341,7 +340,7 @@ async function findOrCreatePaciente({ clinica_id, nombre, apellidos, telefono, e
     const nuevoPaciente = await Paciente.create({
         nombre: nombre || 'Sin nombre',
         apellidos: apellidos || '',
-        telefono_movil: telefono || '',
+        telefono_movil: normalizedPhone || telefono || '',
         email: email || null,
         clinica_id: clinica_id
     });

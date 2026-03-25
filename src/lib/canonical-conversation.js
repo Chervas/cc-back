@@ -2,24 +2,17 @@
 
 const db = require('../../models');
 const whatsappService = require('../services/whatsapp.service');
+const { getPhoneLookupCandidates } = require('./phone');
 
 const { Op } = db.Sequelize;
 const { Conversation, Message, ConversationRead, WhatsAppWebOrigin } = db;
 
 function normalizeContactCandidates(raw) {
-  const normalized = whatsappService.normalizePhoneNumber(raw);
-  const rawValue = String(raw || '').trim();
-  const digits = rawValue.replace(/\D/g, '');
-  const local = digits.length > 9 ? digits.slice(-9) : digits;
-  const set = new Set([
-    normalized,
-    rawValue || null,
-    digits ? `+${digits}` : null,
-    digits || null,
-    local ? `+${local}` : null,
-    local || null,
-  ].filter(Boolean));
-  return Array.from(set);
+  return getPhoneLookupCandidates(raw, {
+    defaultCountryCode: String(
+      process.env.META_WHATSAPP_DEFAULT_COUNTRY_CODE || '+34'
+    ).replace(/\D/g, '') || '34',
+  });
 }
 
 function compareDatesDesc(left, right) {
@@ -186,12 +179,19 @@ async function findCanonicalWhatsappConversation({
     channel: 'whatsapp',
   };
 
+  const contactOr = [];
   if (contactCandidates.length) {
-    where.contact_id = { [Op.in]: contactCandidates };
-  } else if (patientId) {
-    where.patient_id = patientId;
-  } else if (leadId) {
-    where.lead_id = leadId;
+    contactOr.push({ contact_id: { [Op.in]: contactCandidates } });
+  }
+  if (patientId) {
+    contactOr.push({ patient_id: patientId });
+  }
+  if (leadId) {
+    contactOr.push({ lead_id: leadId });
+  }
+
+  if (contactOr.length) {
+    where[Op.or] = contactOr;
   } else {
     return null;
   }
@@ -233,7 +233,7 @@ async function findCanonicalWhatsappConversation({
   const duplicates = sorted.slice(1);
 
   const patch = {};
-  if (contactCandidates.length && !canonical.contact_id) {
+  if (contactCandidates.length && contactCandidates[0] && canonical.contact_id !== contactCandidates[0]) {
     patch.contact_id = contactCandidates[0];
   }
   // Regla canónica en integración: una única conversación WhatsApp por

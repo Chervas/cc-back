@@ -27,6 +27,7 @@ const { getIO } = require('../services/socket.service');
 const jobRequestsService = require('../services/jobRequests.service');
 const { previewLeadImport, executeLeadImport } = require('../services/leadImport.service');
 const { findCanonicalWhatsappConversation } = require('../lib/canonical-conversation');
+const { normalizePhoneDigits } = require('../lib/phone');
 
 const CHANNELS = new Set(['paid', 'organic', 'unknown']);
 const SOURCES = new Set(['meta_ads', 'google_ads', 'web', 'whatsapp', 'call_click', 'tiktok_ads', 'seo', 'direct', 'local_services']);
@@ -109,9 +110,7 @@ const hashValue = (value) => {
 
 const normalizeEmail = (email) => (email || '').trim().toLowerCase() || null;
 const normalizePhone = (phone) => {
-  if (!phone) return null;
-  const digits = String(phone).replace(/\D/g, '');
-  return digits || null;
+  return normalizePhoneDigits(phone);
 };
 
 const resolveFallbackClinicForGroup = async (groupId) => {
