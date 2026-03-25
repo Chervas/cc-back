@@ -236,7 +236,10 @@ exports.listConversations = async (req, res) => {
     }
 
     if (filter === 'leads') {
+      // Si la conversación ya está vinculada a un paciente, debe vivir en la pestaña
+      // de pacientes y no duplicarse en leads.
       where.lead_id = { [Op.not]: null };
+      where.patient_id = null;
     } else if (filter === 'pacientes') {
       where.patient_id = { [Op.not]: null };
     } else if (filter === 'equipo') {
