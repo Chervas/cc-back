@@ -49,9 +49,28 @@ const parseInteger = (value) => {
   const n = Number(value);
   return Number.isFinite(n) ? n : null;
 };
+const countMojibakeMarkers = (value) => {
+  if (!value || typeof value !== 'string') return 0;
+  const matches = value.match(/Ã.|Â.|â[\u0080-\u00BF]|�/g);
+  return matches ? matches.length : 0;
+};
+const repairLikelyMojibake = (value) => {
+  if (!value || typeof value !== 'string') return value;
+  if (!/[ÃÂâ�]/.test(value)) return value;
+
+  try {
+    const repaired = Buffer.from(value, 'latin1').toString('utf8');
+    if (!repaired) return value;
+    return countMojibakeMarkers(repaired) < countMojibakeMarkers(value)
+      ? repaired.normalize('NFC')
+      : value;
+  } catch (_error) {
+    return value;
+  }
+};
 const cleanString = (value) => {
   if (value === undefined || value === null) return null;
-  const normalized = String(value).trim();
+  const normalized = repairLikelyMojibake(String(value)).trim();
   return normalized || null;
 };
 const escapeHtml = (value) => String(value ?? '')
@@ -559,7 +578,7 @@ const parseDate = (value) => {
 const sanitizeText = (value) => {
   if (!value || typeof value !== 'string') return value;
   return value
-    .normalize('NFKD')              // descompone caracteres estilizados
+    .normalize('NFC')
     .replace(/[^\p{L}\p{N}\s.,@'+-]/gu, '') // deja letras, números y signos básicos
     .trim();
 };
@@ -567,7 +586,7 @@ const sanitizeText = (value) => {
 const sanitizeLeadNoteText = (value) => {
   if (!value || typeof value !== 'string') return value;
   return value
-    .normalize('NFKD')
+    .normalize('NFC')
     .replace(/[^\p{L}\p{N}\s.,@'+\-:/?&=#()%_]/gu, '')
     .trim();
 };
@@ -2462,7 +2481,9 @@ exports.receiveMetaWebhook = asyncHandler(async (req, res) => {
   return res.status(200).json({ success: true });
 });
 
-exports.listLeads = asyncHandler(async (req, res) => {
+const LEAD_LIST_SORT_FIELDS = new Set(['created_at', 'channel', 'source', 'status_lead', 'campana_id']);
+
+const buildLeadListPayload = async (query = {}) => {
   const {
     clinicId,
     groupId,
@@ -2479,14 +2500,14 @@ exports.listLeads = asyncHandler(async (req, res) => {
     pageSize,
     sortBy,
     sortOrder
-  } = req.query;
+  } = query;
 
   const where = {};
-  const clinicIdRaw = clinicId || req.query.clinica_id;
-  const groupIdRaw = groupId || req.query.grupo_clinica_id;
+  const clinicIdRaw = clinicId || query.clinica_id;
+  const groupIdRaw = groupId || query.grupo_clinica_id;
   const clinicIdsParsed = parseIntegerList(clinicIdRaw);
   const groupIdParsed = groupIdRaw === 'all' ? null : parseInteger(groupIdRaw);
-  const campanaIdParsed = parseInteger(campanaId || req.query.campana_id);
+  const campanaIdParsed = parseInteger(campanaId || query.campana_id);
 
   if (clinicIdsParsed !== null) {
     where.clinica_id = clinicIdsParsed.length === 1 ? clinicIdsParsed[0] : { [Op.in]: clinicIdsParsed };
@@ -2504,11 +2525,15 @@ exports.listLeads = asyncHandler(async (req, res) => {
   }
 
   if (search) {
-    const term = `%${search}%`;
+    const term = `%${String(search).trim()}%`;
     where[Op.or] = [
       { nombre: { [Op.like]: term } },
       { email: { [Op.like]: term } },
-      { telefono: { [Op.like]: term } }
+      { telefono: { [Op.like]: term } },
+      { source_detail: { [Op.like]: term } },
+      { page_url: { [Op.like]: term } },
+      { landing_url: { [Op.like]: term } },
+      { '$campana.nombre$': { [Op.like]: term } }
     ];
   }
 
@@ -2516,14 +2541,19 @@ exports.listLeads = asyncHandler(async (req, res) => {
   const pageParsed = Math.max(parseInteger(page) || 0, 0);
   const parsedOffset = pageParsed > 0 ? (pageParsed - 1) * pageSizeParsed : Math.max(Number(offset) || 0, 0);
   const parsedLimit = pageSizeParsed;
+  const normalizedSortBy = LEAD_LIST_SORT_FIELDS.has(sortBy) ? sortBy : 'created_at';
+  const normalizedSortOrder = String(sortOrder || 'DESC').toUpperCase() === 'ASC' ? 'ASC' : 'DESC';
 
   const leads = await LeadIntake.findAndCountAll({
     where,
     include: [
       { model: Clinica, as: 'clinica', attributes: ['id_clinica', 'nombre_clinica'] },
-      { model: GrupoClinica, as: 'grupoClinica', attributes: ['id_grupo', 'nombre_grupo'] }
+      { model: GrupoClinica, as: 'grupoClinica', attributes: ['id_grupo', 'nombre_grupo'] },
+      { model: Campana, as: 'campana', attributes: ['id', 'nombre', 'campaign_id'], required: false }
     ].filter(Boolean),
-    order: [['created_at', 'DESC']],
+    distinct: true,
+    subQuery: false,
+    order: [[normalizedSortBy, normalizedSortOrder]],
     limit: parsedLimit,
     offset: parsedOffset
   });
@@ -2533,7 +2563,7 @@ exports.listLeads = asyncHandler(async (req, res) => {
 
   const items = await enrichLeadsForUi(leads.rows);
 
-  res.status(200).json({
+  return {
     total: leads.count,
     limit: parsedLimit,
     offset: parsedOffset,
@@ -2541,7 +2571,17 @@ exports.listLeads = asyncHandler(async (req, res) => {
     pageSize: parsedLimit,
     totalPages,
     items
-  });
+  };
+};
+
+exports.listLeads = asyncHandler(async (req, res) => {
+  const payload = await buildLeadListPayload(req.query);
+  res.status(200).json(payload);
+});
+
+exports.searchLeads = asyncHandler(async (req, res) => {
+  const payload = await buildLeadListPayload(req.query);
+  res.status(200).json(payload);
 });
 
 exports.getLeadById = asyncHandler(async (req, res) => {

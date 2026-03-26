@@ -15,6 +15,7 @@ router.use(protect);
 router.get('/verify-snippet', intakeController.verifySnippetInstalled);
 router.get('/config/:clinicId/secret', intakeController.getIntakeConfigSecretClinic);
 router.get('/config/group/:groupId/secret', intakeController.getIntakeConfigSecretGroup);
+router.get('/leads/search', intakeController.searchLeads);
 router.get('/leads', intakeController.listLeads);
 router.get('/leads/stats', intakeController.getLeadStats);
 router.post('/leads/import/preview', intakeController.previewLeadImport);
