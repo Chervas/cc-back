@@ -4,6 +4,95 @@
 
 ---
 
+## 2026-03-26 - Activos efectivos de marketing por clínica/grupo
+
+`Marketing > Campañas`, `Ajustes > Cuentas conectadas`, el intake web y Meta CAPI ya no deben razonar solo en términos de “hay una conexión”.
+El backend expone ahora un modelo explícito de **activos efectivos para esta clínica** con herencia de grupo y fallback global cuando aplica.
+
+### Problema que existía
+
+Hasta ahora convivían tres planos distintos:
+
+- el assignment técnico (`MetaConnectionAssignment`, `GoogleConnectionAssignment`);
+- los assets materializados (`ClinicMetaAsset`, `ClinicGoogleAdsAccount`);
+- la configuración de medición (`IntakeConfig.config.meta_ads` / `google_ads`);
+
+Cada subsistema resolvía estos planos de forma parcial.
+El resultado era inconsistente:
+
+- `Campañas` podía decir “conectado” aunque la clínica usara una conexión heredada del grupo;
+- `Ajustes` no mostraba con claridad qué activos se estaban usando realmente en esa clínica;
+- Meta CAPI seguía dependiendo del pixel global por `.env`;
+- el snippet web no sabía si debía inyectar un pixel/tag propio, heredado o ninguno.
+
+### Resolver canónico
+
+Se introduce `src/services/effectiveMarketingAssets.service.js` como fuente única para:
+
+- resolver el scope operativo (`clinic` / `group`);
+- leer `IntakeConfig` de clínica y grupo;
+- listar assets Meta visibles para la clínica;
+- listar cuentas Google Ads visibles para la clínica;
+- fusionar configuración de tracking con prioridad:
+  - clínica;
+  - grupo;
+  - fallback global solo para Meta Pixel/CAPI;
+- devolver qué asset se usará realmente en esa clínica.
+
+### Regla de precedencia
+
+Para una clínica concreta:
+
+1. selección/configuración explícita de clínica;
+2. asset/configuración heredada del grupo;
+3. fallback global de entorno solo para:
+   - `META_PIXEL_ID`
+   - `META_CAPI_TOKEN`
+
+No existe hoy fallback global equivalente para Google Ads.
+Google solo trabaja con lo guardado en `IntakeConfig.config.google_ads`.
+
+### Qué consume este resolver
+
+- `GET /api/marketing/campaign-onboarding/bootstrap`
+- `GET /api/marketing/campaign-onboarding/meta-pixels`
+- `POST /api/marketing/campaign-onboarding/start`
+- `GET /api/intake/config`
+- `POST /api/intake/leads`
+- `POST /api/intake/events`
+
+### Pixel de Meta
+
+Estado actual del producto:
+
+- **no** se crea automáticamente ningún pixel desde ClinicaClick;
+- el pixel se selecciona entre los pixels existentes del ad account resuelto;
+- si la clínica/grupo no tienen pixel configurado, Meta CAPI puede seguir usando el global del entorno si existe;
+- si tampoco existe pixel global, no se envía CAPI y el readiness lo marca como incompleto.
+
+### Google Tag / Google Ads
+
+Google no usa un “pixel” equivalente en este flujo.
+La parte web se basa en el `send_to` guardado en `IntakeConfig.config.google_ads`.
+
+Del `send_to` se deriva:
+
+- `tag_id` para la inyección web (`AW-...`);
+- la configuración de conversiones server-side en `maybeUploadGoogleConversion(...)`.
+
+### Compatibilidad
+
+Este cambio no altera:
+
+- el ownership de tokens en `MetaConnection` / `GoogleConnection`;
+- la sync de assets y jobs ya existentes;
+- la atribución de leads ya creados.
+
+Lo que cambia es el punto de lectura:
+
+- ya no debe deducirse “qué usar” a partir de una conexión o asset cualquiera;
+- debe consultarse siempre el resolver de activos efectivos.
+
 ## 2026-03-24 - Intake inbound: descarte explícito de leads sin scope
 
 El intake inbound ya no debe crear `LeadIntake` huérfanos cuando una fuente externa no puede resolverse a clínica o grupo.

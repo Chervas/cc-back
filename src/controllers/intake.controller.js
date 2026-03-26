@@ -18,6 +18,7 @@ const CitaPaciente = db.CitaPaciente;
 const Campana = db.Campana;
 const AdCache = db.AdCache;
 const ClinicMetaAsset = db.ClinicMetaAsset;
+const MetaConnection = db.MetaConnection;
 const ClinicGoogleAdsAccount = db.ClinicGoogleAdsAccount;
 const IntakeConfig = db.IntakeConfig;
 const { enqueueInboundFormSubmissionResume } = require('../services/automationsV2Resume.service');
@@ -28,6 +29,12 @@ const jobRequestsService = require('../services/jobRequests.service');
 const { previewLeadImport, executeLeadImport } = require('../services/leadImport.service');
 const { findCanonicalWhatsappConversation } = require('../lib/canonical-conversation');
 const { normalizePhoneDigits } = require('../lib/phone');
+const {
+  extractGoogleTagId,
+  normalizeMetaAdsConfig,
+  normalizeGoogleAdsConfig: normalizeEffectiveGoogleAdsConfig,
+  resolveEffectiveTrackingConfig
+} = require('../services/effectiveMarketingAssets.service');
 
 const CHANNELS = new Set(['paid', 'organic', 'unknown']);
 const SOURCES = new Set(['meta_ads', 'google_ads', 'web', 'whatsapp', 'call_click', 'tiktok_ads', 'seo', 'direct', 'local_services']);
@@ -519,6 +526,48 @@ const pickMatchingIntakeConfig = ({ req, providedSignature, clinicCfg, groupCfg,
 
   return clinicCfg || groupCfg || domainCfg || null;
 };
+
+const buildTrackingScopeFromRecords = ({ clinicId, groupId, selectedRecord }) => {
+  const selectedClinicId = parseInteger(selectedRecord?.clinic_id);
+  const selectedGroupId = parseInteger(selectedRecord?.group_id);
+  return {
+    assignment_scope: selectedRecord?.assignment_scope === 'group'
+      ? 'group'
+      : (groupId && !clinicId ? 'group' : 'clinic'),
+    clinic_id: clinicId || selectedClinicId || null,
+    group_id: groupId || selectedGroupId || null
+  };
+};
+
+const resolveEffectiveTrackingFromRecords = ({ clinicId, groupId, selectedRecord, clinicCfg, groupCfg }) => {
+  const scope = buildTrackingScopeFromRecords({ clinicId, groupId, selectedRecord });
+  return resolveEffectiveTrackingConfig(scope, {
+    clinicRecord: clinicCfg || null,
+    groupRecord: groupCfg || null
+  });
+};
+
+const resolveMetaCapiRuntimeConfig = async ({ clinicId, groupId, selectedRecord, clinicCfg, groupCfg }) => {
+  const tracking = resolveEffectiveTrackingFromRecords({ clinicId, groupId, selectedRecord, clinicCfg, groupCfg });
+  let accessToken = cleanString(process.env.META_CAPI_TOKEN);
+  const connectionId = parseInteger(tracking?.meta_ads?.connection_id);
+
+  if (connectionId) {
+    const connection = await MetaConnection.findByPk(connectionId, {
+      attributes: ['id', 'accessToken'],
+      raw: true
+    });
+    if (connection?.accessToken) {
+      accessToken = connection.accessToken;
+    }
+  }
+
+  return {
+    tracking,
+    pixelId: cleanString(tracking?.meta_ads?.pixel_id),
+    accessToken: accessToken || null
+  };
+};
 // Número de WhatsApp "público" para wa.me (dígitos, con prefijo de país si existe).
 // En ClinicMetaAssets solemos tenerlo en additionalData.displayPhoneNumber o en metaAssetName.
 const extractWhatsAppNumber = (asset) => {
@@ -915,6 +964,7 @@ const getGoogleAdsEventConfig = (googleAdsCfg, eventName) => {
 
 const maybeUploadGoogleConversion = async ({
   cfgRecord,
+  googleAdsConfig,
   eventName,
   customData,
   userData,
@@ -922,7 +972,9 @@ const maybeUploadGoogleConversion = async ({
   eventId
 }) => {
   const cfgObj = cfgRecord && typeof cfgRecord.config === 'object' ? cfgRecord.config : {};
-  const googleCfg = normalizeGoogleAdsConfig(cfgObj.google_ads || {});
+  const googleCfg = googleAdsConfig
+    ? normalizeGoogleAdsConfig(googleAdsConfig)
+    : normalizeGoogleAdsConfig(cfgObj.google_ads || {});
   const eventCfg = getGoogleAdsEventConfig(googleCfg, eventName);
 
   if (!eventCfg.enabled) {
@@ -1494,6 +1546,27 @@ exports.ingestLead = asyncHandler(async (req, res) => {
         requestedEventName === 'purchase' ? 'Purchase' :
           'Lead';
 
+  const finalClinicCfg = clinicaIdParsed !== null
+    ? await IntakeConfig.findOne({ where: { clinic_id: clinicaIdParsed }, raw: true })
+    : null;
+  const finalGroupCfg = grupoClinicaIdParsed !== null
+    ? await IntakeConfig.findOne({ where: { group_id: grupoClinicaIdParsed, assignment_scope: 'group' }, raw: true })
+    : null;
+  const effectiveTracking = resolveEffectiveTrackingFromRecords({
+    clinicId: clinicaIdParsed,
+    groupId: grupoClinicaIdParsed,
+    selectedRecord: cfg,
+    clinicCfg: finalClinicCfg,
+    groupCfg: finalGroupCfg
+  });
+  const metaRuntime = await resolveMetaCapiRuntimeConfig({
+    clinicId: clinicaIdParsed,
+    groupId: grupoClinicaIdParsed,
+    selectedRecord: cfg,
+    clinicCfg: finalClinicCfg,
+    groupCfg: finalGroupCfg
+  });
+
   // Emitir a Meta CAPI si hay datos mínimos
   try {
     const userData = buildMetaUserData({
@@ -1513,7 +1586,9 @@ exports.ingestLead = asyncHandler(async (req, res) => {
       source: normalizedSource,
       sourceDetail: source_detail || null,
       utmCampaign: utmCampaign || null,
-      userData
+      userData,
+      pixelId: metaRuntime.pixelId,
+      accessToken: metaRuntime.accessToken
     });
   } catch (e) {
     console.warn('⚠️ No se pudo enviar evento Meta CAPI:', e.message || e);
@@ -1537,6 +1612,7 @@ exports.ingestLead = asyncHandler(async (req, res) => {
     };
     await maybeUploadGoogleConversion({
       cfgRecord: cfg,
+      googleAdsConfig: effectiveTracking.google_ads,
       eventName: normalizedEventNameForCapi,
       customData: googleCustomData,
       userData: {
@@ -1623,6 +1699,13 @@ const DEFAULT_GOOGLE_ADS = {
   currency: 'EUR'
 };
 
+const DEFAULT_META_ADS = {
+  enabled: true,
+  connection_id: null,
+  ad_account_id: null,
+  pixel_id: null
+};
+
 const defaultConfigPayload = (clinicId, groupId) => ({
   clinic_id: clinicId || null,
   group_id: groupId || null,
@@ -1633,6 +1716,22 @@ const defaultConfigPayload = (clinicId, groupId) => ({
   flows: null,
   appearance: DEFAULT_APPEARANCE,
   google_ads: DEFAULT_GOOGLE_ADS,
+  meta_ads: DEFAULT_META_ADS,
+  tracking: {
+    meta_ads: {
+      enabled: false,
+      pixel_id: null,
+      tag_injection_enabled: false,
+      config_source: null
+    },
+    google_ads: {
+      enabled: false,
+      send_to: null,
+      tag_id: null,
+      tag_injection_enabled: false,
+      config_source: null
+    }
+  },
   texts: DEFAULT_TEXTS,
   locations: [],
   has_hmac: false,
@@ -1677,6 +1776,31 @@ exports.getIntakeConfig = asyncHandler(async (req, res) => {
     if (record && record.get) record = record.get({ plain: true });
   }
 
+  let effectiveClinicId = record?.clinic_id || clinicIdParsed || null;
+  let effectiveGroupId = record?.group_id || groupIdParsed || null;
+  if (!effectiveGroupId && effectiveClinicId) {
+    const clinicRow = await Clinica.findOne({
+      where: { id_clinica: effectiveClinicId },
+      attributes: ['id_clinica', 'grupoClinicaId'],
+      raw: true
+    });
+    effectiveGroupId = parseInteger(clinicRow?.grupoClinicaId);
+  }
+
+  const clinicRecord = effectiveClinicId
+    ? await IntakeConfig.findOne({ where: { clinic_id: effectiveClinicId }, raw: true })
+    : null;
+  const groupRecord = effectiveGroupId
+    ? await IntakeConfig.findOne({ where: { group_id: effectiveGroupId, assignment_scope: 'group' }, raw: true })
+    : null;
+  const effectiveTracking = resolveEffectiveTrackingFromRecords({
+    clinicId: effectiveClinicId,
+    groupId: effectiveGroupId,
+    selectedRecord: record,
+    clinicCfg: clinicRecord,
+    groupCfg: groupRecord
+  });
+
   const payload = defaultConfigPayload(record?.clinic_id || clinicIdParsed, record?.group_id || groupIdParsed);
   if (record) {
     const cfg = record.config || {};
@@ -1688,7 +1812,23 @@ exports.getIntakeConfig = asyncHandler(async (req, res) => {
     payload.flow = cfg.flow || payload.flow;
     payload.flows = cfg.flows || payload.flows;
     payload.appearance = { ...payload.appearance, ...(cfg.appearance || {}) };
-    payload.google_ads = { ...payload.google_ads, ...normalizeGoogleAdsConfig(cfg.google_ads || {}) };
+    payload.google_ads = { ...payload.google_ads, ...normalizeGoogleAdsConfig(effectiveTracking.google_ads || {}) };
+    payload.meta_ads = { ...payload.meta_ads, ...normalizeMetaAdsConfig(effectiveTracking.meta_ads || {}) };
+    payload.tracking = {
+      meta_ads: {
+        enabled: effectiveTracking.meta_ads.enabled !== false && !!effectiveTracking.meta_ads.pixel_id,
+        pixel_id: effectiveTracking.meta_ads.pixel_id || null,
+        config_source: effectiveTracking.meta_ads.config_source || null,
+        tag_injection_enabled: !!effectiveTracking.meta_ads.pixel_id
+      },
+      google_ads: {
+        enabled: effectiveTracking.google_ads.enabled !== false && !!extractGoogleTagId(effectiveTracking.google_ads.send_to),
+        send_to: effectiveTracking.google_ads.send_to || null,
+        tag_id: extractGoogleTagId(effectiveTracking.google_ads.send_to),
+        config_source: effectiveTracking.google_ads.config_source || null,
+        tag_injection_enabled: !!extractGoogleTagId(effectiveTracking.google_ads.send_to)
+      }
+    };
     payload.texts = { ...payload.texts, ...(cfg.texts || {}) };
     payload.locations = cfg.locations || [];
     payload.config = cfg;
@@ -1696,6 +1836,24 @@ exports.getIntakeConfig = asyncHandler(async (req, res) => {
     if (domain && payload.domains.length > 0 && !isDomainAllowed(payload.domains, domain)) {
       return res.status(403).json({ message: 'Domain not allowed' });
     }
+  } else {
+    payload.google_ads = { ...payload.google_ads, ...normalizeGoogleAdsConfig(effectiveTracking.google_ads || {}) };
+    payload.meta_ads = { ...payload.meta_ads, ...normalizeMetaAdsConfig(effectiveTracking.meta_ads || {}) };
+    payload.tracking = {
+      meta_ads: {
+        enabled: effectiveTracking.meta_ads.enabled !== false && !!effectiveTracking.meta_ads.pixel_id,
+        pixel_id: effectiveTracking.meta_ads.pixel_id || null,
+        config_source: effectiveTracking.meta_ads.config_source || null,
+        tag_injection_enabled: !!effectiveTracking.meta_ads.pixel_id
+      },
+      google_ads: {
+        enabled: effectiveTracking.google_ads.enabled !== false && !!extractGoogleTagId(effectiveTracking.google_ads.send_to),
+        send_to: effectiveTracking.google_ads.send_to || null,
+        tag_id: extractGoogleTagId(effectiveTracking.google_ads.send_to),
+        config_source: effectiveTracking.google_ads.config_source || null,
+        tag_injection_enabled: !!extractGoogleTagId(effectiveTracking.google_ads.send_to)
+      }
+    };
   }
 
   // Locations disponibles para el editor (sedes = clínicas del mismo grupo).
@@ -1838,7 +1996,8 @@ exports.upsertIntakeConfig = asyncHandler(async (req, res) => {
   if (body.config && typeof body.config === 'object' && !Array.isArray(body.config)) {
     config = {
       ...body.config,
-      ...(body.config.google_ads ? { google_ads: normalizeGoogleAdsConfig(body.config.google_ads) } : {})
+      ...(body.config.google_ads ? { google_ads: normalizeGoogleAdsConfig(body.config.google_ads) } : {}),
+      ...(body.config.meta_ads ? { meta_ads: normalizeMetaAdsConfig(body.config.meta_ads) } : {})
     };
   } else {
     const features = body.features && typeof body.features === 'object' ? body.features : undefined;
@@ -1848,6 +2007,9 @@ exports.upsertIntakeConfig = asyncHandler(async (req, res) => {
     const googleAds = body.google_ads && typeof body.google_ads === 'object' && !Array.isArray(body.google_ads)
       ? normalizeGoogleAdsConfig(body.google_ads)
       : undefined;
+    const metaAds = body.meta_ads && typeof body.meta_ads === 'object' && !Array.isArray(body.meta_ads)
+      ? normalizeMetaAdsConfig(body.meta_ads)
+      : undefined;
     const texts = body.texts && typeof body.texts === 'object' ? body.texts : undefined;
     const locations = Array.isArray(body.locations) ? body.locations : undefined;
     config = {
@@ -1856,6 +2018,7 @@ exports.upsertIntakeConfig = asyncHandler(async (req, res) => {
       ...(flows ? { flows } : {}),
       ...(appearance ? { appearance } : {}),
       ...(googleAds ? { google_ads: googleAds } : {}),
+      ...(metaAds ? { meta_ads: metaAds } : {}),
       ...(texts ? { texts } : {}),
       ...(locations ? { locations } : {})
     };
@@ -2234,6 +2397,27 @@ exports.receiveIntakeEvent = asyncHandler(async (req, res) => {
     }
   }
 
+  const finalClinicCfg = clinicIdParsed !== null
+    ? await IntakeConfig.findOne({ where: { clinic_id: clinicIdParsed }, raw: true })
+    : null;
+  const finalGroupCfg = groupIdParsed !== null
+    ? await IntakeConfig.findOne({ where: { group_id: groupIdParsed, assignment_scope: 'group' }, raw: true })
+    : null;
+  const effectiveTracking = resolveEffectiveTrackingFromRecords({
+    clinicId: clinicIdParsed,
+    groupId: groupIdParsed,
+    selectedRecord: cfg,
+    clinicCfg: finalClinicCfg,
+    groupCfg: finalGroupCfg
+  });
+  const metaRuntime = await resolveMetaCapiRuntimeConfig({
+    clinicId: clinicIdParsed,
+    groupId: groupIdParsed,
+    selectedRecord: cfg,
+    clinicCfg: finalClinicCfg,
+    groupCfg: finalGroupCfg
+  });
+
   const userData = buildMetaUserData({
     email: user_data.email,
     phone: user_data.phone || user_data.telefono,
@@ -2256,7 +2440,9 @@ exports.receiveIntakeEvent = asyncHandler(async (req, res) => {
     utmCampaign: custom_data.utm_campaign,
     value: custom_data.value,
     currency: custom_data.currency || 'EUR',
-    userData
+    userData,
+    pixelId: metaRuntime.pixelId,
+    accessToken: metaRuntime.accessToken
   });
 
   // Google Ads Enhanced Conversions (server-side)
@@ -2267,6 +2453,7 @@ exports.receiveIntakeEvent = asyncHandler(async (req, res) => {
   try {
     await maybeUploadGoogleConversion({
       cfgRecord: cfg,
+      googleAdsConfig: effectiveTracking.google_ads,
       eventName: eventName || 'ViewContent',
       customData: {
         ...custom_data,

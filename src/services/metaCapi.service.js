@@ -3,8 +3,8 @@ const axios = require('axios');
 const crypto = require('crypto');
 const { normalizePhoneDigits } = require('../lib/phone');
 
-const PIXEL_ID = process.env.META_PIXEL_ID;
-const CAPI_TOKEN = process.env.META_CAPI_TOKEN;
+const DEFAULT_PIXEL_ID = process.env.META_PIXEL_ID;
+const DEFAULT_CAPI_TOKEN = process.env.META_CAPI_TOKEN;
 const PRIMARY_VERSION = process.env.META_API_VERSION || 'v25.0';
 const FALLBACK_VERSIONS = (process.env.META_API_FALLBACKS || 'v20.0,v19.0,v18.0,v17.0')
   .split(',')
@@ -20,15 +20,17 @@ const normalizePhone = (phone) => {
   return normalizePhoneDigits(phone);
 };
 
-async function sendEvent(payload) {
-  if (!PIXEL_ID || !CAPI_TOKEN) return;
+async function sendEvent(payload, options = {}) {
+  const pixelId = options.pixelId || DEFAULT_PIXEL_ID;
+  const accessToken = options.accessToken || DEFAULT_CAPI_TOKEN;
+  if (!pixelId || !accessToken) return;
   const versions = [PRIMARY_VERSION, ...FALLBACK_VERSIONS];
   let lastError = null;
   for (const version of versions) {
-    const url = `https://graph.facebook.com/${version}/${PIXEL_ID}/events`;
+    const url = `https://graph.facebook.com/${version}/${pixelId}/events`;
     try {
       await axios.post(url, payload, {
-        params: { access_token: CAPI_TOKEN },
+        params: { access_token: accessToken },
         timeout: 8000
       });
       return;
@@ -71,9 +73,11 @@ async function sendMetaEvent({
   utmCampaign,
   value,
   currency = 'EUR',
-  userData
+  userData,
+  pixelId = null,
+  accessToken = null
 }) {
-  if (!PIXEL_ID || !CAPI_TOKEN) return;
+  if (!(pixelId || DEFAULT_PIXEL_ID) || !(accessToken || DEFAULT_CAPI_TOKEN)) return;
 
   const data = [{
     event_name: eventName,
@@ -92,7 +96,7 @@ async function sendMetaEvent({
     user_data: userData
   }];
 
-  return sendEvent({ data });
+  return sendEvent({ data }, { pixelId, accessToken });
 }
 
 module.exports = {
