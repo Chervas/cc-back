@@ -122,27 +122,101 @@ const composeImportedFullName = (nombre, apellidos) => {
   return [cleanNombre, cleanApellidos].filter(Boolean).join(' ').trim() || cleanNombre || cleanApellidos || null;
 };
 
-const parseFlexibleDate = (value) => {
+const buildUtcDate = ({ year, month, day, hours = 0, minutes = 0, seconds = 0 }) => {
+  if (!Number.isFinite(year) || !Number.isFinite(month) || !Number.isFinite(day)) return null;
+  if (month < 1 || month > 12 || day < 1 || day > 31) return null;
+  const parsed = new Date(Date.UTC(year, month - 1, day, hours, minutes, seconds));
+  if (Number.isNaN(parsed.getTime())) return null;
+  if (
+    parsed.getUTCFullYear() !== year
+    || (parsed.getUTCMonth() + 1) !== month
+    || parsed.getUTCDate() !== day
+  ) {
+    return null;
+  }
+  return parsed;
+};
+
+const parseExcelSerialDate = (value) => {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric) || numeric <= 0) return null;
+
+  const excelEpoch = Date.UTC(1899, 11, 30);
+  const milliseconds = Math.round(numeric * 24 * 60 * 60 * 1000);
+  const parsed = new Date(excelEpoch + milliseconds);
+  return Number.isNaN(parsed.getTime()) ? null : parsed;
+};
+
+const inferDateOrder = (values = []) => {
+  let dmyScore = 0;
+  let mdyScore = 0;
+
+  values.forEach((value) => {
+    const raw = cleanString(value);
+    if (!raw) return;
+
+    const match = raw.match(/^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{2,4})(?:\s+(\d{1,2})(?::(\d{1,2}))?(?::(\d{1,2}))?)?$/);
+    if (!match) return;
+
+    const first = Number(match[1]);
+    const second = Number(match[2]);
+    if (first > 12 && second <= 12) dmyScore += 1;
+    if (second > 12 && first <= 12) mdyScore += 1;
+  });
+
+  return mdyScore > dmyScore ? 'MDY' : 'DMY';
+};
+
+const parseFlexibleDate = (value, options = {}) => {
+  const preferredOrder = options.preferredOrder === 'MDY' ? 'MDY' : 'DMY';
   if (value instanceof Date && !Number.isNaN(value.getTime())) return value;
+
+  if (typeof value === 'number') {
+    const excelDate = parseExcelSerialDate(value);
+    if (excelDate) return excelDate;
+  }
 
   const raw = cleanString(value);
   if (!raw) return null;
 
-  const match = raw.match(/^(\d{1,2})\/(\d{1,2})\/(\d{2,4})(?:\s+(\d{1,2})(?::(\d{1,2}))?(?::(\d{1,2}))?)?$/);
+  if (/^\d{4}-\d{1,2}-\d{1,2}(?:[T\s]\d{1,2}:\d{1,2}(?::\d{1,2})?)?/.test(raw)) {
+    const directIso = new Date(raw);
+    return Number.isNaN(directIso.getTime()) ? null : directIso;
+  }
+
+  if (/^\d{5,6}(?:\.\d+)?$/.test(raw)) {
+    const excelDate = parseExcelSerialDate(raw);
+    if (excelDate) return excelDate;
+  }
+
+  const match = raw.match(/^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{2,4})(?:\s+(\d{1,2})(?::(\d{1,2}))?(?::(\d{1,2}))?)?$/);
   if (match) {
-    const day = Number(match[1]);
-    const month = Number(match[2]);
+    const first = Number(match[1]);
+    const second = Number(match[2]);
     let year = Number(match[3]);
     const hours = Number(match[4] || 0);
     const minutes = Number(match[5] || 0);
     const seconds = Number(match[6] || 0);
 
     if (year < 100) year += 2000;
-    if (!Number.isFinite(day) || !Number.isFinite(month) || !Number.isFinite(year)) return null;
-    if (month < 1 || month > 12 || day < 1 || day > 31) return null;
 
-    const parsed = new Date(Date.UTC(year, month - 1, day, hours, minutes, seconds));
-    return Number.isNaN(parsed.getTime()) ? null : parsed;
+    let day;
+    let month;
+    if (first > 12 && second <= 12) {
+      day = first;
+      month = second;
+    } else if (second > 12 && first <= 12) {
+      month = first;
+      day = second;
+    } else if (preferredOrder === 'MDY') {
+      month = first;
+      day = second;
+    } else {
+      day = first;
+      month = second;
+    }
+
+    return buildUtcDate({ year, month, day, hours, minutes, seconds });
   }
 
   const direct = new Date(raw);
@@ -314,7 +388,7 @@ const resolveImportedCampaign = (reference, campaignIndex) => {
   return { campaign: null, matched: false };
 };
 
-const normalizeRowPayload = (row, mapping, config, campaignIndex) => {
+const normalizeRowPayload = (row, mapping, config, campaignIndex, options = {}) => {
   const noteColumnCount = Object.entries(mapping || {})
     .filter(([, destination]) => destination === 'notas')
     .length;
@@ -345,7 +419,7 @@ const normalizeRowPayload = (row, mapping, config, campaignIndex) => {
     source_detail: null,
     channel: inferChannelFromSource(config.source),
   };
-  const createdAt = parseFlexibleDate(mapped.created_at);
+  const createdAt = parseFlexibleDate(mapped.created_at, { preferredOrder: options.createdAtOrder });
   const selectedCampaign = config.campana_id
     ? {
       id: config.campana_id,
@@ -661,7 +735,13 @@ const analyzeImportRows = async (input = {}) => {
     rules: Array.isArray(input.exclusions?.rules) ? input.exclusions.rules : [],
   };
 
-  const normalizedRows = rows.map((row) => normalizeRowPayload(row, mapping, config, null));
+  const createdAtColumns = Object.entries(mapping || {})
+    .filter(([, destination]) => destination === 'created_at')
+    .map(([column]) => column);
+  const createdAtValues = createdAtColumns.flatMap((column) => rows.map((row) => row?.[column]));
+  const createdAtOrder = inferDateOrder(createdAtValues);
+
+  const normalizedRows = rows.map((row) => normalizeRowPayload(row, mapping, config, null, { createdAtOrder }));
   const existingIndexes = await loadExistingIndexes(config, normalizedRows);
 
   const seenKeys = new Set();
