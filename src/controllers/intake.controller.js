@@ -2544,6 +2544,11 @@ const buildLeadListPayload = async (query = {}) => {
   const normalizedSortBy = LEAD_LIST_SORT_FIELDS.has(sortBy) ? sortBy : 'created_at';
   const normalizedSortOrder = String(sortOrder || 'DESC').toUpperCase() === 'ASC' ? 'ASC' : 'DESC';
 
+  const order = [[normalizedSortBy, normalizedSortOrder]];
+  if (normalizedSortBy !== 'id') {
+    order.push(['id', normalizedSortOrder]);
+  }
+
   const leads = await LeadIntake.findAndCountAll({
     where,
     include: [
@@ -2553,7 +2558,7 @@ const buildLeadListPayload = async (query = {}) => {
     ].filter(Boolean),
     distinct: true,
     subQuery: false,
-    order: [[normalizedSortBy, normalizedSortOrder]],
+    order,
     limit: parsedLimit,
     offset: parsedOffset
   });
