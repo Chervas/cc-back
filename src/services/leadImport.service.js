@@ -18,9 +18,30 @@ const STATUSES = new Set(['nuevo', 'contactado', 'esperando_info', 'info_recibid
 const DEDUPE_WINDOW_HOURS = parseInt(process.env.INTAKE_DEDUPE_WINDOW_HOURS || '24', 10);
 const IMPORT_MAX_ROWS = 5000;
 
+const countMojibakeMarkers = (value) => {
+  if (!value || typeof value !== 'string') return 0;
+  const matches = value.match(/Ã.|Â.|â[\u0080-\u00BF]|�/g);
+  return matches ? matches.length : 0;
+};
+
+const repairLikelyMojibake = (value) => {
+  if (!value || typeof value !== 'string') return value;
+  if (!/[ÃÂâ�]/.test(value)) return value;
+
+  try {
+    const repaired = Buffer.from(value, 'latin1').toString('utf8');
+    if (!repaired) return value;
+    return countMojibakeMarkers(repaired) < countMojibakeMarkers(value)
+      ? repaired.normalize('NFC')
+      : value;
+  } catch (_error) {
+    return value;
+  }
+};
+
 const cleanString = (value) => {
   if (value === undefined || value === null) return null;
-  const normalized = String(value).trim();
+  const normalized = repairLikelyMojibake(String(value)).trim();
   return normalized || null;
 };
 
@@ -66,7 +87,7 @@ const stableStringify = (obj) => {
 const sanitizeText = (value) => {
   if (!value || typeof value !== 'string') return value;
   return value
-    .normalize('NFKD')
+    .normalize('NFC')
     .replace(/[^\p{L}\p{N}\s.,@'+-]/gu, '')
     .trim();
 };
@@ -74,12 +95,13 @@ const sanitizeText = (value) => {
 const sanitizeLeadNoteText = (value) => {
   if (!value || typeof value !== 'string') return value;
   return value
-    .normalize('NFKD')
+    .normalize('NFC')
     .replace(/[^\p{L}\p{N}\s.,@'+\-:/?&=#()%_]/gu, '')
     .trim();
 };
 
 const normalizeKey = (value) => String(value || '')
+  .normalize('NFC')
   .normalize('NFKD')
   .replace(/[\u0300-\u036f]/g, '')
   .toLowerCase()
