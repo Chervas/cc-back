@@ -539,6 +539,7 @@ router.get('/meta/connect', async (req, res) => {
             assignmentScope: req.query?.assignment_scope || null
         });
         const scope = [
+            'public_profile',
             'pages_read_engagement',
             'pages_show_list',
             'pages_manage_ads',
