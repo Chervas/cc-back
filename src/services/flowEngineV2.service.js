@@ -3050,10 +3050,17 @@ async function processNode(node, context, runtime = {}) {
       });
 
       if (simulation) {
+        const simulatedOutput = buildAiSimulatedOutput(outputFormatSimple, analysisMode, selectedModel);
+        const presetKey = cleanString(config?.preset_key);
+        const decision = cleanString(simulatedOutput?.decision).toLowerCase();
         return {
           kind: 'success',
-          output: buildAiSimulatedOutput(outputFormatSimple, analysisMode, selectedModel),
-          next_node_id: readOutputTarget(node, 'on_success'),
+          output: simulatedOutput,
+          next_node_id: presetKey === 'confirm_appointment'
+            ? (decision === 'confirmado'
+                ? readOutputTarget(node, 'on_success')
+                : readOutputTarget(node, 'on_fail'))
+            : readOutputTarget(node, 'on_success'),
         };
       }
 
@@ -3066,10 +3073,18 @@ async function processNode(node, context, runtime = {}) {
         maxTokens: resolveTemplateValue(config?.max_tokens, context),
       });
 
+      const presetKey = cleanString(config?.preset_key);
+      const normalizedDecision = cleanString(aiOutput?.decision).toLowerCase();
+      const nextNodeId = presetKey === 'confirm_appointment'
+        ? (normalizedDecision === 'confirmado'
+            ? readOutputTarget(node, 'on_success')
+            : readOutputTarget(node, 'on_fail'))
+        : readOutputTarget(node, 'on_success');
+
       return {
         kind: 'success',
         output: aiOutput,
-        next_node_id: readOutputTarget(node, 'on_success'),
+        next_node_id: nextNodeId,
       };
     }
 
