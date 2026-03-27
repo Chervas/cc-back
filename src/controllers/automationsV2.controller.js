@@ -203,6 +203,18 @@ function joinName(...parts) {
     .trim();
 }
 
+function buildPersonContext(nombre, apellidos, email = null) {
+  const firstName = cleanString(nombre);
+  const lastName = cleanString(apellidos);
+  const fullName = joinName(firstName, lastName) || null;
+  return {
+    nombre: firstName,
+    apellidos: lastName,
+    nombre_completo: fullName || firstName || lastName || null,
+    email: cleanString(email),
+  };
+}
+
 async function buildHydratedExecutionContext({
   triggerType,
   triggerEntityType,
@@ -348,20 +360,18 @@ async function buildHydratedExecutionContext({
           raw: true,
         });
         if (creator) {
-          const creatorName = joinName(creator.nombre, creator.apellidos) || cleanString(creator.nombre) || cleanString(creator.email_usuario);
-          const userPatch = {
-            nombre: creatorName,
-            email: cleanString(creator.email_usuario),
-          };
+          const userPatch = buildPersonContext(creator.nombre, creator.apellidos, creator.email_usuario);
           out.appointment = {
             ...(isObject(out.appointment) ? out.appointment : {}),
-            usuario_nombre: creatorName,
-            usuario_email: cleanString(creator.email_usuario),
+            usuario_nombre: userPatch.nombre,
+            usuario_apellidos: userPatch.apellidos,
+            usuario_email: userPatch.email,
           };
           out.cita = {
             ...(isObject(out.cita) ? out.cita : {}),
-            usuario_nombre: creatorName,
-            usuario_email: cleanString(creator.email_usuario),
+            usuario_nombre: userPatch.nombre,
+            usuario_apellidos: userPatch.apellidos,
+            usuario_email: userPatch.email,
           };
           out.usuario = {
             ...(isObject(out.usuario) ? out.usuario : {}),
@@ -376,11 +386,10 @@ async function buildHydratedExecutionContext({
           raw: true,
         });
         if (doctor) {
-          const doctorName = joinName(doctor.nombre, doctor.apellidos) || cleanString(doctor.nombre) || cleanString(doctor.email_usuario);
+          const professionalPatch = buildPersonContext(doctor.nombre, doctor.apellidos, doctor.email_usuario);
           out.profesional = {
             ...(isObject(out.profesional) ? out.profesional : {}),
-            nombre: doctorName,
-            email: cleanString(doctor.email_usuario),
+            ...professionalPatch,
           };
         }
       }

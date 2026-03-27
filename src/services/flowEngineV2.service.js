@@ -300,6 +300,18 @@ function buildDisplayName(...parts) {
     .trim();
 }
 
+function buildPersonContext(nombre, apellidos, email = null) {
+  const firstName = cleanString(nombre);
+  const lastName = cleanString(apellidos);
+  const fullName = buildDisplayName(firstName, lastName) || null;
+  return {
+    nombre: firstName,
+    apellidos: lastName,
+    nombre_completo: fullName || firstName || lastName || null,
+    email: cleanString(email),
+  };
+}
+
 function mergeContextObject(base, patch) {
   if (!patch || typeof patch !== 'object' || Array.isArray(patch)) return base || {};
   if (!base || typeof base !== 'object' || Array.isArray(base)) return clone(patch) || {};
@@ -328,6 +340,10 @@ async function enrichContextForTemplateResolution(context, targets = {}) {
         cleanString(existingAppointment.usuario_nombre)
         || cleanString(existingTriggerData.usuario_nombre)
         || cleanString(existingTriggerData['usuario.nombre']);
+      const creatorLastNameCandidate =
+        cleanString(existingAppointment.usuario_apellidos)
+        || cleanString(existingTriggerData.usuario_apellidos)
+        || cleanString(existingTriggerData['usuario.apellidos']);
       const creatorEmailCandidate =
         cleanString(existingAppointment.usuario_email)
         || cleanString(existingTriggerData.usuario_email)
@@ -335,6 +351,9 @@ async function enrichContextForTemplateResolution(context, targets = {}) {
       const professionalNameCandidate =
         cleanString(existingTriggerData.profesional_nombre)
         || cleanString(existingTriggerData['profesional.nombre']);
+      const professionalLastNameCandidate =
+        cleanString(existingTriggerData.profesional_apellidos)
+        || cleanString(existingTriggerData['profesional.apellidos']);
       const professionalEmailCandidate =
         cleanString(existingTriggerData.profesional_email)
         || cleanString(existingTriggerData['profesional.email']);
@@ -355,6 +374,7 @@ async function enrichContextForTemplateResolution(context, targets = {}) {
         titulo: cleanString(appointment.titulo),
         motivo: cleanString(appointment.motivo),
         usuario_nombre: creatorNameCandidate || null,
+        usuario_apellidos: creatorLastNameCandidate || null,
         usuario_email: creatorEmailCandidate || null,
         doctor_id: toIntOrNull(appointment.doctor_id),
       };
@@ -371,29 +391,24 @@ async function enrichContextForTemplateResolution(context, targets = {}) {
           raw: true,
         });
         if (creator) {
-          const creatorName =
-            buildDisplayName(creator.nombre, creator.apellidos)
-            || cleanString(creator.nombre)
-            || cleanString(creator.email_usuario);
-          const creatorEmail = cleanString(creator.email_usuario);
+          const creatorContext = buildPersonContext(creator.nombre, creator.apellidos, creator.email_usuario);
           out.appointment = mergeContextObject(out.appointment, {
-            usuario_nombre: creatorName || null,
-            usuario_email: creatorEmail || null,
+            usuario_nombre: creatorContext.nombre || null,
+            usuario_apellidos: creatorContext.apellidos || null,
+            usuario_email: creatorContext.email || null,
           });
           out.cita = mergeContextObject(out.cita, {
-            usuario_nombre: creatorName || null,
-            usuario_email: creatorEmail || null,
+            usuario_nombre: creatorContext.nombre || null,
+            usuario_apellidos: creatorContext.apellidos || null,
+            usuario_email: creatorContext.email || null,
           });
-          out.usuario = mergeContextObject(out.usuario, {
-            nombre: creatorName || null,
-            email: creatorEmail || null,
-          });
+          out.usuario = mergeContextObject(out.usuario, creatorContext);
         }
-      } else if (creatorNameCandidate || creatorEmailCandidate) {
-        out.usuario = mergeContextObject(out.usuario, {
-          nombre: creatorNameCandidate || null,
-          email: creatorEmailCandidate || null,
-        });
+      } else if (creatorNameCandidate || creatorLastNameCandidate || creatorEmailCandidate) {
+        out.usuario = mergeContextObject(
+          out.usuario,
+          buildPersonContext(creatorNameCandidate, creatorLastNameCandidate, creatorEmailCandidate)
+        );
       }
 
       const professionalId = toIntOrNull(appointment.doctor_id);
@@ -403,21 +418,16 @@ async function enrichContextForTemplateResolution(context, targets = {}) {
           raw: true,
         });
         if (professional) {
-          const professionalName =
-            buildDisplayName(professional.nombre, professional.apellidos)
-            || cleanString(professional.nombre)
-            || cleanString(professional.email_usuario);
-          const professionalEmail = cleanString(professional.email_usuario);
-          out.profesional = mergeContextObject(out.profesional, {
-            nombre: professionalName || null,
-            email: professionalEmail || null,
-          });
+          out.profesional = mergeContextObject(
+            out.profesional,
+            buildPersonContext(professional.nombre, professional.apellidos, professional.email_usuario)
+          );
         }
-      } else if (professionalNameCandidate || professionalEmailCandidate) {
-        out.profesional = mergeContextObject(out.profesional, {
-          nombre: professionalNameCandidate || null,
-          email: professionalEmailCandidate || null,
-        });
+      } else if (professionalNameCandidate || professionalLastNameCandidate || professionalEmailCandidate) {
+        out.profesional = mergeContextObject(
+          out.profesional,
+          buildPersonContext(professionalNameCandidate, professionalLastNameCandidate, professionalEmailCandidate)
+        );
       }
     }
   }
