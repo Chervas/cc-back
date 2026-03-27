@@ -4,6 +4,102 @@
 
 ---
 
+## 2026-03-27 - Integración de terceros Meta/Google: estado exacto
+
+### Estado actual del producto
+
+La parte de ClinicaClick ya está operativa para soportar conexiones propias e heredadas:
+
+- `scopeConnectionResolver.service.js` y `effectiveMarketingAssets.service.js` ya resuelven:
+  - conexión técnica;
+  - assignment por clínica/grupo;
+  - activos efectivos;
+  - fallback global de Meta Pixel/CAPI cuando aplica;
+- `Marketing > Campañas` y `Ajustes > Cuentas conectadas` ya exponen:
+  - conexión heredada de grupo;
+  - conexión propia de clínica;
+  - CTA para conectar otra cuenta para la clínica;
+  - selección de activos efectivos para esa clínica.
+
+### Bloqueo actual
+
+El bloqueo actual para conectar una cuenta Meta de un tercero externo ya no está en el backend de ClinicaClick.
+Está en Meta App Review / permisos de la app `1807844546609897`.
+
+Estado verificado por Graph a fecha `2026-03-27`:
+
+- permisos `live` confirmados:
+  - `public_profile`
+  - `email`
+  - `whatsapp_business_management`
+  - `whatsapp_business_messaging`
+- el OAuth de Meta que lanzamos pide además:
+  - `public_profile`
+  - `pages_read_engagement`
+  - `pages_show_list`
+  - `pages_manage_ads`
+  - `pages_manage_metadata`
+  - `ads_read`
+  - `leads_retrieval`
+  - `instagram_basic`
+  - `instagram_manage_insights`
+
+Mientras esos permisos de negocio no estén operativos para usuarios externos, Meta responde con errores del tipo:
+
+- `Parece que esta aplicación no está disponible`
+
+### Permisos previstos para solicitar / revisar
+
+Se deja documentado como lista de trabajo con Meta:
+
+- `publish_video`
+- `instagram_branded_content_creator`
+- `instagram_branded_content_brand`
+- `instagram_business_basic`
+- `pages_manage_ads`
+- `instagram_business_manage_messages`
+- `instagram_manage_messages`
+- `pages_manage_metadata`
+- `ads_read`
+- `pages_read_engagement`
+- `pages_show_list`
+- `business_management`
+
+Y deben mantenerse vigentes:
+
+- `public_profile`
+- `whatsapp_business_messaging`
+- `whatsapp_business_management`
+
+### Nota sobre `business_management`
+
+`business_management` es recomendable, pero no resuelve por sí solo la integración completa.
+
+Es especialmente relevante porque Meta restringe `GET /me/accounts` para páginas vinculadas a un Business si el usuario no concede `business_management` y no tiene rol en ese business.
+
+Pero ClinicaClick necesita además:
+
+- listar cuentas publicitarias (`/me/adaccounts`);
+- suscribir páginas a `leadgen` (`/{page-id}/subscribed_apps`);
+- leer leads;
+- operar con permisos de anuncios y páginas.
+
+Por tanto, `business_management` debe entenderse como permiso complementario, no sustitutivo.
+
+### Decisión operativa hasta que Meta apruebe permisos
+
+Mientras ese review no se cierre:
+
+- no debe considerarse cerrada la conexión de terceros Meta desde clínica;
+- no debe forzarse más lógica sobre “conectar otra cuenta” si el bloqueo viene de Meta;
+- el trabajo puede seguir avanzando en:
+  - automatizaciones;
+  - citas;
+  - nodos;
+  - leads;
+  - intake;
+  - UX interna de `Campañas` y `Ajustes`.
+
 ## 2026-03-26 - Activos efectivos de marketing por clínica/grupo
 
 `Marketing > Campañas`, `Ajustes > Cuentas conectadas`, el intake web y Meta CAPI ya no deben razonar solo en términos de “hay una conexión”.
