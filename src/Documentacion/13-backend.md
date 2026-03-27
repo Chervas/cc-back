@@ -1478,6 +1478,70 @@ Reglas importantes:
 - si varios procesos consumen la misma tabla/cola de jobs en un entorno, todos deben conocer `appointment_automation_schedule_fire` o bien solo uno de ellos debe actuar como scheduler. Si no, el síntoma es `No handler registered for job type 'appointment_automation_schedule_fire'`.
 - Regla aplicada desde el 2026-03-24: cada scheduler debe reclamar solo los tipos que sabe ejecutar (`claimNextJob(..., allowedTypes)`). Esto evita que runtimes auxiliares como `clinicaclick-auth` fallen jobs de automatización V2 que pertenecen al backend funcional.
 
+### Diagnóstico real de una cita que "no disparó" la automatización
+
+Si una cita parece no haber disparado `appointment_created`, el orden correcto de diagnóstico en integración es:
+
+1. revisar `FlowExecutionsV2` por `trigger_entity_type = appointment` y `trigger_entity_id = <id_cita>`;
+2. revisar `FlowExecutionLogsV2` para localizar el nodo exacto que falló;
+3. revisar `AutomationFlowTemplatesV2.nodes` de la versión ejecutada, no solo la versión que el editor tenga abierta;
+4. revisar la plantilla real en `WhatsappTemplates`, no el nombre lógico del nodo.
+
+Caso real validado el `2026-03-27`:
+
+- cita `99`
+- clínica `57` (`Propdental Eixample`)
+- doctora `Doctora`
+- flujo ejecutado:
+  - `FlowExecutionsV2.id = 41`
+  - `template_version_id = 45`
+  - `public_id = flw_1da2804bd8552a43`
+  - `version = 14`
+- resultado:
+  - `status = failed`
+  - `last_error = whatsapp_send_failed:(#132000) Number of parameters does not match the expected number of params`
+
+La automatización **sí disparó**.
+Lo que falló fue el nodo `N2 action/send_whatsapp`.
+
+#### Error de configuración detectado
+
+El nodo `N2` enviaba:
+
+- `1 = {{paciente.nombre}}`
+- `2 = {{profesional.nombre}}`
+- `3 = {{cita.fecha}}`
+- `4 = {{cita.hora}}`
+- `5 = {{clinica.direccion}}`
+
+Pero la plantilla real `clinicaclick_confirmacion_cita` (`WhatsappTemplates.id = 17`) solo tiene **4 placeholders** en `BODY`.
+
+Consecuencia:
+
+- Meta rechaza el envío con `(#132000) Number of parameters does not match the expected number of params`;
+- el flujo queda `failed`;
+- desde UI puede parecer que "no salió".
+
+#### Pitfalls de diseño detectados en ese flujo
+
+Además del mismatch de placeholders, se detectaron dos errores lógicos de modelado:
+
+1. `wait_response` escuchando al nodo equivocado
+   - `N3.config.listens_to_node_id = N6`
+   - `N6` es `action/change_status`
+   - Lo correcto es escuchar al nodo que envió el mensaje al paciente (`N2`)
+
+2. `condition/ai_analysis` sin bifurcación real
+   - `N4` y `N10` generan `decision`, `confianza` y `motivo`
+   - pero sus salidas van siempre por `on_success` a cambio de estado confirmado
+   - no existe un nodo posterior que lea `decision`
+   - por tanto, cualquier respuesta analizada con éxito termina confirmando la cita, aunque la IA devuelva `dudas` o `no_confirmado`
+
+Regla operativa:
+
+- un nodo IA no sustituye una condición de branching;
+- si se quiere actuar distinto según `decision`, hay que añadir una rama explícita posterior que lea ese campo.
+
 - Ventana de 24h en WhatsApp
   - La ventana de texto libre se considera abierta solo si existe `last_inbound_at` real dentro de las últimas 24 horas.
   - Enviar una plantilla aprobada por Meta no abre por sí solo el chat libre.
