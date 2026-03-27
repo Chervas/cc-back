@@ -13,6 +13,7 @@ const LeadIntake = db.LeadIntake;
 const Conversation = db.Conversation;
 const Message = db.Message;
 const FormSubmissionEvent = db.FormSubmissionEvent;
+const WhatsappTemplate = db.WhatsappTemplate;
 const UsuarioClinica = db.UsuarioClinica;
 const Usuario = db.Usuario;
 const Clinica = db.Clinica;
@@ -22,6 +23,12 @@ const { getIO } = require('../services/socket.service');
 const { CITA_STATUS_VALUES, LEAD_STATUS_VALUES } = require('../lib/status-catalog');
 const { buildConversationContext } = require('../lib/automation-conversation-context');
 const { SUBROLES_CLINICA } = require('../lib/role-helpers');
+const {
+  buildWhatsappTemplateVariableContract,
+  normalizeNamedBindings,
+  normalizePositionalBindings,
+  buildPositionalBindingsFromNamed,
+} = require('../lib/whatsapp-template-contract');
 
 const ADMIN_USER_IDS = (process.env.ADMIN_USER_IDS || '1,44')
   .split(',')
@@ -250,7 +257,7 @@ async function buildHydratedExecutionContext({
           attributes: ['id_clinica', 'grupoClinicaId', 'nombre_clinica', 'direccion', 'telefono', 'url_web', 'url_ficha_local'],
         },
       ],
-      attributes: ['id_cita', 'clinica_id', 'paciente_id', 'lead_intake_id', 'created_by', 'estado', 'inicio', 'fin', 'titulo', 'motivo', 'tipo_cita'],
+      attributes: ['id_cita', 'clinica_id', 'paciente_id', 'lead_intake_id', 'created_by', 'doctor_id', 'estado', 'inicio', 'fin', 'titulo', 'motivo', 'tipo_cita'],
     });
 
     if (cita) {
@@ -264,6 +271,7 @@ async function buildHydratedExecutionContext({
         paciente_id: parseIntOrNull(citaJson.paciente_id),
         lead_intake_id: parseIntOrNull(citaJson.lead_intake_id),
         created_by: parseIntOrNull(citaJson.created_by),
+        doctor_id: parseIntOrNull(citaJson.doctor_id),
         estado: cleanString(citaJson.estado),
         status: cleanString(citaJson.estado),
         tipo_cita: cleanString(citaJson.tipo_cita),
@@ -341,7 +349,7 @@ async function buildHydratedExecutionContext({
         });
         if (creator) {
           const creatorName = joinName(creator.nombre, creator.apellidos) || cleanString(creator.nombre) || cleanString(creator.email_usuario);
-          const professionalPatch = {
+          const userPatch = {
             nombre: creatorName,
             email: cleanString(creator.email_usuario),
           };
@@ -355,9 +363,24 @@ async function buildHydratedExecutionContext({
             usuario_nombre: creatorName,
             usuario_email: cleanString(creator.email_usuario),
           };
+          out.usuario = {
+            ...(isObject(out.usuario) ? out.usuario : {}),
+            ...userPatch,
+          };
+        }
+      }
+
+      if (parseIntOrNull(citaJson.doctor_id)) {
+        const doctor = await Usuario.findByPk(parseIntOrNull(citaJson.doctor_id), {
+          attributes: ['id_usuario', 'nombre', 'apellidos', 'email_usuario'],
+          raw: true,
+        });
+        if (doctor) {
+          const doctorName = joinName(doctor.nombre, doctor.apellidos) || cleanString(doctor.nombre) || cleanString(doctor.email_usuario);
           out.profesional = {
             ...(isObject(out.profesional) ? out.profesional : {}),
-            ...professionalPatch,
+            nombre: doctorName,
+            email: cleanString(doctor.email_usuario),
           };
         }
       }
@@ -2072,7 +2095,7 @@ function isOperatorCompatible(operator, valueType) {
   return FIELD_CHECK_OPERATOR_TYPE_COMPAT[type].includes(operator);
 }
 
-function validateNodeConfig(node, nodeMap) {
+function validateNodeConfig(node, nodeMap, templateLookup = {}) {
   const errors = [];
   const nodeId = cleanString(node?.id) || 'unknown';
   const nodeType = cleanString(node?.type) || 'unknown';
@@ -2413,6 +2436,74 @@ function validateNodeConfig(node, nodeMap) {
             { node_id: nodeId, node_type: nodeType, key: 'sender_origin_id' }
           )
         );
+      }
+    }
+
+    if (messageMode === 'template' && hasTemplateId) {
+      const templateId = parseIntOrNull(config.template_id);
+      const templateName = cleanString(config.template_name);
+      const templateRow = (templateId && templateLookup.byId instanceof Map ? templateLookup.byId.get(templateId) : null)
+        || (templateName && templateLookup.byName instanceof Map ? templateLookup.byName.get(templateName) : null)
+        || null;
+
+      if (!templateRow) {
+        errors.push(
+          buildValidationError(
+            'node_config_invalid',
+            `El nodo ${nodeId} referencia una plantilla de WhatsApp inexistente o no sincronizada`,
+            {
+              node_id: nodeId,
+              node_type: nodeType,
+              key: 'template_id',
+              value: config.template_id || null,
+              template_name: templateName || null,
+            }
+          )
+        );
+      } else {
+        const contract = buildWhatsappTemplateVariableContract(templateRow);
+        const namedBindings = normalizeNamedBindings(config.variables_named || {});
+        const positionalBindings = normalizePositionalBindings(config.variables || {});
+        const mergedPositional = buildPositionalBindingsFromNamed(namedBindings, positionalBindings, contract);
+        const expectedIndexes = new Set(contract.map((variable) => String(variable.index)));
+        const invalidPositionalKeys = Object.keys(positionalBindings).filter((key) => !expectedIndexes.has(String(key)));
+        const missingIndexes = contract
+          .filter((variable) => !cleanString(mergedPositional[String(variable.index)]))
+          .map((variable) => variable.index);
+
+        if (invalidPositionalKeys.length) {
+          errors.push(
+            buildValidationError(
+              'node_config_invalid',
+              `El nodo ${nodeId} usa placeholders fuera del contrato actual de la plantilla`,
+              {
+                node_id: nodeId,
+                node_type: nodeType,
+                key: 'variables',
+                invalid_placeholders: invalidPositionalKeys,
+                template_id: templateRow.id,
+                template_name: templateRow.name,
+              }
+            )
+          );
+        }
+
+        if (missingIndexes.length) {
+          errors.push(
+            buildValidationError(
+              'node_config_invalid',
+              `El nodo ${nodeId} no cubre todas las variables requeridas por la plantilla`,
+              {
+                node_id: nodeId,
+                node_type: nodeType,
+                key: 'variables',
+                missing_placeholders: missingIndexes,
+                template_id: templateRow.id,
+                template_name: templateRow.name,
+              }
+            )
+          );
+        }
       }
     }
   }
@@ -2775,17 +2866,66 @@ function validateNodeConfig(node, nodeMap) {
   return errors;
 }
 
-function validateNodeConfigs(nodes) {
+async function loadWhatsappTemplateLookup(nodes) {
+  const safeNodes = Array.isArray(nodes) ? nodes : [];
+  const templateIds = new Set();
+  const templateNames = new Set();
+
+  for (const node of safeNodes) {
+    if (cleanString(node?.type) !== 'action/send_whatsapp') continue;
+    const config = isObject(node?.config) ? node.config : {};
+    if (cleanString(config?.message_mode || 'template') !== 'template') continue;
+    const templateId = parseIntOrNull(config?.template_id);
+    const templateName = cleanString(config?.template_name);
+    if (templateId) templateIds.add(templateId);
+    if (templateName) templateNames.add(templateName);
+  }
+
+  if (!templateIds.size && !templateNames.size) {
+    return { byId: new Map(), byName: new Map() };
+  }
+
+  const where = {};
+  const orClauses = [];
+  if (templateIds.size) {
+    orClauses.push({ id: Array.from(templateIds) });
+  }
+  if (templateNames.size) {
+    orClauses.push({ name: Array.from(templateNames) });
+  }
+  if (orClauses.length === 1) {
+    Object.assign(where, orClauses[0]);
+  } else {
+    where[Op.or] = orClauses;
+  }
+
+  const rows = await WhatsappTemplate.findAll({
+    where,
+    include: [{ association: 'catalog', attributes: ['id', 'variables'], required: false }],
+  });
+
+  const byId = new Map();
+  const byName = new Map();
+  for (const row of rows) {
+    byId.set(Number(row.id), row);
+    const name = cleanString(row.name);
+    if (name) byName.set(name, row);
+  }
+  return { byId, byName };
+}
+
+async function validateNodeConfigs(nodes) {
   const safeNodes = Array.isArray(nodes) ? nodes : [];
   const nodeMap = new Map(
     safeNodes
       .map((node) => [cleanString(node?.id), node])
       .filter(([nodeId]) => !!nodeId)
   );
+  const templateLookup = await loadWhatsappTemplateLookup(safeNodes);
 
   const errors = [];
   for (const node of safeNodes) {
-    errors.push(...validateNodeConfig(node, nodeMap));
+    errors.push(...validateNodeConfig(node, nodeMap, templateLookup));
   }
   return { ok: errors.length === 0, errors };
 }
@@ -3321,7 +3461,7 @@ exports.validateTemplateGraph = async (req, res) => {
       entry_node_id: entryNodeId,
       nodes,
     });
-    const nodeConfigValidation = validateNodeConfigs(nodes);
+    const nodeConfigValidation = await validateNodeConfigs(nodes);
     const triggerResolution = resolveTriggerTypeForTemplate({
       explicitTriggerType: undefined,
       entryNodeId,
@@ -4003,7 +4143,7 @@ exports.publishTemplateVersion = async (req, res) => {
       entry_node_id: row.entry_node_id,
       nodes: normalizedNodes,
     });
-    const nodeConfigValidation = validateNodeConfigs(normalizedNodes);
+    const nodeConfigValidation = await validateNodeConfigs(normalizedNodes);
     const triggerResolution = resolveTriggerTypeForTemplate({
       explicitTriggerType: row.trigger_type,
       entryNodeId: row.entry_node_id,
@@ -4287,7 +4427,7 @@ exports.executeTemplateVersion = async (req, res) => {
       entry_node_id: row.entry_node_id,
       nodes: normalizedNodes,
     });
-    const nodeConfigValidation = validateNodeConfigs(normalizedNodes);
+    const nodeConfigValidation = await validateNodeConfigs(normalizedNodes);
     const validationErrors = [
       ...(graphValidation.errors || []),
       ...(nodeConfigValidation.errors || []),

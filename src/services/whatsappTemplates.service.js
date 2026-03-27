@@ -4,6 +4,7 @@ const axios = require('axios');
 const { Op } = require('sequelize');
 const db = require('../../models');
 const { queues } = require('./queue.service');
+const { recomposeAutomationsUsingTemplate } = require('./whatsappTemplateAutomationSync.service');
 
 const {
   ClinicMetaAsset,
@@ -340,6 +341,7 @@ async function propagateCatalogTemplateToAllClinics({ templateCatalogId, logger 
     errors: [],
   };
   const syncedWabas = new Set();
+  const affectedTemplateInstances = new Map();
 
   for (const clinic of clinics) {
     const clinicId = Number(clinic.id_clinica);
@@ -370,6 +372,7 @@ async function propagateCatalogTemplateToAllClinics({ templateCatalogId, logger 
         const result = await upsertPlaceholderTemplateForClinic({ clinicId, template });
         if (result.action === 'created') summary.placeholders_created += 1;
         if (result.action === 'updated') summary.placeholders_updated += 1;
+        if (result?.row?.id) affectedTemplateInstances.set(Number(result.row.id), result.row);
         continue;
       }
 
@@ -391,6 +394,7 @@ async function propagateCatalogTemplateToAllClinics({ templateCatalogId, logger 
           is_active: !!template.is_active,
         });
         summary.waba_templates_updated += 1;
+        affectedTemplateInstances.set(Number(existingWabaTemplate.id), existingWabaTemplate);
 
         if (placeholder?.is_active) {
           await placeholder.update({ is_active: false });
@@ -421,6 +425,7 @@ async function propagateCatalogTemplateToAllClinics({ templateCatalogId, logger 
             is_active: !!template.is_active,
           });
           summary.waba_templates_updated += 1;
+          affectedTemplateInstances.set(Number(syncedTemplate.id), syncedTemplate);
 
           if (placeholder?.is_active) {
             await placeholder.update({ is_active: false });
@@ -434,6 +439,7 @@ async function propagateCatalogTemplateToAllClinics({ templateCatalogId, logger 
         const result = await upsertPlaceholderTemplateForClinic({ clinicId, template });
         if (result.action === 'created') summary.placeholders_created += 1;
         if (result.action === 'updated') summary.placeholders_updated += 1;
+        if (result?.row?.id) affectedTemplateInstances.set(Number(result.row.id), result.row);
         continue;
       }
 
@@ -455,8 +461,9 @@ async function propagateCatalogTemplateToAllClinics({ templateCatalogId, logger 
           is_active: !!template.is_active,
         });
         summary.placeholders_updated += 1;
+        affectedTemplateInstances.set(Number(placeholder.id), placeholder);
       } else {
-        await WhatsappTemplate.create({
+        const createdRow = await WhatsappTemplate.create({
           waba_id: wabaId,
           clinic_id: clinicId,
           name: template.name,
@@ -469,6 +476,7 @@ async function propagateCatalogTemplateToAllClinics({ templateCatalogId, logger 
           origin: 'catalog',
           is_active: !!template.is_active,
         });
+        affectedTemplateInstances.set(Number(createdRow.id), createdRow);
       }
 
       summary.created_in_meta += 1;
@@ -483,6 +491,29 @@ async function propagateCatalogTemplateToAllClinics({ templateCatalogId, logger 
         summary.errors.push({
           clinic_id: clinicId,
           error: typeof errorMessage === 'string' ? errorMessage : JSON.stringify(errorMessage),
+        });
+      }
+    }
+  }
+
+  for (const templateInstance of affectedTemplateInstances.values()) {
+    try {
+      const syncResult = await recomposeAutomationsUsingTemplate({ templateInstance, logger });
+      if (syncResult?.template_versions_touched) {
+        summary.automation_templates_updated = (summary.automation_templates_updated || 0) + Number(syncResult.template_versions_touched || 0);
+        summary.automation_nodes_updated = (summary.automation_nodes_updated || 0) + Number(syncResult.nodes_touched || 0);
+      }
+    } catch (syncErr) {
+      const syncMessage = syncErr?.message || 'automation_recompose_failed';
+      logger.error('Error recomponiendo automatizaciones ligadas a plantilla de catálogo', {
+        templateCatalogId,
+        templateInstanceId: templateInstance?.id || null,
+        error: syncMessage,
+      });
+      if (summary.errors.length < 25) {
+        summary.errors.push({
+          clinic_id: templateInstance?.clinic_id || null,
+          error: `automation_recompose_failed:${syncMessage}`,
         });
       }
     }

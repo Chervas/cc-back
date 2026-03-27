@@ -1514,13 +1514,13 @@ El nodo `N2` enviaba:
 - `4 = {{cita.hora}}`
 - `5 = {{clinica.direccion}}`
 
-Pero la plantilla real `clinicaclick_confirmacion_cita` (`WhatsappTemplates.id = 17`) solo tiene **4 placeholders** en `BODY`.
+Pero la plantilla real `clinicaclick_confirmacion_cita` (`WhatsappTemplates.id = 17`) solo tenía **4 placeholders** en `BODY` mientras el catálogo ya iba por 5.
 
-Consecuencia:
+Corrección aplicada en `feat/integracion` el `2026-03-27`:
 
-- Meta rechaza el envío con `(#132000) Number of parameters does not match the expected number of params`;
-- el flujo queda `failed`;
-- desde UI puede parecer que "no salió".
+- `send_whatsapp` ya usa contrato semántico (`variables_named`) y reconstruye `variables` según la plantilla operativa real;
+- el runtime acepta que el nodo conserve variables adicionales semánticas aunque la plantilla activa todavía no las exponga posicionalmente;
+- al propagar una plantilla, backend recompone automáticamente las automatizaciones V2 que la usan.
 
 #### Pitfalls de diseño detectados en ese flujo
 
@@ -1537,10 +1537,11 @@ Además del mismatch de placeholders, se detectaron dos errores lógicos de mode
    - no existe un nodo posterior que lea `decision`
    - por tanto, cualquier respuesta analizada con éxito termina confirmando la cita, aunque la IA devuelva `dudas` o `no_confirmado`
 
-Regla operativa:
+Corrección aplicada en los flujos activos de cita el `2026-03-27`:
 
-- un nodo IA no sustituye una condición de branching;
-- si se quiere actuar distinto según `decision`, hay que añadir una rama explícita posterior que lea ese campo.
+- `wait_response` ya escucha al nodo outbound correcto (`N2`);
+- después de `condition/ai_analysis` se añadió un `condition/field_check` que solo confirma la cita si `decision = confirmado`;
+- cualquier otro caso (`dudas`, `no_confirmado`, error IA) deriva a notificación interna, no a confirmación automática.
 
 #### Estado actual del catálogo de automatizaciones
 
@@ -1655,7 +1656,8 @@ Esto explica casos como la cita `99`, donde el mensaje usó `Graci Gonzalez` aun
     - `clinica.url_ficha_local`
 
 - Criterio
-  - `profesional.*` es el alias público recomendado para el usuario operativo que agenda la cita.
+  - `usuario.*` es el usuario operativo que agenda/crea la cita.
+  - `profesional.*` es el doctor o profesional asignado a la cita.
   - `cita.usuario_*` se conserva como alias de compatibilidad para plantillas anteriores.
   - No se inventan valores derivados: la URL de ficha local solo se expone si existe en `Clinicas.url_ficha_local`.
 

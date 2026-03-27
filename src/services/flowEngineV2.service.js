@@ -6,6 +6,14 @@ const db = require('../../models');
 const { getIO } = require('./socket.service');
 const { queues } = require('./queue.service');
 const { normalizeCitaStatus, normalizeLeadStatus } = require('../lib/status-catalog');
+const {
+  extractWhatsappTemplatePlaceholderIndexes,
+  buildWhatsappTemplateVariableContract,
+  normalizeNamedBindings,
+  normalizePositionalBindings,
+  buildNamedBindingsFromPositional,
+  buildPositionalBindingsFromNamed,
+} = require('../lib/whatsapp-template-contract');
 
 const AutomationFlowTemplateV2 = db.AutomationFlowTemplateV2;
 const FlowExecutionV2 = db.FlowExecutionV2;
@@ -20,6 +28,7 @@ const Usuario = db.Usuario;
 const Clinica = db.Clinica;
 const ClinicMetaAsset = db.ClinicMetaAsset;
 const WhatsappTemplate = db.WhatsappTemplate;
+const WhatsappTemplateCatalog = db.WhatsappTemplateCatalog;
 const whatsappService = require('./whatsapp.service');
 const { findCanonicalWhatsappConversation } = require('../lib/canonical-conversation');
 const { buildConversationContext } = require('../lib/automation-conversation-context');
@@ -140,24 +149,6 @@ function renderWhatsappTemplatePreviewText(template, templateParams = {}) {
     const value = cleanString(templateParams?.[key]);
     return value || `{{${key}}}`;
   });
-}
-
-function extractWhatsappTemplatePlaceholderIndexes(template) {
-  const components = Array.isArray(template?.components) ? template.components : [];
-  const indexes = new Set();
-
-  for (const component of components) {
-    const text = cleanString(component?.text);
-    if (!text) continue;
-    const matches = text.matchAll(/{{\s*(\d+)\s*}}/g);
-    for (const match of matches) {
-      const rawIdx = cleanString(match?.[1]);
-      if (!rawIdx) continue;
-      indexes.add(rawIdx);
-    }
-  }
-
-  return Array.from(indexes).sort((a, b) => Number(a) - Number(b));
 }
 
 function getMadridDateParts(date = new Date()) {
@@ -327,7 +318,7 @@ async function enrichContextForTemplateResolution(context, targets = {}) {
 
   if (appointmentId) {
     const appointment = await CitaPaciente.findByPk(appointmentId, {
-      attributes: ['id_cita', 'clinica_id', 'paciente_id', 'lead_intake_id', 'created_by', 'estado', 'inicio', 'fin', 'titulo', 'motivo'],
+      attributes: ['id_cita', 'clinica_id', 'paciente_id', 'lead_intake_id', 'created_by', 'doctor_id', 'estado', 'inicio', 'fin', 'titulo', 'motivo'],
       raw: true,
     });
     if (appointment) {
@@ -336,10 +327,16 @@ async function enrichContextForTemplateResolution(context, targets = {}) {
       const creatorNameCandidate =
         cleanString(existingAppointment.usuario_nombre)
         || cleanString(existingTriggerData.usuario_nombre)
-        || cleanString(existingTriggerData['profesional.nombre']);
+        || cleanString(existingTriggerData['usuario.nombre']);
       const creatorEmailCandidate =
         cleanString(existingAppointment.usuario_email)
         || cleanString(existingTriggerData.usuario_email)
+        || cleanString(existingTriggerData['usuario.email']);
+      const professionalNameCandidate =
+        cleanString(existingTriggerData.profesional_nombre)
+        || cleanString(existingTriggerData['profesional.nombre']);
+      const professionalEmailCandidate =
+        cleanString(existingTriggerData.profesional_email)
         || cleanString(existingTriggerData['profesional.email']);
       const appointmentPatch = {
         id: toIntOrNull(appointment.id_cita),
@@ -359,6 +356,7 @@ async function enrichContextForTemplateResolution(context, targets = {}) {
         motivo: cleanString(appointment.motivo),
         usuario_nombre: creatorNameCandidate || null,
         usuario_email: creatorEmailCandidate || null,
+        doctor_id: toIntOrNull(appointment.doctor_id),
       };
 
       out.appointment = mergeContextObject(out.appointment, appointmentPatch);
@@ -386,15 +384,39 @@ async function enrichContextForTemplateResolution(context, targets = {}) {
             usuario_nombre: creatorName || null,
             usuario_email: creatorEmail || null,
           });
-          out.profesional = mergeContextObject(out.profesional, {
+          out.usuario = mergeContextObject(out.usuario, {
             nombre: creatorName || null,
             email: creatorEmail || null,
           });
         }
       } else if (creatorNameCandidate || creatorEmailCandidate) {
-        out.profesional = mergeContextObject(out.profesional, {
+        out.usuario = mergeContextObject(out.usuario, {
           nombre: creatorNameCandidate || null,
           email: creatorEmailCandidate || null,
+        });
+      }
+
+      const professionalId = toIntOrNull(appointment.doctor_id);
+      if (professionalId) {
+        const professional = await Usuario.findByPk(professionalId, {
+          attributes: ['id_usuario', 'nombre', 'apellidos', 'email_usuario'],
+          raw: true,
+        });
+        if (professional) {
+          const professionalName =
+            buildDisplayName(professional.nombre, professional.apellidos)
+            || cleanString(professional.nombre)
+            || cleanString(professional.email_usuario);
+          const professionalEmail = cleanString(professional.email_usuario);
+          out.profesional = mergeContextObject(out.profesional, {
+            nombre: professionalName || null,
+            email: professionalEmail || null,
+          });
+        }
+      } else if (professionalNameCandidate || professionalEmailCandidate) {
+        out.profesional = mergeContextObject(out.profesional, {
+          nombre: professionalNameCandidate || null,
+          email: professionalEmailCandidate || null,
         });
       }
     }
@@ -1784,11 +1806,32 @@ async function resolveWhatsAppSenderConfig({ config, context, clinicId }) {
   };
 }
 
-function resolveTemplateVariables(config, context) {
-  const raw = config?.variables;
-  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return {};
+function resolveTemplateVariables(config, context, template = null) {
+  const templateVariables = buildWhatsappTemplateVariableContract(template);
+  const rawNamed = normalizeNamedBindings(config?.variables_named);
+  const rawPositional = normalizePositionalBindings(config?.variables);
+
+  if (!templateVariables.length) {
+    const legacyOutput = {};
+    for (const [key, value] of Object.entries(rawPositional)) {
+      const resolved = resolveTemplateValue(value, context);
+      if (resolved === undefined || resolved === null || resolved === '') continue;
+      legacyOutput[key] = String(resolved);
+    }
+    return legacyOutput;
+  }
+
+  const bootstrappedNamed = Object.keys(rawNamed).length
+    ? rawNamed
+    : buildNamedBindingsFromPositional(rawPositional, templateVariables);
+  const positionalBindings = buildPositionalBindingsFromNamed(
+    bootstrappedNamed,
+    rawPositional,
+    templateVariables
+  );
+
   const output = {};
-  for (const [key, value] of Object.entries(raw)) {
+  for (const [key, value] of Object.entries(positionalBindings)) {
     const resolved = resolveTemplateValue(value, context);
     if (resolved === undefined || resolved === null || resolved === '') continue;
     output[key] = String(resolved);
@@ -1837,7 +1880,8 @@ async function handleSendWhatsapp(node, context, runtime) {
     }
 
     template = await WhatsappTemplate.findByPk(templateId, {
-      attributes: ['id', 'name', 'language', 'status', 'components'],
+      attributes: ['id', 'name', 'language', 'status', 'components', 'catalog_template_id'],
+      include: [{ model: WhatsappTemplateCatalog, as: 'catalog', attributes: ['id', 'variables'] }],
     });
     if (!template) {
       throw new Error(`whatsapp_template_not_found:${templateId}`);
@@ -1848,7 +1892,7 @@ async function handleSendWhatsapp(node, context, runtime) {
       throw new Error(`whatsapp_template_blocked:${template.status}`);
     }
 
-    templateParams = resolveTemplateVariables(config, templateContext);
+    templateParams = resolveTemplateVariables(config, templateContext, template);
     const expectedTemplateParamIndexes = extractWhatsappTemplatePlaceholderIndexes(template);
     const missingTemplateParamIndexes = expectedTemplateParamIndexes.filter((paramIdx) => {
       const value = cleanString(templateParams?.[paramIdx]);

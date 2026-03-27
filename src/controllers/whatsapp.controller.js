@@ -5,6 +5,7 @@ const axios = require('axios');
 const crypto = require('crypto');
 const whatsappService = require('../services/whatsapp.service');
 const { enqueueSyncPhonesJob, syncPhonesForWaba } = require('../services/whatsappPhones.service');
+const { buildWhatsappTemplateVariableContract } = require('../lib/whatsapp-template-contract');
 
 const {
   ClinicMetaAsset,
@@ -643,6 +644,7 @@ exports.listTemplatesForClinic = async (req, res) => {
 
     const asset = await resolveWabaFromContext({ clinicId, phoneNumberId, userId });
     let templates = [];
+    const includeCatalog = [{ model: WhatsappTemplateCatalog, as: 'catalog', attributes: ['id', 'variables'] }];
     if (!asset || !asset.wabaId) {
       if (!clinicId) {
         return res.json([]);
@@ -653,9 +655,18 @@ exports.listTemplatesForClinic = async (req, res) => {
           waba_id: null,
           is_active: true,
         },
+        include: includeCatalog,
         order: [['name', 'ASC']],
       });
-      return res.json(templates);
+      return res.json(
+        templates.map((item) => {
+          const json = item.toJSON ? item.toJSON() : item;
+          return {
+            ...json,
+            variables: buildWhatsappTemplateVariableContract(json),
+          };
+        })
+      );
     }
 
     templates = await WhatsappTemplate.findAll({
@@ -663,10 +674,19 @@ exports.listTemplatesForClinic = async (req, res) => {
         waba_id: asset.wabaId,
         is_active: true,
       },
+      include: includeCatalog,
       order: [['name', 'ASC']],
     });
 
-    return res.json(templates);
+    return res.json(
+      templates.map((item) => {
+        const json = item.toJSON ? item.toJSON() : item;
+        return {
+          ...json,
+          variables: buildWhatsappTemplateVariableContract(json),
+        };
+      })
+    );
   } catch (err) {
     console.error('Error listTemplatesForClinic', err);
     return res.status(500).json({ error: 'Error obteniendo plantillas' });
