@@ -1542,6 +1542,43 @@ Regla operativa:
 - un nodo IA no sustituye una condición de branching;
 - si se quiere actuar distinto según `decision`, hay que añadir una rama explícita posterior que lea ese campo.
 
+#### Estado actual del catálogo de automatizaciones
+
+El `2026-03-27` la capa `AutomationFlowCatalog` no actúa todavía como fuente de verdad viva del sistema:
+
+- `propagateCatalogAutomationToClinics(...)` crea o actualiza **borradores** V2 por clínica a partir de un `template_key` enlazado;
+- no modifica en caliente flujos ya publicados;
+- no versiona ni valida el contrato de placeholders de las plantillas WhatsApp que usan esos nodos;
+- varios registros históricos del catálogo siguen con `template_key = NULL`, por lo que no son propagables como catálogo funcional.
+
+Implicación:
+
+- hoy no existe una garantía fuerte de alineación entre:
+  - `AutomationFlowCatalog`
+  - `AutomationFlowTemplatesV2` publicados
+  - `WhatsappTemplateCatalog`
+  - `WhatsappTemplates` operativas de la WABA
+
+Si se quiere usar el catálogo como gobierno real, hacen falta al menos estas garantías:
+
+1. todo item de catálogo debe enlazar a un `template_key` válido y publicado;
+2. cada nodo `action/send_whatsapp` debe conservar contrato verificable de la plantilla elegida (`template_id`/`catalog_template_id` + número/semántica de placeholders);
+3. publicar un flujo debe invalidarse si el contrato real de `WhatsappTemplates.components` ya no coincide con el nodo.
+
+#### Semántica pendiente de normalizar en contexto de cita
+
+Contrato de negocio deseado:
+
+- `usuario.*` = usuario logado que crea la cita
+- `profesional.*` = doctor/profesional asignado a la cita
+
+Estado real del runtime el `2026-03-27`:
+
+- `flowEngineV2` sigue poblando `profesional.nombre` y `profesional.email` a partir de `created_by`;
+- la variable del doctor asignado no está separada todavía en el contexto estándar.
+
+Esto explica casos como la cita `99`, donde el mensaje usó `Graci Gonzalez` aunque la cita estaba asignada a `Doctora`.
+
 - Ventana de 24h en WhatsApp
   - La ventana de texto libre se considera abierta solo si existe `last_inbound_at` real dentro de las últimas 24 horas.
   - Enviar una plantilla aprobada por Meta no abre por sí solo el chat libre.
