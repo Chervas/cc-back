@@ -1,4 +1,7 @@
 require('dotenv').config(); // Asegúrate de que .env está en la raíz del proyecto
+if (!process.env.GROQ_API_KEY) {
+    console.warn('[startup] GROQ_API_KEY no está definida. Los nodos condition/ai_analysis fallarán hasta corregir la configuración del entorno.');
+}
 const cors = require('cors');
 const express = require('express');
 const http = require('http');
