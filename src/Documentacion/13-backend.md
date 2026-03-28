@@ -1116,7 +1116,8 @@ Mitigación:
       - `paciente_telefono`
       - `tratamiento`
       - `phone_match`
-    - Esta ruta sirve para **resolución manual asistida** del caso “el lead llamó y luego se le dio cita”. No crea la asociación automáticamente al guardar una cita manual.
+    - Esta ruta sirve para **resolución manual asistida** cuando no hubo auto-match.
+    - Al crear una cita manual, `createCita` intenta primero resolver un `LeadIntake` pendiente de llamada en la misma clínica y con el mismo teléfono. Si lo encuentra y la cita no es `continuacion`, vincula automáticamente la cita al lead, hereda `campana_id` y cierra el `call_outcome` como `citado`.
   - `GET /api/intake/leads/:id/activity`
     - Añade actividad de cita (`Cita agendada`, `Estado de cita actualizado`) construida desde `CitasPacientes`.
     - Resuelve actor con `created_by` / `updated_by -> Usuarios`.
