@@ -3,6 +3,7 @@ const jobExecutor = require('./jobExecutor.service');
 
 const CRITICAL_INTERVAL_MS = Number(process.env.JOB_SCHEDULER_CRITICAL_INTERVAL_MS || 5000);
 const STANDARD_INTERVAL_MS = Number(process.env.JOB_SCHEDULER_INTERVAL_MS || 30000);
+const CURRENT_RUNTIME_NAMESPACE = jobRequestsService.getCurrentRuntimeNamespace();
 
 const workerState = {
   running: false,
@@ -10,7 +11,8 @@ const workerState = {
   lastCriticalRun: null,
   lastStandardRun: null,
   lastError: null,
-  activeJobs: 0
+  activeJobs: 0,
+  runtimeNamespace: CURRENT_RUNTIME_NAMESPACE
 };
 
 let criticalTimer = null;
@@ -125,6 +127,7 @@ function start() {
   }
   workerState.running = true;
   workerState.startedAt = new Date();
+  console.log(`🧭 Job scheduler namespace: ${CURRENT_RUNTIME_NAMESPACE}`);
   jobRequestsService.resetRunningJobs().catch((error) => {
     console.error('⚠️ No se pudieron resetear los jobs en ejecución al arrancar el scheduler:', error.message);
   });
@@ -174,6 +177,7 @@ function setExternalDispatcher(handler) {
 }
 
 function getStatus() {
+  const groqApiKey = String(process.env.GROQ_API_KEY || '').trim();
   return {
     running: workerState.running,
     startedAt: workerState.startedAt,
@@ -182,7 +186,20 @@ function getStatus() {
     lastError: workerState.lastError,
     activeJobs: workerState.activeJobs,
     criticalIntervalMs: CRITICAL_INTERVAL_MS,
-    standardIntervalMs: STANDARD_INTERVAL_MS
+    standardIntervalMs: STANDARD_INTERVAL_MS,
+    runtimeNamespace: CURRENT_RUNTIME_NAMESPACE,
+    systemChecks: {
+      groqApiKey: {
+        ok: !!groqApiKey,
+        label: 'GROQ_API_KEY',
+        detail: !!groqApiKey ? 'Configurada' : 'Falta en el entorno del proceso',
+      },
+      runtimeNamespace: {
+        ok: !!CURRENT_RUNTIME_NAMESPACE,
+        label: 'Runtime namespace',
+        detail: CURRENT_RUNTIME_NAMESPACE,
+      },
+    },
   };
 }
 

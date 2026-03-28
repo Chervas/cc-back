@@ -100,6 +100,32 @@ Mientras ese review no se cierre:
   - intake;
   - UX interna de `Campañas` y `Ajustes`.
 
+## 2026-03-28 - Aislamiento de colas entre runtimes y checks visibles de entorno
+
+En esta máquina `dev` y `staging` comparten base de datos. El riesgo real no está solo en la configuración de PM2, sino en que ambos runtimes pueden intentar consumir la misma cola de `JobRequests`.
+
+### Medida aplicada
+
+- cada job nuevo guarda `payload.__runtime_namespace`;
+- si no existe `JOB_RUNTIME_NAMESPACE`, el backend usa `port:<PORT>` como fallback estable;
+- `claimNextJob`, `claimJobById` y `resetRunningJobs` ya filtran por ese namespace.
+
+### Consecuencia operativa
+
+- `clinicaclick-integracion` debe reclamar solo jobs de `port:3004`;
+- `clinicaclick-staging` debe reclamar solo jobs de `port:3001`;
+- esto evita que una automatización creada y monitorizada en `localhost` siga ejecutándose “por detrás” en `staging`, dejando el monitor local sin eventos en tiempo real.
+
+### Monitorización
+
+`GET /api/job-requests/worker/status` expone ahora:
+
+- `runtimeNamespace`
+- `systemChecks.groqApiKey`
+- `systemChecks.runtimeNamespace`
+
+La UI de `Ajustes > Monitoreo del sistema` debe usar estos checks como semáforo visible, no solo los logs de servidor.
+
 ## 2026-03-26 - Activos efectivos de marketing por clínica/grupo
 
 `Marketing > Campañas`, `Ajustes > Cuentas conectadas`, el intake web y Meta CAPI ya no deben razonar solo en términos de “hay una conexión”.
@@ -1248,6 +1274,7 @@ En `.env` / `.env.example`:
 - Si `GROQ_API_KEY` falta, `condition/ai_analysis` falla en runtime con `groq_api_key_not_configured`. No hay fallback silencioso.
 - El output del nodo guarda además metadatos técnicos (`_ai_provider`, `_ai_model`, `_ai_analysis_mode`, `_ai_usage`) para auditoría y depuración.
 - Al arrancar el backend, `src/app.js` deja un warning explícito en logs si `GROQ_API_KEY` no está definida.
+- Además, `/api/job-requests/worker/status` marca `GROQ_API_KEY` como check fallido para que soporte lo vea desde UI.
 - Requisito de producto pendiente: persistir consumo por usuario/clinic para facturación por uso.
 
 ### Audio inbound (WhatsApp) y hoja de ruta local
