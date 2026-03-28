@@ -157,6 +157,10 @@ Google solo trabaja con lo guardado en `IntakeConfig.config.google_ads`.
 - `POST /api/intake/leads`
 - `POST /api/intake/events`
 
+Matiz operativo importante en multi-sede:
+- si el snippet llega firmado correctamente y resuelve una `clinic_id` válida, el backend ya no aborta la ingesta solo porque el `group_id` derivado no pueda validarse.
+- en ese caso se prioriza la clínica, se continúa con `group_id = null` y se evita romper casos como `tel_modal` o `CallInitiated` por una inconsistencia accesoria de scope.
+
 ### Pixel de Meta
 
 Estado actual del producto:

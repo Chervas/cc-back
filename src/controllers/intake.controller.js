@@ -1318,7 +1318,16 @@ exports.ingestLead = asyncHandler(async (req, res) => {
   if (grupoClinicaIdParsed !== null) {
     const group = await GrupoClinica.findOne({ where: { id_grupo: grupoClinicaIdParsed } });
     if (!group) {
-      return res.status(400).json({ message: 'El grupo indicado no existe' });
+      if (clinicaIdParsed !== null) {
+        console.warn('⚠️ Intake lead con clínica válida pero grupo no resoluble; se continúa sin group_id', {
+          clinic_id: clinicaIdParsed,
+          group_id: grupoClinicaIdParsed,
+          event_id: eventId || null
+        });
+        grupoClinicaIdParsed = null;
+      } else {
+        return res.status(400).json({ message: 'El grupo indicado no existe' });
+      }
     }
   }
 
