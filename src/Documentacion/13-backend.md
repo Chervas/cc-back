@@ -1245,9 +1245,9 @@ En `.env` / `.env.example`:
 ### Notas operativas
 
 - La API key de Groq se usa **solo en backend**.
-- Si `GROQ_API_KEY` falta, `condition/ai_analysis` ya no tumba por defecto los flujos de confirmación de cita. Para el preset `confirm_appointment`, backend cae a una clasificación determinista simple sobre la respuesta (`si`, `confirmo`, `ok`, `no puedo`, `cancela`, etc.) y solo usa Groq cuando está disponible.
+- Si `GROQ_API_KEY` falta, `condition/ai_analysis` falla en runtime con `groq_api_key_not_configured`. No hay fallback silencioso.
 - El output del nodo guarda además metadatos técnicos (`_ai_provider`, `_ai_model`, `_ai_analysis_mode`, `_ai_usage`) para auditoría y depuración.
-- Cuando entra el fallback, el output marca `_ai_provider = fallback`, `_ai_fallback_used = true` y `_ai_fallback_reason` con el motivo técnico original.
+- Al arrancar el backend, `src/app.js` deja un warning explícito en logs si `GROQ_API_KEY` no está definida.
 - Requisito de producto pendiente: persistir consumo por usuario/clinic para facturación por uso.
 
 ### Audio inbound (WhatsApp) y hoja de ruta local
@@ -1542,9 +1542,9 @@ Tras el saneado del 2026-03-28, los flujos activos de cita quedan con esta semá
    - no se usa ya un `field_check` intermedio en estos flujos porque complicaba el grafo sin aportar nada al usuario
 
 3. Falta de Groq en local o staging
-   - no impide confirmar respuestas simples
-   - el fallback determinista cubre confirmaciones y negativas obvias
-   - las respuestas ambiguas siguen derivando a la rama de revisión/no confirmación
+   - el flujo falla de forma explícita en el nodo `condition/ai_analysis`
+   - el error esperado es `groq_api_key_not_configured`
+   - esto debe tratarse como problema de entorno, no como decisión funcional del flujo
 
 4. Monitor de ejecuciones
    - `GET /api/automations/v2/executions` ya ordena por `updated_at DESC, id DESC`
@@ -1554,7 +1554,6 @@ Corrección aplicada en los flujos activos de cita el `2026-03-28`:
 
 - `wait_response` escucha al nodo outbound correcto (`N2`);
 - `condition/ai_analysis` para `confirm_appointment` enruta directamente `confirmado` por `on_success` y el resto por `on_fail`;
-- el fallback local evita que una ausencia de `GROQ_API_KEY` bloquee confirmaciones simples;
 - el monitor de ejecuciones ordena por última actividad.
 
 ### Preview de atribución en cita manual
