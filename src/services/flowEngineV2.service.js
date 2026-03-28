@@ -919,6 +919,121 @@ function buildAiSimulatedOutput(outputFormat, analysisMode, model) {
   };
 }
 
+function normalizePlainTextForRules(value) {
+  return String(value || '')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .replace(/[^\p{L}\p{N}\s?!]/gu, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function classifyConfirmAppointmentFromText(rawText) {
+  const normalized = normalizePlainTextForRules(rawText);
+  if (!normalized) {
+    return {
+      decision: 'dudas',
+      confianza: 0.2,
+      motivo: 'sin_texto_util',
+    };
+  }
+
+  const negativePatterns = [
+    /\bno puedo\b/,
+    /\bno podre\b/,
+    /\bno podre ir\b/,
+    /\bno voy\b/,
+    /\bno me viene bien\b/,
+    /\bno me va bien\b/,
+    /\bcancel(?:a|ar|ada|ado)\b/,
+    /\breprogram(?:a|ar|ada|ado)\b/,
+    /\bcambiar\b/,
+    /\botro dia\b/,
+    /\bimposible\b/,
+    /\bno confirm(?:o|ar)\b/,
+    /^no\b/,
+  ];
+  if (negativePatterns.some((pattern) => pattern.test(normalized))) {
+    return {
+      decision: 'no_confirmado',
+      confianza: 0.95,
+      motivo: 'respuesta_negativa_detectada',
+    };
+  }
+
+  const positivePatterns = [
+    /^si\b/,
+    /\bconfirmo\b/,
+    /\bconfirmada?\b/,
+    /\bok(?:ay)?\b/,
+    /\bvale\b/,
+    /\bperfecto\b/,
+    /\bde acuerdo\b/,
+    /\bme viene bien\b/,
+    /\bme va bien\b/,
+    /\bcorrecto\b/,
+    /\bgenial\b/,
+    /\bahi estare\b/,
+    /\balli estare\b/,
+    /\bnos vemos\b/,
+  ];
+  if (positivePatterns.some((pattern) => pattern.test(normalized))) {
+    return {
+      decision: 'confirmado',
+      confianza: 0.96,
+      motivo: 'respuesta_afirmativa_detectada',
+    };
+  }
+
+  const doubtPatterns = [
+    /\bduda/,
+    /\bque hora\b/,
+    /\bcual\b/,
+    /\bdonde\b/,
+    /\bpuedo cambiar\b/,
+    /\bpuede ser\b/,
+    /\bquizas\b/,
+    /\btal vez\b/,
+    /\bcreo que\b/,
+    /\bno se\b/,
+    /\?\s*$/,
+  ];
+  if (doubtPatterns.some((pattern) => pattern.test(normalized))) {
+    return {
+      decision: 'dudas',
+      confianza: 0.75,
+      motivo: 'respuesta_ambigua_detectada',
+    };
+  }
+
+  return {
+    decision: 'dudas',
+    confianza: 0.4,
+    motivo: 'respuesta_no_clasificada',
+  };
+}
+
+function buildConfirmAppointmentFallbackOutput(context, reason) {
+  const responseText =
+    cleanString(getByPath(context, 'last_response_context.response_text'))
+    || cleanString(getByPath(context, 'last_response'))
+    || '';
+  const classification = classifyConfirmAppointmentFromText(responseText);
+
+  return {
+    decision: classification.decision,
+    confianza: classification.confianza,
+    motivo: classification.motivo,
+    _ai_provider: 'fallback',
+    _ai_model: null,
+    _ai_analysis_mode: 'deterministic_confirm_appointment',
+    _ai_fallback_used: true,
+    _ai_fallback_reason: cleanString(reason) || 'confirm_appointment_fallback',
+    _ai_source_text: responseText,
+  };
+}
+
 async function runGroqAiAnalysis({ prompt, inputText, outputFormat, outputFields, analysisMode, maxTokens }) {
   const apiKey = cleanString(process.env.GROQ_API_KEY);
   if (!apiKey) {
@@ -3064,16 +3179,25 @@ async function processNode(node, context, runtime = {}) {
         };
       }
 
-      const aiOutput = await runGroqAiAnalysis({
-        prompt: resolvedInstruction,
-        inputText,
-        outputFormat,
-        outputFields: normalizedOutputFields,
-        analysisMode,
-        maxTokens: resolveTemplateValue(config?.max_tokens, context),
-      });
-
       const presetKey = cleanString(config?.preset_key);
+      let aiOutput;
+      try {
+        aiOutput = await runGroqAiAnalysis({
+          prompt: resolvedInstruction,
+          inputText,
+          outputFormat,
+          outputFields: normalizedOutputFields,
+          analysisMode,
+          maxTokens: resolveTemplateValue(config?.max_tokens, context),
+        });
+      } catch (error) {
+        if (presetKey === 'confirm_appointment') {
+          aiOutput = buildConfirmAppointmentFallbackOutput(aiContext, error?.message || error);
+        } else {
+          throw error;
+        }
+      }
+
       const normalizedDecision = cleanString(aiOutput?.decision).toLowerCase();
       const nextNodeId = presetKey === 'confirm_appointment'
         ? (normalizedDecision === 'confirmado'

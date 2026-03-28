@@ -4746,7 +4746,7 @@ exports.listExecutions = async (req, res) => {
         required: !!templateKey || !!templateVersion,
         ...((templateKey || templateVersion) ? { where: templateWhere } : {}),
       }],
-      order: [['id', 'DESC']],
+      order: [['updated_at', 'DESC'], ['id', 'DESC']],
       limit,
       offset,
     });

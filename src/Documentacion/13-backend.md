@@ -1245,8 +1245,9 @@ En `.env` / `.env.example`:
 ### Notas operativas
 
 - La API key de Groq se usa **solo en backend**.
-- Si `GROQ_API_KEY` falta, `condition/ai_analysis` falla en runtime con `groq_api_key_not_configured`. Eso no impide el trigger ni el envío inicial de WhatsApp; bloquea el avance al llegar al nodo IA.
+- Si `GROQ_API_KEY` falta, `condition/ai_analysis` ya no tumba por defecto los flujos de confirmación de cita. Para el preset `confirm_appointment`, backend cae a una clasificación determinista simple sobre la respuesta (`si`, `confirmo`, `ok`, `no puedo`, `cancela`, etc.) y solo usa Groq cuando está disponible.
 - El output del nodo guarda además metadatos técnicos (`_ai_provider`, `_ai_model`, `_ai_analysis_mode`, `_ai_usage`) para auditoría y depuración.
+- Cuando entra el fallback, el output marca `_ai_provider = fallback`, `_ai_fallback_used = true` y `_ai_fallback_reason` con el motivo técnico original.
 - Requisito de producto pendiente: persistir consumo por usuario/clinic para facturación por uso.
 
 ### Audio inbound (WhatsApp) y hoja de ruta local
@@ -1528,26 +1529,43 @@ Corrección aplicada en `feat/integracion` el `2026-03-27`:
 - el runtime acepta que el nodo conserve variables adicionales semánticas aunque la plantilla activa todavía no las exponga posicionalmente;
 - al propagar una plantilla, backend recompone automáticamente las automatizaciones V2 que la usan.
 
-#### Pitfalls de diseño detectados en ese flujo
+#### Estado actual de los flujos de cita
 
-Además del mismatch de placeholders, se detectaron dos errores lógicos de modelado:
+Tras el saneado del 2026-03-28, los flujos activos de cita quedan con esta semántica:
 
 1. `wait_response` escuchando al nodo equivocado
-   - `N3.config.listens_to_node_id = N6`
-   - `N6` es `action/change_status`
-   - Lo correcto es escuchar al nodo que envió el mensaje al paciente (`N2`)
+   - corregido: `wait_response` escucha al nodo outbound real (`N2`)
 
-2. `condition/ai_analysis` sin bifurcación real
-   - `N4` y `N10` generan `decision`, `confianza` y `motivo`
-   - pero sus salidas van siempre por `on_success` a cambio de estado confirmado
-   - no existe un nodo posterior que lea `decision`
-   - por tanto, cualquier respuesta analizada con éxito termina confirmando la cita, aunque la IA devuelva `dudas` o `no_confirmado`
+2. `condition/ai_analysis` en preset `confirm_appointment`
+   - `on_success` significa `decision = confirmado`
+   - `on_fail` significa cualquier otro caso (`no_confirmado`, `dudas` o fallo técnico)
+   - no se usa ya un `field_check` intermedio en estos flujos porque complicaba el grafo sin aportar nada al usuario
 
-Corrección aplicada en los flujos activos de cita el `2026-03-27`:
+3. Falta de Groq en local o staging
+   - no impide confirmar respuestas simples
+   - el fallback determinista cubre confirmaciones y negativas obvias
+   - las respuestas ambiguas siguen derivando a la rama de revisión/no confirmación
 
-- `wait_response` ya escucha al nodo outbound correcto (`N2`);
-- después de `condition/ai_analysis` se añadió un `condition/field_check` que solo confirma la cita si `decision = confirmado`;
-- cualquier otro caso (`dudas`, `no_confirmado`, error IA) deriva a notificación interna, no a confirmación automática.
+4. Monitor de ejecuciones
+   - `GET /api/automations/v2/executions` ya ordena por `updated_at DESC, id DESC`
+   - así una ejecución antigua que recibe una respuesta nueva vuelve arriba en el monitor y no parece "desaparecida"
+
+Corrección aplicada en los flujos activos de cita el `2026-03-28`:
+
+- `wait_response` escucha al nodo outbound correcto (`N2`);
+- `condition/ai_analysis` para `confirm_appointment` enruta directamente `confirmado` por `on_success` y el resto por `on_fail`;
+- el fallback local evita que una ausencia de `GROQ_API_KEY` bloquee confirmaciones simples;
+- el monitor de ejecuciones ordena por última actividad.
+
+### Preview de atribución en cita manual
+
+- `GET /api/citas/manual-attribution-preview`
+  - Se usa desde agenda cuando ya hay paciente identificado en una cita manual.
+  - Backend resuelve tres casos:
+    1. `pending_call_auto_link`: existe un `LeadIntake` pendiente de llamada en la misma clínica y con el mismo teléfono. Al guardar la cita manual se vinculará automáticamente.
+    2. `patient_origin`: no hay llamada pendiente, pero sí un origen histórico conocido del paciente por teléfono/email.
+    3. `manual_no_attribution`: no se encontró señal fiable.
+  - Si `tipo_cita = continuacion`, devuelve `kind = continuation` y no intenta vincular leads de adquisición.
 
 #### Estado actual del catálogo de automatizaciones
 
