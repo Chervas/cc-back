@@ -1,3 +1,4 @@
+const db = require('../../models');
 const jobRequestsService = require('./jobRequests.service');
 const jobExecutor = require('./jobExecutor.service');
 
@@ -68,6 +69,41 @@ let externalDispatcher = null;
 let drainingCritical = false;
 let drainingStandard = false;
 const SCHEDULER_ALLOWED_TYPES = Object.keys(jobExecutor.JOB_HANDLERS || {});
+
+async function getLatestAutomationIncident() {
+  const failedExecution = await db.FlowExecutionV2.findOne({
+    where: { status: 'failed' },
+    order: [['updated_at', 'DESC']],
+    raw: true
+  });
+
+  if (!failedExecution) {
+    return null;
+  }
+
+  const failedLog = await db.FlowExecutionLogV2.findOne({
+    where: {
+      flow_execution_id: failedExecution.id,
+      status: 'error'
+    },
+    order: [['created_at', 'DESC']],
+    raw: true
+  });
+
+  return {
+    executionId: failedExecution.id,
+    clinicId: failedExecution.clinic_id || null,
+    triggerType: failedExecution.trigger_type || null,
+    triggerEntityType: failedExecution.trigger_entity_type || null,
+    triggerEntityId: failedExecution.trigger_entity_id || null,
+    templateVersionId: failedExecution.template_version_id || null,
+    status: failedExecution.status || null,
+    updatedAt: failedExecution.updated_at || failedExecution.created_at || null,
+    error: failedLog?.error_message || failedExecution.last_error || null,
+    nodeId: failedLog?.node_id || null,
+    nodeType: failedLog?.node_type || null
+  };
+}
 
 async function settleJobResult(job, result) {
   try {
@@ -223,8 +259,9 @@ function setExternalDispatcher(handler) {
   externalDispatcher = handler;
 }
 
-function getStatus() {
+async function getStatus() {
   const groqApiKey = String(process.env.GROQ_API_KEY || '').trim();
+  const latestAutomationIncident = await getLatestAutomationIncident().catch(() => null);
   return {
     running: workerState.running,
     startedAt: workerState.startedAt,
@@ -236,6 +273,7 @@ function getStatus() {
     standardIntervalMs: STANDARD_INTERVAL_MS,
     runtimeNamespace: CURRENT_RUNTIME_NAMESPACE,
     runtimeInfo: CURRENT_RUNTIME_INFO,
+    latestAutomationIncident,
     systemChecks: {
       groqApiKey: {
         ok: !!groqApiKey,
