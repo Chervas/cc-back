@@ -121,10 +121,12 @@ En esta máquina `dev` y `staging` comparten base de datos. El riesgo real no es
 `GET /api/job-requests/worker/status` expone ahora:
 
 - `runtimeNamespace`
+- `runtimeInfo.summaryLabel`
 - `systemChecks.groqApiKey`
 - `systemChecks.runtimeNamespace`
 
 La UI de `Ajustes > Monitoreo del sistema` debe usar estos checks como semáforo visible, no solo los logs de servidor.
+El check de `GROQ_API_KEY` describe siempre el proceso activo en ese instante; si cambia `.env`, hay que reiniciar el backend para que el estado reflejado sea real.
 
 ## 2026-03-26 - Activos efectivos de marketing por clínica/grupo
 

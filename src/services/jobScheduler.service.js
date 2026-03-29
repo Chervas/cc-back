@@ -5,6 +5,53 @@ const CRITICAL_INTERVAL_MS = Number(process.env.JOB_SCHEDULER_CRITICAL_INTERVAL_
 const STANDARD_INTERVAL_MS = Number(process.env.JOB_SCHEDULER_INTERVAL_MS || 30000);
 const CURRENT_RUNTIME_NAMESPACE = jobRequestsService.getCurrentRuntimeNamespace();
 
+const cleanString = (value) => {
+  const normalized = String(value || '').trim();
+  return normalized || null;
+};
+
+function buildRuntimeInfo() {
+  const explicitLabel = cleanString(process.env.SYSTEM_RUNTIME_LABEL)
+    || cleanString(process.env.RUNTIME_ENV_LABEL)
+    || cleanString(process.env.RUNTIME_LABEL);
+  const explicitKey = cleanString(process.env.SYSTEM_RUNTIME_KEY)
+    || cleanString(process.env.RUNTIME_ENV)
+    || cleanString(process.env.APP_ENV);
+  const cwd = cleanString(process.cwd()) || '';
+  const port = cleanString(process.env.PORT);
+
+  let environmentKey = explicitKey || 'unknown';
+  let environmentLabel = explicitLabel || 'Entorno desconocido';
+
+  if (!explicitLabel) {
+    if (cwd.includes('/wt/back-integracion') || port === '3004') {
+      environmentKey = 'local_dev';
+      environmentLabel = 'Desarrollo local';
+    } else if (cwd.includes('/wt/back-staging') || port === '3001') {
+      environmentKey = 'staging';
+      environmentLabel = 'Staging';
+    } else if (cwd.includes('/backendclinicaclick')) {
+      environmentKey = 'production_like';
+      environmentLabel = 'Backend principal';
+    }
+  }
+
+  const processLabel = port ? `backend ${port}` : 'backend sin puerto';
+
+  return {
+    environmentKey,
+    environmentLabel,
+    processLabel,
+    summaryLabel: `${environmentLabel} · ${processLabel}`,
+    description: 'Este worker solo procesa jobs creados por este mismo entorno.',
+    port,
+    cwd,
+    namespace: CURRENT_RUNTIME_NAMESPACE,
+  };
+}
+
+const CURRENT_RUNTIME_INFO = buildRuntimeInfo();
+
 const workerState = {
   running: false,
   startedAt: null,
@@ -188,16 +235,26 @@ function getStatus() {
     criticalIntervalMs: CRITICAL_INTERVAL_MS,
     standardIntervalMs: STANDARD_INTERVAL_MS,
     runtimeNamespace: CURRENT_RUNTIME_NAMESPACE,
+    runtimeInfo: CURRENT_RUNTIME_INFO,
     systemChecks: {
       groqApiKey: {
         ok: !!groqApiKey,
         label: 'GROQ_API_KEY',
-        detail: !!groqApiKey ? 'Configurada' : 'Falta en el entorno del proceso',
+        detail: !!groqApiKey
+          ? 'Cargada en el proceso activo. Si cambias el .env, reinicia el backend.'
+          : 'Falta en el proceso activo. Los nodos IA fallarán hasta reiniciar con la clave correcta.',
       },
       runtimeNamespace: {
         ok: !!CURRENT_RUNTIME_NAMESPACE,
-        label: 'Runtime namespace',
-        detail: CURRENT_RUNTIME_NAMESPACE,
+        label: 'Aislamiento de cola',
+        detail: !!CURRENT_RUNTIME_NAMESPACE
+          ? `${CURRENT_RUNTIME_INFO.summaryLabel}. Clave interna: ${CURRENT_RUNTIME_NAMESPACE}`
+          : 'Este proceso no tiene una clave de aislamiento; podría mezclar jobs con otros entornos.',
+      },
+      runtimeEnvironment: {
+        ok: !!CURRENT_RUNTIME_INFO.summaryLabel,
+        label: 'Entorno actual',
+        detail: CURRENT_RUNTIME_INFO.summaryLabel,
       },
     },
   };
