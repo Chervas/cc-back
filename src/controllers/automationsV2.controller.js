@@ -4731,10 +4731,22 @@ exports.listExecutions = async (req, res) => {
       where.template_version_id = templateVersionId;
     }
 
-    const templateKey = sanitizeTemplateKey(req.query?.template_key);
+    const templateReference = cleanString(req.query?.template_key);
     const templateVersion = parseIntOrNull(req.query?.template_version);
-    const templateWhere = {};
-    if (templateKey) templateWhere.template_key = templateKey;
+    const templateWhere = templateReference
+      ? await resolveTemplateFamilyWhere(templateReference)
+      : {};
+    if (templateReference && !templateWhere) {
+      return res.json({
+        success: true,
+        data: [],
+        pagination: {
+          total: 0,
+          limit,
+          offset,
+        },
+      });
+    }
     if (templateVersion) templateWhere.version = templateVersion;
 
     const { count, rows } = await FlowExecutionV2.findAndCountAll({
@@ -4743,8 +4755,8 @@ exports.listExecutions = async (req, res) => {
         model: AutomationFlowTemplateV2,
         as: 'templateVersion',
         attributes: ['id', 'public_id', 'template_key', 'version', 'name', 'trigger_type'],
-        required: !!templateKey || !!templateVersion,
-        ...((templateKey || templateVersion) ? { where: templateWhere } : {}),
+        required: !!templateReference || !!templateVersion,
+        ...((templateReference || templateVersion) ? { where: templateWhere } : {}),
       }],
       order: [['updated_at', 'DESC'], ['id', 'DESC']],
       limit,
