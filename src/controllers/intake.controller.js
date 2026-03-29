@@ -29,6 +29,7 @@ const jobRequestsService = require('../services/jobRequests.service');
 const { previewLeadImport, executeLeadImport } = require('../services/leadImport.service');
 const { findCanonicalWhatsappConversation } = require('../lib/canonical-conversation');
 const { normalizePhoneDigits } = require('../lib/phone');
+const { buildClinicMatcher } = require('../lib/clinicAttribution');
 const {
   extractGoogleTagId,
   normalizeMetaAdsConfig,
@@ -139,6 +140,54 @@ const hashValue = (value) => {
 const normalizeEmail = (email) => (email || '').trim().toLowerCase() || null;
 const normalizePhone = (phone) => {
   return normalizePhoneDigits(phone);
+};
+const normalizeLookupKey = (value = '') => String(value || '')
+  .normalize('NFD')
+  .replace(/[\u0300-\u036f]/g, '')
+  .toLowerCase()
+  .trim();
+
+const extractNamedValue = (input, matcher) => {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) {
+    return null;
+  }
+
+  const entries = Object.entries(input)
+    .map(([key, value]) => [normalizeLookupKey(key), cleanString(value)])
+    .filter(([key, value]) => key && value);
+
+  const hit = entries.find(([key]) => matcher(key));
+  return hit?.[1] || null;
+};
+
+const extractClinicNameHint = (...sources) => {
+  for (const source of sources) {
+    const direct = cleanString(
+      coalesce(
+        source?.clinica,
+        source?.clínica,
+        source?.clinic,
+        source?.clinic_name,
+        source?.clinicName,
+        source?.clinic_name_text,
+        source?.clinicText,
+        source?.sede,
+        source?.centro
+      )
+    );
+    if (direct) return direct;
+
+    const byName = extractNamedValue(source, (key) => (
+      key.includes('clinic')
+      || key.includes('clinica')
+      || key.includes('sede')
+      || key.includes('centro')
+      || key.includes('ubicacion')
+      || key.includes('ubicacion_clinica')
+    ));
+    if (byName) return byName;
+  }
+  return null;
 };
 
 const resolveFallbackClinicForGroup = async (groupId) => {
@@ -776,17 +825,17 @@ const extractLeadDataFromFormFields = (fields) => {
   }
 
   const entries = Object.entries(fields)
-    .map(([key, value]) => [String(key || '').trim(), cleanString(value)] )
+    .map(([key, value]) => [String(key || '').trim(), normalizeLookupKey(key), cleanString(value)] )
     .filter(([key, value]) => key && value);
 
   const findValue = (matcher) => {
-    const hit = entries.find(([key]) => matcher(key.toLowerCase()));
-    return hit?.[1] || null;
+    const hit = entries.find(([, normalizedKey]) => matcher(normalizedKey));
+    return hit?.[2] || null;
   };
 
   const findByValue = (matcher) => {
-    const hit = entries.find(([, value]) => matcher(String(value || '').trim()));
-    return hit?.[1] || null;
+    const hit = entries.find(([, , value]) => matcher(String(value || '').trim()));
+    return hit?.[2] || null;
   };
 
   const email =
@@ -806,10 +855,15 @@ const extractLeadDataFromFormFields = (fields) => {
     findValue((key) => key.includes('full_name') || key.includes('nombre_completo')) ||
     findValue((key) => (key.includes('name') || key.includes('nombre')) && !key.includes('company') && !key.includes('empresa'));
 
+  const clinica =
+    findValue((key) => key.includes('clinic') || key.includes('clinica') || key.includes('sede') || key.includes('centro') || key.includes('ubicacion')) ||
+    null;
+
   return {
     nombre,
     email,
     telefono: phone,
+    clinica,
   };
 };
 
@@ -1186,13 +1240,16 @@ exports.ingestLead = asyncHandler(async (req, res) => {
   } = body;
 
   // Compat: intake.js usa clinic_id; el backend histórico usa clinica_id
-  let clinicaIdParsed = parseInteger(coalesce(clinica_id, clinic_id, body.clinicaId, body.clinicId));
-  let grupoClinicaIdParsed = parseInteger(coalesce(grupo_clinica_id, group_id, body.grupoClinicaId, body.groupId));
+  const explicitClinicId = parseInteger(coalesce(clinica_id, clinic_id, body.clinicaId, body.clinicId));
+  const explicitGroupId = parseInteger(coalesce(grupo_clinica_id, group_id, body.grupoClinicaId, body.groupId));
+  let clinicaIdParsed = explicitClinicId;
+  let grupoClinicaIdParsed = explicitGroupId;
   const campanaIdParsed = parseInteger(campana_id);
   const attribution = body?.attribution || {};
   const leadData = body?.lead_data || {};
   const formSubmission = normalizeFormSubmission(body?.form_submission || body?.formSubmission);
   const formLeadData = extractLeadDataFromFormFields(formSubmission?.fields || {});
+  const clinicNameHint = extractClinicNameHint(body, leadData, formLeadData, formSubmission?.fields || {});
 
   // Validación por dominio + HMAC por clínica/grupo cuando hay IntakeConfig guardada.
   // Fallback legacy: INTAKE_WEB_SECRET solo se usa si NO existe configuración.
@@ -1259,17 +1316,41 @@ exports.ingestLead = asyncHandler(async (req, res) => {
     }
   }
 
-  // Si el widget llegó firmado a nivel grupo pero el dominio está mapeado a una clínica
-  // concreta, la atribución clínica debe prevalecer sobre el scope genérico.
+  // Si el widget llega a nivel grupo y además recibimos nombre de clínica, ese dato
+  // debe tener prioridad sobre el fallback por dominio o por clínica por defecto.
   const domainClinicId = parseInteger(domainCfg?.clinic_id);
   const domainGroupId = parseInteger(domainCfg?.group_id);
+  if (!grupoClinicaIdParsed && domainGroupId !== null) {
+    grupoClinicaIdParsed = domainGroupId;
+  }
+
+  const isGroupScopedRequest = explicitClinicId === null && explicitGroupId !== null;
+
+  if (clinicaIdParsed === null && grupoClinicaIdParsed !== null && clinicNameHint && isGroupScopedRequest) {
+    const groupClinics = await Clinica.findAll({
+      where: { grupoClinicaId: grupoClinicaIdParsed },
+      attributes: ['id_clinica', 'nombre_clinica'],
+      raw: true,
+    });
+    const clinicMatcher = buildClinicMatcher(groupClinics, {
+      allowFallback: true,
+      requireDelimiter: false,
+    });
+    const clinicMatch = clinicMatcher.matchFromText(clinicNameHint, {
+      source: 'clinic_name_field',
+    });
+    const matchedClinicId = parseInteger(clinicMatch?.match?.clinic?.id);
+    if (matchedClinicId !== null) {
+      clinicaIdParsed = matchedClinicId;
+      clinicMatchSource = clinicMatchSource || 'clinic_name_field';
+      clinicMatchValue = clinicMatchValue || clinicNameHint;
+    }
+  }
+
   if (!clinicaIdParsed && domainClinicId !== null) {
     clinicaIdParsed = domainClinicId;
     clinicMatchSource = clinicMatchSource || 'intake_domain';
     clinicMatchValue = clinicMatchValue || domain;
-  }
-  if (!grupoClinicaIdParsed && domainGroupId !== null) {
-    grupoClinicaIdParsed = domainGroupId;
   }
 
   if (clinicaIdParsed === null && grupoClinicaIdParsed !== null) {

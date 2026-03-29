@@ -189,6 +189,14 @@ Matiz operativo importante en multi-sede:
 - si el snippet llega firmado correctamente y resuelve una `clinic_id` válida, el backend ya no aborta la ingesta solo porque el `group_id` derivado no pueda validarse.
 - en ese caso se prioriza la clínica, se continúa con `group_id = null` y se evita romper casos como `tel_modal` o `CallInitiated` por una inconsistencia accesoria de scope.
 
+Resolución adicional en webs de grupo:
+- si el snippet llega con `data-group-id` y el payload trae el nombre de la clínica, `POST /api/intake/leads` intenta resolver la clínica dentro de ese grupo antes de usar el mapeo por dominio o la clínica por defecto;
+- se leen claves como `clinica`, `clinic`, `clinic_name`, `sede`, `centro`, `ubicacion` tanto en `lead_data` como en `form_submission.fields`;
+- la comparación usa `buildClinicMatcher(...)`, sin tildes y sin pisar una `clinic_id` explícita ni una clínica ya resuelta por dominio;
+- cuando hace match, queda auditado en:
+  - `clinic_match_source = clinic_name_field`
+  - `clinic_match_value = <texto recibido>`
+
 ### Pixel de Meta
 
 Estado actual del producto:
