@@ -1,11 +1,14 @@
 'use strict';
 
+const fs = require('fs');
 const { Op } = require('sequelize');
 const axios = require('axios');
 const db = require('../../models');
 const { getIO } = require('./socket.service');
 const { queues } = require('./queue.service');
+const jobRequestsService = require('./jobRequests.service');
 const { normalizeCitaStatus, normalizeLeadStatus } = require('../lib/status-catalog');
+const { ADMIN_USER_IDS } = require('../lib/role-helpers');
 const {
   extractWhatsappTemplatePlaceholderIndexes,
   buildWhatsappTemplateVariableContract,
@@ -45,6 +48,10 @@ const AI_ANALYSIS_MODES = new Set(['auto', 'quick_qa', 'complex_reasoning']);
 const FORM_SUBMISSION_MATCH_MODES = new Set(['url_contains', 'url_equals', 'form_id', 'selector']);
 const FIELD_CHECK_LEFT_REF_SOURCES = new Set(['node_output', 'trigger_data', 'context', 'manual']);
 const FIELD_CHECK_VALUE_TYPES = new Set(['string', 'number', 'boolean']);
+const FIELD_CHECK_MODE_VALUES = new Set(['simple', 'appointment_booking_timing']);
+const FIELD_CHECK_SWITCH_TYPE_VALUES = new Set(['appointment_booking']);
+const FIELD_CHECK_APPOINTMENT_WINDOW_VALUES = new Set(['same_day', 'day_before', 'week_before']);
+const DEFAULT_TIMEZONE = 'Europe/Madrid';
 const FIELD_CHECK_OPERATOR_TYPE_COMPAT = {
   string: ['equals', 'not_equals', 'contains', 'exists'],
   number: ['equals', 'not_equals', 'greater_than', 'less_than', 'exists'],
@@ -60,6 +67,71 @@ function cleanString(value) {
   const normalized = String(value).trim();
   return normalized || null;
 }
+
+function isObject(value) {
+  return !!value && typeof value === 'object' && !Array.isArray(value);
+}
+
+function parseClinicConfig(value) {
+  if (!value) return null;
+  if (isObject(value)) return value;
+  if (typeof value === 'string') {
+    try {
+      const parsed = JSON.parse(value);
+      return isObject(parsed) ? parsed : null;
+    } catch (_err) {
+      return null;
+    }
+  }
+  return null;
+}
+
+function isValidTimeZone(value) {
+  if (!value || typeof value !== 'string') return false;
+  try {
+    Intl.DateTimeFormat('en-US', { timeZone: value }).format(new Date());
+    return true;
+  } catch (_err) {
+    return false;
+  }
+}
+
+function resolveClinicTimezoneFromContext(context) {
+  const clinic = isObject(context?.clinic) ? context.clinic : (isObject(context?.clinica) ? context.clinica : null);
+  const cfg = parseClinicConfig(clinic?.configuracion);
+  const candidates = [
+    cleanString(clinic?.timezone),
+    cleanString(clinic?.time_zone),
+    cleanString(clinic?.tz),
+    cleanString(cfg?.timezone),
+    cleanString(cfg?.timeZone),
+    cleanString(cfg?.tz),
+  ];
+  for (const candidate of candidates) {
+    if (isValidTimeZone(candidate)) return candidate;
+  }
+  return DEFAULT_TIMEZONE;
+}
+
+function detectCurrentRuntimeNamespace() {
+  const explicit = cleanString(process.env.JOB_RUNTIME_NAMESPACE)
+    || cleanString(process.env.RUNTIME_NAMESPACE);
+  if (explicit) return explicit;
+
+  const port = cleanString(process.env.PORT);
+  if (port) return `port:${port}`;
+
+  const cwd = cleanString(process.cwd());
+  if (cwd) return `cwd:${cwd}`;
+
+  return 'runtime:unknown';
+}
+
+const CURRENT_RUNTIME_NAMESPACE =
+  (typeof jobRequestsService.getCurrentRuntimeNamespace === 'function'
+    ? cleanString(jobRequestsService.getCurrentRuntimeNamespace())
+    : null)
+  || detectCurrentRuntimeNamespace();
 
 function parseBool(value, fallback = false) {
   if (value === undefined || value === null || value === '') return fallback;
@@ -122,6 +194,88 @@ function formatTimeEs(rawDate) {
     minute: '2-digit',
     hour12: false,
   }).format(date);
+}
+
+function formatPartsInTimeZone(date, timeZone) {
+  const parts = new Intl.DateTimeFormat('en-CA', {
+    timeZone,
+    hour12: false,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+  }).formatToParts(date);
+
+  const bag = {};
+  parts.forEach((part) => {
+    if (part.type !== 'literal') bag[part.type] = part.value;
+  });
+
+  return {
+    year: Number(bag.year),
+    month: Number(bag.month),
+    day: Number(bag.day),
+    hour: Number(bag.hour),
+    minute: Number(bag.minute),
+    second: Number(bag.second),
+  };
+}
+
+function offsetMinutesForTimeZone(date, timeZone) {
+  const parts = formatPartsInTimeZone(date, timeZone);
+  const asUtc = Date.UTC(parts.year, parts.month - 1, parts.day, parts.hour, parts.minute, parts.second);
+  return Math.round((asUtc - date.getTime()) / 60000);
+}
+
+function normalizeHms(value, fallback = '00:00:00') {
+  const raw = String(value || fallback).trim();
+  const match = raw.match(/^(\d{2}):(\d{2})(?::(\d{2}))?$/);
+  if (!match) return null;
+  return `${match[1]}:${match[2]}:${match[3] || '00'}`;
+}
+
+function localDateTimeToUtc(fechaLocal, timeValue, timeZone) {
+  if (!fechaLocal || typeof fechaLocal !== 'string') return null;
+  const dateMatch = fechaLocal.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (!dateMatch) return null;
+
+  const hms = normalizeHms(timeValue);
+  if (!hms) return null;
+  const timeMatch = hms.match(/^(\d{2}):(\d{2}):(\d{2})$/);
+  if (!timeMatch) return null;
+
+  const year = Number(dateMatch[1]);
+  const month = Number(dateMatch[2]);
+  const day = Number(dateMatch[3]);
+  const hour = Number(timeMatch[1]);
+  const minute = Number(timeMatch[2]);
+  const second = Number(timeMatch[3]);
+  const naiveUtc = Date.UTC(year, month - 1, day, hour, minute, second);
+
+  let timestamp = naiveUtc;
+  for (let index = 0; index < 2; index += 1) {
+    const offsetMin = offsetMinutesForTimeZone(new Date(timestamp), timeZone);
+    timestamp = naiveUtc - (offsetMin * 60000);
+  }
+
+  return new Date(timestamp);
+}
+
+function formatDateLocal(date, timeZone) {
+  const parts = formatPartsInTimeZone(date, timeZone);
+  const pad = (value) => String(value).padStart(2, '0');
+  return `${parts.year}-${pad(parts.month)}-${pad(parts.day)}`;
+}
+
+function addDaysToLocalDate(fechaLocal, deltaDays) {
+  const match = String(fechaLocal || '').match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (!match) return null;
+  const utc = new Date(Date.UTC(Number(match[1]), Number(match[2]) - 1, Number(match[3])));
+  utc.setUTCDate(utc.getUTCDate() + Number(deltaDays || 0));
+  const pad = (value) => String(value).padStart(2, '0');
+  return `${utc.getUTCFullYear()}-${pad(utc.getUTCMonth() + 1)}-${pad(utc.getUTCDate())}`;
 }
 
 function extractWhatsappTemplateBodyText(template) {
@@ -330,7 +484,7 @@ async function enrichContextForTemplateResolution(context, targets = {}) {
 
   if (appointmentId) {
     const appointment = await CitaPaciente.findByPk(appointmentId, {
-      attributes: ['id_cita', 'clinica_id', 'paciente_id', 'lead_intake_id', 'created_by', 'doctor_id', 'estado', 'inicio', 'fin', 'titulo', 'motivo'],
+      attributes: ['id_cita', 'clinica_id', 'paciente_id', 'lead_intake_id', 'created_by', 'doctor_id', 'estado', 'inicio', 'fin', 'titulo', 'motivo', 'created_at'],
       raw: true,
     });
     if (appointment) {
@@ -369,6 +523,7 @@ async function enrichContextForTemplateResolution(context, targets = {}) {
         status: cleanString(appointment.estado),
         inicio: appointment.inicio || null,
         fin: appointment.fin || null,
+        created_at: appointment.created_at || appointment.createdAt || null,
         fecha: formatDateEs(appointment.inicio),
         hora: formatTimeEs(appointment.inicio),
         titulo: cleanString(appointment.titulo),
@@ -474,7 +629,7 @@ async function enrichContextForTemplateResolution(context, targets = {}) {
 
   if (effectiveClinicId) {
     const clinic = await Clinica.findByPk(effectiveClinicId, {
-      attributes: ['id_clinica', 'grupoClinicaId', 'nombre_clinica', 'direccion', 'telefono', 'url_web', 'url_ficha_local'],
+      attributes: ['id_clinica', 'grupoClinicaId', 'nombre_clinica', 'direccion', 'telefono', 'url_web', 'url_ficha_local', 'configuracion'],
       raw: true,
     });
     if (clinic) {
@@ -491,6 +646,8 @@ async function enrichContextForTemplateResolution(context, targets = {}) {
         telefono: cleanString(clinic.telefono),
         url_web: cleanString(clinic.url_web),
         url_ficha_local: cleanString(clinic.url_ficha_local),
+        timezone: resolveClinicTimezoneFromContext({ clinic }),
+        configuracion: clinic.configuracion || null,
       };
       out.clinic = mergeContextObject(out.clinic, clinicPatch);
       out.clinica = mergeContextObject(out.clinica, {
@@ -536,10 +693,13 @@ async function enrichContextForTemplateResolution(context, targets = {}) {
     ...(out.trigger.data || {}),
     appointment_id: toIntOrNull(out?.appointment?.id_cita) || toIntOrNull(out?.cita?.id_cita) || null,
     cita_id: toIntOrNull(out?.appointment?.id_cita) || toIntOrNull(out?.cita?.id_cita) || null,
+    appointment_created_at: out?.appointment?.created_at || out?.cita?.created_at || null,
+    created_at: out?.appointment?.created_at || out?.cita?.created_at || out?.trigger?.data?.created_at || null,
     patient_id: toIntOrNull(out?.patient?.id_paciente) || toIntOrNull(out?.paciente?.id_paciente) || null,
     paciente_id: toIntOrNull(out?.patient?.id_paciente) || toIntOrNull(out?.paciente?.id_paciente) || null,
     clinic_id: toIntOrNull(out?.clinic?.id_clinica) || toIntOrNull(out?.clinica?.id_clinica) || null,
     clinica_id: toIntOrNull(out?.clinic?.id_clinica) || toIntOrNull(out?.clinica?.id_clinica) || null,
+    clinic_timezone: cleanString(out?.clinic?.timezone) || cleanString(out?.clinica?.timezone) || null,
     lead_intake_id: toIntOrNull(out?.lead?.id) || null,
     lead_id: toIntOrNull(out?.lead?.id) || null,
   };
@@ -921,7 +1081,30 @@ function buildAiSimulatedOutput(outputFormat, analysisMode, model) {
 
 async function runGroqAiAnalysis({ prompt, inputText, outputFormat, outputFields, analysisMode, maxTokens }) {
   const apiKey = cleanString(process.env.GROQ_API_KEY);
+  try {
+    fs.appendFileSync('/tmp/cc-groq-debug.log', `${JSON.stringify({
+      ts: new Date().toISOString(),
+      source: 'back-integracion',
+      pid: process.pid,
+      cwd: process.cwd(),
+      port: process.env.PORT || null,
+      runtimeNamespace: process.env.JOB_RUNTIME_NAMESPACE || process.env.RUNTIME_NAMESPACE || null,
+      hasGroqKey: !!apiKey,
+      groqKeyPrefix: apiKey ? `${String(apiKey).slice(0, 6)}...` : null,
+      hasBaseUrl: !!cleanString(process.env.GROQ_API_BASE_URL),
+      analysisMode: normalizeAiAnalysisMode(analysisMode),
+    })}\n`);
+  } catch (_) {
+    // no-op debug fallback
+  }
   if (!apiKey) {
+    console.error('[ai_analysis] GROQ_API_KEY ausente en runtime activo', {
+      pid: process.pid,
+      cwd: process.cwd(),
+      port: process.env.PORT || null,
+      runtimeNamespace: process.env.JOB_RUNTIME_NAMESPACE || process.env.RUNTIME_NAMESPACE || null,
+      hasBaseUrl: !!cleanString(process.env.GROQ_API_BASE_URL),
+    });
     throw new Error('groq_api_key_not_configured');
   }
 
@@ -1362,7 +1545,9 @@ function parseDueDateOffset(rawOffset) {
 function resolveRoleCode(raw) {
   const key = normalizeKey(raw);
   if (!key) return null;
-  if (['1', 'owner', 'propietario', 'administrador', 'admin'].includes(key)) return 'propietario';
+  if (['1', 'owner', 'propietario'].includes(key)) return 'propietario';
+  if (['administrador', 'admin', 'system_admin', 'global_admin'].includes(key)) return 'admin';
+  if (['agencia', 'agency'].includes(key)) return 'agencia';
   if (['2', 'staff', 'personal', 'personaldeclinica', 'clinic_staff', 'recepcion', 'recepcion_comercial_ventas'].includes(key)) {
     return 'personaldeclinica';
   }
@@ -1377,6 +1562,9 @@ async function resolveTaskAssigneeUserIds({ clinicId, assigneeType, assigneeId, 
   if (normalizedAssigneeType === 'user') {
     const userId = toIntOrNull(assigneeId);
     if (!userId) return [];
+    if (ADMIN_USER_IDS.includes(userId)) {
+      return [userId];
+    }
     const membership = await UsuarioClinica.findOne({
       where: { id_clinica: clinicId, id_usuario: userId },
       attributes: ['id_usuario'],
@@ -1386,6 +1574,25 @@ async function resolveTaskAssigneeUserIds({ clinicId, assigneeType, assigneeId, 
   }
 
   const effectiveRole = roleCode || resolveRoleCode(assigneeId);
+  if (effectiveRole === 'admin') {
+    const membershipRows = await UsuarioClinica.findAll({
+      where: {
+        id_clinica: clinicId,
+        rol_clinica: { [Op.in]: ['admin', 'administrador'] },
+      },
+      attributes: ['id_usuario'],
+      raw: true,
+      limit: 50,
+    });
+
+    return Array.from(
+      new Set([
+        ...ADMIN_USER_IDS,
+        ...membershipRows.map((row) => toIntOrNull(row.id_usuario)).filter(Boolean),
+      ])
+    );
+  }
+
   const where = { id_clinica: clinicId };
   if (effectiveRole) {
     where.rol_clinica = effectiveRole;
@@ -2577,7 +2784,30 @@ function isFieldCheckOperatorCompatible(operator, valueType) {
   return allowed.includes(operator);
 }
 
-function evaluateFieldCheck(config, context) {
+function normalizeFieldCheckSwitchRules(rawRules) {
+  if (!Array.isArray(rawRules)) return [];
+  const seen = new Set();
+  const normalized = [];
+  rawRules.forEach((rule, index) => {
+    if (!isObject(rule)) return;
+    let id = cleanString(rule.id);
+    if (!id || !/^branch_\d+$/.test(id)) {
+      id = `branch_${index + 1}`;
+    }
+    if (seen.has(id)) return;
+    seen.add(id);
+    const matchWindow = cleanString(rule.match_window) || 'same_day';
+    const cutoffTime = cleanString(rule.cutoff_time) || '09:00';
+    normalized.push({
+      id,
+      match_window: FIELD_CHECK_APPOINTMENT_WINDOW_VALUES.has(matchWindow) ? matchWindow : 'same_day',
+      cutoff_time: /^\d{2}:\d{2}$/.test(cutoffTime) ? cutoffTime : '09:00',
+    });
+  });
+  return normalized;
+}
+
+function evaluateSimpleFieldCheck(config, context) {
   const leftRef = config?.left_ref;
   if (!leftRef || typeof leftRef !== 'object') {
     throw new Error('field_check_left_ref_required');
@@ -2665,6 +2895,110 @@ function evaluateFieldCheck(config, context) {
   }
 
   return false;
+}
+
+function resolveAppointmentBookingWindowMatch(rule, appointmentDateLocal, bookedAt, timeZone) {
+  const cutoffTime = cleanString(rule?.cutoff_time) || '09:00';
+  let startDate = null;
+  let endDate = null;
+
+  switch (cleanString(rule?.match_window)) {
+    case 'same_day':
+      startDate = appointmentDateLocal;
+      endDate = addDaysToLocalDate(appointmentDateLocal, 1);
+      break;
+    case 'day_before':
+      startDate = addDaysToLocalDate(appointmentDateLocal, -1);
+      endDate = appointmentDateLocal;
+      break;
+    case 'week_before':
+      startDate = addDaysToLocalDate(appointmentDateLocal, -7);
+      endDate = addDaysToLocalDate(appointmentDateLocal, -1);
+      break;
+    default:
+      return false;
+  }
+
+  if (!startDate || !endDate) {
+    return false;
+  }
+
+  const startAt = localDateTimeToUtc(startDate, cutoffTime, timeZone);
+  const endAt = localDateTimeToUtc(endDate, cutoffTime, timeZone);
+  if (!(startAt instanceof Date) || !Number.isFinite(startAt.getTime())) {
+    throw new Error('field_check_invalid_cutoff_time');
+  }
+  if (!(endAt instanceof Date) || !Number.isFinite(endAt.getTime())) {
+    throw new Error('field_check_invalid_cutoff_time');
+  }
+
+  return bookedAt.getTime() >= startAt.getTime() && bookedAt.getTime() < endAt.getTime();
+}
+
+function evaluateAppointmentBookingTimingFieldCheck(config, context) {
+  const switchType = cleanString(config?.switch_type) || 'appointment_booking';
+  if (!FIELD_CHECK_SWITCH_TYPE_VALUES.has(switchType)) {
+    throw new Error(`field_check_invalid_switch_type:${switchType}`);
+  }
+
+  const rules = normalizeFieldCheckSwitchRules(config?.switch_rules);
+  if (!rules.length) {
+    throw new Error('field_check_switch_rules_required');
+  }
+
+  const appointmentStartRaw = context?.appointment?.inicio
+    || context?.cita?.inicio
+    || context?.trigger?.data?.inicio
+    || context?.trigger?.data?.appointment_start;
+  const appointmentCreatedRaw = context?.appointment?.created_at
+    || context?.cita?.created_at
+    || context?.trigger?.data?.created_at
+    || context?.trigger?.data?.appointment_created_at;
+
+  const appointmentStart = appointmentStartRaw ? new Date(appointmentStartRaw) : null;
+  const appointmentCreatedAt = appointmentCreatedRaw ? new Date(appointmentCreatedRaw) : null;
+  if (!(appointmentStart instanceof Date) || !Number.isFinite(appointmentStart.getTime())) {
+    throw new Error('field_check_appointment_start_required');
+  }
+  if (!(appointmentCreatedAt instanceof Date) || !Number.isFinite(appointmentCreatedAt.getTime())) {
+    throw new Error('field_check_appointment_created_at_required');
+  }
+
+  const timeZone = resolveClinicTimezoneFromContext(context);
+  const appointmentDateLocal = formatDateLocal(appointmentStart, timeZone);
+
+  const matchedRule = rules.find((rule) =>
+    resolveAppointmentBookingWindowMatch(rule, appointmentDateLocal, appointmentCreatedAt, timeZone)
+  );
+
+  return {
+    decision: !!matchedRule,
+    matched_rule_id: matchedRule?.id || null,
+    matched_window: matchedRule?.match_window || null,
+    cutoff_time: matchedRule?.cutoff_time || null,
+    appointment_date_local: appointmentDateLocal,
+    booking_created_at: appointmentCreatedAt.toISOString(),
+    time_zone: timeZone,
+    next_output_key: matchedRule?.id || 'on_else',
+  };
+}
+
+function evaluateFieldCheck(config, context) {
+  const mode = cleanString(config?.mode) || 'simple';
+  if (!FIELD_CHECK_MODE_VALUES.has(mode)) {
+    throw new Error(`field_check_invalid_mode:${mode}`);
+  }
+
+  if (mode === 'appointment_booking_timing') {
+    return evaluateAppointmentBookingTimingFieldCheck(config, context);
+  }
+
+  const decision = evaluateSimpleFieldCheck(config, context);
+  return {
+    decision,
+    operator: config?.operator || 'equals',
+    next_output_key: decision ? 'on_true' : 'on_false',
+  };
 }
 
 function evaluateResponseExists(config, context) {
@@ -2944,6 +3278,7 @@ async function processNode(node, context, runtime = {}) {
         },
         waiting_meta: {
           type: nodeType,
+          runtime_namespace: CURRENT_RUNTIME_NAMESPACE,
           listens_to_node_id: cleanString(config?.listens_to_node_id),
           on_response: readOutputTarget(node, 'on_response'),
           on_timeout: readOutputTarget(node, 'on_timeout'),
@@ -2971,6 +3306,7 @@ async function processNode(node, context, runtime = {}) {
         },
         waiting_meta: {
           type: nodeType,
+          runtime_namespace: CURRENT_RUNTIME_NAMESPACE,
           match_mode: matchMode,
           match_value: matchValue,
           on_submit: readOutputTarget(node, 'on_submit'),
@@ -3089,16 +3425,11 @@ async function processNode(node, context, runtime = {}) {
     }
 
     case 'condition/field_check': {
-      const decision = evaluateFieldCheck(config, context);
+      const result = evaluateFieldCheck(config, context);
       return {
         kind: 'success',
-        output: {
-          decision,
-          operator: config?.operator || 'equals',
-        },
-        next_node_id: decision
-          ? readOutputTarget(node, 'on_true')
-          : readOutputTarget(node, 'on_false'),
+        output: result,
+        next_node_id: readOutputTarget(node, result.next_output_key),
       };
     }
 
@@ -3312,6 +3643,31 @@ async function runExecution(executionId, options = {}) {
     ) {
       return execution;
     }
+
+    const [claimedRows] = await FlowExecutionV2.update(
+      {
+        status: 'running',
+        updated_at: new Date(),
+      },
+      {
+        where: {
+          id: execution.id,
+          status: 'waiting',
+        },
+      }
+    );
+
+    if (!claimedRows) {
+      const freshExecution = await FlowExecutionV2.findByPk(executionId, {
+        include: [{
+          model: AutomationFlowTemplateV2,
+          as: 'templateVersion',
+        }],
+      });
+      return freshExecution || execution;
+    }
+
+    execution.status = 'running';
 
     const responseText = options.responseText ?? getByPath(execution.waiting_meta, 'pending_response_text') ?? null;
     const formSubmission = options.formSubmission ?? getByPath(execution.waiting_meta, 'pending_form_submission') ?? null;

@@ -39,6 +39,7 @@ const MANAGER_ROLES = new Set(['propietario', 'personaldeclinica', 'administrado
 const TASK_ASSIGNEE_ROLE_OPTIONS = [
   { id: 'propietario', code: 'propietario', label: 'Propietario' },
   { id: 'personaldeclinica', code: 'personaldeclinica', label: 'Personal clínica' },
+  { id: 'admin', code: 'admin', label: 'Administrador' },
   { id: 'agencia', code: 'agencia', label: 'Agencia' },
 ];
 const TASK_ROLE_LABELS = {
@@ -63,6 +64,10 @@ const FORM_MATCH_MODE_OPTIONS = ['url_contains', 'url_equals', 'form_id', 'selec
 const FIELD_CHECK_LEFT_REF_SOURCES = ['node_output', 'trigger_data', 'context', 'manual'];
 const FIELD_CHECK_VALUE_TYPES = ['string', 'number', 'boolean'];
 const FIELD_CHECK_OPERATOR_OPTIONS = ['equals', 'not_equals', 'contains', 'greater_than', 'less_than', 'exists'];
+const FIELD_CHECK_MODE_OPTIONS = ['simple', 'appointment_booking_timing'];
+const FIELD_CHECK_SWITCH_TYPE_OPTIONS = ['appointment_booking'];
+const FIELD_CHECK_APPOINTMENT_WINDOW_OPTIONS = ['same_day', 'day_before', 'week_before'];
+const DEFAULT_TIMEZONE = 'Europe/Madrid';
 const FIELD_CHECK_OPERATOR_TYPE_COMPAT = {
   string: ['equals', 'not_equals', 'contains', 'exists'],
   number: ['equals', 'not_equals', 'greater_than', 'less_than', 'exists'],
@@ -162,6 +167,42 @@ function cleanString(raw) {
   return out || null;
 }
 
+function parseClinicConfig(value) {
+  if (!value) return null;
+  if (value && typeof value === 'object' && !Array.isArray(value)) return value;
+  if (typeof value === 'string') {
+    try {
+      const parsed = JSON.parse(value);
+      return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : null;
+    } catch (_err) {
+      return null;
+    }
+  }
+  return null;
+}
+
+function isValidTimeZone(value) {
+  if (!value || typeof value !== 'string') return false;
+  try {
+    Intl.DateTimeFormat('en-US', { timeZone: value }).format(new Date());
+    return true;
+  } catch (_err) {
+    return false;
+  }
+}
+
+function resolveClinicTimezone(clinica) {
+  const cfg = parseClinicConfig(clinica?.configuracion);
+  const candidates = [
+    cfg && (cfg.timezone || cfg.timeZone || cfg.tz),
+    clinica && (clinica.timezone || clinica.time_zone || clinica.tz),
+  ];
+  for (const candidate of candidates) {
+    if (isValidTimeZone(candidate)) return candidate;
+  }
+  return DEFAULT_TIMEZONE;
+}
+
 function normalizeToken(raw) {
   return String(raw || '')
     .normalize('NFD')
@@ -212,6 +253,68 @@ function buildPersonContext(nombre, apellidos, email = null) {
     apellidos: lastName,
     nombre_completo: fullName || firstName || lastName || null,
     email: cleanString(email),
+  };
+}
+
+function normalizeFieldCheckSwitchRules(rawRules) {
+  if (!Array.isArray(rawRules)) return [];
+  const seen = new Set();
+  const normalized = [];
+  rawRules.forEach((rule, index) => {
+    if (!rule || typeof rule !== 'object' || Array.isArray(rule)) return;
+    let id = cleanString(rule.id);
+    if (!id || !/^branch_\d+$/.test(id)) {
+      id = `branch_${index + 1}`;
+    }
+    if (seen.has(id)) return;
+    seen.add(id);
+    const matchWindow = cleanString(rule.match_window) || 'same_day';
+    const cutoffTime = cleanString(rule.cutoff_time) || '09:00';
+    normalized.push({
+      id,
+      match_window: FIELD_CHECK_APPOINTMENT_WINDOW_OPTIONS.includes(matchWindow) ? matchWindow : 'same_day',
+      cutoff_time: /^\d{2}:\d{2}$/.test(cutoffTime) ? cutoffTime : '09:00',
+    });
+  });
+  return normalized;
+}
+
+function normalizeFieldCheckNode(rawNode) {
+  if (!rawNode || cleanString(rawNode.type) !== 'condition/field_check') return rawNode;
+  const config = isObject(rawNode.config) ? { ...rawNode.config } : {};
+  const mode = cleanString(config.mode);
+  const normalizedMode = mode === 'appointment_booking_timing' ? 'appointment_booking_timing' : 'simple';
+  const normalizedConfig = {
+    ...config,
+    mode: normalizedMode,
+    switch_type: 'appointment_booking',
+    switch_rules: normalizeFieldCheckSwitchRules(config.switch_rules),
+  };
+
+  const sourceOutputs = isObject(rawNode.outputs) ? { ...rawNode.outputs } : {};
+  const outputs = {};
+  if (normalizedMode === 'appointment_booking_timing') {
+    normalizedConfig.switch_rules.forEach((rule) => {
+      outputs[rule.id] = sourceOutputs[rule.id] ?? null;
+    });
+    outputs.on_else = sourceOutputs.on_else ?? null;
+  } else {
+    outputs.on_true = sourceOutputs.on_true ?? null;
+    outputs.on_false = sourceOutputs.on_false ?? null;
+  }
+
+  const outputSchema = normalizedMode === 'appointment_booking_timing'
+    ? Object.fromEntries([
+        ...normalizedConfig.switch_rules.map((rule) => [rule.id, { label: `${rule.match_window}:${rule.cutoff_time}` }]),
+        ['on_else', { label: 'Resto' }],
+      ])
+    : undefined;
+
+  return {
+    ...rawNode,
+    config: normalizedConfig,
+    outputs,
+    output_schema: outputSchema,
   };
 }
 
@@ -266,10 +369,10 @@ async function buildHydratedExecutionContext({
           model: Clinica,
           as: 'clinica',
           required: false,
-          attributes: ['id_clinica', 'grupoClinicaId', 'nombre_clinica', 'direccion', 'telefono', 'url_web', 'url_ficha_local'],
+          attributes: ['id_clinica', 'grupoClinicaId', 'nombre_clinica', 'direccion', 'telefono', 'url_web', 'url_ficha_local', 'configuracion'],
         },
       ],
-      attributes: ['id_cita', 'clinica_id', 'paciente_id', 'lead_intake_id', 'created_by', 'doctor_id', 'estado', 'inicio', 'fin', 'titulo', 'motivo', 'tipo_cita'],
+      attributes: ['id_cita', 'clinica_id', 'paciente_id', 'lead_intake_id', 'created_by', 'doctor_id', 'estado', 'inicio', 'fin', 'titulo', 'motivo', 'tipo_cita', 'created_at'],
     });
 
     if (cita) {
@@ -289,6 +392,7 @@ async function buildHydratedExecutionContext({
         tipo_cita: cleanString(citaJson.tipo_cita),
         inicio: citaJson.inicio || null,
         fin: citaJson.fin || null,
+        created_at: citaJson.created_at || null,
         fecha: formatDateEs(citaJson.inicio),
         hora: formatTimeEs(citaJson.inicio),
         titulo: cleanString(citaJson.titulo),
@@ -343,6 +447,7 @@ async function buildHydratedExecutionContext({
           telefono: cleanString(clinica.telefono),
           url_web: cleanString(clinica.url_web),
           url_ficha_local: cleanString(clinica.url_ficha_local),
+          timezone: resolveClinicTimezone(clinica),
         };
         out.clinic = {
           ...(isObject(out.clinic) ? out.clinic : {}),
@@ -471,7 +576,7 @@ async function buildHydratedExecutionContext({
 
   if (hydratedClinicId && !out.clinic) {
     const clinic = await Clinica.findByPk(hydratedClinicId, {
-      attributes: ['id_clinica', 'grupoClinicaId', 'nombre_clinica', 'direccion', 'telefono', 'url_web', 'url_ficha_local'],
+      attributes: ['id_clinica', 'grupoClinicaId', 'nombre_clinica', 'direccion', 'telefono', 'url_web', 'url_ficha_local', 'configuracion'],
       raw: true,
     });
     if (clinic) {
@@ -488,6 +593,7 @@ async function buildHydratedExecutionContext({
         telefono: cleanString(clinic.telefono),
         url_web: cleanString(clinic.url_web),
         url_ficha_local: cleanString(clinic.url_ficha_local),
+        timezone: resolveClinicTimezone(clinic),
       };
       out.clinic = clinicPatch;
       out.clinica = { ...clinicPatch };
@@ -532,10 +638,13 @@ async function buildHydratedExecutionContext({
     ...(out.trigger.data || {}),
     appointment_id: parseIntOrNull(out?.appointment?.id_cita) || parseIntOrNull(out?.cita?.id_cita) || null,
     cita_id: parseIntOrNull(out?.appointment?.id_cita) || parseIntOrNull(out?.cita?.id_cita) || null,
+    appointment_created_at: out?.appointment?.created_at || out?.cita?.created_at || null,
+    created_at: out?.appointment?.created_at || out?.cita?.created_at || out?.trigger?.data?.created_at || null,
     patient_id: parseIntOrNull(out?.patient?.id_paciente) || parseIntOrNull(out?.paciente?.id_paciente) || null,
     paciente_id: parseIntOrNull(out?.patient?.id_paciente) || parseIntOrNull(out?.paciente?.id_paciente) || null,
     clinic_id: parseIntOrNull(out?.clinic?.id_clinica) || parseIntOrNull(out?.clinica?.id_clinica) || null,
     clinica_id: parseIntOrNull(out?.clinic?.id_clinica) || parseIntOrNull(out?.clinica?.id_clinica) || null,
+    clinic_timezone: cleanString(out?.clinic?.timezone) || cleanString(out?.clinica?.timezone) || null,
     lead_intake_id: parseIntOrNull(out?.lead?.id) || null,
     lead_id: parseIntOrNull(out?.lead?.id) || null,
     conversation_id: parseIntOrNull(out?.conversation?.id) || null,
@@ -823,7 +932,7 @@ const NODE_TYPES_V2 = [
     type: 'action/send_system_notification',
     category: 'action',
     label: 'Notificación del sistema',
-    description: 'Envía una notificación interna a un usuario o rol de la clínica.',
+    description: 'Envía una notificación interna a un usuario concreto o a un rol interno como clínica, admin o agencia.',
     output_keys: ['on_success', 'on_fail'],
     runtime_status: 'real',
     default_config: {
@@ -872,7 +981,7 @@ const NODE_TYPES_V2 = [
     type: 'control/join',
     category: 'control',
     label: 'Unir bifurcación',
-    description: 'Une dos ramas en una única salida.',
+    description: 'Une dos o más ramas en una única salida.',
     output_keys: ['on_joined'],
     runtime_status: 'real',
     default_config: { mode: 'any' },
@@ -960,13 +1069,16 @@ const NODE_TYPES_V2 = [
     type: 'condition/field_check',
     category: 'condition',
     label: 'Comprobar campo',
-    description: 'Evalúa una condición sobre un campo del contexto.',
+    description: 'Compara un campo o bifurca según cuándo se agendó la cita.',
     output_keys: ['on_true', 'on_false'],
     runtime_status: 'real',
     default_config: {
+      mode: 'simple',
       left_ref: { source: '', node_id: null, path: '', value_type: 'string', label: '' },
       operator: 'equals',
       right_value: '',
+      switch_type: 'appointment_booking',
+      switch_rules: [],
     },
     config_schema: [
       { key: 'left_ref', label: 'Campo a evaluar', input_type: 'json', required: true },
@@ -1417,7 +1529,7 @@ function normalizeNodesInput(nodes) {
         if (!(key in outputs)) outputs[key] = null;
       });
 
-      return {
+      const normalizedNode = {
         id: cleanString(rawNode.id) || `N${index + 1}`,
         type,
         position,
@@ -1425,6 +1537,12 @@ function normalizeNodesInput(nodes) {
         outputs,
         output_schema: isObject(rawNode.output_schema) ? rawNode.output_schema : undefined,
       };
+
+      if (type === 'condition/field_check') {
+        return normalizeFieldCheckNode(normalizedNode);
+      }
+
+      return normalizedNode;
     })
     .filter(Boolean);
 }
@@ -2643,140 +2761,264 @@ function validateNodeConfig(node, nodeMap, templateLookup = {}) {
   }
 
   if (nodeType === 'condition/field_check') {
-    const leftRefRaw = parseJsonIfString(config.left_ref);
-    const leftRef = isObject(leftRefRaw) ? leftRefRaw : null;
+    const mode = cleanString(config?.mode) || 'simple';
 
-    if (!leftRef || !cleanString(leftRef.source)) {
+    if (!FIELD_CHECK_MODE_OPTIONS.includes(mode)) {
       errors.push(
         buildValidationError(
           'node_config_invalid',
-          `El nodo ${nodeId} requiere left_ref con source válido`,
-          { node_id: nodeId, node_type: nodeType, key: 'left_ref' }
+          `El nodo ${nodeId} tiene mode inválido`,
+          {
+            node_id: nodeId,
+            node_type: nodeType,
+            key: 'mode',
+            value: mode,
+            allowed: FIELD_CHECK_MODE_OPTIONS,
+          }
         )
       );
-    } else {
-      const source = cleanString(leftRef.source);
-      if (!FIELD_CHECK_LEFT_REF_SOURCES.includes(source)) {
+    } else if (mode === 'appointment_booking_timing') {
+      const switchType = cleanString(config?.switch_type) || 'appointment_booking';
+      const switchRules = normalizeFieldCheckSwitchRules(config?.switch_rules);
+      const outputs = isObject(node.outputs) ? node.outputs : {};
+      const seenWindows = new Set();
+
+      if (!FIELD_CHECK_SWITCH_TYPE_OPTIONS.includes(switchType)) {
         errors.push(
           buildValidationError(
             'node_config_invalid',
-            `El nodo ${nodeId} tiene left_ref.source inválido: '${source}'`,
+            `El nodo ${nodeId} requiere switch_type válido`,
             {
               node_id: nodeId,
               node_type: nodeType,
-              key: 'left_ref.source',
-              value: source,
-              allowed: FIELD_CHECK_LEFT_REF_SOURCES,
+              key: 'switch_type',
+              value: switchType,
+              allowed: FIELD_CHECK_SWITCH_TYPE_OPTIONS,
             }
           )
         );
       }
 
-      if (source === 'node_output') {
-        const refNodeId = cleanString(leftRef.node_id);
-        if (!refNodeId) {
+      if (!switchRules.length) {
+        errors.push(
+          buildValidationError(
+            'node_config_invalid',
+            `El nodo ${nodeId} requiere al menos una bifurcación temporal`,
+            { node_id: nodeId, node_type: nodeType, key: 'switch_rules' }
+          )
+        );
+      }
+
+      switchRules.forEach((rule, index) => {
+        if (!FIELD_CHECK_APPOINTMENT_WINDOW_OPTIONS.includes(rule.match_window)) {
           errors.push(
             buildValidationError(
               'node_config_invalid',
-              `El nodo ${nodeId} requiere left_ref.node_id cuando source es node_output`,
-              { node_id: nodeId, node_type: nodeType, key: 'left_ref.node_id' }
-            )
-          );
-        } else if (!nodeMap.has(refNodeId)) {
-          errors.push(
-            buildValidationError(
-              'node_config_invalid',
-              `El nodo ${nodeId} referencia node_id '${refNodeId}' que no existe en el flujo`,
-              { node_id: nodeId, node_type: nodeType, key: 'left_ref.node_id', value: refNodeId }
+              `El nodo ${nodeId} tiene una bifurcación temporal inválida`,
+              {
+                node_id: nodeId,
+                node_type: nodeType,
+                key: `switch_rules[${index}].match_window`,
+                value: rule.match_window,
+                allowed: FIELD_CHECK_APPOINTMENT_WINDOW_OPTIONS,
+              }
             )
           );
         }
-      }
+        if (!/^\d{2}:\d{2}$/.test(rule.cutoff_time || '')) {
+          errors.push(
+            buildValidationError(
+              'node_config_invalid',
+              `El nodo ${nodeId} requiere una hora válida en cada bifurcación`,
+              {
+                node_id: nodeId,
+                node_type: nodeType,
+                key: `switch_rules[${index}].cutoff_time`,
+                value: rule.cutoff_time || null,
+              }
+            )
+          );
+        }
+        if (seenWindows.has(rule.match_window)) {
+          errors.push(
+            buildValidationError(
+              'node_config_invalid',
+              `El nodo ${nodeId} no puede repetir la misma bifurcación temporal`,
+              {
+                node_id: nodeId,
+                node_type: nodeType,
+                key: `switch_rules[${index}].match_window`,
+                value: rule.match_window,
+              }
+            )
+          );
+        }
+        seenWindows.add(rule.match_window);
 
-      if (!cleanString(leftRef.path)) {
+        if (!(rule.id in outputs)) {
+          errors.push(
+            buildValidationError(
+              'node_config_invalid',
+              `El nodo ${nodeId} no tiene salida para la bifurcación ${index + 1}`,
+              {
+                node_id: nodeId,
+                node_type: nodeType,
+                key: `outputs.${rule.id}`,
+              }
+            )
+          );
+        }
+      });
+
+      if (!('on_else' in outputs)) {
         errors.push(
           buildValidationError(
             'node_config_invalid',
-            `El nodo ${nodeId} requiere left_ref.path no vacío`,
-            { node_id: nodeId, node_type: nodeType, key: 'left_ref.path' }
-          )
-        );
-      }
-
-      const valueType = cleanString(leftRef.value_type) || 'string';
-      if (!FIELD_CHECK_VALUE_TYPES.includes(valueType)) {
-        errors.push(
-          buildValidationError(
-            'node_config_invalid',
-            `El nodo ${nodeId} tiene left_ref.value_type inválido`,
+            `El nodo ${nodeId} requiere salida para Resto`,
             {
               node_id: nodeId,
               node_type: nodeType,
-              key: 'left_ref.value_type',
-              value: valueType,
-              allowed: FIELD_CHECK_VALUE_TYPES,
+              key: 'outputs.on_else',
             }
           )
         );
       }
-    }
+    } else {
+      const leftRefRaw = parseJsonIfString(config.left_ref);
+      const leftRef = isObject(leftRefRaw) ? leftRefRaw : null;
 
-    const operator = cleanString(config?.operator) || 'equals';
-    if (!FIELD_CHECK_OPERATOR_OPTIONS.includes(operator)) {
-      errors.push(
-        buildValidationError(
-          'node_config_invalid',
-          `El nodo ${nodeId} requiere operador válido`,
-          {
-            node_id: nodeId,
-            node_type: nodeType,
-            key: 'operator',
-            value: operator,
-            allowed: FIELD_CHECK_OPERATOR_OPTIONS,
-          }
-        )
-      );
-    }
-
-    const effectiveValueType = cleanString(leftRef?.value_type) || 'string';
-    if (!isOperatorCompatible(operator, effectiveValueType)) {
-      errors.push(
-        buildValidationError(
-          'node_config_invalid',
-          `El nodo ${nodeId} usa operador '${operator}' incompatible con tipo '${effectiveValueType}'`,
-          {
-            node_id: nodeId,
-            node_type: nodeType,
-            key: 'operator',
-            value: operator,
-            value_type: effectiveValueType,
-            allowed: FIELD_CHECK_OPERATOR_TYPE_COMPAT[effectiveValueType] || null,
-          }
-        )
-      );
-    }
-
-    if (operator !== 'exists') {
-      const rightValue = config?.right_value;
-      if (rightValue === undefined || rightValue === null || rightValue === '') {
+      if (!leftRef || !cleanString(leftRef.source)) {
         errors.push(
           buildValidationError(
             'node_config_invalid',
-            `El nodo ${nodeId} requiere right_value para operador '${operator}'`,
-            { node_id: nodeId, node_type: nodeType, key: 'right_value' }
+            `El nodo ${nodeId} requiere left_ref con source válido`,
+            { node_id: nodeId, node_type: nodeType, key: 'left_ref' }
+          )
+        );
+      } else {
+        const source = cleanString(leftRef.source);
+        if (!FIELD_CHECK_LEFT_REF_SOURCES.includes(source)) {
+          errors.push(
+            buildValidationError(
+              'node_config_invalid',
+              `El nodo ${nodeId} tiene left_ref.source inválido: '${source}'`,
+              {
+                node_id: nodeId,
+                node_type: nodeType,
+                key: 'left_ref.source',
+                value: source,
+                allowed: FIELD_CHECK_LEFT_REF_SOURCES,
+              }
+            )
+          );
+        }
+
+        if (source === 'node_output') {
+          const refNodeId = cleanString(leftRef.node_id);
+          if (!refNodeId) {
+            errors.push(
+              buildValidationError(
+                'node_config_invalid',
+                `El nodo ${nodeId} requiere left_ref.node_id cuando source es node_output`,
+                { node_id: nodeId, node_type: nodeType, key: 'left_ref.node_id' }
+              )
+            );
+          } else if (!nodeMap.has(refNodeId)) {
+            errors.push(
+              buildValidationError(
+                'node_config_invalid',
+                `El nodo ${nodeId} referencia node_id '${refNodeId}' que no existe en el flujo`,
+                { node_id: nodeId, node_type: nodeType, key: 'left_ref.node_id', value: refNodeId }
+              )
+            );
+          }
+        }
+
+        if (!cleanString(leftRef.path)) {
+          errors.push(
+            buildValidationError(
+              'node_config_invalid',
+              `El nodo ${nodeId} requiere left_ref.path no vacío`,
+              { node_id: nodeId, node_type: nodeType, key: 'left_ref.path' }
+            )
+          );
+        }
+
+        const valueType = cleanString(leftRef.value_type) || 'string';
+        if (!FIELD_CHECK_VALUE_TYPES.includes(valueType)) {
+          errors.push(
+            buildValidationError(
+              'node_config_invalid',
+              `El nodo ${nodeId} tiene left_ref.value_type inválido`,
+              {
+                node_id: nodeId,
+                node_type: nodeType,
+                key: 'left_ref.value_type',
+                value: valueType,
+                allowed: FIELD_CHECK_VALUE_TYPES,
+              }
+            )
+          );
+        }
+
+        const operator = cleanString(config?.operator) || 'equals';
+        if (!FIELD_CHECK_OPERATOR_OPTIONS.includes(operator)) {
+          errors.push(
+            buildValidationError(
+              'node_config_invalid',
+              `El nodo ${nodeId} requiere operador válido`,
+              {
+                node_id: nodeId,
+                node_type: nodeType,
+                key: 'operator',
+                value: operator,
+                allowed: FIELD_CHECK_OPERATOR_OPTIONS,
+              }
+            )
+          );
+        }
+
+        const effectiveValueType = cleanString(leftRef?.value_type) || 'string';
+        if (!isOperatorCompatible(operator, effectiveValueType)) {
+          errors.push(
+            buildValidationError(
+              'node_config_invalid',
+              `El nodo ${nodeId} usa operador '${operator}' incompatible con tipo '${effectiveValueType}'`,
+              {
+                node_id: nodeId,
+                node_type: nodeType,
+                key: 'operator',
+                value: operator,
+                value_type: effectiveValueType,
+                allowed: FIELD_CHECK_OPERATOR_TYPE_COMPAT[effectiveValueType] || null,
+              }
+            )
+          );
+        }
+
+        if (operator !== 'exists') {
+          const rightValue = config?.right_value;
+          if (rightValue === undefined || rightValue === null || rightValue === '') {
+            errors.push(
+              buildValidationError(
+                'node_config_invalid',
+                `El nodo ${nodeId} requiere right_value para operador '${operator}'`,
+                { node_id: nodeId, node_type: nodeType, key: 'right_value' }
+              )
+            );
+          }
+        }
+      }
+
+      if (config.field !== undefined || config.value !== undefined) {
+        errors.push(
+          buildValidationError(
+            'node_config_invalid',
+            `El nodo ${nodeId} usa campos legacy (field/value). Re-configurar con el nuevo contrato.`,
+            { node_id: nodeId, node_type: nodeType, key: 'legacy_fields' }
           )
         );
       }
-    }
-
-    if (config.field !== undefined || config.value !== undefined) {
-      errors.push(
-        buildValidationError(
-          'node_config_invalid',
-          `El nodo ${nodeId} usa campos legacy (field/value). Re-configurar con el nuevo contrato.`,
-          { node_id: nodeId, node_type: nodeType, key: 'legacy_fields' }
-        )
-      );
     }
   }
 
@@ -3254,9 +3496,12 @@ exports.getAssigneesCatalog = async (req, res) => {
 
     const userIds = Array.from(
       new Set(
-        memberships
+        [
+          ...memberships
           .map((row) => Number.parseInt(String(row.id_usuario), 10))
-          .filter((id) => Number.isInteger(id) && id > 0)
+          .filter((id) => Number.isInteger(id) && id > 0),
+          ...ADMIN_USER_IDS,
+        ]
       )
     );
 
@@ -3276,6 +3521,12 @@ exports.getAssigneesCatalog = async (req, res) => {
     );
 
     const userMetaMap = new Map();
+    for (const adminUserId of ADMIN_USER_IDS) {
+      if (!Number.isInteger(adminUserId) || adminUserId <= 0) continue;
+      if (!userMetaMap.has(adminUserId)) {
+        userMetaMap.set(adminUserId, { clinic_ids: new Set(), roles: new Set(['admin']) });
+      }
+    }
     for (const membership of memberships) {
       const userId = Number.parseInt(String(membership.id_usuario), 10);
       if (!Number.isInteger(userId) || userId <= 0) continue;

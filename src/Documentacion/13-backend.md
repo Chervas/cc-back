@@ -1441,8 +1441,7 @@ Contrato actual:
 ```json
 {
   "appointment_scope": "all | with_treatment | without_treatment",
-  "appointment_type_without_treatment": "any | primera_sin_trat | urgencia | revision",
-  "day_proximity_filter": "all | exclude_day_before | exclude_same_day | exclude_same_day_and_day_before"
+  "appointment_type_without_treatment": "any | primera_sin_trat | urgencia | revision"
 }
 ```
 
@@ -1451,10 +1450,6 @@ Reglas:
 - Solo aplica a `trigger_type = appointment_created`.
 - Para el resto de triggers, `trigger_config = null`.
 - Si `appointment_scope !== without_treatment`, `appointment_type_without_treatment` se normaliza a `any`.
-- `day_proximity_filter` delimita el trigger por cercanía en días respecto al momento en que se crea la cita.
-  - `exclude_day_before`: no matchea si la cita se crea el día anterior.
-  - `exclude_same_day`: no matchea si la cita se crea el mismo día.
-  - `exclude_same_day_and_day_before`: no matchea ni el mismo día ni el día anterior.
 
 Contratos temporales adicionales:
 
@@ -1487,17 +1482,67 @@ Contratos temporales adicionales:
 3. **Matching de `appointment_created`**
    - `with_treatment` solo matchea con citas que tienen tratamiento.
    - `without_treatment` solo matchea con citas sin tratamiento.
-   - si `day_proximity_filter` está definido, el template se descarta según la fecha local de creación frente a la fecha local de la cita.
    - Para `without_treatment`, la prioridad es:
      - tipo exacto (`primera_sin_trat`, `urgencia`, `revision`)
      - `any`
      - `all`
-   - Entre dos templates válidos del mismo scope, uno con filtro temporal explícito gana frente al genérico sin filtro.
 
 Consecuencias:
 
 - No debe dispararse más de un flujo V2 por el mismo `appointment_created`.
 - Un template `without_treatment` no debe asignarse desde `PUT /api/tratamientos/:id/automation-template`.
+
+### `condition/field_check` temporal
+
+El nodo `condition/field_check` admite ahora dos contratos:
+
+1. `simple`
+   - comparador clásico `left_ref + operator + right_value`
+2. `appointment_booking_timing`
+   - switch temporal específico de cita creada
+
+Contrato del modo temporal:
+
+```json
+{
+  "mode": "appointment_booking_timing",
+  "switch_type": "appointment_booking",
+  "switch_rules": [
+    { "id": "branch_1", "match_window": "same_day", "cutoff_time": "09:00" },
+    { "id": "branch_2", "match_window": "day_before", "cutoff_time": "09:00" },
+    { "id": "branch_3", "match_window": "week_before", "cutoff_time": "09:00" }
+  ]
+}
+```
+
+Salidas requeridas:
+
+- una por cada `switch_rule.id`
+- `on_else`
+
+Semántica:
+
+- usa la hora local de la clínica
+- compara `CitasPacientes.created_at` frente a la fecha local de la cita (`inicio`)
+- cada regla define el inicio de su tramo con `cutoff_time`
+  - `same_day`: desde `fecha_cita @ HH:mm`
+  - `day_before`: desde `fecha_cita - 1 día @ HH:mm` hasta `fecha_cita @ HH:mm`
+  - `week_before`: desde `fecha_cita - 7 días @ HH:mm` hasta `fecha_cita - 1 día @ HH:mm`
+- si no encaja en ninguna regla, sale por `on_else`
+
+Validaciones:
+
+- `switch_rules` no puede estar vacío
+- no se repite `match_window`
+- `cutoff_time` debe venir en `HH:mm`
+- cada regla necesita su salida en `node.outputs`
+- `on_else` es obligatorio
+
+### `control/join` multirrama
+
+- `control/join` sigue usando `mode = any`
+- pero en integración ya converge dos o más ramas
+- no depende de que la bifurcación previa sea estrictamente binaria
 
 ### Scheduler de cita
 
