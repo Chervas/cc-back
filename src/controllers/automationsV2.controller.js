@@ -101,21 +101,6 @@ function parseBool(raw, fallback = undefined) {
   return fallback;
 }
 
-function normalizeAppointmentCreatedDayProximityFilter(rawFilter, legacyMinHours) {
-  const normalized = (cleanString(rawFilter) || '').toLowerCase();
-  if (normalized && APPOINTMENT_CREATED_DAY_PROXIMITY_FILTER_VALUES.has(normalized)) {
-    return normalized;
-  }
-  const parsedLegacyHours = Number(legacyMinHours);
-  if (Number.isFinite(parsedLegacyHours) && parsedLegacyHours >= 24) {
-    return 'exclude_same_day_and_day_before';
-  }
-  if (Number.isFinite(parsedLegacyHours) && parsedLegacyHours > 0) {
-    return 'exclude_same_day';
-  }
-  return 'all';
-}
-
 function parseStringArrayLike(raw) {
   if (raw === undefined || raw === null) return [];
 
@@ -761,12 +746,6 @@ const APPOINTMENT_CREATED_WITHOUT_TREATMENT_TYPES = new Set([
   'urgencia',
   'revision',
 ]);
-const APPOINTMENT_CREATED_DAY_PROXIMITY_FILTER_VALUES = new Set([
-  'all',
-  'exclude_day_before',
-  'exclude_same_day',
-  'exclude_same_day_and_day_before',
-]);
 const APPOINTMENT_BEFORE_MOMENT_VALUES = new Set([
   'same_day',
   'day_before',
@@ -1346,27 +1325,11 @@ function normalizeTriggerConfigForTemplate({ triggerType, entryNodeId, nodes }) 
     };
   }
 
-  const dayProximityFilter = normalizeAppointmentCreatedDayProximityFilter(
-    rawConfig.day_proximity_filter,
-    rawConfig.min_hours_before_start,
-  );
-  if (!APPOINTMENT_CREATED_DAY_PROXIMITY_FILTER_VALUES.has(dayProximityFilter)) {
-    return {
-      ok: false,
-      error: 'invalid_trigger_config',
-      message: `day_proximity_filter no soportado: ${dayProximityFilter}`,
-      details: {
-        allowed_day_proximity_filter: Array.from(APPOINTMENT_CREATED_DAY_PROXIMITY_FILTER_VALUES),
-      },
-    };
-  }
-
   return {
     ok: true,
     trigger_config: {
       appointment_scope: appointmentScope,
       appointment_type_without_treatment: appointmentTypeWithoutTreatment,
-      day_proximity_filter: dayProximityFilter,
     },
   };
 }
@@ -1383,10 +1346,6 @@ function applyTriggerConfigToNodes({ triggerType, entryNodeId, nodes, triggerCon
       appointment_scope: cleanString(triggerConfig.appointment_scope || 'all').toLowerCase() || 'all',
       appointment_type_without_treatment:
         cleanString(triggerConfig.appointment_type_without_treatment || 'any').toLowerCase() || 'any',
-      day_proximity_filter: normalizeAppointmentCreatedDayProximityFilter(
-        triggerConfig.day_proximity_filter,
-        triggerConfig.min_hours_before_start,
-      ),
     };
   } else if (normalizedTriggerType === 'appointment_reminder_window' && isObject(triggerConfig)) {
     sanitizedTriggerConfig = {

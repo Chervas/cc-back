@@ -35,12 +35,6 @@ const APPOINTMENT_CREATED_WITHOUT_TREATMENT_TYPES = new Set([
   'urgencia',
   'revision',
 ]);
-const APPOINTMENT_CREATED_DAY_PROXIMITY_FILTER_VALUES = new Set([
-  'all',
-  'exclude_day_before',
-  'exclude_same_day',
-  'exclude_same_day_and_day_before',
-]);
 const SCHEDULED_APPOINTMENT_TRIGGER_TYPES = new Set([
   'appointment_reminder_window',
   'appointment_after',
@@ -81,21 +75,6 @@ function toIntOrNull(value) {
 function cleanString(value) {
   if (value === undefined || value === null) return '';
   return String(value).trim();
-}
-
-function normalizeAppointmentCreatedDayProximityFilter(value, legacyMinHours) {
-  const normalized = cleanString(value).toLowerCase();
-  if (APPOINTMENT_CREATED_DAY_PROXIMITY_FILTER_VALUES.has(normalized)) {
-    return normalized;
-  }
-  const parsedLegacyHours = Number(legacyMinHours);
-  if (Number.isFinite(parsedLegacyHours) && parsedLegacyHours >= 24) {
-    return 'exclude_same_day_and_day_before';
-  }
-  if (Number.isFinite(parsedLegacyHours) && parsedLegacyHours > 0) {
-    return 'exclude_same_day';
-  }
-  return 'all';
 }
 
 function parseClinicConfig(value) {
@@ -312,35 +291,6 @@ async function resolveTemplateBoundToTratamiento(cita, eventName) {
 }
 
 function isAppointmentCreatedTemplateEligibleForCita(triggerConfig, cita, timeZone = DEFAULT_TIMEZONE) {
-  const dayProximityFilter = normalizeAppointmentCreatedDayProximityFilter(
-    triggerConfig?.day_proximity_filter,
-    triggerConfig?.min_hours_before_start,
-  );
-  if (dayProximityFilter === 'all') return true;
-
-  const start = cita?.inicio ? new Date(cita.inicio) : null;
-  if (!start || !Number.isFinite(start.getTime())) {
-    return false;
-  }
-
-  const appointmentDateLocal = formatDateLocal(start, timeZone);
-  const todayLocal = formatDateLocal(new Date(), timeZone);
-  if (!appointmentDateLocal || !todayLocal) {
-    return false;
-  }
-
-  const isSameDay = appointmentDateLocal === todayLocal;
-  const isDayBefore = appointmentDateLocal === addDaysToLocalDate(todayLocal, 1);
-
-  if (dayProximityFilter === 'exclude_same_day') {
-    return !isSameDay;
-  }
-  if (dayProximityFilter === 'exclude_day_before') {
-    return !isDayBefore;
-  }
-  if (dayProximityFilter === 'exclude_same_day_and_day_before') {
-    return !isSameDay && !isDayBefore;
-  }
   return true;
 }
 
@@ -356,14 +306,9 @@ function normalizeAppointmentCreatedTriggerConfig(rawConfig) {
   if (safeScope !== 'without_treatment') {
     appointmentTypeWithoutTreatment = 'any';
   }
-  const dayProximityFilter = normalizeAppointmentCreatedDayProximityFilter(
-    config.day_proximity_filter,
-    config.min_hours_before_start,
-  );
   return {
     appointment_scope: safeScope,
     appointment_type_without_treatment: appointmentTypeWithoutTreatment,
-    day_proximity_filter: dayProximityFilter,
   };
 }
 
@@ -499,11 +444,6 @@ async function resolveClinicFallbackTemplate(cita, eventName) {
         const triggerConfig = getTemplateTriggerConfig(template);
         const scope = triggerConfig?.appointment_scope || 'all';
         const appointmentType = triggerConfig?.appointment_type_without_treatment || 'any';
-        const dayProximityFilter = normalizeAppointmentCreatedDayProximityFilter(
-          triggerConfig?.day_proximity_filter,
-          triggerConfig?.min_hours_before_start,
-        );
-
         if (citaHasTreatment) {
           if (scope === 'with_treatment') score += 20;
           else if (scope === 'all') score += 5;
@@ -511,12 +451,6 @@ async function resolveClinicFallbackTemplate(cita, eventName) {
           if (scope === 'without_treatment' && appointmentType === citaTipo) score += 30;
           else if (scope === 'without_treatment' && appointmentType === 'any') score += 20;
           else if (scope === 'all') score += 5;
-        }
-
-        if (dayProximityFilter === 'exclude_same_day_and_day_before') {
-          score += 1.2;
-        } else if (dayProximityFilter !== 'all') {
-          score += 1.1;
         }
       }
 
@@ -602,6 +536,9 @@ function computeScheduledRunAt({ cita, triggerType, triggerConfig, timeZone }) {
         : baseDateLocal;
     if (!targetDateLocal) return null;
     const runAt = localDateTimeToUtc(targetDateLocal, `${triggerConfig?.custom_time || '09:00'}:00`, timeZone);
+    // Si la ventana "antes de la cita" ya pasó cuando se crea o resincroniza la cita,
+    // no la disparamos de forma retroactiva porque puede pisar el flujo de confirmación.
+    if (!runAt || runAt.getTime() <= nowTs) return null;
     if (!runAt || runAt.getTime() >= start.getTime()) return null;
     return normalizeScheduledDate(runAt);
   }
