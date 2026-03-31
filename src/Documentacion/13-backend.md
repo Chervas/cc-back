@@ -2075,6 +2075,18 @@ Regla operativa:
 - si existe una plantilla remota con el mismo nombre pero distinto contrato Meta-facing, la propagación no debe fingir una revisión real;
 - en ese caso el override local queda en `PENDING_LOCAL`;
 - el `syncTemplatesForWaba(...)` solo sube el override a `APPROVED` cuando el contenido remoto coincide realmente.
+- el `syncTemplatesForWaba(...)` tampoco debe heredar el `meta_template_id` de la plantilla remota vieja cuando el contenido no coincide, para no dar a entender que esa revisión remota corresponde al override local.
+
+Diagnóstico real aplicado el `2026-03-31`:
+
+- se verificó directamente contra Meta que `clinicaclick_confirmacion_cita` seguía aprobada solo con `4` placeholders;
+- la versión local propagada con `5` placeholders no tenía revisión real abierta en Meta;
+- por eso podían pasar días sin cambiar de estado: no era un fallo del job, sino un estado local mal interpretado.
+
+Implicación operativa:
+
+- si una plantilla queda en `PENDING_LOCAL`, esperar no basta por sí solo;
+- ese estado significa que ClinicaClick tiene un cambio local, pero Meta todavía no tiene una versión remota equivalente aprobable para ese contenido.
 
 Además, el motor V2 ya bloquea el envío de plantillas que no estén en `APPROVED`.
 
