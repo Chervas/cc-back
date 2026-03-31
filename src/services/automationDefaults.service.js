@@ -82,6 +82,19 @@ function sanitizeTemplateKey(value) {
     .replace(/^_+|_+$/g, '');
 }
 
+function sanitizeTemplateReference(value) {
+  return String(value || '')
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9_-]+/g, '_')
+    .replace(/^_+|_+$/g, '');
+}
+
+function parseIntOrNull(value) {
+  const parsed = Number.parseInt(String(value ?? '').trim(), 10);
+  return Number.isInteger(parsed) ? parsed : null;
+}
+
 function buildCatalogTemplateKey(catalogFlowId, sourceTemplateKey, clinicId) {
   const base = sanitizeTemplateKey(sourceTemplateKey || `catalog_${catalogFlowId}`);
   return `${base}__clinic_${clinicId}`;
@@ -92,16 +105,30 @@ function buildPublicId() {
 }
 
 async function resolveLinkedTemplateForCatalog(catalogFlow) {
-  const templateKey = String(catalogFlow?.template_key || '').trim();
+  const rawReference = String(catalogFlow?.template_key || '').trim();
+  if (!rawReference) return null;
 
-  if (!templateKey) return null;
+  const normalizedRef = sanitizeTemplateReference(rawReference);
+  if (!normalizedRef) return null;
+
+  const byPublicId = await AutomationFlowTemplateV2.findOne({
+    where: { public_id: normalizedRef },
+    attributes: ['id'],
+    raw: true,
+  });
+
+  const familyWhere = byPublicId
+    ? { public_id: normalizedRef }
+    : { template_key: sanitizeTemplateKey(normalizedRef) };
+
+  const version = parseIntOrNull(catalogFlow?.template_version);
+  const where = { ...familyWhere };
+  if (version) {
+    where.version = version;
+  }
 
   return AutomationFlowTemplateV2.findOne({
-    where: {
-      template_key: templateKey,
-      published_at: { [Op.ne]: null },
-      is_active: true,
-    },
+    where,
     order: [['version', 'DESC'], ['id', 'DESC']],
   });
 }
