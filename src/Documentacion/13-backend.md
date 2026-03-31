@@ -2062,6 +2062,22 @@ La atribución CRM usa `LeadIntake` y solo se acepta cuando el match con la camp
 
 La respuesta se consume ya desde el wizard y no debe tratarse como contrato futuro.
 
+### 7.1. Estado real de plantillas WhatsApp propagadas
+
+Para `WhatsappTemplates`, el backend ya distingue entre:
+
+- `PENDING`: la plantilla se ha enviado realmente a Meta y está en revisión.
+- `PENDING_LOCAL`: el catálogo local cambió y se propagó a clínica, pero todavía no existe una revisión remota equivalente en Meta para esa versión.
+- `APPROVED`, `REJECTED`, `SIN_CONECTAR`: se mantienen con su semántica habitual.
+
+Regla operativa:
+
+- si existe una plantilla remota con el mismo nombre pero distinto contrato Meta-facing, la propagación no debe fingir una revisión real;
+- en ese caso el override local queda en `PENDING_LOCAL`;
+- el `syncTemplatesForWaba(...)` solo sube el override a `APPROVED` cuando el contenido remoto coincide realmente.
+
+Además, el motor V2 ya bloquea el envío de plantillas que no estén en `APPROVED`.
+
 ### 8. `Campañas Admin` (`AdminCampaignPlaybook`)
 
 Ya existe runtime real para la capa de campañas admin:

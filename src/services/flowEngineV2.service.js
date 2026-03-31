@@ -1471,8 +1471,7 @@ function toLowerSafe(value) {
 
 function isTemplateBlockedForSend(statusValue) {
   const status = toLowerSafe(statusValue);
-  if (!status) return false;
-  return ['rejected', 'disabled', 'deleted', 'archived'].includes(status);
+  return status !== 'approved';
 }
 
 function normalizeStringArray(value) {
@@ -2106,7 +2105,7 @@ async function handleSendWhatsapp(node, context, runtime) {
 
     const templateStatus = toLowerSafe(template.status);
     if (isTemplateBlockedForSend(templateStatus)) {
-      throw new Error(`whatsapp_template_blocked:${template.status}`);
+      throw new Error(`whatsapp_template_not_approved:${template.status}`);
     }
 
     templateParams = resolveTemplateVariables(config, templateContext, template);

@@ -17,6 +17,13 @@ const {
 const META_GRAPH_BASE = process.env.META_GRAPH_BASE_URL || process.env.META_API_BASE_URL || 'https://graph.facebook.com';
 const META_API_VERSION = process.env.META_API_VERSION || 'v24.0';
 const DEFAULT_LANGUAGE = process.env.META_WHATSAPP_TEMPLATE_LANGUAGE || 'es';
+const WHATSAPP_TEMPLATE_STATUS = {
+  LOCAL_PENDING: 'PENDING_LOCAL',
+  PENDING: 'PENDING',
+  APPROVED: 'APPROVED',
+  REJECTED: 'REJECTED',
+  DISCONNECTED: 'SIN_CONECTAR',
+};
 
 function resolveGraphBase() {
   const base = META_GRAPH_BASE.replace(/\/+$/, '');
@@ -195,7 +202,8 @@ async function upsertPlaceholderTemplateForClinic({ clinicId, template }) {
 async function upsertClinicOverrideTemplateForClinic({
   clinicId,
   template,
-  status = 'PENDING',
+  status = WHATSAPP_TEMPLATE_STATUS.PENDING,
+  metaTemplateId,
   logger = console,
 }) {
   if (!clinicId || !template) return { action: 'skipped' };
@@ -222,6 +230,10 @@ async function upsertClinicOverrideTemplateForClinic({
     origin: 'catalog',
     is_active: !!template.is_active,
   };
+
+  if (metaTemplateId !== undefined) {
+    payload.meta_template_id = metaTemplateId;
+  }
 
   if (existing) {
     await existing.update(payload);
@@ -458,7 +470,10 @@ async function propagateCatalogTemplateToAllClinics({ templateCatalogId, logger 
         const result = await upsertClinicOverrideTemplateForClinic({
           clinicId,
           template,
-          status: template.is_active ? 'PENDING' : 'SIN_CONECTAR',
+          status: template.is_active
+            ? WHATSAPP_TEMPLATE_STATUS.LOCAL_PENDING
+            : WHATSAPP_TEMPLATE_STATUS.DISCONNECTED,
+          metaTemplateId: null,
           logger,
         });
         if (result.action === 'created') summary.placeholders_created += 1;
@@ -494,7 +509,10 @@ async function propagateCatalogTemplateToAllClinics({ templateCatalogId, logger 
           const result = await upsertClinicOverrideTemplateForClinic({
             clinicId,
             template,
-            status: template.is_active ? 'PENDING' : 'SIN_CONECTAR',
+            status: template.is_active
+              ? WHATSAPP_TEMPLATE_STATUS.LOCAL_PENDING
+              : WHATSAPP_TEMPLATE_STATUS.DISCONNECTED,
+            metaTemplateId: null,
             logger,
           });
           if (result.action === 'created') summary.placeholders_created += 1;
@@ -522,7 +540,8 @@ async function propagateCatalogTemplateToAllClinics({ templateCatalogId, logger 
       const result = await upsertClinicOverrideTemplateForClinic({
         clinicId,
         template,
-        status: 'PENDING',
+        status: WHATSAPP_TEMPLATE_STATUS.PENDING,
+        metaTemplateId: metaResp?.id || null,
         logger,
       });
       if (result.action === 'created') summary.placeholders_created += 1;
@@ -669,17 +688,27 @@ async function syncTemplatesForWaba({ wabaId, accessToken }) {
     const remoteStatus = String(remote.status || '').trim().toUpperCase();
 
     let nextStatus = override.status;
+    let nextMetaTemplateId = override.meta_template_id || null;
     if (sameComponents) {
       nextStatus = remoteStatus || override.status;
+      nextMetaTemplateId = remote.id || override.meta_template_id || null;
     } else if (['REJECTED', 'DISAPPROVED', 'DECLINED'].includes(remoteStatus)) {
-      nextStatus = 'REJECTED';
+      nextStatus = WHATSAPP_TEMPLATE_STATUS.LOCAL_PENDING;
+      nextMetaTemplateId =
+        String(override.meta_template_id || '') === String(remote.id || '')
+          ? null
+          : (override.meta_template_id || null);
     } else if (['PENDING', 'IN_REVIEW', 'APPROVED'].includes(remoteStatus)) {
-      nextStatus = 'PENDING';
+      nextStatus = WHATSAPP_TEMPLATE_STATUS.LOCAL_PENDING;
+      nextMetaTemplateId =
+        String(override.meta_template_id || '') === String(remote.id || '')
+          ? null
+          : (override.meta_template_id || null);
     }
 
     await override.update({
       status: nextStatus,
-      meta_template_id: remote.id || override.meta_template_id || null,
+      meta_template_id: nextMetaTemplateId,
       last_synced_at: now,
     });
   }
