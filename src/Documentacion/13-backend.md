@@ -1508,9 +1508,9 @@ Contrato del modo temporal:
   "mode": "appointment_booking_timing",
   "switch_type": "appointment_booking",
   "switch_rules": [
-    { "id": "branch_1", "match_window": "same_day", "cutoff_time": "09:00" },
-    { "id": "branch_2", "match_window": "day_before", "cutoff_time": "09:00" },
-    { "id": "branch_3", "match_window": "week_before", "cutoff_time": "09:00" }
+    { "id": "branch_1", "match_window": "same_day" },
+    { "id": "branch_2", "match_window": "day_before" },
+    { "id": "branch_3", "match_window": "more_than_day_before" }
   ]
 }
 ```
@@ -1522,19 +1522,18 @@ Salidas requeridas:
 
 Semántica:
 
-- usa la hora local de la clínica
+- usa la fecha local de la clínica
 - compara `CitasPacientes.created_at` frente a la fecha local de la cita (`inicio`)
-- cada regla define el inicio de su tramo con `cutoff_time`
-  - `same_day`: desde `fecha_cita @ HH:mm`
-  - `day_before`: desde `fecha_cita - 1 día @ HH:mm` hasta `fecha_cita @ HH:mm`
-  - `week_before`: desde `fecha_cita - 7 días @ HH:mm` hasta `fecha_cita - 1 día @ HH:mm`
+- cada regla cubre una ventana cerrada por día natural
+  - `same_day`: la cita se añadió a la agenda el mismo día que la cita
+  - `day_before`: la cita se añadió a la agenda el día anterior al de la cita
+  - `more_than_day_before`: la cita se añadió a la agenda más de un día antes de la fecha de la cita
 - si no encaja en ninguna regla, sale por `on_else`
 
 Validaciones:
 
 - `switch_rules` no puede estar vacío
 - no se repite `match_window`
-- `cutoff_time` debe venir en `HH:mm`
 - cada regla necesita su salida en `node.outputs`
 - `on_else` es obligatorio
 

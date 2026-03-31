@@ -50,7 +50,7 @@ const FIELD_CHECK_LEFT_REF_SOURCES = new Set(['node_output', 'trigger_data', 'co
 const FIELD_CHECK_VALUE_TYPES = new Set(['string', 'number', 'boolean']);
 const FIELD_CHECK_MODE_VALUES = new Set(['simple', 'appointment_booking_timing']);
 const FIELD_CHECK_SWITCH_TYPE_VALUES = new Set(['appointment_booking']);
-const FIELD_CHECK_APPOINTMENT_WINDOW_VALUES = new Set(['same_day', 'day_before', 'week_before']);
+const FIELD_CHECK_APPOINTMENT_WINDOW_VALUES = new Set(['same_day', 'day_before', 'more_than_day_before']);
 const DEFAULT_TIMEZONE = 'Europe/Madrid';
 const FIELD_CHECK_OPERATOR_TYPE_COMPAT = {
   string: ['equals', 'not_equals', 'contains', 'exists'],
@@ -2797,11 +2797,10 @@ function normalizeFieldCheckSwitchRules(rawRules) {
     if (seen.has(id)) return;
     seen.add(id);
     const matchWindow = cleanString(rule.match_window) || 'same_day';
-    const cutoffTime = cleanString(rule.cutoff_time) || '09:00';
+    const normalizedWindow = matchWindow === 'week_before' ? 'more_than_day_before' : matchWindow;
     normalized.push({
       id,
-      match_window: FIELD_CHECK_APPOINTMENT_WINDOW_VALUES.has(matchWindow) ? matchWindow : 'same_day',
-      cutoff_time: /^\d{2}:\d{2}$/.test(cutoffTime) ? cutoffTime : '09:00',
+      match_window: FIELD_CHECK_APPOINTMENT_WINDOW_VALUES.has(normalizedWindow) ? normalizedWindow : 'same_day',
     });
   });
   return normalized;
@@ -2898,41 +2897,21 @@ function evaluateSimpleFieldCheck(config, context) {
 }
 
 function resolveAppointmentBookingWindowMatch(rule, appointmentDateLocal, bookedAt, timeZone) {
-  const cutoffTime = cleanString(rule?.cutoff_time) || '09:00';
-  let startDate = null;
-  let endDate = null;
-
-  switch (cleanString(rule?.match_window)) {
-    case 'same_day':
-      startDate = appointmentDateLocal;
-      endDate = addDaysToLocalDate(appointmentDateLocal, 1);
-      break;
-    case 'day_before':
-      startDate = addDaysToLocalDate(appointmentDateLocal, -1);
-      endDate = appointmentDateLocal;
-      break;
-    case 'week_before':
-      startDate = addDaysToLocalDate(appointmentDateLocal, -7);
-      endDate = addDaysToLocalDate(appointmentDateLocal, -1);
-      break;
-    default:
-      return false;
-  }
-
-  if (!startDate || !endDate) {
+  const bookingDateLocal = formatDateLocal(bookedAt, timeZone);
+  if (!appointmentDateLocal || !bookingDateLocal) {
     return false;
   }
 
-  const startAt = localDateTimeToUtc(startDate, cutoffTime, timeZone);
-  const endAt = localDateTimeToUtc(endDate, cutoffTime, timeZone);
-  if (!(startAt instanceof Date) || !Number.isFinite(startAt.getTime())) {
-    throw new Error('field_check_invalid_cutoff_time');
+  switch (cleanString(rule?.match_window)) {
+    case 'same_day':
+      return bookingDateLocal === appointmentDateLocal;
+    case 'day_before':
+      return bookingDateLocal === addDaysToLocalDate(appointmentDateLocal, -1);
+    case 'more_than_day_before':
+      return bookingDateLocal < addDaysToLocalDate(appointmentDateLocal, -1);
+    default:
+      return false;
   }
-  if (!(endAt instanceof Date) || !Number.isFinite(endAt.getTime())) {
-    throw new Error('field_check_invalid_cutoff_time');
-  }
-
-  return bookedAt.getTime() >= startAt.getTime() && bookedAt.getTime() < endAt.getTime();
 }
 
 function evaluateAppointmentBookingTimingFieldCheck(config, context) {
@@ -2975,7 +2954,6 @@ function evaluateAppointmentBookingTimingFieldCheck(config, context) {
     decision: !!matchedRule,
     matched_rule_id: matchedRule?.id || null,
     matched_window: matchedRule?.match_window || null,
-    cutoff_time: matchedRule?.cutoff_time || null,
     appointment_date_local: appointmentDateLocal,
     booking_created_at: appointmentCreatedAt.toISOString(),
     time_zone: timeZone,

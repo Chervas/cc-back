@@ -66,7 +66,7 @@ const FIELD_CHECK_VALUE_TYPES = ['string', 'number', 'boolean'];
 const FIELD_CHECK_OPERATOR_OPTIONS = ['equals', 'not_equals', 'contains', 'greater_than', 'less_than', 'exists'];
 const FIELD_CHECK_MODE_OPTIONS = ['simple', 'appointment_booking_timing'];
 const FIELD_CHECK_SWITCH_TYPE_OPTIONS = ['appointment_booking'];
-const FIELD_CHECK_APPOINTMENT_WINDOW_OPTIONS = ['same_day', 'day_before', 'week_before'];
+const FIELD_CHECK_APPOINTMENT_WINDOW_OPTIONS = ['same_day', 'day_before', 'more_than_day_before'];
 const DEFAULT_TIMEZONE = 'Europe/Madrid';
 const FIELD_CHECK_OPERATOR_TYPE_COMPAT = {
   string: ['equals', 'not_equals', 'contains', 'exists'],
@@ -254,11 +254,10 @@ function normalizeFieldCheckSwitchRules(rawRules) {
     if (seen.has(id)) return;
     seen.add(id);
     const matchWindow = cleanString(rule.match_window) || 'same_day';
-    const cutoffTime = cleanString(rule.cutoff_time) || '09:00';
+    const normalizedWindow = matchWindow === 'week_before' ? 'more_than_day_before' : matchWindow;
     normalized.push({
       id,
-      match_window: FIELD_CHECK_APPOINTMENT_WINDOW_OPTIONS.includes(matchWindow) ? matchWindow : 'same_day',
-      cutoff_time: /^\d{2}:\d{2}$/.test(cutoffTime) ? cutoffTime : '09:00',
+      match_window: FIELD_CHECK_APPOINTMENT_WINDOW_OPTIONS.includes(normalizedWindow) ? normalizedWindow : 'same_day',
     });
   });
   return normalized;
@@ -290,7 +289,7 @@ function normalizeFieldCheckNode(rawNode) {
 
   const outputSchema = normalizedMode === 'appointment_booking_timing'
     ? Object.fromEntries([
-        ...normalizedConfig.switch_rules.map((rule) => [rule.id, { label: `${rule.match_window}:${rule.cutoff_time}` }]),
+        ...normalizedConfig.switch_rules.map((rule) => [rule.id, { label: rule.match_window }]),
         ['on_else', { label: 'Resto' }],
       ])
     : undefined;
@@ -2780,20 +2779,6 @@ function validateNodeConfig(node, nodeMap, templateLookup = {}) {
                 key: `switch_rules[${index}].match_window`,
                 value: rule.match_window,
                 allowed: FIELD_CHECK_APPOINTMENT_WINDOW_OPTIONS,
-              }
-            )
-          );
-        }
-        if (!/^\d{2}:\d{2}$/.test(rule.cutoff_time || '')) {
-          errors.push(
-            buildValidationError(
-              'node_config_invalid',
-              `El nodo ${nodeId} requiere una hora válida en cada bifurcación`,
-              {
-                node_id: nodeId,
-                node_type: nodeType,
-                key: `switch_rules[${index}].cutoff_time`,
-                value: rule.cutoff_time || null,
               }
             )
           );
