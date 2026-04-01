@@ -1779,24 +1779,7 @@ async function resolveGroupContextForClinicIds(inputClinicIds) {
     )
   );
 
-  let expandedClinicIds = [...clinicIds];
-  if (groupIds.length) {
-    const siblingClinics = await Clinica.findAll({
-      where: { grupoClinicaId: { [Op.in]: groupIds } },
-      attributes: ['id_clinica'],
-      raw: true,
-    });
-    expandedClinicIds = Array.from(
-      new Set([
-        ...clinicIds,
-        ...siblingClinics
-          .map((clinic) => Number.parseInt(String(clinic.id_clinica), 10))
-          .filter((id) => Number.isInteger(id) && id > 0),
-      ])
-    );
-  }
-
-  return { clinic_ids: expandedClinicIds, group_ids: groupIds };
+  return { clinic_ids: clinicIds, group_ids: groupIds };
 }
 
 async function resolveClinicIdsForGroup(groupId) {
