@@ -561,6 +561,40 @@ Regla operativa:
 - cambiar el default en código no modifica producción/integración si la variable ya existe en `.env` o en PM2;
 - si se ajusta el cron, hay que revisar también el valor efectivo en entorno y reiniciar con actualización de variables si aplica.
 
+### Liderazgo explícito del cron
+
+Desde `2026-04-01`, el arranque del scheduler ya no debe depender de que varios runtimes compartan `JOBS_AUTO_START=true`.
+
+Nueva regla:
+
+- `JOBS_CRON_LEADER=true`: este runtime es el que manda y arranca `jobScheduler` + `metaSyncJobs.start()`.
+- `JOBS_CRON_LEADER=false`: este runtime no debe encolar cron jobs periódicos.
+
+Configuración operativa actual:
+
+- `clinicaclick-integracion`: `JOBS_CRON_LEADER=true`
+- `clinicaclick-auth`: `JOBS_CRON_LEADER=false`
+- `clinicaclick-staging`: `JOBS_CRON_LEADER=false`
+
+Objetivo:
+
+- evitar duplicados horarios de `whatsapp_templates_sync`;
+- evitar que `auth` o `staging` compitan con `integracion` sobre la misma base de datos;
+- poder migrar el liderazgo sin tocar código.
+
+### Regla de migración a staging
+
+Cuando `staging` deba convertirse en el runtime que manda los cron jobs:
+
+1. poner `JOBS_CRON_LEADER=false` en `integracion`;
+2. poner `JOBS_CRON_LEADER=true` en `staging`;
+3. reiniciar ambos procesos con actualización de `.env`.
+
+Importante:
+
+- no deben coexistir dos runtimes con `JOBS_CRON_LEADER=true` contra la misma base;
+- `JOBS_AUTO_START=true` por sí solo ya no basta para arrancar cron.
+
 ## 2026-03-23 - Cache ad-level de Google Ads para análisis de campañas
 
 > **Estado:** implementado en `back-integracion`.
