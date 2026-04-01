@@ -3772,7 +3772,12 @@ exports.listTemplates = async (req, res) => {
                 : { [Op.in]: expandedClinicIds },
           },
           ...(relatedGroupIds.length
-            ? [{ group_id: relatedGroupIds.length === 1 ? relatedGroupIds[0] : { [Op.in]: relatedGroupIds } }]
+            ? [{
+                [Op.and]: [
+                  { clinic_id: null },
+                  { group_id: relatedGroupIds.length === 1 ? relatedGroupIds[0] : { [Op.in]: relatedGroupIds } },
+                ],
+              }]
             : []),
           { is_system: true },
         ],
@@ -4451,7 +4456,7 @@ exports.deleteTemplate = async (req, res) => {
 
         return (
           (rowClinicId && expandedClinicIds.includes(rowClinicId)) ||
-          (rowGroupId && relatedGroupIds.includes(rowGroupId)) ||
+          (!rowClinicId && rowGroupId && relatedGroupIds.includes(rowGroupId)) ||
           row.is_system === true ||
           isLegacyOwner
         );
