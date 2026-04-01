@@ -3792,13 +3792,6 @@ exports.listTemplates = async (req, res) => {
             ? [{ group_id: relatedGroupIds.length === 1 ? relatedGroupIds[0] : { [Op.in]: relatedGroupIds } }]
             : []),
           { is_system: true },
-          {
-            [Op.and]: [
-              { clinic_id: null },
-              { group_id: null },
-              { created_by: access.user_id },
-            ],
-          },
         ],
       });
     }
@@ -3816,13 +3809,6 @@ exports.listTemplates = async (req, res) => {
           { group_id: groupId },
           ...(clinicIdsInGroup.length ? [{ clinic_id: { [Op.in]: clinicIdsInGroup } }] : []),
           { is_system: true },
-          {
-            [Op.and]: [
-              { clinic_id: null },
-              { group_id: null },
-              { created_by: access.user_id },
-            ],
-          },
         ],
       });
     }
