@@ -213,6 +213,23 @@ function getTemplateIdentityKey(templateLike) {
   return `${name}|${language}`;
 }
 
+function shouldHideLegacySystemTemplate(templateLike, usageLike) {
+  const catalogTemplateId = Number(templateLike?.catalog_template_id || templateLike?.catalog?.id);
+  if (Number.isFinite(catalogTemplateId) && catalogTemplateId > 0) {
+    return false;
+  }
+
+  const origin = String(templateLike?.origin || '').trim().toLowerCase();
+  const baseName = String(templateLike?.name || '').trim().toLowerCase().replace(/_v\d+$/i, '');
+  if (origin !== 'external' || !baseName.startsWith('clinicaclick_')) {
+    return false;
+  }
+
+  const flowCount = Array.isArray(usageLike?.flows) ? usageLike.flows.length : 0;
+  const treatmentCount = Array.isArray(usageLike?.treatments) ? usageLike.treatments.length : 0;
+  return flowCount === 0 && treatmentCount === 0;
+}
+
 function isObject(value) {
   return !!value && typeof value === 'object' && !Array.isArray(value);
 }
@@ -883,14 +900,17 @@ exports.listTemplatesForClinic = async (req, res) => {
       : new Map();
 
     return res.json(
-      templates.map((item) => {
-        const json = item.toJSON ? item.toJSON() : item;
-        return {
-          ...json,
-          variables: buildWhatsappTemplateVariableContract(json),
-          usage: usageMap.get(Number(json.id)) || { flows: [], treatments: [] },
-        };
-      })
+      templates
+        .map((item) => {
+          const json = item.toJSON ? item.toJSON() : item;
+          const usage = usageMap.get(Number(json.id)) || { flows: [], treatments: [] };
+          return {
+            ...json,
+            variables: buildWhatsappTemplateVariableContract(json),
+            usage,
+          };
+        })
+        .filter((item) => !(clinicId && shouldHideLegacySystemTemplate(item, item.usage)))
     );
   } catch (err) {
     console.error('Error listTemplatesForClinic', err);
