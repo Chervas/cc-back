@@ -58,6 +58,56 @@ function assertAdmin(req, res) {
   return true;
 }
 
+function buildDuplicateDisplayName(baseDisplayName, duplicateIndex) {
+  const base = String(baseDisplayName || '').trim();
+  if (!base) return duplicateIndex > 1 ? `Copia ${duplicateIndex}` : 'Copia';
+  return duplicateIndex > 1 ? `${base} (copia ${duplicateIndex})` : `${base} (copia)`;
+}
+
+function buildDuplicateTechnicalName(baseName, duplicateIndex) {
+  const normalized = String(baseName || '')
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9_]+/g, '_')
+    .replace(/^_+|_+$/g, '');
+  const safeBase = normalized || 'plantilla';
+  return duplicateIndex > 1 ? `${safeBase}_copy_${duplicateIndex}` : `${safeBase}_copy`;
+}
+
+async function resolveWhatsappCatalogDuplicateNames(itemId, { baseName, baseDisplayName }) {
+  const rows = await WhatsappTemplateCatalog.findAll({
+    attributes: ['id', 'name', 'display_name'],
+    raw: true,
+  });
+  const takenNames = new Set(
+    rows
+      .filter((row) => Number(row.id) !== Number(itemId))
+      .map((row) => String(row.name || '').trim().toLowerCase())
+      .filter(Boolean)
+  );
+  const takenDisplayNames = new Set(
+    rows
+      .filter((row) => Number(row.id) !== Number(itemId))
+      .map((row) => String(row.display_name || '').trim().toLowerCase())
+      .filter(Boolean)
+  );
+
+  let duplicateIndex = 1;
+  let nextName = buildDuplicateTechnicalName(baseName, duplicateIndex);
+  let nextDisplayName = buildDuplicateDisplayName(baseDisplayName || baseName, duplicateIndex);
+
+  while (
+    takenNames.has(String(nextName).trim().toLowerCase()) ||
+    takenDisplayNames.has(String(nextDisplayName).trim().toLowerCase())
+  ) {
+    duplicateIndex += 1;
+    nextName = buildDuplicateTechnicalName(baseName, duplicateIndex);
+    nextDisplayName = buildDuplicateDisplayName(baseDisplayName || baseName, duplicateIndex);
+  }
+
+  return { name: nextName, display_name: nextDisplayName };
+}
+
 async function getUserGroupIds({ clinicIds, isAggregateAllowed }) {
   if (isAggregateAllowed) {
     const clinics = await Clinica.findAll({
@@ -1255,6 +1305,70 @@ exports.toggleCatalog = async (req, res) => {
   } catch (err) {
     console.error('Error toggleCatalog', err);
     return res.status(500).json({ error: 'Error actualizando estado' });
+  }
+};
+
+exports.duplicateCatalog = async (req, res) => {
+  if (!assertAdmin(req, res)) return;
+  try {
+    const id = Number(req.params.id);
+    const item = await WhatsappTemplateCatalog.findByPk(id, {
+      include: [
+        {
+          model: WhatsappTemplateCatalogDiscipline,
+          as: 'disciplinas',
+          attributes: ['id', 'disciplina_code'],
+        },
+      ],
+    });
+    if (!item) return res.status(404).json({ error: 'catalog_not_found' });
+
+    const names = await resolveWhatsappCatalogDuplicateNames(item.id, {
+      baseName: item.name,
+      baseDisplayName: item.display_name || item.name,
+    });
+
+    const duplicated = await WhatsappTemplateCatalog.create({
+      name: names.name,
+      display_name: names.display_name,
+      category: item.category,
+      body_text: item.body_text,
+      variables: item.variables || null,
+      components: item.components || null,
+      is_generic: !!item.is_generic,
+      is_active: false,
+    });
+
+    const disciplinaCodes = Array.isArray(item.disciplinas)
+      ? item.disciplinas
+          .map((disc) => (typeof disc?.disciplina_code === 'string' ? disc.disciplina_code.trim() : null))
+          .filter(Boolean)
+      : [];
+
+    if (!duplicated.is_generic && disciplinaCodes.length) {
+      await WhatsappTemplateCatalogDiscipline.bulkCreate(
+        disciplinaCodes.map((code) => ({
+          template_catalog_id: duplicated.id,
+          disciplina_code: code,
+          created_at: new Date(),
+          updated_at: new Date(),
+        }))
+      );
+    }
+
+    const created = await WhatsappTemplateCatalog.findByPk(duplicated.id, {
+      include: [
+        {
+          model: WhatsappTemplateCatalogDiscipline,
+          as: 'disciplinas',
+          attributes: ['id', 'disciplina_code'],
+        },
+      ],
+    });
+    return res.status(201).json(created);
+  } catch (err) {
+    console.error('Error duplicateCatalog', err);
+    return res.status(500).json({ error: 'Error duplicando catálogo' });
   }
 };
 

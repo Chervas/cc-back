@@ -63,6 +63,56 @@ function sanitizeTemplateReference(raw) {
   return base || null;
 }
 
+function buildDuplicateDisplayName(baseDisplayName, duplicateIndex) {
+  const base = String(baseDisplayName || '').trim();
+  if (!base) return duplicateIndex > 1 ? `Copia ${duplicateIndex}` : 'Copia';
+  return duplicateIndex > 1 ? `${base} (copia ${duplicateIndex})` : `${base} (copia)`;
+}
+
+function buildDuplicateCatalogName(baseName, duplicateIndex) {
+  const normalized = String(baseName || '')
+    .toLowerCase()
+    .trim()
+    .replace(/[^a-z0-9_]+/g, '_')
+    .replace(/^_+|_+$/g, '');
+  const safeBase = normalized || 'automatizacion';
+  return duplicateIndex > 1 ? `${safeBase}_copy_${duplicateIndex}` : `${safeBase}_copy`;
+}
+
+async function resolveAutomationCatalogDuplicateNames(itemId, { baseName, baseDisplayName }) {
+  const rows = await AutomationFlowCatalog.findAll({
+    attributes: ['id', 'name', 'display_name'],
+    raw: true,
+  });
+  const takenNames = new Set(
+    rows
+      .filter((row) => Number(row.id) !== Number(itemId))
+      .map((row) => String(row.name || '').trim().toLowerCase())
+      .filter(Boolean)
+  );
+  const takenDisplayNames = new Set(
+    rows
+      .filter((row) => Number(row.id) !== Number(itemId))
+      .map((row) => String(row.display_name || '').trim().toLowerCase())
+      .filter(Boolean)
+  );
+
+  let duplicateIndex = 1;
+  let nextName = buildDuplicateCatalogName(baseName, duplicateIndex);
+  let nextDisplayName = buildDuplicateDisplayName(baseDisplayName || baseName, duplicateIndex);
+
+  while (
+    takenNames.has(String(nextName).trim().toLowerCase()) ||
+    takenDisplayNames.has(String(nextDisplayName).trim().toLowerCase())
+  ) {
+    duplicateIndex += 1;
+    nextName = buildDuplicateCatalogName(baseName, duplicateIndex);
+    nextDisplayName = buildDuplicateDisplayName(baseDisplayName || baseName, duplicateIndex);
+  }
+
+  return { name: nextName, display_name: nextDisplayName };
+}
+
 function assertAdmin(req, res) {
   const uid = Number(req.userData?.userId);
   if (!uid || !ADMIN_USER_IDS.includes(uid)) {
@@ -423,6 +473,59 @@ exports.deleteCatalog = async (req, res) => {
   } catch (err) {
     console.error('Error deleteCatalog', err);
     return res.status(500).json({ error: 'Error eliminando catálogo' });
+  }
+};
+
+exports.duplicateCatalog = async (req, res) => {
+  try {
+    if (!assertAdmin(req, res)) return;
+    const item = await AutomationFlowCatalog.findByPk(req.params.id, {
+      include: [{ model: AutomationFlowCatalogDiscipline, as: 'disciplinas' }],
+    });
+    if (!item) {
+      return res.status(404).json({ error: 'catalog_not_found' });
+    }
+
+    const names = await resolveAutomationCatalogDuplicateNames(item.id, {
+      baseName: item.name,
+      baseDisplayName: item.display_name || item.name,
+    });
+
+    const duplicated = await AutomationFlowCatalog.create({
+      name: names.name,
+      display_name: names.display_name,
+      description: item.description || null,
+      trigger_type: item.trigger_type,
+      steps: item.steps || [],
+      template_key: item.template_key || null,
+      template_version: parseIntOrNull(item.template_version),
+      is_generic: !!item.is_generic,
+      is_active: false,
+    });
+
+    const disciplinaCodes = Array.isArray(item.disciplinas)
+      ? item.disciplinas
+          .map((disc) => (typeof disc?.disciplina_code === 'string' ? disc.disciplina_code.trim() : null))
+          .filter(Boolean)
+      : [];
+
+    if (!duplicated.is_generic && disciplinaCodes.length) {
+      await AutomationFlowCatalogDiscipline.bulkCreate(
+        disciplinaCodes.map((code) => ({ flow_catalog_id: duplicated.id, disciplina_code: code }))
+      );
+    }
+
+    const createdItem = await AutomationFlowCatalog.findByPk(duplicated.id, {
+      include: [{ model: AutomationFlowCatalogDiscipline, as: 'disciplinas' }],
+    });
+    const linkedTemplate = await resolveLinkedTemplateForCatalog({
+      templateKey: createdItem.template_key,
+      templateVersion: createdItem.template_version,
+    });
+    return res.status(201).json(serializeCatalogItem(createdItem, linkedTemplate));
+  } catch (err) {
+    console.error('Error duplicateCatalog', err);
+    return res.status(500).json({ error: 'Error duplicando catálogo' });
   }
 };
 
