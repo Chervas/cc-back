@@ -1733,6 +1733,8 @@ Corrección aplicada en los flujos activos de cita el `2026-03-28`:
 El `2026-03-27` la capa `AutomationFlowCatalog` no actúa todavía como fuente de verdad viva del sistema:
 
 - `propagateCatalogAutomationToClinics(...)` crea o actualiza **borradores** V2 por clínica a partir de un `template_key` enlazado;
+- la propagación debe resolver siempre el flujo base neutro del catálogo y no reutilizar copias de clínica como fuente;
+- cada familia propagada por clínica debe tener `public_id` propio, distinto del asset base del catálogo;
 - no modifica en caliente flujos ya publicados;
 - no versiona ni valida el contrato de placeholders de las plantillas WhatsApp que usan esos nodos;
 - varios registros históricos del catálogo siguen con `template_key = NULL`, por lo que no son propagables como catálogo funcional.
@@ -1750,6 +1752,19 @@ Si se quiere usar el catálogo como gobierno real, hacen falta al menos estas ga
 1. todo item de catálogo debe enlazar a un `template_key` válido y publicado;
 2. cada nodo `action/send_whatsapp` debe conservar contrato verificable de la plantilla elegida (`template_id`/`catalog_template_id` + número/semántica de placeholders);
 3. publicar un flujo debe invalidarse si el contrato real de `WhatsappTemplates.components` ya no coincide con el nodo.
+
+Regla operativa vigente tras el fix del `2026-04-01`:
+
+- si el catálogo enlaza un flujo base por `public_id`, la propagación a clínicas debe:
+  - preferir la versión **sin scope** (`clinic_id = null`, `group_id = null`);
+  - normalizar cualquier `template_key` heredado quitando sufijos previos `__clinic_<id>`;
+  - generar el `template_key` final de clínica como `<base>__clinic_<id>`;
+  - asignar un `public_id` propio a la familia propagada de esa clínica.
+
+Esto evita dos regresiones:
+
+1. que el `template_key` se vaya concatenando (`base__clinic_1__clinic_19__clinic_22...`);
+2. que publicar una copia de clínica desactive por accidente el flujo base del catálogo al compartir `public_id`.
 
 #### Semántica pendiente de normalizar en contexto de cita
 
@@ -1935,6 +1950,10 @@ Reglas:
     - tratamiento guarda `appointment_automation_template_key`;
     - runtime resuelve la última versión publicada activa (`published_at != null`, `is_active = true`);
     - las versiones publicadas anteriores del mismo `template_key` pasan a `deprecadas`.
+  - Desactivar un flujo publicado en clínica lo saca de la resolución operativa:
+    - `appointment_created` no lo volverá a seleccionar en `resolveClinicFallbackTemplate(...)`;
+    - los recordatorios/after ya programados no se ejecutan, porque `fireScheduledTrigger(...)` vuelve a comprobar `is_active = true` y `published_at != null` antes de lanzar la ejecución;
+    - el resultado práctico es que desactivar el flujo en clínica detiene la automatización sin necesidad de borrar jobs pendientes.
   - Las superficies v1 de flujos de cita (`AppointmentFlowTemplate`, `AppointmentFlowInstance`, `/api/tratamientos/:id/flow`, `/api/appointment-flow-templates`) se consideran retiradas en integración.
 
 - Merge hygiene
