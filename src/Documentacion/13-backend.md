@@ -2072,8 +2072,9 @@ Para `WhatsappTemplates`, el backend ya distingue entre:
 
 Regla operativa:
 
-- si existe una plantilla remota con el mismo nombre pero distinto contrato Meta-facing, la propagación no debe fingir una revisión real;
-- en ese caso el override local queda en `PENDING_LOCAL`;
+- si existe una plantilla remota con el mismo nombre pero distinto contrato Meta-facing, la propagación debe intentar abrir igualmente una revisión real en Meta;
+- si Meta acepta esa creación, el override local queda en `PENDING`;
+- si Meta la rechaza, el override local queda en `PENDING_LOCAL` y se persiste el motivo exacto devuelto por Meta en `rejection_reason`;
 - el `syncTemplatesForWaba(...)` solo sube el override a `APPROVED` cuando el contenido remoto coincide realmente.
 - el `syncTemplatesForWaba(...)` tampoco debe heredar el `meta_template_id` de la plantilla remota vieja cuando el contenido no coincide, para no dar a entender que esa revisión remota corresponde al override local.
 

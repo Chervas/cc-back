@@ -87,6 +87,14 @@ function isRetryableMetaError(err) {
   return false;
 }
 
+function parseMetaError(err) {
+  const base = err?.response?.data || err?.message || err;
+  const nestedError = base?.error?.error || base?.error || base;
+  const code = nestedError?.code || null;
+  const message = nestedError?.message || String(base?.message || base || '');
+  return { code, message, raw: base };
+}
+
 async function selectCatalogTemplatesByDisciplines(disciplinas) {
   const generic = await WhatsappTemplateCatalog.findAll({
     where: { is_active: true, is_generic: true },
@@ -188,6 +196,7 @@ async function upsertPlaceholderTemplateForClinic({ clinicId, template }) {
     catalog_template_id: template.id,
     origin: 'catalog',
     is_active: !!template.is_active,
+    rejection_reason: null,
   };
 
   if (existing) {
@@ -204,6 +213,7 @@ async function upsertClinicOverrideTemplateForClinic({
   template,
   status = WHATSAPP_TEMPLATE_STATUS.PENDING,
   metaTemplateId,
+  rejectionReason,
   logger = console,
 }) {
   if (!clinicId || !template) return { action: 'skipped' };
@@ -235,6 +245,10 @@ async function upsertClinicOverrideTemplateForClinic({
     payload.meta_template_id = metaTemplateId;
   }
 
+  if (rejectionReason !== undefined) {
+    payload.rejection_reason = rejectionReason;
+  }
+
   if (existing) {
     await existing.update(payload);
     return { action: 'updated', row: existing };
@@ -248,6 +262,16 @@ async function upsertClinicOverrideTemplateForClinic({
     status,
   });
   return { action: 'created', row };
+}
+
+function buildLocalPendingReasonFromMetaError(err) {
+  const parsed = parseMetaError(err);
+  const detail = String(parsed?.message || '').trim();
+  const code = parsed?.code ? ` [${parsed.code}]` : '';
+  if (!detail) {
+    return `Meta no ha aceptado abrir una revisión nueva para esta plantilla${code}.`;
+  }
+  return `Meta no ha aceptado abrir una revisión nueva para esta plantilla${code}: ${detail}`;
 }
 
 async function resolveDisciplines({ clinicId, groupId }) {
@@ -466,20 +490,66 @@ async function propagateCatalogTemplateToAllClinics({ templateCatalogId, logger 
           });
           continue;
         }
+        if (!template.is_active) {
+          const result = await upsertClinicOverrideTemplateForClinic({
+            clinicId,
+            template,
+            status: WHATSAPP_TEMPLATE_STATUS.DISCONNECTED,
+            metaTemplateId: null,
+            rejectionReason: null,
+            logger,
+          });
+          if (result.action === 'created') summary.placeholders_created += 1;
+          if (result.action === 'updated') summary.placeholders_updated += 1;
+          if (result?.row?.id) affectedTemplateInstances.set(Number(result.row.id), result.row);
+          continue;
+        }
 
-        const result = await upsertClinicOverrideTemplateForClinic({
-          clinicId,
-          template,
-          status: template.is_active
-            ? WHATSAPP_TEMPLATE_STATUS.LOCAL_PENDING
-            : WHATSAPP_TEMPLATE_STATUS.DISCONNECTED,
-          metaTemplateId: null,
-          logger,
-        });
-        if (result.action === 'created') summary.placeholders_created += 1;
-        if (result.action === 'updated') summary.placeholders_updated += 1;
-        if (result?.row?.id) affectedTemplateInstances.set(Number(result.row.id), result.row);
-        continue;
+        try {
+          const metaResp = await createTemplateInMeta({
+            wabaId,
+            accessToken: clinicConfig.accessToken,
+            template,
+            language: DEFAULT_LANGUAGE,
+          });
+
+          const result = await upsertClinicOverrideTemplateForClinic({
+            clinicId,
+            template,
+            status: WHATSAPP_TEMPLATE_STATUS.PENDING,
+            metaTemplateId: metaResp?.id || null,
+            rejectionReason: null,
+            logger,
+          });
+          if (result.action === 'created') summary.placeholders_created += 1;
+          if (result.action === 'updated') summary.placeholders_updated += 1;
+          if (result?.row?.id) affectedTemplateInstances.set(Number(result.row.id), result.row);
+          summary.created_in_meta += 1;
+          continue;
+        } catch (err) {
+          if (isRetryableMetaError(err)) {
+            throw err;
+          }
+          const reason = buildLocalPendingReasonFromMetaError(err);
+          const result = await upsertClinicOverrideTemplateForClinic({
+            clinicId,
+            template,
+            status: WHATSAPP_TEMPLATE_STATUS.LOCAL_PENDING,
+            metaTemplateId: null,
+            rejectionReason: reason,
+            logger,
+          });
+          if (result.action === 'created') summary.placeholders_created += 1;
+          if (result.action === 'updated') summary.placeholders_updated += 1;
+          if (result?.row?.id) affectedTemplateInstances.set(Number(result.row.id), result.row);
+          if (summary.errors.length < 25) {
+            summary.errors.push({
+              clinic_id: clinicId,
+              error: `meta_submission_rejected:${reason}`,
+            });
+          }
+          continue;
+        }
       }
 
       if (!syncedWabas.has(wabaId) && clinicConfig.accessToken) {
@@ -505,20 +575,66 @@ async function propagateCatalogTemplateToAllClinics({ templateCatalogId, logger 
             });
             continue;
           }
+          if (!template.is_active) {
+            const result = await upsertClinicOverrideTemplateForClinic({
+              clinicId,
+              template,
+              status: WHATSAPP_TEMPLATE_STATUS.DISCONNECTED,
+              metaTemplateId: null,
+              rejectionReason: null,
+              logger,
+            });
+            if (result.action === 'created') summary.placeholders_created += 1;
+            if (result.action === 'updated') summary.placeholders_updated += 1;
+            if (result?.row?.id) affectedTemplateInstances.set(Number(result.row.id), result.row);
+            continue;
+          }
 
-          const result = await upsertClinicOverrideTemplateForClinic({
-            clinicId,
-            template,
-            status: template.is_active
-              ? WHATSAPP_TEMPLATE_STATUS.LOCAL_PENDING
-              : WHATSAPP_TEMPLATE_STATUS.DISCONNECTED,
-            metaTemplateId: null,
-            logger,
-          });
-          if (result.action === 'created') summary.placeholders_created += 1;
-          if (result.action === 'updated') summary.placeholders_updated += 1;
-          if (result?.row?.id) affectedTemplateInstances.set(Number(result.row.id), result.row);
-          continue;
+          try {
+            const metaResp = await createTemplateInMeta({
+              wabaId,
+              accessToken: clinicConfig.accessToken,
+              template,
+              language: DEFAULT_LANGUAGE,
+            });
+
+            const result = await upsertClinicOverrideTemplateForClinic({
+              clinicId,
+              template,
+              status: WHATSAPP_TEMPLATE_STATUS.PENDING,
+              metaTemplateId: metaResp?.id || null,
+              rejectionReason: null,
+              logger,
+            });
+            if (result.action === 'created') summary.placeholders_created += 1;
+            if (result.action === 'updated') summary.placeholders_updated += 1;
+            if (result?.row?.id) affectedTemplateInstances.set(Number(result.row.id), result.row);
+            summary.created_in_meta += 1;
+            continue;
+          } catch (err) {
+            if (isRetryableMetaError(err)) {
+              throw err;
+            }
+            const reason = buildLocalPendingReasonFromMetaError(err);
+            const result = await upsertClinicOverrideTemplateForClinic({
+              clinicId,
+              template,
+              status: WHATSAPP_TEMPLATE_STATUS.LOCAL_PENDING,
+              metaTemplateId: null,
+              rejectionReason: reason,
+              logger,
+            });
+            if (result.action === 'created') summary.placeholders_created += 1;
+            if (result.action === 'updated') summary.placeholders_updated += 1;
+            if (result?.row?.id) affectedTemplateInstances.set(Number(result.row.id), result.row);
+            if (summary.errors.length < 25) {
+              summary.errors.push({
+                clinic_id: clinicId,
+                error: `meta_submission_rejected:${reason}`,
+              });
+            }
+            continue;
+          }
         }
       }
 
@@ -542,6 +658,7 @@ async function propagateCatalogTemplateToAllClinics({ templateCatalogId, logger 
         template,
         status: WHATSAPP_TEMPLATE_STATUS.PENDING,
         metaTemplateId: metaResp?.id || null,
+        rejectionReason: null,
         logger,
       });
       if (result.action === 'created') summary.placeholders_created += 1;
@@ -689,26 +806,31 @@ async function syncTemplatesForWaba({ wabaId, accessToken }) {
 
     let nextStatus = override.status;
     let nextMetaTemplateId = override.meta_template_id || null;
+    let nextRejectionReason = override.rejection_reason || null;
     if (sameComponents) {
       nextStatus = remoteStatus || override.status;
       nextMetaTemplateId = remote.id || override.meta_template_id || null;
+      nextRejectionReason = remote.rejected_reason || remote.rejection_reason || null;
     } else if (['REJECTED', 'DISAPPROVED', 'DECLINED'].includes(remoteStatus)) {
       nextStatus = WHATSAPP_TEMPLATE_STATUS.LOCAL_PENDING;
       nextMetaTemplateId =
         String(override.meta_template_id || '') === String(remote.id || '')
           ? null
           : (override.meta_template_id || null);
+      nextRejectionReason = override.rejection_reason || null;
     } else if (['PENDING', 'IN_REVIEW', 'APPROVED'].includes(remoteStatus)) {
       nextStatus = WHATSAPP_TEMPLATE_STATUS.LOCAL_PENDING;
       nextMetaTemplateId =
         String(override.meta_template_id || '') === String(remote.id || '')
           ? null
           : (override.meta_template_id || null);
+      nextRejectionReason = override.rejection_reason || null;
     }
 
     await override.update({
       status: nextStatus,
       meta_template_id: nextMetaTemplateId,
+      rejection_reason: nextRejectionReason,
       last_synced_at: now,
     });
   }
