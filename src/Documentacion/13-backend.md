@@ -128,6 +128,45 @@ En esta máquina `dev` y `staging` comparten base de datos. El riesgo real no es
 La UI de `Ajustes > Monitoreo del sistema` debe usar estos checks como semáforo visible, no solo los logs de servidor.
 El check de `GROQ_API_KEY` describe siempre el proceso activo en ese instante; si cambia `.env`, hay que reiniciar el backend para que el estado reflejado sea real.
 
+## 2026-04-01 - Propagación de plantillas WhatsApp con versionado técnico interno
+
+### Problema real detectado
+
+Editar una plantilla de catálogo y propagarla no bastaba cuando ya existía en Meta una versión aprobada con el mismo nombre técnico y un contrato distinto.
+
+Caso real:
+
+- `clinicaclick_confirmacion_cita` aprobada en Meta con `4` variables;
+- nueva definición local con `5` variables;
+- intentar reabrir revisión sobre el mismo `name` devolvía errores genéricos de Meta;
+- esperar al job horario no resolvía nada porque no había una revisión real nueva.
+
+### Regla nueva
+
+Cuando el contenido Meta-facing cambia para una plantilla de catálogo:
+
+1. ClinicaClick mantiene la **misma plantilla lógica** (`catalog_template_id`).
+2. El backend crea una **variante técnica** en Meta:
+   - `clinicaclick_confirmacion_cita_v2`
+   - `clinicaclick_confirmacion_cita_v3`
+   - etc.
+3. El override local de cada clínica pasa a apuntar a esa variante técnica.
+4. La UI sigue agrupando por `catalog_template_id`, no por `name`, para no duplicar la plantilla lógica.
+
+### Estados
+
+- `PENDING`: existe una revisión real abierta en Meta para la variante técnica actual.
+- `PENDING_LOCAL`: ni la variante técnica nueva ni una revisión equivalente han quedado abiertas en Meta.
+
+### Sync
+
+`syncTemplatesForWaba(...)` ya no degrada una plantilla versionada a `PENDING_LOCAL` si:
+
+- el `meta_template_id` coincide con la revisión remota, o
+- el `name` técnico versionado (`_v2`, `_v3`, ...) coincide con la plantilla remota de esa misma familia.
+
+Eso evita perder el enlace a revisiones `PENDING` recién creadas cuando Meta devuelve componentes normalizados de forma distinta.
+
 ## 2026-03-26 - Activos efectivos de marketing por clínica/grupo
 
 `Marketing > Campañas`, `Ajustes > Cuentas conectadas`, el intake web y Meta CAPI ya no deben razonar solo en términos de “hay una conexión”.

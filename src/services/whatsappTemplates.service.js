@@ -53,13 +53,169 @@ function stringifyTemplateComponents(value) {
   return JSON.stringify(parseMaybeJson(value) || []);
 }
 
+function cleanString(value) {
+  return typeof value === 'string' ? value.trim() : '';
+}
+
+function hasSameMetaFacingContent(template, instance) {
+  if (!template || !instance) return false;
+  return (
+    String(template.category || '').trim().toUpperCase() === String(instance.category || '').trim().toUpperCase()
+    && stringifyTemplateComponents(template.components) === stringifyTemplateComponents(instance.components)
+  );
+}
+
 function hasSameMetaFacingContract(template, instance) {
   if (!template || !instance) return false;
   return (
     String(template.name || '').trim() === String(instance.name || '').trim()
-    && String(template.category || '').trim().toUpperCase() === String(instance.category || '').trim().toUpperCase()
-    && stringifyTemplateComponents(template.components) === stringifyTemplateComponents(instance.components)
+    && hasSameMetaFacingContent(template, instance)
   );
+}
+
+function buildVersionedTechnicalTemplateName(baseName, version) {
+  const safeBaseName = cleanString(baseName);
+  if (!safeBaseName) return '';
+  const safeVersion = Number(version);
+  if (!Number.isFinite(safeVersion) || safeVersion <= 1) {
+    return safeBaseName;
+  }
+  return `${safeBaseName}_v${safeVersion}`;
+}
+
+function extractTechnicalTemplateVersion(baseName, candidateName) {
+  const safeBaseName = cleanString(baseName);
+  const safeCandidate = cleanString(candidateName);
+  if (!safeBaseName || !safeCandidate) return null;
+  if (safeCandidate === safeBaseName) return 1;
+  const match = safeCandidate.match(/^(.*)_v(\d+)$/i);
+  if (!match) return null;
+  if (cleanString(match[1]) !== safeBaseName) return null;
+  const parsed = Number(match[2]);
+  return Number.isFinite(parsed) && parsed >= 2 ? parsed : null;
+}
+
+function isTechnicalTemplateFamilyName(baseName, candidateName) {
+  return Number.isFinite(extractTechnicalTemplateVersion(baseName, candidateName));
+}
+
+function resolveNextTechnicalTemplateName(baseName, familyRows = []) {
+  const safeBaseName = cleanString(baseName);
+  if (!safeBaseName) return '';
+  if (!Array.isArray(familyRows) || !familyRows.length) {
+    return safeBaseName;
+  }
+  const versions = familyRows
+    .map((row) => extractTechnicalTemplateVersion(baseName, row?.name))
+    .filter((value) => Number.isFinite(value));
+  const maxVersion = versions.length ? Math.max(...versions) : 1;
+  return buildVersionedTechnicalTemplateName(safeBaseName, maxVersion + 1);
+}
+
+function mapRemoteStatusToLocalStatus(remoteStatus) {
+  const normalized = String(remoteStatus || '').trim().toUpperCase();
+  switch (normalized) {
+    case 'APPROVED':
+      return WHATSAPP_TEMPLATE_STATUS.APPROVED;
+    case 'PENDING':
+    case 'IN_REVIEW':
+      return WHATSAPP_TEMPLATE_STATUS.PENDING;
+    case 'REJECTED':
+    case 'DISAPPROVED':
+    case 'DECLINED':
+      return WHATSAPP_TEMPLATE_STATUS.REJECTED;
+    case 'SIN_CONECTAR':
+      return WHATSAPP_TEMPLATE_STATUS.DISCONNECTED;
+    default:
+      return normalized || WHATSAPP_TEMPLATE_STATUS.LOCAL_PENDING;
+  }
+}
+
+async function findLatestLocalTemplateForClinic({ clinicId, template }) {
+  if (!clinicId || !template) return null;
+  const candidates = await WhatsappTemplate.findAll({
+    where: {
+      clinic_id: clinicId,
+      waba_id: null,
+      language: DEFAULT_LANGUAGE,
+      is_active: true,
+      [Op.or]: [
+        ...(Number.isFinite(Number(template.id)) && Number(template.id) > 0
+          ? [{ catalog_template_id: Number(template.id) }]
+          : []),
+        { name: template.name },
+        { name: { [Op.like]: `${template.name}%` } },
+      ],
+    },
+    order: [['updatedAt', 'DESC']],
+  });
+
+  return candidates.find((row) => {
+    const catalogId = Number(row?.catalog_template_id);
+    if (Number.isFinite(catalogId) && catalogId > 0 && catalogId === Number(template.id)) {
+      return true;
+    }
+    return isTechnicalTemplateFamilyName(template.name, row?.name);
+  }) || null;
+}
+
+async function loadTemplateFamilyRows({ clinicId, wabaId, template }) {
+  if (!template) return [];
+  const rows = await WhatsappTemplate.findAll({
+    where: {
+      language: DEFAULT_LANGUAGE,
+      is_active: true,
+      [Op.or]: [
+        ...(Number.isFinite(Number(template.id)) && Number(template.id) > 0
+          ? [{ catalog_template_id: Number(template.id) }]
+          : []),
+        ...(wabaId
+          ? [{
+              waba_id: String(wabaId),
+              name: { [Op.like]: `${template.name}%` },
+            }]
+          : []),
+        ...(clinicId
+          ? [{
+              clinic_id: clinicId,
+              waba_id: null,
+              name: { [Op.like]: `${template.name}%` },
+            }]
+          : []),
+      ],
+    },
+    order: [['updatedAt', 'DESC']],
+  });
+
+  return rows.filter((row) => {
+    const catalogId = Number(row?.catalog_template_id);
+    if (Number.isFinite(catalogId) && catalogId > 0 && catalogId === Number(template.id)) {
+      return true;
+    }
+    return isTechnicalTemplateFamilyName(template.name, row?.name);
+  });
+}
+
+function findSameContractRemoteTemplate({ familyRows, wabaId, template }) {
+  const safeWabaId = wabaId ? String(wabaId) : '';
+  return familyRows.find((row) => String(row?.waba_id || '') === safeWabaId && hasSameMetaFacingContent(template, row)) || null;
+}
+
+function buildTemplateForTechnicalName(template, technicalName) {
+  const baseTemplate = template?.toJSON ? template.toJSON() : template;
+  return {
+    ...baseTemplate,
+    name: cleanString(technicalName) || cleanString(baseTemplate?.name),
+  };
+}
+
+function resolveCatalogTemplateByTechnicalName(catalogs, technicalName) {
+  const safeTechnicalName = cleanString(technicalName);
+  if (!safeTechnicalName || !Array.isArray(catalogs) || !catalogs.length) return null;
+  const matches = catalogs.filter((catalog) => isTechnicalTemplateFamilyName(catalog?.name, safeTechnicalName));
+  if (!matches.length) return null;
+  matches.sort((left, right) => String(right?.name || '').length - String(left?.name || '').length);
+  return matches[0] || null;
 }
 
 function normalizeDisciplines(raw) {
@@ -175,15 +331,7 @@ async function createPlaceholderTemplatesForClinic({ clinicId, assignmentScope, 
 async function upsertPlaceholderTemplateForClinic({ clinicId, template }) {
   if (!clinicId || !template) return { action: 'skipped' };
 
-  const existing = await WhatsappTemplate.findOne({
-    where: {
-      clinic_id: clinicId,
-      waba_id: null,
-      name: template.name,
-      language: DEFAULT_LANGUAGE,
-    },
-    order: [['updatedAt', 'DESC']],
-  });
+  const existing = await findLatestLocalTemplateForClinic({ clinicId, template });
 
   const payload = {
     clinic_id: clinicId,
@@ -211,6 +359,7 @@ async function upsertPlaceholderTemplateForClinic({ clinicId, template }) {
 async function upsertClinicOverrideTemplateForClinic({
   clinicId,
   template,
+  technicalName,
   status = WHATSAPP_TEMPLATE_STATUS.PENDING,
   metaTemplateId,
   rejectionReason,
@@ -218,20 +367,12 @@ async function upsertClinicOverrideTemplateForClinic({
 }) {
   if (!clinicId || !template) return { action: 'skipped' };
 
-  const existing = await WhatsappTemplate.findOne({
-    where: {
-      clinic_id: clinicId,
-      waba_id: null,
-      name: template.name,
-      language: DEFAULT_LANGUAGE,
-    },
-    order: [['updatedAt', 'DESC']],
-  });
+  const existing = await findLatestLocalTemplateForClinic({ clinicId, template });
 
   const payload = {
     clinic_id: clinicId,
     waba_id: null,
-    name: template.name,
+    name: cleanString(technicalName) || template.name,
     language: DEFAULT_LANGUAGE,
     category: template.category,
     status,
@@ -261,6 +402,51 @@ async function upsertClinicOverrideTemplateForClinic({
     templateName: template.name,
     status,
   });
+  return { action: 'created', row };
+}
+
+async function upsertConnectedTemplateForWaba({
+  wabaId,
+  template,
+  technicalName,
+  status = WHATSAPP_TEMPLATE_STATUS.PENDING,
+  metaTemplateId,
+  rejectionReason,
+}) {
+  if (!wabaId || !template) return { action: 'skipped' };
+
+  const safeTechnicalName = cleanString(technicalName) || cleanString(template.name);
+  const payload = {
+    waba_id: String(wabaId),
+    clinic_id: null,
+    name: safeTechnicalName,
+    language: DEFAULT_LANGUAGE,
+    category: template.category,
+    status,
+    components: parseMaybeJson(template.components),
+    meta_template_id: metaTemplateId || null,
+    catalog_template_id: template.id,
+    origin: 'catalog',
+    is_active: true,
+    rejection_reason: rejectionReason !== undefined ? rejectionReason : null,
+    last_synced_at: new Date(),
+  };
+
+  const existing = await WhatsappTemplate.findOne({
+    where: {
+      waba_id: String(wabaId),
+      name: safeTechnicalName,
+      language: DEFAULT_LANGUAGE,
+    },
+    order: [['updatedAt', 'DESC']],
+  });
+
+  if (existing) {
+    await existing.update(payload);
+    return { action: 'updated', row: existing };
+  }
+
+  const row = await WhatsappTemplate.create(payload);
   return { action: 'created', row };
 }
 
@@ -310,7 +496,7 @@ async function resolveWabaAssetById(wabaId) {
 async function createTemplateInMeta({ wabaId, accessToken, template, language }) {
   const components = parseMaybeJson(template.components);
   const payload = {
-    name: template.name,
+    name: cleanString(template.name),
     language,
     category: template.category,
     components: components || [],
@@ -357,6 +543,15 @@ async function createTemplatesFromCatalog({ wabaId, clinicId, groupId, assignmen
         accessToken: asset.waAccessToken,
         template,
         language: DEFAULT_LANGUAGE,
+      });
+
+      await upsertConnectedTemplateForWaba({
+        wabaId,
+        template,
+        technicalName: template.name,
+        status: WHATSAPP_TEMPLATE_STATUS.PENDING,
+        metaTemplateId: metaResp?.id || null,
+        rejectionReason: null,
       });
 
       const placeholder = clinicId
@@ -442,6 +637,7 @@ async function propagateCatalogTemplateToAllClinics({ templateCatalogId, logger 
     const clinicId = Number(clinic.id_clinica);
     const clinicDisciplines = normalizeDisciplines(clinic?.configuracion?.disciplinas);
     const effectiveDisciplines = clinicDisciplines.length ? clinicDisciplines : ['dental'];
+    let pendingTechnicalName = cleanString(template.name);
 
     if (!templateAppliesToDisciplines(template, effectiveDisciplines)) {
       summary.skipped_not_applicable += 1;
@@ -452,16 +648,6 @@ async function propagateCatalogTemplateToAllClinics({ templateCatalogId, logger 
 
     try {
       const clinicConfig = await whatsappService.getClinicConfig(clinicId);
-      const placeholder = await WhatsappTemplate.findOne({
-        where: {
-          clinic_id: clinicId,
-          waba_id: null,
-          name: template.name,
-          language: DEFAULT_LANGUAGE,
-        },
-        order: [['updatedAt', 'DESC']],
-      });
-
       const wabaId = clinicConfig?.wabaId ? String(clinicConfig.wabaId) : null;
       if (!wabaId) {
         const result = await upsertPlaceholderTemplateForClinic({ clinicId, template });
@@ -471,171 +657,9 @@ async function propagateCatalogTemplateToAllClinics({ templateCatalogId, logger 
         continue;
       }
 
-      const existingWabaTemplate = await WhatsappTemplate.findOne({
-        where: {
-          waba_id: wabaId,
-          name: template.name,
-          language: DEFAULT_LANGUAGE,
-        },
-        order: [['updatedAt', 'DESC']],
-      });
-
-      if (existingWabaTemplate) {
-        if (template.is_active && hasSameMetaFacingContract(template, existingWabaTemplate)) {
-          logger.info?.('Propagación sin cambios Meta-facing; se conserva plantilla efectiva actual', {
-            clinicId,
-            templateCatalogId,
-            templateName: template.name,
-            existingTemplateId: existingWabaTemplate.id,
-          });
-          continue;
-        }
-        if (!template.is_active) {
-          const result = await upsertClinicOverrideTemplateForClinic({
-            clinicId,
-            template,
-            status: WHATSAPP_TEMPLATE_STATUS.DISCONNECTED,
-            metaTemplateId: null,
-            rejectionReason: null,
-            logger,
-          });
-          if (result.action === 'created') summary.placeholders_created += 1;
-          if (result.action === 'updated') summary.placeholders_updated += 1;
-          if (result?.row?.id) affectedTemplateInstances.set(Number(result.row.id), result.row);
-          continue;
-        }
-
-        try {
-          const metaResp = await createTemplateInMeta({
-            wabaId,
-            accessToken: clinicConfig.accessToken,
-            template,
-            language: DEFAULT_LANGUAGE,
-          });
-
-          const result = await upsertClinicOverrideTemplateForClinic({
-            clinicId,
-            template,
-            status: WHATSAPP_TEMPLATE_STATUS.PENDING,
-            metaTemplateId: metaResp?.id || null,
-            rejectionReason: null,
-            logger,
-          });
-          if (result.action === 'created') summary.placeholders_created += 1;
-          if (result.action === 'updated') summary.placeholders_updated += 1;
-          if (result?.row?.id) affectedTemplateInstances.set(Number(result.row.id), result.row);
-          summary.created_in_meta += 1;
-          continue;
-        } catch (err) {
-          if (isRetryableMetaError(err)) {
-            throw err;
-          }
-          const reason = buildLocalPendingReasonFromMetaError(err);
-          const result = await upsertClinicOverrideTemplateForClinic({
-            clinicId,
-            template,
-            status: WHATSAPP_TEMPLATE_STATUS.LOCAL_PENDING,
-            metaTemplateId: null,
-            rejectionReason: reason,
-            logger,
-          });
-          if (result.action === 'created') summary.placeholders_created += 1;
-          if (result.action === 'updated') summary.placeholders_updated += 1;
-          if (result?.row?.id) affectedTemplateInstances.set(Number(result.row.id), result.row);
-          if (summary.errors.length < 25) {
-            summary.errors.push({
-              clinic_id: clinicId,
-              error: `meta_submission_rejected:${reason}`,
-            });
-          }
-          continue;
-        }
-      }
-
       if (!syncedWabas.has(wabaId) && clinicConfig.accessToken) {
         await syncTemplatesForWaba({ wabaId, accessToken: clinicConfig.accessToken });
         syncedWabas.add(wabaId);
-
-        const syncedTemplate = await WhatsappTemplate.findOne({
-          where: {
-            waba_id: wabaId,
-            name: template.name,
-            language: DEFAULT_LANGUAGE,
-          },
-          order: [['updatedAt', 'DESC']],
-        });
-
-        if (syncedTemplate) {
-          if (template.is_active && hasSameMetaFacingContract(template, syncedTemplate)) {
-            logger.info?.('Propagación sin cambios Meta-facing tras sync; se conserva plantilla efectiva actual', {
-              clinicId,
-              templateCatalogId,
-              templateName: template.name,
-              existingTemplateId: syncedTemplate.id,
-            });
-            continue;
-          }
-          if (!template.is_active) {
-            const result = await upsertClinicOverrideTemplateForClinic({
-              clinicId,
-              template,
-              status: WHATSAPP_TEMPLATE_STATUS.DISCONNECTED,
-              metaTemplateId: null,
-              rejectionReason: null,
-              logger,
-            });
-            if (result.action === 'created') summary.placeholders_created += 1;
-            if (result.action === 'updated') summary.placeholders_updated += 1;
-            if (result?.row?.id) affectedTemplateInstances.set(Number(result.row.id), result.row);
-            continue;
-          }
-
-          try {
-            const metaResp = await createTemplateInMeta({
-              wabaId,
-              accessToken: clinicConfig.accessToken,
-              template,
-              language: DEFAULT_LANGUAGE,
-            });
-
-            const result = await upsertClinicOverrideTemplateForClinic({
-              clinicId,
-              template,
-              status: WHATSAPP_TEMPLATE_STATUS.PENDING,
-              metaTemplateId: metaResp?.id || null,
-              rejectionReason: null,
-              logger,
-            });
-            if (result.action === 'created') summary.placeholders_created += 1;
-            if (result.action === 'updated') summary.placeholders_updated += 1;
-            if (result?.row?.id) affectedTemplateInstances.set(Number(result.row.id), result.row);
-            summary.created_in_meta += 1;
-            continue;
-          } catch (err) {
-            if (isRetryableMetaError(err)) {
-              throw err;
-            }
-            const reason = buildLocalPendingReasonFromMetaError(err);
-            const result = await upsertClinicOverrideTemplateForClinic({
-              clinicId,
-              template,
-              status: WHATSAPP_TEMPLATE_STATUS.LOCAL_PENDING,
-              metaTemplateId: null,
-              rejectionReason: reason,
-              logger,
-            });
-            if (result.action === 'created') summary.placeholders_created += 1;
-            if (result.action === 'updated') summary.placeholders_updated += 1;
-            if (result?.row?.id) affectedTemplateInstances.set(Number(result.row.id), result.row);
-            if (summary.errors.length < 25) {
-              summary.errors.push({
-                clinic_id: clinicId,
-                error: `meta_submission_rejected:${reason}`,
-              });
-            }
-            continue;
-          }
-        }
       }
 
       if (!template.is_active) {
@@ -646,16 +670,58 @@ async function propagateCatalogTemplateToAllClinics({ templateCatalogId, logger 
         continue;
       }
 
+      const familyRows = await loadTemplateFamilyRows({ clinicId, wabaId, template });
+      const sameContractRemoteTemplate = findSameContractRemoteTemplate({ familyRows, wabaId, template });
+
+      if (sameContractRemoteTemplate) {
+        const result = await upsertClinicOverrideTemplateForClinic({
+          clinicId,
+          template,
+          technicalName: sameContractRemoteTemplate.name,
+          status: mapRemoteStatusToLocalStatus(sameContractRemoteTemplate.status),
+          metaTemplateId: sameContractRemoteTemplate.meta_template_id || null,
+          rejectionReason: sameContractRemoteTemplate.rejection_reason || null,
+          logger,
+        });
+        if (result.action === 'created') summary.placeholders_created += 1;
+        if (result.action === 'updated') summary.placeholders_updated += 1;
+        if (result?.row?.id) affectedTemplateInstances.set(Number(result.row.id), result.row);
+        logger.info?.('Propagación reutiliza versión técnica ya existente en Meta', {
+          clinicId,
+          templateCatalogId,
+          templateName: template.name,
+          technicalName: sameContractRemoteTemplate.name,
+          remoteStatus: sameContractRemoteTemplate.status,
+        });
+        continue;
+      }
+
+      const technicalName = familyRows.length
+        ? resolveNextTechnicalTemplateName(template.name, familyRows)
+        : template.name;
+      pendingTechnicalName = cleanString(technicalName) || pendingTechnicalName;
+      const metaTemplate = buildTemplateForTechnicalName(template, technicalName);
+
       const metaResp = await createTemplateInMeta({
         wabaId,
         accessToken: clinicConfig.accessToken,
-        template,
+        template: metaTemplate,
         language: DEFAULT_LANGUAGE,
+      });
+
+      await upsertConnectedTemplateForWaba({
+        wabaId,
+        template,
+        technicalName,
+        status: WHATSAPP_TEMPLATE_STATUS.PENDING,
+        metaTemplateId: metaResp?.id || null,
+        rejectionReason: null,
       });
 
       const result = await upsertClinicOverrideTemplateForClinic({
         clinicId,
         template,
+        technicalName,
         status: WHATSAPP_TEMPLATE_STATUS.PENDING,
         metaTemplateId: metaResp?.id || null,
         rejectionReason: null,
@@ -670,6 +736,39 @@ async function propagateCatalogTemplateToAllClinics({ templateCatalogId, logger 
 
       summary.created_in_meta += 1;
     } catch (err) {
+      const parsedMetaError = parseMetaError(err);
+      const hasMetaResponse = !!(err?.response?.data || parsedMetaError?.message);
+      if (hasMetaResponse && !isRetryableMetaError(err)) {
+        const reason = buildLocalPendingReasonFromMetaError(err);
+        try {
+          const failedResult = await upsertClinicOverrideTemplateForClinic({
+            clinicId,
+            template,
+            technicalName: pendingTechnicalName,
+            status: WHATSAPP_TEMPLATE_STATUS.LOCAL_PENDING,
+            metaTemplateId: null,
+            rejectionReason: reason,
+            logger,
+          });
+          if (failedResult.action === 'created') summary.placeholders_created += 1;
+          if (failedResult.action === 'updated') summary.placeholders_updated += 1;
+          if (failedResult?.row?.id) affectedTemplateInstances.set(Number(failedResult.row.id), failedResult.row);
+        } catch (updateErr) {
+          logger.error('Error guardando rechazo local de plantilla WhatsApp', {
+            clinicId,
+            templateCatalogId,
+            error: updateErr?.message || updateErr,
+          });
+        }
+        if (summary.errors.length < 25) {
+          summary.errors.push({
+            clinic_id: clinicId,
+            error: `meta_submission_rejected:${reason}`,
+          });
+        }
+        continue;
+      }
+
       const errorMessage = err?.response?.data || err?.message || 'unknown_error';
       logger.error('Error propagando plantilla de catálogo a clínica', {
         clinicId,
@@ -721,8 +820,16 @@ async function syncTemplatesForWaba({ wabaId, accessToken }) {
   });
   const items = response.data?.data || [];
   const now = new Date();
+  const catalogs = await WhatsappTemplateCatalog.findAll({
+    attributes: ['id', 'name'],
+    raw: true,
+  });
+  const catalogById = new Map(
+    catalogs.map((catalog) => [Number(catalog.id), catalog]),
+  );
 
   for (const tpl of items) {
+    const catalog = resolveCatalogTemplateByTechnicalName(catalogs, tpl.name);
     const payload = {
       waba_id: wabaId,
       name: tpl.name,
@@ -732,6 +839,7 @@ async function syncTemplatesForWaba({ wabaId, accessToken }) {
       rejection_reason: tpl.rejected_reason || tpl.rejection_reason || null,
       components: tpl.components || null,
       meta_template_id: tpl.id || null,
+      catalog_template_id: catalog?.id || null,
       origin: 'external',
       is_active: true,
       last_synced_at: now,
@@ -803,11 +911,24 @@ async function syncTemplatesForWaba({ wabaId, accessToken }) {
     const remoteComponents = JSON.stringify(parseMaybeJson(remote.components) || []);
     const sameComponents = overrideComponents === remoteComponents;
     const remoteStatus = String(remote.status || '').trim().toUpperCase();
+    const catalog = catalogById.get(Number(override.catalog_template_id));
+    const technicalVersion = extractTechnicalTemplateVersion(catalog?.name, override.name);
+    const isVersionedTechnicalOverride = Number.isFinite(technicalVersion) && technicalVersion > 1;
+    const sameTrackedMetaTemplate =
+      !!override.meta_template_id
+      && String(override.meta_template_id || '') === String(remote.id || '');
+    const sameTrackedVersionedName =
+      isVersionedTechnicalOverride
+      && String(override.name || '').trim().toLowerCase() === String(remote.name || '').trim().toLowerCase();
 
     let nextStatus = override.status;
     let nextMetaTemplateId = override.meta_template_id || null;
     let nextRejectionReason = override.rejection_reason || null;
-    if (sameComponents) {
+    if (sameTrackedMetaTemplate || sameTrackedVersionedName) {
+      nextStatus = remoteStatus || override.status;
+      nextMetaTemplateId = remote.id || override.meta_template_id || null;
+      nextRejectionReason = remote.rejected_reason || remote.rejection_reason || null;
+    } else if (sameComponents) {
       nextStatus = remoteStatus || override.status;
       nextMetaTemplateId = remote.id || override.meta_template_id || null;
       nextRejectionReason = remote.rejected_reason || remote.rejection_reason || null;
