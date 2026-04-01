@@ -207,7 +207,8 @@ function getTemplateIdentityKey(templateLike) {
   if (Number.isFinite(catalogTemplateId) && catalogTemplateId > 0) {
     return `catalog:${catalogTemplateId}`;
   }
-  const name = String(templateLike?.name || '').trim().toLowerCase();
+  const rawName = String(templateLike?.name || '').trim().toLowerCase();
+  const name = rawName.replace(/_v\d+$/i, '');
   const language = String(templateLike?.language || 'es').trim().toLowerCase();
   return `${name}|${language}`;
 }
