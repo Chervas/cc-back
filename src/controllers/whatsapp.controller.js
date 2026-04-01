@@ -243,7 +243,13 @@ function pickPreferredTemplate(currentTemplate, nextTemplate, clinicId) {
 
   const currentUpdatedAt = new Date(currentTemplate?.updatedAt || currentTemplate?.updated_at || 0).getTime();
   const nextUpdatedAt = new Date(nextTemplate?.updatedAt || nextTemplate?.updated_at || 0).getTime();
-  return nextUpdatedAt >= currentUpdatedAt ? nextTemplate : currentTemplate;
+  if (nextUpdatedAt !== currentUpdatedAt) {
+    return nextUpdatedAt > currentUpdatedAt ? nextTemplate : currentTemplate;
+  }
+
+  const currentId = Number(currentTemplate?.id || 0);
+  const nextId = Number(nextTemplate?.id || 0);
+  return nextId > currentId ? nextTemplate : currentTemplate;
 }
 
 async function loadEffectiveWhatsappTemplatesForClinic({ clinicId, userId, includeCatalog }) {
@@ -277,7 +283,8 @@ async function loadEffectiveWhatsappTemplatesForClinic({ clinicId, userId, inclu
 
   const effective = new Map();
   connectedTemplates.forEach((template) => {
-    effective.set(getTemplateIdentityKey(template), template);
+    const key = getTemplateIdentityKey(template);
+    effective.set(key, pickPreferredTemplate(effective.get(key), template, clinicId));
   });
   overrides.forEach((template) => {
     const key = getTemplateIdentityKey(template);
