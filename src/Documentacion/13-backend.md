@@ -544,6 +544,7 @@ Defaults actuales de interés:
 - `JOBS_ADS_MIDDAY_SCHEDULE`: `0 12 * * *`
 - `JOBS_WHATSAPP_PHONES_SCHEDULE`: `*/15 * * * *`
 - `JOBS_WHATSAPP_TEMPLATES_SCHEDULE`: `0 * * * *`
+- `WHATSAPP_PROPAGATE_RESYNC_DELAY_MINUTES`: `12`
 
 Ventanas y límites asociados:
 
@@ -560,6 +561,13 @@ Regla operativa:
 
 - cambiar el default en código no modifica producción/integración si la variable ya existe en `.env` o en PM2;
 - si se ajusta el cron, hay que revisar también el valor efectivo en entorno y reiniciar con actualización de variables si aplica.
+
+Refresco diferido tras `Propagar`:
+
+- además del cron horario, una propagación de plantilla sobre clínicas conectadas encola una sync diferida por `wabaId`;
+- por defecto se programa a los `12` minutos (`WHATSAPP_PROPAGATE_RESYNC_DELAY_MINUTES`);
+- esto cubre el caso en que Meta aprueba la revisión pocos minutos después de abrirla, sin esperar a la siguiente hora en punto;
+- la sync diferida se deduplica por ventana para no encolar varias iguales si se propagan varias plantillas seguidas sobre el mismo WABA.
 
 ### Liderazgo explícito del cron
 

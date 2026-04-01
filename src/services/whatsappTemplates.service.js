@@ -17,6 +17,10 @@ const {
 const META_GRAPH_BASE = process.env.META_GRAPH_BASE_URL || process.env.META_API_BASE_URL || 'https://graph.facebook.com';
 const META_API_VERSION = process.env.META_API_VERSION || 'v24.0';
 const DEFAULT_LANGUAGE = process.env.META_WHATSAPP_TEMPLATE_LANGUAGE || 'es';
+const DEFAULT_PROPAGATE_RESYNC_DELAY_MINUTES = Math.max(
+  1,
+  parseInt(process.env.WHATSAPP_PROPAGATE_RESYNC_DELAY_MINUTES || '12', 10) || 12,
+);
 const WHATSAPP_TEMPLATE_STATUS = {
   LOCAL_PENDING: 'PENDING_LOCAL',
   PENDING: 'PENDING',
@@ -631,6 +635,7 @@ async function propagateCatalogTemplateToAllClinics({ templateCatalogId, logger 
     errors: [],
   };
   const syncedWabas = new Set();
+  const followupSyncs = new Map();
   const affectedTemplateInstances = new Map();
 
   for (const clinic of clinics) {
@@ -660,6 +665,10 @@ async function propagateCatalogTemplateToAllClinics({ templateCatalogId, logger 
       if (!syncedWabas.has(wabaId) && clinicConfig.accessToken) {
         await syncTemplatesForWaba({ wabaId, accessToken: clinicConfig.accessToken });
         syncedWabas.add(wabaId);
+      }
+
+      if (template.is_active && wabaId && clinicConfig.accessToken) {
+        followupSyncs.set(wabaId, clinicConfig.accessToken);
       }
 
       if (!template.is_active) {
@@ -805,6 +814,20 @@ async function propagateCatalogTemplateToAllClinics({ templateCatalogId, logger 
         });
       }
     }
+  }
+
+  if (followupSyncs.size > 0) {
+    const delayMs = DEFAULT_PROPAGATE_RESYNC_DELAY_MINUTES * 60 * 1000;
+    await Promise.all(
+      Array.from(followupSyncs.entries()).map(([wabaId, accessToken]) =>
+        enqueueSyncTemplatesJob(
+          { wabaId, accessToken, trigger: 'propagate_followup' },
+          { delayMs, dedupeWindowMs: delayMs }
+        )
+      )
+    );
+    summary.followup_sync_delay_minutes = DEFAULT_PROPAGATE_RESYNC_DELAY_MINUTES;
+    summary.followup_sync_wabas = Array.from(followupSyncs.keys());
   }
 
   return summary;
@@ -975,10 +998,30 @@ async function enqueuePropagateCatalogTemplateJob(data) {
   });
 }
 
-async function enqueueSyncTemplatesJob(data) {
+function buildDelayedSyncJobId({ wabaId, delayMs, dedupeWindowMs }) {
+  const safeWabaId = String(wabaId || '').trim();
+  if (!safeWabaId || !delayMs || delayMs <= 0) {
+    return null;
+  }
+
+  const windowMs = Math.max(delayMs, dedupeWindowMs || delayMs);
+  const bucket = Math.floor((Date.now() + delayMs) / windowMs);
+  return `sync:${safeWabaId}:followup:${bucket}`;
+}
+
+async function enqueueSyncTemplatesJob(data, options = {}) {
+  const delayMs = Math.max(0, Number(options.delayMs || 0));
+  const jobId = buildDelayedSyncJobId({
+    wabaId: data?.wabaId,
+    delayMs,
+    dedupeWindowMs: options.dedupeWindowMs,
+  });
+
   return queues.whatsappTemplateSync.add('sync', data, {
     attempts: 5,
     backoff: { type: 'exponential', delay: 60000 },
+    ...(delayMs > 0 ? { delay: delayMs } : {}),
+    ...(jobId ? { jobId } : {}),
     removeOnComplete: true,
     removeOnFail: false,
   });
