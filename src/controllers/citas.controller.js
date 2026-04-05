@@ -1528,12 +1528,28 @@ exports.reagendarCita = asyncHandler(async (req, res) => {
         return res.status(400).json({ message: 'inicio/fin inválidos' });
     }
 
+    const nextDoctorIdRaw = req.body?.doctor_id;
+    const nextInstalacionIdRaw = req.body?.instalacion_id;
+    const nextDoctorId = nextDoctorIdRaw !== undefined && nextDoctorIdRaw !== null && String(nextDoctorIdRaw).trim() !== ''
+        ? Number(nextDoctorIdRaw)
+        : cita.doctor_id;
+    const nextInstalacionId = nextInstalacionIdRaw !== undefined && nextInstalacionIdRaw !== null && String(nextInstalacionIdRaw).trim() !== ''
+        ? Number(nextInstalacionIdRaw)
+        : cita.instalacion_id;
+
+    if (nextDoctorIdRaw !== undefined && (!Number.isFinite(nextDoctorId) || nextDoctorId <= 0)) {
+        return res.status(400).json({ message: 'doctor_id inválido' });
+    }
+    if (nextInstalacionIdRaw !== undefined && (!Number.isFinite(nextInstalacionId) || nextInstalacionId <= 0)) {
+        return res.status(400).json({ message: 'instalacion_id inválido' });
+    }
+
     const { resourceConflicts, legacyConflicts, canForce } = await checkDisponibilidadCanonica({
         clinica_id: cita.clinica_id,
         inicio,
         fin,
-        doctor_id: cita.doctor_id,
-        instalacion_id: cita.instalacion_id,
+        doctor_id: nextDoctorId,
+        instalacion_id: nextInstalacionId,
         ignore_cita_id: cita.id_cita
     });
 
@@ -1553,6 +1569,12 @@ exports.reagendarCita = asyncHandler(async (req, res) => {
 
     cita.inicio = inicio;
     cita.fin = fin;
+    if (nextDoctorIdRaw !== undefined) {
+        cita.doctor_id = nextDoctorId;
+    }
+    if (nextInstalacionIdRaw !== undefined) {
+        cita.instalacion_id = nextInstalacionId;
+    }
     const estadoRaw = String(req.body?.estado || '').trim().toLowerCase();
     if (estadoRaw) {
         if (!CITA_ESTADOS_VALIDOS.has(estadoRaw)) {
