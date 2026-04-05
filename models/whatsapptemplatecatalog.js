@@ -24,6 +24,8 @@ module.exports = (sequelize, DataTypes) => {
       body_text: { type: DataTypes.TEXT, allowNull: false },
       variables: { type: DataTypes.JSON, allowNull: true },
       components: { type: DataTypes.JSON, allowNull: true },
+      last_propagated_at: { type: DataTypes.DATE, allowNull: true },
+      propagation_state: { type: DataTypes.STRING(24), allowNull: true },
       is_generic: { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: false },
       is_active: { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: true },
     },

@@ -233,8 +233,19 @@ function serializeCatalogItem(item, linkedTemplate = null) {
   const effectiveSteps = linkedTemplate
     ? mapNodesToCatalogSteps(linkedTemplate.nodes)
     : (Array.isArray(data?.steps) ? data.steps : []);
+  const currentTemplateKey = cleanString(data?.template_key);
+  const currentTemplateVersion = parseIntOrNull(data?.template_version);
+  const lastPropagatedAt = data?.last_propagated_at ? new Date(data.last_propagated_at) : null;
+  const updatedAt = data?.updated_at ? new Date(data.updated_at) : null;
+  const propagated =
+    !!lastPropagatedAt &&
+    !!currentTemplateKey &&
+    cleanString(data?.last_propagated_template_key) === currentTemplateKey &&
+    parseIntOrNull(data?.last_propagated_template_version) === currentTemplateVersion &&
+    (!updatedAt || updatedAt.getTime() <= lastPropagatedAt.getTime());
   return {
     ...data,
+    propagated,
     trigger_type: normalizeCatalogTriggerType(effectiveTriggerType),
     steps: effectiveSteps,
     template_key: typeof data?.template_key === 'string' ? data.template_key : null,
@@ -564,6 +575,17 @@ exports.propagateCatalog = async (req, res) => {
 
     if (!result?.success) {
       return res.status(404).json({ error: result?.error || 'catalog_not_found' });
+    }
+
+    if (Number(result?.failed || 0) === 0) {
+      const item = await AutomationFlowCatalog.findByPk(catalogId);
+      if (item) {
+        await item.update({
+          last_propagated_at: new Date(),
+          last_propagated_template_key: cleanString(item.template_key),
+          last_propagated_template_version: parseIntOrNull(item.template_version),
+        });
+      }
     }
 
     return res.json(result);

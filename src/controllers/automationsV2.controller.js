@@ -827,6 +827,7 @@ const NODE_TYPES_V2 = [
     default_config: {
       message_mode: 'template',
       template_id: '',
+      fallback_template_id: '',
       manual_message_text: '',
       language_code: 'es_ES',
       recipient_mode: 'context_patient',
@@ -835,10 +836,12 @@ const NODE_TYPES_V2 = [
       sender_origin_id: null,
       quiet_hours_enabled: true,
       variables: {},
+      fallback_variables: {},
     },
     config_schema: [
       { key: 'message_mode', label: 'Modo de mensaje', input_type: 'select', required: false, options: ['template', 'manual'] },
       { key: 'template_id', label: 'Template ID', input_type: 'string', required: false },
+      { key: 'fallback_template_id', label: 'Template fallback ID', input_type: 'string', required: false },
       { key: 'manual_message_text', label: 'Mensaje manual', input_type: 'text', required: false },
       { key: 'language_code', label: 'Idioma', input_type: 'string', required: false },
       {
@@ -859,6 +862,7 @@ const NODE_TYPES_V2 = [
       { key: 'sender_origin_id', label: 'Origen específico (ID phone)', input_type: 'number', required: false },
       { key: 'quiet_hours_enabled', label: 'No enviar entre las 22 y las 7h', input_type: 'boolean', required: false },
       { key: 'variables', label: 'Variables', input_type: 'json', required: false },
+      { key: 'fallback_variables', label: 'Variables fallback', input_type: 'json', required: false },
     ],
   },
   {
@@ -1384,7 +1388,7 @@ function collectUnsupportedNodeTypes(nodes) {
 
 const AI_PRESET_CANONICAL_CONFIG = {
   confirm_appointment: {
-    instruction: 'Analiza la conversación de hoy entre clínica y paciente. Clasifica en una de estas decisiones: confirmado, no_confirmado, dudas. Ten en cuenta quién escribe cada mensaje y la hora. Devuelve también confianza (0-1) y motivo breve.',
+    instruction: 'Analiza la conversación de hoy entre clínica y paciente. Clasifica en una de estas decisiones: confirmado, no_confirmado, dudas. Ten en cuenta quién escribe cada mensaje y la hora. Si el paciente responde afirmativamente o usa una reacción positiva al último mensaje de la clínica, por ejemplo 👍, ✅, ok, vale, entendido o equivalente sin contradicción explícita, clasifica como confirmado. Si expresa dudas, clasifica como dudas. Si rechaza, no puede acudir o no confirma claramente, clasifica como no_confirmado. Devuelve también confianza (0-1) y motivo breve.',
     context_sources: [
       { key: 'conversation_today', path: '{{conversation_today}}' },
       { key: 'responded_at', path: '{{last_response_context.responded_at}}' },
@@ -1396,6 +1400,7 @@ const AI_PRESET_CANONICAL_CONFIG = {
     ],
     legacy_instructions: [
       'Analiza la respuesta del paciente teniendo en cuenta el último mensaje enviado por la clínica. Clasifica en una de estas decisiones: confirmado, no_confirmado, dudas. Devuelve también confianza (0-1) y motivo breve.',
+      'Analiza la conversación de hoy entre clínica y paciente. Clasifica en una de estas decisiones: confirmado, no_confirmado, dudas. Ten en cuenta quién escribe cada mensaje y la hora. Devuelve también confianza (0-1) y motivo breve.',
     ],
     legacy_source_sets: [
       ['{{last_prompt}}', '{{last_response}}'],
@@ -2413,6 +2418,9 @@ function validateNodeConfig(node, nodeMap, templateLookup = {}) {
   if (nodeType === 'action/send_whatsapp') {
     const messageModeRaw = cleanString(config.message_mode) || '';
     const hasTemplateId = !isConfigValueEmpty(config.template_id);
+    const hasFallbackTemplateId = !isConfigValueEmpty(config.fallback_template_id);
+    const fallbackTemplateName = cleanString(config.fallback_template_name);
+    const hasFallbackTemplate = hasFallbackTemplateId || !!fallbackTemplateName;
     const manualMessageText =
       cleanString(config.manual_message_text) ||
       cleanString(config.manual_text) ||
@@ -2507,6 +2515,62 @@ function validateNodeConfig(node, nodeMap, templateLookup = {}) {
       }
     }
 
+    const validateWhatsappTemplateContract = (
+      templateRow,
+      {
+        templateIdValue,
+        templateNameValue,
+        positionalValue,
+        namedValue,
+        templateIdKey,
+      }
+    ) => {
+      const contract = buildWhatsappTemplateVariableContract(templateRow);
+      const namedBindings = normalizeNamedBindings(namedValue || {});
+      const positionalBindings = normalizePositionalBindings(positionalValue || {});
+      const mergedPositional = buildPositionalBindingsFromNamed(namedBindings, positionalBindings, contract);
+      const expectedIndexes = new Set(contract.map((variable) => String(variable.index)));
+      const invalidPositionalKeys = Object.keys(positionalBindings).filter((key) => !expectedIndexes.has(String(key)));
+      const missingIndexes = contract
+        .filter((variable) => !cleanString(mergedPositional[String(variable.index)]))
+        .map((variable) => variable.index);
+
+      if (invalidPositionalKeys.length) {
+        errors.push(
+          buildValidationError(
+            'node_config_invalid',
+            `El nodo ${nodeId} usa placeholders fuera del contrato actual de la plantilla`,
+            {
+              node_id: nodeId,
+              node_type: nodeType,
+              key: templateIdKey === 'fallback_template_id' ? 'fallback_variables' : 'variables',
+              invalid_placeholders: invalidPositionalKeys,
+              template_id: templateRow.id,
+              template_name: templateRow.name,
+            }
+          )
+        );
+      }
+
+      if (missingIndexes.length) {
+        errors.push(
+          buildValidationError(
+            'node_config_invalid',
+            `El nodo ${nodeId} no cubre todas las variables requeridas por la plantilla`,
+            {
+              node_id: nodeId,
+              node_type: nodeType,
+              key: templateIdKey === 'fallback_template_id' ? 'fallback_variables' : 'variables',
+              missing_placeholders: missingIndexes,
+              template_id: templateRow.id,
+              template_name: templateRow.name,
+              template_reference: templateIdValue || templateNameValue || null,
+            }
+          )
+        );
+      }
+    };
+
     if (messageMode === 'template' && hasTemplateId) {
       const templateId = parseIntOrNull(config.template_id);
       const templateName = cleanString(config.template_name);
@@ -2529,49 +2593,48 @@ function validateNodeConfig(node, nodeMap, templateLookup = {}) {
           )
         );
       } else {
-        const contract = buildWhatsappTemplateVariableContract(templateRow);
-        const namedBindings = normalizeNamedBindings(config.variables_named || {});
-        const positionalBindings = normalizePositionalBindings(config.variables || {});
-        const mergedPositional = buildPositionalBindingsFromNamed(namedBindings, positionalBindings, contract);
-        const expectedIndexes = new Set(contract.map((variable) => String(variable.index)));
-        const invalidPositionalKeys = Object.keys(positionalBindings).filter((key) => !expectedIndexes.has(String(key)));
-        const missingIndexes = contract
-          .filter((variable) => !cleanString(mergedPositional[String(variable.index)]))
-          .map((variable) => variable.index);
+        validateWhatsappTemplateContract(templateRow, {
+          templateIdValue: templateId,
+          templateNameValue: templateName,
+          positionalValue: config.variables,
+          namedValue: config.variables_named,
+          templateIdKey: 'template_id',
+        });
+      }
+    }
 
-        if (invalidPositionalKeys.length) {
-          errors.push(
-            buildValidationError(
-              'node_config_invalid',
-              `El nodo ${nodeId} usa placeholders fuera del contrato actual de la plantilla`,
-              {
-                node_id: nodeId,
-                node_type: nodeType,
-                key: 'variables',
-                invalid_placeholders: invalidPositionalKeys,
-                template_id: templateRow.id,
-                template_name: templateRow.name,
-              }
-            )
-          );
-        }
+    if (messageMode === 'manual' && hasFallbackTemplate) {
+      const fallbackTemplateId = parseIntOrNull(config.fallback_template_id);
+      const fallbackRow = (fallbackTemplateId && templateLookup.byId instanceof Map
+        ? templateLookup.byId.get(fallbackTemplateId)
+        : null)
+        || (fallbackTemplateName && templateLookup.byName instanceof Map
+          ? templateLookup.byName.get(fallbackTemplateName)
+          : null)
+        || null;
 
-        if (missingIndexes.length) {
-          errors.push(
-            buildValidationError(
-              'node_config_invalid',
-              `El nodo ${nodeId} no cubre todas las variables requeridas por la plantilla`,
-              {
-                node_id: nodeId,
-                node_type: nodeType,
-                key: 'variables',
-                missing_placeholders: missingIndexes,
-                template_id: templateRow.id,
-                template_name: templateRow.name,
-              }
-            )
-          );
-        }
+      if (!fallbackRow) {
+        errors.push(
+          buildValidationError(
+            'node_config_invalid',
+            `El nodo ${nodeId} referencia una plantilla fallback de WhatsApp inexistente o no sincronizada`,
+            {
+              node_id: nodeId,
+              node_type: nodeType,
+              key: 'fallback_template_id',
+              value: config.fallback_template_id || null,
+              template_name: fallbackTemplateName || null,
+            }
+          )
+        );
+      } else {
+        validateWhatsappTemplateContract(fallbackRow, {
+          templateIdValue: fallbackTemplateId,
+          templateNameValue: fallbackTemplateName,
+          positionalValue: config.fallback_variables,
+          namedValue: config.fallback_variables_named,
+          templateIdKey: 'fallback_template_id',
+        });
       }
     }
   }
@@ -3052,11 +3115,15 @@ async function loadWhatsappTemplateLookup(nodes) {
   for (const node of safeNodes) {
     if (cleanString(node?.type) !== 'action/send_whatsapp') continue;
     const config = isObject(node?.config) ? node.config : {};
-    if (cleanString(config?.message_mode || 'template') !== 'template') continue;
-    const templateId = parseIntOrNull(config?.template_id);
-    const templateName = cleanString(config?.template_name);
+    const messageMode = cleanString(config?.message_mode || 'template');
+    const templateId = messageMode === 'template' ? parseIntOrNull(config?.template_id) : null;
+    const templateName = messageMode === 'template' ? cleanString(config?.template_name) : null;
+    const fallbackTemplateId = parseIntOrNull(config?.fallback_template_id);
+    const fallbackTemplateName = cleanString(config?.fallback_template_name);
     if (templateId) templateIds.add(templateId);
     if (templateName) templateNames.add(templateName);
+    if (fallbackTemplateId) templateIds.add(fallbackTemplateId);
+    if (fallbackTemplateName) templateNames.add(fallbackTemplateName);
   }
 
   if (!templateIds.size && !templateNames.size) {

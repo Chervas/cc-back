@@ -166,7 +166,7 @@ class MetaSyncJobs {
         webBackfill: process.env.JOBS_WEB_BACKFILL_SCHEDULE || '30 4 * * 0',
         analyticsSync: process.env.JOBS_ANALYTICS_SCHEDULE || '45 4 * * *',
         analyticsBackfill: process.env.JOBS_ANALYTICS_BACKFILL_SCHEDULE || '0 5 * * 0',
-        whatsappTemplatesSync: process.env.JOBS_WHATSAPP_TEMPLATES_SCHEDULE || '0 * * * *',
+        whatsappTemplatesSync: process.env.JOBS_WHATSAPP_TEMPLATES_SCHEDULE || '*/20 * * * *',
         whatsappPhonesSync: process.env.JOBS_WHATSAPP_PHONES_SCHEDULE || '*/15 * * * *'
       },
       timezone: process.env.JOBS_TIMEZONE || 'Europe/Madrid',
@@ -1303,15 +1303,15 @@ class MetaSyncJobs {
     });
 
     try {
-      await enqueueSyncForAllWabas();
+      const queueResult = await enqueueSyncForAllWabas({ onlyPending: true });
       await syncLog.update({
         status: 'completed',
         end_time: new Date(),
         records_processed: 0,
-        status_report: { queued: true }
+        status_report: queueResult || { queued: true }
       });
       console.log('✅ Plantillas WhatsApp encoladas para sincronización');
-      return { status: 'completed', queued: true };
+      return { status: 'completed', ...(queueResult || { queued: true }) };
     } catch (error) {
       await syncLog.update({ status: 'failed', end_time: new Date(), error_message: error.message });
       console.error('❌ Error sincronizando plantillas WhatsApp:', error);

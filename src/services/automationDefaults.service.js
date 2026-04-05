@@ -131,6 +131,31 @@ async function generateUniquePublicId() {
   throw new Error('public_id_generation_failed');
 }
 
+async function publishClinicTemplateVersion({ row, actorUserId = null, transaction }) {
+  const normalizedPublicId = sanitizeTemplateReference(row?.public_id);
+  const familyWhere = normalizedPublicId
+    ? { public_id: normalizedPublicId }
+    : { template_key: row.template_key };
+
+  await AutomationFlowTemplateV2.update(
+    { is_active: false },
+    {
+      where: {
+        ...familyWhere,
+        published_at: { [Op.ne]: null },
+        id: { [Op.ne]: row.id },
+      },
+      transaction,
+    }
+  );
+
+  await row.update({
+    published_at: new Date(),
+    published_by: actorUserId || row.published_by || row.created_by || 1,
+    is_active: true,
+  }, { transaction });
+}
+
 function getCatalogSourceScopeScore(template) {
   const clinicId = parseIntOrNull(template?.clinic_id);
   const groupId = parseIntOrNull(template?.group_id);
@@ -275,6 +300,7 @@ async function ensureCatalogTemplateForClinic({ clinicId, catalogFlow, actorUser
     where: { template_key: templateKey },
     order: [['version', 'DESC']],
   });
+  const familyExists = !!latest;
   const existingDraft = await AutomationFlowTemplateV2.findOne({
     where: { template_key: templateKey, published_at: null },
     order: [['version', 'DESC']],
@@ -291,30 +317,48 @@ async function ensureCatalogTemplateForClinic({ clinicId, catalogFlow, actorUser
     group_id: clinicScope.group_id,
     entry_node_id: linkedTemplate.entry_node_id,
     nodes: linkedTemplate.nodes,
+    trigger_config: linkedTemplate.trigger_config ?? null,
     published_at: null,
     published_by: null,
     created_by: actorUserId || linkedTemplate.created_by || 1,
   };
 
   if (existingDraft) {
-    await existingDraft.update(payload);
+    await db.sequelize.transaction(async (transaction) => {
+      await existingDraft.update(payload, { transaction });
+      await publishClinicTemplateVersion({
+        row: existingDraft,
+        actorUserId,
+        transaction,
+      });
+    });
     return {
-      status: 'updated',
+      status: familyExists ? 'updated' : 'created',
       template_key: existingDraft.template_key,
       version: existingDraft.version,
     };
   }
 
   const version = latest?.version ? Number(latest.version) + 1 : 1;
-  const created = await AutomationFlowTemplateV2.create({
-    public_id: latest?.public_id || await generateUniquePublicId(),
-    template_key: templateKey,
-    version,
-    ...payload,
+  const created = await db.sequelize.transaction(async (transaction) => {
+    const row = await AutomationFlowTemplateV2.create({
+      public_id: latest?.public_id || await generateUniquePublicId(),
+      template_key: templateKey,
+      version,
+      ...payload,
+    }, { transaction });
+
+    await publishClinicTemplateVersion({
+      row,
+      actorUserId,
+      transaction,
+    });
+
+    return row;
   });
 
   return {
-    status: 'created',
+    status: familyExists ? 'updated' : 'created',
     template_key: created.template_key,
     version: created.version,
   };

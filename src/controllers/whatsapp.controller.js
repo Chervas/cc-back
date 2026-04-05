@@ -270,6 +270,18 @@ function pickPreferredTemplate(currentTemplate, nextTemplate, clinicId) {
   return nextId > currentId ? nextTemplate : currentTemplate;
 }
 
+function extractTechnicalTemplateVersion(baseName, candidateName) {
+  const safeBaseName = String(baseName || '').trim();
+  const safeCandidate = String(candidateName || '').trim();
+  if (!safeBaseName || !safeCandidate) return null;
+  if (safeCandidate === safeBaseName) return 1;
+  const match = safeCandidate.match(/^(.*)_v(\d+)$/i);
+  if (!match) return null;
+  if (String(match[1] || '').trim() !== safeBaseName) return null;
+  const parsed = Number(match[2]);
+  return Number.isFinite(parsed) && parsed >= 2 ? parsed : null;
+}
+
 async function loadEffectiveWhatsappTemplatesForClinic({ clinicId, userId, includeCatalog }) {
   const includeCatalogConfig = includeCatalog
     ? [{ model: WhatsappTemplateCatalog, as: 'catalog', attributes: ['id', 'name', 'display_name', 'body_text', 'variables'] }]
@@ -1243,7 +1255,60 @@ exports.listCatalog = async (req, res) => {
       ],
       order: [['name', 'ASC']],
     });
-    return res.json(items);
+
+    const catalogIds = items
+      .map((item) => Number(item?.id))
+      .filter((value) => Number.isFinite(value) && value > 0);
+
+    const instances = catalogIds.length
+      ? await WhatsappTemplate.findAll({
+          where: {
+            catalog_template_id: { [Op.in]: catalogIds },
+            is_active: true,
+          },
+          attributes: ['catalog_template_id', 'name', 'status', 'waba_id'],
+          raw: true,
+        })
+      : [];
+
+    const instancesByCatalogId = new Map();
+    instances.forEach((instance) => {
+      const catalogId = Number(instance.catalog_template_id);
+      if (!Number.isFinite(catalogId) || catalogId <= 0) return;
+      if (!instancesByCatalogId.has(catalogId)) {
+        instancesByCatalogId.set(catalogId, []);
+      }
+      instancesByCatalogId.get(catalogId).push(instance);
+    });
+
+    return res.json(
+      items.map((item) => {
+        const data = item?.toJSON ? item.toJSON() : item;
+        const lastPropagatedAt = data?.last_propagated_at ? new Date(data.last_propagated_at) : null;
+        const updatedAt = data?.updatedAt || data?.updated_at ? new Date(data.updatedAt || data.updated_at) : null;
+        const rawPropagationState = String(data?.propagation_state || '').trim().toLowerCase();
+        const isPending = rawPropagationState === 'pending';
+        const propagated = !isPending && !!lastPropagatedAt && (!updatedAt || updatedAt.getTime() <= lastPropagatedAt.getTime());
+        const familyRows = instancesByCatalogId.get(Number(data?.id)) || [];
+        const versions = familyRows
+          .map((row) => extractTechnicalTemplateVersion(data?.name, row?.name))
+          .filter((value) => Number.isFinite(value));
+        const latestVersion = versions.length ? Math.max(...versions) : null;
+        const latestRows = latestVersion
+          ? familyRows.filter((row) => extractTechnicalTemplateVersion(data?.name, row?.name) === latestVersion)
+          : [];
+        const latestRemoteRows = latestRows.filter((row) => !!String(row?.waba_id || '').trim());
+        const approved =
+          latestRemoteRows.length > 0 &&
+          latestRemoteRows.every((row) => String(row?.status || '').trim().toUpperCase() === 'APPROVED');
+        return {
+          ...data,
+          propagated,
+          approved,
+          propagation_state: isPending ? 'pending' : (propagated ? 'completed' : 'idle'),
+        };
+      })
+    );
   } catch (err) {
     console.error('Error listCatalog', err);
     return res.status(500).json({ error: 'Error obteniendo catálogo' });
@@ -1264,6 +1329,7 @@ exports.createCatalog = async (req, res) => {
       body_text,
       variables: variables || null,
       components: components || null,
+      propagation_state: null,
       is_generic: !!is_generic,
       is_active: !!is_active,
     });
@@ -1289,6 +1355,7 @@ exports.updateCatalog = async (req, res) => {
       body_text: body_text || item.body_text,
       variables: variables !== undefined ? variables : item.variables,
       components: components !== undefined ? components : item.components,
+      propagation_state: null,
       is_generic: is_generic !== undefined ? !!is_generic : item.is_generic,
       is_active: is_active !== undefined ? !!is_active : item.is_active,
     });
@@ -1328,6 +1395,7 @@ exports.toggleCatalog = async (req, res) => {
     } else {
       item.is_active = !!newState;
     }
+    item.propagation_state = null;
     await item.save();
     return res.json(item);
   } catch (err) {
@@ -1363,6 +1431,7 @@ exports.duplicateCatalog = async (req, res) => {
       body_text: item.body_text,
       variables: item.variables || null,
       components: item.components || null,
+      propagation_state: null,
       is_generic: !!item.is_generic,
       is_active: false,
     });
@@ -1419,6 +1488,7 @@ exports.setCatalogDisciplines = async (req, res) => {
       }));
       await WhatsappTemplateCatalogDiscipline.bulkCreate(rows);
     }
+    await item.update({ propagation_state: null });
     const updated = await WhatsappTemplateCatalog.findByPk(id, {
       include: [{ model: WhatsappTemplateCatalogDiscipline, as: 'disciplinas', attributes: ['id', 'disciplina_code'] }],
     });
@@ -1438,17 +1508,19 @@ exports.propagateCatalogToClinics = async (req, res) => {
     }
 
     const item = await WhatsappTemplateCatalog.findByPk(id, {
-      attributes: ['id', 'name', 'display_name', 'is_active'],
-      raw: true,
+      attributes: ['id', 'name', 'display_name', 'is_active', 'updated_at', 'propagation_state'],
     });
     if (!item) {
       return res.status(404).json({ error: 'catalog_not_found' });
     }
 
+    await item.update({ propagation_state: 'pending' });
+
     const { enqueuePropagateCatalogTemplateJob } = require('../services/whatsappTemplates.service');
     const job = await enqueuePropagateCatalogTemplateJob({
       templateCatalogId: id,
       requestedBy: req.userData?.userId || null,
+      sourceUpdatedAt: item.updated_at || item.updatedAt || new Date(),
     });
 
     return res.json({
@@ -1457,6 +1529,7 @@ exports.propagateCatalogToClinics = async (req, res) => {
       catalog_template_id: id,
       template_name: item.display_name || item.name,
       is_active: !!item.is_active,
+      propagation_state: 'pending',
     });
   } catch (err) {
     console.error('Error propagateCatalogToClinics', err);

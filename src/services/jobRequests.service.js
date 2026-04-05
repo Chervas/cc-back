@@ -74,14 +74,12 @@ const buildScopedPayload = (payload = {}) => {
 };
 
 const buildRuntimeScopeWhere = ({ includeUnscoped = true } = {}) => {
-  const extractedNamespace = sequelize.fn(
-    'JSON_UNQUOTE',
-    sequelize.fn('JSON_EXTRACT', sequelize.col('payload'), `$.${RUNTIME_NAMESPACE_PAYLOAD_KEY}`)
+  const jsonPath = `$."${RUNTIME_NAMESPACE_PAYLOAD_KEY}"`;
+  const extractedNamespace = sequelize.literal(
+    `JSON_UNQUOTE(JSON_EXTRACT(payload, '${jsonPath}'))`
   );
-  const rawNamespace = sequelize.fn(
-    'JSON_EXTRACT',
-    sequelize.col('payload'),
-    `$.${RUNTIME_NAMESPACE_PAYLOAD_KEY}`
+  const rawNamespace = sequelize.literal(
+    `JSON_EXTRACT(payload, '${jsonPath}')`
   );
 
   const clauses = [

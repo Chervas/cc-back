@@ -647,6 +647,8 @@ async function resolveClinicScope(cita) {
 function buildExecutionContext({ cita, eventName, userName = null, userEmail = null }) {
   const leadIntakeId = toIntOrNull(cita?.lead_intake_id);
   const appointmentOrigin = leadIntakeId ? 'lead' : 'manual';
+  const createdAt = cita?.created_at || cita?.createdAt || null;
+  const updatedAt = cita?.updated_at || cita?.updatedAt || null;
 
   return {
     trigger: {
@@ -666,6 +668,9 @@ function buildExecutionContext({ cita, eventName, userName = null, userEmail = n
         estado: cleanString(cita?.estado).toLowerCase() || null,
         usuario_nombre: cleanString(userName),
         usuario_email: cleanString(userEmail),
+        created_at: createdAt,
+        appointment_created_at: createdAt,
+        updated_at: updatedAt,
         inicio: cita?.inicio || null,
         fin: cita?.fin || null,
       },
@@ -681,6 +686,8 @@ function buildExecutionContext({ cita, eventName, userName = null, userEmail = n
       estado: cleanString(cita?.estado).toLowerCase() || null,
       usuario_nombre: cleanString(userName),
       usuario_email: cleanString(userEmail),
+      created_at: createdAt,
+      updated_at: updatedAt,
       inicio: cita?.inicio || null,
       fin: cita?.fin || null,
     },

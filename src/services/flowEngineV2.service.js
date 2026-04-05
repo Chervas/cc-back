@@ -52,6 +52,31 @@ const FIELD_CHECK_MODE_VALUES = new Set(['simple', 'appointment_booking_timing']
 const FIELD_CHECK_SWITCH_TYPE_VALUES = new Set(['appointment_booking']);
 const FIELD_CHECK_APPOINTMENT_WINDOW_VALUES = new Set(['same_day', 'day_before', 'more_than_day_before']);
 const DEFAULT_TIMEZONE = 'Europe/Madrid';
+const POSITIVE_CONFIRMATION_REACTION_EMOJIS = new Set([
+  '👍',
+  '👍🏻',
+  '👍🏼',
+  '👍🏽',
+  '👍🏾',
+  '👍🏿',
+  '✅',
+  '✔️',
+  '✔',
+  '☑️',
+  '☑',
+  '👌',
+  '👌🏻',
+  '👌🏼',
+  '👌🏽',
+  '👌🏾',
+  '👌🏿',
+  '🙌',
+  '🙌🏻',
+  '🙌🏼',
+  '🙌🏽',
+  '🙌🏾',
+  '🙌🏿',
+]);
 const FIELD_CHECK_OPERATOR_TYPE_COMPAT = {
   string: ['equals', 'not_equals', 'contains', 'exists'],
   number: ['equals', 'not_equals', 'greater_than', 'less_than', 'exists'],
@@ -1469,6 +1494,40 @@ function toLowerSafe(value) {
   return String(value || '').trim().toLowerCase();
 }
 
+function buildDeterministicConfirmAppointmentOutput(context = {}) {
+  const responseContext = isObject(context?.last_response_context) ? context.last_response_context : {};
+  const responseMessageType = normalizeKey(
+    responseContext.response_message_type
+    || responseContext.message_type
+  );
+
+  if (responseMessageType !== 'reaction') {
+    return null;
+  }
+
+  const reactionEmoji = cleanString(responseContext.reaction_emoji);
+  if (!reactionEmoji || !POSITIVE_CONFIRMATION_REACTION_EMOJIS.has(reactionEmoji)) {
+    return null;
+  }
+
+  const targetPreview = cleanString(
+    responseContext.reaction_target_message_preview
+    || responseContext.listened_message_preview
+    || context?.last_prompt
+  );
+
+  return {
+    decision: 'confirmado',
+    confianza: 0.99,
+    motivo: targetPreview
+      ? `Paciente reaccionó ${reactionEmoji} de forma positiva al mensaje "${targetPreview}".`
+      : `Paciente reaccionó ${reactionEmoji} de forma positiva al último mensaje de la clínica.`,
+    _ai_provider: 'deterministic_rule',
+    _ai_model: 'confirm_appointment_positive_reaction',
+    _ai_analysis_mode: 'rule',
+  };
+}
+
 function isTemplateBlockedForSend(statusValue) {
   const status = toLowerSafe(statusValue);
   return status !== 'approved';
@@ -2022,10 +2081,18 @@ async function resolveWhatsAppSenderConfig({ config, context, clinicId }) {
   };
 }
 
-function resolveTemplateVariables(config, context, template = null) {
+function resolveTemplateVariablesWithKeys(
+  config,
+  context,
+  template = null,
+  {
+    namedKey = 'variables_named',
+    positionalKey = 'variables',
+  } = {}
+) {
   const templateVariables = buildWhatsappTemplateVariableContract(template);
-  const rawNamed = normalizeNamedBindings(config?.variables_named);
-  const rawPositional = normalizePositionalBindings(config?.variables);
+  const rawNamed = normalizeNamedBindings(config?.[namedKey]);
+  const rawPositional = normalizePositionalBindings(config?.[positionalKey]);
 
   if (!templateVariables.length) {
     const legacyOutput = {};
@@ -2055,6 +2122,43 @@ function resolveTemplateVariables(config, context, template = null) {
   return output;
 }
 
+function resolveTemplateVariables(config, context, template = null) {
+  return resolveTemplateVariablesWithKeys(config, context, template, {
+    namedKey: 'variables_named',
+    positionalKey: 'variables',
+  });
+}
+
+async function loadConfiguredWhatsappTemplate(
+  config,
+  context,
+  {
+    templateIdKey = 'template_id',
+    templateNameKey = 'template_name',
+  } = {}
+) {
+  const templateId = toIntOrNull(resolveTemplateValue(config?.[templateIdKey], context));
+  const templateName = cleanString(resolveTemplateValue(config?.[templateNameKey], context));
+  if (!templateId && !templateName) {
+    return null;
+  }
+
+  const where = {};
+  if (templateId && templateName) {
+    where[Op.or] = [{ id: templateId }, { name: templateName }];
+  } else if (templateId) {
+    where.id = templateId;
+  } else {
+    where.name = templateName;
+  }
+
+  return WhatsappTemplate.findOne({
+    where,
+    attributes: ['id', 'name', 'language', 'status', 'components', 'catalog_template_id'],
+    include: [{ model: WhatsappTemplateCatalog, as: 'catalog', attributes: ['id', 'variables'] }],
+  });
+}
+
 async function handleSendWhatsapp(node, context, runtime) {
   const config = node?.config && typeof node.config === 'object' ? node.config : {};
   const execution = runtime?.execution || null;
@@ -2082,25 +2186,26 @@ async function handleSendWhatsapp(node, context, runtime) {
   });
   const recipientData = await resolveWhatsAppRecipient({ node, config, context: templateContext, targets });
 
+  const originalMessageMode = messageMode;
+  let effectiveMessageMode = messageMode;
   let template = null;
   let templateParams = {};
   let previewText = '';
   let messageContent = '';
   let messageType = 'text';
   let templateLanguage = cleanString(resolveTemplateValue(config?.language_code, context)) || 'es_ES';
+  let fallbackTemplate = null;
+  let fallbackTemplateParams = {};
+  let fallbackPreviewText = '';
+  let fallbackTriggeredReason = null;
 
   if (messageMode === 'template') {
-    const templateId = toIntOrNull(resolveTemplateValue(config?.template_id, context));
-    if (!templateId) {
-      throw new Error('whatsapp_template_id_missing');
-    }
-
-    template = await WhatsappTemplate.findByPk(templateId, {
-      attributes: ['id', 'name', 'language', 'status', 'components', 'catalog_template_id'],
-      include: [{ model: WhatsappTemplateCatalog, as: 'catalog', attributes: ['id', 'variables'] }],
+    template = await loadConfiguredWhatsappTemplate(config, templateContext, {
+      templateIdKey: 'template_id',
+      templateNameKey: 'template_name',
     });
     if (!template) {
-      throw new Error(`whatsapp_template_not_found:${templateId}`);
+      throw new Error('whatsapp_template_id_missing');
     }
 
     const templateStatus = toLowerSafe(template.status);
@@ -2123,7 +2228,7 @@ async function handleSendWhatsapp(node, context, runtime) {
     previewText = renderWhatsappTemplatePreviewText(template, templateParams);
     messageContent = previewText;
     messageType = 'template';
-    templateLanguage = templateLanguage || template.language || 'es_ES';
+    templateLanguage = cleanString(template?.language) || templateLanguage || 'es_ES';
   } else {
     const manualText = cleanString(resolveTemplateValue(config?.manual_message_text, templateContext));
     if (!manualText) {
@@ -2132,6 +2237,42 @@ async function handleSendWhatsapp(node, context, runtime) {
     previewText = manualText;
     messageContent = manualText;
     messageType = 'text';
+
+    fallbackTemplate = await loadConfiguredWhatsappTemplate(config, templateContext, {
+      templateIdKey: 'fallback_template_id',
+      templateNameKey: 'fallback_template_name',
+    });
+    if (fallbackTemplate) {
+      const fallbackStatus = toLowerSafe(fallbackTemplate.status);
+      if (isTemplateBlockedForSend(fallbackStatus)) {
+        throw new Error(`whatsapp_fallback_template_not_approved:${fallbackTemplate.status}`);
+      }
+
+      fallbackTemplateParams = resolveTemplateVariablesWithKeys(
+        config,
+        templateContext,
+        fallbackTemplate,
+        {
+          namedKey: 'fallback_variables_named',
+          positionalKey: 'fallback_variables',
+        }
+      );
+      const expectedFallbackParamIndexes = extractWhatsappTemplatePlaceholderIndexes(fallbackTemplate);
+      const missingFallbackParamIndexes = expectedFallbackParamIndexes.filter((paramIdx) => {
+        const value = cleanString(fallbackTemplateParams?.[paramIdx]);
+        return !value;
+      });
+      if (missingFallbackParamIndexes.length) {
+        throw new Error(
+          `whatsapp_fallback_template_params_missing:${missingFallbackParamIndexes.join(',')}`
+        );
+      }
+
+      fallbackPreviewText = renderWhatsappTemplatePreviewText(
+        fallbackTemplate,
+        fallbackTemplateParams
+      );
+    }
   }
 
   const targetPatientId = toIntOrNull(targets.patient_id);
@@ -2151,20 +2292,35 @@ async function handleSendWhatsapp(node, context, runtime) {
   // - modo manual: no enviar (se exige conversación activa en últimas 24h).
   if (!conversation) {
     if (messageMode === 'manual') {
-      return {
-        kind: 'success',
-        output: {
-          status: 'skipped_no_active_conversation_24h',
-          reason: 'conversation_not_found',
-          message_mode: messageMode,
-          message_preview: previewText,
-          recipient_mode: recipientData.recipient_mode,
-          recipient: recipientData.recipient,
-          conversation_id: null,
-          last_inbound_at: null,
-        },
-        next_node_id: readOutputTarget(node, 'on_success'),
-      };
+      if (fallbackTemplate) {
+        fallbackTriggeredReason = 'conversation_not_found';
+        effectiveMessageMode = 'template_fallback';
+        template = fallbackTemplate;
+        templateParams = fallbackTemplateParams;
+        previewText = fallbackPreviewText;
+        messageContent = previewText;
+        messageType = 'template';
+        templateLanguage = cleanString(fallbackTemplate?.language) || templateLanguage || 'es_ES';
+      } else {
+        return {
+          kind: 'success',
+          output: {
+            status: 'skipped_no_active_conversation_24h',
+            reason: 'conversation_not_found',
+            message_mode: originalMessageMode,
+            delivery_mode: originalMessageMode,
+            message_preview: previewText,
+            recipient_mode: recipientData.recipient_mode,
+            recipient: recipientData.recipient,
+            conversation_id: null,
+            last_inbound_at: null,
+            fallback_used: false,
+            fallback_template_id: null,
+            fallback_template_name: null,
+          },
+          next_node_id: readOutputTarget(node, 'on_success'),
+        };
+      }
     }
     conversation = await findCanonicalWhatsappConversation({
       clinicId,
@@ -2177,20 +2333,35 @@ async function handleSendWhatsapp(node, context, runtime) {
   }
 
   if (messageMode === 'manual' && !hasActiveInboundWindow(conversation?.last_inbound_at)) {
-    return {
-      kind: 'success',
-      output: {
-        status: 'skipped_no_active_conversation_24h',
-        reason: 'conversation_outside_24h_window',
-        message_mode: messageMode,
-        message_preview: previewText,
-        recipient_mode: recipientData.recipient_mode,
-        recipient: recipientData.recipient,
-        conversation_id: conversation?.id || null,
-        last_inbound_at: conversation?.last_inbound_at || null,
-      },
-      next_node_id: readOutputTarget(node, 'on_success'),
-    };
+    if (fallbackTemplate) {
+      fallbackTriggeredReason = 'conversation_outside_24h_window';
+      effectiveMessageMode = 'template_fallback';
+      template = fallbackTemplate;
+      templateParams = fallbackTemplateParams;
+      previewText = fallbackPreviewText;
+      messageContent = previewText;
+      messageType = 'template';
+      templateLanguage = cleanString(fallbackTemplate?.language) || templateLanguage || 'es_ES';
+    } else {
+      return {
+        kind: 'success',
+        output: {
+          status: 'skipped_no_active_conversation_24h',
+          reason: 'conversation_outside_24h_window',
+          message_mode: originalMessageMode,
+          delivery_mode: originalMessageMode,
+          message_preview: previewText,
+          recipient_mode: recipientData.recipient_mode,
+          recipient: recipientData.recipient,
+          conversation_id: conversation?.id || null,
+          last_inbound_at: conversation?.last_inbound_at || null,
+          fallback_used: false,
+          fallback_template_id: null,
+          fallback_template_name: null,
+        },
+        next_node_id: readOutputTarget(node, 'on_success'),
+      };
+    }
   }
 
   const senderData = await resolveWhatsAppSenderConfig({ config, context: templateContext, clinicId });
@@ -2260,9 +2431,14 @@ async function handleSendWhatsapp(node, context, runtime) {
       execution_id: runtime?.execution?.id || null,
       node_id: cleanString(node?.id),
       flow_name: flowName || null,
-      message_mode: messageMode,
+      message_mode: originalMessageMode,
+      delivery_mode: effectiveMessageMode,
       template_id: template?.id || null,
       template_name: template?.name || null,
+      fallback_used: !!fallbackTriggeredReason,
+      fallback_reason: fallbackTriggeredReason,
+      fallback_template_id: fallbackTriggeredReason ? template?.id || null : null,
+      fallback_template_name: fallbackTriggeredReason ? template?.name || null : null,
       generated_at: nowIso,
     },
   });
@@ -2274,9 +2450,14 @@ async function handleSendWhatsapp(node, context, runtime) {
     node_id: cleanString(node?.id),
     flow_name: flowName || null,
     flow_reason: 'flow_send_whatsapp',
-    message_mode: messageMode,
+    message_mode: originalMessageMode,
+    delivery_mode: effectiveMessageMode,
     template_id: template?.id || null,
     template_name: template?.name || null,
+    fallback_used: !!fallbackTriggeredReason,
+    fallback_reason: fallbackTriggeredReason,
+    fallback_template_id: fallbackTriggeredReason ? template?.id || null : null,
+    fallback_template_name: fallbackTriggeredReason ? template?.name || null : null,
     template_language: templateLanguage || template?.language || 'es_ES',
     template_params: templateParams,
     preview_text: previewText,
@@ -2320,7 +2501,7 @@ async function handleSendWhatsapp(node, context, runtime) {
           conversationId: conversation.id,
           to: recipientData.recipient,
           body: messageContent,
-          useTemplate: messageMode === 'template',
+          useTemplate: messageType === 'template',
           templateName: template?.name || null,
           templateLanguage: metadata.template_language,
           templateParams,
@@ -2369,9 +2550,12 @@ async function handleSendWhatsapp(node, context, runtime) {
         message_id: msg.id,
         event_message_id: eventMsg.id,
         status: 'scheduled',
-        message_mode: messageMode,
+        message_mode: originalMessageMode,
+        delivery_mode: effectiveMessageMode,
         template_id: template?.id || null,
         template_name: template?.name || null,
+        fallback_used: !!fallbackTriggeredReason,
+        fallback_reason: fallbackTriggeredReason,
         message_preview: previewText,
         recipient_mode: recipientData.recipient_mode,
         recipient: recipientData.recipient,
@@ -2395,7 +2579,7 @@ async function handleSendWhatsapp(node, context, runtime) {
     const waResponse = await whatsappService.sendMessage({
       to: recipientData.recipient,
       body: messageContent,
-      useTemplate: messageMode === 'template',
+      useTemplate: messageType === 'template',
       templateName: template?.name || null,
       templateLanguage: metadata.template_language,
       templateParams,
@@ -2490,9 +2674,12 @@ async function handleSendWhatsapp(node, context, runtime) {
       message_id: msg.id,
       event_message_id: eventMsg.id,
       status: 'sent',
-      message_mode: messageMode,
+      message_mode: originalMessageMode,
+      delivery_mode: effectiveMessageMode,
       template_id: template?.id || null,
       template_name: template?.name || null,
+      fallback_used: !!fallbackTriggeredReason,
+      fallback_reason: fallbackTriggeredReason,
       message_preview: previewText,
       recipient_mode: recipientData.recipient_mode,
       recipient: recipientData.recipient,
@@ -3003,6 +3190,28 @@ function parseWaitUntilExpression(expression, context) {
   return null;
 }
 
+function parseDateValueOrNull(value) {
+  if (!value) return null;
+  const candidate = value instanceof Date ? value : new Date(value);
+  if (Number.isNaN(candidate.getTime())) return null;
+  return candidate;
+}
+
+function resolveWaitResponseAnchor(context, config) {
+  const listensTo = cleanString(config?.listens_to_node_id);
+  const listenedOutput = listensTo ? getByPath(context, `outputs.${listensTo}`) : null;
+  const anchorAt = parseDateValueOrNull(
+    listenedOutput?.effective_send_at
+    || listenedOutput?.scheduled_for
+    || null
+  );
+  return {
+    listens_to_node_id: listensTo,
+    listened_output: listenedOutput,
+    anchor_at: anchorAt,
+  };
+}
+
 function isSimulationRuntime(runtime = {}, context = {}) {
   if (parseBool(runtime?.simulation, false)) return true;
   if (parseBool(context?.__simulation, false)) return true;
@@ -3243,20 +3452,24 @@ async function processNode(node, context, runtime = {}) {
 
     case 'delay/wait_response': {
       const timeoutMs = resolveDurationMs(config?.timeout_duration ?? 60, config?.timeout_unit || 'minutes');
-      const waitUntil = timeoutMs > 0 ? new Date(Date.now() + timeoutMs) : null;
+      const waitAnchor = resolveWaitResponseAnchor(context, config);
+      const waitStartAt = waitAnchor.anchor_at || new Date();
+      const waitUntil = timeoutMs > 0 ? new Date(waitStartAt.getTime() + timeoutMs) : null;
       const responseBufferEnabled = parseBool(resolveTemplateValue(config?.response_buffer_enabled, context), true);
       return {
         kind: 'waiting',
         output: {
           waits_for_response: true,
-          listens_to_node_id: cleanString(config?.listens_to_node_id),
+          listens_to_node_id: waitAnchor.listens_to_node_id,
+          wait_starts_at: waitStartAt.toISOString(),
           timeout_at: waitUntil ? waitUntil.toISOString() : null,
           response_buffer_enabled: responseBufferEnabled,
         },
         waiting_meta: {
           type: nodeType,
           runtime_namespace: CURRENT_RUNTIME_NAMESPACE,
-          listens_to_node_id: cleanString(config?.listens_to_node_id),
+          listens_to_node_id: waitAnchor.listens_to_node_id,
+          wait_starts_at: waitStartAt.toISOString(),
           on_response: readOutputTarget(node, 'on_response'),
           on_timeout: readOutputTarget(node, 'on_timeout'),
           response_buffer_enabled: responseBufferEnabled,
@@ -3352,6 +3565,18 @@ async function processNode(node, context, runtime = {}) {
         throw new Error('ai_analysis_output_fields_required');
       }
 
+      const presetKey = cleanString(config?.preset_key);
+      const deterministicPresetOutput = presetKey === 'confirm_appointment'
+        ? buildDeterministicConfirmAppointmentOutput(aiContext)
+        : null;
+      if (deterministicPresetOutput) {
+        return {
+          kind: 'success',
+          output: deterministicPresetOutput,
+          next_node_id: readOutputTarget(node, 'on_success'),
+        };
+      }
+
       const outputFormat = normalizeOutputFieldsToFormat(normalizedOutputFields);
       const outputFormatSimple = normalizeAiOutputFormat(outputFormat);
       const analysisMode = normalizeAiAnalysisMode(resolveTemplateValue(config?.mode, context));
@@ -3364,7 +3589,6 @@ async function processNode(node, context, runtime = {}) {
 
       if (simulation) {
         const simulatedOutput = buildAiSimulatedOutput(outputFormatSimple, analysisMode, selectedModel);
-        const presetKey = cleanString(config?.preset_key);
         const decision = cleanString(simulatedOutput?.decision).toLowerCase();
         return {
           kind: 'success',
@@ -3377,7 +3601,6 @@ async function processNode(node, context, runtime = {}) {
         };
       }
 
-      const presetKey = cleanString(config?.preset_key);
       const aiOutput = await runGroqAiAnalysis({
         prompt: resolvedInstruction,
         inputText,
@@ -3445,9 +3668,26 @@ async function resumeWaitingNode(execution, node, context, { mode, responseText,
       : readOutputTarget(node, 'on_timeout');
 
     let nextContext = context;
+    let forcedConversationId = null;
     if (useResponse) {
+      const waitingMeta = execution?.waiting_meta && typeof execution.waiting_meta === 'object'
+        ? execution.waiting_meta
+        : {};
+      const inboundMessageId = toIntOrNull(waitingMeta.last_inbound_message_id);
+      const inboundMessage = inboundMessageId
+        ? await Message.findByPk(inboundMessageId, {
+            attributes: ['id', 'message_type', 'content', 'metadata', 'sent_at', 'createdAt'],
+            raw: true,
+          })
+        : null;
+      const inboundMetadata = isObject(inboundMessage?.metadata) ? inboundMessage.metadata : {};
+      const inboundReaction = isObject(inboundMetadata.reaction) ? inboundMetadata.reaction : {};
       const listensTo = cleanString(node?.config?.listens_to_node_id);
       const listenedOutput = listensTo ? getByPath(context, `outputs.${listensTo}`) : null;
+      forcedConversationId = toIntOrNull(
+        listenedOutput?.conversation_id
+        || listenedOutput?.chat_conversation_id
+      );
       const listenedMessagePreview = cleanString(
         listenedOutput?.message_preview
         || listenedOutput?.content
@@ -3455,14 +3695,33 @@ async function resumeWaitingNode(execution, node, context, { mode, responseText,
       );
       const respondedAt = new Date().toISOString();
       nextContext = mergeNodeOutput(nextContext, node.id, {
+        status: 'responded',
         response_text: responseText ?? null,
         response_lines: String(responseText || '')
           .split(/\r?\n/)
           .map((line) => cleanString(line))
           .filter(Boolean),
+        response_message_id: toIntOrNull(inboundMessage?.id),
+        response_message_type: cleanString(inboundMessage?.message_type) || null,
+        response_message_preview: cleanString(inboundMessage?.content) || null,
+        reaction_emoji: cleanString(inboundReaction.emoji) || null,
+        reaction_target_message_id: cleanString(
+          inboundReaction.target_message_id
+          || inboundReaction.targetMessageId
+        ) || null,
+        reaction_target_message_type: cleanString(
+          inboundReaction.target_message_type
+          || inboundReaction.targetMessageType
+        ) || null,
+        reaction_target_message_preview: cleanString(
+          inboundReaction.target_message_preview
+          || inboundReaction.targetMessagePreview
+        ) || null,
         listens_to_node_id: listensTo,
         listened_message_preview: listenedMessagePreview,
         responded_at: respondedAt,
+        resumed_at: respondedAt,
+        resume_mode: 'response',
       });
       // Alias de contexto para simplificar plantillas IA sin depender de IDs de nodos.
       nextContext = {
@@ -3471,15 +3730,43 @@ async function resumeWaitingNode(execution, node, context, { mode, responseText,
         last_prompt: listenedMessagePreview || null,
         last_response_context: {
           response_text: responseText ?? null,
+          response_message_id: toIntOrNull(inboundMessage?.id),
+          response_message_type: cleanString(inboundMessage?.message_type) || null,
+          response_message_preview: cleanString(inboundMessage?.content) || null,
+          reaction_emoji: cleanString(inboundReaction.emoji) || null,
+          reaction_target_message_id: cleanString(
+            inboundReaction.target_message_id
+            || inboundReaction.targetMessageId
+          ) || null,
+          reaction_target_message_type: cleanString(
+            inboundReaction.target_message_type
+            || inboundReaction.targetMessageType
+          ) || null,
+          reaction_target_message_preview: cleanString(
+            inboundReaction.target_message_preview
+            || inboundReaction.targetMessagePreview
+          ) || null,
           listened_message_preview: listenedMessagePreview || null,
           wait_node_id: node.id,
           listens_to_node_id: listensTo || null,
           responded_at: respondedAt,
         },
       };
+    } else {
+      nextContext = mergeNodeOutput(nextContext, node.id, {
+        status: 'timed_out',
+        timed_out: true,
+        timed_out_at: new Date().toISOString(),
+        resumed_at: new Date().toISOString(),
+        resume_mode: 'timeout',
+      });
     }
 
-    const refreshedTargets = await backfillRuntimeTargets(execution, resolveRuntimeTargets(execution, nextContext));
+    const resumeTargets = resolveRuntimeTargets(execution, nextContext);
+    if (forcedConversationId) {
+      resumeTargets.conversation_id = forcedConversationId;
+    }
+    const refreshedTargets = await backfillRuntimeTargets(execution, resumeTargets);
     nextContext = await enrichConversationContext(nextContext, refreshedTargets);
 
     await updateExecutionAndEmit(execution, {
@@ -3512,6 +3799,7 @@ async function resumeWaitingNode(execution, node, context, { mode, responseText,
         ? formSubmission.fields
         : {};
       const outputPatch = {
+        status: 'submitted',
         submitted: true,
         submitted_at: submittedAt,
         page_url: cleanString(formSubmission?.page_url) || null,
@@ -3527,6 +3815,8 @@ async function resumeWaitingNode(execution, node, context, { mode, responseText,
         telefono: cleanString(formSubmission?.telefono) || null,
         form_submission_event_id: toIntOrNull(formSubmission?.form_submission_event_id),
         source_detail: cleanString(formSubmission?.source_detail) || 'web_form',
+        resumed_at: submittedAt,
+        resume_mode: 'form_submission',
       };
       nextContext = mergeNodeOutput(nextContext, node.id, outputPatch);
       nextContext = {
@@ -3534,11 +3824,16 @@ async function resumeWaitingNode(execution, node, context, { mode, responseText,
         last_form_submission: outputPatch,
       };
     } else {
+      const timedOutAt = new Date().toISOString();
       nextContext = mergeNodeOutput(nextContext, node.id, {
+        status: 'timed_out',
         submitted: false,
-        timed_out_at: new Date().toISOString(),
+        timed_out: true,
+        timed_out_at: timedOutAt,
         match_mode: resolvedMatchMode,
         match_value: resolvedMatchValue,
+        resumed_at: timedOutAt,
+        resume_mode: 'timeout',
       });
     }
 
@@ -3556,15 +3851,22 @@ async function resumeWaitingNode(execution, node, context, { mode, responseText,
 
   if (nodeType === 'delay/fixed' || nodeType === 'delay/wait_until') {
     const nextNode = readOutputTarget(node, 'on_complete');
+    const completedAt = new Date().toISOString();
+    const nextContext = mergeNodeOutput(context, node.id, {
+      status: 'completed',
+      completed_at: completedAt,
+      resumed_at: completedAt,
+      resume_mode: mode || 'timeout',
+    });
     await updateExecutionAndEmit(execution, {
       status: 'running',
       wait_until: null,
       waiting_meta: null,
       current_node_id: nextNode,
-      context,
+      context: nextContext,
       last_error: null,
     }, 'flow_execution:resumed', { resume_mode: mode || 'timeout' });
-    return { resumed: true, context };
+    return { resumed: true, context: nextContext };
   }
 
   await updateExecutionAndEmit(execution, {

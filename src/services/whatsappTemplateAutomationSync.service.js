@@ -25,10 +25,16 @@ function nodeUsesTemplate(node, { templateId, templateName, catalogTemplateId })
   const nodeTemplateId = cleanString(config.template_id);
   const nodeTemplateName = cleanString(config.template_name).toLowerCase();
   const nodeCatalogTemplateId = Number(config.catalog_template_id);
+  const nodeFallbackTemplateId = cleanString(config.fallback_template_id);
+  const nodeFallbackTemplateName = cleanString(config.fallback_template_name).toLowerCase();
+  const nodeFallbackCatalogTemplateId = Number(config.fallback_catalog_template_id);
   return (
     (templateId && nodeTemplateId === String(templateId))
     || (!!templateName && !!nodeTemplateName && nodeTemplateName === String(templateName).trim().toLowerCase())
     || (Number.isFinite(nodeCatalogTemplateId) && nodeCatalogTemplateId > 0 && nodeCatalogTemplateId === Number(catalogTemplateId))
+    || (templateId && nodeFallbackTemplateId === String(templateId))
+    || (!!templateName && !!nodeFallbackTemplateName && nodeFallbackTemplateName === String(templateName).trim().toLowerCase())
+    || (Number.isFinite(nodeFallbackCatalogTemplateId) && nodeFallbackCatalogTemplateId > 0 && nodeFallbackCatalogTemplateId === Number(catalogTemplateId))
   );
 }
 
@@ -69,18 +75,62 @@ async function recomposeAutomationsUsingTemplate({ templateInstance, logger = co
       }
 
       const config = isObject(node.config) ? node.config : {};
-      const namedBindings = Object.keys(normalizeNamedBindings(config.variables_named)).length
-        ? normalizeNamedBindings(config.variables_named)
-        : buildNamedBindingsFromPositional(config.variables, templateVariables);
-      const positionalBindings = buildPositionalBindingsFromNamed(namedBindings, config.variables, templateVariables);
+      const usesPrimaryTemplate = (
+        (templateId && cleanString(config.template_id) === String(templateId))
+        || (!!templateName && cleanString(config.template_name).toLowerCase() === String(templateName).trim().toLowerCase())
+        || (Number.isFinite(Number(config.catalog_template_id)) && Number(config.catalog_template_id) === Number(catalogTemplateId))
+      );
+      const usesFallbackTemplate = (
+        (templateId && cleanString(config.fallback_template_id) === String(templateId))
+        || (!!templateName && cleanString(config.fallback_template_name).toLowerCase() === String(templateName).trim().toLowerCase())
+        || (Number.isFinite(Number(config.fallback_catalog_template_id)) && Number(config.fallback_catalog_template_id) === Number(catalogTemplateId))
+      );
+
+      const namedBindings = usesPrimaryTemplate
+        ? (Object.keys(normalizeNamedBindings(config.variables_named)).length
+          ? normalizeNamedBindings(config.variables_named)
+          : buildNamedBindingsFromPositional(config.variables, templateVariables))
+        : normalizeNamedBindings(config.variables_named);
+      const positionalBindings = usesPrimaryTemplate
+        ? buildPositionalBindingsFromNamed(namedBindings, config.variables, templateVariables)
+        : normalizePositionalBindings(config.variables);
+      const fallbackNamedBindings = usesFallbackTemplate
+        ? (Object.keys(normalizeNamedBindings(config.fallback_variables_named)).length
+          ? normalizeNamedBindings(config.fallback_variables_named)
+          : buildNamedBindingsFromPositional(config.fallback_variables, templateVariables))
+        : normalizeNamedBindings(config.fallback_variables_named);
+      const fallbackPositionalBindings = usesFallbackTemplate
+        ? buildPositionalBindingsFromNamed(
+          fallbackNamedBindings,
+          config.fallback_variables,
+          templateVariables
+        )
+        : normalizePositionalBindings(config.fallback_variables);
 
       const nextConfig = {
         ...config,
-        template_id: Number.isFinite(templateId) && templateId > 0 ? String(templateId) : config.template_id,
-        template_name: templateName || config.template_name || '',
-        catalog_template_id: Number.isFinite(catalogTemplateId) && catalogTemplateId > 0 ? catalogTemplateId : (config.catalog_template_id || null),
+        template_id: usesPrimaryTemplate && Number.isFinite(templateId) && templateId > 0
+          ? String(templateId)
+          : config.template_id,
+        template_name: usesPrimaryTemplate
+          ? (templateName || config.template_name || '')
+          : (config.template_name || ''),
+        catalog_template_id: usesPrimaryTemplate && Number.isFinite(catalogTemplateId) && catalogTemplateId > 0
+          ? catalogTemplateId
+          : (config.catalog_template_id || null),
         variables_named: namedBindings,
         variables: positionalBindings,
+        fallback_template_id: usesFallbackTemplate && Number.isFinite(templateId) && templateId > 0
+          ? String(templateId)
+          : (config.fallback_template_id || ''),
+        fallback_template_name: usesFallbackTemplate
+          ? (templateName || config.fallback_template_name || '')
+          : (config.fallback_template_name || ''),
+        fallback_catalog_template_id: usesFallbackTemplate && Number.isFinite(catalogTemplateId) && catalogTemplateId > 0
+          ? catalogTemplateId
+          : (config.fallback_catalog_template_id || null),
+        fallback_variables_named: fallbackNamedBindings,
+        fallback_variables: fallbackPositionalBindings,
       };
 
       if (JSON.stringify(nextConfig) !== JSON.stringify(config)) {

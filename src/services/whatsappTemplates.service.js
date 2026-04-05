@@ -609,228 +609,260 @@ async function createTemplatesFromCatalog({ wabaId, clinicId, groupId, assignmen
   }
 }
 
-async function propagateCatalogTemplateToAllClinics({ templateCatalogId, logger = console }) {
+async function propagateCatalogTemplateToAllClinics({ templateCatalogId, logger = console, sourceUpdatedAt = null }) {
   const template = await getCatalogTemplateById(templateCatalogId);
   if (!template) {
     throw new Error('catalog_not_found');
   }
 
-  const clinics = await Clinica.findAll({
-    attributes: ['id_clinica', 'configuracion'],
-    order: [['id_clinica', 'ASC']],
-    raw: true,
-  });
-
-  const whatsappService = require('./whatsapp.service');
-  const summary = {
-    catalog_template_id: template.id,
-    clinics_total: clinics.length,
-    clinics_targeted: 0,
-    skipped_not_applicable: 0,
-    placeholders_created: 0,
-    placeholders_updated: 0,
-    placeholders_deactivated: 0,
-    waba_templates_updated: 0,
-    created_in_meta: 0,
-    errors: [],
+  const sourceUpdatedAtTs = sourceUpdatedAt ? new Date(sourceUpdatedAt).getTime() : null;
+  const canMarkCompleted = async () => {
+    if (!Number.isFinite(sourceUpdatedAtTs)) return true;
+    await template.reload();
+    const currentUpdatedAtTs = new Date(template.updated_at || template.updatedAt || 0).getTime();
+    return Number.isFinite(currentUpdatedAtTs) && currentUpdatedAtTs <= sourceUpdatedAtTs;
   };
-  const syncedWabas = new Set();
-  const followupSyncs = new Map();
-  const affectedTemplateInstances = new Map();
 
-  for (const clinic of clinics) {
-    const clinicId = Number(clinic.id_clinica);
-    const clinicDisciplines = normalizeDisciplines(clinic?.configuracion?.disciplinas);
-    const effectiveDisciplines = clinicDisciplines.length ? clinicDisciplines : ['dental'];
-    let pendingTechnicalName = cleanString(template.name);
+  try {
+    const clinics = await Clinica.findAll({
+      attributes: ['id_clinica', 'configuracion'],
+      order: [['id_clinica', 'ASC']],
+      raw: true,
+    });
 
-    if (!templateAppliesToDisciplines(template, effectiveDisciplines)) {
-      summary.skipped_not_applicable += 1;
-      continue;
-    }
+    const whatsappService = require('./whatsapp.service');
+    const summary = {
+      catalog_template_id: template.id,
+      clinics_total: clinics.length,
+      clinics_targeted: 0,
+      skipped_not_applicable: 0,
+      placeholders_created: 0,
+      placeholders_updated: 0,
+      placeholders_deactivated: 0,
+      waba_templates_updated: 0,
+      created_in_meta: 0,
+      errors: [],
+    };
+    const syncedWabas = new Set();
+    const followupSyncs = new Map();
+    const affectedTemplateInstances = new Map();
 
-    summary.clinics_targeted += 1;
+    for (const clinic of clinics) {
+      const clinicId = Number(clinic.id_clinica);
+      const clinicDisciplines = normalizeDisciplines(clinic?.configuracion?.disciplinas);
+      const effectiveDisciplines = clinicDisciplines.length ? clinicDisciplines : ['dental'];
+      let pendingTechnicalName = cleanString(template.name);
 
-    try {
-      const clinicConfig = await whatsappService.getClinicConfig(clinicId);
-      const wabaId = clinicConfig?.wabaId ? String(clinicConfig.wabaId) : null;
-      if (!wabaId) {
-        const result = await upsertPlaceholderTemplateForClinic({ clinicId, template });
-        if (result.action === 'created') summary.placeholders_created += 1;
-        if (result.action === 'updated') summary.placeholders_updated += 1;
-        if (result?.row?.id) affectedTemplateInstances.set(Number(result.row.id), result.row);
+      if (!templateAppliesToDisciplines(template, effectiveDisciplines)) {
+        summary.skipped_not_applicable += 1;
         continue;
       }
 
-      if (!syncedWabas.has(wabaId) && clinicConfig.accessToken) {
-        await syncTemplatesForWaba({ wabaId, accessToken: clinicConfig.accessToken });
-        syncedWabas.add(wabaId);
-      }
+      summary.clinics_targeted += 1;
 
-      if (template.is_active && wabaId && clinicConfig.accessToken) {
-        followupSyncs.set(wabaId, clinicConfig.accessToken);
-      }
+      try {
+        const clinicConfig = await whatsappService.getClinicConfig(clinicId);
+        const wabaId = clinicConfig?.wabaId ? String(clinicConfig.wabaId) : null;
+        if (!wabaId) {
+          const result = await upsertPlaceholderTemplateForClinic({ clinicId, template });
+          if (result.action === 'created') summary.placeholders_created += 1;
+          if (result.action === 'updated') summary.placeholders_updated += 1;
+          if (result?.row?.id) affectedTemplateInstances.set(Number(result.row.id), result.row);
+          continue;
+        }
 
-      if (!template.is_active) {
-        const result = await upsertPlaceholderTemplateForClinic({ clinicId, template });
-        if (result.action === 'created') summary.placeholders_created += 1;
-        if (result.action === 'updated') summary.placeholders_updated += 1;
-        if (result?.row?.id) affectedTemplateInstances.set(Number(result.row.id), result.row);
-        continue;
-      }
+        if (!syncedWabas.has(wabaId) && clinicConfig.accessToken) {
+          await syncTemplatesForWaba({ wabaId, accessToken: clinicConfig.accessToken });
+          syncedWabas.add(wabaId);
+        }
 
-      const familyRows = await loadTemplateFamilyRows({ clinicId, wabaId, template });
-      const sameContractRemoteTemplate = findSameContractRemoteTemplate({ familyRows, wabaId, template });
+        if (template.is_active && wabaId && clinicConfig.accessToken) {
+          followupSyncs.set(wabaId, clinicConfig.accessToken);
+        }
 
-      if (sameContractRemoteTemplate) {
+        if (!template.is_active) {
+          const result = await upsertPlaceholderTemplateForClinic({ clinicId, template });
+          if (result.action === 'created') summary.placeholders_created += 1;
+          if (result.action === 'updated') summary.placeholders_updated += 1;
+          if (result?.row?.id) affectedTemplateInstances.set(Number(result.row.id), result.row);
+          continue;
+        }
+
+        const familyRows = await loadTemplateFamilyRows({ clinicId, wabaId, template });
+        const sameContractRemoteTemplate = findSameContractRemoteTemplate({ familyRows, wabaId, template });
+
+        if (sameContractRemoteTemplate) {
+          const result = await upsertClinicOverrideTemplateForClinic({
+            clinicId,
+            template,
+            technicalName: sameContractRemoteTemplate.name,
+            status: mapRemoteStatusToLocalStatus(sameContractRemoteTemplate.status),
+            metaTemplateId: sameContractRemoteTemplate.meta_template_id || null,
+            rejectionReason: sameContractRemoteTemplate.rejection_reason || null,
+            logger,
+          });
+          if (result.action === 'created') summary.placeholders_created += 1;
+          if (result.action === 'updated') summary.placeholders_updated += 1;
+          if (result?.row?.id) affectedTemplateInstances.set(Number(result.row.id), result.row);
+          logger.info?.('Propagación reutiliza versión técnica ya existente en Meta', {
+            clinicId,
+            templateCatalogId,
+            templateName: template.name,
+            technicalName: sameContractRemoteTemplate.name,
+            remoteStatus: sameContractRemoteTemplate.status,
+          });
+          continue;
+        }
+
+        const technicalName = familyRows.length
+          ? resolveNextTechnicalTemplateName(template.name, familyRows)
+          : template.name;
+        pendingTechnicalName = cleanString(technicalName) || pendingTechnicalName;
+        const metaTemplate = buildTemplateForTechnicalName(template, technicalName);
+
+        const metaResp = await createTemplateInMeta({
+          wabaId,
+          accessToken: clinicConfig.accessToken,
+          template: metaTemplate,
+          language: DEFAULT_LANGUAGE,
+        });
+
+        await upsertConnectedTemplateForWaba({
+          wabaId,
+          template,
+          technicalName,
+          status: WHATSAPP_TEMPLATE_STATUS.PENDING,
+          metaTemplateId: metaResp?.id || null,
+          rejectionReason: null,
+        });
+
         const result = await upsertClinicOverrideTemplateForClinic({
           clinicId,
           template,
-          technicalName: sameContractRemoteTemplate.name,
-          status: mapRemoteStatusToLocalStatus(sameContractRemoteTemplate.status),
-          metaTemplateId: sameContractRemoteTemplate.meta_template_id || null,
-          rejectionReason: sameContractRemoteTemplate.rejection_reason || null,
+          technicalName,
+          status: WHATSAPP_TEMPLATE_STATUS.PENDING,
+          metaTemplateId: metaResp?.id || null,
+          rejectionReason: null,
           logger,
         });
         if (result.action === 'created') summary.placeholders_created += 1;
         if (result.action === 'updated') summary.placeholders_updated += 1;
-        if (result?.row?.id) affectedTemplateInstances.set(Number(result.row.id), result.row);
-        logger.info?.('Propagación reutiliza versión técnica ya existente en Meta', {
+        if (result?.row?.id) {
+          await result.row.update({ meta_template_id: metaResp?.id || result.row.meta_template_id || null });
+          affectedTemplateInstances.set(Number(result.row.id), result.row);
+        }
+
+        summary.created_in_meta += 1;
+      } catch (err) {
+        const parsedMetaError = parseMetaError(err);
+        const hasMetaResponse = !!(err?.response?.data || parsedMetaError?.message);
+        if (hasMetaResponse && !isRetryableMetaError(err)) {
+          const reason = buildLocalPendingReasonFromMetaError(err);
+          try {
+            const failedResult = await upsertClinicOverrideTemplateForClinic({
+              clinicId,
+              template,
+              technicalName: pendingTechnicalName,
+              status: WHATSAPP_TEMPLATE_STATUS.LOCAL_PENDING,
+              metaTemplateId: null,
+              rejectionReason: reason,
+              logger,
+            });
+            if (failedResult.action === 'created') summary.placeholders_created += 1;
+            if (failedResult.action === 'updated') summary.placeholders_updated += 1;
+            if (failedResult?.row?.id) affectedTemplateInstances.set(Number(failedResult.row.id), failedResult.row);
+          } catch (updateErr) {
+            logger.error('Error guardando rechazo local de plantilla WhatsApp', {
+              clinicId,
+              templateCatalogId,
+              error: updateErr?.message || updateErr,
+            });
+          }
+          if (summary.errors.length < 25) {
+            summary.errors.push({
+              clinic_id: clinicId,
+              error: `meta_submission_rejected:${reason}`,
+            });
+          }
+          continue;
+        }
+
+        const errorMessage = err?.response?.data || err?.message || 'unknown_error';
+        logger.error('Error propagando plantilla de catálogo a clínica', {
           clinicId,
           templateCatalogId,
-          templateName: template.name,
-          technicalName: sameContractRemoteTemplate.name,
-          remoteStatus: sameContractRemoteTemplate.status,
+          error: errorMessage,
         });
-        continue;
-      }
-
-      const technicalName = familyRows.length
-        ? resolveNextTechnicalTemplateName(template.name, familyRows)
-        : template.name;
-      pendingTechnicalName = cleanString(technicalName) || pendingTechnicalName;
-      const metaTemplate = buildTemplateForTechnicalName(template, technicalName);
-
-      const metaResp = await createTemplateInMeta({
-        wabaId,
-        accessToken: clinicConfig.accessToken,
-        template: metaTemplate,
-        language: DEFAULT_LANGUAGE,
-      });
-
-      await upsertConnectedTemplateForWaba({
-        wabaId,
-        template,
-        technicalName,
-        status: WHATSAPP_TEMPLATE_STATUS.PENDING,
-        metaTemplateId: metaResp?.id || null,
-        rejectionReason: null,
-      });
-
-      const result = await upsertClinicOverrideTemplateForClinic({
-        clinicId,
-        template,
-        technicalName,
-        status: WHATSAPP_TEMPLATE_STATUS.PENDING,
-        metaTemplateId: metaResp?.id || null,
-        rejectionReason: null,
-        logger,
-      });
-      if (result.action === 'created') summary.placeholders_created += 1;
-      if (result.action === 'updated') summary.placeholders_updated += 1;
-      if (result?.row?.id) {
-        await result.row.update({ meta_template_id: metaResp?.id || result.row.meta_template_id || null });
-        affectedTemplateInstances.set(Number(result.row.id), result.row);
-      }
-
-      summary.created_in_meta += 1;
-    } catch (err) {
-      const parsedMetaError = parseMetaError(err);
-      const hasMetaResponse = !!(err?.response?.data || parsedMetaError?.message);
-      if (hasMetaResponse && !isRetryableMetaError(err)) {
-        const reason = buildLocalPendingReasonFromMetaError(err);
-        try {
-          const failedResult = await upsertClinicOverrideTemplateForClinic({
-            clinicId,
-            template,
-            technicalName: pendingTechnicalName,
-            status: WHATSAPP_TEMPLATE_STATUS.LOCAL_PENDING,
-            metaTemplateId: null,
-            rejectionReason: reason,
-            logger,
-          });
-          if (failedResult.action === 'created') summary.placeholders_created += 1;
-          if (failedResult.action === 'updated') summary.placeholders_updated += 1;
-          if (failedResult?.row?.id) affectedTemplateInstances.set(Number(failedResult.row.id), failedResult.row);
-        } catch (updateErr) {
-          logger.error('Error guardando rechazo local de plantilla WhatsApp', {
-            clinicId,
-            templateCatalogId,
-            error: updateErr?.message || updateErr,
-          });
-        }
         if (summary.errors.length < 25) {
           summary.errors.push({
             clinic_id: clinicId,
-            error: `meta_submission_rejected:${reason}`,
+            error: typeof errorMessage === 'string' ? errorMessage : JSON.stringify(errorMessage),
           });
         }
-        continue;
-      }
-
-      const errorMessage = err?.response?.data || err?.message || 'unknown_error';
-      logger.error('Error propagando plantilla de catálogo a clínica', {
-        clinicId,
-        templateCatalogId,
-        error: errorMessage,
-      });
-      if (summary.errors.length < 25) {
-        summary.errors.push({
-          clinic_id: clinicId,
-          error: typeof errorMessage === 'string' ? errorMessage : JSON.stringify(errorMessage),
-        });
       }
     }
-  }
 
-  for (const templateInstance of affectedTemplateInstances.values()) {
-    try {
-      const syncResult = await recomposeAutomationsUsingTemplate({ templateInstance, logger });
-      if (syncResult?.template_versions_touched) {
-        summary.automation_templates_updated = (summary.automation_templates_updated || 0) + Number(syncResult.template_versions_touched || 0);
-        summary.automation_nodes_updated = (summary.automation_nodes_updated || 0) + Number(syncResult.nodes_touched || 0);
-      }
-    } catch (syncErr) {
-      const syncMessage = syncErr?.message || 'automation_recompose_failed';
-      logger.error('Error recomponiendo automatizaciones ligadas a plantilla de catálogo', {
-        templateCatalogId,
-        templateInstanceId: templateInstance?.id || null,
-        error: syncMessage,
-      });
-      if (summary.errors.length < 25) {
-        summary.errors.push({
-          clinic_id: templateInstance?.clinic_id || null,
-          error: `automation_recompose_failed:${syncMessage}`,
+    for (const templateInstance of affectedTemplateInstances.values()) {
+      try {
+        const syncResult = await recomposeAutomationsUsingTemplate({ templateInstance, logger });
+        if (syncResult?.template_versions_touched) {
+          summary.automation_templates_updated = (summary.automation_templates_updated || 0) + Number(syncResult.template_versions_touched || 0);
+          summary.automation_nodes_updated = (summary.automation_nodes_updated || 0) + Number(syncResult.nodes_touched || 0);
+        }
+      } catch (syncErr) {
+        const syncMessage = syncErr?.message || 'automation_recompose_failed';
+        logger.error('Error recomponiendo automatizaciones ligadas a plantilla de catálogo', {
+          templateCatalogId,
+          templateInstanceId: templateInstance?.id || null,
+          error: syncMessage,
         });
+        if (summary.errors.length < 25) {
+          summary.errors.push({
+            clinic_id: templateInstance?.clinic_id || null,
+            error: `automation_recompose_failed:${syncMessage}`,
+          });
+        }
       }
     }
-  }
 
-  if (followupSyncs.size > 0) {
-    const delayMs = DEFAULT_PROPAGATE_RESYNC_DELAY_MINUTES * 60 * 1000;
-    await Promise.all(
-      Array.from(followupSyncs.entries()).map(([wabaId, accessToken]) =>
-        enqueueSyncTemplatesJob(
-          { wabaId, accessToken, trigger: 'propagate_followup' },
-          { delayMs, dedupeWindowMs: delayMs }
+    if (followupSyncs.size > 0) {
+      const delayMs = DEFAULT_PROPAGATE_RESYNC_DELAY_MINUTES * 60 * 1000;
+      await Promise.all(
+        Array.from(followupSyncs.entries()).map(([wabaId, accessToken]) =>
+          enqueueSyncTemplatesJob(
+            { wabaId, accessToken, trigger: 'propagate_followup' },
+            { delayMs, dedupeWindowMs: delayMs }
+          )
         )
-      )
-    );
-    summary.followup_sync_delay_minutes = DEFAULT_PROPAGATE_RESYNC_DELAY_MINUTES;
-    summary.followup_sync_wabas = Array.from(followupSyncs.keys());
-  }
+      );
+      summary.followup_sync_delay_minutes = DEFAULT_PROPAGATE_RESYNC_DELAY_MINUTES;
+      summary.followup_sync_wabas = Array.from(followupSyncs.keys());
+    }
 
-  return summary;
+    if (summary.errors.length === 0) {
+      if (await canMarkCompleted()) {
+        await template.update({
+          last_propagated_at: new Date(),
+          propagation_state: 'completed',
+        });
+      } else {
+        await template.update({
+          propagation_state: null,
+        });
+      }
+    } else {
+      await template.update({
+        propagation_state: 'failed',
+      });
+    }
+
+    return summary;
+  } catch (err) {
+    await template.update({
+      propagation_state: 'failed',
+    });
+    throw err;
+  }
 }
 
 async function syncTemplatesForWaba({ wabaId, accessToken }) {
@@ -1006,7 +1038,8 @@ function buildDelayedSyncJobId({ wabaId, delayMs, dedupeWindowMs }) {
 
   const windowMs = Math.max(delayMs, dedupeWindowMs || delayMs);
   const bucket = Math.floor((Date.now() + delayMs) / windowMs);
-  return `sync:${safeWabaId}:followup:${bucket}`;
+  const normalizedWabaId = safeWabaId.replace(/[^a-zA-Z0-9_-]+/g, '-');
+  return `sync-${normalizedWabaId}-followup-${bucket}`;
 }
 
 async function enqueueSyncTemplatesJob(data, options = {}) {
@@ -1027,21 +1060,47 @@ async function enqueueSyncTemplatesJob(data, options = {}) {
   });
 }
 
-async function enqueueSyncForAllWabas() {
+async function enqueueSyncForAllWabas(options = {}) {
+  const onlyPending = options?.onlyPending === true;
+  let targetWabaIds = null;
+
+  if (onlyPending) {
+    const pendingRows = await WhatsappTemplate.findAll({
+      where: {
+        is_active: true,
+        waba_id: { [Op.ne]: null },
+        status: { [Op.in]: [WHATSAPP_TEMPLATE_STATUS.PENDING, 'IN_REVIEW'] },
+      },
+      attributes: ['waba_id'],
+      raw: true,
+      group: ['waba_id'],
+    });
+    targetWabaIds = pendingRows
+      .map((row) => String(row?.waba_id || '').trim())
+      .filter(Boolean);
+    if (!targetWabaIds.length) {
+      return { queued: 0, only_pending: true };
+    }
+  }
+
   const assets = await ClinicMetaAsset.findAll({
     where: {
       isActive: true,
       assetType: 'whatsapp_business_account',
-      wabaId: { [Op.ne]: null },
+      wabaId: targetWabaIds ? { [Op.in]: targetWabaIds } : { [Op.ne]: null },
     },
     attributes: ['wabaId', 'waAccessToken'],
     raw: true,
   });
 
+  let queued = 0;
   for (const asset of assets) {
     if (!asset.wabaId || !asset.waAccessToken) continue;
     await enqueueSyncTemplatesJob({ wabaId: asset.wabaId, accessToken: asset.waAccessToken });
+    queued += 1;
   }
+
+  return { queued, only_pending: onlyPending };
 }
 
 module.exports = {
