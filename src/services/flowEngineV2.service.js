@@ -2135,10 +2135,53 @@ async function loadConfiguredWhatsappTemplate(
   {
     templateIdKey = 'template_id',
     templateNameKey = 'template_name',
+    catalogTemplateIdKey = 'catalog_template_id',
   } = {}
 ) {
   const templateId = toIntOrNull(resolveTemplateValue(config?.[templateIdKey], context));
   const templateName = cleanString(resolveTemplateValue(config?.[templateNameKey], context));
+  const catalogTemplateId = toIntOrNull(resolveTemplateValue(config?.[catalogTemplateIdKey], context));
+  const clinicId = toIntOrNull(
+    context?.appointment?.clinica_id
+      || context?.appointment?.clinic_id
+      || context?.cita?.clinica_id
+      || context?.cita?.clinic_id
+      || context?.trigger?.data?.clinica_id
+      || context?.trigger?.data?.clinic_id
+      || context?.clinic?.id
+      || context?.clinic_id
+  );
+
+  const baseQuery = {
+    attributes: ['id', 'name', 'language', 'status', 'components', 'catalog_template_id', 'clinic_id'],
+    include: [{ model: WhatsappTemplateCatalog, as: 'catalog', attributes: ['id', 'variables'] }],
+  };
+
+  if (catalogTemplateId) {
+    const candidates = await WhatsappTemplate.findAll({
+      ...baseQuery,
+      where: {
+        catalog_template_id: catalogTemplateId,
+        is_active: true,
+      },
+    });
+
+    const clinicCandidates = clinicId
+      ? candidates.filter((row) => toIntOrNull(row?.clinic_id) === clinicId)
+      : [];
+    const globalCandidates = candidates.filter((row) => !toIntOrNull(row?.clinic_id));
+    const scopedCandidates = clinicCandidates.length ? clinicCandidates : globalCandidates;
+    if (scopedCandidates.length) {
+      scopedCandidates.sort((a, b) => {
+        const aBlocked = isTemplateBlockedForSend(toLowerSafe(a?.status)) ? 1 : 0;
+        const bBlocked = isTemplateBlockedForSend(toLowerSafe(b?.status)) ? 1 : 0;
+        if (aBlocked !== bBlocked) return aBlocked - bBlocked;
+        return (Number(b?.id) || 0) - (Number(a?.id) || 0);
+      });
+      return scopedCandidates[0];
+    }
+  }
+
   if (!templateId && !templateName) {
     return null;
   }
@@ -2153,9 +2196,8 @@ async function loadConfiguredWhatsappTemplate(
   }
 
   return WhatsappTemplate.findOne({
+    ...baseQuery,
     where,
-    attributes: ['id', 'name', 'language', 'status', 'components', 'catalog_template_id'],
-    include: [{ model: WhatsappTemplateCatalog, as: 'catalog', attributes: ['id', 'variables'] }],
   });
 }
 
@@ -2203,6 +2245,7 @@ async function handleSendWhatsapp(node, context, runtime) {
     template = await loadConfiguredWhatsappTemplate(config, templateContext, {
       templateIdKey: 'template_id',
       templateNameKey: 'template_name',
+      catalogTemplateIdKey: 'catalog_template_id',
     });
     if (!template) {
       throw new Error('whatsapp_template_id_missing');
@@ -2241,6 +2284,7 @@ async function handleSendWhatsapp(node, context, runtime) {
     fallbackTemplate = await loadConfiguredWhatsappTemplate(config, templateContext, {
       templateIdKey: 'fallback_template_id',
       templateNameKey: 'fallback_template_name',
+      catalogTemplateIdKey: 'fallback_catalog_template_id',
     });
     if (fallbackTemplate) {
       const fallbackStatus = toLowerSafe(fallbackTemplate.status);
