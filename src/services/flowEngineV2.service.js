@@ -1,11 +1,22 @@
 'use strict';
 
+const fs = require('fs');
 const { Op } = require('sequelize');
 const axios = require('axios');
 const db = require('../../models');
 const { getIO } = require('./socket.service');
 const { queues } = require('./queue.service');
+const jobRequestsService = require('./jobRequests.service');
 const { normalizeCitaStatus, normalizeLeadStatus } = require('../lib/status-catalog');
+const { ADMIN_USER_IDS } = require('../lib/role-helpers');
+const {
+  extractWhatsappTemplatePlaceholderIndexes,
+  buildWhatsappTemplateVariableContract,
+  normalizeNamedBindings,
+  normalizePositionalBindings,
+  buildNamedBindingsFromPositional,
+  buildPositionalBindingsFromNamed,
+} = require('../lib/whatsapp-template-contract');
 
 const AutomationFlowTemplateV2 = db.AutomationFlowTemplateV2;
 const FlowExecutionV2 = db.FlowExecutionV2;
@@ -20,6 +31,7 @@ const Usuario = db.Usuario;
 const Clinica = db.Clinica;
 const ClinicMetaAsset = db.ClinicMetaAsset;
 const WhatsappTemplate = db.WhatsappTemplate;
+const WhatsappTemplateCatalog = db.WhatsappTemplateCatalog;
 const whatsappService = require('./whatsapp.service');
 const { findCanonicalWhatsappConversation } = require('../lib/canonical-conversation');
 const { buildConversationContext } = require('../lib/automation-conversation-context');
@@ -36,6 +48,35 @@ const AI_ANALYSIS_MODES = new Set(['auto', 'quick_qa', 'complex_reasoning']);
 const FORM_SUBMISSION_MATCH_MODES = new Set(['url_contains', 'url_equals', 'form_id', 'selector']);
 const FIELD_CHECK_LEFT_REF_SOURCES = new Set(['node_output', 'trigger_data', 'context', 'manual']);
 const FIELD_CHECK_VALUE_TYPES = new Set(['string', 'number', 'boolean']);
+const FIELD_CHECK_MODE_VALUES = new Set(['simple', 'appointment_booking_timing']);
+const FIELD_CHECK_SWITCH_TYPE_VALUES = new Set(['appointment_booking']);
+const FIELD_CHECK_APPOINTMENT_WINDOW_VALUES = new Set(['same_day', 'day_before', 'more_than_day_before']);
+const DEFAULT_TIMEZONE = 'Europe/Madrid';
+const POSITIVE_CONFIRMATION_REACTION_EMOJIS = new Set([
+  '👍',
+  '👍🏻',
+  '👍🏼',
+  '👍🏽',
+  '👍🏾',
+  '👍🏿',
+  '✅',
+  '✔️',
+  '✔',
+  '☑️',
+  '☑',
+  '👌',
+  '👌🏻',
+  '👌🏼',
+  '👌🏽',
+  '👌🏾',
+  '👌🏿',
+  '🙌',
+  '🙌🏻',
+  '🙌🏼',
+  '🙌🏽',
+  '🙌🏾',
+  '🙌🏿',
+]);
 const FIELD_CHECK_OPERATOR_TYPE_COMPAT = {
   string: ['equals', 'not_equals', 'contains', 'exists'],
   number: ['equals', 'not_equals', 'greater_than', 'less_than', 'exists'],
@@ -51,6 +92,71 @@ function cleanString(value) {
   const normalized = String(value).trim();
   return normalized || null;
 }
+
+function isObject(value) {
+  return !!value && typeof value === 'object' && !Array.isArray(value);
+}
+
+function parseClinicConfig(value) {
+  if (!value) return null;
+  if (isObject(value)) return value;
+  if (typeof value === 'string') {
+    try {
+      const parsed = JSON.parse(value);
+      return isObject(parsed) ? parsed : null;
+    } catch (_err) {
+      return null;
+    }
+  }
+  return null;
+}
+
+function isValidTimeZone(value) {
+  if (!value || typeof value !== 'string') return false;
+  try {
+    Intl.DateTimeFormat('en-US', { timeZone: value }).format(new Date());
+    return true;
+  } catch (_err) {
+    return false;
+  }
+}
+
+function resolveClinicTimezoneFromContext(context) {
+  const clinic = isObject(context?.clinic) ? context.clinic : (isObject(context?.clinica) ? context.clinica : null);
+  const cfg = parseClinicConfig(clinic?.configuracion);
+  const candidates = [
+    cleanString(clinic?.timezone),
+    cleanString(clinic?.time_zone),
+    cleanString(clinic?.tz),
+    cleanString(cfg?.timezone),
+    cleanString(cfg?.timeZone),
+    cleanString(cfg?.tz),
+  ];
+  for (const candidate of candidates) {
+    if (isValidTimeZone(candidate)) return candidate;
+  }
+  return DEFAULT_TIMEZONE;
+}
+
+function detectCurrentRuntimeNamespace() {
+  const explicit = cleanString(process.env.JOB_RUNTIME_NAMESPACE)
+    || cleanString(process.env.RUNTIME_NAMESPACE);
+  if (explicit) return explicit;
+
+  const port = cleanString(process.env.PORT);
+  if (port) return `port:${port}`;
+
+  const cwd = cleanString(process.cwd());
+  if (cwd) return `cwd:${cwd}`;
+
+  return 'runtime:unknown';
+}
+
+const CURRENT_RUNTIME_NAMESPACE =
+  (typeof jobRequestsService.getCurrentRuntimeNamespace === 'function'
+    ? cleanString(jobRequestsService.getCurrentRuntimeNamespace())
+    : null)
+  || detectCurrentRuntimeNamespace();
 
 function parseBool(value, fallback = false) {
   if (value === undefined || value === null || value === '') return fallback;
@@ -115,6 +221,88 @@ function formatTimeEs(rawDate) {
   }).format(date);
 }
 
+function formatPartsInTimeZone(date, timeZone) {
+  const parts = new Intl.DateTimeFormat('en-CA', {
+    timeZone,
+    hour12: false,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+  }).formatToParts(date);
+
+  const bag = {};
+  parts.forEach((part) => {
+    if (part.type !== 'literal') bag[part.type] = part.value;
+  });
+
+  return {
+    year: Number(bag.year),
+    month: Number(bag.month),
+    day: Number(bag.day),
+    hour: Number(bag.hour),
+    minute: Number(bag.minute),
+    second: Number(bag.second),
+  };
+}
+
+function offsetMinutesForTimeZone(date, timeZone) {
+  const parts = formatPartsInTimeZone(date, timeZone);
+  const asUtc = Date.UTC(parts.year, parts.month - 1, parts.day, parts.hour, parts.minute, parts.second);
+  return Math.round((asUtc - date.getTime()) / 60000);
+}
+
+function normalizeHms(value, fallback = '00:00:00') {
+  const raw = String(value || fallback).trim();
+  const match = raw.match(/^(\d{2}):(\d{2})(?::(\d{2}))?$/);
+  if (!match) return null;
+  return `${match[1]}:${match[2]}:${match[3] || '00'}`;
+}
+
+function localDateTimeToUtc(fechaLocal, timeValue, timeZone) {
+  if (!fechaLocal || typeof fechaLocal !== 'string') return null;
+  const dateMatch = fechaLocal.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (!dateMatch) return null;
+
+  const hms = normalizeHms(timeValue);
+  if (!hms) return null;
+  const timeMatch = hms.match(/^(\d{2}):(\d{2}):(\d{2})$/);
+  if (!timeMatch) return null;
+
+  const year = Number(dateMatch[1]);
+  const month = Number(dateMatch[2]);
+  const day = Number(dateMatch[3]);
+  const hour = Number(timeMatch[1]);
+  const minute = Number(timeMatch[2]);
+  const second = Number(timeMatch[3]);
+  const naiveUtc = Date.UTC(year, month - 1, day, hour, minute, second);
+
+  let timestamp = naiveUtc;
+  for (let index = 0; index < 2; index += 1) {
+    const offsetMin = offsetMinutesForTimeZone(new Date(timestamp), timeZone);
+    timestamp = naiveUtc - (offsetMin * 60000);
+  }
+
+  return new Date(timestamp);
+}
+
+function formatDateLocal(date, timeZone) {
+  const parts = formatPartsInTimeZone(date, timeZone);
+  const pad = (value) => String(value).padStart(2, '0');
+  return `${parts.year}-${pad(parts.month)}-${pad(parts.day)}`;
+}
+
+function addDaysToLocalDate(fechaLocal, deltaDays) {
+  const match = String(fechaLocal || '').match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (!match) return null;
+  const utc = new Date(Date.UTC(Number(match[1]), Number(match[2]) - 1, Number(match[3])));
+  utc.setUTCDate(utc.getUTCDate() + Number(deltaDays || 0));
+  const pad = (value) => String(value).padStart(2, '0');
+  return `${utc.getUTCFullYear()}-${pad(utc.getUTCMonth() + 1)}-${pad(utc.getUTCDate())}`;
+}
+
 function extractWhatsappTemplateBodyText(template) {
   const components = Array.isArray(template?.components) ? template.components : [];
   const bodyParts = components
@@ -140,24 +328,6 @@ function renderWhatsappTemplatePreviewText(template, templateParams = {}) {
     const value = cleanString(templateParams?.[key]);
     return value || `{{${key}}}`;
   });
-}
-
-function extractWhatsappTemplatePlaceholderIndexes(template) {
-  const components = Array.isArray(template?.components) ? template.components : [];
-  const indexes = new Set();
-
-  for (const component of components) {
-    const text = cleanString(component?.text);
-    if (!text) continue;
-    const matches = text.matchAll(/{{\s*(\d+)\s*}}/g);
-    for (const match of matches) {
-      const rawIdx = cleanString(match?.[1]);
-      if (!rawIdx) continue;
-      indexes.add(rawIdx);
-    }
-  }
-
-  return Array.from(indexes).sort((a, b) => Number(a) - Number(b));
 }
 
 function getMadridDateParts(date = new Date()) {
@@ -309,6 +479,18 @@ function buildDisplayName(...parts) {
     .trim();
 }
 
+function buildPersonContext(nombre, apellidos, email = null) {
+  const firstName = cleanString(nombre);
+  const lastName = cleanString(apellidos);
+  const fullName = buildDisplayName(firstName, lastName) || null;
+  return {
+    nombre: firstName,
+    apellidos: lastName,
+    nombre_completo: fullName || firstName || lastName || null,
+    email: cleanString(email),
+  };
+}
+
 function mergeContextObject(base, patch) {
   if (!patch || typeof patch !== 'object' || Array.isArray(patch)) return base || {};
   if (!base || typeof base !== 'object' || Array.isArray(base)) return clone(patch) || {};
@@ -327,7 +509,7 @@ async function enrichContextForTemplateResolution(context, targets = {}) {
 
   if (appointmentId) {
     const appointment = await CitaPaciente.findByPk(appointmentId, {
-      attributes: ['id_cita', 'clinica_id', 'paciente_id', 'lead_intake_id', 'created_by', 'estado', 'inicio', 'fin', 'titulo', 'motivo'],
+      attributes: ['id_cita', 'clinica_id', 'paciente_id', 'lead_intake_id', 'created_by', 'doctor_id', 'estado', 'inicio', 'fin', 'titulo', 'motivo', 'created_at'],
       raw: true,
     });
     if (appointment) {
@@ -336,10 +518,23 @@ async function enrichContextForTemplateResolution(context, targets = {}) {
       const creatorNameCandidate =
         cleanString(existingAppointment.usuario_nombre)
         || cleanString(existingTriggerData.usuario_nombre)
-        || cleanString(existingTriggerData['profesional.nombre']);
+        || cleanString(existingTriggerData['usuario.nombre']);
+      const creatorLastNameCandidate =
+        cleanString(existingAppointment.usuario_apellidos)
+        || cleanString(existingTriggerData.usuario_apellidos)
+        || cleanString(existingTriggerData['usuario.apellidos']);
       const creatorEmailCandidate =
         cleanString(existingAppointment.usuario_email)
         || cleanString(existingTriggerData.usuario_email)
+        || cleanString(existingTriggerData['usuario.email']);
+      const professionalNameCandidate =
+        cleanString(existingTriggerData.profesional_nombre)
+        || cleanString(existingTriggerData['profesional.nombre']);
+      const professionalLastNameCandidate =
+        cleanString(existingTriggerData.profesional_apellidos)
+        || cleanString(existingTriggerData['profesional.apellidos']);
+      const professionalEmailCandidate =
+        cleanString(existingTriggerData.profesional_email)
         || cleanString(existingTriggerData['profesional.email']);
       const appointmentPatch = {
         id: toIntOrNull(appointment.id_cita),
@@ -353,12 +548,15 @@ async function enrichContextForTemplateResolution(context, targets = {}) {
         status: cleanString(appointment.estado),
         inicio: appointment.inicio || null,
         fin: appointment.fin || null,
+        created_at: appointment.created_at || appointment.createdAt || null,
         fecha: formatDateEs(appointment.inicio),
         hora: formatTimeEs(appointment.inicio),
         titulo: cleanString(appointment.titulo),
         motivo: cleanString(appointment.motivo),
         usuario_nombre: creatorNameCandidate || null,
+        usuario_apellidos: creatorLastNameCandidate || null,
         usuario_email: creatorEmailCandidate || null,
+        doctor_id: toIntOrNull(appointment.doctor_id),
       };
 
       out.appointment = mergeContextObject(out.appointment, appointmentPatch);
@@ -373,29 +571,43 @@ async function enrichContextForTemplateResolution(context, targets = {}) {
           raw: true,
         });
         if (creator) {
-          const creatorName =
-            buildDisplayName(creator.nombre, creator.apellidos)
-            || cleanString(creator.nombre)
-            || cleanString(creator.email_usuario);
-          const creatorEmail = cleanString(creator.email_usuario);
+          const creatorContext = buildPersonContext(creator.nombre, creator.apellidos, creator.email_usuario);
           out.appointment = mergeContextObject(out.appointment, {
-            usuario_nombre: creatorName || null,
-            usuario_email: creatorEmail || null,
+            usuario_nombre: creatorContext.nombre || null,
+            usuario_apellidos: creatorContext.apellidos || null,
+            usuario_email: creatorContext.email || null,
           });
           out.cita = mergeContextObject(out.cita, {
-            usuario_nombre: creatorName || null,
-            usuario_email: creatorEmail || null,
+            usuario_nombre: creatorContext.nombre || null,
+            usuario_apellidos: creatorContext.apellidos || null,
+            usuario_email: creatorContext.email || null,
           });
-          out.profesional = mergeContextObject(out.profesional, {
-            nombre: creatorName || null,
-            email: creatorEmail || null,
-          });
+          out.usuario = mergeContextObject(out.usuario, creatorContext);
         }
-      } else if (creatorNameCandidate || creatorEmailCandidate) {
-        out.profesional = mergeContextObject(out.profesional, {
-          nombre: creatorNameCandidate || null,
-          email: creatorEmailCandidate || null,
+      } else if (creatorNameCandidate || creatorLastNameCandidate || creatorEmailCandidate) {
+        out.usuario = mergeContextObject(
+          out.usuario,
+          buildPersonContext(creatorNameCandidate, creatorLastNameCandidate, creatorEmailCandidate)
+        );
+      }
+
+      const professionalId = toIntOrNull(appointment.doctor_id);
+      if (professionalId) {
+        const professional = await Usuario.findByPk(professionalId, {
+          attributes: ['id_usuario', 'nombre', 'apellidos', 'email_usuario'],
+          raw: true,
         });
+        if (professional) {
+          out.profesional = mergeContextObject(
+            out.profesional,
+            buildPersonContext(professional.nombre, professional.apellidos, professional.email_usuario)
+          );
+        }
+      } else if (professionalNameCandidate || professionalLastNameCandidate || professionalEmailCandidate) {
+        out.profesional = mergeContextObject(
+          out.profesional,
+          buildPersonContext(professionalNameCandidate, professionalLastNameCandidate, professionalEmailCandidate)
+        );
       }
     }
   }
@@ -442,7 +654,7 @@ async function enrichContextForTemplateResolution(context, targets = {}) {
 
   if (effectiveClinicId) {
     const clinic = await Clinica.findByPk(effectiveClinicId, {
-      attributes: ['id_clinica', 'grupoClinicaId', 'nombre_clinica', 'direccion', 'telefono', 'url_web', 'url_ficha_local'],
+      attributes: ['id_clinica', 'grupoClinicaId', 'nombre_clinica', 'direccion', 'telefono', 'url_web', 'url_ficha_local', 'configuracion'],
       raw: true,
     });
     if (clinic) {
@@ -459,6 +671,8 @@ async function enrichContextForTemplateResolution(context, targets = {}) {
         telefono: cleanString(clinic.telefono),
         url_web: cleanString(clinic.url_web),
         url_ficha_local: cleanString(clinic.url_ficha_local),
+        timezone: resolveClinicTimezoneFromContext({ clinic }),
+        configuracion: clinic.configuracion || null,
       };
       out.clinic = mergeContextObject(out.clinic, clinicPatch);
       out.clinica = mergeContextObject(out.clinica, {
@@ -504,10 +718,13 @@ async function enrichContextForTemplateResolution(context, targets = {}) {
     ...(out.trigger.data || {}),
     appointment_id: toIntOrNull(out?.appointment?.id_cita) || toIntOrNull(out?.cita?.id_cita) || null,
     cita_id: toIntOrNull(out?.appointment?.id_cita) || toIntOrNull(out?.cita?.id_cita) || null,
+    appointment_created_at: out?.appointment?.created_at || out?.cita?.created_at || null,
+    created_at: out?.appointment?.created_at || out?.cita?.created_at || out?.trigger?.data?.created_at || null,
     patient_id: toIntOrNull(out?.patient?.id_paciente) || toIntOrNull(out?.paciente?.id_paciente) || null,
     paciente_id: toIntOrNull(out?.patient?.id_paciente) || toIntOrNull(out?.paciente?.id_paciente) || null,
     clinic_id: toIntOrNull(out?.clinic?.id_clinica) || toIntOrNull(out?.clinica?.id_clinica) || null,
     clinica_id: toIntOrNull(out?.clinic?.id_clinica) || toIntOrNull(out?.clinica?.id_clinica) || null,
+    clinic_timezone: cleanString(out?.clinic?.timezone) || cleanString(out?.clinica?.timezone) || null,
     lead_intake_id: toIntOrNull(out?.lead?.id) || null,
     lead_id: toIntOrNull(out?.lead?.id) || null,
   };
@@ -889,7 +1106,30 @@ function buildAiSimulatedOutput(outputFormat, analysisMode, model) {
 
 async function runGroqAiAnalysis({ prompt, inputText, outputFormat, outputFields, analysisMode, maxTokens }) {
   const apiKey = cleanString(process.env.GROQ_API_KEY);
+  try {
+    fs.appendFileSync('/tmp/cc-groq-debug.log', `${JSON.stringify({
+      ts: new Date().toISOString(),
+      source: 'back-integracion',
+      pid: process.pid,
+      cwd: process.cwd(),
+      port: process.env.PORT || null,
+      runtimeNamespace: process.env.JOB_RUNTIME_NAMESPACE || process.env.RUNTIME_NAMESPACE || null,
+      hasGroqKey: !!apiKey,
+      groqKeyPrefix: apiKey ? `${String(apiKey).slice(0, 6)}...` : null,
+      hasBaseUrl: !!cleanString(process.env.GROQ_API_BASE_URL),
+      analysisMode: normalizeAiAnalysisMode(analysisMode),
+    })}\n`);
+  } catch (_) {
+    // no-op debug fallback
+  }
   if (!apiKey) {
+    console.error('[ai_analysis] GROQ_API_KEY ausente en runtime activo', {
+      pid: process.pid,
+      cwd: process.cwd(),
+      port: process.env.PORT || null,
+      runtimeNamespace: process.env.JOB_RUNTIME_NAMESPACE || process.env.RUNTIME_NAMESPACE || null,
+      hasBaseUrl: !!cleanString(process.env.GROQ_API_BASE_URL),
+    });
     throw new Error('groq_api_key_not_configured');
   }
 
@@ -1254,10 +1494,43 @@ function toLowerSafe(value) {
   return String(value || '').trim().toLowerCase();
 }
 
+function buildDeterministicConfirmAppointmentOutput(context = {}) {
+  const responseContext = isObject(context?.last_response_context) ? context.last_response_context : {};
+  const responseMessageType = normalizeKey(
+    responseContext.response_message_type
+    || responseContext.message_type
+  );
+
+  if (responseMessageType !== 'reaction') {
+    return null;
+  }
+
+  const reactionEmoji = cleanString(responseContext.reaction_emoji);
+  if (!reactionEmoji || !POSITIVE_CONFIRMATION_REACTION_EMOJIS.has(reactionEmoji)) {
+    return null;
+  }
+
+  const targetPreview = cleanString(
+    responseContext.reaction_target_message_preview
+    || responseContext.listened_message_preview
+    || context?.last_prompt
+  );
+
+  return {
+    decision: 'confirmado',
+    confianza: 0.99,
+    motivo: targetPreview
+      ? `Paciente reaccionó ${reactionEmoji} de forma positiva al mensaje "${targetPreview}".`
+      : `Paciente reaccionó ${reactionEmoji} de forma positiva al último mensaje de la clínica.`,
+    _ai_provider: 'deterministic_rule',
+    _ai_model: 'confirm_appointment_positive_reaction',
+    _ai_analysis_mode: 'rule',
+  };
+}
+
 function isTemplateBlockedForSend(statusValue) {
   const status = toLowerSafe(statusValue);
-  if (!status) return false;
-  return ['rejected', 'disabled', 'deleted', 'archived'].includes(status);
+  return status !== 'approved';
 }
 
 function normalizeStringArray(value) {
@@ -1330,7 +1603,9 @@ function parseDueDateOffset(rawOffset) {
 function resolveRoleCode(raw) {
   const key = normalizeKey(raw);
   if (!key) return null;
-  if (['1', 'owner', 'propietario', 'administrador', 'admin'].includes(key)) return 'propietario';
+  if (['1', 'owner', 'propietario'].includes(key)) return 'propietario';
+  if (['administrador', 'admin', 'system_admin', 'global_admin'].includes(key)) return 'admin';
+  if (['agencia', 'agency'].includes(key)) return 'agencia';
   if (['2', 'staff', 'personal', 'personaldeclinica', 'clinic_staff', 'recepcion', 'recepcion_comercial_ventas'].includes(key)) {
     return 'personaldeclinica';
   }
@@ -1345,6 +1620,9 @@ async function resolveTaskAssigneeUserIds({ clinicId, assigneeType, assigneeId, 
   if (normalizedAssigneeType === 'user') {
     const userId = toIntOrNull(assigneeId);
     if (!userId) return [];
+    if (ADMIN_USER_IDS.includes(userId)) {
+      return [userId];
+    }
     const membership = await UsuarioClinica.findOne({
       where: { id_clinica: clinicId, id_usuario: userId },
       attributes: ['id_usuario'],
@@ -1354,6 +1632,25 @@ async function resolveTaskAssigneeUserIds({ clinicId, assigneeType, assigneeId, 
   }
 
   const effectiveRole = roleCode || resolveRoleCode(assigneeId);
+  if (effectiveRole === 'admin') {
+    const membershipRows = await UsuarioClinica.findAll({
+      where: {
+        id_clinica: clinicId,
+        rol_clinica: { [Op.in]: ['admin', 'administrador'] },
+      },
+      attributes: ['id_usuario'],
+      raw: true,
+      limit: 50,
+    });
+
+    return Array.from(
+      new Set([
+        ...ADMIN_USER_IDS,
+        ...membershipRows.map((row) => toIntOrNull(row.id_usuario)).filter(Boolean),
+      ])
+    );
+  }
+
   const where = { id_clinica: clinicId };
   if (effectiveRole) {
     where.rol_clinica = effectiveRole;
@@ -1784,16 +2081,124 @@ async function resolveWhatsAppSenderConfig({ config, context, clinicId }) {
   };
 }
 
-function resolveTemplateVariables(config, context) {
-  const raw = config?.variables;
-  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return {};
+function resolveTemplateVariablesWithKeys(
+  config,
+  context,
+  template = null,
+  {
+    namedKey = 'variables_named',
+    positionalKey = 'variables',
+  } = {}
+) {
+  const templateVariables = buildWhatsappTemplateVariableContract(template);
+  const rawNamed = normalizeNamedBindings(config?.[namedKey]);
+  const rawPositional = normalizePositionalBindings(config?.[positionalKey]);
+
+  if (!templateVariables.length) {
+    const legacyOutput = {};
+    for (const [key, value] of Object.entries(rawPositional)) {
+      const resolved = resolveTemplateValue(value, context);
+      if (resolved === undefined || resolved === null || resolved === '') continue;
+      legacyOutput[key] = String(resolved);
+    }
+    return legacyOutput;
+  }
+
+  const bootstrappedNamed = Object.keys(rawNamed).length
+    ? rawNamed
+    : buildNamedBindingsFromPositional(rawPositional, templateVariables);
+  const positionalBindings = buildPositionalBindingsFromNamed(
+    bootstrappedNamed,
+    rawPositional,
+    templateVariables
+  );
+
   const output = {};
-  for (const [key, value] of Object.entries(raw)) {
+  for (const [key, value] of Object.entries(positionalBindings)) {
     const resolved = resolveTemplateValue(value, context);
     if (resolved === undefined || resolved === null || resolved === '') continue;
     output[key] = String(resolved);
   }
   return output;
+}
+
+function resolveTemplateVariables(config, context, template = null) {
+  return resolveTemplateVariablesWithKeys(config, context, template, {
+    namedKey: 'variables_named',
+    positionalKey: 'variables',
+  });
+}
+
+async function loadConfiguredWhatsappTemplate(
+  config,
+  context,
+  {
+    templateIdKey = 'template_id',
+    templateNameKey = 'template_name',
+    catalogTemplateIdKey = 'catalog_template_id',
+  } = {}
+) {
+  const templateId = toIntOrNull(resolveTemplateValue(config?.[templateIdKey], context));
+  const templateName = cleanString(resolveTemplateValue(config?.[templateNameKey], context));
+  const catalogTemplateId = toIntOrNull(resolveTemplateValue(config?.[catalogTemplateIdKey], context));
+  const clinicId = toIntOrNull(
+    context?.appointment?.clinica_id
+      || context?.appointment?.clinic_id
+      || context?.cita?.clinica_id
+      || context?.cita?.clinic_id
+      || context?.trigger?.data?.clinica_id
+      || context?.trigger?.data?.clinic_id
+      || context?.clinic?.id
+      || context?.clinic_id
+  );
+
+  const baseQuery = {
+    attributes: ['id', 'name', 'language', 'status', 'components', 'catalog_template_id', 'clinic_id'],
+    include: [{ model: WhatsappTemplateCatalog, as: 'catalog', attributes: ['id', 'variables'] }],
+  };
+
+  if (catalogTemplateId) {
+    const candidates = await WhatsappTemplate.findAll({
+      ...baseQuery,
+      where: {
+        catalog_template_id: catalogTemplateId,
+        is_active: true,
+      },
+    });
+
+    const clinicCandidates = clinicId
+      ? candidates.filter((row) => toIntOrNull(row?.clinic_id) === clinicId)
+      : [];
+    const globalCandidates = candidates.filter((row) => !toIntOrNull(row?.clinic_id));
+    const scopedCandidates = clinicCandidates.length ? clinicCandidates : globalCandidates;
+    if (scopedCandidates.length) {
+      scopedCandidates.sort((a, b) => {
+        const aBlocked = isTemplateBlockedForSend(toLowerSafe(a?.status)) ? 1 : 0;
+        const bBlocked = isTemplateBlockedForSend(toLowerSafe(b?.status)) ? 1 : 0;
+        if (aBlocked !== bBlocked) return aBlocked - bBlocked;
+        return (Number(b?.id) || 0) - (Number(a?.id) || 0);
+      });
+      return scopedCandidates[0];
+    }
+  }
+
+  if (!templateId && !templateName) {
+    return null;
+  }
+
+  const where = {};
+  if (templateId && templateName) {
+    where[Op.or] = [{ id: templateId }, { name: templateName }];
+  } else if (templateId) {
+    where.id = templateId;
+  } else {
+    where.name = templateName;
+  }
+
+  return WhatsappTemplate.findOne({
+    ...baseQuery,
+    where,
+  });
 }
 
 async function handleSendWhatsapp(node, context, runtime) {
@@ -1823,32 +2228,35 @@ async function handleSendWhatsapp(node, context, runtime) {
   });
   const recipientData = await resolveWhatsAppRecipient({ node, config, context: templateContext, targets });
 
+  const originalMessageMode = messageMode;
+  let effectiveMessageMode = messageMode;
   let template = null;
   let templateParams = {};
   let previewText = '';
   let messageContent = '';
   let messageType = 'text';
   let templateLanguage = cleanString(resolveTemplateValue(config?.language_code, context)) || 'es_ES';
+  let fallbackTemplate = null;
+  let fallbackTemplateParams = {};
+  let fallbackPreviewText = '';
+  let fallbackTriggeredReason = null;
 
   if (messageMode === 'template') {
-    const templateId = toIntOrNull(resolveTemplateValue(config?.template_id, context));
-    if (!templateId) {
-      throw new Error('whatsapp_template_id_missing');
-    }
-
-    template = await WhatsappTemplate.findByPk(templateId, {
-      attributes: ['id', 'name', 'language', 'status', 'components'],
+    template = await loadConfiguredWhatsappTemplate(config, templateContext, {
+      templateIdKey: 'template_id',
+      templateNameKey: 'template_name',
+      catalogTemplateIdKey: 'catalog_template_id',
     });
     if (!template) {
-      throw new Error(`whatsapp_template_not_found:${templateId}`);
+      throw new Error('whatsapp_template_id_missing');
     }
 
     const templateStatus = toLowerSafe(template.status);
     if (isTemplateBlockedForSend(templateStatus)) {
-      throw new Error(`whatsapp_template_blocked:${template.status}`);
+      throw new Error(`whatsapp_template_not_approved:${template.status}`);
     }
 
-    templateParams = resolveTemplateVariables(config, templateContext);
+    templateParams = resolveTemplateVariables(config, templateContext, template);
     const expectedTemplateParamIndexes = extractWhatsappTemplatePlaceholderIndexes(template);
     const missingTemplateParamIndexes = expectedTemplateParamIndexes.filter((paramIdx) => {
       const value = cleanString(templateParams?.[paramIdx]);
@@ -1863,7 +2271,7 @@ async function handleSendWhatsapp(node, context, runtime) {
     previewText = renderWhatsappTemplatePreviewText(template, templateParams);
     messageContent = previewText;
     messageType = 'template';
-    templateLanguage = templateLanguage || template.language || 'es_ES';
+    templateLanguage = cleanString(template?.language) || templateLanguage || 'es_ES';
   } else {
     const manualText = cleanString(resolveTemplateValue(config?.manual_message_text, templateContext));
     if (!manualText) {
@@ -1872,6 +2280,43 @@ async function handleSendWhatsapp(node, context, runtime) {
     previewText = manualText;
     messageContent = manualText;
     messageType = 'text';
+
+    fallbackTemplate = await loadConfiguredWhatsappTemplate(config, templateContext, {
+      templateIdKey: 'fallback_template_id',
+      templateNameKey: 'fallback_template_name',
+      catalogTemplateIdKey: 'fallback_catalog_template_id',
+    });
+    if (fallbackTemplate) {
+      const fallbackStatus = toLowerSafe(fallbackTemplate.status);
+      if (isTemplateBlockedForSend(fallbackStatus)) {
+        throw new Error(`whatsapp_fallback_template_not_approved:${fallbackTemplate.status}`);
+      }
+
+      fallbackTemplateParams = resolveTemplateVariablesWithKeys(
+        config,
+        templateContext,
+        fallbackTemplate,
+        {
+          namedKey: 'fallback_variables_named',
+          positionalKey: 'fallback_variables',
+        }
+      );
+      const expectedFallbackParamIndexes = extractWhatsappTemplatePlaceholderIndexes(fallbackTemplate);
+      const missingFallbackParamIndexes = expectedFallbackParamIndexes.filter((paramIdx) => {
+        const value = cleanString(fallbackTemplateParams?.[paramIdx]);
+        return !value;
+      });
+      if (missingFallbackParamIndexes.length) {
+        throw new Error(
+          `whatsapp_fallback_template_params_missing:${missingFallbackParamIndexes.join(',')}`
+        );
+      }
+
+      fallbackPreviewText = renderWhatsappTemplatePreviewText(
+        fallbackTemplate,
+        fallbackTemplateParams
+      );
+    }
   }
 
   const targetPatientId = toIntOrNull(targets.patient_id);
@@ -1891,20 +2336,35 @@ async function handleSendWhatsapp(node, context, runtime) {
   // - modo manual: no enviar (se exige conversación activa en últimas 24h).
   if (!conversation) {
     if (messageMode === 'manual') {
-      return {
-        kind: 'success',
-        output: {
-          status: 'skipped_no_active_conversation_24h',
-          reason: 'conversation_not_found',
-          message_mode: messageMode,
-          message_preview: previewText,
-          recipient_mode: recipientData.recipient_mode,
-          recipient: recipientData.recipient,
-          conversation_id: null,
-          last_inbound_at: null,
-        },
-        next_node_id: readOutputTarget(node, 'on_success'),
-      };
+      if (fallbackTemplate) {
+        fallbackTriggeredReason = 'conversation_not_found';
+        effectiveMessageMode = 'template_fallback';
+        template = fallbackTemplate;
+        templateParams = fallbackTemplateParams;
+        previewText = fallbackPreviewText;
+        messageContent = previewText;
+        messageType = 'template';
+        templateLanguage = cleanString(fallbackTemplate?.language) || templateLanguage || 'es_ES';
+      } else {
+        return {
+          kind: 'success',
+          output: {
+            status: 'skipped_no_active_conversation_24h',
+            reason: 'conversation_not_found',
+            message_mode: originalMessageMode,
+            delivery_mode: originalMessageMode,
+            message_preview: previewText,
+            recipient_mode: recipientData.recipient_mode,
+            recipient: recipientData.recipient,
+            conversation_id: null,
+            last_inbound_at: null,
+            fallback_used: false,
+            fallback_template_id: null,
+            fallback_template_name: null,
+          },
+          next_node_id: readOutputTarget(node, 'on_success'),
+        };
+      }
     }
     conversation = await findCanonicalWhatsappConversation({
       clinicId,
@@ -1917,20 +2377,35 @@ async function handleSendWhatsapp(node, context, runtime) {
   }
 
   if (messageMode === 'manual' && !hasActiveInboundWindow(conversation?.last_inbound_at)) {
-    return {
-      kind: 'success',
-      output: {
-        status: 'skipped_no_active_conversation_24h',
-        reason: 'conversation_outside_24h_window',
-        message_mode: messageMode,
-        message_preview: previewText,
-        recipient_mode: recipientData.recipient_mode,
-        recipient: recipientData.recipient,
-        conversation_id: conversation?.id || null,
-        last_inbound_at: conversation?.last_inbound_at || null,
-      },
-      next_node_id: readOutputTarget(node, 'on_success'),
-    };
+    if (fallbackTemplate) {
+      fallbackTriggeredReason = 'conversation_outside_24h_window';
+      effectiveMessageMode = 'template_fallback';
+      template = fallbackTemplate;
+      templateParams = fallbackTemplateParams;
+      previewText = fallbackPreviewText;
+      messageContent = previewText;
+      messageType = 'template';
+      templateLanguage = cleanString(fallbackTemplate?.language) || templateLanguage || 'es_ES';
+    } else {
+      return {
+        kind: 'success',
+        output: {
+          status: 'skipped_no_active_conversation_24h',
+          reason: 'conversation_outside_24h_window',
+          message_mode: originalMessageMode,
+          delivery_mode: originalMessageMode,
+          message_preview: previewText,
+          recipient_mode: recipientData.recipient_mode,
+          recipient: recipientData.recipient,
+          conversation_id: conversation?.id || null,
+          last_inbound_at: conversation?.last_inbound_at || null,
+          fallback_used: false,
+          fallback_template_id: null,
+          fallback_template_name: null,
+        },
+        next_node_id: readOutputTarget(node, 'on_success'),
+      };
+    }
   }
 
   const senderData = await resolveWhatsAppSenderConfig({ config, context: templateContext, clinicId });
@@ -2000,9 +2475,14 @@ async function handleSendWhatsapp(node, context, runtime) {
       execution_id: runtime?.execution?.id || null,
       node_id: cleanString(node?.id),
       flow_name: flowName || null,
-      message_mode: messageMode,
+      message_mode: originalMessageMode,
+      delivery_mode: effectiveMessageMode,
       template_id: template?.id || null,
       template_name: template?.name || null,
+      fallback_used: !!fallbackTriggeredReason,
+      fallback_reason: fallbackTriggeredReason,
+      fallback_template_id: fallbackTriggeredReason ? template?.id || null : null,
+      fallback_template_name: fallbackTriggeredReason ? template?.name || null : null,
       generated_at: nowIso,
     },
   });
@@ -2014,9 +2494,14 @@ async function handleSendWhatsapp(node, context, runtime) {
     node_id: cleanString(node?.id),
     flow_name: flowName || null,
     flow_reason: 'flow_send_whatsapp',
-    message_mode: messageMode,
+    message_mode: originalMessageMode,
+    delivery_mode: effectiveMessageMode,
     template_id: template?.id || null,
     template_name: template?.name || null,
+    fallback_used: !!fallbackTriggeredReason,
+    fallback_reason: fallbackTriggeredReason,
+    fallback_template_id: fallbackTriggeredReason ? template?.id || null : null,
+    fallback_template_name: fallbackTriggeredReason ? template?.name || null : null,
     template_language: templateLanguage || template?.language || 'es_ES',
     template_params: templateParams,
     preview_text: previewText,
@@ -2060,7 +2545,7 @@ async function handleSendWhatsapp(node, context, runtime) {
           conversationId: conversation.id,
           to: recipientData.recipient,
           body: messageContent,
-          useTemplate: messageMode === 'template',
+          useTemplate: messageType === 'template',
           templateName: template?.name || null,
           templateLanguage: metadata.template_language,
           templateParams,
@@ -2109,9 +2594,12 @@ async function handleSendWhatsapp(node, context, runtime) {
         message_id: msg.id,
         event_message_id: eventMsg.id,
         status: 'scheduled',
-        message_mode: messageMode,
+        message_mode: originalMessageMode,
+        delivery_mode: effectiveMessageMode,
         template_id: template?.id || null,
         template_name: template?.name || null,
+        fallback_used: !!fallbackTriggeredReason,
+        fallback_reason: fallbackTriggeredReason,
         message_preview: previewText,
         recipient_mode: recipientData.recipient_mode,
         recipient: recipientData.recipient,
@@ -2135,7 +2623,7 @@ async function handleSendWhatsapp(node, context, runtime) {
     const waResponse = await whatsappService.sendMessage({
       to: recipientData.recipient,
       body: messageContent,
-      useTemplate: messageMode === 'template',
+      useTemplate: messageType === 'template',
       templateName: template?.name || null,
       templateLanguage: metadata.template_language,
       templateParams,
@@ -2230,9 +2718,12 @@ async function handleSendWhatsapp(node, context, runtime) {
       message_id: msg.id,
       event_message_id: eventMsg.id,
       status: 'sent',
-      message_mode: messageMode,
+      message_mode: originalMessageMode,
+      delivery_mode: effectiveMessageMode,
       template_id: template?.id || null,
       template_name: template?.name || null,
+      fallback_used: !!fallbackTriggeredReason,
+      fallback_reason: fallbackTriggeredReason,
       message_preview: previewText,
       recipient_mode: recipientData.recipient_mode,
       recipient: recipientData.recipient,
@@ -2523,7 +3014,29 @@ function isFieldCheckOperatorCompatible(operator, valueType) {
   return allowed.includes(operator);
 }
 
-function evaluateFieldCheck(config, context) {
+function normalizeFieldCheckSwitchRules(rawRules) {
+  if (!Array.isArray(rawRules)) return [];
+  const seen = new Set();
+  const normalized = [];
+  rawRules.forEach((rule, index) => {
+    if (!isObject(rule)) return;
+    let id = cleanString(rule.id);
+    if (!id || !/^branch_\d+$/.test(id)) {
+      id = `branch_${index + 1}`;
+    }
+    if (seen.has(id)) return;
+    seen.add(id);
+    const matchWindow = cleanString(rule.match_window) || 'same_day';
+    const normalizedWindow = matchWindow === 'week_before' ? 'more_than_day_before' : matchWindow;
+    normalized.push({
+      id,
+      match_window: FIELD_CHECK_APPOINTMENT_WINDOW_VALUES.has(normalizedWindow) ? normalizedWindow : 'same_day',
+    });
+  });
+  return normalized;
+}
+
+function evaluateSimpleFieldCheck(config, context) {
   const leftRef = config?.left_ref;
   if (!leftRef || typeof leftRef !== 'object') {
     throw new Error('field_check_left_ref_required');
@@ -2613,6 +3126,89 @@ function evaluateFieldCheck(config, context) {
   return false;
 }
 
+function resolveAppointmentBookingWindowMatch(rule, appointmentDateLocal, bookedAt, timeZone) {
+  const bookingDateLocal = formatDateLocal(bookedAt, timeZone);
+  if (!appointmentDateLocal || !bookingDateLocal) {
+    return false;
+  }
+
+  switch (cleanString(rule?.match_window)) {
+    case 'same_day':
+      return bookingDateLocal === appointmentDateLocal;
+    case 'day_before':
+      return bookingDateLocal === addDaysToLocalDate(appointmentDateLocal, -1);
+    case 'more_than_day_before':
+      return bookingDateLocal < addDaysToLocalDate(appointmentDateLocal, -1);
+    default:
+      return false;
+  }
+}
+
+function evaluateAppointmentBookingTimingFieldCheck(config, context) {
+  const switchType = cleanString(config?.switch_type) || 'appointment_booking';
+  if (!FIELD_CHECK_SWITCH_TYPE_VALUES.has(switchType)) {
+    throw new Error(`field_check_invalid_switch_type:${switchType}`);
+  }
+
+  const rules = normalizeFieldCheckSwitchRules(config?.switch_rules);
+  if (!rules.length) {
+    throw new Error('field_check_switch_rules_required');
+  }
+
+  const appointmentStartRaw = context?.appointment?.inicio
+    || context?.cita?.inicio
+    || context?.trigger?.data?.inicio
+    || context?.trigger?.data?.appointment_start;
+  const appointmentCreatedRaw = context?.appointment?.created_at
+    || context?.cita?.created_at
+    || context?.trigger?.data?.created_at
+    || context?.trigger?.data?.appointment_created_at;
+
+  const appointmentStart = appointmentStartRaw ? new Date(appointmentStartRaw) : null;
+  const appointmentCreatedAt = appointmentCreatedRaw ? new Date(appointmentCreatedRaw) : null;
+  if (!(appointmentStart instanceof Date) || !Number.isFinite(appointmentStart.getTime())) {
+    throw new Error('field_check_appointment_start_required');
+  }
+  if (!(appointmentCreatedAt instanceof Date) || !Number.isFinite(appointmentCreatedAt.getTime())) {
+    throw new Error('field_check_appointment_created_at_required');
+  }
+
+  const timeZone = resolveClinicTimezoneFromContext(context);
+  const appointmentDateLocal = formatDateLocal(appointmentStart, timeZone);
+
+  const matchedRule = rules.find((rule) =>
+    resolveAppointmentBookingWindowMatch(rule, appointmentDateLocal, appointmentCreatedAt, timeZone)
+  );
+
+  return {
+    decision: !!matchedRule,
+    matched_rule_id: matchedRule?.id || null,
+    matched_window: matchedRule?.match_window || null,
+    appointment_date_local: appointmentDateLocal,
+    booking_created_at: appointmentCreatedAt.toISOString(),
+    time_zone: timeZone,
+    next_output_key: matchedRule?.id || 'on_else',
+  };
+}
+
+function evaluateFieldCheck(config, context) {
+  const mode = cleanString(config?.mode) || 'simple';
+  if (!FIELD_CHECK_MODE_VALUES.has(mode)) {
+    throw new Error(`field_check_invalid_mode:${mode}`);
+  }
+
+  if (mode === 'appointment_booking_timing') {
+    return evaluateAppointmentBookingTimingFieldCheck(config, context);
+  }
+
+  const decision = evaluateSimpleFieldCheck(config, context);
+  return {
+    decision,
+    operator: config?.operator || 'equals',
+    next_output_key: decision ? 'on_true' : 'on_false',
+  };
+}
+
 function evaluateResponseExists(config, context) {
   const listensTo = cleanString(config?.listens_to_node_id);
   if (!listensTo) return false;
@@ -2636,6 +3232,28 @@ function parseWaitUntilExpression(expression, context) {
   }
 
   return null;
+}
+
+function parseDateValueOrNull(value) {
+  if (!value) return null;
+  const candidate = value instanceof Date ? value : new Date(value);
+  if (Number.isNaN(candidate.getTime())) return null;
+  return candidate;
+}
+
+function resolveWaitResponseAnchor(context, config) {
+  const listensTo = cleanString(config?.listens_to_node_id);
+  const listenedOutput = listensTo ? getByPath(context, `outputs.${listensTo}`) : null;
+  const anchorAt = parseDateValueOrNull(
+    listenedOutput?.effective_send_at
+    || listenedOutput?.scheduled_for
+    || null
+  );
+  return {
+    listens_to_node_id: listensTo,
+    listened_output: listenedOutput,
+    anchor_at: anchorAt,
+  };
 }
 
 function isSimulationRuntime(runtime = {}, context = {}) {
@@ -2878,19 +3496,24 @@ async function processNode(node, context, runtime = {}) {
 
     case 'delay/wait_response': {
       const timeoutMs = resolveDurationMs(config?.timeout_duration ?? 60, config?.timeout_unit || 'minutes');
-      const waitUntil = timeoutMs > 0 ? new Date(Date.now() + timeoutMs) : null;
+      const waitAnchor = resolveWaitResponseAnchor(context, config);
+      const waitStartAt = waitAnchor.anchor_at || new Date();
+      const waitUntil = timeoutMs > 0 ? new Date(waitStartAt.getTime() + timeoutMs) : null;
       const responseBufferEnabled = parseBool(resolveTemplateValue(config?.response_buffer_enabled, context), true);
       return {
         kind: 'waiting',
         output: {
           waits_for_response: true,
-          listens_to_node_id: cleanString(config?.listens_to_node_id),
+          listens_to_node_id: waitAnchor.listens_to_node_id,
+          wait_starts_at: waitStartAt.toISOString(),
           timeout_at: waitUntil ? waitUntil.toISOString() : null,
           response_buffer_enabled: responseBufferEnabled,
         },
         waiting_meta: {
           type: nodeType,
-          listens_to_node_id: cleanString(config?.listens_to_node_id),
+          runtime_namespace: CURRENT_RUNTIME_NAMESPACE,
+          listens_to_node_id: waitAnchor.listens_to_node_id,
+          wait_starts_at: waitStartAt.toISOString(),
           on_response: readOutputTarget(node, 'on_response'),
           on_timeout: readOutputTarget(node, 'on_timeout'),
           response_buffer_enabled: responseBufferEnabled,
@@ -2917,6 +3540,7 @@ async function processNode(node, context, runtime = {}) {
         },
         waiting_meta: {
           type: nodeType,
+          runtime_namespace: CURRENT_RUNTIME_NAMESPACE,
           match_mode: matchMode,
           match_value: matchValue,
           on_submit: readOutputTarget(node, 'on_submit'),
@@ -2985,6 +3609,18 @@ async function processNode(node, context, runtime = {}) {
         throw new Error('ai_analysis_output_fields_required');
       }
 
+      const presetKey = cleanString(config?.preset_key);
+      const deterministicPresetOutput = presetKey === 'confirm_appointment'
+        ? buildDeterministicConfirmAppointmentOutput(aiContext)
+        : null;
+      if (deterministicPresetOutput) {
+        return {
+          kind: 'success',
+          output: deterministicPresetOutput,
+          next_node_id: readOutputTarget(node, 'on_success'),
+        };
+      }
+
       const outputFormat = normalizeOutputFieldsToFormat(normalizedOutputFields);
       const outputFormatSimple = normalizeAiOutputFormat(outputFormat);
       const analysisMode = normalizeAiAnalysisMode(resolveTemplateValue(config?.mode, context));
@@ -2996,10 +3632,16 @@ async function processNode(node, context, runtime = {}) {
       });
 
       if (simulation) {
+        const simulatedOutput = buildAiSimulatedOutput(outputFormatSimple, analysisMode, selectedModel);
+        const decision = cleanString(simulatedOutput?.decision).toLowerCase();
         return {
           kind: 'success',
-          output: buildAiSimulatedOutput(outputFormatSimple, analysisMode, selectedModel),
-          next_node_id: readOutputTarget(node, 'on_success'),
+          output: simulatedOutput,
+          next_node_id: presetKey === 'confirm_appointment'
+            ? (decision === 'confirmado'
+                ? readOutputTarget(node, 'on_success')
+                : readOutputTarget(node, 'on_fail'))
+            : readOutputTarget(node, 'on_success'),
         };
       }
 
@@ -3012,24 +3654,26 @@ async function processNode(node, context, runtime = {}) {
         maxTokens: resolveTemplateValue(config?.max_tokens, context),
       });
 
+      const normalizedDecision = cleanString(aiOutput?.decision).toLowerCase();
+      const nextNodeId = presetKey === 'confirm_appointment'
+        ? (normalizedDecision === 'confirmado'
+            ? readOutputTarget(node, 'on_success')
+            : readOutputTarget(node, 'on_fail'))
+        : readOutputTarget(node, 'on_success');
+
       return {
         kind: 'success',
         output: aiOutput,
-        next_node_id: readOutputTarget(node, 'on_success'),
+        next_node_id: nextNodeId,
       };
     }
 
     case 'condition/field_check': {
-      const decision = evaluateFieldCheck(config, context);
+      const result = evaluateFieldCheck(config, context);
       return {
         kind: 'success',
-        output: {
-          decision,
-          operator: config?.operator || 'equals',
-        },
-        next_node_id: decision
-          ? readOutputTarget(node, 'on_true')
-          : readOutputTarget(node, 'on_false'),
+        output: result,
+        next_node_id: readOutputTarget(node, result.next_output_key),
       };
     }
 
@@ -3068,9 +3712,26 @@ async function resumeWaitingNode(execution, node, context, { mode, responseText,
       : readOutputTarget(node, 'on_timeout');
 
     let nextContext = context;
+    let forcedConversationId = null;
     if (useResponse) {
+      const waitingMeta = execution?.waiting_meta && typeof execution.waiting_meta === 'object'
+        ? execution.waiting_meta
+        : {};
+      const inboundMessageId = toIntOrNull(waitingMeta.last_inbound_message_id);
+      const inboundMessage = inboundMessageId
+        ? await Message.findByPk(inboundMessageId, {
+            attributes: ['id', 'message_type', 'content', 'metadata', 'sent_at', 'createdAt'],
+            raw: true,
+          })
+        : null;
+      const inboundMetadata = isObject(inboundMessage?.metadata) ? inboundMessage.metadata : {};
+      const inboundReaction = isObject(inboundMetadata.reaction) ? inboundMetadata.reaction : {};
       const listensTo = cleanString(node?.config?.listens_to_node_id);
       const listenedOutput = listensTo ? getByPath(context, `outputs.${listensTo}`) : null;
+      forcedConversationId = toIntOrNull(
+        listenedOutput?.conversation_id
+        || listenedOutput?.chat_conversation_id
+      );
       const listenedMessagePreview = cleanString(
         listenedOutput?.message_preview
         || listenedOutput?.content
@@ -3078,14 +3739,33 @@ async function resumeWaitingNode(execution, node, context, { mode, responseText,
       );
       const respondedAt = new Date().toISOString();
       nextContext = mergeNodeOutput(nextContext, node.id, {
+        status: 'responded',
         response_text: responseText ?? null,
         response_lines: String(responseText || '')
           .split(/\r?\n/)
           .map((line) => cleanString(line))
           .filter(Boolean),
+        response_message_id: toIntOrNull(inboundMessage?.id),
+        response_message_type: cleanString(inboundMessage?.message_type) || null,
+        response_message_preview: cleanString(inboundMessage?.content) || null,
+        reaction_emoji: cleanString(inboundReaction.emoji) || null,
+        reaction_target_message_id: cleanString(
+          inboundReaction.target_message_id
+          || inboundReaction.targetMessageId
+        ) || null,
+        reaction_target_message_type: cleanString(
+          inboundReaction.target_message_type
+          || inboundReaction.targetMessageType
+        ) || null,
+        reaction_target_message_preview: cleanString(
+          inboundReaction.target_message_preview
+          || inboundReaction.targetMessagePreview
+        ) || null,
         listens_to_node_id: listensTo,
         listened_message_preview: listenedMessagePreview,
         responded_at: respondedAt,
+        resumed_at: respondedAt,
+        resume_mode: 'response',
       });
       // Alias de contexto para simplificar plantillas IA sin depender de IDs de nodos.
       nextContext = {
@@ -3094,15 +3774,43 @@ async function resumeWaitingNode(execution, node, context, { mode, responseText,
         last_prompt: listenedMessagePreview || null,
         last_response_context: {
           response_text: responseText ?? null,
+          response_message_id: toIntOrNull(inboundMessage?.id),
+          response_message_type: cleanString(inboundMessage?.message_type) || null,
+          response_message_preview: cleanString(inboundMessage?.content) || null,
+          reaction_emoji: cleanString(inboundReaction.emoji) || null,
+          reaction_target_message_id: cleanString(
+            inboundReaction.target_message_id
+            || inboundReaction.targetMessageId
+          ) || null,
+          reaction_target_message_type: cleanString(
+            inboundReaction.target_message_type
+            || inboundReaction.targetMessageType
+          ) || null,
+          reaction_target_message_preview: cleanString(
+            inboundReaction.target_message_preview
+            || inboundReaction.targetMessagePreview
+          ) || null,
           listened_message_preview: listenedMessagePreview || null,
           wait_node_id: node.id,
           listens_to_node_id: listensTo || null,
           responded_at: respondedAt,
         },
       };
+    } else {
+      nextContext = mergeNodeOutput(nextContext, node.id, {
+        status: 'timed_out',
+        timed_out: true,
+        timed_out_at: new Date().toISOString(),
+        resumed_at: new Date().toISOString(),
+        resume_mode: 'timeout',
+      });
     }
 
-    const refreshedTargets = await backfillRuntimeTargets(execution, resolveRuntimeTargets(execution, nextContext));
+    const resumeTargets = resolveRuntimeTargets(execution, nextContext);
+    if (forcedConversationId) {
+      resumeTargets.conversation_id = forcedConversationId;
+    }
+    const refreshedTargets = await backfillRuntimeTargets(execution, resumeTargets);
     nextContext = await enrichConversationContext(nextContext, refreshedTargets);
 
     await updateExecutionAndEmit(execution, {
@@ -3135,6 +3843,7 @@ async function resumeWaitingNode(execution, node, context, { mode, responseText,
         ? formSubmission.fields
         : {};
       const outputPatch = {
+        status: 'submitted',
         submitted: true,
         submitted_at: submittedAt,
         page_url: cleanString(formSubmission?.page_url) || null,
@@ -3150,6 +3859,8 @@ async function resumeWaitingNode(execution, node, context, { mode, responseText,
         telefono: cleanString(formSubmission?.telefono) || null,
         form_submission_event_id: toIntOrNull(formSubmission?.form_submission_event_id),
         source_detail: cleanString(formSubmission?.source_detail) || 'web_form',
+        resumed_at: submittedAt,
+        resume_mode: 'form_submission',
       };
       nextContext = mergeNodeOutput(nextContext, node.id, outputPatch);
       nextContext = {
@@ -3157,11 +3868,16 @@ async function resumeWaitingNode(execution, node, context, { mode, responseText,
         last_form_submission: outputPatch,
       };
     } else {
+      const timedOutAt = new Date().toISOString();
       nextContext = mergeNodeOutput(nextContext, node.id, {
+        status: 'timed_out',
         submitted: false,
-        timed_out_at: new Date().toISOString(),
+        timed_out: true,
+        timed_out_at: timedOutAt,
         match_mode: resolvedMatchMode,
         match_value: resolvedMatchValue,
+        resumed_at: timedOutAt,
+        resume_mode: 'timeout',
       });
     }
 
@@ -3179,15 +3895,22 @@ async function resumeWaitingNode(execution, node, context, { mode, responseText,
 
   if (nodeType === 'delay/fixed' || nodeType === 'delay/wait_until') {
     const nextNode = readOutputTarget(node, 'on_complete');
+    const completedAt = new Date().toISOString();
+    const nextContext = mergeNodeOutput(context, node.id, {
+      status: 'completed',
+      completed_at: completedAt,
+      resumed_at: completedAt,
+      resume_mode: mode || 'timeout',
+    });
     await updateExecutionAndEmit(execution, {
       status: 'running',
       wait_until: null,
       waiting_meta: null,
       current_node_id: nextNode,
-      context,
+      context: nextContext,
       last_error: null,
     }, 'flow_execution:resumed', { resume_mode: mode || 'timeout' });
-    return { resumed: true, context };
+    return { resumed: true, context: nextContext };
   }
 
   await updateExecutionAndEmit(execution, {
@@ -3243,6 +3966,31 @@ async function runExecution(executionId, options = {}) {
     ) {
       return execution;
     }
+
+    const [claimedRows] = await FlowExecutionV2.update(
+      {
+        status: 'running',
+        updated_at: new Date(),
+      },
+      {
+        where: {
+          id: execution.id,
+          status: 'waiting',
+        },
+      }
+    );
+
+    if (!claimedRows) {
+      const freshExecution = await FlowExecutionV2.findByPk(executionId, {
+        include: [{
+          model: AutomationFlowTemplateV2,
+          as: 'templateVersion',
+        }],
+      });
+      return freshExecution || execution;
+    }
+
+    execution.status = 'running';
 
     const responseText = options.responseText ?? getByPath(execution.waiting_meta, 'pending_response_text') ?? null;
     const formSubmission = options.formSubmission ?? getByPath(execution.waiting_meta, 'pending_form_submission') ?? null;

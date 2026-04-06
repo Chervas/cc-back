@@ -197,9 +197,9 @@ exports.trigger = async (req, res) => {
   }
 };
 
-exports.workerStatus = (_req, res) => {
+exports.workerStatus = async (_req, res) => {
   try {
-    const status = jobScheduler.getStatus();
+    const status = await jobScheduler.getStatus();
     res.json(status);
   } catch (error) {
     console.error('❌ Error obteniendo estado del worker:', error);

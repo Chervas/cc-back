@@ -14,6 +14,8 @@ const {
   WhatsappTemplateCatalog,
 } = db;
 
+const MAX_TEMPLATE_KEY_LENGTH = 120;
+
 function normalizeDisciplines(raw) {
   if (!raw) return [];
   if (Array.isArray(raw)) return raw.filter(Boolean);
@@ -82,28 +84,199 @@ function sanitizeTemplateKey(value) {
     .replace(/^_+|_+$/g, '');
 }
 
+function sanitizeTemplateReference(value) {
+  return String(value || '')
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9_-]+/g, '_')
+    .replace(/^_+|_+$/g, '');
+}
+
+function parseIntOrNull(value) {
+  const parsed = Number.parseInt(String(value ?? '').trim(), 10);
+  return Number.isInteger(parsed) ? parsed : null;
+}
+
+function stripClinicScopeSuffixes(value) {
+  const normalized = sanitizeTemplateKey(value);
+  if (!normalized) return null;
+  return normalized.replace(/(?:__clinic_\d+)+$/g, '') || null;
+}
+
+function normalizeCatalogSourceTemplateKey(catalogFlowId, sourceTemplateKey) {
+  return stripClinicScopeSuffixes(sourceTemplateKey) || sanitizeTemplateKey(`catalog_${catalogFlowId}`);
+}
+
 function buildCatalogTemplateKey(catalogFlowId, sourceTemplateKey, clinicId) {
-  const base = sanitizeTemplateKey(sourceTemplateKey || `catalog_${catalogFlowId}`);
-  return `${base}__clinic_${clinicId}`;
+  const suffix = `__clinic_${clinicId}`;
+  const base = normalizeCatalogSourceTemplateKey(catalogFlowId, sourceTemplateKey);
+  const room = Math.max(1, MAX_TEMPLATE_KEY_LENGTH - suffix.length);
+  return `${base.slice(0, room)}${suffix}`;
 }
 
 function buildPublicId() {
   return `flw_${crypto.randomBytes(8).toString('hex')}`;
 }
 
+async function generateUniquePublicId() {
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    const candidate = buildPublicId();
+    const existing = await AutomationFlowTemplateV2.findOne({
+      where: { public_id: candidate },
+      attributes: ['id'],
+      raw: true,
+    });
+    if (!existing) return candidate;
+  }
+  throw new Error('public_id_generation_failed');
+}
+
+async function publishClinicTemplateVersion({ row, actorUserId = null, transaction }) {
+  const normalizedPublicId = sanitizeTemplateReference(row?.public_id);
+  const familyWhere = normalizedPublicId
+    ? { public_id: normalizedPublicId }
+    : { template_key: row.template_key };
+
+  await AutomationFlowTemplateV2.update(
+    { is_active: false },
+    {
+      where: {
+        ...familyWhere,
+        published_at: { [Op.ne]: null },
+        id: { [Op.ne]: row.id },
+      },
+      transaction,
+    }
+  );
+
+  await row.update({
+    published_at: new Date(),
+    published_by: actorUserId || row.published_by || row.created_by || 1,
+    is_active: true,
+  }, { transaction });
+}
+
+function getCatalogSourceScopeScore(template) {
+  const clinicId = parseIntOrNull(template?.clinic_id);
+  const groupId = parseIntOrNull(template?.group_id);
+  if (!clinicId && !groupId) return 100;
+  if (!clinicId && groupId) return 50;
+  return 0;
+}
+
 async function resolveLinkedTemplateForCatalog(catalogFlow) {
-  const templateKey = String(catalogFlow?.template_key || '').trim();
+  const rawReference = String(catalogFlow?.template_key || '').trim();
+  if (!rawReference) return null;
 
-  if (!templateKey) return null;
+  const normalizedRef = sanitizeTemplateReference(rawReference);
+  if (!normalizedRef) return null;
 
-  return AutomationFlowTemplateV2.findOne({
-    where: {
-      template_key: templateKey,
-      published_at: { [Op.ne]: null },
-      is_active: true,
-    },
+  const byPublicId = await AutomationFlowTemplateV2.findOne({
+    where: { public_id: normalizedRef },
+    attributes: ['id'],
+    raw: true,
+  });
+
+  const familyWhere = byPublicId
+    ? { public_id: normalizedRef }
+    : { template_key: sanitizeTemplateKey(normalizedRef) };
+
+  const version = parseIntOrNull(catalogFlow?.template_version);
+  const where = { ...familyWhere };
+  if (version) {
+    where.version = version;
+  }
+
+  const candidates = await AutomationFlowTemplateV2.findAll({
+    where,
     order: [['version', 'DESC'], ['id', 'DESC']],
   });
+
+  if (!Array.isArray(candidates) || !candidates.length) {
+    return null;
+  }
+
+  return [...candidates].sort((a, b) => {
+    const scopeDiff = getCatalogSourceScopeScore(b) - getCatalogSourceScopeScore(a);
+    if (scopeDiff) return scopeDiff;
+    const versionDiff = Number(b?.version || 0) - Number(a?.version || 0);
+    if (versionDiff) return versionDiff;
+    return Number(b?.id || 0) - Number(a?.id || 0);
+  })[0] || null;
+}
+
+async function repairClinicDraftFamily({ clinicId, expectedTemplateKey, sourcePublicId }) {
+  const normalizedClinicId = parseIntOrNull(clinicId);
+  const normalizedExpectedKey = sanitizeTemplateKey(expectedTemplateKey);
+  const normalizedSourcePublicId = sanitizeTemplateReference(sourcePublicId);
+  if (!normalizedClinicId || !normalizedExpectedKey || !normalizedSourcePublicId) {
+    return;
+  }
+
+  const currentFamilyRows = await AutomationFlowTemplateV2.findAll({
+    where: {
+      clinic_id: normalizedClinicId,
+      template_key: normalizedExpectedKey,
+      published_at: null,
+    },
+    attributes: ['id', 'public_id'],
+    raw: true,
+  });
+
+  const legacyRows = await AutomationFlowTemplateV2.findAll({
+    where: {
+      clinic_id: normalizedClinicId,
+      public_id: normalizedSourcePublicId,
+      published_at: null,
+      template_key: { [Op.ne]: normalizedExpectedKey },
+    },
+    attributes: ['id', 'template_key'],
+    raw: true,
+  });
+
+  const currentFamilyNeedsIsolation = currentFamilyRows.some(
+    (row) => sanitizeTemplateReference(row?.public_id) === normalizedSourcePublicId
+  );
+
+  if (!currentFamilyRows.length && !legacyRows.length) {
+    return;
+  }
+
+  const isolatedPublicId = await generateUniquePublicId();
+
+  if (currentFamilyRows.length) {
+    if (currentFamilyNeedsIsolation) {
+      await AutomationFlowTemplateV2.update(
+        { public_id: isolatedPublicId },
+        {
+          where: {
+            id: { [Op.in]: currentFamilyRows.map((row) => row.id) },
+          },
+        }
+      );
+    }
+
+    if (legacyRows.length) {
+      await AutomationFlowTemplateV2.destroy({
+        where: {
+          id: { [Op.in]: legacyRows.map((row) => row.id) },
+        },
+      });
+    }
+    return;
+  }
+
+  await AutomationFlowTemplateV2.update(
+    {
+      template_key: normalizedExpectedKey,
+      public_id: isolatedPublicId,
+    },
+    {
+      where: {
+        id: { [Op.in]: legacyRows.map((row) => row.id) },
+      },
+    }
+  );
 }
 
 async function ensureCatalogTemplateForClinic({ clinicId, catalogFlow, actorUserId = null }) {
@@ -118,10 +291,16 @@ async function ensureCatalogTemplateForClinic({ clinicId, catalogFlow, actorUser
   }
 
   const templateKey = buildCatalogTemplateKey(catalogFlow.id, linkedTemplate.template_key, clinicId);
+  await repairClinicDraftFamily({
+    clinicId: clinicScope.clinic_id,
+    expectedTemplateKey: templateKey,
+    sourcePublicId: linkedTemplate.public_id,
+  });
   const latest = await AutomationFlowTemplateV2.findOne({
     where: { template_key: templateKey },
     order: [['version', 'DESC']],
   });
+  const familyExists = !!latest;
   const existingDraft = await AutomationFlowTemplateV2.findOne({
     where: { template_key: templateKey, published_at: null },
     order: [['version', 'DESC']],
@@ -138,30 +317,48 @@ async function ensureCatalogTemplateForClinic({ clinicId, catalogFlow, actorUser
     group_id: clinicScope.group_id,
     entry_node_id: linkedTemplate.entry_node_id,
     nodes: linkedTemplate.nodes,
+    trigger_config: linkedTemplate.trigger_config ?? null,
     published_at: null,
     published_by: null,
     created_by: actorUserId || linkedTemplate.created_by || 1,
   };
 
   if (existingDraft) {
-    await existingDraft.update(payload);
+    await db.sequelize.transaction(async (transaction) => {
+      await existingDraft.update(payload, { transaction });
+      await publishClinicTemplateVersion({
+        row: existingDraft,
+        actorUserId,
+        transaction,
+      });
+    });
     return {
-      status: 'updated',
+      status: familyExists ? 'updated' : 'created',
       template_key: existingDraft.template_key,
       version: existingDraft.version,
     };
   }
 
   const version = latest?.version ? Number(latest.version) + 1 : 1;
-  const created = await AutomationFlowTemplateV2.create({
-    public_id: latest?.public_id || linkedTemplate.public_id || buildPublicId(),
-    template_key: templateKey,
-    version,
-    ...payload,
+  const created = await db.sequelize.transaction(async (transaction) => {
+    const row = await AutomationFlowTemplateV2.create({
+      public_id: latest?.public_id || await generateUniquePublicId(),
+      template_key: templateKey,
+      version,
+      ...payload,
+    }, { transaction });
+
+    await publishClinicTemplateVersion({
+      row,
+      actorUserId,
+      transaction,
+    });
+
+    return row;
   });
 
   return {
-    status: 'created',
+    status: familyExists ? 'updated' : 'created',
     template_key: created.template_key,
     version: created.version,
   };

@@ -15,6 +15,13 @@ const {
   resolveGoogleConnectionForScope,
   resolveMetaConnectionForScope
 } = require('../services/scopeConnectionResolver.service');
+const {
+  extractGoogleTagId,
+  listMetaPixelsForScopeAdAccount,
+  normalizeMetaAdAccountId,
+  normalizeMetaAdsConfig,
+  resolveEffectiveMarketingState
+} = require('../services/effectiveMarketingAssets.service');
 
 const GoogleConnection = db.GoogleConnection;
 const MetaConnection = db.MetaConnection;
@@ -86,6 +93,13 @@ function parseInteger(raw) {
   if (raw === undefined || raw === null || raw === '') return null;
   const parsed = Number.parseInt(raw, 10);
   return Number.isInteger(parsed) ? parsed : null;
+}
+
+function mapConnectionSourceToOrigin(source) {
+  const normalized = String(source || '').trim().toLowerCase();
+  if (normalized.includes('group')) return 'group';
+  if (normalized.includes('clinic')) return 'clinic';
+  return null;
 }
 
 function parseDate(raw, fallback) {
@@ -1937,6 +1951,43 @@ async function upsertIntakeGoogleAdsForScope(scope, googleAdsPatch) {
     google_ads: mergedGoogle
   };
   await existing.update({ config: nextConfig });
+}
+
+async function upsertIntakeMetaAdsForScope(scope, metaAdsPatch) {
+  const where = scope.assignment_scope === 'group'
+    ? { group_id: scope.group_id, assignment_scope: 'group' }
+    : { clinic_id: scope.clinic_id };
+
+  const normalizedPatch = normalizeMetaAdsConfig(metaAdsPatch || {});
+  const existing = await IntakeConfig.findOne({ where });
+  if (!existing) {
+    await IntakeConfig.create({
+      clinic_id: scope.assignment_scope === 'clinic' ? scope.clinic_id : null,
+      group_id: scope.assignment_scope === 'group' ? scope.group_id : null,
+      assignment_scope: scope.assignment_scope,
+      domains: [],
+      config: { meta_ads: normalizedPatch },
+      hmac_key: null
+    });
+    return normalizedPatch;
+  }
+
+  const existingConfig = existing.config && typeof existing.config === 'object' ? existing.config : {};
+  const currentMeta = normalizeMetaAdsConfig(existingConfig.meta_ads || {});
+  const mergedMeta = {
+    ...currentMeta,
+    ...normalizedPatch,
+    enabled: normalizedPatch.enabled !== undefined ? normalizedPatch.enabled : currentMeta.enabled
+  };
+
+  await existing.update({
+    config: {
+      ...existingConfig,
+      meta_ads: mergedMeta
+    }
+  });
+
+  return mergedMeta;
 }
 
 function extractSendToFromTagSnippets(tagSnippets) {
@@ -3994,16 +4045,22 @@ exports.getCampaignOnboardingBootstrap = asyncHandler(async (req, res) => {
   });
   const activeMode = await resolveActiveModeForScope(scope);
   const scopedRequest = Boolean(scope.clinic_id || scope.group_id);
-
-  const intakeRecord = await loadIntakeRecordForScope(scope);
-  const intakeConfig = intakeRecord?.config && typeof intakeRecord.config === 'object' ? intakeRecord.config : {};
-  const intakeGoogleAds = normalizeGoogleAdsConfig(intakeConfig.google_ads || {});
+  const marketingState = await resolveEffectiveMarketingState({
+    clinicIdRaw: scope.clinic_id,
+    groupIdRaw: scope.group_id,
+    assignmentScopeRaw: scope.assignment_scope
+  });
+  const intakeRecord = scope.assignment_scope === 'group'
+    ? marketingState.records.groupRecord
+    : (marketingState.records.clinicRecord || marketingState.records.groupRecord);
+  const intakeGoogleAds = normalizeGoogleAdsConfig(marketingState.tracking.google_ads || {});
+  const intakeMetaAds = normalizeMetaAdsConfig(marketingState.tracking.meta_ads || {});
 
   let googleConnected = false;
   let googleReason = null;
   let hasAdsScope = false;
-  let googleAccounts = [];
-  let selectedCustomerId = intakeGoogleAds.customer_id || null;
+  let googleAccounts = marketingState.google.available_accounts || [];
+  let selectedCustomerId = marketingState.google.effective_assets?.account?.customer_id || intakeGoogleAds.customer_id || null;
 
   const googleResolved = await resolveGoogleConnectionForScope({
     userId,
@@ -4033,16 +4090,17 @@ exports.getCampaignOnboardingBootstrap = asyncHandler(async (req, res) => {
     }
   }
 
-  if (googleConnection) {
-    googleAccounts = await findMappedGoogleAccountsForScope(googleConnection.id, scope);
-  }
   if (!selectedCustomerId && googleAccounts.length > 0) {
     selectedCustomerId = googleAccounts[0].customer_id;
   }
 
   let metaConnected = false;
   let metaReason = null;
-  let metaAssets = { ad_accounts: [], pixels: [] };
+  const metaAssets = marketingState.meta.available_assets || {
+    ad_accounts: [],
+    facebook_pages: [],
+    instagram_business: []
+  };
   const metaResolved = await resolveMetaConnectionForScope({
     userId,
     clinicIdRaw: scope.clinic_id,
@@ -4055,11 +4113,11 @@ exports.getCampaignOnboardingBootstrap = asyncHandler(async (req, res) => {
     metaReason = 'no_connection';
   } else {
     metaConnected = true;
-    metaAssets = await findMappedMetaAssetsForScope(metaConnection.id, scope);
   }
 
   const capiMissing = [];
   if (!metaAssets.ad_accounts.length) capiMissing.push('ad_account_mapping');
+  if (!marketingState.meta.effective_assets?.pixel?.pixel_id && !process.env.META_PIXEL_ID) capiMissing.push('pixel_id');
   if (!(intakeRecord?.hmac_key || '').trim()) capiMissing.push('intake_hmac_key');
 
   return res.json({
@@ -4079,6 +4137,11 @@ exports.getCampaignOnboardingBootstrap = asyncHandler(async (req, res) => {
     google_ads: {
       connected: googleConnected,
       reason: googleReason,
+      connected_via: mapConnectionSourceToOrigin(googleResolved?.source),
+      connection_source: googleResolved?.source || null,
+      source_scope_name: mapConnectionSourceToOrigin(googleResolved?.source) === 'group'
+        ? (marketingState.descriptors.group_name || null)
+        : (marketingState.descriptors.clinic_name || null),
       manager_id: (() => {
         try {
           return formatCustomerId(ensureGoogleAdsConfig().managerId);
@@ -4089,18 +4152,72 @@ exports.getCampaignOnboardingBootstrap = asyncHandler(async (req, res) => {
       accounts: googleAccounts,
       selected_customer_id: selectedCustomerId,
       intake_google_ads: intakeGoogleAds,
+      effective_assets: {
+        customer_id: marketingState.google.effective_assets?.account?.customer_id || null,
+        descriptive_name: marketingState.google.effective_assets?.account?.descriptive_name || null,
+        assignment_origin: marketingState.google.effective_assets?.account?.assignment_origin || null,
+        send_to: intakeGoogleAds.send_to || null,
+        tag_id: marketingState.google.effective_assets?.tag_id || extractGoogleTagId(intakeGoogleAds.send_to)
+      },
       capabilities: buildGoogleAdsCapabilities(googleConnected, hasAdsScope)
     },
     meta_ads: {
       connected: metaConnected,
       reason: metaReason,
+      connected_via: mapConnectionSourceToOrigin(metaResolved?.source),
+      connection_source: metaResolved?.source || null,
+      source_scope_name: mapConnectionSourceToOrigin(metaResolved?.source) === 'group'
+        ? (marketingState.descriptors.group_name || null)
+        : (marketingState.descriptors.clinic_name || null),
       ad_accounts: metaAssets.ad_accounts,
-      pixels: metaAssets.pixels,
+      facebook_pages: metaAssets.facebook_pages,
+      instagram_business: metaAssets.instagram_business,
+      pixels: [],
+      intake_meta_ads: intakeMetaAds,
+      selected_ad_account_id: marketingState.meta.effective_assets?.ad_account?.ad_account_id || null,
+      selected_pixel_id: marketingState.meta.effective_assets?.pixel?.pixel_id || null,
+      effective_assets: {
+        ad_account_id: marketingState.meta.effective_assets?.ad_account?.ad_account_id || null,
+        ad_account_name: marketingState.meta.effective_assets?.ad_account?.name || null,
+        ad_account_origin: marketingState.meta.effective_assets?.ad_account?.assignment_origin || null,
+        facebook_page_id: marketingState.meta.effective_assets?.facebook_page?.page_id || null,
+        facebook_page_name: marketingState.meta.effective_assets?.facebook_page?.name || null,
+        facebook_page_origin: marketingState.meta.effective_assets?.facebook_page?.assignment_origin || null,
+        pixel_id: marketingState.meta.effective_assets?.pixel?.pixel_id || null,
+        pixel_origin: marketingState.meta.effective_assets?.pixel?.assignment_origin || null
+      },
       capi_readiness: {
         ready: capiMissing.length === 0,
         missing: capiMissing
       }
     }
+  });
+});
+
+exports.listMetaPixels = asyncHandler(async (req, res) => {
+  const userId = getUserId(req);
+  if (!userId) return res.status(401).json({ success: false, error: 'unauthenticated' });
+
+  const adAccountId = normalizeMetaAdAccountId(req.query.ad_account_id || req.query.adAccountId);
+  if (!adAccountId) {
+    return res.status(400).json({ success: false, error: 'validation_error', message: 'ad_account_id requerido' });
+  }
+
+  const scope = await resolveScopeFromInput({
+    clinicIdRaw: req.query.clinic_id,
+    groupIdRaw: req.query.group_id,
+    assignmentScopeRaw: req.query.assignment_scope
+  });
+
+  const pixels = await listMetaPixelsForScopeAdAccount({
+    scope,
+    adAccountId
+  });
+
+  return res.json({
+    success: true,
+    ad_account_id: adAccountId,
+    pixels
   });
 });
 
@@ -4612,6 +4729,11 @@ exports.startCampaignOnboarding = asyncHandler(async (req, res) => {
     groupIdRaw: req.body?.group_id,
     assignmentScopeRaw: req.body?.assignment_scope
   });
+  const marketingState = await resolveEffectiveMarketingState({
+    clinicIdRaw: scope.clinic_id,
+    groupIdRaw: scope.group_id,
+    assignmentScopeRaw: scope.assignment_scope
+  });
 
   const anchorClinicId = scope.clinic_id || scope.clinic_ids[0] || null;
   const running = await CampaignRequest.findAll({
@@ -4662,7 +4784,14 @@ exports.startCampaignOnboarding = asyncHandler(async (req, res) => {
     const result = {};
 
     if (providers.includes('google_ads')) {
-      const googleConnection = await GoogleConnection.findOne({ where: { userId } });
+      const googleResolved = await resolveGoogleConnectionForScope({
+        userId,
+        clinicIdRaw: scope.clinic_id,
+        groupIdRaw: scope.group_id,
+        assignmentScopeRaw: scope.assignment_scope,
+        allowLegacyUserFallback: !Boolean(scope.clinic_id || scope.group_id)
+      });
+      const googleConnection = googleResolved.connection;
       if (!googleConnection) throw new Error('No hay conexión Google');
       if (!hasScopeText(googleConnection.scopes || '', GOOGLE_ADS_SCOPE)) {
         const scopeErr = new Error('La conexión Google no tiene scope de Ads');
@@ -4673,9 +4802,12 @@ exports.startCampaignOnboarding = asyncHandler(async (req, res) => {
       const { accessToken } = await ensureGoogleAdsAccess(googleConnection);
       markStep(steps, 'google_connect', 'done');
 
-      const scopeAccounts = await findMappedGoogleAccountsForScope(googleConnection.id, scope);
+      const scopeAccounts = marketingState.google.available_accounts || [];
       const requestedCustomer = normalizeCustomerId(req.body?.google_ads?.customer_id || '');
-      const selectedCustomer = requestedCustomer || scopeAccounts[0]?.customer_id || null;
+      const selectedCustomer = requestedCustomer
+        || marketingState.google.effective_assets?.account?.customer_id
+        || scopeAccounts[0]?.customer_id
+        || null;
       if (!selectedCustomer) {
         throw new Error('No hay customer_id de Google Ads mapeado para este scope');
       }
@@ -4712,15 +4844,39 @@ exports.startCampaignOnboarding = asyncHandler(async (req, res) => {
     }
 
     if (providers.includes('meta_ads')) {
-      const metaConnection = await MetaConnection.findOne({ where: { userId } });
+      const metaResolved = await resolveMetaConnectionForScope({
+        userId,
+        clinicIdRaw: scope.clinic_id,
+        groupIdRaw: scope.group_id,
+        assignmentScopeRaw: scope.assignment_scope,
+        allowLegacyUserFallback: !Boolean(scope.clinic_id || scope.group_id)
+      });
+      const metaConnection = metaResolved.connection;
       if (!metaConnection) throw new Error('No hay conexión Meta');
       markStep(steps, 'meta_connect', 'done');
 
-      const assets = await findMappedMetaAssetsForScope(metaConnection.id, scope);
+      const assets = marketingState.meta.available_assets || { ad_accounts: [] };
+      const requestedMetaAccountId = normalizeMetaAdAccountId(req.body?.meta_ads?.ad_account_id);
+      const selectedMetaAccount = (requestedMetaAccountId
+        ? assets.ad_accounts.find((item) => item.ad_account_id === requestedMetaAccountId)
+        : null)
+        || marketingState.meta.effective_assets?.ad_account
+        || assets.ad_accounts[0]
+        || null;
+      if (!selectedMetaAccount?.ad_account_id) {
+        throw new Error('No hay cuenta publicitaria de Meta mapeada para esta clínica');
+      }
+
+      await upsertIntakeMetaAdsForScope(scope, {
+        enabled: true,
+        connection_id: selectedMetaAccount.connection_id || metaConnection.id,
+        ad_account_id: selectedMetaAccount.ad_account_id,
+        pixel_id: req.body?.meta_ads?.pixel_id || marketingState.meta.effective_assets?.pixel?.pixel_id || null
+      });
       markStep(steps, 'meta_map_assets', 'done');
       result.meta_ads = {
-        ad_account_id: req.body?.meta_ads?.ad_account_id || assets.ad_accounts[0]?.ad_account_id || null,
-        pixel_id: req.body?.meta_ads?.pixel_id || null
+        ad_account_id: selectedMetaAccount.ad_account_id,
+        pixel_id: req.body?.meta_ads?.pixel_id || marketingState.meta.effective_assets?.pixel?.pixel_id || null
       };
     }
 

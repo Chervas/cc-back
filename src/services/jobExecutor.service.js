@@ -1,4 +1,5 @@
 const { metaSyncJobs } = require('../jobs/sync.jobs');
+const fs = require('fs');
 const db = require('../../models');
 const flowEngineV2Service = require('./flowEngineV2.service');
 const { buildNotificationContent } = require('./notifications.service');
@@ -13,7 +14,23 @@ const Notification = db.Notification;
 const Clinica = db.Clinica;
 
 async function runAutomationFlowV2Job(payload = {}) {
-  const executionId = Number(payload.execution_id || 0);
+  const executionId = Number(payload.execution_id || payload.executionId || 0);
+  try {
+    fs.appendFileSync('/tmp/cc-job-debug.log', `${JSON.stringify({
+      ts: new Date().toISOString(),
+      source: 'back-integracion',
+      stage: 'runAutomationFlowV2Job:start',
+      pid: process.pid,
+      cwd: process.cwd(),
+      port: process.env.PORT || null,
+      runtimeNamespace: process.env.JOB_RUNTIME_NAMESPACE || process.env.RUNTIME_NAMESPACE || null,
+      hasGroqKey: !!String(process.env.GROQ_API_KEY || '').trim(),
+      executionId,
+      payload,
+    })}\n`);
+  } catch (_) {
+    // no-op debug fallback
+  }
   if (!Number.isInteger(executionId) || executionId <= 0) {
     throw new Error('automations_v2_execute requires payload.execution_id');
   }

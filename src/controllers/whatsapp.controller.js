@@ -5,12 +5,15 @@ const axios = require('axios');
 const crypto = require('crypto');
 const whatsappService = require('../services/whatsapp.service');
 const { enqueueSyncPhonesJob, syncPhonesForWaba } = require('../services/whatsappPhones.service');
+const { buildWhatsappTemplateVariableContract } = require('../lib/whatsapp-template-contract');
 
 const {
   ClinicMetaAsset,
   UsuarioClinica,
   Clinica,
   WhatsappTemplate,
+  AutomationFlowTemplateV2,
+  Tratamiento,
   MetaConnection,
   GrupoClinica,
   WhatsappTemplateCatalog,
@@ -53,6 +56,56 @@ function assertAdmin(req, res) {
     return false;
   }
   return true;
+}
+
+function buildDuplicateDisplayName(baseDisplayName, duplicateIndex) {
+  const base = String(baseDisplayName || '').trim();
+  if (!base) return duplicateIndex > 1 ? `Copia ${duplicateIndex}` : 'Copia';
+  return duplicateIndex > 1 ? `${base} (copia ${duplicateIndex})` : `${base} (copia)`;
+}
+
+function buildDuplicateTechnicalName(baseName, duplicateIndex) {
+  const normalized = String(baseName || '')
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9_]+/g, '_')
+    .replace(/^_+|_+$/g, '');
+  const safeBase = normalized || 'plantilla';
+  return duplicateIndex > 1 ? `${safeBase}_copy_${duplicateIndex}` : `${safeBase}_copy`;
+}
+
+async function resolveWhatsappCatalogDuplicateNames(itemId, { baseName, baseDisplayName }) {
+  const rows = await WhatsappTemplateCatalog.findAll({
+    attributes: ['id', 'name', 'display_name'],
+    raw: true,
+  });
+  const takenNames = new Set(
+    rows
+      .filter((row) => Number(row.id) !== Number(itemId))
+      .map((row) => String(row.name || '').trim().toLowerCase())
+      .filter(Boolean)
+  );
+  const takenDisplayNames = new Set(
+    rows
+      .filter((row) => Number(row.id) !== Number(itemId))
+      .map((row) => String(row.display_name || '').trim().toLowerCase())
+      .filter(Boolean)
+  );
+
+  let duplicateIndex = 1;
+  let nextName = buildDuplicateTechnicalName(baseName, duplicateIndex);
+  let nextDisplayName = buildDuplicateDisplayName(baseDisplayName || baseName, duplicateIndex);
+
+  while (
+    takenNames.has(String(nextName).trim().toLowerCase()) ||
+    takenDisplayNames.has(String(nextDisplayName).trim().toLowerCase())
+  ) {
+    duplicateIndex += 1;
+    nextName = buildDuplicateTechnicalName(baseName, duplicateIndex);
+    nextDisplayName = buildDuplicateDisplayName(baseDisplayName || baseName, duplicateIndex);
+  }
+
+  return { name: nextName, display_name: nextDisplayName };
 }
 
 async function getUserGroupIds({ clinicIds, isAggregateAllowed }) {
@@ -147,6 +200,218 @@ async function resolveScopedWhatsappAssetForClinic({ clinicId, assetTypes }) {
   }
 
   return null;
+}
+
+function getTemplateIdentityKey(templateLike) {
+  const catalogTemplateId = Number(templateLike?.catalog_template_id || templateLike?.catalog?.id);
+  if (Number.isFinite(catalogTemplateId) && catalogTemplateId > 0) {
+    return `catalog:${catalogTemplateId}`;
+  }
+  const rawName = String(templateLike?.name || '').trim().toLowerCase();
+  const name = rawName.replace(/_v\d+$/i, '');
+  const language = String(templateLike?.language || 'es').trim().toLowerCase();
+  return `${name}|${language}`;
+}
+
+function shouldHideLegacySystemTemplate(templateLike, usageLike) {
+  const catalogTemplateId = Number(templateLike?.catalog_template_id || templateLike?.catalog?.id);
+  if (Number.isFinite(catalogTemplateId) && catalogTemplateId > 0) {
+    return false;
+  }
+
+  const origin = String(templateLike?.origin || '').trim().toLowerCase();
+  const baseName = String(templateLike?.name || '').trim().toLowerCase().replace(/_v\d+$/i, '');
+  if (origin !== 'external' || !baseName.startsWith('clinicaclick_')) {
+    return false;
+  }
+
+  const flowCount = Array.isArray(usageLike?.flows) ? usageLike.flows.length : 0;
+  const treatmentCount = Array.isArray(usageLike?.treatments) ? usageLike.treatments.length : 0;
+  return flowCount === 0 && treatmentCount === 0;
+}
+
+function isObject(value) {
+  return !!value && typeof value === 'object' && !Array.isArray(value);
+}
+
+function nodeUsesWhatsappTemplate(node, { templateId, templateName, catalogTemplateId }) {
+  if (!node || String(node.type || '').toLowerCase() !== 'action/send_whatsapp') return false;
+  const config = isObject(node.config) ? node.config : {};
+  const nodeTemplateId = String(config.template_id || '').trim();
+  const nodeTemplateName = String(config.template_name || '').trim().toLowerCase();
+  const nodeCatalogTemplateId = Number(config.catalog_template_id);
+  return (
+    (templateId && nodeTemplateId === String(templateId))
+    || (!!templateName && !!nodeTemplateName && nodeTemplateName === String(templateName).trim().toLowerCase())
+    || (Number.isFinite(nodeCatalogTemplateId) && nodeCatalogTemplateId > 0 && nodeCatalogTemplateId === Number(catalogTemplateId))
+  );
+}
+
+function pickPreferredTemplate(currentTemplate, nextTemplate, clinicId) {
+  if (!currentTemplate) return nextTemplate;
+
+  const currentClinicId = Number(currentTemplate?.clinic_id);
+  const nextClinicId = Number(nextTemplate?.clinic_id);
+  const currentIsClinicOverride = Number.isFinite(currentClinicId) && currentClinicId === Number(clinicId);
+  const nextIsClinicOverride = Number.isFinite(nextClinicId) && nextClinicId === Number(clinicId);
+
+  if (currentIsClinicOverride !== nextIsClinicOverride) {
+    return nextIsClinicOverride ? nextTemplate : currentTemplate;
+  }
+
+  const currentUpdatedAt = new Date(currentTemplate?.updatedAt || currentTemplate?.updated_at || 0).getTime();
+  const nextUpdatedAt = new Date(nextTemplate?.updatedAt || nextTemplate?.updated_at || 0).getTime();
+  if (nextUpdatedAt !== currentUpdatedAt) {
+    return nextUpdatedAt > currentUpdatedAt ? nextTemplate : currentTemplate;
+  }
+
+  const currentId = Number(currentTemplate?.id || 0);
+  const nextId = Number(nextTemplate?.id || 0);
+  return nextId > currentId ? nextTemplate : currentTemplate;
+}
+
+function extractTechnicalTemplateVersion(baseName, candidateName) {
+  const safeBaseName = String(baseName || '').trim();
+  const safeCandidate = String(candidateName || '').trim();
+  if (!safeBaseName || !safeCandidate) return null;
+  if (safeCandidate === safeBaseName) return 1;
+  const match = safeCandidate.match(/^(.*)_v(\d+)$/i);
+  if (!match) return null;
+  if (String(match[1] || '').trim() !== safeBaseName) return null;
+  const parsed = Number(match[2]);
+  return Number.isFinite(parsed) && parsed >= 2 ? parsed : null;
+}
+
+async function loadEffectiveWhatsappTemplatesForClinic({ clinicId, userId, includeCatalog }) {
+  const includeCatalogConfig = includeCatalog
+    ? [{ model: WhatsappTemplateCatalog, as: 'catalog', attributes: ['id', 'name', 'display_name', 'body_text', 'variables'] }]
+    : [];
+
+  const overrides = await WhatsappTemplate.findAll({
+    where: { clinic_id: clinicId, waba_id: null, is_active: true },
+    include: includeCatalogConfig,
+    order: [['updatedAt', 'DESC']],
+  });
+
+  const asset = await resolveWabaFromContext({ clinicId, userId });
+  if (!asset?.wabaId) {
+    return overrides;
+  }
+
+  const connectedTemplates = await WhatsappTemplate.findAll({
+    where: {
+      waba_id: asset.wabaId,
+      is_active: true,
+      [Op.or]: [
+        { clinic_id: null },
+        { clinic_id: clinicId },
+      ],
+    },
+    include: includeCatalogConfig,
+    order: [['updatedAt', 'DESC']],
+  });
+
+  const effective = new Map();
+  connectedTemplates.forEach((template) => {
+    const key = getTemplateIdentityKey(template);
+    effective.set(key, pickPreferredTemplate(effective.get(key), template, clinicId));
+  });
+  overrides.forEach((template) => {
+    const key = getTemplateIdentityKey(template);
+    effective.set(key, pickPreferredTemplate(effective.get(key), template, clinicId));
+  });
+  return Array.from(effective.values());
+}
+
+async function buildWhatsappTemplateUsageMap({ clinicId, templates }) {
+  const safeClinicId = Number(clinicId);
+  if (!Number.isFinite(safeClinicId) || safeClinicId <= 0 || !Array.isArray(templates) || !templates.length) {
+    return new Map();
+  }
+
+  const clinic = await Clinica.findOne({
+    where: { id_clinica: safeClinicId },
+    attributes: ['id_clinica', 'grupoClinicaId'],
+    raw: true,
+  });
+  const groupId = Number(clinic?.grupoClinicaId);
+
+  const flowWhere = {
+    is_active: true,
+    published_at: { [Op.ne]: null },
+    [Op.or]: [
+      { clinic_id: safeClinicId },
+      ...(Number.isFinite(groupId) && groupId > 0 ? [{ group_id: groupId }] : []),
+      { is_system: true },
+    ],
+  };
+
+  const flows = await AutomationFlowTemplateV2.findAll({
+    where: flowWhere,
+    attributes: ['id', 'public_id', 'template_key', 'name', 'nodes'],
+    raw: true,
+    order: [['updated_at', 'DESC'], ['id', 'DESC']],
+  });
+
+  const treatments = await Tratamiento.findAll({
+    where: {
+      activo: true,
+      appointment_automation_template_key: { [Op.ne]: null },
+      [Op.or]: [
+        { clinica_id: safeClinicId },
+        ...(Number.isFinite(groupId) && groupId > 0 ? [{ grupo_clinica_id: groupId }] : []),
+      ],
+    },
+    attributes: ['id_tratamiento', 'nombre', 'appointment_automation_template_key'],
+    raw: true,
+    order: [['nombre', 'ASC']],
+  });
+
+  const usageMap = new Map();
+
+  templates.forEach((template) => {
+    const json = template?.toJSON ? template.toJSON() : template;
+    const templateId = Number(json?.id);
+    const templateName = String(json?.name || '').trim();
+    const catalogTemplateId = Number(json?.catalog_template_id);
+
+    const matchedFlows = [];
+    const flowKeySet = new Set();
+    flows.forEach((flow) => {
+      const nodes = Array.isArray(flow?.nodes) ? flow.nodes : [];
+      const matches = nodes.some((node) => nodeUsesWhatsappTemplate(node, { templateId, templateName, catalogTemplateId }));
+      if (!matches) return;
+      const uniqueKey = `${String(flow.public_id || flow.template_key || '')}|${String(flow.id)}`;
+      if (flowKeySet.has(uniqueKey)) return;
+      flowKeySet.add(uniqueKey);
+      matchedFlows.push({
+        id: flow.id,
+        public_id: flow.public_id || null,
+        template_key: flow.template_key || null,
+        name: flow.name || null,
+      });
+    });
+
+    const matchedTemplateKeys = new Set(
+      matchedFlows
+        .map((flow) => String(flow.template_key || '').trim())
+        .filter(Boolean)
+    );
+
+    const matchedTreatments = treatments
+      .filter((treatment) => matchedTemplateKeys.has(String(treatment.appointment_automation_template_key || '').trim()))
+      .map((treatment) => ({
+        id: treatment.id_tratamiento,
+        name: treatment.nombre || null,
+      }));
+
+    usageMap.set(Number(templateId), {
+      flows: matchedFlows,
+      treatments: matchedTreatments,
+    });
+  });
+
+  return usageMap;
 }
 
 function assertPreverifiedEnabled(req, res) {
@@ -524,40 +789,19 @@ exports.templatesSummary = async (req, res) => {
     if (!clinicId) {
       return res.status(400).json({ error: 'clinic_id requerido' });
     }
-    const asset = await resolveScopedWhatsappAssetForClinic({
+    const totals = await loadEffectiveWhatsappTemplatesForClinic({
       clinicId,
-      assetTypes: ['whatsapp_business_account', 'whatsapp_phone_number'],
-    });
-    if (!asset?.wabaId) {
-      const placeholders = await WhatsappTemplate.findAll({
-        where: { clinic_id: clinicId, waba_id: null, is_active: true },
-        attributes: ['status', [db.Sequelize.fn('COUNT', db.Sequelize.col('id')), 'count']],
-        group: ['status'],
-        raw: true,
-      });
-      const summary = { total: 0, approved: 0, pending: 0, rejected: 0, sin_conectar: 0 };
-      placeholders.forEach((row) => {
-        summary.total += Number(row.count);
-        const st = (row.status || '').toLowerCase();
-        if (st === 'sin_conectar') summary.sin_conectar += Number(row.count);
-      });
-      return res.json(summary);
-    }
-    const wabaId = asset.wabaId;
-    const totals = await WhatsappTemplate.findAll({
-      where: { waba_id: wabaId },
-      attributes: ['status', [db.Sequelize.fn('COUNT', db.Sequelize.col('id')), 'count']],
-      group: ['status'],
-      raw: true,
+      userId: req.userData?.userId,
+      includeCatalog: false,
     });
     const summary = { total: 0, approved: 0, pending: 0, rejected: 0, sin_conectar: 0 };
     totals.forEach((row) => {
-      summary.total += Number(row.count);
-      const st = (row.status || '').toLowerCase();
-      if (st === 'approved' || st === 'approved_pending') summary.approved += Number(row.count);
-      else if (st === 'pending' || st === 'in_review') summary.pending += Number(row.count);
-      else if (st === 'rejected') summary.rejected += Number(row.count);
-      else if (st === 'sin_conectar') summary.sin_conectar += Number(row.count);
+      summary.total += 1;
+      const st = String(row.status || '').toLowerCase();
+      if (st === 'approved' || st === 'approved_pending') summary.approved += 1;
+      else if (st === 'pending' || st === 'in_review') summary.pending += 1;
+      else if (st === 'rejected') summary.rejected += 1;
+      else if (st === 'sin_conectar') summary.sin_conectar += 1;
     });
     return res.json(summary);
   } catch (err) {
@@ -641,32 +885,45 @@ exports.listTemplatesForClinic = async (req, res) => {
       return res.status(400).json({ error: 'clinic_id o phone_number_id requerido' });
     }
 
-    const asset = await resolveWabaFromContext({ clinicId, phoneNumberId, userId });
     let templates = [];
-    if (!asset || !asset.wabaId) {
-      if (!clinicId) {
+    if (clinicId) {
+      templates = await loadEffectiveWhatsappTemplatesForClinic({
+        clinicId,
+        userId,
+        includeCatalog: true,
+      });
+    } else {
+      const asset = await resolveWabaFromContext({ clinicId, phoneNumberId, userId });
+      if (!asset || !asset.wabaId) {
         return res.json([]);
       }
       templates = await WhatsappTemplate.findAll({
         where: {
-          clinic_id: clinicId,
-          waba_id: null,
+          waba_id: asset.wabaId,
           is_active: true,
         },
+        include: [{ model: WhatsappTemplateCatalog, as: 'catalog', attributes: ['id', 'name', 'display_name', 'body_text', 'variables'] }],
         order: [['name', 'ASC']],
       });
-      return res.json(templates);
     }
 
-    templates = await WhatsappTemplate.findAll({
-      where: {
-        waba_id: asset.wabaId,
-        is_active: true,
-      },
-      order: [['name', 'ASC']],
-    });
+    const usageMap = clinicId
+      ? await buildWhatsappTemplateUsageMap({ clinicId, templates })
+      : new Map();
 
-    return res.json(templates);
+    return res.json(
+      templates
+        .map((item) => {
+          const json = item.toJSON ? item.toJSON() : item;
+          const usage = usageMap.get(Number(json.id)) || { flows: [], treatments: [] };
+          return {
+            ...json,
+            variables: buildWhatsappTemplateVariableContract(json),
+            usage,
+          };
+        })
+        .filter((item) => !(clinicId && shouldHideLegacySystemTemplate(item, item.usage)))
+    );
   } catch (err) {
     console.error('Error listTemplatesForClinic', err);
     return res.status(500).json({ error: 'Error obteniendo plantillas' });
@@ -998,7 +1255,60 @@ exports.listCatalog = async (req, res) => {
       ],
       order: [['name', 'ASC']],
     });
-    return res.json(items);
+
+    const catalogIds = items
+      .map((item) => Number(item?.id))
+      .filter((value) => Number.isFinite(value) && value > 0);
+
+    const instances = catalogIds.length
+      ? await WhatsappTemplate.findAll({
+          where: {
+            catalog_template_id: { [Op.in]: catalogIds },
+            is_active: true,
+          },
+          attributes: ['catalog_template_id', 'name', 'status', 'waba_id'],
+          raw: true,
+        })
+      : [];
+
+    const instancesByCatalogId = new Map();
+    instances.forEach((instance) => {
+      const catalogId = Number(instance.catalog_template_id);
+      if (!Number.isFinite(catalogId) || catalogId <= 0) return;
+      if (!instancesByCatalogId.has(catalogId)) {
+        instancesByCatalogId.set(catalogId, []);
+      }
+      instancesByCatalogId.get(catalogId).push(instance);
+    });
+
+    return res.json(
+      items.map((item) => {
+        const data = item?.toJSON ? item.toJSON() : item;
+        const lastPropagatedAt = data?.last_propagated_at ? new Date(data.last_propagated_at) : null;
+        const updatedAt = data?.updatedAt || data?.updated_at ? new Date(data.updatedAt || data.updated_at) : null;
+        const rawPropagationState = String(data?.propagation_state || '').trim().toLowerCase();
+        const isPending = rawPropagationState === 'pending';
+        const propagated = !isPending && !!lastPropagatedAt && (!updatedAt || updatedAt.getTime() <= lastPropagatedAt.getTime());
+        const familyRows = instancesByCatalogId.get(Number(data?.id)) || [];
+        const versions = familyRows
+          .map((row) => extractTechnicalTemplateVersion(data?.name, row?.name))
+          .filter((value) => Number.isFinite(value));
+        const latestVersion = versions.length ? Math.max(...versions) : null;
+        const latestRows = latestVersion
+          ? familyRows.filter((row) => extractTechnicalTemplateVersion(data?.name, row?.name) === latestVersion)
+          : [];
+        const latestRemoteRows = latestRows.filter((row) => !!String(row?.waba_id || '').trim());
+        const approved =
+          latestRemoteRows.length > 0 &&
+          latestRemoteRows.every((row) => String(row?.status || '').trim().toUpperCase() === 'APPROVED');
+        return {
+          ...data,
+          propagated,
+          approved,
+          propagation_state: isPending ? 'pending' : (propagated ? 'completed' : 'idle'),
+        };
+      })
+    );
   } catch (err) {
     console.error('Error listCatalog', err);
     return res.status(500).json({ error: 'Error obteniendo catálogo' });
@@ -1019,6 +1329,7 @@ exports.createCatalog = async (req, res) => {
       body_text,
       variables: variables || null,
       components: components || null,
+      propagation_state: null,
       is_generic: !!is_generic,
       is_active: !!is_active,
     });
@@ -1044,6 +1355,7 @@ exports.updateCatalog = async (req, res) => {
       body_text: body_text || item.body_text,
       variables: variables !== undefined ? variables : item.variables,
       components: components !== undefined ? components : item.components,
+      propagation_state: null,
       is_generic: is_generic !== undefined ? !!is_generic : item.is_generic,
       is_active: is_active !== undefined ? !!is_active : item.is_active,
     });
@@ -1083,11 +1395,77 @@ exports.toggleCatalog = async (req, res) => {
     } else {
       item.is_active = !!newState;
     }
+    item.propagation_state = null;
     await item.save();
     return res.json(item);
   } catch (err) {
     console.error('Error toggleCatalog', err);
     return res.status(500).json({ error: 'Error actualizando estado' });
+  }
+};
+
+exports.duplicateCatalog = async (req, res) => {
+  if (!assertAdmin(req, res)) return;
+  try {
+    const id = Number(req.params.id);
+    const item = await WhatsappTemplateCatalog.findByPk(id, {
+      include: [
+        {
+          model: WhatsappTemplateCatalogDiscipline,
+          as: 'disciplinas',
+          attributes: ['id', 'disciplina_code'],
+        },
+      ],
+    });
+    if (!item) return res.status(404).json({ error: 'catalog_not_found' });
+
+    const names = await resolveWhatsappCatalogDuplicateNames(item.id, {
+      baseName: item.name,
+      baseDisplayName: item.display_name || item.name,
+    });
+
+    const duplicated = await WhatsappTemplateCatalog.create({
+      name: names.name,
+      display_name: names.display_name,
+      category: item.category,
+      body_text: item.body_text,
+      variables: item.variables || null,
+      components: item.components || null,
+      propagation_state: null,
+      is_generic: !!item.is_generic,
+      is_active: false,
+    });
+
+    const disciplinaCodes = Array.isArray(item.disciplinas)
+      ? item.disciplinas
+          .map((disc) => (typeof disc?.disciplina_code === 'string' ? disc.disciplina_code.trim() : null))
+          .filter(Boolean)
+      : [];
+
+    if (!duplicated.is_generic && disciplinaCodes.length) {
+      await WhatsappTemplateCatalogDiscipline.bulkCreate(
+        disciplinaCodes.map((code) => ({
+          template_catalog_id: duplicated.id,
+          disciplina_code: code,
+          created_at: new Date(),
+          updated_at: new Date(),
+        }))
+      );
+    }
+
+    const created = await WhatsappTemplateCatalog.findByPk(duplicated.id, {
+      include: [
+        {
+          model: WhatsappTemplateCatalogDiscipline,
+          as: 'disciplinas',
+          attributes: ['id', 'disciplina_code'],
+        },
+      ],
+    });
+    return res.status(201).json(created);
+  } catch (err) {
+    console.error('Error duplicateCatalog', err);
+    return res.status(500).json({ error: 'Error duplicando catálogo' });
   }
 };
 
@@ -1110,6 +1488,7 @@ exports.setCatalogDisciplines = async (req, res) => {
       }));
       await WhatsappTemplateCatalogDiscipline.bulkCreate(rows);
     }
+    await item.update({ propagation_state: null });
     const updated = await WhatsappTemplateCatalog.findByPk(id, {
       include: [{ model: WhatsappTemplateCatalogDiscipline, as: 'disciplinas', attributes: ['id', 'disciplina_code'] }],
     });
@@ -1129,17 +1508,19 @@ exports.propagateCatalogToClinics = async (req, res) => {
     }
 
     const item = await WhatsappTemplateCatalog.findByPk(id, {
-      attributes: ['id', 'name', 'display_name', 'is_active'],
-      raw: true,
+      attributes: ['id', 'name', 'display_name', 'is_active', 'updated_at', 'propagation_state'],
     });
     if (!item) {
       return res.status(404).json({ error: 'catalog_not_found' });
     }
 
+    await item.update({ propagation_state: 'pending' });
+
     const { enqueuePropagateCatalogTemplateJob } = require('../services/whatsappTemplates.service');
     const job = await enqueuePropagateCatalogTemplateJob({
       templateCatalogId: id,
       requestedBy: req.userData?.userId || null,
+      sourceUpdatedAt: item.updated_at || item.updatedAt || new Date(),
     });
 
     return res.json({
@@ -1148,6 +1529,7 @@ exports.propagateCatalogToClinics = async (req, res) => {
       catalog_template_id: id,
       template_name: item.display_name || item.name,
       is_active: !!item.is_active,
+      propagation_state: 'pending',
     });
   } catch (err) {
     console.error('Error propagateCatalogToClinics', err);

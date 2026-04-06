@@ -16,6 +16,7 @@ router.post('/chat-flow-templates/:id/duplicate', chatFlowTemplatesController.du
 
 // Onboarding unificado campañas (Google Ads + Meta Ads)
 router.get('/campaign-onboarding/bootstrap', campaignOnboardingController.getCampaignOnboardingBootstrap);
+router.get('/campaign-onboarding/meta-pixels', campaignOnboardingController.listMetaPixels);
 router.get('/campaign-onboarding/external-campaigns', campaignOnboardingController.listExternalCampaigns);
 router.get('/strategies/catalog', campaignOnboardingController.listStrategyCatalog);
 router.get('/strategies/recommend-automation', campaignOnboardingController.getMarketingStrategyAutomationRecommendation);

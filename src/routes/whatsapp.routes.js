@@ -107,6 +107,7 @@ router.get('/template-catalog', authMiddleware, whatsappController.listCatalog);
 router.post('/template-catalog', authMiddleware, whatsappController.createCatalog);
 router.put('/template-catalog/:id', authMiddleware, whatsappController.updateCatalog);
 router.delete('/template-catalog/:id', authMiddleware, whatsappController.deleteCatalog);
+router.post('/template-catalog/:id/duplicate', authMiddleware, whatsappController.duplicateCatalog);
 router.put('/template-catalog/:id/toggle', authMiddleware, whatsappController.toggleCatalog);
 router.post('/template-catalog/:id/disciplines', authMiddleware, whatsappController.setCatalogDisciplines);
 router.post('/template-catalog/:id/propagate', authMiddleware, whatsappController.propagateCatalogToClinics);

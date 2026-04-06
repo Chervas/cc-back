@@ -1,9 +1,57 @@
+const db = require('../../models');
 const jobRequestsService = require('./jobRequests.service');
 const jobExecutor = require('./jobExecutor.service');
 
 const CRITICAL_INTERVAL_MS = Number(process.env.JOB_SCHEDULER_CRITICAL_INTERVAL_MS || 5000);
 const STANDARD_INTERVAL_MS = Number(process.env.JOB_SCHEDULER_INTERVAL_MS || 30000);
 const CURRENT_RUNTIME_NAMESPACE = jobRequestsService.getCurrentRuntimeNamespace();
+
+const cleanString = (value) => {
+  const normalized = String(value || '').trim();
+  return normalized || null;
+};
+
+function buildRuntimeInfo() {
+  const explicitLabel = cleanString(process.env.SYSTEM_RUNTIME_LABEL)
+    || cleanString(process.env.RUNTIME_ENV_LABEL)
+    || cleanString(process.env.RUNTIME_LABEL);
+  const explicitKey = cleanString(process.env.SYSTEM_RUNTIME_KEY)
+    || cleanString(process.env.RUNTIME_ENV)
+    || cleanString(process.env.APP_ENV);
+  const cwd = cleanString(process.cwd()) || '';
+  const port = cleanString(process.env.PORT);
+
+  let environmentKey = explicitKey || 'unknown';
+  let environmentLabel = explicitLabel || 'Entorno desconocido';
+
+  if (!explicitLabel) {
+    if (cwd.includes('/wt/back-integracion') || port === '3004') {
+      environmentKey = 'local_dev';
+      environmentLabel = 'Desarrollo local';
+    } else if (cwd.includes('/wt/back-staging') || port === '3001') {
+      environmentKey = 'staging';
+      environmentLabel = 'Staging';
+    } else if (cwd.includes('/backendclinicaclick')) {
+      environmentKey = 'production_like';
+      environmentLabel = 'Backend principal';
+    }
+  }
+
+  const processLabel = port ? `backend ${port}` : 'backend sin puerto';
+
+  return {
+    environmentKey,
+    environmentLabel,
+    processLabel,
+    summaryLabel: `${environmentLabel} · ${processLabel}`,
+    description: 'Este worker solo procesa jobs creados por este mismo entorno.',
+    port,
+    cwd,
+    namespace: CURRENT_RUNTIME_NAMESPACE,
+  };
+}
+
+const CURRENT_RUNTIME_INFO = buildRuntimeInfo();
 
 const workerState = {
   running: false,
@@ -21,6 +69,41 @@ let externalDispatcher = null;
 let drainingCritical = false;
 let drainingStandard = false;
 const SCHEDULER_ALLOWED_TYPES = Object.keys(jobExecutor.JOB_HANDLERS || {});
+
+async function getLatestAutomationIncident() {
+  const failedExecution = await db.FlowExecutionV2.findOne({
+    where: { status: 'failed' },
+    order: [['updated_at', 'DESC']],
+    raw: true
+  });
+
+  if (!failedExecution) {
+    return null;
+  }
+
+  const failedLog = await db.FlowExecutionLogV2.findOne({
+    where: {
+      flow_execution_id: failedExecution.id,
+      status: 'error'
+    },
+    order: [['created_at', 'DESC']],
+    raw: true
+  });
+
+  return {
+    executionId: failedExecution.id,
+    clinicId: failedExecution.clinic_id || null,
+    triggerType: failedExecution.trigger_type || null,
+    triggerEntityType: failedExecution.trigger_entity_type || null,
+    triggerEntityId: failedExecution.trigger_entity_id || null,
+    templateVersionId: failedExecution.template_version_id || null,
+    status: failedExecution.status || null,
+    updatedAt: failedExecution.updated_at || failedExecution.created_at || null,
+    error: failedLog?.error_message || failedExecution.last_error || null,
+    nodeId: failedLog?.node_id || null,
+    nodeType: failedLog?.node_type || null
+  };
+}
 
 async function settleJobResult(job, result) {
   try {
@@ -176,8 +259,9 @@ function setExternalDispatcher(handler) {
   externalDispatcher = handler;
 }
 
-function getStatus() {
+async function getStatus() {
   const groqApiKey = String(process.env.GROQ_API_KEY || '').trim();
+  const latestAutomationIncident = await getLatestAutomationIncident().catch(() => null);
   return {
     running: workerState.running,
     startedAt: workerState.startedAt,
@@ -188,16 +272,27 @@ function getStatus() {
     criticalIntervalMs: CRITICAL_INTERVAL_MS,
     standardIntervalMs: STANDARD_INTERVAL_MS,
     runtimeNamespace: CURRENT_RUNTIME_NAMESPACE,
+    runtimeInfo: CURRENT_RUNTIME_INFO,
+    latestAutomationIncident,
     systemChecks: {
       groqApiKey: {
         ok: !!groqApiKey,
         label: 'GROQ_API_KEY',
-        detail: !!groqApiKey ? 'Configurada' : 'Falta en el entorno del proceso',
+        detail: !!groqApiKey
+          ? 'Cargada en el proceso activo. Si cambias el .env, reinicia el backend.'
+          : 'Falta en el proceso activo. Los nodos IA fallarán hasta reiniciar con la clave correcta.',
       },
       runtimeNamespace: {
         ok: !!CURRENT_RUNTIME_NAMESPACE,
-        label: 'Runtime namespace',
-        detail: CURRENT_RUNTIME_NAMESPACE,
+        label: 'Aislamiento de cola',
+        detail: !!CURRENT_RUNTIME_NAMESPACE
+          ? `${CURRENT_RUNTIME_INFO.summaryLabel}. Clave interna: ${CURRENT_RUNTIME_NAMESPACE}`
+          : 'Este proceso no tiene una clave de aislamiento; podría mezclar jobs con otros entornos.',
+      },
+      runtimeEnvironment: {
+        ok: !!CURRENT_RUNTIME_INFO.summaryLabel,
+        label: 'Entorno actual',
+        detail: CURRENT_RUNTIME_INFO.summaryLabel,
       },
     },
   };

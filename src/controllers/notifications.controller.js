@@ -14,17 +14,17 @@ function mapNotificationToDto(notification) {
     id: String(plain.id),
     title: plain.title,
     description: plain.message,
-    time: plain.created_at instanceof Date ? plain.created_at.toISOString() : plain.created_at,
+    time: plain.createdAt instanceof Date ? plain.createdAt.toISOString() : plain.createdAt,
     link: plain.data?.link || null,
     useRouter: Boolean(plain.data?.useRouter),
     icon: plain.icon || categoryDef?.icon || 'heroicons_outline:bell',
-    read: Boolean(plain.is_read),
+    read: Boolean(plain.isRead),
     category: plain.category,
     categoryLabel: categoryDef?.label || plain.category,
     event: plain.event,
     level: plain.level || eventDef?.level || 'info',
     data: plain.data || {},
-    clinicaId: plain.clinica_id || null
+    clinicaId: plain.clinicaId || null
   };
 }
 
@@ -32,8 +32,8 @@ exports.list = async (req, res) => {
   try {
     const userId = req.userData.userId;
     const notifications = await Notification.findAll({
-      where: { user_id: userId },
-      order: [['created_at', 'DESC']],
+      where: { userId },
+      order: [['createdAt', 'DESC']],
       limit: 200
     });
     res.json(notifications.map(mapNotificationToDto));
@@ -73,14 +73,14 @@ exports.update = async (req, res) => {
   try {
     const userId = req.userData.userId;
     const { id, notification } = req.body;
-    const existing = await Notification.findOne({ where: { id, user_id: userId } });
+    const existing = await Notification.findOne({ where: { id, userId } });
     if (!existing) {
       return res.status(404).json({ message: 'Notificación no encontrada' });
     }
     const updates = {};
     if (notification && typeof notification.read === 'boolean') {
-      updates.is_read = notification.read;
-      updates.read_at = notification.read ? new Date() : null;
+      updates.isRead = notification.read;
+      updates.readAt = notification.read ? new Date() : null;
     }
     if (notification?.title !== undefined) {
       updates.title = notification.title;
@@ -103,7 +103,7 @@ exports.remove = async (req, res) => {
   try {
     const userId = req.userData.userId;
     const id = req.query.id || req.params.id;
-    const deleted = await Notification.destroy({ where: { id, user_id: userId } });
+    const deleted = await Notification.destroy({ where: { id, userId } });
     res.json(deleted > 0);
   } catch (error) {
     console.error('Error deleting notification:', error);
@@ -115,12 +115,12 @@ exports.markAllAsRead = async (req, res) => {
   try {
     const userId = req.userData.userId;
     await Notification.update({
-      is_read: true,
-      read_at: new Date()
+      isRead: true,
+      readAt: new Date()
     }, {
       where: {
-        user_id: userId,
-        is_read: false
+        userId,
+        isRead: false
       }
     });
     res.json(true);

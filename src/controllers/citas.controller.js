@@ -4,6 +4,7 @@ const db = require('../../models');
 
 const CitaPaciente = db.CitaPaciente;
 const LeadIntake = db.LeadIntake;
+const LeadAttributionAudit = db.LeadAttributionAudit;
 const { findCanonicalWhatsappConversation } = require('../lib/canonical-conversation');
 const Paciente = db.Paciente;
 const Clinica = db.Clinica;
@@ -31,6 +32,23 @@ const LEAD_ACTIVE_APPOINTMENT_STATES = new Set([
     'recordatorio_confirmado',
     'reprogramada',
 ]);
+
+const LEAD_SOURCE_LABELS = {
+    meta_ads: 'Meta Ads',
+    google_ads: 'Google Ads',
+    tiktok_ads: 'TikTok Ads',
+    web: 'Web',
+    whatsapp: 'WhatsApp',
+    call_click: 'Llamada web',
+    seo: 'SEO',
+    direct: 'Directo',
+    local_services: 'Servicios locales',
+};
+
+const LEAD_SOURCE_DETAIL_LABELS = {
+    tel_modal: 'Popup de llamada web',
+    tel_modal_call: 'Popup de llamada web',
+};
 
 function emitAppointmentSocketEvent(eventName, citaLike) {
     const io = getIO();
@@ -124,6 +142,218 @@ function parsePositiveInt(value) {
 function normalizePhone(value) {
     return normalizePhoneDigits(value);
 }
+
+async function findPendingCallLeadForAppointment({ clinica_id, telefono }) {
+    const clinicId = parsePositiveInt(clinica_id);
+    const normalizedPhone = normalizePhone(telefono);
+    if (!clinicId || !normalizedPhone) return null;
+
+    const localPhone = normalizedPhone.length > 9 ? normalizedPhone.slice(-9) : normalizedPhone;
+    const phoneWhere = [
+        { telefono: normalizedPhone },
+        { telefono: { [Op.like]: `%${normalizedPhone}` } },
+    ];
+    if (localPhone && localPhone !== normalizedPhone) {
+        phoneWhere.push({ telefono: localPhone });
+        phoneWhere.push({ telefono: { [Op.like]: `%${localPhone}` } });
+    }
+
+    const candidates = await LeadIntake.findAll({
+        where: {
+            clinica_id: clinicId,
+            call_initiated: true,
+            call_outcome: { [Op.is]: null },
+            call_outcome_appointment_id: { [Op.is]: null },
+            [Op.or]: phoneWhere,
+        },
+        order: [['call_initiated_at', 'DESC'], ['created_at', 'DESC'], ['id', 'DESC']],
+        limit: 20,
+    });
+
+    return candidates.find((lead) => {
+        const candidatePhone = normalizePhone(lead?.telefono);
+        return !!candidatePhone && (candidatePhone === normalizedPhone || candidatePhone.endsWith(localPhone));
+    }) || null;
+}
+
+async function findHistoricalAttributedLeadForPatient({ clinica_id, telefono, email }) {
+    const clinicId = parsePositiveInt(clinica_id);
+    const normalizedPhone = normalizePhone(telefono);
+    const normalizedEmail = String(email || '').trim().toLowerCase();
+    if (!clinicId || (!normalizedPhone && !normalizedEmail)) return null;
+
+    const localPhone = normalizedPhone && normalizedPhone.length > 9
+        ? normalizedPhone.slice(-9)
+        : normalizedPhone;
+    const orWhere = [];
+
+    if (normalizedPhone) {
+        orWhere.push({ telefono: normalizedPhone });
+        orWhere.push({ telefono: { [Op.like]: `%${normalizedPhone}` } });
+        if (localPhone && localPhone !== normalizedPhone) {
+            orWhere.push({ telefono: localPhone });
+            orWhere.push({ telefono: { [Op.like]: `%${localPhone}` } });
+        }
+    }
+
+    if (normalizedEmail) {
+        orWhere.push({ email: normalizedEmail });
+    }
+
+    const candidates = await LeadIntake.findAll({
+        where: {
+            clinica_id: clinicId,
+            [Op.or]: orWhere,
+        },
+        include: [
+            {
+                model: Campana,
+                as: 'campana',
+                attributes: ['id', 'nombre'],
+                required: false,
+            },
+        ],
+        order: [['created_at', 'ASC'], ['id', 'ASC']],
+        limit: 50,
+    });
+
+    return candidates.find((lead) => {
+        const candidatePhone = normalizePhone(lead?.telefono);
+        const candidateEmail = String(lead?.email || '').trim().toLowerCase();
+        const phoneMatches = normalizedPhone
+            ? !!candidatePhone && (candidatePhone === normalizedPhone || (!!localPhone && candidatePhone.endsWith(localPhone)))
+            : false;
+        const emailMatches = normalizedEmail
+            ? candidateEmail === normalizedEmail
+            : false;
+        if (!phoneMatches && !emailMatches) {
+            return false;
+        }
+        return !!(
+            lead?.source
+            || lead?.source_detail
+            || lead?.campana_id
+            || lead?.page_url
+            || lead?.landing_url
+            || lead?.call_initiated
+        );
+    }) || null;
+}
+
+function buildLeadMeasurementPreview(lead, kind, { autoLinkOnSave = false } = {}) {
+    if (!lead) return null;
+    const plain = lead?.toJSON ? lead.toJSON() : lead;
+    const source = String(plain?.source || '').trim() || null;
+    const sourceDetail = String(plain?.source_detail || '').trim() || null;
+    return {
+        kind,
+        auto_link_on_save: !!autoLinkOnSave,
+        lead_id: parsePositiveInt(plain?.id),
+        source,
+        source_label: source ? (LEAD_SOURCE_LABELS[source] || source) : null,
+        source_detail: sourceDetail,
+        source_detail_label: sourceDetail ? (LEAD_SOURCE_DETAIL_LABELS[sourceDetail] || sourceDetail) : null,
+        campaign_id: parsePositiveInt(plain?.campana_id),
+        campaign_name: String(plain?.campana?.nombre || '').trim() || null,
+        page_url: String(plain?.page_url || '').trim() || null,
+        landing_url: String(plain?.landing_url || '').trim() || null,
+        call_initiated_at: plain?.call_initiated_at || null,
+        phone: String(plain?.telefono || '').trim() || null,
+    };
+}
+
+exports.getManualAttributionPreview = asyncHandler(async (req, res) => {
+    const clinicaId = parsePositiveInt(req.query?.clinica_id);
+    const patientId = parsePositiveInt(req.query?.patient_id);
+    const tipoCita = String(req.query?.tipo_cita || '').trim().toLowerCase();
+    if (!clinicaId) {
+        return res.status(400).json({ success: false, message: 'clinica_id inválida' });
+    }
+
+    let telefono = String(req.query?.telefono || '').trim();
+    let email = String(req.query?.email || '').trim();
+
+    if (patientId) {
+        const patient = await Paciente.findByPk(patientId, {
+            attributes: ['id_paciente', 'telefono_movil', 'email'],
+        });
+        if (patient) {
+            telefono = telefono || String(patient.telefono_movil || '').trim();
+            email = email || String(patient.email || '').trim();
+        }
+    }
+
+    if (tipoCita === 'continuacion') {
+        return res.json({
+            success: true,
+            data: {
+                kind: 'continuation',
+                auto_link_on_save: false,
+                source: null,
+                source_label: null,
+                source_detail: null,
+                source_detail_label: null,
+                campaign_id: null,
+                campaign_name: null,
+                page_url: null,
+                landing_url: null,
+                call_initiated_at: null,
+                phone: normalizePhone(telefono),
+            },
+        });
+    }
+
+    const pendingLead = await findPendingCallLeadForAppointment({
+        clinica_id: clinicaId,
+        telefono,
+    });
+    if (pendingLead) {
+        const hydratedLead = await LeadIntake.findByPk(pendingLead.id, {
+            include: [
+                {
+                    model: Campana,
+                    as: 'campana',
+                    attributes: ['id', 'nombre'],
+                    required: false,
+                },
+            ],
+        });
+        return res.json({
+            success: true,
+            data: buildLeadMeasurementPreview(hydratedLead || pendingLead, 'pending_call_auto_link', { autoLinkOnSave: true }),
+        });
+    }
+
+    const historicalLead = await findHistoricalAttributedLeadForPatient({
+        clinica_id: clinicaId,
+        telefono,
+        email,
+    });
+    if (historicalLead) {
+        return res.json({
+            success: true,
+            data: buildLeadMeasurementPreview(historicalLead, 'patient_origin'),
+        });
+    }
+
+    return res.json({
+        success: true,
+        data: {
+            kind: 'manual_no_attribution',
+            auto_link_on_save: false,
+            source: null,
+            source_label: null,
+            source_detail: null,
+            source_detail_label: null,
+            campaign_id: null,
+            campaign_name: null,
+            page_url: null,
+            landing_url: null,
+            call_initiated_at: null,
+            phone: normalizePhone(telefono),
+        },
+    });
+});
 
 async function syncLeadStatusFromAppointments(leadId) {
     const normalizedLeadId = parsePositiveInt(leadId);
@@ -931,8 +1161,10 @@ exports.createCita = asyncHandler(async (req, res) => {
 
         // Resolver lead si viene
         let lead = null;
-        if (lead_intake_id) {
-            lead = await LeadIntake.findByPk(lead_intake_id);
+        const explicitLeadIntakeId = parsePositiveInt(lead_intake_id);
+        let resolvedLeadIntakeId = explicitLeadIntakeId;
+        if (explicitLeadIntakeId) {
+            lead = await LeadIntake.findByPk(explicitLeadIntakeId);
             if (!lead) {
                 return res.status(404).json({ message: 'Lead no encontrado' });
             }
@@ -996,11 +1228,21 @@ exports.createCita = asyncHandler(async (req, res) => {
             id_paciente: datosPaciente.id_paciente || datosPaciente.id
         });
 
+        const shouldAutoLinkPendingCallLead = !lead
+            && String(tipo_cita || '').trim().toLowerCase() !== 'continuacion';
+        if (shouldAutoLinkPendingCallLead) {
+            lead = await findPendingCallLeadForAppointment({
+                clinica_id,
+                telefono: datosPaciente.telefono || paciente?.telefono_movil || null,
+            });
+            resolvedLeadIntakeId = parsePositiveInt(lead?.id) || null;
+        }
+
         // Crear cita
         const cita = await CitaPaciente.create({
             clinica_id,
             paciente_id: paciente.id_paciente,
-            lead_intake_id: lead_intake_id || null,
+            lead_intake_id: resolvedLeadIntakeId || null,
             doctor_id,
             instalacion_id,
             tratamiento_id,
@@ -1035,10 +1277,38 @@ exports.createCita = asyncHandler(async (req, res) => {
 
         // Marcar lead como citado si aplica
         if (lead) {
-            await lead.update({
+            const leadUpdatePayload = {
                 status_lead: 'citado',
                 call_outcome_appointment_id: cita.id_cita,
-            });
+            };
+            if (lead.call_initiated && !lead.call_outcome) {
+                leadUpdatePayload.call_outcome = 'citado';
+                leadUpdatePayload.call_outcome_at = new Date();
+                leadUpdatePayload.call_outcome_notes = lead.call_outcome_notes
+                    || 'Lead vinculado automáticamente al crear una cita manual con el mismo teléfono.';
+            }
+            await lead.update(leadUpdatePayload);
+
+            if (!explicitLeadIntakeId && resolvedLeadIntakeId && LeadAttributionAudit) {
+                try {
+                    await LeadAttributionAudit.create({
+                        lead_intake_id: resolvedLeadIntakeId,
+                        raw_payload: {
+                            appointment_id: cita.id_cita,
+                            patient_id: paciente.id_paciente,
+                            matched_by: 'phone',
+                            source: 'manual_appointment_auto_link',
+                        },
+                        attribution_steps: {
+                            action: 'auto_link_manual_appointment_from_pending_call',
+                            userId: req.userData?.userId || null,
+                            clinic_id: clinica_id,
+                        }
+                    });
+                } catch (auditErr) {
+                    console.warn('⚠️ No se pudo registrar auditoría de auto-link de cita manual:', auditErr.message || auditErr);
+                }
+            }
         }
 
         const citaCreada = await CitaPaciente.findByPk(cita.id_cita, {
@@ -1258,12 +1528,28 @@ exports.reagendarCita = asyncHandler(async (req, res) => {
         return res.status(400).json({ message: 'inicio/fin inválidos' });
     }
 
+    const nextDoctorIdRaw = req.body?.doctor_id;
+    const nextInstalacionIdRaw = req.body?.instalacion_id;
+    const nextDoctorId = nextDoctorIdRaw !== undefined && nextDoctorIdRaw !== null && String(nextDoctorIdRaw).trim() !== ''
+        ? Number(nextDoctorIdRaw)
+        : cita.doctor_id;
+    const nextInstalacionId = nextInstalacionIdRaw !== undefined && nextInstalacionIdRaw !== null && String(nextInstalacionIdRaw).trim() !== ''
+        ? Number(nextInstalacionIdRaw)
+        : cita.instalacion_id;
+
+    if (nextDoctorIdRaw !== undefined && (!Number.isFinite(nextDoctorId) || nextDoctorId <= 0)) {
+        return res.status(400).json({ message: 'doctor_id inválido' });
+    }
+    if (nextInstalacionIdRaw !== undefined && (!Number.isFinite(nextInstalacionId) || nextInstalacionId <= 0)) {
+        return res.status(400).json({ message: 'instalacion_id inválido' });
+    }
+
     const { resourceConflicts, legacyConflicts, canForce } = await checkDisponibilidadCanonica({
         clinica_id: cita.clinica_id,
         inicio,
         fin,
-        doctor_id: cita.doctor_id,
-        instalacion_id: cita.instalacion_id,
+        doctor_id: nextDoctorId,
+        instalacion_id: nextInstalacionId,
         ignore_cita_id: cita.id_cita
     });
 
@@ -1283,6 +1569,12 @@ exports.reagendarCita = asyncHandler(async (req, res) => {
 
     cita.inicio = inicio;
     cita.fin = fin;
+    if (nextDoctorIdRaw !== undefined) {
+        cita.doctor_id = nextDoctorId;
+    }
+    if (nextInstalacionIdRaw !== undefined) {
+        cita.instalacion_id = nextInstalacionId;
+    }
     const estadoRaw = String(req.body?.estado || '').trim().toLowerCase();
     if (estadoRaw) {
         if (!CITA_ESTADOS_VALIDOS.has(estadoRaw)) {
