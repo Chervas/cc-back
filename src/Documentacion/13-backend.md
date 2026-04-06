@@ -582,8 +582,16 @@ Desde `2026-04-01`, el arranque del scheduler ya no debe depender de que varios 
 
 Nueva regla:
 
-- `JOBS_CRON_LEADER=true`: este runtime es el que manda y arranca `jobScheduler` + `metaSyncJobs.start()`.
+- `JOBS_WORKER_ENABLED` controla el worker de `JobRequests`.
+  - Por defecto se considera `true`.
+  - Si vale `false`, este runtime no ejecuta automatizaciones, resumes ni jobs diferidos aunque el backend esté online.
+- `JOBS_CRON_LEADER=true`: este runtime es el que manda y arranca `metaSyncJobs.start()`.
 - `JOBS_CRON_LEADER=false`: este runtime no debe encolar cron jobs periódicos.
+
+Importante:
+
+- `jobScheduler.start()` y `metaSyncJobs.start()` ya no significan lo mismo.
+- `staging` debe poder ejecutar sus automatizaciones (`appointment_created`, `wait_response`, resumes) aunque no sea el leader de cron.
 
 Configuración operativa actual:
 
@@ -609,6 +617,7 @@ Importante:
 
 - no deben coexistir dos runtimes con `JOBS_CRON_LEADER=true` contra la misma base;
 - `JOBS_AUTO_START=true` por sí solo ya no basta para arrancar cron.
+- `JOBS_CRON_LEADER=false` no debe apagar el worker de `JobRequests`; solo desactiva los cron periódicos.
 
 ## 2026-03-23 - Cache ad-level de Google Ads para análisis de campañas
 

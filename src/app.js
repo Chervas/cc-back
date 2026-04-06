@@ -389,13 +389,16 @@ server.listen(PORT, () => {
 
 // El liderazgo del cron debe ser explícito para evitar que varios runtimes
 // (integracion/auth/staging) encolen el mismo trabajo por hora.
+// El worker de JobRequests va por separado: staging debe poder ejecutar sus
+// automatizaciones y resumes aunque no sea el leader de cron.
 const isCronLeader = process.env.JOBS_CRON_LEADER === 'true';
-const shouldAutoStart = isCronLeader && (process.env.NODE_ENV === 'production' || process.env.JOBS_AUTO_START === 'true');
-if (shouldAutoStart) {
+const shouldStartWorker = process.env.JOBS_WORKER_ENABLED !== 'false';
+const shouldStartCron = isCronLeader && (process.env.NODE_ENV === 'production' || process.env.JOBS_AUTO_START === 'true');
+if (shouldStartWorker) {
     jobScheduler.start();
     console.log('🔁 Job scheduler iniciado');
 } else {
-    console.log(`⏸️ Job scheduler deshabilitado (JOBS_CRON_LEADER=${process.env.JOBS_CRON_LEADER || 'false'}, JOBS_AUTO_START=${process.env.JOBS_AUTO_START || 'false'})`);
+    console.log(`⏸️ Job scheduler deshabilitado (JOBS_WORKER_ENABLED=${process.env.JOBS_WORKER_ENABLED || 'true'})`);
 }
 
 // Inicializar jobs automáticamente en producción
@@ -403,7 +406,7 @@ const { metaSyncJobs } = require('./jobs/sync.jobs');
 metaSyncJobs.initialize().catch((error) => {
   console.error('⚠️ No se pudo inicializar el sistema de jobs al arranque:', error.message);
 });
-if (shouldAutoStart) {
+if (shouldStartCron) {
   setTimeout(async () => {
     try {
       console.log('🚀 Inicializando sistema de jobs automáticamente...');
