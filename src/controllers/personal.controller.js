@@ -3014,7 +3014,6 @@ async function validateSingleHorarioCandidate({ targetUserId, clinicaId, candida
         const whereExisting = {
             doctor_clinica_id: sameClinicDoctorPivot.id,
             activo: true,
-            dia_semana: dia,
         };
 
         if (excludeIds.length) {
@@ -3023,12 +3022,36 @@ async function validateSingleHorarioCandidate({ targetUserId, clinicaId, candida
 
         const sameClinicRows = await DoctorHorario.findAll({
             where: whereExisting,
-            attributes: ['id', 'hora_inicio', 'hora_fin'],
-            raw: true,
+            attributes: ['id', 'doctor_clinica_id', 'dia_semana', 'hora_inicio', 'hora_fin', 'activo', 'rrule', 'fecha_inicio_vigencia', 'fecha_fin_vigencia', 'created_at'],
+            include: [{ model: DoctorHorarioExcepcion, as: 'excepciones' }],
         });
 
-        const overlapSameClinic = sameClinicRows.find((row) =>
-            hmRangesOverlap(inicio, fin, normalizeHm(row.hora_inicio), normalizeHm(row.hora_fin))
+        const horizon = resolveScheduleRange({});
+        const candidateOccurrences = expandHorariosForRange(
+            [{ id: -1, doctor_clinica_id: sameClinicDoctorPivot.id, ...candidateHorario, created_at: new Date() }],
+            candidateHorario.fecha_inicio_vigencia || horizon.from,
+            candidateHorario.fecha_fin_vigencia || horizon.to,
+            new Map(),
+        );
+        const existingExceptionMap = buildHorarioExceptionMap(
+            sameClinicRows.flatMap((row) => Array.isArray(row.excepciones) ? row.excepciones : []),
+        );
+        const existingOccurrences = expandHorariosForRange(
+            sameClinicRows,
+            candidateHorario.fecha_inicio_vigencia || horizon.from,
+            candidateHorario.fecha_fin_vigencia || horizon.to,
+            existingExceptionMap,
+        );
+        const overlapSameClinic = candidateOccurrences.find((occurrence) =>
+            existingOccurrences.find((existing) =>
+                existing.fecha === occurrence.fecha
+                && hmRangesOverlap(
+                    occurrence.hora_inicio,
+                    occurrence.hora_fin,
+                    normalizeHm(existing.hora_inicio),
+                    normalizeHm(existing.hora_fin),
+                )
+            )
         );
 
         if (overlapSameClinic) {
@@ -3041,10 +3064,31 @@ async function validateSingleHorarioCandidate({ targetUserId, clinicaId, candida
                     conflicts: [{
                         clinica_id: Number(clinicaId),
                         dia_semana: dia,
-                        nuevo_hora_inicio: inicio,
-                        nuevo_hora_fin: fin,
-                        conflicto_hora_inicio: normalizeHm(overlapSameClinic.hora_inicio),
-                        conflicto_hora_fin: normalizeHm(overlapSameClinic.hora_fin),
+                        fecha: overlapSameClinic.fecha,
+                        nuevo_hora_inicio: overlapSameClinic.hora_inicio || inicio,
+                        nuevo_hora_fin: overlapSameClinic.hora_fin || fin,
+                        conflicto_hora_inicio: normalizeHm(
+                            existingOccurrences.find((existing) =>
+                                existing.fecha === overlapSameClinic.fecha
+                                && hmRangesOverlap(
+                                    overlapSameClinic.hora_inicio,
+                                    overlapSameClinic.hora_fin,
+                                    normalizeHm(existing.hora_inicio),
+                                    normalizeHm(existing.hora_fin),
+                                )
+                            )?.hora_inicio,
+                        ),
+                        conflicto_hora_fin: normalizeHm(
+                            existingOccurrences.find((existing) =>
+                                existing.fecha === overlapSameClinic.fecha
+                                && hmRangesOverlap(
+                                    overlapSameClinic.hora_inicio,
+                                    overlapSameClinic.hora_fin,
+                                    normalizeHm(existing.hora_inicio),
+                                    normalizeHm(existing.hora_fin),
+                                )
+                            )?.hora_fin,
+                        ),
                     }],
                 },
             };
@@ -3221,6 +3265,9 @@ exports.patchHorarioClinica = async (req, res) => {
             hora_inicio: req.body?.hora_inicio ?? existing.hora_inicio,
             hora_fin: req.body?.hora_fin ?? existing.hora_fin,
             activo: req.body?.activo ?? existing.activo,
+            rrule: req.body?.rrule ?? existing.rrule ?? null,
+            fecha_inicio_vigencia: req.body?.fecha_inicio_vigencia ?? existing.fecha_inicio_vigencia ?? null,
+            fecha_fin_vigencia: req.body?.fecha_fin_vigencia ?? existing.fecha_fin_vigencia ?? null,
         };
         const merged = normalizeHorarioRows([mergedRaw]);
         if (merged.length !== 1) {
