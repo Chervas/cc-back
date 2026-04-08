@@ -77,6 +77,15 @@ function cleanString(value) {
   return String(value).trim();
 }
 
+function parseBool(value, fallback = false) {
+  if (value === undefined || value === null || value === '') return fallback;
+  if (typeof value === 'boolean') return value;
+  const normalized = String(value).trim().toLowerCase();
+  if (['1', 'true', 'yes', 'y', 'on'].includes(normalized)) return true;
+  if (['0', 'false', 'no', 'n', 'off'].includes(normalized)) return false;
+  return fallback;
+}
+
 function parseClinicConfig(value) {
   if (!value) return null;
   if (typeof value === 'object') return value;
@@ -325,7 +334,40 @@ function normalizeAppointmentBeforeTriggerConfig(rawConfig) {
     schedule_moment: safeMoment,
     schedule_time_mode: safeTimeMode,
     custom_time: customTime,
+    exclude_if_booked_day_before: parseBool(config.exclude_if_booked_day_before, false) === true,
+    exclude_if_booked_same_day: parseBool(config.exclude_if_booked_same_day, false) === true,
   };
+}
+
+function resolveAppointmentBookingWindowForReminder(cita, timeZone) {
+  const appointmentStartRaw = cita?.inicio || null;
+  const appointmentCreatedRaw = cita?.created_at || cita?.createdAt || null;
+  const appointmentStart = appointmentStartRaw ? new Date(appointmentStartRaw) : null;
+  const appointmentCreatedAt = appointmentCreatedRaw ? new Date(appointmentCreatedRaw) : null;
+
+  if (!(appointmentStart instanceof Date) || !Number.isFinite(appointmentStart.getTime())) {
+    return null;
+  }
+  if (!(appointmentCreatedAt instanceof Date) || !Number.isFinite(appointmentCreatedAt.getTime())) {
+    return null;
+  }
+
+  const appointmentDateLocal = formatDateLocal(appointmentStart, timeZone);
+  const bookingDateLocal = formatDateLocal(appointmentCreatedAt, timeZone);
+  if (!appointmentDateLocal || !bookingDateLocal) {
+    return null;
+  }
+
+  if (bookingDateLocal === appointmentDateLocal) {
+    return 'same_day';
+  }
+  if (bookingDateLocal === addDaysToLocalDate(appointmentDateLocal, -1)) {
+    return 'day_before';
+  }
+  if (bookingDateLocal < addDaysToLocalDate(appointmentDateLocal, -1)) {
+    return 'more_than_day_before';
+  }
+  return null;
 }
 
 function normalizeAppointmentAfterTriggerConfig(rawConfig) {
@@ -521,6 +563,14 @@ function computeScheduledRunAt({ cita, triggerType, triggerConfig, timeZone }) {
   const nowTs = Date.now();
 
   if (triggerType === 'appointment_reminder_window') {
+    const bookingWindow = resolveAppointmentBookingWindowForReminder(cita, timeZone);
+    if (triggerConfig?.exclude_if_booked_same_day && bookingWindow === 'same_day') {
+      return null;
+    }
+    if (triggerConfig?.exclude_if_booked_day_before && bookingWindow === 'day_before') {
+      return null;
+    }
+
     // No se programan disparos retroactivos "antes de la cita" si la cita ya ha comenzado.
     if (start.getTime() <= nowTs) {
       return null;

@@ -12,6 +12,7 @@ const {
   UsuarioClinica,
   Clinica,
   WhatsappTemplate,
+  AutomationFlowCatalog,
   AutomationFlowTemplateV2,
   Tratamiento,
   MetaConnection,
@@ -108,6 +109,29 @@ async function resolveWhatsappCatalogDuplicateNames(itemId, { baseName, baseDisp
   return { name: nextName, display_name: nextDisplayName };
 }
 
+function parseIntOrNull(value) {
+  const parsed = Number.parseInt(String(value ?? '').trim(), 10);
+  return Number.isInteger(parsed) ? parsed : null;
+}
+
+function sanitizeTemplateKey(raw) {
+  const base = String(raw || '')
+    .toLowerCase()
+    .trim()
+    .replace(/[^a-z0-9]+/g, '_')
+    .replace(/^_+|_+$/g, '');
+  return base || null;
+}
+
+function sanitizeTemplateReference(raw) {
+  const base = String(raw || '')
+    .toLowerCase()
+    .trim()
+    .replace(/[^a-z0-9_-]+/g, '_')
+    .replace(/^_+|_+$/g, '');
+  return base || null;
+}
+
 async function getUserGroupIds({ clinicIds, isAggregateAllowed }) {
   if (isAggregateAllowed) {
     const clinics = await Clinica.findAll({
@@ -158,7 +182,7 @@ function validateCatalogTemplateBodyForMeta(bodyText) {
     issues.push('Meta no permite que el cuerpo termine en una variable; añade texto fijo después del último placeholder.');
   }
 
-  if (/\{\{\d+\}\}\s*\{\{\d+\}\}/.test(text)) {
+  if (/\{\{\d+\}\}\{\{\d+\}\}/.test(text)) {
     issues.push('Meta no permite variables consecutivas sin texto fijo entre ellas.');
   }
 
@@ -277,11 +301,77 @@ function nodeUsesWhatsappTemplate(node, { templateId, templateName, catalogTempl
   const nodeTemplateId = String(config.template_id || '').trim();
   const nodeTemplateName = String(config.template_name || '').trim().toLowerCase();
   const nodeCatalogTemplateId = Number(config.catalog_template_id);
+  const nodeFallbackTemplateId = String(config.fallback_template_id || '').trim();
+  const nodeFallbackTemplateName = String(config.fallback_template_name || '').trim().toLowerCase();
+  const nodeFallbackCatalogTemplateId = Number(config.fallback_catalog_template_id);
   return (
     (templateId && nodeTemplateId === String(templateId))
     || (!!templateName && !!nodeTemplateName && nodeTemplateName === String(templateName).trim().toLowerCase())
     || (Number.isFinite(nodeCatalogTemplateId) && nodeCatalogTemplateId > 0 && nodeCatalogTemplateId === Number(catalogTemplateId))
+    || (templateId && nodeFallbackTemplateId === String(templateId))
+    || (!!templateName && !!nodeFallbackTemplateName && nodeFallbackTemplateName === String(templateName).trim().toLowerCase())
+    || (Number.isFinite(nodeFallbackCatalogTemplateId) && nodeFallbackCatalogTemplateId > 0 && nodeFallbackCatalogTemplateId === Number(catalogTemplateId))
   );
+}
+
+async function loadAutomationCatalogLinkedTemplates(items) {
+  const rows = Array.isArray(items) ? items : [];
+  const publicIdRefs = new Set();
+  const templateKeyRefs = new Set();
+
+  rows.forEach((item) => {
+    const rawRef = sanitizeTemplateReference(item?.template_key);
+    if (!rawRef) return;
+    publicIdRefs.add(rawRef);
+    const asTemplateKey = sanitizeTemplateKey(rawRef);
+    if (asTemplateKey) {
+      templateKeyRefs.add(asTemplateKey);
+    }
+  });
+
+  if (!publicIdRefs.size && !templateKeyRefs.size) {
+    return new Map();
+  }
+
+  const linkedTemplates = await AutomationFlowTemplateV2.findAll({
+    where: {
+      [Op.or]: [
+        publicIdRefs.size ? { public_id: { [Op.in]: Array.from(publicIdRefs) } } : null,
+        templateKeyRefs.size ? { template_key: { [Op.in]: Array.from(templateKeyRefs) } } : null,
+      ].filter(Boolean),
+    },
+    attributes: ['id', 'public_id', 'template_key', 'version', 'nodes'],
+    raw: true,
+  });
+
+  const byItemId = new Map();
+  rows.forEach((item) => {
+    const rawRef = sanitizeTemplateReference(item?.template_key);
+    const version = parseIntOrNull(item?.template_version);
+    if (!rawRef) {
+      byItemId.set(Number(item.id), null);
+      return;
+    }
+
+    const byPublicId = linkedTemplates.filter((row) => String(row.public_id || '').trim().toLowerCase() === rawRef);
+    const byTemplateKey = linkedTemplates.filter((row) => sanitizeTemplateKey(row.template_key) === sanitizeTemplateKey(rawRef));
+    const familyRows = byPublicId.length ? byPublicId : byTemplateKey;
+    if (!familyRows.length) {
+      byItemId.set(Number(item.id), null);
+      return;
+    }
+
+    let match = null;
+    if (version) {
+      match = familyRows.find((row) => Number(row.version) === version) || null;
+    }
+    if (!match) {
+      match = [...familyRows].sort((a, b) => Number(b.version || 0) - Number(a.version || 0))[0] || null;
+    }
+    byItemId.set(Number(item.id), match);
+  });
+
+  return byItemId;
 }
 
 function pickPreferredTemplate(currentTemplate, nextTemplate, clinicId) {
@@ -1328,6 +1418,12 @@ exports.listCatalog = async (req, res) => {
       clinics.map((clinic) => [Number(clinic.id_clinica), String(clinic.nombre_clinica || '').trim() || `Clínica ${clinic.id_clinica}`])
     );
 
+    const automationCatalogItems = await AutomationFlowCatalog.findAll({
+      attributes: ['id', 'name', 'display_name', 'template_key', 'template_version', 'is_active'],
+      raw: true,
+    });
+    const automationLinkedTemplatesByCatalogId = await loadAutomationCatalogLinkedTemplates(automationCatalogItems);
+
     const instancesByCatalogId = new Map();
     instances.forEach((instance) => {
       const catalogId = Number(instance.catalog_template_id);
@@ -1343,6 +1439,7 @@ exports.listCatalog = async (req, res) => {
         const data = item?.toJSON ? item.toJSON() : item;
         const lastPropagatedAt = data?.last_propagated_at ? new Date(data.last_propagated_at) : null;
         const updatedAt = data?.updatedAt || data?.updated_at ? new Date(data.updatedAt || data.updated_at) : null;
+        const createdAt = data?.createdAt || data?.created_at ? new Date(data.createdAt || data.created_at) : null;
         const rawPropagationState = String(data?.propagation_state || '').trim().toLowerCase();
         const isPending = rawPropagationState === 'pending';
         const propagated = !isPending && !!lastPropagatedAt && (!updatedAt || updatedAt.getTime() <= lastPropagatedAt.getTime());
@@ -1361,6 +1458,16 @@ exports.listCatalog = async (req, res) => {
           return String(row?.status || '').trim().toUpperCase() !== 'SIN_CONECTAR';
         });
         const approvedClinicRows = latestClinicRows.filter((row) => String(row?.status || '').trim().toUpperCase() === 'APPROVED');
+        const approvalStale =
+          !isPending &&
+          (
+            (!!lastPropagatedAt && !!updatedAt && updatedAt.getTime() > lastPropagatedAt.getTime()) ||
+            (!lastPropagatedAt &&
+              latestRows.length > 0 &&
+              !!createdAt &&
+              !!updatedAt &&
+              updatedAt.getTime() > createdAt.getTime())
+          );
         const unapprovedClinics = latestClinicRows
           .filter((row) => String(row?.status || '').trim().toUpperCase() !== 'APPROVED')
           .map((row) => {
@@ -1371,18 +1478,40 @@ exports.listCatalog = async (req, res) => {
               status: String(row?.status || '').trim().toUpperCase() || null,
             };
           });
-        const approved =
+        const approvedByCoverage =
           latestClinicRows.length > 0
             ? approvedClinicRows.length === latestClinicRows.length
             : (latestRemoteRows.length > 0 &&
               latestRemoteRows.every((row) => String(row?.status || '').trim().toUpperCase() === 'APPROVED'));
+        const approved = !isPending && !approvalStale && approvedByCoverage;
+        const approvalTotal = latestClinicRows.length > 0 ? latestClinicRows.length : latestRemoteRows.length;
+        const associatedAutomations = automationCatalogItems
+          .filter((automationItem) => {
+            const linkedTemplate = automationLinkedTemplatesByCatalogId.get(Number(automationItem.id));
+            const nodes = Array.isArray(linkedTemplate?.nodes) ? linkedTemplate.nodes : [];
+            return nodes.some((node) => nodeUsesWhatsappTemplate(node, {
+              templateId: null,
+              templateName: data?.name,
+              catalogTemplateId: Number(data?.id),
+            }));
+          })
+          .map((automationItem) => ({
+            id: Number(automationItem.id),
+            name: String(automationItem.display_name || automationItem.name || '').trim() || `Automatización ${automationItem.id}`,
+            is_active: automationItem.is_active === true,
+          }));
         return {
           ...data,
           propagated,
           approved,
-          approved_count: latestClinicRows.length > 0 ? approvedClinicRows.length : (approved ? latestRemoteRows.length : 0),
-          approved_total: latestClinicRows.length > 0 ? latestClinicRows.length : latestRemoteRows.length,
+          approved_count: approved ? (latestClinicRows.length > 0 ? approvedClinicRows.length : latestRemoteRows.length) : 0,
+          approved_total: approvalTotal,
           unapproved_clinics: unapprovedClinics,
+          automation_count: associatedAutomations.length,
+          automations: associatedAutomations,
+          approval_state: isPending
+            ? 'pending_propagation'
+            : (approvalStale ? 'stale_local_changes' : (approved ? 'approved' : 'unapproved')),
           propagation_state: isPending ? 'pending' : (propagated ? 'completed' : 'idle'),
         };
       })
@@ -1593,7 +1722,7 @@ exports.propagateCatalogToClinics = async (req, res) => {
     }
 
     const item = await WhatsappTemplateCatalog.findByPk(id, {
-      attributes: ['id', 'name', 'display_name', 'is_active', 'updated_at', 'propagation_state'],
+      attributes: ['id', 'name', 'display_name', 'body_text', 'is_active', 'updated_at', 'propagation_state'],
     });
     if (!item) {
       return res.status(404).json({ error: 'catalog_not_found' });
