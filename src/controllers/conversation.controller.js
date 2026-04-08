@@ -256,7 +256,7 @@ exports.listConversations = async (req, res) => {
 
     const conversations = await Conversation.findAll({
       where,
-      order: [['last_message_at', 'DESC']],
+      order: [['last_message_at', 'DESC'], ['createdAt', 'DESC'], ['id', 'DESC']],
       include: [
         { model: Paciente, as: 'paciente', attributes: ['id_paciente', 'nombre', 'apellidos', 'foto', 'telefono_movil', 'email'] },
         { model: LeadIntake, as: 'lead', attributes: ['id', 'nombre', 'telefono', 'email'] },

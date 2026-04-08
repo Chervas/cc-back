@@ -16,6 +16,7 @@ const {
   normalizePositionalBindings,
   buildNamedBindingsFromPositional,
   buildPositionalBindingsFromNamed,
+  buildEffectiveNamedBindings,
 } = require('../lib/whatsapp-template-contract');
 
 const AutomationFlowTemplateV2 = db.AutomationFlowTemplateV2;
@@ -2104,11 +2105,13 @@ function resolveTemplateVariablesWithKeys(
     return legacyOutput;
   }
 
-  const bootstrappedNamed = Object.keys(rawNamed).length
-    ? rawNamed
-    : buildNamedBindingsFromPositional(rawPositional, templateVariables);
+  const effectiveNamed = buildEffectiveNamedBindings(
+    rawNamed,
+    rawPositional,
+    templateVariables
+  );
   const positionalBindings = buildPositionalBindingsFromNamed(
-    bootstrappedNamed,
+    effectiveNamed,
     rawPositional,
     templateVariables
   );

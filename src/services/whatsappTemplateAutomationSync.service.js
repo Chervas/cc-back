@@ -7,6 +7,7 @@ const {
   normalizePositionalBindings,
   buildNamedBindingsFromPositional,
   buildPositionalBindingsFromNamed,
+  buildEffectiveNamedBindings,
 } = require('../lib/whatsapp-template-contract');
 
 const { AutomationFlowTemplateV2, WhatsappTemplateCatalog } = db;
@@ -87,17 +88,21 @@ async function recomposeAutomationsUsingTemplate({ templateInstance, logger = co
       );
 
       const namedBindings = usesPrimaryTemplate
-        ? (Object.keys(normalizeNamedBindings(config.variables_named)).length
-          ? normalizeNamedBindings(config.variables_named)
-          : buildNamedBindingsFromPositional(config.variables, templateVariables))
+        ? buildEffectiveNamedBindings(
+          normalizeNamedBindings(config.variables_named),
+          normalizePositionalBindings(config.variables),
+          templateVariables
+        )
         : normalizeNamedBindings(config.variables_named);
       const positionalBindings = usesPrimaryTemplate
         ? buildPositionalBindingsFromNamed(namedBindings, config.variables, templateVariables)
         : normalizePositionalBindings(config.variables);
       const fallbackNamedBindings = usesFallbackTemplate
-        ? (Object.keys(normalizeNamedBindings(config.fallback_variables_named)).length
-          ? normalizeNamedBindings(config.fallback_variables_named)
-          : buildNamedBindingsFromPositional(config.fallback_variables, templateVariables))
+        ? buildEffectiveNamedBindings(
+          normalizeNamedBindings(config.fallback_variables_named),
+          normalizePositionalBindings(config.fallback_variables),
+          templateVariables
+        )
         : normalizeNamedBindings(config.fallback_variables_named);
       const fallbackPositionalBindings = usesFallbackTemplate
         ? buildPositionalBindingsFromNamed(
