@@ -141,6 +141,43 @@ function parseWaError(err) {
   return { code, message, raw: base };
 }
 
+function validateCatalogTemplateBodyForMeta(bodyText) {
+  const text = typeof bodyText === 'string' ? bodyText : '';
+  const issues = [];
+
+  if (!text.trim()) {
+    issues.push('El cuerpo de la plantilla no puede estar vacío.');
+    return issues;
+  }
+
+  if (/^\s*\{\{\d+\}\}/.test(text)) {
+    issues.push('Meta no permite que el cuerpo empiece por una variable.');
+  }
+
+  if (/\{\{\d+\}\}\s*$/.test(text)) {
+    issues.push('Meta no permite que el cuerpo termine en una variable; añade texto fijo después del último placeholder.');
+  }
+
+  if (/\{\{\d+\}\}\s*\{\{\d+\}\}/.test(text)) {
+    issues.push('Meta no permite variables consecutivas sin texto fijo entre ellas.');
+  }
+
+  return issues;
+}
+
+function assertValidCatalogTemplatePayload({ bodyText }, res) {
+  const issues = validateCatalogTemplateBodyForMeta(bodyText);
+  if (!issues.length) {
+    return true;
+  }
+
+  res.status(400).json({
+    error: 'invalid_template_body',
+    details: issues,
+  });
+  return false;
+}
+
 async function fetchBusinessVerificationStatus({ businessId }) {
   if (!businessId || !META_GRAPH_TOKEN) return null;
   try {
@@ -1322,6 +1359,9 @@ exports.createCatalog = async (req, res) => {
     if (!name || !category || !body_text) {
       return res.status(400).json({ error: 'name, category y body_text son obligatorios' });
     }
+    if (!assertValidCatalogTemplatePayload({ bodyText: body_text }, res)) {
+      return;
+    }
     const item = await WhatsappTemplateCatalog.create({
       name,
       display_name: display_name || null,
@@ -1348,11 +1388,15 @@ exports.updateCatalog = async (req, res) => {
     if (!item) return res.status(404).json({ error: 'catalog_not_found' });
 
     const { display_name, category, body_text, variables, components, is_generic, is_active, name } = req.body || {};
+    const nextBodyText = body_text || item.body_text;
+    if (!assertValidCatalogTemplatePayload({ bodyText: nextBodyText }, res)) {
+      return;
+    }
     await item.update({
       name: name || item.name,
       display_name: display_name !== undefined ? display_name : item.display_name,
       category: category || item.category,
-      body_text: body_text || item.body_text,
+      body_text: nextBodyText,
       variables: variables !== undefined ? variables : item.variables,
       components: components !== undefined ? components : item.components,
       propagation_state: null,
@@ -1512,6 +1556,10 @@ exports.propagateCatalogToClinics = async (req, res) => {
     });
     if (!item) {
       return res.status(404).json({ error: 'catalog_not_found' });
+    }
+
+    if (!assertValidCatalogTemplatePayload({ bodyText: item.body_text }, res)) {
+      return;
     }
 
     await item.update({ propagation_state: 'pending' });

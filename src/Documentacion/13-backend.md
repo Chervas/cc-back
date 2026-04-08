@@ -2334,11 +2334,22 @@ En `catalogo-plantillas` ya no debe asumirse que ambos conceptos significan lo m
 - `Aprobada = Sí`:
   - la versión técnica más reciente propagada de esa familia ya está `APPROVED` en Meta;
   - si la versión más nueva sigue `PENDING`, el catálogo debe mostrar `Aprobada = No` aunque `Propagada = Sí`.
+  - el cálculo se hace sobre la versión técnica más nueva de las instancias remotas activas (`waba_id != null`);
+  - clínicas sin WABA o placeholders `SIN_CONECTAR` no cuentan para el `Sí`;
+  - si una sola clínica conectada queda `PENDING`, `REJECTED` o `PENDING_LOCAL` en esa versión más nueva, el catálogo muestra `Aprobada = No`.
 
 - `Propagada = En proceso`:
   - la plantilla ya fue encolada para propagación;
   - el worker aún no ha terminado;
   - cuando el worker completa, pasa a `Sí` o vuelve implícitamente a `No` si luego se edita otra vez.
+
+Reglas de validación local antes de propagar a Meta:
+
+- el `BODY` no puede empezar por una variable;
+- el `BODY` no puede terminar en una variable;
+- no puede haber variables consecutivas sin texto fijo entre ellas.
+
+Si se incumplen, backend debe devolver `400 invalid_template_body` y no encolar la propagación.
 
 ### 8. `Campañas Admin` (`AdminCampaignPlaybook`)
 
