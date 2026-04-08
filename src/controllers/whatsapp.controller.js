@@ -1303,10 +1303,30 @@ exports.listCatalog = async (req, res) => {
             catalog_template_id: { [Op.in]: catalogIds },
             is_active: true,
           },
-          attributes: ['catalog_template_id', 'name', 'status', 'waba_id'],
+          attributes: ['catalog_template_id', 'name', 'status', 'waba_id', 'clinic_id'],
           raw: true,
         })
       : [];
+
+    const clinicIds = Array.from(
+      new Set(
+        instances
+          .map((instance) => Number(instance?.clinic_id))
+          .filter((value) => Number.isFinite(value) && value > 0)
+      )
+    );
+
+    const clinics = clinicIds.length
+      ? await Clinica.findAll({
+          where: { id_clinica: { [Op.in]: clinicIds } },
+          attributes: ['id_clinica', 'nombre_clinica'],
+          raw: true,
+        })
+      : [];
+
+    const clinicNameById = new Map(
+      clinics.map((clinic) => [Number(clinic.id_clinica), String(clinic.nombre_clinica || '').trim() || `Clínica ${clinic.id_clinica}`])
+    );
 
     const instancesByCatalogId = new Map();
     instances.forEach((instance) => {
@@ -1335,13 +1355,34 @@ exports.listCatalog = async (req, res) => {
           ? familyRows.filter((row) => extractTechnicalTemplateVersion(data?.name, row?.name) === latestVersion)
           : [];
         const latestRemoteRows = latestRows.filter((row) => !!String(row?.waba_id || '').trim());
+        const latestClinicRows = latestRows.filter((row) => {
+          const clinicId = Number(row?.clinic_id);
+          if (!Number.isFinite(clinicId) || clinicId <= 0) return false;
+          return String(row?.status || '').trim().toUpperCase() !== 'SIN_CONECTAR';
+        });
+        const approvedClinicRows = latestClinicRows.filter((row) => String(row?.status || '').trim().toUpperCase() === 'APPROVED');
+        const unapprovedClinics = latestClinicRows
+          .filter((row) => String(row?.status || '').trim().toUpperCase() !== 'APPROVED')
+          .map((row) => {
+            const clinicId = Number(row?.clinic_id);
+            return {
+              clinic_id: clinicId,
+              clinic_name: clinicNameById.get(clinicId) || `Clínica ${clinicId}`,
+              status: String(row?.status || '').trim().toUpperCase() || null,
+            };
+          });
         const approved =
-          latestRemoteRows.length > 0 &&
-          latestRemoteRows.every((row) => String(row?.status || '').trim().toUpperCase() === 'APPROVED');
+          latestClinicRows.length > 0
+            ? approvedClinicRows.length === latestClinicRows.length
+            : (latestRemoteRows.length > 0 &&
+              latestRemoteRows.every((row) => String(row?.status || '').trim().toUpperCase() === 'APPROVED'));
         return {
           ...data,
           propagated,
           approved,
+          approved_count: latestClinicRows.length > 0 ? approvedClinicRows.length : (approved ? latestRemoteRows.length : 0),
+          approved_total: latestClinicRows.length > 0 ? latestClinicRows.length : latestRemoteRows.length,
+          unapproved_clinics: unapprovedClinics,
           propagation_state: isPending ? 'pending' : (propagated ? 'completed' : 'idle'),
         };
       })
