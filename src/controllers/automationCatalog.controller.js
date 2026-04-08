@@ -394,16 +394,14 @@ exports.updateCatalog = async (req, res) => {
           templateVersion: effectiveTemplateVersion,
         })
       : null;
+    const isUnlinkingFlow = template_key !== undefined && !effectiveTemplateKey;
     const trigger_type = linkedTemplate?.trigger_type ? normalizeCatalogTriggerType(linkedTemplate.trigger_type) : item.trigger_type;
     const steps = linkedTemplate ? mapNodesToCatalogSteps(linkedTemplate.nodes) : item.steps;
 
-    if (!effectiveTemplateKey) {
-      return res.status(400).json({ error: 'template_key es obligatorio' });
-    }
-    if (!linkedTemplate) {
+    if (effectiveTemplateKey && !linkedTemplate) {
       return res.status(404).json({ error: 'linked_template_not_found' });
     }
-    if (!CATALOG_TRIGGER_TYPE_SET.has(trigger_type)) {
+    if (!isUnlinkingFlow && !CATALOG_TRIGGER_TYPE_SET.has(trigger_type)) {
       return res.status(400).json({
         error: 'invalid_trigger_type',
         message: `trigger_type no soportado: ${String(trigger_type)}`,
@@ -411,16 +409,22 @@ exports.updateCatalog = async (req, res) => {
       });
     }
 
+    const nextIsActive = isUnlinkingFlow
+      ? false
+      : (typeof is_active === 'boolean' ? is_active : item.is_active);
+
     await item.update({
       name: name ?? item.name,
       display_name: display_name ?? item.display_name,
       description: description ?? item.description,
       trigger_type: trigger_type ?? item.trigger_type,
       steps: steps ?? item.steps,
-      template_key: effectiveTemplateKey,
-      template_version: effectiveTemplateVersion || parseIntOrNull(linkedTemplate?.version),
+      template_key: effectiveTemplateKey || null,
+      template_version: effectiveTemplateKey
+        ? (effectiveTemplateVersion || parseIntOrNull(linkedTemplate?.version))
+        : null,
       is_generic: typeof is_generic === 'boolean' ? is_generic : item.is_generic,
-      is_active: typeof is_active === 'boolean' ? is_active : item.is_active,
+      is_active: nextIsActive,
     });
     const nextIsGeneric = typeof is_generic === 'boolean' ? is_generic : item.is_generic;
     if (nextIsGeneric || disciplinesProvided) {

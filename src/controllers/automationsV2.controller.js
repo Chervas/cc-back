@@ -1266,6 +1266,8 @@ function normalizeTriggerConfigForTemplate({ triggerType, entryNodeId, nodes }) 
         schedule_moment: scheduleMoment,
         schedule_time_mode: scheduleTimeMode,
         custom_time: customTime,
+        exclude_if_booked_day_before: parseBool(rawConfig.exclude_if_booked_day_before, false) === true,
+        exclude_if_booked_same_day: parseBool(rawConfig.exclude_if_booked_same_day, false) === true,
       },
     };
   }
@@ -1396,6 +1398,8 @@ function applyTriggerConfigToNodes({ triggerType, entryNodeId, nodes, triggerCon
       schedule_moment: cleanString(triggerConfig.schedule_moment || 'day_before').toLowerCase() || 'day_before',
       schedule_time_mode: cleanString(triggerConfig.schedule_time_mode || 'custom').toLowerCase() || 'custom',
       custom_time: cleanString(triggerConfig.custom_time || '09:00') || null,
+      exclude_if_booked_day_before: parseBool(triggerConfig.exclude_if_booked_day_before, false) === true,
+      exclude_if_booked_same_day: parseBool(triggerConfig.exclude_if_booked_same_day, false) === true,
     };
   } else if (normalizedTriggerType === 'appointment_after' && isObject(triggerConfig)) {
     sanitizedTriggerConfig = {
