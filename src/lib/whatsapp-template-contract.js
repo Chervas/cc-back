@@ -69,6 +69,24 @@ const VARIABLE_ALIASES = {
   link: 'enlace',
 };
 
+const SYSTEM_DEFAULT_NAMED_BINDINGS = {
+  nombre_paciente: '{{paciente.nombre}}',
+  apellido_paciente: '{{paciente.apellidos}}',
+  usuario_nombre: '{{usuario.nombre}}',
+  usuario_apellidos: '{{usuario.apellidos}}',
+  usuario_email: '{{usuario.email}}',
+  profesional_nombre: '{{profesional.nombre}}',
+  profesional_apellidos: '{{profesional.apellidos}}',
+  profesional_email: '{{profesional.email}}',
+  fecha_cita: '{{cita.fecha}}',
+  hora_cita: '{{cita.hora}}',
+  nombre_clinica: '{{clinica.nombre}}',
+  direccion_clinica: '{{clinica.direccion}}',
+  telefono_clinica: '{{clinica.telefono}}',
+  url_web_clinica: '{{clinica.url_web}}',
+  url_ficha_local_clinica: '{{clinica.url_ficha_local}}',
+};
+
 const SYSTEM_TEMPLATE_OVERRIDES = {
   clinicaclick_confirmacion_cita: {
     4: ['nombre_paciente', 'usuario_nombre', 'fecha_cita', 'direccion_clinica'],
@@ -300,6 +318,66 @@ function buildPositionalBindingsFromNamed(namedBindings, legacyPositionalBinding
   return output;
 }
 
+function buildSystemNamedBindingsForTemplateVariables(templateVariables) {
+  const output = {};
+  const variables = Array.isArray(templateVariables) ? templateVariables : [];
+  for (const variable of variables) {
+    const semanticKey = normalizeTemplateVariableName(variable?.name || '');
+    if (!semanticKey || output[semanticKey]) continue;
+    const defaultBinding = SYSTEM_DEFAULT_NAMED_BINDINGS[semanticKey];
+    if (!defaultBinding) continue;
+    output[semanticKey] = defaultBinding;
+  }
+  return output;
+}
+
+function buildEffectiveNamedBindings(namedBindings, positionalBindings, templateVariables) {
+  const variables = Array.isArray(templateVariables) ? templateVariables : [];
+  const rawNamed = normalizeNamedBindings(namedBindings);
+  const rawPositional = normalizePositionalBindings(positionalBindings);
+  const defaultNamed = buildSystemNamedBindingsForTemplateVariables(variables);
+  const fallbackNamed = buildNamedBindingsFromPositional(rawPositional, variables);
+  const canonicalDefaultValues = new Set(Object.values(defaultNamed).filter(Boolean));
+  const output = {};
+
+  for (const variable of variables) {
+    const semanticKey = normalizeTemplateVariableName(
+      variable?.name || `var_${variable?.index || variable?.position || ''}`
+    );
+    if (!semanticKey) continue;
+
+    const defaultValue = defaultNamed[semanticKey] || '';
+    const rawValue = rawNamed[semanticKey] || '';
+    const fallbackValue = fallbackNamed[semanticKey] || '';
+    const candidate = rawValue || fallbackValue || defaultValue || '';
+    if (!candidate) continue;
+
+    if (!defaultValue) {
+      output[semanticKey] = candidate;
+      continue;
+    }
+
+    if (!rawValue) {
+      output[semanticKey] = defaultValue;
+      continue;
+    }
+
+    if (rawValue === defaultValue) {
+      output[semanticKey] = rawValue;
+      continue;
+    }
+
+    if (canonicalDefaultValues.has(rawValue)) {
+      output[semanticKey] = defaultValue;
+      continue;
+    }
+
+    output[semanticKey] = rawValue;
+  }
+
+  return output;
+}
+
 module.exports = {
   normalizeTemplateVariableName,
   extractWhatsappTemplatePlaceholderIndexes,
@@ -308,4 +386,6 @@ module.exports = {
   normalizePositionalBindings,
   buildNamedBindingsFromPositional,
   buildPositionalBindingsFromNamed,
+  buildSystemNamedBindingsForTemplateVariables,
+  buildEffectiveNamedBindings,
 };
