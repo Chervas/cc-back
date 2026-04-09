@@ -1498,7 +1498,7 @@ exports.listCatalog = async (req, res) => {
           .map((automationItem) => ({
             id: Number(automationItem.id),
             name: String(automationItem.display_name || automationItem.name || '').trim() || `Automatización ${automationItem.id}`,
-            is_active: automationItem.is_active === true,
+            is_active: Boolean(Number(automationItem.is_active)),
           }));
         return {
           ...data,
