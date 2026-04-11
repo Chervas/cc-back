@@ -39,8 +39,8 @@ const CITA_STATUSES = Object.freeze([
   },
   {
     value: 'recordatorio_confirmado',
-    label: 'Asistencia confirmada',
-    description: 'Paciente confirma su asistencia tras el recordatorio',
+    label: 'Cita confirmada',
+    description: 'Paciente confirma que acudirá a la cita',
     color: 'emerald',
     icon: 'heroicons_outline:hand-thumb-up',
     order: 5,
