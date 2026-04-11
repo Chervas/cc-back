@@ -18,6 +18,9 @@ const DoctorBloqueo = db.DoctorBloqueo;
 const Tratamiento = db.Tratamiento;
 const FlowExecutionV2 = db.FlowExecutionV2;
 const AutomationFlowTemplateV2 = db.AutomationFlowTemplateV2;
+const Conversation = db.Conversation;
+const Message = db.Message;
+const ConversationRead = db.ConversationRead;
 const appointmentAutomationV2Runtime = require('../services/appointmentAutomationV2Runtime.service');
 const { CITA_STATUS_VALUES } = require('../lib/status-catalog');
 const { getIO } = require('../services/socket.service');
@@ -458,6 +461,65 @@ async function attachFlowSummaryToCitas(citas) {
             cita.appointment_flow = summary;
         }
     });
+
+    return citas;
+}
+
+async function getUnreadCountForConversation(conversationId, userId) {
+    if (!Message || !conversationId) return 0;
+
+    let lastReadAt = null;
+    if (ConversationRead && userId) {
+        const read = await ConversationRead.findOne({
+            where: { conversation_id: conversationId, user_id: userId },
+            attributes: ['last_read_at'],
+            raw: true,
+        });
+        lastReadAt = read?.last_read_at || null;
+    }
+
+    const where = { conversation_id: conversationId, direction: 'inbound' };
+    if (lastReadAt) {
+        where.createdAt = { [Op.gt]: lastReadAt };
+    }
+    return Message.count({ where });
+}
+
+async function attachUnreadCountsToCitas(citas, userId) {
+    const list = Array.isArray(citas) ? citas : (citas ? [citas] : []);
+    if (!list.length || !Conversation || !Message) return citas;
+
+    await Promise.all(list.map(async (cita) => {
+        try {
+            const plain = typeof cita?.toJSON === 'function' ? cita.toJSON() : cita;
+            if (!plain?.clinica_id || !plain?.paciente_id) {
+                return;
+            }
+
+            const conv = await findCanonicalWhatsappConversation({
+                clinicId: plain.clinica_id,
+                contactId: plain?.paciente?.telefono_movil || null,
+                patientId: plain.paciente_id,
+                leadId: plain.lead_intake_id || null,
+                createIfMissing: false,
+            });
+
+            const unreadCount = conv ? await getUnreadCountForConversation(conv.id, userId) : 0;
+            if (typeof cita?.setDataValue === 'function') {
+                cita.setDataValue('conversation_id', conv?.id || null);
+                cita.setDataValue('unread_count', unreadCount);
+            } else {
+                cita.conversation_id = conv?.id || null;
+                cita.unread_count = unreadCount;
+            }
+        } catch (err) {
+            if (typeof cita?.setDataValue === 'function') {
+                cita.setDataValue('unread_count', 0);
+            } else if (cita) {
+                cita.unread_count = 0;
+            }
+        }
+    }));
 
     return citas;
 }
@@ -1362,6 +1424,7 @@ exports.getCitas = asyncHandler(async (req, res) => {
     });
 
     await attachFlowSummaryToCitas(citas);
+    await attachUnreadCountsToCitas(citas, req.userData?.userId || null);
     res.json(citas);
 });
 
@@ -1390,6 +1453,7 @@ exports.getCitaById = asyncHandler(async (req, res) => {
     }
 
     await attachFlowSummaryToCitas(cita);
+    await attachUnreadCountsToCitas(cita, req.userData?.userId || null);
 
     let conversation_id = null;
     try {
@@ -1503,6 +1567,7 @@ exports.updateCitaEstado = asyncHandler(async (req, res) => {
     });
 
     await attachFlowSummaryToCitas(citaActualizada);
+    await attachUnreadCountsToCitas(citaActualizada, req.userData?.userId || null);
     emitAppointmentSocketEvent('appointment:updated', citaActualizada?.toJSON ? citaActualizada.toJSON() : citaActualizada);
     return res.json(citaActualizada);
 });

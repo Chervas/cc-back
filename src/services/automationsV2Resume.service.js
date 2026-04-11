@@ -8,6 +8,8 @@ const { normalizePhoneDigits } = require('../lib/phone');
 const FlowExecutionV2 = db.FlowExecutionV2;
 const AutomationFlowTemplateV2 = db.AutomationFlowTemplateV2;
 const JobRequest = db.JobRequest;
+const Message = db.Message;
+const Op = db.Sequelize.Op;
 const FORM_MATCH_MODES = new Set(['url_contains', 'url_equals', 'form_id', 'selector']);
 
 function cleanString(value) {
@@ -222,6 +224,34 @@ function resolvePositiveInt(value) {
   return Number.isInteger(parsed) && parsed >= 0 ? parsed : null;
 }
 
+function parseDateOrNull(value) {
+  if (!value) return null;
+  const date = value instanceof Date ? value : new Date(value);
+  return Number.isNaN(date.getTime()) ? null : date;
+}
+
+function resolveDurationMs(duration, unit) {
+  const amount = Number.parseFloat(String(duration ?? ''));
+  const safeAmount = Number.isFinite(amount) && amount > 0 ? amount : 60;
+  const normalizedUnit = cleanString(unit) || 'minutes';
+  switch (normalizedUnit) {
+    case 'seconds':
+    case 'second':
+      return safeAmount * 1000;
+    case 'minutes':
+    case 'minute':
+      return safeAmount * 60 * 1000;
+    case 'hours':
+    case 'hour':
+      return safeAmount * 60 * 60 * 1000;
+    case 'days':
+    case 'day':
+      return safeAmount * 24 * 60 * 60 * 1000;
+    default:
+      return safeAmount * 60 * 1000;
+  }
+}
+
 function getResponseBufferConfig(waitNode) {
   const cfg = waitNode?.config && typeof waitNode.config === 'object' ? waitNode.config : {};
   const explicitDelayMs = resolvePositiveInt(cfg.response_buffer_delay_ms);
@@ -289,6 +319,155 @@ async function findQueuedExecutionJob(executionId) {
     }
   );
   return rows?.[0] || null;
+}
+
+function getWaitResponseNodes(execution) {
+  const nodes = Array.isArray(execution?.templateVersion?.nodes)
+    ? execution.templateVersion.nodes
+    : [];
+  return nodes.filter((node) => cleanString(node?.type) === 'delay/wait_response');
+}
+
+async function resolveLateTimedOutWaitRecovery(execution, {
+  conversationId,
+  inboundAt,
+}) {
+  if (!Message || !conversationId || !inboundAt) return null;
+
+  const context = execution?.context && typeof execution.context === 'object'
+    ? execution.context
+    : {};
+  const outputs = context?.outputs && typeof context.outputs === 'object'
+    ? context.outputs
+    : {};
+  const waitNodes = getWaitResponseNodes(execution);
+
+  for (const waitNode of waitNodes) {
+    const waitNodeId = cleanString(waitNode?.id);
+    if (!waitNodeId) continue;
+
+    const waitOutput = outputs[waitNodeId];
+    if (!waitOutput || cleanString(waitOutput.status) !== 'timed_out') continue;
+
+    const listensTo = cleanString(waitOutput.listens_to_node_id) || cleanString(waitNode?.config?.listens_to_node_id);
+    const listenedOutput = listensTo ? outputs[listensTo] : null;
+    if (!listenedOutput || Number(listenedOutput.conversation_id || 0) !== Number(conversationId)) continue;
+
+    const outboundMessageId = toIntOrNull(listenedOutput.message_id);
+    if (!outboundMessageId) continue;
+
+    const outboundMessage = await Message.findByPk(outboundMessageId, {
+      attributes: ['id', 'sent_at', 'createdAt'],
+      raw: true,
+    });
+    if (!outboundMessage) continue;
+
+    const actualSendAt =
+      parseDateOrNull(outboundMessage.sent_at)
+      || parseDateOrNull(listenedOutput.effective_send_at)
+      || parseDateOrNull(listenedOutput.scheduled_for)
+      || parseDateOrNull(outboundMessage.createdAt)
+      || parseDateOrNull(listenedOutput.at);
+    const recordedTimeoutAt = parseDateOrNull(waitOutput.timeout_at);
+    if (!actualSendAt || !recordedTimeoutAt) continue;
+
+    // Recuperar solo el caso problemático: el proveedor marca el envío real
+    // después del timeout que ya había vencido desde la creación/cola local.
+    if (actualSendAt.getTime() <= recordedTimeoutAt.getTime()) continue;
+
+    const timeoutMs = resolveDurationMs(waitNode?.config?.timeout_duration ?? 60, waitNode?.config?.timeout_unit || 'minutes');
+    const allowedUntil = new Date(actualSendAt.getTime() + timeoutMs);
+    if (inboundAt.getTime() < actualSendAt.getTime() || inboundAt.getTime() > allowedUntil.getTime()) continue;
+
+    return {
+      waitNode,
+      waitNodeId,
+      listensTo,
+      actualSendAt,
+      allowedUntil,
+      recordedTimeoutAt,
+      outboundMessageId,
+    };
+  }
+
+  return null;
+}
+
+async function recoverLateTimedOutResponseMatches({
+  clinicId,
+  conversationId,
+  patientId,
+  leadId,
+  inboundMessageId,
+}) {
+  const normalizedClinicId = toIntOrNull(clinicId);
+  const normalizedConversationId = toIntOrNull(conversationId);
+  if (!Message || !normalizedClinicId || !normalizedConversationId || !inboundMessageId) {
+    return [];
+  }
+
+  const inboundMessage = await Message.findByPk(inboundMessageId, {
+    attributes: ['id', 'sent_at', 'createdAt'],
+    raw: true,
+  });
+  const inboundAt = parseDateOrNull(inboundMessage?.sent_at) || parseDateOrNull(inboundMessage?.createdAt) || new Date();
+  const since = new Date(inboundAt.getTime() - 14 * 24 * 60 * 60 * 1000);
+
+  const candidates = await FlowExecutionV2.findAll({
+    where: {
+      status: 'completed',
+      clinic_id: normalizedClinicId,
+      updated_at: { [Op.gte]: since },
+    },
+    include: [{
+      model: AutomationFlowTemplateV2,
+      as: 'templateVersion',
+      attributes: ['id', 'nodes'],
+    }],
+    order: [['id', 'DESC']],
+    limit: 100,
+  });
+
+  const recovered = [];
+  for (const execution of candidates) {
+    if (!matchesExecutionTarget(execution, {
+      conversationId: normalizedConversationId,
+      patientId,
+      leadId,
+    })) {
+      continue;
+    }
+
+    const recovery = await resolveLateTimedOutWaitRecovery(execution, {
+      conversationId: normalizedConversationId,
+      inboundAt,
+    });
+    if (!recovery) continue;
+
+    await execution.update({
+      status: 'waiting',
+      current_node_id: recovery.waitNodeId,
+      wait_until: null,
+      waiting_meta: {
+        type: 'delay/wait_response',
+        runtime_namespace: CURRENT_RUNTIME_NAMESPACE,
+        listens_to_node_id: recovery.listensTo,
+        wait_starts_at: recovery.actualSendAt.toISOString(),
+        recovered_after_provider_send_at: true,
+        original_timeout_at: recovery.recordedTimeoutAt.toISOString(),
+        adjusted_timeout_at: recovery.allowedUntil.toISOString(),
+        outbound_message_id: recovery.outboundMessageId,
+        on_response: cleanString(recovery.waitNode?.outputs?.on_response) || null,
+        on_timeout: cleanString(recovery.waitNode?.outputs?.on_timeout) || null,
+        response_buffer_enabled: parseBool(recovery.waitNode?.config?.response_buffer_enabled, true),
+      },
+      last_error: null,
+    });
+
+    recovered.push(execution);
+  }
+
+  return recovered;
 }
 
 async function cancelQueuedExecutionJob(executionId, reason) {
@@ -466,11 +645,21 @@ async function enqueueInboundResponseResume({
     });
   });
 
-  let effectiveMatches = matched;
+  const recoveredLateMatches = matched.length
+    ? []
+    : await recoverLateTimedOutResponseMatches({
+        clinicId: normalizedClinicId,
+        conversationId: normalizedConversationId,
+        patientId: normalizedPatientId,
+        leadId: normalizedLeadId,
+        inboundMessageId,
+      });
+
+  let effectiveMatches = matched.length ? matched : recoveredLateMatches;
   const supersededExecutionIds = [];
 
-  if (normalizedConversationId && matched.length > 1) {
-    const sorted = [...matched].sort((a, b) => {
+  if (normalizedConversationId && effectiveMatches.length > 1) {
+    const sorted = [...effectiveMatches].sort((a, b) => {
       const byId = Number(b.id || 0) - Number(a.id || 0);
       if (byId !== 0) return byId;
       return new Date(b.created_at || 0).getTime() - new Date(a.created_at || 0).getTime();

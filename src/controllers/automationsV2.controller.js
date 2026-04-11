@@ -1923,6 +1923,61 @@ function mapTemplate(row, { includeNodes = true, access = null, clinicNameMap = 
   return base;
 }
 
+function stripCatalogClinicScopeSuffixes(rawTemplateKey) {
+  const normalized = cleanString(rawTemplateKey);
+  if (!normalized) return null;
+  return normalized.replace(/(?:__?clinic_\d+)+$/gi, '') || normalized;
+}
+
+async function loadCatalogBindingMapForRows(rows) {
+  const normalizedRows = Array.isArray(rows) ? rows : [];
+  if (!normalizedRows.length) {
+    return new Map();
+  }
+
+  const candidateKeys = Array.from(
+    new Set(
+      normalizedRows
+        .flatMap((row) => {
+          const item = row?.toJSON ? row.toJSON() : row;
+          const rawKey = cleanString(item?.template_key);
+          const strippedKey = stripCatalogClinicScopeSuffixes(rawKey);
+          return [rawKey, strippedKey].filter(Boolean);
+        })
+        .filter(Boolean)
+    )
+  );
+
+  if (!candidateKeys.length) {
+    return new Map();
+  }
+
+  const catalogRows = await db.AutomationFlowCatalog.findAll({
+    attributes: ['id', 'name', 'display_name', 'template_key', 'template_version', 'is_active'],
+    where: {
+      template_key: { [Op.in]: candidateKeys },
+    },
+    raw: true,
+  });
+
+  const result = new Map();
+  for (const catalogRow of catalogRows) {
+    const rawKey = cleanString(catalogRow?.template_key);
+    if (!rawKey) continue;
+
+    result.set(rawKey, {
+      id: catalogRow.id,
+      name: catalogRow.name,
+      display_name: catalogRow.display_name,
+      template_key: rawKey,
+      template_version: parseIntOrNull(catalogRow.template_version),
+      is_active: catalogRow.is_active !== false,
+    });
+  }
+
+  return result;
+}
+
 async function loadLatestActivePublishedVersionMap(templateKeys) {
   const refs = Array.from(
     new Set(
@@ -1985,6 +2040,12 @@ function computeLifecycleStatus(item, latestActivePublishedVersionMap = null) {
 
 function mapTemplateWithLifecycle(row, options = {}) {
   const mapped = mapTemplate(row, options);
+  const catalogBindingMap =
+    options.catalogBindingMap instanceof Map ? options.catalogBindingMap : null;
+  const bindingKey = stripCatalogClinicScopeSuffixes(mapped.template_key);
+  const catalogItem = bindingKey && catalogBindingMap ? catalogBindingMap.get(bindingKey) || null : null;
+  mapped.managed_by_catalog = !!catalogItem;
+  mapped.catalog_item = catalogItem;
   mapped.lifecycle_status = computeLifecycleStatus(
     row?.toJSON ? row.toJSON() : row,
     options.latestActivePublishedVersionMap || null
@@ -3932,6 +3993,7 @@ exports.listTemplates = async (req, res) => {
     });
 
     const clinicNameMap = await loadClinicNameMapFromRows(rows);
+    const catalogBindingMap = await loadCatalogBindingMapForRows(rows);
 
     const latestActivePublishedVersionMap = await loadLatestActivePublishedVersionMap(
       rows.map((row) => row.public_id || row.template_key)
@@ -3944,6 +4006,7 @@ exports.listTemplates = async (req, res) => {
           includeNodes,
           access,
           clinicNameMap,
+          catalogBindingMap,
           latestActivePublishedVersionMap,
         })
       ),
@@ -4114,9 +4177,10 @@ exports.createTemplateDraft = async (req, res) => {
     });
 
     const clinicNameMap = await loadClinicNameMapFromRows([created]);
+    const catalogBindingMap = await loadCatalogBindingMapForRows([created]);
     return res.status(201).json({
       success: true,
-      data: mapTemplateWithLifecycle(created, { includeNodes: true, access, clinicNameMap }),
+      data: mapTemplateWithLifecycle(created, { includeNodes: true, access, clinicNameMap, catalogBindingMap }),
     });
   } catch (err) {
     console.error('Error createTemplateDraft v2', err);
@@ -4147,6 +4211,7 @@ exports.getTemplateLatestPublished = async (req, res) => {
     }
 
     const clinicNameMap = await loadClinicNameMapFromRows([row]);
+    const catalogBindingMap = await loadCatalogBindingMapForRows([row]);
     const latestActivePublishedVersionMap = await loadLatestActivePublishedVersionMap([row.public_id || row.template_key]);
     return res.json({
       success: true,
@@ -4154,6 +4219,7 @@ exports.getTemplateLatestPublished = async (req, res) => {
         includeNodes: true,
         access,
         clinicNameMap,
+        catalogBindingMap,
         latestActivePublishedVersionMap,
       }),
     });
@@ -4185,6 +4251,7 @@ exports.listTemplateVersions = async (req, res) => {
     const visible = rows.filter((row) => hasScopeAccess(access, row));
 
     const clinicNameMap = await loadClinicNameMapFromRows(visible);
+    const catalogBindingMap = await loadCatalogBindingMapForRows(visible);
 
     const latestActivePublishedVersionMap = await loadLatestActivePublishedVersionMap(
       visible.map((row) => row.public_id || row.template_key)
@@ -4197,6 +4264,7 @@ exports.listTemplateVersions = async (req, res) => {
           includeNodes,
           access,
           clinicNameMap,
+          catalogBindingMap,
           latestActivePublishedVersionMap,
         })
       ),
@@ -4231,6 +4299,7 @@ exports.getTemplateVersion = async (req, res) => {
     }
 
     const clinicNameMap = await loadClinicNameMapFromRows([row]);
+    const catalogBindingMap = await loadCatalogBindingMapForRows([row]);
     const latestActivePublishedVersionMap = await loadLatestActivePublishedVersionMap([row.public_id || row.template_key]);
     return res.json({
       success: true,
@@ -4238,6 +4307,7 @@ exports.getTemplateVersion = async (req, res) => {
         includeNodes: true,
         access,
         clinicNameMap,
+        catalogBindingMap,
         latestActivePublishedVersionMap,
       }),
     });
@@ -4286,6 +4356,7 @@ exports.updateTemplateDraft = async (req, res) => {
       });
 
       const clinicNameMap = await loadClinicNameMapFromRows([row]);
+      const catalogBindingMap = await loadCatalogBindingMapForRows([row]);
       const latestActivePublishedVersionMap = await loadLatestActivePublishedVersionMap([row.public_id || row.template_key]);
       return res.json({
         success: true,
@@ -4293,6 +4364,7 @@ exports.updateTemplateDraft = async (req, res) => {
           includeNodes: true,
           access,
           clinicNameMap,
+          catalogBindingMap,
           latestActivePublishedVersionMap,
         }),
       });
@@ -4390,6 +4462,7 @@ exports.updateTemplateDraft = async (req, res) => {
     await row.update(updates);
 
     const clinicNameMap = await loadClinicNameMapFromRows([row]);
+    const catalogBindingMap = await loadCatalogBindingMapForRows([row]);
     const latestActivePublishedVersionMap = await loadLatestActivePublishedVersionMap([row.public_id || row.template_key]);
     return res.json({
       success: true,
@@ -4397,6 +4470,7 @@ exports.updateTemplateDraft = async (req, res) => {
         includeNodes: true,
         access,
         clinicNameMap,
+        catalogBindingMap,
         latestActivePublishedVersionMap,
       }),
     });
@@ -4516,6 +4590,7 @@ exports.publishTemplateVersion = async (req, res) => {
     });
 
     const clinicNameMap = await loadClinicNameMapFromRows([row]);
+    const catalogBindingMap = await loadCatalogBindingMapForRows([row]);
     const latestActivePublishedVersionMap = await loadLatestActivePublishedVersionMap([row.public_id || row.template_key]);
     return res.json({
       success: true,
@@ -4523,6 +4598,7 @@ exports.publishTemplateVersion = async (req, res) => {
         includeNodes: true,
         access,
         clinicNameMap,
+        catalogBindingMap,
         latestActivePublishedVersionMap,
       }),
     });
