@@ -65,6 +65,9 @@ function detectCurrentRuntimeNamespace() {
 }
 
 const CURRENT_RUNTIME_NAMESPACE = detectCurrentRuntimeNamespace();
+const RUNTIME_ROLE = normalizeType(process.env.RUNTIME_ROLE);
+const IS_GATEWAY_RUNTIME = RUNTIME_ROLE === 'gateway';
+const FALLBACK_OWNER_RUNTIME_NAMESPACE = cleanString(process.env.AUTOMATIONS_V2_FALLBACK_RUNTIME_NAMESPACE);
 
 function getQueuedJobRuntimeNamespace(jobPayload = null) {
   if (!jobPayload || typeof jobPayload !== 'object' || Array.isArray(jobPayload)) return null;
@@ -81,6 +84,11 @@ function isExecutionOwnedByCurrentRuntime(execution, queuedJob = null) {
   const ownerRuntime = getExecutionRuntimeNamespace(execution, queuedJob);
   if (!ownerRuntime) return true;
   return ownerRuntime === CURRENT_RUNTIME_NAMESPACE;
+}
+
+function resolveFallbackOwnerRuntimeNamespace() {
+  if (FALLBACK_OWNER_RUNTIME_NAMESPACE) return FALLBACK_OWNER_RUNTIME_NAMESPACE;
+  return IS_GATEWAY_RUNTIME ? null : CURRENT_RUNTIME_NAMESPACE;
 }
 
 function getByPath(obj, path) {
@@ -383,6 +391,9 @@ async function resolveLateTimedOutWaitRecovery(execution, {
       waitNode,
       waitNodeId,
       listensTo,
+      runtimeNamespace: cleanString(waitOutput.runtime_namespace)
+        || cleanString(execution?.waiting_meta?.runtime_namespace)
+        || resolveFallbackOwnerRuntimeNamespace(),
       actualSendAt,
       allowedUntil,
       recordedTimeoutAt,
@@ -450,7 +461,7 @@ async function recoverLateTimedOutResponseMatches({
       wait_until: null,
       waiting_meta: {
         type: 'delay/wait_response',
-        runtime_namespace: CURRENT_RUNTIME_NAMESPACE,
+        runtime_namespace: recovery.runtimeNamespace || CURRENT_RUNTIME_NAMESPACE,
         listens_to_node_id: recovery.listensTo,
         wait_starts_at: recovery.actualSendAt.toISOString(),
         recovered_after_provider_send_at: true,
@@ -703,6 +714,13 @@ async function enqueueInboundResponseResume({
       const waitNode = getWaitResponseNode(execution);
       const buffer = getResponseBufferConfig(waitNode);
       const ownerRuntime = getExecutionRuntimeNamespace(execution, queuedJob) || CURRENT_RUNTIME_NAMESPACE;
+      if (!IS_GATEWAY_RUNTIME && ownerRuntime !== CURRENT_RUNTIME_NAMESPACE) {
+        errors.push({
+          execution_id: execution.id,
+          message: `owned_by_other_runtime:${ownerRuntime}`,
+        });
+        continue;
+      }
 
       if (buffer.enabled) {
         const waitUntil = new Date(Date.now() + buffer.delayMs);
@@ -793,11 +811,14 @@ async function enqueueInboundResponseResume({
             inbound_message_id: inboundMessageId || null,
             inbound_patient_id: normalizedPatientId || null,
             inbound_lead_id: normalizedLeadId || null,
+            __runtime_namespace: ownerRuntime,
           },
         });
 
         // Menor latencia: intentamos disparo inmediato además del scheduler periódico.
-        jobScheduler.triggerImmediate(job.id).catch(() => {});
+        if (ownerRuntime === CURRENT_RUNTIME_NAMESPACE) {
+          jobScheduler.triggerImmediate(job.id).catch(() => {});
+        }
         enqueued += 1;
       }
     } catch (error) {
@@ -903,10 +924,11 @@ async function enqueueInboundFormSubmissionResume({
     executionIds.push(execution.id);
     try {
       const queuedJob = await findQueuedExecutionJob(execution.id);
-      if (!isExecutionOwnedByCurrentRuntime(execution, queuedJob)) {
+      const ownerRuntime = getExecutionRuntimeNamespace(execution, queuedJob) || CURRENT_RUNTIME_NAMESPACE;
+      if (!IS_GATEWAY_RUNTIME && !isExecutionOwnedByCurrentRuntime(execution, queuedJob)) {
         errors.push({
           execution_id: execution.id,
-          message: `owned_by_other_runtime:${getExecutionRuntimeNamespace(execution, queuedJob)}`,
+          message: `owned_by_other_runtime:${ownerRuntime}`,
         });
         continue;
       }
@@ -920,7 +942,7 @@ async function enqueueInboundFormSubmissionResume({
         wait_until: new Date(),
         waiting_meta: {
           ...existingWaitingMeta,
-          runtime_namespace: getExecutionRuntimeNamespace(execution, queuedJob) || CURRENT_RUNTIME_NAMESPACE,
+          runtime_namespace: ownerRuntime,
           resume_mode: 'form_submission',
           pending_form_submission: submission,
           last_form_submission_at: normalizedSubmittedAt,
@@ -952,9 +974,12 @@ async function enqueueInboundFormSubmissionResume({
             lead_intake_id: normalizedLeadId,
             email: normalizedEmail,
             phone: normalizedPhone,
+            __runtime_namespace: ownerRuntime,
           },
         });
-        jobScheduler.triggerImmediate(job.id).catch(() => {});
+        if (ownerRuntime === CURRENT_RUNTIME_NAMESPACE) {
+          jobScheduler.triggerImmediate(job.id).catch(() => {});
+        }
         enqueued += 1;
       }
     } catch (error) {

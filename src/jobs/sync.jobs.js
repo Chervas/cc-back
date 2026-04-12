@@ -125,6 +125,7 @@ class MetaSyncJobs {
     this.jobs = new Map();
     this.isInitialized = false;
     this.isRunning = false;
+    this.isGatewayRuntime = String(process.env.RUNTIME_ROLE || '').trim().toLowerCase() === 'gateway';
     
     this._webBackfillMode = false;
     this._analyticsBackfillMode = false;
@@ -215,12 +216,14 @@ class MetaSyncJobs {
       }
     };
 
-    console.log('🔧 Configuración de Jobs cargada desde .env:');
-    console.log(`  - Timezone: ${this.config.timezone}`);
-    console.log(`  - Auto Start: ${this.config.autoStart}`);
-    console.log('  - Horarios:');
-    for (const [name, schedule] of Object.entries(this.config.schedules)) {
-      console.log(`    ${name}: ${schedule}`);
+    if (!this.isGatewayRuntime) {
+      console.log('🔧 Configuración de Jobs cargada desde .env:');
+      console.log(`  - Timezone: ${this.config.timezone}`);
+      console.log(`  - Auto Start: ${this.config.autoStart}`);
+      console.log('  - Horarios:');
+      for (const [name, schedule] of Object.entries(this.config.schedules)) {
+        console.log(`    ${name}: ${schedule}`);
+      }
     }
     this._webBackfillMode = false;
     this._analyticsBackfillMode = false;

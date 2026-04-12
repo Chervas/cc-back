@@ -3507,6 +3507,7 @@ async function processNode(node, context, runtime = {}) {
         kind: 'waiting',
         output: {
           waits_for_response: true,
+          runtime_namespace: CURRENT_RUNTIME_NAMESPACE,
           listens_to_node_id: waitAnchor.listens_to_node_id,
           wait_starts_at: waitStartAt.toISOString(),
           timeout_at: waitUntil ? waitUntil.toISOString() : null,
@@ -3537,6 +3538,7 @@ async function processNode(node, context, runtime = {}) {
         kind: 'waiting',
         output: {
           waits_for_form_submission: true,
+          runtime_namespace: CURRENT_RUNTIME_NAMESPACE,
           match_mode: matchMode,
           match_value: matchValue,
           timeout_at: waitUntil ? waitUntil.toISOString() : null,

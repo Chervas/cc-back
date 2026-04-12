@@ -57,6 +57,10 @@ const { isGlobalAdmin } = require('./lib/role-helpers');
 const { buildQuickChatContextFromMemberships } = require('./lib/quickchat-helpers');
 require('./workers/queue.workers');
 
+const RUNTIME_ROLE = String(process.env.RUNTIME_ROLE || '').trim().toLowerCase();
+const IS_GATEWAY_RUNTIME = RUNTIME_ROLE === 'gateway';
+const RESUME_AUTOMATIONS_FROM_SOCKET_BUS =
+    String(process.env.AUTOMATIONS_V2_RESUME_FROM_SOCKET_BUS || '').trim().toLowerCase() === 'true';
 
 // Importar db desde models/index.js que contiene sequelize y todos los modelos
 const db = require('../models'); // <-- Importa el objeto db de models/index.js
@@ -226,64 +230,69 @@ const io = new Server(server, {
 setIO(io);
 const automationsV2ResumeService = require('./services/automationsV2Resume.service');
 
-// Si el inbound de WhatsApp lo procesa otro backend, integración recibe el evento por Redis
-// y reanuda aquí los waits V2 para no depender del proceso que recibió el webhook.
-onBusEvent(async (envelope) => {
-    if (envelope?.event !== 'message:created') {
-        return;
-    }
-
-    const payload = envelope?.payload && typeof envelope.payload === 'object'
-        ? envelope.payload
-        : null;
-    if (!payload || String(payload.direction || '').toLowerCase() !== 'inbound') {
-        return;
-    }
-
-    const conversationId = Number.parseInt(String(payload.conversation_id || payload.conversationId || ''), 10);
-    if (!Number.isInteger(conversationId) || conversationId <= 0) {
-        return;
-    }
-
-    let text = typeof payload.resume_text === 'string'
-        ? payload.resume_text.trim()
-        : (typeof payload?.metadata?.resume_text === 'string'
-            ? payload.metadata.resume_text.trim()
-            : (typeof payload.content === 'string' ? payload.content.trim() : ''));
-
-    if (!text && String(payload?.message_type || '').toLowerCase() === 'reaction') {
-        const emoji = String(payload?.metadata?.reaction?.emoji || '').trim();
-        text = emoji
-            ? `El paciente reaccionó ${emoji} a tu mensaje`
-            : 'El paciente reaccionó a tu mensaje';
-    }
-    if (!text) {
-        return;
-    }
-
-    try {
-        const conv = await db.Conversation.findByPk(conversationId, {
-            attributes: ['id', 'clinic_id', 'patient_id', 'lead_id'],
-            raw: true,
-        });
-
-        if (!conv?.clinic_id) {
+// Con gateway vivo, el webhook inbound coordina una sola reanudacion y encola
+// el job en el namespace propietario del flujo. El bus queda solo como opt-in
+// legacy para evitar que dev/staging dupliquen respuestas del mismo mensaje.
+if (RESUME_AUTOMATIONS_FROM_SOCKET_BUS) {
+    onBusEvent(async (envelope) => {
+        if (envelope?.event !== 'message:created') {
             return;
         }
 
-        await automationsV2ResumeService.enqueueInboundResponseResume({
-            clinicId: conv.clinic_id,
-            conversationId: conv.id,
-            patientId: conv.patient_id || null,
-            leadId: conv.lead_id || null,
-            messageText: text,
-            inboundMessageId: payload.id || null,
-            channel: 'whatsapp',
-        });
-    } catch (error) {
-        console.warn('[automations-v2] No se pudo reanudar wait_response desde socket-bus:', error?.message || error);
-    }
-});
+        const payload = envelope?.payload && typeof envelope.payload === 'object'
+            ? envelope.payload
+            : null;
+        if (!payload || String(payload.direction || '').toLowerCase() !== 'inbound') {
+            return;
+        }
+
+        const conversationId = Number.parseInt(String(payload.conversation_id || payload.conversationId || ''), 10);
+        if (!Number.isInteger(conversationId) || conversationId <= 0) {
+            return;
+        }
+
+        let text = typeof payload.resume_text === 'string'
+            ? payload.resume_text.trim()
+            : (typeof payload?.metadata?.resume_text === 'string'
+                ? payload.metadata.resume_text.trim()
+                : (typeof payload.content === 'string' ? payload.content.trim() : ''));
+
+        if (!text && String(payload?.message_type || '').toLowerCase() === 'reaction') {
+            const emoji = String(payload?.metadata?.reaction?.emoji || '').trim();
+            text = emoji
+                ? `El paciente reaccionó ${emoji} a tu mensaje`
+                : 'El paciente reaccionó a tu mensaje';
+        }
+        if (!text) {
+            return;
+        }
+
+        try {
+            const conv = await db.Conversation.findByPk(conversationId, {
+                attributes: ['id', 'clinic_id', 'patient_id', 'lead_id'],
+                raw: true,
+            });
+
+            if (!conv?.clinic_id) {
+                return;
+            }
+
+            await automationsV2ResumeService.enqueueInboundResponseResume({
+                clinicId: conv.clinic_id,
+                conversationId: conv.id,
+                patientId: conv.patient_id || null,
+                leadId: conv.lead_id || null,
+                messageText: text,
+                inboundMessageId: payload.id || null,
+                channel: 'whatsapp',
+            });
+        } catch (error) {
+            console.warn('[automations-v2] No se pudo reanudar wait_response desde socket-bus:', error?.message || error);
+        }
+    });
+} else {
+    console.log('[automations-v2] Reanudacion por socket-bus deshabilitada; el gateway coordina inbound');
+}
 io.use((socket, next) => {
     const token =
         socket.handshake.auth?.token ||
@@ -403,10 +412,14 @@ if (shouldStartWorker) {
 
 // Inicializar jobs automáticamente en producción
 const { metaSyncJobs } = require('./jobs/sync.jobs');
-metaSyncJobs.initialize().catch((error) => {
-  console.error('⚠️ No se pudo inicializar el sistema de jobs al arranque:', error.message);
-});
-if (shouldStartCron) {
+if (IS_GATEWAY_RUNTIME) {
+  console.log('⏸️ Cron jobs no registrados en runtime gateway');
+} else {
+  metaSyncJobs.initialize().catch((error) => {
+    console.error('⚠️ No se pudo inicializar el sistema de jobs al arranque:', error.message);
+  });
+}
+if (!IS_GATEWAY_RUNTIME && shouldStartCron) {
   setTimeout(async () => {
     try {
       console.log('🚀 Inicializando sistema de jobs automáticamente...');
@@ -417,7 +430,7 @@ if (shouldStartCron) {
       console.error('❌ Error al iniciar jobs automáticamente:', error);
     }
   }, 5000);
-} else {
+} else if (!IS_GATEWAY_RUNTIME) {
   console.log(`⏸️ Cron jobs deshabilitados en este runtime (JOBS_CRON_LEADER=${process.env.JOBS_CRON_LEADER || 'false'})`);
 }
 
