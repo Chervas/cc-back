@@ -1754,7 +1754,8 @@ const DEFAULT_TEXTS = {
   tel_modal_title: 'Conectando con la recepción de {nombre_clinica}',
   tel_modal_subtitle: 'Déjanos tu teléfono por si se pierde la conexión',
   consent_text: 'Acepto la politica de privacidad',
-  privacy_url: '/politica-privacidad'
+  privacy_url: '/politica-privacidad',
+  terms_url: '/terminos-y-condiciones'
 };
 
 const DEFAULT_APPEARANCE = {
@@ -1826,6 +1827,7 @@ const defaultConfigPayload = (clinicId, groupId) => ({
     }
   },
   texts: DEFAULT_TEXTS,
+  snippet_verification: null,
   locations: [],
   has_hmac: false,
   config: {}
@@ -1924,6 +1926,7 @@ exports.getIntakeConfig = asyncHandler(async (req, res) => {
       }
     };
     payload.texts = { ...payload.texts, ...(cfg.texts || {}) };
+    payload.snippet_verification = cfg.snippet_verification || null;
     payload.locations = cfg.locations || [];
     payload.config = cfg;
     payload.has_hmac = !!record.hmac_key;
@@ -2082,13 +2085,23 @@ exports.upsertIntakeConfig = asyncHandler(async (req, res) => {
   const domains = Array.isArray(body.domains) ? body.domains : [];
   const hasHmacKeyField = Object.prototype.hasOwnProperty.call(body, 'hmac_key');
   const requestedHmacKey = body.hmac_key;
+  const existing = await IntakeConfig.findOne({
+    where: scope === 'group'
+      ? { group_id: groupId, assignment_scope: 'group' }
+      : { clinic_id: clinicId },
+    raw: true
+  });
+  const existingConfig = existing?.config && typeof existing.config === 'object' && !Array.isArray(existing.config)
+    ? existing.config
+    : {};
 
   // Compatibilidad:
   // - UI suele enviar features/flow/texts/locations en root.
   // - Backwards: si viene body.config, lo respetamos.
-  let config = {};
+  let config = { ...existingConfig };
   if (body.config && typeof body.config === 'object' && !Array.isArray(body.config)) {
     config = {
+      ...existingConfig,
       ...body.config,
       ...(body.config.google_ads ? { google_ads: normalizeGoogleAdsConfig(body.config.google_ads) } : {}),
       ...(body.config.meta_ads ? { meta_ads: normalizeMetaAdsConfig(body.config.meta_ads) } : {})
@@ -2107,6 +2120,7 @@ exports.upsertIntakeConfig = asyncHandler(async (req, res) => {
     const texts = body.texts && typeof body.texts === 'object' ? body.texts : undefined;
     const locations = Array.isArray(body.locations) ? body.locations : undefined;
     config = {
+      ...existingConfig,
       ...(features ? { features } : {}),
       ...(flow ? { flow } : {}),
       ...(flows ? { flows } : {}),
@@ -2115,6 +2129,16 @@ exports.upsertIntakeConfig = asyncHandler(async (req, res) => {
       ...(metaAds ? { meta_ads: metaAds } : {}),
       ...(texts ? { texts } : {}),
       ...(locations ? { locations } : {})
+    };
+  }
+  if (body.snippet_verification && typeof body.snippet_verification === 'object' && !Array.isArray(body.snippet_verification)) {
+    config.snippet_verification = {
+      verified: !!body.snippet_verification.verified,
+      verified_at: body.snippet_verification.verified_at || new Date().toISOString(),
+      domains: Array.isArray(body.snippet_verification.domains) ? body.snippet_verification.domains : [],
+      checked_urls: body.snippet_verification.checked_urls && typeof body.snippet_verification.checked_urls === 'object'
+        ? body.snippet_verification.checked_urls
+        : {}
     };
   }
 
@@ -2126,12 +2150,6 @@ exports.upsertIntakeConfig = asyncHandler(async (req, res) => {
     nextHmacKey = requestedHmacKey ? String(requestedHmacKey) : null;
   } else {
     // Preservar clave actual si existe
-    const existing = await IntakeConfig.findOne({
-      where: scope === 'group'
-        ? { group_id: groupId, assignment_scope: 'group' }
-        : { clinic_id: clinicId },
-      raw: true
-    });
     nextHmacKey = existing?.hmac_key || null;
 
     // Auto-generación: si se está configurando una allowlist de dominios y aún no hay clave, crearla.
