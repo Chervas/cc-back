@@ -3,8 +3,12 @@ const router = express.Router();
 const authMiddleware = require('./auth.middleware');
 const chatFlowTemplatesController = require('../controllers/chatFlowTemplates.controller');
 const campaignOnboardingController = require('../controllers/campaignOnboarding.controller');
+const marketingReportsController = require('../controllers/marketingReports.controller');
 
 router.use(authMiddleware);
+
+// Informes de marketing agregados (front no orquesta fuentes externas una a una)
+router.get('/reports/overview', marketingReportsController.getOverview);
 
 // Catálogo de plantillas de flujos de chat (snippet web)
 router.get('/chat-flow-templates', chatFlowTemplatesController.listChatFlowTemplates);

@@ -58,6 +58,36 @@ Cambios de código asociados:
 
 Referencia operativa completa: `cc-front/src/Documentacion/31-roadmap-arquitectura-entornos-gateway.md`.
 
+## 2026-04-12 - Informes de marketing agregados V1
+
+Se añade el primer endpoint real para `Marketing > Informes`:
+
+| Endpoint | Estado | Uso |
+|:---|:---|:---|
+| `GET /api/marketing/reports/overview` | Operativo V1 | KPIs, funnel, canales, web, SEO, Ads, Perfil Google, estado de fuentes y recomendaciones. |
+
+Parámetros soportados:
+
+- `clinicId` o `clinica_id`: ID de clínica, CSV de clínicas, `group:ID` o `all`.
+- `startDate` / `endDate`: opcionales; por defecto últimos 30 días.
+
+Fuentes que cruza:
+
+- `LeadIntake` para leads, canales, estados y atribución.
+- `FormSubmissionEvent` para formularios por URL.
+- `CitasPacientes` para citas vinculadas a leads y asistencia.
+- `GoogleAdsInsightsDaily` y `ClinicGoogleAdsAccount` para Google Ads.
+- `SocialAdsInsightsDaily`, `SocialAdsActionsDaily`, `SocialAdsAdsetDailyAgg` y `SocialAdsEntity` para Meta Ads.
+- `WebScDaily` y `WebScQueryDaily` para SEO/Search Console.
+- `WebGaDaily` para GA4 opcional.
+- `ClinicBusinessLocation`, `BusinessProfileDailyMetric` y `BusinessProfileReview` para Perfil Empresa Google.
+
+Limitación consciente:
+
+- No existen todavía `WebEvents`, `WebPageDaily`, `WebClickDaily` ni `WebSessionDaily`.
+- Por eso las visitas propias del funnel usan GA4 si existe o clicks sincronizados desde Ads/SEO como fallback.
+- El frontend debe mostrar nota de calidad de datos y no vender esa métrica como pageviews propios hasta cerrar `ClinicaClick Analytics V1`.
+
 ## 2026-03-27 - Integración de terceros Meta/Google: estado exacto
 
 ### Estado actual del producto
