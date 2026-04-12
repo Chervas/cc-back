@@ -1,8 +1,62 @@
 > **Módulo:** Arquitectura del Backend
-> **Última actualización:** 2026-03-24
-> **Relacionado con:** [20.1-motor-flujos-v2](./20.1-motor-flujos-v2.md)
+> **Última actualización:** 2026-04-12
+> **Relacionado con:** [20.1-motor-flujos-v2](./20.1-motor-flujos-v2.md) | documento operativo `cc-front/src/Documentacion/31-roadmap-arquitectura-entornos-gateway.md`
 
 ---
+
+## 2026-04-12 - Arquitectura operativa dev/staging/gateway
+
+Esta sección manda sobre cualquier nota antigua de `feat/integracion`, `clinicaclick-auth`, `clinicaclick-integracion` o namespaces derivados de puerto.
+
+Topología backend vigente:
+
+| Runtime | Ruta | Rama | Puerto | Rol |
+|:---|:---|:---|---:|:---|
+| `pm2-back-dev` | `/home/ubuntu/wt/back-dev` | `dev` | `3004` | API local y jobs namespace `dev` |
+| `pm2-back-staging` | `/home/ubuntu/wt/back-staging` | `staging` | `3001` | API CRM, jobs namespace `staging`, cron leader actual |
+| `pm2-gateway` | `/home/ubuntu/wt/gateway` | `staging` | `3000` | webhooks externos, OAuth callbacks, WhatsApp/audio inbound |
+
+Variables críticas:
+
+| Variable | Regla |
+|:---|:---|
+| `RUNTIME_ROLE` | `api` en dev/staging; `gateway` en gateway |
+| `JOB_RUNTIME_NAMESPACE` | `dev`, `staging` o `gateway` según proceso |
+| `QUEUE_PREFIX` | debe coincidir con el namespace operativo |
+| `JOBS_WORKER_ENABLED` | `true` en API dev/staging; `false` en gateway |
+| `JOBS_CRON_LEADER` | `true` solo en `pm2-back-staging` hasta que exista prod |
+| `JOB_RUNTIME_CLAIM_UNSCOPED` | por defecto `false` cuando hay namespace explícito; solo `true` en migración controlada |
+| `AUTOMATIONS_V2_FALLBACK_RUNTIME_NAMESPACE` | en gateway actual debe apuntar a `staging` para recuperar waits antiguos sin namespace |
+| `AUTOMATIONS_V2_RESUME_FROM_SOCKET_BUS` | opt-in legacy; por defecto apagado para evitar doble resume inbound |
+
+Reglas de jobs:
+
+- Todo `JobRequest` nuevo lleva `payload.__runtime_namespace`.
+- `pm2-back-dev` no reclama jobs de `staging`.
+- `pm2-back-staging` no reclama jobs de `dev`.
+- Un runtime con namespace explícito no reclama jobs sin namespace salvo `JOB_RUNTIME_CLAIM_UNSCOPED=true`.
+- `pm2-gateway` no ejecuta scheduler de negocio ni cron.
+
+Reglas de inbound externo:
+
+- WhatsApp, audio, OAuth callbacks y webhooks externos entran por `pm2-gateway`.
+- Gateway persiste el mensaje y emite realtime.
+- Gateway encola el resume de automatización en el namespace propietario del flujo.
+- Dev/staging no deben reanudar `message:created` desde socket-bus salvo opt-in temporal documentado.
+- Si hay varias ejecuciones esperando en la misma conversación, gana la más reciente y las antiguas se cancelan como `superseded_by_newer_waiting_execution`.
+
+Cambios de código asociados:
+
+| Archivo | Responsabilidad |
+|:---|:---|
+| `src/services/jobRequests.service.js` | scope de jobs por `__runtime_namespace` y control de unscoped |
+| `src/services/jobScheduler.service.js` | scheduler por namespace y log `claim unscoped` |
+| `src/workers/queue.workers.js` | workers de negocio deshabilitados en `RUNTIME_ROLE=gateway` |
+| `src/app.js` | gateway no registra cron y socket-bus resume queda opt-in |
+| `src/services/automationsV2Resume.service.js` | inbound encola resume en namespace propietario |
+| `src/services/flowEngineV2.service.js` | waits nuevos guardan `runtime_namespace` |
+
+Referencia operativa completa: `cc-front/src/Documentacion/31-roadmap-arquitectura-entornos-gateway.md`.
 
 ## 2026-03-27 - Integración de terceros Meta/Google: estado exacto
 
