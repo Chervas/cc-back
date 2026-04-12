@@ -45,6 +45,9 @@ function cleanString(value) {
     return String(value).trim();
 }
 
+const RUNTIME_ROLE = cleanString(process.env.RUNTIME_ROLE).toLowerCase();
+const IS_GATEWAY_RUNTIME = RUNTIME_ROLE === 'gateway';
+
 function truncateText(value, max = 120) {
     const normalized = cleanString(value);
     if (!normalized || normalized.length <= max) {
@@ -321,8 +324,16 @@ function mergeStatusMetadata(existingMetadata, status) {
     };
 }
 
+function createBusinessWorker(name, processor) {
+    if (IS_GATEWAY_RUNTIME) {
+        console.log(`[Queue ${name}] worker deshabilitado en runtime gateway`);
+        return null;
+    }
+    return createWorker(name, processor);
+}
+
 // Procesa envíos salientes de WhatsApp
-createWorker('outbound_whatsapp', async (job) => {
+createBusinessWorker('outbound_whatsapp', async (job) => {
     const {
         messageId,
         conversationId,
@@ -673,7 +684,7 @@ createWorker('webhook_whatsapp', async (job) => {
 });
 
 // Crea plantillas desde catálogo para un WABA
-createWorker('whatsapp_template_create', async (job) => {
+createBusinessWorker('whatsapp_template_create', async (job) => {
     if (job.name === 'propagate_catalog_item') {
         await whatsappTemplatesService.propagateCatalogTemplateToAllClinics(job.data || {});
         return;
@@ -682,16 +693,16 @@ createWorker('whatsapp_template_create', async (job) => {
 });
 
 // Sincroniza estados de plantillas desde Meta
-createWorker('whatsapp_template_sync', async (job) => {
+createBusinessWorker('whatsapp_template_sync', async (job) => {
     await whatsappTemplatesService.syncTemplatesForWaba(job.data || {});
 });
 
 // Sincroniza numeros de telefono desde Meta para evitar estados stale
-createWorker('whatsapp_phone_sync', async (job) => {
+createBusinessWorker('whatsapp_phone_sync', async (job) => {
     await whatsappPhonesService.syncPhonesForWaba(job.data || {});
 });
 
 // Crea automatizaciones y plantillas predefinidas al crear clínica
-createWorker('automation_defaults', async (job) => {
+createBusinessWorker('automation_defaults', async (job) => {
     await automationDefaultsService.createDefaultAutomationsForClinic(job.data || {});
 });
