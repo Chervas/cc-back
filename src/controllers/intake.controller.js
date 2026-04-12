@@ -1802,6 +1802,7 @@ const defaultConfigPayload = (clinicId, groupId) => ({
   clinic_id: clinicId || null,
   group_id: groupId || null,
   assignment_scope: groupId ? 'group' : 'clinic',
+  config_exists: false,
   domains: [],
   features: { chat_enabled: true, tel_modal_enabled: true, viewcontent_enabled: true, form_intercept_enabled: true },
   flow: DEFAULT_CHAT_FLOW,
@@ -1896,6 +1897,7 @@ exports.getIntakeConfig = asyncHandler(async (req, res) => {
   const payload = defaultConfigPayload(record?.clinic_id || clinicIdParsed, record?.group_id || groupIdParsed);
   if (record) {
     const cfg = record.config || {};
+    payload.config_exists = true;
     payload.clinic_id = record.clinic_id || null;
     payload.group_id = record.group_id || null;
     payload.assignment_scope = record.assignment_scope || payload.assignment_scope;
