@@ -2303,8 +2303,8 @@ exports.verifySnippetInstalled = asyncHandler(async (req, res) => {
   }
 
   const idRe = new RegExp(`${expectedAttr}\\s*=\\s*['"]?${expectedId}['"]?`, 'i');
-  const tagForScope = intakeTags.find((t) => idRe.test(t));
-  if (!tagForScope) {
+  const tagsForScope = intakeTags.filter((t) => idRe.test(t));
+  if (tagsForScope.length === 0) {
     // Pista útil: ¿hay intake.js pero con otro scope/id?
     const clinicIdMatch = intakeTags.map((t) => t.match(/data-clinic-id\s*=\s*['"]?(\d+)['"]?/i)).find(Boolean);
     const groupIdMatch = intakeTags.map((t) => t.match(/data-group-id\s*=\s*['"]?(\d+)['"]?/i)).find(Boolean);
@@ -2317,16 +2317,23 @@ exports.verifySnippetInstalled = asyncHandler(async (req, res) => {
     });
   }
 
-  // Si existe HMAC en backend, exigir data-hmac-key y que coincida.
+  // Si existe HMAC en backend, aceptar cualquier tag del scope que tenga la clave vigente.
+  // Esto evita falsos negativos cuando queda un plugin/snippet antiguo activo además del nuevo.
   if (record.hmac_key) {
-    const m = tagForScope.match(/data-hmac-key\s*=\s*['"]([^'"]+)['"]/i);
-    const installedKey = m?.[1] ? String(m[1]).trim() : null;
-    if (!installedKey) {
+    const hmacKeys = tagsForScope.map((tag) => {
+      const m = tag.match(/data-hmac-key\s*=\s*['"]([^'"]+)['"]/i);
+      return m?.[1] ? String(m[1]).trim() : null;
+    });
+
+    if (hmacKeys.includes(record.hmac_key)) {
+      return res.json({ installed: true });
+    }
+
+    if (hmacKeys.every((key) => !key)) {
       return res.json({ installed: false, details: 'Se encontró el fragmento de código de medición, pero le falta la clave de seguridad (HMAC).' });
     }
-    if (installedKey !== record.hmac_key) {
-      return res.json({ installed: false, details: 'Se encontró el fragmento de código de medición, pero la clave de seguridad no coincide con la que tiene guardada ClinicaClick.' });
-    }
+
+    return res.json({ installed: false, details: 'Se encontró el fragmento de código de medición, pero la clave de seguridad no coincide con la que tiene guardada ClinicaClick.' });
   }
 
   return res.json({ installed: true });
