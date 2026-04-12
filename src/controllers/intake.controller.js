@@ -2257,86 +2257,140 @@ exports.verifySnippetInstalled = asyncHandler(async (req, res) => {
   }
   const uniqueCandidates = Array.from(new Set(candidates));
 
-  let html = null;
-  let finalUrl = null;
-  let lastError = null;
+  const fetchFirstHtml = async (urls, bypassCache = false) => {
+    let lastError = null;
 
-  for (const url of uniqueCandidates) {
-    try {
-      const resp = await axios.get(url, {
-        timeout: 8000,
-        maxRedirects: 5,
-        maxContentLength: 2 * 1024 * 1024,
-        maxBodyLength: 2 * 1024 * 1024,
-        headers: {
-          'User-Agent': 'ClinicaClick Snippet Verifier/1.0',
-          'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8'
-        },
-        validateStatus: (s) => s >= 200 && s < 400
-      });
-      if (typeof resp.data === 'string' && resp.data.length > 0) {
-        html = resp.data;
-        // axios no expone siempre la URL final; guardamos la candidate.
-        finalUrl = url;
-        break;
+    for (const url of urls) {
+      try {
+        const resp = await axios.get(url, {
+          timeout: 8000,
+          maxRedirects: 5,
+          maxContentLength: 2 * 1024 * 1024,
+          maxBodyLength: 2 * 1024 * 1024,
+          headers: {
+            'User-Agent': 'ClinicaClick Snippet Verifier/1.0',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+            ...(bypassCache ? {
+              'Cache-Control': 'no-cache, no-store, max-age=0',
+              'Pragma': 'no-cache'
+            } : {})
+          },
+          validateStatus: (s) => s >= 200 && s < 400
+        });
+        if (typeof resp.data === 'string' && resp.data.length > 0) {
+          return { html: resp.data, finalUrl: url, lastError: null };
+        }
+      } catch (e) {
+        lastError = e;
       }
-    } catch (e) {
-      lastError = e;
     }
-  }
 
-  if (!html) {
-    const code = lastError?.response?.status || null;
+    return { html: null, finalUrl: null, lastError };
+  };
+
+  const withCacheBust = (url) => {
+    try {
+      const u = new URL(url);
+      u.searchParams.set('cc_cache_bust', Date.now().toString());
+      return u.toString();
+    } catch {
+      return url;
+    }
+  };
+
+  const evaluateSnippetHtml = (htmlToCheck, checkedUrl) => {
+    const scriptTags = htmlToCheck.match(/<script\b[^>]*>/gi) || [];
+    const intakeTags = scriptTags.filter((t) => /intake\.js/i.test(t));
+    if (intakeTags.length === 0) {
+      return {
+        installed: false,
+        reason: 'missing_snippet',
+        checked_url: checkedUrl,
+        details: `No se encontró el fragmento de código de medición de ClinicaClick en ${checkedUrl || domain}.`
+      };
+    }
+
+    const idRe = new RegExp(`${expectedAttr}\\s*=\\s*['"]?${expectedId}['"]?`, 'i');
+    const tagsForScope = intakeTags.filter((t) => idRe.test(t));
+    if (tagsForScope.length === 0) {
+      // Pista útil: ¿hay intake.js pero con otro scope/id?
+      const clinicIdMatch = intakeTags.map((t) => t.match(/data-clinic-id\s*=\s*['"]?(\d+)['"]?/i)).find(Boolean);
+      const groupIdMatch = intakeTags.map((t) => t.match(/data-group-id\s*=\s*['"]?(\d+)['"]?/i)).find(Boolean);
+      const hint = clinicIdMatch?.[1]
+        ? `Se detectó data-clinic-id="${clinicIdMatch[1]}".`
+        : (groupIdMatch?.[1] ? `Se detectó data-group-id="${groupIdMatch[1]}".` : null);
+      return {
+        installed: false,
+        reason: 'scope_mismatch',
+        checked_url: checkedUrl,
+        details: `Se encontró el fragmento de código de medición, pero no coincide con esta configuración (${expectedAttr}="${expectedId}").${hint ? ` ${hint}` : ''}`
+      };
+    }
+
+    // Si existe HMAC en backend, aceptar cualquier tag del scope que tenga la clave vigente.
+    // Esto evita falsos negativos cuando queda un plugin/snippet antiguo activo además del nuevo.
+    if (record.hmac_key) {
+      const expectedHmac = String(record.hmac_key).trim();
+      const hmacKeys = tagsForScope.map((tag) => {
+        const m = tag.match(/data-hmac-key\s*=\s*['"]([^'"]+)['"]/i);
+        return m?.[1] ? String(m[1]).trim() : null;
+      });
+
+      if (hmacKeys.includes(expectedHmac)) {
+        return { installed: true, checked_url: checkedUrl };
+      }
+
+      if (hmacKeys.every((key) => !key)) {
+        return {
+          installed: false,
+          reason: 'missing_hmac',
+          checked_url: checkedUrl,
+          details: 'Se encontró el fragmento de código de medición, pero le falta la clave de seguridad (HMAC).'
+        };
+      }
+
+      return {
+        installed: false,
+        reason: 'hmac_mismatch',
+        checked_url: checkedUrl,
+        details: 'Se encontró el fragmento de código de medición, pero la clave de seguridad no coincide con la que tiene guardada ClinicaClick.'
+      };
+    }
+
+    return { installed: true, checked_url: checkedUrl };
+  };
+
+  const primaryFetch = await fetchFirstHtml(uniqueCandidates, false);
+
+  if (!primaryFetch.html) {
+    const code = primaryFetch.lastError?.response?.status || null;
     return res.status(502).json({
       installed: false,
       details: `No se pudo acceder a ${domain} para verificar${code ? ` (HTTP ${code})` : ''}`
     });
   }
 
-  const scriptTags = html.match(/<script\b[^>]*>/gi) || [];
-  const intakeTags = scriptTags.filter((t) => /intake\.js/i.test(t));
-  if (intakeTags.length === 0) {
-    return res.json({
-      installed: false,
-      details: `No se encontró el fragmento de código de medición de ClinicaClick en ${finalUrl || domain}.`
-    });
+  const primaryEvaluation = evaluateSnippetHtml(primaryFetch.html, primaryFetch.finalUrl);
+  if (primaryEvaluation.installed) {
+    return res.json({ installed: true, checked_url: primaryEvaluation.checked_url });
   }
 
-  const idRe = new RegExp(`${expectedAttr}\\s*=\\s*['"]?${expectedId}['"]?`, 'i');
-  const tagsForScope = intakeTags.filter((t) => idRe.test(t));
-  if (tagsForScope.length === 0) {
-    // Pista útil: ¿hay intake.js pero con otro scope/id?
-    const clinicIdMatch = intakeTags.map((t) => t.match(/data-clinic-id\s*=\s*['"]?(\d+)['"]?/i)).find(Boolean);
-    const groupIdMatch = intakeTags.map((t) => t.match(/data-group-id\s*=\s*['"]?(\d+)['"]?/i)).find(Boolean);
-    const hint = clinicIdMatch?.[1]
-      ? `Se detectó data-clinic-id="${clinicIdMatch[1]}".`
-      : (groupIdMatch?.[1] ? `Se detectó data-group-id="${groupIdMatch[1]}".` : null);
-    return res.json({
-      installed: false,
-      details: `Se encontró el fragmento de código de medición, pero no coincide con esta configuración (${expectedAttr}="${expectedId}").${hint ? ` ${hint}` : ''}`
-    });
-  }
-
-  // Si existe HMAC en backend, aceptar cualquier tag del scope que tenga la clave vigente.
-  // Esto evita falsos negativos cuando queda un plugin/snippet antiguo activo además del nuevo.
-  if (record.hmac_key) {
-    const hmacKeys = tagsForScope.map((tag) => {
-      const m = tag.match(/data-hmac-key\s*=\s*['"]([^'"]+)['"]/i);
-      return m?.[1] ? String(m[1]).trim() : null;
-    });
-
-    if (hmacKeys.includes(record.hmac_key)) {
-      return res.json({ installed: true });
+  const bypassCandidates = uniqueCandidates.map(withCacheBust);
+  const bypassFetch = await fetchFirstHtml(bypassCandidates, true);
+  if (bypassFetch.html) {
+    const bypassEvaluation = evaluateSnippetHtml(bypassFetch.html, bypassFetch.finalUrl);
+    if (bypassEvaluation.installed) {
+      return res.json({
+        installed: false,
+        cache_stale: true,
+        checked_url: primaryEvaluation.checked_url || primaryFetch.finalUrl,
+        bypass_checked_url: bypassEvaluation.checked_url,
+        details: 'La web devuelve el snippet correcto al saltar caché, pero la página normal sigue sirviendo una versión antigua o sin HMAC. Purga la caché de WordPress, del hosting o de la CDN y vuelve a verificar.'
+      });
     }
-
-    if (hmacKeys.every((key) => !key)) {
-      return res.json({ installed: false, details: 'Se encontró el fragmento de código de medición, pero le falta la clave de seguridad (HMAC).' });
-    }
-
-    return res.json({ installed: false, details: 'Se encontró el fragmento de código de medición, pero la clave de seguridad no coincide con la que tiene guardada ClinicaClick.' });
   }
 
-  return res.json({ installed: true });
+  return res.json(primaryEvaluation);
 });
 
 // ===========================
