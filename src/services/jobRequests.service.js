@@ -9,6 +9,14 @@ const PRIORITY_CASE_SQL = `(CASE priority WHEN 'critical' THEN 0 WHEN 'high' THE
 const DEFAULT_MAX_ATTEMPTS = Number(process.env.JOB_REQUESTS_MAX_ATTEMPTS || 5);
 const RUNTIME_NAMESPACE_PAYLOAD_KEY = '__runtime_namespace';
 
+const parseBoolean = (value, fallback = false) => {
+  if (value === undefined || value === null || value === '') return fallback;
+  const normalized = String(value).trim().toLowerCase();
+  if (['1', 'true', 'yes', 'on'].includes(normalized)) return true;
+  if (['0', 'false', 'no', 'off'].includes(normalized)) return false;
+  return fallback;
+};
+
 const normalizePriority = (priority = 'normal') => {
   const normalized = String(priority || '').toLowerCase();
   return PRIORITY_ORDER.includes(normalized) ? normalized : 'normal';
@@ -60,6 +68,13 @@ const detectCurrentRuntimeNamespace = () => {
 };
 
 const CURRENT_RUNTIME_NAMESPACE = detectCurrentRuntimeNamespace();
+const HAS_EXPLICIT_RUNTIME_NAMESPACE = Boolean(
+  cleanString(process.env.JOB_RUNTIME_NAMESPACE) || cleanString(process.env.RUNTIME_NAMESPACE)
+);
+const CLAIM_UNSCOPED_JOBS = parseBoolean(
+  process.env.JOB_RUNTIME_CLAIM_UNSCOPED,
+  !HAS_EXPLICIT_RUNTIME_NAMESPACE
+);
 
 const buildScopedPayload = (payload = {}) => {
   const base = payload && typeof payload === 'object' && !Array.isArray(payload)
@@ -73,7 +88,7 @@ const buildScopedPayload = (payload = {}) => {
   return base;
 };
 
-const buildRuntimeScopeWhere = ({ includeUnscoped = true } = {}) => {
+const buildRuntimeScopeWhere = ({ includeUnscoped = CLAIM_UNSCOPED_JOBS } = {}) => {
   const jsonPath = `$."${RUNTIME_NAMESPACE_PAYLOAD_KEY}"`;
   const extractedNamespace = sequelize.literal(
     `JSON_UNQUOTE(JSON_EXTRACT(payload, '${jsonPath}'))`
@@ -98,7 +113,7 @@ const payloadRuntimeNamespace = (payload = null) => {
   return cleanString(payload[RUNTIME_NAMESPACE_PAYLOAD_KEY]);
 };
 
-const matchesCurrentRuntimeNamespace = (payload = null, { allowUnscoped = true } = {}) => {
+const matchesCurrentRuntimeNamespace = (payload = null, { allowUnscoped = CLAIM_UNSCOPED_JOBS } = {}) => {
   const payloadNamespace = payloadRuntimeNamespace(payload);
   if (!payloadNamespace) {
     return allowUnscoped;
@@ -394,5 +409,6 @@ module.exports = {
   listJobRequests,
   findJobById,
   getCurrentRuntimeNamespace: () => CURRENT_RUNTIME_NAMESPACE,
+  shouldClaimUnscopedJobs: () => CLAIM_UNSCOPED_JOBS,
   matchesCurrentRuntimeNamespace
 };
