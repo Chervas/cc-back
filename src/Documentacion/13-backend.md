@@ -1374,6 +1374,8 @@ En `.env` / `.env.example`:
 - `GROQ_MODEL_FAST` (default `llama-3.1-8b-instant`)
 - `GROQ_TIMEOUT_MS` (default `20000`)
 - `GROQ_STT_MODEL` (default `whisper-large-v3-turbo`, para transcripción de audio inbound WhatsApp)
+- `GROQ_STT_TIMEOUT_MS` (default `30000`; si no existe usa `GROQ_TIMEOUT_MS`)
+- `WHATSAPP_MEDIA_DOWNLOAD_MAX_BYTES` (default `25000000`, límite defensivo para descargar media inbound antes de STT)
 
 ### Notas operativas
 
@@ -1387,9 +1389,26 @@ En `.env` / `.env.example`:
 ### Audio inbound (WhatsApp) y hoja de ruta local
 
 - Estado actual:
-  - Los audios entrantes de WhatsApp se transcriben en backend usando Groq STT (`GROQ_STT_MODEL`).
-  - Se persiste la transcripción en `Messages.content` y metadata técnica en `Messages.metadata`.
+  - `workers/queue.workers.js` detecta `message.type = audio` en webhooks inbound de WhatsApp.
+  - El worker descarga la media con el token activo de la clínica (`whatsappService.downloadMediaBuffer(...)`) y transcribe el buffer con Groq STT (`src/services/groqAudio.service.js`).
+  - Se persiste como `Messages.message_type = text` para no migrar el enum actual. La semántica real queda en `Messages.metadata.media.kind = audio`.
+  - `Messages.content` queda visible para soporte/QuickChat como el texto transcrito limpio, sin cabecera redundante. El badge de UI indica que procede de audio.
+  - `Messages.metadata.audio_transcribed = true` y `Messages.metadata.audio_transcription` guarda `status`, `provider`, `model`, `text` y `transcribed_at`.
+  - `resume_text` se emite por socket y se entrega al runtime V2 con el texto transcrito limpio, sin la cabecera visible. Así los nodos `wait_response` y `condition/ai_analysis` analizan lo que dijo el paciente.
+  - Si falla descarga/STT, se persiste el mensaje `Audio recibido. No se pudo transcribir automáticamente.` con `metadata.audio_transcription.status = failed`; no se rompe el webhook ni se pierde trazabilidad.
   - **No** se persiste aún el binario de audio ni media estática propia.
+  - Para escuchar el audio, `GET /api/conversations/messages/:messageId/media` valida permisos de conversación, solicita a Meta una URL temporal desde `metadata.media.id`, descarga el binario en backend y lo devuelve como stream/buffer autenticado al navegador.
+  - Si el mensaje no tiene `metadata.media.id`, si el token ya no puede recuperar el audio o si Meta ya no lo conserva, el endpoint responde `410 audio_unavailable`. La UI muestra snackbar: `El audio ya no está disponible. La transcripción seguirá visible debajo.`
+  - Esta reproducción es transicional y depende de la disponibilidad temporal de media en Meta. No debe tratarse como archivo histórico permanente.
+- Reparación de audios huérfanos:
+  - Si un worker antiguo guardó un audio como mensaje vacío con `metadata.media.kind = audio` pero sin `metadata.media.id`, no se puede pedir a Meta el audio solo con la fila de `Messages`.
+  - Antes de darlo por perdido, se puede intentar recuperar el `media_id` desde el payload original de BullMQ/Redis (`bull:webhook_whatsapp:<jobId>`) si el job aún existe.
+  - Si ese payload conserva `messages[].audio.id`, se puede reparar la fila de `Messages` asociando por `metadata.wamid`, descargar desde Meta y transcribir de nuevo.
+  - Esto es una vía de contingencia, no un contrato operativo: si Redis ya purgó el job o Meta ya no conserva la media, solo quedará registrar el audio como no disponible.
+- Estrategia de almacenamiento:
+  - Fase actual: no hay storage propio; se solicita a Meta bajo demanda para transcribir y reproducir.
+  - Fase con estáticos privados: al recibir un audio, además de transcribirlo, se guardará el binario en almacenamiento privado/autenticado (p.ej. S3 compatible o storage local protegido), se persistirá una referencia interna en `Messages.metadata.media.storage`, y el reproductor priorizará ese storage frente a Meta.
+  - La migración a storage propio debe definir retención, borrado, permisos, cifrado y auditoría, porque los audios pueden contener datos sanitarios o personales.
 - Objetivo futuro (servidor local):
   - Sustituir la llamada cloud STT por un servicio local de transcripción (p.ej. `faster-whisper`/`whisper.cpp`) detrás de un endpoint interno.
   - Mantener el mismo contrato de salida (`content` + `metadata.audio_transcription`) para no romper QuickChat ni automations.
