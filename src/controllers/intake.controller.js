@@ -1902,6 +1902,116 @@ const matchesTemplateDisciplinesForFlow = (templateDisciplinaCodes, clinicDiscip
   return templateCodes.some((code) => clinicCodes.includes(code));
 };
 
+const DAY_SHORT_LABELS = {
+  0: 'D',
+  1: 'L',
+  2: 'M',
+  3: 'X',
+  4: 'J',
+  5: 'V',
+  6: 'S',
+};
+
+const formatOpeningHourTime = (value) => {
+  const match = String(value || '').match(/^(\d{1,2}):(\d{2})/);
+  if (!match) return String(value || '').trim();
+  const hour = String(Number(match[1]));
+  const minute = match[2] === '00' ? '' : `:${match[2]}`;
+  return `${hour}${minute}`;
+};
+
+const formatOpeningHourRanges = (ranges) => {
+  const validRanges = (ranges || [])
+    .map((range) => ({
+      start: String(range?.hora_inicio || '').trim(),
+      end: String(range?.hora_fin || '').trim(),
+    }))
+    .filter((range) => range.start && range.end)
+    .sort((a, b) => a.start.localeCompare(b.start));
+
+  if (!validRanges.length) return '';
+
+  return validRanges
+    .map((range) => `de ${formatOpeningHourTime(range.start)} a ${formatOpeningHourTime(range.end)}h`)
+    .join(' y ');
+};
+
+const formatDayGroupLabel = (days) => {
+  const ordered = (days || []).map((day) => Number(day)).filter((day) => Number.isInteger(day));
+  if (!ordered.length) return '';
+  if (ordered.length === 1) return DAY_SHORT_LABELS[ordered[0]] || '';
+
+  const groups = [];
+  let start = ordered[0];
+  let prev = ordered[0];
+  for (let i = 1; i < ordered.length; i++) {
+    const current = ordered[i];
+    if (current === prev + 1) {
+      prev = current;
+      continue;
+    }
+    groups.push(start === prev ? DAY_SHORT_LABELS[start] : `${DAY_SHORT_LABELS[start]}-${DAY_SHORT_LABELS[prev]}`);
+    start = current;
+    prev = current;
+  }
+  groups.push(start === prev ? DAY_SHORT_LABELS[start] : `${DAY_SHORT_LABELS[start]}-${DAY_SHORT_LABELS[prev]}`);
+  return groups.join(' y ');
+};
+
+const buildOpeningHoursText = (horarios) => {
+  if (!Array.isArray(horarios) || horarios.length === 0) return null;
+
+  const activeByDay = new Map();
+  horarios
+    .filter((h) => h && (h.activo === undefined || h.activo === true || h.activo === 1))
+    .forEach((h) => {
+      const day = Number(h.dia_semana);
+      if (!Number.isInteger(day) || day < 0 || day > 6) return;
+      const list = activeByDay.get(day) || [];
+      list.push({ hora_inicio: h.hora_inicio, hora_fin: h.hora_fin });
+      activeByDay.set(day, list);
+    });
+
+  const dayOrder = [1, 2, 3, 4, 5, 6, 0];
+  const groupsBySignature = [];
+  for (const day of dayOrder) {
+    const ranges = activeByDay.get(day) || [];
+    const rangeText = formatOpeningHourRanges(ranges);
+    if (!rangeText) continue;
+    const last = groupsBySignature[groupsBySignature.length - 1];
+    if (last && last.rangeText === rangeText) {
+      last.days.push(day);
+    } else {
+      groupsBySignature.push({ rangeText, days: [day] });
+    }
+  }
+
+  if (!groupsBySignature.length) return null;
+
+  return groupsBySignature
+    .map((group) => `${formatDayGroupLabel(group.days)} ${group.rangeText}`)
+    .join(' y ');
+};
+
+const buildOpeningHoursTextByClinicId = async (clinicIds) => {
+  const ids = Array.from(new Set((clinicIds || []).map((id) => parseInteger(id)).filter(Boolean)));
+  const result = new Map();
+  if (!ids.length || !ClinicaHorario) return result;
+
+  const rows = await ClinicaHorario.findAll({
+    where: { clinica_id: { [Op.in]: ids }, activo: true },
+    attributes: ['clinica_id', 'dia_semana', 'hora_inicio', 'hora_fin'],
+    raw: true,
+  });
+
+  for (const id of ids) {
+    const horarios = rows.filter((row) => Number(row.clinica_id) === Number(id));
+    result.set(id, buildOpeningHoursText(horarios));
+  }
+
+  return result;
+};
+
 const resolveClinicOpenState = async (clinicId) => {
   const normalizedClinicId = parseInteger(clinicId);
   if (!normalizedClinicId || !ClinicaHorario) {
@@ -2216,6 +2326,7 @@ exports.getIntakeConfig = asyncHandler(async (req, res) => {
 
       // WhatsApp por clínica (si existe), con fallback al número del grupo.
       const clinicIds = clinics.map((c) => c.id_clinica).filter(Boolean);
+      const openingHoursByClinicId = await buildOpeningHoursTextByClinicId(clinicIds);
       const whatsappByClinicId = new Map();
       if (clinicIds.length) {
         const clinicPhones = await ClinicMetaAsset.findAll({
@@ -2253,6 +2364,7 @@ exports.getIntakeConfig = asyncHandler(async (req, res) => {
           whatsapp,
           whatsapp_connected: !!connectedWhatsapp,
           address: c.direccion || null,
+          opening_hours_text: openingHoursByClinicId.get(c.id_clinica) || null,
           url_avatar: c.url_avatar || null
         };
       });
@@ -2285,6 +2397,7 @@ exports.getIntakeConfig = asyncHandler(async (req, res) => {
         const mobilePhone = clinicRow.telefono_movil || null;
         const manualWhatsapp = normalizePhone(clinicRow.telefono_whatsapp);
         const connectedWhatsapp = whatsapp || null;
+        const openingHoursByClinicId = await buildOpeningHoursTextByClinicId([clinicRow.id_clinica]);
         payload.available_locations = [{
           id: clinicRow.id_clinica,
           label: clinicRow.nombre_clinica,
@@ -2294,6 +2407,7 @@ exports.getIntakeConfig = asyncHandler(async (req, res) => {
           whatsapp: connectedWhatsapp || manualWhatsapp || normalizePhone(mobilePhone || fixedPhone) || null,
           whatsapp_connected: !!connectedWhatsapp,
           address: clinicRow.direccion || null,
+          opening_hours_text: openingHoursByClinicId.get(clinicRow.id_clinica) || null,
           url_avatar: clinicRow.url_avatar || null
         }];
       }

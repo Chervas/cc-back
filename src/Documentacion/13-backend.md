@@ -2146,6 +2146,7 @@ Esto explica casos como la cita `99`, donde el mensaje usó `Graci Gonzalez` aun
   2. `Clinicas.telefono_whatsapp`.
   3. WhatsApp Business conectado al grupo.
   4. móvil/fijo normalizado como fallback.
+- `GET /api/intake/config` añade `available_locations[].opening_hours_text` para variables de chat. Se calcula desde `ClinicaHorarios` activos y agrupa días consecutivos con el mismo horario, por ejemplo `L-J de 9 a 20h y V de 10 a 14h`.
 - Migración:
   - `20260413101000-add-clinic-contact-phone-fields.js`
   - copia inicialmente `Clinicas.telefono` a `Clinicas.telefono_fijo` si el nuevo campo está vacío.
@@ -2154,6 +2155,8 @@ Esto explica casos como la cita `99`, donde el mensaje usó `Graci Gonzalez` aun
 
 - El runtime público de `intake.js` resuelve variables `{{ruta.con.puntos}}`.
 - Variable canónica de nombre de paciente: `{{paciente.nombre}}`.
+- Variable de horario de apertura: `{{clinica.horario_apertura}}`, alimentada por `available_locations[].opening_hours_text`.
+- Variables dinámicas de datos recogidos: `{{lead.<campo>}}`, solo válidas para campos capturados en pasos anteriores.
 - Alias legacy `{{nombre}}` sigue funcionando en runtime, pero no debe usarse en plantillas nuevas.
 - Migración:
   - `20260413102000-normalize-chat-flow-patient-name-variable.js`
