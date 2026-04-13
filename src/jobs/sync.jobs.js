@@ -1546,7 +1546,7 @@ class MetaSyncJobs {
   async _syncBusinessProfileReviews(location, accessToken) {
     const resourceBase = this._buildBusinessProfileV4LocationPath(location);
     if (!resourceBase) {
-      return 0;
+      throw new Error('Ubicación Google Business Profile sin accountName para sincronizar reseñas');
     }
 
     let nextPageToken = null;
@@ -1599,7 +1599,7 @@ class MetaSyncJobs {
   async _syncBusinessProfilePosts(location, accessToken) {
     const resourceBase = this._buildBusinessProfileV4LocationPath(location);
     if (!resourceBase) {
-      return 0;
+      throw new Error('Ubicación Google Business Profile sin accountName para sincronizar publicaciones');
     }
 
     let nextPageToken = null;

@@ -1136,12 +1136,15 @@ async function buildSyncStatus(scope, { seo, googleAds, metaAds, ga, businessPro
   ].filter(Boolean);
 
   const activeSources = states.filter((state) => state.active);
+  const errorSources = activeSources.filter((state) => state.state === 'error');
   return {
     active: activeSources.length > 0,
     sources: activeSources,
     allSources: states,
     message: activeSources.length
-      ? `Estamos recabando datos de ${activeSources.map((source) => source.label).join(', ')}. Los resultados pueden tardar unos minutos en aparecer.`
+      ? (errorSources.length
+        ? errorSources.map((source) => source.message).join(' ')
+        : `Estamos recabando datos de ${activeSources.map((source) => source.label).join(', ')}. Los resultados pueden tardar unos minutos en aparecer.`)
       : null,
   };
 }
