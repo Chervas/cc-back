@@ -74,6 +74,24 @@ const {
 } = require('../../models');
 
 const MS_PER_DAY = 24 * 60 * 60 * 1000;
+const DEFAULT_SEARCH_CONSOLE_BULK_CHUNK_SIZE = 500;
+
+function resolveSearchConsoleBulkChunkSize() {
+  const configured = Number(process.env.SEARCH_CONSOLE_BULK_CHUNK_SIZE || 0);
+  return Number.isInteger(configured) && configured > 0
+    ? configured
+    : DEFAULT_SEARCH_CONSOLE_BULK_CHUNK_SIZE;
+}
+
+async function bulkCreateInChunks(model, rows, options = {}, chunkSize = resolveSearchConsoleBulkChunkSize()) {
+  if (!Array.isArray(rows) || rows.length === 0) {
+    return;
+  }
+
+  for (let index = 0; index < rows.length; index += chunkSize) {
+    await model.bulkCreate(rows.slice(index, index + chunkSize), options);
+  }
+}
 
 function parseDateInput(value, label) {
   if (!value) {
@@ -1147,7 +1165,11 @@ class MetaSyncJobs {
               };
             });
             if (bulkPayload.length) {
-              await WebScQueryDaily.bulkCreate(bulkPayload, { updateOnDuplicate: ['clicks', 'impressions', 'ctr', 'position', 'updated_at'] });
+              await bulkCreateInChunks(
+                WebScQueryDaily,
+                bulkPayload,
+                { updateOnDuplicate: ['clicks', 'impressions', 'ctr', 'position', 'updated_at'] }
+              );
             }
           }
 
