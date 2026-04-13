@@ -138,6 +138,7 @@ Fuentes que cruza:
 - `CitasPacientes` para citas vinculadas a leads y asistencia.
 - `GoogleAdsInsightsDaily` y `ClinicGoogleAdsAccount` para Google Ads.
 - `SocialAdsInsightsDaily`, `SocialAdsActionsDaily`, `SocialAdsAdsetDailyAgg` y `SocialAdsEntity` para Meta Ads.
+- `ClinicMetaAssets`, `SocialStatsDaily`, `SocialPosts` y `SocialPostStatsDaily` para Facebook/Instagram orgánico.
 - `WebScDaily` y `WebScQueryDaily` para SEO/Search Console.
 - `WebGaDaily` para GA4 opcional.
 - `ClinicBusinessLocation`, `BusinessProfileDailyMetric` y `BusinessProfileReview` para Perfil Empresa Google.
@@ -145,7 +146,7 @@ Fuentes que cruza:
 Estado de sincronización:
 
 - La respuesta incluye `sync.active`, `sync.sources[]` y `sync.allSources[]`.
-- El estado `connected` de Search Console, GA4, Perfil Google, Google Ads y Meta Ads debe salir de los mapeos activos (`ClinicWebAssets`, `ClinicAnalyticsProperties`, `ClinicBusinessLocations`, `ClinicGoogleAdsAccounts`, `ClinicMetaAssets`), no de que existan métricas agregadas en el rango consultado. Una fuente puede estar conectada aunque el periodo seleccionado aún no tenga datos.
+- El estado `connected` de Search Console, GA4, Perfil Google, Google Ads, Meta Ads, Facebook e Instagram debe salir de los mapeos activos (`ClinicWebAssets`, `ClinicAnalyticsProperties`, `ClinicBusinessLocations`, `ClinicGoogleAdsAccounts`, `ClinicMetaAssets`), no de que existan métricas agregadas en el rango consultado. Una fuente puede estar conectada aunque el periodo seleccionado aún no tenga datos.
 - `sync.active=true` cuando una fuente conectada tiene `JobRequest` pendiente/en ejecución, registros locales pendientes (`ClinicBusinessLocations.sync_status=pending`) o error.
 - El endpoint considera terminada una sincronización cuando el último `JobRequest` relevante para la clínica está `completed`, aunque la API externa no haya devuelto filas nuevas. Los jobs globales sin `clinicId` no deben contaminar el estado de una clínica concreta.
 - Si una fuente queda en `state=error`, `sync.message` debe mostrar el mensaje de error de esa fuente, no el texto genérico de "recabando datos".

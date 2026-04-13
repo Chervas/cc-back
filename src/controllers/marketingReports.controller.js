@@ -18,6 +18,8 @@ const {
   SocialAdsAdsetDailyAgg,
   SocialAdsEntity,
   ClinicMetaAsset,
+  SocialStatsDaily,
+  SocialPosts,
   WebScDaily,
   WebScQueryDaily,
   WebGaDaily,
@@ -227,6 +229,16 @@ function channelLabel(key) {
     local_services: { name: 'Perfil de Empresa Google', icon: 'heroicons_outline:map-pin', source: 'Perfil Google' },
   };
   return map[key] || { name: 'Otros', icon: 'heroicons_outline:squares-2x2', source: 'ClinicaClick' };
+}
+
+function socialPlatformLabel(assetType) {
+  return assetType === 'instagram_business' ? 'Instagram' : 'Facebook';
+}
+
+function truncateText(value, fallback = 'Publicación') {
+  const text = String(value || '').replace(/\s+/g, ' ').trim();
+  if (!text) return fallback;
+  return text.length > 96 ? `${text.slice(0, 93)}...` : text;
 }
 
 async function resolveReportScope(req) {
@@ -671,6 +683,156 @@ async function aggregateSeo(scope, range) {
   };
 }
 
+async function aggregateSocialOrganic(scope, range) {
+  const empty = {
+    summary: {
+      reach: 0,
+      impressions: 0,
+      profileVisits: 0,
+      followers: 0,
+      followersDelta: 0,
+      posts: 0,
+    },
+    platforms: [
+      { platform: 'Facebook', connected: false, reach: 0, impressions: 0, profileVisits: 0, followers: 0, followersDelta: 0, posts: 0, lastSync: null },
+      { platform: 'Instagram', connected: false, reach: 0, impressions: 0, profileVisits: 0, followers: 0, followersDelta: 0, posts: 0, lastSync: null },
+    ],
+    topPosts: [],
+    connected: false,
+    lastSync: null,
+  };
+  if (!SocialStatsDaily || !SocialPosts || !ClinicMetaAsset) return empty;
+
+  const assetWhere = buildAssetScopeWhere(scope);
+  const [facebookMappings, instagramMappings] = await Promise.all([
+    ClinicMetaAsset.count({ where: { ...assetWhere, assetType: 'facebook_page' } }),
+    ClinicMetaAsset.count({ where: { ...assetWhere, assetType: 'instagram_business' } }),
+  ]);
+
+  const statRows = await SocialStatsDaily.findAll({
+    attributes: [
+      'asset_type',
+      'asset_id',
+      [literal('SUM(COALESCE(reach_total, reach, 0))'), 'reach'],
+      [fn('SUM', col('impressions')), 'impressions'],
+      [fn('SUM', col('views')), 'views'],
+      [fn('SUM', col('profile_visits')), 'profileVisits'],
+      [fn('MAX', col('followers')), 'followers'],
+      [fn('SUM', col('followers_day')), 'followersDelta'],
+      [fn('MAX', col('date')), 'lastDate'],
+    ],
+    where: {
+      ...scopedWhere('clinica_id', scope),
+      asset_type: { [Op.in]: ['facebook_page', 'instagram_business'] },
+      ...buildDateOnlyWhere('date', range),
+    },
+    group: ['asset_type', 'asset_id'],
+    raw: true,
+  });
+
+  const postRows = await SocialPosts.findAll({
+    attributes: [
+      'asset_type',
+      [fn('COUNT', col('id')), 'posts'],
+    ],
+    where: {
+      ...scopedWhere('clinica_id', scope),
+      asset_type: { [Op.in]: ['facebook_page', 'instagram_business'] },
+      ...buildSequelizeDateWhere('published_at', range),
+    },
+    group: ['asset_type'],
+    raw: true,
+  });
+
+  const postCounts = new Map(postRows.map((row) => [row.asset_type, toNumber(row.posts)]));
+  const byPlatform = new Map([
+    ['facebook_page', { platform: 'Facebook', connected: facebookMappings > 0, reach: 0, impressions: 0, profileVisits: 0, followers: 0, followersDelta: 0, posts: postCounts.get('facebook_page') || 0, lastSync: null }],
+    ['instagram_business', { platform: 'Instagram', connected: instagramMappings > 0, reach: 0, impressions: 0, profileVisits: 0, followers: 0, followersDelta: 0, posts: postCounts.get('instagram_business') || 0, lastSync: null }],
+  ]);
+
+  for (const row of statRows) {
+    const entry = byPlatform.get(row.asset_type);
+    if (!entry) continue;
+    entry.reach += toNumber(row.reach);
+    const impressions = toNumber(row.impressions);
+    const views = toNumber(row.views);
+    entry.impressions += impressions || views;
+    entry.profileVisits += toNumber(row.profileVisits);
+    entry.followers += toNumber(row.followers);
+    entry.followersDelta += toNumber(row.followersDelta);
+    if (row.lastDate && (!entry.lastSync || String(row.lastDate) > String(entry.lastSync))) {
+      entry.lastSync = row.lastDate;
+    }
+  }
+
+  const replacements = {
+    startDate: range.startLabel,
+    endDate: range.endLabel,
+    startTs: range.startSql,
+    endTs: range.endExclusiveSql,
+    limit: 5,
+  };
+  const postClinicSql = scopedRawSql('p.clinica_id', scope, replacements, 'socialPostClinicIds');
+  const topPosts = await sequelize.query(
+    `SELECT p.id,
+            p.asset_type AS assetType,
+            p.title,
+            p.content,
+            p.permalink_url AS permalinkUrl,
+            p.media_url AS mediaUrl,
+            p.published_at AS publishedAt,
+            COALESCE(SUM(s.reach), 0) AS reach,
+            COALESCE(SUM(s.impressions), 0) AS impressions,
+            COALESCE(SUM(s.engagement), 0) AS engagement
+       FROM SocialPosts p
+       LEFT JOIN SocialPostStatsDaily s
+              ON s.post_id = p.id
+             AND s.date BETWEEN :startDate AND :endDate
+      WHERE p.asset_type IN ('facebook_page', 'instagram_business')
+        AND p.published_at >= :startTs
+        AND p.published_at < :endTs
+        ${postClinicSql}
+      GROUP BY p.id, p.asset_type, p.title, p.content, p.permalink_url, p.media_url, p.published_at
+      ORDER BY COALESCE(SUM(s.reach), 0) DESC, p.published_at DESC
+      LIMIT :limit`,
+    { replacements, type: QueryTypes.SELECT }
+  );
+
+  const platforms = Array.from(byPlatform.values());
+  const summary = platforms.reduce((acc, row) => {
+    acc.reach += toNumber(row.reach);
+    acc.impressions += toNumber(row.impressions);
+    acc.profileVisits += toNumber(row.profileVisits);
+    acc.followers += toNumber(row.followers);
+    acc.followersDelta += toNumber(row.followersDelta);
+    acc.posts += toNumber(row.posts);
+    return acc;
+  }, { reach: 0, impressions: 0, profileVisits: 0, followers: 0, followersDelta: 0, posts: 0 });
+
+  const lastSync = platforms
+    .map((row) => row.lastSync)
+    .filter(Boolean)
+    .sort()
+    .pop() || null;
+
+  return {
+    summary,
+    platforms,
+    topPosts: topPosts.map((row) => ({
+      platform: socialPlatformLabel(row.assetType),
+      title: truncateText(row.title || row.content),
+      publishedAt: row.publishedAt || null,
+      reach: toNumber(row.reach),
+      impressions: toNumber(row.impressions),
+      engagement: toNumber(row.engagement),
+      permalinkUrl: row.permalinkUrl || null,
+      mediaUrl: row.mediaUrl || null,
+    })),
+    connected: facebookMappings > 0 || instagramMappings > 0,
+    lastSync,
+  };
+}
+
 async function aggregateWebPages(scope, range, seoPages = []) {
   const replacements = {
     startTs: range.startSql,
@@ -849,13 +1011,16 @@ function distributeCampaignAppointments(campaigns, platformChannelStats) {
   });
 }
 
-function buildSources({ intakeConfigCount, leadsTotal, seo, googleAds, metaAds, ga, businessProfile, mappingCounts = {} }) {
+function buildSources({ intakeConfigCount, leadsTotal, seo, googleAds, metaAds, ga, businessProfile, social, mappingCounts = {} }) {
   const clinicaClickConnected = intakeConfigCount > 0 || leadsTotal > 0;
   const searchConsoleMapped = toNumber(mappingCounts.search_console) > 0;
   const analyticsMapped = toNumber(mappingCounts.analytics) > 0;
   const businessProfileMapped = toNumber(mappingCounts.business_profile) > 0;
   const googleAdsMapped = toNumber(mappingCounts.google_ads) > 0;
   const metaAdsMapped = toNumber(mappingCounts.meta_ads) > 0;
+  const facebookMapped = toNumber(mappingCounts.facebook) > 0;
+  const instagramMapped = toNumber(mappingCounts.instagram) > 0;
+  const socialPlatformSync = new Map((social?.platforms || []).map((row) => [row.platform, row.lastSync]));
   return [
     {
       name: 'ClinicaClick Analytics',
@@ -894,6 +1059,24 @@ function buildSources({ intakeConfigCount, leadsTotal, seo, googleAds, metaAds, 
       tooltip: 'Datos de campañas de Facebook e Instagram sincronizados.',
       lastSync: relativeSyncLabel(metaAds.lastSync),
       source: 'Meta Ads',
+    },
+    {
+      name: 'Facebook',
+      icon: 'heroicons_outline:flag',
+      connected: facebookMapped,
+      label: facebookMapped ? 'Conectado' : 'Pendiente',
+      tooltip: 'Publicaciones, alcance, seguidores y visitas orgánicas de tu página de Facebook.',
+      lastSync: relativeSyncLabel(socialPlatformSync.get('Facebook')),
+      source: 'Facebook',
+    },
+    {
+      name: 'Instagram',
+      icon: 'heroicons_outline:camera',
+      connected: instagramMapped,
+      label: instagramMapped ? 'Conectado' : 'Pendiente',
+      tooltip: 'Publicaciones, alcance, seguidores y visitas orgánicas de tu cuenta de Instagram.',
+      lastSync: relativeSyncLabel(socialPlatformSync.get('Instagram')),
+      source: 'Instagram',
     },
     {
       name: 'Perfil de Empresa Google',
@@ -1122,6 +1305,8 @@ async function buildSyncStatus(scope, { seo, googleAds, metaAds, ga, businessPro
     businessLocations,
     googleAdsMappings,
     metaAdsMappings,
+    facebookMappings,
+    instagramMappings,
     searchConsoleJobs,
     analyticsJobs,
     businessProfileJobs,
@@ -1133,6 +1318,8 @@ async function buildSyncStatus(scope, { seo, googleAds, metaAds, ga, businessPro
     ClinicBusinessLocation ? ClinicBusinessLocation.findAll({ where: { ...scopedWhere('clinica_id', scope), is_active: true }, raw: true }) : [],
     ClinicGoogleAdsAccount ? ClinicGoogleAdsAccount.count({ where: { ...buildAdsScopeWhere(scope, 'clinicaId', 'grupoClinicaId'), isActive: true } }) : 0,
     ClinicMetaAsset ? ClinicMetaAsset.count({ where: { ...buildAssetScopeWhere(scope), assetType: 'ad_account' } }) : 0,
+    ClinicMetaAsset ? ClinicMetaAsset.count({ where: { ...buildAssetScopeWhere(scope), assetType: 'facebook_page' } }) : 0,
+    ClinicMetaAsset ? ClinicMetaAsset.count({ where: { ...buildAssetScopeWhere(scope), assetType: 'instagram_business' } }) : 0,
     recentJobsForSource(SOURCE_SYNC_CONFIG.search_console, scope),
     recentJobsForSource(SOURCE_SYNC_CONFIG.analytics, scope),
     recentJobsForSource(SOURCE_SYNC_CONFIG.business_profile, scope),
@@ -1148,6 +1335,8 @@ async function buildSyncStatus(scope, { seo, googleAds, metaAds, ga, businessPro
     business_profile: businessLocations.length,
     google_ads: googleAdsMappings,
     meta_ads: metaAdsMappings,
+    facebook: facebookMappings,
+    instagram: instagramMappings,
   };
 
   const states = [
@@ -1369,6 +1558,7 @@ exports.getOverview = async (req, res) => {
       previousMetaAds,
       ga,
       seo,
+      social,
       businessProfile,
     ] = await Promise.all([
       aggregateLeads(scope, range),
@@ -1383,6 +1573,7 @@ exports.getOverview = async (req, res) => {
       aggregateMetaAds(scope, range.previous),
       aggregateGa(scope, range),
       aggregateSeo(scope, range),
+      aggregateSocialOrganic(scope, range),
       aggregateBusinessProfile(scope, range),
     ]);
 
@@ -1451,6 +1642,7 @@ exports.getOverview = async (req, res) => {
       metaAds,
       ga,
       businessProfile,
+      social,
       mappingCounts: sync.mappingCounts,
     }).map((source) => ({
       ...source,
@@ -1486,6 +1678,7 @@ exports.getOverview = async (req, res) => {
       seoSummary: seo.summary,
       seoQueries: seo.queries,
       seoPages: seo.pages,
+      social,
       adsCampaigns,
       businessProfile: businessProfile.metrics,
       recommendations,
