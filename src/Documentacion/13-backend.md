@@ -58,6 +58,64 @@ Cambios de código asociados:
 
 Referencia operativa completa: `cc-front/src/Documentacion/31-roadmap-arquitectura-entornos-gateway.md`.
 
+## 2026-04-13 - Intake: flujos de chat para clínica cerrada
+
+Se añade soporte real para plantillas de flujos de chat que solo deben mostrarse cuando la clínica está fuera de horario.
+
+Modelo:
+
+| Tabla | Campo | Uso |
+|:---|:---|:---|
+| `ChatFlowTemplates` | `show_when_clinic_closed` | Marca una plantilla activa como candidata para clínica cerrada. |
+
+Endpoints afectados:
+
+| Endpoint | Cambio |
+|:---|:---|
+| `GET /api/marketing/chat-flow-templates` | Devuelve `show_when_clinic_closed`. |
+| `POST /api/marketing/chat-flow-templates` | Acepta `show_when_clinic_closed`. No propaga por sí solo. |
+| `PUT /api/marketing/chat-flow-templates/:id` | Actualiza `show_when_clinic_closed`. No propaga por sí solo. |
+| `POST /api/marketing/chat-flow-templates/:id/propagate` | Propaga manualmente una copia del catálogo a configuraciones existentes compatibles. |
+| `GET /api/intake/config` | Devuelve `clinic_open_state` y añade flujos especiales si aplican. |
+
+`GET /api/intake/config` calcula apertura desde `ClinicaHorarios`:
+
+- `open_now=true`: la clínica está abierta;
+- `open_now=false`: la clínica está cerrada;
+- `open_now=null`: no hay horario estructurado suficiente o no hay clínica efectiva única.
+
+Regla runtime:
+
+- si `open_now=false`, el snippet evalúa primero flujos con `show_when_clinic_closed=true`;
+- esos flujos mantienen `url_rules`, por lo que pueden seguir aplicando por página;
+- si no hay match cerrado, se usa la lógica normal de flujo por URL/default;
+- si no hay horario, nunca se activa cierre por defecto.
+
+Migración asociada:
+
+- `20260413082000-add-closed-clinic-flag-to-chat-flow-templates.js`
+
+Limitación consciente:
+
+- En scope de grupo sin clínica efectiva única no se fuerza horario de cierre, porque distintas sedes pueden tener horarios distintos.
+
+Propagación manual de catálogo:
+
+- `create/update/duplicate` de `ChatFlowTemplates` solo modifica el catálogo.
+- `POST /api/marketing/chat-flow-templates/:id/propagate` ejecuta la propagación sobre clínicas compatibles por `disciplina_codes`.
+- Si una clínica compatible no tiene `IntakeConfig`, se crea una configuración mínima de scope `clinic` con `domains=[]`, `hmac_key=null` y `config.flows` propagado. No se activa medición web ni se marca dominio instalado.
+- Las copias propagadas guardan `template_id`, `catalog_template_id`, `template_flow_index` y `catalog_template_flow_index` para poder actualizar la misma copia sin duplicarla.
+- Compatibilidad: si existe una copia antigua sin metadata pero con `id` tipo `catalog_<templateId>_<flowIndex>`, se reconoce como copia propagada y se normaliza en la siguiente propagación.
+- Si el subflujo interno se llama `default`, la copia propagada usa como nombre visible `ChatFlowTemplates.name`; así la UI de clínica no muestra varios flujos indistinguibles llamados `default`.
+- Plantillas normales nuevas se insertan desactivadas para no cambiar widgets publicados sin acción explícita.
+- En copias normales ya existentes se actualiza el contenido del catálogo, pero se preserva `enabled/is_default` si la clínica lo había cambiado manualmente.
+- Plantillas `show_when_clinic_closed=true` se insertan activadas y con `show_when_clinic_closed=true`.
+- `GET /api/intake/config` devuelve `clinic_name` cuando el scope efectivo es una clínica. El widget lo usa como fallback para resolver `{{clinica.nombre}}` aunque no haya sede seleccionada.
+- Plantillas que coinciden con `is_default_for` de la clínica se insertan activadas, pasan a ser `is_default=true` y actualizan `config.flow` legacy.
+- Si una plantilla queda inactiva o deja de aplicar por disciplina, sus copias existentes quedan `enabled=false` e `is_default=false`.
+- `GET /api/intake/config` evita duplicar flujos de clínica cerrada: si una copia persistida ya existe para el mismo `catalog_template_id` e índice, no inyecta otra copia dinámica.
+- La respuesta de propagación devuelve `{ created, updated, skipped }`.
+
 ## 2026-04-12 - Informes de marketing agregados V1
 
 Se añade el primer endpoint real para `Marketing > Informes`:
@@ -2089,6 +2147,38 @@ Esto explica casos como la cita `99`, donde el mensaje usó `Graci Gonzalez` aun
   - `profesional.*` es el doctor o profesional asignado a la cita.
   - `cita.usuario_*` se conserva como alias de compatibilidad para plantillas anteriores.
   - No se inventan valores derivados: la URL de ficha local solo se expone si existe en `Clinicas.url_ficha_local`.
+
+## 2026-04-13 - Contacto de clínica separado y WhatsApp efectivo
+
+- `Clinicas.telefono` se mantiene como compatibilidad legacy.
+- Nuevos campos persistidos:
+  - `telefono_fijo`
+  - `telefono_movil`
+  - `telefono_whatsapp`
+- `GET /api/clinicas/:id` enriquece la respuesta con:
+  - `telefono_whatsapp_conectado`
+  - `whatsapp_connected`
+- `telefono_whatsapp_conectado` se deriva de `ClinicMetaAsset` (`assetType='whatsapp_phone_number'`) priorizando asignación de clínica y usando grupo como fallback. No debe editarse manualmente.
+- `GET /api/intake/config` construye `available_locations[].whatsapp` con prioridad:
+  1. WhatsApp Business conectado a la clínica.
+  2. `Clinicas.telefono_whatsapp`.
+  3. WhatsApp Business conectado al grupo.
+  4. móvil/fijo normalizado como fallback.
+- `GET /api/intake/config` añade `available_locations[].opening_hours_text` para variables de chat. Se calcula desde `ClinicaHorarios` activos y agrupa días consecutivos con el mismo horario, por ejemplo `L-J de 9 a 20h y V de 10 a 14h`.
+- Migración:
+  - `20260413101000-add-clinic-contact-phone-fields.js`
+  - copia inicialmente `Clinicas.telefono` a `Clinicas.telefono_fijo` si el nuevo campo está vacío.
+
+## 2026-04-13 - Variables canónicas en flujos de chat web
+
+- El runtime público de `intake.js` resuelve variables `{{ruta.con.puntos}}`.
+- Variable canónica de nombre de paciente: `{{paciente.nombre}}`.
+- Variable de horario de apertura: `{{clinica.horario_apertura}}`, alimentada por `available_locations[].opening_hours_text`.
+- Variables dinámicas de datos recogidos: `{{lead.<campo>}}`, solo válidas para campos capturados en pasos anteriores.
+- Alias legacy `{{nombre}}` sigue funcionando en runtime, pero no debe usarse en plantillas nuevas.
+- Migración:
+  - `20260413102000-normalize-chat-flow-patient-name-variable.js`
+  - normaliza JSON existentes en `ChatFlowTemplates.flow`, `ChatFlowTemplates.flows`, `ChatFlowTemplates.texts` e `IntakeConfigs.config`.
 
 ## 2026-03-24 - Contexto conversacional canónico para IA
 

@@ -21,6 +21,8 @@ const ClinicMetaAsset = db.ClinicMetaAsset;
 const MetaConnection = db.MetaConnection;
 const ClinicGoogleAdsAccount = db.ClinicGoogleAdsAccount;
 const IntakeConfig = db.IntakeConfig;
+const ChatFlowTemplate = db.ChatFlowTemplate;
+const ClinicaHorario = db.ClinicaHorario;
 const { enqueueInboundFormSubmissionResume } = require('../services/automationsV2Resume.service');
 const { sendMetaEvent, buildUserData: buildMetaUserData } = require('../services/metaCapi.service');
 const { uploadClickConversion } = require('../services/googleAdsConversion.service');
@@ -555,11 +557,16 @@ const resolveClinicByPhoneWithinGroup = async (groupId, phone) => {
 
   const clinics = await Clinica.findAll({
     where: { grupoClinicaId: parsedGroupId },
-    attributes: ['id_clinica', 'grupoClinicaId', 'telefono'],
+    attributes: ['id_clinica', 'grupoClinicaId', 'telefono', 'telefono_fijo', 'telefono_movil', 'telefono_whatsapp'],
     raw: true,
   });
 
-  return clinics.find((clinic) => normalizePhone(clinic.telefono) === normalizedPhone) || null;
+  return clinics.find((clinic) => [
+    clinic.telefono,
+    clinic.telefono_fijo,
+    clinic.telefono_movil,
+    clinic.telefono_whatsapp,
+  ].some((value) => normalizePhone(value) === normalizedPhone)) || null;
 };
 
 const CALL_OUTCOMES = new Set(['citado', 'informacion', 'no_contactado']);
@@ -1740,7 +1747,7 @@ const DEFAULT_CHAT_FLOW = {
   steps: [
     { type: 'message', text: 'Hola. Te ayudamos a pedir cita.' },
     { type: 'input', text: 'Como te llamas?', input_type: 'text', placeholder: 'Tu nombre', field: 'nombre' },
-    { type: 'input', text: 'Gracias {{nombre}}. Cual es tu telefono?', input_type: 'tel', placeholder: 'Tu telefono', field: 'telefono' },
+    { type: 'input', text: 'Gracias {{paciente.nombre}}. Cual es tu telefono?', input_type: 'tel', placeholder: 'Tu telefono', field: 'telefono' },
     { type: 'input', text: 'Y tu email? (opcional)', input_type: 'email', placeholder: 'Tu email', field: 'email' },
     { type: 'cta', text: 'Confirma que quieres que te contactemos:', button_text: 'Ok, contactadme' }
   ]
@@ -1799,6 +1806,374 @@ const DEFAULT_META_ADS = {
   pixel_id: null
 };
 
+const DEFAULT_CLINIC_TIMEZONE = 'Europe/Madrid';
+
+const parseClinicConfigForSchedule = (value) => {
+  if (!value) return null;
+  if (typeof value === 'object' && !Array.isArray(value)) return value;
+  if (typeof value === 'string') {
+    try {
+      const parsed = JSON.parse(value);
+      return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : null;
+    } catch (_error) {
+      return null;
+    }
+  }
+  return null;
+};
+
+const isValidTimeZone = (value) => {
+  if (!value || typeof value !== 'string') return false;
+  try {
+    Intl.DateTimeFormat('en-US', { timeZone: value }).format(new Date());
+    return true;
+  } catch (_error) {
+    return false;
+  }
+};
+
+const resolveClinicTimezoneForSchedule = (clinica) => {
+  const cfg = parseClinicConfigForSchedule(clinica?.configuracion);
+  const candidate = cfg?.timezone || cfg?.timeZone || cfg?.tz;
+  return isValidTimeZone(candidate) ? candidate : DEFAULT_CLINIC_TIMEZONE;
+};
+
+const formatPartsInTimeZone = (date, timeZone) => {
+  const parts = new Intl.DateTimeFormat('en-CA', {
+    timeZone,
+    hour12: false,
+    hourCycle: 'h23',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+  }).formatToParts(date);
+
+  const bag = {};
+  for (const part of parts) {
+    if (part.type !== 'literal') bag[part.type] = part.value;
+  }
+
+  return {
+    year: Number(bag.year),
+    month: Number(bag.month),
+    day: Number(bag.day),
+    hour: Number(bag.hour),
+    minute: Number(bag.minute),
+    second: Number(bag.second),
+  };
+};
+
+const pad2 = (value) => String(value).padStart(2, '0');
+
+const formatLocalDateFromParts = (parts) => `${parts.year}-${pad2(parts.month)}-${pad2(parts.day)}`;
+const formatLocalTimeFromParts = (parts) => `${pad2(parts.hour)}:${pad2(parts.minute)}`;
+const dayIndexFromLocalDate = (fechaLocal) => new Date(`${fechaLocal}T12:00:00Z`).getUTCDay();
+
+const minutesFromHm = (value) => {
+  const match = String(value || '').trim().match(/^(\d{2}):(\d{2})$/);
+  if (!match) return null;
+  const hour = Number(match[1]);
+  const minute = Number(match[2]);
+  if (!Number.isFinite(hour) || !Number.isFinite(minute) || hour < 0 || hour > 23 || minute < 0 || minute > 59) return null;
+  return hour * 60 + minute;
+};
+
+const normalizeDisciplinesFromClinicConfigForFlow = (configuracion) => {
+  const cfg = parseClinicConfigForSchedule(configuracion) || {};
+  const raw = Array.isArray(cfg.disciplinas) ? cfg.disciplinas : (cfg.disciplina ? [cfg.disciplina] : []);
+  return raw
+    .map((d) => String(d || '').trim().toLowerCase())
+    .filter(Boolean);
+};
+
+const matchesTemplateDisciplinesForFlow = (templateDisciplinaCodes, clinicDisciplinaCodes) => {
+  const templateCodes = Array.isArray(templateDisciplinaCodes)
+    ? templateDisciplinaCodes.map((code) => String(code || '').trim().toLowerCase()).filter(Boolean)
+    : [];
+  const clinicCodes = Array.isArray(clinicDisciplinaCodes)
+    ? clinicDisciplinaCodes.map((code) => String(code || '').trim().toLowerCase()).filter(Boolean)
+    : [];
+
+  if (clinicCodes.length === 0) return true;
+  if (templateCodes.length === 0) return true;
+  return templateCodes.some((code) => clinicCodes.includes(code));
+};
+
+const DAY_SHORT_LABELS = {
+  0: 'D',
+  1: 'L',
+  2: 'M',
+  3: 'X',
+  4: 'J',
+  5: 'V',
+  6: 'S',
+};
+
+const formatOpeningHourTime = (value) => {
+  const match = String(value || '').match(/^(\d{1,2}):(\d{2})/);
+  if (!match) return String(value || '').trim();
+  const hour = String(Number(match[1]));
+  const minute = match[2] === '00' ? '' : `:${match[2]}`;
+  return `${hour}${minute}`;
+};
+
+const formatOpeningHourRanges = (ranges) => {
+  const validRanges = (ranges || [])
+    .map((range) => ({
+      start: String(range?.hora_inicio || '').trim(),
+      end: String(range?.hora_fin || '').trim(),
+    }))
+    .filter((range) => range.start && range.end)
+    .sort((a, b) => a.start.localeCompare(b.start));
+
+  if (!validRanges.length) return '';
+
+  return validRanges
+    .map((range) => `de ${formatOpeningHourTime(range.start)} a ${formatOpeningHourTime(range.end)}h`)
+    .join(' y ');
+};
+
+const formatDayGroupLabel = (days) => {
+  const ordered = (days || []).map((day) => Number(day)).filter((day) => Number.isInteger(day));
+  if (!ordered.length) return '';
+  if (ordered.length === 1) return DAY_SHORT_LABELS[ordered[0]] || '';
+
+  const groups = [];
+  let start = ordered[0];
+  let prev = ordered[0];
+  for (let i = 1; i < ordered.length; i++) {
+    const current = ordered[i];
+    if (current === prev + 1) {
+      prev = current;
+      continue;
+    }
+    groups.push(start === prev ? DAY_SHORT_LABELS[start] : `${DAY_SHORT_LABELS[start]}-${DAY_SHORT_LABELS[prev]}`);
+    start = current;
+    prev = current;
+  }
+  groups.push(start === prev ? DAY_SHORT_LABELS[start] : `${DAY_SHORT_LABELS[start]}-${DAY_SHORT_LABELS[prev]}`);
+  return groups.join(' y ');
+};
+
+const buildOpeningHoursText = (horarios) => {
+  if (!Array.isArray(horarios) || horarios.length === 0) return null;
+
+  const activeByDay = new Map();
+  horarios
+    .filter((h) => h && (h.activo === undefined || h.activo === true || h.activo === 1))
+    .forEach((h) => {
+      const day = Number(h.dia_semana);
+      if (!Number.isInteger(day) || day < 0 || day > 6) return;
+      const list = activeByDay.get(day) || [];
+      list.push({ hora_inicio: h.hora_inicio, hora_fin: h.hora_fin });
+      activeByDay.set(day, list);
+    });
+
+  const dayOrder = [1, 2, 3, 4, 5, 6, 0];
+  const groupsBySignature = [];
+  for (const day of dayOrder) {
+    const ranges = activeByDay.get(day) || [];
+    const rangeText = formatOpeningHourRanges(ranges);
+    if (!rangeText) continue;
+    const last = groupsBySignature[groupsBySignature.length - 1];
+    if (last && last.rangeText === rangeText) {
+      last.days.push(day);
+    } else {
+      groupsBySignature.push({ rangeText, days: [day] });
+    }
+  }
+
+  if (!groupsBySignature.length) return null;
+
+  return groupsBySignature
+    .map((group) => `${formatDayGroupLabel(group.days)} ${group.rangeText}`)
+    .join(' y ');
+};
+
+const buildOpeningHoursTextByClinicId = async (clinicIds) => {
+  const ids = Array.from(new Set((clinicIds || []).map((id) => parseInteger(id)).filter(Boolean)));
+  const result = new Map();
+  if (!ids.length || !ClinicaHorario) return result;
+
+  const rows = await ClinicaHorario.findAll({
+    where: { clinica_id: { [Op.in]: ids }, activo: true },
+    attributes: ['clinica_id', 'dia_semana', 'hora_inicio', 'hora_fin'],
+    raw: true,
+  });
+
+  for (const id of ids) {
+    const horarios = rows.filter((row) => Number(row.clinica_id) === Number(id));
+    result.set(id, buildOpeningHoursText(horarios));
+  }
+
+  return result;
+};
+
+const resolveClinicOpenState = async (clinicId) => {
+  const normalizedClinicId = parseInteger(clinicId);
+  if (!normalizedClinicId || !ClinicaHorario) {
+    return { open_now: null, has_schedule: false, checked_at: new Date().toISOString() };
+  }
+
+  const clinica = await Clinica.findOne({
+    where: { id_clinica: normalizedClinicId },
+    attributes: ['id_clinica', 'configuracion'],
+    raw: true,
+  });
+  const timeZone = resolveClinicTimezoneForSchedule(clinica);
+  const now = new Date();
+  const parts = formatPartsInTimeZone(now, timeZone);
+  const localDate = formatLocalDateFromParts(parts);
+  const localTime = formatLocalTimeFromParts(parts);
+  const currentMinutes = parts.hour * 60 + parts.minute;
+  const dow = dayIndexFromLocalDate(localDate);
+
+  const horarios = await ClinicaHorario.findAll({
+    where: { clinica_id: normalizedClinicId, activo: true },
+    attributes: ['dia_semana', 'hora_inicio', 'hora_fin'],
+    raw: true,
+  });
+
+  if (!Array.isArray(horarios) || horarios.length === 0) {
+    return {
+      open_now: null,
+      has_schedule: false,
+      timezone: timeZone,
+      local_date: localDate,
+      local_time: localTime,
+      checked_at: now.toISOString(),
+    };
+  }
+
+  const todaysWindows = horarios
+    .filter((h) => Number(h.dia_semana) === dow)
+    .map((h) => ({
+      start: minutesFromHm(h.hora_inicio),
+      end: minutesFromHm(h.hora_fin),
+    }))
+    .filter((w) => w.start !== null && w.end !== null && w.start < w.end);
+
+  const openNow = todaysWindows.some((w) => currentMinutes >= w.start && currentMinutes < w.end);
+  return {
+    open_now: openNow,
+    has_schedule: true,
+    timezone: timeZone,
+    local_date: localDate,
+    local_time: localTime,
+    checked_at: now.toISOString(),
+  };
+};
+
+const extractClosedClinicFlowRules = (template) => {
+  const base = template?.toJSON ? template.toJSON() : template;
+  if (!base || !base.show_when_clinic_closed) return [];
+
+  if (Array.isArray(base.flows) && base.flows.length > 0) {
+    return base.flows
+      .filter((flowRule) => flowRule?.flow?.steps?.length > 0)
+      .map((flowRule, index) => ({
+        id: `template_${base.id}_${index}`,
+        name: resolveChatFlowTemplateRuleName(base, flowRule.name),
+        is_default: false,
+        enabled: flowRule.enabled !== false,
+        url_rules: Array.isArray(flowRule.url_rules) && flowRule.url_rules.length ? flowRule.url_rules : ['*'],
+        show_when_clinic_closed: true,
+        template_id: base.id,
+        catalog_template_id: base.id,
+        template_flow_index: index,
+        catalog_template_flow_index: index,
+        flow: flowRule.flow,
+      }));
+  }
+
+  if (base.flow?.steps?.length > 0) {
+    return [{
+      id: `template_${base.id}_0`,
+      name: base.name,
+      is_default: false,
+      enabled: true,
+      url_rules: ['*'],
+      show_when_clinic_closed: true,
+      template_id: base.id,
+      catalog_template_id: base.id,
+      template_flow_index: 0,
+      catalog_template_flow_index: 0,
+      flow: base.flow,
+    }];
+  }
+
+  return [];
+};
+
+function resolveChatFlowTemplateRuleName(template, flowName) {
+  const baseName = String(template?.name || '').trim();
+  const name = String(flowName || '').trim();
+  if (!name || name.toLowerCase() === 'default') return baseName || 'Flujo de chat';
+  return name;
+}
+
+const getCatalogTemplateIdFromFlowRule = (flowRule) => {
+  const parsed = parseInteger(flowRule?.catalog_template_id ?? flowRule?.template_id ?? flowRule?._templateId);
+  if (parsed) return parsed;
+
+  const idMatch = String(flowRule?.id || '').match(/^catalog_(\d+)_\d+$/);
+  if (idMatch) {
+    const idParsed = parseInteger(idMatch[1]);
+    if (idParsed) return idParsed;
+  }
+
+  return null;
+};
+
+const getCatalogTemplateFlowIndexFromFlowRule = (flowRule) => {
+  const value = flowRule?.catalog_template_flow_index ?? flowRule?.template_flow_index;
+  if (value !== undefined && value !== null) {
+    const parsed = Number(value);
+    if (Number.isFinite(parsed)) return parsed;
+  }
+
+  const idMatch = String(flowRule?.id || '').match(/^catalog_\d+_(\d+)$/);
+  if (idMatch) {
+    const indexParsed = Number(idMatch[1]);
+    if (Number.isFinite(indexParsed)) return indexParsed;
+  }
+
+  return 0;
+};
+
+const hasCatalogFlowCopy = (flows, templateId, templateFlowIndex) => {
+  const parsedTemplateId = parseInteger(templateId);
+  if (!parsedTemplateId) return false;
+  return (flows || []).some((flowRule) => (
+    getCatalogTemplateIdFromFlowRule(flowRule) === parsedTemplateId
+    && getCatalogTemplateFlowIndexFromFlowRule(flowRule) === Number(templateFlowIndex || 0)
+  ));
+};
+
+const loadClosedClinicTemplateFlows = async (clinicId) => {
+  const normalizedClinicId = parseInteger(clinicId);
+  if (!normalizedClinicId || !ChatFlowTemplate) return [];
+
+  const clinica = await Clinica.findOne({
+    where: { id_clinica: normalizedClinicId },
+    attributes: ['id_clinica', 'configuracion'],
+    raw: true,
+  });
+  const clinicDisciplinaCodes = normalizeDisciplinesFromClinicConfigForFlow(clinica?.configuracion);
+
+  const templates = await ChatFlowTemplate.findAll({
+    where: { is_active: true, show_when_clinic_closed: true },
+    order: [['updated_at', 'DESC'], ['id', 'DESC']],
+  });
+
+  return (templates || [])
+    .filter((template) => matchesTemplateDisciplinesForFlow(template.disciplina_codes, clinicDisciplinaCodes))
+    .flatMap(extractClosedClinicFlowRules);
+};
+
 const defaultConfigPayload = (clinicId, groupId) => ({
   clinic_id: clinicId || null,
   group_id: groupId || null,
@@ -1827,6 +2202,7 @@ const defaultConfigPayload = (clinicId, groupId) => ({
     }
   },
   texts: DEFAULT_TEXTS,
+  clinic_open_state: null,
   snippet_verification: null,
   locations: [],
   has_hmac: false,
@@ -1873,13 +2249,14 @@ exports.getIntakeConfig = asyncHandler(async (req, res) => {
 
   let effectiveClinicId = record?.clinic_id || clinicIdParsed || null;
   let effectiveGroupId = record?.group_id || groupIdParsed || null;
+  let effectiveClinicRow = null;
   if (!effectiveGroupId && effectiveClinicId) {
-    const clinicRow = await Clinica.findOne({
+    effectiveClinicRow = await Clinica.findOne({
       where: { id_clinica: effectiveClinicId },
-      attributes: ['id_clinica', 'grupoClinicaId'],
+      attributes: ['id_clinica', 'grupoClinicaId', 'nombre_clinica'],
       raw: true
     });
-    effectiveGroupId = parseInteger(clinicRow?.grupoClinicaId);
+    effectiveGroupId = parseInteger(effectiveClinicRow?.grupoClinicaId);
   }
 
   const clinicRecord = effectiveClinicId
@@ -1897,6 +2274,16 @@ exports.getIntakeConfig = asyncHandler(async (req, res) => {
   });
 
   const payload = defaultConfigPayload(record?.clinic_id || clinicIdParsed, record?.group_id || groupIdParsed);
+  if (effectiveClinicId && !effectiveClinicRow) {
+    effectiveClinicRow = await Clinica.findOne({
+      where: { id_clinica: effectiveClinicId },
+      attributes: ['id_clinica', 'nombre_clinica'],
+      raw: true
+    });
+  }
+  if (effectiveClinicRow?.nombre_clinica) {
+    payload.clinic_name = effectiveClinicRow.nombre_clinica;
+  }
   if (record) {
     const cfg = record.config || {};
     payload.config_exists = true;
@@ -1965,7 +2352,7 @@ exports.getIntakeConfig = asyncHandler(async (req, res) => {
     if (!resolvedGroupId && payload.clinic_id) {
       clinicRow = await Clinica.findOne({
         where: { id_clinica: payload.clinic_id },
-        attributes: ['id_clinica', 'nombre_clinica', 'telefono', 'grupoClinicaId'],
+        attributes: ['id_clinica', 'nombre_clinica', 'telefono', 'telefono_fijo', 'telefono_movil', 'telefono_whatsapp', 'direccion', 'grupoClinicaId'],
         raw: true
       });
       resolvedGroupId = clinicRow?.grupoClinicaId || null;
@@ -1994,13 +2381,14 @@ exports.getIntakeConfig = asyncHandler(async (req, res) => {
 
       const clinics = await Clinica.findAll({
         where: { grupoClinicaId: resolvedGroupId },
-        attributes: ['id_clinica', 'nombre_clinica', 'telefono', 'url_avatar'],
+        attributes: ['id_clinica', 'nombre_clinica', 'telefono', 'telefono_fijo', 'telefono_movil', 'telefono_whatsapp', 'direccion', 'url_avatar'],
         order: [['nombre_clinica', 'ASC']],
         raw: true
       });
 
       // WhatsApp por clínica (si existe), con fallback al número del grupo.
       const clinicIds = clinics.map((c) => c.id_clinica).filter(Boolean);
+      const openingHoursByClinicId = await buildOpeningHoursTextByClinicId(clinicIds);
       const whatsappByClinicId = new Map();
       if (clinicIds.length) {
         const clinicPhones = await ClinicMetaAsset.findAll({
@@ -2023,13 +2411,22 @@ exports.getIntakeConfig = asyncHandler(async (req, res) => {
       }
 
       payload.available_locations = clinics.map((c) => {
-        const phone = c.telefono || null;
-        const whatsapp = whatsappByClinicId.get(c.id_clinica) || groupWhatsApp || normalizePhone(phone) || null;
+        const fixedPhone = c.telefono_fijo || c.telefono || null;
+        const mobilePhone = c.telefono_movil || null;
+        const manualWhatsapp = normalizePhone(c.telefono_whatsapp);
+        const phone = fixedPhone || mobilePhone || null;
+        const connectedWhatsapp = whatsappByClinicId.get(c.id_clinica) || null;
+        const whatsapp = connectedWhatsapp || manualWhatsapp || groupWhatsApp || normalizePhone(mobilePhone || fixedPhone) || null;
         return {
           id: c.id_clinica,
           label: c.nombre_clinica,
           phone,
+          fixed_phone: fixedPhone,
+          mobile_phone: mobilePhone,
           whatsapp,
+          whatsapp_connected: !!connectedWhatsapp,
+          address: c.direccion || null,
+          opening_hours_text: openingHoursByClinicId.get(c.id_clinica) || null,
           url_avatar: c.url_avatar || null
         };
       });
@@ -2037,7 +2434,7 @@ exports.getIntakeConfig = asyncHandler(async (req, res) => {
       if (!clinicRow) {
         clinicRow = await Clinica.findOne({
           where: { id_clinica: payload.clinic_id },
-          attributes: ['id_clinica', 'nombre_clinica', 'telefono', 'url_avatar'],
+          attributes: ['id_clinica', 'nombre_clinica', 'telefono', 'telefono_fijo', 'telefono_movil', 'telefono_whatsapp', 'direccion', 'url_avatar'],
           raw: true
         });
       }
@@ -2058,11 +2455,21 @@ exports.getIntakeConfig = asyncHandler(async (req, res) => {
         } catch (e) {
           whatsapp = null;
         }
+        const fixedPhone = clinicRow.telefono_fijo || clinicRow.telefono || null;
+        const mobilePhone = clinicRow.telefono_movil || null;
+        const manualWhatsapp = normalizePhone(clinicRow.telefono_whatsapp);
+        const connectedWhatsapp = whatsapp || null;
+        const openingHoursByClinicId = await buildOpeningHoursTextByClinicId([clinicRow.id_clinica]);
         payload.available_locations = [{
           id: clinicRow.id_clinica,
           label: clinicRow.nombre_clinica,
-          phone: clinicRow.telefono || null,
-          whatsapp: whatsapp || normalizePhone(clinicRow.telefono) || null,
+          phone: fixedPhone || mobilePhone || null,
+          fixed_phone: fixedPhone,
+          mobile_phone: mobilePhone,
+          whatsapp: connectedWhatsapp || manualWhatsapp || normalizePhone(mobilePhone || fixedPhone) || null,
+          whatsapp_connected: !!connectedWhatsapp,
+          address: clinicRow.direccion || null,
+          opening_hours_text: openingHoursByClinicId.get(clinicRow.id_clinica) || null,
           url_avatar: clinicRow.url_avatar || null
         }];
       }
@@ -2070,6 +2477,36 @@ exports.getIntakeConfig = asyncHandler(async (req, res) => {
   } catch (e) {
     // No bloquear el snippet por un fallo de soporte UI.
     payload.available_locations = [];
+  }
+
+  // Estado de apertura + flujos especiales de "clínica cerrada".
+  // Si no hay horario estructurado, open_now queda null y el widget mantiene su lógica normal.
+  try {
+    const openStateClinicId = effectiveClinicId || payload.clinic_id || null;
+    payload.clinic_open_state = await resolveClinicOpenState(openStateClinicId);
+
+    if (payload.clinic_open_state?.open_now === false) {
+      const persistedFlows = Array.isArray(payload.flows) ? payload.flows : [];
+      const closedFlows = (await loadClosedClinicTemplateFlows(openStateClinicId))
+        .filter((flowRule) => !hasCatalogFlowCopy(
+          persistedFlows,
+          flowRule.template_id,
+          getCatalogTemplateFlowIndexFromFlowRule(flowRule)
+        ));
+      if (closedFlows.length > 0) {
+        payload.flows = [
+          ...closedFlows,
+          ...persistedFlows,
+        ];
+      }
+    }
+  } catch (e) {
+    payload.clinic_open_state = {
+      open_now: null,
+      has_schedule: false,
+      checked_at: new Date().toISOString(),
+      error: 'clinic_schedule_unavailable',
+    };
   }
 
   return res.json(payload);

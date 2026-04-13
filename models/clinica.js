@@ -39,6 +39,9 @@ module.exports = (sequelize, DataTypes) => {
     
     // ✅ AÑADIDO: Campos de contacto que faltaban
     telefono: DataTypes.STRING,
+    telefono_fijo: DataTypes.STRING,
+    telefono_movil: DataTypes.STRING,
+    telefono_whatsapp: DataTypes.STRING,
     email: DataTypes.STRING,
     descripcion: DataTypes.TEXT,
     

@@ -30,6 +30,70 @@ const toBool = (value, fallback = false) => {
 
 const isValidHHmm = (value) => /^([01]\d|2[0-3]):([0-5]\d)$/.test(String(value || ''));
 
+const normalizePhoneDigits = (value) => {
+    const digits = String(value || '').replace(/\D/g, '');
+    return digits || null;
+};
+
+const extractWhatsappNumber = (asset) => {
+    if (!asset) return null;
+    const additional = asset.additionalData && typeof asset.additionalData === 'object'
+        ? asset.additionalData
+        : {};
+    return normalizePhoneDigits(
+        additional.displayPhoneNumber
+        || additional.display_phone_number
+        || asset.metaAssetName
+        || null
+    );
+};
+
+async function resolveConnectedWhatsappForClinic(clinicaData) {
+    const clinicId = Number(clinicaData?.id_clinica);
+    if (!Number.isFinite(clinicId)) return null;
+
+    const clinicAsset = await ClinicMetaAsset.findOne({
+        where: {
+            clinicaId: clinicId,
+            isActive: true,
+            assetType: 'whatsapp_phone_number',
+        },
+        attributes: ['metaAssetName', 'additionalData', 'updatedAt'],
+        order: [['updatedAt', 'DESC']],
+        raw: true,
+    });
+    const clinicWhatsapp = extractWhatsappNumber(clinicAsset);
+    if (clinicWhatsapp) return clinicWhatsapp;
+
+    const groupId = clinicaData?.grupoClinicaId || clinicaData?.grupoClinica?.id_grupo || null;
+    if (!groupId) return null;
+
+    const groupAsset = await ClinicMetaAsset.findOne({
+        where: {
+            assignmentScope: 'group',
+            grupoClinicaId: groupId,
+            isActive: true,
+            assetType: 'whatsapp_phone_number',
+        },
+        attributes: ['metaAssetName', 'additionalData', 'updatedAt'],
+        order: [['updatedAt', 'DESC']],
+        raw: true,
+    });
+
+    return extractWhatsappNumber(groupAsset);
+}
+
+async function enrichClinicContactFields(clinicaData) {
+    if (!clinicaData) return clinicaData;
+    const connectedWhatsapp = await resolveConnectedWhatsappForClinic(clinicaData);
+    clinicaData.telefono_whatsapp_conectado = connectedWhatsapp;
+    clinicaData.whatsapp_connected = !!connectedWhatsapp;
+    if (!clinicaData.telefono_whatsapp && connectedWhatsapp) {
+        clinicaData.telefono_whatsapp = connectedWhatsapp;
+    }
+    return clinicaData;
+}
+
 async function canReadClinicSchedule(userId, clinicId) {
     if (!Number.isFinite(Number(userId)) || !Number.isFinite(Number(clinicId))) return false;
     if (isGlobalAdmin(userId)) return true;
@@ -207,6 +271,7 @@ exports.getClinicaById = async (req, res) => {
             ...cfg,
             disciplinas: Array.isArray(cfg.disciplinas) && cfg.disciplinas.length > 0 ? cfg.disciplinas : ['dental']
         };
+        await enrichClinicContactFields(clinicaData);
         res.json(clinicaData);
     } catch (error) {
         res.status(500).json({ message: 'Error retrieving clinica', error: error.message });
@@ -301,6 +366,18 @@ exports.createClinica = async (req, res) => {
     try {
         const {
             nombre_clinica,
+            telefono,
+            telefono_fijo,
+            telefono_movil,
+            telefono_whatsapp,
+            email,
+            descripcion,
+            direccion,
+            codigo_postal,
+            ciudad,
+            provincia,
+            pais,
+            horario_atencion,
             url_web,
             url_avatar,
             url_fondo, 
@@ -327,6 +404,18 @@ exports.createClinica = async (req, res) => {
 
         const newClinica = await Clinica.create({   
             nombre_clinica,
+            telefono: telefono || telefono_fijo || telefono_movil || telefono_whatsapp || null,
+            telefono_fijo,
+            telefono_movil,
+            telefono_whatsapp,
+            email,
+            descripcion,
+            direccion,
+            codigo_postal,
+            ciudad,
+            provincia,
+            pais,
+            horario_atencion,
             url_web,
             url_avatar,
             url_fondo, 
@@ -390,6 +479,9 @@ exports.updateClinica = async (req, res) => {
         const {
             nombre_clinica,
             telefono,
+            telefono_fijo,
+            telefono_movil,
+            telefono_whatsapp,
             email,
             descripcion,
             direccion,
@@ -442,11 +534,19 @@ exports.updateClinica = async (req, res) => {
         if (!Array.isArray(configToSave?.disciplinas) || configToSave.disciplinas.length === 0) {
             configToSave = { ...configToSave, disciplinas: ['dental'] };
         }
+        const receivedAnyPhoneField = [telefono, telefono_fijo, telefono_movil, telefono_whatsapp]
+            .some((value) => value !== undefined);
+        const telefonoCompat = receivedAnyPhoneField
+            ? (telefono || telefono_fijo || telefono_movil || telefono_whatsapp || null)
+            : undefined;
 
         // ✅ ACTUALIZAR con TODOS los campos
         const [updatedRowsCount] = await Clinica.update({
             nombre_clinica,
-            telefono,
+            telefono: telefonoCompat,
+            telefono_fijo,
+            telefono_movil,
+            telefono_whatsapp,
             email,
             descripcion,
             direccion,
@@ -577,6 +677,7 @@ exports.updateClinica = async (req, res) => {
             ...cfg,
             disciplinas: Array.isArray(cfg.disciplinas) && cfg.disciplinas.length > 0 ? cfg.disciplinas : ['dental']
         };
+        await enrichClinicContactFields(updatedData);
         res.status(200).json(updatedData);
 
     } catch (error) {
