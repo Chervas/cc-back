@@ -105,9 +105,12 @@ Propagación manual de catálogo:
 - `POST /api/marketing/chat-flow-templates/:id/propagate` ejecuta la propagación sobre clínicas compatibles por `disciplina_codes`.
 - Si una clínica compatible no tiene `IntakeConfig`, se crea una configuración mínima de scope `clinic` con `domains=[]`, `hmac_key=null` y `config.flows` propagado. No se activa medición web ni se marca dominio instalado.
 - Las copias propagadas guardan `template_id`, `catalog_template_id`, `template_flow_index` y `catalog_template_flow_index` para poder actualizar la misma copia sin duplicarla.
+- Compatibilidad: si existe una copia antigua sin metadata pero con `id` tipo `catalog_<templateId>_<flowIndex>`, se reconoce como copia propagada y se normaliza en la siguiente propagación.
+- Si el subflujo interno se llama `default`, la copia propagada usa como nombre visible `ChatFlowTemplates.name`; así la UI de clínica no muestra varios flujos indistinguibles llamados `default`.
 - Plantillas normales nuevas se insertan desactivadas para no cambiar widgets publicados sin acción explícita.
 - En copias normales ya existentes se actualiza el contenido del catálogo, pero se preserva `enabled/is_default` si la clínica lo había cambiado manualmente.
 - Plantillas `show_when_clinic_closed=true` se insertan activadas y con `show_when_clinic_closed=true`.
+- `GET /api/intake/config` devuelve `clinic_name` cuando el scope efectivo es una clínica. El widget lo usa como fallback para resolver `{{clinica.nombre}}` aunque no haya sede seleccionada.
 - Plantillas que coinciden con `is_default_for` de la clínica se insertan activadas, pasan a ser `is_default=true` y actualizan `config.flow` legacy.
 - Si una plantilla queda inactiva o deja de aplicar por disciplina, sus copias existentes quedan `enabled=false` e `is_default=false`.
 - `GET /api/intake/config` evita duplicar flujos de clínica cerrada: si una copia persistida ya existe para el mismo `catalog_template_id` e índice, no inyecta otra copia dinámica.

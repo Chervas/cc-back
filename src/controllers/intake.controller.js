@@ -2076,7 +2076,7 @@ const extractClosedClinicFlowRules = (template) => {
       .filter((flowRule) => flowRule?.flow?.steps?.length > 0)
       .map((flowRule, index) => ({
         id: `template_${base.id}_${index}`,
-        name: flowRule.name || base.name,
+        name: resolveChatFlowTemplateRuleName(base, flowRule.name),
         is_default: false,
         enabled: flowRule.enabled !== false,
         url_rules: Array.isArray(flowRule.url_rules) && flowRule.url_rules.length ? flowRule.url_rules : ['*'],
@@ -2108,15 +2108,40 @@ const extractClosedClinicFlowRules = (template) => {
   return [];
 };
 
+function resolveChatFlowTemplateRuleName(template, flowName) {
+  const baseName = String(template?.name || '').trim();
+  const name = String(flowName || '').trim();
+  if (!name || name.toLowerCase() === 'default') return baseName || 'Flujo de chat';
+  return name;
+}
+
 const getCatalogTemplateIdFromFlowRule = (flowRule) => {
   const parsed = parseInteger(flowRule?.catalog_template_id ?? flowRule?.template_id ?? flowRule?._templateId);
-  return parsed || null;
+  if (parsed) return parsed;
+
+  const idMatch = String(flowRule?.id || '').match(/^catalog_(\d+)_\d+$/);
+  if (idMatch) {
+    const idParsed = parseInteger(idMatch[1]);
+    if (idParsed) return idParsed;
+  }
+
+  return null;
 };
 
 const getCatalogTemplateFlowIndexFromFlowRule = (flowRule) => {
-  const value = flowRule?.catalog_template_flow_index ?? flowRule?.template_flow_index ?? 0;
-  const parsed = Number(value);
-  return Number.isFinite(parsed) ? parsed : 0;
+  const value = flowRule?.catalog_template_flow_index ?? flowRule?.template_flow_index;
+  if (value !== undefined && value !== null) {
+    const parsed = Number(value);
+    if (Number.isFinite(parsed)) return parsed;
+  }
+
+  const idMatch = String(flowRule?.id || '').match(/^catalog_\d+_(\d+)$/);
+  if (idMatch) {
+    const indexParsed = Number(idMatch[1]);
+    if (Number.isFinite(indexParsed)) return indexParsed;
+  }
+
+  return 0;
 };
 
 const hasCatalogFlowCopy = (flows, templateId, templateFlowIndex) => {
@@ -2224,13 +2249,14 @@ exports.getIntakeConfig = asyncHandler(async (req, res) => {
 
   let effectiveClinicId = record?.clinic_id || clinicIdParsed || null;
   let effectiveGroupId = record?.group_id || groupIdParsed || null;
+  let effectiveClinicRow = null;
   if (!effectiveGroupId && effectiveClinicId) {
-    const clinicRow = await Clinica.findOne({
+    effectiveClinicRow = await Clinica.findOne({
       where: { id_clinica: effectiveClinicId },
-      attributes: ['id_clinica', 'grupoClinicaId'],
+      attributes: ['id_clinica', 'grupoClinicaId', 'nombre_clinica'],
       raw: true
     });
-    effectiveGroupId = parseInteger(clinicRow?.grupoClinicaId);
+    effectiveGroupId = parseInteger(effectiveClinicRow?.grupoClinicaId);
   }
 
   const clinicRecord = effectiveClinicId
@@ -2248,6 +2274,16 @@ exports.getIntakeConfig = asyncHandler(async (req, res) => {
   });
 
   const payload = defaultConfigPayload(record?.clinic_id || clinicIdParsed, record?.group_id || groupIdParsed);
+  if (effectiveClinicId && !effectiveClinicRow) {
+    effectiveClinicRow = await Clinica.findOne({
+      where: { id_clinica: effectiveClinicId },
+      attributes: ['id_clinica', 'nombre_clinica'],
+      raw: true
+    });
+  }
+  if (effectiveClinicRow?.nombre_clinica) {
+    payload.clinic_name = effectiveClinicRow.nombre_clinica;
+  }
   if (record) {
     const cfg = record.config || {};
     payload.config_exists = true;

@@ -155,7 +155,7 @@ function extractTemplateFlowRules(template) {
       .filter((flowRule) => flowRule?.flow?.steps?.length > 0)
       .map((flowRule, index) => ({
         index,
-        name: flowRule.name || base.name,
+        name: resolveTemplateFlowName(base, flowRule.name),
         url_rules: Array.isArray(flowRule.url_rules) && flowRule.url_rules.length ? flowRule.url_rules : ['*'],
         flow: flowRule.flow,
       }));
@@ -173,16 +173,41 @@ function extractTemplateFlowRules(template) {
   return [];
 }
 
+function resolveTemplateFlowName(template, flowName) {
+  const baseName = String(template?.name || '').trim();
+  const name = String(flowName || '').trim();
+  if (!name || name.toLowerCase() === 'default') return baseName || 'Flujo de chat';
+  return name;
+}
+
 function getCatalogTemplateId(flowRule) {
   const value = flowRule?.catalog_template_id ?? flowRule?.template_id ?? flowRule?._templateId;
   const parsed = Number(value);
-  return Number.isFinite(parsed) ? parsed : null;
+  if (Number.isFinite(parsed)) return parsed;
+
+  const idMatch = String(flowRule?.id || '').match(/^catalog_(\d+)_\d+$/);
+  if (idMatch) {
+    const idParsed = Number(idMatch[1]);
+    if (Number.isFinite(idParsed)) return idParsed;
+  }
+
+  return null;
 }
 
 function getCatalogTemplateFlowIndex(flowRule) {
-  const value = flowRule?.catalog_template_flow_index ?? flowRule?.template_flow_index ?? 0;
-  const parsed = Number(value);
-  return Number.isFinite(parsed) ? parsed : 0;
+  const value = flowRule?.catalog_template_flow_index ?? flowRule?.template_flow_index;
+  if (value !== undefined && value !== null) {
+    const parsed = Number(value);
+    if (Number.isFinite(parsed)) return parsed;
+  }
+
+  const idMatch = String(flowRule?.id || '').match(/^catalog_\d+_(\d+)$/);
+  if (idMatch) {
+    const indexParsed = Number(idMatch[1]);
+    if (Number.isFinite(indexParsed)) return indexParsed;
+  }
+
+  return 0;
 }
 
 function findCatalogFlowIndex(flows, templateId, templateFlowIndex) {
@@ -196,7 +221,7 @@ function buildCatalogFlowRule({ template, flowRule, forceDefault, forceClosed, e
   const base = template?.toJSON ? template.toJSON() : template;
   return {
     id: `catalog_${base.id}_${flowRule.index}`,
-    name: flowRule.name || base.name,
+    name: resolveTemplateFlowName(base, flowRule.name),
     is_default: !!forceDefault,
     enabled: !!enabled,
     url_rules: cloneJson(flowRule.url_rules || ['*']),
@@ -208,6 +233,26 @@ function buildCatalogFlowRule({ template, flowRule, forceDefault, forceClosed, e
     template_source: 'chat_flow_catalog',
     flow: cloneJson(flowRule.flow),
   };
+}
+
+function dedupeCatalogFlows(flows) {
+  const seen = new Set();
+  const deduped = [];
+  let changed = false;
+
+  for (const flowRule of flows || []) {
+    const templateId = getCatalogTemplateId(flowRule);
+    const flowIndex = getCatalogTemplateFlowIndex(flowRule);
+    const key = templateId ? `${templateId}:${flowIndex}` : null;
+    if (key && seen.has(key)) {
+      changed = true;
+      continue;
+    }
+    if (key) seen.add(key);
+    deduped.push(flowRule);
+  }
+
+  return { flows: deduped, changed };
 }
 
 async function propagateChatFlowTemplateToExistingConfigs(template) {
@@ -316,6 +361,12 @@ async function propagateChatFlowTemplateToExistingConfigs(template) {
           changed = true;
         }
       }
+    }
+
+    const deduped = dedupeCatalogFlows(nextFlows);
+    if (deduped.changed) {
+      nextFlows.splice(0, nextFlows.length, ...deduped.flows);
+      changed = true;
     }
 
     const defaultRule = nextFlows.find((flowRule) => flowRule.is_default && flowRule.flow?.steps?.length > 0);
