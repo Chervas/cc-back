@@ -450,8 +450,7 @@ exports.createChatFlowTemplate = async (req, res) => {
       }, { transaction });
     });
 
-    const propagation = await propagateChatFlowTemplateToExistingConfigs(created);
-    res.status(201).json({ ...mapTemplate(created), propagation });
+    res.status(201).json(mapTemplate(created));
   } catch (error) {
     if (error?.name === 'SequelizeUniqueConstraintError') {
       return res.status(409).json({ message: 'Ya existe una plantilla con ese name' });
@@ -510,8 +509,7 @@ exports.updateChatFlowTemplate = async (req, res) => {
       await row.update(updates, { transaction });
     });
     await row.reload();
-    const propagation = await propagateChatFlowTemplateToExistingConfigs(row);
-    res.status(200).json({ ...mapTemplate(row), propagation });
+    res.status(200).json(mapTemplate(row));
   } catch (error) {
     if (error?.name === 'SequelizeUniqueConstraintError') {
       return res.status(409).json({ message: 'Ya existe una plantilla con ese name' });
@@ -530,6 +528,23 @@ exports.deleteChatFlowTemplate = async (req, res) => {
     return res.status(200).json({ success: true, id: Number(req.params.id) });
   } catch (error) {
     return res.status(500).json({ message: 'Error eliminando plantilla', error: error.message });
+  }
+};
+
+exports.propagateChatFlowTemplate = async (req, res) => {
+  if (!assertAdmin(req, res)) return;
+  try {
+    const row = await ChatFlowTemplate.findByPk(req.params.id);
+    if (!row) return res.status(404).json({ message: 'Plantilla no encontrada' });
+
+    const propagation = await propagateChatFlowTemplateToExistingConfigs(row);
+    return res.status(200).json({
+      success: true,
+      template: mapTemplate(row),
+      propagation,
+    });
+  } catch (error) {
+    return res.status(500).json({ message: 'Error propagando plantilla', error: error.message });
   }
 };
 
@@ -567,8 +582,7 @@ exports.duplicateChatFlowTemplate = async (req, res) => {
           texts,
           appearance,
         });
-        const propagation = await propagateChatFlowTemplateToExistingConfigs(created);
-        return res.status(201).json({ ...mapTemplate(created), propagation });
+        return res.status(201).json(mapTemplate(created));
       } catch (error) {
         if (error?.name !== 'SequelizeUniqueConstraintError') throw error;
         name = `${baseName} (${i + 2})`;

@@ -16,6 +16,7 @@ router.get('/chat-flow-templates/:id', chatFlowTemplatesController.getChatFlowTe
 router.post('/chat-flow-templates', chatFlowTemplatesController.createChatFlowTemplate);
 router.put('/chat-flow-templates/:id', chatFlowTemplatesController.updateChatFlowTemplate);
 router.delete('/chat-flow-templates/:id', chatFlowTemplatesController.deleteChatFlowTemplate);
+router.post('/chat-flow-templates/:id/propagate', chatFlowTemplatesController.propagateChatFlowTemplate);
 router.post('/chat-flow-templates/:id/duplicate', chatFlowTemplatesController.duplicateChatFlowTemplate);
 
 // Onboarding unificado campañas (Google Ads + Meta Ads)

@@ -73,8 +73,9 @@ Endpoints afectados:
 | Endpoint | Cambio |
 |:---|:---|
 | `GET /api/marketing/chat-flow-templates` | Devuelve `show_when_clinic_closed`. |
-| `POST /api/marketing/chat-flow-templates` | Acepta `show_when_clinic_closed` y propaga copias de catálogo a configuraciones existentes compatibles. |
-| `PUT /api/marketing/chat-flow-templates/:id` | Actualiza `show_when_clinic_closed` y repropaga copias de catálogo compatibles. |
+| `POST /api/marketing/chat-flow-templates` | Acepta `show_when_clinic_closed`. No propaga por sí solo. |
+| `PUT /api/marketing/chat-flow-templates/:id` | Actualiza `show_when_clinic_closed`. No propaga por sí solo. |
+| `POST /api/marketing/chat-flow-templates/:id/propagate` | Propaga manualmente una copia del catálogo a configuraciones existentes compatibles. |
 | `GET /api/intake/config` | Devuelve `clinic_open_state` y añade flujos especiales si aplican. |
 
 `GET /api/intake/config` calcula apertura desde `ClinicaHorarios`:
@@ -98,9 +99,10 @@ Limitación consciente:
 
 - En scope de grupo sin clínica efectiva única no se fuerza horario de cierre, porque distintas sedes pueden tener horarios distintos.
 
-Propagación de catálogo:
+Propagación manual de catálogo:
 
-- `create/update/duplicate` de `ChatFlowTemplates` llama a la propagación automática sobre `IntakeConfigs` de scope `clinic` ya existentes.
+- `create/update/duplicate` de `ChatFlowTemplates` solo modifica el catálogo.
+- `POST /api/marketing/chat-flow-templates/:id/propagate` ejecuta la propagación sobre `IntakeConfigs` de scope `clinic` ya existentes.
 - Las copias propagadas guardan `template_id`, `catalog_template_id`, `template_flow_index` y `catalog_template_flow_index` para poder actualizar la misma copia sin duplicarla.
 - Plantillas normales nuevas se insertan desactivadas para no cambiar widgets publicados sin acción explícita.
 - En copias normales ya existentes se actualiza el contenido del catálogo, pero se preserva `enabled/is_default` si la clínica lo había cambiado manualmente.
