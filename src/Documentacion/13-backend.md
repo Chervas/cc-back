@@ -73,8 +73,8 @@ Endpoints afectados:
 | Endpoint | Cambio |
 |:---|:---|
 | `GET /api/marketing/chat-flow-templates` | Devuelve `show_when_clinic_closed`. |
-| `POST /api/marketing/chat-flow-templates` | Acepta `show_when_clinic_closed`. |
-| `PUT /api/marketing/chat-flow-templates/:id` | Actualiza `show_when_clinic_closed`. |
+| `POST /api/marketing/chat-flow-templates` | Acepta `show_when_clinic_closed` y propaga copias de catálogo a configuraciones existentes compatibles. |
+| `PUT /api/marketing/chat-flow-templates/:id` | Actualiza `show_when_clinic_closed` y repropaga copias de catálogo compatibles. |
 | `GET /api/intake/config` | Devuelve `clinic_open_state` y añade flujos especiales si aplican. |
 
 `GET /api/intake/config` calcula apertura desde `ClinicaHorarios`:
@@ -97,6 +97,17 @@ Migración asociada:
 Limitación consciente:
 
 - En scope de grupo sin clínica efectiva única no se fuerza horario de cierre, porque distintas sedes pueden tener horarios distintos.
+
+Propagación de catálogo:
+
+- `create/update/duplicate` de `ChatFlowTemplates` llama a la propagación automática sobre `IntakeConfigs` de scope `clinic` ya existentes.
+- Las copias propagadas guardan `template_id`, `catalog_template_id`, `template_flow_index` y `catalog_template_flow_index` para poder actualizar la misma copia sin duplicarla.
+- Plantillas normales nuevas se insertan desactivadas para no cambiar widgets publicados sin acción explícita.
+- En copias normales ya existentes se actualiza el contenido del catálogo, pero se preserva `enabled/is_default` si la clínica lo había cambiado manualmente.
+- Plantillas `show_when_clinic_closed=true` se insertan activadas y con `show_when_clinic_closed=true`.
+- Plantillas que coinciden con `is_default_for` de la clínica se insertan activadas, pasan a ser `is_default=true` y actualizan `config.flow` legacy.
+- Si una plantilla queda inactiva o deja de aplicar por disciplina, sus copias existentes quedan `enabled=false` e `is_default=false`.
+- `GET /api/intake/config` evita duplicar flujos de clínica cerrada: si una copia persistida ya existe para el mismo `catalog_template_id` e índice, no inyecta otra copia dinámica.
 
 ## 2026-04-12 - Informes de marketing agregados V1
 

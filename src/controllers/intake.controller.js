@@ -2082,6 +2082,9 @@ const extractClosedClinicFlowRules = (template) => {
         url_rules: Array.isArray(flowRule.url_rules) && flowRule.url_rules.length ? flowRule.url_rules : ['*'],
         show_when_clinic_closed: true,
         template_id: base.id,
+        catalog_template_id: base.id,
+        template_flow_index: index,
+        catalog_template_flow_index: index,
         flow: flowRule.flow,
       }));
   }
@@ -2095,11 +2098,34 @@ const extractClosedClinicFlowRules = (template) => {
       url_rules: ['*'],
       show_when_clinic_closed: true,
       template_id: base.id,
+      catalog_template_id: base.id,
+      template_flow_index: 0,
+      catalog_template_flow_index: 0,
       flow: base.flow,
     }];
   }
 
   return [];
+};
+
+const getCatalogTemplateIdFromFlowRule = (flowRule) => {
+  const parsed = parseInteger(flowRule?.catalog_template_id ?? flowRule?.template_id ?? flowRule?._templateId);
+  return parsed || null;
+};
+
+const getCatalogTemplateFlowIndexFromFlowRule = (flowRule) => {
+  const value = flowRule?.catalog_template_flow_index ?? flowRule?.template_flow_index ?? 0;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : 0;
+};
+
+const hasCatalogFlowCopy = (flows, templateId, templateFlowIndex) => {
+  const parsedTemplateId = parseInteger(templateId);
+  if (!parsedTemplateId) return false;
+  return (flows || []).some((flowRule) => (
+    getCatalogTemplateIdFromFlowRule(flowRule) === parsedTemplateId
+    && getCatalogTemplateFlowIndexFromFlowRule(flowRule) === Number(templateFlowIndex || 0)
+  ));
 };
 
 const loadClosedClinicTemplateFlows = async (clinicId) => {
@@ -2424,11 +2450,17 @@ exports.getIntakeConfig = asyncHandler(async (req, res) => {
     payload.clinic_open_state = await resolveClinicOpenState(openStateClinicId);
 
     if (payload.clinic_open_state?.open_now === false) {
-      const closedFlows = await loadClosedClinicTemplateFlows(openStateClinicId);
+      const persistedFlows = Array.isArray(payload.flows) ? payload.flows : [];
+      const closedFlows = (await loadClosedClinicTemplateFlows(openStateClinicId))
+        .filter((flowRule) => !hasCatalogFlowCopy(
+          persistedFlows,
+          flowRule.template_id,
+          getCatalogTemplateFlowIndexFromFlowRule(flowRule)
+        ));
       if (closedFlows.length > 0) {
         payload.flows = [
           ...closedFlows,
-          ...(Array.isArray(payload.flows) ? payload.flows : []),
+          ...persistedFlows,
         ];
       }
     }

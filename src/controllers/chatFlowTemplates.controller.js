@@ -5,6 +5,7 @@ const db = require('../../models');
 
 const ChatFlowTemplate = db.ChatFlowTemplate;
 const Clinica = db.Clinica;
+const IntakeConfig = db.IntakeConfig;
 
 const ADMIN_USER_IDS = (process.env.ADMIN_USER_IDS || '1,44')
   .split(',')
@@ -124,6 +125,208 @@ function matchesDisciplines(templateDisciplinaCodes, clinicDisciplinaCodes) {
   if (templateCodes.length === 0) return true;
   // Intersección
   return templateCodes.some((code) => clinicCodes.includes(code));
+}
+
+function cloneJson(value) {
+  if (value === undefined || value === null) return value;
+  return JSON.parse(JSON.stringify(value));
+}
+
+function normalizeConfigObject(value) {
+  return value && typeof value === 'object' && !Array.isArray(value) ? value : {};
+}
+
+function isDefaultTemplateForClinic(templateDefaultCodes, clinicDisciplinaCodes) {
+  const defaultCodes = normalizeDisciplinaCodes(templateDefaultCodes) || [];
+  if (!Array.isArray(defaultCodes) || defaultCodes.length === 0) return false;
+  if (defaultCodes.some((code) => ['*', 'all', '_all', 'todas'].includes(code))) return true;
+
+  const clinicCodes = normalizeDisciplinaCodes(clinicDisciplinaCodes) || [];
+  if (!Array.isArray(clinicCodes) || clinicCodes.length === 0) return false;
+  return defaultCodes.some((code) => clinicCodes.includes(code));
+}
+
+function extractTemplateFlowRules(template) {
+  const base = template?.toJSON ? template.toJSON() : template;
+  if (!base) return [];
+
+  if (Array.isArray(base.flows) && base.flows.length > 0) {
+    return base.flows
+      .filter((flowRule) => flowRule?.flow?.steps?.length > 0)
+      .map((flowRule, index) => ({
+        index,
+        name: flowRule.name || base.name,
+        url_rules: Array.isArray(flowRule.url_rules) && flowRule.url_rules.length ? flowRule.url_rules : ['*'],
+        flow: flowRule.flow,
+      }));
+  }
+
+  if (base.flow?.steps?.length > 0) {
+    return [{
+      index: 0,
+      name: base.name,
+      url_rules: ['*'],
+      flow: base.flow,
+    }];
+  }
+
+  return [];
+}
+
+function getCatalogTemplateId(flowRule) {
+  const value = flowRule?.catalog_template_id ?? flowRule?.template_id ?? flowRule?._templateId;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function getCatalogTemplateFlowIndex(flowRule) {
+  const value = flowRule?.catalog_template_flow_index ?? flowRule?.template_flow_index ?? 0;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function findCatalogFlowIndex(flows, templateId, templateFlowIndex) {
+  return (flows || []).findIndex((flowRule) => (
+    getCatalogTemplateId(flowRule) === Number(templateId)
+    && getCatalogTemplateFlowIndex(flowRule) === Number(templateFlowIndex)
+  ));
+}
+
+function buildCatalogFlowRule({ template, flowRule, forceDefault, forceClosed, enabled }) {
+  const base = template?.toJSON ? template.toJSON() : template;
+  return {
+    id: `catalog_${base.id}_${flowRule.index}`,
+    name: flowRule.name || base.name,
+    is_default: !!forceDefault,
+    enabled: !!enabled,
+    url_rules: cloneJson(flowRule.url_rules || ['*']),
+    ...(forceClosed ? { show_when_clinic_closed: true } : {}),
+    template_id: base.id,
+    catalog_template_id: base.id,
+    template_flow_index: flowRule.index,
+    catalog_template_flow_index: flowRule.index,
+    template_source: 'chat_flow_catalog',
+    flow: cloneJson(flowRule.flow),
+  };
+}
+
+async function propagateChatFlowTemplateToExistingConfigs(template) {
+  if (!IntakeConfig) return { updated: 0, skipped: 0, reason: 'intake_config_unavailable' };
+
+  const base = template?.toJSON ? template.toJSON() : template;
+  const templateId = Number(base?.id);
+  const templateRules = extractTemplateFlowRules(base);
+  if (!Number.isFinite(templateId) || templateRules.length === 0) {
+    return { updated: 0, skipped: 0, reason: 'empty_template' };
+  }
+
+  const configs = await IntakeConfig.findAll({
+    where: {
+      clinic_id: { [Op.ne]: null },
+      assignment_scope: 'clinic',
+    },
+  });
+  const clinicIds = Array.from(new Set((configs || []).map((record) => Number(record.clinic_id)).filter(Number.isFinite)));
+  const clinics = clinicIds.length
+    ? await Clinica.findAll({
+      where: { id_clinica: { [Op.in]: clinicIds } },
+      attributes: ['id_clinica', 'configuracion'],
+      raw: true,
+    })
+    : [];
+  const clinicById = new Map((clinics || []).map((clinic) => [Number(clinic.id_clinica), clinic]));
+
+  let updated = 0;
+  let skipped = 0;
+
+  for (const record of configs || []) {
+    const clinicId = Number(record.clinic_id);
+    const clinicDisciplinaCodes = normalizeDisciplinesFromClinicConfig(clinicById.get(clinicId)?.configuracion);
+    const disciplineMatches = matchesDisciplines(base.disciplina_codes, clinicDisciplinaCodes);
+    const shouldBeDefault = !!base.is_active && isDefaultTemplateForClinic(base.is_default_for, clinicDisciplinaCodes) && !base.show_when_clinic_closed;
+    const shouldBeClosed = !!base.is_active && !!base.show_when_clinic_closed;
+    const shouldAddIfMissing = !!base.is_active && disciplineMatches;
+
+    const currentConfig = normalizeConfigObject(record.config);
+    const flows = Array.isArray(currentConfig.flows) ? cloneJson(currentConfig.flows) : [];
+    const hadExistingCatalogCopy = flows.some((flowRule) => getCatalogTemplateId(flowRule) === templateId);
+
+    if (!shouldAddIfMissing && !hadExistingCatalogCopy) {
+      skipped += 1;
+      continue;
+    }
+
+    let changed = false;
+    const nextFlows = [...flows];
+
+    for (const templateRule of templateRules) {
+      const existingIndex = findCatalogFlowIndex(nextFlows, templateId, templateRule.index);
+      if (!shouldAddIfMissing && existingIndex < 0) continue;
+
+      const enabled = shouldBeDefault || shouldBeClosed
+        ? true
+        : (existingIndex >= 0 ? !!nextFlows[existingIndex].enabled : false);
+      const nextRule = buildCatalogFlowRule({
+        template: base,
+        flowRule: templateRule,
+        forceDefault: shouldBeDefault && templateRule.index === 0,
+        forceClosed: shouldBeClosed,
+        enabled: !!base.is_active && enabled,
+      });
+
+      if (existingIndex >= 0) {
+        const previous = nextFlows[existingIndex] || {};
+        const preservedDefault = !shouldBeDefault && !shouldBeClosed && !!base.is_active && disciplineMatches
+          ? !!previous.is_default
+          : false;
+        nextFlows[existingIndex] = {
+          ...previous,
+          ...nextRule,
+          id: previous.id || nextRule.id,
+          enabled: !!base.is_active && enabled,
+          is_default: shouldBeDefault && templateRule.index === 0 ? true : preservedDefault,
+        };
+      } else {
+        nextFlows.push(nextRule);
+      }
+      changed = true;
+    }
+
+    if (shouldBeDefault) {
+      for (const flowRule of nextFlows) {
+        const isThisTemplateDefault = getCatalogTemplateId(flowRule) === templateId && getCatalogTemplateFlowIndex(flowRule) === 0;
+        if (flowRule.is_default !== isThisTemplateDefault) {
+          flowRule.is_default = isThisTemplateDefault;
+          changed = true;
+        }
+      }
+    } else if (!base.is_active || !disciplineMatches) {
+      for (const flowRule of nextFlows) {
+        if (getCatalogTemplateId(flowRule) !== templateId) continue;
+        if (flowRule.enabled !== false || flowRule.is_default !== false) {
+          flowRule.enabled = false;
+          flowRule.is_default = false;
+          changed = true;
+        }
+      }
+    }
+
+    const defaultRule = nextFlows.find((flowRule) => flowRule.is_default && flowRule.flow?.steps?.length > 0);
+    const nextConfig = {
+      ...currentConfig,
+      flows: nextFlows,
+      ...(defaultRule ? { flow: cloneJson(defaultRule.flow) } : {}),
+    };
+
+    if (changed && JSON.stringify(currentConfig.flows || []) !== JSON.stringify(nextFlows)) {
+      await record.update({ config: nextConfig });
+      updated += 1;
+    } else {
+      skipped += 1;
+    }
+  }
+
+  return { updated, skipped };
 }
 
 function mapTemplate(row) {
@@ -247,7 +450,8 @@ exports.createChatFlowTemplate = async (req, res) => {
       }, { transaction });
     });
 
-    res.status(201).json(mapTemplate(created));
+    const propagation = await propagateChatFlowTemplateToExistingConfigs(created);
+    res.status(201).json({ ...mapTemplate(created), propagation });
   } catch (error) {
     if (error?.name === 'SequelizeUniqueConstraintError') {
       return res.status(409).json({ message: 'Ya existe una plantilla con ese name' });
@@ -306,7 +510,8 @@ exports.updateChatFlowTemplate = async (req, res) => {
       await row.update(updates, { transaction });
     });
     await row.reload();
-    res.status(200).json(mapTemplate(row));
+    const propagation = await propagateChatFlowTemplateToExistingConfigs(row);
+    res.status(200).json({ ...mapTemplate(row), propagation });
   } catch (error) {
     if (error?.name === 'SequelizeUniqueConstraintError') {
       return res.status(409).json({ message: 'Ya existe una plantilla con ese name' });
@@ -362,7 +567,8 @@ exports.duplicateChatFlowTemplate = async (req, res) => {
           texts,
           appearance,
         });
-        return res.status(201).json(mapTemplate(created));
+        const propagation = await propagateChatFlowTemplateToExistingConfigs(created);
+        return res.status(201).json({ ...mapTemplate(created), propagation });
       } catch (error) {
         if (error?.name !== 'SequelizeUniqueConstraintError') throw error;
         name = `${baseName} (${i + 2})`;
