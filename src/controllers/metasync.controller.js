@@ -1178,7 +1178,9 @@ async function syncInstagramMetrics(asset, accessToken, startDate, endDate) {
                     const totalVal = node?.total_value?.value;
                     if ((m === 'content_views' || m === 'views') && typeof totalVal === 'number') {
                         usedMetric = m;
-                        values = [{ end_time: new Date(new Date(untilStr).getTime()).toISOString(), value: { total_value: totalVal } }];
+                        const bucketDate = new Date(endDate);
+                        bucketDate.setHours(0,0,0,0);
+                        values = [{ end_time: bucketDate.toISOString(), value: { total_value: totalVal } }];
                         break;
                     }
                 } catch (e) {
