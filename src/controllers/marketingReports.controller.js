@@ -952,7 +952,7 @@ function normalizeSourceSyncErrorMessage(label, detail) {
     const projectMatch = message.match(/project\s+(\d+)/i);
     const project = projectMatch?.[1] || null;
     const projectText = project ? ` en el proyecto Google ${project}` : '';
-    return `${label} no puede recuperar reseñas ni publicaciones porque falta activar Google My Business API (mybusiness.googleapis.com)${projectText}. Actívala en Google Cloud, espera unos minutos y vuelve a lanzar el resync.`;
+    return `${label} no puede recuperar reseñas ni publicaciones porque Google está rechazando Google My Business API (mybusiness.googleapis.com) como no habilitada${projectText}. Revisa ese servicio exacto en Google Cloud, espera unos minutos si acabas de activarlo y vuelve a lanzar el resync.`;
   }
 
   if (lower.includes('sin accountname')) {
