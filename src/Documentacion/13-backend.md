@@ -625,6 +625,10 @@ Defaults actuales de interés:
 
 - `JOBS_ADS_SCHEDULE`: `30 0 * * *`
 - `JOBS_GOOGLE_ADS_SCHEDULE`: `20 0 * * *`
+- `JOBS_WEB_SCHEDULE`: `15 4 * * *`
+- `JOBS_ANALYTICS_SCHEDULE`: `45 4 * * *`
+- `JOBS_BUSINESS_PROFILE_SCHEDULE`: `10 5 * * *`
+- `JOBS_BUSINESS_PROFILE_BACKFILL_SCHEDULE`: `20 5 * * 0`
 - `JOBS_ADS_MIDDAY_SCHEDULE`: `0 12 * * *`
 - `JOBS_WHATSAPP_PHONES_SCHEDULE`: `*/15 * * * *`
 - `JOBS_WHATSAPP_TEMPLATES_SCHEDULE`: `*/20 * * * *`
@@ -640,11 +644,31 @@ Ventanas y límites asociados:
 - `GOOGLE_ADS_SYNC_RECENT_DAYS`
 - `GOOGLE_ADS_BACKFILL_DAYS`
 - `GOOGLE_ADS_SYNC_CHUNK_DAYS`
+- `WEB_SYNC_RECENT_DAYS`
+- `WEB_BACKFILL_DAYS`
+- `ANALYTICS_SYNC_RECENT_DAYS`
+- `ANALYTICS_BACKFILL_DAYS`
+- `LOCAL_SYNC_RECENT_DAYS`
+- `LOCAL_BACKFILL_DAYS`
 
 Regla operativa:
 
 - cambiar el default en código no modifica producción/integración si la variable ya existe en `.env` o en PM2;
 - si se ajusta el cron, hay que revisar también el valor efectivo en entorno y reiniciar con actualización de variables si aplica.
+
+Perfil de Empresa Google:
+
+- `POST /oauth/google/local/map-locations` guarda `ClinicBusinessLocations` y encola `business_profile_backfill_locations`;
+- `businessProfileSync` usa la Google Business Profile Performance API para métricas recientes y las rutas v4 de My Business para reseñas/publicaciones;
+- el job persiste en `BusinessProfileDailyMetrics`, `BusinessProfileReviews` y `BusinessProfilePosts`;
+- si Google devuelve 403/scope insuficiente, la ficha queda con `sync_status=error` y la UI debe pedir reconexión con `business.manage`.
+
+Namespace al encolar desde OAuth/gateway:
+
+- Los diálogos de mapeo Google/Meta que llaman a `https://autenticacion.clinicaclick.com` envían `runtime_namespace`.
+- `localhost:4203` debe encolar jobs `dev`; `crm.clinicaclick.com` debe encolar `staging`; `app.clinicaclick.com` debe encolar `prod`.
+- Si no llega namespace y el runtime es gateway, el fallback operativo es `AUTOMATIONS_V2_FALLBACK_RUNTIME_NAMESPACE` o `staging`.
+- El gateway no debe ejecutar el job de negocio; `triggerImmediate` solo tendrá efecto si el namespace coincide con el runtime que reclama.
 
 Refresco diferido tras `Propagar`:
 

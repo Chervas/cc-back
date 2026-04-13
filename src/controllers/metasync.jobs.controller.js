@@ -32,7 +32,9 @@ const JOB_NAME_TO_QUEUE_TYPE = {
   analyticsSync: 'analytics_recent',
   analyticsBackfill: 'analytics_backfill',
   webSync: 'web_recent',
-  webBackfill: 'web_backfill'
+  webBackfill: 'web_backfill',
+  businessProfileSync: 'business_profile_recent',
+  businessProfileBackfill: 'business_profile_backfill'
 };
 
 /**

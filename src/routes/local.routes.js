@@ -9,6 +9,36 @@ const BusinessProfileDailyMetric = db.BusinessProfileDailyMetric;
 const BusinessProfileReview = db.BusinessProfileReview;
 const BusinessProfilePost = db.BusinessProfilePost;
 
+const LOCAL_METRIC_GROUPS = {
+  profile_views: [
+    'BUSINESS_IMPRESSIONS_TOTAL',
+    'BUSINESS_IMPRESSIONS_DESKTOP_MAPS',
+    'BUSINESS_IMPRESSIONS_DESKTOP_SEARCH',
+    'BUSINESS_IMPRESSIONS_MOBILE_MAPS',
+    'BUSINESS_IMPRESSIONS_MOBILE_SEARCH'
+  ],
+  search_views: [
+    'BUSINESS_IMPRESSIONS_SEARCH',
+    'BUSINESS_IMPRESSIONS_DESKTOP_SEARCH',
+    'BUSINESS_IMPRESSIONS_MOBILE_SEARCH'
+  ],
+  map_views: [
+    'BUSINESS_IMPRESSIONS_MAPS',
+    'BUSINESS_IMPRESSIONS_DESKTOP_MAPS',
+    'BUSINESS_IMPRESSIONS_MOBILE_MAPS'
+  ],
+  call_clicks: ['BUSINESS_CONVERSIONS_CALL_CLICKS', 'CALL_CLICKS'],
+  direction_clicks: ['BUSINESS_CONVERSIONS_DIRECTIONS', 'BUSINESS_DIRECTION_REQUESTS'],
+  website_clicks: ['BUSINESS_CONVERSIONS_WEBSITE_CLICKS', 'WEBSITE_CLICKS']
+};
+
+function sumMetricGroup(rows, metrics) {
+  const allowed = new Set(Array.isArray(metrics) ? metrics : [metrics]);
+  return rows
+    .filter((row) => allowed.has(row.metric_type))
+    .reduce((acc, cur) => acc + (cur.value || 0), 0);
+}
+
 function resolveDateRange(startDate, endDate, fallbackDays = 90) {
   const today = new Date(); today.setHours(0, 0, 0, 0);
   const parse = (value, fallback) => {
@@ -76,21 +106,11 @@ router.get('/clinica/:clinicaId/overview', async (req, res) => {
       raw: true
     });
 
-    const sumBy = (rows, metric) => rows.filter(r => r.metric_type === metric).reduce((acc, cur) => acc + (cur.value || 0), 0);
-    const KPIS = {
-      profile_views: 'BUSINESS_IMPRESSIONS_TOTAL',
-      search_views: 'BUSINESS_IMPRESSIONS_SEARCH',
-      map_views: 'BUSINESS_IMPRESSIONS_MAPS',
-      call_clicks: 'BUSINESS_CONVERSIONS_CALL_CLICKS',
-      direction_clicks: 'BUSINESS_CONVERSIONS_DIRECTIONS',
-      website_clicks: 'BUSINESS_CONVERSIONS_WEBSITE_CLICKS'
-    };
-
     const current = {};
     const previous = {};
-    Object.entries(KPIS).forEach(([key, metric]) => {
-      current[key] = sumBy(metrics, metric);
-      previous[key] = sumBy(prevMetrics, metric);
+    Object.entries(LOCAL_METRIC_GROUPS).forEach(([key, metricGroup]) => {
+      current[key] = sumMetricGroup(metrics, metricGroup);
+      previous[key] = sumMetricGroup(prevMetrics, metricGroup);
     });
 
     const delta = (cur, prev) => {
@@ -129,29 +149,35 @@ router.get('/clinica/:clinicaId/overview', async (req, res) => {
 router.get('/clinica/:clinicaId/timeseries', async (req, res) => {
   try {
     const { clinicaId } = req.params;
-    const { startDate, endDate, metric = 'BUSINESS_IMPRESSIONS_TOTAL' } = req.query;
+    const { startDate, endDate, metric = 'profile_views' } = req.query;
     const range = resolveDateRange(startDate, endDate, 90);
+    const metricGroup = LOCAL_METRIC_GROUPS[metric] || [metric];
     const rows = await BusinessProfileDailyMetric.findAll({
       where: {
         clinica_id: clinicaId,
-        metric_type: metric,
+        metric_type: { [Op.in]: metricGroup },
         date: { [Op.between]: [range.start, range.end] }
       },
       order: [['date', 'ASC']],
       raw: true
     });
-    const current = rows.map(r => ({ date: r.date, value: r.value || 0 }));
+    const toSeries = (items) => {
+      const grouped = new Map();
+      items.forEach((row) => grouped.set(row.date, (grouped.get(row.date) || 0) + (row.value || 0)));
+      return Array.from(grouped.entries()).map(([date, value]) => ({ date, value }));
+    };
+    const current = toSeries(rows);
 
     const prevRows = await BusinessProfileDailyMetric.findAll({
       where: {
         clinica_id: clinicaId,
-        metric_type: metric,
+        metric_type: { [Op.in]: metricGroup },
         date: { [Op.between]: [range.previous.start, range.previous.end] }
       },
       order: [['date', 'ASC']],
       raw: true
     });
-    const previous = prevRows.map(r => ({ date: r.date, value: r.value || 0 }));
+    const previous = toSeries(prevRows);
     return res.json({ success: true, metric, period: { start: range.start, end: range.end }, comparison: range.previous, current, previous });
   } catch (e) {
     console.error('❌ /local/timeseries:', e.message);

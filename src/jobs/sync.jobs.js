@@ -32,6 +32,20 @@ const notificationService = require('../services/notifications.service');
 const { enqueueSyncForAllWabas } = require('../services/whatsappTemplates.service');
 const { enqueueSyncPhonesForAllWabas } = require('../services/whatsappPhones.service');
 
+const GOOGLE_BUSINESS_PERFORMANCE_API = 'https://businessprofileperformance.googleapis.com/v1';
+const GOOGLE_MY_BUSINESS_API = 'https://mybusiness.googleapis.com/v4';
+const GOOGLE_BUSINESS_DAILY_METRICS = [
+  'BUSINESS_IMPRESSIONS_DESKTOP_MAPS',
+  'BUSINESS_IMPRESSIONS_DESKTOP_SEARCH',
+  'BUSINESS_IMPRESSIONS_MOBILE_MAPS',
+  'BUSINESS_IMPRESSIONS_MOBILE_SEARCH',
+  'BUSINESS_DIRECTION_REQUESTS',
+  'CALL_CLICKS',
+  'WEBSITE_CLICKS',
+  'BUSINESS_CONVERSATIONS',
+  'BUSINESS_BOOKINGS'
+];
+
 // Importar modelos
 const {
   ClinicMetaAsset,
@@ -144,6 +158,8 @@ class MetaSyncJobs {
       webBackfill: 'Backfill histórico de Search Console (12–16 meses) para cache y rapidez.',
       analyticsSync: 'Sincroniza métricas de Google Analytics 4 (sesiones, usuarios, fuentes, audiencias).',
       analyticsBackfill: 'Backfill extendido de Analytics para nuevos mapeos o reprocesos.',
+      businessProfileSync: 'Sincroniza Perfil de Empresa Google: rendimiento local, reseñas y publicaciones.',
+      businessProfileBackfill: 'Backfill de Perfil de Empresa Google para nuevas fichas o reprocesos.',
       whatsappTemplatesSync: 'Sincroniza estados de plantillas WhatsApp para todos los WABA activos.',
       whatsappPhonesSync: 'Sincroniza números WhatsApp (existencia/estado) para evitar datos desactualizados.',
       tokenValidation: 'Valida tokens (usuario/página) y registra estado/errores recientes.',
@@ -167,6 +183,8 @@ class MetaSyncJobs {
         webBackfill: process.env.JOBS_WEB_BACKFILL_SCHEDULE || '30 4 * * 0',
         analyticsSync: process.env.JOBS_ANALYTICS_SCHEDULE || '45 4 * * *',
         analyticsBackfill: process.env.JOBS_ANALYTICS_BACKFILL_SCHEDULE || '0 5 * * 0',
+        businessProfileSync: process.env.JOBS_BUSINESS_PROFILE_SCHEDULE || '10 5 * * *',
+        businessProfileBackfill: process.env.JOBS_BUSINESS_PROFILE_BACKFILL_SCHEDULE || '20 5 * * 0',
         whatsappTemplatesSync: process.env.JOBS_WHATSAPP_TEMPLATES_SCHEDULE || '*/20 * * * *',
         whatsappPhonesSync: process.env.JOBS_WHATSAPP_PHONES_SCHEDULE || '*/15 * * * *'
       },
@@ -255,6 +273,8 @@ class MetaSyncJobs {
       this.registerJob('webBackfill', this.config.schedules.webBackfill, () => this.executeWebBackfill());
       this.registerJob('analyticsSync', this.config.schedules.analyticsSync, () => this.executeAnalyticsSync());
       this.registerJob('analyticsBackfill', this.config.schedules.analyticsBackfill, () => this.executeAnalyticsBackfill());
+      this.registerJob('businessProfileSync', this.config.schedules.businessProfileSync, () => this.executeBusinessProfileSync());
+      this.registerJob('businessProfileBackfill', this.config.schedules.businessProfileBackfill, () => this.executeBusinessProfileBackfill());
       this.registerJob('whatsappTemplatesSync', this.config.schedules.whatsappTemplatesSync, () => this.executeWhatsappTemplatesSync());
       this.registerJob('whatsappPhonesSync', this.config.schedules.whatsappPhonesSync, () => this.executeWhatsappPhonesSync());
 
@@ -1373,6 +1393,360 @@ class MetaSyncJobs {
       this._analyticsBackfillMode = prevMode;
       this.config.analytics.recentDays = prev;
     }
+  }
+
+  async executeBusinessProfileSync(options = {}) {
+    const {
+      clinicId = null,
+      locationIds = null,
+      startDate = null,
+      endDate = null
+    } = options;
+    const jobType = this._localBackfillMode ? 'business_profile_backfill' : 'business_profile_sync';
+    const syncLog = await SyncLog.create({ job_type: jobType, status: 'running', start_time: new Date(), records_processed: 0 });
+    const report = { locations: 0, processed: 0, metricRows: 0, reviews: 0, posts: 0, errors: [] };
+
+    try {
+      const where = { is_active: true };
+      if (clinicId) {
+        where.clinica_id = clinicId;
+      }
+      if (Array.isArray(locationIds) && locationIds.length) {
+        where.location_id = { [Op.in]: locationIds.map((id) => String(id)).filter(Boolean) };
+      }
+
+      const locations = await ClinicBusinessLocation.findAll({ where });
+      report.locations = locations.length;
+
+      if (!locations.length) {
+        await syncLog.update({ status: 'completed', end_time: new Date(), records_processed: 0, status_report: report });
+        console.log('ℹ️ businessProfileSync sin ubicaciones activas', { clinicId, locationIds });
+        return { status: 'completed', processed: 0, report };
+      }
+
+      const defaultEnd = new Date();
+      defaultEnd.setHours(0, 0, 0, 0);
+      defaultEnd.setDate(defaultEnd.getDate() - 1);
+      const end = this._coerceDate(endDate) || defaultEnd;
+      end.setHours(0, 0, 0, 0);
+      const spanDays = Math.max(1, this._localBackfillMode ? this.config.local.backfillDays : this.config.local.recentDays);
+      const start = this._coerceDate(startDate) || new Date(end);
+      start.setDate(start.getDate() - (spanDays - 1));
+      const startStr = this._formatDate(start);
+      const endStr = this._formatDate(end);
+      report.start = startStr;
+      report.end = endStr;
+
+      for (const location of locations) {
+        try {
+          const { accessToken } = await this._ensureGoogleAccessToken(location.google_connection_id);
+          const metricRows = await this._syncBusinessProfileMetrics(location, accessToken, start, end);
+          const reviews = await this._syncBusinessProfileReviews(location, accessToken);
+          const posts = await this._syncBusinessProfilePosts(location, accessToken);
+
+          report.processed += 1;
+          report.metricRows += metricRows;
+          report.reviews += reviews;
+          report.posts += posts;
+          await location.update({ last_synced_at: new Date(), sync_status: 'completed' });
+          await syncLog.update({ records_processed: report.processed, status_report: report });
+
+          if (this.config.local.betweenLocationsSleepMs > 0) {
+            await new Promise((resolve) => setTimeout(resolve, this.config.local.betweenLocationsSleepMs));
+          }
+        } catch (err) {
+          const message = err.response?.data?.error?.message || err.message;
+          report.errors.push({ locationId: location.location_id, clinicaId: location.clinica_id, message });
+          console.error('❌ businessProfileSync location error:', location.location_id, message);
+          try {
+            await location.update({ sync_status: 'error', last_synced_at: new Date() });
+          } catch (_) {}
+        }
+      }
+
+      await syncLog.update({ status: 'completed', end_time: new Date(), records_processed: report.processed, status_report: report });
+      console.log('✅ businessProfileSync completado', report);
+      return { status: 'completed', processed: report.processed, report };
+    } catch (error) {
+      await syncLog.update({ status: 'failed', end_time: new Date(), error_message: error.message, status_report: report });
+      console.error('❌ Error en businessProfileSync:', error);
+      throw error;
+    }
+  }
+
+  async executeBusinessProfileBackfill(options = {}) {
+    const prevMode = this._localBackfillMode;
+    this._localBackfillMode = true;
+    try {
+      return await this.executeBusinessProfileSync(options);
+    } finally {
+      this._localBackfillMode = prevMode;
+    }
+  }
+
+  async executeBusinessProfileBackfillForLocations(locationMappings = []) {
+    if (!Array.isArray(locationMappings) || locationMappings.length === 0) {
+      throw new Error('locationMappings must contain at least one { clinicId, locationId }');
+    }
+    const locationIds = Array.from(new Set(locationMappings.map((item) => String(item?.locationId || '').trim()).filter(Boolean)));
+    const clinicId = locationMappings[0]?.clinicId || locationMappings[0]?.clinicaId || null;
+    return this.executeBusinessProfileBackfill({ clinicId, locationIds });
+  }
+
+  async _syncBusinessProfileMetrics(location, accessToken, start, end) {
+    const locationName = this._normalizeBusinessProfilePerformanceLocation(location.location_id);
+    if (!locationName) {
+      throw new Error('Ubicación Google Business Profile sin location_id válido');
+    }
+
+    const params = this._buildBusinessProfileMetricParams(start, end);
+    const response = await axios.get(
+      `${GOOGLE_BUSINESS_PERFORMANCE_API}/${locationName}:fetchMultiDailyMetricsTimeSeries`,
+      { params, headers: { Authorization: `Bearer ${accessToken}` } }
+    );
+    const containers = response.data?.multiDailyMetricTimeSeries
+      || response.data?.multi_daily_metric_time_series
+      || [];
+    let rows = 0;
+
+    for (const container of containers) {
+      const seriesList = container.dailyMetricTimeSeries
+        || container.daily_metric_time_series
+        || [];
+      for (const series of seriesList) {
+        const metric = series.dailyMetric || series.daily_metric;
+        if (!metric) {
+          continue;
+        }
+        const datedValues = series.timeSeries?.datedValues
+          || series.time_series?.dated_values
+          || [];
+        for (const point of datedValues) {
+          const date = this._formatGoogleDateObject(point.date);
+          if (!date) {
+            continue;
+          }
+          const value = Number(point.value?.value ?? point.value ?? 0) || 0;
+          await this._upsertBusinessProfileDailyMetric({
+            clinica_id: location.clinica_id,
+            business_location_id: location.id,
+            metric_type: metric,
+            metric_subtype: this._stringifyMetricSubtype(series.dailySubEntityType || series.daily_sub_entity_type),
+            date,
+            value
+          });
+          rows += 1;
+        }
+      }
+    }
+
+    return rows;
+  }
+
+  async _syncBusinessProfileReviews(location, accessToken) {
+    const resourceBase = this._buildBusinessProfileV4LocationPath(location);
+    if (!resourceBase) {
+      return 0;
+    }
+
+    let nextPageToken = null;
+    let processed = 0;
+    do {
+      const response = await axios.get(`${GOOGLE_MY_BUSINESS_API}/${resourceBase}/reviews`, {
+        params: { pageSize: 50, pageToken: nextPageToken || undefined },
+        headers: { Authorization: `Bearer ${accessToken}` }
+      });
+      const reviews = response.data?.reviews || [];
+      for (const review of reviews) {
+        const reviewName = review.name || review.reviewId || null;
+        if (!reviewName) {
+          continue;
+        }
+        const starRating = this._normalizeGoogleStarRating(review.starRating);
+        const reply = review.reviewReply || null;
+        const payload = {
+          clinica_id: location.clinica_id,
+          business_location_id: location.id,
+          review_name: reviewName,
+          reviewer_name: review.reviewer?.displayName || review.reviewer?.name || null,
+          reviewer_profile_photo_url: review.reviewer?.profilePhotoUrl || null,
+          star_rating: starRating,
+          comment: review.comment || null,
+          create_time: review.createTime ? new Date(review.createTime) : null,
+          update_time: review.updateTime ? new Date(review.updateTime) : null,
+          review_state: review.reviewState || null,
+          is_new: review.createTime ? (Date.now() - new Date(review.createTime).getTime()) <= 30 * MS_PER_DAY : false,
+          is_negative: starRating > 0 && starRating <= 3,
+          reply_comment: reply?.comment || null,
+          reply_update_time: reply?.updateTime ? new Date(reply.updateTime) : null,
+          has_reply: Boolean(reply?.comment),
+          raw_payload: review
+        };
+        const existing = await BusinessProfileReview.findOne({ where: { review_name: reviewName } });
+        if (existing) {
+          await existing.update(payload);
+        } else {
+          await BusinessProfileReview.create(payload);
+        }
+        processed += 1;
+      }
+      nextPageToken = response.data?.nextPageToken || null;
+    } while (nextPageToken);
+
+    return processed;
+  }
+
+  async _syncBusinessProfilePosts(location, accessToken) {
+    const resourceBase = this._buildBusinessProfileV4LocationPath(location);
+    if (!resourceBase) {
+      return 0;
+    }
+
+    let nextPageToken = null;
+    let processed = 0;
+    do {
+      const response = await axios.get(`${GOOGLE_MY_BUSINESS_API}/${resourceBase}/localPosts`, {
+        params: { pageSize: 100, pageToken: nextPageToken || undefined },
+        headers: { Authorization: `Bearer ${accessToken}` }
+      });
+      const posts = response.data?.localPosts || [];
+      for (const post of posts) {
+        const postName = post.name || null;
+        if (!postName) {
+          continue;
+        }
+        const media = Array.isArray(post.media) && post.media.length ? post.media[0] : null;
+        const payload = {
+          clinica_id: location.clinica_id,
+          business_location_id: location.id,
+          post_name: postName,
+          summary: post.summary || null,
+          topic_type: post.topicType || null,
+          call_to_action_type: post.callToAction?.actionType || null,
+          call_to_action_url: post.callToAction?.url || null,
+          media_url: media?.googleUrl || media?.sourceUrl || null,
+          create_time: post.createTime ? new Date(post.createTime) : null,
+          update_time: post.updateTime ? new Date(post.updateTime) : null,
+          event_start_time: post.event?.schedule?.startDate ? this._dateFromGoogleDateObject(post.event.schedule.startDate) : null,
+          event_end_time: post.event?.schedule?.endDate ? this._dateFromGoogleDateObject(post.event.schedule.endDate) : null,
+          visibility_state: post.state || post.visibilityState || null,
+          raw_payload: post
+        };
+        const existing = await BusinessProfilePost.findOne({ where: { post_name: postName } });
+        if (existing) {
+          await existing.update(payload);
+        } else {
+          await BusinessProfilePost.create(payload);
+        }
+        processed += 1;
+      }
+      nextPageToken = response.data?.nextPageToken || null;
+    } while (nextPageToken);
+
+    return processed;
+  }
+
+  _buildBusinessProfileMetricParams(start, end) {
+    const params = new URLSearchParams();
+    for (const metric of GOOGLE_BUSINESS_DAILY_METRICS) {
+      params.append('dailyMetrics', metric);
+    }
+    this._appendGoogleDateParams(params, 'daily_range.start_date', start);
+    this._appendGoogleDateParams(params, 'daily_range.end_date', end);
+    return params;
+  }
+
+  _appendGoogleDateParams(params, prefix, date) {
+    const d = date instanceof Date ? new Date(date.getTime()) : new Date(date);
+    params.append(`${prefix}.year`, String(d.getFullYear()));
+    params.append(`${prefix}.month`, String(d.getMonth() + 1));
+    params.append(`${prefix}.day`, String(d.getDate()));
+  }
+
+  async _upsertBusinessProfileDailyMetric(payload) {
+    const where = {
+      business_location_id: payload.business_location_id,
+      metric_type: payload.metric_type,
+      metric_subtype: payload.metric_subtype,
+      date: payload.date
+    };
+    const existing = await BusinessProfileDailyMetric.findOne({ where });
+    if (existing) {
+      await existing.update(payload);
+    } else {
+      await BusinessProfileDailyMetric.create(payload);
+    }
+  }
+
+  _normalizeBusinessProfilePerformanceLocation(value) {
+    const raw = String(value || '').trim();
+    if (!raw) {
+      return null;
+    }
+    const match = raw.match(/(?:^|\/)locations\/([^/]+)$/);
+    const id = match ? match[1] : raw.replace(/^locations\//, '');
+    return id ? `locations/${id}` : null;
+  }
+
+  _buildBusinessProfileV4LocationPath(location) {
+    const rawPayload = location.raw_payload && typeof location.raw_payload === 'object'
+      ? location.raw_payload
+      : {};
+    const accountName = rawPayload.accountName || rawPayload.account_name || null;
+    const locationName = this._normalizeBusinessProfilePerformanceLocation(location.location_id);
+    const locationId = locationName ? locationName.split('/').pop() : null;
+    if (!accountName || !locationId) {
+      return null;
+    }
+    return `${accountName}/locations/${locationId}`;
+  }
+
+  _formatGoogleDateObject(value) {
+    if (!value) {
+      return null;
+    }
+    const year = Number(value.year);
+    const month = Number(value.month);
+    const day = Number(value.day);
+    if (!year || !month || !day) {
+      return null;
+    }
+    return `${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
+  }
+
+  _dateFromGoogleDateObject(value) {
+    const date = this._formatGoogleDateObject(value);
+    return date ? new Date(date) : null;
+  }
+
+  _stringifyMetricSubtype(value) {
+    if (!value) {
+      return null;
+    }
+    if (typeof value === 'string') {
+      return value;
+    }
+    try {
+      return JSON.stringify(value);
+    } catch (_) {
+      return null;
+    }
+  }
+
+  _normalizeGoogleStarRating(value) {
+    const raw = String(value || '').trim().toUpperCase();
+    const map = {
+      ONE: 1,
+      TWO: 2,
+      THREE: 3,
+      FOUR: 4,
+      FIVE: 5
+    };
+    if (map[raw]) {
+      return map[raw];
+    }
+    const numeric = Number(value);
+    return Number.isFinite(numeric) ? numeric : 0;
   }
 
   async _ensureGoogleAccessToken(connectionId) {

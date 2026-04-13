@@ -106,6 +106,19 @@ function ratioPct(numerator, denominator, decimals = 1) {
   return round((toNumber(numerator) / den) * 100, decimals);
 }
 
+const BUSINESS_PROFILE_METRIC_GROUPS = {
+  views: [
+    'BUSINESS_IMPRESSIONS_TOTAL',
+    'BUSINESS_IMPRESSIONS_DESKTOP_MAPS',
+    'BUSINESS_IMPRESSIONS_DESKTOP_SEARCH',
+    'BUSINESS_IMPRESSIONS_MOBILE_MAPS',
+    'BUSINESS_IMPRESSIONS_MOBILE_SEARCH'
+  ],
+  calls: ['BUSINESS_CONVERSIONS_CALL_CLICKS', 'CALL_CLICKS'],
+  directions: ['BUSINESS_CONVERSIONS_DIRECTIONS', 'BUSINESS_DIRECTION_REQUESTS'],
+  websiteClicks: ['BUSINESS_CONVERSIONS_WEBSITE_CLICKS', 'WEBSITE_CLICKS']
+};
+
 function money(value) {
   return round(value, 2);
 }
@@ -738,9 +751,12 @@ async function aggregateBusinessProfile(scope, range) {
     ...buildDateOnlyWhere('date', range),
   };
   const rows = await BusinessProfileDailyMetric.findAll({ where: metricWhere, raw: true });
-  const sumBy = (metric) => rows
-    .filter((row) => row.metric_type === metric)
-    .reduce((acc, row) => acc + toNumber(row.value), 0);
+  const sumBy = (metrics) => {
+    const allowed = new Set(Array.isArray(metrics) ? metrics : [metrics]);
+    return rows
+      .filter((row) => allowed.has(row.metric_type))
+      .reduce((acc, row) => acc + toNumber(row.value), 0);
+  };
 
   const reviewWhere = scopedWhere('clinica_id', scope);
   const reviews = await BusinessProfileReview.findAll({ where: reviewWhere, raw: true });
@@ -752,10 +768,10 @@ async function aggregateBusinessProfile(scope, range) {
   const unansweredReviews = reviews.filter((row) => !row.has_reply).length;
 
   const metrics = {
-    views: sumBy('BUSINESS_IMPRESSIONS_TOTAL'),
-    calls: sumBy('BUSINESS_CONVERSIONS_CALL_CLICKS'),
-    directions: sumBy('BUSINESS_CONVERSIONS_DIRECTIONS'),
-    websiteClicks: sumBy('BUSINESS_CONVERSIONS_WEBSITE_CLICKS'),
+    views: sumBy(BUSINESS_PROFILE_METRIC_GROUPS.views),
+    calls: sumBy(BUSINESS_PROFILE_METRIC_GROUPS.calls),
+    directions: sumBy(BUSINESS_PROFILE_METRIC_GROUPS.directions),
+    websiteClicks: sumBy(BUSINESS_PROFILE_METRIC_GROUPS.websiteClicks),
     newReviews,
     averageRating,
     totalReviews,
