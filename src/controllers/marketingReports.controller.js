@@ -941,11 +941,49 @@ const SOURCE_SYNC_CONFIG = {
   },
 };
 
-function sourceSyncMessage(label, state) {
-  if (state === 'error') {
+function normalizeSourceSyncErrorMessage(label, detail) {
+  const message = String(detail || '').trim();
+  if (!message) {
     return `${label} tiene una sincronización con error. Revisa la conexión o vuelve a lanzar el mapeo.`;
   }
+
+  const lower = message.toLowerCase();
+  if (lower.includes('google my business api') && lower.includes('disabled')) {
+    const projectMatch = message.match(/project\s+(\d+)/i);
+    const project = projectMatch?.[1] || null;
+    const projectText = project ? ` en el proyecto Google ${project}` : '';
+    return `${label} no puede recuperar reseñas ni publicaciones porque falta activar Google My Business API (mybusiness.googleapis.com)${projectText}. Actívala en Google Cloud, espera unos minutos y vuelve a lanzar el resync.`;
+  }
+
+  if (lower.includes('sin accountname')) {
+    return `${label} no puede sincronizar reseñas/publicaciones porque la ficha no conserva el accountName de Google. Vuelve a mapear el Perfil de Empresa.`;
+  }
+
+  return `${label} tiene una sincronización con error: ${message}`;
+}
+
+function sourceSyncMessage(label, state, detail = null) {
+  if (state === 'error') {
+    return normalizeSourceSyncErrorMessage(label, detail);
+  }
   return `Estamos recabando datos de ${label}. Los resultados pueden tardar unos minutos en aparecer.`;
+}
+
+function extractJobSyncError(job) {
+  if (!job) return null;
+  if (job.error_message) return job.error_message;
+
+  const summary = job.result_summary || {};
+  const candidates = [
+    summary?.error,
+    summary?.message,
+    summary?.report?.error,
+    summary?.report?.message,
+    summary?.report?.errors?.[0]?.message,
+    summary?.errors?.[0]?.message,
+  ];
+
+  return candidates.find((value) => typeof value === 'string' && value.trim()) || null;
 }
 
 function normalizePayloadArray(value) {
@@ -1027,14 +1065,15 @@ function buildSourceSyncState({ config, mapped, lastSync, jobs = [], pendingReco
   }
 
   if (errorRecords > 0 || failedJob) {
+    const errorJob = failedJob || jobs.find((job) => extractJobSyncError(job));
     return {
       source: config.source,
       label: config.label,
       state: 'error',
       active: true,
-      message: sourceSyncMessage(config.label, 'error'),
-      jobId: failedJob?.id || null,
-      updatedAt: failedJob?.updated_at || failedJob?.created_at || null,
+      message: sourceSyncMessage(config.label, 'error', extractJobSyncError(errorJob)),
+      jobId: errorJob?.id || null,
+      updatedAt: errorJob?.updated_at || errorJob?.created_at || null,
     };
   }
 
