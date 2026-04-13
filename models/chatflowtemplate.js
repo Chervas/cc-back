@@ -21,6 +21,8 @@ module.exports = (sequelize, DataTypes) => {
       is_default_for: { type: DataTypes.JSON, allowNull: true, defaultValue: null },
       // Tipo de icono sugerido para la plantilla (UI).
       icon_type: { type: DataTypes.STRING(50), allowNull: true, defaultValue: 'whatsapp' },
+      // Cuando la clínica está fuera de horario, estas plantillas tienen prioridad en el widget.
+      show_when_clinic_closed: { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: false },
       is_active: { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: true },
       flow: { type: DataTypes.JSON, allowNull: true },
       flows: { type: DataTypes.JSON, allowNull: true },

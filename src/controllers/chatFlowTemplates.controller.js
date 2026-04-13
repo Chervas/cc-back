@@ -134,6 +134,7 @@ function mapTemplate(row) {
     tags: data.tags ?? null,
     disciplina_codes: data.disciplina_codes ?? null,
     is_default_for: data.is_default_for ?? null,
+    show_when_clinic_closed: !!data.show_when_clinic_closed,
     is_active: !!data.is_active,
     flow: data.flow ?? null,
     flows: data.flows ?? null,
@@ -209,6 +210,7 @@ exports.createChatFlowTemplate = async (req, res) => {
     const disciplina_codes = normalizeDisciplinaCodes(body.disciplina_codes);
     const is_default_for = normalizeDisciplinaCodes(body.is_default_for);
     const is_active = toBool(body.is_active, true);
+    const show_when_clinic_closed = toBool(body.show_when_clinic_closed, false);
 
     const flow = body.flow ?? null;
     const flows = body.flows ?? null;
@@ -236,6 +238,7 @@ exports.createChatFlowTemplate = async (req, res) => {
         tags: tags === undefined ? null : tags,
         disciplina_codes: disciplina_codes === undefined ? null : disciplina_codes,
         is_default_for: defaults,
+        show_when_clinic_closed,
         is_active,
         flow,
         flows,
@@ -274,6 +277,9 @@ exports.updateChatFlowTemplate = async (req, res) => {
       const defaults = normalizeDisciplinaCodes(body.is_default_for) || [];
       updates.is_default_for = defaults.length > 0 ? defaults : null;
       newDefaultDisciplines = defaults;
+    }
+    if (body.show_when_clinic_closed !== undefined) {
+      updates.show_when_clinic_closed = toBool(body.show_when_clinic_closed, row.show_when_clinic_closed);
     }
     if (body.is_active !== undefined) updates.is_active = toBool(body.is_active, row.is_active);
     if (body.flow !== undefined) updates.flow = body.flow;
@@ -334,6 +340,7 @@ exports.duplicateChatFlowTemplate = async (req, res) => {
     const disciplina_codes = row.disciplina_codes ?? null;
     // Una copia nunca debe heredar defaults por disciplina para evitar colisiones.
     const is_default_for = null;
+    const show_when_clinic_closed = !!row.show_when_clinic_closed;
     const is_active = row.is_active;
     const flow = row.flow ?? null;
     const flows = row.flows ?? null;
@@ -348,6 +355,7 @@ exports.duplicateChatFlowTemplate = async (req, res) => {
           tags,
           disciplina_codes,
           is_default_for,
+          show_when_clinic_closed,
           is_active,
           flow,
           flows,

@@ -58,6 +58,46 @@ Cambios de código asociados:
 
 Referencia operativa completa: `cc-front/src/Documentacion/31-roadmap-arquitectura-entornos-gateway.md`.
 
+## 2026-04-13 - Intake: flujos de chat para clínica cerrada
+
+Se añade soporte real para plantillas de flujos de chat que solo deben mostrarse cuando la clínica está fuera de horario.
+
+Modelo:
+
+| Tabla | Campo | Uso |
+|:---|:---|:---|
+| `ChatFlowTemplates` | `show_when_clinic_closed` | Marca una plantilla activa como candidata para clínica cerrada. |
+
+Endpoints afectados:
+
+| Endpoint | Cambio |
+|:---|:---|
+| `GET /api/marketing/chat-flow-templates` | Devuelve `show_when_clinic_closed`. |
+| `POST /api/marketing/chat-flow-templates` | Acepta `show_when_clinic_closed`. |
+| `PUT /api/marketing/chat-flow-templates/:id` | Actualiza `show_when_clinic_closed`. |
+| `GET /api/intake/config` | Devuelve `clinic_open_state` y añade flujos especiales si aplican. |
+
+`GET /api/intake/config` calcula apertura desde `ClinicaHorarios`:
+
+- `open_now=true`: la clínica está abierta;
+- `open_now=false`: la clínica está cerrada;
+- `open_now=null`: no hay horario estructurado suficiente o no hay clínica efectiva única.
+
+Regla runtime:
+
+- si `open_now=false`, el snippet evalúa primero flujos con `show_when_clinic_closed=true`;
+- esos flujos mantienen `url_rules`, por lo que pueden seguir aplicando por página;
+- si no hay match cerrado, se usa la lógica normal de flujo por URL/default;
+- si no hay horario, nunca se activa cierre por defecto.
+
+Migración asociada:
+
+- `20260413082000-add-closed-clinic-flag-to-chat-flow-templates.js`
+
+Limitación consciente:
+
+- En scope de grupo sin clínica efectiva única no se fuerza horario de cierre, porque distintas sedes pueden tener horarios distintos.
+
 ## 2026-04-12 - Informes de marketing agregados V1
 
 Se añade el primer endpoint real para `Marketing > Informes`:
