@@ -1226,6 +1226,7 @@ router.post('/google/local/map-locations', async (req, res) => {
                 continue;
             }
 
+            const rawLocation = mapping.rawLocation || mapping.rawPayload || {};
             const payload = {
                 clinica_id: clinicaId,
                 google_connection_id: conn.id,
@@ -1236,7 +1237,11 @@ router.post('/google/local/map-locations', async (req, res) => {
                 sync_status: 'pending',
                 is_verified: typeof mapping.isVerified === 'boolean' ? mapping.isVerified : false,
                 is_suspended: typeof mapping.isSuspended === 'boolean' ? mapping.isSuspended : false,
-                raw_payload: mapping.rawLocation || mapping.rawPayload || null,
+                raw_payload: {
+                    ...(rawLocation && typeof rawLocation === 'object' ? rawLocation : {}),
+                    accountName: mapping.accountName || rawLocation.accountName || null,
+                    accountDisplayName: mapping.accountDisplayName || rawLocation.accountDisplayName || null
+                },
                 is_active: true,
                 last_synced_at: null
             };

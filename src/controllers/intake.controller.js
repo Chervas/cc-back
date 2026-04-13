@@ -2024,7 +2024,7 @@ exports.getIntakeConfig = asyncHandler(async (req, res) => {
 
       payload.available_locations = clinics.map((c) => {
         const phone = c.telefono || null;
-        const whatsapp = whatsappByClinicId.get(c.id_clinica) || groupWhatsApp || null;
+        const whatsapp = whatsappByClinicId.get(c.id_clinica) || groupWhatsApp || normalizePhone(phone) || null;
         return {
           id: c.id_clinica,
           label: c.nombre_clinica,
@@ -2062,7 +2062,7 @@ exports.getIntakeConfig = asyncHandler(async (req, res) => {
           id: clinicRow.id_clinica,
           label: clinicRow.nombre_clinica,
           phone: clinicRow.telefono || null,
-          whatsapp,
+          whatsapp: whatsapp || normalizePhone(clinicRow.telefono) || null,
           url_avatar: clinicRow.url_avatar || null
         }];
       }
