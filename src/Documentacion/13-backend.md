@@ -153,6 +153,7 @@ Estado de sincronización:
 - En Perfil de Empresa Google, si el último `JobRequest.result_summary.report.errors[]` indica que `mybusiness.googleapis.com` está deshabilitada, el informe debe indicar que Google está rechazando ese servicio exacto como no habilitado en el proyecto afectado y pedir revisar Google Cloud antes de relanzar el resync.
 - El frontend usa ese estado para mostrar una barra informativa y refrescar cada 60 segundos mientras haya trabajo pendiente.
 - El objetivo es que conectar GA4, Search Console, Perfil de Empresa, Google Ads o Meta Ads no parezca "sin datos" durante los primeros minutos.
+- Meta Ads puede llegar a `SocialAdsInsightsDaily` solo con `level='ad'` o `level='adset'` aunque no haya filas `level='campaign'`. El agregador de informes debe sumar primero `campaign` y caer a `adset`/`ad` si el nivel superior no tiene gasto/clicks/impresiones, evitando tanto inversión `0` como doble conteo.
 
 Search Console:
 

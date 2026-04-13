@@ -423,43 +423,72 @@ async function aggregateMetaAds(scope, range) {
   }
 
   const scopeWhere = buildAdsScopeWhere(scope, 'clinica_id', 'grupo_clinica_id');
-  const where = {
+  const baseWhere = {
     ...scopeWhere,
-    level: 'campaign',
     ...buildDateOnlyWhere('date', range),
   };
 
-  let campaignRows = await SocialAdsInsightsDaily.findAll({
-    attributes: [
-      'entity_id',
-      [fn('SUM', col('spend')), 'spend'],
-      [fn('SUM', col('clicks')), 'clicks'],
-      [fn('SUM', col('impressions')), 'impressions'],
-      [fn('MAX', col('date')), 'lastDate'],
-    ],
-    where,
-    group: ['entity_id'],
-    order: [[literal('SUM(spend)'), 'DESC']],
-    limit: 5,
-    raw: true,
-  });
+  const fetchInsightRows = async (level) => {
+    const where = { ...baseWhere, level };
+    const [rows, totals] = await Promise.all([
+      SocialAdsInsightsDaily.findAll({
+        attributes: [
+          'entity_id',
+          [fn('SUM', col('spend')), 'spend'],
+          [fn('SUM', col('clicks')), 'clicks'],
+          [fn('SUM', col('impressions')), 'impressions'],
+          [fn('MAX', col('date')), 'lastDate'],
+        ],
+        where,
+        group: ['entity_id'],
+        order: [[literal('SUM(spend)'), 'DESC']],
+        limit: 5,
+        raw: true,
+      }),
+      SocialAdsInsightsDaily.findAll({
+        attributes: [
+          [fn('SUM', col('spend')), 'spend'],
+          [fn('SUM', col('clicks')), 'clicks'],
+          [fn('SUM', col('impressions')), 'impressions'],
+          [fn('MAX', col('date')), 'lastDate'],
+        ],
+        where,
+        raw: true,
+      }),
+    ]);
+    return { level, rows, total: totals?.[0] || {} };
+  };
 
-  let totalRows = await SocialAdsInsightsDaily.findAll({
-    attributes: [
-      [fn('SUM', col('spend')), 'spend'],
-      [fn('SUM', col('clicks')), 'clicks'],
-      [fn('SUM', col('impressions')), 'impressions'],
-      [fn('MAX', col('date')), 'lastDate'],
-    ],
-    where,
-    raw: true,
-  });
+  let selectedInsights = await fetchInsightRows('campaign');
+  for (const level of ['adset', 'ad']) {
+    if (
+      toNumber(selectedInsights.total?.spend) > 0 ||
+      toNumber(selectedInsights.total?.clicks) > 0 ||
+      toNumber(selectedInsights.total?.impressions) > 0
+    ) {
+      break;
+    }
+    const fallbackInsights = await fetchInsightRows(level);
+    if (
+      fallbackInsights.rows.length > 0 ||
+      toNumber(fallbackInsights.total?.spend) > 0 ||
+      toNumber(fallbackInsights.total?.clicks) > 0 ||
+      toNumber(fallbackInsights.total?.impressions) > 0
+    ) {
+      selectedInsights = fallbackInsights;
+      break;
+    }
+  }
+
+  let campaignRows = selectedInsights.rows;
+  let totalRow = selectedInsights.total;
+  let selectedLevel = selectedInsights.level;
 
   const campaignNames = new Map();
   if (SocialAdsEntity && campaignRows.length) {
     const ids = campaignRows.map((row) => String(row.entity_id || '').trim()).filter(Boolean);
     const entities = await SocialAdsEntity.findAll({
-      where: { level: 'campaign', entity_id: { [Op.in]: ids } },
+      where: { level: selectedLevel, entity_id: { [Op.in]: ids } },
       raw: true,
     });
     entities.forEach((entity) => campaignNames.set(String(entity.entity_id), entity.name));
@@ -476,7 +505,7 @@ async function aggregateMetaAds(scope, range) {
         ],
         where: {
           ...scopeWhere,
-          level: 'campaign',
+          level: selectedLevel,
           entity_id: { [Op.in]: ids },
           ...buildDateOnlyWhere('date', range),
         },
@@ -488,7 +517,6 @@ async function aggregateMetaAds(scope, range) {
   }
 
   let usedAdsetFallback = false;
-  let totalRow = totalRows?.[0] || {};
   const totalActionLeads = Array.from(actionLeadsByCampaignId.values()).reduce((acc, value) => acc + toNumber(value), 0);
   if (totalActionLeads > 0) {
     totalRow.conversions = totalActionLeads;
@@ -529,6 +557,7 @@ async function aggregateMetaAds(scope, range) {
       limit: 5,
       raw: true,
     });
+    selectedLevel = 'adset';
   }
 
   const assetWhere = buildAssetScopeWhere(scope);
@@ -549,8 +578,13 @@ async function aggregateMetaAds(scope, range) {
     const campaignActionLeads = usedAdsetFallback ? 0 : actionLeadsByCampaignId.get(String(row.entity_id));
     const leads = Math.round(toNumber(campaignActionLeads || row.conversions || row.leads));
     const id = usedAdsetFallback ? row.adset_id : row.entity_id;
+    const fallbackLabel = selectedLevel === 'ad'
+      ? 'Anuncio'
+      : selectedLevel === 'adset'
+        ? 'Conjunto'
+        : 'Campaña';
     return {
-      name: campaignNames.get(String(id)) || (usedAdsetFallback ? `Adset ${id}` : `Campaña ${id || 'sin nombre'}`),
+      name: campaignNames.get(String(id)) || `${fallbackLabel} ${id || 'sin nombre'}`,
       platform: 'Meta Ads',
       inversion,
       leads,
