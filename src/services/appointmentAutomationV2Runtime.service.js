@@ -972,6 +972,95 @@ async function syncScheduledTriggersForCita(cita, options = {}) {
   };
 }
 
+async function resolveClinicIdsForTemplateScope(template) {
+  const clinicId = toIntOrNull(template?.clinic_id);
+  if (clinicId) return [clinicId];
+
+  const groupId = toIntOrNull(template?.group_id);
+  if (!groupId) return [];
+
+  const clinics = await Clinica.findAll({
+    where: { grupoClinicaId: groupId },
+    attributes: ['id_clinica'],
+    raw: true,
+  });
+
+  return clinics
+    .map((clinic) => toIntOrNull(clinic.id_clinica))
+    .filter(Boolean);
+}
+
+async function backfillScheduledTriggersForTemplate(template, options = {}) {
+  const triggerType = cleanString(template?.trigger_type);
+  if (!SCHEDULED_APPOINTMENT_TRIGGER_TYPES.has(triggerType)) {
+    return {
+      success: true,
+      skipped: true,
+      reason: 'not_scheduled_trigger',
+      processed: 0,
+      scheduled_jobs: 0,
+    };
+  }
+
+  if (!template?.published_at || template?.is_active === false) {
+    return {
+      success: true,
+      skipped: true,
+      reason: 'template_not_active_or_published',
+      processed: 0,
+      scheduled_jobs: 0,
+    };
+  }
+
+  const clinicIds = await resolveClinicIdsForTemplateScope(template);
+  if (!clinicIds.length) {
+    return {
+      success: true,
+      skipped: true,
+      reason: 'template_without_clinic_scope',
+      processed: 0,
+      scheduled_jobs: 0,
+    };
+  }
+
+  const limit = Math.max(1, Math.min(Number(options.limit) || 1000, 5000));
+  const citas = await db.CitaPaciente.findAll({
+    where: {
+      clinica_id: { [Op.in]: clinicIds },
+      inicio: { [Op.gt]: new Date() },
+      estado: { [Op.in]: Array.from(ACTIVE_APPOINTMENT_STATUSES) },
+    },
+    order: [['inicio', 'ASC']],
+    limit,
+  });
+
+  const summary = {
+    success: true,
+    skipped: false,
+    processed: 0,
+    scheduled_jobs: 0,
+    cancelled_jobs: 0,
+    errors: [],
+  };
+
+  for (const citaModel of citas) {
+    const cita = citaModel?.toJSON ? citaModel.toJSON() : citaModel;
+    try {
+      const result = await syncScheduledTriggersForCita(cita, options);
+      summary.processed += 1;
+      summary.scheduled_jobs += Array.isArray(result?.scheduled_jobs) ? result.scheduled_jobs.length : 0;
+      summary.cancelled_jobs += Array.isArray(result?.cancelled_jobs) ? result.cancelled_jobs.length : 0;
+    } catch (err) {
+      summary.errors.push({
+        cita_id: toIntOrNull(cita?.id_cita),
+        message: err?.message || String(err),
+      });
+    }
+  }
+
+  return summary;
+}
+
 async function getExecutionsByAppointmentId(citaId, limit = 25) {
   const numericCitaId = toIntOrNull(citaId);
   if (!numericCitaId) return [];
@@ -1100,6 +1189,7 @@ module.exports = {
   enqueueExecutionForCita,
   enqueueExecutionForTemplate,
   syncScheduledTriggersForCita,
+  backfillScheduledTriggersForTemplate,
   fireScheduledTrigger,
   getExecutionsByAppointmentId,
   getLatestExecutionByAppointmentId,

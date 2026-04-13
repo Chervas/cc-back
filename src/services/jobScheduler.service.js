@@ -5,6 +5,9 @@ const jobExecutor = require('./jobExecutor.service');
 const CRITICAL_INTERVAL_MS = Number(process.env.JOB_SCHEDULER_CRITICAL_INTERVAL_MS || 5000);
 const STANDARD_INTERVAL_MS = Number(process.env.JOB_SCHEDULER_INTERVAL_MS || 30000);
 const CURRENT_RUNTIME_NAMESPACE = jobRequestsService.getCurrentRuntimeNamespace();
+const RUNTIME_NAMESPACE_ALIASES = typeof jobRequestsService.getRuntimeNamespaceAliases === 'function'
+  ? jobRequestsService.getRuntimeNamespaceAliases()
+  : [];
 const CLAIM_UNSCOPED_JOBS = jobRequestsService.shouldClaimUnscopedJobs();
 
 const cleanString = (value) => {
@@ -211,7 +214,8 @@ function start() {
   }
   workerState.running = true;
   workerState.startedAt = new Date();
-  console.log(`🧭 Job scheduler namespace: ${CURRENT_RUNTIME_NAMESPACE} (claim unscoped: ${CLAIM_UNSCOPED_JOBS})`);
+  const aliasLabel = RUNTIME_NAMESPACE_ALIASES.length ? `, aliases: ${RUNTIME_NAMESPACE_ALIASES.join(',')}` : '';
+  console.log(`🧭 Job scheduler namespace: ${CURRENT_RUNTIME_NAMESPACE}${aliasLabel} (claim unscoped: ${CLAIM_UNSCOPED_JOBS})`);
   jobRequestsService.resetRunningJobs().catch((error) => {
     console.error('⚠️ No se pudieron resetear los jobs en ejecución al arrancar el scheduler:', error.message);
   });
