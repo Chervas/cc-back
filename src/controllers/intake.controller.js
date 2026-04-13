@@ -557,11 +557,16 @@ const resolveClinicByPhoneWithinGroup = async (groupId, phone) => {
 
   const clinics = await Clinica.findAll({
     where: { grupoClinicaId: parsedGroupId },
-    attributes: ['id_clinica', 'grupoClinicaId', 'telefono'],
+    attributes: ['id_clinica', 'grupoClinicaId', 'telefono', 'telefono_fijo', 'telefono_movil', 'telefono_whatsapp'],
     raw: true,
   });
 
-  return clinics.find((clinic) => normalizePhone(clinic.telefono) === normalizedPhone) || null;
+  return clinics.find((clinic) => [
+    clinic.telefono,
+    clinic.telefono_fijo,
+    clinic.telefono_movil,
+    clinic.telefono_whatsapp,
+  ].some((value) => normalizePhone(value) === normalizedPhone)) || null;
 };
 
 const CALL_OUTCOMES = new Set(['citado', 'informacion', 'no_contactado']);
@@ -1742,7 +1747,7 @@ const DEFAULT_CHAT_FLOW = {
   steps: [
     { type: 'message', text: 'Hola. Te ayudamos a pedir cita.' },
     { type: 'input', text: 'Como te llamas?', input_type: 'text', placeholder: 'Tu nombre', field: 'nombre' },
-    { type: 'input', text: 'Gracias {{nombre}}. Cual es tu telefono?', input_type: 'tel', placeholder: 'Tu telefono', field: 'telefono' },
+    { type: 'input', text: 'Gracias {{paciente.nombre}}. Cual es tu telefono?', input_type: 'tel', placeholder: 'Tu telefono', field: 'telefono' },
     { type: 'input', text: 'Y tu email? (opcional)', input_type: 'email', placeholder: 'Tu email', field: 'email' },
     { type: 'cta', text: 'Confirma que quieres que te contactemos:', button_text: 'Ok, contactadme' }
   ]
@@ -2175,7 +2180,7 @@ exports.getIntakeConfig = asyncHandler(async (req, res) => {
     if (!resolvedGroupId && payload.clinic_id) {
       clinicRow = await Clinica.findOne({
         where: { id_clinica: payload.clinic_id },
-        attributes: ['id_clinica', 'nombre_clinica', 'telefono', 'grupoClinicaId'],
+        attributes: ['id_clinica', 'nombre_clinica', 'telefono', 'telefono_fijo', 'telefono_movil', 'telefono_whatsapp', 'direccion', 'grupoClinicaId'],
         raw: true
       });
       resolvedGroupId = clinicRow?.grupoClinicaId || null;
@@ -2204,7 +2209,7 @@ exports.getIntakeConfig = asyncHandler(async (req, res) => {
 
       const clinics = await Clinica.findAll({
         where: { grupoClinicaId: resolvedGroupId },
-        attributes: ['id_clinica', 'nombre_clinica', 'telefono', 'url_avatar'],
+        attributes: ['id_clinica', 'nombre_clinica', 'telefono', 'telefono_fijo', 'telefono_movil', 'telefono_whatsapp', 'direccion', 'url_avatar'],
         order: [['nombre_clinica', 'ASC']],
         raw: true
       });
@@ -2233,13 +2238,21 @@ exports.getIntakeConfig = asyncHandler(async (req, res) => {
       }
 
       payload.available_locations = clinics.map((c) => {
-        const phone = c.telefono || null;
-        const whatsapp = whatsappByClinicId.get(c.id_clinica) || groupWhatsApp || normalizePhone(phone) || null;
+        const fixedPhone = c.telefono_fijo || c.telefono || null;
+        const mobilePhone = c.telefono_movil || null;
+        const manualWhatsapp = normalizePhone(c.telefono_whatsapp);
+        const phone = fixedPhone || mobilePhone || null;
+        const connectedWhatsapp = whatsappByClinicId.get(c.id_clinica) || null;
+        const whatsapp = connectedWhatsapp || manualWhatsapp || groupWhatsApp || normalizePhone(mobilePhone || fixedPhone) || null;
         return {
           id: c.id_clinica,
           label: c.nombre_clinica,
           phone,
+          fixed_phone: fixedPhone,
+          mobile_phone: mobilePhone,
           whatsapp,
+          whatsapp_connected: !!connectedWhatsapp,
+          address: c.direccion || null,
           url_avatar: c.url_avatar || null
         };
       });
@@ -2247,7 +2260,7 @@ exports.getIntakeConfig = asyncHandler(async (req, res) => {
       if (!clinicRow) {
         clinicRow = await Clinica.findOne({
           where: { id_clinica: payload.clinic_id },
-          attributes: ['id_clinica', 'nombre_clinica', 'telefono', 'url_avatar'],
+          attributes: ['id_clinica', 'nombre_clinica', 'telefono', 'telefono_fijo', 'telefono_movil', 'telefono_whatsapp', 'direccion', 'url_avatar'],
           raw: true
         });
       }
@@ -2268,11 +2281,19 @@ exports.getIntakeConfig = asyncHandler(async (req, res) => {
         } catch (e) {
           whatsapp = null;
         }
+        const fixedPhone = clinicRow.telefono_fijo || clinicRow.telefono || null;
+        const mobilePhone = clinicRow.telefono_movil || null;
+        const manualWhatsapp = normalizePhone(clinicRow.telefono_whatsapp);
+        const connectedWhatsapp = whatsapp || null;
         payload.available_locations = [{
           id: clinicRow.id_clinica,
           label: clinicRow.nombre_clinica,
-          phone: clinicRow.telefono || null,
-          whatsapp: whatsapp || normalizePhone(clinicRow.telefono) || null,
+          phone: fixedPhone || mobilePhone || null,
+          fixed_phone: fixedPhone,
+          mobile_phone: mobilePhone,
+          whatsapp: connectedWhatsapp || manualWhatsapp || normalizePhone(mobilePhone || fixedPhone) || null,
+          whatsapp_connected: !!connectedWhatsapp,
+          address: clinicRow.direccion || null,
           url_avatar: clinicRow.url_avatar || null
         }];
       }

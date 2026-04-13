@@ -2130,6 +2130,35 @@ Esto explica casos como la cita `99`, donde el mensaje usó `Graci Gonzalez` aun
   - `cita.usuario_*` se conserva como alias de compatibilidad para plantillas anteriores.
   - No se inventan valores derivados: la URL de ficha local solo se expone si existe en `Clinicas.url_ficha_local`.
 
+## 2026-04-13 - Contacto de clínica separado y WhatsApp efectivo
+
+- `Clinicas.telefono` se mantiene como compatibilidad legacy.
+- Nuevos campos persistidos:
+  - `telefono_fijo`
+  - `telefono_movil`
+  - `telefono_whatsapp`
+- `GET /api/clinicas/:id` enriquece la respuesta con:
+  - `telefono_whatsapp_conectado`
+  - `whatsapp_connected`
+- `telefono_whatsapp_conectado` se deriva de `ClinicMetaAsset` (`assetType='whatsapp_phone_number'`) priorizando asignación de clínica y usando grupo como fallback. No debe editarse manualmente.
+- `GET /api/intake/config` construye `available_locations[].whatsapp` con prioridad:
+  1. WhatsApp Business conectado a la clínica.
+  2. `Clinicas.telefono_whatsapp`.
+  3. WhatsApp Business conectado al grupo.
+  4. móvil/fijo normalizado como fallback.
+- Migración:
+  - `20260413101000-add-clinic-contact-phone-fields.js`
+  - copia inicialmente `Clinicas.telefono` a `Clinicas.telefono_fijo` si el nuevo campo está vacío.
+
+## 2026-04-13 - Variables canónicas en flujos de chat web
+
+- El runtime público de `intake.js` resuelve variables `{{ruta.con.puntos}}`.
+- Variable canónica de nombre de paciente: `{{paciente.nombre}}`.
+- Alias legacy `{{nombre}}` sigue funcionando en runtime, pero no debe usarse en plantillas nuevas.
+- Migración:
+  - `20260413102000-normalize-chat-flow-patient-name-variable.js`
+  - normaliza JSON existentes en `ChatFlowTemplates.flow`, `ChatFlowTemplates.flows`, `ChatFlowTemplates.texts` e `IntakeConfigs.config`.
+
 ## 2026-03-24 - Contexto conversacional canónico para IA
 
 - `buildHydratedExecutionContext` y el runtime de `wait_response` ya exponen:
