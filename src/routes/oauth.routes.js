@@ -77,6 +77,19 @@ const DEFAULT_GOOGLE_SCOPES = [
 const GOOGLE_SCOPES = (process.env.GOOGLE_OAUTH_SCOPES || DEFAULT_GOOGLE_SCOPES).split(/\s+/).join(' ');
 const GOOGLE_BUSINESS_INFORMATION_API = 'https://mybusinessbusinessinformation.googleapis.com/v1';
 const GOOGLE_BUSINESS_ACCOUNT_API = 'https://mybusinessaccountmanagement.googleapis.com/v1';
+const GOOGLE_BUSINESS_LOCATION_READ_MASK = [
+    'name',
+    'title',
+    'storeCode',
+    'phoneNumbers',
+    'categories',
+    'storefrontAddress',
+    'websiteUri',
+    'metadata',
+    'openInfo',
+    'serviceArea',
+    'labels'
+].join(',');
 
 function cleanString(value) {
     const normalized = String(value || '').trim();
@@ -507,7 +520,8 @@ async function fetchAllGoogleBusinessLocations(accessToken, accountName) {
     const locations = [];
     let nextPageToken = null;
     const paramsBase = {
-        pageSize: 100
+        pageSize: 100,
+        readMask: GOOGLE_BUSINESS_LOCATION_READ_MASK
     };
     do {
         const resp = await axios.get(`${GOOGLE_BUSINESS_INFORMATION_API}/${accountName}/locations`, {
@@ -530,11 +544,15 @@ function normalizeBusinessLocation(location, account) {
     const locationName = location.title || location.locationName || null;
     const resourceName = location.name || null;
     const storeCode = location.storeCode || null;
-    const primaryCategory = location.primaryCategory?.displayName || location.primaryCategory?.name || null;
+    const primaryCategory = location.primaryCategory?.displayName
+        || location.primaryCategory?.name
+        || location.categories?.primaryCategory?.displayName
+        || location.categories?.primaryCategory?.name
+        || null;
     const verificationStatus = location.metadata?.verificationState || location.metadata?.verificationStatus || null;
     const suspended = Array.isArray(location.metadata?.suspensionReasons) && location.metadata.suspensionReasons.length > 0;
     const verified = verificationStatus ? verificationStatus.toUpperCase() === 'VERIFIED' : !!location.metadata?.hasBusinessAuthority;
-    const address = location.address || null;
+    const address = location.address || location.storefrontAddress || null;
     const locality = address?.locality || address?.localityName || null;
     const region = address?.administrativeArea || null;
     const country = address?.regionCode || null;

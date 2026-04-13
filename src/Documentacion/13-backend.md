@@ -658,6 +658,7 @@ Regla operativa:
 
 Perfil de Empresa Google:
 
+- `GET /oauth/google/local/locations` usa Business Information API con `readMask`; Google rechaza la llamada sin ese parámetro y no deben tragarse esos errores como "0 fichas";
 - `POST /oauth/google/local/map-locations` guarda `ClinicBusinessLocations` y encola `business_profile_backfill_locations`;
 - `businessProfileSync` usa la Google Business Profile Performance API para métricas recientes y las rutas v4 de My Business para reseñas/publicaciones;
 - el job persiste en `BusinessProfileDailyMetrics`, `BusinessProfileReviews` y `BusinessProfilePosts`;
