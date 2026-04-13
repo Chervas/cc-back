@@ -1076,6 +1076,31 @@ router.post('/google/analytics/map-properties', async (req, res) => {
 
         const createdOrUpdated = [];
         const propertiesToBackfill = [];
+        const replaceExisting = req.body?.replace_existing === true;
+        const selectedByClinic = new Map();
+        for (const m of mappings) {
+            const clinicaId = parseInt(m.clinicaId, 10);
+            const propertyName = String(m.propertyName || '').trim();
+            if (!clinicaId || !propertyName) continue;
+            if (!selectedByClinic.has(clinicaId)) selectedByClinic.set(clinicaId, new Set());
+            selectedByClinic.get(clinicaId).add(propertyName);
+        }
+
+        if (replaceExisting) {
+            for (const [clinicaId, propertyNames] of selectedByClinic.entries()) {
+                await ClinicAnalyticsProperty.update(
+                    { isActive: false },
+                    {
+                        where: {
+                            clinicaId,
+                            isActive: true,
+                            propertyName: { [Op.notIn]: Array.from(propertyNames) }
+                        }
+                    }
+                );
+            }
+        }
+
         for (const m of mappings) {
             const clinicaId = parseInt(m.clinicaId, 10);
             const propertyName = String(m.propertyName || '').trim();
@@ -1219,6 +1244,33 @@ router.post('/google/local/map-locations', async (req, res) => {
 
         const createdOrUpdated = [];
         const locationsToBackfill = [];
+        const replaceExisting = req.body?.replace_existing === true;
+        const selectedByClinic = new Map();
+        for (const mapping of mappings) {
+            const clinicaId = parseInt(mapping?.clinicaId, 10);
+            const locationId = String(mapping?.locationId || mapping?.id || '').trim();
+            if (!clinicaId || !locationId) {
+                continue;
+            }
+            if (!selectedByClinic.has(clinicaId)) selectedByClinic.set(clinicaId, new Set());
+            selectedByClinic.get(clinicaId).add(locationId);
+        }
+
+        if (replaceExisting) {
+            for (const [clinicaId, locationIds] of selectedByClinic.entries()) {
+                await ClinicBusinessLocation.update(
+                    { is_active: false },
+                    {
+                        where: {
+                            clinica_id: clinicaId,
+                            is_active: true,
+                            location_id: { [Op.notIn]: Array.from(locationIds) }
+                        }
+                    }
+                );
+            }
+        }
+
         for (const mapping of mappings) {
             const clinicaId = parseInt(mapping?.clinicaId, 10);
             const locationId = String(mapping?.locationId || mapping?.id || '').trim();
@@ -1749,6 +1801,18 @@ router.post('/google/ads/map-accounts', async (req, res) => {
             return res.status(400).json({ success: false, error: 'mappings requerido' });
         }
 
+        const replaceExisting = req.body?.replace_existing === true;
+        const selectedByClinic = new Map();
+        for (const mapping of mappings) {
+            const clinicaId = parseInt(mapping?.clinicaId, 10);
+            const customerId = normalizeCustomerId(mapping?.customerId);
+            if (!clinicaId || !customerId) {
+                continue;
+            }
+            if (!selectedByClinic.has(clinicaId)) selectedByClinic.set(clinicaId, new Set());
+            selectedByClinic.get(clinicaId).add(customerId);
+        }
+
         const transaction = await db.sequelize.transaction();
         const results = [];
         const clinicsToSync = new Set();
@@ -1776,6 +1840,22 @@ router.post('/google/ads/map-accounts', async (req, res) => {
         }
 
         try {
+            if (replaceExisting) {
+                for (const [clinicaId, customerIds] of selectedByClinic.entries()) {
+                    await ClinicGoogleAdsAccount.update(
+                        { isActive: false },
+                        {
+                            where: {
+                                clinicaId,
+                                isActive: true,
+                                customerId: { [Op.notIn]: Array.from(customerIds) }
+                            },
+                            transaction
+                        }
+                    );
+                }
+            }
+
             for (const mapping of mappings) {
                 const clinicaId = parseInt(mapping?.clinicaId, 10);
                 const customerId = normalizeCustomerId(mapping?.customerId);
@@ -1804,17 +1884,19 @@ router.post('/google/ads/map-accounts', async (req, res) => {
                     isActive: true
                 };
 
-                await ClinicGoogleAdsAccount.update(
-                    { isActive: false },
-                    {
-                        where: {
-                            clinicaId,
-                            customerId: { [Op.ne]: customerId },
-                            isActive: true
-                        },
-                        transaction
-                    }
-                );
+                if (!replaceExisting) {
+                    await ClinicGoogleAdsAccount.update(
+                        { isActive: false },
+                        {
+                            where: {
+                                clinicaId,
+                                customerId: { [Op.ne]: customerId },
+                                isActive: true
+                            },
+                            transaction
+                        }
+                    );
+                }
 
                 const existing = await ClinicGoogleAdsAccount.findOne({ where: { clinicaId, customerId }, transaction });
                 if (existing) {
@@ -1983,7 +2065,7 @@ router.get('/google/analytics/mappings', async (req, res) => {
         if (!conn) return res.status(404).json({ success: false, error: 'No hay conexión Google' });
 
         const items = await ClinicAnalyticsProperty.findAll({
-            where: { googleConnectionId: conn.id },
+            where: { googleConnectionId: conn.id, isActive: true },
             include: [{ model: Clinica, as: 'clinica', attributes: ['id_clinica', 'nombre_clinica'] }]
         });
 
@@ -2053,6 +2135,31 @@ router.post('/google/map-assets', async (req, res) => {
 
         const createdOrUpdated = [];
         const sitesToBackfill = [];
+        const replaceExisting = req.body?.replace_existing === true;
+        const selectedByClinic = new Map();
+        for (const m of mappings) {
+            const clinicaId = parseInt(m.clinicaId, 10);
+            const siteUrl = String(m.siteUrl || '').trim();
+            if (!clinicaId || !siteUrl) continue;
+            if (!selectedByClinic.has(clinicaId)) selectedByClinic.set(clinicaId, new Set());
+            selectedByClinic.get(clinicaId).add(siteUrl);
+        }
+
+        if (replaceExisting) {
+            for (const [clinicaId, siteUrls] of selectedByClinic.entries()) {
+                await ClinicWebAsset.update(
+                    { isActive: false },
+                    {
+                        where: {
+                            clinicaId,
+                            isActive: true,
+                            siteUrl: { [Op.notIn]: Array.from(siteUrls) }
+                        }
+                    }
+                );
+            }
+        }
+
         for (const m of mappings) {
             const clinicaId = parseInt(m.clinicaId, 10);
             const siteUrl = String(m.siteUrl || '').trim();
