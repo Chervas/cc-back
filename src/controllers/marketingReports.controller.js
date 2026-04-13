@@ -849,8 +849,13 @@ function distributeCampaignAppointments(campaigns, platformChannelStats) {
   });
 }
 
-function buildSources({ intakeConfigCount, leadsTotal, seo, googleAds, metaAds, ga, businessProfile }) {
+function buildSources({ intakeConfigCount, leadsTotal, seo, googleAds, metaAds, ga, businessProfile, mappingCounts = {} }) {
   const clinicaClickConnected = intakeConfigCount > 0 || leadsTotal > 0;
+  const searchConsoleMapped = toNumber(mappingCounts.search_console) > 0;
+  const analyticsMapped = toNumber(mappingCounts.analytics) > 0;
+  const businessProfileMapped = toNumber(mappingCounts.business_profile) > 0;
+  const googleAdsMapped = toNumber(mappingCounts.google_ads) > 0;
+  const metaAdsMapped = toNumber(mappingCounts.meta_ads) > 0;
   return [
     {
       name: 'ClinicaClick Analytics',
@@ -866,8 +871,8 @@ function buildSources({ intakeConfigCount, leadsTotal, seo, googleAds, metaAds, 
     {
       name: 'Search Console',
       icon: 'heroicons_outline:magnifying-glass',
-      connected: seo.connected,
-      label: seo.connected ? 'Conectado' : 'Sin datos',
+      connected: searchConsoleMapped,
+      label: searchConsoleMapped ? 'Conectado' : 'Sin datos',
       tooltip: 'Search Console mide cómo te encuentra la gente en Google.',
       lastSync: relativeSyncLabel(seo.lastSync),
       source: 'Search Console',
@@ -875,8 +880,8 @@ function buildSources({ intakeConfigCount, leadsTotal, seo, googleAds, metaAds, 
     {
       name: 'Google Ads',
       icon: 'heroicons_outline:currency-euro',
-      connected: googleAds.connected,
-      label: googleAds.connected ? 'Conectado' : 'Pendiente',
+      connected: googleAdsMapped,
+      label: googleAdsMapped ? 'Conectado' : 'Pendiente',
       tooltip: 'Datos de campañas de Google Ads sincronizados.',
       lastSync: relativeSyncLabel(googleAds.lastSync),
       source: 'Google Ads',
@@ -884,8 +889,8 @@ function buildSources({ intakeConfigCount, leadsTotal, seo, googleAds, metaAds, 
     {
       name: 'Meta Ads',
       icon: 'heroicons_outline:megaphone',
-      connected: metaAds.connected,
-      label: metaAds.connected ? 'Conectado' : 'Pendiente',
+      connected: metaAdsMapped,
+      label: metaAdsMapped ? 'Conectado' : 'Pendiente',
       tooltip: 'Datos de campañas de Facebook e Instagram sincronizados.',
       lastSync: relativeSyncLabel(metaAds.lastSync),
       source: 'Meta Ads',
@@ -893,8 +898,8 @@ function buildSources({ intakeConfigCount, leadsTotal, seo, googleAds, metaAds, 
     {
       name: 'Perfil de Empresa Google',
       icon: 'heroicons_outline:map-pin',
-      connected: businessProfile.connected,
-      label: businessProfile.connected ? 'Conectado' : 'Pendiente',
+      connected: businessProfileMapped,
+      label: businessProfileMapped ? 'Conectado' : 'Pendiente',
       tooltip: 'Conecta tu Perfil de Empresa de Google para ver llamadas, reseñas y visitas a tu ficha.',
       lastSync: relativeSyncLabel(businessProfile.lastSync),
       source: 'Perfil Google',
@@ -902,8 +907,8 @@ function buildSources({ intakeConfigCount, leadsTotal, seo, googleAds, metaAds, 
     {
       name: 'Google Analytics 4',
       icon: 'heroicons_outline:presentation-chart-line',
-      connected: ga.connected,
-      label: ga.connected ? 'Conectado' : 'Opcional',
+      connected: analyticsMapped,
+      label: analyticsMapped ? 'Conectado' : 'Opcional',
       tooltip: 'GA4 es opcional. ClinicaClick Analytics debe ser la fuente principal nueva.',
       lastSync: relativeSyncLabel(ga.lastSync),
       source: 'GA4 opcional',
@@ -1024,7 +1029,7 @@ function jobMatchesScope(job, scope) {
   const clinicIds = Array.isArray(scope?.clinicIds) ? scope.clinicIds.map(Number).filter(Number.isInteger) : [];
   if (!clinicIds.length || scope?.isAll) return true;
   const payloadClinicIds = Array.from(collectClinicIdsFromPayload(job?.payload));
-  if (!payloadClinicIds.length) return true;
+  if (!payloadClinicIds.length) return false;
   return payloadClinicIds.some((id) => clinicIds.includes(id));
 }
 
@@ -1039,7 +1044,7 @@ async function recentJobsForSource(config, scope) {
       status: { [Op.in]: SYNC_RECENT_STATUSES },
       created_at: { [Op.gte]: since },
     },
-    order: [['created_at', 'DESC']],
+    order: [['updated_at', 'DESC'], ['created_at', 'DESC'], ['id', 'DESC']],
     limit: 100,
     raw: true,
   });
@@ -1049,8 +1054,6 @@ async function recentJobsForSource(config, scope) {
 function buildSourceSyncState({ config, mapped, lastSync, jobs = [], pendingRecords = 0, errorRecords = 0 }) {
   if (!mapped) return null;
   const activeJob = jobs.find((job) => SYNC_ACTIVE_STATUSES.includes(job.status));
-  const failedJob = jobs.find((job) => job.status === 'failed');
-  const completedJob = jobs.find((job) => job.status === 'completed');
 
   if (activeJob) {
     return {
@@ -1064,8 +1067,9 @@ function buildSourceSyncState({ config, mapped, lastSync, jobs = [], pendingReco
     };
   }
 
-  if (errorRecords > 0 || failedJob) {
-    const errorJob = failedJob || jobs.find((job) => extractJobSyncError(job));
+  const terminalJob = jobs.find((job) => ['failed', 'completed'].includes(job.status));
+  if (errorRecords > 0 || terminalJob?.status === 'failed') {
+    const errorJob = terminalJob?.status === 'failed' ? terminalJob : jobs.find((job) => extractJobSyncError(job));
     return {
       source: config.source,
       label: config.label,
@@ -1077,15 +1081,15 @@ function buildSourceSyncState({ config, mapped, lastSync, jobs = [], pendingReco
     };
   }
 
-  if (completedJob) {
+  if (terminalJob?.status === 'completed') {
     return {
       source: config.source,
       label: config.label,
       state: 'completed',
       active: false,
       message: `${config.label} sincronizado.`,
-      jobId: completedJob?.id || null,
-      updatedAt: lastSync || completedJob?.completed_at || completedJob?.updated_at || completedJob?.created_at || null,
+      jobId: terminalJob?.id || null,
+      updatedAt: lastSync || terminalJob?.completed_at || terminalJob?.updated_at || terminalJob?.created_at || null,
     };
   }
 
@@ -1127,7 +1131,7 @@ async function buildSyncStatus(scope, { seo, googleAds, metaAds, ga, businessPro
     ClinicWebAsset ? ClinicWebAsset.count({ where: { ...scopedWhere('clinicaId', scope), isActive: true } }) : 0,
     ClinicAnalyticsProperty ? ClinicAnalyticsProperty.count({ where: { ...scopedWhere('clinicaId', scope), isActive: true } }) : 0,
     ClinicBusinessLocation ? ClinicBusinessLocation.findAll({ where: { ...scopedWhere('clinica_id', scope), is_active: true }, raw: true }) : [],
-    ClinicGoogleAdsAccount ? ClinicGoogleAdsAccount.count({ where: buildAdsScopeWhere(scope, 'clinicaId', 'grupoClinicaId') }) : 0,
+    ClinicGoogleAdsAccount ? ClinicGoogleAdsAccount.count({ where: { ...buildAdsScopeWhere(scope, 'clinicaId', 'grupoClinicaId'), isActive: true } }) : 0,
     ClinicMetaAsset ? ClinicMetaAsset.count({ where: { ...buildAssetScopeWhere(scope), assetType: 'ad_account' } }) : 0,
     recentJobsForSource(SOURCE_SYNC_CONFIG.search_console, scope),
     recentJobsForSource(SOURCE_SYNC_CONFIG.analytics, scope),
@@ -1138,6 +1142,13 @@ async function buildSyncStatus(scope, { seo, googleAds, metaAds, ga, businessPro
 
   const businessPending = businessLocations.filter((row) => row.sync_status === 'pending' || !row.last_synced_at).length;
   const businessErrors = businessLocations.filter((row) => row.sync_status === 'error').length;
+  const mappingCounts = {
+    search_console: searchConsoleMappings,
+    analytics: analyticsMappings,
+    business_profile: businessLocations.length,
+    google_ads: googleAdsMappings,
+    meta_ads: metaAdsMappings,
+  };
 
   const states = [
     buildSourceSyncState({
@@ -1180,6 +1191,7 @@ async function buildSyncStatus(scope, { seo, googleAds, metaAds, ga, businessPro
     active: activeSources.length > 0,
     sources: activeSources,
     allSources: states,
+    mappingCounts,
     message: activeSources.length
       ? (errorSources.length
         ? errorSources.map((source) => source.message).join(' ')
@@ -1439,6 +1451,7 @@ exports.getOverview = async (req, res) => {
       metaAds,
       ga,
       businessProfile,
+      mappingCounts: sync.mappingCounts,
     }).map((source) => ({
       ...source,
       sync: syncBySource.get(source.source) || null,
