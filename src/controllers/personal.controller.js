@@ -80,6 +80,13 @@ const ACTIVE_STAFF_INVITATION_WHERE = {
         { estado_invitacion: null },
     ],
 };
+const PROVISIONAL_STAFF_INVITATION_WHERE = {
+    [Op.or]: [
+        { estado_invitacion: 'aceptada' },
+        { estado_invitacion: 'pendiente' },
+        { estado_invitacion: null },
+    ],
+};
 
 
 function isMissingClinicaHorarioTableError(error) {
@@ -102,11 +109,12 @@ async function getAccessibleClinicIdsForUser(userId) {
             .filter((id) => Number.isFinite(id));
     }
 
+    const invitationWhere = await getStaffInvitationWhereForUser(userId);
     const rows = await UsuarioClinica.findAll({
         where: {
             id_usuario: userId,
             rol_clinica: { [Op.in]: STAFF_ROLES },
-            ...ACTIVE_STAFF_INVITATION_WHERE,
+            ...invitationWhere,
         },
         attributes: ['id_clinica'],
         raw: true,
@@ -217,6 +225,39 @@ function normalizeEstadoInvitacion(value, defaultValue = 'aceptada') {
     const estado = String(value).trim().toLowerCase();
     if (!ESTADO_INVITACION.has(estado)) return null;
     return estado;
+}
+
+async function isProvisionalUser(userId) {
+    if (!Number.isFinite(Number(userId))) return false;
+    const user = await Usuario.findByPk(Number(userId), {
+        attributes: ['es_provisional'],
+        raw: true,
+    });
+    return !!user?.es_provisional;
+}
+
+async function getStaffInvitationWhereForUser(userId) {
+    return (await isProvisionalUser(userId))
+        ? PROVISIONAL_STAFF_INVITATION_WHERE
+        : ACTIVE_STAFF_INVITATION_WHERE;
+}
+
+function isOperationalStaffPivotForUser(userJson, pivot) {
+    const estado = normalizeEstadoInvitacion(pivot?.estado_invitacion, 'aceptada') || 'aceptada';
+    if (estado === 'aceptada') return true;
+    return estado === 'pendiente' && !!userJson?.es_provisional;
+}
+
+function serializeOperationalStaffUser(userInstance) {
+    const userJson = userInstance?.toJSON ? userInstance.toJSON() : userInstance;
+    if (!userJson) return null;
+
+    const clinicas = Array.isArray(userJson.Clinicas) ? userJson.Clinicas : [];
+    userJson.Clinicas = clinicas.filter((clinica) =>
+        isOperationalStaffPivotForUser(userJson, clinica?.UsuarioClinica)
+    );
+
+    return userJson.Clinicas.length ? userJson : null;
 }
 
 function getInviteResendRemainingMs(lastInvitedAt, now = new Date()) {
@@ -576,11 +617,13 @@ async function canAccessTargetPersonal(actorId, targetUserId, clinicId) {
         allowedClinicIds = [clinicId];
     }
 
+    const targetInvitationWhere = await getStaffInvitationWhereForUser(targetUserId);
     const match = await UsuarioClinica.findOne({
         where: {
             id_usuario: Number(targetUserId),
             rol_clinica: { [Op.in]: STAFF_ROLES },
             id_clinica: { [Op.in]: allowedClinicIds },
+            ...targetInvitationWhere,
         },
         attributes: ['id_clinica'],
         raw: true,
@@ -703,7 +746,7 @@ exports.getPersonal = async (req, res) => {
                         attributes: ['rol_clinica', 'subrol_clinica', 'estado_invitacion'],
                         where: {
                             rol_clinica: { [Op.in]: STAFF_ROLES },
-                            ...ACTIVE_STAFF_INVITATION_WHERE,
+                            ...PROVISIONAL_STAFF_INVITATION_WHERE,
                         },
                     },
                 },
@@ -711,7 +754,11 @@ exports.getPersonal = async (req, res) => {
             order: [['nombre', 'ASC']],
         });
 
-        return res.json(users);
+        const operationalUsers = users
+            .map((user) => serializeOperationalStaffUser(user))
+            .filter(Boolean);
+
+        return res.json(operationalUsers);
     } catch (error) {
         console.error('[personal.getPersonal] Error:', error);
         return res.status(500).json({ message: 'Error retrieving personal', error: error.message });
@@ -746,18 +793,20 @@ exports.getPersonalById = async (req, res) => {
                         attributes: ['rol_clinica', 'subrol_clinica', 'estado_invitacion'],
                         where: {
                             rol_clinica: { [Op.in]: STAFF_ROLES },
-                            ...ACTIVE_STAFF_INVITATION_WHERE,
+                            ...PROVISIONAL_STAFF_INVITATION_WHERE,
                         },
                     },
                 },
             ],
         });
 
-        if (!user) {
+        const operationalUser = serializeOperationalStaffUser(user);
+
+        if (!operationalUser) {
             return res.status(404).json({ message: 'User not found' });
         }
 
-        return res.json(user);
+        return res.json(operationalUser);
     } catch (error) {
         console.error('[personal.getPersonalById] Error:', error);
         return res.status(500).json({ message: 'Error retrieving personal member', error: error.message });
@@ -802,12 +851,13 @@ exports.updatePersonalMember = async (req, res) => {
 
         if (!isAdmin(actorId)) {
             // Verificar interseccion clinica entre actor propietario y usuario objetivo
+            const targetInvitationWhere = await getStaffInvitationWhereForUser(targetUserId);
             const targetClinics = await UsuarioClinica.findAll({
                 where: {
                     id_usuario: targetUserId,
                     id_clinica: { [Op.in]: actorOwnerClinicIds },
                     rol_clinica: { [Op.in]: STAFF_ROLES },
-                    ...ACTIVE_STAFF_INVITATION_WHERE,
+                    ...targetInvitationWhere,
                 },
                 attributes: ['id_clinica'],
                 raw: true,
@@ -2048,12 +2098,13 @@ function normalizeDiaSemana(value) {
 
 async function hasStaffPivot(userId, clinicId) {
     if (!Number.isFinite(Number(userId)) || !Number.isFinite(Number(clinicId))) return false;
+    const invitationWhere = await getStaffInvitationWhereForUser(userId);
     const row = await UsuarioClinica.findOne({
         where: {
             id_usuario: Number(userId),
             id_clinica: Number(clinicId),
             rol_clinica: { [Op.in]: STAFF_ROLES },
-            ...ACTIVE_STAFF_INVITATION_WHERE,
+            ...invitationWhere,
         },
         attributes: ['id_usuario'],
         raw: true,
@@ -2570,13 +2621,14 @@ async function buildScheduleResponse(actorId, targetUserId, query = {}) {
     // Fuente de verdad de pertenencia de staff por clínica: UsuarioClinica.
     // Esto permite devolver filas de Gantt en modo básico aunque aún no existan horarios
     // persistidos en DoctorClinica/DoctorHorario para ese miembro.
+    const targetStaffInvitationWhere = await getStaffInvitationWhereForUser(targetUserId);
     const staffPivots = allowedClinicIds.length
         ? await UsuarioClinica.findAll({
             where: {
                 id_usuario: Number(targetUserId),
                 id_clinica: { [Op.in]: allowedClinicIds },
                 rol_clinica: { [Op.in]: STAFF_ROLES },
-                ...ACTIVE_STAFF_INVITATION_WHERE,
+                ...targetStaffInvitationWhere,
             },
             attributes: ['id_clinica', 'rol_clinica', 'subrol_clinica'],
             include: [
@@ -2962,12 +3014,13 @@ async function getOrCreateDoctorClinica(targetUserId, clinicaId, options = {}) {
         transaction,
     });
     if (!dc) {
+        const invitationWhere = await getStaffInvitationWhereForUser(targetUserId);
         const pivot = await UsuarioClinica.findOne({
             where: {
                 id_usuario: Number(targetUserId),
                 id_clinica: Number(clinicaId),
                 rol_clinica: { [Op.in]: STAFF_ROLES },
-                ...ACTIVE_STAFF_INVITATION_WHERE,
+                ...invitationWhere,
             },
             attributes: ['subrol_clinica'],
             raw: true,
@@ -4276,6 +4329,15 @@ exports.invitarPersonal = async (req, res) => {
                         ],
                     });
 
+                    if (targetUser.es_provisional) {
+                        await ensureDoctorClinicaRow({
+                            userId: targetUser.id_usuario,
+                            clinicaId,
+                            subrolClinica: nextSubrol,
+                            activo: true,
+                        });
+                    }
+
                     const userJson = targetUser.toJSON ? targetUser.toJSON() : { ...targetUser };
                     delete userJson.password_usuario;
 
@@ -4345,19 +4407,28 @@ exports.invitarPersonal = async (req, res) => {
             invited_at: new Date(),
         });
 
+        if (isNewProvisional || targetUser.es_provisional) {
+            await ensureDoctorClinicaRow({
+                userId: targetUser.id_usuario,
+                clinicaId,
+                subrolClinica: subrol_clinica || null,
+                activo: true,
+            });
+        }
+
         // Devolver respuesta
         const userJson = targetUser.toJSON ? targetUser.toJSON() : { ...targetUser };
         delete userJson.password_usuario;
 
         return res.status(201).json({
-            message: isNewProvisional
+            message: (isNewProvisional || !!targetUser.es_provisional)
                 ? 'Usuario provisional creado e invitación enviada'
                 : 'Invitación enviada al usuario existente',
             usuario: userJson,
             clinica_id: clinicaId,
             estado_invitacion: 'pendiente',
             invite_token: inviteToken,
-            es_provisional: isNewProvisional,
+            es_provisional: isNewProvisional || !!targetUser.es_provisional,
         });
     } catch (error) {
         console.error('[personal.invitarPersonal] Error:', error);
