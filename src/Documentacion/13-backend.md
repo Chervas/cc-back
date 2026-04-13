@@ -82,6 +82,14 @@ Fuentes que cruza:
 - `WebGaDaily` para GA4 opcional.
 - `ClinicBusinessLocation`, `BusinessProfileDailyMetric` y `BusinessProfileReview` para Perfil Empresa Google.
 
+Estado de sincronización:
+
+- La respuesta incluye `sync.active`, `sync.sources[]` y `sync.allSources[]`.
+- `sync.active=true` cuando una fuente conectada tiene `JobRequest` pendiente/en ejecución, registros locales pendientes (`ClinicBusinessLocations.sync_status=pending`) o error.
+- El endpoint considera terminada una sincronización cuando existe un `JobRequest` reciente `completed`, aunque la API externa no haya devuelto filas nuevas.
+- El frontend usa ese estado para mostrar una barra informativa y refrescar cada 60 segundos mientras haya trabajo pendiente.
+- El objetivo es que conectar GA4, Search Console, Perfil de Empresa, Google Ads o Meta Ads no parezca "sin datos" durante los primeros minutos.
+
 Limitación consciente:
 
 - No existen todavía `WebEvents`, `WebPageDaily`, `WebClickDaily` ni `WebSessionDaily`.
@@ -663,6 +671,8 @@ Perfil de Empresa Google:
 - `businessProfileSync` usa la Google Business Profile Performance API para métricas recientes y las rutas v4 de My Business para reseñas/publicaciones;
 - el job persiste en `BusinessProfileDailyMetrics`, `BusinessProfileReviews` y `BusinessProfilePosts`;
 - si Google devuelve 403/scope insuficiente, la ficha queda con `sync_status=error` y la UI debe pedir reconexión con `business.manage`.
+- `GET /api/local/clinica/:clinicaId/status` expone `syncStatus`, `lastSyncedAt`, teléfono, web y dirección procedentes de `raw_payload`;
+- `GET /api/local/clinica/:clinicaId/overview|timeseries|reviews|posts` son los endpoints reales que alimentan `Marketing > Perfil Google`.
 
 Namespace al encolar desde OAuth/gateway:
 
@@ -670,6 +680,7 @@ Namespace al encolar desde OAuth/gateway:
 - `localhost:4203` debe encolar jobs `dev`; `crm.clinicaclick.com` debe encolar `staging`; `app.clinicaclick.com` debe encolar `prod`.
 - Si no llega namespace y el runtime es gateway, el fallback operativo es `AUTOMATIONS_V2_FALLBACK_RUNTIME_NAMESPACE` o `staging`.
 - El gateway no debe ejecutar el job de negocio; `triggerImmediate` solo tendrá efecto si el namespace coincide con el runtime que reclama.
+- Además de GA4, Ads y Meta, el gateway debe encolar backfills dirigidos para Search Console (`web_backfill_for_sites`) y Perfil Empresa Google (`business_profile_backfill_locations`) con el namespace del front que originó la acción.
 
 Refresco diferido tras `Propagar`:
 

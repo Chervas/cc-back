@@ -2052,6 +2052,7 @@ router.post('/google/map-assets', async (req, res) => {
         if (!mappings.length) return res.status(400).json({ success: false, error: 'mappings requerido' });
 
         const createdOrUpdated = [];
+        const sitesToBackfill = [];
         for (const m of mappings) {
             const clinicaId = parseInt(m.clinicaId, 10);
             const siteUrl = String(m.siteUrl || '').trim();
@@ -2069,9 +2070,28 @@ router.post('/google/map-assets', async (req, res) => {
             if (existing) {
                 await existing.update(payload);
                 createdOrUpdated.push({ id: existing.id, ...payload });
+                sitesToBackfill.push({ clinicId: clinicaId, siteUrl });
             } else {
                 const rec = await ClinicWebAsset.create(payload);
                 createdOrUpdated.push({ id: rec.id, ...payload });
+                sitesToBackfill.push({ clinicId: clinicaId, siteUrl });
+            }
+        }
+
+        if (sitesToBackfill.length) {
+            try {
+                const job = await jobRequestsService.enqueueJobRequest({
+                    type: 'web_backfill_for_sites',
+                    payload: withRequestedRuntimeNamespace(req, { siteMappings: sitesToBackfill }),
+                    priority: 'high',
+                    origin: 'search-console:map-assets',
+                    requestedBy: userId
+                });
+                jobScheduler.triggerImmediate(job.id).catch((err) =>
+                    console.error('❌ Error lanzando webSync tras mapeo:', err)
+                );
+            } catch (queueErr) {
+                console.error('❌ Error encolando webSync tras mapeo:', queueErr);
             }
         }
 

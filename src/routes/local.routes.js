@@ -49,8 +49,9 @@ function resolveDateRange(startDate, endDate, fallbackDays = 90) {
     return parsed;
   };
   const end = parse(endDate, today);
-  const start = parse(startDate, null) || new Date(end);
-  start.setDate(start.getDate() - (fallbackDays - 1));
+  const fallbackStart = new Date(end);
+  fallbackStart.setDate(fallbackStart.getDate() - (fallbackDays - 1));
+  const start = parse(startDate, fallbackStart);
   if (end < start) throw new Error('Date range invalid');
   const spanDays = Math.round((end - start) / 86400000) + 1;
   const prevEnd = new Date(start); prevEnd.setDate(prevEnd.getDate() - 1);
@@ -69,15 +70,37 @@ router.get('/clinica/:clinicaId/status', async (req, res) => {
   try {
     const { clinicaId } = req.params;
     const locations = await ClinicBusinessLocation.findAll({ where: { clinica_id: clinicaId, is_active: true }, order: [['location_name', 'ASC']] });
-    const mapped = locations.map(loc => ({
-      id: loc.id,
-      locationId: loc.location_id,
-      name: loc.location_name,
-      storeCode: loc.store_code,
-      verified: loc.is_verified,
-      suspended: loc.is_suspended,
-      lastSyncedAt: loc.last_synced_at
-    }));
+    const mapped = locations.map((loc) => {
+      const raw = loc.raw_payload && typeof loc.raw_payload === 'object' ? loc.raw_payload : {};
+      const address = raw.storefrontAddress || raw.address || {};
+      const addressLines = Array.isArray(address.addressLines) ? address.addressLines : [];
+      return {
+        id: loc.id,
+        locationId: loc.location_id,
+        name: loc.location_name,
+        storeCode: loc.store_code,
+        primaryCategory: loc.primary_category,
+        verified: loc.is_verified,
+        suspended: loc.is_suspended,
+        syncStatus: loc.sync_status,
+        lastSyncedAt: loc.last_synced_at,
+        websiteUri: raw.websiteUri || null,
+        phone: raw.phoneNumbers?.primaryPhone || null,
+        address: {
+          lines: addressLines,
+          postalCode: address.postalCode || null,
+          locality: address.locality || null,
+          region: address.administrativeArea || null,
+          country: address.regionCode || null,
+          formatted: [...addressLines, address.postalCode, address.locality, address.administrativeArea]
+            .filter(Boolean)
+            .join(', ')
+        },
+        mapsUri: raw.metadata?.mapsUri || null,
+        newReviewUri: raw.metadata?.newReviewUri || null,
+        rawPayload: raw
+      };
+    });
     const hasMappings = mapped.length > 0;
     return res.json({ success: true, hasMappings, locations: mapped });
   } catch (e) {

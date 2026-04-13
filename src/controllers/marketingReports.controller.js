@@ -9,6 +9,8 @@ const {
   FormSubmissionEvent,
   CitaPaciente,
   IntakeConfig,
+  ClinicWebAsset,
+  ClinicAnalyticsProperty,
   GoogleAdsInsightsDaily,
   ClinicGoogleAdsAccount,
   SocialAdsInsightsDaily,
@@ -22,6 +24,7 @@ const {
   ClinicBusinessLocation,
   BusinessProfileDailyMetric,
   BusinessProfileReview,
+  JobRequest,
 } = db;
 
 const QueryTypes = db.Sequelize.QueryTypes;
@@ -908,6 +911,241 @@ function buildSources({ intakeConfigCount, leadsTotal, seo, googleAds, metaAds, 
   ];
 }
 
+const SYNC_ACTIVE_STATUSES = ['pending', 'queued', 'running', 'waiting'];
+const SYNC_RECENT_STATUSES = [...SYNC_ACTIVE_STATUSES, 'completed', 'failed'];
+const SOURCE_SYNC_CONFIG = {
+  search_console: {
+    source: 'Search Console',
+    label: 'Search Console',
+    jobTypes: ['web_backfill_for_sites', 'web_backfill', 'web_recent'],
+  },
+  analytics: {
+    source: 'GA4 opcional',
+    label: 'Google Analytics',
+    jobTypes: ['analytics_backfill', 'analytics_backfill_properties', 'analytics_recent'],
+  },
+  business_profile: {
+    source: 'Perfil Google',
+    label: 'Perfil de Empresa Google',
+    jobTypes: ['business_profile_backfill_locations', 'business_profile_backfill', 'business_profile_recent'],
+  },
+  google_ads: {
+    source: 'Google Ads',
+    label: 'Google Ads',
+    jobTypes: ['google_ads_recent', 'google_ads_backfill'],
+  },
+  meta_ads: {
+    source: 'Meta Ads',
+    label: 'Meta Ads',
+    jobTypes: ['meta_ads_recent', 'meta_ads_backfill', 'meta_ads_backfill_for_sites'],
+  },
+};
+
+function sourceSyncMessage(label, state) {
+  if (state === 'error') {
+    return `${label} tiene una sincronización con error. Revisa la conexión o vuelve a lanzar el mapeo.`;
+  }
+  return `Estamos recabando datos de ${label}. Los resultados pueden tardar unos minutos en aparecer.`;
+}
+
+function normalizePayloadArray(value) {
+  if (!value) return [];
+  if (Array.isArray(value)) return value;
+  return [value];
+}
+
+function collectClinicIdsFromPayload(value, out = new Set()) {
+  if (!value || typeof value !== 'object') return out;
+  if (Array.isArray(value)) {
+    value.forEach((item) => collectClinicIdsFromPayload(item, out));
+    return out;
+  }
+
+  normalizePayloadArray(value.clinicIds).forEach((id) => {
+    const parsed = Number(id);
+    if (Number.isInteger(parsed)) out.add(parsed);
+  });
+  normalizePayloadArray(value.clinicaIds).forEach((id) => {
+    const parsed = Number(id);
+    if (Number.isInteger(parsed)) out.add(parsed);
+  });
+
+  const single = Number(value.clinicId || value.clinicaId);
+  if (Number.isInteger(single)) out.add(single);
+
+  ['mappings', 'siteMappings', 'sites', 'locations', 'properties', 'accounts'].forEach((key) => {
+    if (Array.isArray(value[key])) {
+      value[key].forEach((item) => collectClinicIdsFromPayload(item, out));
+    }
+  });
+
+  return out;
+}
+
+function jobMatchesScope(job, scope) {
+  const clinicIds = Array.isArray(scope?.clinicIds) ? scope.clinicIds.map(Number).filter(Number.isInteger) : [];
+  if (!clinicIds.length || scope?.isAll) return true;
+  const payloadClinicIds = Array.from(collectClinicIdsFromPayload(job?.payload));
+  if (!payloadClinicIds.length) return true;
+  return payloadClinicIds.some((id) => clinicIds.includes(id));
+}
+
+async function recentJobsForSource(config, scope) {
+  if (!JobRequest || !Array.isArray(config?.jobTypes) || !config.jobTypes.length) {
+    return [];
+  }
+  const since = new Date(Date.now() - 24 * 60 * 60 * 1000);
+  const rows = await JobRequest.findAll({
+    where: {
+      type: { [Op.in]: config.jobTypes },
+      status: { [Op.in]: SYNC_RECENT_STATUSES },
+      created_at: { [Op.gte]: since },
+    },
+    order: [['created_at', 'DESC']],
+    limit: 100,
+    raw: true,
+  });
+  return rows.filter((row) => jobMatchesScope(row, scope));
+}
+
+function buildSourceSyncState({ config, mapped, lastSync, jobs = [], pendingRecords = 0, errorRecords = 0 }) {
+  if (!mapped) return null;
+  const activeJob = jobs.find((job) => SYNC_ACTIVE_STATUSES.includes(job.status));
+  const failedJob = jobs.find((job) => job.status === 'failed');
+  const completedJob = jobs.find((job) => job.status === 'completed');
+
+  if (activeJob) {
+    return {
+      source: config.source,
+      label: config.label,
+      state: 'syncing',
+      active: true,
+      message: sourceSyncMessage(config.label, 'syncing'),
+      jobId: activeJob?.id || null,
+      updatedAt: activeJob?.updated_at || activeJob?.created_at || null,
+    };
+  }
+
+  if (errorRecords > 0 || failedJob) {
+    return {
+      source: config.source,
+      label: config.label,
+      state: 'error',
+      active: true,
+      message: sourceSyncMessage(config.label, 'error'),
+      jobId: failedJob?.id || null,
+      updatedAt: failedJob?.updated_at || failedJob?.created_at || null,
+    };
+  }
+
+  if (completedJob) {
+    return {
+      source: config.source,
+      label: config.label,
+      state: 'completed',
+      active: false,
+      message: `${config.label} sincronizado.`,
+      jobId: completedJob?.id || null,
+      updatedAt: lastSync || completedJob?.completed_at || completedJob?.updated_at || completedJob?.created_at || null,
+    };
+  }
+
+  if (pendingRecords > 0 || !lastSync) {
+    return {
+      source: config.source,
+      label: config.label,
+      state: 'syncing',
+      active: true,
+      message: sourceSyncMessage(config.label, 'syncing'),
+      jobId: null,
+      updatedAt: null,
+    };
+  }
+
+  return {
+    source: config.source,
+    label: config.label,
+    state: 'completed',
+    active: false,
+    message: `${config.label} sincronizado.`,
+    updatedAt: lastSync || null,
+  };
+}
+
+async function buildSyncStatus(scope, { seo, googleAds, metaAds, ga, businessProfile }) {
+  const [
+    searchConsoleMappings,
+    analyticsMappings,
+    businessLocations,
+    googleAdsMappings,
+    metaAdsMappings,
+    searchConsoleJobs,
+    analyticsJobs,
+    businessProfileJobs,
+    googleAdsJobs,
+    metaAdsJobs,
+  ] = await Promise.all([
+    ClinicWebAsset ? ClinicWebAsset.count({ where: { ...scopedWhere('clinicaId', scope), isActive: true } }) : 0,
+    ClinicAnalyticsProperty ? ClinicAnalyticsProperty.count({ where: { ...scopedWhere('clinicaId', scope), isActive: true } }) : 0,
+    ClinicBusinessLocation ? ClinicBusinessLocation.findAll({ where: { ...scopedWhere('clinica_id', scope), is_active: true }, raw: true }) : [],
+    ClinicGoogleAdsAccount ? ClinicGoogleAdsAccount.count({ where: buildAdsScopeWhere(scope, 'clinicaId', 'grupoClinicaId') }) : 0,
+    ClinicMetaAsset ? ClinicMetaAsset.count({ where: { ...buildAssetScopeWhere(scope), assetType: 'ad_account' } }) : 0,
+    recentJobsForSource(SOURCE_SYNC_CONFIG.search_console, scope),
+    recentJobsForSource(SOURCE_SYNC_CONFIG.analytics, scope),
+    recentJobsForSource(SOURCE_SYNC_CONFIG.business_profile, scope),
+    recentJobsForSource(SOURCE_SYNC_CONFIG.google_ads, scope),
+    recentJobsForSource(SOURCE_SYNC_CONFIG.meta_ads, scope),
+  ]);
+
+  const businessPending = businessLocations.filter((row) => row.sync_status === 'pending' || !row.last_synced_at).length;
+  const businessErrors = businessLocations.filter((row) => row.sync_status === 'error').length;
+
+  const states = [
+    buildSourceSyncState({
+      config: SOURCE_SYNC_CONFIG.search_console,
+      mapped: searchConsoleMappings > 0,
+      lastSync: seo.lastSync,
+      jobs: searchConsoleJobs,
+    }),
+    buildSourceSyncState({
+      config: SOURCE_SYNC_CONFIG.analytics,
+      mapped: analyticsMappings > 0,
+      lastSync: ga.lastSync,
+      jobs: analyticsJobs,
+    }),
+    buildSourceSyncState({
+      config: SOURCE_SYNC_CONFIG.business_profile,
+      mapped: businessLocations.length > 0,
+      lastSync: businessProfile.lastSync,
+      jobs: businessProfileJobs,
+      pendingRecords: businessPending,
+      errorRecords: businessErrors,
+    }),
+    buildSourceSyncState({
+      config: SOURCE_SYNC_CONFIG.google_ads,
+      mapped: googleAdsMappings > 0,
+      lastSync: googleAds.lastSync,
+      jobs: googleAdsJobs,
+    }),
+    buildSourceSyncState({
+      config: SOURCE_SYNC_CONFIG.meta_ads,
+      mapped: metaAdsMappings > 0,
+      lastSync: metaAds.lastSync,
+      jobs: metaAdsJobs,
+    }),
+  ].filter(Boolean);
+
+  const activeSources = states.filter((state) => state.active);
+  return {
+    active: activeSources.length > 0,
+    sources: activeSources,
+    allSources: states,
+    message: activeSources.length
+      ? `Estamos recabando datos de ${activeSources.map((source) => source.label).join(', ')}. Los resultados pueden tardar unos minutos en aparecer.`
+      : null,
+  };
+}
+
 function buildKpis(current, previous) {
   const { leads, citas, acudieron, spend } = current;
   const cpl = leads ? spend / leads : 0;
@@ -1142,6 +1380,15 @@ exports.getOverview = async (req, res) => {
       formularios: formsCount,
     };
 
+    const sync = await buildSyncStatus(scope, {
+      seo,
+      googleAds,
+      metaAds,
+      ga,
+      businessProfile,
+    });
+
+    const syncBySource = new Map((sync.allSources || []).map((item) => [item.source, item]));
     const sources = buildSources({
       intakeConfigCount,
       leadsTotal: leads.totals.leads,
@@ -1150,7 +1397,10 @@ exports.getOverview = async (req, res) => {
       metaAds,
       ga,
       businessProfile,
-    });
+    }).map((source) => ({
+      ...source,
+      sync: syncBySource.get(source.source) || null,
+    }));
 
     const recommendations = buildRecommendations({
       businessProfile,
@@ -1172,6 +1422,7 @@ exports.getOverview = async (req, res) => {
       comparison: { start: range.previous.startLabel, end: range.previous.endLabel, label: dateLabel(range.previous.startLabel, range.previous.endLabel) },
       lastUpdated: new Date().toISOString(),
       sources,
+      sync,
       kpis,
       funnel,
       channels,
