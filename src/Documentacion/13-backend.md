@@ -145,12 +145,19 @@ Fuentes que cruza:
 Estado de sincronización:
 
 - La respuesta incluye `sync.active`, `sync.sources[]` y `sync.allSources[]`.
+- El estado `connected` de Search Console, GA4, Perfil Google, Google Ads y Meta Ads debe salir de los mapeos activos (`ClinicWebAssets`, `ClinicAnalyticsProperties`, `ClinicBusinessLocations`, `ClinicGoogleAdsAccounts`, `ClinicMetaAssets`), no de que existan métricas agregadas en el rango consultado. Una fuente puede estar conectada aunque el periodo seleccionado aún no tenga datos.
 - `sync.active=true` cuando una fuente conectada tiene `JobRequest` pendiente/en ejecución, registros locales pendientes (`ClinicBusinessLocations.sync_status=pending`) o error.
-- El endpoint considera terminada una sincronización cuando existe un `JobRequest` reciente `completed`, aunque la API externa no haya devuelto filas nuevas.
+- El endpoint considera terminada una sincronización cuando el último `JobRequest` relevante para la clínica está `completed`, aunque la API externa no haya devuelto filas nuevas. Los jobs globales sin `clinicId` no deben contaminar el estado de una clínica concreta.
 - Si una fuente queda en `state=error`, `sync.message` debe mostrar el mensaje de error de esa fuente, no el texto genérico de "recabando datos".
 - En Perfil de Empresa Google, si el último `JobRequest.result_summary.report.errors[]` indica que `mybusiness.googleapis.com` está deshabilitada, el informe debe indicar que Google está rechazando ese servicio exacto como no habilitado en el proyecto afectado y pedir revisar Google Cloud antes de relanzar el resync.
 - El frontend usa ese estado para mostrar una barra informativa y refrescar cada 60 segundos mientras haya trabajo pendiente.
 - El objetivo es que conectar GA4, Search Console, Perfil de Empresa, Google Ads o Meta Ads no parezca "sin datos" durante los primeros minutos.
+
+Search Console:
+
+- `web_backfill_for_sites` puede generar cientos de miles de filas en `WebScQueryDaily`.
+- Las escrituras de queries se hacen por lotes (`SEARCH_CONSOLE_BULK_CHUNK_SIZE`, por defecto `500`) para no superar `max_allowed_packet` de MySQL.
+- Si se ve `Got a packet bigger than max_allowed_packet` seguido de `write EPIPE`, la causa probable es un bulk demasiado grande, no un problema de permisos de Search Console. Relanzar el job después de aplicar el troceado debe cerrar el aviso de `Revisar sync`.
 
 Limitación consciente:
 
