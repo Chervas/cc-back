@@ -91,6 +91,48 @@ const GOOGLE_BUSINESS_LOCATION_READ_MASK = [
     'labels'
 ].join(',');
 
+function cleanString(value) {
+    const normalized = String(value || '').trim();
+    return normalized || null;
+}
+
+function resolveRequestedRuntimeNamespace(req) {
+    const explicit = cleanString(req.body?.__runtime_namespace)
+        || cleanString(req.body?.runtime_namespace)
+        || cleanString(req.query?.__runtime_namespace)
+        || cleanString(req.query?.runtime_namespace);
+    if (explicit) {
+        return explicit;
+    }
+
+    const origin = cleanString(req.get('origin')) || cleanString(req.get('referer')) || '';
+    if (origin.includes('localhost:4203') || origin.includes('127.0.0.1:4203')) {
+        return 'dev';
+    }
+    if (origin.includes('crm.clinicaclick.com')) {
+        return 'staging';
+    }
+    if (origin.includes('app.clinicaclick.com')) {
+        return 'prod';
+    }
+
+    const runtimeRole = cleanString(process.env.RUNTIME_ROLE);
+    if (runtimeRole === 'gateway') {
+        return cleanString(process.env.AUTOMATIONS_V2_FALLBACK_RUNTIME_NAMESPACE) || 'staging';
+    }
+
+    return cleanString(process.env.JOB_RUNTIME_NAMESPACE)
+        || cleanString(process.env.RUNTIME_NAMESPACE)
+        || null;
+}
+
+function withRequestedRuntimeNamespace(req, payload = {}) {
+    const runtimeNamespace = resolveRequestedRuntimeNamespace(req);
+    return runtimeNamespace
+        ? { ...payload, __runtime_namespace: runtimeNamespace }
+        : payload;
+}
+
 /**
  * Suscribir una página a leadgen con el page token proporcionado.
  * No bloquea el flujo de guardado: loguea y continúa en caso de error.
@@ -1066,7 +1108,7 @@ router.post('/google/analytics/map-properties', async (req, res) => {
             try {
                 const job = await jobRequestsService.enqueueJobRequest({
                     type: 'analytics_backfill',
-                    payload: { mappings: propertiesToBackfill },
+                    payload: withRequestedRuntimeNamespace(req, { mappings: propertiesToBackfill }),
                     priority: 'high',
                     origin: 'analytics:map-properties',
                     requestedBy: userId
@@ -1176,6 +1218,7 @@ router.post('/google/local/map-locations', async (req, res) => {
         }
 
         const createdOrUpdated = [];
+        const locationsToBackfill = [];
         for (const mapping of mappings) {
             const clinicaId = parseInt(mapping?.clinicaId, 10);
             const locationId = String(mapping?.locationId || mapping?.id || '').trim();
@@ -1205,6 +1248,24 @@ router.post('/google/local/map-locations', async (req, res) => {
                 record = await ClinicBusinessLocation.create(payload);
             }
             createdOrUpdated.push({ id: record.id, clinicaId, locationId });
+            locationsToBackfill.push({ clinicId: clinicaId, locationId });
+        }
+
+        if (locationsToBackfill.length) {
+            try {
+                const job = await jobRequestsService.enqueueJobRequest({
+                    type: 'business_profile_backfill_locations',
+                    payload: withRequestedRuntimeNamespace(req, { mappings: locationsToBackfill }),
+                    priority: 'high',
+                    origin: 'business-profile:map-locations',
+                    requestedBy: userId
+                });
+                jobScheduler.triggerImmediate(job.id).catch((err) =>
+                    console.error('❌ Error lanzando businessProfileSync tras mapeo:', err)
+                );
+            } catch (queueErr) {
+                console.error('❌ Error encolando businessProfileSync tras mapeo:', queueErr);
+            }
         }
 
         return res.json({ success: true, mapped: createdOrUpdated.length, locations: createdOrUpdated });
@@ -1772,7 +1833,7 @@ router.post('/google/ads/map-accounts', async (req, res) => {
             try {
                 const job = await jobRequestsService.enqueueJobRequest({
                     type: 'google_ads_recent',
-                    payload: { clinicIds },
+                    payload: withRequestedRuntimeNamespace(req, { clinicIds }),
                     priority: 'critical',
                     origin: 'google:map-accounts',
                     requestedBy: userId
@@ -1986,6 +2047,7 @@ router.post('/google/map-assets', async (req, res) => {
         if (!mappings.length) return res.status(400).json({ success: false, error: 'mappings requerido' });
 
         const createdOrUpdated = [];
+        const sitesToBackfill = [];
         for (const m of mappings) {
             const clinicaId = parseInt(m.clinicaId, 10);
             const siteUrl = String(m.siteUrl || '').trim();
@@ -2003,9 +2065,28 @@ router.post('/google/map-assets', async (req, res) => {
             if (existing) {
                 await existing.update(payload);
                 createdOrUpdated.push({ id: existing.id, ...payload });
+                sitesToBackfill.push({ clinicId: clinicaId, siteUrl });
             } else {
                 const rec = await ClinicWebAsset.create(payload);
                 createdOrUpdated.push({ id: rec.id, ...payload });
+                sitesToBackfill.push({ clinicId: clinicaId, siteUrl });
+            }
+        }
+
+        if (sitesToBackfill.length) {
+            try {
+                const job = await jobRequestsService.enqueueJobRequest({
+                    type: 'web_backfill_for_sites',
+                    payload: withRequestedRuntimeNamespace(req, { siteMappings: sitesToBackfill }),
+                    priority: 'high',
+                    origin: 'search-console:map-assets',
+                    requestedBy: userId
+                });
+                jobScheduler.triggerImmediate(job.id).catch((err) =>
+                    console.error('❌ Error lanzando webSync tras mapeo:', err)
+                );
+            } catch (queueErr) {
+                console.error('❌ Error encolando webSync tras mapeo:', queueErr);
             }
         }
 
@@ -2675,7 +2756,7 @@ router.post('/meta/map-assets', async (req, res) => {
             try {
                 const job = await jobRequestsService.enqueueJobRequest({
                     type: 'meta_ads_recent',
-                    payload: { clinicIds },
+                    payload: withRequestedRuntimeNamespace(req, { clinicIds }),
                     priority: 'critical',
                     origin: 'meta:map-assets',
                     requestedBy: userId
@@ -2945,7 +3026,7 @@ router.delete('/meta/mappings/:mappingId', async (req, res) => {
             try {
                 const job = await jobRequestsService.enqueueJobRequest({
                     type: 'meta_ads_recent',
-                    payload: { clinicIds: [clinicaId] },
+                    payload: withRequestedRuntimeNamespace(req, { clinicIds: [clinicaId] }),
                     priority: 'high',
                     origin: 'meta:delete-mapping',
                     requestedBy: userId

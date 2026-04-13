@@ -284,6 +284,7 @@ const JOB_HANDLERS = {
   google_ads_backfill: async (payload = {}) => metaSyncJobs.executeGoogleAdsBackfill(payload),
   web_recent: async (payload = {}) => metaSyncJobs.executeWebSync(payload),
   web_backfill: async (payload = {}) => metaSyncJobs.executeWebBackfill(payload),
+  web_backfill_for_sites: async (payload = {}) => metaSyncJobs.executeWebBackfillForSites(payload.siteMappings || payload.mappings || []),
   analytics_recent: async (payload = {}) => metaSyncJobs.executeAnalyticsSync(payload),
   analytics_backfill: async (payload = {}) => metaSyncJobs.executeAnalyticsBackfill(payload),
   analytics_backfill_properties: async (payload = {}) => metaSyncJobs.executeAnalyticsBackfillForProperties(payload.mappings || []),
