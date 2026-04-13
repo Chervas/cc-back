@@ -919,9 +919,14 @@ async function syncScheduledTriggersForCita(cita, options = {}) {
       cleanString(payload.template_key),
       cleanString(payload.window_identifier),
     ].join(':');
-    if (!desiredKeySet.has(existingKey)) {
+    const belongsToCurrentRuntime = jobRequestsService.matchesCurrentRuntimeNamespace(payload, {
+      allowUnscoped: false,
+    });
+    if (!desiredKeySet.has(existingKey) || !belongsToCurrentRuntime) {
       await jobRequestsService.markCancelled(job.id, {
-        errorMessage: 'superseded_by_appointment_resync',
+        errorMessage: belongsToCurrentRuntime
+          ? 'superseded_by_appointment_resync'
+          : 'superseded_by_runtime_namespace_resync',
       });
     }
   }
