@@ -1935,6 +1935,7 @@ Reglas importantes:
 - `appointment_after` sí puede quedar programado desde la creación inicial de la cita;
 - el entorno debe aislar sus colas con `QUEUE_PREFIX` propio;
 - tras una migración de namespaces, no dejar jobs `waiting` con `payload.__runtime_namespace` legacy. Si hace falta reclamar aliases, configurar temporalmente `JOB_RUNTIME_NAMESPACE_ALIASES` y retirarlo al terminar la migración;
+- una resincronización de cita debe cancelar y recrear jobs programados cuyo `__runtime_namespace` no pertenezca al runtime actual;
 - si varios procesos consumen la misma tabla/cola de jobs en un entorno, todos deben conocer `appointment_automation_schedule_fire` o bien solo uno de ellos debe actuar como scheduler. Si no, el síntoma es `No handler registered for job type 'appointment_automation_schedule_fire'`.
 - Regla aplicada desde el 2026-03-24: cada scheduler debe reclamar solo los tipos que sabe ejecutar (`claimNextJob(..., allowedTypes)`). Esto evita que runtimes auxiliares como `clinicaclick-auth` fallen jobs de automatización V2 que pertenecen al backend funcional.
 
