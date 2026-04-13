@@ -220,34 +220,41 @@ async function propagateChatFlowTemplateToExistingConfigs(template) {
     return { updated: 0, skipped: 0, reason: 'empty_template' };
   }
 
-  const configs = await IntakeConfig.findAll({
-    where: {
-      clinic_id: { [Op.ne]: null },
-      assignment_scope: 'clinic',
-    },
-  });
-  const clinicIds = Array.from(new Set((configs || []).map((record) => Number(record.clinic_id)).filter(Number.isFinite)));
-  const clinics = clinicIds.length
-    ? await Clinica.findAll({
-      where: { id_clinica: { [Op.in]: clinicIds } },
+  const [configs, clinics] = await Promise.all([
+    IntakeConfig.findAll({
+      where: {
+        clinic_id: { [Op.ne]: null },
+        assignment_scope: 'clinic',
+      },
+    }),
+    Clinica.findAll({
       attributes: ['id_clinica', 'configuracion'],
       raw: true,
-    })
-    : [];
-  const clinicById = new Map((clinics || []).map((clinic) => [Number(clinic.id_clinica), clinic]));
+    }),
+  ]);
+  const configByClinicId = new Map((configs || [])
+    .map((record) => [Number(record.clinic_id), record])
+    .filter(([clinicId]) => Number.isFinite(clinicId)));
 
+  let created = 0;
   let updated = 0;
   let skipped = 0;
 
-  for (const record of configs || []) {
-    const clinicId = Number(record.clinic_id);
-    const clinicDisciplinaCodes = normalizeDisciplinesFromClinicConfig(clinicById.get(clinicId)?.configuracion);
+  for (const clinic of clinics || []) {
+    const clinicId = Number(clinic.id_clinica);
+    if (!Number.isFinite(clinicId)) {
+      skipped += 1;
+      continue;
+    }
+
+    const record = configByClinicId.get(clinicId) || null;
+    const clinicDisciplinaCodes = normalizeDisciplinesFromClinicConfig(clinic.configuracion);
     const disciplineMatches = matchesDisciplines(base.disciplina_codes, clinicDisciplinaCodes);
     const shouldBeDefault = !!base.is_active && isDefaultTemplateForClinic(base.is_default_for, clinicDisciplinaCodes) && !base.show_when_clinic_closed;
     const shouldBeClosed = !!base.is_active && !!base.show_when_clinic_closed;
     const shouldAddIfMissing = !!base.is_active && disciplineMatches;
 
-    const currentConfig = normalizeConfigObject(record.config);
+    const currentConfig = normalizeConfigObject(record?.config);
     const flows = Array.isArray(currentConfig.flows) ? cloneJson(currentConfig.flows) : [];
     const hadExistingCatalogCopy = flows.some((flowRule) => getCatalogTemplateId(flowRule) === templateId);
 
@@ -319,14 +326,26 @@ async function propagateChatFlowTemplateToExistingConfigs(template) {
     };
 
     if (changed && JSON.stringify(currentConfig.flows || []) !== JSON.stringify(nextFlows)) {
-      await record.update({ config: nextConfig });
-      updated += 1;
+      if (record) {
+        await record.update({ config: nextConfig });
+        updated += 1;
+      } else {
+        await IntakeConfig.create({
+          clinic_id: clinicId,
+          group_id: null,
+          assignment_scope: 'clinic',
+          domains: [],
+          config: nextConfig,
+          hmac_key: null,
+        });
+        created += 1;
+      }
     } else {
       skipped += 1;
     }
   }
 
-  return { updated, skipped };
+  return { created, updated, skipped };
 }
 
 function mapTemplate(row) {

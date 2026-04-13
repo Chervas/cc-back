@@ -102,7 +102,8 @@ Limitación consciente:
 Propagación manual de catálogo:
 
 - `create/update/duplicate` de `ChatFlowTemplates` solo modifica el catálogo.
-- `POST /api/marketing/chat-flow-templates/:id/propagate` ejecuta la propagación sobre `IntakeConfigs` de scope `clinic` ya existentes.
+- `POST /api/marketing/chat-flow-templates/:id/propagate` ejecuta la propagación sobre clínicas compatibles por `disciplina_codes`.
+- Si una clínica compatible no tiene `IntakeConfig`, se crea una configuración mínima de scope `clinic` con `domains=[]`, `hmac_key=null` y `config.flows` propagado. No se activa medición web ni se marca dominio instalado.
 - Las copias propagadas guardan `template_id`, `catalog_template_id`, `template_flow_index` y `catalog_template_flow_index` para poder actualizar la misma copia sin duplicarla.
 - Plantillas normales nuevas se insertan desactivadas para no cambiar widgets publicados sin acción explícita.
 - En copias normales ya existentes se actualiza el contenido del catálogo, pero se preserva `enabled/is_default` si la clínica lo había cambiado manualmente.
@@ -110,6 +111,7 @@ Propagación manual de catálogo:
 - Plantillas que coinciden con `is_default_for` de la clínica se insertan activadas, pasan a ser `is_default=true` y actualizan `config.flow` legacy.
 - Si una plantilla queda inactiva o deja de aplicar por disciplina, sus copias existentes quedan `enabled=false` e `is_default=false`.
 - `GET /api/intake/config` evita duplicar flujos de clínica cerrada: si una copia persistida ya existe para el mismo `catalog_template_id` e índice, no inyecta otra copia dinámica.
+- La respuesta de propagación devuelve `{ created, updated, skipped }`.
 
 ## 2026-04-12 - Informes de marketing agregados V1
 
