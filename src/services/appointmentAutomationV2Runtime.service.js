@@ -912,6 +912,7 @@ async function syncScheduledTriggersForCita(cita, options = {}) {
     desiredJobs.map((item) => `${item.triggerType}:${item.templateKey}:${item.windowIdentifier}`)
   );
 
+  const cancelledJobIds = [];
   for (const job of existingJobs) {
     const payload = job?.payload && typeof job.payload === 'object' ? job.payload : {};
     const existingKey = [
@@ -928,6 +929,7 @@ async function syncScheduledTriggersForCita(cita, options = {}) {
           ? 'superseded_by_appointment_resync'
           : 'superseded_by_runtime_namespace_resync',
       });
+      cancelledJobIds.push(job.id);
     }
   }
 
@@ -973,6 +975,7 @@ async function syncScheduledTriggersForCita(cita, options = {}) {
   return {
     success: true,
     scheduled_jobs: scheduledJobIds,
+    cancelled_jobs: cancelledJobIds,
     desired_count: desiredJobs.length,
   };
 }
