@@ -19,6 +19,7 @@ const Usuario = db.Usuario;
 const Clinica = db.Clinica;
 const jobRequestsService = require('../services/jobRequests.service');
 const jobScheduler = require('../services/jobScheduler.service');
+const appointmentAutomationV2Runtime = require('../services/appointmentAutomationV2Runtime.service');
 const { getIO } = require('../services/socket.service');
 const { CITA_STATUS_VALUES, LEAD_STATUS_VALUES } = require('../lib/status-catalog');
 const { buildConversationContext } = require('../lib/automation-conversation-context');
@@ -165,6 +166,36 @@ function cleanString(raw) {
   if (raw === undefined || raw === null) return null;
   const out = String(raw).trim();
   return out || null;
+}
+
+function buildAutomationRuntimeOptions(req, access = {}) {
+  return {
+    user_id: access.user_id || req.userData?.userId || null,
+    user_name: cleanString(
+      req.userData?.name
+      || req.userData?.nombre
+      || req.userData?.username
+      || req.userData?.email
+      || null
+    ),
+    user_role: cleanString(req.userData?.role || req.userData?.rol || 'admin') || 'admin',
+  };
+}
+
+async function runScheduledTemplateBackfill(row, req, access) {
+  try {
+    return await appointmentAutomationV2Runtime.backfillScheduledTriggersForTemplate(
+      row,
+      buildAutomationRuntimeOptions(req, access)
+    );
+  } catch (err) {
+    console.error('⚠️ Error resincronizando citas futuras del flujo programado:', err.message || err);
+    return {
+      success: false,
+      error: 'scheduled_backfill_failed',
+      message: err.message || String(err),
+    };
+  }
 }
 
 function parseClinicConfig(value) {
@@ -4351,9 +4382,16 @@ exports.updateTemplateDraft = async (req, res) => {
         });
       }
 
+      const wasActive = row.is_active !== false;
+      const nextActive = parseBool(body.is_active, row.is_active);
+
       await row.update({
-        is_active: parseBool(body.is_active, row.is_active),
+        is_active: nextActive,
       });
+
+      const scheduledBackfill = nextActive && !wasActive
+        ? await runScheduledTemplateBackfill(row, req, access)
+        : null;
 
       const clinicNameMap = await loadClinicNameMapFromRows([row]);
       const catalogBindingMap = await loadCatalogBindingMapForRows([row]);
@@ -4367,6 +4405,7 @@ exports.updateTemplateDraft = async (req, res) => {
           catalogBindingMap,
           latestActivePublishedVersionMap,
         }),
+        ...(scheduledBackfill ? { scheduled_backfill: scheduledBackfill } : {}),
       });
     }
 
@@ -4589,6 +4628,8 @@ exports.publishTemplateVersion = async (req, res) => {
       }, { transaction });
     });
 
+    const scheduledBackfill = await runScheduledTemplateBackfill(row, req, access);
+
     const clinicNameMap = await loadClinicNameMapFromRows([row]);
     const catalogBindingMap = await loadCatalogBindingMapForRows([row]);
     const latestActivePublishedVersionMap = await loadLatestActivePublishedVersionMap([row.public_id || row.template_key]);
@@ -4601,6 +4642,7 @@ exports.publishTemplateVersion = async (req, res) => {
         catalogBindingMap,
         latestActivePublishedVersionMap,
       }),
+      scheduled_backfill: scheduledBackfill,
     });
   } catch (err) {
     console.error('Error publishTemplateVersion v2', err);

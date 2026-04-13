@@ -1,5 +1,5 @@
 > **Módulo:** Arquitectura del Backend
-> **Última actualización:** 2026-04-12
+> **Última actualización:** 2026-04-13
 > **Relacionado con:** [20.1-motor-flujos-v2](./20.1-motor-flujos-v2.md) | documento operativo `cc-front/src/Documentacion/31-roadmap-arquitectura-entornos-gateway.md`
 
 ---
@@ -26,6 +26,7 @@ Variables críticas:
 | `JOBS_WORKER_ENABLED` | `true` en API dev/staging; `false` en gateway |
 | `JOBS_CRON_LEADER` | `true` solo en `pm2-back-staging` hasta que exista prod |
 | `JOB_RUNTIME_CLAIM_UNSCOPED` | por defecto `false` cuando hay namespace explícito; solo `true` en migración controlada |
+| `JOB_RUNTIME_NAMESPACE_ALIASES` | lista separada por comas para migraciones controladas de namespaces legacy; por defecto vacío |
 | `AUTOMATIONS_V2_FALLBACK_RUNTIME_NAMESPACE` | en gateway actual debe apuntar a `staging` para recuperar waits antiguos sin namespace |
 | `AUTOMATIONS_V2_RESUME_FROM_SOCKET_BUS` | opt-in legacy; por defecto apagado para evitar doble resume inbound |
 
@@ -35,6 +36,7 @@ Reglas de jobs:
 - `pm2-back-dev` no reclama jobs de `staging`.
 - `pm2-back-staging` no reclama jobs de `dev`.
 - Un runtime con namespace explícito no reclama jobs sin namespace salvo `JOB_RUNTIME_CLAIM_UNSCOPED=true`.
+- Un runtime solo reclama aliases legacy si `JOB_RUNTIME_NAMESPACE_ALIASES` se define explícitamente.
 - `pm2-gateway` no ejecuta scheduler de negocio ni cron.
 
 Reglas de inbound externo:
@@ -50,7 +52,7 @@ Cambios de código asociados:
 | Archivo | Responsabilidad |
 |:---|:---|
 | `src/services/jobRequests.service.js` | scope de jobs por `__runtime_namespace` y control de unscoped |
-| `src/services/jobScheduler.service.js` | scheduler por namespace y log `claim unscoped` |
+| `src/services/jobScheduler.service.js` | scheduler por namespace, aliases explícitos y log `claim unscoped` |
 | `src/workers/queue.workers.js` | workers de negocio deshabilitados en `RUNTIME_ROLE=gateway` |
 | `src/app.js` | gateway no registra cron y socket-bus resume queda opt-in |
 | `src/services/automationsV2Resume.service.js` | inbound encola resume en namespace propietario |
@@ -264,8 +266,8 @@ En esta máquina `dev` y `staging` comparten base de datos. El riesgo real no es
 
 ### Consecuencia operativa
 
-- `clinicaclick-integracion` debe reclamar solo jobs de `port:3004`;
-- `clinicaclick-staging` debe reclamar solo jobs de `port:3001`;
+- `pm2-back-dev` debe reclamar solo jobs de `dev`;
+- `pm2-back-staging` debe reclamar solo jobs de `staging`;
 - esto evita que una automatización creada y monitorizada en `localhost` siga ejecutándose “por detrás” en `staging`, dejando el monitor local sin eventos en tiempo real.
 
 ### Monitorización
@@ -1917,6 +1919,7 @@ Validaciones:
 Contrato operativo:
 
 - al crear, editar o reagendar una cita, backend llama a `syncScheduledTriggersForCita(cita)`;
+- al publicar un flujo programado o reactivar una versión publicada, backend resincroniza citas futuras del scope del flujo para no depender de que la cita se edite después;
 - se crean jobs `appointment_automation_schedule_fire` con `payload`:
   - `appointment_id`
   - `trigger_type`
@@ -1928,10 +1931,19 @@ Contrato operativo:
 Reglas importantes:
 
 - `appointment_reminder_window` no debe programarse si la cita ya ha empezado;
+- el backfill de publicación no dispara recordatorios retroactivos si la ventana ya pasó; solo deja programadas ventanas futuras;
 - `appointment_after` sí puede quedar programado desde la creación inicial de la cita;
 - el entorno debe aislar sus colas con `QUEUE_PREFIX` propio;
+- tras una migración de namespaces, no dejar jobs `waiting` con `payload.__runtime_namespace` legacy. Si hace falta reclamar aliases, configurar temporalmente `JOB_RUNTIME_NAMESPACE_ALIASES` y retirarlo al terminar la migración;
 - si varios procesos consumen la misma tabla/cola de jobs en un entorno, todos deben conocer `appointment_automation_schedule_fire` o bien solo uno de ellos debe actuar como scheduler. Si no, el síntoma es `No handler registered for job type 'appointment_automation_schedule_fire'`.
 - Regla aplicada desde el 2026-03-24: cada scheduler debe reclamar solo los tipos que sabe ejecutar (`claimNextJob(..., allowedTypes)`). Esto evita que runtimes auxiliares como `clinicaclick-auth` fallen jobs de automatización V2 que pertenecen al backend funcional.
+
+Caso real `2026-04-13`:
+
+- recordatorios del día anterior en Propdental Eixample no salieron a las 09:00;
+- algunas citas tenían jobs `waiting` vencidos con `payload.__runtime_namespace = port:3001`, pero `pm2-back-staging` ya reclamaba solo `staging`;
+- otras citas no tenían job porque la cita existía antes de publicar/activar el flujo programado;
+- no activar aliases ni reclamar jobs vencidos de pacientes reales sin confirmar si se deben enviar tarde.
 
 ### Diagnóstico real de una cita que "no disparó" la automatización
 

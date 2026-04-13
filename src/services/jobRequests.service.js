@@ -67,7 +67,17 @@ const detectCurrentRuntimeNamespace = () => {
   return 'runtime:unknown';
 };
 
+const parseRuntimeNamespaceAliases = () => {
+  return String(process.env.JOB_RUNTIME_NAMESPACE_ALIASES || '')
+    .split(',')
+    .map((value) => cleanString(value))
+    .filter(Boolean);
+};
+
 const CURRENT_RUNTIME_NAMESPACE = detectCurrentRuntimeNamespace();
+const RUNTIME_NAMESPACE_ALIASES = parseRuntimeNamespaceAliases()
+  .filter((value, index, array) => value !== CURRENT_RUNTIME_NAMESPACE && array.indexOf(value) === index);
+const CLAIM_RUNTIME_NAMESPACES = [CURRENT_RUNTIME_NAMESPACE, ...RUNTIME_NAMESPACE_ALIASES];
 const HAS_EXPLICIT_RUNTIME_NAMESPACE = Boolean(
   cleanString(process.env.JOB_RUNTIME_NAMESPACE) || cleanString(process.env.RUNTIME_NAMESPACE)
 );
@@ -98,7 +108,7 @@ const buildRuntimeScopeWhere = ({ includeUnscoped = CLAIM_UNSCOPED_JOBS } = {}) 
   );
 
   const clauses = [
-    sequelize.where(extractedNamespace, CURRENT_RUNTIME_NAMESPACE),
+    sequelize.where(extractedNamespace, { [Op.in]: CLAIM_RUNTIME_NAMESPACES }),
   ];
 
   if (includeUnscoped) {
@@ -118,7 +128,7 @@ const matchesCurrentRuntimeNamespace = (payload = null, { allowUnscoped = CLAIM_
   if (!payloadNamespace) {
     return allowUnscoped;
   }
-  return payloadNamespace === CURRENT_RUNTIME_NAMESPACE;
+  return CLAIM_RUNTIME_NAMESPACES.includes(payloadNamespace);
 };
 
 const baseOrder = [
@@ -409,6 +419,7 @@ module.exports = {
   listJobRequests,
   findJobById,
   getCurrentRuntimeNamespace: () => CURRENT_RUNTIME_NAMESPACE,
+  getRuntimeNamespaceAliases: () => RUNTIME_NAMESPACE_ALIASES,
   shouldClaimUnscopedJobs: () => CLAIM_UNSCOPED_JOBS,
   matchesCurrentRuntimeNamespace
 };
