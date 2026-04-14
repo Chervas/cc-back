@@ -332,6 +332,12 @@ class MetaSyncJobs {
       scheduled: false,
       timezone: this.config.timezone // Usar timezone del .env
     });
+    // node-cron v4 starts tasks created with schedule() immediately. Keep the
+    // explicit lifecycle controlled by start()/stop() so non-leader runtimes do
+    // not enqueue duplicated jobs just by registering them.
+    if (typeof job.stop === 'function') {
+      job.stop();
+    }
 
     this.jobs.set(name, {
       job,

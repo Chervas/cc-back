@@ -780,6 +780,7 @@ Nueva regla:
 - `JOBS_CRON_LEADER=true`: este runtime es el que manda y arranca `metaSyncJobs.start()`.
 - `JOBS_CRON_LEADER=false`: este runtime no debe encolar cron jobs periódicos.
 - Los endpoints administrativos que arrancan o reinician `metaSyncJobs` deben rechazar runtimes no líderes (`cron_not_leader`). Parar jobs se permite para limpiar un runtime que se haya quedado arrancado por error.
+- `node-cron` v4 arranca las tareas creadas con `cron.schedule()` al registrarlas, aunque se pase `scheduled:false`. Por eso `src/jobs/sync.jobs.js` debe llamar a `job.stop()` justo después de registrar cada job y dejar que solo `metaSyncJobs.start()` los active. Si se quita ese `stop()`, `dev` vuelve a duplicar cron aunque `JOBS_CRON_LEADER=false`.
 
 Importante:
 
