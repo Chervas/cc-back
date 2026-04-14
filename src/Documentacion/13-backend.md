@@ -2734,3 +2734,60 @@ Comportamiento de navegación:
 - si existe conversación, la notificación guarda `quickChatConversationId`
 - el front puede abrir QuickChat directamente desde la notificación
 - si no hay conversación, el fallback navegable es la ficha del paciente
+
+## Personal: carga de citas e impacto de horarios
+
+El endpoint canónico de horario de personal enriquece los tramos expandidos:
+
+- `GET /api/personal/:id/schedule?from=YYYY-MM-DD&to=YYYY-MM-DD`
+- `GET /api/personal/me/schedule?from=YYYY-MM-DD&to=YYYY-MM-DD`
+
+Cada entrada de `clinicas[].horarios_expandidos[]` puede incluir:
+
+- `appointments_count`: número de citas activas solapadas con ese tramo.
+- `appointments_preview`: lista corta de citas con paciente, hora, estado, instalación y tratamiento.
+
+Reglas:
+
+- Se excluyen citas `cancelada`.
+- El cálculo se hace en backend para evitar que el Gantt cargue y filtre todas las citas en frontend.
+- El solape se evalúa contra fechas reales expandidas y zona horaria de la clínica.
+
+Preview antes de modificar horarios:
+
+- `POST /api/personal/:id/clinicas/:clinicaId/horarios/impact-preview`
+- `POST /api/personal/me/clinicas/:clinicaId/horarios/impact-preview`
+
+Payload mínimo:
+
+```json
+{
+  "action": "update_shift",
+  "horario_id": 123,
+  "fecha": "2026-04-16",
+  "original_start": "09:00",
+  "original_end": "14:00",
+  "next_start": "10:00",
+  "next_end": "13:00"
+}
+```
+
+Respuesta:
+
+```json
+{
+  "has_affected_appointments": true,
+  "affected_count": 2,
+  "intervals": [{ "fecha": "2026-04-16", "start": "09:00", "end": "10:00", "reason": "shorten_start" }],
+  "appointments": []
+}
+```
+
+Uso esperado:
+
+- borrar tramo: detectar citas solapadas con el tramo completo
+- acortar inicio: detectar citas en el intervalo retirado
+- acortar fin: detectar citas en el intervalo retirado
+- bloqueo: detectar citas solapadas con el bloqueo
+
+El movimiento batch de citas afectadas queda como contrato posterior sobre endpoints específicos del asistente de reprogramación. No debe resolverse con cálculo libre en frontend.

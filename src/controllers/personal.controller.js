@@ -10,6 +10,9 @@ const {
     DoctorBloqueo,
     DoctorBloqueoExcepcion,
     CitaPaciente,
+    Paciente,
+    Instalacion,
+    Tratamiento,
     sequelize,
 } = require('../../models');
 const bcrypt = require('bcryptjs');
@@ -2731,9 +2734,19 @@ async function buildScheduleResponse(actorId, targetUserId, query = {}) {
         });
     }
 
+    const scheduleClinicIds = clinicasBase.map((c) => Number(c.clinica_id)).filter((id) => Number.isFinite(id));
+    const scheduleTimezoneMap = await buildClinicTimezoneMap(scheduleClinicIds);
+    const scheduleAppointmentRows = await loadAppointmentsForScheduleRange({
+        doctorId: targetUserId,
+        clinicIds: scheduleClinicIds,
+        from: scheduleRange.from,
+        to: scheduleRange.to,
+    });
+
     const clinicas = clinicasBase.map((c) => {
         const clinicId = Number(c.clinica_id);
         const canEditClinic = editableClinicIds.has(clinicId);
+        const clinicTimeZone = timezoneForClinicId(clinicId, scheduleTimezoneMap);
         const horarioExceptionMap = buildHorarioExceptionMap(
             (c.horarios || []).flatMap((h) => Array.isArray(h.excepciones) ? h.excepciones : [])
         );
@@ -2742,7 +2755,11 @@ async function buildScheduleResponse(actorId, targetUserId, query = {}) {
             scheduleRange.from,
             scheduleRange.to,
             horarioExceptionMap,
-        );
+        ).map((he) => enrichExpandedShiftWithAppointments(
+            { ...he, clinica_id: clinicId },
+            scheduleAppointmentRows,
+            clinicTimeZone,
+        ));
         return {
             ...c,
             horarios: (c.horarios || []).map((h) => serializeHorarioRow(h)),
@@ -2846,6 +2863,81 @@ exports.getScheduleForPersonal = async (req, res) => {
     }
 };
 
+exports.previewHorarioImpactForCurrent = async (req, res) => {
+    req.params.id = String(req.userData?.userId || '');
+    return exports.previewHorarioImpact(req, res);
+};
+
+exports.previewHorarioImpact = async (req, res) => {
+    try {
+        const actorId = Number(req.userData?.userId);
+        if (!Number.isFinite(actorId)) {
+            return res.status(401).json({ message: 'Auth failed!' });
+        }
+
+        const targetUserId = Number(req.params.id);
+        const clinicaId = Number(req.params.clinicaId);
+        if (!Number.isFinite(targetUserId) || !Number.isFinite(clinicaId)) {
+            return res.status(400).json({ message: 'Invalid id' });
+        }
+
+        const canEdit = await canEditHorarios(actorId, targetUserId, clinicaId);
+        if (!canEdit) {
+            return res.status(403).json({ message: 'Forbidden' });
+        }
+
+        const horarioId = Number(req.body?.horario_id || req.body?.horarioId || req.params.horarioId);
+        let fallback = {};
+        if (Number.isFinite(horarioId)) {
+            const existing = await DoctorHorario.findOne({
+                where: { id: horarioId },
+                include: [
+                    {
+                        model: DoctorClinica,
+                        as: 'doctorClinica',
+                        where: { doctor_id: targetUserId, clinica_id: clinicaId },
+                        attributes: ['id'],
+                        required: true,
+                    },
+                ],
+            });
+            if (!existing) {
+                return res.status(404).json({ message: 'Horario not found' });
+            }
+            fallback = {
+                original_start: existing.hora_inicio,
+                original_end: existing.hora_fin,
+            };
+        }
+
+        const clinicTimezone = await getClinicTimezoneById(clinicaId);
+        const intervals = buildImpactIntervalsFromBody(req.body || {}, fallback);
+        if (!intervals.length) {
+            return res.status(400).json({
+                message: 'No se pudo calcular el impacto del cambio de horario',
+                reason: 'INVALID_IMPACT_PAYLOAD',
+            });
+        }
+
+        const appointments = await findAppointmentsForImpact({
+            doctorId: targetUserId,
+            clinicaId,
+            intervals,
+            timeZone: clinicTimezone,
+        });
+
+        return res.json({
+            has_affected_appointments: appointments.length > 0,
+            affected_count: appointments.length,
+            intervals,
+            appointments,
+        });
+    } catch (error) {
+        console.error('[personal.previewHorarioImpact] Error:', error);
+        return res.status(500).json({ message: 'Error calculating horario impact', error: error.message });
+    }
+};
+
 
 async function getHorariosFor(targetUserId, clinicId) {
     const dc = await DoctorClinica.findOne({
@@ -2906,6 +2998,188 @@ function resolveScheduleRange(query = {}) {
         to = maxTo;
     }
     return { from, to };
+}
+
+const ACTIVE_APPOINTMENT_WHERE = {
+    estado: { [Op.notIn]: ['cancelada'] },
+};
+
+function overlapsDateRange(aStart, aEnd, bStart, bEnd) {
+    const startA = parseDateOrNull(aStart);
+    const endA = parseDateOrNull(aEnd);
+    const startB = parseDateOrNull(bStart);
+    const endB = parseDateOrNull(bEnd);
+    if (!startA || !endA || !startB || !endB) return false;
+    return startA < endB && endA > startB;
+}
+
+function appointmentPatientName(row) {
+    const patient = row?.paciente || row?.Paciente || null;
+    const full = `${patient?.nombre || ''} ${patient?.apellidos || ''}`.trim();
+    return full || row?.titulo || 'Paciente';
+}
+
+function serializeScheduleAppointment(row, timeZone = DEFAULT_TIMEZONE) {
+    if (!row) return null;
+    const plain = row.toJSON ? row.toJSON() : row;
+    const patient = plain.paciente || null;
+    const instalacion = plain.instalacion || null;
+    const tratamiento = plain.tratamiento || null;
+    const startDay = toDay(plain.inicio, timeZone);
+    const startHm = toHm(plain.inicio, timeZone);
+    const endHm = toHm(plain.fin, timeZone);
+
+    return {
+        id_cita: Number(plain.id_cita),
+        clinica_id: plain.clinica_id != null ? Number(plain.clinica_id) : null,
+        doctor_id: plain.doctor_id != null ? Number(plain.doctor_id) : null,
+        paciente_id: plain.paciente_id != null ? Number(plain.paciente_id) : null,
+        paciente_nombre: appointmentPatientName(plain),
+        paciente_telefono: patient?.telefono_movil || patient?.telefono_secundario || null,
+        inicio: plain.inicio,
+        fin: plain.fin,
+        fecha: startDay,
+        hora_inicio: startHm,
+        hora_fin: endHm,
+        estado: plain.estado || null,
+        titulo: plain.titulo || null,
+        motivo: plain.motivo || null,
+        instalacion_id: plain.instalacion_id != null ? Number(plain.instalacion_id) : null,
+        instalacion_nombre: instalacion?.nombre || null,
+        tratamiento_id: plain.tratamiento_id != null ? Number(plain.tratamiento_id) : null,
+        tratamiento_nombre: tratamiento?.nombre || null,
+    };
+}
+
+function appointmentInclude() {
+    return [
+        Paciente ? { model: Paciente, as: 'paciente', required: false, attributes: ['id_paciente', 'nombre', 'apellidos', 'telefono_movil', 'telefono_secundario'] } : null,
+        Instalacion ? { model: Instalacion, as: 'instalacion', required: false, attributes: ['id', 'nombre'] } : null,
+        Tratamiento ? { model: Tratamiento, as: 'tratamiento', required: false, attributes: ['id_tratamiento', 'nombre'] } : null,
+    ].filter(Boolean);
+}
+
+async function loadAppointmentsForScheduleRange({ doctorId, clinicIds, from, to }) {
+    const ids = (clinicIds || [])
+        .map((id) => Number(id))
+        .filter((id) => Number.isFinite(id));
+    if (!Number.isFinite(Number(doctorId)) || !ids.length) return [];
+
+    // Buffer de 1 día para no perder citas por diferencias UTC/local.
+    const utcFrom = new Date(`${addDays(from, -1)}T00:00:00.000Z`);
+    const utcTo = new Date(`${addDays(to, 1)}T23:59:59.999Z`);
+
+    return CitaPaciente.findAll({
+        where: {
+            doctor_id: Number(doctorId),
+            clinica_id: { [Op.in]: ids },
+            ...ACTIVE_APPOINTMENT_WHERE,
+            inicio: { [Op.lt]: utcTo },
+            fin: { [Op.gt]: utcFrom },
+        },
+        include: appointmentInclude(),
+        order: [['inicio', 'ASC']],
+    });
+}
+
+function enrichExpandedShiftWithAppointments(shift, appointmentRows, timeZone = DEFAULT_TIMEZONE) {
+    if (!shift?.fecha || !shift?.hora_inicio || !shift?.hora_fin) return shift;
+    const clinicId = Number(shift.clinica_id);
+    const shiftStart = buildDateTime(shift.fecha, shift.hora_inicio, '00:00', timeZone);
+    const shiftEnd = buildDateTime(shift.fecha, shift.hora_fin, '23:59', timeZone);
+    if (!shiftStart || !shiftEnd) return shift;
+
+    const matches = (appointmentRows || []).filter((row) => {
+        const plain = row.toJSON ? row.toJSON() : row;
+        if (clinicId && Number(plain.clinica_id) !== clinicId) return false;
+        return overlapsDateRange(plain.inicio, plain.fin, shiftStart, shiftEnd);
+    });
+
+    return {
+        ...shift,
+        appointments_count: matches.length,
+        appointments_preview: matches.slice(0, 8).map((row) => serializeScheduleAppointment(row, timeZone)),
+    };
+}
+
+function buildImpactIntervalsFromBody(body = {}, fallback = {}) {
+    const action = String(body.action || fallback.action || '').trim();
+    const date = normalizeDateOnly(body.fecha || body.date || fallback.fecha);
+    const originalStart = normalizeHm(body.original_start || body.hora_inicio_original || fallback.original_start);
+    const originalEnd = normalizeHm(body.original_end || body.hora_fin_original || fallback.original_end);
+    const nextStart = normalizeHm(body.next_start || body.hora_inicio || fallback.next_start);
+    const nextEnd = normalizeHm(body.next_end || body.hora_fin || fallback.next_end);
+    const intervals = [];
+
+    if (!date || !originalStart || !originalEnd) return intervals;
+
+    if (action === 'delete_shift' || action === 'delete-row' || action === 'delete_row') {
+        intervals.push({ fecha: date, start: originalStart, end: originalEnd, reason: 'delete_shift' });
+        return intervals;
+    }
+
+    if (action === 'create_block' || action === 'update_block' || action === 'block') {
+        const blockStart = normalizeHm(body.block_start || body.hora_inicio || nextStart || originalStart);
+        const blockEnd = normalizeHm(body.block_end || body.hora_fin || nextEnd || originalEnd);
+        if (blockStart && blockEnd && blockStart < blockEnd) {
+            intervals.push({ fecha: date, start: blockStart, end: blockEnd, reason: 'block' });
+        }
+        return intervals;
+    }
+
+    if (action === 'update_shift' || action === 'resize_shift' || action === 'move_shift') {
+        if (!nextStart || !nextEnd || nextStart >= nextEnd) {
+            intervals.push({ fecha: date, start: originalStart, end: originalEnd, reason: 'invalid_next_range' });
+            return intervals;
+        }
+
+        if (nextStart > originalStart) {
+            intervals.push({ fecha: date, start: originalStart, end: nextStart, reason: 'shorten_start' });
+        }
+        if (nextEnd < originalEnd) {
+            intervals.push({ fecha: date, start: nextEnd, end: originalEnd, reason: 'shorten_end' });
+        }
+        if (nextStart > originalEnd || nextEnd < originalStart) {
+            intervals.push({ fecha: date, start: originalStart, end: originalEnd, reason: 'move_outside_original' });
+        }
+    }
+
+    return intervals.filter((it) => it.start && it.end && it.start < it.end);
+}
+
+async function findAppointmentsForImpact({ doctorId, clinicaId, intervals, timeZone = DEFAULT_TIMEZONE }) {
+    const validIntervals = (intervals || []).filter((it) => it?.fecha && it?.start && it?.end && it.start < it.end);
+    if (!Number.isFinite(Number(doctorId)) || !Number.isFinite(Number(clinicaId)) || !validIntervals.length) {
+        return [];
+    }
+
+    const minDay = validIntervals.map((it) => it.fecha).sort()[0];
+    const maxDay = validIntervals.map((it) => it.fecha).sort().slice(-1)[0];
+    const rows = await loadAppointmentsForScheduleRange({
+        doctorId,
+        clinicIds: [clinicaId],
+        from: minDay,
+        to: maxDay,
+    });
+
+    const affected = rows.filter((row) => {
+        const plain = row.toJSON ? row.toJSON() : row;
+        return validIntervals.some((interval) => {
+            const start = buildDateTime(interval.fecha, interval.start, '00:00', timeZone);
+            const end = buildDateTime(interval.fecha, interval.end, '23:59', timeZone);
+            return start && end && overlapsDateRange(plain.inicio, plain.fin, start, end);
+        });
+    });
+
+    const seen = new Set();
+    return affected
+        .filter((row) => {
+            const id = Number(row?.id_cita);
+            if (!Number.isFinite(id) || seen.has(id)) return false;
+            seen.add(id);
+            return true;
+        })
+        .map((row) => serializeScheduleAppointment(row, timeZone));
 }
 
 function normalizeHorarioExceptionInput(body = {}) {

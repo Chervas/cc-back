@@ -38,6 +38,7 @@ router.get('/:id/schedule', personalController.getScheduleForPersonal);
 
 // Horarios por clínica (compat con /api/doctors/*)
 router.get('/me/clinicas/:clinicaId/horarios', personalController.getHorariosClinicaForCurrent);
+router.post('/me/clinicas/:clinicaId/horarios/impact-preview', personalController.previewHorarioImpactForCurrent);
 router.put('/me/clinicas/:clinicaId/horarios', personalController.updateHorariosClinicaForCurrent);
 router.post('/me/clinicas/:clinicaId/horarios', personalController.createHorarioClinicaForCurrent);
 router.patch('/me/clinicas/:clinicaId/horarios/:horarioId', personalController.patchHorarioClinicaForCurrent);
@@ -50,6 +51,7 @@ router.post('/me/horarios/move', personalController.moveHorarioClinicaForCurrent
 router.post('/me/horarios/copy', personalController.copyHorarioClinicaForCurrent);
 router.patch('/me/clinicas/:clinicaId/disponibilidad-config', personalController.updateDisponibilidadConfigClinicaForCurrent);
 router.get('/:id/clinicas/:clinicaId/horarios', personalController.getHorariosClinica);
+router.post('/:id/clinicas/:clinicaId/horarios/impact-preview', personalController.previewHorarioImpact);
 router.put('/:id/clinicas/:clinicaId/horarios', personalController.updateHorariosClinica);
 router.post('/:id/clinicas/:clinicaId/horarios', personalController.createHorarioClinica);
 router.patch('/:id/clinicas/:clinicaId/horarios/:horarioId', personalController.patchHorarioClinica);
