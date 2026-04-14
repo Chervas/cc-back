@@ -37,12 +37,28 @@ const JOB_NAME_TO_QUEUE_TYPE = {
   businessProfileBackfill: 'business_profile_backfill'
 };
 
+function isCronLeaderRuntime() {
+  return process.env.JOBS_CRON_LEADER === 'true';
+}
+
+function rejectNonLeaderCronStart(res) {
+  return res.status(409).json({
+    message: 'Este runtime no es líder de cron. No puede iniciar jobs periódicos.',
+    code: 'cron_not_leader',
+    runtimeNamespace: process.env.RUNTIME_NAMESPACE || null,
+    queuePrefix: process.env.QUEUE_PREFIX || null,
+  });
+}
+
 /**
  * Inicializar el sistema de jobs cron
  */
 exports.initializeJobs = async (req, res) => {
   try {
     console.log('🚀 Solicitud de inicialización de jobs recibida');
+    if (!isCronLeaderRuntime()) {
+      return rejectNonLeaderCronStart(res);
+    }
     
     // Verificar si ya están inicializados
     if (metaSyncJobs.isRunning) {
@@ -324,6 +340,10 @@ exports.tailJobLog = async (req, res) => {
  */
 exports.startJobs = async (req, res) => {
   try {
+    if (!isCronLeaderRuntime()) {
+      return rejectNonLeaderCronStart(res);
+    }
+
     const result = metaSyncJobs.start();
     
     res.json({
@@ -368,6 +388,10 @@ exports.stopJobs = async (req, res) => {
  */
 exports.restartJobs = async (req, res) => {
   try {
+    if (!isCronLeaderRuntime()) {
+      return rejectNonLeaderCronStart(res);
+    }
+
     const result = metaSyncJobs.restart();
     
     res.json({
