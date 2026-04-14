@@ -779,6 +779,7 @@ Nueva regla:
   - Si vale `false`, este runtime no ejecuta automatizaciones, resumes ni jobs diferidos aunque el backend esté online.
 - `JOBS_CRON_LEADER=true`: este runtime es el que manda y arranca `metaSyncJobs.start()`.
 - `JOBS_CRON_LEADER=false`: este runtime no debe encolar cron jobs periódicos.
+- Los endpoints administrativos que arrancan o reinician `metaSyncJobs` deben rechazar runtimes no líderes (`cron_not_leader`). Parar jobs se permite para limpiar un runtime que se haya quedado arrancado por error.
 
 Importante:
 
@@ -787,23 +788,24 @@ Importante:
 
 Configuración operativa actual:
 
-- `clinicaclick-integracion`: `JOBS_CRON_LEADER=true`
-- `clinicaclick-auth`: `JOBS_CRON_LEADER=false`
-- `clinicaclick-staging`: `JOBS_CRON_LEADER=false`
+- `pm2-back-staging`: `JOBS_CRON_LEADER=true`
+- `pm2-back-dev`: `JOBS_CRON_LEADER=false`
+- `pm2-gateway`: `JOBS_CRON_LEADER=false`
 
 Objetivo:
 
 - evitar duplicados horarios de `whatsapp_templates_sync`;
-- evitar que `auth` o `staging` compitan con `integracion` sobre la misma base de datos;
+- evitar que `dev`, `gateway` o cualquier runtime secundario compita con `staging` sobre la misma base de datos;
 - poder migrar el liderazgo sin tocar código.
 
 ### Regla de migración a staging
 
 Cuando `staging` deba convertirse en el runtime que manda los cron jobs:
 
-1. poner `JOBS_CRON_LEADER=false` en `integracion`;
-2. poner `JOBS_CRON_LEADER=true` en `staging`;
-3. reiniciar ambos procesos con actualización de `.env`.
+1. poner `JOBS_CRON_LEADER=false` en el runtime que deja de mandar;
+2. poner `JOBS_CRON_LEADER=true` en el runtime que pasa a mandar;
+3. reiniciar ambos procesos con actualización de `.env`;
+4. revisar `SyncLogs` durante una hora para confirmar que no aparecen duplicados.
 
 Importante:
 
@@ -2066,7 +2068,7 @@ Regla operativa vigente tras el fix del `2026-04-01`:
 
 - si el catálogo enlaza un flujo base por `public_id`, la propagación a clínicas debe:
   - preferir la versión **sin scope** (`clinic_id = null`, `group_id = null`);
-  - normalizar cualquier `template_key` heredado quitando sufijos previos `__clinic_<id>`;
+  - normalizar cualquier `template_key` heredado quitando sufijos previos `__clinic_<id>` y el legacy `_clinic_<id>`;
   - generar el `template_key` final de clínica como `<base>__clinic_<id>`;
   - asignar un `public_id` propio a la familia propagada de esa clínica.
 
@@ -2074,6 +2076,7 @@ Esto evita dos regresiones:
 
 1. que el `template_key` se vaya concatenando (`base__clinic_1__clinic_19__clinic_22...`);
 2. que publicar una copia de clínica desactive por accidente el flujo base del catálogo al compartir `public_id`.
+3. que una copia legacy `_clinic_<id>` aparezca como borrador activo adicional si ya existe una familia publicada `__clinic_<id>`.
 
 #### Semántica pendiente de normalizar en contexto de cita
 
@@ -2563,6 +2566,8 @@ Para `WhatsappTemplates`, el backend ya distingue entre:
 
 Regla operativa:
 
+- una plantilla inactiva de catálogo no debe propagarse a clínicas ni abrir revisión en Meta; backend devuelve `catalog_template_inactive`;
+- primero se activa y guarda la plantilla, después se pulsa `Propagar`;
 - si existe una plantilla remota con el mismo nombre pero distinto contrato Meta-facing, la propagación debe intentar abrir igualmente una revisión real en Meta;
 - si Meta acepta esa creación, el override local queda en `PENDING`;
 - si Meta la rechaza, el override local queda en `PENDING_LOCAL` y se persiste el motivo exacto devuelto por Meta en `rejection_reason`;

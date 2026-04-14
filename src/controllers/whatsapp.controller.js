@@ -1728,6 +1728,13 @@ exports.propagateCatalogToClinics = async (req, res) => {
       return res.status(404).json({ error: 'catalog_not_found' });
     }
 
+    if (!item.is_active) {
+      return res.status(400).json({
+        error: 'catalog_template_inactive',
+        message: 'Activa la plantilla antes de propagarla. Las plantillas inactivas no se envían a revisión de Meta.',
+      });
+    }
+
     if (!assertValidCatalogTemplatePayload({ bodyText: item.body_text }, res)) {
       return;
     }

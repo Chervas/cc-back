@@ -100,7 +100,7 @@ function parseIntOrNull(value) {
 function stripClinicScopeSuffixes(value) {
   const normalized = sanitizeTemplateKey(value);
   if (!normalized) return null;
-  return normalized.replace(/(?:__clinic_\d+)+$/g, '') || null;
+  return normalized.replace(/(?:_+clinic_\d+)+$/g, '') || null;
 }
 
 function normalizeCatalogSourceTemplateKey(catalogFlowId, sourceTemplateKey) {
@@ -209,9 +209,30 @@ async function repairClinicDraftFamily({ clinicId, expectedTemplateKey, sourcePu
   const normalizedClinicId = parseIntOrNull(clinicId);
   const normalizedExpectedKey = sanitizeTemplateKey(expectedTemplateKey);
   const normalizedSourcePublicId = sanitizeTemplateReference(sourcePublicId);
-  if (!normalizedClinicId || !normalizedExpectedKey || !normalizedSourcePublicId) {
+  if (!normalizedClinicId || !normalizedExpectedKey) {
     return;
   }
+
+  const expectedBaseKey = stripClinicScopeSuffixes(normalizedExpectedKey);
+  const legacyKeyCandidates = Array.from(
+    new Set(
+      [
+        expectedBaseKey ? `${expectedBaseKey}_clinic_${normalizedClinicId}` : null,
+        expectedBaseKey ? `${expectedBaseKey}__clinic_${normalizedClinicId}` : null,
+      ]
+        .map((value) => sanitizeTemplateKey(value))
+        .filter((value) => value && value !== normalizedExpectedKey)
+    )
+  );
+
+  const expectedFamilyRows = await AutomationFlowTemplateV2.findAll({
+    where: {
+      clinic_id: normalizedClinicId,
+      template_key: normalizedExpectedKey,
+    },
+    attributes: ['id'],
+    raw: true,
+  });
 
   const currentFamilyRows = await AutomationFlowTemplateV2.findAll({
     where: {
@@ -223,22 +244,45 @@ async function repairClinicDraftFamily({ clinicId, expectedTemplateKey, sourcePu
     raw: true,
   });
 
-  const legacyRows = await AutomationFlowTemplateV2.findAll({
-    where: {
-      clinic_id: normalizedClinicId,
-      public_id: normalizedSourcePublicId,
-      published_at: null,
-      template_key: { [Op.ne]: normalizedExpectedKey },
-    },
-    attributes: ['id', 'template_key'],
-    raw: true,
-  });
+  const legacyConditions = [];
+  if (normalizedSourcePublicId) {
+    legacyConditions.push({ public_id: normalizedSourcePublicId });
+  }
+  if (legacyKeyCandidates.length) {
+    legacyConditions.push({ template_key: { [Op.in]: legacyKeyCandidates } });
+  }
+
+  if (!legacyConditions.length && !currentFamilyRows.length) {
+    return;
+  }
+
+  const legacyRows = legacyConditions.length
+    ? await AutomationFlowTemplateV2.findAll({
+        where: {
+          clinic_id: normalizedClinicId,
+          published_at: null,
+          template_key: { [Op.ne]: normalizedExpectedKey },
+          [Op.or]: legacyConditions,
+        },
+        attributes: ['id', 'template_key'],
+        raw: true,
+      })
+    : [];
 
   const currentFamilyNeedsIsolation = currentFamilyRows.some(
     (row) => sanitizeTemplateReference(row?.public_id) === normalizedSourcePublicId
   );
 
   if (!currentFamilyRows.length && !legacyRows.length) {
+    return;
+  }
+
+  if (expectedFamilyRows.length && legacyRows.length) {
+    await AutomationFlowTemplateV2.destroy({
+      where: {
+        id: { [Op.in]: legacyRows.map((row) => row.id) },
+      },
+    });
     return;
   }
 
@@ -301,10 +345,25 @@ async function ensureCatalogTemplateForClinic({ clinicId, catalogFlow, actorUser
     order: [['version', 'DESC']],
   });
   const familyExists = !!latest;
-  const existingDraft = await AutomationFlowTemplateV2.findOne({
+  let existingDraft = await AutomationFlowTemplateV2.findOne({
     where: { template_key: templateKey, published_at: null },
     order: [['version', 'DESC']],
   });
+  const latestPublished = await AutomationFlowTemplateV2.findOne({
+    where: {
+      template_key: templateKey,
+      published_at: { [Op.ne]: null },
+    },
+    order: [['version', 'DESC']],
+  });
+  if (
+    existingDraft &&
+    latestPublished &&
+    Number(existingDraft.version || 0) <= Number(latestPublished.version || 0)
+  ) {
+    await existingDraft.destroy();
+    existingDraft = null;
+  }
 
   const payload = {
     engine_version: 'v2',
