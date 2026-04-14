@@ -2670,12 +2670,20 @@ async function syncAdAccountMetrics(asset, accessToken, startDate, endDate, opti
                 await SocialAdsEntity.sequelize.query(`
                   UPDATE SocialAdsEntities se
                   LEFT JOIN (
-                    SELECT entity_id,
-                           MAX(frequency) AS peak_freq,
-                           SUBSTRING_INDEX(GROUP_CONCAT(date ORDER BY frequency DESC, date DESC), ',', 1) AS peak_date
-                    FROM SocialAdsInsightsDaily
-                    WHERE ad_account_id = :acc AND level='ad'
-                    GROUP BY entity_id
+                    SELECT sid.entity_id,
+                           MAX(sid.frequency) AS peak_freq,
+                           (
+                             SELECT sid2.date
+                             FROM SocialAdsInsightsDaily sid2
+                             WHERE sid2.ad_account_id = :acc
+                               AND sid2.level = 'ad'
+                               AND sid2.entity_id = sid.entity_id
+                             ORDER BY sid2.frequency DESC, sid2.date DESC
+                             LIMIT 1
+                           ) AS peak_date
+                    FROM SocialAdsInsightsDaily sid
+                    WHERE sid.ad_account_id = :acc AND sid.level='ad'
+                    GROUP BY sid.entity_id
                   ) m ON m.entity_id = se.entity_id
                   SET se.peak_frequency = m.peak_freq,
                       se.peak_frequency_date = m.peak_date

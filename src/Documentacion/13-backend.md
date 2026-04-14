@@ -700,6 +700,12 @@ Objetivo:
 
 La UI de `Marketing > Campañas > Salud` debe leer esto desde cache y no consultar live al proveedor.
 
+Nota operativa:
+
+- `SocialAdsEntities.peak_frequency` y `peak_frequency_date` se recalculan en la sync de Ads desde `SocialAdsInsightsDaily`.
+- No usar `GROUP_CONCAT` para resolver la fecha del pico: con históricos largos MySQL puede truncar el agregado (`Row ... was cut by GROUP_CONCAT()`), dejando warnings y picos parciales.
+- La consulta debe resolver la fecha con subconsulta ordenada por `frequency DESC, date DESC`, manteniendo el cálculo en BD y evitando trabajo en frontend.
+
 ## 2026-03-24 - Cron y variables de entorno operativas
 
 Los horarios efectivos de sincronización salen de `src/jobs/sync.jobs.js`, pero pueden quedar sobreescritos por variables de entorno.
