@@ -27,6 +27,7 @@ const {
   BusinessProfileDailyMetric,
   BusinessProfileReview,
   JobRequest,
+  WhatsAppWebOrigin,
 } = db;
 
 const QueryTypes = db.Sequelize.QueryTypes;
@@ -35,6 +36,7 @@ const sequelize = db.sequelize;
 const DAY_MS = 86400000;
 const CITED_LEAD_STATUSES = new Set(['citado', 'acudio_cita', 'convertido']);
 const ATTENDED_LEAD_STATUSES = new Set(['acudio_cita', 'convertido']);
+const CONVERTED_LEAD_STATUSES = new Set(['convertido']);
 const CONTACTED_LEAD_STATUSES = new Set(['contactado', 'esperando_info', 'info_recibida', 'citado', 'acudio_cita', 'convertido']);
 
 function parseDate(value, fallback) {
@@ -213,7 +215,7 @@ function deriveChannelKey(row) {
 }
 
 function emptyChannelStats() {
-  return { leads: 0, citas: 0, acudieron: 0 };
+  return { leads: 0, citas: 0, acudieron: 0, convertidos: 0 };
 }
 
 function channelLabel(key) {
@@ -275,7 +277,7 @@ async function aggregateLeads(scope, range) {
   });
 
   const channels = new Map();
-  const totals = { leads: 0, contactados: 0, citas: 0, acudieron: 0 };
+  const totals = { leads: 0, contactados: 0, citas: 0, acudieron: 0, convertidos: 0 };
 
   for (const row of rows) {
     const count = toNumber(row.count);
@@ -293,6 +295,10 @@ async function aggregateLeads(scope, range) {
     if (ATTENDED_LEAD_STATUSES.has(status)) {
       entry.acudieron += count;
       totals.acudieron += count;
+    }
+    if (CONVERTED_LEAD_STATUSES.has(status)) {
+      entry.convertidos += count;
+      totals.convertidos += count;
     }
   }
 
@@ -322,6 +328,28 @@ async function aggregateForms(scope, range) {
       ...buildSequelizeDateWhere('submitted_at', range),
     },
   });
+}
+
+async function aggregateWhatsappWebOrigins(scope, range) {
+  const empty = { clicks: 0, confirmed: 0 };
+  if (!WhatsAppWebOrigin) return empty;
+
+  const [row] = await WhatsAppWebOrigin.findAll({
+    attributes: [
+      [fn('COUNT', col('id')), 'clicks'],
+      [fn('SUM', literal('CASE WHEN used_at IS NOT NULL OR used_conversation_id IS NOT NULL OR used_message_id IS NOT NULL THEN 1 ELSE 0 END')), 'confirmed'],
+    ],
+    where: {
+      ...scopedWhere('clinic_id', scope),
+      ...buildSequelizeDateWhere('createdAt', range),
+    },
+    raw: true,
+  });
+
+  return {
+    clicks: toNumber(row?.clicks),
+    confirmed: toNumber(row?.confirmed),
+  };
 }
 
 async function getIntakeConfigCount(scope) {
@@ -606,7 +634,7 @@ async function aggregateMetaAds(scope, range) {
 }
 
 async function aggregateGa(scope, range) {
-  if (!WebGaDaily) return { sessions: 0, activeUsers: 0, newUsers: 0, conversions: 0, connected: false, lastSync: null };
+  if (!WebGaDaily) return { sessions: 0, activeUsers: 0, newUsers: 0, connected: false, lastSync: null };
   const where = {
     ...scopedWhere('clinica_id', scope),
     ...buildDateOnlyWhere('date', range),
@@ -616,7 +644,6 @@ async function aggregateGa(scope, range) {
       [fn('SUM', col('sessions')), 'sessions'],
       [fn('SUM', col('active_users')), 'activeUsers'],
       [fn('SUM', col('new_users')), 'newUsers'],
-      [fn('SUM', col('conversions')), 'conversions'],
       [fn('MAX', col('date')), 'lastDate'],
     ],
     where,
@@ -626,7 +653,6 @@ async function aggregateGa(scope, range) {
     sessions: toNumber(row?.sessions),
     activeUsers: toNumber(row?.activeUsers),
     newUsers: toNumber(row?.newUsers),
-    conversions: toNumber(row?.conversions),
     connected: toNumber(row?.sessions) > 0 || toNumber(row?.activeUsers) > 0,
     lastSync: row?.lastDate || null,
   };
@@ -875,18 +901,21 @@ async function aggregateWebPages(scope, range, seoPages = []) {
   };
   const leadClinicSql = scopedRawSql('clinica_id', scope, replacements, 'leadPageClinicIds');
   const formClinicSql = scopedRawSql('clinic_id', scope, replacements, 'formPageClinicIds');
+  const whatsappClinicSql = scopedRawSql('clinic_id', scope, replacements, 'waPageClinicIds');
 
   const rows = await sequelize.query(
     `SELECT url,
             SUM(leads) AS leads,
             SUM(clicks_tel) AS clicksTel,
             SUM(clicks_wa) AS clicksWa,
+            SUM(whatsapp_confirmados) AS whatsappConfirmados,
             SUM(formularios) AS formularios
        FROM (
              SELECT COALESCE(NULLIF(page_url, ''), NULLIF(landing_url, ''), 'Sin página') AS url,
                     COUNT(*) AS leads,
                     SUM(CASE WHEN source = 'call_click' THEN 1 ELSE 0 END) AS clicks_tel,
-                    SUM(CASE WHEN source = 'whatsapp' THEN 1 ELSE 0 END) AS clicks_wa,
+                    0 AS clicks_wa,
+                    0 AS whatsapp_confirmados,
                     0 AS formularios
                FROM LeadIntakes
               WHERE created_at >= :startTs AND created_at < :endTs ${leadClinicSql}
@@ -896,9 +925,20 @@ async function aggregateWebPages(scope, range, seoPages = []) {
                     0 AS leads,
                     0 AS clicks_tel,
                     0 AS clicks_wa,
+                    0 AS whatsapp_confirmados,
                     COUNT(*) AS formularios
                FROM FormSubmissionEvents
               WHERE submitted_at >= :startTs AND submitted_at < :endTs ${formClinicSql}
+              GROUP BY COALESCE(NULLIF(page_url, ''), 'Sin página')
+             UNION ALL
+             SELECT COALESCE(NULLIF(page_url, ''), 'Sin página') AS url,
+                    0 AS leads,
+                    0 AS clicks_tel,
+                    COUNT(*) AS clicks_wa,
+                    SUM(CASE WHEN used_at IS NOT NULL OR used_conversation_id IS NOT NULL OR used_message_id IS NOT NULL THEN 1 ELSE 0 END) AS whatsapp_confirmados,
+                    0 AS formularios
+               FROM WhatsAppWebOrigins
+              WHERE createdAt >= :startTs AND createdAt < :endTs ${whatsappClinicSql}
               GROUP BY COALESCE(NULLIF(page_url, ''), 'Sin página')
        ) x
       GROUP BY url
@@ -915,15 +955,18 @@ async function aggregateWebPages(scope, range, seoPages = []) {
   return rows.map((row) => {
     const leads = toNumber(row.leads);
     const formularios = toNumber(row.formularios);
-    const visits = Math.max(toNumber(seoClicksByPath.get(normalizeUrlKey(row.url))), leads + formularios);
+    const clicksTel = toNumber(row.clicksTel);
+    const clicksWa = toNumber(row.clicksWa);
+    const visits = Math.max(toNumber(seoClicksByPath.get(normalizeUrlKey(row.url))), leads + formularios + clicksTel + clicksWa);
     return {
       url: row.url || 'Sin página',
       shortName: shortUrl(row.url || 'Sin página'),
       visitas: visits,
       leads,
       conversionRate: ratioPct(leads, visits, 2),
-      clicksTel: toNumber(row.clicksTel),
-      clicksWa: toNumber(row.clicksWa),
+      clicksTel,
+      clicksWa,
+      whatsappConfirmados: toNumber(row.whatsappConfirmados),
       formularios,
     };
   });
@@ -1424,10 +1467,11 @@ async function buildSyncStatus(scope, { seo, googleAds, metaAds, ga, businessPro
 }
 
 function buildKpis(current, previous) {
-  const { leads, citas, acudieron, spend } = current;
+  const { leads, citas, acudieron, convertidos, spend } = current;
   const cpl = leads ? spend / leads : 0;
   const cpaCita = citas ? spend / citas : 0;
   const cpaAcudio = acudieron ? spend / acudieron : 0;
+  const cpaConvertido = convertidos ? spend / convertidos : 0;
   return [
     {
       id: 'leads',
@@ -1457,8 +1501,17 @@ function buildKpis(current, previous) {
       source: 'ClinicaClick',
     },
     {
-      id: 'tasa',
-      label: 'Tasa lead -> cita',
+      id: 'convertidos',
+      label: 'Pacientes que realizan tratamiento',
+      value: convertidos,
+      helpText: 'Pacientes marcados como convertidos tras acudir y avanzar a tratamiento. En V1 se alimenta desde LeadIntake.status_lead=convertido.',
+      trend: pct(convertidos, previous.convertidos),
+      trendLabel: 'vs. periodo anterior',
+      source: 'ClinicaClick',
+    },
+    {
+      id: 'ratio-lead-cita',
+      label: 'Ratio de conversión lead -> cita',
       value: ratioPct(citas, leads, 0),
       suffix: '%',
       helpText: 'De cada 100 leads, cuántos acaban con cita.',
@@ -1503,6 +1556,16 @@ function buildKpis(current, previous) {
       prefix: '€',
       helpText: 'Cuánto cuesta que un paciente venga realmente a consulta.',
       trend: pct(cpaAcudio, previous.acudieron ? previous.spend / previous.acudieron : 0),
+      trendLabel: 'vs. periodo anterior',
+      source: 'ClinicaClick',
+    },
+    {
+      id: 'cpa-convertido',
+      label: 'Coste por paciente con tratamiento',
+      value: money(cpaConvertido),
+      prefix: '€',
+      helpText: 'Cuánto cuesta captar un paciente que acaba realizando tratamiento.',
+      trend: pct(cpaConvertido, previous.convertidos ? previous.spend / previous.convertidos : 0),
       trendLabel: 'vs. periodo anterior',
       source: 'ClinicaClick',
     },
@@ -1585,6 +1648,7 @@ exports.getOverview = async (req, res) => {
       appointments,
       previousAppointments,
       formsCount,
+      whatsappWeb,
       intakeConfigCount,
       googleAds,
       previousGoogleAds,
@@ -1600,6 +1664,7 @@ exports.getOverview = async (req, res) => {
       countAppointments(scope, range),
       countAppointments(scope, range.previous),
       aggregateForms(scope, range),
+      aggregateWhatsappWebOrigins(scope, range),
       getIntakeConfigCount(scope),
       aggregateGoogleAds(scope, range),
       aggregateGoogleAds(scope, range.previous),
@@ -1618,8 +1683,10 @@ exports.getOverview = async (req, res) => {
 
     const citas = Math.max(leads.totals.citas, appointments.creadas);
     const acudieron = Math.max(leads.totals.acudieron, appointments.completadas);
+    const convertidos = leads.totals.convertidos;
     const previousCitas = Math.max(previousLeads.totals.citas, previousAppointments.creadas);
     const previousAcudieron = Math.max(previousLeads.totals.acudieron, previousAppointments.completadas);
+    const previousConvertidos = previousLeads.totals.convertidos;
 
     const channels = buildChannels(leads.channels, {
       google_ads: googleAds.totals.spend,
@@ -1640,22 +1707,32 @@ exports.getOverview = async (req, res) => {
     );
 
     const kpis = buildKpis(
-      { leads: leads.totals.leads, citas, acudieron, spend: currentSpend },
-      { leads: previousLeads.totals.leads, citas: previousCitas, acudieron: previousAcudieron, spend: previousSpend }
+      { leads: leads.totals.leads, citas, acudieron, convertidos, spend: currentSpend },
+      { leads: previousLeads.totals.leads, citas: previousCitas, acudieron: previousAcudieron, convertidos: previousConvertidos, spend: previousSpend }
     );
 
-    const funnel = [
+    const funnelBase = [
       { id: 'visitas', label: ga.sessions ? 'Sesiones / visitas' : 'Visitas / clicks', value: visitsOrClicks, color: '#6366f1', helpText: 'Sesiones GA4 si existen; si no, clicks medidos desde SEO y Ads.' },
       { id: 'leads', label: 'Leads', value: leads.totals.leads, color: '#8b5cf6', helpText: 'Personas que dejaron sus datos.' },
       { id: 'contacto', label: 'Contactados', value: leads.totals.contactados, color: '#a78bfa', helpText: 'Leads con contacto o avance comercial.' },
       { id: 'citas', label: 'Cita creada', value: citas, color: '#c4b5fd', helpText: 'Leads que agendaron cita.' },
       { id: 'acudio', label: 'Acudió', value: acudieron, color: '#22c55e', helpText: 'Pacientes que acudieron a consulta.' },
+      { id: 'tratamiento', label: 'Realiza tratamiento', value: convertidos, color: '#15803d', helpText: 'Pacientes marcados como convertidos porque realizan tratamiento.' },
     ];
+    const funnel = funnelBase.map((step, index) => ({
+      ...step,
+      ratioFromPrevious: index > 0 ? ratioPct(step.value, funnelBase[index - 1].value, 0) : null,
+    }));
+
+    const legacyWhatsappLeads = leads.channels.get('whatsapp')?.leads || 0;
+    const whatsappWebClicks = Math.max(whatsappWeb.clicks, legacyWhatsappLeads);
 
     const webSummary = {
       totalVisitas: visitsOrClicks,
       clicksTelefono: leads.channels.get('call_click')?.leads || 0,
-      clicksWhatsApp: leads.channels.get('whatsapp')?.leads || 0,
+      clicksWhatsApp: whatsappWebClicks,
+      whatsappWebClicks,
+      whatsappWebConfirmed: whatsappWeb.confirmed,
       formularios: formsCount,
     };
 

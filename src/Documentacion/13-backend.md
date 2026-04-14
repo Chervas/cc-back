@@ -135,6 +135,7 @@ Fuentes que cruza:
 
 - `LeadIntake` para leads, canales, estados y atribución.
 - `FormSubmissionEvent` para formularios por URL.
+- `WhatsAppWebOrigin` para "WhatsApp desde la web (Clicks)" y "WhatsApp desde la web (Confirmados)".
 - `CitasPacientes` para citas vinculadas a leads y asistencia.
 - `GoogleAdsInsightsDaily` y `ClinicGoogleAdsAccount` para Google Ads.
 - `SocialAdsInsightsDaily`, `SocialAdsActionsDaily`, `SocialAdsAdsetDailyAgg` y `SocialAdsEntity` para Meta Ads.
@@ -154,6 +155,9 @@ Estado de sincronización:
 - El frontend usa ese estado para mostrar una barra informativa y refrescar cada 60 segundos mientras haya trabajo pendiente.
 - El objetivo es que conectar GA4, Search Console, Perfil de Empresa, Google Ads o Meta Ads no parezca "sin datos" durante los primeros minutos.
 - Meta Ads puede llegar a `SocialAdsInsightsDaily` solo con `level='ad'` o `level='adset'` aunque no haya filas `level='campaign'`. El agregador de informes debe sumar primero `campaign` y caer a `adset`/`ad` si el nivel superior no tiene gasto/clicks/impresiones, evitando tanto inversión `0` como doble conteo.
+- GA4 se mantiene como fuente opcional de sesiones/histórico, pero `GET /api/marketing/reports/overview` no expone ni usa conversiones nativas de GA4 para el embudo principal.
+- El backend entrega KPIs, ratios, funnel con `ratioFromPrevious`, web summary y top páginas ya calculados. El frontend no debe hacer joins ni cálculos de negocio.
+- El embudo termina en `Realiza tratamiento`. En V1 se calcula desde `LeadIntake.status_lead='convertido'`; cuando exista una señal clínica canónica de tratamiento realizado, debe reemplazar esta aproximación.
 
 Search Console:
 
