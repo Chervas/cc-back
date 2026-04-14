@@ -125,6 +125,7 @@ Se añade el primer endpoint real para `Marketing > Informes`:
 | Endpoint | Estado | Uso |
 |:---|:---|:---|
 | `GET /api/marketing/reports/overview` | Operativo V1 | KPIs, funnel, canales, web, SEO, Ads, Perfil Google, estado de fuentes y recomendaciones. |
+| `POST /api/intake/whatsapp-origin` | Operativo V1 | Registra el `cc_ref` generado por el widget antes de abrir WhatsApp para medir clicks y confirmar inbounds reales. |
 
 Parámetros soportados:
 

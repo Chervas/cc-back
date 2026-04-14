@@ -23,6 +23,7 @@ const ClinicGoogleAdsAccount = db.ClinicGoogleAdsAccount;
 const IntakeConfig = db.IntakeConfig;
 const ChatFlowTemplate = db.ChatFlowTemplate;
 const ClinicaHorario = db.ClinicaHorario;
+const WhatsAppWebOrigin = db.WhatsAppWebOrigin;
 const { enqueueInboundFormSubmissionResume } = require('../services/automationsV2Resume.service');
 const { sendMetaEvent, buildUserData: buildMetaUserData } = require('../services/metaCapi.service');
 const { uploadClickConversion } = require('../services/googleAdsConversion.service');
@@ -84,6 +85,11 @@ const cleanString = (value) => {
   if (value === undefined || value === null) return null;
   const normalized = repairLikelyMojibake(String(value)).trim();
   return normalized || null;
+};
+const truncateString = (value, maxLength) => {
+  const normalized = cleanString(value);
+  if (!normalized) return null;
+  return normalized.length > maxLength ? normalized.slice(0, maxLength) : normalized;
 };
 const escapeHtml = (value) => String(value ?? '')
   .replace(/&/g, '&amp;')
@@ -2888,6 +2894,129 @@ const validateHmac = (req, secret, provided) => {
   }
   return crypto.timingSafeEqual(expectedBuf, providedBuf);
 };
+
+exports.registerWhatsappOrigin = asyncHandler(async (req, res) => {
+  if (!WhatsAppWebOrigin) {
+    return res.status(503).json({ success: false, message: 'WhatsApp web origin no disponible' });
+  }
+
+  const body = req.body || {};
+  const ref = cleanString(body.ref)?.toLowerCase();
+  if (!ref || !/^[a-f0-9]{8,64}$/.test(ref)) {
+    return res.status(400).json({ success: false, message: 'ref inválido' });
+  }
+
+  let clinicIdParsed = parseInteger(coalesce(body.clinic_id, body.clinica_id, body.clinicId));
+  let groupIdParsed = parseInteger(coalesce(body.group_id, body.grupo_clinica_id, body.groupId));
+  const pageUrl = truncateString(coalesce(body.page_url, body.pageUrl), 1024);
+  const derivedDomain = getHostnameFromUrl(pageUrl || '');
+  const domain = normalizeDomain(coalesce(body.domain, derivedDomain));
+  if (domain && !/^[a-z0-9.-]+$/.test(domain)) {
+    return res.status(400).json({ success: false, message: 'domain inválido' });
+  }
+
+  let clinicCfg = null;
+  let groupCfg = null;
+  let domainCfg = null;
+  if (clinicIdParsed !== null) {
+    clinicCfg = await IntakeConfig.findOne({ where: { clinic_id: clinicIdParsed }, raw: true });
+  }
+  if (groupIdParsed !== null) {
+    groupCfg = await IntakeConfig.findOne({ where: { group_id: groupIdParsed, assignment_scope: 'group' }, raw: true });
+  }
+  if (domain) {
+    domainCfg = await IntakeConfig.findOne({
+      where: db.Sequelize.literal(`JSON_CONTAINS(COALESCE(domains,'[]'), '\"${domain}\"') AND assignment_scope='clinic'`),
+      order: [['created_at', 'ASC'], ['id', 'ASC']],
+      raw: true,
+    });
+    if (!domainCfg) {
+      domainCfg = await IntakeConfig.findOne({
+        where: db.Sequelize.literal(`JSON_CONTAINS(COALESCE(domains,'[]'), '\"${domain}\"') AND assignment_scope='group'`),
+        order: [['created_at', 'ASC'], ['id', 'ASC']],
+        raw: true,
+      });
+    }
+  }
+
+  const provided = req.headers[SIGNATURE_HEADER] || req.headers[SIGNATURE_HEADER_SHA];
+  const cfg = pickMatchingIntakeConfig({
+    req,
+    providedSignature: provided,
+    clinicCfg,
+    groupCfg,
+    domainCfg
+  });
+
+  if (cfg && Array.isArray(cfg.domains) && cfg.domains.length > 0) {
+    if (!domain || !isDomainAllowed(cfg.domains, domain)) {
+      return res.status(403).json({ success: false, message: 'Domain not allowed' });
+    }
+  }
+
+  if (cfg?.hmac_key) {
+    if (!provided || !validateHmac(req, cfg.hmac_key, provided)) {
+      return res.status(401).json({ success: false, message: 'Invalid signature' });
+    }
+  }
+
+  const domainClinicId = parseInteger(domainCfg?.clinic_id);
+  const domainGroupId = parseInteger(domainCfg?.group_id);
+  if (clinicIdParsed === null && domainClinicId !== null) {
+    clinicIdParsed = domainClinicId;
+  }
+  if (groupIdParsed === null && domainGroupId !== null) {
+    groupIdParsed = domainGroupId;
+  }
+  if (clinicIdParsed === null && groupIdParsed !== null) {
+    clinicIdParsed = await resolveFallbackClinicForGroup(groupIdParsed);
+  }
+  if (clinicIdParsed === null && groupIdParsed === null) {
+    return res.status(400).json({ success: false, message: 'clinic_id o group_id requerido' });
+  }
+
+  const ttlDays = Math.max(1, parseInteger(process.env.WHATSAPP_WEB_ORIGIN_TTL_DAYS) || 7);
+  const expiresAt = new Date(Date.now() + ttlDays * 24 * 60 * 60 * 1000);
+  const payload = {
+    ref,
+    clinic_id: clinicIdParsed,
+    group_id: groupIdParsed,
+    domain: truncateString(domain, 255),
+    page_url: pageUrl,
+    referrer: truncateString(body.referrer, 1024),
+    utm_source: truncateString(body.utm_source, 128),
+    utm_medium: truncateString(body.utm_medium, 128),
+    utm_campaign: truncateString(body.utm_campaign, 128),
+    utm_content: truncateString(body.utm_content, 128),
+    utm_term: truncateString(body.utm_term, 128),
+    gclid: truncateString(body.gclid, 128),
+    fbclid: truncateString(body.fbclid, 128),
+    ttclid: truncateString(body.ttclid, 128),
+    event_id: truncateString(req.headers[EVENT_ID_HEADER] || body.event_id || body.eventId, 128),
+    expires_at: expiresAt,
+    metadata: body.metadata && typeof body.metadata === 'object' && !Array.isArray(body.metadata)
+      ? body.metadata
+      : null,
+  };
+
+  const existing = await WhatsAppWebOrigin.findOne({ where: { ref } });
+  let record = existing;
+  let created = false;
+  if (existing) {
+    await existing.update(payload);
+  } else {
+    record = await WhatsAppWebOrigin.create(payload);
+    created = true;
+  }
+
+  return res.json({
+    success: true,
+    ref,
+    id: record.id,
+    created,
+    expires_at: expiresAt.toISOString(),
+  });
+});
 
 exports.receiveIntakeEvent = asyncHandler(async (req, res) => {
   const body = req.body || {};
