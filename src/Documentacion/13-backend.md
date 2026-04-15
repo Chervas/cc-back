@@ -2826,6 +2826,8 @@ Contexto extra que inyecta antes de interpolar:
 - `system.patient_conversation_link`
 - `system.patient_detail_link`
 
+Antes de renderizar `title` y `message`, el nodo debe enriquecer el contexto con el mismo resolvedor de plantillas que usan los envíos WhatsApp. Esto garantiza que variables como `{{paciente.nombre}}`, `{{cita.fecha}}`, `{{clinica.nombre}}` o datos derivados de la cita existan aunque el `FlowExecutionV2.context` original solo incluya IDs.
+
 Comportamiento de navegación:
 - si existe conversación, la notificación guarda `quickChatConversationId`
 - el front puede abrir QuickChat directamente desde la notificación

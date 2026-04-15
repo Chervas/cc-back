@@ -2902,7 +2902,8 @@ async function handleSendSystemNotification(node, context, runtime) {
     throw new Error('system_notification_missing_clinic_id');
   }
 
-  let notificationContext = await enrichConversationContext(context, targets);
+  let notificationContext = await enrichContextForTemplateResolution(context, targets);
+  notificationContext = await enrichConversationContext(notificationContext, targets);
   notificationContext = mergeContextPatch(notificationContext, {
     runtime: {
       day_part_greeting: resolveMadridDayPartGreeting(new Date()),
