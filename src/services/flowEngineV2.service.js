@@ -3717,10 +3717,13 @@ async function processNode(node, context, runtime = {}) {
         ? buildDeterministicConfirmAppointmentOutput(aiContext)
         : null;
       if (deterministicPresetOutput) {
+        const deterministicDecision = cleanString(deterministicPresetOutput?.decision).toLowerCase();
         return {
           kind: 'success',
           output: deterministicPresetOutput,
-          next_node_id: readOutputTarget(node, 'on_success'),
+          next_node_id: deterministicDecision === 'confirmado'
+            ? readOutputTarget(node, 'on_success')
+            : readOutputTarget(node, 'on_fail'),
         };
       }
 
