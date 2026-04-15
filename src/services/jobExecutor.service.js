@@ -3,6 +3,7 @@ const fs = require('fs');
 const db = require('../../models');
 const flowEngineV2Service = require('./flowEngineV2.service');
 const { buildNotificationContent } = require('./notifications.service');
+const { emitNotificationCreated } = require('./notificationsRealtime.service');
 
 const DEFAULT_TIMEOUT_MS = Number(process.env.JOB_EXECUTOR_MAX_RUNTIME_MS || 30 * 60 * 1000);
 const DEFAULT_WAITING_BACKOFF_MS = Number(process.env.JOB_SCHEDULER_WAITING_BACKOFF_MS || 15 * 60 * 1000);
@@ -215,8 +216,10 @@ async function runLeadCallbackReminderJob(payload = {}, jobRequest = null) {
     reminderAtLabel,
   });
 
-  await Notification.create({
+  const notification = await Notification.create({
     userId,
+    role: '',
+    subrole: '',
     category: 'crm',
     event: 'crm.call_back_reminder',
     title: content.title,
@@ -234,6 +237,7 @@ async function runLeadCallbackReminderJob(payload = {}, jobRequest = null) {
       notes: lead.callback_reminder_notes || null,
     },
   });
+  emitNotificationCreated(notification);
 
   await LeadIntake.update({
     callback_reminder_job_id: null,

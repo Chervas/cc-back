@@ -2,31 +2,10 @@
 
 const { Notification } = require('../../models');
 const {
-  getCategoryDefinition,
   getEventDefinition
 } = require('../services/notifications.service');
-
-function mapNotificationToDto(notification) {
-  const plain = notification.get({ plain: true });
-  const categoryDef = getCategoryDefinition(plain.category);
-  const eventDef = getEventDefinition(plain.event);
-  return {
-    id: String(plain.id),
-    title: plain.title,
-    description: plain.message,
-    time: plain.createdAt instanceof Date ? plain.createdAt.toISOString() : plain.createdAt,
-    link: plain.data?.link || null,
-    useRouter: Boolean(plain.data?.useRouter),
-    icon: plain.icon || categoryDef?.icon || 'heroicons_outline:bell',
-    read: Boolean(plain.isRead),
-    category: plain.category,
-    categoryLabel: categoryDef?.label || plain.category,
-    event: plain.event,
-    level: plain.level || eventDef?.level || 'info',
-    data: plain.data || {},
-    clinicaId: plain.clinicaId || null
-  };
-}
+const { mapNotificationToDto } = require('../lib/notification-dto');
+const { emitNotificationCreated } = require('../services/notificationsRealtime.service');
 
 exports.list = async (req, res) => {
   try {
@@ -51,8 +30,8 @@ exports.create = async (req, res) => {
     const category = payload.category || eventDef?.category || 'general';
     const notification = await Notification.create({
       userId,
-      role: payload.role || null,
-      subrole: payload.subrole || null,
+      role: payload.role || '',
+      subrole: payload.subrole || '',
       category,
       event: payload.event || 'custom',
       title: payload.title || 'Notificación',
@@ -62,6 +41,7 @@ exports.create = async (req, res) => {
       data: payload.data || null,
       clinicaId: payload.clinicaId || null
     });
+    emitNotificationCreated(notification);
     res.status(201).json(mapNotificationToDto(notification));
   } catch (error) {
     console.error('Error creating notification:', error);

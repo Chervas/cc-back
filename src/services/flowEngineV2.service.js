@@ -5,6 +5,7 @@ const { Op } = require('sequelize');
 const axios = require('axios');
 const db = require('../../models');
 const { getIO } = require('./socket.service');
+const { emitNotificationCreated } = require('./notificationsRealtime.service');
 const { queues } = require('./queue.service');
 const jobRequestsService = require('./jobRequests.service');
 const { normalizeCitaStatus, normalizeLeadStatus } = require('../lib/status-catalog');
@@ -2876,6 +2877,7 @@ async function handleCreateTask(node, context, runtime) {
       },
       clinicaId: clinicId,
     });
+    emitNotificationCreated(notification);
     createdNotifications.push(notification);
   }
 
@@ -2971,6 +2973,7 @@ async function handleSendSystemNotification(node, context, runtime) {
       },
       clinicaId: clinicId,
     });
+    emitNotificationCreated(notification);
     createdNotifications.push(notification);
   }
 

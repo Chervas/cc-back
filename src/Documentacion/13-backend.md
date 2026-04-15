@@ -2833,6 +2833,11 @@ Comportamiento de navegación:
 - el front puede abrir QuickChat directamente desde la notificación
 - si no hay conversación, el fallback navegable es la ficha del paciente
 
+Tiempo real:
+- cada `Notification.create(...)` que nace de `POST /api/common/notifications`, `notifications.service.dispatchEvent(...)`, `action/create_task`, `action/send_system_notification` o jobs internos debe emitir `notification:created` al room `user:{id_usuario}`
+- el DTO público se centraliza en `src/lib/notification-dto.js` para que HTTP y socket no diverjan en `read`, `time`, `link`, `data` o `clinicaId`
+- si una notificación aparece tras refrescar pero no en vivo, revisar primero `/socket.io` y `src/services/notificationsRealtime.service.js`, no la consulta HTTP
+
 ## Personal: carga de citas e impacto de horarios
 
 El endpoint canónico de horario de personal enriquece los tramos expandidos:
