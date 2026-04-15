@@ -1804,7 +1804,10 @@ El endpoint `/api/automation-catalog` acepta solo estos `trigger_type`:
 - `lead_nuevo`
 - `appointment_created`
 - `appointment_confirmed`
+- `appointment_no_show`
+- `appointment_rescheduled`
 - `appointment_cancelled`
+- `appointment_completed`
 - `appointment_reminder_window`
 - `appointment_after`
 - `patient_inactive`
@@ -2097,6 +2100,51 @@ Esto evita dos regresiones:
 1. que el `template_key` se vaya concatenando (`base__clinic_1__clinic_19__clinic_22...`);
 2. que publicar una copia de clínica desactive por accidente el flujo base del catálogo al compartir `public_id`.
 3. que una copia legacy `_clinic_<id>` aparezca como borrador activo adicional si ya existe una familia publicada `__clinic_<id>`.
+
+Regla operativa vigente tras el fix del `2026-04-15`:
+
+- duplicar un item de `AutomationFlowCatalog` debe crear una **nueva familia independiente** en `AutomationFlowTemplatesV2`;
+- el item duplicado queda enlazado al nuevo `public_id` de esa familia, no al flujo original;
+- la copia V2 nace como borrador editable (`published_at = null`) con el nombre visible del catálogo duplicado, para que `Editar flujo` no modifique el flujo fuente ni muestre el nombre original;
+- si el item fuente no tiene flujo V2 enlazado, el duplicado conserva el comportamiento legacy y queda sin copia V2 nueva.
+
+#### Versionado de catálogo vs copias de clínica
+
+No debe mezclarse el versionado del flujo fuente con el versionado operativo de cada clínica:
+
+- `AutomationFlowTemplatesV2.public_id` del catálogo identifica la familia fuente editable desde `catalogo-automatizaciones`.
+- `AutomationFlowCatalog.template_key` puede enlazar esa familia por `public_id` durante la transición; la resolución debe aceptar `public_id` y `template_key`.
+- La versión visible del catálogo (`template_version`) es la versión publicada del flujo fuente.
+- Al propagar, cada clínica recibe o actualiza su propia familia con `template_key = <base>__clinic_<id>` y `public_id` propio.
+- La versión de clínica sube de forma independiente. Ejemplo normal: catálogo `v4` propagado hoy puede crear clínica `v5` si esa familia local ya tenía cuatro versiones previas.
+- Que una copia de clínica sea `v5` no implica que exista `v5` en catálogo.
+- Que una plantilla WhatsApp esté `APPROVED` no crea una versión nueva del flujo. Solo publicar el flujo fuente desde el editor crea una nueva versión del flujo de catálogo.
+
+La columna `Propagada` del catálogo de automatizaciones significa:
+
+- el catálogo fue propagado después de su última edición;
+- `last_propagated_template_key/version` coincide con la referencia actual del catálogo;
+- no garantiza por sí sola que Meta haya aprobado todas las plantillas WhatsApp usadas por los nodos.
+
+Diagnóstico recomendado si hay dudas:
+
+1. comprobar `AutomationFlowCatalog.template_key/template_version` y `last_propagated_*`;
+2. resolver el flujo fuente por `public_id` o `template_key`;
+3. revisar la última copia por clínica (`<base>__clinic_<id>`) y confirmar `published_at` + `is_active`;
+4. revisar las plantillas WhatsApp por `catalog_template_id` y `clinic_id`, no solo por `template_id` guardado en el nodo.
+
+#### Resolución de plantillas WhatsApp en nodos V2
+
+Los nodos `action/send_whatsapp` pueden conservar referencias históricas como `template_id`, pero la referencia robusta es `catalog_template_id`.
+
+Regla vigente:
+
+- si el nodo tiene `catalog_template_id`, el runtime busca la plantilla activa para la clínica de ejecución;
+- dentro de esa familia, prioriza una plantilla no bloqueada (`APPROVED`) frente a estados no enviables;
+- solo si no hay `catalog_template_id`, cae a `template_id` o `template_name`;
+- por tanto, la UI de diagnóstico debe mostrar la plantilla efectiva resuelta para la clínica, no únicamente el `template_id` persistido en el JSON del nodo.
+
+Esto evita un falso diagnóstico típico: un nodo puede mostrar un `template_id` antiguo o de otra clínica en el JSON, pero ejecutar correctamente porque el runtime resuelve por `catalog_template_id + clinic_id`.
 
 #### Semántica pendiente de normalizar en contexto de cita
 
@@ -2636,6 +2684,30 @@ Reglas de validación local antes de propagar a Meta:
 - no puede haber variables consecutivas sin texto fijo entre ellas.
 
 Si se incumplen, backend debe devolver `400 invalid_template_body` y no encolar la propagación.
+
+### 7.3. Relación con flujos V2 que usan plantillas WhatsApp
+
+La aprobación de una plantilla WhatsApp y la publicación de un flujo V2 son procesos independientes:
+
+- aprobar una plantilla en Meta actualiza `WhatsappTemplates.status`;
+- propagar una plantilla puede crear una nueva revisión técnica de la plantilla dentro de la misma familia lógica (`catalog_template_id`);
+- ninguna de esas dos acciones debe incrementar `AutomationFlowTemplatesV2.version`;
+- una nueva versión del flujo solo aparece al guardar/publicar el flujo desde el editor V2;
+- al propagar una automatización de catálogo, las copias de clínica sí pueden subir de versión local aunque el flujo fuente siga en la misma versión.
+
+Caso normal:
+
+- catálogo de automatización: `Recordatorio y confirmacion`, flujo fuente `v4`;
+- plantillas WhatsApp usadas por sus nodos: aprobadas;
+- propagación a Eixample: copia local `v5`;
+- interpretación correcta: el catálogo sigue en `v4`, Eixample ejecuta su copia local `v5` y las plantillas se resuelven por `catalog_template_id`.
+
+Para QA no usar solo el número de versión como prueba de aprobación. Hay que verificar:
+
+1. flujo fuente publicado (`AutomationFlowTemplatesV2` sin `clinic_id`);
+2. copia de clínica publicada y activa;
+3. plantillas efectivas de la clínica en `WhatsappTemplates` con `status = APPROVED`;
+4. si el nodo tiene `catalog_template_id`, resolver por ese campo antes que por `template_id`.
 
 ### 8. `Campañas Admin` (`AdminCampaignPlaybook`)
 
