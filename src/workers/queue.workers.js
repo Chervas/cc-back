@@ -283,6 +283,137 @@ function mapWhatsAppStatus(status) {
     }
 }
 
+function normalizePhoneDigits(value) {
+    return cleanString(value).replace(/\D/g, '');
+}
+
+function normalizeWhatsappContactId(value) {
+    const digits = normalizePhoneDigits(value);
+    return digits ? `+${digits}` : null;
+}
+
+function parseWhatsappTimestamp(value, fallback = new Date()) {
+    const numeric = Number(value);
+    if (Number.isFinite(numeric) && numeric > 0) {
+        const ms = numeric > 100000000000 ? numeric : numeric * 1000;
+        const date = new Date(ms);
+        if (!Number.isNaN(date.getTime())) {
+            return date;
+        }
+    }
+    const parsed = value ? new Date(value) : null;
+    if (parsed && !Number.isNaN(parsed.getTime())) {
+        return parsed;
+    }
+    return fallback;
+}
+
+function isDateAfter(left, right) {
+    const leftTs = left ? new Date(left).getTime() : 0;
+    const rightTs = right ? new Date(right).getTime() : 0;
+    return Number.isFinite(leftTs) && leftTs > (Number.isFinite(rightTs) ? rightTs : 0);
+}
+
+function mapWhatsAppHistoryStatus(status) {
+    const normalized = cleanString(status).toLowerCase();
+    if (['sent', 'delivered', 'read', 'failed'].includes(normalized)) {
+        return normalized;
+    }
+    if (['pending', 'played', 'error'].includes(normalized)) {
+        return normalized === 'error' ? 'failed' : 'sent';
+    }
+    return 'sent';
+}
+
+function getWhatsAppInteractiveText(interactive) {
+    if (!interactive || typeof interactive !== 'object') {
+        return '';
+    }
+    return cleanString(
+        interactive?.button_reply?.title ||
+        interactive?.list_reply?.title ||
+        interactive?.nfm_reply?.body ||
+        interactive?.text ||
+        interactive?.title ||
+        ''
+    );
+}
+
+function getWhatsAppMessageText(message) {
+    const rawType = cleanString(message?.type).toLowerCase() || 'text';
+    const text = cleanString(
+        message?.text?.body ||
+        message?.button?.text ||
+        getWhatsAppInteractiveText(message?.interactive) ||
+        message?.image?.caption ||
+        message?.document?.caption ||
+        message?.video?.caption ||
+        message?.template?.name ||
+        ''
+    );
+    if (text) {
+        return text;
+    }
+    switch (rawType) {
+        case 'audio':
+            return 'Audio enviado desde WhatsApp';
+        case 'image':
+            return 'Imagen enviada desde WhatsApp';
+        case 'document':
+            return 'Documento enviado desde WhatsApp';
+        case 'video':
+            return 'Video enviado desde WhatsApp';
+        case 'sticker':
+            return 'Sticker enviado desde WhatsApp';
+        case 'location':
+            return 'Ubicación enviada desde WhatsApp';
+        case 'media_placeholder':
+            return 'Mensaje multimedia importado del historial';
+        default:
+            return rawType ? `Mensaje ${rawType} de WhatsApp` : 'Mensaje de WhatsApp';
+    }
+}
+
+function getWhatsAppMediaPayload(message) {
+    const rawType = cleanString(message?.type).toLowerCase();
+    const media = message?.[rawType] || {};
+    if (!rawType || ['text', 'button', 'interactive', 'template', 'reaction', 'edit', 'revoke'].includes(rawType)) {
+        return null;
+    }
+    return {
+        kind: rawType,
+        id: cleanString(media?.id) || null,
+        mime_type: cleanString(media?.mime_type) || null,
+        sha256: cleanString(media?.sha256) || null,
+        provider: 'whatsapp',
+        stored: false,
+        playable: Boolean(cleanString(media?.id)),
+    };
+}
+
+function buildCoexistenceMessageDescriptor({ message, origin, sourceEvent, extra = {} }) {
+    const rawType = cleanString(message?.type).toLowerCase() || 'text';
+    const messageType = normalizeInboundMessageType(rawType);
+    const content = getWhatsAppMessageText(message);
+    const media = getWhatsAppMediaPayload(message);
+    return {
+        rawType,
+        messageType,
+        content,
+        metadataExtra: {
+            origin,
+            source_event: sourceEvent,
+            raw_type: rawType,
+            coexistence: {
+                source_event: sourceEvent,
+                imported_at: new Date().toISOString(),
+                ...extra,
+            },
+            ...(media ? { media } : {}),
+        },
+    };
+}
+
 async function findMessageByWamid(wamid) {
     if (!wamid) return null;
     const rows = await db.sequelize.query(
@@ -300,6 +431,119 @@ async function findMessageByWamid(wamid) {
         }
     );
     return rows?.[0] || null;
+}
+
+async function updateWhatsappAssetCoexistenceMetadata({ phoneId, patch }) {
+    if (!phoneId || !ClinicMetaAsset) {
+        return;
+    }
+    try {
+        const asset = await ClinicMetaAsset.findOne({
+            where: {
+                assetType: 'whatsapp_phone_number',
+                phoneNumberId: phoneId,
+                isActive: true,
+            },
+        });
+        if (!asset) {
+            return;
+        }
+        const additionalData = asset.additionalData || {};
+        asset.additionalData = {
+            ...additionalData,
+            coexistence: {
+                ...(additionalData.coexistence || {}),
+                ...patch,
+                updated_at: new Date().toISOString(),
+            },
+        };
+        await asset.save();
+    } catch (error) {
+        console.warn('[whatsapp coexistence] No se pudo actualizar metadata del activo', {
+            phoneId,
+            error: serializeError(error),
+        });
+    }
+}
+
+async function emitMessageCreated({ message, conversation, clinicId, content, messageType, resumeText = null }) {
+    const io = getIO();
+    if (!io || !message || !conversation) {
+        return;
+    }
+    const rooms = new Set();
+    if (clinicId) rooms.add(`clinic:${clinicId}`);
+    if (conversation?.clinic_id && Number(conversation.clinic_id) !== Number(clinicId)) {
+        rooms.add(`clinic:${conversation.clinic_id}`);
+    }
+    if (conversation?.assignee_id) rooms.add(`user:${conversation.assignee_id}`);
+
+    const payload = {
+        id: message.id,
+        conversation_id: String(conversation.id),
+        content,
+        direction: message.direction,
+        message_type: messageType || message.message_type,
+        status: message.status,
+        sent_at: message.sent_at,
+        metadata: message.metadata || null,
+        ...(resumeText ? { resume_text: resumeText } : {}),
+    };
+
+    if (rooms.size === 0) {
+        io.emit('message:created', payload);
+        dlog('Emit message:created broadcast', { convId: conversation.id, clinicId, payload });
+    } else {
+        rooms.forEach((room) => io.to(room).emit('message:created', payload));
+        dlog('Emit message:created rooms', { rooms: Array.from(rooms), payload });
+    }
+}
+
+async function emitMessageUpdated({ message, clinicId }) {
+    const io = getIO();
+    if (!io || !message) {
+        return;
+    }
+    const rooms = new Set();
+    if (clinicId) rooms.add(`clinic:${clinicId}`);
+
+    const payload = {
+        id: message.id,
+        conversation_id: String(message.conversation_id),
+        status: message.status,
+        content: message.content,
+        message_type: message.message_type,
+        sent_at: message.sent_at,
+        metadata: message.metadata || null,
+    };
+
+    if (rooms.size === 0) {
+        io.emit('message:updated', payload);
+        dlog('Emit message:updated broadcast', { payload, rooms: [] });
+    } else {
+        rooms.forEach((room) => io.to(room).emit('message:updated', payload));
+        dlog('Emit message:updated rooms', { rooms: Array.from(rooms), payload });
+    }
+}
+
+async function updateConversationLastMessage(conversation, date, { inbound = false, incrementUnread = false } = {}) {
+    if (!conversation) {
+        return;
+    }
+    const patch = {};
+    if (date && (!conversation.last_message_at || isDateAfter(date, conversation.last_message_at))) {
+        patch.last_message_at = date;
+    }
+    if (inbound && date && (!conversation.last_inbound_at || isDateAfter(date, conversation.last_inbound_at))) {
+        patch.last_inbound_at = date;
+    }
+    if (incrementUnread) {
+        patch.unread_count = (conversation.unread_count || 0) + 1;
+    }
+    if (Object.keys(patch).length) {
+        await conversation.update(patch);
+        Object.assign(conversation, patch);
+    }
 }
 
 function mergeStatusMetadata(existingMetadata, status) {
@@ -432,6 +676,296 @@ createBusinessWorker('outbound_whatsapp', async (job) => {
     }
 });
 
+async function handleWhatsappMessageEdit({ msg, clinicId }) {
+    const originalWamid = cleanString(msg?.edit?.original_message_id);
+    if (!originalWamid) {
+        return;
+    }
+    const messageRef = await findMessageByWamid(originalWamid);
+    if (!messageRef) {
+        return;
+    }
+    const message = await Message.findByPk(messageRef.id);
+    if (!message) {
+        return;
+    }
+    const editedPayload = msg?.edit?.message || {};
+    const descriptor = buildCoexistenceMessageDescriptor({
+        message: editedPayload,
+        origin: message.metadata?.origin || null,
+        sourceEvent: 'edit',
+    });
+    const editedAt = parseWhatsappTimestamp(msg?.timestamp);
+    const currentMetadata = message.metadata || {};
+    message.content = descriptor.content || message.content;
+    message.metadata = {
+        ...currentMetadata,
+        edited_at: editedAt.toISOString(),
+        edit: {
+            wamid: cleanString(msg?.id) || null,
+            original_message_id: originalWamid,
+            raw_type: descriptor.rawType,
+        },
+        coexistence: {
+            ...(currentMetadata.coexistence || {}),
+            last_event: 'edit',
+            edited_at: editedAt.toISOString(),
+        },
+    };
+    await message.save();
+    await emitMessageUpdated({ message, clinicId: messageRef.clinic_id || clinicId });
+}
+
+async function handleWhatsappMessageRevoke({ msg, clinicId }) {
+    const originalWamid = cleanString(msg?.revoke?.original_message_id);
+    if (!originalWamid) {
+        return;
+    }
+    const messageRef = await findMessageByWamid(originalWamid);
+    if (!messageRef) {
+        return;
+    }
+    const message = await Message.findByPk(messageRef.id);
+    if (!message) {
+        return;
+    }
+    const revokedAt = parseWhatsappTimestamp(msg?.timestamp);
+    const currentMetadata = message.metadata || {};
+    message.metadata = {
+        ...currentMetadata,
+        revoked_at: revokedAt.toISOString(),
+        revoke: {
+            wamid: cleanString(msg?.id) || null,
+            original_message_id: originalWamid,
+        },
+        coexistence: {
+            ...(currentMetadata.coexistence || {}),
+            last_event: 'revoke',
+            revoked_at: revokedAt.toISOString(),
+        },
+    };
+    await message.save();
+    await emitMessageUpdated({ message, clinicId: messageRef.clinic_id || clinicId });
+}
+
+async function createCoexistenceConversationMessage({
+    rawMessage,
+    clinicId,
+    patientId = null,
+    leadId = null,
+    contactId,
+    direction,
+    origin,
+    sourceEvent,
+    sentAt,
+    phoneId,
+    extraMetadata = {},
+    status = 'sent',
+    updateUnread = false,
+}) {
+    const wamid = cleanString(rawMessage?.id);
+    if (!wamid) {
+        return null;
+    }
+
+    const existingRef = await findMessageByWamid(wamid);
+    if (existingRef) {
+        return null;
+    }
+
+    const normalizedContactId = normalizeWhatsappContactId(contactId);
+    if (!normalizedContactId) {
+        return null;
+    }
+
+    const descriptor = buildCoexistenceMessageDescriptor({
+        message: rawMessage,
+        origin,
+        sourceEvent,
+        extra: extraMetadata?.coexistence || {},
+    });
+
+    const conv = await findCanonicalWhatsappConversation({
+        clinicId,
+        contactId: normalizedContactId,
+        patientId,
+        leadId,
+        createIfMissing: true,
+        lastMessageAt: sentAt,
+    });
+    if (!conv) {
+        return null;
+    }
+
+    const message = await Message.create({
+        conversation_id: conv.id,
+        sender_id: null,
+        direction,
+        content: descriptor.content,
+        message_type: descriptor.messageType,
+        status,
+        metadata: {
+            wamid,
+            phoneId,
+            ...descriptor.metadataExtra,
+            ...extraMetadata,
+            coexistence: {
+                ...(descriptor.metadataExtra.coexistence || {}),
+                ...(extraMetadata.coexistence || {}),
+            },
+        },
+        sent_at: sentAt,
+    });
+
+    await updateConversationLastMessage(conv, sentAt, {
+        inbound: direction === 'inbound' && updateUnread,
+        incrementUnread: updateUnread,
+    });
+    await emitMessageCreated({
+        message,
+        conversation: conv,
+        clinicId,
+        content: descriptor.content,
+        messageType: descriptor.messageType,
+    });
+
+    return { message, conversation: conv };
+}
+
+async function handleWhatsappCoexistenceEchoes({ echoes, value, clinicId, patientId, leadId }) {
+    if (!Array.isArray(echoes) || !echoes.length) {
+        return;
+    }
+    const phoneId = value?.metadata?.phone_number_id || null;
+    let imported = 0;
+    for (const echo of echoes) {
+        const sentAt = parseWhatsappTimestamp(echo?.timestamp);
+        const result = await createCoexistenceConversationMessage({
+            rawMessage: echo,
+            clinicId,
+            patientId,
+            leadId,
+            contactId: echo?.to,
+            direction: 'outbound',
+            origin: 'mobile_app',
+            sourceEvent: 'smb_message_echoes',
+            sentAt,
+            phoneId,
+            extraMetadata: {
+                coexistence: {
+                    from_business_phone: echo?.from || null,
+                },
+            },
+            status: 'sent',
+            updateUnread: false,
+        });
+        if (result) {
+            imported += 1;
+        }
+    }
+    await updateWhatsappAssetCoexistenceMetadata({
+        phoneId,
+        patch: {
+            last_echo_at: new Date().toISOString(),
+            last_echo_imported_count: imported,
+        },
+    });
+}
+
+async function handleWhatsappHistoryBlocks({ historyBlocks, value, clinicId, patientId, leadId }) {
+    if (!Array.isArray(historyBlocks) || !historyBlocks.length) {
+        return;
+    }
+    const phoneId = value?.metadata?.phone_number_id || null;
+    let imported = 0;
+    let rejectedError = null;
+
+    for (const block of historyBlocks) {
+        const errors = Array.isArray(block?.errors) ? block.errors : [];
+        if (errors.length) {
+            rejectedError = errors[0] || null;
+            continue;
+        }
+
+        const metadata = block?.metadata || {};
+        const threads = Array.isArray(block?.threads) ? block.threads : [];
+        for (const thread of threads) {
+            const threadContactId = thread?.id;
+            const messages = Array.isArray(thread?.messages) ? thread.messages : [];
+            for (const historyMessage of messages) {
+                const sentAt = parseWhatsappTimestamp(historyMessage?.timestamp);
+                const businessDigits = normalizePhoneDigits(value?.metadata?.display_phone_number);
+                const fromDigits = normalizePhoneDigits(historyMessage?.from);
+                const isOutbound = Boolean(historyMessage?.to) || (businessDigits && fromDigits === businessDigits);
+                const contactId = isOutbound
+                    ? (historyMessage?.to || threadContactId)
+                    : (historyMessage?.from || threadContactId);
+                const status = mapWhatsAppHistoryStatus(historyMessage?.history_context?.status);
+
+                const result = await createCoexistenceConversationMessage({
+                    rawMessage: historyMessage,
+                    clinicId,
+                    // Un webhook history puede traer miles de hilos; no heredamos
+                    // patientId/leadId del primer contacto resuelto por la ruta.
+                    patientId: null,
+                    leadId: null,
+                    contactId,
+                    direction: isOutbound ? 'outbound' : 'inbound',
+                    origin: 'history_import',
+                    sourceEvent: 'history',
+                    sentAt,
+                    phoneId,
+                    extraMetadata: {
+                        history_context: historyMessage?.history_context || null,
+                        coexistence: {
+                            history_phase: metadata?.phase ?? null,
+                            history_chunk_order: metadata?.chunk_order ?? null,
+                            history_progress: metadata?.progress ?? null,
+                        },
+                    },
+                    status,
+                    updateUnread: false,
+                });
+                if (result) {
+                    imported += 1;
+                }
+            }
+        }
+    }
+
+    await updateWhatsappAssetCoexistenceMetadata({
+        phoneId,
+        patch: rejectedError
+            ? {
+                history_sync_status: 'rejected',
+                history_sync_error: rejectedError,
+                history_sync_last_at: new Date().toISOString(),
+            }
+            : {
+                history_sync_status: 'syncing',
+                history_sync_last_at: new Date().toISOString(),
+                history_sync_last_imported_count: imported,
+                ...(historyBlocks.some((block) => Number(block?.metadata?.progress) >= 100)
+                    ? { history_sync_status: 'completed' }
+                    : {}),
+            },
+    });
+}
+
+async function handleWhatsappStateSync({ stateSync, value }) {
+    if (!Array.isArray(stateSync) || !stateSync.length) {
+        return;
+    }
+    const phoneId = value?.metadata?.phone_number_id || null;
+    await updateWhatsappAssetCoexistenceMetadata({
+        phoneId,
+        patch: {
+            contacts_sync_last_at: new Date().toISOString(),
+            contacts_sync_last_count: stateSync.length,
+        },
+    });
+}
+
 // Procesa webhooks entrantes de WhatsApp
 createWorker('webhook_whatsapp', async (job) => {
     const payload = job.data?.body;
@@ -449,6 +983,9 @@ createWorker('webhook_whatsapp', async (job) => {
     const value = changes?.value;
     const messages = value?.messages || [];
     const statuses = value?.statuses || [];
+    const historyBlocks = value?.history || [];
+    const echoes = value?.message_echoes || [];
+    const stateSync = value?.state_sync || [];
 
     let webOrigin = null;
     if (webOriginRefFromJob && WhatsAppWebOrigin) {
@@ -462,10 +999,36 @@ createWorker('webhook_whatsapp', async (job) => {
         }
     }
 
+    await handleWhatsappStateSync({ stateSync, value });
+    await handleWhatsappHistoryBlocks({ historyBlocks, value, clinicId, patientId, leadId });
+    await handleWhatsappCoexistenceEchoes({ echoes, value, clinicId, patientId, leadId });
+
     for (const msg of messages) {
         const phoneId = value?.metadata?.phone_number_id;
         const from = msg.from;
         const wamid = msg.id;
+        const rawType = cleanString(msg?.type).toLowerCase();
+
+        if (rawType === 'edit') {
+            await handleWhatsappMessageEdit({ msg, clinicId });
+            continue;
+        }
+        if (rawType === 'revoke') {
+            await handleWhatsappMessageRevoke({ msg, clinicId });
+            continue;
+        }
+
+        if (!wamid) {
+            continue;
+        }
+        if (!from) {
+            continue;
+        }
+        const existingMessage = await findMessageByWamid(wamid);
+        if (existingMessage) {
+            continue;
+        }
+
         const descriptor = await buildInboundMessageDescriptor({ msg, clinicId });
         const webOriginRefFromMsg = descriptor.webOriginRef || null;
         const content = descriptor.content;
@@ -659,27 +1222,7 @@ createWorker('webhook_whatsapp', async (job) => {
         message.metadata = mergeStatusMetadata(message.metadata, status);
         await message.save();
 
-        const io = getIO();
-        if (io) {
-            const rooms = new Set();
-            const roomClinicId = messageRef.clinic_id || clinicId;
-            if (roomClinicId) rooms.add(`clinic:${roomClinicId}`);
-            if (messageRef.assignee_id) rooms.add(`user:${messageRef.assignee_id}`);
-
-            const payload = {
-                id: message.id,
-                conversation_id: String(message.conversation_id),
-                status: message.status,
-            };
-
-            if (rooms.size === 0) {
-                io.emit('message:updated', payload);
-                dlog('Emit message:updated broadcast', { payload, rooms: [] });
-            } else {
-                rooms.forEach((r) => io.to(r).emit('message:updated', payload));
-                dlog('Emit message:updated rooms', { rooms: Array.from(rooms), payload });
-            }
-        }
+        await emitMessageUpdated({ message, clinicId: messageRef.clinic_id || clinicId });
     }
 });
 

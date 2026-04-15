@@ -50,6 +50,17 @@ function extractWebOriginRefFromWebhookBody(body) {
   return null;
 }
 
+function extractPrimaryWhatsappContactFromWebhookBody(body) {
+  const value = body?.entry?.[0]?.changes?.[0]?.value || {};
+  const firstMessage = value?.messages?.[0];
+  if (firstMessage?.from) return firstMessage.from;
+  const firstEcho = value?.message_echoes?.[0];
+  if (firstEcho?.to) return firstEcho.to;
+  const firstHistoryThread = value?.history?.[0]?.threads?.[0];
+  if (firstHistoryThread?.id) return firstHistoryThread.id;
+  return null;
+}
+
 async function resolveClinicAndContact({ clinicId, groupId, from }) {
   const candidates = buildPhoneCandidates(from);
   if (!candidates.length) {
@@ -264,7 +275,7 @@ router.post('/whatsapp/webhook', async (req, res) => {
     }
 
     if (!clinicId && groupId) {
-      const from = req.body?.entry?.[0]?.changes?.[0]?.value?.messages?.[0]?.from;
+      const from = extractPrimaryWhatsappContactFromWebhookBody(req.body);
       const resolved = await resolveClinicAndContact({ clinicId: null, groupId, from });
       clinicId = resolved.clinicId;
       req.resolvedContact = resolved;
@@ -274,7 +285,7 @@ router.post('/whatsapp/webhook', async (req, res) => {
       console.warn('Webhook WA sin clinic_id, descartando payload');
       return res.sendStatus(200);
     }
-    const from = req.body?.entry?.[0]?.changes?.[0]?.value?.messages?.[0]?.from;
+    const from = extractPrimaryWhatsappContactFromWebhookBody(req.body);
     const resolvedContact =
       req.resolvedContact ||
       (await resolveClinicAndContact({ clinicId, groupId, from }));
