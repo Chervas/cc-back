@@ -1,5 +1,5 @@
 > **Módulo:** Arquitectura del Backend
-> **Última actualización:** 2026-04-13
+> **Última actualización:** 2026-04-15
 > **Relacionado con:** [20.1-motor-flujos-v2](./20.1-motor-flujos-v2.md) | documento operativo `cc-front/src/Documentacion/31-roadmap-arquitectura-entornos-gateway.md`
 
 ---
@@ -59,6 +59,21 @@ Cambios de código asociados:
 | `src/services/flowEngineV2.service.js` | waits nuevos guardan `runtime_namespace` |
 
 Referencia operativa completa: `cc-front/src/Documentacion/31-roadmap-arquitectura-entornos-gateway.md`.
+
+### WhatsApp coexistencia: regla de gateway
+
+Roadmap funcional y tecnico: `cc-front/src/Documentacion/14.3-whatsapp-coexistencia.md`.
+
+Antes de activar coexistencia sobre un numero real:
+
+- el webhook WhatsApp ya acepta de forma pasiva `history`, `smb_app_state_sync`, `smb_message_echoes`, `edit` y `revoke` sin romper el inbound actual;
+- `history` y `smb_message_echoes` no reanudan automatizaciones ni `wait_response`;
+- los mensajes `smb_message_echoes` se persisten como outbound manual con `Messages.metadata.origin = mobile_app` para que la UI muestre `Enviado desde el movil`;
+- el historial importado se guarda con `Messages.metadata.origin = history_import`, no suma no leidos y no dispara flujos;
+- `edit` actualiza contenido/metadata del mensaje original y `revoke` marca el mensaje como revocado sin borrarlo;
+- `account_update` con `PARTNER_REMOVED`, `ACCOUNT_OFFBOARDED` o `ACCOUNT_RECONNECTED` actualiza `ClinicMetaAssets.additionalData.coexistence`;
+- hay fixtures de QA en `src/scripts/fixtures/whatsapp-coexistence/`;
+- Propdental se usara como numero de QA, pero no debe relanzarse Embedded Signup ni cambiar el modo de conexion mientras haya mensajes reales de cita pendientes.
 
 ## 2026-04-13 - Intake: flujos de chat para clínica cerrada
 

@@ -1,0 +1,31 @@
+{
+  "object": "whatsapp_business_account",
+  "entry": [
+    {
+      "id": "455445070989662",
+      "changes": [
+        {
+          "field": "messages",
+          "value": {
+            "messaging_product": "whatsapp",
+            "metadata": {
+              "display_phone_number": "34624312583",
+              "phone_number_id": "1009118125613058"
+            },
+            "messages": [
+              {
+                "from": "34617560236",
+                "id": "wamid.coexistence.revoke.fixture",
+                "timestamp": "1768477207",
+                "type": "revoke",
+                "revoke": {
+                  "original_message_id": "wamid.original.to.revoke"
+                }
+              }
+            ]
+          }
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,32 @@
+{
+  "object": "whatsapp_business_account",
+  "entry": [
+    {
+      "id": "455445070989662",
+      "changes": [
+        {
+          "field": "smb_message_echoes",
+          "value": {
+            "messaging_product": "whatsapp",
+            "metadata": {
+              "display_phone_number": "34624312583",
+              "phone_number_id": "1009118125613058"
+            },
+            "message_echoes": [
+              {
+                "from": "34624312583",
+                "to": "34617560236",
+                "id": "wamid.coexistence.echo.fixture",
+                "timestamp": "1768477203",
+                "type": "text",
+                "text": {
+                  "body": "Mensaje enviado desde WhatsApp Business App"
+                }
+              }
+            ]
+          }
+        }
+      ]
+    }
+  ]
+}

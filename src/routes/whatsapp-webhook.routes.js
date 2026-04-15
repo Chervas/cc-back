@@ -50,6 +50,76 @@ function extractWebOriginRefFromWebhookBody(body) {
   return null;
 }
 
+function extractPrimaryWhatsappContactFromWebhookBody(body) {
+  const value = body?.entry?.[0]?.changes?.[0]?.value || {};
+  const firstMessage = value?.messages?.[0];
+  if (firstMessage?.from) return firstMessage.from;
+  const firstEcho = value?.message_echoes?.[0];
+  if (firstEcho?.to) return firstEcho.to;
+  const firstHistoryThread = value?.history?.[0]?.threads?.[0];
+  if (firstHistoryThread?.id) return firstHistoryThread.id;
+  return null;
+}
+
+function extractWhatsappWebhookValue(body) {
+  return body?.entry?.[0]?.changes?.[0]?.value || {};
+}
+
+function extractWhatsappWebhookWabaId(body) {
+  return body?.entry?.[0]?.id || null;
+}
+
+async function findWhatsappAssetForWebhook(body) {
+  const value = extractWhatsappWebhookValue(body);
+  const phoneId = value?.metadata?.phone_number_id || null;
+  if (phoneId) {
+    const asset = await ClinicMetaAsset.findOne({
+      where: { phoneNumberId: phoneId, isActive: true },
+      raw: true,
+    });
+    if (asset) return asset;
+    console.warn('Webhook WA sin mapeo de phoneNumberId', phoneId);
+  }
+
+  const wabaId = extractWhatsappWebhookWabaId(body);
+  if (wabaId) {
+    const asset = await ClinicMetaAsset.findOne({
+      where: {
+        assetType: 'whatsapp_phone_number',
+        wabaId,
+        isActive: true,
+      },
+      raw: true,
+    });
+    if (asset) return asset;
+  }
+
+  const phoneNumber = value?.phone_number || value?.metadata?.display_phone_number || null;
+  const phoneDigits = phoneNumber ? String(phoneNumber).replace(/\D/g, '') : '';
+  if (phoneDigits) {
+    const assets = await ClinicMetaAsset.findAll({
+      where: {
+        assetType: 'whatsapp_phone_number',
+        isActive: true,
+      },
+      raw: true,
+    });
+    const localDigits = phoneDigits.length > 9 ? phoneDigits.slice(-9) : phoneDigits;
+    const match = assets.find((asset) => {
+      const haystack = JSON.stringify({
+        metaAssetName: asset.metaAssetName,
+        phoneNumberId: asset.phoneNumberId,
+        wabaId: asset.wabaId,
+        additionalData: asset.additionalData,
+      }).replace(/\D/g, '');
+      return haystack.includes(phoneDigits) || (localDigits && haystack.includes(localDigits));
+    });
+    if (match) return match;
+  }
+
+  return null;
+}
+
 async function resolveClinicAndContact({ clinicId, groupId, from }) {
   const candidates = buildPhoneCandidates(from);
   if (!candidates.length) {
@@ -248,23 +318,15 @@ router.post('/whatsapp/webhook', async (req, res) => {
     }
 
     if (!clinicId) {
-      const phoneId = req.body?.entry?.[0]?.changes?.[0]?.value?.metadata?.phone_number_id;
-      if (phoneId) {
-        const asset = await ClinicMetaAsset.findOne({
-          where: { phoneNumberId: phoneId, isActive: true },
-          raw: true,
-        });
-        if (asset) {
-          clinicId = asset.clinicaId;
-          groupId = asset.grupoClinicaId;
-        } else {
-          console.warn('Webhook WA sin mapeo de phoneNumberId', phoneId);
-        }
+      const asset = await findWhatsappAssetForWebhook(req.body);
+      if (asset) {
+        clinicId = asset.clinicaId;
+        groupId = asset.grupoClinicaId;
       }
     }
 
     if (!clinicId && groupId) {
-      const from = req.body?.entry?.[0]?.changes?.[0]?.value?.messages?.[0]?.from;
+      const from = extractPrimaryWhatsappContactFromWebhookBody(req.body);
       const resolved = await resolveClinicAndContact({ clinicId: null, groupId, from });
       clinicId = resolved.clinicId;
       req.resolvedContact = resolved;
@@ -274,7 +336,7 @@ router.post('/whatsapp/webhook', async (req, res) => {
       console.warn('Webhook WA sin clinic_id, descartando payload');
       return res.sendStatus(200);
     }
-    const from = req.body?.entry?.[0]?.changes?.[0]?.value?.messages?.[0]?.from;
+    const from = extractPrimaryWhatsappContactFromWebhookBody(req.body);
     const resolvedContact =
       req.resolvedContact ||
       (await resolveClinicAndContact({ clinicId, groupId, from }));
