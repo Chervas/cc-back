@@ -60,6 +60,17 @@ Cambios de código asociados:
 
 Referencia operativa completa: `cc-front/src/Documentacion/31-roadmap-arquitectura-entornos-gateway.md`.
 
+### WhatsApp coexistencia: regla de gateway
+
+Roadmap funcional y tecnico: `cc-front/src/Documentacion/14.3-whatsapp-coexistencia.md`.
+
+Antes de activar coexistencia sobre un numero real:
+
+- `pm2-gateway` debe aceptar pasivamente los webhooks nuevos de Meta (`history`, `smb_app_state_sync`, `smb_message_echoes`, `account_update`, `edit`, `revoke`) sin romper el inbound actual;
+- `history` y `smb_message_echoes` no deben reanudar automatizaciones ni `wait_response`;
+- los mensajes `smb_message_echoes` deben persistirse como outbound manual con origen `mobile_app` para que la UI muestre `Enviado desde el movil`;
+- Propdental se usara como numero de QA, pero no debe relanzarse Embedded Signup ni cambiar el modo de conexion mientras haya mensajes reales de cita pendientes.
+
 ## 2026-04-13 - Intake: flujos de chat para clínica cerrada
 
 Se añade soporte real para plantillas de flujos de chat que solo deben mostrarse cuando la clínica está fuera de horario.
