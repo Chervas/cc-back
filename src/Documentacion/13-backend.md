@@ -2030,6 +2030,8 @@ Tras el saneado del 2026-03-28, los flujos activos de cita quedan con esta semá
 
 1. `wait_response` escuchando al nodo equivocado
    - corregido: `wait_response` escucha al nodo outbound real (`N2`)
+   - el guardado/publicación normaliza `listens_to_node_id`: si existe pero apunta a un nodo no outbound (`change_status`, `ai_analysis`, etc.), backend recorre los predecesores del grafo y lo reancla al `action/send_whatsapp` / `action/send_email` anterior
+   - si no puede inferirse un outbound anterior, la validación bloquea el flujo con error de configuración en vez de publicar un listener semánticamente roto
    - si una plantilla antigua apunta por error a un nodo no outbound, el runtime usa como fallback el último output outbound real con `conversation_id` y `message_id`, y persiste ese nodo efectivo en `waiting_meta.listens_to_node_id`
 
 2. `condition/ai_analysis` en preset `confirm_appointment`
@@ -2414,6 +2416,7 @@ Reglas:
   - `inbound_conversation_id`
 - `waiting_meta.runtime_namespace` y `payload.__runtime_namespace` deben apuntar al mismo runtime que reclama jobs en ese entorno.
 - Si el mensaje outbound escuchado salió más tarde por horario silencioso, `wait_starts_at` debe anclarse a esa hora efectiva de salida, no a la entrada inicial al nodo.
+- En guardado/publicación, `listens_to_node_id` solo es válido si apunta a un nodo outbound real (`action/send_whatsapp` o `action/send_email`). Los duplicados o plantillas antiguas pueden arrastrar IDs existentes pero incorrectos; backend los normaliza recorriendo el grafo hacia atrás y, si no encuentra outbound, rechaza la configuración.
 - Si una ejecución se queda en `waiting` pero el job asociado falla con `No handler registered for job type 'automations_v2_execute'`, el problema es de scheduler/claiming, no de plantilla ni del nodo `wait_response`.
 - En QA de automatizaciones con WhatsApp conviene distinguir siempre:
   - reacción (`message_type = reaction`);
