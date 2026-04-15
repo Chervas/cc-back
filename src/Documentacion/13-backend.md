@@ -1989,6 +1989,8 @@ Si una cita parece no haber disparado `appointment_created`, el orden correcto d
 3. revisar `AutomationFlowTemplatesV2.nodes` de la versión ejecutada, no solo la versión que el editor tenga abierta;
 4. revisar la plantilla real en `WhatsappTemplates`, no el nombre lógico del nodo.
 
+Para `appointment_rescheduled`, la automatización debe disparar cada movimiento real de la cita. La idempotencia no puede ser solo `trigger:cita:template`, porque una misma cita puede reprogramarse varias veces. Desde `2026-04-15`, el runtime añade un `window_identifier` con `updated_at`, `inicio`, `fin`, `doctor_id` e `instalacion_id` para que cada reprogramación real cree una ejecución nueva, manteniendo deduplicación solo para reintentos exactos del mismo movimiento.
+
 Caso real validado el `2026-03-27`:
 
 - cita `99`
