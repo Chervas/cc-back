@@ -71,6 +71,8 @@ Antes de activar coexistencia sobre un numero real:
 - los mensajes `smb_message_echoes` se persisten como outbound manual con `Messages.metadata.origin = mobile_app` para que la UI muestre `Enviado desde el movil`;
 - el historial importado se guarda con `Messages.metadata.origin = history_import`, no suma no leidos y no dispara flujos;
 - `edit` actualiza contenido/metadata del mensaje original y `revoke` marca el mensaje como revocado sin borrarlo;
+- `account_update` con `PARTNER_REMOVED`, `ACCOUNT_OFFBOARDED` o `ACCOUNT_RECONNECTED` actualiza `ClinicMetaAssets.additionalData.coexistence`;
+- hay fixtures de QA en `src/scripts/fixtures/whatsapp-coexistence/`;
 - Propdental se usara como numero de QA, pero no debe relanzarse Embedded Signup ni cambiar el modo de conexion mientras haya mensajes reales de cita pendientes.
 
 ## 2026-04-13 - Intake: flujos de chat para clínica cerrada

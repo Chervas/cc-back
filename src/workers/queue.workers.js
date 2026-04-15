@@ -433,18 +433,58 @@ async function findMessageByWamid(wamid) {
     return rows?.[0] || null;
 }
 
-async function updateWhatsappAssetCoexistenceMetadata({ phoneId, patch }) {
-    if (!phoneId || !ClinicMetaAsset) {
+async function findWhatsappPhoneAssetForMetadata({ phoneId = null, wabaId = null, phoneNumber = null, clinicId = null } = {}) {
+    if (!ClinicMetaAsset) {
+        return null;
+    }
+    const baseWhere = {
+        assetType: 'whatsapp_phone_number',
+        isActive: true,
+    };
+    if (phoneId) {
+        const asset = await ClinicMetaAsset.findOne({
+            where: { ...baseWhere, phoneNumberId: phoneId },
+        });
+        if (asset) return asset;
+    }
+    if (wabaId) {
+        const asset = await ClinicMetaAsset.findOne({
+            where: { ...baseWhere, wabaId },
+        });
+        if (asset) return asset;
+    }
+    if (clinicId) {
+        const asset = await ClinicMetaAsset.findOne({
+            where: { ...baseWhere, clinicaId: clinicId },
+            order: [['updatedAt', 'DESC']],
+        });
+        if (asset) return asset;
+    }
+
+    const phoneDigits = normalizePhoneDigits(phoneNumber);
+    if (phoneDigits) {
+        const localDigits = phoneDigits.length > 9 ? phoneDigits.slice(-9) : phoneDigits;
+        const assets = await ClinicMetaAsset.findAll({ where: baseWhere });
+        return assets.find((asset) => {
+            const haystack = JSON.stringify({
+                metaAssetName: asset.metaAssetName,
+                phoneNumberId: asset.phoneNumberId,
+                wabaId: asset.wabaId,
+                additionalData: asset.additionalData,
+            }).replace(/\D/g, '');
+            return haystack.includes(phoneDigits) || (localDigits && haystack.includes(localDigits));
+        }) || null;
+    }
+
+    return null;
+}
+
+async function updateWhatsappAssetCoexistenceMetadata({ phoneId = null, wabaId = null, phoneNumber = null, clinicId = null, patch }) {
+    if (!ClinicMetaAsset) {
         return;
     }
     try {
-        const asset = await ClinicMetaAsset.findOne({
-            where: {
-                assetType: 'whatsapp_phone_number',
-                phoneNumberId: phoneId,
-                isActive: true,
-            },
-        });
+        const asset = await findWhatsappPhoneAssetForMetadata({ phoneId, wabaId, phoneNumber, clinicId });
         if (!asset) {
             return;
         }
@@ -461,6 +501,9 @@ async function updateWhatsappAssetCoexistenceMetadata({ phoneId, patch }) {
     } catch (error) {
         console.warn('[whatsapp coexistence] No se pudo actualizar metadata del activo', {
             phoneId,
+            wabaId,
+            phoneNumber,
+            clinicId,
             error: serializeError(error),
         });
     }
@@ -966,6 +1009,100 @@ async function handleWhatsappStateSync({ stateSync, value }) {
     });
 }
 
+function normalizeWhatsappAccountEvent(value) {
+    const event = cleanString(value?.event).toUpperCase();
+    if (event === 'PARTNER_REMOVED' || event === 'ACCOUNT_OFFBOARDED') {
+        return {
+            event,
+            status: 'disconnected',
+            canSendApi: false,
+            severity: 'error',
+        };
+    }
+    if (event === 'ACCOUNT_RECONNECTED') {
+        return {
+            event,
+            status: 'active',
+            canSendApi: true,
+            severity: 'info',
+        };
+    }
+    return {
+        event: event || 'ACCOUNT_UPDATE',
+        status: 'updated',
+        canSendApi: null,
+        severity: 'info',
+    };
+}
+
+async function handleWhatsappAccountUpdate({ entry, changes, value, clinicId }) {
+    const field = cleanString(changes?.field).toLowerCase();
+    const event = cleanString(value?.event).toUpperCase();
+    if (field !== 'account_update' && !['PARTNER_REMOVED', 'ACCOUNT_OFFBOARDED', 'ACCOUNT_RECONNECTED'].includes(event)) {
+        return;
+    }
+
+    const phoneId = value?.metadata?.phone_number_id || null;
+    const wabaId = entry?.id || value?.waba_id || null;
+    const phoneNumber = value?.phone_number || value?.metadata?.display_phone_number || null;
+    const normalized = normalizeWhatsappAccountEvent(value);
+    const disconnectionInfo = value?.disconnection_info || null;
+
+    const patch = {
+        account_update_last_at: new Date().toISOString(),
+        account_update_last_event: normalized.event,
+        coexistence_status: normalized.status,
+        can_send_api: normalized.canSendApi,
+        last_account_update: {
+            event: normalized.event,
+            field: field || null,
+            phone_number: phoneNumber || null,
+            disconnection_info: disconnectionInfo,
+            raw: value || null,
+        },
+    };
+
+    if (normalized.status === 'disconnected') {
+        patch.disconnected_at = new Date().toISOString();
+        patch.last_coexistence_error = {
+            event: normalized.event,
+            reason: disconnectionInfo?.reason || null,
+            initiated_by: disconnectionInfo?.initiated_by || null,
+        };
+    }
+    if (normalized.status === 'active') {
+        patch.reconnected_at = new Date().toISOString();
+        patch.last_coexistence_error = null;
+    }
+
+    await updateWhatsappAssetCoexistenceMetadata({
+        phoneId,
+        wabaId,
+        phoneNumber,
+        clinicId,
+        patch,
+    });
+
+    if (normalized.status === 'disconnected') {
+        console.warn('[whatsapp coexistence] Cuenta desconectada por Meta', {
+            clinicId,
+            phoneId,
+            wabaId,
+            phoneNumber,
+            event: normalized.event,
+            disconnectionInfo,
+        });
+    } else {
+        dlog('[whatsapp coexistence] account_update procesado', {
+            clinicId,
+            phoneId,
+            wabaId,
+            phoneNumber,
+            event: normalized.event,
+        });
+    }
+}
+
 // Procesa webhooks entrantes de WhatsApp
 createWorker('webhook_whatsapp', async (job) => {
     const payload = job.data?.body;
@@ -999,6 +1136,7 @@ createWorker('webhook_whatsapp', async (job) => {
         }
     }
 
+    await handleWhatsappAccountUpdate({ entry, changes, value, clinicId });
     await handleWhatsappStateSync({ stateSync, value });
     await handleWhatsappHistoryBlocks({ historyBlocks, value, clinicId, patientId, leadId });
     await handleWhatsappCoexistenceEchoes({ echoes, value, clinicId, patientId, leadId });
