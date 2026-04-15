@@ -2041,6 +2041,7 @@ Tras el saneado del 2026-03-28, los flujos activos de cita quedan con esta semá
    - `on_success` significa `decision = confirmado`
    - `on_fail` significa cualquier otro caso (`no_confirmado`, `dudas` o fallo técnico)
    - esta regla aplica tanto a respuestas de Groq como a reglas deterministas previas; una negativa textual detectada por regla (`_ai_provider = deterministic_rule`) no puede seguir `on_success`
+   - en flujos de confirmación/reprogramación por WhatsApp, la rama `on_fail` debe contestar al paciente con un acuse breve antes de notificar internamente a clínica; no debe dejar al paciente sin respuesta cuando rechaza, propone otra hora o expresa dudas
    - no se usa ya un `field_check` intermedio en estos flujos porque complicaba el grafo sin aportar nada al usuario
    - adicionalmente, ciertas reacciones positivas de WhatsApp (`👍`, `✅`, `👌`, `🙌`) se resuelven de forma determinista como `confirmado` antes de pasar por LLM
    - adicionalmente, negativas claras de texto como `no puedo`, `no me viene bien`, `me va mal`, `otro día`, `reprogramar/cancelar` o erratas evidentes como `me va ma ese día` se resuelven de forma determinista como `no_confirmado` antes de pasar por LLM
