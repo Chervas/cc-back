@@ -145,6 +145,13 @@ Fuentes que cruza:
 - `WebGaDaily` para GA4 opcional.
 - `ClinicBusinessLocation`, `BusinessProfileDailyMetric` y `BusinessProfileReview` para Perfil Empresa Google.
 
+Meta Lead Ads:
+
+- El webhook `leadgen` puede llegar desde páginas que siguen suscritas a la app de Meta aunque ya no estén conectadas en ClinicaClick.
+- El backend solo acepta leads si `page_id` existe como `ClinicMetaAsset` activo de tipo `facebook_page`.
+- Si la página no está conectada, se ignora antes de pedir el detalle del lead a Graph API. Esto evita consumo innecesario y ruido por páginas externas.
+- El log de páginas no conectadas queda limitado por `META_UNMAPPED_PAGE_LOG_TTL_MS` para no inundar PM2 si Meta reenvía muchos leads de una página antigua.
+
 Estado de sincronización:
 
 - La respuesta incluye `sync.active`, `sync.sources[]` y `sync.allSources[]`.

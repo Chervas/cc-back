@@ -3299,6 +3299,19 @@ const mapMetaField = (fieldData = [], name) => {
   return item.values[0] ?? null;
 };
 
+const META_UNMAPPED_PAGE_LOG_TTL_MS = Number(process.env.META_UNMAPPED_PAGE_LOG_TTL_MS || 60 * 60 * 1000);
+const metaUnmappedPageLogCache = new Map();
+const shouldLogUnmappedMetaLeadgen = (pageId, formId) => {
+  const key = `${pageId || 'unknown'}|${formId || 'unknown'}`;
+  const now = Date.now();
+  const last = metaUnmappedPageLogCache.get(key) || 0;
+  if (now - last < META_UNMAPPED_PAGE_LOG_TTL_MS) {
+    return false;
+  }
+  metaUnmappedPageLogCache.set(key, now);
+  return true;
+};
+
 exports.receiveMetaWebhook = asyncHandler(async (req, res) => {
   if (!validateMetaSignature(req)) {
     return res.status(401).json({ message: 'Firma Meta inválida' });
@@ -3319,6 +3332,25 @@ exports.receiveMetaWebhook = asyncHandler(async (req, res) => {
       const adId = changeValue.ad_id || null;
       const pageId = changeValue.page_id || pageEntry.id || null;
       if (!leadId) continue;
+
+      let mappedPage = null;
+      try {
+        if (pageId && ClinicMetaAsset) {
+          mappedPage = await ClinicMetaAsset.findOne({
+            where: { metaAssetId: String(pageId), assetType: 'facebook_page', isActive: true },
+            raw: true,
+          });
+        }
+      } catch (mapClinicErr) {
+        console.warn('⚠️ No se pudo mapear clínica desde page_id:', mapClinicErr.message || mapClinicErr);
+      }
+
+      if (!mappedPage) {
+        if (shouldLogUnmappedMetaLeadgen(pageId, formId)) {
+          console.info(`Lead Meta ignorado por página no conectada a ClinicaClick: page_id=${pageId || 'unknown'} form_id=${formId || 'unknown'} lead_id=${leadId}`);
+        }
+        continue;
+      }
 
       let leadData = {};
       try {
@@ -3353,6 +3385,8 @@ exports.receiveMetaWebhook = asyncHandler(async (req, res) => {
       }
 
       const leadPayload = {
+        clinica_id: mappedPage.clinicaId || null,
+        grupo_clinica_id: mappedPage.grupoClinicaId || null,
         event_id: leadId,
         campana_id: campanaId,
         channel: 'paid',
@@ -3371,26 +3405,6 @@ exports.receiveMetaWebhook = asyncHandler(async (req, res) => {
         clinic_match_source: 'meta_page_id',
         clinic_match_value: pageId || null
       };
-
-      // Intentar asignar clínica por page_id si hay mapeo activo
-      try {
-        if (pageId && ClinicMetaAsset) {
-          const mappedPage = await ClinicMetaAsset.findOne({
-            where: { metaAssetId: String(pageId), assetType: 'facebook_page', isActive: true }
-          });
-          if (mappedPage) {
-            leadPayload.clinica_id = mappedPage.clinicaId || null;
-            leadPayload.grupo_clinica_id = mappedPage.grupoClinicaId || null;
-          }
-        }
-      } catch (mapClinicErr) {
-        console.warn('⚠️ No se pudo mapear clínica desde page_id:', mapClinicErr.message || mapClinicErr);
-      }
-
-      if (!leadPayload.clinica_id && !leadPayload.grupo_clinica_id) {
-        console.info(`Lead Meta descartado por page_id sin mapeo activo: page_id=${pageId || 'unknown'} form_id=${formId || 'unknown'} lead_id=${leadId}`);
-        continue;
-      }
 
       try {
         await dedupeAndCreateLead(leadPayload, { change: changeValue, meta_lead_data: leadData }, { meta_page_id: pageId });
