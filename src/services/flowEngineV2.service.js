@@ -3219,6 +3219,39 @@ function resolveAppointmentBookingWindowMatch(rule, appointmentDateLocal, booked
   }
 }
 
+function resolveAppointmentBookingReference(context) {
+  const triggerType = cleanString(
+    context?.trigger?.type
+      || context?.trigger_type
+      || context?.trigger?.data?.event_name
+      || context?.trigger?.data?.trigger_type
+  ).toLowerCase();
+  const createdRaw = context?.trigger?.data?.appointment_created_at
+    || context?.trigger?.data?.created_at
+    || context?.appointment?.created_at
+    || context?.cita?.created_at;
+  const updatedRaw = context?.trigger?.data?.updated_at
+    || context?.trigger?.data?.appointment_updated_at
+    || context?.appointment?.updated_at
+    || context?.cita?.updated_at;
+
+  if (triggerType === 'appointment_rescheduled' && updatedRaw) {
+    return {
+      raw: updatedRaw,
+      source: 'appointment_updated_at',
+      trigger_type: triggerType,
+      original_created_at: createdRaw || null,
+    };
+  }
+
+  return {
+    raw: createdRaw,
+    source: 'appointment_created_at',
+    trigger_type: triggerType || null,
+    original_created_at: createdRaw || null,
+  };
+}
+
 function evaluateAppointmentBookingTimingFieldCheck(config, context) {
   const switchType = cleanString(config?.switch_type) || 'appointment_booking';
   if (!FIELD_CHECK_SWITCH_TYPE_VALUES.has(switchType)) {
@@ -3234,25 +3267,25 @@ function evaluateAppointmentBookingTimingFieldCheck(config, context) {
     || context?.cita?.inicio
     || context?.trigger?.data?.inicio
     || context?.trigger?.data?.appointment_start;
-  const appointmentCreatedRaw = context?.appointment?.created_at
-    || context?.cita?.created_at
-    || context?.trigger?.data?.created_at
-    || context?.trigger?.data?.appointment_created_at;
+  const bookingReference = resolveAppointmentBookingReference(context);
 
   const appointmentStart = appointmentStartRaw ? new Date(appointmentStartRaw) : null;
-  const appointmentCreatedAt = appointmentCreatedRaw ? new Date(appointmentCreatedRaw) : null;
+  const bookingReferenceAt = bookingReference.raw ? new Date(bookingReference.raw) : null;
   if (!(appointmentStart instanceof Date) || !Number.isFinite(appointmentStart.getTime())) {
     throw new Error('field_check_appointment_start_required');
   }
-  if (!(appointmentCreatedAt instanceof Date) || !Number.isFinite(appointmentCreatedAt.getTime())) {
-    throw new Error('field_check_appointment_created_at_required');
+  if (!(bookingReferenceAt instanceof Date) || !Number.isFinite(bookingReferenceAt.getTime())) {
+    throw new Error('field_check_appointment_reference_at_required');
   }
 
   const timeZone = resolveClinicTimezoneFromContext(context);
   const appointmentDateLocal = formatDateLocal(appointmentStart, timeZone);
+  const originalCreatedAt = bookingReference.original_created_at
+    ? new Date(bookingReference.original_created_at)
+    : null;
 
   const matchedRule = rules.find((rule) =>
-    resolveAppointmentBookingWindowMatch(rule, appointmentDateLocal, appointmentCreatedAt, timeZone)
+    resolveAppointmentBookingWindowMatch(rule, appointmentDateLocal, bookingReferenceAt, timeZone)
   );
 
   return {
@@ -3260,7 +3293,12 @@ function evaluateAppointmentBookingTimingFieldCheck(config, context) {
     matched_rule_id: matchedRule?.id || null,
     matched_window: matchedRule?.match_window || null,
     appointment_date_local: appointmentDateLocal,
-    booking_created_at: appointmentCreatedAt.toISOString(),
+    booking_reference_at: bookingReferenceAt.toISOString(),
+    booking_reference_source: bookingReference.source,
+    booking_created_at: originalCreatedAt && Number.isFinite(originalCreatedAt.getTime())
+      ? originalCreatedAt.toISOString()
+      : null,
+    trigger_type: bookingReference.trigger_type,
     time_zone: timeZone,
     next_output_key: matchedRule?.id || 'on_else',
   };

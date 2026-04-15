@@ -1926,7 +1926,8 @@ Salidas requeridas:
 Semántica:
 
 - usa la fecha local de la clínica
-- compara `CitasPacientes.created_at` frente a la fecha local de la cita (`inicio`)
+- en `appointment_created`, compara `CitasPacientes.created_at` frente a la fecha local de la cita (`inicio`)
+- en `appointment_rescheduled`, compara `CitasPacientes.updated_at` frente a la fecha local de la cita (`inicio`), porque la ventana relevante es cuándo se ha reprogramado, no cuándo se creó originalmente la cita
 - cada regla cubre una ventana cerrada por día natural
   - `same_day`: la cita se añadió a la agenda el mismo día que la cita
   - `day_before`: la cita se añadió a la agenda el día anterior al de la cita
