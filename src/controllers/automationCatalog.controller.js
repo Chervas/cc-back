@@ -1,5 +1,6 @@
 'use strict';
 
+const crypto = require('crypto');
 const { Op } = require('sequelize');
 const db = require('../../models');
 const automationDefaultsService = require('../services/automationDefaults.service');
@@ -13,7 +14,10 @@ const CATALOG_TRIGGER_TYPES = [
   'lead_nuevo',
   'appointment_created',
   'appointment_confirmed',
+  'appointment_no_show',
+  'appointment_rescheduled',
   'appointment_cancelled',
+  'appointment_completed',
   'appointment_reminder_window',
   'appointment_after',
   'patient_inactive',
@@ -79,6 +83,48 @@ function buildDuplicateCatalogName(baseName, duplicateIndex) {
   return duplicateIndex > 1 ? `${safeBase}_copy_${duplicateIndex}` : `${safeBase}_copy`;
 }
 
+function buildTemplatePublicId() {
+  return `flw_${crypto.randomBytes(8).toString('hex')}`;
+}
+
+async function generateUniqueTemplatePublicId() {
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    const candidate = buildTemplatePublicId();
+    const existing = await AutomationFlowTemplateV2.findOne({
+      where: { public_id: candidate },
+      attributes: ['id'],
+      raw: true,
+    });
+    if (!existing) return candidate;
+  }
+  throw new Error('template_public_id_generation_failed');
+}
+
+async function ensureUniqueAutomationTemplateKey(baseKey) {
+  const normalizedBase = sanitizeTemplateKey(baseKey) || `flow_${Date.now()}`;
+  let candidate = normalizedBase.slice(0, 120);
+  let duplicateIndex = 1;
+
+  // AutomationFlowTemplatesV2 versions share template_key, so a duplicate catalog
+  // must receive a new family key or "Editar flujo" would edit the source flow.
+  while (await AutomationFlowTemplateV2.findOne({ where: { template_key: candidate }, attributes: ['id'], raw: true })) {
+    duplicateIndex += 1;
+    const suffix = `_copy_${duplicateIndex}`;
+    candidate = `${normalizedBase.slice(0, Math.max(1, 120 - suffix.length))}${suffix}`;
+  }
+
+  return candidate;
+}
+
+function cloneJson(value, fallback = null) {
+  if (value === undefined || value === null) return fallback;
+  try {
+    return JSON.parse(JSON.stringify(value));
+  } catch (_) {
+    return fallback;
+  }
+}
+
 async function resolveAutomationCatalogDuplicateNames(itemId, { baseName, baseDisplayName }) {
   const rows = await AutomationFlowCatalog.findAll({
     attributes: ['id', 'name', 'display_name'],
@@ -111,6 +157,34 @@ async function resolveAutomationCatalogDuplicateNames(itemId, { baseName, baseDi
   }
 
   return { name: nextName, display_name: nextDisplayName };
+}
+
+async function duplicateLinkedFlowTemplateForCatalog({ sourceTemplate, names, actorUserId }) {
+  if (!sourceTemplate) return null;
+
+  const nextTemplateKey = await ensureUniqueAutomationTemplateKey(names.name);
+  const nextPublicId = await generateUniqueTemplatePublicId();
+  const source = sourceTemplate?.toJSON ? sourceTemplate.toJSON() : sourceTemplate;
+
+  return AutomationFlowTemplateV2.create({
+    public_id: nextPublicId,
+    template_key: nextTemplateKey,
+    version: 1,
+    engine_version: source.engine_version || 'v2',
+    name: names.display_name || source.name || 'Copia',
+    description: source.description || null,
+    trigger_type: source.trigger_type,
+    trigger_config: cloneJson(source.trigger_config, null),
+    is_active: true,
+    is_system: !!source.is_system,
+    clinic_id: null,
+    group_id: null,
+    entry_node_id: source.entry_node_id,
+    nodes: cloneJson(source.nodes, []),
+    published_at: null,
+    published_by: null,
+    created_by: actorUserId || source.created_by || 1,
+  });
 }
 
 function assertAdmin(req, res) {
@@ -505,15 +579,24 @@ exports.duplicateCatalog = async (req, res) => {
       baseName: item.name,
       baseDisplayName: item.display_name || item.name,
     });
+    const sourceLinkedTemplate = await resolveLinkedTemplateForCatalog({
+      templateKey: item.template_key,
+      templateVersion: item.template_version,
+    });
+    const duplicatedLinkedTemplate = await duplicateLinkedFlowTemplateForCatalog({
+      sourceTemplate: sourceLinkedTemplate,
+      names,
+      actorUserId: Number(req.userData?.userId) || null,
+    });
 
     const duplicated = await AutomationFlowCatalog.create({
       name: names.name,
       display_name: names.display_name,
       description: item.description || null,
       trigger_type: item.trigger_type,
-      steps: item.steps || [],
-      template_key: item.template_key || null,
-      template_version: parseIntOrNull(item.template_version),
+      steps: sourceLinkedTemplate ? mapNodesToCatalogSteps(sourceLinkedTemplate.nodes) : (item.steps || []),
+      template_key: duplicatedLinkedTemplate?.public_id || item.template_key || null,
+      template_version: duplicatedLinkedTemplate?.version || parseIntOrNull(item.template_version),
       is_generic: !!item.is_generic,
       is_active: false,
     });
