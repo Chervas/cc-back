@@ -3300,7 +3300,9 @@ const mapMetaField = (fieldData = [], name) => {
 };
 
 const META_UNMAPPED_PAGE_LOG_TTL_MS = Number(process.env.META_UNMAPPED_PAGE_LOG_TTL_MS || 60 * 60 * 1000);
+const META_PAGE_MAPPING_CACHE_TTL_MS = Number(process.env.META_PAGE_MAPPING_CACHE_TTL_MS || 5 * 60 * 1000);
 const metaUnmappedPageLogCache = new Map();
+const metaPageMappingCache = new Map();
 const shouldLogUnmappedMetaLeadgen = (pageId, formId) => {
   const key = `${pageId || 'unknown'}|${formId || 'unknown'}`;
   const now = Date.now();
@@ -3310,6 +3312,26 @@ const shouldLogUnmappedMetaLeadgen = (pageId, formId) => {
   }
   metaUnmappedPageLogCache.set(key, now);
   return true;
+};
+const resolveActiveMetaLeadPage = async (pageId) => {
+  const normalizedPageId = cleanString(pageId);
+  if (!normalizedPageId || !ClinicMetaAsset) return null;
+
+  const cached = metaPageMappingCache.get(normalizedPageId);
+  const now = Date.now();
+  if (cached && cached.expiresAt > now) {
+    return cached.value;
+  }
+
+  const value = await ClinicMetaAsset.findOne({
+    where: { metaAssetId: String(normalizedPageId), assetType: 'facebook_page', isActive: true },
+    raw: true,
+  });
+  metaPageMappingCache.set(normalizedPageId, {
+    value: value || null,
+    expiresAt: now + META_PAGE_MAPPING_CACHE_TTL_MS,
+  });
+  return value || null;
 };
 
 exports.receiveMetaWebhook = asyncHandler(async (req, res) => {
@@ -3335,12 +3357,7 @@ exports.receiveMetaWebhook = asyncHandler(async (req, res) => {
 
       let mappedPage = null;
       try {
-        if (pageId && ClinicMetaAsset) {
-          mappedPage = await ClinicMetaAsset.findOne({
-            where: { metaAssetId: String(pageId), assetType: 'facebook_page', isActive: true },
-            raw: true,
-          });
-        }
+        mappedPage = await resolveActiveMetaLeadPage(pageId);
       } catch (mapClinicErr) {
         console.warn('⚠️ No se pudo mapear clínica desde page_id:', mapClinicErr.message || mapClinicErr);
       }
