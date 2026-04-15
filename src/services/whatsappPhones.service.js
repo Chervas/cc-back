@@ -24,10 +24,11 @@ function buildRegisteredSnapshot(remote, existingRegistration) {
   const codeStatus = String(remote?.code_verification_status || '').toUpperCase();
   const isVerified = codeStatus === 'VERIFIED';
   const isConnected = remote?.status === 'CONNECTED';
+  const isCoexistence = existingRegistration?.skipRegisterReason === 'whatsapp_business_app_coexistence';
   let status = existingRegistration?.status || null;
   let requiresPin = existingRegistration?.requiresPin || false;
 
-  if (isConnected && isVerified) {
+  if (isConnected && (isVerified || isCoexistence)) {
     status = 'registered';
     requiresPin = false;
   } else if (isConnected && !isVerified) {
@@ -52,7 +53,7 @@ async function fetchRemotePhones({ wabaId, accessToken }) {
     headers: { Authorization: `Bearer ${accessToken}` },
     params: {
       fields:
-        'id,display_phone_number,verified_name,status,code_verification_status,quality_rating,messaging_limit_tier,name_status',
+        'id,display_phone_number,verified_name,status,code_verification_status,quality_rating,messaging_limit_tier,name_status,platform_type,account_mode,is_on_biz_app',
     },
   });
   return resp.data?.data || [];
@@ -108,6 +109,15 @@ async function upsertRemoteState(asset, remote, profile) {
   additionalData.limitedMode = testNumber;
   if (remote?.name_status) {
     additionalData.nameStatus = remote.name_status;
+  }
+  if (remote?.platform_type) {
+    additionalData.platformType = remote.platform_type;
+  }
+  if (remote?.account_mode) {
+    additionalData.accountMode = remote.account_mode;
+  }
+  if (remote?.is_on_biz_app !== undefined && remote?.is_on_biz_app !== null) {
+    additionalData.isOnBizApp = remote.is_on_biz_app;
   }
   if (profile) {
     additionalData.profileDescription = profile.description || profile.about || additionalData.profileDescription || null;
