@@ -5,6 +5,7 @@ const { Op } = require('sequelize');
 const axios = require('axios');
 const db = require('../../models');
 const { getIO } = require('./socket.service');
+const { emitNotificationCreated } = require('./notificationsRealtime.service');
 const { queues } = require('./queue.service');
 const jobRequestsService = require('./jobRequests.service');
 const { normalizeCitaStatus, normalizeLeadStatus } = require('../lib/status-catalog');
@@ -1495,7 +1496,79 @@ function toLowerSafe(value) {
   return String(value || '').trim().toLowerCase();
 }
 
+function normalizeIntentText(value) {
+  return String(value || '')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .replace(/[^\p{L}\p{N}\s]+/gu, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function buildDeterministicConfirmAppointmentTextOutput(context = {}) {
+  const rawResponse = cleanString(
+    context?.last_response_context?.response_text
+    || context?.last_response
+  );
+  const text = normalizeIntentText(rawResponse);
+  if (!text) return null;
+
+  const hardNegativePatterns = [
+    /\bno\s+(puedo|podre|podria|voy|ire|asistire|acudire|llego|llegare)\b/,
+    /\bno\s+me\s+(va|viene)\s+(bien|genial|perfecto)\b/,
+    /\bme\s+(va|viene)\s+mal\b/,
+    /\bme\s+va\s+ma\b/,
+    /\bno\s+tengo\s+disponibilidad\b/,
+    /\bno\s+me\s+encaja\b/,
+    /\bme\s+es\s+imposible\b/,
+    /\bimposible\b/,
+    /\bno\s+puede\s+ser\b/,
+    /\bese\s+dia\s+no\b/,
+    /\botro\s+dia\b/,
+    /\bcambiar\b.*\b(cita|hora|dia|fecha)\b/,
+    /\b(reprogramar|reprogramad[ao]s?|posponer|cancelar|anular)\b/,
+  ];
+
+  if (hardNegativePatterns.some((pattern) => pattern.test(text))) {
+    return {
+      decision: 'no_confirmado',
+      confianza: 0.99,
+      motivo: `La última respuesta del paciente indica que no tiene disponibilidad o pide cambiar la cita: "${rawResponse}".`,
+      _ai_provider: 'deterministic_rule',
+      _ai_model: 'confirm_appointment_negative_text',
+      _ai_analysis_mode: 'rule',
+    };
+  }
+
+  const doubtPatterns = [
+    /\b(no\s+se|no\s+lo\s+se|no\s+estoy\s+segur[oa])\b/,
+    /\bquizas\b/,
+    /\bdepende\b/,
+    /\btengo\s+dudas?\b/,
+    /\bpuede\s+ser\b/,
+    /\blo\s+miro\b/,
+    /\bconfirmo\s+luego\b/,
+  ];
+
+  if (doubtPatterns.some((pattern) => pattern.test(text))) {
+    return {
+      decision: 'dudas',
+      confianza: 0.9,
+      motivo: `La última respuesta del paciente no confirma claramente la disponibilidad: "${rawResponse}".`,
+      _ai_provider: 'deterministic_rule',
+      _ai_model: 'confirm_appointment_doubt_text',
+      _ai_analysis_mode: 'rule',
+    };
+  }
+
+  return null;
+}
+
 function buildDeterministicConfirmAppointmentOutput(context = {}) {
+  const textDecision = buildDeterministicConfirmAppointmentTextOutput(context);
+  if (textDecision) return textDecision;
+
   const responseContext = isObject(context?.last_response_context) ? context.last_response_context : {};
   const responseMessageType = normalizeKey(
     responseContext.response_message_type
@@ -2804,6 +2877,7 @@ async function handleCreateTask(node, context, runtime) {
       },
       clinicaId: clinicId,
     });
+    emitNotificationCreated(notification);
     createdNotifications.push(notification);
   }
 
@@ -2830,7 +2904,8 @@ async function handleSendSystemNotification(node, context, runtime) {
     throw new Error('system_notification_missing_clinic_id');
   }
 
-  let notificationContext = await enrichConversationContext(context, targets);
+  let notificationContext = await enrichContextForTemplateResolution(context, targets);
+  notificationContext = await enrichConversationContext(notificationContext, targets);
   notificationContext = mergeContextPatch(notificationContext, {
     runtime: {
       day_part_greeting: resolveMadridDayPartGreeting(new Date()),
@@ -2898,6 +2973,7 @@ async function handleSendSystemNotification(node, context, runtime) {
       },
       clinicaId: clinicId,
     });
+    emitNotificationCreated(notification);
     createdNotifications.push(notification);
   }
 
@@ -3147,6 +3223,39 @@ function resolveAppointmentBookingWindowMatch(rule, appointmentDateLocal, booked
   }
 }
 
+function resolveAppointmentBookingReference(context) {
+  const triggerType = cleanString(
+    context?.trigger?.type
+      || context?.trigger_type
+      || context?.trigger?.data?.event_name
+      || context?.trigger?.data?.trigger_type
+  ).toLowerCase();
+  const createdRaw = context?.trigger?.data?.appointment_created_at
+    || context?.trigger?.data?.created_at
+    || context?.appointment?.created_at
+    || context?.cita?.created_at;
+  const updatedRaw = context?.trigger?.data?.updated_at
+    || context?.trigger?.data?.appointment_updated_at
+    || context?.appointment?.updated_at
+    || context?.cita?.updated_at;
+
+  if (triggerType === 'appointment_rescheduled' && updatedRaw) {
+    return {
+      raw: updatedRaw,
+      source: 'appointment_updated_at',
+      trigger_type: triggerType,
+      original_created_at: createdRaw || null,
+    };
+  }
+
+  return {
+    raw: createdRaw,
+    source: 'appointment_created_at',
+    trigger_type: triggerType || null,
+    original_created_at: createdRaw || null,
+  };
+}
+
 function evaluateAppointmentBookingTimingFieldCheck(config, context) {
   const switchType = cleanString(config?.switch_type) || 'appointment_booking';
   if (!FIELD_CHECK_SWITCH_TYPE_VALUES.has(switchType)) {
@@ -3162,25 +3271,25 @@ function evaluateAppointmentBookingTimingFieldCheck(config, context) {
     || context?.cita?.inicio
     || context?.trigger?.data?.inicio
     || context?.trigger?.data?.appointment_start;
-  const appointmentCreatedRaw = context?.appointment?.created_at
-    || context?.cita?.created_at
-    || context?.trigger?.data?.created_at
-    || context?.trigger?.data?.appointment_created_at;
+  const bookingReference = resolveAppointmentBookingReference(context);
 
   const appointmentStart = appointmentStartRaw ? new Date(appointmentStartRaw) : null;
-  const appointmentCreatedAt = appointmentCreatedRaw ? new Date(appointmentCreatedRaw) : null;
+  const bookingReferenceAt = bookingReference.raw ? new Date(bookingReference.raw) : null;
   if (!(appointmentStart instanceof Date) || !Number.isFinite(appointmentStart.getTime())) {
     throw new Error('field_check_appointment_start_required');
   }
-  if (!(appointmentCreatedAt instanceof Date) || !Number.isFinite(appointmentCreatedAt.getTime())) {
-    throw new Error('field_check_appointment_created_at_required');
+  if (!(bookingReferenceAt instanceof Date) || !Number.isFinite(bookingReferenceAt.getTime())) {
+    throw new Error('field_check_appointment_reference_at_required');
   }
 
   const timeZone = resolveClinicTimezoneFromContext(context);
   const appointmentDateLocal = formatDateLocal(appointmentStart, timeZone);
+  const originalCreatedAt = bookingReference.original_created_at
+    ? new Date(bookingReference.original_created_at)
+    : null;
 
   const matchedRule = rules.find((rule) =>
-    resolveAppointmentBookingWindowMatch(rule, appointmentDateLocal, appointmentCreatedAt, timeZone)
+    resolveAppointmentBookingWindowMatch(rule, appointmentDateLocal, bookingReferenceAt, timeZone)
   );
 
   return {
@@ -3188,7 +3297,12 @@ function evaluateAppointmentBookingTimingFieldCheck(config, context) {
     matched_rule_id: matchedRule?.id || null,
     matched_window: matchedRule?.match_window || null,
     appointment_date_local: appointmentDateLocal,
-    booking_created_at: appointmentCreatedAt.toISOString(),
+    booking_reference_at: bookingReferenceAt.toISOString(),
+    booking_reference_source: bookingReference.source,
+    booking_created_at: originalCreatedAt && Number.isFinite(originalCreatedAt.getTime())
+      ? originalCreatedAt.toISOString()
+      : null,
+    trigger_type: bookingReference.trigger_type,
     time_zone: timeZone,
     next_output_key: matchedRule?.id || 'on_else',
   };
@@ -3244,17 +3358,43 @@ function parseDateValueOrNull(value) {
   return candidate;
 }
 
+function findLatestOutboundOutputRef(context) {
+  const outputs = context?.outputs && typeof context.outputs === 'object'
+    ? context.outputs
+    : {};
+  const entries = Object.entries(outputs);
+  for (let idx = entries.length - 1; idx >= 0; idx -= 1) {
+    const [nodeId, output] = entries[idx];
+    if (!output || typeof output !== 'object') continue;
+    const conversationId = toIntOrNull(output.conversation_id || output.chat_conversation_id);
+    const messageId = toIntOrNull(output.message_id);
+    if (!conversationId || !messageId) continue;
+    return { node_id: nodeId, output };
+  }
+  return null;
+}
+
 function resolveWaitResponseAnchor(context, config) {
   const listensTo = cleanString(config?.listens_to_node_id);
   const listenedOutput = listensTo ? getByPath(context, `outputs.${listensTo}`) : null;
+  const listenedConversationId = toIntOrNull(
+    listenedOutput?.conversation_id
+    || listenedOutput?.chat_conversation_id
+  );
+  const listenedMessageId = toIntOrNull(listenedOutput?.message_id);
+  const fallback = (!listenedConversationId || !listenedMessageId)
+    ? findLatestOutboundOutputRef(context)
+    : null;
+  const effectiveListensTo = fallback?.node_id || listensTo;
+  const effectiveOutput = fallback?.output || listenedOutput;
   const anchorAt = parseDateValueOrNull(
-    listenedOutput?.effective_send_at
-    || listenedOutput?.scheduled_for
+    effectiveOutput?.effective_send_at
+    || effectiveOutput?.scheduled_for
     || null
   );
   return {
-    listens_to_node_id: listensTo,
-    listened_output: listenedOutput,
+    listens_to_node_id: effectiveListensTo,
+    listened_output: effectiveOutput,
     anchor_at: anchorAt,
   };
 }
@@ -3619,10 +3759,13 @@ async function processNode(node, context, runtime = {}) {
         ? buildDeterministicConfirmAppointmentOutput(aiContext)
         : null;
       if (deterministicPresetOutput) {
+        const deterministicDecision = cleanString(deterministicPresetOutput?.decision).toLowerCase();
         return {
           kind: 'success',
           output: deterministicPresetOutput,
-          next_node_id: readOutputTarget(node, 'on_success'),
+          next_node_id: deterministicDecision === 'confirmado'
+            ? readOutputTarget(node, 'on_success')
+            : readOutputTarget(node, 'on_fail'),
         };
       }
 
@@ -3731,7 +3874,8 @@ async function resumeWaitingNode(execution, node, context, { mode, responseText,
         : null;
       const inboundMetadata = isObject(inboundMessage?.metadata) ? inboundMessage.metadata : {};
       const inboundReaction = isObject(inboundMetadata.reaction) ? inboundMetadata.reaction : {};
-      const listensTo = cleanString(node?.config?.listens_to_node_id);
+      const listensTo = cleanString(waitingMeta.listens_to_node_id)
+        || cleanString(node?.config?.listens_to_node_id);
       const listenedOutput = listensTo ? getByPath(context, `outputs.${listensTo}`) : null;
       forcedConversationId = toIntOrNull(
         listenedOutput?.conversation_id

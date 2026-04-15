@@ -14,6 +14,7 @@ const {
   Usuario,
   UsuarioClinica
 } = require('../../models');
+const { emitNotificationCreated } = require('./notificationsRealtime.service');
 
 function getEventDefinition(event) {
   return NOTIFICATION_EVENTS.find((item) => item.event === event) || null;
@@ -263,12 +264,14 @@ async function dispatchEvent({ event, clinicId = null, data = {} }) {
     })());
   }
 
-  await Promise.all(createPromises);
+  const createdNotifications = (await Promise.all(createPromises)).filter(Boolean);
+  createdNotifications.forEach((notification) => emitNotificationCreated(notification));
 }
 
 module.exports = {
   getEventDefinition,
   getCategoryDefinition,
+  buildNotificationContent,
   ensurePreferencesForRole,
   dispatchEvent,
   NOTIFICATION_CATEGORIES,

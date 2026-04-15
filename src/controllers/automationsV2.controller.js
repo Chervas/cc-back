@@ -1464,7 +1464,7 @@ function collectUnsupportedNodeTypes(nodes) {
 
 const AI_PRESET_CANONICAL_CONFIG = {
   confirm_appointment: {
-    instruction: 'Analiza la conversación de hoy entre clínica y paciente. Clasifica en una de estas decisiones: confirmado, no_confirmado, dudas. Ten en cuenta quién escribe cada mensaje y la hora. Si el paciente responde afirmativamente o usa una reacción positiva al último mensaje de la clínica, por ejemplo 👍, ✅, ok, vale, entendido o equivalente sin contradicción explícita, clasifica como confirmado. Si expresa dudas, clasifica como dudas. Si rechaza, no puede acudir o no confirma claramente, clasifica como no_confirmado. Devuelve también confianza (0-1) y motivo breve.',
+    instruction: 'Analiza la conversación de hoy entre clínica y paciente. Clasifica en una de estas decisiones: confirmado, no_confirmado, dudas. Ten en cuenta quién escribe cada mensaje y la hora. Si el paciente responde afirmativamente o usa una reacción positiva al último mensaje de la clínica, por ejemplo 👍, ✅, ok, vale, entendido o equivalente sin contradicción explícita, clasifica como confirmado. Si expresa dudas, clasifica como dudas. Si rechaza, no puede acudir, pide cambiar la cita o indica mala disponibilidad, por ejemplo "me va mal", "no puedo", "no me viene bien", "otro día" o una errata evidente como "me va ma ese día", clasifica como no_confirmado. Si no confirma claramente, clasifica como no_confirmado. Devuelve también confianza (0-1) y motivo breve.',
     context_sources: [
       { key: 'conversation_today', path: '{{conversation_today}}' },
       { key: 'responded_at', path: '{{last_response_context.responded_at}}' },
@@ -1477,6 +1477,7 @@ const AI_PRESET_CANONICAL_CONFIG = {
     legacy_instructions: [
       'Analiza la respuesta del paciente teniendo en cuenta el último mensaje enviado por la clínica. Clasifica en una de estas decisiones: confirmado, no_confirmado, dudas. Devuelve también confianza (0-1) y motivo breve.',
       'Analiza la conversación de hoy entre clínica y paciente. Clasifica en una de estas decisiones: confirmado, no_confirmado, dudas. Ten en cuenta quién escribe cada mensaje y la hora. Devuelve también confianza (0-1) y motivo breve.',
+      'Analiza la conversación de hoy entre clínica y paciente. Clasifica en una de estas decisiones: confirmado, no_confirmado, dudas. Ten en cuenta quién escribe cada mensaje y la hora. Si el paciente responde afirmativamente o usa una reacción positiva al último mensaje de la clínica, por ejemplo 👍, ✅, ok, vale, entendido o equivalente sin contradicción explícita, clasifica como confirmado. Si expresa dudas, clasifica como dudas. Si rechaza, no puede acudir o no confirma claramente, clasifica como no_confirmado. Devuelve también confianza (0-1) y motivo breve.',
     ],
     legacy_source_sets: [
       ['{{last_prompt}}', '{{last_response}}'],
@@ -1540,9 +1541,98 @@ function normalizeAiPresetConfig(config) {
   };
 }
 
+const WAIT_RESPONSE_LISTENER_NODE_TYPES = new Set([
+  'action/send_whatsapp',
+  'action/send_email',
+]);
+
+function isWaitResponseListenerNode(node) {
+  return WAIT_RESPONSE_LISTENER_NODE_TYPES.has(cleanString(node?.type));
+}
+
+function buildIncomingNodeIdsByTarget(nodes) {
+  const validNodeIds = new Set(
+    (Array.isArray(nodes) ? nodes : [])
+      .map((node) => cleanString(node?.id))
+      .filter(Boolean)
+  );
+  const incomingByTarget = new Map();
+
+  for (const node of Array.isArray(nodes) ? nodes : []) {
+    const nodeId = cleanString(node?.id);
+    if (!nodeId) continue;
+    const outputs = isObject(node?.outputs) ? node.outputs : {};
+    for (const rawTargetId of Object.values(outputs)) {
+      const targetId = cleanString(rawTargetId);
+      if (!targetId || !validNodeIds.has(targetId)) continue;
+      const current = incomingByTarget.get(targetId) || [];
+      current.push(nodeId);
+      incomingByTarget.set(targetId, current);
+    }
+  }
+
+  return incomingByTarget;
+}
+
+function inferWaitResponseListenerNodeId(waitNodeId, incomingByTarget, nodeMap) {
+  const waitId = cleanString(waitNodeId);
+  if (!waitId || !(incomingByTarget instanceof Map) || !(nodeMap instanceof Map)) return null;
+
+  const queue = [...(incomingByTarget.get(waitId) || [])];
+  const seen = new Set([waitId]);
+
+  while (queue.length) {
+    const candidateId = cleanString(queue.shift());
+    if (!candidateId || seen.has(candidateId)) continue;
+    seen.add(candidateId);
+
+    const candidate = nodeMap.get(candidateId);
+    if (!candidate) continue;
+    if (isWaitResponseListenerNode(candidate)) return candidateId;
+
+    const predecessors = incomingByTarget.get(candidateId) || [];
+    for (const predecessorId of predecessors) {
+      if (!seen.has(predecessorId)) queue.push(predecessorId);
+    }
+  }
+
+  return null;
+}
+
+function normalizeWaitResponseListeners(nodes) {
+  const safeNodes = Array.isArray(nodes) ? nodes : [];
+  if (!safeNodes.length) return safeNodes;
+
+  const nodeMap = new Map(
+    safeNodes
+      .map((node) => [cleanString(node?.id), node])
+      .filter(([nodeId]) => !!nodeId)
+  );
+  const incomingByTarget = buildIncomingNodeIdsByTarget(safeNodes);
+
+  return safeNodes.map((node) => {
+    if (cleanString(node?.type) !== 'delay/wait_response') return node;
+
+    const currentListenerId = cleanString(node?.config?.listens_to_node_id);
+    const currentListener = currentListenerId ? nodeMap.get(currentListenerId) : null;
+    if (currentListener && isWaitResponseListenerNode(currentListener)) return node;
+
+    const inferredListenerId = inferWaitResponseListenerNodeId(node.id, incomingByTarget, nodeMap);
+    if (!inferredListenerId) return node;
+
+    return {
+      ...node,
+      config: {
+        ...(isObject(node.config) ? node.config : {}),
+        listens_to_node_id: inferredListenerId,
+      },
+    };
+  });
+}
+
 function normalizeNodesInput(nodes) {
   if (!Array.isArray(nodes)) return [];
-  return nodes
+  const normalizedNodes = nodes
     .map((rawNode, index) => {
       if (!isObject(rawNode)) return null;
       const type = cleanString(rawNode.type);
@@ -1584,6 +1674,8 @@ function normalizeNodesInput(nodes) {
       return normalizedNode;
     })
     .filter(Boolean);
+
+  return normalizeWaitResponseListeners(normalizedNodes);
 }
 
 function normalizeLegacyContextAliasInString(value) {
@@ -2816,6 +2908,7 @@ function validateNodeConfig(node, nodeMap, templateLookup = {}) {
     const timeoutDuration = Number(config.timeout_duration);
     const timeoutUnit = cleanString(config.timeout_unit);
     const listensTo = cleanString(config.listens_to_node_id);
+    const listenedNode = listensTo ? nodeMap.get(listensTo) : null;
     if (!Number.isFinite(timeoutDuration) || timeoutDuration <= 0) {
       errors.push(
         buildValidationError(
@@ -2840,6 +2933,21 @@ function validateNodeConfig(node, nodeMap, templateLookup = {}) {
           'node_config_invalid',
           `El nodo ${nodeId} requiere listens_to_node_id existente`,
           { node_id: nodeId, node_type: nodeType, key: 'listens_to_node_id', value: listensTo || null }
+        )
+      );
+    } else if (!isWaitResponseListenerNode(listenedNode)) {
+      errors.push(
+        buildValidationError(
+          'node_config_invalid',
+          `El nodo ${nodeId} debe escuchar a un nodo que envía mensaje`,
+          {
+            node_id: nodeId,
+            node_type: nodeType,
+            key: 'listens_to_node_id',
+            value: listensTo,
+            listened_node_type: cleanString(listenedNode?.type) || null,
+            allowed_node_types: Array.from(WAIT_RESPONSE_LISTENER_NODE_TYPES),
+          }
         )
       );
     }

@@ -1926,7 +1926,8 @@ Salidas requeridas:
 Semántica:
 
 - usa la fecha local de la clínica
-- compara `CitasPacientes.created_at` frente a la fecha local de la cita (`inicio`)
+- en `appointment_created`, compara `CitasPacientes.created_at` frente a la fecha local de la cita (`inicio`)
+- en `appointment_rescheduled`, compara `CitasPacientes.updated_at` frente a la fecha local de la cita (`inicio`), porque la ventana relevante es cuándo se ha reprogramado, no cuándo se creó originalmente la cita
 - cada regla cubre una ventana cerrada por día natural
   - `same_day`: la cita se añadió a la agenda el mismo día que la cita
   - `day_before`: la cita se añadió a la agenda el día anterior al de la cita
@@ -1989,6 +1990,8 @@ Si una cita parece no haber disparado `appointment_created`, el orden correcto d
 3. revisar `AutomationFlowTemplatesV2.nodes` de la versión ejecutada, no solo la versión que el editor tenga abierta;
 4. revisar la plantilla real en `WhatsappTemplates`, no el nombre lógico del nodo.
 
+Para `appointment_rescheduled`, la automatización debe disparar cada movimiento real de la cita. La idempotencia no puede ser solo `trigger:cita:template`, porque una misma cita puede reprogramarse varias veces. Desde `2026-04-15`, el runtime añade un `window_identifier` con `updated_at`, `inicio`, `fin`, `doctor_id` e `instalacion_id` para que cada reprogramación real cree una ejecución nueva, manteniendo deduplicación solo para reintentos exactos del mismo movimiento.
+
 Caso real validado el `2026-03-27`:
 
 - cita `99`
@@ -2030,12 +2033,17 @@ Tras el saneado del 2026-03-28, los flujos activos de cita quedan con esta semá
 
 1. `wait_response` escuchando al nodo equivocado
    - corregido: `wait_response` escucha al nodo outbound real (`N2`)
+   - el guardado/publicación normaliza `listens_to_node_id`: si existe pero apunta a un nodo no outbound (`change_status`, `ai_analysis`, etc.), backend recorre los predecesores del grafo y lo reancla al `action/send_whatsapp` / `action/send_email` anterior
+   - si no puede inferirse un outbound anterior, la validación bloquea el flujo con error de configuración en vez de publicar un listener semánticamente roto
+   - si una plantilla antigua apunta por error a un nodo no outbound, el runtime usa como fallback el último output outbound real con `conversation_id` y `message_id`, y persiste ese nodo efectivo en `waiting_meta.listens_to_node_id`
 
 2. `condition/ai_analysis` en preset `confirm_appointment`
    - `on_success` significa `decision = confirmado`
    - `on_fail` significa cualquier otro caso (`no_confirmado`, `dudas` o fallo técnico)
+   - esta regla aplica tanto a respuestas de Groq como a reglas deterministas previas; una negativa textual detectada por regla (`_ai_provider = deterministic_rule`) no puede seguir `on_success`
    - no se usa ya un `field_check` intermedio en estos flujos porque complicaba el grafo sin aportar nada al usuario
    - adicionalmente, ciertas reacciones positivas de WhatsApp (`👍`, `✅`, `👌`, `🙌`) se resuelven de forma determinista como `confirmado` antes de pasar por LLM
+   - adicionalmente, negativas claras de texto como `no puedo`, `no me viene bien`, `me va mal`, `otro día`, `reprogramar/cancelar` o erratas evidentes como `me va ma ese día` se resuelven de forma determinista como `no_confirmado` antes de pasar por LLM
 
 3. Falta de Groq en local o staging
    - el flujo falla de forma explícita en el nodo `condition/ai_analysis`
@@ -2412,6 +2420,7 @@ Reglas:
   - `inbound_conversation_id`
 - `waiting_meta.runtime_namespace` y `payload.__runtime_namespace` deben apuntar al mismo runtime que reclama jobs en ese entorno.
 - Si el mensaje outbound escuchado salió más tarde por horario silencioso, `wait_starts_at` debe anclarse a esa hora efectiva de salida, no a la entrada inicial al nodo.
+- En guardado/publicación, `listens_to_node_id` solo es válido si apunta a un nodo outbound real (`action/send_whatsapp` o `action/send_email`). Los duplicados o plantillas antiguas pueden arrastrar IDs existentes pero incorrectos; backend los normaliza recorriendo el grafo hacia atrás y, si no encuentra outbound, rechaza la configuración.
 - Si una ejecución se queda en `waiting` pero el job asociado falla con `No handler registered for job type 'automations_v2_execute'`, el problema es de scheduler/claiming, no de plantilla ni del nodo `wait_response`.
 - En QA de automatizaciones con WhatsApp conviene distinguir siempre:
   - reacción (`message_type = reaction`);
@@ -2817,10 +2826,17 @@ Contexto extra que inyecta antes de interpolar:
 - `system.patient_conversation_link`
 - `system.patient_detail_link`
 
+Antes de renderizar `title` y `message`, el nodo debe enriquecer el contexto con el mismo resolvedor de plantillas que usan los envíos WhatsApp. Esto garantiza que variables como `{{paciente.nombre}}`, `{{cita.fecha}}`, `{{clinica.nombre}}` o datos derivados de la cita existan aunque el `FlowExecutionV2.context` original solo incluya IDs.
+
 Comportamiento de navegación:
 - si existe conversación, la notificación guarda `quickChatConversationId`
 - el front puede abrir QuickChat directamente desde la notificación
 - si no hay conversación, el fallback navegable es la ficha del paciente
+
+Tiempo real:
+- cada `Notification.create(...)` que nace de `POST /api/common/notifications`, `notifications.service.dispatchEvent(...)`, `action/create_task`, `action/send_system_notification` o jobs internos debe emitir `notification:created` al room `user:{id_usuario}`
+- el DTO público se centraliza en `src/lib/notification-dto.js` para que HTTP y socket no diverjan en `read`, `time`, `link`, `data` o `clinicaId`
+- si una notificación aparece tras refrescar pero no en vivo, revisar primero `/socket.io` y `src/services/notificationsRealtime.service.js`, no la consulta HTTP
 
 ## Personal: carga de citas e impacto de horarios
 
@@ -2878,3 +2894,9 @@ Uso esperado:
 - bloqueo: detectar citas solapadas con el bloqueo
 
 El movimiento batch de citas afectadas queda como contrato posterior sobre endpoints específicos del asistente de reprogramación. No debe resolverse con cálculo libre en frontend.
+
+Reglas de solape forzable usadas por `/api/citas/:id/reagendar` y `/api/disponibilidad/check`:
+
+- `INSTALLATION_OVERLAP` es forzable: permite agendar y solapar junto a otra cita existente en la misma instalación.
+- `STAFF_OVERLAP` es forzable solo cuando el choque es del mismo profesional dentro de la misma clínica.
+- Bloqueos, fuera de horario y choques del profesional en otra clínica no son forzables.

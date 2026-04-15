@@ -239,6 +239,23 @@ function buildIdempotencyKey({ triggerType, citaId, templateVersionId, windowIde
   return parts.join(':');
 }
 
+function dateKey(value) {
+  const raw = value instanceof Date ? value : (value ? new Date(value) : null);
+  if (!raw || !Number.isFinite(raw.getTime())) return '';
+  return raw.toISOString().replace(/\.\d{3}Z$/, 'Z');
+}
+
+function buildRescheduledWindowIdentifier(cita) {
+  return [
+    'rescheduled',
+    dateKey(cita?.updated_at || cita?.updatedAt),
+    dateKey(cita?.inicio),
+    dateKey(cita?.fin),
+    `doctor_${toIntOrNull(cita?.doctor_id) || 0}`,
+    `instalacion_${toIntOrNull(cita?.instalacion_id) || 0}`,
+  ].filter(Boolean).join(':');
+}
+
 function pickPreferredExecution(rows) {
   if (!Array.isArray(rows) || rows.length === 0) return null;
   const active = rows.find((row) => ['running', 'waiting', 'paused'].includes(cleanString(row.status)));
@@ -851,6 +868,8 @@ async function enqueueExecutionForCita(cita, options = {}) {
   return enqueueExecutionForTemplate(cita, template, {
     ...options,
     event_name: eventName,
+    window_identifier: cleanString(options.window_identifier)
+      || (eventName === 'appointment_rescheduled' ? buildRescheduledWindowIdentifier(cita) : null),
   });
 }
 
