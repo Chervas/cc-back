@@ -1464,7 +1464,7 @@ function collectUnsupportedNodeTypes(nodes) {
 
 const AI_PRESET_CANONICAL_CONFIG = {
   confirm_appointment: {
-    instruction: 'Analiza la conversación de hoy entre clínica y paciente. Clasifica en una de estas decisiones: confirmado, no_confirmado, dudas. Ten en cuenta quién escribe cada mensaje y la hora. Si el paciente responde afirmativamente o usa una reacción positiva al último mensaje de la clínica, por ejemplo 👍, ✅, ok, vale, entendido o equivalente sin contradicción explícita, clasifica como confirmado. Si expresa dudas, clasifica como dudas. Si rechaza, no puede acudir o no confirma claramente, clasifica como no_confirmado. Devuelve también confianza (0-1) y motivo breve.',
+    instruction: 'Analiza la conversación de hoy entre clínica y paciente. Clasifica en una de estas decisiones: confirmado, no_confirmado, dudas. Ten en cuenta quién escribe cada mensaje y la hora. Si el paciente responde afirmativamente o usa una reacción positiva al último mensaje de la clínica, por ejemplo 👍, ✅, ok, vale, entendido o equivalente sin contradicción explícita, clasifica como confirmado. Si expresa dudas, clasifica como dudas. Si rechaza, no puede acudir, pide cambiar la cita o indica mala disponibilidad, por ejemplo "me va mal", "no puedo", "no me viene bien", "otro día" o una errata evidente como "me va ma ese día", clasifica como no_confirmado. Si no confirma claramente, clasifica como no_confirmado. Devuelve también confianza (0-1) y motivo breve.',
     context_sources: [
       { key: 'conversation_today', path: '{{conversation_today}}' },
       { key: 'responded_at', path: '{{last_response_context.responded_at}}' },
@@ -1477,6 +1477,7 @@ const AI_PRESET_CANONICAL_CONFIG = {
     legacy_instructions: [
       'Analiza la respuesta del paciente teniendo en cuenta el último mensaje enviado por la clínica. Clasifica en una de estas decisiones: confirmado, no_confirmado, dudas. Devuelve también confianza (0-1) y motivo breve.',
       'Analiza la conversación de hoy entre clínica y paciente. Clasifica en una de estas decisiones: confirmado, no_confirmado, dudas. Ten en cuenta quién escribe cada mensaje y la hora. Devuelve también confianza (0-1) y motivo breve.',
+      'Analiza la conversación de hoy entre clínica y paciente. Clasifica en una de estas decisiones: confirmado, no_confirmado, dudas. Ten en cuenta quién escribe cada mensaje y la hora. Si el paciente responde afirmativamente o usa una reacción positiva al último mensaje de la clínica, por ejemplo 👍, ✅, ok, vale, entendido o equivalente sin contradicción explícita, clasifica como confirmado. Si expresa dudas, clasifica como dudas. Si rechaza, no puede acudir o no confirma claramente, clasifica como no_confirmado. Devuelve también confianza (0-1) y motivo breve.',
     ],
     legacy_source_sets: [
       ['{{last_prompt}}', '{{last_response}}'],

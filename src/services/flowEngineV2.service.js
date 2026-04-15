@@ -1495,7 +1495,79 @@ function toLowerSafe(value) {
   return String(value || '').trim().toLowerCase();
 }
 
+function normalizeIntentText(value) {
+  return String(value || '')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .replace(/[^\p{L}\p{N}\s]+/gu, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function buildDeterministicConfirmAppointmentTextOutput(context = {}) {
+  const rawResponse = cleanString(
+    context?.last_response_context?.response_text
+    || context?.last_response
+  );
+  const text = normalizeIntentText(rawResponse);
+  if (!text) return null;
+
+  const hardNegativePatterns = [
+    /\bno\s+(puedo|podre|podria|voy|ire|asistire|acudire|llego|llegare)\b/,
+    /\bno\s+me\s+(va|viene)\s+(bien|genial|perfecto)\b/,
+    /\bme\s+(va|viene)\s+mal\b/,
+    /\bme\s+va\s+ma\b/,
+    /\bno\s+tengo\s+disponibilidad\b/,
+    /\bno\s+me\s+encaja\b/,
+    /\bme\s+es\s+imposible\b/,
+    /\bimposible\b/,
+    /\bno\s+puede\s+ser\b/,
+    /\bese\s+dia\s+no\b/,
+    /\botro\s+dia\b/,
+    /\bcambiar\b.*\b(cita|hora|dia|fecha)\b/,
+    /\b(reprogramar|reprogramad[ao]s?|posponer|cancelar|anular)\b/,
+  ];
+
+  if (hardNegativePatterns.some((pattern) => pattern.test(text))) {
+    return {
+      decision: 'no_confirmado',
+      confianza: 0.99,
+      motivo: `La última respuesta del paciente indica que no tiene disponibilidad o pide cambiar la cita: "${rawResponse}".`,
+      _ai_provider: 'deterministic_rule',
+      _ai_model: 'confirm_appointment_negative_text',
+      _ai_analysis_mode: 'rule',
+    };
+  }
+
+  const doubtPatterns = [
+    /\b(no\s+se|no\s+lo\s+se|no\s+estoy\s+segur[oa])\b/,
+    /\bquizas\b/,
+    /\bdepende\b/,
+    /\btengo\s+dudas?\b/,
+    /\bpuede\s+ser\b/,
+    /\blo\s+miro\b/,
+    /\bconfirmo\s+luego\b/,
+  ];
+
+  if (doubtPatterns.some((pattern) => pattern.test(text))) {
+    return {
+      decision: 'dudas',
+      confianza: 0.9,
+      motivo: `La última respuesta del paciente no confirma claramente la disponibilidad: "${rawResponse}".`,
+      _ai_provider: 'deterministic_rule',
+      _ai_model: 'confirm_appointment_doubt_text',
+      _ai_analysis_mode: 'rule',
+    };
+  }
+
+  return null;
+}
+
 function buildDeterministicConfirmAppointmentOutput(context = {}) {
+  const textDecision = buildDeterministicConfirmAppointmentTextOutput(context);
+  if (textDecision) return textDecision;
+
   const responseContext = isObject(context?.last_response_context) ? context.last_response_context : {};
   const responseMessageType = normalizeKey(
     responseContext.response_message_type
@@ -3244,17 +3316,43 @@ function parseDateValueOrNull(value) {
   return candidate;
 }
 
+function findLatestOutboundOutputRef(context) {
+  const outputs = context?.outputs && typeof context.outputs === 'object'
+    ? context.outputs
+    : {};
+  const entries = Object.entries(outputs);
+  for (let idx = entries.length - 1; idx >= 0; idx -= 1) {
+    const [nodeId, output] = entries[idx];
+    if (!output || typeof output !== 'object') continue;
+    const conversationId = toIntOrNull(output.conversation_id || output.chat_conversation_id);
+    const messageId = toIntOrNull(output.message_id);
+    if (!conversationId || !messageId) continue;
+    return { node_id: nodeId, output };
+  }
+  return null;
+}
+
 function resolveWaitResponseAnchor(context, config) {
   const listensTo = cleanString(config?.listens_to_node_id);
   const listenedOutput = listensTo ? getByPath(context, `outputs.${listensTo}`) : null;
+  const listenedConversationId = toIntOrNull(
+    listenedOutput?.conversation_id
+    || listenedOutput?.chat_conversation_id
+  );
+  const listenedMessageId = toIntOrNull(listenedOutput?.message_id);
+  const fallback = (!listenedConversationId || !listenedMessageId)
+    ? findLatestOutboundOutputRef(context)
+    : null;
+  const effectiveListensTo = fallback?.node_id || listensTo;
+  const effectiveOutput = fallback?.output || listenedOutput;
   const anchorAt = parseDateValueOrNull(
-    listenedOutput?.effective_send_at
-    || listenedOutput?.scheduled_for
+    effectiveOutput?.effective_send_at
+    || effectiveOutput?.scheduled_for
     || null
   );
   return {
-    listens_to_node_id: listensTo,
-    listened_output: listenedOutput,
+    listens_to_node_id: effectiveListensTo,
+    listened_output: effectiveOutput,
     anchor_at: anchorAt,
   };
 }
@@ -3731,7 +3829,8 @@ async function resumeWaitingNode(execution, node, context, { mode, responseText,
         : null;
       const inboundMetadata = isObject(inboundMessage?.metadata) ? inboundMessage.metadata : {};
       const inboundReaction = isObject(inboundMetadata.reaction) ? inboundMetadata.reaction : {};
-      const listensTo = cleanString(node?.config?.listens_to_node_id);
+      const listensTo = cleanString(waitingMeta.listens_to_node_id)
+        || cleanString(node?.config?.listens_to_node_id);
       const listenedOutput = listensTo ? getByPath(context, `outputs.${listensTo}`) : null;
       forcedConversationId = toIntOrNull(
         listenedOutput?.conversation_id

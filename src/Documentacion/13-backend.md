@@ -2030,12 +2030,14 @@ Tras el saneado del 2026-03-28, los flujos activos de cita quedan con esta semá
 
 1. `wait_response` escuchando al nodo equivocado
    - corregido: `wait_response` escucha al nodo outbound real (`N2`)
+   - si una plantilla antigua apunta por error a un nodo no outbound, el runtime usa como fallback el último output outbound real con `conversation_id` y `message_id`, y persiste ese nodo efectivo en `waiting_meta.listens_to_node_id`
 
 2. `condition/ai_analysis` en preset `confirm_appointment`
    - `on_success` significa `decision = confirmado`
    - `on_fail` significa cualquier otro caso (`no_confirmado`, `dudas` o fallo técnico)
    - no se usa ya un `field_check` intermedio en estos flujos porque complicaba el grafo sin aportar nada al usuario
    - adicionalmente, ciertas reacciones positivas de WhatsApp (`👍`, `✅`, `👌`, `🙌`) se resuelven de forma determinista como `confirmado` antes de pasar por LLM
+   - adicionalmente, negativas claras de texto como `no puedo`, `no me viene bien`, `me va mal`, `otro día`, `reprogramar/cancelar` o erratas evidentes como `me va ma ese día` se resuelven de forma determinista como `no_confirmado` antes de pasar por LLM
 
 3. Falta de Groq en local o staging
    - el flujo falla de forma explícita en el nodo `condition/ai_analysis`
