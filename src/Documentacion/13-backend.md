@@ -2889,3 +2889,9 @@ Uso esperado:
 - bloqueo: detectar citas solapadas con el bloqueo
 
 El movimiento batch de citas afectadas queda como contrato posterior sobre endpoints específicos del asistente de reprogramación. No debe resolverse con cálculo libre en frontend.
+
+Reglas de solape forzable usadas por `/api/citas/:id/reagendar` y `/api/disponibilidad/check`:
+
+- `INSTALLATION_OVERLAP` es forzable: permite agendar y solapar junto a otra cita existente en la misma instalación.
+- `STAFF_OVERLAP` es forzable solo cuando el choque es del mismo profesional dentro de la misma clínica.
+- Bloqueos, fuera de horario y choques del profesional en otra clínica no son forzables.

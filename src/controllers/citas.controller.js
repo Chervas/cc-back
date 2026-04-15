@@ -1059,7 +1059,7 @@ async function checkDisponibilidadCanonica({ clinica_id, inicio, fin, doctor_id,
                     resource_id: Number(instalacion_id),
                     clinica_id: clinicaId,
                     code: 'INSTALLATION_OVERLAP',
-                    can_force: false,
+                    can_force: true,
                     details: { cita_ids: citasInst.map(c => c.id_cita), message: 'Instalación ocupada' }
                 });
             }

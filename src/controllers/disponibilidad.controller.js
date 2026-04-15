@@ -835,7 +835,7 @@ exports.check = asyncHandler(async (req, res) => {
         resource_id: instalacionId,
         clinica_id: clinicaId,
         code: 'INSTALLATION_OVERLAP',
-        can_force: false,
+        can_force: true,
         details: { cita_ids: citasInst.map((c) => c.id_cita), message: 'Instalación ocupada' }
       });
     }
