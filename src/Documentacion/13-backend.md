@@ -151,6 +151,7 @@ Meta Lead Ads:
 - El backend solo acepta leads si `page_id` existe como `ClinicMetaAsset` activo de tipo `facebook_page`.
 - Si la página no está conectada, se ignora antes de pedir el detalle del lead a Graph API. Esto evita consumo innecesario y ruido por páginas externas.
 - El log de páginas no conectadas queda limitado por `META_UNMAPPED_PAGE_LOG_TTL_MS` para no inundar PM2 si Meta reenvía muchos leads de una página antigua.
+- La resolución `page_id` -> `ClinicMetaAsset` usa caché corta en memoria (`META_PAGE_MAPPING_CACHE_TTL_MS`, default 5 min) para evitar una query por cada lead externo repetido.
 
 Estado de sincronización:
 
