@@ -74,7 +74,10 @@ Antes de activar coexistencia sobre un numero real:
 - `account_update` con `PARTNER_REMOVED`, `ACCOUNT_OFFBOARDED` o `ACCOUNT_RECONNECTED` actualiza `ClinicMetaAssets.additionalData.coexistence`;
 - `POST /api/whatsapp/embedded-signup/callback` acepta `connection_mode=cloud_api|coexistence`;
 - en `connection_mode=coexistence`, el backend guarda el modo en `ClinicMetaAssets.additionalData`, marca el registro como activo y omite el registro tecnico del numero porque Meta ya lo devuelve incorporado;
-- `GET /api/whatsapp/phones` expone `connection_mode`, `is_on_biz_app`, `coexistence_status` y `coexistence_can_send_api` para que Ajustes pueda mostrar el modo real;
+- `GET /api/whatsapp/phones` expone `connection_mode`, `is_on_biz_app`, `coexistence_status`, `coexistence_can_send_api` y estados de sync inicial para que Ajustes pueda mostrar el modo real;
+- `POST /api/whatsapp/phones/:phoneNumberId/coexistence/sync-initial` encola `whatsapp_coexistence_sync_contacts` y `whatsapp_coexistence_sync_history`;
+- los jobs de sync inicial llaman `POST /<BUSINESS_PHONE_NUMBER_ID>/smb_app_data` con `sync_type=smb_app_state_sync` y `sync_type=history`, persistiendo `request_id` y estados en `ClinicMetaAssets.additionalData.coexistence`;
+- estos jobs no se lanzan automaticamente al conectar: se solicitan manualmente desde Ajustes cuando el numero ya esta confirmado en coexistencia, para evitar tocar numeros reales sin QA;
 - hay fixtures de QA en `src/scripts/fixtures/whatsapp-coexistence/`;
 - Propdental se usara como numero de QA, pero no debe relanzarse Embedded Signup ni cambiar el modo de conexion mientras haya mensajes reales de cita pendientes.
 

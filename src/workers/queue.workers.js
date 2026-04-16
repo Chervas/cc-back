@@ -1003,6 +1003,7 @@ async function handleWhatsappStateSync({ stateSync, value }) {
     await updateWhatsappAssetCoexistenceMetadata({
         phoneId,
         patch: {
+            contacts_sync_status: 'completed',
             contacts_sync_last_at: new Date().toISOString(),
             contacts_sync_last_count: stateSync.length,
         },

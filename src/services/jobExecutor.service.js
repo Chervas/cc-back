@@ -2,6 +2,7 @@ const { metaSyncJobs } = require('../jobs/sync.jobs');
 const fs = require('fs');
 const db = require('../../models');
 const flowEngineV2Service = require('./flowEngineV2.service');
+const whatsappCoexistenceService = require('./whatsappCoexistence.service');
 const { buildNotificationContent } = require('./notifications.service');
 const { emitNotificationCreated } = require('./notificationsRealtime.service');
 
@@ -295,6 +296,8 @@ const JOB_HANDLERS = {
   business_profile_recent: async (payload = {}) => metaSyncJobs.executeBusinessProfileSync(payload),
   business_profile_backfill: async (payload = {}) => metaSyncJobs.executeBusinessProfileBackfill(payload),
   business_profile_backfill_locations: async (payload = {}) => metaSyncJobs.executeBusinessProfileBackfillForLocations(payload.mappings || []),
+  whatsapp_coexistence_sync_contacts: async (payload = {}) => whatsappCoexistenceService.runContactsSyncJob(payload),
+  whatsapp_coexistence_sync_history: async (payload = {}) => whatsappCoexistenceService.runHistorySyncJob(payload),
   automations_v2_execute: async (payload = {}) => runAutomationFlowV2Job(payload),
   appointment_automation_schedule_fire: async (payload = {}) => runAppointmentAutomationScheduleJob(payload),
   lead_callback_reminder_notify: async (payload = {}, jobRequest) => runLeadCallbackReminderJob(payload, jobRequest),
