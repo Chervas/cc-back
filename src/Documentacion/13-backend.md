@@ -66,6 +66,8 @@ Roadmap funcional y tecnico: `cc-front/src/Documentacion/14.3-whatsapp-coexisten
 
 Antes de activar coexistencia sobre un numero real:
 
+- QA real esta bloqueado por ticket Meta abierto el 2026-04-16: Embedded Signup de coexistencia abre correctamente, pero en el caso SOHO el boton `Siguiente` queda deshabilitado tras introducir un numero activo en WhatsApp Business App y no llega mensaje de verificacion a la app movil;
+- hasta que Meta responda, no ejecutar `POST /api/whatsapp/phones/:phoneNumberId/coexistence/sync-initial` salvo que el numero haya finalizado onboarding real en coexistencia;
 - el webhook WhatsApp ya acepta de forma pasiva `history`, `smb_app_state_sync`, `smb_message_echoes`, `edit` y `revoke` sin romper el inbound actual;
 - `history` y `smb_message_echoes` no reanudan automatizaciones ni `wait_response`;
 - los mensajes `smb_message_echoes` se persisten como outbound manual con `Messages.metadata.origin = mobile_app` para que la UI muestre `Enviado desde el movil`;
