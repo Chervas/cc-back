@@ -272,13 +272,14 @@ async function fetchWabaDetailsWithBusinessId({ wabaId, accessToken }) {
 
 router.post('/embedded-signup/callback', authMiddleware, async (req, res) => {
   try {
-    const { code, clinic_id, redirect_uri, waba_id, phone_number_id, business_id, assignment_scope, group_id } = req.body;
+    const { code, clinic_id, redirect_uri, waba_id, phone_number_id, business_id, assignment_scope, group_id, connection_mode } = req.body;
     if (!code) {
       return res.status(400).json({ success: false, error: 'missing_code' });
     }
     if (!waba_id || !phone_number_id) {
       return res.status(400).json({ success: false, error: 'missing_waba_or_phone_number_id' });
     }
+    const connectionMode = connection_mode === 'coexistence' ? 'coexistence' : 'cloud_api';
 
     const userId = req.userData?.userId;
     const metaConnection = await db.MetaConnection.findOne({ where: { userId } });
@@ -388,7 +389,7 @@ router.post('/embedded-signup/callback', authMiddleware, async (req, res) => {
           params: {
             access_token: accessToken,
             fields:
-              'id,display_phone_number,verified_name,quality_rating,messaging_limit_tier,name_status,code_verification_status,status,platform_type,account_mode',
+              'id,display_phone_number,verified_name,quality_rating,messaging_limit_tier,name_status,code_verification_status,status,platform_type,account_mode,is_on_biz_app',
           },
         })
         .then((r) => r.data)
@@ -407,6 +408,7 @@ router.post('/embedded-signup/callback', authMiddleware, async (req, res) => {
     const phoneStatus = phoneDetails?.status || null;
     const platformType = phoneDetails?.platform_type || null;
     const accountMode = phoneDetails?.account_mode || null;
+    const isOnBizApp = phoneDetails?.is_on_biz_app ?? null;
     
     console.log('📱 WhatsApp Embedded Signup - Detalles obtenidos:', {
       wabaId: waba_id,
@@ -467,9 +469,24 @@ router.post('/embedded-signup/callback', authMiddleware, async (req, res) => {
     );
 
     const businessId = resolvedBusinessId || null;
-    if (businessId || nameStatus || codeVerificationStatus || platformType || accountMode) {
+    if (businessId || nameStatus || codeVerificationStatus || platformType || accountMode || connectionMode || isOnBizApp !== null) {
       const applyMetaExtras = async (asset) => {
         const additionalData = { ...(asset.additionalData || {}) };
+        additionalData.whatsappConnectionMode = connectionMode;
+        additionalData.connectionMode = connectionMode;
+        additionalData.coexistence = {
+          ...(additionalData.coexistence || {}),
+          enabled: connectionMode === 'coexistence',
+          status: connectionMode === 'coexistence'
+            ? (additionalData.coexistence?.status || 'active')
+            : (additionalData.coexistence?.status || null),
+          canSendApi: connectionMode === 'coexistence'
+            ? additionalData.coexistence?.canSendApi !== false
+            : additionalData.coexistence?.canSendApi,
+          connectedAt: connectionMode === 'coexistence'
+            ? (additionalData.coexistence?.connectedAt || new Date().toISOString())
+            : additionalData.coexistence?.connectedAt,
+        };
         if (businessId) {
           additionalData.businessId = businessId;
         }
@@ -481,6 +498,9 @@ router.post('/embedded-signup/callback', authMiddleware, async (req, res) => {
         }
         if (accountMode) {
           additionalData.accountMode = accountMode;
+        }
+        if (isOnBizApp !== null) {
+          additionalData.isOnBizApp = isOnBizApp;
         }
         if (codeVerificationStatus || phoneStatus) {
           additionalData.registration = {
@@ -505,13 +525,30 @@ router.post('/embedded-signup/callback', authMiddleware, async (req, res) => {
     // Intentar registrar automaticamente el numero (sin PIN). Si requiere PIN,
     // devolvemos el estado para que el frontend lo solicite.
     let registrationResult = null;
-    try {
-      registrationResult = await attemptPhoneRegistration({
-        asset: phoneAsset,
-        accessToken,
-      });
-    } catch (regErr) {
-      console.warn('[EmbeddedSignup] No se pudo registrar el numero automaticamente', regErr?.message || regErr);
+    if (connectionMode === 'coexistence') {
+      const nowIso = new Date().toISOString();
+      const coexistenceRegistration = {
+        status: 'registered',
+        requiresPin: false,
+        lastAttemptAt: nowIso,
+        registeredAt: phoneAsset.additionalData?.registration?.registeredAt || nowIso,
+        phoneStatus: phoneStatus || 'CONNECTED',
+        codeVerificationStatus: codeVerificationStatus || null,
+        lastErrorCode: null,
+        lastErrorMessage: null,
+        skipRegisterReason: 'whatsapp_business_app_coexistence',
+      };
+      await updateRegistrationOnAsset(phoneAsset, coexistenceRegistration);
+      registrationResult = { success: true, registration: coexistenceRegistration, status: null };
+    } else {
+      try {
+        registrationResult = await attemptPhoneRegistration({
+          asset: phoneAsset,
+          accessToken,
+        });
+      } catch (regErr) {
+        console.warn('[EmbeddedSignup] No se pudo registrar el numero automaticamente', regErr?.message || regErr);
+      }
     }
 
     // Suscribir la app para recibir webhooks de mensajes y estados
@@ -536,6 +573,7 @@ router.post('/embedded-signup/callback', authMiddleware, async (req, res) => {
       wabaId: waba_id,
       phoneNumberId: phone_number_id,
       waVerifiedName: verifiedName,
+      connectionMode,
       registration: registrationResult?.registration || null,
       subscribed: subscriptionResult?.success || false,
     });

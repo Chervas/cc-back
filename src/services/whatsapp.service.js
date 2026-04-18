@@ -348,6 +348,43 @@ class WhatsAppService {
     }
 
     /**
+     * Solicita a Meta la sincronizacion inicial de datos de WhatsApp Business App
+     * para numeros conectados en modo coexistencia.
+     *
+     * syncType admitidos por Meta:
+     * - smb_app_state_sync: contactos de la app WhatsApp Business
+     * - history: historial de chats compartido por la clinica
+     */
+    async requestBusinessAppDataSync({ phoneNumberId, accessToken, syncType }) {
+        if (!phoneNumberId) {
+            throw new Error('phoneNumberId requerido');
+        }
+        if (!accessToken) {
+            throw new Error('accessToken requerido');
+        }
+        if (!['smb_app_state_sync', 'history'].includes(syncType)) {
+            throw new Error(`syncType no soportado: ${syncType}`);
+        }
+
+        const url = `https://graph.facebook.com/${this.apiVersion}/${phoneNumberId}/smb_app_data`;
+        const response = await axios.post(
+            url,
+            {
+                messaging_product: 'whatsapp',
+                sync_type: syncType,
+            },
+            {
+                headers: {
+                    Authorization: `Bearer ${accessToken}`,
+                    'Content-Type': 'application/json',
+                },
+            }
+        );
+
+        return response.data;
+    }
+
+    /**
      * Configura el PIN de verificación en dos pasos para un número de WhatsApp.
      */
     async setTwoStepVerification({ phoneNumberId, accessToken, pin }) {

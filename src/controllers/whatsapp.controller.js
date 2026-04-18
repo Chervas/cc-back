@@ -5,6 +5,7 @@ const axios = require('axios');
 const crypto = require('crypto');
 const whatsappService = require('../services/whatsapp.service');
 const { enqueueSyncPhonesJob, syncPhonesForWaba } = require('../services/whatsappPhones.service');
+const whatsappCoexistenceService = require('../services/whatsappCoexistence.service');
 const { buildWhatsappTemplateVariableContract } = require('../lib/whatsapp-template-contract');
 
 const {
@@ -1352,6 +1353,18 @@ exports.listPhones = async (req, res) => {
         is_test_number: !!additionalData.isTestNumber,
         account_mode: additionalData.accountMode || null,
         platform_type: additionalData.platformType || null,
+        is_on_biz_app: additionalData.isOnBizApp ?? null,
+        connection_mode: additionalData.whatsappConnectionMode || additionalData.connectionMode || null,
+        coexistence_status: additionalData.coexistence?.status || null,
+        coexistence_can_send_api: additionalData.coexistence?.canSendApi ?? null,
+        coexistence_initial_sync_status: additionalData.coexistence?.initial_sync_status || null,
+        coexistence_contacts_sync_status: additionalData.coexistence?.contacts_sync_status || null,
+        coexistence_contacts_sync_last_at: additionalData.coexistence?.contacts_sync_last_at || null,
+        coexistence_contacts_sync_request_id: additionalData.coexistence?.contacts_sync_request_id || null,
+        coexistence_history_sync_status: additionalData.coexistence?.history_sync_status || null,
+        coexistence_history_sync_last_at: additionalData.coexistence?.history_sync_last_at || null,
+        coexistence_history_sync_request_id: additionalData.coexistence?.history_sync_request_id || null,
+        coexistence_history_sync_error: additionalData.coexistence?.history_sync_error || null,
         is_preverified: !!additionalData.isPreverified,
         verification_expiry_time: additionalData.verificationExpiryTime || null,
         createdAt: p.createdAt,
@@ -1999,6 +2012,72 @@ exports.refreshPhoneStatus = async (req, res) => {
   } catch (err) {
     console.error('Error refreshPhoneStatus', err);
     return res.status(500).json({ success: false, error: 'refresh_failed' });
+  }
+};
+
+exports.enqueueCoexistenceInitialSync = async (req, res) => {
+  try {
+    const userId = req.userData?.userId;
+    const phoneNumberId = req.params.phoneNumberId;
+
+    if (!phoneNumberId) {
+      return res.status(400).json({ success: false, error: 'phone_number_id_required' });
+    }
+
+    const phone = await ClinicMetaAsset.findOne({
+      where: {
+        assetType: 'whatsapp_phone_number',
+        phoneNumberId,
+        isActive: true,
+      },
+      include: [
+        { model: MetaConnection, as: 'metaConnection', attributes: ['userId'] },
+        {
+          model: Clinica,
+          as: 'clinica',
+          attributes: ['id_clinica', 'grupoClinicaId', 'nombre_clinica'],
+        },
+      ],
+    });
+
+    if (!phone) {
+      return res.status(404).json({ success: false, error: 'phone_not_found' });
+    }
+
+    const { clinicIds, isAggregateAllowed } = await getUserClinics(userId);
+    const userGroupIds = await getUserGroupIds({ clinicIds, isAggregateAllowed });
+    const isOwner = phone.metaConnection?.userId === userId;
+    const hasClinicAccess = phone.clinicaId && clinicIds.includes(phone.clinicaId);
+    const hasGroupAccess =
+      phone.assignmentScope === 'group' &&
+      phone.grupoClinicaId &&
+      userGroupIds.includes(phone.grupoClinicaId);
+
+    if (!isOwner && !isAggregateAllowed && !hasClinicAccess && !hasGroupAccess) {
+      return res.status(403).json({ success: false, error: 'forbidden' });
+    }
+
+    if (!whatsappCoexistenceService.isCoexistenceAsset(phone)) {
+      return res.status(409).json({ success: false, error: 'not_coexistence' });
+    }
+
+    const result = await whatsappCoexistenceService.enqueueInitialSyncJobs({
+      phoneNumberId,
+      requestedBy: userId || null,
+      requestedByName: req.userData?.email || null,
+      requestedByRole: req.userData?.role || null,
+    });
+
+    return res.json({
+      success: true,
+      ...result,
+    });
+  } catch (err) {
+    console.error('Error enqueueCoexistenceInitialSync', err);
+    return res.status(err.statusCode || 500).json({
+      success: false,
+      error: err.message || 'coexistence_initial_sync_failed',
+    });
   }
 };
 

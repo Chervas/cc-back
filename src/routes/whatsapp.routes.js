@@ -139,6 +139,9 @@ router.post('/phones/:phoneNumberId/profile', authMiddleware, whatsappController
 // Refrescar estado del número en Meta (estado registro, nombre, calidad)
 router.post('/phones/:phoneNumberId/refresh', authMiddleware, whatsappController.refreshPhoneStatus);
 
+// Coexistencia: solicitar sync inicial de contactos e historial desde WhatsApp Business App
+router.post('/phones/:phoneNumberId/coexistence/sync-initial', authMiddleware, whatsappController.enqueueCoexistenceInitialSync);
+
 // Desconectar número (desactiva y desasigna)
 router.delete('/phones/:phoneNumberId', authMiddleware, whatsappController.deletePhone);
 
