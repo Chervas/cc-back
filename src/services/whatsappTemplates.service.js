@@ -538,6 +538,16 @@ async function createTemplatesFromCatalog({ wabaId, clinicId, groupId, assignmen
       },
     });
     if (existing) {
+      if (clinicId) {
+        await upsertClinicOverrideTemplateForClinic({
+          clinicId,
+          template,
+          technicalName: existing.name,
+          status: mapRemoteStatusToLocalStatus(existing.status),
+          metaTemplateId: existing.meta_template_id || null,
+          rejectionReason: existing.rejection_reason || null,
+        });
+      }
       continue;
     }
 
@@ -558,47 +568,37 @@ async function createTemplatesFromCatalog({ wabaId, clinicId, groupId, assignmen
         rejectionReason: null,
       });
 
-      const placeholder = clinicId
-        ? await WhatsappTemplate.findOne({
-            where: {
-              clinic_id: clinicId,
-              waba_id: null,
-              name: template.name,
-              language: DEFAULT_LANGUAGE,
-              status: 'SIN_CONECTAR',
-            },
-          })
-        : null;
-
-      if (placeholder) {
-        await placeholder.update({
-          waba_id: wabaId,
-          status: 'PENDING',
-          components: parseMaybeJson(template.components),
-          meta_template_id: metaResp?.id || null,
-          catalog_template_id: template.id,
-          origin: 'catalog',
-          is_active: true,
+      if (clinicId) {
+        await upsertClinicOverrideTemplateForClinic({
+          clinicId,
+          template,
+          technicalName: template.name,
+          status: WHATSAPP_TEMPLATE_STATUS.PENDING,
+          metaTemplateId: metaResp?.id || null,
+          rejectionReason: null,
         });
-        continue;
       }
-
-      await WhatsappTemplate.create({
-        waba_id: wabaId,
-        clinic_id: clinicId || null,
-        name: template.name,
-        language: DEFAULT_LANGUAGE,
-        category: template.category,
-        status: 'PENDING',
-        components: parseMaybeJson(template.components),
-        meta_template_id: metaResp?.id || null,
-        catalog_template_id: template.id,
-        origin: 'catalog',
-        is_active: true,
-      });
     } catch (err) {
       if (isRetryableMetaError(err)) {
         throw err;
+      }
+      if (clinicId) {
+        try {
+          await upsertClinicOverrideTemplateForClinic({
+            clinicId,
+            template,
+            technicalName: template.name,
+            status: WHATSAPP_TEMPLATE_STATUS.LOCAL_PENDING,
+            metaTemplateId: null,
+            rejectionReason: buildLocalPendingReasonFromMetaError(err),
+          });
+        } catch (updateErr) {
+          console.error('Error guardando rechazo local de plantilla WhatsApp', {
+            clinicId,
+            name: template.name,
+            error: updateErr?.message || updateErr,
+          });
+        }
       }
       console.error('Error creando plantilla en Meta', {
         wabaId,
