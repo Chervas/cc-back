@@ -568,7 +568,9 @@ async function ensureDoctorClinicaRow({
     clinicaId,
     subrolClinica,
     activo,
+    recibeCitas = null,
 }) {
+    const shouldUpdateActivo = typeof activo === 'boolean';
     const doctorClinica = await DoctorClinica.findOne({
         where: {
             doctor_id: Number(userId),
@@ -578,23 +580,30 @@ async function ensureDoctorClinicaRow({
 
     const defaultConfig = defaultDisponibilidadConfigFromSubrol(subrolClinica);
     const rolEnClinica = normalizeTrimmed(subrolClinica) || 'personal';
+    const resolvedRecibeCitas = typeof recibeCitas === 'boolean'
+        ? recibeCitas
+        : defaultConfig.recibe_citas;
 
     if (!doctorClinica) {
         await DoctorClinica.create({
             doctor_id: Number(userId),
             clinica_id: Number(clinicaId),
             rol_en_clinica: rolEnClinica,
-            recibe_citas: defaultConfig.recibe_citas,
-            activo: !!activo,
+            recibe_citas: resolvedRecibeCitas,
+            activo: shouldUpdateActivo ? !!activo : false,
         });
         return;
     }
 
     doctorClinica.rol_en_clinica = rolEnClinica;
-    if (doctorClinica.recibe_citas == null) {
+    if (typeof recibeCitas === 'boolean') {
+        doctorClinica.recibe_citas = recibeCitas;
+    } else if (doctorClinica.recibe_citas == null) {
         doctorClinica.recibe_citas = defaultConfig.recibe_citas;
     }
-    doctorClinica.activo = !!activo;
+    if (shouldUpdateActivo) {
+        doctorClinica.activo = !!activo;
+    }
     await doctorClinica.save();
 }
 
@@ -4518,6 +4527,7 @@ exports.invitarPersonal = async (req, res) => {
             apellidos,
             email_usuario,
             telefono,
+            recibe_citas,
         } = req.body;
 
         const clinicaId = parseIntOrNull(clinica_id);
@@ -4540,6 +4550,15 @@ exports.invitarPersonal = async (req, res) => {
 
         if (!INVITABLE_ROLES.includes(rol_clinica)) {
             return res.status(400).json({ message: `rol_clinica debe ser uno de: ${INVITABLE_ROLES.join(', ')}` });
+        }
+
+        const hasRecibeCitasInput = Object.prototype.hasOwnProperty.call(req.body || {}, 'recibe_citas');
+        const requestedRecibeCitas = hasRecibeCitasInput ? parseRecibeCitasInput(recibe_citas) : null;
+        if (hasRecibeCitasInput && requestedRecibeCitas == null) {
+            return res.status(400).json({
+                message: 'recibe_citas inválido',
+                allowed: [true, false],
+            });
         }
 
         let targetUser;
@@ -4603,12 +4622,13 @@ exports.invitarPersonal = async (req, res) => {
                         ],
                     });
 
-                    if (targetUser.es_provisional) {
+                    if (hasRecibeCitasInput || targetUser.es_provisional) {
                         await ensureDoctorClinicaRow({
                             userId: targetUser.id_usuario,
                             clinicaId,
                             subrolClinica: nextSubrol,
-                            activo: true,
+                            activo: targetUser.es_provisional ? true : undefined,
+                            recibeCitas: requestedRecibeCitas,
                         });
                     }
 
@@ -4622,6 +4642,7 @@ exports.invitarPersonal = async (req, res) => {
                         estado_invitacion: 'pendiente',
                         invite_token: resentToken,
                         es_provisional: !!targetUser.es_provisional,
+                        recibe_citas: requestedRecibeCitas ?? defaultDisponibilidadConfigFromSubrol(nextSubrol).recibe_citas,
                         resent: true,
                     });
                 }
@@ -4681,12 +4702,13 @@ exports.invitarPersonal = async (req, res) => {
             invited_at: new Date(),
         });
 
-        if (isNewProvisional || targetUser.es_provisional) {
+        if (hasRecibeCitasInput || isNewProvisional || targetUser.es_provisional) {
             await ensureDoctorClinicaRow({
                 userId: targetUser.id_usuario,
                 clinicaId,
                 subrolClinica: subrol_clinica || null,
-                activo: true,
+                activo: (isNewProvisional || targetUser.es_provisional) ? true : undefined,
+                recibeCitas: requestedRecibeCitas,
             });
         }
 
@@ -4703,6 +4725,7 @@ exports.invitarPersonal = async (req, res) => {
             estado_invitacion: 'pendiente',
             invite_token: inviteToken,
             es_provisional: isNewProvisional || !!targetUser.es_provisional,
+            recibe_citas: requestedRecibeCitas ?? defaultDisponibilidadConfigFromSubrol(subrol_clinica || null).recibe_citas,
         });
     } catch (error) {
         console.error('[personal.invitarPersonal] Error:', error);
