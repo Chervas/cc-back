@@ -1250,6 +1250,13 @@ exports.listPhones = async (req, res) => {
       const grupoClinica = clinica.grupoClinica || {};
       const grupo = grupoDirecto.id_grupo ? grupoDirecto : grupoClinica;
       let registration = p.additionalData?.registration || null;
+      const additionalData = p.additionalData || {};
+      const isCoexistenceAsset =
+        additionalData.whatsappConnectionMode === 'coexistence' ||
+        additionalData.connectionMode === 'coexistence' ||
+        additionalData.isOnBizApp === true ||
+        additionalData.coexistence?.enabled === true ||
+        registration?.skipRegisterReason === 'whatsapp_business_app_coexistence';
 
       // Normaliza el estado si el numero ya aparece como CONNECTED en Meta
       if (
@@ -1262,7 +1269,7 @@ exports.listPhones = async (req, res) => {
           accessToken: p.waAccessToken,
         });
         const codeStatus = String(liveStatus?.code_verification_status || '').toUpperCase();
-        if (liveStatus?.status === 'CONNECTED' && codeStatus === 'VERIFIED') {
+        if (liveStatus?.status === 'CONNECTED' && (codeStatus === 'VERIFIED' || isCoexistenceAsset)) {
           const nowIso = new Date().toISOString();
           registration = {
             status: 'registered',
@@ -1273,9 +1280,12 @@ exports.listPhones = async (req, res) => {
             codeVerificationStatus: liveStatus.code_verification_status || null,
             lastErrorCode: null,
             lastErrorMessage: null,
+            skipRegisterReason: isCoexistenceAsset
+              ? (registration?.skipRegisterReason || 'whatsapp_business_app_coexistence')
+              : registration?.skipRegisterReason,
           };
           await updateRegistrationOnAsset(p, registration);
-        } else if (liveStatus?.status === 'CONNECTED' && codeStatus && registration?.status !== 'registered') {
+        } else if (!isCoexistenceAsset && liveStatus?.status === 'CONNECTED' && codeStatus && registration?.status !== 'registered') {
           const nowIso = new Date().toISOString();
           registration = {
             status: 'not_registered',
@@ -1307,8 +1317,6 @@ exports.listPhones = async (req, res) => {
         p.additionalData?.businessVerificationStatus ||
         (managerBusinessId ? businessStatusMap.get(managerBusinessId) : null) ||
         null;
-
-      const additionalData = p.additionalData || {};
 
       if (businessVerificationStatus && additionalData.businessVerificationStatus !== businessVerificationStatus) {
         additionalData.businessVerificationStatus = businessVerificationStatus;

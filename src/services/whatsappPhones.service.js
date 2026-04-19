@@ -19,12 +19,11 @@ function isTestDisplayNumber(displayPhoneNumber) {
   return digitsOnly.startsWith('1555');
 }
 
-function buildRegisteredSnapshot(remote, existingRegistration) {
+function buildRegisteredSnapshot(remote, existingRegistration, isCoexistence = false) {
   const nowIso = new Date().toISOString();
   const codeStatus = String(remote?.code_verification_status || '').toUpperCase();
   const isVerified = codeStatus === 'VERIFIED';
   const isConnected = remote?.status === 'CONNECTED';
-  const isCoexistence = existingRegistration?.skipRegisterReason === 'whatsapp_business_app_coexistence';
   let status = existingRegistration?.status || null;
   let requiresPin = existingRegistration?.requiresPin || false;
 
@@ -45,6 +44,9 @@ function buildRegisteredSnapshot(remote, existingRegistration) {
     codeVerificationStatus: remote?.code_verification_status || null,
     lastErrorCode: null,
     lastErrorMessage: null,
+    skipRegisterReason: isCoexistence
+      ? (existingRegistration?.skipRegisterReason || 'whatsapp_business_app_coexistence')
+      : existingRegistration?.skipRegisterReason,
   };
 }
 
@@ -104,6 +106,12 @@ async function upsertRemoteState(asset, remote, profile) {
   const additionalData = { ...(asset.additionalData || {}) };
   const registration = additionalData.registration || {};
   const testNumber = isTestDisplayNumber(remote?.display_phone_number);
+  const isCoexistence =
+    additionalData.whatsappConnectionMode === 'coexistence' ||
+    additionalData.connectionMode === 'coexistence' ||
+    additionalData.isOnBizApp === true ||
+    additionalData.coexistence?.enabled === true ||
+    registration?.skipRegisterReason === 'whatsapp_business_app_coexistence';
 
   additionalData.isTestNumber = testNumber;
   additionalData.limitedMode = testNumber;
@@ -129,7 +137,7 @@ async function upsertRemoteState(asset, remote, profile) {
   }
 
   if (remote?.status === 'CONNECTED') {
-    additionalData.registration = buildRegisteredSnapshot(remote, registration);
+    additionalData.registration = buildRegisteredSnapshot(remote, registration, isCoexistence);
   } else {
     additionalData.registration = {
       ...registration,
