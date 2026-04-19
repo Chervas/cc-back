@@ -3,6 +3,7 @@ const fs = require('fs');
 const db = require('../../models');
 const flowEngineV2Service = require('./flowEngineV2.service');
 const whatsappCoexistenceService = require('./whatsappCoexistence.service');
+const whatsappTemplatesService = require('./whatsappTemplates.service');
 const { buildNotificationContent } = require('./notifications.service');
 const { emitNotificationCreated } = require('./notificationsRealtime.service');
 
@@ -127,6 +128,34 @@ async function runAutomationFlowV2Job(payload = {}) {
       execution_id: updated.id,
       execution_status: updated.status,
       current_node_id: updated.current_node_id,
+    },
+  };
+}
+
+async function runWhatsappTemplateCreateJob(payload = {}) {
+  const wabaId = String(payload.wabaId || payload.waba_id || '').trim();
+  if (!wabaId) {
+    throw new Error('whatsapp_template_create requires payload.wabaId');
+  }
+
+  const clinicId = payload.clinicId ?? payload.clinic_id ?? null;
+  const groupId = payload.groupId ?? payload.group_id ?? null;
+  const assignmentScope = payload.assignmentScope || payload.assignment_scope || 'unassigned';
+
+  await whatsappTemplatesService.createTemplatesFromCatalog({
+    wabaId,
+    clinicId,
+    groupId,
+    assignmentScope,
+  });
+
+  return {
+    status: 'completed',
+    result: {
+      wabaId,
+      clinicId,
+      groupId,
+      assignmentScope,
     },
   };
 }
@@ -298,6 +327,7 @@ const JOB_HANDLERS = {
   business_profile_backfill_locations: async (payload = {}) => metaSyncJobs.executeBusinessProfileBackfillForLocations(payload.mappings || []),
   whatsapp_coexistence_sync_contacts: async (payload = {}) => whatsappCoexistenceService.runContactsSyncJob(payload),
   whatsapp_coexistence_sync_history: async (payload = {}) => whatsappCoexistenceService.runHistorySyncJob(payload),
+  whatsapp_template_create: async (payload = {}) => runWhatsappTemplateCreateJob(payload),
   automations_v2_execute: async (payload = {}) => runAutomationFlowV2Job(payload),
   appointment_automation_schedule_fire: async (payload = {}) => runAppointmentAutomationScheduleJob(payload),
   lead_callback_reminder_notify: async (payload = {}, jobRequest) => runLeadCallbackReminderJob(payload, jobRequest),

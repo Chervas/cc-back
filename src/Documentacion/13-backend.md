@@ -76,6 +76,9 @@ Antes de activar coexistencia sobre un numero real:
 - `account_update` con `PARTNER_REMOVED`, `ACCOUNT_OFFBOARDED` o `ACCOUNT_RECONNECTED` actualiza `ClinicMetaAssets.additionalData.coexistence`;
 - `POST /api/whatsapp/embedded-signup/callback` acepta `connection_mode=cloud_api|coexistence`;
 - en `connection_mode=coexistence`, el backend guarda el modo en `ClinicMetaAssets.additionalData`, marca el registro como activo y omite el registro tecnico del numero porque Meta ya lo devuelve incorporado;
+- tras Embedded Signup, la creacion/envio a revision de plantillas WhatsApp no debe encolarse como BullMQ dentro de `QUEUE_PREFIX=gateway`;
+- el callback crea un `JobRequest` `whatsapp_template_create` con `payload.__runtime_namespace` resuelto por origen (`crm` -> `staging`, `localhost:4203` -> `dev`, `app` -> `prod`);
+- `jobExecutor.service.js` procesa `whatsapp_template_create` ejecutando `createTemplatesFromCatalog(...)`, que transforma placeholders `SIN_CONECTAR` en plantillas enviadas a revision (`PENDING`);
 - `GET /api/whatsapp/phones` expone `connection_mode`, `is_on_biz_app`, `coexistence_status`, `coexistence_can_send_api` y estados de sync inicial para que Ajustes pueda mostrar el modo real;
 - `POST /api/whatsapp/phones/:phoneNumberId/coexistence/sync-initial` encola `whatsapp_coexistence_sync_contacts` y `whatsapp_coexistence_sync_history`;
 - los jobs de sync inicial llaman `POST /<BUSINESS_PHONE_NUMBER_ID>/smb_app_data` con `sync_type=smb_app_state_sync` y `sync_type=history`, persistiendo `request_id` y estados en `ClinicMetaAssets.additionalData.coexistence`;

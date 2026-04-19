@@ -5,11 +5,54 @@ const crypto = require('crypto');
 const db = require('../../models');
 const authMiddleware = require('./auth.middleware');
 const whatsappService = require('../services/whatsapp.service');
+const jobRequestsService = require('../services/jobRequests.service');
+const jobScheduler = require('../services/jobScheduler.service');
 
 const router = express.Router();
 const ClinicMetaAsset = db.ClinicMetaAsset;
-const { enqueueCreateTemplatesJob } = require('../services/whatsappTemplates.service');
 const META_API_VERSION = process.env.META_API_VERSION || 'v24.0';
+
+function cleanString(value) {
+  const normalized = String(value || '').trim();
+  return normalized || null;
+}
+
+function resolveRequestedRuntimeNamespace(req) {
+  const explicit = cleanString(req.body?.__runtime_namespace)
+    || cleanString(req.body?.runtime_namespace)
+    || cleanString(req.query?.__runtime_namespace)
+    || cleanString(req.query?.runtime_namespace);
+  if (explicit) {
+    return explicit;
+  }
+
+  const origin = cleanString(req.get('origin')) || cleanString(req.get('referer')) || '';
+  if (origin.includes('localhost:4203') || origin.includes('127.0.0.1:4203')) {
+    return 'dev';
+  }
+  if (origin.includes('crm.clinicaclick.com')) {
+    return 'staging';
+  }
+  if (origin.includes('app.clinicaclick.com')) {
+    return 'prod';
+  }
+
+  const runtimeRole = cleanString(process.env.RUNTIME_ROLE);
+  if (runtimeRole === 'gateway') {
+    return cleanString(process.env.AUTOMATIONS_V2_FALLBACK_RUNTIME_NAMESPACE) || 'staging';
+  }
+
+  return cleanString(process.env.JOB_RUNTIME_NAMESPACE)
+    || cleanString(process.env.RUNTIME_NAMESPACE)
+    || null;
+}
+
+function withRequestedRuntimeNamespace(req, payload = {}) {
+  const runtimeNamespace = resolveRequestedRuntimeNamespace(req);
+  return runtimeNamespace
+    ? { ...payload, __runtime_namespace: runtimeNamespace }
+    : payload;
+}
 
 function parseWaError(err) {
   const base = err?.response?.data || err?.message || err;
@@ -558,14 +601,27 @@ router.post('/embedded-signup/callback', authMiddleware, async (req, res) => {
     });
 
     if (assignmentScope !== 'unassigned') {
-      enqueueCreateTemplatesJob({
-        wabaId: waba_id,
-        clinicId: targetClinicId,
-        groupId: targetGroupId,
-        assignmentScope,
-      }).catch((err) => {
+      try {
+        const templateJobPayload = withRequestedRuntimeNamespace(req, {
+          wabaId: waba_id,
+          clinicId: targetClinicId,
+          groupId: targetGroupId,
+          assignmentScope,
+          connectionMode,
+        });
+        const templateJob = await jobRequestsService.enqueueJobRequest({
+          type: 'whatsapp_template_create',
+          payload: templateJobPayload,
+          priority: 'high',
+          origin: `whatsapp:embedded-signup:${connectionMode}`,
+          requestedBy: userId,
+        });
+        jobScheduler.triggerImmediate(templateJob.id).catch((err) => {
+          console.error('[EmbeddedSignup] Error lanzando job de plantillas', err?.message || err);
+        });
+      } catch (err) {
         console.error('[EmbeddedSignup] Error encolando plantillas', err?.message || err);
-      });
+      }
     }
 
     return res.json({
