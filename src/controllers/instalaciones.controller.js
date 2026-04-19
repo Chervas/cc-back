@@ -15,6 +15,12 @@ const overlap = (startA, endA, startB, endB) => {
 };
 
 const HORARIO_KEYS = ['domingo','lunes','martes','miercoles','jueves','viernes','sabado'];
+const INSTALLATION_TYPES = new Set(['box', 'quirofano', 'sala', 'consulta', 'laboratorio', 'sala_pruebas', 'sala_polivalente', 'otro']);
+
+const normalizeInstallationType = (value, fallback = 'box') => {
+  const raw = String(value ?? fallback).trim();
+  return INSTALLATION_TYPES.has(raw) ? raw : null;
+};
 
 const buildHorarioRowsFromBody = (instalacionId, body) => {
   if (!body) return [];
@@ -86,13 +92,15 @@ exports.create = asyncHandler(async (req, res) => {
   const clinicaId = toInt(body.clinica_id ?? body.id_clinica);
   if (!clinicaId) return res.status(400).json({ message: 'clinica_id requerido' });
   if (!body.nombre) return res.status(400).json({ message: 'nombre requerido' });
+  const tipo = normalizeInstallationType(body.tipo);
+  if (!tipo) return res.status(400).json({ message: 'tipo de instalación inválido' });
 
   const t = await db.sequelize.transaction();
   try {
     const created = await db.Instalacion.create({
       clinica_id: clinicaId,
       nombre: body.nombre,
-      tipo: body.tipo || 'box',
+      tipo,
       descripcion: body.descripcion || null,
       piso: body.piso || null,
       color: body.color || '#4CAF50',
@@ -137,13 +145,15 @@ exports.update = asyncHandler(async (req, res) => {
 
   const item = await db.Instalacion.findByPk(id);
   if (!item) return res.status(404).json({ message: 'Instalación no encontrada' });
+  const tipo = body.tipo !== undefined ? normalizeInstallationType(body.tipo) : item.tipo;
+  if (!tipo) return res.status(400).json({ message: 'tipo de instalación inválido' });
 
   const t = await db.sequelize.transaction();
   try {
     await item.update({
       // No permitimos cambiar de clínica por ahora (evita movimientos inesperados)
       nombre: body.nombre ?? item.nombre,
-      tipo: body.tipo ?? item.tipo,
+      tipo,
       descripcion: body.descripcion ?? item.descripcion,
       piso: body.piso ?? item.piso,
       color: body.color ?? item.color,
