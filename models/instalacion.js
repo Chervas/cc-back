@@ -12,7 +12,7 @@ module.exports = (sequelize, DataTypes) => {
     id: { type: DataTypes.INTEGER, primaryKey: true, autoIncrement: true },
     clinica_id: { type: DataTypes.INTEGER, allowNull: false },
     nombre: { type: DataTypes.STRING(255), allowNull: false },
-    tipo: { type: DataTypes.ENUM('box','quirofano','sala_pruebas','sala_polivalente','otro'), defaultValue: 'box' },
+    tipo: { type: DataTypes.ENUM('box', 'quirofano', 'sala', 'consulta', 'laboratorio', 'sala_pruebas', 'sala_polivalente', 'otro'), defaultValue: 'box' },
     descripcion: DataTypes.TEXT,
     piso: DataTypes.STRING(64),
     color: DataTypes.STRING(16),
