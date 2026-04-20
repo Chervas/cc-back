@@ -759,6 +759,7 @@ Defaults actuales de interés:
 - `JOBS_ADS_MIDDAY_SCHEDULE`: `0 12 * * *`
 - `JOBS_WHATSAPP_PHONES_SCHEDULE`: `*/15 * * * *`
 - `JOBS_WHATSAPP_TEMPLATES_SCHEDULE`: `*/20 * * * *`
+- `JOBS_AUTOMATION_HEALTH_CHECK_SCHEDULE`: `0 10,16 * * *`
 - `WHATSAPP_PROPAGATE_RESYNC_DELAY_MINUTES`: `12`
 
 Ventanas y límites asociados:
@@ -777,6 +778,9 @@ Ventanas y límites asociados:
 - `ANALYTICS_BACKFILL_DAYS`
 - `LOCAL_SYNC_RECENT_DAYS`
 - `LOCAL_BACKFILL_DAYS`
+- `JOBS_AUTOMATION_HEALTH_LOOKBACK_HOURS`
+- `JOBS_AUTOMATION_HEALTH_STALE_RUNNING_MINUTES`
+- `JOBS_AUTOMATION_HEALTH_OVERDUE_GRACE_MINUTES`
 
 Regla operativa:
 
@@ -2017,6 +2021,38 @@ Caso real `2026-04-20`:
 - el worker los reclamó unos segundos después de la hora exacta (`09:00:19`) y `fireScheduledTrigger(payload)` recalculó la ventana con `Date.now()`;
 - al no existir tolerancia en la ruta de ejecución, `computeScheduledRunAt(...)` devolvió `null` y los jobs terminaron como `completed` con `reason = invalid_schedule`, sin crear `FlowExecutionV2`;
 - corrección aplicada: la tolerancia de ejecución solo permite disparar jobs previamente programados que vencen con pequeño retraso del worker. La programación inicial sigue sin crear envíos retroactivos si la ventana ya pasó.
+
+### Barrido de salud de automatizaciones
+
+Desde `2026-04-20` existe el cron `automationHealthCheck` en `src/jobs/sync.jobs.js`.
+
+Objetivo:
+
+- detectar a media mañana y media tarde si una automatización importante ha fallado sin depender de que alguien abra el monitor;
+- dejar evidencia en `SyncLogs` con `job_type = automation_health_check`;
+- avisar a administradores mediante el evento `jobs.automation_health_issue` si hay incidencias críticas.
+
+Horario por defecto:
+
+- `JOBS_AUTOMATION_HEALTH_CHECK_SCHEDULE = 0 10,16 * * *`
+- timezone: `JOBS_TIMEZONE`, normalmente `Europe/Madrid`
+
+Qué revisa:
+
+- `FlowExecutionsV2` en `failed` o `dead_letter` dentro de la ventana reciente;
+- ejecuciones `running` atascadas más de `JOBS_AUTOMATION_HEALTH_STALE_RUNNING_MINUTES` minutos;
+- ejecuciones `waiting` cuyo `wait_until` ya venció con margen de `JOBS_AUTOMATION_HEALTH_OVERDUE_GRACE_MINUTES`;
+- `JobRequests` de `automations_v2_execute` o `appointment_automation_schedule_fire` fallidos;
+- jobs de recordatorio vencidos que siguen `pending`, `waiting` o `running`;
+- jobs de `appointment_automation_schedule_fire` que terminaron `completed` con `result.reason = invalid_schedule`.
+
+Reglas operativas:
+
+- si encuentra incidencias funcionales, el `SyncLog` queda `failed`, pero el cron no lanza excepción para evitar tres reintentos duplicados del mismo barrido;
+- si el propio barrido falla por error técnico de BD/código, sí lanza excepción y entra en el flujo normal de `jobs.failed`;
+- `jobs.automation_health_issue` no usa deduplicación diaria de notificaciones porque hay dos barridos diarios y el de la tarde puede detectar una incidencia distinta;
+- el panel `Settings > Monitorización del sistema` muestra el job programado y el historial;
+- no confundir este barrido con el `healthCheck` genérico, que solo valida dependencias técnicas.
 
 ### Diagnóstico real de una cita que "no disparó" la automatización
 

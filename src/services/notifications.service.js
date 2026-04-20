@@ -68,6 +68,17 @@ function buildNotificationContent(event, payload = {}) {
         level: defaults.level || 'error'
       };
     }
+    case 'jobs.automation_health_issue': {
+      const issueCount = Number(payload.issueCount || 0);
+      const countLabel = issueCount === 1 ? '1 incidencia crítica' : `${issueCount || 'Varias'} incidencias críticas`;
+      const firstIssue = payload.firstIssue?.title ? ` Primera: ${payload.firstIssue.title}.` : '';
+      return {
+        title: 'Barrido de automatizaciones con incidencias',
+        message: `${countLabel} detectadas en automatizaciones importantes.${firstIssue} Revisa Settings > Monitorización del sistema.`,
+        icon: 'heroicons_outline:bolt',
+        level: defaults.level || 'error'
+      };
+    }
     case 'crm.call_back_reminder': {
       const leadName = payload.leadName || 'este lead';
       const clinic = payload.clinicName ? ` en ${payload.clinicName}` : '';
@@ -232,21 +243,24 @@ async function dispatchEvent({ event, clinicId = null, data = {} }) {
   const createPromises = [];
   const today = new Date();
   const startOfDay = new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), today.getUTCDate()));
+  const dedupeDailyEvent = event !== 'jobs.automation_health_issue';
 
   for (const [userId, meta] of uniqueUsers.entries()) {
     createPromises.push((async () => {
-      const existing = await Notification.findOne({
-        where: {
-          userId,
-          event,
-          clinicaId: clinicIdValue,
-          created_at: {
-            [Op.gte]: startOfDay
+      if (dedupeDailyEvent) {
+        const existing = await Notification.findOne({
+          where: {
+            userId,
+            event,
+            clinicaId: clinicIdValue,
+            created_at: {
+              [Op.gte]: startOfDay
+            }
           }
+        });
+        if (existing) {
+          return null;
         }
-      });
-      if (existing) {
-        return null;
       }
       return Notification.create({
         userId,

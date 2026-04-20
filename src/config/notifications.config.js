@@ -49,6 +49,12 @@ const NOTIFICATION_EVENTS = [
     level: 'error'
   },
   {
+    event: 'jobs.automation_health_issue',
+    category: 'jobs',
+    label: 'Barrido de automatizaciones con incidencias',
+    level: 'error'
+  },
+  {
     event: 'crm.call_back_reminder',
     category: 'crm',
     label: 'Recordatorio de volver a llamar',
@@ -96,6 +102,7 @@ const DEFAULT_NOTIFICATION_PREFERENCES = [
   { role: 'propietario', subrole: null, event: 'ads.new_lead', enabled: true },
   { role: 'propietario', subrole: null, event: 'ads.health_issue', enabled: true },
   { role: 'admin', subrole: null, event: 'jobs.failed', enabled: true },
+  { role: 'admin', subrole: null, event: 'jobs.automation_health_issue', enabled: true },
   { role: 'admin', subrole: null, event: 'ads.sync_error', enabled: true },
   { role: 'admin', subrole: null, event: 'ads.new_lead', enabled: true },
   { role: 'admin', subrole: null, event: 'ads.health_issue', enabled: true },
