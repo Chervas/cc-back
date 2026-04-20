@@ -1989,6 +1989,7 @@ Contrato operativo:
   - `window_identifier`
   - `scheduled_for`
 - cuando el job vence, `fireScheduledTrigger(payload)` resuelve la última versión publicada activa del `template_key` y crea una `FlowExecutionV2` normal.
+- al ejecutar un job ya creado, `fireScheduledTrigger(payload)` permite una pequeña tolerancia de reloj/worker (`APPOINTMENT_AUTOMATION_FIRE_GRACE_MS`, por defecto 15 minutos). Esta tolerancia solo aplica a jobs ya programados: evita que un recordatorio a las 09:00 se descarte si el worker lo reclama a las 09:00:19. No convierte el backfill ni la resincronización en envíos retroactivos.
 
 Reglas importantes:
 
@@ -2007,6 +2008,13 @@ Caso real `2026-04-13`:
 - algunas citas tenían jobs `waiting` vencidos con `payload.__runtime_namespace = port:3001`, pero `pm2-back-staging` ya reclamaba solo `staging`;
 - otras citas no tenían job porque la cita existía antes de publicar/activar el flujo programado;
 - no activar aliases ni reclamar jobs vencidos de pacientes reales sin confirmar si se deben enviar tarde.
+
+Caso real `2026-04-20`:
+
+- recordatorios del día anterior en Propdental Eixample sí quedaron programados para `2026-04-20 09:00 Europe/Madrid`;
+- el worker los reclamó unos segundos después de la hora exacta (`09:00:19`) y `fireScheduledTrigger(payload)` recalculó la ventana con `Date.now()`;
+- al no existir tolerancia en la ruta de ejecución, `computeScheduledRunAt(...)` devolvió `null` y los jobs terminaron como `completed` con `reason = invalid_schedule`, sin crear `FlowExecutionV2`;
+- corrección aplicada: la tolerancia de ejecución solo permite disparar jobs previamente programados que vencen con pequeño retraso del worker. La programación inicial sigue sin crear envíos retroactivos si la ventana ya pasó.
 
 ### Diagnóstico real de una cita que "no disparó" la automatización
 
