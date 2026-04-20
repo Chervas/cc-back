@@ -2036,6 +2036,7 @@ Horario por defecto:
 
 - `JOBS_AUTOMATION_HEALTH_CHECK_SCHEDULE = 0 10,16 * * *`
 - timezone: `JOBS_TIMEZONE`, normalmente `Europe/Madrid`
+- ventana: desde el último `automation_health_check` del mismo `JOB_RUNTIME_NAMESPACE`; si no existe, usa `JOBS_AUTOMATION_HEALTH_LOOKBACK_HOURS` como fallback.
 
 Qué revisa:
 
@@ -2051,6 +2052,7 @@ Reglas operativas:
 - si encuentra incidencias funcionales, el `SyncLog` queda `failed`, pero el cron no lanza excepción para evitar tres reintentos duplicados del mismo barrido;
 - si el propio barrido falla por error técnico de BD/código, sí lanza excepción y entra en el flujo normal de `jobs.failed`;
 - `jobs.automation_health_issue` no usa deduplicación diaria de notificaciones porque hay dos barridos diarios y el de la tarde puede detectar una incidencia distinta;
+- cada `status_report` guarda `runtime_namespace`, `since`, `since_source` y `previous_sweep_id` para saber exactamente qué ventana se revisó;
 - el panel `Settings > Monitorización del sistema` muestra el job programado y el historial;
 - no confundir este barrido con el `healthCheck` genérico, que solo valida dependencias técnicas.
 

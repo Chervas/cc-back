@@ -2414,13 +2414,27 @@ async executeAutomationHealthCheck() {
   });
 
   const now = new Date();
+  const runtimeNamespace = process.env.JOB_RUNTIME_NAMESPACE || process.env.RUNTIME_NAMESPACE || (process.env.PORT ? `port:${process.env.PORT}` : null);
   const lookbackHours = Math.max(1, parseInt(process.env.JOBS_AUTOMATION_HEALTH_LOOKBACK_HOURS || '24', 10));
   const staleRunningMinutes = Math.max(5, parseInt(process.env.JOBS_AUTOMATION_HEALTH_STALE_RUNNING_MINUTES || '30', 10));
   const overdueGraceMinutes = Math.max(5, parseInt(process.env.JOBS_AUTOMATION_HEALTH_OVERDUE_GRACE_MINUTES || '15', 10));
-  const since = new Date(now.getTime() - lookbackHours * 60 * 60 * 1000);
+  const fallbackSince = new Date(now.getTime() - lookbackHours * 60 * 60 * 1000);
+  let since = fallbackSince;
+  let sinceSource = 'configured_lookback';
+  let previousSweepId = null;
   const staleBefore = new Date(now.getTime() - staleRunningMinutes * 60 * 1000);
   const overdueBefore = new Date(now.getTime() - overdueGraceMinutes * 60 * 1000);
   const automationJobTypes = ['automations_v2_execute', 'appointment_automation_schedule_fire'];
+
+  const parseReport = (value) => {
+    if (!value) return {};
+    if (typeof value === 'object') return value;
+    try {
+      return JSON.parse(value);
+    } catch {
+      return {};
+    }
+  };
 
   const issues = [];
   const addIssue = (issue) => {
@@ -2473,6 +2487,28 @@ async executeAutomationHealthCheck() {
   });
 
   try {
+    const previousSweepCandidates = await SyncLog.findAll({
+      where: {
+        job_type: 'automation_health_check',
+        id: { [Op.ne]: syncLog.id },
+        start_time: { [Op.lt]: now }
+      },
+      order: [['start_time', 'DESC']],
+      limit: 20
+    });
+    const previousSweep = previousSweepCandidates.find((candidate) => {
+      const report = parseReport(candidate.status_report);
+      return report.runtime_namespace && runtimeNamespace && report.runtime_namespace === runtimeNamespace;
+    });
+    if (previousSweep?.start_time) {
+      const previousStart = new Date(previousSweep.start_time);
+      if (!Number.isNaN(previousStart.getTime()) && previousStart > fallbackSince) {
+        since = previousStart;
+        sinceSource = 'previous_sweep';
+        previousSweepId = previousSweep.id;
+      }
+    }
+
     const failedExecutions = await FlowExecutionV2.findAll({
       where: {
         status: { [Op.in]: ['failed', 'dead_letter'] },
@@ -2626,6 +2662,10 @@ async executeAutomationHealthCheck() {
     const criticalCount = issues.filter((issue) => issue.severity === 'critical').length;
     const report = {
       checked_at: now.toISOString(),
+      runtime_namespace: runtimeNamespace,
+      since: since.toISOString(),
+      since_source: sinceSource,
+      previous_sweep_id: previousSweepId,
       lookback_hours: lookbackHours,
       stale_running_minutes: staleRunningMinutes,
       overdue_grace_minutes: overdueGraceMinutes,
