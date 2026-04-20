@@ -207,6 +207,10 @@ exports.getJobsStatus = async (req, res) => {
     res.json({
       systemRunning: systemStatus.running,
       systemInitialized: systemStatus.initialized,
+      cronLeader: process.env.JOBS_CRON_LEADER === 'true',
+      cronExpectedToRun: process.env.JOBS_CRON_LEADER === 'true',
+      runtimeNamespace: process.env.JOB_RUNTIME_NAMESPACE || process.env.RUNTIME_NAMESPACE || null,
+      runtimeRole: process.env.RUNTIME_ROLE || null,
       jobsCount: systemStatus.jobsCount,
       jobs: jobsView, // incluye description y estado efectivo
       metaUsage: {
