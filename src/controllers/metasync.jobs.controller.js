@@ -50,6 +50,20 @@ function rejectNonLeaderCronStart(res) {
   });
 }
 
+function parseStatusReport(value) {
+  if (!value) {
+    return {};
+  }
+  if (typeof value === 'object') {
+    return value;
+  }
+  try {
+    return JSON.parse(value);
+  } catch {
+    return {};
+  }
+}
+
 /**
  * Inicializar el sistema de jobs cron
  */
@@ -127,7 +141,7 @@ exports.getJobsStatus = async (req, res) => {
       attributes: ['id','job_type', 'status', 'start_time', 'end_time', 'records_processed', 'error_message', 'status_report'],
       where: {
         job_type: {
-          [Op.in]: ['automated_metrics_sync', 'manual_job_execution', 'health_check', 'token_validation', 'data_cleanup', 'ads_sync', 'ads_sync_midday', 'ads_backfill', 'web_sync', 'web_backfill', 'analytics_sync', 'analytics_backfill']
+          [Op.in]: ['automated_metrics_sync', 'manual_job_execution', 'health_check', 'automation_health_check', 'token_validation', 'data_cleanup', 'ads_sync', 'ads_sync_midday', 'ads_backfill', 'web_sync', 'web_backfill', 'analytics_sync', 'analytics_backfill']
         }
       },
       order: [['created_at', 'DESC']],
@@ -219,7 +233,7 @@ exports.getJobsStatus = async (req, res) => {
         completedAt: log.end_time,
         recordsProcessed: log.records_processed,
         errorMessage: log.error_message,
-        statusReport: (() => { try { return JSON.parse(log.status_report || '{}'); } catch { return {}; } })()
+        statusReport: parseStatusReport(log.status_report)
       }))
     });
 
@@ -652,6 +666,7 @@ exports.getJobsLogs = async (req, res) => {
         completedAt: log.end_time,
         recordsProcessed: log.records_processed,
         errorMessage: log.error_message,
+        statusReport: parseStatusReport(log.status_report),
         createdAt: log.created_at
       })),
       pagination: {

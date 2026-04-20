@@ -70,7 +70,11 @@ const {
   BusinessProfileDailyMetric,
   BusinessProfileReview,
   BusinessProfilePost,
-  AdAttributionIssue
+  AdAttributionIssue,
+  FlowExecutionV2,
+  FlowExecutionLogV2,
+  AutomationFlowTemplateV2,
+  JobRequest
 } = require('../../models');
 
 const MS_PER_DAY = 24 * 60 * 60 * 1000;
@@ -180,6 +184,7 @@ class MetaSyncJobs {
       businessProfileBackfill: 'Backfill de Perfil de Empresa Google para nuevas fichas o reprocesos.',
       whatsappTemplatesSync: 'Sincroniza estados de plantillas WhatsApp para todos los WABA activos.',
       whatsappPhonesSync: 'Sincroniza números WhatsApp (existencia/estado) para evitar datos desactualizados.',
+      automationHealthCheck: 'Barrido funcional de automatizaciones críticas: flujos fallidos, jobs vencidos y ejecuciones atascadas.',
       tokenValidation: 'Valida tokens (usuario/página) y registra estado/errores recientes.',
       dataCleanup: 'Limpia registros antiguos según retenciones configuradas (logs, validaciones, métricas).',
       healthCheck: 'Comprueba salud de BD, disponibilidad de Meta API y actividad reciente.'
@@ -204,7 +209,8 @@ class MetaSyncJobs {
         businessProfileSync: process.env.JOBS_BUSINESS_PROFILE_SCHEDULE || '10 5 * * *',
         businessProfileBackfill: process.env.JOBS_BUSINESS_PROFILE_BACKFILL_SCHEDULE || '20 5 * * 0',
         whatsappTemplatesSync: process.env.JOBS_WHATSAPP_TEMPLATES_SCHEDULE || '*/20 * * * *',
-        whatsappPhonesSync: process.env.JOBS_WHATSAPP_PHONES_SCHEDULE || '*/15 * * * *'
+        whatsappPhonesSync: process.env.JOBS_WHATSAPP_PHONES_SCHEDULE || '*/15 * * * *',
+        automationHealthCheck: process.env.JOBS_AUTOMATION_HEALTH_CHECK_SCHEDULE || '0 10,16 * * *'
       },
       timezone: process.env.JOBS_TIMEZONE || 'Europe/Madrid',
       autoStart: process.env.JOBS_AUTO_START === 'true',
@@ -295,6 +301,7 @@ class MetaSyncJobs {
       this.registerJob('businessProfileBackfill', this.config.schedules.businessProfileBackfill, () => this.executeBusinessProfileBackfill());
       this.registerJob('whatsappTemplatesSync', this.config.schedules.whatsappTemplatesSync, () => this.executeWhatsappTemplatesSync());
       this.registerJob('whatsappPhonesSync', this.config.schedules.whatsappPhonesSync, () => this.executeWhatsappPhonesSync());
+      this.registerJob('automationHealthCheck', this.config.schedules.automationHealthCheck, () => this.executeAutomationHealthCheck());
 
       this.isInitialized = true;
       
@@ -2392,6 +2399,293 @@ async syncFacebookPageMetrics(asset) {
     console.log(`🗑️ Eliminadas ${deleted} métricas sociales antiguas (>${this.config.dataRetention.socialStats} días)`);
     return deleted;
   }
+
+  /**
+   * Job: Barrido funcional de automatizaciones críticas
+   */
+async executeAutomationHealthCheck() {
+  console.log('🧭 Ejecutando barrido de salud de automatizaciones...');
+
+  const syncLog = await SyncLog.create({
+    job_type: 'automation_health_check',
+    status: 'running',
+    start_time: new Date(),
+    records_processed: 0
+  });
+
+  const now = new Date();
+  const lookbackHours = Math.max(1, parseInt(process.env.JOBS_AUTOMATION_HEALTH_LOOKBACK_HOURS || '24', 10));
+  const staleRunningMinutes = Math.max(5, parseInt(process.env.JOBS_AUTOMATION_HEALTH_STALE_RUNNING_MINUTES || '30', 10));
+  const overdueGraceMinutes = Math.max(5, parseInt(process.env.JOBS_AUTOMATION_HEALTH_OVERDUE_GRACE_MINUTES || '15', 10));
+  const since = new Date(now.getTime() - lookbackHours * 60 * 60 * 1000);
+  const staleBefore = new Date(now.getTime() - staleRunningMinutes * 60 * 1000);
+  const overdueBefore = new Date(now.getTime() - overdueGraceMinutes * 60 * 1000);
+  const automationJobTypes = ['automations_v2_execute', 'appointment_automation_schedule_fire'];
+
+  const issues = [];
+  const addIssue = (issue) => {
+    issues.push({
+      severity: issue.severity || 'critical',
+      type: issue.type,
+      title: issue.title,
+      detail: issue.detail,
+      data: issue.data || {}
+    });
+  };
+
+  const buildExecutionData = (execution) => {
+    const failedLog = Array.isArray(execution.logs) ? execution.logs[0] : null;
+    return {
+      execution_id: execution.id,
+      status: execution.status,
+      clinic_id: execution.clinic_id,
+      clinic_name: execution.clinic?.nombre_clinica || null,
+      template_version_id: execution.template_version_id,
+      template_name: execution.templateVersion?.name || null,
+      template_key: execution.templateVersion?.template_key || null,
+      template_version: execution.templateVersion?.version || null,
+      trigger_type: execution.trigger_type,
+      trigger_entity_type: execution.trigger_entity_type,
+      trigger_entity_id: execution.trigger_entity_id,
+      current_node_id: execution.current_node_id,
+      wait_until: execution.wait_until,
+      updated_at: execution.updated_at,
+      last_error: execution.last_error || failedLog?.error_message || null,
+      failed_node_id: failedLog?.node_id || null,
+      failed_node_type: failedLog?.node_type || null
+    };
+  };
+
+  const buildJobData = (job) => ({
+    job_request_id: job.id,
+    type: job.type,
+    status: job.status,
+    priority: job.priority,
+    origin: job.origin,
+    attempts: job.attempts,
+    max_attempts: job.max_attempts,
+    next_run_at: job.next_run_at,
+    completed_at: job.completed_at,
+    updated_at: job.updated_at,
+    error_message: job.error_message,
+    result_summary: job.result_summary || null,
+    payload: job.payload || {}
+  });
+
+  try {
+    const failedExecutions = await FlowExecutionV2.findAll({
+      where: {
+        status: { [Op.in]: ['failed', 'dead_letter'] },
+        updated_at: { [Op.gte]: since }
+      },
+      include: [
+        { model: AutomationFlowTemplateV2, as: 'templateVersion', attributes: ['id', 'name', 'template_key', 'version', 'trigger_type'] },
+        { model: Clinica, as: 'clinic', attributes: ['id_clinica', 'nombre_clinica'] },
+        {
+          model: FlowExecutionLogV2,
+          as: 'logs',
+          required: false,
+          separate: true,
+          where: { status: 'error' },
+          attributes: ['id', 'node_id', 'node_type', 'error_message', 'started_at', 'finished_at'],
+          order: [['id', 'DESC']],
+          limit: 1
+        }
+      ],
+      order: [['updated_at', 'DESC']],
+      limit: 50
+    });
+
+    failedExecutions.forEach((execution) => {
+      const data = buildExecutionData(execution);
+      addIssue({
+        type: 'flow_execution_failed',
+        title: `Flujo fallido: ${data.template_name || data.template_key || `#${data.template_version_id}`}`,
+        detail: data.last_error || 'La ejecución quedó marcada como fallida sin detalle.',
+        data
+      });
+    });
+
+    const staleRunningExecutions = await FlowExecutionV2.findAll({
+      where: {
+        status: 'running',
+        updated_at: { [Op.between]: [since, staleBefore] }
+      },
+      include: [
+        { model: AutomationFlowTemplateV2, as: 'templateVersion', attributes: ['id', 'name', 'template_key', 'version', 'trigger_type'] },
+        { model: Clinica, as: 'clinic', attributes: ['id_clinica', 'nombre_clinica'] }
+      ],
+      order: [['updated_at', 'ASC']],
+      limit: 50
+    });
+
+    staleRunningExecutions.forEach((execution) => {
+      const data = buildExecutionData(execution);
+      addIssue({
+        type: 'flow_execution_stale_running',
+        title: `Ejecución atascada: ${data.template_name || data.template_key || `#${data.template_version_id}`}`,
+        detail: `La ejecución sigue en running desde hace más de ${staleRunningMinutes} minutos.`,
+        data
+      });
+    });
+
+    const overdueWaitingExecutions = await FlowExecutionV2.findAll({
+      where: {
+        status: 'waiting',
+        wait_until: { [Op.lt]: overdueBefore },
+        updated_at: { [Op.gte]: since }
+      },
+      include: [
+        { model: AutomationFlowTemplateV2, as: 'templateVersion', attributes: ['id', 'name', 'template_key', 'version', 'trigger_type'] },
+        { model: Clinica, as: 'clinic', attributes: ['id_clinica', 'nombre_clinica'] }
+      ],
+      order: [['wait_until', 'ASC']],
+      limit: 50
+    });
+
+    overdueWaitingExecutions.forEach((execution) => {
+      const data = buildExecutionData(execution);
+      addIssue({
+        type: 'flow_execution_overdue_wait',
+        title: `Espera vencida sin reanudar: ${data.template_name || data.template_key || `#${data.template_version_id}`}`,
+        detail: `La ejecución debía reanudarse hace más de ${overdueGraceMinutes} minutos.`,
+        data
+      });
+    });
+
+    const failedJobs = await JobRequest.findAll({
+      where: {
+        type: { [Op.in]: automationJobTypes },
+        status: 'failed',
+        updated_at: { [Op.gte]: since }
+      },
+      order: [['updated_at', 'DESC']],
+      limit: 50
+    });
+
+    failedJobs.forEach((job) => {
+      const data = buildJobData(job);
+      addIssue({
+        type: 'automation_job_failed',
+        title: `Job de automatización fallido: ${job.type}`,
+        detail: job.error_message || 'La solicitud de job quedó fallida sin detalle.',
+        data
+      });
+    });
+
+    const overdueJobs = await JobRequest.findAll({
+      where: {
+        type: { [Op.in]: automationJobTypes },
+        status: { [Op.in]: ['pending', 'waiting', 'running'] },
+        next_run_at: { [Op.lt]: overdueBefore },
+        updated_at: { [Op.gte]: since }
+      },
+      order: [['next_run_at', 'ASC']],
+      limit: 50
+    });
+
+    overdueJobs.forEach((job) => {
+      const data = buildJobData(job);
+      addIssue({
+        type: 'automation_job_overdue',
+        title: `Job de automatización vencido: ${job.type}`,
+        detail: `La solicitud debía ejecutarse hace más de ${overdueGraceMinutes} minutos y sigue en ${job.status}.`,
+        data
+      });
+    });
+
+    const recentScheduleJobs = await JobRequest.findAll({
+      where: {
+        type: 'appointment_automation_schedule_fire',
+        status: 'completed',
+        completed_at: { [Op.gte]: since }
+      },
+      order: [['completed_at', 'DESC']],
+      limit: 200
+    });
+
+    recentScheduleJobs
+      .filter((job) => {
+        const summary = job.result_summary || {};
+        return summary?.result?.reason === 'invalid_schedule' || summary?.reason === 'invalid_schedule';
+      })
+      .forEach((job) => {
+        const data = buildJobData(job);
+        addIssue({
+          type: 'appointment_schedule_invalid',
+          title: 'Recordatorio programado descartado por horario inválido',
+          detail: 'Un job de recordatorio de cita terminó como completado, pero el motor lo descartó por invalid_schedule.',
+          data
+        });
+      });
+
+    const counts = issues.reduce((acc, issue) => {
+      acc[issue.type] = (acc[issue.type] || 0) + 1;
+      return acc;
+    }, {});
+    const criticalCount = issues.filter((issue) => issue.severity === 'critical').length;
+    const report = {
+      checked_at: now.toISOString(),
+      lookback_hours: lookbackHours,
+      stale_running_minutes: staleRunningMinutes,
+      overdue_grace_minutes: overdueGraceMinutes,
+      issue_count: issues.length,
+      critical_count: criticalCount,
+      counts,
+      issues: issues.slice(0, 75)
+    };
+
+    const hasCriticalIssues = criticalCount > 0;
+    const errorMessage = hasCriticalIssues
+      ? `Se detectaron ${criticalCount} incidencias críticas de automatizaciones.`
+      : null;
+
+    await syncLog.update({
+      status: hasCriticalIssues ? 'failed' : 'completed',
+      end_time: new Date(),
+      records_processed: issues.length,
+      error_message: errorMessage,
+      status_report: report
+    });
+
+    if (hasCriticalIssues) {
+      await notificationService.dispatchEvent({
+        event: 'jobs.automation_health_issue',
+        data: {
+          jobName: 'Barrido de automatizaciones',
+          error: errorMessage,
+          issueCount: criticalCount,
+          counts,
+          firstIssue: issues[0] || null
+        }
+      });
+      console.warn('⚠️ Barrido de automatizaciones con incidencias:', report);
+      return { status: 'failed', ...report };
+    }
+
+    console.log('✅ Barrido de automatizaciones sin incidencias críticas');
+    return { status: 'completed', ...report };
+  } catch (error) {
+    console.error('❌ Error ejecutando barrido de automatizaciones:', error);
+    await syncLog.update({
+      status: 'failed',
+      end_time: new Date(),
+      error_message: error.message,
+      status_report: {
+        checked_at: now.toISOString(),
+        error: error.message
+      }
+    });
+    await notificationService.dispatchEvent({
+      event: 'jobs.failed',
+      data: {
+        jobName: 'automationHealthCheck',
+        error: error.message
+      }
+    });
+    throw error;
+  }
+}
 
   /**
  * Job: Verificación de salud del sistema
