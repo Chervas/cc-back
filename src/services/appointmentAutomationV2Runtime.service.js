@@ -13,6 +13,12 @@ const JobRequest = db.JobRequest;
 const { getIO } = require('./socket.service');
 const { Op } = db.Sequelize;
 const DEFAULT_TIMEZONE = 'Europe/Madrid';
+const SCHEDULED_TRIGGER_FIRE_GRACE_MS = (() => {
+  const configured = Number(process.env.APPOINTMENT_AUTOMATION_FIRE_GRACE_MS);
+  return Number.isFinite(configured) && configured >= 0
+    ? configured
+    : 15 * 60 * 1000;
+})();
 
 const APPOINTMENT_TRIGGER_TYPES = new Set([
   'appointment_created',
@@ -571,13 +577,20 @@ function buildScheduledSlotKey(triggerType, triggerConfig) {
   ].join('|');
 }
 
-function computeScheduledRunAt({ cita, triggerType, triggerConfig, timeZone }) {
+function computeScheduledRunAt({
+  cita,
+  triggerType,
+  triggerConfig,
+  timeZone,
+  pastWindowGraceMs = 0,
+}) {
   const start = cita?.inicio ? new Date(cita.inicio) : null;
   const end = cita?.fin ? new Date(cita.fin) : start;
   if (!start || !Number.isFinite(start.getTime()) || !end || !Number.isFinite(end.getTime())) {
     return null;
   }
   const nowTs = Date.now();
+  const allowedPastMs = Math.max(0, Number(pastWindowGraceMs) || 0);
 
   if (triggerType === 'appointment_reminder_window') {
     const bookingWindow = resolveAppointmentBookingWindowForReminder(cita, timeZone);
@@ -593,7 +606,10 @@ function computeScheduledRunAt({ cita, triggerType, triggerConfig, timeZone }) {
       return null;
     }
     if (triggerConfig?.schedule_time_mode === 'one_hour_before') {
-      return normalizeScheduledDate(new Date(start.getTime() - (60 * 60 * 1000)));
+      const runAt = new Date(start.getTime() - (60 * 60 * 1000));
+      if (!runAt || runAt.getTime() <= nowTs - allowedPastMs) return null;
+      if (runAt.getTime() >= start.getTime()) return null;
+      return normalizeScheduledDate(runAt);
     }
     const baseDateLocal = formatDateLocal(start, timeZone);
     const targetDateLocal = triggerConfig?.schedule_moment === 'week_before'
@@ -605,7 +621,7 @@ function computeScheduledRunAt({ cita, triggerType, triggerConfig, timeZone }) {
     const runAt = localDateTimeToUtc(targetDateLocal, `${triggerConfig?.custom_time || '09:00'}:00`, timeZone);
     // Si la ventana "antes de la cita" ya pasó cuando se crea o resincroniza la cita,
     // no la disparamos de forma retroactiva porque puede pisar el flujo de confirmación.
-    if (!runAt || runAt.getTime() <= nowTs) return null;
+    if (!runAt || runAt.getTime() <= nowTs - allowedPastMs) return null;
     if (!runAt || runAt.getTime() >= start.getTime()) return null;
     return normalizeScheduledDate(runAt);
   }
@@ -1174,6 +1190,7 @@ async function fireScheduledTrigger(payload = {}) {
     triggerType,
     triggerConfig,
     timeZone,
+    pastWindowGraceMs: SCHEDULED_TRIGGER_FIRE_GRACE_MS,
   });
   if (!scheduledFor || !Number.isFinite(scheduledFor.getTime())) {
     return { success: true, skipped: true, reason: 'invalid_schedule' };
