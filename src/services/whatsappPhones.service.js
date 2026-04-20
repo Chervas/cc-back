@@ -19,6 +19,13 @@ function isTestDisplayNumber(displayPhoneNumber) {
   return digitsOnly.startsWith('1555');
 }
 
+function normalizeWhatsappBusinessProfile(payload) {
+  if (!payload) return null;
+  if (Array.isArray(payload)) return payload[0] || null;
+  if (Array.isArray(payload.data)) return payload.data[0] || null;
+  return payload;
+}
+
 function buildRegisteredSnapshot(remote, existingRegistration, isCoexistence = false) {
   const nowIso = new Date().toISOString();
   const codeStatus = String(remote?.code_verification_status || '').toUpperCase();
@@ -69,7 +76,7 @@ async function fetchPhoneProfile({ phoneNumberId, accessToken }) {
       fields: 'about,description,profile_picture_url,vertical,email,websites,address',
     },
   });
-  return resp.data || null;
+  return normalizeWhatsappBusinessProfile(resp.data);
 }
 
 async function fetchNameStatus({ phoneNumberId, accessToken }) {

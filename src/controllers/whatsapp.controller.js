@@ -203,6 +203,13 @@ function assertValidCatalogTemplatePayload({ bodyText }, res) {
   return false;
 }
 
+function normalizeWhatsappBusinessProfile(payload) {
+  if (!payload) return null;
+  if (Array.isArray(payload)) return payload[0] || null;
+  if (Array.isArray(payload.data)) return payload.data[0] || null;
+  return payload;
+}
+
 async function fetchBusinessVerificationStatus({ businessId }) {
   if (!businessId || !META_GRAPH_TOKEN) return null;
   try {
@@ -2284,7 +2291,7 @@ exports.updatePhoneProfile = async (req, res) => {
           params: { fields: 'about,description,profile_picture_url,vertical,email,websites,address' },
         }
       );
-      profileRemote = resp.data || null;
+      profileRemote = normalizeWhatsappBusinessProfile(resp.data);
     } catch (e) {
       profileRemote = null;
     }

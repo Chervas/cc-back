@@ -80,6 +80,7 @@ Antes de activar coexistencia sobre un numero real:
 - el callback crea un `JobRequest` `whatsapp_template_create` con `payload.__runtime_namespace` resuelto por origen (`crm` -> `staging`, `localhost:4203` -> `dev`, `app` -> `prod`);
 - `jobExecutor.service.js` procesa `whatsapp_template_create` ejecutando `createTemplatesFromCatalog(...)`, que transforma placeholders `SIN_CONECTAR` en plantillas enviadas a revision (`PENDING`);
 - `GET /api/whatsapp/phones` expone `connection_mode`, `is_on_biz_app`, `coexistence_status`, `coexistence_can_send_api` y estados de sync inicial para que Ajustes pueda mostrar el modo real;
+- la sync de telefonos debe normalizar `GET /<phone_number_id>/whatsapp_business_profile`: Meta devuelve el perfil en `data[0]`; de ahi salen `vertical`/categoria, descripcion y foto. No leer `profile.vertical` directamente sin normalizar porque dejaria vacia la categoria en Ajustes;
 - `POST /api/whatsapp/phones/:phoneNumberId/coexistence/sync-initial` encola `whatsapp_coexistence_sync_contacts` y `whatsapp_coexistence_sync_history`;
 - los jobs de sync inicial llaman `POST /<BUSINESS_PHONE_NUMBER_ID>/smb_app_data` con `sync_type=smb_app_state_sync` y `sync_type=history`, persistiendo `request_id` y estados en `ClinicMetaAssets.additionalData.coexistence`;
 - estos jobs no se lanzan automaticamente al conectar: se solicitan manualmente desde Ajustes cuando el numero ya esta confirmado en coexistencia, para evitar tocar numeros reales sin QA;
