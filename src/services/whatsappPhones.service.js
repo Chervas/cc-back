@@ -3,10 +3,15 @@
 const axios = require('axios');
 const db = require('../../models');
 const { queues } = require('./queue.service');
+const whatsappTemplatesService = require('./whatsappTemplates.service');
 
-const { ClinicMetaAsset } = db;
+const { ClinicMetaAsset, WhatsappTemplate, Sequelize } = db;
+const { Op } = Sequelize;
 
 const META_API_VERSION = process.env.META_API_VERSION || 'v24.0';
+const TEMPLATE_CREATE_ENSURE_COOLDOWN_MS = Number(
+  process.env.WHATSAPP_TEMPLATE_CREATE_ENSURE_COOLDOWN_MS || 60 * 60 * 1000
+);
 
 function getMetaBaseUrl() {
   return `https://graph.facebook.com/${META_API_VERSION}`;
@@ -170,6 +175,104 @@ async function upsertRemoteState(asset, remote, profile) {
   await asset.save();
 }
 
+function isOperationalPhoneAsset(asset, remote) {
+  const additionalData = asset?.additionalData || {};
+  const registration = additionalData.registration || {};
+  const remoteStatus = String(remote?.status || registration.phoneStatus || '').toUpperCase();
+  const registrationStatus = String(registration.status || '').toLowerCase();
+  const hasScope = Boolean(asset?.clinicaId || asset?.grupoClinicaId);
+  return Boolean(
+    asset?.isActive
+    && asset?.wabaId
+    && asset?.waAccessToken
+    && hasScope
+    && remoteStatus === 'CONNECTED'
+    && registrationStatus === 'registered'
+  );
+}
+
+function resolveTemplateAssignmentScope(asset) {
+  const scope = String(asset?.assignmentScope || '').trim().toLowerCase();
+  if (scope === 'group' && asset?.grupoClinicaId) return 'group';
+  if (scope === 'clinic' && asset?.clinicaId) return 'clinic';
+  if (asset?.grupoClinicaId && !asset?.clinicaId) return 'group';
+  return 'clinic';
+}
+
+function hasRecentTemplateEnsure(additionalData) {
+  const lastQueuedAt = additionalData?.templatesCreateEnsure?.lastQueuedAt;
+  if (!lastQueuedAt) return false;
+  const lastTs = new Date(lastQueuedAt).getTime();
+  if (!Number.isFinite(lastTs)) return false;
+  const cooldownMs = Number.isFinite(TEMPLATE_CREATE_ENSURE_COOLDOWN_MS) && TEMPLATE_CREATE_ENSURE_COOLDOWN_MS >= 0
+    ? TEMPLATE_CREATE_ENSURE_COOLDOWN_MS
+    : 60 * 60 * 1000;
+  return Date.now() - lastTs < cooldownMs;
+}
+
+async function hasTemplatesNeedingCreate(asset) {
+  const wabaId = String(asset?.wabaId || '').trim();
+  if (!wabaId) return false;
+
+  const connectedCount = await WhatsappTemplate.count({
+    where: {
+      waba_id: wabaId,
+      is_active: true,
+      catalog_template_id: { [Op.ne]: null },
+      meta_template_id: { [Op.ne]: null },
+    },
+  });
+
+  if (connectedCount === 0) return true;
+
+  if (!asset?.clinicaId) return false;
+
+  const localPendingCount = await WhatsappTemplate.count({
+    where: {
+      clinic_id: asset.clinicaId,
+      waba_id: null,
+      is_active: true,
+      catalog_template_id: { [Op.ne]: null },
+      [Op.or]: [
+        { status: { [Op.in]: ['SIN_CONECTAR', 'LOCAL_PENDING'] } },
+        { meta_template_id: { [Op.is]: null } },
+      ],
+    },
+  });
+
+  return localPendingCount > 0;
+}
+
+async function maybeEnsureTemplatesForOperationalPhone(asset, remote) {
+  if (!isOperationalPhoneAsset(asset, remote)) return;
+
+  const additionalData = { ...(asset.additionalData || {}) };
+  if (hasRecentTemplateEnsure(additionalData)) return;
+
+  const needsCreate = await hasTemplatesNeedingCreate(asset);
+  if (!needsCreate) return;
+
+  const assignmentScope = resolveTemplateAssignmentScope(asset);
+  await whatsappTemplatesService.enqueueCreateTemplatesJob({
+    wabaId: asset.wabaId,
+    clinicId: assignmentScope === 'clinic' ? asset.clinicaId : null,
+    groupId: assignmentScope === 'group' ? asset.grupoClinicaId : null,
+    assignmentScope,
+    source: 'whatsapp_phone_sync_operational',
+  });
+
+  additionalData.templatesCreateEnsure = {
+    ...(additionalData.templatesCreateEnsure || {}),
+    lastQueuedAt: new Date().toISOString(),
+    reason: 'operational_phone_sync',
+    wabaId: asset.wabaId,
+    phoneNumberId: asset.phoneNumberId || null,
+    assignmentScope,
+  };
+  asset.additionalData = additionalData;
+  await asset.save();
+}
+
 async function resolveAccessToken(wabaId) {
   const asset = await ClinicMetaAsset.findOne({
     where: {
@@ -256,6 +359,7 @@ async function syncPhonesForWaba({ wabaId, accessToken }) {
     }
     const profileInfo = profileMap.get(remote.id) || null;
     await upsertRemoteState(asset, remote, profileInfo);
+    await maybeEnsureTemplatesForOperationalPhone(asset, remote);
   }
 
   return {
