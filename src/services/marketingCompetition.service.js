@@ -26,6 +26,7 @@ const DEFAULT_AD_LIMIT = Math.max(1, Math.min(100, parseInt(process.env.COMPETIT
 const DEFAULT_RANKING_LIMIT = Math.max(1, Math.min(5, parseInt(process.env.COMPETITION_LOCAL_RANKING_TERMS_LIMIT || '3', 10)));
 const SNAPSHOT_MEDIA_TIMEOUT_MS = Math.max(1000, Math.min(15000, parseInt(process.env.COMPETITION_META_SNAPSHOT_MEDIA_TIMEOUT_MS || '6000', 10)));
 const SNAPSHOT_MEDIA_LIMIT = Math.max(0, Math.min(DEFAULT_AD_LIMIT, parseInt(process.env.COMPETITION_META_SNAPSHOT_MEDIA_LIMIT || String(DEFAULT_AD_LIMIT), 10)));
+const SOCIAL_DISCOVERY_TIMEOUT_MS = Math.max(1000, Math.min(15000, parseInt(process.env.COMPETITION_SOCIAL_DISCOVERY_TIMEOUT_MS || '8000', 10)));
 
 const PLACE_FIELD_MASK = [
   'places.id',
@@ -181,6 +182,180 @@ function extractFirstMediaFromHtml(html) {
   const videoMatch = text.match(/<(?:video|source)\b[^>]*\bsrc\s*=\s*(['"])(.*?)\1/i);
   const rawVideo = normalizeUrl(decodeHtmlEntities(videoMatch?.[2] || ''));
   return rawVideo ? { video_url: rawVideo, image_url: null, thumbnail_url: null } : null;
+}
+
+function absolutizeUrl(value, baseUrl = null) {
+  const text = cleanString(decodeHtmlEntities(value));
+  if (!text) return null;
+  try {
+    if (baseUrl) return normalizeUrl(new URL(text, baseUrl).toString());
+    return normalizeUrl(text);
+  } catch (_) {
+    return normalizeUrl(text);
+  }
+}
+
+function normalizeSocialProfileUrl(value, baseUrl = null) {
+  const url = absolutizeUrl(value, baseUrl);
+  if (!url) return null;
+  try {
+    const parsed = new URL(url);
+    const host = parsed.hostname.replace(/^www\./i, '').toLowerCase();
+    if (host === 'fb.com') parsed.hostname = 'facebook.com';
+    const normalizedHost = parsed.hostname.replace(/^www\./i, '').toLowerCase();
+    if (!['facebook.com', 'instagram.com'].includes(normalizedHost)) return null;
+
+    const path = parsed.pathname.replace(/\/+$/g, '');
+    const ignored = [
+      '/share',
+      '/sharer',
+      '/dialog',
+      '/plugins',
+      '/privacy',
+      '/legal',
+      '/explore',
+      '/accounts',
+      '/p',
+      '/reel',
+      '/stories',
+      '/ads',
+      '/ads/library'
+    ];
+    if (!path || path === '/' || ignored.some((prefix) => path.toLowerCase().startsWith(prefix))) return null;
+    parsed.hash = '';
+    parsed.search = '';
+    return parsed.toString().replace(/\/$/g, '');
+  } catch (_) {
+    return null;
+  }
+}
+
+function usernameFromSocialUrl(value, platform) {
+  const url = normalizeSocialProfileUrl(value);
+  if (!url) return null;
+  try {
+    const parsed = new URL(url);
+    const host = parsed.hostname.replace(/^www\./i, '').toLowerCase();
+    if (platform === 'instagram' && host !== 'instagram.com') return null;
+    if (platform === 'facebook' && host !== 'facebook.com') return null;
+    const first = parsed.pathname.split('/').map(cleanString).filter(Boolean)[0];
+    return first || null;
+  } catch (_) {
+    return null;
+  }
+}
+
+function socialUrlFromUsername(value, platform) {
+  const text = cleanString(value);
+  if (!text) return null;
+  if (/^https?:\/\//i.test(text)) return normalizeSocialProfileUrl(text);
+  const username = text.replace(/^@/, '').replace(/^\/+/, '').split(/[/?#]/)[0];
+  if (!username) return null;
+  if (platform === 'instagram') return `https://www.instagram.com/${username}`;
+  if (platform === 'facebook') return `https://www.facebook.com/${username}`;
+  return null;
+}
+
+function extractSocialProfilesFromHtml(html, baseUrl) {
+  const profiles = {};
+  const text = String(html || '');
+  const hrefRegex = /\bhref\s*=\s*(['"])(.*?)\1/gi;
+  let match;
+  while ((match = hrefRegex.exec(text)) !== null) {
+    const url = normalizeSocialProfileUrl(match[2], baseUrl);
+    if (!url) continue;
+    const host = new URL(url).hostname.replace(/^www\./i, '').toLowerCase();
+    if (host === 'instagram.com' && !profiles.instagram_url) profiles.instagram_url = url;
+    if (host === 'facebook.com' && !profiles.facebook_url) profiles.facebook_url = url;
+    if (profiles.instagram_url && profiles.facebook_url) break;
+  }
+
+  if (profiles.instagram_url) profiles.instagram_username = usernameFromSocialUrl(profiles.instagram_url, 'instagram');
+  if (profiles.facebook_url) profiles.facebook_username = usernameFromSocialUrl(profiles.facebook_url, 'facebook');
+  return profiles;
+}
+
+function socialProfilesFromPayload(payload = {}) {
+  return payload?.clinicaclick_social_profiles || payload?.manual?.social_profiles || null;
+}
+
+function mergeSocialProfiles(left = null, right = null) {
+  const result = {};
+  for (const source of [left, right]) {
+    if (!source || typeof source !== 'object') continue;
+    for (const field of ['instagram_url', 'instagram_username', 'facebook_url', 'facebook_username', 'source', 'checked_at', 'error']) {
+      if (source[field] && !result[field]) result[field] = source[field];
+    }
+  }
+  return Object.keys(result).length ? result : null;
+}
+
+function buildSocialProfilesFromPayload(payload = {}) {
+  const instagramUrl = normalizeSocialProfileUrl(payload.instagram_url) || socialUrlFromUsername(payload.instagram_username, 'instagram');
+  const facebookUrl = normalizeSocialProfileUrl(payload.facebook_url) || socialUrlFromUsername(payload.facebook_username, 'facebook');
+  const profiles = {
+    instagram_url: instagramUrl,
+    instagram_username: cleanString(payload.instagram_username) || usernameFromSocialUrl(instagramUrl, 'instagram'),
+    facebook_url: facebookUrl,
+    facebook_username: cleanString(payload.facebook_username) || usernameFromSocialUrl(facebookUrl, 'facebook'),
+    source: instagramUrl || facebookUrl ? 'manual' : null,
+    checked_at: instagramUrl || facebookUrl ? new Date().toISOString() : null
+  };
+  return Object.fromEntries(Object.entries(profiles).filter(([, value]) => !!value));
+}
+
+function withSocialProfilesInRawPayload(rawPayload, profiles) {
+  if (!profiles || !Object.keys(profiles).length) return rawPayload || null;
+  const base = rawPayload && typeof rawPayload === 'object' && !Array.isArray(rawPayload) ? rawPayload : {};
+  return {
+    ...base,
+    clinicaclick_social_profiles: mergeSocialProfiles(socialProfilesFromPayload(base), profiles)
+  };
+}
+
+function metaTermsFromCompetitor(competitor, socialProfiles = null) {
+  const terms = [
+    ...(Array.isArray(competitor?.meta_ads_search_terms) ? competitor.meta_ads_search_terms : []),
+    competitor?.name,
+    socialProfiles?.instagram_username ? `@${socialProfiles.instagram_username}` : null,
+    socialProfiles?.instagram_username,
+    socialProfiles?.facebook_username,
+  ];
+  return [...new Set(terms.map(cleanString).filter(Boolean))].slice(0, 8);
+}
+
+async function discoverSocialProfiles(competitor, candidate = {}) {
+  const existing = socialProfilesFromPayload(competitor?.raw_place_payload);
+  const manual = buildSocialProfilesFromPayload(candidate);
+  let profiles = mergeSocialProfiles(existing, manual);
+  if (profiles?.instagram_url && profiles?.facebook_url) return profiles;
+
+  const websiteUrl = normalizeUrl(candidate.website_url) || normalizeUrl(competitor?.website_url);
+  if (!websiteUrl) return profiles;
+
+  try {
+    const response = await axios.get(websiteUrl, {
+      timeout: SOCIAL_DISCOVERY_TIMEOUT_MS,
+      maxContentLength: 1024 * 1024,
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (compatible; ClinicaClickBot/1.0; +https://clinicaclick.com)',
+        'Accept': 'text/html,application/xhtml+xml'
+      }
+    });
+    const discovered = extractSocialProfilesFromHtml(response.data, websiteUrl);
+    profiles = mergeSocialProfiles(profiles, {
+      ...discovered,
+      source: Object.keys(discovered).length ? 'website_homepage' : null,
+      checked_at: new Date().toISOString()
+    });
+    return profiles;
+  } catch (error) {
+    return mergeSocialProfiles(profiles, {
+      source: 'website_homepage',
+      checked_at: new Date().toISOString(),
+      error: error?.response?.status ? `HTTP ${error.response.status}` : (error?.code || error?.message || 'social_discovery_failed')
+    });
+  }
 }
 
 function splitSearchTerms(value) {
@@ -852,6 +1027,7 @@ function mapCompetitorRow(row, latestSnapshot = null, latestAdSnapshot = null) {
       error_message: ads?.error_message || null,
       last_synced_at: plain.last_ads_synced_at
     },
+    social_profiles: socialProfilesFromPayload(plain.raw_place_payload),
     photo_name: extractPhotoNames(plain.raw_place_payload || [])[0] || null,
     latest_snapshot: snapshot ? {
       date: snapshot.snapshot_date,
@@ -1104,14 +1280,20 @@ function scopeDefaults(scope) {
 }
 
 async function createCompetitor(scope, payload = {}) {
-  const metaSearchTerms = splitSearchTerms(payload.meta_ads_search_terms ?? payload.meta_search_terms);
+  const socialProfiles = buildSocialProfilesFromPayload(payload);
+  const metaSearchTerms = [...new Set([
+    ...splitSearchTerms(payload.meta_ads_search_terms ?? payload.meta_search_terms),
+    ...(socialProfiles.instagram_username ? [`@${socialProfiles.instagram_username}`, socialProfiles.instagram_username] : []),
+    ...(socialProfiles.facebook_username ? [socialProfiles.facebook_username] : [])
+  ].map(cleanString).filter(Boolean))];
   const metaPageUrl = normalizeUrl(payload.meta_page_url) || normalizeUrl(payload.facebook_url) || normalizeUrl(payload.instagram_url);
   const metaPageId = cleanString(payload.meta_page_id) || extractMetaPageIdFromUrl(metaPageUrl);
   const manualPayload = {
     facebook_url: normalizeUrl(payload.facebook_url),
     instagram_url: normalizeUrl(payload.instagram_url),
     notes: cleanString(payload.notes),
-    meta_search_terms: metaSearchTerms
+    meta_search_terms: metaSearchTerms,
+    social_profiles: socialProfiles
   };
   const hasManualPayload = Object.values(manualPayload).some((value) => Array.isArray(value) ? value.length : !!value);
   const normalizedPlace = payload.google_place_id || payload.raw_place_payload ? normalizePlace({
@@ -1149,7 +1331,7 @@ async function createCompetitor(scope, payload = {}) {
     meta_page_name: cleanString(payload.meta_page_name),
     meta_page_url: metaPageUrl,
     meta_ads_search_terms: metaSearchTerms,
-    raw_place_payload: payload.raw_place_payload || normalizedPlace.raw_place_payload || (hasManualPayload ? { manual: manualPayload } : null),
+    raw_place_payload: withSocialProfilesInRawPayload(payload.raw_place_payload || normalizedPlace.raw_place_payload || (hasManualPayload ? { manual: manualPayload } : null), socialProfiles),
     is_active: payload.is_active !== false,
     last_sync_status: 'created'
   };
@@ -1203,6 +1385,16 @@ async function updateCompetitor(scope, competitorId, payload = {}) {
   if (payload.meta_ads_search_terms !== undefined) {
     patch.meta_ads_search_terms = Array.isArray(payload.meta_ads_search_terms) ? payload.meta_ads_search_terms.map(cleanString).filter(Boolean) : [];
   }
+  const socialProfiles = buildSocialProfilesFromPayload(payload);
+  if (Object.keys(socialProfiles).length) {
+    patch.raw_place_payload = withSocialProfilesInRawPayload(competitor.raw_place_payload, socialProfiles);
+    patch.meta_ads_search_terms = [...new Set([
+      ...(patch.meta_ads_search_terms || competitor.meta_ads_search_terms || []),
+      ...(socialProfiles.instagram_username ? [`@${socialProfiles.instagram_username}`, socialProfiles.instagram_username] : []),
+      ...(socialProfiles.facebook_username ? [socialProfiles.facebook_username] : [])
+    ].map(cleanString).filter(Boolean))];
+    if (!patch.meta_page_url && socialProfiles.facebook_url) patch.meta_page_url = socialProfiles.facebook_url;
+  }
   if (!patch.meta_page_id && (payload.meta_page_url !== undefined || payload.facebook_url !== undefined || payload.instagram_url !== undefined)) {
     patch.meta_page_id = extractMetaPageIdFromUrl(patch.meta_page_url || payload.facebook_url || payload.instagram_url);
   }
@@ -1238,6 +1430,10 @@ async function refreshOneCompetitor(competitor, scope) {
     try {
       const place = await getGooglePlaceDetails(competitor.google_place_id);
       const normalized = normalizePlace(place);
+      const socialProfiles = await discoverSocialProfiles(competitor, {
+        website_url: normalized.website_url,
+        facebook_url: competitor.meta_page_url
+      });
       Object.assign(patch, {
         google_maps_url: normalized.google_maps_url,
         website_url: normalized.website_url,
@@ -1249,9 +1445,14 @@ async function refreshOneCompetitor(competitor, scope) {
         rating: normalized.rating,
         review_count: normalized.review_count,
         business_status: normalized.business_status,
-        raw_place_payload: place,
+        raw_place_payload: withSocialProfilesInRawPayload(place, socialProfiles),
         last_places_synced_at: new Date()
       });
+      if (socialProfiles) {
+        patch.meta_ads_search_terms = metaTermsFromCompetitor({ ...competitor.toJSON(), ...patch }, socialProfiles);
+        if (!patch.meta_page_url && socialProfiles.facebook_url) patch.meta_page_url = socialProfiles.facebook_url;
+        if (!patch.meta_page_id && patch.meta_page_url) patch.meta_page_id = extractMetaPageIdFromUrl(patch.meta_page_url);
+      }
       await competitor.update(patch);
       await upsertPlaceSnapshot(competitor, place);
       report.places = { status: 'completed' };
@@ -1260,6 +1461,18 @@ async function refreshOneCompetitor(competitor, scope) {
       report.places = { status: 'unavailable', error: normalizedError };
       patch.last_sync_status = 'partial_error';
       patch.last_sync_error = normalizedError.message;
+    }
+  } else {
+    const socialProfiles = await discoverSocialProfiles(competitor, {
+      website_url: competitor.website_url,
+      facebook_url: competitor.meta_page_url
+    });
+    if (socialProfiles) {
+      patch.raw_place_payload = withSocialProfilesInRawPayload(competitor.raw_place_payload, socialProfiles);
+      patch.meta_ads_search_terms = metaTermsFromCompetitor({ ...competitor.toJSON(), ...patch }, socialProfiles);
+      if (!patch.meta_page_url && socialProfiles.facebook_url) patch.meta_page_url = socialProfiles.facebook_url;
+      if (!patch.meta_page_id && patch.meta_page_url) patch.meta_page_id = extractMetaPageIdFromUrl(patch.meta_page_url);
+      await competitor.update(patch);
     }
   }
 
