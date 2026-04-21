@@ -23,6 +23,8 @@ const DEFAULT_LANGUAGE = process.env.COMPETITION_GOOGLE_LANGUAGE || 'es';
 const DEFAULT_REGION = process.env.COMPETITION_GOOGLE_REGION || 'ES';
 const DEFAULT_LIMIT = Math.max(1, Math.min(25, parseInt(process.env.COMPETITION_SUGGESTION_LIMIT || '10', 10)));
 const DEFAULT_AD_LIMIT = Math.max(1, Math.min(100, parseInt(process.env.COMPETITION_META_AD_LIMIT || '25', 10)));
+const SNAPSHOT_MEDIA_TIMEOUT_MS = Math.max(1000, Math.min(15000, parseInt(process.env.COMPETITION_META_SNAPSHOT_MEDIA_TIMEOUT_MS || '6000', 10)));
+const SNAPSHOT_MEDIA_LIMIT = Math.max(0, Math.min(DEFAULT_AD_LIMIT, parseInt(process.env.COMPETITION_META_SNAPSHOT_MEDIA_LIMIT || String(DEFAULT_AD_LIMIT), 10)));
 
 const PLACE_FIELD_MASK = [
   'places.id',
@@ -115,8 +117,60 @@ function normalizePlaceId(value) {
 function normalizeUrl(value) {
   const text = cleanString(value);
   if (!text) return null;
+  if (/^\/\//.test(text)) return `https:${text}`;
   if (/^https?:\/\//i.test(text)) return text;
+  if (/^[a-z][a-z0-9+.-]*:/i.test(text)) return null;
   return `https://${text}`;
+}
+
+function decodeHtmlEntities(value) {
+  return String(value || '')
+    .replace(/&amp;/g, '&')
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>');
+}
+
+function extractMetaTagContent(html, keys = []) {
+  const wanted = new Set(keys.map((key) => String(key || '').toLowerCase()));
+  const tagRegex = /<meta\b[^>]*>/gi;
+  let match;
+  while ((match = tagRegex.exec(String(html || ''))) !== null) {
+    const tag = match[0];
+    const attrs = {};
+    const attrRegex = /([a-zA-Z_:.-]+)\s*=\s*(['"])(.*?)\2/g;
+    let attrMatch;
+    while ((attrMatch = attrRegex.exec(tag)) !== null) {
+      attrs[attrMatch[1].toLowerCase()] = decodeHtmlEntities(attrMatch[3]);
+    }
+    const key = String(attrs.property || attrs.name || '').toLowerCase();
+    const content = normalizeUrl(attrs.content);
+    if (wanted.has(key) && content) return content;
+  }
+  return null;
+}
+
+function extractFirstMediaFromHtml(html) {
+  const text = String(html || '');
+  const video = extractMetaTagContent(text, [
+    'og:video:secure_url',
+    'og:video:url',
+    'og:video',
+    'twitter:player:stream'
+  ]);
+  const image = extractMetaTagContent(text, [
+    'og:image:secure_url',
+    'og:image:url',
+    'og:image',
+    'twitter:image'
+  ]);
+
+  if (video || image) return { video_url: video, image_url: image, thumbnail_url: image };
+
+  const videoMatch = text.match(/<(?:video|source)\b[^>]*\bsrc\s*=\s*(['"])(.*?)\1/i);
+  const rawVideo = normalizeUrl(decodeHtmlEntities(videoMatch?.[2] || ''));
+  return rawVideo ? { video_url: rawVideo, image_url: null, thumbnail_url: null } : null;
 }
 
 function splitSearchTerms(value) {
@@ -180,7 +234,7 @@ function providerStatus({ googleError = null, metaError = null, metaTokenSource 
       token_source: metaToken ? 'env' : (metaTokenSource || null),
       error: metaError ? normalizeExternalError(metaError) : null,
       required_env: 'META_AD_LIBRARY_ACCESS_TOKEN',
-      note: 'Solo se usa la API oficial de Meta. Si Meta no devuelve datos o rechaza el token, la UI debe mostrar aviso y no usar scraping.'
+      note: 'Se usa Meta Ads Library oficial y, si existe snapshot público, se intenta extraer una previsualización visual best-effort. Si no hay media, la UI muestra enlace a Meta.'
     }
   };
 }
@@ -419,10 +473,61 @@ function normalizeMetaAd(ad = {}) {
     snapshot_url: normalizeUrl(ad.ad_snapshot_url),
     platforms: Array.isArray(ad.publisher_platforms) ? ad.publisher_platforms : [],
     reached_countries: Array.isArray(ad.ad_reached_countries) ? ad.ad_reached_countries : [],
+    media_url: normalizeUrl(ad.media_url),
+    image_url: normalizeUrl(ad.image_url),
+    thumbnail_url: normalizeUrl(ad.thumbnail_url),
+    video_url: normalizeUrl(ad.video_url),
+    media_source: cleanString(ad.media_source),
     created_at: cleanString(ad.ad_creation_time),
     delivery_start_at: cleanString(ad.ad_delivery_start_time),
     delivery_stop_at: cleanString(ad.ad_delivery_stop_time)
   };
+}
+
+async function enrichAdWithSnapshotMedia(ad = {}) {
+  const snapshotUrl = normalizeUrl(ad.snapshot_url);
+  if (!snapshotUrl || ad.image_url || ad.video_url || ad.media_url) return ad;
+  try {
+    const response = await axios.get(snapshotUrl, {
+      timeout: SNAPSHOT_MEDIA_TIMEOUT_MS,
+      maxContentLength: 5 * 1024 * 1024,
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (compatible; ClinicaClickBot/1.0; +https://clinicaclick.com)',
+        'Accept': 'text/html,application/xhtml+xml'
+      }
+    });
+    const media = extractFirstMediaFromHtml(response.data);
+    if (!media?.image_url && !media?.video_url) {
+      return { ...ad, media_source: ad.media_source || 'snapshot_unavailable' };
+    }
+    return {
+      ...ad,
+      ...media,
+      media_url: media.video_url || media.image_url || ad.media_url || null,
+      media_source: 'snapshot_html'
+    };
+  } catch (error) {
+    return {
+      ...ad,
+      media_source: 'snapshot_unavailable',
+      media_error: error?.response?.status ? `HTTP ${error.response.status}` : (error?.code || error?.message || 'snapshot_unavailable')
+    };
+  }
+}
+
+async function enrichAdsWithSnapshotMedia(ads = []) {
+  if (!SNAPSHOT_MEDIA_LIMIT || !Array.isArray(ads) || !ads.length) return ads;
+  const enriched = [...ads];
+  let cursor = 0;
+  const workerCount = Math.min(3, SNAPSHOT_MEDIA_LIMIT, ads.length);
+  async function worker() {
+    while (cursor < Math.min(SNAPSHOT_MEDIA_LIMIT, ads.length)) {
+      const index = cursor++;
+      enriched[index] = await enrichAdWithSnapshotMedia(ads[index]);
+    }
+  }
+  await Promise.all(Array.from({ length: workerCount }, worker));
+  return enriched;
 }
 
 async function fetchMetaAdsForCompetitor(competitor, scope) {
@@ -460,10 +565,11 @@ async function fetchMetaAdsForCompetitor(competitor, scope) {
 
   const response = await metaGet('ads_archive', { params, accessToken, timeout: 30000 });
   const data = Array.isArray(response.data?.data) ? response.data.data : [];
+  const ads = data.map(normalizeMetaAd);
   return {
     tokenSource: source,
     raw: response.data,
-    ads: data.map(normalizeMetaAd)
+    ads: await enrichAdsWithSnapshotMedia(ads)
   };
 }
 

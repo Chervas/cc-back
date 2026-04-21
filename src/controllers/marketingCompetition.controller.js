@@ -8,6 +8,7 @@ async function resolveScope(req, { allowAll = true } = {}) {
     || req.query.clinica_id
     || req.body?.clinicId
     || req.body?.clinica_id
+    || req.body?.clinic_id
     || req.query.scope
     || req.body?.scope
     || 'all';
