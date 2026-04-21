@@ -118,13 +118,6 @@ function providerStatus({ googleError = null, metaError = null, metaTokenSource 
       error: metaError ? normalizeExternalError(metaError) : null,
       required_env: 'META_AD_LIBRARY_ACCESS_TOKEN',
       note: 'Solo se usa la API oficial de Meta. Si Meta no devuelve datos o rechaza el token, la UI debe mostrar aviso y no usar scraping.'
-    },
-    google_ads: {
-      provider: 'google_ads',
-      available: false,
-      configured: false,
-      error: null,
-      note: 'Pendiente para competencia: Google Ads API solo cubre cuentas propias autorizadas. No usar scraping del Transparency Center.'
     }
   };
 }
@@ -712,8 +705,7 @@ async function refreshCompetition(scope, { competitorIds = null } = {}) {
   const report = {
     provider: {
       google_places: { configured: !!getGooglePlacesApiKey() },
-      meta_ads_library: { configured: !!getMetaAdLibraryTokenFromEnv() },
-      google_ads: { configured: false, note: 'Pendiente para anuncios de competencia; Google Ads propio se sincroniza en jobs separados.' }
+      meta_ads_library: { configured: !!getMetaAdLibraryTokenFromEnv() }
     },
     competitors: competitors.length,
     processed: 0,
