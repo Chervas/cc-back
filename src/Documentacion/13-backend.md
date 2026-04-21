@@ -2000,6 +2000,7 @@ Contrato operativo:
 Reglas importantes:
 
 - `appointment_reminder_window` no debe programarse si la cita ya ha empezado;
+- si el trigger `appointment_reminder_window` tiene `exclude_if_not_confirmed = true`, `fireScheduledTrigger(...)` vuelve a consultar el estado actual de la cita al vencer el job y lo omite con `appointment_not_confirmed` salvo que esté en `info_confirmada`, `recordatorio_confirmado` o `completada`;
 - el backfill de publicación no dispara recordatorios retroactivos si la ventana ya pasó; solo deja programadas ventanas futuras;
 - `appointment_after` sí puede quedar programado desde la creación inicial de la cita;
 - el entorno debe aislar sus colas con `QUEUE_PREFIX` propio;

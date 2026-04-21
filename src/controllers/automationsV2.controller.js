@@ -1299,6 +1299,7 @@ function normalizeTriggerConfigForTemplate({ triggerType, entryNodeId, nodes }) 
         custom_time: customTime,
         exclude_if_booked_day_before: parseBool(rawConfig.exclude_if_booked_day_before, false) === true,
         exclude_if_booked_same_day: parseBool(rawConfig.exclude_if_booked_same_day, false) === true,
+        exclude_if_not_confirmed: parseBool(rawConfig.exclude_if_not_confirmed, false) === true,
       },
     };
   }
@@ -1431,6 +1432,7 @@ function applyTriggerConfigToNodes({ triggerType, entryNodeId, nodes, triggerCon
       custom_time: cleanString(triggerConfig.custom_time || '09:00') || null,
       exclude_if_booked_day_before: parseBool(triggerConfig.exclude_if_booked_day_before, false) === true,
       exclude_if_booked_same_day: parseBool(triggerConfig.exclude_if_booked_same_day, false) === true,
+      exclude_if_not_confirmed: parseBool(triggerConfig.exclude_if_not_confirmed, false) === true,
     };
   } else if (normalizedTriggerType === 'appointment_after' && isObject(triggerConfig)) {
     sanitizedTriggerConfig = {

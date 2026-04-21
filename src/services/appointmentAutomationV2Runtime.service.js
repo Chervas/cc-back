@@ -71,6 +71,11 @@ const ACTIVE_APPOINTMENT_STATUSES = new Set([
   'recordatorio_confirmado',
   'reprogramada',
 ]);
+const CONFIRMED_APPOINTMENT_STATUSES = new Set([
+  'info_confirmada',
+  'recordatorio_confirmado',
+  'completada',
+]);
 
 function toIntOrNull(value) {
   if (value === undefined || value === null || value === '') return null;
@@ -359,7 +364,12 @@ function normalizeAppointmentBeforeTriggerConfig(rawConfig) {
     custom_time: customTime,
     exclude_if_booked_day_before: parseBool(config.exclude_if_booked_day_before, false) === true,
     exclude_if_booked_same_day: parseBool(config.exclude_if_booked_same_day, false) === true,
+    exclude_if_not_confirmed: parseBool(config.exclude_if_not_confirmed, false) === true,
   };
+}
+
+function isAppointmentConfirmedForReminder(cita) {
+  return CONFIRMED_APPOINTMENT_STATUSES.has(cleanString(cita?.estado).toLowerCase());
 }
 
 function resolveAppointmentBookingWindowForReminder(cita, timeZone) {
@@ -1185,6 +1195,14 @@ async function fireScheduledTrigger(payload = {}) {
   }
 
   const triggerConfig = getTemplateTriggerConfig(template);
+  if (
+    triggerType === 'appointment_reminder_window' &&
+    triggerConfig?.exclude_if_not_confirmed === true &&
+    !isAppointmentConfirmedForReminder(cita)
+  ) {
+    return { success: true, skipped: true, reason: 'appointment_not_confirmed' };
+  }
+
   const scheduledFor = computeScheduledRunAt({
     cita,
     triggerType,
