@@ -222,6 +222,8 @@ Principios:
 - Guardar solo competidores confirmados por el usuario.
 - Actualizar semanalmente por cron, no en cada render del informe.
 - Consultar anuncios mediante la API oficial de Meta Ads Library. Si Meta devuelve `ad_snapshot_url`, el backend puede intentar extraer imagen/vídeo público del snapshot como previsualización best-effort. Si el token no tiene acceso o Meta no devuelve datos, persiste `status=unavailable` y la UI debe mostrar aviso.
+- El alta/edición de competidor acepta `meta_page_url`. Si la URL contiene `view_all_page_id`, `search_page_ids`, `page_id` o `id`, backend extrae automáticamente `meta_page_id` para consultar la página exacta de Meta Ads Library.
+- Los competidores se etiquetan con `relevance` frente a las disciplinas de la clínica. Los que no encajan, por ejemplo competidores médicos genéricos en una clínica capilar, no se borran automáticamente, pero la UI debe marcarlos como `Revisar`.
 
 Tablas:
 
@@ -247,7 +249,7 @@ Job:
 - `competitionSync`, cola `competition_refresh`, schedule por defecto `0 6 * * 1`.
 - Variables: `GOOGLE_PLACES_API_KEY`, `META_AD_LIBRARY_ACCESS_TOKEN`, `JOBS_COMPETITION_SCHEDULE`, `COMPETITION_SUGGESTION_LIMIT`, `COMPETITION_META_AD_LIMIT`, `COMPETITION_META_AD_COUNTRY`.
 - Si `GOOGLE_PLACES_API_KEY` no está presente, las sugerencias devuelven proveedor no configurado.
-- Si `META_AD_LIBRARY_ACCESS_TOKEN` no está presente, se intenta una conexión Meta activa del scope; si tampoco existe o Meta rechaza el endpoint, se guarda aviso de no disponibilidad.
+- Si `META_AD_LIBRARY_ACCESS_TOKEN` no está presente, se intenta `META_GRAPH_TOKEN` y después una conexión Meta activa del scope. Si Meta rechaza `ads_archive` con permiso insuficiente, se guarda `status=unavailable` con el error real; esto no debe interpretarse como "sin anuncios activos".
 
 ## 2026-03-27 - Integración de terceros Meta/Google: estado exacto
 

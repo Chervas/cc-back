@@ -244,6 +244,7 @@ function providerStatus({ googleError = null, metaError = null, metaTokenSource 
       token_source: metaToken ? 'env' : (metaTokenSource || null),
       error: metaError ? normalizeExternalError(metaError) : null,
       required_env: 'META_AD_LIBRARY_ACCESS_TOKEN',
+      fallback_env: ['META_GRAPH_TOKEN'],
       note: 'Se usa Meta Ads Library oficial y, si existe snapshot público, se intenta extraer una previsualización visual best-effort. Si no hay media, la UI muestra enlace a Meta.'
     }
   };
@@ -265,7 +266,27 @@ function getGooglePlacesApiKey() {
 }
 
 function getMetaAdLibraryTokenFromEnv() {
-  return process.env.META_AD_LIBRARY_ACCESS_TOKEN || null;
+  return process.env.META_AD_LIBRARY_ACCESS_TOKEN || process.env.META_GRAPH_TOKEN || null;
+}
+
+function extractMetaPageIdFromUrl(value) {
+  const url = normalizeUrl(value);
+  if (!url) return null;
+  try {
+    const parsed = new URL(url);
+    const queryId = parsed.searchParams.get('view_all_page_id')
+      || parsed.searchParams.get('search_page_ids')
+      || parsed.searchParams.get('page_id')
+      || parsed.searchParams.get('id');
+    const cleanQueryId = cleanString(queryId)?.match(/\d{5,}/)?.[0] || null;
+    if (cleanQueryId) return cleanQueryId;
+    const pathId = parsed.pathname.match(/(?:\/profile\.php).*?[?&]id=(\d{5,})/)?.[1]
+      || parsed.pathname.match(/\/(\d{5,})(?:\/|$)/)?.[1]
+      || null;
+    return pathId || null;
+  } catch (_) {
+    return null;
+  }
 }
 
 function normalizeExternalError(error) {
@@ -859,13 +880,86 @@ async function hydrateCompetitors(rows) {
   return hydrated;
 }
 
+function competitionDisciplineKeys(clinic) {
+  return Array.isArray(clinic?.configuracion?.disciplinas)
+    ? clinic.configuracion.disciplinas.map((item) => String(item || '').toLowerCase()).filter(Boolean)
+    : [];
+}
+
+function competitorRelevanceForClinic(competitor, clinic) {
+  const keys = competitionDisciplineKeys(clinic);
+  if (!keys.length) return { status: 'unknown', score: null, label: 'Sin especialidad de referencia' };
+
+  const text = [
+    competitor?.name,
+    competitor?.google?.primary_category,
+    competitor?.latest_snapshot?.primary_category,
+    competitor?.contact?.website_url,
+    competitor?.contact?.address,
+  ].map((value) => String(value || '').toLowerCase()).join(' ');
+
+  const groups = [
+    {
+      keys: ['capilar', 'medicina_capilar', 'trasplante_capilar'],
+      terms: ['capilar', 'injerto', 'trasplante', 'hair', 'sven', 'pelo', 'alopecia'],
+      label: 'capilar'
+    },
+    {
+      keys: ['podologia'],
+      terms: ['podolog', 'podólog', 'pie', 'podoactiva', 'plantilla', 'uñas'],
+      label: 'podología'
+    },
+    {
+      keys: ['dental', 'odontologia'],
+      terms: ['dental', 'dentista', 'odont', 'ortodon', 'implante'],
+      label: 'dental'
+    }
+  ];
+  const group = groups.find((item) => keys.some((key) => item.keys.includes(key)));
+  if (!group) return { status: 'unknown', score: null, label: 'Sin regla de relevancia' };
+
+  const matches = group.terms.filter((term) => text.includes(term));
+  if (matches.length) return { status: 'match', score: matches.length, label: `Relacionado con ${group.label}` };
+  return { status: 'review', score: 0, label: `Revisar: no parece ${group.label}` };
+}
+
+function providerStatusWithObservedErrors(status, competitors = []) {
+  const output = { ...status };
+  const metaPermissionError = competitors.find((competitor) => {
+    const code = String(competitor?.meta?.error_code || '');
+    const message = String(competitor?.meta?.error_message || '').toLowerCase();
+    return code === '10' || message.includes('does not have permission') || message.includes('no tiene permiso');
+  });
+
+  if (metaPermissionError && output.meta_ads_library) {
+    output.meta_ads_library = {
+      ...output.meta_ads_library,
+      available: false,
+      configured: true,
+      error: {
+        code: metaPermissionError.meta.error_code || 'permission_denied',
+        message: 'Meta Ads Library está configurada, pero el token actual no tiene permiso para consultar ads_archive.',
+        details: metaPermissionError.meta.error_message || null,
+        status: null,
+        fbtrace_id: null
+      }
+    };
+  }
+
+  return output;
+}
+
 async function listCompetition(scope, { includeInactive = false } = {}) {
   const clinic = await resolvePrimaryClinic(scope);
   const rows = await MarketingCompetitor.findAll({
     where: buildCompetitorWhere(scope, { includeInactive }),
     order: [['is_active', 'DESC'], ['review_count', 'DESC'], ['rating', 'DESC'], ['name', 'ASC']]
   });
-  const competitors = await hydrateCompetitors(rows);
+  const competitors = (await hydrateCompetitors(rows))
+    .map((competitor) => ({
+      ...competitor,
+      relevance: competitorRelevanceForClinic(competitor, clinic)
+    }));
   const setupBlocker = competitionSetupBlocker(clinic, null);
   const ownProfile = setupBlocker ? null : await resolveOwnClinicProfile(clinic);
   const localRanking = setupBlocker
@@ -880,7 +974,7 @@ async function listCompetition(scope, { includeInactive = false } = {}) {
       first_setup_requires_google_places: true,
       ads_provider: META_ADS_LIBRARY_PROVIDER
     },
-    provider_status: await providerStatusForScope(scope),
+    provider_status: providerStatusWithObservedErrors(await providerStatusForScope(scope), competitors),
     own_profile: ownProfile ? {
       name: ownProfile.name,
       google_place_id: normalizePlaceId(ownProfile.google_place_id),
@@ -922,6 +1016,12 @@ async function suggestCompetitors(scope, { query = null, limit = DEFAULT_LIMIT }
     const places = await searchGooglePlaces({ query: textQuery, maxResultCount: Math.max(1, Math.min(20, Number(limit) || DEFAULT_LIMIT)) });
     const suggestions = await Promise.all(places.map(async (place) => {
       const normalized = normalizePlace(place);
+      const relevance = competitorRelevanceForClinic({
+        name: normalized.name,
+        google: { primary_category: normalized.primary_category },
+        latest_snapshot: { primary_category: normalized.primary_category },
+        contact: { website_url: normalized.website_url, address: normalized.address }
+      }, clinic);
       const normalizedPlaceId = normalizePlaceId(normalized.google_place_id);
       const normalizedName = normalizeBusinessName(normalized.name);
       const isOwnClinic = (normalizedPlaceId && ownPlaceIds.has(normalizedPlaceId))
@@ -929,16 +1029,21 @@ async function suggestCompetitors(scope, { query = null, limit = DEFAULT_LIMIT }
       const alreadyAdded = isOwnClinic
         || (normalizedPlaceId && existingPlaceIds.has(normalizedPlaceId))
         || [...existingNames].some((existingName) => businessNamesMatch(normalizedName, existingName));
-      const score = Math.round(((normalized.rating || 0) * 20) + Math.log10((normalized.review_count || 0) + 1) * 35);
-      return attachPlacePhotoUrl({ ...normalized, already_added: alreadyAdded, suggested_score: score }, { maxWidthPx: 640 });
+      const relevanceBoost = relevance.status === 'match' ? 1000 : (relevance.status === 'review' ? -500 : 0);
+      const score = Math.round(relevanceBoost + ((normalized.rating || 0) * 20) + Math.log10((normalized.review_count || 0) + 1) * 35);
+      return attachPlacePhotoUrl({ ...normalized, relevance, already_added: alreadyAdded, suggested_score: score }, { maxWidthPx: 640 });
     }));
+
+    const sortedSuggestions = suggestions
+      .filter((item) => item.name)
+      .sort((a, b) => (b.suggested_score || 0) - (a.suggested_score || 0));
 
     return {
       success: true,
       query: textQuery,
       clinic: clinic ? { id: clinic.id_clinica, name: clinic.nombre_clinica } : null,
       provider_status: await providerStatusForScope(scope),
-      suggestions: suggestions.filter((item) => item.name)
+      suggestions: sortedSuggestions
     };
   } catch (error) {
     return {
@@ -1000,6 +1105,8 @@ function scopeDefaults(scope) {
 
 async function createCompetitor(scope, payload = {}) {
   const metaSearchTerms = splitSearchTerms(payload.meta_ads_search_terms ?? payload.meta_search_terms);
+  const metaPageUrl = normalizeUrl(payload.meta_page_url) || normalizeUrl(payload.facebook_url) || normalizeUrl(payload.instagram_url);
+  const metaPageId = cleanString(payload.meta_page_id) || extractMetaPageIdFromUrl(metaPageUrl);
   const manualPayload = {
     facebook_url: normalizeUrl(payload.facebook_url),
     instagram_url: normalizeUrl(payload.instagram_url),
@@ -1038,9 +1145,9 @@ async function createCompetitor(scope, payload = {}) {
     rating: toNumber(payload.rating) ?? normalizedPlace.rating,
     review_count: toInt(payload.review_count) ?? normalizedPlace.review_count,
     business_status: cleanString(payload.business_status) || normalizedPlace.business_status,
-    meta_page_id: cleanString(payload.meta_page_id),
+    meta_page_id: metaPageId,
     meta_page_name: cleanString(payload.meta_page_name),
-    meta_page_url: normalizeUrl(payload.meta_page_url) || manualPayload.facebook_url || manualPayload.instagram_url,
+    meta_page_url: metaPageUrl,
     meta_ads_search_terms: metaSearchTerms,
     raw_place_payload: payload.raw_place_payload || normalizedPlace.raw_place_payload || (hasManualPayload ? { manual: manualPayload } : null),
     is_active: payload.is_active !== false,
@@ -1083,12 +1190,21 @@ async function updateCompetitor(scope, competitorId, payload = {}) {
   for (const field of ['name', 'source', 'google_place_id', 'google_maps_url', 'website_url', 'phone', 'address', 'city', 'primary_category', 'business_status', 'meta_page_id', 'meta_page_name', 'meta_page_url', 'last_sync_status', 'last_sync_error']) {
     if (payload[field] !== undefined) patch[field] = cleanString(payload[field]);
   }
+  for (const field of ['google_maps_url', 'website_url', 'meta_page_url']) {
+    if (payload[field] !== undefined) patch[field] = normalizeUrl(payload[field]);
+  }
+  if (payload.meta_page_url === undefined && (payload.facebook_url !== undefined || payload.instagram_url !== undefined)) {
+    patch.meta_page_url = normalizeUrl(payload.facebook_url) || normalizeUrl(payload.instagram_url);
+  }
   if (payload.latitude !== undefined) patch.latitude = toNumber(payload.latitude);
   if (payload.longitude !== undefined) patch.longitude = toNumber(payload.longitude);
   if (payload.rating !== undefined) patch.rating = toNumber(payload.rating);
   if (payload.review_count !== undefined) patch.review_count = toInt(payload.review_count);
   if (payload.meta_ads_search_terms !== undefined) {
     patch.meta_ads_search_terms = Array.isArray(payload.meta_ads_search_terms) ? payload.meta_ads_search_terms.map(cleanString).filter(Boolean) : [];
+  }
+  if (!patch.meta_page_id && (payload.meta_page_url !== undefined || payload.facebook_url !== undefined || payload.instagram_url !== undefined)) {
+    patch.meta_page_id = extractMetaPageIdFromUrl(patch.meta_page_url || payload.facebook_url || payload.instagram_url);
   }
   if (payload.is_active !== undefined) patch.is_active = !!payload.is_active;
 
