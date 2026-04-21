@@ -587,10 +587,10 @@ async function resolvePrimaryClinic(scope) {
 }
 
 function competitionServiceHint(clinic) {
-  return cleanString(clinic?.business_primary_category)
-    || disciplineSearchHint(clinic)
+  return disciplineSearchHint(clinic)
     || cleanString(clinic?.servicios)
     || cleanString(clinic?.descripcion)?.split(/[.,;]/)[0]
+    || cleanString(clinic?.business_primary_category)
     || null;
 }
 
@@ -675,6 +675,20 @@ function buildSetupRequiredPayload(scope, clinic, blocker, query = null) {
   };
 }
 
+function clinicSpecialtyText(clinic) {
+  const config = clinic?.configuracion && typeof clinic.configuracion === 'object' ? clinic.configuracion : {};
+  return normalizeBusinessName([
+    clinic?.nombre_clinica,
+    clinic?.servicios,
+    clinic?.descripcion,
+    clinic?.business_location_name,
+    clinic?.business_primary_category,
+    config.area_medica,
+    config.disciplina,
+    ...(Array.isArray(config.disciplinas) ? config.disciplinas : [])
+  ].map(cleanString).filter(Boolean).join(' '));
+}
+
 function disciplineSearchHint(clinic) {
   const disciplinas = Array.isArray(clinic?.configuracion?.disciplinas)
     ? clinic.configuracion.disciplinas
@@ -693,7 +707,14 @@ function disciplineSearchHint(clinic) {
     trasplante_capilar: 'trasplante capilar'
   };
   const match = disciplinas.map((item) => map[String(item || '').toLowerCase()]).find(Boolean);
-  return match || null;
+  if (match) return match;
+
+  const text = clinicSpecialtyText(clinic);
+  if (!text) return null;
+  if (/(^| )(capilar|alopecia|injerto capilar|trasplante capilar|pelo|hair)( |$)/.test(text)) return 'clínica capilar';
+  if (/(^| )(podolog|podologo|podologa|podologia|pies|pie)( |$)/.test(text)) return 'podólogo';
+  if (/(^| )(dental|dentista|odontolog|ortodoncia|implante dental)( |$)/.test(text)) return 'clínica dental';
+  return null;
 }
 
 function inferCompetitionQuery(clinic, explicitQuery = null) {
@@ -1064,9 +1085,16 @@ async function hydrateCompetitors(rows) {
 }
 
 function competitionDisciplineKeys(clinic) {
-  return Array.isArray(clinic?.configuracion?.disciplinas)
+  const configured = Array.isArray(clinic?.configuracion?.disciplinas)
     ? clinic.configuracion.disciplinas.map((item) => String(item || '').toLowerCase()).filter(Boolean)
     : [];
+  if (configured.length) return configured;
+
+  const hint = disciplineSearchHint(clinic);
+  if (hint === 'clínica capilar' || hint === 'trasplante capilar') return ['capilar'];
+  if (hint === 'podólogo') return ['podologia'];
+  if (hint === 'clínica dental') return ['dental'];
+  return [];
 }
 
 function competitorRelevanceForClinic(competitor, clinic) {
