@@ -23,6 +23,7 @@ const DEFAULT_LANGUAGE = process.env.COMPETITION_GOOGLE_LANGUAGE || 'es';
 const DEFAULT_REGION = process.env.COMPETITION_GOOGLE_REGION || 'ES';
 const DEFAULT_LIMIT = Math.max(1, Math.min(25, parseInt(process.env.COMPETITION_SUGGESTION_LIMIT || '10', 10)));
 const DEFAULT_AD_LIMIT = Math.max(1, Math.min(100, parseInt(process.env.COMPETITION_META_AD_LIMIT || '25', 10)));
+const DEFAULT_RANKING_LIMIT = Math.max(1, Math.min(5, parseInt(process.env.COMPETITION_LOCAL_RANKING_TERMS_LIMIT || '3', 10)));
 const SNAPSHOT_MEDIA_TIMEOUT_MS = Math.max(1000, Math.min(15000, parseInt(process.env.COMPETITION_META_SNAPSHOT_MEDIA_TIMEOUT_MS || '6000', 10)));
 const SNAPSHOT_MEDIA_LIMIT = Math.max(0, Math.min(DEFAULT_AD_LIMIT, parseInt(process.env.COMPETITION_META_SNAPSHOT_MEDIA_LIMIT || String(DEFAULT_AD_LIMIT), 10)));
 
@@ -390,6 +391,34 @@ function competitionServiceHint(clinic) {
     || null;
 }
 
+function clinicLocationLabel(clinic) {
+  const parts = [clinic?.ciudad, clinic?.provincia, clinic?.codigo_postal]
+    .map(cleanString)
+    .filter(Boolean);
+  return parts.length ? parts.join(', ') : cleanString(clinic?.direccion);
+}
+
+function rankingTermsForClinic(clinic, limit = DEFAULT_RANKING_LIMIT) {
+  const serviceHint = competitionServiceHint(clinic);
+  const city = cleanString(clinic?.ciudad) || cleanString(clinic?.provincia);
+  if (!serviceHint || !city) return [];
+
+  const disciplineKeys = Array.isArray(clinic?.configuracion?.disciplinas)
+    ? clinic.configuracion.disciplinas.map((item) => String(item || '').toLowerCase())
+    : [];
+  let baseTerms = [serviceHint];
+
+  if (disciplineKeys.some((item) => ['capilar', 'medicina_capilar', 'trasplante_capilar'].includes(item))) {
+    baseTerms = ['clínica capilar', 'injerto capilar', 'trasplante capilar', 'tratamiento capilar'];
+  } else if (disciplineKeys.includes('podologia')) {
+    baseTerms = ['podólogo', 'clínica podológica', 'podología', 'uñas encarnadas'];
+  } else if (disciplineKeys.some((item) => ['dental', 'odontologia'].includes(item))) {
+    baseTerms = ['clínica dental', 'dentista', 'implantes dentales', 'ortodoncia'];
+  }
+
+  return [...new Set(baseTerms.map((term) => `${term} en ${city}`))].slice(0, limit);
+}
+
 function competitionSetupBlocker(clinic, explicitQuery = null) {
   const hasLocalProfileAnchor = !!(
     cleanString(clinic?.url_ficha_local)
@@ -475,6 +504,79 @@ function inferCompetitionQuery(clinic, explicitQuery = null) {
   const address = locationParts.length ? locationParts.join(', ') : cleanString(clinic?.direccion);
   if (address) return `${serviceHint} en ${address}`;
   return serviceHint;
+}
+
+async function resolveOwnClinicProfile(clinic) {
+  if (!clinic) return null;
+
+  const ownPlaceId = normalizePlaceId(clinic.business_place_id);
+  if (ownPlaceId) {
+    try {
+      const details = await getGooglePlaceDetails(ownPlaceId);
+      return attachPlacePhotoUrl(normalizePlace(details), { maxWidthPx: 640 });
+    } catch (_) {
+      // Si el place_id almacenado falla, intentamos localizar por nombre.
+    }
+  }
+
+  const query = [clinic.nombre_clinica, clinicLocationLabel(clinic)].map(cleanString).filter(Boolean).join(' ');
+  if (!query) return null;
+
+  try {
+    const places = await searchGooglePlaces({ query, maxResultCount: 5 });
+    const normalized = places.map(normalizePlace);
+    const ownName = cleanString(clinic.business_location_name) || cleanString(clinic.nombre_clinica);
+    const match = normalized.find((place) => businessNamesMatch(place.name, ownName)) || normalized[0] || null;
+    return match ? attachPlacePhotoUrl(match, { maxWidthPx: 640 }) : null;
+  } catch (_) {
+    return null;
+  }
+}
+
+async function buildLocalRanking(clinic, ownProfile) {
+  const terms = rankingTermsForClinic(clinic);
+  if (!terms.length) return { terms: [], entries: [] };
+
+  const ownPlaceId = normalizePlaceId(ownProfile?.google_place_id || clinic?.business_place_id);
+  const ownName = cleanString(ownProfile?.name) || cleanString(clinic?.business_location_name) || cleanString(clinic?.nombre_clinica);
+  const location = clinicLocationLabel(clinic);
+  const entries = [];
+
+  for (const term of terms) {
+    try {
+      const places = await searchGooglePlaces({ query: term, maxResultCount: 10 });
+      const normalized = places.map(normalizePlace).filter((place) => place.name);
+      const ownIndex = normalized.findIndex((place) => {
+        const placeId = normalizePlaceId(place.google_place_id);
+        return (ownPlaceId && placeId === ownPlaceId) || businessNamesMatch(place.name, ownName);
+      });
+
+      entries.push({
+        term,
+        myPosition: ownIndex >= 0 ? ownIndex + 1 : null,
+        aboveMe: ownIndex > 0 ? normalized.slice(0, ownIndex).map((place) => place.name).slice(0, 5) : [],
+        belowMe: ownIndex >= 0
+          ? normalized.slice(ownIndex + 1, ownIndex + 6).map((place) => place.name)
+          : normalized.slice(0, 5).map((place) => place.name),
+        lastMeasured: new Date().toISOString(),
+        location,
+        source: 'google_places_text_search'
+      });
+    } catch (error) {
+      entries.push({
+        term,
+        myPosition: null,
+        aboveMe: [],
+        belowMe: [],
+        lastMeasured: new Date().toISOString(),
+        location,
+        error: normalizeExternalError(error),
+        source: 'google_places_text_search'
+      });
+    }
+  }
+
+  return { terms, entries };
 }
 
 function buildPlaceHeaders(fieldMask) {
@@ -758,11 +860,17 @@ async function hydrateCompetitors(rows) {
 }
 
 async function listCompetition(scope, { includeInactive = false } = {}) {
+  const clinic = await resolvePrimaryClinic(scope);
   const rows = await MarketingCompetitor.findAll({
     where: buildCompetitorWhere(scope, { includeInactive }),
     order: [['is_active', 'DESC'], ['review_count', 'DESC'], ['rating', 'DESC'], ['name', 'ASC']]
   });
   const competitors = await hydrateCompetitors(rows);
+  const setupBlocker = competitionSetupBlocker(clinic, null);
+  const ownProfile = setupBlocker ? null : await resolveOwnClinicProfile(clinic);
+  const localRanking = setupBlocker
+    ? { terms: rankingTermsForClinic(clinic), entries: [] }
+    : await buildLocalRanking(clinic, ownProfile);
   return {
     success: true,
     mode: 'real_v1',
@@ -773,6 +881,20 @@ async function listCompetition(scope, { includeInactive = false } = {}) {
       ads_provider: META_ADS_LIBRARY_PROVIDER
     },
     provider_status: await providerStatusForScope(scope),
+    own_profile: ownProfile ? {
+      name: ownProfile.name,
+      google_place_id: normalizePlaceId(ownProfile.google_place_id),
+      google_maps_url: ownProfile.google_maps_url,
+      rating: ownProfile.rating,
+      reviews_count: ownProfile.review_count,
+      category: ownProfile.primary_category,
+      address: ownProfile.address,
+      photo_url: ownProfile.photo_url || null
+    } : null,
+    local_ranking: localRanking.entries,
+    ranking_terms: localRanking.terms,
+    setup_required: !!setupBlocker,
+    setup_code: setupBlocker?.code || null,
     competitors
   };
 }
