@@ -209,6 +209,43 @@ Limitación consciente:
 - Por eso las visitas propias del funnel usan GA4 si existe o clicks sincronizados desde Ads/SEO como fallback.
 - El frontend debe mostrar nota de calidad de datos y no vender esa métrica como pageviews propios hasta cerrar `ClinicaClick Analytics V1`.
 
+## 2026-04-21 - Informes de competencia local V1
+
+Se añade backend V1 para una futura subpestaña `Marketing > Informes > Competencia`.
+
+Principios:
+
+- Sugerir competidores locales en la primera configuración con Google Places.
+- Guardar solo competidores confirmados por el usuario.
+- Actualizar semanalmente por cron, no en cada render del informe.
+- Consultar anuncios únicamente mediante la API oficial de Meta Ads Library. Si el token no tiene acceso o Meta no devuelve datos, el backend persiste `status=unavailable` y la UI debe mostrar aviso; no hay scraping como fallback.
+
+Tablas:
+
+| Tabla | Uso |
+|:---|:---|
+| `MarketingCompetitors` | Competidores activos por clínica/grupo, con `google_place_id`, ficha pública y configuración opcional de página Meta. |
+| `MarketingCompetitorSnapshots` | Snapshot diario/semanal de rating, reseñas, categoría, web, teléfono y estado Google Places. |
+| `MarketingCompetitorAdSnapshots` | Snapshot de anuncios activos de Meta Ads Library o error explícito de disponibilidad. |
+
+Endpoints:
+
+| Endpoint | Estado | Uso |
+|:---|:---|:---|
+| `GET /api/marketing/reports/competition` | Operativo backend V1 | Lista competidores, último snapshot, anuncios activos y estado de proveedores. |
+| `GET /api/marketing/reports/competition/suggestions` | Operativo backend V1 | Sugiere competidores con Google Places para una clínica concreta. |
+| `POST /api/marketing/reports/competition/competitors` | Operativo backend V1 | Añade un competidor confirmado por el usuario. |
+| `PATCH /api/marketing/reports/competition/competitors/:competitorId` | Operativo backend V1 | Edita datos, `meta_page_id`, términos de búsqueda o estado. |
+| `DELETE /api/marketing/reports/competition/competitors/:competitorId` | Operativo backend V1 | Desactiva sin borrar histórico. |
+| `POST /api/marketing/reports/competition/refresh` | Operativo backend V1 | Refresco manual de Google Places + Meta Ads Library para todos o algunos competidores. |
+
+Job:
+
+- `competitionSync`, cola `competition_refresh`, schedule por defecto `0 6 * * 1`.
+- Variables: `GOOGLE_PLACES_API_KEY`, `META_AD_LIBRARY_ACCESS_TOKEN`, `JOBS_COMPETITION_SCHEDULE`, `COMPETITION_SUGGESTION_LIMIT`, `COMPETITION_META_AD_LIMIT`, `COMPETITION_META_AD_COUNTRY`.
+- Si `GOOGLE_PLACES_API_KEY` no está presente, las sugerencias devuelven proveedor no configurado.
+- Si `META_AD_LIBRARY_ACCESS_TOKEN` no está presente, se intenta una conexión Meta activa del scope; si tampoco existe o Meta rechaza el endpoint, se guarda aviso de no disponibilidad.
+
 ## 2026-03-27 - Integración de terceros Meta/Google: estado exacto
 
 ### Estado actual del producto

@@ -4,11 +4,18 @@ const authMiddleware = require('./auth.middleware');
 const chatFlowTemplatesController = require('../controllers/chatFlowTemplates.controller');
 const campaignOnboardingController = require('../controllers/campaignOnboarding.controller');
 const marketingReportsController = require('../controllers/marketingReports.controller');
+const marketingCompetitionController = require('../controllers/marketingCompetition.controller');
 
 router.use(authMiddleware);
 
 // Informes de marketing agregados (front no orquesta fuentes externas una a una)
 router.get('/reports/overview', marketingReportsController.getOverview);
+router.get('/reports/competition', marketingCompetitionController.getCompetition);
+router.get('/reports/competition/suggestions', marketingCompetitionController.suggestCompetitors);
+router.post('/reports/competition/competitors', marketingCompetitionController.createCompetitor);
+router.patch('/reports/competition/competitors/:competitorId', marketingCompetitionController.updateCompetitor);
+router.delete('/reports/competition/competitors/:competitorId', marketingCompetitionController.deleteCompetitor);
+router.post('/reports/competition/refresh', marketingCompetitionController.refreshCompetition);
 
 // Catálogo de plantillas de flujos de chat (snippet web)
 router.get('/chat-flow-templates', chatFlowTemplatesController.listChatFlowTemplates);

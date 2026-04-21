@@ -31,6 +31,7 @@ const { googleAdsRequest, getGoogleAdsUsageStatus, resumeGoogleAdsUsage, ensureG
 const notificationService = require('../services/notifications.service');
 const { enqueueSyncForAllWabas } = require('../services/whatsappTemplates.service');
 const { enqueueSyncPhonesForAllWabas } = require('../services/whatsappPhones.service');
+const marketingCompetitionService = require('../services/marketingCompetition.service');
 
 const GOOGLE_BUSINESS_PERFORMANCE_API = 'https://businessprofileperformance.googleapis.com/v1';
 const GOOGLE_MY_BUSINESS_API = 'https://mybusiness.googleapis.com/v4';
@@ -182,6 +183,7 @@ class MetaSyncJobs {
       analyticsBackfill: 'Backfill extendido de Analytics para nuevos mapeos o reprocesos.',
       businessProfileSync: 'Sincroniza Perfil de Empresa Google: rendimiento local, reseñas y publicaciones.',
       businessProfileBackfill: 'Backfill de Perfil de Empresa Google para nuevas fichas o reprocesos.',
+      competitionSync: 'Actualiza semanalmente benchmark local: competidores, ficha publica Google Places y anuncios activos desde Meta Ads Library oficial.',
       whatsappTemplatesSync: 'Sincroniza estados de plantillas WhatsApp para todos los WABA activos.',
       whatsappPhonesSync: 'Sincroniza números WhatsApp (existencia/estado) para evitar datos desactualizados.',
       automationHealthCheck: 'Barrido funcional de automatizaciones críticas: flujos fallidos, jobs vencidos y ejecuciones atascadas.',
@@ -208,6 +210,7 @@ class MetaSyncJobs {
         analyticsBackfill: process.env.JOBS_ANALYTICS_BACKFILL_SCHEDULE || '0 5 * * 0',
         businessProfileSync: process.env.JOBS_BUSINESS_PROFILE_SCHEDULE || '10 5 * * *',
         businessProfileBackfill: process.env.JOBS_BUSINESS_PROFILE_BACKFILL_SCHEDULE || '20 5 * * 0',
+        competitionSync: process.env.JOBS_COMPETITION_SCHEDULE || '0 6 * * 1',
         whatsappTemplatesSync: process.env.JOBS_WHATSAPP_TEMPLATES_SCHEDULE || '*/20 * * * *',
         whatsappPhonesSync: process.env.JOBS_WHATSAPP_PHONES_SCHEDULE || '*/15 * * * *',
         automationHealthCheck: process.env.JOBS_AUTOMATION_HEALTH_CHECK_SCHEDULE || '0 10,16 * * *'
@@ -299,6 +302,7 @@ class MetaSyncJobs {
       this.registerJob('analyticsBackfill', this.config.schedules.analyticsBackfill, () => this.executeAnalyticsBackfill());
       this.registerJob('businessProfileSync', this.config.schedules.businessProfileSync, () => this.executeBusinessProfileSync());
       this.registerJob('businessProfileBackfill', this.config.schedules.businessProfileBackfill, () => this.executeBusinessProfileBackfill());
+      this.registerJob('competitionSync', this.config.schedules.competitionSync, () => this.executeCompetitionSync());
       this.registerJob('whatsappTemplatesSync', this.config.schedules.whatsappTemplatesSync, () => this.executeWhatsappTemplatesSync());
       this.registerJob('whatsappPhonesSync', this.config.schedules.whatsappPhonesSync, () => this.executeWhatsappPhonesSync());
       this.registerJob('automationHealthCheck', this.config.schedules.automationHealthCheck, () => this.executeAutomationHealthCheck());
@@ -1526,6 +1530,46 @@ class MetaSyncJobs {
     const locationIds = Array.from(new Set(locationMappings.map((item) => String(item?.locationId || '').trim()).filter(Boolean)));
     const clinicId = locationMappings[0]?.clinicId || locationMappings[0]?.clinicaId || null;
     return this.executeBusinessProfileBackfill({ clinicId, locationIds });
+  }
+
+  async executeCompetitionSync(options = {}) {
+    const syncLog = await SyncLog.create({
+      job_type: 'competition_sync',
+      status: 'running',
+      start_time: new Date(),
+      records_processed: 0
+    });
+
+    try {
+      const scope = {
+        isAll: !options.clinicId && !options.clinicaId && !options.groupId,
+        scope: options.groupId ? 'group' : (options.clinicId || options.clinicaId ? 'clinic' : 'all'),
+        clinicIds: options.clinicId || options.clinicaId ? [Number(options.clinicId || options.clinicaId)] : [],
+        groupId: options.groupId ? Number(options.groupId) : null,
+        original: options.groupId ? `group:${options.groupId}` : (options.clinicId || options.clinicaId || 'all')
+      };
+
+      const result = await marketingCompetitionService.refreshCompetition(scope, {
+        competitorIds: options.competitorIds || options.competitor_ids || null
+      });
+      const report = result.report || {};
+      await syncLog.update({
+        status: report.errors?.length ? 'completed' : 'completed',
+        end_time: new Date(),
+        records_processed: report.processed || 0,
+        status_report: report
+      });
+      console.log('✅ competitionSync completado', report);
+      return { status: 'completed', processed: report.processed || 0, report };
+    } catch (error) {
+      await syncLog.update({
+        status: 'failed',
+        end_time: new Date(),
+        error_message: error.message
+      });
+      console.error('❌ Error en competitionSync:', error);
+      throw error;
+    }
   }
 
   async _syncBusinessProfileMetrics(location, accessToken, start, end) {
