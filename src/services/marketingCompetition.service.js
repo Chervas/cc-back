@@ -134,6 +134,13 @@ function normalizeUrl(value) {
   return `https://${text}`;
 }
 
+function buildGoogleMapsUrl(placeId, query = null) {
+  const id = normalizePlaceId(placeId);
+  if (!id) return null;
+  const text = cleanString(query) || id;
+  return `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(text)}&query_place_id=${encodeURIComponent(id)}`;
+}
+
 function decodeHtmlEntities(value) {
   return String(value || '')
     .replace(/&amp;/g, '&')
@@ -486,7 +493,7 @@ function normalizePlace(place = {}) {
     source: 'google_places',
     name: cleanString(displayName) || 'Competidor sin nombre',
     google_place_id: cleanString(place.id),
-    google_maps_url: normalizeUrl(place.googleMapsUri),
+    google_maps_url: normalizeUrl(place.googleMapsUri) || buildGoogleMapsUrl(place.id, displayName),
     website_url: normalizeUrl(place.websiteUri),
     phone: cleanString(place.nationalPhoneNumber),
     address: cleanString(place.formattedAddress),
@@ -1000,7 +1007,7 @@ function mapCompetitorRow(row, latestSnapshot = null, latestAdSnapshot = null) {
     },
     google: {
       place_id: plain.google_place_id,
-      maps_url: plain.google_maps_url,
+      maps_url: plain.google_maps_url || buildGoogleMapsUrl(plain.google_place_id, plain.name),
       rating: plain.rating != null ? Number(plain.rating) : null,
       review_count: plain.review_count != null ? Number(plain.review_count) : null,
       primary_category: plain.primary_category,
