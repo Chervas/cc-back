@@ -11,6 +11,7 @@ const {
   Clinica,
   ClinicMetaAsset,
   MetaConnection,
+  ClinicBusinessLocation,
 } = db;
 
 const { Op } = db.Sequelize;
@@ -91,6 +92,12 @@ function cleanString(value) {
   return text || null;
 }
 
+function normalizePlaceId(value) {
+  const text = cleanString(value);
+  if (!text) return null;
+  return text.replace(/^places\//i, '');
+}
+
 function normalizeUrl(value) {
   const text = cleanString(value);
   if (!text) return null;
@@ -120,6 +127,17 @@ function providerStatus({ googleError = null, metaError = null, metaTokenSource 
       note: 'Solo se usa la API oficial de Meta. Si Meta no devuelve datos o rechaza el token, la UI debe mostrar aviso y no usar scraping.'
     }
   };
+}
+
+async function providerStatusForScope(scope, options = {}) {
+  let metaTokenSource = null;
+  try {
+    const resolved = await resolveMetaAdLibraryToken(scope);
+    metaTokenSource = resolved?.accessToken ? resolved.source : null;
+  } catch (_) {
+    metaTokenSource = null;
+  }
+  return providerStatus({ ...options, metaTokenSource });
 }
 
 function getGooglePlacesApiKey() {
@@ -204,7 +222,7 @@ async function resolvePrimaryClinic(scope) {
   const clinicIds = Array.isArray(scope?.clinicIds) ? scope.clinicIds.map(toInt).filter(Boolean) : [];
   const clinicId = clinicIds.length === 1 ? clinicIds[0] : null;
   if (!clinicId) return null;
-  return Clinica.findByPk(clinicId, {
+  const clinic = await Clinica.findByPk(clinicId, {
     attributes: [
       'id_clinica',
       'nombre_clinica',
@@ -215,17 +233,52 @@ async function resolvePrimaryClinic(scope) {
       'pais',
       'servicios',
       'descripcion',
-      'url_web'
+      'url_web',
+      'configuracion'
     ],
     raw: true
   });
+  if (!clinic || !ClinicBusinessLocation) return clinic;
+
+  const businessLocation = await ClinicBusinessLocation.findOne({
+    where: { clinica_id: clinicId, is_active: true },
+    attributes: ['location_name', 'primary_category'],
+    order: [['last_synced_at', 'DESC'], ['updated_at', 'DESC']],
+    raw: true
+  });
+
+  return {
+    ...clinic,
+    business_location_name: businessLocation?.location_name || null,
+    business_primary_category: businessLocation?.primary_category || null
+  };
+}
+
+function disciplineSearchHint(clinic) {
+  const disciplinas = Array.isArray(clinic?.configuracion?.disciplinas)
+    ? clinic.configuracion.disciplinas
+    : [];
+  const map = {
+    dental: 'clínica dental',
+    odontologia: 'clínica dental',
+    podologia: 'podólogo',
+    estetica: 'clínica estética',
+    fisioterapia: 'fisioterapia',
+    medicina_estetica: 'medicina estética',
+    dermatologia: 'dermatólogo',
+    oftalmologia: 'oftalmólogo'
+  };
+  const match = disciplinas.map((item) => map[String(item || '').toLowerCase()]).find(Boolean);
+  return match || null;
 }
 
 function inferCompetitionQuery(clinic, explicitQuery = null) {
   const query = cleanString(explicitQuery);
   if (query) return query;
 
-  const serviceHint = cleanString(clinic?.servicios)
+  const serviceHint = cleanString(clinic?.business_primary_category)
+    || disciplineSearchHint(clinic)
+    || cleanString(clinic?.servicios)
     || cleanString(clinic?.descripcion)?.split(/[.,;]/)[0]
     || 'clínica médica';
   const locationParts = [clinic?.ciudad, clinic?.provincia, clinic?.codigo_postal]
@@ -478,7 +531,7 @@ async function listCompetition(scope, { includeInactive = false } = {}) {
       first_setup_requires_google_places: true,
       ads_provider: META_ADS_LIBRARY_PROVIDER
     },
-    provider_status: providerStatus(),
+    provider_status: await providerStatusForScope(scope),
     competitors
   };
 }
@@ -487,14 +540,18 @@ async function suggestCompetitors(scope, { query = null, limit = DEFAULT_LIMIT }
   const clinic = await resolvePrimaryClinic(scope);
   const textQuery = inferCompetitionQuery(clinic, query);
   const existing = await MarketingCompetitor.findAll({ where: buildCompetitorWhere(scope, { includeInactive: true }), raw: true });
-  const existingPlaceIds = new Set(existing.map((item) => item.google_place_id).filter(Boolean));
+  const existingPlaceIds = new Set(existing.map((item) => normalizePlaceId(item.google_place_id)).filter(Boolean));
   const existingNames = new Set(existing.map((item) => String(item.name || '').toLowerCase()));
+  const ownPlaceIds = await resolveOwnBusinessPlaceIds(scope);
 
   try {
     const places = await searchGooglePlaces({ query: textQuery, maxResultCount: Math.max(1, Math.min(20, Number(limit) || DEFAULT_LIMIT)) });
     const suggestions = places.map((place) => {
       const normalized = normalizePlace(place);
-      const alreadyAdded = (normalized.google_place_id && existingPlaceIds.has(normalized.google_place_id))
+      const normalizedPlaceId = normalizePlaceId(normalized.google_place_id);
+      const isOwnClinic = normalizedPlaceId && ownPlaceIds.has(normalizedPlaceId);
+      const alreadyAdded = isOwnClinic
+        || (normalizedPlaceId && existingPlaceIds.has(normalizedPlaceId))
         || existingNames.has(String(normalized.name || '').toLowerCase());
       const score = Math.round(((normalized.rating || 0) * 20) + Math.log10((normalized.review_count || 0) + 1) * 35);
       return { ...normalized, already_added: alreadyAdded, suggested_score: score };
@@ -504,7 +561,7 @@ async function suggestCompetitors(scope, { query = null, limit = DEFAULT_LIMIT }
       success: true,
       query: textQuery,
       clinic: clinic ? { id: clinic.id_clinica, name: clinic.nombre_clinica } : null,
-      provider_status: providerStatus(),
+      provider_status: await providerStatusForScope(scope),
       suggestions
     };
   } catch (error) {
@@ -512,11 +569,49 @@ async function suggestCompetitors(scope, { query = null, limit = DEFAULT_LIMIT }
       success: false,
       query: textQuery,
       clinic: clinic ? { id: clinic.id_clinica, name: clinic.nombre_clinica } : null,
-      provider_status: providerStatus({ googleError: error }),
+      provider_status: await providerStatusForScope(scope, { googleError: error }),
       suggestions: [],
       error: normalizeExternalError(error)
     };
   }
+}
+
+async function resolveOwnBusinessPlaceIds(scope) {
+  if (!ClinicBusinessLocation) return new Set();
+  const clinicIds = Array.isArray(scope?.clinicIds) ? scope.clinicIds.map(toInt).filter(Boolean) : [];
+  if (!clinicIds.length) return new Set();
+
+  const targetClinicIds = new Set(clinicIds);
+  const clinics = await Clinica.findAll({
+    where: { id_clinica: { [Op.in]: clinicIds } },
+    attributes: ['grupoClinicaId'],
+    raw: true
+  });
+  const groupIds = clinics.map((clinic) => toInt(clinic.grupoClinicaId)).filter(Boolean);
+  if (groupIds.length) {
+    const groupClinics = await Clinica.findAll({
+      where: { grupoClinicaId: { [Op.in]: groupIds } },
+      attributes: ['id_clinica'],
+      raw: true
+    });
+    for (const clinic of groupClinics) {
+      const id = toInt(clinic.id_clinica);
+      if (id) targetClinicIds.add(id);
+    }
+  }
+
+  const rows = await ClinicBusinessLocation.findAll({
+    where: { clinica_id: { [Op.in]: [...targetClinicIds] }, is_active: true },
+    attributes: ['raw_payload'],
+    raw: true
+  });
+
+  const ids = new Set();
+  for (const row of rows) {
+    const placeId = normalizePlaceId(row?.raw_payload?.metadata?.placeId);
+    if (placeId) ids.add(placeId);
+  }
+  return ids;
 }
 
 function scopeDefaults(scope) {
