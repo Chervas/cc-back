@@ -2009,6 +2009,12 @@ Reglas importantes:
 - si varios procesos consumen la misma tabla/cola de jobs en un entorno, todos deben conocer `appointment_automation_schedule_fire` o bien solo uno de ellos debe actuar como scheduler. Si no, el síntoma es `No handler registered for job type 'appointment_automation_schedule_fire'`.
 - Regla aplicada desde el 2026-03-24: cada scheduler debe reclamar solo los tipos que sabe ejecutar (`claimNextJob(..., allowedTypes)`). Esto evita que runtimes auxiliares como `clinicaclick-auth` fallen jobs de automatización V2 que pertenecen al backend funcional.
 
+### Notificaciones internas desde flujos V2
+
+El nodo `action/send_system_notification` puede asignar destinatario por usuario unico o por rol. En modo rol, `assignee_id` acepta tanto un string legacy (`"admin"`) como un array (`["admin", "propietario"]`). El runtime resuelve todos los usuarios de los roles indicados y los deduplica antes de crear `Notification`.
+
+El filtro `subrole` solo se aplica a `personaldeclinica`; no debe limitar roles agregados como `admin`, `propietario` o `agencia`.
+
 Caso real `2026-04-13`:
 
 - recordatorios del día anterior en Propdental Eixample no salieron a las 09:00;

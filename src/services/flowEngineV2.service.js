@@ -1687,25 +1687,18 @@ function resolveRoleCode(raw) {
   return null;
 }
 
-async function resolveTaskAssigneeUserIds({ clinicId, assigneeType, assigneeId, roleCode, subrole }) {
+function normalizeAssigneeRoleCodes(raw) {
+  const values = Array.isArray(raw) ? raw : [raw];
+  return Array.from(new Set(
+    values
+      .map((value) => resolveRoleCode(value))
+      .filter(Boolean)
+  ));
+}
+
+async function resolveRoleAssigneeUserIds({ clinicId, effectiveRole, subrole }) {
   if (!clinicId) return [];
 
-  const normalizedAssigneeType = normalizeKey(assigneeType) || 'role';
-  if (normalizedAssigneeType === 'user') {
-    const userId = toIntOrNull(assigneeId);
-    if (!userId) return [];
-    if (ADMIN_USER_IDS.includes(userId)) {
-      return [userId];
-    }
-    const membership = await UsuarioClinica.findOne({
-      where: { id_clinica: clinicId, id_usuario: userId },
-      attributes: ['id_usuario'],
-      raw: true,
-    });
-    return membership ? [userId] : [];
-  }
-
-  const effectiveRole = roleCode || resolveRoleCode(assigneeId);
   if (effectiveRole === 'admin') {
     const membershipRows = await UsuarioClinica.findAll({
       where: {
@@ -1733,7 +1726,7 @@ async function resolveTaskAssigneeUserIds({ clinicId, assigneeType, assigneeId, 
   }
 
   const normalizedSubrole = cleanString(subrole);
-  if (normalizedSubrole) {
+  if (normalizedSubrole && (!effectiveRole || effectiveRole === 'personaldeclinica')) {
     where.subrol_clinica = normalizedSubrole;
   }
 
@@ -1745,6 +1738,41 @@ async function resolveTaskAssigneeUserIds({ clinicId, assigneeType, assigneeId, 
   });
 
   return Array.from(new Set(rows.map((row) => toIntOrNull(row.id_usuario)).filter(Boolean)));
+}
+
+async function resolveTaskAssigneeUserIds({ clinicId, assigneeType, assigneeId, roleCode, subrole }) {
+  if (!clinicId) return [];
+
+  const normalizedAssigneeType = normalizeKey(assigneeType) || 'role';
+  if (normalizedAssigneeType === 'user') {
+    const userId = toIntOrNull(assigneeId);
+    if (!userId) return [];
+    if (ADMIN_USER_IDS.includes(userId)) {
+      return [userId];
+    }
+    const membership = await UsuarioClinica.findOne({
+      where: { id_clinica: clinicId, id_usuario: userId },
+      attributes: ['id_usuario'],
+      raw: true,
+    });
+    return membership ? [userId] : [];
+  }
+
+  const effectiveRoles = roleCode
+    ? [roleCode]
+    : normalizeAssigneeRoleCodes(assigneeId);
+  const roleTargets = effectiveRoles.length ? effectiveRoles : [null];
+  const userIds = [];
+  for (const effectiveRole of roleTargets) {
+    const roleUserIds = await resolveRoleAssigneeUserIds({
+      clinicId,
+      effectiveRole,
+      subrole,
+    });
+    userIds.push(...roleUserIds);
+  }
+
+  return Array.from(new Set(userIds.filter(Boolean)));
 }
 
 async function handleChangeStatus(node, context, runtime) {
@@ -2922,6 +2950,7 @@ async function handleSendSystemNotification(node, context, runtime) {
       || resolveTemplateValue(config?.role, notificationContext)
       || resolveTemplateValue(config?.assignee_role, notificationContext)
   );
+  const roleCodes = roleCode ? [roleCode] : normalizeAssigneeRoleCodes(assigneeId);
   const subrole = cleanString(resolveTemplateValue(config?.subrole, notificationContext));
 
   if (!message) {
@@ -2949,7 +2978,7 @@ async function handleSendSystemNotification(node, context, runtime) {
   for (const userId of userIds) {
     const notification = await Notification.create({
       userId,
-      role: roleCode || '',
+      role: roleCodes.length ? roleCodes.join(',') : '',
       subrole: subrole || '',
       category: 'general',
       event: 'automation.system_notification',
