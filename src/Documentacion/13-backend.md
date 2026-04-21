@@ -216,9 +216,11 @@ Se añade backend V1 para una futura subpestaña `Marketing > Informes > Compete
 Principios:
 
 - Sugerir competidores locales en la primera configuración con Google Places.
+- Para sugerir competidores es obligatorio tener una ficha local propia conectada o `Clinica.url_ficha_local` guardada. Si falta, `GET /competition/suggestions` devuelve `setup_required=true`, `setup_code=LOCAL_PROFILE_REQUIRED` y no ejecuta una búsqueda genérica.
+- Si hay ancla local pero no hay categoría/especialidad suficiente, devuelve `setup_code=LOCAL_CATEGORY_REQUIRED`. No se debe usar fallback a "clínica médica" porque genera ruido en clínicas nuevas.
 - Guardar solo competidores confirmados por el usuario.
 - Actualizar semanalmente por cron, no en cada render del informe.
-- Consultar anuncios únicamente mediante la API oficial de Meta Ads Library. Si el token no tiene acceso o Meta no devuelve datos, el backend persiste `status=unavailable` y la UI debe mostrar aviso; no hay scraping como fallback.
+- Consultar anuncios mediante la API oficial de Meta Ads Library. Si Meta devuelve `ad_snapshot_url`, el backend puede intentar extraer imagen/vídeo público del snapshot como previsualización best-effort. Si el token no tiene acceso o Meta no devuelve datos, persiste `status=unavailable` y la UI debe mostrar aviso.
 
 Tablas:
 

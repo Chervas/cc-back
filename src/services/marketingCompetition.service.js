@@ -114,6 +114,15 @@ function normalizePlaceId(value) {
   return text.replace(/^places\//i, '');
 }
 
+function businessNamesMatch(left, right) {
+  const a = normalizeBusinessName(left);
+  const b = normalizeBusinessName(right);
+  if (!a || !b) return false;
+  if (a === b) return true;
+  const minLength = Math.min(a.length, b.length);
+  return minLength >= 6 && (a.includes(b) || b.includes(a));
+}
+
 function normalizeUrl(value) {
   const text = cleanString(value);
   if (!text) return null;
@@ -347,6 +356,7 @@ async function resolvePrimaryClinic(scope) {
       'servicios',
       'descripcion',
       'url_web',
+      'url_ficha_local',
       'configuracion'
     ],
     raw: true
@@ -355,7 +365,7 @@ async function resolvePrimaryClinic(scope) {
 
   const businessLocation = await ClinicBusinessLocation.findOne({
     where: { clinica_id: clinicId, is_active: true },
-    attributes: ['location_name', 'primary_category'],
+    attributes: ['location_name', 'location_id', 'primary_category', 'sync_status', 'raw_payload'],
     order: [['last_synced_at', 'DESC'], ['updated_at', 'DESC']],
     raw: true
   });
@@ -363,7 +373,73 @@ async function resolvePrimaryClinic(scope) {
   return {
     ...clinic,
     business_location_name: businessLocation?.location_name || null,
-    business_primary_category: businessLocation?.primary_category || null
+    business_location_id: businessLocation?.location_id || null,
+    business_primary_category: businessLocation?.primary_category || null,
+    business_sync_status: businessLocation?.sync_status || null,
+    business_place_id: normalizePlaceId(businessLocation?.raw_payload?.metadata?.placeId)
+      || normalizePlaceId(businessLocation?.raw_payload?.placeId)
+      || null
+  };
+}
+
+function competitionServiceHint(clinic) {
+  return cleanString(clinic?.business_primary_category)
+    || disciplineSearchHint(clinic)
+    || cleanString(clinic?.servicios)
+    || cleanString(clinic?.descripcion)?.split(/[.,;]/)[0]
+    || null;
+}
+
+function competitionSetupBlocker(clinic, explicitQuery = null) {
+  const hasLocalProfileAnchor = !!(
+    cleanString(clinic?.url_ficha_local)
+    || (
+      cleanString(clinic?.business_primary_category)
+      && (
+        cleanString(clinic?.business_place_id)
+        || cleanString(clinic?.business_location_id)
+        || cleanString(clinic?.business_location_name)
+      )
+    )
+  );
+
+  if (!hasLocalProfileAnchor) {
+    return {
+      code: 'LOCAL_PROFILE_REQUIRED',
+      action: 'connect_google_business_profile',
+      message: 'Conecta la ficha local de Google de esta clínica o añade su URL de ficha local antes de buscar competidores. Así evitamos sugerencias genéricas que no correspondan a su especialidad.'
+    };
+  }
+
+  if (!cleanString(explicitQuery) && !competitionServiceHint(clinic)) {
+    return {
+      code: 'LOCAL_CATEGORY_REQUIRED',
+      action: 'complete_clinic_medical_area',
+      message: 'Completa la categoría/especialidad de la clínica antes de buscar competidores. No usamos una búsqueda genérica de clínica médica porque genera ruido.'
+    };
+  }
+
+  return null;
+}
+
+function buildSetupRequiredPayload(scope, clinic, blocker, query = null) {
+  return {
+    success: false,
+    query: cleanString(query),
+    clinic: clinic ? { id: clinic.id_clinica, name: clinic.nombre_clinica } : null,
+    provider_status: null,
+    suggestions: [],
+    setup_required: true,
+    setup_code: blocker.code,
+    setup_action: blocker.action,
+    error: {
+      code: blocker.code,
+      message: blocker.message
+    },
+    scope_hint: {
+      type: scope?.scope || null,
+      clinicIds: scope?.clinicIds || []
+    }
   };
 }
 
@@ -379,7 +455,10 @@ function disciplineSearchHint(clinic) {
     fisioterapia: 'fisioterapia',
     medicina_estetica: 'medicina estética',
     dermatologia: 'dermatólogo',
-    oftalmologia: 'oftalmólogo'
+    oftalmologia: 'oftalmólogo',
+    capilar: 'clínica capilar',
+    medicina_capilar: 'clínica capilar',
+    trasplante_capilar: 'trasplante capilar'
   };
   const match = disciplinas.map((item) => map[String(item || '').toLowerCase()]).find(Boolean);
   return match || null;
@@ -389,11 +468,7 @@ function inferCompetitionQuery(clinic, explicitQuery = null) {
   const query = cleanString(explicitQuery);
   if (query) return query;
 
-  const serviceHint = cleanString(clinic?.business_primary_category)
-    || disciplineSearchHint(clinic)
-    || cleanString(clinic?.servicios)
-    || cleanString(clinic?.descripcion)?.split(/[.,;]/)[0]
-    || 'clínica médica';
+  const serviceHint = competitionServiceHint(clinic);
   const locationParts = [clinic?.ciudad, clinic?.provincia, clinic?.codigo_postal]
     .map(cleanString)
     .filter(Boolean);
@@ -704,6 +779,13 @@ async function listCompetition(scope, { includeInactive = false } = {}) {
 
 async function suggestCompetitors(scope, { query = null, limit = DEFAULT_LIMIT } = {}) {
   const clinic = await resolvePrimaryClinic(scope);
+  const setupBlocker = competitionSetupBlocker(clinic, query);
+  if (setupBlocker) {
+    const payload = buildSetupRequiredPayload(scope, clinic, setupBlocker, query);
+    payload.provider_status = await providerStatusForScope(scope);
+    return payload;
+  }
+
   const textQuery = inferCompetitionQuery(clinic, query);
   const existing = await MarketingCompetitor.findAll({ where: buildCompetitorWhere(scope, { includeInactive: true }), raw: true });
   const existingPlaceIds = new Set(existing.map((item) => normalizePlaceId(item.google_place_id)).filter(Boolean));
@@ -721,10 +803,10 @@ async function suggestCompetitors(scope, { query = null, limit = DEFAULT_LIMIT }
       const normalizedPlaceId = normalizePlaceId(normalized.google_place_id);
       const normalizedName = normalizeBusinessName(normalized.name);
       const isOwnClinic = (normalizedPlaceId && ownPlaceIds.has(normalizedPlaceId))
-        || (normalizedName && ownNames.has(normalizedName));
+        || [...ownNames].some((ownName) => businessNamesMatch(normalizedName, ownName));
       const alreadyAdded = isOwnClinic
         || (normalizedPlaceId && existingPlaceIds.has(normalizedPlaceId))
-        || (normalizedName && existingNames.has(normalizedName));
+        || [...existingNames].some((existingName) => businessNamesMatch(normalizedName, existingName));
       const score = Math.round(((normalized.rating || 0) * 20) + Math.log10((normalized.review_count || 0) + 1) * 35);
       return attachPlacePhotoUrl({ ...normalized, already_added: alreadyAdded, suggested_score: score }, { maxWidthPx: 640 });
     }));
