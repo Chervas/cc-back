@@ -156,6 +156,34 @@ async function publishClinicTemplateVersion({ row, actorUserId = null, transacti
   }, { transaction });
 }
 
+async function backfillScheduledTriggersForPublishedTemplate(row, { actorUserId = null } = {}) {
+  const triggerType = String(row?.trigger_type || '').trim();
+  if (!['appointment_reminder_window', 'appointment_after'].includes(triggerType)) {
+    return null;
+  }
+
+  try {
+    // Lazy require: the runtime imports this service indirectly through normal appointment flows.
+    const appointmentAutomationV2Runtime = require('./appointmentAutomationV2Runtime.service');
+    return await appointmentAutomationV2Runtime.backfillScheduledTriggersForTemplate(row, {
+      user_id: actorUserId || row?.published_by || row?.created_by || null,
+      user_role: 'system',
+      user_name: 'Catalog propagation',
+      limit: 5000,
+    });
+  } catch (err) {
+    console.error('Error backfilling scheduled automation after catalog propagation', {
+      template_key: row?.template_key,
+      version: row?.version,
+      error: err?.message || String(err),
+    });
+    return {
+      success: false,
+      error: err?.message || String(err),
+    };
+  }
+}
+
 function getCatalogSourceScopeScore(template) {
   const clinicId = parseIntOrNull(template?.clinic_id);
   const groupId = parseIntOrNull(template?.group_id);
@@ -391,10 +419,12 @@ async function ensureCatalogTemplateForClinic({ clinicId, catalogFlow, actorUser
         transaction,
       });
     });
+    const scheduledBackfill = await backfillScheduledTriggersForPublishedTemplate(existingDraft, { actorUserId });
     return {
       status: familyExists ? 'updated' : 'created',
       template_key: existingDraft.template_key,
       version: existingDraft.version,
+      scheduled_backfill: scheduledBackfill,
     };
   }
 
@@ -416,10 +446,12 @@ async function ensureCatalogTemplateForClinic({ clinicId, catalogFlow, actorUser
     return row;
   });
 
+  const scheduledBackfill = await backfillScheduledTriggersForPublishedTemplate(created, { actorUserId });
   return {
     status: familyExists ? 'updated' : 'created',
     template_key: created.template_key,
     version: created.version,
+    scheduled_backfill: scheduledBackfill,
   };
 }
 

@@ -1988,6 +1988,7 @@ Contrato operativo:
 
 - al crear, editar o reagendar una cita, backend llama a `syncScheduledTriggersForCita(cita)`;
 - al publicar un flujo programado o reactivar una versión publicada, backend resincroniza citas futuras del scope del flujo para no depender de que la cita se edite después;
+- al propagar desde `AutomationFlowCatalog`, cada copia clínica publicada también ejecuta ese backfill; si no, las citas ya existentes antes de la propagación no tendrían job hasta que se modificasen;
 - se crean jobs `appointment_automation_schedule_fire` con `payload`:
   - `appointment_id`
   - `trigger_type`
@@ -2157,6 +2158,7 @@ Corrección aplicada en los flujos activos de cita el `2026-03-28`:
 El `2026-03-27` la capa `AutomationFlowCatalog` no actúa todavía como fuente de verdad viva del sistema:
 
 - `propagateCatalogAutomationToClinics(...)` crea o actualiza una nueva versión V2 por clínica y la **publica automáticamente** a partir de un `template_key` enlazado;
+- si el flujo propagado es programado (`appointment_reminder_window` o `appointment_after`), la propagación debe ejecutar también el backfill de scheduler para crear/cancelar `JobRequests` de citas futuras ya existentes;
 - la propagación debe resolver siempre el flujo base neutro del catálogo y no reutilizar copias de clínica como fuente;
 - cada familia propagada por clínica debe tener `public_id` propio, distinto del asset base del catálogo;
 - desactiva la versión publicada anterior de la misma familia en la clínica y deja activa la recién propagada;
