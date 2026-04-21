@@ -37,7 +37,8 @@ const PLACE_FIELD_MASK = [
   'places.websiteUri',
   'places.nationalPhoneNumber',
   'places.googleMapsUri',
-  'places.businessStatus'
+  'places.businessStatus',
+  'places.photos'
 ].join(',');
 
 const PLACE_DETAILS_FIELD_MASK = [
@@ -53,7 +54,8 @@ const PLACE_DETAILS_FIELD_MASK = [
   'websiteUri',
   'nationalPhoneNumber',
   'googleMapsUri',
-  'businessStatus'
+  'businessStatus',
+  'photos'
 ].join(',');
 
 const META_AD_FIELDS = [
@@ -92,6 +94,18 @@ function cleanString(value) {
   return text || null;
 }
 
+function normalizeBusinessName(value) {
+  const text = cleanString(value);
+  if (!text) return null;
+  return text
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
 function normalizePlaceId(value) {
   const text = cleanString(value);
   if (!text) return null;
@@ -103,6 +117,48 @@ function normalizeUrl(value) {
   if (!text) return null;
   if (/^https?:\/\//i.test(text)) return text;
   return `https://${text}`;
+}
+
+function splitSearchTerms(value) {
+  const source = Array.isArray(value) ? value : String(value || '').split(/[,\n;]/);
+  return source.map(cleanString).filter(Boolean);
+}
+
+function extractPhotoNames(place = {}) {
+  const photos = Array.isArray(place?.photos) ? place.photos : [];
+  return photos
+    .map((photo) => cleanString(photo?.name || photo))
+    .filter(Boolean);
+}
+
+async function resolvePlacePhotoUrl(photoName, { maxWidthPx = 640 } = {}) {
+  const resourceName = cleanString(photoName);
+  if (!resourceName) return null;
+  try {
+    const response = await axios.get(`${GOOGLE_PLACES_API_BASE}/${resourceName.replace(/\/media$/i, '')}/media`, {
+      headers: {
+        'X-Goog-Api-Key': getGooglePlacesApiKey()
+      },
+      params: {
+        maxWidthPx,
+        skipHttpRedirect: true
+      },
+      timeout: 10000
+    });
+    return normalizeUrl(response.data?.photoUri);
+  } catch (_) {
+    return null;
+  }
+}
+
+async function attachPlacePhotoUrl(item, { maxWidthPx = 640 } = {}) {
+  const photoName = cleanString(item?.photo_name) || (Array.isArray(item?.photo_names) ? item.photo_names[0] : null);
+  if (!photoName) return item;
+  const photoUrl = await resolvePlacePhotoUrl(photoName, { maxWidthPx });
+  return {
+    ...item,
+    photo_url: photoUrl || null
+  };
 }
 
 function providerStatus({ googleError = null, metaError = null, metaTokenSource = null } = {}) {
@@ -165,6 +221,7 @@ function normalizePlace(place = {}) {
   const displayName = place.displayName?.text || place.displayName || null;
   const primaryCategory = place.primaryTypeDisplayName?.text || place.primaryTypeDisplayName || place.primaryType || null;
   const location = place.location || {};
+  const photoNames = extractPhotoNames(place);
   return {
     source: 'google_places',
     name: cleanString(displayName) || 'Competidor sin nombre',
@@ -180,6 +237,8 @@ function normalizePlace(place = {}) {
     rating: toNumber(place.rating),
     review_count: toInt(place.userRatingCount),
     business_status: cleanString(place.businessStatus),
+    photo_name: photoNames[0] || null,
+    photo_names: photoNames,
     raw_place_payload: place
   };
 }
@@ -489,6 +548,7 @@ function mapCompetitorRow(row, latestSnapshot = null, latestAdSnapshot = null) {
       error_message: ads?.error_message || null,
       last_synced_at: plain.last_ads_synced_at
     },
+    photo_name: extractPhotoNames(plain.raw_place_payload || [])[0] || null,
     latest_snapshot: snapshot ? {
       date: snapshot.snapshot_date,
       rating: snapshot.rating != null ? Number(snapshot.rating) : null,
@@ -511,7 +571,7 @@ async function hydrateCompetitors(rows) {
       MarketingCompetitorSnapshot.findOne({ where: { competitor_id: row.id }, order: [['snapshot_date', 'DESC'], ['id', 'DESC']] }),
       MarketingCompetitorAdSnapshot.findOne({ where: { competitor_id: row.id, provider: META_ADS_LIBRARY_PROVIDER }, order: [['snapshot_date', 'DESC'], ['id', 'DESC']] })
     ]);
-    hydrated.push(mapCompetitorRow(row, snapshot, adSnapshot));
+    hydrated.push(await attachPlacePhotoUrl(mapCompetitorRow(row, snapshot, adSnapshot), { maxWidthPx: 640 }));
   }
   return hydrated;
 }
@@ -541,28 +601,34 @@ async function suggestCompetitors(scope, { query = null, limit = DEFAULT_LIMIT }
   const textQuery = inferCompetitionQuery(clinic, query);
   const existing = await MarketingCompetitor.findAll({ where: buildCompetitorWhere(scope, { includeInactive: true }), raw: true });
   const existingPlaceIds = new Set(existing.map((item) => normalizePlaceId(item.google_place_id)).filter(Boolean));
-  const existingNames = new Set(existing.map((item) => String(item.name || '').toLowerCase()));
+  const existingNames = new Set(existing.map((item) => normalizeBusinessName(item.name)).filter(Boolean));
+  const ownNames = new Set([
+    normalizeBusinessName(clinic?.nombre_clinica),
+    normalizeBusinessName(clinic?.business_location_name)
+  ].filter(Boolean));
   const ownPlaceIds = await resolveOwnBusinessPlaceIds(scope);
 
   try {
     const places = await searchGooglePlaces({ query: textQuery, maxResultCount: Math.max(1, Math.min(20, Number(limit) || DEFAULT_LIMIT)) });
-    const suggestions = places.map((place) => {
+    const suggestions = await Promise.all(places.map(async (place) => {
       const normalized = normalizePlace(place);
       const normalizedPlaceId = normalizePlaceId(normalized.google_place_id);
-      const isOwnClinic = normalizedPlaceId && ownPlaceIds.has(normalizedPlaceId);
+      const normalizedName = normalizeBusinessName(normalized.name);
+      const isOwnClinic = (normalizedPlaceId && ownPlaceIds.has(normalizedPlaceId))
+        || (normalizedName && ownNames.has(normalizedName));
       const alreadyAdded = isOwnClinic
         || (normalizedPlaceId && existingPlaceIds.has(normalizedPlaceId))
-        || existingNames.has(String(normalized.name || '').toLowerCase());
+        || (normalizedName && existingNames.has(normalizedName));
       const score = Math.round(((normalized.rating || 0) * 20) + Math.log10((normalized.review_count || 0) + 1) * 35);
-      return { ...normalized, already_added: alreadyAdded, suggested_score: score };
-    }).filter((item) => item.name);
+      return attachPlacePhotoUrl({ ...normalized, already_added: alreadyAdded, suggested_score: score }, { maxWidthPx: 640 });
+    }));
 
     return {
       success: true,
       query: textQuery,
       clinic: clinic ? { id: clinic.id_clinica, name: clinic.nombre_clinica } : null,
       provider_status: await providerStatusForScope(scope),
-      suggestions
+      suggestions: suggestions.filter((item) => item.name)
     };
   } catch (error) {
     return {
@@ -623,6 +689,14 @@ function scopeDefaults(scope) {
 }
 
 async function createCompetitor(scope, payload = {}) {
+  const metaSearchTerms = splitSearchTerms(payload.meta_ads_search_terms ?? payload.meta_search_terms);
+  const manualPayload = {
+    facebook_url: normalizeUrl(payload.facebook_url),
+    instagram_url: normalizeUrl(payload.instagram_url),
+    notes: cleanString(payload.notes),
+    meta_search_terms: metaSearchTerms
+  };
+  const hasManualPayload = Object.values(manualPayload).some((value) => Array.isArray(value) ? value.length : !!value);
   const normalizedPlace = payload.google_place_id || payload.raw_place_payload ? normalizePlace({
     id: payload.google_place_id,
     displayName: { text: payload.name },
@@ -656,9 +730,9 @@ async function createCompetitor(scope, payload = {}) {
     business_status: cleanString(payload.business_status) || normalizedPlace.business_status,
     meta_page_id: cleanString(payload.meta_page_id),
     meta_page_name: cleanString(payload.meta_page_name),
-    meta_page_url: normalizeUrl(payload.meta_page_url),
-    meta_ads_search_terms: Array.isArray(payload.meta_ads_search_terms) ? payload.meta_ads_search_terms.map(cleanString).filter(Boolean) : [],
-    raw_place_payload: payload.raw_place_payload || normalizedPlace.raw_place_payload || null,
+    meta_page_url: normalizeUrl(payload.meta_page_url) || manualPayload.facebook_url || manualPayload.instagram_url,
+    meta_ads_search_terms: metaSearchTerms,
+    raw_place_payload: payload.raw_place_payload || normalizedPlace.raw_place_payload || (hasManualPayload ? { manual: manualPayload } : null),
     is_active: payload.is_active !== false,
     last_sync_status: 'created'
   };
