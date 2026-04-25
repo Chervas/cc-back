@@ -228,7 +228,7 @@ function channelLabel(key) {
     whatsapp: { name: 'WhatsApp', icon: 'heroicons_outline:chat-bubble-left-right', source: 'ClinicaClick' },
     social_organic: { name: 'Redes sociales orgánico', icon: 'heroicons_outline:share', source: 'Redes sociales' },
     call_click: { name: 'Llamada telefónica', icon: 'heroicons_outline:phone', source: 'ClinicaClick' },
-    local_services: { name: 'Perfil de Empresa Google', icon: 'brand:google', source: 'Perfil Google' },
+    local_services: { name: 'Perfil de Empresa Google', icon: 'brand:google-business-profile', source: 'Perfil Google' },
   };
   return map[key] || { name: 'Otros', icon: 'heroicons_outline:squares-2x2', source: 'ClinicaClick' };
 }
@@ -1157,7 +1157,7 @@ function buildSources({ intakeConfigCount, leadsTotal, seo, googleAds, metaAds, 
     },
     {
       name: 'Perfil de Empresa Google',
-      icon: 'brand:google',
+      icon: 'brand:google-business-profile',
       connected: businessProfileMapped,
       label: businessProfileMapped ? 'Conectado' : 'Pendiente',
       tooltip: 'Conecta tu Perfil de Empresa de Google para ver llamadas, reseñas y visitas a tu ficha.',
@@ -1166,7 +1166,7 @@ function buildSources({ intakeConfigCount, leadsTotal, seo, googleAds, metaAds, 
     },
     {
       name: 'Google Analytics 4',
-      icon: 'brand:google',
+      icon: 'brand:google-analytics',
       connected: analyticsMapped,
       label: analyticsMapped ? 'Conectado' : 'Opcional',
       tooltip: 'GA4 es opcional. ClinicaClick Analytics debe ser la fuente principal nueva.',

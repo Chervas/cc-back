@@ -119,3 +119,24 @@ exports.refreshCompetition = async (req, res) => {
     return sendError(res, error, 'Error refrescando competencia');
   }
 };
+
+exports.getLocalHeatmap = async (req, res) => {
+  try {
+    const scope = await resolveScope(req, { allowAll: false });
+    const result = await competitionService.getLocalRankingHeatmap(scope, {
+      term: req.query.term || null,
+      zoomKm: req.query.zoom_km || req.query.zoomKm || null,
+    });
+    return res.json({
+      ...result,
+      scope: {
+        type: scope.scope,
+        clinicIds: scope.clinicIds || [],
+        groupId: scope.groupId || null,
+        original: scope.original || null,
+      },
+    });
+  } catch (error) {
+    return sendError(res, error, 'Error calculando mapa de ranking local');
+  }
+};
