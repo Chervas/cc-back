@@ -1786,11 +1786,15 @@ function getMetaBrowserAutomation() {
   return metaBrowserRuntime.automation;
 }
 
-function scheduleMetaBrowserSleep() {
+function clearMetaBrowserIdleTimer() {
   if (metaBrowserRuntime.idleTimer) {
     clearTimeout(metaBrowserRuntime.idleTimer);
     metaBrowserRuntime.idleTimer = null;
   }
+}
+
+function scheduleMetaBrowserSleep() {
+  clearMetaBrowserIdleTimer();
   if (!metaBrowserRuntime.browser) return;
 
   if (!META_BROWSER_MEDIA_IDLE_MS) {
@@ -1819,6 +1823,7 @@ function scheduleMetaBrowserSleep() {
 }
 
 async function getMetaBrowserInstance() {
+  clearMetaBrowserIdleTimer();
   if (metaBrowserRuntime.browser) return metaBrowserRuntime.browser;
   if (metaBrowserRuntime.launchPromise) return metaBrowserRuntime.launchPromise;
 
