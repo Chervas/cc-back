@@ -18,17 +18,47 @@ const { Op } = db.Sequelize;
 
 const GOOGLE_PLACES_API_BASE = 'https://places.googleapis.com/v1';
 const META_ADS_LIBRARY_PROVIDER = 'meta_ads_library';
+const GOOGLE_ADS_TRANSPARENCY_PROVIDER = 'google_ads_transparency';
+const GOOGLE_ADS_TRANSPARENCY_BASE = process.env.COMPETITION_GOOGLE_ADS_TRANSPARENCY_BASE || 'https://adstransparency.google.com';
 const DEFAULT_COUNTRY = process.env.COMPETITION_META_AD_COUNTRY || 'ES';
 const DEFAULT_LANGUAGE = process.env.COMPETITION_GOOGLE_LANGUAGE || 'es';
 const DEFAULT_REGION = process.env.COMPETITION_GOOGLE_REGION || 'ES';
 const DEFAULT_LIMIT = Math.max(1, Math.min(25, parseInt(process.env.COMPETITION_SUGGESTION_LIMIT || '10', 10)));
 const DEFAULT_AD_LIMIT = Math.max(1, Math.min(100, parseInt(process.env.COMPETITION_META_AD_LIMIT || '25', 10)));
+const GOOGLE_TRANSPARENCY_AD_LIMIT = Math.max(1, Math.min(50, parseInt(process.env.COMPETITION_GOOGLE_ADS_TRANSPARENCY_AD_LIMIT || '10', 10)));
+const GOOGLE_TRANSPARENCY_ADVERTISER_LIMIT = Math.max(1, Math.min(10, parseInt(process.env.COMPETITION_GOOGLE_ADS_TRANSPARENCY_ADVERTISER_LIMIT || '5', 10)));
+const GOOGLE_TRANSPARENCY_TIMEOUT_MS = Math.max(2000, Math.min(30000, parseInt(process.env.COMPETITION_GOOGLE_ADS_TRANSPARENCY_TIMEOUT_MS || '12000', 10)));
+const GOOGLE_TRANSPARENCY_SCRIPT_MEDIA_LIMIT = Math.max(0, Math.min(GOOGLE_TRANSPARENCY_AD_LIMIT, parseInt(process.env.COMPETITION_GOOGLE_ADS_TRANSPARENCY_SCRIPT_MEDIA_LIMIT || '3', 10)));
 const DEFAULT_RANKING_LIMIT = Math.max(1, Math.min(5, parseInt(process.env.COMPETITION_LOCAL_RANKING_TERMS_LIMIT || '3', 10)));
 const SNAPSHOT_MEDIA_TIMEOUT_MS = Math.max(1000, Math.min(15000, parseInt(process.env.COMPETITION_META_SNAPSHOT_MEDIA_TIMEOUT_MS || '6000', 10)));
 const SNAPSHOT_MEDIA_LIMIT = Math.max(0, Math.min(DEFAULT_AD_LIMIT, parseInt(process.env.COMPETITION_META_SNAPSHOT_MEDIA_LIMIT || String(DEFAULT_AD_LIMIT), 10)));
 const SOCIAL_DISCOVERY_TIMEOUT_MS = Math.max(1000, Math.min(15000, parseInt(process.env.COMPETITION_SOCIAL_DISCOVERY_TIMEOUT_MS || '8000', 10)));
 const SOCIAL_DISCOVERY_PAGE_LIMIT = Math.max(1, Math.min(6, parseInt(process.env.COMPETITION_SOCIAL_DISCOVERY_PAGE_LIMIT || '4', 10)));
 const META_PAGE_MATCH_THRESHOLD = Math.max(20, Math.min(100, parseInt(process.env.COMPETITION_META_PAGE_MATCH_THRESHOLD || '45', 10)));
+const GOOGLE_ADVERTISER_MATCH_THRESHOLD = Math.max(20, Math.min(100, parseInt(process.env.COMPETITION_GOOGLE_ADS_ADVERTISER_MATCH_THRESHOLD || '45', 10)));
+
+const GOOGLE_COUNTRY_GEO_CRITERIA_IDS = {
+  AD: 2020,
+  AR: 2032,
+  AU: 2036,
+  BE: 2056,
+  BR: 2076,
+  CA: 2124,
+  CH: 2756,
+  CL: 2152,
+  CO: 2170,
+  DE: 2276,
+  DK: 2208,
+  ES: 2724,
+  FR: 2250,
+  GB: 2826,
+  IE: 2372,
+  IT: 2380,
+  MX: 2484,
+  NL: 2528,
+  PT: 2620,
+  US: 2840
+};
 
 const SOCIAL_DISCOVERY_INTERNAL_LINK_HINTS = [
   'contact',
@@ -137,6 +167,11 @@ function toNumber(value) {
   return Number.isFinite(num) ? num : null;
 }
 
+function envFlagEnabled(value, defaultValue = true) {
+  if (value === undefined || value === null || value === '') return defaultValue;
+  return !['0', 'false', 'no', 'off'].includes(String(value).trim().toLowerCase());
+}
+
 function cleanString(value) {
   const text = String(value || '').replace(/\s+/g, ' ').trim();
   return text || null;
@@ -191,6 +226,18 @@ function normalizeUrl(value) {
   if (/^https?:\/\//i.test(text)) return text;
   if (/^[a-z][a-z0-9+.-]*:/i.test(text)) return null;
   return `https://${text}`;
+}
+
+function domainFromUrl(value) {
+  const url = normalizeUrl(value);
+  if (!url) return null;
+  try {
+    const parsed = new URL(url);
+    const host = parsed.hostname.replace(/^www\./i, '').toLowerCase();
+    return host || null;
+  } catch (_) {
+    return null;
+  }
 }
 
 function buildGoogleMapsUrl(placeId, query = null) {
@@ -256,6 +303,9 @@ function isUsableSnapshotMediaUrl(value) {
     const host = parsed.hostname.replace(/^www\./i, '').toLowerCase();
     if (host === 'static.xx.fbcdn.net') return false;
     if (host === 'facebook.com' || host.endsWith('.facebook.com')) return false;
+    if (host === 'fonts.gstatic.com') return false;
+    if (host === 'gstatic.com' || host === 'www.gstatic.com') return false;
+    if (/googlematerialicons|\/gm_.*-48dp\//i.test(parsed.pathname)) return false;
     if (/\/rsrc\.php\//i.test(parsed.pathname)) return false;
     return true;
   } catch (_) {
@@ -271,6 +321,23 @@ function extractFirstUrlByExtension(text, extensions = []) {
   for (const match of matches) {
     const url = normalizeUrl(decodeEscapedHtml(match));
     if (isUsableSnapshotMediaUrl(url)) return url;
+  }
+  return null;
+}
+
+function extractFirstGoogleImageUrl(text) {
+  const source = decodeEscapedHtml(text);
+  const patterns = [
+    /https?:\/\/tpc\.googlesyndication\.com\/archive\/simgad\/[^"'<>\s\\]+/ig,
+    /https?:\/\/encrypted-tbn\d*\.gstatic\.com\/[^"'<>\s\\]+/ig,
+    /https?:\/\/[^"'<>\s\\]+\.googleusercontent\.com\/[^"'<>\s\\]+(?:\.(?:jpg|jpeg|png|webp|gif)|[?][^"'<>\s\\]*)/ig
+  ];
+  for (const pattern of patterns) {
+    const matches = source.match(pattern) || [];
+    for (const match of matches) {
+      const url = normalizeUrl(decodeEscapedHtml(match));
+      if (isUsableSnapshotMediaUrl(url)) return url;
+    }
   }
   return null;
 }
@@ -298,8 +365,11 @@ function extractFirstMediaFromHtml(html) {
     || normalizeUrl(cleanString(text.match(/"(?:playable_url|browser_native_sd_url|browser_native_hd_url|video_url)"\s*:\s*"([^"]+)"/i)?.[1]));
 
   const attrPoster = extractAttributeUrl(text.match(/<video\b[^>]*>/i)?.[0] || '', 'poster');
+  const attrImage = extractAttributeUrl(text.match(/<img\b[^>]*>/i)?.[0] || '', 'src');
   const anyImage = attrPoster
+    || attrImage
     || extractFirstUrlByExtension(text, ['jpg', 'jpeg', 'png', 'webp'])
+    || extractFirstGoogleImageUrl(text)
     || normalizeUrl(cleanString(text.match(/"(?:image_url|thumbnail_url|poster)"\s*:\s*"([^"]+)"/i)?.[1]));
 
   if (anyVideo || anyImage) {
@@ -624,6 +694,7 @@ async function attachPlacePhotoUrl(item, { maxWidthPx = 640 } = {}) {
 function providerStatus({ googleError = null, metaError = null, metaTokenSource = null } = {}) {
   const googleKey = getGooglePlacesApiKey();
   const metaToken = getMetaAdLibraryTokenFromEnv();
+  const googleAdsTransparencyEnabled = isGoogleAdsTransparencyEnabled();
   return {
     google_places: {
       provider: 'google_places',
@@ -642,6 +713,14 @@ function providerStatus({ googleError = null, metaError = null, metaTokenSource 
       required_env: 'META_AD_LIBRARY_ACCESS_TOKEN',
       fallback_env: ['META_GRAPH_TOKEN'],
       note: 'Se usa Meta Ads Library oficial y, si existe snapshot público, se intenta extraer una previsualización visual best-effort. Si no hay media, la UI muestra enlace a Meta.'
+    },
+    google_ads_transparency: {
+      provider: GOOGLE_ADS_TRANSPARENCY_PROVIDER,
+      available: googleAdsTransparencyEnabled,
+      configured: googleAdsTransparencyEnabled,
+      error: null,
+      optional_env: 'COMPETITION_GOOGLE_ADS_TRANSPARENCY_ENABLED=false',
+      note: 'Se consulta el Ads Transparency Center público de Google mediante RPC asíncrono y limitado. No se ejecuta navegador ni se bloquea la carga del informe.'
     }
   };
 }
@@ -1378,6 +1457,380 @@ async function fetchMetaAdsForCompetitor(competitor, scope) {
   };
 }
 
+function isGoogleAdsTransparencyEnabled() {
+  return envFlagEnabled(process.env.COMPETITION_GOOGLE_ADS_TRANSPARENCY_ENABLED, true);
+}
+
+function googleTransparencyRegionIds() {
+  const explicit = String(process.env.COMPETITION_GOOGLE_ADS_TRANSPARENCY_GEO_CRITERIA_IDS || '')
+    .split(/[,\s]+/)
+    .map(toInt)
+    .filter(Boolean);
+  if (explicit.length) return [...new Set(explicit)];
+
+  const country = cleanString(process.env.COMPETITION_GOOGLE_ADS_TRANSPARENCY_COUNTRY || DEFAULT_COUNTRY || DEFAULT_REGION)
+    ?.toUpperCase();
+  const id = country ? GOOGLE_COUNTRY_GEO_CRITERIA_IDS[country] : null;
+  return id ? [id] : [];
+}
+
+function googleTransparencyHeaders() {
+  return {
+    'User-Agent': 'Mozilla/5.0 (compatible; ClinicaClickBot/1.0; +https://clinicaclick.com)',
+    'Accept': 'application/json',
+    'Content-Type': 'application/json',
+    'X-Same-Domain': '1',
+    'Referer': `${GOOGLE_ADS_TRANSPARENCY_BASE}/`
+  };
+}
+
+async function googleTransparencyRpc(path, body) {
+  const response = await axios.post(
+    `${GOOGLE_ADS_TRANSPARENCY_BASE.replace(/\/$/g, '')}/anji/_/rpc/${path}`,
+    body,
+    {
+      timeout: GOOGLE_TRANSPARENCY_TIMEOUT_MS,
+      maxContentLength: 2 * 1024 * 1024,
+      headers: googleTransparencyHeaders()
+    }
+  );
+  return response.data || {};
+}
+
+function googleTransparencyTimestamp(value) {
+  const seconds = toNumber(value?.['1'] ?? value?.seconds);
+  if (!seconds) return null;
+  return new Date(seconds * 1000).toISOString();
+}
+
+function findStringInObject(value, predicate, seen = new Set()) {
+  if (!value) return null;
+  if (typeof value === 'string') return predicate(value) ? value : null;
+  if (typeof value !== 'object') return null;
+  if (seen.has(value)) return null;
+  seen.add(value);
+
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      const found = findStringInObject(item, predicate, seen);
+      if (found) return found;
+    }
+    return null;
+  }
+
+  for (const item of Object.values(value)) {
+    const found = findStringInObject(item, predicate, seen);
+    if (found) return found;
+  }
+  return null;
+}
+
+function googleTransparencyPreviewHtml(preview) {
+  return findStringInObject(preview, (value) => /<img\b|<video\b|<iframe\b/i.test(value));
+}
+
+function googleTransparencyPreviewScriptUrl(preview) {
+  const script = findStringInObject(preview, (value) => /displayads-formats\.googleusercontent\.com\/ads\/preview\/content\.js/i.test(value));
+  return normalizeUrl(script);
+}
+
+function googleTransparencyCreativeUrl(advertiserId, creativeId) {
+  if (!advertiserId || !creativeId) return null;
+  return `${GOOGLE_ADS_TRANSPARENCY_BASE.replace(/\/$/g, '')}/advertiser/${encodeURIComponent(advertiserId)}/creative/${encodeURIComponent(creativeId)}?region=${encodeURIComponent(DEFAULT_COUNTRY)}`;
+}
+
+function googleTransparencyFormatLabel(value) {
+  const format = toInt(value);
+  if (format === 1) return 'Imagen';
+  if (format === 2) return 'HTML5';
+  if (format === 3) return 'Vídeo';
+  if (format === 4) return 'Texto';
+  return format ? `Formato ${format}` : null;
+}
+
+function normalizeGoogleTransparencyAd(ad = {}) {
+  const advertiserId = cleanString(ad['1'] || ad.advertiser_id);
+  const creativeId = cleanString(ad['2'] || ad.creative_id);
+  const preview = ad['3'] || ad.preview || {};
+  const previewHtml = googleTransparencyPreviewHtml(preview);
+  const previewScriptUrl = googleTransparencyPreviewScriptUrl(preview);
+  const media = previewHtml ? extractFirstMediaFromHtml(previewHtml) : null;
+  const imageUrl = media?.image_url || null;
+  const videoUrl = media?.video_url || null;
+  const formatLabel = googleTransparencyFormatLabel(ad['4'] || ad.format);
+
+  return {
+    provider: GOOGLE_ADS_TRANSPARENCY_PROVIDER,
+    id: creativeId,
+    creative_id: creativeId,
+    advertiser_id: advertiserId,
+    advertiser_name: cleanString(ad['12'] || ad.advertiser_name),
+    page_name: cleanString(ad['12'] || ad.advertiser_name),
+    domain: domainFromUrl(ad['14']) || cleanString(ad['14'] || ad.domain),
+    body: null,
+    title: formatLabel || 'Anuncio de Google',
+    description: null,
+    snapshot_url: googleTransparencyCreativeUrl(advertiserId, creativeId),
+    ad_snapshot_url: googleTransparencyCreativeUrl(advertiserId, creativeId),
+    preview_html: previewHtml || null,
+    preview_script_url: previewScriptUrl || null,
+    platforms: ['GOOGLE'],
+    publisher_platforms: ['GOOGLE'],
+    format: formatLabel,
+    format_code: toInt(ad['4'] || ad.format),
+    served_days: toInt(ad['13'] || ad.served_days),
+    image_url: imageUrl,
+    thumbnail_url: imageUrl,
+    video_url: videoUrl,
+    media_url: videoUrl || imageUrl || null,
+    media_source: imageUrl || videoUrl ? 'google_rpc_preview' : (previewScriptUrl ? 'google_preview_script_pending' : null),
+    created_at: googleTransparencyTimestamp(ad['6']),
+    delivery_start_at: googleTransparencyTimestamp(ad['6']),
+    delivery_stop_at: googleTransparencyTimestamp(ad['7'])
+  };
+}
+
+async function enrichGoogleAdWithPreviewScript(ad = {}) {
+  if (ad.image_url || ad.video_url || !ad.preview_script_url) return ad;
+  try {
+    const response = await axios.get(ad.preview_script_url, {
+      timeout: Math.min(GOOGLE_TRANSPARENCY_TIMEOUT_MS, 15000),
+      maxContentLength: 1024 * 1024,
+      headers: {
+        'User-Agent': googleTransparencyHeaders()['User-Agent'],
+        'Accept': 'application/javascript,text/javascript,*/*',
+        'Referer': `${GOOGLE_ADS_TRANSPARENCY_BASE}/`
+      }
+    });
+    const media = extractFirstMediaFromHtml(response.data);
+    if (!media?.image_url && !media?.video_url) {
+      return { ...ad, media_source: 'google_preview_script_unavailable' };
+    }
+    return {
+      ...ad,
+      ...media,
+      media_url: media.video_url || media.image_url || ad.media_url || null,
+      media_source: 'google_preview_script'
+    };
+  } catch (error) {
+    return {
+      ...ad,
+      media_source: 'google_preview_script_unavailable',
+      media_error: error?.response?.status ? `HTTP ${error.response.status}` : (error?.code || error?.message || 'google_preview_script_unavailable')
+    };
+  }
+}
+
+async function enrichGoogleAdsWithPreviewScripts(ads = []) {
+  if (!GOOGLE_TRANSPARENCY_SCRIPT_MEDIA_LIMIT || !Array.isArray(ads) || !ads.length) return ads;
+  const enriched = [...ads];
+  for (let index = 0; index < Math.min(GOOGLE_TRANSPARENCY_SCRIPT_MEDIA_LIMIT, ads.length); index += 1) {
+    enriched[index] = await enrichGoogleAdWithPreviewScript(ads[index]);
+  }
+  return enriched;
+}
+
+function googleTransparencyMediaScore(ad = {}) {
+  const media = ad.video_url || ad.image_url || ad.thumbnail_url || ad.media_url;
+  if (ad.video_url) return 50;
+  if (/tpc\.googlesyndication\.com\/archive\/simgad/i.test(media || '')) return 40;
+  if (/encrypted-tbn\d*\.gstatic\.com|googleusercontent\.com/i.test(media || '')) return 30;
+  if (media) return 10;
+  return 0;
+}
+
+function sortGoogleTransparencyAds(ads = []) {
+  return [...ads]
+    .map((ad, index) => ({ ad, index }))
+    .sort((left, right) => {
+      const scoreDelta = googleTransparencyMediaScore(right.ad) - googleTransparencyMediaScore(left.ad);
+      if (scoreDelta) return scoreDelta;
+      return left.index - right.index;
+    })
+    .map((item) => item.ad);
+}
+
+function googleAdsCandidateDomains(competitor = {}) {
+  const raw = competitor.raw_place_payload || {};
+  const domains = [
+    domainFromUrl(competitor.website_url),
+    domainFromUrl(raw.websiteUri),
+    domainFromUrl(raw.website_url),
+    domainFromUrl(competitor.google_maps_url)
+  ].filter(Boolean);
+  return [...new Set(domains)]
+    .filter((domain) => !['google.com', 'maps.google.com', 'facebook.com', 'instagram.com'].includes(domain))
+    .slice(0, 3);
+}
+
+function googleAdsCandidateTerms(competitor = {}) {
+  const socialProfiles = socialProfilesFromPayload(competitor.raw_place_payload);
+  const terms = [
+    competitor.name,
+    competitor.meta_page_name,
+    ...(Array.isArray(competitor.meta_ads_search_terms) ? competitor.meta_ads_search_terms : []),
+    socialProfiles?.instagram_username,
+    socialProfiles?.facebook_username
+  ];
+  return [...new Set(terms.map(cleanString).filter((term) => term && normalizeBusinessName(term)?.length >= 3))].slice(0, 4);
+}
+
+function normalizeGoogleSuggestion(item = {}) {
+  const advertiser = item['1'] || null;
+  const domain = item['2'] || null;
+  if (advertiser) {
+    const count = advertiser['4']?.['1']?.['1'] || advertiser['4']?.['2']?.['1'] || null;
+    return {
+      type: 'advertiser',
+      name: cleanString(advertiser['1']),
+      advertiser_id: cleanString(advertiser['2']),
+      country: cleanString(advertiser['3']),
+      ads_count_hint: toInt(count)
+    };
+  }
+  if (domain) {
+    return {
+      type: 'domain',
+      domain: domainFromUrl(domain['1']) || cleanString(domain['1'])
+    };
+  }
+  return null;
+}
+
+function scoreGoogleAdvertiserMatch(competitor = {}, suggestion = {}) {
+  if (suggestion.type !== 'advertiser') return 0;
+  let score = businessNamesMatch(competitor.name, suggestion.name) ? 80 : 0;
+  const tokens = sharedBusinessTokens(competitor.name, suggestion.name);
+  if (tokens.length >= 2) score = Math.max(score, 70);
+  if (tokens.some((token) => token.length >= 6)) score = Math.max(score, 45);
+  for (const term of googleAdsCandidateTerms(competitor)) {
+    const termTokens = sharedBusinessTokens(term, suggestion.name);
+    if (businessNamesMatch(term, suggestion.name)) score = Math.max(score, 70);
+    if (termTokens.length >= 2) score = Math.max(score, 60);
+    if (termTokens.some((token) => token.length >= 6)) score = Math.max(score, 45);
+  }
+  return score;
+}
+
+async function searchGoogleTransparencySuggestions(query) {
+  const body = {
+    1: query,
+    2: GOOGLE_TRANSPARENCY_ADVERTISER_LIMIT,
+    3: 3
+  };
+  const regionIds = googleTransparencyRegionIds();
+  if (regionIds.length) body[4] = regionIds;
+  const raw = await googleTransparencyRpc('SearchService/SearchSuggestions', body);
+  const suggestions = (Array.isArray(raw?.['1']) ? raw['1'] : [])
+    .map(normalizeGoogleSuggestion)
+    .filter(Boolean);
+  return { raw, suggestions };
+}
+
+async function searchGoogleTransparencyCreativesByDomain(domain, limit = GOOGLE_TRANSPARENCY_AD_LIMIT) {
+  const protoQuery = { 12: { 1: domain, 2: true } };
+  const regionIds = googleTransparencyRegionIds();
+  if (regionIds.length) protoQuery[8] = regionIds;
+  const raw = await googleTransparencyRpc('SearchService/SearchCreatives', {
+    2: limit,
+    3: protoQuery,
+    7: { 1: 1 }
+  });
+  return {
+    raw,
+    ads: Array.isArray(raw?.['1']) ? raw['1'].map(normalizeGoogleTransparencyAd) : [],
+    next_page_token: cleanString(raw?.['2']),
+    lower_bound: toInt(raw?.['4']),
+    upper_bound: toInt(raw?.['5'])
+  };
+}
+
+async function searchGoogleTransparencyCreativesByAdvertiser(advertiserId, limit = GOOGLE_TRANSPARENCY_AD_LIMIT) {
+  const protoQuery = { 1: advertiserId };
+  const regionIds = googleTransparencyRegionIds();
+  if (regionIds.length) protoQuery[8] = regionIds;
+  const raw = await googleTransparencyRpc('SearchService/SearchCreatives', {
+    2: limit,
+    3: protoQuery,
+    7: { 1: 1 }
+  });
+  return {
+    raw,
+    ads: Array.isArray(raw?.['1']) ? raw['1'].map(normalizeGoogleTransparencyAd) : [],
+    next_page_token: cleanString(raw?.['2']),
+    lower_bound: toInt(raw?.['4']),
+    upper_bound: toInt(raw?.['5'])
+  };
+}
+
+async function fetchGoogleAdsTransparencyForCompetitor(competitor = {}) {
+  if (!isGoogleAdsTransparencyEnabled()) {
+    const err = new Error('Google Ads Transparency está desactivado por configuración');
+    err.code = 'GOOGLE_ADS_TRANSPARENCY_DISABLED';
+    throw err;
+  }
+
+  const domains = googleAdsCandidateDomains(competitor);
+  const resolution = { mode: null, domains_checked: [], advertisers_checked: [], suggestions: [] };
+  for (const domain of domains) {
+    resolution.domains_checked.push(domain);
+    const result = await searchGoogleTransparencyCreativesByDomain(domain);
+    if (result.ads.length) {
+      const ads = await enrichGoogleAdsWithPreviewScripts(result.ads.slice(0, GOOGLE_TRANSPARENCY_AD_LIMIT));
+      return {
+        raw: { ...result.raw, clinicaclick_resolution: { ...resolution, mode: 'domain', domain } },
+        ads: sortGoogleTransparencyAds(ads),
+        resolved: { mode: 'domain', domain, lower_bound: result.lower_bound, upper_bound: result.upper_bound }
+      };
+    }
+  }
+
+  const advertiserCandidates = [];
+  for (const term of googleAdsCandidateTerms(competitor)) {
+    const result = await searchGoogleTransparencySuggestions(term);
+    resolution.suggestions.push({ term, suggestions: result.suggestions.slice(0, 10) });
+    for (const suggestion of result.suggestions) {
+      if (suggestion.type !== 'advertiser' || !suggestion.advertiser_id) continue;
+      const score = scoreGoogleAdvertiserMatch(competitor, suggestion);
+      if (score < GOOGLE_ADVERTISER_MATCH_THRESHOLD) continue;
+      advertiserCandidates.push({ ...suggestion, match_score: score, term });
+    }
+  }
+
+  const uniqueAdvertisers = [];
+  const seen = new Set();
+  for (const candidate of advertiserCandidates.sort((a, b) => (b.match_score || 0) - (a.match_score || 0))) {
+    if (seen.has(candidate.advertiser_id)) continue;
+    seen.add(candidate.advertiser_id);
+    uniqueAdvertisers.push(candidate);
+    if (uniqueAdvertisers.length >= 2) break;
+  }
+
+  let combinedRaw = null;
+  const combinedAds = [];
+  for (const candidate of uniqueAdvertisers) {
+    resolution.advertisers_checked.push(candidate);
+    const remaining = GOOGLE_TRANSPARENCY_AD_LIMIT - combinedAds.length;
+    if (remaining <= 0) break;
+    const result = await searchGoogleTransparencyCreativesByAdvertiser(candidate.advertiser_id, remaining);
+    combinedRaw = combinedRaw || result.raw;
+    combinedAds.push(...result.ads.map((ad) => ({
+      ...ad,
+      match_score: candidate.match_score,
+      matched_term: candidate.term
+    })));
+  }
+
+  return {
+    raw: {
+      ...(combinedRaw || {}),
+      clinicaclick_resolution: { ...resolution, mode: uniqueAdvertisers.length ? 'advertiser' : 'not_found' }
+    },
+    ads: sortGoogleTransparencyAds(await enrichGoogleAdsWithPreviewScripts(combinedAds.slice(0, GOOGLE_TRANSPARENCY_AD_LIMIT))),
+    resolved: uniqueAdvertisers[0] || null
+  };
+}
+
 async function upsertPlaceSnapshot(competitor, placePayload) {
   const place = normalizePlace(placePayload || competitor.raw_place_payload || {});
   const snapshotDate = todayLabel();
@@ -1400,9 +1853,13 @@ async function upsertPlaceSnapshot(competitor, placePayload) {
 }
 
 async function upsertAdsSnapshot(competitor, result) {
+  return upsertProviderAdsSnapshot(competitor, META_ADS_LIBRARY_PROVIDER, result);
+}
+
+async function upsertProviderAdsSnapshot(competitor, provider, result) {
   const snapshotDate = todayLabel();
   const values = {
-    provider: META_ADS_LIBRARY_PROVIDER,
+    provider,
     status: result.status || 'completed',
     ads_count: Array.isArray(result.ads) ? result.ads.length : 0,
     active_ads: Array.isArray(result.ads) ? result.ads : [],
@@ -1411,17 +1868,30 @@ async function upsertAdsSnapshot(competitor, result) {
     raw_payload: result.raw || null
   };
   const [snapshot, created] = await MarketingCompetitorAdSnapshot.findOrCreate({
-    where: { competitor_id: competitor.id, provider: META_ADS_LIBRARY_PROVIDER, snapshot_date: snapshotDate },
+    where: { competitor_id: competitor.id, provider, snapshot_date: snapshotDate },
     defaults: values
   });
   if (!created) await snapshot.update(values);
   return snapshot;
 }
 
-function mapCompetitorRow(row, latestSnapshot = null, latestAdSnapshot = null) {
+function adSnapshotPayload(snapshot) {
+  const ads = snapshot && typeof snapshot.toJSON === 'function' ? snapshot.toJSON() : snapshot;
+  return {
+    ads_status: ads?.status || null,
+    active_ads_count: ads?.ads_count != null ? Number(ads.ads_count) : null,
+    active_ads: Array.isArray(ads?.active_ads) ? ads.active_ads : [],
+    error_code: ads?.error_code || null,
+    error_message: ads?.error_message || null,
+    last_synced_at: ads?.updated_at || null
+  };
+}
+
+function mapCompetitorRow(row, latestSnapshot = null, latestAdSnapshot = null, latestGoogleAdSnapshot = null) {
   const plain = typeof row.toJSON === 'function' ? row.toJSON() : row;
   const snapshot = latestSnapshot && typeof latestSnapshot.toJSON === 'function' ? latestSnapshot.toJSON() : latestSnapshot;
-  const ads = latestAdSnapshot && typeof latestAdSnapshot.toJSON === 'function' ? latestAdSnapshot.toJSON() : latestAdSnapshot;
+  const ads = adSnapshotPayload(latestAdSnapshot);
+  const googleAds = adSnapshotPayload(latestGoogleAdSnapshot);
   return {
     id: plain.id,
     name: plain.name,
@@ -1452,12 +1922,21 @@ function mapCompetitorRow(row, latestSnapshot = null, latestAdSnapshot = null) {
       page_name: plain.meta_page_name,
       page_url: plain.meta_page_url,
       search_terms: plain.meta_ads_search_terms || [],
-      ads_status: ads?.status || null,
-      active_ads_count: ads?.ads_count != null ? Number(ads.ads_count) : null,
-      active_ads: Array.isArray(ads?.active_ads) ? ads.active_ads : [],
-      error_code: ads?.error_code || null,
-      error_message: ads?.error_message || null,
+      ads_status: ads.ads_status,
+      active_ads_count: ads.active_ads_count,
+      active_ads: ads.active_ads,
+      error_code: ads.error_code,
+      error_message: ads.error_message,
       last_synced_at: plain.last_ads_synced_at
+    },
+    google_ads: {
+      provider: GOOGLE_ADS_TRANSPARENCY_PROVIDER,
+      ads_status: googleAds.ads_status,
+      active_ads_count: googleAds.active_ads_count,
+      active_ads: googleAds.active_ads,
+      error_code: googleAds.error_code,
+      error_message: googleAds.error_message,
+      last_synced_at: googleAds.last_synced_at
     },
     social_profiles: socialProfilesFromPayload(plain.raw_place_payload),
     photo_name: extractPhotoNames(plain.raw_place_payload || [])[0] || null,
@@ -1479,11 +1958,12 @@ function mapCompetitorRow(row, latestSnapshot = null, latestAdSnapshot = null) {
 async function hydrateCompetitors(rows) {
   const hydrated = [];
   for (const row of rows) {
-    const [snapshot, adSnapshot] = await Promise.all([
+    const [snapshot, adSnapshot, googleAdSnapshot] = await Promise.all([
       MarketingCompetitorSnapshot.findOne({ where: { competitor_id: row.id }, order: [['snapshot_date', 'DESC'], ['id', 'DESC']] }),
-      MarketingCompetitorAdSnapshot.findOne({ where: { competitor_id: row.id, provider: META_ADS_LIBRARY_PROVIDER }, order: [['snapshot_date', 'DESC'], ['id', 'DESC']] })
+      MarketingCompetitorAdSnapshot.findOne({ where: { competitor_id: row.id, provider: META_ADS_LIBRARY_PROVIDER }, order: [['snapshot_date', 'DESC'], ['id', 'DESC']] }),
+      MarketingCompetitorAdSnapshot.findOne({ where: { competitor_id: row.id, provider: GOOGLE_ADS_TRANSPARENCY_PROVIDER }, order: [['snapshot_date', 'DESC'], ['id', 'DESC']] })
     ]);
-    hydrated.push(await attachPlacePhotoUrl(mapCompetitorRow(row, snapshot, adSnapshot), { maxWidthPx: 640 }));
+    hydrated.push(await attachPlacePhotoUrl(mapCompetitorRow(row, snapshot, adSnapshot, googleAdSnapshot), { maxWidthPx: 640 }));
   }
   return hydrated;
 }
@@ -1868,7 +2348,8 @@ async function refreshOneCompetitor(competitor, scope) {
     competitor_id: competitor.id,
     name: competitor.name,
     places: { status: 'skipped' },
-    meta_ads_library: { status: 'skipped' }
+    meta_ads_library: { status: 'skipped' },
+    google_ads_transparency: { status: 'skipped' }
   };
   const patch = { last_sync_status: 'completed', last_sync_error: null };
 
@@ -1923,8 +2404,10 @@ async function refreshOneCompetitor(competitor, scope) {
     }
   }
 
+  const competitorForAds = { ...competitor.toJSON(), ...patch };
+
   try {
-    const metaResult = await fetchMetaAdsForCompetitor(competitor, scope);
+    const metaResult = await fetchMetaAdsForCompetitor(competitorForAds, scope);
     await upsertAdsSnapshot(competitor, { status: 'completed', ads: metaResult.ads, raw: metaResult.raw });
     report.meta_ads_library = {
       status: 'completed',
@@ -1956,6 +2439,34 @@ async function refreshOneCompetitor(competitor, scope) {
     patch.last_ads_synced_at = new Date();
   }
 
+  if (isGoogleAdsTransparencyEnabled()) {
+    try {
+      const googleResult = await fetchGoogleAdsTransparencyForCompetitor({ ...competitorForAds, ...patch });
+      await upsertProviderAdsSnapshot(competitor, GOOGLE_ADS_TRANSPARENCY_PROVIDER, {
+        status: 'completed',
+        ads: googleResult.ads,
+        raw: googleResult.raw
+      });
+      report.google_ads_transparency = {
+        status: 'completed',
+        ads_count: googleResult.ads.length,
+        resolved: googleResult.resolved
+      };
+    } catch (error) {
+      const normalizedError = normalizeExternalError(error);
+      await upsertProviderAdsSnapshot(competitor, GOOGLE_ADS_TRANSPARENCY_PROVIDER, {
+        status: 'unavailable',
+        ads: [],
+        error_code: normalizedError.code,
+        error_message: normalizedError.message,
+        raw: normalizedError
+      });
+      report.google_ads_transparency = { status: 'unavailable', error: normalizedError };
+      patch.last_sync_status = patch.last_sync_status === 'partial_error' ? 'error' : 'partial_error';
+      patch.last_sync_error = normalizedError.message;
+    }
+  }
+
   await competitor.update(patch);
   return report;
 }
@@ -1969,7 +2480,8 @@ async function refreshCompetition(scope, { competitorIds = null } = {}) {
   const report = {
     provider: {
       google_places: { configured: !!getGooglePlacesApiKey() },
-      meta_ads_library: { configured: !!getMetaAdLibraryTokenFromEnv() }
+      meta_ads_library: { configured: !!getMetaAdLibraryTokenFromEnv() },
+      google_ads_transparency: { configured: isGoogleAdsTransparencyEnabled() }
     },
     competitors: competitors.length,
     processed: 0,
@@ -1981,8 +2493,16 @@ async function refreshCompetition(scope, { competitorIds = null } = {}) {
   for (const competitor of competitors) {
     const item = await refreshOneCompetitor(competitor, scope);
     report.processed += 1;
-    if (item.places.status === 'completed' || item.meta_ads_library.status === 'completed') report.completed += 1;
-    if (item.places.status === 'unavailable' || item.meta_ads_library.status === 'unavailable') {
+    if (
+      item.places.status === 'completed'
+      || item.meta_ads_library.status === 'completed'
+      || item.google_ads_transparency.status === 'completed'
+    ) report.completed += 1;
+    if (
+      item.places.status === 'unavailable'
+      || item.meta_ads_library.status === 'unavailable'
+      || item.google_ads_transparency.status === 'unavailable'
+    ) {
       report.partial += 1;
       report.errors.push(item);
     }
