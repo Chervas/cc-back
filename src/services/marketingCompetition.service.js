@@ -25,13 +25,16 @@ const DEFAULT_LANGUAGE = process.env.COMPETITION_GOOGLE_LANGUAGE || 'es';
 const DEFAULT_REGION = process.env.COMPETITION_GOOGLE_REGION || 'ES';
 const DEFAULT_LIMIT = Math.max(1, Math.min(25, parseInt(process.env.COMPETITION_SUGGESTION_LIMIT || '10', 10)));
 const DEFAULT_AD_LIMIT = Math.max(1, Math.min(100, parseInt(process.env.COMPETITION_META_AD_LIMIT || '25', 10)));
-const GOOGLE_TRANSPARENCY_AD_LIMIT = Math.max(1, Math.min(50, parseInt(process.env.COMPETITION_GOOGLE_ADS_TRANSPARENCY_AD_LIMIT || '10', 10)));
+const GOOGLE_TRANSPARENCY_AD_LIMIT = Math.max(1, Math.min(100, parseInt(process.env.COMPETITION_GOOGLE_ADS_TRANSPARENCY_AD_LIMIT || '25', 10)));
 const GOOGLE_TRANSPARENCY_ADVERTISER_LIMIT = Math.max(1, Math.min(10, parseInt(process.env.COMPETITION_GOOGLE_ADS_TRANSPARENCY_ADVERTISER_LIMIT || '5', 10)));
 const GOOGLE_TRANSPARENCY_TIMEOUT_MS = Math.max(2000, Math.min(30000, parseInt(process.env.COMPETITION_GOOGLE_ADS_TRANSPARENCY_TIMEOUT_MS || '12000', 10)));
-const GOOGLE_TRANSPARENCY_SCRIPT_MEDIA_LIMIT = Math.max(0, Math.min(GOOGLE_TRANSPARENCY_AD_LIMIT, parseInt(process.env.COMPETITION_GOOGLE_ADS_TRANSPARENCY_SCRIPT_MEDIA_LIMIT || '3', 10)));
+const GOOGLE_TRANSPARENCY_SCRIPT_MEDIA_LIMIT = Math.max(0, Math.min(GOOGLE_TRANSPARENCY_AD_LIMIT, parseInt(process.env.COMPETITION_GOOGLE_ADS_TRANSPARENCY_SCRIPT_MEDIA_LIMIT || String(GOOGLE_TRANSPARENCY_AD_LIMIT), 10)));
 const DEFAULT_RANKING_LIMIT = Math.max(1, Math.min(5, parseInt(process.env.COMPETITION_LOCAL_RANKING_TERMS_LIMIT || '3', 10)));
 const SNAPSHOT_MEDIA_TIMEOUT_MS = Math.max(1000, Math.min(15000, parseInt(process.env.COMPETITION_META_SNAPSHOT_MEDIA_TIMEOUT_MS || '6000', 10)));
 const SNAPSHOT_MEDIA_LIMIT = Math.max(0, Math.min(DEFAULT_AD_LIMIT, parseInt(process.env.COMPETITION_META_SNAPSHOT_MEDIA_LIMIT || String(DEFAULT_AD_LIMIT), 10)));
+const META_BROWSER_MEDIA_ENABLED = envFlagEnabled(process.env.COMPETITION_META_BROWSER_MEDIA_ENABLED, false);
+const META_BROWSER_MEDIA_LIMIT = Math.max(0, Math.min(DEFAULT_AD_LIMIT, parseInt(process.env.COMPETITION_META_BROWSER_MEDIA_LIMIT || '5', 10)));
+const META_BROWSER_MEDIA_TIMEOUT_MS = Math.max(3000, Math.min(45000, parseInt(process.env.COMPETITION_META_BROWSER_MEDIA_TIMEOUT_MS || '15000', 10)));
 const SOCIAL_DISCOVERY_TIMEOUT_MS = Math.max(1000, Math.min(15000, parseInt(process.env.COMPETITION_SOCIAL_DISCOVERY_TIMEOUT_MS || '8000', 10)));
 const SOCIAL_DISCOVERY_PAGE_LIMIT = Math.max(1, Math.min(6, parseInt(process.env.COMPETITION_SOCIAL_DISCOVERY_PAGE_LIMIT || '4', 10)));
 const META_PAGE_MATCH_THRESHOLD = Math.max(20, Math.min(100, parseInt(process.env.COMPETITION_META_PAGE_MATCH_THRESHOLD || '45', 10)));
@@ -240,6 +243,38 @@ function domainFromUrl(value) {
   }
 }
 
+function removeQueryParams(value, names = []) {
+  const url = normalizeUrl(value);
+  if (!url) return null;
+  try {
+    const parsed = new URL(url);
+    for (const name of names) parsed.searchParams.delete(name);
+    return parsed.toString();
+  } catch (_) {
+    return url;
+  }
+}
+
+function metaAdsLibraryPageUrl(pageId, { activeStatus = 'active' } = {}) {
+  const id = cleanString(pageId);
+  if (!id) return null;
+  const params = new URLSearchParams({
+    active_status: activeStatus,
+    ad_type: 'all',
+    country: DEFAULT_COUNTRY,
+    is_targeted_country: 'false',
+    media_type: 'all',
+    search_type: 'page',
+    view_all_page_id: id
+  });
+  return `https://www.facebook.com/ads/library/?${params.toString()}`;
+}
+
+function metaAdsLibraryAdUrl(adId) {
+  const id = cleanString(adId);
+  return id ? `https://www.facebook.com/ads/library/?id=${encodeURIComponent(id)}` : null;
+}
+
 function buildGoogleMapsUrl(placeId, query = null) {
   const id = normalizePlaceId(placeId);
   if (!id) return null;
@@ -288,6 +323,22 @@ function decodeEscapedHtml(value) {
   return text;
 }
 
+function decodePercentEncodedText(value) {
+  const text = String(value || '');
+  if (!/%[0-9a-f]{2}/i.test(text)) return text;
+  try {
+    return decodeURIComponent(text);
+  } catch (_) {
+    return text.replace(/%([0-9a-f]{2})/ig, (_, hex) => {
+      try {
+        return String.fromCharCode(parseInt(hex, 16));
+      } catch (__) {
+        return `%${hex}`;
+      }
+    });
+  }
+}
+
 function extractAttributeUrl(html, attrName) {
   const attrRegex = new RegExp(`\\b${attrName}\\s*=\\s*(['"])(.*?)\\1`, 'i');
   const match = String(html || '').match(attrRegex);
@@ -302,6 +353,7 @@ function isUsableSnapshotMediaUrl(value) {
     const parsed = new URL(url);
     const host = parsed.hostname.replace(/^www\./i, '').toLowerCase();
     if (host === 'static.xx.fbcdn.net') return false;
+    if (host === 'cdn.ampproject.org') return false;
     if (host === 'facebook.com' || host.endsWith('.facebook.com')) return false;
     if (host === 'fonts.gstatic.com') return false;
     if (host === 'gstatic.com' || host === 'www.gstatic.com') return false;
@@ -325,25 +377,68 @@ function extractFirstUrlByExtension(text, extensions = []) {
   return null;
 }
 
-function extractFirstGoogleImageUrl(text) {
+function extractGoogleImageUrls(text) {
   const source = decodeEscapedHtml(text);
+  const decodedSource = decodePercentEncodedText(source);
   const patterns = [
     /https?:\/\/tpc\.googlesyndication\.com\/archive\/simgad\/[^"'<>\s\\]+/ig,
+    /https?:\/\/i\.ytimg\.com\/vi\/[^"'<>\s\\]+/ig,
+    /https?:\/\/lh\d+\.googleusercontent\.com\/[^"'<>\s\\]+/ig,
     /https?:\/\/encrypted-tbn\d*\.gstatic\.com\/[^"'<>\s\\]+/ig,
     /https?:\/\/[^"'<>\s\\]+\.googleusercontent\.com\/[^"'<>\s\\]+(?:\.(?:jpg|jpeg|png|webp|gif)|[?][^"'<>\s\\]*)/ig
   ];
-  for (const pattern of patterns) {
-    const matches = source.match(pattern) || [];
-    for (const match of matches) {
-      const url = normalizeUrl(decodeEscapedHtml(match));
-      if (isUsableSnapshotMediaUrl(url)) return url;
+  const urls = [];
+  for (const candidateSource of [...new Set([source, decodedSource])]) {
+    for (const pattern of patterns) {
+      const matches = candidateSource.match(pattern) || [];
+      for (const match of matches) {
+        const url = normalizeUrl(decodePercentEncodedText(decodeEscapedHtml(match)));
+        if (isUsableSnapshotMediaUrl(url) && !urls.includes(url)) urls.push(url);
+      }
     }
   }
-  return null;
+  return urls;
 }
 
-function extractFirstMediaFromHtml(html) {
+function extractFirstGoogleImageUrl(text) {
+  return extractGoogleImageUrls(text)[0] || null;
+}
+
+function mediaAssetFromUrl(url, type = 'image', extra = {}) {
+  const normalized = normalizeUrl(url);
+  if (!isUsableSnapshotMediaUrl(normalized)) return null;
+  return {
+    type,
+    url: normalized,
+    thumbnail_url: type === 'image' ? normalized : (extra.thumbnail_url || null),
+    ...extra
+  };
+}
+
+function youtubeUrlFromThumbnail(url) {
+  const normalized = normalizeUrl(url);
+  const match = normalized?.match(/i\.ytimg\.com\/vi\/([^/?#]+)/i);
+  return match?.[1] ? `https://www.youtube.com/watch?v=${encodeURIComponent(match[1])}` : null;
+}
+
+function uniqueMediaAssets(assets = []) {
+  const output = [];
+  const seen = new Set();
+  for (const asset of assets) {
+    if (!asset?.url) continue;
+    const key = `${asset.type || 'image'}:${asset.url}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    output.push(asset);
+  }
+  return output;
+}
+
+function extractMediaAssetsFromHtml(html) {
   const text = decodeEscapedHtml(String(html || ''));
+  const decodedText = decodePercentEncodedText(text);
+  const assets = [];
+
   const video = extractMetaTagContent(text, [
     'og:video:secure_url',
     'og:video:url',
@@ -356,9 +451,67 @@ function extractFirstMediaFromHtml(html) {
     'og:image',
     'twitter:image'
   ]);
+  if (video) assets.push(mediaAssetFromUrl(video, 'video', { thumbnail_url: image || null }));
+  if (image) assets.push(mediaAssetFromUrl(image, 'image'));
 
-  if (video || image) return { video_url: video, image_url: image, thumbnail_url: image };
+  const tagRegex = /<(img|video|source|iframe)\b[^>]*>/ig;
+  let tagMatch;
+  while ((tagMatch = tagRegex.exec(text)) !== null) {
+    const tagName = tagMatch[1].toLowerCase();
+    const tag = tagMatch[0];
+    const src = extractAttributeUrl(tag, 'src');
+    const poster = extractAttributeUrl(tag, 'poster');
+    if (tagName === 'video' || tagName === 'source') {
+      if (src) assets.push(mediaAssetFromUrl(src, 'video', { thumbnail_url: poster || null }));
+      if (poster) assets.push(mediaAssetFromUrl(poster, 'image'));
+    } else if (tagName === 'iframe') {
+      if (src && /youtube\.com|youtu\.be/i.test(src)) {
+        assets.push(mediaAssetFromUrl(src, 'external_video'));
+      }
+    } else if (src) {
+      assets.push(mediaAssetFromUrl(src, 'image'));
+    }
+  }
 
+  for (const url of [
+    ...extractGoogleImageUrls(text),
+    ...(String(text || '').match(/https?:\/\/[^"'<>\\s]+?\.(?:mp4|mov|webm)(?:\?[^"'<>\\s]*)?/ig) || []),
+    ...(String(decodedText || '').match(/https?:\/\/[^"'<>\\s]+?\.(?:mp4|mov|webm)(?:\?[^"'<>\\s]*)?/ig) || [])
+  ]) {
+    const normalized = normalizeUrl(decodePercentEncodedText(decodeEscapedHtml(url)));
+    if (!normalized) continue;
+    const youtubeUrl = youtubeUrlFromThumbnail(normalized);
+    if (youtubeUrl) {
+      assets.push(mediaAssetFromUrl(normalized, 'external_video', {
+        thumbnail_url: normalized,
+        external_url: youtubeUrl
+      }));
+    } else if (/\.(mp4|mov|webm)(?:\?|$)/i.test(normalized)) {
+      assets.push(mediaAssetFromUrl(normalized, 'video'));
+    } else {
+      assets.push(mediaAssetFromUrl(normalized, 'image'));
+    }
+  }
+
+  return uniqueMediaAssets(assets).filter(Boolean);
+}
+
+function extractFirstMediaFromHtml(html) {
+  const mediaAssets = extractMediaAssetsFromHtml(html);
+  const firstVideo = mediaAssets.find((asset) => asset.type === 'video');
+  const firstExternalVideo = mediaAssets.find((asset) => asset.type === 'external_video');
+  const firstImage = mediaAssets.find((asset) => asset.type === 'image');
+  if (firstVideo || firstExternalVideo || firstImage) {
+    return {
+      video_url: firstVideo?.url || null,
+      external_video_url: firstExternalVideo?.external_url || firstExternalVideo?.url || null,
+      image_url: firstImage?.url || firstExternalVideo?.thumbnail_url || firstVideo?.thumbnail_url || null,
+      thumbnail_url: firstImage?.url || firstExternalVideo?.thumbnail_url || firstVideo?.thumbnail_url || null,
+      media_assets: mediaAssets
+    };
+  }
+
+  const text = decodeEscapedHtml(String(html || ''));
   const attrVideo = extractAttributeUrl(text.match(/<(?:video|source)\b[^>]*>/i)?.[0] || '', 'src');
   const anyVideo = attrVideo
     || extractFirstUrlByExtension(text, ['mp4', 'mov', 'webm'])
@@ -376,7 +529,11 @@ function extractFirstMediaFromHtml(html) {
     return {
       video_url: anyVideo || null,
       image_url: anyImage || null,
-      thumbnail_url: anyImage || null
+      thumbnail_url: anyImage || null,
+      media_assets: uniqueMediaAssets([
+        anyVideo ? mediaAssetFromUrl(anyVideo, 'video', { thumbnail_url: anyImage || null }) : null,
+        anyImage ? mediaAssetFromUrl(anyImage, 'image') : null
+      ]).filter(Boolean)
     };
   }
   return null;
@@ -1089,7 +1246,8 @@ async function buildLocalRanking(clinic, ownProfile) {
         aboveMe: ownIndex > 0 ? normalized.slice(0, ownIndex).map((place) => place.name).slice(0, 5) : [],
         belowMe: ownIndex >= 0
           ? normalized.slice(ownIndex + 1, ownIndex + 6).map((place) => place.name)
-          : normalized.slice(0, 5).map((place) => place.name),
+          : [],
+        visibleResults: ownIndex < 0 ? normalized.slice(0, 5).map((place) => place.name) : [],
         lastMeasured: new Date().toISOString(),
         location,
         source: 'google_places_text_search'
@@ -1217,15 +1375,24 @@ function normalizeMetaAd(ad = {}) {
   const titles = Array.isArray(ad.ad_creative_link_titles) ? ad.ad_creative_link_titles : [];
   const descriptions = Array.isArray(ad.ad_creative_link_descriptions) ? ad.ad_creative_link_descriptions : [];
   const urls = Array.isArray(ad.ad_creative_link_urls) ? ad.ad_creative_link_urls : [];
+  const adId = cleanString(ad.id);
+  const pageId = cleanString(ad.page_id);
+  const renderUrl = normalizeUrl(ad.ad_snapshot_url);
+  const safeAdUrl = metaAdsLibraryAdUrl(adId) || removeQueryParams(renderUrl, ['access_token']);
+  const pageLibraryUrl = metaAdsLibraryPageUrl(pageId);
   return {
-    id: cleanString(ad.id),
-    page_id: cleanString(ad.page_id),
+    id: adId,
+    page_id: pageId,
     page_name: cleanString(ad.page_name),
     body: cleanString(bodies[0]),
     title: cleanString(titles[0]),
     description: cleanString(descriptions[0]),
     landing_url: normalizeUrl(urls[0]),
-    snapshot_url: normalizeUrl(ad.ad_snapshot_url),
+    snapshot_url: safeAdUrl,
+    ad_snapshot_url: safeAdUrl,
+    library_url: pageLibraryUrl || safeAdUrl,
+    page_library_url: pageLibraryUrl,
+    _render_snapshot_url: renderUrl,
     platforms: Array.isArray(ad.publisher_platforms) ? ad.publisher_platforms : [],
     reached_countries: Array.isArray(ad.ad_reached_countries) ? ad.ad_reached_countries : [],
     media_url: normalizeUrl(ad.media_url),
@@ -1352,7 +1519,7 @@ async function resolveMetaPageFromAdsArchive(competitor, accessToken) {
 }
 
 async function enrichAdWithSnapshotMedia(ad = {}) {
-  const snapshotUrl = normalizeUrl(ad.snapshot_url);
+  const snapshotUrl = normalizeUrl(ad._render_snapshot_url || ad.snapshot_url);
   if (!snapshotUrl || ad.image_url || ad.video_url || ad.media_url) return ad;
   try {
     const response = await axios.get(snapshotUrl, {
@@ -1371,19 +1538,212 @@ async function enrichAdWithSnapshotMedia(ad = {}) {
       ...ad,
       ...media,
       media_url: media.video_url || media.image_url || ad.media_url || null,
+      _render_snapshot_url: undefined,
       media_source: 'snapshot_html'
     };
   } catch (error) {
     return {
       ...ad,
+      _render_snapshot_url: snapshotUrl,
       media_source: 'snapshot_unavailable',
       media_error: error?.response?.status ? `HTTP ${error.response.status}` : (error?.code || error?.message || 'snapshot_unavailable')
     };
   }
 }
 
+function adHasMedia(ad = {}) {
+  return !!(ad.image_url || ad.thumbnail_url || ad.video_url || ad.media_url || ad.external_video_url);
+}
+
+function loadOptionalBrowserAutomation() {
+  const candidates = ['playwright-core', 'playwright', 'puppeteer-core', 'puppeteer'];
+  for (const packageName of candidates) {
+    try {
+      // Optional dependency: only loaded if the runtime explicitly enables browser recovery.
+      // eslint-disable-next-line global-require, import/no-dynamic-require
+      const mod = require(packageName);
+      if (mod?.chromium) return { type: 'playwright', chromium: mod.chromium };
+      if (typeof mod?.launch === 'function') return { type: 'puppeteer', puppeteer: mod };
+    } catch (_) {
+      // Try next optional package.
+    }
+  }
+  return null;
+}
+
+async function extractMediaWithPlaywright(browser, ad) {
+  const snapshotUrl = normalizeUrl(ad._render_snapshot_url || ad.snapshot_url);
+  if (!snapshotUrl) return null;
+  const page = await browser.newPage();
+  try {
+    await page.goto(snapshotUrl, {
+      waitUntil: 'domcontentloaded',
+      timeout: META_BROWSER_MEDIA_TIMEOUT_MS
+    });
+    await page.waitForTimeout(Math.min(1500, Math.floor(META_BROWSER_MEDIA_TIMEOUT_MS / 3)));
+    const domAssets = await page.evaluate(() => {
+      const normalize = (value) => value || null;
+      return Array.from(document.querySelectorAll('img,video,source,iframe')).map((node) => {
+        const tag = node.tagName.toLowerCase();
+        return {
+          tag,
+          src: normalize(node.getAttribute('src') || node.currentSrc),
+          poster: normalize(node.getAttribute('poster')),
+          width: Number(node.getAttribute('width') || node.clientWidth || 0),
+          height: Number(node.getAttribute('height') || node.clientHeight || 0)
+        };
+      });
+    });
+    const assets = [];
+    for (const item of domAssets || []) {
+      if (item.tag === 'video' || item.tag === 'source') {
+        if (item.src) assets.push(mediaAssetFromUrl(item.src, 'video', { thumbnail_url: item.poster || null }));
+        if (item.poster) assets.push(mediaAssetFromUrl(item.poster, 'image'));
+      } else if (item.tag === 'iframe' && /youtube\.com|youtu\.be/i.test(item.src || '')) {
+        assets.push(mediaAssetFromUrl(item.src, 'external_video'));
+      } else if (item.src) {
+        assets.push(mediaAssetFromUrl(item.src, 'image'));
+      }
+    }
+    const htmlMedia = extractFirstMediaFromHtml(await page.content());
+    const mediaAssets = uniqueMediaAssets([
+      ...assets,
+      ...(Array.isArray(htmlMedia?.media_assets) ? htmlMedia.media_assets : [])
+    ].filter(Boolean));
+    if (!mediaAssets.length) return null;
+    const firstVideo = mediaAssets.find((asset) => asset.type === 'video');
+    const firstExternalVideo = mediaAssets.find((asset) => asset.type === 'external_video');
+    const firstImage = mediaAssets.find((asset) => asset.type === 'image');
+    return {
+      video_url: firstVideo?.url || null,
+      external_video_url: firstExternalVideo?.external_url || firstExternalVideo?.url || null,
+      image_url: firstImage?.url || firstExternalVideo?.thumbnail_url || firstVideo?.thumbnail_url || null,
+      thumbnail_url: firstImage?.url || firstExternalVideo?.thumbnail_url || firstVideo?.thumbnail_url || null,
+      media_assets: mediaAssets
+    };
+  } finally {
+    await page.close().catch(() => {});
+  }
+}
+
+async function extractMediaWithPuppeteer(browser, ad) {
+  const snapshotUrl = normalizeUrl(ad._render_snapshot_url || ad.snapshot_url);
+  if (!snapshotUrl) return null;
+  const page = await browser.newPage();
+  try {
+    await page.goto(snapshotUrl, {
+      waitUntil: 'domcontentloaded',
+      timeout: META_BROWSER_MEDIA_TIMEOUT_MS
+    });
+    await new Promise((resolve) => setTimeout(resolve, Math.min(1500, Math.floor(META_BROWSER_MEDIA_TIMEOUT_MS / 3))));
+    const domAssets = await page.evaluate(() => {
+      const normalize = (value) => value || null;
+      return Array.from(document.querySelectorAll('img,video,source,iframe')).map((node) => {
+        const tag = node.tagName.toLowerCase();
+        return {
+          tag,
+          src: normalize(node.getAttribute('src') || node.currentSrc),
+          poster: normalize(node.getAttribute('poster')),
+          width: Number(node.getAttribute('width') || node.clientWidth || 0),
+          height: Number(node.getAttribute('height') || node.clientHeight || 0)
+        };
+      });
+    });
+    const assets = [];
+    for (const item of domAssets || []) {
+      if (item.tag === 'video' || item.tag === 'source') {
+        if (item.src) assets.push(mediaAssetFromUrl(item.src, 'video', { thumbnail_url: item.poster || null }));
+        if (item.poster) assets.push(mediaAssetFromUrl(item.poster, 'image'));
+      } else if (item.tag === 'iframe' && /youtube\.com|youtu\.be/i.test(item.src || '')) {
+        assets.push(mediaAssetFromUrl(item.src, 'external_video'));
+      } else if (item.src) {
+        assets.push(mediaAssetFromUrl(item.src, 'image'));
+      }
+    }
+    const htmlMedia = extractFirstMediaFromHtml(await page.content());
+    const mediaAssets = uniqueMediaAssets([
+      ...assets,
+      ...(Array.isArray(htmlMedia?.media_assets) ? htmlMedia.media_assets : [])
+    ].filter(Boolean));
+    if (!mediaAssets.length) return null;
+    const firstVideo = mediaAssets.find((asset) => asset.type === 'video');
+    const firstExternalVideo = mediaAssets.find((asset) => asset.type === 'external_video');
+    const firstImage = mediaAssets.find((asset) => asset.type === 'image');
+    return {
+      video_url: firstVideo?.url || null,
+      external_video_url: firstExternalVideo?.external_url || firstExternalVideo?.url || null,
+      image_url: firstImage?.url || firstExternalVideo?.thumbnail_url || firstVideo?.thumbnail_url || null,
+      thumbnail_url: firstImage?.url || firstExternalVideo?.thumbnail_url || firstVideo?.thumbnail_url || null,
+      media_assets: mediaAssets
+    };
+  } finally {
+    await page.close().catch(() => {});
+  }
+}
+
+async function enrichAdsWithBrowserMedia(ads = []) {
+  if (!META_BROWSER_MEDIA_ENABLED || !META_BROWSER_MEDIA_LIMIT || !Array.isArray(ads) || !ads.length) return ads;
+
+  const indexes = ads
+    .map((ad, index) => ({ ad, index }))
+    .filter(({ ad }) => !adHasMedia(ad) && normalizeUrl(ad._render_snapshot_url || ad.snapshot_url))
+    .slice(0, META_BROWSER_MEDIA_LIMIT);
+  if (!indexes.length) return ads;
+
+  const automation = loadOptionalBrowserAutomation();
+  if (!automation) {
+    return ads.map((ad, index) => {
+      if (!indexes.some((item) => item.index === index)) return ad;
+      return { ...ad, media_source: ad.media_source || 'meta_browser_unavailable' };
+    });
+  }
+
+  const launchOptions = {
+    headless: true,
+    args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage']
+  };
+  if (process.env.COMPETITION_BROWSER_EXECUTABLE_PATH) {
+    launchOptions.executablePath = process.env.COMPETITION_BROWSER_EXECUTABLE_PATH;
+  }
+
+  let browser = null;
+  const enriched = [...ads];
+  try {
+    browser = automation.type === 'playwright'
+      ? await automation.chromium.launch(launchOptions)
+      : await automation.puppeteer.launch(launchOptions);
+    for (const { ad, index } of indexes) {
+      try {
+        const media = automation.type === 'playwright'
+          ? await extractMediaWithPlaywright(browser, ad)
+          : await extractMediaWithPuppeteer(browser, ad);
+        if (media?.image_url || media?.video_url || media?.external_video_url) {
+          enriched[index] = {
+            ...ad,
+            ...media,
+            media_url: media.video_url || media.image_url || ad.media_url || null,
+            media_source: 'meta_browser_snapshot'
+          };
+        } else {
+          enriched[index] = { ...ad, media_source: ad.media_source || 'meta_browser_no_media' };
+        }
+      } catch (error) {
+        enriched[index] = {
+          ...ad,
+          media_source: ad.media_source || 'meta_browser_error',
+          media_error: error?.message || error?.code || 'meta_browser_error'
+        };
+      }
+    }
+  } finally {
+    if (browser) await browser.close().catch(() => {});
+  }
+  return enriched;
+}
+
 async function enrichAdsWithSnapshotMedia(ads = []) {
-  if (!SNAPSHOT_MEDIA_LIMIT || !Array.isArray(ads) || !ads.length) return ads;
+  if (!Array.isArray(ads) || !ads.length) return ads;
+  if (!SNAPSHOT_MEDIA_LIMIT) return ads.map(stripPrivateAdFields);
   const enriched = [...ads];
   let cursor = 0;
   const workerCount = Math.min(3, SNAPSHOT_MEDIA_LIMIT, ads.length);
@@ -1394,7 +1754,14 @@ async function enrichAdsWithSnapshotMedia(ads = []) {
     }
   }
   await Promise.all(Array.from({ length: workerCount }, worker));
-  return enriched;
+  const browserEnriched = await enrichAdsWithBrowserMedia(enriched);
+  return browserEnriched.map(stripPrivateAdFields);
+}
+
+function stripPrivateAdFields(ad = {}) {
+  if (!ad || typeof ad !== 'object') return ad;
+  const { _render_snapshot_url, ...safe } = ad;
+  return safe;
 }
 
 async function fetchMetaAdsForCompetitor(competitor, scope) {
@@ -1539,6 +1906,11 @@ function googleTransparencyCreativeUrl(advertiserId, creativeId) {
   return `${GOOGLE_ADS_TRANSPARENCY_BASE.replace(/\/$/g, '')}/advertiser/${encodeURIComponent(advertiserId)}/creative/${encodeURIComponent(creativeId)}?region=${encodeURIComponent(DEFAULT_COUNTRY)}`;
 }
 
+function googleTransparencyAdvertiserUrl(advertiserId) {
+  if (!advertiserId) return null;
+  return `${GOOGLE_ADS_TRANSPARENCY_BASE.replace(/\/$/g, '')}/advertiser/${encodeURIComponent(advertiserId)}?region=${encodeURIComponent(DEFAULT_COUNTRY)}`;
+}
+
 function googleTransparencyFormatLabel(value) {
   const format = toInt(value);
   if (format === 1) return 'Imagen';
@@ -1557,7 +1929,10 @@ function normalizeGoogleTransparencyAd(ad = {}) {
   const media = previewHtml ? extractFirstMediaFromHtml(previewHtml) : null;
   const imageUrl = media?.image_url || null;
   const videoUrl = media?.video_url || null;
+  const externalVideoUrl = media?.external_video_url || null;
   const formatLabel = googleTransparencyFormatLabel(ad['4'] || ad.format);
+  const advertiserUrl = googleTransparencyAdvertiserUrl(advertiserId);
+  const creativeUrl = googleTransparencyCreativeUrl(advertiserId, creativeId);
 
   return {
     provider: GOOGLE_ADS_TRANSPARENCY_PROVIDER,
@@ -1570,8 +1945,10 @@ function normalizeGoogleTransparencyAd(ad = {}) {
     body: null,
     title: formatLabel || 'Anuncio de Google',
     description: null,
-    snapshot_url: googleTransparencyCreativeUrl(advertiserId, creativeId),
-    ad_snapshot_url: googleTransparencyCreativeUrl(advertiserId, creativeId),
+    snapshot_url: creativeUrl,
+    ad_snapshot_url: creativeUrl,
+    advertiser_url: advertiserUrl,
+    library_url: advertiserUrl || creativeUrl,
     preview_html: previewHtml || null,
     preview_script_url: previewScriptUrl || null,
     platforms: ['GOOGLE'],
@@ -1582,7 +1959,9 @@ function normalizeGoogleTransparencyAd(ad = {}) {
     image_url: imageUrl,
     thumbnail_url: imageUrl,
     video_url: videoUrl,
+    external_video_url: externalVideoUrl,
     media_url: videoUrl || imageUrl || null,
+    media_assets: Array.isArray(media?.media_assets) ? media.media_assets : [],
     media_source: imageUrl || videoUrl ? 'google_rpc_preview' : (previewScriptUrl ? 'google_preview_script_pending' : null),
     created_at: googleTransparencyTimestamp(ad['6']),
     delivery_start_at: googleTransparencyTimestamp(ad['6']),
@@ -1624,9 +2003,16 @@ async function enrichGoogleAdWithPreviewScript(ad = {}) {
 async function enrichGoogleAdsWithPreviewScripts(ads = []) {
   if (!GOOGLE_TRANSPARENCY_SCRIPT_MEDIA_LIMIT || !Array.isArray(ads) || !ads.length) return ads;
   const enriched = [...ads];
-  for (let index = 0; index < Math.min(GOOGLE_TRANSPARENCY_SCRIPT_MEDIA_LIMIT, ads.length); index += 1) {
-    enriched[index] = await enrichGoogleAdWithPreviewScript(ads[index]);
+  let cursor = 0;
+  const limit = Math.min(GOOGLE_TRANSPARENCY_SCRIPT_MEDIA_LIMIT, ads.length);
+  const workerCount = Math.min(3, limit);
+  async function worker() {
+    while (cursor < limit) {
+      const index = cursor++;
+      enriched[index] = await enrichGoogleAdWithPreviewScript(ads[index]);
+    }
   }
+  await Promise.all(Array.from({ length: workerCount }, worker));
   return enriched;
 }
 
@@ -1741,7 +2127,8 @@ async function searchGoogleTransparencyCreativesByDomain(domain, limit = GOOGLE_
     ads: Array.isArray(raw?.['1']) ? raw['1'].map(normalizeGoogleTransparencyAd) : [],
     next_page_token: cleanString(raw?.['2']),
     lower_bound: toInt(raw?.['4']),
-    upper_bound: toInt(raw?.['5'])
+    upper_bound: toInt(raw?.['5']),
+    total_ads_count: toInt(raw?.['5']) || toInt(raw?.['4']) || null
   };
 }
 
@@ -1759,7 +2146,8 @@ async function searchGoogleTransparencyCreativesByAdvertiser(advertiserId, limit
     ads: Array.isArray(raw?.['1']) ? raw['1'].map(normalizeGoogleTransparencyAd) : [],
     next_page_token: cleanString(raw?.['2']),
     lower_bound: toInt(raw?.['4']),
-    upper_bound: toInt(raw?.['5'])
+    upper_bound: toInt(raw?.['5']),
+    total_ads_count: toInt(raw?.['5']) || toInt(raw?.['4']) || null
   };
 }
 
@@ -1780,6 +2168,7 @@ async function fetchGoogleAdsTransparencyForCompetitor(competitor = {}) {
       return {
         raw: { ...result.raw, clinicaclick_resolution: { ...resolution, mode: 'domain', domain } },
         ads: sortGoogleTransparencyAds(ads),
+        total_ads_count: result.total_ads_count || result.upper_bound || result.lower_bound || result.ads.length,
         resolved: { mode: 'domain', domain, lower_bound: result.lower_bound, upper_bound: result.upper_bound }
       };
     }
@@ -1808,12 +2197,14 @@ async function fetchGoogleAdsTransparencyForCompetitor(competitor = {}) {
 
   let combinedRaw = null;
   const combinedAds = [];
+  let totalAdsCount = null;
   for (const candidate of uniqueAdvertisers) {
     resolution.advertisers_checked.push(candidate);
     const remaining = GOOGLE_TRANSPARENCY_AD_LIMIT - combinedAds.length;
     if (remaining <= 0) break;
     const result = await searchGoogleTransparencyCreativesByAdvertiser(candidate.advertiser_id, remaining);
     combinedRaw = combinedRaw || result.raw;
+    totalAdsCount = Math.max(totalAdsCount || 0, result.total_ads_count || result.upper_bound || result.lower_bound || result.ads.length || 0);
     combinedAds.push(...result.ads.map((ad) => ({
       ...ad,
       match_score: candidate.match_score,
@@ -1827,6 +2218,7 @@ async function fetchGoogleAdsTransparencyForCompetitor(competitor = {}) {
       clinicaclick_resolution: { ...resolution, mode: uniqueAdvertisers.length ? 'advertiser' : 'not_found' }
     },
     ads: sortGoogleTransparencyAds(await enrichGoogleAdsWithPreviewScripts(combinedAds.slice(0, GOOGLE_TRANSPARENCY_AD_LIMIT))),
+    total_ads_count: totalAdsCount || combinedAds.length,
     resolved: uniqueAdvertisers[0] || null
   };
 }
@@ -1858,14 +2250,22 @@ async function upsertAdsSnapshot(competitor, result) {
 
 async function upsertProviderAdsSnapshot(competitor, provider, result) {
   const snapshotDate = todayLabel();
+  const visibleAds = Array.isArray(result.ads) ? result.ads.map(stripPrivateAdFields) : [];
+  const adsCount = result.total_ads_count != null
+    ? Math.max(toInt(result.total_ads_count) || 0, visibleAds.length)
+    : visibleAds.length;
   const values = {
     provider,
     status: result.status || 'completed',
-    ads_count: Array.isArray(result.ads) ? result.ads.length : 0,
-    active_ads: Array.isArray(result.ads) ? result.ads : [],
+    ads_count: adsCount,
+    active_ads: visibleAds,
     error_code: result.error_code || null,
     error_message: result.error_message || null,
-    raw_payload: result.raw || null
+    raw_payload: {
+      ...(result.raw || {}),
+      clinicaclick_total_ads_count: adsCount,
+      clinicaclick_visible_ads_count: visibleAds.length
+    }
   };
   const [snapshot, created] = await MarketingCompetitorAdSnapshot.findOrCreate({
     where: { competitor_id: competitor.id, provider, snapshot_date: snapshotDate },
@@ -1877,10 +2277,13 @@ async function upsertProviderAdsSnapshot(competitor, provider, result) {
 
 function adSnapshotPayload(snapshot) {
   const ads = snapshot && typeof snapshot.toJSON === 'function' ? snapshot.toJSON() : snapshot;
+  const activeAds = Array.isArray(ads?.active_ads) ? ads.active_ads : [];
   return {
     ads_status: ads?.status || null,
     active_ads_count: ads?.ads_count != null ? Number(ads.ads_count) : null,
-    active_ads: Array.isArray(ads?.active_ads) ? ads.active_ads : [],
+    total_ads_count: ads?.ads_count != null ? Number(ads.ads_count) : null,
+    visible_ads_count: activeAds.length,
+    active_ads: activeAds,
     error_code: ads?.error_code || null,
     error_message: ads?.error_message || null,
     last_synced_at: ads?.updated_at || null
@@ -2412,6 +2815,7 @@ async function refreshOneCompetitor(competitor, scope) {
     report.meta_ads_library = {
       status: 'completed',
       ads_count: metaResult.ads.length,
+      visible_ads_count: metaResult.ads.length,
       token_source: metaResult.tokenSource
     };
     if (metaResult.resolvedPage?.page_id && !cleanString(competitor.meta_page_id)) {
@@ -2445,11 +2849,13 @@ async function refreshOneCompetitor(competitor, scope) {
       await upsertProviderAdsSnapshot(competitor, GOOGLE_ADS_TRANSPARENCY_PROVIDER, {
         status: 'completed',
         ads: googleResult.ads,
+        total_ads_count: googleResult.total_ads_count,
         raw: googleResult.raw
       });
       report.google_ads_transparency = {
         status: 'completed',
-        ads_count: googleResult.ads.length,
+        ads_count: googleResult.total_ads_count || googleResult.ads.length,
+        visible_ads_count: googleResult.ads.length,
         resolved: googleResult.resolved
       };
     } catch (error) {
