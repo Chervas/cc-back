@@ -222,8 +222,13 @@ Principios:
 - Guardar solo competidores confirmados por el usuario.
 - Actualizar semanalmente por cron, no en cada render del informe.
 - Consultar anuncios mediante la API oficial de Meta Ads Library. Si Meta devuelve `ad_snapshot_url`, el backend puede intentar extraer imagen/vídeo público del snapshot como previsualización best-effort. Si el token no tiene acceso o Meta no devuelve datos, persiste `status=unavailable` y la UI debe mostrar aviso.
-- El alta/edición de competidor acepta `meta_page_url`. Si la URL contiene `view_all_page_id`, `search_page_ids`, `page_id` o `id`, backend extrae automáticamente `meta_page_id` para consultar la página exacta de Meta Ads Library.
-- En cada refresco se intenta detectar perfiles sociales públicos del competidor desde su web (`website_url`) buscando enlaces a Instagram/Facebook. Los perfiles se guardan en `raw_place_payload.clinicaclick_social_profiles` y se añaden a `meta_ads_search_terms` para mejorar la consulta oficial de Meta Ads Library. La detección es best-effort, con timeout bajo, y no bloquea el refresco de Google Places.
+- Resolución de Meta antes del fallback:
+  - Primero se usan perfiles sociales ya guardados/manuales y URL de ficha/web si son Facebook o Instagram.
+  - Después se revisa `website_url`: home + páginas internas ligeras de contacto/sobre nosotros/equipo para localizar enlaces públicos a Facebook/Instagram, normalmente en footer.
+  - Si hay Facebook URL o usuario, se intenta resolver `page_id` con Graph API; también se extraen IDs de URLs tipo `view_all_page_id`, `search_page_ids`, `page_id`, `id`, `/123456` o slugs con sufijo numérico `nombre-123456`.
+  - Solo si no existe página exacta se consulta Ads Library por frase exacta y se aceptan anuncios cuyo `page_name/page_id` encaje con el competidor. Los resultados ruidosos se descartan y se persiste `0` anuncios, no anuncios de terceros.
+- El alta/edición de competidor acepta `meta_page_url`. Si la URL contiene un identificador de página, backend extrae automáticamente `meta_page_id` para consultar la página exacta de Meta Ads Library.
+- En cada refresco se intenta detectar perfiles sociales públicos del competidor desde Google Places, datos manuales y su web (`website_url`). Los perfiles se guardan en `raw_place_payload.clinicaclick_social_profiles` y se añaden a `meta_ads_search_terms` para mejorar la consulta oficial de Meta Ads Library. La detección es best-effort, con timeout bajo, máximo de páginas limitado, y no bloquea el refresco de Google Places.
 - Los competidores se etiquetan con `relevance` frente a las disciplinas de la clínica. La especialidad se infiere primero desde `configuracion.disciplinas` y, si falta, desde nombre/servicios/descripción antes de caer a categorías genéricas de Google como `Medical Clinic`. Los que no encajan, por ejemplo competidores médicos genéricos en una clínica capilar, no se borran automáticamente, pero la UI debe marcarlos como `Revisar`.
 
 Tablas:

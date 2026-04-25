@@ -27,6 +27,50 @@ const DEFAULT_RANKING_LIMIT = Math.max(1, Math.min(5, parseInt(process.env.COMPE
 const SNAPSHOT_MEDIA_TIMEOUT_MS = Math.max(1000, Math.min(15000, parseInt(process.env.COMPETITION_META_SNAPSHOT_MEDIA_TIMEOUT_MS || '6000', 10)));
 const SNAPSHOT_MEDIA_LIMIT = Math.max(0, Math.min(DEFAULT_AD_LIMIT, parseInt(process.env.COMPETITION_META_SNAPSHOT_MEDIA_LIMIT || String(DEFAULT_AD_LIMIT), 10)));
 const SOCIAL_DISCOVERY_TIMEOUT_MS = Math.max(1000, Math.min(15000, parseInt(process.env.COMPETITION_SOCIAL_DISCOVERY_TIMEOUT_MS || '8000', 10)));
+const SOCIAL_DISCOVERY_PAGE_LIMIT = Math.max(1, Math.min(6, parseInt(process.env.COMPETITION_SOCIAL_DISCOVERY_PAGE_LIMIT || '4', 10)));
+const META_PAGE_MATCH_THRESHOLD = Math.max(20, Math.min(100, parseInt(process.env.COMPETITION_META_PAGE_MATCH_THRESHOLD || '45', 10)));
+
+const SOCIAL_DISCOVERY_INTERNAL_LINK_HINTS = [
+  'contact',
+  'contacto',
+  'about',
+  'sobre',
+  'quienes',
+  'quien',
+  'clinica',
+  'equipo',
+  'nosotros'
+];
+
+const GENERIC_BUSINESS_TOKENS = new Set([
+  'clinica',
+  'clinic',
+  'clinical',
+  'centro',
+  'center',
+  'medical',
+  'medica',
+  'medico',
+  'medicina',
+  'grupo',
+  'instituto',
+  'doctor',
+  'doctora',
+  'dra',
+  'dr',
+  'the',
+  'and',
+  'para',
+  'con',
+  'de',
+  'del',
+  'la',
+  'las',
+  'los',
+  'el',
+  'en',
+  'y'
+]);
 
 const PLACE_FIELD_MASK = [
   'places.id',
@@ -108,6 +152,21 @@ function normalizeBusinessName(value) {
     .replace(/[^a-z0-9]+/g, ' ')
     .replace(/\s+/g, ' ')
     .trim();
+}
+
+function businessNameTokens(value) {
+  const normalized = normalizeBusinessName(value);
+  if (!normalized) return [];
+  return normalized
+    .split(' ')
+    .map(cleanString)
+    .filter((token) => token && token.length >= 3 && !GENERIC_BUSINESS_TOKENS.has(token));
+}
+
+function sharedBusinessTokens(left, right) {
+  const leftTokens = new Set(businessNameTokens(left));
+  const rightTokens = new Set(businessNameTokens(right));
+  return [...leftTokens].filter((token) => rightTokens.has(token));
 }
 
 function normalizePlaceId(value) {
@@ -282,6 +341,69 @@ function extractSocialProfilesFromHtml(html, baseUrl) {
   return profiles;
 }
 
+function extractCandidateInternalLinks(html, baseUrl) {
+  const base = normalizeUrl(baseUrl);
+  if (!base) return [];
+  const urls = [];
+  try {
+    const baseParsed = new URL(base);
+    const hrefRegex = /\bhref\s*=\s*(['"])(.*?)\1/gi;
+    let match;
+    while ((match = hrefRegex.exec(String(html || ''))) !== null) {
+      const url = absolutizeUrl(match[2], base);
+      if (!url) continue;
+      const parsed = new URL(url);
+      if (parsed.hostname.replace(/^www\./i, '').toLowerCase() !== baseParsed.hostname.replace(/^www\./i, '').toLowerCase()) continue;
+      parsed.hash = '';
+      parsed.search = '';
+      const normalized = parsed.toString().replace(/\/$/g, '');
+      const path = normalizeBusinessName(parsed.pathname);
+      if (!path || !SOCIAL_DISCOVERY_INTERNAL_LINK_HINTS.some((hint) => path.includes(hint))) continue;
+      if (!urls.includes(normalized)) urls.push(normalized);
+      if (urls.length >= SOCIAL_DISCOVERY_PAGE_LIMIT - 1) break;
+    }
+  } catch (_) {
+    return [];
+  }
+  return urls;
+}
+
+function extractSocialProfilesFromObject(value, seen = new Set()) {
+  if (!value) return null;
+  if (typeof value === 'string') {
+    const direct = buildSocialProfilesFromPayload({ website_url: value, facebook_url: value, instagram_url: value });
+    if (Object.keys(direct).length) return direct;
+    const profiles = {};
+    const urlRegex = /https?:\/\/[^\s"'<>]+/gi;
+    let match;
+    while ((match = urlRegex.exec(value)) !== null) {
+      const profile = buildSocialProfilesFromPayload({ website_url: match[0], facebook_url: match[0], instagram_url: match[0] });
+      Object.assign(profiles, mergeSocialProfiles(profiles, profile) || {});
+      if (profiles.instagram_url && profiles.facebook_url) break;
+    }
+    return Object.keys(profiles).length ? profiles : null;
+  }
+  if (typeof value !== 'object') return null;
+  if (seen.has(value)) return null;
+  seen.add(value);
+
+  let profiles = null;
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      profiles = mergeSocialProfiles(profiles, extractSocialProfilesFromObject(item, seen));
+      if (profiles?.instagram_url && profiles?.facebook_url) break;
+    }
+    return profiles;
+  }
+
+  profiles = mergeSocialProfiles(profiles, buildSocialProfilesFromPayload(value));
+  for (const item of Object.values(value)) {
+    profiles = mergeSocialProfiles(profiles, extractSocialProfilesFromObject(item, seen));
+    if (profiles?.instagram_url && profiles?.facebook_url) break;
+  }
+  return profiles;
+}
+
 function socialProfilesFromPayload(payload = {}) {
   return payload?.clinicaclick_social_profiles || payload?.manual?.social_profiles || null;
 }
@@ -298,8 +420,14 @@ function mergeSocialProfiles(left = null, right = null) {
 }
 
 function buildSocialProfilesFromPayload(payload = {}) {
-  const instagramUrl = normalizeSocialProfileUrl(payload.instagram_url) || socialUrlFromUsername(payload.instagram_username, 'instagram');
-  const facebookUrl = normalizeSocialProfileUrl(payload.facebook_url) || socialUrlFromUsername(payload.facebook_username, 'facebook');
+  const websiteSocialUrl = normalizeSocialProfileUrl(payload.website_url);
+  const websiteHost = websiteSocialUrl ? new URL(websiteSocialUrl).hostname.replace(/^www\./i, '').toLowerCase() : null;
+  const instagramUrl = normalizeSocialProfileUrl(payload.instagram_url)
+    || (websiteHost === 'instagram.com' ? websiteSocialUrl : null)
+    || socialUrlFromUsername(payload.instagram_username, 'instagram');
+  const facebookUrl = normalizeSocialProfileUrl(payload.facebook_url)
+    || (websiteHost === 'facebook.com' ? websiteSocialUrl : null)
+    || socialUrlFromUsername(payload.facebook_username, 'facebook');
   const profiles = {
     instagram_url: instagramUrl,
     instagram_username: cleanString(payload.instagram_username) || usernameFromSocialUrl(instagramUrl, 'instagram'),
@@ -334,31 +462,55 @@ function metaTermsFromCompetitor(competitor, socialProfiles = null) {
 async function discoverSocialProfiles(competitor, candidate = {}) {
   const existing = socialProfilesFromPayload(competitor?.raw_place_payload);
   const manual = buildSocialProfilesFromPayload(candidate);
-  let profiles = mergeSocialProfiles(existing, manual);
+  const rawProfiles = mergeSocialProfiles(
+    extractSocialProfilesFromObject(candidate.raw_place_payload),
+    extractSocialProfilesFromObject(competitor?.raw_place_payload)
+  );
+  let profiles = mergeSocialProfiles(mergeSocialProfiles(existing, manual), rawProfiles);
   if (profiles?.instagram_url && profiles?.facebook_url) return profiles;
 
   const websiteUrl = normalizeUrl(candidate.website_url) || normalizeUrl(competitor?.website_url);
   if (!websiteUrl) return profiles;
 
+  const pagesToCheck = [websiteUrl];
+  const errors = [];
   try {
-    const response = await axios.get(websiteUrl, {
-      timeout: SOCIAL_DISCOVERY_TIMEOUT_MS,
-      maxContentLength: 1024 * 1024,
-      headers: {
-        'User-Agent': 'Mozilla/5.0 (compatible; ClinicaClickBot/1.0; +https://clinicaclick.com)',
-        'Accept': 'text/html,application/xhtml+xml'
+    for (let index = 0; index < pagesToCheck.length && index < SOCIAL_DISCOVERY_PAGE_LIMIT; index += 1) {
+      const pageUrl = pagesToCheck[index];
+      try {
+        const response = await axios.get(pageUrl, {
+          timeout: SOCIAL_DISCOVERY_TIMEOUT_MS,
+          maxContentLength: 1024 * 1024,
+          headers: {
+            'User-Agent': 'Mozilla/5.0 (compatible; ClinicaClickBot/1.0; +https://clinicaclick.com)',
+            'Accept': 'text/html,application/xhtml+xml'
+          }
+        });
+        const discovered = extractSocialProfilesFromHtml(response.data, pageUrl);
+        profiles = mergeSocialProfiles(profiles, {
+          ...discovered,
+          source: Object.keys(discovered).length ? (index === 0 ? 'website_homepage' : 'website_internal_page') : null,
+          checked_at: new Date().toISOString()
+        });
+        if (profiles?.instagram_url && profiles?.facebook_url) return profiles;
+        if (index === 0) {
+          for (const link of extractCandidateInternalLinks(response.data, pageUrl)) {
+            if (!pagesToCheck.includes(link)) pagesToCheck.push(link);
+            if (pagesToCheck.length >= SOCIAL_DISCOVERY_PAGE_LIMIT) break;
+          }
+        }
+      } catch (error) {
+        errors.push(error?.response?.status ? `HTTP ${error.response.status}` : (error?.code || error?.message || 'social_discovery_failed'));
       }
-    });
-    const discovered = extractSocialProfilesFromHtml(response.data, websiteUrl);
-    profiles = mergeSocialProfiles(profiles, {
-      ...discovered,
-      source: Object.keys(discovered).length ? 'website_homepage' : null,
-      checked_at: new Date().toISOString()
-    });
-    return profiles;
+    }
+    return mergeSocialProfiles(profiles, errors.length && !profiles ? {
+      source: 'website_pages',
+      checked_at: new Date().toISOString(),
+      error: errors.slice(0, 2).join('; ')
+    } : null);
   } catch (error) {
     return mergeSocialProfiles(profiles, {
-      source: 'website_homepage',
+      source: 'website_pages',
       checked_at: new Date().toISOString(),
       error: error?.response?.status ? `HTTP ${error.response.status}` : (error?.code || error?.message || 'social_discovery_failed')
     });
@@ -464,6 +616,7 @@ function extractMetaPageIdFromUrl(value) {
     if (cleanQueryId) return cleanQueryId;
     const pathId = parsed.pathname.match(/(?:\/profile\.php).*?[?&]id=(\d{5,})/)?.[1]
       || parsed.pathname.match(/\/(\d{5,})(?:\/|$)/)?.[1]
+      || parsed.pathname.match(/-(\d{5,})(?:\/|$)/)?.[1]
       || null;
     return pathId || null;
   } catch (_) {
@@ -858,6 +1011,52 @@ async function resolveMetaAdLibraryToken(scope) {
   return token ? { accessToken: token, source: `meta_connection:${asset.metaConnection.id}` } : { accessToken: null, source: null };
 }
 
+function competitorMetaIdentityValues(competitor = {}) {
+  const socialProfiles = socialProfilesFromPayload(competitor.raw_place_payload);
+  return [
+    competitor.meta_page_name,
+    competitor.name,
+    ...(Array.isArray(competitor.meta_ads_search_terms) ? competitor.meta_ads_search_terms : []),
+    socialProfiles?.facebook_username,
+    socialProfiles?.instagram_username,
+    socialProfiles?.facebook_url,
+    socialProfiles?.instagram_url,
+    competitor.meta_page_url
+  ].map(cleanString).filter(Boolean);
+}
+
+function scoreMetaPageMatch(competitor = {}, page = {}) {
+  const pageName = cleanString(page.page_name || page.name);
+  const pageId = cleanString(page.page_id || page.id);
+  if (pageId && cleanString(competitor.meta_page_id) && pageId === cleanString(competitor.meta_page_id)) return 100;
+  if (!pageName) return 0;
+
+  let score = businessNamesMatch(pageName, competitor.name) ? 80 : 0;
+  const tokens = sharedBusinessTokens(competitor.name, pageName);
+  if (tokens.length >= 2) score = Math.max(score, 70);
+  if (tokens.some((token) => token.length >= 6)) score = Math.max(score, 45);
+
+  for (const value of competitorMetaIdentityValues(competitor)) {
+    const normalizedValue = normalizeBusinessName(value);
+    if (!normalizedValue) continue;
+    const pageNormalized = normalizeBusinessName(pageName);
+    if (pageNormalized && normalizedValue.length >= 6 && (pageNormalized.includes(normalizedValue) || normalizedValue.includes(pageNormalized))) {
+      score = Math.max(score, 70);
+    }
+    const valueTokens = sharedBusinessTokens(value, pageName);
+    if (valueTokens.length >= 2) score = Math.max(score, 60);
+    if (valueTokens.some((token) => token.length >= 6)) score = Math.max(score, 45);
+  }
+
+  return score;
+}
+
+function filterMetaAdsForCompetitor(competitor, ads = []) {
+  return ads
+    .map((ad) => ({ ...ad, match_score: scoreMetaPageMatch(competitor, ad) }))
+    .filter((ad) => ad.match_score >= META_PAGE_MATCH_THRESHOLD);
+}
+
 function normalizeMetaAd(ad = {}) {
   const bodies = Array.isArray(ad.ad_creative_bodies) ? ad.ad_creative_bodies : [];
   const titles = Array.isArray(ad.ad_creative_link_titles) ? ad.ad_creative_link_titles : [];
@@ -883,6 +1082,118 @@ function normalizeMetaAd(ad = {}) {
     delivery_start_at: cleanString(ad.ad_delivery_start_time),
     delivery_stop_at: cleanString(ad.ad_delivery_stop_time)
   };
+}
+
+async function resolveFacebookPageFromUrlOrUsername(value, accessToken) {
+  const url = normalizeSocialProfileUrl(value) || normalizeUrl(value);
+  const explicitId = extractMetaPageIdFromUrl(url || value);
+  let isFacebookUrl = false;
+  try {
+    isFacebookUrl = !!url && new URL(url).hostname.replace(/^www\./i, '').toLowerCase() === 'facebook.com';
+  } catch (_) {
+    isFacebookUrl = false;
+  }
+  if (url && !isFacebookUrl && !explicitId) return null;
+
+  let username = usernameFromSocialUrl(url || value, 'facebook') || (!url ? cleanString(value) : null);
+  if (username) username = username.replace(/^@/, '').replace(/^\/+/, '').split(/[/?#]/)[0];
+
+  const idsToTry = [...new Set([explicitId, username && /^\d{5,}$/.test(username) ? username : null].filter(Boolean))];
+  for (const id of idsToTry) {
+    try {
+      const response = await metaGet(String(id), {
+        params: { fields: 'id,name,link' },
+        accessToken,
+        timeout: 12000
+      });
+      return {
+        page_id: cleanString(response.data?.id) || id,
+        page_name: cleanString(response.data?.name),
+        page_url: normalizeUrl(response.data?.link) || socialUrlFromUsername(id, 'facebook'),
+        source: 'facebook_page_url'
+      };
+    } catch (_) {
+      return { page_id: id, page_name: null, page_url: socialUrlFromUsername(id, 'facebook'), source: 'facebook_page_url' };
+    }
+  }
+
+  if (!username || /^\d+$/.test(username)) return null;
+  try {
+    const response = await metaGet(encodeURIComponent(username), {
+      params: { fields: 'id,name,link' },
+      accessToken,
+      timeout: 12000
+    });
+    if (!response.data?.id) return null;
+    return {
+      page_id: cleanString(response.data.id),
+      page_name: cleanString(response.data.name),
+      page_url: normalizeUrl(response.data.link) || socialUrlFromUsername(username, 'facebook'),
+      source: 'facebook_username'
+    };
+  } catch (_) {
+    return null;
+  }
+}
+
+async function resolveMetaPageFromKnownProfiles(competitor, accessToken) {
+  const socialProfiles = socialProfilesFromPayload(competitor.raw_place_payload);
+  const candidates = [
+    competitor.meta_page_url,
+    socialProfiles?.facebook_url,
+    socialProfiles?.facebook_username ? socialUrlFromUsername(socialProfiles.facebook_username, 'facebook') : null
+  ].map(cleanString).filter(Boolean);
+
+  for (const candidate of [...new Set(candidates)]) {
+    const resolved = await resolveFacebookPageFromUrlOrUsername(candidate, accessToken);
+    if (!resolved?.page_id) continue;
+    const score = resolved.page_name ? scoreMetaPageMatch(competitor, { page_id: resolved.page_id, page_name: resolved.page_name }) : META_PAGE_MATCH_THRESHOLD;
+    if (score >= META_PAGE_MATCH_THRESHOLD || extractMetaPageIdFromUrl(candidate)) {
+      return { ...resolved, match_score: score };
+    }
+  }
+  return null;
+}
+
+async function searchMetaAdsArchive(params, accessToken) {
+  const response = await metaGet('ads_archive', { params, accessToken, timeout: 30000 });
+  return {
+    raw: response.data,
+    ads: Array.isArray(response.data?.data) ? response.data.data.map(normalizeMetaAd) : []
+  };
+}
+
+async function resolveMetaPageFromAdsArchive(competitor, accessToken) {
+  const candidateTerms = competitorMetaIdentityValues(competitor)
+    .filter((value) => !/^https?:\/\//i.test(value))
+    .filter((value) => normalizeBusinessName(value)?.length >= 3);
+
+  for (const term of [...new Set(candidateTerms)].slice(0, 4)) {
+    const params = {
+      fields: META_AD_FIELDS,
+      ad_type: 'ALL',
+      ad_active_status: 'ACTIVE',
+      ad_reached_countries: JSON.stringify([DEFAULT_COUNTRY]),
+      search_terms: term,
+      search_type: 'KEYWORD_EXACT_PHRASE',
+      limit: Math.min(DEFAULT_AD_LIMIT, 25)
+    };
+    const result = await searchMetaAdsArchive(params, accessToken);
+    const matches = filterMetaAdsForCompetitor(competitor, result.ads)
+      .filter((ad) => ad.page_id)
+      .sort((a, b) => (b.match_score || 0) - (a.match_score || 0));
+    const best = matches[0];
+    if (best) {
+      return {
+        page_id: best.page_id,
+        page_name: best.page_name,
+        page_url: best.page_id ? `https://www.facebook.com/${best.page_id}` : null,
+        source: 'ads_archive_exact_search',
+        match_score: best.match_score
+      };
+    }
+  }
+  return null;
 }
 
 async function enrichAdWithSnapshotMedia(ad = {}) {
@@ -949,7 +1260,12 @@ async function fetchMetaAdsForCompetitor(competitor, scope) {
     throw err;
   }
 
-  const params = {
+  const resolvedPage = competitor.meta_page_id
+    ? { page_id: String(competitor.meta_page_id), page_name: cleanString(competitor.meta_page_name), page_url: normalizeUrl(competitor.meta_page_url), source: 'stored' }
+    : (await resolveMetaPageFromKnownProfiles(competitor, accessToken)
+      || await resolveMetaPageFromAdsArchive(competitor, accessToken));
+
+  const baseParams = {
     fields: META_AD_FIELDS,
     ad_type: 'ALL',
     ad_active_status: 'ACTIVE',
@@ -957,20 +1273,32 @@ async function fetchMetaAdsForCompetitor(competitor, scope) {
     limit: DEFAULT_AD_LIMIT
   };
 
-  if (competitor.meta_page_id) {
-    params.search_page_ids = JSON.stringify([String(competitor.meta_page_id)]);
+  let result;
+  if (resolvedPage?.page_id) {
+    result = await searchMetaAdsArchive({
+      ...baseParams,
+      search_page_ids: JSON.stringify([String(resolvedPage.page_id)])
+    }, accessToken);
   } else {
-    params.search_terms = searchTerms[0] || fallbackTerm;
-    params.search_type = 'KEYWORD_UNORDERED';
+    result = await searchMetaAdsArchive({
+      ...baseParams,
+      search_terms: searchTerms[0] || fallbackTerm,
+      search_type: 'KEYWORD_EXACT_PHRASE'
+    }, accessToken);
+    result.ads = filterMetaAdsForCompetitor(competitor, result.ads);
   }
 
-  const response = await metaGet('ads_archive', { params, accessToken, timeout: 30000 });
-  const data = Array.isArray(response.data?.data) ? response.data.data : [];
-  const ads = data.map(normalizeMetaAd);
   return {
     tokenSource: source,
-    raw: response.data,
-    ads: await enrichAdsWithSnapshotMedia(ads)
+    resolvedPage: resolvedPage || null,
+    raw: {
+      ...result.raw,
+      clinicaclick_resolution: {
+        page: resolvedPage || null,
+        fallback_filtered: !resolvedPage?.page_id
+      }
+    },
+    ads: await enrichAdsWithSnapshotMedia(result.ads)
   };
 }
 
@@ -1467,7 +1795,8 @@ async function refreshOneCompetitor(competitor, scope) {
       const normalized = normalizePlace(place);
       const socialProfiles = await discoverSocialProfiles(competitor, {
         website_url: normalized.website_url,
-        facebook_url: competitor.meta_page_url
+        facebook_url: competitor.meta_page_url,
+        raw_place_payload: place
       });
       Object.assign(patch, {
         google_maps_url: normalized.google_maps_url,
@@ -1519,6 +1848,15 @@ async function refreshOneCompetitor(competitor, scope) {
       ads_count: metaResult.ads.length,
       token_source: metaResult.tokenSource
     };
+    if (metaResult.resolvedPage?.page_id && !cleanString(competitor.meta_page_id)) {
+      patch.meta_page_id = metaResult.resolvedPage.page_id;
+    }
+    if (metaResult.resolvedPage?.page_name && !cleanString(competitor.meta_page_name)) {
+      patch.meta_page_name = metaResult.resolvedPage.page_name;
+    }
+    if (metaResult.resolvedPage?.page_url && !cleanString(competitor.meta_page_url)) {
+      patch.meta_page_url = metaResult.resolvedPage.page_url;
+    }
     patch.last_ads_synced_at = new Date();
   } catch (error) {
     const normalizedError = normalizeExternalError(error);
