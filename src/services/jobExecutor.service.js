@@ -325,6 +325,7 @@ const JOB_HANDLERS = {
   business_profile_recent: async (payload = {}) => metaSyncJobs.executeBusinessProfileSync(payload),
   business_profile_backfill: async (payload = {}) => metaSyncJobs.executeBusinessProfileBackfill(payload),
   business_profile_backfill_locations: async (payload = {}) => metaSyncJobs.executeBusinessProfileBackfillForLocations(payload.mappings || []),
+  competition_refresh: async (payload = {}) => metaSyncJobs.executeCompetitionSync(payload),
   whatsapp_coexistence_sync_contacts: async (payload = {}) => whatsappCoexistenceService.runContactsSyncJob(payload),
   whatsapp_coexistence_sync_history: async (payload = {}) => whatsappCoexistenceService.runHistorySyncJob(payload),
   whatsapp_template_create: async (payload = {}) => runWhatsappTemplateCreateJob(payload),

@@ -209,6 +209,70 @@ Limitación consciente:
 - Por eso las visitas propias del funnel usan GA4 si existe o clicks sincronizados desde Ads/SEO como fallback.
 - El frontend debe mostrar nota de calidad de datos y no vender esa métrica como pageviews propios hasta cerrar `ClinicaClick Analytics V1`.
 
+## 2026-04-21 - Informes de competencia local V1
+
+Se añade backend V1 para una futura subpestaña `Marketing > Informes > Competencia`.
+
+Principios:
+
+- Sugerir competidores locales en la primera configuración con Google Places.
+- Para sugerir competidores es obligatorio tener una ficha local propia conectada o `Clinica.url_ficha_local` guardada. Si falta, `GET /competition/suggestions` devuelve `setup_required=true`, `setup_code=LOCAL_PROFILE_REQUIRED` y no ejecuta una búsqueda genérica.
+- Si hay ancla local pero no hay categoría/especialidad suficiente, devuelve `setup_code=LOCAL_CATEGORY_REQUIRED`. No se debe usar fallback a "clínica médica" porque genera ruido en clínicas nuevas.
+- Cuando hay ficha local conectada, la categoría/nombre de Google Business Profile tiene prioridad sobre disciplinas mixtas de la clínica para inferir la búsqueda inicial. Ejemplo: si una clínica tiene varias áreas pero su ficha local es `Podólogo`, la competencia se busca como podología, no como otra disciplina secundaria.
+- Las sugerencias excluyen la propia ficha local por `place_id` y por nombre normalizado. La propia clínica no debe aparecer como competidor sugerido aunque Google la devuelva en los primeros resultados.
+- `GET /competition` devuelve también `own_profile`, `ranking_terms` y `local_ranking`: ficha propia resuelta con Places, términos por especialidad/ciudad y posición estimada frente a competidores. En V1 se calcula en vivo con un límite bajo; debe migrarse a snapshot semanal si el uso crece.
+- Si la ficha propia no aparece en una búsqueda simulada, `aboveMe` y `belowMe` deben ir vacíos y se devuelve `visibleResults` con los resultados encontrados. No tiene sentido hablar de "por encima" o "por debajo" cuando la clínica no aparece.
+- Guardar solo competidores confirmados por el usuario.
+- Actualizar semanalmente por cron, no en cada render del informe.
+- Consultar anuncios mediante la API oficial de Meta Ads Library. Si Meta devuelve `ad_snapshot_url`, el backend puede intentar extraer imagen/vídeo público del snapshot como previsualización best-effort. El `ad_snapshot_url` original puede incluir `access_token`; nunca debe persistirse ni devolverse al front. Se usa solo de forma transitoria durante el refresco y se guardan enlaces públicos seguros (`https://www.facebook.com/ads/library/?id=...` y catálogo de página `view_all_page_id=...`).
+- Media de anuncios Meta: el extractor busca `og:video`, `og:image`, `video[src]`, `video[poster]`, URLs `.mp4/.webm/.mov` e imágenes `.jpg/.png/.webp` incluso si vienen escapadas en HTML/JSON. Se filtran assets internos de Facebook (`static.xx.fbcdn.net`, `rsrc.php`) para no guardar logos o páginas de error como creatividad. Si el snapshot devuelve `400/403` o una página sin media accesible desde servidor, se conserva el enlace oficial a Meta y la UI debe indicar que la creatividad visual no está disponible.
+- Recuperación visual Meta con navegador: existe un fallback opcional para ejecutar navegador headless solo durante `competition_refresh`, nunca en el render normal del informe. Está apagado por defecto con `COMPETITION_META_BROWSER_MEDIA_ENABLED=false`, limita anuncios con `COMPETITION_META_BROWSER_MEDIA_LIMIT` y usa concurrencia 1 para no cargar CPU. Requiere instalar `playwright`/`puppeteer` o definir `COMPETITION_BROWSER_EXECUTABLE_PATH`; si no existe runtime de navegador, el snapshot queda como `meta_browser_unavailable` sin fallar el job.
+- Resolución de Meta antes del fallback:
+  - Primero se usan perfiles sociales ya guardados/manuales y URL de ficha/web si son Facebook o Instagram.
+  - Después se revisa `website_url`: home + páginas internas ligeras de contacto/sobre nosotros/equipo para localizar enlaces públicos a Facebook/Instagram, normalmente en footer.
+  - Si hay Facebook URL o usuario, se intenta resolver `page_id` con Graph API; también se extraen IDs de URLs tipo `view_all_page_id`, `search_page_ids`, `page_id`, `id`, `/123456` o slugs con sufijo numérico `nombre-123456`.
+  - Solo si no existe página exacta se consulta Ads Library por frase exacta y se aceptan anuncios cuyo `page_name/page_id` encaje con el competidor. Los resultados ruidosos se descartan y se persiste `0` anuncios, no anuncios de terceros.
+- Google Ads Transparency:
+  - No existe una API oficial de Google Ads para leer anuncios de competidores desde cuentas no autorizadas. Para competencia se consulta el Ads Transparency Center público mediante sus endpoints RPC (`SearchService/SearchSuggestions` y `SearchService/SearchCreatives`), con `X-Same-Domain`, `Referer` oficial y límites bajos.
+  - No se lanza navegador/headless ni se hace scraping interactivo de la web. Esto evita carga de CPU, reduce riesgo operativo y permite ejecutar la captura solo en `competition_refresh`.
+  - Resolución: primero se buscan creatividades por dominio del competidor (`website_url`/Google Places). Si no hay dominio con anuncios, se buscan anunciantes por nombre/términos y se aceptan solo coincidencias con score mínimo.
+  - Las creatividades se guardan en `MarketingCompetitorAdSnapshots` con `provider='google_ads_transparency'`. Se devuelven en `GET /competition` bajo `competitor.google_ads`.
+  - Conteo: `ads_count` representa el total estimado de anuncios del anunciante cuando Google devuelve `upper_bound/lower_bound`. `active_ads` contiene solo el set visible recuperado para UI (`visible_ads_count`, por defecto 25). No confundir "25 creatividades visibles" con "25 anuncios totales".
+  - Enlaces: cada creatividad mantiene `ad_snapshot_url` al anuncio concreto, pero `library_url/advertiser_url` deben apuntar al catálogo del anunciante para que el usuario vea todos los anuncios disponibles.
+  - Media de Google: se priorizan imágenes `tpc.googlesyndication.com/archive/simgad`. Si el preview llega como `content.js`, se descarga solo para los primeros anuncios configurados y se extraen imágenes/vídeos aunque vengan dentro de contenido percent-encoded. Se filtran iconos/material assets (`fonts.gstatic.com`, `www.gstatic.com`, `googlematerialicons`) para no guardar iconos como creatividad. Los vídeos de YouTube se guardan como `external_video_url` con miniatura, no como descarga local.
+  - Si Google cambia el contrato RPC o bloquea la consulta, se persiste `status=unavailable` para ese provider y la UI debe mostrar el enlace oficial o estado no disponible sin bloquear el informe.
+- El alta/edición de competidor acepta `meta_page_url`. Si la URL contiene un identificador de página, backend extrae automáticamente `meta_page_id` para consultar la página exacta de Meta Ads Library.
+- En cada refresco se intenta detectar perfiles sociales públicos del competidor desde Google Places, datos manuales y su web (`website_url`). Los perfiles se guardan en `raw_place_payload.clinicaclick_social_profiles` y se añaden a `meta_ads_search_terms` para mejorar la consulta oficial de Meta Ads Library. La detección es best-effort, con timeout bajo, máximo de páginas limitado, y no bloquea el refresco de Google Places.
+- Los competidores se etiquetan con `relevance` frente a las disciplinas de la clínica. La especialidad se infiere primero desde `configuracion.disciplinas` y, si falta, desde nombre/servicios/descripción antes de caer a categorías genéricas de Google como `Medical Clinic`. Los que no encajan, por ejemplo competidores médicos genéricos en una clínica capilar, no se borran automáticamente, pero la UI debe marcarlos como `Revisar`.
+- Reglas de relevancia V1 cubiertas: capilar, cirugía digestiva/hepatobiliar, podología y dental. Si una disciplina no tiene regla todavía, la UI debe mostrar `Sin regla de relevancia` y no ocultar resultados.
+
+Tablas:
+
+| Tabla | Uso |
+|:---|:---|
+| `MarketingCompetitors` | Competidores activos por clínica/grupo, con `google_place_id`, ficha pública y configuración opcional de página Meta. |
+| `MarketingCompetitorSnapshots` | Snapshot diario/semanal de rating, reseñas, categoría, web, teléfono y estado Google Places. |
+| `MarketingCompetitorAdSnapshots` | Snapshot de anuncios activos por provider (`meta_ads_library`, `google_ads_transparency`) o error explícito de disponibilidad. |
+
+Endpoints:
+
+| Endpoint | Estado | Uso |
+|:---|:---|:---|
+| `GET /api/marketing/reports/competition` | Operativo backend V1 | Lista competidores, último snapshot, anuncios activos y estado de proveedores. |
+| `GET /api/marketing/reports/competition/suggestions` | Operativo backend V1 | Sugiere competidores con Google Places para una clínica concreta. |
+| `POST /api/marketing/reports/competition/competitors` | Operativo backend V1 | Añade un competidor confirmado por el usuario. |
+| `PATCH /api/marketing/reports/competition/competitors/:competitorId` | Operativo backend V1 | Edita datos, `meta_page_id`, términos de búsqueda o estado. |
+| `DELETE /api/marketing/reports/competition/competitors/:competitorId` | Operativo backend V1 | Desactiva sin borrar histórico. |
+| `POST /api/marketing/reports/competition/refresh` | Operativo backend V1 | Refresco manual de Google Places + Meta Ads Library + Google Ads Transparency para todos o algunos competidores. |
+
+Job:
+
+- `competitionSync`, cola `competition_refresh`, schedule por defecto `0 6 * * 1`.
+- Variables: `GOOGLE_PLACES_API_KEY`, `META_AD_LIBRARY_ACCESS_TOKEN`, `JOBS_COMPETITION_SCHEDULE`, `COMPETITION_SUGGESTION_LIMIT`, `COMPETITION_META_AD_LIMIT`, `COMPETITION_META_AD_COUNTRY`, `COMPETITION_SOCIAL_DISCOVERY_TIMEOUT_MS`, `COMPETITION_GOOGLE_ADS_TRANSPARENCY_ENABLED`, `COMPETITION_GOOGLE_ADS_TRANSPARENCY_AD_LIMIT`, `COMPETITION_GOOGLE_ADS_TRANSPARENCY_SCRIPT_MEDIA_LIMIT`, `COMPETITION_GOOGLE_ADS_TRANSPARENCY_TIMEOUT_MS`.
+- Si `GOOGLE_PLACES_API_KEY` no está presente, las sugerencias devuelven proveedor no configurado.
+- Si `META_AD_LIBRARY_ACCESS_TOKEN` no está presente, se intenta `META_GRAPH_TOKEN` y después una conexión Meta activa del scope. Si Meta rechaza `ads_archive` con permiso insuficiente, se guarda `status=unavailable` con el error real; esto no debe interpretarse como "sin anuncios activos".
+- `COMPETITION_GOOGLE_ADS_TRANSPARENCY_ENABLED=false` desactiva la consulta a Google Ads Transparency sin tocar el resto del informe. Por defecto está activa porque no requiere token, pero siempre se ejecuta con límite bajo y solo en refrescos/syncs.
+
 ## 2026-03-27 - Integración de terceros Meta/Google: estado exacto
 
 ### Estado actual del producto
