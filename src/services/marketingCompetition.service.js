@@ -32,9 +32,14 @@ const GOOGLE_TRANSPARENCY_SCRIPT_MEDIA_LIMIT = Math.max(0, Math.min(GOOGLE_TRANS
 const DEFAULT_RANKING_LIMIT = Math.max(1, Math.min(5, parseInt(process.env.COMPETITION_LOCAL_RANKING_TERMS_LIMIT || '3', 10)));
 const SNAPSHOT_MEDIA_TIMEOUT_MS = Math.max(1000, Math.min(15000, parseInt(process.env.COMPETITION_META_SNAPSHOT_MEDIA_TIMEOUT_MS || '6000', 10)));
 const SNAPSHOT_MEDIA_LIMIT = Math.max(0, Math.min(DEFAULT_AD_LIMIT, parseInt(process.env.COMPETITION_META_SNAPSHOT_MEDIA_LIMIT || String(DEFAULT_AD_LIMIT), 10)));
-const META_BROWSER_MEDIA_ENABLED = envFlagEnabled(process.env.COMPETITION_META_BROWSER_MEDIA_ENABLED, false);
+const META_BROWSER_MEDIA_MODE = String(process.env.COMPETITION_META_BROWSER_MEDIA_MODE || (envFlagEnabled(process.env.COMPETITION_META_BROWSER_MEDIA_ENABLED, false) ? 'on' : 'auto')).trim().toLowerCase();
 const META_BROWSER_MEDIA_LIMIT = Math.max(0, Math.min(DEFAULT_AD_LIMIT, parseInt(process.env.COMPETITION_META_BROWSER_MEDIA_LIMIT || '5', 10)));
 const META_BROWSER_MEDIA_TIMEOUT_MS = Math.max(3000, Math.min(45000, parseInt(process.env.COMPETITION_META_BROWSER_MEDIA_TIMEOUT_MS || '15000', 10)));
+const META_BROWSER_MEDIA_IDLE_MS = Math.max(0, Math.min(300000, parseInt(process.env.COMPETITION_META_BROWSER_MEDIA_IDLE_MS || '60000', 10)));
+const META_BROWSER_MEDIA_MIN_MISSING = Math.max(1, Math.min(DEFAULT_AD_LIMIT, parseInt(process.env.COMPETITION_META_BROWSER_MEDIA_MIN_MISSING || '1', 10)));
+const LOCAL_HEATMAP_GRID_SIZE = Math.max(3, Math.min(5, parseInt(process.env.COMPETITION_LOCAL_HEATMAP_GRID_SIZE || '3', 10)));
+const LOCAL_HEATMAP_MAX_POINTS = Math.max(1, Math.min(25, parseInt(process.env.COMPETITION_LOCAL_HEATMAP_MAX_POINTS || '9', 10)));
+const LOCAL_HEATMAP_RESULT_LIMIT = Math.max(3, Math.min(20, parseInt(process.env.COMPETITION_LOCAL_HEATMAP_RESULT_LIMIT || '10', 10)));
 const SOCIAL_DISCOVERY_TIMEOUT_MS = Math.max(1000, Math.min(15000, parseInt(process.env.COMPETITION_SOCIAL_DISCOVERY_TIMEOUT_MS || '8000', 10)));
 const SOCIAL_DISCOVERY_PAGE_LIMIT = Math.max(1, Math.min(6, parseInt(process.env.COMPETITION_SOCIAL_DISCOVERY_PAGE_LIMIT || '4', 10)));
 const META_PAGE_MATCH_THRESHOLD = Math.max(20, Math.min(100, parseInt(process.env.COMPETITION_META_PAGE_MATCH_THRESHOLD || '45', 10)));
@@ -1269,6 +1274,150 @@ async function buildLocalRanking(clinic, ownProfile) {
   return { terms, entries };
 }
 
+function clampHeatmapZoom(value) {
+  const parsed = Number(value);
+  if (parsed === 1 || parsed === 3 || parsed === 5) return parsed;
+  return 3;
+}
+
+function rankingHeatmapOffsets(radiusKm) {
+  const size = LOCAL_HEATMAP_GRID_SIZE % 2 === 0 ? LOCAL_HEATMAP_GRID_SIZE - 1 : LOCAL_HEATMAP_GRID_SIZE;
+  const half = Math.floor(size / 2);
+  const step = half > 0 ? radiusKm / half : 0;
+  const offsets = [];
+  for (let y = half; y >= -half; y -= 1) {
+    for (let x = -half; x <= half; x += 1) {
+      offsets.push({ xKm: x * step, yKm: y * step });
+    }
+  }
+  return offsets.slice(0, LOCAL_HEATMAP_MAX_POINTS);
+}
+
+function offsetLatLng(center, xKm, yKm) {
+  const latitude = Number(center?.latitude);
+  const longitude = Number(center?.longitude);
+  if (!Number.isFinite(latitude) || !Number.isFinite(longitude)) return null;
+  const lat = latitude + (yKm / 111.32);
+  const lng = longitude + (xKm / (111.32 * Math.cos(latitude * Math.PI / 180)));
+  return {
+    latitude: Math.round(lat * 1000000) / 1000000,
+    longitude: Math.round(lng * 1000000) / 1000000
+  };
+}
+
+function heatmapScore(position) {
+  if (!position) return 0;
+  if (position <= 3) return 100;
+  if (position <= 5) return 75;
+  if (position <= 10) return 45;
+  return 20;
+}
+
+async function getLocalRankingHeatmap(scope, { term = null, zoomKm = 3 } = {}) {
+  const clinic = await resolvePrimaryClinic(scope);
+  const setupBlocker = competitionSetupBlocker(clinic, term);
+  if (setupBlocker) {
+    return {
+      success: false,
+      setup_required: true,
+      setup_code: setupBlocker.code,
+      message: setupBlocker.message,
+      points: []
+    };
+  }
+
+  const ownProfile = await resolveOwnClinicProfile(clinic);
+  const center = {
+    latitude: Number(ownProfile?.latitude ?? clinic?.latitud ?? clinic?.latitude),
+    longitude: Number(ownProfile?.longitude ?? clinic?.longitud ?? clinic?.longitude)
+  };
+  if (!Number.isFinite(center.latitude) || !Number.isFinite(center.longitude)) {
+    return {
+      success: false,
+      setup_required: true,
+      setup_code: 'LOCAL_COORDINATES_REQUIRED',
+      message: 'No tenemos coordenadas fiables de la ficha local de esta clínica para simular búsquedas por zona.',
+      points: []
+    };
+  }
+
+  const terms = rankingTermsForClinic(clinic);
+  const selectedTerm = cleanString(term) || terms[0];
+  if (!selectedTerm) {
+    return {
+      success: false,
+      setup_required: true,
+      setup_code: 'LOCAL_TERM_REQUIRED',
+      message: 'Falta una búsqueda relevante para calcular el mapa de posición local.',
+      points: []
+    };
+  }
+
+  const radiusKm = clampHeatmapZoom(zoomKm);
+  const ownPlaceId = normalizePlaceId(ownProfile?.google_place_id || clinic?.business_place_id);
+  const ownName = cleanString(ownProfile?.name) || cleanString(clinic?.business_location_name) || cleanString(clinic?.nombre_clinica);
+  const points = [];
+
+  for (const offset of rankingHeatmapOffsets(radiusKm)) {
+    const point = offsetLatLng(center, offset.xKm, offset.yKm);
+    if (!point) continue;
+    try {
+      const places = await searchGooglePlaces({
+        query: selectedTerm,
+        maxResultCount: LOCAL_HEATMAP_RESULT_LIMIT,
+        locationBias: {
+          circle: {
+            center: point,
+            radius: Math.max(500, Math.round((radiusKm * 1000) / 3))
+          }
+        }
+      });
+      const normalized = places.map(normalizePlace).filter((place) => place.name);
+      const ownIndex = normalized.findIndex((place) => {
+        const placeId = normalizePlaceId(place.google_place_id);
+        return (ownPlaceId && placeId === ownPlaceId) || businessNamesMatch(place.name, ownName);
+      });
+      const myPosition = ownIndex >= 0 ? ownIndex + 1 : null;
+      points.push({
+        latitude: point.latitude,
+        longitude: point.longitude,
+        x_km: offset.xKm,
+        y_km: offset.yKm,
+        my_position: myPosition,
+        score: heatmapScore(myPosition),
+        top_results: normalized.slice(0, 5).map((place) => place.name),
+        measured_at: new Date().toISOString()
+      });
+    } catch (error) {
+      points.push({
+        latitude: point.latitude,
+        longitude: point.longitude,
+        x_km: offset.xKm,
+        y_km: offset.yKm,
+        my_position: null,
+        score: 0,
+        top_results: [],
+        error: normalizeExternalError(error),
+        measured_at: new Date().toISOString()
+      });
+    }
+  }
+
+  return {
+    success: true,
+    term: selectedTerm,
+    available_terms: terms,
+    zoom_km: radiusKm,
+    center,
+    own_profile: ownProfile ? {
+      name: ownProfile.name,
+      google_place_id: normalizePlaceId(ownProfile.google_place_id),
+      google_maps_url: ownProfile.google_maps_url
+    } : null,
+    points
+  };
+}
+
 function buildPlaceHeaders(fieldMask) {
   const apiKey = getGooglePlacesApiKey();
   if (!apiKey) {
@@ -1283,13 +1432,14 @@ function buildPlaceHeaders(fieldMask) {
   };
 }
 
-async function searchGooglePlaces({ query, maxResultCount = DEFAULT_LIMIT }) {
+async function searchGooglePlaces({ query, maxResultCount = DEFAULT_LIMIT, locationBias = null }) {
   const body = {
     textQuery: query,
     languageCode: DEFAULT_LANGUAGE,
     regionCode: DEFAULT_REGION,
     maxResultCount
   };
+  if (locationBias) body.locationBias = locationBias;
   const response = await axios.post(`${GOOGLE_PLACES_API_BASE}/places:searchText`, body, {
     headers: buildPlaceHeaders(PLACE_FIELD_MASK),
     timeout: 15000
@@ -1571,6 +1721,157 @@ function loadOptionalBrowserAutomation() {
   return null;
 }
 
+const metaBrowserRuntime = {
+  automation: undefined,
+  browser: null,
+  browserType: null,
+  idleTimer: null,
+  launchPromise: null,
+  queue: Promise.resolve(),
+  metrics: {
+    mode: META_BROWSER_MEDIA_MODE,
+    enabled: META_BROWSER_MEDIA_MODE !== 'off',
+    browser_available: null,
+    launches: 0,
+    sleep_count: 0,
+    batches: 0,
+    attempted_ads: 0,
+    recovered_ads: 0,
+    no_media_ads: 0,
+    failed_ads: 0,
+    unavailable_ads: 0,
+    last_error: null,
+    last_duration_ms: 0,
+    last_memory_delta_mb: null,
+    idle_timeout_ms: META_BROWSER_MEDIA_IDLE_MS,
+    limit: META_BROWSER_MEDIA_LIMIT
+  }
+};
+
+function cloneMetaBrowserMetrics() {
+  return {
+    ...metaBrowserRuntime.metrics,
+    browser_awake: !!metaBrowserRuntime.browser,
+    browser_type: metaBrowserRuntime.browserType
+  };
+}
+
+function resetMetaBrowserBatchMetrics() {
+  metaBrowserRuntime.metrics.batches = 0;
+  metaBrowserRuntime.metrics.attempted_ads = 0;
+  metaBrowserRuntime.metrics.recovered_ads = 0;
+  metaBrowserRuntime.metrics.no_media_ads = 0;
+  metaBrowserRuntime.metrics.failed_ads = 0;
+  metaBrowserRuntime.metrics.unavailable_ads = 0;
+  metaBrowserRuntime.metrics.last_error = null;
+  metaBrowserRuntime.metrics.last_duration_ms = 0;
+  metaBrowserRuntime.metrics.last_memory_delta_mb = null;
+}
+
+function shouldUseMetaBrowserForAds(indexes = []) {
+  if (META_BROWSER_MEDIA_MODE === 'off') return false;
+  if (!META_BROWSER_MEDIA_LIMIT) return false;
+  if (!indexes.length) return false;
+  if (META_BROWSER_MEDIA_MODE === 'on') return true;
+  return indexes.length >= META_BROWSER_MEDIA_MIN_MISSING;
+}
+
+function getMetaBrowserAutomation() {
+  if (metaBrowserRuntime.automation !== undefined) return metaBrowserRuntime.automation;
+  metaBrowserRuntime.automation = loadOptionalBrowserAutomation();
+  metaBrowserRuntime.metrics.browser_available = !!metaBrowserRuntime.automation;
+  if (!metaBrowserRuntime.automation) {
+    metaBrowserRuntime.metrics.last_error = 'browser_runtime_unavailable';
+  }
+  return metaBrowserRuntime.automation;
+}
+
+function scheduleMetaBrowserSleep() {
+  if (metaBrowserRuntime.idleTimer) {
+    clearTimeout(metaBrowserRuntime.idleTimer);
+    metaBrowserRuntime.idleTimer = null;
+  }
+  if (!metaBrowserRuntime.browser) return;
+
+  if (!META_BROWSER_MEDIA_IDLE_MS) {
+    const browser = metaBrowserRuntime.browser;
+    metaBrowserRuntime.browser = null;
+    metaBrowserRuntime.browserType = null;
+    browser.close()
+      .then(() => { metaBrowserRuntime.metrics.sleep_count += 1; })
+      .catch(() => {});
+    return;
+  }
+
+  metaBrowserRuntime.idleTimer = setTimeout(async () => {
+    const browser = metaBrowserRuntime.browser;
+    metaBrowserRuntime.browser = null;
+    metaBrowserRuntime.browserType = null;
+    metaBrowserRuntime.idleTimer = null;
+    if (browser) {
+      await browser.close().catch(() => {});
+      metaBrowserRuntime.metrics.sleep_count += 1;
+    }
+  }, META_BROWSER_MEDIA_IDLE_MS);
+  if (typeof metaBrowserRuntime.idleTimer.unref === 'function') {
+    metaBrowserRuntime.idleTimer.unref();
+  }
+}
+
+async function getMetaBrowserInstance() {
+  if (metaBrowserRuntime.browser) return metaBrowserRuntime.browser;
+  if (metaBrowserRuntime.launchPromise) return metaBrowserRuntime.launchPromise;
+
+  const automation = getMetaBrowserAutomation();
+  if (!automation) return null;
+
+  const launchOptions = {
+    headless: true,
+    args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage']
+  };
+  if (process.env.COMPETITION_BROWSER_EXECUTABLE_PATH) {
+    launchOptions.executablePath = process.env.COMPETITION_BROWSER_EXECUTABLE_PATH;
+  }
+
+  metaBrowserRuntime.launchPromise = (async () => {
+    const browser = automation.type === 'playwright'
+      ? await automation.chromium.launch(launchOptions)
+      : await automation.puppeteer.launch(launchOptions);
+    metaBrowserRuntime.browser = browser;
+    metaBrowserRuntime.browserType = automation.type;
+    metaBrowserRuntime.metrics.launches += 1;
+    metaBrowserRuntime.metrics.browser_available = true;
+    return browser;
+  })();
+
+  try {
+    return await metaBrowserRuntime.launchPromise;
+  } catch (error) {
+    metaBrowserRuntime.browser = null;
+    metaBrowserRuntime.browserType = null;
+    metaBrowserRuntime.metrics.browser_available = false;
+    metaBrowserRuntime.metrics.last_error = error?.message || error?.code || 'browser_launch_failed';
+    return null;
+  } finally {
+    metaBrowserRuntime.launchPromise = null;
+  }
+}
+
+async function withMetaBrowser(fn) {
+  const previous = metaBrowserRuntime.queue;
+  let release;
+  metaBrowserRuntime.queue = new Promise((resolve) => { release = resolve; });
+  await previous.catch(() => {});
+  try {
+    const browser = await getMetaBrowserInstance();
+    if (!browser) return null;
+    return await fn(browser, metaBrowserRuntime.browserType);
+  } finally {
+    release();
+    scheduleMetaBrowserSleep();
+  }
+}
+
 async function extractMediaWithPlaywright(browser, ad) {
   const snapshotUrl = normalizeUrl(ad._render_snapshot_url || ad.snapshot_url);
   if (!snapshotUrl) return null;
@@ -1682,39 +1983,40 @@ async function extractMediaWithPuppeteer(browser, ad) {
 }
 
 async function enrichAdsWithBrowserMedia(ads = []) {
-  if (!META_BROWSER_MEDIA_ENABLED || !META_BROWSER_MEDIA_LIMIT || !Array.isArray(ads) || !ads.length) return ads;
+  if (!Array.isArray(ads) || !ads.length) return ads;
 
   const indexes = ads
     .map((ad, index) => ({ ad, index }))
     .filter(({ ad }) => !adHasMedia(ad) && normalizeUrl(ad._render_snapshot_url || ad.snapshot_url))
     .slice(0, META_BROWSER_MEDIA_LIMIT);
+  if (!shouldUseMetaBrowserForAds(indexes)) return ads;
   if (!indexes.length) return ads;
 
-  const automation = loadOptionalBrowserAutomation();
-  if (!automation) {
-    return ads.map((ad, index) => {
-      if (!indexes.some((item) => item.index === index)) return ad;
-      return { ...ad, media_source: ad.media_source || 'meta_browser_unavailable' };
-    });
-  }
-
-  const launchOptions = {
-    headless: true,
-    args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage']
-  };
-  if (process.env.COMPETITION_BROWSER_EXECUTABLE_PATH) {
-    launchOptions.executablePath = process.env.COMPETITION_BROWSER_EXECUTABLE_PATH;
-  }
-
-  let browser = null;
+  const startedAt = Date.now();
+  const memoryBefore = process.memoryUsage().rss;
   const enriched = [...ads];
-  try {
-    browser = automation.type === 'playwright'
-      ? await automation.chromium.launch(launchOptions)
-      : await automation.puppeteer.launch(launchOptions);
+  metaBrowserRuntime.metrics.batches += 1;
+  metaBrowserRuntime.metrics.attempted_ads += indexes.length;
+
+  const automation = getMetaBrowserAutomation();
+  if (!automation) {
+    metaBrowserRuntime.metrics.unavailable_ads += indexes.length;
+    for (const { ad, index } of indexes) {
+      enriched[index] = { ...ad, media_source: ad.media_source || 'meta_browser_unavailable' };
+    }
+    metaBrowserRuntime.metrics.last_duration_ms = Date.now() - startedAt;
+    metaBrowserRuntime.metrics.last_memory_delta_mb = Math.round(((process.memoryUsage().rss - memoryBefore) / 1024 / 1024) * 10) / 10;
+    return enriched;
+  }
+
+  const browserResult = await withMetaBrowser(async (browser, browserType) => {
+    if (!browser) {
+      metaBrowserRuntime.metrics.unavailable_ads += indexes.length;
+      return;
+    }
     for (const { ad, index } of indexes) {
       try {
-        const media = automation.type === 'playwright'
+        const media = browserType === 'playwright'
           ? await extractMediaWithPlaywright(browser, ad)
           : await extractMediaWithPuppeteer(browser, ad);
         if (media?.image_url || media?.video_url || media?.external_video_url) {
@@ -1724,8 +2026,10 @@ async function enrichAdsWithBrowserMedia(ads = []) {
             media_url: media.video_url || media.image_url || ad.media_url || null,
             media_source: 'meta_browser_snapshot'
           };
+          metaBrowserRuntime.metrics.recovered_ads += 1;
         } else {
           enriched[index] = { ...ad, media_source: ad.media_source || 'meta_browser_no_media' };
+          metaBrowserRuntime.metrics.no_media_ads += 1;
         }
       } catch (error) {
         enriched[index] = {
@@ -1733,11 +2037,23 @@ async function enrichAdsWithBrowserMedia(ads = []) {
           media_source: ad.media_source || 'meta_browser_error',
           media_error: error?.message || error?.code || 'meta_browser_error'
         };
+        metaBrowserRuntime.metrics.failed_ads += 1;
+        metaBrowserRuntime.metrics.last_error = error?.message || error?.code || 'meta_browser_error';
       }
     }
-  } finally {
-    if (browser) await browser.close().catch(() => {});
+    return true;
+  });
+  if (!browserResult) {
+    metaBrowserRuntime.metrics.unavailable_ads += indexes.length;
+    for (const { ad, index } of indexes) {
+      if (enriched[index] === ad) {
+        enriched[index] = { ...ad, media_source: ad.media_source || 'meta_browser_unavailable' };
+      }
+    }
   }
+
+  metaBrowserRuntime.metrics.last_duration_ms = Date.now() - startedAt;
+  metaBrowserRuntime.metrics.last_memory_delta_mb = Math.round(((process.memoryUsage().rss - memoryBefore) / 1024 / 1024) * 10) / 10;
   return enriched;
 }
 
@@ -2878,6 +3194,7 @@ async function refreshOneCompetitor(competitor, scope) {
 }
 
 async function refreshCompetition(scope, { competitorIds = null } = {}) {
+  resetMetaBrowserBatchMetrics();
   const where = buildCompetitorWhere(scope);
   const ids = Array.isArray(competitorIds) ? competitorIds.map(toInt).filter(Boolean) : [];
   if (ids.length) where.id = { [Op.in]: ids };
@@ -2887,7 +3204,8 @@ async function refreshCompetition(scope, { competitorIds = null } = {}) {
     provider: {
       google_places: { configured: !!getGooglePlacesApiKey() },
       meta_ads_library: { configured: !!getMetaAdLibraryTokenFromEnv() },
-      google_ads_transparency: { configured: isGoogleAdsTransparencyEnabled() }
+      google_ads_transparency: { configured: isGoogleAdsTransparencyEnabled() },
+      meta_browser_media: cloneMetaBrowserMetrics()
     },
     competitors: competitors.length,
     processed: 0,
@@ -2914,6 +3232,8 @@ async function refreshCompetition(scope, { competitorIds = null } = {}) {
     }
   }
 
+  report.provider.meta_browser_media = cloneMetaBrowserMetrics();
+
   return { success: true, report };
 }
 
@@ -2924,5 +3244,6 @@ module.exports = {
   updateCompetitor,
   deactivateCompetitor,
   refreshCompetition,
+  getLocalRankingHeatmap,
   providerStatus,
 };

@@ -208,6 +208,86 @@ router.get('/clinica/:clinicaId/timeseries', async (req, res) => {
   }
 });
 
+router.get('/clinica/:clinicaId/seasonality', async (req, res) => {
+  try {
+    const { clinicaId } = req.params;
+    const months = Math.max(6, Math.min(36, Number(req.query.months) || 18));
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    const start = new Date(today.getFullYear(), today.getMonth() - (months - 1), 1);
+    const end = new Date(today.getFullYear(), today.getMonth() + 1, 0);
+    const fmt = (d) => d.toISOString().slice(0, 10);
+
+    const metricTypes = Array.from(new Set([
+      ...LOCAL_METRIC_GROUPS.profile_views,
+      ...LOCAL_METRIC_GROUPS.call_clicks,
+      ...LOCAL_METRIC_GROUPS.direction_clicks,
+      ...LOCAL_METRIC_GROUPS.website_clicks,
+    ]));
+
+    const rows = await BusinessProfileDailyMetric.findAll({
+      where: {
+        clinica_id: clinicaId,
+        metric_type: { [Op.in]: metricTypes },
+        date: { [Op.between]: [fmt(start), fmt(end)] }
+      },
+      order: [['date', 'ASC']],
+      raw: true
+    });
+
+    const byMonth = new Map();
+    const ensureMonth = (key) => {
+      if (!byMonth.has(key)) {
+        byMonth.set(key, { month: key, views: 0, calls: 0, directions: 0, websiteClicks: 0, totalActions: 0 });
+      }
+      return byMonth.get(key);
+    };
+
+    for (let cursor = new Date(start); cursor <= end; cursor.setMonth(cursor.getMonth() + 1)) {
+      ensureMonth(cursor.toISOString().slice(0, 7));
+    }
+
+    for (const row of rows) {
+      const key = String(row.date).slice(0, 7);
+      const bucket = ensureMonth(key);
+      const value = Number(row.value || 0);
+      if (LOCAL_METRIC_GROUPS.profile_views.includes(row.metric_type)) bucket.views += value;
+      if (LOCAL_METRIC_GROUPS.call_clicks.includes(row.metric_type)) bucket.calls += value;
+      if (LOCAL_METRIC_GROUPS.direction_clicks.includes(row.metric_type)) bucket.directions += value;
+      if (LOCAL_METRIC_GROUPS.website_clicks.includes(row.metric_type)) bucket.websiteClicks += value;
+    }
+
+    const series = Array.from(byMonth.values())
+      .sort((a, b) => a.month.localeCompare(b.month))
+      .map((bucket) => ({
+        ...bucket,
+        totalActions: bucket.calls + bucket.directions + bucket.websiteClicks
+      }));
+
+    const comparable = series.filter((item) => item.views > 0 || item.totalActions > 0);
+    const bestMonth = comparable.length
+      ? comparable.reduce((best, item) => (item.views > best.views ? item : best), comparable[0])
+      : null;
+    const weakestMonth = comparable.length
+      ? comparable.reduce((weakest, item) => (item.views < weakest.views ? item : weakest), comparable[0])
+      : null;
+
+    return res.json({
+      success: true,
+      period: { start: fmt(start), end: fmt(end), months },
+      series,
+      insight: {
+        bestMonth: bestMonth?.month || null,
+        weakestMonth: weakestMonth?.month || null,
+        hasEnoughHistory: comparable.length >= 12
+      }
+    });
+  } catch (e) {
+    console.error('❌ /local/seasonality:', e.message);
+    return res.status(500).json({ success: false, error: 'Error obteniendo estacionalidad Local' });
+  }
+});
+
 router.get('/clinica/:clinicaId/reviews', async (req, res) => {
   try {
     const { clinicaId } = req.params;

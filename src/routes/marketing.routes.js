@@ -12,6 +12,7 @@ router.use(authMiddleware);
 router.get('/reports/overview', marketingReportsController.getOverview);
 router.get('/reports/competition', marketingCompetitionController.getCompetition);
 router.get('/reports/competition/suggestions', marketingCompetitionController.suggestCompetitors);
+router.get('/reports/competition/local-heatmap', marketingCompetitionController.getLocalHeatmap);
 router.post('/reports/competition/competitors', marketingCompetitionController.createCompetitor);
 router.patch('/reports/competition/competitors/:competitorId', marketingCompetitionController.updateCompetitor);
 router.delete('/reports/competition/competitors/:competitorId', marketingCompetitionController.deleteCompetitor);
