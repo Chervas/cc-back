@@ -218,6 +218,8 @@ Principios:
 - Sugerir competidores locales en la primera configuración con Google Places.
 - Para sugerir competidores es obligatorio tener una ficha local propia conectada o `Clinica.url_ficha_local` guardada. Si falta, `GET /competition/suggestions` devuelve `setup_required=true`, `setup_code=LOCAL_PROFILE_REQUIRED` y no ejecuta una búsqueda genérica.
 - Si hay ancla local pero no hay categoría/especialidad suficiente, devuelve `setup_code=LOCAL_CATEGORY_REQUIRED`. No se debe usar fallback a "clínica médica" porque genera ruido en clínicas nuevas.
+- Cuando hay ficha local conectada, la categoría/nombre de Google Business Profile tiene prioridad sobre disciplinas mixtas de la clínica para inferir la búsqueda inicial. Ejemplo: si una clínica tiene varias áreas pero su ficha local es `Podólogo`, la competencia se busca como podología, no como otra disciplina secundaria.
+- Las sugerencias excluyen la propia ficha local por `place_id` y por nombre normalizado. La propia clínica no debe aparecer como competidor sugerido aunque Google la devuelva en los primeros resultados.
 - `GET /competition` devuelve también `own_profile`, `ranking_terms` y `local_ranking`: ficha propia resuelta con Places, términos por especialidad/ciudad y posición estimada frente a competidores. En V1 se calcula en vivo con un límite bajo; debe migrarse a snapshot semanal si el uso crece.
 - Guardar solo competidores confirmados por el usuario.
 - Actualizar semanalmente por cron, no en cada render del informe.
@@ -230,6 +232,7 @@ Principios:
 - El alta/edición de competidor acepta `meta_page_url`. Si la URL contiene un identificador de página, backend extrae automáticamente `meta_page_id` para consultar la página exacta de Meta Ads Library.
 - En cada refresco se intenta detectar perfiles sociales públicos del competidor desde Google Places, datos manuales y su web (`website_url`). Los perfiles se guardan en `raw_place_payload.clinicaclick_social_profiles` y se añaden a `meta_ads_search_terms` para mejorar la consulta oficial de Meta Ads Library. La detección es best-effort, con timeout bajo, máximo de páginas limitado, y no bloquea el refresco de Google Places.
 - Los competidores se etiquetan con `relevance` frente a las disciplinas de la clínica. La especialidad se infiere primero desde `configuracion.disciplinas` y, si falta, desde nombre/servicios/descripción antes de caer a categorías genéricas de Google como `Medical Clinic`. Los que no encajan, por ejemplo competidores médicos genéricos en una clínica capilar, no se borran automáticamente, pero la UI debe marcarlos como `Revisar`.
+- Reglas de relevancia V1 cubiertas: capilar, cirugía digestiva/hepatobiliar, podología y dental. Si una disciplina no tiene regla todavía, la UI debe mostrar `Sin regla de relevancia` y no ocultar resultados.
 
 Tablas:
 

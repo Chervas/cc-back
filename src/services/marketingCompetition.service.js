@@ -842,7 +842,23 @@ function clinicSpecialtyText(clinic) {
   ].map(cleanString).filter(Boolean).join(' '));
 }
 
+function specialtyHintFromText(value) {
+  const text = normalizeBusinessName(value);
+  if (!text) return null;
+  if (/(^| )(capilar|alopecia|injerto capilar|trasplante capilar|pelo|hair)( |$)/.test(text)) return 'clínica capilar';
+  if (/(^| )(hepatobiliar|pancreat|laparoscop|cirugia digestiva|cirujano digestivo|digestiv)( |$)/.test(text)) return 'cirujano hepatobiliar';
+  if (/(^| )(podolog|podologo|podologa|podologia|pies|pie)( |$)/.test(text)) return 'podólogo';
+  if (/(^| )(dental|dentista|odontolog|ortodoncia|implante dental)( |$)/.test(text)) return 'clínica dental';
+  return null;
+}
+
 function disciplineSearchHint(clinic) {
+  const localProfileHint = specialtyHintFromText([
+    clinic?.business_primary_category,
+    clinic?.business_location_name
+  ].map(cleanString).filter(Boolean).join(' '));
+  if (localProfileHint) return localProfileHint;
+
   const disciplinas = Array.isArray(clinic?.configuracion?.disciplinas)
     ? clinic.configuracion.disciplinas
     : [];
@@ -857,17 +873,15 @@ function disciplineSearchHint(clinic) {
     oftalmologia: 'oftalmólogo',
     capilar: 'clínica capilar',
     medicina_capilar: 'clínica capilar',
-    trasplante_capilar: 'trasplante capilar'
+    trasplante_capilar: 'trasplante capilar',
+    cirugia_digestiva: 'cirujano hepatobiliar',
+    cirugia_hepatobiliar: 'cirujano hepatobiliar',
+    hepatobiliar: 'cirujano hepatobiliar'
   };
   const match = disciplinas.map((item) => map[String(item || '').toLowerCase()]).find(Boolean);
   if (match) return match;
 
-  const text = clinicSpecialtyText(clinic);
-  if (!text) return null;
-  if (/(^| )(capilar|alopecia|injerto capilar|trasplante capilar|pelo|hair)( |$)/.test(text)) return 'clínica capilar';
-  if (/(^| )(podolog|podologo|podologa|podologia|pies|pie)( |$)/.test(text)) return 'podólogo';
-  if (/(^| )(dental|dentista|odontolog|ortodoncia|implante dental)( |$)/.test(text)) return 'clínica dental';
-  return null;
+  return specialtyHintFromText(clinicSpecialtyText(clinic));
 }
 
 function inferCompetitionQuery(clinic, explicitQuery = null) {
@@ -1444,6 +1458,11 @@ function competitorRelevanceForClinic(competitor, clinic) {
       label: 'capilar'
     },
     {
+      keys: ['cirugia_digestiva', 'cirugia_hepatobiliar', 'hepatobiliar'],
+      terms: ['hepatobiliar', 'pancreat', 'digestiv', 'endoscop', 'cirugia', 'cirujano', 'laparoscop'],
+      label: 'cirugía digestiva/hepatobiliar'
+    },
+    {
       keys: ['podologia'],
       terms: ['podolog', 'podólog', 'pie', 'podoactiva', 'plantilla', 'uñas'],
       label: 'podología'
@@ -1570,11 +1589,11 @@ async function suggestCompetitors(scope, { query = null, limit = DEFAULT_LIMIT }
         || [...existingNames].some((existingName) => businessNamesMatch(normalizedName, existingName));
       const relevanceBoost = relevance.status === 'match' ? 1000 : (relevance.status === 'review' ? -500 : 0);
       const score = Math.round(relevanceBoost + ((normalized.rating || 0) * 20) + Math.log10((normalized.review_count || 0) + 1) * 35);
-      return attachPlacePhotoUrl({ ...normalized, relevance, already_added: alreadyAdded, suggested_score: score }, { maxWidthPx: 640 });
+      return attachPlacePhotoUrl({ ...normalized, relevance, already_added: alreadyAdded, is_own_clinic: isOwnClinic, suggested_score: score }, { maxWidthPx: 640 });
     }));
 
     const sortedSuggestions = suggestions
-      .filter((item) => item.name)
+      .filter((item) => item.name && !item.is_own_clinic)
       .sort((a, b) => (b.suggested_score || 0) - (a.suggested_score || 0));
 
     return {
@@ -1628,7 +1647,9 @@ async function resolveOwnBusinessPlaceIds(scope) {
 
   const ids = new Set();
   for (const row of rows) {
-    const placeId = normalizePlaceId(row?.raw_payload?.metadata?.placeId);
+    const placeId = normalizePlaceId(row?.raw_payload?.metadata?.placeId)
+      || normalizePlaceId(row?.raw_payload?.placeId)
+      || normalizePlaceId(row?.raw_payload?.id);
     if (placeId) ids.add(placeId);
   }
   return ids;
