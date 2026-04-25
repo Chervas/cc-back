@@ -228,8 +228,55 @@ function extractMetaTagContent(html, keys = []) {
   return null;
 }
 
+function decodeEscapedHtml(value) {
+  let text = decodeHtmlEntities(value);
+  for (let i = 0; i < 2; i += 1) {
+    text = text
+      .replace(/\\u([0-9a-fA-F]{4})/g, (_, code) => String.fromCharCode(parseInt(code, 16)))
+      .replace(/\\\//g, '/')
+      .replace(/\\"/g, '"')
+      .replace(/\\'/g, "'")
+      .replace(/\\&/g, '&');
+  }
+  return text;
+}
+
+function extractAttributeUrl(html, attrName) {
+  const attrRegex = new RegExp(`\\b${attrName}\\s*=\\s*(['"])(.*?)\\1`, 'i');
+  const match = String(html || '').match(attrRegex);
+  const url = normalizeUrl(decodeEscapedHtml(match?.[2] || ''));
+  return isUsableSnapshotMediaUrl(url) ? url : null;
+}
+
+function isUsableSnapshotMediaUrl(value) {
+  const url = normalizeUrl(value);
+  if (!url) return false;
+  try {
+    const parsed = new URL(url);
+    const host = parsed.hostname.replace(/^www\./i, '').toLowerCase();
+    if (host === 'static.xx.fbcdn.net') return false;
+    if (host === 'facebook.com' || host.endsWith('.facebook.com')) return false;
+    if (/\/rsrc\.php\//i.test(parsed.pathname)) return false;
+    return true;
+  } catch (_) {
+    return false;
+  }
+}
+
+function extractFirstUrlByExtension(text, extensions = []) {
+  const ext = extensions.map((item) => item.replace(/^\./, '')).join('|');
+  if (!ext) return null;
+  const regex = new RegExp(`https?:\\/\\/[^"'<>\\s\\\\]+?\\.(?:${ext})(?:\\?[^"'<>\\s\\\\]*)?`, 'ig');
+  const matches = String(text || '').match(regex) || [];
+  for (const match of matches) {
+    const url = normalizeUrl(decodeEscapedHtml(match));
+    if (isUsableSnapshotMediaUrl(url)) return url;
+  }
+  return null;
+}
+
 function extractFirstMediaFromHtml(html) {
-  const text = String(html || '');
+  const text = decodeEscapedHtml(String(html || ''));
   const video = extractMetaTagContent(text, [
     'og:video:secure_url',
     'og:video:url',
@@ -245,9 +292,24 @@ function extractFirstMediaFromHtml(html) {
 
   if (video || image) return { video_url: video, image_url: image, thumbnail_url: image };
 
-  const videoMatch = text.match(/<(?:video|source)\b[^>]*\bsrc\s*=\s*(['"])(.*?)\1/i);
-  const rawVideo = normalizeUrl(decodeHtmlEntities(videoMatch?.[2] || ''));
-  return rawVideo ? { video_url: rawVideo, image_url: null, thumbnail_url: null } : null;
+  const attrVideo = extractAttributeUrl(text.match(/<(?:video|source)\b[^>]*>/i)?.[0] || '', 'src');
+  const anyVideo = attrVideo
+    || extractFirstUrlByExtension(text, ['mp4', 'mov', 'webm'])
+    || normalizeUrl(cleanString(text.match(/"(?:playable_url|browser_native_sd_url|browser_native_hd_url|video_url)"\s*:\s*"([^"]+)"/i)?.[1]));
+
+  const attrPoster = extractAttributeUrl(text.match(/<video\b[^>]*>/i)?.[0] || '', 'poster');
+  const anyImage = attrPoster
+    || extractFirstUrlByExtension(text, ['jpg', 'jpeg', 'png', 'webp'])
+    || normalizeUrl(cleanString(text.match(/"(?:image_url|thumbnail_url|poster)"\s*:\s*"([^"]+)"/i)?.[1]));
+
+  if (anyVideo || anyImage) {
+    return {
+      video_url: anyVideo || null,
+      image_url: anyImage || null,
+      thumbnail_url: anyImage || null
+    };
+  }
+  return null;
 }
 
 function absolutizeUrl(value, baseUrl = null) {

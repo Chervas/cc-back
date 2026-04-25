@@ -224,6 +224,7 @@ Principios:
 - Guardar solo competidores confirmados por el usuario.
 - Actualizar semanalmente por cron, no en cada render del informe.
 - Consultar anuncios mediante la API oficial de Meta Ads Library. Si Meta devuelve `ad_snapshot_url`, el backend puede intentar extraer imagen/vídeo público del snapshot como previsualización best-effort. Si el token no tiene acceso o Meta no devuelve datos, persiste `status=unavailable` y la UI debe mostrar aviso.
+- Media de anuncios: el extractor busca `og:video`, `og:image`, `video[src]`, `video[poster]`, URLs `.mp4/.webm/.mov` e imágenes `.jpg/.png/.webp` incluso si vienen escapadas en HTML/JSON. Se filtran assets internos de Facebook (`static.xx.fbcdn.net`, `rsrc.php`) para no guardar logos o páginas de error como creatividad. Si el snapshot devuelve `400` o una página sin media accesible desde servidor, se conserva el enlace a Meta.
 - Resolución de Meta antes del fallback:
   - Primero se usan perfiles sociales ya guardados/manuales y URL de ficha/web si son Facebook o Instagram.
   - Después se revisa `website_url`: home + páginas internas ligeras de contacto/sobre nosotros/equipo para localizar enlaces públicos a Facebook/Instagram, normalmente en footer.
