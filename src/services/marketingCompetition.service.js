@@ -25,10 +25,10 @@ const DEFAULT_LANGUAGE = process.env.COMPETITION_GOOGLE_LANGUAGE || 'es';
 const DEFAULT_REGION = process.env.COMPETITION_GOOGLE_REGION || 'ES';
 const DEFAULT_LIMIT = Math.max(1, Math.min(25, parseInt(process.env.COMPETITION_SUGGESTION_LIMIT || '10', 10)));
 const DEFAULT_AD_LIMIT = Math.max(1, Math.min(100, parseInt(process.env.COMPETITION_META_AD_LIMIT || '25', 10)));
-const GOOGLE_TRANSPARENCY_AD_LIMIT = Math.max(1, Math.min(100, parseInt(process.env.COMPETITION_GOOGLE_ADS_TRANSPARENCY_AD_LIMIT || '25', 10)));
+const GOOGLE_TRANSPARENCY_AD_LIMIT = Math.max(1, Math.min(100, parseInt(process.env.COMPETITION_GOOGLE_ADS_TRANSPARENCY_AD_LIMIT || '100', 10)));
 const GOOGLE_TRANSPARENCY_ADVERTISER_LIMIT = Math.max(1, Math.min(10, parseInt(process.env.COMPETITION_GOOGLE_ADS_TRANSPARENCY_ADVERTISER_LIMIT || '5', 10)));
 const GOOGLE_TRANSPARENCY_TIMEOUT_MS = Math.max(2000, Math.min(30000, parseInt(process.env.COMPETITION_GOOGLE_ADS_TRANSPARENCY_TIMEOUT_MS || '12000', 10)));
-const GOOGLE_TRANSPARENCY_SCRIPT_MEDIA_LIMIT = Math.max(0, Math.min(GOOGLE_TRANSPARENCY_AD_LIMIT, parseInt(process.env.COMPETITION_GOOGLE_ADS_TRANSPARENCY_SCRIPT_MEDIA_LIMIT || String(GOOGLE_TRANSPARENCY_AD_LIMIT), 10)));
+const GOOGLE_TRANSPARENCY_SCRIPT_MEDIA_LIMIT = Math.max(0, Math.min(GOOGLE_TRANSPARENCY_AD_LIMIT, parseInt(process.env.COMPETITION_GOOGLE_ADS_TRANSPARENCY_SCRIPT_MEDIA_LIMIT || '25', 10)));
 const DEFAULT_RANKING_LIMIT = Math.max(1, Math.min(5, parseInt(process.env.COMPETITION_LOCAL_RANKING_TERMS_LIMIT || '3', 10)));
 const SNAPSHOT_MEDIA_TIMEOUT_MS = Math.max(1000, Math.min(15000, parseInt(process.env.COMPETITION_META_SNAPSHOT_MEDIA_TIMEOUT_MS || '6000', 10)));
 const SNAPSHOT_MEDIA_LIMIT = Math.max(0, Math.min(DEFAULT_AD_LIMIT, parseInt(process.env.COMPETITION_META_SNAPSHOT_MEDIA_LIMIT || String(DEFAULT_AD_LIMIT), 10)));
@@ -902,6 +902,53 @@ function getGooglePlacesApiKey() {
   return process.env.GOOGLE_PLACES_API_KEY || process.env.GOOGLE_MAPS_API_KEY || process.env.GOOGLE_API_KEY || null;
 }
 
+function staticMapZoomForRadius(radiusKm) {
+  const radius = Number(radiusKm) || 3;
+  if (radius <= 1) return 15;
+  if (radius <= 3) return 14;
+  return 13;
+}
+
+function staticMapMarkerColor(position) {
+  if (!position) return '0x94A3B8';
+  if (position <= 3) return '0x22C55E';
+  if (position <= 5) return '0xF59E0B';
+  return '0xEF4444';
+}
+
+async function buildLocalHeatmapStaticMapDataUrl(center, points = [], radiusKm = 3) {
+  const apiKey = getGooglePlacesApiKey();
+  if (!apiKey || !center?.latitude || !center?.longitude) return null;
+  try {
+    const params = new URLSearchParams({
+      center: `${center.latitude},${center.longitude}`,
+      zoom: String(staticMapZoomForRadius(radiusKm)),
+      size: '640x420',
+      scale: '2',
+      maptype: 'roadmap',
+      language: DEFAULT_LANGUAGE,
+      region: DEFAULT_REGION,
+      key: apiKey
+    });
+    params.append('markers', `color:blue|label:C|${center.latitude},${center.longitude}`);
+    for (const [index, point] of points.entries()) {
+      if (!Number.isFinite(Number(point.latitude)) || !Number.isFinite(Number(point.longitude))) continue;
+      const label = String(index + 1);
+      params.append('markers', `color:${staticMapMarkerColor(point.my_position)}|label:${label}|${point.latitude},${point.longitude}`);
+    }
+    const response = await axios.get(`https://maps.googleapis.com/maps/api/staticmap?${params.toString()}`, {
+      responseType: 'arraybuffer',
+      timeout: 12000,
+      maxContentLength: 1024 * 1024
+    });
+    const contentType = response.headers?.['content-type'] || 'image/png';
+    if (!String(contentType).startsWith('image/')) return null;
+    return `data:${contentType};base64,${Buffer.from(response.data).toString('base64')}`;
+  } catch (_) {
+    return null;
+  }
+}
+
 function getMetaAdLibraryTokenFromEnv() {
   return process.env.META_AD_LIBRARY_ACCESS_TOKEN || process.env.META_GRAPH_TOKEN || null;
 }
@@ -1403,12 +1450,16 @@ async function getLocalRankingHeatmap(scope, { term = null, zoomKm = 3 } = {}) {
     }
   }
 
+  const mapImageDataUrl = await buildLocalHeatmapStaticMapDataUrl(center, points, radiusKm);
+
   return {
     success: true,
     term: selectedTerm,
     available_terms: terms,
     zoom_km: radiusKm,
     center,
+    map_image_data_url: mapImageDataUrl,
+    map_provider: mapImageDataUrl ? 'google_static_maps' : null,
     own_profile: ownProfile ? {
       name: ownProfile.name,
       google_place_id: normalizePlaceId(ownProfile.google_place_id),
@@ -1889,27 +1940,40 @@ async function extractMediaWithPlaywright(browser, ad) {
     await page.waitForTimeout(Math.min(1500, Math.floor(META_BROWSER_MEDIA_TIMEOUT_MS / 3)));
     const domAssets = await page.evaluate(() => {
       const normalize = (value) => value || null;
-      return Array.from(document.querySelectorAll('img,video,source,iframe')).map((node) => {
+      const nodes = Array.from(document.querySelectorAll('img,video,source,iframe,[style]')).map((node) => {
         const tag = node.tagName.toLowerCase();
         return {
           tag,
-          src: normalize(node.getAttribute('src') || node.currentSrc),
+          src: normalize(node.getAttribute('src') || node.currentSrc || node.getAttribute('data-src')),
+          srcset: normalize(node.getAttribute('srcset')),
           poster: normalize(node.getAttribute('poster')),
+          backgroundImage: normalize(window.getComputedStyle(node).backgroundImage),
           width: Number(node.getAttribute('width') || node.clientWidth || 0),
           height: Number(node.getAttribute('height') || node.clientHeight || 0)
         };
       });
+      const resources = performance.getEntriesByType('resource')
+        .map((entry) => entry.name)
+        .filter((url) => /fbcdn|scontent|\.mp4|\.webp|\.jpg|\.jpeg|\.png/i.test(url));
+      return { nodes, resources };
     });
     const assets = [];
-    for (const item of domAssets || []) {
+    const domNodes = Array.isArray(domAssets) ? domAssets : (domAssets?.nodes || []);
+    for (const item of domNodes || []) {
+      const srcsetUrl = String(item.srcset || '').split(',').map((part) => part.trim().split(/\s+/)[0]).filter(Boolean)[0];
+      const bgUrl = String(item.backgroundImage || '').match(/url\(["']?(.*?)["']?\)/i)?.[1] || null;
+      const candidateSrc = item.src || srcsetUrl || bgUrl;
       if (item.tag === 'video' || item.tag === 'source') {
-        if (item.src) assets.push(mediaAssetFromUrl(item.src, 'video', { thumbnail_url: item.poster || null }));
+        if (candidateSrc) assets.push(mediaAssetFromUrl(candidateSrc, 'video', { thumbnail_url: item.poster || null }));
         if (item.poster) assets.push(mediaAssetFromUrl(item.poster, 'image'));
       } else if (item.tag === 'iframe' && /youtube\.com|youtu\.be/i.test(item.src || '')) {
         assets.push(mediaAssetFromUrl(item.src, 'external_video'));
-      } else if (item.src) {
-        assets.push(mediaAssetFromUrl(item.src, 'image'));
+      } else if (candidateSrc) {
+        assets.push(mediaAssetFromUrl(candidateSrc, /\.(mp4|mov|webm)(?:\?|$)/i.test(candidateSrc) ? 'video' : 'image'));
       }
+    }
+    for (const url of domAssets?.resources || []) {
+      assets.push(mediaAssetFromUrl(url, /\.(mp4|mov|webm)(?:\?|$)/i.test(url) ? 'video' : 'image'));
     }
     const htmlMedia = extractFirstMediaFromHtml(await page.content());
     const mediaAssets = uniqueMediaAssets([
@@ -1944,27 +2008,40 @@ async function extractMediaWithPuppeteer(browser, ad) {
     await new Promise((resolve) => setTimeout(resolve, Math.min(1500, Math.floor(META_BROWSER_MEDIA_TIMEOUT_MS / 3))));
     const domAssets = await page.evaluate(() => {
       const normalize = (value) => value || null;
-      return Array.from(document.querySelectorAll('img,video,source,iframe')).map((node) => {
+      const nodes = Array.from(document.querySelectorAll('img,video,source,iframe,[style]')).map((node) => {
         const tag = node.tagName.toLowerCase();
         return {
           tag,
-          src: normalize(node.getAttribute('src') || node.currentSrc),
+          src: normalize(node.getAttribute('src') || node.currentSrc || node.getAttribute('data-src')),
+          srcset: normalize(node.getAttribute('srcset')),
           poster: normalize(node.getAttribute('poster')),
+          backgroundImage: normalize(window.getComputedStyle(node).backgroundImage),
           width: Number(node.getAttribute('width') || node.clientWidth || 0),
           height: Number(node.getAttribute('height') || node.clientHeight || 0)
         };
       });
+      const resources = performance.getEntriesByType('resource')
+        .map((entry) => entry.name)
+        .filter((url) => /fbcdn|scontent|\.mp4|\.webp|\.jpg|\.jpeg|\.png/i.test(url));
+      return { nodes, resources };
     });
     const assets = [];
-    for (const item of domAssets || []) {
+    const domNodes = Array.isArray(domAssets) ? domAssets : (domAssets?.nodes || []);
+    for (const item of domNodes || []) {
+      const srcsetUrl = String(item.srcset || '').split(',').map((part) => part.trim().split(/\s+/)[0]).filter(Boolean)[0];
+      const bgUrl = String(item.backgroundImage || '').match(/url\(["']?(.*?)["']?\)/i)?.[1] || null;
+      const candidateSrc = item.src || srcsetUrl || bgUrl;
       if (item.tag === 'video' || item.tag === 'source') {
-        if (item.src) assets.push(mediaAssetFromUrl(item.src, 'video', { thumbnail_url: item.poster || null }));
+        if (candidateSrc) assets.push(mediaAssetFromUrl(candidateSrc, 'video', { thumbnail_url: item.poster || null }));
         if (item.poster) assets.push(mediaAssetFromUrl(item.poster, 'image'));
       } else if (item.tag === 'iframe' && /youtube\.com|youtu\.be/i.test(item.src || '')) {
         assets.push(mediaAssetFromUrl(item.src, 'external_video'));
-      } else if (item.src) {
-        assets.push(mediaAssetFromUrl(item.src, 'image'));
+      } else if (candidateSrc) {
+        assets.push(mediaAssetFromUrl(candidateSrc, /\.(mp4|mov|webm)(?:\?|$)/i.test(candidateSrc) ? 'video' : 'image'));
       }
+    }
+    for (const url of domAssets?.resources || []) {
+      assets.push(mediaAssetFromUrl(url, /\.(mp4|mov|webm)(?:\?|$)/i.test(url) ? 'video' : 'image'));
     }
     const htmlMedia = extractFirstMediaFromHtml(await page.content());
     const mediaAssets = uniqueMediaAssets([
@@ -2648,6 +2725,8 @@ function mapCompetitorRow(row, latestSnapshot = null, latestAdSnapshot = null, l
       search_terms: plain.meta_ads_search_terms || [],
       ads_status: ads.ads_status,
       active_ads_count: ads.active_ads_count,
+      total_ads_count: ads.total_ads_count,
+      visible_ads_count: ads.visible_ads_count,
       active_ads: ads.active_ads,
       error_code: ads.error_code,
       error_message: ads.error_message,
@@ -2657,6 +2736,8 @@ function mapCompetitorRow(row, latestSnapshot = null, latestAdSnapshot = null, l
       provider: GOOGLE_ADS_TRANSPARENCY_PROVIDER,
       ads_status: googleAds.ads_status,
       active_ads_count: googleAds.active_ads_count,
+      total_ads_count: googleAds.total_ads_count,
+      visible_ads_count: googleAds.visible_ads_count,
       active_ads: googleAds.active_ads,
       error_code: googleAds.error_code,
       error_message: googleAds.error_message,
