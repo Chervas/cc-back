@@ -167,8 +167,13 @@ async function upsertRemoteState(asset, remote, profile) {
   asset.quality_rating = remote?.quality_rating || asset.quality_rating;
   asset.messaging_limit = remote?.messaging_limit_tier || asset.messaging_limit;
 
-  // If the remote phone still exists, keep it active
-  if (!asset.isActive) {
+  // A remote phone can still exist in Meta after the clinic unlinks it.
+  // Do not make hidden/unassigned numbers operational again during sync.
+  const hasAssignedScope = Boolean(asset.clinicaId || asset.grupoClinicaId);
+  if (!hasAssignedScope) {
+    asset.isActive = false;
+    asset.assignmentScope = 'unassigned';
+  } else if (!asset.isActive) {
     asset.isActive = true;
   }
 
@@ -382,7 +387,12 @@ async function enqueueSyncPhonesForAllWabas() {
     where: {
       wabaId: { [db.Sequelize.Op.ne]: null },
       assetType: 'whatsapp_phone_number',
+      isActive: true,
       waAccessToken: { [db.Sequelize.Op.ne]: null },
+      [db.Sequelize.Op.or]: [
+        { clinicaId: { [db.Sequelize.Op.ne]: null } },
+        { grupoClinicaId: { [db.Sequelize.Op.ne]: null } },
+      ],
     },
     attributes: ['wabaId', 'waAccessToken'],
     raw: true,
