@@ -196,6 +196,7 @@ Estado de sincronización:
 - GA4 se mantiene como fuente opcional de sesiones/histórico, pero `GET /api/marketing/reports/overview` no expone ni usa conversiones nativas de GA4 para el embudo principal.
 - El backend entrega KPIs, ratios, funnel con `ratioFromPrevious`, web summary y top páginas ya calculados. El frontend no debe hacer joins ni cálculos de negocio.
 - El embudo termina en `Realiza tratamiento`. En V1 se calcula desde `LeadIntake.status_lead='convertido'`; cuando exista una señal clínica canónica de tratamiento realizado, debe reemplazar esta aproximación.
+- `webSummary.webConvertedPatients` suma convertidos de canales web propios (`web`, `direct`, `call_click`, `whatsapp`). Los leads con `utm_source` social se asignan a `social_organic`, aunque técnicamente hayan entrado por una URL web, para respetar el primer contacto y evitar doble atribución.
 
 Search Console:
 
@@ -255,6 +256,7 @@ Principios:
   - El zoom (`1/3/5 km`) solo separa más o menos los puntos alrededor de la clínica. No debe ampliar la ventana de búsqueda de cada tile, porque entonces el punto `Centro` de 3 km/5 km deja de ser comparable con el de 1 km.
   - El mapa de Google Static Maps debe ser solo fondo visual, sin `markers`. Los marcadores se pintan en frontend con los resultados calculados; si se añaden marcadores al PNG aparece duplicado el punto central (`label:5`) bajo el marcador propio.
   - La consulta efectiva elimina sufijos geográficos redundantes del término elegido (`"clínica capilar en Alicante"` -> `"clínica capilar"`) y la UI muestra también el término original si cambia.
+  - En podología, no usar `"uñas"` como término aislado de ranking/relevancia. Debe ser contexto clínico (`"podólogo uñas encarnadas"`, `"podología"`, `"clínica podológica"`, `"quiropod"`, `"plantilla"`), porque `"uñas"` trae centros de manicura y distorsiona el mapa.
   - La caché del heatmap incluye `COMPETITION_CACHE_VERSION`; al cambiar la semántica del cálculo hay que subir la versión para no mezclar mediciones antiguas.
 
 Tablas:

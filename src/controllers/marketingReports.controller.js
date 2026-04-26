@@ -218,6 +218,10 @@ function emptyChannelStats() {
   return { leads: 0, citas: 0, acudieron: 0, convertidos: 0 };
 }
 
+function sumChannelStats(channels, keys, field) {
+  return keys.reduce((sum, key) => sum + toNumber(channels.get(key)?.[field]), 0);
+}
+
 function channelLabel(key) {
   const map = {
     google_ads: { name: 'Google Ads', icon: 'brand:google-ads', source: 'Google Ads' },
@@ -1736,6 +1740,11 @@ exports.getOverview = async (req, res) => {
 
     const legacyWhatsappLeads = leads.channels.get('whatsapp')?.leads || 0;
     const whatsappWebClicks = Math.max(whatsappWeb.clicks, legacyWhatsappLeads);
+    const webConvertedPatients = sumChannelStats(
+      leads.channels,
+      ['web', 'direct', 'call_click', 'whatsapp'],
+      'convertidos'
+    );
 
     const webSummary = {
       totalVisitas: visitsOrClicks,
@@ -1743,6 +1752,7 @@ exports.getOverview = async (req, res) => {
       clicksWhatsApp: whatsappWebClicks,
       whatsappWebClicks,
       whatsappWebConfirmed: whatsappWeb.confirmed,
+      webConvertedPatients,
       formularios: formsCount,
     };
 

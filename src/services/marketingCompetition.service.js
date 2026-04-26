@@ -54,7 +54,7 @@ const COMPETITION_PLACE_PHOTO_CACHE_TTL_MS = Math.max(0, Math.min(86400000, pars
 const COMPETITION_HEATMAP_CACHE_TTL_MS = Math.max(0, Math.min(86400000, parseInt(process.env.COMPETITION_HEATMAP_CACHE_TTL_MS || '21600000', 10)));
 const COMPETITION_STATIC_MAP_CACHE_TTL_MS = Math.max(0, Math.min(86400000, parseInt(process.env.COMPETITION_STATIC_MAP_CACHE_TTL_MS || '21600000', 10)));
 const COMPETITION_GOOGLE_CONCURRENCY = Math.max(1, Math.min(5, parseInt(process.env.COMPETITION_GOOGLE_CONCURRENCY || '3', 10)));
-const COMPETITION_CACHE_VERSION = process.env.COMPETITION_CACHE_VERSION || 'competition-v6-heatmap-5x5-depth20';
+const COMPETITION_CACHE_VERSION = process.env.COMPETITION_CACHE_VERSION || 'competition-v7-podology-relevance';
 
 const competitionRuntimeCache = new Map();
 const competitionInFlight = new Map();
@@ -1248,7 +1248,7 @@ function rankingTermsForClinic(clinic, limit = DEFAULT_RANKING_LIMIT) {
   if (disciplineKeys.some((item) => ['capilar', 'medicina_capilar', 'trasplante_capilar'].includes(item))) {
     baseTerms = ['clínica capilar', 'injerto capilar', 'trasplante capilar', 'tratamiento capilar'];
   } else if (disciplineKeys.includes('podologia')) {
-    baseTerms = ['podólogo', 'clínica podológica', 'podología', 'uñas encarnadas'];
+    baseTerms = ['podólogo', 'clínica podológica', 'podología', 'podólogo uñas encarnadas'];
   } else if (disciplineKeys.some((item) => ['dental', 'odontologia'].includes(item))) {
     baseTerms = ['clínica dental', 'dentista', 'implantes dentales', 'ortodoncia'];
   }
@@ -3042,7 +3042,7 @@ function competitorRelevanceForClinic(competitor, clinic) {
     },
     {
       keys: ['podologia'],
-      terms: ['podolog', 'podólog', 'pie', 'podoactiva', 'plantilla', 'uñas'],
+      terms: ['podolog', 'podólog', 'pie', 'pies', 'podoactiva', 'plantilla', 'quiropod', 'uña encarnada', 'uñas encarnadas'],
       label: 'podología'
     },
     {
@@ -3053,6 +3053,14 @@ function competitorRelevanceForClinic(competitor, clinic) {
   ];
   const group = groups.find((item) => keys.some((key) => item.keys.includes(key)));
   if (!group) return { status: 'unknown', score: null, label: 'Sin regla de relevancia' };
+
+  if (
+    group.label === 'podología'
+    && /(nail|nails|manicura|pedicura|estetica|estética)/i.test(text)
+    && !/(podolog|podólog|podoactiva|quiropod|plantilla|pie|pies|uña encarnada|uñas encarnadas)/i.test(text)
+  ) {
+    return { status: 'review', score: 0, label: 'Revisar: parece centro de estética/uñas, no podología' };
+  }
 
   const matches = group.terms.filter((term) => text.includes(term));
   if (matches.length) return { status: 'match', score: matches.length, label: `Relacionado con ${group.label}` };
