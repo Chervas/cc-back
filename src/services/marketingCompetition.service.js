@@ -54,7 +54,7 @@ const COMPETITION_PLACE_PHOTO_CACHE_TTL_MS = Math.max(0, Math.min(86400000, pars
 const COMPETITION_HEATMAP_CACHE_TTL_MS = Math.max(0, Math.min(86400000, parseInt(process.env.COMPETITION_HEATMAP_CACHE_TTL_MS || '21600000', 10)));
 const COMPETITION_STATIC_MAP_CACHE_TTL_MS = Math.max(0, Math.min(86400000, parseInt(process.env.COMPETITION_STATIC_MAP_CACHE_TTL_MS || '21600000', 10)));
 const COMPETITION_GOOGLE_CONCURRENCY = Math.max(1, Math.min(5, parseInt(process.env.COMPETITION_GOOGLE_CONCURRENCY || '3', 10)));
-const COMPETITION_CACHE_VERSION = process.env.COMPETITION_CACHE_VERSION || 'competition-v2-static-map';
+const COMPETITION_CACHE_VERSION = process.env.COMPETITION_CACHE_VERSION || 'competition-v3-local-restriction';
 
 const competitionRuntimeCache = new Map();
 const competitionInFlight = new Map();
@@ -1488,6 +1488,67 @@ function rankingHeatmapOffsets(radiusKm) {
   return offsets.slice(0, LOCAL_HEATMAP_MAX_POINTS);
 }
 
+function escapeRegExp(value) {
+  return String(value || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function heatmapSearchTermForClinic(term, clinic) {
+  const raw = cleanString(term) || competitionServiceHint(clinic);
+  if (!raw) return null;
+
+  const normalizedRaw = normalizeBusinessName(raw);
+  const normalizedLocations = [
+    clinic?.ciudad,
+    clinic?.provincia,
+    clinic?.codigo_postal,
+    clinic?.pais
+  ].map(normalizeBusinessName).filter(Boolean);
+
+  let stripped = raw;
+  const normalizedAfterEn = normalizedRaw?.includes(' en ')
+    ? normalizedRaw.slice(normalizedRaw.lastIndexOf(' en ') + 4)
+    : null;
+  if (normalizedAfterEn && normalizedLocations.some((location) => normalizedAfterEn.includes(location))) {
+    stripped = stripped.replace(/\s+en\s+.+$/i, '').trim();
+  }
+
+  for (const location of [clinic?.ciudad, clinic?.provincia, clinic?.codigo_postal, clinic?.pais].map(cleanString).filter(Boolean)) {
+    stripped = stripped
+      .replace(new RegExp(`[,\\s]+${escapeRegExp(location)}\\b.*$`, 'i'), '')
+      .trim();
+  }
+
+  return cleanString(stripped) || raw;
+}
+
+function heatmapRestrictionHalfSizeMeters(radiusKm) {
+  const radius = Number(radiusKm) || 1;
+  return Math.max(450, Math.min(2500, Math.round(radius * 550)));
+}
+
+function rectangleAroundPoint(point, halfSizeMeters) {
+  const latitude = Number(point?.latitude);
+  const longitude = Number(point?.longitude);
+  const meters = Number(halfSizeMeters);
+  if (!Number.isFinite(latitude) || !Number.isFinite(longitude) || !Number.isFinite(meters)) return null;
+
+  const km = meters / 1000;
+  const latDelta = km / 111.32;
+  const lngDelta = km / (111.32 * Math.cos(latitude * Math.PI / 180));
+  return {
+    rectangle: {
+      low: {
+        latitude: Math.round((latitude - latDelta) * 1000000) / 1000000,
+        longitude: Math.round((longitude - lngDelta) * 1000000) / 1000000
+      },
+      high: {
+        latitude: Math.round((latitude + latDelta) * 1000000) / 1000000,
+        longitude: Math.round((longitude + lngDelta) * 1000000) / 1000000
+      }
+    }
+  };
+}
+
 function offsetLatLng(center, xKm, yKm) {
   const latitude = Number(center?.latitude);
   const longitude = Number(center?.longitude);
@@ -1555,23 +1616,37 @@ async function getLocalRankingHeatmap(scope, { term = null, zoomKm = 3 } = {}) {
   }
 
   const radiusKm = normalizedZoomKm;
+  const heatmapQuery = heatmapSearchTermForClinic(selectedTerm, clinic) || selectedTerm;
+  const restrictionHalfSizeMeters = heatmapRestrictionHalfSizeMeters(radiusKm);
   const ownPlaceId = normalizePlaceId(ownProfile?.google_place_id || clinic?.business_place_id);
   const ownName = cleanString(ownProfile?.name) || cleanString(clinic?.business_location_name) || cleanString(clinic?.nombre_clinica);
   const points = await mapWithConcurrency(rankingHeatmapOffsets(radiusKm), COMPETITION_GOOGLE_CONCURRENCY, async (offset) => {
     const point = offsetLatLng(center, offset.xKm, offset.yKm);
     if (!point) return null;
     try {
+      const locationRestriction = rectangleAroundPoint(point, restrictionHalfSizeMeters);
       const places = await searchGooglePlaces({
-        query: selectedTerm,
+        query: heatmapQuery,
         maxResultCount: LOCAL_HEATMAP_RESULT_LIMIT,
-        locationBias: {
-          circle: {
-            center: point,
-            radius: Math.max(500, Math.round((radiusKm * 1000) / 3))
-          }
-        }
+        locationRestriction,
+        rankPreference: 'DISTANCE'
       });
-      const normalized = places.map(normalizePlace).filter((place) => place.name);
+      let normalized = places.map(normalizePlace).filter((place) => place.name);
+
+      if (!normalized.length) {
+        const fallbackPlaces = await searchGooglePlaces({
+          query: heatmapQuery,
+          maxResultCount: LOCAL_HEATMAP_RESULT_LIMIT,
+          locationBias: {
+            circle: {
+              center: point,
+              radius: Math.max(500, Math.round((radiusKm * 1000) / 3))
+            }
+          },
+          rankPreference: 'DISTANCE'
+        });
+        normalized = fallbackPlaces.map(normalizePlace).filter((place) => place.name);
+      }
       const ownIndex = normalized.findIndex((place) => {
         const placeId = normalizePlaceId(place.google_place_id);
         return (ownPlaceId && placeId === ownPlaceId) || businessNamesMatch(place.name, ownName);
@@ -1607,6 +1682,7 @@ async function getLocalRankingHeatmap(scope, { term = null, zoomKm = 3 } = {}) {
   return {
     success: true,
     term: selectedTerm,
+    effective_term: heatmapQuery,
     available_terms: terms,
     zoom_km: radiusKm,
     center,
@@ -1639,14 +1715,22 @@ function buildPlaceHeaders(fieldMask) {
   };
 }
 
-async function searchGooglePlaces({ query, maxResultCount = DEFAULT_LIMIT, locationBias = null }) {
+async function searchGooglePlaces({
+  query,
+  maxResultCount = DEFAULT_LIMIT,
+  locationBias = null,
+  locationRestriction = null,
+  rankPreference = null
+}) {
   const body = {
     textQuery: query,
     languageCode: DEFAULT_LANGUAGE,
     regionCode: DEFAULT_REGION,
     maxResultCount
   };
-  if (locationBias) body.locationBias = locationBias;
+  if (locationRestriction) body.locationRestriction = locationRestriction;
+  else if (locationBias) body.locationBias = locationBias;
+  if (rankPreference) body.rankPreference = rankPreference;
   return cachedCompetitionValue(cacheKey(['places-search', body]), COMPETITION_PLACES_CACHE_TTL_MS, async () => {
     const response = await axios.post(`${GOOGLE_PLACES_API_BASE}/places:searchText`, body, {
       headers: buildPlaceHeaders(PLACE_FIELD_MASK),
