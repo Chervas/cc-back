@@ -94,8 +94,8 @@ function normalizeEventType(eventName) {
   const name = String(eventName || '').trim().toLowerCase();
   if (['viewcontent', 'page_view', 'pageview', 'page_viewed'].includes(name)) return 'page_view';
   if (['callinitiated', 'phone_click', 'tel_click', 'click_phone', 'click_tel'].includes(name)) return 'tel_click';
-  if (['whatsapp_click', 'click_whatsapp', 'openwhatsapp', 'whatsappstarted'].includes(name)) return 'whatsapp_click';
-  if (['form_submit', 'formsubmitted', 'submitform'].includes(name)) return 'form_submit';
+  if (['whatsappclick', 'whatsapp_click', 'click_whatsapp', 'openwhatsapp', 'whatsappstarted'].includes(name)) return 'whatsapp_click';
+  if (['formsubmit', 'form_submit', 'formsubmitted', 'submitform'].includes(name)) return 'form_submit';
   if (['consentupdate', 'consent_update'].includes(name)) return 'consent_update';
   if (name.startsWith('click')) return 'click';
   return name || 'event';
