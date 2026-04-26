@@ -1775,9 +1775,78 @@ async function resolveTaskAssigneeUserIds({ clinicId, assigneeType, assigneeId, 
   return Array.from(new Set(userIds.filter(Boolean)));
 }
 
+const APPOINTMENT_CONFIRMATION_STATUSES = new Set([
+  'info_confirmada',
+  'recordatorio_confirmado',
+  'completada',
+]);
+
+function isInconclusiveConfirmationNotification(notification) {
+  const title = (cleanString(notification?.title) || '').toLowerCase();
+  const message = (cleanString(notification?.message) || '').toLowerCase();
+  return title.startsWith('confirmación inconclusa')
+    || message.includes('no ha confirmado claramente')
+    || message.includes('no ha contestado afirmativamente');
+}
+
+async function markStaleInconclusiveAppointmentNotificationsRead({ appointmentId, conversationId, clinicId }) {
+  const targetAppointmentId = toIntOrNull(appointmentId);
+  const targetConversationId = toIntOrNull(conversationId);
+  const targetClinicId = toIntOrNull(clinicId);
+  if (!targetAppointmentId && !targetConversationId) return 0;
+
+  const where = {
+    event: 'automation.system_notification',
+    isRead: false,
+    [Op.or]: [
+      { title: { [Op.like]: 'Confirmación inconclusa%' } },
+      { message: { [Op.like]: '%no ha confirmado claramente%' } },
+      { message: { [Op.like]: '%no ha contestado afirmativamente%' } },
+    ],
+  };
+  if (targetClinicId) {
+    where.clinicaId = targetClinicId;
+  }
+
+  const candidates = await Notification.findAll({
+    where,
+    order: [['createdAt', 'DESC']],
+    limit: 50,
+  });
+
+  const now = new Date();
+  let updated = 0;
+  for (const notification of candidates) {
+    const plain = typeof notification.get === 'function' ? notification.get({ plain: true }) : notification;
+    if (!isInconclusiveConfirmationNotification(plain)) continue;
+
+    const data = plain.data && typeof plain.data === 'object' ? plain.data : {};
+    const notificationAppointmentId = toIntOrNull(data.trigger_entity_id);
+    const notificationConversationId = toIntOrNull(data.quickChatConversationId);
+    const sameAppointment = targetAppointmentId && notificationAppointmentId === targetAppointmentId;
+    const sameConversation = targetConversationId && notificationConversationId === targetConversationId;
+    if (!sameAppointment && !sameConversation) continue;
+
+    await notification.update({
+      isRead: true,
+      readAt: now,
+      data: {
+        ...data,
+        auto_resolved: true,
+        auto_resolved_reason: 'appointment_confirmed_after_inconclusive_notification',
+        auto_resolved_at: now.toISOString(),
+      },
+    });
+    updated += 1;
+  }
+
+  return updated;
+}
+
 async function handleChangeStatus(node, context, runtime) {
   const config = node?.config && typeof node.config === 'object' ? node.config : {};
-  const targets = resolveRuntimeTargets(runtime?.execution, context);
+  let targets = resolveRuntimeTargets(runtime?.execution, context);
+  targets = await backfillRuntimeTargets(runtime?.execution, targets);
   const requestedStatus = resolveTemplateValue(config?.new_status, context);
   const rawStatus = cleanString(requestedStatus);
   if (!rawStatus) {
@@ -1806,6 +1875,13 @@ async function handleChangeStatus(node, context, runtime) {
     const previousStatus = cleanString(appointment.estado);
     await appointment.update({ estado: appointmentStatus });
     emitAppointmentSocketEvent(appointment, 'appointment:updated');
+    const resolvedNotifications = APPOINTMENT_CONFIRMATION_STATUSES.has(appointmentStatus)
+      ? await markStaleInconclusiveAppointmentNotificationsRead({
+        appointmentId: appointment.id_cita,
+        conversationId: targets.conversation_id,
+        clinicId: appointment.clinica_id,
+      })
+      : 0;
 
     return {
       kind: 'success',
@@ -1815,6 +1891,7 @@ async function handleChangeStatus(node, context, runtime) {
         target_entity: 'appointment',
         previous_status: previousStatus,
         new_status: appointmentStatus,
+        stale_inconclusive_notifications_resolved: resolvedNotifications,
       },
       next_node_id: readOutputTarget(node, 'on_success'),
     };
