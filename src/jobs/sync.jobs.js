@@ -35,6 +35,23 @@ const marketingCompetitionService = require('../services/marketingCompetition.se
 
 const GOOGLE_BUSINESS_PERFORMANCE_API = 'https://businessprofileperformance.googleapis.com/v1';
 const GOOGLE_MY_BUSINESS_API = 'https://mybusiness.googleapis.com/v4';
+const GOOGLE_BUSINESS_INFORMATION_API = 'https://mybusinessbusinessinformation.googleapis.com/v1';
+const GOOGLE_BUSINESS_LOCATION_READ_MASK = [
+  'name',
+  'title',
+  'storeCode',
+  'phoneNumbers',
+  'categories',
+  'storefrontAddress',
+  'websiteUri',
+  'metadata',
+  'openInfo',
+  'regularHours',
+  'specialHours',
+  'moreHours',
+  'serviceArea',
+  'labels'
+].join(',');
 const GOOGLE_BUSINESS_DAILY_METRICS = [
   'BUSINESS_IMPRESSIONS_DESKTOP_MAPS',
   'BUSINESS_IMPRESSIONS_DESKTOP_SEARCH',
@@ -1479,6 +1496,7 @@ class MetaSyncJobs {
       for (const location of locations) {
         try {
           const { accessToken } = await this._ensureGoogleAccessToken(location.google_connection_id);
+          await this._syncBusinessProfileLocationDetails(location, accessToken);
           const metricRows = await this._syncBusinessProfileMetrics(location, accessToken, start, end);
           const reviews = await this._syncBusinessProfileReviews(location, accessToken);
           const posts = await this._syncBusinessProfilePosts(location, accessToken);
@@ -1723,6 +1741,59 @@ class MetaSyncJobs {
     } while (nextPageToken);
 
     return processed;
+  }
+
+  async _syncBusinessProfileLocationDetails(location, accessToken) {
+    const rawPayload = location.raw_payload && typeof location.raw_payload === 'object'
+      ? location.raw_payload
+      : {};
+    const accountName = rawPayload.accountName || rawPayload.account_name || null;
+    const locationName = this._normalizeBusinessProfilePerformanceLocation(location.location_id);
+    const locationId = locationName ? locationName.split('/').pop() : null;
+    if (!accountName || !locationId) {
+      return null;
+    }
+
+    try {
+      const response = await axios.get(`${GOOGLE_BUSINESS_INFORMATION_API}/locations/${locationId}`, {
+        params: { readMask: GOOGLE_BUSINESS_LOCATION_READ_MASK },
+        headers: { Authorization: `Bearer ${accessToken}` }
+      });
+      const details = response.data || {};
+      const primaryCategory = details.primaryCategory?.displayName
+        || details.categories?.primaryCategory?.displayName
+        || details.primaryCategory?.name
+        || details.categories?.primaryCategory?.name
+        || location.primary_category
+        || null;
+
+      await location.update({
+        location_name: details.title || details.locationName || location.location_name || null,
+        store_code: details.storeCode || location.store_code || null,
+        primary_category: primaryCategory,
+        is_verified: details.metadata?.verificationState
+          ? String(details.metadata.verificationState).toUpperCase() === 'VERIFIED'
+          : location.is_verified,
+        is_suspended: Array.isArray(details.metadata?.suspensionReasons)
+          ? details.metadata.suspensionReasons.length > 0
+          : location.is_suspended,
+        raw_payload: {
+          ...rawPayload,
+          ...details,
+          accountName,
+          accountDisplayName: rawPayload.accountDisplayName || rawPayload.account_display_name || null
+        }
+      });
+
+      return details;
+    } catch (error) {
+      console.warn('⚠️ No se pudo refrescar detalles de Google Business Profile', {
+        locationId: location.location_id,
+        status: error.response?.status,
+        message: error.response?.data?.error?.message || error.message
+      });
+      return null;
+    }
   }
 
   _buildBusinessProfileMetricParams(start, end) {
