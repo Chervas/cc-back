@@ -363,14 +363,18 @@ async function getFirstPartySummary(scope, range) {
     { replacements, type: QueryTypes.SELECT }
   );
 
-  return {
-    connected: Number(summary?.pageviews || 0) > 0 || Number(summary?.sessions || 0) > 0,
+  const totals = {
     sessions: Number(summary?.sessions || 0),
     visitors: Number(summary?.visitors || 0),
     pageviews: Number(summary?.pageviews || 0),
     telClicks: Number(summary?.telClicks || 0),
     whatsappClicks: Number(summary?.whatsappClicks || 0),
     formSubmits: Number(summary?.formSubmits || 0),
+  };
+
+  return {
+    connected: Object.values(totals).some((value) => value > 0),
+    ...totals,
     lastDate: summary?.lastDate || null,
   };
 }
