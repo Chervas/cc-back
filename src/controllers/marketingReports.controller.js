@@ -429,8 +429,10 @@ async function aggregateGoogleAds(scope, range) {
       inversion,
       leads,
       citas: 0,
+      convertidos: 0,
       cpl: leads ? money(inversion / leads) : 0,
       cpaCita: 0,
+      cpaConvertido: 0,
       alert: inversion >= 25 && leads === 0
         ? 'Esta campaña está gastando sin registrar conversiones en Google Ads. Revisa su destino y medición.'
         : undefined,
@@ -617,8 +619,10 @@ async function aggregateMetaAds(scope, range) {
       inversion,
       leads,
       citas: 0,
+      convertidos: 0,
       cpl: leads ? money(inversion / leads) : 0,
       cpaCita: 0,
+      cpaConvertido: 0,
       alert: inversion >= 25 && leads === 0
         ? 'Esta campaña está gastando sin registrar leads. Revisa la creatividad, el destino o la atribución.'
         : undefined,
@@ -1078,12 +1082,18 @@ function distributeCampaignAppointments(campaigns, platformChannelStats) {
   const citaRate = totalLeads && platformChannelStats?.leads
     ? toNumber(platformChannelStats.citas) / toNumber(platformChannelStats.leads)
     : 0;
+  const convertidoRate = totalLeads && platformChannelStats?.leads
+    ? toNumber(platformChannelStats.convertidos) / toNumber(platformChannelStats.leads)
+    : 0;
   return campaigns.map((row) => {
     const citas = Math.round(toNumber(row.leads) * citaRate);
+    const convertidos = Math.round(toNumber(row.leads) * convertidoRate);
     return {
       ...row,
       citas,
+      convertidos,
       cpaCita: citas ? money(row.inversion / citas) : 0,
+      cpaConvertido: convertidos ? money(row.inversion / convertidos) : 0,
     };
   });
 }
