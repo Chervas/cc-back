@@ -44,6 +44,19 @@ const SOCIAL_DISCOVERY_TIMEOUT_MS = Math.max(1000, Math.min(15000, parseInt(proc
 const SOCIAL_DISCOVERY_PAGE_LIMIT = Math.max(1, Math.min(6, parseInt(process.env.COMPETITION_SOCIAL_DISCOVERY_PAGE_LIMIT || '4', 10)));
 const META_PAGE_MATCH_THRESHOLD = Math.max(20, Math.min(100, parseInt(process.env.COMPETITION_META_PAGE_MATCH_THRESHOLD || '45', 10)));
 const GOOGLE_ADVERTISER_MATCH_THRESHOLD = Math.max(20, Math.min(100, parseInt(process.env.COMPETITION_GOOGLE_ADS_ADVERTISER_MATCH_THRESHOLD || '45', 10)));
+const COMPETITION_CACHE_MAX_ENTRIES = Math.max(50, Math.min(2000, parseInt(process.env.COMPETITION_CACHE_MAX_ENTRIES || '600', 10)));
+const COMPETITION_REPORT_CACHE_TTL_MS = Math.max(0, Math.min(3600000, parseInt(process.env.COMPETITION_REPORT_CACHE_TTL_MS || '180000', 10)));
+const COMPETITION_SUGGESTIONS_CACHE_TTL_MS = Math.max(0, Math.min(3600000, parseInt(process.env.COMPETITION_SUGGESTIONS_CACHE_TTL_MS || '600000', 10)));
+const COMPETITION_PROVIDER_CACHE_TTL_MS = Math.max(0, Math.min(300000, parseInt(process.env.COMPETITION_PROVIDER_CACHE_TTL_MS || '60000', 10)));
+const COMPETITION_PLACES_CACHE_TTL_MS = Math.max(0, Math.min(86400000, parseInt(process.env.COMPETITION_PLACES_CACHE_TTL_MS || '21600000', 10)));
+const COMPETITION_PLACE_DETAILS_CACHE_TTL_MS = Math.max(0, Math.min(86400000, parseInt(process.env.COMPETITION_PLACE_DETAILS_CACHE_TTL_MS || '43200000', 10)));
+const COMPETITION_PLACE_PHOTO_CACHE_TTL_MS = Math.max(0, Math.min(86400000, parseInt(process.env.COMPETITION_PLACE_PHOTO_CACHE_TTL_MS || '43200000', 10)));
+const COMPETITION_HEATMAP_CACHE_TTL_MS = Math.max(0, Math.min(86400000, parseInt(process.env.COMPETITION_HEATMAP_CACHE_TTL_MS || '21600000', 10)));
+const COMPETITION_STATIC_MAP_CACHE_TTL_MS = Math.max(0, Math.min(86400000, parseInt(process.env.COMPETITION_STATIC_MAP_CACHE_TTL_MS || '21600000', 10)));
+const COMPETITION_GOOGLE_CONCURRENCY = Math.max(1, Math.min(5, parseInt(process.env.COMPETITION_GOOGLE_CONCURRENCY || '3', 10)));
+
+const competitionRuntimeCache = new Map();
+const competitionInFlight = new Map();
 
 const GOOGLE_COUNTRY_GEO_CRITERIA_IDS = {
   AD: 2020,
@@ -183,6 +196,95 @@ function envFlagEnabled(value, defaultValue = true) {
 function cleanString(value) {
   const text = String(value || '').replace(/\s+/g, ' ').trim();
   return text || null;
+}
+
+function stableStringify(value) {
+  if (value === null || value === undefined) return String(value);
+  if (Array.isArray(value)) return `[${value.map(stableStringify).join(',')}]`;
+  if (typeof value === 'object') {
+    return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${stableStringify(value[key])}`).join(',')}}`;
+  }
+  return JSON.stringify(value);
+}
+
+function scopeCacheKey(scope) {
+  const clinicIds = Array.isArray(scope?.clinicIds) ? scope.clinicIds.map(toInt).filter(Boolean).sort((a, b) => a - b) : [];
+  return stableStringify({
+    all: !!scope?.isAll,
+    scope: scope?.scope || null,
+    groupId: toInt(scope?.groupId),
+    clinicIds
+  });
+}
+
+function cacheKey(parts) {
+  return parts.map((part) => typeof part === 'string' ? part : stableStringify(part)).join('|');
+}
+
+function pruneCompetitionCache(now = Date.now()) {
+  if (competitionRuntimeCache.size <= COMPETITION_CACHE_MAX_ENTRIES) return;
+  const expired = [];
+  for (const [key, entry] of competitionRuntimeCache.entries()) {
+    if (!entry || entry.expiresAt <= now) expired.push(key);
+  }
+  for (const key of expired) competitionRuntimeCache.delete(key);
+  if (competitionRuntimeCache.size <= COMPETITION_CACHE_MAX_ENTRIES) return;
+
+  const ordered = [...competitionRuntimeCache.entries()]
+    .sort((left, right) => (left[1].lastAccessed || left[1].createdAt || 0) - (right[1].lastAccessed || right[1].createdAt || 0));
+  const overflow = competitionRuntimeCache.size - COMPETITION_CACHE_MAX_ENTRIES;
+  for (const [key] of ordered.slice(0, overflow)) competitionRuntimeCache.delete(key);
+}
+
+async function cachedCompetitionValue(key, ttlMs, loader) {
+  if (!ttlMs) return loader();
+  const now = Date.now();
+  const current = competitionRuntimeCache.get(key);
+  if (current && current.expiresAt > now) {
+    current.lastAccessed = now;
+    return current.value;
+  }
+  if (current) competitionRuntimeCache.delete(key);
+  if (competitionInFlight.has(key)) return competitionInFlight.get(key);
+
+  const promise = Promise.resolve()
+    .then(loader)
+    .then((value) => {
+      competitionRuntimeCache.set(key, {
+        value,
+        createdAt: Date.now(),
+        lastAccessed: Date.now(),
+        expiresAt: Date.now() + ttlMs
+      });
+      pruneCompetitionCache();
+      return value;
+    })
+    .finally(() => competitionInFlight.delete(key));
+
+  competitionInFlight.set(key, promise);
+  return promise;
+}
+
+function clearCompetitionRuntimeCache() {
+  competitionRuntimeCache.clear();
+}
+
+async function mapWithConcurrency(items, concurrency, iteratee) {
+  const list = Array.isArray(items) ? items : [];
+  const limit = Math.max(1, Math.min(Number(concurrency) || 1, list.length || 1));
+  const results = new Array(list.length);
+  let index = 0;
+
+  async function worker() {
+    while (index < list.length) {
+      const currentIndex = index;
+      index += 1;
+      results[currentIndex] = await iteratee(list[currentIndex], currentIndex);
+    }
+  }
+
+  await Promise.all(Array.from({ length: limit }, worker));
+  return results;
 }
 
 function normalizeBusinessName(value) {
@@ -826,21 +928,23 @@ function extractPhotoNames(place = {}) {
 async function resolvePlacePhotoUrl(photoName, { maxWidthPx = 640 } = {}) {
   const resourceName = cleanString(photoName);
   if (!resourceName) return null;
-  try {
-    const response = await axios.get(`${GOOGLE_PLACES_API_BASE}/${resourceName.replace(/\/media$/i, '')}/media`, {
-      headers: {
-        'X-Goog-Api-Key': getGooglePlacesApiKey()
-      },
-      params: {
-        maxWidthPx,
-        skipHttpRedirect: true
-      },
-      timeout: 10000
-    });
-    return normalizeUrl(response.data?.photoUri);
-  } catch (_) {
-    return null;
-  }
+  return cachedCompetitionValue(cacheKey(['places-photo', resourceName, maxWidthPx]), COMPETITION_PLACE_PHOTO_CACHE_TTL_MS, async () => {
+    try {
+      const response = await axios.get(`${GOOGLE_PLACES_API_BASE}/${resourceName.replace(/\/media$/i, '')}/media`, {
+        headers: {
+          'X-Goog-Api-Key': getGooglePlacesApiKey()
+        },
+        params: {
+          maxWidthPx,
+          skipHttpRedirect: true
+        },
+        timeout: 10000
+      });
+      return normalizeUrl(response.data?.photoUri);
+    } catch (_) {
+      return null;
+    }
+  });
 }
 
 async function attachPlacePhotoUrl(item, { maxWidthPx = 640 } = {}) {
@@ -888,14 +992,23 @@ function providerStatus({ googleError = null, metaError = null, metaTokenSource 
 }
 
 async function providerStatusForScope(scope, options = {}) {
-  let metaTokenSource = null;
-  try {
-    const resolved = await resolveMetaAdLibraryToken(scope);
-    metaTokenSource = resolved?.accessToken ? resolved.source : null;
-  } catch (_) {
-    metaTokenSource = null;
-  }
-  return providerStatus({ ...options, metaTokenSource });
+  const hasErrorContext = !!options.googleError || !!options.metaError;
+  const loader = async () => {
+    let metaTokenSource = null;
+    try {
+      const resolved = await resolveMetaAdLibraryToken(scope);
+      metaTokenSource = resolved?.accessToken ? resolved.source : null;
+    } catch (_) {
+      metaTokenSource = null;
+    }
+    return providerStatus({ ...options, metaTokenSource });
+  };
+  if (hasErrorContext) return loader();
+  return cachedCompetitionValue(
+    cacheKey(['provider-status', scopeCacheKey(scope)]),
+    COMPETITION_PROVIDER_CACHE_TTL_MS,
+    loader
+  );
 }
 
 function getGooglePlacesApiKey() {
@@ -919,7 +1032,13 @@ function staticMapMarkerColor(position) {
 async function buildLocalHeatmapStaticMapDataUrl(center, points = [], radiusKm = 3) {
   const apiKey = getGooglePlacesApiKey();
   if (!apiKey || !center?.latitude || !center?.longitude) return null;
-  try {
+  const markerKey = (points || []).map((point) => [
+    Number(point.latitude).toFixed(6),
+    Number(point.longitude).toFixed(6),
+    point.my_position || null
+  ]);
+  return cachedCompetitionValue(cacheKey(['static-map', center.latitude, center.longitude, radiusKm, markerKey]), COMPETITION_STATIC_MAP_CACHE_TTL_MS, async () => {
+    try {
     const params = new URLSearchParams({
       center: `${center.latitude},${center.longitude}`,
       zoom: String(staticMapZoomForRadius(radiusKm)),
@@ -944,9 +1063,10 @@ async function buildLocalHeatmapStaticMapDataUrl(center, points = [], radiusKm =
     const contentType = response.headers?.['content-type'] || 'image/png';
     if (!String(contentType).startsWith('image/')) return null;
     return `data:${contentType};base64,${Buffer.from(response.data).toString('base64')}`;
-  } catch (_) {
-    return null;
-  }
+    } catch (_) {
+      return null;
+    }
+  });
 }
 
 function getMetaAdLibraryTokenFromEnv() {
@@ -1281,9 +1401,8 @@ async function buildLocalRanking(clinic, ownProfile) {
   const ownPlaceId = normalizePlaceId(ownProfile?.google_place_id || clinic?.business_place_id);
   const ownName = cleanString(ownProfile?.name) || cleanString(clinic?.business_location_name) || cleanString(clinic?.nombre_clinica);
   const location = clinicLocationLabel(clinic);
-  const entries = [];
 
-  for (const term of terms) {
+  const entries = await mapWithConcurrency(terms, COMPETITION_GOOGLE_CONCURRENCY, async (term) => {
     try {
       const places = await searchGooglePlaces({ query: term, maxResultCount: 10 });
       const normalized = places.map(normalizePlace).filter((place) => place.name);
@@ -1292,7 +1411,7 @@ async function buildLocalRanking(clinic, ownProfile) {
         return (ownPlaceId && placeId === ownPlaceId) || businessNamesMatch(place.name, ownName);
       });
 
-      entries.push({
+      return {
         term,
         myPosition: ownIndex >= 0 ? ownIndex + 1 : null,
         aboveMe: ownIndex > 0 ? normalized.slice(0, ownIndex).map((place) => place.name).slice(0, 5) : [],
@@ -1303,9 +1422,9 @@ async function buildLocalRanking(clinic, ownProfile) {
         lastMeasured: new Date().toISOString(),
         location,
         source: 'google_places_text_search'
-      });
+      };
     } catch (error) {
-      entries.push({
+      return {
         term,
         myPosition: null,
         aboveMe: [],
@@ -1314,9 +1433,9 @@ async function buildLocalRanking(clinic, ownProfile) {
         location,
         error: normalizeExternalError(error),
         source: 'google_places_text_search'
-      });
+      };
     }
-  }
+  });
 
   return { terms, entries };
 }
@@ -1361,8 +1480,14 @@ function heatmapScore(position) {
 }
 
 async function getLocalRankingHeatmap(scope, { term = null, zoomKm = 3 } = {}) {
+  const normalizedTerm = cleanString(term) || null;
+  const normalizedZoomKm = clampHeatmapZoom(zoomKm);
+  return cachedCompetitionValue(
+    cacheKey(['local-heatmap', scopeCacheKey(scope), normalizedTerm || '__auto__', normalizedZoomKm]),
+    COMPETITION_HEATMAP_CACHE_TTL_MS,
+    async () => {
   const clinic = await resolvePrimaryClinic(scope);
-  const setupBlocker = competitionSetupBlocker(clinic, term);
+  const setupBlocker = competitionSetupBlocker(clinic, normalizedTerm);
   if (setupBlocker) {
     return {
       success: false,
@@ -1389,7 +1514,7 @@ async function getLocalRankingHeatmap(scope, { term = null, zoomKm = 3 } = {}) {
   }
 
   const terms = rankingTermsForClinic(clinic);
-  const selectedTerm = cleanString(term) || terms[0];
+  const selectedTerm = normalizedTerm || terms[0];
   if (!selectedTerm) {
     return {
       success: false,
@@ -1400,14 +1525,12 @@ async function getLocalRankingHeatmap(scope, { term = null, zoomKm = 3 } = {}) {
     };
   }
 
-  const radiusKm = clampHeatmapZoom(zoomKm);
+  const radiusKm = normalizedZoomKm;
   const ownPlaceId = normalizePlaceId(ownProfile?.google_place_id || clinic?.business_place_id);
   const ownName = cleanString(ownProfile?.name) || cleanString(clinic?.business_location_name) || cleanString(clinic?.nombre_clinica);
-  const points = [];
-
-  for (const offset of rankingHeatmapOffsets(radiusKm)) {
+  const points = await mapWithConcurrency(rankingHeatmapOffsets(radiusKm), COMPETITION_GOOGLE_CONCURRENCY, async (offset) => {
     const point = offsetLatLng(center, offset.xKm, offset.yKm);
-    if (!point) continue;
+    if (!point) return null;
     try {
       const places = await searchGooglePlaces({
         query: selectedTerm,
@@ -1425,7 +1548,7 @@ async function getLocalRankingHeatmap(scope, { term = null, zoomKm = 3 } = {}) {
         return (ownPlaceId && placeId === ownPlaceId) || businessNamesMatch(place.name, ownName);
       });
       const myPosition = ownIndex >= 0 ? ownIndex + 1 : null;
-      points.push({
+      return {
         latitude: point.latitude,
         longitude: point.longitude,
         x_km: offset.xKm,
@@ -1434,9 +1557,9 @@ async function getLocalRankingHeatmap(scope, { term = null, zoomKm = 3 } = {}) {
         score: heatmapScore(myPosition),
         top_results: normalized.slice(0, 5).map((place) => place.name),
         measured_at: new Date().toISOString()
-      });
+      };
     } catch (error) {
-      points.push({
+      return {
         latitude: point.latitude,
         longitude: point.longitude,
         x_km: offset.xKm,
@@ -1446,9 +1569,9 @@ async function getLocalRankingHeatmap(scope, { term = null, zoomKm = 3 } = {}) {
         top_results: [],
         error: normalizeExternalError(error),
         measured_at: new Date().toISOString()
-      });
+      };
     }
-  }
+  }).then((items) => items.filter(Boolean));
 
   const mapImageDataUrl = await buildLocalHeatmapStaticMapDataUrl(center, points, radiusKm);
 
@@ -1467,6 +1590,8 @@ async function getLocalRankingHeatmap(scope, { term = null, zoomKm = 3 } = {}) {
     } : null,
     points
   };
+    }
+  );
 }
 
 function buildPlaceHeaders(fieldMask) {
@@ -1491,20 +1616,27 @@ async function searchGooglePlaces({ query, maxResultCount = DEFAULT_LIMIT, locat
     maxResultCount
   };
   if (locationBias) body.locationBias = locationBias;
-  const response = await axios.post(`${GOOGLE_PLACES_API_BASE}/places:searchText`, body, {
-    headers: buildPlaceHeaders(PLACE_FIELD_MASK),
-    timeout: 15000
+  return cachedCompetitionValue(cacheKey(['places-search', body]), COMPETITION_PLACES_CACHE_TTL_MS, async () => {
+    const response = await axios.post(`${GOOGLE_PLACES_API_BASE}/places:searchText`, body, {
+      headers: buildPlaceHeaders(PLACE_FIELD_MASK),
+      timeout: 15000
+    });
+    return Array.isArray(response.data?.places) ? response.data.places : [];
   });
-  return Array.isArray(response.data?.places) ? response.data.places : [];
 }
 
-async function getGooglePlaceDetails(placeId) {
+async function getGooglePlaceDetails(placeId, { bypassCache = false } = {}) {
   if (!placeId) return null;
-  const response = await axios.get(`${GOOGLE_PLACES_API_BASE}/places/${encodeURIComponent(placeId)}`, {
-    headers: buildPlaceHeaders(PLACE_DETAILS_FIELD_MASK),
-    timeout: 15000
-  });
-  return response.data || null;
+  const loader = async () => {
+    const response = await axios.get(`${GOOGLE_PLACES_API_BASE}/places/${encodeURIComponent(placeId)}`, {
+      headers: buildPlaceHeaders(PLACE_DETAILS_FIELD_MASK),
+      timeout: 15000
+    });
+    return response.data || null;
+  };
+  return bypassCache
+    ? loader()
+    : cachedCompetitionValue(cacheKey(['place-details', normalizePlaceId(placeId) || placeId]), COMPETITION_PLACE_DETAILS_CACHE_TTL_MS, loader);
 }
 
 async function resolveMetaAdLibraryToken(scope) {
@@ -2855,6 +2987,10 @@ function providerStatusWithObservedErrors(status, competitors = []) {
 }
 
 async function listCompetition(scope, { includeInactive = false } = {}) {
+  return cachedCompetitionValue(
+    cacheKey(['competition-list', scopeCacheKey(scope), includeInactive ? 'with-inactive' : 'active-only']),
+    COMPETITION_REPORT_CACHE_TTL_MS,
+    async () => {
   const clinic = await resolvePrimaryClinic(scope);
   const rows = await MarketingCompetitor.findAll({
     where: buildCompetitorWhere(scope, { includeInactive }),
@@ -2896,18 +3032,26 @@ async function listCompetition(scope, { includeInactive = false } = {}) {
     setup_code: setupBlocker?.code || null,
     competitors
   };
+    }
+  );
 }
 
 async function suggestCompetitors(scope, { query = null, limit = DEFAULT_LIMIT } = {}) {
+  const normalizedLimit = Math.max(1, Math.min(20, Number(limit) || DEFAULT_LIMIT));
+  const normalizedQuery = cleanString(query) || null;
+  return cachedCompetitionValue(
+    cacheKey(['competition-suggestions', scopeCacheKey(scope), normalizedQuery || '__auto__', normalizedLimit]),
+    COMPETITION_SUGGESTIONS_CACHE_TTL_MS,
+    async () => {
   const clinic = await resolvePrimaryClinic(scope);
-  const setupBlocker = competitionSetupBlocker(clinic, query);
+  const setupBlocker = competitionSetupBlocker(clinic, normalizedQuery);
   if (setupBlocker) {
-    const payload = buildSetupRequiredPayload(scope, clinic, setupBlocker, query);
+    const payload = buildSetupRequiredPayload(scope, clinic, setupBlocker, normalizedQuery);
     payload.provider_status = await providerStatusForScope(scope);
     return payload;
   }
 
-  const textQuery = inferCompetitionQuery(clinic, query);
+  const textQuery = inferCompetitionQuery(clinic, normalizedQuery);
   const existing = await MarketingCompetitor.findAll({ where: buildCompetitorWhere(scope, { includeInactive: true }), raw: true });
   const existingPlaceIds = new Set(existing.map((item) => normalizePlaceId(item.google_place_id)).filter(Boolean));
   const existingNames = new Set(existing.map((item) => normalizeBusinessName(item.name)).filter(Boolean));
@@ -2918,7 +3062,7 @@ async function suggestCompetitors(scope, { query = null, limit = DEFAULT_LIMIT }
   const ownPlaceIds = await resolveOwnBusinessPlaceIds(scope);
 
   try {
-    const places = await searchGooglePlaces({ query: textQuery, maxResultCount: Math.max(1, Math.min(20, Number(limit) || DEFAULT_LIMIT)) });
+    const places = await searchGooglePlaces({ query: textQuery, maxResultCount: normalizedLimit });
     const suggestions = await Promise.all(places.map(async (place) => {
       const normalized = normalizePlace(place);
       const relevance = competitorRelevanceForClinic({
@@ -2960,6 +3104,8 @@ async function suggestCompetitors(scope, { query = null, limit = DEFAULT_LIMIT }
       error: normalizeExternalError(error)
     };
   }
+    }
+  );
 }
 
 async function resolveOwnBusinessPlaceIds(scope) {
@@ -3086,6 +3232,7 @@ async function createCompetitor(scope, payload = {}) {
     await upsertPlaceSnapshot(competitor, competitor.raw_place_payload);
   }
 
+  clearCompetitionRuntimeCache();
   return mapCompetitorRow(competitor, await MarketingCompetitorSnapshot.findOne({ where: { competitor_id: competitor.id }, order: [['snapshot_date', 'DESC']] }), null);
 }
 
@@ -3132,6 +3279,7 @@ async function updateCompetitor(scope, competitorId, payload = {}) {
   if (payload.is_active !== undefined) patch.is_active = !!payload.is_active;
 
   await competitor.update(patch);
+  clearCompetitionRuntimeCache();
   return mapCompetitorRow(competitor, null, null);
 }
 
@@ -3145,6 +3293,7 @@ async function deactivateCompetitor(scope, competitorId) {
     throw err;
   }
   await competitor.update({ is_active: false, last_sync_status: 'deactivated' });
+  clearCompetitionRuntimeCache();
   return { success: true, id: competitor.id, is_active: false };
 }
 
@@ -3160,7 +3309,7 @@ async function refreshOneCompetitor(competitor, scope) {
 
   if (competitor.google_place_id) {
     try {
-      const place = await getGooglePlaceDetails(competitor.google_place_id);
+      const place = await getGooglePlaceDetails(competitor.google_place_id, { bypassCache: true });
       const normalized = normalizePlace(place);
       const socialProfiles = await discoverSocialProfiles(competitor, {
         website_url: normalized.website_url,
@@ -3319,6 +3468,7 @@ async function refreshCompetition(scope, { competitorIds = null } = {}) {
   }
 
   report.provider.meta_browser_media = cloneMetaBrowserMetrics();
+  clearCompetitionRuntimeCache();
 
   return { success: true, report };
 }
