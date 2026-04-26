@@ -594,6 +594,9 @@ function mergeStatusMetadata(existingMetadata, status) {
     const history = Array.isArray(metadata.wa_status_history)
         ? metadata.wa_status_history
         : [];
+    const statusTimestamps = metadata.wa_status_timestamps && typeof metadata.wa_status_timestamps === 'object'
+        ? { ...metadata.wa_status_timestamps }
+        : {};
     const entry = {
         status: status.status,
         timestamp: status.timestamp,
@@ -603,10 +606,15 @@ function mergeStatusMetadata(existingMetadata, status) {
         errors: status.errors || null,
     };
     history.push(entry);
+    const normalizedStatus = mapWhatsAppStatus(status.status);
+    if (normalizedStatus && status.timestamp) {
+        statusTimestamps[normalizedStatus] = status.timestamp;
+    }
     return {
         ...metadata,
         wa_status: entry,
         wa_status_history: history,
+        wa_status_timestamps: statusTimestamps,
         wa_error: status.errors || metadata.wa_error || null,
     };
 }
@@ -1352,7 +1360,7 @@ createWorker('webhook_whatsapp', async (job) => {
         }
 
         message.status = nextStatus;
-        if (status?.timestamp) {
+        if (nextStatus === 'sent' && status?.timestamp && !message.sent_at) {
             const tsMs = Number(status.timestamp) * 1000;
             if (!Number.isNaN(tsMs)) {
                 message.sent_at = new Date(tsMs);

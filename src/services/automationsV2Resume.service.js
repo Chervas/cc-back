@@ -238,6 +238,27 @@ function parseDateOrNull(value) {
   return Number.isNaN(date.getTime()) ? null : date;
 }
 
+function parseWhatsAppTimestampOrNull(value) {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric) || numeric <= 0) return null;
+  const ms = numeric > 100000000000 ? numeric : numeric * 1000;
+  const date = new Date(ms);
+  return Number.isNaN(date.getTime()) ? null : date;
+}
+
+function getProviderSentAtFromMetadata(metadata) {
+  if (!metadata || typeof metadata !== 'object') return null;
+  const timestamps = metadata.wa_status_timestamps && typeof metadata.wa_status_timestamps === 'object'
+    ? metadata.wa_status_timestamps
+    : {};
+  const direct = parseWhatsAppTimestampOrNull(timestamps.sent);
+  if (direct) return direct;
+
+  const history = Array.isArray(metadata.wa_status_history) ? metadata.wa_status_history : [];
+  const sentEntry = history.find((entry) => normalizeType(entry?.status) === 'sent' && entry?.timestamp);
+  return parseWhatsAppTimestampOrNull(sentEntry?.timestamp);
+}
+
 function resolveDurationMs(duration, unit) {
   const amount = Number.parseFloat(String(duration ?? ''));
   const safeAmount = Number.isFinite(amount) && amount > 0 ? amount : 60;
@@ -365,15 +386,16 @@ async function resolveLateTimedOutWaitRecovery(execution, {
     if (!outboundMessageId) continue;
 
     const outboundMessage = await Message.findByPk(outboundMessageId, {
-      attributes: ['id', 'sent_at', 'createdAt'],
+      attributes: ['id', 'sent_at', 'createdAt', 'metadata'],
       raw: true,
     });
     if (!outboundMessage) continue;
 
     const actualSendAt =
-      parseDateOrNull(outboundMessage.sent_at)
+      getProviderSentAtFromMetadata(outboundMessage.metadata)
       || parseDateOrNull(listenedOutput.effective_send_at)
       || parseDateOrNull(listenedOutput.scheduled_for)
+      || parseDateOrNull(outboundMessage.sent_at)
       || parseDateOrNull(outboundMessage.createdAt)
       || parseDateOrNull(listenedOutput.at);
     const recordedTimeoutAt = parseDateOrNull(waitOutput.timeout_at);
