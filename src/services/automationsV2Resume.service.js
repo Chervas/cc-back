@@ -286,10 +286,12 @@ function getResponseBufferConfig(waitNode) {
   const explicitDelayMs = resolvePositiveInt(cfg.response_buffer_delay_ms);
   const explicitDelaySeconds = resolvePositiveInt(cfg.response_buffer_delay_seconds);
   const envDelayMs = resolvePositiveInt(process.env.AUTOMATIONS_V2_RESPONSE_BUFFER_MS);
+  const envDelaySeconds = resolvePositiveInt(process.env.AUTOMATIONS_V2_RESPONSE_BUFFER_SECONDS);
   const resolvedDelayMs = explicitDelayMs
     ?? (explicitDelaySeconds !== null ? explicitDelaySeconds * 1000 : null)
     ?? envDelayMs
-    ?? 5 * 1000;
+    ?? (envDelaySeconds !== null ? envDelaySeconds * 1000 : null)
+    ?? 90 * 1000;
   return {
     enabled: parseBool(cfg.response_buffer_enabled, true),
     delayMs: resolvedDelayMs,

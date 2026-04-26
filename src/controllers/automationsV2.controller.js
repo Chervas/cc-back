@@ -1048,6 +1048,7 @@ const NODE_TYPES_V2 = [
       timeout_unit: 'hours',
       listens_to_node_id: null,
       response_buffer_enabled: true,
+      response_buffer_delay_seconds: 90,
     },
     config_schema: [
       { key: 'timeout_duration', label: 'Tiempo de espera', input_type: 'number', required: true },
@@ -1055,7 +1056,7 @@ const NODE_TYPES_V2 = [
       { key: 'listens_to_node_id', label: 'Nodo escuchado', input_type: 'string', required: false },
       {
         key: 'response_buffer_enabled',
-        label: 'Si hay respuesta, esperar 1 minuto antes de pasar al siguiente paso. A veces los pacientes contestan en varias líneas',
+        label: 'Si hay respuesta, esperar 90 segundos antes de pasar al siguiente paso. A veces los pacientes contestan en varias líneas',
         input_type: 'boolean',
         required: false,
       },

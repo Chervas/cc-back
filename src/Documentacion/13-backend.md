@@ -2588,6 +2588,7 @@ Reglas:
   - `response_text`
   - `inbound_message_id`
   - `inbound_conversation_id`
+- Cuando `response_buffer_enabled=true`, el runtime agrupa respuestas partidas del paciente durante 90 segundos por defecto antes de reanudar el flujo. Esto evita falsos negativos si el paciente responde en dos mensajes seguidos, por ejemplo `Buenos días` y después `sí confirmo`. Se puede ajustar por nodo con `response_buffer_delay_seconds` o por entorno con `AUTOMATIONS_V2_RESPONSE_BUFFER_SECONDS`.
 - `waiting_meta.runtime_namespace` y `payload.__runtime_namespace` deben apuntar al mismo runtime que reclama jobs en ese entorno.
 - Si el mensaje outbound escuchado salió más tarde por horario silencioso, `wait_starts_at` debe anclarse a esa hora efectiva de salida, no a la entrada inicial al nodo.
 - En guardado/publicación, `listens_to_node_id` solo es válido si apunta a un nodo outbound real (`action/send_whatsapp` o `action/send_email`). Los duplicados o plantillas antiguas pueden arrastrar IDs existentes pero incorrectos; backend los normaliza recorriendo el grafo hacia atrás y, si no encuentra outbound, rechaza la configuración.
