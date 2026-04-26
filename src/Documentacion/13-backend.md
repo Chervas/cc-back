@@ -214,6 +214,7 @@ ClinicaClick Analytics V1:
 - Los eventos analíticos propios se guardan solo si hay consentimiento analítico o si Consent Mode no está activado para la clínica.
 - `consent_update` se persiste siempre para poder auditar cambios de consentimiento.
 - Desde `intake.js` v3.2.1, la configuración legal canónica del aviso de cookies es `legal_url`, `cookies_url` y `privacy_url`. `terms_url` queda como alias legacy de `legal_url`.
+- `IntakeConfig.config.snippet_verification` conserva `consent_mode_detected` y `consent_mode_domains`; no eliminarlos en el upsert porque Marketing > Web los usa para saber si la web instalada ya carga un runtime compatible.
 - `GET /api/marketing/reports/overview` prioriza `WebPageDaily` / `WebSessionDaily` para pageviews, sesiones y visitantes. GA4 queda como fuente opcional/fallback histórico.
 - `webEventsAggregate` recalcula agregados para una ventana reciente y limpia eventos brutos antiguos según `WEB_EVENTS_RETENTION_DAYS`.
 

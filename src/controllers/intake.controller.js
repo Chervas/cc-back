@@ -2620,6 +2620,10 @@ exports.upsertIntakeConfig = asyncHandler(async (req, res) => {
       verified: !!body.snippet_verification.verified,
       verified_at: body.snippet_verification.verified_at || new Date().toISOString(),
       domains: Array.isArray(body.snippet_verification.domains) ? body.snippet_verification.domains : [],
+      consent_mode_detected: !!body.snippet_verification.consent_mode_detected,
+      consent_mode_domains: Array.isArray(body.snippet_verification.consent_mode_domains)
+        ? body.snippet_verification.consent_mode_domains
+        : [],
       checked_urls: body.snippet_verification.checked_urls && typeof body.snippet_verification.checked_urls === 'object'
         ? body.snippet_verification.checked_urls
         : {}
