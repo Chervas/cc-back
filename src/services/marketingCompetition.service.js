@@ -1545,10 +1545,10 @@ function offsetLatLng(center, xKm, yKm) {
 }
 
 function heatmapScore(position) {
-  if (!position) return 0;
+  if (!position) return 5;
   if (position <= 3) return 100;
-  if (position <= 5) return 75;
-  return 35;
+  if (position <= 9) return 65;
+  return 20;
 }
 
 async function getLocalRankingHeatmap(scope, { term = null, zoomKm = 3 } = {}) {
