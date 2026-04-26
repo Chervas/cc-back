@@ -54,6 +54,7 @@ const COMPETITION_PLACE_PHOTO_CACHE_TTL_MS = Math.max(0, Math.min(86400000, pars
 const COMPETITION_HEATMAP_CACHE_TTL_MS = Math.max(0, Math.min(86400000, parseInt(process.env.COMPETITION_HEATMAP_CACHE_TTL_MS || '21600000', 10)));
 const COMPETITION_STATIC_MAP_CACHE_TTL_MS = Math.max(0, Math.min(86400000, parseInt(process.env.COMPETITION_STATIC_MAP_CACHE_TTL_MS || '21600000', 10)));
 const COMPETITION_GOOGLE_CONCURRENCY = Math.max(1, Math.min(5, parseInt(process.env.COMPETITION_GOOGLE_CONCURRENCY || '3', 10)));
+const COMPETITION_CACHE_VERSION = process.env.COMPETITION_CACHE_VERSION || 'competition-v2-static-map';
 
 const competitionRuntimeCache = new Map();
 const competitionInFlight = new Map();
@@ -218,7 +219,7 @@ function scopeCacheKey(scope) {
 }
 
 function cacheKey(parts) {
-  return parts.map((part) => typeof part === 'string' ? part : stableStringify(part)).join('|');
+  return [COMPETITION_CACHE_VERSION, ...parts].map((part) => typeof part === 'string' ? part : stableStringify(part)).join('|');
 }
 
 function pruneCompetitionCache(now = Date.now()) {
@@ -236,8 +237,9 @@ function pruneCompetitionCache(now = Date.now()) {
   for (const [key] of ordered.slice(0, overflow)) competitionRuntimeCache.delete(key);
 }
 
-async function cachedCompetitionValue(key, ttlMs, loader) {
+async function cachedCompetitionValue(key, ttlMs, loader, options = {}) {
   if (!ttlMs) return loader();
+  const cachePredicate = typeof options.cachePredicate === 'function' ? options.cachePredicate : () => true;
   const now = Date.now();
   const current = competitionRuntimeCache.get(key);
   if (current && current.expiresAt > now) {
@@ -250,13 +252,15 @@ async function cachedCompetitionValue(key, ttlMs, loader) {
   const promise = Promise.resolve()
     .then(loader)
     .then((value) => {
-      competitionRuntimeCache.set(key, {
-        value,
-        createdAt: Date.now(),
-        lastAccessed: Date.now(),
-        expiresAt: Date.now() + ttlMs
-      });
-      pruneCompetitionCache();
+      if (cachePredicate(value)) {
+        competitionRuntimeCache.set(key, {
+          value,
+          createdAt: Date.now(),
+          lastAccessed: Date.now(),
+          expiresAt: Date.now() + ttlMs
+        });
+        pruneCompetitionCache();
+      }
       return value;
     })
     .finally(() => competitionInFlight.delete(key));
@@ -1029,9 +1033,11 @@ function staticMapMarkerColor(position) {
   return '0xEF4444';
 }
 
-async function buildLocalHeatmapStaticMapDataUrl(center, points = [], radiusKm = 3) {
+async function buildLocalHeatmapStaticMap(center, points = [], radiusKm = 3) {
   const apiKey = getGooglePlacesApiKey();
-  if (!apiKey || !center?.latitude || !center?.longitude) return null;
+  if (!apiKey || !center?.latitude || !center?.longitude) {
+    return { dataUrl: null, error: { code: 'STATIC_MAP_NOT_CONFIGURED', message: 'Maps Static API no está configurada para este entorno.' } };
+  }
   const markerKey = (points || []).map((point) => [
     Number(point.latitude).toFixed(6),
     Number(point.longitude).toFixed(6),
@@ -1039,33 +1045,56 @@ async function buildLocalHeatmapStaticMapDataUrl(center, points = [], radiusKm =
   ]);
   return cachedCompetitionValue(cacheKey(['static-map', center.latitude, center.longitude, radiusKm, markerKey]), COMPETITION_STATIC_MAP_CACHE_TTL_MS, async () => {
     try {
-    const params = new URLSearchParams({
-      center: `${center.latitude},${center.longitude}`,
-      zoom: String(staticMapZoomForRadius(radiusKm)),
-      size: '640x420',
-      scale: '2',
-      maptype: 'roadmap',
-      language: DEFAULT_LANGUAGE,
-      region: DEFAULT_REGION,
-      key: apiKey
-    });
-    params.append('markers', `color:blue|label:C|${center.latitude},${center.longitude}`);
-    for (const [index, point] of points.entries()) {
-      if (!Number.isFinite(Number(point.latitude)) || !Number.isFinite(Number(point.longitude))) continue;
-      const label = String(index + 1);
-      params.append('markers', `color:${staticMapMarkerColor(point.my_position)}|label:${label}|${point.latitude},${point.longitude}`);
+      const params = new URLSearchParams({
+        center: `${center.latitude},${center.longitude}`,
+        zoom: String(staticMapZoomForRadius(radiusKm)),
+        size: '640x420',
+        scale: '2',
+        maptype: 'roadmap',
+        language: DEFAULT_LANGUAGE,
+        region: DEFAULT_REGION,
+        key: apiKey
+      });
+      params.append('markers', `color:blue|label:C|${center.latitude},${center.longitude}`);
+      for (const [index, point] of points.entries()) {
+        if (!Number.isFinite(Number(point.latitude)) || !Number.isFinite(Number(point.longitude))) continue;
+        const label = String(index + 1);
+        params.append('markers', `color:${staticMapMarkerColor(point.my_position)}|label:${label}|${point.latitude},${point.longitude}`);
+      }
+      const response = await axios.get(`https://maps.googleapis.com/maps/api/staticmap?${params.toString()}`, {
+        responseType: 'arraybuffer',
+        timeout: 12000,
+        maxContentLength: 1024 * 1024,
+        validateStatus: () => true
+      });
+      const contentType = response.headers?.['content-type'] || 'image/png';
+      if (response.status >= 400 || !String(contentType).startsWith('image/')) {
+        return {
+          dataUrl: null,
+          error: {
+            code: `STATIC_MAP_HTTP_${response.status}`,
+            message: 'Google Static Maps no ha devuelto una imagen válida.',
+            status: response.status
+          }
+        };
+      }
+      return {
+        dataUrl: `data:${contentType};base64,${Buffer.from(response.data).toString('base64')}`,
+        error: null
+      };
+    } catch (error) {
+      const normalized = normalizeExternalError(error);
+      return {
+        dataUrl: null,
+        error: {
+          code: normalized.code || 'STATIC_MAP_ERROR',
+          message: normalized.message || 'No se pudo generar el mapa estático.',
+          status: normalized.status || null
+        }
+      };
     }
-    const response = await axios.get(`https://maps.googleapis.com/maps/api/staticmap?${params.toString()}`, {
-      responseType: 'arraybuffer',
-      timeout: 12000,
-      maxContentLength: 1024 * 1024
-    });
-    const contentType = response.headers?.['content-type'] || 'image/png';
-    if (!String(contentType).startsWith('image/')) return null;
-    return `data:${contentType};base64,${Buffer.from(response.data).toString('base64')}`;
-    } catch (_) {
-      return null;
-    }
+  }, {
+    cachePredicate: (value) => !!value?.dataUrl
   });
 }
 
@@ -1573,7 +1602,7 @@ async function getLocalRankingHeatmap(scope, { term = null, zoomKm = 3 } = {}) {
     }
   }).then((items) => items.filter(Boolean));
 
-  const mapImageDataUrl = await buildLocalHeatmapStaticMapDataUrl(center, points, radiusKm);
+  const staticMap = await buildLocalHeatmapStaticMap(center, points, radiusKm);
 
   return {
     success: true,
@@ -1581,8 +1610,9 @@ async function getLocalRankingHeatmap(scope, { term = null, zoomKm = 3 } = {}) {
     available_terms: terms,
     zoom_km: radiusKm,
     center,
-    map_image_data_url: mapImageDataUrl,
-    map_provider: mapImageDataUrl ? 'google_static_maps' : null,
+    map_image_data_url: staticMap.dataUrl,
+    map_provider: staticMap.dataUrl ? 'google_static_maps' : null,
+    map_error: staticMap.error,
     own_profile: ownProfile ? {
       name: ownProfile.name,
       google_place_id: normalizePlaceId(ownProfile.google_place_id),
@@ -1590,7 +1620,8 @@ async function getLocalRankingHeatmap(scope, { term = null, zoomKm = 3 } = {}) {
     } : null,
     points
   };
-    }
+    },
+    { cachePredicate: (value) => !value?.success || !!value?.map_image_data_url }
   );
 }
 
