@@ -5,6 +5,7 @@ const chatFlowTemplatesController = require('../controllers/chatFlowTemplates.co
 const campaignOnboardingController = require('../controllers/campaignOnboarding.controller');
 const marketingReportsController = require('../controllers/marketingReports.controller');
 const marketingCompetitionController = require('../controllers/marketingCompetition.controller');
+const marketingReactivationController = require('../controllers/marketingReactivation.controller');
 
 router.use(authMiddleware);
 
@@ -17,6 +18,9 @@ router.post('/reports/competition/competitors', marketingCompetitionController.c
 router.patch('/reports/competition/competitors/:competitorId', marketingCompetitionController.updateCompetitor);
 router.delete('/reports/competition/competitors/:competitorId', marketingCompetitionController.deleteCompetitor);
 router.post('/reports/competition/refresh', marketingCompetitionController.refreshCompetition);
+
+// Reactivación de pacientes
+router.get('/reactivation/suggestions', marketingReactivationController.getSuggestions);
 
 // Catálogo de plantillas de flujos de chat (snippet web)
 router.get('/chat-flow-templates', chatFlowTemplatesController.listChatFlowTemplates);

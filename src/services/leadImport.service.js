@@ -416,7 +416,7 @@ const normalizeRowPayload = (row, mapping, config, campaignIndex, options = {}) 
 
   const sourceMeta = {
     source: config.source,
-    source_detail: null,
+    source_detail: cleanString(config.source_detail),
     channel: inferChannelFromSource(config.source),
   };
   const createdAt = parseFlexibleDate(mapped.created_at, { preferredOrder: options.createdAtOrder });
@@ -427,9 +427,12 @@ const normalizeRowPayload = (row, mapping, config, campaignIndex, options = {}) 
     }
     : null;
   const resolvedCampaign = selectedCampaign || null;
-  const effectiveSourceDetail = resolvedCampaign?.nombre || null;
+  const effectiveSourceDetail = resolvedCampaign?.nombre || sourceMeta.source_detail || null;
 
   const noteLines = [];
+  if (sourceMeta.source_detail === 'reactivacion_pacientes') {
+    noteLines.push('Origen: reactivación de pacientes.');
+  }
   const baseNotes = Array.isArray(mapped.notas) ? mapped.notas.filter(Boolean) : [];
   const mergedNotes = [...baseNotes, ...noteLines].filter(Boolean).join('\n');
   const normalizedStatus = 'nuevo';

@@ -672,6 +672,12 @@ Al importar:
 - registra `LeadAttributionAudit` con el raw de importación, mapping y contexto;
 - conserva `created_at` importado cuando la columna se ha mapeado como fecha de entrada;
 - materializa cita importada en `cita_propuesta` cuando el archivo trae fecha/hora/responsable/dirección.
+- conserva `config.source_detail` aunque no exista `campana_id`.
+
+Caso operativo:
+
+- si `source_detail=reactivacion_pacientes`, backend añade la nota interna `Origen: reactivación de pacientes.` al lead importado;
+- esto permite reutilizar el importador de `Marketing > Leads` desde `Marketing > Campañas > Reactivar pacientes` sin crear una tabla paralela prematura.
 
 ### Alcance del mapeo actual
 
@@ -697,6 +703,31 @@ Regla práctica:
 
 - si el archivo trae más columnas de negocio, hoy deben mapearse a `notas` o quedar fuera;
 - no se debe inventar una tabla paralela de importación para información que ya cabe razonablemente en `LeadIntake` o `cita_propuesta`.
+
+## 2026-04-26 - Reactivación de pacientes: sugerencias iniciales
+
+Endpoint:
+
+- `GET /api/marketing/reactivation/suggestions`
+
+Alcance:
+
+- acepta `clinica_id`, `clinic_id` o `scope=group:<id>`;
+- calcula sugerencias por tratamiento a partir de `CitasPacientes`;
+- considera la última cita por paciente y tratamiento;
+- aplica umbrales por tratamiento:
+  - ortodoncia: 6 meses;
+  - higiene/periodoncia: 9 meses;
+  - capilar: 12 meses;
+  - resto: 6 meses;
+- excluye como no enviables los pacientes con cita futura o teléfono no válido.
+
+Limitación:
+
+- no crea listas persistentes;
+- no congela audiencia;
+- no encola WhatsApp;
+- es una fuente de sugerencias para el MVP de `Marketing > Campañas > Reactivar pacientes`.
 
 ## 2026-03-24 - Análisis de campañas cache-only
 
