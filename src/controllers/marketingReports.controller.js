@@ -74,6 +74,7 @@ function buildRange(startDate, endDate, fallbackDays = 30) {
     start,
     end,
     endExclusive,
+    spanDays,
     startLabel: formatDate(start),
     endLabel: formatDate(end),
     startSql: formatDateTime(start),
@@ -88,6 +89,26 @@ function buildRange(startDate, endDate, fallbackDays = 30) {
       endExclusiveSql: formatDateTime(new Date(previousEnd.getTime() + DAY_MS)),
     },
   };
+}
+
+function enumerateDateLabels(range) {
+  const labels = [];
+  for (let ts = range.start.getTime(); ts < range.endExclusive.getTime(); ts += DAY_MS) {
+    labels.push(formatDate(new Date(ts)));
+  }
+  return labels;
+}
+
+function compactNumericSeries(values, maxPoints = 18) {
+  const list = Array.isArray(values) ? values.map((value) => toNumber(value)) : [];
+  if (list.length <= maxPoints) return list;
+  const bucketSize = Math.ceil(list.length / maxPoints);
+  const compacted = [];
+  for (let index = 0; index < list.length; index += bucketSize) {
+    const bucket = list.slice(index, index + bucketSize);
+    compacted.push(round(bucket.reduce((sum, value) => sum + value, 0), 2));
+  }
+  return compacted;
 }
 
 function toNumber(value) {
@@ -309,6 +330,52 @@ async function aggregateLeads(scope, range) {
   return { totals, channels };
 }
 
+async function aggregateLeadSeries(scope, range) {
+  if (!LeadIntake) return { leads: [], citas: [], acudieron: [], convertidos: [] };
+  const labels = enumerateDateLabels(range);
+  const empty = labels.map(() => 0);
+  const byDate = new Map(labels.map((label) => [label, {
+    leads: 0,
+    citas: 0,
+    acudieron: 0,
+    convertidos: 0,
+  }]));
+
+  const rows = await LeadIntake.findAll({
+    attributes: [
+      [fn('DATE', col('created_at')), 'date'],
+      'status_lead',
+      [fn('COUNT', col('id')), 'count'],
+    ],
+    where: {
+      ...scopedWhere('clinica_id', scope),
+      ...buildSequelizeDateWhere('created_at', range),
+    },
+    group: [literal('DATE(created_at)'), 'status_lead'],
+    raw: true,
+  });
+
+  for (const row of rows) {
+    const date = String(row.date || '').slice(0, 10);
+    const bucket = byDate.get(date);
+    if (!bucket) continue;
+    const count = toNumber(row.count);
+    const status = String(row.status_lead || '').toLowerCase();
+    bucket.leads += count;
+    if (CITED_LEAD_STATUSES.has(status)) bucket.citas += count;
+    if (ATTENDED_LEAD_STATUSES.has(status)) bucket.acudieron += count;
+    if (CONVERTED_LEAD_STATUSES.has(status)) bucket.convertidos += count;
+  }
+
+  if (!labels.length) return { leads: empty, citas: empty, acudieron: empty, convertidos: empty };
+  return {
+    leads: labels.map((label) => byDate.get(label)?.leads || 0),
+    citas: labels.map((label) => byDate.get(label)?.citas || 0),
+    acudieron: labels.map((label) => byDate.get(label)?.acudieron || 0),
+    convertidos: labels.map((label) => byDate.get(label)?.convertidos || 0),
+  };
+}
+
 async function countAppointments(scope, range) {
   if (!CitaPaciente) return { creadas: 0, completadas: 0, noAsistio: 0 };
   const baseWhere = {
@@ -322,6 +389,91 @@ async function countAppointments(scope, range) {
     CitaPaciente.count({ where: { ...baseWhere, estado: 'no_asistio' } }),
   ]);
   return { creadas, completadas, noAsistio };
+}
+
+async function aggregateAppointmentSeries(scope, range) {
+  if (!CitaPaciente) return { citas: [], acudieron: [] };
+  const labels = enumerateDateLabels(range);
+  const byDate = new Map(labels.map((label) => [label, { citas: 0, acudieron: 0 }]));
+
+  const rows = await CitaPaciente.findAll({
+    attributes: [
+      [fn('DATE', col('created_at')), 'date'],
+      'estado',
+      [fn('COUNT', col('id_cita')), 'count'],
+    ],
+    where: {
+      ...scopedWhere('clinica_id', scope),
+      ...buildSequelizeDateWhere('created_at', range),
+      lead_intake_id: { [Op.ne]: null },
+    },
+    group: [literal('DATE(created_at)'), 'estado'],
+    raw: true,
+  });
+
+  for (const row of rows) {
+    const date = String(row.date || '').slice(0, 10);
+    const bucket = byDate.get(date);
+    if (!bucket) continue;
+    const count = toNumber(row.count);
+    bucket.citas += count;
+    if (String(row.estado || '').toLowerCase() === 'completada') bucket.acudieron += count;
+  }
+
+  return {
+    citas: labels.map((label) => byDate.get(label)?.citas || 0),
+    acudieron: labels.map((label) => byDate.get(label)?.acudieron || 0),
+  };
+}
+
+async function aggregateSpendSeries(scope, range) {
+  const labels = enumerateDateLabels(range);
+  const byDate = new Map(labels.map((label) => [label, 0]));
+
+  if (GoogleAdsInsightsDaily) {
+    const rows = await GoogleAdsInsightsDaily.findAll({
+      attributes: [
+        'date',
+        [fn('SUM', col('costMicros')), 'costMicros'],
+      ],
+      where: {
+        ...buildAdsScopeWhere(scope, 'clinicaId', 'grupoClinicaId'),
+        ...buildDateOnlyWhere('date', range),
+      },
+      group: ['date'],
+      raw: true,
+    });
+    for (const row of rows) {
+      const date = String(row.date || '').slice(0, 10);
+      if (byDate.has(date)) {
+        byDate.set(date, byDate.get(date) + (toNumber(row.costMicros) / 1_000_000));
+      }
+    }
+  }
+
+  if (SocialAdsInsightsDaily) {
+    const rows = await SocialAdsInsightsDaily.findAll({
+      attributes: [
+        'date',
+        [fn('SUM', col('spend')), 'spend'],
+      ],
+      where: {
+        ...buildAdsScopeWhere(scope, 'clinica_id', 'grupo_clinica_id'),
+        ...buildDateOnlyWhere('date', range),
+        level: 'campaign',
+      },
+      group: ['date'],
+      raw: true,
+    });
+    for (const row of rows) {
+      const date = String(row.date || '').slice(0, 10);
+      if (byDate.has(date)) {
+        byDate.set(date, byDate.get(date) + toNumber(row.spend));
+      }
+    }
+  }
+
+  return labels.map((label) => money(byDate.get(label) || 0));
 }
 
 async function aggregateForms(scope, range) {
@@ -1480,17 +1632,29 @@ async function buildSyncStatus(scope, { seo, googleAds, metaAds, ga, businessPro
   };
 }
 
-function buildKpis(current, previous) {
+function buildKpis(current, previous, series = {}) {
   const { leads, citas, acudieron, convertidos, spend } = current;
   const cpl = leads ? spend / leads : 0;
   const cpaCita = citas ? spend / citas : 0;
   const cpaAcudio = acudieron ? spend / acudieron : 0;
   const cpaConvertido = convertidos ? spend / convertidos : 0;
+  const leadSeries = Array.isArray(series.leads) ? series.leads : [];
+  const citaSeries = Array.isArray(series.citas) ? series.citas : [];
+  const acudioSeries = Array.isArray(series.acudieron) ? series.acudieron : [];
+  const convertidoSeries = Array.isArray(series.convertidos) ? series.convertidos : [];
+  const spendSeries = Array.isArray(series.spend) ? series.spend : [];
+  const ratioSeries = leadSeries.map((value, index) => ratioPct(citaSeries[index] || 0, value, 1));
+  const cplSeries = leadSeries.map((value, index) => value ? money((spendSeries[index] || 0) / value) : 0);
+  const cpaCitaSeries = citaSeries.map((value, index) => value ? money((spendSeries[index] || 0) / value) : 0);
+  const cpaAcudioSeries = acudioSeries.map((value, index) => value ? money((spendSeries[index] || 0) / value) : 0);
+  const cpaConvertidoSeries = convertidoSeries.map((value, index) => value ? money((spendSeries[index] || 0) / value) : 0);
+
   return [
     {
       id: 'leads',
       label: 'Leads reales recibidos',
       value: leads,
+      sparkline: compactNumericSeries(leadSeries),
       helpText: 'Personas que dejaron sus datos a través de tu web, WhatsApp, llamada o campañas.',
       trend: pct(leads, previous.leads),
       trendLabel: 'vs. periodo anterior',
@@ -1500,6 +1664,7 @@ function buildKpis(current, previous) {
       id: 'citas',
       label: 'Citas creadas desde esos leads',
       value: citas,
+      sparkline: compactNumericSeries(citaSeries),
       helpText: 'Leads que acabaron con una cita agendada en tu clínica.',
       trend: pct(citas, previous.citas),
       trendLabel: 'vs. periodo anterior',
@@ -1509,6 +1674,7 @@ function buildKpis(current, previous) {
       id: 'acudieron',
       label: 'Pacientes que acudieron',
       value: acudieron,
+      sparkline: compactNumericSeries(acudioSeries),
       helpText: 'De las citas creadas desde leads, cuántos pacientes vinieron realmente.',
       trend: pct(acudieron, previous.acudieron),
       trendLabel: 'vs. periodo anterior',
@@ -1518,6 +1684,7 @@ function buildKpis(current, previous) {
       id: 'convertidos',
       label: 'Pacientes que realizan tratamiento',
       value: convertidos,
+      sparkline: compactNumericSeries(convertidoSeries),
       helpText: 'Pacientes marcados como convertidos tras acudir y avanzar a tratamiento. En V1 se alimenta desde LeadIntake.status_lead=convertido.',
       trend: pct(convertidos, previous.convertidos),
       trendLabel: 'vs. periodo anterior',
@@ -1528,6 +1695,7 @@ function buildKpis(current, previous) {
       label: 'Ratio de conversión lead -> cita',
       value: ratioPct(citas, leads, 0),
       suffix: '%',
+      sparkline: compactNumericSeries(ratioSeries),
       helpText: 'De cada 100 leads, cuántos acaban con cita.',
       trend: pct(ratioPct(citas, leads, 2), ratioPct(previous.citas, previous.leads, 2)),
       trendLabel: 'vs. periodo anterior',
@@ -1538,6 +1706,7 @@ function buildKpis(current, previous) {
       label: 'Inversión total en publicidad',
       value: money(spend),
       prefix: '€',
+      sparkline: compactNumericSeries(spendSeries),
       helpText: 'Gasto sincronizado de Google Ads y Meta Ads en el periodo.',
       trend: pct(spend, previous.spend),
       trendLabel: 'vs. periodo anterior',
@@ -1548,6 +1717,7 @@ function buildKpis(current, previous) {
       label: 'Coste medio por lead',
       value: money(cpl),
       prefix: '€',
+      sparkline: compactNumericSeries(cplSeries),
       helpText: 'Cuánto cuesta conseguir cada lead real registrado en ClinicaClick.',
       trend: pct(cpl, previous.leads ? previous.spend / previous.leads : 0),
       trendLabel: 'vs. periodo anterior',
@@ -1558,6 +1728,7 @@ function buildKpis(current, previous) {
       label: 'Coste medio por cita',
       value: money(cpaCita),
       prefix: '€',
+      sparkline: compactNumericSeries(cpaCitaSeries),
       helpText: 'Cuánto cuesta que un lead acabe con cita agendada.',
       trend: pct(cpaCita, previous.citas ? previous.spend / previous.citas : 0),
       trendLabel: 'vs. periodo anterior',
@@ -1568,6 +1739,7 @@ function buildKpis(current, previous) {
       label: 'Coste por paciente que acudió',
       value: money(cpaAcudio),
       prefix: '€',
+      sparkline: compactNumericSeries(cpaAcudioSeries),
       helpText: 'Cuánto cuesta que un paciente venga realmente a consulta.',
       trend: pct(cpaAcudio, previous.acudieron ? previous.spend / previous.acudieron : 0),
       trendLabel: 'vs. periodo anterior',
@@ -1578,6 +1750,7 @@ function buildKpis(current, previous) {
       label: 'Coste por paciente con tratamiento',
       value: money(cpaConvertido),
       prefix: '€',
+      sparkline: compactNumericSeries(cpaConvertidoSeries),
       helpText: 'Cuánto cuesta captar un paciente que acaba realizando tratamiento.',
       trend: pct(cpaConvertido, previous.convertidos ? previous.spend / previous.convertidos : 0),
       trendLabel: 'vs. periodo anterior',
@@ -1659,8 +1832,11 @@ exports.getOverview = async (req, res) => {
     const [
       leads,
       previousLeads,
+      leadSeries,
       appointments,
       previousAppointments,
+      appointmentSeries,
+      spendSeries,
       formsCount,
       whatsappWeb,
       intakeConfigCount,
@@ -1675,8 +1851,11 @@ exports.getOverview = async (req, res) => {
     ] = await Promise.all([
       aggregateLeads(scope, range),
       aggregateLeads(scope, range.previous),
+      aggregateLeadSeries(scope, range),
       countAppointments(scope, range),
       countAppointments(scope, range.previous),
+      aggregateAppointmentSeries(scope, range),
+      aggregateSpendSeries(scope, range),
       aggregateForms(scope, range),
       aggregateWhatsappWebOrigins(scope, range),
       getIntakeConfigCount(scope),
@@ -1722,7 +1901,14 @@ exports.getOverview = async (req, res) => {
 
     const kpis = buildKpis(
       { leads: leads.totals.leads, citas, acudieron, convertidos, spend: currentSpend },
-      { leads: previousLeads.totals.leads, citas: previousCitas, acudieron: previousAcudieron, convertidos: previousConvertidos, spend: previousSpend }
+      { leads: previousLeads.totals.leads, citas: previousCitas, acudieron: previousAcudieron, convertidos: previousConvertidos, spend: previousSpend },
+      {
+        leads: leadSeries.leads,
+        citas: leadSeries.citas.map((value, index) => Math.max(value, appointmentSeries.citas[index] || 0)),
+        acudieron: leadSeries.acudieron.map((value, index) => Math.max(value, appointmentSeries.acudieron[index] || 0)),
+        convertidos: leadSeries.convertidos,
+        spend: spendSeries,
+      }
     );
 
     const funnelBase = [
