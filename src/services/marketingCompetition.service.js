@@ -37,9 +37,9 @@ const META_BROWSER_MEDIA_LIMIT = Math.max(0, Math.min(DEFAULT_AD_LIMIT, parseInt
 const META_BROWSER_MEDIA_TIMEOUT_MS = Math.max(3000, Math.min(45000, parseInt(process.env.COMPETITION_META_BROWSER_MEDIA_TIMEOUT_MS || '15000', 10)));
 const META_BROWSER_MEDIA_IDLE_MS = Math.max(0, Math.min(300000, parseInt(process.env.COMPETITION_META_BROWSER_MEDIA_IDLE_MS || '60000', 10)));
 const META_BROWSER_MEDIA_MIN_MISSING = Math.max(1, Math.min(DEFAULT_AD_LIMIT, parseInt(process.env.COMPETITION_META_BROWSER_MEDIA_MIN_MISSING || '1', 10)));
-const LOCAL_HEATMAP_GRID_SIZE = Math.max(3, Math.min(5, parseInt(process.env.COMPETITION_LOCAL_HEATMAP_GRID_SIZE || '3', 10)));
-const LOCAL_HEATMAP_MAX_POINTS = Math.max(1, Math.min(25, parseInt(process.env.COMPETITION_LOCAL_HEATMAP_MAX_POINTS || '9', 10)));
-const LOCAL_HEATMAP_RESULT_LIMIT = Math.max(3, Math.min(20, parseInt(process.env.COMPETITION_LOCAL_HEATMAP_RESULT_LIMIT || '10', 10)));
+const LOCAL_HEATMAP_GRID_SIZE = Math.max(3, Math.min(5, parseInt(process.env.COMPETITION_LOCAL_HEATMAP_GRID_SIZE || '5', 10)));
+const LOCAL_HEATMAP_MAX_POINTS = Math.max(1, Math.min(25, parseInt(process.env.COMPETITION_LOCAL_HEATMAP_MAX_POINTS || '25', 10)));
+const LOCAL_HEATMAP_RESULT_LIMIT = Math.max(3, Math.min(20, parseInt(process.env.COMPETITION_LOCAL_HEATMAP_RESULT_LIMIT || '20', 10)));
 const SOCIAL_DISCOVERY_TIMEOUT_MS = Math.max(1000, Math.min(15000, parseInt(process.env.COMPETITION_SOCIAL_DISCOVERY_TIMEOUT_MS || '8000', 10)));
 const SOCIAL_DISCOVERY_PAGE_LIMIT = Math.max(1, Math.min(6, parseInt(process.env.COMPETITION_SOCIAL_DISCOVERY_PAGE_LIMIT || '4', 10)));
 const META_PAGE_MATCH_THRESHOLD = Math.max(20, Math.min(100, parseInt(process.env.COMPETITION_META_PAGE_MATCH_THRESHOLD || '45', 10)));
@@ -54,7 +54,7 @@ const COMPETITION_PLACE_PHOTO_CACHE_TTL_MS = Math.max(0, Math.min(86400000, pars
 const COMPETITION_HEATMAP_CACHE_TTL_MS = Math.max(0, Math.min(86400000, parseInt(process.env.COMPETITION_HEATMAP_CACHE_TTL_MS || '21600000', 10)));
 const COMPETITION_STATIC_MAP_CACHE_TTL_MS = Math.max(0, Math.min(86400000, parseInt(process.env.COMPETITION_STATIC_MAP_CACHE_TTL_MS || '21600000', 10)));
 const COMPETITION_GOOGLE_CONCURRENCY = Math.max(1, Math.min(5, parseInt(process.env.COMPETITION_GOOGLE_CONCURRENCY || '3', 10)));
-const COMPETITION_CACHE_VERSION = process.env.COMPETITION_CACHE_VERSION || 'competition-v5-clean-static-map';
+const COMPETITION_CACHE_VERSION = process.env.COMPETITION_CACHE_VERSION || 'competition-v6-heatmap-5x5-depth20';
 
 const competitionRuntimeCache = new Map();
 const competitionInFlight = new Map();
@@ -1548,8 +1548,7 @@ function heatmapScore(position) {
   if (!position) return 0;
   if (position <= 3) return 100;
   if (position <= 5) return 75;
-  if (position <= 10) return 45;
-  return 20;
+  return 35;
 }
 
 async function getLocalRankingHeatmap(scope, { term = null, zoomKm = 3 } = {}) {
@@ -1668,6 +1667,8 @@ async function getLocalRankingHeatmap(scope, { term = null, zoomKm = 3 } = {}) {
     effective_term: heatmapQuery,
     available_terms: terms,
     zoom_km: radiusKm,
+    grid_size: LOCAL_HEATMAP_GRID_SIZE % 2 === 0 ? LOCAL_HEATMAP_GRID_SIZE - 1 : LOCAL_HEATMAP_GRID_SIZE,
+    result_limit: LOCAL_HEATMAP_RESULT_LIMIT,
     center,
     map_image_data_url: staticMap.dataUrl,
     map_provider: staticMap.dataUrl ? 'google_static_maps' : null,
