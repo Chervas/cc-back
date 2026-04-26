@@ -252,6 +252,7 @@ Principios:
 - Mapa de calor local:
   - Cada tile simula una búsqueda desde la coordenada del tile usando Google Places Text Search con `locationRestriction.rectangle`.
   - El zoom (`1/3/5 km`) solo separa más o menos los puntos alrededor de la clínica. No debe ampliar la ventana de búsqueda de cada tile, porque entonces el punto `Centro` de 3 km/5 km deja de ser comparable con el de 1 km.
+  - El mapa de Google Static Maps debe ser solo fondo visual, sin `markers`. Los marcadores se pintan en frontend con los resultados calculados; si se añaden marcadores al PNG aparece duplicado el punto central (`label:5`) bajo el marcador propio.
   - La consulta efectiva elimina sufijos geográficos redundantes del término elegido (`"clínica capilar en Alicante"` -> `"clínica capilar"`) y la UI muestra también el término original si cambia.
   - La caché del heatmap incluye `COMPETITION_CACHE_VERSION`; al cambiar la semántica del cálculo hay que subir la versión para no mezclar mediciones antiguas.
 

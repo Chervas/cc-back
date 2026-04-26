@@ -54,7 +54,7 @@ const COMPETITION_PLACE_PHOTO_CACHE_TTL_MS = Math.max(0, Math.min(86400000, pars
 const COMPETITION_HEATMAP_CACHE_TTL_MS = Math.max(0, Math.min(86400000, parseInt(process.env.COMPETITION_HEATMAP_CACHE_TTL_MS || '21600000', 10)));
 const COMPETITION_STATIC_MAP_CACHE_TTL_MS = Math.max(0, Math.min(86400000, parseInt(process.env.COMPETITION_STATIC_MAP_CACHE_TTL_MS || '21600000', 10)));
 const COMPETITION_GOOGLE_CONCURRENCY = Math.max(1, Math.min(5, parseInt(process.env.COMPETITION_GOOGLE_CONCURRENCY || '3', 10)));
-const COMPETITION_CACHE_VERSION = process.env.COMPETITION_CACHE_VERSION || 'competition-v4-local-point-search';
+const COMPETITION_CACHE_VERSION = process.env.COMPETITION_CACHE_VERSION || 'competition-v5-clean-static-map';
 
 const competitionRuntimeCache = new Map();
 const competitionInFlight = new Map();
@@ -1026,24 +1026,12 @@ function staticMapZoomForRadius(radiusKm) {
   return 13;
 }
 
-function staticMapMarkerColor(position) {
-  if (!position) return '0x94A3B8';
-  if (position <= 3) return '0x22C55E';
-  if (position <= 5) return '0xF59E0B';
-  return '0xEF4444';
-}
-
 async function buildLocalHeatmapStaticMap(center, points = [], radiusKm = 3) {
   const apiKey = getGooglePlacesApiKey();
   if (!apiKey || !center?.latitude || !center?.longitude) {
     return { dataUrl: null, error: { code: 'STATIC_MAP_NOT_CONFIGURED', message: 'Maps Static API no está configurada para este entorno.' } };
   }
-  const markerKey = (points || []).map((point) => [
-    Number(point.latitude).toFixed(6),
-    Number(point.longitude).toFixed(6),
-    point.my_position || null
-  ]);
-  return cachedCompetitionValue(cacheKey(['static-map', center.latitude, center.longitude, radiusKm, markerKey]), COMPETITION_STATIC_MAP_CACHE_TTL_MS, async () => {
+  return cachedCompetitionValue(cacheKey(['static-map-background', center.latitude, center.longitude, radiusKm]), COMPETITION_STATIC_MAP_CACHE_TTL_MS, async () => {
     try {
       const params = new URLSearchParams({
         center: `${center.latitude},${center.longitude}`,
@@ -1055,12 +1043,6 @@ async function buildLocalHeatmapStaticMap(center, points = [], radiusKm = 3) {
         region: DEFAULT_REGION,
         key: apiKey
       });
-      params.append('markers', `color:blue|label:C|${center.latitude},${center.longitude}`);
-      for (const [index, point] of points.entries()) {
-        if (!Number.isFinite(Number(point.latitude)) || !Number.isFinite(Number(point.longitude))) continue;
-        const label = String(index + 1);
-        params.append('markers', `color:${staticMapMarkerColor(point.my_position)}|label:${label}|${point.latitude},${point.longitude}`);
-      }
       const response = await axios.get(`https://maps.googleapis.com/maps/api/staticmap?${params.toString()}`, {
         responseType: 'arraybuffer',
         timeout: 12000,
