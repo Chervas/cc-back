@@ -91,6 +91,19 @@ Antes de activar coexistencia sobre un numero real:
 - hay fixtures de QA en `src/scripts/fixtures/whatsapp-coexistence/`;
 - Propdental se usara como numero de QA, pero no debe relanzarse Embedded Signup ni cambiar el modo de conexion mientras haya mensajes reales de cita pendientes.
 
+## 2026-04-26 - Intake: verificacion Consent Mode v2 y avisos externos
+
+- `GET /api/intake/verify-snippet` no debe decidir compatibilidad de Consent Mode v2 solo por el query param `?v=` del `<script>`.
+- Si el snippet instalado apunta a un asset de `*.clinicaclick.com`, el verificador puede inspeccionar el JS servido y leer version/capacidades reales. Esto evita falsos negativos con instalaciones tipo `https://crm.clinicaclick.com/assets/intake.js` sin version en la URL.
+- La verificacion devuelve y persiste:
+  - `consent_mode_detected`;
+  - `consent_mode_domains`;
+  - `cookie_notice_detected`;
+  - `cookie_notice_provider`;
+  - `google_consent_mode_detected`.
+- `cookie_notice_detected` se usa para avisar al usuario de posible doble banner cuando activa el Aviso de Cookies + Consent Mode v2 de ClinicaClick en una web que ya carga Complianz, Cookiebot, OneTrust u otro CMP.
+- Si el snippet no esta instalado, no se puede verificar el runtime de Consent Mode v2. En ese caso la UI debe apoyarse en el bloque general de verificacion de instalacion, no mostrar una alerta preventiva de Consent.
+
 ## 2026-04-13 - Intake: flujos de chat para clínica cerrada
 
 Se añade soporte real para plantillas de flujos de chat que solo deben mostrarse cuando la clínica está fuera de horario.

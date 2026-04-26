@@ -2624,6 +2624,9 @@ exports.upsertIntakeConfig = asyncHandler(async (req, res) => {
       consent_mode_domains: Array.isArray(body.snippet_verification.consent_mode_domains)
         ? body.snippet_verification.consent_mode_domains
         : [],
+      cookie_notice_detected: !!body.snippet_verification.cookie_notice_detected,
+      cookie_notice_provider: body.snippet_verification.cookie_notice_provider || null,
+      google_consent_mode_detected: !!body.snippet_verification.google_consent_mode_detected,
       checked_urls: body.snippet_verification.checked_urls && typeof body.snippet_verification.checked_urls === 'object'
         ? body.snippet_verification.checked_urls
         : {}
@@ -2822,7 +2825,84 @@ exports.verifySnippetInstalled = asyncHandler(async (req, res) => {
     return true;
   };
 
-  const getSnippetRuntimeInfo = (tags) => {
+  const isClinicaClickAssetHost = (src, checkedUrl) => {
+    try {
+      const url = new URL(src, checkedUrl || `https://${domain}/`);
+      const host = normalizeDomain(url.hostname);
+      return Boolean(
+        host === 'clinicaclick.com' ||
+        host.endsWith('.clinicaclick.com') ||
+        host === 'localhost' ||
+        host === '127.0.0.1'
+      );
+    } catch {
+      return false;
+    }
+  };
+
+  const fetchSnippetScriptInfo = async (src, checkedUrl) => {
+    if (!src || !isClinicaClickAssetHost(src, checkedUrl)) return null;
+    try {
+      const url = new URL(src, checkedUrl || `https://${domain}/`).toString();
+      const resp = await axios.get(url, {
+        timeout: 5000,
+        maxRedirects: 3,
+        maxContentLength: 512 * 1024,
+        maxBodyLength: 512 * 1024,
+        headers: {
+          'User-Agent': 'ClinicaClick Snippet Verifier/1.0',
+          'Accept': 'application/javascript,text/javascript,*/*;q=0.8',
+          'Cache-Control': 'no-cache',
+          'Pragma': 'no-cache',
+        },
+        validateStatus: (s) => s >= 200 && s < 400,
+      });
+      const body = typeof resp.data === 'string' ? resp.data : '';
+      if (!body) return null;
+      const version =
+        body.match(/ClinicaClick\s+Intake\s+Snippet\s+v([0-9]+(?:\.[0-9]+){0,3})/i)?.[1] ||
+        body.match(/\bversion\s*:\s*['"]([0-9]+(?:\.[0-9]+){0,3})['"]/i)?.[1] ||
+        null;
+      const hasConsentRuntime =
+        /consent_mode_enabled/i.test(body) &&
+        (/gtag\s*\(\s*['"]consent['"]/i.test(body) || /Consent\s+Mode/i.test(body));
+      return { version, hasConsentRuntime };
+    } catch (err) {
+      console.warn('[intake] No se pudo inspeccionar runtime del snippet', src, err?.message || err);
+      return null;
+    }
+  };
+
+  const detectExternalCookieNotice = (htmlToCheck) => {
+    const html = String(htmlToCheck || '');
+    const providers = [];
+    const add = (name, pattern) => {
+      if (pattern.test(html) && !providers.includes(name)) providers.push(name);
+    };
+
+    add('Complianz', /cmplz-|complianz/i);
+    add('Cookiebot', /cookiebot|CybotCookiebot/i);
+    add('OneTrust', /onetrust|Optanon/i);
+    add('CookieYes', /cookieyes|cky-consent/i);
+    add('Iubenda', /iubenda/i);
+    add('Didomi', /didomi/i);
+    add('Borlabs Cookie', /borlabs-cookie/i);
+    add('Cookie Notice', /cookie-notice|cn-notice/i);
+    add('GDPR Cookie Compliance', /moove_gdpr|gdpr-cookie-compliance/i);
+
+    const googleConsentModeDetected =
+      /gtag\s*\(\s*['"]consent['"]\s*,\s*['"]default['"]/i.test(html) ||
+      /_googlesitekitConsents/i.test(html) ||
+      /wp-consent-api/i.test(html);
+
+    return {
+      cookie_notice_detected: providers.length > 0,
+      cookie_notice_provider: providers.join(', ') || null,
+      google_consent_mode_detected: googleConsentModeDetected,
+    };
+  };
+
+  const getSnippetRuntimeInfo = async (tags, checkedUrl) => {
     let usesLoader = false;
     let runtimeVersion = null;
     let consentModeDetected = false;
@@ -2839,13 +2919,26 @@ exports.verifySnippetInstalled = asyncHandler(async (req, res) => {
         if (versionAtLeast(version, '3.2.1')) {
           consentModeDetected = true;
         }
+        if (!consentModeDetected || !runtimeVersion) {
+          const scriptInfo = await fetchSnippetScriptInfo(src, checkedUrl);
+          if (scriptInfo?.version) {
+            runtimeVersion = scriptInfo.version;
+          }
+          if (
+            scriptInfo?.hasConsentRuntime ||
+            versionAtLeast(scriptInfo?.version, '3.2.1')
+          ) {
+            consentModeDetected = true;
+          }
+        }
       }
     }
 
     return { uses_loader: usesLoader, runtime_version: runtimeVersion, consent_mode_detected: consentModeDetected };
   };
 
-  const evaluateSnippetHtml = (htmlToCheck, checkedUrl) => {
+  const evaluateSnippetHtml = async (htmlToCheck, checkedUrl) => {
+    const externalCookieNoticeInfo = detectExternalCookieNotice(htmlToCheck);
     const scriptTags = htmlToCheck.match(/<script\b[^>]*>/gi) || [];
     const snippetTags = scriptTags.filter((t) => /(intake|loader)\.js/i.test(t));
     if (snippetTags.length === 0) {
@@ -2853,7 +2946,8 @@ exports.verifySnippetInstalled = asyncHandler(async (req, res) => {
         installed: false,
         reason: 'missing_snippet',
         checked_url: checkedUrl,
-        details: `No se encontró el fragmento de código de medición de ClinicaClick en ${checkedUrl || domain}.`
+        details: `No se encontró el fragmento de código de medición de ClinicaClick en ${checkedUrl || domain}.`,
+        ...externalCookieNoticeInfo,
       };
     }
 
@@ -2870,11 +2964,12 @@ exports.verifySnippetInstalled = asyncHandler(async (req, res) => {
         installed: false,
         reason: 'scope_mismatch',
         checked_url: checkedUrl,
-        details: `Se encontró el fragmento de código de medición, pero no coincide con esta configuración (${expectedAttr}="${expectedId}").${hint ? ` ${hint}` : ''}`
+        details: `Se encontró el fragmento de código de medición, pero no coincide con esta configuración (${expectedAttr}="${expectedId}").${hint ? ` ${hint}` : ''}`,
+        ...externalCookieNoticeInfo,
       };
     }
 
-    const runtimeInfo = getSnippetRuntimeInfo(tagsForScope);
+    const runtimeInfo = await getSnippetRuntimeInfo(tagsForScope, checkedUrl);
 
     // Si existe HMAC en backend, aceptar cualquier tag del scope que tenga la clave vigente.
     // Esto evita falsos negativos cuando queda un plugin/snippet antiguo activo además del nuevo.
@@ -2886,7 +2981,7 @@ exports.verifySnippetInstalled = asyncHandler(async (req, res) => {
       });
 
       if (hmacKeys.includes(expectedHmac)) {
-        return { installed: true, checked_url: checkedUrl, ...runtimeInfo };
+        return { installed: true, checked_url: checkedUrl, ...runtimeInfo, ...externalCookieNoticeInfo };
       }
 
       if (hmacKeys.every((key) => !key)) {
@@ -2894,7 +2989,8 @@ exports.verifySnippetInstalled = asyncHandler(async (req, res) => {
           installed: false,
           reason: 'missing_hmac',
           checked_url: checkedUrl,
-          details: 'Se encontró el fragmento de código de medición, pero le falta la clave de seguridad (HMAC).'
+          details: 'Se encontró el fragmento de código de medición, pero le falta la clave de seguridad (HMAC).',
+          ...externalCookieNoticeInfo,
         };
       }
 
@@ -2902,11 +2998,12 @@ exports.verifySnippetInstalled = asyncHandler(async (req, res) => {
         installed: false,
         reason: 'hmac_mismatch',
         checked_url: checkedUrl,
-        details: 'Se encontró el fragmento de código de medición, pero la clave de seguridad no coincide con la que tiene guardada ClinicaClick.'
+        details: 'Se encontró el fragmento de código de medición, pero la clave de seguridad no coincide con la que tiene guardada ClinicaClick.',
+        ...externalCookieNoticeInfo,
       };
     }
 
-    return { installed: true, checked_url: checkedUrl, ...runtimeInfo };
+    return { installed: true, checked_url: checkedUrl, ...runtimeInfo, ...externalCookieNoticeInfo };
   };
 
   const primaryFetch = await fetchFirstHtml(uniqueCandidates, false);
@@ -2919,7 +3016,7 @@ exports.verifySnippetInstalled = asyncHandler(async (req, res) => {
     });
   }
 
-  const primaryEvaluation = evaluateSnippetHtml(primaryFetch.html, primaryFetch.finalUrl);
+  const primaryEvaluation = await evaluateSnippetHtml(primaryFetch.html, primaryFetch.finalUrl);
   if (primaryEvaluation.installed) {
     return res.json({
       installed: true,
@@ -2927,13 +3024,16 @@ exports.verifySnippetInstalled = asyncHandler(async (req, res) => {
       consent_mode_detected: !!primaryEvaluation.consent_mode_detected,
       uses_loader: !!primaryEvaluation.uses_loader,
       runtime_version: primaryEvaluation.runtime_version || null,
+      cookie_notice_detected: !!primaryEvaluation.cookie_notice_detected,
+      cookie_notice_provider: primaryEvaluation.cookie_notice_provider || null,
+      google_consent_mode_detected: !!primaryEvaluation.google_consent_mode_detected,
     });
   }
 
   const bypassCandidates = uniqueCandidates.map(withCacheBust);
   const bypassFetch = await fetchFirstHtml(bypassCandidates, true);
   if (bypassFetch.html) {
-    const bypassEvaluation = evaluateSnippetHtml(bypassFetch.html, bypassFetch.finalUrl);
+    const bypassEvaluation = await evaluateSnippetHtml(bypassFetch.html, bypassFetch.finalUrl);
     if (bypassEvaluation.installed) {
       return res.json({
         installed: false,
@@ -2943,6 +3043,9 @@ exports.verifySnippetInstalled = asyncHandler(async (req, res) => {
         consent_mode_detected: !!bypassEvaluation.consent_mode_detected,
         uses_loader: !!bypassEvaluation.uses_loader,
         runtime_version: bypassEvaluation.runtime_version || null,
+        cookie_notice_detected: !!bypassEvaluation.cookie_notice_detected,
+        cookie_notice_provider: bypassEvaluation.cookie_notice_provider || null,
+        google_consent_mode_detected: !!bypassEvaluation.google_consent_mode_detected,
         details: 'La web devuelve el snippet correcto al saltar caché, pero la página normal sigue sirviendo una versión antigua o sin HMAC. Purga la caché de WordPress, del hosting o de la CDN y vuelve a verificar.'
       });
     }
