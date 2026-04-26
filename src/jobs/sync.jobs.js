@@ -32,6 +32,7 @@ const notificationService = require('../services/notifications.service');
 const { enqueueSyncForAllWabas } = require('../services/whatsappTemplates.service');
 const { enqueueSyncPhonesForAllWabas } = require('../services/whatsappPhones.service');
 const marketingCompetitionService = require('../services/marketingCompetition.service');
+const webEventsService = require('../services/webEvents.service');
 
 const GOOGLE_BUSINESS_PERFORMANCE_API = 'https://businessprofileperformance.googleapis.com/v1';
 const GOOGLE_MY_BUSINESS_API = 'https://mybusiness.googleapis.com/v4';
@@ -201,6 +202,7 @@ class MetaSyncJobs {
       businessProfileSync: 'Sincroniza Perfil de Empresa Google: rendimiento local, reseñas y publicaciones.',
       businessProfileBackfill: 'Backfill de Perfil de Empresa Google para nuevas fichas o reprocesos.',
       competitionSync: 'Actualiza semanalmente benchmark local: competidores, ficha publica Google Places y anuncios activos desde Meta Ads Library oficial.',
+      webEventsAggregate: 'Agrega WebEvents propios en tablas diarias para informes sin recalcular desde el front.',
       whatsappTemplatesSync: 'Sincroniza estados de plantillas WhatsApp para todos los WABA activos.',
       whatsappPhonesSync: 'Sincroniza números WhatsApp (existencia/estado) para evitar datos desactualizados.',
       automationHealthCheck: 'Barrido funcional de automatizaciones críticas: flujos fallidos, jobs vencidos y ejecuciones atascadas.',
@@ -228,6 +230,7 @@ class MetaSyncJobs {
         businessProfileSync: process.env.JOBS_BUSINESS_PROFILE_SCHEDULE || '10 5 * * *',
         businessProfileBackfill: process.env.JOBS_BUSINESS_PROFILE_BACKFILL_SCHEDULE || '20 5 * * 0',
         competitionSync: process.env.JOBS_COMPETITION_SCHEDULE || '0 6 * * 1',
+        webEventsAggregate: process.env.JOBS_WEB_EVENTS_AGGREGATE_SCHEDULE || '*/15 * * * *',
         whatsappTemplatesSync: process.env.JOBS_WHATSAPP_TEMPLATES_SCHEDULE || '*/20 * * * *',
         whatsappPhonesSync: process.env.JOBS_WHATSAPP_PHONES_SCHEDULE || '*/15 * * * *',
         automationHealthCheck: process.env.JOBS_AUTOMATION_HEALTH_CHECK_SCHEDULE || '0 10,16 * * *'
@@ -320,6 +323,7 @@ class MetaSyncJobs {
       this.registerJob('businessProfileSync', this.config.schedules.businessProfileSync, () => this.executeBusinessProfileSync());
       this.registerJob('businessProfileBackfill', this.config.schedules.businessProfileBackfill, () => this.executeBusinessProfileBackfill());
       this.registerJob('competitionSync', this.config.schedules.competitionSync, () => this.executeCompetitionSync());
+      this.registerJob('webEventsAggregate', this.config.schedules.webEventsAggregate, () => this.executeWebEventsAggregate());
       this.registerJob('whatsappTemplatesSync', this.config.schedules.whatsappTemplatesSync, () => this.executeWhatsappTemplatesSync());
       this.registerJob('whatsappPhonesSync', this.config.schedules.whatsappPhonesSync, () => this.executeWhatsappPhonesSync());
       this.registerJob('automationHealthCheck', this.config.schedules.automationHealthCheck, () => this.executeAutomationHealthCheck());
@@ -1586,6 +1590,37 @@ class MetaSyncJobs {
         error_message: error.message
       });
       console.error('❌ Error en competitionSync:', error);
+      throw error;
+    }
+  }
+
+  async executeWebEventsAggregate(options = {}) {
+    const syncLog = await SyncLog.create({
+      job_type: 'web_events_aggregate',
+      status: 'running',
+      start_time: new Date(),
+      records_processed: 0
+    });
+
+    try {
+      const aggregate = await webEventsService.aggregateWebEvents(options);
+      const cleanup = options.skipCleanup ? { deleted: 0, skipped: true } : await webEventsService.cleanupWebEvents();
+      const report = { aggregate, cleanup };
+      await syncLog.update({
+        status: 'completed',
+        end_time: new Date(),
+        records_processed: aggregate.processed || 0,
+        status_report: report
+      });
+      console.log('✅ webEventsAggregate completado', report);
+      return { status: 'completed', processed: aggregate.processed || 0, report };
+    } catch (error) {
+      await syncLog.update({
+        status: 'failed',
+        end_time: new Date(),
+        error_message: error.message
+      });
+      console.error('❌ Error en webEventsAggregate:', error);
       throw error;
     }
   }

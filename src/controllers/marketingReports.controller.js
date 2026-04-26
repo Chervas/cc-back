@@ -3,6 +3,7 @@
 const { Op, fn, col, literal } = require('sequelize');
 const db = require('../../models');
 const { resolveClinicScope, buildAssetScopeWhere } = require('../lib/clinicScope');
+const webEventsService = require('../services/webEvents.service');
 
 const {
   LeadIntake,
@@ -28,6 +29,8 @@ const {
   BusinessProfileReview,
   JobRequest,
   WhatsAppWebOrigin,
+  WebPageDaily,
+  WebSessionDaily,
 } = db;
 
 const QueryTypes = db.Sequelize.QueryTypes;
@@ -1057,21 +1060,38 @@ async function aggregateWebPages(scope, range, seoPages = []) {
   const replacements = {
     startTs: range.startSql,
     endTs: range.endExclusiveSql,
+    startDate: range.startLabel,
+    endDate: range.endLabel,
     limit: 5,
   };
   const leadClinicSql = scopedRawSql('clinica_id', scope, replacements, 'leadPageClinicIds');
   const formClinicSql = scopedRawSql('clinic_id', scope, replacements, 'formPageClinicIds');
   const whatsappClinicSql = scopedRawSql('clinic_id', scope, replacements, 'waPageClinicIds');
+  const webPageClinicSql = WebPageDaily ? scopedRawSql('clinic_id', scope, replacements, 'webPageClinicIds') : '';
 
   const rows = await sequelize.query(
     `SELECT url,
+            SUM(visits) AS visits,
             SUM(leads) AS leads,
             SUM(clicks_tel) AS clicksTel,
             SUM(clicks_wa) AS clicksWa,
             SUM(whatsapp_confirmados) AS whatsappConfirmados,
             SUM(formularios) AS formularios
        FROM (
+             ${WebPageDaily ? `
+             SELECT COALESCE(NULLIF(page_url, ''), 'Sin página') AS url,
+                    SUM(pageviews) AS visits,
+                    0 AS leads,
+                    SUM(tel_clicks) AS clicks_tel,
+                    SUM(whatsapp_clicks) AS clicks_wa,
+                    0 AS whatsapp_confirmados,
+                    SUM(form_submits) AS formularios
+               FROM WebPageDaily
+              WHERE date >= :startDate AND date <= :endDate ${webPageClinicSql}
+              GROUP BY COALESCE(NULLIF(page_url, ''), 'Sin página')
+             UNION ALL` : ''}
              SELECT COALESCE(NULLIF(page_url, ''), NULLIF(landing_url, ''), 'Sin página') AS url,
+                    0 AS visits,
                     COUNT(*) AS leads,
                     SUM(CASE WHEN source = 'call_click' THEN 1 ELSE 0 END) AS clicks_tel,
                     0 AS clicks_wa,
@@ -1082,6 +1102,7 @@ async function aggregateWebPages(scope, range, seoPages = []) {
               GROUP BY COALESCE(NULLIF(page_url, ''), NULLIF(landing_url, ''), 'Sin página')
              UNION ALL
              SELECT COALESCE(NULLIF(page_url, ''), 'Sin página') AS url,
+                    0 AS visits,
                     0 AS leads,
                     0 AS clicks_tel,
                     0 AS clicks_wa,
@@ -1092,6 +1113,7 @@ async function aggregateWebPages(scope, range, seoPages = []) {
               GROUP BY COALESCE(NULLIF(page_url, ''), 'Sin página')
              UNION ALL
              SELECT COALESCE(NULLIF(page_url, ''), 'Sin página') AS url,
+                    0 AS visits,
                     0 AS leads,
                     0 AS clicks_tel,
                     COUNT(*) AS clicks_wa,
@@ -1117,7 +1139,7 @@ async function aggregateWebPages(scope, range, seoPages = []) {
     const formularios = toNumber(row.formularios);
     const clicksTel = toNumber(row.clicksTel);
     const clicksWa = toNumber(row.clicksWa);
-    const visits = Math.max(toNumber(seoClicksByPath.get(normalizeUrlKey(row.url))), leads + formularios + clicksTel + clicksWa);
+    const visits = Math.max(toNumber(row.visits), toNumber(seoClicksByPath.get(normalizeUrlKey(row.url))), leads + formularios + clicksTel + clicksWa);
     return {
       url: row.url || 'Sin página',
       shortName: shortUrl(row.url || 'Sin página'),
@@ -1254,8 +1276,8 @@ function distributeCampaignAppointments(campaigns, platformChannelStats) {
   });
 }
 
-function buildSources({ intakeConfigCount, leadsTotal, seo, googleAds, metaAds, ga, businessProfile, social, mappingCounts = {} }) {
-  const clinicaClickConnected = intakeConfigCount > 0 || leadsTotal > 0;
+function buildSources({ intakeConfigCount, leadsTotal, seo, googleAds, metaAds, ga, businessProfile, social, firstParty, mappingCounts = {} }) {
+  const clinicaClickConnected = intakeConfigCount > 0 || leadsTotal > 0 || !!firstParty?.connected;
   const searchConsoleMapped = toNumber(mappingCounts.search_console) > 0;
   const analyticsMapped = toNumber(mappingCounts.analytics) > 0;
   const businessProfileMapped = toNumber(mappingCounts.business_profile) > 0;
@@ -1270,10 +1292,12 @@ function buildSources({ intakeConfigCount, leadsTotal, seo, googleAds, metaAds, 
       icon: 'heroicons_outline:chart-bar-square',
       connected: clinicaClickConnected,
       label: clinicaClickConnected ? 'Activo' : 'Pendiente',
-      tooltip: clinicaClickConnected
+      tooltip: firstParty?.connected
+        ? 'ClinicaClick Analytics está capturando visitas y acciones propias con WebEvents.'
+        : clinicaClickConnected
         ? 'Hay configuración de medición o leads capturados por ClinicaClick.'
         : 'Aún no hay configuración o datos capturados por el snippet de ClinicaClick.',
-      lastSync: leadsTotal > 0 ? 'Tiempo real' : undefined,
+      lastSync: firstParty?.lastDate || (leadsTotal > 0 ? 'Tiempo real' : undefined),
       source: 'ClinicaClick',
     },
     {
@@ -1816,7 +1840,7 @@ function buildRecommendations({ businessProfile, adsCampaigns, webPages, intakeC
       icon: 'heroicons_outline:check-badge',
       iconColor: 'text-green-500',
       title: 'ClinicaClick Analytics tiene configuración activa',
-      description: 'Los formularios, llamadas y WhatsApp ya pueden atribuirse a leads. Pageviews propios quedan para la siguiente fase de analítica.',
+      description: 'Los formularios, llamadas, WhatsApp y pageviews propios se agregan en backend cuando WebEvents está activo.',
       severity: 'success',
     });
   }
@@ -1848,6 +1872,7 @@ exports.getOverview = async (req, res) => {
       seo,
       social,
       businessProfile,
+      firstParty,
     ] = await Promise.all([
       aggregateLeads(scope, range),
       aggregateLeads(scope, range.previous),
@@ -1867,6 +1892,7 @@ exports.getOverview = async (req, res) => {
       aggregateSeo(scope, range),
       aggregateSocialOrganic(scope, range),
       aggregateBusinessProfile(scope, range),
+      webEventsService.getFirstPartySummary(scope, range),
     ]);
 
     const webPages = await aggregateWebPages(scope, range, seo.pages);
@@ -1893,6 +1919,8 @@ exports.getOverview = async (req, res) => {
       .slice(0, 8);
 
     const visitsOrClicks = Math.max(
+      firstParty.pageviews,
+      firstParty.sessions,
       ga.sessions,
       googleAds.totals.clicks + metaAds.totals.clicks + seo.summary.clicks,
       leads.totals.leads,
@@ -1912,7 +1940,7 @@ exports.getOverview = async (req, res) => {
     );
 
     const funnelBase = [
-      { id: 'visitas', label: ga.sessions ? 'Sesiones / visitas' : 'Visitas / clicks', value: visitsOrClicks, color: '#6366f1', helpText: 'Sesiones GA4 si existen; si no, clicks medidos desde SEO y Ads.' },
+      { id: 'visitas', label: firstParty.pageviews ? 'Visitas web propias' : (ga.sessions ? 'Sesiones / visitas' : 'Visitas / clicks'), value: visitsOrClicks, color: '#6366f1', helpText: firstParty.pageviews ? 'Pageviews capturados por ClinicaClick Analytics con consentimiento.' : 'Sesiones GA4 si existen; si no, clicks medidos desde SEO y Ads.' },
       { id: 'leads', label: 'Leads', value: leads.totals.leads, color: '#8b5cf6', helpText: 'Personas que dejaron sus datos.' },
       { id: 'contacto', label: 'Contactados', value: leads.totals.contactados, color: '#a78bfa', helpText: 'Leads con contacto o avance comercial.' },
       { id: 'citas', label: 'Cita creada', value: citas, color: '#c4b5fd', helpText: 'Leads que agendaron cita.' },
@@ -1934,12 +1962,15 @@ exports.getOverview = async (req, res) => {
 
     const webSummary = {
       totalVisitas: visitsOrClicks,
-      clicksTelefono: leads.channels.get('call_click')?.leads || 0,
-      clicksWhatsApp: whatsappWebClicks,
+      sessions: firstParty.sessions,
+      visitors: firstParty.visitors,
+      firstPartyPageviews: firstParty.pageviews,
+      clicksTelefono: Math.max(firstParty.telClicks, leads.channels.get('call_click')?.leads || 0),
+      clicksWhatsApp: Math.max(firstParty.whatsappClicks, whatsappWebClicks),
       whatsappWebClicks,
       whatsappWebConfirmed: whatsappWeb.confirmed,
       webConvertedPatients,
-      formularios: formsCount,
+      formularios: Math.max(firstParty.formSubmits, formsCount),
     };
 
     const sync = await buildSyncStatus(scope, {
@@ -1960,6 +1991,7 @@ exports.getOverview = async (req, res) => {
       ga,
       businessProfile,
       social,
+      firstParty,
       mappingCounts: sync.mappingCounts,
     }).map((source) => ({
       ...source,
@@ -2000,8 +2032,10 @@ exports.getOverview = async (req, res) => {
       businessProfile: businessProfile.metrics,
       recommendations,
       dataQuality: {
-        firstPartyPageviews: false,
-        note: 'V1 usa leads, formularios, citas y agregados externos existentes. Pageviews propios requieren WebEvents/WebPageDaily.',
+        firstPartyPageviews: firstParty.connected,
+        note: firstParty.connected
+          ? 'V1 usa WebEvents propios agregados en backend, además de leads, formularios, citas y fuentes externas.'
+          : 'V1 usa leads, formularios, citas y agregados externos existentes. Pageviews propios aparecerán cuando WebEvents tenga datos agregados.',
       },
     });
   } catch (error) {

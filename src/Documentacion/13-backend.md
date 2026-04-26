@@ -204,11 +204,15 @@ Search Console:
 - Las escrituras de queries se hacen por lotes (`SEARCH_CONSOLE_BULK_CHUNK_SIZE`, por defecto `500`) para no superar `max_allowed_packet` de MySQL.
 - Si se ve `Got a packet bigger than max_allowed_packet` seguido de `write EPIPE`, la causa probable es un bulk demasiado grande, no un problema de permisos de Search Console. Relanzar el job después de aplicar el troceado debe cerrar el aviso de `Revisar sync`.
 
-Limitación consciente:
+ClinicaClick Analytics V1:
 
-- No existen todavía `WebEvents`, `WebPageDaily`, `WebClickDaily` ni `WebSessionDaily`.
-- Por eso las visitas propias del funnel usan GA4 si existe o clicks sincronizados desde Ads/SEO como fallback.
-- El frontend debe mostrar nota de calidad de datos y no vender esa métrica como pageviews propios hasta cerrar `ClinicaClick Analytics V1`.
+- Desde 2026-04-26 existen `WebEvents`, `WebPageDaily`, `WebClickDaily` y `WebSessionDaily`.
+- `POST /api/intake/events` persiste eventos propios desde `intake.js` además de mantener Meta CAPI / Google Ads cuando proceda.
+- Si `Consent Mode v2` está activo para el scope, los envíos server-side a Meta/Google se bloquean hasta consentimiento de marketing explícito.
+- Los eventos analíticos propios se guardan solo si hay consentimiento analítico o si Consent Mode no está activado para la clínica.
+- `consent_update` se persiste siempre para poder auditar cambios de consentimiento.
+- `GET /api/marketing/reports/overview` prioriza `WebPageDaily` / `WebSessionDaily` para pageviews, sesiones y visitantes. GA4 queda como fuente opcional/fallback histórico.
+- `webEventsAggregate` recalcula agregados para una ventana reciente y limpia eventos brutos antiguos según `WEB_EVENTS_RETENTION_DAYS`.
 
 ## 2026-04-21 - Informes de competencia local V1
 
@@ -835,6 +839,7 @@ Defaults actuales de interés:
 - `JOBS_ANALYTICS_SCHEDULE`: `45 4 * * *`
 - `JOBS_BUSINESS_PROFILE_SCHEDULE`: `10 5 * * *`
 - `JOBS_BUSINESS_PROFILE_BACKFILL_SCHEDULE`: `20 5 * * 0`
+- `JOBS_WEB_EVENTS_AGGREGATE_SCHEDULE`: `*/15 * * * *`
 - `JOBS_ADS_MIDDAY_SCHEDULE`: `0 12 * * *`
 - `JOBS_WHATSAPP_PHONES_SCHEDULE`: `*/15 * * * *`
 - `JOBS_WHATSAPP_TEMPLATES_SCHEDULE`: `*/20 * * * *`
@@ -844,6 +849,8 @@ Defaults actuales de interés:
 Ventanas y límites asociados:
 
 - `ADS_SYNC_INITIAL_DAYS`
+- `WEB_EVENTS_AGGREGATE_DAYS`: días recientes a reagregar en cada pasada, por defecto `3`.
+- `WEB_EVENTS_RETENTION_DAYS`: retención de `WebEvents` brutos, por defecto `120`.
 - `ADS_SYNC_RECENT_DAYS`
 - `ADS_SYNC_MIDDAY_DAYS`
 - `ADS_SYNC_BACKFILL_DAYS`

@@ -27,6 +27,7 @@ const WhatsAppWebOrigin = db.WhatsAppWebOrigin;
 const { enqueueInboundFormSubmissionResume } = require('../services/automationsV2Resume.service');
 const { sendMetaEvent, buildUserData: buildMetaUserData } = require('../services/metaCapi.service');
 const { uploadClickConversion } = require('../services/googleAdsConversion.service');
+const webEventsService = require('../services/webEvents.service');
 const { getIO } = require('../services/socket.service');
 const jobRequestsService = require('../services/jobRequests.service');
 const { previewLeadImport, executeLeadImport } = require('../services/leadImport.service');
@@ -938,6 +939,32 @@ const normalizeGoogleConsent = (consent) => {
   );
 };
 
+const boolConsent = (value) => {
+  if (value === undefined || value === null || value === '') return null;
+  if (typeof value === 'boolean') return value;
+  const normalized = String(value).trim().toLowerCase();
+  if (['granted', 'grant', 'accepted', 'accept', 'yes', 'true', '1', 'optin', 'opt_in'].includes(normalized)) return true;
+  if (['denied', 'deny', 'rejected', 'reject', 'no', 'false', '0', 'optout', 'opt_out'].includes(normalized)) return false;
+  return null;
+};
+
+const normalizeMarketingConsent = (consent) => {
+  if (!consent || typeof consent !== 'object' || Array.isArray(consent)) return null;
+  const marketing = boolConsent(consent.marketing ?? consent.ad_storage ?? consent.adStorage);
+  const adUserData = boolConsent(consent.ad_user_data ?? consent.adUserData ?? marketing);
+  const adPersonalization = boolConsent(consent.ad_personalization ?? consent.adPersonalization ?? marketing);
+  if (marketing === false || adUserData === false || adPersonalization === false) return false;
+  if (marketing === true || adUserData === true || adPersonalization === true) return true;
+  return null;
+};
+
+const isConsentModeEnabledForRecord = (record) => {
+  const cfg = record?.config && typeof record.config === 'object' && !Array.isArray(record.config)
+    ? record.config
+    : {};
+  return cfg.features?.consent_mode_enabled === true;
+};
+
 const parseSendToActionId = (sendTo) => {
   if (!sendTo) return null;
   const parts = String(sendTo).trim().split('/');
@@ -1671,6 +1698,9 @@ exports.ingestLead = asyncHandler(async (req, res) => {
     clinicCfg: finalClinicCfg,
     groupCfg: finalGroupCfg
   });
+  const leadConsentModeEnabled = [cfg, finalClinicCfg, finalGroupCfg].some(isConsentModeEnabledForRecord);
+  const leadMarketingConsent = normalizeMarketingConsent(coalesce(body.consent, body.consentimiento_canal) || null);
+  const allowLeadAdPlatformEvents = !leadConsentModeEnabled || leadMarketingConsent === true;
 
   // Emitir a Meta CAPI si hay datos mínimos
   try {
@@ -1681,20 +1711,22 @@ exports.ingestLead = asyncHandler(async (req, res) => {
       ua: coalesce(user_agent, req.headers['user-agent']),
       externalId: lead.id
     });
-    await sendMetaEvent({
-      eventName: normalizedEventNameForCapi,
-      eventTime: Math.floor(Date.now() / 1000),
-      eventId: lead.event_id || `lead-${lead.id}`,
-      actionSource: 'website',
-      eventSourceUrl: pageUrlValue || landingUrlValue || null,
-      clinicId: clinicaIdParsed,
-      source: normalizedSource,
-      sourceDetail: source_detail || null,
-      utmCampaign: utmCampaign || null,
-      userData,
-      pixelId: metaRuntime.pixelId,
-      accessToken: metaRuntime.accessToken
-    });
+    if (allowLeadAdPlatformEvents) {
+      await sendMetaEvent({
+        eventName: normalizedEventNameForCapi,
+        eventTime: Math.floor(Date.now() / 1000),
+        eventId: lead.event_id || `lead-${lead.id}`,
+        actionSource: 'website',
+        eventSourceUrl: pageUrlValue || landingUrlValue || null,
+        clinicId: clinicaIdParsed,
+        source: normalizedSource,
+        sourceDetail: source_detail || null,
+        utmCampaign: utmCampaign || null,
+        userData,
+        pixelId: metaRuntime.pixelId,
+        accessToken: metaRuntime.accessToken
+      });
+    }
   } catch (e) {
     console.warn('⚠️ No se pudo enviar evento Meta CAPI:', e.message || e);
   }
@@ -1715,18 +1747,20 @@ exports.ingestLead = asyncHandler(async (req, res) => {
       send_to: coalesce(body.send_to, body.sendTo),
       consent: coalesce(body.consent, body.consentimiento_canal)
     };
-    await maybeUploadGoogleConversion({
-      cfgRecord: cfg,
-      googleAdsConfig: effectiveTracking.google_ads,
-      eventName: normalizedEventNameForCapi,
-      customData: googleCustomData,
-      userData: {
-        email: leadEmail,
-        phone: leadTelefono
-      },
-      consent: coalesce(body.consent, body.consentimiento_canal),
-      eventId: lead.event_id || `lead-${lead.id}`
-    });
+    if (allowLeadAdPlatformEvents) {
+      await maybeUploadGoogleConversion({
+        cfgRecord: cfg,
+        googleAdsConfig: effectiveTracking.google_ads,
+        eventName: normalizedEventNameForCapi,
+        customData: googleCustomData,
+        userData: {
+          email: leadEmail,
+          phone: leadTelefono
+        },
+        consent: coalesce(body.consent, body.consentimiento_canal),
+        eventId: lead.event_id || `lead-${lead.id}`
+      });
+    }
   } catch (adsErr) {
     console.warn('⚠️ Google Ads upload error (ingestLead):', adsErr.response?.data || adsErr.message || adsErr);
   }
@@ -2186,7 +2220,14 @@ const defaultConfigPayload = (clinicId, groupId) => ({
   assignment_scope: groupId ? 'group' : 'clinic',
   config_exists: false,
   domains: [],
-  features: { chat_enabled: true, tel_modal_enabled: true, viewcontent_enabled: true, form_intercept_enabled: true },
+  features: {
+    chat_enabled: true,
+    tel_modal_enabled: true,
+    viewcontent_enabled: true,
+    form_intercept_enabled: true,
+    webevents_enabled: true,
+    consent_mode_enabled: false
+  },
   flow: DEFAULT_CHAT_FLOW,
   flows: null,
   appearance: DEFAULT_APPEARANCE,
@@ -3156,6 +3197,25 @@ exports.receiveIntakeEvent = asyncHandler(async (req, res) => {
     clinicCfg: finalClinicCfg,
     groupCfg: finalGroupCfg
   });
+  const consentRecord = cfg || finalClinicCfg || finalGroupCfg || null;
+  const consentModeEnabled = [cfg, finalClinicCfg, finalGroupCfg].some(isConsentModeEnabledForRecord);
+  const marketingConsent = normalizeMarketingConsent(body.consent || custom_data.consent || eventDataFromBody.consent || null);
+  const allowAdPlatformEvents = !consentModeEnabled || marketingConsent === true;
+
+  try {
+    await webEventsService.recordWebEvent({
+      req,
+      body,
+      cfgRecord: consentRecord,
+      clinicId: cfg?.clinic_id || clinicIdParsed || null,
+      groupId: cfg?.group_id || groupIdParsed || null,
+      eventName: eventName || 'ViewContent',
+      eventSourceUrl,
+      customData: custom_data
+    });
+  } catch (webEventErr) {
+    console.warn('⚠️ WebEvent persist error:', webEventErr.message || webEventErr);
+  }
 
   const userData = buildMetaUserData({
     email: user_data.email,
@@ -3167,22 +3227,24 @@ exports.receiveIntakeEvent = asyncHandler(async (req, res) => {
     externalId: user_data.external_id
   });
 
-  await sendMetaEvent({
-    eventName: eventName || 'ViewContent',
-    eventTime: body.event_time || Math.floor(Date.now() / 1000),
-    eventId: body.event_id || undefined,
-    actionSource: body.action_source || 'website',
-    eventSourceUrl: eventSourceUrl || undefined,
-    clinicId: cfg?.clinic_id || clinicIdParsed || null,
-    source: custom_data.source,
-    sourceDetail: custom_data.source_detail,
-    utmCampaign: custom_data.utm_campaign,
-    value: custom_data.value,
-    currency: custom_data.currency || 'EUR',
-    userData,
-    pixelId: metaRuntime.pixelId,
-    accessToken: metaRuntime.accessToken
-  });
+  if (allowAdPlatformEvents) {
+    await sendMetaEvent({
+      eventName: eventName || 'ViewContent',
+      eventTime: body.event_time || Math.floor(Date.now() / 1000),
+      eventId: body.event_id || undefined,
+      actionSource: body.action_source || 'website',
+      eventSourceUrl: eventSourceUrl || undefined,
+      clinicId: cfg?.clinic_id || clinicIdParsed || null,
+      source: custom_data.source,
+      sourceDetail: custom_data.source_detail,
+      utmCampaign: custom_data.utm_campaign,
+      value: custom_data.value,
+      currency: custom_data.currency || 'EUR',
+      userData,
+      pixelId: metaRuntime.pixelId,
+      accessToken: metaRuntime.accessToken
+    });
+  }
 
   // Google Ads Enhanced Conversions (server-side)
   // Prioridad de configuración:
@@ -3190,18 +3252,20 @@ exports.receiveIntakeEvent = asyncHandler(async (req, res) => {
   // 2) config.google_ads (clínica/grupo)
   // 3) variables de entorno
   try {
-    await maybeUploadGoogleConversion({
-      cfgRecord: cfg,
-      googleAdsConfig: effectiveTracking.google_ads,
-      eventName: eventName || 'ViewContent',
-      customData: {
-        ...custom_data,
-        conversion_time: coalesce(custom_data.conversion_time, custom_data.conversionDateTime, body.event_time)
-      },
-      userData: user_data,
-      consent: body.consent || null,
-      eventId: body.event_id || user_data.external_id || null
-    });
+    if (allowAdPlatformEvents) {
+      await maybeUploadGoogleConversion({
+        cfgRecord: cfg,
+        googleAdsConfig: effectiveTracking.google_ads,
+        eventName: eventName || 'ViewContent',
+        customData: {
+          ...custom_data,
+          conversion_time: coalesce(custom_data.conversion_time, custom_data.conversionDateTime, body.event_time)
+        },
+        userData: user_data,
+        consent: body.consent || null,
+        eventId: body.event_id || user_data.external_id || null
+      });
+    }
   } catch (adsErr) {
     console.warn('⚠️ Google Ads upload error (events):', adsErr.response?.data || adsErr.message || adsErr);
   }
