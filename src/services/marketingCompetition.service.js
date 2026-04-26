@@ -812,7 +812,18 @@ function mergeSocialProfiles(left = null, right = null) {
   const result = {};
   for (const source of [left, right]) {
     if (!source || typeof source !== 'object') continue;
-    for (const field of ['instagram_url', 'instagram_username', 'facebook_url', 'facebook_username', 'source', 'checked_at', 'error']) {
+    for (const field of [
+      'instagram_url',
+      'instagram_username',
+      'instagram_followers_count',
+      'facebook_url',
+      'facebook_username',
+      'facebook_followers_count',
+      'followers_count',
+      'source',
+      'checked_at',
+      'error'
+    ]) {
       if (source[field] && !result[field]) result[field] = source[field];
     }
   }
@@ -837,6 +848,34 @@ function buildSocialProfilesFromPayload(payload = {}) {
     checked_at: instagramUrl || facebookUrl ? new Date().toISOString() : null
   };
   return Object.fromEntries(Object.entries(profiles).filter(([, value]) => !!value));
+}
+
+async function enrichSocialProfilesWithMetaPublicMetrics(profiles, pageId, accessToken) {
+  const normalizedPageId = cleanString(pageId);
+  if (!profiles || !normalizedPageId || !accessToken) return profiles;
+
+  try {
+    const response = await metaGet(encodeURIComponent(normalizedPageId), {
+      params: { fields: 'id,name,link,fan_count,followers_count' },
+      accessToken,
+      timeout: 12000
+    });
+    const facebookFollowers = toInt(response.data?.followers_count) || toInt(response.data?.fan_count);
+    if (!facebookFollowers) return profiles;
+    return mergeSocialProfiles(profiles, {
+      facebook_followers_count: facebookFollowers,
+      followers_count: Math.max(toInt(profiles.followers_count) || 0, facebookFollowers),
+      source: profiles.source || 'meta_public_page',
+      checked_at: new Date().toISOString()
+    });
+  } catch (error) {
+    const message = error?.response?.data?.error?.message || error?.message || 'meta_public_metrics_unavailable';
+    return mergeSocialProfiles(profiles, {
+      source: profiles.source || 'meta_public_page',
+      checked_at: new Date().toISOString(),
+      error: cleanString(message)
+    });
+  }
 }
 
 function withSocialProfilesInRawPayload(rawPayload, profiles) {
@@ -2439,9 +2478,27 @@ async function fetchMetaAdsForCompetitor(competitor, scope) {
     result.ads = filterMetaAdsForCompetitor(competitor, result.ads);
   }
 
+  const baseSocialProfiles = mergeSocialProfiles(
+    socialProfilesFromPayload(competitor.raw_place_payload),
+    resolvedPage?.page_id ? {
+      facebook_url: resolvedPage.page_url || metaAdsLibraryPageUrl(resolvedPage.page_id),
+      facebook_username: usernameFromSocialUrl(resolvedPage.page_url, 'facebook'),
+      source: 'meta_ads_library',
+      checked_at: new Date().toISOString()
+    } : null
+  );
+  const socialProfiles = resolvedPage?.page_id
+    ? await enrichSocialProfilesWithMetaPublicMetrics(
+      baseSocialProfiles,
+      resolvedPage.page_id,
+      accessToken
+    )
+    : baseSocialProfiles;
+
   return {
     tokenSource: source,
     resolvedPage: resolvedPage || null,
+    socialProfiles,
     raw: {
       ...result.raw,
       clinicaclick_resolution: {
@@ -3484,6 +3541,9 @@ async function refreshOneCompetitor(competitor, scope) {
     }
     if (metaResult.resolvedPage?.page_url && !cleanString(competitor.meta_page_url)) {
       patch.meta_page_url = metaResult.resolvedPage.page_url;
+    }
+    if (metaResult.socialProfiles) {
+      patch.raw_place_payload = withSocialProfilesInRawPayload(patch.raw_place_payload || competitor.raw_place_payload, metaResult.socialProfiles);
     }
     patch.last_ads_synced_at = new Date();
   } catch (error) {
