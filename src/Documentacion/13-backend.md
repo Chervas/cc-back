@@ -225,6 +225,8 @@ ClinicaClick Analytics V1:
 - `POST /api/intake/events` persiste eventos propios desde `intake.js` además de mantener Meta CAPI / Google Ads cuando proceda.
 - Si `Aviso de Cookies + Consent Mode v2` está activo para el scope, los envíos server-side a Meta/Google se bloquean hasta consentimiento de marketing explícito.
 - Los eventos analíticos propios se guardan solo si hay consentimiento analítico o si Consent Mode no está activado para la clínica.
+- `ViewContent` no debe persistirse antes de consentimiento analítico cuando Consent Mode está activo. El runtime lo reintenta una sola vez tras aceptar/guardar consentimiento para no perder la primera visita consentida.
+- El backend normaliza variantes emitidas por el runtime (`WhatsAppClick`, `FormSubmit`, etc.) a tipos canónicos (`whatsapp_click`, `form_submit`) antes de agregar. La migración `20260426224500-normalize-web-event-action-types.js` corrige eventos y agregados ya escritos con nombres compactados legacy.
 - `consent_update` se persiste siempre para poder auditar cambios de consentimiento.
 - Desde `intake.js` v3.2.1, la configuración legal canónica del aviso de cookies es `legal_url`, `cookies_url` y `privacy_url`. `terms_url` queda como alias legacy de `legal_url`.
 - `IntakeConfig.config.snippet_verification` conserva `consent_mode_detected` y `consent_mode_domains`; no eliminarlos en el upsert porque Marketing > Web los usa para saber si la web instalada ya carga un runtime compatible.
