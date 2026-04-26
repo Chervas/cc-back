@@ -54,7 +54,7 @@ const COMPETITION_PLACE_PHOTO_CACHE_TTL_MS = Math.max(0, Math.min(86400000, pars
 const COMPETITION_HEATMAP_CACHE_TTL_MS = Math.max(0, Math.min(86400000, parseInt(process.env.COMPETITION_HEATMAP_CACHE_TTL_MS || '21600000', 10)));
 const COMPETITION_STATIC_MAP_CACHE_TTL_MS = Math.max(0, Math.min(86400000, parseInt(process.env.COMPETITION_STATIC_MAP_CACHE_TTL_MS || '21600000', 10)));
 const COMPETITION_GOOGLE_CONCURRENCY = Math.max(1, Math.min(5, parseInt(process.env.COMPETITION_GOOGLE_CONCURRENCY || '3', 10)));
-const COMPETITION_CACHE_VERSION = process.env.COMPETITION_CACHE_VERSION || 'competition-v3-local-restriction';
+const COMPETITION_CACHE_VERSION = process.env.COMPETITION_CACHE_VERSION || 'competition-v4-local-point-search';
 
 const competitionRuntimeCache = new Map();
 const competitionInFlight = new Map();
@@ -1521,9 +1521,10 @@ function heatmapSearchTermForClinic(term, clinic) {
   return cleanString(stripped) || raw;
 }
 
-function heatmapRestrictionHalfSizeMeters(radiusKm) {
-  const radius = Number(radiusKm) || 1;
-  return Math.max(450, Math.min(2500, Math.round(radius * 550)));
+function heatmapRestrictionHalfSizeMeters() {
+  // Each tile simulates a search from that point. The zoom changes where the
+  // points are placed, but not the local search window itself.
+  return 650;
 }
 
 function rectangleAroundPoint(point, halfSizeMeters) {

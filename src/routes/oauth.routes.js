@@ -87,6 +87,9 @@ const GOOGLE_BUSINESS_LOCATION_READ_MASK = [
     'websiteUri',
     'metadata',
     'openInfo',
+    'regularHours',
+    'specialHours',
+    'moreHours',
     'serviceArea',
     'labels'
 ].join(',');
@@ -575,6 +578,9 @@ function normalizeBusinessLocation(location, account) {
         websiteUri: location.websiteUri || null,
         phoneNumbers: location.phoneNumbers || null,
         openInfo: location.openInfo || null,
+        regularHours: location.regularHours || null,
+        specialHours: location.specialHours || null,
+        moreHours: location.moreHours || null,
         serviceArea: location.serviceArea || null,
         labels: location.labels || null,
         rawLocation: location

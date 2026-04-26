@@ -319,12 +319,16 @@ router.get('/clinica/:clinicaId/reviews', async (req, res) => {
 router.get('/clinica/:clinicaId/posts', async (req, res) => {
   try {
     const { clinicaId } = req.params;
+    const limit = Math.max(1, Math.min(100, Number(req.query.limit) || 25));
+    const offset = Math.max(0, Number(req.query.offset) || 0);
     const rows = await BusinessProfilePost.findAll({
       where: { clinica_id: clinicaId },
       order: [['create_time', 'DESC']],
-      limit: 20
+      limit,
+      offset
     });
-    return res.json({ success: true, items: rows });
+    const total = await BusinessProfilePost.count({ where: { clinica_id: clinicaId } });
+    return res.json({ success: true, items: rows, total });
   } catch (e) {
     console.error('❌ /local/posts:', e.message);
     return res.status(500).json({ success: false, error: 'Error obteniendo publicaciones' });

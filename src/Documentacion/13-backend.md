@@ -249,6 +249,11 @@ Principios:
 - En cada refresco se intenta detectar perfiles sociales públicos del competidor desde Google Places, datos manuales y su web (`website_url`). Los perfiles se guardan en `raw_place_payload.clinicaclick_social_profiles` y se añaden a `meta_ads_search_terms` para mejorar la consulta oficial de Meta Ads Library. La detección es best-effort, con timeout bajo, máximo de páginas limitado, y no bloquea el refresco de Google Places.
 - Los competidores se etiquetan con `relevance` frente a las disciplinas de la clínica. La especialidad se infiere primero desde `configuracion.disciplinas` y, si falta, desde nombre/servicios/descripción antes de caer a categorías genéricas de Google como `Medical Clinic`. Los que no encajan, por ejemplo competidores médicos genéricos en una clínica capilar, no se borran automáticamente, pero la UI debe marcarlos como `Revisar`.
 - Reglas de relevancia V1 cubiertas: capilar, cirugía digestiva/hepatobiliar, podología y dental. Si una disciplina no tiene regla todavía, la UI debe mostrar `Sin regla de relevancia` y no ocultar resultados.
+- Mapa de calor local:
+  - Cada tile simula una búsqueda desde la coordenada del tile usando Google Places Text Search con `locationRestriction.rectangle`.
+  - El zoom (`1/3/5 km`) solo separa más o menos los puntos alrededor de la clínica. No debe ampliar la ventana de búsqueda de cada tile, porque entonces el punto `Centro` de 3 km/5 km deja de ser comparable con el de 1 km.
+  - La consulta efectiva elimina sufijos geográficos redundantes del término elegido (`"clínica capilar en Alicante"` -> `"clínica capilar"`) y la UI muestra también el término original si cambia.
+  - La caché del heatmap incluye `COMPETITION_CACHE_VERSION`; al cambiar la semántica del cálculo hay que subir la versión para no mezclar mediciones antiguas.
 
 Tablas:
 
@@ -859,13 +864,15 @@ Regla operativa:
 Perfil de Empresa Google:
 
 - `GET /oauth/google/local/locations` usa Business Information API con `readMask`; Google rechaza la llamada sin ese parámetro y no deben tragarse esos errores como "0 fichas";
+- el `readMask` debe incluir `regularHours`, `specialHours` y `moreHours`. Sin esos campos, la UI de `Marketing > Perfil Google` no puede mostrar el horario real de la ficha;
 - `POST /oauth/google/local/map-locations` guarda `ClinicBusinessLocations`, conserva `raw_payload.accountName` y encola `business_profile_backfill_locations`;
+- `businessProfileSync` refresca primero los detalles de la ubicación en Business Information API (`/v1/locations/:id`) para actualizar horario, categoría, teléfono y metadatos. Si este refresco auxiliar falla, no debe abortar métricas/reseñas/publicaciones;
 - `businessProfileSync` usa la Google Business Profile Performance API para métricas recientes y las rutas v4 de My Business (`mybusiness.googleapis.com`) para reseñas/publicaciones;
 - el job persiste en `BusinessProfileDailyMetrics`, `BusinessProfileReviews` y `BusinessProfilePosts`;
 - `BusinessProfilePosts.summary`, `call_to_action_url` y `media_url` deben ser `TEXT`; Google puede devolver publicaciones o URLs más largas que 1024 caracteres;
 - si falta `raw_payload.accountName`, Google devuelve 403/scope insuficiente o `mybusiness.googleapis.com` no está habilitada en el proyecto, la ficha queda con `sync_status=error`; no debe mostrarse como "0 reseñas/publicaciones" completado.
-- `GET /api/local/clinica/:clinicaId/status` expone `syncStatus`, `lastSyncedAt`, teléfono, web y dirección procedentes de `raw_payload`;
-- `GET /api/local/clinica/:clinicaId/overview|timeseries|reviews|posts` son los endpoints reales que alimentan `Marketing > Perfil Google`.
+- `GET /api/local/clinica/:clinicaId/status` expone `syncStatus`, `lastSyncedAt`, teléfono, web, dirección, horario y `rawPayload` procedentes de `raw_payload`;
+- `GET /api/local/clinica/:clinicaId/overview|timeseries|reviews|posts` son los endpoints reales que alimentan `Marketing > Perfil Google`. `posts` acepta `limit/offset` y devuelve `total`.
 
 Namespace al encolar desde OAuth/gateway:
 
