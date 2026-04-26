@@ -2800,10 +2800,51 @@ exports.verifySnippetInstalled = asyncHandler(async (req, res) => {
     }
   };
 
+  const readScriptAttr = (tag, attr) => {
+    const re = new RegExp(`${attr}\\s*=\\s*['"]([^'"]+)['"]`, 'i');
+    return tag.match(re)?.[1] || null;
+  };
+
+  const versionAtLeast = (actual, minimum) => {
+    if (!actual) return false;
+    const a = String(actual).split('.').map((part) => parseInt(part, 10) || 0);
+    const b = String(minimum).split('.').map((part) => parseInt(part, 10) || 0);
+    for (let i = 0; i < Math.max(a.length, b.length); i += 1) {
+      const av = a[i] || 0;
+      const bv = b[i] || 0;
+      if (av > bv) return true;
+      if (av < bv) return false;
+    }
+    return true;
+  };
+
+  const getSnippetRuntimeInfo = (tags) => {
+    let usesLoader = false;
+    let runtimeVersion = null;
+    let consentModeDetected = false;
+
+    for (const tag of tags) {
+      const src = readScriptAttr(tag, 'src') || '';
+      if (/loader\.js/i.test(src)) {
+        usesLoader = true;
+        consentModeDetected = true;
+      }
+      if (/intake\.js/i.test(src)) {
+        const version = src.match(/[?&]v=([0-9]+(?:\.[0-9]+){0,3})/i)?.[1] || null;
+        runtimeVersion = version || runtimeVersion;
+        if (versionAtLeast(version, '3.2.1')) {
+          consentModeDetected = true;
+        }
+      }
+    }
+
+    return { uses_loader: usesLoader, runtime_version: runtimeVersion, consent_mode_detected: consentModeDetected };
+  };
+
   const evaluateSnippetHtml = (htmlToCheck, checkedUrl) => {
     const scriptTags = htmlToCheck.match(/<script\b[^>]*>/gi) || [];
-    const intakeTags = scriptTags.filter((t) => /intake\.js/i.test(t));
-    if (intakeTags.length === 0) {
+    const snippetTags = scriptTags.filter((t) => /(intake|loader)\.js/i.test(t));
+    if (snippetTags.length === 0) {
       return {
         installed: false,
         reason: 'missing_snippet',
@@ -2813,11 +2854,11 @@ exports.verifySnippetInstalled = asyncHandler(async (req, res) => {
     }
 
     const idRe = new RegExp(`${expectedAttr}\\s*=\\s*['"]?${expectedId}['"]?`, 'i');
-    const tagsForScope = intakeTags.filter((t) => idRe.test(t));
+    const tagsForScope = snippetTags.filter((t) => idRe.test(t));
     if (tagsForScope.length === 0) {
       // Pista útil: ¿hay intake.js pero con otro scope/id?
-      const clinicIdMatch = intakeTags.map((t) => t.match(/data-clinic-id\s*=\s*['"]?(\d+)['"]?/i)).find(Boolean);
-      const groupIdMatch = intakeTags.map((t) => t.match(/data-group-id\s*=\s*['"]?(\d+)['"]?/i)).find(Boolean);
+      const clinicIdMatch = snippetTags.map((t) => t.match(/data-clinic-id\s*=\s*['"]?(\d+)['"]?/i)).find(Boolean);
+      const groupIdMatch = snippetTags.map((t) => t.match(/data-group-id\s*=\s*['"]?(\d+)['"]?/i)).find(Boolean);
       const hint = clinicIdMatch?.[1]
         ? `Se detectó data-clinic-id="${clinicIdMatch[1]}".`
         : (groupIdMatch?.[1] ? `Se detectó data-group-id="${groupIdMatch[1]}".` : null);
@@ -2829,6 +2870,8 @@ exports.verifySnippetInstalled = asyncHandler(async (req, res) => {
       };
     }
 
+    const runtimeInfo = getSnippetRuntimeInfo(tagsForScope);
+
     // Si existe HMAC en backend, aceptar cualquier tag del scope que tenga la clave vigente.
     // Esto evita falsos negativos cuando queda un plugin/snippet antiguo activo además del nuevo.
     if (record.hmac_key) {
@@ -2839,7 +2882,7 @@ exports.verifySnippetInstalled = asyncHandler(async (req, res) => {
       });
 
       if (hmacKeys.includes(expectedHmac)) {
-        return { installed: true, checked_url: checkedUrl };
+        return { installed: true, checked_url: checkedUrl, ...runtimeInfo };
       }
 
       if (hmacKeys.every((key) => !key)) {
@@ -2859,7 +2902,7 @@ exports.verifySnippetInstalled = asyncHandler(async (req, res) => {
       };
     }
 
-    return { installed: true, checked_url: checkedUrl };
+    return { installed: true, checked_url: checkedUrl, ...runtimeInfo };
   };
 
   const primaryFetch = await fetchFirstHtml(uniqueCandidates, false);
@@ -2874,7 +2917,13 @@ exports.verifySnippetInstalled = asyncHandler(async (req, res) => {
 
   const primaryEvaluation = evaluateSnippetHtml(primaryFetch.html, primaryFetch.finalUrl);
   if (primaryEvaluation.installed) {
-    return res.json({ installed: true, checked_url: primaryEvaluation.checked_url });
+    return res.json({
+      installed: true,
+      checked_url: primaryEvaluation.checked_url,
+      consent_mode_detected: !!primaryEvaluation.consent_mode_detected,
+      uses_loader: !!primaryEvaluation.uses_loader,
+      runtime_version: primaryEvaluation.runtime_version || null,
+    });
   }
 
   const bypassCandidates = uniqueCandidates.map(withCacheBust);
@@ -2887,6 +2936,9 @@ exports.verifySnippetInstalled = asyncHandler(async (req, res) => {
         cache_stale: true,
         checked_url: primaryEvaluation.checked_url || primaryFetch.finalUrl,
         bypass_checked_url: bypassEvaluation.checked_url,
+        consent_mode_detected: !!bypassEvaluation.consent_mode_detected,
+        uses_loader: !!bypassEvaluation.uses_loader,
+        runtime_version: bypassEvaluation.runtime_version || null,
         details: 'La web devuelve el snippet correcto al saltar caché, pero la página normal sigue sirviendo una versión antigua o sin HMAC. Purga la caché de WordPress, del hosting o de la CDN y vuelve a verificar.'
       });
     }

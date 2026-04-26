@@ -80,6 +80,8 @@ Antes de activar coexistencia sobre un numero real:
 - el callback crea un `JobRequest` `whatsapp_template_create` con `payload.__runtime_namespace` resuelto por origen (`crm` -> `staging`, `localhost:4203` -> `dev`, `app` -> `prod`);
 - `jobExecutor.service.js` procesa `whatsapp_template_create` ejecutando `createTemplatesFromCatalog(...)`, que transforma placeholders `SIN_CONECTAR` en plantillas enviadas a revision (`PENDING`);
 - `whatsapp_phones_sync` (cada 15 minutos) actua como red de seguridad: si detecta que un numero ya esta `CONNECTED`/`registered` y quedan plantillas de catalogo sin `meta_template_id` o en `SIN_CONECTAR`/`LOCAL_PENDING`, encola `whatsapp_template_create` con cooldown de 1 hora (`WHATSAPP_TEMPLATE_CREATE_ENSURE_COOLDOWN_MS`). Esto cubre coexistencia cuando Meta termina de habilitar el numero despues del callback inicial;
+- `whatsapp_phones_sync` solo debe encolar WABAs procedentes de `whatsapp_phone_number` activos y asignados a clínica o grupo. Un número `unassigned` no es operativo aunque conserve token de Meta para reasignación o auditoría;
+- la sync remota de teléfonos no puede reactivar un número desvinculado solo porque Meta lo siga devolviendo. Si el activo no tiene `clinicaId` ni `grupoClinicaId`, debe permanecer `isActive=false` y `assignmentScope=unassigned`;
 - `whatsapp_templates_sync` (cada 20 minutos) solo sincroniza estados remotos existentes. Si Meta sigue devolviendo `PENDING`, ClinicaClick debe mantener `PENDING`; no se marca como aprobada por tener el numero operativo;
 - `GET /api/whatsapp/phones` expone `connection_mode`, `is_on_biz_app`, `coexistence_status`, `coexistence_can_send_api` y estados de sync inicial para que Ajustes pueda mostrar el modo real;
 - la sync de telefonos debe normalizar `GET /<phone_number_id>/whatsapp_business_profile`: Meta devuelve el perfil en `data[0]`; de ahi salen `vertical`/categoria, descripcion y foto. No leer `profile.vertical` directamente sin normalizar porque dejaria vacia la categoria en Ajustes;
@@ -208,9 +210,10 @@ ClinicaClick Analytics V1:
 
 - Desde 2026-04-26 existen `WebEvents`, `WebPageDaily`, `WebClickDaily` y `WebSessionDaily`.
 - `POST /api/intake/events` persiste eventos propios desde `intake.js` además de mantener Meta CAPI / Google Ads cuando proceda.
-- Si `Consent Mode v2` está activo para el scope, los envíos server-side a Meta/Google se bloquean hasta consentimiento de marketing explícito.
+- Si `Aviso de Cookies + Consent Mode v2` está activo para el scope, los envíos server-side a Meta/Google se bloquean hasta consentimiento de marketing explícito.
 - Los eventos analíticos propios se guardan solo si hay consentimiento analítico o si Consent Mode no está activado para la clínica.
 - `consent_update` se persiste siempre para poder auditar cambios de consentimiento.
+- Desde `intake.js` v3.2.1, la configuración legal canónica del aviso de cookies es `legal_url`, `cookies_url` y `privacy_url`. `terms_url` queda como alias legacy de `legal_url`.
 - `GET /api/marketing/reports/overview` prioriza `WebPageDaily` / `WebSessionDaily` para pageviews, sesiones y visitantes. GA4 queda como fuente opcional/fallback histórico.
 - `webEventsAggregate` recalcula agregados para una ventana reciente y limpia eventos brutos antiguos según `WEB_EVENTS_RETENTION_DAYS`.
 
