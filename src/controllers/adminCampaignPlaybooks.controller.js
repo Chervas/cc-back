@@ -11,6 +11,11 @@ const { AdminCampaignPlaybook, Tratamiento, AutomationFlowCatalog, AutomationFlo
 const ALLOWED_PROMOTION_KINDS = new Set(['treatment_specific', 'generic_campaign']);
 const ALLOWED_STATUSES = new Set(['draft', 'active', 'archived']);
 const ALLOWED_AUTOMATION_MODES = new Set(['inherit_recommendation', 'force_template', 'none']);
+const ALLOWED_REACTIVATION_LIST_SOURCES = new Set(['clinical_inactive', 'imported_file', 'manual_list']);
+const ALLOWED_REACTIVATION_ACTIONS = new Set(['whatsapp_auto', 'send_to_leads', 'managed_calls']);
+const ALLOWED_REACTIVATION_TEMPLATE_POLICIES = new Set(['approved_only', 'allow_local_draft']);
+const ALLOWED_REACTIVATION_INACTIVITY_UNITS = new Set(['months', 'days']);
+const ALLOWED_REACTIVATION_TREATMENT_SCOPES = new Set(['selected_treatment', 'any_treatment']);
 
 function assertAdmin(req, res) {
   if (!isGlobalAdmin(req.userData?.userId)) {
@@ -45,6 +50,11 @@ function normalizeStringArray(value) {
 
 function normalizeBool(value, fallback = false) {
   return typeof value === 'boolean' ? value : fallback;
+}
+
+function normalizeEnum(value, allowed, fallback) {
+  const clean = toCleanString(value);
+  return clean && allowed.has(clean) ? clean : fallback;
 }
 
 function slugify(value) {
@@ -112,6 +122,41 @@ function normalizeReviewPolicy(raw) {
   };
 }
 
+function normalizeReactivationPreset(raw) {
+  if (!raw || typeof raw !== 'object') return null;
+
+  const threshold = raw.inactivity_threshold && typeof raw.inactivity_threshold === 'object'
+    ? raw.inactivity_threshold
+    : {};
+  const exclusions = raw.exclusions && typeof raw.exclusions === 'object' ? raw.exclusions : {};
+  const safetyGates = raw.safety_gates && typeof raw.safety_gates === 'object' ? raw.safety_gates : {};
+
+  return {
+    list_source: normalizeEnum(raw.list_source, ALLOWED_REACTIVATION_LIST_SOURCES, 'clinical_inactive'),
+    inactivity_threshold: {
+      value: Math.max(toNullableInt(threshold.value) || 6, 1),
+      unit: normalizeEnum(threshold.unit, ALLOWED_REACTIVATION_INACTIVITY_UNITS, 'months'),
+    },
+    treatment_scope: normalizeEnum(raw.treatment_scope, ALLOWED_REACTIVATION_TREATMENT_SCOPES, 'selected_treatment'),
+    default_action: normalizeEnum(raw.default_action, ALLOWED_REACTIVATION_ACTIONS, 'whatsapp_auto'),
+    whatsapp_template_policy: normalizeEnum(raw.whatsapp_template_policy, ALLOWED_REACTIVATION_TEMPLATE_POLICIES, 'approved_only'),
+    exclusions: {
+      future_appointments: normalizeBool(exclusions.future_appointments, true),
+      no_contact: normalizeBool(exclusions.no_contact, true),
+      invalid_phone: normalizeBool(exclusions.invalid_phone, true),
+      duplicates: normalizeBool(exclusions.duplicates, true),
+    },
+    safety_gates: {
+      frozen_audience: normalizeBool(safetyGates.frozen_audience, true),
+      opt_out: normalizeBool(safetyGates.opt_out, true),
+      capping: normalizeBool(safetyGates.capping, true),
+      approved_template: normalizeBool(safetyGates.approved_template, true),
+      audit: normalizeBool(safetyGates.audit, true),
+      cancelable_queue: normalizeBool(safetyGates.cancelable_queue, true),
+    },
+  };
+}
+
 function normalizeAutomationStrategy(raw) {
   const value = raw && typeof raw === 'object' ? raw : {};
   const mode = toCleanString(value.mode) || 'inherit_recommendation';
@@ -119,6 +164,7 @@ function normalizeAutomationStrategy(raw) {
     mode: ALLOWED_AUTOMATION_MODES.has(mode) ? mode : 'inherit_recommendation',
     template_key: toCleanString(value.template_key),
     template_version: toNullableInt(value.template_version),
+    reactivation_preset: normalizeReactivationPreset(value.reactivation_preset),
   };
 }
 
@@ -251,6 +297,10 @@ async function normalizePlaybookPayload(payload, options = {}) {
   const automationStrategy = source.automation_strategy !== undefined
     ? normalizeAutomationStrategy(source.automation_strategy)
     : (partial ? normalizeAutomationStrategy(current?.automation_strategy) : normalizeAutomationStrategy({}));
+  const resolvedObjectiveId = objectiveId || current?.objective_id || null;
+  if (resolvedObjectiveId !== 'reactivate_patients') {
+    automationStrategy.reactivation_preset = null;
+  }
   if (automationStrategy.mode === 'force_template') {
     if (!automationStrategy.template_key) {
       return { error: 'automation_template_required', message: 'automation_strategy.template_key es obligatorio para force_template' };
