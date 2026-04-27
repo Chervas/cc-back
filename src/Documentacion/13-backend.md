@@ -729,6 +729,138 @@ Limitación:
 - no encola WhatsApp;
 - es una fuente de sugerencias para el MVP de `Marketing > Campañas > Reactivar pacientes`.
 
+## 2026-04-27 - Roadmap backend de campañas: endpoints a preparar
+
+> **Estado:** contrato de backlog. No implementar envío real ni publicación Meta/Google sin las tablas, auditoría, permisos y colas descritas abajo.
+
+### 1. Reactivación de pacientes y listas
+
+Rutas bajo `/api/marketing/reactivation`:
+
+| Método | Ruta | Uso |
+|---|---|---|
+| GET | `/suggestions` | Operativo hoy como sugerencias. Debe evolucionar a datos reales por scope/tratamiento. |
+| GET | `/lists` | Listar listas de reactivación por scope, estado y objetivo. |
+| POST | `/lists` | Crear lista `draft` desde filtros, manual o importación pendiente. |
+| GET | `/lists/:id` | Detalle con resumen, field schema, plantilla y contadores calculados en backend. |
+| PATCH | `/lists/:id` | Editar nombre, uso previsto, filtros, plantilla o acción mientras esté editable. |
+| POST | `/lists/:id/import/preview` | Subir CSV/XLSX, detectar columnas, sugerir mapeos y validar filas sin persistir items finales. |
+| POST | `/lists/:id/import/commit` | Persistir importación, mapping e items calculados. |
+| POST | `/lists/:id/mappings/apply` | Aplicar mapeos generales: tratamientos, clínicas, estados, enums y fechas. |
+| POST | `/lists/:id/rebuild` | Recalcular cruces con pacientes, citas, LeadIntake, opt-out, cuarentena y duplicados. |
+| GET | `/lists/:id/items` | Items paginados con filtros por estado, motivo y campos faltantes. |
+| PATCH | `/lists/:id/items/:itemId` | Editar/include/exclude item, custom fields o mapping manual. |
+| POST | `/lists/:id/template-preview` | Calcular variables requeridas, pacientes sin datos y preview antes de aprobar. |
+| POST | `/lists/:id/approve` | Congelar audiencia y plantilla. |
+| POST | `/lists/:id/schedule` | Crear cola cancelable si todos los gates están OK. |
+| POST | `/lists/:id/cancel` | Cancelar lista o cola antes de ejecución efectiva. |
+| GET | `/lists/:id/events` | Auditoría por item/contacto/mensaje/respuesta/error. |
+
+Tablas pendientes:
+
+- `MarketingPatientLists`
+- `MarketingPatientListItems`
+- `MarketingPatientListImports`
+- `MarketingPatientListFieldDefinitions`
+- `MarketingPatientContactEvents`
+
+Reglas:
+
+- Los campos extra importados van en JSON tipado, no en columnas dinámicas.
+- Los tratamientos importados deben poder mapearse al catálogo existente o conservarse como campo personalizado.
+- Antes de encolar se excluyen cita futura, opt-out/no contactar, teléfono inválido, duplicados, cuarentena y variables personalizadas faltantes.
+- Los nombres de pacientes creados/actualizados desde importación se normalizan a formato nombre propio.
+
+### 1.1. Automatizaciones basadas en listas
+
+Rutas bajo `/api/marketing/list-automations`:
+
+| Método | Ruta | Uso |
+|---|---|---|
+| GET | `/` | Listar automatizaciones basadas en listas por scope, objetivo y estado. |
+| POST | `/` | Crear automatización desde lista/campaña, condiciones, acción y capping. |
+| GET | `/:id` | Detalle con lista origen, reglas, próxima reevaluación, métricas y último resultado. |
+| PATCH | `/:id` | Editar reglas mientras esté pausada o en draft. |
+| POST | `/:id/preview` | Recalcular candidatos sin guardar ni enviar. |
+| POST | `/:id/run-now` | Ejecutar reevaluación manual y crear lista/snapshot si procede. |
+| POST | `/:id/pause` | Pausar reevaluación automática. |
+| POST | `/:id/resume` | Reactivar reevaluación automática. |
+| GET | `/:id/metrics` | Métricas de listas generadas, envíos, respuestas, citas y conversiones atribuidas. |
+
+Regla operativa:
+
+- La reevaluación normal debe ejecutarse por job cada 24h o bajo demanda con preview.
+- El job no debe enviar directamente: solo crea snapshot/lista o encola si todos los gates de envío están aprobados.
+
+### 2. Campañas gestionadas Meta/Google
+
+Rutas bajo `/api/marketing/managed-campaigns`:
+
+| Método | Ruta | Uso |
+|---|---|---|
+| GET | `/` | Listar specs gestionadas visibles por scope. |
+| POST | `/` | Crear `ManagedPaidCampaignSpec` en `draft`; no publica en plataforma. |
+| GET | `/:id` | Detalle completo para cliente/admin. |
+| PATCH | `/:id` | Editar spec en `draft` o `changes_requested`. |
+| POST | `/:id/submit-client-review` | Enviar a visto bueno del cliente si aplica. |
+| POST | `/:id/submit-admin-review` | Pasar a revisión ClinicaClick. |
+| POST | `/:id/request-changes` | Solicitar cambios y registrar motivo. |
+| POST | `/:id/approve-to-launch` | Aprobar internamente; todavía no crea campaña real. |
+| POST | `/:id/launch` | Crear/sincronizar en Meta/Google tras `approved_to_launch`. |
+| POST | `/:id/pause` | Pausar en ClinicaClick y plataforma si existe `platform_ref`. |
+| POST | `/:id/sync` | Refrescar estado, IDs externos, incidencias y métricas. |
+| GET | `/:id/metrics` | Métricas normalizadas y contribución a LeadIntake/citas/tratamientos. |
+
+Familias V1:
+
+- Meta: `meta_reach`, `meta_instant_form`.
+- Google: `google_search`, `google_pmax`.
+
+Regla: no llamar a APIs de Meta/Google hasta `approved_to_launch`.
+
+### 3. Audiencias manuales y automáticas
+
+Rutas bajo `/api/marketing/audiences`:
+
+| Método | Ruta | Uso |
+|---|---|---|
+| GET | `/` | Listar audiencias por scope, canal, `source_type` y elegibilidad. |
+| POST | `/preview` | Calcular tamaño, consentimiento, sensibilidad y elegibilidad sin guardar. |
+| POST | `/` | Crear definición interna de audiencia. |
+| GET | `/:id` | Detalle con reglas, tamaño, policy status y plataformas permitidas. |
+| PATCH | `/:id` | Editar reglas mientras no esté bloqueada por uso activo. |
+| POST | `/:id/refresh` | Recalcular tamaño/eligibilidad. |
+| GET | `/:id/eligibility` | Explicar por canal si está `available`, `warning` o `blocked`. |
+| POST | `/:id/platform-segment` | Crear segmento en Meta/Google solo si elegible y si la campaña está aprobada para lanzamiento. |
+
+Notas Google:
+
+- Google Ads soporta técnicamente segmentos de visitantes web por URL/reglas con Google tag.
+- Para `website_visit` y `treatment_page_visit`, el backend debe validar Google tag, consentimiento, tamaño mínimo y política antes de permitir targeting.
+- Si el contenido/campaña entra en categoría sensible de salud y la política bloquea segmentos propios, devolver `blocked` con motivo claro.
+
+### 4. Bandeja de aprobaciones admin
+
+Rutas bajo `/api/admin/campaign-reviews`:
+
+| Método | Ruta | Uso |
+|---|---|---|
+| GET | `/summary` | Contadores para badge/notificación. |
+| GET | `/` | Cola paginada con filtros por clínica, grupo, objetivo, entidad, estado y prioridad. |
+| GET | `/:id` | Detalle de revisión y deep-link a entidad. |
+| POST | `/:id/assign` | Asignar responsable. |
+| POST | `/:id/approve` | Aprobar recurso/campaña/envío. |
+| POST | `/:id/request-changes` | Pedir cambios con motivo. |
+| POST | `/:id/block` | Bloquear por política, permisos, tracking, audiencia o recursos. |
+
+### 5. Variables de plantillas
+
+| Método | Ruta | Uso |
+|---|---|---|
+| GET | `/api/marketing/template-variables` | Variables estándar disponibles por scope/contexto. |
+| GET | `/api/marketing/lists/:listId/template-variables` | Variables personalizadas disponibles en una lista. |
+| POST | `/api/marketing/templates/:templateId/usage-preview` | Validar plantilla contra contexto/lista/pacientes y devolver excluidos por variables faltantes. |
+
 ## 2026-03-24 - Análisis de campañas cache-only
 
 > **Estado:** implementado en `back-integracion`.
