@@ -2,6 +2,7 @@
 const { Paciente, Clinica, PacienteRelacion, PacienteClinica, PacienteConsentimiento, CitaPaciente, Usuario, Tratamiento } = require('../../models');
 const { Op, literal } = require('sequelize');
 const { normalizePhoneDigits } = require('../lib/phone');
+const { normalizeHumanName } = require('../lib/name');
 
 const normalizePhone = (phone) => {
   return normalizePhoneDigits(phone);
@@ -577,7 +578,9 @@ exports.createPaciente = async (req, res) => {
     const { nombre, apellidos, dni, telefono_movil, email, telefono_secundario, foto, fecha_nacimiento, edad, estatura, peso, sexo, profesion, fecha_alta, fecha_baja, alergias, antecedentes, medicacion, paciente_conocido, como_nos_conocio, procedencia, clinica_id, tutor } = req.body;
     const normPhone = normalizePhone(telefono_movil);
     const normEmail = normalizeEmail(email);
-    if (!nombre) {
+    const normalizedNombre = normalizeHumanName(nombre);
+    const normalizedApellidos = normalizeHumanName(apellidos || '');
+    if (!normalizedNombre) {
       return res.status(400).json({ message: 'Faltan campos obligatorios (nombre)' });
     }
     // Permitimos sin teléfono/email solo si hay tutor
@@ -608,8 +611,8 @@ exports.createPaciente = async (req, res) => {
     }
 
     const newPaciente = await Paciente.create({
-      nombre,
-      apellidos,
+      nombre: normalizedNombre,
+      apellidos: normalizedApellidos,
       dni,
       telefono_movil: normPhone,
       email: normEmail,
@@ -752,6 +755,10 @@ exports.updatePaciente = async (req, res) => {
         }
         if (field === 'email') {
           paciente[field] = normEmail;
+          return;
+        }
+        if (field === 'nombre' || field === 'apellidos') {
+          paciente[field] = normalizeHumanName(req.body[field]);
           return;
         }
         paciente[field] = req.body[field];

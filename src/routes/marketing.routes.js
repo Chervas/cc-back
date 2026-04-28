@@ -21,6 +21,14 @@ router.post('/reports/competition/refresh', marketingCompetitionController.refre
 
 // Reactivación de pacientes
 router.get('/reactivation/suggestions', marketingReactivationController.getSuggestions);
+router.get('/reactivation/lists', marketingReactivationController.listLists);
+router.post('/reactivation/lists', marketingReactivationController.createList);
+router.get('/reactivation/lists/:id', marketingReactivationController.getList);
+router.get('/reactivation/lists/:id/items', marketingReactivationController.getItems);
+router.get('/reactivation/lists/:id/events', marketingReactivationController.getEvents);
+router.post('/reactivation/lists/:id/rebuild', marketingReactivationController.rebuildList);
+router.post('/reactivation/lists/:id/prepare', marketingReactivationController.prepareList);
+router.post('/reactivation/lists/:id/schedule', marketingReactivationController.scheduleList);
 
 // Catálogo de plantillas de flujos de chat (snippet web)
 router.get('/chat-flow-templates', chatFlowTemplatesController.listChatFlowTemplates);

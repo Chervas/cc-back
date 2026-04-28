@@ -25,6 +25,7 @@ const appointmentAutomationV2Runtime = require('../services/appointmentAutomatio
 const { CITA_STATUS_VALUES } = require('../lib/status-catalog');
 const { getIO } = require('../services/socket.service');
 const { normalizePhoneDigits } = require('../lib/phone');
+const { normalizeHumanName } = require('../lib/name');
 
 const CITA_ESTADOS_VALIDOS = new Set(CITA_STATUS_VALUES);
 const LEAD_ACTIVE_APPOINTMENT_STATES = new Set([
@@ -630,8 +631,8 @@ async function findOrCreatePaciente({ clinica_id, nombre, apellidos, telefono, e
     }
 
     const nuevoPaciente = await Paciente.create({
-        nombre: nombre || 'Sin nombre',
-        apellidos: apellidos || '',
+        nombre: normalizeHumanName(nombre || 'Sin nombre') || 'Sin nombre',
+        apellidos: normalizeHumanName(apellidos || ''),
         telefono_movil: normalizedPhone || telefono || '',
         email: email || null,
         clinica_id: clinica_id
