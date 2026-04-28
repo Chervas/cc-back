@@ -739,9 +739,9 @@ Rutas bajo `/api/marketing/reactivation`:
 
 | Método | Ruta | Uso |
 |---|---|---|
-| GET | `/suggestions` | Operativo hoy como sugerencias. Debe evolucionar a datos reales por scope/tratamiento. |
+| GET | `/suggestions` | Operativo con datos reales por scope/tratamiento. Si existen playbooks admin activos de `reactivate_patients`, usa su `reactivation_preset` y devuelve la automatización asociada. |
 | GET | `/lists` | Listar listas de reactivación por scope, estado y objetivo. |
-| POST | `/lists` | Crear lista `draft` desde filtros, manual o importación pendiente. |
+| POST | `/lists` | Crear lista `draft` desde filtros, manual o importación real. Para `source=import` acepta `import_rows`, `column_mapping`, `custom_fields_schema` e `import_file_name`, relaciona/crea pacientes y persiste items. |
 | GET | `/lists/:id` | Detalle con resumen, field schema, plantilla y contadores calculados en backend. |
 | PATCH | `/lists/:id` | Editar nombre, uso previsto, filtros, plantilla o acción mientras esté editable. |
 | POST | `/lists/:id/import/preview` | Subir CSV/XLSX, detectar columnas, sugerir mapeos y validar filas sin persistir items finales. |
@@ -756,13 +756,16 @@ Rutas bajo `/api/marketing/reactivation`:
 | POST | `/lists/:id/cancel` | Cancelar lista o cola antes de ejecución efectiva. |
 | GET | `/lists/:id/events` | Auditoría por item/contacto/mensaje/respuesta/error. |
 
-Tablas pendientes:
+Tablas operativas:
 
 - `MarketingPatientLists`
 - `MarketingPatientListItems`
+- `MarketingPatientContactEvents`
+
+Tablas pendientes:
+
 - `MarketingPatientListImports`
 - `MarketingPatientListFieldDefinitions`
-- `MarketingPatientContactEvents`
 
 Reglas:
 
