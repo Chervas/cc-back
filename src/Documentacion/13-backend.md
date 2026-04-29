@@ -748,6 +748,7 @@ Rutas bajo `/api/marketing/reactivation`:
 | POST | `/lists/:id/import/commit` | Persistir importación, mapping e items calculados. |
 | POST | `/lists/:id/mappings/apply` | Aplicar mapeos generales: tratamientos, clínicas, estados, enums y fechas. |
 | POST | `/lists/:id/rebuild` | Recalcular cruces con pacientes, citas, LeadIntake, opt-out, cuarentena y duplicados. |
+| DELETE | `/lists/:id` | Eliminar listas `draft`; archivar listas ya preparadas/activas para ocultarlas del listado principal sin perder auditoría ni datos. |
 | GET | `/lists/:id/items` | Items paginados con filtros por estado, motivo y campos faltantes. |
 | PATCH | `/lists/:id/items/:itemId` | Editar/include/exclude item, custom fields o mapping manual. |
 | POST | `/lists/:id/template-preview` | Calcular variables requeridas, pacientes sin datos y preview antes de aprobar. |
@@ -774,6 +775,8 @@ Reglas:
 - Los tratamientos importados deben poder mapearse al catálogo existente o conservarse como campo personalizado.
 - Antes de encolar se excluyen cita futura, opt-out/no contactar, teléfono inválido, duplicados, cuarentena y variables personalizadas faltantes.
 - Los nombres de pacientes creados/actualizados desde importación se normalizan a formato nombre propio.
+- Alias de importación soportados para nombre completo: `nombre`, `nombre_completo`, `nombre_y_apellidos`, `nombre_apellidos`, `nombre_paciente`, `full_name`.
+- `GET /reactivation/lists` omite listas `archived` por defecto.
 
 ### 1.1. Automatizaciones basadas en listas
 

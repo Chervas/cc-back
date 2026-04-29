@@ -29,6 +29,7 @@ router.get('/reactivation/lists/:id/events', marketingReactivationController.get
 router.post('/reactivation/lists/:id/rebuild', marketingReactivationController.rebuildList);
 router.post('/reactivation/lists/:id/prepare', marketingReactivationController.prepareList);
 router.post('/reactivation/lists/:id/schedule', marketingReactivationController.scheduleList);
+router.delete('/reactivation/lists/:id', marketingReactivationController.removeList);
 
 // Catálogo de plantillas de flujos de chat (snippet web)
 router.get('/chat-flow-templates', chatFlowTemplatesController.listChatFlowTemplates);

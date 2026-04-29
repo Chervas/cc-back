@@ -160,6 +160,16 @@ exports.scheduleList = async (req, res) => {
   }
 };
 
+exports.removeList = async (req, res) => {
+  try {
+    const scope = await resolveScopeFromRequest(req, { allowAll: false });
+    const result = await marketingReactivationService.removeList(scope, req.params.id, req.userData?.userId || null);
+    return res.json(result);
+  } catch (error) {
+    return sendError(res, error, 'Error eliminando o archivando lista de reactivación');
+  }
+};
+
 exports.getEvents = async (req, res) => {
   try {
     const scope = await resolveScope(req, { allowAll: false });

@@ -80,6 +80,12 @@ function titleCaseIfNeeded(value) {
   return /^[^a-záéíóúñü]+$/.test(text) ? toTitleCaseName(text) : text;
 }
 
+function mapDialogUnitToBackend(unit) {
+  if (unit === 'dias') return 'days';
+  if (unit === 'anos') return 'years';
+  return 'months';
+}
+
 function toThresholdCutoff(value, unit, fallbackMonths) {
   const amount = Math.max(Number(value || 0), 1);
   const date = new Date();
@@ -561,7 +567,7 @@ function computeCounters(items) {
 }
 
 const IMPORT_ALIASES = {
-  name: ['nombre', 'name', 'paciente', 'nombre_paciente', 'full_name'],
+  name: ['nombre', 'nombre_completo', 'nombre_y_apellidos', 'nombre_apellidos', 'name', 'paciente', 'nombre_paciente', 'full_name'],
   first_name: ['nombre', 'first_name', 'firstname'],
   last_name: ['apellidos', 'apellido', 'last_name', 'lastname'],
   phone: ['telefono', 'teléfono', 'tela_fono', 'movil', 'móvil', 'ma_vil', 'telefono_movil', 'phone', 'mobile', 'whatsapp'],
@@ -803,6 +809,21 @@ async function buildImportedItemPayloads(scope, body, transaction) {
   return { itemPayloads, columnMapping, customFieldsSchema };
 }
 
+async function buildCustomItemPayloads(scope, body = {}) {
+  const conditions = Array.isArray(body.rules) ? body.rules : [];
+  const noVisitRule = conditions.find((rule) => rule?.kind === 'no_visit') || conditions[0] || {};
+  const treatmentId = Number(body.treatment_id || body.treatmentId || 0) || null;
+  const groups = await collectSuggestionGroups(scope, {
+    treatmentId,
+    treatmentScope: treatmentId ? 'selected_treatment' : 'any_treatment',
+    groupTreatmentName: body.treatment || (treatmentId ? null : 'Cualquier tratamiento'),
+    thresholdValue: Math.max(Number(noVisitRule.amount || 6), 1),
+    thresholdUnit: mapDialogUnitToBackend(noVisitRule.unit || 'meses'),
+  });
+
+  return groups.flatMap((group) => group.candidates.map(mapSuggestionCandidateToItem));
+}
+
 function mapSuggestionCandidateToItem(candidate) {
   return {
     paciente_id: candidate.patient_id || null,
@@ -947,6 +968,7 @@ function buildEmptyDailySeries() {
 async function getLists(scope) {
   const where = {
     objective_id: 'reactivate_patients',
+    status: { [Op.ne]: 'archived' },
     ...scopeToWhere(scope),
   };
   const lists = await MarketingPatientList.findAll({
@@ -1028,9 +1050,12 @@ async function createList(scope, body = {}, userId = null) {
     const importResult = source === 'import'
       ? await buildImportedItemPayloads(scope, body, transaction)
       : null;
+    const customPayloads = !importResult && !suggestion && source === 'custom'
+      ? await buildCustomItemPayloads(scope, body)
+      : null;
     const itemPayloads = importResult
       ? importResult.itemPayloads
-      : (suggestion ? suggestion.candidates_full.map(mapSuggestionCandidateToItem) : []);
+      : (customPayloads || (suggestion ? suggestion.candidates_full.map(mapSuggestionCandidateToItem) : []));
     const counters = computeCounters(itemPayloads);
     const actionMode = body.action_mode || suggestion?.recommendedMode || 'whatsapp_template';
     const list = await MarketingPatientList.create({
@@ -1048,6 +1073,7 @@ async function createList(scope, body = {}, userId = null) {
         threshold: suggestion?.threshold || null,
         threshold_months: suggestion?.thresholdMonths || body.threshold_months || null,
         source,
+        treatment_id: body.treatment_id || body.treatmentId || null,
         import_file_name: body.import_file_name || null,
         column_mapping: importResult?.columnMapping || body.column_mapping || null,
         rules: body.rules || [],
@@ -1188,6 +1214,56 @@ async function scheduleList(scope, listId) {
   throw err;
 }
 
+async function removeList(scope, listId, userId = null) {
+  const list = await MarketingPatientList.findByPk(listId);
+  ensureScopeAccess(list, scope);
+
+  if (list.status === 'draft') {
+    await MarketingPatientContactEvent.create({
+      list_id: list.id,
+      event_type: 'list_deleted',
+      channel: list.channel,
+      payload: {
+        status: list.status,
+        user_id: userId || null,
+      },
+      occurred_at: new Date(),
+    });
+    await list.destroy();
+    return {
+      success: true,
+      action: 'deleted',
+      id: Number(listId),
+    };
+  }
+
+  const previousStatus = list.status;
+  await list.update({
+    status: 'archived',
+    safety_gates: {
+      ...(list.safety_gates || {}),
+      archived: true,
+    },
+  });
+  await MarketingPatientContactEvent.create({
+    list_id: list.id,
+    event_type: 'list_archived',
+    channel: list.channel,
+    payload: {
+      previous_status: previousStatus,
+      user_id: userId || null,
+    },
+    occurred_at: new Date(),
+  });
+
+  const reloaded = await MarketingPatientList.findByPk(list.id);
+  return {
+    success: true,
+    action: 'archived',
+    list: serializeList(reloaded),
+  };
+}
+
 async function rebuildList(scope, listId) {
   const list = await MarketingPatientList.findByPk(listId);
   ensureScopeAccess(list, scope);
@@ -1259,6 +1335,7 @@ module.exports = {
   getItems,
   prepareList,
   scheduleList,
+  removeList,
   rebuildList,
   getEvents,
 };
