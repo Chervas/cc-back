@@ -623,7 +623,34 @@ function parseImportDate(value) {
   return Number.isFinite(parsed.getTime()) ? parsed : null;
 }
 
-function buildCustomFields(row, mapping) {
+function normalizeCustomFieldSchemaEntry(entry) {
+  if (!entry || typeof entry !== 'object' || Array.isArray(entry)) return null;
+  const key = normalizeKey(entry.key || entry.name || entry.variable);
+  const sourceColumn = normalizeText(entry.source_column || entry.sourceColumn || entry.column || entry.source);
+  if (!key || !sourceColumn) return null;
+  return {
+    key,
+    label: normalizeText(entry.label) || key.split('_').map((part) => part.charAt(0).toUpperCase() + part.slice(1)).join(' '),
+    type: normalizeText(entry.type) || 'text',
+    source: 'import',
+    source_column: sourceColumn,
+  };
+}
+
+function buildCustomFields(row, mapping, customFieldsSchema = []) {
+  const explicitFields = Array.isArray(customFieldsSchema)
+    ? customFieldsSchema.map(normalizeCustomFieldSchemaEntry).filter(Boolean)
+    : [];
+  if (explicitFields.length) {
+    const custom = {};
+    for (const field of explicitFields) {
+      const cleanValue = normalizeText(row?.[field.source_column]);
+      if (!cleanValue) continue;
+      custom[field.key] = cleanValue;
+    }
+    return custom;
+  }
+
   const mappedHeaders = new Set(Object.values(mapping || {}).filter(Boolean));
   const custom = {};
   for (const [key, value] of Object.entries(row || {})) {
@@ -639,7 +666,7 @@ function buildCustomFields(row, mapping) {
 
 function buildCustomFieldSchema(rows, mapping, explicitSchema = []) {
   if (Array.isArray(explicitSchema) && explicitSchema.length) {
-    return explicitSchema;
+    return explicitSchema.map(normalizeCustomFieldSchemaEntry).filter(Boolean);
   }
   const fields = new Map();
   for (const row of rows) {
@@ -714,7 +741,7 @@ async function buildImportedItemPayloads(scope, body, transaction) {
     const email = readImportValue(row, columnMapping, 'email') || null;
     const treatment = titleCaseIfNeeded(readImportValue(row, columnMapping, 'treatment') || body.treatment || 'Sin tratamiento asignado');
     const lastVisit = parseImportDate(readImportValue(row, columnMapping, 'last_visit_at'));
-    const customFields = buildCustomFields(row, columnMapping);
+    const customFields = buildCustomFields(row, columnMapping, customFieldsSchema);
     let patient = phoneDigits ? patientByPhone.get(phoneDigits) : null;
     let createdNewPatient = false;
     const validPhone = !!phoneDigits && phoneDigits.length >= 8;

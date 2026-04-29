@@ -770,6 +770,7 @@ Tablas pendientes:
 Reglas:
 
 - Los campos extra importados van en JSON tipado, no en columnas dinámicas.
+- Si el frontend envia `custom_fields_schema` con `source_column`, solo esas columnas extra se guardan como variables personalizadas de lista; la `key` se persiste en formato simple para plantillas, por ejemplo `{{importe_presupuesto}}`.
 - Los tratamientos importados deben poder mapearse al catálogo existente o conservarse como campo personalizado.
 - Antes de encolar se excluyen cita futura, opt-out/no contactar, teléfono inválido, duplicados, cuarentena y variables personalizadas faltantes.
 - Los nombres de pacientes creados/actualizados desde importación se normalizan a formato nombre propio.
