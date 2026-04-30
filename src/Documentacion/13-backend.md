@@ -739,7 +739,7 @@ Rutas bajo `/api/marketing/reactivation`:
 
 | Método | Ruta | Uso |
 |---|---|---|
-| GET | `/suggestions` | Operativo con datos reales por scope/tratamiento. Si existen playbooks admin activos de `reactivate_patients`, usa su `reactivation_preset` y devuelve la automatización asociada. |
+| GET | `/suggestions` | Operativo con datos reales por scope/tratamiento. Si existen playbooks admin activos de `reactivate_patients`, usa su `reactivation_preset`, devuelve la automatización asociada y mantiene el preset visible aunque el scope tenga cero candidatos. |
 | GET | `/lists` | Listar listas de reactivación por scope, estado y objetivo. |
 | POST | `/lists` | Crear lista `draft` desde filtros, manual o importación real. Para `source=import` acepta `import_rows`, `column_mapping`, `custom_fields_schema` e `import_file_name`, relaciona/crea pacientes y persiste items. |
 | GET | `/lists/:id` | Detalle con resumen, field schema, plantilla y contadores calculados en backend. |

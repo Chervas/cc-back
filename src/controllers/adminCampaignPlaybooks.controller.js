@@ -277,6 +277,8 @@ async function normalizePlaybookPayload(payload, options = {}) {
     }
   }
 
+  const resolvedObjectiveId = objectiveId || current?.objective_id || null;
+  const isReactivationObjective = resolvedObjectiveId === 'reactivate_patients';
   const channelsSupported = source.channels_supported !== undefined
     ? normalizeStringArray(source.channels_supported)
     : (partial ? normalizeStringArray(current?.channels_supported) : []);
@@ -284,9 +286,20 @@ async function normalizePlaybookPayload(payload, options = {}) {
     ? normalizeStringArray(source.channels_default)
     : (partial ? normalizeStringArray(current?.channels_default) : []);
   const channelsDefault = channelsDefaultRaw.filter((channel) => channelsSupported.includes(channel));
-  if (!channelsSupported.length) {
+  if (!channelsSupported.length && !isReactivationObjective) {
     return { error: 'channels_supported_required', message: 'channels_supported debe incluir al menos un canal' };
   }
+  const reactivationAllowedChannels = new Set(['whatsapp', 'phone']);
+  const finalChannelsSupported = isReactivationObjective
+    ? channelsSupported.filter((channel) => reactivationAllowedChannels.has(channel))
+    : channelsSupported;
+  const finalChannelsSupportedWithFallback = finalChannelsSupported.length
+    ? finalChannelsSupported
+    : (isReactivationObjective ? ['whatsapp', 'phone'] : finalChannelsSupported);
+  const finalChannelsDefault = (isReactivationObjective
+    ? channelsDefault.filter((channel) => reactivationAllowedChannels.has(channel))
+    : channelsDefault)
+    .filter((channel) => finalChannelsSupportedWithFallback.includes(channel));
 
   const destinationPolicy = source.destination_policy !== undefined
     ? normalizeDestinationPolicy(source.destination_policy)
@@ -297,7 +310,6 @@ async function normalizePlaybookPayload(payload, options = {}) {
   const automationStrategy = source.automation_strategy !== undefined
     ? normalizeAutomationStrategy(source.automation_strategy)
     : (partial ? normalizeAutomationStrategy(current?.automation_strategy) : normalizeAutomationStrategy({}));
-  const resolvedObjectiveId = objectiveId || current?.objective_id || null;
   if (resolvedObjectiveId !== 'reactivate_patients') {
     automationStrategy.reactivation_preset = null;
   }
@@ -338,16 +350,31 @@ async function normalizePlaybookPayload(payload, options = {}) {
       area_medica: resolvedPromotionKind === 'generic_campaign' ? areaMedica : null,
       family_key: resolvedPromotionKind === 'generic_campaign' ? familyKey : null,
       status,
-      channels_supported: channelsSupported,
-      channels_default: channelsDefault.length ? channelsDefault : [channelsSupported[0]],
-      recommended_budget_min: source.recommended_budget_min !== undefined
+      channels_supported: finalChannelsSupportedWithFallback,
+      channels_default: finalChannelsDefault.length ? finalChannelsDefault : [finalChannelsSupportedWithFallback[0]],
+      recommended_budget_min: isReactivationObjective ? null : (source.recommended_budget_min !== undefined
         ? toNullableInt(source.recommended_budget_min)
-        : (partial ? toNullableInt(current?.recommended_budget_min) : null),
-      recommended_budget_max: source.recommended_budget_max !== undefined
+        : (partial ? toNullableInt(current?.recommended_budget_min) : null)),
+      recommended_budget_max: isReactivationObjective ? null : (source.recommended_budget_max !== undefined
         ? toNullableInt(source.recommended_budget_max)
-        : (partial ? toNullableInt(current?.recommended_budget_max) : null),
-      destination_policy: destinationPolicy,
-      measurement_profile: measurementProfile,
+        : (partial ? toNullableInt(current?.recommended_budget_max) : null)),
+      destination_policy: isReactivationObjective
+        ? {
+            clinic_website_default: false,
+            specific_url_allowed: false,
+            subtree_recommended: false,
+            landing_future: false,
+          }
+        : destinationPolicy,
+      measurement_profile: isReactivationObjective
+        ? {
+            first_party: false,
+            channel_native: false,
+            business_outcomes: true,
+            remarketing: false,
+            ad_calls: false,
+          }
+        : measurementProfile,
       automation_strategy: automationStrategy,
       template_bundle_refs: source.template_bundle_refs !== undefined
         ? normalizeStringArray(source.template_bundle_refs)
@@ -364,8 +391,42 @@ async function normalizePlaybookPayload(payload, options = {}) {
 function serializePlaybook(item) {
   const data = item?.toJSON ? item.toJSON() : item;
   const treatment = data?.treatment || null;
+  const isReactivationObjective = data?.objective_id === 'reactivate_patients';
+  const reactivationAllowedChannels = new Set(['whatsapp', 'phone']);
+  const channelsSupported = isReactivationObjective
+    ? normalizeStringArray(data?.channels_supported).filter((channel) => reactivationAllowedChannels.has(channel))
+    : normalizeStringArray(data?.channels_supported);
+  const channelsSupportedWithFallback = channelsSupported.length
+    ? channelsSupported
+    : (isReactivationObjective ? ['whatsapp', 'phone'] : channelsSupported);
+  const channelsDefault = (isReactivationObjective
+    ? normalizeStringArray(data?.channels_default).filter((channel) => reactivationAllowedChannels.has(channel))
+    : normalizeStringArray(data?.channels_default))
+    .filter((channel) => channelsSupportedWithFallback.includes(channel));
+
   return {
     ...data,
+    channels_supported: channelsSupportedWithFallback,
+    channels_default: channelsDefault.length ? channelsDefault : [channelsSupportedWithFallback[0]].filter(Boolean),
+    recommended_budget_min: isReactivationObjective ? null : data?.recommended_budget_min,
+    recommended_budget_max: isReactivationObjective ? null : data?.recommended_budget_max,
+    destination_policy: isReactivationObjective
+      ? {
+          clinic_website_default: false,
+          specific_url_allowed: false,
+          subtree_recommended: false,
+          landing_future: false,
+        }
+      : data?.destination_policy,
+    measurement_profile: isReactivationObjective
+      ? {
+          first_party: false,
+          channel_native: false,
+          business_outcomes: true,
+          remarketing: false,
+          ad_calls: false,
+        }
+      : data?.measurement_profile,
     area_medica: data?.area_medica || null,
     treatment: treatment
       ? {

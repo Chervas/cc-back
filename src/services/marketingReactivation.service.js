@@ -438,16 +438,21 @@ function buildSuggestionFromGroup(group) {
   const id = group.playbookId ? `playbook_${group.playbookId}` : slugSuggestionId(group.treatmentName, group.thresholdMonths);
   const thresholdLabel = group.threshold?.label || `${group.thresholdMonths} meses`;
   const recommendedMode = group.recommendedMode || getRecommendedMode(group.treatmentName);
+  const hasCandidates = group.candidates.length > 0;
   return {
     id,
     title: group.playbookName || `${group.treatmentName} sin visita reciente`,
-    subtitle: `Pacientes de ${group.treatmentName} sin cita futura detectada.`,
+    subtitle: hasCandidates
+      ? `Pacientes de ${group.treatmentName} sin cita futura detectada.`
+      : 'Preset activo del catálogo. Todavía no hay pacientes detectados en este scope.',
     treatment: group.treatmentName,
     condition: `Última cita hace más de ${thresholdLabel}, sin cita programada y con teléfono válido.`,
     candidates: group.candidates.length,
     eligible,
     excluded,
-    exclusionSummary: excluded ? `${excluded} excluidos por cita futura, no contactar, duplicado o teléfono no válido.` : 'Sin exclusiones detectadas.',
+    exclusionSummary: excluded
+      ? `${excluded} excluidos por cita futura, no contactar, duplicado o teléfono no válido.`
+      : (hasCandidates ? 'Sin exclusiones detectadas.' : 'Sin pacientes que cumplan estas condiciones en el scope seleccionado.'),
     recommendedMode,
     priority: getPriority({ eligible, thresholdMonths: group.thresholdMonths }),
     estimatedRevenueLabel: group.estimatedRevenueLabel || getRevenueLabel(group.treatmentName),
@@ -458,6 +463,31 @@ function buildSuggestionFromGroup(group) {
     automation: group.automation || null,
     candidates_preview: group.candidates.slice(0, 5),
     candidates_full: group.candidates,
+  };
+}
+
+function buildEmptyPlaybookGroup(playbook, preset, options = {}) {
+  const treatmentName = preset?.treatment_scope === 'any_treatment'
+    ? 'Cualquier tratamiento'
+    : playbookTreatmentName(playbook);
+  const fallbackMonths = getThresholdMonths(treatmentName);
+  const threshold = toThresholdCutoff(
+    preset?.inactivity_threshold?.value || fallbackMonths,
+    preset?.inactivity_threshold?.unit || 'months',
+    fallbackMonths
+  );
+
+  return {
+    treatmentName,
+    thresholdMonths: threshold.monthsForPriority,
+    threshold,
+    playbookId: playbook.id,
+    playbookName: playbook.display_name,
+    recommendedMode: mapPresetActionToMode(preset?.default_action),
+    estimatedRevenueLabel: null,
+    automation: options.automation || null,
+    sourcePlaybook: playbook,
+    candidates: [],
   };
 }
 
@@ -480,13 +510,11 @@ async function getSuggestions(scope, options = {}) {
       playbookId: playbook.id,
       playbookName: playbook.display_name,
       recommendedMode: mapPresetActionToMode(preset.default_action),
-      estimatedRevenueLabel: playbook.recommended_budget_min || playbook.recommended_budget_max
-        ? `Presupuesto recomendado ${playbook.recommended_budget_min || 0}-${playbook.recommended_budget_max || 0} €/mes`
-        : null,
+      estimatedRevenueLabel: null,
       automation,
       sourcePlaybook: playbook,
     });
-    playbookGroups.push(...groups);
+    playbookGroups.push(...(groups.length ? groups : [buildEmptyPlaybookGroup(playbook, preset, { automation })]));
   }
 
   const groups = playbookGroups.length
@@ -495,7 +523,6 @@ async function getSuggestions(scope, options = {}) {
 
   const suggestions = groups
     .map(buildSuggestionFromGroup)
-    .filter((item) => item.candidates > 0)
     .sort((a, b) => (b.eligible - a.eligible) || (b.candidates - a.candidates))
     .slice(0, Math.min(Math.max(Number(options.limit || 8), 1), 20))
     .map(({ candidates_full, thresholdMonths, ...item }) => item);
@@ -535,7 +562,8 @@ async function findSuggestion(scope, suggestionId) {
       automation,
       sourcePlaybook: playbook,
     });
-    return groups
+    const effectiveGroups = groups.length ? groups : [buildEmptyPlaybookGroup(playbook, preset, { automation })];
+    return effectiveGroups
       .map(buildSuggestionFromGroup)
       .find((suggestion) => suggestion.id === suggestionId) || null;
   }
