@@ -1,6 +1,7 @@
 'use strict';
 
 const { Op } = require('sequelize');
+const crypto = require('crypto');
 const db = require('../../models');
 const { normalizePhoneDigits } = require('../lib/phone');
 
@@ -384,6 +385,7 @@ async function collectSuggestionGroups(scope, options = {}) {
     if (!groups.has(groupKey)) {
       groups.set(groupKey, {
         treatmentName: displayTreatmentName,
+        treatmentId: options.treatmentId || Number(appointment.tratamiento_id || appointment.tratamiento?.id_tratamiento || 0) || null,
         thresholdMonths: threshold.monthsForPriority,
         threshold,
         playbookId: options.playbookId || null,
@@ -446,6 +448,7 @@ function buildSuggestionFromGroup(group) {
       ? `Pacientes de ${group.treatmentName} sin cita futura detectada.`
       : 'Preset activo del catálogo. Todavía no hay pacientes detectados en este scope.',
     treatment: group.treatmentName,
+    treatment_id: group.treatmentId || null,
     condition: `Última cita hace más de ${thresholdLabel}, sin cita programada y con teléfono válido.`,
     candidates: group.candidates.length,
     eligible,
@@ -479,6 +482,7 @@ function buildEmptyPlaybookGroup(playbook, preset, options = {}) {
 
   return {
     treatmentName,
+    treatmentId: playbook.treatment_id || null,
     thresholdMonths: threshold.monthsForPriority,
     threshold,
     playbookId: playbook.id,
@@ -920,6 +924,125 @@ function getBlockedGates(safetyGates) {
   return REQUIRED_SEND_GATES.filter((key) => safetyGates?.[key] !== true);
 }
 
+function sanitizeTemplateKey(value) {
+  return String(value || '')
+    .trim()
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/[^a-z0-9_]+/g, '_')
+    .replace(/^_+|_+$/g, '')
+    .slice(0, 120);
+}
+
+function buildReactivationAutomationNodes(list, automation, actionMode, template) {
+  const criteria = list.criteria || {};
+  const actionNodeType = actionMode === 'whatsapp_template'
+    ? 'action/send_whatsapp'
+    : (actionMode === 'lead_call_list' ? 'action/update_lead_info' : 'action/create_task');
+  const actionConfig = actionMode === 'whatsapp_template'
+    ? {
+      mode: 'template',
+      template_id: template?.id || automation?.template_id || null,
+      template_name: template?.nombre || automation?.template_name || null,
+      source: 'marketing_reactivation',
+    }
+    : {
+      source: 'marketing_reactivation',
+      destination: actionMode === 'lead_call_list' ? 'leads' : 'managed_calls',
+    };
+
+  return [
+    {
+      id: 'N1',
+      type: 'trigger/patient_reactivation',
+      position: { x: 120, y: 160 },
+      config: {
+        readonly: true,
+        list_id: list.id,
+        treatment: list.treatment,
+        treatment_id: automation?.treatment_id || criteria.treatment_id || null,
+        condition_summary: list.condition_summary,
+        criteria,
+      },
+      outputs: { on_success: 'N2' },
+    },
+    {
+      id: 'N2',
+      type: actionNodeType,
+      position: { x: 420, y: 160 },
+      config: actionConfig,
+      outputs: {},
+    },
+  ];
+}
+
+async function upsertReactivationAutomationTemplate({ list, automation, actionMode, template, userId }) {
+  if (!AutomationFlowTemplateV2 || !automation?.active) {
+    return automation || null;
+  }
+
+  const templateKey = sanitizeTemplateKey(
+    automation.template_key || `reactivacion_lista_${list.id}`
+  );
+  const nodes = buildReactivationAutomationNodes(list, automation, actionMode, template);
+  const payload = {
+    engine_version: 'v2',
+    name: automation.name || `Automatización · ${list.name}`,
+    description: `Automatización de solo lectura creada desde la reactivación "${list.name}".`,
+    trigger_type: 'patient_reactivation',
+    trigger_config: {
+      list_id: list.id,
+      treatment: list.treatment,
+      treatment_id: automation.treatment_id || list.criteria?.treatment_id || null,
+      readonly: true,
+    },
+    is_active: true,
+    is_system: false,
+    clinic_id: list.clinica_id || null,
+    group_id: list.grupo_clinica_id || null,
+    entry_node_id: 'N1',
+    nodes,
+    published_at: new Date(),
+    published_by: userId || null,
+  };
+
+  const existing = await AutomationFlowTemplateV2.findOne({
+    where: { template_key: templateKey },
+    order: [['version', 'DESC']],
+  });
+
+  const row = existing
+    ? await existing.update(payload)
+    : await AutomationFlowTemplateV2.create({
+      public_id: `flw_${crypto.randomBytes(8).toString('hex')}`,
+      template_key: templateKey,
+      version: 1,
+      created_by: userId || 1,
+      ...payload,
+    });
+
+  return {
+    ...automation,
+    active: true,
+    readonly: true,
+    id: row.id,
+    template_key: row.template_key,
+    template_version: row.version,
+    trigger_type: 'patient_reactivation',
+  };
+}
+
+async function deactivateReactivationAutomationTemplate(automation) {
+  if (!AutomationFlowTemplateV2 || !automation?.template_key) {
+    return;
+  }
+  await AutomationFlowTemplateV2.update(
+    { is_active: false },
+    { where: { template_key: automation.template_key, trigger_type: 'patient_reactivation' } }
+  );
+}
+
 function serializeItem(item) {
   const plain = item?.get ? item.get({ plain: true }) : item;
   return {
@@ -1183,6 +1306,86 @@ async function getItems(scope, listId) {
   };
 }
 
+async function updateItem(scope, listId, itemId, body = {}, userId = null) {
+  const list = await MarketingPatientList.findByPk(listId);
+  ensureScopeAccess(list, scope);
+
+  const item = await MarketingPatientListItem.findOne({
+    where: {
+      id: itemId,
+      list_id: list.id,
+    },
+  });
+  if (!item) {
+    const err = new Error('Paciente de la lista no encontrado');
+    err.status = 404;
+    throw err;
+  }
+
+  const action = String(body.action || body.status || '').toLowerCase();
+  const excluding = action === 'exclude' || action === 'excluded' || action === 'excluded_manual';
+  const restoring = action === 'restore' || action === 'ready' || action === 'include';
+  if (!excluding && !restoring) {
+    const err = new Error('Acción no válida. Usa exclude o restore.');
+    err.status = 400;
+    throw err;
+  }
+
+  const nextStatus = excluding ? 'excluded_manual' : 'ready';
+  const nextReason = excluding
+    ? (body.reason || 'Excluido manualmente por la clínica')
+    : (body.reason || 'Incluido manualmente por la clínica');
+
+  await db.sequelize.transaction(async (transaction) => {
+    await item.update({
+      status: nextStatus,
+      selected: !excluding,
+      exclusion_reason: excluding ? 'manual' : null,
+      reason: nextReason,
+      notes: body.notes || item.notes || null,
+    }, { transaction });
+
+    const allItems = await MarketingPatientListItem.findAll({
+      where: { list_id: list.id },
+      transaction,
+    });
+    const counters = computeCounters(allItems.map((row) => row.get({ plain: true })));
+    await list.update({
+      counters,
+      safety_gates: {
+        ...(list.safety_gates || {}),
+        frozen_audience: counters.total > 0,
+      },
+    }, { transaction });
+
+    await MarketingPatientContactEvent.create({
+      list_id: list.id,
+      item_id: item.id,
+      event_type: excluding ? 'item_excluded_manual' : 'item_restored_manual',
+      channel: list.channel,
+      payload: {
+        action: excluding ? 'exclude' : 'restore',
+        reason: nextReason,
+        user_id: userId || null,
+      },
+      occurred_at: new Date(),
+    }, { transaction });
+  });
+
+  const updated = await MarketingPatientListItem.findByPk(item.id);
+  const reloaded = await MarketingPatientList.findByPk(list.id);
+  const previewItems = await MarketingPatientListItem.findAll({
+    where: { list_id: list.id },
+    order: [['id', 'ASC']],
+    limit: 5,
+  });
+  return {
+    success: true,
+    item: serializeItem(updated),
+    list: serializeList(reloaded, { itemsPreview: previewItems }),
+  };
+}
+
 async function prepareList(scope, listId, body = {}, userId = null) {
   const list = await MarketingPatientList.findByPk(listId);
   ensureScopeAccess(list, scope);
@@ -1191,6 +1394,15 @@ async function prepareList(scope, listId, body = {}, userId = null) {
   const items = await MarketingPatientListItem.findAll({ where: { list_id: list.id } });
   const counters = computeCounters(items.map((item) => item.get({ plain: true })));
   const safetyGates = buildSafetyGates({ actionMode, template, list: { counters } });
+  const automationPayload = Object.prototype.hasOwnProperty.call(body, 'automation')
+    ? (body.automation && typeof body.automation === 'object' ? body.automation : null)
+    : list.automation;
+  const automationSnapshot = automationPayload
+    ? await upsertReactivationAutomationTemplate({ list, automation: automationPayload, actionMode, template, userId })
+    : null;
+  if (!automationPayload) {
+    await deactivateReactivationAutomationTemplate(list.automation);
+  }
 
   await list.update({
     status: 'prepared',
@@ -1199,6 +1411,7 @@ async function prepareList(scope, listId, body = {}, userId = null) {
     template_id: template?.id || null,
     template_snapshot: snapshot,
     counters,
+    automation: automationSnapshot,
     safety_gates: safetyGates,
     prepared_at: new Date(),
   });
@@ -1213,6 +1426,7 @@ async function prepareList(scope, listId, body = {}, userId = null) {
       user_id: userId || null,
       safety_gates: safetyGates,
       blocked_gates: getBlockedGates(safetyGates),
+      automation_requested: !!automationSnapshot,
     },
     occurred_at: new Date(),
   });
@@ -1361,6 +1575,7 @@ module.exports = {
   createList,
   getList,
   getItems,
+  updateItem,
   prepareList,
   scheduleList,
   removeList,

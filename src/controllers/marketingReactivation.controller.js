@@ -130,6 +130,22 @@ exports.getItems = async (req, res) => {
   }
 };
 
+exports.updateItem = async (req, res) => {
+  try {
+    const scope = await resolveScopeFromRequest(req, { allowAll: false });
+    const result = await marketingReactivationService.updateItem(
+      scope,
+      req.params.id,
+      req.params.itemId,
+      req.body || {},
+      req.userData?.userId || null
+    );
+    return res.json(result);
+  } catch (error) {
+    return sendError(res, error, 'Error actualizando paciente de la lista');
+  }
+};
+
 exports.prepareList = async (req, res) => {
   try {
     const scope = await resolveScopeFromRequest(req, { allowAll: false });

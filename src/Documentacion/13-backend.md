@@ -739,7 +739,7 @@ Rutas bajo `/api/marketing/reactivation`:
 
 | Método | Ruta | Uso |
 |---|---|---|
-| GET | `/suggestions` | Operativo con datos reales por scope/tratamiento. Si existen playbooks admin activos de `reactivate_patients`, usa su `reactivation_preset`, devuelve la automatización asociada y mantiene el preset visible aunque el scope tenga cero candidatos. |
+| GET | `/suggestions` | Operativo con datos reales por scope/tratamiento. Si existen playbooks admin activos de `reactivate_patients`, usa su `reactivation_preset`, devuelve `treatment_id`, la automatización asociada y mantiene el preset visible aunque el scope tenga cero candidatos. |
 | GET | `/lists` | Listar listas de reactivación por scope, estado y objetivo. |
 | POST | `/lists` | Crear lista `draft` desde filtros, manual o importación real. Para `source=import` acepta `import_rows`, `column_mapping`, `custom_fields_schema` e `import_file_name`, relaciona/crea pacientes y persiste items. |
 | GET | `/lists/:id` | Detalle con resumen, field schema, plantilla y contadores calculados en backend. |
@@ -750,7 +750,7 @@ Rutas bajo `/api/marketing/reactivation`:
 | POST | `/lists/:id/rebuild` | Recalcular cruces con pacientes, citas, LeadIntake, opt-out, cuarentena y duplicados. |
 | DELETE | `/lists/:id` | Eliminar listas `draft`; archivar listas ya preparadas/activas para ocultarlas del listado principal sin perder auditoría ni datos. |
 | GET | `/lists/:id/items` | Items paginados con filtros por estado, motivo y campos faltantes. |
-| PATCH | `/lists/:id/items/:itemId` | Editar/include/exclude item, custom fields o mapping manual. |
+| PATCH | `/lists/:id/items/:itemId` | Operativo para `action=exclude|restore`: excluye/restaura manualmente un paciente de lista, valida scope, recalcula contadores y audita en `MarketingPatientContactEvents`. |
 | POST | `/lists/:id/template-preview` | Calcular variables requeridas, pacientes sin datos y preview antes de aprobar. |
 | POST | `/lists/:id/approve` | Congelar audiencia y plantilla. |
 | POST | `/lists/:id/schedule` | Crear cola cancelable si todos los gates están OK. |
@@ -777,6 +777,9 @@ Reglas:
 - Los nombres de pacientes creados/actualizados desde importación se normalizan a formato nombre propio.
 - Alias de importación soportados para nombre completo: `nombre`, `nombre_completo`, `nombre_y_apellidos`, `nombre_apellidos`, `nombre_paciente`, `full_name`.
 - `GET /reactivation/lists` omite listas `archived` por defecto.
+- `POST /reactivation/lists/:id/prepare` no envia mensajes. Si recibe `automation.active=true`, crea/actualiza una plantilla real en `AutomationFlowTemplatesV2` con `trigger_type=patient_reactivation`, `entry_node_id=N1` y nodos de solo lectura: activador de reactivacion + accion elegida (`send_whatsapp`, `update_lead_info` o `create_task`).
+- Si `prepare` recibe `automation=null`, desactiva el flujo `patient_reactivation` asociado por `template_key` cuando existe.
+- `patient_reactivation` es representacion operativa/visual para `Marketing > Flujos`; la reevaluacion batch 24h, capping y cola cancelable siguen pendientes antes de envio real.
 
 ### 1.1. Automatizaciones basadas en listas
 
