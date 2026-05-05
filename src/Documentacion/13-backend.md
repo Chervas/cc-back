@@ -543,6 +543,14 @@ Resolución adicional en webs de grupo:
   - `clinic_match_source = clinic_name_field`
   - `clinic_match_value = <texto recibido>`
 
+Herencia de configuración web al crear grupos:
+- `groupAssets.service.copyClinicIntakeConfigToGroup` copia `IntakeConfig` de clínica a grupo conservando dominios, HMAC y `config` completo.
+- `updateGroupConfig` la ejecuta automáticamente si el grupo queda con una sola clínica y todavía no existe `IntakeConfig` de grupo.
+- La copia añade `config.group_inheritance` con clínica origen, fecha y motivo.
+- Para grupos con varias clínicas no hay migración automática: debe elegirse explícitamente la clínica origen o usar `web_assignment_mode=manual`.
+- Script operativo para backfills puntuales:
+  - `node scripts/copy-intake-config-to-group.js --clinic=<id> --group=<id> [--overwrite] [--reason=texto]`
+
 ### Pixel de Meta
 
 Estado actual del producto:

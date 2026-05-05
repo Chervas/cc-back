@@ -5,6 +5,7 @@ const {
   sequelize,
   GrupoClinica,
   Clinica,
+  IntakeConfig,
   ClinicMetaAsset,
   ClinicWebAsset,
   ClinicAnalyticsProperty,
@@ -80,6 +81,17 @@ const CONNECTION_STATUSES = {
   connected: 'connected',
   disconnected: 'disconnected'
 };
+
+function _cloneJson(value, fallback) {
+  if (value === undefined || value === null) {
+    return fallback;
+  }
+  try {
+    return JSON.parse(JSON.stringify(value));
+  } catch (_error) {
+    return fallback;
+  }
+}
 
 function _indexAssignments(rows = []) {
   const byType = new Map();
@@ -378,6 +390,18 @@ async function getGroupConfig(groupId) {
     connections: Array.from(googleConnectionIds)
   };
 
+  const groupIntakeConfig = IntakeConfig
+    ? await IntakeConfig.findOne({
+        where: { group_id: group.id_grupo, assignment_scope: 'group' },
+        attributes: ['id', 'domains', 'config', 'updated_at'],
+        raw: true
+      })
+    : null;
+  const groupIntakeConfigJson = groupIntakeConfig?.config && typeof groupIntakeConfig.config === 'object'
+    ? groupIntakeConfig.config
+    : {};
+  const groupIntakeInheritance = groupIntakeConfigJson?.group_inheritance || null;
+
   const clinicSummaries = clinics.map(c => ({ id: c.id_clinica, nombre: c.nombre_clinica }));
   const clinicUrlMap = {};
   clinics.forEach(clinic => {
@@ -400,7 +424,16 @@ async function getGroupConfig(groupId) {
       mode: group.web_assignment_mode,
       primaryUrl: group.web_primary_url,
       updatedAt: group.web_assignment_updated_at,
-      clinicUrls: clinicUrlMap
+      clinicUrls: clinicUrlMap,
+      intakeConfig: {
+        exists: !!groupIntakeConfig,
+        id: groupIntakeConfig?.id || null,
+        domains: groupIntakeConfig?.domains || [],
+        inheritedFromClinicId: groupIntakeInheritance?.inherited_from_clinic_id || null,
+        inheritedFromClinicName: groupIntakeInheritance?.inherited_from_clinic_name || null,
+        inheritedAt: groupIntakeInheritance?.inherited_at || null,
+        updatedAt: groupIntakeConfig?.updated_at || null
+      }
     },
     clinics: clinicSummaries,
     assets: {
@@ -462,6 +495,159 @@ async function getGroupConfig(groupId) {
   };
 
   return response;
+}
+
+async function copyClinicIntakeConfigToGroup({
+  clinicId,
+  groupId,
+  overwrite = false,
+  reason = 'single_clinic_group_inheritance',
+  transaction = null
+}) {
+  const normalizedClinicId = Number.parseInt(String(clinicId), 10);
+  const normalizedGroupId = Number.parseInt(String(groupId), 10);
+  if (!Number.isInteger(normalizedClinicId) || !Number.isInteger(normalizedGroupId)) {
+    throw new Error('clinicId/groupId inválido');
+  }
+
+  const run = async (tx) => {
+    const [clinic, group, sourceConfig, existingGroupConfig] = await Promise.all([
+      Clinica.findByPk(normalizedClinicId, {
+        attributes: ['id_clinica', 'nombre_clinica', 'grupoClinicaId', 'url_web'],
+        raw: true,
+        transaction: tx
+      }),
+      GrupoClinica.findByPk(normalizedGroupId, {
+        attributes: ['id_grupo', 'nombre_grupo', 'web_assignment_mode', 'web_primary_url'],
+        raw: true,
+        transaction: tx
+      }),
+      IntakeConfig.findOne({
+        where: { clinic_id: normalizedClinicId, assignment_scope: 'clinic' },
+        transaction: tx
+      }),
+      IntakeConfig.findOne({
+        where: { group_id: normalizedGroupId, assignment_scope: 'group' },
+        transaction: tx
+      })
+    ]);
+
+    if (!group) {
+      throw new Error('Group not found');
+    }
+    if (!clinic) {
+      throw new Error('Clinic not found');
+    }
+    if (Number(clinic.grupoClinicaId) !== normalizedGroupId) {
+      throw new Error('La clínica no pertenece al grupo indicado');
+    }
+    if (!sourceConfig) {
+      return {
+        copied: false,
+        reason: 'clinic_intake_config_missing',
+        clinicId: normalizedClinicId,
+        groupId: normalizedGroupId
+      };
+    }
+    if (existingGroupConfig && !overwrite) {
+      return {
+        copied: false,
+        reason: 'group_intake_config_exists',
+        clinicId: normalizedClinicId,
+        groupId: normalizedGroupId,
+        groupConfigId: existingGroupConfig.id
+      };
+    }
+
+    const source = sourceConfig.get ? sourceConfig.get({ plain: true }) : sourceConfig;
+    const now = new Date();
+    const config = _cloneJson(source.config, {});
+    config.group_inheritance = {
+      source: 'clinic_intake_config',
+      inherited_from_clinic_id: normalizedClinicId,
+      inherited_from_clinic_name: clinic.nombre_clinica || null,
+      inherited_at: now.toISOString(),
+      reason
+    };
+
+    const payload = {
+      clinic_id: null,
+      group_id: normalizedGroupId,
+      assignment_scope: 'group',
+      domains: _cloneJson(source.domains, []),
+      config,
+      hmac_key: source.hmac_key || null
+    };
+
+    let saved;
+    if (existingGroupConfig) {
+      saved = await existingGroupConfig.update(payload, { transaction: tx });
+    } else {
+      saved = await IntakeConfig.create(payload, { transaction: tx });
+    }
+
+    if (
+      group.web_assignment_mode === 'automatic'
+      && !group.web_primary_url
+      && clinic.url_web
+    ) {
+      await GrupoClinica.update(
+        {
+          web_primary_url: clinic.url_web,
+          web_assignment_updated_at: now
+        },
+        { where: { id_grupo: normalizedGroupId }, transaction: tx }
+      );
+    }
+
+    return {
+      copied: true,
+      clinicId: normalizedClinicId,
+      groupId: normalizedGroupId,
+      groupConfigId: saved.id,
+      domains: payload.domains
+    };
+  };
+
+  if (transaction) {
+    return run(transaction);
+  }
+
+  return sequelize.transaction(run);
+}
+
+async function _maybeInheritIntakeConfigForSingleClinicGroup({ groupId, clinicIds, transaction }) {
+  const normalizedClinicIds = Array.from(new Set(
+    (clinicIds || [])
+      .map((id) => Number.parseInt(String(id), 10))
+      .filter(Number.isInteger)
+  ));
+
+  if (normalizedClinicIds.length !== 1) {
+    return null;
+  }
+
+  const group = await GrupoClinica.findByPk(groupId, {
+    attributes: ['id_grupo', 'web_assignment_mode'],
+    raw: true,
+    transaction
+  });
+  if (!group || group.web_assignment_mode !== 'automatic') {
+    return {
+      copied: false,
+      reason: 'group_web_mode_not_automatic',
+      clinicId: normalizedClinicIds[0],
+      groupId
+    };
+  }
+
+  return copyClinicIntakeConfigToGroup({
+    groupId,
+    clinicId: normalizedClinicIds[0],
+    overwrite: false,
+    reason: 'single_clinic_group_membership',
+    transaction
+  });
 }
 
 function _ensureValidMode(value, field) {
@@ -1106,6 +1292,12 @@ async function updateGroupConfig(groupId, payload) {
       }
     }
 
+    await _maybeInheritIntakeConfigForSingleClinicGroup({
+      groupId,
+      clinicIds,
+      transaction
+    });
+
     if (payload.meta) {
       const { facebook, instagram, tiktok } = payload.meta;
 
@@ -1230,5 +1422,6 @@ async function updateGroupConfig(groupId, payload) {
 
 module.exports = {
   getGroupConfig,
-  updateGroupConfig
+  updateGroupConfig,
+  copyClinicIntakeConfigToGroup
 };
