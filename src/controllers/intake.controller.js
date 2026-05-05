@@ -2256,6 +2256,43 @@ const defaultConfigPayload = (clinicId, groupId) => ({
   config: {}
 });
 
+const resolveSharedWebGroupConfigForClinic = async (clinicId) => {
+  const parsedClinicId = parseInteger(clinicId);
+  if (parsedClinicId === null) {
+    return null;
+  }
+
+  const clinicRow = await Clinica.findOne({
+    where: { id_clinica: parsedClinicId },
+    attributes: ['id_clinica', 'grupoClinicaId', 'nombre_clinica'],
+    raw: true
+  });
+  const groupId = parseInteger(clinicRow?.grupoClinicaId);
+  if (!clinicRow || groupId === null) {
+    return { clinicRow, groupId: null, record: null };
+  }
+
+  const group = await GrupoClinica.findOne({
+    where: { id_grupo: groupId },
+    attributes: ['id_grupo', 'web_assignment_mode'],
+    raw: true
+  });
+  if (group?.web_assignment_mode !== 'automatic') {
+    return { clinicRow, groupId, record: null };
+  }
+
+  const record = await IntakeConfig.findOne({
+    where: { group_id: groupId, assignment_scope: 'group' },
+    raw: true
+  });
+
+  return {
+    clinicRow,
+    groupId,
+    record: record || null
+  };
+};
+
 exports.getIntakeConfig = asyncHandler(async (req, res) => {
   // La config es “source of truth” para el snippet; evitar 304/ETag y cachés agresivas.
   res.set('Cache-Control', 'no-store');
@@ -2267,16 +2304,22 @@ exports.getIntakeConfig = asyncHandler(async (req, res) => {
   const groupIdParsed = parseInteger(groupIdRaw);
 
   let record = null;
+  let sharedWebContext = null;
   // Prioridad:
-  // - Si el snippet pasa clinic_id explícito => config de clínica.
+  // - Si el snippet pasa clinic_id explícito y su grupo usa web compartida => config efectiva de grupo.
+  // - Si el snippet pasa clinic_id explícito sin web compartida => config de clínica.
   // - Si el snippet pasa group_id explícito => config de grupo.
-  // - Si no hay IDs => resolver por dominio (primero clínica, luego grupo).
+  // - Si no hay IDs => resolver por dominio (primero clínica, aplicando web compartida, luego grupo).
   //
   // Motivo: el HMAC se configura por scope (clínica vs grupo). Si el snippet se instala con
   // data-group-id, NO debemos devolver config de clínica solo por el dominio, o el snippet firmará
   // con la key de grupo pero el backend esperará la key de clínica (401).
   if (clinicIdParsed !== null) {
-    record = await IntakeConfig.findOne({ where: { clinic_id: clinicIdParsed }, raw: true });
+    sharedWebContext = await resolveSharedWebGroupConfigForClinic(clinicIdParsed);
+    record = sharedWebContext?.record || null;
+    if (!record) {
+      record = await IntakeConfig.findOne({ where: { clinic_id: clinicIdParsed }, raw: true });
+    }
   }
   if (!record && groupIdParsed !== null) {
     record = await IntakeConfig.findOne({ where: { group_id: groupIdParsed, assignment_scope: 'group' }, raw: true });
@@ -2286,6 +2329,10 @@ exports.getIntakeConfig = asyncHandler(async (req, res) => {
       where: db.Sequelize.literal(`JSON_CONTAINS(COALESCE(domains,'[]'), '\"${domain}\"') AND assignment_scope='clinic'`)
     });
     if (record && record.get) record = record.get({ plain: true });
+    if (record?.clinic_id) {
+      sharedWebContext = await resolveSharedWebGroupConfigForClinic(record.clinic_id);
+      record = sharedWebContext?.record || record;
+    }
   }
   if (!record && domain) {
     record = await IntakeConfig.findOne({
@@ -2294,9 +2341,9 @@ exports.getIntakeConfig = asyncHandler(async (req, res) => {
     if (record && record.get) record = record.get({ plain: true });
   }
 
-  let effectiveClinicId = record?.clinic_id || clinicIdParsed || null;
-  let effectiveGroupId = record?.group_id || groupIdParsed || null;
-  let effectiveClinicRow = null;
+  let effectiveClinicId = sharedWebContext?.clinicRow?.id_clinica || record?.clinic_id || clinicIdParsed || null;
+  let effectiveGroupId = sharedWebContext?.groupId || record?.group_id || groupIdParsed || null;
+  let effectiveClinicRow = sharedWebContext?.clinicRow || null;
   if (!effectiveGroupId && effectiveClinicId) {
     effectiveClinicRow = await Clinica.findOne({
       where: { id_clinica: effectiveClinicId },
@@ -2364,6 +2411,10 @@ exports.getIntakeConfig = asyncHandler(async (req, res) => {
     payload.locations = cfg.locations || [];
     payload.config = cfg;
     payload.has_hmac = !!record.hmac_key;
+    if (sharedWebContext?.record) {
+      payload.effective_config_source = 'group_web_shared';
+      payload.requested_clinic_id = clinicIdParsed || sharedWebContext.clinicRow?.id_clinica || null;
+    }
     if (domain && payload.domains.length > 0 && !isDomainAllowed(payload.domains, domain)) {
       return res.status(403).json({ message: 'Domain not allowed' });
     }
@@ -2565,6 +2616,18 @@ exports.upsertIntakeConfig = asyncHandler(async (req, res) => {
   if (!clinicId && !groupId) return res.status(400).json({ message: 'clinicId o group_id requerido' });
 
   const scope = groupId ? 'group' : 'clinic';
+  if (scope === 'clinic') {
+    const sharedWebContext = await resolveSharedWebGroupConfigForClinic(clinicId);
+    if (sharedWebContext?.record) {
+      return res.status(409).json({
+        message: 'Esta clínica usa la configuración web del grupo. Selecciona el grupo para editarla para todas las clínicas.',
+        assignment_scope: 'group',
+        group_id: sharedWebContext.groupId,
+        clinic_id: clinicId
+      });
+    }
+  }
+
   const body = req.body && typeof req.body === 'object' ? req.body : {};
   const domains = Array.isArray(body.domains) ? body.domains : [];
   const hasHmacKeyField = Object.prototype.hasOwnProperty.call(body, 'hmac_key');

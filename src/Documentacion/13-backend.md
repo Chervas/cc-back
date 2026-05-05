@@ -550,6 +550,7 @@ Herencia de configuración web al crear grupos:
 - Para grupos con varias clínicas no hay migración automática: debe elegirse explícitamente la clínica origen o usar `web_assignment_mode=manual`.
 - Script operativo para backfills puntuales:
   - `node scripts/copy-intake-config-to-group.js --clinic=<id> --group=<id> [--overwrite] [--reason=texto]`
+- Compatibilidad de snippets antiguos: si una web sigue instalada con `data-clinic-id` pero la clínica pertenece a un grupo con `web_assignment_mode=automatic` y existe `IntakeConfig` de grupo, `GET /api/intake/config?clinic_id=<id>` devuelve la configuración efectiva de grupo. Los `PUT` directos a la configuración individual quedan bloqueados con `409`; debe editarse el grupo.
 
 ### Pixel de Meta
 
