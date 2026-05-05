@@ -7,6 +7,7 @@ module.exports = (sequelize, DataTypes) => {
       MarketingPatientListItem.belongsTo(models.MarketingPatientList, { foreignKey: 'list_id', as: 'list' });
       MarketingPatientListItem.belongsTo(models.Paciente, { foreignKey: 'paciente_id', targetKey: 'id_paciente', as: 'paciente' });
       MarketingPatientListItem.belongsTo(models.Clinica, { foreignKey: 'clinica_id', targetKey: 'id_clinica', as: 'clinica' });
+      MarketingPatientListItem.belongsTo(models.Tratamiento, { foreignKey: 'treatment_id', targetKey: 'id_tratamiento', as: 'tratamiento' });
       if (models.MarketingPatientContactEvent) {
         MarketingPatientListItem.hasMany(models.MarketingPatientContactEvent, { foreignKey: 'item_id', as: 'events' });
       }
@@ -22,6 +23,7 @@ module.exports = (sequelize, DataTypes) => {
     phone: { type: DataTypes.STRING(64), allowNull: true },
     email: { type: DataTypes.STRING(255), allowNull: true },
     treatment: { type: DataTypes.STRING(255), allowNull: true },
+    treatment_id: { type: DataTypes.INTEGER, allowNull: true },
     last_visit_at: { type: DataTypes.DATE, allowNull: true },
     status: { type: DataTypes.STRING(64), allowNull: false, defaultValue: 'ready' },
     reason: { type: DataTypes.STRING(512), allowNull: true },
