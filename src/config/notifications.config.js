@@ -20,6 +20,11 @@ const NOTIFICATION_CATEGORIES = [
     id: 'crm',
     label: 'CRM y seguimiento',
     icon: 'heroicons_outline:phone-arrow-up-right'
+  },
+  {
+    id: 'whatsapp',
+    label: 'WhatsApp',
+    icon: 'heroicons_outline:chat-bubble-left-right'
   }
 ];
 
@@ -59,6 +64,12 @@ const NOTIFICATION_EVENTS = [
     category: 'crm',
     label: 'Recordatorio de volver a llamar',
     level: 'info'
+  },
+  {
+    event: 'whatsapp.payment_missing',
+    category: 'whatsapp',
+    label: 'WhatsApp sin método de pago',
+    level: 'error'
   }
 ];
 
@@ -108,7 +119,9 @@ const DEFAULT_NOTIFICATION_PREFERENCES = [
   { role: 'admin', subrole: null, event: 'ads.health_issue', enabled: true },
   { role: 'admin', subrole: null, event: 'crm.call_back_reminder', enabled: true },
   { role: 'propietario', subrole: null, event: 'crm.call_back_reminder', enabled: true },
-  { role: 'personaldeclinica', subrole: 'Recepción / Comercial ventas', event: 'crm.call_back_reminder', enabled: true }
+  { role: 'personaldeclinica', subrole: 'Recepción / Comercial ventas', event: 'crm.call_back_reminder', enabled: true },
+  { role: 'admin', subrole: null, event: 'whatsapp.payment_missing', enabled: true },
+  { role: 'propietario', subrole: null, event: 'whatsapp.payment_missing', enabled: true }
 ];
 
 module.exports = {

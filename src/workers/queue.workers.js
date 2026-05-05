@@ -7,11 +7,12 @@ const whatsappTemplatesService = require('../services/whatsappTemplates.service'
 const whatsappPhonesService = require('../services/whatsappPhones.service');
 const automationDefaultsService = require('../services/automationDefaults.service');
 const automationsV2ResumeService = require('../services/automationsV2Resume.service');
+const notificationService = require('../services/notifications.service');
 const { getIO } = require('../services/socket.service');
 const { findCanonicalWhatsappConversation } = require('../lib/canonical-conversation');
 const db = require('../../models');
 
-const { Conversation, Message, ClinicMetaAsset, WhatsAppWebOrigin } = db;
+const { Conversation, Message, ClinicMetaAsset, Clinica, WhatsAppWebOrigin } = db;
 
 const CHAT_DEBUG = process.env.CHAT_DEBUG === 'true';
 const dlog = (...args) => {
@@ -47,6 +48,7 @@ function cleanString(value) {
 
 const RUNTIME_ROLE = cleanString(process.env.RUNTIME_ROLE).toLowerCase();
 const IS_GATEWAY_RUNTIME = RUNTIME_ROLE === 'gateway';
+const WHATSAPP_PAYMENT_MISSING_ERROR_CODE = 131042;
 
 function truncateText(value, max = 120) {
     const normalized = cleanString(value);
@@ -617,6 +619,94 @@ function mergeStatusMetadata(existingMetadata, status) {
         wa_status_timestamps: statusTimestamps,
         wa_error: status.errors || metadata.wa_error || null,
     };
+}
+
+function getWhatsappStatusErrors(status) {
+    return Array.isArray(status?.errors) ? status.errors : [];
+}
+
+function findWhatsappPaymentMissingError(status) {
+    return getWhatsappStatusErrors(status).find((error) => Number(error?.code) === WHATSAPP_PAYMENT_MISSING_ERROR_CODE) || null;
+}
+
+async function notifyWhatsappPaymentMissing({ status, message, clinicId }) {
+    const paymentError = findWhatsappPaymentMissingError(status);
+    if (!paymentError || !message) {
+        return;
+    }
+
+    const metadata = message.metadata || {};
+    const resolvedClinicId = Number(clinicId || 0) || null;
+    const phoneId = metadata.phoneId || metadata.phoneNumberId || null;
+    const wabaId = metadata.wabaId || null;
+    const href = cleanString(paymentError.href);
+    const errorMessage = cleanString(paymentError?.error_data?.details)
+        || cleanString(paymentError.message)
+        || 'Meta indica que falta un método de pago en WhatsApp Business.';
+
+    try {
+        const asset = await findWhatsappPhoneAssetForMetadata({
+            phoneId,
+            wabaId,
+            clinicId: resolvedClinicId,
+        });
+        if (asset) {
+            const additionalData = asset.additionalData || {};
+            asset.additionalData = {
+                ...additionalData,
+                payment: {
+                    ...(additionalData.payment || {}),
+                    status: 'missing_payment_method',
+                    last_error_code: WHATSAPP_PAYMENT_MISSING_ERROR_CODE,
+                    last_error_message: errorMessage,
+                    last_error_href: href || null,
+                    last_detected_at: new Date().toISOString(),
+                    last_message_id: message.id,
+                    last_wamid: cleanString(metadata.wamid),
+                },
+            };
+            await asset.save();
+        }
+    } catch (assetError) {
+        console.warn('[whatsapp] No se pudo marcar falta de método de pago en el asset', {
+            clinicId: resolvedClinicId,
+            phoneId,
+            wabaId,
+            error: serializeError(assetError),
+        });
+    }
+
+    try {
+        const clinic = resolvedClinicId && Clinica
+            ? await Clinica.findByPk(resolvedClinicId, {
+                attributes: ['id_clinica', 'nombre_clinica'],
+                raw: true,
+            })
+            : null;
+
+        await notificationService.dispatchEvent({
+            event: 'whatsapp.payment_missing',
+            clinicId: resolvedClinicId,
+            data: {
+                clinicId: resolvedClinicId,
+                clinicName: cleanString(clinic?.nombre_clinica),
+                phoneNumber: cleanString(metadata.recipient) || cleanString(status?.recipient_id),
+                phoneNumberId: phoneId,
+                wabaId,
+                messageId: message.id,
+                wamid: cleanString(metadata.wamid),
+                errorCode: WHATSAPP_PAYMENT_MISSING_ERROR_CODE,
+                errorMessage,
+                href: href || null,
+            },
+        });
+    } catch (notificationError) {
+        console.warn('[whatsapp] No se pudo crear notificación por método de pago ausente', {
+            clinicId: resolvedClinicId,
+            messageId: message.id,
+            error: serializeError(notificationError),
+        });
+    }
 }
 
 function createBusinessWorker(name, processor) {
@@ -1368,6 +1458,14 @@ createWorker('webhook_whatsapp', async (job) => {
         }
         message.metadata = mergeStatusMetadata(message.metadata, status);
         await message.save();
+
+        if (nextStatus === 'failed') {
+            await notifyWhatsappPaymentMissing({
+                status,
+                message,
+                clinicId: messageRef.clinic_id || clinicId,
+            });
+        }
 
         await emitMessageUpdated({ message, clinicId: messageRef.clinic_id || clinicId });
     }
