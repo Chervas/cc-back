@@ -6,6 +6,7 @@ const campaignOnboardingController = require('../controllers/campaignOnboarding.
 const marketingReportsController = require('../controllers/marketingReports.controller');
 const marketingCompetitionController = require('../controllers/marketingCompetition.controller');
 const marketingReactivationController = require('../controllers/marketingReactivation.controller');
+const marketingBulkSendsController = require('../controllers/marketingBulkSends.controller');
 
 router.use(authMiddleware);
 
@@ -31,6 +32,14 @@ router.post('/reactivation/lists/:id/rebuild', marketingReactivationController.r
 router.post('/reactivation/lists/:id/prepare', marketingReactivationController.prepareList);
 router.post('/reactivation/lists/:id/schedule', marketingReactivationController.scheduleList);
 router.delete('/reactivation/lists/:id', marketingReactivationController.removeList);
+
+// Envíos masivos por listas externas o pacientes actuales
+router.get('/bulk-sends/campaigns', marketingBulkSendsController.listCampaigns);
+router.post('/bulk-sends/campaigns', marketingBulkSendsController.createCampaign);
+router.get('/bulk-sends/campaigns/:id', marketingBulkSendsController.getCampaign);
+router.post('/bulk-sends/campaigns/:id/prepare', marketingBulkSendsController.prepareCampaign);
+router.post('/bulk-sends/campaigns/:id/test-send', marketingBulkSendsController.sendTest);
+router.delete('/bulk-sends/campaigns/:id', marketingBulkSendsController.removeCampaign);
 
 // Catálogo de plantillas de flujos de chat (snippet web)
 router.get('/chat-flow-templates', chatFlowTemplatesController.listChatFlowTemplates);
