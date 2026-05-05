@@ -5,12 +5,14 @@ const db = require('../../models');
 const { normalizePhoneDigits } = require('../lib/phone');
 const whatsappService = require('./whatsapp.service');
 const { buildWhatsappTemplateVariableContract } = require('../lib/whatsapp-template-contract');
+const { findCanonicalWhatsappConversation } = require('../lib/canonical-conversation');
 
 const {
   Clinica,
   MarketingPatientContactEvent,
   MarketingPatientList,
   MarketingPatientListItem,
+  Message,
   Paciente,
   WhatsappTemplate,
 } = db;
@@ -555,6 +557,25 @@ function buildTemplateParams({ template, item, list, clinic }) {
   return contract.map((variable) => resolveVariableValue(variable.name, item, list, clinic) || variable.example || ' ');
 }
 
+function renderTemplatePreview({ template, item, list, clinic }) {
+  const plain = template?.get ? template.get({ plain: true }) : template;
+  const body = extractBodyText(plain?.components);
+  if (!body) return `Plantilla WhatsApp: ${plain?.name || 'sin nombre'}`;
+
+  const contract = buildWhatsappTemplateVariableContract(plain);
+  const byIndex = new Map(
+    contract.map((variable) => [
+      Number(variable.index),
+      resolveVariableValue(variable.name, item, list, clinic) || variable.example || '',
+    ])
+  );
+
+  return body.replace(/{{\s*(\d+)\s*}}/g, (_match, rawIndex) => {
+    const value = byIndex.get(Number(rawIndex));
+    return value || '...';
+  });
+}
+
 async function prepareCampaign(scope, campaignId, body = {}, userId = null) {
   const list = await MarketingPatientList.findByPk(campaignId);
   ensureScopeAccess(list, scope);
@@ -673,15 +694,93 @@ async function sendTest(scope, campaignId, body = {}) {
     err.status = 409;
     throw err;
   }
-  const params = buildTemplateParams({ template, item: item.get({ plain: true }), list, clinic });
-  const response = await whatsappService.sendMessage({
-    to: targetPhone,
-    useTemplate: true,
-    templateName: template.name,
-    templateLanguage: template.language || 'es',
-    templateParams: params,
-    clinicConfig,
+  const plainItem = item.get({ plain: true });
+  const params = buildTemplateParams({ template, item: plainItem, list, clinic });
+  const previewText = renderTemplatePreview({ template, item: plainItem, list, clinic });
+  const conversation = await findCanonicalWhatsappConversation({
+    clinicId,
+    contactId: targetPhone,
+    createIfMissing: true,
+    lastMessageAt: new Date(),
   });
+  if (!conversation || !Message) {
+    const err = new Error('No se pudo crear la conversación de seguimiento para la prueba WhatsApp.');
+    err.status = 500;
+    throw err;
+  }
+
+  const appMessage = await Message.create({
+    conversation_id: conversation.id,
+    sender_id: null,
+    direction: 'outbound',
+    content: previewText,
+    message_type: 'template',
+    status: 'pending',
+    metadata: {
+      kind: 'mass_campaign_test',
+      source: 'marketing_bulk_sends',
+      list_id: list.id,
+      item_id: item.id,
+      template_id: template.id,
+      template_name: template.name,
+      template_language: template.language || 'es',
+      template_params: params,
+      recipient: targetPhone,
+      phoneNumberId: clinicConfig.phoneNumberId || null,
+      wabaId: clinicConfig.wabaId || null,
+    },
+    sent_at: new Date(),
+  });
+
+  let response;
+  try {
+    response = await whatsappService.sendMessage({
+      to: targetPhone,
+      useTemplate: true,
+      templateName: template.name,
+      templateLanguage: template.language || 'es',
+      templateParams: params,
+      clinicConfig,
+    });
+  } catch (sendErr) {
+    const providerError = sendErr?.response?.data || sendErr?.message || 'whatsapp_send_failed';
+    await appMessage.update({
+      status: 'failed',
+      metadata: {
+        ...(appMessage.metadata || {}),
+        error: providerError,
+      },
+    });
+    await MarketingPatientContactEvent.create({
+      list_id: list.id,
+      item_id: item.id,
+      event_type: 'mass_campaign_test_failed',
+      channel: 'whatsapp',
+      payload: {
+        to: targetPhone,
+        template_id: template.id,
+        template_name: template.name,
+        app_message_id: appMessage.id,
+        conversation_id: conversation.id,
+        error: providerError,
+      },
+      occurred_at: new Date(),
+    });
+    throw sendErr;
+  }
+
+  const providerMessageId = response?.messages?.[0]?.id || null;
+  await appMessage.update({
+    status: 'sent',
+    metadata: {
+      ...(appMessage.metadata || {}),
+      wa_response: response || null,
+      wamid: providerMessageId,
+      phoneId: clinicConfig.phoneNumberId || null,
+    },
+    sent_at: new Date(),
+  });
+  await conversation.update({ last_message_at: new Date() });
   await MarketingPatientContactEvent.create({
     list_id: list.id,
     item_id: item.id,
@@ -691,14 +790,20 @@ async function sendTest(scope, campaignId, body = {}) {
       to: targetPhone,
       template_id: template.id,
       template_name: template.name,
-      message_id: response?.messages?.[0]?.id || null,
+      message_id: providerMessageId,
+      provider_message_id: providerMessageId,
+      app_message_id: appMessage.id,
+      conversation_id: conversation.id,
     },
     occurred_at: new Date(),
   });
   return {
     success: true,
     to: targetPhone,
-    message_id: response?.messages?.[0]?.id || null,
+    message_id: providerMessageId,
+    provider_message_id: providerMessageId,
+    app_message_id: appMessage.id,
+    conversation_id: conversation.id,
   };
 }
 
