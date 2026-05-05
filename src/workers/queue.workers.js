@@ -7,6 +7,7 @@ const whatsappTemplatesService = require('../services/whatsappTemplates.service'
 const whatsappPhonesService = require('../services/whatsappPhones.service');
 const automationDefaultsService = require('../services/automationDefaults.service');
 const automationsV2ResumeService = require('../services/automationsV2Resume.service');
+const marketingOptOutService = require('../services/marketingOptOut.service');
 const notificationService = require('../services/notifications.service');
 const { getIO } = require('../services/socket.service');
 const { findCanonicalWhatsappConversation } = require('../lib/canonical-conversation');
@@ -1320,6 +1321,30 @@ createWorker('webhook_whatsapp', async (job) => {
             },
             sent_at: new Date(),
         });
+
+        try {
+            const optOutResult = await marketingOptOutService.applyInboundOptOutIfNeeded({
+                clinicId: conv.clinic_id || clinicId,
+                conversation: conv,
+                inboundMessage: inboundMsg,
+                rawText: resumeText || content,
+                patientId: conv.patient_id || patientId || null,
+            });
+            if (optOutResult?.applied) {
+                inboundMsg.metadata = {
+                    ...(inboundMsg.metadata || {}),
+                    marketing_opt_out: optOutResult,
+                };
+                await inboundMsg.save();
+            }
+        } catch (optOutErr) {
+            console.warn('[marketing opt-out] No se pudo procesar baja por WhatsApp', {
+                clinicId: conv.clinic_id || clinicId,
+                conversationId: conv.id,
+                inboundMessageId: inboundMsg.id,
+                error: serializeError(optOutErr),
+            });
+        }
 
         // Marcar el origen como "usado" para depuración/dedupe. No bloqueamos si falla.
         if (webOrigin && WhatsAppWebOrigin && !webOrigin.used_at) {

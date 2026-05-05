@@ -4,6 +4,7 @@ const { Op } = require('sequelize');
 const crypto = require('crypto');
 const db = require('../../models');
 const { normalizePhoneDigits } = require('../lib/phone');
+const marketingOptOutService = require('./marketingOptOut.service');
 
 const {
   AdminCampaignPlaybook,
@@ -29,6 +30,7 @@ const REACTIVATION_ACTION_TO_MODE = {
   managed_calls: 'managed_calls',
 };
 const STANDARD_IMPORT_FIELDS = new Set(['name', 'first_name', 'last_name', 'phone', 'email', 'treatment', 'last_visit_at', 'clinic']);
+const COMMERCIAL_TEMPLATE_USAGES = new Set(['marketing', 'comercial', 'promocion', 'promocional', 'reactivacion_pacientes']);
 
 function toDateMonthsAgo(months) {
   const date = new Date();
@@ -58,6 +60,10 @@ function normalizeKey(value) {
     .replace(/[\u0300-\u036f]/g, '')
     .replace(/[^a-z0-9]+/g, '_')
     .replace(/^_+|_+$/g, '');
+}
+
+function isCommercialTemplateUsage(value) {
+  return COMMERCIAL_TEMPLATE_USAGES.has(normalizeKey(value));
 }
 
 function toTitleCaseName(value) {
@@ -364,6 +370,7 @@ async function collectSuggestionGroups(scope, options = {}) {
     })
     : [];
   const noContactPatientIds = new Set(rejectedContactRows.map((row) => Number(row.paciente_id)).filter(Boolean));
+  const marketingOptOutSets = await marketingOptOutService.getActiveOptOutSetsForScope(scope);
 
   const latestByPatientTreatment = new Map();
   for (const appointment of pastAppointments) {
@@ -393,6 +400,11 @@ async function collectSuggestionGroups(scope, options = {}) {
 
     const phone = normalizePhoneDigits(appointment.paciente?.telefono_movil || '');
     const hasFutureAppointment = futurePatientIds.has(patientId);
+    const hasMarketingOptOut = marketingOptOutService.isContactOptedOut({
+      patientId,
+      phone: appointment.paciente?.telefono_movil || '',
+      optOutSets: marketingOptOutSets,
+    });
     const noContact = !!appointment.paciente?.fecha_baja || noContactPatientIds.has(patientId);
     const validPhone = phone && phone.length >= 8;
     let status = 'ready';
@@ -403,6 +415,10 @@ async function collectSuggestionGroups(scope, options = {}) {
       status = 'excluded_future_appointment';
       exclusionReason = 'cita_futura';
       reason = 'Tiene cita futura';
+    } else if (hasMarketingOptOut) {
+      status = 'excluded_opt_out';
+      exclusionReason = 'opt_out';
+      reason = 'Baja comercial solicitada por WhatsApp';
     } else if (preset?.exclusions?.no_contact !== false && noContact) {
       status = 'excluded_no_contact';
       exclusionReason = 'no_contactar';
@@ -629,6 +645,28 @@ function computeCounters(items) {
     appointments: 0,
     treatments: 0,
   };
+}
+
+async function applyMarketingOptOutExclusions(itemPayloads, scope, transaction = null) {
+  if (!Array.isArray(itemPayloads) || !itemPayloads.length) return itemPayloads;
+  const optOutSets = await marketingOptOutService.getActiveOptOutSetsForScope(scope, transaction);
+  return itemPayloads.map((item) => {
+    if (String(item.status || '').startsWith('excluded')) return item;
+    if (!marketingOptOutService.isContactOptedOut({
+      patientId: item.paciente_id || item.patient_id || null,
+      phone: item.phone || null,
+      optOutSets,
+    })) {
+      return item;
+    }
+    return {
+      ...item,
+      status: 'excluded_opt_out',
+      reason: 'Baja comercial solicitada por WhatsApp en un envío anterior',
+      exclusion_reason: 'opt_out',
+      selected: false,
+    };
+  });
 }
 
 const IMPORT_ALIASES = {
@@ -1207,6 +1245,8 @@ function buildReactivationAutomationNodes(list, automation, actionMode, template
       mode: 'template',
       template_id: template?.id || automation?.template_id || null,
       template_name: template?.nombre || automation?.template_name || null,
+      template_usage: template?.uso || automation?.template_usage || null,
+      template_commercial: isCommercialTemplateUsage(template?.uso || automation?.template_usage || 'reactivacion_pacientes'),
       source: 'marketing_reactivation',
     }
     : {
@@ -1471,6 +1511,7 @@ async function createList(scope, body = {}, userId = null) {
       ? importResult.itemPayloads
       : (customPayloads || (suggestion ? suggestion.candidates_full.map(mapSuggestionCandidateToItem) : []));
     itemPayloads = await enrichItemsWithPatientCustomFields(itemPayloads, transaction);
+    itemPayloads = await applyMarketingOptOutExclusions(itemPayloads, scope, transaction);
     const counters = computeCounters(itemPayloads);
     const actionMode = body.action_mode || suggestion?.recommendedMode || 'whatsapp_template';
     const list = await MarketingPatientList.create({
@@ -1789,10 +1830,11 @@ async function rebuildList(scope, listId) {
 
   let previewPayloads = [];
   await db.sequelize.transaction(async (transaction) => {
-    const itemPayloads = await enrichItemsWithPatientCustomFields(
+    let itemPayloads = await enrichItemsWithPatientCustomFields(
       suggestion.candidates_full.map(mapSuggestionCandidateToItem),
       transaction
     );
+    itemPayloads = await applyMarketingOptOutExclusions(itemPayloads, scope, transaction);
     previewPayloads = itemPayloads.slice(0, 5).map((item, index) => ({ ...item, id: index + 1, list_id: list.id }));
     const counters = computeCounters(itemPayloads);
     await MarketingPatientListItem.destroy({ where: { list_id: list.id }, transaction });

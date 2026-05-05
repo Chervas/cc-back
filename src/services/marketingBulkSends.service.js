@@ -6,6 +6,7 @@ const { normalizePhoneDigits } = require('../lib/phone');
 const whatsappService = require('./whatsapp.service');
 const { buildWhatsappTemplateVariableContract } = require('../lib/whatsapp-template-contract');
 const { findCanonicalWhatsappConversation } = require('../lib/canonical-conversation');
+const marketingOptOutService = require('./marketingOptOut.service');
 
 const {
   Clinica,
@@ -56,12 +57,46 @@ function toTitleCaseName(value) {
     .join(' ');
 }
 
-function splitFullName(value) {
-  const fullName = toTitleCaseName(value);
+function normalizeNameFormat(value) {
+  const format = normalizeKey(value);
+  if (['first_last', 'last_comma_first', 'full', 'auto'].includes(format)) return format;
+  return 'auto';
+}
+
+function splitNameParts(text, format) {
+  const clean = normalizeText(text);
+  if (!clean) return { firstName: 'Contacto', lastName: '', fullName: 'Contacto' };
+  if ((format === 'auto' || format === 'last_comma_first') && clean.includes(',')) {
+    const [lastNameRaw, ...firstNameRaw] = clean.split(',');
+    const firstName = toTitleCaseName(firstNameRaw.join(',').trim() || lastNameRaw);
+    const lastName = toTitleCaseName(firstNameRaw.length ? lastNameRaw : '');
+    return {
+      firstName: firstName || 'Contacto',
+      lastName,
+      fullName: [firstName, lastName].filter(Boolean).join(' ') || firstName || 'Contacto',
+    };
+  }
+  const fullName = toTitleCaseName(clean);
   const parts = fullName.split(/\s+/).filter(Boolean);
-  if (!parts.length) return { name: 'Contacto', firstName: 'Contacto', lastName: '' };
-  if (parts.length === 1) return { name: parts[0], firstName: parts[0], lastName: '' };
-  return { name: fullName, firstName: parts.slice(0, 2).join(' '), lastName: parts.slice(2).join(' ') };
+  if (!parts.length) return { firstName: 'Contacto', lastName: '', fullName: 'Contacto' };
+  if (parts.length === 1) return { firstName: parts[0], lastName: '', fullName: parts[0] };
+  return {
+    firstName: parts[0],
+    lastName: parts.slice(1).join(' '),
+    fullName,
+  };
+}
+
+function splitFullName(value, format = 'auto') {
+  const normalizedFormat = normalizeNameFormat(format);
+  const parts = splitNameParts(value, normalizedFormat);
+  const useFullName = normalizedFormat === 'full';
+  return {
+    name: useFullName ? parts.fullName : parts.firstName,
+    firstName: parts.firstName,
+    lastName: parts.lastName,
+    fullName: parts.fullName,
+  };
 }
 
 function scopeToWhere(scope) {
@@ -123,6 +158,28 @@ function computeCounters(items) {
     appointments: 0,
     treatments: 0,
   };
+}
+
+async function applyMarketingOptOutExclusions(itemPayloads, scope, transaction = null) {
+  if (!Array.isArray(itemPayloads) || !itemPayloads.length) return itemPayloads;
+  const optOutSets = await marketingOptOutService.getActiveOptOutSetsForScope(scope, transaction);
+  return itemPayloads.map((item) => {
+    if (String(item.status || '').startsWith('excluded')) return item;
+    if (!marketingOptOutService.isContactOptedOut({
+      patientId: item.paciente_id || null,
+      phone: item.phone || null,
+      optOutSets,
+    })) {
+      return item;
+    }
+    return {
+      ...item,
+      status: 'excluded_opt_out',
+      reason: 'Baja comercial solicitada por WhatsApp en una campaña anterior',
+      exclusion_reason: 'opt_out',
+      selected: false,
+    };
+  });
 }
 
 const IMPORT_ALIASES = {
@@ -234,13 +291,14 @@ function missingRequiredFields({ channels, name, phoneDigits, email }) {
 function buildItemsFromRows(rows, body, channels) {
   const columnMapping = inferColumnMapping(rows, body.column_mapping || {});
   const customFieldsSchema = buildCustomFieldSchema(rows, columnMapping, body.custom_fields_schema || []);
+  const nameFormat = normalizeNameFormat(body.name_format || body.nameFormat || 'auto');
   const seen = new Set();
   const items = [];
 
   for (const row of rows) {
     const fullName = readImportValue(row, columnMapping, 'name')
       || [readImportValue(row, columnMapping, 'first_name'), readImportValue(row, columnMapping, 'last_name')].filter(Boolean).join(' ');
-    const nameInfo = splitFullName(fullName || 'Contacto importado');
+    const nameInfo = splitFullName(fullName || 'Contacto importado', nameFormat);
     const phoneDigits = normalizePhoneDigits(readImportValue(row, columnMapping, 'phone'));
     const phone = phoneDigits ? `+${phoneDigits}` : null;
     const email = readImportValue(row, columnMapping, 'email') || null;
@@ -270,13 +328,19 @@ function buildItemsFromRows(rows, body, channels) {
       reason,
       exclusion_reason: exclusionReason,
       selected: status === 'ready',
-      custom_fields: customFields,
+      custom_fields: {
+        nombre: nameInfo.firstName,
+        apellido: nameInfo.lastName,
+        apellidos: nameInfo.lastName,
+        nombre_completo: nameInfo.fullName,
+        ...customFields,
+      },
       missing_variables: [],
       notes: null,
     });
   }
 
-  return { items, columnMapping, customFieldsSchema };
+  return { items, columnMapping, customFieldsSchema, nameFormat };
 }
 
 async function buildItemsFromCurrentPatients(scope, body) {
@@ -421,6 +485,7 @@ async function createCampaign(scope, body = {}, userId = null) {
       customFieldsSchema = importResult.customFieldsSchema;
     }
 
+    itemPayloads = await applyMarketingOptOutExclusions(itemPayloads, scope, transaction);
     const counters = computeCounters(itemPayloads);
     const list = await MarketingPatientList.create({
       name: normalizeText(body.name) || 'Campaña de envíos masivos',
@@ -439,6 +504,7 @@ async function createCampaign(scope, body = {}, userId = null) {
         list_source: source,
         import_file_name: body.import_file_name || null,
         column_mapping: columnMapping,
+        name_format: normalizeNameFormat(body.name_format || body.nameFormat || (source === 'imported_file' ? 'auto' : null)),
         required_policy: {
           whatsapp: ['name', 'phone'],
           email: ['name', 'email'],
@@ -721,6 +787,10 @@ async function sendTest(scope, campaignId, body = {}) {
       source: 'marketing_bulk_sends',
       list_id: list.id,
       item_id: item.id,
+      objective_id: OBJECTIVE_ID,
+      template_usage: 'promocion',
+      template_commercial: true,
+      template_category: template.category || template.catalog?.category || null,
       template_id: template.id,
       template_name: template.name,
       template_language: template.language || 'es',
