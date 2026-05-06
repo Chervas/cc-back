@@ -52,10 +52,14 @@ function sendError(res, error, fallbackMessage) {
   if (status >= 500) {
     console.error('❌ marketing bulk sends error:', error);
   }
-  return res.status(status).json({
+  const payload = {
     success: false,
     error: error.message || fallbackMessage,
-  });
+  };
+  if (error.details) {
+    payload.details = error.details;
+  }
+  return res.status(status).json(payload);
 }
 
 exports.listCampaigns = async (req, res) => {

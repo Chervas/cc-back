@@ -2,7 +2,7 @@
 
 const { Op } = require('sequelize');
 const db = require('../../models');
-const { normalizePhoneDigits } = require('../lib/phone');
+const { normalizePhoneDigits, getPhoneLookupCandidates } = require('../lib/phone');
 const whatsappService = require('./whatsapp.service');
 const { buildWhatsappTemplateVariableContract } = require('../lib/whatsapp-template-contract');
 const { findCanonicalWhatsappConversation } = require('../lib/canonical-conversation');
@@ -15,6 +15,7 @@ const {
   MarketingPatientListItem,
   Message,
   Paciente,
+  PatientCustomField,
   WhatsappTemplate,
 } = db;
 
@@ -288,6 +289,128 @@ function buildCustomFieldSchema(rows, mapping, explicitSchema = []) {
   return Array.from(fields.values());
 }
 
+function buildPatientVariableFields(patient, patientCustomFields = []) {
+  const firstName = toTitleCaseName(patient?.nombre || '');
+  const lastName = toTitleCaseName(patient?.apellidos || '');
+  const fields = {
+    nombre: firstName,
+    nombre_paciente: firstName,
+    apellido: lastName,
+    apellidos: lastName,
+    apellido_paciente: lastName,
+    nombre_completo: [firstName, lastName].filter(Boolean).join(' '),
+    telefono: patient?.telefono_movil || patient?.telefono_secundario || '',
+    email: patient?.email || '',
+  };
+
+  for (const customField of patientCustomFields || []) {
+    const key = normalizeKey(customField.field_key);
+    const value = normalizeText(customField.value);
+    if (!key || !value) continue;
+    fields[key] = value;
+  }
+
+  return fields;
+}
+
+function patientMatchesItem(patient, item) {
+  const itemPhoneCandidates = new Set(getPhoneLookupCandidates(item.phone || ''));
+  const patientPhoneCandidates = [
+    ...getPhoneLookupCandidates(patient.telefono_movil || ''),
+    ...getPhoneLookupCandidates(patient.telefono_secundario || ''),
+  ];
+  if (patientPhoneCandidates.some((candidate) => itemPhoneCandidates.has(candidate))) {
+    return true;
+  }
+
+  const itemEmail = normalizeText(item.email).toLowerCase();
+  const patientEmail = normalizeText(patient.email).toLowerCase();
+  return !!itemEmail && !!patientEmail && itemEmail === patientEmail;
+}
+
+async function attachExistingPatientContext(itemPayloads, scope, transaction = null) {
+  if (!Array.isArray(itemPayloads) || !itemPayloads.length || !Paciente) return itemPayloads;
+  const clinicIds = Array.isArray(scope?.clinicIds) ? scope.clinicIds.filter(Number.isInteger) : [];
+  if (!clinicIds.length) return itemPayloads;
+
+  const phoneCandidates = new Set();
+  const emails = new Set();
+  for (const item of itemPayloads) {
+    for (const candidate of getPhoneLookupCandidates(item.phone || '')) {
+      phoneCandidates.add(candidate);
+    }
+    const email = normalizeText(item.email).toLowerCase();
+    if (email) emails.add(email);
+  }
+
+  const contactClauses = [];
+  const phoneList = Array.from(phoneCandidates).slice(0, 5000);
+  const emailList = Array.from(emails).slice(0, 5000);
+  if (phoneList.length) {
+    contactClauses.push({ telefono_movil: { [Op.in]: phoneList } });
+    contactClauses.push({ telefono_secundario: { [Op.in]: phoneList } });
+  }
+  if (emailList.length) {
+    contactClauses.push({ email: { [Op.in]: emailList } });
+  }
+  if (!contactClauses.length) return itemPayloads;
+
+  const patients = await Paciente.findAll({
+    where: {
+      clinica_id: { [Op.in]: clinicIds },
+      fecha_baja: null,
+      [Op.or]: contactClauses,
+    },
+    attributes: ['id_paciente', 'clinica_id', 'nombre', 'apellidos', 'telefono_movil', 'telefono_secundario', 'email'],
+    order: [['id_paciente', 'DESC']],
+    raw: true,
+    transaction,
+  });
+  if (!patients.length) return itemPayloads;
+
+  const patientIds = patients
+    .map((patient) => Number(patient.id_paciente))
+    .filter((id) => Number.isInteger(id) && id > 0);
+  const customRows = PatientCustomField && patientIds.length
+    ? await PatientCustomField.findAll({
+      where: {
+        paciente_id: { [Op.in]: patientIds },
+        clinica_id: { [Op.in]: clinicIds },
+      },
+      attributes: ['paciente_id', 'field_key', 'value'],
+      raw: true,
+      transaction,
+    })
+    : [];
+  const customByPatient = new Map();
+  for (const row of customRows) {
+    const id = Number(row.paciente_id);
+    if (!customByPatient.has(id)) customByPatient.set(id, []);
+    customByPatient.get(id).push(row);
+  }
+
+  return itemPayloads.map((item) => {
+    const matched = patients.find((patient) => patientMatchesItem(patient, item));
+    if (!matched) return item;
+    const patientFields = buildPatientVariableFields(matched, customByPatient.get(Number(matched.id_paciente)) || []);
+    return {
+      ...item,
+      paciente_id: Number(matched.id_paciente) || item.paciente_id || null,
+      clinica_id: item.clinica_id || matched.clinica_id || null,
+      phone: item.phone || matched.telefono_movil || matched.telefono_secundario || null,
+      email: item.email || matched.email || null,
+      custom_fields: {
+        ...patientFields,
+        ...(item.custom_fields || {}),
+      },
+      notes: [
+        normalizeText(item.notes),
+        'Contacto cruzado con paciente existente por teléfono/email.',
+      ].filter(Boolean).join('\n') || null,
+    };
+  });
+}
+
 function missingRequiredFields({ channels, name, phoneDigits, email }) {
   const missing = [];
   if (!name) missing.push('nombre');
@@ -497,6 +620,7 @@ async function createCampaign(scope, body = {}, userId = null) {
       itemPayloads = importResult.items;
       columnMapping = importResult.columnMapping;
       customFieldsSchema = importResult.customFieldsSchema;
+      itemPayloads = await attachExistingPatientContext(itemPayloads, scope, transaction);
     }
 
     itemPayloads = await applyMarketingOptOutExclusions(itemPayloads, scope, transaction);
@@ -623,21 +747,77 @@ function resolveVariableValue(variableName, item, list, clinic) {
   const values = {
     nombre: item.name,
     nombre_paciente: item.name,
-    apellido: '',
-    apellido_paciente: '',
+    apellido: custom.apellido || custom.apellidos || custom.apellido_paciente || '',
+    apellidos: custom.apellidos || custom.apellido || custom.apellido_paciente || '',
+    apellido_paciente: custom.apellido_paciente || custom.apellido || custom.apellidos || '',
+    nombre_completo: custom.nombre_completo || item.name,
     telefono: item.phone,
     email: item.email,
     clinica: clinic?.nombre_clinica || clinic?.nombre || 'tu clínica',
     nombre_clinica: clinic?.nombre_clinica || clinic?.nombre || 'tu clínica',
     telefono_clinica: clinic?.telefono || clinic?.telefono_clinica || '',
+    direccion_clinica: clinic?.direccion || '',
+    url_web_clinica: clinic?.url_web || '',
+    url_ficha_local_clinica: clinic?.url_ficha_local || '',
     tratamiento: item.treatment || '',
   };
   return normalizeText(custom[key] || values[key] || '');
 }
 
-function buildTemplateParams({ template, item, list, clinic }) {
+function getTemplateVariableContract(template) {
   const plain = template?.get ? template.get({ plain: true }) : template;
-  const contract = buildWhatsappTemplateVariableContract(plain);
+  return buildWhatsappTemplateVariableContract(plain)
+    .map((variable) => ({
+      ...variable,
+      name: normalizeKey(variable.name || `var_${variable.index || variable.position || ''}`),
+    }))
+    .filter((variable) => variable.name);
+}
+
+function getClinicIdForList(list, fallbackScope = {}) {
+  const fromList = Number(list?.clinica_id || 0);
+  if (Number.isInteger(fromList) && fromList > 0) return fromList;
+  const listClinicIds = Array.isArray(list?.clinic_ids) ? list.clinic_ids : [];
+  const fromListArray = Number(listClinicIds[0] || 0);
+  if (Number.isInteger(fromListArray) && fromListArray > 0) return fromListArray;
+  const scopeClinicIds = Array.isArray(fallbackScope?.clinicIds) ? fallbackScope.clinicIds : [];
+  const fromScope = Number(scopeClinicIds[0] || 0);
+  return Number.isInteger(fromScope) && fromScope > 0 ? fromScope : null;
+}
+
+function buildMissingVariablesSummary({ template, items, list, clinic }) {
+  const contract = getTemplateVariableContract(template);
+  if (!contract.length) return [];
+  const readyItems = (items || [])
+    .map((item) => (item?.get ? item.get({ plain: true }) : item))
+    .filter((item) => item.status === 'ready' && item.selected !== false);
+  if (!readyItems.length) return [];
+
+  return contract
+    .map((variable) => {
+      const missingItems = readyItems.filter((item) => !resolveVariableValue(variable.name, item, list, clinic));
+      return {
+        variable: variable.name,
+        token: `{{${variable.name}}}`,
+        missing_count: missingItems.length,
+        total_ready: readyItems.length,
+        sample_item_ids: missingItems.slice(0, 5).map((item) => item.id).filter(Boolean),
+      };
+    })
+    .filter((item) => item.missing_count > 0);
+}
+
+function formatMissingVariablesMessage(summary) {
+  const first = summary?.[0];
+  if (!first) return 'La plantilla usa variables que no existen para todos los contactos.';
+  const suffix = summary.length > 1
+    ? ` Hay ${summary.length - 1} variable(s) más con datos incompletos.`
+    : '';
+  return `${first.missing_count} contactos no tienen la variable ${first.token}. No puedes enviar esta plantilla. Edita tu lista o elimina la variable de la plantilla y espera hasta que se apruebe.${suffix}`;
+}
+
+function buildTemplateParams({ template, item, list, clinic }) {
+  const contract = getTemplateVariableContract(template);
   if (!contract.length) return [];
   return contract.map((variable) => resolveVariableValue(variable.name, item, list, clinic) || variable.example || ' ');
 }
@@ -647,7 +827,7 @@ function renderTemplatePreview({ template, item, list, clinic }) {
   const body = extractBodyText(plain?.components);
   if (!body) return `Plantilla WhatsApp: ${plain?.name || 'sin nombre'}`;
 
-  const contract = buildWhatsappTemplateVariableContract(plain);
+  const contract = getTemplateVariableContract(template);
   const byIndex = new Map(
     contract.map((variable) => [
       Number(variable.index),
@@ -679,6 +859,17 @@ async function prepareCampaign(scope, campaignId, body = {}, userId = null) {
     ? !!template && String(template.status || '').toUpperCase() === 'APPROVED'
     : true;
   const items = await MarketingPatientListItem.findAll({ where: { list_id: list.id } });
+  const clinicId = getClinicIdForList(list, scope);
+  const clinic = clinicId && Clinica ? await Clinica.findByPk(clinicId, { raw: true }) : null;
+  if (needsWhatsappTemplate && template) {
+    const missingVariables = buildMissingVariablesSummary({ template, items, list, clinic });
+    if (missingVariables.length) {
+      const err = new Error(formatMissingVariablesMessage(missingVariables));
+      err.status = 409;
+      err.details = { missing_variables: missingVariables };
+      throw err;
+    }
+  }
   const counters = computeCounters(items.map((item) => item.get({ plain: true })));
   const nextGates = {
     ...(list.safety_gates || {}),
@@ -772,7 +963,7 @@ async function sendTest(scope, campaignId, body = {}) {
     err.status = 400;
     throw err;
   }
-  const clinicId = Number(list.clinica_id || (Array.isArray(list.clinic_ids) ? list.clinic_ids[0] : 0) || body.clinic_id || 0);
+  const clinicId = Number(getClinicIdForList(list, scope) || body.clinic_id || 0);
   if (!clinicId) {
     const err = new Error('La campaña necesita una clínica concreta para enviar WhatsApp.');
     err.status = 400;
@@ -786,6 +977,13 @@ async function sendTest(scope, campaignId, body = {}) {
     throw err;
   }
   const plainItem = item.get({ plain: true });
+  const missingVariables = buildMissingVariablesSummary({ template, items: [plainItem], list, clinic });
+  if (missingVariables.length) {
+    const err = new Error(formatMissingVariablesMessage(missingVariables));
+    err.status = 409;
+    err.details = { missing_variables: missingVariables };
+    throw err;
+  }
   const params = buildTemplateParams({ template, item: plainItem, list, clinic });
   const previewText = renderTemplatePreview({ template, item: plainItem, list, clinic });
   const templateUsage = normalizeTemplateUsage(body.template_usage || list.criteria?.template_usage || 'promocion');

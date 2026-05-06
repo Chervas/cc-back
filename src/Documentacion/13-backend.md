@@ -810,6 +810,9 @@ Reglas:
 - Las plantillas WhatsApp reales exponen `category`/`catalog.category`; la UI lo mapea a `uso=promocion` si Meta devuelve `MARKETING`, y a `notificacion` si no.
 - Las variables de columnas extra de listas importadas siguen el contrato `custom_fields_schema` y pueden mostrarse como `{{variable}}` al crear la plantilla desde la campana.
 - En envios masivos, `MarketingPatientList.name` representa el nombre de la lista. El nombre visible de campaña se conserva en `criteria.campaign_name` para permitir vistas separadas de campanas y listas sin crear otra tabla.
+- Las listas importadas/manuales de `mass_sends` no crean ni actualizan `Pacientes`, pero `POST /campaigns` cruza cada item con pacientes existentes del scope por telefono/email. Si hay match, guarda `MarketingPatientListItems.paciente_id` y mezcla en `custom_fields` variables estándar del paciente y `PatientCustomFields` existentes.
+- Si un contacto externo responde por WhatsApp, el webhook resuelve la conversacion por telefono. Si existe paciente se vincula `patient_id`; si no existe, se conserva contacto externo y el opt-out comercial se aplica por `phone_digits`.
+- `POST /campaigns/:id/prepare` y `/test-send` validan todas las variables de la plantilla real contra los items `ready`; si falta algun valor devuelven `409` con `details.missing_variables[]` y no usan ejemplos de plantilla como fallback operativo.
 
 ### 1.2. Automatizaciones basadas en listas
 
