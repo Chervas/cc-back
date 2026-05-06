@@ -3315,9 +3315,11 @@ Actualización 2026-05-06:
 - `POST /api/marketing/bulk-sends/campaigns/:id/send` no encola si faltan gates: plantilla WABA aprobada, opt-out/consentimiento, audiencia congelada, auditoría, capping y cola cancelable.
 - `cancel` marca `cancel_requested`; el job corta en el siguiente punto de control. `resume` vuelve a encolar solo si quedan items `ready` pendientes.
 - Los informes/listados deben consultar agregados y paginación (`/recipients`, `/dispatch`). No cargar todos los items en frontend para calcular abiertos/no abiertos.
+- `/recipients` busca por nombre, teléfono, email y `custom_fields` JSON, siempre paginado. No traer la lista completa al frontend para filtrar campos importados.
 - Los webhooks WhatsApp materializan `sent/delivered/read/failed/replied` en `MarketingPatientListItems` usando `app_message_id`, `provider_message_id` y metadata `source = marketing_bulk_sends`.
 - Los inbound con `BAJA` solo aplican opt-out si el outbound previo tiene metadata comercial; no se debe excluir a pacientes por responder `baja` a recordatorios operativos.
 - El job de envío lo ejecuta el API del namespace (`dev`, `staging`, `prod`). Gateway no ejecuta jobs de negocio, pero al promocionar hay que llevarle `src/workers/queue.workers.js` porque recibe webhooks externos y materializa estados/respuestas.
+- Si se prepara una campaña con plantilla WhatsApp no aprobada y `auto_send_when_template_approved = true`, queda en `dispatch.status = waiting_template_approval`. La sincronización WABA la reencola automáticamente cuando esa plantilla pase a `APPROVED`.
 
 Webhooks y colas:
 
@@ -3331,3 +3333,4 @@ Plantillas:
 - Las plantillas creadas desde campañas usan `POST /api/whatsapp/templates/custom` y crean `WhatsappTemplates`, no `MessageTemplates` legacy.
 - El backend acepta variables semánticas (`{{nombre}}`, `{{apellido}}`, `{{telefono_clinica}}`, custom de lista), las transforma a placeholders posicionales de Meta y guarda el contrato en `WhatsappTemplates.variables`.
 - `WhatsappTemplates.status` es la fuente de verdad WABA. Una plantilla `MessageTemplates` pendiente no está aprobada ni sincronizable por Meta si no existe registro WABA.
+- `PENDING_LOCAL` en una plantilla WABA custom significa que ClinicaClick la guardó localmente, pero Meta no dejó abierta una revisión real. La UI debe mostrarla como `No enviada a Meta` y no como aprobada ni en revisión.

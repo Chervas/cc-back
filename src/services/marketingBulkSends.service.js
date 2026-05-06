@@ -1,6 +1,6 @@
 'use strict';
 
-const { Op, QueryTypes } = require('sequelize');
+const { Op, QueryTypes, Sequelize } = require('sequelize');
 const db = require('../../models');
 const { normalizePhoneDigits, getPhoneLookupCandidates } = require('../lib/phone');
 const whatsappService = require('./whatsapp.service');
@@ -989,6 +989,18 @@ async function updateCampaign(scope, campaignId, body = {}, userId = null) {
   if (listName) nextCriteria.list_name = listName;
   if (campaignName) nextCriteria.campaign_name = campaignName;
   if (channels) nextCriteria.channels = channels;
+  if (body.whatsapp_template_id !== undefined || body.template_id !== undefined) {
+    nextCriteria.whatsapp_template_id = Number(body.whatsapp_template_id || body.template_id || 0) || null;
+  }
+  if (body.template_usage !== undefined) nextCriteria.template_usage = normalizeTemplateUsage(body.template_usage);
+  if (body.template_commercial !== undefined) nextCriteria.template_commercial = body.template_commercial === true;
+  if (body.opt_out_text !== undefined) nextCriteria.opt_out_text = normalizeText(body.opt_out_text) || null;
+  if (body.consent_acknowledged !== undefined) nextCriteria.consent_acknowledged = body.consent_acknowledged === true;
+  if (body.schedule_mode !== undefined) nextCriteria.schedule_mode = normalizeText(body.schedule_mode) || 'now';
+  if (body.scheduled_at !== undefined) nextCriteria.scheduled_at = body.scheduled_at || null;
+  if (body.auto_send_when_template_approved !== undefined || body.auto_send_when_approved !== undefined) {
+    nextCriteria.auto_send_when_template_approved = body.auto_send_when_template_approved === true || body.auto_send_when_approved === true;
+  }
 
   const updatePayload = { criteria: nextCriteria };
   if (listName) updatePayload.name = listName;
@@ -1338,6 +1350,7 @@ async function prepareCampaign(scope, campaignId, body = {}, userId = null) {
   const templateUsage = normalizeTemplateUsage(body.template_usage || list.criteria?.template_usage || 'promocion');
   const templateCommercial = body.template_commercial === true
     || (body.template_commercial !== false && (list.criteria?.template_commercial === true || isCommercialTemplateUsage(templateUsage)));
+  const autoSendWhenApproved = body.auto_send_when_template_approved === true || body.auto_send_when_approved === true;
   const approved = needsWhatsappTemplate
     ? !!template && String(template.status || '').toUpperCase() === 'APPROVED'
     : true;
@@ -1385,7 +1398,7 @@ async function prepareCampaign(scope, campaignId, body = {}, userId = null) {
       scheduled_at: body.scheduled_at || null,
       dispatch: {
         ...getDispatchConfig(list),
-        status: 'prepared',
+        status: !approved && autoSendWhenApproved ? 'waiting_template_approval' : 'prepared',
         batch_size: DISPATCH_BATCH_SIZE,
         delay_ms: DISPATCH_BATCH_DELAY_MS,
         min_read_rate: DISPATCH_MIN_READ_RATE,
@@ -1396,7 +1409,9 @@ async function prepareCampaign(scope, campaignId, body = {}, userId = null) {
           timezone: DISPATCH_TIMEZONE,
         },
         prepared_at: new Date().toISOString(),
+        auto_send_when_template_approved: autoSendWhenApproved,
       },
+      auto_send_when_template_approved: autoSendWhenApproved,
     },
   });
 
@@ -1627,6 +1642,7 @@ async function listRecipients(scope, campaignId, query = {}) {
       { name: { [Op.like]: `%${search}%` } },
       { phone: { [Op.like]: `%${search}%` } },
       { email: { [Op.like]: `%${search}%` } },
+      Sequelize.where(Sequelize.cast(Sequelize.col('custom_fields'), 'CHAR'), { [Op.like]: `%${search}%` }),
     ];
   }
 
@@ -1865,6 +1881,73 @@ async function resumeCampaignDispatch(scope, campaignId, body = {}, userId = nul
     campaign: serializeCampaign(reloaded),
     dispatch: getDispatchProgress(reloaded, counters, await getWhatsappAccountQualityForList(reloaded, scope)),
   };
+}
+
+async function enqueueAutoDispatchForApprovedTemplate(templateRow, logger = console) {
+  const template = templateRow?.get ? templateRow.get({ plain: true }) : templateRow;
+  const templateId = Number(template?.id || 0);
+  if (!templateId || String(template?.status || '').toUpperCase() !== 'APPROVED') {
+    return { queued: 0 };
+  }
+
+  const rows = await db.sequelize.query(
+    `
+    SELECT id
+    FROM MarketingPatientLists
+    WHERE objective_id = :objectiveId
+      AND status = 'prepared'
+      AND JSON_UNQUOTE(JSON_EXTRACT(criteria, '$.auto_send_when_template_approved')) IN ('true', '1')
+      AND CAST(JSON_UNQUOTE(JSON_EXTRACT(criteria, '$.whatsapp_template_id')) AS UNSIGNED) = :templateId
+    LIMIT 25
+    `,
+    {
+      replacements: { objectiveId: OBJECTIVE_ID, templateId },
+      type: QueryTypes.SELECT,
+    }
+  );
+
+  let queued = 0;
+  for (const row of rows) {
+    const list = await MarketingPatientList.findByPk(row.id);
+    if (!list) continue;
+    const clinicIds = Array.isArray(list.clinic_ids)
+      ? list.clinic_ids.map((id) => Number(id)).filter((id) => Number.isInteger(id) && id > 0)
+      : [];
+    const clinicId = Number(list.clinica_id || 0);
+    if (clinicId && !clinicIds.includes(clinicId)) clinicIds.push(clinicId);
+    const scope = Number(list.grupo_clinica_id || 0)
+      ? { scope: 'group', groupId: Number(list.grupo_clinica_id), clinicIds }
+      : { scope: 'clinic', clinicIds };
+
+    const dispatch = getDispatchConfig(list);
+    await list.update({
+      safety_gates: {
+        ...(list.safety_gates || {}),
+        approved_template: true,
+      },
+      criteria: mergeCriteria(list, {
+        dispatch: {
+          ...dispatch,
+          status: 'prepared',
+          auto_send_when_template_approved: true,
+          template_approved_at: new Date().toISOString(),
+        },
+      }),
+    });
+
+    try {
+      await startCampaignDispatch(scope, list.id, { scheduled_at: list.criteria?.scheduled_at || null }, null);
+      queued += 1;
+    } catch (error) {
+      logger.warn?.('[marketing-bulk-sends] No se pudo autoencolar campaña tras aprobar plantilla', {
+        list_id: list.id,
+        template_id: templateId,
+        error: error?.message || error,
+      });
+    }
+  }
+
+  return { queued };
 }
 
 function extractProviderError(error) {
@@ -2410,6 +2493,7 @@ module.exports = {
   startCampaignDispatch,
   cancelCampaignDispatch,
   resumeCampaignDispatch,
+  enqueueAutoDispatchForApprovedTemplate,
   runDispatchJob,
   materializeMessageStatusFromWebhook,
   materializeInboundReply,

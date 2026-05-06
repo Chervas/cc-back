@@ -510,6 +510,23 @@ function buildLocalPendingReasonFromMetaError(err) {
   return `Meta no ha aceptado abrir una revisión nueva para esta plantilla${code}: ${detail}`;
 }
 
+async function notifyBulkSendsTemplateApproval(templateRow, logger = console) {
+  const plain = templateRow?.get ? templateRow.get({ plain: true }) : templateRow;
+  if (String(plain?.status || '').toUpperCase() !== WHATSAPP_TEMPLATE_STATUS.APPROVED) return;
+  try {
+    const marketingBulkSendsService = require('./marketingBulkSends.service');
+    if (typeof marketingBulkSendsService.enqueueAutoDispatchForApprovedTemplate === 'function') {
+      await marketingBulkSendsService.enqueueAutoDispatchForApprovedTemplate(templateRow, logger);
+    }
+  } catch (error) {
+    logger.warn?.('[whatsapp-templates] No se pudo notificar aprobación a envíos masivos', {
+      template_id: plain?.id || null,
+      name: plain?.name || null,
+      error: error?.message || error,
+    });
+  }
+}
+
 async function resolveDisciplines({ clinicId, groupId }) {
   if (clinicId) {
     const clinic = await Clinica.findOne({ where: { id_clinica: clinicId }, raw: true });
@@ -610,7 +627,7 @@ async function createCustomTemplateForClinic({
     });
     metaTemplateId = metaResp?.id || null;
   } catch (err) {
-    const parsed = err?.response?.data?.error || err?.response?.data || {};
+    const parsed = parseMetaError(err);
     const row = await WhatsappTemplate.create({
       waba_id: safeWabaId,
       clinic_id: safeClinicId,
@@ -622,7 +639,7 @@ async function createCustomTemplateForClinic({
       components: [bodyComponent],
       variables: contract.variables,
       origin: 'custom',
-      rejection_reason: parsed?.message || err.message || 'pending_meta_submission',
+      rejection_reason: buildLocalPendingReasonFromMetaError(err),
       is_active: true,
     });
     row.meta_submission_error = parsed;
@@ -1042,11 +1059,14 @@ async function syncTemplatesForWaba({ wabaId, accessToken }) {
     const existing = await WhatsappTemplate.findOne({
       where: { waba_id: wabaId, name: payload.name, language: payload.language },
     });
+    let syncedRow = null;
     if (existing) {
       await existing.update(payload);
+      syncedRow = existing;
     } else {
-      await WhatsappTemplate.create(payload);
+      syncedRow = await WhatsappTemplate.create(payload);
     }
+    await notifyBulkSendsTemplateApproval(syncedRow);
   }
 
   const linkedAssets = await ClinicMetaAsset.findAll({
