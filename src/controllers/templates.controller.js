@@ -49,6 +49,21 @@ exports.upsertTemplate = asyncHandler(async (req, res) => {
   res.status(201).json(template);
 });
 
+exports.deleteTemplate = asyncHandler(async (req, res) => {
+  const id = Number(req.params.id || 0);
+  if (!Number.isInteger(id) || id <= 0) {
+    return res.status(400).json({ message: 'id de plantilla inválido' });
+  }
+
+  const existing = await MessageTemplate.findByPk(id);
+  if (!existing) {
+    return res.status(404).json({ message: 'Plantilla no encontrada' });
+  }
+
+  await existing.destroy();
+  return res.status(200).json({ success: true, id });
+});
+
 exports.listMessageLogs = asyncHandler(async (req, res) => {
   const { tipo, estado, destinatario } = req.query;
   const where = {};

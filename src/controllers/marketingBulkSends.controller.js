@@ -100,6 +100,16 @@ exports.getCampaign = async (req, res) => {
   }
 };
 
+exports.updateCampaign = async (req, res) => {
+  try {
+    const scope = await resolveScopeFromRequest(req, { allowAll: false });
+    const result = await marketingBulkSendsService.updateCampaign(scope, req.params.id, req.body || {}, req.userData?.userId || null);
+    return res.json(result);
+  } catch (error) {
+    return sendError(res, error, 'Error actualizando campaña de envíos masivos');
+  }
+};
+
 exports.prepareCampaign = async (req, res) => {
   try {
     const scope = await resolveScopeFromRequest(req, { allowAll: false });

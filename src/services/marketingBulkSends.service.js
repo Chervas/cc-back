@@ -1,6 +1,6 @@
 'use strict';
 
-const { Op } = require('sequelize');
+const { Op, QueryTypes } = require('sequelize');
 const db = require('../../models');
 const { normalizePhoneDigits, getPhoneLookupCandidates } = require('../lib/phone');
 const whatsappService = require('./whatsapp.service');
@@ -156,11 +156,18 @@ function computeCounters(items) {
   const total = items.length;
   const ready = items.filter((item) => item.status === 'ready').length;
   const excluded = items.filter((item) => String(item.status || '').startsWith('excluded')).length;
+  const exclusionReasons = {};
+  for (const item of items) {
+    if (!String(item.status || '').startsWith('excluded')) continue;
+    const key = normalizeKey(item.exclusion_reason || item.status || 'otro') || 'otro';
+    exclusionReasons[key] = (exclusionReasons[key] || 0) + 1;
+  }
   return {
     total,
     ready,
     selected: ready,
     excluded,
+    exclusion_reasons: exclusionReasons,
     lead: 0,
     sent: 0,
     delivered: 0,
@@ -569,6 +576,21 @@ async function listCampaigns(scope) {
     limit: 100,
   });
   const ids = lists.map((list) => list.id);
+  const [uniqueContactsRow] = ids.length
+    ? await db.sequelize.query(
+      `
+      SELECT COUNT(DISTINCT COALESCE(
+        CASE WHEN paciente_id IS NOT NULL THEN CONCAT('p:', paciente_id) END,
+        CASE WHEN NULLIF(TRIM(phone), '') IS NOT NULL THEN CONCAT('ph:', TRIM(phone)) END,
+        CASE WHEN NULLIF(TRIM(email), '') IS NOT NULL THEN CONCAT('em:', LOWER(TRIM(email))) END,
+        CASE WHEN NULLIF(TRIM(name), '') IS NOT NULL THEN CONCAT('nm:', LOWER(TRIM(name))) END
+      )) AS unique_contacts
+      FROM MarketingPatientListItems
+      WHERE list_id IN (:ids)
+      `,
+      { replacements: { ids }, type: QueryTypes.SELECT }
+    )
+    : [{ unique_contacts: 0 }];
   const previewRows = ids.length
     ? await MarketingPatientListItem.findAll({
       where: { list_id: { [Op.in]: ids } },
@@ -591,9 +613,11 @@ async function listCampaigns(scope) {
     acc.excluded += Number(counters.excluded || 0);
     acc.sent += Number(counters.sent || 0);
     acc.delivered += Number(counters.delivered || 0);
+    acc.read += Number(counters.read || 0);
     acc.replied += Number(counters.replied || 0);
     return acc;
-  }, { total_lists: 0, total_patients: 0, ready: 0, excluded: 0, sent: 0, delivered: 0, replied: 0, appointments: 0, treatments: 0, estimated_revenue: 0 });
+  }, { total_lists: 0, total_patients: 0, unique_contacts: 0, ready: 0, excluded: 0, sent: 0, delivered: 0, read: 0, replied: 0, appointments: 0, treatments: 0, estimated_revenue: 0 });
+  aggregate.unique_contacts = Number(uniqueContactsRow?.unique_contacts || 0);
   return { success: true, items, aggregate, daily_series: [] };
 }
 
@@ -697,6 +721,61 @@ async function getCampaign(scope, campaignId) {
     limit: 1000,
   });
   return { success: true, campaign: serializeCampaign(list, { itemsPreview: items.slice(0, 5) }), list: serializeCampaign(list, { itemsPreview: items.slice(0, 5) }), items: items.map(serializeItem) };
+}
+
+async function updateCampaign(scope, campaignId, body = {}, userId = null) {
+  const list = await MarketingPatientList.findByPk(campaignId);
+  ensureScopeAccess(list, scope);
+  if (String(list.status || '') === 'archived') {
+    const err = new Error('No se puede editar una lista archivada');
+    err.status = 409;
+    throw err;
+  }
+
+  const listName = normalizeText(body.name || body.list_name);
+  const campaignName = normalizeText(body.campaign_name || body.campaignName);
+  const incomingChannels = body.channels || body.destinations || null;
+  const channels = incomingChannels ? normalizeChannels(incomingChannels) : null;
+
+  const nextCriteria = {
+    ...(list.criteria || {}),
+  };
+  if (listName) nextCriteria.list_name = listName;
+  if (campaignName) nextCriteria.campaign_name = campaignName;
+  if (channels) nextCriteria.channels = channels;
+
+  const updatePayload = {
+    criteria: nextCriteria,
+  };
+  if (listName) updatePayload.name = listName;
+  if (channels) {
+    updatePayload.action_mode = channels.join(',');
+    updatePayload.channel = channels[0] || list.channel || 'whatsapp';
+  }
+
+  await list.update(updatePayload);
+  await MarketingPatientContactEvent.create({
+    list_id: list.id,
+    event_type: 'mass_campaign_updated',
+    channel: updatePayload.channel || list.channel,
+    payload: {
+      user_id: userId || null,
+      changed: Object.keys(updatePayload),
+    },
+    occurred_at: new Date(),
+  });
+
+  const reloaded = await MarketingPatientList.findByPk(list.id);
+  const items = await MarketingPatientListItem.findAll({
+    where: { list_id: list.id },
+    order: [['id', 'ASC']],
+    limit: 5,
+  });
+  return {
+    success: true,
+    campaign: serializeCampaign(reloaded, { itemsPreview: items }),
+    list: serializeCampaign(reloaded, { itemsPreview: items }),
+  };
 }
 
 async function resolveWhatsappTemplate(templateId, scope) {
@@ -892,6 +971,8 @@ async function prepareCampaign(scope, campaignId, body = {}, userId = null) {
     prepared_at: new Date(),
     criteria: {
       ...(list.criteria || {}),
+      campaign_name: normalizeText(body.campaign_name || list.criteria?.campaign_name || list.name),
+      list_name: normalizeText(body.list_name || list.criteria?.list_name || list.name),
       whatsapp_template_id: template?.id || null,
       template_usage: templateUsage,
       template_commercial: templateCommercial,
@@ -1107,6 +1188,15 @@ async function removeCampaign(scope, campaignId, userId = null) {
   const list = await MarketingPatientList.findByPk(campaignId);
   ensureScopeAccess(list, scope);
   const previousStatus = list.status;
+  if (previousStatus === 'draft') {
+    await db.sequelize.transaction(async (transaction) => {
+      await MarketingPatientContactEvent.destroy({ where: { list_id: list.id }, transaction });
+      await MarketingPatientListItem.destroy({ where: { list_id: list.id }, transaction });
+      await list.destroy({ transaction });
+    });
+    return { success: true, action: 'deleted', id: list.id };
+  }
+
   await list.update({ status: 'archived' });
   await MarketingPatientContactEvent.create({
     list_id: list.id,
@@ -1122,6 +1212,7 @@ module.exports = {
   listCampaigns,
   createCampaign,
   getCampaign,
+  updateCampaign,
   prepareCampaign,
   sendTest,
   removeCampaign,

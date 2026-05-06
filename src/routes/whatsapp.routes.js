@@ -101,6 +101,7 @@ router.post('/messages', authMiddleware, async (req, res) => {
 router.get('/templates', authMiddleware, whatsappController.listTemplatesForClinic);
 router.post('/templates/sync', authMiddleware, whatsappController.syncTemplates);
 router.post('/templates/create-from-catalog', authMiddleware, whatsappController.createTemplatesFromCatalog);
+router.delete('/templates/:id', authMiddleware, whatsappController.deleteTemplate);
 
 // Catálogo maestro (solo admins)
 router.get('/template-catalog', authMiddleware, whatsappController.listCatalog);

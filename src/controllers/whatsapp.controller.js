@@ -1089,6 +1089,42 @@ exports.syncTemplates = async (req, res) => {
   }
 };
 
+exports.deleteTemplate = async (req, res) => {
+  try {
+    const id = Number(req.params.id || 0);
+    const userId = req.userData?.userId;
+
+    if (!Number.isInteger(id) || id <= 0) {
+      return res.status(400).json({ error: 'template_id_invalid' });
+    }
+
+    const template = await WhatsappTemplate.findByPk(id);
+    if (!template || template.is_active === false) {
+      return res.status(404).json({ error: 'template_not_found' });
+    }
+
+    if (template.clinic_id) {
+      const asset = await resolveWabaFromContext({ clinicId: Number(template.clinic_id), userId });
+      if (!asset || String(asset.wabaId || '') !== String(template.waba_id || '')) {
+        return res.status(403).json({ error: 'template_scope_forbidden' });
+      }
+    }
+
+    if (String(template.status || '').toUpperCase() === 'APPROVED') {
+      return res.status(409).json({
+        error: 'approved_template_cannot_be_deleted',
+        message: 'No se puede borrar una plantilla aprobada desde ClinicaClick. Archívala o duplica una versión nueva.',
+      });
+    }
+
+    await template.update({ is_active: false });
+    return res.json({ success: true, id });
+  } catch (err) {
+    console.error('Error deleteTemplate WhatsApp', err);
+    return res.status(500).json({ error: 'Error eliminando plantilla WhatsApp' });
+  }
+};
+
 exports.createTemplatesFromCatalog = async (req, res) => {
   try {
     const clinicId = req.query.clinic_id ? Number(req.query.clinic_id) : null;

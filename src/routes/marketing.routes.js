@@ -37,6 +37,7 @@ router.delete('/reactivation/lists/:id', marketingReactivationController.removeL
 router.get('/bulk-sends/campaigns', marketingBulkSendsController.listCampaigns);
 router.post('/bulk-sends/campaigns', marketingBulkSendsController.createCampaign);
 router.get('/bulk-sends/campaigns/:id', marketingBulkSendsController.getCampaign);
+router.patch('/bulk-sends/campaigns/:id', marketingBulkSendsController.updateCampaign);
 router.post('/bulk-sends/campaigns/:id/prepare', marketingBulkSendsController.prepareCampaign);
 router.post('/bulk-sends/campaigns/:id/test-send', marketingBulkSendsController.sendTest);
 router.delete('/bulk-sends/campaigns/:id', marketingBulkSendsController.removeCampaign);
