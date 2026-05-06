@@ -3319,6 +3319,13 @@ Actualización 2026-05-06:
 - Los inbound con `BAJA` solo aplican opt-out si el outbound previo tiene metadata comercial; no se debe excluir a pacientes por responder `baja` a recordatorios operativos.
 - El job de envío lo ejecuta el API del namespace (`dev`, `staging`, `prod`). Gateway no ejecuta jobs de negocio, pero al promocionar hay que llevarle `src/workers/queue.workers.js` porque recibe webhooks externos y materializa estados/respuestas.
 
+Webhooks y colas:
+
+- `POST /api/whatsapp/webhook` responde rápido y encola el payload en BullMQ `webhook_whatsapp` mediante `src/services/queue.service.js`; no procesa 1000 respuestas en la request HTTP.
+- `src/workers/queue.workers.js` consume esa cola, persiste `Messages`, socket/realtime y materializa estados de `mass_sends` de forma idempotente.
+- `marketing_bulk_send_dispatch` no es BullMQ: es `JobRequests` del runtime propietario. La recepción de webhooks sí es BullMQ. Mantener esa separación evita que gateway ejecute jobs de negocio.
+- Para informes de abiertos/no abiertos/respuestas/bajas, usar contadores materializados y `/recipients` paginado. Si se necesita un listado filtrado nuevo, añadir filtro backend paginado; no resolverlo trayendo todos los contactos al frontend.
+
 Plantillas:
 
 - Las plantillas creadas desde campañas usan `POST /api/whatsapp/templates/custom` y crean `WhatsappTemplates`, no `MessageTemplates` legacy.
