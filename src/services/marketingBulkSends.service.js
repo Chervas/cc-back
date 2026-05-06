@@ -1003,6 +1003,15 @@ async function updateCampaign(scope, campaignId, body = {}, userId = null) {
   }
 
   const updatePayload = { criteria: nextCriteria };
+  if (body.whatsapp_template_id !== undefined || body.template_id !== undefined) {
+    if (nextCriteria.whatsapp_template_id) {
+      const template = await resolveWhatsappTemplate(nextCriteria.whatsapp_template_id, scope);
+      updatePayload.template_id = null;
+      updatePayload.template_snapshot = buildTemplateSnapshot(template);
+    } else {
+      updatePayload.template_snapshot = null;
+    }
+  }
   if (listName) updatePayload.name = listName;
   if (channels) {
     updatePayload.action_mode = channels.join(',');
