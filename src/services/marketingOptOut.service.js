@@ -57,13 +57,14 @@ function isMarketingOutboundMessage(message) {
     || COMMERCIAL_TEMPLATE_USAGES.has(templateUsage)
     || COMMERCIAL_TEMPLATE_CATEGORIES.has(templateCategory);
 
-  return MARKETING_MESSAGE_SOURCES.has(source)
+  const hasMarketingContext = MARKETING_MESSAGE_SOURCES.has(source)
     || MARKETING_MESSAGE_SOURCES.has(flowSource)
     || MARKETING_MESSAGE_KINDS.has(kind)
     || MARKETING_OBJECTIVES.has(objectiveId)
-    || templateCommercial
     || (source === 'automations_v2' && flowSource === 'marketing_reactivation')
     || (source === 'automations_v2' && metadata.flow_domain === 'marketing');
+
+  return templateCommercial || (hasMarketingContext && metadata.template_commercial === true);
 }
 
 async function findRecentMarketingOutboundMessage({ conversationId, inboundCreatedAt }) {

@@ -22,6 +22,7 @@ const OBJECTIVE_ID = 'mass_sends';
 const REQUIRED_SEND_GATES = ['frozen_audience', 'opt_out', 'capping', 'approved_template', 'audit', 'cancelable_queue'];
 const CHANNELS = new Set(['whatsapp', 'email', 'managed_calls']);
 const STANDARD_FIELDS = new Set(['name', 'first_name', 'last_name', 'phone', 'email']);
+const COMMERCIAL_TEMPLATE_USAGES = new Set(['marketing', 'comercial', 'promocion', 'promocional', 'reactivacion_pacientes']);
 
 function repairMojibake(value) {
   const text = String(value || '');
@@ -45,6 +46,15 @@ function normalizeKey(value) {
     .replace(/[\u0300-\u036f]/g, '')
     .replace(/[^a-z0-9]+/g, '_')
     .replace(/^_+|_+$/g, '');
+}
+
+function normalizeTemplateUsage(value) {
+  const usage = normalizeKey(value);
+  return usage || 'promocion';
+}
+
+function isCommercialTemplateUsage(value) {
+  return COMMERCIAL_TEMPLATE_USAGES.has(normalizeTemplateUsage(value));
 }
 
 function toTitleCaseName(value) {
@@ -470,6 +480,8 @@ async function createCampaign(scope, body = {}, userId = null) {
   const scopePayload = serializeScope(scope);
   const listSource = normalizeText(body.list_source || body.source || 'import');
   const source = listSource === 'current_patients' ? 'existing_patients_condition' : (listSource === 'manual' ? 'manual_list' : 'imported_file');
+  const templateUsage = normalizeTemplateUsage(body.template_usage || body.template_uso || body.uso || 'promocion');
+  const templateCommercial = body.template_commercial === true || isCommercialTemplateUsage(templateUsage);
 
   return db.sequelize.transaction(async (transaction) => {
     let itemPayloads = [];
@@ -500,6 +512,9 @@ async function createCampaign(scope, body = {}, userId = null) {
       exclusion_summary: counters.excluded ? `${counters.excluded} contactos no tienen los campos necesarios o están duplicados.` : 'Sin exclusiones detectadas.',
       criteria: {
         channels,
+        template_usage: templateUsage,
+        template_commercial: templateCommercial,
+        opt_out_text: templateCommercial ? normalizeText(body.opt_out_text) : null,
         consent_acknowledged: !!body.consent_acknowledged,
         list_source: source,
         import_file_name: body.import_file_name || null,
@@ -653,6 +668,9 @@ async function prepareCampaign(scope, campaignId, body = {}, userId = null) {
     ? await resolveWhatsappTemplate(body.whatsapp_template_id || body.template_id, scope)
     : null;
   const snapshot = buildTemplateSnapshot(template);
+  const templateUsage = normalizeTemplateUsage(body.template_usage || list.criteria?.template_usage || 'promocion');
+  const templateCommercial = body.template_commercial === true
+    || (body.template_commercial !== false && (list.criteria?.template_commercial === true || isCommercialTemplateUsage(templateUsage)));
   const approved = needsWhatsappTemplate
     ? !!template && String(template.status || '').toUpperCase() === 'APPROVED'
     : true;
@@ -680,6 +698,9 @@ async function prepareCampaign(scope, campaignId, body = {}, userId = null) {
     criteria: {
       ...(list.criteria || {}),
       whatsapp_template_id: template?.id || null,
+      template_usage: templateUsage,
+      template_commercial: templateCommercial,
+      opt_out_text: templateCommercial ? normalizeText(body.opt_out_text || list.criteria?.opt_out_text) : null,
       schedule_mode: body.schedule_mode || 'now',
       scheduled_at: body.scheduled_at || null,
     },
@@ -763,6 +784,9 @@ async function sendTest(scope, campaignId, body = {}) {
   const plainItem = item.get({ plain: true });
   const params = buildTemplateParams({ template, item: plainItem, list, clinic });
   const previewText = renderTemplatePreview({ template, item: plainItem, list, clinic });
+  const templateUsage = normalizeTemplateUsage(body.template_usage || list.criteria?.template_usage || 'promocion');
+  const templateCommercial = body.template_commercial === true
+    || (body.template_commercial !== false && (list.criteria?.template_commercial === true || isCommercialTemplateUsage(templateUsage)));
   const conversation = await findCanonicalWhatsappConversation({
     clinicId,
     contactId: targetPhone,
@@ -788,8 +812,8 @@ async function sendTest(scope, campaignId, body = {}) {
       list_id: list.id,
       item_id: item.id,
       objective_id: OBJECTIVE_ID,
-      template_usage: 'promocion',
-      template_commercial: true,
+      template_usage: templateUsage,
+      template_commercial: templateCommercial,
       template_category: template.category || template.catalog?.category || null,
       template_id: template.id,
       template_name: template.name,

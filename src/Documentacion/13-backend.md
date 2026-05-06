@@ -790,7 +790,27 @@ Reglas:
 - Si `prepare` recibe `automation=null`, desactiva el flujo `patient_reactivation` asociado por `template_key` cuando existe.
 - `patient_reactivation` es representacion operativa/visual para `Marketing > Flujos`; la reevaluacion batch 24h, capping y cola cancelable siguen pendientes antes de envio real.
 
-### 1.1. Automatizaciones basadas en listas
+### 1.1. Envios masivos por listas
+
+Rutas bajo `/api/marketing/bulk-sends`:
+
+| Método | Ruta | Uso |
+|---|---|---|
+| GET | `/campaigns` | Lista campanas `mass_sends` por scope, excluyendo archivadas. |
+| POST | `/campaigns` | Crea lista/campana desde importacion, manual o pacientes actuales. Acepta `template_usage`, `template_commercial` y `opt_out_text` en `criteria`. |
+| POST | `/campaigns/:id/prepare` | Congela/prepara con plantilla WhatsApp si aplica, sin envio masivo real hasta capping y cola cancelable. |
+| POST | `/campaigns/:id/test-send` | Envia una prueba individual con metadata comercial/no comercial para que el opt-out entrante se aplique correctamente. |
+| DELETE | `/campaigns/:id` | Archiva la campana/lista. |
+
+Reglas:
+
+- `template_usage=promocion` o `template_commercial=true` identifica una comunicacion comercial.
+- Solo los mensajes outbound con metadata comercial deben activar baja automatica si el paciente responde con `BAJA`; notificaciones y recordatorios no comerciales no excluyen al contacto de marketing.
+- Al crear una plantilla promocional desde campañas, la UI debe guardar el texto principal mas un bloque de baja con la palabra `BAJA`.
+- Las plantillas WhatsApp reales exponen `category`/`catalog.category`; la UI lo mapea a `uso=promocion` si Meta devuelve `MARKETING`, y a `notificacion` si no.
+- Las variables de columnas extra de listas importadas siguen el contrato `custom_fields_schema` y pueden mostrarse como `{{variable}}` al crear la plantilla desde la campana.
+
+### 1.2. Automatizaciones basadas en listas
 
 Rutas bajo `/api/marketing/list-automations`:
 

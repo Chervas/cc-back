@@ -419,7 +419,7 @@ function extractTechnicalTemplateVersion(baseName, candidateName) {
 
 async function loadEffectiveWhatsappTemplatesForClinic({ clinicId, userId, includeCatalog }) {
   const includeCatalogConfig = includeCatalog
-    ? [{ model: WhatsappTemplateCatalog, as: 'catalog', attributes: ['id', 'name', 'display_name', 'body_text', 'variables'] }]
+    ? [{ model: WhatsappTemplateCatalog, as: 'catalog', attributes: ['id', 'name', 'display_name', 'category', 'body_text', 'variables'] }]
     : [];
 
   const overrides = await WhatsappTemplate.findAll({
@@ -1037,7 +1037,7 @@ exports.listTemplatesForClinic = async (req, res) => {
           waba_id: asset.wabaId,
           is_active: true,
         },
-        include: [{ model: WhatsappTemplateCatalog, as: 'catalog', attributes: ['id', 'name', 'display_name', 'body_text', 'variables'] }],
+        include: [{ model: WhatsappTemplateCatalog, as: 'catalog', attributes: ['id', 'name', 'display_name', 'category', 'body_text', 'variables'] }],
         order: [['name', 'ASC']],
       });
     }
