@@ -7,14 +7,17 @@ const whatsappService = require('./whatsapp.service');
 const { buildWhatsappTemplateVariableContract } = require('../lib/whatsapp-template-contract');
 const { findCanonicalWhatsappConversation } = require('../lib/canonical-conversation');
 const marketingOptOutService = require('./marketingOptOut.service');
+const jobRequestsService = require('./jobRequests.service');
 
 const {
   Clinica,
+  ClinicMetaAsset,
   MarketingPatientContactEvent,
   MarketingPatientList,
   MarketingPatientListItem,
   Message,
   Paciente,
+  PacienteConsentimiento,
   PatientCustomField,
   WhatsappTemplate,
 } = db;
@@ -24,6 +27,14 @@ const REQUIRED_SEND_GATES = ['frozen_audience', 'opt_out', 'capping', 'approved_
 const CHANNELS = new Set(['whatsapp', 'email', 'managed_calls']);
 const STANDARD_FIELDS = new Set(['name', 'first_name', 'last_name', 'phone', 'email']);
 const COMMERCIAL_TEMPLATE_USAGES = new Set(['marketing', 'comercial', 'promocion', 'promocional', 'reactivacion_pacientes']);
+const DISPATCH_JOB_TYPE = 'marketing_bulk_send_dispatch';
+const DISPATCH_BATCH_SIZE = Math.max(1, Number.parseInt(process.env.MARKETING_BULK_SEND_BATCH_SIZE || '100', 10) || 100);
+const DISPATCH_BATCH_DELAY_MS = Math.max(60 * 1000, Number.parseInt(process.env.MARKETING_BULK_SEND_BATCH_DELAY_MS || String(2 * 60 * 1000), 10) || 2 * 60 * 1000);
+const DISPATCH_MIN_READ_RATE = Number(process.env.MARKETING_BULK_SEND_MIN_READ_RATE || '0.30') || 0.30;
+const DISPATCH_MAX_OPT_OUT_RATE = Number(process.env.MARKETING_BULK_SEND_MAX_OPT_OUT_RATE || '0.05') || 0.05;
+const DISPATCH_TIMEZONE = process.env.MARKETING_BULK_SEND_TIMEZONE || 'Europe/Madrid';
+const DISPATCH_BUSINESS_START_HOUR = 7;
+const DISPATCH_BUSINESS_END_HOUR = 22;
 
 function repairMojibake(value) {
   const text = String(value || '');
@@ -156,6 +167,12 @@ function computeCounters(items) {
   const total = items.length;
   const ready = items.filter((item) => item.status === 'ready').length;
   const excluded = items.filter((item) => String(item.status || '').startsWith('excluded')).length;
+  const sent = items.filter((item) => item.sent_at || ['sent', 'delivered', 'read', 'replied'].includes(String(item.dispatch_status || '').toLowerCase())).length;
+  const delivered = items.filter((item) => item.delivered_at || item.read_at || ['delivered', 'read', 'replied'].includes(String(item.dispatch_status || '').toLowerCase())).length;
+  const read = items.filter((item) => item.read_at || ['read', 'replied'].includes(String(item.dispatch_status || '').toLowerCase())).length;
+  const replied = items.filter((item) => item.replied_at || String(item.dispatch_status || '').toLowerCase() === 'replied').length;
+  const failed = items.filter((item) => item.failed_at || String(item.dispatch_status || '').toLowerCase() === 'failed').length;
+  const optOut = items.filter((item) => item.opt_out_at || item.exclusion_reason === 'opt_out').length;
   const exclusionReasons = {};
   for (const item of items) {
     if (!String(item.status || '').startsWith('excluded')) continue;
@@ -169,12 +186,135 @@ function computeCounters(items) {
     excluded,
     exclusion_reasons: exclusionReasons,
     lead: 0,
-    sent: 0,
-    delivered: 0,
-    read: 0,
-    replied: 0,
+    sent,
+    delivered,
+    read,
+    replied,
+    failed,
+    opt_out: optOut,
     appointments: 0,
     treatments: 0,
+  };
+}
+
+function parseDate(value) {
+  const parsed = value ? new Date(value) : null;
+  return parsed && !Number.isNaN(parsed.getTime()) ? parsed : null;
+}
+
+function parseWhatsappTimestamp(value, fallback = new Date()) {
+  const numeric = Number(value);
+  if (Number.isFinite(numeric) && numeric > 0) {
+    const ms = numeric > 100000000000 ? numeric : numeric * 1000;
+    const date = new Date(ms);
+    if (!Number.isNaN(date.getTime())) return date;
+  }
+  return parseDate(value) || fallback;
+}
+
+function getMadridParts(date = new Date()) {
+  const formatter = new Intl.DateTimeFormat('en-CA', {
+    timeZone: DISPATCH_TIMEZONE,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hour12: false,
+  });
+  const parts = Object.fromEntries(formatter.formatToParts(date).map((part) => [part.type, part.value]));
+  return {
+    year: Number(parts.year),
+    month: Number(parts.month),
+    day: Number(parts.day),
+    hour: Number(parts.hour),
+    minute: Number(parts.minute),
+    second: Number(parts.second),
+  };
+}
+
+function getTimezoneOffsetMs(date = new Date(), timeZone = DISPATCH_TIMEZONE) {
+  const formatter = new Intl.DateTimeFormat('en-CA', {
+    timeZone,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hour12: false,
+  });
+  const parts = Object.fromEntries(formatter.formatToParts(date).map((part) => [part.type, part.value]));
+  const asUtc = Date.UTC(
+    Number(parts.year),
+    Number(parts.month) - 1,
+    Number(parts.day),
+    Number(parts.hour),
+    Number(parts.minute),
+    Number(parts.second)
+  );
+  return asUtc - date.getTime();
+}
+
+function zonedDateToUtc({ year, month, day, hour, minute = 0, second = 0 }, timeZone = DISPATCH_TIMEZONE) {
+  const utcGuess = new Date(Date.UTC(year, month - 1, day, hour, minute, second));
+  const offsetMs = getTimezoneOffsetMs(utcGuess, timeZone);
+  return new Date(utcGuess.getTime() - offsetMs);
+}
+
+function getNextBusinessAllowedAt(reference = new Date()) {
+  const parts = getMadridParts(reference);
+  if (parts.hour >= DISPATCH_BUSINESS_START_HOUR && parts.hour < DISPATCH_BUSINESS_END_HOUR) {
+    return reference;
+  }
+  if (parts.hour < DISPATCH_BUSINESS_START_HOUR) {
+    return zonedDateToUtc({ ...parts, hour: DISPATCH_BUSINESS_START_HOUR, minute: 0, second: 0 });
+  }
+  const tomorrow = new Date(zonedDateToUtc({ ...parts, hour: 12, minute: 0, second: 0 }).getTime() + 24 * 60 * 60 * 1000);
+  const nextParts = getMadridParts(tomorrow);
+  return zonedDateToUtc({ ...nextParts, hour: DISPATCH_BUSINESS_START_HOUR, minute: 0, second: 0 });
+}
+
+function isWithinBusinessHours(date = new Date()) {
+  const parts = getMadridParts(date);
+  return parts.hour >= DISPATCH_BUSINESS_START_HOUR && parts.hour < DISPATCH_BUSINESS_END_HOUR;
+}
+
+function parseMessagingLimit(value) {
+  const raw = String(value || '').trim().toUpperCase();
+  if (!raw) return null;
+  if (raw.includes('UNLIMITED')) return null;
+  const compact = raw.replace(/,/g, '');
+  const match = compact.match(/(\d+(?:\.\d+)?)(K|M)?/);
+  if (!match) return null;
+  const amount = Number(match[1]);
+  const multiplier = match[2] === 'M' ? 1000000 : (match[2] === 'K' ? 1000 : 1);
+  return Number.isFinite(amount) ? Math.round(amount * multiplier) : null;
+}
+
+function getDispatchConfig(list) {
+  const criteria = list?.criteria || {};
+  const dispatch = criteria.dispatch && typeof criteria.dispatch === 'object' ? criteria.dispatch : {};
+  return {
+    batch_size: Number(dispatch.batch_size || DISPATCH_BATCH_SIZE) || DISPATCH_BATCH_SIZE,
+    delay_ms: Number(dispatch.delay_ms || DISPATCH_BATCH_DELAY_MS) || DISPATCH_BATCH_DELAY_MS,
+    min_read_rate: Number(dispatch.min_read_rate || DISPATCH_MIN_READ_RATE) || DISPATCH_MIN_READ_RATE,
+    max_opt_out_rate: Number(dispatch.max_opt_out_rate || DISPATCH_MAX_OPT_OUT_RATE) || DISPATCH_MAX_OPT_OUT_RATE,
+    timezone: dispatch.timezone || DISPATCH_TIMEZONE,
+    business_hours: dispatch.business_hours || {
+      start: DISPATCH_BUSINESS_START_HOUR,
+      end: DISPATCH_BUSINESS_END_HOUR,
+      timezone: DISPATCH_TIMEZONE,
+    },
+    ...dispatch,
+  };
+}
+
+function mergeCriteria(list, patch) {
+  return {
+    ...(list.criteria || {}),
+    ...patch,
   };
 }
 
@@ -198,6 +338,67 @@ async function applyMarketingOptOutExclusions(itemPayloads, scope, transaction =
       selected: false,
     };
   });
+}
+
+async function revalidateDispatchExclusions(list, items, scope, transaction = null) {
+  if (!Array.isArray(items) || !items.length) return [];
+  const optOutSets = await marketingOptOutService.getActiveOptOutSetsForScope(scope, transaction);
+  const patientIds = items.map((item) => Number(item.paciente_id || 0)).filter((id) => Number.isInteger(id) && id > 0);
+  const rejectedContactRows = patientIds.length && PacienteConsentimiento
+    ? await PacienteConsentimiento.findAll({
+      where: {
+        paciente_id: { [Op.in]: patientIds },
+        tipo: 'comunicaciones',
+        estado: 'rechazado',
+      },
+      attributes: ['paciente_id'],
+      raw: true,
+      transaction,
+    })
+    : [];
+  const rejectedContactPatientIds = new Set(rejectedContactRows.map((row) => Number(row.paciente_id)).filter(Boolean));
+  const excluded = [];
+
+  for (const item of items) {
+    if (String(item.status || '') !== 'ready' || item.selected === false) {
+      excluded.push(item);
+      continue;
+    }
+    const hasMarketingOptOut = marketingOptOutService.isContactOptedOut({
+      patientId: item.paciente_id || null,
+      phone: item.phone || null,
+      optOutSets,
+    });
+    const noContact = item.paciente_id && rejectedContactPatientIds.has(Number(item.paciente_id));
+    if (!hasMarketingOptOut && !noContact) continue;
+    await item.update({
+      status: 'excluded_opt_out',
+      exclusion_reason: hasMarketingOptOut ? 'opt_out' : 'no_contactar',
+      selected: false,
+      reason: hasMarketingOptOut
+        ? 'Baja comercial solicitada antes del envío'
+        : 'Paciente con comunicaciones rechazadas antes del envío',
+      dispatch_status: null,
+      opt_out_at: hasMarketingOptOut ? new Date() : item.opt_out_at,
+    }, { transaction });
+    excluded.push(item);
+    await MarketingPatientContactEvent.create({
+      list_id: list.id,
+      item_id: item.id,
+      paciente_id: item.paciente_id || null,
+      event_type: 'mass_campaign_contact_excluded_before_send',
+      channel: 'whatsapp',
+      payload: {
+        reason: hasMarketingOptOut ? 'opt_out' : 'no_contactar',
+      },
+      occurred_at: new Date(),
+    }, { transaction });
+  }
+
+  if (excluded.length) {
+    await refreshListCounters(list.id, transaction);
+  }
+  return excluded;
 }
 
 const IMPORT_ALIASES = {
@@ -526,6 +727,19 @@ function serializeItem(item) {
     selected: plain.selected,
     custom_fields: plain.custom_fields || {},
     missing_variables: plain.missing_variables || [],
+    dispatch_status: plain.dispatch_status || null,
+    provider_message_id: plain.provider_message_id || null,
+    app_message_id: plain.app_message_id || null,
+    conversation_id: plain.conversation_id || null,
+    send_batch_index: plain.send_batch_index || null,
+    sent_at: plain.sent_at || null,
+    delivered_at: plain.delivered_at || null,
+    read_at: plain.read_at || null,
+    replied_at: plain.replied_at || null,
+    failed_at: plain.failed_at || null,
+    opt_out_at: plain.opt_out_at || null,
+    last_error_code: plain.last_error_code || null,
+    last_error_message: plain.last_error_message || null,
     notes: plain.notes || null,
   };
 }
@@ -556,6 +770,7 @@ function serializeCampaign(list, { itemsPreview = [] } = {}) {
     metrics: plain.metrics || {},
     safety_gates: plain.safety_gates || {},
     blocked_gates: getBlockedGates(plain.safety_gates || {}),
+    dispatch: getDispatchConfig(plain),
     custom_fields_schema: plain.custom_fields_schema || [],
     prepared_at: plain.prepared_at,
     last_sent_at: plain.last_sent_at,
@@ -864,6 +1079,97 @@ function getClinicIdForList(list, fallbackScope = {}) {
   return Number.isInteger(fromScope) && fromScope > 0 ? fromScope : null;
 }
 
+async function getWhatsappAccountQualityForList(list, scope = {}) {
+  const clinicId = getClinicIdForList(list, scope);
+  if (!clinicId || !ClinicMetaAsset) {
+    return {
+      clinic_id: clinicId,
+      quality_rating: null,
+      messaging_limit: null,
+      messaging_limit_count: null,
+      can_send_api: null,
+    };
+  }
+
+  let clinicConfig = null;
+  try {
+    clinicConfig = await whatsappService.getClinicConfig(clinicId);
+  } catch (_) {
+    clinicConfig = null;
+  }
+
+  const where = {
+    assetType: 'whatsapp_phone_number',
+    isActive: true,
+    [Op.or]: [
+      { clinicaId: clinicId },
+      ...(clinicConfig?.phoneNumberId ? [{ phoneNumberId: clinicConfig.phoneNumberId }] : []),
+      ...(clinicConfig?.wabaId ? [{ wabaId: clinicConfig.wabaId }] : []),
+    ],
+  };
+  const asset = await ClinicMetaAsset.findOne({ where, order: [['updatedAt', 'DESC']] });
+  const paymentStatus = asset?.additionalData?.payment?.status || null;
+  return {
+    clinic_id: clinicId,
+    phone_number_id: clinicConfig?.phoneNumberId || asset?.phoneNumberId || null,
+    waba_id: clinicConfig?.wabaId || asset?.wabaId || null,
+    quality_rating: asset?.quality_rating || null,
+    messaging_limit: asset?.messaging_limit || null,
+    messaging_limit_count: parseMessagingLimit(asset?.messaging_limit),
+    can_send_api: asset?.can_send_api ?? asset?.additionalData?.coexistence?.can_send_api ?? null,
+    payment_status: paymentStatus,
+    payment_missing: paymentStatus === 'missing_payment_method',
+  };
+}
+
+async function refreshListCounters(listId, transaction = null) {
+  const items = await MarketingPatientListItem.findAll({
+    where: { list_id: listId },
+    transaction,
+  });
+  const counters = computeCounters(items.map((item) => item.get({ plain: true })));
+  await MarketingPatientList.update(
+    { counters },
+    { where: { id: listId }, transaction }
+  );
+  return counters;
+}
+
+function getDispatchProgress(list, counters = null, accountQuality = null) {
+  const config = getDispatchConfig(list);
+  const currentCounters = counters || list?.counters || {};
+  const sent = Number(currentCounters.sent || 0);
+  const ready = Number(currentCounters.ready || currentCounters.selected || 0);
+  const totalToSend = Math.max(sent, ready);
+  const read = Number(currentCounters.read || 0);
+  const optOut = Number(currentCounters.opt_out || currentCounters.exclusion_reasons?.opt_out || 0);
+  const readRate = sent > 0 ? read / sent : null;
+  const optOutRate = sent > 0 ? optOut / sent : null;
+  return {
+    ...config,
+    status: config.status || list?.status || 'draft',
+    job_id: config.job_id || null,
+    sent,
+    delivered: Number(currentCounters.delivered || 0),
+    read,
+    replied: Number(currentCounters.replied || 0),
+    failed: Number(currentCounters.failed || 0),
+    opt_out: optOut,
+    ready,
+    total_to_send: totalToSend,
+    progress_percent: totalToSend > 0 ? Math.min(100, Math.round((sent / totalToSend) * 100)) : 0,
+    read_rate: readRate,
+    opt_out_rate: optOutRate,
+    paused_reason: config.paused_reason || null,
+    cancel_requested: config.cancel_requested === true,
+    next_allowed_at: config.next_allowed_at || null,
+    account: accountQuality || null,
+    limits_warning: accountQuality?.messaging_limit_count && ready > accountQuality.messaging_limit_count
+      ? `WhatsApp, por la calidad de tu cuenta de momento solo te deja enviar ${accountQuality.messaging_limit_count} mensajes en 24h. Este límite puede aumentar si mantienes buena puntuación.`
+      : null,
+  };
+}
+
 function buildMissingVariablesSummary({ template, items, list, clinic }) {
   const contract = getTemplateVariableContract(template);
   if (!contract.length) return [];
@@ -956,8 +1262,8 @@ async function prepareCampaign(scope, campaignId, body = {}, userId = null) {
     opt_out: !!(body.consent_acknowledged ?? list.criteria?.consent_acknowledged),
     approved_template: approved,
     audit: true,
-    capping: false,
-    cancelable_queue: false,
+    capping: true,
+    cancelable_queue: true,
   };
 
   await list.update({
@@ -979,6 +1285,20 @@ async function prepareCampaign(scope, campaignId, body = {}, userId = null) {
       opt_out_text: templateCommercial ? normalizeText(body.opt_out_text || list.criteria?.opt_out_text) : null,
       schedule_mode: body.schedule_mode || 'now',
       scheduled_at: body.scheduled_at || null,
+      dispatch: {
+        ...getDispatchConfig(list),
+        status: 'prepared',
+        batch_size: DISPATCH_BATCH_SIZE,
+        delay_ms: DISPATCH_BATCH_DELAY_MS,
+        min_read_rate: DISPATCH_MIN_READ_RATE,
+        max_opt_out_rate: DISPATCH_MAX_OPT_OUT_RATE,
+        business_hours: {
+          start: DISPATCH_BUSINESS_START_HOUR,
+          end: DISPATCH_BUSINESS_END_HOUR,
+          timezone: DISPATCH_TIMEZONE,
+        },
+        prepared_at: new Date().toISOString(),
+      },
     },
   });
 
@@ -996,16 +1316,18 @@ async function prepareCampaign(scope, campaignId, body = {}, userId = null) {
   });
 
   const reloaded = await MarketingPatientList.findByPk(list.id);
+  const accountQuality = await getWhatsappAccountQualityForList(reloaded, scope);
   return {
     success: true,
     campaign: serializeCampaign(reloaded, { itemsPreview: items.slice(0, 5) }),
-    dispatch_blocked: true,
+    dispatch_blocked: getBlockedGates(nextGates).length > 0,
     blocked_gates: getBlockedGates(nextGates),
+    dispatch: getDispatchProgress(reloaded, counters, accountQuality),
     message: needsWhatsappTemplate && !template
       ? 'Selecciona una plantilla WhatsApp aprobada antes de preparar esta campaña.'
       : approved
-      ? 'Campaña preparada. El envío masivo queda pendiente de cola cancelable y capping.'
-      : 'La plantilla todavía no está aprobada. Meta puede tardar hasta 30 minutos en aprobarla.',
+      ? 'Campaña preparada. Puedes enviarla ahora o programarla respetando capping y horario permitido.'
+      : 'La plantilla todavía no está aprobada. Meta suele aprobarla en unos 15 minutos.',
   };
 }
 
@@ -1184,6 +1506,776 @@ async function sendTest(scope, campaignId, body = {}) {
   };
 }
 
+async function listRecipients(scope, campaignId, query = {}) {
+  const list = await MarketingPatientList.findByPk(campaignId);
+  ensureScopeAccess(list, scope);
+  const page = Math.max(1, Number.parseInt(query.page || '1', 10) || 1);
+  const pageSize = Math.min(100, Math.max(10, Number.parseInt(query.page_size || query.pageSize || '25', 10) || 25));
+  const offset = (page - 1) * pageSize;
+  const search = normalizeText(query.search || '');
+  const status = normalizeText(query.status || '');
+  const where = { list_id: list.id };
+  if (status && status !== 'all') {
+    if (status === 'excluded') {
+      where.status = { [Op.like]: 'excluded%' };
+    } else if (status === 'sent') {
+      where.dispatch_status = { [Op.in]: ['sent', 'delivered', 'read', 'replied'] };
+    } else {
+      where.dispatch_status = status;
+    }
+  }
+  if (search) {
+    where[Op.or] = [
+      { name: { [Op.like]: `%${search}%` } },
+      { phone: { [Op.like]: `%${search}%` } },
+      { email: { [Op.like]: `%${search}%` } },
+    ];
+  }
+
+  const { count, rows } = await MarketingPatientListItem.findAndCountAll({
+    where,
+    order: [['id', 'ASC']],
+    limit: pageSize,
+    offset,
+  });
+  const counters = list.counters || await refreshListCounters(list.id);
+  return {
+    success: true,
+    page,
+    page_size: pageSize,
+    total: count,
+    items: rows.map(serializeItem),
+    summary: counters,
+  };
+}
+
+async function getDispatchStatus(scope, campaignId) {
+  const list = await MarketingPatientList.findByPk(campaignId);
+  ensureScopeAccess(list, scope);
+  const counters = await refreshListCounters(list.id);
+  const reloaded = await MarketingPatientList.findByPk(list.id);
+  const accountQuality = await getWhatsappAccountQualityForList(reloaded, scope);
+  return {
+    success: true,
+    campaign: serializeCampaign(reloaded),
+    dispatch: getDispatchProgress(reloaded, counters, accountQuality),
+  };
+}
+
+async function enqueueDispatchJob({ list, scope, nextRunAt = null, userId = null }) {
+  const job = await jobRequestsService.enqueueJobRequest({
+    type: DISPATCH_JOB_TYPE,
+    payload: {
+      list_id: list.id,
+      scope,
+    },
+    priority: 'normal',
+    status: nextRunAt ? 'waiting' : 'pending',
+    origin: 'marketing_bulk_sends',
+    requestedBy: userId || null,
+    maxAttempts: 1,
+    nextRunAt,
+  });
+  return job;
+}
+
+async function triggerDispatchJobIfReady(job, nextRunAt = null) {
+  if (!job?.id || nextRunAt) return;
+  try {
+    const jobScheduler = require('./jobScheduler.service');
+    if (typeof jobScheduler.triggerImmediate === 'function') {
+      await jobScheduler.triggerImmediate(job.id);
+    }
+  } catch (error) {
+    console.warn('[marketing-bulk-sends] No se pudo disparar el job inmediatamente:', error?.message || error);
+  }
+}
+
+async function startCampaignDispatch(scope, campaignId, body = {}, userId = null) {
+  const list = await MarketingPatientList.findByPk(campaignId);
+  ensureScopeAccess(list, scope);
+  const channels = Array.isArray(list.criteria?.channels)
+    ? list.criteria.channels
+    : normalizeChannels(list.action_mode || list.channel);
+  if (!channels.includes('whatsapp')) {
+    const err = new Error('El envío real solo está conectado para WhatsApp en este MVP.');
+    err.status = 409;
+    throw err;
+  }
+  if (!['prepared', 'paused', 'cancelled', 'sending'].includes(String(list.status || '').toLowerCase())) {
+    const err = new Error('Prepara la campaña antes de enviarla.');
+    err.status = 409;
+    throw err;
+  }
+  const blockedGates = getBlockedGates(list.safety_gates || {});
+  if (blockedGates.length) {
+    const err = new Error('La campaña tiene garantías pendientes antes del envío.');
+    err.status = 409;
+    err.details = { blocked_gates: blockedGates };
+    throw err;
+  }
+  const template = await resolveWhatsappTemplate(list.criteria?.whatsapp_template_id || list.template_snapshot?.id, scope);
+  if (!template || String(template.status || '').toUpperCase() !== 'APPROVED') {
+    const err = new Error('La plantilla no está aprobada. Meta suele aprobarla en unos 15 minutos.');
+    err.status = 409;
+    throw err;
+  }
+
+  const counters = await refreshListCounters(list.id);
+  const remaining = await MarketingPatientListItem.count({
+    where: {
+      list_id: list.id,
+      status: 'ready',
+      selected: true,
+      [Op.or]: [{ dispatch_status: null }, { dispatch_status: 'pending' }],
+    },
+  });
+  if (remaining <= 0) {
+    const err = new Error('No quedan contactos pendientes de envío en esta lista.');
+    err.status = 409;
+    throw err;
+  }
+
+  const accountQuality = await getWhatsappAccountQualityForList(list, scope);
+  const dispatch = getDispatchConfig(list);
+  const scheduledAt = parseDate(body.scheduled_at || list.criteria?.scheduled_at);
+  const reference = scheduledAt && scheduledAt.getTime() > Date.now() ? scheduledAt : new Date();
+  const businessAllowedAt = getNextBusinessAllowedAt(reference);
+  const nextRunAt = businessAllowedAt.getTime() > Date.now() + 1000 ? businessAllowedAt : null;
+  const job = await enqueueDispatchJob({ list, scope, nextRunAt, userId });
+  triggerDispatchJobIfReady(job, nextRunAt);
+  const nextDispatch = {
+    ...dispatch,
+    status: nextRunAt ? 'scheduled' : 'queued',
+    job_id: job.id,
+    batch_size: DISPATCH_BATCH_SIZE,
+    delay_ms: DISPATCH_BATCH_DELAY_MS,
+    min_read_rate: DISPATCH_MIN_READ_RATE,
+    max_opt_out_rate: DISPATCH_MAX_OPT_OUT_RATE,
+    cancel_requested: false,
+    paused_reason: null,
+    started_at: dispatch.started_at || new Date().toISOString(),
+    next_allowed_at: nextRunAt ? nextRunAt.toISOString() : null,
+    account_quality: accountQuality,
+  };
+  await list.update({
+    status: nextRunAt ? 'scheduled' : 'sending',
+    criteria: mergeCriteria(list, { dispatch: nextDispatch }),
+  });
+  await MarketingPatientContactEvent.create({
+    list_id: list.id,
+    event_type: 'mass_campaign_dispatch_queued',
+    channel: 'whatsapp',
+    payload: {
+      job_id: job.id,
+      remaining,
+      scheduled_at: nextRunAt ? nextRunAt.toISOString() : null,
+      account_quality: accountQuality,
+    },
+    occurred_at: new Date(),
+  });
+  const reloaded = await MarketingPatientList.findByPk(list.id);
+  return {
+    success: true,
+    campaign: serializeCampaign(reloaded),
+    dispatch: getDispatchProgress(reloaded, counters, accountQuality),
+  };
+}
+
+async function cancelCampaignDispatch(scope, campaignId, body = {}, userId = null) {
+  const list = await MarketingPatientList.findByPk(campaignId);
+  ensureScopeAccess(list, scope);
+  const dispatch = getDispatchConfig(list);
+  const nextDispatch = {
+    ...dispatch,
+    status: 'cancel_requested',
+    cancel_requested: true,
+    cancelled_at: new Date().toISOString(),
+    cancelled_by: userId || null,
+    cancel_reason: normalizeText(body.reason) || 'Cancelado por el usuario',
+  };
+  await list.update({
+    status: 'paused',
+    criteria: mergeCriteria(list, { dispatch: nextDispatch }),
+  });
+  await MarketingPatientContactEvent.create({
+    list_id: list.id,
+    event_type: 'mass_campaign_dispatch_cancel_requested',
+    channel: 'whatsapp',
+    payload: { user_id: userId || null, reason: nextDispatch.cancel_reason },
+    occurred_at: new Date(),
+  });
+  const counters = await refreshListCounters(list.id);
+  const reloaded = await MarketingPatientList.findByPk(list.id);
+  return {
+    success: true,
+    campaign: serializeCampaign(reloaded),
+    dispatch: getDispatchProgress(reloaded, counters, await getWhatsappAccountQualityForList(reloaded, scope)),
+  };
+}
+
+async function resumeCampaignDispatch(scope, campaignId, body = {}, userId = null) {
+  const list = await MarketingPatientList.findByPk(campaignId);
+  ensureScopeAccess(list, scope);
+  const dispatch = getDispatchConfig(list);
+  if (!['paused', 'cancelled', 'scheduled', 'sending', 'prepared'].includes(String(list.status || '').toLowerCase())) {
+    const err = new Error('Esta campaña no se puede retomar desde su estado actual.');
+    err.status = 409;
+    throw err;
+  }
+  const remaining = await MarketingPatientListItem.count({
+    where: {
+      list_id: list.id,
+      status: 'ready',
+      selected: true,
+      [Op.or]: [{ dispatch_status: null }, { dispatch_status: 'pending' }],
+    },
+  });
+  if (remaining <= 0) {
+    const err = new Error('No quedan contactos pendientes de envío.');
+    err.status = 409;
+    throw err;
+  }
+  const nextAllowed = getNextBusinessAllowedAt(new Date());
+  const nextRunAt = nextAllowed.getTime() > Date.now() + 1000 ? nextAllowed : null;
+  const job = await enqueueDispatchJob({ list, scope, nextRunAt, userId });
+  triggerDispatchJobIfReady(job, nextRunAt);
+  const nextDispatch = {
+    ...dispatch,
+    status: nextRunAt ? 'scheduled' : 'queued',
+    job_id: job.id,
+    cancel_requested: false,
+    paused_reason: null,
+    resumed_at: new Date().toISOString(),
+    next_allowed_at: nextRunAt ? nextRunAt.toISOString() : null,
+  };
+  await list.update({
+    status: nextRunAt ? 'scheduled' : 'sending',
+    criteria: mergeCriteria(list, { dispatch: nextDispatch }),
+  });
+  await MarketingPatientContactEvent.create({
+    list_id: list.id,
+    event_type: 'mass_campaign_dispatch_resumed',
+    channel: 'whatsapp',
+    payload: { user_id: userId || null, job_id: job.id, remaining },
+    occurred_at: new Date(),
+  });
+  const counters = await refreshListCounters(list.id);
+  const reloaded = await MarketingPatientList.findByPk(list.id);
+  return {
+    success: true,
+    campaign: serializeCampaign(reloaded),
+    dispatch: getDispatchProgress(reloaded, counters, await getWhatsappAccountQualityForList(reloaded, scope)),
+  };
+}
+
+function extractProviderError(error) {
+  const raw = error?.response?.data?.error || error?.response?.data || error;
+  return {
+    code: normalizeText(raw?.code || raw?.error_subcode || raw?.type || ''),
+    message: normalizeText(raw?.message || raw?.error_data?.details || error?.message || 'whatsapp_send_failed'),
+    raw,
+  };
+}
+
+async function sendDispatchItem({ list, item, template, clinic, clinicConfig, batchIndex }) {
+  const plainItem = item.get ? item.get({ plain: true }) : item;
+  const params = buildTemplateParams({ template, item: plainItem, list, clinic });
+  const previewText = renderTemplatePreview({ template, item: plainItem, list, clinic });
+  const conversation = await findCanonicalWhatsappConversation({
+    clinicId: clinicConfig.clinicId || getClinicIdForList(list),
+    contactId: item.phone,
+    patientId: item.paciente_id || null,
+    createIfMissing: true,
+    lastMessageAt: new Date(),
+  });
+  const templateUsage = normalizeTemplateUsage(list.criteria?.template_usage || 'promocion');
+  const templateCommercial = list.criteria?.template_commercial === true || isCommercialTemplateUsage(templateUsage);
+  const appMessage = await Message.create({
+    conversation_id: conversation.id,
+    sender_id: null,
+    direction: 'outbound',
+    content: previewText,
+    message_type: 'template',
+    status: 'pending',
+    metadata: {
+      kind: 'mass_campaign_send',
+      source: 'marketing_bulk_sends',
+      list_id: list.id,
+      item_id: item.id,
+      objective_id: OBJECTIVE_ID,
+      template_usage: templateUsage,
+      template_commercial: templateCommercial,
+      template_category: template.category || template.catalog?.category || null,
+      template_id: template.id,
+      template_name: template.name,
+      template_language: template.language || 'es',
+      template_params: params,
+      recipient: item.phone,
+      phoneNumberId: clinicConfig.phoneNumberId || null,
+      phoneId: clinicConfig.phoneNumberId || null,
+      wabaId: clinicConfig.wabaId || null,
+      batch_index: batchIndex,
+    },
+    sent_at: new Date(),
+  });
+
+  try {
+    const response = await whatsappService.sendMessage({
+      to: item.phone,
+      useTemplate: true,
+      templateName: template.name,
+      templateLanguage: template.language || 'es',
+      templateParams: params,
+      clinicConfig,
+    });
+    const providerMessageId = response?.messages?.[0]?.id || null;
+    await appMessage.update({
+      status: 'sent',
+      metadata: {
+        ...(appMessage.metadata || {}),
+        wa_response: response || null,
+        wamid: providerMessageId,
+      },
+      sent_at: new Date(),
+    });
+    await item.update({
+      dispatch_status: 'sent',
+      provider_message_id: providerMessageId,
+      app_message_id: appMessage.id,
+      conversation_id: conversation.id,
+      send_batch_index: batchIndex,
+      sent_at: new Date(),
+      failed_at: null,
+      last_error_code: null,
+      last_error_message: null,
+    });
+    await conversation.update({ last_message_at: new Date() });
+    await MarketingPatientContactEvent.create({
+      list_id: list.id,
+      item_id: item.id,
+      paciente_id: item.paciente_id || null,
+      event_type: 'mass_campaign_message_sent',
+      channel: 'whatsapp',
+      payload: {
+        provider_message_id: providerMessageId,
+        app_message_id: appMessage.id,
+        conversation_id: conversation.id,
+        batch_index: batchIndex,
+      },
+      occurred_at: new Date(),
+    });
+    return { sent: true };
+  } catch (error) {
+    const providerError = extractProviderError(error);
+    await appMessage.update({
+      status: 'failed',
+      metadata: {
+        ...(appMessage.metadata || {}),
+        error: providerError.raw || providerError.message,
+      },
+    });
+    await item.update({
+      dispatch_status: 'failed',
+      app_message_id: appMessage.id,
+      conversation_id: conversation.id,
+      send_batch_index: batchIndex,
+      failed_at: new Date(),
+      last_error_code: providerError.code || null,
+      last_error_message: providerError.message,
+    });
+    await MarketingPatientContactEvent.create({
+      list_id: list.id,
+      item_id: item.id,
+      paciente_id: item.paciente_id || null,
+      event_type: 'mass_campaign_message_failed',
+      channel: 'whatsapp',
+      payload: {
+        app_message_id: appMessage.id,
+        conversation_id: conversation.id,
+        batch_index: batchIndex,
+        error_code: providerError.code || null,
+        error_message: providerError.message,
+      },
+      occurred_at: new Date(),
+    });
+    return { sent: false, error: providerError };
+  }
+}
+
+async function runDispatchJob(payload = {}, jobRequest = null) {
+  const listId = Number(payload.list_id || payload.listId || 0);
+  if (!Number.isInteger(listId) || listId <= 0) {
+    throw new Error('marketing_bulk_send_dispatch requires payload.list_id');
+  }
+  const scope = payload.scope || {};
+  const list = await MarketingPatientList.findByPk(listId);
+  if (!list || list.objective_id !== OBJECTIVE_ID || String(list.status || '').toLowerCase() === 'archived') {
+    return { status: 'completed', result: { skipped: true, reason: 'list_not_found_or_archived', list_id: listId } };
+  }
+  const dispatch = getDispatchConfig(list);
+  if (dispatch.cancel_requested === true) {
+    await list.update({
+      status: 'paused',
+      criteria: mergeCriteria(list, {
+        dispatch: {
+          ...dispatch,
+          status: 'cancelled',
+          paused_reason: 'cancelled_by_user',
+          stopped_at: new Date().toISOString(),
+        },
+      }),
+    });
+    return { status: 'completed', result: { cancelled: true, list_id: list.id } };
+  }
+  if (!isWithinBusinessHours(new Date())) {
+    const nextAllowed = getNextBusinessAllowedAt(new Date());
+    await list.update({
+      status: 'scheduled',
+      criteria: mergeCriteria(list, {
+        dispatch: {
+          ...dispatch,
+          status: 'scheduled',
+          next_allowed_at: nextAllowed.toISOString(),
+          paused_reason: 'outside_business_hours',
+        },
+      }),
+    });
+    return {
+      status: 'waiting',
+      nextRunAt: nextAllowed,
+      nextAllowedAt: nextAllowed,
+      result: { waiting: true, reason: 'outside_business_hours', list_id: list.id },
+    };
+  }
+
+  const countersBefore = await refreshListCounters(list.id);
+  const sentBefore = Number(countersBefore.sent || 0);
+  const readRate = sentBefore > 0 ? Number(countersBefore.read || 0) / sentBefore : 1;
+  const optOutRate = sentBefore > 0 ? Number(countersBefore.opt_out || countersBefore.exclusion_reasons?.opt_out || 0) / sentBefore : 0;
+  if (sentBefore >= DISPATCH_BATCH_SIZE && optOutRate > DISPATCH_MAX_OPT_OUT_RATE) {
+    await list.update({
+      status: 'paused',
+      criteria: mergeCriteria(list, {
+        dispatch: {
+          ...dispatch,
+          status: 'paused_quality',
+          paused_reason: 'opt_out_rate_high',
+          paused_at: new Date().toISOString(),
+          quality_snapshot: { sent: sentBefore, read_rate: readRate, opt_out_rate: optOutRate },
+        },
+      }),
+    });
+    return { status: 'completed', result: { paused: true, reason: 'opt_out_rate_high', list_id: list.id } };
+  }
+  if (sentBefore >= DISPATCH_BATCH_SIZE && readRate < DISPATCH_MIN_READ_RATE) {
+    await list.update({
+      status: 'paused',
+      criteria: mergeCriteria(list, {
+        dispatch: {
+          ...dispatch,
+          status: 'paused_quality',
+          paused_reason: 'read_rate_low',
+          paused_at: new Date().toISOString(),
+          quality_snapshot: { sent: sentBefore, read_rate: readRate, opt_out_rate: optOutRate },
+        },
+      }),
+    });
+    return { status: 'completed', result: { paused: true, reason: 'read_rate_low', list_id: list.id } };
+  }
+
+  const accountQuality = await getWhatsappAccountQualityForList(list, scope);
+  if (accountQuality.messaging_limit_count && sentBefore >= accountQuality.messaging_limit_count) {
+    await list.update({
+      status: 'paused',
+      criteria: mergeCriteria(list, {
+        dispatch: {
+          ...dispatch,
+          status: 'paused_limit',
+          paused_reason: 'messaging_limit_reached',
+          paused_at: new Date().toISOString(),
+          account_quality: accountQuality,
+        },
+      }),
+    });
+    return { status: 'completed', result: { paused: true, reason: 'messaging_limit_reached', list_id: list.id } };
+  }
+
+  const template = await resolveWhatsappTemplate(list.criteria?.whatsapp_template_id || list.template_snapshot?.id, scope);
+  if (!template || String(template.status || '').toUpperCase() !== 'APPROVED') {
+    await list.update({
+      status: 'paused',
+      criteria: mergeCriteria(list, {
+        dispatch: {
+          ...dispatch,
+          status: 'paused_template',
+          paused_reason: 'template_not_approved',
+          paused_at: new Date().toISOString(),
+        },
+      }),
+    });
+    return { status: 'completed', result: { paused: true, reason: 'template_not_approved', list_id: list.id } };
+  }
+  const clinicId = getClinicIdForList(list, scope);
+  const clinic = clinicId && Clinica ? await Clinica.findByPk(clinicId, { raw: true }) : null;
+  const clinicConfig = clinicId ? await whatsappService.getClinicConfig(clinicId) : null;
+  if (!clinicConfig?.phoneNumberId || !clinicConfig?.accessToken) {
+    await list.update({
+      status: 'paused',
+      criteria: mergeCriteria(list, {
+        dispatch: {
+          ...dispatch,
+          status: 'paused_config',
+          paused_reason: 'whatsapp_config_missing',
+          paused_at: new Date().toISOString(),
+        },
+      }),
+    });
+    return { status: 'completed', result: { paused: true, reason: 'whatsapp_config_missing', list_id: list.id } };
+  }
+  clinicConfig.clinicId = clinicId;
+
+  const batchLimit = accountQuality.messaging_limit_count
+    ? Math.max(0, Math.min(DISPATCH_BATCH_SIZE, accountQuality.messaging_limit_count - sentBefore))
+    : DISPATCH_BATCH_SIZE;
+  const batch = batchLimit > 0
+    ? await MarketingPatientListItem.findAll({
+      where: {
+        list_id: list.id,
+        status: 'ready',
+        selected: true,
+        [Op.or]: [{ dispatch_status: null }, { dispatch_status: 'pending' }],
+      },
+      order: [['id', 'ASC']],
+      limit: batchLimit,
+    })
+    : [];
+
+  if (!batch.length) {
+    const finalCounters = await refreshListCounters(list.id);
+    await list.update({
+      status: 'completed',
+      last_sent_at: new Date(),
+      criteria: mergeCriteria(list, {
+        dispatch: {
+          ...dispatch,
+          status: 'completed',
+          completed_at: new Date().toISOString(),
+          next_allowed_at: null,
+        },
+      }),
+    });
+    return { status: 'completed', result: { completed: true, list_id: list.id, counters: finalCounters } };
+  }
+
+  await list.update({
+    status: 'sending',
+    criteria: mergeCriteria(list, {
+      dispatch: {
+        ...dispatch,
+        status: 'sending',
+        job_id: jobRequest?.id || dispatch.job_id || null,
+        last_batch_started_at: new Date().toISOString(),
+        next_allowed_at: null,
+        account_quality: accountQuality,
+      },
+    }),
+  });
+
+  await revalidateDispatchExclusions(list, batch, scope);
+  const freshBatch = await MarketingPatientListItem.findAll({
+    where: {
+      id: { [Op.in]: batch.map((item) => item.id) },
+      status: 'ready',
+      selected: true,
+      [Op.or]: [{ dispatch_status: null }, { dispatch_status: 'pending' }],
+    },
+    order: [['id', 'ASC']],
+  });
+
+  const batchIndex = Number(dispatch.last_batch_index || 0) + 1;
+  let sent = 0;
+  let failed = 0;
+  for (const item of freshBatch) {
+    const currentList = await MarketingPatientList.findByPk(list.id);
+    if (getDispatchConfig(currentList).cancel_requested === true) {
+      break;
+    }
+    const missingVariables = buildMissingVariablesSummary({ template, items: [item], list, clinic });
+    if (missingVariables.length) {
+      await item.update({
+        status: 'excluded_missing_variables',
+        exclusion_reason: 'variables_faltantes',
+        selected: false,
+        reason: formatMissingVariablesMessage(missingVariables),
+        missing_variables: missingVariables,
+      });
+      continue;
+    }
+    const result = await sendDispatchItem({ list, item, template, clinic, clinicConfig, batchIndex });
+    if (result.sent) sent += 1;
+    else failed += 1;
+  }
+
+  const countersAfter = await refreshListCounters(list.id);
+  await MarketingPatientContactEvent.create({
+    list_id: list.id,
+    event_type: 'mass_campaign_batch_processed',
+    channel: 'whatsapp',
+    payload: {
+      batch_index: batchIndex,
+      attempted: freshBatch.length,
+      sent,
+      failed,
+      counters: countersAfter,
+    },
+    occurred_at: new Date(),
+  });
+
+  const remaining = await MarketingPatientListItem.count({
+    where: {
+      list_id: list.id,
+      status: 'ready',
+      selected: true,
+      [Op.or]: [{ dispatch_status: null }, { dispatch_status: 'pending' }],
+    },
+  });
+  if (remaining <= 0) {
+    await list.update({
+      status: 'completed',
+      last_sent_at: new Date(),
+      criteria: mergeCriteria(list, {
+        dispatch: {
+          ...getDispatchConfig(list),
+          status: 'completed',
+          last_batch_index: batchIndex,
+          completed_at: new Date().toISOString(),
+          next_allowed_at: null,
+        },
+      }),
+    });
+    return { status: 'completed', result: { completed: true, list_id: list.id, counters: countersAfter } };
+  }
+
+  const nextAllowed = new Date(Date.now() + DISPATCH_BATCH_DELAY_MS);
+  await list.update({
+    status: 'sending',
+    criteria: mergeCriteria(list, {
+      dispatch: {
+        ...getDispatchConfig(list),
+        status: 'waiting_next_batch',
+        last_batch_index: batchIndex,
+        last_batch_completed_at: new Date().toISOString(),
+        next_allowed_at: nextAllowed.toISOString(),
+      },
+    }),
+  });
+  return {
+    status: 'waiting',
+    nextRunAt: nextAllowed,
+    nextAllowedAt: nextAllowed,
+    result: {
+      waiting: true,
+      reason: 'batch_delay',
+      list_id: list.id,
+      batch_index: batchIndex,
+      remaining,
+      counters: countersAfter,
+    },
+  };
+}
+
+async function materializeMessageStatusFromWebhook({ message, status, mappedStatus }) {
+  const metadata = message?.metadata || {};
+  if (metadata.source !== 'marketing_bulk_sends') return { applied: false, reason: 'not_bulk_send' };
+  const listId = Number(metadata.list_id || 0);
+  const itemId = Number(metadata.item_id || 0);
+  if (!listId || !itemId) return { applied: false, reason: 'missing_ids' };
+  const item = await MarketingPatientListItem.findOne({ where: { id: itemId, list_id: listId } });
+  if (!item) return { applied: false, reason: 'item_not_found' };
+  const eventAt = parseWhatsappTimestamp(status?.timestamp, new Date());
+  const patch = {
+    provider_message_id: metadata.wamid || status?.id || item.provider_message_id || null,
+    app_message_id: message.id || item.app_message_id || null,
+  };
+  if (mappedStatus === 'sent') {
+    patch.dispatch_status = item.dispatch_status || 'sent';
+    patch.sent_at = item.sent_at || eventAt;
+  } else if (mappedStatus === 'delivered') {
+    patch.dispatch_status = 'delivered';
+    patch.sent_at = item.sent_at || eventAt;
+    patch.delivered_at = item.delivered_at || eventAt;
+  } else if (mappedStatus === 'read') {
+    patch.dispatch_status = 'read';
+    patch.sent_at = item.sent_at || eventAt;
+    patch.delivered_at = item.delivered_at || eventAt;
+    patch.read_at = item.read_at || eventAt;
+  } else if (mappedStatus === 'failed') {
+    const error = Array.isArray(status?.errors) ? status.errors[0] : null;
+    patch.dispatch_status = 'failed';
+    patch.failed_at = item.failed_at || eventAt;
+    patch.last_error_code = normalizeText(error?.code || error?.error_subcode || '') || item.last_error_code || null;
+    patch.last_error_message = normalizeText(error?.message || error?.error_data?.details || '') || item.last_error_message || null;
+  }
+  await item.update(patch);
+  await MarketingPatientContactEvent.create({
+    list_id: listId,
+    item_id: itemId,
+    paciente_id: item.paciente_id || null,
+    event_type: `mass_campaign_message_${mappedStatus}`,
+    channel: 'whatsapp',
+    payload: {
+      provider_message_id: patch.provider_message_id || null,
+      app_message_id: patch.app_message_id || null,
+      raw_status: status || null,
+    },
+    occurred_at: eventAt,
+  });
+  await refreshListCounters(listId);
+  return { applied: true, list_id: listId, item_id: itemId, status: mappedStatus };
+}
+
+async function materializeInboundReply({ conversation, inboundMessage }) {
+  if (!conversation?.id || !inboundMessage) return { applied: false, reason: 'missing_context' };
+  const triggerMessage = await Message.findOne({
+    where: {
+      conversation_id: conversation.id,
+      direction: 'outbound',
+      createdAt: { [Op.lte]: inboundMessage.createdAt || new Date() },
+    },
+    order: [['createdAt', 'DESC']],
+    limit: 1,
+  });
+  const metadata = triggerMessage?.metadata || {};
+  if (metadata.source !== 'marketing_bulk_sends') return { applied: false, reason: 'not_bulk_send' };
+  const listId = Number(metadata.list_id || 0);
+  const itemId = Number(metadata.item_id || 0);
+  if (!listId || !itemId) return { applied: false, reason: 'missing_ids' };
+  const item = await MarketingPatientListItem.findOne({ where: { id: itemId, list_id: listId } });
+  if (!item) return { applied: false, reason: 'item_not_found' };
+  const repliedAt = inboundMessage.sent_at || inboundMessage.createdAt || new Date();
+  await item.update({
+    dispatch_status: 'replied',
+    replied_at: item.replied_at || repliedAt,
+    conversation_id: conversation.id,
+  });
+  await MarketingPatientContactEvent.create({
+    list_id: listId,
+    item_id: itemId,
+    paciente_id: item.paciente_id || null,
+    event_type: 'mass_campaign_message_replied',
+    channel: 'whatsapp',
+    payload: {
+      inbound_message_id: inboundMessage.id,
+      trigger_message_id: triggerMessage.id,
+      content_preview: normalizeText(inboundMessage.content).slice(0, 300),
+    },
+    occurred_at: repliedAt,
+  });
+  await refreshListCounters(listId);
+  return { applied: true, list_id: listId, item_id: itemId };
+}
+
 async function removeCampaign(scope, campaignId, userId = null) {
   const list = await MarketingPatientList.findByPk(campaignId);
   ensureScopeAccess(list, scope);
@@ -1213,7 +2305,15 @@ module.exports = {
   createCampaign,
   getCampaign,
   updateCampaign,
+  listRecipients,
   prepareCampaign,
   sendTest,
+  getDispatchStatus,
+  startCampaignDispatch,
+  cancelCampaignDispatch,
+  resumeCampaignDispatch,
+  runDispatchJob,
+  materializeMessageStatusFromWebhook,
+  materializeInboundReply,
   removeCampaign,
 };

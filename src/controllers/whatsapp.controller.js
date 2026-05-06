@@ -1154,6 +1154,51 @@ exports.createTemplatesFromCatalog = async (req, res) => {
   }
 };
 
+exports.createCustomTemplate = async (req, res) => {
+  try {
+    const clinicId = req.body?.clinic_id ? Number(req.body.clinic_id) : (req.query.clinic_id ? Number(req.query.clinic_id) : null);
+    const phoneNumberId = req.body?.phone_number_id || req.query.phone_number_id || null;
+    const userId = req.userData?.userId;
+
+    if (!clinicId && !phoneNumberId) {
+      return res.status(400).json({ error: 'clinic_id o phone_number_id requerido' });
+    }
+
+    const asset = await resolveWabaFromContext({ clinicId, phoneNumberId, userId });
+    if (!asset || !asset.wabaId || !asset.waAccessToken) {
+      return res.status(404).json({ error: 'waba_not_found' });
+    }
+
+    const { createCustomTemplateForClinic } = require('../services/whatsappTemplates.service');
+    const result = await createCustomTemplateForClinic({
+      clinicId: asset.clinicaId || clinicId || null,
+      wabaId: asset.wabaId,
+      accessToken: asset.waAccessToken,
+      displayName: req.body?.display_name || req.body?.nombre || req.body?.name,
+      bodyText: req.body?.body_text || req.body?.contenido || req.body?.body,
+      category: req.body?.category || (req.body?.template_commercial ? 'MARKETING' : 'UTILITY'),
+      language: req.body?.language || 'es',
+      variables: req.body?.variables || [],
+    });
+    const json = result.row.get ? result.row.get({ plain: true }) : result.row;
+    return res.status(201).json({
+      success: true,
+      submitted: result.submitted,
+      template: {
+        ...json,
+        variables: buildWhatsappTemplateVariableContract(json),
+      },
+      message: result.submitted
+        ? 'Plantilla enviada a WhatsApp. Meta suele aprobarla en unos 15 minutos.'
+        : 'Plantilla guardada localmente, pero no se pudo enviar a Meta. Revisa la conexión WhatsApp.',
+      ...(result.error ? { error: result.error } : {}),
+    });
+  } catch (err) {
+    console.error('Error createCustomTemplate', err);
+    return res.status(500).json({ error: err.message || 'Error creando plantilla WhatsApp' });
+  }
+};
+
 exports.listPhones = async (req, res) => {
   try {
     const userId = req.userData?.userId;

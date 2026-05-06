@@ -30,6 +30,10 @@ module.exports = (sequelize, DataTypes) => {
         type: DataTypes.STRING,
         allowNull: false,
       },
+      display_name: {
+        type: DataTypes.STRING(150),
+        allowNull: true,
+      },
       language: {
         type: DataTypes.STRING,
         allowNull: false,
@@ -43,6 +47,10 @@ module.exports = (sequelize, DataTypes) => {
         allowNull: true,
       },
       components: {
+        type: DataTypes.JSON,
+        allowNull: true,
+      },
+      variables: {
         type: DataTypes.JSON,
         allowNull: true,
       },

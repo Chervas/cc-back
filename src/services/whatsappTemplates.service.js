@@ -61,6 +61,52 @@ function cleanString(value) {
   return typeof value === 'string' ? value.trim() : '';
 }
 
+function normalizeTemplateKey(value) {
+  return cleanString(value)
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/[^a-z0-9_]+/g, '_')
+    .replace(/^_+|_+$/g, '');
+}
+
+function buildCustomTemplateTechnicalName(displayName) {
+  const base = normalizeTemplateKey(displayName).slice(0, 64) || 'plantilla_whatsapp';
+  const suffix = Date.now().toString(36).slice(-8);
+  return `cc_${base}_${suffix}`.slice(0, 100);
+}
+
+function buildVariableContractFromBody(bodyText, rawVariables = []) {
+  const explicit = Array.isArray(rawVariables) ? rawVariables : [];
+  const explicitByKey = new Map(
+    explicit
+      .map((variable) => {
+        const key = normalizeTemplateKey(variable?.key || variable?.name || variable?.variable);
+        return key ? [key, variable] : null;
+      })
+      .filter(Boolean)
+  );
+  const variables = [];
+  const seen = new Map();
+  const replacedBody = cleanString(bodyText).replace(/\{\{\s*([^}]+?)\s*\}\}/g, (_match, rawKey) => {
+    const key = normalizeTemplateKey(rawKey);
+    if (!key) return '';
+    if (!seen.has(key)) {
+      seen.set(key, seen.size + 1);
+      const source = explicitByKey.get(key) || {};
+      variables.push({
+        index: seen.get(key),
+        position: seen.get(key),
+        name: key,
+        example: cleanString(source.example) || key.split('_').join(' '),
+        description: cleanString(source.description || source.label) || `Variable ${key}`,
+      });
+    }
+    return `{{${seen.get(key)}}}`;
+  });
+  return { body: replacedBody, variables };
+}
+
 function hasSameMetaFacingContent(template, instance) {
   if (!template || !instance) return false;
   return (
@@ -512,6 +558,99 @@ async function createTemplateInMeta({ wabaId, accessToken, template, language })
     { params: { access_token: accessToken } }
   );
   return response.data;
+}
+
+async function createCustomTemplateForClinic({
+  clinicId,
+  wabaId,
+  accessToken,
+  displayName,
+  bodyText,
+  category = 'UTILITY',
+  language = DEFAULT_LANGUAGE,
+  variables = [],
+}) {
+  const safeClinicId = Number(clinicId || 0) || null;
+  const safeWabaId = cleanString(wabaId);
+  const safeAccessToken = cleanString(accessToken);
+  const safeDisplayName = cleanString(displayName) || 'Plantilla WhatsApp';
+  const safeBodyText = cleanString(bodyText);
+  const safeCategory = String(category || '').trim().toUpperCase() === 'MARKETING' ? 'MARKETING' : 'UTILITY';
+  if (!safeWabaId || !safeAccessToken) {
+    throw new Error('missing_waba_credentials');
+  }
+  if (!safeBodyText) {
+    throw new Error('template_body_required');
+  }
+
+  const contract = buildVariableContractFromBody(safeBodyText, variables);
+  const bodyComponent = {
+    type: 'BODY',
+    text: contract.body,
+    ...(contract.variables.length ? {
+      example: {
+        body_text: [contract.variables.map((variable) => variable.example || variable.name)],
+      },
+    } : {}),
+  };
+  const technicalName = buildCustomTemplateTechnicalName(safeDisplayName);
+  const template = {
+    name: technicalName,
+    category: safeCategory,
+    components: [bodyComponent],
+  };
+
+  let metaTemplateId = null;
+  try {
+    const metaResp = await createTemplateInMeta({
+      wabaId: safeWabaId,
+      accessToken: safeAccessToken,
+      template,
+      language,
+    });
+    metaTemplateId = metaResp?.id || null;
+  } catch (err) {
+    const parsed = err?.response?.data?.error || err?.response?.data || {};
+    const row = await WhatsappTemplate.create({
+      waba_id: safeWabaId,
+      clinic_id: safeClinicId,
+      name: technicalName,
+      display_name: safeDisplayName,
+      language,
+      category: safeCategory,
+      status: WHATSAPP_TEMPLATE_STATUS.LOCAL_PENDING,
+      components: [bodyComponent],
+      variables: contract.variables,
+      origin: 'custom',
+      rejection_reason: parsed?.message || err.message || 'pending_meta_submission',
+      is_active: true,
+    });
+    row.meta_submission_error = parsed;
+    return { row, submitted: false, error: parsed || err.message };
+  }
+
+  const row = await WhatsappTemplate.create({
+    waba_id: safeWabaId,
+    clinic_id: safeClinicId,
+    name: technicalName,
+    display_name: safeDisplayName,
+    language,
+    category: safeCategory,
+    status: WHATSAPP_TEMPLATE_STATUS.PENDING,
+    components: [bodyComponent],
+    variables: contract.variables,
+    meta_template_id: metaTemplateId,
+    origin: 'custom',
+    rejection_reason: null,
+    is_active: true,
+  });
+
+  await enqueueSyncTemplatesJob({
+    wabaId: safeWabaId,
+    accessToken: safeAccessToken,
+  }, { delayMs: 15 * 60 * 1000 }).catch(() => null);
+
+  return { row, submitted: true, meta_template_id: metaTemplateId };
 }
 
 async function createTemplatesFromCatalog({ wabaId, clinicId, groupId, assignmentScope }) {
@@ -1105,6 +1244,7 @@ async function enqueueSyncForAllWabas(options = {}) {
 
 module.exports = {
   createTemplatesFromCatalog,
+  createCustomTemplateForClinic,
   createPlaceholderTemplatesForClinic,
   propagateCatalogTemplateToAllClinics,
   syncTemplatesForWaba,

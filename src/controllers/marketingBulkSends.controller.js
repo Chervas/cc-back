@@ -100,6 +100,16 @@ exports.getCampaign = async (req, res) => {
   }
 };
 
+exports.listRecipients = async (req, res) => {
+  try {
+    const scope = await resolveScope(req, { allowAll: false });
+    const result = await marketingBulkSendsService.listRecipients(scope, req.params.id, req.query || {});
+    return res.json(result);
+  } catch (error) {
+    return sendError(res, error, 'Error cargando destinatarios de envíos masivos');
+  }
+};
+
 exports.updateCampaign = async (req, res) => {
   try {
     const scope = await resolveScopeFromRequest(req, { allowAll: false });
@@ -117,6 +127,46 @@ exports.prepareCampaign = async (req, res) => {
     return res.json(result);
   } catch (error) {
     return sendError(res, error, 'Error preparando campaña de envíos masivos');
+  }
+};
+
+exports.getDispatchStatus = async (req, res) => {
+  try {
+    const scope = await resolveScope(req, { allowAll: false });
+    const result = await marketingBulkSendsService.getDispatchStatus(scope, req.params.id);
+    return res.json(result);
+  } catch (error) {
+    return sendError(res, error, 'Error consultando progreso de envío');
+  }
+};
+
+exports.startDispatch = async (req, res) => {
+  try {
+    const scope = await resolveScopeFromRequest(req, { allowAll: false });
+    const result = await marketingBulkSendsService.startCampaignDispatch(scope, req.params.id, req.body || {}, req.userData?.userId || null);
+    return res.json(result);
+  } catch (error) {
+    return sendError(res, error, 'Error iniciando envío masivo');
+  }
+};
+
+exports.cancelDispatch = async (req, res) => {
+  try {
+    const scope = await resolveScopeFromRequest(req, { allowAll: false });
+    const result = await marketingBulkSendsService.cancelCampaignDispatch(scope, req.params.id, req.body || {}, req.userData?.userId || null);
+    return res.json(result);
+  } catch (error) {
+    return sendError(res, error, 'Error cancelando envío masivo');
+  }
+};
+
+exports.resumeDispatch = async (req, res) => {
+  try {
+    const scope = await resolveScopeFromRequest(req, { allowAll: false });
+    const result = await marketingBulkSendsService.resumeCampaignDispatch(scope, req.params.id, req.body || {}, req.userData?.userId || null);
+    return res.json(result);
+  } catch (error) {
+    return sendError(res, error, 'Error retomando envío masivo');
   }
 };
 

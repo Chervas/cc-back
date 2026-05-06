@@ -8,6 +8,7 @@ const whatsappPhonesService = require('../services/whatsappPhones.service');
 const automationDefaultsService = require('../services/automationDefaults.service');
 const automationsV2ResumeService = require('../services/automationsV2Resume.service');
 const marketingOptOutService = require('../services/marketingOptOut.service');
+const marketingBulkSendsService = require('../services/marketingBulkSends.service');
 const notificationService = require('../services/notifications.service');
 const { getIO } = require('../services/socket.service');
 const { findCanonicalWhatsappConversation } = require('../lib/canonical-conversation');
@@ -1346,6 +1347,20 @@ createWorker('webhook_whatsapp', async (job) => {
             });
         }
 
+        try {
+            await marketingBulkSendsService.materializeInboundReply({
+                conversation: conv,
+                inboundMessage: inboundMsg,
+            });
+        } catch (bulkReplyErr) {
+            console.warn('[marketing bulk sends] No se pudo materializar respuesta inbound', {
+                clinicId: conv.clinic_id || clinicId,
+                conversationId: conv.id,
+                inboundMessageId: inboundMsg.id,
+                error: serializeError(bulkReplyErr),
+            });
+        }
+
         // Marcar el origen como "usado" para depuración/dedupe. No bloqueamos si falla.
         if (webOrigin && WhatsAppWebOrigin && !webOrigin.used_at) {
             try {
@@ -1489,6 +1504,22 @@ createWorker('webhook_whatsapp', async (job) => {
                 status,
                 message,
                 clinicId: messageRef.clinic_id || clinicId,
+            });
+        }
+
+        try {
+            await marketingBulkSendsService.materializeMessageStatusFromWebhook({
+                message,
+                status,
+                mappedStatus: nextStatus,
+            });
+        } catch (bulkStatusErr) {
+            console.warn('[marketing bulk sends] No se pudo materializar estado WhatsApp', {
+                clinicId: messageRef.clinic_id || clinicId,
+                messageId: message.id,
+                wamid,
+                status: nextStatus,
+                error: serializeError(bulkStatusErr),
             });
         }
 

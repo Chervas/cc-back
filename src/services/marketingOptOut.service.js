@@ -89,16 +89,24 @@ function computeCounters(items) {
   const total = items.length;
   const ready = items.filter((item) => item.status === 'ready').length;
   const excluded = items.filter((item) => String(item.status || '').startsWith('excluded')).length;
+  const sent = items.filter((item) => item.sent_at || ['sent', 'delivered', 'read', 'replied'].includes(String(item.dispatch_status || '').toLowerCase())).length;
+  const delivered = items.filter((item) => item.delivered_at || item.read_at || ['delivered', 'read', 'replied'].includes(String(item.dispatch_status || '').toLowerCase())).length;
+  const read = items.filter((item) => item.read_at || ['read', 'replied'].includes(String(item.dispatch_status || '').toLowerCase())).length;
+  const replied = items.filter((item) => item.replied_at || String(item.dispatch_status || '').toLowerCase() === 'replied').length;
+  const failed = items.filter((item) => item.failed_at || String(item.dispatch_status || '').toLowerCase() === 'failed').length;
+  const optOut = items.filter((item) => item.opt_out_at || item.exclusion_reason === 'opt_out').length;
   return {
     total,
     ready,
     selected: ready,
     excluded,
     lead: 0,
-    sent: 0,
-    delivered: 0,
-    read: 0,
-    replied: 0,
+    sent,
+    delivered,
+    read,
+    replied,
+    failed,
+    opt_out: optOut,
     appointments: 0,
     treatments: 0,
   };
@@ -246,6 +254,7 @@ async function excludeMatchingListItems({
       status: 'excluded_opt_out',
       exclusion_reason: 'opt_out',
       selected: false,
+      opt_out_at: inboundMessage?.sent_at || inboundMessage?.createdAt || new Date(),
       reason: 'Baja solicitada por WhatsApp tras un envío comercial',
       notes: [
         cleanString(row.notes),

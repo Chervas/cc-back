@@ -4,6 +4,7 @@ const db = require('../../models');
 const flowEngineV2Service = require('./flowEngineV2.service');
 const whatsappCoexistenceService = require('./whatsappCoexistence.service');
 const whatsappTemplatesService = require('./whatsappTemplates.service');
+const marketingBulkSendsService = require('./marketingBulkSends.service');
 const { buildNotificationContent } = require('./notifications.service');
 const { emitNotificationCreated } = require('./notificationsRealtime.service');
 
@@ -330,6 +331,7 @@ const JOB_HANDLERS = {
   whatsapp_coexistence_sync_contacts: async (payload = {}) => whatsappCoexistenceService.runContactsSyncJob(payload),
   whatsapp_coexistence_sync_history: async (payload = {}) => whatsappCoexistenceService.runHistorySyncJob(payload),
   whatsapp_template_create: async (payload = {}) => runWhatsappTemplateCreateJob(payload),
+  marketing_bulk_send_dispatch: async (payload = {}, jobRequest) => marketingBulkSendsService.runDispatchJob(payload, jobRequest),
   automations_v2_execute: async (payload = {}) => runAutomationFlowV2Job(payload),
   appointment_automation_schedule_fire: async (payload = {}) => runAppointmentAutomationScheduleJob(payload),
   lead_callback_reminder_notify: async (payload = {}, jobRequest) => runLeadCallbackReminderJob(payload, jobRequest),
