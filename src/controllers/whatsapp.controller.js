@@ -13,6 +13,7 @@ const {
   UsuarioClinica,
   Clinica,
   WhatsappTemplate,
+  MarketingPatientList,
   AutomationFlowCatalog,
   AutomationFlowTemplateV2,
   Tratamiento,
@@ -1108,6 +1109,32 @@ exports.deleteTemplate = async (req, res) => {
       if (!asset || String(asset.wabaId || '') !== String(template.waba_id || '')) {
         return res.status(403).json({ error: 'template_scope_forbidden' });
       }
+    }
+
+    const linkedCampaigns = MarketingPatientList
+      ? await MarketingPatientList.count({
+        where: {
+          status: { [Op.ne]: 'archived' },
+          [Op.or]: [
+            db.sequelize.where(
+              db.sequelize.cast(db.sequelize.json('criteria.whatsapp_template_id'), 'UNSIGNED'),
+              id
+            ),
+            db.sequelize.where(
+              db.sequelize.cast(db.sequelize.json('template_snapshot.id'), 'UNSIGNED'),
+              id
+            ),
+          ],
+        },
+      })
+      : 0;
+    const confirmLinked = String(req.query.confirm_linked || req.body?.confirm_linked || '').toLowerCase() === 'true';
+    if (linkedCampaigns > 0 && !confirmLinked) {
+      return res.status(409).json({
+        error: 'template_linked_to_campaigns',
+        message: `Esta plantilla está asociada a ${linkedCampaigns} campaña(s) o lista(s). Si la ocultas, esas campañas conservarán la captura del mensaje, pero no podrán reutilizar la plantilla.`,
+        linked_campaigns: linkedCampaigns,
+      });
     }
 
     if (String(template.status || '').toUpperCase() === 'APPROVED') {

@@ -12,6 +12,7 @@ const jobRequestsService = require('./jobRequests.service');
 const {
   Clinica,
   ClinicMetaAsset,
+  Conversation,
   MarketingPatientContactEvent,
   MarketingPatientList,
   MarketingPatientListItem,
@@ -197,6 +198,164 @@ function computeCounters(items) {
   };
 }
 
+function statusRank(status) {
+  const normalized = normalizeWebhookStatus(status) || normalizeKey(status);
+  return { pending: 0, sent: 1, delivered: 2, read: 3, replied: 4, failed: 5 }[normalized] ?? 0;
+}
+
+function shouldMaterializeStatus(item, mappedStatus) {
+  if (!item || !mappedStatus) return false;
+  if (mappedStatus === 'failed') return !item.failed_at && String(item.dispatch_status || '').toLowerCase() !== 'failed';
+  if (mappedStatus === 'sent') return !item.sent_at && statusRank(item.dispatch_status) < statusRank('sent');
+  if (mappedStatus === 'delivered') return !item.delivered_at && statusRank(item.dispatch_status) < statusRank('delivered');
+  if (mappedStatus === 'read') return !item.read_at && statusRank(item.dispatch_status) < statusRank('read');
+  return false;
+}
+
+async function reconcileListMessageState(list, scope = {}) {
+  const listId = Number(list?.id || list || 0);
+  if (!listId || !Message || !MarketingPatientListItem) return { reconciled: false, reason: 'missing_context' };
+
+  const items = await MarketingPatientListItem.findAll({ where: { list_id: listId } });
+  if (!items.length) {
+    await refreshListCounters(listId);
+    return { reconciled: true, items: 0, messages: 0, inbound: 0 };
+  }
+
+  const appMessageIds = items
+    .map((item) => Number(item.app_message_id || 0))
+    .filter((id) => Number.isInteger(id) && id > 0);
+  const uniqueAppMessageIds = Array.from(new Set(appMessageIds));
+  const messages = uniqueAppMessageIds.length
+    ? await Message.findAll({ where: { id: { [Op.in]: uniqueAppMessageIds } } })
+    : [];
+  const itemByMessageId = new Map(items.filter((item) => item.app_message_id).map((item) => [Number(item.app_message_id), item]));
+  let statusUpdates = 0;
+
+  for (const message of messages) {
+    const item = itemByMessageId.get(Number(message.id));
+    if (!item) continue;
+    const latest = getLatestWhatsappStatusFromMessage(message);
+    const mappedStatus = normalizeWebhookStatus(latest?.status || message.status);
+    if (!mappedStatus || !shouldMaterializeStatus(item, mappedStatus)) continue;
+    const result = await materializeMessageStatusFromWebhook({ message, status: latest || {}, mappedStatus });
+    if (result?.applied) statusUpdates += 1;
+  }
+
+  const conversations = items
+    .filter((item) => item.sent_at && item.conversation_id)
+    .map((item) => Number(item.conversation_id))
+    .filter((id) => Number.isInteger(id) && id > 0);
+  const uniqueConversationIds = Array.from(new Set(conversations));
+  let inboundUpdates = 0;
+
+  if (uniqueConversationIds.length && Conversation) {
+    const sentDates = items.map((item) => parseDate(item.sent_at)).filter(Boolean);
+    const minSentAt = sentDates.length ? new Date(Math.min(...sentDates.map((date) => date.getTime()))) : null;
+    const [conversationRows, inboundMessages] = await Promise.all([
+      Conversation.findAll({ where: { id: { [Op.in]: uniqueConversationIds } } }),
+      Message.findAll({
+        where: {
+          conversation_id: { [Op.in]: uniqueConversationIds },
+          direction: 'inbound',
+          ...(minSentAt ? { createdAt: { [Op.gte]: minSentAt } } : {}),
+        },
+        order: [['createdAt', 'ASC']],
+      }),
+    ]);
+    const conversationById = new Map(conversationRows.map((conversation) => [Number(conversation.id), conversation]));
+    for (const inboundMessage of inboundMessages) {
+      const conversation = conversationById.get(Number(inboundMessage.conversation_id));
+      if (!conversation) continue;
+      try {
+        await marketingOptOutService.applyInboundOptOutIfNeeded({
+          clinicId: conversation.clinic_id || scope?.clinicIds?.[0] || null,
+          conversation,
+          inboundMessage,
+          rawText: inboundMessage.content,
+          patientId: conversation.patient_id || null,
+        });
+      } catch (error) {
+        console.warn('[marketing-bulk-sends] No se pudo reconciliar baja inbound', {
+          listId,
+          inboundMessageId: inboundMessage.id,
+          error: error?.message || error,
+        });
+      }
+      const result = await materializeInboundReply({ conversation, inboundMessage });
+      if (result?.applied) inboundUpdates += 1;
+    }
+  }
+
+  const counters = await refreshListCounters(listId);
+  return {
+    reconciled: true,
+    items: items.length,
+    messages: messages.length,
+    status_updates: statusUpdates,
+    inbound_updates: inboundUpdates,
+    counters,
+  };
+}
+
+async function buildListReport(listId) {
+  const id = Number(listId || 0);
+  if (!id) return null;
+
+  const [hourRows] = await db.sequelize.query(
+    `
+    SELECT HOUR(read_at) AS hour, COUNT(*) AS total
+    FROM MarketingPatientListItems
+    WHERE list_id = :listId AND read_at IS NOT NULL
+    GROUP BY HOUR(read_at)
+    ORDER BY hour ASC
+    `,
+    { replacements: { listId: id } }
+  );
+  const [statusRows] = await db.sequelize.query(
+    `
+    SELECT
+      COUNT(*) AS total,
+      SUM(CASE WHEN sent_at IS NOT NULL OR dispatch_status IN ('sent','delivered','read','replied') THEN 1 ELSE 0 END) AS sent,
+      SUM(CASE WHEN delivered_at IS NOT NULL OR read_at IS NOT NULL OR dispatch_status IN ('delivered','read','replied') THEN 1 ELSE 0 END) AS delivered,
+      SUM(CASE WHEN read_at IS NOT NULL OR dispatch_status IN ('read','replied') THEN 1 ELSE 0 END) AS read_count,
+      SUM(CASE WHEN replied_at IS NOT NULL OR dispatch_status = 'replied' THEN 1 ELSE 0 END) AS replied,
+      SUM(CASE WHEN opt_out_at IS NOT NULL OR exclusion_reason = 'opt_out' THEN 1 ELSE 0 END) AS opt_out,
+      SUM(CASE
+        WHEN (sent_at IS NOT NULL OR dispatch_status IN ('sent','delivered','read','replied'))
+          AND (opt_out_at IS NOT NULL OR exclusion_reason = 'opt_out')
+        THEN 1 ELSE 0
+      END) AS sent_opt_out
+    FROM MarketingPatientListItems
+    WHERE list_id = :listId
+    `,
+    { replacements: { listId: id } }
+  );
+  const totals = statusRows?.[0] || {};
+  const sent = Number(totals.sent || 0);
+  const optOut = Number(totals.opt_out || 0);
+  const sentOptOut = Number(totals.sent_opt_out || 0);
+  return {
+    opt_out_share: [
+      { label: 'Bajas', value: sentOptOut },
+      { label: 'Sin baja', value: Math.max(0, sent - sentOptOut) },
+    ],
+    read_hours: Array.from({ length: 24 }, (_value, hour) => {
+      const row = (hourRows || []).find((entry) => Number(entry.hour) === hour);
+      return { hour, label: `${String(hour).padStart(2, '0')}:00`, value: Number(row?.total || 0) };
+    }),
+    totals: {
+      total: Number(totals.total || 0),
+      sent,
+      delivered: Number(totals.delivered || 0),
+      read: Number(totals.read_count || 0),
+      replied: Number(totals.replied || 0),
+      opt_out: optOut,
+      sent_opt_out: sentOptOut,
+    },
+  };
+}
+
 function parseDate(value) {
   const parsed = value ? new Date(value) : null;
   return parsed && !Number.isNaN(parsed.getTime()) ? parsed : null;
@@ -210,6 +369,39 @@ function parseWhatsappTimestamp(value, fallback = new Date()) {
     if (!Number.isNaN(date.getTime())) return date;
   }
   return parseDate(value) || fallback;
+}
+
+function normalizeWebhookStatus(value) {
+  const status = normalizeKey(value);
+  if (status === 'sent') return 'sent';
+  if (status === 'delivered') return 'delivered';
+  if (status === 'read') return 'read';
+  if (status === 'failed') return 'failed';
+  return null;
+}
+
+function getLatestWhatsappStatusFromMessage(message) {
+  const metadata = message?.metadata || {};
+  const history = Array.isArray(metadata.wa_status_history) ? metadata.wa_status_history : [];
+  const candidates = [
+    metadata.wa_status,
+    ...history,
+    { status: message?.status, timestamp: message?.sent_at || message?.createdAt },
+  ].filter(Boolean);
+  const order = { sent: 1, delivered: 2, read: 3, failed: 4 };
+  return candidates.reduce((best, candidate) => {
+    const mapped = normalizeWebhookStatus(candidate?.status);
+    if (!mapped) return best;
+    if (!best) return candidate;
+    const bestMapped = normalizeWebhookStatus(best.status);
+    const currentRank = order[mapped] || 0;
+    const bestRank = order[bestMapped] || 0;
+    if (currentRank > bestRank) return candidate;
+    if (currentRank < bestRank) return best;
+    const currentTime = parseWhatsappTimestamp(candidate.timestamp, new Date(0)).getTime();
+    const bestTime = parseWhatsappTimestamp(best.timestamp, new Date(0)).getTime();
+    return currentTime > bestTime ? candidate : best;
+  }, null);
 }
 
 function getMadridParts(date = new Date()) {
@@ -930,12 +1122,21 @@ async function createCampaign(scope, body = {}, userId = null) {
 async function getCampaign(scope, campaignId) {
   const list = await MarketingPatientList.findByPk(campaignId);
   ensureScopeAccess(list, scope);
+  await reconcileListMessageState(list, scope);
+  const reloaded = await MarketingPatientList.findByPk(list.id);
   const items = await MarketingPatientListItem.findAll({
     where: { list_id: list.id },
     order: [['id', 'ASC']],
     limit: 1000,
   });
-  return { success: true, campaign: serializeCampaign(list, { itemsPreview: items.slice(0, 5) }), list: serializeCampaign(list, { itemsPreview: items.slice(0, 5) }), items: items.map(serializeItem) };
+  const report = await buildListReport(list.id);
+  return {
+    success: true,
+    campaign: serializeCampaign(reloaded, { itemsPreview: items.slice(0, 5) }),
+    list: serializeCampaign(reloaded, { itemsPreview: items.slice(0, 5) }),
+    items: items.map(serializeItem),
+    report,
+  };
 }
 
 function getListItemDedupeKey(item) {
@@ -1631,6 +1832,8 @@ async function sendTest(scope, campaignId, body = {}) {
 async function listRecipients(scope, campaignId, query = {}) {
   const list = await MarketingPatientList.findByPk(campaignId);
   ensureScopeAccess(list, scope);
+  await reconcileListMessageState(list, scope);
+  const reloaded = await MarketingPatientList.findByPk(list.id);
   const page = Math.max(1, Number.parseInt(query.page || '1', 10) || 1);
   const pageSize = Math.min(100, Math.max(10, Number.parseInt(query.page_size || query.pageSize || '25', 10) || 25));
   const offset = (page - 1) * pageSize;
@@ -1661,7 +1864,8 @@ async function listRecipients(scope, campaignId, query = {}) {
     limit: pageSize,
     offset,
   });
-  const counters = list.counters || await refreshListCounters(list.id);
+  const counters = reloaded?.counters || await refreshListCounters(list.id);
+  const report = await buildListReport(list.id);
   return {
     success: true,
     page,
@@ -1669,12 +1873,14 @@ async function listRecipients(scope, campaignId, query = {}) {
     total: count,
     items: rows.map(serializeItem),
     summary: counters,
+    report,
   };
 }
 
 async function getDispatchStatus(scope, campaignId) {
   const list = await MarketingPatientList.findByPk(campaignId);
   ensureScopeAccess(list, scope);
+  await reconcileListMessageState(list, scope);
   const counters = await refreshListCounters(list.id);
   const reloaded = await MarketingPatientList.findByPk(list.id);
   const accountQuality = await getWhatsappAccountQualityForList(reloaded, scope);
@@ -2443,6 +2649,9 @@ async function materializeInboundReply({ conversation, inboundMessage }) {
   if (!listId || !itemId) return { applied: false, reason: 'missing_ids' };
   const item = await MarketingPatientListItem.findOne({ where: { id: itemId, list_id: listId } });
   if (!item) return { applied: false, reason: 'item_not_found' };
+  if (item.replied_at && String(item.dispatch_status || '').toLowerCase() === 'replied') {
+    return { applied: false, reason: 'already_replied', list_id: listId, item_id: itemId };
+  }
   const repliedAt = inboundMessage.sent_at || inboundMessage.createdAt || new Date();
   await item.update({
     dispatch_status: 'replied',

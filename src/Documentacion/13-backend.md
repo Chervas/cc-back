@@ -813,6 +813,10 @@ Reglas:
 - Las listas importadas/manuales de `mass_sends` no crean ni actualizan `Pacientes`, pero `POST /campaigns` cruza cada item con pacientes existentes del scope por telefono/email. Si hay match, guarda `MarketingPatientListItems.paciente_id` y mezcla en `custom_fields` variables estándar del paciente y `PatientCustomFields` existentes.
 - Si un contacto externo responde por WhatsApp, el webhook resuelve la conversacion por telefono. Si existe paciente se vincula `patient_id`; si no existe, se conserva contacto externo y el opt-out comercial se aplica por `phone_digits`.
 - `POST /campaigns/:id/prepare` y `/test-send` validan todas las variables de la plantilla real contra los items `ready`; si falta algun valor devuelven `409` con `details.missing_variables[]` y no usan ejemplos de plantilla como fallback operativo.
+- `GET /campaigns/:id`, `/campaigns/:id/recipients` y `/campaigns/:id/dispatch` hacen una reconciliacion ligera antes de responder: leen `Messages.metadata.wa_status_history`, materializan `sent/delivered/read/failed/replied` en `MarketingPatientListItems`, refrescan contadores y devuelven `report` agregado. Esto corrige informes atrasados sin cargar toda la lista en frontend.
+- El `report` de envios masivos expone `opt_out_share` (bajas sobre contactos realmente enviados) y `read_hours` (lecturas por hora). Los listados detallados de abiertos/no abiertos/respuestas/bajas deben seguir saliendo de endpoints paginados, no de arrays completos en UI.
+- Si un contacto responde `BAJA` tras un outbound comercial, `MarketingContactOptOut` se crea para todas las clinicas del mismo `grupoClinicaId`. En contactos ya enviados no se cambia `status` a excluido: se mantiene el envio histórico y se marca `dispatch_status=replied`, `replied_at` y `opt_out_at`. En contactos pendientes/futuros sí se marca `excluded_opt_out`.
+- Para QA manual se permite revocar una baja dejando `MarketingContactOptOut.status=revoked`; si la revocacion referencia el mismo `inbound_message_id`, la reconciliacion posterior no reactiva esa baja antigua.
 
 ### 1.2. Automatizaciones basadas en listas
 
@@ -3318,6 +3322,7 @@ Actualización 2026-05-06:
 - `/recipients` busca por nombre, teléfono, email y `custom_fields` JSON, siempre paginado. No traer la lista completa al frontend para filtrar campos importados.
 - `PATCH /api/marketing/bulk-sends/campaigns/:id` con `whatsapp_template_id` valida que la plantilla sea WABA del scope y guarda `template_snapshot` también en borrador. No usar `MessageTemplates` legacy para campañas nuevas.
 - Los webhooks WhatsApp materializan `sent/delivered/read/failed/replied` en `MarketingPatientListItems` usando `app_message_id`, `provider_message_id` y metadata `source = marketing_bulk_sends`.
+- Como red de seguridad, las lecturas de detalle (`GET /campaigns/:id`, `/recipients`, `/dispatch`) vuelven a reconciliar de forma idempotente contra `Messages`. Esto no sustituye a actualizar gateway cuando se promociona: solo evita que un informe quede desfasado si un webhook llegó antes de desplegar el materializador.
 - Los inbound con `BAJA` solo aplican opt-out si el outbound previo tiene metadata comercial; no se debe excluir a pacientes por responder `baja` a recordatorios operativos.
 - El job de envío lo ejecuta el API del namespace (`dev`, `staging`, `prod`). Gateway no ejecuta jobs de negocio, pero al promocionar hay que llevarle `src/workers/queue.workers.js` porque recibe webhooks externos y materializa estados/respuestas.
 - Si se prepara una campaña con plantilla WhatsApp no aprobada y `auto_send_when_template_approved = true`, queda en `dispatch.status = waiting_template_approval`. La sincronización WABA la reencola automáticamente cuando esa plantilla pase a `APPROVED`.
@@ -3335,3 +3340,4 @@ Plantillas:
 - El backend acepta variables semánticas (`{{nombre}}`, `{{apellido}}`, `{{telefono_clinica}}`, custom de lista), las transforma a placeholders posicionales de Meta y guarda el contrato en `WhatsappTemplates.variables`.
 - `WhatsappTemplates.status` es la fuente de verdad WABA. Una plantilla `MessageTemplates` pendiente no está aprobada ni sincronizable por Meta si no existe registro WABA.
 - `PENDING_LOCAL` en una plantilla WABA custom significa que ClinicaClick la guardó localmente, pero Meta no dejó abierta una revisión real. La UI debe mostrarla como `No enviada a Meta` y no como aprobada ni en revisión.
+- `DELETE /api/whatsapp/templates/:id` devuelve `409 template_linked_to_campaigns` si la plantilla está referenciada por campañas/listas no archivadas. La UI debe pedir confirmación explícita antes de ocultarla; las campañas conservan `template_snapshot`, pero no deben poder reutilizar una plantilla oculta.

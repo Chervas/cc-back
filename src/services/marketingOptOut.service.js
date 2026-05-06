@@ -5,6 +5,7 @@ const db = require('../../models');
 const { normalizePhoneDigits, normalizePhoneE164, getPhoneLookupCandidates } = require('../lib/phone');
 
 const {
+  Clinica,
   MarketingContactOptOut,
   MarketingPatientContactEvent,
   MarketingPatientList,
@@ -126,6 +127,40 @@ async function refreshListCounters(listIds, transaction = null) {
   }
 }
 
+async function getClinicIdsForMarketingOptOut(clinicId, transaction = null) {
+  const normalizedClinicId = Number(clinicId || 0);
+  if (!Number.isInteger(normalizedClinicId) || normalizedClinicId <= 0 || !Clinica) {
+    return normalizedClinicId > 0 ? [normalizedClinicId] : [];
+  }
+
+  const clinic = await Clinica.findByPk(normalizedClinicId, {
+    attributes: ['id_clinica', 'grupoClinicaId'],
+    raw: true,
+    transaction,
+  });
+  const groupId = Number(clinic?.grupoClinicaId || 0);
+  if (!Number.isInteger(groupId) || groupId <= 0) {
+    return [normalizedClinicId];
+  }
+
+  const siblings = await Clinica.findAll({
+    where: { grupoClinicaId: groupId },
+    attributes: ['id_clinica'],
+    raw: true,
+    transaction,
+  });
+  const ids = siblings.map((row) => Number(row.id_clinica)).filter((id) => Number.isInteger(id) && id > 0);
+  return Array.from(new Set(ids.length ? ids : [normalizedClinicId]));
+}
+
+function listBelongsToAnyClinic(list, clinicIds) {
+  const targetIds = new Set((clinicIds || []).map(Number).filter((id) => Number.isInteger(id) && id > 0));
+  if (!targetIds.size) return false;
+  if (list.clinica_id && targetIds.has(Number(list.clinica_id))) return true;
+  const listClinicIds = Array.isArray(list.clinic_ids) ? list.clinic_ids.map(Number) : [];
+  return listClinicIds.some((id) => targetIds.has(Number(id)));
+}
+
 async function createRejectedCommunicationConsent({ patientId, inboundMessage, triggerMessage, transaction = null }) {
   if (!PacienteConsentimiento || !patientId) return;
   const existing = await PacienteConsentimiento.findOne({
@@ -155,6 +190,7 @@ async function createRejectedCommunicationConsent({ patientId, inboundMessage, t
 
 async function upsertOptOutRecord({
   clinicId,
+  clinicIds = null,
   patientId = null,
   phone,
   phoneDigits,
@@ -163,46 +199,52 @@ async function upsertOptOutRecord({
   transaction = null,
 }) {
   const triggerMetadata = triggerMessage?.metadata || {};
-  const [record] = await MarketingContactOptOut.findOrCreate({
-    where: {
-      clinica_id: clinicId,
-      phone_digits: phoneDigits,
-      channel: 'whatsapp',
-      scope: 'marketing',
-      status: 'active',
-    },
-    defaults: {
-      paciente_id: patientId || null,
-      phone,
-      reason_text: cleanString(inboundMessage?.content) || null,
-      source: 'whatsapp_inbound',
-      trigger_message_id: triggerMessage?.id || null,
-      inbound_message_id: inboundMessage?.id || null,
-      trigger_list_id: Number(triggerMetadata.list_id || 0) || null,
-      trigger_item_id: Number(triggerMetadata.item_id || 0) || null,
-      trigger_objective_id: cleanString(triggerMetadata.objective_id) || cleanString(triggerMetadata.campaign_source) || null,
-      opted_out_at: inboundMessage?.sent_at || inboundMessage?.createdAt || new Date(),
-    },
-    transaction,
-  });
+  const targetClinicIds = Array.from(new Set((clinicIds || [clinicId]).map(Number).filter((id) => Number.isInteger(id) && id > 0)));
+  const records = [];
+  for (const targetClinicId of targetClinicIds) {
+    const [record] = await MarketingContactOptOut.findOrCreate({
+      where: {
+        clinica_id: targetClinicId,
+        phone_digits: phoneDigits,
+        channel: 'whatsapp',
+        scope: 'marketing',
+        status: 'active',
+      },
+      defaults: {
+        paciente_id: patientId || null,
+        phone,
+        reason_text: cleanString(inboundMessage?.content) || null,
+        source: 'whatsapp_inbound',
+        trigger_message_id: triggerMessage?.id || null,
+        inbound_message_id: inboundMessage?.id || null,
+        trigger_list_id: Number(triggerMetadata.list_id || 0) || null,
+        trigger_item_id: Number(triggerMetadata.item_id || 0) || null,
+        trigger_objective_id: cleanString(triggerMetadata.objective_id) || cleanString(triggerMetadata.campaign_source) || null,
+        opted_out_at: inboundMessage?.sent_at || inboundMessage?.createdAt || new Date(),
+      },
+      transaction,
+    });
 
-  const patch = {
-    paciente_id: record.paciente_id || patientId || null,
-    phone: record.phone || phone,
-    reason_text: cleanString(inboundMessage?.content) || record.reason_text,
-    trigger_message_id: triggerMessage?.id || record.trigger_message_id,
-    inbound_message_id: inboundMessage?.id || record.inbound_message_id,
-    trigger_list_id: Number(triggerMetadata.list_id || 0) || record.trigger_list_id || null,
-    trigger_item_id: Number(triggerMetadata.item_id || 0) || record.trigger_item_id || null,
-    trigger_objective_id: cleanString(triggerMetadata.objective_id) || cleanString(triggerMetadata.campaign_source) || record.trigger_objective_id || null,
-    opted_out_at: inboundMessage?.sent_at || inboundMessage?.createdAt || record.opted_out_at || new Date(),
-  };
-  await record.update(patch, { transaction });
-  return record;
+    const patch = {
+      paciente_id: record.paciente_id || patientId || null,
+      phone: record.phone || phone,
+      reason_text: cleanString(inboundMessage?.content) || record.reason_text,
+      trigger_message_id: triggerMessage?.id || record.trigger_message_id,
+      inbound_message_id: inboundMessage?.id || record.inbound_message_id,
+      trigger_list_id: Number(triggerMetadata.list_id || 0) || record.trigger_list_id || null,
+      trigger_item_id: Number(triggerMetadata.item_id || 0) || record.trigger_item_id || null,
+      trigger_objective_id: cleanString(triggerMetadata.objective_id) || cleanString(triggerMetadata.campaign_source) || record.trigger_objective_id || null,
+      opted_out_at: inboundMessage?.sent_at || inboundMessage?.createdAt || record.opted_out_at || new Date(),
+    };
+    await record.update(patch, { transaction });
+    records.push(record);
+  }
+  return records[0] || null;
 }
 
 async function excludeMatchingListItems({
   clinicId,
+  clinicIds = null,
   patientId = null,
   phoneCandidates = [],
   inboundMessage,
@@ -210,11 +252,12 @@ async function excludeMatchingListItems({
   transaction = null,
 }) {
   if (!MarketingPatientList || !MarketingPatientListItem) return [];
+  const targetClinicIds = Array.from(new Set((clinicIds || [clinicId]).map(Number).filter((id) => Number.isInteger(id) && id > 0)));
   const activeLists = await MarketingPatientList.findAll({
     where: {
       status: { [Op.ne]: 'archived' },
       [Op.or]: [
-        { clinica_id: clinicId },
+        targetClinicIds.length === 1 ? { clinica_id: targetClinicIds[0] } : { clinica_id: { [Op.in]: targetClinicIds } },
         { clinic_ids: { [Op.ne]: null } },
       ],
     },
@@ -222,11 +265,7 @@ async function excludeMatchingListItems({
     transaction,
   });
   const listIds = activeLists
-    .filter((list) => {
-      if (Number(list.clinica_id) === Number(clinicId)) return true;
-      const clinicIds = Array.isArray(list.clinic_ids) ? list.clinic_ids.map(Number) : [];
-      return clinicIds.includes(Number(clinicId));
-    })
+    .filter((list) => listBelongsToAnyClinic(list, targetClinicIds))
     .map((list) => list.id);
   if (!listIds.length) return [];
 
@@ -246,21 +285,40 @@ async function excludeMatchingListItems({
 
   const updatedListIds = new Set();
   for (const row of rows) {
-    if (String(row.status || '').startsWith('excluded') && row.exclusion_reason === 'opt_out') {
+    const alreadySent = !!row.sent_at || ['sent', 'delivered', 'read', 'replied'].includes(String(row.dispatch_status || '').toLowerCase());
+    if (!alreadySent && String(row.status || '').startsWith('excluded') && row.exclusion_reason === 'opt_out') {
+      continue;
+    }
+    const inboundNote = inboundMessage?.id ? `Opt-out inbound #${inboundMessage.id}` : null;
+    const notes = cleanString(row.notes);
+    if (inboundNote && notes.includes(inboundNote) && row.opt_out_at) {
       continue;
     }
     const previousStatus = row.status;
-    await row.update({
-      status: 'excluded_opt_out',
-      exclusion_reason: 'opt_out',
-      selected: false,
-      opt_out_at: inboundMessage?.sent_at || inboundMessage?.createdAt || new Date(),
-      reason: 'Baja solicitada por WhatsApp tras un envío comercial',
-      notes: [
-        cleanString(row.notes),
-        inboundMessage?.id ? `Opt-out inbound #${inboundMessage.id}` : null,
-      ].filter(Boolean).join('\n') || null,
-    }, { transaction });
+    const optedOutAt = inboundMessage?.sent_at || inboundMessage?.createdAt || new Date();
+    const patch = alreadySent
+      ? {
+        dispatch_status: 'replied',
+        replied_at: row.replied_at || optedOutAt,
+        opt_out_at: row.opt_out_at || optedOutAt,
+        conversation_id: triggerMessage?.conversation_id || row.conversation_id || null,
+        notes: [
+          notes,
+          inboundNote,
+        ].filter(Boolean).join('\n') || null,
+      }
+      : {
+        status: 'excluded_opt_out',
+        exclusion_reason: 'opt_out',
+        selected: false,
+        opt_out_at: row.opt_out_at || optedOutAt,
+        reason: 'Baja solicitada por WhatsApp tras un envío comercial',
+        notes: [
+          notes,
+          inboundNote,
+        ].filter(Boolean).join('\n') || null,
+      };
+    await row.update(patch, { transaction });
     updatedListIds.add(row.list_id);
     await MarketingPatientContactEvent.create({
       list_id: row.list_id,
@@ -304,10 +362,26 @@ async function applyInboundOptOutIfNeeded({ clinicId, conversation, inboundMessa
     return { applied: false, reason: 'phone_not_found' };
   }
   const effectivePatientId = patientId || conversation.patient_id || null;
+  const targetClinicIds = await getClinicIdsForMarketingOptOut(clinicId);
+  const revokedRows = await MarketingContactOptOut.findAll({
+    where: {
+      clinica_id: { [Op.in]: targetClinicIds.length ? targetClinicIds : [clinicId] },
+      phone_digits: normalized.phoneDigits,
+      channel: 'whatsapp',
+      scope: 'marketing',
+      status: { [Op.in]: ['inactive', 'revoked'] },
+      inbound_message_id: inboundMessage.id,
+    },
+    limit: 1,
+  });
+  if (revokedRows.length) {
+    return { applied: false, reason: 'opt_out_revoked_for_inbound' };
+  }
 
   return db.sequelize.transaction(async (transaction) => {
     const record = await upsertOptOutRecord({
       clinicId,
+      clinicIds: targetClinicIds,
       patientId: effectivePatientId,
       phone: normalized.phone,
       phoneDigits: normalized.phoneDigits,
@@ -323,6 +397,7 @@ async function applyInboundOptOutIfNeeded({ clinicId, conversation, inboundMessa
     });
     const updatedItems = await excludeMatchingListItems({
       clinicId,
+      clinicIds: targetClinicIds,
       patientId: effectivePatientId,
       phoneCandidates: normalized.candidates,
       inboundMessage,
@@ -332,6 +407,7 @@ async function applyInboundOptOutIfNeeded({ clinicId, conversation, inboundMessa
     return {
       applied: true,
       record_id: record.id,
+      clinic_ids: targetClinicIds,
       updated_items: updatedItems.length,
       trigger_message_id: triggerMessage.id,
     };
