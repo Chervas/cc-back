@@ -482,6 +482,8 @@ async function createCampaign(scope, body = {}, userId = null) {
   const source = listSource === 'current_patients' ? 'existing_patients_condition' : (listSource === 'manual' ? 'manual_list' : 'imported_file');
   const templateUsage = normalizeTemplateUsage(body.template_usage || body.template_uso || body.uso || 'promocion');
   const templateCommercial = body.template_commercial === true || isCommercialTemplateUsage(templateUsage);
+  const listName = normalizeText(body.name) || 'Lista de envíos masivos';
+  const campaignName = normalizeText(body.campaign_name || body.campaignName) || listName;
 
   return db.sequelize.transaction(async (transaction) => {
     let itemPayloads = [];
@@ -500,7 +502,7 @@ async function createCampaign(scope, body = {}, userId = null) {
     itemPayloads = await applyMarketingOptOutExclusions(itemPayloads, scope, transaction);
     const counters = computeCounters(itemPayloads);
     const list = await MarketingPatientList.create({
-      name: normalizeText(body.name) || 'Campaña de envíos masivos',
+      name: listName,
       objective_id: OBJECTIVE_ID,
       source,
       status: 'draft',
@@ -511,6 +513,8 @@ async function createCampaign(scope, body = {}, userId = null) {
         : 'Lista externa importada para campaña puntual.',
       exclusion_summary: counters.excluded ? `${counters.excluded} contactos no tienen los campos necesarios o están duplicados.` : 'Sin exclusiones detectadas.',
       criteria: {
+        campaign_name: campaignName,
+        list_name: listName,
         channels,
         template_usage: templateUsage,
         template_commercial: templateCommercial,

@@ -797,7 +797,7 @@ Rutas bajo `/api/marketing/bulk-sends`:
 | Método | Ruta | Uso |
 |---|---|---|
 | GET | `/campaigns` | Lista campanas `mass_sends` por scope, excluyendo archivadas. |
-| POST | `/campaigns` | Crea lista/campana desde importacion, manual o pacientes actuales. Acepta `template_usage`, `template_commercial` y `opt_out_text` en `criteria`. |
+| POST | `/campaigns` | Crea lista/campana desde importacion, manual o pacientes actuales. Acepta `campaign_name`, `template_usage`, `template_commercial` y `opt_out_text` en `criteria`. |
 | POST | `/campaigns/:id/prepare` | Congela/prepara con plantilla WhatsApp si aplica, sin envio masivo real hasta capping y cola cancelable. |
 | POST | `/campaigns/:id/test-send` | Envia una prueba individual con metadata comercial/no comercial para que el opt-out entrante se aplique correctamente. |
 | DELETE | `/campaigns/:id` | Archiva la campana/lista. |
@@ -809,6 +809,7 @@ Reglas:
 - Al crear una plantilla promocional desde campañas, la UI debe guardar el texto principal mas un bloque de baja con la palabra `BAJA`.
 - Las plantillas WhatsApp reales exponen `category`/`catalog.category`; la UI lo mapea a `uso=promocion` si Meta devuelve `MARKETING`, y a `notificacion` si no.
 - Las variables de columnas extra de listas importadas siguen el contrato `custom_fields_schema` y pueden mostrarse como `{{variable}}` al crear la plantilla desde la campana.
+- En envios masivos, `MarketingPatientList.name` representa el nombre de la lista. El nombre visible de campaña se conserva en `criteria.campaign_name` para permitir vistas separadas de campanas y listas sin crear otra tabla.
 
 ### 1.2. Automatizaciones basadas en listas
 
