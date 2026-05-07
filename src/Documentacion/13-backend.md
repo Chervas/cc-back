@@ -798,6 +798,7 @@ Rutas bajo `/api/marketing/bulk-sends`:
 |---|---|---|
 | GET | `/campaigns` | Lista campanas `mass_sends` por scope, excluyendo archivadas. |
 | POST | `/campaigns` | Crea lista/campana desde importacion, manual o pacientes actuales. Acepta `campaign_name`, `template_usage`, `template_commercial`, `opt_out_text` y `link_tracking` en `criteria`. |
+| PATCH | `/campaigns/:id` | Edita borradores/preparadas, asocia plantilla WhatsApp, actualiza tracking o añade contactos a una lista existente con `append_rows`, `column_mapping` y `custom_fields_schema`. |
 | POST | `/campaigns/:id/prepare` | Congela/prepara con plantilla WhatsApp si aplica, sin envio masivo real hasta capping y cola cancelable. |
 | POST | `/campaigns/:id/test-send` | Envia una prueba individual con metadata comercial/no comercial para que el opt-out entrante se aplique correctamente. |
 | DELETE | `/campaigns/:id` | Archiva la campana/lista. |
@@ -3318,7 +3319,7 @@ Actualización 2026-05-06:
 - `mass_sends` usa `MarketingPatientLists` y `MarketingPatientListItems` como audiencia congelada y tabla de materialización de estado.
 - El envío real WhatsApp se ejecuta con `JobRequests.type = marketing_bulk_send_dispatch`.
 - El job envía lotes de 100 contactos, programa el siguiente lote con `next_run_at = now + 2 minutos` y respeta la ventana 07:00-22:00 `Europe/Madrid`.
-- Antes de cada batch se recalculan contadores materializados y se pausa si `opt_out_rate > 3%` o, cuando haya vencido la gracia configurada (24h por defecto), si `read_rate < 30%`.
+- Antes de cada batch se recalculan contadores materializados y se pausa si `opt_out_rate > 3%`. La tasa de lectura queda como métrica de informe, no como bloqueo de calidad.
 - `POST /api/marketing/bulk-sends/campaigns/:id/send` no encola si faltan gates: plantilla WABA aprobada, opt-out/consentimiento, audiencia congelada, auditoría, capping y cola cancelable.
 - `cancel` marca `cancel_requested`; el job corta en el siguiente punto de control. `resume` vuelve a encolar solo si quedan items `ready` pendientes.
 - Los informes/listados deben consultar agregados y paginación (`/recipients`, `/dispatch`). No cargar todos los items en frontend para calcular abiertos/no abiertos.
@@ -3329,8 +3330,8 @@ Actualización 2026-05-06:
 - Los inbound con `BAJA` solo aplican opt-out si el outbound previo tiene metadata comercial; no se debe excluir a pacientes por responder `baja` a recordatorios operativos.
 - El job de envío lo ejecuta el API del namespace (`dev`, `staging`, `prod`). Gateway no ejecuta jobs de negocio, pero al promocionar hay que llevarle `src/workers/queue.workers.js` porque recibe webhooks externos y materializa estados/respuestas.
 - Si se prepara una campaña con plantilla WhatsApp no aprobada y `auto_send_when_template_approved = true`, queda en `dispatch.status = waiting_template_approval`. La sincronización WABA la reencola automáticamente cuando esa plantilla pase a `APPROVED`.
-- Campañas Admin expone `GET/PUT /api/admin/campaign-playbooks/bulk-send-settings` para configurar ajustes de envíos masivos WhatsApp: batch size, delay, lectura mínima, gracia antes de evaluar lecturas y baja máxima. `prepare` guarda snapshot en `criteria.dispatch`; el delay mínimo efectivo es 2 minutos por lote y la lectura mínima se evalúa por defecto tras 24h desde el inicio/preparación del envío. Email y otros canales deberán tener ajustes propios cuando se conecten.
-- Una campaña pausada con `dispatch.status=paused_quality` solo puede reanudarse con usuario admin global. El cliente debe ver la pausa y contactar con soporte; `paused_limit`, `paused_template`, `paused_config` y pausas manuales siguen siendo reanudables cuando proceda.
+- Campañas Admin expone `GET/PUT /api/admin/campaign-playbooks/bulk-send-settings` para configurar ajustes de envíos masivos WhatsApp: batch size, delay y baja máxima. `prepare` guarda snapshot en `criteria.dispatch`; el delay mínimo efectivo es 2 minutos por lote. Email y otros canales deberán tener ajustes propios cuando se conecten.
+- Una campaña pausada con `dispatch.status=paused_quality` solo puede reanudarse con usuario admin global cuando el motivo es calidad real bloqueante (`opt_out_rate_high` o futuros motivos equivalentes). Las pausas legacy por `read_rate_low` son reanudables porque la lectura ya no bloquea envíos.
 - El seguimiento de enlaces usa `MarketingTrackedLinks`, `MarketingTrackedLinkClicks` y `GET /r/:token`. `token` debe ser opaco/no semántico; no derivarlo de URL, lista, campaña, paciente ni variable. En staging/prod, gateway/DNS debe enrutar `envios.clinicaclick.com/r/:token` o el subdominio elegido al backend correcto.
 - El error de pago WhatsApp `131042` se guarda en `ClinicMetaAsset.additionalData.payment` cuando llega por webhook `failed`. Un webhook posterior `sent`/`delivered`/`read` del mismo phone/WABA limpia la marca con `whatsappPaymentStatus.service.js`; no mostrar bloqueos de pago anteriores a `payment.last_success_at`.
 
