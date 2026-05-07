@@ -1659,6 +1659,7 @@ function buildTemplateSnapshot(template) {
     name: plain.name,
     display_name: plain.catalog?.display_name || plain.display_name || plain.name,
     status: plain.status,
+    rejection_reason: plain.rejection_reason || null,
     language: plain.language || 'es',
     body: extractBodyText(plain.components),
     variables: buildWhatsappTemplateVariableContract(plain),

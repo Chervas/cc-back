@@ -1225,6 +1225,13 @@ exports.createCustomTemplate = async (req, res) => {
     });
   } catch (err) {
     console.error('Error createCustomTemplate', err);
+    if (err?.statusCode || err?.code === 'invalid_template_body' || err?.code === 'meta_template_submission_failed') {
+      return res.status(err.statusCode || 400).json({
+        error: err.code || 'template_submission_failed',
+        message: Array.isArray(err.details) && err.details.length ? err.details[0] : (err.message || 'No se pudo enviar la plantilla a WhatsApp.'),
+        details: Array.isArray(err.details) ? err.details : [],
+      });
+    }
     return res.status(500).json({ error: err.message || 'Error creando plantilla WhatsApp' });
   }
 };

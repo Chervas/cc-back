@@ -28,6 +28,7 @@ const WHATSAPP_TEMPLATE_STATUS = {
   REJECTED: 'REJECTED',
   DISCONNECTED: 'SIN_CONECTAR',
 };
+const WHATSAPP_TEMPLATE_BODY_MAX_LENGTH = 1024;
 
 function resolveGraphBase() {
   const base = META_GRAPH_BASE.replace(/\/+$/, '');
@@ -105,6 +106,36 @@ function buildVariableContractFromBody(bodyText, rawVariables = []) {
     return `{{${seen.get(key)}}}`;
   });
   return { body: replacedBody, variables };
+}
+
+function createTemplateValidationError(details) {
+  const error = new Error('invalid_template_body');
+  error.code = 'invalid_template_body';
+  error.statusCode = 400;
+  error.details = Array.isArray(details) ? details : [String(details || 'La plantilla no cumple las reglas de WhatsApp.')];
+  return error;
+}
+
+function validateTemplateBodyForMeta(bodyText) {
+  const text = cleanString(bodyText);
+  const issues = [];
+  if (!text) {
+    issues.push('El cuerpo de la plantilla no puede estar vacío.');
+    return issues;
+  }
+  if (text.length > WHATSAPP_TEMPLATE_BODY_MAX_LENGTH) {
+    issues.push(`El mensaje tiene ${text.length} caracteres. WhatsApp permite un máximo de ${WHATSAPP_TEMPLATE_BODY_MAX_LENGTH} en el cuerpo de una plantilla.`);
+  }
+  if (/^\s*\{\{\d+\}\}/.test(text)) {
+    issues.push('WhatsApp no permite que el cuerpo empiece por una variable. Añade texto fijo antes.');
+  }
+  if (/\{\{\d+\}\}\s*$/.test(text)) {
+    issues.push('WhatsApp no permite que el cuerpo termine en una variable. Añade texto fijo después.');
+  }
+  if (/\{\{\d+\}\}\s*\{\{\d+\}\}/.test(text)) {
+    issues.push('WhatsApp no permite variables consecutivas sin texto fijo entre ellas.');
+  }
+  return issues;
 }
 
 function hasSameMetaFacingContent(template, instance) {
@@ -510,6 +541,17 @@ function buildLocalPendingReasonFromMetaError(err) {
   return `Meta no ha aceptado abrir una revisión nueva para esta plantilla${code}: ${detail}`;
 }
 
+function createMetaTemplateSubmissionError(parsed) {
+  const error = new Error('meta_template_submission_failed');
+  error.code = 'meta_template_submission_failed';
+  error.statusCode = 400;
+  error.details = [
+    'Meta no aceptó abrir la revisión de esta plantilla por un problema técnico de formato. No la hemos guardado como pendiente para evitar confusión; revisa longitud, variables y formato, o avisa a soporte.',
+  ];
+  error.metaError = parsed || null;
+  return error;
+}
+
 async function notifyBulkSendsTemplateApproval(templateRow, logger = console) {
   const plain = templateRow?.get ? templateRow.get({ plain: true }) : templateRow;
   if (String(plain?.status || '').toUpperCase() !== WHATSAPP_TEMPLATE_STATUS.APPROVED) return;
@@ -603,6 +645,10 @@ async function createCustomTemplateForClinic({
   const safeReplaceTemplateId = Number(replaceTemplateId || 0) || null;
 
   const contract = buildVariableContractFromBody(safeBodyText, variables);
+  const validationIssues = validateTemplateBodyForMeta(contract.body);
+  if (validationIssues.length) {
+    throw createTemplateValidationError(validationIssues);
+  }
   const bodyComponent = {
     type: 'BODY',
     text: contract.body,
@@ -630,6 +676,9 @@ async function createCustomTemplateForClinic({
     metaTemplateId = metaResp?.id || null;
   } catch (err) {
     const parsed = parseMetaError(err);
+    if (Number(parsed?.code) === 100 || /invalid parameter/i.test(String(parsed?.message || ''))) {
+      throw createMetaTemplateSubmissionError(parsed);
+    }
     const row = await WhatsappTemplate.create({
       waba_id: safeWabaId,
       clinic_id: safeClinicId,
