@@ -4,6 +4,7 @@ const { Op } = require('sequelize');
 const axios = require('axios');
 const crypto = require('crypto');
 const whatsappService = require('../services/whatsapp.service');
+const whatsappPaymentStatusService = require('../services/whatsappPaymentStatus.service');
 const { enqueueSyncPhonesJob, syncPhonesForWaba } = require('../services/whatsappPhones.service');
 const whatsappCoexistenceService = require('../services/whatsappCoexistence.service');
 const { buildWhatsappTemplateVariableContract } = require('../lib/whatsapp-template-contract');
@@ -1376,6 +1377,7 @@ exports.listPhones = async (req, res) => {
       const grupo = grupoDirecto.id_grupo ? grupoDirecto : grupoClinica;
       let registration = p.additionalData?.registration || null;
       const additionalData = p.additionalData || {};
+      const payment = whatsappPaymentStatusService.derivePaymentSnapshot(additionalData);
       const isCoexistenceAsset =
         additionalData.whatsappConnectionMode === 'coexistence' ||
         additionalData.connectionMode === 'coexistence' ||
@@ -1483,11 +1485,12 @@ exports.listPhones = async (req, res) => {
         limited_mode: usage?.limitedMode || false,
         limited_mode_count: usage?.limitedMode ? usage.count : null,
         limited_mode_limit: usage?.limitedMode ? usage.limit : null,
-        payment_status: additionalData.payment?.status || null,
-        payment_last_error_code: additionalData.payment?.last_error_code || null,
-        payment_last_error_message: additionalData.payment?.last_error_message || null,
-        payment_last_error_href: additionalData.payment?.last_error_href || null,
-        payment_last_detected_at: additionalData.payment?.last_detected_at || null,
+        payment_status: payment.status || null,
+        payment_last_error_code: payment.last_error_code || null,
+        payment_last_error_message: payment.last_error_message || null,
+        payment_last_error_href: payment.last_error_href || null,
+        payment_last_detected_at: payment.last_detected_at || null,
+        payment_last_success_at: payment.last_success_at || null,
         meta_billed_by: p.meta_billed_by ?? null,
         is_test_number: !!additionalData.isTestNumber,
         account_mode: additionalData.accountMode || null,

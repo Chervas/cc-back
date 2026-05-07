@@ -10,6 +10,7 @@ const automationsV2ResumeService = require('../services/automationsV2Resume.serv
 const marketingOptOutService = require('../services/marketingOptOut.service');
 const marketingBulkSendsService = require('../services/marketingBulkSends.service');
 const notificationService = require('../services/notifications.service');
+const whatsappPaymentStatusService = require('../services/whatsappPaymentStatus.service');
 const { getIO } = require('../services/socket.service');
 const { findCanonicalWhatsappConversation } = require('../lib/canonical-conversation');
 const db = require('../../models');
@@ -50,7 +51,7 @@ function cleanString(value) {
 
 const RUNTIME_ROLE = cleanString(process.env.RUNTIME_ROLE).toLowerCase();
 const IS_GATEWAY_RUNTIME = RUNTIME_ROLE === 'gateway';
-const WHATSAPP_PAYMENT_MISSING_ERROR_CODE = 131042;
+const WHATSAPP_PAYMENT_MISSING_ERROR_CODE = whatsappPaymentStatusService.PAYMENT_MISSING_ERROR_CODE;
 
 function truncateText(value, max = 120) {
     const normalized = cleanString(value);
@@ -1498,6 +1499,26 @@ createWorker('webhook_whatsapp', async (job) => {
         }
         message.metadata = mergeStatusMetadata(message.metadata, status);
         await message.save();
+
+        if (['sent', 'delivered', 'read'].includes(nextStatus)) {
+            try {
+                await whatsappPaymentStatusService.clearMissingPaymentAfterSuccessfulStatus({
+                    clinicId: messageRef.clinic_id || clinicId,
+                    phoneId: message.metadata?.phoneId || message.metadata?.phoneNumberId || null,
+                    wabaId: message.metadata?.wabaId || null,
+                    messageId: message.id,
+                    wamid,
+                    status: nextStatus,
+                });
+            } catch (paymentClearError) {
+                console.warn('[whatsapp] No se pudo limpiar estado de pago tras status correcto', {
+                    clinicId: messageRef.clinic_id || clinicId,
+                    messageId: message.id,
+                    status: nextStatus,
+                    error: serializeError(paymentClearError),
+                });
+            }
+        }
 
         if (nextStatus === 'failed') {
             await notifyWhatsappPaymentMissing({

@@ -3330,7 +3330,8 @@ Actualización 2026-05-06:
 - El job de envío lo ejecuta el API del namespace (`dev`, `staging`, `prod`). Gateway no ejecuta jobs de negocio, pero al promocionar hay que llevarle `src/workers/queue.workers.js` porque recibe webhooks externos y materializa estados/respuestas.
 - Si se prepara una campaña con plantilla WhatsApp no aprobada y `auto_send_when_template_approved = true`, queda en `dispatch.status = waiting_template_approval`. La sincronización WABA la reencola automáticamente cuando esa plantilla pase a `APPROVED`.
 - Campañas Admin expone `GET/PUT /api/admin/campaign-playbooks/bulk-send-settings` para configurar batch size, delay, lectura mínima y baja máxima. `prepare` guarda snapshot en `criteria.dispatch`; el delay mínimo efectivo es 2 minutos por lote.
-- El seguimiento de enlaces usa `MarketingTrackedLinks`, `MarketingTrackedLinkClicks` y `GET /r/:token`. En staging/prod, gateway/DNS debe enrutar `envios.clinicaclick.com/r/:token` o el subdominio elegido al backend correcto.
+- El seguimiento de enlaces usa `MarketingTrackedLinks`, `MarketingTrackedLinkClicks` y `GET /r/:token`. `token` debe ser opaco/no semántico; no derivarlo de URL, lista, campaña, paciente ni variable. En staging/prod, gateway/DNS debe enrutar `envios.clinicaclick.com/r/:token` o el subdominio elegido al backend correcto.
+- El error de pago WhatsApp `131042` se guarda en `ClinicMetaAsset.additionalData.payment` cuando llega por webhook `failed`. Un webhook posterior `sent`/`delivered`/`read` del mismo phone/WABA limpia la marca con `whatsappPaymentStatus.service.js`; no mostrar bloqueos de pago anteriores a `payment.last_success_at`.
 
 Webhooks y colas:
 

@@ -5,6 +5,7 @@ const { Op, QueryTypes, Sequelize } = require('sequelize');
 const db = require('../../models');
 const { normalizePhoneDigits, getPhoneLookupCandidates } = require('../lib/phone');
 const whatsappService = require('./whatsapp.service');
+const whatsappPaymentStatusService = require('./whatsappPaymentStatus.service');
 const { buildWhatsappTemplateVariableContract } = require('../lib/whatsapp-template-contract');
 const { findCanonicalWhatsappConversation } = require('../lib/canonical-conversation');
 const marketingOptOutService = require('./marketingOptOut.service');
@@ -139,6 +140,10 @@ function buildTrackingUrl(link) {
   return `https://${domain}/r/${encodeURIComponent(link.token)}`;
 }
 
+function generateTrackingToken() {
+  return String(crypto.randomInt(1000000000, 10000000000));
+}
+
 async function createTrackedLinkForVariable({ list, item, variableKey, originalUrl, domain }) {
   if (!MarketingTrackedLink || !list?.id || !isHttpUrl(originalUrl)) {
     return null;
@@ -163,7 +168,7 @@ async function createTrackedLinkForVariable({ list, item, variableKey, originalU
     try {
       return await MarketingTrackedLink.create({
         ...where,
-        token: crypto.randomBytes(12).toString('base64url'),
+        token: generateTrackingToken(),
         clinica_id: itemPlain?.clinica_id || listPlain.clinica_id || null,
         grupo_clinica_id: listPlain.grupo_clinica_id || null,
         tracking_domain: domain,
@@ -1740,7 +1745,7 @@ async function getWhatsappAccountQualityForList(list, scope = {}) {
     ],
   };
   const asset = await ClinicMetaAsset.findOne({ where, order: [['updatedAt', 'DESC']] });
-  const paymentStatus = asset?.additionalData?.payment?.status || null;
+  const payment = whatsappPaymentStatusService.derivePaymentSnapshot(asset?.additionalData || {});
   return {
     clinic_id: clinicId,
     phone_number_id: clinicConfig?.phoneNumberId || asset?.phoneNumberId || null,
@@ -1749,8 +1754,9 @@ async function getWhatsappAccountQualityForList(list, scope = {}) {
     messaging_limit: asset?.messaging_limit || null,
     messaging_limit_count: parseMessagingLimit(asset?.messaging_limit),
     can_send_api: asset?.can_send_api ?? asset?.additionalData?.coexistence?.can_send_api ?? null,
-    payment_status: paymentStatus,
-    payment_missing: paymentStatus === 'missing_payment_method',
+    payment_status: payment.status,
+    payment_missing: payment.missing,
+    payment_last_success_at: payment.last_success_at,
   };
 }
 
