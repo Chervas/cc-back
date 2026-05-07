@@ -1249,6 +1249,45 @@ function serializeCampaign(list, { itemsPreview = [] } = {}) {
   };
 }
 
+function getListWhatsappTemplateId(list) {
+  const plain = list?.get ? list.get({ plain: true }) : (list || {});
+  return Number(plain.criteria?.whatsapp_template_id || plain.template_snapshot?.id || 0) || null;
+}
+
+async function hydrateListTemplateSnapshots(lists) {
+  const rows = (Array.isArray(lists) ? lists : [lists]).filter(Boolean);
+  if (!rows.length || !WhatsappTemplate) return;
+
+  const templateIds = Array.from(new Set(rows.map(getListWhatsappTemplateId).filter(Boolean)));
+  if (!templateIds.length) return;
+
+  const templates = await WhatsappTemplate.findAll({
+    where: { id: { [Op.in]: templateIds }, is_active: true },
+    include: [{ model: db.WhatsappTemplateCatalog, as: 'catalog', attributes: ['id', 'name', 'display_name', 'body_text', 'variables'], required: false }],
+  });
+  const templatesById = new Map(templates.map((template) => [Number(template.id), template]));
+
+  for (const list of rows) {
+    const template = templatesById.get(getListWhatsappTemplateId(list));
+    if (!template) continue;
+
+    const snapshot = buildTemplateSnapshot(template);
+    const currentCriteria = list.get ? list.get('criteria') || {} : list.criteria || {};
+    const criteria = {
+      ...currentCriteria,
+      whatsapp_template_id: Number(template.id),
+    };
+
+    if (list.set) {
+      list.set('template_snapshot', snapshot);
+      list.set('criteria', criteria);
+    } else {
+      list.template_snapshot = snapshot;
+      list.criteria = criteria;
+    }
+  }
+}
+
 async function listCampaigns(scope) {
   const lists = await MarketingPatientList.findAll({
     where: {
@@ -1288,6 +1327,7 @@ async function listCampaigns(scope) {
     const bucket = previewByList.get(row.list_id);
     if (bucket.length < 5) bucket.push(row);
   }
+  await hydrateListTemplateSnapshots(lists);
   const items = lists.map((list) => serializeCampaign(list, { itemsPreview: previewByList.get(list.id) || [] }));
   const aggregate = items.reduce((acc, item) => {
     const counters = item.counters || {};
@@ -1403,6 +1443,7 @@ async function getCampaign(scope, campaignId) {
   ensureScopeAccess(list, scope);
   await reconcileListMessageState(list, scope);
   const reloaded = await MarketingPatientList.findByPk(list.id);
+  await hydrateListTemplateSnapshots(reloaded);
   const items = await MarketingPatientListItem.findAll({
     where: { list_id: list.id },
     order: [['id', 'ASC']],
@@ -1617,6 +1658,7 @@ async function updateCampaign(scope, campaignId, body = {}, userId = null) {
   });
 
   const reloaded = await MarketingPatientList.findByPk(list.id);
+  await hydrateListTemplateSnapshots(reloaded);
   const items = await MarketingPatientListItem.findAll({
     where: { list_id: list.id },
     order: [['id', 'ASC']],
@@ -1925,8 +1967,13 @@ async function prepareCampaign(scope, campaignId, body = {}, userId = null) {
     ? list.criteria.channels
     : normalizeChannels(list.action_mode || list.channel);
   const needsWhatsappTemplate = channels.includes('whatsapp');
-  const template = body.whatsapp_template_id || body.template_id
-    ? await resolveWhatsappTemplate(body.whatsapp_template_id || body.template_id, scope)
+  const selectedTemplateId = body.whatsapp_template_id
+    || body.template_id
+    || list.criteria?.whatsapp_template_id
+    || list.template_snapshot?.id
+    || list.template_id;
+  const template = selectedTemplateId
+    ? await resolveWhatsappTemplate(selectedTemplateId, scope)
     : null;
   const snapshot = buildTemplateSnapshot(template);
   const templateUsage = normalizeTemplateUsage(body.template_usage || list.criteria?.template_usage || 'promocion');
