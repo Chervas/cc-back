@@ -9,6 +9,7 @@ const { recomposeAutomationsUsingTemplate } = require('./whatsappTemplateAutomat
 const {
   ClinicMetaAsset,
   Clinica,
+  MarketingPatientList,
   WhatsappTemplate,
   WhatsappTemplateCatalog,
   WhatsappTemplateCatalogDiscipline,
@@ -619,6 +620,71 @@ async function createTemplateInMeta({ wabaId, accessToken, template, language })
   return response.data;
 }
 
+function extractTemplateBodyText(components) {
+  const parsed = parseMaybeJson(components) || [];
+  const body = Array.isArray(parsed)
+    ? parsed.find((component) => String(component?.type || '').toUpperCase() === 'BODY')
+    : null;
+  return body?.text || '';
+}
+
+function buildTemplateSnapshot(template) {
+  if (!template) return null;
+  const plain = template.get ? template.get({ plain: true }) : template;
+  return {
+    id: plain.id,
+    name: plain.name,
+    display_name: plain.catalog?.display_name || plain.display_name || plain.name,
+    status: plain.status,
+    rejection_reason: plain.rejection_reason || null,
+    language: plain.language || DEFAULT_LANGUAGE,
+    body: extractTemplateBodyText(plain.components),
+    variables: Array.isArray(plain.variables) ? plain.variables : [],
+    captured_at: new Date().toISOString(),
+  };
+}
+
+async function replaceTemplateInEditableBulkSends({ oldTemplateId, newTemplate }) {
+  const oldId = Number(oldTemplateId || 0);
+  if (!oldId || !MarketingPatientList || !newTemplate) return true;
+
+  const snapshot = buildTemplateSnapshot(newTemplate);
+  const newId = Number(snapshot?.id || 0);
+  if (!newId) return true;
+
+  const lists = await MarketingPatientList.findAll({
+    where: {
+      objective_id: 'mass_sends',
+      status: { [Op.in]: ['draft', 'prepared'] },
+      [Op.or]: [
+        db.sequelize.where(
+          db.sequelize.cast(db.sequelize.json('criteria.whatsapp_template_id'), 'UNSIGNED'),
+          oldId
+        ),
+        db.sequelize.where(
+          db.sequelize.cast(db.sequelize.json('template_snapshot.id'), 'UNSIGNED'),
+          oldId
+        ),
+      ],
+    },
+  });
+
+  for (const list of lists) {
+    await list.update({
+      template_snapshot: snapshot,
+      criteria: {
+        ...(list.criteria || {}),
+        whatsapp_template_id: newId,
+      },
+      safety_gates: {
+        ...(list.safety_gates || {}),
+        approved_template: false,
+      },
+    });
+  }
+  return true;
+}
+
 async function createCustomTemplateForClinic({
   clinicId,
   wabaId,
@@ -693,18 +759,6 @@ async function createCustomTemplateForClinic({
       rejection_reason: buildLocalPendingReasonFromMetaError(err),
       is_active: true,
     });
-    if (safeReplaceTemplateId) {
-      await WhatsappTemplate.update(
-        { is_active: false },
-        {
-          where: {
-            id: safeReplaceTemplateId,
-            waba_id: safeWabaId,
-            ...(safeClinicId ? { clinic_id: safeClinicId } : {}),
-          },
-        }
-      ).catch(() => null);
-    }
     row.meta_submission_error = parsed;
     return { row, submitted: false, error: parsed || err.message };
   }
@@ -726,16 +780,30 @@ async function createCustomTemplateForClinic({
   });
 
   if (safeReplaceTemplateId) {
-    await WhatsappTemplate.update(
-      { is_active: false },
-      {
-        where: {
-          id: safeReplaceTemplateId,
-          waba_id: safeWabaId,
-          ...(safeClinicId ? { clinic_id: safeClinicId } : {}),
-        },
-      }
-    ).catch(() => null);
+    const replaced = await replaceTemplateInEditableBulkSends({
+      oldTemplateId: safeReplaceTemplateId,
+      newTemplate: row,
+    }).catch((err) => {
+      console.error('Error actualizando borradores con nueva plantilla WhatsApp', {
+        oldTemplateId: safeReplaceTemplateId,
+        newTemplateId: row.id,
+        error: err?.message || err,
+      });
+      return false;
+    });
+
+    if (replaced) {
+      await WhatsappTemplate.update(
+        { is_active: false },
+        {
+          where: {
+            id: safeReplaceTemplateId,
+            waba_id: safeWabaId,
+            ...(safeClinicId ? { clinic_id: safeClinicId } : {}),
+          },
+        }
+      ).catch(() => null);
+    }
   }
 
   await enqueueSyncTemplatesJob({
