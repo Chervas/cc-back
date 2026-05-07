@@ -38,10 +38,13 @@ const DISPATCH_BATCH_SIZE = Math.max(1, Number.parseInt(process.env.MARKETING_BU
 const DISPATCH_BATCH_DELAY_MS = Math.max(2 * 60 * 1000, Number.parseInt(process.env.MARKETING_BULK_SEND_BATCH_DELAY_MS || String(2 * 60 * 1000), 10) || 2 * 60 * 1000);
 const DISPATCH_MIN_READ_RATE = Number(process.env.MARKETING_BULK_SEND_MIN_READ_RATE || '0.30') || 0.30;
 const DISPATCH_MAX_OPT_OUT_RATE = Number(process.env.MARKETING_BULK_SEND_MAX_OPT_OUT_RATE || '0.03') || 0.03;
+const DISPATCH_READ_RATE_GRACE_MS = Math.max(60 * 60 * 1000, Number.parseInt(process.env.MARKETING_BULK_SEND_READ_RATE_GRACE_MS || String(24 * 60 * 60 * 1000), 10) || 24 * 60 * 60 * 1000);
+const TEST_SEND_COOLDOWN_MS = Math.max(1000, Number.parseInt(process.env.MARKETING_BULK_SEND_TEST_COOLDOWN_MS || '60000', 10) || 60000);
 const DISPATCH_TIMEZONE = process.env.MARKETING_BULK_SEND_TIMEZONE || 'Europe/Madrid';
 const DISPATCH_BUSINESS_START_HOUR = 7;
 const DISPATCH_BUSINESS_END_HOUR = 22;
 const LINK_TRACKING_DEFAULT_DOMAIN = process.env.MARKETING_LINK_TRACKING_DEFAULT_DOMAIN || 'envios.clinicaclick.com';
+const testSendCooldowns = new Map();
 
 function repairMojibake(value) {
   const text = String(value || '');
@@ -76,6 +79,36 @@ function normalizeTrackingDomain(value, mode = 'default') {
     return raw;
   }
   return LINK_TRACKING_DEFAULT_DOMAIN;
+}
+
+function buildContactUniqExpression(alias = '') {
+  const prefix = alias ? `${alias}.` : '';
+  return `COALESCE(
+    CASE WHEN ${prefix}paciente_id IS NOT NULL THEN CONCAT('p:', ${prefix}paciente_id) END,
+    CASE WHEN NULLIF(TRIM(${prefix}phone), '') IS NOT NULL THEN CONCAT('ph:', TRIM(${prefix}phone)) END,
+    CASE WHEN NULLIF(TRIM(${prefix}email), '') IS NOT NULL THEN CONCAT('em:', LOWER(TRIM(${prefix}email))) END,
+    CASE WHEN NULLIF(TRIM(${prefix}name), '') IS NOT NULL THEN CONCAT('nm:', LOWER(TRIM(${prefix}name))) END
+  )`;
+}
+
+function assertTestSendCooldown({ clinicId, targetPhone }) {
+  const key = `${Number(clinicId || 0) || 'scope'}:${String(targetPhone || '').trim()}`;
+  const now = Date.now();
+  for (const [entryKey, until] of testSendCooldowns.entries()) {
+    if (until <= now) testSendCooldowns.delete(entryKey);
+  }
+  const blockedUntil = testSendCooldowns.get(key) || 0;
+  if (blockedUntil > now) {
+    const retryAfterSeconds = Math.max(1, Math.ceil((blockedUntil - now) / 1000));
+    const err = new Error(`Espera ${retryAfterSeconds}s antes de enviar otra prueba a este número.`);
+    err.status = 429;
+    err.details = {
+      retry_after_seconds: retryAfterSeconds,
+      cooldown_ms: TEST_SEND_COOLDOWN_MS,
+    };
+    throw err;
+  }
+  testSendCooldowns.set(key, now + TEST_SEND_COOLDOWN_MS);
 }
 
 function normalizeLinkTrackingConfig(raw = {}) {
@@ -696,6 +729,7 @@ function getDispatchConfig(list) {
     batch_size: Number(dispatch.batch_size || DISPATCH_BATCH_SIZE) || DISPATCH_BATCH_SIZE,
     delay_ms: Number(dispatch.delay_ms || DISPATCH_BATCH_DELAY_MS) || DISPATCH_BATCH_DELAY_MS,
     min_read_rate: Number(dispatch.min_read_rate || DISPATCH_MIN_READ_RATE) || DISPATCH_MIN_READ_RATE,
+    read_rate_grace_ms: Number(dispatch.read_rate_grace_ms || DISPATCH_READ_RATE_GRACE_MS) || DISPATCH_READ_RATE_GRACE_MS,
     max_opt_out_rate: Number(dispatch.max_opt_out_rate || DISPATCH_MAX_OPT_OUT_RATE) || DISPATCH_MAX_OPT_OUT_RATE,
     timezone: dispatch.timezone || DISPATCH_TIMEZONE,
     business_hours: dispatch.business_hours || {
@@ -711,11 +745,13 @@ function normalizeBulkSendSettingsPayload(raw = {}) {
   const batchSize = Math.max(1, Math.min(1000, Number.parseInt(raw.batch_size || raw.batchSize || DISPATCH_BATCH_SIZE, 10) || DISPATCH_BATCH_SIZE));
   const delayMs = Math.max(2 * 60 * 1000, Number.parseInt(raw.delay_ms || raw.delayMs || DISPATCH_BATCH_DELAY_MS, 10) || DISPATCH_BATCH_DELAY_MS);
   const minReadRate = Math.min(1, Math.max(0, Number(raw.min_read_rate ?? raw.minReadRate ?? DISPATCH_MIN_READ_RATE) || DISPATCH_MIN_READ_RATE));
+  const readRateGraceMs = Math.max(60 * 60 * 1000, Number.parseInt(raw.read_rate_grace_ms || raw.readRateGraceMs || DISPATCH_READ_RATE_GRACE_MS, 10) || DISPATCH_READ_RATE_GRACE_MS);
   const maxOptOutRate = Math.min(1, Math.max(0, Number(raw.max_opt_out_rate ?? raw.maxOptOutRate ?? DISPATCH_MAX_OPT_OUT_RATE) || DISPATCH_MAX_OPT_OUT_RATE));
   return {
     batch_size: batchSize,
     delay_ms: delayMs,
     min_read_rate: minReadRate,
+    read_rate_grace_ms: readRateGraceMs,
     max_opt_out_rate: maxOptOutRate,
     business_hours: {
       start: DISPATCH_BUSINESS_START_HOUR,
@@ -1239,7 +1275,7 @@ function serializeCampaign(list, { itemsPreview = [] } = {}) {
     metrics: plain.metrics || {},
     safety_gates: plain.safety_gates || {},
     blocked_gates: getBlockedGates(plain.safety_gates || {}),
-    dispatch: getDispatchConfig(plain),
+    dispatch: getDispatchProgress(plain, plain.counters || null),
     custom_fields_schema: plain.custom_fields_schema || [],
     prepared_at: plain.prepared_at,
     last_sent_at: plain.last_sent_at,
@@ -1302,12 +1338,13 @@ async function listCampaigns(scope) {
   const [uniqueContactsRow] = ids.length
     ? await db.sequelize.query(
       `
-      SELECT COUNT(DISTINCT COALESCE(
-        CASE WHEN paciente_id IS NOT NULL THEN CONCAT('p:', paciente_id) END,
-        CASE WHEN NULLIF(TRIM(phone), '') IS NOT NULL THEN CONCAT('ph:', TRIM(phone)) END,
-        CASE WHEN NULLIF(TRIM(email), '') IS NOT NULL THEN CONCAT('em:', LOWER(TRIM(email))) END,
-        CASE WHEN NULLIF(TRIM(name), '') IS NOT NULL THEN CONCAT('nm:', LOWER(TRIM(name))) END
-      )) AS unique_contacts
+      SELECT
+        COUNT(DISTINCT ${buildContactUniqExpression()}) AS unique_contacts,
+        COUNT(DISTINCT CASE WHEN status = 'ready' THEN ${buildContactUniqExpression()} END) AS unique_ready_contacts,
+        COUNT(DISTINCT CASE
+          WHEN sent_at IS NOT NULL OR dispatch_status IN ('sent','delivered','read','replied')
+          THEN ${buildContactUniqExpression()}
+        END) AS unique_sent_contacts
       FROM MarketingPatientListItems
       WHERE list_id IN (:ids)
       `,
@@ -1342,6 +1379,8 @@ async function listCampaigns(scope) {
     return acc;
   }, { total_lists: 0, total_patients: 0, unique_contacts: 0, ready: 0, excluded: 0, sent: 0, delivered: 0, read: 0, replied: 0, appointments: 0, treatments: 0, estimated_revenue: 0 });
   aggregate.unique_contacts = Number(uniqueContactsRow?.unique_contacts || 0);
+  aggregate.unique_ready_contacts = Number(uniqueContactsRow?.unique_ready_contacts || 0);
+  aggregate.unique_sent_contacts = Number(uniqueContactsRow?.unique_sent_contacts || 0);
   return { success: true, items, aggregate, daily_series: [] };
 }
 
@@ -2024,6 +2063,7 @@ async function prepareCampaign(scope, campaignId, body = {}, userId = null) {
       template_usage: templateUsage,
       template_commercial: templateCommercial,
       opt_out_text: templateCommercial ? normalizeText(body.opt_out_text || list.criteria?.opt_out_text) : null,
+      consent_acknowledged: !!(body.consent_acknowledged ?? list.criteria?.consent_acknowledged),
       link_tracking: buildLinkTrackingCriteria(body, list.criteria || {}),
       schedule_mode: body.schedule_mode || 'now',
       scheduled_at: body.scheduled_at || null,
@@ -2033,6 +2073,7 @@ async function prepareCampaign(scope, campaignId, body = {}, userId = null) {
         batch_size: dispatchConfig.batch_size,
         delay_ms: dispatchConfig.delay_ms,
         min_read_rate: dispatchConfig.min_read_rate,
+        read_rate_grace_ms: dispatchConfig.read_rate_grace_ms,
         max_opt_out_rate: dispatchConfig.max_opt_out_rate,
         business_hours: dispatchConfig.business_hours,
         prepared_at: new Date().toISOString(),
@@ -2127,6 +2168,7 @@ async function sendTest(scope, campaignId, body = {}) {
     err.details = { missing_variables: missingVariables };
     throw err;
   }
+  assertTestSendCooldown({ clinicId, targetPhone });
   const params = await buildTemplateParams({ template, item: plainItem, list, clinic });
   const previewText = await renderTemplatePreview({ template, item: plainItem, list, clinic });
   const templateUsage = normalizeTemplateUsage(body.template_usage || list.criteria?.template_usage || 'promocion');
@@ -2401,6 +2443,7 @@ async function startCampaignDispatch(scope, campaignId, body = {}, userId = null
     batch_size: dispatch.batch_size,
     delay_ms: dispatch.delay_ms,
     min_read_rate: dispatch.min_read_rate,
+    read_rate_grace_ms: dispatch.read_rate_grace_ms,
     max_opt_out_rate: dispatch.max_opt_out_rate,
     cancel_requested: false,
     paused_reason: null,
@@ -2773,7 +2816,10 @@ async function runDispatchJob(payload = {}, jobRequest = null) {
   const batchSize = Number(dispatch.batch_size || DISPATCH_BATCH_SIZE) || DISPATCH_BATCH_SIZE;
   const batchDelayMs = Number(dispatch.delay_ms || DISPATCH_BATCH_DELAY_MS) || DISPATCH_BATCH_DELAY_MS;
   const minReadRate = Number(dispatch.min_read_rate || DISPATCH_MIN_READ_RATE) || DISPATCH_MIN_READ_RATE;
+  const readRateGraceMs = Number(dispatch.read_rate_grace_ms || DISPATCH_READ_RATE_GRACE_MS) || DISPATCH_READ_RATE_GRACE_MS;
   const maxOptOutRate = Number(dispatch.max_opt_out_rate || DISPATCH_MAX_OPT_OUT_RATE) || DISPATCH_MAX_OPT_OUT_RATE;
+  const readRateReferenceAt = parseDate(dispatch.started_at || dispatch.prepared_at || list.prepared_at || list.created_at);
+  const canEvaluateReadRate = !!readRateReferenceAt && (Date.now() - readRateReferenceAt.getTime()) >= readRateGraceMs;
   if (sentBefore >= batchSize && optOutRate > maxOptOutRate) {
     await list.update({
       status: 'paused',
@@ -2789,7 +2835,7 @@ async function runDispatchJob(payload = {}, jobRequest = null) {
     });
     return { status: 'completed', result: { paused: true, reason: 'opt_out_rate_high', list_id: list.id } };
   }
-  if (sentBefore >= batchSize && readRate < minReadRate) {
+  if (sentBefore >= batchSize && canEvaluateReadRate && readRate < minReadRate) {
     await list.update({
       status: 'paused',
       criteria: mergeCriteria(list, {
