@@ -35,6 +35,7 @@ const campaignRoutes = require('./routes/campaign.routes');
 const campaignRequestRoutes = require('./routes/campaign-request.routes');
 const templatesRoutes = require('./routes/templates.routes');
 const marketingRoutes = require('./routes/marketing.routes');
+const marketingTrackingRoutes = require('./routes/marketingTracking.routes');
 const automationsRoutes = require('./routes/automations.routes');
 const automationCatalogRoutes = require('./routes/automationCatalog.routes');
 const adminCampaignPlaybooksRoutes = require('./routes/adminCampaignPlaybooks.routes');
@@ -121,6 +122,7 @@ app.use(express.json({
 }));
 app.use(express.urlencoded({ extended: true, limit: HTTP_JSON_BODY_LIMIT }));
 app.use(cookieParser());
+app.use('/', marketingTrackingRoutes);
 // ✅ CORREGIDO: Usar rutas con prefijo /api/ como en la versión que funcionaba
 console.log('Configurando rutas...');
 app.use('/api/users', userRoutes);

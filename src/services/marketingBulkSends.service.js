@@ -1,5 +1,6 @@
 'use strict';
 
+const crypto = require('crypto');
 const { Op, QueryTypes, Sequelize } = require('sequelize');
 const db = require('../../models');
 const { normalizePhoneDigits, getPhoneLookupCandidates } = require('../lib/phone');
@@ -16,6 +17,9 @@ const {
   MarketingPatientContactEvent,
   MarketingPatientList,
   MarketingPatientListItem,
+  MarketingBulkSendSetting,
+  MarketingTrackedLink,
+  MarketingTrackedLinkClick,
   Message,
   Paciente,
   PacienteConsentimiento,
@@ -30,12 +34,13 @@ const STANDARD_FIELDS = new Set(['name', 'first_name', 'last_name', 'phone', 'em
 const COMMERCIAL_TEMPLATE_USAGES = new Set(['marketing', 'comercial', 'promocion', 'promocional', 'reactivacion_pacientes']);
 const DISPATCH_JOB_TYPE = 'marketing_bulk_send_dispatch';
 const DISPATCH_BATCH_SIZE = Math.max(1, Number.parseInt(process.env.MARKETING_BULK_SEND_BATCH_SIZE || '100', 10) || 100);
-const DISPATCH_BATCH_DELAY_MS = Math.max(60 * 1000, Number.parseInt(process.env.MARKETING_BULK_SEND_BATCH_DELAY_MS || String(2 * 60 * 1000), 10) || 2 * 60 * 1000);
+const DISPATCH_BATCH_DELAY_MS = Math.max(2 * 60 * 1000, Number.parseInt(process.env.MARKETING_BULK_SEND_BATCH_DELAY_MS || String(2 * 60 * 1000), 10) || 2 * 60 * 1000);
 const DISPATCH_MIN_READ_RATE = Number(process.env.MARKETING_BULK_SEND_MIN_READ_RATE || '0.30') || 0.30;
-const DISPATCH_MAX_OPT_OUT_RATE = Number(process.env.MARKETING_BULK_SEND_MAX_OPT_OUT_RATE || '0.05') || 0.05;
+const DISPATCH_MAX_OPT_OUT_RATE = Number(process.env.MARKETING_BULK_SEND_MAX_OPT_OUT_RATE || '0.03') || 0.03;
 const DISPATCH_TIMEZONE = process.env.MARKETING_BULK_SEND_TIMEZONE || 'Europe/Madrid';
 const DISPATCH_BUSINESS_START_HOUR = 7;
 const DISPATCH_BUSINESS_END_HOUR = 22;
+const LINK_TRACKING_DEFAULT_DOMAIN = process.env.MARKETING_LINK_TRACKING_DEFAULT_DOMAIN || 'envios.clinicaclick.com';
 
 function repairMojibake(value) {
   const text = String(value || '');
@@ -50,6 +55,129 @@ function repairMojibake(value) {
 
 function normalizeText(value) {
   return repairMojibake(String(value ?? '')).trim();
+}
+
+function normalizeTrackingSubdomain(value) {
+  return normalizeText(value)
+    .toLowerCase()
+    .replace(/[^a-z0-9-]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 48);
+}
+
+function normalizeTrackingDomain(value, mode = 'default') {
+  const raw = normalizeText(value).toLowerCase();
+  if (mode === 'custom') {
+    const subdomain = normalizeTrackingSubdomain(raw.replace(/\.clinicaclick\.com$/i, ''));
+    return subdomain ? `${subdomain}.clinicaclick.com` : LINK_TRACKING_DEFAULT_DOMAIN;
+  }
+  if (/^[a-z0-9-]+\.clinicaclick\.com$/i.test(raw)) {
+    return raw;
+  }
+  return LINK_TRACKING_DEFAULT_DOMAIN;
+}
+
+function normalizeLinkTrackingConfig(raw = {}) {
+  const source = raw && typeof raw === 'object' ? raw : {};
+  const enabled = source.enabled === true || source.link_tracking_enabled === true;
+  const mode = source.domain_mode === 'custom' || source.mode === 'custom' ? 'custom' : 'default';
+  const customSubdomain = normalizeTrackingSubdomain(source.custom_subdomain || source.customSubdomain || '');
+  const domain = normalizeTrackingDomain(
+    mode === 'custom'
+      ? customSubdomain
+      : (source.domain || source.tracking_domain || LINK_TRACKING_DEFAULT_DOMAIN),
+    mode
+  );
+  return {
+    enabled,
+    domain_mode: mode,
+    domain,
+    custom_subdomain: mode === 'custom' ? customSubdomain : null,
+  };
+}
+
+function buildLinkTrackingCriteria(body = {}, previousCriteria = {}) {
+  const previous = normalizeLinkTrackingConfig(previousCriteria.link_tracking || previousCriteria);
+  if (
+    body.link_tracking === undefined &&
+    body.link_tracking_enabled === undefined &&
+    body.tracking_domain_mode === undefined &&
+    body.tracking_custom_subdomain === undefined &&
+    body.tracking_domain === undefined
+  ) {
+    return previous;
+  }
+
+  const raw = body.link_tracking && typeof body.link_tracking === 'object'
+    ? body.link_tracking
+    : {};
+  return normalizeLinkTrackingConfig({
+    ...previous,
+    ...raw,
+    ...(body.link_tracking_enabled !== undefined ? { enabled: body.link_tracking_enabled === true } : {}),
+    ...(body.tracking_domain_mode !== undefined ? { domain_mode: body.tracking_domain_mode } : {}),
+    ...(body.tracking_custom_subdomain !== undefined ? { custom_subdomain: body.tracking_custom_subdomain } : {}),
+    ...(body.tracking_domain !== undefined ? { domain: body.tracking_domain } : {}),
+  });
+}
+
+function getListLinkTrackingConfig(list) {
+  return normalizeLinkTrackingConfig((list?.criteria || {}).link_tracking || {});
+}
+
+function isHttpUrl(value) {
+  try {
+    const parsed = new URL(String(value || '').trim());
+    return ['http:', 'https:'].includes(parsed.protocol);
+  } catch (_) {
+    return false;
+  }
+}
+
+function buildTrackingUrl(link) {
+  const domain = normalizeTrackingDomain(link?.tracking_domain || LINK_TRACKING_DEFAULT_DOMAIN);
+  return `https://${domain}/r/${encodeURIComponent(link.token)}`;
+}
+
+async function createTrackedLinkForVariable({ list, item, variableKey, originalUrl, domain }) {
+  if (!MarketingTrackedLink || !list?.id || !isHttpUrl(originalUrl)) {
+    return null;
+  }
+  const listPlain = list?.get ? list.get({ plain: true }) : list;
+  const itemPlain = item?.get ? item.get({ plain: true }) : item;
+  const where = {
+    list_id: listPlain.id,
+    item_id: itemPlain?.id || null,
+    variable_key: normalizeKey(variableKey) || null,
+    original_url: String(originalUrl).trim(),
+  };
+  const existing = await MarketingTrackedLink.findOne({ where });
+  if (existing) {
+    if (existing.status !== 'active' || existing.tracking_domain !== domain) {
+      await existing.update({ status: 'active', tracking_domain: domain });
+    }
+    return existing;
+  }
+
+  for (let attempt = 0; attempt < 4; attempt += 1) {
+    try {
+      return await MarketingTrackedLink.create({
+        ...where,
+        token: crypto.randomBytes(12).toString('base64url'),
+        clinica_id: itemPlain?.clinica_id || listPlain.clinica_id || null,
+        grupo_clinica_id: listPlain.grupo_clinica_id || null,
+        tracking_domain: domain,
+        status: 'active',
+        metadata: {
+          source: 'marketing_bulk_sends',
+          objective_id: OBJECTIVE_ID,
+        },
+      });
+    } catch (error) {
+      if (attempt >= 3) throw error;
+    }
+  }
+  return null;
 }
 
 function normalizeKey(value) {
@@ -302,7 +430,8 @@ async function buildListReport(listId) {
   const id = Number(listId || 0);
   if (!id) return null;
 
-  const [hourRows] = await db.sequelize.query(
+  const [hourRows, clickRows, clickCountryRows, clickItemRows] = await Promise.all([
+    db.sequelize.query(
     `
     SELECT HOUR(read_at) AS hour, COUNT(*) AS total
     FROM MarketingPatientListItems
@@ -310,8 +439,55 @@ async function buildListReport(listId) {
     GROUP BY HOUR(read_at)
     ORDER BY hour ASC
     `,
-    { replacements: { listId: id } }
-  );
+      { replacements: { listId: id }, type: QueryTypes.SELECT }
+    ),
+    MarketingTrackedLinkClick && MarketingTrackedLink
+      ? db.sequelize.query(
+        `
+        SELECT
+          l.id,
+          l.variable_key,
+          l.original_url,
+          COUNT(c.id) AS clicks,
+          COUNT(DISTINCT CONCAT(COALESCE(c.item_id, 0), ':', COALESCE(c.ip_hash, ''), ':', COALESCE(c.user_agent_hash, ''))) AS unique_clicks
+        FROM MarketingTrackedLinks l
+        LEFT JOIN MarketingTrackedLinkClicks c ON c.tracked_link_id = l.id
+        WHERE l.list_id = :listId
+        GROUP BY l.id, l.variable_key, l.original_url
+        ORDER BY clicks DESC, l.id ASC
+        LIMIT 20
+        `,
+        { replacements: { listId: id }, type: QueryTypes.SELECT }
+      )
+      : Promise.resolve([]),
+    MarketingTrackedLinkClick
+      ? db.sequelize.query(
+        `
+        SELECT
+          COALESCE(NULLIF(country_code, ''), 'unknown') AS country_code,
+          COALESCE(NULLIF(country_name, ''), 'Sin dato') AS country_name,
+          COUNT(*) AS clicks
+        FROM MarketingTrackedLinkClicks
+        WHERE list_id = :listId
+        GROUP BY COALESCE(NULLIF(country_code, ''), 'unknown'), COALESCE(NULLIF(country_name, ''), 'Sin dato')
+        ORDER BY clicks DESC
+        LIMIT 20
+        `,
+        { replacements: { listId: id }, type: QueryTypes.SELECT }
+      )
+      : Promise.resolve([]),
+    MarketingTrackedLinkClick
+      ? db.sequelize.query(
+        `
+        SELECT item_id, COUNT(*) AS clicks
+        FROM MarketingTrackedLinkClicks
+        WHERE list_id = :listId AND item_id IS NOT NULL
+        GROUP BY item_id
+        `,
+        { replacements: { listId: id }, type: QueryTypes.SELECT }
+      )
+      : Promise.resolve([]),
+  ]);
   const [statusRows] = await db.sequelize.query(
     `
     SELECT
@@ -335,6 +511,7 @@ async function buildListReport(listId) {
   const sent = Number(totals.sent || 0);
   const optOut = Number(totals.opt_out || 0);
   const sentOptOut = Number(totals.sent_opt_out || 0);
+  const quality = getMarketingQualitySnapshot({ sent, optOut: sentOptOut, spamReports: 0 });
   return {
     opt_out_share: [
       { label: 'Bajas', value: sentOptOut },
@@ -352,7 +529,27 @@ async function buildListReport(listId) {
       replied: Number(totals.replied || 0),
       opt_out: optOut,
       sent_opt_out: sentOptOut,
+      link_clicks: clickRows.reduce((sum, row) => sum + Number(row.clicks || 0), 0),
+      unique_link_clicks: clickRows.reduce((sum, row) => sum + Number(row.unique_clicks || 0), 0),
     },
+    link_clicks: clickRows.map((row) => ({
+      id: row.id,
+      variable_key: row.variable_key,
+      original_url: row.original_url,
+      clicks: Number(row.clicks || 0),
+      unique_clicks: Number(row.unique_clicks || 0),
+    })),
+    click_countries: clickCountryRows.map((row) => ({
+      country_code: row.country_code,
+      country_name: row.country_name,
+      clicks: Number(row.clicks || 0),
+    })),
+    item_clicks: clickItemRows.map((row) => ({
+      item_id: Number(row.item_id || 0),
+      clicks: Number(row.clicks || 0),
+    })).filter((row) => row.item_id > 0),
+    quality,
+    spam_reports_supported: false,
   };
 }
 
@@ -487,7 +684,9 @@ function parseMessagingLimit(value) {
 
 function getDispatchConfig(list) {
   const criteria = list?.criteria || {};
-  const dispatch = criteria.dispatch && typeof criteria.dispatch === 'object' ? criteria.dispatch : {};
+  const dispatch = criteria.dispatch && typeof criteria.dispatch === 'object'
+    ? criteria.dispatch
+    : (criteria.dispatch_config && typeof criteria.dispatch_config === 'object' ? criteria.dispatch_config : {});
   return {
     batch_size: Number(dispatch.batch_size || DISPATCH_BATCH_SIZE) || DISPATCH_BATCH_SIZE,
     delay_ms: Number(dispatch.delay_ms || DISPATCH_BATCH_DELAY_MS) || DISPATCH_BATCH_DELAY_MS,
@@ -501,6 +700,79 @@ function getDispatchConfig(list) {
     },
     ...dispatch,
   };
+}
+
+function normalizeBulkSendSettingsPayload(raw = {}) {
+  const batchSize = Math.max(1, Math.min(1000, Number.parseInt(raw.batch_size || raw.batchSize || DISPATCH_BATCH_SIZE, 10) || DISPATCH_BATCH_SIZE));
+  const delayMs = Math.max(2 * 60 * 1000, Number.parseInt(raw.delay_ms || raw.delayMs || DISPATCH_BATCH_DELAY_MS, 10) || DISPATCH_BATCH_DELAY_MS);
+  const minReadRate = Math.min(1, Math.max(0, Number(raw.min_read_rate ?? raw.minReadRate ?? DISPATCH_MIN_READ_RATE) || DISPATCH_MIN_READ_RATE));
+  const maxOptOutRate = Math.min(1, Math.max(0, Number(raw.max_opt_out_rate ?? raw.maxOptOutRate ?? DISPATCH_MAX_OPT_OUT_RATE) || DISPATCH_MAX_OPT_OUT_RATE));
+  return {
+    batch_size: batchSize,
+    delay_ms: delayMs,
+    min_read_rate: minReadRate,
+    max_opt_out_rate: maxOptOutRate,
+    business_hours: {
+      start: DISPATCH_BUSINESS_START_HOUR,
+      end: DISPATCH_BUSINESS_END_HOUR,
+      timezone: DISPATCH_TIMEZONE,
+      locked: true,
+    },
+  };
+}
+
+async function getAdminBulkSendSettings() {
+  const defaults = normalizeBulkSendSettingsPayload({});
+  if (!MarketingBulkSendSetting) {
+    return { settings: defaults, blocked_users: [] };
+  }
+  const row = await MarketingBulkSendSetting.findOne({ where: { scope_key: 'global' } });
+  return {
+    settings: normalizeBulkSendSettingsPayload(row?.settings || defaults),
+    blocked_users: Array.isArray(row?.blocked_users) ? row.blocked_users : [],
+    updated_at: row?.updated_at || null,
+  };
+}
+
+async function upsertAdminBulkSendSettings(body = {}, userId = null) {
+  const settings = normalizeBulkSendSettingsPayload(body);
+  const blockedUsers = Array.isArray(body.blocked_users)
+    ? body.blocked_users.map((item) => ({
+      phone: normalizePhoneDigits(item?.phone || ''),
+      email: normalizeText(item?.email || '').toLowerCase(),
+      reason: normalizeText(item?.reason || 'Bloqueo manual por calidad'),
+      blocked_at: item?.blocked_at || new Date().toISOString(),
+    })).filter((item) => item.phone || item.email)
+    : undefined;
+
+  if (!MarketingBulkSendSetting) {
+    return { settings, blocked_users: blockedUsers || [] };
+  }
+
+  const [row] = await MarketingBulkSendSetting.findOrCreate({
+    where: { scope_key: 'global' },
+    defaults: {
+      scope_key: 'global',
+      settings,
+      blocked_users: blockedUsers || [],
+      updated_by: userId || null,
+    },
+  });
+  await row.update({
+    settings,
+    ...(blockedUsers !== undefined ? { blocked_users: blockedUsers } : {}),
+    updated_by: userId || null,
+  });
+  return getAdminBulkSendSettings();
+}
+
+async function getDispatchConfigForList(list) {
+  const admin = await getAdminBulkSendSettings().catch(() => null);
+  const criteria = {
+    ...(list?.criteria || {}),
+    dispatch_config: admin?.settings || (list?.criteria || {}).dispatch_config || {},
+  };
+  return getDispatchConfig({ ...list, criteria });
 }
 
 function mergeCriteria(list, patch) {
@@ -1038,6 +1310,7 @@ async function createCampaign(scope, body = {}, userId = null) {
   const templateCommercial = body.template_commercial === true || isCommercialTemplateUsage(templateUsage);
   const listName = normalizeText(body.name) || 'Lista de envíos masivos';
   const campaignName = normalizeText(body.campaign_name || body.campaignName) || listName;
+  const linkTracking = buildLinkTrackingCriteria(body, {});
 
   return db.sequelize.transaction(async (transaction) => {
     let itemPayloads = [];
@@ -1079,6 +1352,7 @@ async function createCampaign(scope, body = {}, userId = null) {
         import_file_name: body.import_file_name || null,
         column_mapping: columnMapping,
         name_format: normalizeNameFormat(body.name_format || body.nameFormat || (source === 'imported_file' ? 'auto' : null)),
+        link_tracking: linkTracking,
         required_policy: {
           whatsapp: ['name', 'phone'],
           email: ['name', 'email'],
@@ -1167,6 +1441,26 @@ function mergeCustomFieldSchemas(existingSchema = [], incomingSchema = []) {
   return Array.from(fields.values());
 }
 
+function normalizeListSegment(segment = {}) {
+  if (!segment || typeof segment !== 'object') return null;
+  const field = normalizeKey(segment.field || segment.key || '');
+  const value = normalizeText(segment.value);
+  if (!field) return null;
+  const allowedOperators = new Set(['equals', 'contains', 'not_empty']);
+  const operator = allowedOperators.has(normalizeKey(segment.operator || 'equals'))
+    ? normalizeKey(segment.operator || 'equals')
+    : 'equals';
+  if (operator !== 'not_empty' && !value) return null;
+  return {
+    id: normalizeText(segment.id) || crypto.randomBytes(6).toString('hex'),
+    name: normalizeText(segment.name) || `Segmento ${field}`,
+    field,
+    operator,
+    value,
+    created_at: new Date().toISOString(),
+  };
+}
+
 async function updateCampaign(scope, campaignId, body = {}, userId = null) {
   const list = await MarketingPatientList.findByPk(campaignId);
   ensureScopeAccess(list, scope);
@@ -1199,6 +1493,23 @@ async function updateCampaign(scope, campaignId, body = {}, userId = null) {
   if (body.consent_acknowledged !== undefined) nextCriteria.consent_acknowledged = body.consent_acknowledged === true;
   if (body.schedule_mode !== undefined) nextCriteria.schedule_mode = normalizeText(body.schedule_mode) || 'now';
   if (body.scheduled_at !== undefined) nextCriteria.scheduled_at = body.scheduled_at || null;
+  if (
+    body.link_tracking !== undefined ||
+    body.link_tracking_enabled !== undefined ||
+    body.tracking_domain_mode !== undefined ||
+    body.tracking_custom_subdomain !== undefined ||
+    body.tracking_domain !== undefined
+  ) {
+    nextCriteria.link_tracking = buildLinkTrackingCriteria(body, nextCriteria);
+  }
+  const incomingSegment = normalizeListSegment(body.segment);
+  if (incomingSegment) {
+    const previousSegments = Array.isArray(nextCriteria.segments) ? nextCriteria.segments : [];
+    nextCriteria.segments = [
+      incomingSegment,
+      ...previousSegments.filter((segment) => String(segment?.id || '') !== incomingSegment.id),
+    ];
+  }
   if (body.auto_send_when_template_approved !== undefined || body.auto_send_when_approved !== undefined) {
     nextCriteria.auto_send_when_template_approved = body.auto_send_when_template_approved === true || body.auto_send_when_approved === true;
   }
@@ -1455,6 +1766,37 @@ async function refreshListCounters(listId, transaction = null) {
   return counters;
 }
 
+function getMarketingQualitySnapshot({ sent = 0, optOut = 0, spamReports = 0 } = {}) {
+  const safeSent = Number(sent || 0);
+  const optOutRate = safeSent > 0 ? Number(optOut || 0) / safeSent : 0;
+  const spamRate = safeSent > 0 ? Number(spamReports || 0) / safeSent : 0;
+  let label = 'sin_datos';
+  let severity = 'muted';
+  if (safeSent > 0) {
+    if (spamRate > 0.01) {
+      label = 'spam';
+      severity = 'danger';
+    } else if (optOutRate > 0.03) {
+      label = 'mala';
+      severity = 'danger';
+    } else if (optOutRate > 0.01) {
+      label = 'normal';
+      severity = 'warning';
+    } else {
+      label = 'buena';
+      severity = 'success';
+    }
+  }
+  return {
+    label,
+    severity,
+    opt_out_rate: optOutRate,
+    spam_rate: spamRate,
+    spam_reports: Number(spamReports || 0),
+    spam_reports_supported: false,
+  };
+}
+
 function getDispatchProgress(list, counters = null, accountQuality = null) {
   const config = getDispatchConfig(list);
   const currentCounters = counters || list?.counters || {};
@@ -1465,6 +1807,7 @@ function getDispatchProgress(list, counters = null, accountQuality = null) {
   const optOut = Number(currentCounters.opt_out || currentCounters.exclusion_reasons?.opt_out || 0);
   const readRate = sent > 0 ? read / sent : null;
   const optOutRate = sent > 0 ? optOut / sent : null;
+  const quality = getMarketingQualitySnapshot({ sent, optOut, spamReports: Number(config.spam_reports || 0) });
   return {
     ...config,
     status: config.status || list?.status || 'draft',
@@ -1480,6 +1823,10 @@ function getDispatchProgress(list, counters = null, accountQuality = null) {
     progress_percent: totalToSend > 0 ? Math.min(100, Math.round((sent / totalToSend) * 100)) : 0,
     read_rate: readRate,
     opt_out_rate: optOutRate,
+    spam_rate: quality.spam_rate,
+    quality_label: quality.label,
+    quality_severity: quality.severity,
+    spam_reports_supported: false,
     paused_reason: config.paused_reason || null,
     cancel_requested: config.cancel_requested === true,
     next_allowed_at: config.next_allowed_at || null,
@@ -1521,24 +1868,42 @@ function formatMissingVariablesMessage(summary) {
   return `${first.missing_count} contactos no tienen la variable ${first.token}. No puedes enviar esta plantilla. Edita tu lista o elimina la variable de la plantilla y espera hasta que se apruebe.${suffix}`;
 }
 
-function buildTemplateParams({ template, item, list, clinic }) {
-  const contract = getTemplateVariableContract(template);
-  if (!contract.length) return [];
-  return contract.map((variable) => resolveVariableValue(variable.name, item, list, clinic) || variable.example || ' ');
+async function resolveTemplateParamValue({ variable, item, list, clinic }) {
+  const rawValue = resolveVariableValue(variable.name, item, list, clinic) || variable.example || ' ';
+  const tracking = getListLinkTrackingConfig(list);
+  if (!tracking.enabled || !isHttpUrl(rawValue)) {
+    return rawValue;
+  }
+  const link = await createTrackedLinkForVariable({
+    list,
+    item,
+    variableKey: variable.name,
+    originalUrl: rawValue,
+    domain: tracking.domain,
+  });
+  return link ? buildTrackingUrl(link) : rawValue;
 }
 
-function renderTemplatePreview({ template, item, list, clinic }) {
+async function buildTemplateParams({ template, item, list, clinic }) {
+  const contract = getTemplateVariableContract(template);
+  if (!contract.length) return [];
+  const params = [];
+  for (const variable of contract) {
+    params.push(await resolveTemplateParamValue({ variable, item, list, clinic }));
+  }
+  return params;
+}
+
+async function renderTemplatePreview({ template, item, list, clinic }) {
   const plain = template?.get ? template.get({ plain: true }) : template;
   const body = extractBodyText(plain?.components);
   if (!body) return `Plantilla WhatsApp: ${plain?.name || 'sin nombre'}`;
 
   const contract = getTemplateVariableContract(template);
-  const byIndex = new Map(
-    contract.map((variable) => [
-      Number(variable.index),
-      resolveVariableValue(variable.name, item, list, clinic) || variable.example || '',
-    ])
-  );
+  const byIndex = new Map();
+  for (const variable of contract) {
+    byIndex.set(Number(variable.index), await resolveTemplateParamValue({ variable, item, list, clinic }));
+  }
 
   return body.replace(/{{\s*(\d+)\s*}}/g, (_match, rawIndex) => {
     const value = byIndex.get(Number(rawIndex));
@@ -1586,6 +1951,7 @@ async function prepareCampaign(scope, campaignId, body = {}, userId = null) {
     capping: true,
     cancelable_queue: true,
   };
+  const dispatchConfig = await getDispatchConfigForList(list);
 
   await list.update({
     status: 'prepared',
@@ -1604,20 +1970,17 @@ async function prepareCampaign(scope, campaignId, body = {}, userId = null) {
       template_usage: templateUsage,
       template_commercial: templateCommercial,
       opt_out_text: templateCommercial ? normalizeText(body.opt_out_text || list.criteria?.opt_out_text) : null,
+      link_tracking: buildLinkTrackingCriteria(body, list.criteria || {}),
       schedule_mode: body.schedule_mode || 'now',
       scheduled_at: body.scheduled_at || null,
       dispatch: {
-        ...getDispatchConfig(list),
+        ...dispatchConfig,
         status: !approved && autoSendWhenApproved ? 'waiting_template_approval' : 'prepared',
-        batch_size: DISPATCH_BATCH_SIZE,
-        delay_ms: DISPATCH_BATCH_DELAY_MS,
-        min_read_rate: DISPATCH_MIN_READ_RATE,
-        max_opt_out_rate: DISPATCH_MAX_OPT_OUT_RATE,
-        business_hours: {
-          start: DISPATCH_BUSINESS_START_HOUR,
-          end: DISPATCH_BUSINESS_END_HOUR,
-          timezone: DISPATCH_TIMEZONE,
-        },
+        batch_size: dispatchConfig.batch_size,
+        delay_ms: dispatchConfig.delay_ms,
+        min_read_rate: dispatchConfig.min_read_rate,
+        max_opt_out_rate: dispatchConfig.max_opt_out_rate,
+        business_hours: dispatchConfig.business_hours,
         prepared_at: new Date().toISOString(),
         auto_send_when_template_approved: autoSendWhenApproved,
       },
@@ -1710,8 +2073,8 @@ async function sendTest(scope, campaignId, body = {}) {
     err.details = { missing_variables: missingVariables };
     throw err;
   }
-  const params = buildTemplateParams({ template, item: plainItem, list, clinic });
-  const previewText = renderTemplatePreview({ template, item: plainItem, list, clinic });
+  const params = await buildTemplateParams({ template, item: plainItem, list, clinic });
+  const previewText = await renderTemplatePreview({ template, item: plainItem, list, clinic });
   const templateUsage = normalizeTemplateUsage(body.template_usage || list.criteria?.template_usage || 'promocion');
   const templateCommercial = body.template_commercial === true
     || (body.template_commercial !== false && (list.criteria?.template_commercial === true || isCommercialTemplateUsage(templateUsage)));
@@ -1866,12 +2229,16 @@ async function listRecipients(scope, campaignId, query = {}) {
   });
   const counters = reloaded?.counters || await refreshListCounters(list.id);
   const report = await buildListReport(list.id);
+  const clickCountsByItem = new Map((report?.item_clicks || []).map((row) => [Number(row.item_id), Number(row.clicks || 0)]));
   return {
     success: true,
     page,
     page_size: pageSize,
     total: count,
-    items: rows.map(serializeItem),
+    items: rows.map((row) => ({
+      ...serializeItem(row),
+      link_clicks: clickCountsByItem.get(Number(row.id)) || 0,
+    })),
     summary: counters,
     report,
   };
@@ -1977,10 +2344,10 @@ async function startCampaignDispatch(scope, campaignId, body = {}, userId = null
     ...dispatch,
     status: nextRunAt ? 'scheduled' : 'queued',
     job_id: job.id,
-    batch_size: DISPATCH_BATCH_SIZE,
-    delay_ms: DISPATCH_BATCH_DELAY_MS,
-    min_read_rate: DISPATCH_MIN_READ_RATE,
-    max_opt_out_rate: DISPATCH_MAX_OPT_OUT_RATE,
+    batch_size: dispatch.batch_size,
+    delay_ms: dispatch.delay_ms,
+    min_read_rate: dispatch.min_read_rate,
+    max_opt_out_rate: dispatch.max_opt_out_rate,
     cancel_requested: false,
     paused_reason: null,
     started_at: dispatch.started_at || new Date().toISOString(),
@@ -2176,8 +2543,8 @@ function extractProviderError(error) {
 
 async function sendDispatchItem({ list, item, template, clinic, clinicConfig, batchIndex }) {
   const plainItem = item.get ? item.get({ plain: true }) : item;
-  const params = buildTemplateParams({ template, item: plainItem, list, clinic });
-  const previewText = renderTemplatePreview({ template, item: plainItem, list, clinic });
+  const params = await buildTemplateParams({ template, item: plainItem, list, clinic });
+  const previewText = await renderTemplatePreview({ template, item: plainItem, list, clinic });
   const conversation = await findCanonicalWhatsappConversation({
     clinicId: clinicConfig.clinicId || getClinicIdForList(list),
     contactId: item.phone,
@@ -2349,7 +2716,11 @@ async function runDispatchJob(payload = {}, jobRequest = null) {
   const sentBefore = Number(countersBefore.sent || 0);
   const readRate = sentBefore > 0 ? Number(countersBefore.read || 0) / sentBefore : 1;
   const optOutRate = sentBefore > 0 ? Number(countersBefore.opt_out || countersBefore.exclusion_reasons?.opt_out || 0) / sentBefore : 0;
-  if (sentBefore >= DISPATCH_BATCH_SIZE && optOutRate > DISPATCH_MAX_OPT_OUT_RATE) {
+  const batchSize = Number(dispatch.batch_size || DISPATCH_BATCH_SIZE) || DISPATCH_BATCH_SIZE;
+  const batchDelayMs = Number(dispatch.delay_ms || DISPATCH_BATCH_DELAY_MS) || DISPATCH_BATCH_DELAY_MS;
+  const minReadRate = Number(dispatch.min_read_rate || DISPATCH_MIN_READ_RATE) || DISPATCH_MIN_READ_RATE;
+  const maxOptOutRate = Number(dispatch.max_opt_out_rate || DISPATCH_MAX_OPT_OUT_RATE) || DISPATCH_MAX_OPT_OUT_RATE;
+  if (sentBefore >= batchSize && optOutRate > maxOptOutRate) {
     await list.update({
       status: 'paused',
       criteria: mergeCriteria(list, {
@@ -2364,7 +2735,7 @@ async function runDispatchJob(payload = {}, jobRequest = null) {
     });
     return { status: 'completed', result: { paused: true, reason: 'opt_out_rate_high', list_id: list.id } };
   }
-  if (sentBefore >= DISPATCH_BATCH_SIZE && readRate < DISPATCH_MIN_READ_RATE) {
+  if (sentBefore >= batchSize && readRate < minReadRate) {
     await list.update({
       status: 'paused',
       criteria: mergeCriteria(list, {
@@ -2432,8 +2803,8 @@ async function runDispatchJob(payload = {}, jobRequest = null) {
   clinicConfig.clinicId = clinicId;
 
   const batchLimit = accountQuality.messaging_limit_count
-    ? Math.max(0, Math.min(DISPATCH_BATCH_SIZE, accountQuality.messaging_limit_count - sentBefore))
-    : DISPATCH_BATCH_SIZE;
+    ? Math.max(0, Math.min(batchSize, accountQuality.messaging_limit_count - sentBefore))
+    : batchSize;
   const batch = batchLimit > 0
     ? await MarketingPatientListItem.findAll({
       where: {
@@ -2553,7 +2924,7 @@ async function runDispatchJob(payload = {}, jobRequest = null) {
     return { status: 'completed', result: { completed: true, list_id: list.id, counters: countersAfter } };
   }
 
-  const nextAllowed = new Date(Date.now() + DISPATCH_BATCH_DELAY_MS);
+  const nextAllowed = new Date(Date.now() + batchDelayMs);
   await list.update({
     status: 'sending',
     criteria: mergeCriteria(list, {
@@ -2715,5 +3086,7 @@ module.exports = {
   runDispatchJob,
   materializeMessageStatusFromWebhook,
   materializeInboundReply,
+  getAdminBulkSendSettings,
+  upsertAdminBulkSendSettings,
   removeCampaign,
 };

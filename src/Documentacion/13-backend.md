@@ -797,10 +797,11 @@ Rutas bajo `/api/marketing/bulk-sends`:
 | Método | Ruta | Uso |
 |---|---|---|
 | GET | `/campaigns` | Lista campanas `mass_sends` por scope, excluyendo archivadas. |
-| POST | `/campaigns` | Crea lista/campana desde importacion, manual o pacientes actuales. Acepta `campaign_name`, `template_usage`, `template_commercial` y `opt_out_text` en `criteria`. |
+| POST | `/campaigns` | Crea lista/campana desde importacion, manual o pacientes actuales. Acepta `campaign_name`, `template_usage`, `template_commercial`, `opt_out_text` y `link_tracking` en `criteria`. |
 | POST | `/campaigns/:id/prepare` | Congela/prepara con plantilla WhatsApp si aplica, sin envio masivo real hasta capping y cola cancelable. |
 | POST | `/campaigns/:id/test-send` | Envia una prueba individual con metadata comercial/no comercial para que el opt-out entrante se aplique correctamente. |
 | DELETE | `/campaigns/:id` | Archiva la campana/lista. |
+| GET | `/r/:token` | Ruta publica de tracking. Registra click de enlace variable y redirige al destino original. |
 
 Reglas:
 
@@ -814,9 +815,11 @@ Reglas:
 - Si un contacto externo responde por WhatsApp, el webhook resuelve la conversacion por telefono. Si existe paciente se vincula `patient_id`; si no existe, se conserva contacto externo y el opt-out comercial se aplica por `phone_digits`.
 - `POST /campaigns/:id/prepare` y `/test-send` validan todas las variables de la plantilla real contra los items `ready`; si falta algun valor devuelven `409` con `details.missing_variables[]` y no usan ejemplos de plantilla como fallback operativo.
 - `GET /campaigns/:id`, `/campaigns/:id/recipients` y `/campaigns/:id/dispatch` hacen una reconciliacion ligera antes de responder: leen `Messages.metadata.wa_status_history`, materializan `sent/delivered/read/failed/replied` en `MarketingPatientListItems`, refrescan contadores y devuelven `report` agregado. Esto corrige informes atrasados sin cargar toda la lista en frontend.
-- El `report` de envios masivos expone `opt_out_share` (bajas sobre contactos realmente enviados) y `read_hours` (lecturas por hora). Los listados detallados de abiertos/no abiertos/respuestas/bajas deben seguir saliendo de endpoints paginados, no de arrays completos en UI.
+- El `report` de envios masivos expone `opt_out_share` (bajas sobre contactos realmente enviados), `read_hours` (lecturas por hora), clicks de enlaces, clicks por contacto y pais aproximado de click. Los listados detallados de abiertos/no abiertos/respuestas/bajas/clicks deben seguir saliendo de endpoints paginados, no de arrays completos en UI.
 - Si un contacto responde `BAJA` tras un outbound comercial, `MarketingContactOptOut` se crea para todas las clinicas del mismo `grupoClinicaId`. En contactos ya enviados no se cambia `status` a excluido: se mantiene el envio histórico y se marca `dispatch_status=replied`, `replied_at` y `opt_out_at`. En contactos pendientes/futuros sí se marca `excluded_opt_out`.
 - Para QA manual se permite revocar una baja dejando `MarketingContactOptOut.status=revoked`; si la revocacion referencia el mismo `inbound_message_id`, la reconciliacion posterior no reactiva esa baja antigua.
+- `criteria.link_tracking.enabled=true` solo transforma variables cuyo valor final sea URL `http/https`. URLs fijas dentro de una plantilla aprobada no se reescriben sin nueva aprobación de Meta.
+- Meta Cloud API no documenta un webhook por destinatario para reporte de spam. El backend expone `spam_reports_supported=false`; la calidad se calcula con bajas, lecturas y calidad/limites WABA cuando estén disponibles.
 
 ### 1.2. Automatizaciones basadas en listas
 
@@ -3315,7 +3318,7 @@ Actualización 2026-05-06:
 - `mass_sends` usa `MarketingPatientLists` y `MarketingPatientListItems` como audiencia congelada y tabla de materialización de estado.
 - El envío real WhatsApp se ejecuta con `JobRequests.type = marketing_bulk_send_dispatch`.
 - El job envía lotes de 100 contactos, programa el siguiente lote con `next_run_at = now + 2 minutos` y respeta la ventana 07:00-22:00 `Europe/Madrid`.
-- Antes de cada batch se recalculan contadores materializados y se pausa si `opt_out_rate > 5%` o, tras el primer lote, `read_rate < 30%`.
+- Antes de cada batch se recalculan contadores materializados y se pausa si `opt_out_rate > 3%` o, tras el primer lote, `read_rate < 30%`.
 - `POST /api/marketing/bulk-sends/campaigns/:id/send` no encola si faltan gates: plantilla WABA aprobada, opt-out/consentimiento, audiencia congelada, auditoría, capping y cola cancelable.
 - `cancel` marca `cancel_requested`; el job corta en el siguiente punto de control. `resume` vuelve a encolar solo si quedan items `ready` pendientes.
 - Los informes/listados deben consultar agregados y paginación (`/recipients`, `/dispatch`). No cargar todos los items en frontend para calcular abiertos/no abiertos.
@@ -3326,6 +3329,8 @@ Actualización 2026-05-06:
 - Los inbound con `BAJA` solo aplican opt-out si el outbound previo tiene metadata comercial; no se debe excluir a pacientes por responder `baja` a recordatorios operativos.
 - El job de envío lo ejecuta el API del namespace (`dev`, `staging`, `prod`). Gateway no ejecuta jobs de negocio, pero al promocionar hay que llevarle `src/workers/queue.workers.js` porque recibe webhooks externos y materializa estados/respuestas.
 - Si se prepara una campaña con plantilla WhatsApp no aprobada y `auto_send_when_template_approved = true`, queda en `dispatch.status = waiting_template_approval`. La sincronización WABA la reencola automáticamente cuando esa plantilla pase a `APPROVED`.
+- Campañas Admin expone `GET/PUT /api/admin/campaign-playbooks/bulk-send-settings` para configurar batch size, delay, lectura mínima y baja máxima. `prepare` guarda snapshot en `criteria.dispatch`; el delay mínimo efectivo es 2 minutos por lote.
+- El seguimiento de enlaces usa `MarketingTrackedLinks`, `MarketingTrackedLinkClicks` y `GET /r/:token`. En staging/prod, gateway/DNS debe enrutar `envios.clinicaclick.com/r/:token` o el subdominio elegido al backend correcto.
 
 Webhooks y colas:
 

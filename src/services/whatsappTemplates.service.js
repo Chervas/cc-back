@@ -586,6 +586,7 @@ async function createCustomTemplateForClinic({
   category = 'UTILITY',
   language = DEFAULT_LANGUAGE,
   variables = [],
+  replaceTemplateId = null,
 }) {
   const safeClinicId = Number(clinicId || 0) || null;
   const safeWabaId = cleanString(wabaId);
@@ -599,6 +600,7 @@ async function createCustomTemplateForClinic({
   if (!safeBodyText) {
     throw new Error('template_body_required');
   }
+  const safeReplaceTemplateId = Number(replaceTemplateId || 0) || null;
 
   const contract = buildVariableContractFromBody(safeBodyText, variables);
   const bodyComponent = {
@@ -642,6 +644,18 @@ async function createCustomTemplateForClinic({
       rejection_reason: buildLocalPendingReasonFromMetaError(err),
       is_active: true,
     });
+    if (safeReplaceTemplateId) {
+      await WhatsappTemplate.update(
+        { is_active: false },
+        {
+          where: {
+            id: safeReplaceTemplateId,
+            waba_id: safeWabaId,
+            ...(safeClinicId ? { clinic_id: safeClinicId } : {}),
+          },
+        }
+      ).catch(() => null);
+    }
     row.meta_submission_error = parsed;
     return { row, submitted: false, error: parsed || err.message };
   }
@@ -661,6 +675,19 @@ async function createCustomTemplateForClinic({
     rejection_reason: null,
     is_active: true,
   });
+
+  if (safeReplaceTemplateId) {
+    await WhatsappTemplate.update(
+      { is_active: false },
+      {
+        where: {
+          id: safeReplaceTemplateId,
+          waba_id: safeWabaId,
+          ...(safeClinicId ? { clinic_id: safeClinicId } : {}),
+        },
+      }
+    ).catch(() => null);
+  }
 
   await enqueueSyncTemplatesJob({
     wabaId: safeWabaId,

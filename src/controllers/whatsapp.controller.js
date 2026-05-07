@@ -1137,10 +1137,12 @@ exports.deleteTemplate = async (req, res) => {
       });
     }
 
-    if (String(template.status || '').toUpperCase() === 'APPROVED') {
+    const isCatalogApproved = String(template.status || '').toUpperCase() === 'APPROVED'
+      && (String(template.origin || '').toLowerCase() === 'catalog' || template.catalog_template_id);
+    if (isCatalogApproved) {
       return res.status(409).json({
         error: 'approved_template_cannot_be_deleted',
-        message: 'No se puede borrar una plantilla aprobada desde ClinicaClick. Archívala o duplica una versión nueva.',
+        message: 'No se puede borrar una plantilla aprobada de catálogo desde ClinicaClick. Puedes duplicarla y crear una versión nueva.',
       });
     }
 
@@ -1206,6 +1208,7 @@ exports.createCustomTemplate = async (req, res) => {
       category: req.body?.category || (req.body?.template_commercial ? 'MARKETING' : 'UTILITY'),
       language: req.body?.language || 'es',
       variables: req.body?.variables || [],
+      replaceTemplateId: req.body?.replace_template_id || req.body?.replaceTemplateId || null,
     });
     const json = result.row.get ? result.row.get({ plain: true }) : result.row;
     return res.status(201).json({
