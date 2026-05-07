@@ -685,6 +685,27 @@ async function replaceTemplateInEditableBulkSends({ oldTemplateId, newTemplate }
   return true;
 }
 
+async function deactivateReplacedTemplateFamily({ wabaId, clinicId, displayName, keepTemplateId }) {
+  const safeWabaId = cleanString(wabaId);
+  const safeClinicId = Number(clinicId || 0) || null;
+  const safeDisplayName = cleanString(displayName);
+  const safeKeepTemplateId = Number(keepTemplateId || 0);
+  if (!safeWabaId || !safeDisplayName || !safeKeepTemplateId) return;
+
+  await WhatsappTemplate.update(
+    { is_active: false },
+    {
+      where: {
+        waba_id: safeWabaId,
+        display_name: safeDisplayName,
+        is_active: true,
+        id: { [Op.ne]: safeKeepTemplateId },
+        ...(safeClinicId ? { clinic_id: safeClinicId } : {}),
+      },
+    }
+  ).catch(() => null);
+}
+
 async function createCustomTemplateForClinic({
   clinicId,
   wabaId,
@@ -793,16 +814,12 @@ async function createCustomTemplateForClinic({
     });
 
     if (replaced) {
-      await WhatsappTemplate.update(
-        { is_active: false },
-        {
-          where: {
-            id: safeReplaceTemplateId,
-            waba_id: safeWabaId,
-            ...(safeClinicId ? { clinic_id: safeClinicId } : {}),
-          },
-        }
-      ).catch(() => null);
+      await deactivateReplacedTemplateFamily({
+        wabaId: safeWabaId,
+        clinicId: safeClinicId,
+        displayName: safeDisplayName,
+        keepTemplateId: row.id,
+      });
     }
   }
 
