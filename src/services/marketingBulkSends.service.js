@@ -10,6 +10,7 @@ const { buildWhatsappTemplateVariableContract } = require('../lib/whatsapp-templ
 const { findCanonicalWhatsappConversation } = require('../lib/canonical-conversation');
 const marketingOptOutService = require('./marketingOptOut.service');
 const jobRequestsService = require('./jobRequests.service');
+const { isGlobalAdmin } = require('../lib/role-helpers');
 
 const {
   Clinica,
@@ -79,6 +80,17 @@ function normalizeTrackingDomain(value, mode = 'default') {
     return raw;
   }
   return LINK_TRACKING_DEFAULT_DOMAIN;
+}
+
+function getActorUserId(actor) {
+  if (actor && typeof actor === 'object') {
+    return actor.userId || actor.id_usuario || actor.id || null;
+  }
+  return actor || null;
+}
+
+function isActorGlobalAdmin(actor) {
+  return isGlobalAdmin(getActorUserId(actor));
 }
 
 function buildContactUniqExpression(alias = '') {
@@ -2383,9 +2395,11 @@ async function triggerDispatchJobIfReady(job, nextRunAt = null) {
   }
 }
 
-async function startCampaignDispatch(scope, campaignId, body = {}, userId = null) {
+async function startCampaignDispatch(scope, campaignId, body = {}, actor = null) {
+  const userId = getActorUserId(actor);
   const list = await MarketingPatientList.findByPk(campaignId);
   ensureScopeAccess(list, scope);
+  const dispatch = getDispatchConfig(list);
   const channels = Array.isArray(list.criteria?.channels)
     ? list.criteria.channels
     : normalizeChannels(list.action_mode || list.channel);
@@ -2397,6 +2411,11 @@ async function startCampaignDispatch(scope, campaignId, body = {}, userId = null
   if (!['prepared', 'paused', 'cancelled', 'sending'].includes(String(list.status || '').toLowerCase())) {
     const err = new Error('Prepara la campaña antes de enviarla.');
     err.status = 409;
+    throw err;
+  }
+  if (String(dispatch.status || '').toLowerCase() === 'paused_quality' && !isActorGlobalAdmin(actor)) {
+    const err = new Error('No se puede reanudar una campaña pausada por baja calidad. Contacta con soporte.');
+    err.status = 403;
     throw err;
   }
   const blockedGates = getBlockedGates(list.safety_gates || {});
@@ -2429,7 +2448,6 @@ async function startCampaignDispatch(scope, campaignId, body = {}, userId = null
   }
 
   const accountQuality = await getWhatsappAccountQualityForList(list, scope);
-  const dispatch = getDispatchConfig(list);
   const scheduledAt = parseDate(body.scheduled_at || list.criteria?.scheduled_at);
   const reference = scheduledAt && scheduledAt.getTime() > Date.now() ? scheduledAt : new Date();
   const businessAllowedAt = getNextBusinessAllowedAt(reference);
@@ -2507,10 +2525,16 @@ async function cancelCampaignDispatch(scope, campaignId, body = {}, userId = nul
   };
 }
 
-async function resumeCampaignDispatch(scope, campaignId, body = {}, userId = null) {
+async function resumeCampaignDispatch(scope, campaignId, body = {}, actor = null) {
+  const userId = getActorUserId(actor);
   const list = await MarketingPatientList.findByPk(campaignId);
   ensureScopeAccess(list, scope);
   const dispatch = getDispatchConfig(list);
+  if (String(dispatch.status || '').toLowerCase() === 'paused_quality' && !isActorGlobalAdmin(actor)) {
+    const err = new Error('No se puede reanudar una campaña pausada por baja calidad. Contacta con soporte.');
+    err.status = 403;
+    throw err;
+  }
   if (!['paused', 'cancelled', 'scheduled', 'sending', 'prepared'].includes(String(list.status || '').toLowerCase())) {
     const err = new Error('Esta campaña no se puede retomar desde su estado actual.');
     err.status = 409;

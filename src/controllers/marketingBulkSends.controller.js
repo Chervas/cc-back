@@ -163,7 +163,7 @@ exports.cancelDispatch = async (req, res) => {
 exports.resumeDispatch = async (req, res) => {
   try {
     const scope = await resolveScopeFromRequest(req, { allowAll: false });
-    const result = await marketingBulkSendsService.resumeCampaignDispatch(scope, req.params.id, req.body || {}, req.userData?.userId || null);
+    const result = await marketingBulkSendsService.resumeCampaignDispatch(scope, req.params.id, req.body || {}, req.userData || null);
     return res.json(result);
   } catch (error) {
     return sendError(res, error, 'Error retomando envío masivo');
