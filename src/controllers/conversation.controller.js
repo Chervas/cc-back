@@ -14,6 +14,51 @@ const ADMIN_USER_IDS = (process.env.ADMIN_USER_IDS || '1,44')
   .map((v) => parseInt(v.trim(), 10))
   .filter((n) => !Number.isNaN(n));
 
+const STREAMABLE_MEDIA_KINDS = new Set(['audio', 'image', 'video', 'document', 'sticker']);
+const INLINE_MEDIA_KINDS = new Set(['audio', 'image', 'video', 'sticker']);
+
+function normalizeMediaMimeType(value, fallback = 'application/octet-stream') {
+  return String(value || fallback).split(';')[0].trim().toLowerCase() || fallback;
+}
+
+function getDefaultMimeTypeForKind(kind) {
+  switch (kind) {
+    case 'audio':
+      return 'audio/ogg';
+    case 'image':
+      return 'image/jpeg';
+    case 'video':
+      return 'video/mp4';
+    default:
+      return 'application/octet-stream';
+  }
+}
+
+function extensionForMediaMimeType(mimeType, kind) {
+  const normalized = normalizeMediaMimeType(mimeType, getDefaultMimeTypeForKind(kind));
+  if (normalized.includes('jpeg') || normalized.includes('jpg')) return 'jpg';
+  if (normalized.includes('png')) return 'png';
+  if (normalized.includes('webp')) return 'webp';
+  if (normalized.includes('gif')) return 'gif';
+  if (normalized.includes('mpeg') || normalized.includes('mp3')) return 'mp3';
+  if (normalized.includes('mp4')) return kind === 'audio' ? 'm4a' : 'mp4';
+  if (normalized.includes('wav')) return 'wav';
+  if (normalized.includes('webm')) return 'webm';
+  if (normalized.includes('ogg') || normalized.includes('opus')) return 'ogg';
+  if (normalized.includes('pdf')) return 'pdf';
+  return kind || 'media';
+}
+
+function unavailableMediaError(kind) {
+  const normalized = String(kind || '').toLowerCase();
+  return normalized ? `${normalized}_unavailable` : 'media_unavailable';
+}
+
+function downloadFailedMediaError(kind) {
+  const normalized = String(kind || '').toLowerCase();
+  return normalized ? `${normalized}_download_failed` : 'media_download_failed';
+}
+
 async function getUserClinics(userId) {
   const isAdmin = ADMIN_USER_IDS.includes(Number(userId));
   if (isAdmin) {
@@ -418,13 +463,13 @@ exports.streamMessageMedia = async (req, res) => {
     const media = metadata.media || {};
     const kind = String(media.kind || '').toLowerCase();
     const mediaId = String(media.id || '').trim();
-    if (kind !== 'audio' || !mediaId) {
-      return res.status(410).json({ error: 'audio_unavailable' });
+    if (!STREAMABLE_MEDIA_KINDS.has(kind) || !mediaId) {
+      return res.status(410).json({ error: unavailableMediaError(kind) });
     }
 
     const clinicConfig = await whatsappService.getClinicConfig(conversation.clinic_id);
     if (!clinicConfig?.accessToken) {
-      return res.status(410).json({ error: 'audio_unavailable' });
+      return res.status(410).json({ error: unavailableMediaError(kind) });
     }
 
     try {
@@ -432,25 +477,30 @@ exports.streamMessageMedia = async (req, res) => {
         mediaId,
         accessToken: clinicConfig.accessToken,
       });
-      const mimeType = contentType || mediaInfo?.mime_type || media.mime_type || 'audio/ogg';
+      const mimeType = normalizeMediaMimeType(
+        contentType || mediaInfo?.mime_type || media.mime_type,
+        getDefaultMimeTypeForKind(kind)
+      );
+      const extension = extensionForMediaMimeType(mimeType, kind);
+      const disposition = INLINE_MEDIA_KINDS.has(kind) ? 'inline' : 'attachment';
       res.set({
         'Content-Type': mimeType,
         'Content-Length': buffer.length,
         'Cache-Control': 'no-store',
-        'Content-Disposition': `inline; filename="whatsapp-audio-${messageId}"`,
+        'Content-Disposition': `${disposition}; filename="whatsapp-${kind}-${messageId}.${extension}"`,
       });
       return res.send(buffer);
     } catch (downloadError) {
       const status = downloadError?.response?.status;
       if ([400, 401, 403, 404, 410].includes(Number(status))) {
-        return res.status(410).json({ error: 'audio_unavailable' });
+        return res.status(410).json({ error: unavailableMediaError(kind) });
       }
       console.error('Error streamMessageMedia', downloadError?.message || downloadError);
-      return res.status(502).json({ error: 'audio_download_failed' });
+      return res.status(502).json({ error: downloadFailedMediaError(kind) });
     }
   } catch (err) {
     console.error('Error streamMessageMedia', err);
-    return res.status(500).json({ error: 'Error obteniendo audio' });
+    return res.status(500).json({ error: 'Error obteniendo media' });
   }
 };
 

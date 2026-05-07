@@ -256,11 +256,12 @@ async function buildInboundMessageDescriptor({ msg, clinicId }) {
     const stripped = extractAndStripWebOriginRef(rawContent);
     const content = stripped.content;
     const metadataExtra = {};
+    const mediaPayload = getWhatsAppMediaPayload(msg);
 
-    if (rawType && !['text', 'button', 'interactive'].includes(rawType)) {
-        metadataExtra.media = {
-            kind: rawType,
-        };
+    if (mediaPayload) {
+        metadataExtra.media = mediaPayload;
+    } else if (rawType && !['text', 'button', 'interactive'].includes(rawType)) {
+        metadataExtra.media = { kind: rawType };
     }
 
     return {
