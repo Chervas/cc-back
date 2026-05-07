@@ -93,6 +93,11 @@ function isActorGlobalAdmin(actor) {
   return isGlobalAdmin(getActorUserId(actor));
 }
 
+function isBlockingQualityPause(dispatch = {}) {
+  if (String(dispatch.status || '').toLowerCase() !== 'paused_quality') return false;
+  return String(dispatch.paused_reason || '').toLowerCase() !== 'read_rate_low';
+}
+
 function buildContactUniqExpression(alias = '') {
   const prefix = alias ? `${alias}.` : '';
   return `COALESCE(
@@ -2413,7 +2418,7 @@ async function startCampaignDispatch(scope, campaignId, body = {}, actor = null)
     err.status = 409;
     throw err;
   }
-  if (String(dispatch.status || '').toLowerCase() === 'paused_quality' && !isActorGlobalAdmin(actor)) {
+  if (isBlockingQualityPause(dispatch) && !isActorGlobalAdmin(actor)) {
     const err = new Error('No se puede reanudar una campaña pausada por baja calidad. Contacta con soporte.');
     err.status = 403;
     throw err;
@@ -2530,7 +2535,7 @@ async function resumeCampaignDispatch(scope, campaignId, body = {}, actor = null
   const list = await MarketingPatientList.findByPk(campaignId);
   ensureScopeAccess(list, scope);
   const dispatch = getDispatchConfig(list);
-  if (String(dispatch.status || '').toLowerCase() === 'paused_quality' && !isActorGlobalAdmin(actor)) {
+  if (isBlockingQualityPause(dispatch) && !isActorGlobalAdmin(actor)) {
     const err = new Error('No se puede reanudar una campaña pausada por baja calidad. Contacta con soporte.');
     err.status = 403;
     throw err;
@@ -2839,11 +2844,7 @@ async function runDispatchJob(payload = {}, jobRequest = null) {
   const optOutRate = sentBefore > 0 ? Number(countersBefore.opt_out || countersBefore.exclusion_reasons?.opt_out || 0) / sentBefore : 0;
   const batchSize = Number(dispatch.batch_size || DISPATCH_BATCH_SIZE) || DISPATCH_BATCH_SIZE;
   const batchDelayMs = Number(dispatch.delay_ms || DISPATCH_BATCH_DELAY_MS) || DISPATCH_BATCH_DELAY_MS;
-  const minReadRate = Number(dispatch.min_read_rate || DISPATCH_MIN_READ_RATE) || DISPATCH_MIN_READ_RATE;
-  const readRateGraceMs = Number(dispatch.read_rate_grace_ms || DISPATCH_READ_RATE_GRACE_MS) || DISPATCH_READ_RATE_GRACE_MS;
   const maxOptOutRate = Number(dispatch.max_opt_out_rate || DISPATCH_MAX_OPT_OUT_RATE) || DISPATCH_MAX_OPT_OUT_RATE;
-  const readRateReferenceAt = parseDate(dispatch.started_at || dispatch.prepared_at || list.prepared_at || list.created_at);
-  const canEvaluateReadRate = !!readRateReferenceAt && (Date.now() - readRateReferenceAt.getTime()) >= readRateGraceMs;
   if (sentBefore >= batchSize && optOutRate > maxOptOutRate) {
     await list.update({
       status: 'paused',
@@ -2858,21 +2859,6 @@ async function runDispatchJob(payload = {}, jobRequest = null) {
       }),
     });
     return { status: 'completed', result: { paused: true, reason: 'opt_out_rate_high', list_id: list.id } };
-  }
-  if (sentBefore >= batchSize && canEvaluateReadRate && readRate < minReadRate) {
-    await list.update({
-      status: 'paused',
-      criteria: mergeCriteria(list, {
-        dispatch: {
-          ...dispatch,
-          status: 'paused_quality',
-          paused_reason: 'read_rate_low',
-          paused_at: new Date().toISOString(),
-          quality_snapshot: { sent: sentBefore, read_rate: readRate, opt_out_rate: optOutRate },
-        },
-      }),
-    });
-    return { status: 'completed', result: { paused: true, reason: 'read_rate_low', list_id: list.id } };
   }
 
   const accountQuality = await getWhatsappAccountQualityForList(list, scope);
