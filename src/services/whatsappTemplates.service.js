@@ -9,6 +9,7 @@ const { recomposeAutomationsUsingTemplate } = require('./whatsappTemplateAutomat
 const {
   ClinicMetaAsset,
   Clinica,
+  MarketingPatientList,
   WhatsappTemplate,
   WhatsappTemplateCatalog,
   WhatsappTemplateCatalogDiscipline,
@@ -28,6 +29,7 @@ const WHATSAPP_TEMPLATE_STATUS = {
   REJECTED: 'REJECTED',
   DISCONNECTED: 'SIN_CONECTAR',
 };
+const WHATSAPP_TEMPLATE_BODY_MAX_LENGTH = 1024;
 
 function resolveGraphBase() {
   const base = META_GRAPH_BASE.replace(/\/+$/, '');
@@ -59,6 +61,82 @@ function stringifyTemplateComponents(value) {
 
 function cleanString(value) {
   return typeof value === 'string' ? value.trim() : '';
+}
+
+function normalizeTemplateKey(value) {
+  return cleanString(value)
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/[^a-z0-9_]+/g, '_')
+    .replace(/^_+|_+$/g, '');
+}
+
+function buildCustomTemplateTechnicalName(displayName) {
+  const base = normalizeTemplateKey(displayName).slice(0, 64) || 'plantilla_whatsapp';
+  const suffix = Date.now().toString(36).slice(-8);
+  return `cc_${base}_${suffix}`.slice(0, 100);
+}
+
+function buildVariableContractFromBody(bodyText, rawVariables = []) {
+  const explicit = Array.isArray(rawVariables) ? rawVariables : [];
+  const explicitByKey = new Map(
+    explicit
+      .map((variable) => {
+        const key = normalizeTemplateKey(variable?.key || variable?.name || variable?.variable);
+        return key ? [key, variable] : null;
+      })
+      .filter(Boolean)
+  );
+  const variables = [];
+  const seen = new Map();
+  const replacedBody = cleanString(bodyText).replace(/\{\{\s*([^}]+?)\s*\}\}/g, (_match, rawKey) => {
+    const key = normalizeTemplateKey(rawKey);
+    if (!key) return '';
+    if (!seen.has(key)) {
+      seen.set(key, seen.size + 1);
+      const source = explicitByKey.get(key) || {};
+      variables.push({
+        index: seen.get(key),
+        position: seen.get(key),
+        name: key,
+        example: cleanString(source.example) || key.split('_').join(' '),
+        description: cleanString(source.description || source.label) || `Variable ${key}`,
+      });
+    }
+    return `{{${seen.get(key)}}}`;
+  });
+  return { body: replacedBody, variables };
+}
+
+function createTemplateValidationError(details) {
+  const error = new Error('invalid_template_body');
+  error.code = 'invalid_template_body';
+  error.statusCode = 400;
+  error.details = Array.isArray(details) ? details : [String(details || 'La plantilla no cumple las reglas de WhatsApp.')];
+  return error;
+}
+
+function validateTemplateBodyForMeta(bodyText) {
+  const text = cleanString(bodyText);
+  const issues = [];
+  if (!text) {
+    issues.push('El cuerpo de la plantilla no puede estar vacío.');
+    return issues;
+  }
+  if (text.length > WHATSAPP_TEMPLATE_BODY_MAX_LENGTH) {
+    issues.push(`El mensaje tiene ${text.length} caracteres. WhatsApp permite un máximo de ${WHATSAPP_TEMPLATE_BODY_MAX_LENGTH} en el cuerpo de una plantilla.`);
+  }
+  if (/^\s*\{\{\d+\}\}/.test(text)) {
+    issues.push('WhatsApp no permite que el cuerpo empiece por una variable. Añade texto fijo antes.');
+  }
+  if (/\{\{\d+\}\}\s*$/.test(text)) {
+    issues.push('WhatsApp no permite que el cuerpo termine en una variable. Añade texto fijo después.');
+  }
+  if (/\{\{\d+\}\}\s*\{\{\d+\}\}/.test(text)) {
+    issues.push('WhatsApp no permite variables consecutivas sin texto fijo entre ellas.');
+  }
+  return issues;
 }
 
 function hasSameMetaFacingContent(template, instance) {
@@ -464,6 +542,34 @@ function buildLocalPendingReasonFromMetaError(err) {
   return `Meta no ha aceptado abrir una revisión nueva para esta plantilla${code}: ${detail}`;
 }
 
+function createMetaTemplateSubmissionError(parsed) {
+  const error = new Error('meta_template_submission_failed');
+  error.code = 'meta_template_submission_failed';
+  error.statusCode = 400;
+  error.details = [
+    'Meta no aceptó abrir la revisión de esta plantilla por un problema técnico de formato. No la hemos guardado como pendiente para evitar confusión; revisa longitud, variables y formato, o avisa a soporte.',
+  ];
+  error.metaError = parsed || null;
+  return error;
+}
+
+async function notifyBulkSendsTemplateApproval(templateRow, logger = console) {
+  const plain = templateRow?.get ? templateRow.get({ plain: true }) : templateRow;
+  if (String(plain?.status || '').toUpperCase() !== WHATSAPP_TEMPLATE_STATUS.APPROVED) return;
+  try {
+    const marketingBulkSendsService = require('./marketingBulkSends.service');
+    if (typeof marketingBulkSendsService.enqueueAutoDispatchForApprovedTemplate === 'function') {
+      await marketingBulkSendsService.enqueueAutoDispatchForApprovedTemplate(templateRow, logger);
+    }
+  } catch (error) {
+    logger.warn?.('[whatsapp-templates] No se pudo notificar aprobación a envíos masivos', {
+      template_id: plain?.id || null,
+      name: plain?.name || null,
+      error: error?.message || error,
+    });
+  }
+}
+
 async function resolveDisciplines({ clinicId, groupId }) {
   if (clinicId) {
     const clinic = await Clinica.findOne({ where: { id_clinica: clinicId }, raw: true });
@@ -512,6 +618,217 @@ async function createTemplateInMeta({ wabaId, accessToken, template, language })
     { params: { access_token: accessToken } }
   );
   return response.data;
+}
+
+function extractTemplateBodyText(components) {
+  const parsed = parseMaybeJson(components) || [];
+  const body = Array.isArray(parsed)
+    ? parsed.find((component) => String(component?.type || '').toUpperCase() === 'BODY')
+    : null;
+  return body?.text || '';
+}
+
+function buildTemplateSnapshot(template) {
+  if (!template) return null;
+  const plain = template.get ? template.get({ plain: true }) : template;
+  return {
+    id: plain.id,
+    name: plain.name,
+    display_name: plain.catalog?.display_name || plain.display_name || plain.name,
+    status: plain.status,
+    rejection_reason: plain.rejection_reason || null,
+    language: plain.language || DEFAULT_LANGUAGE,
+    body: extractTemplateBodyText(plain.components),
+    variables: Array.isArray(plain.variables) ? plain.variables : [],
+    captured_at: new Date().toISOString(),
+  };
+}
+
+async function replaceTemplateInEditableBulkSends({ oldTemplateId, newTemplate }) {
+  const oldId = Number(oldTemplateId || 0);
+  if (!oldId || !MarketingPatientList || !newTemplate) return true;
+
+  const snapshot = buildTemplateSnapshot(newTemplate);
+  const newId = Number(snapshot?.id || 0);
+  if (!newId) return true;
+
+  const lists = await MarketingPatientList.findAll({
+    where: {
+      objective_id: 'mass_sends',
+      status: { [Op.in]: ['draft', 'prepared'] },
+      [Op.or]: [
+        db.sequelize.where(
+          db.sequelize.cast(db.sequelize.json('criteria.whatsapp_template_id'), 'UNSIGNED'),
+          oldId
+        ),
+        db.sequelize.where(
+          db.sequelize.cast(db.sequelize.json('template_snapshot.id'), 'UNSIGNED'),
+          oldId
+        ),
+      ],
+    },
+  });
+
+  for (const list of lists) {
+    await list.update({
+      template_snapshot: snapshot,
+      criteria: {
+        ...(list.criteria || {}),
+        whatsapp_template_id: newId,
+      },
+      safety_gates: {
+        ...(list.safety_gates || {}),
+        approved_template: false,
+      },
+    });
+  }
+  return true;
+}
+
+async function deactivateReplacedTemplateFamily({ wabaId, clinicId, displayName, keepTemplateId }) {
+  const safeWabaId = cleanString(wabaId);
+  const safeClinicId = Number(clinicId || 0) || null;
+  const safeDisplayName = cleanString(displayName);
+  const safeKeepTemplateId = Number(keepTemplateId || 0);
+  if (!safeWabaId || !safeDisplayName || !safeKeepTemplateId) return;
+
+  await WhatsappTemplate.update(
+    { is_active: false },
+    {
+      where: {
+        waba_id: safeWabaId,
+        display_name: safeDisplayName,
+        is_active: true,
+        id: { [Op.ne]: safeKeepTemplateId },
+        ...(safeClinicId ? { clinic_id: safeClinicId } : {}),
+      },
+    }
+  ).catch(() => null);
+}
+
+async function createCustomTemplateForClinic({
+  clinicId,
+  wabaId,
+  accessToken,
+  displayName,
+  bodyText,
+  category = 'UTILITY',
+  language = DEFAULT_LANGUAGE,
+  variables = [],
+  replaceTemplateId = null,
+}) {
+  const safeClinicId = Number(clinicId || 0) || null;
+  const safeWabaId = cleanString(wabaId);
+  const safeAccessToken = cleanString(accessToken);
+  const safeDisplayName = cleanString(displayName) || 'Plantilla WhatsApp';
+  const safeBodyText = cleanString(bodyText);
+  const safeCategory = String(category || '').trim().toUpperCase() === 'MARKETING' ? 'MARKETING' : 'UTILITY';
+  if (!safeWabaId || !safeAccessToken) {
+    throw new Error('missing_waba_credentials');
+  }
+  if (!safeBodyText) {
+    throw new Error('template_body_required');
+  }
+  const safeReplaceTemplateId = Number(replaceTemplateId || 0) || null;
+
+  const contract = buildVariableContractFromBody(safeBodyText, variables);
+  const validationIssues = validateTemplateBodyForMeta(contract.body);
+  if (validationIssues.length) {
+    throw createTemplateValidationError(validationIssues);
+  }
+  const bodyComponent = {
+    type: 'BODY',
+    text: contract.body,
+    ...(contract.variables.length ? {
+      example: {
+        body_text: [contract.variables.map((variable) => variable.example || variable.name)],
+      },
+    } : {}),
+  };
+  const technicalName = buildCustomTemplateTechnicalName(safeDisplayName);
+  const template = {
+    name: technicalName,
+    category: safeCategory,
+    components: [bodyComponent],
+  };
+
+  let metaTemplateId = null;
+  try {
+    const metaResp = await createTemplateInMeta({
+      wabaId: safeWabaId,
+      accessToken: safeAccessToken,
+      template,
+      language,
+    });
+    metaTemplateId = metaResp?.id || null;
+  } catch (err) {
+    const parsed = parseMetaError(err);
+    if (Number(parsed?.code) === 100 || /invalid parameter/i.test(String(parsed?.message || ''))) {
+      throw createMetaTemplateSubmissionError(parsed);
+    }
+    const row = await WhatsappTemplate.create({
+      waba_id: safeWabaId,
+      clinic_id: safeClinicId,
+      name: technicalName,
+      display_name: safeDisplayName,
+      language,
+      category: safeCategory,
+      status: WHATSAPP_TEMPLATE_STATUS.LOCAL_PENDING,
+      components: [bodyComponent],
+      variables: contract.variables,
+      origin: 'custom',
+      rejection_reason: buildLocalPendingReasonFromMetaError(err),
+      is_active: true,
+    });
+    row.meta_submission_error = parsed;
+    return { row, submitted: false, error: parsed || err.message };
+  }
+
+  const row = await WhatsappTemplate.create({
+    waba_id: safeWabaId,
+    clinic_id: safeClinicId,
+    name: technicalName,
+    display_name: safeDisplayName,
+    language,
+    category: safeCategory,
+    status: WHATSAPP_TEMPLATE_STATUS.PENDING,
+    components: [bodyComponent],
+    variables: contract.variables,
+    meta_template_id: metaTemplateId,
+    origin: 'custom',
+    rejection_reason: null,
+    is_active: true,
+  });
+
+  if (safeReplaceTemplateId) {
+    const replaced = await replaceTemplateInEditableBulkSends({
+      oldTemplateId: safeReplaceTemplateId,
+      newTemplate: row,
+    }).catch((err) => {
+      console.error('Error actualizando borradores con nueva plantilla WhatsApp', {
+        oldTemplateId: safeReplaceTemplateId,
+        newTemplateId: row.id,
+        error: err?.message || err,
+      });
+      return false;
+    });
+
+    if (replaced) {
+      await deactivateReplacedTemplateFamily({
+        wabaId: safeWabaId,
+        clinicId: safeClinicId,
+        displayName: safeDisplayName,
+        keepTemplateId: row.id,
+      });
+    }
+  }
+
+  await enqueueSyncTemplatesJob({
+    wabaId: safeWabaId,
+    accessToken: safeAccessToken,
+  }, { delayMs: 15 * 60 * 1000 }).catch(() => null);
+
+  return { row, submitted: true, meta_template_id: metaTemplateId };
 }
 
 async function createTemplatesFromCatalog({ wabaId, clinicId, groupId, assignmentScope }) {
@@ -903,11 +1220,14 @@ async function syncTemplatesForWaba({ wabaId, accessToken }) {
     const existing = await WhatsappTemplate.findOne({
       where: { waba_id: wabaId, name: payload.name, language: payload.language },
     });
+    let syncedRow = null;
     if (existing) {
       await existing.update(payload);
+      syncedRow = existing;
     } else {
-      await WhatsappTemplate.create(payload);
+      syncedRow = await WhatsappTemplate.create(payload);
     }
+    await notifyBulkSendsTemplateApproval(syncedRow);
   }
 
   const linkedAssets = await ClinicMetaAsset.findAll({
@@ -1105,6 +1425,7 @@ async function enqueueSyncForAllWabas(options = {}) {
 
 module.exports = {
   createTemplatesFromCatalog,
+  createCustomTemplateForClinic,
   createPlaceholderTemplatesForClinic,
   propagateCatalogTemplateToAllClinics,
   syncTemplatesForWaba,

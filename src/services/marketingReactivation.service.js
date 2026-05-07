@@ -4,6 +4,7 @@ const { Op } = require('sequelize');
 const crypto = require('crypto');
 const db = require('../../models');
 const { normalizePhoneDigits } = require('../lib/phone');
+const marketingOptOutService = require('./marketingOptOut.service');
 
 const {
   AdminCampaignPlaybook,
@@ -16,6 +17,8 @@ const {
   MessageTemplate,
   PacienteConsentimiento,
   Paciente,
+  PacienteClinica,
+  PatientCustomField,
   Tratamiento,
 } = db;
 
@@ -27,6 +30,7 @@ const REACTIVATION_ACTION_TO_MODE = {
   managed_calls: 'managed_calls',
 };
 const STANDARD_IMPORT_FIELDS = new Set(['name', 'first_name', 'last_name', 'phone', 'email', 'treatment', 'last_visit_at', 'clinic']);
+const COMMERCIAL_TEMPLATE_USAGES = new Set(['marketing', 'comercial', 'promocion', 'promocional', 'reactivacion_pacientes']);
 
 function toDateMonthsAgo(months) {
   const date = new Date();
@@ -34,8 +38,19 @@ function toDateMonthsAgo(months) {
   return date;
 }
 
+function repairMojibake(value) {
+  const text = String(value || '');
+  if (!/[ÃÂ]/.test(text)) return text;
+  try {
+    const repaired = Buffer.from(text, 'latin1').toString('utf8');
+    return repaired && repaired !== text ? repaired : text;
+  } catch (_) {
+    return text;
+  }
+}
+
 function normalizeText(value) {
-  return String(value || '').trim();
+  return repairMojibake(String(value || '')).trim();
 }
 
 function normalizeKey(value) {
@@ -45,6 +60,10 @@ function normalizeKey(value) {
     .replace(/[\u0300-\u036f]/g, '')
     .replace(/[^a-z0-9]+/g, '_')
     .replace(/^_+|_+$/g, '');
+}
+
+function isCommercialTemplateUsage(value) {
+  return COMMERCIAL_TEMPLATE_USAGES.has(normalizeKey(value));
 }
 
 function toTitleCaseName(value) {
@@ -79,6 +98,25 @@ function titleCaseIfNeeded(value) {
   const text = normalizeText(value);
   if (!text) return text;
   return /^[^a-záéíóúñü]+$/.test(text) ? toTitleCaseName(text) : text;
+}
+
+function normalizeTreatmentMappings(rawMappings = {}) {
+  const entries = Array.isArray(rawMappings)
+    ? rawMappings.map((item) => [item?.source || item?.sourceValue || item?.source_value, item])
+    : Object.entries(rawMappings || {});
+  const mappings = new Map();
+  for (const [source, raw] of entries) {
+    const sourceName = normalizeText(source);
+    if (!sourceName || !raw || typeof raw !== 'object') continue;
+    const key = normalizeKey(sourceName);
+    mappings.set(key, {
+      source: sourceName,
+      treatment_id: Number(raw.treatment_id || raw.treatmentId || 0) || null,
+      treatment_name: titleCaseIfNeeded(raw.treatment_name || raw.treatmentName || sourceName),
+      create_if_missing: raw.create_if_missing !== false && raw.createIfMissing !== false,
+    });
+  }
+  return mappings;
 }
 
 function mapDialogUnitToBackend(unit) {
@@ -332,6 +370,7 @@ async function collectSuggestionGroups(scope, options = {}) {
     })
     : [];
   const noContactPatientIds = new Set(rejectedContactRows.map((row) => Number(row.paciente_id)).filter(Boolean));
+  const marketingOptOutSets = await marketingOptOutService.getActiveOptOutSetsForScope(scope);
 
   const latestByPatientTreatment = new Map();
   for (const appointment of pastAppointments) {
@@ -361,6 +400,11 @@ async function collectSuggestionGroups(scope, options = {}) {
 
     const phone = normalizePhoneDigits(appointment.paciente?.telefono_movil || '');
     const hasFutureAppointment = futurePatientIds.has(patientId);
+    const hasMarketingOptOut = marketingOptOutService.isContactOptedOut({
+      patientId,
+      phone: appointment.paciente?.telefono_movil || '',
+      optOutSets: marketingOptOutSets,
+    });
     const noContact = !!appointment.paciente?.fecha_baja || noContactPatientIds.has(patientId);
     const validPhone = phone && phone.length >= 8;
     let status = 'ready';
@@ -371,6 +415,10 @@ async function collectSuggestionGroups(scope, options = {}) {
       status = 'excluded_future_appointment';
       exclusionReason = 'cita_futura';
       reason = 'Tiene cita futura';
+    } else if (hasMarketingOptOut) {
+      status = 'excluded_opt_out';
+      exclusionReason = 'opt_out';
+      reason = 'Baja comercial solicitada por WhatsApp';
     } else if (preset?.exclusions?.no_contact !== false && noContact) {
       status = 'excluded_no_contact';
       exclusionReason = 'no_contactar';
@@ -405,6 +453,7 @@ async function collectSuggestionGroups(scope, options = {}) {
       phone: phone ? `+${phone}` : '',
       email: appointment.paciente?.email || null,
       treatment: appointmentTreatmentName,
+      treatment_id: Number(appointment.tratamiento_id || appointment.tratamiento?.id_tratamiento || 0) || null,
       last_visit_at: lastDate.toISOString(),
       status,
       exclusion_reason: exclusionReason,
@@ -598,6 +647,28 @@ function computeCounters(items) {
   };
 }
 
+async function applyMarketingOptOutExclusions(itemPayloads, scope, transaction = null) {
+  if (!Array.isArray(itemPayloads) || !itemPayloads.length) return itemPayloads;
+  const optOutSets = await marketingOptOutService.getActiveOptOutSetsForScope(scope, transaction);
+  return itemPayloads.map((item) => {
+    if (String(item.status || '').startsWith('excluded')) return item;
+    if (!marketingOptOutService.isContactOptedOut({
+      patientId: item.paciente_id || item.patient_id || null,
+      phone: item.phone || null,
+      optOutSets,
+    })) {
+      return item;
+    }
+    return {
+      ...item,
+      status: 'excluded_opt_out',
+      reason: 'Baja comercial solicitada por WhatsApp en un envío anterior',
+      exclusion_reason: 'opt_out',
+      selected: false,
+    };
+  });
+}
+
 const IMPORT_ALIASES = {
   name: ['nombre', 'nombre_completo', 'nombre_y_apellidos', 'nombre_apellidos', 'name', 'paciente', 'nombre_paciente', 'full_name'],
   first_name: ['nombre', 'first_name', 'firstname'],
@@ -723,6 +794,201 @@ function buildCustomFieldSchema(rows, mapping, explicitSchema = []) {
   return Array.from(fields.values());
 }
 
+async function loadImportTreatments(scope, defaultClinicId, transaction) {
+  const groupId = Number(scope?.groupId || 0);
+  const orClauses = [
+    { origen: 'sistema' },
+    { clinica_id: defaultClinicId },
+  ];
+  if (Number.isInteger(groupId) && groupId > 0) {
+    orClauses.push({ grupo_clinica_id: groupId });
+  }
+  return Tratamiento.findAll({
+    where: {
+      activo: true,
+      [Op.or]: orClauses,
+    },
+    attributes: ['id_tratamiento', 'nombre', 'disciplina', 'categoria', 'origen', 'clinica_id', 'grupo_clinica_id', 'duracion_min'],
+    transaction,
+  });
+}
+
+function indexTreatments(treatments) {
+  const byId = new Map();
+  const byKey = new Map();
+  for (const treatment of treatments || []) {
+    const plain = treatment?.get ? treatment.get({ plain: true }) : treatment;
+    const id = Number(plain.id_tratamiento || 0);
+    if (id) byId.set(id, plain);
+    const key = normalizeKey(plain.nombre);
+    if (key && !byKey.has(key)) byKey.set(key, plain);
+  }
+  return { byId, byKey };
+}
+
+async function resolveImportedTreatment(rawTreatment, context) {
+  const sourceName = titleCaseIfNeeded(rawTreatment || 'Sin tratamiento asignado');
+  const sourceKey = normalizeKey(sourceName);
+  const mapping = context.treatmentMappings.get(sourceKey);
+  const mappedId = Number(mapping?.treatment_id || 0);
+  if (mappedId && context.treatmentsById.has(mappedId)) {
+    const treatment = context.treatmentsById.get(mappedId);
+    return { id: mappedId, name: treatment.nombre || sourceName };
+  }
+
+  const mappedName = titleCaseIfNeeded(mapping?.treatment_name || sourceName);
+  const mappedKey = normalizeKey(mappedName);
+  const existing = context.treatmentsByKey.get(mappedKey) || context.treatmentsByKey.get(sourceKey);
+  if (existing?.id_tratamiento) {
+    return { id: Number(existing.id_tratamiento), name: existing.nombre || mappedName };
+  }
+
+  if (!mapping || mapping.create_if_missing) {
+    const created = await Tratamiento.create({
+      nombre: mappedName,
+      codigo: normalizeKey(mappedName).slice(0, 50) || null,
+      descripcion: 'Creado vacío desde importación de pacientes para reactivación.',
+      disciplina: 'general',
+      especialidad: null,
+      categoria: 'General',
+      duracion_min: 30,
+      precio_base: 0,
+      color: null,
+      origen: 'clinica',
+      clinica_id: context.defaultClinicId,
+      grupo_clinica_id: null,
+      activo: true,
+      sesiones_defecto: 1,
+      requiere_pieza: false,
+      requiere_zona: false,
+      asignacion_instalacion_tipo: 'cualquiera',
+    }, { transaction: context.transaction });
+    const plain = created.get({ plain: true });
+    context.treatmentsById.set(Number(plain.id_tratamiento), plain);
+    context.treatmentsByKey.set(normalizeKey(plain.nombre), plain);
+    return { id: Number(plain.id_tratamiento), name: plain.nombre };
+  }
+
+  return { id: null, name: mappedName };
+}
+
+async function ensurePacienteClinicaLink(patient, clinicId, transaction) {
+  if (!PacienteClinica || !patient?.id_paciente || !clinicId) return;
+  await PacienteClinica.findOrCreate({
+    where: { paciente_id: patient.id_paciente, clinica_id: clinicId },
+    defaults: { es_principal: Number(patient.clinica_id || 0) === Number(clinicId) },
+    transaction,
+  });
+}
+
+async function ensureImportedHistoricalAppointment({ patient, clinicId, treatmentId, treatmentName, lastVisit, transaction }) {
+  if (!patient?.id_paciente || !clinicId || !treatmentId || !lastVisit) return null;
+  const start = new Date(lastVisit);
+  if (!Number.isFinite(start.getTime())) return null;
+  const end = new Date(start.getTime() + 30 * 60 * 1000);
+  const existing = await CitaPaciente.findOne({
+    where: {
+      paciente_id: patient.id_paciente,
+      clinica_id: clinicId,
+      tratamiento_id: treatmentId,
+      inicio: start,
+    },
+    attributes: ['id_cita'],
+    transaction,
+  });
+  if (existing) return existing;
+  return CitaPaciente.create({
+    clinica_id: clinicId,
+    paciente_id: patient.id_paciente,
+    tratamiento_id: treatmentId,
+    titulo: `Histórico: ${treatmentName}`,
+    motivo: 'Importación de pacientes para reactivación',
+    nota: 'Cita histórica creada automáticamente desde una importación de pacientes para que las condiciones de reactivación puedan evaluarse sobre datos reales.',
+    tipo_cita: 'continuacion',
+    estado: 'completada',
+    inicio: start,
+    fin: end,
+    es_provisional: false,
+  }, { transaction });
+}
+
+function inferCustomFieldValueType(value) {
+  const text = normalizeText(value);
+  if (/^-?\d+([.,]\d+)?$/.test(text)) return 'number';
+  if (parseImportDate(text)) return 'date';
+  return 'text';
+}
+
+async function persistPatientCustomFields({ patient, clinicId, customFields, schema, transaction }) {
+  if (!PatientCustomField || !patient?.id_paciente || !clinicId || !customFields || typeof customFields !== 'object') {
+    return;
+  }
+  const schemaByKey = new Map((schema || []).map((field) => [field.key, field]));
+  for (const [key, value] of Object.entries(customFields)) {
+    const fieldKey = normalizeKey(key);
+    const cleanValue = normalizeText(value);
+    if (!fieldKey || !cleanValue) continue;
+    const schemaField = schemaByKey.get(fieldKey) || {};
+    const [row] = await PatientCustomField.findOrCreate({
+      where: {
+        paciente_id: patient.id_paciente,
+        clinica_id: clinicId,
+        field_key: fieldKey,
+      },
+      defaults: {
+        label: normalizeText(schemaField.label) || fieldKey.split('_').map((part) => part.charAt(0).toUpperCase() + part.slice(1)).join(' '),
+        value: cleanValue,
+        value_type: normalizeText(schemaField.type) || inferCustomFieldValueType(cleanValue),
+        source: 'import',
+        source_column: normalizeText(schemaField.source_column || schemaField.sourceColumn) || null,
+        last_imported_at: new Date(),
+      },
+      transaction,
+    });
+    if (row) {
+      await row.update({
+        label: normalizeText(schemaField.label) || row.label,
+        value: cleanValue,
+        value_type: normalizeText(schemaField.type) || inferCustomFieldValueType(cleanValue),
+        source: 'import',
+        source_column: normalizeText(schemaField.source_column || schemaField.sourceColumn) || row.source_column,
+        last_imported_at: new Date(),
+      }, { transaction });
+    }
+  }
+}
+
+async function enrichItemsWithPatientCustomFields(itemPayloads, transaction) {
+  if (!PatientCustomField || !Array.isArray(itemPayloads) || !itemPayloads.length) return itemPayloads;
+  const patientIds = Array.from(new Set(itemPayloads.map((item) => Number(item.paciente_id || 0)).filter(Boolean)));
+  if (!patientIds.length) return itemPayloads;
+  const rows = await PatientCustomField.findAll({
+    where: { paciente_id: { [Op.in]: patientIds } },
+    attributes: ['paciente_id', 'field_key', 'value'],
+    raw: true,
+    transaction,
+  });
+  const byPatient = new Map();
+  for (const row of rows) {
+    const patientId = Number(row.paciente_id || 0);
+    const key = normalizeKey(row.field_key);
+    const value = normalizeText(row.value);
+    if (!patientId || !key || !value) continue;
+    if (!byPatient.has(patientId)) byPatient.set(patientId, {});
+    byPatient.get(patientId)[key] = value;
+  }
+  return itemPayloads.map((item) => {
+    const patientFields = byPatient.get(Number(item.paciente_id || 0)) || {};
+    return {
+      ...item,
+      custom_fields: {
+        ...patientFields,
+        ...(item.custom_fields || {}),
+      },
+    };
+  });
+}
+
 async function buildImportedItemPayloads(scope, body, transaction) {
   const rows = Array.isArray(body.import_rows) ? body.import_rows.filter((row) => row && typeof row === 'object') : [];
   if (!rows.length) return { itemPayloads: [], columnMapping: {}, customFieldsSchema: [] };
@@ -737,6 +1003,16 @@ async function buildImportedItemPayloads(scope, body, transaction) {
 
   const columnMapping = inferColumnMapping(rows, body.column_mapping || {});
   const customFieldsSchema = buildCustomFieldSchema(rows, columnMapping, body.custom_fields_schema || []);
+  const treatmentMappings = normalizeTreatmentMappings(body.treatment_mappings || body.treatment_mapping || {});
+  const importTreatments = await loadImportTreatments(scope, defaultClinicId, transaction);
+  const treatmentIndex = indexTreatments(importTreatments);
+  const treatmentContext = {
+    treatmentMappings,
+    treatmentsById: treatmentIndex.byId,
+    treatmentsByKey: treatmentIndex.byKey,
+    defaultClinicId,
+    transaction,
+  };
   const existingPatients = await Paciente.findAll({
     where: {
       clinica_id: clinicIds.length ? { [Op.in]: clinicIds } : defaultClinicId,
@@ -777,7 +1053,10 @@ async function buildImportedItemPayloads(scope, body, transaction) {
     const phoneDigits = normalizePhoneDigits(readImportValue(row, columnMapping, 'phone'));
     const formattedPhone = phoneDigits ? `+${phoneDigits}` : null;
     const email = readImportValue(row, columnMapping, 'email') || null;
-    const treatment = titleCaseIfNeeded(readImportValue(row, columnMapping, 'treatment') || body.treatment || 'Sin tratamiento asignado');
+    const rawTreatment = readImportValue(row, columnMapping, 'treatment') || body.treatment || 'Sin tratamiento asignado';
+    const resolvedTreatment = await resolveImportedTreatment(rawTreatment, treatmentContext);
+    const treatment = resolvedTreatment.name;
+    const treatmentId = resolvedTreatment.id;
     const lastVisit = parseImportDate(readImportValue(row, columnMapping, 'last_visit_at'));
     const customFields = buildCustomFields(row, columnMapping, customFieldsSchema);
     let patient = phoneDigits ? patientByPhone.get(phoneDigits) : null;
@@ -794,6 +1073,25 @@ async function buildImportedItemPayloads(scope, body, transaction) {
       }, { transaction });
       patientByPhone.set(phoneDigits, patient);
       createdNewPatient = true;
+    }
+
+    if (patient) {
+      await ensurePacienteClinicaLink(patient, Number(patient.clinica_id || defaultClinicId), transaction);
+      await ensureImportedHistoricalAppointment({
+        patient,
+        clinicId: Number(patient.clinica_id || defaultClinicId),
+        treatmentId,
+        treatmentName: treatment,
+        lastVisit,
+        transaction,
+      });
+      await persistPatientCustomFields({
+        patient,
+        clinicId: Number(patient.clinica_id || defaultClinicId),
+        customFields,
+        schema: customFieldsSchema,
+        transaction,
+      });
     }
 
     let status = 'ready';
@@ -827,6 +1125,7 @@ async function buildImportedItemPayloads(scope, body, transaction) {
       phone: formattedPhone,
       email,
       treatment,
+      treatment_id: treatmentId,
       last_visit_at: lastVisit,
       status,
       reason,
@@ -864,6 +1163,7 @@ function mapSuggestionCandidateToItem(candidate) {
     phone: candidate.phone || null,
     email: candidate.email || null,
     treatment: candidate.treatment || null,
+    treatment_id: candidate.treatmentId || candidate.treatment_id || null,
     last_visit_at: candidate.last_visit_at ? new Date(candidate.last_visit_at) : null,
     status: candidate.status === 'ready' ? 'ready' : candidate.status,
     reason: candidate.reason || null,
@@ -945,6 +1245,8 @@ function buildReactivationAutomationNodes(list, automation, actionMode, template
       mode: 'template',
       template_id: template?.id || automation?.template_id || null,
       template_name: template?.nombre || automation?.template_name || null,
+      template_usage: template?.uso || automation?.template_usage || null,
+      template_commercial: isCommercialTemplateUsage(template?.uso || automation?.template_usage || 'reactivacion_pacientes'),
       source: 'marketing_reactivation',
     }
     : {
@@ -1053,6 +1355,7 @@ function serializeItem(item) {
     phone: plain.phone,
     email: plain.email,
     treatment: plain.treatment,
+    treatment_id: plain.treatment_id || null,
     last_visit_at: plain.last_visit_at,
     status: plain.status,
     reason: plain.reason,
@@ -1204,9 +1507,11 @@ async function createList(scope, body = {}, userId = null) {
     const customPayloads = !importResult && !suggestion && source === 'custom'
       ? await buildCustomItemPayloads(scope, body)
       : null;
-    const itemPayloads = importResult
+    let itemPayloads = importResult
       ? importResult.itemPayloads
       : (customPayloads || (suggestion ? suggestion.candidates_full.map(mapSuggestionCandidateToItem) : []));
+    itemPayloads = await enrichItemsWithPatientCustomFields(itemPayloads, transaction);
+    itemPayloads = await applyMarketingOptOutExclusions(itemPayloads, scope, transaction);
     const counters = computeCounters(itemPayloads);
     const actionMode = body.action_mode || suggestion?.recommendedMode || 'whatsapp_template';
     const list = await MarketingPatientList.create({
@@ -1227,6 +1532,7 @@ async function createList(scope, body = {}, userId = null) {
         treatment_id: body.treatment_id || body.treatmentId || null,
         import_file_name: body.import_file_name || null,
         column_mapping: importResult?.columnMapping || body.column_mapping || null,
+        treatment_mappings: body.treatment_mappings || body.treatment_mapping || null,
         rules: body.rules || [],
       },
       action_mode: actionMode,
@@ -1521,10 +1827,16 @@ async function rebuildList(scope, listId) {
     err.status = 404;
     throw err;
   }
-  const itemPayloads = suggestion.candidates_full.map(mapSuggestionCandidateToItem);
-  const counters = computeCounters(itemPayloads);
 
+  let previewPayloads = [];
   await db.sequelize.transaction(async (transaction) => {
+    let itemPayloads = await enrichItemsWithPatientCustomFields(
+      suggestion.candidates_full.map(mapSuggestionCandidateToItem),
+      transaction
+    );
+    itemPayloads = await applyMarketingOptOutExclusions(itemPayloads, scope, transaction);
+    previewPayloads = itemPayloads.slice(0, 5).map((item, index) => ({ ...item, id: index + 1, list_id: list.id }));
+    const counters = computeCounters(itemPayloads);
     await MarketingPatientListItem.destroy({ where: { list_id: list.id }, transaction });
     if (itemPayloads.length) {
       await MarketingPatientListItem.bulkCreate(itemPayloads.map((item) => ({ ...item, list_id: list.id })), { transaction });
@@ -1551,7 +1863,7 @@ async function rebuildList(scope, listId) {
   const reloaded = await MarketingPatientList.findByPk(list.id);
   return {
     success: true,
-    list: serializeList(reloaded, { itemsPreview: itemPayloads.slice(0, 5).map((item, index) => ({ ...item, id: index + 1, list_id: list.id })) }),
+    list: serializeList(reloaded, { itemsPreview: previewPayloads }),
   };
 }
 

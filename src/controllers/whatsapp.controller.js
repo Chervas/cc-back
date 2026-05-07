@@ -4,6 +4,7 @@ const { Op } = require('sequelize');
 const axios = require('axios');
 const crypto = require('crypto');
 const whatsappService = require('../services/whatsapp.service');
+const whatsappPaymentStatusService = require('../services/whatsappPaymentStatus.service');
 const { enqueueSyncPhonesJob, syncPhonesForWaba } = require('../services/whatsappPhones.service');
 const whatsappCoexistenceService = require('../services/whatsappCoexistence.service');
 const { buildWhatsappTemplateVariableContract } = require('../lib/whatsapp-template-contract');
@@ -13,6 +14,7 @@ const {
   UsuarioClinica,
   Clinica,
   WhatsappTemplate,
+  MarketingPatientList,
   AutomationFlowCatalog,
   AutomationFlowTemplateV2,
   Tratamiento,
@@ -419,7 +421,7 @@ function extractTechnicalTemplateVersion(baseName, candidateName) {
 
 async function loadEffectiveWhatsappTemplatesForClinic({ clinicId, userId, includeCatalog }) {
   const includeCatalogConfig = includeCatalog
-    ? [{ model: WhatsappTemplateCatalog, as: 'catalog', attributes: ['id', 'name', 'display_name', 'body_text', 'variables'] }]
+    ? [{ model: WhatsappTemplateCatalog, as: 'catalog', attributes: ['id', 'name', 'display_name', 'category', 'body_text', 'variables'] }]
     : [];
 
   const overrides = await WhatsappTemplate.findAll({
@@ -1037,7 +1039,7 @@ exports.listTemplatesForClinic = async (req, res) => {
           waba_id: asset.wabaId,
           is_active: true,
         },
-        include: [{ model: WhatsappTemplateCatalog, as: 'catalog', attributes: ['id', 'name', 'display_name', 'body_text', 'variables'] }],
+        include: [{ model: WhatsappTemplateCatalog, as: 'catalog', attributes: ['id', 'name', 'display_name', 'category', 'body_text', 'variables'] }],
         order: [['name', 'ASC']],
       });
     }
@@ -1089,6 +1091,70 @@ exports.syncTemplates = async (req, res) => {
   }
 };
 
+exports.deleteTemplate = async (req, res) => {
+  try {
+    const id = Number(req.params.id || 0);
+    const userId = req.userData?.userId;
+
+    if (!Number.isInteger(id) || id <= 0) {
+      return res.status(400).json({ error: 'template_id_invalid' });
+    }
+
+    const template = await WhatsappTemplate.findByPk(id);
+    if (!template || template.is_active === false) {
+      return res.status(404).json({ error: 'template_not_found' });
+    }
+
+    if (template.clinic_id) {
+      const asset = await resolveWabaFromContext({ clinicId: Number(template.clinic_id), userId });
+      if (!asset || String(asset.wabaId || '') !== String(template.waba_id || '')) {
+        return res.status(403).json({ error: 'template_scope_forbidden' });
+      }
+    }
+
+    const linkedCampaigns = MarketingPatientList
+      ? await MarketingPatientList.count({
+        where: {
+          status: { [Op.ne]: 'archived' },
+          [Op.or]: [
+            db.sequelize.where(
+              db.sequelize.cast(db.sequelize.json('criteria.whatsapp_template_id'), 'UNSIGNED'),
+              id
+            ),
+            db.sequelize.where(
+              db.sequelize.cast(db.sequelize.json('template_snapshot.id'), 'UNSIGNED'),
+              id
+            ),
+          ],
+        },
+      })
+      : 0;
+    const confirmLinked = String(req.query.confirm_linked || req.body?.confirm_linked || '').toLowerCase() === 'true';
+    if (linkedCampaigns > 0 && !confirmLinked) {
+      return res.status(409).json({
+        error: 'template_linked_to_campaigns',
+        message: `Esta plantilla está asociada a ${linkedCampaigns} campaña(s) o lista(s). Si la ocultas, esas campañas conservarán la captura del mensaje, pero no podrán reutilizar la plantilla.`,
+        linked_campaigns: linkedCampaigns,
+      });
+    }
+
+    const isCatalogApproved = String(template.status || '').toUpperCase() === 'APPROVED'
+      && (String(template.origin || '').toLowerCase() === 'catalog' || template.catalog_template_id);
+    if (isCatalogApproved) {
+      return res.status(409).json({
+        error: 'approved_template_cannot_be_deleted',
+        message: 'No se puede borrar una plantilla aprobada de catálogo desde ClinicaClick. Puedes duplicarla y crear una versión nueva.',
+      });
+    }
+
+    await template.update({ is_active: false });
+    return res.json({ success: true, id });
+  } catch (err) {
+    console.error('Error deleteTemplate WhatsApp', err);
+    return res.status(500).json({ error: 'Error eliminando plantilla WhatsApp' });
+  }
+};
+
 exports.createTemplatesFromCatalog = async (req, res) => {
   try {
     const clinicId = req.query.clinic_id ? Number(req.query.clinic_id) : null;
@@ -1115,6 +1181,59 @@ exports.createTemplatesFromCatalog = async (req, res) => {
   } catch (err) {
     console.error('Error createTemplatesFromCatalog', err);
     return res.status(500).json({ error: 'Error creando plantillas' });
+  }
+};
+
+exports.createCustomTemplate = async (req, res) => {
+  try {
+    const clinicId = req.body?.clinic_id ? Number(req.body.clinic_id) : (req.query.clinic_id ? Number(req.query.clinic_id) : null);
+    const phoneNumberId = req.body?.phone_number_id || req.query.phone_number_id || null;
+    const userId = req.userData?.userId;
+
+    if (!clinicId && !phoneNumberId) {
+      return res.status(400).json({ error: 'clinic_id o phone_number_id requerido' });
+    }
+
+    const asset = await resolveWabaFromContext({ clinicId, phoneNumberId, userId });
+    if (!asset || !asset.wabaId || !asset.waAccessToken) {
+      return res.status(404).json({ error: 'waba_not_found' });
+    }
+
+    const { createCustomTemplateForClinic } = require('../services/whatsappTemplates.service');
+    const result = await createCustomTemplateForClinic({
+      clinicId: asset.clinicaId || clinicId || null,
+      wabaId: asset.wabaId,
+      accessToken: asset.waAccessToken,
+      displayName: req.body?.display_name || req.body?.nombre || req.body?.name,
+      bodyText: req.body?.body_text || req.body?.contenido || req.body?.body,
+      category: req.body?.category || (req.body?.template_commercial ? 'MARKETING' : 'UTILITY'),
+      language: req.body?.language || 'es',
+      variables: req.body?.variables || [],
+      replaceTemplateId: req.body?.replace_template_id || req.body?.replaceTemplateId || null,
+    });
+    const json = result.row.get ? result.row.get({ plain: true }) : result.row;
+    return res.status(201).json({
+      success: true,
+      submitted: result.submitted,
+      template: {
+        ...json,
+        variables: buildWhatsappTemplateVariableContract(json),
+      },
+      message: result.submitted
+        ? 'Plantilla enviada a WhatsApp. Meta suele aprobarla en unos 15 minutos.'
+        : 'Plantilla guardada localmente, pero no se pudo enviar a Meta. Revisa la conexión WhatsApp.',
+      ...(result.error ? { error: result.error } : {}),
+    });
+  } catch (err) {
+    console.error('Error createCustomTemplate', err);
+    if (err?.statusCode || err?.code === 'invalid_template_body' || err?.code === 'meta_template_submission_failed') {
+      return res.status(err.statusCode || 400).json({
+        error: err.code || 'template_submission_failed',
+        message: Array.isArray(err.details) && err.details.length ? err.details[0] : (err.message || 'No se pudo enviar la plantilla a WhatsApp.'),
+        details: Array.isArray(err.details) ? err.details : [],
+      });
+    }
+    return res.status(500).json({ error: err.message || 'Error creando plantilla WhatsApp' });
   }
 };
 
@@ -1258,6 +1377,7 @@ exports.listPhones = async (req, res) => {
       const grupo = grupoDirecto.id_grupo ? grupoDirecto : grupoClinica;
       let registration = p.additionalData?.registration || null;
       const additionalData = p.additionalData || {};
+      const payment = whatsappPaymentStatusService.derivePaymentSnapshot(additionalData);
       const isCoexistenceAsset =
         additionalData.whatsappConnectionMode === 'coexistence' ||
         additionalData.connectionMode === 'coexistence' ||
@@ -1365,6 +1485,13 @@ exports.listPhones = async (req, res) => {
         limited_mode: usage?.limitedMode || false,
         limited_mode_count: usage?.limitedMode ? usage.count : null,
         limited_mode_limit: usage?.limitedMode ? usage.limit : null,
+        payment_status: payment.status || null,
+        payment_last_error_code: payment.last_error_code || null,
+        payment_last_error_message: payment.last_error_message || null,
+        payment_last_error_href: payment.last_error_href || null,
+        payment_last_detected_at: payment.last_detected_at || null,
+        payment_last_success_at: payment.last_success_at || null,
+        meta_billed_by: p.meta_billed_by ?? null,
         is_test_number: !!additionalData.isTestNumber,
         account_mode: additionalData.accountMode || null,
         platform_type: additionalData.platformType || null,

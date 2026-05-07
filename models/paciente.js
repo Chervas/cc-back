@@ -16,6 +16,9 @@ module.exports = (sequelize, DataTypes) => {
       if (models.PacienteConsentimiento) {
         Paciente.hasMany(models.PacienteConsentimiento, { foreignKey: 'paciente_id', as: 'consentimientos' });
       }
+      if (models.PatientCustomField) {
+        Paciente.hasMany(models.PatientCustomField, { foreignKey: 'paciente_id', as: 'camposPersonalizados' });
+      }
     }
   }
   Paciente.init({

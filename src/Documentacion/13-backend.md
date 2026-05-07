@@ -790,7 +790,38 @@ Reglas:
 - Si `prepare` recibe `automation=null`, desactiva el flujo `patient_reactivation` asociado por `template_key` cuando existe.
 - `patient_reactivation` es representacion operativa/visual para `Marketing > Flujos`; la reevaluacion batch 24h, capping y cola cancelable siguen pendientes antes de envio real.
 
-### 1.1. Automatizaciones basadas en listas
+### 1.1. Envios masivos por listas
+
+Rutas bajo `/api/marketing/bulk-sends`:
+
+| Método | Ruta | Uso |
+|---|---|---|
+| GET | `/campaigns` | Lista campanas `mass_sends` por scope, excluyendo archivadas. |
+| POST | `/campaigns` | Crea lista/campana desde importacion, manual o pacientes actuales. Acepta `campaign_name`, `template_usage`, `template_commercial`, `opt_out_text` y `link_tracking` en `criteria`. |
+| POST | `/campaigns/:id/prepare` | Congela/prepara con plantilla WhatsApp si aplica, sin envio masivo real hasta capping y cola cancelable. |
+| POST | `/campaigns/:id/test-send` | Envia una prueba individual con metadata comercial/no comercial para que el opt-out entrante se aplique correctamente. |
+| DELETE | `/campaigns/:id` | Archiva la campana/lista. |
+| GET | `/r/:token` | Ruta publica de tracking. Registra click de enlace variable y redirige al destino original. |
+
+Reglas:
+
+- `template_usage=promocion` o `template_commercial=true` identifica una comunicacion comercial.
+- Solo los mensajes outbound con metadata comercial deben activar baja automatica si el paciente responde con `BAJA`; notificaciones y recordatorios no comerciales no excluyen al contacto de marketing.
+- Al crear una plantilla promocional desde campañas, la UI debe guardar el texto principal mas un bloque de baja con la palabra `BAJA`.
+- Las plantillas WhatsApp reales exponen `category`/`catalog.category`; la UI lo mapea a `uso=promocion` si Meta devuelve `MARKETING`, y a `notificacion` si no.
+- Las variables de columnas extra de listas importadas siguen el contrato `custom_fields_schema` y pueden mostrarse como `{{variable}}` al crear la plantilla desde la campana.
+- En envios masivos, `MarketingPatientList.name` representa el nombre de la lista. El nombre visible de campaña se conserva en `criteria.campaign_name` para permitir vistas separadas de campanas y listas sin crear otra tabla.
+- Las listas importadas/manuales de `mass_sends` no crean ni actualizan `Pacientes`, pero `POST /campaigns` cruza cada item con pacientes existentes del scope por telefono/email. Si hay match, guarda `MarketingPatientListItems.paciente_id` y mezcla en `custom_fields` variables estándar del paciente y `PatientCustomFields` existentes.
+- Si un contacto externo responde por WhatsApp, el webhook resuelve la conversacion por telefono. Si existe paciente se vincula `patient_id`; si no existe, se conserva contacto externo y el opt-out comercial se aplica por `phone_digits`.
+- `POST /campaigns/:id/prepare` y `/test-send` validan todas las variables de la plantilla real contra los items `ready`; si falta algun valor devuelven `409` con `details.missing_variables[]` y no usan ejemplos de plantilla como fallback operativo.
+- `GET /campaigns/:id`, `/campaigns/:id/recipients` y `/campaigns/:id/dispatch` hacen una reconciliacion ligera antes de responder: leen `Messages.metadata.wa_status_history`, materializan `sent/delivered/read/failed/replied` en `MarketingPatientListItems`, refrescan contadores y devuelven `report` agregado. Esto corrige informes atrasados sin cargar toda la lista en frontend.
+- El `report` de envios masivos expone `opt_out_share` (bajas sobre contactos realmente enviados), `read_hours` (lecturas por hora), clicks de enlaces, clicks por contacto y pais aproximado de click. Los listados detallados de abiertos/no abiertos/respuestas/bajas/clicks deben seguir saliendo de endpoints paginados, no de arrays completos en UI.
+- Si un contacto responde `BAJA` tras un outbound comercial, `MarketingContactOptOut` se crea para todas las clinicas del mismo `grupoClinicaId`. En contactos ya enviados no se cambia `status` a excluido: se mantiene el envio histórico y se marca `dispatch_status=replied`, `replied_at` y `opt_out_at`. En contactos pendientes/futuros sí se marca `excluded_opt_out`.
+- Para QA manual se permite revocar una baja dejando `MarketingContactOptOut.status=revoked`; si la revocacion referencia el mismo `inbound_message_id`, la reconciliacion posterior no reactiva esa baja antigua.
+- `criteria.link_tracking.enabled=true` solo transforma variables cuyo valor final sea URL `http/https`. URLs fijas dentro de una plantilla aprobada no se reescriben sin nueva aprobación de Meta.
+- Meta Cloud API no documenta un webhook por destinatario para reporte de spam. El backend expone `spam_reports_supported=false`; la calidad se calcula con bajas, lecturas y calidad/limites WABA cuando estén disponibles.
+
+### 1.2. Automatizaciones basadas en listas
 
 Rutas bajo `/api/marketing/list-automations`:
 
@@ -3279,3 +3310,41 @@ Reglas de solape forzable usadas por `/api/citas/:id/reagendar` y `/api/disponib
 - `INSTALLATION_OVERLAP` es forzable: permite agendar y solapar junto a otra cita existente en la misma instalación.
 - `STAFF_OVERLAP` es forzable solo cuando el choque es del mismo profesional dentro de la misma clínica.
 - Bloqueos, fuera de horario y choques del profesional en otra clínica no son forzables.
+
+## Marketing: Envíos Masivos WhatsApp
+
+Actualización 2026-05-06:
+
+- `mass_sends` usa `MarketingPatientLists` y `MarketingPatientListItems` como audiencia congelada y tabla de materialización de estado.
+- El envío real WhatsApp se ejecuta con `JobRequests.type = marketing_bulk_send_dispatch`.
+- El job envía lotes de 100 contactos, programa el siguiente lote con `next_run_at = now + 2 minutos` y respeta la ventana 07:00-22:00 `Europe/Madrid`.
+- Antes de cada batch se recalculan contadores materializados y se pausa si `opt_out_rate > 3%` o, cuando haya vencido la gracia configurada (24h por defecto), si `read_rate < 30%`.
+- `POST /api/marketing/bulk-sends/campaigns/:id/send` no encola si faltan gates: plantilla WABA aprobada, opt-out/consentimiento, audiencia congelada, auditoría, capping y cola cancelable.
+- `cancel` marca `cancel_requested`; el job corta en el siguiente punto de control. `resume` vuelve a encolar solo si quedan items `ready` pendientes.
+- Los informes/listados deben consultar agregados y paginación (`/recipients`, `/dispatch`). No cargar todos los items en frontend para calcular abiertos/no abiertos.
+- `/recipients` busca por nombre, teléfono, email y `custom_fields` JSON, siempre paginado. No traer la lista completa al frontend para filtrar campos importados.
+- `PATCH /api/marketing/bulk-sends/campaigns/:id` con `whatsapp_template_id` valida que la plantilla sea WABA del scope y guarda `template_snapshot` también en borrador. No usar `MessageTemplates` legacy para campañas nuevas.
+- Los webhooks WhatsApp materializan `sent/delivered/read/failed/replied` en `MarketingPatientListItems` usando `app_message_id`, `provider_message_id` y metadata `source = marketing_bulk_sends`.
+- Como red de seguridad, las lecturas de detalle (`GET /campaigns/:id`, `/recipients`, `/dispatch`) vuelven a reconciliar de forma idempotente contra `Messages`. Esto no sustituye a actualizar gateway cuando se promociona: solo evita que un informe quede desfasado si un webhook llegó antes de desplegar el materializador.
+- Los inbound con `BAJA` solo aplican opt-out si el outbound previo tiene metadata comercial; no se debe excluir a pacientes por responder `baja` a recordatorios operativos.
+- El job de envío lo ejecuta el API del namespace (`dev`, `staging`, `prod`). Gateway no ejecuta jobs de negocio, pero al promocionar hay que llevarle `src/workers/queue.workers.js` porque recibe webhooks externos y materializa estados/respuestas.
+- Si se prepara una campaña con plantilla WhatsApp no aprobada y `auto_send_when_template_approved = true`, queda en `dispatch.status = waiting_template_approval`. La sincronización WABA la reencola automáticamente cuando esa plantilla pase a `APPROVED`.
+- Campañas Admin expone `GET/PUT /api/admin/campaign-playbooks/bulk-send-settings` para configurar batch size, delay, lectura mínima, gracia antes de evaluar lecturas y baja máxima. `prepare` guarda snapshot en `criteria.dispatch`; el delay mínimo efectivo es 2 minutos por lote y la lectura mínima se evalúa por defecto tras 24h desde el inicio/preparación del envío.
+- Una campaña pausada con `dispatch.status=paused_quality` solo puede reanudarse con usuario admin global. El cliente debe ver la pausa y contactar con soporte; `paused_limit`, `paused_template`, `paused_config` y pausas manuales siguen siendo reanudables cuando proceda.
+- El seguimiento de enlaces usa `MarketingTrackedLinks`, `MarketingTrackedLinkClicks` y `GET /r/:token`. `token` debe ser opaco/no semántico; no derivarlo de URL, lista, campaña, paciente ni variable. En staging/prod, gateway/DNS debe enrutar `envios.clinicaclick.com/r/:token` o el subdominio elegido al backend correcto.
+- El error de pago WhatsApp `131042` se guarda en `ClinicMetaAsset.additionalData.payment` cuando llega por webhook `failed`. Un webhook posterior `sent`/`delivered`/`read` del mismo phone/WABA limpia la marca con `whatsappPaymentStatus.service.js`; no mostrar bloqueos de pago anteriores a `payment.last_success_at`.
+
+Webhooks y colas:
+
+- `POST /api/whatsapp/webhook` responde rápido y encola el payload en BullMQ `webhook_whatsapp` mediante `src/services/queue.service.js`; no procesa 1000 respuestas en la request HTTP.
+- `src/workers/queue.workers.js` consume esa cola, persiste `Messages`, socket/realtime y materializa estados de `mass_sends` de forma idempotente.
+- `marketing_bulk_send_dispatch` no es BullMQ: es `JobRequests` del runtime propietario. La recepción de webhooks sí es BullMQ. Mantener esa separación evita que gateway ejecute jobs de negocio.
+- Para informes de abiertos/no abiertos/respuestas/bajas, usar contadores materializados y `/recipients` paginado. Si se necesita un listado filtrado nuevo, añadir filtro backend paginado; no resolverlo trayendo todos los contactos al frontend.
+
+Plantillas:
+
+- Las plantillas creadas desde campañas usan `POST /api/whatsapp/templates/custom` y crean `WhatsappTemplates`, no `MessageTemplates` legacy.
+- El backend acepta variables semánticas (`{{nombre}}`, `{{apellido}}`, `{{telefono_clinica}}`, custom de lista), las transforma a placeholders posicionales de Meta y guarda el contrato en `WhatsappTemplates.variables`.
+- `WhatsappTemplates.status` es la fuente de verdad WABA. Una plantilla `MessageTemplates` pendiente no está aprobada ni sincronizable por Meta si no existe registro WABA.
+- `PENDING_LOCAL` en una plantilla WABA custom significa que ClinicaClick la guardó localmente, pero Meta no dejó abierta una revisión real. La UI debe mostrarla como `No enviada a Meta` y no como aprobada ni en revisión.
+- `DELETE /api/whatsapp/templates/:id` devuelve `409 template_linked_to_campaigns` si la plantilla está referenciada por campañas/listas no archivadas. La UI debe pedir confirmación explícita antes de ocultarla; las campañas conservan `template_snapshot`, pero no deben poder reutilizar una plantilla oculta.

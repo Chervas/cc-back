@@ -7,6 +7,7 @@ const templatesController = require('../controllers/templates.controller');
 // y bloquearía cualquier otro endpoint "/api/*" aunque no pertenezca a templates.
 router.get('/templates', protect, templatesController.listTemplates);
 router.post('/templates', protect, templatesController.upsertTemplate);
+router.delete('/templates/:id', protect, templatesController.deleteTemplate);
 
 router.get('/message-log', protect, templatesController.listMessageLogs);
 

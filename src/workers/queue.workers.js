@@ -7,11 +7,15 @@ const whatsappTemplatesService = require('../services/whatsappTemplates.service'
 const whatsappPhonesService = require('../services/whatsappPhones.service');
 const automationDefaultsService = require('../services/automationDefaults.service');
 const automationsV2ResumeService = require('../services/automationsV2Resume.service');
+const marketingOptOutService = require('../services/marketingOptOut.service');
+const marketingBulkSendsService = require('../services/marketingBulkSends.service');
+const notificationService = require('../services/notifications.service');
+const whatsappPaymentStatusService = require('../services/whatsappPaymentStatus.service');
 const { getIO } = require('../services/socket.service');
 const { findCanonicalWhatsappConversation } = require('../lib/canonical-conversation');
 const db = require('../../models');
 
-const { Conversation, Message, ClinicMetaAsset, WhatsAppWebOrigin } = db;
+const { Conversation, Message, ClinicMetaAsset, Clinica, WhatsAppWebOrigin } = db;
 
 const CHAT_DEBUG = process.env.CHAT_DEBUG === 'true';
 const dlog = (...args) => {
@@ -47,6 +51,7 @@ function cleanString(value) {
 
 const RUNTIME_ROLE = cleanString(process.env.RUNTIME_ROLE).toLowerCase();
 const IS_GATEWAY_RUNTIME = RUNTIME_ROLE === 'gateway';
+const WHATSAPP_PAYMENT_MISSING_ERROR_CODE = whatsappPaymentStatusService.PAYMENT_MISSING_ERROR_CODE;
 
 function truncateText(value, max = 120) {
     const normalized = cleanString(value);
@@ -251,11 +256,12 @@ async function buildInboundMessageDescriptor({ msg, clinicId }) {
     const stripped = extractAndStripWebOriginRef(rawContent);
     const content = stripped.content;
     const metadataExtra = {};
+    const mediaPayload = getWhatsAppMediaPayload(msg);
 
-    if (rawType && !['text', 'button', 'interactive'].includes(rawType)) {
-        metadataExtra.media = {
-            kind: rawType,
-        };
+    if (mediaPayload) {
+        metadataExtra.media = mediaPayload;
+    } else if (rawType && !['text', 'button', 'interactive'].includes(rawType)) {
+        metadataExtra.media = { kind: rawType };
     }
 
     return {
@@ -617,6 +623,94 @@ function mergeStatusMetadata(existingMetadata, status) {
         wa_status_timestamps: statusTimestamps,
         wa_error: status.errors || metadata.wa_error || null,
     };
+}
+
+function getWhatsappStatusErrors(status) {
+    return Array.isArray(status?.errors) ? status.errors : [];
+}
+
+function findWhatsappPaymentMissingError(status) {
+    return getWhatsappStatusErrors(status).find((error) => Number(error?.code) === WHATSAPP_PAYMENT_MISSING_ERROR_CODE) || null;
+}
+
+async function notifyWhatsappPaymentMissing({ status, message, clinicId }) {
+    const paymentError = findWhatsappPaymentMissingError(status);
+    if (!paymentError || !message) {
+        return;
+    }
+
+    const metadata = message.metadata || {};
+    const resolvedClinicId = Number(clinicId || 0) || null;
+    const phoneId = metadata.phoneId || metadata.phoneNumberId || null;
+    const wabaId = metadata.wabaId || null;
+    const href = cleanString(paymentError.href);
+    const errorMessage = cleanString(paymentError?.error_data?.details)
+        || cleanString(paymentError.message)
+        || 'Meta indica que falta un método de pago en WhatsApp Business.';
+
+    try {
+        const asset = await findWhatsappPhoneAssetForMetadata({
+            phoneId,
+            wabaId,
+            clinicId: resolvedClinicId,
+        });
+        if (asset) {
+            const additionalData = asset.additionalData || {};
+            asset.additionalData = {
+                ...additionalData,
+                payment: {
+                    ...(additionalData.payment || {}),
+                    status: 'missing_payment_method',
+                    last_error_code: WHATSAPP_PAYMENT_MISSING_ERROR_CODE,
+                    last_error_message: errorMessage,
+                    last_error_href: href || null,
+                    last_detected_at: new Date().toISOString(),
+                    last_message_id: message.id,
+                    last_wamid: cleanString(metadata.wamid),
+                },
+            };
+            await asset.save();
+        }
+    } catch (assetError) {
+        console.warn('[whatsapp] No se pudo marcar falta de método de pago en el asset', {
+            clinicId: resolvedClinicId,
+            phoneId,
+            wabaId,
+            error: serializeError(assetError),
+        });
+    }
+
+    try {
+        const clinic = resolvedClinicId && Clinica
+            ? await Clinica.findByPk(resolvedClinicId, {
+                attributes: ['id_clinica', 'nombre_clinica'],
+                raw: true,
+            })
+            : null;
+
+        await notificationService.dispatchEvent({
+            event: 'whatsapp.payment_missing',
+            clinicId: resolvedClinicId,
+            data: {
+                clinicId: resolvedClinicId,
+                clinicName: cleanString(clinic?.nombre_clinica),
+                phoneNumber: cleanString(metadata.recipient) || cleanString(status?.recipient_id),
+                phoneNumberId: phoneId,
+                wabaId,
+                messageId: message.id,
+                wamid: cleanString(metadata.wamid),
+                errorCode: WHATSAPP_PAYMENT_MISSING_ERROR_CODE,
+                errorMessage,
+                href: href || null,
+            },
+        });
+    } catch (notificationError) {
+        console.warn('[whatsapp] No se pudo crear notificación por método de pago ausente', {
+            clinicId: resolvedClinicId,
+            messageId: message.id,
+            error: serializeError(notificationError),
+        });
+    }
 }
 
 function createBusinessWorker(name, processor) {
@@ -1231,6 +1325,44 @@ createWorker('webhook_whatsapp', async (job) => {
             sent_at: new Date(),
         });
 
+        try {
+            const optOutResult = await marketingOptOutService.applyInboundOptOutIfNeeded({
+                clinicId: conv.clinic_id || clinicId,
+                conversation: conv,
+                inboundMessage: inboundMsg,
+                rawText: resumeText || content,
+                patientId: conv.patient_id || patientId || null,
+            });
+            if (optOutResult?.applied) {
+                inboundMsg.metadata = {
+                    ...(inboundMsg.metadata || {}),
+                    marketing_opt_out: optOutResult,
+                };
+                await inboundMsg.save();
+            }
+        } catch (optOutErr) {
+            console.warn('[marketing opt-out] No se pudo procesar baja por WhatsApp', {
+                clinicId: conv.clinic_id || clinicId,
+                conversationId: conv.id,
+                inboundMessageId: inboundMsg.id,
+                error: serializeError(optOutErr),
+            });
+        }
+
+        try {
+            await marketingBulkSendsService.materializeInboundReply({
+                conversation: conv,
+                inboundMessage: inboundMsg,
+            });
+        } catch (bulkReplyErr) {
+            console.warn('[marketing bulk sends] No se pudo materializar respuesta inbound', {
+                clinicId: conv.clinic_id || clinicId,
+                conversationId: conv.id,
+                inboundMessageId: inboundMsg.id,
+                error: serializeError(bulkReplyErr),
+            });
+        }
+
         // Marcar el origen como "usado" para depuración/dedupe. No bloqueamos si falla.
         if (webOrigin && WhatsAppWebOrigin && !webOrigin.used_at) {
             try {
@@ -1368,6 +1500,50 @@ createWorker('webhook_whatsapp', async (job) => {
         }
         message.metadata = mergeStatusMetadata(message.metadata, status);
         await message.save();
+
+        if (['sent', 'delivered', 'read'].includes(nextStatus)) {
+            try {
+                await whatsappPaymentStatusService.clearMissingPaymentAfterSuccessfulStatus({
+                    clinicId: messageRef.clinic_id || clinicId,
+                    phoneId: message.metadata?.phoneId || message.metadata?.phoneNumberId || null,
+                    wabaId: message.metadata?.wabaId || null,
+                    messageId: message.id,
+                    wamid,
+                    status: nextStatus,
+                });
+            } catch (paymentClearError) {
+                console.warn('[whatsapp] No se pudo limpiar estado de pago tras status correcto', {
+                    clinicId: messageRef.clinic_id || clinicId,
+                    messageId: message.id,
+                    status: nextStatus,
+                    error: serializeError(paymentClearError),
+                });
+            }
+        }
+
+        if (nextStatus === 'failed') {
+            await notifyWhatsappPaymentMissing({
+                status,
+                message,
+                clinicId: messageRef.clinic_id || clinicId,
+            });
+        }
+
+        try {
+            await marketingBulkSendsService.materializeMessageStatusFromWebhook({
+                message,
+                status,
+                mappedStatus: nextStatus,
+            });
+        } catch (bulkStatusErr) {
+            console.warn('[marketing bulk sends] No se pudo materializar estado WhatsApp', {
+                clinicId: messageRef.clinic_id || clinicId,
+                messageId: message.id,
+                wamid,
+                status: nextStatus,
+                error: serializeError(bulkStatusErr),
+            });
+        }
 
         await emitMessageUpdated({ message, clinicId: messageRef.clinic_id || clinicId });
     }

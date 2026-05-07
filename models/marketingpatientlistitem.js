@@ -7,6 +7,7 @@ module.exports = (sequelize, DataTypes) => {
       MarketingPatientListItem.belongsTo(models.MarketingPatientList, { foreignKey: 'list_id', as: 'list' });
       MarketingPatientListItem.belongsTo(models.Paciente, { foreignKey: 'paciente_id', targetKey: 'id_paciente', as: 'paciente' });
       MarketingPatientListItem.belongsTo(models.Clinica, { foreignKey: 'clinica_id', targetKey: 'id_clinica', as: 'clinica' });
+      MarketingPatientListItem.belongsTo(models.Tratamiento, { foreignKey: 'treatment_id', targetKey: 'id_tratamiento', as: 'tratamiento' });
       if (models.MarketingPatientContactEvent) {
         MarketingPatientListItem.hasMany(models.MarketingPatientContactEvent, { foreignKey: 'item_id', as: 'events' });
       }
@@ -22,6 +23,7 @@ module.exports = (sequelize, DataTypes) => {
     phone: { type: DataTypes.STRING(64), allowNull: true },
     email: { type: DataTypes.STRING(255), allowNull: true },
     treatment: { type: DataTypes.STRING(255), allowNull: true },
+    treatment_id: { type: DataTypes.INTEGER, allowNull: true },
     last_visit_at: { type: DataTypes.DATE, allowNull: true },
     status: { type: DataTypes.STRING(64), allowNull: false, defaultValue: 'ready' },
     reason: { type: DataTypes.STRING(512), allowNull: true },
@@ -31,6 +33,19 @@ module.exports = (sequelize, DataTypes) => {
     missing_variables: { type: DataTypes.JSON, allowNull: true },
     appointment_at: { type: DataTypes.DATE, allowNull: true },
     treatment_completed: { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: false },
+    dispatch_status: { type: DataTypes.STRING(32), allowNull: true },
+    provider_message_id: { type: DataTypes.STRING(255), allowNull: true },
+    app_message_id: { type: DataTypes.INTEGER, allowNull: true },
+    conversation_id: { type: DataTypes.INTEGER, allowNull: true },
+    send_batch_index: { type: DataTypes.INTEGER, allowNull: true },
+    sent_at: { type: DataTypes.DATE, allowNull: true },
+    delivered_at: { type: DataTypes.DATE, allowNull: true },
+    read_at: { type: DataTypes.DATE, allowNull: true },
+    replied_at: { type: DataTypes.DATE, allowNull: true },
+    failed_at: { type: DataTypes.DATE, allowNull: true },
+    opt_out_at: { type: DataTypes.DATE, allowNull: true },
+    last_error_code: { type: DataTypes.STRING(64), allowNull: true },
+    last_error_message: { type: DataTypes.TEXT, allowNull: true },
     notes: { type: DataTypes.TEXT, allowNull: true },
   }, {
     sequelize,

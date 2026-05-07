@@ -5,6 +5,7 @@ const crypto = require('crypto');
 const { Op } = require('sequelize');
 const db = require('../../models');
 const { isGlobalAdmin } = require('../lib/role-helpers');
+const marketingBulkSendsService = require('../services/marketingBulkSends.service');
 
 const { AdminCampaignPlaybook, Tratamiento, AutomationFlowCatalog, AutomationFlowTemplateV2 } = db;
 
@@ -455,6 +456,18 @@ exports.listPlaybooks = asyncHandler(async (req, res) => {
   });
 
   return res.json(items.map(serializePlaybook));
+});
+
+exports.getBulkSendSettings = asyncHandler(async (req, res) => {
+  if (!assertAdmin(req, res)) return;
+  const result = await marketingBulkSendsService.getAdminBulkSendSettings();
+  return res.json({ success: true, ...result });
+});
+
+exports.updateBulkSendSettings = asyncHandler(async (req, res) => {
+  if (!assertAdmin(req, res)) return;
+  const result = await marketingBulkSendsService.upsertAdminBulkSendSettings(req.body || {}, req.userData?.userId || null);
+  return res.json({ success: true, ...result });
 });
 
 exports.getPlaybookById = asyncHandler(async (req, res) => {
