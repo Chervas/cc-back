@@ -756,6 +756,7 @@ const TRIGGER_TYPES_V2 = [
   { value: 'appointment_cancelled', label: 'Cita cancelada' },
   { value: 'appointment_completed', label: 'Cita completada' },
   { value: 'lead_nuevo', label: 'Lead nuevo' },
+  { value: 'patient_reactivation', label: 'Reactivación de pacientes' },
   { value: 'manual', label: 'Manual' },
 ];
 const TRIGGER_NODE_PREFIX = 'trigger/';
@@ -1350,6 +1351,20 @@ function normalizeTriggerConfigForTemplate({ triggerType, entryNodeId, nodes }) 
     };
   }
 
+  if (normalizedTriggerType === 'patient_reactivation') {
+    return {
+      ok: true,
+      trigger_config: {
+        readonly: true,
+        list_id: parseIntOrNull(rawConfig.list_id),
+        treatment: cleanString(rawConfig.treatment) || null,
+        treatment_id: parseIntOrNull(rawConfig.treatment_id),
+        condition_summary: cleanString(rawConfig.condition_summary) || null,
+        criteria: isObject(rawConfig.criteria) ? rawConfig.criteria : {},
+      },
+    };
+  }
+
   if (normalizedTriggerType !== 'appointment_created') {
     return { ok: true, trigger_config: null };
   }
@@ -1893,13 +1908,16 @@ function buildTemplatePermissions(access, item) {
   const scopeAllowed = hasScopeAccess(access, item);
   const isDraft = !item?.published_at;
   const isSystem = !!item?.is_system;
+  const isReadonlyGenerated =
+    cleanString(item?.trigger_type) === 'patient_reactivation'
+    || cleanString(item?.template_key).startsWith('reactivacion_lista_');
 
   return {
-    can_edit: scopeAllowed && isDraft,
-    can_delete: scopeAllowed && (!isSystem || access.is_admin),
-    can_publish: scopeAllowed && isDraft,
-    can_execute: scopeAllowed,
-    can_create_draft: !isDraft && canCreateDraftFromTemplate(access, item),
+    can_edit: scopeAllowed && isDraft && !isReadonlyGenerated,
+    can_delete: scopeAllowed && !isReadonlyGenerated && (!isSystem || access.is_admin),
+    can_publish: scopeAllowed && isDraft && !isReadonlyGenerated,
+    can_execute: scopeAllowed && !isReadonlyGenerated,
+    can_create_draft: !isDraft && !isReadonlyGenerated && canCreateDraftFromTemplate(access, item),
   };
 }
 
@@ -3422,6 +3440,52 @@ async function validateNodeConfigs(nodes) {
   }
   return { ok: errors.length === 0, errors };
 }
+
+async function validateFlowPayloadForInternalUse(payload = {}) {
+  const entryNodeId = cleanString(payload.entry_node_id);
+  const nodes = normalizeNodesInput(payload.nodes);
+  const triggerResolution = resolveTriggerTypeForTemplate({
+    explicitTriggerType: payload.trigger_type,
+    entryNodeId,
+    nodes,
+  });
+  const graphValidation = validateFlowGraph({
+    entry_node_id: entryNodeId,
+    nodes,
+  });
+  const nodeConfigValidation = await validateNodeConfigs(nodes);
+  const triggerConfigResolution = triggerResolution.ok
+    ? normalizeTriggerConfigForTemplate({
+      triggerType: triggerResolution.trigger_type,
+      entryNodeId,
+      nodes,
+    })
+    : { ok: true, trigger_config: null };
+  const errors = [
+    ...(triggerResolution.ok ? [] : [buildValidationError(
+      triggerResolution.error || 'invalid_trigger_type',
+      triggerResolution.message || 'Activador no válido',
+      triggerResolution.details || { allowed: triggerResolution.allowed }
+    )]),
+    ...(triggerConfigResolution.ok ? [] : [buildValidationError(
+      triggerConfigResolution.error || 'invalid_trigger_config',
+      triggerConfigResolution.message || 'Configuración de activador no válida',
+      triggerConfigResolution.details || {}
+    )]),
+    ...(graphValidation.errors || []),
+    ...(nodeConfigValidation.errors || []),
+  ];
+
+  return {
+    ok: errors.length === 0,
+    errors,
+    nodes,
+    trigger_type: triggerResolution.ok ? triggerResolution.trigger_type : null,
+    trigger_config: triggerConfigResolution.ok ? triggerConfigResolution.trigger_config : null,
+  };
+}
+
+exports.validateFlowPayloadForInternalUse = validateFlowPayloadForInternalUse;
 
 exports.getFlowMeta = async (_req, res) => {
   return res.json({

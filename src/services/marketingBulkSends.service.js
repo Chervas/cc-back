@@ -11,6 +11,7 @@ const { findCanonicalWhatsappConversation } = require('../lib/canonical-conversa
 const marketingOptOutService = require('./marketingOptOut.service');
 const jobRequestsService = require('./jobRequests.service');
 const { isGlobalAdmin } = require('../lib/role-helpers');
+const { getIO } = require('./socket.service');
 
 const {
   Clinica,
@@ -41,11 +42,64 @@ const DISPATCH_MIN_READ_RATE = Number(process.env.MARKETING_BULK_SEND_MIN_READ_R
 const DISPATCH_MAX_OPT_OUT_RATE = Number(process.env.MARKETING_BULK_SEND_MAX_OPT_OUT_RATE || '0.03') || 0.03;
 const DISPATCH_READ_RATE_GRACE_MS = Math.max(60 * 60 * 1000, Number.parseInt(process.env.MARKETING_BULK_SEND_READ_RATE_GRACE_MS || String(24 * 60 * 60 * 1000), 10) || 24 * 60 * 60 * 1000);
 const TEST_SEND_COOLDOWN_MS = Math.max(1000, Number.parseInt(process.env.MARKETING_BULK_SEND_TEST_COOLDOWN_MS || '60000', 10) || 60000);
+const STATS_RECONCILE_WINDOW_MS = Math.max(
+  24 * 60 * 60 * 1000,
+  Number.parseInt(process.env.MARKETING_BULK_SEND_STATS_RECONCILE_WINDOW_MS || String(30 * 24 * 60 * 60 * 1000), 10)
+    || 30 * 24 * 60 * 60 * 1000
+);
 const DISPATCH_TIMEZONE = process.env.MARKETING_BULK_SEND_TIMEZONE || 'Europe/Madrid';
 const DISPATCH_BUSINESS_START_HOUR = 7;
 const DISPATCH_BUSINESS_END_HOUR = 22;
 const LINK_TRACKING_DEFAULT_DOMAIN = process.env.MARKETING_LINK_TRACKING_DEFAULT_DOMAIN || 'envios.clinicaclick.com';
 const testSendCooldowns = new Map();
+
+function buildQuickChatMessagePayload(message) {
+  return {
+    id: String(message.id),
+    conversation_id: String(message.conversation_id),
+    content: message.content || '',
+    direction: message.direction,
+    message_type: message.message_type,
+    status: message.status,
+    sent_at: message.sent_at || message.createdAt || new Date(),
+    sender_id: message.sender_id || null,
+    metadata: message.metadata || undefined,
+  };
+}
+
+function emitQuickChatMessageCreated(conversation, message) {
+  const io = getIO();
+  if (!io || !conversation?.id || !message?.id) return;
+  const rooms = [];
+  if (conversation.clinic_id) rooms.push(`clinic:${conversation.clinic_id}`);
+  const payload = buildQuickChatMessagePayload(message);
+  if (rooms.length) {
+    rooms.forEach((room) => io.to(room).emit('message:created', payload));
+  } else {
+    io.emit('message:created', payload);
+  }
+}
+
+function emitQuickChatMessageUpdated(conversation, message) {
+  const io = getIO();
+  if (!io || !message?.id || !message?.conversation_id) return;
+  const payload = {
+    id: String(message.id),
+    conversation_id: String(message.conversation_id),
+    status: message.status,
+    content: message.content || '',
+    message_type: message.message_type,
+    sent_at: message.sent_at || message.updatedAt || new Date(),
+    metadata: message.metadata || undefined,
+  };
+  const rooms = [];
+  if (conversation?.clinic_id) rooms.push(`clinic:${conversation.clinic_id}`);
+  if (rooms.length) {
+    rooms.forEach((room) => io.to(room).emit('message:updated', payload));
+  } else {
+    io.emit('message:updated', payload);
+  }
+}
 
 function repairMojibake(value) {
   const text = String(value || '');
@@ -349,7 +403,8 @@ function normalizeChannels(rawChannels) {
 
 function computeCounters(items) {
   const total = items.length;
-  const ready = items.filter((item) => item.status === 'ready').length;
+  const readyTotal = items.filter((item) => item.status === 'ready').length;
+  const selectedReady = items.filter((item) => item.status === 'ready' && item.selected !== false).length;
   const excluded = items.filter((item) => String(item.status || '').startsWith('excluded')).length;
   const sent = items.filter((item) => item.sent_at || ['sent', 'delivered', 'read', 'replied'].includes(String(item.dispatch_status || '').toLowerCase())).length;
   const delivered = items.filter((item) => item.delivered_at || item.read_at || ['delivered', 'read', 'replied'].includes(String(item.dispatch_status || '').toLowerCase())).length;
@@ -365,8 +420,9 @@ function computeCounters(items) {
   }
   return {
     total,
-    ready,
-    selected: ready,
+    ready: selectedReady,
+    ready_total: readyTotal,
+    selected: selectedReady,
     excluded,
     exclusion_reasons: exclusionReasons,
     lead: 0,
@@ -398,6 +454,20 @@ function shouldMaterializeStatus(item, mappedStatus) {
 async function reconcileListMessageState(list, scope = {}) {
   const listId = Number(list?.id || list || 0);
   if (!listId || !Message || !MarketingPatientListItem) return { reconciled: false, reason: 'missing_context' };
+  const dispatch = getDispatchConfig(list);
+  const dispatchStatus = String(dispatch?.status || list?.status || '').toLowerCase();
+  const liveStatuses = new Set(['queued', 'sending', 'scheduled', 'waiting_template_approval', 'paused', 'paused_quality', 'paused_limit', 'paused_template']);
+  const referenceDate = parseDate(list?.last_sent_at) || parseDate(list?.prepared_at) || parseDate(list?.updated_at) || parseDate(list?.created_at);
+  const isWithinReconcileWindow = !referenceDate || (Date.now() - referenceDate.getTime()) <= STATS_RECONCILE_WINDOW_MS;
+  if (!liveStatuses.has(dispatchStatus) && !isWithinReconcileWindow) {
+    const counters = list?.counters || await refreshListCounters(listId);
+    return {
+      reconciled: false,
+      reason: 'outside_stats_reconcile_window',
+      window_ms: STATS_RECONCILE_WINDOW_MS,
+      counters,
+    };
+  }
 
   const items = await MarketingPatientListItem.findAll({ where: { list_id: listId } });
   if (!items.length) {
@@ -1563,6 +1633,96 @@ function normalizeListSegment(segment = {}) {
   };
 }
 
+function getListSegments(criteria = {}) {
+  return Array.isArray(criteria?.segments) ? criteria.segments : [];
+}
+
+function findListSegment(criteria = {}, segmentId = '') {
+  const id = normalizeText(segmentId);
+  if (!id) return null;
+  return getListSegments(criteria).find((segment) => String(segment?.id || '') === id) || null;
+}
+
+function getSegmentItemValue(item = {}, field = '') {
+  const key = normalizeKey(field);
+  if (key === 'name' || key === 'nombre') return normalizeText(item.name);
+  if (key === 'phone' || key === 'telefono') return normalizeText(item.phone);
+  if (key === 'email') return normalizeText(item.email);
+  if (key === 'status' || key === 'estado') return normalizeText(item.status);
+  const custom = item.custom_fields || {};
+  if (custom[key] !== undefined && custom[key] !== null) return normalizeText(custom[key]);
+  const matched = Object.entries(custom).find(([rawKey]) => normalizeKey(rawKey) === key);
+  return matched ? normalizeText(matched[1]) : '';
+}
+
+function itemMatchesSegment(item = {}, segment = {}) {
+  const field = normalizeKey(segment.field || segment.key || '');
+  const operator = normalizeKey(segment.operator || 'equals');
+  const expected = normalizeText(segment.value).toLowerCase();
+  const value = getSegmentItemValue(item, field).toLowerCase();
+  if (!field) return false;
+  if (operator === 'not_empty') return !!value;
+  if (operator === 'contains') return !!expected && value.includes(expected);
+  return !!expected && value === expected;
+}
+
+function annotateSegmentCounts(criteria = {}, items = []) {
+  const plainItems = items.map((item) => (item?.get ? item.get({ plain: true }) : item));
+  const segmentCounts = {};
+  const segments = getListSegments(criteria).map((segment) => {
+    const id = normalizeText(segment?.id);
+    const count = plainItems.filter((item) => itemMatchesSegment(item, segment)).length;
+    if (id) segmentCounts[id] = count;
+    return { ...segment, count };
+  });
+  return {
+    ...criteria,
+    segments,
+    segment_counts: segmentCounts,
+  };
+}
+
+async function applyActiveSegmentSelection(list, items = [], activeSegmentId = null, transaction = null) {
+  const activeId = normalizeText(activeSegmentId);
+  const plainItems = items.map((item) => (item?.get ? item.get({ plain: true }) : item));
+  if (!activeId) {
+    const readyIds = plainItems
+      .filter((item) => item.status === 'ready' && item.selected === false)
+      .map((item) => item.id)
+      .filter(Boolean);
+    if (readyIds.length) {
+      await MarketingPatientListItem.update(
+        { selected: true },
+        { where: { id: { [Op.in]: readyIds }, list_id: list.id }, transaction }
+      );
+    }
+    return plainItems.map((item) => item.status === 'ready' ? { ...item, selected: true } : item);
+  }
+  const segment = findListSegment(list.criteria || {}, activeId);
+  if (!segment) {
+    return plainItems;
+  }
+  const selectedIds = new Set(
+    plainItems
+      .filter((item) => item.status === 'ready' && itemMatchesSegment(item, segment))
+      .map((item) => item.id)
+      .filter(Boolean)
+  );
+  await MarketingPatientListItem.update(
+    { selected: false },
+    { where: { list_id: list.id, status: 'ready' }, transaction }
+  );
+  if (selectedIds.size) {
+    await MarketingPatientListItem.update(
+      { selected: true },
+      { where: { id: { [Op.in]: Array.from(selectedIds) }, list_id: list.id }, transaction }
+    );
+  }
+  return plainItems.map((item) => item.status === 'ready'
+    ? { ...item, selected: selectedIds.has(item.id) }
+    : item);
+}
+
 async function updateCampaign(scope, campaignId, body = {}, userId = null) {
   const list = await MarketingPatientList.findByPk(campaignId);
   ensureScopeAccess(list, scope);
@@ -1574,6 +1734,7 @@ async function updateCampaign(scope, campaignId, body = {}, userId = null) {
 
   const listName = normalizeText(body.name || body.list_name);
   const campaignName = normalizeText(body.campaign_name || body.campaignName);
+  const requestedStatus = normalizeText(body.status || body.state);
   const incomingChannels = body.channels || body.destinations || null;
   const channels = incomingChannels ? normalizeChannels(incomingChannels) : null;
   const appendRows = Array.isArray(body.append_rows)
@@ -1612,11 +1773,17 @@ async function updateCampaign(scope, campaignId, body = {}, userId = null) {
       ...previousSegments.filter((segment) => String(segment?.id || '') !== incomingSegment.id),
     ];
   }
+  if (body.active_segment_id !== undefined || body.segment_id !== undefined) {
+    nextCriteria.active_segment_id = normalizeText(body.active_segment_id || body.segment_id) || null;
+  }
   if (body.auto_send_when_template_approved !== undefined || body.auto_send_when_approved !== undefined) {
     nextCriteria.auto_send_when_template_approved = body.auto_send_when_template_approved === true || body.auto_send_when_approved === true;
   }
 
   const updatePayload = { criteria: nextCriteria };
+  if (requestedStatus === 'archived') {
+    updatePayload.status = 'archived';
+  }
   if (body.whatsapp_template_id !== undefined || body.template_id !== undefined) {
     if (nextCriteria.whatsapp_template_id) {
       const template = await resolveWhatsappTemplate(nextCriteria.whatsapp_template_id, scope);
@@ -1695,6 +1862,8 @@ async function updateCampaign(scope, campaignId, body = {}, userId = null) {
         : (list.exclusion_summary || 'Sin exclusiones detectadas.');
     }
 
+    const segmentItems = await MarketingPatientListItem.findAll({ where: { list_id: list.id }, transaction });
+    updatePayload.criteria = annotateSegmentCounts(updatePayload.criteria || nextCriteria, segmentItems);
     await list.update(updatePayload, { transaction });
     const counters = await refreshListCounters(list.id, transaction);
     await MarketingPatientContactEvent.create({
@@ -2039,11 +2208,19 @@ async function prepareCampaign(scope, campaignId, body = {}, userId = null) {
   const approved = needsWhatsappTemplate
     ? !!template && String(template.status || '').toUpperCase() === 'APPROVED'
     : true;
-  const items = await MarketingPatientListItem.findAll({ where: { list_id: list.id } });
+  let items = await MarketingPatientListItem.findAll({ where: { list_id: list.id } });
+  const activeSegmentId = body.active_segment_id !== undefined || body.segment_id !== undefined
+    ? normalizeText(body.active_segment_id || body.segment_id) || null
+    : normalizeText(list.criteria?.active_segment_id) || null;
+  const selectedItems = await applyActiveSegmentSelection(list, items, activeSegmentId);
+  const nextCriteriaBase = annotateSegmentCounts({
+    ...(list.criteria || {}),
+    active_segment_id: activeSegmentId,
+  }, selectedItems);
   const clinicId = getClinicIdForList(list, scope);
   const clinic = clinicId && Clinica ? await Clinica.findByPk(clinicId, { raw: true }) : null;
   if (needsWhatsappTemplate && template) {
-    const missingVariables = buildMissingVariablesSummary({ template, items, list, clinic });
+    const missingVariables = buildMissingVariablesSummary({ template, items: selectedItems, list, clinic });
     if (missingVariables.length) {
       const err = new Error(formatMissingVariablesMessage(missingVariables));
       err.status = 409;
@@ -2051,7 +2228,7 @@ async function prepareCampaign(scope, campaignId, body = {}, userId = null) {
       throw err;
     }
   }
-  const counters = computeCounters(items.map((item) => item.get({ plain: true })));
+  const counters = computeCounters(selectedItems);
   const nextGates = {
     ...(list.safety_gates || {}),
     frozen_audience: counters.ready > 0,
@@ -2073,7 +2250,7 @@ async function prepareCampaign(scope, campaignId, body = {}, userId = null) {
     safety_gates: nextGates,
     prepared_at: new Date(),
     criteria: {
-      ...(list.criteria || {}),
+      ...nextCriteriaBase,
       campaign_name: normalizeText(body.campaign_name || list.criteria?.campaign_name || list.name),
       list_name: normalizeText(body.list_name || list.criteria?.list_name || list.name),
       whatsapp_template_id: template?.id || null,
@@ -2229,6 +2406,7 @@ async function sendTest(scope, campaignId, body = {}) {
     },
     sent_at: new Date(),
   });
+  emitQuickChatMessageCreated(conversation, appMessage);
 
   let response;
   try {
@@ -2249,6 +2427,7 @@ async function sendTest(scope, campaignId, body = {}) {
         error: providerError,
       },
     });
+    emitQuickChatMessageUpdated(conversation, appMessage);
     await MarketingPatientContactEvent.create({
       list_id: list.id,
       item_id: item.id,
@@ -2278,6 +2457,7 @@ async function sendTest(scope, campaignId, body = {}) {
     },
     sent_at: new Date(),
   });
+  emitQuickChatMessageUpdated(conversation, appMessage);
   await conversation.update({ last_message_at: new Date() });
   await MarketingPatientContactEvent.create({
     list_id: list.id,
@@ -2708,6 +2888,7 @@ async function sendDispatchItem({ list, item, template, clinic, clinicConfig, ba
     },
     sent_at: new Date(),
   });
+  emitQuickChatMessageCreated(conversation, appMessage);
 
   try {
     const response = await whatsappService.sendMessage({
@@ -2728,6 +2909,7 @@ async function sendDispatchItem({ list, item, template, clinic, clinicConfig, ba
       },
       sent_at: new Date(),
     });
+    emitQuickChatMessageUpdated(conversation, appMessage);
     await item.update({
       dispatch_status: 'sent',
       provider_message_id: providerMessageId,
@@ -2764,6 +2946,7 @@ async function sendDispatchItem({ list, item, template, clinic, clinicConfig, ba
         error: providerError.raw || providerError.message,
       },
     });
+    emitQuickChatMessageUpdated(conversation, appMessage);
     await item.update({
       dispatch_status: 'failed',
       app_message_id: appMessage.id,

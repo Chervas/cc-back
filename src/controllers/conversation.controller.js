@@ -6,7 +6,7 @@ const { getIO } = require('../services/socket.service');
 const whatsappService = require('../services/whatsapp.service');
 const { findCanonicalWhatsappConversation } = require('../lib/canonical-conversation');
 
-const { Conversation, Message, UsuarioClinica, Paciente, LeadIntake, ConversationRead, Clinica } = db;
+const { Conversation, Message, UsuarioClinica, Paciente, LeadIntake, ConversationRead, Clinica, MarketingPatientListItem } = db;
 
 const ROLE_AGGREGATE = ['propietario', 'admin'];
 const ADMIN_USER_IDS = (process.env.ADMIN_USER_IDS || '1,44')
@@ -163,7 +163,105 @@ async function enrichConversationUnreadForUser(userId, conversationLike) {
 
   const unreadMap = await getUnreadCountsByConversation(userId, [conversationId]);
   plain.unread_count = unreadMap.get(conversationId) ?? 0;
-  return plain;
+  const [hydrated] = await hydrateMarketingContactFallbacks([plain]);
+  return hydrated || plain;
+}
+
+function normalizePhoneDigits(value) {
+  return String(value || '').replace(/\D+/g, '').replace(/^00/, '');
+}
+
+function buildMarketingContactPhoneCandidates(value) {
+  const digits = normalizePhoneDigits(value);
+  if (!digits) return [];
+  const local = digits.length > 9 ? digits.slice(-9) : digits;
+  return Array.from(new Set([
+    digits,
+    `+${digits}`,
+    local,
+    `+${local}`,
+  ])).filter(Boolean);
+}
+
+function marketingContactMatchesConversation(item, conversation) {
+  if (!item || !conversation) return false;
+  if (item.conversation_id && Number(item.conversation_id) === Number(conversation.id)) {
+    return true;
+  }
+  const contactDigits = normalizePhoneDigits(conversation.contact_id);
+  const itemDigits = normalizePhoneDigits(item.phone);
+  return !!contactDigits && !!itemDigits && (
+    contactDigits === itemDigits
+    || contactDigits.endsWith(itemDigits)
+    || itemDigits.endsWith(contactDigits)
+  );
+}
+
+async function hydrateMarketingContactFallbacks(conversations = []) {
+  if (!MarketingPatientListItem || !Array.isArray(conversations) || !conversations.length) {
+    return conversations;
+  }
+
+  const plainRows = conversations.map((conversation) =>
+    typeof conversation?.toJSON === 'function' ? conversation.toJSON() : { ...conversation }
+  );
+  const candidates = plainRows.filter((conversation) =>
+    conversation
+    && !conversation.paciente
+    && !conversation.lead
+    && !conversation.patient_id
+    && !conversation.lead_id
+    && conversation.channel === 'whatsapp'
+    && conversation.contact_id
+  );
+  if (!candidates.length) return plainRows;
+
+  const conversationIds = candidates
+    .map((conversation) => Number(conversation.id))
+    .filter((id) => Number.isInteger(id) && id > 0);
+  const phoneCandidates = Array.from(new Set(
+    candidates.flatMap((conversation) => buildMarketingContactPhoneCandidates(conversation.contact_id))
+  ));
+
+  const clauses = [];
+  if (conversationIds.length) clauses.push({ conversation_id: { [Op.in]: conversationIds } });
+  if (phoneCandidates.length) clauses.push({ phone: { [Op.in]: phoneCandidates } });
+  if (!clauses.length) return plainRows;
+
+  const items = await MarketingPatientListItem.findAll({
+    where: { [Op.or]: clauses },
+    attributes: ['id', 'list_id', 'conversation_id', 'name', 'phone', 'email', 'custom_fields', 'updated_at', 'created_at'],
+    order: [['updated_at', 'DESC'], ['id', 'DESC']],
+    raw: true,
+  });
+  if (!items.length) return plainRows;
+
+  for (const conversation of plainRows) {
+    if (
+      conversation.paciente
+      || conversation.lead
+      || conversation.patient_id
+      || conversation.lead_id
+      || conversation.channel !== 'whatsapp'
+      || !conversation.contact_id
+    ) {
+      continue;
+    }
+    const item = items.find((row) => marketingContactMatchesConversation(row, conversation));
+    if (!item?.name) continue;
+    const fields = item.custom_fields && typeof item.custom_fields === 'object' ? item.custom_fields : {};
+    const contactName = fields.nombre_completo || item.name;
+    conversation.contact = {
+      ...(conversation.contact || {}),
+      name: contactName,
+      phone: item.phone || conversation.contact_id,
+      email: item.email || null,
+      source: 'marketing_patient_list',
+      list_id: item.list_id || null,
+    };
+  }
+
+  return plainRows;
 }
 
 async function getTotalUnreadCountForUser(userId, clinicIds, isAggregateAllowed, requestedClinicId) {
@@ -200,6 +298,8 @@ exports.listConversations = async (req, res) => {
     const { clinic_id, filter, channel } = req.query;
     const patientId = req.query.patient_id ? Number(req.query.patient_id) : null;
     const leadId = req.query.lead_id ? Number(req.query.lead_id) : null;
+    const limit = Math.min(100, Math.max(20, Number.parseInt(req.query.limit || '50', 10) || 50));
+    const offset = Math.max(0, Number.parseInt(req.query.offset || '0', 10) || 0);
 
     const { clinicIds, isAggregateAllowed } = await getUserClinics(userId);
     if (!clinicIds.length) {
@@ -281,10 +381,19 @@ exports.listConversations = async (req, res) => {
     }
 
     if (filter === 'leads') {
-      // Si la conversación ya está vinculada a un paciente, debe vivir en la pestaña
-      // de pacientes y no duplicarse en leads.
-      where.lead_id = { [Op.not]: null };
+      // La pestaña "Otros" agrupa leads y conversaciones externas de campañas.
+      // Si ya existe paciente, debe vivir solo en la pestaña de pacientes.
       where.patient_id = null;
+      where[Op.or] = [
+        { lead_id: { [Op.not]: null } },
+        {
+          id: {
+            [Op.in]: db.sequelize.literal(
+              '(SELECT DISTINCT conversation_id FROM MarketingPatientListItems WHERE conversation_id IS NOT NULL)'
+            ),
+          },
+        },
+      ];
     } else if (filter === 'pacientes') {
       where.patient_id = { [Op.not]: null };
     } else if (filter === 'equipo') {
@@ -299,9 +408,11 @@ exports.listConversations = async (req, res) => {
       where.lead_id = leadId;
     }
 
-    const conversations = await Conversation.findAll({
+    const conversationsPlusOne = await Conversation.findAll({
       where,
       order: [['last_message_at', 'DESC'], ['createdAt', 'DESC'], ['id', 'DESC']],
+      limit: limit + 1,
+      offset,
       include: [
         { model: Paciente, as: 'paciente', attributes: ['id_paciente', 'nombre', 'apellidos', 'foto', 'telefono_movil', 'email'] },
         { model: LeadIntake, as: 'lead', attributes: ['id', 'nombre', 'telefono', 'email'] },
@@ -315,18 +426,23 @@ exports.listConversations = async (req, res) => {
         },
       ],
     });
+    const hasMore = conversationsPlusOne.length > limit;
+    const conversations = hasMore ? conversationsPlusOne.slice(0, limit) : conversationsPlusOne;
 
     const conversationIds = conversations.map((c) => c.id);
     const unreadMap = await getUnreadCountsByConversation(userId, conversationIds);
 
-    const payload = conversations.map((c) => {
+    const rawPayload = conversations.map((c) => {
       const data = c.toJSON();
       data.lastMessage = data.messages && data.messages.length ? data.messages[0] : null;
       delete data.messages;
       data.unread_count = unreadMap.get(data.id) ?? 0;
       return data;
     });
+    const payload = await hydrateMarketingContactFallbacks(rawPayload);
 
+    res.set('X-Has-More', hasMore ? 'true' : 'false');
+    res.set('X-Next-Offset', String(offset + payload.length));
     return res.json(payload);
   } catch (err) {
     console.error('Error listConversations', err);

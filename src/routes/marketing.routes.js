@@ -25,6 +25,7 @@ router.get('/reactivation/suggestions', marketingReactivationController.getSugge
 router.get('/reactivation/lists', marketingReactivationController.listLists);
 router.post('/reactivation/lists', marketingReactivationController.createList);
 router.get('/reactivation/lists/:id', marketingReactivationController.getList);
+router.patch('/reactivation/lists/:id', marketingReactivationController.updateList);
 router.get('/reactivation/lists/:id/items', marketingReactivationController.getItems);
 router.patch('/reactivation/lists/:id/items/:itemId', marketingReactivationController.updateItem);
 router.get('/reactivation/lists/:id/events', marketingReactivationController.getEvents);

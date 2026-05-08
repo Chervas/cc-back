@@ -120,6 +120,21 @@ exports.getList = async (req, res) => {
   }
 };
 
+exports.updateList = async (req, res) => {
+  try {
+    const scope = await resolveScopeFromRequest(req, { allowAll: false });
+    const result = await marketingReactivationService.updateList(
+      scope,
+      req.params.id,
+      req.body || {},
+      req.userData?.userId || null
+    );
+    return res.json(result);
+  } catch (error) {
+    return sendError(res, error, 'Error actualizando lista de reactivación');
+  }
+};
+
 exports.getItems = async (req, res) => {
   try {
     const scope = await resolveScope(req, { allowAll: false });
