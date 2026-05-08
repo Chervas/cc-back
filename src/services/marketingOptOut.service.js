@@ -1,8 +1,9 @@
 'use strict';
 
-const { Op } = require('sequelize');
+const { Op, Sequelize } = require('sequelize');
 const db = require('../../models');
 const { normalizePhoneDigits, normalizePhoneE164, getPhoneLookupCandidates } = require('../lib/phone');
+const { getIO } = require('./socket.service');
 
 const {
   Clinica,
@@ -44,6 +45,27 @@ function normalizePhone(raw) {
     phoneDigits: normalizePhoneDigits(raw),
     candidates: getPhoneLookupCandidates(raw),
   };
+}
+
+function emitQuickChatInternalNotice(conversation, message) {
+  const io = getIO();
+  if (!io || !conversation?.id || !message?.id) return;
+  const payload = {
+    id: String(message.id),
+    conversation_id: String(message.conversation_id || conversation.id),
+    content: message.content || '',
+    direction: message.direction || 'outbound',
+    message_type: message.message_type || 'event',
+    status: message.status || 'sent',
+    sent_at: message.sent_at || message.createdAt || new Date(),
+    sender_id: message.sender_id || null,
+    metadata: message.metadata || undefined,
+  };
+  if (conversation.clinic_id) {
+    io.to(`clinic:${conversation.clinic_id}`).emit('message:created', payload);
+  } else {
+    io.emit('message:created', payload);
+  }
 }
 
 function isMarketingOutboundMessage(message) {
@@ -185,6 +207,50 @@ async function createRejectedCommunicationConsent({ patientId, inboundMessage, t
     fecha_envio: triggerMessage?.sent_at || triggerMessage?.createdAt || null,
     fecha_firma: inboundMessage?.sent_at || inboundMessage?.createdAt || new Date(),
     obligatorio: false,
+  }, { transaction });
+}
+
+async function createQuickChatOptOutNotice({
+  conversation,
+  inboundMessage,
+  triggerMessage,
+  updatedItems = [],
+  clinicIds = [],
+  transaction = null,
+}) {
+  if (!Message || !conversation?.id || !inboundMessage?.id) return null;
+  const metadataLike = Sequelize.cast(Sequelize.col('metadata'), 'CHAR');
+  const existing = await Message.findOne({
+    where: {
+      conversation_id: conversation.id,
+      message_type: 'event',
+      [Op.or]: [
+        Sequelize.where(metadataLike, { [Op.like]: `%"inbound_message_id":${Number(inboundMessage.id)}%` }),
+        Sequelize.where(metadataLike, { [Op.like]: `%"inbound_message_id": ${Number(inboundMessage.id)}%` }),
+      ],
+    },
+    transaction,
+  });
+  if (existing) return null;
+
+  return Message.create({
+    conversation_id: conversation.id,
+    sender_id: null,
+    direction: 'outbound',
+    content: 'Se ha dado de baja a este usuario de esta lista y futuros envíos promocionales.',
+    message_type: 'event',
+    status: 'sent',
+    sent_at: inboundMessage.sent_at || inboundMessage.createdAt || new Date(),
+    metadata: {
+      kind: 'automation_flow_event',
+      reason: 'marketing_opt_out',
+      source: 'marketing_opt_out',
+      hidden_from_patient: true,
+      inbound_message_id: inboundMessage.id,
+      trigger_message_id: triggerMessage?.id || null,
+      clinic_ids: clinicIds,
+      updated_items: updatedItems.length,
+    },
   }, { transaction });
 }
 
@@ -378,7 +444,7 @@ async function applyInboundOptOutIfNeeded({ clinicId, conversation, inboundMessa
     return { applied: false, reason: 'opt_out_revoked_for_inbound' };
   }
 
-  return db.sequelize.transaction(async (transaction) => {
+  const result = await db.sequelize.transaction(async (transaction) => {
     const record = await upsertOptOutRecord({
       clinicId,
       clinicIds: targetClinicIds,
@@ -404,14 +470,28 @@ async function applyInboundOptOutIfNeeded({ clinicId, conversation, inboundMessa
       triggerMessage,
       transaction,
     });
+    const noticeMessage = await createQuickChatOptOutNotice({
+      conversation,
+      inboundMessage,
+      triggerMessage,
+      updatedItems,
+      clinicIds: targetClinicIds,
+      transaction,
+    });
     return {
       applied: true,
       record_id: record.id,
       clinic_ids: targetClinicIds,
       updated_items: updatedItems.length,
       trigger_message_id: triggerMessage.id,
+      notice_message: noticeMessage ? noticeMessage.get({ plain: true }) : null,
     };
   });
+  if (result.notice_message) {
+    emitQuickChatInternalNotice(conversation, result.notice_message);
+  }
+  delete result.notice_message;
+  return result;
 }
 
 async function getActiveOptOutSetsForScope(scope, transaction = null) {

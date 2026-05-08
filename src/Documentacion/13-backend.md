@@ -752,7 +752,7 @@ Rutas bajo `/api/marketing/reactivation`:
 | GET | `/lists` | Listar listas de reactivación por scope, estado y objetivo. |
 | POST | `/lists` | Crear lista `draft` desde filtros, manual o importación real. Para `source=import` acepta `import_rows`, `column_mapping`, `custom_fields_schema` e `import_file_name`, relaciona/crea pacientes y persiste items. |
 | GET | `/lists/:id` | Detalle con resumen, field schema, plantilla y contadores calculados en backend. |
-| PATCH | `/lists/:id` | Editar nombre, uso previsto, filtros, plantilla o acción mientras esté editable. |
+| PATCH | `/lists/:id` | Editar condiciones propias de clinica (`source=manual_list`) mientras no tenga envios registrados; recalcula items, contadores y refresca la automatizacion visual si estaba activa. |
 | POST | `/lists/:id/import/preview` | Subir CSV/XLSX, detectar columnas, sugerir mapeos y validar filas sin persistir items finales. |
 | POST | `/lists/:id/import/commit` | Persistir importación, mapping e items calculados. |
 | POST | `/lists/:id/mappings/apply` | Aplicar mapeos generales: tratamientos, clínicas, estados, enums y fechas. |
@@ -784,11 +784,18 @@ Reglas:
 - Los tratamientos importados deben poder mapearse al catálogo existente o conservarse como campo personalizado.
 - Antes de encolar se excluyen cita futura, opt-out/no contactar, teléfono inválido, duplicados, cuarentena y variables personalizadas faltantes.
 - Los nombres de pacientes creados/actualizados desde importación se normalizan a formato nombre propio.
+- Si la importacion de reactivacion trae nombres en formato `Apellidos, Nombre`, backend debe invertirlos al persistir `Pacientes.nombre`/`Pacientes.apellidos` y al materializar variables de lista. Este caso aparece en CSV historicos de eventos o tratamientos.
+- La importacion de reactivacion solo debe crear pacientes cuando el archivo representa historico clinico/tratamiento de la clinica y se necesita evaluar condiciones de reactivacion. No debe usarse como importador generico de contactos comerciales.
 - Alias de importación soportados para nombre completo: `nombre`, `nombre_completo`, `nombre_y_apellidos`, `nombre_apellidos`, `nombre_paciente`, `full_name`.
+- Los nombres de listas de reactivacion autogeneradas no deben depender del nombre de archivo. Backend compone `Reactivacion · tratamiento · condicion` cuando `source=import` o cuando recibe nombres legacy tipo `Importacion <archivo>`; `criteria.import_file_name` conserva la trazabilidad del fichero.
 - `GET /reactivation/lists` omite listas `archived` por defecto.
+- `PATCH /reactivation/lists/:id` solo permite editar condiciones creadas por la clinica (`manual_list`). Las listas de catalogo/importacion no se mutan desde este endpoint para no mezclar presets admin con excepciones locales.
 - `POST /reactivation/lists/:id/prepare` no envia mensajes. Si recibe `automation.active=true`, crea/actualiza una plantilla real en `AutomationFlowTemplatesV2` con `trigger_type=patient_reactivation`, `entry_node_id=N1` y nodos de solo lectura: activador de reactivacion + accion elegida (`send_whatsapp`, `update_lead_info` o `create_task`).
+- `patient_reactivation` esta registrado como trigger V2. Antes de persistir la automatizacion generada desde reactivacion, `marketingReactivation.service` ejecuta una validacion estricta del subconjunto V2 permitido; no debe insertar grafos "a pelo" con tipos o configs fuera de catalogo.
 - Si `prepare` recibe `automation=null`, desactiva el flujo `patient_reactivation` asociado por `template_key` cuando existe.
-- `patient_reactivation` es representacion operativa/visual para `Marketing > Flujos`; la reevaluacion batch 24h, capping y cola cancelable siguen pendientes antes de envio real.
+- `patient_reactivation` es representacion operativa/visual para `Marketing > Flujos`; cliente lo ve en solo lectura y la fuente de verdad sigue siendo la lista de reactivacion.
+- En dev se elimino la automatizacion legacy `qa-reactivation-patient-followup-v1` porque usaba `trigger_type=patient_inactive` y nodos obsoletos (`start`, `wait`) incompatibles con V2.
+- Sigue pendiente el evaluador periodico de reactivaciones antes de envio real: debe recorrer listas activas por scope con predicados indexables, watermark incremental, lotes, clave idempotente por lista/paciente/condicion y gates justo antes de encolar (opt-out, cuarentena, capping, plantilla aprobada, ventana horaria, cola cancelable). Para reglas con fecha conocida, como presupuesto no aceptado en 7 dias, preferir `JobRequest` programado al crear el presupuesto y cancelarlo al aceptar; el barrido diario queda como red de seguridad, no como scan global.
 
 ### 1.1. Envios masivos por listas
 
@@ -798,7 +805,7 @@ Rutas bajo `/api/marketing/bulk-sends`:
 |---|---|---|
 | GET | `/campaigns` | Lista campanas `mass_sends` por scope, excluyendo archivadas. |
 | POST | `/campaigns` | Crea lista/campana desde importacion, manual o pacientes actuales. Acepta `campaign_name`, `template_usage`, `template_commercial`, `opt_out_text` y `link_tracking` en `criteria`. |
-| PATCH | `/campaigns/:id` | Edita borradores/preparadas, asocia plantilla WhatsApp, actualiza tracking o añade contactos a una lista existente con `append_rows`, `column_mapping` y `custom_fields_schema`. |
+| PATCH | `/campaigns/:id` | Edita borradores/preparadas, asocia plantilla WhatsApp, actualiza tracking, añade contactos a una lista existente con `append_rows`, `column_mapping` y `custom_fields_schema`, o guarda `active_segment_id`. |
 | POST | `/campaigns/:id/prepare` | Congela/prepara con plantilla WhatsApp si aplica, sin envio masivo real hasta capping y cola cancelable. |
 | POST | `/campaigns/:id/test-send` | Envia una prueba individual con metadata comercial/no comercial para que el opt-out entrante se aplique correctamente. |
 | DELETE | `/campaigns/:id` | Archiva la campana/lista. |
@@ -811,9 +818,14 @@ Reglas:
 - Al crear una plantilla promocional desde campañas, la UI debe guardar el texto principal mas un bloque de baja con la palabra `BAJA`.
 - Las plantillas WhatsApp reales exponen `category`/`catalog.category`; la UI lo mapea a `uso=promocion` si Meta devuelve `MARKETING`, y a `notificacion` si no.
 - Las variables de columnas extra de listas importadas siguen el contrato `custom_fields_schema` y pueden mostrarse como `{{variable}}` al crear la plantilla desde la campana.
+- Los segmentos de lista viven en `criteria.segments[]`. Cada segmento define `field`, `operator` (`equals`, `contains`, `not_empty`) y `value`; el backend materializa `count`/`criteria.segment_counts` al editar o preparar la lista.
+- Si `prepare` recibe `active_segment_id`, el backend marca `MarketingPatientListItems.selected=true` solo para los items `ready` que cumplen el segmento y el dispatch usa ese subconjunto. Si no hay segmento activo, los items `ready` vuelven a quedar seleccionados.
 - En envios masivos, `MarketingPatientList.name` representa el nombre de la lista. El nombre visible de campaña se conserva en `criteria.campaign_name` para permitir vistas separadas de campanas y listas sin crear otra tabla.
+- En items importados de `mass_sends`, `MarketingPatientListItems.name` debe representar el nombre de pila/contacto visible. El nombre completo queda en `custom_fields.nombre_completo` para tablas ampliadas, variables y fallback de QuickChat.
 - Las listas importadas/manuales de `mass_sends` no crean ni actualizan `Pacientes`, pero `POST /campaigns` cruza cada item con pacientes existentes del scope por telefono/email. Si hay match, guarda `MarketingPatientListItems.paciente_id` y mezcla en `custom_fields` variables estándar del paciente y `PatientCustomFields` existentes.
 - Si un contacto externo responde por WhatsApp, el webhook resuelve la conversacion por telefono. Si existe paciente se vincula `patient_id`; si no existe, se conserva contacto externo y el opt-out comercial se aplica por `phone_digits`.
+- QuickChat no debe crear `Paciente` ni `LeadIntake` para poder nombrar un contacto externo de una lista. Cuando una conversacion WhatsApp no tiene `patient_id` ni `lead_id`, el backend puede hidratar `conversation.contact` desde `MarketingPatientListItems` por `conversation_id` o telefono normalizado.
+- `GET /api/conversations` pagina por `limit/offset` y devuelve `X-Has-More`/`X-Next-Offset`; QuickChat debe consumirlo con scroll infinito. La pestaña visible `Otros` mantiene `filter=leads` por compatibilidad, pero backend incluye `lead_id` y conversaciones externas de campañas presentes en `MarketingPatientListItems.conversation_id`, excluyendo siempre conversaciones con `patient_id`.
 - `POST /campaigns/:id/prepare` y `/test-send` validan todas las variables de la plantilla real contra los items `ready`; si falta algun valor devuelven `409` con `details.missing_variables[]` y no usan ejemplos de plantilla como fallback operativo.
 - `GET /campaigns/:id`, `/campaigns/:id/recipients` y `/campaigns/:id/dispatch` hacen una reconciliacion ligera antes de responder: leen `Messages.metadata.wa_status_history`, materializan `sent/delivered/read/failed/replied` en `MarketingPatientListItems`, refrescan contadores y devuelven `report` agregado. Esto corrige informes atrasados sin cargar toda la lista en frontend.
 - El `report` de envios masivos expone `opt_out_share` (bajas sobre contactos realmente enviados), `read_hours` (lecturas por hora), clicks de enlaces, clicks por contacto y pais aproximado de click. Los listados detallados de abiertos/no abiertos/respuestas/bajas/clicks deben seguir saliendo de endpoints paginados, no de arrays completos en UI.
@@ -3324,10 +3336,15 @@ Actualización 2026-05-06:
 - `cancel` marca `cancel_requested`; el job corta en el siguiente punto de control. `resume` vuelve a encolar solo si quedan items `ready` pendientes.
 - Los informes/listados deben consultar agregados y paginación (`/recipients`, `/dispatch`). No cargar todos los items en frontend para calcular abiertos/no abiertos.
 - `/recipients` busca por nombre, teléfono, email y `custom_fields` JSON, siempre paginado. No traer la lista completa al frontend para filtrar campos importados.
+- La reconciliación defensiva de informes contra `Messages` solo se ejecuta durante la ventana activa configurada por `MARKETING_BULK_SEND_STATS_RECONCILE_WINDOW_MS` (30 días por defecto) o si la campaña sigue viva/pausada/programada. Pasada esa ventana, los informes usan contadores materializados para no reescanear campañas antiguas en cada lectura.
+- Los mensajes salientes de pruebas y campañas emiten `message:created/message:updated` a QuickChat por socket con metadata `source=marketing_bulk_sends`. QuickChat debe reflejar el envío en vivo sin recargar todo el histórico.
+- Los contactos externos de campañas no se convierten en lead ni paciente para aparecer en QuickChat. La conversación se hidrata desde `MarketingPatientListItems` y queda en el filtro `Otros` mientras no haya `patient_id`.
+- Las campañas pueden prepararse contra toda la lista o contra `active_segment_id`; el contador operativo de `counters.ready` representa receptores seleccionados para el envío, mientras `counters.ready_total` conserva los contactos `ready` totales de la lista.
 - `PATCH /api/marketing/bulk-sends/campaigns/:id` con `whatsapp_template_id` valida que la plantilla sea WABA del scope y guarda `template_snapshot` también en borrador. No usar `MessageTemplates` legacy para campañas nuevas.
 - Los webhooks WhatsApp materializan `sent/delivered/read/failed/replied` en `MarketingPatientListItems` usando `app_message_id`, `provider_message_id` y metadata `source = marketing_bulk_sends`.
 - Como red de seguridad, las lecturas de detalle (`GET /campaigns/:id`, `/recipients`, `/dispatch`) vuelven a reconciliar de forma idempotente contra `Messages`. Esto no sustituye a actualizar gateway cuando se promociona: solo evita que un informe quede desfasado si un webhook llegó antes de desplegar el materializador.
 - Los inbound con `BAJA` solo aplican opt-out si el outbound previo tiene metadata comercial; no se debe excluir a pacientes por responder `baja` a recordatorios operativos.
+- Cuando una baja comercial se aplica, se persiste un `Messages.message_type=event` interno con `metadata.reason=marketing_opt_out`. Es aviso operativo para QuickChat; no se envía al paciente.
 - El job de envío lo ejecuta el API del namespace (`dev`, `staging`, `prod`). Gateway no ejecuta jobs de negocio, pero al promocionar hay que llevarle `src/workers/queue.workers.js` porque recibe webhooks externos y materializa estados/respuestas.
 - Si se prepara una campaña con plantilla WhatsApp no aprobada y `auto_send_when_template_approved = true`, queda en `dispatch.status = waiting_template_approval`. La sincronización WABA la reencola automáticamente cuando esa plantilla pase a `APPROVED`.
 - Campañas Admin expone `GET/PUT /api/admin/campaign-playbooks/bulk-send-settings` para configurar ajustes de envíos masivos WhatsApp: batch size, delay y baja máxima. `prepare` guarda snapshot en `criteria.dispatch`; el delay mínimo efectivo es 2 minutos por lote. Email y otros canales deberán tener ajustes propios cuando se conecten.

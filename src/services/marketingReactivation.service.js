@@ -84,6 +84,15 @@ function splitFullName(value) {
   if (!normalized) {
     return { nombre: 'Paciente', apellidos: '' };
   }
+  if (normalized.includes(',')) {
+    const [lastNameRaw, ...firstNameRaw] = normalized.split(',');
+    const firstName = toTitleCaseName(firstNameRaw.join(',').trim() || lastNameRaw);
+    const lastName = toTitleCaseName(firstNameRaw.length ? lastNameRaw : '');
+    return {
+      nombre: firstName || 'Paciente',
+      apellidos: lastName,
+    };
+  }
   const parts = normalized.split(/\s+/);
   if (parts.length === 1) {
     return { nombre: parts[0], apellidos: '' };
@@ -117,6 +126,85 @@ function normalizeTreatmentMappings(rawMappings = {}) {
     });
   }
   return mappings;
+}
+
+function uniqueNonEmpty(values) {
+  return Array.from(new Set(
+    (values || [])
+      .map((value) => normalizeText(value))
+      .filter(Boolean)
+  ));
+}
+
+function shortenSemanticNamePart(value, maxLength) {
+  const text = normalizeText(value).replace(/\s+/g, ' ');
+  if (!text || text.length <= maxLength) return text;
+  return `${text.slice(0, Math.max(0, maxLength - 1)).trim()}…`;
+}
+
+function composeReactivationListName(treatment, condition) {
+  return [
+    'Reactivación',
+    shortenSemanticNamePart(treatment || 'varios tratamientos', 42),
+    shortenSemanticNamePart(condition || 'condiciones configuradas', 58),
+  ].join(' · ');
+}
+
+function looksLikeGeneratedImportName(value) {
+  const normalized = normalizeKey(value);
+  return normalized.startsWith('importacion_')
+    || normalized.includes('_importacion_')
+    || normalized.startsWith('automatizacion_importacion_')
+    || normalized.startsWith('automatizacion_reactivacion_importacion_');
+}
+
+function resolveSemanticTreatmentLabel({ body = {}, suggestion = null, itemPayloads = [] } = {}) {
+  const direct = normalizeText(body.treatment || suggestion?.treatment);
+  if (direct && normalizeKey(direct) !== 'varios') return direct;
+
+  const mappings = normalizeTreatmentMappings(body.treatment_mappings || body.treatment_mapping || {});
+  const mappedNames = uniqueNonEmpty(Array.from(mappings.values()).map((mapping) => mapping.treatment_name));
+  if (mappedNames.length === 1) return mappedNames[0];
+  if (mappedNames.length > 1) {
+    return mappedNames.length > 2
+      ? `${mappedNames.slice(0, 2).join(', ')} y ${mappedNames.length - 2} más`
+      : mappedNames.join(' y ');
+  }
+
+  const itemNames = uniqueNonEmpty(itemPayloads.map((item) => item.treatment));
+  if (itemNames.length === 1) return itemNames[0];
+  if (itemNames.length > 1) {
+    return itemNames.length > 2
+      ? `${itemNames.slice(0, 2).join(', ')} y ${itemNames.length - 2} más`
+      : itemNames.join(' y ');
+  }
+
+  return 'varios tratamientos';
+}
+
+function resolveSemanticConditionLabel({ source, body = {}, suggestion = null } = {}) {
+  const direct = normalizeText(body.condition_summary || suggestion?.condition);
+  if (direct && normalizeKey(direct) !== 'pacientes_importados_desde_archivo') return direct;
+  const months = Number(suggestion?.thresholdMonths || body.threshold_months || body.threshold || 0);
+  if (Number.isFinite(months) && months > 0) {
+    return `sin visita desde hace más de ${months} meses`;
+  }
+  if (source === 'import') {
+    return 'fecha de tratamiento importada';
+  }
+  return 'condiciones configuradas';
+}
+
+function buildSemanticReactivationListName({ source, body, suggestion, itemPayloads } = {}) {
+  return composeReactivationListName(
+    resolveSemanticTreatmentLabel({ body, suggestion, itemPayloads }),
+    resolveSemanticConditionLabel({ source, body, suggestion })
+  );
+}
+
+function shouldUseSemanticReactivationName(name) {
+  const clean = normalizeText(name);
+  return !clean || looksLikeGeneratedImportName(clean);
 }
 
 function mapDialogUnitToBackend(unit) {
@@ -1240,19 +1328,57 @@ function buildReactivationAutomationNodes(list, automation, actionMode, template
   const actionNodeType = actionMode === 'whatsapp_template'
     ? 'action/send_whatsapp'
     : (actionMode === 'lead_call_list' ? 'action/update_lead_info' : 'action/create_task');
+  const wabaTemplateId = Number(
+    automation?.whatsapp_template_id
+    || automation?.waba_template_id
+    || template?.whatsapp_template_id
+    || 0
+  ) || null;
   const actionConfig = actionMode === 'whatsapp_template'
-    ? {
-      mode: 'template',
-      template_id: template?.id || automation?.template_id || null,
-      template_name: template?.nombre || automation?.template_name || null,
-      template_usage: template?.uso || automation?.template_usage || null,
-      template_commercial: isCommercialTemplateUsage(template?.uso || automation?.template_usage || 'reactivacion_pacientes'),
-      source: 'marketing_reactivation',
-    }
-    : {
-      source: 'marketing_reactivation',
-      destination: actionMode === 'lead_call_list' ? 'leads' : 'managed_calls',
-    };
+    ? (wabaTemplateId
+      ? {
+        message_mode: 'template',
+        template_id: wabaTemplateId,
+        template_name: automation?.template_name || template?.nombre || null,
+        template_usage: template?.uso || automation?.template_usage || 'reactivacion_pacientes',
+        template_commercial: isCommercialTemplateUsage(template?.uso || automation?.template_usage || 'reactivacion_pacientes'),
+        recipient_mode: 'context_patient',
+        sender_mode: 'clinic_default',
+        quiet_hours_enabled: true,
+        source: 'marketing_reactivation',
+      }
+      : {
+        message_mode: 'manual',
+        manual_message_text: template?.contenido || automation?.template_text || 'Mensaje de reactivación pendiente de plantilla WhatsApp aprobada.',
+        legacy_message_template_id: template?.id || automation?.template_id || null,
+        template_name: template?.nombre || automation?.template_name || null,
+        template_usage: template?.uso || automation?.template_usage || 'reactivacion_pacientes',
+        template_commercial: isCommercialTemplateUsage(template?.uso || automation?.template_usage || 'reactivacion_pacientes'),
+        recipient_mode: 'context_patient',
+        sender_mode: 'clinic_default',
+        quiet_hours_enabled: true,
+        source: 'marketing_reactivation',
+        requires_approved_template_before_dispatch: true,
+      })
+    : (actionMode === 'lead_call_list'
+      ? {
+        mode: 'set_required',
+        info_requerida: ['Llamar al paciente por reactivación'],
+        auto_transition: true,
+        status_when_waiting: 'esperando_info',
+        status_when_complete: 'info_recibida',
+        source: 'marketing_reactivation',
+        destination: 'leads',
+      }
+      : {
+        title: 'Llamada gestionada por ClinicaClick',
+        description: `Gestionar llamada de reactivación para "${list.name}".`,
+        assignee_type: 'role',
+        assignee_id: 'admin',
+        due_date_offset: '1 day',
+        source: 'marketing_reactivation',
+        destination: 'managed_calls',
+      });
 
   return [
     {
@@ -1274,9 +1400,124 @@ function buildReactivationAutomationNodes(list, automation, actionMode, template
       type: actionNodeType,
       position: { x: 420, y: 160 },
       config: actionConfig,
-      outputs: {},
+      outputs: { on_success: null, on_fail: null },
     },
   ];
+}
+
+function validateReactivationAutomationContract(payload) {
+  const errors = [];
+  const nodes = Array.isArray(payload?.nodes) ? payload.nodes : [];
+  const entryNodeId = String(payload?.entry_node_id || '').trim();
+  const nodeMap = new Map();
+  const allowedNodeTypes = new Set([
+    'trigger/patient_reactivation',
+    'action/send_whatsapp',
+    'action/update_lead_info',
+    'action/create_task',
+  ]);
+
+  if (payload?.trigger_type !== 'patient_reactivation') {
+    errors.push('trigger_type debe ser patient_reactivation');
+  }
+  if (!entryNodeId) {
+    errors.push('entry_node_id es obligatorio');
+  }
+  if (!nodes.length) {
+    errors.push('nodes debe tener al menos un nodo');
+  }
+
+  for (const node of nodes) {
+    const id = String(node?.id || '').trim();
+    const type = String(node?.type || '').trim();
+    if (!id || !/^N[0-9]+$/.test(id)) {
+      errors.push(`Nodo con id inválido: ${id || '(vacío)'}`);
+      continue;
+    }
+    if (nodeMap.has(id)) {
+      errors.push(`Nodo duplicado: ${id}`);
+      continue;
+    }
+    if (!allowedNodeTypes.has(type)) {
+      errors.push(`Tipo de nodo no permitido en reactivación: ${type || '(vacío)'}`);
+    }
+    nodeMap.set(id, node);
+  }
+
+  const entryNode = nodeMap.get(entryNodeId);
+  if (!entryNode || entryNode.type !== 'trigger/patient_reactivation') {
+    errors.push('El nodo de entrada debe ser trigger/patient_reactivation');
+  }
+
+  for (const node of nodeMap.values()) {
+    const outputs = node?.outputs && typeof node.outputs === 'object' && !Array.isArray(node.outputs)
+      ? node.outputs
+      : {};
+    for (const target of Object.values(outputs)) {
+      if (target === null || target === undefined || target === '') continue;
+      if (!nodeMap.has(String(target).trim())) {
+        errors.push(`El nodo ${node.id} apunta a un destino inexistente: ${target}`);
+      }
+    }
+
+    const config = node?.config && typeof node.config === 'object' && !Array.isArray(node.config)
+      ? node.config
+      : {};
+    if (node.type === 'action/send_whatsapp') {
+      const messageMode = normalizeKey(config.message_mode || 'template');
+      if (!['template', 'manual'].includes(messageMode)) {
+        errors.push('send_whatsapp requiere message_mode template o manual');
+      }
+      if (messageMode === 'template' && !config.template_id) {
+        errors.push('send_whatsapp con template requiere template_id');
+      }
+      if (messageMode === 'manual' && !normalizeText(config.manual_message_text)) {
+        errors.push('send_whatsapp manual requiere manual_message_text');
+      }
+      const recipientMode = normalizeKey(config.recipient_mode || 'context_patient');
+      if (!['context_patient', 'context_lead', 'manual_number'].includes(recipientMode)) {
+        errors.push('send_whatsapp requiere recipient_mode válido');
+      }
+      const senderMode = normalizeKey(config.sender_mode || 'clinic_default');
+      if (!['clinic_default', 'specific_origin'].includes(senderMode)) {
+        errors.push('send_whatsapp requiere sender_mode válido');
+      }
+      if (senderMode === 'specific_origin' && !config.sender_origin_id) {
+        errors.push('send_whatsapp con specific_origin requiere sender_origin_id');
+      }
+    }
+    if (node.type === 'action/update_lead_info') {
+      const mode = normalizeKey(config.mode || 'set_required');
+      const info = Array.isArray(config.info_requerida)
+        ? config.info_requerida.filter((item) => normalizeText(item))
+        : [];
+      if (!['set_required', 'set_received', 'append_received', 'clear_required', 'clear_received', 'clear_all'].includes(mode)) {
+        errors.push('update_lead_info requiere mode válido');
+      }
+      if (mode === 'set_required' && !info.length) {
+        errors.push('update_lead_info set_required requiere info_requerida');
+      }
+    }
+    if (node.type === 'action/create_task') {
+      const assigneeType = normalizeKey(config.assignee_type);
+      if (!['user', 'role'].includes(assigneeType)) {
+        errors.push('create_task requiere assignee_type user o role');
+      }
+      if (!normalizeText(config.assignee_id)) {
+        errors.push('create_task requiere assignee_id');
+      }
+      if (!normalizeText(config.title)) {
+        errors.push('create_task requiere title');
+      }
+    }
+  }
+
+  if (errors.length) {
+    const err = new Error('La automatización de reactivación no cumple el contrato V2');
+    err.status = 400;
+    err.details = errors;
+    throw err;
+  }
 }
 
 async function upsertReactivationAutomationTemplate({ list, automation, actionMode, template, userId }) {
@@ -1308,6 +1549,11 @@ async function upsertReactivationAutomationTemplate({ list, automation, actionMo
     published_at: new Date(),
     published_by: userId || null,
   };
+  validateReactivationAutomationContract({
+    trigger_type: payload.trigger_type,
+    entry_node_id: payload.entry_node_id,
+    nodes: payload.nodes,
+  });
 
   const existing = await AutomationFlowTemplateV2.findOne({
     where: { template_key: templateKey },
@@ -1514,14 +1760,20 @@ async function createList(scope, body = {}, userId = null) {
     itemPayloads = await applyMarketingOptOutExclusions(itemPayloads, scope, transaction);
     const counters = computeCounters(itemPayloads);
     const actionMode = body.action_mode || suggestion?.recommendedMode || 'whatsapp_template';
+    const semanticName = buildSemanticReactivationListName({ source, body, suggestion, itemPayloads });
+    const listName = shouldUseSemanticReactivationName(body.name)
+      ? semanticName
+      : normalizeText(body.name);
+    const conditionSummary = normalizeText(body.condition_summary || suggestion?.condition)
+      || (source === 'import' ? 'Pacientes importados con tratamiento y fecha de tratamiento informada.' : null);
     const list = await MarketingPatientList.create({
-      name: body.name || suggestion?.title || 'Lista de reactivación',
+      name: listName || suggestion?.title || 'Lista de reactivación',
       objective_id: 'reactivate_patients',
       source: source === 'custom' ? 'manual_list' : (source === 'import' ? 'imported_file' : source),
       status: 'draft',
       ...scopePayload,
       treatment: body.treatment || suggestion?.treatment || itemPayloads[0]?.treatment || null,
-      condition_summary: body.condition_summary || suggestion?.condition || null,
+      condition_summary: conditionSummary,
       exclusion_summary: body.exclusion_summary || suggestion?.exclusionSummary || null,
       criteria: {
         suggestion_id: suggestion?.id || null,
@@ -1534,6 +1786,7 @@ async function createList(scope, body = {}, userId = null) {
         column_mapping: importResult?.columnMapping || body.column_mapping || null,
         treatment_mappings: body.treatment_mappings || body.treatment_mapping || null,
         rules: body.rules || [],
+        exclusions: body.exclusions || [],
       },
       action_mode: actionMode,
       channel: actionModeToChannel(actionMode),
@@ -1581,6 +1834,108 @@ async function createList(scope, body = {}, userId = null) {
       list: serializeList(created, { itemsPreview: preview }),
     };
   });
+}
+
+async function updateList(scope, listId, body = {}, userId = null) {
+  const list = await MarketingPatientList.findByPk(listId);
+  ensureScopeAccess(list, scope);
+
+  if (list.source !== 'manual_list') {
+    const err = new Error('Solo se pueden editar condiciones creadas por la clínica');
+    err.status = 400;
+    throw err;
+  }
+  if (['completed', 'cancelled'].includes(String(list.status || '').toLowerCase())) {
+    const err = new Error('No se puede editar una reactivación ya cerrada');
+    err.status = 409;
+    throw err;
+  }
+
+  const sentCount = await MarketingPatientListItem.count({
+    where: {
+      list_id: list.id,
+      dispatch_status: { [Op.in]: ['sent', 'delivered', 'read', 'replied'] },
+    },
+  });
+  if (sentCount > 0) {
+    const err = new Error('No se pueden editar condiciones de una lista con envíos registrados');
+    err.status = 409;
+    throw err;
+  }
+
+  let previewPayloads = [];
+  await db.sequelize.transaction(async (transaction) => {
+    let itemPayloads = await buildCustomItemPayloads(scope, body);
+    itemPayloads = await enrichItemsWithPatientCustomFields(itemPayloads, transaction);
+    itemPayloads = await applyMarketingOptOutExclusions(itemPayloads, scope, transaction);
+    const counters = computeCounters(itemPayloads);
+    previewPayloads = itemPayloads.slice(0, 5).map((item, index) => ({ ...item, id: index + 1, list_id: list.id }));
+    const conditionSummary = normalizeText(body.condition_summary) || list.condition_summary;
+    const exclusionSummary = normalizeText(body.exclusion_summary) || list.exclusion_summary;
+    const treatmentName = normalizeText(body.treatment || body.treatmentName || list.treatment);
+    const treatmentId = body.treatment_id || body.treatmentId || list.criteria?.treatment_id || null;
+    const listName = normalizeText(body.name) || list.name;
+
+    await MarketingPatientListItem.destroy({ where: { list_id: list.id }, transaction });
+    if (itemPayloads.length) {
+      await MarketingPatientListItem.bulkCreate(
+        itemPayloads.map((item) => ({ ...item, list_id: list.id })),
+        { transaction }
+      );
+    }
+
+    await list.update({
+      name: listName,
+      treatment: treatmentName || null,
+      condition_summary: conditionSummary,
+      exclusion_summary: exclusionSummary,
+      criteria: {
+        ...(list.criteria || {}),
+        source: 'custom',
+        treatment_id: treatmentId,
+        rules: Array.isArray(body.rules) ? body.rules : [],
+        exclusions: Array.isArray(body.exclusions) ? body.exclusions : [],
+      },
+      counters,
+      safety_gates: {
+        ...(list.safety_gates || {}),
+        frozen_audience: counters.total > 0,
+      },
+    }, { transaction });
+
+    await MarketingPatientContactEvent.create({
+      list_id: list.id,
+      event_type: 'list_conditions_updated',
+      channel: list.channel,
+      payload: {
+        user_id: userId || null,
+        name: listName,
+        condition_summary: conditionSummary,
+        exclusion_summary: exclusionSummary,
+        counters,
+      },
+      occurred_at: new Date(),
+    }, { transaction });
+  });
+
+  const reloaded = await MarketingPatientList.findByPk(list.id);
+  if (reloaded?.automation?.active) {
+    const { template } = await snapshotTemplate(reloaded.template_id || null);
+    const automationSnapshot = await upsertReactivationAutomationTemplate({
+      list: reloaded.get({ plain: true }),
+      automation: reloaded.automation,
+      actionMode: reloaded.action_mode || 'whatsapp_template',
+      template,
+      userId,
+    });
+    await reloaded.update({ automation: automationSnapshot });
+  }
+
+  const finalList = await MarketingPatientList.findByPk(list.id);
+  return {
+    success: true,
+    list: serializeList(finalList, { itemsPreview: previewPayloads }),
+  };
 }
 
 async function getList(scope, listId) {
@@ -1885,6 +2240,7 @@ module.exports = {
   getSuggestions,
   getLists,
   createList,
+  updateList,
   getList,
   getItems,
   updateItem,
