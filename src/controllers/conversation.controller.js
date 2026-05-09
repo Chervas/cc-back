@@ -265,31 +265,36 @@ async function hydrateMarketingContactFallbacks(conversations = []) {
 }
 
 async function getTotalUnreadCountForUser(userId, clinicIds, isAggregateAllowed, requestedClinicId) {
-  const where = {};
+  const replacements = { userId };
+  const clinicClauses = [];
   if (requestedClinicId && requestedClinicId !== 'all') {
     const parsed = parseClinicIdsParam(requestedClinicId);
     if (!parsed || !ensureAccess({ clinicIds, isAggregateAllowed }, requestedClinicId)) {
       return 0;
     }
-    where.clinic_id = parsed.length === 1 ? parsed[0] : { [Op.in]: parsed };
+    replacements.clinicIds = parsed;
+    clinicClauses.push('c.clinic_id IN (:clinicIds)');
   } else if (!isAggregateAllowed) {
-    where.clinic_id = { [Op.in]: clinicIds };
+    replacements.clinicIds = clinicIds;
+    clinicClauses.push('c.clinic_id IN (:clinicIds)');
   }
 
-  const conversations = await Conversation.findAll({
-    where,
-    attributes: ['id'],
-    raw: true,
-  });
-  const ids = conversations.map((c) => c.id);
-  if (!ids.length) return 0;
+  const [row] = await db.sequelize.query(
+    `
+      SELECT COUNT(m.id) AS total
+      FROM Messages m
+      INNER JOIN Conversations c ON c.id = m.conversation_id
+      LEFT JOIN ConversationReads cr
+        ON cr.conversation_id = c.id
+       AND cr.user_id = :userId
+      WHERE m.direction = 'inbound'
+        AND m.createdAt > COALESCE(cr.last_read_at, '1970-01-01')
+        ${clinicClauses.length ? `AND ${clinicClauses.join(' AND ')}` : ''}
+    `,
+    { replacements, type: db.Sequelize.QueryTypes.SELECT }
+  );
 
-  const unreadMap = await getUnreadCountsByConversation(userId, ids);
-  let total = 0;
-  unreadMap.forEach((count) => {
-    total += count || 0;
-  });
-  return total;
+  return Number(row?.total || 0);
 }
 
 exports.listConversations = async (req, res) => {
@@ -440,9 +445,11 @@ exports.listConversations = async (req, res) => {
       return data;
     });
     const payload = await hydrateMarketingContactFallbacks(rawPayload);
+    const totalUnread = await getTotalUnreadCountForUser(userId, clinicIds, isAggregateAllowed, clinic_id);
 
     res.set('X-Has-More', hasMore ? 'true' : 'false');
     res.set('X-Next-Offset', String(offset + payload.length));
+    res.set('X-Total-Unread', String(totalUnread || 0));
     return res.json(payload);
   } catch (err) {
     console.error('Error listConversations', err);
