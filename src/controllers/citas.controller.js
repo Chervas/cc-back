@@ -1,6 +1,7 @@
 const asyncHandler = require('express-async-handler');
 const { Op } = require('sequelize');
 const db = require('../../models');
+const crypto = require('crypto');
 
 const CitaPaciente = db.CitaPaciente;
 const LeadIntake = db.LeadIntake;
@@ -26,8 +27,66 @@ const { CITA_STATUS_VALUES } = require('../lib/status-catalog');
 const { getIO } = require('../services/socket.service');
 const { normalizePhoneDigits } = require('../lib/phone');
 const { normalizeHumanName } = require('../lib/name');
+const consentimientosService = require('../services/consentimientos.service');
 
 const CITA_ESTADOS_VALIDOS = new Set(CITA_STATUS_VALUES);
+const generatePacientePublicId = () => `pac_${crypto.randomBytes(10).toString('hex')}`;
+
+async function generateUniquePacientePublicId() {
+    for (let i = 0; i < 8; i++) {
+        const publicId = generatePacientePublicId();
+        const existing = await Paciente.findOne({ where: { public_id: publicId }, attributes: ['id_paciente'] });
+        if (!existing) return publicId;
+    }
+    throw new Error('paciente_public_id_generation_failed');
+}
+
+async function findPacienteByIdentifier(id) {
+    const value = String(id || '').trim();
+    if (!value) return null;
+    if (/^\d+$/.test(value)) {
+        return Paciente.findByPk(Number(value), {
+            include: [{ model: db.PacienteClinica, as: 'clinicasVinculadas', required: false }]
+        });
+    }
+    const publicIds = value.startsWith('pat_') ? [value, `pac_${value.slice(4)}`] : [value];
+    return Paciente.findOne({
+        where: { public_id: { [Op.in]: publicIds } },
+        include: [{ model: db.PacienteClinica, as: 'clinicasVinculadas', required: false }]
+    });
+}
+
+async function ensureConsentPackageAndAutomation(cita, req, triggerSource = 'appointment') {
+    if (!cita?.id_cita) return null;
+    try {
+        const result = await consentimientosService.ensurePackageForAppointment(cita.id_cita, {
+            createdBy: req.userData?.userId || null,
+            triggerSource,
+        });
+        const packagePlain = result?.package?.toJSON ? result.package.toJSON() : result?.package;
+        if (packagePlain?.id) {
+            await appointmentAutomationV2Runtime.enqueueExecutionForCita(cita, {
+                event_name: 'consent_required',
+                window_identifier: `consent:${packagePlain.public_id || packagePlain.id}`,
+                trigger_data: {
+                    consent_package_id: packagePlain.id,
+                    consent_package_public_id: packagePlain.public_id || null,
+                    consent_required_count: result?.summary?.required_total || packagePlain.required_count || 0,
+                    consent_pending_required: result?.summary?.pending_required || 0,
+                    consent_public_url_pending: true,
+                },
+                user_id: req.userData?.userId || null,
+                user_name: req.userData?.name || req.userData?.nombre || req.userData?.email || null,
+                user_role: req.userData?.role || req.userData?.rol || 'admin',
+            });
+        }
+        return result;
+    } catch (error) {
+        console.warn('⚠️ [Citas] No se pudo preparar paquete de consentimientos:', error.message || error);
+        return null;
+    }
+}
+
 const LEAD_ACTIVE_APPOINTMENT_STATES = new Set([
     'pendiente',
     'info_enviada',
@@ -556,9 +615,7 @@ async function findOrCreatePaciente({ clinica_id, nombre, apellidos, telefono, e
 
     // Si viene un id_paciente, vincularlo si hace falta y devolverlo
     if (id_paciente) {
-        const existente = await Paciente.findByPk(id_paciente, {
-            include: [{ model: db.PacienteClinica, as: 'clinicasVinculadas', required: false }]
-        });
+        const existente = await findPacienteByIdentifier(id_paciente);
         if (!existente) {
             throw new Error('Paciente no encontrado');
         }
@@ -631,6 +688,7 @@ async function findOrCreatePaciente({ clinica_id, nombre, apellidos, telefono, e
     }
 
     const nuevoPaciente = await Paciente.create({
+        public_id: await generateUniquePacientePublicId(),
         nombre: normalizeHumanName(nombre || 'Sin nombre') || 'Sin nombre',
         apellidos: normalizeHumanName(apellidos || ''),
         telefono_movil: normalizedPhone || telefono || '',
@@ -1338,6 +1396,8 @@ exports.createCita = asyncHandler(async (req, res) => {
             console.error('⚠️ [createCita] Error disparando automation v2:', automationErr.message);
         }
 
+        await ensureConsentPackageAndAutomation(cita, req, 'appointment_created');
+
         // Marcar lead como citado si aplica
         if (lead) {
             const leadUpdatePayload = {
@@ -1379,11 +1439,16 @@ exports.createCita = asyncHandler(async (req, res) => {
                 { model: Paciente, as: 'paciente' },
                 { model: LeadIntake, as: 'lead' },
                 { model: Clinica, as: 'clinica', attributes: ['id_clinica','nombre_clinica', ['grupoClinicaId', 'grupo_clinica_id']] },
-                Campana ? { model: Campana, as: 'campana' } : null
+                Campana ? { model: Campana, as: 'campana' } : null,
+                { model: Instalacion, as: 'instalacion', required: false },
+                { model: Tratamiento, as: 'tratamiento', required: false },
+                db.Usuario ? { model: db.Usuario, as: 'doctor', required: false, attributes: ['id_usuario', 'nombre', 'apellidos', 'avatar'] } : null
             ].filter(Boolean)
         });
 
         await attachFlowSummaryToCitas(citaCreada);
+        await attachUnreadCountsToCitas(citaCreada, req.userData?.userId || null);
+        await consentimientosService.attachConsentSummaryToCitas(citaCreada);
         emitAppointmentSocketEvent('appointment:created', citaCreada?.toJSON ? citaCreada.toJSON() : citaCreada);
 
         return res.status(201).json(citaCreada);
@@ -1400,11 +1465,28 @@ exports.createCita = asyncHandler(async (req, res) => {
  * Listar citas (simplificado para calendario)
  */
 exports.getCitas = asyncHandler(async (req, res) => {
-    const { clinica_id, startDate, endDate } = req.query;
+    const { clinica_id, startDate, endDate, paciente_id, patient_id } = req.query;
 
     const where = {};
     if (clinica_id) {
         where.clinica_id = clinica_id;
+    }
+    const pacienteIdRaw = paciente_id || patient_id;
+    if (pacienteIdRaw) {
+        let pacienteId = Number(pacienteIdRaw);
+        if ((!Number.isFinite(pacienteId) || pacienteId <= 0) && Paciente) {
+            const pacientePublicId = String(pacienteIdRaw).trim();
+            const publicIds = pacientePublicId.startsWith('pat_') ? [pacientePublicId, `pac_${pacientePublicId.slice(4)}`] : [pacientePublicId];
+            const paciente = await Paciente.findOne({
+                where: { public_id: { [Op.in]: publicIds } },
+                attributes: ['id_paciente'],
+            });
+            pacienteId = Number(paciente?.id_paciente);
+        }
+        if (!Number.isFinite(pacienteId) || pacienteId <= 0) {
+            return res.status(400).json({ message: 'paciente_id inválido' });
+        }
+        where.paciente_id = pacienteId;
     }
     if (startDate && endDate) {
         where.inicio = { [db.Sequelize.Op.between]: [new Date(startDate), new Date(endDate)] };
@@ -1419,13 +1501,14 @@ exports.getCitas = asyncHandler(async (req, res) => {
             { model: Clinica, as: 'clinica' },
             { model: Instalacion, as: 'instalacion', required: false },
             { model: Tratamiento, as: 'tratamiento', required: false },
-            db.Usuario ? { model: db.Usuario, as: 'doctor', required: false, attributes: ['id_usuario', 'nombre', 'apellidos'] } : null
+            db.Usuario ? { model: db.Usuario, as: 'doctor', required: false, attributes: ['id_usuario', 'nombre', 'apellidos', 'avatar'] } : null
         ]
         .filter(Boolean)
     });
 
     await attachFlowSummaryToCitas(citas);
     await attachUnreadCountsToCitas(citas, req.userData?.userId || null);
+    await consentimientosService.attachConsentSummaryToCitas(citas);
     res.json(citas);
 });
 
@@ -1455,6 +1538,7 @@ exports.getCitaById = asyncHandler(async (req, res) => {
 
     await attachFlowSummaryToCitas(cita);
     await attachUnreadCountsToCitas(cita, req.userData?.userId || null);
+    await consentimientosService.attachConsentSummaryToCitas(cita);
 
     let conversation_id = null;
     try {
@@ -1503,8 +1587,11 @@ exports.getNextCita = asyncHandler(async (req, res) => {
         include: [
             { model: Paciente, as: 'paciente' },
             { model: LeadIntake, as: 'lead' },
-            { model: Clinica, as: 'clinica' }
-        ]
+            { model: Clinica, as: 'clinica' },
+            { model: Instalacion, as: 'instalacion', required: false },
+            { model: Tratamiento, as: 'tratamiento', required: false },
+            db.Usuario ? { model: db.Usuario, as: 'doctor', required: false, attributes: ['id_usuario', 'nombre', 'apellidos', 'avatar'] } : null
+        ].filter(Boolean)
     });
 
     await attachFlowSummaryToCitas(cita);
@@ -1563,12 +1650,16 @@ exports.updateCitaEstado = asyncHandler(async (req, res) => {
         include: [
             { model: Paciente, as: 'paciente' },
             { model: LeadIntake, as: 'lead' },
-            { model: Clinica, as: 'clinica' }
-        ]
+            { model: Clinica, as: 'clinica' },
+            { model: Instalacion, as: 'instalacion', required: false },
+            { model: Tratamiento, as: 'tratamiento', required: false },
+            db.Usuario ? { model: db.Usuario, as: 'doctor', required: false, attributes: ['id_usuario', 'nombre', 'apellidos', 'avatar'] } : null
+        ].filter(Boolean)
     });
 
     await attachFlowSummaryToCitas(citaActualizada);
     await attachUnreadCountsToCitas(citaActualizada, req.userData?.userId || null);
+    await consentimientosService.attachConsentSummaryToCitas(citaActualizada);
     emitAppointmentSocketEvent('appointment:updated', citaActualizada?.toJSON ? citaActualizada.toJSON() : citaActualizada);
     return res.json(citaActualizada);
 });
@@ -1674,15 +1765,23 @@ exports.reagendarCita = asyncHandler(async (req, res) => {
         console.error('⚠️ [reagendarCita] Error disparando automation v2:', automationErr.message);
     }
 
+    await ensureConsentPackageAndAutomation(cita, req, 'appointment_rescheduled');
+
     const citaActualizada = await CitaPaciente.findByPk(citaId, {
         include: [
             { model: Paciente, as: 'paciente' },
             { model: LeadIntake, as: 'lead' },
-            { model: Clinica, as: 'clinica' }
+            { model: Clinica, as: 'clinica' },
+            { model: Instalacion, as: 'instalacion', required: false },
+            { model: Tratamiento, as: 'tratamiento', required: false },
+            db.Usuario ? { model: db.Usuario, as: 'doctor', required: false, attributes: ['id_usuario', 'nombre', 'apellidos', 'avatar'] } : null
         ]
+        .filter(Boolean)
     });
 
     await attachFlowSummaryToCitas(citaActualizada);
+    await attachUnreadCountsToCitas(citaActualizada, req.userData?.userId || null);
+    await consentimientosService.attachConsentSummaryToCitas(citaActualizada);
     emitAppointmentSocketEvent('appointment:updated', citaActualizada?.toJSON ? citaActualizada.toJSON() : citaActualizada);
     return res.json(citaActualizada);
 });

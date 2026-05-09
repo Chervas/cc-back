@@ -29,6 +29,7 @@ const APPOINTMENT_TRIGGER_TYPES = new Set([
   'appointment_rescheduled',
   'appointment_cancelled',
   'appointment_completed',
+  'consent_required',
 ]);
 const APPOINTMENT_CREATED_SCOPE_VALUES = new Set([
   'all',
@@ -737,11 +738,12 @@ async function resolveClinicScope(cita) {
   };
 }
 
-function buildExecutionContext({ cita, eventName, userName = null, userEmail = null }) {
+function buildExecutionContext({ cita, eventName, userName = null, userEmail = null, triggerData = null }) {
   const leadIntakeId = toIntOrNull(cita?.lead_intake_id);
   const appointmentOrigin = leadIntakeId ? 'lead' : 'manual';
   const createdAt = cita?.created_at || cita?.createdAt || null;
   const updatedAt = cita?.updated_at || cita?.updatedAt || null;
+  const extraTriggerData = triggerData && typeof triggerData === 'object' ? triggerData : {};
 
   return {
     trigger: {
@@ -766,6 +768,7 @@ function buildExecutionContext({ cita, eventName, userName = null, userEmail = n
         updated_at: updatedAt,
         inicio: cita?.inicio || null,
         fin: cita?.fin || null,
+        ...extraTriggerData,
       },
     },
     appointment: {
@@ -824,6 +827,7 @@ async function enqueueExecutionForTemplate(cita, template, options = {}) {
     eventName,
     userName: options.user_name || null,
     userEmail: options.user_email || null,
+    triggerData: options.trigger_data || null,
   });
 
   const createdExecution = await FlowExecutionV2.create({

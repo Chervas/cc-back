@@ -28,6 +28,7 @@ module.exports = (sequelize, DataTypes) => {
     email_usuario: DataTypes.STRING,
     email_factura: DataTypes.STRING,
     email_notificacion: DataTypes.STRING,
+    avatar: DataTypes.STRING,
     password_usuario: DataTypes.STRING,
     fecha_creacion: {
       type: DataTypes.DATE,

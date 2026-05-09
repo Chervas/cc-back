@@ -1450,7 +1450,7 @@ function buildSystemNavigationContext(context = {}, targets = {}) {
   return {
     system: {
       patient_conversation_link: conversationId ? `/chat/${conversationId}` : null,
-      patient_detail_link: patientId ? `/pacientes/detail/${patientId}` : null,
+      patient_detail_link: patientId ? `/pacientes/detalle/${patientId}` : null,
     },
   };
 }

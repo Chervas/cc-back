@@ -27,6 +27,11 @@ module.exports = (sequelize, DataTypes) => {
       primaryKey: true,
       autoIncrement: true
     },
+    public_id: {
+      type: DataTypes.STRING(64),
+      allowNull: false,
+      unique: true
+    },
     nombre: {
       type: DataTypes.STRING,
       allowNull: false

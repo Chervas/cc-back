@@ -755,6 +755,7 @@ const TRIGGER_TYPES_V2 = [
   { value: 'appointment_rescheduled', label: 'Cita reagendada' },
   { value: 'appointment_cancelled', label: 'Cita cancelada' },
   { value: 'appointment_completed', label: 'Cita completada' },
+  { value: 'consent_required', label: 'Consentimiento necesario' },
   { value: 'lead_nuevo', label: 'Lead nuevo' },
   { value: 'patient_reactivation', label: 'Reactivación de pacientes' },
   { value: 'manual', label: 'Manual' },
@@ -780,6 +781,7 @@ const APPOINTMENT_TRIGGER_TYPES = new Set([
   'appointment_rescheduled',
   'appointment_cancelled',
   'appointment_completed',
+  'consent_required',
 ]);
 const APPOINTMENT_CREATED_SCOPE_VALUES = new Set([
   'all',

@@ -23,6 +23,21 @@ const {
 } = db;
 
 const CANCELLED_STATES = new Set(['cancelada', 'no_asistio']);
+const generatePacientePublicId = () => `pac_${crypto.randomBytes(10).toString('hex')}`;
+
+async function generateUniquePacientePublicId(transaction) {
+  for (let i = 0; i < 8; i++) {
+    const publicId = generatePacientePublicId();
+    const existing = await Paciente.findOne({
+      where: { public_id: publicId },
+      attributes: ['id_paciente'],
+      transaction,
+    });
+    if (!existing) return publicId;
+  }
+  throw new Error('paciente_public_id_generation_failed');
+}
+
 const REQUIRED_SEND_GATES = ['frozen_audience', 'opt_out', 'capping', 'approved_template', 'audit', 'cancelable_queue'];
 const REACTIVATION_ACTION_TO_MODE = {
   whatsapp_auto: 'whatsapp_template',
@@ -1153,6 +1168,7 @@ async function buildImportedItemPayloads(scope, body, transaction) {
 
     if (!patient && validPhone) {
       patient = await Paciente.create({
+        public_id: await generateUniquePacientePublicId(transaction),
         nombre: splitName.nombre,
         apellidos: splitName.apellidos,
         telefono_movil: formattedPhone,
