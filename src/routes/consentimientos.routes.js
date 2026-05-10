@@ -29,6 +29,7 @@ router.get('/treatments/:id/requirements', consentimientosController.getTreatmen
 router.put('/treatments/:id/requirements', consentimientosController.saveTreatmentRequirements);
 
 router.get('/patients/:id/documents', consentimientosController.listPatientDocuments);
+router.get('/patients/:id/treatments-without-consent', consentimientosController.listPatientTreatmentsWithoutConsentRequirements);
 router.get('/patients/:id/audit', consentimientosController.exportPatientAudit);
 router.get('/appointments/:id/summary', consentimientosController.getAppointmentSummary);
 router.post('/appointments/:id/package', consentimientosController.createAppointmentPackage);

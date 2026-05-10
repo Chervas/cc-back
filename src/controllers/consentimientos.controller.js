@@ -117,6 +117,15 @@ exports.listPatientDocuments = asyncHandler(async (req, res) => {
     }
 });
 
+exports.listPatientTreatmentsWithoutConsentRequirements = asyncHandler(async (req, res) => {
+    try {
+        const items = await consentimientosService.listPatientTreatmentsWithoutConsentRequirements(req.params.id, req.query || {});
+        return res.json(items);
+    } catch (error) {
+        return sendError(res, error);
+    }
+});
+
 exports.getAppointmentSummary = asyncHandler(async (req, res) => {
     try {
         const db = require('../../models');

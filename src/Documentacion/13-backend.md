@@ -2710,6 +2710,7 @@ Prefijo: `/api/consentimientos`
 | GET | `/treatments/:id/requirements` | Requisitos de consentimiento de un tratamiento. |
 | PUT | `/treatments/:id/requirements` | Reemplazar requisitos de un tratamiento para el scope. |
 | GET | `/patients/:id/documents` | Documentos clínicos del paciente. Acepta `pac_...` o id numérico. |
+| GET | `/patients/:id/treatments-without-consent` | Tratamientos presentes en citas del paciente que no tienen requisitos activos de consentimiento para esa clínica. Alimenta la sección de creación rápida en ficha de paciente. |
 | GET | `/appointments/:id/summary` | Resumen de documentos requeridos/pendientes de una cita. |
 | POST | `/appointments/:id/package` | Crear o reutilizar paquete de firma para una cita. |
 | POST | `/packages/:id/send-mock` | Registrar envío mock (`email`, `whatsapp`, `tablet`, `internal`). |

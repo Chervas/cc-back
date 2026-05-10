@@ -102,6 +102,79 @@ const formatAppointmentStateLabel = (estado) => {
   return labels[normalized] || normalized.replace(/_/g, ' ');
 };
 
+const ACTIVE_APPOINTMENT_EXCLUDED_STATES = ['cancelada', 'reprogramada'];
+
+const buildPacienteAppointmentInclude = () => [
+  { model: Clinica, as: 'clinica', attributes: ['id_clinica', 'nombre_clinica'], required: false },
+  { model: Tratamiento, as: 'tratamiento', attributes: ['id_tratamiento', 'nombre', 'disciplina'], required: false },
+  Usuario ? { model: Usuario, as: 'doctor', attributes: ['id_usuario', 'nombre', 'apellidos', 'avatar'], required: false } : null,
+].filter(Boolean);
+
+const serializePacienteAppointmentSummary = (cita) => {
+  if (!cita) return null;
+  const plain = typeof cita.toJSON === 'function' ? cita.toJSON() : cita;
+  const doctorName = [plain.doctor?.nombre, plain.doctor?.apellidos].filter(Boolean).join(' ').trim();
+  return {
+    id_cita: plain.id_cita,
+    clinica_id: plain.clinica_id,
+    paciente_id: plain.paciente_id,
+    doctor_id: plain.doctor_id,
+    tratamiento_id: plain.tratamiento_id,
+    estado: plain.estado,
+    estado_label: formatAppointmentStateLabel(plain.estado),
+    inicio: plain.inicio,
+    fin: plain.fin,
+    titulo: plain.titulo || plain.motivo || null,
+    clinica: plain.clinica ? {
+      id_clinica: plain.clinica.id_clinica,
+      nombre_clinica: plain.clinica.nombre_clinica,
+    } : null,
+    tratamiento: plain.tratamiento ? {
+      id_tratamiento: plain.tratamiento.id_tratamiento,
+      nombre: plain.tratamiento.nombre,
+      disciplina: plain.tratamiento.disciplina,
+    } : null,
+    doctor: plain.doctor ? {
+      id_usuario: plain.doctor.id_usuario,
+      nombre: plain.doctor.nombre,
+      apellidos: plain.doctor.apellidos,
+      nombre_completo: doctorName || null,
+      avatar: plain.doctor.avatar || null,
+    } : null,
+  };
+};
+
+const getPacienteAppointmentBounds = async (pacienteId) => {
+  const now = new Date();
+  const baseWhere = {
+    paciente_id: pacienteId,
+    estado: { [Op.notIn]: ACTIVE_APPOINTMENT_EXCLUDED_STATES },
+  };
+  const include = buildPacienteAppointmentInclude();
+  const [proxima, ultima] = await Promise.all([
+    CitaPaciente.findOne({
+      where: {
+        ...baseWhere,
+        inicio: { [Op.gte]: now },
+      },
+      include,
+      order: [['inicio', 'ASC']],
+    }),
+    CitaPaciente.findOne({
+      where: {
+        ...baseWhere,
+        inicio: { [Op.lt]: now },
+      },
+      include,
+      order: [['inicio', 'DESC']],
+    }),
+  ]);
+  return {
+    proxima_cita: serializePacienteAppointmentSummary(proxima),
+    ultima_cita: serializePacienteAppointmentSummary(ultima),
+  };
+};
+
 const buildAppointmentActivityDescription = ({ telefono, inicio, tratamiento, estado }) => {
   const fields = [];
   if (telefono) fields.push({ label: 'Teléfono', value: telefono });
@@ -519,7 +592,11 @@ exports.getPacienteById = async (req, res) => {
       return res.status(404).json({ message: 'Paciente not found' });
     }
     await ensurePacientePublicId(paciente);
-    res.json(paciente);
+    const appointmentSummary = await getPacienteAppointmentBounds(paciente.id_paciente);
+    res.json({
+      ...(typeof paciente.toJSON === 'function' ? paciente.toJSON() : paciente),
+      ...appointmentSummary,
+    });
   } catch (error) {
     res.status(500).json({ message: 'Error retrieving paciente', error: error.message });
   }

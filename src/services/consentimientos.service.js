@@ -1029,6 +1029,118 @@ async function listPatientDocuments(identifier, filters = {}) {
     };
 }
 
+function serializeAppointmentLite(citaLike) {
+    const cita = getPlain(citaLike);
+    if (!cita?.id_cita) return null;
+    return {
+        id_cita: cita.id_cita,
+        inicio: cita.inicio || null,
+        fin: cita.fin || null,
+        estado: cita.estado || null,
+        titulo: cita.titulo || cita.motivo || null,
+    };
+}
+
+function isRequirementActive(requirementLike) {
+    const requirement = getPlain(requirementLike);
+    const clinicTemplate = requirement?.clinicTemplate;
+    const catalogTemplate = requirement?.catalogTemplate;
+    const status = clinicTemplate?.status || catalogTemplate?.status || 'active';
+    return status === 'active';
+}
+
+async function listPatientTreatmentsWithoutConsentRequirements(identifier, filters = {}) {
+    const paciente = await findPacienteByIdentifier(identifier);
+    if (!paciente) {
+        const err = new Error('patient_not_found');
+        err.statusCode = 404;
+        throw err;
+    }
+
+    const where = {
+        paciente_id: paciente.id_paciente,
+        tratamiento_id: { [Op.ne]: null },
+        estado: { [Op.notIn]: ['cancelada', 'reprogramada'] },
+    };
+    const clinicId = toIntOrNull(filters.clinic_id ?? filters.clinica_id);
+    if (clinicId) where.clinica_id = clinicId;
+
+    const citas = await db.CitaPaciente.findAll({
+        where,
+        attributes: ['id_cita', 'clinica_id', 'paciente_id', 'tratamiento_id', 'estado', 'inicio', 'fin', 'titulo', 'motivo'],
+        include: [
+            { model: db.Tratamiento, as: 'tratamiento', required: true, attributes: ['id_tratamiento', 'nombre', 'disciplina', 'especialidad', 'categoria', 'origen'] },
+            { model: db.Clinica, as: 'clinica', required: false, attributes: ['id_clinica', 'nombre_clinica'] },
+        ],
+        order: [['inicio', 'DESC']],
+        limit: 1000,
+    });
+
+    const now = Date.now();
+    const grouped = new Map();
+    for (const citaRow of citas) {
+        const cita = getPlain(citaRow);
+        const tratamientoId = toIntOrNull(cita.tratamiento_id || cita.tratamiento?.id_tratamiento);
+        const clinicaId = toIntOrNull(cita.clinica_id || cita.clinica?.id_clinica);
+        if (!tratamientoId || !clinicaId) continue;
+        const key = `${clinicaId}:${tratamientoId}`;
+        if (!grouped.has(key)) {
+            grouped.set(key, {
+                clinica_id: clinicaId,
+                tratamiento_id: tratamientoId,
+                clinica: cita.clinica ? {
+                    id_clinica: cita.clinica.id_clinica,
+                    nombre_clinica: cita.clinica.nombre_clinica,
+                } : null,
+                tratamiento: cita.tratamiento ? {
+                    id_tratamiento: cita.tratamiento.id_tratamiento,
+                    nombre: cita.tratamiento.nombre,
+                    disciplina: cita.tratamiento.disciplina,
+                    especialidad: cita.tratamiento.especialidad,
+                    categoria: cita.tratamiento.categoria,
+                    origen: cita.tratamiento.origen,
+                } : null,
+                appointments_count: 0,
+                next_appointment: null,
+                last_appointment: null,
+            });
+        }
+        const item = grouped.get(key);
+        item.appointments_count += 1;
+        const inicioMs = cita.inicio ? new Date(cita.inicio).getTime() : NaN;
+        if (!Number.isFinite(inicioMs)) continue;
+        const current = serializeAppointmentLite(cita);
+        if (inicioMs >= now) {
+            const previousNextMs = item.next_appointment?.inicio ? new Date(item.next_appointment.inicio).getTime() : Infinity;
+            if (inicioMs < previousNextMs) item.next_appointment = current;
+        } else {
+            const previousLastMs = item.last_appointment?.inicio ? new Date(item.last_appointment.inicio).getTime() : -Infinity;
+            if (inicioMs > previousLastMs) item.last_appointment = current;
+        }
+    }
+
+    const result = [];
+    for (const item of grouped.values()) {
+        const requirements = await getTreatmentRequirements({
+            tratamientoId: item.tratamiento_id,
+            clinicaId: item.clinica_id,
+        });
+        if (requirements.some(isRequirementActive)) continue;
+        const recommended = item.next_appointment || item.last_appointment || null;
+        result.push({
+            ...item,
+            recommended_appointment_id: recommended?.id_cita || null,
+        });
+    }
+
+    return result.sort((a, b) => {
+        const aNext = a.next_appointment?.inicio ? new Date(a.next_appointment.inicio).getTime() : Infinity;
+        const bNext = b.next_appointment?.inicio ? new Date(b.next_appointment.inicio).getTime() : Infinity;
+        if (aNext !== bNext) return aNext - bNext;
+        return String(a.tratamiento?.nombre || '').localeCompare(String(b.tratamiento?.nombre || ''), 'es');
+    });
+}
+
 function summarizeDocuments(documents = [], missingRequired = 0, missingOptional = 0) {
     const items = documents.map(getPlain);
     const requiredItems = items.filter((item) => item.required);
@@ -1996,6 +2108,7 @@ module.exports = {
     getTreatmentRequirements,
     saveTreatmentRequirements,
     listPatientDocuments,
+    listPatientTreatmentsWithoutConsentRequirements,
     getConsentSummaryForAppointment,
     attachConsentSummaryToCitas,
     createPackageForAppointment,
