@@ -495,32 +495,83 @@ function buildPrintableHtml(documentRow) {
     const appointment = snapshot.context?.cita || {};
     const professional = snapshot.context?.profesional || {};
     const safeHtml = doc.snapshot_html || '';
+    const roleLabel = (role) => {
+        if (role === 'representative') return 'Representante legal';
+        if (role === 'professional') return 'Profesional';
+        return 'Paciente';
+    };
+    const methodLabel = (method) => {
+        const value = String(method || '');
+        if (value.includes('tablet')) return 'Firma en tablet';
+        if (value.includes('whatsapp')) return 'Firma desde enlace WhatsApp';
+        if (value.includes('email')) return 'Firma desde enlace email';
+        if (value.includes('professional')) return 'Confirmación profesional';
+        return 'Firma digital';
+    };
+    const statusLabel = (status) => ({
+        pending: 'Pendiente',
+        sent: 'Enviado',
+        viewed: 'Visto',
+        signed: 'Firmado',
+        revoked: 'Revocado',
+        rejected: 'Rechazado',
+        expired: 'Caducado',
+        cancelled: 'Cancelado',
+        superseded: 'Sustituido',
+        voided: 'Anulado',
+    }[status] || status || 'Sin estado');
     const signatureBlock = evidence ? `
-        <section class="evidence">
-            <h2>Evidencia de firma</h2>
-            <dl>
-                <div><dt>Firmante</dt><dd>${escapeHtml(evidence.signer_name || patient.nombre_completo || 'Paciente')}</dd></div>
-                <div><dt>Rol</dt><dd>${escapeHtml(evidence.signer_role || 'patient')}</dd></div>
-                <div><dt>Fecha</dt><dd>${escapeHtml(formatDateTime(evidence.signed_at || doc.signed_at))}</dd></div>
-                <div><dt>Método</dt><dd>${escapeHtml(evidence.method || 'tablet_signature')}</dd></div>
-                ${evidence.ip ? `<div><dt>IP</dt><dd>${escapeHtml(evidence.ip)}</dd></div>` : ''}
-            </dl>
-            ${evidence.signature_data_url ? `<img class="signature" src="${evidence.signature_data_url}" alt="Firma" />` : ''}
+        <section class="evidence-panel">
+            <div class="section-heading">
+                <div>
+                    <div class="eyebrow">Evidencia</div>
+                    <h2>Firma del paciente</h2>
+                </div>
+                <span class="status-chip">Firmado</span>
+            </div>
+            <div class="signature-layout">
+                <dl class="detail-grid">
+                    <div><dt>Firmante</dt><dd>${escapeHtml(evidence.signer_name || patient.nombre_completo || 'Paciente')}</dd></div>
+                    <div><dt>Rol</dt><dd>${escapeHtml(roleLabel(evidence.signer_role))}</dd></div>
+                    <div><dt>Fecha</dt><dd>${escapeHtml(formatDateTime(evidence.signed_at || doc.signed_at))}</dd></div>
+                    <div><dt>Método</dt><dd>${escapeHtml(methodLabel(evidence.method || 'tablet_signature'))}</dd></div>
+                    ${evidence.ip ? `<div><dt>IP</dt><dd>${escapeHtml(evidence.ip)}</dd></div>` : ''}
+                    ${evidence.relationship ? `<div><dt>Relación</dt><dd>${escapeHtml(evidence.relationship)}</dd></div>` : ''}
+                </dl>
+                ${evidence.signature_data_url ? `
+                    <figure class="signature-card">
+                        <img class="signature" src="${evidence.signature_data_url}" alt="Firma" />
+                        <figcaption>Firma manuscrita capturada</figcaption>
+                    </figure>
+                ` : ''}
+            </div>
         </section>
     ` : '';
     const professionalSignatureBlock = professionalEvidence ? `
-        <section class="evidence">
-            <h2>Firma del profesional</h2>
-            <dl>
+        <section class="evidence-panel professional">
+            <div class="section-heading">
+                <div>
+                    <div class="eyebrow">Evidencia</div>
+                    <h2>Firma del profesional</h2>
+                </div>
+                <span class="status-chip slate">Validado</span>
+            </div>
+            <dl class="detail-grid">
                 <div><dt>Profesional</dt><dd>${escapeHtml(professionalEvidence.professional_name || professional.nombre || 'Profesional')}</dd></div>
                 <div><dt>Fecha</dt><dd>${escapeHtml(formatDateTime(professionalEvidence.signed_at || doc.professional_signed_at))}</dd></div>
-                <div><dt>Método</dt><dd>${escapeHtml(professionalEvidence.method || 'professional_confirmation')}</dd></div>
+                <div><dt>Método</dt><dd>${escapeHtml(methodLabel(professionalEvidence.method || 'professional_confirmation'))}</dd></div>
             </dl>
         </section>
     ` : '';
     const revocationBlock = revocation ? `
-        <section class="evidence warning">
-            <h2>Revocación</h2>
+        <section class="evidence-panel warning">
+            <div class="section-heading">
+                <div>
+                    <div class="eyebrow">Estado</div>
+                    <h2>Revocación</h2>
+                </div>
+                <span class="status-chip red">Revocado</span>
+            </div>
             <p>Revocado el ${escapeHtml(formatDateTime(revocation.revoked_at || doc.revoked_at))}. Motivo: ${escapeHtml(revocation.reason || 'No indicado')}.</p>
         </section>
     ` : '';
@@ -532,46 +583,107 @@ function buildPrintableHtml(documentRow) {
   <title>${escapeHtml(doc.title || 'Consentimiento')}</title>
   <style>
     :root { color-scheme: light; }
-    body { font-family: Inter, Arial, sans-serif; color: #111827; margin: 0; background: #f8fafc; }
-    main { max-width: 820px; margin: 0 auto; padding: 32px 24px 56px; background: #fff; min-height: 100vh; box-sizing: border-box; }
-    header { border-bottom: 1px solid #e5e7eb; margin-bottom: 24px; padding-bottom: 16px; }
-    h1 { font-size: 26px; margin: 0 0 8px; line-height: 1.2; }
-    h2 { font-size: 17px; margin: 24px 0 10px; }
+    * { box-sizing: border-box; }
+    body { font-family: Inter, Arial, sans-serif; color: #111827; margin: 0; background: #f1f5f9; text-align: center; }
+    .preview-shell { display: inline-block; padding: 32px 24px 56px; text-align: left; }
+    main { width: 960px; max-width: calc(100vw - 48px); margin: 0 auto; padding: 64px; background: #fff; border-radius: 18px; box-shadow: 0 16px 40px rgba(15, 23, 42, 0.12); }
+    header { border-bottom: 1px solid #e5e7eb; margin-bottom: 36px; padding-bottom: 28px; }
+    .document-top { display: flex; align-items: flex-start; gap: 40px; }
+    .identity-stack { display: grid; gap: 28px; }
+    .identity-row { display: grid; grid-template-columns: 112px minmax(0, 1fr); align-items: center; column-gap: 28px; }
+    .identity-label { color: #64748b; font-size: 22px; text-align: center; }
+    .identity-copy { border-left: 1px solid #e5e7eb; padding-left: 28px; color: #475569; font-size: 13px; line-height: 1.65; }
+    .identity-copy .strong { color: #111827; font-weight: 700; }
+    .document-summary { margin-left: auto; display: grid; grid-template-columns: max-content minmax(180px, 340px); gap: 6px 18px; align-items: baseline; }
+    .summary-title { color: #64748b; font-size: 30px; line-height: 1; letter-spacing: -0.02em; text-align: right; }
+    .summary-value { color: #111827; font-size: 18px; font-weight: 700; }
+    .summary-value.title { max-width: 340px; font-size: 24px; font-weight: 400; line-height: 1.1; overflow-wrap: anywhere; }
+    .summary-label { color: #64748b; font-size: 12px; font-weight: 700; letter-spacing: 0.04em; text-transform: uppercase; text-align: right; }
+    h1 { font-size: 28px; margin: 0 0 8px; line-height: 1.18; letter-spacing: -0.01em; }
+    h2 { font-size: 17px; margin: 0; }
     p, li { font-size: 14px; line-height: 1.65; }
-    .meta { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px 18px; color: #4b5563; font-size: 13px; margin-top: 14px; }
-    .meta span, dl div { display: flex; gap: 6px; }
-    .meta b, dt { color: #111827; font-weight: 700; }
-    dt { min-width: 120px; }
+    .content { margin-top: 0; }
+    .content h1, .content h2 { margin: 24px 0 10px; }
+    .evidence-panel { border: 1px solid #e2e8f0; border-top: 4px solid #334155; background: #f8fafc; border-radius: 12px; padding: 22px; margin-top: 40px; box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04); }
+    .evidence-panel.professional { border-top-color: #475569; }
+    .evidence-panel.warning { border-color: #fecaca; border-top-color: #b91c1c; background: #fff7f7; }
+    .section-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 18px; margin-bottom: 18px; }
+    .eyebrow { color: #64748b; font-size: 11px; font-weight: 800; letter-spacing: 0.08em; text-transform: uppercase; margin-bottom: 4px; }
+    .status-chip { display: inline-flex; align-items: center; min-height: 26px; border-radius: 999px; background: #0f172a; color: #fff; padding: 4px 12px; font-size: 12px; font-weight: 700; }
+    .status-chip.slate { background: #334155; }
+    .status-chip.red { background: #991b1b; }
+    .signature-layout { display: grid; grid-template-columns: minmax(0, 1fr) 300px; gap: 24px; align-items: start; }
+    .detail-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px 22px; margin: 0; }
+    .detail-grid div { min-width: 0; }
+    dt { color: #64748b; font-size: 11px; font-weight: 800; letter-spacing: 0.04em; text-transform: uppercase; }
     dd { margin: 0; }
-    .content { margin-top: 22px; }
-    .evidence { border: 1px solid #d1fae5; background: #ecfdf5; border-radius: 8px; padding: 16px; margin-top: 28px; }
-    .warning { border-color: #fecaca; background: #fef2f2; }
-    .signature { display: block; max-width: 320px; max-height: 120px; margin-top: 12px; border: 1px solid #d1d5db; background: #fff; }
-    footer { margin-top: 28px; padding-top: 14px; border-top: 1px solid #e5e7eb; color: #6b7280; font-size: 12px; }
-    @media print { body { background: #fff; } main { padding: 0; } }
+    .detail-grid dd { color: #0f172a; font-size: 14px; font-weight: 600; margin-top: 3px; overflow-wrap: anywhere; }
+    .signature-card { margin: 0; border: 1px solid #e5e7eb; background: #fff; border-radius: 10px; padding: 12px; }
+    .signature { display: block; width: 100%; max-height: 112px; object-fit: contain; }
+    figcaption { margin-top: 8px; color: #64748b; font-size: 11px; text-align: center; }
+    footer { margin-top: 34px; padding-top: 16px; border-top: 1px solid #e5e7eb; color: #64748b; font-size: 12px; }
+    @media (max-width: 780px) {
+      .preview-shell { display: block; padding: 0; }
+      main { width: 100%; max-width: none; min-height: 100vh; border-radius: 0; padding: 28px 20px 40px; box-shadow: none; }
+      .document-top, .signature-layout { grid-template-columns: 1fr; display: grid; }
+      .document-summary { margin-left: 0; grid-template-columns: 1fr; }
+      .summary-title, .summary-label { text-align: left; }
+      .identity-row { grid-template-columns: 1fr; row-gap: 8px; }
+      .identity-label { text-align: left; font-size: 14px; font-weight: 700; }
+      .identity-copy { padding-left: 14px; }
+      .detail-grid { grid-template-columns: 1fr; }
+    }
+    @media print {
+      body { background: #fff; text-align: left; }
+      .preview-shell { display: block; padding: 0; }
+      main { width: auto; max-width: none; padding: 0; border-radius: 0; box-shadow: none; }
+    }
   </style>
 </head>
 <body>
-<main>
-  <header>
+<div class="preview-shell">
+  <main>
+    <header>
+      <div class="document-top">
+        <div class="identity-stack">
+          <div class="identity-row">
+            <div class="identity-label">Centro</div>
+            <div class="identity-copy">
+              <div class="strong">${escapeHtml(clinic.nombre || '')}</div>
+              ${clinic.direccion ? `<div>${escapeHtml(clinic.direccion)}</div>` : ''}
+            </div>
+          </div>
+          <div class="identity-row">
+            <div class="identity-label">Paciente</div>
+            <div class="identity-copy">
+              <div class="strong">${escapeHtml(patient.nombre_completo || '')}</div>
+              ${patient.documento ? `<div>${escapeHtml(patient.documento)}</div>` : ''}
+              ${patient.email ? `<div>${escapeHtml(patient.email)}</div>` : ''}
+            </div>
+          </div>
+        </div>
+        <div class="document-summary">
+          <div class="summary-title">CONSENTIMIENTO</div>
+          <div class="summary-value title">${escapeHtml(doc.public_id || doc.id)}</div>
+          <div class="summary-label">Estado</div>
+          <div class="summary-value">${escapeHtml(statusLabel(doc.status))}</div>
+          <div class="summary-label">Tratamiento</div>
+          <div class="summary-value">${escapeHtml(treatment.nombre || 'No indicado')}</div>
+          <div class="summary-label">Cita</div>
+          <div class="summary-value">${escapeHtml(appointment.fecha || 'No indicada')}</div>
+        </div>
+      </div>
+    </header>
     <h1>${escapeHtml(doc.title || 'Consentimiento')}</h1>
-    <div class="meta">
-      <span><b>Paciente:</b> ${escapeHtml(patient.nombre_completo || '')}</span>
-      <span><b>Documento:</b> ${escapeHtml(patient.documento || '')}</span>
-      <span><b>Clínica:</b> ${escapeHtml(clinic.nombre || '')}</span>
-      <span><b>Tratamiento:</b> ${escapeHtml(treatment.nombre || '')}</span>
-      <span><b>Cita:</b> ${escapeHtml(appointment.fecha || '')}</span>
-      <span><b>Estado:</b> ${escapeHtml(doc.status || '')}</span>
-    </div>
-  </header>
-  <section class="content">${safeHtml}</section>
-  ${signatureBlock}
-  ${professionalSignatureBlock}
-  ${revocationBlock}
-  <footer>
-    Documento ${escapeHtml(doc.public_id || doc.id)}. Hash: ${escapeHtml(doc.snapshot_hash || 'pendiente')}.
-  </footer>
-</main>
+    <section class="content">${safeHtml}</section>
+    ${signatureBlock}
+    ${professionalSignatureBlock}
+    ${revocationBlock}
+    <footer>
+      Documento ${escapeHtml(doc.public_id || doc.id)}. Hash: ${escapeHtml(doc.snapshot_hash || 'pendiente')}.
+    </footer>
+  </main>
+</div>
 </body>
 </html>`;
 }
