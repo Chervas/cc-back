@@ -663,11 +663,12 @@ function buildPrintableHtml(documentRow) {
       .status-box dt { font-size: 8.5px; }
       .status-box dd { font-size: 13px; }
       .header-grid { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 14px 20px; }
-      .info-card, .summary-list { min-height: 0; padding-left: 12px; }
+      .info-card { min-height: 0; padding-left: 12px; }
       .info-title, .summary-list dt { font-size: 9px; margin-bottom: 6px; }
       .info-copy, .summary-list dd { font-size: 11px; line-height: 1.35; }
-      .summary-list { grid-column: 1 / -1; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 8px 20px; }
-      .summary-list div { grid-template-columns: 76px minmax(0, 1fr); gap: 10px; }
+      .summary-list { grid-column: 1 / -1; display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 20px; border-left: 0; padding-left: 0; min-height: 0; }
+      .summary-list div { border-left: 1px solid #e5e7eb; padding-left: 12px; grid-template-columns: max-content minmax(0, 1fr); gap: 12px; }
+      .summary-list dt { margin-bottom: 0; }
       h1 { font-size: 22px; line-height: 1.15; }
       h2 { font-size: 14px; }
       p, li { font-size: 11.5px; line-height: 1.5; }
