@@ -345,6 +345,13 @@ function getTabletBaseUrl() {
         || 'https://tablet.clinicaclick.com';
 }
 
+function getDocumentAssetBaseUrl() {
+    return (toCleanString(process.env.CONSENT_DOCUMENT_ASSET_BASE_URL)
+        || toCleanString(process.env.FRONTEND_PUBLIC_URL)
+        || toCleanString(process.env.FRONTEND_URL)
+        || 'http://localhost:4203').replace(/\/+$/, '');
+}
+
 function buildPublicConsentUrl(token, baseUrl = null) {
     const resolvedBaseUrl = toCleanString(baseUrl) || getTabletBaseUrl();
     return `${resolvedBaseUrl.replace(/\/+$/, '')}/tablet/consentimientos/${encodeURIComponent(token)}`;
@@ -520,12 +527,7 @@ function buildPrintableHtml(documentRow) {
         superseded: 'Sustituido',
         voided: 'Anulado',
     }[status] || status || 'Sin estado');
-    const brandMark = `
-        <svg class="brand-mark" width="19" height="20" viewBox="0 0 38 40" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
-          <path d="M17.9729 0.0817349C20.4241 -0.121604 22.9175 0.0404641 25.2881 0.725977C30.1873 2.03157 34.4323 5.4078 36.9962 9.75844C37.2378 10.1893 37.5166 10.602 37.7109 11.059C37.884 11.4083 37.5377 11.8724 37.1552 11.8291C36.9187 11.8724 36.7365 11.7093 36.6378 11.511C35.3141 8.87059 33.3643 6.54428 30.9886 4.78772C28.2858 2.76742 25.0082 1.54235 21.6522 1.24238C20.6546 1.14171 19.6439 1.07528 18.6454 1.20513C15.6869 1.39035 12.7566 2.25907 10.2128 3.79216C6.84769 5.79535 4.16 8.89576 2.61583 12.4914C1.94441 14.0859 1.49847 15.774 1.28507 17.4913C1.13609 18.8412 1.03039 20.2092 1.20051 21.5642C1.46224 25.4367 3.03962 29.1853 5.55719 32.1327C6.58999 33.3125 7.72446 34.4168 9.01093 35.3197C11.8456 37.3481 15.2601 38.554 18.7349 38.7865C22.3105 39.0573 25.9444 38.1896 29.0549 36.4159C31.3218 35.1244 33.3099 33.3548 34.8672 31.263C35.5768 30.3299 36.1637 29.3122 36.7294 28.2884C37.117 27.7791 38.0169 28.369 37.6686 28.9236C35.7651 32.7498 32.6103 35.9408 28.8012 37.8816C26.4085 39.1278 23.7399 39.8123 21.0552 39.9955C19.9439 39.9955 18.8306 40.0327 17.7263 39.8928C13.8699 39.4368 10.1323 37.8715 7.16075 35.36C4.4177 33.0568 2.25143 30.039 1.08274 26.6416C0.371055 24.5619 -0.0336109 22.3634 0.00464094 20.1629C-0.0768958 16.3961 0.916646 12.5911 2.93091 9.39606C4.54654 6.78789 6.76213 4.55619 9.3703 2.93754C11.9614 1.32995 14.9359 0.343458 17.9729 0.0817349Z" fill="currentColor"/>
-          <path d="M16.3994 10.6987C16.3713 10.449 16.5706 10.2004 16.8232 10.1943C18.8345 10.1994 20.8467 10.1964 22.859 10.1953C23.1136 10.2004 23.3109 10.449 23.2878 10.7007C23.3049 12.6626 23.2918 14.6255 23.2938 16.5884C25.1974 16.5673 27.1009 16.5784 29.0034 16.5804C29.3688 16.5451 29.6306 16.8985 29.6084 17.2387C29.6024 19.1201 29.6044 21.0015 29.6074 22.8819C29.6306 23.1718 29.394 23.4707 29.099 23.4838C27.1683 23.4949 25.2376 23.4677 23.3079 23.4969C23.3422 25.4055 23.316 27.314 23.323 29.2226C23.3623 29.5508 23.1096 29.889 22.7603 29.8437C20.8477 29.8568 18.9331 29.8477 17.0205 29.8457C16.7256 29.8819 16.3864 29.6373 16.4065 29.3253C16.3974 27.3795 16.4025 25.4337 16.4065 23.4879C14.4959 23.4828 12.5853 23.4838 10.6758 23.4889C10.3486 23.5221 10.0134 23.2181 10.0627 22.8829C10.0597 20.9693 10.0567 19.0557 10.0627 17.1421C10.0064 16.7918 10.3516 16.5381 10.6798 16.5824C12.5843 16.5864 14.4889 16.5673 16.3934 16.5945C16.4035 14.6285 16.3854 12.6636 16.3994 10.6987ZM17.4624 11.2483C17.4816 13.2142 17.4725 15.1792 17.4695 17.1451C17.4906 17.3575 17.3698 17.5326 17.1967 17.6434C16.8393 17.6987 16.4759 17.6746 16.1166 17.6796C14.4456 17.6736 12.7746 17.6846 11.1036 17.6736C11.1016 19.2399 11.1207 20.8072 11.0965 22.3745C13.0393 22.3785 14.9821 22.3806 16.9249 22.3715C17.2098 22.3373 17.5228 22.5748 17.4866 22.8798C17.4846 24.8226 17.5057 26.7674 17.4695 28.7092C19.0539 28.7273 20.6383 28.7213 22.2228 28.7122C22.1966 26.8017 22.2117 24.8901 22.2137 22.9785C22.1865 22.6987 22.3738 22.3947 22.6687 22.3765C24.6115 22.3745 26.5533 22.3796 28.4961 22.3755C28.4951 20.8072 28.5072 19.2399 28.489 17.6726C26.5462 17.6836 24.6035 17.6897 22.6607 17.6675C22.3325 17.6907 22.1714 17.3263 22.2016 17.0444C22.2037 15.1137 22.1875 13.182 22.2117 11.2503C20.6283 11.2644 19.0449 11.2694 17.4624 11.2483Z" fill="currentColor"/>
-        </svg>
-    `;
+    const brandLogo = `<img class="brand-logo" alt="ClinicaClick" src="${escapeHtml(getDocumentAssetBaseUrl())}/assets/images/logo/logo-text-on-dark.svg" />`;
     const signatureBlock = evidence ? `
         <section class="evidence-panel">
             <div class="section-heading">
@@ -634,8 +636,8 @@ function buildPrintableHtml(documentRow) {
     figcaption { margin-top: 8px; color: #64748b; font-size: 11px; text-align: center; }
     footer { display: flex; align-items: center; justify-content: space-between; gap: 20px; margin-top: 34px; padding-top: 16px; border-top: 1px solid #e5e7eb; color: #64748b; font-size: 12px; }
     .footer-meta { min-width: 0; overflow-wrap: anywhere; }
-    .brand-lockup { display: inline-flex; align-items: center; gap: 7px; color: #000; font-size: 13px; font-weight: 700; letter-spacing: -0.01em; white-space: nowrap; }
-    .brand-mark { display: block; flex: 0 0 auto; color: #000; }
+    .brand-lockup { display: inline-flex; align-items: center; white-space: nowrap; }
+    .brand-logo { display: block; width: 116px; height: auto; filter: brightness(0); }
     @media (max-width: 780px) {
       .preview-shell { display: block; padding: 0; }
       main { width: 100%; max-width: none; min-height: 100vh; border-radius: 0; padding: 28px 20px 40px; box-shadow: none; }
@@ -703,7 +705,7 @@ function buildPrintableHtml(documentRow) {
     ${revocationBlock}
     <footer>
       <div class="footer-meta">Documento ${escapeHtml(doc.public_id || doc.id)}. Hash: ${escapeHtml(doc.snapshot_hash || 'pendiente')}.</div>
-      <div class="brand-lockup"><span>clinicaclick</span>${brandMark}</div>
+      <div class="brand-lockup">${brandLogo}</div>
     </footer>
   </main>
 </div>
