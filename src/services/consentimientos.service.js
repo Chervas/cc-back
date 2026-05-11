@@ -638,7 +638,7 @@ function buildPrintableHtml(documentRow) {
     .footer-meta { min-width: 0; overflow-wrap: anywhere; }
     .brand-lockup { display: inline-flex; align-items: center; white-space: nowrap; }
     .brand-logo { display: block; width: 116px; height: auto; filter: brightness(0); }
-    @media (max-width: 780px) {
+    @media screen and (max-width: 780px) {
       .preview-shell { display: block; padding: 0; }
       main { width: 100%; max-width: none; min-height: 100vh; border-radius: 0; padding: 28px 20px 40px; box-shadow: none; }
       .document-heading { display: grid; gap: 18px; }
@@ -649,15 +649,44 @@ function buildPrintableHtml(documentRow) {
       footer { align-items: flex-start; flex-direction: column; }
     }
     @media print {
-      @page { size: A4; margin: 16mm; }
-      * { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+      @page { size: A4; margin: 14mm; }
       body { background: #fff; text-align: left; }
       .preview-shell { display: block; padding: 0; }
       main { width: auto; max-width: none; padding: 0; border-radius: 0; box-shadow: none; }
       header, .evidence-panel { break-inside: avoid; page-break-inside: avoid; }
-      .document-title { font-size: 30px; }
-      .header-grid { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) minmax(190px, 0.78fr); gap: 20px; }
+      header { margin-bottom: 24px; padding-bottom: 18px; }
+      .document-heading { display: grid; grid-template-columns: minmax(0, 1fr) 104px; gap: 18px; align-items: start; margin-bottom: 20px; }
+      .document-kicker { font-size: 9.5px; letter-spacing: 0.1em; }
+      .document-title { font-size: 25px; line-height: 1; margin-top: 3px; }
+      .document-id { max-width: none; font-size: 9.5px; margin-top: 6px; }
+      .status-box { min-width: 0; border-radius: 7px; padding: 7px 9px; text-align: right; }
+      .status-box dt { font-size: 8.5px; }
+      .status-box dd { font-size: 13px; }
+      .header-grid { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 14px 20px; }
+      .info-card, .summary-list { min-height: 0; padding-left: 12px; }
+      .info-title, .summary-list dt { font-size: 9px; margin-bottom: 6px; }
+      .info-copy, .summary-list dd { font-size: 11px; line-height: 1.35; }
+      .summary-list { grid-column: 1 / -1; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 8px 20px; }
       .summary-list div { grid-template-columns: 76px minmax(0, 1fr); gap: 10px; }
+      h1 { font-size: 22px; line-height: 1.15; }
+      h2 { font-size: 14px; }
+      p, li { font-size: 11.5px; line-height: 1.5; }
+      .content h1, .content h2 { margin: 18px 0 8px; }
+      .evidence-panel { border: 1px solid #d8dee8; border-top-width: 1px; background: #fff; border-radius: 7px; box-shadow: none; padding: 11px 12px; margin-top: 20px; }
+      .evidence-panel.warning { background: #fff; border-color: #e5b4b4; }
+      .section-heading { align-items: center; margin-bottom: 10px; }
+      .eyebrow { font-size: 8.5px; margin-bottom: 2px; }
+      .status-chip { min-height: 18px; border: 1px solid #cbd5e1; background: #fff; color: #111827; padding: 1px 7px; font-size: 9px; }
+      .status-chip.slate, .status-chip.red { background: #fff; color: #111827; }
+      .signature-layout { grid-template-columns: minmax(0, 1fr) 170px; gap: 12px; align-items: center; }
+      .detail-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px 12px; }
+      dt { font-size: 8.5px; }
+      .detail-grid dd { font-size: 10.5px; margin-top: 1px; }
+      .signature-card { border-radius: 5px; padding: 6px; }
+      .signature { max-height: 58px; }
+      figcaption { margin-top: 4px; font-size: 8.5px; }
+      footer { margin-top: 24px; padding-top: 10px; font-size: 9px; }
+      .brand-logo { width: 74px; }
     }
   </style>
 </head>
