@@ -1818,9 +1818,14 @@ async function sendPackageMock(packageIdRaw, payload = {}) {
     const publicUrl = buildPublicConsentUrl(token, payload.base_url ?? payload.baseUrl);
 
     const documents = Array.isArray(packageRow.documents) ? packageRow.documents : [];
-    for (const doc of documents) {
+    const pendingDocuments = documents.filter((doc) => DOCUMENT_PENDING_STATUSES.has(getPlain(doc).status));
+    if (!pendingDocuments.length) {
+        const err = new Error('consent_package_has_no_pending_documents');
+        err.statusCode = 409;
+        throw err;
+    }
+    for (const doc of pendingDocuments) {
         const plainDoc = getPlain(doc);
-        if (!DOCUMENT_PENDING_STATUSES.has(plainDoc.status)) continue;
         await db.ConsentDeliveryEvent.create({
             package_id: packageRow.id,
             patient_consent_document_id: plainDoc.id,
@@ -1892,9 +1897,14 @@ async function createTabletSession(packageIdRaw, payload = {}) {
     });
     const publicUrl = buildPublicConsentUrl(token, payload.base_url ?? payload.baseUrl);
     const documents = Array.isArray(packageRow.documents) ? packageRow.documents : [];
-    await Promise.all(documents.map(async (doc) => {
+    const pendingDocuments = documents.filter((doc) => DOCUMENT_PENDING_STATUSES.has(getPlain(doc).status));
+    if (!pendingDocuments.length) {
+        const err = new Error('consent_package_has_no_pending_documents');
+        err.statusCode = 409;
+        throw err;
+    }
+    await Promise.all(pendingDocuments.map(async (doc) => {
         const plainDoc = getPlain(doc);
-        if (!DOCUMENT_PENDING_STATUSES.has(plainDoc.status)) return;
         const existingQueuedEvent = await db.ConsentDeliveryEvent.findOne({
             where: {
                 package_id: packageRow.id,
@@ -2191,6 +2201,25 @@ function serializeKioskPackage(packageRow) {
     };
 }
 
+function publicSignatureEvidenceForDocument(doc) {
+    const plain = getPlain(doc);
+    const snapshot = parseJsonObject(plain.snapshot_json);
+    const evidence = parseJsonObject(snapshot.signature_evidence);
+    if (!evidence?.signed_at && !plain.signed_at) return null;
+    return {
+        signer_name: evidence.signer_name || null,
+        signer_role: evidence.signer_role || null,
+        representative_name: evidence.representative_name || null,
+        relationship: evidence.relationship || null,
+        method: evidence.method || null,
+        signed_at: evidence.signed_at || plain.signed_at || null,
+        ip: evidence.ip || null,
+        user_agent: evidence.user_agent || null,
+        accepted_statement: evidence.accepted_statement ?? null,
+        signature_data_url: evidence.signature_data_url || null,
+    };
+}
+
 async function listTabletKioskPackages(tokenRaw, filters = {}) {
     const kiosk = await requireKioskSession(tokenRaw);
     const limit = Math.min(toIntOrNull(filters.limit) || 80, 150);
@@ -2288,6 +2317,7 @@ function serializePublicPackage(packageRow) {
             signed_at: doc.signed_at || null,
             revoked_at: doc.revoked_at || null,
             requires_representative: requiresRepresentative(doc),
+            signature_evidence: publicSignatureEvidenceForDocument(doc),
         })),
     };
 }

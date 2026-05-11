@@ -2821,6 +2821,7 @@ El scheduler no envía recordatorios de consentimiento por su cuenta. Los record
 - Los resúmenes de cita y el snapshot firmado exponen `signing_timing`, `signing_timing_label`, `due_policy` y `recommended_min_hours_before` para que agenda/paciente/tablet puedan mostrar cuándo debe resolverse la firma.
 - No borrar documentos firmados sin trazabilidad: estados esperados `pending`, `sent`, `viewed`, `signed`, `revoked`, `superseded`, `voided`.
 - Los consentimientos reutilizables ya firmados (`data_protection` o `validity_mode=manual`) no se regeneran para nuevas citas del mismo paciente y clínica; pendientes antiguos equivalentes se marcan `superseded`.
+- `send-mock` y `tablet-session` solo actúan si el paquete contiene documentos pendientes (`pending`, `sent`, `viewed`); si todo está firmado/cerrado devuelven `409 consent_package_has_no_pending_documents`.
 - `tablet-session` encola la firma para el kiosco sin duplicar eventos `queued` del mismo documento.
 - La firma profesional se guarda en `PatientConsentDocuments.professional_signed_by` y `professional_signed_at`, además de `snapshot_json.professional_signature_evidence`.
 - Menores/tutores deben resolverse en la fase de firma usando los datos ya modelados en paciente.
