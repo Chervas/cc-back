@@ -1,6 +1,7 @@
 'use strict';
 const { Paciente, Clinica, PacienteRelacion, PacienteClinica, PacienteConsentimiento, CitaPaciente, Usuario, Tratamiento } = require('../../models');
 const { Op, literal } = require('sequelize');
+const crypto = require('crypto');
 const { normalizePhoneDigits } = require('../lib/phone');
 const { normalizeHumanName } = require('../lib/name');
 
@@ -11,6 +12,68 @@ const normalizePhone = (phone) => {
 const normalizeEmail = (email) => {
   if (!email) return null;
   return email.toString().trim().toLowerCase();
+};
+
+const normalizeSearchTerm = (value) => String(value || '')
+  .normalize('NFD')
+  .replace(/[\u0300-\u036f]/g, '')
+  .replace(/ñ/g, 'n')
+  .replace(/Ñ/g, 'n')
+  .trim()
+  .toLowerCase();
+
+const ACCENT_FOLD_REPLACEMENTS = [
+  ['á', 'a'], ['à', 'a'], ['ä', 'a'], ['â', 'a'], ['ã', 'a'],
+  ['é', 'e'], ['è', 'e'], ['ë', 'e'], ['ê', 'e'],
+  ['í', 'i'], ['ì', 'i'], ['ï', 'i'], ['î', 'i'],
+  ['ó', 'o'], ['ò', 'o'], ['ö', 'o'], ['ô', 'o'], ['õ', 'o'],
+  ['ú', 'u'], ['ù', 'u'], ['ü', 'u'], ['û', 'u'],
+  ['ñ', 'n'],
+  ['ç', 'c'],
+];
+
+const accentFoldSql = (expression) => ACCENT_FOLD_REPLACEMENTS.reduce(
+  (sql, [from, to]) => `REPLACE(${sql}, '${from}', '${to}')`,
+  `LOWER(${expression})`
+);
+
+const generatePacientePublicId = () => `pac_${crypto.randomBytes(10).toString('hex')}`;
+
+const isNumericPacienteIdentifier = (value) => /^\d+$/.test(String(value || '').trim());
+
+const generateUniquePacientePublicId = async () => {
+  for (let i = 0; i < 8; i++) {
+    const publicId = generatePacientePublicId();
+    const existing = await Paciente.findOne({ where: { public_id: publicId }, attributes: ['id_paciente'] });
+    if (!existing) {
+      return publicId;
+    }
+  }
+  throw new Error('paciente_public_id_generation_failed');
+};
+
+const ensurePacientePublicId = async (paciente) => {
+  if (!paciente || paciente.public_id) {
+    return paciente;
+  }
+  paciente.public_id = await generateUniquePacientePublicId();
+  await paciente.save({ fields: ['public_id'] });
+  return paciente;
+};
+
+const findPacienteByIdentifier = async (identifier, options = {}) => {
+  const value = String(identifier || '').trim();
+  if (!value) {
+    return null;
+  }
+
+  const { where, ...restOptions } = options || {};
+  const publicIds = value.startsWith('pat_') ? [value, `pac_${value.slice(4)}`] : [value];
+  const lookupWhere = isNumericPacienteIdentifier(value)
+    ? { id_paciente: Number(value) }
+    : { public_id: { [Op.in]: publicIds } };
+  const finalWhere = where ? { [Op.and]: [lookupWhere, where] } : lookupWhere;
+  return Paciente.findOne({ ...restOptions, where: finalWhere });
 };
 
 const escapeHtml = (value) => String(value ?? '')
@@ -60,6 +123,79 @@ const formatAppointmentStateLabel = (estado) => {
     reprogramada: 'Reprogramada',
   };
   return labels[normalized] || normalized.replace(/_/g, ' ');
+};
+
+const ACTIVE_APPOINTMENT_EXCLUDED_STATES = ['cancelada', 'reprogramada'];
+
+const buildPacienteAppointmentInclude = () => [
+  { model: Clinica, as: 'clinica', attributes: ['id_clinica', 'nombre_clinica'], required: false },
+  { model: Tratamiento, as: 'tratamiento', attributes: ['id_tratamiento', 'nombre', 'disciplina'], required: false },
+  Usuario ? { model: Usuario, as: 'doctor', attributes: ['id_usuario', 'nombre', 'apellidos', 'avatar'], required: false } : null,
+].filter(Boolean);
+
+const serializePacienteAppointmentSummary = (cita) => {
+  if (!cita) return null;
+  const plain = typeof cita.toJSON === 'function' ? cita.toJSON() : cita;
+  const doctorName = [plain.doctor?.nombre, plain.doctor?.apellidos].filter(Boolean).join(' ').trim();
+  return {
+    id_cita: plain.id_cita,
+    clinica_id: plain.clinica_id,
+    paciente_id: plain.paciente_id,
+    doctor_id: plain.doctor_id,
+    tratamiento_id: plain.tratamiento_id,
+    estado: plain.estado,
+    estado_label: formatAppointmentStateLabel(plain.estado),
+    inicio: plain.inicio,
+    fin: plain.fin,
+    titulo: plain.titulo || plain.motivo || null,
+    clinica: plain.clinica ? {
+      id_clinica: plain.clinica.id_clinica,
+      nombre_clinica: plain.clinica.nombre_clinica,
+    } : null,
+    tratamiento: plain.tratamiento ? {
+      id_tratamiento: plain.tratamiento.id_tratamiento,
+      nombre: plain.tratamiento.nombre,
+      disciplina: plain.tratamiento.disciplina,
+    } : null,
+    doctor: plain.doctor ? {
+      id_usuario: plain.doctor.id_usuario,
+      nombre: plain.doctor.nombre,
+      apellidos: plain.doctor.apellidos,
+      nombre_completo: doctorName || null,
+      avatar: plain.doctor.avatar || null,
+    } : null,
+  };
+};
+
+const getPacienteAppointmentBounds = async (pacienteId) => {
+  const now = new Date();
+  const baseWhere = {
+    paciente_id: pacienteId,
+    estado: { [Op.notIn]: ACTIVE_APPOINTMENT_EXCLUDED_STATES },
+  };
+  const include = buildPacienteAppointmentInclude();
+  const [proxima, ultima] = await Promise.all([
+    CitaPaciente.findOne({
+      where: {
+        ...baseWhere,
+        inicio: { [Op.gte]: now },
+      },
+      include,
+      order: [['inicio', 'ASC']],
+    }),
+    CitaPaciente.findOne({
+      where: {
+        ...baseWhere,
+        inicio: { [Op.lt]: now },
+      },
+      include,
+      order: [['inicio', 'DESC']],
+    }),
+  ]);
+  return {
+    proxima_cita: serializePacienteAppointmentSummary(proxima),
+    ultima_cita: serializePacienteAppointmentSummary(ultima),
+  };
 };
 
 const buildAppointmentActivityDescription = ({ telefono, inicio, tratamiento, estado }) => {
@@ -286,6 +422,7 @@ exports.getAllPacientes = async (req, res) => {
       distinct: true,
       order: [['nombre', 'ASC']]
     });
+    await Promise.all(pacientes.map((paciente) => ensurePacientePublicId(paciente)));
     res.json(pacientes);
   } catch (error) {
     res.status(500).json({ message: 'Error retrieving pacientes', error: error.message });
@@ -294,7 +431,7 @@ exports.getAllPacientes = async (req, res) => {
 
 exports.searchPacientes = async (req, res) => {
   try {
-    const query = req.query.q || req.query.query || '';
+    const query = String(req.query.q || req.query.query || '').trim().replace(/\s+/g, ' ');
     const scope = req.query.scope || 'clinica';
     const clinicaId = req.query.clinica_id;
     const normPhone = normalizePhone(req.query.telefono || '');
@@ -305,17 +442,72 @@ exports.searchPacientes = async (req, res) => {
       return res.json([]);
     }
 
-    const whereOr = [
-      { nombre: { [Op.like]: `%${query}%` } },
-      { apellidos: { [Op.like]: `%${query}%` } },
-      { telefono_movil: { [Op.like]: `%${query}%` } },
-      { email: { [Op.like]: `%${query}%` } }
-    ];
+    const accentInsensitiveLike = (expression, term) => {
+      const normalized = normalizeSearchTerm(term);
+      if (!normalized) return null;
+      return literal(`${accentFoldSql(expression)} LIKE ${Paciente.sequelize.escape(`%${normalized}%`)}`);
+    };
+
+    const fieldLike = (field, term) => {
+      const normalized = normalizeSearchTerm(term);
+      const clauses = [
+        { [field]: { [Op.like]: `%${term}%` } },
+      ];
+      if (normalized) {
+        clauses.push(accentInsensitiveLike(`\`Paciente\`.\`${field}\``, term));
+      }
+      return clauses.filter(Boolean);
+    };
+
+    const fullNameLike = (term) => {
+      const escaped = Paciente.sequelize.escape(`%${term}%`);
+      const clauses = [
+        literal(`CONCAT_WS(' ', \`Paciente\`.\`nombre\`, \`Paciente\`.\`apellidos\`) LIKE ${escaped}`),
+        literal(`CONCAT_WS(' ', \`Paciente\`.\`apellidos\`, \`Paciente\`.\`nombre\`) LIKE ${escaped}`),
+      ];
+      const normalized = normalizeSearchTerm(term);
+      if (normalized) {
+        clauses.push(
+          accentInsensitiveLike(`CONCAT_WS(' ', \`Paciente\`.\`nombre\`, \`Paciente\`.\`apellidos\`)`, term),
+          accentInsensitiveLike(`CONCAT_WS(' ', \`Paciente\`.\`apellidos\`, \`Paciente\`.\`nombre\`)`, term)
+        );
+      }
+      return clauses.filter(Boolean);
+    };
+
+    const whereOr = [];
+    if (query) {
+      whereOr.push(
+        ...fieldLike('nombre', query),
+        ...fieldLike('apellidos', query),
+        { telefono_movil: { [Op.like]: `%${query}%` } },
+        { email: { [Op.like]: `%${query}%` } },
+        ...fullNameLike(query)
+      );
+
+      const tokens = query.split(' ').filter(token => token.length >= 2).slice(0, 8);
+      if (tokens.length > 1) {
+        whereOr.push({
+          [Op.and]: tokens.map(token => ({
+            [Op.or]: [
+              ...fieldLike('nombre', token),
+              ...fieldLike('apellidos', token),
+              { telefono_movil: { [Op.like]: `%${token}%` } },
+              { email: { [Op.like]: `%${token}%` } },
+              ...fullNameLike(token)
+            ]
+          }))
+        });
+      }
+    }
     if (normPhone) {
       whereOr.push({ telefono_movil: { [Op.like]: `%${normPhone}%` } });
     }
     if (normEmail) {
       whereOr.push({ email: { [Op.like]: `%${normEmail}%` } });
+    }
+    if (!whereOr.length) {
+      return res.json([]);
     }
 
     if (!clinicaId) {
@@ -356,6 +548,7 @@ exports.searchPacientes = async (req, res) => {
       limit: 20,
       distinct: true
     });
+    await Promise.all(pacientes.map((paciente) => ensurePacientePublicId(paciente)));
     res.json(pacientes);
   } catch (error) {
     res.status(500).json({ message: 'Error al buscar pacientes', error: error.message });
@@ -409,13 +602,13 @@ exports.checkDuplicates = async (req, res) => {
 exports.getConsents = async (req, res) => {
   try {
     const pacienteId = req.params.id;
-    const paciente = await Paciente.findByPk(pacienteId);
+    const paciente = await findPacienteByIdentifier(pacienteId);
     if (!paciente) {
       return res.status(404).json({ message: 'Paciente no encontrado' });
     }
 
     const consents = await PacienteConsentimiento.findAll({
-      where: { paciente_id: pacienteId },
+      where: { paciente_id: paciente.id_paciente },
       order: [['createdAt', 'DESC']]
     });
 
@@ -427,7 +620,7 @@ exports.getConsents = async (req, res) => {
 
 exports.getPacienteById = async (req, res) => {
   try {
-    const paciente = await Paciente.findByPk(req.params.id, {
+    const paciente = await findPacienteByIdentifier(req.params.id, {
       include: [
         { model: Clinica, as: 'clinica' },
         { model: PacienteClinica, as: 'clinicasVinculadas', required: false, include: [{ model: Clinica, as: 'clinica' }] },
@@ -446,7 +639,12 @@ exports.getPacienteById = async (req, res) => {
     if (!paciente) {
       return res.status(404).json({ message: 'Paciente not found' });
     }
-    res.json(paciente);
+    await ensurePacientePublicId(paciente);
+    const appointmentSummary = await getPacienteAppointmentBounds(paciente.id_paciente);
+    res.json({
+      ...(typeof paciente.toJSON === 'function' ? paciente.toJSON() : paciente),
+      ...appointmentSummary,
+    });
   } catch (error) {
     res.status(500).json({ message: 'Error retrieving paciente', error: error.message });
   }
@@ -454,10 +652,11 @@ exports.getPacienteById = async (req, res) => {
 
 exports.getPacienteActivity = async (req, res) => {
   try {
-    const pacienteId = Number(req.params.id);
-    if (!Number.isFinite(pacienteId) || pacienteId <= 0) {
+    const paciente = await findPacienteByIdentifier(req.params.id, { attributes: ['id_paciente', 'public_id'] });
+    if (!paciente) {
       return res.status(400).json({ message: 'Paciente inválido' });
     }
+    const pacienteId = Number(paciente.id_paciente);
 
     const citas = await CitaPaciente.findAll({
       where: { paciente_id: pacienteId },
@@ -611,6 +810,7 @@ exports.createPaciente = async (req, res) => {
     }
 
     const newPaciente = await Paciente.create({
+      public_id: await generateUniquePacientePublicId(),
       nombre: normalizedNombre,
       apellidos: normalizedApellidos,
       dni,
@@ -676,7 +876,7 @@ exports.vincularPacienteAClinica = async (req, res) => {
       return res.status(400).json({ message: 'clinica_id es obligatorio' });
     }
 
-    const paciente = await Paciente.findByPk(id, { include: [{ model: Clinica, as: 'clinica' }] });
+    const paciente = await findPacienteByIdentifier(id, { include: [{ model: Clinica, as: 'clinica' }] });
     if (!paciente) {
       return res.status(404).json({ message: 'Paciente no encontrado' });
     }
@@ -715,7 +915,7 @@ exports.vincularPacienteAClinica = async (req, res) => {
 
 exports.updatePaciente = async (req, res) => {
   try {
-    const paciente = await Paciente.findByPk(req.params.id);
+    const paciente = await findPacienteByIdentifier(req.params.id);
     if (!paciente) {
       return res.status(404).json({ message: 'Paciente not found' });
     }
@@ -787,7 +987,7 @@ exports.transferirContacto = async (req, res) => {
       return res.status(400).json({ message: 'Se requiere teléfono o email para transferir el contacto' });
     }
 
-    const paciente = await Paciente.findByPk(id, { include: [{ model: Clinica, as: 'clinica' }] });
+    const paciente = await findPacienteByIdentifier(id, { include: [{ model: Clinica, as: 'clinica' }] });
     if (!paciente) {
       return res.status(404).json({ message: 'Paciente no encontrado' });
     }
@@ -824,7 +1024,7 @@ exports.transferirContacto = async (req, res) => {
       { where: { id_paciente: paciente.id_paciente, es_contacto_principal: true, fecha_fin: null } }
     );
 
-    const updated = await Paciente.findByPk(id, {
+    const updated = await Paciente.findByPk(paciente.id_paciente, {
       include: [{ model: Clinica, as: 'clinica' }, { model: PacienteRelacion, as: 'relaciones', include: [{ model: Paciente, as: 'relacionado' }] }]
     });
 
@@ -836,7 +1036,7 @@ exports.transferirContacto = async (req, res) => {
 
 exports.deletePaciente = async (req, res) => {
   try {
-    const paciente = await Paciente.findByPk(req.params.id);
+    const paciente = await findPacienteByIdentifier(req.params.id);
     if (!paciente) {
       return res.status(404).json({ message: 'Paciente not found' });
     }

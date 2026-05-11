@@ -20,6 +20,7 @@ const CATALOG_TRIGGER_TYPES = [
   'appointment_completed',
   'appointment_reminder_window',
   'appointment_after',
+  'consent_required',
   'patient_inactive',
   'quote_accepted',
   'treatment_completed',

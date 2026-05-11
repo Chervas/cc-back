@@ -16,6 +16,7 @@ const APPOINTMENT_TRIGGER_TYPES = new Set([
     'appointment_rescheduled',
     'appointment_cancelled',
     'appointment_completed',
+    'consent_required',
 ]);
 const APPOINTMENT_CREATED_WITHOUT_TREATMENT_SCOPE = 'without_treatment';
 
@@ -370,13 +371,16 @@ exports.restaurarTratamiento = asyncHandler(async (req, res) => {
 exports.personalizarTratamiento = asyncHandler(async (req, res) => {
     const { id } = req.params;
     const { clinica_id, ...cambios } = req.body;
-    if (!clinica_id) return res.status(400).json({ message: 'clinica_id es obligatorio' });
+    const clinicaIdNum = Number(clinica_id);
+    if (!clinicaIdNum || Number.isNaN(clinicaIdNum)) {
+        return res.status(400).json({ message: 'clinica_id es obligatorio' });
+    }
 
     const tratamientoBase = await Tratamiento.findByPk(id);
     if (!tratamientoBase) return res.status(404).json({ message: 'Tratamiento no encontrado' });
 
     // No personalizar uno ya propio
-    if (tratamientoBase.origen === 'clinica' && tratamientoBase.clinica_id === clinica_id) {
+    if (tratamientoBase.origen === 'clinica' && Number(tratamientoBase.clinica_id) === clinicaIdNum) {
         return res.status(400).json({ message: 'El tratamiento ya pertenece a esta clínica' });
     }
 
@@ -384,10 +388,15 @@ exports.personalizarTratamiento = asyncHandler(async (req, res) => {
         ...tratamientoBase.toJSON(),
         id_tratamiento: undefined,
         origen: 'clinica',
-        clinica_id,
+        clinica_id: clinicaIdNum,
+        grupo_clinica_id: null,
         id_tratamiento_base: tratamientoBase.id_tratamiento,
         ...cambios
     };
+    datosCopia.origen = 'clinica';
+    datosCopia.clinica_id = clinicaIdNum;
+    datosCopia.grupo_clinica_id = null;
+    datosCopia.eliminado_por_clinica = null;
     delete datosCopia.createdAt;
     delete datosCopia.updatedAt;
 
@@ -395,6 +404,17 @@ exports.personalizarTratamiento = asyncHandler(async (req, res) => {
     datosCopia.codigo = nuevoCodigo;
 
     const copia = await Tratamiento.create(datosCopia);
+
+    if (tratamientoBase.origen !== 'clinica') {
+        const eliminados = Array.isArray(tratamientoBase.eliminado_por_clinica)
+            ? tratamientoBase.eliminado_por_clinica.map((item) => Number(item)).filter((item) => Number.isFinite(item))
+            : [];
+        if (!eliminados.includes(clinicaIdNum)) {
+            tratamientoBase.eliminado_por_clinica = [...eliminados, clinicaIdNum];
+            await tratamientoBase.save();
+        }
+    }
+
     res.status(201).json(copia);
 });
 

@@ -1,11 +1,16 @@
 const express = require('express');
 const router = express.Router();
 const pacienteController = require('../controllers/paciente.controller');
+const consentimientosController = require('../controllers/consentimientos.controller');
+const authMiddleware = require('./auth.middleware');
+
+router.use(authMiddleware);
 
 router.get('/', pacienteController.getAllPacientes);
 router.get('/search', pacienteController.searchPacientes); // Ruta de búsqueda
 router.get('/check-duplicates', pacienteController.checkDuplicates);
 router.get('/:id/consents', pacienteController.getConsents);
+router.get('/:id/consentimientos', consentimientosController.listPatientDocuments);
 router.get('/:id/activity', pacienteController.getPacienteActivity);
 router.get('/:id', pacienteController.getPacienteById);
 router.post('/', pacienteController.createPaciente);

@@ -1855,6 +1855,7 @@ Mitigación:
     - `asignacion_instalacion_tipo`: `cualquiera | especificas`
     - `tipo_instalacion_requerida`: tipo mínimo exigido cuando el modo es `cualquiera`
     - `instalaciones_habilitadas`: IDs explícitos cuando el modo es `especificas`
+  - `POST /api/tratamientos/:id/personalizar` crea una copia de clínica desde un tratamiento de sistema/grupo. Fuerza `origen=clinica`, limpia `grupo_clinica_id` y marca el original como oculto para esa clínica para que el flujo de frontend sea `editar -> Guardar`, sin duplicar el original visible.
   - Migraciones:
     - `20260316113000-add-installation-assignment-to-tratamientos.js`
     - `20260316120500-add-installation-type-to-tratamientos.js`
@@ -2181,6 +2182,7 @@ El endpoint `/api/automation-catalog` acepta solo estos `trigger_type`:
 - `appointment_completed`
 - `appointment_reminder_window`
 - `appointment_after`
+- `consent_required`
 - `patient_inactive`
 - `quote_accepted`
 - `treatment_completed`
@@ -2651,6 +2653,169 @@ Esto explica casos como la cita `99`, donde el mensaje usó `Graci Gonzalez` aun
 - `GET /api/citas/:id`
   - Sigue siendo el detalle operativo de la cita.
   - El drawer de agenda en integración usa `GET /api/pacientes/:id/activity` como fuente principal de `Registros`, filtrando por `citaId`, para no reconstruir actividad local divergente.
+
+- `GET /api/citas`
+  - Acepta `paciente_id` / `patient_id` como filtro opcional para la ficha completa de paciente.
+  - Mantiene compatibilidad con los filtros existentes `clinica_id`, `startDate` y `endDate`.
+  - Incluye `doctor.avatar` cuando existe para reutilizar el avatar del profesional en vistas de pacientes/agenda.
+
+- `GET /api/pacientes/search`
+  - La búsqueda multipalabra también evalúa el nombre completo en ambos órdenes (`nombre apellidos` / `apellidos nombre`) y tokens individuales para casos como `hugo tala vidal caceres`.
+
+- `Pacientes.public_id`
+  - La tabla `Pacientes` tiene un identificador público opaco (`pac_...`) para URLs y enlaces internos nuevos.
+  - Los endpoints `GET/PATCH/DELETE /api/pacientes/:id` aceptan tanto `public_id` como `id_paciente` numérico para compatibilidad.
+  - Las rutas de pacientes quedan detrás de `authMiddleware`; una llamada sin token devuelve `401`.
+
+- `GET /api/pacientes/:id/consents`
+  - Devuelve los registros de `PacienteConsentimientos` del paciente, ordenados por `createdAt DESC`.
+  - El endpoint es solo lectura y acepta `public_id` (`pac_...`) o `id_paciente` numérico por compatibilidad.
+  - El uso real actual lo genera marketing/opt-out para bajas comerciales (`tipo = comunicaciones`, `estado = rechazado`). No usar esta tabla para consentimientos clínicos.
+
+## 2026-05-09 - Consentimientos clínicos V2
+
+Se añade un modelo separado para consentimientos clínicos/documentales, sin contaminar `PacienteConsentimientos` de marketing/opt-out.
+
+### Tablas principales
+
+- `ConsentTemplateCatalogs`: plantilla global/admin.
+- `ConsentTemplateCatalogVersions`: versiones de plantilla admin.
+- `ConsentTemplateCatalogDisciplines`: binding admin por área/disciplina médica.
+- `ConsentTemplateCatalogTreatments`: binding admin por tratamiento de sistema cuando aplique.
+- `ClinicConsentTemplates`: plantilla editable de clínica.
+- `ClinicConsentTemplateVersions`: versiones/snapshot de plantilla de clínica.
+- `TreatmentConsentRequirements`: requisitos tratamiento -> plantilla.
+- `ConsentSignaturePackages`: paquete de firma por cita/paciente.
+- `PatientConsentDocuments`: documento concreto para paciente/cita/tratamiento.
+- `ConsentDeliveryEvents`: eventos de entrega mock/real por paquete/documento.
+- `ClinicTabletKiosks`: credenciales propias de kiosco tablet por clínica.
+
+La fuente de verdad del documento firmado es JSON/snapshot + metadatos + hash. El PDF se genera bajo demanda con Chromium; no debe guardarse como dato primario.
+
+### API
+
+Prefijo: `/api/consentimientos`
+
+| Método | Endpoint | Uso |
+|---|---|---|
+| GET | `/admin/templates` | Listar plantillas admin. |
+| POST | `/admin/templates` | Crear plantilla admin con primera versión. |
+| PUT | `/admin/templates/:id` | Actualizar plantilla admin y crear versión nueva. |
+| GET | `/clinic/templates` | Listar plantillas de clínica (`clinica_id` requerido salvo admin global). |
+| POST | `/clinic/templates` | Crear plantilla de clínica. |
+| PUT | `/clinic/templates/:id` | Actualizar plantilla de clínica y versionar. |
+| POST | `/clinic/:clinicId/sync-admin` | Copiar plantillas admin activas al scope clínica. |
+| GET | `/clinic/:clinicId/tablet-kiosk` | Consultar tablets/kioscos de firma de la clínica. Devuelve `kiosks[]` y conserva `kiosk` como primer activo por compatibilidad. |
+| POST | `/clinic/:clinicId/tablet-kiosk` | Crear una tablet/kiosco adicional para la clínica. |
+| POST | `/clinic/:clinicId/tablet-kiosk/reset` | Crear o regenerar el primer kiosco activo, endpoint legacy. |
+| POST | `/clinic/:clinicId/tablet-kiosk/:kioskId/reset` | Regenerar contraseña de una tablet concreta. |
+| GET | `/treatments/:id/requirements` | Requisitos de consentimiento de un tratamiento. |
+| PUT | `/treatments/:id/requirements` | Reemplazar requisitos de un tratamiento para el scope. |
+| GET | `/patients/:id/documents` | Documentos clínicos del paciente. Acepta `pac_...` o id numérico. |
+| GET | `/patients/:id/treatments-without-consent` | Tratamientos presentes en citas del paciente que no tienen requisitos activos de consentimiento para esa clínica. Alimenta la sección de creación rápida en ficha de paciente. |
+| GET | `/appointments/:id/summary` | Resumen de documentos requeridos/pendientes de una cita. |
+| POST | `/appointments/:id/package` | Crear o reutilizar paquete de firma para una cita. |
+| POST | `/packages/:id/send-mock` | Registrar envío mock (`email`, `whatsapp`, `tablet`, `internal`). |
+| POST | `/packages/:id/tablet-session` | Emitir enlace opaco de firma para un paquete. |
+| GET | `/documents/:id/render` | Render HTML imprimible autenticado. |
+| GET | `/documents/:id/pdf` | PDF bajo demanda autenticado. |
+| GET | `/professional/pending` | Documentos firmados por paciente que requieren firma profesional. |
+| POST | `/documents/:id/sign-professional` | Registra firma/confirmación del profesional. |
+| POST | `/tablet/login` | Login público de kiosco tablet. |
+| GET | `/tablet/session` | Validar sesión de kiosco por bearer token propio. |
+| GET | `/tablet/packages` | Cola de paquetes pendientes de la clínica del kiosco. |
+| POST | `/tablet/packages/:id/session` | Emitir enlace de firma desde kiosco. |
+| GET | `/public/:token` | Abrir paquete de firma por token opaco. |
+| POST | `/public/:token/sign` | Firmar paquete por token opaco. |
+
+### Seed Admin Base
+
+Migración de datos:
+
+- `migrations/20260509143000-seed-admin-consentimientos-base.js`
+
+Plantillas base creadas en `ConsentTemplateCatalogs`:
+
+- `cc_base_proteccion_datos_asistencia_v1`: información de protección de datos y asistencia sanitaria.
+- `cc_dental_ortodoncia_v1`: consentimiento informado de ortodoncia.
+- `cc_dental_implantes_v1`: consentimiento informado de implantes dentales.
+- `cc_base_imagen_clinica_v1`: autorización de fotografías clínicas.
+
+Las plantillas usan `variable_schema` y HTML editable. El render de snapshot soporta variables como `{{paciente.documento}}`, `{{cita.fecha}}` y `{{profesional.nombre}}`.
+
+Migración de expansión:
+
+- `migrations/20260510191000-seed-consentimientos-expansion-y-whatsapp.js`
+
+Añade plantillas admin reales para portal del paciente, ácido hialurónico, toxina botulínica y microinjerto capilar, además de la plantilla WhatsApp `clinicaclick_envio_consentimiento_firma` con variable de enlace público de consentimiento. Las plantillas invasivas incluyen `variable_schema.automation` con envío recomendado 24h antes y confirmación de explicación.
+
+Alias de paciente:
+
+- `GET /api/pacientes/:id/consentimientos`
+  - Devuelve el mismo contrato que `GET /api/consentimientos/patients/:id/documents`.
+
+### Integración con citas
+
+- `GET /api/citas`
+- `GET /api/citas/:id`
+- respuestas de cambio de estado de cita
+
+incluyen `consent_summary` cuando la cita tiene tratamiento con requisitos configurados.
+
+Campos principales de `consent_summary`:
+
+- `appointment_id`
+- `package_id`
+- `total`
+- `required_total`
+- `pending_required`
+- `pending_optional`
+- `signed_total`
+- `has_pending`
+- `documents[]`
+
+La agenda debe usar `has_pending` para avisos visuales y `pending_required > 0` para bloqueos operativos futuros.
+
+### Automatizaciones
+
+`/api/automations/v2/meta` y `/node-types` exponen el trigger:
+
+```text
+consent_required
+```
+
+Nombre UI: `Consentimiento necesario`.
+
+Estado actual:
+
+- trigger disponible para construir automatizaciones;
+- `action/send_email` sigue stub, por lo que envío por email real queda documentado como mock;
+- WhatsApp dispone de plantilla admin para enlace de consentimiento, pero el envío real depende de WABA conectado, plantilla aprobada y resolución de `consentimiento.enlace_publico`;
+- al crear/reprogramar cita con documentos pendientes, backend crea/reutiliza paquete y dispara `consent_required` con idempotencia por paquete.
+
+El scheduler no envía recordatorios de consentimiento por su cuenta. Los recordatorios deben vivir en Automatizaciones V2 (`consent_required -> wait -> condición pendiente -> canal`). El scheduler queda para ejecutar pasos programados del motor y mantenimiento técnico de caducidad/estado.
+
+### Subdominio tablet dev
+
+- `https://tablet.clinicaclick.com/tablet` está servido por Nginx con certificado Let's Encrypt propio.
+- En dev apunta al build `/home/ubuntu/wt/front-dev/dist/fuse` y al backend `127.0.0.1:3004`.
+- El site restringe `/api/` a `consentimientos/public/*` y `consentimientos/tablet/*`; no expone el resto del API dev en ese host.
+- Al promover a staging hay que cambiar el root a `/home/ubuntu/www/front-staging` y el proxy al backend staging.
+
+### Reglas de negocio vigentes
+
+- Consentimiento clínico y marketing son finalidades separadas.
+- Marketing, imágenes publicitarias y comunicaciones comerciales no deben bloquear un acto clínico.
+- Clínica puede adaptar plantillas heredadas del admin.
+- La sincronización desde catálogo admin a clínica es una operación interna/superadmin en frontend; el cliente no ve el botón por defecto.
+- Área médica sirve para herencia/base; tratamiento concreto manda cuando hay riesgo/invasividad.
+- La asociación entre consentimiento de clínica y tratamiento es bidireccional: puede guardarse desde `PUT /treatments/:id/requirements` o desde `POST/PUT /clinic/templates` enviando `tratamiento_ids`.
+- Las plantillas de clínica solo exponen `apply_to_group` en UI cuando la clínica pertenece a un grupo; el backend sigue validando permisos/scope.
+- No borrar documentos firmados sin trazabilidad: estados esperados `pending`, `sent`, `viewed`, `signed`, `revoked`, `superseded`, `voided`.
+- Los consentimientos reutilizables ya firmados (`data_protection` o `validity_mode=manual`) no se regeneran para nuevas citas del mismo paciente y clínica; pendientes antiguos equivalentes se marcan `superseded`.
+- `tablet-session` encola la firma para el kiosco sin duplicar eventos `queued` del mismo documento.
+- La firma profesional se guarda en `PatientConsentDocuments.professional_signed_by` y `professional_signed_at`, además de `snapshot_json.professional_signature_evidence`.
+- Menores/tutores deben resolverse en la fase de firma usando los datos ya modelados en paciente.
 
 ## 2026-03-15 - Contexto V2 enriquecido con datos clínicos
 
