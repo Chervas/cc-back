@@ -91,6 +91,8 @@ module.exports = (sequelize, DataTypes) => {
     snapshot_hash: { type: DataTypes.STRING(128), allowNull: true },
     signed_by_patient_id: { type: DataTypes.INTEGER, allowNull: true },
     signed_by_representative_id: { type: DataTypes.INTEGER, allowNull: true },
+    professional_signed_by: { type: DataTypes.INTEGER, allowNull: true },
+    professional_signed_at: { type: DataTypes.DATE, allowNull: true },
     signed_at: { type: DataTypes.DATE, allowNull: true },
     revoked_at: { type: DataTypes.DATE, allowNull: true },
     expires_at: { type: DataTypes.DATE, allowNull: true },

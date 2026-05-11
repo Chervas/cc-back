@@ -160,7 +160,7 @@ exports.sendPackageMock = asyncHandler(async (req, res) => {
     try {
         const item = await consentimientosService.sendPackageMock(req.params.id, {
             ...(req.body || {}),
-            base_url: req.body?.base_url || getRequestBaseUrl(req),
+            base_url: req.body?.base_url || req.body?.baseUrl || undefined,
         });
         return res.json(item);
     } catch (error) {
@@ -172,7 +172,7 @@ exports.createTabletSession = asyncHandler(async (req, res) => {
     try {
         const item = await consentimientosService.createTabletSession(req.params.id, {
             ...(req.body || {}),
-            base_url: req.body?.base_url || getRequestBaseUrl(req),
+            base_url: req.body?.base_url || req.body?.baseUrl || undefined,
         });
         return res.json(item);
     } catch (error) {
@@ -192,6 +192,24 @@ exports.getClinicKioskAccess = asyncHandler(async (req, res) => {
 exports.resetClinicKioskAccess = asyncHandler(async (req, res) => {
     try {
         const item = await consentimientosService.resetClinicKioskAccess(req.params.clinicId, getUserId(req));
+        return res.json(item);
+    } catch (error) {
+        return sendError(res, error);
+    }
+});
+
+exports.createClinicKioskAccess = asyncHandler(async (req, res) => {
+    try {
+        const item = await consentimientosService.createClinicKioskAccess(req.params.clinicId, getUserId(req), req.body || {});
+        return res.status(201).json(item);
+    } catch (error) {
+        return sendError(res, error);
+    }
+});
+
+exports.regenerateClinicKioskAccess = asyncHandler(async (req, res) => {
+    try {
+        const item = await consentimientosService.regenerateClinicKioskAccess(req.params.clinicId, req.params.kioskId, getUserId(req));
         return res.json(item);
     } catch (error) {
         return sendError(res, error);
@@ -229,7 +247,7 @@ exports.createTabletKioskPackageSession = asyncHandler(async (req, res) => {
     try {
         const item = await consentimientosService.createTabletSessionForKiosk(req.params.id, getBearer(req), {
             ...(req.body || {}),
-            base_url: req.body?.base_url || getRequestBaseUrl(req),
+            base_url: req.body?.base_url || req.body?.baseUrl || undefined,
         });
         return res.json(item);
     } catch (error) {
@@ -299,6 +317,27 @@ exports.signDocument = asyncHandler(async (req, res) => {
             userAgent: req.get('user-agent'),
         });
         return res.json(item);
+    } catch (error) {
+        return sendError(res, error);
+    }
+});
+
+exports.signProfessionalDocument = asyncHandler(async (req, res) => {
+    try {
+        const item = await consentimientosService.signProfessionalConsentDocument(req.params.id, req.body || {}, getUserId(req), {
+            ip: req.ip,
+            userAgent: req.get('user-agent'),
+        });
+        return res.json(item);
+    } catch (error) {
+        return sendError(res, error);
+    }
+});
+
+exports.listProfessionalPendingDocuments = asyncHandler(async (req, res) => {
+    try {
+        const items = await consentimientosService.listProfessionalPendingDocuments(req.query || {}, getUserId(req));
+        return res.json({ items, total: items.length });
     } catch (error) {
         return sendError(res, error);
     }

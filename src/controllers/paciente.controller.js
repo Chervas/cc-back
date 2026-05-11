@@ -14,6 +14,29 @@ const normalizeEmail = (email) => {
   return email.toString().trim().toLowerCase();
 };
 
+const normalizeSearchTerm = (value) => String(value || '')
+  .normalize('NFD')
+  .replace(/[\u0300-\u036f]/g, '')
+  .replace(/ñ/g, 'n')
+  .replace(/Ñ/g, 'n')
+  .trim()
+  .toLowerCase();
+
+const ACCENT_FOLD_REPLACEMENTS = [
+  ['á', 'a'], ['à', 'a'], ['ä', 'a'], ['â', 'a'], ['ã', 'a'],
+  ['é', 'e'], ['è', 'e'], ['ë', 'e'], ['ê', 'e'],
+  ['í', 'i'], ['ì', 'i'], ['ï', 'i'], ['î', 'i'],
+  ['ó', 'o'], ['ò', 'o'], ['ö', 'o'], ['ô', 'o'], ['õ', 'o'],
+  ['ú', 'u'], ['ù', 'u'], ['ü', 'u'], ['û', 'u'],
+  ['ñ', 'n'],
+  ['ç', 'c'],
+];
+
+const accentFoldSql = (expression) => ACCENT_FOLD_REPLACEMENTS.reduce(
+  (sql, [from, to]) => `REPLACE(${sql}, '${from}', '${to}')`,
+  `LOWER(${expression})`
+);
+
 const generatePacientePublicId = () => `pac_${crypto.randomBytes(10).toString('hex')}`;
 
 const isNumericPacienteIdentifier = (value) => /^\d+$/.test(String(value || '').trim());
@@ -419,19 +442,44 @@ exports.searchPacientes = async (req, res) => {
       return res.json([]);
     }
 
+    const accentInsensitiveLike = (expression, term) => {
+      const normalized = normalizeSearchTerm(term);
+      if (!normalized) return null;
+      return literal(`${accentFoldSql(expression)} LIKE ${Paciente.sequelize.escape(`%${normalized}%`)}`);
+    };
+
+    const fieldLike = (field, term) => {
+      const normalized = normalizeSearchTerm(term);
+      const clauses = [
+        { [field]: { [Op.like]: `%${term}%` } },
+      ];
+      if (normalized) {
+        clauses.push(accentInsensitiveLike(`\`Paciente\`.\`${field}\``, term));
+      }
+      return clauses.filter(Boolean);
+    };
+
     const fullNameLike = (term) => {
       const escaped = Paciente.sequelize.escape(`%${term}%`);
-      return [
+      const clauses = [
         literal(`CONCAT_WS(' ', \`Paciente\`.\`nombre\`, \`Paciente\`.\`apellidos\`) LIKE ${escaped}`),
-        literal(`CONCAT_WS(' ', \`Paciente\`.\`apellidos\`, \`Paciente\`.\`nombre\`) LIKE ${escaped}`)
+        literal(`CONCAT_WS(' ', \`Paciente\`.\`apellidos\`, \`Paciente\`.\`nombre\`) LIKE ${escaped}`),
       ];
+      const normalized = normalizeSearchTerm(term);
+      if (normalized) {
+        clauses.push(
+          accentInsensitiveLike(`CONCAT_WS(' ', \`Paciente\`.\`nombre\`, \`Paciente\`.\`apellidos\`)`, term),
+          accentInsensitiveLike(`CONCAT_WS(' ', \`Paciente\`.\`apellidos\`, \`Paciente\`.\`nombre\`)`, term)
+        );
+      }
+      return clauses.filter(Boolean);
     };
 
     const whereOr = [];
     if (query) {
       whereOr.push(
-        { nombre: { [Op.like]: `%${query}%` } },
-        { apellidos: { [Op.like]: `%${query}%` } },
+        ...fieldLike('nombre', query),
+        ...fieldLike('apellidos', query),
         { telefono_movil: { [Op.like]: `%${query}%` } },
         { email: { [Op.like]: `%${query}%` } },
         ...fullNameLike(query)
@@ -442,8 +490,8 @@ exports.searchPacientes = async (req, res) => {
         whereOr.push({
           [Op.and]: tokens.map(token => ({
             [Op.or]: [
-              { nombre: { [Op.like]: `%${token}%` } },
-              { apellidos: { [Op.like]: `%${token}%` } },
+              ...fieldLike('nombre', token),
+              ...fieldLike('apellidos', token),
               { telefono_movil: { [Op.like]: `%${token}%` } },
               { email: { [Op.like]: `%${token}%` } },
               ...fullNameLike(token)

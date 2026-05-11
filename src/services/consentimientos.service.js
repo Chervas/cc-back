@@ -246,7 +246,7 @@ function addHours(date, hours) {
 function getTabletBaseUrl() {
     return toCleanString(process.env.CONSENT_TABLET_BASE_URL)
         || toCleanString(process.env.FRONTEND_PUBLIC_URL)
-        || 'http://localhost:4203';
+        || 'https://tablet.clinicaclick.com';
 }
 
 function buildPublicConsentUrl(token, baseUrl = null) {
@@ -375,15 +375,29 @@ function normalizeRevocationEvidence(payload = {}, requestMeta = {}) {
     };
 }
 
+function normalizeProfessionalSignatureEvidence(payload = {}, requestMeta = {}, userId = null) {
+    return {
+        method: toCleanString(payload.method ?? payload.metodo) || 'professional_confirmation',
+        professional_id: toIntOrNull(payload.professional_id ?? payload.profesional_id) || toIntOrNull(userId),
+        professional_name: toCleanString(payload.professional_name ?? payload.nombre_profesional),
+        accepted_statement: normalizeBoolean(payload.accepted_statement ?? payload.declaracion_aceptada, true),
+        signed_at: new Date().toISOString(),
+        ip: toCleanString(requestMeta.ip),
+        user_agent: toCleanString(requestMeta.userAgent),
+    };
+}
+
 function buildPrintableHtml(documentRow) {
     const doc = getPlain(documentRow);
     const snapshot = doc.snapshot_json && typeof doc.snapshot_json === 'object' ? doc.snapshot_json : {};
     const evidence = snapshot.signature_evidence || null;
+    const professionalEvidence = snapshot.professional_signature_evidence || null;
     const revocation = snapshot.revocation_evidence || null;
     const patient = snapshot.context?.paciente || {};
     const clinic = snapshot.context?.clinica || {};
     const treatment = snapshot.context?.tratamiento || {};
     const appointment = snapshot.context?.cita || {};
+    const professional = snapshot.context?.profesional || {};
     const safeHtml = doc.snapshot_html || '';
     const signatureBlock = evidence ? `
         <section class="evidence">
@@ -396,6 +410,16 @@ function buildPrintableHtml(documentRow) {
                 ${evidence.ip ? `<div><dt>IP</dt><dd>${escapeHtml(evidence.ip)}</dd></div>` : ''}
             </dl>
             ${evidence.signature_data_url ? `<img class="signature" src="${evidence.signature_data_url}" alt="Firma" />` : ''}
+        </section>
+    ` : '';
+    const professionalSignatureBlock = professionalEvidence ? `
+        <section class="evidence">
+            <h2>Firma del profesional</h2>
+            <dl>
+                <div><dt>Profesional</dt><dd>${escapeHtml(professionalEvidence.professional_name || professional.nombre || 'Profesional')}</dd></div>
+                <div><dt>Fecha</dt><dd>${escapeHtml(formatDateTime(professionalEvidence.signed_at || doc.professional_signed_at))}</dd></div>
+                <div><dt>Método</dt><dd>${escapeHtml(professionalEvidence.method || 'professional_confirmation')}</dd></div>
+            </dl>
         </section>
     ` : '';
     const revocationBlock = revocation ? `
@@ -446,6 +470,7 @@ function buildPrintableHtml(documentRow) {
   </header>
   <section class="content">${safeHtml}</section>
   ${signatureBlock}
+  ${professionalSignatureBlock}
   ${revocationBlock}
   <footer>
     Documento ${escapeHtml(doc.public_id || doc.id)}. Hash: ${escapeHtml(doc.snapshot_hash || 'pendiente')}.
@@ -706,10 +731,93 @@ async function listClinicTemplates(filters = {}) {
         where,
         include: [
             { model: db.ClinicConsentTemplateVersion, as: 'versions', required: false },
-            { model: db.ConsentTemplateCatalog, as: 'sourceCatalog', required: false },
+            {
+                model: db.ConsentTemplateCatalog,
+                as: 'sourceCatalog',
+                required: false,
+                include: [
+                    { model: db.ConsentTemplateCatalogDiscipline, as: 'disciplines', required: false },
+                ],
+            },
+            {
+                model: db.TreatmentConsentRequirement,
+                as: 'treatmentRequirements',
+                required: false,
+                include: [
+                    {
+                        model: db.Tratamiento,
+                        as: 'tratamiento',
+                        required: false,
+                        attributes: ['id_tratamiento', 'codigo', 'nombre', 'disciplina', 'especialidad', 'categoria', 'origen'],
+                    },
+                ],
+            },
         ],
         order: [['updatedAt', 'DESC']],
     });
+}
+
+function normalizeTreatmentIds(value) {
+    if (!Array.isArray(value)) return [];
+    return Array.from(new Set(value.map(toIntOrNull).filter(Boolean)));
+}
+
+async function syncClinicTemplateTreatmentLinks(templateIdRaw, clinicIdRaw, treatmentIdsRaw = []) {
+    const templateId = toIntOrNull(templateIdRaw);
+    const clinicId = toIntOrNull(clinicIdRaw);
+    if (!templateId || !clinicId) return;
+
+    const treatmentIds = normalizeTreatmentIds(treatmentIdsRaw);
+    await db.TreatmentConsentRequirement.destroy({
+        where: {
+            clinic_template_id: templateId,
+            clinica_id: clinicId,
+        },
+    });
+
+    if (!treatmentIds.length) return;
+
+    await db.TreatmentConsentRequirement.bulkCreate(
+        treatmentIds.map((tratamientoId, index) => ({
+            tratamiento_id: tratamientoId,
+            clinica_id: clinicId,
+            clinic_template_id: templateId,
+            catalog_template_id: null,
+            requirement_scope: 'treatment',
+            condition_key: null,
+            required: true,
+            blocking_policy: 'hard',
+            sort_order: index,
+        })),
+        { ignoreDuplicates: true }
+    );
+}
+
+function clinicTemplateInclude() {
+    return [
+        { model: db.ClinicConsentTemplateVersion, as: 'versions', required: false },
+        {
+            model: db.ConsentTemplateCatalog,
+            as: 'sourceCatalog',
+            required: false,
+            include: [
+                { model: db.ConsentTemplateCatalogDiscipline, as: 'disciplines', required: false },
+            ],
+        },
+        {
+            model: db.TreatmentConsentRequirement,
+            as: 'treatmentRequirements',
+            required: false,
+            include: [
+                {
+                    model: db.Tratamiento,
+                    as: 'tratamiento',
+                    required: false,
+                    attributes: ['id_tratamiento', 'codigo', 'nombre', 'disciplina', 'especialidad', 'categoria', 'origen'],
+                },
+            ],
+        },
+    ];
 }
 
 async function createClinicTemplate(payload = {}, userId = null) {
@@ -751,9 +859,50 @@ async function createClinicTemplate(payload = {}, userId = null) {
         published_at: version.published_at,
         created_by: userId,
     });
-    return db.ClinicConsentTemplate.findByPk(template.id, {
-        include: [{ model: db.ClinicConsentTemplateVersion, as: 'versions' }],
+    if (Array.isArray(payload.tratamiento_ids)) {
+        await syncClinicTemplateTreatmentLinks(template.id, clinicId, payload.tratamiento_ids);
+    }
+
+    const createdTemplate = await db.ClinicConsentTemplate.findByPk(template.id, {
+        include: clinicTemplateInclude(),
     });
+
+    const applyToGroup = normalizeBoolean(payload.apply_to_group ?? payload.aplicar_a_grupo ?? payload.usar_en_grupo, false);
+    if (applyToGroup) {
+        const clinic = await db.Clinica.findByPk(clinicId, { raw: true });
+        const groupId = toIntOrNull(clinic?.grupoClinicaId ?? clinic?.grupo_clinica_id);
+        if (groupId) {
+            const groupClinics = await db.Clinica.findAll({
+                where: { grupoClinicaId: groupId },
+                attributes: ['id_clinica'],
+                raw: true,
+            });
+            const sharedCatalogKey = getPlain(createdTemplate)?.catalog_key || getPlain(createdTemplate)?.public_id || data.catalog_key;
+            for (const targetClinic of groupClinics) {
+                const targetClinicId = toIntOrNull(targetClinic.id_clinica);
+                if (!targetClinicId || targetClinicId === clinicId) continue;
+                const existing = sharedCatalogKey
+                    ? await db.ClinicConsentTemplate.findOne({
+                        where: { clinic_id: targetClinicId, catalog_key: sharedCatalogKey },
+                        attributes: ['id'],
+                    })
+                    : null;
+                if (existing) continue;
+                await createClinicTemplate({
+                    ...payload,
+                    clinic_id: targetClinicId,
+                    clinica_id: targetClinicId,
+                    catalog_key: sharedCatalogKey,
+                    tratamiento_ids: [],
+                    apply_to_group: false,
+                    aplicar_a_grupo: false,
+                    usar_en_grupo: false,
+                }, userId);
+            }
+        }
+    }
+
+    return createdTemplate;
 }
 
 async function updateClinicTemplate(id, payload = {}, userId = null) {
@@ -803,8 +952,12 @@ async function updateClinicTemplate(id, payload = {}, userId = null) {
         });
     }
 
+    if (Array.isArray(payload.tratamiento_ids)) {
+        await syncClinicTemplateTreatmentLinks(template.id, template.clinic_id, payload.tratamiento_ids);
+    }
+
     return db.ClinicConsentTemplate.findByPk(template.id, {
-        include: [{ model: db.ClinicConsentTemplateVersion, as: 'versions' }],
+        include: clinicTemplateInclude(),
     });
 }
 
@@ -979,6 +1132,100 @@ async function resolveRequirementTemplate(requirement) {
     return null;
 }
 
+function isReusableSignedConsentTemplate(template = {}) {
+    const purpose = String(template.purpose || '').trim();
+    const validityMode = String(template.validity_mode || '').trim();
+    return purpose === 'data_protection' || validityMode === 'manual';
+}
+
+function buildTemplateDocumentWhere(resolved = {}) {
+    if (resolved.source === 'clinic') {
+        return { clinic_template_id: resolved.template?.id || null };
+    }
+    return { catalog_template_id: resolved.template?.id || null };
+}
+
+async function findSignedReusableConsent({ pacienteId, clinicaId, resolved }) {
+    if (!pacienteId || !clinicaId || !resolved?.template || !isReusableSignedConsentTemplate(resolved.template)) {
+        return null;
+    }
+    return db.PatientConsentDocument.findOne({
+        where: {
+            paciente_id: pacienteId,
+            clinica_id: clinicaId,
+            status: 'signed',
+            purpose: resolved.template.purpose || 'data_protection',
+            ...buildTemplateDocumentWhere(resolved),
+        },
+        order: [['signed_at', 'DESC'], ['id', 'DESC']],
+    });
+}
+
+async function supersedePendingReusableConsents({ pacienteId, clinicaId, resolved, exceptId = null }) {
+    if (!pacienteId || !clinicaId || !resolved?.template || !isReusableSignedConsentTemplate(resolved.template)) {
+        return;
+    }
+    const where = {
+        paciente_id: pacienteId,
+        clinica_id: clinicaId,
+        status: { [Op.in]: Array.from(DOCUMENT_PENDING_STATUSES) },
+        purpose: resolved.template.purpose || 'data_protection',
+        ...buildTemplateDocumentWhere(resolved),
+    };
+    if (exceptId) {
+        where.id = { [Op.ne]: exceptId };
+    }
+    await db.PatientConsentDocument.update(
+        { status: 'superseded', delivery_status: 'superseded' },
+        { where }
+    );
+}
+
+function isReusableSignedConsentDocument(documentLike) {
+    const doc = getPlain(documentLike);
+    const snapshot = doc?.snapshot_json && typeof doc.snapshot_json === 'object' ? doc.snapshot_json : {};
+    return isReusableSignedConsentTemplate({
+        purpose: doc?.purpose || snapshot?.template?.purpose,
+        validity_mode: snapshot?.template?.validity_mode,
+    });
+}
+
+async function supersedePendingReusableConsentDocuments(documentLike) {
+    const doc = getPlain(documentLike);
+    if (!doc?.id || !doc?.paciente_id || !doc?.clinica_id || !isReusableSignedConsentDocument(doc)) {
+        return;
+    }
+    const where = {
+        paciente_id: doc.paciente_id,
+        clinica_id: doc.clinica_id,
+        status: { [Op.in]: Array.from(DOCUMENT_PENDING_STATUSES) },
+        purpose: doc.purpose || 'data_protection',
+        id: { [Op.ne]: doc.id },
+    };
+    if (doc.clinic_template_id) {
+        where.clinic_template_id = doc.clinic_template_id;
+    } else if (doc.catalog_template_id) {
+        where.catalog_template_id = doc.catalog_template_id;
+    } else {
+        return;
+    }
+
+    const affected = await db.PatientConsentDocument.findAll({
+        where,
+        attributes: ['id', 'package_id'],
+        raw: true,
+    });
+    if (!affected.length) return;
+
+    await db.PatientConsentDocument.update(
+        { status: 'superseded', delivery_status: 'superseded' },
+        { where: { id: affected.map((item) => item.id) } }
+    );
+
+    const packageIds = Array.from(new Set(affected.map((item) => toIntOrNull(item.package_id)).filter(Boolean)));
+    await Promise.all(packageIds.map((packageId) => refreshPackageCounts(packageId)));
+}
+
 async function resolveRequirementsForAppointment(citaLike) {
     const plain = getPlain(citaLike);
     const tratamientoId = toIntOrNull(plain?.tratamiento_id || plain?.tratamiento?.id_tratamiento);
@@ -1005,7 +1252,11 @@ async function listPatientDocuments(identifier, filters = {}) {
     const clinicId = toIntOrNull(filters.clinic_id ?? filters.clinica_id);
     if (clinicId) where.clinica_id = clinicId;
     const status = toCleanString(filters.status ?? filters.estado);
-    if (status && status !== 'all') where.status = status;
+    if (status && status !== 'all') {
+        where.status = status;
+    } else {
+        where.status = { [Op.notIn]: ['cancelled', 'voided', 'superseded'] };
+    }
     const documents = await db.PatientConsentDocument.findAll({
         where,
         include: [
@@ -1311,6 +1562,24 @@ async function createPackageForAppointment(citaIdRaw, options = {}) {
 
     for (const requirement of requirements) {
         const plainRequirement = getPlain(requirement);
+        const resolved = await resolveRequirementTemplate(requirement);
+        if (!resolved?.template || !resolved?.version) continue;
+
+        const signedReusable = await findSignedReusableConsent({
+            pacienteId: plainCita.paciente_id,
+            clinicaId: plainCita.clinica_id,
+            resolved,
+        });
+        if (signedReusable) {
+            await supersedePendingReusableConsents({
+                pacienteId: plainCita.paciente_id,
+                clinicaId: plainCita.clinica_id,
+                resolved,
+                exceptId: signedReusable.id,
+            });
+            continue;
+        }
+
         const existingWhere = {
             package_id: packageRow.id,
             paciente_id: plainCita.paciente_id,
@@ -1326,8 +1595,6 @@ async function createPackageForAppointment(citaIdRaw, options = {}) {
         const existing = await db.PatientConsentDocument.findOne({ where: existingWhere });
         if (existing && !DOCUMENT_CLOSED_STATUSES.has(existing.status)) continue;
 
-        const resolved = await resolveRequirementTemplate(requirement);
-        if (!resolved?.template || !resolved?.version) continue;
         const title = resolved.version.title || resolved.template.name;
         const renderedHtml = renderTemplateHtml(resolved.version.body_html || buildDefaultBodyHtml(title), context);
         const snapshot = {
@@ -1341,6 +1608,7 @@ async function createPackageForAppointment(citaIdRaw, options = {}) {
                 validity_mode: resolved.template.validity_mode,
                 requires_patient_signature: resolved.template.requires_patient_signature !== false,
                 requires_representative_when_minor: resolved.template.requires_representative_when_minor !== false,
+                requires_professional_signature: !!resolved.template.requires_professional_signature,
             },
             version: {
                 id: resolved.version.id,
@@ -1519,18 +1787,29 @@ async function createTabletSession(packageIdRaw, payload = {}) {
     await Promise.all(documents.map(async (doc) => {
         const plainDoc = getPlain(doc);
         if (!DOCUMENT_PENDING_STATUSES.has(plainDoc.status)) return;
-        await db.ConsentDeliveryEvent.create({
-            package_id: packageRow.id,
-            patient_consent_document_id: plainDoc.id,
-            channel: 'tablet',
-            status: 'queued',
-            recipient: 'tablet_clinica',
-            event_payload: {
-                public_url: publicUrl,
-                token_expires_in_hours: getLinkTtlHours(payload.ttl_hours ?? payload.validez_horas ?? 12),
-                created_at: new Date().toISOString(),
+        const existingQueuedEvent = await db.ConsentDeliveryEvent.findOne({
+            where: {
+                package_id: packageRow.id,
+                patient_consent_document_id: plainDoc.id,
+                channel: 'tablet',
+                status: 'queued',
             },
+            attributes: ['id'],
         });
+        if (!existingQueuedEvent) {
+            await db.ConsentDeliveryEvent.create({
+                package_id: packageRow.id,
+                patient_consent_document_id: plainDoc.id,
+                channel: 'tablet',
+                status: 'queued',
+                recipient: 'tablet_clinica',
+                event_payload: {
+                    public_url: publicUrl,
+                    token_expires_in_hours: getLinkTtlHours(payload.ttl_hours ?? payload.validez_horas ?? 12),
+                    created_at: new Date().toISOString(),
+                },
+            });
+        }
         if (plainDoc.status === 'pending') {
             await doc.update({ channel: 'tablet', delivery_status: 'queued' });
         }
@@ -1576,15 +1855,34 @@ async function getClinicKioskAccess(clinicIdRaw) {
         err.statusCode = 404;
         throw err;
     }
-    const kiosk = await db.ClinicTabletKiosk.findOne({ where: { clinic_id: clinicId } });
+    const kiosks = await db.ClinicTabletKiosk.findAll({
+        where: { clinic_id: clinicId },
+        order: [
+            [db.sequelize.literal("CASE WHEN status = 'active' THEN 0 ELSE 1 END"), 'ASC'],
+            ['id', 'ASC'],
+        ],
+    });
+    const serialized = kiosks.map((kiosk) => serializeKioskAccess(kiosk));
     return {
-        exists: !!kiosk,
+        exists: serialized.length > 0,
         suggested_username: `tablet-${clinicId}-${slugifyKioskPart(clinic.nombre_clinica) || 'clinica'}`,
-        kiosk: serializeKioskAccess(kiosk),
+        kiosk: serialized.find((item) => item.status === 'active') || serialized[0] || null,
+        kiosks: serialized,
     };
 }
 
-async function resetClinicKioskAccess(clinicIdRaw, userId = null) {
+async function buildUniqueKioskUsername(clinicId, clinicName, preferred = null) {
+    const base = slugifyKioskPart(preferred) || `tablet-${clinicId}-${slugifyKioskPart(clinicName) || 'clinica'}`;
+    let candidate = base;
+    let index = 1;
+    while (await db.ClinicTabletKiosk.findOne({ where: { username: candidate }, attributes: ['id'] })) {
+        index += 1;
+        candidate = `${base}-${index}`;
+    }
+    return candidate;
+}
+
+async function createClinicKioskAccess(clinicIdRaw, userId = null, payload = {}) {
     const clinicId = toIntOrNull(clinicIdRaw);
     if (!clinicId) {
         const err = new Error('clinic_id_required');
@@ -1597,28 +1895,82 @@ async function resetClinicKioskAccess(clinicIdRaw, userId = null) {
         err.statusCode = 404;
         throw err;
     }
-    const existing = await db.ClinicTabletKiosk.findOne({ where: { clinic_id: clinicId } });
     const password = generateReadablePassword();
     const passwordHash = await bcrypt.hash(password, 12);
-    const username = existing?.username || `tablet-${clinicId}-${slugifyKioskPart(clinic.nombre_clinica) || 'clinica'}`;
-    const payload = {
+    const existingCount = await db.ClinicTabletKiosk.count({ where: { clinic_id: clinicId } });
+    const displayName = toCleanString(payload.display_name ?? payload.nombre)
+        || (existingCount ? `Tablet ${existingCount + 1}` : 'Tablet recepción');
+    const username = await buildUniqueKioskUsername(
+        clinicId,
+        clinic.nombre_clinica,
+        payload.username || `tablet-${clinicId}-${displayName}`
+    );
+    const kiosk = await db.ClinicTabletKiosk.create({
+        public_id: await generateUniquePublicId(db.ClinicTabletKiosk, 'kiosk'),
+        clinic_id: clinicId,
         username,
         password_hash: passwordHash,
-        display_name: `Tablet ${clinic.nombre_clinica || clinicId}`,
+        display_name: displayName,
         status: 'active',
         created_by: toIntOrNull(userId),
-    };
-    const kiosk = existing
-        ? await existing.update(payload)
-        : await db.ClinicTabletKiosk.create({
-            ...payload,
-            public_id: await generateUniquePublicId(db.ClinicTabletKiosk, 'kiosk'),
-            clinic_id: clinicId,
-        });
+    });
+    const access = await getClinicKioskAccess(clinicId);
     return {
+        ...access,
         exists: true,
         kiosk: serializeKioskAccess(kiosk, password),
+        kiosks: access.kiosks.map((item) => item.id === kiosk.id ? serializeKioskAccess(kiosk, password) : item),
     };
+}
+
+async function regenerateClinicKioskAccess(clinicIdRaw, kioskIdRaw, userId = null) {
+    const clinicId = toIntOrNull(clinicIdRaw);
+    const kioskId = toIntOrNull(kioskIdRaw);
+    if (!clinicId || !kioskId) {
+        const err = new Error('tablet_kiosk_id_required');
+        err.statusCode = 400;
+        throw err;
+    }
+    const kiosk = await db.ClinicTabletKiosk.findOne({ where: { id: kioskId, clinic_id: clinicId } });
+    if (!kiosk) {
+        const err = new Error('tablet_kiosk_not_found');
+        err.statusCode = 404;
+        throw err;
+    }
+    const password = generateReadablePassword();
+    const passwordHash = await bcrypt.hash(password, 12);
+    await kiosk.update({
+        password_hash: passwordHash,
+        status: 'active',
+        created_by: toIntOrNull(userId) || kiosk.created_by || null,
+    });
+    const access = await getClinicKioskAccess(clinicId);
+    return {
+        ...access,
+        exists: true,
+        kiosk: serializeKioskAccess(kiosk, password),
+        kiosks: access.kiosks.map((item) => item.id === kiosk.id ? serializeKioskAccess(kiosk, password) : item),
+    };
+}
+
+async function resetClinicKioskAccess(clinicIdRaw, userId = null) {
+    const clinicId = toIntOrNull(clinicIdRaw);
+    if (!clinicId) {
+        const err = new Error('clinic_id_required');
+        err.statusCode = 400;
+        throw err;
+    }
+    const existing = await db.ClinicTabletKiosk.findOne({
+        where: { clinic_id: clinicId },
+        order: [
+            [db.sequelize.literal("CASE WHEN status = 'active' THEN 0 ELSE 1 END"), 'ASC'],
+            ['id', 'ASC'],
+        ],
+    });
+    if (existing) {
+        return regenerateClinicKioskAccess(clinicId, existing.id, userId);
+    }
+    return createClinicKioskAccess(clinicId, userId);
 }
 
 async function loginTabletKiosk(payload = {}) {
@@ -1941,8 +2293,96 @@ async function signConsentDocument(identifier, payload = {}, requestMeta = {}) {
             snapshot_hash: nextHash,
         },
     });
+    await supersedePendingReusableConsentDocuments({ ...plainDoc, status: 'signed' });
     if (plainDoc.package_id) await refreshPackageCounts(plainDoc.package_id);
     return findDocumentByIdentifier(plainDoc.id);
+}
+
+function documentRequiresProfessionalSignature(documentLike) {
+    const doc = getPlain(documentLike);
+    const snapshot = doc?.snapshot_json && typeof doc.snapshot_json === 'object' ? doc.snapshot_json : {};
+    return !!snapshot?.template?.requires_professional_signature;
+}
+
+async function signProfessionalConsentDocument(identifier, payload = {}, userId = null, requestMeta = {}) {
+    const doc = await findDocumentByIdentifier(identifier);
+    if (!doc) {
+        const err = new Error('consent_document_not_found');
+        err.statusCode = 404;
+        throw err;
+    }
+    const plainDoc = getPlain(doc);
+    if (!documentRequiresProfessionalSignature(plainDoc)) {
+        const err = new Error('professional_signature_not_required');
+        err.statusCode = 400;
+        throw err;
+    }
+    if (DOCUMENT_CLOSED_STATUSES.has(plainDoc.status) && plainDoc.status !== 'signed') {
+        const err = new Error('consent_document_already_closed');
+        err.statusCode = 409;
+        throw err;
+    }
+    if (plainDoc.professional_signed_at) {
+        return findDocumentByIdentifier(plainDoc.id);
+    }
+
+    const snapshot = plainDoc.snapshot_json && typeof plainDoc.snapshot_json === 'object' ? plainDoc.snapshot_json : {};
+    const evidence = normalizeProfessionalSignatureEvidence(payload, requestMeta, userId);
+    const nextSnapshot = {
+        ...snapshot,
+        professional_signature_evidence: evidence,
+    };
+    const nextHash = hashSnapshot({ ...nextSnapshot, rendered_html: plainDoc.snapshot_html || '' });
+    await doc.update({
+        professional_signed_by: evidence.professional_id || null,
+        professional_signed_at: new Date(evidence.signed_at),
+        snapshot_json: nextSnapshot,
+        snapshot_hash: nextHash,
+    });
+    await db.ConsentDeliveryEvent.create({
+        package_id: plainDoc.package_id || null,
+        patient_consent_document_id: plainDoc.id,
+        channel: 'internal',
+        status: 'viewed',
+        recipient: evidence.professional_name || (evidence.professional_id ? `usuario:${evidence.professional_id}` : 'professional'),
+        event_payload: {
+            event: 'professional_signed_document',
+            evidence,
+            snapshot_hash: nextHash,
+        },
+    });
+    return findDocumentByIdentifier(plainDoc.id);
+}
+
+async function listProfessionalPendingDocuments(filters = {}, userId = null) {
+    const clinicId = toIntOrNull(filters.clinic_id ?? filters.clinica_id);
+    const where = {
+        status: 'signed',
+        professional_signed_at: null,
+    };
+    if (clinicId) where.clinica_id = clinicId;
+
+    const documents = await db.PatientConsentDocument.findAll({
+        where,
+        include: [
+            { model: db.ConsentSignaturePackage, as: 'package', required: false },
+            { model: db.Paciente, as: 'paciente', required: false, attributes: ['id_paciente', 'public_id', 'nombre', 'apellidos'] },
+            { model: db.Clinica, as: 'clinica', required: false, attributes: ['id_clinica', 'nombre_clinica'] },
+            { model: db.CitaPaciente, as: 'cita', required: false, attributes: ['id_cita', 'inicio', 'doctor_id'] },
+            { model: db.Tratamiento, as: 'tratamiento', required: false, attributes: ['id_tratamiento', 'nombre', 'disciplina'] },
+        ],
+        order: [['updatedAt', 'DESC']],
+        limit: Math.min(toIntOrNull(filters.limit) || 100, 200),
+    });
+
+    return documents
+        .map(getPlain)
+        .filter((doc) => documentRequiresProfessionalSignature(doc))
+        .filter((doc) => {
+            const filterUserId = toIntOrNull(userId);
+            if (!filterUserId || !normalizeBoolean(filters.only_mine ?? filters.solo_mios, false)) return true;
+            return toIntOrNull(doc.cita?.doctor_id) === filterUserId;
+        });
 }
 
 async function signPublicPackage(tokenRaw, payload = {}, requestMeta = {}) {
@@ -1964,7 +2404,10 @@ async function signPublicPackage(tokenRaw, payload = {}, requestMeta = {}) {
             continue;
         }
         if (DOCUMENT_CLOSED_STATUSES.has(doc.status)) continue;
-        signed.push(await signConsentDocument(doc.public_id, { ...payload, method: payload.method || 'tablet_signature' }, requestMeta));
+        signed.push(await signConsentDocument(doc.public_id, {
+            ...payload,
+            method: payload.method || `${token.channel || 'tablet'}_signature`,
+        }, requestMeta));
     }
     const refreshed = await getPackageWithDocumentsById(packageRow.id);
     return {
@@ -2116,6 +2559,8 @@ module.exports = {
     sendPackageMock,
     createTabletSession,
     getClinicKioskAccess,
+    createClinicKioskAccess,
+    regenerateClinicKioskAccess,
     resetClinicKioskAccess,
     loginTabletKiosk,
     getTabletKioskSession,
@@ -2127,6 +2572,8 @@ module.exports = {
     renderConsentDocument,
     generateConsentDocumentPdf,
     signConsentDocument,
+    signProfessionalConsentDocument,
+    listProfessionalPendingDocuments,
     revokeConsentDocument,
     exportPatientConsentAudit,
 };

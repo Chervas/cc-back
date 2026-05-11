@@ -7,14 +7,14 @@ const CATALOG_NAME = 'auto_consentimientos_necesarios';
 function buildNodes() {
   return [
     {
-      id: 'start',
+      id: 'N1',
       type: 'trigger/consent_required',
       config: {},
-      outputs: { on_success: 'send_email_stub' },
+      outputs: { on_success: 'N2' },
       position: { x: 100, y: 120 },
     },
     {
-      id: 'send_email_stub',
+      id: 'N2',
       type: 'action/send_email',
       config: {
         subject: 'Consentimientos pendientes para tu cita',
@@ -25,11 +25,11 @@ function buildNodes() {
         ].join('\n'),
         variables: {},
       },
-      outputs: { on_success: 'notify_clinic', on_fail: 'notify_clinic' },
+      outputs: { on_success: 'N3', on_fail: 'N3' },
       position: { x: 100, y: 260 },
     },
     {
-      id: 'notify_clinic',
+      id: 'N3',
       type: 'action/send_system_notification',
       config: {
         title: 'Consentimientos pendientes',
@@ -70,7 +70,7 @@ module.exports = {
         is_system: true,
         clinic_id: null,
         group_id: null,
-        entry_node_id: 'start',
+        entry_node_id: 'N1',
         nodes: JSON.stringify(nodes),
         published_at: now,
         published_by: 1,
