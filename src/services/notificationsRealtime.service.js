@@ -4,6 +4,14 @@ const { getIO } = require('./socket.service');
 const { mapNotificationToDto } = require('../lib/notification-dto');
 
 function emitNotificationCreated(notification) {
+  emitNotificationEvent(notification, 'notification:created');
+}
+
+function emitNotificationUpdated(notification) {
+  emitNotificationEvent(notification, 'notification:updated');
+}
+
+function emitNotificationEvent(notification, eventName) {
   try {
     const plain = typeof notification?.get === 'function'
       ? notification.get({ plain: true })
@@ -18,7 +26,7 @@ function emitNotificationCreated(notification) {
       return;
     }
 
-    io.to(`user:${userId}`).emit('notification:created', mapNotificationToDto(notification));
+    io.to(`user:${userId}`).emit(eventName, mapNotificationToDto(notification));
   } catch (error) {
     console.warn('[notifications] realtime emit failed:', error?.message || error);
   }
@@ -26,4 +34,5 @@ function emitNotificationCreated(notification) {
 
 module.exports = {
   emitNotificationCreated,
+  emitNotificationUpdated,
 };

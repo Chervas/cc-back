@@ -2071,6 +2071,9 @@ Regla funcional validada en QA para `condition/ai_analysis` con `preset_key = co
   - se trata como `confirmado` de forma determinista;
   - no depende del LLM;
   - enruta por `on_success`.
+- respuesta escrita con emoji positivo equivalente (`👍`, `👌`, etc.) o texto afirmativo claro (`sí`, `confirmo`, `ok`, `vale`, `perfecto`, `nos vemos`, etc.):
+  - también se trata como `confirmado` de forma determinista;
+  - esto aplica en ejecución real y en simulación para que el test-run no caiga falsamente por la rama inconclusa.
 - reacción negativa o neutra (`👎`, `🤔`, etc.):
   - no se fuerza como éxito;
   - se analiza como respuesta no confirmatoria y debe terminar en `on_fail` salvo que el preset futuro decida otra semántica explícita.
@@ -2268,6 +2271,7 @@ Consecuencias:
 - No debe dispararse más de un flujo V2 por el mismo `appointment_created`.
 - Un template `without_treatment` no debe asignarse desde `PUT /api/tratamientos/:id/automation-template`.
 - Si una cita pasa a `cancelada`, `reprogramada`, `completada` o `no_asistio`, las ejecuciones V2 activas/pendientes de esa cita se cancelan antes de lanzar el evento terminal correspondiente. Un nodo `action/change_status` tampoco puede resucitar una cita que ya esté en esos estados terminales; el nodo se marca como `skipped` y el flujo termina.
+- Las notificaciones operativas creadas por `action/send_system_notification` para una cita se marcan automáticamente como leídas cuando esa cita queda resuelta (`info_confirmada`, `recordatorio_confirmado`, `cancelada`, `reprogramada`, `completada`, `no_asistio`). El backend emite `notification:updated` para que la campana no mantenga avisos obsoletos si la resolución ocurre en tiempo real.
 
 ### `condition/field_check` temporal
 

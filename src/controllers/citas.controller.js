@@ -28,10 +28,19 @@ const { getIO } = require('../services/socket.service');
 const { normalizePhoneDigits } = require('../lib/phone');
 const { normalizeHumanName } = require('../lib/name');
 const consentimientosService = require('../services/consentimientos.service');
+const appointmentNotificationCleanup = require('../services/appointmentNotificationCleanup.service');
 
 const CITA_ESTADOS_VALIDOS = new Set(CITA_STATUS_VALUES);
 const ACTIVE_APPOINTMENT_WHERE = { estado: { [Op.ne]: 'cancelada' } };
 const CITA_ESTADOS_TERMINALES_AUTOMATION = new Set(['cancelada', 'reprogramada', 'completada', 'no_asistio']);
+const CITA_ESTADOS_RESUELVEN_NOTIFICACIONES = new Set([
+    'info_confirmada',
+    'recordatorio_confirmado',
+    'cancelada',
+    'reprogramada',
+    'completada',
+    'no_asistio'
+]);
 const generatePacientePublicId = () => `pac_${crypto.randomBytes(10).toString('hex')}`;
 
 async function generateUniquePacientePublicId() {
@@ -1637,6 +1646,11 @@ exports.updateCitaEstado = asyncHandler(async (req, res) => {
                 exclude_trigger_types: automationEvent ? [automationEvent] : [],
             });
         }
+        if (CITA_ESTADOS_RESUELVEN_NOTIFICACIONES.has(estadoRaw)) {
+            await appointmentNotificationCleanup.markAutomationNotificationsReadForAppointment(cita.id_cita, {
+                reason: `appointment_status_${estadoRaw}`,
+            });
+        }
         if (automationEvent) {
             await appointmentAutomationV2Runtime.enqueueExecutionForCita(cita, {
                 event_name: automationEvent,
@@ -1762,6 +1776,9 @@ exports.reagendarCita = asyncHandler(async (req, res) => {
         await appointmentAutomationV2Runtime.cancelActiveExecutionsForCita(cita, {
             reason: 'appointment_rescheduled_cancelled_previous_active_flow',
             exclude_trigger_types: ['appointment_rescheduled'],
+        });
+        await appointmentNotificationCleanup.markAutomationNotificationsReadForAppointment(cita.id_cita, {
+            reason: 'appointment_rescheduled',
         });
         await appointmentAutomationV2Runtime.enqueueExecutionForCita(cita, {
             event_name: 'appointment_rescheduled',
