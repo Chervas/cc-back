@@ -438,11 +438,14 @@ const inAnyWindow = (windows, start, end) => {
 
 const normalizeTimeRangeRows = (rows, startKey, endKey) => {
   return (rows || [])
-    .map((r) => ({
-      ...r,
-      start: new Date(r[startKey]),
-      end: new Date(r[endKey])
-    }))
+    .map((r) => {
+      const plain = typeof r?.get === 'function' ? r.get({ plain: true }) : r;
+      return {
+        ...plain,
+        start: new Date(plain[startKey]),
+        end: new Date(plain[endKey])
+      };
+    })
     .filter((r) => Number.isFinite(r.start.getTime()) && Number.isFinite(r.end.getTime()) && r.start < r.end)
     .sort((a, b) => a.start - b.start);
 };
