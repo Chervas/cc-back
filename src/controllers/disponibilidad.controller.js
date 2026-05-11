@@ -4,6 +4,7 @@ const { Op } = db.Sequelize;
 const { buildHorarioExceptionMap, expandHorariosForDate } = require('../lib/personal-schedule-recurring');
 
 const DEFAULT_TIMEZONE = 'Europe/Madrid';
+const ACTIVE_APPOINTMENT_WHERE = { estado: { [Op.ne]: 'cancelada' } };
 
 const parseBool = (v) => v === true || v === 'true' || v === '1';
 
@@ -544,7 +545,7 @@ const conflictsForSlot = ({
         resource_id: instalacionId,
         clinica_id: clinicaId,
         code: 'INSTALLATION_OVERLAP',
-        can_force: false,
+        can_force: true,
         details: { message: 'Instalación ocupada' }
       });
     }
@@ -823,6 +824,7 @@ exports.check = asyncHandler(async (req, res) => {
 
     // Ocupación instalación (citas)
     const citasInstWhere = {
+      ...ACTIVE_APPOINTMENT_WHERE,
       instalacion_id: instalacionId,
       inicio: { [Op.lt]: end },
       fin: { [Op.gt]: start }
@@ -915,6 +917,7 @@ exports.check = asyncHandler(async (req, res) => {
     }
 
     const citasDocWhere = {
+      ...ACTIVE_APPOINTMENT_WHERE,
       doctor_id: doctorId,
       inicio: { [Op.lt]: end },
       fin: { [Op.gt]: start }
@@ -1223,7 +1226,7 @@ exports.slots = asyncHandler(async (req, res) => {
       attributes: ['instalacion_id', 'fecha_inicio', 'fecha_fin', 'motivo']
     });
     const instCitasRows = await db.CitaPaciente.findAll({
-      where: { instalacion_id: { [Op.in]: instalacionIds }, inicio: { [Op.lt]: baseEnd }, fin: { [Op.gt]: baseStart } },
+      where: { ...ACTIVE_APPOINTMENT_WHERE, instalacion_id: { [Op.in]: instalacionIds }, inicio: { [Op.lt]: baseEnd }, fin: { [Op.gt]: baseStart } },
       attributes: ['instalacion_id', 'inicio', 'fin']
     });
 
@@ -1253,7 +1256,7 @@ exports.slots = asyncHandler(async (req, res) => {
     });
     const docBloqRows = buildDoctorBloqueoRowsForDate(docBloqDefs, fecha_local, clinicTimezone);
     const docCitasRows = await db.CitaPaciente.findAll({
-      where: { doctor_id: doctorId, inicio: { [Op.lt]: baseEnd }, fin: { [Op.gt]: baseStart } },
+      where: { ...ACTIVE_APPOINTMENT_WHERE, doctor_id: doctorId, inicio: { [Op.lt]: baseEnd }, fin: { [Op.gt]: baseStart } },
       attributes: ['inicio', 'fin', 'clinica_id']
     });
 
@@ -1323,7 +1326,7 @@ exports.slots = asyncHandler(async (req, res) => {
       attributes: ['fecha_inicio', 'fecha_fin', 'motivo']
     });
     const instCitasRows = await db.CitaPaciente.findAll({
-      where: { instalacion_id: instalacionId, inicio: { [Op.lt]: baseEnd }, fin: { [Op.gt]: baseStart } },
+      where: { ...ACTIVE_APPOINTMENT_WHERE, instalacion_id: instalacionId, inicio: { [Op.lt]: baseEnd }, fin: { [Op.gt]: baseStart } },
       attributes: ['inicio', 'fin']
     });
 
@@ -1346,7 +1349,7 @@ exports.slots = asyncHandler(async (req, res) => {
     });
     const docBloqRows = buildDoctorBloqueoRowsForDate(docBloqDefs, fecha_local, clinicTimezone);
     const docCitasRows = await db.CitaPaciente.findAll({
-      where: { doctor_id: { [Op.in]: doctorIds }, inicio: { [Op.lt]: baseEnd }, fin: { [Op.gt]: baseStart } },
+      where: { ...ACTIVE_APPOINTMENT_WHERE, doctor_id: { [Op.in]: doctorIds }, inicio: { [Op.lt]: baseEnd }, fin: { [Op.gt]: baseStart } },
       attributes: ['doctor_id', 'inicio', 'fin', 'clinica_id']
     });
 
@@ -1443,7 +1446,7 @@ exports.slots = asyncHandler(async (req, res) => {
       attributes: ['fecha_inicio', 'fecha_fin', 'motivo']
     });
     instCitasRows = await db.CitaPaciente.findAll({
-      where: { instalacion_id: instalacionId, inicio: { [Op.lt]: baseEnd }, fin: { [Op.gt]: baseStart } },
+      where: { ...ACTIVE_APPOINTMENT_WHERE, instalacion_id: instalacionId, inicio: { [Op.lt]: baseEnd }, fin: { [Op.gt]: baseStart } },
       attributes: ['inicio', 'fin']
     });
   }
@@ -1476,7 +1479,7 @@ exports.slots = asyncHandler(async (req, res) => {
     });
     docBloqRows = buildDoctorBloqueoRowsForDate(docBloqDefs, fecha_local, clinicTimezone);
     docCitasRows = await db.CitaPaciente.findAll({
-      where: { doctor_id: doctorId, inicio: { [Op.lt]: baseEnd }, fin: { [Op.gt]: baseStart } },
+      where: { ...ACTIVE_APPOINTMENT_WHERE, doctor_id: doctorId, inicio: { [Op.lt]: baseEnd }, fin: { [Op.gt]: baseStart } },
       attributes: ['inicio', 'fin', 'clinica_id']
     });
   }

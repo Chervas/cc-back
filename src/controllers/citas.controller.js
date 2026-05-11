@@ -30,6 +30,7 @@ const { normalizeHumanName } = require('../lib/name');
 const consentimientosService = require('../services/consentimientos.service');
 
 const CITA_ESTADOS_VALIDOS = new Set(CITA_STATUS_VALUES);
+const ACTIVE_APPOINTMENT_WHERE = { estado: { [Op.ne]: 'cancelada' } };
 const generatePacientePublicId = () => `pac_${crypto.randomBytes(10).toString('hex')}`;
 
 async function generateUniquePacientePublicId() {
@@ -978,7 +979,7 @@ async function checkDisponibilidad({ clinica_id, inicio, fin, doctor_id, instala
             (inst.bloqueos || []).forEach(b => {
                 if (overlap(start, end, b.fecha_inicio, b.fecha_fin)) conflicts.push({ type: 'blocked', message: b.motivo || 'Bloqueo instalación' });
             });
-            const citasInst = await CitaPaciente.findAll({ where: { instalacion_id, inicio: { [db.Sequelize.Op.lt]: end }, fin: { [db.Sequelize.Op.gt]: start } }, attributes: ['id_cita'] });
+            const citasInst = await CitaPaciente.findAll({ where: { ...ACTIVE_APPOINTMENT_WHERE, instalacion_id, inicio: { [db.Sequelize.Op.lt]: end }, fin: { [db.Sequelize.Op.gt]: start } }, attributes: ['id_cita'] });
             if (citasInst.length) conflicts.push({ type: 'overlap', message: 'Instalación ocupada' });
         }
     }
@@ -1016,7 +1017,7 @@ async function checkDisponibilidad({ clinica_id, inicio, fin, doctor_id, instala
             conflicts.push({ type: 'doctor_unavailable', message: (bloqueos[0] && bloqueos[0].motivo) || 'Bloqueo doctor' });
         }
         const citasDoc = await CitaPaciente.findAll({
-            where: { doctor_id, inicio: { [db.Sequelize.Op.lt]: end }, fin: { [db.Sequelize.Op.gt]: start } },
+            where: { ...ACTIVE_APPOINTMENT_WHERE, doctor_id, inicio: { [db.Sequelize.Op.lt]: end }, fin: { [db.Sequelize.Op.gt]: start } },
             attributes: ['id_cita', 'clinica_id']
         });
         if (citasDoc.some((c) => Number(c.clinica_id) !== Number(clinica_id))) {
@@ -1031,7 +1032,7 @@ async function checkDisponibilidad({ clinica_id, inicio, fin, doctor_id, instala
 
 /**
  * Helper: conflictos canónicos (17.6) + compatibilidad legacy para el 409 de POST /citas.
- * Fuente de verdad: solo se permite `force=true` cuando el único conflicto es `STAFF_OVERLAP` (doctor).
+ * Fuente de verdad: `force=true` solo actúa cuando todos los conflictos son forzables.
  */
 async function checkDisponibilidadCanonica({ clinica_id, inicio, fin, doctor_id, instalacion_id, ignore_cita_id = null, clinicTimezone = DEFAULT_TIMEZONE }) {
     const clinicaId = Number(clinica_id);
@@ -1105,6 +1106,7 @@ async function checkDisponibilidadCanonica({ clinica_id, inicio, fin, doctor_id,
             });
 
             const citasInstWhere = {
+                ...ACTIVE_APPOINTMENT_WHERE,
                 instalacion_id,
                 inicio: { [db.Sequelize.Op.lt]: end },
                 fin: { [db.Sequelize.Op.gt]: start }
@@ -1190,7 +1192,7 @@ async function checkDisponibilidadCanonica({ clinica_id, inicio, fin, doctor_id,
             });
         }
 
-        const citasDocWhere = { doctor_id, inicio: { [db.Sequelize.Op.lt]: end }, fin: { [db.Sequelize.Op.gt]: start } };
+        const citasDocWhere = { ...ACTIVE_APPOINTMENT_WHERE, doctor_id, inicio: { [db.Sequelize.Op.lt]: end }, fin: { [db.Sequelize.Op.gt]: start } };
         if (ignore_cita_id) citasDocWhere.id_cita = { [db.Sequelize.Op.ne]: ignore_cita_id };
         const citasDoc = await CitaPaciente.findAll({ where: citasDocWhere, attributes: ['id_cita', 'clinica_id'] });
         const citasDocOtherClinics = citasDoc.filter((c) => Number(c.clinica_id) !== Number(clinicaId));
@@ -1320,7 +1322,6 @@ exports.createCita = asyncHandler(async (req, res) => {
         if (resourceConflicts.length) {
             const wantsForce = parseBool(force);
 
-            // Solo se puede forzar si el único conflicto es STAFF_OVERLAP (doctor).
             if (!wantsForce || !canForce) {
                 const firstLegacy = legacyConflicts[0];
                 const reason = (firstLegacy && ['overlap', 'blocked', 'out_of_hours', 'doctor_unavailable'].includes(firstLegacy.type))
@@ -1710,7 +1711,8 @@ exports.reagendarCita = asyncHandler(async (req, res) => {
         ignore_cita_id: cita.id_cita
     });
 
-    if (resourceConflicts.length && !parseBool(req.body?.force)) {
+    const wantsForce = parseBool(req.body?.force);
+    if (resourceConflicts.length && (!wantsForce || !canForce)) {
         const firstLegacy = legacyConflicts[0];
         const reason = (firstLegacy && ['overlap', 'blocked', 'out_of_hours', 'doctor_unavailable'].includes(firstLegacy.type))
             ? firstLegacy.type
