@@ -53,6 +53,7 @@ const FIELD_CHECK_VALUE_TYPES = new Set(['string', 'number', 'boolean']);
 const FIELD_CHECK_MODE_VALUES = new Set(['simple', 'appointment_booking_timing']);
 const FIELD_CHECK_SWITCH_TYPE_VALUES = new Set(['appointment_booking']);
 const FIELD_CHECK_APPOINTMENT_WINDOW_VALUES = new Set(['same_day', 'day_before', 'more_than_day_before']);
+const PROTECTED_APPOINTMENT_STATUSES = new Set(['cancelada', 'reprogramada', 'completada', 'no_asistio']);
 const DEFAULT_TIMEZONE = 'Europe/Madrid';
 const POSITIVE_CONFIRMATION_REACTION_EMOJIS = new Set([
   '👍',
@@ -1805,6 +1806,23 @@ async function handleChangeStatus(node, context, runtime) {
     }
 
     const previousStatus = cleanString(appointment.estado);
+    if (PROTECTED_APPOINTMENT_STATUSES.has(previousStatus) && previousStatus !== appointmentStatus) {
+      return {
+        kind: 'success',
+        output: {
+          target_type: 'appointment',
+          target_id: appointment.id_cita,
+          target_entity: 'appointment',
+          previous_status: previousStatus,
+          requested_status: appointmentStatus,
+          new_status: previousStatus,
+          skipped: true,
+          reason: 'appointment_status_protected',
+        },
+        next_node_id: null,
+      };
+    }
+
     await appointment.update({ estado: appointmentStatus });
     emitAppointmentSocketEvent(appointment, 'appointment:updated');
 
