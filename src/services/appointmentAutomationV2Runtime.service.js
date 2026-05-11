@@ -927,21 +927,64 @@ async function cancelActiveExecutionsForCita(cita, options = {}) {
     where.trigger_type = { [Op.notIn]: excludeTriggerTypes };
   }
 
+  const executions = await FlowExecutionV2.findAll({
+    where,
+    attributes: ['id'],
+    raw: true,
+  });
+  const executionIds = executions.map((row) => toIntOrNull(row.id)).filter(Boolean);
+  if (!executionIds.length) {
+    return {
+      success: true,
+      cancelled_executions: 0,
+      cancelled_jobs: 0,
+    };
+  }
+
+  const reason = cleanString(options.reason) || 'appointment_status_cancelled_active_flow';
   const [cancelled] = await FlowExecutionV2.update(
     {
       status: 'cancelled',
       current_node_id: null,
       wait_until: null,
       waiting_meta: null,
-      last_error: cleanString(options.reason) || 'appointment_status_cancelled_active_flow',
+      last_error: reason,
       updated_at: new Date(),
     },
-    { where }
+    {
+      where: {
+        id: { [Op.in]: executionIds },
+        status: { [Op.in]: ['running', 'waiting'] },
+      },
+    }
   );
+
+  const jobsToCancel = [];
+  for (const executionId of executionIds) {
+    const jobs = await JobRequest.findAll({
+      where: {
+        type: 'automations_v2_execute',
+        status: { [Op.in]: ['pending', 'queued', 'waiting'] },
+        [Op.and]: db.sequelize.where(
+          db.sequelize.literal("CAST(JSON_UNQUOTE(JSON_EXTRACT(payload, '$.execution_id')) AS UNSIGNED)"),
+          executionId
+        ),
+      },
+      attributes: ['id'],
+      raw: true,
+    });
+    jobsToCancel.push(...jobs.map((job) => toIntOrNull(job.id)).filter(Boolean));
+  }
+
+  const uniqueJobIds = Array.from(new Set(jobsToCancel));
+  await Promise.all(uniqueJobIds.map((jobId) => jobRequestsService.markCancelled(jobId, {
+    errorMessage: reason,
+  })));
 
   return {
     success: true,
     cancelled_executions: cancelled,
+    cancelled_jobs: uniqueJobIds.length,
   };
 }
 
