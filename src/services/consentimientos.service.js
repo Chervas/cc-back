@@ -27,6 +27,7 @@ const STATUS_VALUES = new Set(['draft', 'active', 'archived']);
 const VERSION_STATUS_VALUES = new Set(['draft', 'published', 'archived']);
 const BLOCKING_VALUES = new Set(['hard', 'soft', 'optional']);
 const VALIDITY_VALUES = new Set(['single_act', 'treatment_episode', 'treatment_plan', 'until_date', 'manual']);
+const SIGNING_TIMING_VALUES = new Set(['first_visit', 'before_treatment', 'at_treatment', 'before_each_session', 'at_least_24h_before', 'manual']);
 const DOCUMENT_CLOSED_STATUSES = new Set(['signed', 'rejected', 'revoked', 'expired', 'cancelled', 'superseded', 'voided']);
 const DOCUMENT_PENDING_STATUSES = new Set(['pending', 'sent', 'viewed']);
 const CHANNEL_VALUES = new Set(['tablet', 'email', 'whatsapp', 'internal']);
@@ -36,6 +37,39 @@ const KIOSK_TOKEN_TTL = process.env.CONSENT_KIOSK_TOKEN_TTL || '30d';
 const DEFAULT_LINK_TTL_HOURS = Number.parseInt(process.env.CONSENT_LINK_TTL_HOURS || '168', 10);
 const DEFAULT_SURGICAL_MIN_HOURS = Number.parseInt(process.env.CONSENT_SURGICAL_MIN_HOURS || '24', 10);
 const DEFAULT_CHROMIUM_PATH = '/home/ubuntu/.cache/clinicaclick-browsers/chrome-headless-shell/linux-148.0.7778.56/chrome-headless-shell-linux64/chrome-headless-shell';
+
+const SIGNING_TIMING_META = {
+    first_visit: {
+        label: 'Primera cita',
+        recommendation: 'Solicita la firma en la primera cita o alta del paciente.',
+        priority: 20,
+    },
+    before_treatment: {
+        label: 'Antes del tratamiento',
+        recommendation: 'Solicita la firma antes de iniciar el tratamiento.',
+        priority: 60,
+    },
+    at_treatment: {
+        label: 'Al realizar el tratamiento',
+        recommendation: 'Solicita la firma el mismo día, antes de empezar el acto clínico.',
+        priority: 50,
+    },
+    before_each_session: {
+        label: 'Antes de cada sesión',
+        recommendation: 'Solicita la firma antes de cada sesión del tratamiento.',
+        priority: 70,
+    },
+    at_least_24h_before: {
+        label: '24h antes',
+        recommendation: 'Solicita la firma al menos 24 horas antes del tratamiento.',
+        priority: 90,
+    },
+    manual: {
+        label: 'Manual',
+        recommendation: 'El equipo debe decidir cuándo pedir la firma según el caso.',
+        priority: 10,
+    },
+};
 
 function toIntOrNull(value) {
     if (value === undefined || value === null || value === '') return null;
@@ -52,6 +86,68 @@ function toCleanString(value) {
 function normalizeEnum(value, allowed, fallback) {
     const cleaned = toCleanString(value);
     return cleaned && allowed.has(cleaned) ? cleaned : fallback;
+}
+
+function parseJsonObject(value) {
+    if (!value) return {};
+    if (typeof value === 'object' && !Array.isArray(value)) return value;
+    try {
+        const parsed = JSON.parse(String(value));
+        return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
+    } catch {
+        return {};
+    }
+}
+
+function defaultSigningTimingForPurpose(purpose) {
+    if (['data_protection', 'commercial_communications', 'marketing_image'].includes(String(purpose || ''))) {
+        return 'first_visit';
+    }
+    return 'before_treatment';
+}
+
+function normalizeSigningTiming(value, fallback = 'before_treatment') {
+    const cleaned = toCleanString(value);
+    return cleaned && SIGNING_TIMING_VALUES.has(cleaned) ? cleaned : fallback;
+}
+
+function getSigningPolicyFromVersion(version = {}, template = {}) {
+    const schema = parseJsonObject(version?.variable_schema);
+    const clinicalPolicy = parseJsonObject(schema.clinical_policy);
+    const signingTiming = parseJsonObject(schema.signing_timing);
+    const fallback = defaultSigningTimingForPurpose(template?.purpose);
+    const mode = normalizeSigningTiming(
+        (typeof schema.signing_timing === 'string' ? schema.signing_timing : null)
+        || signingTiming.mode
+        || clinicalPolicy.signing_timing
+        || clinicalPolicy.due_policy,
+        fallback
+    );
+    const meta = SIGNING_TIMING_META[mode] || SIGNING_TIMING_META.before_treatment;
+    const configuredHours = Number.parseInt(
+        String(clinicalPolicy.recommended_min_hours_before || signingTiming.recommended_min_hours_before || ''),
+        10
+    );
+    const recommendedMinHours = Number.isFinite(configuredHours) && configuredHours > 0
+        ? configuredHours
+        : (mode === 'at_least_24h_before' ? DEFAULT_SURGICAL_MIN_HOURS : null);
+    return {
+        due_policy: mode,
+        signing_timing: mode,
+        signing_timing_label: meta.label,
+        recommendation: meta.recommendation,
+        recommended_min_hours_before: recommendedMinHours,
+        priority: meta.priority,
+    };
+}
+
+function pickSigningPolicy(policies = []) {
+    const validPolicies = policies.filter(Boolean);
+    if (!validPolicies.length) {
+        return getSigningPolicyFromVersion({}, { purpose: 'clinical' });
+    }
+    return validPolicies
+        .sort((a, b) => Number(b.priority || 0) - Number(a.priority || 0))[0];
 }
 
 function normalizeBoolean(value, fallback = false) {
@@ -1463,22 +1559,31 @@ async function getConsentSummaryForAppointment(citaLike) {
     }));
     let missingRequired = 0;
     let missingOptional = 0;
+    const signingPolicies = [];
     for (const requirement of requirements) {
         const plain = getPlain(requirement);
         const key = plain.clinic_template_id ? `clinic:${plain.clinic_template_id}` : `catalog:${plain.catalog_template_id}`;
+        const resolved = await resolveRequirementTemplate(requirement);
+        if (resolved?.template && resolved?.version) {
+            signingPolicies.push(getSigningPolicyFromVersion(resolved.version, resolved.template));
+        }
         if (existingKeys.has(key)) continue;
         if (plain.required) missingRequired += 1;
         else missingOptional += 1;
     }
     const summary = summarizeDocuments(documents, missingRequired, missingOptional);
     const packageRow = documents.map((doc) => getPlain(doc).package).find(Boolean) || null;
+    const signingPolicy = pickSigningPolicy(signingPolicies);
     return {
         ...summary,
         status: summary.has_pending ? 'pending' : 'ok',
         package_id: packageRow?.id || null,
         package_public_id: packageRow?.public_id || null,
-        due_policy: 'antes_del_acto',
-        recommendation: summary.has_pending ? 'Solicita la firma antes de iniciar el tratamiento.' : null,
+        due_policy: signingPolicy.due_policy,
+        signing_timing: signingPolicy.signing_timing,
+        signing_timing_label: signingPolicy.signing_timing_label,
+        recommended_min_hours_before: signingPolicy.recommended_min_hours_before,
+        recommendation: summary.has_pending ? signingPolicy.recommendation : null,
     };
 }
 
@@ -1597,6 +1702,7 @@ async function createPackageForAppointment(citaIdRaw, options = {}) {
 
         const title = resolved.version.title || resolved.template.name;
         const renderedHtml = renderTemplateHtml(resolved.version.body_html || buildDefaultBodyHtml(title), context);
+        const signingPolicy = getSigningPolicyFromVersion(resolved.version, resolved.template);
         const snapshot = {
             template_source: resolved.source,
             template: {
@@ -1624,8 +1730,10 @@ async function createPackageForAppointment(citaIdRaw, options = {}) {
                 representatives: getRepresentativeSnapshot(plainCita.paciente),
             },
             clinical_policy: {
-                due_policy: 'antes_del_acto',
-                recommended_min_hours_before: DEFAULT_SURGICAL_MIN_HOURS,
+                due_policy: signingPolicy.due_policy,
+                signing_timing: signingPolicy.signing_timing,
+                signing_timing_label: signingPolicy.signing_timing_label,
+                recommended_min_hours_before: signingPolicy.recommended_min_hours_before,
                 pdf_strategy: 'json_snapshot_printable_on_demand',
             },
             generated_at: new Date().toISOString(),

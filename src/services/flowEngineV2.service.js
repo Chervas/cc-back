@@ -1583,12 +1583,34 @@ function buildDeterministicConfirmAppointmentTextOutput(context = {}) {
     };
   }
 
-  const positivePatterns = [
-    /\b(si|confirmo|confirmado|confirmada|ok|okay|vale|perfecto|genial|de acuerdo|recibido|entendido)\b/,
+  const strongPositivePatterns = [
+    /\b(confirmo|confirmado|confirmada|confirmadisimo|confirmadisima)\b/,
     /\b(nos vemos|alli estare|ahi estare|asistire|acudire)\b/,
   ];
+  const hasStrongConfirmation = strongPositivePatterns.some((pattern) => pattern.test(text));
+  const shortPositiveTexts = new Set([
+    'si',
+    'si confirmo',
+    'confirmo',
+    'confirmado',
+    'confirmada',
+    'ok',
+    'okay',
+    'vale',
+    'perfecto',
+    'genial',
+    'de acuerdo',
+    'recibido',
+    'entendido',
+    'nos vemos',
+    'alli estare',
+    'ahi estare',
+  ]);
+  const looksLikeQuestion = /[?¿]/.test(rawResponse);
+  const tokenCount = text.split(/\s+/).filter(Boolean).length;
+  const hasShortConfirmation = !looksLikeQuestion && tokenCount <= 4 && shortPositiveTexts.has(text);
 
-  if (positivePatterns.some((pattern) => pattern.test(text))) {
+  if (hasStrongConfirmation || hasShortConfirmation) {
     return {
       decision: 'confirmado',
       confianza: 0.95,

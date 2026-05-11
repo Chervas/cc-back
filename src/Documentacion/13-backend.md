@@ -2071,8 +2071,9 @@ Regla funcional validada en QA para `condition/ai_analysis` con `preset_key = co
   - se trata como `confirmado` de forma determinista;
   - no depende del LLM;
   - enruta por `on_success`.
-- respuesta escrita con emoji positivo equivalente (`👍`, `👌`, etc.) o texto afirmativo claro (`sí`, `confirmo`, `ok`, `vale`, `perfecto`, `nos vemos`, etc.):
+- respuesta escrita con emoji positivo equivalente (`👍`, `👌`, etc.) o texto afirmativo inequívoco:
   - también se trata como `confirmado` de forma determinista;
+  - para respuestas cortas tipo `sí`, `ok`, `vale`, `perfecto` se exige que sean respuestas breves y sin interrogación; frases largas ambiguas siguen pasando por el análisis normal;
   - esto aplica en ejecución real y en simulación para que el test-run no caiga falsamente por la rama inconclusa.
 - reacción negativa o neutra (`👎`, `🤔`, etc.):
   - no se fuerza como éxito;
@@ -2816,6 +2817,8 @@ El scheduler no envía recordatorios de consentimiento por su cuenta. Los record
 - Área médica sirve para herencia/base; tratamiento concreto manda cuando hay riesgo/invasividad.
 - La asociación entre consentimiento de clínica y tratamiento es bidireccional: puede guardarse desde `PUT /treatments/:id/requirements` o desde `POST/PUT /clinic/templates` enviando `tratamiento_ids`.
 - Las plantillas de clínica solo exponen `apply_to_group` en UI cuando la clínica pertenece a un grupo; el backend sigue validando permisos/scope.
+- El momento operativo de firma se guarda en `ConsentTemplate*Version.variable_schema.signing_timing` / `clinical_policy.signing_timing`; valores actuales: `first_visit`, `before_treatment`, `at_treatment`, `before_each_session`, `at_least_24h_before`, `manual`.
+- Los resúmenes de cita y el snapshot firmado exponen `signing_timing`, `signing_timing_label`, `due_policy` y `recommended_min_hours_before` para que agenda/paciente/tablet puedan mostrar cuándo debe resolverse la firma.
 - No borrar documentos firmados sin trazabilidad: estados esperados `pending`, `sent`, `viewed`, `signed`, `revoked`, `superseded`, `voided`.
 - Los consentimientos reutilizables ya firmados (`data_protection` o `validity_mode=manual`) no se regeneran para nuevas citas del mismo paciente y clínica; pendientes antiguos equivalentes se marcan `superseded`.
 - `tablet-session` encola la firma para el kiosco sin duplicar eventos `queued` del mismo documento.
