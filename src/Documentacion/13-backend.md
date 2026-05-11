@@ -2267,6 +2267,7 @@ Consecuencias:
 
 - No debe dispararse más de un flujo V2 por el mismo `appointment_created`.
 - Un template `without_treatment` no debe asignarse desde `PUT /api/tratamientos/:id/automation-template`.
+- Si una cita pasa a `cancelada`, `reprogramada`, `completada` o `no_asistio`, las ejecuciones V2 activas/pendientes de esa cita se cancelan antes de lanzar el evento terminal correspondiente. Un nodo `action/change_status` tampoco puede resucitar una cita que ya esté en esos estados terminales; el nodo se marca como `skipped` y el flujo termina.
 
 ### `condition/field_check` temporal
 

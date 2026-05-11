@@ -89,6 +89,14 @@ function cleanString(value) {
   return String(value).trim();
 }
 
+function normalizeStringArray(value) {
+  if (Array.isArray(value)) {
+    return value.map((item) => cleanString(item)).filter(Boolean);
+  }
+  const normalized = cleanString(value);
+  return normalized ? [normalized] : [];
+}
+
 function parseBool(value, fallback = false) {
   if (value === undefined || value === null || value === '') return fallback;
   if (typeof value === 'boolean') return value;
@@ -903,6 +911,40 @@ async function enqueueExecutionForCita(cita, options = {}) {
   });
 }
 
+async function cancelActiveExecutionsForCita(cita, options = {}) {
+  const citaId = toIntOrNull(cita?.id_cita || cita);
+  if (!citaId) {
+    return { success: false, skipped: true, reason: 'invalid_cita' };
+  }
+
+  const excludeTriggerTypes = normalizeStringArray(options.exclude_trigger_types || options.excludeTriggerTypes);
+  const where = {
+    trigger_entity_type: 'appointment',
+    trigger_entity_id: citaId,
+    status: { [Op.in]: ['running', 'waiting'] },
+  };
+  if (excludeTriggerTypes.length) {
+    where.trigger_type = { [Op.notIn]: excludeTriggerTypes };
+  }
+
+  const [cancelled] = await FlowExecutionV2.update(
+    {
+      status: 'cancelled',
+      current_node_id: null,
+      wait_until: null,
+      waiting_meta: null,
+      last_error: cleanString(options.reason) || 'appointment_status_cancelled_active_flow',
+      updated_at: new Date(),
+    },
+    { where }
+  );
+
+  return {
+    success: true,
+    cancelled_executions: cancelled,
+  };
+}
+
 async function syncScheduledTriggersForCita(cita, options = {}) {
   const citaId = toIntOrNull(cita?.id_cita);
   if (!citaId) return { success: false, skipped: true, reason: 'invalid_cita' };
@@ -1254,6 +1296,7 @@ module.exports = {
   SCHEDULED_APPOINTMENT_TRIGGER_TYPES,
   enqueueExecutionForCita,
   enqueueExecutionForTemplate,
+  cancelActiveExecutionsForCita,
   syncScheduledTriggersForCita,
   backfillScheduledTriggersForTemplate,
   fireScheduledTrigger,
