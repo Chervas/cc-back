@@ -35,6 +35,7 @@ const ClinicMetaAsset = db.ClinicMetaAsset;
 const WhatsappTemplate = db.WhatsappTemplate;
 const WhatsappTemplateCatalog = db.WhatsappTemplateCatalog;
 const whatsappService = require('./whatsapp.service');
+const appointmentNotificationCleanup = require('./appointmentNotificationCleanup.service');
 const { findCanonicalWhatsappConversation } = require('../lib/canonical-conversation');
 const { buildConversationContext } = require('../lib/automation-conversation-context');
 const UPDATE_LEAD_INFO_MODES = new Set([
@@ -54,6 +55,14 @@ const FIELD_CHECK_MODE_VALUES = new Set(['simple', 'appointment_booking_timing']
 const FIELD_CHECK_SWITCH_TYPE_VALUES = new Set(['appointment_booking']);
 const FIELD_CHECK_APPOINTMENT_WINDOW_VALUES = new Set(['same_day', 'day_before', 'more_than_day_before']);
 const PROTECTED_APPOINTMENT_STATUSES = new Set(['cancelada', 'reprogramada', 'completada', 'no_asistio']);
+const APPOINTMENT_NOTIFICATION_RESOLVED_STATUSES = new Set([
+  'info_confirmada',
+  'recordatorio_confirmado',
+  'cancelada',
+  'reprogramada',
+  'completada',
+  'no_asistio',
+]);
 const DEFAULT_TIMEZONE = 'Europe/Madrid';
 const POSITIVE_CONFIRMATION_REACTION_EMOJIS = new Set([
   '👍',
@@ -1512,6 +1521,17 @@ function buildDeterministicConfirmAppointmentTextOutput(context = {}) {
     context?.last_response_context?.response_text
     || context?.last_response
   );
+  if (POSITIVE_CONFIRMATION_REACTION_EMOJIS.has(rawResponse)) {
+    return {
+      decision: 'confirmado',
+      confianza: 0.99,
+      motivo: `El paciente respondió con ${rawResponse}, interpretado como confirmación positiva.`,
+      _ai_provider: 'deterministic_rule',
+      _ai_model: 'confirm_appointment_positive_text',
+      _ai_analysis_mode: 'rule',
+    };
+  }
+
   const text = normalizeIntentText(rawResponse);
   if (!text) return null;
 
@@ -1559,6 +1579,22 @@ function buildDeterministicConfirmAppointmentTextOutput(context = {}) {
       motivo: `La última respuesta del paciente no confirma claramente la disponibilidad: "${rawResponse}".`,
       _ai_provider: 'deterministic_rule',
       _ai_model: 'confirm_appointment_doubt_text',
+      _ai_analysis_mode: 'rule',
+    };
+  }
+
+  const positivePatterns = [
+    /\b(si|confirmo|confirmado|confirmada|ok|okay|vale|perfecto|genial|de acuerdo|recibido|entendido)\b/,
+    /\b(nos vemos|alli estare|ahi estare|asistire|acudire)\b/,
+  ];
+
+  if (positivePatterns.some((pattern) => pattern.test(text))) {
+    return {
+      decision: 'confirmado',
+      confianza: 0.95,
+      motivo: `La última respuesta del paciente confirma la cita: "${rawResponse}".`,
+      _ai_provider: 'deterministic_rule',
+      _ai_model: 'confirm_appointment_positive_text',
       _ai_analysis_mode: 'rule',
     };
   }
@@ -1824,6 +1860,11 @@ async function handleChangeStatus(node, context, runtime) {
     }
 
     await appointment.update({ estado: appointmentStatus });
+    if (APPOINTMENT_NOTIFICATION_RESOLVED_STATUSES.has(appointmentStatus)) {
+      await appointmentNotificationCleanup.markAutomationNotificationsReadForAppointment(appointment.id_cita, {
+        reason: `appointment_status_${appointmentStatus}`,
+      });
+    }
     emitAppointmentSocketEvent(appointment, 'appointment:updated');
 
     return {
