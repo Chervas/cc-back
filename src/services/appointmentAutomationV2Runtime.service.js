@@ -46,6 +46,11 @@ const SCHEDULED_APPOINTMENT_TRIGGER_TYPES = new Set([
   'appointment_reminder_window',
   'appointment_after',
 ]);
+const BEFORE_APPOINTMENT_FALLBACK_TRIGGER_TYPES = new Set([
+  'appointment_created',
+  'appointment_reminder_window',
+  'consent_required',
+]);
 const APPOINTMENT_BEFORE_MOMENT_VALUES = new Set([
   'same_day',
   'day_before',
@@ -288,29 +293,86 @@ async function resolveTemplateForCitaEvent(cita, eventName) {
     return boundTemplate;
   }
 
+  if (await isBeforeAppointmentFallbackDisabledForTratamiento(cita, eventName)) {
+    return null;
+  }
+
   return resolveClinicFallbackTemplate(cita, eventName);
+}
+
+function parseTreatmentAutomationBindings(value) {
+  if (!value) return {};
+  if (typeof value === 'object') return value || {};
+  try {
+    return JSON.parse(String(value)) || {};
+  } catch {
+    return {};
+  }
+}
+
+async function isBeforeAppointmentFallbackDisabledForTratamiento(cita, eventName) {
+  if (!BEFORE_APPOINTMENT_FALLBACK_TRIGGER_TYPES.has(eventName)) return false;
+  const tratamientoId = toIntOrNull(cita?.tratamiento_id);
+  if (!tratamientoId) return false;
+
+  const tratamiento = await Tratamiento.findByPk(tratamientoId, {
+    attributes: ['id_tratamiento', 'automation_template_bindings'],
+    raw: true,
+  });
+  if (!tratamiento) return false;
+
+  const bindings = parseTreatmentAutomationBindings(tratamiento.automation_template_bindings);
+  return bindings?.appointment_before?.disabled === true;
+}
+
+function treatmentBindingKeyForAppointmentEvent(eventName) {
+  switch (cleanString(eventName).toLowerCase()) {
+    case 'appointment_completed':
+      return 'appointment_after_completed';
+    case 'appointment_no_show':
+      return 'appointment_after_no_show';
+    case 'appointment_after':
+      return 'appointment_after_next_session';
+    case 'appointment_rescheduled':
+      return 'appointment_during_rescheduled';
+    case 'appointment_cancelled':
+      return 'appointment_during_cancelled';
+    default:
+      return null;
+  }
 }
 
 async function resolveTemplateBoundToTratamiento(cita, eventName) {
   const tratamientoId = toIntOrNull(cita?.tratamiento_id);
   if (!tratamientoId) return null;
+  const normalizedEventName = cleanString(eventName).toLowerCase();
 
   const tratamiento = await Tratamiento.findByPk(tratamientoId, {
     attributes: [
       'id_tratamiento',
       'appointment_automation_template_key',
+      'automation_template_bindings',
     ],
+    raw: true,
   });
   if (!tratamiento) return null;
 
-  const templateKey = cleanString(tratamiento.appointment_automation_template_key);
+  let templateKey = '';
+  if (normalizedEventName === 'appointment_created') {
+    templateKey = cleanString(tratamiento.appointment_automation_template_key);
+  } else {
+    const bindingKey = treatmentBindingKeyForAppointmentEvent(normalizedEventName);
+    const bindings = parseTreatmentAutomationBindings(tratamiento.automation_template_bindings);
+    templateKey = bindingKey ? cleanString(bindings?.[bindingKey]?.template_key) : '';
+  }
+
   if (!templateKey) return null;
 
   const where = {
     template_key: templateKey,
     published_at: { [db.Sequelize.Op.ne]: null },
     is_active: true,
-    trigger_type: eventName,
+    trigger_type: normalizedEventName,
   };
 
   const template = await AutomationFlowTemplateV2.findOne({
@@ -319,7 +381,7 @@ async function resolveTemplateBoundToTratamiento(cita, eventName) {
   });
   if (!template) return null;
 
-  if (eventName === 'appointment_created') {
+  if (normalizedEventName === 'appointment_created') {
     const triggerConfig = getTemplateTriggerConfig(template);
     const clinic = cita?.clinica_id
       ? await Clinica.findByPk(cita.clinica_id, { attributes: ['id_clinica', 'configuracion'], raw: true })
@@ -337,6 +399,19 @@ async function resolveTemplateBoundToTratamiento(cita, eventName) {
 }
 
 function isAppointmentCreatedTemplateEligibleForCita(triggerConfig, cita, timeZone = DEFAULT_TIMEZONE) {
+  const config = triggerConfig && typeof triggerConfig === 'object' ? triggerConfig : {};
+  const treatmentId = toIntOrNull(cita?.tratamiento_id);
+  const scope = cleanString(config.appointment_scope || 'all').toLowerCase() || 'all';
+
+  if (scope === 'with_treatment' && !treatmentId) return false;
+  if (scope === 'without_treatment' && treatmentId) return false;
+  if (scope === 'with_treatment' && cleanString(config.treatment_filter).toLowerCase() === 'specific') {
+    const treatmentIds = Array.isArray(config.treatment_ids)
+      ? config.treatment_ids.map(toIntOrNull).filter(Boolean)
+      : [];
+    if (!treatmentIds.includes(treatmentId)) return false;
+  }
+
   return true;
 }
 
@@ -352,9 +427,18 @@ function normalizeAppointmentCreatedTriggerConfig(rawConfig) {
   if (safeScope !== 'without_treatment') {
     appointmentTypeWithoutTreatment = 'any';
   }
+  const treatmentFilterRaw = cleanString(config.treatment_filter || 'all').toLowerCase() || 'all';
+  const treatmentFilter = safeScope === 'with_treatment' && treatmentFilterRaw === 'specific'
+    ? 'specific'
+    : 'all';
+  const treatmentIds = treatmentFilter === 'specific' && Array.isArray(config.treatment_ids)
+    ? Array.from(new Set(config.treatment_ids.map(toIntOrNull).filter(Boolean)))
+    : [];
   return {
     appointment_scope: safeScope,
     appointment_type_without_treatment: appointmentTypeWithoutTreatment,
+    treatment_filter: treatmentFilter,
+    treatment_ids: treatmentIds,
   };
 }
 
@@ -529,7 +613,10 @@ async function resolveClinicFallbackTemplate(cita, eventName) {
         const scope = triggerConfig?.appointment_scope || 'all';
         const appointmentType = triggerConfig?.appointment_type_without_treatment || 'any';
         if (citaHasTreatment) {
-          if (scope === 'with_treatment') score += 20;
+          if (scope === 'with_treatment') {
+            score += 20;
+            if (triggerConfig?.treatment_filter === 'specific') score += 15;
+          }
           else if (scope === 'all') score += 5;
         } else {
           if (scope === 'without_treatment' && appointmentType === citaTipo) score += 30;

@@ -793,7 +793,7 @@ Reglas:
 - `POST /reactivation/lists/:id/prepare` no envia mensajes. Si recibe `automation.active=true`, crea/actualiza una plantilla real en `AutomationFlowTemplatesV2` con `trigger_type=patient_reactivation`, `entry_node_id=N1` y nodos de solo lectura: activador de reactivacion + accion elegida (`send_whatsapp`, `update_lead_info` o `create_task`).
 - `patient_reactivation` esta registrado como trigger V2. Antes de persistir la automatizacion generada desde reactivacion, `marketingReactivation.service` ejecuta una validacion estricta del subconjunto V2 permitido; no debe insertar grafos "a pelo" con tipos o configs fuera de catalogo.
 - Si `prepare` recibe `automation=null`, desactiva el flujo `patient_reactivation` asociado por `template_key` cuando existe.
-- `patient_reactivation` es representacion operativa/visual para `Marketing > Flujos`; cliente lo ve en solo lectura y la fuente de verdad sigue siendo la lista de reactivacion.
+- `patient_reactivation` es representacion operativa/visual para `Automatizaciones`; cliente lo ve en solo lectura y la fuente de verdad sigue siendo la lista de reactivacion.
 - En dev se elimino la automatizacion legacy `qa-reactivation-patient-followup-v1` porque usaba `trigger_type=patient_inactive` y nodos obsoletos (`start`, `wait`) incompatibles con V2.
 - Sigue pendiente el evaluador periodico de reactivaciones antes de envio real: debe recorrer listas activas por scope con predicados indexables, watermark incremental, lotes, clave idempotente por lista/paciente/condicion y gates justo antes de encolar (opt-out, cuarentena, capping, plantilla aprobada, ventana horaria, cola cancelable). Para reglas con fecha conocida, como presupuesto no aceptado en 7 dias, preferir `JobRequest` programado al crear el presupuesto y cancelarlo al aceptar; el barrido diario queda como red de seguridad, no como scan global.
 
@@ -2253,7 +2253,8 @@ Contratos temporales adicionales:
 `appointmentAutomationV2Runtime` usa esta precedencia:
 
 1. **Flujo asignado al tratamiento**
-   - Si la cita tiene `tratamiento_id` y ese tratamiento tiene `appointment_automation_template_key/version`, ese flujo gana.
+   - Si la cita tiene `tratamiento_id` y ese tratamiento tiene `appointment_automation_template_key/version`, ese flujo gana para `appointment_created`.
+   - Para eventos complementarios, el runtime lee `Tratamientos.automation_template_bindings` y resuelve el slot compatible: `appointment_after_completed`, `appointment_after_no_show`, `appointment_after_next_session`, `appointment_during_rescheduled` o `appointment_during_cancelled`.
 2. **Fallback clinic/group/system**
    - Si no hay flujo por tratamiento, se buscan templates V2 publicados en el scope de clínica, grupo o sistema.
    - Solo se consideran como fallback los templates no asignados ya a tratamientos.
@@ -2271,6 +2272,13 @@ Consecuencias:
 
 - No debe dispararse más de un flujo V2 por el mismo `appointment_created`.
 - Un template `without_treatment` no debe asignarse desde `PUT /api/tratamientos/:id/automation-template`.
+- `Tratamientos.automation_template_bindings` guarda bindings auxiliares por bloque de cita:
+  - `appointment_before.disabled=true`: el tratamiento no usa la automatizacion general por defecto si no tiene una especifica hasta la cita.
+  - `appointment_after_completed`, `appointment_after_no_show`, `appointment_after_next_session`: slots post-cita seleccionados desde la UI de tratamientos.
+  - `appointment_during_rescheduled`, `appointment_during_cancelled`: slots durante la cita para reprogramaciones y cancelaciones.
+  Este JSON permite que la UI seleccione automatizaciones complementarias sin alterar el contrato principal `appointment_automation_template_key/version`.
+- El runtime resuelve primero el binding del tratamiento y después el fallback clinic/group/system. Los slots solo son compatibles con su `trigger_type`: `appointment_completed`, `appointment_no_show`, `appointment_after`, `appointment_rescheduled` o `appointment_cancelled`.
+- Para `appointment_created` con `with_treatment + treatment_filter=specific`, `publish` bloquea otra automatización activa del mismo scope si ya cubre alguno de esos tratamientos.
 - Si una cita pasa a `cancelada`, `reprogramada`, `completada` o `no_asistio`, las ejecuciones V2 activas/pendientes de esa cita se cancelan antes de lanzar el evento terminal correspondiente. Un nodo `action/change_status` tampoco puede resucitar una cita que ya esté en esos estados terminales; el nodo se marca como `skipped` y el flujo termina.
 - Las notificaciones operativas creadas por `action/send_system_notification` para una cita se marcan automáticamente como leídas cuando esa cita queda resuelta (`info_confirmada`, `recordatorio_confirmado`, `cancelada`, `reprogramada`, `completada`, `no_asistio`). El backend emite `notification:updated` para que la campana no mantenga avisos obsoletos si la resolución ocurre en tiempo real.
 
@@ -2687,7 +2695,7 @@ Se añade un modelo separado para consentimientos clínicos/documentales, sin co
 - `ConsentTemplateCatalogs`: plantilla global/admin.
 - `ConsentTemplateCatalogVersions`: versiones de plantilla admin.
 - `ConsentTemplateCatalogDisciplines`: binding admin por área/disciplina médica.
-- `ConsentTemplateCatalogTreatments`: binding admin por tratamiento de sistema cuando aplique.
+- `ConsentTemplateCatalogTreatments`: binding admin por tratamiento de sistema cuando aplique. La sincronización/propagación resuelve copias de clínica/grupo por `id_tratamiento_base`.
 - `ClinicConsentTemplates`: plantilla editable de clínica.
 - `ClinicConsentTemplateVersions`: versiones/snapshot de plantilla de clínica.
 - `TreatmentConsentRequirements`: requisitos tratamiento -> plantilla.
@@ -2707,6 +2715,7 @@ Prefijo: `/api/consentimientos`
 | GET | `/admin/templates` | Listar plantillas admin. |
 | POST | `/admin/templates` | Crear plantilla admin con primera versión. |
 | PUT | `/admin/templates/:id` | Actualizar plantilla admin y crear versión nueva. |
+| POST | `/admin/templates/:id/propagate` | Propagar una plantilla admin activa a clínicas existentes compatibles. No sobreescribe copias existentes; si hay un requisito activo para el mismo tratamiento crea la copia como borrador. |
 | GET | `/clinic/templates` | Listar plantillas de clínica (`clinica_id` requerido salvo admin global). |
 | POST | `/clinic/templates` | Crear plantilla de clínica. |
 | PUT | `/clinic/templates/:id` | Actualizar plantilla de clínica y versionar. |
@@ -2754,6 +2763,15 @@ Migración de expansión:
 - `migrations/20260510191000-seed-consentimientos-expansion-y-whatsapp.js`
 
 Añade plantillas admin reales para portal del paciente, ácido hialurónico, toxina botulínica y microinjerto capilar, además de la plantilla WhatsApp `clinicaclick_envio_consentimiento_firma` con variable de enlace público de consentimiento. Las plantillas invasivas incluyen `variable_schema.automation` con envío recomendado 24h antes y confirmación de explicación.
+
+### Propagación admin a clínicas existentes
+
+- Endpoint: `POST /api/consentimientos/admin/templates/:id/propagate`.
+- Usa el scope de la plantilla admin: genérica, áreas (`ConsentTemplateCatalogDisciplines`) y/o tratamientos concretos (`ConsentTemplateCatalogTreatments`).
+- Para tratamientos del catálogo base resuelve copias activas de clínica/grupo mediante `id_tratamiento_base` y sincroniza los vínculos en `TreatmentConsentRequirements`.
+- Si la clínica ya tiene copia de esa plantilla (`source_catalog_id`) se omite por idempotencia.
+- Si el tratamiento resuelto ya tiene un consentimiento activo en esa clínica, la copia entra en `status=draft` para no pisar el flujo actual.
+- Devuelve contadores `created_count`, `draft_count`, `skipped_count` y motivos de omisión.
 
 Alias de paciente:
 

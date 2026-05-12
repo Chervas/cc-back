@@ -196,6 +196,7 @@ exports.createTratamiento = asyncHandler(async (req, res) => {
         activo = true,
         appointment_automation_template_key = null,
         appointment_automation_template_version = null,
+        automation_template_bindings = null,
         asignacion_instalacion_tipo = 'cualquiera',
         tipo_instalacion_requerida = null,
         instalaciones_habilitadas = null,
@@ -239,6 +240,9 @@ exports.createTratamiento = asyncHandler(async (req, res) => {
         activo: activo !== false,
         appointment_automation_template_key: appointment_automation_template_key || null,
         appointment_automation_template_version: null,
+        automation_template_bindings: automation_template_bindings && typeof automation_template_bindings === 'object'
+            ? automation_template_bindings
+            : null,
         asignacion_instalacion_tipo: installationAssignmentType,
         tipo_instalacion_requerida: requiredInstallationType,
         instalaciones_habilitadas: enabledInstallationIds,
@@ -276,6 +280,7 @@ exports.updateTratamiento = asyncHandler(async (req, res) => {
         'activo',
         'appointment_automation_template_key',
         'appointment_automation_template_version',
+        'automation_template_bindings',
         'asignacion_instalacion_tipo',
         'tipo_instalacion_requerida',
         'instalaciones_habilitadas',
@@ -460,7 +465,6 @@ exports.getTratamientoAutomationTemplate = asyncHandler(async (req, res) => {
 
     const where = {
         template_key: templateKey,
-        is_active: true,
         published_at: { [db.Sequelize.Op.ne]: null },
     };
 
@@ -561,7 +565,7 @@ exports.setTratamientoAutomationTemplate = asyncHandler(async (req, res) => {
     ) {
         return res.status(400).json({
             success: false,
-            message: 'No puedes asignar a un tratamiento un flujo configurado solo para citas sin tratamiento.',
+            message: 'No puedes asignar a un tratamiento una automatización configurada solo para citas sin tratamiento.',
         });
     }
 

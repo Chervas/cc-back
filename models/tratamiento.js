@@ -110,6 +110,10 @@ module.exports = (sequelize, DataTypes) => {
       type: DataTypes.INTEGER,
       allowNull: true
     },
+    automation_template_bindings: {
+      type: DataTypes.JSON,
+      allowNull: true
+    },
     asignacion_instalacion_tipo: {
       type: DataTypes.ENUM('cualquiera', 'especificas'),
       allowNull: false,

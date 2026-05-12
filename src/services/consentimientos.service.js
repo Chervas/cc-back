@@ -834,7 +834,19 @@ async function listAdminTemplates(filters = {}) {
         include: [
             { model: db.ConsentTemplateCatalogVersion, as: 'versions', required: false },
             { model: db.ConsentTemplateCatalogDiscipline, as: 'disciplines', required: false },
-            { model: db.ConsentTemplateCatalogTreatment, as: 'treatments', required: false },
+            {
+                model: db.ConsentTemplateCatalogTreatment,
+                as: 'treatments',
+                required: false,
+                include: [
+                    {
+                        model: db.Tratamiento,
+                        as: 'tratamiento',
+                        required: false,
+                        attributes: ['id_tratamiento', 'codigo', 'nombre', 'disciplina', 'especialidad', 'categoria', 'origen'],
+                    },
+                ],
+            },
         ],
         order: [['updatedAt', 'DESC']],
     });
@@ -891,7 +903,18 @@ async function createAdminTemplate(payload = {}, userId = null) {
         include: [
             { model: db.ConsentTemplateCatalogVersion, as: 'versions' },
             { model: db.ConsentTemplateCatalogDiscipline, as: 'disciplines' },
-            { model: db.ConsentTemplateCatalogTreatment, as: 'treatments' },
+            {
+                model: db.ConsentTemplateCatalogTreatment,
+                as: 'treatments',
+                include: [
+                    {
+                        model: db.Tratamiento,
+                        as: 'tratamiento',
+                        required: false,
+                        attributes: ['id_tratamiento', 'codigo', 'nombre', 'disciplina', 'especialidad', 'categoria', 'origen'],
+                    },
+                ],
+            },
         ],
     });
 }
@@ -969,7 +992,18 @@ async function updateAdminTemplate(id, payload = {}, userId = null) {
         include: [
             { model: db.ConsentTemplateCatalogVersion, as: 'versions' },
             { model: db.ConsentTemplateCatalogDiscipline, as: 'disciplines' },
-            { model: db.ConsentTemplateCatalogTreatment, as: 'treatments' },
+            {
+                model: db.ConsentTemplateCatalogTreatment,
+                as: 'treatments',
+                include: [
+                    {
+                        model: db.Tratamiento,
+                        as: 'tratamiento',
+                        required: false,
+                        attributes: ['id_tratamiento', 'codigo', 'nombre', 'disciplina', 'especialidad', 'categoria', 'origen'],
+                    },
+                ],
+            },
         ],
     });
 }
@@ -1244,6 +1278,7 @@ async function syncClinicTemplatesFromCatalog(clinicIdRaw, userId = null) {
     const include = [
         { model: db.ConsentTemplateCatalogVersion, as: 'versions', required: false },
         { model: db.ConsentTemplateCatalogDiscipline, as: 'disciplines', required: false },
+        { model: db.ConsentTemplateCatalogTreatment, as: 'treatments', required: false },
     ];
     const catalogItems = await db.ConsentTemplateCatalog.findAll({ where: catalogWhere, include });
     const created = [];
@@ -1253,9 +1288,12 @@ async function syncClinicTemplatesFromCatalog(clinicIdRaw, userId = null) {
         const itemDisciplines = Array.isArray(plain.disciplines)
             ? plain.disciplines.map((disc) => disc.disciplina_code).filter(Boolean)
             : [];
-        const isGeneric = !!plain.is_generic || itemDisciplines.length === 0;
+        const catalogTreatmentIds = getCatalogTreatmentIds(plain);
+        const resolvedTreatmentIds = await resolveCatalogTreatmentsForClinic(catalogTreatmentIds, clinic);
+        const isGeneric = !!plain.is_generic || (itemDisciplines.length === 0 && catalogTreatmentIds.length === 0);
         const matchesDiscipline = isGeneric || itemDisciplines.some((code) => clinicDisciplines.includes(code));
-        if (!matchesDiscipline) continue;
+        const matchesTreatment = catalogTreatmentIds.length > 0 && resolvedTreatmentIds.length > 0;
+        if (!matchesDiscipline && !matchesTreatment) continue;
 
         const existing = await db.ClinicConsentTemplate.findOne({
             where: { clinic_id: clinicId, source_catalog_id: item.id },
@@ -1284,11 +1322,180 @@ async function syncClinicTemplatesFromCatalog(clinicIdRaw, userId = null) {
             body_json: sourceVersion?.body_json || null,
             body_html: sourceVersion?.body_html || buildDefaultBodyHtml(plain.name),
             variable_schema: sourceVersion?.variable_schema || null,
+            tratamiento_ids: resolvedTreatmentIds,
         }, userId);
         created.push(copy);
     }
 
     return { created_count: created.length, items: created };
+}
+
+function getCatalogDisciplineCodes(catalogPlain) {
+    return Array.isArray(catalogPlain?.disciplines)
+        ? catalogPlain.disciplines.map((disc) => disc.disciplina_code).filter(Boolean)
+        : [];
+}
+
+function getCatalogTreatmentIds(catalogPlain) {
+    return Array.isArray(catalogPlain?.treatments)
+        ? Array.from(new Set(catalogPlain.treatments.map((item) => toIntOrNull(item.tratamiento_id)).filter(Boolean)))
+        : [];
+}
+
+async function resolveCatalogTreatmentsForClinic(catalogTreatmentIds = [], clinicPlain = {}) {
+    const baseIds = Array.from(new Set((catalogTreatmentIds || []).map(toIntOrNull).filter(Boolean)));
+    if (!baseIds.length) return [];
+
+    const clinicId = toIntOrNull(clinicPlain.id_clinica);
+    const groupId = toIntOrNull(clinicPlain.grupoClinicaId ?? clinicPlain.grupo_clinica_id);
+    const scopedCopyWhere = [];
+    if (clinicId) scopedCopyWhere.push({ origen: 'clinica', clinica_id: clinicId });
+    if (groupId) scopedCopyWhere.push({ origen: 'grupo', grupo_clinica_id: groupId });
+
+    const treatmentWhere = {
+        activo: true,
+        [Op.or]: [
+            { id_tratamiento: { [Op.in]: baseIds } },
+            ...(scopedCopyWhere.length
+                ? scopedCopyWhere.map((scope) => ({
+                    ...scope,
+                    id_tratamiento_base: { [Op.in]: baseIds },
+                }))
+                : []),
+        ],
+    };
+
+    const treatments = await db.Tratamiento.findAll({
+        where: treatmentWhere,
+        attributes: ['id_tratamiento'],
+        raw: true,
+    });
+    return Array.from(new Set(treatments.map((item) => toIntOrNull(item.id_tratamiento)).filter(Boolean)));
+}
+
+async function hasActiveRequirementForTreatments(clinicId, treatmentIds = []) {
+    const parsedClinicId = toIntOrNull(clinicId);
+    const parsedTreatmentIds = Array.from(new Set((treatmentIds || []).map(toIntOrNull).filter(Boolean)));
+    if (!parsedClinicId || !parsedTreatmentIds.length) return false;
+
+    const existing = await db.TreatmentConsentRequirement.findOne({
+        where: {
+            clinica_id: parsedClinicId,
+            tratamiento_id: { [Op.in]: parsedTreatmentIds },
+        },
+        include: [
+            {
+                model: db.ClinicConsentTemplate,
+                as: 'clinicTemplate',
+                required: true,
+                where: { status: 'active' },
+                attributes: ['id', 'status'],
+            },
+        ],
+        attributes: ['id'],
+    });
+    return !!existing;
+}
+
+async function propagateAdminTemplateToClinics(catalogIdRaw, options = {}) {
+    const catalogId = toIntOrNull(catalogIdRaw);
+    if (!catalogId) {
+        const err = new Error('admin_consent_template_id_required');
+        err.statusCode = 400;
+        throw err;
+    }
+
+    const catalog = await db.ConsentTemplateCatalog.findByPk(catalogId, {
+        include: [
+            { model: db.ConsentTemplateCatalogVersion, as: 'versions', required: false },
+            { model: db.ConsentTemplateCatalogDiscipline, as: 'disciplines', required: false },
+            { model: db.ConsentTemplateCatalogTreatment, as: 'treatments', required: false },
+        ],
+    });
+    if (!catalog) {
+        const err = new Error('admin_consent_template_not_found');
+        err.statusCode = 404;
+        throw err;
+    }
+
+    const catalogPlain = getPlain(catalog);
+    const disciplineCodes = getCatalogDisciplineCodes(catalogPlain);
+    const catalogTreatmentIds = getCatalogTreatmentIds(catalogPlain);
+    const isGeneric = !!catalogPlain.is_generic || (!disciplineCodes.length && !catalogTreatmentIds.length);
+    const sourceVersion = await getLatestCatalogVersion(catalog.id, 'es');
+    const targetClinicIds = normalizeTreatmentIds(options.clinic_ids ?? options.clinica_ids ?? []);
+
+    const clinicWhere = targetClinicIds.length
+        ? { id_clinica: { [Op.in]: targetClinicIds } }
+        : { [Op.or]: [{ estado_clinica: true }, { estado_clinica: null }] };
+    const clinics = await db.Clinica.findAll({ where: clinicWhere, raw: true });
+
+    const created = [];
+    const skipped = [];
+    let draftCount = 0;
+
+    for (const clinic of clinics) {
+        const clinicId = toIntOrNull(clinic.id_clinica);
+        if (!clinicId) continue;
+
+        const config = clinic.configuracion && typeof clinic.configuracion === 'object' ? clinic.configuracion : {};
+        const clinicDisciplines = normalizeStringList(config.disciplinas || (config.disciplina ? [config.disciplina] : []));
+        const resolvedTreatmentIds = await resolveCatalogTreatmentsForClinic(catalogTreatmentIds, clinic);
+        const matchesDiscipline = isGeneric || disciplineCodes.some((code) => clinicDisciplines.includes(code));
+        const matchesTreatment = catalogTreatmentIds.length > 0 && resolvedTreatmentIds.length > 0;
+        if (!matchesDiscipline && !matchesTreatment) {
+            skipped.push({ clinic_id: clinicId, reason: 'scope_mismatch' });
+            continue;
+        }
+
+        const existingSource = await db.ClinicConsentTemplate.findOne({
+            where: { clinic_id: clinicId, source_catalog_id: catalog.id },
+            attributes: ['id'],
+        });
+        if (existingSource) {
+            skipped.push({ clinic_id: clinicId, reason: 'already_exists' });
+            continue;
+        }
+
+        const hasTreatmentConflict = await hasActiveRequirementForTreatments(clinicId, resolvedTreatmentIds);
+        const copyStatus = hasTreatmentConflict ? 'draft' : 'active';
+        if (copyStatus === 'draft') draftCount += 1;
+
+        const copy = await createClinicTemplate({
+            clinic_id: clinicId,
+            source_catalog_id: catalog.id,
+            source_catalog_version_id: sourceVersion?.id || null,
+            catalog_key: catalogPlain.catalog_key,
+            name: catalogPlain.name,
+            description: catalogPlain.description,
+            purpose: catalogPlain.purpose,
+            status: copyStatus,
+            blocking_policy: catalogPlain.blocking_policy,
+            validity_mode: catalogPlain.validity_mode,
+            is_default: copyStatus === 'active',
+            requires_patient_signature: catalogPlain.requires_patient_signature,
+            requires_representative_when_minor: catalogPlain.requires_representative_when_minor,
+            requires_professional_signature: catalogPlain.requires_professional_signature,
+            locale: sourceVersion?.locale || 'es',
+            title: sourceVersion?.title || catalogPlain.name,
+            body_json: sourceVersion?.body_json || null,
+            body_html: sourceVersion?.body_html || buildDefaultBodyHtml(catalogPlain.name),
+            variable_schema: sourceVersion?.variable_schema || null,
+            tratamiento_ids: resolvedTreatmentIds,
+        }, options.userId || null);
+        created.push(copy);
+    }
+
+    return {
+        success: true,
+        catalog_id: catalog.id,
+        clinics_total: clinics.length,
+        created_count: created.length,
+        draft_count: draftCount,
+        skipped_count: skipped.length,
+        skipped,
+        items: created,
+    };
 }
 
 async function getTreatmentRequirements({ tratamientoId, clinicaId = null }) {
@@ -2849,6 +3056,7 @@ module.exports = {
     listAdminTemplates,
     createAdminTemplate,
     updateAdminTemplate,
+    propagateAdminTemplateToClinics,
     listClinicTemplates,
     createClinicTemplate,
     updateClinicTemplate,
