@@ -2560,6 +2560,7 @@ No debe mezclarse el versionado del flujo fuente con el versionado operativo de 
 
 - `AutomationFlowTemplatesV2.public_id` del catálogo identifica la familia fuente editable desde `catalogo-automatizaciones`.
 - `AutomationFlowCatalog.template_key` puede enlazar esa familia por `public_id` durante la transición; la resolución debe aceptar `public_id` y `template_key`.
+- `AutomationFlowCatalog.is_default_for_trigger` marca la opción por defecto para un `trigger_type`. El backend valida en `POST/PUT /api/automation-catalog` que no haya dos items marcados como default para el mismo activador y exige que el default esté activo.
 - La versión visible del catálogo (`template_version`) es la versión publicada del flujo fuente.
 - Al propagar, cada clínica recibe o actualiza su propia familia con `template_key = <base>__clinic_<id>` y `public_id` propio.
 - La versión de clínica sube de forma independiente. Ejemplo normal: catálogo `v4` propagado hoy puede crear clínica `v5` si esa familia local ya tenía cuatro versiones previas.

@@ -6,6 +6,7 @@ const jobScheduler = require('./jobScheduler.service');
 
 const Tratamiento = db.Tratamiento;
 const Clinica = db.Clinica;
+const AutomationFlowCatalog = db.AutomationFlowCatalog;
 const AutomationFlowTemplateV2 = db.AutomationFlowTemplateV2;
 const FlowExecutionV2 = db.FlowExecutionV2;
 const FlowExecutionLogV2 = db.FlowExecutionLogV2;
@@ -92,6 +93,87 @@ function toIntOrNull(value) {
 function cleanString(value) {
   if (value === undefined || value === null) return '';
   return String(value).trim();
+}
+
+function stripCatalogClinicScopeSuffixes(rawTemplateKey) {
+  const normalized = cleanString(rawTemplateKey);
+  if (!normalized) return '';
+  return normalized.replace(/(?:__?clinic_\d+)+$/gi, '') || normalized;
+}
+
+async function loadCatalogBindingMapForTemplates(templates) {
+  const candidateKeys = Array.from(
+    new Set(
+      (Array.isArray(templates) ? templates : [])
+        .flatMap((template) => {
+          const item = template?.toJSON ? template.toJSON() : template;
+          const rawKey = cleanString(item?.template_key);
+          return [rawKey, stripCatalogClinicScopeSuffixes(rawKey)].filter(Boolean);
+        })
+    )
+  );
+  if (!candidateKeys.length) return new Map();
+
+  const catalogRows = await AutomationFlowCatalog.findAll({
+    attributes: ['id', 'template_key', 'trigger_type', 'is_active', 'is_default_for_trigger'],
+    where: { template_key: { [Op.ne]: null } },
+    raw: true,
+  });
+  if (!catalogRows.length) return new Map();
+
+  const catalogRefs = Array.from(new Set(catalogRows.map((row) => cleanString(row.template_key)).filter(Boolean)));
+  const sourceRows = catalogRefs.length
+    ? await AutomationFlowTemplateV2.findAll({
+        attributes: ['public_id', 'template_key'],
+        where: {
+          [Op.or]: [
+            { public_id: { [Op.in]: catalogRefs } },
+            { template_key: { [Op.in]: catalogRefs } },
+          ],
+        },
+        order: [['version', 'DESC'], ['id', 'DESC']],
+        raw: true,
+      })
+    : [];
+  const sourceByPublicId = new Map();
+  const sourceByTemplateKey = new Map();
+  for (const row of sourceRows) {
+    const publicId = cleanString(row.public_id);
+    const templateKey = cleanString(row.template_key);
+    if (publicId && !sourceByPublicId.has(publicId)) sourceByPublicId.set(publicId, row);
+    if (templateKey && !sourceByTemplateKey.has(templateKey)) sourceByTemplateKey.set(templateKey, row);
+  }
+
+  const result = new Map();
+  for (const catalogRow of catalogRows) {
+    const rawKey = cleanString(catalogRow.template_key);
+    if (!rawKey) continue;
+    const sourceTemplate = sourceByPublicId.get(rawKey) || sourceByTemplateKey.get(rawKey) || null;
+    const keys = Array.from(new Set([
+      rawKey,
+      stripCatalogClinicScopeSuffixes(rawKey),
+      cleanString(sourceTemplate?.template_key),
+      stripCatalogClinicScopeSuffixes(sourceTemplate?.template_key),
+    ].filter(Boolean)));
+    if (!keys.some((key) => candidateKeys.includes(key))) continue;
+
+    const binding = {
+      id: catalogRow.id,
+      trigger_type: catalogRow.trigger_type,
+      is_active: catalogRow.is_active !== false,
+      is_default_for_trigger: catalogRow.is_default_for_trigger === true || catalogRow.is_default_for_trigger === 1,
+    };
+    for (const key of keys) {
+      if (candidateKeys.includes(key)) result.set(key, binding);
+    }
+  }
+  return result;
+}
+
+function getCatalogBindingForTemplate(template, catalogBindingMap) {
+  if (!(catalogBindingMap instanceof Map)) return null;
+  const key = cleanString(template?.template_key);
+  return catalogBindingMap.get(key) || catalogBindingMap.get(stripCatalogClinicScopeSuffixes(key)) || null;
 }
 
 function normalizeStringArray(value) {
@@ -570,6 +652,9 @@ async function resolveClinicFallbackTemplate(cita, eventName) {
   if (!Array.isArray(candidates) || !candidates.length) {
     return null;
   }
+  const catalogBindingMap = candidates.length > 1
+    ? await loadCatalogBindingMapForTemplates(candidates)
+    : new Map();
 
   const citaHasTreatment = !!toIntOrNull(cita?.tratamiento_id);
   const citaTipo = cleanString(cita?.tipo_cita).toLowerCase() || 'continuacion';
@@ -607,6 +692,11 @@ async function resolveClinicFallbackTemplate(cita, eventName) {
       if (templateClinicId && templateClinicId === clinicId) score += 100;
       else if (templateGroupId && groupId && templateGroupId === groupId) score += 50;
       else if (template?.is_system) score += 10;
+
+      const catalogBinding = getCatalogBindingForTemplate(template, catalogBindingMap);
+      if (catalogBinding?.is_default_for_trigger && catalogBinding?.is_active !== false) {
+        score += 25;
+      }
 
       if (cleanString(template?.trigger_type) === 'appointment_created') {
         const triggerConfig = getTemplateTriggerConfig(template);
@@ -768,6 +858,9 @@ async function resolveScheduledTemplatesForCita(cita, eventName) {
   }
 
   const { clinicId, groupId, candidates } = await fetchClinicScopedTemplates(cita, eventName);
+  const catalogBindingMap = Array.isArray(candidates) && candidates.length > 1
+    ? await loadCatalogBindingMapForTemplates(candidates)
+    : new Map();
   const byTemplateKey = new Map();
   for (const row of candidates || []) {
     const key = cleanString(row?.template_key);
@@ -790,7 +883,8 @@ async function resolveScheduledTemplatesForCita(cita, eventName) {
       slotKey,
       score: template.id === boundTemplate?.id
         ? 1000
-        : getScopeScoreForTemplate(template, clinicId, groupId),
+        : getScopeScoreForTemplate(template, clinicId, groupId)
+          + (getCatalogBindingForTemplate(template, catalogBindingMap)?.is_default_for_trigger ? 25 : 0),
     };
     const current = bestBySlot.get(slotKey);
     if (!current || candidate.score > current.score || (candidate.score === current.score && Number(template.version || 0) > Number(current.template.version || 0))) {

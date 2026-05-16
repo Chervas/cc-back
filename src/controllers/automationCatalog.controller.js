@@ -209,6 +209,16 @@ function normalizeCatalogTriggerType(raw) {
   return value || null;
 }
 
+function parseBoolOrUndefined(value) {
+  if (typeof value === 'boolean') return value;
+  if (value === undefined) return undefined;
+  if (value === null || value === '') return false;
+  const normalized = String(value).trim().toLowerCase();
+  if (['1', 'true', 'yes', 'y', 'on'].includes(normalized)) return true;
+  if (['0', 'false', 'no', 'n', 'off'].includes(normalized)) return false;
+  return undefined;
+}
+
 function mapNodesToCatalogSteps(nodes) {
   const list = Array.isArray(nodes) ? nodes : [];
   return list.map((node, index) => ({
@@ -218,6 +228,56 @@ function mapNodesToCatalogSteps(nodes) {
     config: {},
     order: index + 1,
   }));
+}
+
+async function validateDefaultForTrigger({ itemId = null, triggerType, isDefault, isActive }) {
+  if (!isDefault) return null;
+
+  const normalizedTriggerType = normalizeCatalogTriggerType(triggerType);
+  if (!isActive) {
+    return {
+      status: 400,
+      body: {
+        error: 'default_requires_active',
+        message: 'Una automatización por defecto debe estar activa',
+      },
+    };
+  }
+  if (!normalizedTriggerType) {
+    return {
+      status: 400,
+      body: {
+        error: 'invalid_trigger_type',
+        message: 'La automatización por defecto necesita un activador válido',
+      },
+    };
+  }
+
+  const where = {
+    trigger_type: normalizedTriggerType,
+    is_default_for_trigger: true,
+  };
+  if (itemId) {
+    where.id = { [Op.ne]: Number(itemId) };
+  }
+
+  const existing = await AutomationFlowCatalog.findOne({
+    where,
+    attributes: ['id', 'display_name', 'name', 'trigger_type'],
+    raw: true,
+  });
+  if (!existing) return null;
+
+  return {
+    status: 409,
+    body: {
+      error: 'default_trigger_conflict',
+      message: `Ya existe una automatización por defecto para ${normalizedTriggerType}`,
+      trigger_type: normalizedTriggerType,
+      existing_catalog_id: existing.id,
+      existing_display_name: existing.display_name || existing.name,
+    },
+  };
 }
 
 async function resolveLinkedTemplateByKey(templateKey) {
@@ -391,6 +451,7 @@ exports.createCatalog = async (req, res) => {
     const template_version = parseIntOrNull(payload.template_version);
     const is_generic = typeof payload.is_generic === 'boolean' ? payload.is_generic : !!payload.isGeneric;
     const is_active = typeof payload.is_active === 'boolean' ? payload.is_active : (typeof payload.isActive === 'boolean' ? payload.isActive : true);
+    const is_default_for_trigger = parseBoolOrUndefined(payload.is_default_for_trigger ?? payload.isDefaultForTrigger) === true;
     const disciplinaCodes = extractDisciplinaCodes(payload);
     const linkedTemplate = await resolveLinkedTemplateForCatalog({
       templateKey: template_key,
@@ -413,6 +474,14 @@ exports.createCatalog = async (req, res) => {
       });
     }
     const steps = mapNodesToCatalogSteps(linkedTemplate.nodes);
+    const defaultValidation = await validateDefaultForTrigger({
+      triggerType: trigger_type,
+      isDefault: is_default_for_trigger,
+      isActive: is_active,
+    });
+    if (defaultValidation) {
+      return res.status(defaultValidation.status).json(defaultValidation.body);
+    }
 
     const item = await AutomationFlowCatalog.create({
       name,
@@ -424,6 +493,7 @@ exports.createCatalog = async (req, res) => {
       template_version: template_version || parseIntOrNull(linkedTemplate?.version),
       is_generic,
       is_active,
+      is_default_for_trigger,
     });
     if (!is_generic && disciplinaCodes.length) {
       const rows = disciplinaCodes.map((code) => ({ flow_catalog_id: item.id, disciplina_code: code }));
@@ -459,6 +529,7 @@ exports.updateCatalog = async (req, res) => {
       : undefined;
     const is_generic = typeof payload.is_generic === 'boolean' ? payload.is_generic : (typeof payload.isGeneric === 'boolean' ? payload.isGeneric : undefined);
     const is_active = typeof payload.is_active === 'boolean' ? payload.is_active : (typeof payload.isActive === 'boolean' ? payload.isActive : undefined);
+    const is_default_for_trigger = parseBoolOrUndefined(payload.is_default_for_trigger ?? payload.isDefaultForTrigger);
     const disciplinaCodes = extractDisciplinaCodes(payload);
     const disciplinesProvided = Object.prototype.hasOwnProperty.call(payload, 'disciplina_codes');
     const effectiveTemplateKey = template_key !== undefined ? template_key : item.template_key;
@@ -487,6 +558,21 @@ exports.updateCatalog = async (req, res) => {
     const nextIsActive = isUnlinkingFlow
       ? false
       : (typeof is_active === 'boolean' ? is_active : item.is_active);
+    const nextIsDefault = isUnlinkingFlow
+      ? false
+      : (typeof is_default_for_trigger === 'boolean'
+          ? is_default_for_trigger
+          : !!item.is_default_for_trigger);
+
+    const defaultValidation = await validateDefaultForTrigger({
+      itemId: item.id,
+      triggerType: trigger_type,
+      isDefault: nextIsDefault,
+      isActive: nextIsActive,
+    });
+    if (defaultValidation) {
+      return res.status(defaultValidation.status).json(defaultValidation.body);
+    }
 
     await item.update({
       name: name ?? item.name,
@@ -500,6 +586,7 @@ exports.updateCatalog = async (req, res) => {
         : null,
       is_generic: typeof is_generic === 'boolean' ? is_generic : item.is_generic,
       is_active: nextIsActive,
+      is_default_for_trigger: nextIsDefault,
     });
     const nextIsGeneric = typeof is_generic === 'boolean' ? is_generic : item.is_generic;
     if (nextIsGeneric || disciplinesProvided) {
@@ -527,6 +614,7 @@ exports.toggleCatalog = async (req, res) => {
       return res.status(404).json({ error: 'catalog_not_found' });
     }
     const next = !item.is_active;
+    const nextIsDefault = next ? !!item.is_default_for_trigger : false;
     if (next) {
       const linkedTemplate = await resolveLinkedTemplateForCatalog({
         templateKey: item.template_key,
@@ -535,8 +623,20 @@ exports.toggleCatalog = async (req, res) => {
       if (!linkedTemplate) {
         return res.status(409).json({ error: 'linked_template_required' });
       }
+      const defaultValidation = await validateDefaultForTrigger({
+        itemId: item.id,
+        triggerType: item.trigger_type,
+        isDefault: nextIsDefault,
+        isActive: next,
+      });
+      if (defaultValidation) {
+        return res.status(defaultValidation.status).json(defaultValidation.body);
+      }
     }
-    await item.update({ is_active: next });
+    await item.update({
+      is_active: next,
+      is_default_for_trigger: nextIsDefault,
+    });
     const linkedTemplate = await resolveLinkedTemplateForCatalog({
       templateKey: item.template_key,
       templateVersion: item.template_version,
@@ -600,6 +700,7 @@ exports.duplicateCatalog = async (req, res) => {
       template_version: duplicatedLinkedTemplate?.version || parseIntOrNull(item.template_version),
       is_generic: !!item.is_generic,
       is_active: false,
+      is_default_for_trigger: false,
     });
 
     const disciplinaCodes = Array.isArray(item.disciplinas)

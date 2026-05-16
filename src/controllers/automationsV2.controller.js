@@ -2173,26 +2173,86 @@ async function loadCatalogBindingMapForRows(rows) {
   }
 
   const catalogRows = await db.AutomationFlowCatalog.findAll({
-    attributes: ['id', 'name', 'display_name', 'template_key', 'template_version', 'is_active'],
+    attributes: [
+      'id',
+      'name',
+      'display_name',
+      'trigger_type',
+      'template_key',
+      'template_version',
+      'is_active',
+      'is_default_for_trigger',
+    ],
     where: {
-      template_key: { [Op.in]: candidateKeys },
+      template_key: { [Op.ne]: null },
     },
     raw: true,
   });
+
+  const catalogRefs = Array.from(
+    new Set(
+      catalogRows
+        .map((row) => cleanString(row?.template_key))
+        .filter(Boolean)
+    )
+  );
+  const sourceRows = catalogRefs.length
+    ? await AutomationFlowTemplateV2.findAll({
+        attributes: ['public_id', 'template_key'],
+        where: {
+          [Op.or]: [
+            { public_id: { [Op.in]: catalogRefs } },
+            { template_key: { [Op.in]: catalogRefs } },
+          ],
+        },
+        order: [['version', 'DESC'], ['id', 'DESC']],
+        raw: true,
+      })
+    : [];
+  const sourceByPublicId = new Map();
+  const sourceByTemplateKey = new Map();
+  for (const row of sourceRows) {
+    const publicId = cleanString(row?.public_id);
+    const templateKey = cleanString(row?.template_key);
+    if (publicId && !sourceByPublicId.has(publicId)) sourceByPublicId.set(publicId, row);
+    if (templateKey && !sourceByTemplateKey.has(templateKey)) sourceByTemplateKey.set(templateKey, row);
+  }
 
   const result = new Map();
   for (const catalogRow of catalogRows) {
     const rawKey = cleanString(catalogRow?.template_key);
     if (!rawKey) continue;
 
-    result.set(rawKey, {
+    const sourceTemplate = sourceByPublicId.get(rawKey) || sourceByTemplateKey.get(rawKey) || null;
+    const keys = Array.from(
+      new Set(
+        [
+          rawKey,
+          stripCatalogClinicScopeSuffixes(rawKey),
+          cleanString(sourceTemplate?.template_key),
+          stripCatalogClinicScopeSuffixes(sourceTemplate?.template_key),
+        ].filter(Boolean)
+      )
+    );
+    if (!keys.some((key) => candidateKeys.includes(key))) {
+      continue;
+    }
+
+    const binding = {
       id: catalogRow.id,
       name: catalogRow.name,
       display_name: catalogRow.display_name,
+      trigger_type: catalogRow.trigger_type,
       template_key: rawKey,
       template_version: parseIntOrNull(catalogRow.template_version),
       is_active: catalogRow.is_active !== false,
-    });
+      is_default_for_trigger: catalogRow.is_default_for_trigger === true || catalogRow.is_default_for_trigger === 1,
+    };
+    for (const key of keys) {
+      if (candidateKeys.includes(key)) {
+        result.set(key, binding);
+      }
+    }
   }
 
   return result;
