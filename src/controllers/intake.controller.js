@@ -2274,11 +2274,11 @@ const resolveSharedWebGroupConfigForClinic = async (clinicId) => {
 
   const group = await GrupoClinica.findOne({
     where: { id_grupo: groupId },
-    attributes: ['id_grupo', 'web_assignment_mode'],
+    attributes: ['id_grupo', 'nombre_grupo', 'web_assignment_mode'],
     raw: true
   });
   if (group?.web_assignment_mode !== 'automatic') {
-    return { clinicRow, groupId, record: null };
+    return { clinicRow, groupId, group, record: null };
   }
 
   const record = await IntakeConfig.findOne({
@@ -2289,6 +2289,7 @@ const resolveSharedWebGroupConfigForClinic = async (clinicId) => {
   return {
     clinicRow,
     groupId,
+    group,
     record: record || null
   };
 };
@@ -2344,6 +2345,7 @@ exports.getIntakeConfig = asyncHandler(async (req, res) => {
   let effectiveClinicId = sharedWebContext?.clinicRow?.id_clinica || record?.clinic_id || clinicIdParsed || null;
   let effectiveGroupId = sharedWebContext?.groupId || record?.group_id || groupIdParsed || null;
   let effectiveClinicRow = sharedWebContext?.clinicRow || null;
+  let effectiveGroupRow = sharedWebContext?.group || null;
   if (!effectiveGroupId && effectiveClinicId) {
     effectiveClinicRow = await Clinica.findOne({
       where: { id_clinica: effectiveClinicId },
@@ -2377,6 +2379,19 @@ exports.getIntakeConfig = asyncHandler(async (req, res) => {
   }
   if (effectiveClinicRow?.nombre_clinica) {
     payload.clinic_name = effectiveClinicRow.nombre_clinica;
+  }
+  if (effectiveGroupId && !effectiveGroupRow) {
+    effectiveGroupRow = await GrupoClinica.findOne({
+      where: { id_grupo: effectiveGroupId },
+      attributes: ['id_grupo', 'nombre_grupo'],
+      raw: true
+    });
+  }
+  if (effectiveGroupRow?.nombre_grupo) {
+    payload.group_name = effectiveGroupRow.nombre_grupo;
+    if (record?.assignment_scope === 'group' || sharedWebContext?.record || groupIdParsed !== null) {
+      payload.clinic_name = effectiveGroupRow.nombre_grupo;
+    }
   }
   if (record) {
     const cfg = record.config || {};
