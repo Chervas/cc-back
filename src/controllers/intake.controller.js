@@ -2256,6 +2256,41 @@ const defaultConfigPayload = (clinicId, groupId) => ({
   config: {}
 });
 
+const normalizeConfiguredLocations = (locations, availableLocations) => {
+  const available = Array.isArray(availableLocations) ? availableLocations : [];
+  const byId = new Map();
+
+  for (const location of available) {
+    const id = location?.id;
+    if (id === undefined || id === null || id === '') continue;
+    byId.set(String(id), location);
+  }
+
+  const configured = Array.isArray(locations) ? locations : [];
+  if (!configured.length) {
+    return available.map((location) => ({
+      id: String(location.id),
+      label: location.label,
+    }));
+  }
+
+  return configured.map((location) => {
+    if (!location || typeof location !== 'object') return location;
+
+    const id = location.id ?? location.value ?? location.clinic_id ?? location.clinica_id;
+    const fresh = id !== undefined && id !== null && id !== '' ? byId.get(String(id)) : null;
+    if (!fresh) return location;
+
+    return {
+      ...location,
+      label: fresh.label || location.label,
+      phone: location.phone || fresh.phone || null,
+      whatsapp: location.whatsapp || fresh.whatsapp || null,
+      address: location.address || fresh.address || null,
+    };
+  });
+};
+
 const resolveSharedWebGroupConfigForClinic = async (clinicId) => {
   const parsedClinicId = parseInteger(clinicId);
   if (parsedClinicId === null) {
@@ -2591,6 +2626,7 @@ exports.getIntakeConfig = asyncHandler(async (req, res) => {
     // No bloquear el snippet por un fallo de soporte UI.
     payload.available_locations = [];
   }
+  payload.locations = normalizeConfiguredLocations(payload.locations, payload.available_locations);
 
   // Estado de apertura + flujos especiales de "clínica cerrada".
   // Si no hay horario estructurado, open_now queda null y el widget mantiene su lógica normal.
