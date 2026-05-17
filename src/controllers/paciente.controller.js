@@ -723,17 +723,39 @@ exports.getPacienteActivity = async (req, res) => {
       const updatedById = Number(cita.updated_by);
       const updatedAt = cita.updated_at ? new Date(cita.updated_at).getTime() : null;
       const createdAt = cita.created_at ? new Date(cita.created_at).getTime() : null;
-      if (!updatedById || !updatedAt || !createdAt || updatedAt <= createdAt) {
+      if (!updatedAt || !createdAt || updatedAt <= createdAt) {
         continue;
       }
 
       const eventTypeByStatus = {
+        info_enviada: 'appointment_info_sent',
         info_confirmada: 'appointment_confirmed',
+        recordatorio_enviado: 'appointment_reminder_sent',
         recordatorio_confirmado: 'appointment_confirmed',
         completada: 'appointment_completed',
         cancelada: 'appointment_cancelled',
         no_asistio: 'appointment_no_show',
         reprogramada: 'appointment_rescheduled',
+      };
+      const titleByStatus = {
+        info_enviada: 'Datos de la cita enviados',
+        info_confirmada: 'Cita confirmada',
+        recordatorio_enviado: 'Recordatorio enviado',
+        recordatorio_confirmado: 'Cita confirmada por el paciente',
+        completada: 'Cita completada',
+        cancelada: 'Cita cancelada',
+        no_asistio: 'Paciente no acude',
+        reprogramada: 'Cita reprogramada',
+      };
+      const iconByStatus = {
+        info_enviada: 'heroicons_outline:paper-airplane',
+        info_confirmada: 'heroicons_outline:check-badge',
+        recordatorio_enviado: 'heroicons_outline:bell-alert',
+        recordatorio_confirmado: 'heroicons_outline:hand-thumb-up',
+        completada: 'heroicons_outline:check',
+        cancelada: 'heroicons_outline:x-circle',
+        no_asistio: 'heroicons_outline:hand-thumb-down',
+        reprogramada: 'heroicons_outline:arrow-path-rounded-square',
       };
       const eventType = eventTypeByStatus[cita.estado];
       if (!eventType) {
@@ -752,11 +774,13 @@ exports.getPacienteActivity = async (req, res) => {
         pacienteId: String(pacienteId),
         fecha: cita.updated_at,
         tipo: eventType,
-        titulo: 'Estado de cita actualizado',
+        titulo: titleByStatus[cita.estado] || 'Estado de cita actualizado',
         descripcion: updatedDescriptions.plain,
         descripcion_html: updatedDescriptions.html,
-        icono: 'heroicons_outline:check-badge',
-        color: ['cancelada', 'no_asistio'].includes(cita.estado) ? 'warning' : 'success',
+        icono: iconByStatus[cita.estado] || 'heroicons_outline:check-badge',
+        color: ['cancelada', 'no_asistio'].includes(cita.estado)
+          ? 'warning'
+          : (['info_enviada', 'recordatorio_enviado', 'reprogramada'].includes(cita.estado) ? 'info' : 'success'),
         citaId: String(cita.id_cita),
         usuarioId: updatedByUser ? String(updatedByUser.id_usuario) : 'system',
         usuarioNombre: buildActorLabel(updatedByUser),

@@ -48,6 +48,18 @@ exports.updateAdminTemplate = asyncHandler(async (req, res) => {
     }
 });
 
+exports.propagateAdminTemplate = asyncHandler(async (req, res) => {
+    try {
+        const result = await consentimientosService.propagateAdminTemplateToClinics(req.params.id, {
+            ...(req.body || {}),
+            userId: getUserId(req),
+        });
+        return res.json(result);
+    } catch (error) {
+        return sendError(res, error);
+    }
+});
+
 exports.listClinicTemplates = asyncHandler(async (req, res) => {
     try {
         const items = await consentimientosService.listClinicTemplates(req.query || {});

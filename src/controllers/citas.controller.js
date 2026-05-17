@@ -1573,6 +1573,41 @@ exports.getCitaById = asyncHandler(async (req, res) => {
     });
 });
 
+exports.updateCitaNota = asyncHandler(async (req, res) => {
+    const { id } = req.params;
+    const citaId = Number(id);
+    if (!Number.isFinite(citaId) || citaId <= 0) {
+        return res.status(400).json({ message: 'id inválido' });
+    }
+
+    const cita = await CitaPaciente.findByPk(citaId);
+    if (!cita) {
+        return res.status(404).json({ message: 'Cita no encontrada' });
+    }
+
+    cita.nota = req.body?.nota == null ? null : String(req.body.nota).trim() || null;
+    cita.updated_by = req.userData?.userId || null;
+    await cita.save();
+
+    const citaActualizada = await CitaPaciente.findByPk(citaId, {
+        include: [
+            { model: Paciente, as: 'paciente' },
+            { model: LeadIntake, as: 'lead' },
+            { model: Clinica, as: 'clinica', attributes: ['id_clinica', 'nombre_clinica', ['grupoClinicaId', 'grupo_clinica_id']] },
+            { model: Instalacion, as: 'instalacion', required: false },
+            { model: Tratamiento, as: 'tratamiento', required: false },
+            db.Usuario ? { model: db.Usuario, as: 'doctor', required: false } : null,
+            Campana ? { model: Campana, as: 'campana' } : null
+        ].filter(Boolean)
+    });
+
+    await attachFlowSummaryToCitas(citaActualizada);
+    await attachUnreadCountsToCitas(citaActualizada, req.userData?.userId || null);
+    await consentimientosService.attachConsentSummaryToCitas(citaActualizada);
+    emitAppointmentSocketEvent('appointment:updated', citaActualizada?.toJSON ? citaActualizada.toJSON() : citaActualizada);
+    return res.json(citaActualizada);
+});
+
 /**
  * Obtener la próxima cita de un paciente en una clínica
  */

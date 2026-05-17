@@ -301,6 +301,7 @@ exports.listConversations = async (req, res) => {
   try {
     const userId = req.userData?.userId;
     const { clinic_id, filter, channel } = req.query;
+    const searchQuery = String(req.query.q || req.query.search || '').trim();
     const patientId = req.query.patient_id ? Number(req.query.patient_id) : null;
     const leadId = req.query.lead_id ? Number(req.query.lead_id) : null;
     const limit = Math.min(100, Math.max(20, Number.parseInt(req.query.limit || '50', 10) || 50));
@@ -411,6 +412,25 @@ exports.listConversations = async (req, res) => {
       where.patient_id = patientId;
     } else if (leadId) {
       where.lead_id = leadId;
+    }
+
+    if (searchQuery) {
+      const like = `%${searchQuery.replace(/[%_]/g, '\\$&')}%`;
+      where[Op.and] = [
+        ...(where[Op.and] || []),
+        {
+          [Op.or]: [
+            { contact_id: { [Op.like]: like } },
+            { '$paciente.nombre$': { [Op.like]: like } },
+            { '$paciente.apellidos$': { [Op.like]: like } },
+            { '$paciente.telefono_movil$': { [Op.like]: like } },
+            { '$paciente.email$': { [Op.like]: like } },
+            { '$lead.nombre$': { [Op.like]: like } },
+            { '$lead.telefono$': { [Op.like]: like } },
+            { '$lead.email$': { [Op.like]: like } },
+          ],
+        },
+      ];
     }
 
     const conversationsPlusOne = await Conversation.findAll({

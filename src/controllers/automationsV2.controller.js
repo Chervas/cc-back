@@ -794,6 +794,10 @@ const APPOINTMENT_CREATED_WITHOUT_TREATMENT_TYPES = new Set([
   'urgencia',
   'revision',
 ]);
+const APPOINTMENT_CREATED_TREATMENT_FILTER_VALUES = new Set([
+  'all',
+  'specific',
+]);
 const APPOINTMENT_CREATED_DAY_PROXIMITY_FILTER_VALUES = new Set([
   'all',
   'exclude_day_before',
@@ -1401,6 +1405,26 @@ function normalizeTriggerConfigForTemplate({ triggerType, entryNodeId, nodes }) 
     };
   }
 
+  let treatmentFilter = cleanString(rawConfig.treatment_filter || 'all').toLowerCase() || 'all';
+  if (!APPOINTMENT_CREATED_TREATMENT_FILTER_VALUES.has(treatmentFilter)) {
+    treatmentFilter = 'all';
+  }
+  const treatmentIds = Array.isArray(rawConfig.treatment_ids)
+    ? Array.from(new Set(rawConfig.treatment_ids
+        .map((value) => parseIntOrNull(value))
+        .filter((value) => Number.isInteger(value) && value > 0)))
+    : [];
+  if (appointmentScope !== 'with_treatment') {
+    treatmentFilter = 'all';
+  }
+  if (treatmentFilter === 'specific' && treatmentIds.length === 0) {
+    return {
+      ok: false,
+      error: 'invalid_trigger_config',
+      message: 'Selecciona al menos un tratamiento para una automatización de cita con tratamientos específicos.',
+    };
+  }
+
   const dayProximityFilter = normalizeAppointmentCreatedDayProximityFilter(
     rawConfig.day_proximity_filter,
     rawConfig.min_hours_before_start,
@@ -1421,9 +1445,57 @@ function normalizeTriggerConfigForTemplate({ triggerType, entryNodeId, nodes }) 
     trigger_config: {
       appointment_scope: appointmentScope,
       appointment_type_without_treatment: appointmentTypeWithoutTreatment,
+      treatment_filter: treatmentFilter,
+      treatment_ids: treatmentFilter === 'specific' ? treatmentIds : [],
       day_proximity_filter: dayProximityFilter,
     },
   };
+}
+
+function getSpecificAppointmentTreatmentIds(triggerConfig) {
+  if (!isObject(triggerConfig)) return [];
+  const scope = cleanString(triggerConfig.appointment_scope || 'all');
+  const treatmentFilter = cleanString(triggerConfig.treatment_filter || 'all');
+  if (scope !== 'with_treatment' || treatmentFilter !== 'specific') return [];
+  return Array.isArray(triggerConfig.treatment_ids)
+    ? Array.from(new Set(triggerConfig.treatment_ids
+        .map((value) => parseIntOrNull(value))
+        .filter((value) => Number.isInteger(value) && value > 0)))
+    : [];
+}
+
+function isSameAutomationScope(a, b) {
+  return (parseIntOrNull(a?.clinic_id) || null) === (parseIntOrNull(b?.clinic_id) || null)
+    && (parseIntOrNull(a?.group_id) || null) === (parseIntOrNull(b?.group_id) || null)
+    && Boolean(a?.is_system) === Boolean(b?.is_system);
+}
+
+async function findAppointmentCreatedTreatmentConflict(row, triggerConfig) {
+  const treatmentIds = getSpecificAppointmentTreatmentIds(triggerConfig);
+  if (!treatmentIds.length) return null;
+  const treatmentIdSet = new Set(treatmentIds);
+  const publicId = cleanString(row?.public_id);
+  const templateKey = cleanString(row?.template_key);
+
+  const candidates = await AutomationFlowTemplateV2.findAll({
+    where: {
+      trigger_type: 'appointment_created',
+      is_active: true,
+      published_at: { [Op.ne]: null },
+      id: { [Op.ne]: row.id },
+    },
+    attributes: ['id', 'name', 'template_key', 'public_id', 'clinic_id', 'group_id', 'is_system', 'trigger_config'],
+    raw: true,
+  });
+
+  return (candidates || []).find((candidate) => {
+    if (publicId && cleanString(candidate.public_id) === publicId) return false;
+    if (!publicId && templateKey && cleanString(candidate.template_key) === templateKey) return false;
+    if (!isSameAutomationScope(candidate, row)) return false;
+
+    const candidateTreatmentIds = getSpecificAppointmentTreatmentIds(candidate.trigger_config);
+    return candidateTreatmentIds.some((id) => treatmentIdSet.has(id));
+  }) || null;
 }
 
 function applyTriggerConfigToNodes({ triggerType, entryNodeId, nodes, triggerConfig }) {
@@ -1438,6 +1510,8 @@ function applyTriggerConfigToNodes({ triggerType, entryNodeId, nodes, triggerCon
       appointment_scope: cleanString(triggerConfig.appointment_scope || 'all').toLowerCase() || 'all',
       appointment_type_without_treatment:
         cleanString(triggerConfig.appointment_type_without_treatment || 'any').toLowerCase() || 'any',
+      treatment_filter: cleanString(triggerConfig.treatment_filter || 'all').toLowerCase() || 'all',
+      treatment_ids: Array.isArray(triggerConfig.treatment_ids) ? triggerConfig.treatment_ids : [],
       day_proximity_filter: normalizeAppointmentCreatedDayProximityFilter(
         triggerConfig.day_proximity_filter,
         triggerConfig.min_hours_before_start,
@@ -2099,26 +2173,86 @@ async function loadCatalogBindingMapForRows(rows) {
   }
 
   const catalogRows = await db.AutomationFlowCatalog.findAll({
-    attributes: ['id', 'name', 'display_name', 'template_key', 'template_version', 'is_active'],
+    attributes: [
+      'id',
+      'name',
+      'display_name',
+      'trigger_type',
+      'template_key',
+      'template_version',
+      'is_active',
+      'is_default_for_trigger',
+    ],
     where: {
-      template_key: { [Op.in]: candidateKeys },
+      template_key: { [Op.ne]: null },
     },
     raw: true,
   });
+
+  const catalogRefs = Array.from(
+    new Set(
+      catalogRows
+        .map((row) => cleanString(row?.template_key))
+        .filter(Boolean)
+    )
+  );
+  const sourceRows = catalogRefs.length
+    ? await AutomationFlowTemplateV2.findAll({
+        attributes: ['public_id', 'template_key'],
+        where: {
+          [Op.or]: [
+            { public_id: { [Op.in]: catalogRefs } },
+            { template_key: { [Op.in]: catalogRefs } },
+          ],
+        },
+        order: [['version', 'DESC'], ['id', 'DESC']],
+        raw: true,
+      })
+    : [];
+  const sourceByPublicId = new Map();
+  const sourceByTemplateKey = new Map();
+  for (const row of sourceRows) {
+    const publicId = cleanString(row?.public_id);
+    const templateKey = cleanString(row?.template_key);
+    if (publicId && !sourceByPublicId.has(publicId)) sourceByPublicId.set(publicId, row);
+    if (templateKey && !sourceByTemplateKey.has(templateKey)) sourceByTemplateKey.set(templateKey, row);
+  }
 
   const result = new Map();
   for (const catalogRow of catalogRows) {
     const rawKey = cleanString(catalogRow?.template_key);
     if (!rawKey) continue;
 
-    result.set(rawKey, {
+    const sourceTemplate = sourceByPublicId.get(rawKey) || sourceByTemplateKey.get(rawKey) || null;
+    const keys = Array.from(
+      new Set(
+        [
+          rawKey,
+          stripCatalogClinicScopeSuffixes(rawKey),
+          cleanString(sourceTemplate?.template_key),
+          stripCatalogClinicScopeSuffixes(sourceTemplate?.template_key),
+        ].filter(Boolean)
+      )
+    );
+    if (!keys.some((key) => candidateKeys.includes(key))) {
+      continue;
+    }
+
+    const binding = {
       id: catalogRow.id,
       name: catalogRow.name,
       display_name: catalogRow.display_name,
+      trigger_type: catalogRow.trigger_type,
       template_key: rawKey,
       template_version: parseIntOrNull(catalogRow.template_version),
       is_active: catalogRow.is_active !== false,
-    });
+      is_default_for_trigger: catalogRow.is_default_for_trigger === true || catalogRow.is_default_for_trigger === 1,
+    };
+    for (const key of keys) {
+      if (candidateKeys.includes(key)) {
+        result.set(key, binding);
+      }
+    }
   }
 
   return result;
@@ -4774,6 +4908,20 @@ exports.publishTemplateVersion = async (req, res) => {
         success: false,
         error: 'validation_failed',
         validation_errors: validationErrors,
+      });
+    }
+
+    const treatmentConflict = await findAppointmentCreatedTreatmentConflict(row, triggerConfigResolution.trigger_config);
+    if (treatmentConflict) {
+      return res.status(409).json({
+        success: false,
+        error: 'appointment_treatment_trigger_conflict',
+        message: `Ya existe una automatización activa para ese tratamiento: ${treatmentConflict.name || treatmentConflict.template_key}. Desactívala o elimínala antes de publicar otra.`,
+        conflict: {
+          id: treatmentConflict.id,
+          template_key: treatmentConflict.template_key,
+          name: treatmentConflict.name,
+        },
       });
     }
 

@@ -27,6 +27,7 @@ const STATUS_VALUES = new Set(['draft', 'active', 'archived']);
 const VERSION_STATUS_VALUES = new Set(['draft', 'published', 'archived']);
 const BLOCKING_VALUES = new Set(['hard', 'soft', 'optional']);
 const VALIDITY_VALUES = new Set(['single_act', 'treatment_episode', 'treatment_plan', 'until_date', 'manual']);
+const SIGNING_TIMING_VALUES = new Set(['first_visit', 'before_treatment', 'at_treatment', 'before_each_session', 'at_least_24h_before', 'manual']);
 const DOCUMENT_CLOSED_STATUSES = new Set(['signed', 'rejected', 'revoked', 'expired', 'cancelled', 'superseded', 'voided']);
 const DOCUMENT_PENDING_STATUSES = new Set(['pending', 'sent', 'viewed']);
 const CHANNEL_VALUES = new Set(['tablet', 'email', 'whatsapp', 'internal']);
@@ -36,6 +37,39 @@ const KIOSK_TOKEN_TTL = process.env.CONSENT_KIOSK_TOKEN_TTL || '30d';
 const DEFAULT_LINK_TTL_HOURS = Number.parseInt(process.env.CONSENT_LINK_TTL_HOURS || '168', 10);
 const DEFAULT_SURGICAL_MIN_HOURS = Number.parseInt(process.env.CONSENT_SURGICAL_MIN_HOURS || '24', 10);
 const DEFAULT_CHROMIUM_PATH = '/home/ubuntu/.cache/clinicaclick-browsers/chrome-headless-shell/linux-148.0.7778.56/chrome-headless-shell-linux64/chrome-headless-shell';
+
+const SIGNING_TIMING_META = {
+    first_visit: {
+        label: 'Primera cita',
+        recommendation: 'Solicita la firma en la primera cita o alta del paciente.',
+        priority: 20,
+    },
+    before_treatment: {
+        label: 'Antes del tratamiento',
+        recommendation: 'Solicita la firma antes de iniciar el tratamiento.',
+        priority: 60,
+    },
+    at_treatment: {
+        label: 'Al realizar el tratamiento',
+        recommendation: 'Solicita la firma el mismo día, antes de empezar el acto clínico.',
+        priority: 50,
+    },
+    before_each_session: {
+        label: 'Antes de cada sesión',
+        recommendation: 'Solicita la firma antes de cada sesión del tratamiento.',
+        priority: 70,
+    },
+    at_least_24h_before: {
+        label: '24h antes',
+        recommendation: 'Solicita la firma al menos 24 horas antes del tratamiento.',
+        priority: 90,
+    },
+    manual: {
+        label: 'Manual',
+        recommendation: 'El equipo debe decidir cuándo pedir la firma según el caso.',
+        priority: 10,
+    },
+};
 
 function toIntOrNull(value) {
     if (value === undefined || value === null || value === '') return null;
@@ -52,6 +86,68 @@ function toCleanString(value) {
 function normalizeEnum(value, allowed, fallback) {
     const cleaned = toCleanString(value);
     return cleaned && allowed.has(cleaned) ? cleaned : fallback;
+}
+
+function parseJsonObject(value) {
+    if (!value) return {};
+    if (typeof value === 'object' && !Array.isArray(value)) return value;
+    try {
+        const parsed = JSON.parse(String(value));
+        return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
+    } catch {
+        return {};
+    }
+}
+
+function defaultSigningTimingForPurpose(purpose) {
+    if (['data_protection', 'commercial_communications', 'marketing_image'].includes(String(purpose || ''))) {
+        return 'first_visit';
+    }
+    return 'before_treatment';
+}
+
+function normalizeSigningTiming(value, fallback = 'before_treatment') {
+    const cleaned = toCleanString(value);
+    return cleaned && SIGNING_TIMING_VALUES.has(cleaned) ? cleaned : fallback;
+}
+
+function getSigningPolicyFromVersion(version = {}, template = {}) {
+    const schema = parseJsonObject(version?.variable_schema);
+    const clinicalPolicy = parseJsonObject(schema.clinical_policy);
+    const signingTiming = parseJsonObject(schema.signing_timing);
+    const fallback = defaultSigningTimingForPurpose(template?.purpose);
+    const mode = normalizeSigningTiming(
+        (typeof schema.signing_timing === 'string' ? schema.signing_timing : null)
+        || signingTiming.mode
+        || clinicalPolicy.signing_timing
+        || clinicalPolicy.due_policy,
+        fallback
+    );
+    const meta = SIGNING_TIMING_META[mode] || SIGNING_TIMING_META.before_treatment;
+    const configuredHours = Number.parseInt(
+        String(clinicalPolicy.recommended_min_hours_before || signingTiming.recommended_min_hours_before || ''),
+        10
+    );
+    const recommendedMinHours = Number.isFinite(configuredHours) && configuredHours > 0
+        ? configuredHours
+        : (mode === 'at_least_24h_before' ? DEFAULT_SURGICAL_MIN_HOURS : null);
+    return {
+        due_policy: mode,
+        signing_timing: mode,
+        signing_timing_label: meta.label,
+        recommendation: meta.recommendation,
+        recommended_min_hours_before: recommendedMinHours,
+        priority: meta.priority,
+    };
+}
+
+function pickSigningPolicy(policies = []) {
+    const validPolicies = policies.filter(Boolean);
+    if (!validPolicies.length) {
+        return getSigningPolicyFromVersion({}, { purpose: 'clinical' });
+    }
+    return validPolicies
+        .sort((a, b) => Number(b.priority || 0) - Number(a.priority || 0))[0];
 }
 
 function normalizeBoolean(value, fallback = false) {
@@ -249,6 +345,13 @@ function getTabletBaseUrl() {
         || 'https://tablet.clinicaclick.com';
 }
 
+function getDocumentAssetBaseUrl() {
+    return (toCleanString(process.env.CONSENT_DOCUMENT_ASSET_BASE_URL)
+        || toCleanString(process.env.FRONTEND_PUBLIC_URL)
+        || toCleanString(process.env.FRONTEND_URL)
+        || 'http://localhost:4203').replace(/\/+$/, '');
+}
+
 function buildPublicConsentUrl(token, baseUrl = null) {
     const resolvedBaseUrl = toCleanString(baseUrl) || getTabletBaseUrl();
     return `${resolvedBaseUrl.replace(/\/+$/, '')}/tablet/consentimientos/${encodeURIComponent(token)}`;
@@ -399,32 +502,84 @@ function buildPrintableHtml(documentRow) {
     const appointment = snapshot.context?.cita || {};
     const professional = snapshot.context?.profesional || {};
     const safeHtml = doc.snapshot_html || '';
+    const roleLabel = (role) => {
+        if (role === 'representative') return 'Representante legal';
+        if (role === 'professional') return 'Profesional';
+        return 'Paciente';
+    };
+    const methodLabel = (method) => {
+        const value = String(method || '');
+        if (value.includes('tablet')) return 'Firma en tablet';
+        if (value.includes('whatsapp')) return 'Firma desde enlace WhatsApp';
+        if (value.includes('email')) return 'Firma desde enlace email';
+        if (value.includes('professional')) return 'Confirmación profesional';
+        return 'Firma digital';
+    };
+    const statusLabel = (status) => ({
+        pending: 'Pendiente',
+        sent: 'Enviado',
+        viewed: 'Visto',
+        signed: 'Firmado',
+        revoked: 'Revocado',
+        rejected: 'Rechazado',
+        expired: 'Caducado',
+        cancelled: 'Cancelado',
+        superseded: 'Sustituido',
+        voided: 'Anulado',
+    }[status] || status || 'Sin estado');
+    const brandLogo = `<img class="brand-logo" alt="ClinicaClick" src="${escapeHtml(getDocumentAssetBaseUrl())}/assets/images/logo/logo-text-on-dark.svg" />`;
     const signatureBlock = evidence ? `
-        <section class="evidence">
-            <h2>Evidencia de firma</h2>
-            <dl>
-                <div><dt>Firmante</dt><dd>${escapeHtml(evidence.signer_name || patient.nombre_completo || 'Paciente')}</dd></div>
-                <div><dt>Rol</dt><dd>${escapeHtml(evidence.signer_role || 'patient')}</dd></div>
-                <div><dt>Fecha</dt><dd>${escapeHtml(formatDateTime(evidence.signed_at || doc.signed_at))}</dd></div>
-                <div><dt>Método</dt><dd>${escapeHtml(evidence.method || 'tablet_signature')}</dd></div>
-                ${evidence.ip ? `<div><dt>IP</dt><dd>${escapeHtml(evidence.ip)}</dd></div>` : ''}
-            </dl>
-            ${evidence.signature_data_url ? `<img class="signature" src="${evidence.signature_data_url}" alt="Firma" />` : ''}
+        <section class="evidence-panel">
+            <div class="section-heading">
+                <div>
+                    <div class="eyebrow">Evidencia</div>
+                    <h2>Firma del paciente</h2>
+                </div>
+                <span class="status-chip">Firmado</span>
+            </div>
+            <div class="signature-layout">
+                <dl class="detail-grid">
+                    <div><dt>Firmante</dt><dd>${escapeHtml(evidence.signer_name || patient.nombre_completo || 'Paciente')}</dd></div>
+                    <div><dt>Rol</dt><dd>${escapeHtml(roleLabel(evidence.signer_role))}</dd></div>
+                    <div><dt>Fecha</dt><dd>${escapeHtml(formatDateTime(evidence.signed_at || doc.signed_at))}</dd></div>
+                    <div><dt>Método</dt><dd>${escapeHtml(methodLabel(evidence.method || 'tablet_signature'))}</dd></div>
+                    ${evidence.ip ? `<div><dt>IP</dt><dd>${escapeHtml(evidence.ip)}</dd></div>` : ''}
+                    ${evidence.relationship ? `<div><dt>Relación</dt><dd>${escapeHtml(evidence.relationship)}</dd></div>` : ''}
+                </dl>
+                ${evidence.signature_data_url ? `
+                    <figure class="signature-card">
+                        <img class="signature" src="${evidence.signature_data_url}" alt="Firma" />
+                        <figcaption>Firma manuscrita capturada</figcaption>
+                    </figure>
+                ` : ''}
+            </div>
         </section>
     ` : '';
     const professionalSignatureBlock = professionalEvidence ? `
-        <section class="evidence">
-            <h2>Firma del profesional</h2>
-            <dl>
+        <section class="evidence-panel professional">
+            <div class="section-heading">
+                <div>
+                    <div class="eyebrow">Evidencia</div>
+                    <h2>Firma del profesional</h2>
+                </div>
+                <span class="status-chip slate">Validado</span>
+            </div>
+            <dl class="detail-grid">
                 <div><dt>Profesional</dt><dd>${escapeHtml(professionalEvidence.professional_name || professional.nombre || 'Profesional')}</dd></div>
                 <div><dt>Fecha</dt><dd>${escapeHtml(formatDateTime(professionalEvidence.signed_at || doc.professional_signed_at))}</dd></div>
-                <div><dt>Método</dt><dd>${escapeHtml(professionalEvidence.method || 'professional_confirmation')}</dd></div>
+                <div><dt>Método</dt><dd>${escapeHtml(methodLabel(professionalEvidence.method || 'professional_confirmation'))}</dd></div>
             </dl>
         </section>
     ` : '';
     const revocationBlock = revocation ? `
-        <section class="evidence warning">
-            <h2>Revocación</h2>
+        <section class="evidence-panel warning">
+            <div class="section-heading">
+                <div>
+                    <div class="eyebrow">Estado</div>
+                    <h2>Revocación</h2>
+                </div>
+                <span class="status-chip red">Revocado</span>
+            </div>
             <p>Revocado el ${escapeHtml(formatDateTime(revocation.revoked_at || doc.revoked_at))}. Motivo: ${escapeHtml(revocation.reason || 'No indicado')}.</p>
         </section>
     ` : '';
@@ -436,46 +591,154 @@ function buildPrintableHtml(documentRow) {
   <title>${escapeHtml(doc.title || 'Consentimiento')}</title>
   <style>
     :root { color-scheme: light; }
-    body { font-family: Inter, Arial, sans-serif; color: #111827; margin: 0; background: #f8fafc; }
-    main { max-width: 820px; margin: 0 auto; padding: 32px 24px 56px; background: #fff; min-height: 100vh; box-sizing: border-box; }
-    header { border-bottom: 1px solid #e5e7eb; margin-bottom: 24px; padding-bottom: 16px; }
-    h1 { font-size: 26px; margin: 0 0 8px; line-height: 1.2; }
-    h2 { font-size: 17px; margin: 24px 0 10px; }
+    * { box-sizing: border-box; }
+    body { font-family: Inter, Arial, sans-serif; color: #111827; margin: 0; background: #f1f5f9; text-align: center; }
+    .preview-shell { display: inline-block; padding: 32px 24px 56px; text-align: left; }
+    main { width: 960px; max-width: calc(100vw - 48px); margin: 0 auto; padding: 64px; background: #fff; border-radius: 18px; box-shadow: 0 16px 40px rgba(15, 23, 42, 0.12); }
+    header { border-bottom: 1px solid #e5e7eb; margin-bottom: 36px; padding-bottom: 28px; }
+    .document-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 32px; margin-bottom: 32px; }
+    .document-kicker { color: #64748b; font-size: 12px; font-weight: 800; letter-spacing: 0.12em; text-transform: uppercase; }
+    .document-title { color: #111827; font-size: 34px; font-weight: 700; line-height: 1.05; letter-spacing: -0.02em; margin-top: 5px; }
+    .document-id { color: #64748b; font-size: 12px; line-height: 1.45; margin-top: 8px; max-width: 520px; overflow-wrap: anywhere; }
+    .status-box { min-width: 150px; border: 1px solid #e2e8f0; border-radius: 12px; padding: 12px 16px; text-align: right; }
+    .status-box dt { color: #64748b; font-size: 11px; font-weight: 800; letter-spacing: 0.08em; text-transform: uppercase; }
+    .status-box dd { color: #111827; font-size: 18px; font-weight: 800; margin-top: 3px; }
+    .header-grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) minmax(220px, 0.82fr); gap: 26px; align-items: start; }
+    .info-card, .summary-list { border-left: 1px solid #e5e7eb; padding-left: 20px; min-height: 92px; }
+    .info-title { color: #64748b; font-size: 12px; font-weight: 800; letter-spacing: 0.08em; text-transform: uppercase; margin-bottom: 10px; }
+    .info-copy { color: #475569; font-size: 13px; line-height: 1.55; }
+    .info-copy .strong { color: #111827; font-weight: 800; }
+    .summary-list { display: grid; gap: 10px; margin: 0; }
+    .summary-list div { display: grid; grid-template-columns: 88px minmax(0, 1fr); gap: 12px; align-items: baseline; }
+    .summary-list dt { color: #64748b; font-size: 11px; font-weight: 800; letter-spacing: 0.06em; text-transform: uppercase; }
+    .summary-list dd { color: #111827; font-size: 14px; font-weight: 800; overflow-wrap: anywhere; }
+    h1 { font-size: 28px; margin: 0 0 8px; line-height: 1.18; letter-spacing: -0.01em; }
+    h2 { font-size: 17px; margin: 0; }
     p, li { font-size: 14px; line-height: 1.65; }
-    .meta { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px 18px; color: #4b5563; font-size: 13px; margin-top: 14px; }
-    .meta span, dl div { display: flex; gap: 6px; }
-    .meta b, dt { color: #111827; font-weight: 700; }
-    dt { min-width: 120px; }
+    .content { margin-top: 0; }
+    .content h1, .content h2 { margin: 24px 0 10px; }
+    .evidence-panel { border: 1px solid #e2e8f0; border-top: 4px solid #334155; background: #f8fafc; border-radius: 12px; padding: 22px; margin-top: 40px; box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04); }
+    .evidence-panel.professional { border-top-color: #475569; }
+    .evidence-panel.warning { border-color: #fecaca; border-top-color: #b91c1c; background: #fff7f7; }
+    .section-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 18px; margin-bottom: 18px; }
+    .eyebrow { color: #64748b; font-size: 11px; font-weight: 800; letter-spacing: 0.08em; text-transform: uppercase; margin-bottom: 4px; }
+    .status-chip { display: inline-flex; align-items: center; min-height: 26px; border-radius: 999px; background: #0f172a; color: #fff; padding: 4px 12px; font-size: 12px; font-weight: 700; }
+    .status-chip.slate { background: #334155; }
+    .status-chip.red { background: #991b1b; }
+    .signature-layout { display: grid; grid-template-columns: minmax(0, 1fr) 300px; gap: 24px; align-items: start; }
+    .detail-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px 22px; margin: 0; }
+    .detail-grid div { min-width: 0; }
+    dt { color: #64748b; font-size: 11px; font-weight: 800; letter-spacing: 0.04em; text-transform: uppercase; }
     dd { margin: 0; }
-    .content { margin-top: 22px; }
-    .evidence { border: 1px solid #d1fae5; background: #ecfdf5; border-radius: 8px; padding: 16px; margin-top: 28px; }
-    .warning { border-color: #fecaca; background: #fef2f2; }
-    .signature { display: block; max-width: 320px; max-height: 120px; margin-top: 12px; border: 1px solid #d1d5db; background: #fff; }
-    footer { margin-top: 28px; padding-top: 14px; border-top: 1px solid #e5e7eb; color: #6b7280; font-size: 12px; }
-    @media print { body { background: #fff; } main { padding: 0; } }
+    .detail-grid dd { color: #0f172a; font-size: 14px; font-weight: 600; margin-top: 3px; overflow-wrap: anywhere; }
+    .signature-card { margin: 0; border: 1px solid #e5e7eb; background: #fff; border-radius: 10px; padding: 12px; }
+    .signature { display: block; width: 100%; max-height: 112px; object-fit: contain; }
+    figcaption { margin-top: 8px; color: #64748b; font-size: 11px; text-align: center; }
+    footer { display: flex; align-items: center; justify-content: space-between; gap: 20px; margin-top: 34px; padding-top: 16px; border-top: 1px solid #e5e7eb; color: #64748b; font-size: 12px; }
+    .footer-meta { min-width: 0; overflow-wrap: anywhere; }
+    .brand-lockup { display: inline-flex; align-items: center; white-space: nowrap; }
+    .brand-logo { display: block; width: 116px; height: auto; filter: brightness(0); }
+    @media screen and (max-width: 780px) {
+      .preview-shell { display: block; padding: 0; }
+      main { width: 100%; max-width: none; min-height: 100vh; border-radius: 0; padding: 28px 20px 40px; box-shadow: none; }
+      .document-heading { display: grid; gap: 18px; }
+      .document-title { font-size: 28px; }
+      .status-box { text-align: left; }
+      .header-grid, .signature-layout { grid-template-columns: 1fr; display: grid; }
+      .detail-grid { grid-template-columns: 1fr; }
+      footer { align-items: flex-start; flex-direction: column; }
+    }
+    @media print {
+      @page { size: A4; margin: 14mm; }
+      body { background: #fff; text-align: left; }
+      .preview-shell { display: block; padding: 0; }
+      main { width: auto; max-width: none; padding: 0; border-radius: 0; box-shadow: none; }
+      header, .evidence-panel { break-inside: avoid; page-break-inside: avoid; }
+      header { margin-bottom: 24px; padding-bottom: 18px; }
+      .document-heading { display: grid; grid-template-columns: minmax(0, 1fr) 104px; gap: 18px; align-items: start; margin-bottom: 20px; }
+      .document-kicker { font-size: 9.5px; letter-spacing: 0.1em; }
+      .document-title { font-size: 25px; line-height: 1; margin-top: 3px; }
+      .document-id { max-width: none; font-size: 9.5px; margin-top: 6px; }
+      .status-box { min-width: 0; border-radius: 7px; padding: 7px 9px; text-align: right; }
+      .status-box dt { font-size: 8.5px; }
+      .status-box dd { font-size: 13px; }
+      .header-grid { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 14px 20px; }
+      .info-card { min-height: 0; padding-left: 12px; }
+      .info-title, .summary-list dt { font-size: 9px; margin-bottom: 6px; }
+      .info-copy, .summary-list dd { font-size: 11px; line-height: 1.35; }
+      .summary-list { grid-column: 1 / -1; display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 20px; border-left: 0; padding-left: 0; min-height: 0; }
+      .summary-list div { border-left: 1px solid #e5e7eb; padding-left: 12px; grid-template-columns: max-content minmax(0, 1fr); gap: 12px; }
+      .summary-list dt { margin-bottom: 0; }
+      h1 { font-size: 22px; line-height: 1.15; }
+      h2 { font-size: 14px; }
+      p, li { font-size: 11.5px; line-height: 1.5; }
+      .content h1, .content h2 { margin: 18px 0 8px; }
+      .evidence-panel { border: 1px solid #d8dee8; border-top-width: 1px; background: #fff; border-radius: 7px; box-shadow: none; padding: 11px 12px; margin-top: 20px; }
+      .evidence-panel.warning { background: #fff; border-color: #e5b4b4; }
+      .section-heading { align-items: center; margin-bottom: 10px; }
+      .eyebrow { font-size: 8.5px; margin-bottom: 2px; }
+      .status-chip { min-height: 18px; border: 1px solid #cbd5e1; background: #fff; color: #111827; padding: 1px 7px; font-size: 9px; }
+      .status-chip.slate, .status-chip.red { background: #fff; color: #111827; }
+      .signature-layout { grid-template-columns: minmax(0, 1fr) 170px; gap: 12px; align-items: center; }
+      .detail-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px 12px; }
+      dt { font-size: 8.5px; }
+      .detail-grid dd { font-size: 10.5px; margin-top: 1px; }
+      .signature-card { border-radius: 5px; padding: 6px; }
+      .signature { max-height: 58px; }
+      figcaption { margin-top: 4px; font-size: 8.5px; }
+      footer { margin-top: 24px; padding-top: 10px; font-size: 9px; }
+      .brand-logo { width: 74px; }
+    }
   </style>
 </head>
 <body>
-<main>
-  <header>
+<div class="preview-shell">
+  <main>
+    <header>
+      <div class="document-heading">
+        <div>
+          <div class="document-kicker">Consentimiento informado</div>
+          <div class="document-title">CONSENTIMIENTO</div>
+          <div class="document-id">Documento ${escapeHtml(doc.public_id || doc.id)}</div>
+        </div>
+        <dl class="status-box">
+          <dt>Estado</dt>
+          <dd>${escapeHtml(statusLabel(doc.status))}</dd>
+        </dl>
+      </div>
+      <div class="header-grid">
+        <section class="info-card">
+          <div class="info-title">Centro</div>
+          <div class="info-copy">
+            <div class="strong">${escapeHtml(clinic.nombre || '')}</div>
+            ${clinic.direccion ? `<div>${escapeHtml(clinic.direccion)}</div>` : ''}
+          </div>
+        </section>
+        <section class="info-card">
+          <div class="info-title">Paciente</div>
+          <div class="info-copy">
+            <div class="strong">${escapeHtml(patient.nombre_completo || '')}</div>
+            ${patient.documento ? `<div>${escapeHtml(patient.documento)}</div>` : ''}
+            ${patient.email ? `<div>${escapeHtml(patient.email)}</div>` : ''}
+          </div>
+        </section>
+        <dl class="summary-list">
+          <div><dt>Tratamiento</dt><dd>${escapeHtml(treatment.nombre || 'No indicado')}</dd></div>
+          <div><dt>Cita</dt><dd>${escapeHtml(appointment.fecha || 'No indicada')}</dd></div>
+        </dl>
+      </div>
+    </header>
     <h1>${escapeHtml(doc.title || 'Consentimiento')}</h1>
-    <div class="meta">
-      <span><b>Paciente:</b> ${escapeHtml(patient.nombre_completo || '')}</span>
-      <span><b>Documento:</b> ${escapeHtml(patient.documento || '')}</span>
-      <span><b>Clínica:</b> ${escapeHtml(clinic.nombre || '')}</span>
-      <span><b>Tratamiento:</b> ${escapeHtml(treatment.nombre || '')}</span>
-      <span><b>Cita:</b> ${escapeHtml(appointment.fecha || '')}</span>
-      <span><b>Estado:</b> ${escapeHtml(doc.status || '')}</span>
-    </div>
-  </header>
-  <section class="content">${safeHtml}</section>
-  ${signatureBlock}
-  ${professionalSignatureBlock}
-  ${revocationBlock}
-  <footer>
-    Documento ${escapeHtml(doc.public_id || doc.id)}. Hash: ${escapeHtml(doc.snapshot_hash || 'pendiente')}.
-  </footer>
-</main>
+    <section class="content">${safeHtml}</section>
+    ${signatureBlock}
+    ${professionalSignatureBlock}
+    ${revocationBlock}
+    <footer>
+      <div class="footer-meta">Documento ${escapeHtml(doc.public_id || doc.id)}. Hash: ${escapeHtml(doc.snapshot_hash || 'pendiente')}.</div>
+      <div class="brand-lockup">${brandLogo}</div>
+    </footer>
+  </main>
+</div>
 </body>
 </html>`;
 }
@@ -571,7 +834,19 @@ async function listAdminTemplates(filters = {}) {
         include: [
             { model: db.ConsentTemplateCatalogVersion, as: 'versions', required: false },
             { model: db.ConsentTemplateCatalogDiscipline, as: 'disciplines', required: false },
-            { model: db.ConsentTemplateCatalogTreatment, as: 'treatments', required: false },
+            {
+                model: db.ConsentTemplateCatalogTreatment,
+                as: 'treatments',
+                required: false,
+                include: [
+                    {
+                        model: db.Tratamiento,
+                        as: 'tratamiento',
+                        required: false,
+                        attributes: ['id_tratamiento', 'codigo', 'nombre', 'disciplina', 'especialidad', 'categoria', 'origen'],
+                    },
+                ],
+            },
         ],
         order: [['updatedAt', 'DESC']],
     });
@@ -628,7 +903,18 @@ async function createAdminTemplate(payload = {}, userId = null) {
         include: [
             { model: db.ConsentTemplateCatalogVersion, as: 'versions' },
             { model: db.ConsentTemplateCatalogDiscipline, as: 'disciplines' },
-            { model: db.ConsentTemplateCatalogTreatment, as: 'treatments' },
+            {
+                model: db.ConsentTemplateCatalogTreatment,
+                as: 'treatments',
+                include: [
+                    {
+                        model: db.Tratamiento,
+                        as: 'tratamiento',
+                        required: false,
+                        attributes: ['id_tratamiento', 'codigo', 'nombre', 'disciplina', 'especialidad', 'categoria', 'origen'],
+                    },
+                ],
+            },
         ],
     });
 }
@@ -706,7 +992,18 @@ async function updateAdminTemplate(id, payload = {}, userId = null) {
         include: [
             { model: db.ConsentTemplateCatalogVersion, as: 'versions' },
             { model: db.ConsentTemplateCatalogDiscipline, as: 'disciplines' },
-            { model: db.ConsentTemplateCatalogTreatment, as: 'treatments' },
+            {
+                model: db.ConsentTemplateCatalogTreatment,
+                as: 'treatments',
+                include: [
+                    {
+                        model: db.Tratamiento,
+                        as: 'tratamiento',
+                        required: false,
+                        attributes: ['id_tratamiento', 'codigo', 'nombre', 'disciplina', 'especialidad', 'categoria', 'origen'],
+                    },
+                ],
+            },
         ],
     });
 }
@@ -981,6 +1278,7 @@ async function syncClinicTemplatesFromCatalog(clinicIdRaw, userId = null) {
     const include = [
         { model: db.ConsentTemplateCatalogVersion, as: 'versions', required: false },
         { model: db.ConsentTemplateCatalogDiscipline, as: 'disciplines', required: false },
+        { model: db.ConsentTemplateCatalogTreatment, as: 'treatments', required: false },
     ];
     const catalogItems = await db.ConsentTemplateCatalog.findAll({ where: catalogWhere, include });
     const created = [];
@@ -990,9 +1288,12 @@ async function syncClinicTemplatesFromCatalog(clinicIdRaw, userId = null) {
         const itemDisciplines = Array.isArray(plain.disciplines)
             ? plain.disciplines.map((disc) => disc.disciplina_code).filter(Boolean)
             : [];
-        const isGeneric = !!plain.is_generic || itemDisciplines.length === 0;
+        const catalogTreatmentIds = getCatalogTreatmentIds(plain);
+        const resolvedTreatmentIds = await resolveCatalogTreatmentsForClinic(catalogTreatmentIds, clinic);
+        const isGeneric = !!plain.is_generic || (itemDisciplines.length === 0 && catalogTreatmentIds.length === 0);
         const matchesDiscipline = isGeneric || itemDisciplines.some((code) => clinicDisciplines.includes(code));
-        if (!matchesDiscipline) continue;
+        const matchesTreatment = catalogTreatmentIds.length > 0 && resolvedTreatmentIds.length > 0;
+        if (!matchesDiscipline && !matchesTreatment) continue;
 
         const existing = await db.ClinicConsentTemplate.findOne({
             where: { clinic_id: clinicId, source_catalog_id: item.id },
@@ -1021,11 +1322,180 @@ async function syncClinicTemplatesFromCatalog(clinicIdRaw, userId = null) {
             body_json: sourceVersion?.body_json || null,
             body_html: sourceVersion?.body_html || buildDefaultBodyHtml(plain.name),
             variable_schema: sourceVersion?.variable_schema || null,
+            tratamiento_ids: resolvedTreatmentIds,
         }, userId);
         created.push(copy);
     }
 
     return { created_count: created.length, items: created };
+}
+
+function getCatalogDisciplineCodes(catalogPlain) {
+    return Array.isArray(catalogPlain?.disciplines)
+        ? catalogPlain.disciplines.map((disc) => disc.disciplina_code).filter(Boolean)
+        : [];
+}
+
+function getCatalogTreatmentIds(catalogPlain) {
+    return Array.isArray(catalogPlain?.treatments)
+        ? Array.from(new Set(catalogPlain.treatments.map((item) => toIntOrNull(item.tratamiento_id)).filter(Boolean)))
+        : [];
+}
+
+async function resolveCatalogTreatmentsForClinic(catalogTreatmentIds = [], clinicPlain = {}) {
+    const baseIds = Array.from(new Set((catalogTreatmentIds || []).map(toIntOrNull).filter(Boolean)));
+    if (!baseIds.length) return [];
+
+    const clinicId = toIntOrNull(clinicPlain.id_clinica);
+    const groupId = toIntOrNull(clinicPlain.grupoClinicaId ?? clinicPlain.grupo_clinica_id);
+    const scopedCopyWhere = [];
+    if (clinicId) scopedCopyWhere.push({ origen: 'clinica', clinica_id: clinicId });
+    if (groupId) scopedCopyWhere.push({ origen: 'grupo', grupo_clinica_id: groupId });
+
+    const treatmentWhere = {
+        activo: true,
+        [Op.or]: [
+            { id_tratamiento: { [Op.in]: baseIds } },
+            ...(scopedCopyWhere.length
+                ? scopedCopyWhere.map((scope) => ({
+                    ...scope,
+                    id_tratamiento_base: { [Op.in]: baseIds },
+                }))
+                : []),
+        ],
+    };
+
+    const treatments = await db.Tratamiento.findAll({
+        where: treatmentWhere,
+        attributes: ['id_tratamiento'],
+        raw: true,
+    });
+    return Array.from(new Set(treatments.map((item) => toIntOrNull(item.id_tratamiento)).filter(Boolean)));
+}
+
+async function hasActiveRequirementForTreatments(clinicId, treatmentIds = []) {
+    const parsedClinicId = toIntOrNull(clinicId);
+    const parsedTreatmentIds = Array.from(new Set((treatmentIds || []).map(toIntOrNull).filter(Boolean)));
+    if (!parsedClinicId || !parsedTreatmentIds.length) return false;
+
+    const existing = await db.TreatmentConsentRequirement.findOne({
+        where: {
+            clinica_id: parsedClinicId,
+            tratamiento_id: { [Op.in]: parsedTreatmentIds },
+        },
+        include: [
+            {
+                model: db.ClinicConsentTemplate,
+                as: 'clinicTemplate',
+                required: true,
+                where: { status: 'active' },
+                attributes: ['id', 'status'],
+            },
+        ],
+        attributes: ['id'],
+    });
+    return !!existing;
+}
+
+async function propagateAdminTemplateToClinics(catalogIdRaw, options = {}) {
+    const catalogId = toIntOrNull(catalogIdRaw);
+    if (!catalogId) {
+        const err = new Error('admin_consent_template_id_required');
+        err.statusCode = 400;
+        throw err;
+    }
+
+    const catalog = await db.ConsentTemplateCatalog.findByPk(catalogId, {
+        include: [
+            { model: db.ConsentTemplateCatalogVersion, as: 'versions', required: false },
+            { model: db.ConsentTemplateCatalogDiscipline, as: 'disciplines', required: false },
+            { model: db.ConsentTemplateCatalogTreatment, as: 'treatments', required: false },
+        ],
+    });
+    if (!catalog) {
+        const err = new Error('admin_consent_template_not_found');
+        err.statusCode = 404;
+        throw err;
+    }
+
+    const catalogPlain = getPlain(catalog);
+    const disciplineCodes = getCatalogDisciplineCodes(catalogPlain);
+    const catalogTreatmentIds = getCatalogTreatmentIds(catalogPlain);
+    const isGeneric = !!catalogPlain.is_generic || (!disciplineCodes.length && !catalogTreatmentIds.length);
+    const sourceVersion = await getLatestCatalogVersion(catalog.id, 'es');
+    const targetClinicIds = normalizeTreatmentIds(options.clinic_ids ?? options.clinica_ids ?? []);
+
+    const clinicWhere = targetClinicIds.length
+        ? { id_clinica: { [Op.in]: targetClinicIds } }
+        : { [Op.or]: [{ estado_clinica: true }, { estado_clinica: null }] };
+    const clinics = await db.Clinica.findAll({ where: clinicWhere, raw: true });
+
+    const created = [];
+    const skipped = [];
+    let draftCount = 0;
+
+    for (const clinic of clinics) {
+        const clinicId = toIntOrNull(clinic.id_clinica);
+        if (!clinicId) continue;
+
+        const config = clinic.configuracion && typeof clinic.configuracion === 'object' ? clinic.configuracion : {};
+        const clinicDisciplines = normalizeStringList(config.disciplinas || (config.disciplina ? [config.disciplina] : []));
+        const resolvedTreatmentIds = await resolveCatalogTreatmentsForClinic(catalogTreatmentIds, clinic);
+        const matchesDiscipline = isGeneric || disciplineCodes.some((code) => clinicDisciplines.includes(code));
+        const matchesTreatment = catalogTreatmentIds.length > 0 && resolvedTreatmentIds.length > 0;
+        if (!matchesDiscipline && !matchesTreatment) {
+            skipped.push({ clinic_id: clinicId, reason: 'scope_mismatch' });
+            continue;
+        }
+
+        const existingSource = await db.ClinicConsentTemplate.findOne({
+            where: { clinic_id: clinicId, source_catalog_id: catalog.id },
+            attributes: ['id'],
+        });
+        if (existingSource) {
+            skipped.push({ clinic_id: clinicId, reason: 'already_exists' });
+            continue;
+        }
+
+        const hasTreatmentConflict = await hasActiveRequirementForTreatments(clinicId, resolvedTreatmentIds);
+        const copyStatus = hasTreatmentConflict ? 'draft' : 'active';
+        if (copyStatus === 'draft') draftCount += 1;
+
+        const copy = await createClinicTemplate({
+            clinic_id: clinicId,
+            source_catalog_id: catalog.id,
+            source_catalog_version_id: sourceVersion?.id || null,
+            catalog_key: catalogPlain.catalog_key,
+            name: catalogPlain.name,
+            description: catalogPlain.description,
+            purpose: catalogPlain.purpose,
+            status: copyStatus,
+            blocking_policy: catalogPlain.blocking_policy,
+            validity_mode: catalogPlain.validity_mode,
+            is_default: copyStatus === 'active',
+            requires_patient_signature: catalogPlain.requires_patient_signature,
+            requires_representative_when_minor: catalogPlain.requires_representative_when_minor,
+            requires_professional_signature: catalogPlain.requires_professional_signature,
+            locale: sourceVersion?.locale || 'es',
+            title: sourceVersion?.title || catalogPlain.name,
+            body_json: sourceVersion?.body_json || null,
+            body_html: sourceVersion?.body_html || buildDefaultBodyHtml(catalogPlain.name),
+            variable_schema: sourceVersion?.variable_schema || null,
+            tratamiento_ids: resolvedTreatmentIds,
+        }, options.userId || null);
+        created.push(copy);
+    }
+
+    return {
+        success: true,
+        catalog_id: catalog.id,
+        clinics_total: clinics.length,
+        created_count: created.length,
+        draft_count: draftCount,
+        skipped_count: skipped.length,
+        skipped,
+        items: created,
+    };
 }
 
 async function getTreatmentRequirements({ tratamientoId, clinicaId = null }) {
@@ -1463,22 +1933,31 @@ async function getConsentSummaryForAppointment(citaLike) {
     }));
     let missingRequired = 0;
     let missingOptional = 0;
+    const signingPolicies = [];
     for (const requirement of requirements) {
         const plain = getPlain(requirement);
         const key = plain.clinic_template_id ? `clinic:${plain.clinic_template_id}` : `catalog:${plain.catalog_template_id}`;
+        const resolved = await resolveRequirementTemplate(requirement);
+        if (resolved?.template && resolved?.version) {
+            signingPolicies.push(getSigningPolicyFromVersion(resolved.version, resolved.template));
+        }
         if (existingKeys.has(key)) continue;
         if (plain.required) missingRequired += 1;
         else missingOptional += 1;
     }
     const summary = summarizeDocuments(documents, missingRequired, missingOptional);
     const packageRow = documents.map((doc) => getPlain(doc).package).find(Boolean) || null;
+    const signingPolicy = pickSigningPolicy(signingPolicies);
     return {
         ...summary,
         status: summary.has_pending ? 'pending' : 'ok',
         package_id: packageRow?.id || null,
         package_public_id: packageRow?.public_id || null,
-        due_policy: 'antes_del_acto',
-        recommendation: summary.has_pending ? 'Solicita la firma antes de iniciar el tratamiento.' : null,
+        due_policy: signingPolicy.due_policy,
+        signing_timing: signingPolicy.signing_timing,
+        signing_timing_label: signingPolicy.signing_timing_label,
+        recommended_min_hours_before: signingPolicy.recommended_min_hours_before,
+        recommendation: summary.has_pending ? signingPolicy.recommendation : null,
     };
 }
 
@@ -1597,6 +2076,7 @@ async function createPackageForAppointment(citaIdRaw, options = {}) {
 
         const title = resolved.version.title || resolved.template.name;
         const renderedHtml = renderTemplateHtml(resolved.version.body_html || buildDefaultBodyHtml(title), context);
+        const signingPolicy = getSigningPolicyFromVersion(resolved.version, resolved.template);
         const snapshot = {
             template_source: resolved.source,
             template: {
@@ -1624,8 +2104,10 @@ async function createPackageForAppointment(citaIdRaw, options = {}) {
                 representatives: getRepresentativeSnapshot(plainCita.paciente),
             },
             clinical_policy: {
-                due_policy: 'antes_del_acto',
-                recommended_min_hours_before: DEFAULT_SURGICAL_MIN_HOURS,
+                due_policy: signingPolicy.due_policy,
+                signing_timing: signingPolicy.signing_timing,
+                signing_timing_label: signingPolicy.signing_timing_label,
+                recommended_min_hours_before: signingPolicy.recommended_min_hours_before,
                 pdf_strategy: 'json_snapshot_printable_on_demand',
             },
             generated_at: new Date().toISOString(),
@@ -1710,9 +2192,14 @@ async function sendPackageMock(packageIdRaw, payload = {}) {
     const publicUrl = buildPublicConsentUrl(token, payload.base_url ?? payload.baseUrl);
 
     const documents = Array.isArray(packageRow.documents) ? packageRow.documents : [];
-    for (const doc of documents) {
+    const pendingDocuments = documents.filter((doc) => DOCUMENT_PENDING_STATUSES.has(getPlain(doc).status));
+    if (!pendingDocuments.length) {
+        const err = new Error('consent_package_has_no_pending_documents');
+        err.statusCode = 409;
+        throw err;
+    }
+    for (const doc of pendingDocuments) {
         const plainDoc = getPlain(doc);
-        if (!DOCUMENT_PENDING_STATUSES.has(plainDoc.status)) continue;
         await db.ConsentDeliveryEvent.create({
             package_id: packageRow.id,
             patient_consent_document_id: plainDoc.id,
@@ -1784,9 +2271,14 @@ async function createTabletSession(packageIdRaw, payload = {}) {
     });
     const publicUrl = buildPublicConsentUrl(token, payload.base_url ?? payload.baseUrl);
     const documents = Array.isArray(packageRow.documents) ? packageRow.documents : [];
-    await Promise.all(documents.map(async (doc) => {
+    const pendingDocuments = documents.filter((doc) => DOCUMENT_PENDING_STATUSES.has(getPlain(doc).status));
+    if (!pendingDocuments.length) {
+        const err = new Error('consent_package_has_no_pending_documents');
+        err.statusCode = 409;
+        throw err;
+    }
+    await Promise.all(pendingDocuments.map(async (doc) => {
         const plainDoc = getPlain(doc);
-        if (!DOCUMENT_PENDING_STATUSES.has(plainDoc.status)) return;
         const existingQueuedEvent = await db.ConsentDeliveryEvent.findOne({
             where: {
                 package_id: packageRow.id,
@@ -2083,6 +2575,25 @@ function serializeKioskPackage(packageRow) {
     };
 }
 
+function publicSignatureEvidenceForDocument(doc) {
+    const plain = getPlain(doc);
+    const snapshot = parseJsonObject(plain.snapshot_json);
+    const evidence = parseJsonObject(snapshot.signature_evidence);
+    if (!evidence?.signed_at && !plain.signed_at) return null;
+    return {
+        signer_name: evidence.signer_name || null,
+        signer_role: evidence.signer_role || null,
+        representative_name: evidence.representative_name || null,
+        relationship: evidence.relationship || null,
+        method: evidence.method || null,
+        signed_at: evidence.signed_at || plain.signed_at || null,
+        ip: evidence.ip || null,
+        user_agent: evidence.user_agent || null,
+        accepted_statement: evidence.accepted_statement ?? null,
+        signature_data_url: evidence.signature_data_url || null,
+    };
+}
+
 async function listTabletKioskPackages(tokenRaw, filters = {}) {
     const kiosk = await requireKioskSession(tokenRaw);
     const limit = Math.min(toIntOrNull(filters.limit) || 80, 150);
@@ -2180,6 +2691,7 @@ function serializePublicPackage(packageRow) {
             signed_at: doc.signed_at || null,
             revoked_at: doc.revoked_at || null,
             requires_representative: requiresRepresentative(doc),
+            signature_evidence: publicSignatureEvidenceForDocument(doc),
         })),
     };
 }
@@ -2544,6 +3056,7 @@ module.exports = {
     listAdminTemplates,
     createAdminTemplate,
     updateAdminTemplate,
+    propagateAdminTemplateToClinics,
     listClinicTemplates,
     createClinicTemplate,
     updateClinicTemplate,

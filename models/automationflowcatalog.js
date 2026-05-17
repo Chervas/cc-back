@@ -26,6 +26,7 @@ module.exports = (sequelize, DataTypes) => {
       last_propagated_template_version: { type: DataTypes.INTEGER, allowNull: true },
       is_generic: { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: false },
       is_active: { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: true },
+      is_default_for_trigger: { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: false },
     },
     {
       sequelize,

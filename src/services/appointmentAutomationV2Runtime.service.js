@@ -6,6 +6,7 @@ const jobScheduler = require('./jobScheduler.service');
 
 const Tratamiento = db.Tratamiento;
 const Clinica = db.Clinica;
+const AutomationFlowCatalog = db.AutomationFlowCatalog;
 const AutomationFlowTemplateV2 = db.AutomationFlowTemplateV2;
 const FlowExecutionV2 = db.FlowExecutionV2;
 const FlowExecutionLogV2 = db.FlowExecutionLogV2;
@@ -45,6 +46,11 @@ const APPOINTMENT_CREATED_WITHOUT_TREATMENT_TYPES = new Set([
 const SCHEDULED_APPOINTMENT_TRIGGER_TYPES = new Set([
   'appointment_reminder_window',
   'appointment_after',
+]);
+const BEFORE_APPOINTMENT_FALLBACK_TRIGGER_TYPES = new Set([
+  'appointment_created',
+  'appointment_reminder_window',
+  'consent_required',
 ]);
 const APPOINTMENT_BEFORE_MOMENT_VALUES = new Set([
   'same_day',
@@ -87,6 +93,87 @@ function toIntOrNull(value) {
 function cleanString(value) {
   if (value === undefined || value === null) return '';
   return String(value).trim();
+}
+
+function stripCatalogClinicScopeSuffixes(rawTemplateKey) {
+  const normalized = cleanString(rawTemplateKey);
+  if (!normalized) return '';
+  return normalized.replace(/(?:__?clinic_\d+)+$/gi, '') || normalized;
+}
+
+async function loadCatalogBindingMapForTemplates(templates) {
+  const candidateKeys = Array.from(
+    new Set(
+      (Array.isArray(templates) ? templates : [])
+        .flatMap((template) => {
+          const item = template?.toJSON ? template.toJSON() : template;
+          const rawKey = cleanString(item?.template_key);
+          return [rawKey, stripCatalogClinicScopeSuffixes(rawKey)].filter(Boolean);
+        })
+    )
+  );
+  if (!candidateKeys.length) return new Map();
+
+  const catalogRows = await AutomationFlowCatalog.findAll({
+    attributes: ['id', 'template_key', 'trigger_type', 'is_active', 'is_default_for_trigger'],
+    where: { template_key: { [Op.ne]: null } },
+    raw: true,
+  });
+  if (!catalogRows.length) return new Map();
+
+  const catalogRefs = Array.from(new Set(catalogRows.map((row) => cleanString(row.template_key)).filter(Boolean)));
+  const sourceRows = catalogRefs.length
+    ? await AutomationFlowTemplateV2.findAll({
+        attributes: ['public_id', 'template_key'],
+        where: {
+          [Op.or]: [
+            { public_id: { [Op.in]: catalogRefs } },
+            { template_key: { [Op.in]: catalogRefs } },
+          ],
+        },
+        order: [['version', 'DESC'], ['id', 'DESC']],
+        raw: true,
+      })
+    : [];
+  const sourceByPublicId = new Map();
+  const sourceByTemplateKey = new Map();
+  for (const row of sourceRows) {
+    const publicId = cleanString(row.public_id);
+    const templateKey = cleanString(row.template_key);
+    if (publicId && !sourceByPublicId.has(publicId)) sourceByPublicId.set(publicId, row);
+    if (templateKey && !sourceByTemplateKey.has(templateKey)) sourceByTemplateKey.set(templateKey, row);
+  }
+
+  const result = new Map();
+  for (const catalogRow of catalogRows) {
+    const rawKey = cleanString(catalogRow.template_key);
+    if (!rawKey) continue;
+    const sourceTemplate = sourceByPublicId.get(rawKey) || sourceByTemplateKey.get(rawKey) || null;
+    const keys = Array.from(new Set([
+      rawKey,
+      stripCatalogClinicScopeSuffixes(rawKey),
+      cleanString(sourceTemplate?.template_key),
+      stripCatalogClinicScopeSuffixes(sourceTemplate?.template_key),
+    ].filter(Boolean)));
+    if (!keys.some((key) => candidateKeys.includes(key))) continue;
+
+    const binding = {
+      id: catalogRow.id,
+      trigger_type: catalogRow.trigger_type,
+      is_active: catalogRow.is_active !== false,
+      is_default_for_trigger: catalogRow.is_default_for_trigger === true || catalogRow.is_default_for_trigger === 1,
+    };
+    for (const key of keys) {
+      if (candidateKeys.includes(key)) result.set(key, binding);
+    }
+  }
+  return result;
+}
+
+function getCatalogBindingForTemplate(template, catalogBindingMap) {
+  if (!(catalogBindingMap instanceof Map)) return null;
+  const key = cleanString(template?.template_key);
+  return catalogBindingMap.get(key) || catalogBindingMap.get(stripCatalogClinicScopeSuffixes(key)) || null;
 }
 
 function normalizeStringArray(value) {
@@ -288,29 +375,86 @@ async function resolveTemplateForCitaEvent(cita, eventName) {
     return boundTemplate;
   }
 
+  if (await isBeforeAppointmentFallbackDisabledForTratamiento(cita, eventName)) {
+    return null;
+  }
+
   return resolveClinicFallbackTemplate(cita, eventName);
+}
+
+function parseTreatmentAutomationBindings(value) {
+  if (!value) return {};
+  if (typeof value === 'object') return value || {};
+  try {
+    return JSON.parse(String(value)) || {};
+  } catch {
+    return {};
+  }
+}
+
+async function isBeforeAppointmentFallbackDisabledForTratamiento(cita, eventName) {
+  if (!BEFORE_APPOINTMENT_FALLBACK_TRIGGER_TYPES.has(eventName)) return false;
+  const tratamientoId = toIntOrNull(cita?.tratamiento_id);
+  if (!tratamientoId) return false;
+
+  const tratamiento = await Tratamiento.findByPk(tratamientoId, {
+    attributes: ['id_tratamiento', 'automation_template_bindings'],
+    raw: true,
+  });
+  if (!tratamiento) return false;
+
+  const bindings = parseTreatmentAutomationBindings(tratamiento.automation_template_bindings);
+  return bindings?.appointment_before?.disabled === true;
+}
+
+function treatmentBindingKeyForAppointmentEvent(eventName) {
+  switch (cleanString(eventName).toLowerCase()) {
+    case 'appointment_completed':
+      return 'appointment_after_completed';
+    case 'appointment_no_show':
+      return 'appointment_after_no_show';
+    case 'appointment_after':
+      return 'appointment_after_next_session';
+    case 'appointment_rescheduled':
+      return 'appointment_during_rescheduled';
+    case 'appointment_cancelled':
+      return 'appointment_during_cancelled';
+    default:
+      return null;
+  }
 }
 
 async function resolveTemplateBoundToTratamiento(cita, eventName) {
   const tratamientoId = toIntOrNull(cita?.tratamiento_id);
   if (!tratamientoId) return null;
+  const normalizedEventName = cleanString(eventName).toLowerCase();
 
   const tratamiento = await Tratamiento.findByPk(tratamientoId, {
     attributes: [
       'id_tratamiento',
       'appointment_automation_template_key',
+      'automation_template_bindings',
     ],
+    raw: true,
   });
   if (!tratamiento) return null;
 
-  const templateKey = cleanString(tratamiento.appointment_automation_template_key);
+  let templateKey = '';
+  if (normalizedEventName === 'appointment_created') {
+    templateKey = cleanString(tratamiento.appointment_automation_template_key);
+  } else {
+    const bindingKey = treatmentBindingKeyForAppointmentEvent(normalizedEventName);
+    const bindings = parseTreatmentAutomationBindings(tratamiento.automation_template_bindings);
+    templateKey = bindingKey ? cleanString(bindings?.[bindingKey]?.template_key) : '';
+  }
+
   if (!templateKey) return null;
 
   const where = {
     template_key: templateKey,
     published_at: { [db.Sequelize.Op.ne]: null },
     is_active: true,
-    trigger_type: eventName,
+    trigger_type: normalizedEventName,
   };
 
   const template = await AutomationFlowTemplateV2.findOne({
@@ -319,7 +463,7 @@ async function resolveTemplateBoundToTratamiento(cita, eventName) {
   });
   if (!template) return null;
 
-  if (eventName === 'appointment_created') {
+  if (normalizedEventName === 'appointment_created') {
     const triggerConfig = getTemplateTriggerConfig(template);
     const clinic = cita?.clinica_id
       ? await Clinica.findByPk(cita.clinica_id, { attributes: ['id_clinica', 'configuracion'], raw: true })
@@ -337,6 +481,19 @@ async function resolveTemplateBoundToTratamiento(cita, eventName) {
 }
 
 function isAppointmentCreatedTemplateEligibleForCita(triggerConfig, cita, timeZone = DEFAULT_TIMEZONE) {
+  const config = triggerConfig && typeof triggerConfig === 'object' ? triggerConfig : {};
+  const treatmentId = toIntOrNull(cita?.tratamiento_id);
+  const scope = cleanString(config.appointment_scope || 'all').toLowerCase() || 'all';
+
+  if (scope === 'with_treatment' && !treatmentId) return false;
+  if (scope === 'without_treatment' && treatmentId) return false;
+  if (scope === 'with_treatment' && cleanString(config.treatment_filter).toLowerCase() === 'specific') {
+    const treatmentIds = Array.isArray(config.treatment_ids)
+      ? config.treatment_ids.map(toIntOrNull).filter(Boolean)
+      : [];
+    if (!treatmentIds.includes(treatmentId)) return false;
+  }
+
   return true;
 }
 
@@ -352,9 +509,18 @@ function normalizeAppointmentCreatedTriggerConfig(rawConfig) {
   if (safeScope !== 'without_treatment') {
     appointmentTypeWithoutTreatment = 'any';
   }
+  const treatmentFilterRaw = cleanString(config.treatment_filter || 'all').toLowerCase() || 'all';
+  const treatmentFilter = safeScope === 'with_treatment' && treatmentFilterRaw === 'specific'
+    ? 'specific'
+    : 'all';
+  const treatmentIds = treatmentFilter === 'specific' && Array.isArray(config.treatment_ids)
+    ? Array.from(new Set(config.treatment_ids.map(toIntOrNull).filter(Boolean)))
+    : [];
   return {
     appointment_scope: safeScope,
     appointment_type_without_treatment: appointmentTypeWithoutTreatment,
+    treatment_filter: treatmentFilter,
+    treatment_ids: treatmentIds,
   };
 }
 
@@ -486,6 +652,9 @@ async function resolveClinicFallbackTemplate(cita, eventName) {
   if (!Array.isArray(candidates) || !candidates.length) {
     return null;
   }
+  const catalogBindingMap = candidates.length > 1
+    ? await loadCatalogBindingMapForTemplates(candidates)
+    : new Map();
 
   const citaHasTreatment = !!toIntOrNull(cita?.tratamiento_id);
   const citaTipo = cleanString(cita?.tipo_cita).toLowerCase() || 'continuacion';
@@ -524,12 +693,20 @@ async function resolveClinicFallbackTemplate(cita, eventName) {
       else if (templateGroupId && groupId && templateGroupId === groupId) score += 50;
       else if (template?.is_system) score += 10;
 
+      const catalogBinding = getCatalogBindingForTemplate(template, catalogBindingMap);
+      if (catalogBinding?.is_default_for_trigger && catalogBinding?.is_active !== false) {
+        score += 25;
+      }
+
       if (cleanString(template?.trigger_type) === 'appointment_created') {
         const triggerConfig = getTemplateTriggerConfig(template);
         const scope = triggerConfig?.appointment_scope || 'all';
         const appointmentType = triggerConfig?.appointment_type_without_treatment || 'any';
         if (citaHasTreatment) {
-          if (scope === 'with_treatment') score += 20;
+          if (scope === 'with_treatment') {
+            score += 20;
+            if (triggerConfig?.treatment_filter === 'specific') score += 15;
+          }
           else if (scope === 'all') score += 5;
         } else {
           if (scope === 'without_treatment' && appointmentType === citaTipo) score += 30;
@@ -681,6 +858,9 @@ async function resolveScheduledTemplatesForCita(cita, eventName) {
   }
 
   const { clinicId, groupId, candidates } = await fetchClinicScopedTemplates(cita, eventName);
+  const catalogBindingMap = Array.isArray(candidates) && candidates.length > 1
+    ? await loadCatalogBindingMapForTemplates(candidates)
+    : new Map();
   const byTemplateKey = new Map();
   for (const row of candidates || []) {
     const key = cleanString(row?.template_key);
@@ -703,7 +883,8 @@ async function resolveScheduledTemplatesForCita(cita, eventName) {
       slotKey,
       score: template.id === boundTemplate?.id
         ? 1000
-        : getScopeScoreForTemplate(template, clinicId, groupId),
+        : getScopeScoreForTemplate(template, clinicId, groupId)
+          + (getCatalogBindingForTemplate(template, catalogBindingMap)?.is_default_for_trigger ? 25 : 0),
     };
     const current = bestBySlot.get(slotKey);
     if (!current || candidate.score > current.score || (candidate.score === current.score && Number(template.version || 0) > Number(current.template.version || 0))) {

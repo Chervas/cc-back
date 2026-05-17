@@ -17,6 +17,7 @@ router.use(authMiddleware);
 router.get('/admin/templates', consentimientosController.listAdminTemplates);
 router.post('/admin/templates', consentimientosController.createAdminTemplate);
 router.put('/admin/templates/:id', consentimientosController.updateAdminTemplate);
+router.post('/admin/templates/:id/propagate', consentimientosController.propagateAdminTemplate);
 
 router.get('/clinic/templates', consentimientosController.listClinicTemplates);
 router.post('/clinic/templates', consentimientosController.createClinicTemplate);
