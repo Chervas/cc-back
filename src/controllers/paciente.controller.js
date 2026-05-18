@@ -125,7 +125,10 @@ const formatAppointmentStateLabel = (estado) => {
   return labels[normalized] || normalized.replace(/_/g, ' ');
 };
 
-const ACTIVE_APPOINTMENT_EXCLUDED_STATES = ['cancelada', 'reprogramada'];
+// "Reprogramada" sigue siendo una cita operativa cuando conserva una fecha futura:
+// el hub del paciente debe poder mostrarla como próxima cita. Solo ocultamos
+// estados realmente no atendibles.
+const ACTIVE_APPOINTMENT_EXCLUDED_STATES = ['cancelada'];
 
 const buildPacienteAppointmentInclude = () => [
   { model: Clinica, as: 'clinica', attributes: ['id_clinica', 'nombre_clinica'], required: false },
