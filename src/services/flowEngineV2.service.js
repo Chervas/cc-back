@@ -1516,12 +1516,33 @@ function normalizeIntentText(value) {
     .trim();
 }
 
+function isPositiveConfirmationEmojiText(value) {
+  const raw = cleanString(value).normalize('NFC');
+  if (!raw) return false;
+  if (POSITIVE_CONFIRMATION_REACTION_EMOJIS.has(raw)) return true;
+
+  const positiveEmojis = Array.from(POSITIVE_CONFIRMATION_REACTION_EMOJIS)
+    .sort((a, b) => b.length - a.length);
+  let remaining = raw;
+  let consumedAny = false;
+
+  for (const emoji of positiveEmojis) {
+    if (remaining.includes(emoji)) {
+      consumedAny = true;
+      remaining = remaining.split(emoji).join('');
+    }
+  }
+
+  remaining = remaining.replace(/[\s\uFE0F\u200D.!¡¿?,;:]+/g, '');
+  return consumedAny && remaining.length === 0;
+}
+
 function buildDeterministicConfirmAppointmentTextOutput(context = {}) {
   const rawResponse = cleanString(
     context?.last_response_context?.response_text
     || context?.last_response
   );
-  if (POSITIVE_CONFIRMATION_REACTION_EMOJIS.has(rawResponse)) {
+  if (isPositiveConfirmationEmojiText(rawResponse)) {
     return {
       decision: 'confirmado',
       confianza: 0.99,
@@ -1639,7 +1660,7 @@ function buildDeterministicConfirmAppointmentOutput(context = {}) {
   }
 
   const reactionEmoji = cleanString(responseContext.reaction_emoji);
-  if (!reactionEmoji || !POSITIVE_CONFIRMATION_REACTION_EMOJIS.has(reactionEmoji)) {
+  if (!reactionEmoji || !isPositiveConfirmationEmojiText(reactionEmoji)) {
     return null;
   }
 
@@ -1877,7 +1898,7 @@ async function handleChangeStatus(node, context, runtime) {
           skipped: true,
           reason: 'appointment_status_protected',
         },
-        next_node_id: null,
+        next_node_id: readOutputTarget(node, 'on_success'),
       };
     }
 
