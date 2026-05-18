@@ -181,7 +181,10 @@ const getPacienteAppointmentBounds = async (pacienteId) => {
     CitaPaciente.findOne({
       where: {
         ...baseWhere,
-        inicio: { [Op.gte]: now },
+        [Op.or]: [
+          { inicio: { [Op.gte]: now } },
+          { fin: { [Op.gte]: now } },
+        ],
       },
       include,
       order: [['inicio', 'ASC']],

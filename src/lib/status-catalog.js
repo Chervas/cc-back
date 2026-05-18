@@ -76,11 +76,11 @@ const CITA_STATUSES = Object.freeze([
   {
     value: 'reprogramada',
     label: 'Reprogramada',
-    description: 'Cita original reprogramada a una nueva cita',
+    description: 'La cita cambió de fecha u hora y sigue pendiente de atención',
     color: 'slate',
     icon: 'heroicons_outline:arrow-path',
     order: 9,
-    is_terminal: true,
+    is_terminal: false,
   },
 ]);
 
@@ -90,7 +90,7 @@ const CITA_ALLOWED_TRANSITIONS = Object.freeze({
   info_confirmada: ['recordatorio_enviado', 'recordatorio_confirmado', 'reprogramada', 'cancelada', 'completada', 'no_asistio'],
   recordatorio_enviado: ['recordatorio_confirmado', 'reprogramada', 'cancelada', 'completada', 'no_asistio'],
   recordatorio_confirmado: ['reprogramada', 'cancelada', 'completada', 'no_asistio'],
-  reprogramada: [],
+  reprogramada: ['recordatorio_confirmado', 'info_confirmada', 'cancelada', 'completada', 'no_asistio'],
   cancelada: [],
   completada: [],
   no_asistio: [],

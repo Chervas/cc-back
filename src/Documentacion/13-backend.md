@@ -2279,7 +2279,7 @@ Consecuencias:
   Este JSON permite que la UI seleccione automatizaciones complementarias sin alterar el contrato principal `appointment_automation_template_key/version`.
 - El runtime resuelve primero el binding del tratamiento y después el fallback clinic/group/system. Los slots solo son compatibles con su `trigger_type`: `appointment_completed`, `appointment_no_show`, `appointment_after`, `appointment_rescheduled` o `appointment_cancelled`.
 - Para `appointment_created` con `with_treatment + treatment_filter=specific`, `publish` bloquea otra automatización activa del mismo scope si ya cubre alguno de esos tratamientos.
-- Si una cita pasa a `cancelada`, `reprogramada`, `completada` o `no_asistio`, las ejecuciones V2 activas/pendientes de esa cita se cancelan antes de lanzar el evento terminal correspondiente. Un nodo `action/change_status` tampoco puede resucitar una cita que ya esté en esos estados terminales; el nodo se marca como `skipped` y el flujo termina.
+- Si una cita pasa a `cancelada`, `reprogramada`, `completada` o `no_asistio`, las ejecuciones V2 activas/pendientes de esa cita se cancelan antes de lanzar el evento correspondiente. `reprogramada` cancela automatizaciones de la hora anterior, pero la cita sigue siendo accionable manualmente desde UI. Un nodo `action/change_status` no puede resucitar citas realmente cerradas (`cancelada`, `completada`, `no_asistio`); el nodo se marca como `skipped` y el flujo termina.
 - Las notificaciones operativas creadas por `action/send_system_notification` para una cita se marcan automáticamente como leídas cuando esa cita queda resuelta (`info_confirmada`, `recordatorio_confirmado`, `cancelada`, `reprogramada`, `completada`, `no_asistio`). El backend emite `notification:updated` para que la campana no mantenga avisos obsoletos si la resolución ocurre en tiempo real.
 
 ### `condition/field_check` temporal
@@ -3007,7 +3007,8 @@ Reglas:
   - `reprogramada`
 - `cancelada` no mantiene al lead como `citado`.
 - `enrichLeadsWithLinkedAppointments()` ignora citas no activas para `linked_appointment`.
-- El resumen de paciente (`GET /api/pacientes/:id`) usa el mismo criterio operativo para `proxima_cita`/`ultima_cita`: una cita futura en estado `reprogramada` debe seguir mostrándose en ficha/QuickChat si conserva fecha futura. Solo `cancelada` se excluye de estos bounds.
+- El resumen de paciente (`GET /api/pacientes/:id`) usa el mismo criterio operativo para `proxima_cita`/`ultima_cita`: una cita en estado `reprogramada` debe seguir mostrándose en ficha/QuickChat si conserva fecha futura o si está en curso (`fin >= now`). Solo `cancelada` se excluye de estos bounds.
+- `reprogramada` no es terminal para acciones manuales de UI: se puede pasar a `info_confirmada`, `recordatorio_confirmado`, `completada`, `no_asistio` o `cancelada`. Sí sigue cancelando ejecuciones de automatización previas cuando se dispara el evento de reagendado, para no enviar mensajes de la hora antigua.
 
 ### Intake web: precedencia de scope
 
