@@ -3007,6 +3007,7 @@ Reglas:
   - `reprogramada`
 - `cancelada` no mantiene al lead como `citado`.
 - `enrichLeadsWithLinkedAppointments()` ignora citas no activas para `linked_appointment`.
+- El resumen de paciente (`GET /api/pacientes/:id`) usa el mismo criterio operativo para `proxima_cita`/`ultima_cita`: una cita futura en estado `reprogramada` debe seguir mostrándose en ficha/QuickChat si conserva fecha futura. Solo `cancelada` se excluye de estos bounds.
 
 ### Intake web: precedencia de scope
 
