@@ -171,6 +171,71 @@ function normalizePhoneDigits(value) {
   return String(value || '').replace(/\D+/g, '').replace(/^00/, '');
 }
 
+function escapeLikePattern(value) {
+  return String(value || '').replace(/[\\%_]/g, (match) => `\\${match}`);
+}
+
+function normalizeSearchQuery(value) {
+  return String(value || '').trim().replace(/\s+/g, ' ');
+}
+
+function buildConversationSearchClause(searchQuery) {
+  const normalized = normalizeSearchQuery(searchQuery);
+  if (!normalized) {
+    return null;
+  }
+
+  const makeLike = (value) => `%${escapeLikePattern(String(value || '').toLowerCase())}%`;
+  const textFieldClauses = (like) => [
+    { contact_id: { [Op.like]: like } },
+    { '$paciente.nombre$': { [Op.like]: like } },
+    { '$paciente.apellidos$': { [Op.like]: like } },
+    { '$paciente.telefono_movil$': { [Op.like]: like } },
+    { '$paciente.email$': { [Op.like]: like } },
+    { '$lead.nombre$': { [Op.like]: like } },
+    { '$lead.telefono$': { [Op.like]: like } },
+    { '$lead.email$': { [Op.like]: like } },
+    db.Sequelize.where(
+      db.Sequelize.fn(
+        'LOWER',
+        db.Sequelize.fn(
+          'CONCAT_WS',
+          ' ',
+          db.Sequelize.col('paciente.nombre'),
+          db.Sequelize.col('paciente.apellidos')
+        )
+      ),
+      { [Op.like]: like }
+    ),
+    db.Sequelize.where(
+      db.Sequelize.fn(
+        'LOWER',
+        db.Sequelize.fn(
+          'CONCAT_WS',
+          ' ',
+          db.Sequelize.col('paciente.apellidos'),
+          db.Sequelize.col('paciente.nombre')
+        )
+      ),
+      { [Op.like]: like }
+    ),
+  ];
+
+  const fullLike = makeLike(normalized);
+  const tokenClauses = normalized
+    .split(' ')
+    .map((token) => token.trim())
+    .filter((token) => token.length >= 2)
+    .map((token) => ({ [Op.or]: textFieldClauses(makeLike(token)) }));
+
+  return {
+    [Op.and]: [
+      { [Op.or]: textFieldClauses(fullLike) },
+      ...tokenClauses,
+    ],
+  };
+}
+
 function buildMarketingContactPhoneCandidates(value) {
   const digits = normalizePhoneDigits(value);
   if (!digits) return [];
@@ -415,21 +480,10 @@ exports.listConversations = async (req, res) => {
     }
 
     if (searchQuery) {
-      const like = `%${searchQuery.replace(/[%_]/g, '\\$&')}%`;
+      const searchClause = buildConversationSearchClause(searchQuery);
       where[Op.and] = [
         ...(where[Op.and] || []),
-        {
-          [Op.or]: [
-            { contact_id: { [Op.like]: like } },
-            { '$paciente.nombre$': { [Op.like]: like } },
-            { '$paciente.apellidos$': { [Op.like]: like } },
-            { '$paciente.telefono_movil$': { [Op.like]: like } },
-            { '$paciente.email$': { [Op.like]: like } },
-            { '$lead.nombre$': { [Op.like]: like } },
-            { '$lead.telefono$': { [Op.like]: like } },
-            { '$lead.email$': { [Op.like]: like } },
-          ],
-        },
+        searchClause,
       ];
     }
 

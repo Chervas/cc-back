@@ -761,10 +761,10 @@ const formatAppointmentStateLabel = (estado) => {
   if (!normalized) return null;
   const labels = {
     pendiente: 'Pendiente',
-    info_enviada: 'Info enviada',
-    info_confirmada: 'Info confirmada',
+    info_enviada: 'Datos de la cita enviados',
+    info_confirmada: 'Cita confirmada',
     recordatorio_enviado: 'Recordatorio enviado',
-    recordatorio_confirmado: 'Recordatorio confirmado',
+    recordatorio_confirmado: 'Cita confirmada',
     completada: 'Completada',
     no_asistio: 'No asistió',
     cancelada: 'Cancelada',
