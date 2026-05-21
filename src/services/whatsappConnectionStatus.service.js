@@ -48,6 +48,19 @@ function isGraphObjectAccessError(error) {
     && (lower.includes('does not exist') || lower.includes('missing permissions') || lower.includes('cannot be loaded'));
 }
 
+function buildReconnectLink({ phoneNumberId = null, wabaId = null } = {}) {
+  const params = new URLSearchParams();
+  params.set('tab', 'whatsapp');
+  params.set('action', 'reconnect_whatsapp');
+  if (phoneNumberId) {
+    params.set('phoneNumberId', String(phoneNumberId));
+  }
+  if (wabaId) {
+    params.set('wabaId', String(wabaId));
+  }
+  return `/ajustes?${params.toString()}`;
+}
+
 async function findWhatsappPhoneAsset({ clinicId = null, phoneId = null, wabaId = null } = {}) {
   if (!ClinicMetaAsset) return null;
   const baseWhere = {
@@ -140,14 +153,17 @@ async function markDisconnectedAfterProviderError({
         })
       : null;
 
+    const phoneNumberId = phoneId || asset?.phoneNumberId || null;
+    const resolvedWabaId = wabaId || asset?.wabaId || null;
+
     await notificationService.dispatchEvent({
       event: 'whatsapp.coexistence_disconnected',
       clinicId: resolvedClinicId,
       data: {
         clinicId: resolvedClinicId,
         clinicName: cleanString(clinic?.nombre_clinica),
-        phoneNumberId: phoneId || asset?.phoneNumberId || null,
-        wabaId: wabaId || asset?.wabaId || null,
+        phoneNumberId,
+        wabaId: resolvedWabaId,
         phoneNumber: cleanString(asset?.displayPhoneNumber || asset?.display_phone_number),
         messageId: messageId || null,
         recipient: cleanString(recipient) || null,
@@ -155,7 +171,7 @@ async function markDisconnectedAfterProviderError({
         errorSubcode: normalized.subcode,
         errorMessage: normalized.message,
         source: cleanString(source) || null,
-        link: '/ajustes?tab=whatsapp',
+        link: buildReconnectLink({ phoneNumberId, wabaId: resolvedWabaId }),
         useRouter: true,
         actionLabel: 'Reconectar WhatsApp',
         actionIcon: 'heroicons_outline:arrow-path',
