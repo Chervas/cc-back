@@ -70,6 +70,12 @@ const NOTIFICATION_EVENTS = [
     category: 'whatsapp',
     label: 'WhatsApp sin método de pago',
     level: 'error'
+  },
+  {
+    event: 'whatsapp.coexistence_disconnected',
+    category: 'whatsapp',
+    label: 'WhatsApp compartido desconectado',
+    level: 'error'
   }
 ];
 
@@ -121,7 +127,11 @@ const DEFAULT_NOTIFICATION_PREFERENCES = [
   { role: 'propietario', subrole: null, event: 'crm.call_back_reminder', enabled: true },
   { role: 'personaldeclinica', subrole: 'Recepción / Comercial ventas', event: 'crm.call_back_reminder', enabled: true },
   { role: 'admin', subrole: null, event: 'whatsapp.payment_missing', enabled: true },
-  { role: 'propietario', subrole: null, event: 'whatsapp.payment_missing', enabled: true }
+  { role: 'propietario', subrole: null, event: 'whatsapp.payment_missing', enabled: true },
+  { role: 'admin', subrole: null, event: 'whatsapp.coexistence_disconnected', enabled: true },
+  { role: 'propietario', subrole: null, event: 'whatsapp.coexistence_disconnected', enabled: true },
+  { role: 'personaldeclinica', subrole: 'Administrativos', event: 'whatsapp.coexistence_disconnected', enabled: true },
+  { role: 'personaldeclinica', subrole: 'Recepción / Comercial ventas', event: 'whatsapp.coexistence_disconnected', enabled: true }
 ];
 
 module.exports = {
