@@ -157,6 +157,8 @@ async function markDisconnectedAfterProviderError({
         source: cleanString(source) || null,
         link: '/ajustes?tab=whatsapp',
         useRouter: true,
+        actionLabel: 'Reconectar WhatsApp',
+        actionIcon: 'heroicons_outline:arrow-path',
       },
     });
   } catch (notificationError) {

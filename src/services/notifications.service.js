@@ -106,7 +106,7 @@ function buildNotificationContent(event, payload = {}) {
       const phone = payload.phoneNumber || payload.phoneNumberId || 'el número conectado';
       return {
         title: `WhatsApp desconectado en ${clinic}`,
-        message: `El WhatsApp compartido ${phone} ha perdido acceso en Meta. Puede ocurrir si la sesión de WhatsApp Business del móvil queda inactiva o si Meta retira permisos del activo. Para reactivarlo, abre WhatsApp Business en el móvil vinculado, comprueba que el número compartido está conectado, escribe un mensaje desde ese móvil y espera una respuesta. Después confirma en ClinicaClick que la API vuelve a enviar y cierra esta alerta.`,
+        message: `El WhatsApp compartido ${phone} ha perdido acceso en Meta. Hemos detectado un error compatible con la app de ClinicaClick desinstalada o sin permisos sobre el WABA. Pulsa Reconectar WhatsApp para abrir Ajustes y completar de nuevo la conexión. Si usas WhatsApp compartido, después conecta WhatsApp Business en el móvil, escribe un mensaje desde ese móvil y recibe una respuesta para reactivar la sesión antes de cerrar esta alerta.`,
         icon: 'heroicons_outline:exclamation-triangle',
         level: defaults.level || 'error'
       };
