@@ -308,6 +308,28 @@ function isCommercialTemplateUsage(value) {
   return COMMERCIAL_TEMPLATE_USAGES.has(normalizeTemplateUsage(value));
 }
 
+function getTemplateCategory(template) {
+  const plain = template?.get ? template.get({ plain: true }) : (template || {});
+  return normalizeText(plain.category || plain.catalog?.category).toUpperCase();
+}
+
+function resolveTemplateUsageFromMetaCategory(template, fallbackUsage = 'promocion') {
+  const category = getTemplateCategory(template);
+  if (category === 'MARKETING') return 'promocion';
+  if (category && category !== 'MARKETING') {
+    const fallback = normalizeTemplateUsage(fallbackUsage);
+    return fallback && fallback !== 'promocion' ? fallback : 'notificacion';
+  }
+  return normalizeTemplateUsage(fallbackUsage);
+}
+
+function resolveTemplateCommercialFromMetaCategory(template, fallbackCommercial = false) {
+  const category = getTemplateCategory(template);
+  if (category === 'MARKETING') return true;
+  if (category) return false;
+  return fallbackCommercial === true;
+}
+
 function toTitleCaseName(value) {
   const particles = new Set(['de', 'del', 'la', 'las', 'los', 'y', 'e', 'da', 'das', 'do', 'dos']);
   return normalizeText(value)
@@ -1387,7 +1409,7 @@ async function hydrateListTemplateSnapshots(lists) {
 
   const templates = await WhatsappTemplate.findAll({
     where: { id: { [Op.in]: templateIds }, is_active: true },
-    include: [{ model: db.WhatsappTemplateCatalog, as: 'catalog', attributes: ['id', 'name', 'display_name', 'body_text', 'variables'], required: false }],
+    include: [{ model: db.WhatsappTemplateCatalog, as: 'catalog', attributes: ['id', 'name', 'display_name', 'category', 'body_text', 'variables'], required: false }],
   });
   const templatesById = new Map(templates.map((template) => [Number(template.id), template]));
 
@@ -1397,9 +1419,17 @@ async function hydrateListTemplateSnapshots(lists) {
 
     const snapshot = buildTemplateSnapshot(template);
     const currentCriteria = list.get ? list.get('criteria') || {} : list.criteria || {};
+    const templateUsage = resolveTemplateUsageFromMetaCategory(template, currentCriteria.template_usage || 'promocion');
+    const templateCommercial = resolveTemplateCommercialFromMetaCategory(
+      template,
+      currentCriteria.template_commercial === true || isCommercialTemplateUsage(templateUsage)
+    );
     const criteria = {
       ...currentCriteria,
       whatsapp_template_id: Number(template.id),
+      template_usage: templateUsage,
+      template_commercial: templateCommercial,
+      template_category: getTemplateCategory(template) || null,
     };
 
     if (list.set) {
@@ -1931,6 +1961,7 @@ function buildTemplateSnapshot(template) {
     id: plain.id,
     name: plain.name,
     display_name: plain.catalog?.display_name || plain.display_name || plain.name,
+    category: plain.category || plain.catalog?.category || null,
     status: plain.status,
     rejection_reason: plain.rejection_reason || null,
     language: plain.language || 'es',
@@ -2202,9 +2233,11 @@ async function prepareCampaign(scope, campaignId, body = {}, userId = null) {
     ? await resolveWhatsappTemplate(selectedTemplateId, scope)
     : null;
   const snapshot = buildTemplateSnapshot(template);
-  const templateUsage = normalizeTemplateUsage(body.template_usage || list.criteria?.template_usage || 'promocion');
-  const templateCommercial = body.template_commercial === true
-    || (body.template_commercial !== false && (list.criteria?.template_commercial === true || isCommercialTemplateUsage(templateUsage)));
+  const requestedTemplateUsage = normalizeTemplateUsage(body.template_usage || list.criteria?.template_usage || 'promocion');
+  const requestedTemplateCommercial = body.template_commercial === true
+    || (body.template_commercial !== false && (list.criteria?.template_commercial === true || isCommercialTemplateUsage(requestedTemplateUsage)));
+  const templateUsage = resolveTemplateUsageFromMetaCategory(template, requestedTemplateUsage);
+  const templateCommercial = resolveTemplateCommercialFromMetaCategory(template, requestedTemplateCommercial);
   const autoSendWhenApproved = body.auto_send_when_template_approved === true || body.auto_send_when_approved === true;
   const approved = needsWhatsappTemplate
     ? !!template && String(template.status || '').toUpperCase() === 'APPROVED'
@@ -2568,6 +2601,75 @@ async function getDispatchStatus(scope, campaignId) {
   };
 }
 
+async function reconcileBulkSendTemplateCategory(templateRow, logger = console) {
+  const template = templateRow?.get ? templateRow.get({ plain: true }) : templateRow;
+  const templateId = Number(template?.id || 0);
+  if (!templateId) return { updated: 0 };
+
+  const rows = await db.sequelize.query(
+    `
+    SELECT id
+    FROM MarketingPatientLists
+    WHERE objective_id = :objectiveId
+      AND CAST(JSON_UNQUOTE(JSON_EXTRACT(criteria, '$.whatsapp_template_id')) AS UNSIGNED) = :templateId
+    LIMIT 200
+    `,
+    {
+      replacements: { objectiveId: OBJECTIVE_ID, templateId },
+      type: QueryTypes.SELECT,
+    }
+  );
+
+  const templateCategory = getTemplateCategory(template) || null;
+  const templateSyncedAt = new Date().toISOString();
+  let updated = 0;
+
+  for (const row of rows) {
+    const list = await MarketingPatientList.findByPk(row.id);
+    if (!list) continue;
+    const currentCriteria = list.criteria || {};
+    const templateUsage = resolveTemplateUsageFromMetaCategory(template, currentCriteria.template_usage || 'promocion');
+    const templateCommercial = resolveTemplateCommercialFromMetaCategory(
+      template,
+      currentCriteria.template_commercial === true || isCommercialTemplateUsage(templateUsage)
+    );
+    const nextDispatch = currentCriteria.dispatch && typeof currentCriteria.dispatch === 'object'
+      ? {
+          ...currentCriteria.dispatch,
+          template_category: templateCategory,
+          template_category_source: 'meta_sync',
+          template_category_synced_at: templateSyncedAt,
+        }
+      : currentCriteria.dispatch;
+    const nextCriteria = {
+      ...currentCriteria,
+      template_usage: templateUsage,
+      template_commercial: templateCommercial,
+      opt_out_text: templateCommercial ? normalizeText(currentCriteria.opt_out_text) : null,
+      template_category: templateCategory,
+      template_category_source: 'meta_sync',
+      template_category_synced_at: templateSyncedAt,
+      ...(nextDispatch ? { dispatch: nextDispatch } : {}),
+    };
+
+    try {
+      await list.update({
+        template_snapshot: buildTemplateSnapshot(template),
+        criteria: nextCriteria,
+      });
+      updated += 1;
+    } catch (error) {
+      logger.warn?.('[marketing-bulk-sends] No se pudo reconciliar categoria de plantilla en campaña', {
+        list_id: list.id,
+        template_id: templateId,
+        error: error?.message || error,
+      });
+    }
+  }
+
+  return { updated };
+}
+
 async function enqueueDispatchJob({ list, scope, nextRunAt = null, userId = null }) {
   const job = await jobRequestsService.enqueueJobRequest({
     type: DISPATCH_JOB_TYPE,
@@ -2795,6 +2897,8 @@ async function enqueueAutoDispatchForApprovedTemplate(templateRow, logger = cons
     return { queued: 0 };
   }
 
+  const reconciliation = await reconcileBulkSendTemplateCategory(template, logger);
+
   const rows = await db.sequelize.query(
     `
     SELECT id
@@ -2815,6 +2919,13 @@ async function enqueueAutoDispatchForApprovedTemplate(templateRow, logger = cons
   for (const row of rows) {
     const list = await MarketingPatientList.findByPk(row.id);
     if (!list) continue;
+    const templateUsage = resolveTemplateUsageFromMetaCategory(template, list.criteria?.template_usage || 'promocion');
+    const templateCommercial = resolveTemplateCommercialFromMetaCategory(
+      template,
+      list.criteria?.template_commercial === true || isCommercialTemplateUsage(templateUsage)
+    );
+    const templateCategory = getTemplateCategory(template) || null;
+    const templateSyncedAt = new Date().toISOString();
     const clinicIds = Array.isArray(list.clinic_ids)
       ? list.clinic_ids.map((id) => Number(id)).filter((id) => Number.isInteger(id) && id > 0)
       : [];
@@ -2830,12 +2941,22 @@ async function enqueueAutoDispatchForApprovedTemplate(templateRow, logger = cons
         ...(list.safety_gates || {}),
         approved_template: true,
       },
+      template_snapshot: buildTemplateSnapshot(template),
       criteria: mergeCriteria(list, {
+        template_usage: templateUsage,
+        template_commercial: templateCommercial,
+        opt_out_text: templateCommercial ? normalizeText(list.criteria?.opt_out_text) : null,
+        template_category: templateCategory,
+        template_category_source: 'meta_sync',
+        template_category_synced_at: templateSyncedAt,
         dispatch: {
           ...dispatch,
           status: 'prepared',
           auto_send_when_template_approved: true,
           template_approved_at: new Date().toISOString(),
+          template_category: templateCategory,
+          template_category_source: 'meta_sync',
+          template_category_synced_at: templateSyncedAt,
         },
       }),
     });
@@ -2852,7 +2973,7 @@ async function enqueueAutoDispatchForApprovedTemplate(templateRow, logger = cons
     }
   }
 
-  return { queued };
+  return { queued, reconciled: reconciliation.updated || 0 };
 }
 
 function extractProviderError(error) {
