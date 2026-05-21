@@ -11,6 +11,7 @@ const marketingOptOutService = require('../services/marketingOptOut.service');
 const marketingBulkSendsService = require('../services/marketingBulkSends.service');
 const notificationService = require('../services/notifications.service');
 const whatsappPaymentStatusService = require('../services/whatsappPaymentStatus.service');
+const whatsappConnectionStatusService = require('../services/whatsappConnectionStatus.service');
 const { getIO } = require('../services/socket.service');
 const { findCanonicalWhatsappConversation } = require('../lib/canonical-conversation');
 const db = require('../../models');
@@ -760,6 +761,14 @@ createBusinessWorker('outbound_whatsapp', async (job) => {
         msg.sent_at = new Date();
         await msg.save();
 
+        await whatsappConnectionStatusService.clearDisconnectedAfterSuccess({
+            clinicId: clinicConfig?.clinicId || null,
+            phoneId: clinicConfig?.phoneNumberId || msg.metadata?.phoneNumberId || msg.metadata?.phoneId || null,
+            wabaId: clinicConfig?.wabaId || msg.metadata?.wabaId || null,
+            messageId: msg.id,
+            source: 'outbound_whatsapp_worker',
+        }).catch(() => null);
+
         const conv = await Conversation.findByPk(conversationId);
         if (conv) {
             conv.last_message_at = new Date();
@@ -809,6 +818,16 @@ createBusinessWorker('outbound_whatsapp', async (job) => {
                     await asset.save();
                 }
             }
+
+            await whatsappConnectionStatusService.markDisconnectedAfterProviderError({
+                error: rawError || err,
+                clinicId: clinicConfig?.clinicId || null,
+                phoneId: clinicConfig?.phoneNumberId || msg.metadata?.phoneNumberId || msg.metadata?.phoneId || null,
+                wabaId: clinicConfig?.wabaId || msg.metadata?.wabaId || null,
+                messageId: msg.id,
+                recipient: to || msg.metadata?.recipient || null,
+                source: 'outbound_whatsapp_worker',
+            });
         } catch (regErr) {
             console.warn('[outbound_whatsapp] No se pudo actualizar estado de registro', regErr?.message || regErr);
         }
@@ -1517,6 +1536,22 @@ createWorker('webhook_whatsapp', async (job) => {
                     messageId: message.id,
                     status: nextStatus,
                     error: serializeError(paymentClearError),
+                });
+            }
+            try {
+                await whatsappConnectionStatusService.clearDisconnectedAfterSuccess({
+                    clinicId: messageRef.clinic_id || clinicId,
+                    phoneId: message.metadata?.phoneId || message.metadata?.phoneNumberId || null,
+                    wabaId: message.metadata?.wabaId || null,
+                    messageId: message.id,
+                    source: `whatsapp_status_${nextStatus}`,
+                });
+            } catch (connectionClearError) {
+                console.warn('[whatsapp] No se pudo limpiar desconexión coexistence tras status correcto', {
+                    clinicId: messageRef.clinic_id || clinicId,
+                    messageId: message.id,
+                    status: nextStatus,
+                    error: serializeError(connectionClearError),
                 });
             }
         }

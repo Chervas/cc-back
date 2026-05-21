@@ -6,6 +6,7 @@ const db = require('../../models');
 const { normalizePhoneDigits, getPhoneLookupCandidates } = require('../lib/phone');
 const whatsappService = require('./whatsapp.service');
 const whatsappPaymentStatusService = require('./whatsappPaymentStatus.service');
+const whatsappConnectionStatusService = require('./whatsappConnectionStatus.service');
 const { buildWhatsappTemplateVariableContract } = require('../lib/whatsapp-template-contract');
 const { findCanonicalWhatsappConversation } = require('../lib/canonical-conversation');
 const marketingOptOutService = require('./marketingOptOut.service');
@@ -2443,6 +2444,15 @@ async function sendTest(scope, campaignId, body = {}) {
       },
       occurred_at: new Date(),
     });
+    await whatsappConnectionStatusService.markDisconnectedAfterProviderError({
+      error: providerError,
+      clinicId,
+      phoneId: clinicConfig.phoneNumberId || null,
+      wabaId: clinicConfig.wabaId || null,
+      messageId: appMessage.id,
+      recipient: targetPhone,
+      source: 'mass_campaign_test',
+    }).catch(() => null);
     throw sendErr;
   }
 
@@ -2458,6 +2468,13 @@ async function sendTest(scope, campaignId, body = {}) {
     sent_at: new Date(),
   });
   emitQuickChatMessageUpdated(conversation, appMessage);
+  await whatsappConnectionStatusService.clearDisconnectedAfterSuccess({
+    clinicId,
+    phoneId: clinicConfig.phoneNumberId || null,
+    wabaId: clinicConfig.wabaId || null,
+    messageId: appMessage.id,
+    source: 'mass_campaign_test',
+  }).catch(() => null);
   await conversation.update({ last_message_at: new Date() });
   await MarketingPatientContactEvent.create({
     list_id: list.id,
@@ -2936,6 +2953,13 @@ async function sendDispatchItem({ list, item, template, clinic, clinicConfig, ba
       },
       occurred_at: new Date(),
     });
+    await whatsappConnectionStatusService.clearDisconnectedAfterSuccess({
+      clinicId: clinicConfig.clinicId || getClinicIdForList(list),
+      phoneId: clinicConfig.phoneNumberId || null,
+      wabaId: clinicConfig.wabaId || null,
+      messageId: appMessage.id,
+      source: 'mass_campaign_dispatch',
+    }).catch(() => null);
     return { sent: true };
   } catch (error) {
     const providerError = extractProviderError(error);
@@ -2971,6 +2995,15 @@ async function sendDispatchItem({ list, item, template, clinic, clinicConfig, ba
       },
       occurred_at: new Date(),
     });
+    await whatsappConnectionStatusService.markDisconnectedAfterProviderError({
+      error: providerError.raw || providerError,
+      clinicId: clinicConfig.clinicId || getClinicIdForList(list),
+      phoneId: clinicConfig.phoneNumberId || null,
+      wabaId: clinicConfig.wabaId || null,
+      messageId: appMessage.id,
+      recipient: item.phone,
+      source: 'mass_campaign_dispatch',
+    }).catch(() => null);
     return { sent: false, error: providerError };
   }
 }

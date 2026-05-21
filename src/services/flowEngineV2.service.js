@@ -35,6 +35,7 @@ const ClinicMetaAsset = db.ClinicMetaAsset;
 const WhatsappTemplate = db.WhatsappTemplate;
 const WhatsappTemplateCatalog = db.WhatsappTemplateCatalog;
 const whatsappService = require('./whatsapp.service');
+const whatsappConnectionStatusService = require('./whatsappConnectionStatus.service');
 const appointmentNotificationCleanup = require('./appointmentNotificationCleanup.service');
 const { findCanonicalWhatsappConversation } = require('../lib/canonical-conversation');
 const { buildConversationContext } = require('../lib/automation-conversation-context');
@@ -2857,6 +2858,14 @@ async function handleSendWhatsapp(node, context, runtime) {
       sent_at: new Date(),
     });
 
+    await whatsappConnectionStatusService.clearDisconnectedAfterSuccess({
+      clinicId,
+      phoneId: senderData.clinic_config?.phoneNumberId || null,
+      wabaId: senderData.clinic_config?.wabaId || null,
+      messageId: msg.id,
+      source: 'automation_flow_send_whatsapp',
+    }).catch(() => null);
+
     await conversation.update({ last_message_at: new Date() });
     const io = getIO();
     if (io) {
@@ -2905,6 +2914,16 @@ async function handleSendWhatsapp(node, context, runtime) {
           await asset.save();
         }
       }
+
+      await whatsappConnectionStatusService.markDisconnectedAfterProviderError({
+        error: providerError,
+        clinicId,
+        phoneId: senderData?.clinic_config?.phoneNumberId || null,
+        wabaId: senderData?.clinic_config?.wabaId || null,
+        messageId: msg.id,
+        recipient: recipientData?.recipient || null,
+        source: 'automation_flow_send_whatsapp',
+      });
     } catch (_regErr) {
       // No bloquea el flujo: la causa principal del error ya se propagará.
     }
