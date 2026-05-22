@@ -3,6 +3,7 @@ const jwt = require('jsonwebtoken');
 const bcrypt = require('bcryptjs');
 const secret = process.env.JWT_SECRET; 
 const { Usuario } = require('../../models'); 
+const { isBlockedAuthEmail } = require('../lib/blocked-auth-emails');
 const ACCESS_TOKEN_TTL_SECONDS = Math.max(300, Number(process.env.AUTH_ACCESS_TOKEN_TTL_SECONDS || (12 * 60 * 60)));
 const ACCESS_TOKEN_TTL = `${ACCESS_TOKEN_TTL_SECONDS}s`;
 
@@ -62,8 +63,14 @@ exports.resetPassword = async (req, res) => {
 exports.signIn = async (req, res) => {
     try {
         console.log('Credenciales recibidas:', req.body);
+        const email = String(req.body?.email || '').trim().toLowerCase();
 
-        const user = await Usuario.findOne({ where: { email_usuario: req.body.email } });
+        if (isBlockedAuthEmail(email)) {
+            console.warn('[Auth] Blocked login attempt for disabled demo email:', email);
+            return res.status(401).json({ message: 'Wrong email or password.' });
+        }
+
+        const user = await Usuario.findOne({ where: { email_usuario: email } });
         console.log('Datos del usuario:', user);
 
         if (!user) {
@@ -99,6 +106,10 @@ exports.signInWithToken = async (req, res) => {
         if(!accessToken) return res.status(400).json({ error: 'Access token is required' });
 
         const decodedToken = jwt.verify(accessToken, secret);
+        if (isBlockedAuthEmail(decodedToken.email)) {
+            return res.status(401).json({ error: 'Invalid token' });
+        }
+
         const user = await Usuario.findOne({ where: { id_usuario: decodedToken.userId } });
 
         if (!user) {
@@ -159,8 +170,12 @@ exports.unlockSession = async (req, res) => {
         if (!email || !password) {
             return res.status(400).json({ message: 'Email and password are required.' });
         }
+        const normalizedEmail = String(email).trim().toLowerCase();
+        if (isBlockedAuthEmail(normalizedEmail)) {
+            return res.status(401).json({ message: 'Wrong email or password.' });
+        }
 
-        const user = await Usuario.findOne({ where: { email_usuario: email } });
+        const user = await Usuario.findOne({ where: { email_usuario: normalizedEmail } });
         if (!user || !user.password_usuario) {
             return res.status(401).json({ message: 'Wrong email or password.' });
         }
