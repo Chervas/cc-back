@@ -851,6 +851,88 @@ function getDispatchConfig(list) {
   };
 }
 
+function normalizeDispatchContext(value) {
+  const key = normalizeKey(value || '');
+  if (key === 'welcome' || key === 'bienvenida') return 'welcome';
+  return key || null;
+}
+
+function buildDispatchFilterFromBody(body = {}, fallbackContext = null) {
+  const importBatchId = normalizeText(body.import_batch_id || body.importBatchId || '');
+  if (!importBatchId) return null;
+  return {
+    type: 'import_batch',
+    import_batch_id: importBatchId,
+    context: normalizeDispatchContext(body.dispatch_context || body.dispatch_mode || fallbackContext) || null,
+  };
+}
+
+function getDispatchItemFilter(dispatch = {}) {
+  const filter = dispatch?.filter && typeof dispatch.filter === 'object' ? dispatch.filter : null;
+  if (!filter || !normalizeText(filter.import_batch_id)) return null;
+  return {
+    type: filter.type || 'import_batch',
+    import_batch_id: normalizeText(filter.import_batch_id),
+    context: normalizeDispatchContext(filter.context || dispatch.context) || null,
+  };
+}
+
+function itemMatchesDispatchFilter(item = {}, filter = null) {
+  if (!filter) return true;
+  const plain = item?.get ? item.get({ plain: true }) : item;
+  if (filter.type === 'import_batch') {
+    return normalizeText(plain.custom_fields?.lote_importacion) === normalizeText(filter.import_batch_id);
+  }
+  return true;
+}
+
+async function getDispatchScopedItems(listId, filter = null, transaction = null) {
+  const items = await MarketingPatientListItem.findAll({
+    where: { list_id: listId },
+    transaction,
+  });
+  return items
+    .map((item) => (item?.get ? item.get({ plain: true }) : item))
+    .filter((item) => itemMatchesDispatchFilter(item, filter));
+}
+
+async function getDispatchScopedCounters(list, filter = null, transaction = null) {
+  if (!filter) {
+    return refreshListCounters(list.id, transaction);
+  }
+  const items = await getDispatchScopedItems(list.id, filter, transaction);
+  return computeCounters(items);
+}
+
+async function countDispatchRemainingItems(listId, filter = null) {
+  const where = {
+    list_id: listId,
+    status: 'ready',
+    selected: true,
+    [Op.or]: [{ dispatch_status: null }, { dispatch_status: 'pending' }],
+  };
+  if (!filter) {
+    return MarketingPatientListItem.count({ where });
+  }
+  const items = await MarketingPatientListItem.findAll({ where, order: [['id', 'ASC']] });
+  return items.filter((item) => itemMatchesDispatchFilter(item, filter)).length;
+}
+
+async function findDispatchCandidateBatch(listId, filter = null, limit = DISPATCH_BATCH_SIZE) {
+  const where = {
+    list_id: listId,
+    status: 'ready',
+    selected: true,
+    [Op.or]: [{ dispatch_status: null }, { dispatch_status: 'pending' }],
+  };
+  const items = await MarketingPatientListItem.findAll({
+    where,
+    order: [['id', 'ASC']],
+    ...(!filter ? { limit } : {}),
+  });
+  return (filter ? items.filter((item) => itemMatchesDispatchFilter(item, filter)) : items).slice(0, limit);
+}
+
 function normalizeBulkSendSettingsPayload(raw = {}) {
   const batchSize = Math.max(1, Math.min(1000, Number.parseInt(raw.batch_size || raw.batchSize || DISPATCH_BATCH_SIZE, 10) || DISPATCH_BATCH_SIZE));
   const delayMs = Math.max(2 * 60 * 1000, Number.parseInt(raw.delay_ms || raw.delayMs || DISPATCH_BATCH_DELAY_MS, 10) || DISPATCH_BATCH_DELAY_MS);
@@ -1246,7 +1328,8 @@ function missingRequiredFields({ channels, name, phoneDigits, email }) {
 
 function buildItemsFromRows(rows, body, channels) {
   const columnMapping = inferColumnMapping(rows, body.column_mapping || {});
-  const customFieldsSchema = buildCustomFieldSchema(rows, columnMapping, body.custom_fields_schema || []);
+  const importMetadata = buildImportMetadata(body);
+  const customFieldsSchema = withImportTrackingSchema(buildCustomFieldSchema(rows, columnMapping, body.custom_fields_schema || []));
   const nameFormat = normalizeNameFormat(body.name_format || body.nameFormat || 'auto');
   const seen = new Set();
   const items = [];
@@ -1290,13 +1373,16 @@ function buildItemsFromRows(rows, body, channels) {
         apellidos: nameInfo.lastName,
         nombre_completo: nameInfo.fullName,
         ...customFields,
+        fecha_importacion: importMetadata.importedAtDate,
+        fecha_importacion_texto: importMetadata.importedAtLabel,
+        lote_importacion: importMetadata.importBatchId,
       },
       missing_variables: [],
       notes: null,
     });
   }
 
-  return { items, columnMapping, customFieldsSchema, nameFormat };
+  return { items, columnMapping, customFieldsSchema, nameFormat, importMetadata };
 }
 
 async function buildItemsFromCurrentPatients(scope, body) {
@@ -1518,6 +1604,8 @@ async function createCampaign(scope, body = {}, userId = null) {
     let itemPayloads = [];
     let columnMapping = body.column_mapping || {};
     let customFieldsSchema = Array.isArray(body.custom_fields_schema) ? body.custom_fields_schema : [];
+    let importSummary = null;
+    let importMetadata = null;
 
     if (source === 'existing_patients_condition') {
       itemPayloads = await buildItemsFromCurrentPatients(scope, body);
@@ -1527,9 +1615,14 @@ async function createCampaign(scope, body = {}, userId = null) {
       columnMapping = importResult.columnMapping;
       customFieldsSchema = importResult.customFieldsSchema;
       itemPayloads = await attachExistingPatientContext(itemPayloads, scope, transaction);
+      importMetadata = importResult.importMetadata;
+      importSummary = buildImportSummary(itemPayloads, importMetadata);
     }
 
     itemPayloads = await applyMarketingOptOutExclusions(itemPayloads, scope, transaction);
+    if (importMetadata) {
+      importSummary = buildImportSummary(itemPayloads, importMetadata);
+    }
     const counters = computeCounters(itemPayloads);
     const list = await MarketingPatientList.create({
       name: listName,
@@ -1554,6 +1647,8 @@ async function createCampaign(scope, body = {}, userId = null) {
         import_file_name: body.import_file_name || null,
         column_mapping: columnMapping,
         name_format: normalizeNameFormat(body.name_format || body.nameFormat || (source === 'imported_file' ? 'auto' : null)),
+        import_history: importSummary ? [importSummary] : [],
+        welcome_message: body.welcome_message && typeof body.welcome_message === 'object' ? body.welcome_message : null,
         link_tracking: linkTracking,
         required_policy: {
           whatsapp: ['name', 'phone'],
@@ -1591,7 +1686,12 @@ async function createCampaign(scope, body = {}, userId = null) {
 
     const created = await MarketingPatientList.findByPk(list.id, { transaction });
     const preview = itemPayloads.slice(0, 5).map((item, index) => ({ ...item, id: index + 1 }));
-    return { success: true, campaign: serializeCampaign(created, { itemsPreview: preview }), list: serializeCampaign(created, { itemsPreview: preview }) };
+    return {
+      success: true,
+      campaign: serializeCampaign(created, { itemsPreview: preview }),
+      list: serializeCampaign(created, { itemsPreview: preview }),
+      import_result: importSummary,
+    };
   });
 }
 
@@ -1642,6 +1742,74 @@ function mergeCustomFieldSchemas(existingSchema = [], incomingSchema = []) {
     });
   }
   return Array.from(fields.values());
+}
+
+function buildImportMetadata(body = {}) {
+  const importedAt = new Date();
+  const importBatchId = normalizeText(body.import_batch_id || body.importBatchId)
+    || crypto.randomBytes(8).toString('hex');
+  return {
+    importBatchId,
+    importedAt,
+    importedAtIso: importedAt.toISOString(),
+    importedAtDate: importedAt.toISOString().slice(0, 10),
+    importedAtLabel: importedAt.toLocaleString('es-ES', {
+      timeZone: 'Europe/Madrid',
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+    }),
+  };
+}
+
+function withImportTrackingSchema(schema = []) {
+  return mergeCustomFieldSchemas(schema, [
+    {
+      key: 'fecha_importacion',
+      label: 'Fecha importación',
+      type: 'date',
+      source: 'system',
+      source_column: 'Fecha importación',
+    },
+    {
+      key: 'lote_importacion',
+      label: 'Lote importación',
+      type: 'text',
+      source: 'system',
+      source_column: 'Lote importación',
+    },
+  ]);
+}
+
+function buildImportSummary(itemPayloads = [], metadata = {}) {
+  const reasons = {};
+  for (const item of itemPayloads) {
+    if (!String(item.status || '').startsWith('excluded')) continue;
+    const key = normalizeKey(item.exclusion_reason || item.status || 'otro') || 'otro';
+    reasons[key] = (reasons[key] || 0) + 1;
+  }
+  return {
+    import_batch_id: metadata.importBatchId || null,
+    imported_at: metadata.importedAtIso || null,
+    total: itemPayloads.length,
+    imported: itemPayloads.filter((item) => item.status === 'ready').length,
+    discarded: itemPayloads.filter((item) => String(item.status || '').startsWith('excluded')).length,
+    reasons,
+  };
+}
+
+function serializeImportResultItem(item) {
+  return {
+    name: item?.name || null,
+    phone: item?.phone || null,
+    email: item?.email || null,
+    status: item?.status || null,
+    reason: item?.reason || null,
+    exclusion_reason: item?.exclusion_reason || null,
+    custom_fields: item?.custom_fields || {},
+  };
 }
 
 function normalizeListSegment(segment = {}) {
@@ -1810,6 +1978,11 @@ async function updateCampaign(scope, campaignId, body = {}, userId = null) {
   if (body.auto_send_when_template_approved !== undefined || body.auto_send_when_approved !== undefined) {
     nextCriteria.auto_send_when_template_approved = body.auto_send_when_template_approved === true || body.auto_send_when_approved === true;
   }
+  if (body.welcome_message !== undefined) {
+    nextCriteria.welcome_message = body.welcome_message && typeof body.welcome_message === 'object'
+      ? body.welcome_message
+      : null;
+  }
 
   const updatePayload = { criteria: nextCriteria };
   if (requestedStatus === 'archived') {
@@ -1833,6 +2006,7 @@ async function updateCampaign(scope, campaignId, body = {}, userId = null) {
   let appendedCount = 0;
   let appendedReady = 0;
   let appendedExcluded = 0;
+  let appendImportSummary = null;
 
   await db.sequelize.transaction(async (transaction) => {
     if (appendRows.length) {
@@ -1873,24 +2047,31 @@ async function updateCampaign(scope, campaignId, body = {}, userId = null) {
         return item;
       });
 
+      const readyItemPayloads = itemPayloads.filter((item) => item.status === 'ready');
+      const rejectedItemPayloads = itemPayloads.filter((item) => String(item.status || '').startsWith('excluded'));
       appendedCount = itemPayloads.length;
-      appendedReady = itemPayloads.filter((item) => item.status === 'ready').length;
-      appendedExcluded = itemPayloads.filter((item) => String(item.status || '').startsWith('excluded')).length;
+      appendedReady = readyItemPayloads.length;
+      appendedExcluded = rejectedItemPayloads.length;
+      appendImportSummary = {
+        ...buildImportSummary(itemPayloads, importResult.importMetadata),
+        imported_items: readyItemPayloads.map(serializeImportResultItem),
+        discarded_items: rejectedItemPayloads.map(serializeImportResultItem),
+      };
 
-      if (itemPayloads.length) {
+      if (readyItemPayloads.length) {
         await MarketingPatientListItem.bulkCreate(
-          itemPayloads.map((item) => ({ ...item, list_id: list.id })),
+          readyItemPayloads.map((item) => ({ ...item, list_id: list.id })),
           { transaction }
         );
       }
 
-      nextCriteria.column_mapping = importResult.columnMapping;
-      nextCriteria.name_format = importResult.nameFormat;
-      updatePayload.custom_fields_schema = mergeCustomFieldSchemas(list.custom_fields_schema || [], importResult.customFieldsSchema || []);
-      updatePayload.condition_summary = 'Lista externa importada para campaña puntual, con contactos añadidos posteriormente.';
-      updatePayload.exclusion_summary = appendedExcluded
-        ? `${appendedExcluded} contacto(s) añadidos quedaron descartados por duplicado, opt-out o campos obligatorios.`
-        : (list.exclusion_summary || 'Sin exclusiones detectadas.');
+      if (readyItemPayloads.length) {
+        nextCriteria.column_mapping = importResult.columnMapping;
+        nextCriteria.name_format = importResult.nameFormat;
+        updatePayload.custom_fields_schema = mergeCustomFieldSchemas(list.custom_fields_schema || [], importResult.customFieldsSchema || []);
+        updatePayload.condition_summary = 'Lista externa importada para campaña puntual, con contactos añadidos posteriormente.';
+      }
+      updatePayload.exclusion_summary = list.exclusion_summary || 'Sin exclusiones detectadas.';
     }
 
     const segmentItems = await MarketingPatientListItem.findAll({ where: { list_id: list.id }, transaction });
@@ -1924,6 +2105,7 @@ async function updateCampaign(scope, campaignId, body = {}, userId = null) {
     success: true,
     campaign: serializeCampaign(reloaded, { itemsPreview: items }),
     list: serializeCampaign(reloaded, { itemsPreview: items }),
+    import_result: appendImportSummary,
   };
 }
 
@@ -2220,15 +2402,23 @@ async function renderTemplatePreview({ template, item, list, clinic }) {
 async function prepareCampaign(scope, campaignId, body = {}, userId = null) {
   const list = await MarketingPatientList.findByPk(campaignId);
   ensureScopeAccess(list, scope);
+  const dispatchContext = normalizeDispatchContext(body.dispatch_context || body.dispatch_mode);
+  const isWelcomeDispatch = dispatchContext === 'welcome' || body.welcome === true;
+  const dispatchFilter = buildDispatchFilterFromBody(body, isWelcomeDispatch ? 'welcome' : null);
+  const welcomeMessage = list.criteria?.welcome_message && typeof list.criteria.welcome_message === 'object'
+    ? list.criteria.welcome_message
+    : {};
   const channels = Array.isArray(list.criteria?.channels)
     ? list.criteria.channels
     : normalizeChannels(list.action_mode || list.channel);
   const needsWhatsappTemplate = channels.includes('whatsapp');
-  const selectedTemplateId = body.whatsapp_template_id
-    || body.template_id
-    || list.criteria?.whatsapp_template_id
-    || list.template_snapshot?.id
-    || list.template_id;
+  const selectedTemplateId = isWelcomeDispatch
+    ? (body.whatsapp_template_id || body.template_id || welcomeMessage.template_id)
+    : (body.whatsapp_template_id
+      || body.template_id
+      || list.criteria?.whatsapp_template_id
+      || list.template_snapshot?.id
+      || list.template_id);
   const template = selectedTemplateId
     ? await resolveWhatsappTemplate(selectedTemplateId, scope)
     : null;
@@ -2243,10 +2433,14 @@ async function prepareCampaign(scope, campaignId, body = {}, userId = null) {
     ? !!template && String(template.status || '').toUpperCase() === 'APPROVED'
     : true;
   let items = await MarketingPatientListItem.findAll({ where: { list_id: list.id } });
+  const listCounters = computeCounters(items.map((item) => (item?.get ? item.get({ plain: true }) : item)));
+  const dispatchItems = dispatchFilter
+    ? items.filter((item) => itemMatchesDispatchFilter(item, dispatchFilter))
+    : items;
   const activeSegmentId = body.active_segment_id !== undefined || body.segment_id !== undefined
     ? normalizeText(body.active_segment_id || body.segment_id) || null
-    : normalizeText(list.criteria?.active_segment_id) || null;
-  const selectedItems = await applyActiveSegmentSelection(list, items, activeSegmentId);
+    : (isWelcomeDispatch ? null : (normalizeText(list.criteria?.active_segment_id) || null));
+  const selectedItems = await applyActiveSegmentSelection(list, dispatchItems, activeSegmentId);
   const nextCriteriaBase = annotateSegmentCounts({
     ...(list.criteria || {}),
     active_segment_id: activeSegmentId,
@@ -2274,20 +2468,20 @@ async function prepareCampaign(scope, campaignId, body = {}, userId = null) {
   };
   const dispatchConfig = await getDispatchConfigForList(list);
 
-  await list.update({
+  const dispatchSnapshot = buildTemplateSnapshot(template);
+  const listPatch = {
     status: 'prepared',
     // `template_id` points to legacy MessageTemplates. WABA templates live in
     // WhatsappTemplates, so keep the approved WABA reference in criteria/snapshot.
     template_id: null,
-    template_snapshot: snapshot,
-    counters,
+    counters: isWelcomeDispatch ? listCounters : counters,
     safety_gates: nextGates,
     prepared_at: new Date(),
     criteria: {
       ...nextCriteriaBase,
       campaign_name: normalizeText(body.campaign_name || list.criteria?.campaign_name || list.name),
       list_name: normalizeText(body.list_name || list.criteria?.list_name || list.name),
-      whatsapp_template_id: template?.id || null,
+      whatsapp_template_id: isWelcomeDispatch ? (list.criteria?.whatsapp_template_id || null) : (template?.id || null),
       template_usage: templateUsage,
       template_commercial: templateCommercial,
       opt_out_text: templateCommercial ? normalizeText(body.opt_out_text || list.criteria?.opt_out_text) : null,
@@ -2298,6 +2492,19 @@ async function prepareCampaign(scope, campaignId, body = {}, userId = null) {
       dispatch: {
         ...dispatchConfig,
         status: !approved && autoSendWhenApproved ? 'waiting_template_approval' : 'prepared',
+        context: isWelcomeDispatch ? 'welcome' : null,
+        label: isWelcomeDispatch ? 'Bienvenida WhatsApp' : null,
+        filter: dispatchFilter,
+        whatsapp_template_id: template?.id || null,
+        template_snapshot: dispatchSnapshot,
+        job_id: null,
+        started_at: null,
+        completed_at: null,
+        last_batch_index: 0,
+        last_batch_started_at: null,
+        last_batch_completed_at: null,
+        next_allowed_at: null,
+        cancel_requested: false,
         batch_size: dispatchConfig.batch_size,
         delay_ms: dispatchConfig.delay_ms,
         min_read_rate: dispatchConfig.min_read_rate,
@@ -2309,7 +2516,11 @@ async function prepareCampaign(scope, campaignId, body = {}, userId = null) {
       },
       auto_send_when_template_approved: autoSendWhenApproved,
     },
-  });
+  };
+  if (!isWelcomeDispatch) {
+    listPatch.template_snapshot = snapshot;
+  }
+  await list.update(listPatch);
 
   await MarketingPatientContactEvent.create({
     list_id: list.id,
@@ -2318,6 +2529,8 @@ async function prepareCampaign(scope, campaignId, body = {}, userId = null) {
     payload: {
       user_id: userId || null,
       template_id: template?.id || null,
+      context: isWelcomeDispatch ? 'welcome' : 'campaign',
+      filter: dispatchFilter,
       safety_gates: nextGates,
       blocked_gates: getBlockedGates(nextGates),
     },
@@ -2587,11 +2800,91 @@ async function listRecipients(scope, campaignId, query = {}) {
   };
 }
 
+async function updateRecipient(scope, campaignId, itemId, body = {}, userId = null) {
+  const list = await MarketingPatientList.findByPk(campaignId);
+  ensureScopeAccess(list, scope);
+  const item = await MarketingPatientListItem.findOne({
+    where: {
+      id: itemId,
+      list_id: list.id,
+    },
+  });
+  if (!item) {
+    const err = new Error('Contacto de la lista no encontrado');
+    err.status = 404;
+    throw err;
+  }
+
+  const action = normalizeKey(body.action || 'restore');
+  if (action !== 'restore') {
+    const err = new Error('Acción no soportada para este contacto');
+    err.status = 400;
+    throw err;
+  }
+  if (item.opt_out_at || item.exclusion_reason === 'opt_out' || item.status === 'excluded_opt_out') {
+    const err = new Error('No se puede sacar de cuarentena un contacto que ha solicitado baja comercial.');
+    err.status = 409;
+    err.details = { reason: 'opt_out' };
+    throw err;
+  }
+  if (!String(item.status || '').startsWith('excluded')) {
+    return {
+      success: true,
+      action: 'unchanged',
+      item: serializeItem(item),
+      campaign: serializeCampaign(list),
+      list: serializeCampaign(list),
+    };
+  }
+
+  const previousStatus = item.status;
+  const previousExclusionReason = item.exclusion_reason || null;
+  await db.sequelize.transaction(async (transaction) => {
+    await item.update({
+      status: 'ready',
+      reason: normalizeText(body.reason) || 'Contacto sacado de cuarentena manualmente.',
+      exclusion_reason: null,
+      selected: true,
+      notes: [
+        normalizeText(item.notes),
+        `Sacado de cuarentena manualmente${userId ? ` por usuario ${userId}` : ''}.`,
+      ].filter(Boolean).join('\n') || null,
+    }, { transaction });
+    const counters = await refreshListCounters(list.id, transaction);
+    await MarketingPatientContactEvent.create({
+      list_id: list.id,
+      item_id: item.id,
+      paciente_id: item.paciente_id || null,
+      event_type: 'mass_campaign_recipient_restored',
+      channel: list.channel,
+      payload: {
+        user_id: userId || null,
+        previous_status: previousStatus,
+        previous_exclusion_reason: previousExclusionReason,
+        counters,
+      },
+      occurred_at: new Date(),
+    }, { transaction });
+  });
+
+  const reloaded = await MarketingPatientList.findByPk(list.id);
+  const updated = await MarketingPatientListItem.findByPk(item.id);
+  return {
+    success: true,
+    action: 'restored',
+    item: serializeItem(updated),
+    campaign: serializeCampaign(reloaded, { itemsPreview: [updated] }),
+    list: serializeCampaign(reloaded, { itemsPreview: [updated] }),
+  };
+}
+
 async function getDispatchStatus(scope, campaignId) {
   const list = await MarketingPatientList.findByPk(campaignId);
   ensureScopeAccess(list, scope);
   await reconcileListMessageState(list, scope);
-  const counters = await refreshListCounters(list.id);
+  const dispatch = getDispatchConfig(list);
+  const filter = getDispatchItemFilter(dispatch);
+  const counters = await getDispatchScopedCounters(list, filter);
   const reloaded = await MarketingPatientList.findByPk(list.id);
   const accountQuality = await getWhatsappAccountQualityForList(reloaded, scope);
   return {
@@ -2670,12 +2963,14 @@ async function reconcileBulkSendTemplateCategory(templateRow, logger = console) 
   return { updated };
 }
 
-async function enqueueDispatchJob({ list, scope, nextRunAt = null, userId = null }) {
+async function enqueueDispatchJob({ list, scope, nextRunAt = null, userId = null, context = null, filter = null }) {
   const job = await jobRequestsService.enqueueJobRequest({
     type: DISPATCH_JOB_TYPE,
     payload: {
       list_id: list.id,
       scope,
+      context,
+      filter,
     },
     priority: 'normal',
     status: nextRunAt ? 'waiting' : 'pending',
@@ -2704,6 +2999,8 @@ async function startCampaignDispatch(scope, campaignId, body = {}, actor = null)
   const list = await MarketingPatientList.findByPk(campaignId);
   ensureScopeAccess(list, scope);
   const dispatch = getDispatchConfig(list);
+  const context = normalizeDispatchContext(body.dispatch_context || body.dispatch_mode || dispatch.context);
+  const filter = buildDispatchFilterFromBody(body, context) || getDispatchItemFilter(dispatch);
   const channels = Array.isArray(list.criteria?.channels)
     ? list.criteria.channels
     : normalizeChannels(list.action_mode || list.channel);
@@ -2729,22 +3026,25 @@ async function startCampaignDispatch(scope, campaignId, body = {}, actor = null)
     err.details = { blocked_gates: blockedGates };
     throw err;
   }
-  const template = await resolveWhatsappTemplate(list.criteria?.whatsapp_template_id || list.template_snapshot?.id, scope);
+  const welcomeMessage = list.criteria?.welcome_message && typeof list.criteria.welcome_message === 'object'
+    ? list.criteria.welcome_message
+    : {};
+  const selectedTemplateId = body.whatsapp_template_id
+    || body.template_id
+    || dispatch.whatsapp_template_id
+    || dispatch.template_snapshot?.id
+    || (context === 'welcome' ? welcomeMessage.template_id : null)
+    || list.criteria?.whatsapp_template_id
+    || list.template_snapshot?.id;
+  const template = await resolveWhatsappTemplate(selectedTemplateId, scope);
   if (!template || String(template.status || '').toUpperCase() !== 'APPROVED') {
     const err = new Error('La plantilla no está aprobada. Meta suele aprobarla en unos 15 minutos.');
     err.status = 409;
     throw err;
   }
 
-  const counters = await refreshListCounters(list.id);
-  const remaining = await MarketingPatientListItem.count({
-    where: {
-      list_id: list.id,
-      status: 'ready',
-      selected: true,
-      [Op.or]: [{ dispatch_status: null }, { dispatch_status: 'pending' }],
-    },
-  });
+  const counters = await getDispatchScopedCounters(list, filter);
+  const remaining = await countDispatchRemainingItems(list.id, filter);
   if (remaining <= 0) {
     const err = new Error('No quedan contactos pendientes de envío en esta lista.');
     err.status = 409;
@@ -2756,11 +3056,16 @@ async function startCampaignDispatch(scope, campaignId, body = {}, actor = null)
   const reference = scheduledAt && scheduledAt.getTime() > Date.now() ? scheduledAt : new Date();
   const businessAllowedAt = getNextBusinessAllowedAt(reference);
   const nextRunAt = businessAllowedAt.getTime() > Date.now() + 1000 ? businessAllowedAt : null;
-  const job = await enqueueDispatchJob({ list, scope, nextRunAt, userId });
+  const job = await enqueueDispatchJob({ list, scope, nextRunAt, userId, context, filter });
   triggerDispatchJobIfReady(job, nextRunAt);
   const nextDispatch = {
     ...dispatch,
     status: nextRunAt ? 'scheduled' : 'queued',
+    context,
+    label: context === 'welcome' ? 'Bienvenida WhatsApp' : dispatch.label || null,
+    filter,
+    whatsapp_template_id: template?.id || null,
+    template_snapshot: buildTemplateSnapshot(template),
     job_id: job.id,
     batch_size: dispatch.batch_size,
     delay_ms: dispatch.delay_ms,
@@ -2769,7 +3074,7 @@ async function startCampaignDispatch(scope, campaignId, body = {}, actor = null)
     max_opt_out_rate: dispatch.max_opt_out_rate,
     cancel_requested: false,
     paused_reason: null,
-    started_at: dispatch.started_at || new Date().toISOString(),
+    started_at: new Date().toISOString(),
     next_allowed_at: nextRunAt ? nextRunAt.toISOString() : null,
     account_quality: accountQuality,
   };
@@ -2786,14 +3091,17 @@ async function startCampaignDispatch(scope, campaignId, body = {}, actor = null)
       remaining,
       scheduled_at: nextRunAt ? nextRunAt.toISOString() : null,
       account_quality: accountQuality,
+      context,
+      filter,
     },
     occurred_at: new Date(),
   });
   const reloaded = await MarketingPatientList.findByPk(list.id);
+  const scopedCounters = await getDispatchScopedCounters(reloaded, filter);
   return {
     success: true,
     campaign: serializeCampaign(reloaded),
-    dispatch: getDispatchProgress(reloaded, counters, accountQuality),
+    dispatch: getDispatchProgress(reloaded, scopedCounters, accountQuality),
   };
 }
 
@@ -2834,6 +3142,8 @@ async function resumeCampaignDispatch(scope, campaignId, body = {}, actor = null
   const list = await MarketingPatientList.findByPk(campaignId);
   ensureScopeAccess(list, scope);
   const dispatch = getDispatchConfig(list);
+  const context = normalizeDispatchContext(dispatch.context);
+  const filter = getDispatchItemFilter(dispatch);
   if (isBlockingQualityPause(dispatch) && !isActorGlobalAdmin(actor)) {
     const err = new Error('No se puede reanudar una campaña pausada por baja calidad. Contacta con soporte.');
     err.status = 403;
@@ -2844,14 +3154,7 @@ async function resumeCampaignDispatch(scope, campaignId, body = {}, actor = null
     err.status = 409;
     throw err;
   }
-  const remaining = await MarketingPatientListItem.count({
-    where: {
-      list_id: list.id,
-      status: 'ready',
-      selected: true,
-      [Op.or]: [{ dispatch_status: null }, { dispatch_status: 'pending' }],
-    },
-  });
+  const remaining = await countDispatchRemainingItems(list.id, filter);
   if (remaining <= 0) {
     const err = new Error('No quedan contactos pendientes de envío.');
     err.status = 409;
@@ -2859,7 +3162,7 @@ async function resumeCampaignDispatch(scope, campaignId, body = {}, actor = null
   }
   const nextAllowed = getNextBusinessAllowedAt(new Date());
   const nextRunAt = nextAllowed.getTime() > Date.now() + 1000 ? nextAllowed : null;
-  const job = await enqueueDispatchJob({ list, scope, nextRunAt, userId });
+  const job = await enqueueDispatchJob({ list, scope, nextRunAt, userId, context, filter });
   triggerDispatchJobIfReady(job, nextRunAt);
   const nextDispatch = {
     ...dispatch,
@@ -2987,6 +3290,8 @@ function extractProviderError(error) {
 
 async function sendDispatchItem({ list, item, template, clinic, clinicConfig, batchIndex }) {
   const plainItem = item.get ? item.get({ plain: true }) : item;
+  const dispatch = getDispatchConfig(list);
+  const dispatchContext = normalizeDispatchContext(dispatch.context);
   const params = await buildTemplateParams({ template, item: plainItem, list, clinic });
   const previewText = await renderTemplatePreview({ template, item: plainItem, list, clinic });
   const conversation = await findCanonicalWhatsappConversation({
@@ -3006,8 +3311,9 @@ async function sendDispatchItem({ list, item, template, clinic, clinicConfig, ba
     message_type: 'template',
     status: 'pending',
     metadata: {
-      kind: 'mass_campaign_send',
+      kind: dispatchContext === 'welcome' ? 'mass_campaign_welcome_send' : 'mass_campaign_send',
       source: 'marketing_bulk_sends',
+      dispatch_context: dispatchContext || 'campaign',
       list_id: list.id,
       item_id: item.id,
       objective_id: OBJECTIVE_ID,
@@ -3140,6 +3446,11 @@ async function runDispatchJob(payload = {}, jobRequest = null) {
     return { status: 'completed', result: { skipped: true, reason: 'list_not_found_or_archived', list_id: listId } };
   }
   const dispatch = getDispatchConfig(list);
+  const payloadFilter = payload.filter && typeof payload.filter === 'object' && normalizeText(payload.filter.import_batch_id)
+    ? payload.filter
+    : null;
+  const filter = payloadFilter || getDispatchItemFilter(dispatch);
+  const context = normalizeDispatchContext(payload.context || dispatch.context);
   if (dispatch.cancel_requested === true) {
     await list.update({
       status: 'paused',
@@ -3175,7 +3486,7 @@ async function runDispatchJob(payload = {}, jobRequest = null) {
     };
   }
 
-  const countersBefore = await refreshListCounters(list.id);
+  const countersBefore = await getDispatchScopedCounters(list, filter);
   const sentBefore = Number(countersBefore.sent || 0);
   const readRate = sentBefore > 0 ? Number(countersBefore.read || 0) / sentBefore : 1;
   const optOutRate = sentBefore > 0 ? Number(countersBefore.opt_out || countersBefore.exclusion_reasons?.opt_out || 0) / sentBefore : 0;
@@ -3215,7 +3526,17 @@ async function runDispatchJob(payload = {}, jobRequest = null) {
     return { status: 'completed', result: { paused: true, reason: 'messaging_limit_reached', list_id: list.id } };
   }
 
-  const template = await resolveWhatsappTemplate(list.criteria?.whatsapp_template_id || list.template_snapshot?.id, scope);
+  const welcomeMessage = list.criteria?.welcome_message && typeof list.criteria.welcome_message === 'object'
+    ? list.criteria.welcome_message
+    : {};
+  const template = await resolveWhatsappTemplate(
+    dispatch.whatsapp_template_id
+      || dispatch.template_snapshot?.id
+      || (context === 'welcome' ? welcomeMessage.template_id : null)
+      || list.criteria?.whatsapp_template_id
+      || list.template_snapshot?.id,
+    scope
+  );
   if (!template || String(template.status || '').toUpperCase() !== 'APPROVED') {
     await list.update({
       status: 'paused',
@@ -3253,20 +3574,12 @@ async function runDispatchJob(payload = {}, jobRequest = null) {
     ? Math.max(0, Math.min(batchSize, accountQuality.messaging_limit_count - sentBefore))
     : batchSize;
   const batch = batchLimit > 0
-    ? await MarketingPatientListItem.findAll({
-      where: {
-        list_id: list.id,
-        status: 'ready',
-        selected: true,
-        [Op.or]: [{ dispatch_status: null }, { dispatch_status: 'pending' }],
-      },
-      order: [['id', 'ASC']],
-      limit: batchLimit,
-    })
+    ? await findDispatchCandidateBatch(list.id, filter, batchLimit)
     : [];
 
   if (!batch.length) {
-    const finalCounters = await refreshListCounters(list.id);
+    await refreshListCounters(list.id);
+    const finalCounters = await getDispatchScopedCounters(list, filter);
     await list.update({
       status: 'completed',
       last_sent_at: new Date(),
@@ -3306,11 +3619,12 @@ async function runDispatchJob(payload = {}, jobRequest = null) {
     },
     order: [['id', 'ASC']],
   });
+  const filteredFreshBatch = freshBatch.filter((item) => itemMatchesDispatchFilter(item, filter));
 
   const batchIndex = Number(dispatch.last_batch_index || 0) + 1;
   let sent = 0;
   let failed = 0;
-  for (const item of freshBatch) {
+  for (const item of filteredFreshBatch) {
     const currentList = await MarketingPatientList.findByPk(list.id);
     if (getDispatchConfig(currentList).cancel_requested === true) {
       break;
@@ -3331,29 +3645,25 @@ async function runDispatchJob(payload = {}, jobRequest = null) {
     else failed += 1;
   }
 
-  const countersAfter = await refreshListCounters(list.id);
+  await refreshListCounters(list.id);
+  const countersAfter = await getDispatchScopedCounters(list, filter);
   await MarketingPatientContactEvent.create({
     list_id: list.id,
     event_type: 'mass_campaign_batch_processed',
     channel: 'whatsapp',
     payload: {
       batch_index: batchIndex,
-      attempted: freshBatch.length,
+      attempted: filteredFreshBatch.length,
       sent,
       failed,
       counters: countersAfter,
+      context,
+      filter,
     },
     occurred_at: new Date(),
   });
 
-  const remaining = await MarketingPatientListItem.count({
-    where: {
-      list_id: list.id,
-      status: 'ready',
-      selected: true,
-      [Op.or]: [{ dispatch_status: null }, { dispatch_status: 'pending' }],
-    },
-  });
+  const remaining = await countDispatchRemainingItems(list.id, filter);
   if (remaining <= 0) {
     await list.update({
       status: 'completed',
@@ -3523,6 +3833,7 @@ module.exports = {
   getCampaign,
   updateCampaign,
   listRecipients,
+  updateRecipient,
   prepareCampaign,
   sendTest,
   getDispatchStatus,
