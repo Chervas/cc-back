@@ -102,14 +102,24 @@ const formatDateEs = (value) => {
   if (!value) return null;
   const date = new Date(value);
   return Number.isFinite(date.getTime())
-    ? date.toLocaleDateString('es-ES')
+    ? new Intl.DateTimeFormat('es-ES', {
+        timeZone: 'Europe/Madrid',
+        day: '2-digit',
+        month: '2-digit',
+        year: 'numeric',
+      }).format(date)
     : null;
 };
 const formatTimeEs = (value) => {
   if (!value) return null;
   const date = new Date(value);
   return Number.isFinite(date.getTime())
-    ? date.toLocaleTimeString('es-ES', { hour: '2-digit', minute: '2-digit' })
+    ? new Intl.DateTimeFormat('es-ES', {
+        timeZone: 'Europe/Madrid',
+        hour: '2-digit',
+        minute: '2-digit',
+        hour12: false,
+      }).format(date)
     : null;
 };
 const buildActorLabel = (usuario) => {
