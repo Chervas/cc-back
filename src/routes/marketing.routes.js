@@ -39,6 +39,7 @@ router.get('/bulk-sends/campaigns', marketingBulkSendsController.listCampaigns);
 router.post('/bulk-sends/campaigns', marketingBulkSendsController.createCampaign);
 router.get('/bulk-sends/campaigns/:id', marketingBulkSendsController.getCampaign);
 router.get('/bulk-sends/campaigns/:id/recipients', marketingBulkSendsController.listRecipients);
+router.patch('/bulk-sends/campaigns/:id/recipients/:itemId', marketingBulkSendsController.updateRecipient);
 router.get('/bulk-sends/campaigns/:id/dispatch', marketingBulkSendsController.getDispatchStatus);
 router.patch('/bulk-sends/campaigns/:id', marketingBulkSendsController.updateCampaign);
 router.post('/bulk-sends/campaigns/:id/prepare', marketingBulkSendsController.prepareCampaign);

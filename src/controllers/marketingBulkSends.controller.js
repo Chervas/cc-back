@@ -110,6 +110,22 @@ exports.listRecipients = async (req, res) => {
   }
 };
 
+exports.updateRecipient = async (req, res) => {
+  try {
+    const scope = await resolveScopeFromRequest(req, { allowAll: false });
+    const result = await marketingBulkSendsService.updateRecipient(
+      scope,
+      req.params.id,
+      req.params.itemId,
+      req.body || {},
+      req.userData?.userId || null
+    );
+    return res.json(result);
+  } catch (error) {
+    return sendError(res, error, 'Error actualizando destinatario de envíos masivos');
+  }
+};
+
 exports.updateCampaign = async (req, res) => {
   try {
     const scope = await resolveScopeFromRequest(req, { allowAll: false });
