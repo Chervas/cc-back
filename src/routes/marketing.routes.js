@@ -35,6 +35,8 @@ router.post('/reactivation/lists/:id/schedule', marketingReactivationController.
 router.delete('/reactivation/lists/:id', marketingReactivationController.removeList);
 
 // Envíos masivos por listas externas o pacientes actuales
+router.get('/review-requests/summary', marketingBulkSendsController.getReviewRequestSummary);
+router.patch('/review-requests/automation', marketingBulkSendsController.setReviewRequestAutomation);
 router.get('/bulk-sends/campaigns', marketingBulkSendsController.listCampaigns);
 router.post('/bulk-sends/campaigns', marketingBulkSendsController.createCampaign);
 router.get('/bulk-sends/campaigns/:id', marketingBulkSendsController.getCampaign);

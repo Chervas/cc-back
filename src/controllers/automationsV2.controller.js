@@ -20,6 +20,10 @@ const Clinica = db.Clinica;
 const jobRequestsService = require('../services/jobRequests.service');
 const jobScheduler = require('../services/jobScheduler.service');
 const appointmentAutomationV2Runtime = require('../services/appointmentAutomationV2Runtime.service');
+const {
+  mergeClinicLinksIntoContext,
+  resolveClinicGoogleLocalLinks,
+} = require('../services/googleLocalLinks.service');
 const { getIO } = require('../services/socket.service');
 const { CITA_STATUS_VALUES, LEAD_STATUS_VALUES } = require('../lib/status-catalog');
 const { buildConversationContext } = require('../lib/automation-conversation-context');
@@ -464,7 +468,7 @@ async function buildHydratedExecutionContext({
 
       if (citaJson.clinica) {
         const clinica = citaJson.clinica;
-        const clinicPatch = {
+        const clinicPatchBase = {
           id: parseIntOrNull(clinica.id_clinica),
           id_clinica: parseIntOrNull(clinica.id_clinica),
           clinic_id: parseIntOrNull(clinica.id_clinica),
@@ -479,6 +483,8 @@ async function buildHydratedExecutionContext({
           url_ficha_local: cleanString(clinica.url_ficha_local),
           timezone: resolveClinicTimezone(clinica),
         };
+        const clinicLinks = await resolveClinicGoogleLocalLinks(clinica);
+        const clinicPatch = mergeClinicLinksIntoContext(clinicPatchBase, clinicLinks);
         out.clinic = {
           ...(isObject(out.clinic) ? out.clinic : {}),
           ...clinicPatch,
@@ -610,7 +616,7 @@ async function buildHydratedExecutionContext({
       raw: true,
     });
     if (clinic) {
-      const clinicPatch = {
+      const clinicPatchBase = {
         id: parseIntOrNull(clinic.id_clinica),
         id_clinica: parseIntOrNull(clinic.id_clinica),
         clinic_id: parseIntOrNull(clinic.id_clinica),
@@ -625,6 +631,8 @@ async function buildHydratedExecutionContext({
         url_ficha_local: cleanString(clinic.url_ficha_local),
         timezone: resolveClinicTimezone(clinic),
       };
+      const clinicLinks = await resolveClinicGoogleLocalLinks(clinic);
+      const clinicPatch = mergeClinicLinksIntoContext(clinicPatchBase, clinicLinks);
       out.clinic = clinicPatch;
       out.clinica = { ...clinicPatch };
     }

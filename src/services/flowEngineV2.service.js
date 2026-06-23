@@ -8,6 +8,10 @@ const { getIO } = require('./socket.service');
 const { emitNotificationCreated } = require('./notificationsRealtime.service');
 const { queues } = require('./queue.service');
 const jobRequestsService = require('./jobRequests.service');
+const {
+  mergeClinicLinksIntoContext,
+  resolveClinicGoogleLocalLinks,
+} = require('./googleLocalLinks.service');
 const { normalizeCitaStatus, normalizeLeadStatus } = require('../lib/status-catalog');
 const { ADMIN_USER_IDS } = require('../lib/role-helpers');
 const {
@@ -36,6 +40,7 @@ const WhatsappTemplate = db.WhatsappTemplate;
 const WhatsappTemplateCatalog = db.WhatsappTemplateCatalog;
 const whatsappService = require('./whatsapp.service');
 const whatsappConnectionStatusService = require('./whatsappConnectionStatus.service');
+const marketingBulkSendsService = require('./marketingBulkSends.service');
 const appointmentNotificationCleanup = require('./appointmentNotificationCleanup.service');
 const { findCanonicalWhatsappConversation } = require('../lib/canonical-conversation');
 const { buildConversationContext } = require('../lib/automation-conversation-context');
@@ -671,7 +676,7 @@ async function enrichContextForTemplateResolution(context, targets = {}) {
       raw: true,
     });
     if (clinic) {
-      const clinicPatch = {
+      const clinicPatchBase = {
         id: toIntOrNull(clinic.id_clinica),
         id_clinica: toIntOrNull(clinic.id_clinica),
         clinic_id: toIntOrNull(clinic.id_clinica),
@@ -687,6 +692,8 @@ async function enrichContextForTemplateResolution(context, targets = {}) {
         timezone: resolveClinicTimezoneFromContext({ clinic }),
         configuracion: clinic.configuracion || null,
       };
+      const clinicLinks = await resolveClinicGoogleLocalLinks(clinic);
+      const clinicPatch = mergeClinicLinksIntoContext(clinicPatchBase, clinicLinks);
       out.clinic = mergeContextObject(out.clinic, clinicPatch);
       out.clinica = mergeContextObject(out.clinica, {
         ...clinicPatch,
@@ -2977,6 +2984,40 @@ async function handleSendWhatsapp(node, context, runtime) {
   };
 }
 
+async function handleRequestReview(node, context, runtime) {
+  const config = node?.config && typeof node.config === 'object' ? node.config : {};
+  const targets = resolveRuntimeTargets(runtime?.execution, context);
+  const appointmentId = toIntOrNull(resolveTemplateValue(config?.appointment_id, context))
+    || toIntOrNull(getByPath(context, 'appointment.id_cita'))
+    || toIntOrNull(getByPath(context, 'appointment.id'))
+    || toIntOrNull(getByPath(context, 'trigger.data.appointment_id'))
+    || toIntOrNull(getByPath(context, 'trigger.data.cita_id'));
+  const clinicId = toIntOrNull(resolveTemplateValue(config?.clinic_id, context))
+    || toIntOrNull(targets.clinic_id)
+    || toIntOrNull(getByPath(context, 'appointment.clinica_id'))
+    || toIntOrNull(getByPath(context, 'clinic.id_clinica'))
+    || toIntOrNull(getByPath(context, 'clinica.id_clinica'));
+
+  const result = await marketingBulkSendsService.createAndStartReviewRequestForAppointment({
+    appointmentId,
+    clinicId,
+    reviewSource: resolveTemplateValue(config?.review_source, context),
+    reviewThreshold: resolveTemplateValue(config?.review_threshold, context),
+    whatsappTemplateId: resolveTemplateValue(config?.whatsapp_template_id, context),
+    userId: runtime?.execution?.created_by || runtime?.execution?.user_id || null,
+  });
+
+  return {
+    kind: 'success',
+    output: {
+      ...result,
+      appointment_id: appointmentId || null,
+      clinic_id: clinicId || null,
+    },
+    next_node_id: readOutputTarget(node, result?.skipped ? 'on_fail' : 'on_success') || readOutputTarget(node, 'on_success'),
+  };
+}
+
 async function handleCreateTask(node, context, runtime) {
   const config = node?.config && typeof node.config === 'object' ? node.config : {};
   const targets = resolveRuntimeTargets(runtime?.execution, context);
@@ -3695,6 +3736,23 @@ async function processNode(node, context, runtime = {}) {
         };
       }
       return handleSendWhatsapp(node, context, runtime);
+    }
+
+    case 'action/request_review': {
+      if (simulation) {
+        return {
+          kind: 'success',
+          output: {
+            status: 'simulated',
+            simulated: true,
+            review_source: cleanString(resolveTemplateValue(config?.review_source, context)) || 'first_completed_appointment',
+            review_threshold: toIntOrNull(resolveTemplateValue(config?.review_threshold, context)) || 5,
+            whatsapp_template_id: toIntOrNull(resolveTemplateValue(config?.whatsapp_template_id, context)) || null,
+          },
+          next_node_id: readOutputTarget(node, 'on_success'),
+        };
+      }
+      return handleRequestReview(node, context, runtime);
     }
 
     case 'action/send_email': {

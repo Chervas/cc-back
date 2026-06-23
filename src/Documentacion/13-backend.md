@@ -2859,12 +2859,20 @@ El scheduler no envía recordatorios de consentimiento por su cuenta. Los record
     - `clinica.telefono`
     - `clinica.url_web`
     - `clinica.url_ficha_local`
+    - `clinica.url_perfil_google`
+    - `clinica.url_como_llegar`
+    - `clinica.url_dejar_resena`
 
 - Criterio
   - `usuario.*` es el usuario operativo que agenda/crea la cita.
   - `profesional.*` es el doctor o profesional asignado a la cita.
   - `cita.usuario_*` se conserva como alias de compatibilidad para plantillas anteriores.
-  - No se inventan valores derivados: la URL de ficha local solo se expone si existe en `Clinicas.url_ficha_local`.
+  - `clinica.url_ficha_local` se conserva por compatibilidad legacy. Para enlaces de ruta debe usarse `clinica.url_como_llegar`.
+  - El resolvedor `googleLocalLinks.service` prioriza `ClinicBusinessLocations` activas:
+    - `url_perfil_google`: `metadata.mapsUri` o URL generada con `placeId`; fallback a `Clinicas.url_ficha_local`.
+    - `url_como_llegar`: URL `https://www.google.com/maps/dir/` con `destination_place_id`; fallback a URL de indicaciones generada con nombre/dirección; último fallback a la ficha manual.
+    - `url_dejar_resena`: `metadata.newReviewUri` si Google la devuelve.
+  - La plantilla de catálogo `clinicaclick_recordatorio_mismo_dia_primera_visita` debe mapear su posición 4 a `url_como_llegar_clinica` (`{{clinica.url_como_llegar}}`), no a `url_perfil_google_clinica`.
 
 ## 2026-04-13 - Contacto de clínica separado y WhatsApp efectivo
 
@@ -3549,6 +3557,14 @@ Actualización 2026-05-06:
 - El seguimiento de enlaces usa `MarketingTrackedLinks`, `MarketingTrackedLinkClicks` y `GET /r/:token`. `token` debe ser opaco/no semántico; no derivarlo de URL, lista, campaña, paciente ni variable. En staging/prod, gateway/DNS debe enrutar `envios.clinicaclick.com/r/:token` o el subdominio elegido al backend correcto.
 - El error de pago WhatsApp `131042` se guarda en `ClinicMetaAsset.additionalData.payment` cuando llega por webhook `failed`. Un webhook posterior `sent`/`delivered`/`read` del mismo phone/WABA limpia la marca con `whatsappPaymentStatus.service.js`; no mostrar bloqueos de pago anteriores a `payment.last_success_at`.
 - El error Meta `100/33` en envios WhatsApp se trata como perdida de acceso al activo. `whatsappConnectionStatus.service.js` actualiza el asset y crea una alerta cerrable para admin/propietario/recepcion. La alerta indica el procedimiento operativo: abrir WhatsApp Business en el movil vinculado, comprobar el numero compartido, escribir un mensaje desde ese movil y recibir respuesta antes de validar de nuevo la API. Un envio o status posterior correcto limpia el marcador tecnico del asset, pero la notificacion permanece hasta que el usuario la cierre.
+- `GET /api/marketing/review-requests/summary` devuelve el resumen operativo del objetivo de reseñas para el `review_source` solicitado: pacientes posibles, peticiones enviadas, valoraciones internas `1-4` y `5`, estado de automatización, disponibilidad de plantilla WABA aprobada y disponibilidad de `url_dejar_resena`.
+- `PATCH /api/marketing/review-requests/automation` activa/desactiva una plantilla `AutomationFlowTemplatesV2` por clínica o grupo con `trigger_type=appointment_completed` y nodo `action/request_review`. No crea plantillas WABA aprobadas falsas: si no hay plantilla real aprobada, la automatización queda activa pero el runtime salta el envío con `approved_review_template_missing`.
+- Las solicitudes de reseñas se materializan como `mass_sends` con `criteria.review_request = true` y `template_usage = solicitud_resena`. Si `list_source=current_patients`, el backend crea candidatos desde `CitasPacientes` completadas o desde pacientes actuales en selección manual.
+- Fuentes soportadas para reseñas: `first_completed_appointment`, `completed_treatment`, `manual_selection`. Antes de crear candidatos se excluye cualquier paciente que ya tenga una solicitud previa enviada/en cola para evitar duplicados, especialmente si la primera cita incluye tratamiento.
+- La escala de reseña es `1-5`; `criteria.review_threshold` solo admite `4` o `5`. Las plantillas WABA `solicitud_resena` se crean con botones rápidos `1`-`5` en texto plano, porque Meta rechaza emojis y caracteres de formato en botones de plantilla; el cuerpo puede explicar la escala con texto más humano. Al recibir la respuesta, `materializeInboundReply` crea `review_rating_received`; si alcanza el umbral envía follow-up con `{{clinica.url_dejar_resena}}`, y si no lo alcanza pide motivo como opinión privada. El follow-up positivo puede usar texto libre con emoji real mientras exista ventana de conversación de 24h; si se quiere insistir fuera de esa ventana debe salir por plantilla WABA aprobada. Si el paciente no contesta a la valoración, la automatización futura debe esperar unas 20h y enviar un segundo recordatorio dentro de ventana, por ejemplo: "Perdona la insistencia {{nombre_paciente}}, pero saber tu opinión nos ayuda mucho a mejorar. ¿Podrías pinchar en la valoración de los botones de arriba?". Si el paciente corrige la valoración (`5` y después `3`, por ejemplo), se actualiza el evento canónico, se crea `review_rating_updated` para auditoría y se envía el follow-up correspondiente al último valor. En envíos de prueba (`mass_campaign_test`), el follow-up debe enviarse al número de prueba guardado en `metadata.recipient`, no al teléfono del contacto usado para renderizar variables; además, cada prueba se evalúa por `trigger_message_id` para poder repetir tests sobre el mismo contacto/lista sin bloquear el nuevo follow-up.
+- QA dev 2026-06-22: `review-requests/summary` validado para `first_completed_appointment`, `completed_treatment` y `manual_selection`; `PATCH /review-requests/automation` activó la plantilla clínica `review_request_after_completed__clinic_66`; `action/request_review` se probó con cita completada y devolvió `approved_review_template_missing` sin enviar mensajes cuando no hay plantilla WABA aprobada.
+- QA Meta 2026-06-22: el payload con botones `1⭐`-`5⭐` fue rechazado por Meta con `code=100`, `error_subcode=2388060`, `Button Format is Incorrect` y mensaje `Buttons can't have any variables, newlines, emojis, or formatting characters.`. Tras cambiar los botones a `1`-`5`, Meta aceptó y aprobó la revisión de `clinicaclick_solicitar_resena` para BS Capilar (`meta_template_id=2747631985622377`, estado `APPROVED`).
+- Pendiente de roadmap: contadores de límites por clínica para WhatsApp enviados, pacientes alcanzados, automatizaciones activas/ejecutadas e instalaciones. No resolver esos límites desde frontend.
 
 Webhooks y colas:
 
@@ -3560,7 +3576,7 @@ Webhooks y colas:
 Plantillas:
 
 - Las plantillas creadas desde campañas usan `POST /api/whatsapp/templates/custom` y crean `WhatsappTemplates`, no `MessageTemplates` legacy.
-- El backend acepta variables semánticas (`{{nombre}}`, `{{apellido}}`, `{{telefono_clinica}}`, custom de lista), las transforma a placeholders posicionales de Meta y guarda el contrato en `WhatsappTemplates.variables`.
+- El backend acepta variables semánticas (`{{nombre}}`, `{{apellido}}`, `{{telefono_clinica}}`, `{{url_como_llegar_clinica}}`, custom de lista), las transforma a placeholders posicionales de Meta y guarda el contrato en `WhatsappTemplates.variables`.
 - `WhatsappTemplates.status` es la fuente de verdad WABA. Una plantilla `MessageTemplates` pendiente no está aprobada ni sincronizable por Meta si no existe registro WABA.
 - `PENDING_LOCAL` en una plantilla WABA custom significa que ClinicaClick la guardó localmente, pero Meta no dejó abierta una revisión real. La UI debe mostrarla como `No enviada a Meta` y no como aprobada ni en revisión.
 - `DELETE /api/whatsapp/templates/:id` devuelve `409 template_linked_to_campaigns` si la plantilla está referenciada por campañas/listas no archivadas. La UI debe pedir confirmación explícita antes de ocultarla; las campañas conservan `template_snapshot`, pero no deben poder reutilizar una plantilla oculta.
