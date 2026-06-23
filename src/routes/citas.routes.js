@@ -10,6 +10,7 @@ router.get('/manual-attribution-preview', authMiddleware, citasController.getMan
 router.patch('/:id/estado', authMiddleware, citasController.updateCitaEstado);
 router.patch('/:id/nota', authMiddleware, citasController.updateCitaNota);
 router.patch('/:id/reagendar', authMiddleware, citasController.reagendarCita);
+router.delete('/:id', authMiddleware, citasController.deleteCita);
 router.get('/:id', authMiddleware, citasController.getCitaById);
 router.get('/', authMiddleware, citasController.getCitas);
 

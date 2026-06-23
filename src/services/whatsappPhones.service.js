@@ -5,7 +5,7 @@ const db = require('../../models');
 const { queues } = require('./queue.service');
 const whatsappTemplatesService = require('./whatsappTemplates.service');
 
-const { ClinicMetaAsset, WhatsappTemplate, Sequelize } = db;
+const { ClinicMetaAsset, Clinica, WhatsappTemplate, Sequelize } = db;
 const { Op } = Sequelize;
 
 const META_API_VERSION = process.env.META_API_VERSION || 'v24.0';
@@ -67,7 +67,7 @@ async function fetchRemotePhones({ wabaId, accessToken }) {
     headers: { Authorization: `Bearer ${accessToken}` },
     params: {
       fields:
-        'id,display_phone_number,verified_name,status,code_verification_status,quality_rating,messaging_limit_tier,name_status,platform_type,account_mode,is_on_biz_app',
+        'id,display_phone_number,verified_name,status,code_verification_status,quality_rating,messaging_limit_tier,name_status,new_name_status,platform_type,account_mode,is_on_biz_app',
     },
   });
   return resp.data?.data || [];
@@ -89,7 +89,7 @@ async function fetchNameStatus({ phoneNumberId, accessToken }) {
   const resp = await axios.get(`${getMetaBaseUrl()}/${phoneNumberId}`, {
     headers: { Authorization: `Bearer ${accessToken}` },
     params: {
-      fields: 'id,name_status',
+      fields: 'id,name_status,new_name_status',
     },
   });
   return resp.data || null;
@@ -129,6 +129,9 @@ async function upsertRemoteState(asset, remote, profile) {
   additionalData.limitedMode = testNumber;
   if (remote?.name_status) {
     additionalData.nameStatus = remote.name_status;
+  }
+  if (remote?.new_name_status) {
+    additionalData.newNameStatus = remote.new_name_status;
   }
   if (remote?.platform_type) {
     additionalData.platformType = remote.platform_type;
@@ -219,6 +222,12 @@ async function hasTemplatesNeedingCreate(asset) {
   const wabaId = String(asset?.wabaId || '').trim();
   if (!wabaId) return false;
 
+  const groupId = Number(asset?.grupoClinicaId || 0);
+  const isGroupScope =
+    String(asset?.assignmentScope || '').trim().toLowerCase() === 'group' &&
+    Number.isInteger(groupId) &&
+    groupId > 0;
+
   const connectedCount = await WhatsappTemplate.count({
     where: {
       waba_id: wabaId,
@@ -230,6 +239,38 @@ async function hasTemplatesNeedingCreate(asset) {
 
   if (connectedCount === 0) return true;
 
+  if (isGroupScope) {
+    const clinics = await Clinica.findAll({
+      where: { grupoClinicaId: groupId },
+      attributes: ['id_clinica'],
+      raw: true,
+    });
+    const clinicIds = clinics
+      .map((clinic) => Number(clinic?.id_clinica || 0))
+      .filter((id) => Number.isInteger(id) && id > 0);
+    if (!clinicIds.length) return false;
+
+    const localPendingCount = await WhatsappTemplate.count({
+      where: {
+        clinic_id: { [Op.in]: clinicIds },
+        waba_id: null,
+        is_active: true,
+        catalog_template_id: { [Op.ne]: null },
+        [Op.or]: [
+          { status: 'SIN_CONECTAR' },
+          {
+            [Op.and]: [
+              { meta_template_id: { [Op.is]: null } },
+              { status: { [Op.notIn]: ['PENDING_LOCAL', 'REJECTED'] } },
+            ],
+          },
+        ],
+      },
+    });
+
+    return localPendingCount > 0;
+  }
+
   if (!asset?.clinicaId) return false;
 
   const localPendingCount = await WhatsappTemplate.count({
@@ -239,8 +280,13 @@ async function hasTemplatesNeedingCreate(asset) {
       is_active: true,
       catalog_template_id: { [Op.ne]: null },
       [Op.or]: [
-        { status: { [Op.in]: ['SIN_CONECTAR', 'LOCAL_PENDING'] } },
-        { meta_template_id: { [Op.is]: null } },
+        { status: 'SIN_CONECTAR' },
+        {
+          [Op.and]: [
+            { meta_template_id: { [Op.is]: null } },
+            { status: { [Op.notIn]: ['PENDING_LOCAL', 'REJECTED'] } },
+          ],
+        },
       ],
     },
   });
@@ -320,6 +366,7 @@ async function syncPhonesForWaba({ wabaId, accessToken }) {
       if (statusInfo) {
         nameStatusMap.set(remote.id, {
           nameStatus: statusInfo.name_status || null,
+          newNameStatus: statusInfo.new_name_status || null,
           nameStatusReason: null,
         });
       }
@@ -359,6 +406,7 @@ async function syncPhonesForWaba({ wabaId, accessToken }) {
     if (statusExtra) {
       const additionalData = { ...(asset.additionalData || {}) };
       additionalData.nameStatus = statusExtra.nameStatus;
+      additionalData.newNameStatus = statusExtra.newNameStatus;
       additionalData.nameStatusReason = statusExtra.nameStatusReason;
       asset.additionalData = { ...additionalData };
     }

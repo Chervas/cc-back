@@ -1,5 +1,5 @@
 > **Módulo:** Arquitectura del Backend
-> **Última actualización:** 2026-04-15
+> **Última actualización:** 2026-06-23
 > **Relacionado con:** [20.1-motor-flujos-v2](./20.1-motor-flujos-v2.md) | documento operativo `cc-front/src/Documentacion/31-roadmap-arquitectura-entornos-gateway.md`
 
 ---
@@ -79,15 +79,18 @@ Antes de activar coexistencia sobre un numero real:
 - tras Embedded Signup, la creacion/envio a revision de plantillas WhatsApp no debe encolarse como BullMQ dentro de `QUEUE_PREFIX=gateway`;
 - el callback crea un `JobRequest` `whatsapp_template_create` con `payload.__runtime_namespace` resuelto por origen (`crm` -> `staging`, `localhost:4203` -> `dev`, `app` -> `prod`);
 - `jobExecutor.service.js` procesa `whatsapp_template_create` ejecutando `createTemplatesFromCatalog(...)`, que transforma placeholders `SIN_CONECTAR` en plantillas enviadas a revision (`PENDING`);
-- `whatsapp_phones_sync` (cada 15 minutos) actua como red de seguridad: si detecta que un numero ya esta `CONNECTED`/`registered` y quedan plantillas de catalogo sin `meta_template_id` o en `SIN_CONECTAR`/`LOCAL_PENDING`, encola `whatsapp_template_create` con cooldown de 1 hora (`WHATSAPP_TEMPLATE_CREATE_ENSURE_COOLDOWN_MS`). Esto cubre coexistencia cuando Meta termina de habilitar el numero despues del callback inicial;
+- si el WABA esta asignado a grupo, `createTemplatesFromCatalog(...)` debe resolver todas las clinicas del grupo como objetivo efectivo. Las plantillas aprobadas existen en Meta a nivel de WABA, asi que una clinica nueva del grupo debe enlazar sus overrides locales a esas aprobaciones antes de intentar abrir revisiones nuevas;
+- para WABA compartido, si ya existe una plantilla aprobada compatible por `catalog_template_id`/familia en ese WABA, el job debe dejar la copia local de cada clinica en `APPROVED` con el `meta_template_id` existente. No se debe enviar una revision nueva a Meta solo porque una clinica del grupo tuviera placeholders `SIN_CONECTAR`;
+- `whatsapp_phones_sync` (cada 15 minutos) actua como red de seguridad: si detecta que un numero ya esta `CONNECTED`/`registered` y quedan plantillas de catalogo sin `meta_template_id` o en `SIN_CONECTAR`, encola `whatsapp_template_create` con cooldown de 1 hora (`WHATSAPP_TEMPLATE_CREATE_ENSURE_COOLDOWN_MS`). En WABA asignado a grupo debe revisar las plantillas de todas las clinicas del grupo, no solo la clinica principal del activo. Esto cubre coexistencia cuando Meta termina de habilitar el numero despues del callback inicial;
+- `whatsapp_phones_sync` no debe reintentar automaticamente `PENDING_LOCAL` o `REJECTED`: esos estados significan cambio local no aprobable o rechazo de Meta y requieren accion correctiva sobre el contenido;
 - `whatsapp_phones_sync` solo debe encolar WABAs procedentes de `whatsapp_phone_number` activos y asignados a clínica o grupo. Un número `unassigned` no es operativo aunque conserve token de Meta para reasignación o auditoría;
 - la sync remota de teléfonos no puede reactivar un número desvinculado solo porque Meta lo siga devolviendo. Si el activo no tiene `clinicaId` ni `grupoClinicaId`, debe permanecer `isActive=false` y `assignmentScope=unassigned`;
 - `whatsapp_templates_sync` (cada 20 minutos) solo sincroniza estados remotos existentes. Si Meta sigue devolviendo `PENDING`, ClinicaClick debe mantener `PENDING`; no se marca como aprobada por tener el numero operativo;
-- `GET /api/whatsapp/phones` expone `connection_mode`, `is_on_biz_app`, `coexistence_status`, `coexistence_can_send_api` y estados de sync inicial para que Ajustes pueda mostrar el modo real;
+- `GET /api/whatsapp/phones` expone `connection_mode`, `is_on_biz_app`, `coexistence_status`, `coexistence_can_send_api` y estados de importacion inicial para que Ajustes pueda mostrar el modo real;
 - Si Meta devuelve `GraphMethodException code=100 error_subcode=33` al enviar o leer un numero en coexistencia, el backend marca `ClinicMetaAssets.additionalData.coexistence.status=disconnected`, `canSendApi=false`, `requiresReconnect=true` y emite la notificacion `whatsapp.coexistence_disconnected` con accion `Reconectar WhatsApp` hacia `/ajustes?tab=whatsapp`. Esto cubre sesiones compartidas caducadas/inactivas, la app de ClinicaClick desinstalada del WABA o tokens que pierden permisos sobre el WABA/phone. El texto operativo indica reconectar desde Ajustes y, en modo compartido, abrir WhatsApp Business en el movil, escribir un mensaje desde ese movil y recibir respuesta antes de cerrar la alerta;
 - la sync de telefonos debe normalizar `GET /<phone_number_id>/whatsapp_business_profile`: Meta devuelve el perfil en `data[0]`; de ahi salen `vertical`/categoria, descripcion y foto. No leer `profile.vertical` directamente sin normalizar porque dejaria vacia la categoria en Ajustes;
 - `POST /api/whatsapp/phones/:phoneNumberId/coexistence/sync-initial` encola `whatsapp_coexistence_sync_contacts` y `whatsapp_coexistence_sync_history`;
-- los jobs de sync inicial llaman `POST /<BUSINESS_PHONE_NUMBER_ID>/smb_app_data` con `sync_type=smb_app_state_sync` y `sync_type=history`, persistiendo `request_id` y estados en `ClinicMetaAssets.additionalData.coexistence`;
+- los jobs de importacion inicial llaman `POST /<BUSINESS_PHONE_NUMBER_ID>/smb_app_data` con `sync_type=smb_app_state_sync` y `sync_type=history`, persistiendo `request_id` y estados en `ClinicMetaAssets.additionalData.coexistence`;
 - estos jobs no se lanzan automaticamente al conectar: se solicitan manualmente desde Ajustes cuando el numero ya esta confirmado en coexistencia, para evitar tocar numeros reales sin QA;
 - hay fixtures de QA en `src/scripts/fixtures/whatsapp-coexistence/`;
 - Propdental se usara como numero de QA, pero no debe relanzarse Embedded Signup ni cambiar el modo de conexion mientras haya mensajes reales de cita pendientes.
@@ -2100,6 +2103,8 @@ Checklist obligatorio al pasar a `staging` y luego a `main`:
   - Si el backend de integración se fragmenta en procesos separados sin adapter de Socket.io compartido, los jobs podrían persistir mensajes sin notificar a los clientes conectados a otro proceso. En el runtime actual de integración se asume proceso único (`fork_mode`).
   - Regla canónica de conversación WhatsApp:
     - debe existir una sola conversación por `clinic_id + contact_id`.
+    - si dos clinicas del mismo grupo comparten paciente, telefono o WABA, siguen teniendo conversaciones separadas por `clinic_id`.
+    - QuickChat de una clinica no debe mostrar el historico previo de otra clinica del grupo; compartir WABA comparte numero/plantillas, no timeline operativo.
     - si el sistema detecta duplicados, backend los fusiona en lectura/escritura y reutiliza la conversación canónica.
     - inbound WhatsApp, QuickChat, drawers y runtime de flujos deben resolver siempre contra la misma conversación canónica.
     - si reaparecen dos conversaciones para el mismo número en la misma clínica, tratarlo como regresión porque rompe trazabilidad, ventana 24h y reanudación de `wait_response`.
@@ -2590,10 +2595,13 @@ Regla vigente:
 
 - si el nodo tiene `catalog_template_id`, el runtime busca la plantilla activa para la clínica de ejecución;
 - dentro de esa familia, prioriza una plantilla no bloqueada (`APPROVED`) frente a estados no enviables;
+- si la clinica hereda un WABA de grupo y su override local esta bloqueado (`SIN_CONECTAR`, `PENDING_LOCAL` o `REJECTED`), pero existe una plantilla aprobada de la misma familia en el WABA efectivo, el runtime debe usar la aprobada del WABA;
 - solo si no hay `catalog_template_id`, cae a `template_id` o `template_name`;
 - por tanto, la UI de diagnóstico debe mostrar la plantilla efectiva resuelta para la clínica, no únicamente el `template_id` persistido en el JSON del nodo.
 
 Esto evita un falso diagnóstico típico: un nodo puede mostrar un `template_id` antiguo o de otra clínica en el JSON, pero ejecutar correctamente porque el runtime resuelve por `catalog_template_id + clinic_id`.
+
+Caso operativo validado el `2026-06-23`: al añadir BS Medical al grupo de BS Capilar con WABA compartido, las plantillas de recordatorio/confirmacion no debian abrir revision nueva porque el WABA ya tenia las familias aprobadas. El provisioning correcto enlaza la clinica nueva a esas aprobaciones y deja fuera solo plantillas con rechazo/local pendiente real, como consentimiento de firma si Meta rechaza el formato.
 
 #### Semántica pendiente de normalizar en contexto de cita
 

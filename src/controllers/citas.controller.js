@@ -1722,6 +1722,59 @@ exports.updateCitaEstado = asyncHandler(async (req, res) => {
 });
 
 /**
+ * Eliminar una cita ya cancelada de la agenda.
+ */
+exports.deleteCita = asyncHandler(async (req, res) => {
+    const { id } = req.params;
+    const citaId = Number(id);
+    if (!Number.isFinite(citaId) || citaId <= 0) {
+        return res.status(400).json({ message: 'id inválido' });
+    }
+
+    const cita = await CitaPaciente.findByPk(citaId);
+    if (!cita) {
+        return res.status(404).json({ message: 'Cita no encontrada' });
+    }
+
+    if (String(cita.estado || '').trim().toLowerCase() !== 'cancelada') {
+        return res.status(409).json({ message: 'Solo se pueden eliminar citas canceladas' });
+    }
+
+    const deletedPayload = cita.toJSON ? cita.toJSON() : { ...cita };
+
+    try {
+        await appointmentAutomationV2Runtime.cancelActiveExecutionsForCita(cita, {
+            reason: 'appointment_deleted_cancelled_active_flow',
+        });
+        await appointmentNotificationCleanup.markAutomationNotificationsReadForAppointment(cita.id_cita, {
+            reason: 'appointment_deleted',
+        });
+    } catch (automationErr) {
+        console.error('⚠️ [deleteCita] Error cerrando automation v2:', automationErr.message);
+    }
+
+    await db.sequelize.transaction(async (transaction) => {
+        if (db.ConsentSignaturePackage) {
+            await db.ConsentSignaturePackage.update(
+                { cita_id: null },
+                { where: { cita_id: citaId }, transaction }
+            );
+        }
+        if (db.PatientConsentDocument) {
+            await db.PatientConsentDocument.update(
+                { cita_id: null },
+                { where: { cita_id: citaId }, transaction }
+            );
+        }
+        await CitaPaciente.destroy({ where: { id_cita: citaId }, transaction });
+    });
+
+    await syncLeadStatusFromAppointments(cita.lead_intake_id);
+    emitAppointmentSocketEvent('appointment:deleted', deletedPayload);
+    return res.json({ success: true, id_cita: citaId });
+});
+
+/**
  * Reagendar una cita (inicio/fin) y sincronizar su flujo asociado.
  */
 exports.reagendarCita = asyncHandler(async (req, res) => {

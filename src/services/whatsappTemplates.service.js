@@ -278,6 +278,60 @@ async function loadTemplateFamilyRows({ clinicId, wabaId, template }) {
   });
 }
 
+function isTemplateUsableForSend(templateLike) {
+  return String(templateLike?.status || '').trim().toUpperCase() === WHATSAPP_TEMPLATE_STATUS.APPROVED
+    && !!String(templateLike?.meta_template_id || '').trim();
+}
+
+function compareConnectedTemplatePreference(left, right) {
+  const leftUsable = isTemplateUsableForSend(left) ? 1 : 0;
+  const rightUsable = isTemplateUsableForSend(right) ? 1 : 0;
+  if (leftUsable !== rightUsable) return rightUsable - leftUsable;
+
+  const leftHasMeta = String(left?.meta_template_id || '').trim() ? 1 : 0;
+  const rightHasMeta = String(right?.meta_template_id || '').trim() ? 1 : 0;
+  if (leftHasMeta !== rightHasMeta) return rightHasMeta - leftHasMeta;
+
+  const leftUpdatedAt = new Date(left?.updatedAt || left?.updated_at || 0).getTime();
+  const rightUpdatedAt = new Date(right?.updatedAt || right?.updated_at || 0).getTime();
+  if (leftUpdatedAt !== rightUpdatedAt) return rightUpdatedAt - leftUpdatedAt;
+
+  return (Number(right?.id) || 0) - (Number(left?.id) || 0);
+}
+
+async function findConnectedTemplateForCatalogInWaba({ wabaId, template }) {
+  if (!wabaId || !template) return null;
+  const rows = await loadTemplateFamilyRows({ wabaId, template });
+  return rows
+    .filter((row) => String(row?.waba_id || '') === String(wabaId))
+    .sort(compareConnectedTemplatePreference)[0] || null;
+}
+
+async function resolveTargetClinicIdsForTemplateProvisioning({ clinicId, groupId, assignmentScope }) {
+  const ids = new Set();
+  const safeClinicId = Number(clinicId || 0);
+  const safeGroupId = Number(groupId || 0);
+  const scope = String(assignmentScope || '').trim().toLowerCase();
+
+  if (scope === 'group' && Number.isInteger(safeGroupId) && safeGroupId > 0) {
+    const clinics = await Clinica.findAll({
+      where: { grupoClinicaId: safeGroupId },
+      attributes: ['id_clinica'],
+      raw: true,
+    });
+    clinics.forEach((clinic) => {
+      const id = Number(clinic?.id_clinica || 0);
+      if (Number.isInteger(id) && id > 0) ids.add(id);
+    });
+  }
+
+  if (Number.isInteger(safeClinicId) && safeClinicId > 0) {
+    ids.add(safeClinicId);
+  }
+
+  return Array.from(ids);
+}
+
 function findSameContractRemoteTemplate({ familyRows, wabaId, template }) {
   const safeWabaId = wabaId ? String(wabaId) : '';
   return familyRows.find((row) => String(row?.waba_id || '') === safeWabaId && hasSameMetaFacingContent(template, row)) || null;
@@ -845,19 +899,26 @@ async function createTemplatesFromCatalog({ wabaId, clinicId, groupId, assignmen
   });
 
   const templates = await selectCatalogTemplatesByDisciplines(disciplinas);
+  const targetClinicIds = await resolveTargetClinicIdsForTemplateProvisioning({
+    clinicId,
+    groupId,
+    assignmentScope,
+  });
+  const result = {
+    wabaId,
+    assignmentScope,
+    clinicIds: targetClinicIds,
+    connected: 0,
+    submitted: 0,
+    localPending: 0,
+  };
 
   for (const template of templates) {
-    const existing = await WhatsappTemplate.findOne({
-      where: {
-        waba_id: wabaId,
-        name: template.name,
-        language: DEFAULT_LANGUAGE,
-      },
-    });
+    const existing = await findConnectedTemplateForCatalogInWaba({ wabaId, template });
     if (existing) {
-      if (clinicId) {
+      for (const targetClinicId of targetClinicIds) {
         await upsertClinicOverrideTemplateForClinic({
-          clinicId,
+          clinicId: targetClinicId,
           template,
           technicalName: existing.name,
           status: mapRemoteStatusToLocalStatus(existing.status),
@@ -865,6 +926,7 @@ async function createTemplatesFromCatalog({ wabaId, clinicId, groupId, assignmen
           rejectionReason: existing.rejection_reason || null,
         });
       }
+      result.connected += 1;
       continue;
     }
 
@@ -885,9 +947,9 @@ async function createTemplatesFromCatalog({ wabaId, clinicId, groupId, assignmen
         rejectionReason: null,
       });
 
-      if (clinicId) {
+      for (const targetClinicId of targetClinicIds) {
         await upsertClinicOverrideTemplateForClinic({
-          clinicId,
+          clinicId: targetClinicId,
           template,
           technicalName: template.name,
           status: WHATSAPP_TEMPLATE_STATUS.PENDING,
@@ -895,23 +957,25 @@ async function createTemplatesFromCatalog({ wabaId, clinicId, groupId, assignmen
           rejectionReason: null,
         });
       }
+      result.submitted += 1;
     } catch (err) {
       if (isRetryableMetaError(err)) {
         throw err;
       }
-      if (clinicId) {
+      for (const targetClinicId of targetClinicIds) {
         try {
           await upsertClinicOverrideTemplateForClinic({
-            clinicId,
+            clinicId: targetClinicId,
             template,
             technicalName: template.name,
             status: WHATSAPP_TEMPLATE_STATUS.LOCAL_PENDING,
             metaTemplateId: null,
             rejectionReason: buildLocalPendingReasonFromMetaError(err),
           });
+          result.localPending += 1;
         } catch (updateErr) {
           console.error('Error guardando rechazo local de plantilla WhatsApp', {
-            clinicId,
+            clinicId: targetClinicId,
             name: template.name,
             error: updateErr?.message || updateErr,
           });
@@ -924,6 +988,8 @@ async function createTemplatesFromCatalog({ wabaId, clinicId, groupId, assignmen
       });
     }
   }
+
+  return result;
 }
 
 async function propagateCatalogTemplateToAllClinics({ templateCatalogId, logger = console, sourceUpdatedAt = null }) {

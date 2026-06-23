@@ -2361,7 +2361,7 @@ async function loadConfiguredWhatsappTemplate(
   );
 
   const baseQuery = {
-    attributes: ['id', 'name', 'language', 'status', 'components', 'catalog_template_id', 'clinic_id'],
+    attributes: ['id', 'name', 'language', 'status', 'components', 'catalog_template_id', 'clinic_id', 'waba_id', 'meta_template_id'],
     include: [{ model: WhatsappTemplateCatalog, as: 'catalog', attributes: ['id', 'variables'] }],
   };
 
@@ -2374,16 +2374,38 @@ async function loadConfiguredWhatsappTemplate(
       },
     });
 
+    let effectiveWabaId = null;
+    if (clinicId) {
+      try {
+        const clinicConfig = await whatsappService.getClinicConfig(clinicId);
+        effectiveWabaId = cleanString(clinicConfig?.wabaId);
+      } catch (_) {
+        effectiveWabaId = null;
+      }
+    }
+
     const clinicCandidates = clinicId
       ? candidates.filter((row) => toIntOrNull(row?.clinic_id) === clinicId)
       : [];
-    const globalCandidates = candidates.filter((row) => !toIntOrNull(row?.clinic_id));
-    const scopedCandidates = clinicCandidates.length ? clinicCandidates : globalCandidates;
+    const globalCandidates = candidates.filter((row) => {
+      if (toIntOrNull(row?.clinic_id)) return false;
+      const rowWabaId = cleanString(row?.waba_id);
+      return !effectiveWabaId || !rowWabaId || rowWabaId === effectiveWabaId;
+    });
+    const scopedCandidates = clinicCandidates.length
+      ? [...clinicCandidates, ...globalCandidates]
+      : globalCandidates;
     if (scopedCandidates.length) {
       scopedCandidates.sort((a, b) => {
         const aBlocked = isTemplateBlockedForSend(toLowerSafe(a?.status)) ? 1 : 0;
         const bBlocked = isTemplateBlockedForSend(toLowerSafe(b?.status)) ? 1 : 0;
         if (aBlocked !== bBlocked) return aBlocked - bBlocked;
+        const aClinic = clinicId && toIntOrNull(a?.clinic_id) === clinicId ? 1 : 0;
+        const bClinic = clinicId && toIntOrNull(b?.clinic_id) === clinicId ? 1 : 0;
+        if (aClinic !== bClinic) return bClinic - aClinic;
+        const aHasMeta = cleanString(a?.meta_template_id) ? 1 : 0;
+        const bHasMeta = cleanString(b?.meta_template_id) ? 1 : 0;
+        if (aHasMeta !== bHasMeta) return bHasMeta - aHasMeta;
         return (Number(b?.id) || 0) - (Number(a?.id) || 0);
       });
       return scopedCandidates[0];

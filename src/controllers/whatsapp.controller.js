@@ -387,6 +387,12 @@ async function loadAutomationCatalogLinkedTemplates(items) {
 function pickPreferredTemplate(currentTemplate, nextTemplate, clinicId) {
   if (!currentTemplate) return nextTemplate;
 
+  const currentBlocked = String(currentTemplate?.status || '').trim().toUpperCase() !== 'APPROVED' ? 1 : 0;
+  const nextBlocked = String(nextTemplate?.status || '').trim().toUpperCase() !== 'APPROVED' ? 1 : 0;
+  if (currentBlocked !== nextBlocked) {
+    return nextBlocked ? currentTemplate : nextTemplate;
+  }
+
   const currentClinicId = Number(currentTemplate?.clinic_id);
   const nextClinicId = Number(nextTemplate?.clinic_id);
   const currentIsClinicOverride = Number.isFinite(currentClinicId) && currentClinicId === Number(clinicId);
@@ -405,6 +411,23 @@ function pickPreferredTemplate(currentTemplate, nextTemplate, clinicId) {
   const currentId = Number(currentTemplate?.id || 0);
   const nextId = Number(nextTemplate?.id || 0);
   return nextId > currentId ? nextTemplate : currentTemplate;
+}
+
+function annotateEffectiveWhatsappTemplateScope(template, asset) {
+  if (!template || !asset) return template;
+  const patch = {
+    effective_assignment_scope: asset.assignmentScope || null,
+    effective_group_id: asset.grupoClinicaId || null,
+    effective_waba_id: asset.wabaId || null,
+    effective_phone_number_id: asset.phoneNumberId || null,
+    effective_waba_shared: asset.assignmentScope === 'group',
+  };
+  if (typeof template.setDataValue === 'function') {
+    Object.entries(patch).forEach(([key, value]) => template.setDataValue(key, value));
+  } else {
+    Object.assign(template, patch);
+  }
+  return template;
 }
 
 function extractTechnicalTemplateVersion(baseName, candidateName) {
@@ -457,7 +480,7 @@ async function loadEffectiveWhatsappTemplatesForClinic({ clinicId, userId, inclu
     const key = getTemplateIdentityKey(template);
     effective.set(key, pickPreferredTemplate(effective.get(key), template, clinicId));
   });
-  return Array.from(effective.values());
+  return Array.from(effective.values()).map((template) => annotateEffectiveWhatsappTemplateScope(template, asset));
 }
 
 async function buildWhatsappTemplateUsageMap({ clinicId, templates }) {
@@ -1470,6 +1493,9 @@ exports.listPhones = async (req, res) => {
         name_status: additionalData.nameStatus || null,
         name_status_reason: additionalData.nameStatusReason || null,
         requested_display_name: additionalData.requestedDisplayName || null,
+        new_name_status: additionalData.newNameStatus || additionalData.new_name_status || null,
+        new_display_name: additionalData.newDisplayName || null,
+        display_name_requested_at: additionalData.requestedDisplayNameAt || additionalData.displayNameRequestedAt || null,
         profile_picture_url: additionalData.profilePictureUrl || null,
         profile_description: additionalData.profileDescription || null,
         profile_category: additionalData.profileCategory || null,
@@ -1922,6 +1948,7 @@ exports.assignPhone = async (req, res) => {
     const userId = req.userData?.userId;
     const phoneNumberId = req.params.phoneNumberId;
     const { assignmentScope, clinic_id } = req.body || {};
+    const registerAfterAssign = Boolean(req.body?.register_after_assign);
 
     if (!['group', 'clinic'].includes(assignmentScope)) {
       return res.status(400).json({ success: false, error: 'invalid_assignment_scope' });
@@ -2013,12 +2040,14 @@ exports.assignPhone = async (req, res) => {
       });
     }
 
-    // Intentar registrar automaticamente el numero en la Cloud API
-    let registrationResult = null;
-    try {
-      registrationResult = await attemptPhoneRegistration({ asset: phone });
-    } catch (regErr) {
-      console.warn('No se pudo registrar el numero automaticamente', regErr?.message || regErr);
+    let registration = phone.additionalData?.registration || null;
+    if (registerAfterAssign) {
+      try {
+        const registrationResult = await attemptPhoneRegistration({ asset: phone });
+        registration = registrationResult?.registration || registration;
+      } catch (regErr) {
+        console.warn('No se pudo registrar el numero tras asignarlo', regErr?.message || regErr);
+      }
     }
 
     return res.json({
@@ -2027,7 +2056,7 @@ exports.assignPhone = async (req, res) => {
       assignmentScope,
       clinic_id: targetClinicId,
       clinic_name: phone.clinica?.nombre_clinica || null,
-      registration: registrationResult?.registration || null,
+      registration,
     });
   } catch (err) {
     console.error('Error assignPhone', err);
@@ -2283,32 +2312,52 @@ exports.updatePhoneDisplayName = async (req, res) => {
 
     const trimmedName = String(displayName).trim();
     const additionalData = phone.additionalData || {};
+    const normalizeDisplayName = (value) => String(value || '').trim().toLowerCase();
 
-    // Intentar actualizar el nombre en Meta
     try {
       await axios.post(
         `https://graph.facebook.com/${META_API_VERSION}/${phoneNumberId}`,
         { verified_name: trimmedName },
         { headers: { Authorization: `Bearer ${phone.waAccessToken}` } }
       );
-      // Obtener estado actualizado
+    } catch (err) {
+      const parsed = parseWaError(err);
+      additionalData.nameStatusReason = parsed.message || null;
+      phone.additionalData = additionalData;
+      await phone.save();
+      return res.status(502).json({
+        success: false,
+        error: 'display_name_meta_update_failed',
+        message: parsed.message || 'No se pudo solicitar el cambio de nombre en Meta',
+        managerUrl: 'https://business.facebook.com/wa/manage/phone-numbers/',
+      });
+    }
+
+    try {
       const statusResp = await axios.get(
         `https://graph.facebook.com/${META_API_VERSION}/${phoneNumberId}`,
         {
           headers: { Authorization: `Bearer ${phone.waAccessToken}` },
-          params: { fields: 'id,name_status' },
+          params: { fields: 'id,verified_name,name_status,new_name_status' },
         }
       );
+      const remoteVerifiedName = statusResp.data?.verified_name || null;
+      const newNameStatus = statusResp.data?.new_name_status || null;
+      if (remoteVerifiedName) {
+        phone.waVerifiedName = remoteVerifiedName;
+      }
       additionalData.nameStatus = statusResp.data?.name_status || additionalData.nameStatus || null;
+      additionalData.newNameStatus = newNameStatus;
       additionalData.nameStatusReason = null;
     } catch (err) {
       const parsed = parseWaError(err);
-      // Guardamos el motivo por si Meta rechaza inmediatamente
-      additionalData.nameStatusReason = parsed.message || null;
+      additionalData.nameStatusReason = parsed.message || additionalData.nameStatusReason || null;
     }
 
-    additionalData.requestedDisplayName = trimmedName;
-    additionalData.requestedDisplayNameAt = new Date().toISOString();
+    const applied = normalizeDisplayName(phone.waVerifiedName) === normalizeDisplayName(trimmedName);
+    additionalData.requestedDisplayName = applied ? null : trimmedName;
+    additionalData.newDisplayName = applied ? null : trimmedName;
+    additionalData.requestedDisplayNameAt = applied ? null : new Date().toISOString();
     phone.additionalData = additionalData;
     await phone.save();
 
