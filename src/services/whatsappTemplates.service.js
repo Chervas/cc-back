@@ -1455,16 +1455,25 @@ async function enqueueSyncForAllWabas(options = {}) {
   const assets = await ClinicMetaAsset.findAll({
     where: {
       isActive: true,
-      assetType: 'whatsapp_business_account',
+      assetType: { [Op.in]: ['whatsapp_phone_number', 'whatsapp_business_account'] },
       wabaId: targetWabaIds ? { [Op.in]: targetWabaIds } : { [Op.ne]: null },
     },
-    attributes: ['wabaId', 'waAccessToken'],
+    attributes: ['id', 'assetType', 'assignmentScope', 'wabaId', 'waAccessToken', 'updatedAt'],
+    order: [
+      [db.sequelize.literal("CASE WHEN assetType = 'whatsapp_phone_number' THEN 0 ELSE 1 END"), 'ASC'],
+      [db.sequelize.literal("CASE WHEN assignmentScope = 'group' THEN 0 ELSE 1 END"), 'ASC'],
+      ['updatedAt', 'DESC'],
+      ['id', 'DESC'],
+    ],
     raw: true,
   });
 
   let queued = 0;
+  const seenWabas = new Set();
   for (const asset of assets) {
     if (!asset.wabaId || !asset.waAccessToken) continue;
+    if (seenWabas.has(asset.wabaId)) continue;
+    seenWabas.add(asset.wabaId);
     await enqueueSyncTemplatesJob({ wabaId: asset.wabaId, accessToken: asset.waAccessToken });
     queued += 1;
   }
