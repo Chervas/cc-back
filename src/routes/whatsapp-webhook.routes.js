@@ -69,28 +69,70 @@ function extractWhatsappWebhookWabaId(body) {
   return body?.entry?.[0]?.id || null;
 }
 
+function getWhatsappWebhookAssetScore(asset) {
+  if (!asset) return 999;
+
+  const typeScore =
+    asset.assetType === 'whatsapp_phone_number'
+      ? 0
+      : asset.assetType === 'whatsapp_business_account'
+        ? 100
+        : 200;
+
+  const scopeScore =
+    asset.assignmentScope === 'group' && asset.grupoClinicaId
+      ? 0
+      : asset.assignmentScope === 'clinic' && asset.clinicaId
+        ? 10
+        : asset.grupoClinicaId
+          ? 20
+          : asset.clinicaId
+            ? 30
+            : 40;
+
+  return typeScore + scopeScore;
+}
+
+function pickPreferredWhatsappWebhookAsset(assets = []) {
+  const validAssets = Array.isArray(assets) ? assets.filter(Boolean) : [];
+  if (!validAssets.length) return null;
+
+  return [...validAssets].sort((left, right) => {
+    const scoreDiff = getWhatsappWebhookAssetScore(left) - getWhatsappWebhookAssetScore(right);
+    if (scoreDiff !== 0) return scoreDiff;
+
+    const leftUpdated = new Date(left.updatedAt || left.createdAt || 0).getTime() || 0;
+    const rightUpdated = new Date(right.updatedAt || right.createdAt || 0).getTime() || 0;
+    if (rightUpdated !== leftUpdated) return rightUpdated - leftUpdated;
+
+    return Number(right.id || 0) - Number(left.id || 0);
+  })[0];
+}
+
 async function findWhatsappAssetForWebhook(body) {
   const value = extractWhatsappWebhookValue(body);
   const phoneId = value?.metadata?.phone_number_id || null;
   if (phoneId) {
-    const asset = await ClinicMetaAsset.findOne({
+    const assets = await ClinicMetaAsset.findAll({
       where: { phoneNumberId: phoneId, isActive: true },
       raw: true,
     });
+    const asset = pickPreferredWhatsappWebhookAsset(assets);
     if (asset) return asset;
     console.warn('Webhook WA sin mapeo de phoneNumberId', phoneId);
   }
 
   const wabaId = extractWhatsappWebhookWabaId(body);
   if (wabaId) {
-    const asset = await ClinicMetaAsset.findOne({
+    const assets = await ClinicMetaAsset.findAll({
       where: {
-        assetType: 'whatsapp_phone_number',
+        assetType: { [Op.in]: ['whatsapp_phone_number', 'whatsapp_business_account'] },
         wabaId,
         isActive: true,
       },
       raw: true,
     });
+    const asset = pickPreferredWhatsappWebhookAsset(assets);
     if (asset) return asset;
   }
 
@@ -105,7 +147,7 @@ async function findWhatsappAssetForWebhook(body) {
       raw: true,
     });
     const localDigits = phoneDigits.length > 9 ? phoneDigits.slice(-9) : phoneDigits;
-    const match = assets.find((asset) => {
+    const matches = assets.filter((asset) => {
       const haystack = JSON.stringify({
         metaAssetName: asset.metaAssetName,
         phoneNumberId: asset.phoneNumberId,
@@ -114,6 +156,7 @@ async function findWhatsappAssetForWebhook(body) {
       }).replace(/\D/g, '');
       return haystack.includes(phoneDigits) || (localDigits && haystack.includes(localDigits));
     });
+    const match = pickPreferredWhatsappWebhookAsset(matches);
     if (match) return match;
   }
 
