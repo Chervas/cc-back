@@ -3180,6 +3180,9 @@ async function handleRequestReview(node, context, runtime) {
     reviewSource: resolveTemplateValue(config?.review_source, context),
     reviewThreshold: resolveTemplateValue(config?.review_threshold, context),
     whatsappTemplateId: resolveTemplateValue(config?.whatsapp_template_id, context),
+    reviewGiftEnabled: resolveTemplateValue(config?.review_gift_enabled, context),
+    reviewGiftDescription: resolveTemplateValue(config?.review_gift_description, context),
+    reviewDisplayClinicName: resolveTemplateValue(config?.review_display_clinic_name, context),
     waitForMessageMs: resolveTemplateValue(config?.wait_for_message_ms, context),
     userId: runtime?.execution?.created_by || runtime?.execution?.user_id || null,
   });
@@ -4025,6 +4028,9 @@ async function processNode(node, context, runtime = {}) {
             review_source: cleanString(resolveTemplateValue(config?.review_source, context)) || 'first_completed_appointment',
             review_threshold: toIntOrNull(resolveTemplateValue(config?.review_threshold, context)) || 5,
             whatsapp_template_id: toIntOrNull(resolveTemplateValue(config?.whatsapp_template_id, context)) || null,
+            review_gift_enabled: parseBool(resolveTemplateValue(config?.review_gift_enabled, context), false),
+            review_gift_description: cleanString(resolveTemplateValue(config?.review_gift_description, context)) || null,
+            review_display_clinic_name: cleanString(resolveTemplateValue(config?.review_display_clinic_name, context)) || null,
           },
           next_node_id: readOutputTarget(node, 'on_success'),
         };

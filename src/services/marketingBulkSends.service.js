@@ -2141,17 +2141,48 @@ async function buildItemsForReviewRequest(scope, body = {}) {
   const alreadyRequested = await getReviewRequestedPatientIds(scope);
 
   if (source === 'manual_selection' || !CitaPaciente) {
-    const patients = await Paciente.findAll({
-      where: {
-        clinica_id: { [Op.in]: clinicIds },
-        fecha_baja: null,
-        ...(alreadyRequested.size ? { id_paciente: { [Op.notIn]: Array.from(alreadyRequested) } } : {}),
+    const requestedIds = Array.from(alreadyRequested).filter(Number.isInteger);
+    const requestedClause = requestedIds.length ? 'AND p.id_paciente NOT IN (:requestedIds)' : '';
+    const patients = await db.sequelize.query(
+      `
+      SELECT DISTINCT
+        p.id_paciente,
+        p.clinica_id,
+        p.nombre,
+        p.apellidos,
+        p.telefono_movil,
+        p.email,
+        COALESCE(pc.clinica_id, p.clinica_id) AS review_clinica_id,
+        c.nombre_clinica AS review_clinica_nombre
+      FROM Pacientes p
+      LEFT JOIN PacienteClinicas pc
+        ON pc.paciente_id = p.id_paciente
+       AND pc.clinica_id IN (:clinicIds)
+      LEFT JOIN Clinicas c
+        ON c.id_clinica = COALESCE(pc.clinica_id, p.clinica_id)
+      WHERE p.fecha_baja IS NULL
+        AND (p.clinica_id IN (:clinicIds) OR pc.clinica_id IS NOT NULL)
+        ${requestedClause}
+      ORDER BY p.id_paciente DESC
+      LIMIT :limit
+      `,
+      {
+        replacements: {
+          clinicIds,
+          requestedIds,
+          limit,
+        },
+        type: QueryTypes.SELECT,
+      }
+    );
+    return patients.map((patient) => mapReviewPatientItem({
+      patient,
+      appointment: {
+        clinica_id: Number(patient.review_clinica_id || patient.clinica_id || 0) || null,
+        clinica: { nombre_clinica: patient.review_clinica_nombre || '' },
       },
-      attributes: ['id_paciente', 'clinica_id', 'nombre', 'apellidos', 'telefono_movil', 'email'],
-      order: [['id_paciente', 'DESC']],
-      limit,
-    });
-    return patients.map((patient) => mapReviewPatientItem({ patient, source }));
+      source,
+    }));
   }
 
   const appointmentWhere = {
@@ -2281,6 +2312,9 @@ function serializeReviewAutomationTemplate(template) {
     review_threshold: normalizeReviewThreshold(config.review_threshold),
     whatsapp_template_id: Number(config.whatsapp_template_id || 0) || null,
     template_name: normalizeText(config.template_name) || REVIEW_TEMPLATE_NAME,
+    review_gift_enabled: config.review_gift_enabled === true || String(config.review_gift_enabled || '').toLowerCase() === 'true',
+    review_gift_description: normalizeText(config.review_gift_description || '') || null,
+    review_display_clinic_name: normalizeText(config.review_display_clinic_name || '') || null,
   };
 }
 
@@ -2680,8 +2714,16 @@ function buildReviewAutomationTemplateIdentity(scope) {
   throw err;
 }
 
-function buildReviewAutomationNodes({ reviewSource, reviewThreshold, whatsappTemplateId = null }) {
+function buildReviewAutomationNodes({
+  reviewSource,
+  reviewThreshold,
+  whatsappTemplateId = null,
+  reviewGiftEnabled = false,
+  reviewGiftDescription = '',
+  reviewDisplayClinicName = '',
+}) {
   const threshold = normalizeReviewThreshold(reviewThreshold);
+  const giftEnabled = reviewGiftEnabled === true || String(reviewGiftEnabled || '').toLowerCase() === 'true';
   return [
     {
       id: 'N1',
@@ -2700,6 +2742,9 @@ function buildReviewAutomationNodes({ reviewSource, reviewThreshold, whatsappTem
         review_threshold: threshold,
         whatsapp_template_id: Number(whatsappTemplateId || 0) || null,
         template_name: REVIEW_TEMPLATE_NAME,
+        review_gift_enabled: giftEnabled,
+        review_gift_description: giftEnabled ? normalizeText(reviewGiftDescription || '') : null,
+        review_display_clinic_name: normalizeText(reviewDisplayClinicName || '') || null,
         require_message_anchor_for_wait: true,
         wait_for_message_ms: 6000,
       },
@@ -2806,6 +2851,11 @@ async function setReviewRequestAutomation(scope, body = {}, userId = null) {
   const reviewSource = normalizeReviewRequestSource(body.review_source || body.reviewSource || 'first_completed_or_completed_treatment');
   const reviewThreshold = 5;
   const whatsappTemplateId = Number(body.whatsapp_template_id || body.template_id || 0) || null;
+  const reviewGiftEnabled = body.review_gift_enabled === true
+    || body.reviewGiftEnabled === true
+    || String(body.review_gift_enabled ?? body.reviewGiftEnabled ?? '').toLowerCase() === 'true';
+  const reviewGiftDescription = normalizeText(body.review_gift_description || body.reviewGiftDescription || '');
+  const reviewDisplayClinicName = normalizeText(body.review_display_clinic_name || body.reviewDisplayClinicName || '');
 
   let approvedTemplate = null;
   if (whatsappTemplateId) {
@@ -2827,6 +2877,9 @@ async function setReviewRequestAutomation(scope, body = {}, userId = null) {
     reviewSource,
     reviewThreshold,
     whatsappTemplateId: whatsappTemplateId || approvedTemplate?.id || null,
+    reviewGiftEnabled,
+    reviewGiftDescription,
+    reviewDisplayClinicName,
   });
   const payload = {
     ...identity,
@@ -2880,6 +2933,11 @@ async function createAndStartReviewRequestForAppointment(options = {}) {
   };
   const reviewSource = normalizeReviewRequestSource(options.reviewSource || options.review_source || 'first_completed_or_completed_treatment');
   const reviewThreshold = 5;
+  const reviewGiftEnabled = options.reviewGiftEnabled === true
+    || options.review_gift_enabled === true
+    || String(options.reviewGiftEnabled ?? options.review_gift_enabled ?? '').toLowerCase() === 'true';
+  const reviewGiftDescription = normalizeText(options.reviewGiftDescription || options.review_gift_description || '');
+  const reviewDisplayClinicName = normalizeText(options.reviewDisplayClinicName || options.review_display_clinic_name || '');
   const candidate = await buildReviewRequestCandidateForAppointment(scope, {
     review_appointment_id: appointmentId,
     review_source: reviewSource,
@@ -2912,7 +2970,9 @@ async function createAndStartReviewRequestForAppointment(options = {}) {
       review_source: reviewSource,
       review_threshold: reviewThreshold,
       review_appointment_id: appointmentId,
-      review_display_clinic_name: resolveReviewDisplayClinicName({ criteria: {} }, clinic),
+      review_gift_enabled: reviewGiftEnabled,
+      review_gift_description: reviewGiftEnabled ? reviewGiftDescription : null,
+      review_display_clinic_name: reviewDisplayClinicName || resolveReviewDisplayClinicName({ criteria: {} }, clinic),
       whatsapp_template_id: template.id,
       link_tracking: {
         enabled: true,
@@ -4650,6 +4710,10 @@ async function listRecipients(scope, campaignId, query = {}) {
   if (status && status !== 'all') {
     if (status === 'excluded') {
       where.status = { [Op.like]: 'excluded%' };
+    } else if (status === 'ready') {
+      where.status = 'ready';
+      where.selected = true;
+      where[Op.or] = [{ dispatch_status: null }, { dispatch_status: 'pending' }];
     } else if (status === 'sent') {
       where.dispatch_status = { [Op.in]: ['sent', 'delivered', 'read', 'replied'] };
     } else {
