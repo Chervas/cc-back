@@ -741,6 +741,11 @@ createBusinessWorker('outbound_whatsapp', async (job) => {
     if (!msg) {
         throw new Error(`Mensaje ${messageId} no encontrado`);
     }
+    const currentStatus = String(msg.status || '').toLowerCase();
+    if (['sent', 'delivered', 'read'].includes(currentStatus)) {
+        console.log(`[outbound_whatsapp] Mensaje ${messageId} ya enviado; se omite job pendiente`);
+        return;
+    }
 
     msg.status = 'sending';
     await msg.save();

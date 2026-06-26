@@ -68,14 +68,14 @@ const AI_OUTPUT_FIELD_TYPES = ['string', 'number', 'boolean'];
 const FORM_MATCH_MODE_OPTIONS = ['url_contains', 'url_equals', 'form_id', 'selector'];
 const FIELD_CHECK_LEFT_REF_SOURCES = ['node_output', 'trigger_data', 'context', 'manual'];
 const FIELD_CHECK_VALUE_TYPES = ['string', 'number', 'boolean'];
-const FIELD_CHECK_OPERATOR_OPTIONS = ['equals', 'not_equals', 'contains', 'greater_than', 'less_than', 'exists'];
+const FIELD_CHECK_OPERATOR_OPTIONS = ['equals', 'not_equals', 'contains', 'greater_than', 'greater_than_or_equals', 'less_than', 'exists'];
 const FIELD_CHECK_MODE_OPTIONS = ['simple', 'appointment_booking_timing'];
 const FIELD_CHECK_SWITCH_TYPE_OPTIONS = ['appointment_booking'];
 const FIELD_CHECK_APPOINTMENT_WINDOW_OPTIONS = ['same_day', 'day_before', 'more_than_day_before'];
 const DEFAULT_TIMEZONE = 'Europe/Madrid';
 const FIELD_CHECK_OPERATOR_TYPE_COMPAT = {
   string: ['equals', 'not_equals', 'contains', 'exists'],
-  number: ['equals', 'not_equals', 'greater_than', 'less_than', 'exists'],
+  number: ['equals', 'not_equals', 'greater_than', 'greater_than_or_equals', 'less_than', 'exists'],
   boolean: ['equals', 'not_equals', 'exists'],
 };
 const CITA_STATUS_SET = new Set(CITA_STATUS_VALUES);
@@ -933,6 +933,66 @@ const NODE_TYPES_V2 = [
     ],
   },
   {
+    type: 'action/request_review',
+    category: 'action',
+    label: 'Solicitar reseña',
+    description: 'Crea la solicitud de valoración privada, evita duplicados y envía la plantilla aprobada de WhatsApp.',
+    output_keys: ['on_success', 'on_fail'],
+    runtime_status: 'real',
+    default_config: {
+      review_source: 'first_completed_or_completed_treatment',
+      review_threshold: 5,
+      whatsapp_template_id: null,
+      template_name: 'clinicaclick_solicitar_resena',
+      require_message_anchor_for_wait: true,
+      wait_for_message_ms: 6000,
+    },
+    config_schema: [
+      { key: 'review_source', label: 'A quién se pide si no valoró antes', input_type: 'select', required: false, options: ['first_completed_or_completed_treatment', 'first_completed_appointment', 'completed_treatment', 'manual_selection'] },
+    ],
+  },
+  {
+    type: 'action/request_review_reminder',
+    category: 'action',
+    label: 'Enviar recordatorio de valoración',
+    description: 'Envía un recordatorio sobre la misma solicitud si el paciente no responde al primer WhatsApp.',
+    output_keys: ['on_success', 'on_fail'],
+    runtime_status: 'real',
+    default_config: {
+      list_id: '{{outputs.N2.list_id}}',
+      item_id: '{{outputs.N2.item_id}}',
+      clinic_id: '{{outputs.N2.clinic_id}}',
+      trigger_message_id: '{{outputs.N2.message_id}}',
+      template_name: 'clinicaclick_recordatorio_resena_sin_respuesta',
+    },
+    config_schema: [],
+  },
+  {
+    type: 'action/review_followup',
+    category: 'action',
+    label: 'Responder según valoración',
+    description: 'Responde dentro de la ventana de WhatsApp: si valora 5/5 envía Google; si valora 1-4 pide el motivo en privado.',
+    output_keys: ['on_success'],
+    runtime_status: 'real',
+    default_config: {
+      followup_kind: 'google_review',
+      review_threshold: 5,
+    },
+    config_schema: [
+      { key: 'followup_kind', label: 'Qué enviar tras la respuesta', input_type: 'select', required: false, options: ['google_review', 'private_feedback'] },
+    ],
+  },
+  {
+    type: 'action/review_no_response',
+    category: 'action',
+    label: 'Fin del flujo',
+    description: 'Termina esta rama de la automatización sin ejecutar más acciones.',
+    output_keys: [],
+    runtime_status: 'real',
+    default_config: {},
+    config_schema: [],
+  },
+  {
     type: 'action/send_email',
     category: 'action',
     label: 'Enviar Email',
@@ -1003,7 +1063,7 @@ const NODE_TYPES_V2 = [
     type: 'action/write_note',
     category: 'action',
     label: 'Escribir nota',
-    description: 'Escribe una nota interna en el historial.',
+    description: 'Escribe una nota interna en el historial. Requiere contenido; si está vacía no se ejecuta.',
     output_keys: ['on_success'],
     runtime_status: 'real',
     default_config: { content: '' },
@@ -1037,6 +1097,16 @@ const NODE_TYPES_V2 = [
     config_schema: [
       { key: 'mode', label: 'Modo unión', input_type: 'select', required: false, options: ['any'] },
     ],
+  },
+  {
+    type: 'control/end',
+    category: 'control',
+    label: 'Fin del flujo',
+    description: 'Termina esta rama de la automatización sin ejecutar más acciones.',
+    output_keys: [],
+    runtime_status: 'real',
+    default_config: {},
+    config_schema: [],
   },
   {
     type: 'delay/fixed',
@@ -1646,6 +1716,8 @@ function normalizeAiPresetConfig(config) {
 const WAIT_RESPONSE_LISTENER_NODE_TYPES = new Set([
   'action/send_whatsapp',
   'action/send_email',
+  'action/request_review',
+  'action/request_review_reminder',
 ]);
 
 function isWaitResponseListenerNode(node) {

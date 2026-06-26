@@ -83,17 +83,7 @@ function isReviewRequestUsage(value) {
 }
 
 function buildCustomTemplateExtraComponents({ templateUsage }) {
-  if (!isReviewRequestUsage(templateUsage)) {
-    return [];
-  }
-
-  return [{
-    type: 'BUTTONS',
-    buttons: [1, 2, 3, 4, 5].map((rating) => ({
-      type: 'QUICK_REPLY',
-      text: String(rating),
-    })),
-  }];
+  return [];
 }
 
 function annotateTemplateVariables(variables = [], templateUsage = null) {

@@ -85,6 +85,9 @@ exports.getReviewRequestSummary = async (req, res) => {
     const scope = await resolveScope(req, { allowAll: false });
     const result = await marketingBulkSendsService.getReviewRequestSummary(scope, {
       review_source: req.query.review_source || req.query.reviewSource || null,
+      review_treatment_id: req.query.review_treatment_id || req.query.reviewTreatmentId || null,
+      review_treatment_ids: req.query.review_treatment_ids || req.query.reviewTreatmentIds || null,
+      review_treatment_moment: req.query.review_treatment_moment || req.query.reviewTreatmentMoment || null,
     });
     return res.json({
       ...result,

@@ -133,12 +133,21 @@ async function resolveClinicGoogleLocalLinks(clinicOrId) {
 function mergeClinicLinksIntoContext(clinicPatch, links) {
   const base = clinicPatch && typeof clinicPatch === 'object' ? clinicPatch : {};
   const safeLinks = links && typeof links === 'object' ? links : {};
+  const effectiveDirectionsUrl =
+    cleanString(safeLinks.url_como_llegar)
+    || cleanString(safeLinks.url_perfil_google)
+    || cleanString(base.url_ficha_local);
+  const effectiveAddress =
+    cleanString(base.direccion)
+    || cleanString(safeLinks.location_name)
+    || effectiveDirectionsUrl;
   return {
     ...base,
+    direccion: effectiveAddress,
     url_ficha_local_manual: cleanString(safeLinks.url_ficha_local_manual) || cleanString(base.url_ficha_local),
     url_ficha_local: cleanString(safeLinks.url_ficha_local) || cleanString(base.url_ficha_local),
     url_perfil_google: cleanString(safeLinks.url_perfil_google) || cleanString(safeLinks.url_ficha_local) || cleanString(base.url_ficha_local),
-    url_como_llegar: cleanString(safeLinks.url_como_llegar) || cleanString(safeLinks.url_perfil_google) || cleanString(base.url_ficha_local),
+    url_como_llegar: effectiveDirectionsUrl,
     url_dejar_resena: cleanString(safeLinks.url_dejar_resena),
     perfil_google_conectado: safeLinks.has_google_business_profile === true,
     perfil_google_source: cleanString(safeLinks.source),

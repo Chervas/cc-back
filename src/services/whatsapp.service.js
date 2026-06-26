@@ -184,6 +184,8 @@ class WhatsAppService {
         templateLanguage,
         templateParams,
         templateComponents,
+        interactiveCtaUrl,
+        interactiveCtaText,
         clinicConfig = {},
     }) {
         this.setClinicCredentials(clinicConfig);
@@ -202,7 +204,56 @@ class WhatsAppService {
             });
         }
 
+        if (interactiveCtaUrl) {
+            return this.sendCtaUrlMessage({
+                to,
+                body,
+                displayText: interactiveCtaText,
+                url: interactiveCtaUrl,
+                clinicConfig,
+            });
+        }
+
         return this.sendTextMessage({ to, body, previewUrl, clinicConfig });
+    }
+
+    /**
+     * Envía un mensaje interactivo con botón CTA URL dentro de ventana de servicio.
+     * Meta renderiza el enlace como botón y evita exponer URLs largas en el cuerpo.
+     */
+    async sendCtaUrlMessage({ to, body, displayText = 'Abrir enlace', url, clinicConfig = {} }) {
+        this.setClinicCredentials(clinicConfig);
+        this.assertConfiguration();
+
+        const payload = {
+            messaging_product: 'whatsapp',
+            recipient_type: 'individual',
+            to,
+            type: 'interactive',
+            interactive: {
+                type: 'cta_url',
+                body: {
+                    text: String(body || '').trim(),
+                },
+                action: {
+                    name: 'cta_url',
+                    parameters: {
+                        display_text: String(displayText || 'Abrir enlace').trim().slice(0, 20),
+                        url: String(url || '').trim(),
+                    },
+                },
+            },
+        };
+
+        const apiUrl = `https://graph.facebook.com/${this.apiVersion}/${this.phoneNumberId}/messages`;
+        const response = await axios.post(apiUrl, payload, {
+            headers: {
+                Authorization: `Bearer ${this.accessToken}`,
+                'Content-Type': 'application/json',
+            },
+        });
+
+        return response.data;
     }
 
     /**
