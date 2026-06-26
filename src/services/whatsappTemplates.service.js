@@ -78,6 +78,27 @@ function buildCustomTemplateTechnicalName(displayName) {
   return `cc_${base}_${suffix}`.slice(0, 100);
 }
 
+function isReviewRequestUsage(value) {
+  return ['solicitud_resena', 'resena', 'review_request', 'reviews'].includes(normalizeTemplateKey(value));
+}
+
+function buildCustomTemplateExtraComponents({ templateUsage }) {
+  return [];
+}
+
+function annotateTemplateVariables(variables = [], templateUsage = null) {
+  const base = Array.isArray(variables) ? variables.map((variable) => ({ ...variable })) : [];
+  const normalizedUsage = normalizeTemplateKey(templateUsage);
+  if (!normalizedUsage) {
+    return base;
+  }
+
+  return base.map((variable) => ({
+    ...variable,
+    template_usage: normalizedUsage,
+  }));
+}
+
 function buildVariableContractFromBody(bodyText, rawVariables = []) {
   const explicit = Array.isArray(rawVariables) ? rawVariables : [];
   const explicitByKey = new Map(
@@ -384,7 +405,14 @@ function parseMetaError(err) {
   const nestedError = base?.error?.error || base?.error || base;
   const code = nestedError?.code || null;
   const message = nestedError?.message || String(base?.message || base || '');
-  return { code, message, raw: base };
+  return {
+    code,
+    subcode: nestedError?.error_subcode || nestedError?.subcode || null,
+    message,
+    userTitle: nestedError?.error_user_title || null,
+    userMessage: nestedError?.error_user_msg || null,
+    raw: base,
+  };
 }
 
 async function selectCatalogTemplatesByDisciplines(disciplinas) {
@@ -454,6 +482,7 @@ async function createPlaceholderTemplatesForClinic({ clinicId, assignmentScope, 
       category: template.category,
       status: 'SIN_CONECTAR',
       components: parseMaybeJson(template.components),
+      variables: parseMaybeJson(template.variables) || [],
       catalog_template_id: template.id,
       origin: 'catalog',
       is_active: true,
@@ -477,6 +506,7 @@ async function upsertPlaceholderTemplateForClinic({ clinicId, template }) {
     category: template.category,
     status: 'SIN_CONECTAR',
     components: parseMaybeJson(template.components),
+    variables: parseMaybeJson(template.variables) || [],
     catalog_template_id: template.id,
     origin: 'catalog',
     is_active: !!template.is_active,
@@ -513,6 +543,7 @@ async function upsertClinicOverrideTemplateForClinic({
     category: template.category,
     status,
     components: parseMaybeJson(template.components),
+    variables: parseMaybeJson(template.variables) || [],
     catalog_template_id: template.id,
     origin: 'catalog',
     is_active: !!template.is_active,
@@ -560,6 +591,7 @@ async function upsertConnectedTemplateForWaba({
     category: template.category,
     status,
     components: parseMaybeJson(template.components),
+    variables: parseMaybeJson(template.variables) || [],
     meta_template_id: metaTemplateId || null,
     catalog_template_id: template.id,
     origin: 'catalog',
@@ -588,7 +620,11 @@ async function upsertConnectedTemplateForWaba({
 
 function buildLocalPendingReasonFromMetaError(err) {
   const parsed = parseMetaError(err);
-  const detail = String(parsed?.message || '').trim();
+  const detail = [
+    parsed?.userTitle,
+    parsed?.userMessage,
+    parsed?.message,
+  ].map((value) => String(value || '').trim()).filter(Boolean).join(' - ');
   const code = parsed?.code ? ` [${parsed.code}]` : '';
   if (!detail) {
     return `Meta no ha aceptado abrir una revisión nueva para esta plantilla${code}.`;
@@ -769,6 +805,7 @@ async function createCustomTemplateForClinic({
   category = 'UTILITY',
   language = DEFAULT_LANGUAGE,
   variables = [],
+  templateUsage = null,
   replaceTemplateId = null,
 }) {
   const safeClinicId = Number(clinicId || 0) || null;
@@ -777,6 +814,7 @@ async function createCustomTemplateForClinic({
   const safeDisplayName = cleanString(displayName) || 'Plantilla WhatsApp';
   const safeBodyText = cleanString(bodyText);
   const safeCategory = String(category || '').trim().toUpperCase() === 'MARKETING' ? 'MARKETING' : 'UTILITY';
+  const safeTemplateUsage = cleanString(templateUsage).toLowerCase();
   if (!safeWabaId || !safeAccessToken) {
     throw new Error('missing_waba_credentials');
   }
@@ -799,11 +837,12 @@ async function createCustomTemplateForClinic({
       },
     } : {}),
   };
+  const extraComponents = buildCustomTemplateExtraComponents({ templateUsage: safeTemplateUsage });
   const technicalName = buildCustomTemplateTechnicalName(safeDisplayName);
   const template = {
     name: technicalName,
     category: safeCategory,
-    components: [bodyComponent],
+    components: [bodyComponent, ...extraComponents],
   };
 
   let metaTemplateId = null;
@@ -828,8 +867,8 @@ async function createCustomTemplateForClinic({
       language,
       category: safeCategory,
       status: WHATSAPP_TEMPLATE_STATUS.LOCAL_PENDING,
-      components: [bodyComponent],
-      variables: contract.variables,
+      components: [bodyComponent, ...extraComponents],
+      variables: annotateTemplateVariables(contract.variables, safeTemplateUsage),
       origin: 'custom',
       rejection_reason: buildLocalPendingReasonFromMetaError(err),
       is_active: true,
@@ -846,8 +885,8 @@ async function createCustomTemplateForClinic({
     language,
     category: safeCategory,
     status: WHATSAPP_TEMPLATE_STATUS.PENDING,
-    components: [bodyComponent],
-    variables: contract.variables,
+    components: [bodyComponent, ...extraComponents],
+    variables: annotateTemplateVariables(contract.variables, safeTemplateUsage),
     meta_template_id: metaTemplateId,
     origin: 'custom',
     rejection_reason: null,

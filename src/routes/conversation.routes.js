@@ -11,6 +11,7 @@ router.get('/conversations/permissions', conversationController.getConversationP
 router.get('/conversations/by-patient/:patientId', conversationController.getConversationByPatient);
 router.get('/conversations/by-lead/:leadId', conversationController.getConversationByLead);
 router.get('/conversations/messages/:messageId/media', conversationController.streamMessageMedia);
+router.post('/conversations/messages/:messageId/send-now', conversationController.sendScheduledMessageNow);
 router.get('/conversations/:id/messages', conversationController.getMessages);
 router.post('/conversations/:id/messages', conversationController.postMessage);
 router.patch('/conversations/:id/read', conversationController.markAsRead);

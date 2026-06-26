@@ -1232,6 +1232,7 @@ exports.createCustomTemplate = async (req, res) => {
       category: req.body?.category || (req.body?.template_commercial ? 'MARKETING' : 'UTILITY'),
       language: req.body?.language || 'es',
       variables: req.body?.variables || [],
+      templateUsage: req.body?.template_usage || req.body?.uso || req.body?.usage || null,
       replaceTemplateId: req.body?.replace_template_id || req.body?.replaceTemplateId || null,
     });
     const json = result.row.get ? result.row.get({ plain: true }) : result.row;

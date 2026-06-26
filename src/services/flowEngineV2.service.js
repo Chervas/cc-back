@@ -8,6 +8,10 @@ const { getIO } = require('./socket.service');
 const { emitNotificationCreated } = require('./notificationsRealtime.service');
 const { queues } = require('./queue.service');
 const jobRequestsService = require('./jobRequests.service');
+const {
+  mergeClinicLinksIntoContext,
+  resolveClinicGoogleLocalLinks,
+} = require('./googleLocalLinks.service');
 const { normalizeCitaStatus, normalizeLeadStatus } = require('../lib/status-catalog');
 const { ADMIN_USER_IDS } = require('../lib/role-helpers');
 const {
@@ -36,6 +40,7 @@ const WhatsappTemplate = db.WhatsappTemplate;
 const WhatsappTemplateCatalog = db.WhatsappTemplateCatalog;
 const whatsappService = require('./whatsapp.service');
 const whatsappConnectionStatusService = require('./whatsappConnectionStatus.service');
+const marketingBulkSendsService = require('./marketingBulkSends.service');
 const appointmentNotificationCleanup = require('./appointmentNotificationCleanup.service');
 const { findCanonicalWhatsappConversation } = require('../lib/canonical-conversation');
 const { buildConversationContext } = require('../lib/automation-conversation-context');
@@ -92,7 +97,7 @@ const POSITIVE_CONFIRMATION_REACTION_EMOJIS = new Set([
 ]);
 const FIELD_CHECK_OPERATOR_TYPE_COMPAT = {
   string: ['equals', 'not_equals', 'contains', 'exists'],
-  number: ['equals', 'not_equals', 'greater_than', 'less_than', 'exists'],
+  number: ['equals', 'not_equals', 'greater_than', 'greater_than_or_equals', 'less_than', 'exists'],
   boolean: ['equals', 'not_equals', 'exists'],
 };
 
@@ -671,7 +676,7 @@ async function enrichContextForTemplateResolution(context, targets = {}) {
       raw: true,
     });
     if (clinic) {
-      const clinicPatch = {
+      const clinicPatchBase = {
         id: toIntOrNull(clinic.id_clinica),
         id_clinica: toIntOrNull(clinic.id_clinica),
         clinic_id: toIntOrNull(clinic.id_clinica),
@@ -687,6 +692,8 @@ async function enrichContextForTemplateResolution(context, targets = {}) {
         timezone: resolveClinicTimezoneFromContext({ clinic }),
         configuracion: clinic.configuracion || null,
       };
+      const clinicLinks = await resolveClinicGoogleLocalLinks(clinic);
+      const clinicPatch = mergeClinicLinksIntoContext(clinicPatchBase, clinicLinks);
       out.clinic = mergeContextObject(out.clinic, clinicPatch);
       out.clinica = mergeContextObject(out.clinica, {
         ...clinicPatch,
@@ -1688,6 +1695,54 @@ function isTemplateBlockedForSend(statusValue) {
   return status !== 'approved';
 }
 
+function getWhatsappTemplateWabaId(template) {
+  const plain = template?.get ? template.get({ plain: true }) : (template || {});
+  return cleanString(plain.waba_id || plain.wabaId);
+}
+
+function scoreWhatsappTemplateCandidate(template, { clinicId = null, targetWabaId = '' } = {}) {
+  const plain = template?.get ? template.get({ plain: true }) : (template || {});
+  const rowClinicId = toIntOrNull(plain.clinic_id);
+  const wabaId = getWhatsappTemplateWabaId(plain);
+  const safeClinicId = toIntOrNull(clinicId);
+  const safeTargetWabaId = cleanString(targetWabaId);
+
+  if (safeClinicId && rowClinicId && rowClinicId !== safeClinicId) {
+    return 0;
+  }
+
+  if (safeTargetWabaId && wabaId && wabaId !== safeTargetWabaId) {
+    return 0;
+  }
+
+  let score = isTemplateBlockedForSend(plain.status) ? 0 : 1000;
+
+  if (safeTargetWabaId) {
+    score += wabaId === safeTargetWabaId ? 300 : 10;
+  }
+
+  if (safeClinicId) {
+    score += rowClinicId === safeClinicId ? 60 : 40;
+  }
+
+  if (cleanString(plain.meta_template_id || plain.metaTemplateId)) {
+    score += 20;
+  }
+
+  score += Number(plain.id || 0) / 100000;
+  return score;
+}
+
+function selectBestWhatsappTemplateCandidate(candidates, options = {}) {
+  return (Array.isArray(candidates) ? candidates : [])
+    .map((template) => ({
+      template,
+      score: scoreWhatsappTemplateCandidate(template, options),
+    }))
+    .filter((item) => item.score > 0)
+    .sort((a, b) => b.score - a.score)[0]?.template || null;
+}
+
 function normalizeStringArray(value) {
   if (value === undefined || value === null) return [];
 
@@ -2344,6 +2399,7 @@ async function loadConfiguredWhatsappTemplate(
     templateIdKey = 'template_id',
     templateNameKey = 'template_name',
     catalogTemplateIdKey = 'catalog_template_id',
+    targetWabaId = '',
   } = {}
 ) {
   const templateId = toIntOrNull(resolveTemplateValue(config?.[templateIdKey], context));
@@ -2374,42 +2430,8 @@ async function loadConfiguredWhatsappTemplate(
       },
     });
 
-    let effectiveWabaId = null;
-    if (clinicId) {
-      try {
-        const clinicConfig = await whatsappService.getClinicConfig(clinicId);
-        effectiveWabaId = cleanString(clinicConfig?.wabaId);
-      } catch (_) {
-        effectiveWabaId = null;
-      }
-    }
-
-    const clinicCandidates = clinicId
-      ? candidates.filter((row) => toIntOrNull(row?.clinic_id) === clinicId)
-      : [];
-    const globalCandidates = candidates.filter((row) => {
-      if (toIntOrNull(row?.clinic_id)) return false;
-      const rowWabaId = cleanString(row?.waba_id);
-      return !effectiveWabaId || !rowWabaId || rowWabaId === effectiveWabaId;
-    });
-    const scopedCandidates = clinicCandidates.length
-      ? [...clinicCandidates, ...globalCandidates]
-      : globalCandidates;
-    if (scopedCandidates.length) {
-      scopedCandidates.sort((a, b) => {
-        const aBlocked = isTemplateBlockedForSend(toLowerSafe(a?.status)) ? 1 : 0;
-        const bBlocked = isTemplateBlockedForSend(toLowerSafe(b?.status)) ? 1 : 0;
-        if (aBlocked !== bBlocked) return aBlocked - bBlocked;
-        const aClinic = clinicId && toIntOrNull(a?.clinic_id) === clinicId ? 1 : 0;
-        const bClinic = clinicId && toIntOrNull(b?.clinic_id) === clinicId ? 1 : 0;
-        if (aClinic !== bClinic) return bClinic - aClinic;
-        const aHasMeta = cleanString(a?.meta_template_id) ? 1 : 0;
-        const bHasMeta = cleanString(b?.meta_template_id) ? 1 : 0;
-        if (aHasMeta !== bHasMeta) return bHasMeta - aHasMeta;
-        return (Number(b?.id) || 0) - (Number(a?.id) || 0);
-      });
-      return scopedCandidates[0];
-    }
+    const selected = selectBestWhatsappTemplateCandidate(candidates, { clinicId, targetWabaId });
+    if (selected) return selected;
   }
 
   if (!templateId && !templateName) {
@@ -2425,10 +2447,38 @@ async function loadConfiguredWhatsappTemplate(
     where.name = templateName;
   }
 
-  return WhatsappTemplate.findOne({
+  const requested = await WhatsappTemplate.findOne({
     ...baseQuery,
     where,
   });
+  if (!requested) return null;
+
+  const requestedWabaId = getWhatsappTemplateWabaId(requested);
+  const requestedStatus = toLowerSafe(requested.status);
+  const requestedCatalogId = toIntOrNull(requested.catalog_template_id);
+  const needsCompatibleReplacement =
+    requestedCatalogId
+    && (
+      isTemplateBlockedForSend(requestedStatus)
+      || (cleanString(targetWabaId) && requestedWabaId && requestedWabaId !== cleanString(targetWabaId))
+    );
+
+  if (needsCompatibleReplacement) {
+    const candidates = await WhatsappTemplate.findAll({
+      ...baseQuery,
+      where: {
+        catalog_template_id: requestedCatalogId,
+        is_active: true,
+      },
+    });
+    const replacement = selectBestWhatsappTemplateCandidate(candidates, { clinicId, targetWabaId });
+    if (replacement) return replacement;
+    if (cleanString(targetWabaId) && requestedWabaId && requestedWabaId !== cleanString(targetWabaId)) {
+      return null;
+    }
+  }
+
+  return requested;
 }
 
 async function handleSendWhatsapp(node, context, runtime) {
@@ -2470,12 +2520,21 @@ async function handleSendWhatsapp(node, context, runtime) {
   let fallbackTemplateParams = {};
   let fallbackPreviewText = '';
   let fallbackTriggeredReason = null;
+  let senderData = null;
+  const getSenderData = async () => {
+    if (!senderData) {
+      senderData = await resolveWhatsAppSenderConfig({ config, context: templateContext, clinicId });
+    }
+    return senderData;
+  };
 
   if (messageMode === 'template') {
+    senderData = await getSenderData();
     template = await loadConfiguredWhatsappTemplate(config, templateContext, {
       templateIdKey: 'template_id',
       templateNameKey: 'template_name',
       catalogTemplateIdKey: 'catalog_template_id',
+      targetWabaId: senderData.clinic_config?.wabaId || '',
     });
     if (!template) {
       throw new Error('whatsapp_template_id_missing');
@@ -2638,7 +2697,7 @@ async function handleSendWhatsapp(node, context, runtime) {
     }
   }
 
-  const senderData = await resolveWhatsAppSenderConfig({ config, context: templateContext, clinicId });
+  senderData = await getSenderData();
 
   const senderClinic = await Clinica.findByPk(clinicId, {
     attributes: ['id_clinica', 'nombre_clinica'],
@@ -2994,6 +3053,236 @@ async function handleSendWhatsapp(node, context, runtime) {
       sender_clinic_name: cleanString(senderClinic?.nombre_clinica),
       recipient_patient_id: recipientPatientId,
       recipient_patient_name: recipientPatientName,
+    },
+    next_node_id: readOutputTarget(node, 'on_success'),
+  };
+}
+
+async function materializeFailedAutomationWhatsappMessage({ node, context, execution, errorMessage }) {
+  try {
+    const config = node?.config && typeof node.config === 'object' ? node.config : {};
+    let targets = resolveRuntimeTargets(execution, context);
+    targets = await backfillRuntimeTargets(execution, targets);
+    const clinicId = toIntOrNull(targets.clinic_id);
+    if (!clinicId) return null;
+
+    const templateContext = await enrichContextForTemplateResolution(context, targets).catch(() => context);
+    const recipientData = await resolveWhatsAppRecipient({
+      node,
+      config,
+      context: templateContext || context,
+      targets,
+    }).catch(() => null);
+    if (!recipientData?.recipient) return null;
+
+    const targetPatientId = toIntOrNull(targets.patient_id);
+    const targetLeadId = toIntOrNull(targets.lead_intake_id);
+    const conversation = await findCanonicalWhatsappConversation({
+      clinicId,
+      contactId: recipientData.recipient,
+      patientId: targetPatientId,
+      leadId: targetLeadId,
+      createIfMissing: true,
+      lastMessageAt: new Date(),
+    });
+    if (!conversation) return null;
+
+    const existing = await Message.findOne({
+      where: {
+        conversation_id: conversation.id,
+        direction: 'outbound',
+        status: 'failed',
+      },
+      order: [['id', 'DESC']],
+    });
+    const existingMeta = existing?.metadata && typeof existing.metadata === 'object' ? existing.metadata : {};
+    if (
+      toIntOrNull(existingMeta.execution_id) === toIntOrNull(execution?.id) &&
+      cleanString(existingMeta.node_id) === cleanString(node?.id) &&
+      cleanString(existingMeta.failure_source) === 'automation_send_whatsapp_preflight'
+    ) {
+      return existing;
+    }
+
+    const flowName =
+      cleanString(execution?.templateVersion?.name)
+      || cleanString(execution?.template_name)
+      || `Flujo #${toIntOrNull(execution?.id) || ''}`.trim();
+    const templateName = cleanString(resolveTemplateValue(config?.template_name, templateContext || context))
+      || cleanString(config?.template_name)
+      || null;
+    const rawError = cleanString(errorMessage);
+    const normalizedError = rawError.toLowerCase();
+    const failureReason =
+      normalizedError.includes('sin_conectar') || normalizedError.includes('whatsapp_config_missing')
+        ? 'porque esta clínica no tiene WhatsApp conectado.'
+        : normalizedError.includes('template_not_approved') || normalizedError.includes('not_approved')
+          ? 'porque la plantilla de WhatsApp no está aprobada para esta clínica.'
+          : normalizedError.includes('params_missing')
+            ? 'porque faltan datos para completar la plantilla.'
+            : rawError
+              ? `por este motivo: ${rawError}.`
+              : 'por un error de configuración.';
+    const messageContent = templateName
+      ? `No se pudo enviar el WhatsApp automático "${templateName}" ${failureReason}`
+      : `No se pudo enviar este WhatsApp automático ${failureReason}`;
+    const failedMessage = await Message.create({
+      conversation_id: conversation.id,
+      sender_id: null,
+      direction: 'outbound',
+      content: messageContent,
+      message_type: normalizeWhatsappMessageMode(config?.message_mode) === 'template' ? 'template' : 'text',
+      status: 'failed',
+      sent_at: new Date(),
+      metadata: {
+        source: 'automations_v2',
+        kind: 'flow_send_whatsapp',
+        failure_source: 'automation_send_whatsapp_preflight',
+        execution_id: execution?.id || null,
+        node_id: cleanString(node?.id),
+        flow_name: flowName || null,
+        template_id: toIntOrNull(resolveTemplateValue(config?.template_id, templateContext || context)) || null,
+        template_name: templateName,
+        catalog_template_id: toIntOrNull(resolveTemplateValue(config?.catalog_template_id, templateContext || context)) || null,
+        recipient_mode: recipientData.recipient_mode,
+        recipient: recipientData.recipient,
+        error: errorMessage,
+        error_message: errorMessage,
+        generated_at: new Date().toISOString(),
+      },
+    });
+    await conversation.update({ last_message_at: new Date() });
+    emitMessageCreatedToConversationRooms(conversation, failedMessage);
+    return failedMessage;
+  } catch (noticeError) {
+    console.warn('[automations:v2] No se pudo materializar fallo WhatsApp en QuickChat', {
+      execution_id: execution?.id || null,
+      node_id: cleanString(node?.id),
+      error: noticeError?.message || noticeError,
+    });
+    return null;
+  }
+}
+
+async function handleRequestReview(node, context, runtime) {
+  const config = node?.config && typeof node.config === 'object' ? node.config : {};
+  const targets = resolveRuntimeTargets(runtime?.execution, context);
+  const appointmentId = toIntOrNull(resolveTemplateValue(config?.appointment_id, context))
+    || toIntOrNull(getByPath(context, 'appointment.id_cita'))
+    || toIntOrNull(getByPath(context, 'appointment.id'))
+    || toIntOrNull(getByPath(context, 'trigger.data.appointment_id'))
+    || toIntOrNull(getByPath(context, 'trigger.data.cita_id'));
+  const clinicId = toIntOrNull(resolveTemplateValue(config?.clinic_id, context))
+    || toIntOrNull(targets.clinic_id)
+    || toIntOrNull(getByPath(context, 'appointment.clinica_id'))
+    || toIntOrNull(getByPath(context, 'clinic.id_clinica'))
+    || toIntOrNull(getByPath(context, 'clinica.id_clinica'));
+
+  const result = await marketingBulkSendsService.createAndStartReviewRequestForAppointment({
+    appointmentId,
+    clinicId,
+    reviewSource: resolveTemplateValue(config?.review_source, context),
+    reviewThreshold: resolveTemplateValue(config?.review_threshold, context),
+    whatsappTemplateId: resolveTemplateValue(config?.whatsapp_template_id, context),
+    reviewGiftEnabled: resolveTemplateValue(config?.review_gift_enabled, context),
+    reviewGiftDescription: resolveTemplateValue(config?.review_gift_description, context),
+    reviewDisplayClinicName: resolveTemplateValue(config?.review_display_clinic_name, context),
+    waitForMessageMs: resolveTemplateValue(config?.wait_for_message_ms, context),
+    userId: runtime?.execution?.created_by || runtime?.execution?.user_id || null,
+  });
+  const requireMessageAnchor = parseBool(resolveTemplateValue(config?.require_message_anchor_for_wait, context), false);
+  const nextOutput = result?.skipped || (requireMessageAnchor && !toIntOrNull(result?.message_id))
+    ? 'on_fail'
+    : 'on_success';
+
+  return {
+    kind: 'success',
+    output: {
+      ...result,
+      appointment_id: appointmentId || null,
+      clinic_id: clinicId || null,
+    },
+    next_node_id: readOutputTarget(node, nextOutput) || (nextOutput === 'on_fail' ? null : readOutputTarget(node, 'on_success')),
+  };
+}
+
+async function handleRequestReviewReminder(node, context, runtime) {
+  const config = node?.config && typeof node.config === 'object' ? node.config : {};
+  const result = await marketingBulkSendsService.sendReviewRequestReminder({
+    listId: resolveTemplateValue(config?.list_id, context),
+    itemId: resolveTemplateValue(config?.item_id, context),
+    campaignId: resolveTemplateValue(config?.campaign_id, context),
+    clinicId: resolveTemplateValue(config?.clinic_id, context),
+    whatsappTemplateId: resolveTemplateValue(config?.whatsapp_template_id, context),
+    templateName: resolveTemplateValue(config?.template_name, context),
+    triggerMessageId: resolveTemplateValue(config?.trigger_message_id, context),
+    userId: runtime?.execution?.created_by || runtime?.execution?.user_id || null,
+  });
+  const nextOutput = result?.sent && toIntOrNull(result?.message_id) ? 'on_success' : 'on_fail';
+
+  return {
+    kind: 'success',
+    output: result,
+    next_node_id: readOutputTarget(node, nextOutput) || (nextOutput === 'on_fail' ? null : readOutputTarget(node, 'on_success')),
+  };
+}
+
+async function handleReviewFollowup(node, context) {
+  const config = node?.config && typeof node.config === 'object' ? node.config : {};
+  const responseCandidates = Object.entries(context?.outputs || {})
+    .filter(([, output]) => (
+      cleanString(output?.response_text)
+      || output?.responded_at
+      || output?.inbound_message_id
+      || toIntOrNull(output?.response_rating)
+    ))
+    .map(([nodeId, output]) => ({ nodeId, output }));
+  const explicitResponse = context?.last_response_context
+    && typeof context.last_response_context === 'object'
+    && (
+      cleanString(context.last_response_context.response_text)
+      || context.last_response_context.responded_at
+      || context.last_response_context.inbound_message_id
+      || toIntOrNull(context.last_response_context.response_rating)
+    )
+    ? { nodeId: cleanString(context.last_response_context.node_id) || null, output: context.last_response_context }
+    : null;
+  const inferredResponse = explicitResponse || responseCandidates[responseCandidates.length - 1] || null;
+  const responseOutput = inferredResponse?.output || null;
+  const responseSourceNodeId = inferredResponse?.nodeId || null;
+  const responseText = cleanString(responseOutput?.response_text);
+  const rating = toIntOrNull(responseOutput?.response_rating)
+    || toIntOrNull(context?.last_response_context?.response_rating)
+    || extractReviewRatingFromResponseText(responseText);
+  const threshold = 5;
+  const followupKind = cleanString(resolveTemplateValue(config?.followup_kind, context)) || 'google_review';
+  const publicReviewRequested = followupKind === 'google_review';
+
+  return {
+    kind: 'success',
+    output: {
+      status: 'review_followup_tracked',
+      followup_kind: followupKind,
+      rating,
+      review_threshold: threshold,
+      public_review_requested: publicReviewRequested,
+      response_source_node_id: responseSourceNodeId,
+      inbound_message_id: responseOutput?.inbound_message_id || null,
+      note: 'El seguimiento de reseña se materializa al recibir el WhatsApp del paciente.',
+    },
+    next_node_id: readOutputTarget(node, 'on_success'),
+  };
+}
+
+async function handleReviewNoResponse(node, context) {
+  const config = node?.config && typeof node.config === 'object' ? node.config : {};
+  return {
+    kind: 'success',
+    output: {
+      status: 'review_request_closed_without_response',
+      list_id: resolveTemplateValue(config?.list_id, context) || null,
+      item_id: resolveTemplateValue(config?.item_id, context) || null,
+      reason: cleanString(resolveTemplateValue(config?.reason, context)) || 'sin_respuesta',
     },
     next_node_id: readOutputTarget(node, 'on_success'),
   };
@@ -3361,6 +3650,7 @@ function evaluateSimpleFieldCheck(config, context) {
     if (operator === 'equals') return leftNum === rightNum;
     if (operator === 'not_equals') return leftNum !== rightNum;
     if (operator === 'greater_than') return leftNum > rightNum;
+    if (operator === 'greater_than_or_equals') return leftNum >= rightNum;
     if (operator === 'less_than') return leftNum < rightNum;
     return false;
   }
@@ -3514,6 +3804,19 @@ function evaluateResponseExists(config, context) {
   const output = context?.outputs?.[listensTo];
   const responseText = output?.response_text;
   return responseText !== undefined && responseText !== null && String(responseText).trim() !== '';
+}
+
+function extractReviewRatingFromResponseText(value) {
+  const text = cleanString(value);
+  if (!text) return null;
+  const starCount = (text.match(/[⭐★]/g) || []).length;
+  if (starCount >= 1 && starCount <= 5 && !/[0-9]/.test(text)) {
+    return starCount;
+  }
+  const match = text.match(/(?:^|[^\d])([1-5])(?:\s*(?:\/\s*5|de\s*5|estrellas?|stars?|⭐|★))?(?:$|[^\d])/i);
+  if (!match) return null;
+  const rating = Number(match[1]);
+  return rating >= 1 && rating <= 5 ? rating : null;
 }
 
 function parseWaitUntilExpression(expression, context) {
@@ -3719,6 +4022,73 @@ async function processNode(node, context, runtime = {}) {
       return handleSendWhatsapp(node, context, runtime);
     }
 
+    case 'action/request_review': {
+      if (simulation) {
+        return {
+          kind: 'success',
+          output: {
+            status: 'simulated',
+            simulated: true,
+            review_source: cleanString(resolveTemplateValue(config?.review_source, context)) || 'first_completed_appointment',
+            review_threshold: toIntOrNull(resolveTemplateValue(config?.review_threshold, context)) || 5,
+            whatsapp_template_id: toIntOrNull(resolveTemplateValue(config?.whatsapp_template_id, context)) || null,
+            review_gift_enabled: parseBool(resolveTemplateValue(config?.review_gift_enabled, context), false),
+            review_gift_description: cleanString(resolveTemplateValue(config?.review_gift_description, context)) || null,
+            review_display_clinic_name: cleanString(resolveTemplateValue(config?.review_display_clinic_name, context)) || null,
+          },
+          next_node_id: readOutputTarget(node, 'on_success'),
+        };
+      }
+      return handleRequestReview(node, context, runtime);
+    }
+
+    case 'action/request_review_reminder': {
+      if (simulation) {
+        return {
+          kind: 'success',
+          output: {
+            status: 'simulated',
+            simulated: true,
+            list_id: cleanString(resolveTemplateValue(config?.list_id, context)) || null,
+            item_id: cleanString(resolveTemplateValue(config?.item_id, context)) || null,
+            template_name: cleanString(resolveTemplateValue(config?.template_name, context)) || 'clinicaclick_recordatorio_resena_sin_respuesta',
+          },
+          next_node_id: readOutputTarget(node, 'on_success'),
+        };
+      }
+      return handleRequestReviewReminder(node, context, runtime);
+    }
+
+    case 'action/review_followup': {
+      if (simulation) {
+        return {
+          kind: 'success',
+          output: {
+            status: 'simulated',
+            simulated: true,
+            review_threshold: toIntOrNull(resolveTemplateValue(config?.review_threshold, context)) || 5,
+          },
+          next_node_id: readOutputTarget(node, 'on_success'),
+        };
+      }
+      return handleReviewFollowup(node, context);
+    }
+
+    case 'action/review_no_response': {
+      if (simulation) {
+        return {
+          kind: 'success',
+          output: {
+            status: 'simulated',
+            simulated: true,
+            reason: cleanString(resolveTemplateValue(config?.reason, context)) || 'sin_respuesta_tras_recordatorio',
+          },
+          next_node_id: readOutputTarget(node, 'on_success'),
+        };
+      }
+      return handleReviewNoResponse(node, context);
+    }
+
     case 'action/send_email': {
       return {
         kind: 'success',
@@ -3782,6 +4152,16 @@ async function processNode(node, context, runtime = {}) {
           mode: cleanString(resolveTemplateValue(config?.mode, context)) || 'any',
         },
         next_node_id: readOutputTarget(node, 'on_joined') || readOutputTarget(node, 'on_success'),
+      };
+    }
+
+    case 'control/end': {
+      return {
+        kind: 'success',
+        output: {
+          status: 'flow_ended',
+        },
+        next_node_id: null,
       };
     }
 
@@ -4068,9 +4448,11 @@ async function resumeWaitingNode(execution, node, context, { mode, responseText,
         || listenedOutput?.body
       );
       const respondedAt = new Date().toISOString();
+      const responseRating = extractReviewRatingFromResponseText(responseText);
       nextContext = mergeNodeOutput(nextContext, node.id, {
         status: 'responded',
         response_text: responseText ?? null,
+        response_rating: responseRating,
         response_lines: String(responseText || '')
           .split(/\r?\n/)
           .map((line) => cleanString(line))
@@ -4104,6 +4486,7 @@ async function resumeWaitingNode(execution, node, context, { mode, responseText,
         last_prompt: listenedMessagePreview || null,
         last_response_context: {
           response_text: responseText ?? null,
+          response_rating: responseRating,
           response_message_id: toIntOrNull(inboundMessage?.id),
           response_message_type: cleanString(inboundMessage?.message_type) || null,
           response_message_preview: cleanString(inboundMessage?.content) || null,
@@ -4483,6 +4866,14 @@ async function runExecution(executionId, options = {}) {
       const finishedAt = new Date();
       const errorMessage = cleanString(error?.message) || 'node_execution_error';
       const onFailNode = readOutputTarget(node, 'on_fail');
+      if (cleanString(node?.type) === 'action/send_whatsapp') {
+        await materializeFailedAutomationWhatsappMessage({
+          node,
+          context,
+          execution,
+          errorMessage,
+        });
+      }
 
       context = mergeNodeOutput(context, currentNodeId, {
         status: 'error',

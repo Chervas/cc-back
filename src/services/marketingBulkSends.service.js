@@ -13,6 +13,10 @@ const marketingOptOutService = require('./marketingOptOut.service');
 const jobRequestsService = require('./jobRequests.service');
 const { isGlobalAdmin } = require('../lib/role-helpers');
 const { getIO } = require('./socket.service');
+const {
+  mergeClinicLinksIntoContext,
+  resolveClinicGoogleLocalLinks,
+} = require('./googleLocalLinks.service');
 
 const {
   Clinica,
@@ -24,10 +28,12 @@ const {
   MarketingBulkSendSetting,
   MarketingTrackedLink,
   MarketingTrackedLinkClick,
+  AutomationFlowTemplateV2,
   Message,
   Paciente,
   PacienteConsentimiento,
   PatientCustomField,
+  CitaPaciente,
   WhatsappTemplate,
 } = db;
 
@@ -36,6 +42,15 @@ const REQUIRED_SEND_GATES = ['frozen_audience', 'opt_out', 'capping', 'approved_
 const CHANNELS = new Set(['whatsapp', 'email', 'managed_calls']);
 const STANDARD_FIELDS = new Set(['name', 'first_name', 'last_name', 'phone', 'email']);
 const COMMERCIAL_TEMPLATE_USAGES = new Set(['marketing', 'comercial', 'promocion', 'promocional', 'reactivacion_pacientes']);
+const REVIEW_TEMPLATE_USAGES = new Set(['solicitud_resena', 'resena', 'review_request', 'reviews']);
+const REVIEW_AUTOMATION_TRIGGER = 'appointment_completed';
+const REVIEW_AUTOMATION_ACTION = 'action/request_review';
+const REVIEW_REMINDER_AUTOMATION_ACTION = 'action/request_review_reminder';
+const REVIEW_FOLLOWUP_AUTOMATION_ACTION = 'action/review_followup';
+const REVIEW_NO_RESPONSE_AUTOMATION_ACTION = 'action/review_no_response';
+const REVIEW_RATING_EVENT_TYPES = ['review_rating_received', 'review_request_rating'];
+const REVIEW_TEMPLATE_NAME = 'clinicaclick_solicitar_resena';
+const REVIEW_REMINDER_TEMPLATE_NAME = 'clinicaclick_recordatorio_resena_sin_respuesta';
 const DISPATCH_JOB_TYPE = 'marketing_bulk_send_dispatch';
 const DISPATCH_BATCH_SIZE = Math.max(1, Number.parseInt(process.env.MARKETING_BULK_SEND_BATCH_SIZE || '100', 10) || 100);
 const DISPATCH_BATCH_DELAY_MS = Math.max(2 * 60 * 1000, Number.parseInt(process.env.MARKETING_BULK_SEND_BATCH_DELAY_MS || String(2 * 60 * 1000), 10) || 2 * 60 * 1000);
@@ -52,7 +67,12 @@ const DISPATCH_TIMEZONE = process.env.MARKETING_BULK_SEND_TIMEZONE || 'Europe/Ma
 const DISPATCH_BUSINESS_START_HOUR = 7;
 const DISPATCH_BUSINESS_END_HOUR = 22;
 const LINK_TRACKING_DEFAULT_DOMAIN = process.env.MARKETING_LINK_TRACKING_DEFAULT_DOMAIN || 'envios.clinicaclick.com';
+const WHATSAPP_SESSION_WINDOW_MS = 23 * 60 * 60 * 1000 + 50 * 60 * 1000;
 const testSendCooldowns = new Map();
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
 
 function buildQuickChatMessagePayload(message) {
   return {
@@ -115,6 +135,26 @@ function repairMojibake(value) {
 
 function normalizeText(value) {
   return repairMojibake(String(value ?? '')).trim();
+}
+
+function asPlainObject(value) {
+  if (!value) return {};
+  if (typeof value === 'string') {
+    try {
+      return JSON.parse(value) || {};
+    } catch {
+      return {};
+    }
+  }
+  return typeof value === 'object' ? value : {};
+}
+
+function isWithinWhatsappSessionWindow(value, now = new Date()) {
+  const date = value instanceof Date ? value : new Date(value || 0);
+  const current = now instanceof Date ? now : new Date(now || Date.now());
+  if (Number.isNaN(date.getTime()) || Number.isNaN(current.getTime())) return false;
+  const ageMs = current.getTime() - date.getTime();
+  return ageMs >= 0 && ageMs <= WHATSAPP_SESSION_WINDOW_MS;
 }
 
 function normalizeTrackingSubdomain(value) {
@@ -299,6 +339,38 @@ function normalizeKey(value) {
     .replace(/^_+|_+$/g, '');
 }
 
+function parseTemplateComponents(value) {
+  if (!value) return [];
+  if (Array.isArray(value)) return value;
+  if (typeof value === 'string') {
+    try {
+      const parsed = JSON.parse(value);
+      return Array.isArray(parsed) ? parsed : [];
+    } catch {
+      return [];
+    }
+  }
+  return [];
+}
+
+function templateHasButtonComponents(template) {
+  const plain = template?.get ? template.get({ plain: true }) : (template || {});
+  return parseTemplateComponents(plain.components)
+    .some((component) => String(component?.type || '').toUpperCase() === 'BUTTONS');
+}
+
+function isStarTextReviewBody(value) {
+  const text = normalizeText(value);
+  const normalized = normalizeKey(text);
+  return normalized.includes('numero')
+    && normalized.includes('valoracion')
+    && /1\s*[⭐★]/.test(text)
+    && /2\s*[⭐★]{2}/.test(text)
+    && /3\s*[⭐★]{3}/.test(text)
+    && /4\s*[⭐★]{4}/.test(text)
+    && /5\s*[⭐★]{5}/.test(text);
+}
+
 function normalizeTemplateUsage(value) {
   const usage = normalizeKey(value);
   return usage || 'promocion';
@@ -308,19 +380,26 @@ function isCommercialTemplateUsage(value) {
   return COMMERCIAL_TEMPLATE_USAGES.has(normalizeTemplateUsage(value));
 }
 
+function isReviewTemplateUsage(value) {
+  return REVIEW_TEMPLATE_USAGES.has(normalizeTemplateUsage(value));
+}
+
 function getTemplateCategory(template) {
   const plain = template?.get ? template.get({ plain: true }) : (template || {});
   return normalizeText(plain.category || plain.catalog?.category).toUpperCase();
 }
 
 function resolveTemplateUsageFromMetaCategory(template, fallbackUsage = 'promocion') {
+  const fallback = normalizeTemplateUsage(fallbackUsage);
+  if (isReviewTemplateUsage(fallback)) {
+    return fallback;
+  }
   const category = getTemplateCategory(template);
   if (category === 'MARKETING') return 'promocion';
   if (category && category !== 'MARKETING') {
-    const fallback = normalizeTemplateUsage(fallbackUsage);
     return fallback && fallback !== 'promocion' ? fallback : 'notificacion';
   }
-  return normalizeTemplateUsage(fallbackUsage);
+  return fallback;
 }
 
 function resolveTemplateCommercialFromMetaCategory(template, fallbackCommercial = false) {
@@ -1386,6 +1465,10 @@ function buildItemsFromRows(rows, body, channels) {
 }
 
 async function buildItemsFromCurrentPatients(scope, body) {
+  if (isReviewRequestBody(body)) {
+    return buildItemsForReviewRequest(scope, body);
+  }
+
   const clinicIds = Array.isArray(scope?.clinicIds) ? scope.clinicIds.filter(Number.isInteger) : [];
   const rows = await Paciente.findAll({
     where: {
@@ -1413,6 +1496,1760 @@ async function buildItemsFromCurrentPatients(scope, body) {
   }));
 }
 
+function isReviewRequestBody(body = {}) {
+  const usage = normalizeTemplateUsage(body.template_usage || body.template_uso || body.uso || '');
+  return body.review_request === true || usage === 'solicitud_resena';
+}
+
+function normalizeReviewRequestSource(value) {
+  const normalized = normalizeText(value || '').toLowerCase();
+  if (
+    [
+      'first_completed_or_completed_treatment',
+      'automatic_after_care',
+      'automatic_review_request',
+      'primera_cita_o_tratamiento',
+    ].includes(normalized)
+  ) {
+    return 'first_completed_or_completed_treatment';
+  }
+  if (['completed_treatment', 'completed_treatments', 'tratamiento_realizado', 'treatment_completed'].includes(normalized)) {
+    return 'completed_treatment';
+  }
+  if (['manual_selection', 'manual', 'seleccion_manual'].includes(normalized)) {
+    return 'manual_selection';
+  }
+  return 'first_completed_appointment';
+}
+
+function normalizeReviewThreshold(value) {
+  const parsed = Number(value || 0);
+  return [4, 5].includes(parsed) ? parsed : 5;
+}
+
+function parseReviewTreatmentIds(source = {}) {
+  const raw = source.review_treatment_ids
+    ?? source.reviewTreatmentIds
+    ?? source.review_treatment_id
+    ?? source.reviewTreatmentId
+    ?? null;
+  const values = Array.isArray(raw)
+    ? raw
+    : String(raw || '').split(',');
+  return [...new Set(values
+    .map((value) => Number(value))
+    .filter((value) => Number.isInteger(value) && value > 0))];
+}
+
+function isReviewRequestList(list) {
+  const criteria = list?.criteria || {};
+  return criteria.review_request === true || isReviewTemplateUsage(criteria.template_usage);
+}
+
+function extractReviewRatingFromInboundMessage(message) {
+  const metadata = asPlainObject(message?.metadata);
+  const candidates = [
+    message?.content,
+    metadata?.button?.text,
+    metadata?.text?.body,
+    metadata?.button_reply?.title,
+    metadata?.interactive?.button_reply?.title,
+    metadata?.interactive?.list_reply?.title,
+    metadata?.raw?.button?.text,
+    metadata?.raw?.text?.body,
+    metadata?.raw?.interactive?.button_reply?.title,
+    metadata?.raw?.interactive?.list_reply?.title,
+    metadata?.payload?.button?.text,
+    metadata?.payload?.text?.body,
+    metadata?.payload?.interactive?.button_reply?.title,
+  ]
+    .map((value) => normalizeText(value))
+    .filter(Boolean);
+
+  for (const candidate of candidates) {
+    const starCount = (candidate.match(/[⭐★]/g) || []).length;
+    if (starCount >= 1 && starCount <= 5 && !/[0-9]/.test(candidate)) {
+      return starCount;
+    }
+
+    const match = candidate.match(/(?:^|[^\d])([1-5])(?:\s*(?:\/\s*5|de\s*5|estrellas?|stars?|⭐|★))?(?:$|[^\d])/i);
+    if (match) {
+      const rating = Number(match[1]);
+      if (rating >= 1 && rating <= 5) return rating;
+    }
+  }
+
+  return null;
+}
+
+async function findExistingReviewRatingEvent(listId, itemId, options = {}) {
+  const events = await MarketingPatientContactEvent.findAll({
+    where: {
+      list_id: listId,
+      item_id: itemId,
+      event_type: { [Op.in]: REVIEW_RATING_EVENT_TYPES },
+    },
+    order: [['occurred_at', 'DESC']],
+    limit: options.sameTriggerOnly ? 25 : 1,
+  });
+
+  if (options.sameTriggerOnly) {
+    const triggerMessageId = Number(options.triggerMessageId || 0);
+    return events.find((event) => Number(event.payload?.trigger_message_id || 0) === triggerMessageId) || null;
+  }
+
+  return events[0] || null;
+}
+
+function isReviewRatingTriggerMessage(triggerMessage) {
+  const metadata = asPlainObject(triggerMessage?.metadata);
+  const kind = normalizeKey(metadata.kind);
+  if (kind === 'review_google_link_followup' || kind === 'review_private_feedback_request') return false;
+  if (kind === 'review_request_reminder') return true;
+  if ((kind === 'mass_campaign_test' || kind === 'mass_campaign_send') && isReviewTemplateUsage(metadata.template_usage)) {
+    return true;
+  }
+  return normalizeKey(metadata.dispatch_context) === 'review_request' && isReviewTemplateUsage(metadata.template_usage);
+}
+
+async function materializeReviewPrivateFeedback({ list, item, inboundMessage, triggerMessage, occurredAt }) {
+  const triggerMetadata = asPlainObject(triggerMessage?.metadata);
+  if (!isReviewRequestList(list) || triggerMetadata.kind !== 'review_private_feedback_request') {
+    return { applied: false };
+  }
+  const content = normalizeText(inboundMessage.content);
+  if (!content) return { applied: false };
+
+  const recentFeedback = await MarketingPatientContactEvent.findAll({
+    where: {
+      list_id: list.id,
+      item_id: item.id,
+      event_type: 'review_private_feedback_received',
+    },
+    order: [['occurred_at', 'DESC']],
+    limit: 25,
+  });
+  const alreadyStored = recentFeedback.find((event) => Number(event.payload?.inbound_message_id || 0) === Number(inboundMessage.id || 0));
+  if (alreadyStored) return { applied: false, reason: 'already_feedback_received' };
+
+  await MarketingPatientContactEvent.create({
+    list_id: list.id,
+    item_id: item.id,
+    paciente_id: item.paciente_id || null,
+    event_type: 'review_private_feedback_received',
+    channel: 'whatsapp',
+    payload: {
+      inbound_message_id: inboundMessage.id,
+      trigger_message_id: triggerMessage?.id || null,
+      content,
+    },
+    occurred_at: occurredAt,
+  });
+  return { applied: true };
+}
+
+function buildReviewPrivateFeedbackAckText(item) {
+  const firstName = normalizeText(item?.name).split(/\s+/).filter(Boolean)[0] || '';
+  return firstName
+    ? `Gracias por contárnoslo, ${firstName}. Lo revisaremos con el equipo para mejorar.`
+    : 'Gracias por contárnoslo. Lo revisaremos con el equipo para mejorar.';
+}
+
+async function sendReviewPrivateFeedbackAcknowledgement({ list, item, conversation, inboundMessage, triggerMessage, occurredAt }) {
+  const triggerMetadata = asPlainObject(triggerMessage?.metadata);
+  if (!isReviewRequestList(list) || triggerMetadata.kind !== 'review_private_feedback_request') {
+    return { sent: false, reason: 'not_private_feedback_reply' };
+  }
+
+  const recentAck = await MarketingPatientContactEvent.findAll({
+    where: {
+      list_id: list.id,
+      item_id: item.id,
+      event_type: 'review_private_feedback_ack_sent',
+    },
+    order: [['occurred_at', 'DESC']],
+    limit: 25,
+  });
+  const alreadySent = recentAck.find((event) => Number(event.payload?.inbound_message_id || 0) === Number(inboundMessage.id || 0));
+  if (alreadySent) return { sent: false, reason: 'already_sent' };
+
+  const recipient = whatsappService.normalizePhoneNumber(triggerMetadata.recipient || item.phone || '');
+  if (!recipient) return { sent: false, reason: 'missing_recipient' };
+
+  const clinicId = Number(item.clinica_id || list.clinica_id || conversation?.clinic_id || 0) || null;
+  const body = buildReviewPrivateFeedbackAckText(item);
+  if (!isWithinWhatsappSessionWindow(occurredAt)) {
+    await MarketingPatientContactEvent.create({
+      list_id: list.id,
+      item_id: item.id,
+      paciente_id: item.paciente_id || null,
+      event_type: 'review_private_feedback_ack_skipped',
+      channel: 'whatsapp',
+      payload: {
+        status: 'skipped',
+        reason: 'whatsapp_session_window_expired',
+        inbound_message_id: inboundMessage.id,
+        trigger_message_id: triggerMessage?.id || null,
+        recipient,
+      },
+      occurred_at: new Date(),
+    });
+    return { sent: false, status: 'skipped', reason: 'whatsapp_session_window_expired' };
+  }
+  let appMessage = null;
+  let providerMessageId = null;
+  let status = 'sent';
+  let errorPayload = null;
+  let clinicConfig = null;
+
+  try {
+    clinicConfig = await whatsappService.getClinicConfig(clinicId);
+    if (!clinicConfig?.phoneNumberId || !clinicConfig?.accessToken) {
+      throw new Error('whatsapp_config_missing_for_review_private_feedback_ack');
+    }
+
+    appMessage = await Message.create({
+      conversation_id: conversation.id,
+      sender_id: null,
+      direction: 'outbound',
+      content: body,
+      message_type: 'text',
+      status: 'pending',
+      metadata: {
+        kind: 'review_private_feedback_ack',
+        source: 'marketing_bulk_sends',
+        dispatch_context: 'review_request',
+        list_id: list.id,
+        item_id: item.id,
+        objective_id: OBJECTIVE_ID,
+        inbound_message_id: inboundMessage.id,
+        trigger_message_id: triggerMessage?.id || null,
+        recipient,
+      },
+      sent_at: new Date(),
+    });
+    emitQuickChatMessageCreated(conversation, appMessage);
+
+    const response = await whatsappService.sendMessage({
+      to: recipient,
+      body,
+      previewUrl: false,
+      useTemplate: false,
+      clinicConfig: { ...clinicConfig, clinicId },
+    });
+    providerMessageId = response?.messages?.[0]?.id || null;
+    await appMessage.update({
+      status: 'sent',
+      metadata: {
+        ...(appMessage.metadata || {}),
+        wa_response: response || null,
+        wamid: providerMessageId,
+      },
+      sent_at: new Date(),
+    });
+    emitQuickChatMessageUpdated(conversation, appMessage);
+    await whatsappConnectionStatusService.clearDisconnectedAfterSuccess({
+      clinicId,
+      phoneId: clinicConfig.phoneNumberId || null,
+      wabaId: clinicConfig.wabaId || null,
+      messageId: appMessage.id,
+      source: 'review_private_feedback_ack',
+    }).catch(() => null);
+  } catch (error) {
+    status = 'failed';
+    errorPayload = extractProviderError(error);
+    if (appMessage) {
+      await appMessage.update({
+        status: 'failed',
+        metadata: {
+          ...(appMessage.metadata || {}),
+          error: errorPayload.raw || errorPayload.message,
+        },
+      }).catch(() => null);
+      emitQuickChatMessageUpdated(conversation, appMessage);
+    }
+    await whatsappConnectionStatusService.markDisconnectedAfterProviderError({
+      error: errorPayload?.raw || errorPayload,
+      clinicId,
+      phoneId: clinicConfig?.phoneNumberId || null,
+      wabaId: clinicConfig?.wabaId || null,
+      messageId: appMessage?.id || null,
+      recipient,
+      source: 'review_private_feedback_ack',
+    }).catch(() => null);
+  }
+
+  await MarketingPatientContactEvent.create({
+    list_id: list.id,
+    item_id: item.id,
+    paciente_id: item.paciente_id || null,
+    event_type: 'review_private_feedback_ack_sent',
+    channel: 'whatsapp',
+    payload: {
+      status,
+      inbound_message_id: inboundMessage.id,
+      trigger_message_id: triggerMessage?.id || null,
+      app_message_id: appMessage?.id || null,
+      provider_message_id: providerMessageId,
+      recipient,
+      error: errorPayload || null,
+    },
+    occurred_at: occurredAt,
+  });
+
+  return { sent: status === 'sent', status };
+}
+
+async function sendReviewRatingFollowUp({ list, item, conversation, rating, clinicId, triggerMessage, occurredAt }) {
+  if (!isReviewRequestList(list) || !rating) return { sent: false, reason: 'not_review_rating' };
+
+  const triggerMetadata = asPlainObject(triggerMessage?.metadata);
+  const isTestSend = triggerMetadata.kind === 'mass_campaign_test';
+  const followUpRecipient = whatsappService.normalizePhoneNumber(
+    isTestSend
+      ? (triggerMetadata.recipient || item.phone || '')
+      : (item.phone || triggerMetadata.recipient || '')
+  );
+  if (!followUpRecipient) return { sent: false, reason: 'missing_recipient' };
+
+  const threshold = 5;
+  const isPositive = rating >= threshold;
+  const followUpKind = isPositive ? 'review_google_link_followup' : 'review_private_feedback_request';
+
+  const existingFollowUp = await MarketingPatientContactEvent.findOne({
+    where: {
+      list_id: list.id,
+      item_id: item.id,
+      event_type: 'review_rating_followup_sent',
+    },
+    order: [['occurred_at', 'DESC']],
+  });
+  if (existingFollowUp) {
+    const payload = existingFollowUp.payload || {};
+    const existingKind = String(payload.kind || '').toLowerCase();
+    let existingTriggerMessageId = Number(payload.trigger_message_id || 0);
+    let existingRecipient = whatsappService.normalizePhoneNumber(payload.recipient || payload.to || payload.target_phone || '');
+
+    if ((!existingRecipient || !existingTriggerMessageId) && payload.app_message_id) {
+      const existingMessage = await Message.findByPk(payload.app_message_id).catch(() => null);
+      const existingMetadata = asPlainObject(existingMessage?.metadata);
+      existingTriggerMessageId = existingTriggerMessageId || Number(existingMetadata.trigger_message_id || 0);
+      existingRecipient = whatsappService.normalizePhoneNumber(
+        existingMetadata.recipient
+          || existingMetadata.wa_response?.contacts?.[0]?.input
+          || existingMetadata.wa_response?.contacts?.[0]?.wa_id
+          || ''
+      );
+    }
+
+    const currentTriggerMessageId = Number(triggerMessage?.id || 0);
+    const sameRequestCycle = currentTriggerMessageId > 0 && existingTriggerMessageId === currentTriggerMessageId;
+    const legacySameRecipientWithoutCycle = !currentTriggerMessageId && existingRecipient === followUpRecipient && !existingTriggerMessageId;
+    if (existingKind === followUpKind && (sameRequestCycle || legacySameRecipientWithoutCycle)) {
+      return { sent: false, reason: 'already_sent' };
+    }
+  }
+
+  const clinic = await loadClinicForTemplateVariables(clinicId);
+  const criteria = asPlainObject(list.criteria);
+  const googleReviewUrl = normalizeText(clinic?.url_dejar_resena || criteria?.link_tracking?.google_review_url || '');
+  const rewardEnabled = criteria.review_gift_enabled === true || String(criteria.review_gift_enabled || '').toLowerCase() === 'true';
+  const rewardDescription = normalizeText(criteria.review_gift_description || '');
+  const body = isPositive
+    ? (googleReviewUrl
+      ? (rewardEnabled
+        ? `¡Muchísimas gracias por tu valoración! 😊 *Como gratitud por valorarnos te vamos a regalar ${rewardDescription || 'un detalle'} si dejas la reseña también en Google* para que otras personas puedan verla.\n\nPuedes dejarla aquí: ${googleReviewUrl}\n\nUna vez que nos hayas valorado, *escríbenos a este WhatsApp* para indicarte cómo puedes reclamar tu regalo. Te contestaremos en horario laboral antes de 24h.`
+        : `¡Muchísimas gracias por tu valoración! 😊 *Nos ayudaría muchísimo que también la dejaras en Google* para que otras personas puedan verla.\n\nNo se tarda nada, pincha en el enlace de aquí abajo 👇\n${googleReviewUrl}`)
+      : 'Gracias por tu valoración. Hemos registrado tu opinión.')
+    : 'Gracias por responder. ¿Nos ayudarías contándonos el motivo de esta valoración? Puedes escribirlo aquí mismo y lo revisaremos con el equipo.';
+  if (!isWithinWhatsappSessionWindow(occurredAt)) {
+    await MarketingPatientContactEvent.create({
+      list_id: list.id,
+      item_id: item.id,
+      paciente_id: item.paciente_id || null,
+      event_type: 'review_rating_followup_skipped',
+      channel: 'whatsapp',
+      payload: {
+        status: 'skipped',
+        reason: 'whatsapp_session_window_expired',
+        kind: followUpKind,
+        rating,
+        threshold,
+        trigger_message_id: triggerMessage?.id || null,
+        recipient: followUpRecipient,
+        test_send: isTestSend,
+        google_review_url_available: isPositive && !!googleReviewUrl,
+      },
+      occurred_at: new Date(),
+    });
+    return { sent: false, status: 'skipped', kind: followUpKind, reason: 'whatsapp_session_window_expired' };
+  }
+  let appMessage = null;
+  let providerMessageId = null;
+  let status = 'sent';
+  let errorPayload = null;
+
+  try {
+    const clinicConfig = await whatsappService.getClinicConfig(clinicId);
+    if (!clinicConfig?.phoneNumberId || !clinicConfig?.accessToken) {
+      throw new Error('whatsapp_config_missing_for_review_followup');
+    }
+
+    appMessage = await Message.create({
+      conversation_id: conversation.id,
+      sender_id: null,
+      direction: 'outbound',
+      content: body,
+      message_type: 'text',
+      status: 'pending',
+      metadata: {
+        kind: followUpKind,
+        source: 'marketing_bulk_sends',
+        dispatch_context: 'review_request',
+        list_id: list.id,
+        item_id: item.id,
+        objective_id: OBJECTIVE_ID,
+        review_rating: rating,
+        review_threshold: threshold,
+        review_gift_enabled: rewardEnabled,
+        review_gift_description: rewardEnabled ? rewardDescription : null,
+        google_review_link_mode: isPositive && googleReviewUrl ? 'text_url' : null,
+        trigger_message_id: triggerMessage?.id || null,
+        recipient: followUpRecipient,
+        test_send: isTestSend,
+      },
+      sent_at: new Date(),
+    });
+    emitQuickChatMessageCreated(conversation, appMessage);
+
+    const response = await whatsappService.sendMessage({
+      to: followUpRecipient,
+      body,
+      previewUrl: isPositive,
+      useTemplate: false,
+      clinicConfig: { ...clinicConfig, clinicId },
+    });
+    providerMessageId = response?.messages?.[0]?.id || null;
+    await appMessage.update({
+      status: 'sent',
+      metadata: {
+        ...(appMessage.metadata || {}),
+        wa_response: response || null,
+        wamid: providerMessageId,
+      },
+      sent_at: new Date(),
+    });
+    emitQuickChatMessageUpdated(conversation, appMessage);
+  } catch (error) {
+    status = 'failed';
+    errorPayload = extractProviderError(error);
+    if (appMessage) {
+      await appMessage.update({
+        status: 'failed',
+        metadata: {
+          ...(appMessage.metadata || {}),
+          error: errorPayload.raw || errorPayload.message,
+        },
+      }).catch(() => null);
+      emitQuickChatMessageUpdated(conversation, appMessage);
+    }
+  }
+
+  await MarketingPatientContactEvent.create({
+    list_id: list.id,
+    item_id: item.id,
+    paciente_id: item.paciente_id || null,
+    event_type: 'review_rating_followup_sent',
+    channel: 'whatsapp',
+    payload: {
+      status,
+      kind: followUpKind,
+      rating,
+      threshold,
+      trigger_message_id: triggerMessage?.id || null,
+      recipient: followUpRecipient,
+      test_send: isTestSend,
+      google_review_url_sent: isPositive && !!googleReviewUrl,
+      app_message_id: appMessage?.id || null,
+      provider_message_id: providerMessageId,
+      error: errorPayload || null,
+    },
+    occurred_at: occurredAt,
+  });
+
+  return { sent: status === 'sent', status, kind: followUpKind };
+}
+
+function formatReviewDate(value) {
+  const date = value instanceof Date ? value : new Date(value || Date.now());
+  if (Number.isNaN(date.getTime())) return '';
+  return date.toLocaleDateString('es-ES', { day: '2-digit', month: '2-digit', year: 'numeric' });
+}
+
+function buildPatientDisplayName(patient) {
+  return [patient?.nombre, patient?.apellidos].filter(Boolean).join(' ').trim() || 'Paciente';
+}
+
+async function getReviewRequestedPatientIds(scope) {
+  const clinicIds = Array.isArray(scope?.clinicIds) ? scope.clinicIds.filter(Number.isInteger) : [];
+  if (!clinicIds.length) return new Set();
+  const rows = await db.sequelize.query(
+    `
+    SELECT DISTINCT i.paciente_id AS paciente_id
+    FROM MarketingPatientListItems i
+    INNER JOIN MarketingPatientLists l ON l.id = i.list_id
+    WHERE i.paciente_id IS NOT NULL
+      AND i.clinica_id IN (:clinicIds)
+      AND l.objective_id = :objectiveId
+      AND l.status <> 'archived'
+      AND (
+        JSON_UNQUOTE(JSON_EXTRACT(l.criteria, '$.review_request')) IN ('true', '1')
+        OR JSON_UNQUOTE(JSON_EXTRACT(l.criteria, '$.template_usage')) = 'solicitud_resena'
+      )
+      AND (
+        i.sent_at IS NOT NULL
+        OR i.dispatch_status IN ('queued','sending','sent','delivered','read','replied')
+        OR (
+          i.selected = TRUE
+          AND i.status = 'ready'
+          AND l.status IN ('ready','sending','sent','completed','scheduled')
+        )
+      )
+    `,
+    { replacements: { clinicIds, objectiveId: OBJECTIVE_ID }, type: QueryTypes.SELECT }
+  );
+  return new Set(rows.map((row) => Number(row.paciente_id)).filter(Number.isFinite));
+}
+
+function mapReviewPatientItem({ patient, appointment = null, source = 'manual_selection' }) {
+  const name = buildPatientDisplayName(patient);
+  const appointmentDate = appointment?.inicio || appointment?.appointment_at || null;
+  const treatment = normalizeText(appointment?.tratamiento?.nombre || appointment?.titulo || appointment?.motivo)
+    || (source === 'completed_treatment' ? 'tratamiento realizado' : 'visita');
+  const clinicName = normalizeText(appointment?.clinica?.nombre_clinica || '');
+
+  return {
+    paciente_id: patient.id_paciente,
+    clinica_id: appointment?.clinica_id || patient.clinica_id || null,
+    name,
+    phone: patient.telefono_movil || null,
+    email: patient.email || null,
+    treatment,
+    treatment_id: appointment?.tratamiento_id || null,
+    last_visit_at: appointmentDate,
+    appointment_at: appointmentDate,
+    treatment_completed: source === 'completed_treatment',
+    status: 'ready',
+    reason: source === 'manual_selection'
+      ? 'Paciente disponible para solicitud manual de valoración.'
+      : 'Paciente elegible: no tiene solicitud de valoración previa.',
+    exclusion_reason: null,
+    selected: true,
+    custom_fields: {
+      nombre: patient.nombre || name,
+      apellido: patient.apellidos || '',
+      apellidos: patient.apellidos || '',
+      nombre_completo: name,
+      tratamiento: treatment,
+      fecha: formatReviewDate(appointmentDate),
+      fecha_cita: formatReviewDate(appointmentDate),
+      clinica: clinicName,
+      nombre_clinica: clinicName,
+    },
+    missing_variables: [],
+  };
+}
+
+async function buildReviewRequestCandidateForAppointment(scope, body = {}) {
+  const appointmentId = Number(body.review_appointment_id || body.appointment_id || body.cita_id || 0);
+  const clinicIds = Array.isArray(scope?.clinicIds) ? scope.clinicIds.filter(Number.isInteger) : [];
+  if (!appointmentId || !clinicIds.length || !CitaPaciente) {
+    return { item: null, reason: 'appointment_not_found' };
+  }
+
+  const source = normalizeReviewRequestSource(body.review_source || body.reviewRequestSource);
+  const appointment = await CitaPaciente.findOne({
+    where: {
+      id_cita: appointmentId,
+      clinica_id: { [Op.in]: clinicIds },
+    },
+    include: [
+      { model: Paciente, as: 'paciente', required: true, attributes: ['id_paciente', 'clinica_id', 'nombre', 'apellidos', 'telefono_movil', 'email'] },
+      { model: Clinica, as: 'clinica', required: false, attributes: ['id_clinica', 'nombre_clinica'] },
+      db.Tratamiento ? { model: db.Tratamiento, as: 'tratamiento', required: false, attributes: ['id_tratamiento', 'nombre'] } : null,
+    ].filter(Boolean),
+  });
+  if (!appointment) return { item: null, reason: 'appointment_not_found' };
+
+  const plain = appointment.get ? appointment.get({ plain: true }) : appointment;
+  if (plain.estado !== 'completada') {
+    return { item: null, reason: 'appointment_not_completed' };
+  }
+
+  const patient = plain.paciente;
+  const patientId = Number(patient?.id_paciente || plain.paciente_id || 0);
+  if (!patientId) return { item: null, reason: 'patient_not_found' };
+
+  const alreadyRequested = await getReviewRequestedPatientIds(scope);
+  if (alreadyRequested.has(patientId)) {
+    return { item: null, reason: 'patient_already_requested' };
+  }
+
+  let isFirstCompletedAppointment = true;
+  if (source === 'first_completed_appointment' || source === 'first_completed_or_completed_treatment') {
+    const firstCompleted = await CitaPaciente.findOne({
+      where: {
+        clinica_id: plain.clinica_id,
+        paciente_id: patientId,
+        estado: 'completada',
+      },
+      attributes: ['id_cita', 'inicio'],
+      order: [['inicio', 'ASC'], ['id_cita', 'ASC']],
+      raw: true,
+    });
+    isFirstCompletedAppointment = Number(firstCompleted?.id_cita || 0) === appointmentId;
+    if (source === 'first_completed_appointment' && !isFirstCompletedAppointment) {
+      return { item: null, reason: 'not_first_completed_appointment' };
+    }
+  }
+
+  const isCompletedTreatment = !!plain.tratamiento_id || plain.tipo_cita === 'primera_con_trat';
+  if (source === 'completed_treatment' && !isCompletedTreatment) {
+    return { item: null, reason: 'appointment_without_completed_treatment' };
+  }
+  if (source === 'first_completed_or_completed_treatment' && !isFirstCompletedAppointment && !isCompletedTreatment) {
+    return { item: null, reason: 'not_first_completed_or_completed_treatment' };
+  }
+
+  return {
+    item: mapReviewPatientItem({ patient, appointment: plain, source }),
+    reason: null,
+  };
+}
+
+async function buildItemsForReviewRequest(scope, body = {}) {
+  const clinicIds = Array.isArray(scope?.clinicIds) ? scope.clinicIds.filter(Number.isInteger) : [];
+  if (!clinicIds.length) return [];
+
+  if (body.review_appointment_id || body.appointment_id || body.cita_id) {
+    const candidate = await buildReviewRequestCandidateForAppointment(scope, body);
+    return candidate.item ? [candidate.item] : [];
+  }
+
+  const source = normalizeReviewRequestSource(body.review_source || body.reviewRequestSource);
+  const limit = Math.min(Math.max(Number(body.limit || 500), 1), 2000);
+  const alreadyRequested = await getReviewRequestedPatientIds(scope);
+
+  if (source === 'manual_selection' || !CitaPaciente) {
+    const requestedIds = Array.from(alreadyRequested).filter(Number.isInteger);
+    const requestedClause = requestedIds.length ? 'AND p.id_paciente NOT IN (:requestedIds)' : '';
+    const patients = await db.sequelize.query(
+      `
+      SELECT DISTINCT
+        p.id_paciente,
+        p.clinica_id,
+        p.nombre,
+        p.apellidos,
+        p.telefono_movil,
+        p.email,
+        COALESCE(pc.clinica_id, p.clinica_id) AS review_clinica_id,
+        c.nombre_clinica AS review_clinica_nombre
+      FROM Pacientes p
+      LEFT JOIN PacienteClinicas pc
+        ON pc.paciente_id = p.id_paciente
+       AND pc.clinica_id IN (:clinicIds)
+      LEFT JOIN Clinicas c
+        ON c.id_clinica = COALESCE(pc.clinica_id, p.clinica_id)
+      WHERE p.fecha_baja IS NULL
+        AND (p.clinica_id IN (:clinicIds) OR pc.clinica_id IS NOT NULL)
+        ${requestedClause}
+      ORDER BY p.id_paciente DESC
+      LIMIT :limit
+      `,
+      {
+        replacements: {
+          clinicIds,
+          requestedIds,
+          limit,
+        },
+        type: QueryTypes.SELECT,
+      }
+    );
+    return patients.map((patient) => mapReviewPatientItem({
+      patient,
+      appointment: {
+        clinica_id: Number(patient.review_clinica_id || patient.clinica_id || 0) || null,
+        clinica: { nombre_clinica: patient.review_clinica_nombre || '' },
+      },
+      source,
+    }));
+  }
+
+  const appointmentWhere = {
+    clinica_id: { [Op.in]: clinicIds },
+    estado: 'completada',
+  };
+  const treatmentIds = parseReviewTreatmentIds(body);
+  if (source === 'completed_treatment') {
+    appointmentWhere[Op.or] = [
+      { tratamiento_id: { [Op.ne]: null } },
+      { tipo_cita: 'primera_con_trat' },
+    ];
+  }
+  if (treatmentIds.length) {
+    appointmentWhere.tratamiento_id = { [Op.in]: treatmentIds };
+    delete appointmentWhere[Op.or];
+  }
+
+  const appointments = await CitaPaciente.findAll({
+    where: appointmentWhere,
+    include: [
+      { model: Paciente, as: 'paciente', required: true, attributes: ['id_paciente', 'clinica_id', 'nombre', 'apellidos', 'telefono_movil', 'email'] },
+      { model: Clinica, as: 'clinica', required: false, attributes: ['id_clinica', 'nombre_clinica'] },
+      db.Tratamiento ? { model: db.Tratamiento, as: 'tratamiento', required: false, attributes: ['id_tratamiento', 'nombre'] } : null,
+    ].filter(Boolean),
+    order: [['inicio', 'ASC']],
+    limit: Math.min(limit * 5, 10000),
+  });
+
+  const selected = new Map();
+  for (const appointment of appointments) {
+    const plain = appointment?.get ? appointment.get({ plain: true }) : appointment;
+    const patient = plain?.paciente;
+    const patientId = Number(patient?.id_paciente || plain?.paciente_id);
+    if (!patientId || alreadyRequested.has(patientId) || selected.has(patientId)) continue;
+    selected.set(patientId, mapReviewPatientItem({ patient, appointment: plain, source }));
+    if (selected.size >= limit) break;
+  }
+
+  return Array.from(selected.values());
+}
+
+async function buildReviewTreatmentOptions(scope) {
+  const clinicIds = Array.isArray(scope?.clinicIds) ? scope.clinicIds.filter(Number.isInteger) : [];
+  if (!clinicIds.length || !CitaPaciente || !db.Tratamiento) return [];
+
+  const alreadyRequested = await getReviewRequestedPatientIds(scope);
+  const requestedIds = Array.from(alreadyRequested).filter(Number.isInteger);
+  const requestedClause = requestedIds.length
+    ? 'AND c.paciente_id NOT IN (:requestedIds)'
+    : '';
+
+  const rows = await db.sequelize.query(
+    `
+    SELECT
+      c.tratamiento_id AS treatment_id,
+      COALESCE(t.nombre, c.titulo, c.motivo, 'Tratamiento') AS treatment_name,
+      COUNT(DISTINCT c.paciente_id) AS eligible_count
+    FROM CitasPacientes c
+    INNER JOIN Pacientes p ON p.id_paciente = c.paciente_id
+    LEFT JOIN Tratamientos t ON t.id_tratamiento = c.tratamiento_id
+    WHERE c.clinica_id IN (:clinicIds)
+      AND c.estado = 'completada'
+      AND c.tratamiento_id IS NOT NULL
+      AND p.fecha_baja IS NULL
+      ${requestedClause}
+    GROUP BY c.tratamiento_id, COALESCE(t.nombre, c.titulo, c.motivo, 'Tratamiento')
+    HAVING eligible_count > 0
+    ORDER BY eligible_count DESC, treatment_name ASC
+    LIMIT 200
+    `,
+    {
+      replacements: {
+        clinicIds,
+        requestedIds,
+      },
+      type: QueryTypes.SELECT,
+    }
+  );
+
+  return rows.map((row) => ({
+    id: Number(row.treatment_id),
+    name: normalizeText(row.treatment_name) || 'Tratamiento',
+    eligible_count: Number(row.eligible_count || 0),
+  })).filter((row) => row.id && row.eligible_count > 0);
+}
+
+function buildReviewAutomationScopeWhere(scope = {}, { includeInactive = false } = {}) {
+  const clinicIds = Array.isArray(scope?.clinicIds) ? scope.clinicIds.filter(Number.isInteger) : [];
+  const clauses = [];
+  if (scope.scope === 'group' && Number.isInteger(scope.groupId)) {
+    clauses.push({ group_id: scope.groupId, clinic_id: null });
+  }
+  if (clinicIds.length === 1) {
+    clauses.push({ clinic_id: clinicIds[0], group_id: null });
+  } else if (clinicIds.length > 1) {
+    clauses.push({ clinic_id: { [Op.in]: clinicIds }, group_id: null });
+  }
+  if (!clauses.length) clauses.push({ id: { [Op.eq]: -1 } });
+  return {
+    trigger_type: REVIEW_AUTOMATION_TRIGGER,
+    published_at: { [Op.ne]: null },
+    ...(includeInactive ? {} : { is_active: true }),
+    [Op.or]: clauses,
+  };
+}
+
+function templateHasReviewRequestAction(template) {
+  const nodes = Array.isArray(template?.nodes) ? template.nodes : [];
+  return nodes.some((node) => normalizeText(node?.type) === REVIEW_AUTOMATION_ACTION);
+}
+
+function serializeReviewAutomationTemplate(template) {
+  if (!template) return null;
+  const plain = template.get ? template.get({ plain: true }) : template;
+  const actionNode = (Array.isArray(plain.nodes) ? plain.nodes : [])
+    .find((node) => normalizeText(node?.type) === REVIEW_AUTOMATION_ACTION);
+  const config = actionNode?.config && typeof actionNode.config === 'object' ? actionNode.config : {};
+  return {
+    id: plain.id,
+    public_id: plain.public_id || null,
+    template_key: plain.template_key,
+    version: plain.version,
+    name: plain.name,
+    is_active: plain.is_active === true,
+    review_source: normalizeReviewRequestSource(config.review_source),
+    review_threshold: normalizeReviewThreshold(config.review_threshold),
+    whatsapp_template_id: Number(config.whatsapp_template_id || 0) || null,
+    template_name: normalizeText(config.template_name) || REVIEW_TEMPLATE_NAME,
+    review_gift_enabled: config.review_gift_enabled === true || String(config.review_gift_enabled || '').toLowerCase() === 'true',
+    review_gift_description: normalizeText(config.review_gift_description || '') || null,
+    review_display_clinic_name: normalizeText(config.review_display_clinic_name || '') || null,
+  };
+}
+
+async function getReviewAutomationTemplate(scope, { includeInactive = false } = {}) {
+  if (!AutomationFlowTemplateV2) return null;
+  const rows = await AutomationFlowTemplateV2.findAll({
+    where: buildReviewAutomationScopeWhere(scope, { includeInactive }),
+    order: [
+      ['clinic_id', 'DESC'],
+      ['group_id', 'DESC'],
+      ['version', 'DESC'],
+      ['id', 'DESC'],
+    ],
+    limit: 20,
+  });
+  return rows.find(templateHasReviewRequestAction) || null;
+}
+
+function isReviewWhatsappTemplateCandidate(template) {
+  const plain = template?.get ? template.get({ plain: true }) : (template || {});
+  const text = normalizeKey([
+    plain.name,
+    plain.display_name,
+    plain.category,
+    plain.catalog?.name,
+    plain.catalog?.display_name,
+    plain.catalog?.body_text,
+    JSON.stringify(plain.variables || ''),
+    JSON.stringify(plain.components || ''),
+  ].filter(Boolean).join(' '));
+  return REVIEW_TEMPLATE_USAGES.has(normalizeTemplateUsage(plain.variables?.template_usage))
+    || text.includes('solicitud_resena')
+    || text.includes('resena')
+    || text.includes('review')
+    || text.includes('valoracion')
+    || text.includes('opinion');
+}
+
+function isReviewReminderWhatsappTemplateCandidate(template) {
+  const plain = template?.get ? template.get({ plain: true }) : (template || {});
+  const text = normalizeKey([
+    plain.name,
+    plain.display_name,
+    plain.catalog?.name,
+    plain.catalog?.display_name,
+    plain.catalog?.body_text,
+    JSON.stringify(plain.variables || ''),
+    JSON.stringify(plain.components || ''),
+  ].filter(Boolean).join(' '));
+  return text.includes('recordatorio_resena_sin_respuesta')
+    || text.includes('recordatorio_de_valoracion_sin_respuesta')
+    || (text.includes('recordatorio') && text.includes('resena'))
+    || (text.includes('recordatorio') && text.includes('valoracion'));
+}
+
+function isPrimaryReviewRequestWhatsappTemplateCandidate(template) {
+  if (!isReviewWhatsappTemplateCandidate(template)) return false;
+  if (isReviewReminderWhatsappTemplateCandidate(template)) return false;
+  if (templateHasButtonComponents(template)) return false;
+  const plain = template?.get ? template.get({ plain: true }) : (template || {});
+  const currentCatalogBody = normalizeText(plain.catalog?.body_text);
+  if (currentCatalogBody) {
+    const templateBody = normalizeText(extractBodyText(plain.components));
+    if (templateBody !== currentCatalogBody && !isStarTextReviewBody(templateBody)) return false;
+  }
+  const text = normalizeKey([
+    plain.name,
+    plain.display_name,
+    plain.catalog?.name,
+    plain.catalog?.display_name,
+    JSON.stringify(plain.variables || ''),
+  ].filter(Boolean).join(' '));
+  return text.includes(REVIEW_TEMPLATE_NAME)
+    || text.includes('solicitar_resena')
+    || text.includes('solicitud_resena')
+    || text.includes('solicitud_de_valoracion')
+    || REVIEW_TEMPLATE_USAGES.has(normalizeTemplateUsage(plain.variables?.template_usage));
+}
+
+function isCurrentReviewReminderWhatsappTemplateCandidate(template) {
+  if (!isReviewReminderWhatsappTemplateCandidate(template)) return false;
+  if (templateHasButtonComponents(template)) return false;
+  const plain = template?.get ? template.get({ plain: true }) : (template || {});
+  const currentCatalogBody = normalizeText(plain.catalog?.body_text);
+  if (currentCatalogBody) {
+    const templateBody = normalizeText(extractBodyText(plain.components));
+    if (templateBody !== currentCatalogBody && !isStarTextReviewBody(templateBody)) return false;
+  }
+  return true;
+}
+
+async function findApprovedReviewWhatsappTemplate(scope, explicitTemplateId = null) {
+  const clinicIds = Array.isArray(scope?.clinicIds) ? scope.clinicIds.filter(Number.isInteger) : [];
+  if (!WhatsappTemplate || !clinicIds.length) return null;
+  const targetWabaId = await getPrimaryWabaIdForScope(scope);
+
+  if (explicitTemplateId) {
+    const explicit = await resolveWhatsappTemplate(explicitTemplateId, scope);
+    if (explicit && explicit.is_active !== false && String(explicit.status || '').toUpperCase() === 'APPROVED' && isPrimaryReviewRequestWhatsappTemplateCandidate(explicit)) {
+      if (!targetWabaId || !getTemplateWabaId(explicit) || getTemplateWabaId(explicit) === targetWabaId) {
+        return explicit;
+      }
+      const plainExplicit = explicit.get ? explicit.get({ plain: true }) : explicit;
+      const replacement = await WhatsappTemplate.findOne({
+        where: {
+          is_active: true,
+          status: 'APPROVED',
+          catalog_template_id: plainExplicit.catalog_template_id || null,
+          waba_id: targetWabaId,
+        },
+        include: [{ model: db.WhatsappTemplateCatalog, as: 'catalog', attributes: ['id', 'name', 'display_name', 'body_text', 'variables'], required: false }],
+        order: [['updatedAt', 'DESC'], ['id', 'DESC']],
+      });
+      if (replacement && isPrimaryReviewRequestWhatsappTemplateCandidate(replacement)) {
+        return replacement;
+      }
+    }
+    return null;
+  }
+
+  const candidates = await WhatsappTemplate.findAll({
+    where: {
+      is_active: true,
+      status: 'APPROVED',
+      [Op.or]: [
+        { clinic_id: { [Op.in]: clinicIds } },
+        { clinic_id: null },
+      ],
+    },
+    include: [{ model: db.WhatsappTemplateCatalog, as: 'catalog', attributes: ['id', 'name', 'display_name', 'body_text', 'variables'], required: false }],
+    order: [['updatedAt', 'DESC'], ['id', 'DESC']],
+    limit: 100,
+  });
+  return candidates
+    .filter(isPrimaryReviewRequestWhatsappTemplateCandidate)
+    .filter((template) => scoreWhatsappTemplateForScope(template, clinicIds, targetWabaId) > 0)
+    .sort((a, b) => {
+      const aScore = scoreWhatsappTemplateForScope(a, clinicIds, targetWabaId);
+      const bScore = scoreWhatsappTemplateForScope(b, clinicIds, targetWabaId);
+      if (aScore !== bScore) return bScore - aScore;
+      return Number(b.id || 0) - Number(a.id || 0);
+    })[0] || null;
+}
+
+async function findApprovedReviewReminderWhatsappTemplate(scope, explicitTemplateId = null, templateName = REVIEW_REMINDER_TEMPLATE_NAME) {
+  const clinicIds = Array.isArray(scope?.clinicIds) ? scope.clinicIds.filter(Number.isInteger) : [];
+  if (!WhatsappTemplate || !clinicIds.length) return null;
+  const targetWabaId = await getPrimaryWabaIdForScope(scope);
+
+  if (explicitTemplateId) {
+    const explicit = await resolveWhatsappTemplate(explicitTemplateId, scope);
+    if (
+      explicit
+      && explicit.is_active !== false
+      && String(explicit.status || '').toUpperCase() === 'APPROVED'
+      && isCurrentReviewReminderWhatsappTemplateCandidate(explicit)
+    ) {
+      if (!targetWabaId || !getTemplateWabaId(explicit) || getTemplateWabaId(explicit) === targetWabaId) {
+        return explicit;
+      }
+      const plainExplicit = explicit.get ? explicit.get({ plain: true }) : explicit;
+      const replacement = await WhatsappTemplate.findOne({
+        where: {
+          is_active: true,
+          status: 'APPROVED',
+          catalog_template_id: plainExplicit.catalog_template_id || null,
+          waba_id: targetWabaId,
+        },
+        include: [{ model: db.WhatsappTemplateCatalog, as: 'catalog', attributes: ['id', 'name', 'display_name', 'body_text', 'variables'], required: false }],
+        order: [['updatedAt', 'DESC'], ['id', 'DESC']],
+      });
+      if (replacement && isCurrentReviewReminderWhatsappTemplateCandidate(replacement)) {
+        return replacement;
+      }
+    }
+    return null;
+  }
+
+  const normalizedTemplateName = normalizeText(templateName || REVIEW_REMINDER_TEMPLATE_NAME);
+  const candidates = await WhatsappTemplate.findAll({
+    where: {
+      is_active: true,
+      status: 'APPROVED',
+      name: { [Op.like]: `${normalizedTemplateName}%` },
+      [Op.or]: [
+        { clinic_id: { [Op.in]: clinicIds } },
+        { clinic_id: null },
+      ],
+    },
+    include: [{ model: db.WhatsappTemplateCatalog, as: 'catalog', attributes: ['id', 'name', 'display_name', 'body_text', 'variables'], required: false }],
+    order: [['updatedAt', 'DESC'], ['id', 'DESC']],
+  });
+
+  return candidates
+    .filter(isCurrentReviewReminderWhatsappTemplateCandidate)
+    .filter((template) => scoreWhatsappTemplateForScope(template, clinicIds, targetWabaId) > 0)
+    .sort((a, b) => {
+      const aScore = scoreWhatsappTemplateForScope(a, clinicIds, targetWabaId);
+      const bScore = scoreWhatsappTemplateForScope(b, clinicIds, targetWabaId);
+      if (aScore !== bScore) return bScore - aScore;
+      return Number(b.id || 0) - Number(a.id || 0);
+    })[0] || null;
+}
+
+async function waitForReviewRequestDispatchAnchor(campaignId, timeoutMs = 6000) {
+  const safeCampaignId = Number(campaignId || 0);
+  if (!safeCampaignId) return null;
+
+  const deadline = Date.now() + Math.max(0, Number(timeoutMs || 0));
+  do {
+    const item = await MarketingPatientListItem.findOne({
+      where: {
+        list_id: safeCampaignId,
+        app_message_id: { [Op.ne]: null },
+        conversation_id: { [Op.ne]: null },
+      },
+      order: [['sent_at', 'DESC'], ['updated_at', 'DESC'], ['id', 'ASC']],
+    });
+    if (item) {
+      const plain = item.get ? item.get({ plain: true }) : item;
+      return {
+        item_id: plain.id,
+        patient_id: plain.paciente_id || null,
+        message_id: plain.app_message_id || null,
+        app_message_id: plain.app_message_id || null,
+        conversation_id: plain.conversation_id || null,
+        provider_message_id: plain.provider_message_id || null,
+        sent_at: plain.sent_at || null,
+        dispatch_status: plain.dispatch_status || null,
+      };
+    }
+
+    if (Date.now() >= deadline) break;
+    await sleep(250);
+  } while (true);
+
+  return null;
+}
+
+async function hasGoogleReviewUrlForScope(scope) {
+  const clinicIds = Array.isArray(scope?.clinicIds) ? scope.clinicIds.filter(Number.isInteger) : [];
+  if (!clinicIds.length) return false;
+  const checks = await Promise.all(clinicIds.map(async (clinicId) => {
+    const clinic = await loadClinicForTemplateVariables(clinicId);
+    return !!normalizeText(clinic?.url_dejar_resena);
+  }));
+  return checks.every(Boolean);
+}
+
+async function getReviewRequestSummary(scope, options = {}) {
+  const reviewSource = normalizeReviewRequestSource(options.review_source || options.reviewSource);
+  const treatmentIds = parseReviewTreatmentIds(options);
+  const [candidates, treatmentOptions] = await Promise.all([
+    buildItemsForReviewRequest(scope, {
+      review_request: true,
+      review_source: reviewSource,
+      review_treatment_ids: treatmentIds,
+      review_treatment_moment: options.review_treatment_moment || options.reviewTreatmentMoment || null,
+      limit: 5000,
+    }),
+    buildReviewTreatmentOptions(scope),
+  ]);
+  const clinicIds = Array.isArray(scope?.clinicIds) ? scope.clinicIds.filter(Number.isInteger) : [];
+  if (!clinicIds.length) {
+    return {
+      success: true,
+      summary: {
+        possible_patients: 0,
+        candidates_preview: [],
+        requests_sent: 0,
+        ratings_1_to_4: 0,
+        ratings_5: 0,
+        treatment_options: [],
+        automation_enabled: false,
+        automation_template: null,
+        approved_template_available: false,
+        google_review_url_available: false,
+      },
+    };
+  }
+
+  const [sentRow] = await db.sequelize.query(
+    `
+    SELECT COUNT(DISTINCT i.id) AS total
+    FROM MarketingPatientListItems i
+    INNER JOIN MarketingPatientLists l ON l.id = i.list_id
+    WHERE i.clinica_id IN (:clinicIds)
+      AND l.objective_id = :objectiveId
+      AND (
+        JSON_UNQUOTE(JSON_EXTRACT(l.criteria, '$.review_request')) IN ('true', '1')
+        OR JSON_UNQUOTE(JSON_EXTRACT(l.criteria, '$.template_usage')) = 'solicitud_resena'
+      )
+      AND (
+        i.sent_at IS NOT NULL
+        OR i.dispatch_status IN ('queued','sending','sent','delivered','read','replied')
+      )
+    `,
+    { replacements: { clinicIds, objectiveId: OBJECTIVE_ID }, type: QueryTypes.SELECT }
+  );
+
+  const [ratingsRow] = await db.sequelize.query(
+    `
+    SELECT
+      SUM(CASE WHEN CAST(JSON_UNQUOTE(JSON_EXTRACT(e.payload, '$.rating')) AS UNSIGNED) BETWEEN 1 AND 4 THEN 1 ELSE 0 END) AS ratings_1_to_4,
+      SUM(CASE WHEN CAST(JSON_UNQUOTE(JSON_EXTRACT(e.payload, '$.rating')) AS UNSIGNED) = 5 THEN 1 ELSE 0 END) AS ratings_5
+    FROM MarketingPatientContactEvents e
+    INNER JOIN MarketingPatientLists l ON l.id = e.list_id
+    LEFT JOIN MarketingPatientListItems i ON i.id = e.item_id
+    WHERE l.objective_id = :objectiveId
+      AND COALESCE(i.clinica_id, l.clinica_id) IN (:clinicIds)
+      AND e.event_type IN ('review_rating_received', 'review_request_rating')
+    `,
+    { replacements: { clinicIds, objectiveId: OBJECTIVE_ID }, type: QueryTypes.SELECT }
+  );
+
+  const lowRatingReasons = await db.sequelize.query(
+    `
+    SELECT
+      COALESCE(i.name, p.nombre, 'Paciente') AS patient_name,
+      JSON_UNQUOTE(JSON_EXTRACT(f.payload, '$.content')) AS reason,
+      (
+        SELECT CAST(JSON_UNQUOTE(JSON_EXTRACT(r.payload, '$.rating')) AS UNSIGNED)
+        FROM MarketingPatientContactEvents r
+        WHERE r.list_id = f.list_id
+          AND r.item_id = f.item_id
+          AND r.event_type IN ('review_rating_received', 'review_request_rating', 'review_rating_updated')
+        ORDER BY r.occurred_at DESC
+        LIMIT 1
+      ) AS rating,
+      f.occurred_at
+    FROM MarketingPatientContactEvents f
+    INNER JOIN MarketingPatientLists l ON l.id = f.list_id
+    LEFT JOIN MarketingPatientListItems i ON i.id = f.item_id
+    LEFT JOIN Pacientes p ON p.id_paciente = f.paciente_id
+    WHERE l.objective_id = :objectiveId
+      AND COALESCE(i.clinica_id, l.clinica_id) IN (:clinicIds)
+      AND f.event_type = 'review_private_feedback_received'
+      AND JSON_UNQUOTE(JSON_EXTRACT(f.payload, '$.content')) IS NOT NULL
+    ORDER BY f.occurred_at DESC
+    LIMIT 5
+    `,
+    { replacements: { clinicIds, objectiveId: OBJECTIVE_ID }, type: QueryTypes.SELECT }
+  );
+
+  const [automationTemplate, approvedReviewTemplate, googleReviewUrlAvailable] = await Promise.all([
+    getReviewAutomationTemplate(scope),
+    findApprovedReviewWhatsappTemplate(scope),
+    hasGoogleReviewUrlForScope(scope),
+  ]);
+
+  return {
+    success: true,
+    summary: {
+      possible_patients: candidates.length,
+      candidates_preview: candidates.slice(0, 8).map(serializeItem),
+      treatment_options: treatmentOptions,
+      requests_sent: Number(sentRow?.total || 0),
+      ratings_1_to_4: Number(ratingsRow?.ratings_1_to_4 || 0),
+      ratings_5: Number(ratingsRow?.ratings_5 || 0),
+      low_rating_reasons: (lowRatingReasons || [])
+        .map((row) => ({
+          patient_name: normalizeText(row.patient_name) || 'Paciente',
+          rating: Number(row.rating || 0) || null,
+          reason: normalizeText(row.reason).slice(0, 500),
+          occurred_at: row.occurred_at || null,
+        }))
+        .filter((row) => row.reason),
+      automation_enabled: !!automationTemplate,
+      automation_template: serializeReviewAutomationTemplate(automationTemplate),
+      approved_template_available: !!approvedReviewTemplate,
+      approved_template_id: approvedReviewTemplate?.id || null,
+      google_review_url_available: googleReviewUrlAvailable,
+    },
+  };
+}
+
+function buildReviewAutomationTemplateIdentity(scope) {
+  if (scope?.scope === 'group' && Number.isInteger(scope.groupId)) {
+    return {
+      template_key: `review_request_after_completed__group_${scope.groupId}`,
+      public_id: `flw_review_req_group_${scope.groupId}`,
+      clinic_id: null,
+      group_id: scope.groupId,
+    };
+  }
+  const clinicIds = Array.isArray(scope?.clinicIds) ? scope.clinicIds.filter(Number.isInteger) : [];
+  if (clinicIds.length === 1) {
+    return {
+      template_key: `review_request_after_completed__clinic_${clinicIds[0]}`,
+      public_id: `flw_review_req_clinic_${clinicIds[0]}`,
+      clinic_id: clinicIds[0],
+      group_id: null,
+    };
+  }
+  const err = new Error('Activa la automatización de reseñas para una clínica o un grupo concreto.');
+  err.status = 400;
+  throw err;
+}
+
+function buildReviewAutomationNodes({
+  reviewSource,
+  reviewThreshold,
+  whatsappTemplateId = null,
+  reviewGiftEnabled = false,
+  reviewGiftDescription = '',
+  reviewDisplayClinicName = '',
+}) {
+  const threshold = normalizeReviewThreshold(reviewThreshold);
+  const giftEnabled = reviewGiftEnabled === true || String(reviewGiftEnabled || '').toLowerCase() === 'true';
+  return [
+    {
+      id: 'N1',
+      type: 'trigger/appointment_completed',
+      config: {
+        event_name: REVIEW_AUTOMATION_TRIGGER,
+      },
+      outputs: { on_success: 'N2' },
+      position: { x: 120, y: 120 },
+    },
+    {
+      id: 'N2',
+      type: REVIEW_AUTOMATION_ACTION,
+      config: {
+        review_source: normalizeReviewRequestSource(reviewSource),
+        review_threshold: threshold,
+        whatsapp_template_id: Number(whatsappTemplateId || 0) || null,
+        template_name: REVIEW_TEMPLATE_NAME,
+        review_gift_enabled: giftEnabled,
+        review_gift_description: giftEnabled ? normalizeText(reviewGiftDescription || '') : null,
+        review_display_clinic_name: normalizeText(reviewDisplayClinicName || '') || null,
+        require_message_anchor_for_wait: true,
+        wait_for_message_ms: 6000,
+      },
+      outputs: { on_success: 'N3', on_fail: null },
+      position: { x: 120, y: 280 },
+    },
+    {
+      id: 'N3',
+      type: 'delay/wait_response',
+      config: {
+        timeout_duration: 20,
+        timeout_unit: 'hours',
+        listens_to_node_id: 'N2',
+        response_buffer_enabled: true,
+      },
+      outputs: { on_response: 'N6', on_timeout: 'N4' },
+      position: { x: 120, y: 440 },
+    },
+    {
+      id: 'N4',
+      type: REVIEW_REMINDER_AUTOMATION_ACTION,
+      config: {
+        list_id: '{{outputs.N2.list_id}}',
+        item_id: '{{outputs.N2.item_id}}',
+        clinic_id: '{{outputs.N2.clinic_id}}',
+        trigger_message_id: '{{outputs.N2.message_id}}',
+        template_name: REVIEW_REMINDER_TEMPLATE_NAME,
+      },
+      outputs: { on_success: 'N5', on_fail: null },
+      position: { x: 120, y: 600 },
+    },
+    {
+      id: 'N5',
+      type: 'delay/wait_response',
+      config: {
+        timeout_duration: 4,
+        timeout_unit: 'hours',
+        listens_to_node_id: 'N4',
+        response_buffer_enabled: true,
+      },
+      outputs: { on_response: 'N6', on_timeout: 'N9' },
+      position: { x: 120, y: 760 },
+    },
+    {
+      id: 'N6',
+      type: 'condition/field_check',
+      config: {
+        mode: 'simple',
+        left_ref: {
+          source: 'context',
+          path: 'last_response_context.response_rating',
+          value_type: 'number',
+          label: 'Valoración del paciente',
+        },
+        operator: 'greater_than_or_equals',
+        right_value: threshold,
+      },
+      outputs: { on_true: 'N7', on_false: 'N8' },
+      position: { x: 430, y: 600 },
+    },
+    {
+      id: 'N7',
+      type: REVIEW_FOLLOWUP_AUTOMATION_ACTION,
+      config: {
+        followup_kind: 'google_review',
+        review_threshold: threshold,
+      },
+      outputs: { on_success: null },
+      position: { x: 720, y: 500 },
+    },
+    {
+      id: 'N8',
+      type: REVIEW_FOLLOWUP_AUTOMATION_ACTION,
+      config: {
+        followup_kind: 'private_feedback',
+        review_threshold: threshold,
+      },
+      outputs: { on_success: null },
+      position: { x: 720, y: 700 },
+    },
+    {
+      id: 'N9',
+      type: REVIEW_NO_RESPONSE_AUTOMATION_ACTION,
+      config: {
+        list_id: '{{outputs.N2.list_id}}',
+        item_id: '{{outputs.N2.item_id}}',
+        reason: 'sin_respuesta_tras_recordatorio',
+      },
+      outputs: { on_success: null },
+      position: { x: 120, y: 920 },
+    },
+  ];
+}
+
+async function setReviewRequestAutomation(scope, body = {}, userId = null) {
+  if (!AutomationFlowTemplateV2) {
+    const err = new Error('El motor de automatizaciones V2 no está disponible.');
+    err.status = 503;
+    throw err;
+  }
+
+  const enabled = body.enabled === true || body.active === true || body.is_active === true;
+  const identity = buildReviewAutomationTemplateIdentity(scope);
+  const reviewSource = normalizeReviewRequestSource(body.review_source || body.reviewSource || 'first_completed_or_completed_treatment');
+  const reviewThreshold = 5;
+  const whatsappTemplateId = Number(body.whatsapp_template_id || body.template_id || 0) || null;
+  const reviewGiftEnabled = body.review_gift_enabled === true
+    || body.reviewGiftEnabled === true
+    || String(body.review_gift_enabled ?? body.reviewGiftEnabled ?? '').toLowerCase() === 'true';
+  const reviewGiftDescription = normalizeText(body.review_gift_description || body.reviewGiftDescription || '');
+  const reviewDisplayClinicName = normalizeText(body.review_display_clinic_name || body.reviewDisplayClinicName || '');
+
+  let approvedTemplate = null;
+  if (whatsappTemplateId) {
+    approvedTemplate = await findApprovedReviewWhatsappTemplate(scope, whatsappTemplateId);
+    if (!approvedTemplate) {
+      const err = new Error('Selecciona una plantilla de reseñas aprobada por Meta.');
+      err.status = 409;
+      err.details = { reason: 'review_template_not_approved' };
+      throw err;
+    }
+  }
+
+  const existing = await AutomationFlowTemplateV2.findOne({
+    where: { template_key: identity.template_key },
+    order: [['version', 'DESC'], ['id', 'DESC']],
+  });
+  const now = new Date();
+  const nodes = buildReviewAutomationNodes({
+    reviewSource,
+    reviewThreshold,
+    whatsappTemplateId: whatsappTemplateId || approvedTemplate?.id || null,
+    reviewGiftEnabled,
+    reviewGiftDescription,
+    reviewDisplayClinicName,
+  });
+  const payload = {
+    ...identity,
+    version: Math.max(Number(existing?.version || 0), 2),
+    engine_version: 'v2',
+    name: 'Solicitar reseña tras cita completada',
+    description: 'Pide al paciente una valoración de 1 a 5 después de completar una cita, espera respuesta y envía un recordatorio si no contesta.',
+    trigger_type: REVIEW_AUTOMATION_TRIGGER,
+    trigger_config: { event_name: REVIEW_AUTOMATION_TRIGGER },
+    is_active: enabled,
+    is_system: false,
+    entry_node_id: 'N1',
+    nodes,
+    published_at: now,
+    published_by: userId || 1,
+    created_by: existing?.created_by || userId || 1,
+  };
+
+  const row = existing
+    ? await existing.update(payload)
+    : await AutomationFlowTemplateV2.create(payload);
+  const approvedReviewTemplate = await findApprovedReviewWhatsappTemplate(scope, whatsappTemplateId || null);
+  const googleReviewUrlAvailable = await hasGoogleReviewUrlForScope(scope);
+  return {
+    success: true,
+    automation_enabled: row.is_active === true,
+    automation_template: serializeReviewAutomationTemplate(row),
+    approved_template_available: !!approvedReviewTemplate,
+    approved_template_id: approvedReviewTemplate?.id || null,
+    google_review_url_available: googleReviewUrlAvailable,
+    warnings: [
+      !approvedReviewTemplate ? 'template_not_approved' : null,
+      !googleReviewUrlAvailable ? 'google_review_url_missing' : null,
+    ].filter(Boolean),
+  };
+}
+
+async function createAndStartReviewRequestForAppointment(options = {}) {
+  const appointmentId = Number(options.appointmentId || options.appointment_id || options.cita_id || 0);
+  const clinicId = Number(options.clinicId || options.clinic_id || 0);
+  if (!appointmentId || !clinicId) {
+    return { success: true, sent: false, skipped: true, reason: 'appointment_or_clinic_missing' };
+  }
+
+  const scope = {
+    scope: 'clinic',
+    clinicIds: [clinicId],
+    groupId: null,
+    isAll: false,
+    isValid: true,
+  };
+  const reviewSource = normalizeReviewRequestSource(options.reviewSource || options.review_source || 'first_completed_or_completed_treatment');
+  const reviewThreshold = 5;
+  const reviewGiftEnabled = options.reviewGiftEnabled === true
+    || options.review_gift_enabled === true
+    || String(options.reviewGiftEnabled ?? options.review_gift_enabled ?? '').toLowerCase() === 'true';
+  const reviewGiftDescription = normalizeText(options.reviewGiftDescription || options.review_gift_description || '');
+  const reviewDisplayClinicName = normalizeText(options.reviewDisplayClinicName || options.review_display_clinic_name || '');
+  const candidate = await buildReviewRequestCandidateForAppointment(scope, {
+    review_appointment_id: appointmentId,
+    review_source: reviewSource,
+  });
+  if (!candidate.item) {
+    return { success: true, sent: false, skipped: true, reason: candidate.reason || 'no_review_candidate' };
+  }
+
+  const clinic = await loadClinicForTemplateVariables(clinicId);
+  const googleReviewUrl = normalizeText(clinic?.url_dejar_resena);
+  if (!googleReviewUrl) {
+    return { success: true, sent: false, skipped: true, reason: 'google_review_url_missing' };
+  }
+
+  const template = await findApprovedReviewWhatsappTemplate(scope, options.whatsappTemplateId || options.whatsapp_template_id || null);
+  if (!template) {
+    return { success: true, sent: false, skipped: true, reason: 'approved_review_template_missing' };
+  }
+
+  try {
+    const body = {
+      name: `Solicitud de reseña · cita #${appointmentId}`,
+      campaign_name: `Solicitud de reseña · cita #${appointmentId}`,
+      list_source: 'current_patients',
+      channels: ['whatsapp'],
+      template_usage: 'solicitud_resena',
+      template_commercial: false,
+      consent_acknowledged: true,
+      review_request: true,
+      review_source: reviewSource,
+      review_threshold: reviewThreshold,
+      review_appointment_id: appointmentId,
+      review_gift_enabled: reviewGiftEnabled,
+      review_gift_description: reviewGiftEnabled ? reviewGiftDescription : null,
+      review_display_clinic_name: reviewDisplayClinicName || resolveReviewDisplayClinicName({ criteria: {} }, clinic),
+      whatsapp_template_id: template.id,
+      link_tracking: {
+        enabled: true,
+        google_review_url: googleReviewUrl,
+      },
+    };
+    const created = await createCampaign(scope, body, options.userId || null);
+    const campaignId = created?.campaign?.id || created?.list?.id;
+    if (!campaignId) {
+      return { success: true, sent: false, skipped: true, reason: 'campaign_not_created' };
+    }
+    await prepareCampaign(scope, campaignId, body, options.userId || null);
+    const dispatched = await startCampaignDispatch(scope, campaignId, body, options.userId || null);
+    const anchor = await waitForReviewRequestDispatchAnchor(
+      campaignId,
+      options.waitForMessageMs ?? options.wait_for_message_ms ?? 6000
+    );
+    return {
+      success: true,
+      sent: true,
+      skipped: false,
+      campaign_id: campaignId,
+      list_id: campaignId,
+      item_id: anchor?.item_id || null,
+      patient_id: anchor?.patient_id || null,
+      message_id: anchor?.message_id || null,
+      app_message_id: anchor?.app_message_id || null,
+      conversation_id: anchor?.conversation_id || null,
+      provider_message_id: anchor?.provider_message_id || null,
+      dispatch_status: anchor?.dispatch_status || null,
+      sent_at: anchor?.sent_at || null,
+      template_id: template.id,
+      dispatch: dispatched?.dispatch || null,
+    };
+  } catch (error) {
+    console.warn('[marketing-bulk-sends] No se pudo lanzar solicitud automática de reseña', {
+      appointmentId,
+      clinicId,
+      error: error?.message || error,
+    });
+    return {
+      success: true,
+      sent: false,
+      skipped: true,
+      reason: 'dispatch_failed',
+      error: error?.message || String(error),
+    };
+  }
+}
+
+async function sendReviewRequestReminder(options = {}) {
+  const listId = Number(options.listId || options.list_id || options.campaign_id || 0);
+  const itemId = Number(options.itemId || options.item_id || 0);
+  if (!listId || !itemId) {
+    return { success: true, sent: false, skipped: true, reason: 'review_reminder_missing_list_or_item' };
+  }
+
+  const list = await MarketingPatientList.findByPk(listId);
+  if (!list || !isReviewRequestList(list)) {
+    return { success: true, sent: false, skipped: true, reason: 'review_request_list_not_found' };
+  }
+
+  const item = await MarketingPatientListItem.findOne({ where: { id: itemId, list_id: listId } });
+  if (!item) {
+    return { success: true, sent: false, skipped: true, reason: 'review_request_item_not_found' };
+  }
+
+  const existingRating = await findExistingReviewRatingEvent(listId, itemId);
+  if (existingRating) {
+    return { success: true, sent: false, skipped: true, reason: 'review_already_answered' };
+  }
+
+  const existingReminder = await MarketingPatientContactEvent.findOne({
+    where: {
+      list_id: listId,
+      item_id: itemId,
+      event_type: 'review_request_reminder_sent',
+    },
+    order: [['occurred_at', 'DESC']],
+  });
+  if (existingReminder) {
+    return { success: true, sent: false, skipped: true, reason: 'review_reminder_already_sent' };
+  }
+
+  const clinicId = Number(options.clinicId || options.clinic_id || item.clinica_id || getClinicIdForList(list) || 0);
+  if (!clinicId) {
+    return { success: true, sent: false, skipped: true, reason: 'review_reminder_missing_clinic' };
+  }
+
+  const scope = {
+    scope: 'clinic',
+    clinicIds: [clinicId],
+    groupId: null,
+    isAll: false,
+    isValid: true,
+  };
+  const template = await findApprovedReviewReminderWhatsappTemplate(
+    scope,
+    options.whatsappTemplateId || options.whatsapp_template_id || null,
+    options.templateName || options.template_name || REVIEW_REMINDER_TEMPLATE_NAME
+  );
+  if (!template) {
+    return { success: true, sent: false, skipped: true, reason: 'approved_review_reminder_template_missing' };
+  }
+
+  const clinic = await loadClinicForTemplateVariables(clinicId);
+  const plainItem = item.get ? item.get({ plain: true }) : item;
+  const params = await buildTemplateParams({ template, item: plainItem, list, clinic });
+  const previewText = await renderTemplatePreview({ template, item: plainItem, list, clinic });
+  const recipient = whatsappService.normalizePhoneNumber(item.phone || '');
+  if (!recipient) {
+    return { success: true, sent: false, skipped: true, reason: 'review_reminder_missing_recipient' };
+  }
+
+  let conversation = await findCanonicalWhatsappConversation({
+    clinicId,
+    contactId: recipient,
+    patientId: item.paciente_id || null,
+    createIfMissing: true,
+    lastMessageAt: new Date(),
+  });
+  if (!conversation) {
+    return { success: true, sent: false, skipped: true, reason: 'review_reminder_conversation_not_found' };
+  }
+
+  let appMessage = null;
+  let providerMessageId = null;
+  let status = 'sent';
+  let errorPayload = null;
+  let clinicConfig = null;
+
+  try {
+    clinicConfig = await whatsappService.getClinicConfig(clinicId);
+    if (!clinicConfig?.phoneNumberId || !clinicConfig?.accessToken) {
+      throw new Error('whatsapp_config_missing_for_review_reminder');
+    }
+
+    appMessage = await Message.create({
+      conversation_id: conversation.id,
+      sender_id: null,
+      direction: 'outbound',
+      content: previewText,
+      message_type: 'template',
+      status: 'pending',
+      metadata: {
+        kind: 'review_request_reminder',
+        source: 'marketing_bulk_sends',
+        dispatch_context: 'review_request_reminder',
+        list_id: list.id,
+        item_id: item.id,
+        objective_id: OBJECTIVE_ID,
+        template_usage: 'solicitud_resena',
+        template_commercial: false,
+        template_category: template.category || template.catalog?.category || null,
+        template_id: template.id,
+        template_name: template.name,
+        template_language: template.language || 'es',
+        template_params: params,
+        recipient,
+        phoneNumberId: clinicConfig.phoneNumberId || null,
+        phoneId: clinicConfig.phoneNumberId || null,
+        wabaId: clinicConfig.wabaId || null,
+        trigger_message_id: Number(options.triggerMessageId || options.trigger_message_id || 0) || null,
+      },
+      sent_at: new Date(),
+    });
+    emitQuickChatMessageCreated(conversation, appMessage);
+
+    const response = await whatsappService.sendMessage({
+      to: recipient,
+      useTemplate: true,
+      templateName: template.name,
+      templateLanguage: template.language || 'es',
+      templateParams: params,
+      clinicConfig: { ...clinicConfig, clinicId },
+    });
+    providerMessageId = response?.messages?.[0]?.id || null;
+    await appMessage.update({
+      status: 'sent',
+      metadata: {
+        ...(appMessage.metadata || {}),
+        wa_response: response || null,
+        wamid: providerMessageId,
+      },
+      sent_at: new Date(),
+    });
+    emitQuickChatMessageUpdated(conversation, appMessage);
+    await item.update({
+      dispatch_status: 'sent',
+      provider_message_id: providerMessageId,
+      app_message_id: appMessage.id,
+      conversation_id: conversation.id,
+      sent_at: item.sent_at || new Date(),
+      failed_at: null,
+      last_error_code: null,
+      last_error_message: null,
+    });
+    await conversation.update({ last_message_at: new Date() });
+    await whatsappConnectionStatusService.clearDisconnectedAfterSuccess({
+      clinicId,
+      phoneId: clinicConfig.phoneNumberId || null,
+      wabaId: clinicConfig.wabaId || null,
+      messageId: appMessage.id,
+      source: 'review_request_reminder',
+    }).catch(() => null);
+  } catch (error) {
+    status = 'failed';
+    errorPayload = extractProviderError(error);
+    if (appMessage) {
+      await appMessage.update({
+        status: 'failed',
+        metadata: {
+          ...(appMessage.metadata || {}),
+          error: errorPayload.raw || errorPayload.message,
+        },
+      }).catch(() => null);
+      emitQuickChatMessageUpdated(conversation, appMessage);
+    }
+    await item.update({
+      dispatch_status: 'failed',
+      app_message_id: appMessage?.id || item.app_message_id || null,
+      conversation_id: conversation.id,
+      failed_at: new Date(),
+      last_error_code: errorPayload.code || null,
+      last_error_message: errorPayload.message || null,
+    }).catch(() => null);
+    await whatsappConnectionStatusService.markDisconnectedAfterProviderError({
+      error: errorPayload.raw || errorPayload,
+      clinicId,
+      phoneId: clinicConfig?.phoneNumberId || null,
+      wabaId: clinicConfig?.wabaId || null,
+      messageId: appMessage?.id || null,
+      recipient,
+      source: 'review_request_reminder',
+    }).catch(() => null);
+  }
+
+  await MarketingPatientContactEvent.create({
+    list_id: list.id,
+    item_id: item.id,
+    paciente_id: item.paciente_id || null,
+    event_type: 'review_request_reminder_sent',
+    channel: 'whatsapp',
+    payload: {
+      status,
+      template_id: template.id,
+      template_name: template.name,
+      trigger_message_id: Number(options.triggerMessageId || options.trigger_message_id || 0) || null,
+      app_message_id: appMessage?.id || null,
+      provider_message_id: providerMessageId,
+      conversation_id: conversation.id,
+      recipient,
+      error: errorPayload || null,
+    },
+    occurred_at: new Date(),
+  });
+  await refreshListCounters(list.id).catch(() => null);
+
+  return {
+    success: true,
+    sent: status === 'sent',
+    skipped: false,
+    status,
+    list_id: list.id,
+    item_id: item.id,
+    campaign_id: list.id,
+    message_id: appMessage?.id || null,
+    app_message_id: appMessage?.id || null,
+    provider_message_id: providerMessageId,
+    conversation_id: conversation.id,
+    recipient,
+    template_id: template.id,
+    template_name: template.name,
+    error: errorPayload || null,
+  };
+}
+
 function serializeItem(item) {
   const plain = item?.get ? item.get({ plain: true }) : item;
   return {
@@ -1422,6 +3259,11 @@ function serializeItem(item) {
     name: plain.name,
     phone: plain.phone,
     email: plain.email,
+    treatment: plain.treatment || plain.custom_fields?.tratamiento || null,
+    treatment_id: plain.treatment_id || null,
+    last_visit_at: plain.last_visit_at || null,
+    appointment_at: plain.appointment_at || null,
+    treatment_completed: plain.treatment_completed === true,
     status: plain.status,
     reason: plain.reason,
     exclusion_reason: plain.exclusion_reason,
@@ -1599,6 +3441,10 @@ async function createCampaign(scope, body = {}, userId = null) {
   const listName = normalizeText(body.name) || 'Lista de envíos masivos';
   const campaignName = normalizeText(body.campaign_name || body.campaignName) || listName;
   const linkTracking = buildLinkTrackingCriteria(body, {});
+  const isReviewRequest = isReviewRequestBody(body);
+  const reviewSource = normalizeReviewRequestSource(body.review_source || body.reviewRequestSource);
+  const reviewTreatmentIds = parseReviewTreatmentIds(body);
+  const reviewThreshold = 5;
 
   return db.sequelize.transaction(async (transaction) => {
     let itemPayloads = [];
@@ -1632,7 +3478,9 @@ async function createCampaign(scope, body = {}, userId = null) {
       ...scopePayload,
       treatment: null,
       condition_summary: source === 'existing_patients_condition'
-        ? 'Pacientes actuales que cumplen la condición seleccionada.'
+        ? (isReviewRequest
+          ? 'Pacientes elegibles para solicitar valoración, excluyendo quienes ya recibieron una solicitud.'
+          : 'Pacientes actuales que cumplen la condición seleccionada.')
         : 'Lista externa importada para campaña puntual.',
       exclusion_summary: counters.excluded ? `${counters.excluded} contactos no tienen los campos necesarios o están duplicados.` : 'Sin exclusiones detectadas.',
       criteria: {
@@ -1641,9 +3489,21 @@ async function createCampaign(scope, body = {}, userId = null) {
         channels,
         template_usage: templateUsage,
         template_commercial: templateCommercial,
+        whatsapp_template_id: Number(body.whatsapp_template_id || body.template_id || 0) || null,
         opt_out_text: templateCommercial ? normalizeText(body.opt_out_text) : null,
         consent_acknowledged: !!body.consent_acknowledged,
         list_source: source,
+        review_request: isReviewRequest,
+        review_source: isReviewRequest ? reviewSource : null,
+        review_treatment_id: isReviewRequest ? (reviewTreatmentIds[0] || null) : null,
+        review_treatment_ids: isReviewRequest ? reviewTreatmentIds : [],
+        review_treatment_moment: isReviewRequest ? normalizeText(body.review_treatment_moment || body.reviewTreatmentMoment || '') || null : null,
+        review_delay: isReviewRequest ? normalizeText(body.review_delay || body.reviewDelay || '24h') : null,
+        review_threshold: isReviewRequest ? reviewThreshold : null,
+        review_gift_enabled: isReviewRequest ? (body.review_gift_enabled === true || String(body.review_gift_enabled || '').toLowerCase() === 'true') : false,
+        review_gift_description: isReviewRequest ? normalizeText(body.review_gift_description || body.reviewGiftDescription || '') || null : null,
+        review_display_clinic_name: isReviewRequest ? normalizeText(body.review_display_clinic_name || body.reviewDisplayClinicName || '') || null : null,
+        review_automation_enabled: false,
         import_file_name: body.import_file_name || null,
         column_mapping: columnMapping,
         name_format: normalizeNameFormat(body.name_format || body.nameFormat || (source === 'imported_file' ? 'auto' : null)),
@@ -2130,9 +3990,8 @@ async function resolveWhatsappTemplate(templateId, scope) {
 }
 
 function extractBodyText(components) {
-  const body = Array.isArray(components)
-    ? components.find((component) => String(component?.type || '').toUpperCase() === 'BODY')
-    : null;
+  const body = parseTemplateComponents(components)
+    .find((component) => String(component?.type || '').toUpperCase() === 'BODY');
   return body?.text || '';
 }
 
@@ -2153,9 +4012,52 @@ function buildTemplateSnapshot(template) {
   };
 }
 
+function getTemplateWabaId(template) {
+  const plain = template?.get ? template.get({ plain: true }) : (template || {});
+  return normalizeText(plain.waba_id || plain.wabaId || '');
+}
+
+async function getPrimaryWabaIdForScope(scope) {
+  const clinicIds = Array.isArray(scope?.clinicIds)
+    ? scope.clinicIds.filter(Number.isInteger)
+    : [];
+  if (!clinicIds.length) return '';
+  const clinicConfig = await whatsappService.getClinicConfig(clinicIds[0]).catch(() => null);
+  return normalizeText(clinicConfig?.wabaId || '');
+}
+
+function scoreWhatsappTemplateForScope(template, clinicIds, targetWabaId = '') {
+  const plain = template?.get ? template.get({ plain: true }) : (template || {});
+  const clinicId = Number(plain.clinic_id || 0);
+  const wabaId = getTemplateWabaId(plain);
+  if (clinicId && clinicIds.includes(clinicId)) return 3;
+  if (targetWabaId && wabaId && wabaId === targetWabaId) return 2;
+  if (!targetWabaId) return 1;
+  return 0;
+}
+
+function resolveReviewDisplayClinicName(list, clinic) {
+  const criteria = asPlainObject(list?.criteria);
+  const explicit = normalizeText(criteria.review_display_clinic_name || criteria.reviewDisplayClinicName || '');
+  if (explicit) return explicit;
+  const shouldPreferGoogleName = isReviewRequestList(list)
+    || criteria.review_request === true
+    || String(criteria.review_request || '').toLowerCase() === 'true'
+    || isReviewTemplateUsage(criteria.template_usage);
+  return normalizeText(
+    (shouldPreferGoogleName
+      ? (clinic?.perfil_google_location_name || clinic?.location_name || clinic?.google_location_name)
+      : '')
+    || clinic?.nombre_clinica
+    || clinic?.nombre
+    || 'tu clínica'
+  );
+}
+
 function resolveVariableValue(variableName, item, list, clinic) {
   const key = normalizeKey(variableName);
   const custom = item.custom_fields || {};
+  const displayClinicName = resolveReviewDisplayClinicName(list, clinic);
   const values = {
     nombre: item.name,
     nombre_paciente: item.name,
@@ -2165,12 +4067,22 @@ function resolveVariableValue(variableName, item, list, clinic) {
     nombre_completo: custom.nombre_completo || item.name,
     telefono: item.phone,
     email: item.email,
-    clinica: clinic?.nombre_clinica || clinic?.nombre || 'tu clínica',
-    nombre_clinica: clinic?.nombre_clinica || clinic?.nombre || 'tu clínica',
+    clinica: displayClinicName,
+    nombre_clinica: displayClinicName,
+    nombre_clinica_visible: displayClinicName,
     telefono_clinica: clinic?.telefono || clinic?.telefono_clinica || '',
     direccion_clinica: clinic?.direccion || '',
     url_web_clinica: clinic?.url_web || '',
     url_ficha_local_clinica: clinic?.url_ficha_local || '',
+    clinic_local_profile_url: clinic?.url_ficha_local || '',
+    url_perfil_google_clinica: clinic?.url_perfil_google || clinic?.url_ficha_local || '',
+    google_profile_url: clinic?.url_perfil_google || clinic?.url_ficha_local || '',
+    clinic_google_profile_url: clinic?.url_perfil_google || clinic?.url_ficha_local || '',
+    url_como_llegar_clinica: clinic?.url_como_llegar || clinic?.url_perfil_google || clinic?.url_ficha_local || '',
+    url_como_llegar: clinic?.url_como_llegar || clinic?.url_perfil_google || clinic?.url_ficha_local || '',
+    url_dejar_resena_clinica: clinic?.url_dejar_resena || '',
+    url_dejar_resena: clinic?.url_dejar_resena || '',
+    enlace_resena: clinic?.url_dejar_resena || '',
     tratamiento: item.treatment || '',
   };
   return normalizeText(custom[key] || values[key] || '');
@@ -2195,6 +4107,15 @@ function getClinicIdForList(list, fallbackScope = {}) {
   const scopeClinicIds = Array.isArray(fallbackScope?.clinicIds) ? fallbackScope.clinicIds : [];
   const fromScope = Number(scopeClinicIds[0] || 0);
   return Number.isInteger(fromScope) && fromScope > 0 ? fromScope : null;
+}
+
+async function loadClinicForTemplateVariables(clinicId) {
+  const safeClinicId = Number(clinicId || 0);
+  if (!safeClinicId || !Clinica) return null;
+  const clinic = await Clinica.findByPk(safeClinicId, { raw: true });
+  if (!clinic) return null;
+  const links = await resolveClinicGoogleLocalLinks(clinic);
+  return mergeClinicLinksIntoContext(clinic, links);
 }
 
 async function getWhatsappAccountQualityForList(list, scope = {}) {
@@ -2428,6 +4349,13 @@ async function prepareCampaign(scope, campaignId, body = {}, userId = null) {
     || (body.template_commercial !== false && (list.criteria?.template_commercial === true || isCommercialTemplateUsage(requestedTemplateUsage)));
   const templateUsage = resolveTemplateUsageFromMetaCategory(template, requestedTemplateUsage);
   const templateCommercial = resolveTemplateCommercialFromMetaCategory(template, requestedTemplateCommercial);
+  const isReviewRequest = isReviewRequestList(list) || isReviewRequestBody(body) || isReviewTemplateUsage(templateUsage);
+  const reviewSource = normalizeReviewRequestSource(body.review_source || body.reviewRequestSource || list.criteria?.review_source);
+  const reviewTreatmentIds = parseReviewTreatmentIds({
+    review_treatment_ids: body.review_treatment_ids || body.reviewTreatmentIds || list.criteria?.review_treatment_ids,
+    review_treatment_id: body.review_treatment_id || body.reviewTreatmentId || list.criteria?.review_treatment_id,
+  });
+  const reviewThreshold = 5;
   const autoSendWhenApproved = body.auto_send_when_template_approved === true || body.auto_send_when_approved === true;
   const approved = needsWhatsappTemplate
     ? !!template && String(template.status || '').toUpperCase() === 'APPROVED'
@@ -2446,7 +4374,7 @@ async function prepareCampaign(scope, campaignId, body = {}, userId = null) {
     active_segment_id: activeSegmentId,
   }, selectedItems);
   const clinicId = getClinicIdForList(list, scope);
-  const clinic = clinicId && Clinica ? await Clinica.findByPk(clinicId, { raw: true }) : null;
+  const clinic = await loadClinicForTemplateVariables(clinicId);
   if (needsWhatsappTemplate && template) {
     const missingVariables = buildMissingVariablesSummary({ template, items: selectedItems, list, clinic });
     if (missingVariables.length) {
@@ -2486,6 +4414,24 @@ async function prepareCampaign(scope, campaignId, body = {}, userId = null) {
       template_commercial: templateCommercial,
       opt_out_text: templateCommercial ? normalizeText(body.opt_out_text || list.criteria?.opt_out_text) : null,
       consent_acknowledged: !!(body.consent_acknowledged ?? list.criteria?.consent_acknowledged),
+      review_request: isReviewRequest,
+      review_source: isReviewRequest ? reviewSource : null,
+      review_treatment_id: isReviewRequest ? (reviewTreatmentIds[0] || null) : null,
+      review_treatment_ids: isReviewRequest ? reviewTreatmentIds : [],
+      review_treatment_moment: isReviewRequest ? normalizeText(body.review_treatment_moment || body.reviewTreatmentMoment || list.criteria?.review_treatment_moment || '') || null : null,
+      review_delay: isReviewRequest ? normalizeText(body.review_delay || body.reviewDelay || list.criteria?.review_delay || '24h') : null,
+      review_threshold: isReviewRequest ? reviewThreshold : null,
+      review_gift_enabled: isReviewRequest
+        ? (body.review_gift_enabled === true
+          || String(body.review_gift_enabled ?? list.criteria?.review_gift_enabled ?? '').toLowerCase() === 'true')
+        : false,
+      review_gift_description: isReviewRequest
+        ? normalizeText(body.review_gift_description || body.reviewGiftDescription || list.criteria?.review_gift_description || '') || null
+        : null,
+      review_display_clinic_name: isReviewRequest
+        ? normalizeText(body.review_display_clinic_name || body.reviewDisplayClinicName || list.criteria?.review_display_clinic_name || '') || null
+        : null,
+      review_automation_enabled: false,
       link_tracking: buildLinkTrackingCriteria(body, list.criteria || {}),
       schedule_mode: body.schedule_mode || 'now',
       scheduled_at: body.scheduled_at || null,
@@ -2556,14 +4502,17 @@ async function prepareCampaign(scope, campaignId, body = {}, userId = null) {
 async function sendTest(scope, campaignId, body = {}) {
   const list = await MarketingPatientList.findByPk(campaignId);
   ensureScopeAccess(list, scope);
-  const template = await resolveWhatsappTemplate(
+  const listCriteria = asPlainObject(list?.criteria);
+  const templateUsage = normalizeTemplateUsage(body.template_usage || listCriteria.template_usage || 'promocion');
+  const selectedTemplateId =
     body.whatsapp_template_id
-      || body.template_id
-      || list.criteria?.whatsapp_template_id
-      || list.template_snapshot?.id
-      || list.template_id,
-    scope
-  );
+    || body.template_id
+    || listCriteria.whatsapp_template_id
+    || list.template_snapshot?.id
+    || list.template_id;
+  const template = isReviewTemplateUsage(templateUsage)
+    ? await findApprovedReviewWhatsappTemplate(scope, selectedTemplateId || null)
+    : await resolveWhatsappTemplate(selectedTemplateId, scope);
   if (!template) {
     const err = new Error('Selecciona una plantilla WhatsApp aprobada para enviar una prueba real.');
     err.status = 400;
@@ -2594,7 +4543,7 @@ async function sendTest(scope, campaignId, body = {}) {
     err.status = 400;
     throw err;
   }
-  const clinic = Clinica ? await Clinica.findByPk(clinicId, { raw: true }) : null;
+  const clinic = await loadClinicForTemplateVariables(clinicId);
   const clinicConfig = await whatsappService.getClinicConfig(clinicId);
   if (!clinicConfig?.phoneNumberId || !clinicConfig?.accessToken) {
     const err = new Error('whatsapp_config_missing_for_scope');
@@ -2612,9 +4561,8 @@ async function sendTest(scope, campaignId, body = {}) {
   assertTestSendCooldown({ clinicId, targetPhone });
   const params = await buildTemplateParams({ template, item: plainItem, list, clinic });
   const previewText = await renderTemplatePreview({ template, item: plainItem, list, clinic });
-  const templateUsage = normalizeTemplateUsage(body.template_usage || list.criteria?.template_usage || 'promocion');
   const templateCommercial = body.template_commercial === true
-    || (body.template_commercial !== false && (list.criteria?.template_commercial === true || isCommercialTemplateUsage(templateUsage)));
+    || (body.template_commercial !== false && (listCriteria.template_commercial === true || isCommercialTemplateUsage(templateUsage)));
   const conversation = await findCanonicalWhatsappConversation({
     clinicId,
     contactId: targetPhone,
@@ -2762,6 +4710,10 @@ async function listRecipients(scope, campaignId, query = {}) {
   if (status && status !== 'all') {
     if (status === 'excluded') {
       where.status = { [Op.like]: 'excluded%' };
+    } else if (status === 'ready') {
+      where.status = 'ready';
+      where.selected = true;
+      where[Op.or] = [{ dispatch_status: null }, { dispatch_status: 'pending' }];
     } else if (status === 'sent') {
       where.dispatch_status = { [Op.in]: ['sent', 'delivered', 'read', 'replied'] };
     } else {
@@ -3552,7 +5504,7 @@ async function runDispatchJob(payload = {}, jobRequest = null) {
     return { status: 'completed', result: { paused: true, reason: 'template_not_approved', list_id: list.id } };
   }
   const clinicId = getClinicIdForList(list, scope);
-  const clinic = clinicId && Clinica ? await Clinica.findByPk(clinicId, { raw: true }) : null;
+  const clinic = await loadClinicForTemplateVariables(clinicId);
   const clinicConfig = clinicId ? await whatsappService.getClinicConfig(clinicId) : null;
   if (!clinicConfig?.phoneNumberId || !clinicConfig?.accessToken) {
     await list.update({
@@ -3761,7 +5713,7 @@ async function materializeMessageStatusFromWebhook({ message, status, mappedStat
 
 async function materializeInboundReply({ conversation, inboundMessage }) {
   if (!conversation?.id || !inboundMessage) return { applied: false, reason: 'missing_context' };
-  const triggerMessage = await Message.findOne({
+  let triggerMessage = await Message.findOne({
     where: {
       conversation_id: conversation.id,
       direction: 'outbound',
@@ -3770,37 +5722,223 @@ async function materializeInboundReply({ conversation, inboundMessage }) {
     order: [['createdAt', 'DESC']],
     limit: 1,
   });
-  const metadata = triggerMessage?.metadata || {};
+  let metadata = asPlainObject(triggerMessage?.metadata);
+  const inboundRatingCandidate = extractReviewRatingFromInboundMessage(inboundMessage);
+  if (
+    inboundRatingCandidate &&
+    metadata.source === 'marketing_bulk_sends' &&
+    !isReviewRatingTriggerMessage(triggerMessage)
+  ) {
+    const previousOutboundMessages = await Message.findAll({
+      where: {
+        conversation_id: conversation.id,
+        direction: 'outbound',
+        createdAt: { [Op.lte]: inboundMessage.createdAt || new Date() },
+      },
+      order: [['createdAt', 'DESC']],
+      limit: 25,
+    });
+    const currentListId = Number(metadata.list_id || 0);
+    const currentItemId = Number(metadata.item_id || 0);
+    const ratingTrigger = previousOutboundMessages.find((message) => {
+      const candidateMeta = asPlainObject(message?.metadata);
+      if (candidateMeta.source !== 'marketing_bulk_sends') return false;
+      if (!isReviewRatingTriggerMessage(message)) return false;
+      if (currentListId && Number(candidateMeta.list_id || 0) !== currentListId) return false;
+      if (currentItemId && Number(candidateMeta.item_id || 0) !== currentItemId) return false;
+      return true;
+    });
+    if (ratingTrigger) {
+      triggerMessage = ratingTrigger;
+      metadata = asPlainObject(triggerMessage?.metadata);
+    }
+  }
   if (metadata.source !== 'marketing_bulk_sends') return { applied: false, reason: 'not_bulk_send' };
   const listId = Number(metadata.list_id || 0);
   const itemId = Number(metadata.item_id || 0);
   if (!listId || !itemId) return { applied: false, reason: 'missing_ids' };
+  const list = await MarketingPatientList.findByPk(listId);
+  if (!list) return { applied: false, reason: 'list_not_found' };
   const item = await MarketingPatientListItem.findOne({ where: { id: itemId, list_id: listId } });
   if (!item) return { applied: false, reason: 'item_not_found' };
-  if (item.replied_at && String(item.dispatch_status || '').toLowerCase() === 'replied') {
+  const repliedAt = inboundMessage.sent_at || inboundMessage.createdAt || new Date();
+  const existingReply = await MarketingPatientContactEvent.findOne({
+    where: {
+      list_id: listId,
+      item_id: itemId,
+      event_type: 'mass_campaign_message_replied',
+    },
+    order: [['occurred_at', 'DESC']],
+  });
+  const privateFeedback = await materializeReviewPrivateFeedback({
+    list,
+    item,
+    inboundMessage,
+    triggerMessage,
+    occurredAt: repliedAt,
+  });
+  if (privateFeedback.applied || privateFeedback.reason === 'already_feedback_received') {
+    const acknowledgement = await sendReviewPrivateFeedbackAcknowledgement({
+      list,
+      item,
+      conversation,
+      inboundMessage,
+      triggerMessage,
+      occurredAt: repliedAt,
+    });
+    await refreshListCounters(listId);
+    return {
+      applied: true,
+      list_id: listId,
+      item_id: itemId,
+      review_private_feedback: true,
+      acknowledgement,
+    };
+  }
+  const reviewRating = isReviewRequestList(list) && isReviewRatingTriggerMessage(triggerMessage)
+    ? extractReviewRatingFromInboundMessage(inboundMessage)
+    : null;
+  const existingRating = reviewRating
+    ? await findExistingReviewRatingEvent(listId, itemId, {
+      sameTriggerOnly: Number(triggerMessage?.id || 0) > 0,
+      triggerMessageId: triggerMessage.id,
+    })
+    : null;
+  const alreadyReplied = existingReply || (item.replied_at && String(item.dispatch_status || '').toLowerCase() === 'replied');
+  if (alreadyReplied) {
+    if (!item.replied_at || String(item.dispatch_status || '').toLowerCase() !== 'replied') {
+      await item.update({
+        dispatch_status: 'replied',
+        replied_at: item.replied_at || repliedAt,
+        conversation_id: conversation.id,
+      });
+    }
+    if (reviewRating && existingRating) {
+      const previousPayload = existingRating.payload || {};
+      const previousRating = Number(previousPayload.rating || 0);
+      if (previousRating && previousRating !== reviewRating) {
+        await existingRating.update({
+          payload: {
+            ...previousPayload,
+            rating: reviewRating,
+            previous_rating: previousPayload.previous_rating || previousRating,
+            updated_by_inbound_message_id: inboundMessage.id,
+            updated_trigger_message_id: triggerMessage.id,
+            updated_content_preview: normalizeText(inboundMessage.content).slice(0, 300),
+            updated_at: repliedAt,
+          },
+        });
+        await MarketingPatientContactEvent.create({
+          list_id: listId,
+          item_id: itemId,
+          paciente_id: item.paciente_id || null,
+          event_type: 'review_rating_updated',
+          channel: 'whatsapp',
+          payload: {
+            previous_rating: previousRating,
+            rating: reviewRating,
+            inbound_message_id: inboundMessage.id,
+            trigger_message_id: triggerMessage.id,
+            content_preview: normalizeText(inboundMessage.content).slice(0, 300),
+          },
+          occurred_at: repliedAt,
+        });
+        await sendReviewRatingFollowUp({
+          list,
+          item,
+          conversation,
+          rating: reviewRating,
+          clinicId: item.clinica_id || list.clinica_id || conversation.clinic_id || null,
+          triggerMessage,
+          occurredAt: repliedAt,
+        });
+        await refreshListCounters(listId);
+        return {
+          applied: true,
+          list_id: listId,
+          item_id: itemId,
+          review_rating: reviewRating,
+          previous_rating: previousRating,
+          rating_updated: true,
+        };
+      }
+    }
+    if (reviewRating && !existingRating) {
+      await MarketingPatientContactEvent.create({
+        list_id: listId,
+        item_id: itemId,
+        paciente_id: item.paciente_id || null,
+        event_type: 'review_rating_received',
+        channel: 'whatsapp',
+        payload: {
+          rating: reviewRating,
+          inbound_message_id: inboundMessage.id,
+          trigger_message_id: triggerMessage.id,
+          content_preview: normalizeText(inboundMessage.content).slice(0, 300),
+        },
+        occurred_at: repliedAt,
+      });
+      await sendReviewRatingFollowUp({
+        list,
+        item,
+        conversation,
+        rating: reviewRating,
+        clinicId: item.clinica_id || list.clinica_id || conversation.clinic_id || null,
+        triggerMessage,
+        occurredAt: repliedAt,
+      });
+      await refreshListCounters(listId);
+      return { applied: true, list_id: listId, item_id: itemId, review_rating: reviewRating };
+    }
     return { applied: false, reason: 'already_replied', list_id: listId, item_id: itemId };
   }
-  const repliedAt = inboundMessage.sent_at || inboundMessage.createdAt || new Date();
   await item.update({
     dispatch_status: 'replied',
     replied_at: item.replied_at || repliedAt,
     conversation_id: conversation.id,
   });
-  await MarketingPatientContactEvent.create({
-    list_id: listId,
-    item_id: itemId,
-    paciente_id: item.paciente_id || null,
-    event_type: 'mass_campaign_message_replied',
-    channel: 'whatsapp',
-    payload: {
-      inbound_message_id: inboundMessage.id,
-      trigger_message_id: triggerMessage.id,
-      content_preview: normalizeText(inboundMessage.content).slice(0, 300),
-    },
-    occurred_at: repliedAt,
-  });
+  if (!existingReply) {
+    await MarketingPatientContactEvent.create({
+      list_id: listId,
+      item_id: itemId,
+      paciente_id: item.paciente_id || null,
+      event_type: 'mass_campaign_message_replied',
+      channel: 'whatsapp',
+      payload: {
+        inbound_message_id: inboundMessage.id,
+        trigger_message_id: triggerMessage.id,
+        content_preview: normalizeText(inboundMessage.content).slice(0, 300),
+      },
+      occurred_at: repliedAt,
+    });
+  }
+  if (reviewRating && !existingRating) {
+    await MarketingPatientContactEvent.create({
+      list_id: listId,
+      item_id: itemId,
+      paciente_id: item.paciente_id || null,
+      event_type: 'review_rating_received',
+      channel: 'whatsapp',
+      payload: {
+        rating: reviewRating,
+        inbound_message_id: inboundMessage.id,
+        trigger_message_id: triggerMessage.id,
+        content_preview: normalizeText(inboundMessage.content).slice(0, 300),
+      },
+      occurred_at: repliedAt,
+    });
+    await sendReviewRatingFollowUp({
+      list,
+      item,
+      conversation,
+      rating: reviewRating,
+      clinicId: item.clinica_id || list.clinica_id || conversation.clinic_id || null,
+      triggerMessage,
+      occurredAt: repliedAt,
+    });
+  }
   await refreshListCounters(listId);
-  return { applied: true, list_id: listId, item_id: itemId };
+  return { applied: true, list_id: listId, item_id: itemId, ...(reviewRating ? { review_rating: reviewRating } : {}) };
 }
 
 async function removeCampaign(scope, campaignId, userId = null) {
@@ -3832,6 +5970,10 @@ module.exports = {
   createCampaign,
   getCampaign,
   updateCampaign,
+  getReviewRequestSummary,
+  setReviewRequestAutomation,
+  createAndStartReviewRequestForAppointment,
+  sendReviewRequestReminder,
   listRecipients,
   updateRecipient,
   prepareCampaign,

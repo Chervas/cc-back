@@ -80,6 +80,51 @@ exports.listCampaigns = async (req, res) => {
   }
 };
 
+exports.getReviewRequestSummary = async (req, res) => {
+  try {
+    const scope = await resolveScope(req, { allowAll: false });
+    const result = await marketingBulkSendsService.getReviewRequestSummary(scope, {
+      review_source: req.query.review_source || req.query.reviewSource || null,
+      review_treatment_id: req.query.review_treatment_id || req.query.reviewTreatmentId || null,
+      review_treatment_ids: req.query.review_treatment_ids || req.query.reviewTreatmentIds || null,
+      review_treatment_moment: req.query.review_treatment_moment || req.query.reviewTreatmentMoment || null,
+    });
+    return res.json({
+      ...result,
+      scope: {
+        type: scope.scope,
+        clinicIds: scope.clinicIds || [],
+        groupId: scope.groupId || null,
+        original: scope.original || null,
+      },
+    });
+  } catch (error) {
+    return sendError(res, error, 'Error cargando resumen de solicitudes de reseñas');
+  }
+};
+
+exports.setReviewRequestAutomation = async (req, res) => {
+  try {
+    const scope = await resolveScopeFromRequest(req, { allowAll: false });
+    const result = await marketingBulkSendsService.setReviewRequestAutomation(
+      scope,
+      req.body || {},
+      req.userData?.userId || null
+    );
+    return res.json({
+      ...result,
+      scope: {
+        type: scope.scope,
+        clinicIds: scope.clinicIds || [],
+        groupId: scope.groupId || null,
+        original: scope.original || null,
+      },
+    });
+  } catch (error) {
+    return sendError(res, error, 'Error actualizando automatización de reseñas');
+  }
+};
+
 exports.createCampaign = async (req, res) => {
   try {
     const scope = await resolveScopeFromRequest(req, { allowAll: false });

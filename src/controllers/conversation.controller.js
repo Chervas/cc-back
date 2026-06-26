@@ -1096,6 +1096,99 @@ exports.postMessage = async (req, res) => {
   }
 };
 
+exports.sendScheduledMessageNow = async (req, res) => {
+  try {
+    const userId = req.userData?.userId;
+    const messageId = Number(req.params.messageId || req.params.message_id);
+    if (!Number.isFinite(messageId) || messageId <= 0) {
+      return res.status(400).json({ error: 'message_id_required' });
+    }
+
+    const msg = await Message.findByPk(messageId);
+    if (!msg) {
+      return res.status(404).json({ error: 'message_not_found' });
+    }
+    const conversation = await Conversation.findByPk(msg.conversation_id);
+    if (!conversation) {
+      return res.status(404).json({ error: 'conversation_not_found' });
+    }
+
+    const { clinicIds, isAggregateAllowed } = await getUserClinics(userId);
+    if (!ensureAccess({ clinicIds, isAggregateAllowed }, conversation.clinic_id)) {
+      return res.status(403).json({ error: 'Acceso denegado a la clínica' });
+    }
+    if (conversation.channel !== 'whatsapp' || msg.direction !== 'outbound') {
+      return res.status(400).json({ error: 'not_whatsapp_outbound_message' });
+    }
+
+    const metadata = msg.metadata || {};
+    const wasQueuedByQuietHours = metadata.queued_by_quiet_hours === true || metadata.queued_by_quiet_hours === 'true';
+    if (!wasQueuedByQuietHours) {
+      return res.status(400).json({ error: 'message_not_scheduled_by_quiet_hours' });
+    }
+
+    const status = String(msg.status || '').toLowerCase();
+    if (['sent', 'delivered', 'read'].includes(status)) {
+      return res.json({ success: true, already_sent: true, message: msg });
+    }
+
+    const clinicConfig = await whatsappService.getClinicConfig(conversation.clinic_id);
+    if (!clinicConfig?.accessToken || !clinicConfig?.phoneNumberId) {
+      return res.status(500).json({ error: 'whatsapp_config_missing' });
+    }
+
+    const to = whatsappService.normalizePhoneNumber(metadata.recipient)
+      || whatsappService.normalizePhoneNumber(conversation.contact_id)
+      || null;
+    if (!to) {
+      return res.status(400).json({ error: 'contacto_sin_numero' });
+    }
+
+    const useTemplate = String(msg.message_type || '').toLowerCase() === 'template';
+    const nextMetadata = {
+      ...metadata,
+      forced_send_at: new Date().toISOString(),
+      forced_send_by: userId || null,
+      scheduled_for_original: metadata.scheduled_for || null,
+      scheduled_for: null,
+      quiet_hours_forced_send: true,
+    };
+    msg.metadata = nextMetadata;
+    await msg.save();
+
+    await queues.outboundWhatsApp.add('send', {
+      messageId: msg.id,
+      conversationId: conversation.id,
+      to,
+      body: msg.content,
+      useTemplate,
+      templateName: metadata.template_name || metadata.templateName || null,
+      templateLanguage: metadata.template_language || metadata.templateLanguage || 'es_ES',
+      templateParams: metadata.template_params || metadata.templateParams || null,
+      templateComponents: metadata.template_components || metadata.templateComponents || null,
+      clinicConfig,
+    });
+
+    const io = getIO();
+    if (io) {
+      const payload = {
+        id: msg.id,
+        conversation_id: conversation.id,
+        status: msg.status,
+        metadata: nextMetadata,
+      };
+      const room = conversation.clinic_id ? `clinic:${conversation.clinic_id}` : null;
+      if (room) io.to(room).emit('message:updated', payload);
+      else io.emit('message:updated', payload);
+    }
+
+    return res.json({ success: true, message: msg });
+  } catch (err) {
+    console.error('Error sendScheduledMessageNow', err);
+    return res.status(500).json({ error: 'send_now_failed', message: err.message });
+  }
+};
+
 exports.createInternalMessage = async (req, res) => {
   const transaction = await db.sequelize.transaction();
   try {
