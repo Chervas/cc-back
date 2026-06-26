@@ -67,6 +67,7 @@ const DISPATCH_TIMEZONE = process.env.MARKETING_BULK_SEND_TIMEZONE || 'Europe/Ma
 const DISPATCH_BUSINESS_START_HOUR = 7;
 const DISPATCH_BUSINESS_END_HOUR = 22;
 const LINK_TRACKING_DEFAULT_DOMAIN = process.env.MARKETING_LINK_TRACKING_DEFAULT_DOMAIN || 'envios.clinicaclick.com';
+const WHATSAPP_SESSION_WINDOW_MS = 23 * 60 * 60 * 1000 + 50 * 60 * 1000;
 const testSendCooldowns = new Map();
 
 function sleep(ms) {
@@ -146,6 +147,14 @@ function asPlainObject(value) {
     }
   }
   return typeof value === 'object' ? value : {};
+}
+
+function isWithinWhatsappSessionWindow(value, now = new Date()) {
+  const date = value instanceof Date ? value : new Date(value || 0);
+  const current = now instanceof Date ? now : new Date(now || Date.now());
+  if (Number.isNaN(date.getTime()) || Number.isNaN(current.getTime())) return false;
+  const ageMs = current.getTime() - date.getTime();
+  return ageMs >= 0 && ageMs <= WHATSAPP_SESSION_WINDOW_MS;
 }
 
 function normalizeTrackingSubdomain(value) {
@@ -1669,6 +1678,24 @@ async function sendReviewPrivateFeedbackAcknowledgement({ list, item, conversati
 
   const clinicId = Number(item.clinica_id || list.clinica_id || conversation?.clinic_id || 0) || null;
   const body = buildReviewPrivateFeedbackAckText(item);
+  if (!isWithinWhatsappSessionWindow(occurredAt)) {
+    await MarketingPatientContactEvent.create({
+      list_id: list.id,
+      item_id: item.id,
+      paciente_id: item.paciente_id || null,
+      event_type: 'review_private_feedback_ack_skipped',
+      channel: 'whatsapp',
+      payload: {
+        status: 'skipped',
+        reason: 'whatsapp_session_window_expired',
+        inbound_message_id: inboundMessage.id,
+        trigger_message_id: triggerMessage?.id || null,
+        recipient,
+      },
+      occurred_at: new Date(),
+    });
+    return { sent: false, status: 'skipped', reason: 'whatsapp_session_window_expired' };
+  }
   let appMessage = null;
   let providerMessageId = null;
   let status = 'sent';
@@ -1835,6 +1862,28 @@ async function sendReviewRatingFollowUp({ list, item, conversation, rating, clin
         : `¡Muchísimas gracias por tu valoración! 😊 *Nos ayudaría muchísimo que también la dejaras en Google* para que otras personas puedan verla.\n\nNo se tarda nada, pincha en el enlace de aquí abajo 👇\n${googleReviewUrl}`)
       : 'Gracias por tu valoración. Hemos registrado tu opinión.')
     : 'Gracias por responder. ¿Nos ayudarías contándonos el motivo de esta valoración? Puedes escribirlo aquí mismo y lo revisaremos con el equipo.';
+  if (!isWithinWhatsappSessionWindow(occurredAt)) {
+    await MarketingPatientContactEvent.create({
+      list_id: list.id,
+      item_id: item.id,
+      paciente_id: item.paciente_id || null,
+      event_type: 'review_rating_followup_skipped',
+      channel: 'whatsapp',
+      payload: {
+        status: 'skipped',
+        reason: 'whatsapp_session_window_expired',
+        kind: followUpKind,
+        rating,
+        threshold,
+        trigger_message_id: triggerMessage?.id || null,
+        recipient: followUpRecipient,
+        test_send: isTestSend,
+        google_review_url_available: isPositive && !!googleReviewUrl,
+      },
+      occurred_at: new Date(),
+    });
+    return { sent: false, status: 'skipped', kind: followUpKind, reason: 'whatsapp_session_window_expired' };
+  }
   let appMessage = null;
   let providerMessageId = null;
   let status = 'sent';
