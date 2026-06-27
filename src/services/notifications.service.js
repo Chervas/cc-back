@@ -111,6 +111,16 @@ function buildNotificationContent(event, payload = {}) {
         level: defaults.level || 'error'
       };
     }
+    case 'whatsapp.coexistence_reconnected': {
+      const clinic = payload.clinicName || 'tu clínica';
+      const phone = payload.phoneNumber || payload.phoneNumberId || 'el número conectado';
+      return {
+        title: `WhatsApp reconectado en ${clinic}`,
+        message: `ClinicaClick vuelve a tener acceso al WhatsApp compartido ${phone}. Ya no se mostrará la alerta de reconexión para este número.`,
+        icon: 'heroicons_outline:check-circle',
+        level: defaults.level || 'info'
+      };
+    }
     default:
       return {
         title: defaults.label || 'Notificación',
