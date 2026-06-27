@@ -602,6 +602,9 @@ router.post('/embedded-signup/callback', authMiddleware, async (req, res) => {
         isActive: true,
       }
     );
+    const hadCoexistenceDisconnect =
+      phoneAsset.additionalData?.coexistence?.status === 'disconnected'
+      || phoneAsset.additionalData?.coexistence?.requiresReconnect === true;
 
     const businessId = resolvedBusinessId || null;
     const connectedNowIso = new Date().toISOString();
@@ -673,24 +676,26 @@ router.post('/embedded-signup/callback', authMiddleware, async (req, res) => {
         skipRegisterReason: 'whatsapp_business_app_coexistence',
       };
       await updateRegistrationOnAsset(phoneAsset, coexistenceRegistration);
-      await markCoexistenceNotificationsRead({
+      const notificationCleanup = await markCoexistenceNotificationsRead({
         phoneNumberId: phone_number_id,
         wabaId: waba_id,
       });
-      await notificationService.dispatchEvent({
-        event: 'whatsapp.coexistence_reconnected',
-        clinicId: targetClinicId || null,
-        data: {
+      if (hadCoexistenceDisconnect || notificationCleanup.count > 0) {
+        await notificationService.dispatchEvent({
+          event: 'whatsapp.coexistence_reconnected',
           clinicId: targetClinicId || null,
-          clinicName: null,
-          phoneNumberId: phone_number_id,
-          wabaId: waba_id,
-          phoneNumber: displayPhoneNumber,
-          source: 'embedded_signup_reconnect',
-          link: `/ajustes?tab=whatsapp&phoneNumberId=${encodeURIComponent(phone_number_id)}&wabaId=${encodeURIComponent(waba_id)}`,
-          useRouter: true,
-        },
-      });
+          data: {
+            clinicId: targetClinicId || null,
+            clinicName: null,
+            phoneNumberId: phone_number_id,
+            wabaId: waba_id,
+            phoneNumber: displayPhoneNumber,
+            source: 'embedded_signup_reconnect',
+            link: `/ajustes?tab=whatsapp&phoneNumberId=${encodeURIComponent(phone_number_id)}&wabaId=${encodeURIComponent(waba_id)}`,
+            useRouter: true,
+          },
+        });
+      }
       registrationResult = { success: true, registration: coexistenceRegistration, status: null };
     } else {
       try {
