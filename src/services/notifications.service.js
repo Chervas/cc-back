@@ -104,9 +104,13 @@ function buildNotificationContent(event, payload = {}) {
     case 'whatsapp.coexistence_disconnected': {
       const clinic = payload.clinicName || 'tu clínica';
       const phone = payload.phoneNumber || payload.phoneNumberId || 'el número conectado';
+      const reason = String(payload.disconnectReason || payload.reason || '').toUpperCase();
+      const instruction = reason === 'PRIMARY_INACTIVITY'
+        ? 'Meta indica que el móvil principal de WhatsApp Business ha quedado inactivo. Pulsa Reconectar WhatsApp y, después, abre WhatsApp Business en el móvil vinculado, envía un mensaje desde ese móvil y recibe una respuesta para reactivar la sesión.'
+        : 'Hemos detectado un error compatible con la app de ClinicaClick desinstalada o sin permisos sobre el WABA. Pulsa Reconectar WhatsApp para abrir el flujo de conexión de Meta de nuevo. Si usas WhatsApp compartido, después conecta WhatsApp Business en el móvil, escribe un mensaje desde ese móvil y recibe una respuesta para reactivar la sesión antes de cerrar esta alerta.';
       return {
         title: `WhatsApp desconectado en ${clinic}`,
-        message: `El WhatsApp compartido ${phone} ha perdido acceso en Meta. Hemos detectado un error compatible con la app de ClinicaClick desinstalada o sin permisos sobre el WABA. Pulsa Reconectar WhatsApp para abrir el flujo de conexión de Meta de nuevo. Si usas WhatsApp compartido, después conecta WhatsApp Business en el móvil, escribe un mensaje desde ese móvil y recibe una respuesta para reactivar la sesión antes de cerrar esta alerta.`,
+        message: `El WhatsApp compartido ${phone} ha perdido acceso en Meta. ${instruction}`,
         icon: 'heroicons_outline:exclamation-triangle',
         level: defaults.level || 'error'
       };

@@ -1202,6 +1202,24 @@ async function handleWhatsappAccountUpdate({ entry, changes, value, clinicId }) 
         patch.last_coexistence_error = null;
     }
 
+    if (normalized.status === 'active') {
+        try {
+            await whatsappConnectionStatusService.clearDisconnectedAfterSuccess({
+                clinicId,
+                phoneId,
+                wabaId,
+                source: 'whatsapp_account_update',
+            });
+        } catch (cleanupError) {
+            console.warn('[whatsapp coexistence] No se pudo limpiar alertas tras account_update activo', {
+                clinicId,
+                phoneId,
+                wabaId,
+                error: serializeError(cleanupError),
+            });
+        }
+    }
+
     await updateWhatsappAssetCoexistenceMetadata({
         phoneId,
         wabaId,
@@ -1211,6 +1229,45 @@ async function handleWhatsappAccountUpdate({ entry, changes, value, clinicId }) 
     });
 
     if (normalized.status === 'disconnected') {
+        try {
+            const clinic = clinicId && Clinica
+                ? await Clinica.findByPk(clinicId, {
+                    attributes: ['id_clinica', 'nombre_clinica'],
+                    raw: true,
+                })
+                : null;
+            const params = new URLSearchParams();
+            params.set('tab', 'whatsapp');
+            params.set('action', 'reconnect_whatsapp');
+            if (phoneId) params.set('phoneNumberId', String(phoneId));
+            if (wabaId) params.set('wabaId', String(wabaId));
+
+            await notificationService.dispatchEvent({
+                event: 'whatsapp.coexistence_disconnected',
+                clinicId: clinicId || null,
+                data: {
+                    clinicId: clinicId || null,
+                    clinicName: clinic?.nombre_clinica || null,
+                    phoneNumberId: phoneId || null,
+                    wabaId: wabaId || null,
+                    phoneNumber: phoneNumber || null,
+                    disconnectReason: disconnectionInfo?.reason || null,
+                    disconnectInitiatedBy: disconnectionInfo?.initiated_by || null,
+                    source: 'whatsapp_account_update',
+                    link: `/ajustes?${params.toString()}`,
+                    useRouter: true,
+                    actionLabel: 'Reconectar WhatsApp',
+                    actionIcon: 'heroicons_outline:arrow-path',
+                },
+            });
+        } catch (notificationError) {
+            console.warn('[whatsapp coexistence] No se pudo crear notificación de account_update', {
+                clinicId,
+                phoneId,
+                wabaId,
+                error: serializeError(notificationError),
+            });
+        }
         console.warn('[whatsapp coexistence] Cuenta desconectada por Meta', {
             clinicId,
             phoneId,

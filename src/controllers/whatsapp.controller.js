@@ -164,8 +164,9 @@ function parseWaError(err) {
   const base = err?.response?.data || err?.message || err;
   const nestedError = base?.error?.error || base?.error || base;
   const code = nestedError?.code || null;
+  const subcode = nestedError?.error_subcode || nestedError?.subcode || null;
   const message = nestedError?.message || String(base?.message || base || '');
-  return { code, message, raw: base };
+  return { code, subcode, message, raw: base };
 }
 
 function validateCatalogTemplateBodyForMeta(bodyText) {
@@ -610,6 +611,26 @@ async function fetchPhoneStatus({ phoneNumberId, accessToken }) {
       }
     );
     return resp.data;
+  } catch (err) {
+    return null;
+  }
+}
+
+async function fetchDisplayNameStatus({ phoneNumberId, accessToken }) {
+  if (!phoneNumberId || !accessToken) {
+    return null;
+  }
+  try {
+    const resp = await axios.get(
+      `https://graph.facebook.com/${META_API_VERSION}/${phoneNumberId}`,
+      {
+        headers: { Authorization: `Bearer ${accessToken}` },
+        params: {
+          fields: 'id,verified_name,name_status,new_display_name,new_name_status',
+        },
+      }
+    );
+    return resp.data || null;
   } catch (err) {
     return null;
   }
@@ -1471,6 +1492,9 @@ exports.listPhones = async (req, res) => {
         name_status: additionalData.nameStatus || null,
         name_status_reason: additionalData.nameStatusReason || null,
         requested_display_name: additionalData.requestedDisplayName || null,
+        new_display_name: additionalData.newDisplayName || null,
+        new_name_status: additionalData.newNameStatus || null,
+        display_name_requested_at: additionalData.requestedDisplayNameAt || null,
         profile_picture_url: additionalData.profilePictureUrl || null,
         profile_description: additionalData.profileDescription || null,
         profile_category: additionalData.profileCategory || null,
@@ -2283,34 +2307,76 @@ exports.updatePhoneDisplayName = async (req, res) => {
     }
 
     const trimmedName = String(displayName).trim();
-    const additionalData = phone.additionalData || {};
+    if (trimmedName.length < 2 || trimmedName.length > 64) {
+      return res.status(400).json({
+        success: false,
+        error: 'display_name_invalid_length',
+        message: 'El nombre visible debe tener entre 2 y 64 caracteres.',
+      });
+    }
 
-    // Intentar actualizar el nombre en Meta
+    const additionalData = phone.additionalData && typeof phone.additionalData === 'object'
+      ? { ...phone.additionalData }
+      : {};
+
+    // Meta acepta solicitudes de cambio mediante `new_display_name`.
+    // `verified_name` es de lectura y hacía que la UI simulara éxito local.
     try {
       await axios.post(
         `https://graph.facebook.com/${META_API_VERSION}/${phoneNumberId}`,
-        { verified_name: trimmedName },
-        { headers: { Authorization: `Bearer ${phone.waAccessToken}` } }
-      );
-      // Obtener estado actualizado
-      const statusResp = await axios.get(
-        `https://graph.facebook.com/${META_API_VERSION}/${phoneNumberId}`,
+        null,
         {
           headers: { Authorization: `Bearer ${phone.waAccessToken}` },
-          params: { fields: 'id,name_status' },
+          params: { new_display_name: trimmedName },
         }
       );
-      additionalData.nameStatus = statusResp.data?.name_status || additionalData.nameStatus || null;
-      additionalData.nameStatusReason = null;
     } catch (err) {
       const parsed = parseWaError(err);
-      // Guardamos el motivo por si Meta rechaza inmediatamente
+      additionalData.requestedDisplayName = trimmedName;
+      additionalData.requestedDisplayNameAt = new Date().toISOString();
       additionalData.nameStatusReason = parsed.message || null;
+      additionalData.displayNameRequestError = {
+        code: parsed.code || null,
+        subcode: parsed.subcode || null,
+        message: parsed.message || 'display_name_update_failed',
+        at: new Date().toISOString(),
+      };
+      phone.additionalData = { ...additionalData };
+      phone.changed('additionalData', true);
+      await phone.save();
+
+      return res.status(502).json({
+        success: false,
+        error: 'display_name_meta_rejected',
+        message: parsed.message || 'Meta no ha aceptado la solicitud de cambio de nombre.',
+        code: parsed.code || null,
+        subcode: parsed.subcode || null,
+        managerUrl: 'https://business.facebook.com/wa/manage/phone-numbers/',
+      });
     }
 
+    const status = await fetchDisplayNameStatus({
+      phoneNumberId,
+      accessToken: phone.waAccessToken,
+    });
+    if (status?.verified_name) {
+      phone.waVerifiedName = status.verified_name;
+    }
+    if (status?.name_status) {
+      additionalData.nameStatus = status.name_status;
+    }
+    if (status?.new_display_name !== undefined) {
+      additionalData.newDisplayName = status.new_display_name || null;
+    }
+    if (status?.new_name_status !== undefined) {
+      additionalData.newNameStatus = status.new_name_status || null;
+    }
+    additionalData.nameStatusReason = null;
+    additionalData.displayNameRequestError = null;
     additionalData.requestedDisplayName = trimmedName;
     additionalData.requestedDisplayNameAt = new Date().toISOString();
-    phone.additionalData = additionalData;
+    phone.additionalData = { ...additionalData };
+    phone.changed('additionalData', true);
     await phone.save();
 
     return res.json({
@@ -2318,6 +2384,8 @@ exports.updatePhoneDisplayName = async (req, res) => {
       phoneNumberId,
       requestedDisplayName: additionalData.requestedDisplayName,
       nameStatus: additionalData.nameStatus || null,
+      newDisplayName: additionalData.newDisplayName || null,
+      newNameStatus: additionalData.newNameStatus || null,
       manualRequired: false,
       managerUrl: 'https://business.facebook.com/wa/manage/phone-numbers/',
     });

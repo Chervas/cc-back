@@ -67,7 +67,7 @@ async function fetchRemotePhones({ wabaId, accessToken }) {
     headers: { Authorization: `Bearer ${accessToken}` },
     params: {
       fields:
-        'id,display_phone_number,verified_name,status,code_verification_status,quality_rating,messaging_limit_tier,name_status,platform_type,account_mode,is_on_biz_app',
+        'id,display_phone_number,verified_name,status,code_verification_status,quality_rating,messaging_limit_tier,name_status,new_display_name,new_name_status,platform_type,account_mode,is_on_biz_app',
     },
   });
   return resp.data?.data || [];
@@ -89,7 +89,7 @@ async function fetchNameStatus({ phoneNumberId, accessToken }) {
   const resp = await axios.get(`${getMetaBaseUrl()}/${phoneNumberId}`, {
     headers: { Authorization: `Bearer ${accessToken}` },
     params: {
-      fields: 'id,name_status',
+      fields: 'id,verified_name,name_status,new_display_name,new_name_status',
     },
   });
   return resp.data || null;
@@ -129,6 +129,12 @@ async function upsertRemoteState(asset, remote, profile) {
   additionalData.limitedMode = testNumber;
   if (remote?.name_status) {
     additionalData.nameStatus = remote.name_status;
+  }
+  if (remote?.new_display_name !== undefined) {
+    additionalData.newDisplayName = remote.new_display_name || null;
+  }
+  if (remote?.new_name_status !== undefined) {
+    additionalData.newNameStatus = remote.new_name_status || null;
   }
   if (remote?.platform_type) {
     additionalData.platformType = remote.platform_type;
@@ -320,6 +326,8 @@ async function syncPhonesForWaba({ wabaId, accessToken }) {
       if (statusInfo) {
         nameStatusMap.set(remote.id, {
           nameStatus: statusInfo.name_status || null,
+          newDisplayName: statusInfo.new_display_name || null,
+          newNameStatus: statusInfo.new_name_status || null,
           nameStatusReason: null,
         });
       }
@@ -359,6 +367,8 @@ async function syncPhonesForWaba({ wabaId, accessToken }) {
     if (statusExtra) {
       const additionalData = { ...(asset.additionalData || {}) };
       additionalData.nameStatus = statusExtra.nameStatus;
+      additionalData.newDisplayName = statusExtra.newDisplayName;
+      additionalData.newNameStatus = statusExtra.newNameStatus;
       additionalData.nameStatusReason = statusExtra.nameStatusReason;
       asset.additionalData = { ...additionalData };
     }
