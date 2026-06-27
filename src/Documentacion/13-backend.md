@@ -2387,6 +2387,22 @@ Caso real `2026-04-20`:
 - al no existir tolerancia en la ruta de ejecución, `computeScheduledRunAt(...)` devolvió `null` y los jobs terminaron como `completed` con `reason = invalid_schedule`, sin crear `FlowExecutionV2`;
 - corrección aplicada: la tolerancia de ejecución solo permite disparar jobs previamente programados que vencen con pequeño retraso del worker. La programación inicial sigue sin crear envíos retroactivos si la ventana ya pasó.
 
+Caso real `2026-06-26`:
+
+- los recordatorios del mismo día a las 08:00 de BS Capilar (`clinica_id = 66`) y BS Medical (`clinica_id = 72`) dispararon sus jobs, pero las ejecuciones fallaron antes de enviar WhatsApp con `whatsapp_template_params_missing:4`;
+- el parámetro 4 de `clinicaclick_recordatorio_mismo_dia_primera_visita` es `url_como_llegar_clinica` (`{{clinica.url_como_llegar}}`);
+- las clínicas sí tenían Perfil de Empresa Google conectado y `googleLocalLinks.service` resolvía `url_como_llegar`; el fallo operativo fue que el worker que ejecutó el cron seguía con runtime anterior al cambio de variable/enriquecimiento;
+- al mover una clínica a grupo o reasignarle un WABA compartido, verificar siempre tres capas juntas: `ClinicMetaAssets` efectivo, plantilla WABA compatible aprobada y resolución de variables con datos reales de cita/clinica/paciente;
+- después de cambiar variables de plantillas usadas por `appointment_reminder_window`, reiniciar el backend que consume `JobRequests` y hacer un preflight sobre jobs futuros (`appointment_automation_schedule_fire`) antes de esperar al cron real;
+- validación posterior: con runtime reiniciado, BS Capilar y BS Medical seleccionan la plantilla aprobada del WABA de grupo `825171709863569` y resuelven los 4 parámetros; los jobs futuros del mismo día no muestran variables faltantes.
+
+Caso real `2026-06-27`:
+
+- una cita QA de BS Capilar (`CitasPacientes.id_cita = 431`, `clinica_id = 66`) validó que el scheduler ya no falla por variables: `JobRequests.id = 1682` se ejecutó a las 08:00 Europe/Madrid y creó `FlowExecutionsV2.id = 691`;
+- la ejecución falló en el nodo `action/send_whatsapp`, no en la programación ni en la plantilla, con `whatsapp_send_failed: GraphMethodException code=100 error_subcode=33` sobre `phoneNumberId = 1128272900359750`;
+- `ClinicMetaAssets.id = 363` quedó con `additionalData.coexistence.status = disconnected`, `canSendApi = false`, `requiresReconnect = true` y `disconnectReason = meta_object_access_lost`;
+- conclusión operativa: un `appointment_automation_schedule_fire` completado solo demuestra que el trigger temporal salió; para dar el WhatsApp por válido hay que comprobar `FlowExecutionsV2.status`, `FlowExecutionLogsV2` y `Messages.status` final. Si Meta devuelve `100/33`, reconectar WhatsApp desde Ajustes antes de esperar a nuevos recordatorios.
+
 ### Barrido de salud de automatizaciones
 
 Desde `2026-04-20` existe el cron `automationHealthCheck` en `src/jobs/sync.jobs.js`.
