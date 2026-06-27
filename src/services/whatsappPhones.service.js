@@ -4,6 +4,7 @@ const axios = require('axios');
 const db = require('../../models');
 const { queues } = require('./queue.service');
 const whatsappTemplatesService = require('./whatsappTemplates.service');
+const whatsappConnectionStatusService = require('./whatsappConnectionStatus.service');
 
 const { ClinicMetaAsset, Clinica, WhatsappTemplate, Sequelize } = db;
 const { Op } = Sequelize;
@@ -417,6 +418,13 @@ async function syncPhonesForWaba({ wabaId, accessToken }) {
     }
     const profileInfo = profileMap.get(remote.id) || null;
     await upsertRemoteState(asset, remote, profileInfo);
+    if (String(remote?.status || '').toUpperCase() === 'CONNECTED') {
+      await whatsappConnectionStatusService.clearDisconnectedAfterSuccess({
+        phoneId: asset.phoneNumberId || remote.id,
+        wabaId: asset.wabaId || wabaId,
+        source: 'whatsapp_phone_sync_connected',
+      });
+    }
     await maybeEnsureTemplatesForOperationalPhone(asset, remote);
   }
 

@@ -13,6 +13,7 @@ const { emitNotificationUpdated } = require('../services/notificationsRealtime.s
 const router = express.Router();
 const ClinicMetaAsset = db.ClinicMetaAsset;
 const Notification = db.Notification;
+const { Op } = db.Sequelize;
 const META_API_VERSION = process.env.META_API_VERSION || 'v24.0';
 
 function cleanString(value) {
@@ -558,10 +559,11 @@ router.post('/embedded-signup/callback', authMiddleware, async (req, res) => {
         phoneDetailsRaw: phoneDetails
     });
 
-    const upsertAsset = async (where, values) => {
-      const existing = await ClinicMetaAsset.findOne({ where });
+    const upsertAsset = async (where, values, options = {}) => {
+      const lookupWhere = options.lookupWhere || where;
+      const existing = await ClinicMetaAsset.findOne({ where: lookupWhere });
       if (existing) {
-        await existing.update(values);
+        await existing.update({ ...where, ...values });
         return existing;
       }
       return ClinicMetaAsset.create({ ...where, ...values });
@@ -602,11 +604,36 @@ router.post('/embedded-signup/callback', authMiddleware, async (req, res) => {
         waAccessToken: accessToken,
         assignmentScope,
         isActive: true,
+      },
+      {
+        // En reconexiones puede cambiar la MetaConnection. El numero fisico debe
+        // seguir siendo un unico origen operativo; si buscamos por connection_id
+        // dejamos filas antiguas activas que siguen mostrando alerta en QuickChat.
+        lookupWhere: {
+          assetType: 'whatsapp_phone_number',
+          phoneNumberId: phone_number_id,
+        },
+      }
+    );
+    const [duplicatePhoneCleanupCount] = await ClinicMetaAsset.update(
+      {
+        isActive: false,
+        assignmentScope: 'unassigned',
+        clinicaId: null,
+        grupoClinicaId: null,
+      },
+      {
+        where: {
+          assetType: 'whatsapp_phone_number',
+          phoneNumberId: phone_number_id,
+          id: { [Op.ne]: phoneAsset.id },
+        },
       }
     );
     const hadCoexistenceDisconnect =
       phoneAsset.additionalData?.coexistence?.status === 'disconnected'
       || phoneAsset.additionalData?.coexistence?.requiresReconnect === true;
+    let coexistenceNotificationCleanup = { count: 0 };
 
     const businessId = resolvedBusinessId || null;
     const connectedNowIso = new Date().toISOString();
@@ -685,11 +712,11 @@ router.post('/embedded-signup/callback', authMiddleware, async (req, res) => {
         skipRegisterReason: 'whatsapp_business_app_coexistence',
       };
       await updateRegistrationOnAsset(phoneAsset, coexistenceRegistration);
-      const notificationCleanup = await markCoexistenceNotificationsRead({
+      coexistenceNotificationCleanup = await markCoexistenceNotificationsRead({
         phoneNumberId: phone_number_id,
         wabaId: waba_id,
       });
-      if (hadCoexistenceDisconnect || notificationCleanup.count > 0) {
+      if (hadCoexistenceDisconnect || coexistenceNotificationCleanup.count > 0 || duplicatePhoneCleanupCount > 0) {
         await notificationService.dispatchEvent({
           event: 'whatsapp.coexistence_reconnected',
           clinicId: targetClinicId || null,
@@ -754,6 +781,12 @@ router.post('/embedded-signup/callback', authMiddleware, async (req, res) => {
       waVerifiedName: verifiedName,
       connectionMode,
       coexistenceReconnected: connectionMode === 'coexistence',
+      reconnectCleanup: connectionMode === 'coexistence'
+        ? {
+            notifications_read: coexistenceNotificationCleanup.count,
+            duplicated_phone_assets_disabled: duplicatePhoneCleanupCount,
+          }
+        : null,
       registration: registrationResult?.registration || null,
       subscribed: subscriptionResult?.success || false,
     });
