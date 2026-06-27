@@ -7,9 +7,11 @@ const authMiddleware = require('./auth.middleware');
 const whatsappService = require('../services/whatsapp.service');
 const jobRequestsService = require('../services/jobRequests.service');
 const jobScheduler = require('../services/jobScheduler.service');
+const { emitNotificationUpdated } = require('../services/notificationsRealtime.service');
 
 const router = express.Router();
 const ClinicMetaAsset = db.ClinicMetaAsset;
+const Notification = db.Notification;
 const META_API_VERSION = process.env.META_API_VERSION || 'v24.0';
 
 function cleanString(value) {
@@ -91,6 +93,95 @@ async function updateRegistrationOnAsset(asset, registration) {
   };
   asset.additionalData = additionalData;
   await asset.save();
+}
+
+function markCoexistenceActive(additionalData, nowIso) {
+  const current = additionalData && typeof additionalData === 'object'
+    ? { ...additionalData }
+    : {};
+  const previousCoexistence = current.coexistence && typeof current.coexistence === 'object'
+    ? { ...current.coexistence }
+    : {};
+  const previousDisconnectReason = previousCoexistence.disconnectReason
+    || previousCoexistence.previous_disconnect_reason
+    || null;
+  const previousDisconnectAt = previousCoexistence.last_error_at
+    || previousCoexistence.previous_disconnect_at
+    || null;
+
+  const coexistence = {
+    ...previousCoexistence,
+    enabled: true,
+    status: 'active',
+    canSendApi: true,
+    requiresReconnect: false,
+    connectedAt: previousCoexistence.connectedAt || nowIso,
+    reconnectedAt: nowIso,
+    last_success_at: nowIso,
+    last_success_source: 'embedded_signup_reconnect',
+    previous_disconnect_reason: previousDisconnectReason,
+    previous_disconnect_at: previousDisconnectAt,
+  };
+
+  delete coexistence.disconnectReason;
+  delete coexistence.last_error_code;
+  delete coexistence.last_error_subcode;
+  delete coexistence.last_error_message;
+  delete coexistence.last_error_at;
+  delete coexistence.last_message_id;
+  delete coexistence.last_recipient;
+  delete coexistence.last_source;
+
+  return {
+    ...current,
+    whatsappConnectionMode: 'coexistence',
+    connectionMode: 'coexistence',
+    coexistence,
+  };
+}
+
+async function markCoexistenceNotificationsRead({ phoneNumberId, wabaId } = {}) {
+  if (!Notification || (!phoneNumberId && !wabaId)) {
+    return { count: 0 };
+  }
+
+  const notifications = await Notification.findAll({
+    where: {
+      event: 'whatsapp.coexistence_disconnected',
+      isRead: false,
+    },
+    order: [['createdAt', 'DESC']],
+    limit: 250,
+  });
+
+  const phoneKey = cleanString(phoneNumberId);
+  const wabaKey = cleanString(wabaId);
+  const matched = notifications.filter((notification) => {
+    const data = notification.data && typeof notification.data === 'object'
+      ? notification.data
+      : {};
+    const link = cleanString(data.link);
+    return (phoneKey && (
+      String(data.phoneNumberId || '') === phoneKey
+      || link?.includes(`phoneNumberId=${phoneKey}`)
+      || link?.includes(`phone_number_id=${phoneKey}`)
+    ))
+      || (wabaKey && (
+        String(data.wabaId || '') === wabaKey
+        || link?.includes(`wabaId=${wabaKey}`)
+        || link?.includes(`waba_id=${wabaKey}`)
+      ));
+  });
+
+  await Promise.all(matched.map(async (notification) => {
+    await notification.update({
+      isRead: true,
+      readAt: new Date(),
+    });
+    emitNotificationUpdated(notification);
+  }));
+
+  return { count: matched.length };
 }
 
 async function fetchPhoneStatus({ phoneNumberId, accessToken }) {
@@ -512,24 +603,23 @@ router.post('/embedded-signup/callback', authMiddleware, async (req, res) => {
     );
 
     const businessId = resolvedBusinessId || null;
+    const connectedNowIso = new Date().toISOString();
     if (businessId || nameStatus || codeVerificationStatus || platformType || accountMode || connectionMode || isOnBizApp !== null) {
       const applyMetaExtras = async (asset) => {
         const additionalData = { ...(asset.additionalData || {}) };
         additionalData.whatsappConnectionMode = connectionMode;
         additionalData.connectionMode = connectionMode;
-        additionalData.coexistence = {
-          ...(additionalData.coexistence || {}),
-          enabled: connectionMode === 'coexistence',
-          status: connectionMode === 'coexistence'
-            ? (additionalData.coexistence?.status || 'active')
-            : (additionalData.coexistence?.status || null),
-          canSendApi: connectionMode === 'coexistence'
-            ? additionalData.coexistence?.canSendApi !== false
-            : additionalData.coexistence?.canSendApi,
-          connectedAt: connectionMode === 'coexistence'
-            ? (additionalData.coexistence?.connectedAt || new Date().toISOString())
-            : additionalData.coexistence?.connectedAt,
-        };
+        if (connectionMode === 'coexistence') {
+          Object.assign(additionalData, markCoexistenceActive(additionalData, connectedNowIso));
+        } else {
+          additionalData.coexistence = {
+            ...(additionalData.coexistence || {}),
+            enabled: false,
+            status: additionalData.coexistence?.status || null,
+            canSendApi: additionalData.coexistence?.canSendApi,
+            connectedAt: additionalData.coexistence?.connectedAt,
+          };
+        }
         if (businessId) {
           additionalData.businessId = businessId;
         }
@@ -582,6 +672,10 @@ router.post('/embedded-signup/callback', authMiddleware, async (req, res) => {
         skipRegisterReason: 'whatsapp_business_app_coexistence',
       };
       await updateRegistrationOnAsset(phoneAsset, coexistenceRegistration);
+      await markCoexistenceNotificationsRead({
+        phoneNumberId: phone_number_id,
+        wabaId: waba_id,
+      });
       registrationResult = { success: true, registration: coexistenceRegistration, status: null };
     } else {
       try {
@@ -630,6 +724,7 @@ router.post('/embedded-signup/callback', authMiddleware, async (req, res) => {
       phoneNumberId: phone_number_id,
       waVerifiedName: verifiedName,
       connectionMode,
+      coexistenceReconnected: connectionMode === 'coexistence',
       registration: registrationResult?.registration || null,
       subscribed: subscriptionResult?.success || false,
     });
