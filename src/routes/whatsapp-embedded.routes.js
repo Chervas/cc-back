@@ -7,6 +7,7 @@ const authMiddleware = require('./auth.middleware');
 const whatsappService = require('../services/whatsapp.service');
 const jobRequestsService = require('../services/jobRequests.service');
 const jobScheduler = require('../services/jobScheduler.service');
+const notificationService = require('../services/notifications.service');
 const { emitNotificationUpdated } = require('../services/notificationsRealtime.service');
 
 const router = express.Router();
@@ -675,6 +676,20 @@ router.post('/embedded-signup/callback', authMiddleware, async (req, res) => {
       await markCoexistenceNotificationsRead({
         phoneNumberId: phone_number_id,
         wabaId: waba_id,
+      });
+      await notificationService.dispatchEvent({
+        event: 'whatsapp.coexistence_reconnected',
+        clinicId: targetClinicId || null,
+        data: {
+          clinicId: targetClinicId || null,
+          clinicName: null,
+          phoneNumberId: phone_number_id,
+          wabaId: waba_id,
+          phoneNumber: displayPhoneNumber,
+          source: 'embedded_signup_reconnect',
+          link: `/ajustes?tab=whatsapp&phoneNumberId=${encodeURIComponent(phone_number_id)}&wabaId=${encodeURIComponent(waba_id)}`,
+          useRouter: true,
+        },
       });
       registrationResult = { success: true, registration: coexistenceRegistration, status: null };
     } else {

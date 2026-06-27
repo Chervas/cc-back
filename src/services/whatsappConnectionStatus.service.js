@@ -3,8 +3,9 @@
 const { Op } = require('sequelize');
 const db = require('../../models');
 const notificationService = require('./notifications.service');
+const { emitNotificationUpdated } = require('./notificationsRealtime.service');
 
-const { ClinicMetaAsset, Clinica } = db;
+const { ClinicMetaAsset, Clinica, Notification } = db;
 
 const GRAPH_OBJECT_ACCESS_ERROR_CODE = 100;
 const GRAPH_OBJECT_ACCESS_ERROR_SUBCODE = 33;
@@ -59,6 +60,50 @@ function buildReconnectLink({ phoneNumberId = null, wabaId = null } = {}) {
     params.set('wabaId', String(wabaId));
   }
   return `/ajustes?${params.toString()}`;
+}
+
+async function markCoexistenceNotificationsRead({ phoneNumberId = null, wabaId = null } = {}) {
+  if (!Notification || (!phoneNumberId && !wabaId)) {
+    return { count: 0 };
+  }
+
+  const notifications = await Notification.findAll({
+    where: {
+      event: 'whatsapp.coexistence_disconnected',
+      isRead: false,
+    },
+    order: [['createdAt', 'DESC']],
+    limit: 250,
+  });
+
+  const phoneKey = cleanString(phoneNumberId);
+  const wabaKey = cleanString(wabaId);
+  const matched = notifications.filter((notification) => {
+    const data = notification.data && typeof notification.data === 'object'
+      ? notification.data
+      : {};
+    const link = cleanString(data.link);
+    return (phoneKey && (
+      String(data.phoneNumberId || '') === phoneKey
+      || link.includes(`phoneNumberId=${phoneKey}`)
+      || link.includes(`phone_number_id=${phoneKey}`)
+    ))
+      || (wabaKey && (
+        String(data.wabaId || '') === wabaKey
+        || link.includes(`wabaId=${wabaKey}`)
+        || link.includes(`waba_id=${wabaKey}`)
+      ));
+  });
+
+  await Promise.all(matched.map(async (notification) => {
+    await notification.update({
+      isRead: true,
+      readAt: new Date(),
+    });
+    emitNotificationUpdated(notification);
+  }));
+
+  return { count: matched.length };
 }
 
 async function findWhatsappPhoneAsset({ clinicId = null, phoneId = null, wabaId = null } = {}) {
@@ -236,7 +281,49 @@ async function clearDisconnectedAfterSuccess({
   delete asset.additionalData.coexistence.last_recipient;
   delete asset.additionalData.coexistence.last_source;
   await asset.save();
-  return { cleared: true, asset_id: asset.id };
+
+  const phoneNumberId = phoneId || asset.phoneNumberId || null;
+  const resolvedWabaId = wabaId || asset.wabaId || null;
+  const notifications = await markCoexistenceNotificationsRead({
+    phoneNumberId,
+    wabaId: resolvedWabaId,
+  });
+
+  try {
+    const resolvedClinicId = Number(clinicId || asset.clinicaId || 0) || null;
+    const clinic = resolvedClinicId && Clinica
+      ? await Clinica.findByPk(resolvedClinicId, {
+          attributes: ['id_clinica', 'nombre_clinica'],
+          raw: true,
+        })
+      : null;
+
+    await notificationService.dispatchEvent({
+      event: 'whatsapp.coexistence_reconnected',
+      clinicId: resolvedClinicId,
+      data: {
+        clinicId: resolvedClinicId,
+        clinicName: cleanString(clinic?.nombre_clinica),
+        phoneNumberId,
+        wabaId: resolvedWabaId,
+        phoneNumber: cleanString(asset.displayPhoneNumber || asset.display_phone_number || asset.metaAssetName),
+        source: cleanString(source) || null,
+        messageId: messageId || null,
+        link: buildReconnectLink({ phoneNumberId, wabaId: resolvedWabaId }),
+        useRouter: true,
+      },
+    });
+  } catch (notificationError) {
+    console.warn('[whatsapp] No se pudo crear notificación de reconexión coexistence', {
+      clinicId,
+      phoneId,
+      wabaId,
+      messageId,
+      error: notificationError?.message || notificationError,
+    });
+  }
+
+  return { cleared: true, asset_id: asset.id, notifications_read: notifications.count };
 }
 
 module.exports = {
@@ -244,6 +331,7 @@ module.exports = {
   GRAPH_OBJECT_ACCESS_ERROR_SUBCODE: GRAPH_OBJECT_ACCESS_ERROR_SUBCODE,
   normalizeProviderError,
   isGraphObjectAccessError,
+  markCoexistenceNotificationsRead,
   markDisconnectedAfterProviderError,
   clearDisconnectedAfterSuccess,
 };

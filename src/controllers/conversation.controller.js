@@ -59,6 +59,30 @@ function downloadFailedMediaError(kind) {
   return normalized ? `${normalized}_download_failed` : 'media_download_failed';
 }
 
+function cleanText(value) {
+  if (value === undefined || value === null) return '';
+  return String(value).trim();
+}
+
+function isTechnicalWhatsappFailureNotice(message) {
+  if (!message || typeof message !== 'object') {
+    return false;
+  }
+  const metadata = message.metadata && typeof message.metadata === 'object'
+    ? message.metadata
+    : {};
+  const failureSource = cleanText(metadata.failure_source).toLowerCase();
+  if (failureSource === 'automation_send_whatsapp_preflight') {
+    return true;
+  }
+  const normalizedContent = cleanText(message.content)
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase();
+  return normalizedContent.startsWith('no se pudo enviar el whatsapp automatico')
+    || normalizedContent.startsWith('no se pudo enviar este whatsapp automatico');
+}
+
 async function getUserClinics(userId) {
   const isAdmin = ADMIN_USER_IDS.includes(Number(userId));
   if (isAdmin) {
@@ -499,7 +523,7 @@ exports.listConversations = async (req, res) => {
           model: Message,
           as: 'messages',
           separate: true,
-          limit: 1,
+          limit: 6,
           order: [['createdAt', 'DESC']],
           attributes: ['id', 'direction', 'content', 'message_type', 'status', 'sent_at', 'createdAt', 'metadata'],
         },
@@ -513,7 +537,10 @@ exports.listConversations = async (req, res) => {
 
     const rawPayload = conversations.map((c) => {
       const data = c.toJSON();
-      data.lastMessage = data.messages && data.messages.length ? data.messages[0] : null;
+      const recentMessages = Array.isArray(data.messages) ? data.messages : [];
+      data.lastMessage = recentMessages.find((message) => !isTechnicalWhatsappFailureNotice(message))
+        || recentMessages[0]
+        || null;
       delete data.messages;
       data.unread_count = unreadMap.get(data.id) ?? 0;
       return data;
