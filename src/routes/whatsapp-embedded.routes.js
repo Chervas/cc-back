@@ -524,7 +524,7 @@ router.post('/embedded-signup/callback', authMiddleware, async (req, res) => {
           params: {
             access_token: accessToken,
             fields:
-              'id,display_phone_number,verified_name,quality_rating,messaging_limit_tier,name_status,code_verification_status,status,platform_type,account_mode,is_on_biz_app',
+              'id,display_phone_number,verified_name,quality_rating,messaging_limit_tier,name_status,new_display_name,new_name_status,code_verification_status,status,platform_type,account_mode,is_on_biz_app',
           },
         })
         .then((r) => r.data)
@@ -539,6 +539,8 @@ router.post('/embedded-signup/callback', authMiddleware, async (req, res) => {
     const qualityRating = phoneDetails?.quality_rating || null;
     const messagingLimit = phoneDetails?.messaging_limit_tier || phoneDetails?.messaging_limit || null;
     const nameStatus = phoneDetails?.name_status || null;
+    const newDisplayName = phoneDetails?.new_display_name || null;
+    const newNameStatus = phoneDetails?.new_name_status || null;
     const codeVerificationStatus = phoneDetails?.code_verification_status || null;
     const phoneStatus = phoneDetails?.status || null;
     const platformType = phoneDetails?.platform_type || null;
@@ -608,7 +610,7 @@ router.post('/embedded-signup/callback', authMiddleware, async (req, res) => {
 
     const businessId = resolvedBusinessId || null;
     const connectedNowIso = new Date().toISOString();
-    if (businessId || nameStatus || codeVerificationStatus || platformType || accountMode || connectionMode || isOnBizApp !== null) {
+    if (businessId || nameStatus || newDisplayName || newNameStatus || codeVerificationStatus || platformType || accountMode || connectionMode || isOnBizApp !== null) {
       const applyMetaExtras = async (asset) => {
         const additionalData = { ...(asset.additionalData || {}) };
         additionalData.whatsappConnectionMode = connectionMode;
@@ -630,6 +632,12 @@ router.post('/embedded-signup/callback', authMiddleware, async (req, res) => {
         if (nameStatus) {
           additionalData.nameStatus = nameStatus;
         }
+        if (newDisplayName !== null) {
+          additionalData.newDisplayName = newDisplayName;
+        }
+        if (newNameStatus !== null) {
+          additionalData.newNameStatus = newNameStatus;
+        }
         if (platformType) {
           additionalData.platformType = platformType;
         }
@@ -646,7 +654,8 @@ router.post('/embedded-signup/callback', authMiddleware, async (req, res) => {
             phoneStatus: phoneStatus || additionalData.registration?.phoneStatus || null,
           };
         }
-        asset.additionalData = additionalData;
+        asset.additionalData = { ...additionalData };
+        asset.changed('additionalData', true);
         await asset.save();
       };
 
