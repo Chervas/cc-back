@@ -14,6 +14,8 @@ const JobRequest = db.JobRequest;
 const { getIO } = require('./socket.service');
 const { Op } = db.Sequelize;
 const DEFAULT_TIMEZONE = 'Europe/Madrid';
+const REVIEW_AUTOMATION_TRIGGER = 'appointment_completed';
+const REVIEW_AUTOMATION_ACTION = 'action/request_review';
 const SCHEDULED_TRIGGER_FIRE_GRACE_MS = (() => {
   const configured = Number(process.env.APPOINTMENT_AUTOMATION_FIRE_GRACE_MS);
   return Number.isFinite(configured) && configured >= 0
@@ -174,6 +176,38 @@ function getCatalogBindingForTemplate(template, catalogBindingMap) {
   if (!(catalogBindingMap instanceof Map)) return null;
   const key = cleanString(template?.template_key);
   return catalogBindingMap.get(key) || catalogBindingMap.get(stripCatalogClinicScopeSuffixes(key)) || null;
+}
+
+function templateHasNodeType(template, nodeType) {
+  const normalizedNodeType = cleanString(nodeType).toLowerCase();
+  if (!normalizedNodeType) return false;
+  const plain = template?.toJSON ? template.toJSON() : template;
+  const nodes = Array.isArray(plain?.nodes) ? plain.nodes : [];
+  return nodes.some((node) => cleanString(node?.type).toLowerCase() === normalizedNodeType);
+}
+
+async function getClinicReviewAutomationOverrideState(clinicId, eventName) {
+  const safeClinicId = toIntOrNull(clinicId);
+  if (!safeClinicId || cleanString(eventName).toLowerCase() !== REVIEW_AUTOMATION_TRIGGER) {
+    return { hasOverride: false, disabled: false };
+  }
+
+  const rows = await AutomationFlowTemplateV2.findAll({
+    where: {
+      clinic_id: safeClinicId,
+      group_id: null,
+      trigger_type: REVIEW_AUTOMATION_TRIGGER,
+      published_at: { [Op.ne]: null },
+    },
+    order: [['version', 'DESC'], ['id', 'DESC']],
+    limit: 10,
+  });
+
+  const latestReviewTemplate = (rows || []).find((template) => templateHasNodeType(template, REVIEW_AUTOMATION_ACTION));
+  return {
+    hasOverride: !!latestReviewTemplate,
+    disabled: !!latestReviewTemplate && latestReviewTemplate.is_active !== true,
+  };
 }
 
 function normalizeStringArray(value) {
@@ -540,6 +574,7 @@ function normalizeAppointmentBeforeTriggerConfig(rawConfig) {
     exclude_if_booked_day_before: parseBool(config.exclude_if_booked_day_before, false) === true,
     exclude_if_booked_same_day: parseBool(config.exclude_if_booked_same_day, false) === true,
     exclude_if_not_confirmed: parseBool(config.exclude_if_not_confirmed, false) === true,
+    only_if_not_confirmed: parseBool(config.only_if_not_confirmed, false) === true,
   };
 }
 
@@ -655,12 +690,21 @@ async function resolveClinicFallbackTemplate(cita, eventName) {
   const catalogBindingMap = candidates.length > 1
     ? await loadCatalogBindingMapForTemplates(candidates)
     : new Map();
+  const reviewOverrideState = await getClinicReviewAutomationOverrideState(clinicId, eventName);
 
   const citaHasTreatment = !!toIntOrNull(cita?.tratamiento_id);
   const citaTipo = cleanString(cita?.tipo_cita).toLowerCase() || 'continuacion';
 
   const scored = candidates
     .filter((template) => {
+      if (
+        reviewOverrideState.disabled
+        && templateHasNodeType(template, REVIEW_AUTOMATION_ACTION)
+        && toIntOrNull(template?.clinic_id) !== clinicId
+      ) {
+        return false;
+      }
+
       if (cleanString(template?.trigger_type) !== 'appointment_created') {
         return true;
       }
@@ -1471,6 +1515,13 @@ async function fireScheduledTrigger(payload = {}) {
     !isAppointmentConfirmedForReminder(cita)
   ) {
     return { success: true, skipped: true, reason: 'appointment_not_confirmed' };
+  }
+  if (
+    triggerType === 'appointment_reminder_window' &&
+    triggerConfig?.only_if_not_confirmed === true &&
+    isAppointmentConfirmedForReminder(cita)
+  ) {
+    return { success: true, skipped: true, reason: 'appointment_already_confirmed' };
   }
 
   const scheduledFor = computeScheduledRunAt({

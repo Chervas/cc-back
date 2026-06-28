@@ -83,6 +83,22 @@ function isTechnicalWhatsappFailureNotice(message) {
     || normalizedContent.startsWith('no se pudo enviar este whatsapp automatico');
 }
 
+function isQuickChatHiddenMessage(message) {
+  if (!message || typeof message !== 'object') {
+    return false;
+  }
+  const metadata = message.metadata && typeof message.metadata === 'object'
+    ? message.metadata
+    : {};
+  return metadata.qa_cleanup === true || metadata.hide_from_quickchat === true;
+}
+
+function filterQuickChatVisibleMessages(messages) {
+  return Array.isArray(messages)
+    ? messages.filter((message) => !isQuickChatHiddenMessage(message))
+    : [];
+}
+
 async function getUserClinics(userId) {
   const isAdmin = ADMIN_USER_IDS.includes(Number(userId));
   if (isAdmin) {
@@ -537,7 +553,7 @@ exports.listConversations = async (req, res) => {
 
     const rawPayload = conversations.map((c) => {
       const data = c.toJSON();
-      const recentMessages = Array.isArray(data.messages) ? data.messages : [];
+      const recentMessages = filterQuickChatVisibleMessages(data.messages);
       data.lastMessage = recentMessages.find((message) => !isTechnicalWhatsappFailureNotice(message))
         || recentMessages[0]
         || null;
@@ -653,7 +669,7 @@ exports.getMessages = async (req, res) => {
     });
 
     const conversationPayload = await enrichConversationUnreadForUser(userId, conversation);
-    return res.json({ conversation: conversationPayload, messages });
+    return res.json({ conversation: conversationPayload, messages: filterQuickChatVisibleMessages(messages) });
   } catch (err) {
     console.error('Error getMessages', err);
     return res.status(500).json({ error: 'Error obteniendo mensajes' });
@@ -761,7 +777,7 @@ exports.getConversationByPatient = async (req, res) => {
     });
 
     const conversationPayload = await enrichConversationUnreadForUser(userId, conversation);
-    return res.json({ conversation: conversationPayload, messages });
+    return res.json({ conversation: conversationPayload, messages: filterQuickChatVisibleMessages(messages) });
   } catch (err) {
     console.error('Error getConversationByPatient', err);
     return res.status(500).json({ error: 'Error obteniendo conversación' });
@@ -801,7 +817,7 @@ exports.getConversationByLead = async (req, res) => {
     });
 
     const conversationPayload = await enrichConversationUnreadForUser(userId, conversation);
-    return res.json({ conversation: conversationPayload, messages });
+    return res.json({ conversation: conversationPayload, messages: filterQuickChatVisibleMessages(messages) });
   } catch (err) {
     console.error('Error getConversationByLead', err);
     return res.status(500).json({ error: 'Error obteniendo conversación' });

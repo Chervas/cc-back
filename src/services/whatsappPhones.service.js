@@ -6,7 +6,7 @@ const { queues } = require('./queue.service');
 const whatsappTemplatesService = require('./whatsappTemplates.service');
 const whatsappConnectionStatusService = require('./whatsappConnectionStatus.service');
 
-const { ClinicMetaAsset, WhatsappTemplate, Sequelize } = db;
+const { ClinicMetaAsset, WhatsappTemplate, WhatsappTemplateCatalog, Sequelize } = db;
 const { Op } = Sequelize;
 
 const META_API_VERSION = process.env.META_API_VERSION || 'v24.0';
@@ -23,6 +23,27 @@ function isTestDisplayNumber(displayPhoneNumber) {
   const digitsOnly = String(displayPhoneNumber).replace(/\D/g, '');
   // Meta test numbers often start with 1555...
   return digitsOnly.startsWith('1555');
+}
+
+function parseMaybeJson(value) {
+  if (!value) return value;
+  if (Array.isArray(value) || typeof value === 'object') return value;
+  try {
+    return JSON.parse(value);
+  } catch {
+    return value;
+  }
+}
+
+function stringifyTemplateComponents(value) {
+  const parsed = parseMaybeJson(value);
+  return JSON.stringify(parsed || []);
+}
+
+function hasSameTemplateCatalogContract(catalog, instance) {
+  if (!catalog || !instance) return false;
+  return String(catalog.category || '').trim().toUpperCase() === String(instance.category || '').trim().toUpperCase()
+    && stringifyTemplateComponents(catalog.components) === stringifyTemplateComponents(instance.components);
 }
 
 function normalizeWhatsappBusinessProfile(payload) {
@@ -222,9 +243,18 @@ function hasRecentTemplateEnsure(additionalData) {
   return Date.now() - lastTs < cooldownMs;
 }
 
-async function hasTemplatesNeedingCreate(asset) {
+async function getTemplateCreateNeed(asset) {
   const wabaId = String(asset?.wabaId || '').trim();
-  if (!wabaId) return false;
+  if (!wabaId) return { needed: false, bypassCooldown: false };
+
+  const activeGenericCatalogs = WhatsappTemplateCatalog
+    ? await WhatsappTemplateCatalog.findAll({
+        where: { is_active: true, is_generic: true },
+        attributes: ['id', 'category', 'components'],
+        raw: true,
+      })
+    : [];
+  const activeGenericCatalogIds = activeGenericCatalogs.map((row) => Number(row.id)).filter(Boolean);
 
   const connectedCount = await WhatsappTemplate.count({
     where: {
@@ -235,9 +265,37 @@ async function hasTemplatesNeedingCreate(asset) {
     },
   });
 
-  if (connectedCount === 0) return true;
+  if (connectedCount === 0) return { needed: true, bypassCooldown: true };
 
-  if (!asset?.clinicaId) return false;
+  if (activeGenericCatalogIds.length) {
+    const existingCatalogRows = await WhatsappTemplate.findAll({
+      where: {
+        waba_id: wabaId,
+        is_active: true,
+        catalog_template_id: { [Op.in]: activeGenericCatalogIds },
+        meta_template_id: { [Op.ne]: null },
+      },
+      attributes: ['catalog_template_id', 'category', 'components'],
+      raw: true,
+    });
+    const existingByCatalogId = new Map();
+    for (const row of existingCatalogRows) {
+      const catalogId = Number(row.catalog_template_id);
+      if (!catalogId) continue;
+      if (!existingByCatalogId.has(catalogId)) existingByCatalogId.set(catalogId, []);
+      existingByCatalogId.get(catalogId).push(row);
+    }
+    const hasMissingOrOutdatedGeneric = activeGenericCatalogs.some((catalog) => {
+      const catalogId = Number(catalog.id);
+      const rows = existingByCatalogId.get(catalogId) || [];
+      return !rows.some((row) => hasSameTemplateCatalogContract(catalog, row));
+    });
+    if (hasMissingOrOutdatedGeneric) {
+      return { needed: true, bypassCooldown: true };
+    }
+  }
+
+  if (!asset?.clinicaId) return { needed: false, bypassCooldown: false };
 
   const localPendingCount = await WhatsappTemplate.count({
     where: {
@@ -252,17 +310,16 @@ async function hasTemplatesNeedingCreate(asset) {
     },
   });
 
-  return localPendingCount > 0;
+  return { needed: localPendingCount > 0, bypassCooldown: false };
 }
 
 async function maybeEnsureTemplatesForOperationalPhone(asset, remote) {
   if (!isOperationalPhoneAsset(asset, remote)) return;
 
   const additionalData = { ...(asset.additionalData || {}) };
-  if (hasRecentTemplateEnsure(additionalData)) return;
-
-  const needsCreate = await hasTemplatesNeedingCreate(asset);
-  if (!needsCreate) return;
+  const templateNeed = await getTemplateCreateNeed(asset);
+  if (!templateNeed.needed) return;
+  if (!templateNeed.bypassCooldown && hasRecentTemplateEnsure(additionalData)) return;
 
   const assignmentScope = resolveTemplateAssignmentScope(asset);
   await whatsappTemplatesService.enqueueCreateTemplatesJob({
