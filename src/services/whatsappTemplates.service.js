@@ -1397,15 +1397,32 @@ async function syncTemplatesForWaba({ wabaId, accessToken }) {
       wabaId,
       assetType: { [Op.in]: ['whatsapp_business_account', 'whatsapp_phone_number'] },
     },
-    attributes: ['clinicaId', 'grupoClinicaId'],
+    attributes: ['clinicaId', 'grupoClinicaId', 'assignmentScope'],
     raw: true,
   });
 
   const clinicIds = new Set();
   const groupIds = new Set();
   linkedAssets.forEach((asset) => {
-    if (asset.clinicaId) clinicIds.add(Number(asset.clinicaId));
-    if (asset.grupoClinicaId) groupIds.add(Number(asset.grupoClinicaId));
+    const assignmentScope = String(asset.assignmentScope || '').trim().toLowerCase();
+    const clinicId = Number(asset.clinicaId || 0);
+    const groupId = Number(asset.grupoClinicaId || 0);
+
+    if (assignmentScope === 'clinic') {
+      if (Number.isInteger(clinicId) && clinicId > 0) clinicIds.add(clinicId);
+      return;
+    }
+
+    if (assignmentScope === 'group') {
+      if (Number.isInteger(groupId) && groupId > 0) groupIds.add(groupId);
+      return;
+    }
+
+    if (Number.isInteger(clinicId) && clinicId > 0) {
+      clinicIds.add(clinicId);
+    } else if (Number.isInteger(groupId) && groupId > 0) {
+      groupIds.add(groupId);
+    }
   });
 
   if (groupIds.size) {
