@@ -59,6 +59,27 @@ function stringifyTemplateComponents(value) {
   return JSON.stringify(parseMaybeJson(value) || []);
 }
 
+function normalizeTemplateComponentsForMeta(value) {
+  const components = parseMaybeJson(value) || [];
+  if (!Array.isArray(components)) return [];
+
+  return components.map((component) => {
+    if (!component || typeof component !== 'object') return component;
+    const type = String(component.type || '').trim().toUpperCase();
+    if (type !== 'BODY' || typeof component.text !== 'string') {
+      return { ...component };
+    }
+    return {
+      ...component,
+      text: component.text.trim(),
+    };
+  });
+}
+
+function stringifyComparableTemplateComponents(value) {
+  return JSON.stringify(normalizeTemplateComponentsForMeta(value));
+}
+
 function cleanString(value) {
   return typeof value === 'string' ? value.trim() : '';
 }
@@ -164,7 +185,7 @@ function hasSameMetaFacingContent(template, instance) {
   if (!template || !instance) return false;
   return (
     String(template.category || '').trim().toUpperCase() === String(instance.category || '').trim().toUpperCase()
-    && stringifyTemplateComponents(template.components) === stringifyTemplateComponents(instance.components)
+    && stringifyComparableTemplateComponents(template.components) === stringifyComparableTemplateComponents(instance.components)
   );
 }
 
@@ -355,7 +376,21 @@ async function resolveTargetClinicIdsForTemplateProvisioning({ clinicId, groupId
 
 function findSameContractRemoteTemplate({ familyRows, wabaId, template }) {
   const safeWabaId = wabaId ? String(wabaId) : '';
-  return familyRows.find((row) => String(row?.waba_id || '') === safeWabaId && hasSameMetaFacingContent(template, row)) || null;
+  const matches = familyRows
+    .filter((row) => String(row?.waba_id || '') === safeWabaId && hasSameMetaFacingContent(template, row))
+    .sort((left, right) => {
+      const score = (row) => {
+        const status = String(row?.status || '').trim().toUpperCase();
+        if (status === WHATSAPP_TEMPLATE_STATUS.APPROVED) return 3;
+        if (status === WHATSAPP_TEMPLATE_STATUS.PENDING || status === 'IN_REVIEW') return 2;
+        if (status === WHATSAPP_TEMPLATE_STATUS.REJECTED) return 1;
+        return 0;
+      };
+      const diff = score(right) - score(left);
+      if (diff !== 0) return diff;
+      return new Date(right?.updatedAt || 0).getTime() - new Date(left?.updatedAt || 0).getTime();
+    });
+  return matches[0] || null;
 }
 
 function buildTemplateForTechnicalName(template, technicalName) {
@@ -363,6 +398,8 @@ function buildTemplateForTechnicalName(template, technicalName) {
   return {
     ...baseTemplate,
     name: cleanString(technicalName) || cleanString(baseTemplate?.name),
+    body_text: cleanString(baseTemplate?.body_text),
+    components: normalizeTemplateComponentsForMeta(baseTemplate?.components),
   };
 }
 
@@ -481,7 +518,7 @@ async function createPlaceholderTemplatesForClinic({ clinicId, assignmentScope, 
       language: DEFAULT_LANGUAGE,
       category: template.category,
       status: 'SIN_CONECTAR',
-      components: parseMaybeJson(template.components),
+      components: normalizeTemplateComponentsForMeta(template.components),
       variables: parseMaybeJson(template.variables) || [],
       catalog_template_id: template.id,
       origin: 'catalog',
@@ -505,7 +542,7 @@ async function upsertPlaceholderTemplateForClinic({ clinicId, template }) {
     language: DEFAULT_LANGUAGE,
     category: template.category,
     status: 'SIN_CONECTAR',
-    components: parseMaybeJson(template.components),
+    components: normalizeTemplateComponentsForMeta(template.components),
     variables: parseMaybeJson(template.variables) || [],
     catalog_template_id: template.id,
     origin: 'catalog',
@@ -542,7 +579,7 @@ async function upsertClinicOverrideTemplateForClinic({
     language: DEFAULT_LANGUAGE,
     category: template.category,
     status,
-    components: parseMaybeJson(template.components),
+    components: normalizeTemplateComponentsForMeta(template.components),
     variables: parseMaybeJson(template.variables) || [],
     catalog_template_id: template.id,
     origin: 'catalog',
@@ -590,7 +627,7 @@ async function upsertConnectedTemplateForWaba({
     language: DEFAULT_LANGUAGE,
     category: template.category,
     status,
-    components: parseMaybeJson(template.components),
+    components: normalizeTemplateComponentsForMeta(template.components),
     variables: parseMaybeJson(template.variables) || [],
     meta_template_id: metaTemplateId || null,
     catalog_template_id: template.id,
@@ -694,7 +731,7 @@ async function resolveWabaAssetById(wabaId) {
 }
 
 async function createTemplateInMeta({ wabaId, accessToken, template, language }) {
-  const components = parseMaybeJson(template.components);
+  const components = normalizeTemplateComponentsForMeta(template.components);
   const payload = {
     name: cleanString(template.name),
     language,
@@ -953,34 +990,53 @@ async function createTemplatesFromCatalog({ wabaId, clinicId, groupId, assignmen
   };
 
   for (const template of templates) {
-    const existing = await findConnectedTemplateForCatalogInWaba({ wabaId, template });
-    if (existing) {
+    const familyRows = await loadTemplateFamilyRows({
+      clinicId: assignmentScope === 'clinic' ? clinicId : null,
+      wabaId,
+      template,
+    });
+    const sameContractRemoteTemplate = findSameContractRemoteTemplate({ familyRows, wabaId, template });
+
+    if (sameContractRemoteTemplate) {
+      if (Number(sameContractRemoteTemplate.catalog_template_id || 0) !== Number(template.id || 0)) {
+        await sameContractRemoteTemplate.update({
+          catalog_template_id: template.id,
+          category: sameContractRemoteTemplate.category || template.category,
+          origin: sameContractRemoteTemplate.origin || 'catalog',
+          is_active: true,
+        });
+      }
       for (const targetClinicId of targetClinicIds) {
         await upsertClinicOverrideTemplateForClinic({
           clinicId: targetClinicId,
           template,
-          technicalName: existing.name,
-          status: mapRemoteStatusToLocalStatus(existing.status),
-          metaTemplateId: existing.meta_template_id || null,
-          rejectionReason: existing.rejection_reason || null,
+          technicalName: sameContractRemoteTemplate.name,
+          status: mapRemoteStatusToLocalStatus(sameContractRemoteTemplate.status),
+          metaTemplateId: sameContractRemoteTemplate.meta_template_id || null,
+          rejectionReason: sameContractRemoteTemplate.rejection_reason || null,
         });
       }
       result.connected += 1;
       continue;
     }
 
+    const technicalName = familyRows.length
+      ? resolveNextTechnicalTemplateName(template.name, familyRows)
+      : template.name;
+    const metaTemplate = buildTemplateForTechnicalName(template, technicalName);
+
     try {
       const metaResp = await createTemplateInMeta({
         wabaId,
         accessToken: asset.waAccessToken,
-        template,
+        template: metaTemplate,
         language: DEFAULT_LANGUAGE,
       });
 
       await upsertConnectedTemplateForWaba({
         wabaId,
         template,
-        technicalName: template.name,
+        technicalName,
         status: WHATSAPP_TEMPLATE_STATUS.PENDING,
         metaTemplateId: metaResp?.id || null,
         rejectionReason: null,
@@ -990,7 +1046,7 @@ async function createTemplatesFromCatalog({ wabaId, clinicId, groupId, assignmen
         await upsertClinicOverrideTemplateForClinic({
           clinicId: targetClinicId,
           template,
-          technicalName: template.name,
+          technicalName,
           status: WHATSAPP_TEMPLATE_STATUS.PENDING,
           metaTemplateId: metaResp?.id || null,
           rejectionReason: null,
@@ -1006,7 +1062,7 @@ async function createTemplatesFromCatalog({ wabaId, clinicId, groupId, assignmen
           await upsertClinicOverrideTemplateForClinic({
             clinicId: targetClinicId,
             template,
-            technicalName: template.name,
+            technicalName,
             status: WHATSAPP_TEMPLATE_STATUS.LOCAL_PENDING,
             metaTemplateId: null,
             rejectionReason: buildLocalPendingReasonFromMetaError(err),
@@ -1022,7 +1078,7 @@ async function createTemplatesFromCatalog({ wabaId, clinicId, groupId, assignmen
       }
       console.error('Error creando plantilla en Meta', {
         wabaId,
-        name: template.name,
+        name: technicalName,
         error: err?.response?.data || err.message,
       });
     }

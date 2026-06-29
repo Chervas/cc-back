@@ -129,6 +129,9 @@ router.get('/phones', authMiddleware, whatsappController.listPhones);
 // Asignar número a grupo o clínica
 router.post('/phones/:phoneNumberId/assign', authMiddleware, whatsappController.assignPhone);
 
+// Desasignar número sin desconectarlo de Meta
+router.post('/phones/:phoneNumberId/unassign', authMiddleware, whatsappController.unassignPhone);
+
 // Registrar número en Cloud API (PIN opcional)
 router.post('/phones/:phoneNumberId/register', authMiddleware, whatsappController.registerPhone);
 

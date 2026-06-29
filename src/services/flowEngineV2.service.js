@@ -321,8 +321,23 @@ function addDaysToLocalDate(fechaLocal, deltaDays) {
   return `${utc.getUTCFullYear()}-${pad(utc.getUTCMonth() + 1)}-${pad(utc.getUTCDate())}`;
 }
 
+function normalizeWhatsappTemplateComponents(template) {
+  const plain = template?.get ? template.get({ plain: true }) : (template || {});
+  const components = plain.components;
+  if (Array.isArray(components)) return components;
+  if (typeof components === 'string') {
+    try {
+      const parsed = JSON.parse(components);
+      return Array.isArray(parsed) ? parsed : [];
+    } catch (_err) {
+      return [];
+    }
+  }
+  return [];
+}
+
 function extractWhatsappTemplateBodyText(template) {
-  const components = Array.isArray(template?.components) ? template.components : [];
+  const components = normalizeWhatsappTemplateComponents(template);
   const bodyParts = components
     .filter((comp) => String(comp?.type || '').toUpperCase() === 'BODY')
     .map((comp) => cleanString(comp?.text))
@@ -333,6 +348,22 @@ function extractWhatsappTemplateBodyText(template) {
   }
 
   return null;
+}
+
+function normalizeTemplateBodyForComparison(value) {
+  return cleanString(value)?.replace(/\s+/g, ' ') || null;
+}
+
+function getWhatsappTemplateCatalogBodyText(template) {
+  const plain = template?.get ? template.get({ plain: true }) : (template || {});
+  const catalog = plain.catalog?.get ? plain.catalog.get({ plain: true }) : plain.catalog;
+  return cleanString(catalog?.body_text);
+}
+
+function matchesCurrentCatalogBody(template) {
+  const catalogBody = normalizeTemplateBodyForComparison(getWhatsappTemplateCatalogBodyText(template));
+  const templateBody = normalizeTemplateBodyForComparison(extractWhatsappTemplateBodyText(template));
+  return !!catalogBody && !!templateBody && catalogBody === templateBody;
 }
 
 function renderWhatsappTemplatePreviewText(template, templateParams = {}) {
@@ -1690,6 +1721,90 @@ function buildDeterministicConfirmAppointmentOutput(context = {}) {
   };
 }
 
+function buildDeterministicAppointmentUnconfirmedReplyOutput(context = {}) {
+  const rawResponse = cleanString(
+    context?.last_response_context?.response_text
+    || context?.last_response
+  );
+
+  const positive = buildDeterministicConfirmAppointmentTextOutput(context);
+  if (positive && cleanString(positive.decision).toLowerCase() === 'confirmado') {
+    return {
+      decision: 'confirmar',
+      confianza: positive.confianza || 0.95,
+      motivo: positive.motivo || 'El paciente confirma que acudirá a la cita.',
+      _ai_provider: positive._ai_provider || 'deterministic_rule',
+      _ai_model: 'appointment_unconfirmed_reply_confirm',
+      _ai_analysis_mode: 'rule',
+    };
+  }
+
+  const text = normalizeIntentText(rawResponse);
+  const responseContext = isObject(context?.last_response_context) ? context.last_response_context : {};
+  const reactionEmoji = cleanString(responseContext.reaction_emoji);
+  if (!text && isPositiveConfirmationEmojiText(reactionEmoji)) {
+    return {
+      decision: 'confirmar',
+      confianza: 0.99,
+      motivo: `El paciente reaccionó ${reactionEmoji} de forma positiva al aviso.`,
+      _ai_provider: 'deterministic_rule',
+      _ai_model: 'appointment_unconfirmed_reply_reaction_confirm',
+      _ai_analysis_mode: 'rule',
+    };
+  }
+
+  if (!text) {
+    return {
+      decision: 'duda',
+      confianza: 0.2,
+      motivo: 'No hay texto suficiente para confirmar o reprogramar.',
+      _ai_provider: 'deterministic_rule',
+      _ai_model: 'appointment_unconfirmed_reply_empty',
+      _ai_analysis_mode: 'rule',
+    };
+  }
+
+  const cancelPatterns = [
+    /\b(cancelar|cancela|cancelad[ao]s?|anular|anula|dar\s+de\s+baja)\b/,
+    /\b(no\s+voy|no\s+ire|no\s+asistire|no\s+acudire)\b/,
+    /\b(la\s+perdemos|no\s+la\s+quiero|mejor\s+no)\b/,
+  ];
+  if (cancelPatterns.some((pattern) => pattern.test(text))) {
+    return {
+      decision: 'cancelar',
+      confianza: 0.95,
+      motivo: `La respuesta del paciente indica cancelación: "${rawResponse}".`,
+      _ai_provider: 'deterministic_rule',
+      _ai_model: 'appointment_unconfirmed_reply_cancel',
+      _ai_analysis_mode: 'rule',
+    };
+  }
+
+  const reschedulePatterns = [
+    /\b(reprogramar|reprograma|cambiar|cambio|mover|mueve|posponer|aplazar|otra\s+hora|otro\s+dia|otro\s+d[ií]a|mas\s+tarde|más\s+tarde)\b/,
+    /\b(no\s+puedo|me\s+viene\s+mal|me\s+va\s+mal|no\s+me\s+encaja|imposible)\b/,
+  ];
+  if (reschedulePatterns.some((pattern) => pattern.test(text))) {
+    return {
+      decision: 'reprogramar',
+      confianza: 0.92,
+      motivo: `La respuesta del paciente pide cambiar la cita: "${rawResponse}".`,
+      _ai_provider: 'deterministic_rule',
+      _ai_model: 'appointment_unconfirmed_reply_reschedule',
+      _ai_analysis_mode: 'rule',
+    };
+  }
+
+  return {
+    decision: 'duda',
+    confianza: 0.35,
+    motivo: `La respuesta no confirma ni pide reprogramar con claridad: "${rawResponse}".`,
+    _ai_provider: 'deterministic_rule',
+    _ai_model: 'appointment_unconfirmed_reply_unclear',
+    _ai_analysis_mode: 'rule',
+  };
+}
+
 function isTemplateBlockedForSend(statusValue) {
   const status = toLowerSafe(statusValue);
   return status !== 'approved';
@@ -1700,12 +1815,16 @@ function getWhatsappTemplateWabaId(template) {
   return cleanString(plain.waba_id || plain.wabaId);
 }
 
-function scoreWhatsappTemplateCandidate(template, { clinicId = null, targetWabaId = '' } = {}) {
+function scoreWhatsappTemplateCandidate(template, { clinicId = null, targetWabaId = '', requireCurrentCatalogBody = false } = {}) {
   const plain = template?.get ? template.get({ plain: true }) : (template || {});
   const rowClinicId = toIntOrNull(plain.clinic_id);
   const wabaId = getWhatsappTemplateWabaId(plain);
   const safeClinicId = toIntOrNull(clinicId);
   const safeTargetWabaId = cleanString(targetWabaId);
+
+  if (requireCurrentCatalogBody && !matchesCurrentCatalogBody(template)) {
+    return 0;
+  }
 
   if (safeClinicId && rowClinicId && rowClinicId !== safeClinicId) {
     return 0;
@@ -2400,6 +2519,7 @@ async function loadConfiguredWhatsappTemplate(
     templateNameKey = 'template_name',
     catalogTemplateIdKey = 'catalog_template_id',
     targetWabaId = '',
+    requireCurrentCatalogBody = false,
   } = {}
 ) {
   const templateId = toIntOrNull(resolveTemplateValue(config?.[templateIdKey], context));
@@ -2418,7 +2538,7 @@ async function loadConfiguredWhatsappTemplate(
 
   const baseQuery = {
     attributes: ['id', 'name', 'language', 'status', 'components', 'catalog_template_id', 'clinic_id', 'waba_id', 'meta_template_id'],
-    include: [{ model: WhatsappTemplateCatalog, as: 'catalog', attributes: ['id', 'variables'] }],
+    include: [{ model: WhatsappTemplateCatalog, as: 'catalog', attributes: ['id', 'variables', 'body_text'] }],
   };
 
   if (catalogTemplateId) {
@@ -2430,7 +2550,7 @@ async function loadConfiguredWhatsappTemplate(
       },
     });
 
-    const selected = selectBestWhatsappTemplateCandidate(candidates, { clinicId, targetWabaId });
+    const selected = selectBestWhatsappTemplateCandidate(candidates, { clinicId, targetWabaId, requireCurrentCatalogBody });
     if (selected) return selected;
   }
 
@@ -2452,6 +2572,20 @@ async function loadConfiguredWhatsappTemplate(
     where,
   });
   if (!requested) return null;
+  if (requireCurrentCatalogBody && !matchesCurrentCatalogBody(requested)) {
+    const requestedCatalogId = toIntOrNull(requested.catalog_template_id);
+    if (requestedCatalogId) {
+      const candidates = await WhatsappTemplate.findAll({
+        ...baseQuery,
+        where: {
+          catalog_template_id: requestedCatalogId,
+          is_active: true,
+        },
+      });
+      return selectBestWhatsappTemplateCandidate(candidates, { clinicId, targetWabaId, requireCurrentCatalogBody });
+    }
+    return null;
+  }
 
   const requestedWabaId = getWhatsappTemplateWabaId(requested);
   const requestedStatus = toLowerSafe(requested.status);
@@ -2471,7 +2605,7 @@ async function loadConfiguredWhatsappTemplate(
         is_active: true,
       },
     });
-    const replacement = selectBestWhatsappTemplateCandidate(candidates, { clinicId, targetWabaId });
+    const replacement = selectBestWhatsappTemplateCandidate(candidates, { clinicId, targetWabaId, requireCurrentCatalogBody });
     if (replacement) return replacement;
     if (cleanString(targetWabaId) && requestedWabaId && requestedWabaId !== cleanString(targetWabaId)) {
       return null;
@@ -2535,6 +2669,7 @@ async function handleSendWhatsapp(node, context, runtime) {
       templateNameKey: 'template_name',
       catalogTemplateIdKey: 'catalog_template_id',
       targetWabaId: senderData.clinic_config?.wabaId || '',
+      requireCurrentCatalogBody: parseBool(resolveTemplateValue(config?.require_current_catalog_body, templateContext), false),
     });
     if (!template) {
       throw new Error('whatsapp_template_id_missing');
@@ -2574,6 +2709,7 @@ async function handleSendWhatsapp(node, context, runtime) {
       templateIdKey: 'fallback_template_id',
       templateNameKey: 'fallback_template_name',
       catalogTemplateIdKey: 'fallback_catalog_template_id',
+      requireCurrentCatalogBody: parseBool(resolveTemplateValue(config?.fallback_require_current_catalog_body, templateContext), false),
     });
     if (fallbackTemplate) {
       const fallbackStatus = toLowerSafe(fallbackTemplate.status);
@@ -4318,15 +4454,19 @@ async function processNode(node, context, runtime = {}) {
       const presetKey = cleanString(config?.preset_key);
       const deterministicPresetOutput = presetKey === 'confirm_appointment'
         ? buildDeterministicConfirmAppointmentOutput(aiContext)
-        : null;
+        : (presetKey === 'appointment_unconfirmed_reply'
+            ? buildDeterministicAppointmentUnconfirmedReplyOutput(aiContext)
+            : null);
       if (deterministicPresetOutput) {
         const deterministicDecision = cleanString(deterministicPresetOutput?.decision).toLowerCase();
         return {
           kind: 'success',
           output: deterministicPresetOutput,
-          next_node_id: deterministicDecision === 'confirmado'
-            ? readOutputTarget(node, 'on_success')
-            : readOutputTarget(node, 'on_fail'),
+          next_node_id: presetKey === 'confirm_appointment'
+            ? (deterministicDecision === 'confirmado'
+                ? readOutputTarget(node, 'on_success')
+                : readOutputTarget(node, 'on_fail'))
+            : readOutputTarget(node, 'on_success'),
         };
       }
 

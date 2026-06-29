@@ -1183,6 +1183,7 @@ const IMPORT_ALIASES = {
   last_name: ['apellido', 'apellidos', 'last_name', 'lastname'],
   phone: ['telefono', 'teléfono', 'movil', 'móvil', 'telefono_movil', 'phone', 'mobile', 'whatsapp'],
   email: ['email', 'correo', 'correo_electronico', 'mail'],
+  clinic: ['clinica', 'clínica', 'sede', 'centro', 'clinic', 'location'],
 };
 
 function findHeader(headers, aliases) {
@@ -1395,6 +1396,64 @@ async function attachExistingPatientContext(itemPayloads, scope, transaction = n
   });
 }
 
+async function attachImportedClinicContext(itemPayloads, scope, transaction = null) {
+  if (!Array.isArray(itemPayloads) || !itemPayloads.length || !Clinica) return itemPayloads;
+  const clinicIds = Array.isArray(scope?.clinicIds) ? scope.clinicIds.filter(Number.isInteger) : [];
+  if (!clinicIds.length) return itemPayloads;
+
+  const clinics = await Clinica.findAll({
+    where: { id_clinica: { [Op.in]: clinicIds } },
+    attributes: ['id_clinica', 'nombre_clinica'],
+    raw: true,
+    transaction,
+  });
+  const byId = new Map();
+  const byName = new Map();
+  for (const clinic of clinics) {
+    const id = Number(clinic.id_clinica);
+    if (!id) continue;
+    byId.set(id, id);
+    const normalizedName = normalizeKey(clinic.nombre_clinica || '');
+    if (normalizedName) byName.set(normalizedName, id);
+  }
+
+  return itemPayloads.map((item) => {
+    if (item.clinica_id) return item;
+    const importedClinic = normalizeText(
+      item.custom_fields?.clinica_importada
+      || item.custom_fields?.sede_importada
+      || item.custom_fields?.clinic
+      || item.custom_fields?.clinica
+      || item.custom_fields?.sede
+    );
+    if (!importedClinic) return item;
+
+    const numericId = Number(importedClinic);
+    const clinicId = (Number.isInteger(numericId) && byId.has(numericId))
+      ? numericId
+      : (byName.get(normalizeKey(importedClinic)) || null);
+
+    if (!clinicId) {
+      return {
+        ...item,
+        notes: [
+          normalizeText(item.notes),
+          `Sede importada no reconocida dentro del grupo: ${importedClinic}.`,
+        ].filter(Boolean).join('\n') || null,
+      };
+    }
+
+    return {
+      ...item,
+      clinica_id: clinicId,
+      notes: [
+        normalizeText(item.notes),
+        `Sede importada asignada: ${importedClinic}.`,
+      ].filter(Boolean).join('\n') || null,
+    };
+  });
+}
+
 function missingRequiredFields({ channels, name, phoneDigits, email }) {
   const missing = [];
   if (!name) missing.push('nombre');
@@ -1420,6 +1479,7 @@ function buildItemsFromRows(rows, body, channels) {
     const phoneDigits = normalizePhoneDigits(readImportValue(row, columnMapping, 'phone'));
     const phone = phoneDigits ? `+${phoneDigits}` : null;
     const email = readImportValue(row, columnMapping, 'email') || null;
+    const importedClinic = readImportValue(row, columnMapping, 'clinic') || null;
     const customFields = buildCustomFields(row, columnMapping, customFieldsSchema);
     const missing = missingRequiredFields({ channels, name: nameInfo.name, phoneDigits, email });
     const dedupeKey = phoneDigits || normalizeKey(email) || normalizeKey(nameInfo.name);
@@ -1452,6 +1512,7 @@ function buildItemsFromRows(rows, body, channels) {
         apellidos: nameInfo.lastName,
         nombre_completo: nameInfo.fullName,
         ...customFields,
+        ...(importedClinic ? { clinica_importada: importedClinic, sede_importada: importedClinic } : {}),
         fecha_importacion: importMetadata.importedAtDate,
         fecha_importacion_texto: importMetadata.importedAtLabel,
         lote_importacion: importMetadata.importBatchId,
@@ -1539,6 +1600,34 @@ function parseReviewTreatmentIds(source = {}) {
   return [...new Set(values
     .map((value) => Number(value))
     .filter((value) => Number.isInteger(value) && value > 0))];
+}
+
+function parseReviewClinicIds(source = {}) {
+  const raw = source.review_group_clinic_ids
+    ?? source.reviewGroupClinicIds
+    ?? source.review_clinic_ids
+    ?? source.reviewClinicIds
+    ?? null;
+  const values = Array.isArray(raw)
+    ? raw
+    : String(raw || '').split(',');
+  return [...new Set(values
+    .map((value) => Number(value))
+    .filter((value) => Number.isInteger(value) && value > 0))];
+}
+
+function applyReviewClinicFilter(scope, source = {}) {
+  const requestedClinicIds = parseReviewClinicIds(source);
+  if (!requestedClinicIds.length || scope?.scope !== 'group') {
+    return scope;
+  }
+
+  const allowedIds = new Set((scope?.clinicIds || []).filter(Number.isInteger));
+  const selectedIds = requestedClinicIds.filter((clinicId) => allowedIds.has(clinicId));
+  return {
+    ...scope,
+    clinicIds: selectedIds,
+  };
 }
 
 function isReviewRequestList(list) {
@@ -1858,8 +1947,8 @@ async function sendReviewRatingFollowUp({ list, item, conversation, rating, clin
   const body = isPositive
     ? (googleReviewUrl
       ? (rewardEnabled
-        ? `¡Muchísimas gracias por tu valoración! 😊 *Como gratitud por valorarnos te vamos a regalar ${rewardDescription || 'un detalle'} si dejas la reseña también en Google* para que otras personas puedan verla.\n\nPuedes dejarla aquí: ${googleReviewUrl}\n\nUna vez que nos hayas valorado, *escríbenos a este WhatsApp* para indicarte cómo puedes reclamar tu regalo. Te contestaremos en horario laboral antes de 24h.`
-        : `¡Muchísimas gracias por tu valoración! 😊 *Nos ayudaría muchísimo que también la dejaras en Google* para que otras personas puedan verla.\n\nNo se tarda nada, pincha en el enlace de aquí abajo 👇\n${googleReviewUrl}`)
+        ? `Como gratitud por valorarnos *te vamos a regalar ${rewardDescription || 'un detalle'}* para ti y para toda tu familia *si dejas la reseña también en Google* para que otras personas puedan verla.\n\nSolo tienes que pinchar aquí: ${googleReviewUrl}\n\nUna vez que nos hayas valorado, escríbenos a este WhatsApp para indicarte cómo puedes reclamar tu regalo. Te contestaremos en horario laboral antes de 24h.`
+        : `¿Podrías publicarla en Google para que otras personas puedan verla? Solo tienes que pinchar en el enlace de aquí abajo 👇\n${googleReviewUrl}\n\n¡Nos ayudaría muchísimo! 😊`)
       : 'Gracias por tu valoración. Hemos registrado tu opinión.')
     : 'Gracias por responder. ¿Nos ayudarías contándonos el motivo de esta valoración? Puedes escribirlo aquí mismo y lo revisaremos con el equipo.';
   if (!isWithinWhatsappSessionWindow(occurredAt)) {
@@ -1981,7 +2070,8 @@ async function sendReviewRatingFollowUp({ list, item, conversation, rating, clin
 }
 
 function formatReviewDate(value) {
-  const date = value instanceof Date ? value : new Date(value || Date.now());
+  if (!value) return '';
+  const date = value instanceof Date ? value : new Date(value);
   if (Number.isNaN(date.getTime())) return '';
   return date.toLocaleDateString('es-ES', { day: '2-digit', month: '2-digit', year: 'numeric' });
 }
@@ -2024,6 +2114,10 @@ async function getReviewRequestedPatientIds(scope) {
 function mapReviewPatientItem({ patient, appointment = null, source = 'manual_selection' }) {
   const name = buildPatientDisplayName(patient);
   const appointmentDate = appointment?.inicio || appointment?.appointment_at || null;
+  const formattedAppointmentDate = formatReviewDate(appointmentDate);
+  const visitReference = formattedAppointmentDate
+    ? `el pasado ${formattedAppointmentDate}`
+    : 'en tu última visita';
   const treatment = normalizeText(appointment?.tratamiento?.nombre || appointment?.titulo || appointment?.motivo)
     || (source === 'completed_treatment' ? 'tratamiento realizado' : 'visita');
   const clinicName = normalizeText(appointment?.clinica?.nombre_clinica || '');
@@ -2051,8 +2145,9 @@ function mapReviewPatientItem({ patient, appointment = null, source = 'manual_se
       apellidos: patient.apellidos || '',
       nombre_completo: name,
       tratamiento: treatment,
-      fecha: formatReviewDate(appointmentDate),
-      fecha_cita: formatReviewDate(appointmentDate),
+      fecha: formattedAppointmentDate,
+      fecha_cita: formattedAppointmentDate,
+      referencia_visita: visitReference,
       clinica: clinicName,
       nombre_clinica: clinicName,
     },
@@ -2273,9 +2368,6 @@ async function buildReviewTreatmentOptions(scope) {
 function buildReviewAutomationScopeWhere(scope = {}, { includeInactive = false } = {}) {
   const clinicIds = Array.isArray(scope?.clinicIds) ? scope.clinicIds.filter(Number.isInteger) : [];
   const clauses = [];
-  if (scope.scope === 'group' && Number.isInteger(scope.groupId)) {
-    clauses.push({ group_id: scope.groupId, clinic_id: null });
-  }
   if (clinicIds.length === 1) {
     clauses.push({ clinic_id: clinicIds[0], group_id: null });
   } else if (clinicIds.length > 1) {
@@ -2439,14 +2531,28 @@ async function findApprovedReviewWhatsappTemplate(scope, explicitTemplateId = nu
     where: {
       is_active: true,
       status: 'APPROVED',
-      [Op.or]: [
-        { clinic_id: { [Op.in]: clinicIds } },
-        { clinic_id: null },
+      [Op.and]: [
+        {
+          [Op.or]: [
+            { clinic_id: { [Op.in]: clinicIds } },
+            { clinic_id: null },
+          ],
+        },
+        {
+          [Op.or]: [
+            { name: { [Op.like]: `%${REVIEW_TEMPLATE_NAME}%` } },
+            { name: { [Op.like]: '%solicitar_resena%' } },
+            { name: { [Op.like]: '%solicitud_resena%' } },
+            { name: { [Op.like]: '%solicitud_de_valoracion%' } },
+            { display_name: { [Op.like]: '%reseña%' } },
+            { display_name: { [Op.like]: '%resena%' } },
+            ...(targetWabaId ? [{ waba_id: targetWabaId }] : []),
+          ],
+        },
       ],
     },
     include: [{ model: db.WhatsappTemplateCatalog, as: 'catalog', attributes: ['id', 'name', 'display_name', 'body_text', 'variables'], required: false }],
     order: [['updatedAt', 'DESC'], ['id', 'DESC']],
-    limit: 100,
   });
   return candidates
     .filter(isPrimaryReviewRequestWhatsappTemplateCandidate)
@@ -2564,20 +2670,183 @@ async function hasGoogleReviewUrlForScope(scope) {
   return checks.every(Boolean);
 }
 
+async function hasWhatsappConfigForClinic(clinicId) {
+  const safeClinicId = Number(clinicId || 0);
+  if (!safeClinicId) return false;
+  try {
+    const config = await whatsappService.getClinicConfig(safeClinicId);
+    return !!(config?.phoneNumberId && config?.accessToken);
+  } catch (_) {
+    return false;
+  }
+}
+
+async function hasWhatsappConfigForScope(scope) {
+  const clinicIds = Array.isArray(scope?.clinicIds) ? scope.clinicIds.filter(Number.isInteger) : [];
+  if (!clinicIds.length) return false;
+  const checks = await Promise.all(clinicIds.map((clinicId) => hasWhatsappConfigForClinic(clinicId)));
+  return checks.every(Boolean);
+}
+
+async function buildReviewClinicStatuses(scope, options = {}) {
+  const clinicIds = Array.isArray(scope?.clinicIds) ? scope.clinicIds.filter(Number.isInteger) : [];
+  if (!clinicIds.length || !Clinica) return [];
+
+  const reviewSource = normalizeReviewRequestSource(options.review_source || options.reviewSource);
+  const treatmentIds = parseReviewTreatmentIds(options);
+  const clinics = await Clinica.findAll({
+    where: { id_clinica: { [Op.in]: clinicIds } },
+    attributes: ['id_clinica', 'nombre_clinica'],
+    order: [['nombre_clinica', 'ASC']],
+    raw: true,
+  });
+
+  return Promise.all(clinics.map(async (clinic) => {
+    const clinicId = Number(clinic.id_clinica);
+    const clinicScope = {
+      ...scope,
+      scope: 'clinic',
+      clinicIds: [clinicId],
+      groupId: null,
+      isAll: false,
+      isValid: true,
+    };
+    const [candidateItems, approvedTemplate, googleReviewUrlAvailable, whatsappAvailable, clinicAutomationTemplate] = await Promise.all([
+      buildItemsForReviewRequest(clinicScope, {
+        review_request: true,
+        review_source: reviewSource,
+        review_treatment_ids: treatmentIds,
+        review_treatment_moment: options.review_treatment_moment || options.reviewTreatmentMoment || null,
+        limit: 5000,
+      }),
+      findApprovedReviewWhatsappTemplate(clinicScope),
+      hasGoogleReviewUrlForScope(clinicScope),
+      hasWhatsappConfigForScope(clinicScope),
+      getReviewAutomationTemplate(clinicScope, { includeInactive: true }),
+    ]);
+    const ready = !!googleReviewUrlAvailable && !!whatsappAvailable && !!approvedTemplate;
+    const serializedAutomation = serializeReviewAutomationTemplate(clinicAutomationTemplate);
+    const automationExcludedByOverride = !!clinicAutomationTemplate && clinicAutomationTemplate.is_active !== true;
+    const missing = [
+      !googleReviewUrlAvailable ? 'google_review_url' : null,
+      !whatsappAvailable ? 'whatsapp_connection' : null,
+      !approvedTemplate ? 'approved_whatsapp_template' : null,
+    ].filter(Boolean);
+    const googleLabel = googleReviewUrlAvailable ? 'Ficha lista' : 'Falta Perfil Google';
+    const whatsappLabel = whatsappAvailable ? 'WhatsApp conectado' : 'Falta WhatsApp';
+    const templateLabel = approvedTemplate ? 'Plantilla aprobada' : 'Plantilla del sistema pendiente';
+    const statusLabel = ready ? 'Lista para enviar' : 'No enviará todavía';
+    const statusHint = ready
+      ? 'Esta sede tiene Perfil Google, WhatsApp y plantilla aprobada. Puede recibir solicitudes de valoración.'
+      : [
+          !googleReviewUrlAvailable ? 'Conecta su Perfil Google para generar el enlace correcto de reseña.' : null,
+          !whatsappAvailable ? 'Conecta WhatsApp para poder enviar la solicitud.' : null,
+          !approvedTemplate ? 'ClinicaClick debe tener una plantilla de reseñas aprobada por WhatsApp para esta sede.' : null,
+        ].filter(Boolean).join(' ');
+    const automationLabel = clinicAutomationTemplate?.is_active === true
+      ? (ready ? 'Automatización activa' : 'Configurada, sin enviar')
+      : (ready ? 'Lista para activar' : 'Pendiente');
+    const automationHint = clinicAutomationTemplate?.is_active === true
+      ? (ready
+        ? 'La sede pedirá valoraciones automáticamente cuando se cumplan las reglas.'
+        : 'La automatización está guardada, pero no enviará reseñas hasta resolver los requisitos pendientes.')
+      : (ready
+        ? 'Puede activarse desde el interruptor general del grupo.'
+        : 'No se ejecutará hasta resolver los requisitos pendientes.');
+
+    return {
+      clinic_id: clinicId,
+      clinic_name: normalizeText(clinic.nombre_clinica) || `Clínica ${clinicId}`,
+      possible_patients: candidateItems.length,
+      google_review_url_available: !!googleReviewUrlAvailable,
+      google_status_label: googleLabel,
+      whatsapp_available: !!whatsappAvailable,
+      whatsapp_status_label: whatsappLabel,
+      approved_template_available: !!approvedTemplate,
+      approved_template_id: approvedTemplate?.id || null,
+      template_status_label: templateLabel,
+      clinic_automation_enabled: clinicAutomationTemplate?.is_active === true,
+      clinic_automation_has_override: !!clinicAutomationTemplate,
+      clinic_automation_excluded_by_override: automationExcludedByOverride,
+      clinic_automation_template: serializedAutomation,
+      status_label: statusLabel,
+      status_hint: statusHint,
+      automation_label: automationLabel,
+      automation_hint: automationHint,
+      ready,
+      missing,
+    };
+  }));
+}
+
+function buildReviewReadinessExclusion(item, readinessByClinic = new Map()) {
+  if (!item || String(item.status || '').startsWith('excluded')) return null;
+
+  const clinicId = Number(item.clinica_id || item.clinic_id || 0) || null;
+  if (!clinicId) {
+    return {
+      status: 'excluded_review_clinic_unassigned',
+      exclusion_reason: 'clinica_no_identificada',
+      selected: false,
+      reason: 'No se ha podido asociar este contacto a una clínica del grupo. Revisa teléfono/email o asigna sede antes de enviar.',
+    };
+  }
+
+  const clinicStatus = readinessByClinic.get(clinicId);
+  if (!clinicStatus) {
+    return {
+      status: 'excluded_review_clinic_unavailable',
+      exclusion_reason: 'clinica_fuera_de_grupo',
+      selected: false,
+      reason: 'La clínica asociada no está disponible en el grupo seleccionado.',
+    };
+  }
+
+  if (clinicStatus.ready) return null;
+
+  const missing = Array.isArray(clinicStatus.missing) ? clinicStatus.missing : [];
+  const missingLabels = missing.map((key) => {
+    if (key === 'google_review_url') return 'ficha Google de reseñas';
+    if (key === 'approved_whatsapp_template') return 'plantilla WhatsApp aprobada';
+    return key;
+  });
+  return {
+    status: 'excluded_review_clinic_not_ready',
+    exclusion_reason: 'clinica_no_preparada_resenas',
+    selected: false,
+    reason: `La clínica ${clinicStatus.clinic_name || clinicStatus.clinicName || clinicId} todavía no puede pedir reseñas${missingLabels.length ? `: falta ${missingLabels.join(' y ')}` : '.'}.`,
+  };
+}
+
+function applyReviewClinicReadinessExclusions(itemPayloads = [], clinicStatuses = []) {
+  const readinessByClinic = new Map(
+    (clinicStatuses || [])
+      .map((status) => [Number(status.clinic_id || status.clinicId || 0), status])
+      .filter(([clinicId]) => clinicId)
+  );
+  if (!readinessByClinic.size) return itemPayloads;
+
+  return itemPayloads.map((item) => {
+    const exclusionPatch = buildReviewReadinessExclusion(item, readinessByClinic);
+    return exclusionPatch ? { ...item, ...exclusionPatch } : item;
+  });
+}
+
 async function getReviewRequestSummary(scope, options = {}) {
   const reviewSource = normalizeReviewRequestSource(options.review_source || options.reviewSource);
   const treatmentIds = parseReviewTreatmentIds(options);
+  const effectiveScope = applyReviewClinicFilter(scope, options);
   const [candidates, treatmentOptions] = await Promise.all([
-    buildItemsForReviewRequest(scope, {
+    buildItemsForReviewRequest(effectiveScope, {
       review_request: true,
       review_source: reviewSource,
       review_treatment_ids: treatmentIds,
       review_treatment_moment: options.review_treatment_moment || options.reviewTreatmentMoment || null,
       limit: 5000,
     }),
-    buildReviewTreatmentOptions(scope),
+    buildReviewTreatmentOptions(effectiveScope),
   ]);
-  const clinicIds = Array.isArray(scope?.clinicIds) ? scope.clinicIds.filter(Number.isInteger) : [];
+  const clinicIds = Array.isArray(effectiveScope?.clinicIds) ? effectiveScope.clinicIds.filter(Number.isInteger) : [];
   if (!clinicIds.length) {
     return {
       success: true,
@@ -2592,6 +2861,7 @@ async function getReviewRequestSummary(scope, options = {}) {
         automation_template: null,
         approved_template_available: false,
         google_review_url_available: false,
+        whatsapp_available: false,
       },
     };
   }
@@ -2630,76 +2900,100 @@ async function getReviewRequestSummary(scope, options = {}) {
     { replacements: { clinicIds, objectiveId: OBJECTIVE_ID }, type: QueryTypes.SELECT }
   );
 
-  const lowRatingReasons = await db.sequelize.query(
+  const recentPrivateRatings = await db.sequelize.query(
     `
     SELECT
       COALESCE(i.name, p.nombre, 'Paciente') AS patient_name,
-      JSON_UNQUOTE(JSON_EXTRACT(f.payload, '$.content')) AS reason,
+      COALESCE(i.clinica_id, l.clinica_id) AS clinic_id,
+      cl.nombre_clinica AS clinic_name,
+      CAST(JSON_UNQUOTE(JSON_EXTRACT(e.payload, '$.rating')) AS UNSIGNED) AS rating,
       (
-        SELECT CAST(JSON_UNQUOTE(JSON_EXTRACT(r.payload, '$.rating')) AS UNSIGNED)
-        FROM MarketingPatientContactEvents r
-        WHERE r.list_id = f.list_id
-          AND r.item_id = f.item_id
-          AND r.event_type IN ('review_rating_received', 'review_request_rating', 'review_rating_updated')
-        ORDER BY r.occurred_at DESC
+        SELECT JSON_UNQUOTE(JSON_EXTRACT(f.payload, '$.content'))
+        FROM MarketingPatientContactEvents f
+        WHERE f.list_id = e.list_id
+          AND f.item_id = e.item_id
+          AND f.event_type = 'review_private_feedback_received'
+          AND JSON_UNQUOTE(JSON_EXTRACT(f.payload, '$.content')) IS NOT NULL
+        ORDER BY f.occurred_at DESC
         LIMIT 1
-      ) AS rating,
-      f.occurred_at
-    FROM MarketingPatientContactEvents f
-    INNER JOIN MarketingPatientLists l ON l.id = f.list_id
-    LEFT JOIN MarketingPatientListItems i ON i.id = f.item_id
-    LEFT JOIN Pacientes p ON p.id_paciente = f.paciente_id
+      ) AS reason,
+      e.occurred_at
+    FROM MarketingPatientContactEvents e
+    INNER JOIN MarketingPatientLists l ON l.id = e.list_id
+    LEFT JOIN MarketingPatientListItems i ON i.id = e.item_id
+    LEFT JOIN Pacientes p ON p.id_paciente = e.paciente_id
+    LEFT JOIN Clinicas cl ON cl.id_clinica = COALESCE(i.clinica_id, l.clinica_id)
     WHERE l.objective_id = :objectiveId
       AND COALESCE(i.clinica_id, l.clinica_id) IN (:clinicIds)
-      AND f.event_type = 'review_private_feedback_received'
-      AND JSON_UNQUOTE(JSON_EXTRACT(f.payload, '$.content')) IS NOT NULL
-    ORDER BY f.occurred_at DESC
-    LIMIT 5
+      AND e.event_type IN ('review_rating_received', 'review_request_rating', 'review_rating_updated')
+      AND CAST(JSON_UNQUOTE(JSON_EXTRACT(e.payload, '$.rating')) AS UNSIGNED) BETWEEN 1 AND 5
+    ORDER BY e.occurred_at DESC
+    LIMIT 50
     `,
     { replacements: { clinicIds, objectiveId: OBJECTIVE_ID }, type: QueryTypes.SELECT }
   );
 
-  const [automationTemplate, approvedReviewTemplate, googleReviewUrlAvailable] = await Promise.all([
+  const [automationTemplate, approvedReviewTemplate, googleReviewUrlAvailable, clinicStatuses] = await Promise.all([
     getReviewAutomationTemplate(scope),
-    findApprovedReviewWhatsappTemplate(scope),
-    hasGoogleReviewUrlForScope(scope),
+    findApprovedReviewWhatsappTemplate(effectiveScope),
+    hasGoogleReviewUrlForScope(effectiveScope),
+    scope?.scope === 'group' ? buildReviewClinicStatuses(scope, options) : Promise.resolve([]),
   ]);
+  const groupReadyClinics = clinicStatuses.filter((clinic) => clinic.ready);
+  const whatsappAvailable = scope?.scope === 'group'
+    ? groupReadyClinics.length > 0
+    : await hasWhatsappConfigForScope(effectiveScope);
+  const summaryCandidates = scope?.scope === 'group'
+    ? applyReviewClinicReadinessExclusions(candidates, clinicStatuses).filter((item) => !String(item.status || '').startsWith('excluded'))
+    : candidates;
+  const groupApprovedTemplate = groupReadyClinics.find((clinic) => clinic.approved_template_id)
+    || clinicStatuses.find((clinic) => clinic.approved_template_id)
+    || null;
+  const effectiveApprovedTemplateId = approvedReviewTemplate?.id || groupApprovedTemplate?.approved_template_id || null;
+  const groupAutomationTemplates = clinicStatuses
+    .filter((clinic) => clinic.clinic_automation_enabled && clinic.clinic_automation_template)
+    .map((clinic) => clinic.clinic_automation_template);
+  const effectiveAutomationTemplate = scope?.scope === 'group'
+    ? (groupAutomationTemplates[0] || null)
+    : serializeReviewAutomationTemplate(automationTemplate);
+  const automationEnabled = scope?.scope === 'group'
+    ? groupReadyClinics.length > 0 && groupReadyClinics.every((clinic) => clinic.clinic_automation_enabled === true)
+    : !!automationTemplate;
 
   return {
     success: true,
     summary: {
-      possible_patients: candidates.length,
-      candidates_preview: candidates.slice(0, 8).map(serializeItem),
+      possible_patients: summaryCandidates.length,
+      candidates_preview: summaryCandidates.slice(0, 8).map(serializeItem),
       treatment_options: treatmentOptions,
       requests_sent: Number(sentRow?.total || 0),
       ratings_1_to_4: Number(ratingsRow?.ratings_1_to_4 || 0),
       ratings_5: Number(ratingsRow?.ratings_5 || 0),
-      low_rating_reasons: (lowRatingReasons || [])
+      low_rating_reasons: (recentPrivateRatings || [])
         .map((row) => ({
           patient_name: normalizeText(row.patient_name) || 'Paciente',
+          clinic_id: Number(row.clinic_id || 0) || null,
+          clinic_name: normalizeText(row.clinic_name) || null,
           rating: Number(row.rating || 0) || null,
-          reason: normalizeText(row.reason).slice(0, 500),
+          reason: normalizeText(row.reason || (Number(row.rating || 0) === 5 ? 'Valoración positiva sin comentario.' : 'Sin comentario.')).slice(0, 500),
           occurred_at: row.occurred_at || null,
         }))
-        .filter((row) => row.reason),
-      automation_enabled: !!automationTemplate,
-      automation_template: serializeReviewAutomationTemplate(automationTemplate),
-      approved_template_available: !!approvedReviewTemplate,
-      approved_template_id: approvedReviewTemplate?.id || null,
+        .filter((row) => row.rating),
+      automation_enabled: automationEnabled,
+      automation_template: effectiveAutomationTemplate,
+      approved_template_available: !!effectiveApprovedTemplateId,
+      approved_template_id: effectiveApprovedTemplateId,
       google_review_url_available: googleReviewUrlAvailable,
+      whatsapp_available: whatsappAvailable,
+      clinic_statuses: clinicStatuses,
+      group_total_clinics: clinicStatuses.length || null,
+      group_ready_clinics: groupReadyClinics.length,
+      group_blocked_clinics: clinicStatuses.length ? clinicStatuses.length - groupReadyClinics.length : null,
     },
   };
 }
 
 function buildReviewAutomationTemplateIdentity(scope) {
-  if (scope?.scope === 'group' && Number.isInteger(scope.groupId)) {
-    return {
-      template_key: `review_request_after_completed__group_${scope.groupId}`,
-      public_id: `flw_review_req_group_${scope.groupId}`,
-      clinic_id: null,
-      group_id: scope.groupId,
-    };
-  }
   const clinicIds = Array.isArray(scope?.clinicIds) ? scope.clinicIds.filter(Number.isInteger) : [];
   if (clinicIds.length === 1) {
     return {
@@ -2712,6 +3006,17 @@ function buildReviewAutomationTemplateIdentity(scope) {
   const err = new Error('Activa la automatización de reseñas para una clínica o un grupo concreto.');
   err.status = 400;
   throw err;
+}
+
+function buildClinicReviewScopeFromGroup(scope, clinicId) {
+  return {
+    ...scope,
+    scope: 'clinic',
+    clinicIds: [clinicId],
+    groupId: null,
+    isAll: false,
+    isValid: true,
+  };
 }
 
 function buildReviewAutomationNodes({
@@ -2839,7 +3144,7 @@ function buildReviewAutomationNodes({
   ];
 }
 
-async function setReviewRequestAutomation(scope, body = {}, userId = null) {
+async function upsertReviewRequestAutomationForClinic(scope, body = {}, userId = null) {
   if (!AutomationFlowTemplateV2) {
     const err = new Error('El motor de automatizaciones V2 no está disponible.');
     err.status = 503;
@@ -2872,11 +3177,49 @@ async function setReviewRequestAutomation(scope, body = {}, userId = null) {
     where: { template_key: identity.template_key },
     order: [['version', 'DESC'], ['id', 'DESC']],
   });
+  if (!enabled && !existing) {
+    const [approvedReviewTemplate, googleReviewUrlAvailable, whatsappAvailable] = await Promise.all([
+      findApprovedReviewWhatsappTemplate(scope, whatsappTemplateId || null),
+      hasGoogleReviewUrlForScope(scope),
+      hasWhatsappConfigForScope(scope),
+    ]);
+    return {
+      success: true,
+      automation_enabled: false,
+      automation_template: null,
+      approved_template_available: !!approvedReviewTemplate,
+      approved_template_id: approvedReviewTemplate?.id || null,
+      google_review_url_available: googleReviewUrlAvailable,
+      whatsapp_available: whatsappAvailable,
+      warnings: [
+        !approvedReviewTemplate ? 'template_not_approved' : null,
+        !googleReviewUrlAvailable ? 'google_review_url_missing' : null,
+        !whatsappAvailable ? 'whatsapp_missing' : null,
+      ].filter(Boolean),
+    };
+  }
+
+  const [readyApprovedTemplate, readyGoogleReviewUrlAvailable, readyWhatsappAvailable] = await Promise.all([
+    findApprovedReviewWhatsappTemplate(scope, whatsappTemplateId || null),
+    hasGoogleReviewUrlForScope(scope),
+    hasWhatsappConfigForScope(scope),
+  ]);
+  if (enabled && (!readyApprovedTemplate || !readyGoogleReviewUrlAvailable || !readyWhatsappAvailable)) {
+    const warnings = [
+      !readyApprovedTemplate ? 'template_not_approved' : null,
+      !readyGoogleReviewUrlAvailable ? 'google_review_url_missing' : null,
+      !readyWhatsappAvailable ? 'whatsapp_missing' : null,
+    ].filter(Boolean);
+    const err = new Error('No se puede activar la automatización hasta conectar Perfil Google, WhatsApp y una plantilla aprobada de reseñas.');
+    err.status = 409;
+    err.details = { reason: 'review_automation_requirements_missing', warnings };
+    throw err;
+  }
   const now = new Date();
   const nodes = buildReviewAutomationNodes({
     reviewSource,
     reviewThreshold,
-    whatsappTemplateId: whatsappTemplateId || approvedTemplate?.id || null,
+    whatsappTemplateId: whatsappTemplateId || approvedTemplate?.id || readyApprovedTemplate?.id || null,
     reviewGiftEnabled,
     reviewGiftDescription,
     reviewDisplayClinicName,
@@ -2901,8 +3244,11 @@ async function setReviewRequestAutomation(scope, body = {}, userId = null) {
   const row = existing
     ? await existing.update(payload)
     : await AutomationFlowTemplateV2.create(payload);
-  const approvedReviewTemplate = await findApprovedReviewWhatsappTemplate(scope, whatsappTemplateId || null);
-  const googleReviewUrlAvailable = await hasGoogleReviewUrlForScope(scope);
+  const [approvedReviewTemplate, googleReviewUrlAvailable, whatsappAvailable] = await Promise.all([
+    findApprovedReviewWhatsappTemplate(scope, whatsappTemplateId || null),
+    hasGoogleReviewUrlForScope(scope),
+    hasWhatsappConfigForScope(scope),
+  ]);
   return {
     success: true,
     automation_enabled: row.is_active === true,
@@ -2910,9 +3256,66 @@ async function setReviewRequestAutomation(scope, body = {}, userId = null) {
     approved_template_available: !!approvedReviewTemplate,
     approved_template_id: approvedReviewTemplate?.id || null,
     google_review_url_available: googleReviewUrlAvailable,
+    whatsapp_available: whatsappAvailable,
     warnings: [
       !approvedReviewTemplate ? 'template_not_approved' : null,
       !googleReviewUrlAvailable ? 'google_review_url_missing' : null,
+      !whatsappAvailable ? 'whatsapp_missing' : null,
+    ].filter(Boolean),
+  };
+}
+
+async function setReviewRequestAutomation(scope, body = {}, userId = null) {
+  const clinicIds = Array.isArray(scope?.clinicIds) ? scope.clinicIds.filter(Number.isInteger) : [];
+  if (scope?.scope !== 'group' || clinicIds.length <= 1) {
+    return upsertReviewRequestAutomationForClinic(scope, body, userId);
+  }
+
+  const results = [];
+  for (const clinicId of clinicIds) {
+    const clinicScope = buildClinicReviewScopeFromGroup(scope, clinicId);
+    try {
+      const result = await upsertReviewRequestAutomationForClinic(clinicScope, body, userId);
+      results.push({ clinic_id: clinicId, ...result });
+    } catch (error) {
+      results.push({
+        clinic_id: clinicId,
+        success: false,
+        automation_enabled: false,
+        error: error?.message || 'No se pudo actualizar la automatización de esta clínica.',
+        reason: error?.details?.reason || null,
+      });
+    }
+  }
+
+  const successful = results.filter((result) => result.success !== false);
+  const active = successful.filter((result) => result.automation_enabled === true);
+  const firstTemplate = active.find((result) => result.automation_template)?.automation_template
+    || successful.find((result) => result.automation_template)?.automation_template
+    || null;
+  const approvedTemplateAvailable = successful.some((result) => result.approved_template_available === true);
+  const googleReviewUrlAvailable = successful.some((result) => result.google_review_url_available === true);
+  const whatsappAvailable = successful.some((result) => result.whatsapp_available === true);
+  return {
+    success: true,
+    automation_enabled: active.length > 0 && active.length === successful.length && successful.length > 0,
+    automation_template: firstTemplate,
+    approved_template_available: approvedTemplateAvailable,
+    approved_template_id: successful.find((result) => result.approved_template_id)?.approved_template_id || null,
+    google_review_url_available: googleReviewUrlAvailable,
+    whatsapp_available: whatsappAvailable,
+    group_result: {
+      requested_clinics: clinicIds.length,
+      updated_clinics: successful.length,
+      active_clinics: active.length,
+      failed_clinics: results.filter((result) => result.success === false).length,
+      results,
+    },
+    warnings: [
+      !approvedTemplateAvailable ? 'template_not_approved' : null,
+      !googleReviewUrlAvailable ? 'google_review_url_missing' : null,
+      !whatsappAvailable ? 'whatsapp_missing' : null,
+      results.some((result) => result.success === false) ? 'some_clinics_failed' : null,
     ].filter(Boolean),
   };
 }
@@ -2950,6 +3353,11 @@ async function createAndStartReviewRequestForAppointment(options = {}) {
   const googleReviewUrl = normalizeText(clinic?.url_dejar_resena);
   if (!googleReviewUrl) {
     return { success: true, sent: false, skipped: true, reason: 'google_review_url_missing' };
+  }
+
+  const whatsappAvailable = await hasWhatsappConfigForScope(scope);
+  if (!whatsappAvailable) {
+    return { success: true, sent: false, skipped: true, reason: 'whatsapp_connection_missing' };
   }
 
   const template = await findApprovedReviewWhatsappTemplate(scope, options.whatsappTemplateId || options.whatsapp_template_id || null);
@@ -3433,7 +3841,6 @@ async function listCampaigns(scope) {
 async function createCampaign(scope, body = {}, userId = null) {
   const rows = Array.isArray(body.import_rows) ? body.import_rows.filter((row) => row && typeof row === 'object') : [];
   const channels = normalizeChannels(body.channels || body.destinations || body.channel);
-  const scopePayload = serializeScope(scope);
   const listSource = normalizeText(body.list_source || body.source || 'import');
   const source = listSource === 'current_patients' ? 'existing_patients_condition' : (listSource === 'manual' ? 'manual_list' : 'imported_file');
   const templateUsage = normalizeTemplateUsage(body.template_usage || body.template_uso || body.uso || 'promocion');
@@ -3445,6 +3852,7 @@ async function createCampaign(scope, body = {}, userId = null) {
   const reviewSource = normalizeReviewRequestSource(body.review_source || body.reviewRequestSource);
   const reviewTreatmentIds = parseReviewTreatmentIds(body);
   const reviewThreshold = 5;
+  const effectiveScope = isReviewRequest ? applyReviewClinicFilter(scope, body) : scope;
 
   return db.sequelize.transaction(async (transaction) => {
     let itemPayloads = [];
@@ -3454,18 +3862,27 @@ async function createCampaign(scope, body = {}, userId = null) {
     let importMetadata = null;
 
     if (source === 'existing_patients_condition') {
-      itemPayloads = await buildItemsFromCurrentPatients(scope, body);
+      itemPayloads = await buildItemsFromCurrentPatients(effectiveScope, body);
     } else {
       const importResult = buildItemsFromRows(rows, body, channels);
       itemPayloads = importResult.items;
       columnMapping = importResult.columnMapping;
       customFieldsSchema = importResult.customFieldsSchema;
-      itemPayloads = await attachExistingPatientContext(itemPayloads, scope, transaction);
+      itemPayloads = await attachExistingPatientContext(itemPayloads, effectiveScope, transaction);
+      itemPayloads = await attachImportedClinicContext(itemPayloads, effectiveScope, transaction);
       importMetadata = importResult.importMetadata;
       importSummary = buildImportSummary(itemPayloads, importMetadata);
     }
 
-    itemPayloads = await applyMarketingOptOutExclusions(itemPayloads, scope, transaction);
+    itemPayloads = await applyMarketingOptOutExclusions(itemPayloads, effectiveScope, transaction);
+    if (isReviewRequest && effectiveScope?.scope === 'group') {
+      const clinicStatuses = await buildReviewClinicStatuses(effectiveScope, {
+        review_source: reviewSource,
+        review_treatment_ids: reviewTreatmentIds,
+        review_treatment_moment: body.review_treatment_moment || body.reviewTreatmentMoment || null,
+      });
+      itemPayloads = applyReviewClinicReadinessExclusions(itemPayloads, clinicStatuses);
+    }
     if (importMetadata) {
       importSummary = buildImportSummary(itemPayloads, importMetadata);
     }
@@ -3475,7 +3892,7 @@ async function createCampaign(scope, body = {}, userId = null) {
       objective_id: OBJECTIVE_ID,
       source,
       status: 'draft',
-      ...scopePayload,
+      ...serializeScope(effectiveScope),
       treatment: null,
       condition_summary: source === 'existing_patients_condition'
         ? (isReviewRequest
@@ -3495,6 +3912,7 @@ async function createCampaign(scope, body = {}, userId = null) {
         list_source: source,
         review_request: isReviewRequest,
         review_source: isReviewRequest ? reviewSource : null,
+        review_group_clinic_ids: isReviewRequest ? parseReviewClinicIds(body) : [],
         review_treatment_id: isReviewRequest ? (reviewTreatmentIds[0] || null) : null,
         review_treatment_ids: isReviewRequest ? reviewTreatmentIds : [],
         review_treatment_moment: isReviewRequest ? normalizeText(body.review_treatment_moment || body.reviewTreatmentMoment || '') || null : null,
@@ -3546,11 +3964,22 @@ async function createCampaign(scope, body = {}, userId = null) {
 
     const created = await MarketingPatientList.findByPk(list.id, { transaction });
     const preview = itemPayloads.slice(0, 5).map((item, index) => ({ ...item, id: index + 1 }));
+    const responseImportSummary = importSummary
+      ? {
+        ...importSummary,
+        imported_items: itemPayloads
+          .filter((item) => item.status === 'ready')
+          .map(serializeImportResultItem),
+        discarded_items: itemPayloads
+          .filter((item) => String(item.status || '').startsWith('excluded'))
+          .map(serializeImportResultItem),
+      }
+      : null;
     return {
       success: true,
       campaign: serializeCampaign(created, { itemsPreview: preview }),
       list: serializeCampaign(created, { itemsPreview: preview }),
-      import_result: importSummary,
+      import_result: responseImportSummary,
     };
   });
 }
@@ -4036,6 +4465,44 @@ function scoreWhatsappTemplateForScope(template, clinicIds, targetWabaId = '') {
   return 0;
 }
 
+async function resolveWhatsappTemplateForClinic(template, clinicId, clinicConfig = null) {
+  const safeClinicId = Number(clinicId || 0);
+  const plain = template?.get ? template.get({ plain: true }) : (template || {});
+  if (!template || !safeClinicId) return template || null;
+
+  const templateClinicId = Number(plain.clinic_id || 0);
+  const templateWabaId = getTemplateWabaId(plain);
+  const targetWabaId = normalizeText(clinicConfig?.wabaId || '');
+  const catalogTemplateId = Number(plain.catalog_template_id || plain.catalog?.id || 0) || null;
+
+  const sameClinic = !templateClinicId || templateClinicId === safeClinicId;
+  const sameWaba = !targetWabaId || !templateWabaId || templateWabaId === targetWabaId;
+  if (sameClinic && sameWaba) return template;
+
+  if (!catalogTemplateId || !WhatsappTemplate) return null;
+
+  const replacement = await WhatsappTemplate.findOne({
+    where: {
+      is_active: true,
+      status: 'APPROVED',
+      catalog_template_id: catalogTemplateId,
+      [Op.or]: [
+        { clinic_id: safeClinicId },
+        ...(targetWabaId ? [{ waba_id: targetWabaId }] : []),
+        { clinic_id: null },
+      ],
+    },
+    include: [{ model: db.WhatsappTemplateCatalog, as: 'catalog', attributes: ['id', 'name', 'display_name', 'body_text', 'variables'], required: false }],
+    order: [
+      ['clinic_id', 'DESC'],
+      ['updatedAt', 'DESC'],
+      ['id', 'DESC'],
+    ],
+  });
+
+  return replacement || null;
+}
+
 function resolveReviewDisplayClinicName(list, clinic) {
   const criteria = asPlainObject(list?.criteria);
   const explicit = normalizeText(criteria.review_display_clinic_name || criteria.reviewDisplayClinicName || '');
@@ -4084,6 +4551,10 @@ function resolveVariableValue(variableName, item, list, clinic) {
     url_dejar_resena: clinic?.url_dejar_resena || '',
     enlace_resena: clinic?.url_dejar_resena || '',
     tratamiento: item.treatment || '',
+    fecha: custom.fecha || custom.fecha_cita || '',
+    fecha_cita: custom.fecha_cita || custom.fecha || '',
+    referencia_visita: custom.referencia_visita || (custom.fecha_cita || custom.fecha ? `el pasado ${custom.fecha_cita || custom.fecha}` : 'en tu última visita'),
+    referencia_cita: custom.referencia_visita || (custom.fecha_cita || custom.fecha ? `el pasado ${custom.fecha_cita || custom.fecha}` : 'en tu última visita'),
   };
   return normalizeText(custom[key] || values[key] || '');
 }
@@ -4355,6 +4826,11 @@ async function prepareCampaign(scope, campaignId, body = {}, userId = null) {
     review_treatment_ids: body.review_treatment_ids || body.reviewTreatmentIds || list.criteria?.review_treatment_ids,
     review_treatment_id: body.review_treatment_id || body.reviewTreatmentId || list.criteria?.review_treatment_id,
   });
+  const effectiveScope = isReviewRequest
+    ? applyReviewClinicFilter(scope, {
+        review_group_clinic_ids: body.review_group_clinic_ids || body.reviewGroupClinicIds || list.criteria?.review_group_clinic_ids,
+      })
+    : scope;
   const reviewThreshold = 5;
   const autoSendWhenApproved = body.auto_send_when_template_approved === true || body.auto_send_when_approved === true;
   const approved = needsWhatsappTemplate
@@ -4368,7 +4844,30 @@ async function prepareCampaign(scope, campaignId, body = {}, userId = null) {
   const activeSegmentId = body.active_segment_id !== undefined || body.segment_id !== undefined
     ? normalizeText(body.active_segment_id || body.segment_id) || null
     : (isWelcomeDispatch ? null : (normalizeText(list.criteria?.active_segment_id) || null));
-  const selectedItems = await applyActiveSegmentSelection(list, dispatchItems, activeSegmentId);
+  let selectedItems = await applyActiveSegmentSelection(list, dispatchItems, activeSegmentId);
+  if (isReviewRequest && effectiveScope?.scope === 'group') {
+    const clinicStatuses = await buildReviewClinicStatuses(effectiveScope, {
+      review_source: reviewSource,
+      review_treatment_ids: reviewTreatmentIds,
+      review_treatment_moment: body.review_treatment_moment || body.reviewTreatmentMoment || list.criteria?.review_treatment_moment || null,
+    });
+    const readinessByClinic = new Map(
+      clinicStatuses
+        .map((status) => [Number(status.clinic_id || status.clinicId || 0), status])
+        .filter(([clinicId]) => clinicId)
+    );
+    const readyItems = [];
+    for (const item of selectedItems) {
+      const plain = item?.get ? item.get({ plain: true }) : item;
+      const exclusionPatch = buildReviewReadinessExclusion(plain, readinessByClinic);
+      if (exclusionPatch && item?.update) {
+        await item.update(exclusionPatch);
+      } else if (!exclusionPatch) {
+        readyItems.push(item);
+      }
+    }
+    selectedItems = readyItems;
+  }
   const nextCriteriaBase = annotateSegmentCounts({
     ...(list.criteria || {}),
     active_segment_id: activeSegmentId,
@@ -4510,7 +5009,7 @@ async function sendTest(scope, campaignId, body = {}) {
     || listCriteria.whatsapp_template_id
     || list.template_snapshot?.id
     || list.template_id;
-  const template = isReviewTemplateUsage(templateUsage)
+  let template = isReviewTemplateUsage(templateUsage)
     ? await findApprovedReviewWhatsappTemplate(scope, selectedTemplateId || null)
     : await resolveWhatsappTemplate(selectedTemplateId, scope);
   if (!template) {
@@ -4537,7 +5036,8 @@ async function sendTest(scope, campaignId, body = {}) {
     err.status = 400;
     throw err;
   }
-  const clinicId = Number(getClinicIdForList(list, scope) || body.clinic_id || 0);
+  const plainItem = item.get({ plain: true });
+  const clinicId = Number(body.clinic_id || body.clinica_id || plainItem.clinica_id || getClinicIdForList(list, scope) || 0);
   if (!clinicId) {
     const err = new Error('La campaña necesita una clínica concreta para enviar WhatsApp.');
     err.status = 400;
@@ -4550,7 +5050,13 @@ async function sendTest(scope, campaignId, body = {}) {
     err.status = 409;
     throw err;
   }
-  const plainItem = item.get({ plain: true });
+  clinicConfig.clinicId = clinicId;
+  template = await resolveWhatsappTemplateForClinic(template, clinicId, clinicConfig);
+  if (!template) {
+    const err = new Error('No hay plantilla WhatsApp aprobada compatible con la clínica del contacto de prueba.');
+    err.status = 409;
+    throw err;
+  }
   const missingVariables = buildMissingVariablesSummary({ template, items: [plainItem], list, clinic });
   if (missingVariables.length) {
     const err = new Error(formatMissingVariablesMessage(missingVariables));
@@ -5581,7 +6087,38 @@ async function runDispatchJob(payload = {}, jobRequest = null) {
     if (getDispatchConfig(currentList).cancel_requested === true) {
       break;
     }
-    const missingVariables = buildMissingVariablesSummary({ template, items: [item], list, clinic });
+    const plainItem = item.get ? item.get({ plain: true }) : item;
+    const itemClinicId = Number(plainItem.clinica_id || clinicId || 0) || null;
+    let itemClinic = clinic;
+    let itemClinicConfig = clinicConfig;
+    let itemTemplate = template;
+    if (itemClinicId && itemClinicId !== Number(clinicId || 0)) {
+      itemClinic = await loadClinicForTemplateVariables(itemClinicId);
+      itemClinicConfig = await whatsappService.getClinicConfig(itemClinicId).catch(() => null);
+      if (itemClinicConfig) itemClinicConfig.clinicId = itemClinicId;
+      itemTemplate = await resolveWhatsappTemplateForClinic(template, itemClinicId, itemClinicConfig);
+    }
+    if (!itemClinicConfig?.phoneNumberId || !itemClinicConfig?.accessToken) {
+      failed += 1;
+      await item.update({
+        dispatch_status: 'failed',
+        failed_at: new Date(),
+        last_error_code: 'whatsapp_config_missing',
+        last_error_message: 'La clínica del contacto no tiene WhatsApp conectado.',
+      });
+      continue;
+    }
+    if (!itemTemplate || String(itemTemplate.status || '').toUpperCase() !== 'APPROVED') {
+      failed += 1;
+      await item.update({
+        dispatch_status: 'failed',
+        failed_at: new Date(),
+        last_error_code: 'template_not_approved_for_clinic',
+        last_error_message: 'No hay plantilla WhatsApp aprobada compatible con la clínica del contacto.',
+      });
+      continue;
+    }
+    const missingVariables = buildMissingVariablesSummary({ template: itemTemplate, items: [plainItem], list, clinic: itemClinic });
     if (missingVariables.length) {
       await item.update({
         status: 'excluded_missing_variables',
@@ -5592,7 +6129,14 @@ async function runDispatchJob(payload = {}, jobRequest = null) {
       });
       continue;
     }
-    const result = await sendDispatchItem({ list, item, template, clinic, clinicConfig, batchIndex });
+    const result = await sendDispatchItem({
+      list,
+      item,
+      template: itemTemplate,
+      clinic: itemClinic,
+      clinicConfig: itemClinicConfig,
+      batchIndex,
+    });
     if (result.sent) sent += 1;
     else failed += 1;
   }

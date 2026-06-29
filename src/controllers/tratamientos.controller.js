@@ -120,8 +120,8 @@ exports.getTratamientos = asyncHandler(async (req, res) => {
     const clinicIdNum = toIntOrNull(clinica_id);
     const groupIdNum = toIntOrNull(grupo_clinica_id);
 
-    if (clinicIdNum && !groupIdNum) {
-        const effectiveGroupId = await resolveGroupIdForClinicId(clinicIdNum);
+    if (clinicIdNum) {
+        const effectiveGroupId = groupIdNum || await resolveGroupIdForClinicId(clinicIdNum);
         const scopeOr = [];
 
         if (!origen || origen === 'clinica') {
@@ -138,9 +138,15 @@ exports.getTratamientos = asyncHandler(async (req, res) => {
             where[Op.or] = scopeOr;
         }
     } else {
-        if (clinicIdNum) where.clinica_id = clinicIdNum;
-        if (groupIdNum) where.grupo_clinica_id = groupIdNum;
-        if (origen) where.origen = origen;
+        if (groupIdNum && !origen) {
+            where[Op.or] = [
+                { origen: 'grupo', grupo_clinica_id: groupIdNum },
+                { origen: 'sistema' },
+            ];
+        } else {
+            if (groupIdNum) where.grupo_clinica_id = groupIdNum;
+            if (origen) where.origen = origen;
+        }
     }
 
     if (disciplina) where.disciplina = disciplina;

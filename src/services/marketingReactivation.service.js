@@ -11,6 +11,7 @@ const {
   AutomationFlowCatalog,
   AutomationFlowTemplateV2,
   CitaPaciente,
+  Clinica,
   MarketingPatientContactEvent,
   MarketingPatientList,
   MarketingPatientListItem,
@@ -44,7 +45,7 @@ const REACTIVATION_ACTION_TO_MODE = {
   send_to_leads: 'lead_call_list',
   managed_calls: 'managed_calls',
 };
-const STANDARD_IMPORT_FIELDS = new Set(['name', 'first_name', 'last_name', 'phone', 'email', 'treatment', 'last_visit_at', 'clinic']);
+const STANDARD_IMPORT_FIELDS = new Set(['name', 'first_name', 'last_name', 'phone', 'phone_landline', 'email', 'treatment', 'last_visit_at', 'clinic']);
 const COMMERCIAL_TEMPLATE_USAGES = new Set(['marketing', 'comercial', 'promocion', 'promocional', 'reactivacion_pacientes']);
 
 function toDateMonthsAgo(months) {
@@ -777,10 +778,11 @@ const IMPORT_ALIASES = {
   first_name: ['nombre', 'first_name', 'firstname'],
   last_name: ['apellidos', 'apellido', 'last_name', 'lastname'],
   phone: ['telefono', 'teléfono', 'tela_fono', 'movil', 'móvil', 'ma_vil', 'telefono_movil', 'phone', 'mobile', 'whatsapp'],
+  phone_landline: ['telefono_fijo', 'teléfono_fijo', 'telefono_secundario', 'teléfono_secundario', 'fijo', 'phone_landline', 'landline', 'fixed_phone', 'telefono_casa'],
   email: ['email', 'correo', 'correo_electronico', 'mail'],
   treatment: ['tratamiento', 'treatment', 'servicio', 'procedimiento'],
   last_visit_at: ['fecha_ultima_cita', 'ultima_cita', 'última_cita', 'fecha_ultimo_tratamiento', 'last_visit', 'last_visit_at'],
-  clinic: ['clinica', 'clínica', 'clinic'],
+  clinic: ['clinica', 'clínica', 'sede', 'centro', 'clinic', 'location'],
 };
 
 function findImportHeader(headers, aliases) {
@@ -801,6 +803,39 @@ function inferColumnMapping(rows, explicit = {}) {
     mapping[field] = explicit[field] || findImportHeader(headers, aliases) || null;
   }
   return mapping;
+}
+
+async function loadImportClinicLookup(scope, transaction) {
+  const clinicIds = Array.isArray(scope?.clinicIds) ? scope.clinicIds.filter(Number.isInteger) : [];
+  if (!clinicIds.length || !Clinica) {
+    return { byId: new Map(), byName: new Map(), clinicIds };
+  }
+  const clinics = await Clinica.findAll({
+    where: { id_clinica: { [Op.in]: clinicIds } },
+    attributes: ['id_clinica', 'nombre_clinica'],
+    raw: true,
+    transaction,
+  });
+  const byId = new Map();
+  const byName = new Map();
+  for (const clinic of clinics) {
+    const id = Number(clinic.id_clinica);
+    if (!id) continue;
+    byId.set(id, id);
+    const normalizedName = normalizeKey(clinic.nombre_clinica || '');
+    if (normalizedName) byName.set(normalizedName, id);
+  }
+  return { byId, byName, clinicIds };
+}
+
+function resolveImportedClinicId(importedClinic, lookup) {
+  const normalized = normalizeText(importedClinic);
+  if (!normalized) return null;
+  const numericId = Number(normalized);
+  if (Number.isInteger(numericId) && lookup.byId.has(numericId)) {
+    return numericId;
+  }
+  return lookup.byName.get(normalizeKey(normalized)) || null;
 }
 
 function readImportValue(row, mapping, field) {
@@ -1107,6 +1142,7 @@ async function buildImportedItemPayloads(scope, body, transaction) {
   const columnMapping = inferColumnMapping(rows, body.column_mapping || {});
   const customFieldsSchema = buildCustomFieldSchema(rows, columnMapping, body.custom_fields_schema || []);
   const treatmentMappings = normalizeTreatmentMappings(body.treatment_mappings || body.treatment_mapping || {});
+  const clinicLookup = await loadImportClinicLookup(scope, transaction);
   const importTreatments = await loadImportTreatments(scope, defaultClinicId, transaction);
   const treatmentIndex = indexTreatments(importTreatments);
   const treatmentContext = {
@@ -1121,7 +1157,7 @@ async function buildImportedItemPayloads(scope, body, transaction) {
       clinica_id: clinicIds.length ? { [Op.in]: clinicIds } : defaultClinicId,
       telefono_movil: { [Op.ne]: null },
     },
-    attributes: ['id_paciente', 'clinica_id', 'nombre', 'apellidos', 'telefono_movil', 'email'],
+    attributes: ['id_paciente', 'clinica_id', 'nombre', 'apellidos', 'telefono_movil', 'telefono_secundario', 'email'],
     transaction,
   });
   const patientByPhone = new Map();
@@ -1155,7 +1191,11 @@ async function buildImportedItemPayloads(scope, body, transaction) {
     const splitName = splitFullName(normalizedFullName);
     const phoneDigits = normalizePhoneDigits(readImportValue(row, columnMapping, 'phone'));
     const formattedPhone = phoneDigits ? `+${phoneDigits}` : null;
+    const landlineDigits = normalizePhoneDigits(readImportValue(row, columnMapping, 'phone_landline'));
+    const formattedLandline = landlineDigits ? `+${landlineDigits}` : null;
     const email = readImportValue(row, columnMapping, 'email') || null;
+    const importedClinic = readImportValue(row, columnMapping, 'clinic') || null;
+    const importedClinicId = resolveImportedClinicId(importedClinic, clinicLookup);
     const rawTreatment = readImportValue(row, columnMapping, 'treatment') || body.treatment || 'Sin tratamiento asignado';
     const resolvedTreatment = await resolveImportedTreatment(rawTreatment, treatmentContext);
     const treatment = resolvedTreatment.name;
@@ -1165,21 +1205,34 @@ async function buildImportedItemPayloads(scope, body, transaction) {
     let patient = phoneDigits ? patientByPhone.get(phoneDigits) : null;
     let createdNewPatient = false;
     const validPhone = !!phoneDigits && phoneDigits.length >= 8;
+    const patientClinicId = Number(patient?.clinica_id || 0) || null;
+    const rowClinicId = patientClinicId
+      || importedClinicId
+      || (clinicIds.length === 1 ? defaultClinicId : null);
+    const clinicAssignmentError = !patientClinicId && clinicIds.length > 1 && !rowClinicId
+      ? (importedClinic
+        ? `Sede importada no reconocida dentro del grupo: ${importedClinic}.`
+        : 'No se ha podido asociar este contacto a una clínica del grupo. Añade una columna sede/clinica o revisa el teléfono/email.')
+      : null;
 
-    if (!patient && validPhone) {
+    if (!patient && validPhone && rowClinicId && !clinicAssignmentError) {
       patient = await Paciente.create({
         public_id: await generateUniquePacientePublicId(transaction),
         nombre: splitName.nombre,
         apellidos: splitName.apellidos,
         telefono_movil: formattedPhone,
+        telefono_secundario: formattedLandline,
         email,
-        clinica_id: defaultClinicId,
+        clinica_id: rowClinicId,
       }, { transaction });
       patientByPhone.set(phoneDigits, patient);
       createdNewPatient = true;
     }
 
     if (patient) {
+      if (formattedLandline && !patient.telefono_secundario) {
+        await patient.update({ telefono_secundario: formattedLandline }, { transaction });
+      }
       await ensurePacienteClinicaLink(patient, Number(patient.clinica_id || defaultClinicId), transaction);
       await ensureImportedHistoricalAppointment({
         patient,
@@ -1217,6 +1270,11 @@ async function buildImportedItemPayloads(scope, body, transaction) {
       reason = 'Tiene cita futura';
       exclusionReason = 'cita_futura';
       selected = false;
+    } else if (clinicAssignmentError) {
+      status = 'excluded_clinic_unassigned';
+      reason = clinicAssignmentError;
+      exclusionReason = 'clinica_no_identificada';
+      selected = false;
     }
     if (validPhone && !seenPhones.has(phoneDigits)) {
       seenPhones.set(phoneDigits, normalizedFullName);
@@ -1224,7 +1282,7 @@ async function buildImportedItemPayloads(scope, body, transaction) {
 
     itemPayloads.push({
       paciente_id: patient?.id_paciente || null,
-      clinica_id: Number(patient?.clinica_id || defaultClinicId),
+      clinica_id: Number(patient?.clinica_id || rowClinicId || defaultClinicId),
       name: normalizedFullName,
       phone: formattedPhone,
       email,

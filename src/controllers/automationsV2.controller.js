@@ -14,6 +14,7 @@ const Conversation = db.Conversation;
 const Message = db.Message;
 const FormSubmissionEvent = db.FormSubmissionEvent;
 const WhatsappTemplate = db.WhatsappTemplate;
+const WhatsappTemplateCatalog = db.WhatsappTemplateCatalog;
 const UsuarioClinica = db.UsuarioClinica;
 const Usuario = db.Usuario;
 const Clinica = db.Clinica;
@@ -1386,6 +1387,7 @@ function normalizeTriggerConfigForTemplate({ triggerType, entryNodeId, nodes }) 
         exclude_if_booked_day_before: parseBool(rawConfig.exclude_if_booked_day_before, false) === true,
         exclude_if_booked_same_day: parseBool(rawConfig.exclude_if_booked_same_day, false) === true,
         exclude_if_not_confirmed: parseBool(rawConfig.exclude_if_not_confirmed, false) === true,
+        only_if_not_confirmed: parseBool(rawConfig.only_if_not_confirmed, false) === true,
       },
     };
   }
@@ -1603,6 +1605,7 @@ function applyTriggerConfigToNodes({ triggerType, entryNodeId, nodes, triggerCon
       exclude_if_booked_day_before: parseBool(triggerConfig.exclude_if_booked_day_before, false) === true,
       exclude_if_booked_same_day: parseBool(triggerConfig.exclude_if_booked_same_day, false) === true,
       exclude_if_not_confirmed: parseBool(triggerConfig.exclude_if_not_confirmed, false) === true,
+      only_if_not_confirmed: parseBool(triggerConfig.only_if_not_confirmed, false) === true,
     };
   } else if (normalizedTriggerType === 'appointment_after' && isObject(triggerConfig)) {
     sanitizedTriggerConfig = {
@@ -2884,9 +2887,13 @@ function validateNodeConfig(node, nodeMap, templateLookup = {}) {
   if (nodeType === 'action/send_whatsapp') {
     const messageModeRaw = cleanString(config.message_mode) || '';
     const hasTemplateId = !isConfigValueEmpty(config.template_id);
+    const templateName = cleanString(config.template_name);
+    const hasCatalogTemplateId = !isConfigValueEmpty(config.catalog_template_id);
+    const hasTemplateReference = hasTemplateId || !!templateName || hasCatalogTemplateId;
     const hasFallbackTemplateId = !isConfigValueEmpty(config.fallback_template_id);
     const fallbackTemplateName = cleanString(config.fallback_template_name);
-    const hasFallbackTemplate = hasFallbackTemplateId || !!fallbackTemplateName;
+    const hasFallbackCatalogTemplateId = !isConfigValueEmpty(config.fallback_catalog_template_id);
+    const hasFallbackTemplate = hasFallbackTemplateId || !!fallbackTemplateName || hasFallbackCatalogTemplateId;
     const manualMessageText =
       cleanString(config.manual_message_text) ||
       cleanString(config.manual_text) ||
@@ -2897,10 +2904,10 @@ function validateNodeConfig(node, nodeMap, templateLookup = {}) {
     let messageMode = 'template';
     if (messageModeRaw === 'manual' || messageModeRaw === 'template') {
       messageMode = messageModeRaw;
-    } else if (!hasTemplateId && hasManualMessageText) {
+    } else if (!hasTemplateReference && hasManualMessageText) {
       // Fallback robusto: si hay texto manual y no hay plantilla, asumimos modo manual.
       messageMode = 'manual';
-    } else if (hasTemplateId) {
+    } else if (hasTemplateReference) {
       messageMode = 'template';
     }
 
@@ -2914,11 +2921,11 @@ function validateNodeConfig(node, nodeMap, templateLookup = {}) {
       );
     }
 
-    if (messageMode === 'template' && !hasTemplateId) {
+    if (messageMode === 'template' && !hasTemplateReference) {
       errors.push(
         buildValidationError(
           'node_config_required',
-          `El nodo ${nodeId} requiere 'template_id' cuando message_mode = template`,
+          `El nodo ${nodeId} requiere una plantilla cuando message_mode = template`,
           { node_id: nodeId, node_type: nodeType, key: 'template_id' }
         )
       );
@@ -3037,11 +3044,12 @@ function validateNodeConfig(node, nodeMap, templateLookup = {}) {
       }
     };
 
-    if (messageMode === 'template' && hasTemplateId) {
+    if (messageMode === 'template' && hasTemplateReference) {
       const templateId = parseIntOrNull(config.template_id);
-      const templateName = cleanString(config.template_name);
+      const catalogTemplateId = parseIntOrNull(config.catalog_template_id);
       const templateRow = (templateId && templateLookup.byId instanceof Map ? templateLookup.byId.get(templateId) : null)
         || (templateName && templateLookup.byName instanceof Map ? templateLookup.byName.get(templateName) : null)
+        || (catalogTemplateId && templateLookup.byCatalogId instanceof Map ? templateLookup.byCatalogId.get(catalogTemplateId) : null)
         || null;
 
       if (!templateRow) {
@@ -3055,6 +3063,7 @@ function validateNodeConfig(node, nodeMap, templateLookup = {}) {
               key: 'template_id',
               value: config.template_id || null,
               template_name: templateName || null,
+              catalog_template_id: catalogTemplateId || null,
             }
           )
         );
@@ -3071,11 +3080,15 @@ function validateNodeConfig(node, nodeMap, templateLookup = {}) {
 
     if (messageMode === 'manual' && hasFallbackTemplate) {
       const fallbackTemplateId = parseIntOrNull(config.fallback_template_id);
+      const fallbackCatalogTemplateId = parseIntOrNull(config.fallback_catalog_template_id);
       const fallbackRow = (fallbackTemplateId && templateLookup.byId instanceof Map
         ? templateLookup.byId.get(fallbackTemplateId)
         : null)
         || (fallbackTemplateName && templateLookup.byName instanceof Map
           ? templateLookup.byName.get(fallbackTemplateName)
+          : null)
+        || (fallbackCatalogTemplateId && templateLookup.byCatalogId instanceof Map
+          ? templateLookup.byCatalogId.get(fallbackCatalogTemplateId)
           : null)
         || null;
 
@@ -3090,6 +3103,7 @@ function validateNodeConfig(node, nodeMap, templateLookup = {}) {
               key: 'fallback_template_id',
               value: config.fallback_template_id || null,
               template_name: fallbackTemplateName || null,
+              catalog_template_id: fallbackCatalogTemplateId || null,
             }
           )
         );
@@ -3593,6 +3607,7 @@ async function loadWhatsappTemplateLookup(nodes) {
   const safeNodes = Array.isArray(nodes) ? nodes : [];
   const templateIds = new Set();
   const templateNames = new Set();
+  const catalogTemplateIds = new Set();
 
   for (const node of safeNodes) {
     if (cleanString(node?.type) !== 'action/send_whatsapp') continue;
@@ -3600,16 +3615,20 @@ async function loadWhatsappTemplateLookup(nodes) {
     const messageMode = cleanString(config?.message_mode || 'template');
     const templateId = messageMode === 'template' ? parseIntOrNull(config?.template_id) : null;
     const templateName = messageMode === 'template' ? cleanString(config?.template_name) : null;
+    const catalogTemplateId = messageMode === 'template' ? parseIntOrNull(config?.catalog_template_id) : null;
     const fallbackTemplateId = parseIntOrNull(config?.fallback_template_id);
     const fallbackTemplateName = cleanString(config?.fallback_template_name);
+    const fallbackCatalogTemplateId = parseIntOrNull(config?.fallback_catalog_template_id);
     if (templateId) templateIds.add(templateId);
     if (templateName) templateNames.add(templateName);
+    if (catalogTemplateId) catalogTemplateIds.add(catalogTemplateId);
     if (fallbackTemplateId) templateIds.add(fallbackTemplateId);
     if (fallbackTemplateName) templateNames.add(fallbackTemplateName);
+    if (fallbackCatalogTemplateId) catalogTemplateIds.add(fallbackCatalogTemplateId);
   }
 
-  if (!templateIds.size && !templateNames.size) {
-    return { byId: new Map(), byName: new Map() };
+  if (!templateIds.size && !templateNames.size && !catalogTemplateIds.size) {
+    return { byId: new Map(), byName: new Map(), byCatalogId: new Map() };
   }
 
   const where = {};
@@ -3619,6 +3638,9 @@ async function loadWhatsappTemplateLookup(nodes) {
   }
   if (templateNames.size) {
     orClauses.push({ name: Array.from(templateNames) });
+  }
+  if (catalogTemplateIds.size) {
+    orClauses.push({ catalog_template_id: Array.from(catalogTemplateIds) });
   }
   if (orClauses.length === 1) {
     Object.assign(where, orClauses[0]);
@@ -3633,12 +3655,38 @@ async function loadWhatsappTemplateLookup(nodes) {
 
   const byId = new Map();
   const byName = new Map();
+  const byCatalogId = new Map();
   for (const row of rows) {
     byId.set(Number(row.id), row);
     const name = cleanString(row.name);
     if (name) byName.set(name, row);
+    const catalogId = parseIntOrNull(row.catalog_template_id);
+    if (catalogId && !byCatalogId.has(catalogId)) byCatalogId.set(catalogId, row);
   }
-  return { byId, byName };
+  if (catalogTemplateIds.size || templateNames.size) {
+    const missingCatalogIds = Array.from(catalogTemplateIds).filter((id) => !byCatalogId.has(id));
+    const missingCatalogNames = Array.from(templateNames).filter((name) => !byName.has(name));
+    if ((missingCatalogIds.length || missingCatalogNames.length) && WhatsappTemplateCatalog) {
+      const catalogWhere = {};
+      const catalogOr = [];
+      if (missingCatalogIds.length) catalogOr.push({ id: missingCatalogIds });
+      if (missingCatalogNames.length) catalogOr.push({ name: missingCatalogNames });
+      if (catalogOr.length === 1) Object.assign(catalogWhere, catalogOr[0]);
+      else catalogWhere[Op.or] = catalogOr;
+      const catalogRows = await WhatsappTemplateCatalog.findAll({
+        where: catalogWhere,
+        attributes: ['id', 'name', 'components', 'variables'],
+      });
+      for (const catalogRow of catalogRows) {
+        const catalogId = parseIntOrNull(catalogRow.id);
+        if (!catalogId) continue;
+        byCatalogId.set(catalogId, catalogRow);
+        const name = cleanString(catalogRow.name);
+        if (name && !byName.has(name)) byName.set(name, catalogRow);
+      }
+    }
+  }
+  return { byId, byName, byCatalogId };
 }
 
 async function validateNodeConfigs(nodes) {

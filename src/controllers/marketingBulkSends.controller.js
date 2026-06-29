@@ -23,6 +23,26 @@ async function resolveScope(req, { allowAll = false } = {}) {
   return scope;
 }
 
+async function resolveReviewRequestSummaryScope(req, { allowAll = false } = {}) {
+  const rawScope = req.query.scope
+    || req.query.clinicId
+    || req.query.clinica_id
+    || req.query.clinic_id
+    || 'all';
+  const scope = await resolveClinicScope(rawScope, { allowAll });
+  if (scope.notFound) {
+    const err = new Error('Grupo de clínicas no encontrado');
+    err.status = 404;
+    throw err;
+  }
+  if (!scope.isValid && !scope.isAll) {
+    const err = new Error('clinicId/grupo inválido');
+    err.status = 400;
+    throw err;
+  }
+  return scope;
+}
+
 async function resolveScopeFromRequest(req, { allowAll = false } = {}) {
   const rawScope = req.body?.clinicId
     || req.body?.clinica_id
@@ -82,9 +102,10 @@ exports.listCampaigns = async (req, res) => {
 
 exports.getReviewRequestSummary = async (req, res) => {
   try {
-    const scope = await resolveScope(req, { allowAll: false });
+    const scope = await resolveReviewRequestSummaryScope(req, { allowAll: false });
     const result = await marketingBulkSendsService.getReviewRequestSummary(scope, {
       review_source: req.query.review_source || req.query.reviewSource || null,
+      review_group_clinic_ids: req.query.review_group_clinic_ids || req.query.reviewGroupClinicIds || null,
       review_treatment_id: req.query.review_treatment_id || req.query.reviewTreatmentId || null,
       review_treatment_ids: req.query.review_treatment_ids || req.query.reviewTreatmentIds || null,
       review_treatment_moment: req.query.review_treatment_moment || req.query.reviewTreatmentMoment || null,
