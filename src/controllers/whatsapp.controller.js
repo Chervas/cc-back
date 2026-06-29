@@ -1946,7 +1946,7 @@ exports.assignPhone = async (req, res) => {
   try {
     const userId = req.userData?.userId;
     const phoneNumberId = req.params.phoneNumberId;
-    const { assignmentScope, clinic_id } = req.body || {};
+    const { assignmentScope, clinic_id, group_id, grupo_clinica_id } = req.body || {};
 
     if (!['group', 'clinic'].includes(assignmentScope)) {
       return res.status(400).json({ success: false, error: 'invalid_assignment_scope' });
@@ -2002,21 +2002,40 @@ exports.assignPhone = async (req, res) => {
       targetClinicId = clinic_id;
       targetGroupId = clinic.grupoClinicaId || null;
     } else if (assignmentScope === 'group') {
-      if (!clinic_id) {
-        return res.status(400).json({ success: false, error: 'clinic_id_required_for_group' });
+      const requestedGroupId = parseIntOrNull(group_id ?? grupo_clinica_id);
+      if (requestedGroupId) {
+        const group = await GrupoClinica.findOne({
+          where: { id_grupo: requestedGroupId },
+          attributes: ['id_grupo'],
+          raw: true,
+        });
+        if (!group) {
+          return res.status(404).json({ success: false, error: 'invalid_group' });
+        }
+        if (!isAggregateAllowed) {
+          const allowedGroupIds = await getUserGroupIds({ clinicIds, isAggregateAllowed });
+          if (!allowedGroupIds.includes(requestedGroupId)) {
+            return res.status(403).json({ success: false, error: 'forbidden' });
+          }
+        }
+        targetGroupId = requestedGroupId;
+      } else {
+        if (!clinic_id) {
+          return res.status(400).json({ success: false, error: 'clinic_id_or_group_id_required_for_group' });
+        }
+        const clinic = await Clinica.findOne({
+          where: { id_clinica: clinic_id },
+          attributes: ['grupoClinicaId'],
+          raw: true,
+        });
+        if (!clinic) {
+          return res.status(404).json({ success: false, error: 'invalid_clinic' });
+        }
+        if (!isAggregateAllowed && !clinicIds.includes(clinic_id)) {
+          return res.status(403).json({ success: false, error: 'forbidden' });
+        }
+        targetGroupId = clinic.grupoClinicaId || null;
       }
-      const clinic = await Clinica.findOne({
-        where: { id_clinica: clinic_id },
-        attributes: ['grupoClinicaId'],
-        raw: true,
-      });
-      if (!clinic) {
-        return res.status(404).json({ success: false, error: 'invalid_clinic' });
-      }
-      if (!isAggregateAllowed && !clinicIds.includes(clinic_id)) {
-        return res.status(403).json({ success: false, error: 'forbidden' });
-      }
-      targetGroupId = clinic.grupoClinicaId || null;
     }
 
     if (assignmentScope === 'clinic' && targetClinicId) {
