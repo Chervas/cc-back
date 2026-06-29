@@ -81,7 +81,8 @@ Antes de activar coexistencia sobre un numero real:
 - `jobExecutor.service.js` procesa `whatsapp_template_create` ejecutando `createTemplatesFromCatalog(...)`, que transforma placeholders `SIN_CONECTAR` en plantillas enviadas a revision (`PENDING`);
 - `whatsapp_phones_sync` (cada 15 minutos) actua como red de seguridad: si detecta que un numero ya esta `CONNECTED`/`registered` y quedan plantillas de catalogo sin `meta_template_id` o en `SIN_CONECTAR`/`LOCAL_PENDING`, encola `whatsapp_template_create` con cooldown de 1 hora (`WHATSAPP_TEMPLATE_CREATE_ENSURE_COOLDOWN_MS`). Tambien compara cada WABA contra todas las plantillas de catalogo genericas activas (`is_generic=true`): si una plantilla generica nueva no tiene copia remota con `catalog_template_id` y `meta_template_id`, o si la copia remota apunta al mismo catalogo pero su `category/components` ya no coinciden con el contenido Meta-facing actual, se vuelve a encolar la creacion aunque el WABA ya tuviera plantillas anteriores. Esta ruta salta el cooldown cuando el catalogo esta incompleto/desactualizado para que se abra una nueva version tecnica en Meta. Esto cubre coexistencia cuando Meta termina de habilitar el numero despues del callback inicial, nuevas plantillas admin añadidas a posteriori y cambios de copy en plantillas genericas ya propagadas;
 - `whatsapp_phones_sync` solo debe encolar WABAs procedentes de `whatsapp_phone_number` activos y asignados a clínica o grupo. Un número `unassigned` no es operativo aunque conserve token de Meta para reasignación o auditoría;
-- la sync remota de teléfonos no puede reactivar un número desvinculado solo porque Meta lo siga devolviendo. Si el activo no tiene `clinicaId` ni `grupoClinicaId`, debe permanecer `isActive=false` y `assignmentScope=unassigned`;
+- un número `unassigned` puede permanecer `isActive=true` si se ha desasignado para poder reasignarlo desde Ajustes. La sync remota no debe tratarlo como operativo ni encolar plantillas hasta que vuelva a tener `assignmentScope=clinic|group`;
+- la sync remota de teléfonos no puede reactivar un número desconectado/desactivado solo porque Meta lo siga devolviendo. Si se desactivó con la acción destructiva de desconexión, debe permanecer `isActive=false` y `assignmentScope=unassigned`;
 - `whatsapp_templates_sync` (cada 20 minutos) solo sincroniza estados remotos existentes. Si Meta sigue devolviendo `PENDING`, ClinicaClick debe mantener `PENDING`; no se marca como aprobada por tener el numero operativo;
 - el webhook inbound debe resolver `metadata.phone_number_id` priorizando activos `whatsapp_phone_number` sobre filas legacy `whatsapp_business_account`. En WABA compartido de grupo, el activo `whatsapp_phone_number + assignmentScope=group` es el origen canonico; desde ahi se busca la conversacion existente por contacto dentro del grupo. Si se deja que una fila legacy de una clinica gane el lookup, las respuestas entran en la clinica propietaria historica del WABA, no en la clinica que envio la cita, y los `wait_response` no se reanudan. Una vez existe el `whatsapp_phone_number` operativo con `wabaId`, token y `businessId`, las filas duplicadas `whatsapp_business_account` del mismo WABA deben retirarse para no reintroducir ambiguedad; los jobs de plantillas enumeran WABAs desde ambos tipos y priorizan el phone asset;
 - `GET /api/whatsapp/phones` expone `connection_mode`, `is_on_biz_app`, `coexistence_status`, `coexistence_can_send_api` y estados de importacion inicial para que Ajustes pueda mostrar el modo real;
@@ -989,6 +990,26 @@ Semántica actual:
 - `clinic_id`: devuelve números propios de la clínica y números heredados del grupo;
 - `group_id`: devuelve números asignados al grupo y números clínicos de las clínicas que cuelgan de ese grupo;
 - sin scope: vista global según permisos del usuario.
+
+Resolución operativa:
+
+1. si la clínica tiene un `whatsapp_phone_number` activo con `assignmentScope=clinic`, ese número gana siempre;
+2. si no lo tiene, se hereda el `whatsapp_phone_number` activo del grupo con `assignmentScope=group`;
+3. los números `unassigned` se pueden mostrar para reasignación, pero nunca deben usarse para enviar ni para encolar plantillas.
+
+Excepción de sede dentro de un grupo:
+
+- conectar un número desde `/ajustes?action=connect_whatsapp&assignment_scope=clinic&clinic_id=<id>` debe crear/actualizar el activo como propio de esa clínica;
+- conectar un número propio de clínica no modifica el WhatsApp de grupo ni el resto de sedes;
+- si ya existía otro número propio para la misma clínica, se desasigna antes de activar el nuevo para evitar dos números efectivos compitiendo;
+- `POST /api/whatsapp/phones/:phoneNumberId/unassign` desasigna sin desconectar Meta: deja el teléfono/WABA como `unassigned` y permite que la clínica vuelva a heredar el grupo;
+- `DELETE /api/whatsapp/phones/:phoneNumberId` sigue siendo acción destructiva de desconexión/desactivación y no debe usarse para "volver a usar el grupo".
+
+Plantillas:
+
+- `assignPhone` y el callback de Embedded Signup encolan `whatsapp_template_create` para el WABA conectado con el scope resultante (`clinic` o `group`);
+- las plantillas aprobadas en el WABA de grupo no se copian al WABA propio de una sede: el nuevo WABA debe crear/enviar a revisión sus propias plantillas;
+- los envíos futuros resuelven el teléfono efectivo por clínica en runtime. Jobs ya encolados que incluyan `clinicConfig` antiguo pueden conservar el número previo; si hace falta corte estricto, se debe reencolar o cancelar la cola pendiente de esa clínica.
 
 Esto alinea WhatsApp con el resto de activos conectados en `Ajustes`.
 

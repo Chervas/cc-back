@@ -2019,11 +2019,94 @@ exports.assignPhone = async (req, res) => {
       targetGroupId = clinic.grupoClinicaId || null;
     }
 
+    if (assignmentScope === 'clinic' && targetClinicId) {
+      await ClinicMetaAsset.update(
+        {
+          assignmentScope: 'unassigned',
+          clinicaId: null,
+          grupoClinicaId: null,
+        },
+        {
+          where: {
+            assetType: 'whatsapp_phone_number',
+            isActive: true,
+            clinicaId: targetClinicId,
+            phoneNumberId: { [Op.ne]: phoneNumberId },
+          },
+        }
+      );
+      await ClinicMetaAsset.update(
+        {
+          assignmentScope: 'unassigned',
+          clinicaId: null,
+          grupoClinicaId: null,
+        },
+        {
+          where: {
+            assetType: 'whatsapp_business_account',
+            isActive: true,
+            clinicaId: targetClinicId,
+            ...(phone.wabaId ? { wabaId: { [Op.ne]: phone.wabaId } } : {}),
+          },
+        }
+      );
+    } else if (assignmentScope === 'group' && targetGroupId) {
+      await ClinicMetaAsset.update(
+        {
+          assignmentScope: 'unassigned',
+          clinicaId: null,
+          grupoClinicaId: null,
+        },
+        {
+          where: {
+            assetType: 'whatsapp_phone_number',
+            isActive: true,
+            assignmentScope: 'group',
+            grupoClinicaId: targetGroupId,
+            phoneNumberId: { [Op.ne]: phoneNumberId },
+          },
+        }
+      );
+      await ClinicMetaAsset.update(
+        {
+          assignmentScope: 'unassigned',
+          clinicaId: null,
+          grupoClinicaId: null,
+        },
+        {
+          where: {
+            assetType: 'whatsapp_business_account',
+            isActive: true,
+            assignmentScope: 'group',
+            grupoClinicaId: targetGroupId,
+            ...(phone.wabaId ? { wabaId: { [Op.ne]: phone.wabaId } } : {}),
+          },
+        }
+      );
+    }
+
     await phone.update({
       assignmentScope,
       clinicaId: targetClinicId,
       grupoClinicaId: targetGroupId,
     });
+
+    if (phone.wabaId) {
+      await ClinicMetaAsset.update(
+        {
+          assignmentScope,
+          clinicaId: targetClinicId,
+          grupoClinicaId: targetGroupId,
+        },
+        {
+          where: {
+            assetType: 'whatsapp_business_account',
+            isActive: true,
+            wabaId: phone.wabaId,
+          },
+        }
+      );
+    }
 
     // Encolar creación automática de plantillas al asignar
     const { enqueueCreateTemplatesJob } = require('../services/whatsappTemplates.service');
@@ -2057,6 +2140,95 @@ exports.assignPhone = async (req, res) => {
   } catch (err) {
     console.error('Error assignPhone', err);
     return res.status(500).json({ success: false, error: 'assign_failed' });
+  }
+};
+
+exports.unassignPhone = async (req, res) => {
+  try {
+    const userId = req.userData?.userId;
+    const phoneNumberId = req.params.phoneNumberId;
+    if (!phoneNumberId) {
+      return res.status(400).json({ success: false, error: 'phone_number_id_required' });
+    }
+
+    const phone = await ClinicMetaAsset.findOne({
+      where: {
+        assetType: 'whatsapp_phone_number',
+        phoneNumberId,
+        isActive: true,
+      },
+      include: [
+        { model: MetaConnection, as: 'metaConnection', attributes: ['userId'] },
+        { model: Clinica, as: 'clinica', attributes: ['id_clinica', 'grupoClinicaId', 'nombre_clinica'] },
+      ],
+    });
+
+    if (!phone) {
+      return res.status(404).json({ success: false, error: 'phone_not_found' });
+    }
+
+    const { clinicIds, isAggregateAllowed } = await getUserClinics(userId);
+    const userGroupIds = await getUserGroupIds({ clinicIds, isAggregateAllowed });
+    const isOwner = phone.metaConnection?.userId === userId;
+    const hasClinicAccess = phone.clinicaId ? clinicIds.includes(phone.clinicaId) : false;
+    const hasGroupAccess =
+      phone.assignmentScope === 'group' &&
+      phone.grupoClinicaId &&
+      userGroupIds.includes(phone.grupoClinicaId);
+    const canManage = isOwner || isAggregateAllowed || hasClinicAccess || hasGroupAccess;
+
+    if (!canManage) {
+      return res.status(403).json({ success: false, error: 'forbidden' });
+    }
+
+    const previousScope = phone.assignmentScope || null;
+    const previousClinicId = phone.clinicaId || null;
+    const previousGroupId = phone.grupoClinicaId || phone.clinica?.grupoClinicaId || null;
+
+    await phone.update({
+      assignmentScope: 'unassigned',
+      clinicaId: null,
+      grupoClinicaId: null,
+    });
+
+    if (phone.wabaId && (previousClinicId || previousGroupId)) {
+      const wabaScopeWhere =
+        previousScope === 'clinic' && previousClinicId
+          ? [{ clinicaId: previousClinicId }]
+          : previousScope === 'group' && previousGroupId
+            ? [{ assignmentScope: 'group', grupoClinicaId: previousGroupId }]
+            : [];
+
+      if (wabaScopeWhere.length) {
+        await ClinicMetaAsset.update(
+          {
+            assignmentScope: 'unassigned',
+            clinicaId: null,
+            grupoClinicaId: null,
+          },
+          {
+            where: {
+              assetType: 'whatsapp_business_account',
+              wabaId: phone.wabaId,
+              isActive: true,
+              [Op.or]: wabaScopeWhere,
+            },
+          }
+        );
+      }
+    }
+
+    return res.json({
+      success: true,
+      phoneNumberId,
+      previous_assignment_scope: previousScope,
+      previous_clinic_id: previousClinicId,
+      previous_group_id: previousGroupId,
+      assignmentScope: 'unassigned',
+    });
+  } catch (err) {
+    console.error('Error unassignPhone', err);
+    return res.status(500).json({ success: false, error: 'unassign_failed' });
   }
 };
 
