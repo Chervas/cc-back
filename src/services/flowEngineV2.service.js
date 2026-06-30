@@ -3340,22 +3340,19 @@ async function handleRequestReview(node, context, runtime) {
 
 async function handleRequestReviewReminder(node, context, runtime) {
   const config = node?.config && typeof node.config === 'object' ? node.config : {};
-  const result = await marketingBulkSendsService.sendReviewRequestReminder({
-    listId: resolveTemplateValue(config?.list_id, context),
-    itemId: resolveTemplateValue(config?.item_id, context),
-    campaignId: resolveTemplateValue(config?.campaign_id, context),
-    clinicId: resolveTemplateValue(config?.clinic_id, context),
-    whatsappTemplateId: resolveTemplateValue(config?.whatsapp_template_id, context),
-    templateName: resolveTemplateValue(config?.template_name, context),
-    triggerMessageId: resolveTemplateValue(config?.trigger_message_id, context),
-    userId: runtime?.execution?.created_by || runtime?.execution?.user_id || null,
-  });
-  const nextOutput = result?.sent && toIntOrNull(result?.message_id) ? 'on_success' : 'on_fail';
+  const result = {
+    success: true,
+    sent: false,
+    skipped: true,
+    reason: 'review_reminders_disabled',
+    list_id: resolveTemplateValue(config?.list_id, context) || null,
+    item_id: resolveTemplateValue(config?.item_id, context) || null,
+  };
 
   return {
     kind: 'success',
     output: result,
-    next_node_id: readOutputTarget(node, nextOutput) || (nextOutput === 'on_fail' ? null : readOutputTarget(node, 'on_success')),
+    next_node_id: null,
   };
 }
 

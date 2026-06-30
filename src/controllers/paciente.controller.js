@@ -1,6 +1,6 @@
 'use strict';
-const { Paciente, Clinica, PacienteRelacion, PacienteClinica, PacienteConsentimiento, CitaPaciente, Usuario, Tratamiento } = require('../../models');
-const { Op, literal } = require('sequelize');
+const { Paciente, Clinica, PacienteRelacion, PacienteClinica, PacienteConsentimiento, CitaPaciente, Usuario, Tratamiento, sequelize } = require('../../models');
+const { Op, literal, QueryTypes } = require('sequelize');
 const crypto = require('crypto');
 const { normalizePhoneDigits } = require('../lib/phone');
 const { normalizeHumanName } = require('../lib/name');
@@ -226,6 +226,19 @@ const buildAppointmentActivityDescription = ({ telefono, inicio, tratamiento, es
   if (tratamiento) fields.push({ label: 'Tratamiento', value: tratamiento });
   const stateValue = formatAppointmentStateLabel(estado);
   if (stateValue) fields.push({ label: 'Estado', value: stateValue });
+
+  return {
+    plain: fields.map(({ label, value }) => `${label}: ${value}`).join('\n') || 'Sin detalles',
+    html: fields.map(({ label, value }) => `<div><strong>${escapeHtml(label)}:</strong> ${escapeHtml(value)}</div>`).join('') || '<div>Sin detalles</div>',
+  };
+};
+
+const buildReviewActivityDescription = ({ rating, reason, reviewerName, clinicName }) => {
+  const fields = [];
+  if (rating) fields.push({ label: 'Valoración', value: `${rating}/5` });
+  if (reason) fields.push({ label: 'Motivo', value: reason });
+  if (reviewerName) fields.push({ label: 'Google', value: reviewerName });
+  if (clinicName) fields.push({ label: 'Sede', value: clinicName });
 
   return {
     plain: fields.map(({ label, value }) => `${label}: ${value}`).join('\n') || 'Sin detalles',
@@ -804,6 +817,106 @@ exports.getPacienteActivity = async (req, res) => {
         usuarioNombre: buildActorLabel(updatedByUser),
         detalles: {
           estado: cita.estado,
+        },
+      });
+    }
+
+    const reviewEvents = await sequelize.query(
+      `
+      SELECT
+        e.id,
+        e.event_type,
+        e.channel,
+        e.payload,
+        e.occurred_at,
+        l.name AS list_name,
+        i.name AS item_name,
+        i.clinica_id,
+        cl.nombre_clinica AS clinic_name
+      FROM MarketingPatientContactEvents e
+      INNER JOIN MarketingPatientLists l ON l.id = e.list_id
+      LEFT JOIN MarketingPatientListItems i ON i.id = e.item_id
+      LEFT JOIN Clinicas cl ON cl.id_clinica = COALESCE(i.clinica_id, l.clinica_id)
+      WHERE COALESCE(e.paciente_id, i.paciente_id) = :pacienteId
+        AND e.event_type IN (
+          'review_rating_received',
+          'review_rating_updated',
+          'review_rating_followup_sent',
+          'review_private_feedback_received',
+          'google_review_matched'
+        )
+      ORDER BY e.occurred_at DESC
+      LIMIT 60
+      `,
+      { replacements: { pacienteId }, type: QueryTypes.SELECT }
+    );
+
+    const reviewEventConfig = {
+      review_rating_received: {
+        tipo: 'review_rating_received',
+        titulo: 'Valoración privada recibida',
+        icono: 'heroicons_outline:star',
+        color: 'success',
+      },
+      review_rating_updated: {
+        tipo: 'review_rating_updated',
+        titulo: 'Valoración privada actualizada',
+        icono: 'heroicons_outline:star',
+        color: 'info',
+      },
+      review_rating_followup_sent: {
+        tipo: 'review_rating_followup_sent',
+        titulo: 'Respuesta de reseña enviada',
+        icono: 'heroicons_outline:paper-airplane',
+        color: 'info',
+      },
+      review_private_feedback_received: {
+        tipo: 'review_private_feedback_received',
+        titulo: 'Motivo privado recibido',
+        icono: 'heroicons_outline:chat-bubble-left-ellipsis',
+        color: 'warning',
+      },
+      google_review_matched: {
+        tipo: 'google_review_matched',
+        titulo: 'Reseña de Google vinculada',
+        icono: 'brand:google-business-profile',
+        color: 'success',
+      },
+    };
+
+    for (const event of reviewEvents) {
+      const payload = event.payload && typeof event.payload === 'object' ? event.payload : {};
+      const kind = String(payload.kind || '').trim();
+      const rating = Number(payload.rating || payload.star_rating || 0) || null;
+      const reason = String(payload.content || payload.content_preview || '').trim();
+      const config = reviewEventConfig[event.event_type] || reviewEventConfig.review_rating_received;
+      const title = event.event_type === 'review_rating_followup_sent'
+        ? (kind === 'review_google_link_followup' ? 'Enlace de Google enviado' : 'Motivo privado solicitado')
+        : config.titulo;
+      const descriptions = buildReviewActivityDescription({
+        rating,
+        reason,
+        reviewerName: payload.reviewer_name || null,
+        clinicName: event.clinic_name || null,
+      });
+
+      items.push({
+        id: `review-${event.id}`,
+        pacienteId: String(pacienteId),
+        fecha: event.occurred_at,
+        tipo: config.tipo,
+        titulo: title,
+        descripcion: descriptions.plain,
+        descripcion_html: descriptions.html,
+        icono: config.icono,
+        color: config.color,
+        usuarioId: 'system',
+        usuarioNombre: 'Sistema',
+        detalles: {
+          channel: event.channel || null,
+          listName: event.list_name || null,
+          rating,
+          kind: kind || null,
         },
       });
     }

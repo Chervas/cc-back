@@ -18,6 +18,11 @@ module.exports = (sequelize, DataTypes) => {
     reply_comment: { type: DataTypes.TEXT, allowNull: true },
     reply_update_time: { type: DataTypes.DATE, allowNull: true },
     has_reply: { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: false },
+    matched_paciente_id: { type: DataTypes.INTEGER, allowNull: true },
+    matched_contact_event_id: { type: DataTypes.INTEGER, allowNull: true },
+    match_confidence: { type: DataTypes.FLOAT, allowNull: true },
+    match_reason: { type: DataTypes.STRING(255), allowNull: true },
+    matched_at: { type: DataTypes.DATE, allowNull: true },
     raw_payload: { type: DataTypes.JSON, allowNull: true }
   }, {
     tableName: 'BusinessProfileReviews',
@@ -29,6 +34,8 @@ module.exports = (sequelize, DataTypes) => {
   BusinessProfileReview.associate = function(models) {
     BusinessProfileReview.belongsTo(models.ClinicBusinessLocation, { foreignKey: 'business_location_id', as: 'location' });
     BusinessProfileReview.belongsTo(models.Clinica, { foreignKey: 'clinica_id', targetKey: 'id_clinica', as: 'clinica' });
+    BusinessProfileReview.belongsTo(models.Paciente, { foreignKey: 'matched_paciente_id', targetKey: 'id_paciente', as: 'matchedPaciente' });
+    BusinessProfileReview.belongsTo(models.MarketingPatientContactEvent, { foreignKey: 'matched_contact_event_id', as: 'matchedContactEvent' });
   };
 
   return BusinessProfileReview;

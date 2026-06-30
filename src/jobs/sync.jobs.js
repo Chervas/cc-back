@@ -33,6 +33,7 @@ const { enqueueSyncForAllWabas } = require('../services/whatsappTemplates.servic
 const { enqueueSyncPhonesForAllWabas } = require('../services/whatsappPhones.service');
 const marketingCompetitionService = require('../services/marketingCompetition.service');
 const webEventsService = require('../services/webEvents.service');
+const googleReviewMatchService = require('../services/googleReviewMatch.service');
 
 const GOOGLE_BUSINESS_PERFORMANCE_API = 'https://businessprofileperformance.googleapis.com/v1';
 const GOOGLE_MY_BUSINESS_API = 'https://mybusiness.googleapis.com/v4';
@@ -1715,10 +1716,16 @@ class MetaSyncJobs {
           raw_payload: review
         };
         const existing = await BusinessProfileReview.findOne({ where: { review_name: reviewName } });
-        if (existing) {
-          await existing.update(payload);
-        } else {
-          await BusinessProfileReview.create(payload);
+        const reviewRow = existing
+          ? await existing.update(payload)
+          : await BusinessProfileReview.create(payload);
+        try {
+          await googleReviewMatchService.enqueueBusinessProfileReviewMatch(reviewRow.id, {
+            origin: 'business_profile_sync',
+            priority: 'low'
+          });
+        } catch (error) {
+          console.warn('⚠️ No se pudo encolar matching de reseña Google:', error.message);
         }
         processed += 1;
       }

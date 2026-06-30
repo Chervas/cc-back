@@ -285,6 +285,45 @@ function getTemplateIdentityKey(templateLike) {
   return `${name}|${language}`;
 }
 
+function getTemplateStatusRank(templateLike) {
+  const status = String(templateLike?.status || '').trim().toUpperCase();
+  if (status === 'APPROVED') return 4;
+  if (status === 'PENDING' || status === 'IN_REVIEW') return 3;
+  if (status === 'APPROVED_PENDING') return 2;
+  if (status === 'REJECTED') return 1;
+  return 0;
+}
+
+function normalizeTemplateBodyText(value) {
+  return String(value || '')
+    .replace(/\r\n/g, '\n')
+    .replace(/[ \t]+/g, ' ')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+}
+
+function extractTemplateBodyText(templateLike) {
+  let components = templateLike?.components;
+  if (typeof components === 'string') {
+    try {
+      components = JSON.parse(components);
+    } catch (_) {
+      components = [];
+    }
+  }
+  const body = Array.isArray(components)
+    ? components.find((component) => String(component?.type || '').trim().toUpperCase() === 'BODY')
+    : null;
+  return normalizeTemplateBodyText(body?.text || '');
+}
+
+function getCurrentCatalogBodyMatchRank(templateLike) {
+  const catalogBody = normalizeTemplateBodyText(templateLike?.catalog?.body_text);
+  if (!catalogBody) return 0;
+  const templateBody = extractTemplateBodyText(templateLike);
+  return templateBody && templateBody === catalogBody ? 1 : 0;
+}
+
 function shouldHideLegacySystemTemplate(templateLike, usageLike) {
   const catalogTemplateId = Number(templateLike?.catalog_template_id || templateLike?.catalog?.id);
   if (Number.isFinite(catalogTemplateId) && catalogTemplateId > 0) {
@@ -393,6 +432,18 @@ function pickPreferredTemplate(currentTemplate, nextTemplate, clinicId) {
   const currentIsClinicOverride = Number.isFinite(currentClinicId) && currentClinicId === Number(clinicId);
   const nextIsClinicOverride = Number.isFinite(nextClinicId) && nextClinicId === Number(clinicId);
 
+  const currentStatusRank = getTemplateStatusRank(currentTemplate);
+  const nextStatusRank = getTemplateStatusRank(nextTemplate);
+  if (currentStatusRank !== nextStatusRank) {
+    return nextStatusRank > currentStatusRank ? nextTemplate : currentTemplate;
+  }
+
+  const currentBodyRank = getCurrentCatalogBodyMatchRank(currentTemplate);
+  const nextBodyRank = getCurrentCatalogBodyMatchRank(nextTemplate);
+  if (currentBodyRank !== nextBodyRank) {
+    return nextBodyRank > currentBodyRank ? nextTemplate : currentTemplate;
+  }
+
   if (currentIsClinicOverride !== nextIsClinicOverride) {
     return nextIsClinicOverride ? nextTemplate : currentTemplate;
   }
@@ -422,7 +473,7 @@ function extractTechnicalTemplateVersion(baseName, candidateName) {
 
 async function loadEffectiveWhatsappTemplatesForClinic({ clinicId, userId, includeCatalog }) {
   const includeCatalogConfig = includeCatalog
-    ? [{ model: WhatsappTemplateCatalog, as: 'catalog', attributes: ['id', 'name', 'display_name', 'category', 'body_text', 'variables'] }]
+    ? [{ model: WhatsappTemplateCatalog, as: 'catalog', attributes: ['id', 'name', 'display_name', 'category', 'body_text', 'variables', 'is_active'] }]
     : [];
 
   const overrides = await WhatsappTemplate.findAll({
@@ -1079,6 +1130,10 @@ exports.listTemplatesForClinic = async (req, res) => {
             variables: buildWhatsappTemplateVariableContract(json),
             usage,
           };
+        })
+        .filter((item) => {
+          if (!item.catalog) return true;
+          return item.catalog.is_active !== false && Number(item.catalog.is_active) !== 0;
         })
         .filter((item) => !(clinicId && shouldHideLegacySystemTemplate(item, item.usage)))
     );

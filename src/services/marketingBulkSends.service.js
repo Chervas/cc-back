@@ -64,7 +64,7 @@ const STATS_RECONCILE_WINDOW_MS = Math.max(
     || 30 * 24 * 60 * 60 * 1000
 );
 const DISPATCH_TIMEZONE = process.env.MARKETING_BULK_SEND_TIMEZONE || 'Europe/Madrid';
-const DISPATCH_BUSINESS_START_HOUR = 7;
+const DISPATCH_BUSINESS_START_HOUR = Math.max(8, Number.parseInt(process.env.MARKETING_BULK_SEND_START_HOUR || '9', 10) || 9);
 const DISPATCH_BUSINESS_END_HOUR = 22;
 const LINK_TRACKING_DEFAULT_DOMAIN = process.env.MARKETING_LINK_TRACKING_DEFAULT_DOMAIN || 'envios.clinicaclick.com';
 const WHATSAPP_SESSION_WINDOW_MS = 23 * 60 * 60 * 1000 + 50 * 60 * 1000;
@@ -1947,8 +1947,8 @@ async function sendReviewRatingFollowUp({ list, item, conversation, rating, clin
   const body = isPositive
     ? (googleReviewUrl
       ? (rewardEnabled
-        ? `Como gratitud por valorarnos *te vamos a regalar ${rewardDescription || 'un detalle'}* para ti y para toda tu familia *si dejas la reseña también en Google* para que otras personas puedan verla.\n\nSolo tienes que pinchar aquí: ${googleReviewUrl}\n\nUna vez que nos hayas valorado, escríbenos a este WhatsApp para indicarte cómo puedes reclamar tu regalo. Te contestaremos en horario laboral antes de 24h.`
-        : `¿Podrías publicarla en Google para que otras personas puedan verla? Solo tienes que pinchar en el enlace de aquí abajo 👇\n${googleReviewUrl}\n\n¡Nos ayudaría muchísimo! 😊`)
+        ? `¡Muchísimas gracias por tu valoración! 😊 *Como gratitud por valorarnos te vamos a regalar ${rewardDescription || 'un detalle'} si dejas la reseña también en Google* para que otras personas puedan verla.\n\nNo se tarda nada, pincha en el enlace de aquí abajo 👇\n${googleReviewUrl}\n\nUna vez que nos hayas valorado, *escríbenos a este WhatsApp* para indicarte cómo puedes reclamar tu regalo. Te contestaremos en horario laboral antes de 24h.`
+        : `¡Muchísimas gracias por tu valoración! 😊 *Nos ayudaría muchísimo que también la dejaras en Google* para que otras personas puedan verla.\n\nNo se tarda nada, pincha en el enlace de aquí abajo 👇\n${googleReviewUrl}`)
       : 'Gracias por tu valoración. Hemos registrado tu opinión.')
     : 'Gracias por responder. ¿Nos ayudarías contándonos el motivo de esta valoración? Puedes escribirlo aquí mismo y lo revisaremos con el equipo.';
   if (!isWithinWhatsappSessionWindow(occurredAt)) {
@@ -2498,6 +2498,17 @@ function isCurrentReviewReminderWhatsappTemplateCandidate(template) {
   return true;
 }
 
+function reviewTemplateMatchesCurrentCatalogBody(template) {
+  const plain = template?.get ? template.get({ plain: true }) : (template || {});
+  const currentCatalogBody = normalizeText(plain.catalog?.body_text);
+  if (!currentCatalogBody) return false;
+  return normalizeText(extractBodyText(plain.components)) === currentCatalogBody;
+}
+
+function scoreReviewTemplateFreshness(template) {
+  return reviewTemplateMatchesCurrentCatalogBody(template) ? 1 : 0;
+}
+
 async function findApprovedReviewWhatsappTemplate(scope, explicitTemplateId = null) {
   const clinicIds = Array.isArray(scope?.clinicIds) ? scope.clinicIds.filter(Number.isInteger) : [];
   if (!WhatsappTemplate || !clinicIds.length) return null;
@@ -2506,22 +2517,47 @@ async function findApprovedReviewWhatsappTemplate(scope, explicitTemplateId = nu
   if (explicitTemplateId) {
     const explicit = await resolveWhatsappTemplate(explicitTemplateId, scope);
     if (explicit && explicit.is_active !== false && String(explicit.status || '').toUpperCase() === 'APPROVED' && isPrimaryReviewRequestWhatsappTemplateCandidate(explicit)) {
-      if (!targetWabaId || !getTemplateWabaId(explicit) || getTemplateWabaId(explicit) === targetWabaId) {
+      const plainExplicit = explicit.get ? explicit.get({ plain: true }) : explicit;
+      const explicitMatchesWaba = !targetWabaId || !getTemplateWabaId(explicit) || getTemplateWabaId(explicit) === targetWabaId;
+      if (explicitMatchesWaba && reviewTemplateMatchesCurrentCatalogBody(explicit)) {
         return explicit;
       }
-      const plainExplicit = explicit.get ? explicit.get({ plain: true }) : explicit;
-      const replacement = await WhatsappTemplate.findOne({
-        where: {
-          is_active: true,
-          status: 'APPROVED',
-          catalog_template_id: plainExplicit.catalog_template_id || null,
-          waba_id: targetWabaId,
-        },
-        include: [{ model: db.WhatsappTemplateCatalog, as: 'catalog', attributes: ['id', 'name', 'display_name', 'body_text', 'variables'], required: false }],
-        order: [['updatedAt', 'DESC'], ['id', 'DESC']],
-      });
-      if (replacement && isPrimaryReviewRequestWhatsappTemplateCandidate(replacement)) {
-        return replacement;
+      if (plainExplicit.catalog_template_id) {
+        const exactReplacement = await WhatsappTemplate.findOne({
+          where: {
+            is_active: true,
+            status: 'APPROVED',
+            catalog_template_id: plainExplicit.catalog_template_id,
+            ...(targetWabaId ? { waba_id: targetWabaId } : {}),
+          },
+          include: [{ model: db.WhatsappTemplateCatalog, as: 'catalog', attributes: ['id', 'name', 'display_name', 'body_text', 'variables'], required: false }],
+          order: [['updatedAt', 'DESC'], ['id', 'DESC']],
+        });
+        if (
+          exactReplacement
+          && isPrimaryReviewRequestWhatsappTemplateCandidate(exactReplacement)
+          && reviewTemplateMatchesCurrentCatalogBody(exactReplacement)
+        ) {
+          return exactReplacement;
+        }
+      }
+      if (!explicitMatchesWaba) {
+        const replacement = await WhatsappTemplate.findOne({
+          where: {
+            is_active: true,
+            status: 'APPROVED',
+            catalog_template_id: plainExplicit.catalog_template_id || null,
+            waba_id: targetWabaId,
+          },
+          include: [{ model: db.WhatsappTemplateCatalog, as: 'catalog', attributes: ['id', 'name', 'display_name', 'body_text', 'variables'], required: false }],
+          order: [['updatedAt', 'DESC'], ['id', 'DESC']],
+        });
+        if (replacement && isPrimaryReviewRequestWhatsappTemplateCandidate(replacement)) {
+          return replacement;
+        }
+      }
+      if (explicitMatchesWaba) {
+        return explicit;
       }
     }
     return null;
@@ -2561,6 +2597,9 @@ async function findApprovedReviewWhatsappTemplate(scope, explicitTemplateId = nu
       const aScore = scoreWhatsappTemplateForScope(a, clinicIds, targetWabaId);
       const bScore = scoreWhatsappTemplateForScope(b, clinicIds, targetWabaId);
       if (aScore !== bScore) return bScore - aScore;
+      const aFresh = scoreReviewTemplateFreshness(a);
+      const bFresh = scoreReviewTemplateFreshness(b);
+      if (aFresh !== bFresh) return bFresh - aFresh;
       return Number(b.id || 0) - Number(a.id || 0);
     })[0] || null;
 }
@@ -2744,7 +2783,7 @@ async function buildReviewClinicStatuses(scope, options = {}) {
           !approvedTemplate ? 'ClinicaClick debe tener una plantilla de reseñas aprobada por WhatsApp para esta sede.' : null,
         ].filter(Boolean).join(' ');
     const automationLabel = clinicAutomationTemplate?.is_active === true
-      ? (ready ? 'Automatización activa' : 'Configurada, sin enviar')
+      ? (ready ? 'Activa' : 'Configurada, sin enviar')
       : (ready ? 'Lista para activar' : 'Pendiente');
     const automationHint = clinicAutomationTemplate?.is_active === true
       ? (ready
@@ -2904,6 +2943,8 @@ async function getReviewRequestSummary(scope, options = {}) {
     `
     SELECT
       COALESCE(i.name, p.nombre, 'Paciente') AS patient_name,
+      COALESCE(e.paciente_id, i.paciente_id) AS patient_id,
+      i.conversation_id AS conversation_id,
       COALESCE(i.clinica_id, l.clinica_id) AS clinic_id,
       cl.nombre_clinica AS clinic_name,
       CAST(JSON_UNQUOTE(JSON_EXTRACT(e.payload, '$.rating')) AS UNSIGNED) AS rating,
@@ -2972,6 +3013,8 @@ async function getReviewRequestSummary(scope, options = {}) {
       low_rating_reasons: (recentPrivateRatings || [])
         .map((row) => ({
           patient_name: normalizeText(row.patient_name) || 'Paciente',
+          patient_id: Number(row.patient_id || 0) || null,
+          conversation_id: Number(row.conversation_id || 0) || null,
           clinic_id: Number(row.clinic_id || 0) || null,
           clinic_name: normalizeText(row.clinic_name) || null,
           rating: Number(row.rating || 0) || null,
@@ -3008,6 +3051,19 @@ function buildReviewAutomationTemplateIdentity(scope) {
   throw err;
 }
 
+async function buildReviewAutomationDisplayName(scope) {
+  const clinicIds = Array.isArray(scope?.clinicIds) ? scope.clinicIds.filter(Number.isInteger) : [];
+  if (clinicIds.length === 1) {
+    const clinic = await Clinica.findByPk(clinicIds[0], {
+      attributes: ['id_clinica', 'nombre_clinica'],
+      raw: true,
+    });
+    const clinicName = normalizeText(clinic?.nombre_clinica || '');
+    return `Reseñas automáticas · Clínica: ${clinicName || `Clínica ${clinicIds[0]}`}`;
+  }
+  return 'Reseñas automáticas · Clínica';
+}
+
 function buildClinicReviewScopeFromGroup(scope, clinicId) {
   return {
     ...scope,
@@ -3041,6 +3097,16 @@ function buildReviewAutomationNodes({
     },
     {
       id: 'N2',
+      type: 'delay/fixed',
+      config: {
+        duration: 24,
+        unit: 'hours',
+      },
+      outputs: { on_complete: 'N3' },
+      position: { x: 120, y: 280 },
+    },
+    {
+      id: 'N3',
       type: REVIEW_AUTOMATION_ACTION,
       config: {
         review_source: normalizeReviewRequestSource(reviewSource),
@@ -3053,48 +3119,23 @@ function buildReviewAutomationNodes({
         require_message_anchor_for_wait: true,
         wait_for_message_ms: 6000,
       },
-      outputs: { on_success: 'N3', on_fail: null },
-      position: { x: 120, y: 280 },
-    },
-    {
-      id: 'N3',
-      type: 'delay/wait_response',
-      config: {
-        timeout_duration: 20,
-        timeout_unit: 'hours',
-        listens_to_node_id: 'N2',
-        response_buffer_enabled: true,
-      },
-      outputs: { on_response: 'N6', on_timeout: 'N4' },
+      outputs: { on_success: 'N4', on_fail: null },
       position: { x: 120, y: 440 },
     },
     {
       id: 'N4',
-      type: REVIEW_REMINDER_AUTOMATION_ACTION,
+      type: 'delay/wait_response',
       config: {
-        list_id: '{{outputs.N2.list_id}}',
-        item_id: '{{outputs.N2.item_id}}',
-        clinic_id: '{{outputs.N2.clinic_id}}',
-        trigger_message_id: '{{outputs.N2.message_id}}',
-        template_name: REVIEW_REMINDER_TEMPLATE_NAME,
+        timeout_duration: 20,
+        timeout_unit: 'hours',
+        listens_to_node_id: 'N3',
+        response_buffer_enabled: true,
       },
-      outputs: { on_success: 'N5', on_fail: null },
+      outputs: { on_response: 'N5', on_timeout: 'N8' },
       position: { x: 120, y: 600 },
     },
     {
       id: 'N5',
-      type: 'delay/wait_response',
-      config: {
-        timeout_duration: 4,
-        timeout_unit: 'hours',
-        listens_to_node_id: 'N4',
-        response_buffer_enabled: true,
-      },
-      outputs: { on_response: 'N6', on_timeout: 'N9' },
-      position: { x: 120, y: 760 },
-    },
-    {
-      id: 'N6',
       type: 'condition/field_check',
       config: {
         mode: 'simple',
@@ -3107,11 +3148,11 @@ function buildReviewAutomationNodes({
         operator: 'greater_than_or_equals',
         right_value: threshold,
       },
-      outputs: { on_true: 'N7', on_false: 'N8' },
+      outputs: { on_true: 'N6', on_false: 'N7' },
       position: { x: 430, y: 600 },
     },
     {
-      id: 'N7',
+      id: 'N6',
       type: REVIEW_FOLLOWUP_AUTOMATION_ACTION,
       config: {
         followup_kind: 'google_review',
@@ -3121,7 +3162,7 @@ function buildReviewAutomationNodes({
       position: { x: 720, y: 500 },
     },
     {
-      id: 'N8',
+      id: 'N7',
       type: REVIEW_FOLLOWUP_AUTOMATION_ACTION,
       config: {
         followup_kind: 'private_feedback',
@@ -3131,15 +3172,15 @@ function buildReviewAutomationNodes({
       position: { x: 720, y: 700 },
     },
     {
-      id: 'N9',
+      id: 'N8',
       type: REVIEW_NO_RESPONSE_AUTOMATION_ACTION,
       config: {
-        list_id: '{{outputs.N2.list_id}}',
-        item_id: '{{outputs.N2.item_id}}',
-        reason: 'sin_respuesta_tras_recordatorio',
+        list_id: '{{outputs.N3.list_id}}',
+        item_id: '{{outputs.N3.item_id}}',
+        reason: 'sin_respuesta_a_solicitud',
       },
       outputs: { on_success: null },
-      position: { x: 120, y: 920 },
+      position: { x: 120, y: 760 },
     },
   ];
 }
@@ -3224,12 +3265,13 @@ async function upsertReviewRequestAutomationForClinic(scope, body = {}, userId =
     reviewGiftDescription,
     reviewDisplayClinicName,
   });
+  const displayName = await buildReviewAutomationDisplayName(scope);
   const payload = {
     ...identity,
     version: Math.max(Number(existing?.version || 0), 2),
     engine_version: 'v2',
-    name: 'Solicitar reseña tras cita completada',
-    description: 'Pide al paciente una valoración de 1 a 5 después de completar una cita, espera respuesta y envía un recordatorio si no contesta.',
+    name: displayName,
+    description: 'Espera 24h tras completar una cita, pide al paciente una valoración de 1 a 5 y deriva a Google solo si responde 5/5.',
     trigger_type: REVIEW_AUTOMATION_TRIGGER,
     trigger_config: { event_name: REVIEW_AUTOMATION_TRIGGER },
     is_active: enabled,
@@ -3432,6 +3474,15 @@ async function createAndStartReviewRequestForAppointment(options = {}) {
 }
 
 async function sendReviewRequestReminder(options = {}) {
+  return {
+    success: true,
+    sent: false,
+    skipped: true,
+    reason: 'review_reminders_disabled',
+    list_id: Number(options.listId || options.list_id || options.campaign_id || 0) || null,
+    item_id: Number(options.itemId || options.item_id || 0) || null,
+  };
+
   const listId = Number(options.listId || options.list_id || options.campaign_id || 0);
   const itemId = Number(options.itemId || options.item_id || 0);
   if (!listId || !itemId) {
