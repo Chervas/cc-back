@@ -5,6 +5,7 @@ const flowEngineV2Service = require('./flowEngineV2.service');
 const whatsappCoexistenceService = require('./whatsappCoexistence.service');
 const whatsappTemplatesService = require('./whatsappTemplates.service');
 const marketingBulkSendsService = require('./marketingBulkSends.service');
+const googleReviewMatchService = require('./googleReviewMatch.service');
 const { buildNotificationContent } = require('./notifications.service');
 const { emitNotificationCreated } = require('./notificationsRealtime.service');
 
@@ -326,6 +327,7 @@ const JOB_HANDLERS = {
   business_profile_recent: async (payload = {}) => metaSyncJobs.executeBusinessProfileSync(payload),
   business_profile_backfill: async (payload = {}) => metaSyncJobs.executeBusinessProfileBackfill(payload),
   business_profile_backfill_locations: async (payload = {}) => metaSyncJobs.executeBusinessProfileBackfillForLocations(payload.mappings || []),
+  business_profile_review_match: async (payload = {}) => googleReviewMatchService.runBusinessProfileReviewMatchJob(payload),
   competition_refresh: async (payload = {}) => metaSyncJobs.executeCompetitionSync(payload),
   web_events_aggregate: async (payload = {}) => metaSyncJobs.executeWebEventsAggregate(payload),
   whatsapp_coexistence_sync_contacts: async (payload = {}) => whatsappCoexistenceService.runContactsSyncJob(payload),

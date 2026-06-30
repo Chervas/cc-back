@@ -953,22 +953,6 @@ const NODE_TYPES_V2 = [
     ],
   },
   {
-    type: 'action/request_review_reminder',
-    category: 'action',
-    label: 'Enviar recordatorio de valoración',
-    description: 'Envía un recordatorio sobre la misma solicitud si el paciente no responde al primer WhatsApp.',
-    output_keys: ['on_success', 'on_fail'],
-    runtime_status: 'real',
-    default_config: {
-      list_id: '{{outputs.N2.list_id}}',
-      item_id: '{{outputs.N2.item_id}}',
-      clinic_id: '{{outputs.N2.clinic_id}}',
-      trigger_message_id: '{{outputs.N2.message_id}}',
-      template_name: 'clinicaclick_recordatorio_resena_sin_respuesta',
-    },
-    config_schema: [],
-  },
-  {
     type: 'action/review_followup',
     category: 'action',
     label: 'Responder según valoración',
@@ -1720,7 +1704,6 @@ const WAIT_RESPONSE_LISTENER_NODE_TYPES = new Set([
   'action/send_whatsapp',
   'action/send_email',
   'action/request_review',
-  'action/request_review_reminder',
 ]);
 
 function isWaitResponseListenerNode(node) {
