@@ -7,6 +7,7 @@ const authMiddleware = require('./auth.middleware');
 router.post('/', authMiddleware, citasController.createCita);
 router.get('/next', authMiddleware, citasController.getNextCita);
 router.get('/manual-attribution-preview', authMiddleware, citasController.getManualAttributionPreview);
+router.get('/calendar', authMiddleware, citasController.getCitasCalendar);
 router.patch('/:id/estado', authMiddleware, citasController.updateCitaEstado);
 router.patch('/:id/nota', authMiddleware, citasController.updateCitaNota);
 router.patch('/:id/reagendar', authMiddleware, citasController.reagendarCita);

@@ -25,7 +25,7 @@ const ConversationRead = db.ConversationRead;
 const appointmentAutomationV2Runtime = require('../services/appointmentAutomationV2Runtime.service');
 const { CITA_STATUS_VALUES } = require('../lib/status-catalog');
 const { getIO } = require('../services/socket.service');
-const { normalizePhoneDigits } = require('../lib/phone');
+const { normalizePhoneDigits, getPhoneLookupCandidates } = require('../lib/phone');
 const { normalizeHumanName } = require('../lib/name');
 const consentimientosService = require('../services/consentimientos.service');
 const appointmentNotificationCleanup = require('../services/appointmentNotificationCleanup.service');
@@ -539,19 +539,20 @@ async function attachFlowSummaryToCitas(citas) {
 async function getUnreadCountForConversation(conversationId, userId) {
     if (!Message || !conversationId) return 0;
 
-    let lastReadAt = null;
-    if (ConversationRead && userId) {
-        const read = await ConversationRead.findOne({
-            where: { conversation_id: conversationId, user_id: userId },
-            attributes: ['last_read_at'],
-            raw: true,
-        });
-        lastReadAt = read?.last_read_at || null;
-    }
+    const lastOutbound = await Message.findOne({
+        where: {
+            conversation_id: conversationId,
+            direction: 'outbound',
+            message_type: { [Op.ne]: 'event' },
+        },
+        attributes: ['createdAt'],
+        order: [['createdAt', 'DESC']],
+        raw: true,
+    });
 
     const where = { conversation_id: conversationId, direction: 'inbound' };
-    if (lastReadAt) {
-        where.createdAt = { [Op.gt]: lastReadAt };
+    if (lastOutbound?.createdAt) {
+        where.createdAt = { [Op.gt]: lastOutbound.createdAt };
     }
     return Message.count({ where });
 }
@@ -593,6 +594,210 @@ async function attachUnreadCountsToCitas(citas, userId) {
     }));
 
     return citas;
+}
+
+function setCitaDataValue(cita, key, value) {
+    if (typeof cita?.setDataValue === 'function') {
+        cita.setDataValue(key, value);
+        return;
+    }
+    if (cita && typeof cita === 'object') {
+        cita[key] = value;
+    }
+}
+
+function plainCita(cita) {
+    return typeof cita?.toJSON === 'function' ? cita.toJSON() : cita;
+}
+
+function scoreCalendarConversation(conversation, citaLike, phoneCandidatesByPatient) {
+    let score = 0;
+    if (Number(conversation.patient_id) === Number(citaLike.paciente_id)) score += 100;
+    if (citaLike.lead_intake_id && Number(conversation.lead_id) === Number(citaLike.lead_intake_id)) score += 50;
+    const phoneCandidates = phoneCandidatesByPatient.get(Number(citaLike.paciente_id)) || new Set();
+    if (conversation.contact_id && phoneCandidates.has(String(conversation.contact_id))) score += 30;
+    if (conversation.last_inbound_at) score += 8;
+    if (conversation.last_message_at) score += 4;
+    return score;
+}
+
+async function attachCalendarUnreadCountsToCitas(citas, userId) {
+    const list = Array.isArray(citas) ? citas : (citas ? [citas] : []);
+    if (!list.length || !Conversation || !Message) return citas;
+
+    const plainList = list.map(plainCita).filter(Boolean);
+    const patientIds = Array.from(new Set(
+        plainList
+            .map((cita) => Number(cita?.paciente_id))
+            .filter((id) => Number.isInteger(id) && id > 0)
+    ));
+    if (!patientIds.length) return citas;
+
+    const leadIds = Array.from(new Set(
+        plainList
+            .map((cita) => Number(cita?.lead_intake_id))
+            .filter((id) => Number.isInteger(id) && id > 0)
+    ));
+
+    const phoneCandidatesByPatient = new Map();
+    const allPhoneCandidates = new Set();
+    plainList.forEach((cita) => {
+        const patientId = Number(cita?.paciente_id);
+        const candidates = getPhoneLookupCandidates(cita?.paciente?.telefono_movil || null);
+        if (!Number.isInteger(patientId) || patientId <= 0 || !candidates.length) return;
+        const bucket = phoneCandidatesByPatient.get(patientId) || new Set();
+        candidates.forEach((candidate) => {
+            const value = String(candidate || '').trim();
+            if (!value) return;
+            bucket.add(value);
+            allPhoneCandidates.add(value);
+        });
+        phoneCandidatesByPatient.set(patientId, bucket);
+    });
+
+    const orConditions = [
+        { patient_id: { [Op.in]: patientIds } },
+    ];
+    if (leadIds.length) {
+        orConditions.push({ lead_id: { [Op.in]: leadIds } });
+    }
+    if (allPhoneCandidates.size) {
+        orConditions.push({ contact_id: { [Op.in]: Array.from(allPhoneCandidates) } });
+    }
+
+    const conversations = await Conversation.findAll({
+        where: {
+            clinic_id: { [Op.in]: Array.from(new Set(plainList.map((cita) => Number(cita?.clinica_id)).filter((id) => Number.isInteger(id) && id > 0))) },
+            channel: 'whatsapp',
+            [Op.or]: orConditions,
+        },
+        attributes: ['id', 'clinic_id', 'contact_id', 'patient_id', 'lead_id', 'last_message_at', 'last_inbound_at', 'unread_count', 'updatedAt'],
+        raw: true,
+    });
+
+    if (!conversations.length) {
+        list.forEach((cita) => {
+            setCitaDataValue(cita, 'conversation_id', null);
+            setCitaDataValue(cita, 'unread_count', 0);
+        });
+        return citas;
+    }
+
+    const conversationIds = conversations
+        .map((conversation) => Number(conversation.id))
+        .filter((id) => Number.isInteger(id) && id > 0);
+
+    const pendingReplyByConversation = new Map();
+    if (conversationIds.length) {
+        const rows = await db.sequelize.query(`
+            SELECT
+                base.conversation_id AS conversation_id,
+                COUNT(m.id) AS unread_count
+            FROM (
+                SELECT id AS conversation_id
+                FROM Conversations
+                WHERE id IN (:conversationIds)
+            ) base
+            LEFT JOIN (
+                SELECT conversation_id, MAX(createdAt) AS last_outbound_at
+                FROM Messages
+                WHERE conversation_id IN (:conversationIds)
+                  AND direction = 'outbound'
+                  AND message_type <> 'event'
+                GROUP BY conversation_id
+            ) last_outbound
+              ON last_outbound.conversation_id = base.conversation_id
+            LEFT JOIN Messages m
+              ON m.conversation_id = base.conversation_id
+             AND m.direction = 'inbound'
+             AND (
+                last_outbound.last_outbound_at IS NULL
+                OR m.createdAt > last_outbound.last_outbound_at
+             )
+            GROUP BY base.conversation_id
+        `, {
+            replacements: { conversationIds },
+            type: db.Sequelize.QueryTypes.SELECT,
+        });
+        rows.forEach((row) => {
+            pendingReplyByConversation.set(Number(row.conversation_id), Number(row.unread_count || 0));
+        });
+    } else {
+        conversations.forEach((conversation) => {
+            pendingReplyByConversation.set(Number(conversation.id), Number(conversation.unread_count || 0));
+        });
+    }
+
+    list.forEach((cita) => {
+        const plain = plainCita(cita);
+        let best = null;
+        let bestScore = Number.NEGATIVE_INFINITY;
+        conversations.forEach((conversation) => {
+            if (Number(conversation.clinic_id) !== Number(plain?.clinica_id)) return;
+            const score = scoreCalendarConversation(conversation, plain, phoneCandidatesByPatient);
+            if (score > bestScore) {
+                best = conversation;
+                bestScore = score;
+            }
+        });
+        if (!best || bestScore <= 0) {
+            setCitaDataValue(cita, 'conversation_id', null);
+            setCitaDataValue(cita, 'unread_count', 0);
+            return;
+        }
+        setCitaDataValue(cita, 'conversation_id', best.id);
+        setCitaDataValue(cita, 'unread_count', pendingReplyByConversation.get(Number(best.id)) || 0);
+    });
+
+    return citas;
+}
+
+function mapCalendarCitaRow(cita) {
+    const plain = plainCita(cita);
+    if (!plain) return null;
+    return {
+        id_cita: plain.id_cita,
+        clinica_id: plain.clinica_id,
+        paciente_id: plain.paciente_id,
+        lead_intake_id: plain.lead_intake_id,
+        doctor_id: plain.doctor_id,
+        instalacion_id: plain.instalacion_id,
+        tratamiento_id: plain.tratamiento_id,
+        titulo: plain.titulo,
+        nota: plain.nota,
+        motivo: plain.motivo,
+        tipo_cita: plain.tipo_cita,
+        estado: plain.estado,
+        inicio: plain.inicio,
+        fin: plain.fin,
+        conversation_id: plain.conversation_id || null,
+        unread_count: Number(plain.unread_count || 0) || 0,
+        paciente: plain.paciente ? {
+            id_paciente: plain.paciente.id_paciente,
+            public_id: plain.paciente.public_id,
+            nombre: plain.paciente.nombre,
+            apellidos: plain.paciente.apellidos,
+            telefono_movil: plain.paciente.telefono_movil,
+            foto: plain.paciente.foto,
+        } : null,
+        instalacion: plain.instalacion ? {
+            id: plain.instalacion.id,
+            nombre: plain.instalacion.nombre,
+            color: plain.instalacion.color,
+        } : null,
+        tratamiento: plain.tratamiento ? {
+            id_tratamiento: plain.tratamiento.id_tratamiento,
+            nombre: plain.tratamiento.nombre,
+            duracion_min: plain.tratamiento.duracion_min,
+            color: plain.tratamiento.color,
+        } : null,
+        doctor: plain.doctor ? {
+            id_usuario: plain.doctor.id_usuario,
+            nombre: plain.doctor.nombre,
+            apellidos: plain.doctor.apellidos,
+            avatar: plain.doctor.avatar,
+        } : null,
+    };
 }
 const { buildHorarioExceptionMap, expandHorariosForDate } = require('../lib/personal-schedule-recurring');
 const DEFAULT_TIMEZONE = 'Europe/Madrid';
@@ -1521,6 +1726,94 @@ exports.getCitas = asyncHandler(async (req, res) => {
     await attachUnreadCountsToCitas(citas, req.userData?.userId || null);
     await consentimientosService.attachConsentSummaryToCitas(citas);
     res.json(citas);
+});
+
+/**
+ * Listado ligero para agenda.
+ * Evita cargar detalle de flujos/consentimientos en el primer render; el drawer usa getCitaById.
+ */
+exports.getCitasCalendar = asyncHandler(async (req, res) => {
+    const { clinica_id, startDate, endDate, paciente_id, patient_id } = req.query;
+
+    const where = {};
+    if (clinica_id) {
+        where.clinica_id = clinica_id;
+    }
+
+    const pacienteIdRaw = paciente_id || patient_id;
+    if (pacienteIdRaw) {
+        let pacienteId = Number(pacienteIdRaw);
+        if ((!Number.isFinite(pacienteId) || pacienteId <= 0) && Paciente) {
+            const pacientePublicId = String(pacienteIdRaw).trim();
+            const publicIds = pacientePublicId.startsWith('pat_') ? [pacientePublicId, `pac_${pacientePublicId.slice(4)}`] : [pacientePublicId];
+            const paciente = await Paciente.findOne({
+                where: { public_id: { [Op.in]: publicIds } },
+                attributes: ['id_paciente'],
+            });
+            pacienteId = Number(paciente?.id_paciente);
+        }
+        if (!Number.isFinite(pacienteId) || pacienteId <= 0) {
+            return res.status(400).json({ message: 'paciente_id inválido' });
+        }
+        where.paciente_id = pacienteId;
+    }
+
+    if (startDate && endDate) {
+        where.inicio = { [Op.between]: [new Date(startDate), new Date(endDate)] };
+    }
+
+    const citas = await CitaPaciente.findAll({
+        where,
+        attributes: [
+            'id_cita',
+            'clinica_id',
+            'paciente_id',
+            'lead_intake_id',
+            'doctor_id',
+            'instalacion_id',
+            'tratamiento_id',
+            'titulo',
+            'nota',
+            'motivo',
+            'tipo_cita',
+            'estado',
+            'inicio',
+            'fin',
+            'created_at',
+            'updated_at',
+        ],
+        order: [['inicio', 'ASC']],
+        include: [
+            {
+                model: Paciente,
+                as: 'paciente',
+                attributes: ['id_paciente', 'public_id', 'nombre', 'apellidos', 'telefono_movil', 'foto'],
+            },
+            {
+                model: Instalacion,
+                as: 'instalacion',
+                required: false,
+                attributes: ['id', 'nombre', 'color'],
+            },
+            {
+                model: Tratamiento,
+                as: 'tratamiento',
+                required: false,
+                attributes: ['id_tratamiento', 'nombre', 'duracion_min', 'color'],
+            },
+            db.Usuario ? {
+                model: db.Usuario,
+                as: 'doctor',
+                required: false,
+                attributes: ['id_usuario', 'nombre', 'apellidos', 'avatar'],
+            } : null,
+        ].filter(Boolean),
+    });
+
+    await attachCalendarUnreadCountsToCitas(citas, req.userData?.userId || null);
+
+    res.set('X-Agenda-Endpoint', 'calendar-lite');
+    res.json(citas.map(mapCalendarCitaRow).filter(Boolean));
 });
 
 exports.getCitaById = asyncHandler(async (req, res) => {

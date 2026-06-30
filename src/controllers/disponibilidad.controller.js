@@ -1552,6 +1552,132 @@ const invokeSlotsForSummary = (query) => new Promise((resolve, reject) => {
   Promise.resolve(exports.slots(req, res, reject)).catch(reject);
 });
 
+exports.grid = asyncHandler(async (req, res) => {
+  const {
+    clinica_id,
+    dates,
+    duracion_min,
+    granularity_min,
+    from_local,
+    to_local,
+    tratamiento_id,
+    mode,
+    context_doctor_id,
+    context_instalacion_id,
+    preferred_instalacion_id,
+  } = req.query || {};
+
+  const clinicaId = parseIntSafe(clinica_id);
+  if (!clinicaId) return res.status(400).json({ message: 'clinica_id requerido' });
+
+  const dateList = Array.from(new Set(parseDateArray(dates || req.query['dates[]'])));
+  if (!dateList.length) {
+    return res.status(400).json({ message: 'dates[] requerido (YYYY-MM-DD)' });
+  }
+  if (dateList.length > 14) {
+    return res.status(400).json({ message: 'dates[] excede el máximo (14)' });
+  }
+
+  const durMin = parseIntSafe(duracion_min);
+  if (!durMin || durMin <= 0) return res.status(400).json({ message: 'duracion_min requerido' });
+
+  const stepMin = parseIntSafe(granularity_min) || 15;
+  const columnIds = parseIntArray(req.query.column_ids || req.query['column_ids[]']);
+  if (!columnIds.length) {
+    return res.status(400).json({ message: 'column_ids[] requerido' });
+  }
+  if (columnIds.length > 80) {
+    return res.status(400).json({ message: 'column_ids[] excede el máximo (80)' });
+  }
+
+  const peerInstalacionIds = parseIntArray(req.query.peer_instalacion_ids || req.query['peer_instalacion_ids[]']);
+  const peerDoctorIds = parseIntArray(req.query.peer_doctor_ids || req.query['peer_doctor_ids[]']);
+  const normalizedMode = mode === 'doctor' ? 'doctor' : 'installation';
+  const contextDoctorId = context_doctor_id && context_doctor_id !== 'todos' ? parseIntSafe(context_doctor_id) : null;
+  const contextInstalacionId = context_instalacion_id && context_instalacion_id !== 'todos' ? parseIntSafe(context_instalacion_id) : null;
+  const preferredInstalacionId = preferred_instalacion_id ? parseIntSafe(preferred_instalacion_id) : null;
+
+  const baseQuery = {
+    clinica_id: String(clinicaId),
+    duracion_min: String(durMin),
+    granularity_min: String(stepMin),
+    include_unavailable: 'true',
+  };
+  if (from_local) baseQuery.from_local = from_local;
+  if (to_local) baseQuery.to_local = to_local;
+  if (tratamiento_id) baseQuery.tratamiento_id = tratamiento_id;
+
+  const tasks = [];
+  dateList.forEach((dateIso) => {
+    columnIds.forEach((columnId) => {
+      tasks.push({ dateIso, columnId });
+    });
+  });
+
+  const rows = await runWithConcurrency(tasks, 4, async ({ dateIso, columnId }) => {
+    const query = {
+      ...baseQuery,
+      fecha_local: dateIso,
+    };
+
+    if (normalizedMode === 'doctor') {
+      query.doctor_id = String(columnId);
+      const resolvedInstalacionId = contextInstalacionId || preferredInstalacionId || null;
+      if (resolvedInstalacionId) {
+        query.instalacion_id = String(resolvedInstalacionId);
+      } else if (peerInstalacionIds.length) {
+        query.instalacion_ids = peerInstalacionIds.join(',');
+      }
+    } else {
+      const resolvedInstalacionId = contextInstalacionId || columnId;
+      query.instalacion_id = String(resolvedInstalacionId);
+      if (contextDoctorId) {
+        query.doctor_id = String(contextDoctorId);
+      } else if (peerDoctorIds.length) {
+        query.doctor_ids = peerDoctorIds.join(',');
+      }
+    }
+
+    try {
+      const payload = await invokeSlotsForSummary(query);
+      return {
+        day_id: dateIso,
+        column_id: String(columnId),
+        ok: true,
+        slots: Array.isArray(payload?.slots) ? payload.slots : undefined,
+        unavailable_intervals: Array.isArray(payload?.unavailable_intervals) ? payload.unavailable_intervals : undefined,
+        slots_by_instalacion: payload?.slots_by_instalacion || undefined,
+        unavailable_by_instalacion: payload?.unavailable_by_instalacion || undefined,
+        slots_by_doctor: payload?.slots_by_doctor || undefined,
+        unavailable_by_doctor: payload?.unavailable_by_doctor || undefined,
+      };
+    } catch (error) {
+      console.warn('[Disponibilidad][grid] No se pudo calcular columna.', {
+        dateIso,
+        columnId,
+        mode: normalizedMode,
+        message: error?.message || error,
+      });
+      return {
+        day_id: dateIso,
+        column_id: String(columnId),
+        ok: false,
+        error: error?.message || 'availability_grid_column_failed',
+      };
+    }
+  });
+
+  return res.json({
+    clinica_id: clinicaId,
+    dates: dateList,
+    mode: normalizedMode,
+    duracion_min: durMin,
+    granularity_min: stepMin,
+    columns: columnIds.map((id) => String(id)),
+    rows,
+  });
+});
+
 exports.summary = asyncHandler(async (req, res) => {
   const { dates, duracion_min } = req.query || {};
   const dateList = parseDateArray(dates || req.query['dates[]']);
