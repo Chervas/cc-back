@@ -119,6 +119,40 @@ function splitFullName(value) {
   };
 }
 
+function resolveImportedPatientName(row, columnMapping) {
+  const nameHeader = normalizeText(columnMapping?.name || '');
+  const firstNameHeader = normalizeText(columnMapping?.first_name || '');
+  const lastNameHeader = normalizeText(columnMapping?.last_name || '');
+  const hasSeparateNameColumns =
+    (!!firstNameHeader && firstNameHeader !== nameHeader) ||
+    (!!lastNameHeader && lastNameHeader !== nameHeader);
+
+  if (hasSeparateNameColumns) {
+    const firstName = toTitleCaseName(readImportValue(row, columnMapping, 'first_name'));
+    const lastName = toTitleCaseName(readImportValue(row, columnMapping, 'last_name'));
+    if (firstName || lastName) {
+      const splitName = {
+        nombre: firstName || 'Paciente',
+        apellidos: lastName,
+      };
+      return {
+        normalizedFullName: [splitName.nombre, splitName.apellidos].filter(Boolean).join(' ').trim() || 'Paciente importado',
+        splitName,
+      };
+    }
+  }
+
+  const rawFullName = readImportValue(row, columnMapping, 'name') || [
+    readImportValue(row, columnMapping, 'first_name'),
+    readImportValue(row, columnMapping, 'last_name'),
+  ].filter(Boolean).join(' ');
+  const normalizedFullName = toTitleCaseName(rawFullName || 'Paciente importado');
+  return {
+    normalizedFullName,
+    splitName: splitFullName(normalizedFullName),
+  };
+}
+
 function titleCaseIfNeeded(value) {
   const text = normalizeText(value);
   if (!text) return text;
@@ -885,8 +919,10 @@ function normalizeCustomFieldSchemaEntry(entry) {
 }
 
 function buildCustomFields(row, mapping, customFieldsSchema = []) {
+  const mappedHeaders = new Set(Object.values(mapping || {}).filter(Boolean));
   const explicitFields = Array.isArray(customFieldsSchema)
     ? customFieldsSchema.map(normalizeCustomFieldSchemaEntry).filter(Boolean)
+      .filter((field) => !mappedHeaders.has(field.source_column))
     : [];
   if (explicitFields.length) {
     const custom = {};
@@ -898,7 +934,6 @@ function buildCustomFields(row, mapping, customFieldsSchema = []) {
     return custom;
   }
 
-  const mappedHeaders = new Set(Object.values(mapping || {}).filter(Boolean));
   const custom = {};
   for (const [key, value] of Object.entries(row || {})) {
     if (mappedHeaders.has(key)) continue;
@@ -912,8 +947,12 @@ function buildCustomFields(row, mapping, customFieldsSchema = []) {
 }
 
 function buildCustomFieldSchema(rows, mapping, explicitSchema = []) {
+  const mappedHeaders = new Set(Object.values(mapping || {}).filter(Boolean));
   if (Array.isArray(explicitSchema) && explicitSchema.length) {
-    return explicitSchema.map(normalizeCustomFieldSchemaEntry).filter(Boolean);
+    return explicitSchema
+      .map(normalizeCustomFieldSchemaEntry)
+      .filter(Boolean)
+      .filter((field) => !mappedHeaders.has(field.source_column));
   }
   const fields = new Map();
   for (const row of rows) {
@@ -1183,12 +1222,7 @@ async function buildImportedItemPayloads(scope, body, transaction) {
   const itemPayloads = [];
 
   for (const row of rows) {
-    const rawFullName = readImportValue(row, columnMapping, 'name') || [
-      readImportValue(row, columnMapping, 'first_name'),
-      readImportValue(row, columnMapping, 'last_name'),
-    ].filter(Boolean).join(' ');
-    const normalizedFullName = toTitleCaseName(rawFullName || 'Paciente importado');
-    const splitName = splitFullName(normalizedFullName);
+    const { normalizedFullName, splitName } = resolveImportedPatientName(row, columnMapping);
     const phoneDigits = normalizePhoneDigits(readImportValue(row, columnMapping, 'phone'));
     const formattedPhone = phoneDigits ? `+${phoneDigits}` : null;
     const landlineDigits = normalizePhoneDigits(readImportValue(row, columnMapping, 'phone_landline'));

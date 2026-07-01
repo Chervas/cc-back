@@ -233,6 +233,15 @@ const buildAppointmentActivityDescription = ({ telefono, inicio, tratamiento, es
   };
 };
 
+const isImportedHistoricalAppointment = (cita) => {
+  const tipoCita = String(cita?.tipo_cita || '').trim().toLowerCase();
+  const motivo = String(cita?.motivo || '').trim().toLowerCase();
+  const nota = String(cita?.nota || '').trim().toLowerCase();
+  return tipoCita === 'historico_importado'
+    || motivo === 'importación de pacientes para reactivación'
+    || nota.includes('cita histórica creada automáticamente desde una importación');
+};
+
 const buildReviewActivityDescription = ({ rating, reason, reviewerName, clinicName }) => {
   const fields = [];
   if (rating) fields.push({ label: 'Valoración', value: `${rating}/5` });
@@ -696,6 +705,9 @@ exports.getPacienteActivity = async (req, res) => {
         'paciente_id',
         'estado',
         'inicio',
+        'tipo_cita',
+        'motivo',
+        'nota',
         'created_at',
         'updated_at',
         'created_by',
@@ -733,23 +745,31 @@ exports.getPacienteActivity = async (req, res) => {
         inicio: cita.inicio,
         tratamiento: cita?.tratamiento?.nombre || null,
       });
+      const importedHistorical = isImportedHistoricalAppointment(cita);
       items.push({
-        id: `appointment-created-${cita.id_cita}`,
+        id: importedHistorical
+          ? `historical-treatment-imported-${cita.id_cita}`
+          : `appointment-created-${cita.id_cita}`,
         pacienteId: String(pacienteId),
         fecha: cita.created_at || cita.inicio,
-        tipo: 'appointment_created',
-        titulo: 'Cita agendada',
+        tipo: importedHistorical ? 'historical_treatment_imported' : 'appointment_created',
+        titulo: importedHistorical ? 'Tratamiento histórico importado' : 'Cita agendada',
         descripcion: createdDescriptions.plain,
         descripcion_html: createdDescriptions.html,
-        icono: 'heroicons_outline:calendar-days',
+        icono: importedHistorical ? 'heroicons_outline:archive-box' : 'heroicons_outline:calendar-days',
         color: 'info',
         citaId: String(cita.id_cita),
         usuarioId: createdByUser ? String(createdByUser.id_usuario) : 'system',
         usuarioNombre: buildActorLabel(createdByUser),
         detalles: {
           estado: cita.estado || null,
+          importado: importedHistorical,
         },
       });
+
+      if (importedHistorical) {
+        continue;
+      }
 
       const updatedById = Number(cita.updated_by);
       const updatedAt = cita.updated_at ? new Date(cita.updated_at).getTime() : null;
