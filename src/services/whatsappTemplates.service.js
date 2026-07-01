@@ -103,12 +103,6 @@ function isReviewRequestUsage(value) {
   return ['solicitud_resena', 'resena', 'review_request', 'reviews'].includes(normalizeTemplateKey(value));
 }
 
-function isRetiredReviewReminderTemplateName(value) {
-  const key = normalizeTemplateKey(value);
-  return key === 'clinicaclick_recordatorio_resena_sin_respuesta'
-    || key.startsWith('clinicaclick_recordatorio_resena_sin_respuesta_v');
-}
-
 function buildCustomTemplateExtraComponents({ templateUsage }) {
   return [];
 }
@@ -1370,7 +1364,6 @@ async function syncTemplatesForWaba({ wabaId, accessToken }) {
   for (const tpl of items) {
     const catalog = resolveCatalogTemplateByTechnicalName(catalogs, tpl.name);
     const catalogIsActive = !catalog || (catalog.is_active !== false && Number(catalog.is_active) !== 0);
-    const isRetiredTemplate = isRetiredReviewReminderTemplateName(tpl.name);
     const payload = {
       waba_id: wabaId,
       name: tpl.name,
@@ -1382,7 +1375,7 @@ async function syncTemplatesForWaba({ wabaId, accessToken }) {
       meta_template_id: tpl.id || null,
       catalog_template_id: catalog?.id || null,
       origin: 'external',
-      is_active: catalogIsActive && !isRetiredTemplate,
+      is_active: catalogIsActive,
       last_synced_at: now,
     };
 

@@ -83,6 +83,7 @@ Antes de activar coexistencia sobre un numero real:
 - para WABA compartido, si ya existe una plantilla aprobada compatible por `catalog_template_id`/familia en ese WABA, el job debe dejar la copia local de cada clinica en `APPROVED` con el `meta_template_id` existente. No se debe enviar una revision nueva a Meta solo porque una clinica del grupo tuviera placeholders `SIN_CONECTAR`;
 - `whatsapp_phones_sync` (cada 15 minutos) actua como red de seguridad: si detecta que un numero ya esta `CONNECTED`/`registered` y quedan plantillas de catalogo sin `meta_template_id` o en `SIN_CONECTAR`, encola `whatsapp_template_create` con cooldown de 1 hora (`WHATSAPP_TEMPLATE_CREATE_ENSURE_COOLDOWN_MS`). En WABA asignado a grupo debe revisar las plantillas de todas las clinicas del grupo, no solo la clinica principal del activo. Tambien compara cada WABA contra todas las plantillas de catalogo genericas activas (`is_generic=true`): si una plantilla generica nueva no tiene copia remota con `catalog_template_id` y `meta_template_id`, o si la copia remota apunta al mismo catalogo pero su `category/components` ya no coinciden con el contenido Meta-facing actual, se vuelve a encolar la creacion aunque el WABA ya tuviera plantillas anteriores. Esta ruta salta el cooldown cuando el catalogo esta incompleto/desactualizado para que se abra una nueva version tecnica en Meta. Esto cubre coexistencia cuando Meta termina de habilitar el numero despues del callback inicial, nuevas plantillas admin añadidas a posteriori, cambios de copy en plantillas genericas ya propagadas y clinicas nuevas que heredan WABA de grupo;
 - `whatsapp_phones_sync` no debe reintentar automaticamente `PENDING_LOCAL`/`LOCAL_PENDING` o `REJECTED`: esos estados significan cambio local no aprobable o rechazo de Meta y requieren accion correctiva sobre el contenido;
+- las plantillas de reseñas tienen dos familias genericas: `clinicaclick_solicitar_resena` (solo texto) y `clinicaclick_solicitar_resena_foto` (cabecera `HEADER/IMAGE`). El backend solo prefiere la variante con foto si `review_team_photo_url` es HTTPS y esa variante esta `APPROVED`; en caso contrario cae a la plantilla sin foto para no romper la solicitud de reseñas. Para que Meta acepte la revision de cabecera de imagen, el ejemplo de la plantilla debe ser un recurso publico estable; si se usa media handle de Meta, configurar `WHATSAPP_REVIEW_TEMPLATE_HEADER_HANDLE`/`WHATSAPP_TEMPLATE_IMAGE_HEADER_HANDLE` antes de propagar;
 - `whatsapp_phones_sync` solo debe encolar WABAs procedentes de `whatsapp_phone_number` activos y asignados a clínica o grupo. Un número `unassigned` no es operativo aunque conserve token de Meta para reasignación o auditoría;
 - un número `unassigned` puede permanecer `isActive=true` si se ha desasignado para poder reasignarlo desde Ajustes. La sync remota no debe tratarlo como operativo ni encolar plantillas hasta que vuelva a tener `assignmentScope=clinic|group`;
 - la sync remota de teléfonos no puede reactivar un número desconectado/desactivado solo porque Meta lo siga devolviendo. Si se desactivó con la acción destructiva de desconexión, debe permanecer `isActive=false` y `assignmentScope=unassigned`;
@@ -2027,6 +2028,7 @@ En `.env` / `.env.example`:
   - Fase actual: no hay storage propio; se solicita a Meta bajo demanda para transcribir y reproducir.
   - Fase con estáticos privados: al recibir un audio, además de transcribirlo, se guardará el binario en almacenamiento privado/autenticado (p.ej. S3 compatible o storage local protegido), se persistirá una referencia interna en `Messages.metadata.media.storage`, y el reproductor priorizará ese storage frente a Meta.
   - La migración a storage propio debe definir retención, borrado, permisos, cifrado y auditoría, porque los audios pueden contener datos sanitarios o personales.
+- Importante 2026-06-30: `PUBLIC_MEDIA` no sustituye esta estrategia. `media.clinicaclick.com` solo puede servir assets publicos/no clinicos.
 - Objetivo futuro (servidor local):
   - Sustituir la llamada cloud STT por un servicio local de transcripción (p.ej. `faster-whisper`/`whisper.cpp`) detrás de un endpoint interno.
   - Mantener el mismo contrato de salida (`content` + `metadata.audio_transcription`) para no romper QuickChat ni automations.
@@ -2570,7 +2572,7 @@ El `2026-03-27` la capa `AutomationFlowCatalog` no actúa todavía como fuente d
 - si el flujo propagado es programado (`appointment_reminder_window` o `appointment_after`), la propagación debe ejecutar también el backfill de scheduler para crear/cancelar `JobRequests` de citas futuras ya existentes;
 - la propagación debe resolver siempre el flujo base neutro del catálogo y no reutilizar copias de clínica como fuente;
 - cada familia propagada por clínica debe tener `public_id` propio, distinto del asset base del catálogo;
-- desactiva la versión publicada anterior de la misma familia en la clínica y deja activa la recién propagada;
+- desactiva la versión publicada anterior de la misma familia en la clínica y publica la nueva versión conservando el estado operativo local: si la clínica había pausado esa automatización, la propagación no debe reactivarla;
 - no versiona ni valida el contrato de placeholders de las plantillas WhatsApp que usan esos nodos;
 - varios registros históricos del catálogo siguen con `template_key = NULL`, por lo que no son propagables como catálogo funcional.
 
@@ -2621,6 +2623,9 @@ No debe mezclarse el versionado del flujo fuente con el versionado operativo de 
 - La versión de clínica sube de forma independiente. Ejemplo normal: catálogo `v4` propagado hoy puede crear clínica `v5` si esa familia local ya tenía cuatro versiones previas.
 - Que una copia de clínica sea `v5` no implica que exista `v5` en catálogo.
 - Que una plantilla WhatsApp esté `APPROVED` no crea una versión nueva del flujo. Solo publicar el flujo fuente desde el editor crea una nueva versión del flujo de catálogo.
+- Las copias de clínica propagadas desde catálogo se consideran automatizaciones de sistema operativas. El usuario de clínica puede verlas, pausarlas o duplicarlas para crear una automatización propia, pero no debe editar ni publicar sobre la familia gestionada por catálogo. El admin controla la base desde `automatizaciones-admin` y puede propagar cambios sin pisar desactivaciones locales.
+- En automatizaciones de reseñas, la propagación conserva configuración local de clínica en los nodos de reseñas (`whatsapp_template_id`, premio, nombre visible y foto de equipo). El admin gobierna estructura/nodos; la configuración de producto de cada clínica sigue viniendo de `Marketing > Campañas > Conseguir reseñas`.
+- En listados operativos (`/automatizaciones`) con scope de clínica o grupo, la plantilla base global del catálogo no debe mostrarse junto a su copia clínica. La base se consulta desde `automatizaciones-admin`; la pantalla cliente trabaja con la copia propagada/operativa para evitar dobles automatizaciones aparentes.
 
 La columna `Propagada` del catálogo de automatizaciones significa:
 
@@ -3106,7 +3111,7 @@ Reglas:
 - Cuando `response_buffer_enabled=true`, el runtime agrupa respuestas partidas del paciente durante 90 segundos por defecto antes de reanudar el flujo. Esto evita falsos negativos si el paciente responde en dos mensajes seguidos, por ejemplo `Buenos días` y después `sí confirmo`. Se puede ajustar por nodo con `response_buffer_delay_seconds` o por entorno con `AUTOMATIONS_V2_RESPONSE_BUFFER_SECONDS`.
 - `waiting_meta.runtime_namespace` y `payload.__runtime_namespace` deben apuntar al mismo runtime que reclama jobs en ese entorno.
 - Si el mensaje outbound escuchado salió más tarde por horario silencioso, `wait_starts_at` debe anclarse a esa hora efectiva de salida, no a la entrada inicial al nodo.
-- En guardado/publicación, `listens_to_node_id` solo es válido si apunta a un nodo outbound real (`action/send_whatsapp`, `action/send_email`, `action/request_review` o `action/request_review_reminder`). Los duplicados o plantillas antiguas pueden arrastrar IDs existentes pero incorrectos; backend los normaliza recorriendo el grafo hacia atrás y, si no encuentra outbound, rechaza la configuración.
+- En guardado/publicación, `listens_to_node_id` solo es válido si apunta a un nodo outbound real (`action/send_whatsapp`, `action/send_email` o `action/request_review`). Los duplicados o plantillas antiguas pueden arrastrar IDs existentes pero incorrectos; backend los normaliza recorriendo el grafo hacia atrás y, si no encuentra outbound, rechaza la configuración.
 - Si una ejecución se queda en `waiting` pero el job asociado falla con `No handler registered for job type 'automations_v2_execute'`, el problema es de scheduler/claiming, no de plantilla ni del nodo `wait_response`.
 - En QA de automatizaciones con WhatsApp conviene distinguir siempre:
   - reacción (`message_type = reaction`);
@@ -3610,7 +3615,7 @@ Actualización 2026-05-06:
 - Cuando una baja comercial se aplica, se persiste un `Messages.message_type=event` interno con `metadata.reason=marketing_opt_out`. Es aviso operativo para QuickChat; no se envía al paciente.
 - El job de envío lo ejecuta el API del namespace (`dev`, `staging`, `prod`). Gateway no ejecuta jobs de negocio, pero al promocionar hay que llevarle `src/workers/queue.workers.js` porque recibe webhooks externos y materializa estados/respuestas.
 - Si se prepara una campaña con plantilla WhatsApp no aprobada y `auto_send_when_template_approved = true`, queda en `dispatch.status = waiting_template_approval`. La sincronización WABA la reencola automáticamente cuando esa plantilla pase a `APPROVED`.
-- La sincronización WABA respeta `WhatsappTemplateCatalog.is_active=false` y no debe reactivar plantillas retiradas. En particular, `clinicaclick_recordatorio_resena_sin_respuesta*` queda retirado: el flujo de reseñas no envía recordatorios si el paciente no responde a la primera solicitud.
+- La sincronización WABA respeta `WhatsappTemplateCatalog.is_active=false` y no debe reactivar plantillas retiradas. Las plantillas activas del catálogo pueden volver a quedar operativas tras sincronizarse desde Meta si el flujo vigente las necesita.
 - Campañas Admin expone `GET/PUT /api/admin/campaign-playbooks/bulk-send-settings` para configurar ajustes de envíos masivos WhatsApp: batch size, delay y baja máxima. `prepare` guarda snapshot en `criteria.dispatch`; el delay mínimo efectivo es 2 minutos por lote. Email y otros canales deberán tener ajustes propios cuando se conecten.
 - Una campaña pausada con `dispatch.status=paused_quality` solo puede reanudarse con usuario admin global cuando el motivo es calidad real bloqueante (`opt_out_rate_high` o futuros motivos equivalentes). Las pausas legacy por `read_rate_low` son reanudables porque la lectura ya no bloquea envíos.
 - El seguimiento de enlaces usa `MarketingTrackedLinks`, `MarketingTrackedLinkClicks` y `GET /r/:token`. `token` debe ser opaco/no semántico; no derivarlo de URL, lista, campaña, paciente ni variable. En staging/prod, gateway/DNS debe enrutar `envios.clinicaclick.com/r/:token` o el subdominio elegido al backend correcto.
@@ -3622,12 +3627,12 @@ Actualización 2026-05-06:
 - QuickChat no debe mostrar como burbuja independiente los fallos tecnicos `automation_send_whatsapp_preflight`: el mensaje real fallido conserva la admiracion roja, el detalle tecnico vive en el tooltip y el listado de conversaciones ignora esas filas como preview si existe un mensaje real anterior.
 - `GET /api/marketing/review-requests/summary` devuelve el resumen operativo del objetivo de reseñas para el `review_source` solicitado: pacientes posibles, preview de candidatos con tratamiento, peticiones enviadas, valoraciones internas `1-4` y `5`, `treatment_options` con contador de pacientes elegibles por tratamiento, estado de automatización, disponibilidad de plantilla WABA aprobada, disponibilidad de WhatsApp y disponibilidad de `url_dejar_resena`. Si la automatización está activa, `automation_template` incluye también `review_gift_enabled`, `review_gift_description` y `review_display_clinic_name` para que la UI explique si opera con premio/sin premio, nombre visible y audiencia. Acepta `review_treatment_ids` como lista separada por comas para filtrar varios tratamientos; `review_treatment_id` sigue soportado como compatibilidad. En este endpoint, si llegan `scope=group:<id>` y `clinic_id` juntos, el backend debe priorizar `scope` para que el front pueda conservar una sede activa sin perder el desglose de grupo. En scope de grupo añade `clinic_statuses`, `group_total_clinics`, `group_ready_clinics` y `group_blocked_clinics`: cada sede se evalua por candidatos posibles, `url_dejar_resena` disponible, WhatsApp conectado, plantilla WABA aprobada y automatización individual de clínica. Cada `clinic_status` expone labels/hints listos para UI (`google_status_label`, `whatsapp_status_label`, `template_status_label`, `status_label`, `status_hint`, `automation_label`, `automation_hint`) para que el front no deduzca estados complejos. Si una automatización está activa pero la sede no está lista, se etiqueta como `Configurada, sin enviar`. La UI no muestra switches por sede: usa un interruptor general de grupo como operación masiva y un desglose por clínica para explicar qué sedes están listas y cuántos pacientes posibles aporta cada una. Las sedes no listas quedan fuera del envío hasta resolver el motivo; las listas usan el enlace de reseña de la sede de cada item, no un enlace global del grupo.
 - En vista de grupo, el interruptor de reseñas no representa una plantilla operativa de grupo. Al activarlo se crean/actualizan las automatizaciones individuales de las clínicas del grupo; al pausarlo se desactivan las automatizaciones existentes de esas clínicas. Esto evita herencias/overrides difíciles de explicar al usuario.
-- `PATCH /api/marketing/review-requests/automation` activa/desactiva una plantilla `AutomationFlowTemplatesV2` por clínica con `trigger_type=appointment_completed`. Para activarla exige Perfil Google con `url_dejar_resena`, WhatsApp conectado y plantilla WABA aprobada; si falta algo devuelve `409 review_automation_requirements_missing` con `warnings`. Si recibe `scope=group:<id>`, ejecuta la misma operación clínica para cada sede del grupo y devuelve `group_result` con sedes actualizadas/activas/fallidas; no crea `review_request_after_completed__group_*`. La plantilla actual es V2 y encadena `delay/fixed` de 24h tras `appointment_completed` -> `action/request_review` -> `delay/wait_response` de 20h. Si hay respuesta entra en `condition/field_check`, que comprueba `last_response_context.response_rating >= 5`; si es verdadero continúa por `action/review_followup` con `followup_kind=google_review`, y si es falso continúa por `action/review_followup` con `followup_kind=private_feedback`. Si no responde, la rama termina sin recordatorio para no molestar al paciente. La acción `request_review` conserva en su configuración `review_gift_enabled`, `review_gift_description` y `review_display_clinic_name`; el runtime los traslada a la lista generada automáticamente.
+- `PATCH /api/marketing/review-requests/automation` activa/desactiva una plantilla `AutomationFlowTemplatesV2` por clínica con `trigger_type=appointment_completed`. Para activarla exige Perfil Google con `url_dejar_resena`, WhatsApp conectado y plantilla WABA aprobada; si falta algo devuelve `409 review_automation_requirements_missing` con `warnings`. Si recibe `scope=group:<id>`, ejecuta la misma operación clínica para cada sede del grupo y devuelve `group_result` con sedes actualizadas/activas/fallidas; no crea `review_request_after_completed__group_*`. La plantilla actual es V2 y encadena `delay/fixed` de 24h tras `appointment_completed` -> `action/request_review` con `review_source=completed_treatment` -> `delay/wait_response` de 24h. Si hay respuesta entra en `condition/field_check`, que comprueba `last_response_context.response_rating >= 5`; si es verdadero continúa por `action/review_followup` con `followup_kind=google_review`, y si es falso continúa por `action/review_followup` con `followup_kind=private_feedback`. Si no responde, cierra la rama con `action/review_no_response` sin enviar recordatorios. La acción `request_review` conserva en su configuración `review_gift_enabled`, `review_gift_description`, `review_display_clinic_name` y `review_team_photo_url`; el runtime los traslada a la lista generada automáticamente.
 - Las solicitudes de reseñas se materializan como `mass_sends` con `criteria.review_request = true` y `template_usage = solicitud_resena`. Si `list_source=current_patients`, el backend crea candidatos desde `CitasPacientes` completadas o desde pacientes actuales en selección manual. La selección manual considera tanto `Pacientes.clinica_id` como vínculos en `PacienteClinicas`, para que un paciente cuya clínica principal sea otra sede del grupo pueda usarse como ejemplo o receptor si está vinculado a la clínica activa. Cuando se filtra por tratamientos, guarda `criteria.review_treatment_ids` y conserva `criteria.review_treatment_id` con el primer valor para consumidores legacy.
-- Fuentes soportadas para reseñas: `first_completed_or_completed_treatment`, `first_completed_appointment`, `completed_treatment`, `manual_selection`. La automatización operativa debe usar `first_completed_or_completed_treatment`: envía 24h después de la primera cita completada o al completar un tratamiento, y excluye cualquier paciente que ya tenga una solicitud previa enviada/en cola para evitar duplicados, especialmente si la primera cita incluye tratamiento.
+- Fuentes soportadas para reseñas: `first_completed_or_completed_treatment`, `first_completed_appointment`, `completed_treatment`, `manual_selection`. Las dos primeras se mantienen para leer automatizaciones históricas. La automatización operativa nueva debe usar `completed_treatment`: envía 24h después de una cita completada que tenga tratamiento asociado y excluye cualquier paciente que ya tenga una solicitud previa enviada/en cola para evitar duplicados.
 - En reseñas, `appointment_completed` significa que la cita se ha marcado con `estado = completada`, es decir, el paciente ha acudido o la clínica la da por realizada. No equivale a `info_confirmada` ni a `recordatorio_confirmado`, que solo indican confirmación previa del paciente. La automatización vigente no envía en ese instante: entra primero en `delay/fixed` de 24h.
-- La escala de reseña es `1-5`; el filtro público queda fijado en `5/5`. Las plantillas WABA `solicitud_resena` ya no usan botones rápidos: WhatsApp colapsa 5 opciones bajo "ver todas las opciones" y Meta rechaza emojis/formato en botones. La plantilla muestra la escala con estrellas en el cuerpo y el paciente responde escribiendo `1`, `2`, `3`, `4` o `5`. El copy base actual usa una pregunta corta (`¿Cómo valorarías tu experiencia en {{clinica}}?`) para que el preview plegado de WhatsApp llegue antes a la escala. Al recibir la respuesta, `materializeInboundReply` crea `review_rating_received`; si la valoración es `5/5` envía follow-up con `{{clinica.url_dejar_resena}}` como URL visible en texto, y si es `1-4` pide motivo como opinión privada. Se evita `interactive cta_url` para reseñas porque puede abrir Google en un contexto que obliga a iniciar sesión, mientras el enlace directo conserva mejor el flujo de escritura de reseña. Los follow-ups tras respuesta usan texto libre porque el inbound del paciente abre ventana de 24h; si en el futuro se diferencian o retrasan fuera de esa ventana deberán tener fallback por plantilla aprobada. Si el paciente deja motivo, se guarda como `review_private_feedback_received` y se envía acuse `review_private_feedback_ack` para cerrar la conversación. Si el paciente no contesta a la primera solicitud, no se envía recordatorio de valoración. El runtime mantiene `sendReviewRequestReminder` como no-op defensivo para flujos antiguos y las migraciones `20260630090000-disable-review-reminders-and-cancel-legacy-waits`, `20260630093000-deactivate-review-reminder-templates-after-sync` y `20260630095500-clarify-review-automation-display-names` desactivan la plantilla de recordatorio, inactivan sus copias WABA incluso si una sincronización Meta las reactiva y cierran esperas legacy que hubieran quedado en esa rama. En envíos de prueba (`mass_campaign_test`), el follow-up debe enviarse al número de prueba guardado en `metadata.recipient`, no al teléfono del contacto usado para renderizar variables; además, cada prueba se evalúa por `trigger_message_id` para poder repetir tests sobre el mismo contacto/lista sin bloquear el nuevo follow-up.
-- Si una campaña/lista de reseñas se prepara con premio, `criteria.review_gift_enabled` y `criteria.review_gift_description` gobiernan el follow-up de `5/5`. Sin premio: pregunta directa para publicar la valoración en Google y URL visible en texto. Con premio: texto corto con la descripción del regalo en negrita, URL visible y la instrucción de escribir al WhatsApp para reclamarlo en horario laboral. Este follow-up no es plantilla WABA: se envía como mensaje de sesión justo después de recibir la valoración del paciente, aprovechando la ventana de 24h abierta por ese inbound. El backend usa un margen operativo de 23h50; si el webhook/materialización llega fuera de ventana, no intenta enviar texto libre y registra `review_rating_followup_skipped` con `reason=whatsapp_session_window_expired`.
+- La escala de reseña es `1-5`; el filtro público queda fijado en `5/5`. Las plantillas WABA `solicitud_resena` ya no usan botones rápidos: WhatsApp colapsa 5 opciones bajo "ver todas las opciones" y Meta rechaza emojis/formato en botones. La plantilla muestra la escala con estrellas en el cuerpo y el paciente responde escribiendo `1`, `2`, `3`, `4` o `5`. El copy base actual pregunta por la experiencia con el equipo de la clínica y muestra directamente las cinco opciones. Al recibir la respuesta, `materializeInboundReply` crea `review_rating_received`; si la valoración es `5/5` envía follow-up con `{{clinica.url_dejar_resena}}` como URL visible en texto, y si es `1-4` pide motivo como opinión privada. Se evita `interactive cta_url` para reseñas porque puede abrir Google en un contexto que obliga a iniciar sesión, mientras el enlace directo conserva mejor el flujo de escritura de reseña. Los follow-ups tras respuesta usan texto libre porque el inbound del paciente abre ventana de 24h; si en el futuro se diferencian o retrasan fuera de esa ventana deberán tener fallback por plantilla aprobada. Si el paciente deja motivo, se guarda como `review_private_feedback_received` y se envía acuse `review_private_feedback_ack` para cerrar la conversación. Si el paciente no contesta a la primera solicitud, el flujo vigente cierra la rama sin enviar recordatorios para no insistir. En envíos de prueba (`mass_campaign_test`), el follow-up debe enviarse al número de prueba guardado en `metadata.recipient`, no al teléfono del contacto usado para renderizar variables; además, cada prueba se evalúa por `trigger_message_id` para poder repetir tests sobre el mismo contacto/lista sin bloquear el nuevo follow-up.
+- Si una campaña/lista de reseñas se prepara con premio, `criteria.review_gift_enabled` y `criteria.review_gift_description` gobiernan el follow-up de `5/5`. Sin premio: mensaje corto con URL visible para publicar en Google. Con premio: texto corto con la descripción del regalo, URL visible y la instrucción de escribir al WhatsApp para tramitarlo. Este follow-up no es plantilla WABA: se envía como mensaje de sesión justo después de recibir la valoración del paciente, aprovechando la ventana de 24h abierta por ese inbound. El backend usa un margen operativo de 23h50; si el webhook/materialización llega fuera de ventana, no intenta enviar texto libre y registra `review_rating_followup_skipped` con `reason=whatsapp_session_window_expired`.
 - La resolución de plantillas de reseñas prioriza copias `APPROVED` cuyo BODY coincide exactamente con el catálogo vigente. Si una automatización antigua apunta a un `whatsapp_template_id` aprobado pero con copy obsoleto, el backend busca primero una copia aprobada del mismo catálogo/WABA con el cuerpo actual antes de reutilizar la antigua. En listados efectivos de plantillas, una copia aprobada tiene prioridad sobre una copia más nueva en revisión para que `Marketing > Plantillas` muestre las plantillas de sistema utilizables como solo lectura.
 - Nomenclatura operativa: `Plantilla base de sistema · Reseñas automáticas` es la plantilla global editable/inspeccionable desde admin; no dispara envíos por sí sola. Las automatizaciones que sí operan por clínica se nombran `Reseñas automáticas · Clínica: {nombre}`.
 - La sincronización de plantillas contra Meta no debe reactivar copias de un `WhatsappTemplateCatalog` inactivo. Si Meta sigue devolviendo una plantilla remota de una familia retirada, `syncTemplatesForWaba` la conserva/actualiza con `is_active=false` y no dispara callbacks de aprobación.
@@ -3635,7 +3640,7 @@ Actualización 2026-05-06:
 - Las reseñas nuevas de Perfil Empresa Google se concilian mediante `JobRequests.type=business_profile_review_match`. Al sincronizar `BusinessProfileReviews`, el backend encola un job de baja prioridad que compara `reviewer_name` con pacientes/list items que recibieron `review_google_link_followup` en las 48h previas en la misma clínica. Si el score de nombre supera el umbral, marca `BusinessProfileReviews.matched_paciente_id`, `matched_contact_event_id`, `match_confidence`, `match_reason`, `matched_at` y crea un evento `MarketingPatientContactEvents.event_type=google_review_matched` para que aparezca en la actividad del paciente/QuickChat. Si no hay candidato claro, no vincula automáticamente.
 - `GET /api/marketing/bulk-sends/campaigns/:id/recipients?status=ready` filtra por `MarketingPatientListItems.status='ready'`, `selected=true` y `dispatch_status` vacío/pendiente. No debe interpretarse como `dispatch_status='ready'`, porque ese estado no existe y rompería selectores de prueba en campañas/reseñas.
 - Los mensajes WhatsApp encolados por horario silencioso (`metadata.queued_by_quiet_hours=true`) se muestran en QuickChat como programados y pueden forzarse con `POST /api/conversations/messages/:messageId/send-now`. El worker ignora el job diferido si el mensaje ya quedó `sent/delivered/read` para evitar duplicados.
-- La automatización admin de reseñas debe resolver siempre a la plantilla global `public_id=flw_review_request_system`, `template_key=system_review_request_after_appointment_completed`, versión 2. Las clínicas pueden tener clones propios activos, pero el catálogo admin enlaza contra esa plantilla global para poder editar e inspeccionar el flujo base.
+- La automatización admin de reseñas debe resolver siempre a la plantilla global `public_id=flw_review_request_system`, `template_key=review_request_after_completed`, versión 2. Las clínicas tienen copias operativas con `template_key=review_request_after_completed__clinic_<id>` y `public_id=flw_review_req_clinic_<id>`. El catálogo admin enlaza contra el `public_id` global para poder editar e inspeccionar el flujo base sin mezclarlo con las copias de clínica.
 - La automatización admin `Cancelar cita sin confirmar la noche anterior` queda registrada como `public_id=flw_cancel_unconfirmed_appt_night_before`, `template_key=system_cancel_unconfirmed_appointment_night_before`, `trigger_type=appointment_reminder_window` y `trigger_config={ schedule_moment: day_before, schedule_time_mode: custom, custom_time: 21:00, only_if_not_confirmed: true }`. Envía la plantilla de catálogo `clinicaclick_aviso_cita_sin_confirmar_noche` con copy natural, sin opciones rígidas tipo "responde confirmo/reprogramar/cancelar"; espera 1h y clasifica la intención con `preset_key=appointment_unconfirmed_reply`. Si confirma, marca `recordatorio_confirmado`; si pide reprogramar, cancela la cita para liberar el hueco y crea una notificación interna para recepción; si cancela o no responde, cambia a `cancelada`; si la respuesta es inconclusa, crea una notificación interna y no cierra la cita automáticamente. El runtime evalúa `only_if_not_confirmed` en la hora real del job para no avisar a citas que se confirmaron después de programar el disparo.
 - El nodo de WhatsApp de ese flujo usa `require_current_catalog_body=true`: cuando se actualiza la copia del catálogo, el motor no reutiliza una versión antigua aprobada por Meta con texto obsoleto. Si la versión nueva aún está `PENDING`, el envío queda bloqueado hasta aprobación en lugar de mandar un mensaje rígido al paciente.
 - Auditoría dev 2026-06-30: la automatización `Cancelar cita sin confirmar la noche anterior` está activa y encola `appointment_automation_schedule_fire` con `payload.__runtime_namespace=staging` para citas futuras. En BS Capilar existen ejecuciones reales recientes (`FlowExecutionsV2.id=693/694`) completadas; no se observaron disparos vencidos posteriores sin procesar en la muestra revisada.
@@ -3646,6 +3651,118 @@ Actualización 2026-05-06:
 - QA Meta 2026-06-24: tras probar en móvil, WhatsApp mostró solo `1`, `2` y "ver todas las opciones" para los cinco botones. Se cambia el catálogo a una plantilla sin botones y con estrellas en el cuerpo (`1 ⭐` ... `5 ⭐⭐⭐⭐⭐`), de forma que la previsualización de la app coincida con el WhatsApp real. La migración `20260624162000-deactivate-old-review-request-template-versions` deja inactivas las versiones locales antiguas con botones; no borra plantillas en Meta.
 - QA dev 2026-06-24: el acuse de opinión privada se materializa en gateway con `review_private_feedback_ack`. La migración `20260624184500-update-review-request-template-question-copy` actualiza el catálogo al copy con pregunta inicial. Durante la transición, el selector acepta versiones aprobadas sin botones que mantengan la escala visible con estrellas aunque el BODY exacto aún sea el de la versión previa, para no cortar envíos mientras Meta aprueba la nueva revisión.
 - Pendiente de roadmap: contadores de límites por clínica para WhatsApp enviados, pacientes alcanzados, automatizaciones activas/ejecutadas e instalaciones. No resolver esos límites desde frontend.
+
+## 2026-06-30 - PUBLIC_MEDIA S3/CloudFront
+
+`PUBLIC_MEDIA` es un storage exclusivo para assets publicos/no clinicos. No debe usarse para RX, consentimientos, informes, audios de pacientes, fotos clinicas, STL, documentos de laboratorio ni cualquier fichero con dato clinico o identificable de paciente.
+
+Infraestructura objetivo:
+
+- Bucket: `clinicaclick-public-media-eu-west-3`
+- Region: `eu-west-3`
+- Cuenta AWS recursos: `137819318729`
+- CloudFront distribution: `E3TRXQ4DMSYUVL`
+- CloudFront ARN: `arn:aws:cloudfront::137819318729:distribution/E3TRXQ4DMSYUVL`
+- Base URL: `https://media.clinicaclick.com`
+
+Variables:
+
+- `AWS_DEFAULT_REGION`
+- `PUBLIC_MEDIA_BUCKET`
+- `PUBLIC_MEDIA_BASE_URL`
+- `CLOUDFRONT_DISTRIBUTION_ID`
+- `PUBLIC_MEDIA_ASSUME_ROLE_ARN` opcional si el servidor debe asumir un rol en la cuenta propietaria de los recursos.
+- Credenciales por rol IAM/AssumeRole o `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY` en `.env` seguro. No subir secretos a git.
+
+Estado de cuentas 2026-07-01:
+
+- la instancia llama como `arn:aws:sts::468355432137:assumed-role/AmazonLightsailInstanceRole/i-0b2967e8de0866910`;
+- bucket y CloudFront reales estan en `137819318729`;
+- no sirve conceder `cloudfront:CreateInvalidation` al rol de Lightsail contra un ARN de CloudFront construido con la cuenta `468355432137`, porque la distribucion real no esta en esa cuenta;
+- opcion A: configurar `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY` de minimo privilegio de la cuenta `137819318729`;
+- opcion B: crear `arn:aws:iam::137819318729:role/ClinicaclickPublicMediaUploader` con confianza a `arn:aws:iam::468355432137:role/AmazonLightsailInstanceRole` y definir `PUBLIC_MEDIA_ASSUME_ROLE_ARN` en el servidor. El rol de la cuenta `468355432137` solo necesita `sts:AssumeRole` sobre ese rol.
+- 2026-07-01: queda aplicada la opcion A en dev con usuario IAM `clinicaclick-public-media-uploader` en la cuenta `137819318729` e inline policy `ClinicaclickPublicMediaPolicy`. La access key esta solo en `.env` seguro del servidor (`chmod 600`), no en git.
+- 2026-07-01: el rol destino `ClinicaclickPublicMediaUploader` tambien existe, pero no se usa en dev porque `sts:AssumeRole` desde `AmazonLightsailInstanceRole` de la cuenta `468355432137` devuelve `AccessDenied 403` sin la mitad de permisos de esa cuenta.
+
+Implementacion:
+
+- Modelo: `PublicMediaAsset`
+- Tabla: `PublicMediaAssets`
+- Migracion: `20260630233000-create-public-media-assets.js`
+- Servicio: `src/services/publicMediaStorage.service.js`
+- Controlador: `src/controllers/publicMedia.controller.js`
+- Ruta: `GET /api/public-media/status`
+- Ruta: `POST /api/public-media/upload`
+
+Contrato `POST /api/public-media/upload`:
+
+```json
+{
+  "clinic_id": 66,
+  "purpose": "review_team_photo",
+  "file_name": "equipo.jpg",
+  "content_type": "image/jpeg",
+  "data_url": "data:image/jpeg;base64,...",
+  "owner_type": "review_request",
+  "owner_id": 123,
+  "non_clinical_asserted": true
+}
+```
+
+Respuesta:
+
+```json
+{
+  "success": true,
+  "asset": {
+    "url": "https://media.clinicaclick.com/whatsapp/reviews/team/clinic-66/2026/06/uuid.jpg",
+    "key": "whatsapp/reviews/team/clinic-66/2026/06/uuid.jpg",
+    "content_type": "image/jpeg",
+    "size_bytes": 12345,
+    "cache_control": "public, max-age=31536000, immutable"
+  },
+  "usage": {
+    "asset_count": 1,
+    "size_bytes": 12345
+  }
+}
+```
+
+Reglas:
+
+- S3 sube sin `ACL` y sin `public-read`.
+- El bucket debe permanecer privado; la exposicion publica es via CloudFront/DNS.
+- Las keys se generan opacas y no incluyen nombres de paciente, DNI, diagnostico ni tratamiento.
+- `size_bytes` se persiste por clinica/grupo para futura facturacion de almacenamiento.
+- Si se sobrescribe una key existente, el servicio puede crear invalidacion CloudFront con `CLOUDFRONT_DISTRIBUTION_ID`.
+
+Uso actual:
+
+- `Marketing > Campanas > Conseguir resenas` permite subir la foto del equipo para plantillas WhatsApp de resenas. La URL devuelta se guarda como `review_team_photo_url` en criterios de lista/campana y en la configuracion de automatizacion recurrente.
+- Si la plantilla de reseñas usa cabecera de imagen, el backend prepara la foto en `sendDispatchItem`/`sendTest`: descarga la foto base desde PUBLIC_MEDIA, compone una imagen WebP 1200x675 con una banda solida y texto blanco `¡Hola {nombre}!`, y sube la derivada como `purpose=whatsapp_image`. Esta es una excepcion controlada de producto para cabecera WhatsApp de reseñas: solo puede incluir nombre de pila, nunca apellidos completos, telefono, diagnostico, tratamiento ni dato clinico. El color se guarda en `review_team_photo_overlay_color`. La key sigue siendo opaca y `PublicMediaAssets.metadata` marca `patient_name_present=true`, `patient_data_in_public_media=true` y `public_media_patient_data_exception=review_whatsapp_header_greeting`. Si la transformacion falla por un error transitorio, se usa la foto base; si la URL no pertenece a PUBLIC_MEDIA, se bloquea.
+
+Estado QA 2026-06-30:
+
+- AWS CLI no esta instalado en el servidor.
+- El SDK AWS esta instalado en backend, fijado a `@aws-sdk/client-s3@3.600.0` y `@aws-sdk/client-cloudfront@3.600.0`, compatible con Node 18.
+- No hay variables `AWS_*`/`PUBLIC_MEDIA_*` en shell ni PM2; se usan los defaults no secretos y credenciales por metadata.
+- Existe rol de metadata `AmazonLightsailInstanceRole`; STS devuelve `arn:aws:sts::468355432137:assumed-role/AmazonLightsailInstanceRole/i-0b2967e8de0866910`.
+- Los recursos PUBLIC_MEDIA reales pertenecen a la cuenta AWS `137819318729`.
+- `HeadBucket`, `ListObjectsV2`, `GetObject` y `PutObject` contra `clinicaclick-public-media-eu-west-3` fallan con `AccessDenied 403`.
+- `cloudfront:CreateInvalidation` contra `E3TRXQ4DMSYUVL` falla con `AccessDenied 403`.
+- La prueba `test/health.txt` y la subida API de una imagen dummy fallaban con `AccessDenied 403` antes de configurar credenciales propias de la cuenta `137819318729`. El codigo soporta `PUBLIC_MEDIA_ASSUME_ROLE_ARN`, pero en dev se deja vacio porque se usa la opcion A.
+- En dev estan aplicadas las migraciones `20260630143000-update-review-request-template-photo-variant.js`, `20260630170000-mark-review-automation-catalog-propagated.js` y `20260630233000-create-public-media-assets.js`; el catalogo `clinicaclick_solicitar_resena_foto` existe con cabecera `IMAGE`.
+- Script de prueba repetible: `node src/scripts/test_public_media_upload.js` y despues `curl -I https://media.clinicaclick.com/test/health.txt`.
+
+Estado QA 2026-07-01:
+
+- IAM usuario `clinicaclick-public-media-uploader` creado en `137819318729` con policy minima para S3 PUBLIC_MEDIA e invalidacion CloudFront.
+- `.env` del servidor dev contiene solo las credenciales de ese usuario, fuera de git y con permisos `600`; backup previo movido a `/home/ubuntu/.clinicaclick-env-backups/`.
+- `node src/scripts/test_public_media_upload.js` devuelve `success: true` y sube `test/health.txt`.
+- `curl -I https://media.clinicaclick.com/test/health.txt` devuelve `HTTP/2 200`, `x-cache: Hit from cloudfront` y metadatos `purpose=test_health`, `sensitivity=public`.
+- `pm2-back-dev` reiniciado con `--update-env` y queda `online`.
+
+Documento canonico frontend/producto: `src/Documentacion/32-storage-publico-y-clinico.md`.
 
 Webhooks y colas:
 

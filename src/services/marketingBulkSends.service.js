@@ -17,6 +17,7 @@ const {
   mergeClinicLinksIntoContext,
   resolveClinicGoogleLocalLinks,
 } = require('./googleLocalLinks.service');
+const publicMediaPersonalizationService = require('./publicMediaPersonalization.service');
 
 const {
   Clinica,
@@ -45,12 +46,11 @@ const COMMERCIAL_TEMPLATE_USAGES = new Set(['marketing', 'comercial', 'promocion
 const REVIEW_TEMPLATE_USAGES = new Set(['solicitud_resena', 'resena', 'review_request', 'reviews']);
 const REVIEW_AUTOMATION_TRIGGER = 'appointment_completed';
 const REVIEW_AUTOMATION_ACTION = 'action/request_review';
-const REVIEW_REMINDER_AUTOMATION_ACTION = 'action/request_review_reminder';
 const REVIEW_FOLLOWUP_AUTOMATION_ACTION = 'action/review_followup';
 const REVIEW_NO_RESPONSE_AUTOMATION_ACTION = 'action/review_no_response';
 const REVIEW_RATING_EVENT_TYPES = ['review_rating_received', 'review_request_rating'];
 const REVIEW_TEMPLATE_NAME = 'clinicaclick_solicitar_resena';
-const REVIEW_REMINDER_TEMPLATE_NAME = 'clinicaclick_recordatorio_resena_sin_respuesta';
+const REVIEW_PHOTO_TEMPLATE_NAME = 'clinicaclick_solicitar_resena_foto';
 const DISPATCH_JOB_TYPE = 'marketing_bulk_send_dispatch';
 const DISPATCH_BATCH_SIZE = Math.max(1, Number.parseInt(process.env.MARKETING_BULK_SEND_BATCH_SIZE || '100', 10) || 100);
 const DISPATCH_BATCH_DELAY_MS = Math.max(2 * 60 * 1000, Number.parseInt(process.env.MARKETING_BULK_SEND_BATCH_DELAY_MS || String(2 * 60 * 1000), 10) || 2 * 60 * 1000);
@@ -357,6 +357,15 @@ function templateHasButtonComponents(template) {
   const plain = template?.get ? template.get({ plain: true }) : (template || {});
   return parseTemplateComponents(plain.components)
     .some((component) => String(component?.type || '').toUpperCase() === 'BUTTONS');
+}
+
+function templateHasImageHeader(template) {
+  const plain = template?.get ? template.get({ plain: true }) : (template || {});
+  return parseTemplateComponents(plain.components)
+    .some((component) => (
+      String(component?.type || '').toUpperCase() === 'HEADER'
+      && String(component?.format || '').toUpperCase() === 'IMAGE'
+    ));
 }
 
 function isStarTextReviewBody(value) {
@@ -1580,7 +1589,7 @@ function normalizeReviewRequestSource(value) {
   if (['manual_selection', 'manual', 'seleccion_manual'].includes(normalized)) {
     return 'manual_selection';
   }
-  return 'first_completed_appointment';
+  return 'completed_treatment';
 }
 
 function normalizeReviewThreshold(value) {
@@ -1947,8 +1956,8 @@ async function sendReviewRatingFollowUp({ list, item, conversation, rating, clin
   const body = isPositive
     ? (googleReviewUrl
       ? (rewardEnabled
-        ? `¡Muchísimas gracias por tu valoración! 😊 *Como gratitud por valorarnos te vamos a regalar ${rewardDescription || 'un detalle'} si dejas la reseña también en Google* para que otras personas puedan verla.\n\nNo se tarda nada, pincha en el enlace de aquí abajo 👇\n${googleReviewUrl}\n\nUna vez que nos hayas valorado, *escríbenos a este WhatsApp* para indicarte cómo puedes reclamar tu regalo. Te contestaremos en horario laboral antes de 24h.`
-        : `¡Muchísimas gracias por tu valoración! 😊 *Nos ayudaría muchísimo que también la dejaras en Google* para que otras personas puedan verla.\n\nNo se tarda nada, pincha en el enlace de aquí abajo 👇\n${googleReviewUrl}`)
+        ? `😊 Queremos obsequiarte con "${rewardDescription || 'un detalle'}" si la compartes en Google. Pincha aquí y se publicará, esto nos ayudará muchísimo para que todo el mundo pueda verla 👉 ${googleReviewUrl}. Tras hacerlo, escríbenos para que te indiquemos cómo tramitar tu regalo.`
+        : `😊 Pincha aquí y se publicará en Google, esto nos ayudará muchísimo para que todo el mundo pueda verla 👉 ${googleReviewUrl}`)
       : 'Gracias por tu valoración. Hemos registrado tu opinión.')
     : 'Gracias por responder. ¿Nos ayudarías contándonos el motivo de esta valoración? Puedes escribirlo aquí mismo y lo revisaremos con el equipo.';
   if (!isWithinWhatsappSessionWindow(occurredAt)) {
@@ -2407,6 +2416,10 @@ function serializeReviewAutomationTemplate(template) {
     review_gift_enabled: config.review_gift_enabled === true || String(config.review_gift_enabled || '').toLowerCase() === 'true',
     review_gift_description: normalizeText(config.review_gift_description || '') || null,
     review_display_clinic_name: normalizeText(config.review_display_clinic_name || '') || null,
+    review_team_photo_url: normalizeText(config.review_team_photo_url || '') || null,
+    review_team_photo_overlay_color: publicMediaPersonalizationService.normalizeHexColor(
+      config.review_team_photo_overlay_color || publicMediaPersonalizationService.DEFAULT_OVERLAY_COLOR
+    ),
   };
 }
 
@@ -2480,22 +2493,11 @@ function isPrimaryReviewRequestWhatsappTemplateCandidate(template) {
     JSON.stringify(plain.variables || ''),
   ].filter(Boolean).join(' '));
   return text.includes(REVIEW_TEMPLATE_NAME)
+    || text.includes(REVIEW_PHOTO_TEMPLATE_NAME)
     || text.includes('solicitar_resena')
     || text.includes('solicitud_resena')
     || text.includes('solicitud_de_valoracion')
     || REVIEW_TEMPLATE_USAGES.has(normalizeTemplateUsage(plain.variables?.template_usage));
-}
-
-function isCurrentReviewReminderWhatsappTemplateCandidate(template) {
-  if (!isReviewReminderWhatsappTemplateCandidate(template)) return false;
-  if (templateHasButtonComponents(template)) return false;
-  const plain = template?.get ? template.get({ plain: true }) : (template || {});
-  const currentCatalogBody = normalizeText(plain.catalog?.body_text);
-  if (currentCatalogBody) {
-    const templateBody = normalizeText(extractBodyText(plain.components));
-    if (templateBody !== currentCatalogBody && !isStarTextReviewBody(templateBody)) return false;
-  }
-  return true;
 }
 
 function reviewTemplateMatchesCurrentCatalogBody(template) {
@@ -2509,10 +2511,38 @@ function scoreReviewTemplateFreshness(template) {
   return reviewTemplateMatchesCurrentCatalogBody(template) ? 1 : 0;
 }
 
-async function findApprovedReviewWhatsappTemplate(scope, explicitTemplateId = null) {
+async function findApprovedReviewWhatsappTemplate(scope, explicitTemplateId = null, options = {}) {
   const clinicIds = Array.isArray(scope?.clinicIds) ? scope.clinicIds.filter(Number.isInteger) : [];
   if (!WhatsappTemplate || !clinicIds.length) return null;
   const targetWabaId = await getPrimaryWabaIdForScope(scope);
+  const preferPhoto = options.preferPhoto === true;
+
+  if (preferPhoto) {
+    const photoCandidates = await WhatsappTemplate.findAll({
+      where: {
+        is_active: true,
+        status: 'APPROVED',
+        name: { [Op.like]: `${REVIEW_PHOTO_TEMPLATE_NAME}%` },
+        [Op.or]: [
+          { clinic_id: { [Op.in]: clinicIds } },
+          { clinic_id: null },
+        ],
+      },
+      include: [{ model: db.WhatsappTemplateCatalog, as: 'catalog', attributes: ['id', 'name', 'display_name', 'body_text', 'variables'], required: false }],
+      order: [['updatedAt', 'DESC'], ['id', 'DESC']],
+    });
+    const photoTemplate = photoCandidates
+      .filter(isPrimaryReviewRequestWhatsappTemplateCandidate)
+      .filter(templateHasImageHeader)
+      .filter((template) => scoreWhatsappTemplateForScope(template, clinicIds, targetWabaId) > 0)
+      .sort((a, b) => {
+        const aScore = scoreWhatsappTemplateForScope(a, clinicIds, targetWabaId);
+        const bScore = scoreWhatsappTemplateForScope(b, clinicIds, targetWabaId);
+        if (aScore !== bScore) return bScore - aScore;
+        return Number(b.id || 0) - Number(a.id || 0);
+      })[0] || null;
+    if (photoTemplate) return photoTemplate;
+  }
 
   if (explicitTemplateId) {
     const explicit = await resolveWhatsappTemplate(explicitTemplateId, scope);
@@ -2577,6 +2607,7 @@ async function findApprovedReviewWhatsappTemplate(scope, explicitTemplateId = nu
         {
           [Op.or]: [
             { name: { [Op.like]: `%${REVIEW_TEMPLATE_NAME}%` } },
+            { name: { [Op.like]: `%${REVIEW_PHOTO_TEMPLATE_NAME}%` } },
             { name: { [Op.like]: '%solicitar_resena%' } },
             { name: { [Op.like]: '%solicitud_resena%' } },
             { name: { [Op.like]: '%solicitud_de_valoracion%' } },
@@ -2600,66 +2631,6 @@ async function findApprovedReviewWhatsappTemplate(scope, explicitTemplateId = nu
       const aFresh = scoreReviewTemplateFreshness(a);
       const bFresh = scoreReviewTemplateFreshness(b);
       if (aFresh !== bFresh) return bFresh - aFresh;
-      return Number(b.id || 0) - Number(a.id || 0);
-    })[0] || null;
-}
-
-async function findApprovedReviewReminderWhatsappTemplate(scope, explicitTemplateId = null, templateName = REVIEW_REMINDER_TEMPLATE_NAME) {
-  const clinicIds = Array.isArray(scope?.clinicIds) ? scope.clinicIds.filter(Number.isInteger) : [];
-  if (!WhatsappTemplate || !clinicIds.length) return null;
-  const targetWabaId = await getPrimaryWabaIdForScope(scope);
-
-  if (explicitTemplateId) {
-    const explicit = await resolveWhatsappTemplate(explicitTemplateId, scope);
-    if (
-      explicit
-      && explicit.is_active !== false
-      && String(explicit.status || '').toUpperCase() === 'APPROVED'
-      && isCurrentReviewReminderWhatsappTemplateCandidate(explicit)
-    ) {
-      if (!targetWabaId || !getTemplateWabaId(explicit) || getTemplateWabaId(explicit) === targetWabaId) {
-        return explicit;
-      }
-      const plainExplicit = explicit.get ? explicit.get({ plain: true }) : explicit;
-      const replacement = await WhatsappTemplate.findOne({
-        where: {
-          is_active: true,
-          status: 'APPROVED',
-          catalog_template_id: plainExplicit.catalog_template_id || null,
-          waba_id: targetWabaId,
-        },
-        include: [{ model: db.WhatsappTemplateCatalog, as: 'catalog', attributes: ['id', 'name', 'display_name', 'body_text', 'variables'], required: false }],
-        order: [['updatedAt', 'DESC'], ['id', 'DESC']],
-      });
-      if (replacement && isCurrentReviewReminderWhatsappTemplateCandidate(replacement)) {
-        return replacement;
-      }
-    }
-    return null;
-  }
-
-  const normalizedTemplateName = normalizeText(templateName || REVIEW_REMINDER_TEMPLATE_NAME);
-  const candidates = await WhatsappTemplate.findAll({
-    where: {
-      is_active: true,
-      status: 'APPROVED',
-      name: { [Op.like]: `${normalizedTemplateName}%` },
-      [Op.or]: [
-        { clinic_id: { [Op.in]: clinicIds } },
-        { clinic_id: null },
-      ],
-    },
-    include: [{ model: db.WhatsappTemplateCatalog, as: 'catalog', attributes: ['id', 'name', 'display_name', 'body_text', 'variables'], required: false }],
-    order: [['updatedAt', 'DESC'], ['id', 'DESC']],
-  });
-
-  return candidates
-    .filter(isCurrentReviewReminderWhatsappTemplateCandidate)
-    .filter((template) => scoreWhatsappTemplateForScope(template, clinicIds, targetWabaId) > 0)
-    .sort((a, b) => {
-      const aScore = scoreWhatsappTemplateForScope(a, clinicIds, targetWabaId);
-      const bScore = scoreWhatsappTemplateForScope(b, clinicIds, targetWabaId);
-      if (aScore !== bScore) return bScore - aScore;
       return Number(b.id || 0) - Number(a.id || 0);
     })[0] || null;
 }
@@ -3082,6 +3053,8 @@ function buildReviewAutomationNodes({
   reviewGiftEnabled = false,
   reviewGiftDescription = '',
   reviewDisplayClinicName = '',
+  reviewTeamPhotoUrl = '',
+  reviewTeamPhotoOverlayColor = publicMediaPersonalizationService.DEFAULT_OVERLAY_COLOR,
 }) {
   const threshold = normalizeReviewThreshold(reviewThreshold);
   const giftEnabled = reviewGiftEnabled === true || String(reviewGiftEnabled || '').toLowerCase() === 'true';
@@ -3116,6 +3089,8 @@ function buildReviewAutomationNodes({
         review_gift_enabled: giftEnabled,
         review_gift_description: giftEnabled ? normalizeText(reviewGiftDescription || '') : null,
         review_display_clinic_name: normalizeText(reviewDisplayClinicName || '') || null,
+        review_team_photo_url: normalizeText(reviewTeamPhotoUrl || '') || null,
+        review_team_photo_overlay_color: publicMediaPersonalizationService.normalizeHexColor(reviewTeamPhotoOverlayColor),
         require_message_anchor_for_wait: true,
         wait_for_message_ms: 6000,
       },
@@ -3126,7 +3101,7 @@ function buildReviewAutomationNodes({
       id: 'N4',
       type: 'delay/wait_response',
       config: {
-        timeout_duration: 20,
+        timeout_duration: 24,
         timeout_unit: 'hours',
         listens_to_node_id: 'N3',
         response_buffer_enabled: true,
@@ -3194,7 +3169,7 @@ async function upsertReviewRequestAutomationForClinic(scope, body = {}, userId =
 
   const enabled = body.enabled === true || body.active === true || body.is_active === true;
   const identity = buildReviewAutomationTemplateIdentity(scope);
-  const reviewSource = normalizeReviewRequestSource(body.review_source || body.reviewSource || 'first_completed_or_completed_treatment');
+  const reviewSource = normalizeReviewRequestSource(body.review_source || body.reviewSource || 'completed_treatment');
   const reviewThreshold = 5;
   const whatsappTemplateId = Number(body.whatsapp_template_id || body.template_id || 0) || null;
   const reviewGiftEnabled = body.review_gift_enabled === true
@@ -3202,6 +3177,10 @@ async function upsertReviewRequestAutomationForClinic(scope, body = {}, userId =
     || String(body.review_gift_enabled ?? body.reviewGiftEnabled ?? '').toLowerCase() === 'true';
   const reviewGiftDescription = normalizeText(body.review_gift_description || body.reviewGiftDescription || '');
   const reviewDisplayClinicName = normalizeText(body.review_display_clinic_name || body.reviewDisplayClinicName || '');
+  const reviewTeamPhotoUrl = normalizeText(body.review_team_photo_url || body.reviewTeamPhotoUrl || '');
+  const reviewTeamPhotoOverlayColor = publicMediaPersonalizationService.normalizeHexColor(
+    body.review_team_photo_overlay_color || body.reviewTeamPhotoOverlayColor
+  );
 
   let approvedTemplate = null;
   if (whatsappTemplateId) {
@@ -3264,6 +3243,8 @@ async function upsertReviewRequestAutomationForClinic(scope, body = {}, userId =
     reviewGiftEnabled,
     reviewGiftDescription,
     reviewDisplayClinicName,
+    reviewTeamPhotoUrl,
+    reviewTeamPhotoOverlayColor,
   });
   const displayName = await buildReviewAutomationDisplayName(scope);
   const payload = {
@@ -3271,7 +3252,7 @@ async function upsertReviewRequestAutomationForClinic(scope, body = {}, userId =
     version: Math.max(Number(existing?.version || 0), 2),
     engine_version: 'v2',
     name: displayName,
-    description: 'Espera 24h tras completar una cita, pide al paciente una valoración de 1 a 5 y deriva a Google solo si responde 5/5.',
+    description: 'Espera 24h tras finalizar un tratamiento, pide al paciente una valoración de 1 a 5 y deriva a Google solo si responde 5/5. Si no responde, cierra el flujo sin insistir.',
     trigger_type: REVIEW_AUTOMATION_TRIGGER,
     trigger_config: { event_name: REVIEW_AUTOMATION_TRIGGER },
     is_active: enabled,
@@ -3376,13 +3357,17 @@ async function createAndStartReviewRequestForAppointment(options = {}) {
     isAll: false,
     isValid: true,
   };
-  const reviewSource = normalizeReviewRequestSource(options.reviewSource || options.review_source || 'first_completed_or_completed_treatment');
+  const reviewSource = normalizeReviewRequestSource(options.reviewSource || options.review_source || 'completed_treatment');
   const reviewThreshold = 5;
   const reviewGiftEnabled = options.reviewGiftEnabled === true
     || options.review_gift_enabled === true
     || String(options.reviewGiftEnabled ?? options.review_gift_enabled ?? '').toLowerCase() === 'true';
   const reviewGiftDescription = normalizeText(options.reviewGiftDescription || options.review_gift_description || '');
   const reviewDisplayClinicName = normalizeText(options.reviewDisplayClinicName || options.review_display_clinic_name || '');
+  const reviewTeamPhotoUrl = normalizeText(options.reviewTeamPhotoUrl || options.review_team_photo_url || '');
+  const reviewTeamPhotoOverlayColor = publicMediaPersonalizationService.normalizeHexColor(
+    options.reviewTeamPhotoOverlayColor || options.review_team_photo_overlay_color
+  );
   const candidate = await buildReviewRequestCandidateForAppointment(scope, {
     review_appointment_id: appointmentId,
     review_source: reviewSource,
@@ -3402,7 +3387,11 @@ async function createAndStartReviewRequestForAppointment(options = {}) {
     return { success: true, sent: false, skipped: true, reason: 'whatsapp_connection_missing' };
   }
 
-  const template = await findApprovedReviewWhatsappTemplate(scope, options.whatsappTemplateId || options.whatsapp_template_id || null);
+  const template = await findApprovedReviewWhatsappTemplate(
+    scope,
+    options.whatsappTemplateId || options.whatsapp_template_id || null,
+    { preferPhoto: isHttpsUrl(reviewTeamPhotoUrl) }
+  );
   if (!template) {
     return { success: true, sent: false, skipped: true, reason: 'approved_review_template_missing' };
   }
@@ -3423,6 +3412,8 @@ async function createAndStartReviewRequestForAppointment(options = {}) {
       review_gift_enabled: reviewGiftEnabled,
       review_gift_description: reviewGiftEnabled ? reviewGiftDescription : null,
       review_display_clinic_name: reviewDisplayClinicName || resolveReviewDisplayClinicName({ criteria: {} }, clinic),
+      review_team_photo_url: reviewTeamPhotoUrl || null,
+      review_team_photo_overlay_color: reviewTeamPhotoOverlayColor,
       whatsapp_template_id: template.id,
       link_tracking: {
         enabled: true,
@@ -3471,242 +3462,6 @@ async function createAndStartReviewRequestForAppointment(options = {}) {
       error: error?.message || String(error),
     };
   }
-}
-
-async function sendReviewRequestReminder(options = {}) {
-  return {
-    success: true,
-    sent: false,
-    skipped: true,
-    reason: 'review_reminders_disabled',
-    list_id: Number(options.listId || options.list_id || options.campaign_id || 0) || null,
-    item_id: Number(options.itemId || options.item_id || 0) || null,
-  };
-
-  const listId = Number(options.listId || options.list_id || options.campaign_id || 0);
-  const itemId = Number(options.itemId || options.item_id || 0);
-  if (!listId || !itemId) {
-    return { success: true, sent: false, skipped: true, reason: 'review_reminder_missing_list_or_item' };
-  }
-
-  const list = await MarketingPatientList.findByPk(listId);
-  if (!list || !isReviewRequestList(list)) {
-    return { success: true, sent: false, skipped: true, reason: 'review_request_list_not_found' };
-  }
-
-  const item = await MarketingPatientListItem.findOne({ where: { id: itemId, list_id: listId } });
-  if (!item) {
-    return { success: true, sent: false, skipped: true, reason: 'review_request_item_not_found' };
-  }
-
-  const existingRating = await findExistingReviewRatingEvent(listId, itemId);
-  if (existingRating) {
-    return { success: true, sent: false, skipped: true, reason: 'review_already_answered' };
-  }
-
-  const existingReminder = await MarketingPatientContactEvent.findOne({
-    where: {
-      list_id: listId,
-      item_id: itemId,
-      event_type: 'review_request_reminder_sent',
-    },
-    order: [['occurred_at', 'DESC']],
-  });
-  if (existingReminder) {
-    return { success: true, sent: false, skipped: true, reason: 'review_reminder_already_sent' };
-  }
-
-  const clinicId = Number(options.clinicId || options.clinic_id || item.clinica_id || getClinicIdForList(list) || 0);
-  if (!clinicId) {
-    return { success: true, sent: false, skipped: true, reason: 'review_reminder_missing_clinic' };
-  }
-
-  const scope = {
-    scope: 'clinic',
-    clinicIds: [clinicId],
-    groupId: null,
-    isAll: false,
-    isValid: true,
-  };
-  const template = await findApprovedReviewReminderWhatsappTemplate(
-    scope,
-    options.whatsappTemplateId || options.whatsapp_template_id || null,
-    options.templateName || options.template_name || REVIEW_REMINDER_TEMPLATE_NAME
-  );
-  if (!template) {
-    return { success: true, sent: false, skipped: true, reason: 'approved_review_reminder_template_missing' };
-  }
-
-  const clinic = await loadClinicForTemplateVariables(clinicId);
-  const plainItem = item.get ? item.get({ plain: true }) : item;
-  const params = await buildTemplateParams({ template, item: plainItem, list, clinic });
-  const previewText = await renderTemplatePreview({ template, item: plainItem, list, clinic });
-  const recipient = whatsappService.normalizePhoneNumber(item.phone || '');
-  if (!recipient) {
-    return { success: true, sent: false, skipped: true, reason: 'review_reminder_missing_recipient' };
-  }
-
-  let conversation = await findCanonicalWhatsappConversation({
-    clinicId,
-    contactId: recipient,
-    patientId: item.paciente_id || null,
-    createIfMissing: true,
-    lastMessageAt: new Date(),
-  });
-  if (!conversation) {
-    return { success: true, sent: false, skipped: true, reason: 'review_reminder_conversation_not_found' };
-  }
-
-  let appMessage = null;
-  let providerMessageId = null;
-  let status = 'sent';
-  let errorPayload = null;
-  let clinicConfig = null;
-
-  try {
-    clinicConfig = await whatsappService.getClinicConfig(clinicId);
-    if (!clinicConfig?.phoneNumberId || !clinicConfig?.accessToken) {
-      throw new Error('whatsapp_config_missing_for_review_reminder');
-    }
-
-    appMessage = await Message.create({
-      conversation_id: conversation.id,
-      sender_id: null,
-      direction: 'outbound',
-      content: previewText,
-      message_type: 'template',
-      status: 'pending',
-      metadata: {
-        kind: 'review_request_reminder',
-        source: 'marketing_bulk_sends',
-        dispatch_context: 'review_request_reminder',
-        list_id: list.id,
-        item_id: item.id,
-        objective_id: OBJECTIVE_ID,
-        template_usage: 'solicitud_resena',
-        template_commercial: false,
-        template_category: template.category || template.catalog?.category || null,
-        template_id: template.id,
-        template_name: template.name,
-        template_language: template.language || 'es',
-        template_params: params,
-        recipient,
-        phoneNumberId: clinicConfig.phoneNumberId || null,
-        phoneId: clinicConfig.phoneNumberId || null,
-        wabaId: clinicConfig.wabaId || null,
-        trigger_message_id: Number(options.triggerMessageId || options.trigger_message_id || 0) || null,
-      },
-      sent_at: new Date(),
-    });
-    emitQuickChatMessageCreated(conversation, appMessage);
-
-    const response = await whatsappService.sendMessage({
-      to: recipient,
-      useTemplate: true,
-      templateName: template.name,
-      templateLanguage: template.language || 'es',
-      templateParams: params,
-      clinicConfig: { ...clinicConfig, clinicId },
-    });
-    providerMessageId = response?.messages?.[0]?.id || null;
-    await appMessage.update({
-      status: 'sent',
-      metadata: {
-        ...(appMessage.metadata || {}),
-        wa_response: response || null,
-        wamid: providerMessageId,
-      },
-      sent_at: new Date(),
-    });
-    emitQuickChatMessageUpdated(conversation, appMessage);
-    await item.update({
-      dispatch_status: 'sent',
-      provider_message_id: providerMessageId,
-      app_message_id: appMessage.id,
-      conversation_id: conversation.id,
-      sent_at: item.sent_at || new Date(),
-      failed_at: null,
-      last_error_code: null,
-      last_error_message: null,
-    });
-    await conversation.update({ last_message_at: new Date() });
-    await whatsappConnectionStatusService.clearDisconnectedAfterSuccess({
-      clinicId,
-      phoneId: clinicConfig.phoneNumberId || null,
-      wabaId: clinicConfig.wabaId || null,
-      messageId: appMessage.id,
-      source: 'review_request_reminder',
-    }).catch(() => null);
-  } catch (error) {
-    status = 'failed';
-    errorPayload = extractProviderError(error);
-    if (appMessage) {
-      await appMessage.update({
-        status: 'failed',
-        metadata: {
-          ...(appMessage.metadata || {}),
-          error: errorPayload.raw || errorPayload.message,
-        },
-      }).catch(() => null);
-      emitQuickChatMessageUpdated(conversation, appMessage);
-    }
-    await item.update({
-      dispatch_status: 'failed',
-      app_message_id: appMessage?.id || item.app_message_id || null,
-      conversation_id: conversation.id,
-      failed_at: new Date(),
-      last_error_code: errorPayload.code || null,
-      last_error_message: errorPayload.message || null,
-    }).catch(() => null);
-    await whatsappConnectionStatusService.markDisconnectedAfterProviderError({
-      error: errorPayload.raw || errorPayload,
-      clinicId,
-      phoneId: clinicConfig?.phoneNumberId || null,
-      wabaId: clinicConfig?.wabaId || null,
-      messageId: appMessage?.id || null,
-      recipient,
-      source: 'review_request_reminder',
-    }).catch(() => null);
-  }
-
-  await MarketingPatientContactEvent.create({
-    list_id: list.id,
-    item_id: item.id,
-    paciente_id: item.paciente_id || null,
-    event_type: 'review_request_reminder_sent',
-    channel: 'whatsapp',
-    payload: {
-      status,
-      template_id: template.id,
-      template_name: template.name,
-      trigger_message_id: Number(options.triggerMessageId || options.trigger_message_id || 0) || null,
-      app_message_id: appMessage?.id || null,
-      provider_message_id: providerMessageId,
-      conversation_id: conversation.id,
-      recipient,
-      error: errorPayload || null,
-    },
-    occurred_at: new Date(),
-  });
-  await refreshListCounters(list.id).catch(() => null);
-
-  return {
-    success: true,
-    sent: status === 'sent',
-    skipped: false,
-    status,
-    list_id: list.id,
-    item_id: item.id,
-    campaign_id: list.id,
-    message_id: appMessage?.id || null,
-    app_message_id: appMessage?.id || null,
-    provider_message_id: providerMessageId,
-    conversation_id: conversation.id,
-    recipient,
-    template_id: template.id,
-    template_name: template.name,
-    error: errorPayload || null,
-  };
 }
 
 function serializeItem(item) {
@@ -3972,6 +3727,10 @@ async function createCampaign(scope, body = {}, userId = null) {
         review_gift_enabled: isReviewRequest ? (body.review_gift_enabled === true || String(body.review_gift_enabled || '').toLowerCase() === 'true') : false,
         review_gift_description: isReviewRequest ? normalizeText(body.review_gift_description || body.reviewGiftDescription || '') || null : null,
         review_display_clinic_name: isReviewRequest ? normalizeText(body.review_display_clinic_name || body.reviewDisplayClinicName || '') || null : null,
+        review_team_photo_url: isReviewRequest ? normalizeText(body.review_team_photo_url || body.reviewTeamPhotoUrl || '') || null : null,
+        review_team_photo_overlay_color: isReviewRequest
+          ? publicMediaPersonalizationService.normalizeHexColor(body.review_team_photo_overlay_color || body.reviewTeamPhotoOverlayColor)
+          : null,
         review_automation_enabled: false,
         import_file_name: body.import_file_name || null,
         column_mapping: columnMapping,
@@ -4579,6 +4338,7 @@ function resolveVariableValue(variableName, item, list, clinic) {
   const values = {
     nombre: item.name,
     nombre_paciente: item.name,
+    nombrepaciente: item.name,
     apellido: custom.apellido || custom.apellidos || custom.apellido_paciente || '',
     apellidos: custom.apellidos || custom.apellido || custom.apellido_paciente || '',
     apellido_paciente: custom.apellido_paciente || custom.apellido || custom.apellidos || '',
@@ -4587,6 +4347,7 @@ function resolveVariableValue(variableName, item, list, clinic) {
     email: item.email,
     clinica: displayClinicName,
     nombre_clinica: displayClinicName,
+    nombreclinica: displayClinicName,
     nombre_clinica_visible: displayClinicName,
     telefono_clinica: clinic?.telefono || clinic?.telefono_clinica || '',
     direccion_clinica: clinic?.direccion || '',
@@ -4825,6 +4586,138 @@ async function buildTemplateParams({ template, item, list, clinic }) {
   return params;
 }
 
+function isHttpsUrl(value) {
+  try {
+    const parsed = new URL(String(value || '').trim());
+    return parsed.protocol === 'https:';
+  } catch (_) {
+    return false;
+  }
+}
+
+function resolveReviewTeamPhotoUrl(list, overrideValue = null) {
+  const criteria = asPlainObject(list?.criteria);
+  return normalizeText(
+    overrideValue
+    || criteria.review_team_photo_url
+    || criteria.reviewTeamPhotoUrl
+    || ''
+  );
+}
+
+function resolveReviewTeamPhotoOverlayColor(list, overrideValue = null) {
+  const criteria = asPlainObject(list?.criteria);
+  return publicMediaPersonalizationService.normalizeHexColor(
+    overrideValue
+    || criteria.review_team_photo_overlay_color
+    || criteria.reviewTeamPhotoOverlayColor
+    || publicMediaPersonalizationService.DEFAULT_OVERLAY_COLOR
+  );
+}
+
+function resolveReviewTeamPhotoPatientName(item, list, clinic) {
+  const raw = resolveVariableValue('nombre_paciente', item || {}, list, clinic)
+    || resolveVariableValue('nombre', item || {}, list, clinic)
+    || item?.name
+    || '';
+  const cleaned = toTitleCaseName(raw).replace(/\s+/g, ' ').trim();
+  return publicMediaPersonalizationService.normalizePatientDisplayName(
+    cleaned.split(' ').filter(Boolean).slice(0, 1).join(' ') || 'Paciente'
+  );
+}
+
+async function resolveReviewHeaderPhotoUrl({
+  list = null,
+  item = null,
+  clinic = null,
+  clinicId = null,
+  groupId = null,
+  reviewTeamPhotoUrl = null,
+  reviewTeamPhotoOverlayColor = null,
+  ownerType = 'review_request',
+  ownerId = null,
+  userId = null,
+} = {}) {
+  const photoUrl = resolveReviewTeamPhotoUrl(list, reviewTeamPhotoUrl);
+  if (!isHttpsUrl(photoUrl)) {
+    const error = new Error('review_team_photo_https_url_required');
+    error.status = 409;
+    throw error;
+  }
+
+  try {
+    const personalized = await publicMediaPersonalizationService.buildPersonalizedReviewTeamPhoto({
+      sourceUrl: photoUrl,
+      patientName: resolveReviewTeamPhotoPatientName(item, list, clinic),
+      overlayColor: resolveReviewTeamPhotoOverlayColor(list, reviewTeamPhotoOverlayColor),
+      clinicId,
+      groupId,
+      ownerType,
+      ownerId,
+      userId,
+    });
+    return personalized.url || photoUrl;
+  } catch (error) {
+    if (['review_team_photo_must_be_public_media', 'review_team_photo_url_invalid'].includes(error?.message)) {
+      throw error;
+    }
+    console.warn('[marketing-bulk-sends] No se pudo personalizar foto de reseñas; se usará la foto base', {
+      list_id: list?.id || null,
+      item_id: item?.id || null,
+      error: error?.message || error,
+    });
+    return photoUrl;
+  }
+}
+
+async function buildTemplateComponentsForSend({
+  template,
+  params = [],
+  list = null,
+  item = null,
+  clinic = null,
+  clinicId = null,
+  groupId = null,
+  reviewTeamPhotoUrl = null,
+  reviewTeamPhotoOverlayColor = null,
+  ownerType = 'review_request',
+  ownerId = null,
+  userId = null,
+}) {
+  const components = [];
+  const bodyParams = Array.isArray(params) ? params : [];
+  if (templateHasImageHeader(template)) {
+    const photoUrl = await resolveReviewHeaderPhotoUrl({
+      list,
+      item,
+      clinic,
+      clinicId,
+      groupId,
+      reviewTeamPhotoUrl,
+      reviewTeamPhotoOverlayColor,
+      ownerType,
+      ownerId,
+      userId,
+    });
+    components.push({
+      type: 'header',
+      parameters: [
+        {
+          type: 'image',
+          image: { link: photoUrl },
+        },
+      ],
+    });
+  }
+  if (bodyParams.length) {
+    components.push({
+      type: 'body',
+      parameters: bodyParams.map((value) => ({ type: 'text', text: String(value ?? '') })),
+    });
+  }
+  return components.length ? components : null;
+}
+
 async function renderTemplatePreview({ template, item, list, clinic }) {
   const plain = template?.get ? template.get({ plain: true }) : template;
   const body = extractBodyText(plain?.components);
@@ -4862,11 +4755,19 @@ async function prepareCampaign(scope, campaignId, body = {}, userId = null) {
       || list.criteria?.whatsapp_template_id
       || list.template_snapshot?.id
       || list.template_id);
-  const template = selectedTemplateId
-    ? await resolveWhatsappTemplate(selectedTemplateId, scope)
-    : null;
-  const snapshot = buildTemplateSnapshot(template);
   const requestedTemplateUsage = normalizeTemplateUsage(body.template_usage || list.criteria?.template_usage || 'promocion');
+  const reviewTeamPhotoUrlForSelection = normalizeText(body.review_team_photo_url || body.reviewTeamPhotoUrl || list.criteria?.review_team_photo_url || '') || null;
+  let template = null;
+  if (isReviewTemplateUsage(requestedTemplateUsage)) {
+    template = await findApprovedReviewWhatsappTemplate(scope, selectedTemplateId || null, {
+      preferPhoto: isHttpsUrl(reviewTeamPhotoUrlForSelection),
+    });
+  } else {
+    template = selectedTemplateId
+      ? await resolveWhatsappTemplate(selectedTemplateId, scope)
+      : null;
+  }
+  const snapshot = buildTemplateSnapshot(template);
   const requestedTemplateCommercial = body.template_commercial === true
     || (body.template_commercial !== false && (list.criteria?.template_commercial === true || isCommercialTemplateUsage(requestedTemplateUsage)));
   const templateUsage = resolveTemplateUsageFromMetaCategory(template, requestedTemplateUsage);
@@ -4981,6 +4882,16 @@ async function prepareCampaign(scope, campaignId, body = {}, userId = null) {
       review_display_clinic_name: isReviewRequest
         ? normalizeText(body.review_display_clinic_name || body.reviewDisplayClinicName || list.criteria?.review_display_clinic_name || '') || null
         : null,
+      review_team_photo_url: isReviewRequest
+        ? normalizeText(body.review_team_photo_url || body.reviewTeamPhotoUrl || list.criteria?.review_team_photo_url || '') || null
+        : null,
+      review_team_photo_overlay_color: isReviewRequest
+        ? publicMediaPersonalizationService.normalizeHexColor(
+          body.review_team_photo_overlay_color
+          || body.reviewTeamPhotoOverlayColor
+          || list.criteria?.review_team_photo_overlay_color
+        )
+        : null,
       review_automation_enabled: false,
       link_tracking: buildLinkTrackingCriteria(body, list.criteria || {}),
       schedule_mode: body.schedule_mode || 'now',
@@ -5060,8 +4971,16 @@ async function sendTest(scope, campaignId, body = {}) {
     || listCriteria.whatsapp_template_id
     || list.template_snapshot?.id
     || list.template_id;
+  const reviewTeamPhotoUrlForSelection = normalizeText(body.review_team_photo_url || body.reviewTeamPhotoUrl || listCriteria.review_team_photo_url || '') || null;
+  const reviewTeamPhotoOverlayColorForSelection = publicMediaPersonalizationService.normalizeHexColor(
+    body.review_team_photo_overlay_color
+    || body.reviewTeamPhotoOverlayColor
+    || listCriteria.review_team_photo_overlay_color
+  );
   let template = isReviewTemplateUsage(templateUsage)
-    ? await findApprovedReviewWhatsappTemplate(scope, selectedTemplateId || null)
+    ? await findApprovedReviewWhatsappTemplate(scope, selectedTemplateId || null, {
+      preferPhoto: isHttpsUrl(reviewTeamPhotoUrlForSelection),
+    })
     : await resolveWhatsappTemplate(selectedTemplateId, scope);
   if (!template) {
     const err = new Error('Selecciona una plantilla WhatsApp aprobada para enviar una prueba real.');
@@ -5070,6 +4989,11 @@ async function sendTest(scope, campaignId, body = {}) {
   }
   if (String(template.status || '').toUpperCase() !== 'APPROVED') {
     const err = new Error('La plantilla no está aprobada. No se puede enviar prueba real hasta que Meta la apruebe.');
+    err.status = 409;
+    throw err;
+  }
+  if (isReviewTemplateUsage(templateUsage) && isHttpsUrl(reviewTeamPhotoUrlForSelection) && !templateHasImageHeader(template)) {
+    const err = new Error('La foto está configurada, pero la plantilla de reseñas con imagen todavía no está aprobada por Meta. Cuando se apruebe, la prueba se enviará con foto.');
     err.status = 409;
     throw err;
   }
@@ -5117,6 +5041,18 @@ async function sendTest(scope, campaignId, body = {}) {
   }
   assertTestSendCooldown({ clinicId, targetPhone });
   const params = await buildTemplateParams({ template, item: plainItem, list, clinic });
+  const templateComponents = await buildTemplateComponentsForSend({
+    template,
+    params,
+    list,
+    item: plainItem,
+    clinic,
+    clinicId,
+    reviewTeamPhotoUrl: reviewTeamPhotoUrlForSelection,
+    reviewTeamPhotoOverlayColor: reviewTeamPhotoOverlayColorForSelection,
+    ownerType: 'review_request_test',
+    ownerId: item.id,
+  });
   const previewText = await renderTemplatePreview({ template, item: plainItem, list, clinic });
   const templateCommercial = body.template_commercial === true
     || (body.template_commercial !== false && (listCriteria.template_commercial === true || isCommercialTemplateUsage(templateUsage)));
@@ -5152,6 +5088,7 @@ async function sendTest(scope, campaignId, body = {}) {
       template_name: template.name,
       template_language: template.language || 'es',
       template_params: params,
+      template_components: templateComponents,
       recipient: targetPhone,
       phoneNumberId: clinicConfig.phoneNumberId || null,
       wabaId: clinicConfig.wabaId || null,
@@ -5168,6 +5105,7 @@ async function sendTest(scope, campaignId, body = {}) {
       templateName: template.name,
       templateLanguage: template.language || 'es',
       templateParams: params,
+      templateComponents,
       clinicConfig,
     });
   } catch (sendErr) {
@@ -5802,6 +5740,17 @@ async function sendDispatchItem({ list, item, template, clinic, clinicConfig, ba
   const dispatch = getDispatchConfig(list);
   const dispatchContext = normalizeDispatchContext(dispatch.context);
   const params = await buildTemplateParams({ template, item: plainItem, list, clinic });
+  const templateComponents = await buildTemplateComponentsForSend({
+    template,
+    params,
+    list,
+    item: plainItem,
+    clinic,
+    clinicId: clinicConfig.clinicId || getClinicIdForList(list),
+    groupId: list.group_id || null,
+    ownerType: 'review_request',
+    ownerId: item.id,
+  });
   const previewText = await renderTemplatePreview({ template, item: plainItem, list, clinic });
   const conversation = await findCanonicalWhatsappConversation({
     clinicId: clinicConfig.clinicId || getClinicIdForList(list),
@@ -5833,6 +5782,7 @@ async function sendDispatchItem({ list, item, template, clinic, clinicConfig, ba
       template_name: template.name,
       template_language: template.language || 'es',
       template_params: params,
+      template_components: templateComponents,
       recipient: item.phone,
       phoneNumberId: clinicConfig.phoneNumberId || null,
       phoneId: clinicConfig.phoneNumberId || null,
@@ -5850,6 +5800,7 @@ async function sendDispatchItem({ list, item, template, clinic, clinicConfig, ba
       templateName: template.name,
       templateLanguage: template.language || 'es',
       templateParams: params,
+      templateComponents,
       clinicConfig,
     });
     const providerMessageId = response?.messages?.[0]?.id || null;
@@ -6568,7 +6519,6 @@ module.exports = {
   getReviewRequestSummary,
   setReviewRequestAutomation,
   createAndStartReviewRequestForAppointment,
-  sendReviewRequestReminder,
   listRecipients,
   updateRecipient,
   prepareCampaign,
