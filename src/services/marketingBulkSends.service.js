@@ -4992,6 +4992,11 @@ async function sendTest(scope, campaignId, body = {}) {
     err.status = 409;
     throw err;
   }
+  if (isReviewTemplateUsage(templateUsage) && isHttpsUrl(reviewTeamPhotoUrlForSelection) && !templateHasImageHeader(template)) {
+    const err = new Error('La foto está configurada, pero la plantilla de reseñas con imagen todavía no está aprobada por Meta. Cuando se apruebe, la prueba se enviará con foto.');
+    err.status = 409;
+    throw err;
+  }
   const item = body.item_id
     ? await MarketingPatientListItem.findOne({ where: { id: body.item_id, list_id: list.id } })
     : await MarketingPatientListItem.findOne({ where: { list_id: list.id, status: 'ready' }, order: [['id', 'ASC']] });

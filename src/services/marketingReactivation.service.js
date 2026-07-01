@@ -2018,7 +2018,7 @@ async function getList(scope, listId) {
   const items = await MarketingPatientListItem.findAll({
     where: { list_id: list.id },
     order: [['id', 'ASC']],
-    limit: 500,
+    limit: 5000,
   });
   return {
     success: true,
