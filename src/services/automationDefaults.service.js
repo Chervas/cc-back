@@ -118,6 +118,64 @@ function buildPublicId() {
   return `flw_${crypto.randomBytes(8).toString('hex')}`;
 }
 
+function cloneJson(value) {
+  if (value === undefined || value === null) return value;
+  return JSON.parse(JSON.stringify(value));
+}
+
+function getNodesArray(templateOrNodes) {
+  const raw = Array.isArray(templateOrNodes)
+    ? templateOrNodes
+    : templateOrNodes?.nodes;
+  return Array.isArray(raw) ? raw : [];
+}
+
+function mergeLocalReviewConfigIntoCatalogNodes(sourceNodes, latestPublishedTemplate) {
+  const nodes = cloneJson(sourceNodes) || [];
+  const localNodes = getNodesArray(latestPublishedTemplate);
+  if (!nodes.length || !localNodes.length) return nodes;
+
+  const localById = new Map(localNodes.map((node) => [String(node?.id || ''), node]));
+  const localByType = new Map();
+  localNodes.forEach((node) => {
+    const type = String(node?.type || '');
+    if (type && !localByType.has(type)) {
+      localByType.set(type, node);
+    }
+  });
+
+  const preserveByType = {
+    'action/request_review': [
+      'whatsapp_template_id',
+      'template_name',
+      'review_gift_enabled',
+      'review_gift_description',
+      'review_display_clinic_name',
+      'review_team_photo_url',
+    ],
+  };
+
+  return nodes.map((node) => {
+    const type = String(node?.type || '');
+    const preserveKeys = preserveByType[type];
+    if (!preserveKeys?.length) return node;
+
+    const localNode = localById.get(String(node?.id || '')) || localByType.get(type);
+    const localConfig = localNode?.config && typeof localNode.config === 'object'
+      ? localNode.config
+      : null;
+    if (!localConfig) return node;
+
+    const config = { ...(node.config || {}) };
+    preserveKeys.forEach((key) => {
+      if (localConfig[key] !== undefined) {
+        config[key] = cloneJson(localConfig[key]);
+      }
+    });
+    return { ...node, config };
+  });
+}
+
 async function generateUniquePublicId() {
   for (let attempt = 0; attempt < 20; attempt += 1) {
     const candidate = buildPublicId();
@@ -131,7 +189,7 @@ async function generateUniquePublicId() {
   throw new Error('public_id_generation_failed');
 }
 
-async function publishClinicTemplateVersion({ row, actorUserId = null, transaction }) {
+async function publishClinicTemplateVersion({ row, actorUserId = null, transaction, isActive = true }) {
   const normalizedPublicId = sanitizeTemplateReference(row?.public_id);
   const familyWhere = normalizedPublicId
     ? { public_id: normalizedPublicId }
@@ -152,7 +210,7 @@ async function publishClinicTemplateVersion({ row, actorUserId = null, transacti
   await row.update({
     published_at: new Date(),
     published_by: actorUserId || row.published_by || row.created_by || 1,
-    is_active: true,
+    is_active: isActive !== false,
   }, { transaction });
 }
 
@@ -393,6 +451,11 @@ async function ensureCatalogTemplateForClinic({ clinicId, catalogFlow, actorUser
     existingDraft = null;
   }
 
+  const targetActive = latestPublished
+    ? latestPublished.is_active !== false
+    : true;
+  const nodes = mergeLocalReviewConfigIntoCatalogNodes(linkedTemplate.nodes, latestPublished);
+
   const payload = {
     engine_version: 'v2',
     name: catalogFlow.display_name || linkedTemplate.name,
@@ -403,7 +466,7 @@ async function ensureCatalogTemplateForClinic({ clinicId, catalogFlow, actorUser
     clinic_id: clinicScope.clinic_id,
     group_id: clinicScope.group_id,
     entry_node_id: linkedTemplate.entry_node_id,
-    nodes: linkedTemplate.nodes,
+    nodes,
     trigger_config: linkedTemplate.trigger_config ?? null,
     published_at: null,
     published_by: null,
@@ -417,6 +480,7 @@ async function ensureCatalogTemplateForClinic({ clinicId, catalogFlow, actorUser
         row: existingDraft,
         actorUserId,
         transaction,
+        isActive: targetActive,
       });
     });
     const scheduledBackfill = await backfillScheduledTriggersForPublishedTemplate(existingDraft, { actorUserId });
@@ -441,6 +505,7 @@ async function ensureCatalogTemplateForClinic({ clinicId, catalogFlow, actorUser
       row,
       actorUserId,
       transaction,
+      isActive: targetActive,
     });
 
     return row;
@@ -538,6 +603,7 @@ async function enqueueDefaultAutomations(data) {
 
 module.exports = {
   createDefaultAutomationsForClinic,
+  ensureCatalogTemplateForClinic,
   enqueueDefaultAutomations,
   propagateCatalogAutomationToClinics,
 };

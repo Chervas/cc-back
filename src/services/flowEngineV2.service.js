@@ -3319,6 +3319,7 @@ async function handleRequestReview(node, context, runtime) {
     reviewGiftEnabled: resolveTemplateValue(config?.review_gift_enabled, context),
     reviewGiftDescription: resolveTemplateValue(config?.review_gift_description, context),
     reviewDisplayClinicName: resolveTemplateValue(config?.review_display_clinic_name, context),
+    reviewTeamPhotoUrl: resolveTemplateValue(config?.review_team_photo_url, context),
     waitForMessageMs: resolveTemplateValue(config?.wait_for_message_ms, context),
     userId: runtime?.execution?.created_by || runtime?.execution?.user_id || null,
   });
@@ -3340,19 +3341,17 @@ async function handleRequestReview(node, context, runtime) {
 
 async function handleRequestReviewReminder(node, context, runtime) {
   const config = node?.config && typeof node.config === 'object' ? node.config : {};
-  const result = {
-    success: true,
-    sent: false,
-    skipped: true,
-    reason: 'review_reminders_disabled',
-    list_id: resolveTemplateValue(config?.list_id, context) || null,
-    item_id: resolveTemplateValue(config?.item_id, context) || null,
-  };
 
   return {
     kind: 'success',
-    output: result,
-    next_node_id: null,
+    output: {
+      status: 'skipped',
+      skipped: true,
+      reason: 'review_reminder_retired',
+      list_id: resolveTemplateValue(config?.list_id, context) || null,
+      item_id: resolveTemplateValue(config?.item_id, context) || null,
+    },
+    next_node_id: readOutputTarget(node, 'on_fail') || readOutputTarget(node, 'on_success'),
   };
 }
 
@@ -4158,12 +4157,13 @@ async function processNode(node, context, runtime = {}) {
           output: {
             status: 'simulated',
             simulated: true,
-            review_source: cleanString(resolveTemplateValue(config?.review_source, context)) || 'first_completed_appointment',
+            review_source: cleanString(resolveTemplateValue(config?.review_source, context)) || 'completed_treatment',
             review_threshold: toIntOrNull(resolveTemplateValue(config?.review_threshold, context)) || 5,
             whatsapp_template_id: toIntOrNull(resolveTemplateValue(config?.whatsapp_template_id, context)) || null,
             review_gift_enabled: parseBool(resolveTemplateValue(config?.review_gift_enabled, context), false),
             review_gift_description: cleanString(resolveTemplateValue(config?.review_gift_description, context)) || null,
             review_display_clinic_name: cleanString(resolveTemplateValue(config?.review_display_clinic_name, context)) || null,
+            review_team_photo_url: cleanString(resolveTemplateValue(config?.review_team_photo_url, context)) || null,
           },
           next_node_id: readOutputTarget(node, 'on_success'),
         };
@@ -4176,13 +4176,14 @@ async function processNode(node, context, runtime = {}) {
         return {
           kind: 'success',
           output: {
-            status: 'simulated',
+            status: 'skipped',
             simulated: true,
+            skipped: true,
+            reason: 'review_reminder_retired',
             list_id: cleanString(resolveTemplateValue(config?.list_id, context)) || null,
             item_id: cleanString(resolveTemplateValue(config?.item_id, context)) || null,
-            template_name: cleanString(resolveTemplateValue(config?.template_name, context)) || 'clinicaclick_recordatorio_resena_sin_respuesta',
           },
-          next_node_id: readOutputTarget(node, 'on_success'),
+          next_node_id: readOutputTarget(node, 'on_fail') || readOutputTarget(node, 'on_success'),
         };
       }
       return handleRequestReviewReminder(node, context, runtime);

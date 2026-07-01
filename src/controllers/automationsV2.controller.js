@@ -941,15 +941,16 @@ const NODE_TYPES_V2 = [
     output_keys: ['on_success', 'on_fail'],
     runtime_status: 'real',
     default_config: {
-      review_source: 'first_completed_or_completed_treatment',
+      review_source: 'completed_treatment',
       review_threshold: 5,
       whatsapp_template_id: null,
       template_name: 'clinicaclick_solicitar_resena',
+      review_team_photo_url: null,
       require_message_anchor_for_wait: true,
       wait_for_message_ms: 6000,
     },
     config_schema: [
-      { key: 'review_source', label: 'A quién se pide si no valoró antes', input_type: 'select', required: false, options: ['first_completed_or_completed_treatment', 'first_completed_appointment', 'completed_treatment', 'manual_selection'] },
+      { key: 'review_source', label: 'Cuándo se pide', input_type: 'select', required: false, options: ['completed_treatment', 'manual_selection'] },
     ],
   },
   {
@@ -2036,6 +2037,76 @@ function canCreateDraftFromTemplate(access, { clinic_id, group_id }) {
   return true;
 }
 
+function isCatalogManagedTemplate(item) {
+  const templateKey = cleanString(item?.template_key);
+  const publicId = cleanString(item?.public_id);
+  if (item?.is_system) return true;
+  if (/__clinic_\d+$/i.test(templateKey)) return true;
+  if (/^review_request_after_completed__clinic_\d+$/i.test(templateKey)) return true;
+  if (/^flw_review_req_clinic_\d+$/i.test(publicId)) return true;
+  return false;
+}
+
+function isReviewAutomationFamilyReference(rawValue) {
+  const value = cleanString(rawValue);
+  if (!value) return false;
+  return (
+    value === 'review_request_after_completed'
+    || value === 'flw_review_request_system'
+    || /^review_request_after_completed(?:__clinic_|_clinic_)\d+$/i.test(value)
+    || /^flw_review_req_clinic_\d+$/i.test(value)
+  );
+}
+
+function getCatalogManagedListFamilyKey(item) {
+  const templateKey = cleanString(item?.template_key);
+  const publicId = cleanString(item?.public_id);
+  const strippedKey = stripCatalogClinicScopeSuffixes(templateKey);
+
+  if (
+    isReviewAutomationFamilyReference(templateKey)
+    || isReviewAutomationFamilyReference(strippedKey)
+    || isReviewAutomationFamilyReference(publicId)
+  ) {
+    return 'catalog:review_request_system';
+  }
+
+  return null;
+}
+
+function hasTemplateOperationalScope(item) {
+  return !!(parseIntOrNull(item?.clinic_id) || parseIntOrNull(item?.group_id));
+}
+
+function collapseCatalogManagedRowsForScopedList(rows, shouldCollapse) {
+  const sourceRows = Array.isArray(rows) ? rows : [];
+  if (!shouldCollapse || sourceRows.length < 2) return sourceRows;
+
+  const groups = new Map();
+  sourceRows.forEach((row) => {
+    const key = getCatalogManagedListFamilyKey(row);
+    if (!key) return;
+    const current = groups.get(key) || [];
+    current.push(row);
+    groups.set(key, current);
+  });
+
+  const hiddenIds = new Set();
+  groups.forEach((groupRows) => {
+    const hasScopedCopy = groupRows.some((row) => hasTemplateOperationalScope(row));
+    if (!hasScopedCopy) return;
+
+    groupRows.forEach((row) => {
+      if (!hasTemplateOperationalScope(row) && row?.is_system) {
+        hiddenIds.add(Number(row.id));
+      }
+    });
+  });
+
+  if (!hiddenIds.size) return sourceRows;
+  return sourceRows.filter((row) => !hiddenIds.has(Number(row.id)));
+}
+
 function buildTemplatePermissions(access, item) {
   if (!access || !access.user_id) {
     return {
@@ -2044,22 +2115,33 @@ function buildTemplatePermissions(access, item) {
       can_publish: false,
       can_execute: false,
       can_create_draft: false,
+      can_toggle_active: false,
     };
   }
 
   const scopeAllowed = hasScopeAccess(access, item);
   const isDraft = !item?.published_at;
   const isSystem = !!item?.is_system;
+  const isManagedSystemTemplate = isCatalogManagedTemplate(item);
   const isReadonlyGenerated =
     cleanString(item?.trigger_type) === 'patient_reactivation'
     || cleanString(item?.template_key).startsWith('reactivacion_lista_');
+  const canChangeStructure =
+    scopeAllowed
+    && !isReadonlyGenerated
+    && (!isManagedSystemTemplate || access.is_admin);
 
   return {
-    can_edit: scopeAllowed && isDraft && !isReadonlyGenerated,
-    can_delete: scopeAllowed && !isReadonlyGenerated && (!isSystem || access.is_admin),
-    can_publish: scopeAllowed && isDraft && !isReadonlyGenerated,
+    can_edit: canChangeStructure && isDraft,
+    can_delete: canChangeStructure && (!isSystem || access.is_admin),
+    can_publish: canChangeStructure && isDraft,
     can_execute: scopeAllowed && !isReadonlyGenerated,
-    can_create_draft: !isDraft && !isReadonlyGenerated && canCreateDraftFromTemplate(access, item),
+    can_create_draft: canChangeStructure && !isDraft && canCreateDraftFromTemplate(access, item),
+    can_toggle_active:
+      scopeAllowed
+      && !isDraft
+      && !isReadonlyGenerated
+      && (!isSystem || access.is_admin),
   };
 }
 
@@ -2194,6 +2276,7 @@ function mapTemplate(row, { includeNodes = true, access = null, clinicNameMap = 
     can_publish: permissions.can_publish,
     can_execute: permissions.can_execute,
     can_create_draft: permissions.can_create_draft,
+    can_toggle_active: permissions.can_toggle_active,
   };
 
   if (includeNodes) {
@@ -2390,8 +2473,15 @@ function mapTemplateWithLifecycle(row, options = {}) {
     options.catalogBindingMap instanceof Map ? options.catalogBindingMap : null;
   const bindingKey = stripCatalogClinicScopeSuffixes(mapped.template_key);
   const catalogItem = bindingKey && catalogBindingMap ? catalogBindingMap.get(bindingKey) || null : null;
-  mapped.managed_by_catalog = !!catalogItem;
+  const managedByCatalog = !!catalogItem || isCatalogManagedTemplate(mapped);
+  mapped.managed_by_catalog = managedByCatalog;
   mapped.catalog_item = catalogItem;
+  if (managedByCatalog && !options.access?.is_admin) {
+    mapped.can_edit = false;
+    mapped.can_publish = false;
+    mapped.can_create_draft = false;
+    mapped.can_delete = false;
+  }
   mapped.lifecycle_status = computeLifecycleStatus(
     row?.toJSON ? row.toJSON() : row,
     options.latestActivePublishedVersionMap || null
@@ -4445,16 +4535,20 @@ exports.listTemplates = async (req, res) => {
       order: [['template_key', 'ASC'], ['version', 'DESC']],
     });
 
-    const clinicNameMap = await loadClinicNameMapFromRows(rows);
-    const catalogBindingMap = await loadCatalogBindingMapForRows(rows);
+    const shouldCollapseCatalogManagedRows = !!(clinicIds.length || groupId || !access.is_admin);
+    const visibleRows = collapseCatalogManagedRowsForScopedList(rows, shouldCollapseCatalogManagedRows);
+
+    const clinicNameMap = await loadClinicNameMapFromRows(visibleRows);
+    const catalogBindingMap = await loadCatalogBindingMapForRows(visibleRows);
 
     const latestActivePublishedVersionMap = await loadLatestActivePublishedVersionMap(
-      rows.map((row) => row.public_id || row.template_key)
+      visibleRows.map((row) => row.public_id || row.template_key)
     );
+    const hiddenManagedRows = rows.length - visibleRows.length;
 
     return res.json({
       success: true,
-      data: rows.map((row) =>
+      data: visibleRows.map((row) =>
         mapTemplateWithLifecycle(row, {
           includeNodes,
           access,
@@ -4464,7 +4558,7 @@ exports.listTemplates = async (req, res) => {
         })
       ),
       pagination: {
-        total: count,
+        total: Math.max(visibleRows.length, count - hiddenManagedRows),
         limit,
         offset,
       },
@@ -4804,6 +4898,14 @@ exports.updateTemplateDraft = async (req, res) => {
         });
       }
 
+      if (row.is_system && !access.is_admin) {
+        return res.status(403).json({
+          success: false,
+          error: 'system_template_toggle_forbidden',
+          message: 'Las automatizaciones de sistema no se modifican desde una clínica. Activa o desactiva la copia de la clínica.',
+        });
+      }
+
       const wasActive = row.is_active !== false;
       const nextActive = parseBool(body.is_active, row.is_active);
 
@@ -4828,6 +4930,14 @@ exports.updateTemplateDraft = async (req, res) => {
           latestActivePublishedVersionMap,
         }),
         ...(scheduledBackfill ? { scheduled_backfill: scheduledBackfill } : {}),
+      });
+    }
+
+    if (isCatalogManagedTemplate(row) && !access.is_admin) {
+      return res.status(403).json({
+        success: false,
+        error: 'system_template_edit_forbidden',
+        message: 'Esta automatización viene del sistema. Puedes desactivarla o duplicarla para personalizarla.',
       });
     }
 
