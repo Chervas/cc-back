@@ -109,7 +109,6 @@ exports.getReviewRequestSummary = async (req, res) => {
       review_treatment_id: req.query.review_treatment_id || req.query.reviewTreatmentId || null,
       review_treatment_ids: req.query.review_treatment_ids || req.query.reviewTreatmentIds || null,
       review_treatment_moment: req.query.review_treatment_moment || req.query.reviewTreatmentMoment || null,
-      preview_limit: req.query.preview_limit || req.query.previewLimit || null,
     });
     return res.json({
       ...result,

@@ -2635,11 +2635,6 @@ async function findApprovedReviewWhatsappTemplate(scope, explicitTemplateId = nu
     })[0] || null;
 }
 
-async function findApprovedPhotoReviewWhatsappTemplate(scope) {
-  const template = await findApprovedReviewWhatsappTemplate(scope, null, { preferPhoto: true });
-  return template && templateHasImageHeader(template) ? template : null;
-}
-
 async function waitForReviewRequestDispatchAnchor(campaignId, timeoutMs = 6000) {
   const safeCampaignId = Number(campaignId || 0);
   if (!safeCampaignId) return null;
@@ -2851,10 +2846,6 @@ async function getReviewRequestSummary(scope, options = {}) {
   const reviewSource = normalizeReviewRequestSource(options.review_source || options.reviewSource);
   const treatmentIds = parseReviewTreatmentIds(options);
   const effectiveScope = applyReviewClinicFilter(scope, options);
-  const previewLimit = Math.min(
-    Math.max(Number.parseInt(options.preview_limit || options.previewLimit || '8', 10) || 8, 1),
-    250
-  );
   const [candidates, treatmentOptions] = await Promise.all([
     buildItemsForReviewRequest(effectiveScope, {
       review_request: true,
@@ -2879,8 +2870,6 @@ async function getReviewRequestSummary(scope, options = {}) {
         automation_enabled: false,
         automation_template: null,
         approved_template_available: false,
-        approved_photo_template_available: false,
-        approved_photo_template_id: null,
         google_review_url_available: false,
         whatsapp_available: false,
       },
@@ -2956,10 +2945,9 @@ async function getReviewRequestSummary(scope, options = {}) {
     { replacements: { clinicIds, objectiveId: OBJECTIVE_ID }, type: QueryTypes.SELECT }
   );
 
-  const [automationTemplate, approvedReviewTemplate, approvedPhotoReviewTemplate, googleReviewUrlAvailable, clinicStatuses] = await Promise.all([
+  const [automationTemplate, approvedReviewTemplate, googleReviewUrlAvailable, clinicStatuses] = await Promise.all([
     getReviewAutomationTemplate(scope),
     findApprovedReviewWhatsappTemplate(effectiveScope),
-    findApprovedPhotoReviewWhatsappTemplate(effectiveScope),
     hasGoogleReviewUrlForScope(effectiveScope),
     scope?.scope === 'group' ? buildReviewClinicStatuses(scope, options) : Promise.resolve([]),
   ]);
@@ -2988,7 +2976,7 @@ async function getReviewRequestSummary(scope, options = {}) {
     success: true,
     summary: {
       possible_patients: summaryCandidates.length,
-      candidates_preview: summaryCandidates.slice(0, previewLimit).map(serializeItem),
+      candidates_preview: summaryCandidates.slice(0, 8).map(serializeItem),
       treatment_options: treatmentOptions,
       requests_sent: Number(sentRow?.total || 0),
       ratings_1_to_4: Number(ratingsRow?.ratings_1_to_4 || 0),
@@ -3009,8 +2997,6 @@ async function getReviewRequestSummary(scope, options = {}) {
       automation_template: effectiveAutomationTemplate,
       approved_template_available: !!effectiveApprovedTemplateId,
       approved_template_id: effectiveApprovedTemplateId,
-      approved_photo_template_available: !!approvedPhotoReviewTemplate,
-      approved_photo_template_id: approvedPhotoReviewTemplate?.id || null,
       google_review_url_available: googleReviewUrlAvailable,
       whatsapp_available: whatsappAvailable,
       clinic_statuses: clinicStatuses,
