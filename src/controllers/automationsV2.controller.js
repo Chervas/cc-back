@@ -946,6 +946,7 @@ const NODE_TYPES_V2 = [
       whatsapp_template_id: null,
       template_name: 'clinicaclick_solicitar_resena',
       review_team_photo_url: null,
+      review_team_photo_overlay_color: '#4f46e5',
       require_message_anchor_for_wait: true,
       wait_for_message_ms: 6000,
     },

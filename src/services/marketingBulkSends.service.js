@@ -17,6 +17,7 @@ const {
   mergeClinicLinksIntoContext,
   resolveClinicGoogleLocalLinks,
 } = require('./googleLocalLinks.service');
+const publicMediaPersonalizationService = require('./publicMediaPersonalization.service');
 
 const {
   Clinica,
@@ -2416,6 +2417,9 @@ function serializeReviewAutomationTemplate(template) {
     review_gift_description: normalizeText(config.review_gift_description || '') || null,
     review_display_clinic_name: normalizeText(config.review_display_clinic_name || '') || null,
     review_team_photo_url: normalizeText(config.review_team_photo_url || '') || null,
+    review_team_photo_overlay_color: publicMediaPersonalizationService.normalizeHexColor(
+      config.review_team_photo_overlay_color || publicMediaPersonalizationService.DEFAULT_OVERLAY_COLOR
+    ),
   };
 }
 
@@ -3050,6 +3054,7 @@ function buildReviewAutomationNodes({
   reviewGiftDescription = '',
   reviewDisplayClinicName = '',
   reviewTeamPhotoUrl = '',
+  reviewTeamPhotoOverlayColor = publicMediaPersonalizationService.DEFAULT_OVERLAY_COLOR,
 }) {
   const threshold = normalizeReviewThreshold(reviewThreshold);
   const giftEnabled = reviewGiftEnabled === true || String(reviewGiftEnabled || '').toLowerCase() === 'true';
@@ -3085,6 +3090,7 @@ function buildReviewAutomationNodes({
         review_gift_description: giftEnabled ? normalizeText(reviewGiftDescription || '') : null,
         review_display_clinic_name: normalizeText(reviewDisplayClinicName || '') || null,
         review_team_photo_url: normalizeText(reviewTeamPhotoUrl || '') || null,
+        review_team_photo_overlay_color: publicMediaPersonalizationService.normalizeHexColor(reviewTeamPhotoOverlayColor),
         require_message_anchor_for_wait: true,
         wait_for_message_ms: 6000,
       },
@@ -3172,6 +3178,9 @@ async function upsertReviewRequestAutomationForClinic(scope, body = {}, userId =
   const reviewGiftDescription = normalizeText(body.review_gift_description || body.reviewGiftDescription || '');
   const reviewDisplayClinicName = normalizeText(body.review_display_clinic_name || body.reviewDisplayClinicName || '');
   const reviewTeamPhotoUrl = normalizeText(body.review_team_photo_url || body.reviewTeamPhotoUrl || '');
+  const reviewTeamPhotoOverlayColor = publicMediaPersonalizationService.normalizeHexColor(
+    body.review_team_photo_overlay_color || body.reviewTeamPhotoOverlayColor
+  );
 
   let approvedTemplate = null;
   if (whatsappTemplateId) {
@@ -3235,6 +3244,7 @@ async function upsertReviewRequestAutomationForClinic(scope, body = {}, userId =
     reviewGiftDescription,
     reviewDisplayClinicName,
     reviewTeamPhotoUrl,
+    reviewTeamPhotoOverlayColor,
   });
   const displayName = await buildReviewAutomationDisplayName(scope);
   const payload = {
@@ -3355,6 +3365,9 @@ async function createAndStartReviewRequestForAppointment(options = {}) {
   const reviewGiftDescription = normalizeText(options.reviewGiftDescription || options.review_gift_description || '');
   const reviewDisplayClinicName = normalizeText(options.reviewDisplayClinicName || options.review_display_clinic_name || '');
   const reviewTeamPhotoUrl = normalizeText(options.reviewTeamPhotoUrl || options.review_team_photo_url || '');
+  const reviewTeamPhotoOverlayColor = publicMediaPersonalizationService.normalizeHexColor(
+    options.reviewTeamPhotoOverlayColor || options.review_team_photo_overlay_color
+  );
   const candidate = await buildReviewRequestCandidateForAppointment(scope, {
     review_appointment_id: appointmentId,
     review_source: reviewSource,
@@ -3400,6 +3413,7 @@ async function createAndStartReviewRequestForAppointment(options = {}) {
       review_gift_description: reviewGiftEnabled ? reviewGiftDescription : null,
       review_display_clinic_name: reviewDisplayClinicName || resolveReviewDisplayClinicName({ criteria: {} }, clinic),
       review_team_photo_url: reviewTeamPhotoUrl || null,
+      review_team_photo_overlay_color: reviewTeamPhotoOverlayColor,
       whatsapp_template_id: template.id,
       link_tracking: {
         enabled: true,
@@ -3714,6 +3728,9 @@ async function createCampaign(scope, body = {}, userId = null) {
         review_gift_description: isReviewRequest ? normalizeText(body.review_gift_description || body.reviewGiftDescription || '') || null : null,
         review_display_clinic_name: isReviewRequest ? normalizeText(body.review_display_clinic_name || body.reviewDisplayClinicName || '') || null : null,
         review_team_photo_url: isReviewRequest ? normalizeText(body.review_team_photo_url || body.reviewTeamPhotoUrl || '') || null : null,
+        review_team_photo_overlay_color: isReviewRequest
+          ? publicMediaPersonalizationService.normalizeHexColor(body.review_team_photo_overlay_color || body.reviewTeamPhotoOverlayColor)
+          : null,
         review_automation_enabled: false,
         import_file_name: body.import_file_name || null,
         column_mapping: columnMapping,
@@ -4588,16 +4605,88 @@ function resolveReviewTeamPhotoUrl(list, overrideValue = null) {
   );
 }
 
-function buildTemplateComponentsForSend({ template, params = [], list = null, reviewTeamPhotoUrl = null }) {
+function resolveReviewTeamPhotoOverlayColor(list, overrideValue = null) {
+  const criteria = asPlainObject(list?.criteria);
+  return publicMediaPersonalizationService.normalizeHexColor(
+    overrideValue
+    || criteria.review_team_photo_overlay_color
+    || criteria.reviewTeamPhotoOverlayColor
+    || publicMediaPersonalizationService.DEFAULT_OVERLAY_COLOR
+  );
+}
+
+async function resolveReviewHeaderPhotoUrl({
+  list = null,
+  item = null,
+  clinic = null,
+  clinicId = null,
+  groupId = null,
+  reviewTeamPhotoUrl = null,
+  reviewTeamPhotoOverlayColor = null,
+  ownerType = 'review_request',
+  ownerId = null,
+  userId = null,
+} = {}) {
+  const photoUrl = resolveReviewTeamPhotoUrl(list, reviewTeamPhotoUrl);
+  if (!isHttpsUrl(photoUrl)) {
+    const error = new Error('review_team_photo_https_url_required');
+    error.status = 409;
+    throw error;
+  }
+
+  try {
+    const personalized = await publicMediaPersonalizationService.buildPersonalizedReviewTeamPhoto({
+      sourceUrl: photoUrl,
+      overlayColor: resolveReviewTeamPhotoOverlayColor(list, reviewTeamPhotoOverlayColor),
+      clinicId,
+      groupId,
+      ownerType,
+      ownerId,
+      userId,
+    });
+    return personalized.url || photoUrl;
+  } catch (error) {
+    if (['review_team_photo_must_be_public_media', 'review_team_photo_url_invalid'].includes(error?.message)) {
+      throw error;
+    }
+    console.warn('[marketing-bulk-sends] No se pudo personalizar foto de reseñas; se usará la foto base', {
+      list_id: list?.id || null,
+      item_id: item?.id || null,
+      error: error?.message || error,
+    });
+    return photoUrl;
+  }
+}
+
+async function buildTemplateComponentsForSend({
+  template,
+  params = [],
+  list = null,
+  item = null,
+  clinic = null,
+  clinicId = null,
+  groupId = null,
+  reviewTeamPhotoUrl = null,
+  reviewTeamPhotoOverlayColor = null,
+  ownerType = 'review_request',
+  ownerId = null,
+  userId = null,
+}) {
   const components = [];
   const bodyParams = Array.isArray(params) ? params : [];
   if (templateHasImageHeader(template)) {
-    const photoUrl = resolveReviewTeamPhotoUrl(list, reviewTeamPhotoUrl);
-    if (!isHttpsUrl(photoUrl)) {
-      const error = new Error('review_team_photo_https_url_required');
-      error.status = 409;
-      throw error;
-    }
+    const photoUrl = await resolveReviewHeaderPhotoUrl({
+      list,
+      item,
+      clinic,
+      clinicId,
+      groupId,
+      reviewTeamPhotoUrl,
+      reviewTeamPhotoOverlayColor,
+      ownerType,
+      ownerId,
+      userId,
+    });
     components.push({
       type: 'header',
       parameters: [
@@ -4784,6 +4873,13 @@ async function prepareCampaign(scope, campaignId, body = {}, userId = null) {
       review_team_photo_url: isReviewRequest
         ? normalizeText(body.review_team_photo_url || body.reviewTeamPhotoUrl || list.criteria?.review_team_photo_url || '') || null
         : null,
+      review_team_photo_overlay_color: isReviewRequest
+        ? publicMediaPersonalizationService.normalizeHexColor(
+          body.review_team_photo_overlay_color
+          || body.reviewTeamPhotoOverlayColor
+          || list.criteria?.review_team_photo_overlay_color
+        )
+        : null,
       review_automation_enabled: false,
       link_tracking: buildLinkTrackingCriteria(body, list.criteria || {}),
       schedule_mode: body.schedule_mode || 'now',
@@ -4864,6 +4960,11 @@ async function sendTest(scope, campaignId, body = {}) {
     || list.template_snapshot?.id
     || list.template_id;
   const reviewTeamPhotoUrlForSelection = normalizeText(body.review_team_photo_url || body.reviewTeamPhotoUrl || listCriteria.review_team_photo_url || '') || null;
+  const reviewTeamPhotoOverlayColorForSelection = publicMediaPersonalizationService.normalizeHexColor(
+    body.review_team_photo_overlay_color
+    || body.reviewTeamPhotoOverlayColor
+    || listCriteria.review_team_photo_overlay_color
+  );
   let template = isReviewTemplateUsage(templateUsage)
     ? await findApprovedReviewWhatsappTemplate(scope, selectedTemplateId || null, {
       preferPhoto: isHttpsUrl(reviewTeamPhotoUrlForSelection),
@@ -4923,11 +5024,17 @@ async function sendTest(scope, campaignId, body = {}) {
   }
   assertTestSendCooldown({ clinicId, targetPhone });
   const params = await buildTemplateParams({ template, item: plainItem, list, clinic });
-  const templateComponents = buildTemplateComponentsForSend({
+  const templateComponents = await buildTemplateComponentsForSend({
     template,
     params,
     list,
+    item: plainItem,
+    clinic,
+    clinicId,
     reviewTeamPhotoUrl: reviewTeamPhotoUrlForSelection,
+    reviewTeamPhotoOverlayColor: reviewTeamPhotoOverlayColorForSelection,
+    ownerType: 'review_request_test',
+    ownerId: item.id,
   });
   const previewText = await renderTemplatePreview({ template, item: plainItem, list, clinic });
   const templateCommercial = body.template_commercial === true
@@ -5616,7 +5723,17 @@ async function sendDispatchItem({ list, item, template, clinic, clinicConfig, ba
   const dispatch = getDispatchConfig(list);
   const dispatchContext = normalizeDispatchContext(dispatch.context);
   const params = await buildTemplateParams({ template, item: plainItem, list, clinic });
-  const templateComponents = buildTemplateComponentsForSend({ template, params, list });
+  const templateComponents = await buildTemplateComponentsForSend({
+    template,
+    params,
+    list,
+    item: plainItem,
+    clinic,
+    clinicId: clinicConfig.clinicId || getClinicIdForList(list),
+    groupId: list.group_id || null,
+    ownerType: 'review_request',
+    ownerId: item.id,
+  });
   const previewText = await renderTemplatePreview({ template, item: plainItem, list, clinic });
   const conversation = await findCanonicalWhatsappConversation({
     clinicId: clinicConfig.clinicId || getClinicIdForList(list),

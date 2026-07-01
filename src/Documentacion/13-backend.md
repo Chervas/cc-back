@@ -3731,6 +3731,7 @@ Reglas:
 Uso actual:
 
 - `Marketing > Campanas > Conseguir resenas` permite subir la foto del equipo para plantillas WhatsApp de resenas. La URL devuelta se guarda como `review_team_photo_url` en criterios de lista/campana y en la configuracion de automatizacion recurrente.
+- Si la plantilla de reseñas usa cabecera de imagen, el backend prepara la foto en `sendDispatchItem`/`sendTest`: descarga la foto base desde PUBLIC_MEDIA, compone una imagen WebP 1200x675 con una banda solida y texto blanco generico `¡Hola!`, y sube la derivada como `purpose=whatsapp_image`. El color se guarda en `review_team_photo_overlay_color`. El nombre del paciente va en el cuerpo de WhatsApp, no en la imagen publica. Si la transformacion falla por un error transitorio, se usa la foto base; si la URL no pertenece a PUBLIC_MEDIA, se bloquea.
 
 Estado QA 2026-06-30:
 

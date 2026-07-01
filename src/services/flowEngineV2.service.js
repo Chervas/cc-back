@@ -3320,6 +3320,7 @@ async function handleRequestReview(node, context, runtime) {
     reviewGiftDescription: resolveTemplateValue(config?.review_gift_description, context),
     reviewDisplayClinicName: resolveTemplateValue(config?.review_display_clinic_name, context),
     reviewTeamPhotoUrl: resolveTemplateValue(config?.review_team_photo_url, context),
+    reviewTeamPhotoOverlayColor: resolveTemplateValue(config?.review_team_photo_overlay_color, context),
     waitForMessageMs: resolveTemplateValue(config?.wait_for_message_ms, context),
     userId: runtime?.execution?.created_by || runtime?.execution?.user_id || null,
   });
@@ -4164,6 +4165,7 @@ async function processNode(node, context, runtime = {}) {
             review_gift_description: cleanString(resolveTemplateValue(config?.review_gift_description, context)) || null,
             review_display_clinic_name: cleanString(resolveTemplateValue(config?.review_display_clinic_name, context)) || null,
             review_team_photo_url: cleanString(resolveTemplateValue(config?.review_team_photo_url, context)) || null,
+            review_team_photo_overlay_color: cleanString(resolveTemplateValue(config?.review_team_photo_overlay_color, context)) || null,
           },
           next_node_id: readOutputTarget(node, 'on_success'),
         };
