@@ -4615,6 +4615,17 @@ function resolveReviewTeamPhotoOverlayColor(list, overrideValue = null) {
   );
 }
 
+function resolveReviewTeamPhotoPatientName(item, list, clinic) {
+  const raw = resolveVariableValue('nombre_paciente', item || {}, list, clinic)
+    || resolveVariableValue('nombre', item || {}, list, clinic)
+    || item?.name
+    || '';
+  const cleaned = toTitleCaseName(raw).replace(/\s+/g, ' ').trim();
+  return publicMediaPersonalizationService.normalizePatientDisplayName(
+    cleaned.split(' ').filter(Boolean).slice(0, 1).join(' ') || 'Paciente'
+  );
+}
+
 async function resolveReviewHeaderPhotoUrl({
   list = null,
   item = null,
@@ -4637,6 +4648,7 @@ async function resolveReviewHeaderPhotoUrl({
   try {
     const personalized = await publicMediaPersonalizationService.buildPersonalizedReviewTeamPhoto({
       sourceUrl: photoUrl,
+      patientName: resolveReviewTeamPhotoPatientName(item, list, clinic),
       overlayColor: resolveReviewTeamPhotoOverlayColor(list, reviewTeamPhotoOverlayColor),
       clinicId,
       groupId,

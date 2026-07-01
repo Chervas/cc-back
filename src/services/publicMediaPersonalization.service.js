@@ -11,7 +11,7 @@ const MAX_SOURCE_IMAGE_BYTES = 8 * 1024 * 1024;
 const OUTPUT_WIDTH = 1200;
 const OUTPUT_HEIGHT = 675;
 const DEFAULT_OVERLAY_COLOR = '#4f46e5';
-const SAFE_OVERLAY_TEXT = '¡Hola!';
+const OVERLAY_GREETING_TEMPLATE = '¡Hola {nombre}!';
 
 function cleanText(value) {
   return String(value || '').trim();
@@ -90,8 +90,15 @@ async function fetchSourceImage(url) {
   }
 }
 
-function buildOverlaySvg({ color }) {
-  const message = SAFE_OVERLAY_TEXT;
+function normalizePatientDisplayName(value) {
+  const cleaned = cleanText(value)
+    .replace(/\s+/g, ' ')
+    .slice(0, 32);
+  return cleaned.split(' ').filter(Boolean).slice(0, 1).join(' ') || 'Paciente';
+}
+
+function buildOverlaySvg({ patientName, color }) {
+  const message = `¡Hola ${normalizePatientDisplayName(patientName)}!`;
   const fontSize = message.length > 25 ? 44 : message.length > 20 ? 48 : 54;
   const rectWidth = Math.min(860, Math.max(480, 260 + message.length * (fontSize * 0.48)));
   const rectHeight = 104;
@@ -106,20 +113,20 @@ function buildOverlaySvg({ color }) {
 </svg>`);
 }
 
-function buildPersonalizedObjectKey({ clinicId, groupId, sourceUrl, color }) {
+function buildPersonalizedObjectKey({ clinicId, groupId, sourceUrl, patientName, color }) {
   const now = new Date();
   const yyyy = String(now.getUTCFullYear());
   const mm = String(now.getUTCMonth() + 1).padStart(2, '0');
   const scope = clinicId ? `clinic-${clinicId}` : (groupId ? `group-${groupId}` : 'global');
   const digest = crypto
     .createHash('sha256')
-    .update([sourceUrl, normalizeHexColor(color)].join('|'))
+    .update([sourceUrl, normalizePatientDisplayName(patientName), normalizeHexColor(color)].join('|'))
     .digest('hex')
     .slice(0, 24);
   return `whatsapp/reviews/personalized/${scope}/${yyyy}/${mm}/${digest}.webp`;
 }
 
-async function persistAsset({ upload, clinicId, groupId, ownerType, ownerId, sourceUrl, color, userId }) {
+async function persistAsset({ upload, clinicId, groupId, ownerType, ownerId, sourceUrl, patientName, color, userId }) {
   if (!PublicMediaAsset) return null;
   const scopeType = clinicId ? 'clinic' : (groupId ? 'group' : 'global');
   return PublicMediaAsset.create({
@@ -145,9 +152,10 @@ async function persistAsset({ upload, clinicId, groupId, ownerType, ownerId, sou
       source: 'review_team_photo_personalization',
       source_url: sourceUrl,
       overlay_color: normalizeHexColor(color),
-      greeting_template: SAFE_OVERLAY_TEXT,
-      patient_name_present: false,
-      patient_data_in_public_media: false,
+      greeting_template: OVERLAY_GREETING_TEMPLATE,
+      patient_name_present: true,
+      patient_data_in_public_media: true,
+      public_media_patient_data_exception: 'review_whatsapp_header_greeting',
       non_clinical_asserted: true
     },
     created_by: userId || null
@@ -156,6 +164,7 @@ async function persistAsset({ upload, clinicId, groupId, ownerType, ownerId, sou
 
 async function buildPersonalizedReviewTeamPhoto(options = {}) {
   const sourceUrl = assertAllowedSourceUrl(options.sourceUrl || options.source_url);
+  const patientName = normalizePatientDisplayName(options.patientName || options.patient_name);
   const color = normalizeHexColor(options.overlayColor || options.overlay_color);
   const clinicId = Number.isInteger(Number(options.clinicId || options.clinic_id))
     ? Number(options.clinicId || options.clinic_id)
@@ -163,12 +172,12 @@ async function buildPersonalizedReviewTeamPhoto(options = {}) {
   const groupId = Number.isInteger(Number(options.groupId || options.group_id))
     ? Number(options.groupId || options.group_id)
     : null;
-  const key = buildPersonalizedObjectKey({ clinicId, groupId, sourceUrl, color });
+  const key = buildPersonalizedObjectKey({ clinicId, groupId, sourceUrl, patientName, color });
   const sourceBuffer = await fetchSourceImage(sourceUrl);
   const outputBuffer = await sharp(sourceBuffer, { failOn: 'none' })
     .rotate()
     .resize(OUTPUT_WIDTH, OUTPUT_HEIGHT, { fit: 'cover', position: 'center' })
-    .composite([{ input: buildOverlaySvg({ color }), top: 0, left: 0 }])
+    .composite([{ input: buildOverlaySvg({ patientName, color }), top: 0, left: 0 }])
     .webp({ quality: 88 })
     .toBuffer();
 
@@ -188,6 +197,7 @@ async function buildPersonalizedReviewTeamPhoto(options = {}) {
     ownerType: options.ownerType || options.owner_type || 'review_request',
     ownerId: options.ownerId || options.owner_id || null,
     sourceUrl,
+    patientName,
     color,
     userId: options.userId || options.user_id || null
   });
@@ -201,7 +211,8 @@ async function buildPersonalizedReviewTeamPhoto(options = {}) {
 
 module.exports = {
   DEFAULT_OVERLAY_COLOR,
-  SAFE_OVERLAY_TEXT,
+  OVERLAY_GREETING_TEMPLATE,
   normalizeHexColor,
+  normalizePatientDisplayName,
   buildPersonalizedReviewTeamPhoto
 };
