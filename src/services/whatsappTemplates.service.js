@@ -76,6 +76,29 @@ function normalizeTemplateComponentsForMeta(value) {
   });
 }
 
+function getImageHeaderSampleIssue(template) {
+  const components = normalizeTemplateComponentsForMeta(template?.components);
+  const imageHeader = components.find((component) => {
+    const type = String(component?.type || '').trim().toUpperCase();
+    const format = String(component?.format || '').trim().toUpperCase();
+    return type === 'HEADER' && format === 'IMAGE';
+  });
+  if (!imageHeader) return null;
+
+  const headerHandle = imageHeader?.example?.header_handle;
+  const sample = cleanString(Array.isArray(headerHandle) ? headerHandle[0] : headerHandle);
+  if (!sample) return 'missing_image_header_sample';
+  if (/^https?:\/\//i.test(sample)) return 'image_header_sample_must_be_meta_handle';
+  return null;
+}
+
+function buildImageHeaderSamplePendingReason(issue) {
+  if (issue === 'image_header_sample_must_be_meta_handle') {
+    return 'La plantilla tiene cabecera de imagen, pero Meta requiere un media handle de ejemplo, no una URL publica. Configura WHATSAPP_REVIEW_TEMPLATE_HEADER_HANDLE o WHATSAPP_TEMPLATE_IMAGE_HEADER_HANDLE antes de enviarla a revision.';
+  }
+  return 'La plantilla tiene cabecera de imagen, pero falta el media handle de ejemplo requerido por Meta. Configura WHATSAPP_REVIEW_TEMPLATE_HEADER_HANDLE o WHATSAPP_TEMPLATE_IMAGE_HEADER_HANDLE antes de enviarla a revision.';
+}
+
 function stringifyComparableTemplateComponents(value) {
   return JSON.stringify(normalizeTemplateComponentsForMeta(value));
 }
@@ -952,6 +975,34 @@ async function createTemplatesFromCatalog({ wabaId, clinicId, groupId, assignmen
       ? resolveNextTechnicalTemplateName(template.name, familyRows)
       : template.name;
     const metaTemplate = buildTemplateForTechnicalName(template, technicalName);
+    const imageHeaderSampleIssue = getImageHeaderSampleIssue(metaTemplate);
+    if (imageHeaderSampleIssue) {
+      const rejectionReason = buildImageHeaderSamplePendingReason(imageHeaderSampleIssue);
+      await upsertConnectedTemplateForWaba({
+        wabaId,
+        template,
+        technicalName,
+        status: WHATSAPP_TEMPLATE_STATUS.LOCAL_PENDING,
+        metaTemplateId: null,
+        rejectionReason,
+      });
+      if (clinicId) {
+        await upsertClinicOverrideTemplateForClinic({
+          clinicId,
+          template,
+          technicalName,
+          status: WHATSAPP_TEMPLATE_STATUS.LOCAL_PENDING,
+          metaTemplateId: null,
+          rejectionReason,
+        });
+      }
+      console.warn('Plantilla WhatsApp con cabecera de imagen no enviada a Meta por falta de media handle de ejemplo', {
+        wabaId,
+        name: technicalName,
+        reason: imageHeaderSampleIssue,
+      });
+      continue;
+    }
 
     try {
       const metaResp = await createTemplateInMeta({
@@ -1121,6 +1172,39 @@ async function propagateCatalogTemplateToAllClinics({ templateCatalogId, logger 
           : template.name;
         pendingTechnicalName = cleanString(technicalName) || pendingTechnicalName;
         const metaTemplate = buildTemplateForTechnicalName(template, technicalName);
+        const imageHeaderSampleIssue = getImageHeaderSampleIssue(metaTemplate);
+        if (imageHeaderSampleIssue) {
+          const rejectionReason = buildImageHeaderSamplePendingReason(imageHeaderSampleIssue);
+          await upsertConnectedTemplateForWaba({
+            wabaId,
+            template,
+            technicalName,
+            status: WHATSAPP_TEMPLATE_STATUS.LOCAL_PENDING,
+            metaTemplateId: null,
+            rejectionReason,
+          });
+          const result = await upsertClinicOverrideTemplateForClinic({
+            clinicId,
+            template,
+            technicalName,
+            status: WHATSAPP_TEMPLATE_STATUS.LOCAL_PENDING,
+            metaTemplateId: null,
+            rejectionReason,
+            logger,
+          });
+          if (result.action === 'created') summary.placeholders_created += 1;
+          if (result.action === 'updated') summary.placeholders_updated += 1;
+          if (result?.row?.id) affectedTemplateInstances.set(Number(result.row.id), result.row);
+          summary.waba_templates_updated += 1;
+          logger.warn?.('Plantilla WhatsApp con cabecera de imagen no enviada a Meta por falta de media handle de ejemplo', {
+            clinicId,
+            wabaId,
+            templateCatalogId,
+            technicalName,
+            reason: imageHeaderSampleIssue,
+          });
+          continue;
+        }
 
         const metaResp = await createTemplateInMeta({
           wabaId,
