@@ -82,6 +82,12 @@ const NOTIFICATION_EVENTS = [
     category: 'whatsapp',
     label: 'WhatsApp compartido reconectado',
     level: 'info'
+  },
+  {
+    event: 'whatsapp.review_photo_template_approved',
+    category: 'whatsapp',
+    label: 'Plantilla de reseñas con foto aprobada',
+    level: 'info'
   }
 ];
 
@@ -141,7 +147,11 @@ const DEFAULT_NOTIFICATION_PREFERENCES = [
   { role: 'admin', subrole: null, event: 'whatsapp.coexistence_reconnected', enabled: true },
   { role: 'propietario', subrole: null, event: 'whatsapp.coexistence_reconnected', enabled: true },
   { role: 'personaldeclinica', subrole: 'Administrativos', event: 'whatsapp.coexistence_reconnected', enabled: true },
-  { role: 'personaldeclinica', subrole: 'Recepción / Comercial ventas', event: 'whatsapp.coexistence_reconnected', enabled: true }
+  { role: 'personaldeclinica', subrole: 'Recepción / Comercial ventas', event: 'whatsapp.coexistence_reconnected', enabled: true },
+  { role: 'admin', subrole: null, event: 'whatsapp.review_photo_template_approved', enabled: true },
+  { role: 'propietario', subrole: null, event: 'whatsapp.review_photo_template_approved', enabled: true },
+  { role: 'personaldeclinica', subrole: 'Administrativos', event: 'whatsapp.review_photo_template_approved', enabled: true },
+  { role: 'personaldeclinica', subrole: 'Recepción / Comercial ventas', event: 'whatsapp.review_photo_template_approved', enabled: true }
 ];
 
 module.exports = {

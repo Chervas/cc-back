@@ -16,6 +16,7 @@ const { Op } = db.Sequelize;
 const DEFAULT_TIMEZONE = 'Europe/Madrid';
 const REVIEW_AUTOMATION_TRIGGER = 'appointment_completed';
 const REVIEW_AUTOMATION_ACTION = 'action/request_review';
+const IMPORTED_HISTORICAL_APPOINTMENT_REASON = 'Importación de pacientes para reactivación';
 const SCHEDULED_TRIGGER_FIRE_GRACE_MS = (() => {
   const configured = Number(process.env.APPOINTMENT_AUTOMATION_FIRE_GRACE_MS);
   return Number.isFinite(configured) && configured >= 0
@@ -95,6 +96,14 @@ function toIntOrNull(value) {
 function cleanString(value) {
   if (value === undefined || value === null) return '';
   return String(value).trim();
+}
+
+function isImportedHistoricalAppointment(cita) {
+  const reason = cleanString(cita?.motivo).toLowerCase();
+  const title = cleanString(cita?.titulo).toLowerCase();
+  return reason === IMPORTED_HISTORICAL_APPOINTMENT_REASON.toLowerCase()
+    || reason.startsWith('importación de pacientes')
+    || title.startsWith('histórico:');
 }
 
 function stripCatalogClinicScopeSuffixes(rawTemplateKey) {
@@ -1035,6 +1044,9 @@ async function enqueueExecutionForTemplate(cita, template, options = {}) {
   if (!citaId || !template) {
     return { success: false, skipped: true, reason: 'invalid_cita' };
   }
+  if (isImportedHistoricalAppointment(cita)) {
+    return { success: true, skipped: true, reason: 'imported_historical_appointment' };
+  }
 
   const eventName = normalizeEventName(options.event_name) || cleanString(template?.trigger_type) || mapEstadoToEvent(cita?.estado) || 'appointment_created';
   if (!APPOINTMENT_TRIGGER_TYPES.has(cleanString(template.trigger_type))) {
@@ -1120,6 +1132,9 @@ async function enqueueExecutionForCita(cita, options = {}) {
   const citaId = toIntOrNull(cita?.id_cita);
   if (!citaId) {
     return { success: false, skipped: true, reason: 'invalid_cita' };
+  }
+  if (isImportedHistoricalAppointment(cita)) {
+    return { success: true, skipped: true, reason: 'imported_historical_appointment' };
   }
 
   const eventName = normalizeEventName(options.event_name) || mapEstadoToEvent(cita?.estado) || 'appointment_created';
@@ -1216,6 +1231,19 @@ async function cancelActiveExecutionsForCita(cita, options = {}) {
 async function syncScheduledTriggersForCita(cita, options = {}) {
   const citaId = toIntOrNull(cita?.id_cita);
   if (!citaId) return { success: false, skipped: true, reason: 'invalid_cita' };
+  if (isImportedHistoricalAppointment(cita)) {
+    const existingJobs = await listExistingScheduledJobs(citaId);
+    await Promise.all(existingJobs.map((job) => jobRequestsService.markCancelled(job.id, {
+      errorMessage: 'imported_historical_appointment_cancelled_schedule',
+    })));
+    return {
+      success: true,
+      cancelled_jobs: existingJobs.map((job) => job.id),
+      scheduled_jobs: [],
+      skipped: true,
+      reason: 'imported_historical_appointment',
+    };
+  }
 
   const normalizedStatus = cleanString(cita?.estado).toLowerCase();
   const existingJobs = await listExistingScheduledJobs(citaId);
@@ -1482,6 +1510,9 @@ async function fireScheduledTrigger(payload = {}) {
     return { success: false, skipped: true, reason: 'appointment_not_found' };
   }
   const cita = citaModel.toJSON ? citaModel.toJSON() : citaModel;
+  if (isImportedHistoricalAppointment(cita)) {
+    return { success: true, skipped: true, reason: 'imported_historical_appointment' };
+  }
   const normalizedStatus = cleanString(cita?.estado).toLowerCase();
   if (['cancelada', 'no_asistio'].includes(normalizedStatus)) {
     return { success: true, skipped: true, reason: `appointment_${normalizedStatus}` };

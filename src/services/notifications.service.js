@@ -125,6 +125,15 @@ function buildNotificationContent(event, payload = {}) {
         level: defaults.level || 'info'
       };
     }
+    case 'whatsapp.review_photo_template_approved': {
+      const clinic = payload.clinicName || 'tu clínica';
+      return {
+        title: `Plantilla de reseñas aprobada en ${clinic}`,
+        message: 'Meta ha aprobado la plantilla de reseñas con imagen. Ya puedes retomar la campaña y enviar la prueba o el listado preparado.',
+        icon: 'heroicons_outline:star',
+        level: defaults.level || 'info'
+      };
+    }
     default:
       return {
         title: defaults.label || 'Notificación',
