@@ -2897,6 +2897,36 @@ async function listProfessionalPendingDocuments(filters = {}, userId = null) {
         });
 }
 
+async function listClinicPendingPatientDocuments(filters = {}, userId = null) {
+    const clinicId = toIntOrNull(filters.clinic_id ?? filters.clinica_id);
+    const limit = Math.min(toIntOrNull(filters.limit) || 100, 200);
+    const where = {
+        status: { [Op.in]: Array.from(DOCUMENT_PENDING_STATUSES) },
+    };
+    if (clinicId) where.clinica_id = clinicId;
+
+    const documents = await db.PatientConsentDocument.findAll({
+        where,
+        include: [
+            { model: db.ConsentSignaturePackage, as: 'package', required: false },
+            { model: db.Paciente, as: 'paciente', required: false, attributes: ['id_paciente', 'public_id', 'nombre', 'apellidos'] },
+            { model: db.Clinica, as: 'clinica', required: false, attributes: ['id_clinica', 'nombre_clinica'] },
+            { model: db.CitaPaciente, as: 'cita', required: false, attributes: ['id_cita', 'inicio', 'doctor_id', 'estado'] },
+            { model: db.Tratamiento, as: 'tratamiento', required: false, attributes: ['id_tratamiento', 'nombre', 'disciplina'] },
+        ],
+        order: [['updatedAt', 'DESC']],
+        limit,
+    });
+
+    return documents
+        .map(getPlain)
+        .filter((doc) => {
+            const filterUserId = toIntOrNull(userId);
+            if (!filterUserId || !normalizeBoolean(filters.only_mine ?? filters.solo_mios, false)) return true;
+            return toIntOrNull(doc.cita?.doctor_id) === filterUserId;
+        });
+}
+
 async function signPublicPackage(tokenRaw, payload = {}, requestMeta = {}) {
     const token = verifyPackageToken(tokenRaw);
     const packageRow = await getPackageWithDocumentsByPublicId(token.package_public_id);
@@ -3087,6 +3117,7 @@ module.exports = {
     signConsentDocument,
     signProfessionalConsentDocument,
     listProfessionalPendingDocuments,
+    listClinicPendingPatientDocuments,
     revokeConsentDocument,
     exportPatientConsentAudit,
 };

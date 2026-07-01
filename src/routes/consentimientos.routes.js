@@ -34,6 +34,7 @@ router.put('/treatments/:id/requirements', consentimientosController.saveTreatme
 router.get('/patients/:id/documents', consentimientosController.listPatientDocuments);
 router.get('/patients/:id/treatments-without-consent', consentimientosController.listPatientTreatmentsWithoutConsentRequirements);
 router.get('/patients/:id/audit', consentimientosController.exportPatientAudit);
+router.get('/clinic/pending-documents', consentimientosController.listClinicPendingPatientDocuments);
 router.get('/professional/pending', consentimientosController.listProfessionalPendingDocuments);
 router.get('/appointments/:id/summary', consentimientosController.getAppointmentSummary);
 router.post('/appointments/:id/package', consentimientosController.createAppointmentPackage);
