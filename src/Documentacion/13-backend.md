@@ -3673,6 +3673,8 @@ Estado de cuentas 2026-07-01:
 - no sirve conceder `cloudfront:CreateInvalidation` al rol de Lightsail contra un ARN de CloudFront construido con la cuenta `468355432137`, porque la distribucion real no esta en esa cuenta;
 - opcion A: configurar `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY` de minimo privilegio de la cuenta `137819318729`;
 - opcion B: crear `arn:aws:iam::137819318729:role/ClinicaclickPublicMediaUploader` con confianza a `arn:aws:iam::468355432137:role/AmazonLightsailInstanceRole` y definir `PUBLIC_MEDIA_ASSUME_ROLE_ARN` en el servidor. El rol de la cuenta `468355432137` solo necesita `sts:AssumeRole` sobre ese rol.
+- 2026-07-01: queda aplicada la opcion A en dev con usuario IAM `clinicaclick-public-media-uploader` en la cuenta `137819318729` e inline policy `ClinicaclickPublicMediaPolicy`. La access key esta solo en `.env` seguro del servidor (`chmod 600`), no en git.
+- 2026-07-01: el rol destino `ClinicaclickPublicMediaUploader` tambien existe, pero no se usa en dev porque `sts:AssumeRole` desde `AmazonLightsailInstanceRole` de la cuenta `468355432137` devuelve `AccessDenied 403` sin la mitad de permisos de esa cuenta.
 
 Implementacion:
 
@@ -3739,9 +3741,17 @@ Estado QA 2026-06-30:
 - Los recursos PUBLIC_MEDIA reales pertenecen a la cuenta AWS `137819318729`.
 - `HeadBucket`, `ListObjectsV2`, `GetObject` y `PutObject` contra `clinicaclick-public-media-eu-west-3` fallan con `AccessDenied 403`.
 - `cloudfront:CreateInvalidation` contra `E3TRXQ4DMSYUVL` falla con `AccessDenied 403`.
-- La prueba `test/health.txt` y la subida API de una imagen dummy fallan con `AccessDenied 403`. Pendiente: configurar Opcion A u Opcion B. El codigo ya soporta `PUBLIC_MEDIA_ASSUME_ROLE_ARN`, pero la variable queda vacia hasta crear credenciales/rol fuera de git.
+- La prueba `test/health.txt` y la subida API de una imagen dummy fallaban con `AccessDenied 403` antes de configurar credenciales propias de la cuenta `137819318729`. El codigo soporta `PUBLIC_MEDIA_ASSUME_ROLE_ARN`, pero en dev se deja vacio porque se usa la opcion A.
 - En dev estan aplicadas las migraciones `20260630143000-update-review-request-template-photo-variant.js`, `20260630170000-mark-review-automation-catalog-propagated.js` y `20260630233000-create-public-media-assets.js`; el catalogo `clinicaclick_solicitar_resena_foto` existe con cabecera `IMAGE`.
 - Script de prueba repetible: `node src/scripts/test_public_media_upload.js` y despues `curl -I https://media.clinicaclick.com/test/health.txt`.
+
+Estado QA 2026-07-01:
+
+- IAM usuario `clinicaclick-public-media-uploader` creado en `137819318729` con policy minima para S3 PUBLIC_MEDIA e invalidacion CloudFront.
+- `.env` del servidor dev contiene solo las credenciales de ese usuario, fuera de git y con permisos `600`; backup previo movido a `/home/ubuntu/.clinicaclick-env-backups/`.
+- `node src/scripts/test_public_media_upload.js` devuelve `success: true` y sube `test/health.txt`.
+- `curl -I https://media.clinicaclick.com/test/health.txt` devuelve `HTTP/2 200`, `x-cache: Hit from cloudfront` y metadatos `purpose=test_health`, `sensitivity=public`.
+- `pm2-back-dev` reiniciado con `--update-env` y queda `online`.
 
 Documento canonico frontend/producto: `src/Documentacion/32-storage-publico-y-clinico.md`.
 
