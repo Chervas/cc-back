@@ -5,6 +5,9 @@ const db = require('../../models');
 const { queues } = require('./queue.service');
 const whatsappTemplatesService = require('./whatsappTemplates.service');
 const whatsappConnectionStatusService = require('./whatsappConnectionStatus.service');
+const {
+  haveSameTemplateComponents,
+} = require('../lib/whatsapp-template-components');
 
 const { ClinicMetaAsset, Clinica, WhatsappTemplate, WhatsappTemplateCatalog, Sequelize } = db;
 const { Op } = Sequelize;
@@ -25,25 +28,10 @@ function isTestDisplayNumber(displayPhoneNumber) {
   return digitsOnly.startsWith('1555');
 }
 
-function parseMaybeJson(value) {
-  if (!value) return value;
-  if (Array.isArray(value) || typeof value === 'object') return value;
-  try {
-    return JSON.parse(value);
-  } catch {
-    return value;
-  }
-}
-
-function stringifyTemplateComponents(value) {
-  const parsed = parseMaybeJson(value);
-  return JSON.stringify(parsed || []);
-}
-
 function hasSameTemplateCatalogContract(catalog, instance) {
   if (!catalog || !instance) return false;
   return String(catalog.category || '').trim().toUpperCase() === String(instance.category || '').trim().toUpperCase()
-    && stringifyTemplateComponents(catalog.components) === stringifyTemplateComponents(instance.components);
+    && haveSameTemplateComponents(catalog.components, instance.components);
 }
 
 function normalizeWhatsappBusinessProfile(payload) {

@@ -5,6 +5,10 @@ const { Op } = require('sequelize');
 const db = require('../../models');
 const { queues } = require('./queue.service');
 const { recomposeAutomationsUsingTemplate } = require('./whatsappTemplateAutomationSync.service');
+const {
+  haveSameTemplateComponents,
+  stringifyComparableTemplateComponents,
+} = require('../lib/whatsapp-template-components');
 
 const {
   ClinicMetaAsset,
@@ -55,10 +59,6 @@ function parseMaybeJson(value) {
   return value;
 }
 
-function stringifyTemplateComponents(value) {
-  return JSON.stringify(parseMaybeJson(value) || []);
-}
-
 function normalizeTemplateComponentsForMeta(value) {
   const components = parseMaybeJson(value) || [];
   if (!Array.isArray(components)) return [];
@@ -97,10 +97,6 @@ function buildImageHeaderSamplePendingReason(issue) {
     return 'La plantilla tiene cabecera de imagen, pero Meta requiere un media handle de ejemplo, no una URL publica. Configura WHATSAPP_REVIEW_TEMPLATE_HEADER_HANDLE o WHATSAPP_TEMPLATE_IMAGE_HEADER_HANDLE antes de enviarla a revision.';
   }
   return 'La plantilla tiene cabecera de imagen, pero falta el media handle de ejemplo requerido por Meta. Configura WHATSAPP_REVIEW_TEMPLATE_HEADER_HANDLE o WHATSAPP_TEMPLATE_IMAGE_HEADER_HANDLE antes de enviarla a revision.';
-}
-
-function stringifyComparableTemplateComponents(value) {
-  return JSON.stringify(normalizeTemplateComponentsForMeta(value));
 }
 
 function cleanString(value) {
@@ -1547,9 +1543,7 @@ async function syncTemplatesForWaba({ wabaId, accessToken }) {
     const remote = remoteByKey.get(key);
     if (!remote) continue;
 
-    const overrideComponents = JSON.stringify(parseMaybeJson(override.components) || []);
-    const remoteComponents = JSON.stringify(parseMaybeJson(remote.components) || []);
-    const sameComponents = overrideComponents === remoteComponents;
+    const sameComponents = haveSameTemplateComponents(override.components, remote.components);
     const remoteStatus = String(remote.status || '').trim().toUpperCase();
     const catalog = catalogById.get(Number(override.catalog_template_id));
     const technicalVersion = extractTechnicalTemplateVersion(catalog?.name, override.name);
