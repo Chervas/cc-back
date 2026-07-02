@@ -1638,7 +1638,40 @@ function parseReviewClinicIds(source = {}) {
     : String(raw || '').split(',');
   return [...new Set(values
     .map((value) => Number(value))
+      .filter((value) => Number.isInteger(value) && value > 0))];
+}
+
+function parseReviewExcludedPatientIds(source = {}) {
+  const raw = source.excluded_review_patient_ids
+    ?? source.excludedReviewPatientIds
+    ?? source.review_excluded_patient_ids
+    ?? source.reviewExcludedPatientIds
+    ?? null;
+  const values = Array.isArray(raw)
+    ? raw
+    : String(raw || '').split(',');
+  return [...new Set(values
+    .map((value) => Number(value))
     .filter((value) => Number.isInteger(value) && value > 0))];
+}
+
+function parseReviewExclusionRules(source = {}) {
+  let raw = source.review_exclusion_rules ?? source.reviewExclusionRules ?? {};
+  if (typeof raw === 'string') {
+    try {
+      raw = JSON.parse(raw);
+    } catch (_) {
+      raw = {};
+    }
+  }
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+    raw = {};
+  }
+  return {
+    no_phone: raw.no_phone === true || String(raw.no_phone || '').toLowerCase() === 'true',
+    no_treatment: raw.no_treatment === true || String(raw.no_treatment || '').toLowerCase() === 'true',
+    no_visit_date: raw.no_visit_date === true || String(raw.no_visit_date || '').toLowerCase() === 'true',
+  };
 }
 
 function applyReviewClinicFilter(scope, source = {}) {
@@ -2207,6 +2240,49 @@ function isImportedHistoricalAppointment(appointment) {
     || title.startsWith('Histórico:');
 }
 
+function getReviewRuleExclusionReason(item, rules = {}) {
+  if (rules.no_phone && !normalizeText(item?.phone)) {
+    return 'Sin teléfono móvil';
+  }
+  const treatment = normalizeText(item?.treatment || '').toLowerCase();
+  if (
+    rules.no_treatment
+    && (!treatment || treatment === 'sin tratamiento asignado' || treatment === 'atención recibida' || treatment === 'atencion recibida')
+  ) {
+    return 'Sin tratamiento asociado';
+  }
+  if (rules.no_visit_date && !item?.last_visit_at && !item?.appointment_at) {
+    return 'Sin fecha de atención';
+  }
+  return null;
+}
+
+function applyReviewRequestExclusions(items = [], source = {}) {
+  const excludedPatientIds = new Set(parseReviewExcludedPatientIds(source));
+  const rules = parseReviewExclusionRules(source);
+  if (!excludedPatientIds.size && !rules.no_phone && !rules.no_treatment && !rules.no_visit_date) {
+    return items;
+  }
+  return (items || []).map((item) => {
+    if (String(item?.status || '').startsWith('excluded')) {
+      return item;
+    }
+    const patientId = Number(item?.paciente_id || item?.patient_id || 0);
+    const manualExcluded = patientId && excludedPatientIds.has(patientId);
+    const ruleReason = getReviewRuleExclusionReason(item, rules);
+    if (!manualExcluded && !ruleReason) {
+      return item;
+    }
+    return {
+      ...item,
+      status: 'excluded_manual',
+      reason: manualExcluded ? 'Excluido manualmente de esta solicitud de reseña.' : ruleReason,
+      exclusion_reason: 'manual',
+      selected: false,
+    };
+  });
+}
+
 async function buildReviewRequestCandidateForAppointment(scope, body = {}) {
   const appointmentId = Number(body.review_appointment_id || body.appointment_id || body.cita_id || 0);
   const clinicIds = Array.isArray(scope?.clinicIds) ? scope.clinicIds.filter(Number.isInteger) : [];
@@ -2283,7 +2359,9 @@ async function buildItemsForReviewRequest(scope, body = {}) {
 
   if (body.review_appointment_id || body.appointment_id || body.cita_id) {
     const candidate = await buildReviewRequestCandidateForAppointment(scope, body);
-    return candidate.item ? [candidate.item] : [];
+    return candidate.item
+      ? applyReviewRequestExclusions([candidate.item], body).filter((item) => !String(item.status || '').startsWith('excluded'))
+      : [];
   }
 
   const source = normalizeReviewRequestSource(body.review_source || body.reviewRequestSource);
@@ -2381,7 +2459,7 @@ async function buildItemsForReviewRequest(scope, body = {}) {
       latestAppointmentByPatient.set(patientId, row);
     }
 
-    return patients.map((patient) => {
+    return applyReviewRequestExclusions(patients.map((patient) => {
       const latestAppointment = latestAppointmentByPatient.get(Number(patient.id_paciente));
       const item = mapReviewPatientItem({
         patient,
@@ -2411,14 +2489,19 @@ async function buildItemsForReviewRequest(scope, body = {}) {
           ...(item.custom_fields || {}),
         },
       };
-    });
+    }), body);
   }
 
   const appointmentWhere = {
     clinica_id: { [Op.in]: clinicIds },
-    estado: 'completada',
   };
   const treatmentIds = parseReviewTreatmentIds(body);
+  const treatmentMoment = normalizeText(body.review_treatment_moment || body.reviewTreatmentMoment || 'completed').toLowerCase();
+  if (treatmentMoment === 'started_or_completed' || treatmentMoment === 'started') {
+    appointmentWhere.estado = { [Op.ne]: 'cancelada' };
+  } else {
+    appointmentWhere.estado = 'completada';
+  }
   if (source === 'completed_treatment') {
     appointmentWhere[Op.or] = [
       { tratamiento_id: { [Op.ne]: null } },
@@ -2451,7 +2534,7 @@ async function buildItemsForReviewRequest(scope, body = {}) {
     if (selected.size >= limit) break;
   }
 
-  return Array.from(selected.values());
+  return applyReviewRequestExclusions(Array.from(selected.values()), body);
 }
 
 async function buildReviewTreatmentOptions(scope) {
@@ -3122,9 +3205,10 @@ async function getReviewRequestSummary(scope, options = {}) {
   const whatsappAvailable = scope?.scope === 'group'
     ? groupReadyClinics.length > 0
     : await hasWhatsappConfigForScope(effectiveScope);
+  const manuallyFilteredCandidates = candidates.filter((item) => !String(item.status || '').startsWith('excluded'));
   const summaryCandidates = scope?.scope === 'group'
-    ? applyReviewClinicReadinessExclusions(candidates, clinicStatuses).filter((item) => !String(item.status || '').startsWith('excluded'))
-    : candidates;
+    ? applyReviewClinicReadinessExclusions(manuallyFilteredCandidates, clinicStatuses).filter((item) => !String(item.status || '').startsWith('excluded'))
+    : manuallyFilteredCandidates;
   const groupApprovedTemplate = groupReadyClinics.find((clinic) => clinic.approved_template_id)
     || clinicStatuses.find((clinic) => clinic.approved_template_id)
     || null;
@@ -3900,6 +3984,8 @@ async function createCampaign(scope, body = {}, userId = null) {
         review_treatment_id: isReviewRequest ? (reviewTreatmentIds[0] || null) : null,
         review_treatment_ids: isReviewRequest ? reviewTreatmentIds : [],
         review_treatment_moment: isReviewRequest ? normalizeText(body.review_treatment_moment || body.reviewTreatmentMoment || '') || null : null,
+        excluded_review_patient_ids: isReviewRequest ? parseReviewExcludedPatientIds(body) : [],
+        review_exclusion_rules: isReviewRequest ? parseReviewExclusionRules(body) : null,
         review_delay: isReviewRequest ? normalizeText(body.review_delay || body.reviewDelay || '24h') : null,
         review_threshold: isReviewRequest ? reviewThreshold : null,
         review_gift_enabled: isReviewRequest ? (body.review_gift_enabled === true || String(body.review_gift_enabled || '').toLowerCase() === 'true') : false,
@@ -5048,6 +5134,18 @@ async function prepareCampaign(scope, campaignId, body = {}, userId = null) {
       review_treatment_id: isReviewRequest ? (reviewTreatmentIds[0] || null) : null,
       review_treatment_ids: isReviewRequest ? reviewTreatmentIds : [],
       review_treatment_moment: isReviewRequest ? normalizeText(body.review_treatment_moment || body.reviewTreatmentMoment || list.criteria?.review_treatment_moment || '') || null : null,
+      excluded_review_patient_ids: isReviewRequest
+        ? parseReviewExcludedPatientIds({
+          excluded_review_patient_ids: body.excluded_review_patient_ids
+            || body.excludedReviewPatientIds
+            || list.criteria?.excluded_review_patient_ids,
+        })
+        : [],
+      review_exclusion_rules: isReviewRequest
+        ? parseReviewExclusionRules(body.review_exclusion_rules !== undefined || body.reviewExclusionRules !== undefined
+          ? body
+          : { review_exclusion_rules: list.criteria?.review_exclusion_rules })
+        : null,
       review_delay: isReviewRequest ? normalizeText(body.review_delay || body.reviewDelay || list.criteria?.review_delay || '24h') : null,
       review_threshold: isReviewRequest ? reviewThreshold : null,
       review_gift_enabled: isReviewRequest
