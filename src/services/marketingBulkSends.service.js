@@ -1956,8 +1956,8 @@ async function sendReviewRatingFollowUp({ list, item, conversation, rating, clin
   const body = isPositive
     ? (googleReviewUrl
       ? (rewardEnabled
-        ? `😊 Queremos obsequiarte con "${rewardDescription || 'un detalle'}" si la compartes en Google. Pincha aquí y se publicará, esto nos ayudará muchísimo para que todo el mundo pueda verla 👉 ${googleReviewUrl}. Tras hacerlo, escríbenos para que te indiquemos cómo tramitar tu regalo.`
-        : `😊 Pincha aquí y se publicará en Google, esto nos ayudará muchísimo para que todo el mundo pueda verla 👉 ${googleReviewUrl}`)
+        ? `¡Muchísimas gracias por tu valoración! 😊 *Como gratitud por valorarnos te vamos a regalar ${rewardDescription || 'un detalle'} si dejas la reseña también en Google* para que otras personas puedan verla.\n\nPuedes dejarla aquí: ${googleReviewUrl}\n\nUna vez que nos hayas valorado, escríbenos a este WhatsApp para indicarte cómo puedes reclamar tu regalo. Te contestaremos en horario laboral antes de 24h.`
+        : `¡Muchísimas gracias por tu valoración! 😊 Nos ayudaría muchísimo que también la dejaras en Google para que otras personas puedan verla.\n\nNo se tarda nada, pincha en el enlace de aquí abajo 👇\n${googleReviewUrl}`)
       : 'Gracias por tu valoración. Hemos registrado tu opinión.')
     : 'Gracias por responder. ¿Nos ayudarías contándonos el motivo de esta valoración? Puedes escribirlo aquí mismo y lo revisaremos con el equipo.';
   if (!isWithinWhatsappSessionWindow(occurredAt)) {
