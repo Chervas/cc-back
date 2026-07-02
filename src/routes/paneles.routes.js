@@ -3,6 +3,25 @@ const express = require('express');
 const router = express.Router();
 const { Op } = require('sequelize');
 const { SocialStatsDaily, ClinicMetaAsset } = require('../../models');
+const authMiddleware = require('./auth.middleware');
+const panelesDashboardService = require('../services/panelesDashboard.service');
+
+// GET /api/paneles/main
+router.get('/main', authMiddleware, async (req, res) => {
+    try {
+        const dashboard = await panelesDashboardService.getMainDashboard({
+            userId: Number(req.userData?.userId || 0) || null,
+            query: req.query || {},
+        });
+        res.json(dashboard);
+    } catch (error) {
+        console.error('Error al obtener panel principal:', error);
+        res.status(500).json({
+            error: 'Error interno del servidor',
+            message: error.message,
+        });
+    }
+});
 
 // GET /api/paneles/dashboard/:idClinica
 router.get('/dashboard/:idClinica', async (req, res) => {

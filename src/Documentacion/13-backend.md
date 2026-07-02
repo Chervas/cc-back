@@ -60,6 +60,21 @@ Cambios de código asociados:
 
 Referencia operativa completa: `cc-front/src/Documentacion/31-roadmap-arquitectura-entornos-gateway.md`.
 
+## 2026-07-02 - Panel principal agregado
+
+Endpoint real:
+
+| Endpoint | Estado | Uso |
+|:---|:---|:---|
+| `GET /api/paneles/main` | Operativo V1 | Contrato agregado para `/panel-principal` por rol, clínica y fecha. |
+
+Reglas:
+
+- El panel se sirve desde backend; el frontend no debe recomponerlo con llamadas paralelas a agenda, leads, consentimientos o reseñas.
+- El servicio `panelesDashboard.service.js` evita `include`/left joins para el contrato del panel: consulta tablas base y enriquece en memoria por mapas de IDs.
+- `todayAppointments` usa rango de día completo y excluye citas canceladas/reprogramadas. `pastAttendancePending` devuelve citas ya finalizadas sin asistencia cerrada para que la UI pregunte si acudió.
+- Las acciones de asistencia siguen usando el endpoint canónico `PATCH /api/citas/:id/estado`.
+
 ### WhatsApp coexistencia: regla de gateway
 
 Roadmap funcional y tecnico: `cc-front/src/Documentacion/14.3-whatsapp-coexistencia.md`.
