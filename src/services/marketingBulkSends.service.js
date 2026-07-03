@@ -3371,7 +3371,7 @@ async function getReviewRequestSummary(scope, options = {}) {
         JSON_UNQUOTE(JSON_EXTRACT(l.criteria, '$.review_request')) IN ('true', '1')
         OR JSON_UNQUOTE(JSON_EXTRACT(l.criteria, '$.template_usage')) = 'solicitud_resena'
       )
-      AND e.event_type = 'review_google_link_followup'
+      AND e.event_type = 'google_review_matched'
       AND NOT EXISTS (
         SELECT 1
         FROM MarketingPatientContactEvents te

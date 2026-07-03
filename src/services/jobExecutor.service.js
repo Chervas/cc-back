@@ -325,6 +325,7 @@ const JOB_HANDLERS = {
   analytics_backfill: async (payload = {}) => metaSyncJobs.executeAnalyticsBackfill(payload),
   analytics_backfill_properties: async (payload = {}) => metaSyncJobs.executeAnalyticsBackfillForProperties(payload.mappings || []),
   business_profile_recent: async (payload = {}) => metaSyncJobs.executeBusinessProfileSync(payload),
+  business_profile_reviews_recent: async (payload = {}) => metaSyncJobs.executeBusinessProfileReviewsSync(payload),
   business_profile_backfill: async (payload = {}) => metaSyncJobs.executeBusinessProfileBackfill(payload),
   business_profile_backfill_locations: async (payload = {}) => metaSyncJobs.executeBusinessProfileBackfillForLocations(payload.mappings || []),
   business_profile_review_match: async (payload = {}) => googleReviewMatchService.runBusinessProfileReviewMatchJob(payload),

@@ -201,6 +201,7 @@ class MetaSyncJobs {
       analyticsSync: 'Sincroniza métricas de Google Analytics 4 (sesiones, usuarios, fuentes, audiencias).',
       analyticsBackfill: 'Backfill extendido de Analytics para nuevos mapeos o reprocesos.',
       businessProfileSync: 'Sincroniza Perfil de Empresa Google: rendimiento local, reseñas y publicaciones.',
+      businessProfileReviewsSync: 'Refresca solo reseñas recientes de Perfil de Empresa Google y lanza conciliación con campañas.',
       businessProfileBackfill: 'Backfill de Perfil de Empresa Google para nuevas fichas o reprocesos.',
       competitionSync: 'Actualiza semanalmente benchmark local: competidores, ficha publica Google Places y anuncios activos desde Meta Ads Library oficial.',
       webEventsAggregate: 'Agrega WebEvents propios en tablas diarias para informes sin recalcular desde el front.',
@@ -229,6 +230,7 @@ class MetaSyncJobs {
         analyticsSync: process.env.JOBS_ANALYTICS_SCHEDULE || '45 4 * * *',
         analyticsBackfill: process.env.JOBS_ANALYTICS_BACKFILL_SCHEDULE || '0 5 * * 0',
         businessProfileSync: process.env.JOBS_BUSINESS_PROFILE_SCHEDULE || '10 5 * * *',
+        businessProfileReviewsSync: process.env.JOBS_BUSINESS_PROFILE_REVIEWS_SCHEDULE || '*/15 * * * *',
         businessProfileBackfill: process.env.JOBS_BUSINESS_PROFILE_BACKFILL_SCHEDULE || '20 5 * * 0',
         competitionSync: process.env.JOBS_COMPETITION_SCHEDULE || '0 6 * * 1',
         webEventsAggregate: process.env.JOBS_WEB_EVENTS_AGGREGATE_SCHEDULE || '*/15 * * * *',
@@ -269,7 +271,8 @@ class MetaSyncJobs {
       local: {
         recentDays: parseInt(process.env.LOCAL_SYNC_RECENT_DAYS || '30', 10),
         backfillDays: parseInt(process.env.LOCAL_BACKFILL_DAYS || '180', 10),
-        betweenLocationsSleepMs: parseInt(process.env.LOCAL_SYNC_BETWEEN_LOCATIONS_SLEEP_MS || '250', 10)
+        betweenLocationsSleepMs: parseInt(process.env.LOCAL_SYNC_BETWEEN_LOCATIONS_SLEEP_MS || '250', 10),
+        reviewSyncMaxPages: parseInt(process.env.LOCAL_REVIEWS_SYNC_MAX_PAGES || '2', 10)
       },
       dataRetention: {
         syncLogs: parseInt(process.env.JOBS_SYNC_LOGS_RETENTION) || 90,
@@ -322,6 +325,7 @@ class MetaSyncJobs {
       this.registerJob('analyticsSync', this.config.schedules.analyticsSync, () => this.executeAnalyticsSync());
       this.registerJob('analyticsBackfill', this.config.schedules.analyticsBackfill, () => this.executeAnalyticsBackfill());
       this.registerJob('businessProfileSync', this.config.schedules.businessProfileSync, () => this.executeBusinessProfileSync());
+      this.registerJob('businessProfileReviewsSync', this.config.schedules.businessProfileReviewsSync, () => this.executeBusinessProfileReviewsSync());
       this.registerJob('businessProfileBackfill', this.config.schedules.businessProfileBackfill, () => this.executeBusinessProfileBackfill());
       this.registerJob('competitionSync', this.config.schedules.competitionSync, () => this.executeCompetitionSync());
       this.registerJob('webEventsAggregate', this.config.schedules.webEventsAggregate, () => this.executeWebEventsAggregate());
@@ -1536,6 +1540,69 @@ class MetaSyncJobs {
     }
   }
 
+  async executeBusinessProfileReviewsSync(options = {}) {
+    const {
+      clinicId = null,
+      locationIds = null,
+      maxPages = this.config.local.reviewSyncMaxPages
+    } = options;
+    const syncLog = await SyncLog.create({ job_type: 'business_profile_reviews_sync', status: 'running', start_time: new Date(), records_processed: 0 });
+    const report = { locations: 0, processed: 0, reviews: 0, errors: [], maxPages: Math.max(1, Number(maxPages || 1) || 1) };
+
+    try {
+      const where = { is_active: true };
+      if (clinicId) {
+        where.clinica_id = clinicId;
+      }
+      if (Array.isArray(locationIds) && locationIds.length) {
+        where.location_id = { [Op.in]: locationIds.map((id) => String(id)).filter(Boolean) };
+      }
+
+      const locations = await ClinicBusinessLocation.findAll({ where });
+      report.locations = locations.length;
+
+      if (!locations.length) {
+        await syncLog.update({ status: 'completed', end_time: new Date(), records_processed: 0, status_report: report });
+        console.log('ℹ️ businessProfileReviewsSync sin ubicaciones activas', { clinicId, locationIds });
+        return { status: 'completed', processed: 0, report };
+      }
+
+      for (const location of locations) {
+        try {
+          const { accessToken } = await this._ensureGoogleAccessToken(location.google_connection_id);
+          const reviews = await this._syncBusinessProfileReviews(location, accessToken, {
+            maxPages: report.maxPages,
+            enqueueOnlyNewReviews: true
+          });
+
+          report.processed += 1;
+          report.reviews += reviews;
+          await location.update({ last_synced_at: new Date(), sync_status: 'completed' });
+          await syncLog.update({ records_processed: report.processed, status_report: report });
+
+          if (this.config.local.betweenLocationsSleepMs > 0) {
+            await new Promise((resolve) => setTimeout(resolve, this.config.local.betweenLocationsSleepMs));
+          }
+        } catch (err) {
+          const message = err.response?.data?.error?.message || err.message;
+          report.errors.push({ locationId: location.location_id, clinicaId: location.clinica_id, message });
+          console.error('❌ businessProfileReviewsSync location error:', location.location_id, message);
+          try {
+            await location.update({ sync_status: 'error', last_synced_at: new Date() });
+          } catch (_) {}
+        }
+      }
+
+      await syncLog.update({ status: 'completed', end_time: new Date(), records_processed: report.processed, status_report: report });
+      console.log('✅ businessProfileReviewsSync completado', report);
+      return { status: 'completed', processed: report.processed, report };
+    } catch (error) {
+      await syncLog.update({ status: 'failed', end_time: new Date(), error_message: error.message, status_report: report });
+      console.error('❌ Error en businessProfileReviewsSync:', error);
+      throw error;
+    }
+  }
+
   async executeBusinessProfileBackfill(options = {}) {
     const prevMode = this._localBackfillMode;
     this._localBackfillMode = true;
@@ -1676,15 +1743,19 @@ class MetaSyncJobs {
     return rows;
   }
 
-  async _syncBusinessProfileReviews(location, accessToken) {
+  async _syncBusinessProfileReviews(location, accessToken, options = {}) {
     const resourceBase = this._buildBusinessProfileV4LocationPath(location);
     if (!resourceBase) {
       throw new Error('Ubicación Google Business Profile sin accountName para sincronizar reseñas');
     }
 
+    const maxPages = Math.max(1, Number(options.maxPages || 0) || Number.MAX_SAFE_INTEGER);
+    const enqueueOnlyNewReviews = options.enqueueOnlyNewReviews === true;
     let nextPageToken = null;
     let processed = 0;
+    let page = 0;
     do {
+      page += 1;
       const response = await axios.get(`${GOOGLE_MY_BUSINESS_API}/${resourceBase}/reviews`, {
         params: { pageSize: 50, pageToken: nextPageToken || undefined },
         headers: { Authorization: `Bearer ${accessToken}` }
@@ -1719,18 +1790,20 @@ class MetaSyncJobs {
         const reviewRow = existing
           ? await existing.update(payload)
           : await BusinessProfileReview.create(payload);
-        try {
-          await googleReviewMatchService.enqueueBusinessProfileReviewMatch(reviewRow.id, {
-            origin: 'business_profile_sync',
-            priority: 'low'
-          });
-        } catch (error) {
-          console.warn('⚠️ No se pudo encolar matching de reseña Google:', error.message);
+        if (!enqueueOnlyNewReviews || !existing) {
+          try {
+            await googleReviewMatchService.enqueueBusinessProfileReviewMatch(reviewRow.id, {
+              origin: enqueueOnlyNewReviews ? 'business_profile_reviews_sync' : 'business_profile_sync',
+              priority: 'low'
+            });
+          } catch (error) {
+            console.warn('⚠️ No se pudo encolar matching de reseña Google:', error.message);
+          }
         }
         processed += 1;
       }
       nextPageToken = response.data?.nextPageToken || null;
-    } while (nextPageToken);
+    } while (nextPageToken && page < maxPages);
 
     return processed;
   }
