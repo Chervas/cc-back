@@ -1865,7 +1865,44 @@ function buildGoogleRatingSummary(row = {}) {
     rating_sum: ratingSum,
     target_average: targetAverage,
     needed_five_star_reviews_for_5: neededFiveStarReviews,
+    rating_targets: buildGoogleRatingTargets(totalReviews, ratingSum, averageRating),
   };
+}
+
+function calculateFiveStarReviewsNeeded(totalReviews, ratingSum, targetAverage) {
+  if (!totalReviews || targetAverage <= 0 || targetAverage >= 5) return 0;
+  if ((ratingSum / totalReviews) >= targetAverage) return 0;
+  return Math.max(1, Math.ceil(((targetAverage * totalReviews) - ratingSum) / (5 - targetAverage)));
+}
+
+function buildGoogleRatingTargets(totalReviews, ratingSum, averageRating) {
+  if (!totalReviews) return [];
+
+  const targets = [];
+  const currentRounded = Math.round(averageRating * 10) / 10;
+  const firstVisibleTarget = Math.min(4.9, Math.max(0.1, (Math.floor(currentRounded * 10) + 1) / 10));
+  const candidateVisibleTargets = [
+    firstVisibleTarget,
+    Math.min(4.9, firstVisibleTarget + 0.1),
+    5,
+  ];
+
+  for (const visibleTarget of candidateVisibleTargets) {
+    const roundedVisibleTarget = Number(visibleTarget.toFixed(1));
+    if (targets.some((target) => target.visible_average === roundedVisibleTarget)) {
+      continue;
+    }
+    const threshold = roundedVisibleTarget >= 5
+      ? 4.95
+      : Math.max(0, roundedVisibleTarget - 0.05);
+    targets.push({
+      visible_average: roundedVisibleTarget,
+      target_average: Number(threshold.toFixed(2)),
+      needed_five_star_reviews: calculateFiveStarReviewsNeeded(totalReviews, ratingSum, threshold),
+    });
+  }
+
+  return targets;
 }
 
 function isReviewRequestList(list) {
@@ -3455,6 +3492,39 @@ async function getReviewRequestSummary(scope, options = {}) {
     { replacements: { clinicIds, objectiveId: OBJECTIVE_ID }, type: QueryTypes.SELECT }
   );
 
+  const [googleReviewsAttributedRow] = await db.sequelize.query(
+    `
+    SELECT COUNT(DISTINCT r.id) AS total
+    FROM BusinessProfileReviews r
+    WHERE r.clinica_id IN (:clinicIds)
+      AND CAST(r.star_rating AS UNSIGNED) BETWEEN 1 AND 5
+      AND EXISTS (
+        SELECT 1
+        FROM MarketingPatientContactEvents e
+        INNER JOIN MarketingPatientLists l ON l.id = e.list_id
+        INNER JOIN MarketingPatientListItems i ON i.id = e.item_id
+        WHERE COALESCE(i.clinica_id, l.clinica_id) = r.clinica_id
+          AND l.objective_id = :objectiveId
+          AND (
+            JSON_UNQUOTE(JSON_EXTRACT(l.criteria, '$.review_request')) IN ('true', '1')
+            OR JSON_UNQUOTE(JSON_EXTRACT(l.criteria, '$.template_usage')) = 'solicitud_resena'
+          )
+          AND e.event_type = 'review_rating_followup_sent'
+          AND JSON_UNQUOTE(JSON_EXTRACT(e.payload, '$.kind')) = 'review_google_link_followup'
+          AND e.occurred_at <= COALESCE(r.create_time, r.update_time, r.created_at)
+          AND e.occurred_at >= DATE_SUB(COALESCE(r.create_time, r.update_time, r.created_at), INTERVAL 72 HOUR)
+          AND NOT EXISTS (
+            SELECT 1
+            FROM MarketingPatientContactEvents te
+            WHERE te.list_id = e.list_id
+              AND te.item_id = e.item_id
+              AND te.event_type IN ('mass_campaign_test_sent', 'mass_campaign_test_failed')
+          )
+      )
+    `,
+    { replacements: { clinicIds, objectiveId: OBJECTIVE_ID }, type: QueryTypes.SELECT }
+  );
+
   const recentPrivateRatings = await db.sequelize.query(
     `
     SELECT
@@ -3639,6 +3709,7 @@ async function getReviewRequestSummary(scope, options = {}) {
       ratings_1_to_4: Number(ratingsRow?.ratings_1_to_4 || 0),
       ratings_5: Number(ratingsRow?.ratings_5 || 0),
       google_reviews_matched: Number(googleReviewsMatchedRow?.total || 0),
+      google_reviews_attributed: Number(googleReviewsAttributedRow?.total || 0),
       low_rating_reasons: (recentPrivateRatings || [])
         .map((row) => ({
           patient_name: normalizeText(row.patient_name) || 'Paciente',

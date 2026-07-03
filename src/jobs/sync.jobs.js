@@ -272,7 +272,7 @@ class MetaSyncJobs {
         recentDays: parseInt(process.env.LOCAL_SYNC_RECENT_DAYS || '30', 10),
         backfillDays: parseInt(process.env.LOCAL_BACKFILL_DAYS || '180', 10),
         betweenLocationsSleepMs: parseInt(process.env.LOCAL_SYNC_BETWEEN_LOCATIONS_SLEEP_MS || '250', 10),
-        reviewSyncMaxPages: parseInt(process.env.LOCAL_REVIEWS_SYNC_MAX_PAGES || '2', 10)
+        reviewSyncMaxPages: parseInt(process.env.LOCAL_REVIEWS_SYNC_MAX_PAGES || '5', 10)
       },
       dataRetention: {
         syncLogs: parseInt(process.env.JOBS_SYNC_LOGS_RETENTION) || 90,
