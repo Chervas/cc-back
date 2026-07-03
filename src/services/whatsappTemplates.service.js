@@ -165,6 +165,57 @@ function isReviewPhotoTemplate(template, catalog = null) {
   return searchable.includes('resena') || searchable.includes('review');
 }
 
+function isReviewRequestTemplateFamily(template, catalog = null) {
+  const names = [
+    template?.name,
+    template?.display_name,
+    catalog?.name,
+    catalog?.display_name,
+  ].map((value) => normalizeTemplateKey(value)).filter(Boolean);
+
+  return names.some((name) => (
+    name === 'clinicaclick_solicitar_resena'
+    || name === 'clinicaclick_solicitar_resena_foto'
+    || name === 'clinicaclick_recordatorio_resena_sin_respuesta'
+    || isTechnicalTemplateFamilyName('clinicaclick_solicitar_resena', name)
+    || isTechnicalTemplateFamilyName('clinicaclick_solicitar_resena_foto', name)
+    || isTechnicalTemplateFamilyName('clinicaclick_recordatorio_resena_sin_respuesta', name)
+  ));
+}
+
+function isReviewReminderTemplateFamily(template, catalog = null) {
+  const names = [
+    template?.name,
+    template?.display_name,
+    catalog?.name,
+    catalog?.display_name,
+  ].map((value) => normalizeTemplateKey(value)).filter(Boolean);
+
+  return names.some((name) => (
+    name === 'clinicaclick_recordatorio_resena_sin_respuesta'
+    || isTechnicalTemplateFamilyName('clinicaclick_recordatorio_resena_sin_respuesta', name)
+  ));
+}
+
+function reviewTemplateBodyHasSender(value) {
+  const raw = cleanString(value);
+  const normalized = normalizeTemplateKey(raw);
+  return /soy\s+\{\{\s*3\s*\}\}/i.test(raw)
+    || normalized.includes('firma_resenas')
+    || normalized.includes('remitente_resena')
+    || normalized.includes('nombre_remitente_resenas')
+    || normalized.includes('review_sender_name');
+}
+
+function isStaleReviewRequestTemplate(template, catalog = null) {
+  if (!isReviewRequestTemplateFamily(template, catalog)) return false;
+  const templateBody = cleanString(extractTemplateBodyText(template?.components));
+  const catalogBody = cleanString(catalog?.body_text);
+  if (catalogBody && templateBody && templateBody !== catalogBody) return true;
+  if (isReviewReminderTemplateFamily(template, catalog)) return false;
+  return !reviewTemplateBodyHasSender(templateBody);
+}
+
 async function notifyReviewPhotoTemplateApproved(template, catalog = null) {
   if (!isReviewPhotoTemplate(template, catalog)) return;
   const clinicId = Number(template?.clinic_id || 0);
@@ -1624,7 +1675,7 @@ async function syncTemplatesForWaba({ wabaId, accessToken }) {
   const items = response.data?.data || [];
   const now = new Date();
   const catalogs = await WhatsappTemplateCatalog.findAll({
-    attributes: ['id', 'name', 'is_active'],
+    attributes: ['id', 'name', 'display_name', 'body_text', 'is_active'],
     raw: true,
   });
   const catalogById = new Map(
@@ -1634,18 +1685,26 @@ async function syncTemplatesForWaba({ wabaId, accessToken }) {
   for (const tpl of items) {
     const catalog = resolveCatalogTemplateByTechnicalName(catalogs, tpl.name);
     const catalogIsActive = !catalog || (catalog.is_active !== false && Number(catalog.is_active) !== 0);
+    const isStaleReviewTemplate = isStaleReviewRequestTemplate(tpl, catalog);
+    const remoteRejectionReason = tpl.rejected_reason || tpl.rejection_reason || null;
+    const rejectionReason = isStaleReviewTemplate
+      ? [
+          remoteRejectionReason,
+          'Retirada localmente: version antigua de plantilla de resenas.',
+        ].filter(Boolean).join(' | ')
+      : remoteRejectionReason;
     const payload = {
       waba_id: wabaId,
       name: tpl.name,
       language: tpl.language || DEFAULT_LANGUAGE,
       category: tpl.category || null,
       status: tpl.status || null,
-      rejection_reason: tpl.rejected_reason || tpl.rejection_reason || null,
+      rejection_reason: rejectionReason,
       components: tpl.components || null,
       meta_template_id: tpl.id || null,
       catalog_template_id: catalog?.id || null,
       origin: 'external',
-      is_active: catalogIsActive,
+      is_active: catalogIsActive && !isStaleReviewTemplate,
       last_synced_at: now,
     };
 
@@ -1659,7 +1718,7 @@ async function syncTemplatesForWaba({ wabaId, accessToken }) {
     } else {
       syncedRow = await WhatsappTemplate.create(payload);
     }
-    if (catalogIsActive) {
+    if (payload.is_active) {
       await notifyBulkSendsTemplateApproval(syncedRow);
     }
   }

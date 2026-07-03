@@ -151,6 +151,7 @@ function mergeLocalReviewConfigIntoCatalogNodes(sourceNodes, latestPublishedTemp
       'review_gift_enabled',
       'review_gift_description',
       'review_display_clinic_name',
+      'review_sender_name',
       'review_team_photo_url',
       'review_team_photo_overlay_color',
     ],

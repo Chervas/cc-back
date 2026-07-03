@@ -8,11 +8,13 @@ const publicMediaStorage = require('./publicMediaStorage.service');
 const { PublicMediaAsset } = db;
 
 const MAX_SOURCE_IMAGE_BYTES = 8 * 1024 * 1024;
+const MAX_WHATSAPP_IMAGE_BYTES = 5 * 1024 * 1024;
+const WHATSAPP_IMAGE_TARGET_BYTES = MAX_WHATSAPP_IMAGE_BYTES - (128 * 1024);
 const OUTPUT_WIDTH = 1200;
 const OUTPUT_HEIGHT = 675;
 const DEFAULT_OVERLAY_COLOR = '#4f46e5';
 const OVERLAY_GREETING_TEMPLATE = '¡Hola {nombre}!';
-const PERSONALIZATION_VERSION = 'review_header_jpeg_contain_v2';
+const PERSONALIZATION_VERSION = 'review_header_jpeg_contain_v3';
 
 function cleanText(value) {
   return String(value || '').trim();
@@ -141,7 +143,7 @@ async function composePersonalizedReviewImage({ sourceBuffer, patientName, color
     .png()
     .toBuffer({ resolveWithObject: true });
 
-  return sharp(background)
+  const composed = sharp(background)
     .composite([
       {
         input: foreground.data,
@@ -150,15 +152,35 @@ async function composePersonalizedReviewImage({ sourceBuffer, patientName, color
       },
       { input: buildOverlaySvg({ patientName, color }), top: 0, left: 0 }
     ])
-    .flatten({ background: '#ffffff' })
-    .jpeg({ quality: 88, mozjpeg: true })
+    .flatten({ background: '#ffffff' });
+
+  for (const quality of [84, 78, 72, 66, 60]) {
+    const buffer = await composed.clone()
+      .jpeg({ quality, mozjpeg: true, chromaSubsampling: '4:2:0' })
+      .toBuffer();
+    if (buffer.length <= WHATSAPP_IMAGE_TARGET_BYTES) {
+      return buffer;
+    }
+  }
+
+  const resized = await composed
+    .resize(1024, 576, { fit: 'inside', withoutEnlargement: true })
+    .jpeg({ quality: 72, mozjpeg: true, chromaSubsampling: '4:2:0' })
+    .toBuffer();
+  if (resized.length <= WHATSAPP_IMAGE_TARGET_BYTES) {
+    return resized;
+  }
+
+  return composed
+    .resize(900, 506, { fit: 'inside', withoutEnlargement: true })
+    .jpeg({ quality: 64, mozjpeg: true, chromaSubsampling: '4:2:0' })
     .toBuffer();
 }
 
 async function persistAsset({ upload, clinicId, groupId, ownerType, ownerId, sourceUrl, patientName, color, userId }) {
   if (!PublicMediaAsset) return null;
   const scopeType = clinicId ? 'clinic' : (groupId ? 'group' : 'global');
-  return PublicMediaAsset.create({
+  const payload = {
     scope_type: scopeType,
     clinica_id: clinicId || null,
     grupo_clinica_id: groupId || null,
@@ -190,7 +212,14 @@ async function persistAsset({ upload, clinicId, groupId, ownerType, ownerId, sou
       non_clinical_asserted: true
     },
     created_by: userId || null
-  });
+  };
+
+  const existing = await PublicMediaAsset.findOne({ where: { object_key: upload.key } });
+  if (existing) {
+    await existing.update(payload);
+    return existing;
+  }
+  return PublicMediaAsset.create(payload);
 }
 
 async function buildPersonalizedReviewTeamPhoto(options = {}) {
@@ -206,6 +235,12 @@ async function buildPersonalizedReviewTeamPhoto(options = {}) {
   const key = buildPersonalizedObjectKey({ clinicId, groupId, sourceUrl, patientName, color });
   const sourceBuffer = await fetchSourceImage(sourceUrl);
   const outputBuffer = await composePersonalizedReviewImage({ sourceBuffer, patientName, color });
+  if (!outputBuffer.length || outputBuffer.length > MAX_WHATSAPP_IMAGE_BYTES) {
+    const err = new Error('review_team_photo_output_too_large');
+    err.status = 413;
+    err.details = { maxBytes: MAX_WHATSAPP_IMAGE_BYTES, sizeBytes: outputBuffer.length };
+    throw err;
+  }
 
   const upload = await publicMediaStorage.uploadPublicMedia({
     purpose: 'whatsapp_image',

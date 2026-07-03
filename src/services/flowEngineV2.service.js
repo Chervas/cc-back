@@ -3319,6 +3319,7 @@ async function handleRequestReview(node, context, runtime) {
     reviewGiftEnabled: resolveTemplateValue(config?.review_gift_enabled, context),
     reviewGiftDescription: resolveTemplateValue(config?.review_gift_description, context),
     reviewDisplayClinicName: resolveTemplateValue(config?.review_display_clinic_name, context),
+    reviewSenderName: resolveTemplateValue(config?.review_sender_name, context),
     reviewTeamPhotoUrl: resolveTemplateValue(config?.review_team_photo_url, context),
     reviewTeamPhotoOverlayColor: resolveTemplateValue(config?.review_team_photo_overlay_color, context),
     waitForMessageMs: resolveTemplateValue(config?.wait_for_message_ms, context),
@@ -3342,17 +3343,23 @@ async function handleRequestReview(node, context, runtime) {
 
 async function handleRequestReviewReminder(node, context, runtime) {
   const config = node?.config && typeof node.config === 'object' ? node.config : {};
+  const result = await marketingBulkSendsService.sendReviewRequestReminder({
+    listId: resolveTemplateValue(config?.list_id, context),
+    itemId: resolveTemplateValue(config?.item_id, context),
+    userId: runtime?.execution?.created_by || runtime?.execution?.user_id || null,
+  });
+  const nextOutput = result?.skipped || !toIntOrNull(result?.message_id)
+    ? 'on_fail'
+    : 'on_success';
 
   return {
     kind: 'success',
     output: {
-      status: 'skipped',
-      skipped: true,
-      reason: 'review_reminder_retired',
-      list_id: resolveTemplateValue(config?.list_id, context) || null,
-      item_id: resolveTemplateValue(config?.item_id, context) || null,
+      ...result,
+      status: result?.sent ? 'sent' : 'skipped',
+      reminder_policy: cleanString(resolveTemplateValue(config?.reminder_policy, context)) || 'after_24h',
     },
-    next_node_id: readOutputTarget(node, 'on_fail') || readOutputTarget(node, 'on_success'),
+    next_node_id: readOutputTarget(node, nextOutput) || (nextOutput === 'on_fail' ? readOutputTarget(node, 'on_fail') : readOutputTarget(node, 'on_success')),
   };
 }
 
@@ -3676,6 +3683,31 @@ function resolveDurationMs(duration, unit) {
   if (normalized.startsWith('hour')) return qty * 60 * 60 * 1000;
   if (normalized.startsWith('day')) return qty * 24 * 60 * 60 * 1000;
   return qty * 1000;
+}
+
+function parseRunAtTime(value) {
+  const match = String(value || '').trim().match(/^([01]?\d|2[0-3]):([0-5]\d)$/);
+  if (!match) return null;
+  return {
+    hours: Number(match[1]),
+    minutes: Number(match[2]),
+  };
+}
+
+function resolveFixedDelayUntil(config = {}) {
+  const ms = resolveDurationMs(config?.duration ?? 0, config?.unit || 'seconds');
+  const runAt = parseRunAtTime(config?.run_at_time || config?.runAtTime);
+  if (!runAt) {
+    return new Date(Date.now() + ms);
+  }
+
+  const reference = new Date(Date.now() + ms);
+  const waitUntil = new Date(reference);
+  waitUntil.setHours(runAt.hours, runAt.minutes, 0, 0);
+  if (waitUntil.getTime() <= Date.now()) {
+    waitUntil.setDate(waitUntil.getDate() + 1);
+  }
+  return waitUntil;
 }
 
 function toBool(value) {
@@ -4164,6 +4196,7 @@ async function processNode(node, context, runtime = {}) {
             review_gift_enabled: parseBool(resolveTemplateValue(config?.review_gift_enabled, context), false),
             review_gift_description: cleanString(resolveTemplateValue(config?.review_gift_description, context)) || null,
             review_display_clinic_name: cleanString(resolveTemplateValue(config?.review_display_clinic_name, context)) || null,
+            review_sender_name: cleanString(resolveTemplateValue(config?.review_sender_name, context)) || null,
             review_team_photo_url: cleanString(resolveTemplateValue(config?.review_team_photo_url, context)) || null,
             review_team_photo_overlay_color: cleanString(resolveTemplateValue(config?.review_team_photo_overlay_color, context)) || null,
           },
@@ -4178,14 +4211,13 @@ async function processNode(node, context, runtime = {}) {
         return {
           kind: 'success',
           output: {
-            status: 'skipped',
+            status: 'simulated',
             simulated: true,
-            skipped: true,
-            reason: 'review_reminder_retired',
             list_id: cleanString(resolveTemplateValue(config?.list_id, context)) || null,
             item_id: cleanString(resolveTemplateValue(config?.item_id, context)) || null,
+            reminder_policy: cleanString(resolveTemplateValue(config?.reminder_policy, context)) || 'after_24h',
           },
-          next_node_id: readOutputTarget(node, 'on_fail') || readOutputTarget(node, 'on_success'),
+          next_node_id: readOutputTarget(node, 'on_success'),
         };
       }
       return handleRequestReviewReminder(node, context, runtime);
@@ -4298,13 +4330,13 @@ async function processNode(node, context, runtime = {}) {
     }
 
     case 'delay/fixed': {
-      const ms = resolveDurationMs(config?.duration ?? 0, config?.unit || 'seconds');
-      const waitUntil = new Date(Date.now() + ms);
+      const waitUntil = resolveFixedDelayUntil(config);
       return {
         kind: 'waiting',
         output: {
           wait_until: waitUntil.toISOString(),
           reason: 'fixed_delay',
+          run_at_time: cleanString(config?.run_at_time || config?.runAtTime) || null,
         },
         waiting_meta: {
           type: nodeType,

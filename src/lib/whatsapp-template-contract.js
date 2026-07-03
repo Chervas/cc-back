@@ -12,6 +12,7 @@ const VARIABLE_METADATA = {
   fecha_cita: { description: 'Fecha de la cita programada', example: '30/03/2026' },
   hora_cita: { description: 'Hora de la cita programada', example: '10:00' },
   nombre_clinica: { description: 'Nombre de la clínica', example: 'Propdental Eixample' },
+  firma_resenas: { description: 'Remitente que firma una solicitud de reseña', example: 'Recepción' },
   direccion_clinica: { description: 'Dirección completa de la clínica', example: 'Calle Rossello, 68' },
   telefono_clinica: { description: 'Teléfono de la clínica', example: '602 502 792' },
   url_web_clinica: { description: 'URL web de la clínica', example: 'https://propdental.es' },
@@ -56,6 +57,10 @@ const VARIABLE_ALIASES = {
   appointment_time: 'hora_cita',
   nombre_clinica: 'nombre_clinica',
   clinic_name: 'nombre_clinica',
+  firma_resenas: 'firma_resenas',
+  remitente_resena: 'firma_resenas',
+  nombre_remitente_resenas: 'firma_resenas',
+  review_sender_name: 'firma_resenas',
   direccion_clinica: 'direccion_clinica',
   ubicacion: 'direccion_clinica',
   ubicación: 'direccion_clinica',
@@ -99,6 +104,7 @@ const SYSTEM_DEFAULT_NAMED_BINDINGS = {
   fecha_cita: '{{cita.fecha}}',
   hora_cita: '{{cita.hora}}',
   nombre_clinica: '{{clinica.nombre}}',
+  firma_resenas: '{{clinica.firma_resenas}}',
   direccion_clinica: '{{clinica.direccion}}',
   telefono_clinica: '{{clinica.telefono}}',
   url_web_clinica: '{{clinica.url_web}}',
@@ -115,6 +121,17 @@ const SYSTEM_TEMPLATE_OVERRIDES = {
   },
   clinicaclick_recordatorio_dia_antes: {
     5: ['nombre_paciente', 'hora_cita', 'nombre_clinica', 'direccion_clinica', 'telefono_clinica'],
+  },
+  clinicaclick_solicitar_resena: {
+    2: ['nombre_paciente', 'nombre_clinica'],
+    3: ['nombre_paciente', 'nombre_clinica', 'firma_resenas'],
+  },
+  clinicaclick_solicitar_resena_foto: {
+    2: ['nombre_paciente', 'nombre_clinica'],
+    3: ['nombre_paciente', 'nombre_clinica', 'firma_resenas'],
+  },
+  clinicaclick_recordatorio_resena_sin_respuesta: {
+    1: ['nombre_paciente'],
   },
 };
 
@@ -222,7 +239,7 @@ function normalizeExplicitVariables(rawVariables) {
 }
 
 function buildVariablesFromOverride(templateName, indexes, examples = []) {
-  const normalizedTemplateName = cleanString(templateName);
+  const normalizedTemplateName = cleanString(templateName).replace(/_v\d+$/i, '');
   const byCount = SYSTEM_TEMPLATE_OVERRIDES[normalizedTemplateName];
   if (!byCount) return null;
   const names = byCount[indexes.length];

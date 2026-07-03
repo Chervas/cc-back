@@ -334,6 +334,8 @@ const JOB_HANDLERS = {
   whatsapp_coexistence_sync_history: async (payload = {}) => whatsappCoexistenceService.runHistorySyncJob(payload),
   whatsapp_template_create: async (payload = {}) => runWhatsappTemplateCreateJob(payload),
   marketing_bulk_send_dispatch: async (payload = {}, jobRequest) => marketingBulkSendsService.runDispatchJob(payload, jobRequest),
+  marketing_review_request_reminder: async (payload = {}, jobRequest) => marketingBulkSendsService.runReviewRequestReminderJob(payload, jobRequest),
+  marketing_review_request_no_response: async (payload = {}, jobRequest) => marketingBulkSendsService.runReviewNoResponseJob(payload, jobRequest),
   automations_v2_execute: async (payload = {}) => runAutomationFlowV2Job(payload),
   appointment_automation_schedule_fire: async (payload = {}) => runAppointmentAutomationScheduleJob(payload),
   lead_callback_reminder_notify: async (payload = {}, jobRequest) => runLeadCallbackReminderJob(payload, jobRequest),

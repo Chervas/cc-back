@@ -945,6 +945,7 @@ const NODE_TYPES_V2 = [
       review_threshold: 5,
       whatsapp_template_id: null,
       template_name: 'clinicaclick_solicitar_resena',
+      review_sender_name: 'Recepción',
       review_team_photo_url: null,
       review_team_photo_overlay_color: '#4f46e5',
       require_message_anchor_for_wait: true,
@@ -953,6 +954,19 @@ const NODE_TYPES_V2 = [
     config_schema: [
       { key: 'review_source', label: 'Cuándo se pide', input_type: 'select', required: false, options: ['completed_treatment', 'manual_selection'] },
     ],
+  },
+  {
+    type: 'action/request_review_reminder',
+    category: 'action',
+    label: 'Recordar valoración',
+    description: 'Envía el recordatorio de valoración por WhatsApp 24h después si el paciente no respondió.',
+    output_keys: ['on_success', 'on_fail'],
+    runtime_status: 'real',
+    default_config: {
+      template_name: 'clinicaclick_recordatorio_resena_sin_respuesta',
+      reminder_policy: 'after_24h',
+    },
+    config_schema: [],
   },
   {
     type: 'action/review_followup',
