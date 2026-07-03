@@ -1010,15 +1010,27 @@ function getMinimumDispatchDelayMs(dispatch = {}) {
 
 function getDispatchConfig(list) {
   const criteria = list?.criteria || {};
-  const dispatch = criteria.dispatch && typeof criteria.dispatch === 'object'
+  const rawDispatch = criteria.dispatch && typeof criteria.dispatch === 'object'
     ? criteria.dispatch
     : (criteria.dispatch_config && typeof criteria.dispatch_config === 'object' ? criteria.dispatch_config : {});
+  const isReviewRequest = criteria.review_request === true
+    || String(criteria.review_request || '').toLowerCase() === 'true'
+    || isReviewTemplateUsage(criteria.template_usage);
+  const dispatchContext = normalizeDispatchContext(rawDispatch.context || rawDispatch.dispatch_context || (isReviewRequest ? 'review_request' : null));
+  const dispatch = dispatchContext ? { ...rawDispatch, context: dispatchContext } : rawDispatch;
   const businessHours = normalizeBusinessHours(dispatch.business_hours || {});
   const minDelayMs = getMinimumDispatchDelayMs(dispatch);
+  const batchSize = Math.max(1, Math.min(1000, Number.parseInt(dispatch.batch_size || DISPATCH_BATCH_SIZE, 10) || DISPATCH_BATCH_SIZE));
+  const requestedDelayMs = Number.parseInt(dispatch.delay_ms || DISPATCH_BATCH_DELAY_MS, 10) || DISPATCH_BATCH_DELAY_MS;
+  const isDefaultReviewPacedDispatch = isReviewRequest
+    && dispatchContext === 'review_request'
+    && normalizeKey(dispatch.mode || '') === 'all_at_once'
+    && batchSize === 1
+    && requestedDelayMs === DISPATCH_BATCH_DELAY_MS;
   return {
     ...dispatch,
-    batch_size: Math.max(1, Math.min(1000, Number.parseInt(dispatch.batch_size || DISPATCH_BATCH_SIZE, 10) || DISPATCH_BATCH_SIZE)),
-    delay_ms: Math.max(minDelayMs, Number.parseInt(dispatch.delay_ms || DISPATCH_BATCH_DELAY_MS, 10) || DISPATCH_BATCH_DELAY_MS),
+    batch_size: batchSize,
+    delay_ms: Math.max(minDelayMs, isDefaultReviewPacedDispatch ? 60 * 1000 : requestedDelayMs),
     min_read_rate: Number(dispatch.min_read_rate || DISPATCH_MIN_READ_RATE) || DISPATCH_MIN_READ_RATE,
     read_rate_grace_ms: Number(dispatch.read_rate_grace_ms || DISPATCH_READ_RATE_GRACE_MS) || DISPATCH_READ_RATE_GRACE_MS,
     max_opt_out_rate: Number(dispatch.max_opt_out_rate || DISPATCH_MAX_OPT_OUT_RATE) || DISPATCH_MAX_OPT_OUT_RATE,
@@ -5704,6 +5716,12 @@ async function prepareCampaign(scope, campaignId, body = {}, userId = null) {
     cancelable_queue: true,
   };
   const dispatchConfig = await getDispatchConfigForList(list, body.dispatch_config || body.dispatchConfig || null);
+  const effectiveDispatchContext = isWelcomeDispatch
+    ? 'welcome'
+    : (isReviewRequest ? 'review_request' : normalizeDispatchContext(body.dispatch_context || body.dispatch_mode || dispatchConfig.context));
+  const dispatchLabel = isWelcomeDispatch
+    ? 'Bienvenida WhatsApp'
+    : (isReviewRequest ? (dispatchConfig.label || 'Solicitud de reseñas') : (dispatchConfig.label || null));
 
   const dispatchSnapshot = buildTemplateSnapshot(template);
   const listPatch = {
@@ -5773,8 +5791,8 @@ async function prepareCampaign(scope, campaignId, body = {}, userId = null) {
       dispatch: {
         ...dispatchConfig,
         status: !approved && autoSendWhenApproved ? 'waiting_template_approval' : 'prepared',
-        context: isWelcomeDispatch ? 'welcome' : null,
-        label: isWelcomeDispatch ? 'Bienvenida WhatsApp' : null,
+        context: effectiveDispatchContext,
+        label: dispatchLabel,
         filter: dispatchFilter,
         whatsapp_template_id: template?.id || null,
         template_snapshot: dispatchSnapshot,
@@ -5811,6 +5829,7 @@ async function prepareCampaign(scope, campaignId, body = {}, userId = null) {
       user_id: userId || null,
       template_id: template?.id || null,
       context: isWelcomeDispatch ? 'welcome' : 'campaign',
+      dispatch_context: effectiveDispatchContext || (isWelcomeDispatch ? 'welcome' : 'campaign'),
       filter: dispatchFilter,
       safety_gates: nextGates,
       blocked_gates: getBlockedGates(nextGates),
@@ -6319,8 +6338,21 @@ async function startCampaignDispatch(scope, campaignId, body = {}, actor = null)
   const userId = getActorUserId(actor);
   const list = await MarketingPatientList.findByPk(campaignId);
   ensureScopeAccess(list, scope);
-  const dispatch = await getDispatchConfigForList(list, body.dispatch_config || body.dispatchConfig || null);
-  const context = normalizeDispatchContext(body.dispatch_context || body.dispatch_mode || dispatch.context);
+  const rawDispatchOverride = body.dispatch_config || body.dispatchConfig || null;
+  const requestedContext = normalizeDispatchContext(
+    body.dispatch_context
+    || body.dispatch_mode
+    || rawDispatchOverride?.context
+    || rawDispatchOverride?.dispatch_context
+    || list.criteria?.dispatch_config?.context
+    || list.criteria?.dispatch?.context
+    || (isReviewRequestList(list) ? 'review_request' : null)
+  );
+  const dispatchOverride = requestedContext
+    ? mergeDispatchConfigs(rawDispatchOverride || {}, { context: requestedContext })
+    : rawDispatchOverride;
+  const dispatch = await getDispatchConfigForList(list, dispatchOverride);
+  const context = requestedContext || normalizeDispatchContext(dispatch.context);
   const filter = buildDispatchFilterFromBody(body, context) || getDispatchItemFilter(dispatch);
   const channels = Array.isArray(list.criteria?.channels)
     ? list.criteria.channels
