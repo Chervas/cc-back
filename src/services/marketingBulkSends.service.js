@@ -5516,12 +5516,15 @@ async function resolveReviewHeaderPhotoUrl({
     ) {
       throw error;
     }
-    console.warn('[marketing-bulk-sends] No se pudo personalizar foto de reseñas; se usará la foto base', {
+    console.warn('[marketing-bulk-sends] No se pudo personalizar foto de reseñas; se bloqueará el envío para evitar foto sin nombre', {
       list_id: list?.id || null,
       item_id: item?.id || null,
       error: error?.message || error,
     });
-    return photoUrl;
+    const wrapped = new Error('review_team_photo_personalization_failed');
+    wrapped.status = Number(error?.status || 0) || 502;
+    wrapped.cause = error;
+    throw wrapped;
   }
 }
 
