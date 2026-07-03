@@ -1796,6 +1796,78 @@ function applyReviewClinicFilter(scope, source = {}) {
   };
 }
 
+function buildReviewRatingSummaryText(row = {}) {
+  const rating = Number(row.rating || 0) || null;
+  const privateReason = normalizeText(row.reason || '');
+  const googleComment = normalizeText(row.google_review_comment || '');
+  const googleMatched = row.google_review_matched === true || row.google_review_matched === 1;
+
+  if (rating === 5) {
+    if (googleComment) {
+      return `En Google han comentado: ${googleComment}`;
+    }
+    if (googleMatched) {
+      return 'Valoración positiva sin comentario interno por ser 5/5. No han comentado en Google.';
+    }
+    return 'Valoración positiva sin comentario interno por ser 5/5. No han comentado en Google o no hemos podido relacionar su usuario con el de la reseña.';
+  }
+
+  return privateReason || 'Sin comentario interno.';
+}
+
+function buildReviewResponseHeatmaps(rows = []) {
+  const weekdays = ['Lun', 'Mar', 'Mié', 'Jue', 'Vie', 'Sáb', 'Dom'];
+  const hours = Array.from({ length: 24 }, (_item, index) => index);
+  const empty = () => weekdays.map((day) => ({
+    name: day,
+    data: hours.map((hour) => ({ x: `${String(hour).padStart(2, '0')}:00`, y: 0 }))
+  }));
+  const heatmaps = {
+    winter: { label: 'Invierno', total: 0, series: empty() },
+    summer: { label: 'Verano', total: 0, series: empty() },
+  };
+
+  for (const row of rows || []) {
+    const season = String(row.season || '');
+    if (!heatmaps[season]) continue;
+    const weekday = Number(row.weekday);
+    const hour = Number(row.hour);
+    const total = Number(row.total || 0);
+    if (!Number.isInteger(weekday) || weekday < 0 || weekday > 6) continue;
+    if (!Number.isInteger(hour) || hour < 0 || hour > 23) continue;
+    heatmaps[season].series[weekday].data[hour].y = total;
+    heatmaps[season].total += total;
+  }
+
+  return heatmaps;
+}
+
+function buildGoogleRatingSummary(row = {}) {
+  const totalReviews = Number(row.total_reviews || 0);
+  const ratingSum = Number(row.rating_sum || 0);
+  const averageRating = totalReviews > 0
+    ? Number((ratingSum / totalReviews).toFixed(2))
+    : 0;
+  const fiveStarReviews = Number(row.five_star_reviews || 0);
+  const targetAverage = 4.95; // Umbral para que una media con un decimal pueda mostrarse como 5,0.
+  let neededFiveStarReviews = totalReviews > 0 ? 1 : 1;
+
+  if (totalReviews > 0 && averageRating >= targetAverage) {
+    neededFiveStarReviews = 0;
+  } else if (totalReviews > 0) {
+    neededFiveStarReviews = Math.max(1, Math.ceil(((targetAverage * totalReviews) - ratingSum) / (5 - targetAverage)));
+  }
+
+  return {
+    total_reviews: totalReviews,
+    five_star_reviews: fiveStarReviews,
+    average_rating: averageRating,
+    rating_sum: ratingSum,
+    target_average: targetAverage,
+    needed_five_star_reviews_for_5: neededFiveStarReviews,
+  };
+}
+
 function isReviewRequestList(list) {
   const criteria = list?.criteria || {};
   return criteria.review_request === true || isReviewTemplateUsage(criteria.template_usage);
@@ -3402,6 +3474,33 @@ async function getReviewRequestSummary(scope, options = {}) {
         ORDER BY f.occurred_at DESC
         LIMIT 1
       ) AS reason,
+      (
+        SELECT r.comment
+        FROM MarketingPatientContactEvents gm
+        INNER JOIN BusinessProfileReviews r ON r.matched_contact_event_id = gm.id
+        WHERE gm.list_id = e.list_id
+          AND gm.item_id = e.item_id
+          AND gm.event_type = 'google_review_matched'
+        ORDER BY r.create_time DESC
+        LIMIT 1
+      ) AS google_review_comment,
+      (
+        SELECT r.reviewer_name
+        FROM MarketingPatientContactEvents gm
+        INNER JOIN BusinessProfileReviews r ON r.matched_contact_event_id = gm.id
+        WHERE gm.list_id = e.list_id
+          AND gm.item_id = e.item_id
+          AND gm.event_type = 'google_review_matched'
+        ORDER BY r.create_time DESC
+        LIMIT 1
+      ) AS google_reviewer_name,
+      EXISTS (
+        SELECT 1
+        FROM MarketingPatientContactEvents gm
+        WHERE gm.list_id = e.list_id
+          AND gm.item_id = e.item_id
+          AND gm.event_type = 'google_review_matched'
+      ) AS google_review_matched,
       e.occurred_at
     FROM MarketingPatientContactEvents e
     INNER JOIN MarketingPatientLists l ON l.id = e.list_id
@@ -3431,6 +3530,59 @@ async function getReviewRequestSummary(scope, options = {}) {
     LIMIT 50
     `,
     { replacements: { clinicIds, objectiveId: OBJECTIVE_ID }, type: QueryTypes.SELECT }
+  );
+
+  const reviewResponseHeatmapRows = await db.sequelize.query(
+    `
+    SELECT
+      CASE
+        WHEN MONTH(COALESCE(i.sent_at, e.occurred_at)) IN (12, 1, 2) THEN 'winter'
+        WHEN MONTH(COALESCE(i.sent_at, e.occurred_at)) IN (6, 7, 8) THEN 'summer'
+        ELSE 'other'
+      END AS season,
+      WEEKDAY(e.occurred_at) AS weekday,
+      HOUR(e.occurred_at) AS hour,
+      COUNT(*) AS total
+    FROM MarketingPatientContactEvents e
+    INNER JOIN MarketingPatientLists l ON l.id = e.list_id
+    INNER JOIN MarketingPatientListItems i ON i.id = e.item_id
+    WHERE l.objective_id = :objectiveId
+      AND i.clinica_id IN (:clinicIds)
+      AND (
+        JSON_UNQUOTE(JSON_EXTRACT(l.criteria, '$.review_request')) IN ('true', '1')
+        OR JSON_UNQUOTE(JSON_EXTRACT(l.criteria, '$.template_usage')) = 'solicitud_resena'
+      )
+      AND (
+        i.sent_at IS NOT NULL
+        OR i.dispatch_status IN ('queued','sending','sent','delivered','read','replied')
+      )
+      AND NOT EXISTS (
+        SELECT 1
+        FROM MarketingPatientContactEvents te
+        WHERE te.list_id = i.list_id
+          AND te.item_id = i.id
+          AND te.event_type IN ('mass_campaign_test_sent', 'mass_campaign_test_failed')
+      )
+      AND e.event_type IN ('review_rating_received', 'review_request_rating', 'review_rating_updated')
+      AND CAST(JSON_UNQUOTE(JSON_EXTRACT(e.payload, '$.rating')) AS UNSIGNED) BETWEEN 1 AND 5
+    GROUP BY season, WEEKDAY(e.occurred_at), HOUR(e.occurred_at)
+    ORDER BY season, weekday, hour
+    `,
+    { replacements: { clinicIds, objectiveId: OBJECTIVE_ID }, type: QueryTypes.SELECT }
+  );
+
+  const [googleRatingRow] = await db.sequelize.query(
+    `
+    SELECT
+      COUNT(*) AS total_reviews,
+      SUM(CAST(star_rating AS UNSIGNED)) AS rating_sum,
+      AVG(CAST(star_rating AS UNSIGNED)) AS average_rating,
+      SUM(CASE WHEN CAST(star_rating AS UNSIGNED) = 5 THEN 1 ELSE 0 END) AS five_star_reviews
+    FROM BusinessProfileReviews
+    WHERE clinica_id IN (:clinicIds)
+      AND CAST(star_rating AS UNSIGNED) BETWEEN 1 AND 5
+    `,
+    { replacements: { clinicIds }, type: QueryTypes.SELECT }
   );
 
   const [automationTemplate, approvedReviewTemplate, approvedReminderTemplate, approvedPhotoReviewTemplate, googleReviewUrlAvailable, clinicStatuses] = await Promise.all([
@@ -3473,6 +3625,7 @@ async function getReviewRequestSummary(scope, options = {}) {
   const automationEnabled = scope?.scope === 'group'
     ? groupReadyClinics.length > 0 && groupReadyClinics.every((clinic) => clinic.clinic_automation_enabled === true)
     : automationTemplate?.is_active === true;
+  const googleRatingSummary = buildGoogleRatingSummary(googleRatingRow || {});
 
   return {
     success: true,
@@ -3494,10 +3647,15 @@ async function getReviewRequestSummary(scope, options = {}) {
           clinic_id: Number(row.clinic_id || 0) || null,
           clinic_name: normalizeText(row.clinic_name) || null,
           rating: Number(row.rating || 0) || null,
-          reason: normalizeText(row.reason || (Number(row.rating || 0) === 5 ? 'Valoración positiva sin comentario.' : 'Sin comentario.')).slice(0, 500),
+          reason: buildReviewRatingSummaryText(row).slice(0, 700),
+          google_review_comment: normalizeText(row.google_review_comment || '') || null,
+          google_reviewer_name: normalizeText(row.google_reviewer_name || '') || null,
+          google_review_matched: row.google_review_matched === true || row.google_review_matched === 1,
           occurred_at: row.occurred_at || null,
         }))
         .filter((row) => row.rating),
+      review_response_heatmaps: buildReviewResponseHeatmaps(reviewResponseHeatmapRows || []),
+      google_rating_summary: googleRatingSummary,
       automation_enabled: automationEnabled,
       automation_template: effectiveAutomationTemplate,
       approved_template_available: !!effectiveApprovedTemplateId && !!effectiveApprovedReminderTemplateId,
