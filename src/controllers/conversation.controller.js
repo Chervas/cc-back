@@ -226,6 +226,33 @@ function buildConversationSearchClause(searchQuery) {
   }
 
   const makeLike = (value) => `%${escapeLikePattern(String(value || '').toLowerCase())}%`;
+  const likeSql = (like) => db.sequelize.escape(like);
+  const externalContactClause = (like) => db.Sequelize.literal(`
+    (
+      \`Conversation\`.\`id\` IN (
+        SELECT DISTINCT mpli.conversation_id
+        FROM MarketingPatientListItems mpli
+        WHERE mpli.conversation_id IS NOT NULL
+          AND (
+            LOWER(COALESCE(mpli.name, '')) LIKE ${likeSql(like)} ESCAPE '\\\\'
+            OR LOWER(COALESCE(mpli.phone, '')) LIKE ${likeSql(like)} ESCAPE '\\\\'
+            OR LOWER(COALESCE(mpli.email, '')) LIKE ${likeSql(like)} ESCAPE '\\\\'
+            OR LOWER(COALESCE(JSON_UNQUOTE(JSON_EXTRACT(mpli.custom_fields, '$.nombre_completo')), '')) LIKE ${likeSql(like)} ESCAPE '\\\\'
+          )
+      )
+      OR \`Conversation\`.\`contact_id\` IN (
+        SELECT DISTINCT mpli.phone
+        FROM MarketingPatientListItems mpli
+        WHERE mpli.phone IS NOT NULL
+          AND (
+            LOWER(COALESCE(mpli.name, '')) LIKE ${likeSql(like)} ESCAPE '\\\\'
+            OR LOWER(COALESCE(mpli.phone, '')) LIKE ${likeSql(like)} ESCAPE '\\\\'
+            OR LOWER(COALESCE(mpli.email, '')) LIKE ${likeSql(like)} ESCAPE '\\\\'
+            OR LOWER(COALESCE(JSON_UNQUOTE(JSON_EXTRACT(mpli.custom_fields, '$.nombre_completo')), '')) LIKE ${likeSql(like)} ESCAPE '\\\\'
+          )
+      )
+    )
+  `);
   const textFieldClauses = (like) => [
     { contact_id: { [Op.like]: like } },
     { '$paciente.nombre$': { [Op.like]: like } },
@@ -259,6 +286,7 @@ function buildConversationSearchClause(searchQuery) {
       ),
       { [Op.like]: like }
     ),
+    externalContactClause(like),
   ];
 
   const fullLike = makeLike(normalized);
