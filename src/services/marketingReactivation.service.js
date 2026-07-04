@@ -95,12 +95,19 @@ function toTitleCaseName(value) {
     .join(' ');
 }
 
-function splitFullName(value) {
+function normalizeNameFormat(value) {
+  const format = normalizeKey(value);
+  if (['first_last', 'last_comma_first', 'last_last_first', 'full', 'auto'].includes(format)) return format;
+  return 'auto';
+}
+
+function splitFullName(value, format = 'auto') {
+  const nameFormat = normalizeNameFormat(format);
   const normalized = toTitleCaseName(value);
   if (!normalized) {
     return { nombre: 'Paciente', apellidos: '' };
   }
-  if (normalized.includes(',')) {
+  if ((nameFormat === 'auto' || nameFormat === 'last_comma_first') && normalized.includes(',')) {
     const [lastNameRaw, ...firstNameRaw] = normalized.split(',');
     const firstName = toTitleCaseName(firstNameRaw.join(',').trim() || lastNameRaw);
     const lastName = toTitleCaseName(firstNameRaw.length ? lastNameRaw : '');
@@ -113,13 +120,22 @@ function splitFullName(value) {
   if (parts.length === 1) {
     return { nombre: parts[0], apellidos: '' };
   }
+  if (nameFormat === 'last_last_first' && parts.length >= 3) {
+    return {
+      nombre: parts.slice(2).join(' '),
+      apellidos: parts.slice(0, 2).join(' '),
+    };
+  }
+  if (nameFormat === 'full') {
+    return { nombre: normalized, apellidos: '' };
+  }
   return {
     nombre: parts.slice(0, 2).join(' '),
     apellidos: parts.slice(2).join(' '),
   };
 }
 
-function resolveImportedPatientName(row, columnMapping) {
+function resolveImportedPatientName(row, columnMapping, nameFormat = 'auto') {
   const nameHeader = normalizeText(columnMapping?.name || '');
   const firstNameHeader = normalizeText(columnMapping?.first_name || '');
   const lastNameHeader = normalizeText(columnMapping?.last_name || '');
@@ -149,7 +165,7 @@ function resolveImportedPatientName(row, columnMapping) {
   const normalizedFullName = toTitleCaseName(rawFullName || 'Paciente importado');
   return {
     normalizedFullName,
-    splitName: splitFullName(normalizedFullName),
+    splitName: splitFullName(normalizedFullName, nameFormat),
   };
 }
 
@@ -815,7 +831,18 @@ const IMPORT_ALIASES = {
   phone_landline: ['telefono_fijo', 'teléfono_fijo', 'telefono_secundario', 'teléfono_secundario', 'fijo', 'phone_landline', 'landline', 'fixed_phone', 'telefono_casa'],
   email: ['email', 'correo', 'correo_electronico', 'mail'],
   treatment: ['tratamiento', 'treatment', 'servicio', 'procedimiento'],
-  last_visit_at: ['fecha_ultima_cita', 'ultima_cita', 'última_cita', 'fecha_ultimo_tratamiento', 'last_visit', 'last_visit_at'],
+  last_visit_at: [
+    'fecha_tratamiento',
+    'fecha_de_tratamiento',
+    'fecha_realizacion',
+    'fecha_realizacion_tratamiento',
+    'fecha_ultima_cita',
+    'ultima_cita',
+    'última_cita',
+    'fecha_ultimo_tratamiento',
+    'last_visit',
+    'last_visit_at',
+  ],
   clinic: ['clinica', 'clínica', 'sede', 'centro', 'clinic', 'location'],
 };
 
@@ -1179,6 +1206,7 @@ async function buildImportedItemPayloads(scope, body, transaction) {
   }
 
   const columnMapping = inferColumnMapping(rows, body.column_mapping || {});
+  const nameFormat = normalizeNameFormat(body.name_format || body.nameFormat || 'auto');
   const customFieldsSchema = buildCustomFieldSchema(rows, columnMapping, body.custom_fields_schema || []);
   const treatmentMappings = normalizeTreatmentMappings(body.treatment_mappings || body.treatment_mapping || {});
   const clinicLookup = await loadImportClinicLookup(scope, transaction);
@@ -1222,7 +1250,7 @@ async function buildImportedItemPayloads(scope, body, transaction) {
   const itemPayloads = [];
 
   for (const row of rows) {
-    const { normalizedFullName, splitName } = resolveImportedPatientName(row, columnMapping);
+    const { normalizedFullName, splitName } = resolveImportedPatientName(row, columnMapping, nameFormat);
     const phoneDigits = normalizePhoneDigits(readImportValue(row, columnMapping, 'phone'));
     const formattedPhone = phoneDigits ? `+${phoneDigits}` : null;
     const landlineDigits = normalizePhoneDigits(readImportValue(row, columnMapping, 'phone_landline'));
@@ -1892,6 +1920,7 @@ async function createList(scope, body = {}, userId = null) {
         treatment_id: body.treatment_id || body.treatmentId || null,
         import_file_name: body.import_file_name || null,
         column_mapping: importResult?.columnMapping || body.column_mapping || null,
+        name_format: source === 'import' ? normalizeNameFormat(body.name_format || body.nameFormat || 'auto') : null,
         treatment_mappings: body.treatment_mappings || body.treatment_mapping || null,
         rules: body.rules || [],
         exclusions: body.exclusions || [],

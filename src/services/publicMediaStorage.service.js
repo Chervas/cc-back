@@ -1,6 +1,7 @@
 'use strict';
 
 const crypto = require('crypto');
+const sharp = require('sharp');
 const { CloudFrontClient, CreateInvalidationCommand } = require('@aws-sdk/client-cloudfront');
 const { PutObjectCommand, S3Client } = require('@aws-sdk/client-s3');
 const { AssumeRoleCommand, STSClient } = require('@aws-sdk/client-sts');
@@ -116,6 +117,19 @@ function assertPublicMediaPayload({ purpose, contentType, buffer }) {
     err.details = { maxBytes, sizeBytes: buffer.length };
     throw err;
   }
+}
+
+function shouldNormalizeWhatsappImage({ purpose, contentType }) {
+  return ['review_team_photo', 'whatsapp_image'].includes(purpose)
+    && ['image/webp', 'image/gif'].includes(contentType);
+}
+
+async function normalizeWhatsappImageToJpeg(buffer) {
+  return sharp(buffer, { failOn: 'none', animated: false })
+    .rotate()
+    .flatten({ background: '#ffffff' })
+    .jpeg({ quality: 90, mozjpeg: true })
+    .toBuffer();
 }
 
 function publicUrlForKey(key) {
@@ -234,8 +248,12 @@ function cloudFrontClient() {
 
 async function uploadPublicMedia(input = {}) {
   const purpose = assertAllowedPurpose(input.purpose);
-  const contentType = inferContentType(input);
-  const buffer = Buffer.isBuffer(input.buffer) ? input.buffer : decodePayload(input);
+  let contentType = inferContentType(input);
+  let buffer = Buffer.isBuffer(input.buffer) ? input.buffer : decodePayload(input);
+  if (shouldNormalizeWhatsappImage({ purpose, contentType })) {
+    buffer = await normalizeWhatsappImageToJpeg(buffer);
+    contentType = 'image/jpeg';
+  }
   assertPublicMediaPayload({ purpose, contentType, buffer });
 
   const { region, bucket } = getConfig();

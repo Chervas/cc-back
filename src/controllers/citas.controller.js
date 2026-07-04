@@ -43,6 +43,32 @@ const CITA_ESTADOS_RESUELVEN_NOTIFICACIONES = new Set([
 ]);
 const generatePacientePublicId = () => `pac_${crypto.randomBytes(10).toString('hex')}`;
 
+function isDateOnlyParam(value) {
+    return typeof value === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(value.trim());
+}
+
+function parseDateBoundary(value, endOfDay = false) {
+    if (!value) return null;
+    let date;
+    if (isDateOnlyParam(value)) {
+        date = new Date(`${String(value).trim()}T00:00:00`);
+        if (endOfDay) {
+            date.setHours(23, 59, 59, 999);
+        }
+    } else {
+        date = new Date(value);
+    }
+    return Number.isNaN(date.getTime()) ? null : date;
+}
+
+function buildDateRangeWhere(startDate, endDate) {
+    if (!startDate || !endDate) return null;
+    const start = parseDateBoundary(startDate, false);
+    const end = parseDateBoundary(endDate, true);
+    if (!start || !end) return null;
+    return { [Op.between]: [start, end] };
+}
+
 async function generateUniquePacientePublicId() {
     for (let i = 0; i < 8; i++) {
         const publicId = generatePacientePublicId();
@@ -1704,8 +1730,9 @@ exports.getCitas = asyncHandler(async (req, res) => {
         }
         where.paciente_id = pacienteId;
     }
-    if (startDate && endDate) {
-        where.inicio = { [db.Sequelize.Op.between]: [new Date(startDate), new Date(endDate)] };
+    const dateRange = buildDateRangeWhere(startDate, endDate);
+    if (dateRange) {
+        where.inicio = dateRange;
     }
 
     const citas = await CitaPaciente.findAll({
@@ -1758,8 +1785,9 @@ exports.getCitasCalendar = asyncHandler(async (req, res) => {
         where.paciente_id = pacienteId;
     }
 
-    if (startDate && endDate) {
-        where.inicio = { [Op.between]: [new Date(startDate), new Date(endDate)] };
+    const dateRange = buildDateRangeWhere(startDate, endDate);
+    if (dateRange) {
+        where.inicio = dateRange;
     }
 
     const citas = await CitaPaciente.findAll({

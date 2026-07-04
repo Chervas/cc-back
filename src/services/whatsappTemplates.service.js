@@ -21,6 +21,7 @@ const {
 
 const META_GRAPH_BASE = process.env.META_GRAPH_BASE_URL || process.env.META_API_BASE_URL || 'https://graph.facebook.com';
 const META_API_VERSION = process.env.META_API_VERSION || 'v24.0';
+const META_APP_ID = process.env.META_APP_ID || process.env.FACEBOOK_APP_ID || '1807844546609897';
 const DEFAULT_LANGUAGE = process.env.META_WHATSAPP_TEMPLATE_LANGUAGE || 'es';
 const DEFAULT_PROPAGATE_RESYNC_DELAY_MINUTES = Math.max(
   1,
@@ -34,6 +35,7 @@ const WHATSAPP_TEMPLATE_STATUS = {
   DISCONNECTED: 'SIN_CONECTAR',
 };
 const WHATSAPP_TEMPLATE_BODY_MAX_LENGTH = 1024;
+const WHATSAPP_TEMPLATE_IMAGE_HEADER_MAX_BYTES = 5 * 1024 * 1024;
 
 function resolveGraphBase() {
   const base = META_GRAPH_BASE.replace(/\/+$/, '');
@@ -76,25 +78,47 @@ function normalizeTemplateComponentsForMeta(value) {
   });
 }
 
-function getImageHeaderSampleIssue(template) {
-  const components = normalizeTemplateComponentsForMeta(template?.components);
-  const imageHeader = components.find((component) => {
+function findImageHeaderComponent(components) {
+  const parsed = Array.isArray(components) ? components : normalizeTemplateComponentsForMeta(components);
+  return parsed.find((component) => {
     const type = String(component?.type || '').trim().toUpperCase();
     const format = String(component?.format || '').trim().toUpperCase();
     return type === 'HEADER' && format === 'IMAGE';
-  });
+  }) || null;
+}
+
+function resolveConfiguredTemplateImageHeaderHandle() {
+  return cleanString(
+    process.env.WHATSAPP_REVIEW_TEMPLATE_HEADER_HANDLE ||
+    process.env.WHATSAPP_TEMPLATE_IMAGE_HEADER_HANDLE ||
+    ''
+  );
+}
+
+function extractImageHeaderSample(template) {
+  const components = normalizeTemplateComponentsForMeta(template?.components);
+  const imageHeader = findImageHeaderComponent(components);
+  const headerHandle = imageHeader?.example?.header_handle;
+  return cleanString(Array.isArray(headerHandle) ? headerHandle[0] : headerHandle);
+}
+
+function getImageHeaderSampleIssue(template) {
+  const components = normalizeTemplateComponentsForMeta(template?.components);
+  const imageHeader = findImageHeaderComponent(components);
   if (!imageHeader) return null;
 
-  const headerHandle = imageHeader?.example?.header_handle;
-  const sample = cleanString(Array.isArray(headerHandle) ? headerHandle[0] : headerHandle);
+  const sample = extractImageHeaderSample({ components });
   if (!sample) return 'missing_image_header_sample';
   if (/^https?:\/\//i.test(sample)) return 'image_header_sample_must_be_meta_handle';
   return null;
 }
 
 function buildImageHeaderSamplePendingReason(issue) {
+  if (issue === 'image_header_sample_upload_failed') {
+    return 'No se pudo preparar el media handle de ejemplo requerido por Meta para la cabecera de imagen. Revisa la URL publica de ejemplo, el token de WhatsApp y META_APP_ID antes de reenviar a revision.';
+  }
   if (issue === 'image_header_sample_must_be_meta_handle') {
-    return 'La plantilla tiene cabecera de imagen, pero Meta requiere un media handle de ejemplo, no una URL publica. Configura WHATSAPP_REVIEW_TEMPLATE_HEADER_HANDLE o WHATSAPP_TEMPLATE_IMAGE_HEADER_HANDLE antes de enviarla a revision.';
+    return 'La plantilla tiene cabecera de imagen, pero Meta requiere un media handle de ejemplo, no una URL publica. El backend intentara generarlo automaticamente desde la URL publica; si falla, configura WHATSAPP_REVIEW_TEMPLATE_HEADER_HANDLE o WHATSAPP_TEMPLATE_IMAGE_HEADER_HANDLE.';
   }
   return 'La plantilla tiene cabecera de imagen, pero falta el media handle de ejemplo requerido por Meta. Configura WHATSAPP_REVIEW_TEMPLATE_HEADER_HANDLE o WHATSAPP_TEMPLATE_IMAGE_HEADER_HANDLE antes de enviarla a revision.';
 }
@@ -120,6 +144,106 @@ function buildCustomTemplateTechnicalName(displayName) {
 
 function isReviewRequestUsage(value) {
   return ['solicitud_resena', 'resena', 'review_request', 'reviews'].includes(normalizeTemplateKey(value));
+}
+
+function templateHasImageHeader(template) {
+  const components = normalizeTemplateComponentsForMeta(template?.components);
+  return components.some((component) => {
+    const type = String(component?.type || '').trim().toUpperCase();
+    const format = String(component?.format || '').trim().toUpperCase();
+    return type === 'HEADER' && format === 'IMAGE';
+  });
+}
+
+function isReviewPhotoTemplate(template, catalog = null) {
+  if (!templateHasImageHeader(template)) return false;
+  const searchable = [
+    template?.name,
+    template?.display_name,
+    catalog?.name,
+  ].map((value) => normalizeTemplateKey(value)).join('_');
+  return searchable.includes('resena') || searchable.includes('review');
+}
+
+function isReviewRequestTemplateFamily(template, catalog = null) {
+  const names = [
+    template?.name,
+    template?.display_name,
+    catalog?.name,
+    catalog?.display_name,
+  ].map((value) => normalizeTemplateKey(value)).filter(Boolean);
+
+  return names.some((name) => (
+    name === 'clinicaclick_solicitar_resena'
+    || name === 'clinicaclick_solicitar_resena_foto'
+    || name === 'clinicaclick_recordatorio_resena_sin_respuesta'
+    || isTechnicalTemplateFamilyName('clinicaclick_solicitar_resena', name)
+    || isTechnicalTemplateFamilyName('clinicaclick_solicitar_resena_foto', name)
+    || isTechnicalTemplateFamilyName('clinicaclick_recordatorio_resena_sin_respuesta', name)
+  ));
+}
+
+function isReviewReminderTemplateFamily(template, catalog = null) {
+  const names = [
+    template?.name,
+    template?.display_name,
+    catalog?.name,
+    catalog?.display_name,
+  ].map((value) => normalizeTemplateKey(value)).filter(Boolean);
+
+  return names.some((name) => (
+    name === 'clinicaclick_recordatorio_resena_sin_respuesta'
+    || isTechnicalTemplateFamilyName('clinicaclick_recordatorio_resena_sin_respuesta', name)
+  ));
+}
+
+function reviewTemplateBodyHasSender(value) {
+  const raw = cleanString(value);
+  const normalized = normalizeTemplateKey(raw);
+  return /soy\s+\{\{\s*3\s*\}\}/i.test(raw)
+    || normalized.includes('firma_resenas')
+    || normalized.includes('remitente_resena')
+    || normalized.includes('nombre_remitente_resenas')
+    || normalized.includes('review_sender_name');
+}
+
+function isStaleReviewRequestTemplate(template, catalog = null) {
+  if (!isReviewRequestTemplateFamily(template, catalog)) return false;
+  const templateBody = cleanString(extractTemplateBodyText(template?.components));
+  const catalogBody = cleanString(catalog?.body_text);
+  if (catalogBody && templateBody && templateBody !== catalogBody) return true;
+  if (isReviewReminderTemplateFamily(template, catalog)) return false;
+  return !reviewTemplateBodyHasSender(templateBody);
+}
+
+async function notifyReviewPhotoTemplateApproved(template, catalog = null) {
+  if (!isReviewPhotoTemplate(template, catalog)) return;
+  const clinicId = Number(template?.clinic_id || 0);
+  if (!Number.isInteger(clinicId) || clinicId <= 0) return;
+
+  try {
+    const notificationService = require('./notifications.service');
+    const clinic = await Clinica.findByPk(clinicId, {
+      attributes: ['id_clinica', 'nombre_clinica'],
+      raw: true,
+    });
+    await notificationService.dispatchEvent({
+      event: 'whatsapp.review_photo_template_approved',
+      clinicId,
+      data: {
+        clinicName: clinic?.nombre_clinica || 'tu clínica',
+        templateName: template?.display_name || template?.name || catalog?.name || 'plantilla de reseñas con foto',
+        link: '/marketing/campanas?objective=get_reviews&review_step=summary',
+        useRouter: true,
+      },
+    });
+  } catch (error) {
+    console.warn('[whatsapp-templates] No se pudo notificar aprobación de plantilla de reseñas con foto', {
+      template_id: template?.id || null,
+      clinic_id: clinicId,
+      error: error?.message || error,
+    });
+  }
 }
 
 function buildCustomTemplateExtraComponents({ templateUsage }) {
@@ -396,7 +520,16 @@ async function resolveTargetClinicIdsForTemplateProvisioning({ clinicId, groupId
 function findSameContractRemoteTemplate({ familyRows, wabaId, template }) {
   const safeWabaId = wabaId ? String(wabaId) : '';
   const matches = familyRows
-    .filter((row) => String(row?.waba_id || '') === safeWabaId && hasSameMetaFacingContent(template, row))
+    .filter((row) => {
+      const status = String(row?.status || '').trim().toUpperCase();
+      const hasRemoteIdentity = !!cleanString(row?.meta_template_id);
+      return (
+        String(row?.waba_id || '') === safeWabaId &&
+        hasRemoteIdentity &&
+        ![WHATSAPP_TEMPLATE_STATUS.LOCAL_PENDING, WHATSAPP_TEMPLATE_STATUS.DISCONNECTED].includes(status) &&
+        hasSameMetaFacingContent(template, row)
+      );
+    })
     .sort((left, right) => {
       const score = (row) => {
         const status = String(row?.status || '').trim().toUpperCase();
@@ -469,6 +602,180 @@ function parseMetaError(err) {
     userMessage: nestedError?.error_user_msg || null,
     raw: base,
   };
+}
+
+function guessFileNameFromUrl(url) {
+  try {
+    const parsed = new URL(url);
+    const lastPath = parsed.pathname.split('/').filter(Boolean).pop();
+    return cleanString(lastPath) || 'template-header-image.jpg';
+  } catch {
+    return 'template-header-image.jpg';
+  }
+}
+
+function normalizeImageContentType(value, fallbackName = '') {
+  const raw = cleanString(value).split(';')[0].trim().toLowerCase();
+  if (['image/jpeg', 'image/jpg', 'image/png', 'image/webp'].includes(raw)) {
+    return raw === 'image/jpg' ? 'image/jpeg' : raw;
+  }
+  const name = cleanString(fallbackName).toLowerCase();
+  if (name.endsWith('.png')) return 'image/png';
+  if (name.endsWith('.webp')) return 'image/webp';
+  return 'image/jpeg';
+}
+
+async function downloadTemplateHeaderImage(sampleUrl) {
+  if (!/^https:\/\//i.test(sampleUrl)) {
+    throw new Error('template_image_header_sample_must_be_https');
+  }
+
+  const response = await axios.get(sampleUrl, {
+    responseType: 'arraybuffer',
+    timeout: 30000,
+    maxBodyLength: WHATSAPP_TEMPLATE_IMAGE_HEADER_MAX_BYTES,
+    maxContentLength: WHATSAPP_TEMPLATE_IMAGE_HEADER_MAX_BYTES,
+  });
+  const buffer = Buffer.from(response.data || []);
+  if (!buffer.length) {
+    throw new Error('template_image_header_sample_empty');
+  }
+  if (buffer.length > WHATSAPP_TEMPLATE_IMAGE_HEADER_MAX_BYTES) {
+    throw new Error('template_image_header_sample_too_large');
+  }
+
+  const fileName = guessFileNameFromUrl(sampleUrl);
+  return {
+    buffer,
+    fileName,
+    contentType: normalizeImageContentType(response.headers?.['content-type'], fileName),
+  };
+}
+
+async function uploadTemplateHeaderImageHandleToMeta({ accessToken, sampleUrl, logger = console }) {
+  const safeAccessToken = cleanString(accessToken);
+  if (!safeAccessToken) {
+    throw new Error('whatsapp_template_header_upload_missing_access_token');
+  }
+  if (!META_APP_ID) {
+    throw new Error('whatsapp_template_header_upload_missing_meta_app_id');
+  }
+
+  const image = await downloadTemplateHeaderImage(sampleUrl);
+  const uploadSession = await axios.post(
+    graphUrl(`${META_APP_ID}/uploads`),
+    null,
+    {
+      params: {
+        file_name: image.fileName,
+        file_length: image.buffer.length,
+        file_type: image.contentType,
+        access_token: safeAccessToken,
+      },
+      timeout: 30000,
+    }
+  );
+
+  const uploadSessionId = cleanString(uploadSession?.data?.id);
+  if (!uploadSessionId) {
+    throw new Error('whatsapp_template_header_upload_session_missing');
+  }
+
+  const uploadResponse = await axios.post(
+    graphUrl(uploadSessionId),
+    image.buffer,
+    {
+      headers: {
+        Authorization: `OAuth ${safeAccessToken}`,
+        file_offset: '0',
+        'Content-Type': image.contentType,
+      },
+      timeout: 30000,
+      maxBodyLength: WHATSAPP_TEMPLATE_IMAGE_HEADER_MAX_BYTES,
+      maxContentLength: WHATSAPP_TEMPLATE_IMAGE_HEADER_MAX_BYTES,
+    }
+  );
+
+  const mediaHandle = cleanString(uploadResponse?.data?.h || uploadResponse?.data?.handle || uploadResponse?.data?.id);
+  if (!mediaHandle) {
+    throw new Error('whatsapp_template_header_media_handle_missing');
+  }
+
+  logger.info?.('[whatsapp-templates] Media handle de cabecera generado para revision de plantilla', {
+    fileName: image.fileName,
+    contentType: image.contentType,
+    bytes: image.buffer.length,
+  });
+
+  return mediaHandle;
+}
+
+function replaceImageHeaderHandleInComponents(components, mediaHandle) {
+  const safeHandle = cleanString(mediaHandle);
+  if (!safeHandle) return components;
+  return normalizeTemplateComponentsForMeta(components).map((component) => {
+    const type = String(component?.type || '').trim().toUpperCase();
+    const format = String(component?.format || '').trim().toUpperCase();
+    if (type !== 'HEADER' || format !== 'IMAGE') {
+      return component;
+    }
+    return {
+      ...component,
+      example: {
+        ...(component.example || {}),
+        header_handle: [safeHandle],
+      },
+    };
+  });
+}
+
+async function prepareTemplateImageHeaderForMeta({ template, accessToken, logger = console }) {
+  const components = normalizeTemplateComponentsForMeta(template?.components);
+  if (!findImageHeaderComponent(components)) {
+    return { template: { ...template, components }, issue: null };
+  }
+
+  const currentSample = extractImageHeaderSample({ components });
+  if (currentSample && !/^https?:\/\//i.test(currentSample)) {
+    return { template: { ...template, components }, issue: null };
+  }
+
+  const configuredHandle = resolveConfiguredTemplateImageHeaderHandle();
+  if (configuredHandle) {
+    return {
+      template: {
+        ...template,
+        components: replaceImageHeaderHandleInComponents(components, configuredHandle),
+      },
+      issue: null,
+      source: 'env',
+    };
+  }
+
+  if (!currentSample) {
+    return { template: { ...template, components }, issue: 'missing_image_header_sample' };
+  }
+
+  try {
+    const mediaHandle = await uploadTemplateHeaderImageHandleToMeta({
+      accessToken,
+      sampleUrl: currentSample,
+      logger,
+    });
+    return {
+      template: {
+        ...template,
+        components: replaceImageHeaderHandleInComponents(components, mediaHandle),
+      },
+      issue: null,
+      source: 'meta_upload',
+    };
+  } catch (err) {
+    logger.warn?.('[whatsapp-templates] No se pudo generar media handle para cabecera de plantilla', {
+      reason: err?.response?.data || err?.message || err,
+    });
+    return { template: { ...template, components }, issue: 'image_header_sample_upload_failed', error: err };
+  }
 }
 
 async function selectCatalogTemplatesByDisciplines(disciplinas) {
@@ -1042,8 +1349,13 @@ async function createTemplatesFromCatalog({ wabaId, clinicId, groupId, assignmen
     const technicalName = familyRows.length
       ? resolveNextTechnicalTemplateName(template.name, familyRows)
       : template.name;
-    const metaTemplate = buildTemplateForTechnicalName(template, technicalName);
-    const imageHeaderSampleIssue = getImageHeaderSampleIssue(metaTemplate);
+    const preparedTemplate = await prepareTemplateImageHeaderForMeta({
+      template: buildTemplateForTechnicalName(template, technicalName),
+      accessToken: asset.waAccessToken,
+      logger: console,
+    });
+    const metaTemplate = preparedTemplate.template;
+    const imageHeaderSampleIssue = preparedTemplate.issue || getImageHeaderSampleIssue(metaTemplate);
     if (imageHeaderSampleIssue) {
       const rejectionReason = buildImageHeaderSamplePendingReason(imageHeaderSampleIssue);
       await upsertConnectedTemplateForWaba({
@@ -1243,8 +1555,13 @@ async function propagateCatalogTemplateToAllClinics({ templateCatalogId, logger 
           ? resolveNextTechnicalTemplateName(template.name, familyRows)
           : template.name;
         pendingTechnicalName = cleanString(technicalName) || pendingTechnicalName;
-        const metaTemplate = buildTemplateForTechnicalName(template, technicalName);
-        const imageHeaderSampleIssue = getImageHeaderSampleIssue(metaTemplate);
+        const preparedTemplate = await prepareTemplateImageHeaderForMeta({
+          template: buildTemplateForTechnicalName(template, technicalName),
+          accessToken: clinicConfig.accessToken,
+          logger,
+        });
+        const metaTemplate = preparedTemplate.template;
+        const imageHeaderSampleIssue = preparedTemplate.issue || getImageHeaderSampleIssue(metaTemplate);
         if (imageHeaderSampleIssue) {
           const rejectionReason = buildImageHeaderSamplePendingReason(imageHeaderSampleIssue);
           await upsertConnectedTemplateForWaba({
@@ -1434,7 +1751,7 @@ async function syncTemplatesForWaba({ wabaId, accessToken }) {
   const items = response.data?.data || [];
   const now = new Date();
   const catalogs = await WhatsappTemplateCatalog.findAll({
-    attributes: ['id', 'name', 'is_active'],
+    attributes: ['id', 'name', 'display_name', 'body_text', 'is_active'],
     raw: true,
   });
   const catalogById = new Map(
@@ -1444,18 +1761,26 @@ async function syncTemplatesForWaba({ wabaId, accessToken }) {
   for (const tpl of items) {
     const catalog = resolveCatalogTemplateByTechnicalName(catalogs, tpl.name);
     const catalogIsActive = !catalog || (catalog.is_active !== false && Number(catalog.is_active) !== 0);
+    const isStaleReviewTemplate = isStaleReviewRequestTemplate(tpl, catalog);
+    const remoteRejectionReason = tpl.rejected_reason || tpl.rejection_reason || null;
+    const rejectionReason = isStaleReviewTemplate
+      ? [
+          remoteRejectionReason,
+          'Retirada localmente: version antigua de plantilla de resenas.',
+        ].filter(Boolean).join(' | ')
+      : remoteRejectionReason;
     const payload = {
       waba_id: wabaId,
       name: tpl.name,
       language: tpl.language || DEFAULT_LANGUAGE,
       category: tpl.category || null,
       status: tpl.status || null,
-      rejection_reason: tpl.rejected_reason || tpl.rejection_reason || null,
+      rejection_reason: rejectionReason,
       components: tpl.components || null,
       meta_template_id: tpl.id || null,
       catalog_template_id: catalog?.id || null,
       origin: 'external',
-      is_active: catalogIsActive,
+      is_active: catalogIsActive && !isStaleReviewTemplate,
       last_synced_at: now,
     };
 
@@ -1469,7 +1794,7 @@ async function syncTemplatesForWaba({ wabaId, accessToken }) {
     } else {
       syncedRow = await WhatsappTemplate.create(payload);
     }
-    if (catalogIsActive) {
+    if (payload.is_active) {
       await notifyBulkSendsTemplateApproval(syncedRow);
     }
   }
@@ -1582,12 +1907,18 @@ async function syncTemplatesForWaba({ wabaId, accessToken }) {
       nextRejectionReason = override.rejection_reason || null;
     }
 
+    const wasApproved = String(override.status || '').trim().toUpperCase() === WHATSAPP_TEMPLATE_STATUS.APPROVED;
     await override.update({
       status: nextStatus,
       meta_template_id: nextMetaTemplateId,
       rejection_reason: nextRejectionReason,
       last_synced_at: now,
     });
+
+    const isNowApproved = String(nextStatus || '').trim().toUpperCase() === WHATSAPP_TEMPLATE_STATUS.APPROVED;
+    if (!wasApproved && isNowApproved) {
+      await notifyReviewPhotoTemplateApproved(override, catalog);
+    }
   }
 }
 

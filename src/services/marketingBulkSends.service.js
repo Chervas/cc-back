@@ -36,6 +36,7 @@ const {
   PatientCustomField,
   CitaPaciente,
   WhatsappTemplate,
+  JobRequest,
 } = db;
 
 const OBJECTIVE_ID = 'mass_sends';
@@ -51,6 +52,10 @@ const REVIEW_NO_RESPONSE_AUTOMATION_ACTION = 'action/review_no_response';
 const REVIEW_RATING_EVENT_TYPES = ['review_rating_received', 'review_request_rating'];
 const REVIEW_TEMPLATE_NAME = 'clinicaclick_solicitar_resena';
 const REVIEW_PHOTO_TEMPLATE_NAME = 'clinicaclick_solicitar_resena_foto';
+const REVIEW_REMINDER_TEMPLATE_NAME = 'clinicaclick_recordatorio_resena_sin_respuesta';
+const REVIEW_REMINDER_JOB_TYPE = 'marketing_review_request_reminder';
+const REVIEW_NO_RESPONSE_JOB_TYPE = 'marketing_review_request_no_response';
+const IMPORTED_HISTORICAL_APPOINTMENT_REASON = 'Importación de pacientes para reactivación';
 const DISPATCH_JOB_TYPE = 'marketing_bulk_send_dispatch';
 const DISPATCH_BATCH_SIZE = Math.max(1, Number.parseInt(process.env.MARKETING_BULK_SEND_BATCH_SIZE || '100', 10) || 100);
 const DISPATCH_BATCH_DELAY_MS = Math.max(2 * 60 * 1000, Number.parseInt(process.env.MARKETING_BULK_SEND_BATCH_DELAY_MS || String(2 * 60 * 1000), 10) || 2 * 60 * 1000);
@@ -68,10 +73,18 @@ const DISPATCH_BUSINESS_START_HOUR = Math.max(8, Number.parseInt(process.env.MAR
 const DISPATCH_BUSINESS_END_HOUR = 22;
 const LINK_TRACKING_DEFAULT_DOMAIN = process.env.MARKETING_LINK_TRACKING_DEFAULT_DOMAIN || 'envios.clinicaclick.com';
 const WHATSAPP_SESSION_WINDOW_MS = 23 * 60 * 60 * 1000 + 50 * 60 * 1000;
+const REVIEW_REMINDER_DELAY_MS = 24 * 60 * 60 * 1000;
+const REVIEW_NO_RESPONSE_DELAY_MS = 24 * 60 * 60 * 1000;
 const testSendCooldowns = new Map();
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function clampInteger(value, fallback, min, max) {
+  const parsed = Number.parseInt(value, 10);
+  if (!Number.isFinite(parsed)) return fallback;
+  return Math.min(Math.max(parsed, min), max);
 }
 
 function buildQuickChatMessagePayload(message) {
@@ -373,11 +386,22 @@ function isStarTextReviewBody(value) {
   const normalized = normalizeKey(text);
   return normalized.includes('numero')
     && normalized.includes('valoracion')
+    && reviewTemplateBodyHasSender(value)
     && /1\s*[⭐★]/.test(text)
     && /2\s*[⭐★]{2}/.test(text)
     && /3\s*[⭐★]{3}/.test(text)
     && /4\s*[⭐★]{4}/.test(text)
     && /5\s*[⭐★]{5}/.test(text);
+}
+
+function reviewTemplateBodyHasSender(value) {
+  const raw = String(value || '');
+  const normalized = normalizeKey(raw);
+  return /soy\s+\{\{\s*3\s*\}\}/i.test(raw)
+    || normalized.includes('firma_resenas')
+    || normalized.includes('remitente_resena')
+    || normalized.includes('nombre_remitente_resenas')
+    || normalized.includes('review_sender_name');
 }
 
 function normalizeTemplateUsage(value) {
@@ -430,7 +454,7 @@ function toTitleCaseName(value) {
 
 function normalizeNameFormat(value) {
   const format = normalizeKey(value);
-  if (['first_last', 'last_comma_first', 'full', 'auto'].includes(format)) return format;
+  if (['first_last', 'last_comma_first', 'last_last_first', 'full', 'auto'].includes(format)) return format;
   return 'auto';
 }
 
@@ -451,6 +475,15 @@ function splitNameParts(text, format) {
   const parts = fullName.split(/\s+/).filter(Boolean);
   if (!parts.length) return { firstName: 'Contacto', lastName: '', fullName: 'Contacto' };
   if (parts.length === 1) return { firstName: parts[0], lastName: '', fullName: parts[0] };
+  if (format === 'last_last_first' && parts.length >= 3) {
+    const firstName = parts.slice(2).join(' ');
+    const lastName = parts.slice(0, 2).join(' ');
+    return {
+      firstName: firstName || parts[parts.length - 1],
+      lastName,
+      fullName: [firstName, lastName].filter(Boolean).join(' ') || fullName,
+    };
+  }
   return {
     firstName: parts[0],
     lastName: parts.slice(1).join(' '),
@@ -888,22 +921,72 @@ function zonedDateToUtc({ year, month, day, hour, minute = 0, second = 0 }, time
   return new Date(utcGuess.getTime() - offsetMs);
 }
 
-function getNextBusinessAllowedAt(reference = new Date()) {
+function parseBusinessTimeToMinutes(value, fallbackMinutes) {
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    const hour = Math.floor(value);
+    return hour >= 0 && hour <= 23 ? hour * 60 : fallbackMinutes;
+  }
+  const match = String(value || '').trim().match(/^(\d{1,2})(?::(\d{2}))?/);
+  if (!match) return fallbackMinutes;
+  const hour = Number(match[1]);
+  const minute = Number(match[2] || 0);
+  if (!Number.isFinite(hour) || !Number.isFinite(minute) || hour < 0 || hour > 23 || minute < 0 || minute > 59) {
+    return fallbackMinutes;
+  }
+  return hour * 60 + minute;
+}
+
+function formatBusinessTime(minutes) {
+  const safe = Math.max(0, Math.min(23 * 60 + 59, Math.round(Number(minutes || 0))));
+  const hour = Math.floor(safe / 60);
+  const minute = safe % 60;
+  return `${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')}`;
+}
+
+function normalizeBusinessHours(input = {}) {
+  const raw = input && typeof input === 'object' ? input : {};
+  const defaultStart = DISPATCH_BUSINESS_START_HOUR * 60;
+  const defaultEnd = DISPATCH_BUSINESS_END_HOUR * 60;
+  let startMinutes = parseBusinessTimeToMinutes(raw.start_time ?? raw.start, defaultStart);
+  let endMinutes = parseBusinessTimeToMinutes(raw.end_time ?? raw.end, defaultEnd);
+  if (endMinutes <= startMinutes) {
+    startMinutes = defaultStart;
+    endMinutes = defaultEnd;
+  }
+  return {
+    ...raw,
+    start: Math.floor(startMinutes / 60),
+    end: Math.ceil(endMinutes / 60),
+    start_time: formatBusinessTime(startMinutes),
+    end_time: formatBusinessTime(endMinutes),
+    timezone: raw.timezone || DISPATCH_TIMEZONE,
+  };
+}
+
+function getNextBusinessAllowedAt(reference = new Date(), businessHours = null) {
+  const window = normalizeBusinessHours(businessHours || {});
   const parts = getMadridParts(reference);
-  if (parts.hour >= DISPATCH_BUSINESS_START_HOUR && parts.hour < DISPATCH_BUSINESS_END_HOUR) {
+  const currentMinutes = parts.hour * 60 + parts.minute;
+  const startMinutes = parseBusinessTimeToMinutes(window.start_time ?? window.start, DISPATCH_BUSINESS_START_HOUR * 60);
+  const endMinutes = parseBusinessTimeToMinutes(window.end_time ?? window.end, DISPATCH_BUSINESS_END_HOUR * 60);
+  if (currentMinutes >= startMinutes && currentMinutes < endMinutes) {
     return reference;
   }
-  if (parts.hour < DISPATCH_BUSINESS_START_HOUR) {
-    return zonedDateToUtc({ ...parts, hour: DISPATCH_BUSINESS_START_HOUR, minute: 0, second: 0 });
+  if (currentMinutes < startMinutes) {
+    return zonedDateToUtc({ ...parts, hour: Math.floor(startMinutes / 60), minute: startMinutes % 60, second: 0 });
   }
   const tomorrow = new Date(zonedDateToUtc({ ...parts, hour: 12, minute: 0, second: 0 }).getTime() + 24 * 60 * 60 * 1000);
   const nextParts = getMadridParts(tomorrow);
-  return zonedDateToUtc({ ...nextParts, hour: DISPATCH_BUSINESS_START_HOUR, minute: 0, second: 0 });
+  return zonedDateToUtc({ ...nextParts, hour: Math.floor(startMinutes / 60), minute: startMinutes % 60, second: 0 });
 }
 
-function isWithinBusinessHours(date = new Date()) {
+function isWithinBusinessHours(date = new Date(), businessHours = null) {
+  const window = normalizeBusinessHours(businessHours || {});
   const parts = getMadridParts(date);
-  return parts.hour >= DISPATCH_BUSINESS_START_HOUR && parts.hour < DISPATCH_BUSINESS_END_HOUR;
+  const currentMinutes = parts.hour * 60 + parts.minute;
+  const startMinutes = parseBusinessTimeToMinutes(window.start_time ?? window.start, DISPATCH_BUSINESS_START_HOUR * 60);
+  const endMinutes = parseBusinessTimeToMinutes(window.end_time ?? window.end, DISPATCH_BUSINESS_END_HOUR * 60);
+  return currentMinutes >= startMinutes && currentMinutes < endMinutes;
 }
 
 function parseMessagingLimit(value) {
@@ -918,24 +1001,41 @@ function parseMessagingLimit(value) {
   return Number.isFinite(amount) ? Math.round(amount * multiplier) : null;
 }
 
+function getMinimumDispatchDelayMs(dispatch = {}) {
+  const context = normalizeKey(dispatch.context || dispatch.dispatch_context || dispatch.dispatch_mode || '');
+  return ['review_request', 'reviews', 'solicitud_resena', 'resenas'].includes(context)
+    ? 60 * 1000
+    : 2 * 60 * 1000;
+}
+
 function getDispatchConfig(list) {
   const criteria = list?.criteria || {};
-  const dispatch = criteria.dispatch && typeof criteria.dispatch === 'object'
+  const rawDispatch = criteria.dispatch && typeof criteria.dispatch === 'object'
     ? criteria.dispatch
     : (criteria.dispatch_config && typeof criteria.dispatch_config === 'object' ? criteria.dispatch_config : {});
+  const isReviewRequest = criteria.review_request === true
+    || String(criteria.review_request || '').toLowerCase() === 'true'
+    || isReviewTemplateUsage(criteria.template_usage);
+  const dispatchContext = normalizeDispatchContext(rawDispatch.context || rawDispatch.dispatch_context || (isReviewRequest ? 'review_request' : null));
+  const dispatch = dispatchContext ? { ...rawDispatch, context: dispatchContext } : rawDispatch;
+  const businessHours = normalizeBusinessHours(dispatch.business_hours || {});
+  const minDelayMs = getMinimumDispatchDelayMs(dispatch);
+  const batchSize = Math.max(1, Math.min(1000, Number.parseInt(dispatch.batch_size || DISPATCH_BATCH_SIZE, 10) || DISPATCH_BATCH_SIZE));
+  const requestedDelayMs = Number.parseInt(dispatch.delay_ms || DISPATCH_BATCH_DELAY_MS, 10) || DISPATCH_BATCH_DELAY_MS;
+  const isDefaultReviewPacedDispatch = isReviewRequest
+    && dispatchContext === 'review_request'
+    && normalizeKey(dispatch.mode || '') === 'all_at_once'
+    && batchSize === 1
+    && requestedDelayMs === DISPATCH_BATCH_DELAY_MS;
   return {
-    batch_size: Number(dispatch.batch_size || DISPATCH_BATCH_SIZE) || DISPATCH_BATCH_SIZE,
-    delay_ms: Number(dispatch.delay_ms || DISPATCH_BATCH_DELAY_MS) || DISPATCH_BATCH_DELAY_MS,
+    ...dispatch,
+    batch_size: batchSize,
+    delay_ms: Math.max(minDelayMs, isDefaultReviewPacedDispatch ? 60 * 1000 : requestedDelayMs),
     min_read_rate: Number(dispatch.min_read_rate || DISPATCH_MIN_READ_RATE) || DISPATCH_MIN_READ_RATE,
     read_rate_grace_ms: Number(dispatch.read_rate_grace_ms || DISPATCH_READ_RATE_GRACE_MS) || DISPATCH_READ_RATE_GRACE_MS,
     max_opt_out_rate: Number(dispatch.max_opt_out_rate || DISPATCH_MAX_OPT_OUT_RATE) || DISPATCH_MAX_OPT_OUT_RATE,
     timezone: dispatch.timezone || DISPATCH_TIMEZONE,
-    business_hours: dispatch.business_hours || {
-      start: DISPATCH_BUSINESS_START_HOUR,
-      end: DISPATCH_BUSINESS_END_HOUR,
-      timezone: DISPATCH_TIMEZONE,
-    },
-    ...dispatch,
+    business_hours: businessHours,
   };
 }
 
@@ -1087,11 +1187,35 @@ async function upsertAdminBulkSendSettings(body = {}, userId = null) {
   return getAdminBulkSendSettings();
 }
 
-async function getDispatchConfigForList(list) {
+function mergeDispatchConfigs(...configs) {
+  return configs.reduce((acc, config) => {
+    if (!config || typeof config !== 'object') return acc;
+    const nextBusinessHours = config.business_hours && typeof config.business_hours === 'object'
+      ? {
+          ...(acc.business_hours || {}),
+          ...config.business_hours,
+        }
+      : acc.business_hours;
+    return {
+      ...acc,
+      ...config,
+      ...(nextBusinessHours ? { business_hours: nextBusinessHours } : {}),
+    };
+  }, {});
+}
+
+async function getDispatchConfigForList(list, override = null) {
   const admin = await getAdminBulkSendSettings().catch(() => null);
+  const listCriteria = list?.criteria || {};
+  const listDispatchConfig = listCriteria.dispatch_config && typeof listCriteria.dispatch_config === 'object'
+    ? listCriteria.dispatch_config
+    : {};
+  const listDispatch = listCriteria.dispatch && typeof listCriteria.dispatch === 'object'
+    ? listCriteria.dispatch
+    : {};
   const criteria = {
-    ...(list?.criteria || {}),
-    dispatch_config: admin?.settings || (list?.criteria || {}).dispatch_config || {},
+    ...listCriteria,
+    dispatch_config: mergeDispatchConfigs(admin?.settings || {}, listDispatchConfig, listDispatch, override || {}),
   };
   return getDispatchConfig({ ...list, criteria });
 }
@@ -1622,7 +1746,40 @@ function parseReviewClinicIds(source = {}) {
     : String(raw || '').split(',');
   return [...new Set(values
     .map((value) => Number(value))
+      .filter((value) => Number.isInteger(value) && value > 0))];
+}
+
+function parseReviewExcludedPatientIds(source = {}) {
+  const raw = source.excluded_review_patient_ids
+    ?? source.excludedReviewPatientIds
+    ?? source.review_excluded_patient_ids
+    ?? source.reviewExcludedPatientIds
+    ?? null;
+  const values = Array.isArray(raw)
+    ? raw
+    : String(raw || '').split(',');
+  return [...new Set(values
+    .map((value) => Number(value))
     .filter((value) => Number.isInteger(value) && value > 0))];
+}
+
+function parseReviewExclusionRules(source = {}) {
+  let raw = source.review_exclusion_rules ?? source.reviewExclusionRules ?? {};
+  if (typeof raw === 'string') {
+    try {
+      raw = JSON.parse(raw);
+    } catch (_) {
+      raw = {};
+    }
+  }
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+    raw = {};
+  }
+  return {
+    no_phone: raw.no_phone === true || String(raw.no_phone || '').toLowerCase() === 'true',
+    no_treatment: raw.no_treatment === true || String(raw.no_treatment || '').toLowerCase() === 'true',
+    no_visit_date: raw.no_visit_date === true || String(raw.no_visit_date || '').toLowerCase() === 'true',
+  };
 }
 
 function applyReviewClinicFilter(scope, source = {}) {
@@ -1637,6 +1794,115 @@ function applyReviewClinicFilter(scope, source = {}) {
     ...scope,
     clinicIds: selectedIds,
   };
+}
+
+function buildReviewRatingSummaryText(row = {}) {
+  const rating = Number(row.rating || 0) || null;
+  const privateReason = normalizeText(row.reason || '');
+  const googleComment = normalizeText(row.google_review_comment || '');
+  const googleMatched = row.google_review_matched === true || row.google_review_matched === 1;
+
+  if (rating === 5) {
+    if (googleComment) {
+      return `En Google han comentado: ${googleComment}`;
+    }
+    if (googleMatched) {
+      return 'Valoración positiva sin comentario interno por ser 5/5. No han comentado en Google.';
+    }
+    return 'Valoración positiva sin comentario interno por ser 5/5. No han comentado en Google o no hemos podido relacionar su usuario con el de la reseña.';
+  }
+
+  return privateReason || 'Sin comentario interno.';
+}
+
+function buildReviewResponseHeatmaps(rows = []) {
+  const weekdays = ['Lun', 'Mar', 'Mié', 'Jue', 'Vie', 'Sáb', 'Dom'];
+  const hours = Array.from({ length: 24 }, (_item, index) => index);
+  const empty = () => weekdays.map((day) => ({
+    name: day,
+    data: hours.map((hour) => ({ x: `${String(hour).padStart(2, '0')}:00`, y: 0 }))
+  }));
+  const heatmaps = {
+    winter: { label: 'Invierno', total: 0, series: empty() },
+    summer: { label: 'Verano', total: 0, series: empty() },
+  };
+
+  for (const row of rows || []) {
+    const season = String(row.season || '');
+    if (!heatmaps[season]) continue;
+    const weekday = Number(row.weekday);
+    const hour = Number(row.hour);
+    const total = Number(row.total || 0);
+    if (!Number.isInteger(weekday) || weekday < 0 || weekday > 6) continue;
+    if (!Number.isInteger(hour) || hour < 0 || hour > 23) continue;
+    heatmaps[season].series[weekday].data[hour].y = total;
+    heatmaps[season].total += total;
+  }
+
+  return heatmaps;
+}
+
+function buildGoogleRatingSummary(row = {}) {
+  const totalReviews = Number(row.total_reviews || 0);
+  const ratingSum = Number(row.rating_sum || 0);
+  const averageRating = totalReviews > 0
+    ? Number((ratingSum / totalReviews).toFixed(2))
+    : 0;
+  const fiveStarReviews = Number(row.five_star_reviews || 0);
+  const targetAverage = 4.95; // Umbral para que una media con un decimal pueda mostrarse como 5,0.
+  let neededFiveStarReviews = totalReviews > 0 ? 1 : 1;
+
+  if (totalReviews > 0 && averageRating >= targetAverage) {
+    neededFiveStarReviews = 0;
+  } else if (totalReviews > 0) {
+    neededFiveStarReviews = Math.max(1, Math.ceil(((targetAverage * totalReviews) - ratingSum) / (5 - targetAverage)));
+  }
+
+  return {
+    total_reviews: totalReviews,
+    five_star_reviews: fiveStarReviews,
+    average_rating: averageRating,
+    rating_sum: ratingSum,
+    target_average: targetAverage,
+    needed_five_star_reviews_for_5: neededFiveStarReviews,
+    rating_targets: buildGoogleRatingTargets(totalReviews, ratingSum, averageRating),
+  };
+}
+
+function calculateFiveStarReviewsNeeded(totalReviews, ratingSum, targetAverage) {
+  if (!totalReviews || targetAverage <= 0 || targetAverage >= 5) return 0;
+  if ((ratingSum / totalReviews) >= targetAverage) return 0;
+  return Math.max(1, Math.ceil(((targetAverage * totalReviews) - ratingSum) / (5 - targetAverage)));
+}
+
+function buildGoogleRatingTargets(totalReviews, ratingSum, averageRating) {
+  if (!totalReviews) return [];
+
+  const targets = [];
+  const currentRounded = Math.round(averageRating * 10) / 10;
+  const firstVisibleTarget = Math.min(4.9, Math.max(0.1, (Math.floor(currentRounded * 10) + 1) / 10));
+  const candidateVisibleTargets = [
+    firstVisibleTarget,
+    Math.min(4.9, firstVisibleTarget + 0.1),
+    5,
+  ];
+
+  for (const visibleTarget of candidateVisibleTargets) {
+    const roundedVisibleTarget = Number(visibleTarget.toFixed(1));
+    if (targets.some((target) => target.visible_average === roundedVisibleTarget)) {
+      continue;
+    }
+    const threshold = roundedVisibleTarget >= 5
+      ? 4.95
+      : Math.max(0, roundedVisibleTarget - 0.05);
+    targets.push({
+      visible_average: roundedVisibleTarget,
+      target_average: Number(threshold.toFixed(2)),
+      needed_five_star_reviews: calculateFiveStarReviewsNeeded(totalReviews, ratingSum, threshold),
+    });
+  }
+
+  return targets;
 }
 
 function isReviewRequestList(list) {
@@ -1699,6 +1965,34 @@ async function findExistingReviewRatingEvent(listId, itemId, options = {}) {
   return events[0] || null;
 }
 
+function classifyReviewRatingChange(previousRating, nextRating) {
+  const previous = Number(previousRating || 0);
+  const next = Number(nextRating || 0);
+  if (!previous || !next || previous === next) return { action: 'ignore', reason: 'same_or_invalid_rating' };
+  if (previous < 5) return { action: 'ignore', reason: 'previous_low_rating_locked' };
+  if (previous >= 5 && next < 5) return { action: 'downgrade_to_private_feedback', reason: 'positive_then_low_rating' };
+  return { action: 'ignore', reason: 'rating_change_not_actionable' };
+}
+
+async function createIgnoredReviewRatingEvent({ list, item, inboundMessage, triggerMessage, previousRating, rating, reason, occurredAt }) {
+  await MarketingPatientContactEvent.create({
+    list_id: list.id,
+    item_id: item.id,
+    paciente_id: item.paciente_id || null,
+    event_type: 'review_rating_ignored',
+    channel: 'whatsapp',
+    payload: {
+      previous_rating: previousRating || null,
+      rating,
+      reason,
+      inbound_message_id: inboundMessage?.id || null,
+      trigger_message_id: triggerMessage?.id || null,
+      content_preview: normalizeText(inboundMessage?.content).slice(0, 300),
+    },
+    occurred_at: occurredAt || new Date(),
+  });
+}
+
 function isReviewRatingTriggerMessage(triggerMessage) {
   const metadata = asPlainObject(triggerMessage?.metadata);
   const kind = normalizeKey(metadata.kind);
@@ -1714,6 +2008,20 @@ async function materializeReviewPrivateFeedback({ list, item, inboundMessage, tr
   const triggerMetadata = asPlainObject(triggerMessage?.metadata);
   if (!isReviewRequestList(list) || triggerMetadata.kind !== 'review_private_feedback_request') {
     return { applied: false };
+  }
+  const repeatedRating = extractReviewRatingFromInboundMessage(inboundMessage);
+  if (repeatedRating) {
+    await createIgnoredReviewRatingEvent({
+      list,
+      item,
+      inboundMessage,
+      triggerMessage,
+      previousRating: null,
+      rating: repeatedRating,
+      reason: 'rating_received_in_private_feedback_branch',
+      occurredAt,
+    });
+    return { applied: false, reason: 'rating_is_not_private_feedback' };
   }
   const content = normalizeText(inboundMessage.content);
   if (!content) return { applied: false };
@@ -2089,6 +2397,26 @@ function buildPatientDisplayName(patient) {
   return [patient?.nombre, patient?.apellidos].filter(Boolean).join(' ').trim() || 'Paciente';
 }
 
+function resolveReviewTreatmentLabel(appointment, source = 'manual_selection') {
+  const rawCandidates = [
+    appointment?.tratamiento?.nombre,
+    appointment?.tratamiento_nombre,
+    appointment?.treatment_name,
+    appointment?.titulo,
+    appointment?.motivo,
+  ];
+  for (const candidate of rawCandidates) {
+    let value = normalizeText(candidate);
+    if (!value) continue;
+    value = value.replace(/^Hist[oó]rico:\s*/i, '').trim();
+    if (!value || /^(visita|cita|atenci[oó]n recibida|importaci[oó]n de pacientes)/i.test(value)) {
+      continue;
+    }
+    return value;
+  }
+  return source === 'completed_treatment' ? 'tratamiento realizado' : 'atención recibida';
+}
+
 async function getReviewRequestedPatientIds(scope) {
   const clinicIds = Array.isArray(scope?.clinicIds) ? scope.clinicIds.filter(Number.isInteger) : [];
   if (!clinicIds.length) return new Set();
@@ -2126,9 +2454,8 @@ function mapReviewPatientItem({ patient, appointment = null, source = 'manual_se
   const formattedAppointmentDate = formatReviewDate(appointmentDate);
   const visitReference = formattedAppointmentDate
     ? `el pasado ${formattedAppointmentDate}`
-    : 'en tu última visita';
-  const treatment = normalizeText(appointment?.tratamiento?.nombre || appointment?.titulo || appointment?.motivo)
-    || (source === 'completed_treatment' ? 'tratamiento realizado' : 'visita');
+    : 'en tu última atención';
+  const treatment = resolveReviewTreatmentLabel(appointment, source);
   const clinicName = normalizeText(appointment?.clinica?.nombre_clinica || '');
 
   return {
@@ -2164,6 +2491,57 @@ function mapReviewPatientItem({ patient, appointment = null, source = 'manual_se
   };
 }
 
+function isImportedHistoricalAppointment(appointment) {
+  const reason = normalizeText(appointment?.motivo || appointment?.reason || '');
+  const title = normalizeText(appointment?.titulo || appointment?.title || '');
+  return reason === IMPORTED_HISTORICAL_APPOINTMENT_REASON
+    || reason.startsWith('Importación de pacientes')
+    || title.startsWith('Histórico:');
+}
+
+function getReviewRuleExclusionReason(item, rules = {}) {
+  if (rules.no_phone && !normalizeText(item?.phone)) {
+    return 'Sin teléfono móvil';
+  }
+  const treatment = normalizeText(item?.treatment || '').toLowerCase();
+  if (
+    rules.no_treatment
+    && (!treatment || treatment === 'sin tratamiento asignado' || treatment === 'atención recibida' || treatment === 'atencion recibida')
+  ) {
+    return 'Sin tratamiento asociado';
+  }
+  if (rules.no_visit_date && !item?.last_visit_at && !item?.appointment_at) {
+    return 'Sin fecha de atención';
+  }
+  return null;
+}
+
+function applyReviewRequestExclusions(items = [], source = {}) {
+  const excludedPatientIds = new Set(parseReviewExcludedPatientIds(source));
+  const rules = parseReviewExclusionRules(source);
+  if (!excludedPatientIds.size && !rules.no_phone && !rules.no_treatment && !rules.no_visit_date) {
+    return items;
+  }
+  return (items || []).map((item) => {
+    if (String(item?.status || '').startsWith('excluded')) {
+      return item;
+    }
+    const patientId = Number(item?.paciente_id || item?.patient_id || 0);
+    const manualExcluded = patientId && excludedPatientIds.has(patientId);
+    const ruleReason = getReviewRuleExclusionReason(item, rules);
+    if (!manualExcluded && !ruleReason) {
+      return item;
+    }
+    return {
+      ...item,
+      status: 'excluded_manual',
+      reason: manualExcluded ? 'Excluido manualmente de esta solicitud de reseña.' : ruleReason,
+      exclusion_reason: 'manual',
+      selected: false,
+    };
+  });
+}
+
 async function buildReviewRequestCandidateForAppointment(scope, body = {}) {
   const appointmentId = Number(body.review_appointment_id || body.appointment_id || body.cita_id || 0);
   const clinicIds = Array.isArray(scope?.clinicIds) ? scope.clinicIds.filter(Number.isInteger) : [];
@@ -2188,6 +2566,9 @@ async function buildReviewRequestCandidateForAppointment(scope, body = {}) {
   const plain = appointment.get ? appointment.get({ plain: true }) : appointment;
   if (plain.estado !== 'completada') {
     return { item: null, reason: 'appointment_not_completed' };
+  }
+  if (isImportedHistoricalAppointment(plain)) {
+    return { item: null, reason: 'imported_historical_appointment' };
   }
 
   const patient = plain.paciente;
@@ -2237,7 +2618,9 @@ async function buildItemsForReviewRequest(scope, body = {}) {
 
   if (body.review_appointment_id || body.appointment_id || body.cita_id) {
     const candidate = await buildReviewRequestCandidateForAppointment(scope, body);
-    return candidate.item ? [candidate.item] : [];
+    return candidate.item
+      ? applyReviewRequestExclusions([candidate.item], body).filter((item) => !String(item.status || '').startsWith('excluded'))
+      : [];
   }
 
   const source = normalizeReviewRequestSource(body.review_source || body.reviewRequestSource);
@@ -2279,21 +2662,105 @@ async function buildItemsForReviewRequest(scope, body = {}) {
         type: QueryTypes.SELECT,
       }
     );
-    return patients.map((patient) => mapReviewPatientItem({
-      patient,
-      appointment: {
-        clinica_id: Number(patient.review_clinica_id || patient.clinica_id || 0) || null,
-        clinica: { nombre_clinica: patient.review_clinica_nombre || '' },
-      },
-      source,
-    }));
+    const patientIds = patients
+      .map((patient) => Number(patient.id_paciente))
+      .filter((id) => Number.isInteger(id) && id > 0);
+    const customRows = PatientCustomField && patientIds.length
+      ? await PatientCustomField.findAll({
+        where: {
+          paciente_id: { [Op.in]: patientIds },
+          clinica_id: { [Op.in]: clinicIds },
+        },
+        attributes: ['paciente_id', 'field_key', 'value'],
+        raw: true,
+      })
+      : [];
+    const customByPatient = new Map();
+    for (const row of customRows) {
+      const id = Number(row.paciente_id);
+      if (!customByPatient.has(id)) customByPatient.set(id, []);
+      customByPatient.get(id).push(row);
+    }
+    const latestAppointmentRows = CitaPaciente && patientIds.length
+      ? await db.sequelize.query(
+        `
+        SELECT
+          c.id_cita,
+          c.paciente_id,
+          c.clinica_id,
+          c.tratamiento_id,
+          c.inicio,
+          c.titulo,
+          c.motivo,
+          cl.nombre_clinica AS clinica_nombre,
+          t.nombre AS tratamiento_nombre
+        FROM CitasPacientes c
+        LEFT JOIN Clinicas cl ON cl.id_clinica = c.clinica_id
+        LEFT JOIN Tratamientos t ON t.id_tratamiento = c.tratamiento_id
+        WHERE c.paciente_id IN (:patientIds)
+          AND c.clinica_id IN (:clinicIds)
+          AND c.estado = 'completada'
+        ORDER BY c.paciente_id ASC, c.inicio DESC, c.id_cita DESC
+        `,
+        {
+          replacements: {
+            clinicIds,
+            patientIds,
+          },
+          type: QueryTypes.SELECT,
+        }
+      )
+      : [];
+    const latestAppointmentByPatient = new Map();
+    for (const row of latestAppointmentRows) {
+      const patientId = Number(row.paciente_id);
+      if (!patientId || latestAppointmentByPatient.has(patientId)) continue;
+      latestAppointmentByPatient.set(patientId, row);
+    }
+
+    return applyReviewRequestExclusions(patients.map((patient) => {
+      const latestAppointment = latestAppointmentByPatient.get(Number(patient.id_paciente));
+      const item = mapReviewPatientItem({
+        patient,
+        appointment: latestAppointment
+          ? {
+            clinica_id: Number(latestAppointment.clinica_id || patient.review_clinica_id || patient.clinica_id || 0) || null,
+            tratamiento_id: Number(latestAppointment.tratamiento_id || 0) || null,
+            inicio: latestAppointment.inicio || null,
+            titulo: latestAppointment.titulo || '',
+            motivo: latestAppointment.motivo || '',
+            clinica: { nombre_clinica: latestAppointment.clinica_nombre || patient.review_clinica_nombre || '' },
+            tratamiento: latestAppointment.tratamiento_nombre
+              ? { nombre: latestAppointment.tratamiento_nombre }
+              : null,
+          }
+          : {
+            clinica_id: Number(patient.review_clinica_id || patient.clinica_id || 0) || null,
+            clinica: { nombre_clinica: patient.review_clinica_nombre || '' },
+          },
+        source,
+      });
+      const patientFields = buildPatientVariableFields(patient, customByPatient.get(Number(patient.id_paciente)) || []);
+      return {
+        ...item,
+        custom_fields: {
+          ...patientFields,
+          ...(item.custom_fields || {}),
+        },
+      };
+    }), body);
   }
 
   const appointmentWhere = {
     clinica_id: { [Op.in]: clinicIds },
-    estado: 'completada',
   };
   const treatmentIds = parseReviewTreatmentIds(body);
+  const treatmentMoment = normalizeText(body.review_treatment_moment || body.reviewTreatmentMoment || 'completed').toLowerCase();
+  if (treatmentMoment === 'started_or_completed' || treatmentMoment === 'started') {
+    appointmentWhere.estado = { [Op.ne]: 'cancelada' };
+  } else {
+    appointmentWhere.estado = 'completada';
+  }
   if (source === 'completed_treatment') {
     appointmentWhere[Op.or] = [
       { tratamiento_id: { [Op.ne]: null } },
@@ -2326,7 +2793,7 @@ async function buildItemsForReviewRequest(scope, body = {}) {
     if (selected.size >= limit) break;
   }
 
-  return Array.from(selected.values());
+  return applyReviewRequestExclusions(Array.from(selected.values()), body);
 }
 
 async function buildReviewTreatmentOptions(scope) {
@@ -2416,6 +2883,7 @@ function serializeReviewAutomationTemplate(template) {
     review_gift_enabled: config.review_gift_enabled === true || String(config.review_gift_enabled || '').toLowerCase() === 'true',
     review_gift_description: normalizeText(config.review_gift_description || '') || null,
     review_display_clinic_name: normalizeText(config.review_display_clinic_name || '') || null,
+    review_sender_name: normalizeText(config.review_sender_name || '') || null,
     review_team_photo_url: normalizeText(config.review_team_photo_url || '') || null,
     review_team_photo_overlay_color: publicMediaPersonalizationService.normalizeHexColor(
       config.review_team_photo_overlay_color || publicMediaPersonalizationService.DEFAULT_OVERLAY_COLOR
@@ -2504,11 +2972,60 @@ function reviewTemplateMatchesCurrentCatalogBody(template) {
   const plain = template?.get ? template.get({ plain: true }) : (template || {});
   const currentCatalogBody = normalizeText(plain.catalog?.body_text);
   if (!currentCatalogBody) return false;
-  return normalizeText(extractBodyText(plain.components)) === currentCatalogBody;
+  const templateBody = normalizeText(extractBodyText(plain.components));
+  return templateBody === currentCatalogBody && reviewTemplateBodyHasSender(templateBody);
+}
+
+function templateMatchesCurrentCatalogBody(template) {
+  const plain = template?.get ? template.get({ plain: true }) : (template || {});
+  const currentCatalogBody = normalizeText(plain.catalog?.body_text);
+  if (!currentCatalogBody) return false;
+  const templateBody = normalizeText(extractBodyText(plain.components));
+  return templateBody === currentCatalogBody;
 }
 
 function scoreReviewTemplateFreshness(template) {
   return reviewTemplateMatchesCurrentCatalogBody(template) ? 1 : 0;
+}
+
+async function findApprovedReviewReminderWhatsappTemplate(scope) {
+  const clinicIds = Array.isArray(scope?.clinicIds) ? scope.clinicIds.filter(Number.isInteger) : [];
+  if (!WhatsappTemplate || !clinicIds.length) return null;
+  const targetWabaId = await getPrimaryWabaIdForScope(scope);
+  const candidates = await WhatsappTemplate.findAll({
+    where: {
+      is_active: true,
+      status: 'APPROVED',
+      [Op.and]: [
+        {
+          [Op.or]: [
+            { clinic_id: { [Op.in]: clinicIds } },
+            { clinic_id: null },
+          ],
+        },
+        {
+          [Op.or]: [
+            { name: { [Op.like]: `${REVIEW_REMINDER_TEMPLATE_NAME}%` } },
+            { name: { [Op.like]: '%recordatorio_resena%' } },
+            { name: { [Op.like]: '%recordatorio_de_valoracion%' } },
+            ...(targetWabaId ? [{ waba_id: targetWabaId }] : []),
+          ],
+        },
+      ],
+    },
+    include: [{ model: db.WhatsappTemplateCatalog, as: 'catalog', attributes: ['id', 'name', 'display_name', 'body_text', 'variables'], required: false }],
+    order: [['updatedAt', 'DESC'], ['id', 'DESC']],
+  });
+  return candidates
+    .filter(isReviewReminderWhatsappTemplateCandidate)
+    .filter(templateMatchesCurrentCatalogBody)
+    .filter((template) => scoreWhatsappTemplateForScope(template, clinicIds, targetWabaId) > 0)
+    .sort((a, b) => {
+      const aScore = scoreWhatsappTemplateForScope(a, clinicIds, targetWabaId);
+      const bScore = scoreWhatsappTemplateForScope(b, clinicIds, targetWabaId);
+      if (aScore !== bScore) return bScore - aScore;
+      return Number(b.id || 0) - Number(a.id || 0);
+    })[0] || null;
 }
 
 async function findApprovedReviewWhatsappTemplate(scope, explicitTemplateId = null, options = {}) {
@@ -2534,6 +3051,7 @@ async function findApprovedReviewWhatsappTemplate(scope, explicitTemplateId = nu
     const photoTemplate = photoCandidates
       .filter(isPrimaryReviewRequestWhatsappTemplateCandidate)
       .filter(templateHasImageHeader)
+      .filter(reviewTemplateMatchesCurrentCatalogBody)
       .filter((template) => scoreWhatsappTemplateForScope(template, clinicIds, targetWabaId) > 0)
       .sort((a, b) => {
         const aScore = scoreWhatsappTemplateForScope(a, clinicIds, targetWabaId);
@@ -2582,12 +3100,13 @@ async function findApprovedReviewWhatsappTemplate(scope, explicitTemplateId = nu
           include: [{ model: db.WhatsappTemplateCatalog, as: 'catalog', attributes: ['id', 'name', 'display_name', 'body_text', 'variables'], required: false }],
           order: [['updatedAt', 'DESC'], ['id', 'DESC']],
         });
-        if (replacement && isPrimaryReviewRequestWhatsappTemplateCandidate(replacement)) {
+        if (
+          replacement
+          && isPrimaryReviewRequestWhatsappTemplateCandidate(replacement)
+          && reviewTemplateMatchesCurrentCatalogBody(replacement)
+        ) {
           return replacement;
         }
-      }
-      if (explicitMatchesWaba) {
-        return explicit;
       }
     }
     return null;
@@ -2623,6 +3142,7 @@ async function findApprovedReviewWhatsappTemplate(scope, explicitTemplateId = nu
   });
   return candidates
     .filter(isPrimaryReviewRequestWhatsappTemplateCandidate)
+    .filter(reviewTemplateMatchesCurrentCatalogBody)
     .filter((template) => scoreWhatsappTemplateForScope(template, clinicIds, targetWabaId) > 0)
     .sort((a, b) => {
       const aScore = scoreWhatsappTemplateForScope(a, clinicIds, targetWabaId);
@@ -2721,7 +3241,7 @@ async function buildReviewClinicStatuses(scope, options = {}) {
       isAll: false,
       isValid: true,
     };
-    const [candidateItems, approvedTemplate, googleReviewUrlAvailable, whatsappAvailable, clinicAutomationTemplate] = await Promise.all([
+    const [candidateItems, approvedTemplate, approvedReminderTemplate, approvedPhotoTemplate, googleReviewUrlAvailable, whatsappAvailable, clinicAutomationTemplate] = await Promise.all([
       buildItemsForReviewRequest(clinicScope, {
         review_request: true,
         review_source: reviewSource,
@@ -2730,28 +3250,35 @@ async function buildReviewClinicStatuses(scope, options = {}) {
         limit: 5000,
       }),
       findApprovedReviewWhatsappTemplate(clinicScope),
+      findApprovedReviewReminderWhatsappTemplate(clinicScope),
+      findApprovedReviewWhatsappTemplate(clinicScope, null, { preferPhoto: true }),
       hasGoogleReviewUrlForScope(clinicScope),
       hasWhatsappConfigForScope(clinicScope),
       getReviewAutomationTemplate(clinicScope, { includeInactive: true }),
     ]);
-    const ready = !!googleReviewUrlAvailable && !!whatsappAvailable && !!approvedTemplate;
+    const templatesReady = !!approvedTemplate && !!approvedReminderTemplate;
+    const ready = !!googleReviewUrlAvailable && !!whatsappAvailable && templatesReady;
     const serializedAutomation = serializeReviewAutomationTemplate(clinicAutomationTemplate);
     const automationExcludedByOverride = !!clinicAutomationTemplate && clinicAutomationTemplate.is_active !== true;
     const missing = [
       !googleReviewUrlAvailable ? 'google_review_url' : null,
       !whatsappAvailable ? 'whatsapp_connection' : null,
       !approvedTemplate ? 'approved_whatsapp_template' : null,
+      approvedTemplate && !approvedReminderTemplate ? 'approved_review_reminder_template' : null,
     ].filter(Boolean);
     const googleLabel = googleReviewUrlAvailable ? 'Ficha lista' : 'Falta Perfil Google';
     const whatsappLabel = whatsappAvailable ? 'WhatsApp conectado' : 'Falta WhatsApp';
-    const templateLabel = approvedTemplate ? 'Plantilla aprobada' : 'Plantilla del sistema pendiente';
+    const templateLabel = templatesReady
+      ? 'Plantillas aprobadas'
+      : (approvedTemplate ? 'Recordatorio pendiente' : 'Plantilla del sistema pendiente');
     const statusLabel = ready ? 'Lista para enviar' : 'No enviará todavía';
     const statusHint = ready
-      ? 'Esta sede tiene Perfil Google, WhatsApp y plantilla aprobada. Puede recibir solicitudes de valoración.'
+      ? 'Esta sede tiene Perfil Google, WhatsApp y plantillas aprobadas. Puede recibir solicitudes de valoración.'
       : [
           !googleReviewUrlAvailable ? 'Conecta su Perfil Google para generar el enlace correcto de reseña.' : null,
           !whatsappAvailable ? 'Conecta WhatsApp para poder enviar la solicitud.' : null,
           !approvedTemplate ? 'ClinicaClick debe tener una plantilla de reseñas aprobada por WhatsApp para esta sede.' : null,
+          approvedTemplate && !approvedReminderTemplate ? 'ClinicaClick debe tener aprobada también la plantilla de recordatorio de reseñas.' : null,
         ].filter(Boolean).join(' ');
     const automationLabel = clinicAutomationTemplate?.is_active === true
       ? (ready ? 'Activa' : 'Configurada, sin enviar')
@@ -2772,8 +3299,12 @@ async function buildReviewClinicStatuses(scope, options = {}) {
       google_status_label: googleLabel,
       whatsapp_available: !!whatsappAvailable,
       whatsapp_status_label: whatsappLabel,
-      approved_template_available: !!approvedTemplate,
+      approved_template_available: templatesReady,
       approved_template_id: approvedTemplate?.id || null,
+      approved_reminder_template_available: !!approvedReminderTemplate,
+      approved_reminder_template_id: approvedReminderTemplate?.id || null,
+      approved_photo_template_available: !!approvedPhotoTemplate && templateHasImageHeader(approvedPhotoTemplate),
+      approved_photo_template_id: templateHasImageHeader(approvedPhotoTemplate) ? (approvedPhotoTemplate?.id || null) : null,
       template_status_label: templateLabel,
       clinic_automation_enabled: clinicAutomationTemplate?.is_active === true,
       clinic_automation_has_override: !!clinicAutomationTemplate,
@@ -2817,7 +3348,9 @@ function buildReviewReadinessExclusion(item, readinessByClinic = new Map()) {
   const missing = Array.isArray(clinicStatus.missing) ? clinicStatus.missing : [];
   const missingLabels = missing.map((key) => {
     if (key === 'google_review_url') return 'ficha Google de reseñas';
+    if (key === 'whatsapp_connection') return 'WhatsApp conectado';
     if (key === 'approved_whatsapp_template') return 'plantilla WhatsApp aprobada';
+    if (key === 'approved_review_reminder_template') return 'plantilla de recordatorio aprobada';
     return key;
   });
   return {
@@ -2846,6 +3379,7 @@ async function getReviewRequestSummary(scope, options = {}) {
   const reviewSource = normalizeReviewRequestSource(options.review_source || options.reviewSource);
   const treatmentIds = parseReviewTreatmentIds(options);
   const effectiveScope = applyReviewClinicFilter(scope, options);
+  const previewLimit = clampInteger(options.preview_limit || options.previewLimit, 8, 1, 1000);
   const [candidates, treatmentOptions] = await Promise.all([
     buildItemsForReviewRequest(effectiveScope, {
       review_request: true,
@@ -2870,6 +3404,7 @@ async function getReviewRequestSummary(scope, options = {}) {
         automation_enabled: false,
         automation_template: null,
         approved_template_available: false,
+        approved_reminder_template_available: false,
         google_review_url_available: false,
         whatsapp_available: false,
       },
@@ -2891,6 +3426,13 @@ async function getReviewRequestSummary(scope, options = {}) {
         i.sent_at IS NOT NULL
         OR i.dispatch_status IN ('queued','sending','sent','delivered','read','replied')
       )
+      AND NOT EXISTS (
+        SELECT 1
+        FROM MarketingPatientContactEvents te
+        WHERE te.list_id = i.list_id
+          AND te.item_id = i.id
+          AND te.event_type IN ('mass_campaign_test_sent', 'mass_campaign_test_failed')
+      )
     `,
     { replacements: { clinicIds, objectiveId: OBJECTIVE_ID }, type: QueryTypes.SELECT }
   );
@@ -2902,10 +3444,83 @@ async function getReviewRequestSummary(scope, options = {}) {
       SUM(CASE WHEN CAST(JSON_UNQUOTE(JSON_EXTRACT(e.payload, '$.rating')) AS UNSIGNED) = 5 THEN 1 ELSE 0 END) AS ratings_5
     FROM MarketingPatientContactEvents e
     INNER JOIN MarketingPatientLists l ON l.id = e.list_id
-    LEFT JOIN MarketingPatientListItems i ON i.id = e.item_id
+    INNER JOIN MarketingPatientListItems i ON i.id = e.item_id
     WHERE l.objective_id = :objectiveId
-      AND COALESCE(i.clinica_id, l.clinica_id) IN (:clinicIds)
+      AND i.clinica_id IN (:clinicIds)
+      AND (
+        JSON_UNQUOTE(JSON_EXTRACT(l.criteria, '$.review_request')) IN ('true', '1')
+        OR JSON_UNQUOTE(JSON_EXTRACT(l.criteria, '$.template_usage')) = 'solicitud_resena'
+      )
+      AND (
+        i.sent_at IS NOT NULL
+        OR i.dispatch_status IN ('queued','sending','sent','delivered','read','replied')
+      )
+      AND NOT EXISTS (
+        SELECT 1
+        FROM MarketingPatientContactEvents te
+        WHERE te.list_id = i.list_id
+          AND te.item_id = i.id
+          AND te.event_type IN ('mass_campaign_test_sent', 'mass_campaign_test_failed')
+      )
       AND e.event_type IN ('review_rating_received', 'review_request_rating')
+    `,
+    { replacements: { clinicIds, objectiveId: OBJECTIVE_ID }, type: QueryTypes.SELECT }
+  );
+
+  const [googleReviewsMatchedRow] = await db.sequelize.query(
+    `
+    SELECT COUNT(DISTINCT r.id) AS total
+    FROM BusinessProfileReviews r
+    INNER JOIN MarketingPatientContactEvents e ON e.id = r.matched_contact_event_id
+    INNER JOIN MarketingPatientLists l ON l.id = e.list_id
+    INNER JOIN MarketingPatientListItems i ON i.id = e.item_id
+    WHERE r.clinica_id IN (:clinicIds)
+      AND l.objective_id = :objectiveId
+      AND (
+        JSON_UNQUOTE(JSON_EXTRACT(l.criteria, '$.review_request')) IN ('true', '1')
+        OR JSON_UNQUOTE(JSON_EXTRACT(l.criteria, '$.template_usage')) = 'solicitud_resena'
+      )
+      AND e.event_type = 'google_review_matched'
+      AND NOT EXISTS (
+        SELECT 1
+        FROM MarketingPatientContactEvents te
+        WHERE te.list_id = i.list_id
+          AND te.item_id = i.id
+          AND te.event_type IN ('mass_campaign_test_sent', 'mass_campaign_test_failed')
+      )
+    `,
+    { replacements: { clinicIds, objectiveId: OBJECTIVE_ID }, type: QueryTypes.SELECT }
+  );
+
+  const [googleReviewsAttributedRow] = await db.sequelize.query(
+    `
+    SELECT COUNT(DISTINCT r.id) AS total
+    FROM BusinessProfileReviews r
+    WHERE r.clinica_id IN (:clinicIds)
+      AND CAST(r.star_rating AS UNSIGNED) BETWEEN 1 AND 5
+      AND EXISTS (
+        SELECT 1
+        FROM MarketingPatientContactEvents e
+        INNER JOIN MarketingPatientLists l ON l.id = e.list_id
+        INNER JOIN MarketingPatientListItems i ON i.id = e.item_id
+        WHERE COALESCE(i.clinica_id, l.clinica_id) = r.clinica_id
+          AND l.objective_id = :objectiveId
+          AND (
+            JSON_UNQUOTE(JSON_EXTRACT(l.criteria, '$.review_request')) IN ('true', '1')
+            OR JSON_UNQUOTE(JSON_EXTRACT(l.criteria, '$.template_usage')) = 'solicitud_resena'
+          )
+          AND e.event_type = 'review_rating_followup_sent'
+          AND JSON_UNQUOTE(JSON_EXTRACT(e.payload, '$.kind')) = 'review_google_link_followup'
+          AND e.occurred_at <= COALESCE(r.create_time, r.update_time, r.created_at)
+          AND e.occurred_at >= DATE_SUB(COALESCE(r.create_time, r.update_time, r.created_at), INTERVAL 72 HOUR)
+          AND NOT EXISTS (
+            SELECT 1
+            FROM MarketingPatientContactEvents te
+            WHERE te.list_id = e.list_id
+              AND te.item_id = e.item_id
+              AND te.event_type IN ('mass_campaign_test_sent', 'mass_campaign_test_failed')
+          )
+      )
     `,
     { replacements: { clinicIds, objectiveId: OBJECTIVE_ID }, type: QueryTypes.SELECT }
   );
@@ -2929,14 +3544,56 @@ async function getReviewRequestSummary(scope, options = {}) {
         ORDER BY f.occurred_at DESC
         LIMIT 1
       ) AS reason,
+      (
+        SELECT r.comment
+        FROM MarketingPatientContactEvents gm
+        INNER JOIN BusinessProfileReviews r ON r.matched_contact_event_id = gm.id
+        WHERE gm.list_id = e.list_id
+          AND gm.item_id = e.item_id
+          AND gm.event_type = 'google_review_matched'
+        ORDER BY r.create_time DESC
+        LIMIT 1
+      ) AS google_review_comment,
+      (
+        SELECT r.reviewer_name
+        FROM MarketingPatientContactEvents gm
+        INNER JOIN BusinessProfileReviews r ON r.matched_contact_event_id = gm.id
+        WHERE gm.list_id = e.list_id
+          AND gm.item_id = e.item_id
+          AND gm.event_type = 'google_review_matched'
+        ORDER BY r.create_time DESC
+        LIMIT 1
+      ) AS google_reviewer_name,
+      EXISTS (
+        SELECT 1
+        FROM MarketingPatientContactEvents gm
+        WHERE gm.list_id = e.list_id
+          AND gm.item_id = e.item_id
+          AND gm.event_type = 'google_review_matched'
+      ) AS google_review_matched,
       e.occurred_at
     FROM MarketingPatientContactEvents e
     INNER JOIN MarketingPatientLists l ON l.id = e.list_id
-    LEFT JOIN MarketingPatientListItems i ON i.id = e.item_id
+    INNER JOIN MarketingPatientListItems i ON i.id = e.item_id
     LEFT JOIN Pacientes p ON p.id_paciente = e.paciente_id
-    LEFT JOIN Clinicas cl ON cl.id_clinica = COALESCE(i.clinica_id, l.clinica_id)
+    LEFT JOIN Clinicas cl ON cl.id_clinica = i.clinica_id
     WHERE l.objective_id = :objectiveId
-      AND COALESCE(i.clinica_id, l.clinica_id) IN (:clinicIds)
+      AND i.clinica_id IN (:clinicIds)
+      AND (
+        JSON_UNQUOTE(JSON_EXTRACT(l.criteria, '$.review_request')) IN ('true', '1')
+        OR JSON_UNQUOTE(JSON_EXTRACT(l.criteria, '$.template_usage')) = 'solicitud_resena'
+      )
+      AND (
+        i.sent_at IS NOT NULL
+        OR i.dispatch_status IN ('queued','sending','sent','delivered','read','replied')
+      )
+      AND NOT EXISTS (
+        SELECT 1
+        FROM MarketingPatientContactEvents te
+        WHERE te.list_id = i.list_id
+          AND te.item_id = i.id
+          AND te.event_type IN ('mass_campaign_test_sent', 'mass_campaign_test_failed')
+      )
       AND e.event_type IN ('review_rating_received', 'review_request_rating', 'review_rating_updated')
       AND CAST(JSON_UNQUOTE(JSON_EXTRACT(e.payload, '$.rating')) AS UNSIGNED) BETWEEN 1 AND 5
     ORDER BY e.occurred_at DESC
@@ -2945,9 +3602,64 @@ async function getReviewRequestSummary(scope, options = {}) {
     { replacements: { clinicIds, objectiveId: OBJECTIVE_ID }, type: QueryTypes.SELECT }
   );
 
-  const [automationTemplate, approvedReviewTemplate, googleReviewUrlAvailable, clinicStatuses] = await Promise.all([
-    getReviewAutomationTemplate(scope),
+  const reviewResponseHeatmapRows = await db.sequelize.query(
+    `
+    SELECT
+      CASE
+        WHEN MONTH(COALESCE(i.sent_at, e.occurred_at)) IN (12, 1, 2) THEN 'winter'
+        WHEN MONTH(COALESCE(i.sent_at, e.occurred_at)) IN (6, 7, 8) THEN 'summer'
+        ELSE 'other'
+      END AS season,
+      WEEKDAY(e.occurred_at) AS weekday,
+      HOUR(e.occurred_at) AS hour,
+      COUNT(*) AS total
+    FROM MarketingPatientContactEvents e
+    INNER JOIN MarketingPatientLists l ON l.id = e.list_id
+    INNER JOIN MarketingPatientListItems i ON i.id = e.item_id
+    WHERE l.objective_id = :objectiveId
+      AND i.clinica_id IN (:clinicIds)
+      AND (
+        JSON_UNQUOTE(JSON_EXTRACT(l.criteria, '$.review_request')) IN ('true', '1')
+        OR JSON_UNQUOTE(JSON_EXTRACT(l.criteria, '$.template_usage')) = 'solicitud_resena'
+      )
+      AND (
+        i.sent_at IS NOT NULL
+        OR i.dispatch_status IN ('queued','sending','sent','delivered','read','replied')
+      )
+      AND NOT EXISTS (
+        SELECT 1
+        FROM MarketingPatientContactEvents te
+        WHERE te.list_id = i.list_id
+          AND te.item_id = i.id
+          AND te.event_type IN ('mass_campaign_test_sent', 'mass_campaign_test_failed')
+      )
+      AND e.event_type IN ('review_rating_received', 'review_request_rating', 'review_rating_updated')
+      AND CAST(JSON_UNQUOTE(JSON_EXTRACT(e.payload, '$.rating')) AS UNSIGNED) BETWEEN 1 AND 5
+    GROUP BY season, WEEKDAY(e.occurred_at), HOUR(e.occurred_at)
+    ORDER BY season, weekday, hour
+    `,
+    { replacements: { clinicIds, objectiveId: OBJECTIVE_ID }, type: QueryTypes.SELECT }
+  );
+
+  const [googleRatingRow] = await db.sequelize.query(
+    `
+    SELECT
+      COUNT(*) AS total_reviews,
+      SUM(CAST(star_rating AS UNSIGNED)) AS rating_sum,
+      AVG(CAST(star_rating AS UNSIGNED)) AS average_rating,
+      SUM(CASE WHEN CAST(star_rating AS UNSIGNED) = 5 THEN 1 ELSE 0 END) AS five_star_reviews
+    FROM BusinessProfileReviews
+    WHERE clinica_id IN (:clinicIds)
+      AND CAST(star_rating AS UNSIGNED) BETWEEN 1 AND 5
+    `,
+    { replacements: { clinicIds }, type: QueryTypes.SELECT }
+  );
+
+  const [automationTemplate, approvedReviewTemplate, approvedReminderTemplate, approvedPhotoReviewTemplate, googleReviewUrlAvailable, clinicStatuses] = await Promise.all([
+    getReviewAutomationTemplate(scope, { includeInactive: true }),
     findApprovedReviewWhatsappTemplate(effectiveScope),
+    findApprovedReviewReminderWhatsappTemplate(effectiveScope),
+    findApprovedReviewWhatsappTemplate(effectiveScope, null, { preferPhoto: true }),
     hasGoogleReviewUrlForScope(effectiveScope),
     scope?.scope === 'group' ? buildReviewClinicStatuses(scope, options) : Promise.resolve([]),
   ]);
@@ -2955,13 +3667,25 @@ async function getReviewRequestSummary(scope, options = {}) {
   const whatsappAvailable = scope?.scope === 'group'
     ? groupReadyClinics.length > 0
     : await hasWhatsappConfigForScope(effectiveScope);
+  const manuallyFilteredCandidates = candidates.filter((item) => !String(item.status || '').startsWith('excluded'));
   const summaryCandidates = scope?.scope === 'group'
-    ? applyReviewClinicReadinessExclusions(candidates, clinicStatuses).filter((item) => !String(item.status || '').startsWith('excluded'))
-    : candidates;
+    ? applyReviewClinicReadinessExclusions(manuallyFilteredCandidates, clinicStatuses).filter((item) => !String(item.status || '').startsWith('excluded'))
+    : manuallyFilteredCandidates;
   const groupApprovedTemplate = groupReadyClinics.find((clinic) => clinic.approved_template_id)
     || clinicStatuses.find((clinic) => clinic.approved_template_id)
     || null;
   const effectiveApprovedTemplateId = approvedReviewTemplate?.id || groupApprovedTemplate?.approved_template_id || null;
+  const groupApprovedReminderTemplate = groupReadyClinics.find((clinic) => clinic.approved_reminder_template_id)
+    || clinicStatuses.find((clinic) => clinic.approved_reminder_template_id)
+    || null;
+  const effectiveApprovedReminderTemplateId = approvedReminderTemplate?.id || groupApprovedReminderTemplate?.approved_reminder_template_id || null;
+  const groupApprovedPhotoTemplate = groupReadyClinics.find((clinic) => clinic.approved_photo_template_id)
+    || clinicStatuses.find((clinic) => clinic.approved_photo_template_id)
+    || null;
+  const approvedPhotoTemplateHasImage = !!approvedPhotoReviewTemplate && templateHasImageHeader(approvedPhotoReviewTemplate);
+  const effectiveApprovedPhotoTemplateId = approvedPhotoTemplateHasImage
+    ? (approvedPhotoReviewTemplate?.id || null)
+    : (groupApprovedPhotoTemplate?.approved_photo_template_id || null);
   const groupAutomationTemplates = clinicStatuses
     .filter((clinic) => clinic.clinic_automation_enabled && clinic.clinic_automation_template)
     .map((clinic) => clinic.clinic_automation_template);
@@ -2970,17 +3694,22 @@ async function getReviewRequestSummary(scope, options = {}) {
     : serializeReviewAutomationTemplate(automationTemplate);
   const automationEnabled = scope?.scope === 'group'
     ? groupReadyClinics.length > 0 && groupReadyClinics.every((clinic) => clinic.clinic_automation_enabled === true)
-    : !!automationTemplate;
+    : automationTemplate?.is_active === true;
+  const googleRatingSummary = buildGoogleRatingSummary(googleRatingRow || {});
 
   return {
     success: true,
     summary: {
       possible_patients: summaryCandidates.length,
-      candidates_preview: summaryCandidates.slice(0, 8).map(serializeItem),
+      candidates_preview: summaryCandidates.slice(0, previewLimit).map(serializeItem),
+      candidates_preview_total: summaryCandidates.length,
+      candidates_preview_limit: previewLimit,
       treatment_options: treatmentOptions,
       requests_sent: Number(sentRow?.total || 0),
       ratings_1_to_4: Number(ratingsRow?.ratings_1_to_4 || 0),
       ratings_5: Number(ratingsRow?.ratings_5 || 0),
+      google_reviews_matched: Number(googleReviewsMatchedRow?.total || 0),
+      google_reviews_attributed: Number(googleReviewsAttributedRow?.total || 0),
       low_rating_reasons: (recentPrivateRatings || [])
         .map((row) => ({
           patient_name: normalizeText(row.patient_name) || 'Paciente',
@@ -2989,14 +3718,23 @@ async function getReviewRequestSummary(scope, options = {}) {
           clinic_id: Number(row.clinic_id || 0) || null,
           clinic_name: normalizeText(row.clinic_name) || null,
           rating: Number(row.rating || 0) || null,
-          reason: normalizeText(row.reason || (Number(row.rating || 0) === 5 ? 'Valoración positiva sin comentario.' : 'Sin comentario.')).slice(0, 500),
+          reason: buildReviewRatingSummaryText(row).slice(0, 700),
+          google_review_comment: normalizeText(row.google_review_comment || '') || null,
+          google_reviewer_name: normalizeText(row.google_reviewer_name || '') || null,
+          google_review_matched: row.google_review_matched === true || row.google_review_matched === 1,
           occurred_at: row.occurred_at || null,
         }))
         .filter((row) => row.rating),
+      review_response_heatmaps: buildReviewResponseHeatmaps(reviewResponseHeatmapRows || []),
+      google_rating_summary: googleRatingSummary,
       automation_enabled: automationEnabled,
       automation_template: effectiveAutomationTemplate,
-      approved_template_available: !!effectiveApprovedTemplateId,
+      approved_template_available: !!effectiveApprovedTemplateId && !!effectiveApprovedReminderTemplateId,
       approved_template_id: effectiveApprovedTemplateId,
+      approved_reminder_template_available: !!effectiveApprovedReminderTemplateId,
+      approved_reminder_template_id: effectiveApprovedReminderTemplateId,
+      approved_photo_template_available: !!effectiveApprovedPhotoTemplateId,
+      approved_photo_template_id: effectiveApprovedPhotoTemplateId,
       google_review_url_available: googleReviewUrlAvailable,
       whatsapp_available: whatsappAvailable,
       clinic_statuses: clinicStatuses,
@@ -3053,6 +3791,7 @@ function buildReviewAutomationNodes({
   reviewGiftEnabled = false,
   reviewGiftDescription = '',
   reviewDisplayClinicName = '',
+  reviewSenderName = '',
   reviewTeamPhotoUrl = '',
   reviewTeamPhotoOverlayColor = publicMediaPersonalizationService.DEFAULT_OVERLAY_COLOR,
 }) {
@@ -3089,6 +3828,7 @@ function buildReviewAutomationNodes({
         review_gift_enabled: giftEnabled,
         review_gift_description: giftEnabled ? normalizeText(reviewGiftDescription || '') : null,
         review_display_clinic_name: normalizeText(reviewDisplayClinicName || '') || null,
+        review_sender_name: normalizeText(reviewSenderName || '') || null,
         review_team_photo_url: normalizeText(reviewTeamPhotoUrl || '') || null,
         review_team_photo_overlay_color: publicMediaPersonalizationService.normalizeHexColor(reviewTeamPhotoOverlayColor),
         require_message_anchor_for_wait: true,
@@ -3106,7 +3846,7 @@ function buildReviewAutomationNodes({
         listens_to_node_id: 'N3',
         response_buffer_enabled: true,
       },
-      outputs: { on_response: 'N5', on_timeout: 'N8' },
+      outputs: { on_response: 'N5', on_timeout: 'N9' },
       position: { x: 120, y: 600 },
     },
     {
@@ -3147,15 +3887,40 @@ function buildReviewAutomationNodes({
       position: { x: 720, y: 700 },
     },
     {
-      id: 'N8',
+      id: 'N9',
+      type: 'action/request_review_reminder',
+      config: {
+        list_id: '{{outputs.N3.list_id}}',
+        item_id: '{{outputs.N3.item_id}}',
+        previous_message_id: '{{outputs.N3.message_id}}',
+        template_name: REVIEW_REMINDER_TEMPLATE_NAME,
+        reminder_policy: 'after_24h',
+      },
+      outputs: { on_success: 'N10', on_fail: 'N12' },
+      position: { x: 120, y: 760 },
+    },
+    {
+      id: 'N10',
+      type: 'delay/wait_response',
+      config: {
+        timeout_duration: 24,
+        timeout_unit: 'hours',
+        listens_to_node_id: 'N9',
+        response_buffer_enabled: true,
+      },
+      outputs: { on_response: 'N5', on_timeout: 'N12' },
+      position: { x: 120, y: 920 },
+    },
+    {
+      id: 'N12',
       type: REVIEW_NO_RESPONSE_AUTOMATION_ACTION,
       config: {
         list_id: '{{outputs.N3.list_id}}',
         item_id: '{{outputs.N3.item_id}}',
-        reason: 'sin_respuesta_a_solicitud',
+        reason: 'sin_respuesta_tras_recordatorio',
       },
       outputs: { on_success: null },
-      position: { x: 120, y: 760 },
+      position: { x: 120, y: 1080 },
     },
   ];
 }
@@ -3177,6 +3942,7 @@ async function upsertReviewRequestAutomationForClinic(scope, body = {}, userId =
     || String(body.review_gift_enabled ?? body.reviewGiftEnabled ?? '').toLowerCase() === 'true';
   const reviewGiftDescription = normalizeText(body.review_gift_description || body.reviewGiftDescription || '');
   const reviewDisplayClinicName = normalizeText(body.review_display_clinic_name || body.reviewDisplayClinicName || '');
+  const reviewSenderName = normalizeText(body.review_sender_name || body.reviewSenderName || '');
   const reviewTeamPhotoUrl = normalizeText(body.review_team_photo_url || body.reviewTeamPhotoUrl || '');
   const reviewTeamPhotoOverlayColor = publicMediaPersonalizationService.normalizeHexColor(
     body.review_team_photo_overlay_color || body.reviewTeamPhotoOverlayColor
@@ -3198,39 +3964,52 @@ async function upsertReviewRequestAutomationForClinic(scope, body = {}, userId =
     order: [['version', 'DESC'], ['id', 'DESC']],
   });
   if (!enabled && !existing) {
-    const [approvedReviewTemplate, googleReviewUrlAvailable, whatsappAvailable] = await Promise.all([
+    const [approvedReviewTemplate, approvedReminderTemplate, googleReviewUrlAvailable, whatsappAvailable] = await Promise.all([
       findApprovedReviewWhatsappTemplate(scope, whatsappTemplateId || null),
+      findApprovedReviewReminderWhatsappTemplate(scope),
       hasGoogleReviewUrlForScope(scope),
       hasWhatsappConfigForScope(scope),
     ]);
+    const templatesReady = !!approvedReviewTemplate && !!approvedReminderTemplate;
     return {
       success: true,
       automation_enabled: false,
       automation_template: null,
-      approved_template_available: !!approvedReviewTemplate,
+      approved_template_available: templatesReady,
       approved_template_id: approvedReviewTemplate?.id || null,
+      approved_reminder_template_available: !!approvedReminderTemplate,
+      approved_reminder_template_id: approvedReminderTemplate?.id || null,
       google_review_url_available: googleReviewUrlAvailable,
       whatsapp_available: whatsappAvailable,
       warnings: [
         !approvedReviewTemplate ? 'template_not_approved' : null,
+        approvedReviewTemplate && !approvedReminderTemplate ? 'reminder_template_not_approved' : null,
         !googleReviewUrlAvailable ? 'google_review_url_missing' : null,
         !whatsappAvailable ? 'whatsapp_missing' : null,
       ].filter(Boolean),
     };
   }
 
-  const [readyApprovedTemplate, readyGoogleReviewUrlAvailable, readyWhatsappAvailable] = await Promise.all([
+  const [readyApprovedTemplate, readyApprovedReminderTemplate, readyGoogleReviewUrlAvailable, readyWhatsappAvailable] = await Promise.all([
     findApprovedReviewWhatsappTemplate(scope, whatsappTemplateId || null),
+    findApprovedReviewReminderWhatsappTemplate(scope),
     hasGoogleReviewUrlForScope(scope),
     hasWhatsappConfigForScope(scope),
   ]);
-  if (enabled && (!readyApprovedTemplate || !readyGoogleReviewUrlAvailable || !readyWhatsappAvailable)) {
+  if (enabled && !reviewSenderName) {
+    const err = new Error('Indica el remitente que firma la solicitud de reseña antes de activar la automatización.');
+    err.status = 409;
+    err.details = { reason: 'review_automation_requirements_missing', warnings: ['sender_name_missing'] };
+    throw err;
+  }
+  if (enabled && (!readyApprovedTemplate || !readyApprovedReminderTemplate || !readyGoogleReviewUrlAvailable || !readyWhatsappAvailable)) {
     const warnings = [
       !readyApprovedTemplate ? 'template_not_approved' : null,
+      readyApprovedTemplate && !readyApprovedReminderTemplate ? 'reminder_template_not_approved' : null,
       !readyGoogleReviewUrlAvailable ? 'google_review_url_missing' : null,
       !readyWhatsappAvailable ? 'whatsapp_missing' : null,
     ].filter(Boolean);
-    const err = new Error('No se puede activar la automatización hasta conectar Perfil Google, WhatsApp y una plantilla aprobada de reseñas.');
+    const err = new Error('No se puede activar la automatización hasta conectar Perfil Google, WhatsApp y tener aprobadas las plantillas de reseñas y recordatorio.');
     err.status = 409;
     err.details = { reason: 'review_automation_requirements_missing', warnings };
     throw err;
@@ -3243,6 +4022,7 @@ async function upsertReviewRequestAutomationForClinic(scope, body = {}, userId =
     reviewGiftEnabled,
     reviewGiftDescription,
     reviewDisplayClinicName,
+    reviewSenderName,
     reviewTeamPhotoUrl,
     reviewTeamPhotoOverlayColor,
   });
@@ -3252,7 +4032,7 @@ async function upsertReviewRequestAutomationForClinic(scope, body = {}, userId =
     version: Math.max(Number(existing?.version || 0), 2),
     engine_version: 'v2',
     name: displayName,
-    description: 'Espera 24h tras finalizar un tratamiento, pide al paciente una valoración de 1 a 5 y deriva a Google solo si responde 5/5. Si no responde, cierra el flujo sin insistir.',
+    description: 'Espera 24h tras finalizar un tratamiento, pide al paciente una valoración con escala 5 a 1 y deriva a Google solo si responde 5/5. Si no responde, manda un recordatorio 24h después y cierra si sigue sin respuesta otras 24h.',
     trigger_type: REVIEW_AUTOMATION_TRIGGER,
     trigger_config: { event_name: REVIEW_AUTOMATION_TRIGGER },
     is_active: enabled,
@@ -3267,21 +4047,26 @@ async function upsertReviewRequestAutomationForClinic(scope, body = {}, userId =
   const row = existing
     ? await existing.update(payload)
     : await AutomationFlowTemplateV2.create(payload);
-  const [approvedReviewTemplate, googleReviewUrlAvailable, whatsappAvailable] = await Promise.all([
+  const [approvedReviewTemplate, approvedReminderTemplate, googleReviewUrlAvailable, whatsappAvailable] = await Promise.all([
     findApprovedReviewWhatsappTemplate(scope, whatsappTemplateId || null),
+    findApprovedReviewReminderWhatsappTemplate(scope),
     hasGoogleReviewUrlForScope(scope),
     hasWhatsappConfigForScope(scope),
   ]);
+  const templatesReady = !!approvedReviewTemplate && !!approvedReminderTemplate;
   return {
     success: true,
     automation_enabled: row.is_active === true,
     automation_template: serializeReviewAutomationTemplate(row),
-    approved_template_available: !!approvedReviewTemplate,
+    approved_template_available: templatesReady,
     approved_template_id: approvedReviewTemplate?.id || null,
+    approved_reminder_template_available: !!approvedReminderTemplate,
+    approved_reminder_template_id: approvedReminderTemplate?.id || null,
     google_review_url_available: googleReviewUrlAvailable,
     whatsapp_available: whatsappAvailable,
     warnings: [
       !approvedReviewTemplate ? 'template_not_approved' : null,
+      approvedReviewTemplate && !approvedReminderTemplate ? 'reminder_template_not_approved' : null,
       !googleReviewUrlAvailable ? 'google_review_url_missing' : null,
       !whatsappAvailable ? 'whatsapp_missing' : null,
     ].filter(Boolean),
@@ -3317,6 +4102,7 @@ async function setReviewRequestAutomation(scope, body = {}, userId = null) {
     || successful.find((result) => result.automation_template)?.automation_template
     || null;
   const approvedTemplateAvailable = successful.some((result) => result.approved_template_available === true);
+  const approvedReminderTemplateAvailable = successful.some((result) => result.approved_reminder_template_available === true);
   const googleReviewUrlAvailable = successful.some((result) => result.google_review_url_available === true);
   const whatsappAvailable = successful.some((result) => result.whatsapp_available === true);
   return {
@@ -3325,6 +4111,8 @@ async function setReviewRequestAutomation(scope, body = {}, userId = null) {
     automation_template: firstTemplate,
     approved_template_available: approvedTemplateAvailable,
     approved_template_id: successful.find((result) => result.approved_template_id)?.approved_template_id || null,
+    approved_reminder_template_available: approvedReminderTemplateAvailable,
+    approved_reminder_template_id: successful.find((result) => result.approved_reminder_template_id)?.approved_reminder_template_id || null,
     google_review_url_available: googleReviewUrlAvailable,
     whatsapp_available: whatsappAvailable,
     group_result: {
@@ -3336,6 +4124,7 @@ async function setReviewRequestAutomation(scope, body = {}, userId = null) {
     },
     warnings: [
       !approvedTemplateAvailable ? 'template_not_approved' : null,
+      !approvedReminderTemplateAvailable ? 'reminder_template_not_approved' : null,
       !googleReviewUrlAvailable ? 'google_review_url_missing' : null,
       !whatsappAvailable ? 'whatsapp_missing' : null,
       results.some((result) => result.success === false) ? 'some_clinics_failed' : null,
@@ -3364,6 +4153,7 @@ async function createAndStartReviewRequestForAppointment(options = {}) {
     || String(options.reviewGiftEnabled ?? options.review_gift_enabled ?? '').toLowerCase() === 'true';
   const reviewGiftDescription = normalizeText(options.reviewGiftDescription || options.review_gift_description || '');
   const reviewDisplayClinicName = normalizeText(options.reviewDisplayClinicName || options.review_display_clinic_name || '');
+  const reviewSenderName = normalizeText(options.reviewSenderName || options.review_sender_name || '');
   const reviewTeamPhotoUrl = normalizeText(options.reviewTeamPhotoUrl || options.review_team_photo_url || '');
   const reviewTeamPhotoOverlayColor = publicMediaPersonalizationService.normalizeHexColor(
     options.reviewTeamPhotoOverlayColor || options.review_team_photo_overlay_color
@@ -3396,6 +4186,11 @@ async function createAndStartReviewRequestForAppointment(options = {}) {
     return { success: true, sent: false, skipped: true, reason: 'approved_review_template_missing' };
   }
 
+  const reminderTemplate = await findApprovedReviewReminderWhatsappTemplate(scope);
+  if (!reminderTemplate) {
+    return { success: true, sent: false, skipped: true, reason: 'approved_review_reminder_template_missing' };
+  }
+
   try {
     const body = {
       name: `Solicitud de reseña · cita #${appointmentId}`,
@@ -3412,6 +4207,7 @@ async function createAndStartReviewRequestForAppointment(options = {}) {
       review_gift_enabled: reviewGiftEnabled,
       review_gift_description: reviewGiftEnabled ? reviewGiftDescription : null,
       review_display_clinic_name: reviewDisplayClinicName || resolveReviewDisplayClinicName({ criteria: {} }, clinic),
+      review_sender_name: reviewSenderName || resolveReviewSenderName({ criteria: {} }),
       review_team_photo_url: reviewTeamPhotoUrl || null,
       review_team_photo_overlay_color: reviewTeamPhotoOverlayColor,
       whatsapp_template_id: template.id,
@@ -3462,6 +4258,259 @@ async function createAndStartReviewRequestForAppointment(options = {}) {
       error: error?.message || String(error),
     };
   }
+}
+
+async function sendReviewRequestReminder(options = {}) {
+  const listId = Number(options.listId || options.list_id || 0);
+  const itemId = Number(options.itemId || options.item_id || 0);
+  if (!listId || !itemId) {
+    return { success: true, sent: false, skipped: true, reason: 'list_or_item_missing' };
+  }
+
+  const [list, item] = await Promise.all([
+    MarketingPatientList.findByPk(listId),
+    MarketingPatientListItem.findOne({ where: { id: itemId, list_id: listId } }),
+  ]);
+  if (!list || !item) {
+    return { success: true, sent: false, skipped: true, reason: 'review_request_not_found' };
+  }
+  if (item.replied_at || String(item.dispatch_status || '').toLowerCase() === 'replied') {
+    return { success: true, sent: false, skipped: true, reason: 'already_replied', list_id: listId, item_id: itemId };
+  }
+  if (!item.phone) {
+    return { success: true, sent: false, skipped: true, reason: 'phone_missing', list_id: listId, item_id: itemId };
+  }
+
+  const clinicId = Number(item.clinica_id || getClinicIdForList(list) || 0);
+  if (!clinicId) {
+    return { success: true, sent: false, skipped: true, reason: 'clinic_missing', list_id: listId, item_id: itemId };
+  }
+  const scope = {
+    scope: 'clinic',
+    clinicIds: [clinicId],
+    groupId: null,
+    isAll: false,
+    isValid: true,
+  };
+  const [clinic, clinicConfig, template] = await Promise.all([
+    loadClinicForTemplateVariables(clinicId),
+    whatsappService.getClinicConfig(clinicId).catch(() => null),
+    findApprovedReviewReminderWhatsappTemplate(scope),
+  ]);
+  if (!clinicConfig?.phoneNumberId || !clinicConfig?.accessToken) {
+    return { success: true, sent: false, skipped: true, reason: 'whatsapp_connection_missing', list_id: listId, item_id: itemId };
+  }
+  clinicConfig.clinicId = clinicId;
+  if (!template) {
+    return { success: true, sent: false, skipped: true, reason: 'approved_review_reminder_template_missing', list_id: listId, item_id: itemId };
+  }
+
+  const missingVariables = buildMissingVariablesSummary({ template, items: [item.get ? item.get({ plain: true }) : item], list, clinic });
+  if (missingVariables.length) {
+    return {
+      success: true,
+      sent: false,
+      skipped: true,
+      reason: 'missing_variables',
+      missing_variables: missingVariables,
+      list_id: listId,
+      item_id: itemId,
+    };
+  }
+
+  const batchIndex = Number(item.send_batch_index || 0) + 1;
+  const result = await sendDispatchItem({
+    list,
+    item,
+    template,
+    clinic,
+    clinicConfig,
+    batchIndex,
+    messageKind: 'review_request_reminder',
+    dispatchContextOverride: 'review_reminder',
+    eventType: 'review_request_reminder_sent',
+    connectionSource: 'review_request_reminder',
+  });
+  if (!result.sent) {
+    return {
+      success: true,
+      sent: false,
+      skipped: true,
+      reason: 'reminder_send_failed',
+      error: result.error?.message || result.error || null,
+      list_id: listId,
+      item_id: itemId,
+    };
+  }
+  return {
+    success: true,
+    sent: true,
+    skipped: false,
+    list_id: listId,
+    item_id: itemId,
+    patient_id: item.paciente_id || null,
+    message_id: result.message_id || result.app_message_id || null,
+    app_message_id: result.app_message_id || result.message_id || null,
+    conversation_id: result.conversation_id || null,
+    provider_message_id: result.provider_message_id || null,
+    dispatch_status: 'sent',
+    sent_at: result.sent_at || new Date(),
+    template_id: result.template_id || template.id,
+    template_name: result.template_name || template.name,
+  };
+}
+
+function buildJsonPayloadNumberWhere(key, value) {
+  return db.sequelize.where(
+    db.sequelize.literal(`CAST(JSON_UNQUOTE(JSON_EXTRACT(payload, '$.${key}')) AS UNSIGNED)`),
+    Number(value)
+  );
+}
+
+async function findReviewFollowupJob(type, listId, itemId) {
+  if (!JobRequest) return null;
+  return JobRequest.findOne({
+    where: {
+      type,
+      [Op.and]: [
+        buildJsonPayloadNumberWhere('list_id', listId),
+        buildJsonPayloadNumberWhere('item_id', itemId),
+      ],
+    },
+    order: [['created_at', 'DESC']],
+  });
+}
+
+async function hasReviewEvent(listId, itemId, eventTypes) {
+  const event = await MarketingPatientContactEvent.findOne({
+    where: {
+      list_id: listId,
+      item_id: itemId,
+      event_type: { [Op.in]: Array.isArray(eventTypes) ? eventTypes : [eventTypes] },
+    },
+    order: [['occurred_at', 'DESC']],
+  });
+  return !!event;
+}
+
+async function enqueueReviewNoResponseJob({ list, item, nextRunAt = null, triggerMessageId = null }) {
+  const listId = Number(list?.id || 0);
+  const itemId = Number(item?.id || 0);
+  if (!listId || !itemId) return null;
+  const existing = await findReviewFollowupJob(REVIEW_NO_RESPONSE_JOB_TYPE, listId, itemId);
+  if (existing && !['failed', 'cancelled'].includes(String(existing.status || '').toLowerCase())) {
+    return existing;
+  }
+  return jobRequestsService.enqueueJobRequest({
+    type: REVIEW_NO_RESPONSE_JOB_TYPE,
+    payload: {
+      list_id: listId,
+      item_id: itemId,
+      trigger_message_id: triggerMessageId || null,
+    },
+    priority: 'normal',
+    status: 'waiting',
+    origin: 'marketing_review_request',
+    maxAttempts: 1,
+    nextRunAt: nextRunAt || new Date(Date.now() + REVIEW_NO_RESPONSE_DELAY_MS),
+  });
+}
+
+async function enqueueReviewReminderJob({ list, item, sentAt = null, triggerMessageId = null }) {
+  const listId = Number(list?.id || 0);
+  const itemId = Number(item?.id || 0);
+  if (!listId || !itemId || !isReviewRequestList(list)) return null;
+  const existing = await findReviewFollowupJob(REVIEW_REMINDER_JOB_TYPE, listId, itemId);
+  if (existing && !['failed', 'cancelled'].includes(String(existing.status || '').toLowerCase())) {
+    return existing;
+  }
+  const base = sentAt ? new Date(sentAt) : new Date();
+  const nextRunAt = new Date((Number.isNaN(base.getTime()) ? Date.now() : base.getTime()) + REVIEW_REMINDER_DELAY_MS);
+  return jobRequestsService.enqueueJobRequest({
+    type: REVIEW_REMINDER_JOB_TYPE,
+    payload: {
+      list_id: listId,
+      item_id: itemId,
+      trigger_message_id: triggerMessageId || null,
+    },
+    priority: 'normal',
+    status: 'waiting',
+    origin: 'marketing_review_request',
+    maxAttempts: 1,
+    nextRunAt,
+  });
+}
+
+async function runReviewRequestReminderJob(payload = {}) {
+  const listId = Number(payload.list_id || payload.listId || 0);
+  const itemId = Number(payload.item_id || payload.itemId || 0);
+  if (!listId || !itemId) {
+    return { status: 'completed', result: { skipped: true, reason: 'missing_list_or_item' } };
+  }
+
+  const [list, item] = await Promise.all([
+    MarketingPatientList.findByPk(listId),
+    MarketingPatientListItem.findOne({ where: { id: itemId, list_id: listId } }),
+  ]);
+  if (!list || !item || String(list.status || '').toLowerCase() === 'archived') {
+    return { status: 'completed', result: { skipped: true, reason: 'list_or_item_not_available', list_id: listId, item_id: itemId } };
+  }
+  if (!isReviewRequestList(list)) {
+    return { status: 'completed', result: { skipped: true, reason: 'not_review_request', list_id: listId, item_id: itemId } };
+  }
+  if (item.replied_at || String(item.dispatch_status || '').toLowerCase() === 'replied') {
+    return { status: 'completed', result: { skipped: true, reason: 'already_replied', list_id: listId, item_id: itemId } };
+  }
+  const reminderAlreadySent = await hasReviewEvent(listId, itemId, ['review_request_reminder_sent']);
+  if (reminderAlreadySent) {
+    return { status: 'completed', result: { skipped: true, reason: 'reminder_already_sent', list_id: listId, item_id: itemId } };
+  }
+
+  const result = await sendReviewRequestReminder({ listId, itemId });
+  if (result?.sent) {
+    await enqueueReviewNoResponseJob({
+      list,
+      item,
+      triggerMessageId: result.message_id || result.app_message_id || null,
+      nextRunAt: new Date(Date.now() + REVIEW_NO_RESPONSE_DELAY_MS),
+    });
+  }
+  return { status: 'completed', result };
+}
+
+async function runReviewNoResponseJob(payload = {}) {
+  const listId = Number(payload.list_id || payload.listId || 0);
+  const itemId = Number(payload.item_id || payload.itemId || 0);
+  if (!listId || !itemId) {
+    return { status: 'completed', result: { skipped: true, reason: 'missing_list_or_item' } };
+  }
+  const [list, item] = await Promise.all([
+    MarketingPatientList.findByPk(listId),
+    MarketingPatientListItem.findOne({ where: { id: itemId, list_id: listId } }),
+  ]);
+  if (!list || !item || String(list.status || '').toLowerCase() === 'archived') {
+    return { status: 'completed', result: { skipped: true, reason: 'list_or_item_not_available', list_id: listId, item_id: itemId } };
+  }
+  if (item.replied_at || String(item.dispatch_status || '').toLowerCase() === 'replied') {
+    return { status: 'completed', result: { skipped: true, reason: 'already_replied', list_id: listId, item_id: itemId } };
+  }
+  const closedAlready = await hasReviewEvent(listId, itemId, ['review_request_no_response_closed']);
+  if (closedAlready) {
+    return { status: 'completed', result: { skipped: true, reason: 'already_closed', list_id: listId, item_id: itemId } };
+  }
+  await MarketingPatientContactEvent.create({
+    list_id: listId,
+    item_id: itemId,
+    paciente_id: item.paciente_id || null,
+    event_type: 'review_request_no_response_closed',
+    channel: 'whatsapp',
+    payload: {
+      reason: 'sin_respuesta_tras_recordatorio',
+      trigger_message_id: payload.trigger_message_id || null,
+    },
+    occurred_at: new Date(),
+  });
+  return { status: 'completed', result: { closed: true, list_id: listId, item_id: itemId } };
 }
 
 function serializeItem(item) {
@@ -3722,11 +4771,14 @@ async function createCampaign(scope, body = {}, userId = null) {
         review_treatment_id: isReviewRequest ? (reviewTreatmentIds[0] || null) : null,
         review_treatment_ids: isReviewRequest ? reviewTreatmentIds : [],
         review_treatment_moment: isReviewRequest ? normalizeText(body.review_treatment_moment || body.reviewTreatmentMoment || '') || null : null,
+        excluded_review_patient_ids: isReviewRequest ? parseReviewExcludedPatientIds(body) : [],
+        review_exclusion_rules: isReviewRequest ? parseReviewExclusionRules(body) : null,
         review_delay: isReviewRequest ? normalizeText(body.review_delay || body.reviewDelay || '24h') : null,
         review_threshold: isReviewRequest ? reviewThreshold : null,
         review_gift_enabled: isReviewRequest ? (body.review_gift_enabled === true || String(body.review_gift_enabled || '').toLowerCase() === 'true') : false,
         review_gift_description: isReviewRequest ? normalizeText(body.review_gift_description || body.reviewGiftDescription || '') || null : null,
         review_display_clinic_name: isReviewRequest ? normalizeText(body.review_display_clinic_name || body.reviewDisplayClinicName || '') || null : null,
+        review_sender_name: isReviewRequest ? normalizeText(body.review_sender_name || body.reviewSenderName || '') || null : null,
         review_team_photo_url: isReviewRequest ? normalizeText(body.review_team_photo_url || body.reviewTeamPhotoUrl || '') || null : null,
         review_team_photo_overlay_color: isReviewRequest
           ? publicMediaPersonalizationService.normalizeHexColor(body.review_team_photo_overlay_color || body.reviewTeamPhotoOverlayColor)
@@ -4331,24 +5383,65 @@ function resolveReviewDisplayClinicName(list, clinic) {
   );
 }
 
+function resolveReviewSenderName(list) {
+  const criteria = asPlainObject(list?.criteria);
+  return normalizeText(
+    criteria.review_sender_name
+    || criteria.reviewSenderName
+    || criteria.firma_resenas
+    || ''
+  ) || 'Recepción';
+}
+
+function firstTokenFromName(value) {
+  const clean = toTitleCaseName(value).replace(/\s+/g, ' ').trim();
+  if (!clean) return '';
+  const commaParts = clean.split(',').map((part) => part.trim()).filter(Boolean);
+  if (commaParts.length > 1) {
+    return commaParts[1].split(' ')[0] || commaParts[0].split(' ')[0] || '';
+  }
+  return clean.split(' ')[0] || '';
+}
+
+function resolvePatientFirstNameForTemplate(item = {}) {
+  const custom = asPlainObject(item.custom_fields);
+  return firstTokenFromName(
+    custom.nombre
+    || custom.nombre_paciente
+    || custom.first_name
+    || custom.firstname
+    || item.first_name
+    || item.firstname
+    || item.name
+    || ''
+  ) || 'Paciente';
+}
+
 function resolveVariableValue(variableName, item, list, clinic) {
   const key = normalizeKey(variableName);
   const custom = item.custom_fields || {};
   const displayClinicName = resolveReviewDisplayClinicName(list, clinic);
+  const reviewSenderName = resolveReviewSenderName(list);
+  const patientFirstName = resolvePatientFirstNameForTemplate(item || {});
+  const patientFullName = normalizeText(custom.nombre_completo || item.name || patientFirstName);
   const values = {
-    nombre: item.name,
-    nombre_paciente: item.name,
-    nombrepaciente: item.name,
+    nombre: patientFirstName,
+    nombre_paciente: patientFirstName,
+    nombrepaciente: patientFirstName,
     apellido: custom.apellido || custom.apellidos || custom.apellido_paciente || '',
     apellidos: custom.apellidos || custom.apellido || custom.apellido_paciente || '',
     apellido_paciente: custom.apellido_paciente || custom.apellido || custom.apellidos || '',
-    nombre_completo: custom.nombre_completo || item.name,
+    nombre_completo: patientFullName,
     telefono: item.phone,
     email: item.email,
     clinica: displayClinicName,
     nombre_clinica: displayClinicName,
     nombreclinica: displayClinicName,
     nombre_clinica_visible: displayClinicName,
+    firma_resenas: reviewSenderName,
+    nombre_remitente_resenas: reviewSenderName,
+    remitente_resena: reviewSenderName,
+    review_sender_name: reviewSenderName,
     telefono_clinica: clinic?.telefono || clinic?.telefono_clinica || '',
     direccion_clinica: clinic?.direccion || '',
     url_web_clinica: clinic?.url_web || '',
@@ -4365,8 +5458,8 @@ function resolveVariableValue(variableName, item, list, clinic) {
     tratamiento: item.treatment || '',
     fecha: custom.fecha || custom.fecha_cita || '',
     fecha_cita: custom.fecha_cita || custom.fecha || '',
-    referencia_visita: custom.referencia_visita || (custom.fecha_cita || custom.fecha ? `el pasado ${custom.fecha_cita || custom.fecha}` : 'en tu última visita'),
-    referencia_cita: custom.referencia_visita || (custom.fecha_cita || custom.fecha ? `el pasado ${custom.fecha_cita || custom.fecha}` : 'en tu última visita'),
+    referencia_visita: custom.referencia_visita || (custom.fecha_cita || custom.fecha ? `el pasado ${custom.fecha_cita || custom.fecha}` : 'en tu última atención'),
+    referencia_cita: custom.referencia_visita || (custom.fecha_cita || custom.fecha ? `el pasado ${custom.fecha_cita || custom.fecha}` : 'en tu última atención'),
   };
   return normalizeText(custom[key] || values[key] || '');
 }
@@ -4658,15 +5751,21 @@ async function resolveReviewHeaderPhotoUrl({
     });
     return personalized.url || photoUrl;
   } catch (error) {
-    if (['review_team_photo_must_be_public_media', 'review_team_photo_url_invalid'].includes(error?.message)) {
+    if (
+      ['review_team_photo_must_be_public_media', 'review_team_photo_url_invalid', 'review_team_photo_too_large', 'review_team_photo_output_too_large'].includes(error?.message)
+      || Number(error?.status || 0) === 413
+    ) {
       throw error;
     }
-    console.warn('[marketing-bulk-sends] No se pudo personalizar foto de reseñas; se usará la foto base', {
+    console.warn('[marketing-bulk-sends] No se pudo personalizar foto de reseñas; se bloqueará el envío para evitar foto sin nombre', {
       list_id: list?.id || null,
       item_id: item?.id || null,
       error: error?.message || error,
     });
-    return photoUrl;
+    const wrapped = new Error('review_team_photo_personalization_failed');
+    wrapped.status = Number(error?.status || 0) || 502;
+    wrapped.cause = error;
+    throw wrapped;
   }
 }
 
@@ -4845,7 +5944,13 @@ async function prepareCampaign(scope, campaignId, body = {}, userId = null) {
     capping: true,
     cancelable_queue: true,
   };
-  const dispatchConfig = await getDispatchConfigForList(list);
+  const dispatchConfig = await getDispatchConfigForList(list, body.dispatch_config || body.dispatchConfig || null);
+  const effectiveDispatchContext = isWelcomeDispatch
+    ? 'welcome'
+    : (isReviewRequest ? 'review_request' : normalizeDispatchContext(body.dispatch_context || body.dispatch_mode || dispatchConfig.context));
+  const dispatchLabel = isWelcomeDispatch
+    ? 'Bienvenida WhatsApp'
+    : (isReviewRequest ? (dispatchConfig.label || 'Solicitud de reseñas') : (dispatchConfig.label || null));
 
   const dispatchSnapshot = buildTemplateSnapshot(template);
   const listPatch = {
@@ -4870,6 +5975,18 @@ async function prepareCampaign(scope, campaignId, body = {}, userId = null) {
       review_treatment_id: isReviewRequest ? (reviewTreatmentIds[0] || null) : null,
       review_treatment_ids: isReviewRequest ? reviewTreatmentIds : [],
       review_treatment_moment: isReviewRequest ? normalizeText(body.review_treatment_moment || body.reviewTreatmentMoment || list.criteria?.review_treatment_moment || '') || null : null,
+      excluded_review_patient_ids: isReviewRequest
+        ? parseReviewExcludedPatientIds({
+          excluded_review_patient_ids: body.excluded_review_patient_ids
+            || body.excludedReviewPatientIds
+            || list.criteria?.excluded_review_patient_ids,
+        })
+        : [],
+      review_exclusion_rules: isReviewRequest
+        ? parseReviewExclusionRules(body.review_exclusion_rules !== undefined || body.reviewExclusionRules !== undefined
+          ? body
+          : { review_exclusion_rules: list.criteria?.review_exclusion_rules })
+        : null,
       review_delay: isReviewRequest ? normalizeText(body.review_delay || body.reviewDelay || list.criteria?.review_delay || '24h') : null,
       review_threshold: isReviewRequest ? reviewThreshold : null,
       review_gift_enabled: isReviewRequest
@@ -4881,6 +5998,9 @@ async function prepareCampaign(scope, campaignId, body = {}, userId = null) {
         : null,
       review_display_clinic_name: isReviewRequest
         ? normalizeText(body.review_display_clinic_name || body.reviewDisplayClinicName || list.criteria?.review_display_clinic_name || '') || null
+        : null,
+      review_sender_name: isReviewRequest
+        ? normalizeText(body.review_sender_name || body.reviewSenderName || list.criteria?.review_sender_name || '') || null
         : null,
       review_team_photo_url: isReviewRequest
         ? normalizeText(body.review_team_photo_url || body.reviewTeamPhotoUrl || list.criteria?.review_team_photo_url || '') || null
@@ -4896,11 +6016,12 @@ async function prepareCampaign(scope, campaignId, body = {}, userId = null) {
       link_tracking: buildLinkTrackingCriteria(body, list.criteria || {}),
       schedule_mode: body.schedule_mode || 'now',
       scheduled_at: body.scheduled_at || null,
+      dispatch_config: dispatchConfig,
       dispatch: {
         ...dispatchConfig,
         status: !approved && autoSendWhenApproved ? 'waiting_template_approval' : 'prepared',
-        context: isWelcomeDispatch ? 'welcome' : null,
-        label: isWelcomeDispatch ? 'Bienvenida WhatsApp' : null,
+        context: effectiveDispatchContext,
+        label: dispatchLabel,
         filter: dispatchFilter,
         whatsapp_template_id: template?.id || null,
         template_snapshot: dispatchSnapshot,
@@ -4937,6 +6058,7 @@ async function prepareCampaign(scope, campaignId, body = {}, userId = null) {
       user_id: userId || null,
       template_id: template?.id || null,
       context: isWelcomeDispatch ? 'welcome' : 'campaign',
+      dispatch_context: effectiveDispatchContext || (isWelcomeDispatch ? 'welcome' : 'campaign'),
       filter: dispatchFilter,
       safety_gates: nextGates,
       blocked_gates: getBlockedGates(nextGates),
@@ -5445,8 +6567,21 @@ async function startCampaignDispatch(scope, campaignId, body = {}, actor = null)
   const userId = getActorUserId(actor);
   const list = await MarketingPatientList.findByPk(campaignId);
   ensureScopeAccess(list, scope);
-  const dispatch = getDispatchConfig(list);
-  const context = normalizeDispatchContext(body.dispatch_context || body.dispatch_mode || dispatch.context);
+  const rawDispatchOverride = body.dispatch_config || body.dispatchConfig || null;
+  const requestedContext = normalizeDispatchContext(
+    body.dispatch_context
+    || body.dispatch_mode
+    || rawDispatchOverride?.context
+    || rawDispatchOverride?.dispatch_context
+    || list.criteria?.dispatch_config?.context
+    || list.criteria?.dispatch?.context
+    || (isReviewRequestList(list) ? 'review_request' : null)
+  );
+  const dispatchOverride = requestedContext
+    ? mergeDispatchConfigs(rawDispatchOverride || {}, { context: requestedContext })
+    : rawDispatchOverride;
+  const dispatch = await getDispatchConfigForList(list, dispatchOverride);
+  const context = requestedContext || normalizeDispatchContext(dispatch.context);
   const filter = buildDispatchFilterFromBody(body, context) || getDispatchItemFilter(dispatch);
   const channels = Array.isArray(list.criteria?.channels)
     ? list.criteria.channels
@@ -5501,7 +6636,7 @@ async function startCampaignDispatch(scope, campaignId, body = {}, actor = null)
   const accountQuality = await getWhatsappAccountQualityForList(list, scope);
   const scheduledAt = parseDate(body.scheduled_at || list.criteria?.scheduled_at);
   const reference = scheduledAt && scheduledAt.getTime() > Date.now() ? scheduledAt : new Date();
-  const businessAllowedAt = getNextBusinessAllowedAt(reference);
+  const businessAllowedAt = getNextBusinessAllowedAt(reference, dispatch.business_hours);
   const nextRunAt = businessAllowedAt.getTime() > Date.now() + 1000 ? businessAllowedAt : null;
   const job = await enqueueDispatchJob({ list, scope, nextRunAt, userId, context, filter });
   triggerDispatchJobIfReady(job, nextRunAt);
@@ -5527,7 +6662,7 @@ async function startCampaignDispatch(scope, campaignId, body = {}, actor = null)
   };
   await list.update({
     status: nextRunAt ? 'scheduled' : 'sending',
-    criteria: mergeCriteria(list, { dispatch: nextDispatch }),
+    criteria: mergeCriteria(list, { dispatch_config: dispatch, dispatch: nextDispatch }),
   });
   await MarketingPatientContactEvent.create({
     list_id: list.id,
@@ -5607,7 +6742,7 @@ async function resumeCampaignDispatch(scope, campaignId, body = {}, actor = null
     err.status = 409;
     throw err;
   }
-  const nextAllowed = getNextBusinessAllowedAt(new Date());
+  const nextAllowed = getNextBusinessAllowedAt(new Date(), dispatch.business_hours);
   const nextRunAt = nextAllowed.getTime() > Date.now() + 1000 ? nextAllowed : null;
   const job = await enqueueDispatchJob({ list, scope, nextRunAt, userId, context, filter });
   triggerDispatchJobIfReady(job, nextRunAt);
@@ -5735,10 +6870,21 @@ function extractProviderError(error) {
   };
 }
 
-async function sendDispatchItem({ list, item, template, clinic, clinicConfig, batchIndex }) {
+async function sendDispatchItem({
+  list,
+  item,
+  template,
+  clinic,
+  clinicConfig,
+  batchIndex,
+  messageKind = null,
+  dispatchContextOverride = null,
+  eventType = 'mass_campaign_message_sent',
+  connectionSource = 'mass_campaign_dispatch',
+}) {
   const plainItem = item.get ? item.get({ plain: true }) : item;
   const dispatch = getDispatchConfig(list);
-  const dispatchContext = normalizeDispatchContext(dispatch.context);
+  const dispatchContext = normalizeDispatchContext(dispatchContextOverride || dispatch.context);
   const params = await buildTemplateParams({ template, item: plainItem, list, clinic });
   const templateComponents = await buildTemplateComponentsForSend({
     template,
@@ -5770,6 +6916,7 @@ async function sendDispatchItem({ list, item, template, clinic, clinicConfig, ba
     status: 'pending',
     metadata: {
       kind: dispatchContext === 'welcome' ? 'mass_campaign_welcome_send' : 'mass_campaign_send',
+      ...(messageKind ? { kind: messageKind } : {}),
       source: 'marketing_bulk_sends',
       dispatch_context: dispatchContext || 'campaign',
       list_id: list.id,
@@ -5830,7 +6977,7 @@ async function sendDispatchItem({ list, item, template, clinic, clinicConfig, ba
       list_id: list.id,
       item_id: item.id,
       paciente_id: item.paciente_id || null,
-      event_type: 'mass_campaign_message_sent',
+      event_type: eventType,
       channel: 'whatsapp',
       payload: {
         provider_message_id: providerMessageId,
@@ -5845,9 +6992,37 @@ async function sendDispatchItem({ list, item, template, clinic, clinicConfig, ba
       phoneId: clinicConfig.phoneNumberId || null,
       wabaId: clinicConfig.wabaId || null,
       messageId: appMessage.id,
-      source: 'mass_campaign_dispatch',
+      source: connectionSource,
     }).catch(() => null);
-    return { sent: true };
+    if (
+      eventType === 'mass_campaign_message_sent'
+      && isReviewRequestList(list)
+      && isReviewRatingTriggerMessage(appMessage)
+      && dispatchContext !== 'review_reminder'
+    ) {
+      await enqueueReviewReminderJob({
+        list,
+        item,
+        sentAt: appMessage.sent_at || new Date(),
+        triggerMessageId: appMessage.id,
+      }).catch((error) => {
+        console.warn('[marketing-bulk-sends] No se pudo programar recordatorio de reseña', {
+          list_id: list.id,
+          item_id: item.id,
+          error: error?.message || error,
+        });
+      });
+    }
+    return {
+      sent: true,
+      app_message_id: appMessage.id,
+      message_id: appMessage.id,
+      provider_message_id: providerMessageId,
+      conversation_id: conversation.id,
+      sent_at: appMessage.sent_at || new Date(),
+      template_id: template.id,
+      template_name: template.name,
+    };
   } catch (error) {
     const providerError = extractProviderError(error);
     await appMessage.update({
@@ -5871,7 +7046,7 @@ async function sendDispatchItem({ list, item, template, clinic, clinicConfig, ba
       list_id: list.id,
       item_id: item.id,
       paciente_id: item.paciente_id || null,
-      event_type: 'mass_campaign_message_failed',
+      event_type: eventType === 'mass_campaign_message_sent' ? 'mass_campaign_message_failed' : `${eventType}_failed`,
       channel: 'whatsapp',
       payload: {
         app_message_id: appMessage.id,
@@ -5889,7 +7064,7 @@ async function sendDispatchItem({ list, item, template, clinic, clinicConfig, ba
       wabaId: clinicConfig.wabaId || null,
       messageId: appMessage.id,
       recipient: item.phone,
-      source: 'mass_campaign_dispatch',
+      source: connectionSource,
     }).catch(() => null);
     return { sent: false, error: providerError };
   }
@@ -5925,8 +7100,8 @@ async function runDispatchJob(payload = {}, jobRequest = null) {
     });
     return { status: 'completed', result: { cancelled: true, list_id: list.id } };
   }
-  if (!isWithinBusinessHours(new Date())) {
-    const nextAllowed = getNextBusinessAllowedAt(new Date());
+  if (!isWithinBusinessHours(new Date(), dispatch.business_hours)) {
+    const nextAllowed = getNextBusinessAllowedAt(new Date(), dispatch.business_hours);
     await list.update({
       status: 'scheduled',
       criteria: mergeCriteria(list, {
@@ -6346,7 +7521,7 @@ async function materializeInboundReply({ conversation, inboundMessage }) {
     : null;
   const existingRating = reviewRating
     ? await findExistingReviewRatingEvent(listId, itemId, {
-      sameTriggerOnly: Number(triggerMessage?.id || 0) > 0,
+      sameTriggerOnly: false,
       triggerMessageId: triggerMessage.id,
     })
     : null;
@@ -6363,6 +7538,29 @@ async function materializeInboundReply({ conversation, inboundMessage }) {
       const previousPayload = existingRating.payload || {};
       const previousRating = Number(previousPayload.rating || 0);
       if (previousRating && previousRating !== reviewRating) {
+        const ratingChange = classifyReviewRatingChange(previousRating, reviewRating);
+        if (ratingChange.action === 'ignore') {
+          await createIgnoredReviewRatingEvent({
+            list,
+            item,
+            inboundMessage,
+            triggerMessage,
+            previousRating,
+            rating: reviewRating,
+            reason: ratingChange.reason,
+            occurredAt: repliedAt,
+          });
+          await refreshListCounters(listId);
+          return {
+            applied: true,
+            list_id: listId,
+            item_id: itemId,
+            review_rating: reviewRating,
+            previous_rating: previousRating,
+            rating_ignored: true,
+            reason: ratingChange.reason,
+          };
+        }
         await existingRating.update({
           payload: {
             ...previousPayload,
@@ -6519,6 +7717,9 @@ module.exports = {
   getReviewRequestSummary,
   setReviewRequestAutomation,
   createAndStartReviewRequestForAppointment,
+  sendReviewRequestReminder,
+  runReviewRequestReminderJob,
+  runReviewNoResponseJob,
   listRecipients,
   updateRecipient,
   prepareCampaign,

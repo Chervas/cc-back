@@ -155,10 +155,10 @@ function parseStringArrayLike(raw) {
   return [];
 }
 
-function parseLimit(raw, fallback = 20) {
+function parseLimit(raw, fallback = 20, max = 100) {
   const parsed = parseIntOrNull(raw);
   if (!parsed || parsed <= 0) return fallback;
-  return Math.min(parsed, 100);
+  return Math.min(parsed, max);
 }
 
 function parseOffset(raw) {
@@ -945,6 +945,7 @@ const NODE_TYPES_V2 = [
       review_threshold: 5,
       whatsapp_template_id: null,
       template_name: 'clinicaclick_solicitar_resena',
+      review_sender_name: 'Recepción',
       review_team_photo_url: null,
       review_team_photo_overlay_color: '#4f46e5',
       require_message_anchor_for_wait: true,
@@ -953,6 +954,19 @@ const NODE_TYPES_V2 = [
     config_schema: [
       { key: 'review_source', label: 'Cuándo se pide', input_type: 'select', required: false, options: ['completed_treatment', 'manual_selection'] },
     ],
+  },
+  {
+    type: 'action/request_review_reminder',
+    category: 'action',
+    label: 'Recordar valoración',
+    description: 'Envía el recordatorio de valoración por WhatsApp 24h después si el paciente no respondió.',
+    output_keys: ['on_success', 'on_fail'],
+    runtime_status: 'real',
+    default_config: {
+      template_name: 'clinicaclick_recordatorio_resena_sin_respuesta',
+      reminder_policy: 'after_24h',
+    },
+    config_schema: [],
   },
   {
     type: 'action/review_followup',
@@ -2079,9 +2093,17 @@ function hasTemplateOperationalScope(item) {
   return !!(parseIntOrNull(item?.clinic_id) || parseIntOrNull(item?.group_id));
 }
 
+function isPublishedTemplate(item) {
+  return !!item?.published_at;
+}
+
+function isActiveTemplate(item) {
+  return parseBool(item?.is_active, true) === true;
+}
+
 function collapseCatalogManagedRowsForScopedList(rows, shouldCollapse) {
   const sourceRows = Array.isArray(rows) ? rows : [];
-  if (!shouldCollapse || sourceRows.length < 2) return sourceRows;
+  if (!shouldCollapse || !sourceRows.length) return sourceRows;
 
   const groups = new Map();
   sourceRows.forEach((row) => {
@@ -2093,12 +2115,20 @@ function collapseCatalogManagedRowsForScopedList(rows, shouldCollapse) {
   });
 
   const hiddenIds = new Set();
-  groups.forEach((groupRows) => {
-    const hasScopedCopy = groupRows.some((row) => hasTemplateOperationalScope(row));
-    if (!hasScopedCopy) return;
+  groups.forEach((groupRows, familyKey) => {
+    const scopedRows = groupRows.filter((row) => hasTemplateOperationalScope(row));
+    const isReviewRequestFamily = familyKey === 'catalog:review_request_system';
+    const hasScopedCopy = scopedRows.length > 0;
 
     groupRows.forEach((row) => {
-      if (!hasTemplateOperationalScope(row) && row?.is_system) {
+      const isSystemBase = !hasTemplateOperationalScope(row) && row?.is_system;
+      // La automatización de reseñas solo es operativa cuando existe una copia
+      // configurada para la clínica/grupo desde Campañas > Reseñas. La base de
+      // sistema es catálogo y no debe aparecer como "activa" en scope de cliente.
+      if ((isReviewRequestFamily || hasScopedCopy) && isSystemBase) {
+        hiddenIds.add(Number(row.id));
+      }
+      if (isReviewRequestFamily && hasTemplateOperationalScope(row) && isPublishedTemplate(row) && !isActiveTemplate(row)) {
         hiddenIds.add(Number(row.id));
       }
     });
@@ -4413,7 +4443,7 @@ exports.listTemplates = async (req, res) => {
       return res.status(403).json({ success: false, error: 'forbidden' });
     }
 
-    const limit = parseLimit(req.query?.limit, 20);
+    const limit = parseLimit(req.query?.limit, 20, 500);
     const offset = parseOffset(req.query?.offset);
     const includeNodes = parseBool(req.query?.include_nodes, false);
 

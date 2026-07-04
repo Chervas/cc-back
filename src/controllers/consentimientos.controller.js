@@ -355,6 +355,15 @@ exports.listProfessionalPendingDocuments = asyncHandler(async (req, res) => {
     }
 });
 
+exports.listClinicPendingPatientDocuments = asyncHandler(async (req, res) => {
+    try {
+        const items = await consentimientosService.listClinicPendingPatientDocuments(req.query || {}, getUserId(req));
+        return res.json({ items, total: items.length });
+    } catch (error) {
+        return sendError(res, error);
+    }
+});
+
 exports.revokeDocument = asyncHandler(async (req, res) => {
     try {
         const item = await consentimientosService.revokeConsentDocument(req.params.id, {
