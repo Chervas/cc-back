@@ -78,6 +78,29 @@ Reglas:
 - Desde 2026-07-04 la respuesta incluye `nextAppointments` para que el frontend explique estados vacíos de "citas de hoy" sin recomponer agenda en Angular. Se calcula en backend con la misma tabla base `CitasPacientes` y excluye canceladas/reprogramadas.
 - El feedback positivo de ejemplo no se devuelve; cuando se reactive debe venir como señal real atribuible a ClinicaClick.
 
+## Control de acceso por capacidades
+
+Endpoint real:
+
+| Endpoint | Estado | Uso |
+|:---|:---|:---|
+| `GET /api/access-policies/overrides` | Operativo V1 | Lista overrides accesibles para el usuario autenticado. |
+| `PUT /api/access-policies/overrides` | Operativo V1 | Crea, actualiza o elimina (`state=inherit`) un override por ámbito, capacidad y rol operativo. |
+
+Contrato:
+
+- `scope_type`: `group` o `clinic`.
+- `scope_id`: ID del grupo o clínica.
+- `feature_key`: `marketing`, `clinic.settings.edit`, `billing.reports.view`, `patients.view`, `patients.edit`, `appointments.manage`, `consents.manage`, `quickchat.read_patients`, `quickchat.read_team`, `quickchat.read_leads`.
+- `role_code`: `propietario`, `agencia`, `doctor`, `assistant`, `reception`, `admin_staff` o `unknown`.
+- `effect`: `allow` o `deny`; `state=inherit` borra el override.
+
+Reglas:
+
+- `administrador` no se persiste como `role_code`; mantiene acceso completo.
+- Un administrador puede leer/escribir todos los ámbitos. Un propietario solo puede escribir overrides en sus clínicas/grupos; el resto de staff solo lee sus ámbitos accesibles.
+- La tabla `AccessPolicyOverrides` usa una clave única por `scope_type`, `scope_id`, `feature_key` y `role_code`.
+
 ### WhatsApp coexistencia: regla de gateway
 
 Roadmap funcional y tecnico: `cc-front/src/Documentacion/14.3-whatsapp-coexistencia.md`.

@@ -16,7 +16,7 @@ const ALLOWED_FEATURE_KEYS = new Set([
   'quickchat.read_team',
   'quickchat.read_leads',
 ]);
-const ALLOWED_ROLE_CODES = new Set(['doctor', 'assistant', 'reception', 'admin_staff', 'unknown']);
+const ALLOWED_ROLE_CODES = new Set(['propietario', 'agencia', 'doctor', 'assistant', 'reception', 'admin_staff', 'unknown']);
 const ALLOWED_EFFECTS = new Set(['allow', 'deny']);
 
 const isAdmin = (userId) => ADMIN_USER_IDS.includes(Number(userId));
@@ -153,7 +153,7 @@ exports.getOverrides = async (req, res) => {
         clauses.push({ scope_type: 'group', scope_id: { [Op.in]: scopeAccess.readGroupIds } });
       }
       if (!clauses.length) {
-        return res.json({ feature_key: featureKey, items: [] });
+        return res.json({ feature_key: requestedFeatureKey || 'all', items: [] });
       }
       where[Op.or] = clauses;
     }
