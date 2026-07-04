@@ -227,15 +227,6 @@ function buildConversationSearchClause(searchQuery) {
 
   const makeLike = (value) => `%${escapeLikePattern(String(value || '').toLowerCase())}%`;
   const likeSql = (like) => db.sequelize.escape(like);
-  const messageContentClause = (like) => db.Sequelize.literal(`
-    \`Conversation\`.\`id\` IN (
-      SELECT DISTINCT m.conversation_id
-      FROM Messages m
-      WHERE LOWER(COALESCE(m.content, '')) LIKE ${likeSql(like)} ESCAPE '\\\\'
-        AND COALESCE(JSON_UNQUOTE(JSON_EXTRACT(m.metadata, '$.hide_from_quickchat')), 'false') NOT IN ('true', '1')
-        AND COALESCE(JSON_UNQUOTE(JSON_EXTRACT(m.metadata, '$.qa_cleanup')), 'false') NOT IN ('true', '1')
-    )
-  `);
   const externalContactClause = (like) => db.Sequelize.literal(`
     (
       \`Conversation\`.\`id\` IN (
@@ -296,7 +287,6 @@ function buildConversationSearchClause(searchQuery) {
       { [Op.like]: like }
     ),
     externalContactClause(like),
-    messageContentClause(like),
   ];
 
   const fullLike = makeLike(normalized);
