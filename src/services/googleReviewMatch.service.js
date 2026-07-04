@@ -27,6 +27,46 @@ const nameTokens = (value) => normalizeName(value)
   .split(' ')
   .filter((token) => token.length > 1);
 
+const allNameTokens = (value) => normalizeName(value)
+  .split(' ')
+  .filter(Boolean);
+
+function compactName(value) {
+  return allNameTokens(value).join('');
+}
+
+function initials(tokens) {
+  return (tokens || []).map((token) => token[0] || '').join('');
+}
+
+function isOneEditAway(a, b) {
+  const left = String(a || '');
+  const right = String(b || '');
+  if (left === right) return true;
+  if (left.length < 5 || right.length < 5) return false;
+  if (Math.abs(left.length - right.length) > 1) return false;
+
+  let i = 0;
+  let j = 0;
+  let edits = 0;
+  while (i < left.length && j < right.length) {
+    if (left[i] === right[j]) {
+      i += 1;
+      j += 1;
+      continue;
+    }
+    edits += 1;
+    if (edits > 1) return false;
+    if (left.length > right.length) i += 1;
+    else if (right.length > left.length) j += 1;
+    else {
+      i += 1;
+      j += 1;
+    }
+  }
+  return edits + (left.length - i) + (right.length - j) <= 1;
+}
+
 function scoreNameMatch(reviewName, candidateName) {
   const review = normalizeName(reviewName);
   const candidate = normalizeName(candidateName);
@@ -34,12 +74,35 @@ function scoreNameMatch(reviewName, candidateName) {
   if (review === candidate) return 1;
   if (review.includes(candidate) || candidate.includes(review)) return 0.92;
 
+  const reviewAllTokens = allNameTokens(review);
+  const candidateAllTokens = allNameTokens(candidate);
+  const reviewCompact = compactName(review);
+  const candidateCompact = compactName(candidate);
+  if (reviewCompact.length >= 6 && candidateCompact.includes(reviewCompact)) return 0.92;
+  if (candidateAllTokens.length >= 2 && reviewCompact === `${candidateAllTokens[0]}${candidateAllTokens[candidateAllTokens.length - 1]}`) {
+    return 0.9;
+  }
+
+  const reviewInitials = initials(reviewAllTokens);
+  const candidateInitials = initials(candidateAllTokens);
+  if (reviewInitials.length >= 2 && reviewInitials === candidateInitials) return 0.9;
+  if (
+    reviewAllTokens.length === 2
+    && candidateAllTokens.length >= 3
+    && reviewAllTokens[0] === candidateAllTokens[0]
+    && reviewAllTokens[1] === initials(candidateAllTokens.slice(1))
+  ) {
+    return 0.9;
+  }
+
   const reviewTokens = nameTokens(review);
   const candidateTokens = nameTokens(candidate);
   if (!reviewTokens.length || !candidateTokens.length) return 0;
 
-  const candidateSet = new Set(candidateTokens);
-  const matches = reviewTokens.filter((token) => candidateSet.has(token)).length;
+  const matches = reviewTokens.filter((token) => candidateTokens.some((candidateToken) => isOneEditAway(token, candidateToken))).length;
+  if (matches >= 2 && reviewTokens.length >= 2 && candidateTokens.length >= 2) {
+    return Math.max(0.67, matches / Math.max(reviewTokens.length, candidateTokens.length));
+  }
   const denominator = Math.max(reviewTokens.length, candidateTokens.length);
   return denominator ? matches / denominator : 0;
 }

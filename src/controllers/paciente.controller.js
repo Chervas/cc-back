@@ -860,10 +860,20 @@ exports.getPacienteActivity = async (req, res) => {
       WHERE COALESCE(e.paciente_id, i.paciente_id) = :pacienteId
         AND e.event_type IN (
           'review_rating_received',
-          'review_rating_updated',
           'review_rating_followup_sent',
           'review_private_feedback_received',
           'google_review_matched'
+        )
+        AND NOT (
+          e.event_type = 'review_private_feedback_received'
+          AND EXISTS (
+            SELECT 1
+            FROM MarketingPatientContactEvents re
+            WHERE re.list_id = e.list_id
+              AND re.item_id = e.item_id
+              AND re.event_type IN ('review_rating_received', 'review_request_rating')
+              AND JSON_UNQUOTE(JSON_EXTRACT(re.payload, '$.inbound_message_id')) = JSON_UNQUOTE(JSON_EXTRACT(e.payload, '$.inbound_message_id'))
+          )
         )
       ORDER BY e.occurred_at DESC
       LIMIT 60
@@ -877,12 +887,6 @@ exports.getPacienteActivity = async (req, res) => {
         titulo: 'Valoración privada recibida',
         icono: 'heroicons_outline:star',
         color: 'success',
-      },
-      review_rating_updated: {
-        tipo: 'review_rating_updated',
-        titulo: 'Valoración privada actualizada',
-        icono: 'heroicons_outline:star',
-        color: 'info',
       },
       review_rating_followup_sent: {
         tipo: 'review_rating_followup_sent',
@@ -908,7 +912,9 @@ exports.getPacienteActivity = async (req, res) => {
       const payload = event.payload && typeof event.payload === 'object' ? event.payload : {};
       const kind = String(payload.kind || '').trim();
       const rating = Number(payload.rating || payload.star_rating || 0) || null;
-      const reason = String(payload.content || payload.content_preview || '').trim();
+      const reason = event.event_type === 'review_private_feedback_received' || event.event_type === 'google_review_matched'
+        ? String(payload.content || payload.content_preview || '').trim()
+        : '';
       const config = reviewEventConfig[event.event_type] || reviewEventConfig.review_rating_received;
       const title = event.event_type === 'review_rating_followup_sent'
         ? (kind === 'review_google_link_followup' ? 'Enlace de Google enviado' : 'Motivo privado solicitado')

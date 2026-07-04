@@ -1092,6 +1092,75 @@ async function getDispatchScopedCounters(list, filter = null, transaction = null
   return computeCounters(items);
 }
 
+async function getReviewDispatchFollowUpCounters(list, filter = null) {
+  const listId = Number(list?.id || list || 0);
+  if (!listId || !JobRequest) {
+    return { pending_replies: 0, pending_reminders: 0 };
+  }
+
+  const filterClause = filter?.type === 'import_batch' && normalizeText(filter.import_batch_id)
+    ? "AND JSON_UNQUOTE(JSON_EXTRACT(i.custom_fields, '$.lote_importacion')) = :importBatchId"
+    : '';
+  const replacements = {
+    listId,
+    noResponseType: REVIEW_NO_RESPONSE_JOB_TYPE,
+    importBatchId: filterClause ? normalizeText(filter.import_batch_id) : null,
+  };
+  const [rows] = await db.sequelize.query(
+    `
+    SELECT
+      COUNT(DISTINCT CASE
+        WHEN i.sent_at IS NOT NULL
+          AND i.replied_at IS NULL
+          AND COALESCE(i.dispatch_status, '') <> 'replied'
+        THEN i.id
+        ELSE NULL
+      END) AS pending_replies,
+      COUNT(DISTINCT CASE
+        WHEN j.id IS NOT NULL
+          AND i.replied_at IS NULL
+          AND COALESCE(i.dispatch_status, '') <> 'replied'
+        THEN i.id
+        ELSE NULL
+      END) AS pending_reminders
+    FROM MarketingPatientListItems i
+    LEFT JOIN JobRequests j
+      ON j.type = :noResponseType
+      AND j.status IN ('waiting', 'queued', 'pending', 'scheduled')
+      AND CAST(JSON_UNQUOTE(JSON_EXTRACT(j.payload, '$.list_id')) AS UNSIGNED) = i.list_id
+      AND CAST(JSON_UNQUOTE(JSON_EXTRACT(j.payload, '$.item_id')) AS UNSIGNED) = i.id
+    WHERE i.list_id = :listId
+      AND i.sent_at IS NOT NULL
+      ${filterClause}
+    `,
+    { replacements, type: QueryTypes.SELECT }
+  );
+
+  return {
+    pending_replies: Number(rows?.pending_replies || 0),
+    pending_reminders: Number(rows?.pending_reminders || 0),
+  };
+}
+
+function buildDispatchCompletedPatch(dispatch = {}, followUp = null, completedAt = new Date()) {
+  const completedAtIso = completedAt.toISOString();
+  return {
+    ...dispatch,
+    status: 'completed',
+    completed_at: completedAtIso,
+    completed_banner_expires_at: new Date(completedAt.getTime() + 72 * 60 * 60 * 1000).toISOString(),
+    review_pending_replies: followUp ? Number(followUp.pending_replies || 0) : dispatch.review_pending_replies,
+    review_pending_reminders: followUp ? Number(followUp.pending_reminders || 0) : dispatch.review_pending_reminders,
+    next_allowed_at: null,
+  };
+}
+
+function getDispatchCompletionExpiryIso(completedAt) {
+  const parsed = new Date(completedAt || '');
+  if (!Number.isFinite(parsed.getTime())) return null;
+  return new Date(parsed.getTime() + 72 * 60 * 60 * 1000).toISOString();
+}
+
 async function countDispatchRemainingItems(listId, filter = null) {
   const where = {
     list_id: listId,
@@ -1804,7 +1873,7 @@ function buildReviewRatingSummaryText(row = {}) {
 
   if (rating === 5) {
     if (googleComment) {
-      return `En Google han comentado: ${googleComment}`;
+      return googleComment;
     }
     if (googleMatched) {
       return 'Valoración positiva sin comentario interno por ser 5/5. No han comentado en Google.';
@@ -1816,7 +1885,7 @@ function buildReviewRatingSummaryText(row = {}) {
 }
 
 function buildReviewResponseHeatmaps(rows = []) {
-  const weekdays = ['Lun', 'Mar', 'Mié', 'Jue', 'Vie', 'Sáb', 'Dom'];
+  const weekdays = ['L', 'M', 'X', 'J', 'V', 'S', 'D'];
   const hours = Array.from({ length: 24 }, (_item, index) => index);
   const empty = () => weekdays.map((day) => ({
     name: day,
@@ -1910,6 +1979,38 @@ function isReviewRequestList(list) {
   return criteria.review_request === true || isReviewTemplateUsage(criteria.template_usage);
 }
 
+function normalizeCampaignListContext(value) {
+  const key = normalizeKey(value || '');
+  if (['review', 'reviews', 'review_request', 'resena', 'resenas', 'solicitud_resena'].includes(key)) {
+    return 'reviews';
+  }
+  if (['mass', 'mass_sends', 'bulk_sends', 'envios_masivos', 'envios'].includes(key)) {
+    return 'mass_sends';
+  }
+  return 'all';
+}
+
+function buildReviewCampaignSqlCondition() {
+  const jsonValue = (path) => `COALESCE(JSON_UNQUOTE(JSON_EXTRACT(criteria, '${path}')), '')`;
+  return `(
+    ${jsonValue('$.review_request')} IN ('true', '1')
+    OR ${jsonValue('$.template_usage')} IN ('solicitud_resena', 'resena', 'review_request', 'reviews')
+    OR ${jsonValue('$.dispatch.context')} IN ('review_request', 'reviews', 'solicitud_resena', 'resenas')
+    OR ${jsonValue('$.dispatch.dispatch_context')} IN ('review_request', 'reviews', 'solicitud_resena', 'resenas')
+    OR ${jsonValue('$.dispatch_config.context')} IN ('review_request', 'reviews', 'solicitud_resena', 'resenas')
+    OR ${jsonValue('$.dispatch_config.dispatch_context')} IN ('review_request', 'reviews', 'solicitud_resena', 'resenas')
+  )`;
+}
+
+function contextToCampaignWhere(context) {
+  const normalized = normalizeCampaignListContext(context);
+  if (normalized === 'all') return {};
+  const reviewCondition = buildReviewCampaignSqlCondition();
+  return normalized === 'reviews'
+    ? { [Op.and]: [Sequelize.literal(reviewCondition)] }
+    : { [Op.and]: [Sequelize.literal(`NOT ${reviewCondition}`)] };
+}
+
 function extractReviewRatingFromInboundMessage(message) {
   const metadata = asPlainObject(message?.metadata);
   const candidates = [
@@ -1936,10 +2037,18 @@ function extractReviewRatingFromInboundMessage(message) {
       return starCount;
     }
 
-    const match = candidate.match(/(?:^|[^\d])([1-5])(?:\s*(?:\/\s*5|de\s*5|estrellas?|stars?|⭐|★))?(?:$|[^\d])/i);
-    if (match) {
-      const rating = Number(match[1]);
+    const explicitMatch = candidate.match(/(?:^|[^\d])([1-5])\s*(?:\/\s*5|de\s*5|estrellas?|stars?|⭐|★)(?:$|[^\d])/i);
+    if (explicitMatch) {
+      const rating = Number(explicitMatch[1]);
       if (rating >= 1 && rating <= 5) return rating;
+    }
+
+    if (candidate.length <= 40) {
+      const compactMatch = candidate.match(/(?:^|[^\d])([1-5])(?:$|[^\d])/i);
+      if (compactMatch) {
+        const rating = Number(compactMatch[1]);
+        if (rating >= 1 && rating <= 5) return rating;
+      }
     }
   }
 
@@ -2009,22 +2118,10 @@ async function materializeReviewPrivateFeedback({ list, item, inboundMessage, tr
   if (!isReviewRequestList(list) || triggerMetadata.kind !== 'review_private_feedback_request') {
     return { applied: false };
   }
-  const repeatedRating = extractReviewRatingFromInboundMessage(inboundMessage);
-  if (repeatedRating) {
-    await createIgnoredReviewRatingEvent({
-      list,
-      item,
-      inboundMessage,
-      triggerMessage,
-      previousRating: null,
-      rating: repeatedRating,
-      reason: 'rating_received_in_private_feedback_branch',
-      occurredAt,
-    });
-    return { applied: false, reason: 'rating_is_not_private_feedback' };
-  }
   const content = normalizeText(inboundMessage.content);
   if (!content) return { applied: false };
+  const rating = Number(triggerMetadata.review_rating || 0) || null;
+  const inboundMessageId = Number(inboundMessage.id || 0);
 
   const recentFeedback = await MarketingPatientContactEvent.findAll({
     where: {
@@ -2035,8 +2132,23 @@ async function materializeReviewPrivateFeedback({ list, item, inboundMessage, tr
     order: [['occurred_at', 'DESC']],
     limit: 25,
   });
-  const alreadyStored = recentFeedback.find((event) => Number(event.payload?.inbound_message_id || 0) === Number(inboundMessage.id || 0));
+  const alreadyStored = recentFeedback.find((event) => Number(event.payload?.inbound_message_id || 0) === inboundMessageId);
   if (alreadyStored) return { applied: false, reason: 'already_feedback_received' };
+  if (inboundMessageId) {
+    const recentRatings = await MarketingPatientContactEvent.findAll({
+      where: {
+        list_id: list.id,
+        item_id: item.id,
+        event_type: { [Op.in]: REVIEW_RATING_EVENT_TYPES },
+      },
+      order: [['occurred_at', 'DESC']],
+      limit: 25,
+    });
+    const sameInboundRating = recentRatings.find((event) => Number(event.payload?.inbound_message_id || 0) === inboundMessageId);
+    if (sameInboundRating) {
+      return { applied: false, reason: 'inbound_already_registered_as_rating' };
+    }
+  }
 
   await MarketingPatientContactEvent.create({
     list_id: list.id,
@@ -2047,6 +2159,7 @@ async function materializeReviewPrivateFeedback({ list, item, inboundMessage, tr
     payload: {
       inbound_message_id: inboundMessage.id,
       trigger_message_id: triggerMessage?.id || null,
+      rating,
       content,
     },
     occurred_at: occurredAt,
@@ -3437,32 +3550,70 @@ async function getReviewRequestSummary(scope, options = {}) {
     { replacements: { clinicIds, objectiveId: OBJECTIVE_ID }, type: QueryTypes.SELECT }
   );
 
+  const reviewRatingsCte = `
+    WITH review_ratings AS (
+      SELECT
+        e.id,
+        e.list_id,
+        e.item_id,
+        e.paciente_id AS event_paciente_id,
+        e.payload,
+        e.occurred_at,
+        i.paciente_id AS item_paciente_id,
+        i.name AS item_name,
+        i.phone AS item_phone,
+        i.email AS item_email,
+        i.conversation_id AS conversation_id,
+        i.sent_at AS sent_at,
+        COALESCE(i.clinica_id, l.clinica_id) AS clinic_id,
+        cl.nombre_clinica AS clinic_name,
+        p.nombre AS paciente_nombre,
+        p.apellidos AS paciente_apellidos,
+        ROW_NUMBER() OVER (
+          PARTITION BY COALESCE(
+            CASE WHEN COALESCE(e.paciente_id, i.paciente_id) IS NOT NULL THEN CONCAT('p:', COALESCE(e.paciente_id, i.paciente_id)) END,
+            CASE WHEN NULLIF(TRIM(i.phone), '') IS NOT NULL THEN CONCAT('ph:', TRIM(REPLACE(REPLACE(REPLACE(REPLACE(i.phone, '+', ''), ' ', ''), '-', ''), '.', ''))) END,
+            CASE WHEN NULLIF(TRIM(i.email), '') IS NOT NULL THEN CONCAT('em:', LOWER(TRIM(i.email))) END,
+            CASE WHEN NULLIF(TRIM(i.name), '') IS NOT NULL THEN CONCAT('nm:', LOWER(TRIM(i.name))) END,
+            CONCAT('event:', e.id)
+          )
+          ORDER BY e.occurred_at DESC, e.id DESC
+        ) AS contact_rank
+      FROM MarketingPatientContactEvents e
+      INNER JOIN MarketingPatientLists l ON l.id = e.list_id
+      INNER JOIN MarketingPatientListItems i ON i.id = e.item_id
+      LEFT JOIN Pacientes p ON p.id_paciente = COALESCE(e.paciente_id, i.paciente_id)
+      LEFT JOIN Clinicas cl ON cl.id_clinica = COALESCE(i.clinica_id, l.clinica_id)
+      WHERE l.objective_id = :objectiveId
+        AND COALESCE(i.clinica_id, l.clinica_id) IN (:clinicIds)
+        AND (
+          JSON_UNQUOTE(JSON_EXTRACT(l.criteria, '$.review_request')) IN ('true', '1')
+          OR JSON_UNQUOTE(JSON_EXTRACT(l.criteria, '$.template_usage')) = 'solicitud_resena'
+        )
+        AND (
+          i.sent_at IS NOT NULL
+          OR i.dispatch_status IN ('queued','sending','sent','delivered','read','replied')
+        )
+        AND NOT EXISTS (
+          SELECT 1
+          FROM MarketingPatientContactEvents te
+          WHERE te.list_id = i.list_id
+            AND te.item_id = i.id
+            AND te.event_type IN ('mass_campaign_test_sent', 'mass_campaign_test_failed')
+        )
+        AND e.event_type IN ('review_rating_received', 'review_request_rating')
+        AND CAST(JSON_UNQUOTE(JSON_EXTRACT(e.payload, '$.rating')) AS UNSIGNED) BETWEEN 1 AND 5
+    )
+  `;
+
   const [ratingsRow] = await db.sequelize.query(
     `
+    ${reviewRatingsCte}
     SELECT
-      SUM(CASE WHEN CAST(JSON_UNQUOTE(JSON_EXTRACT(e.payload, '$.rating')) AS UNSIGNED) BETWEEN 1 AND 4 THEN 1 ELSE 0 END) AS ratings_1_to_4,
-      SUM(CASE WHEN CAST(JSON_UNQUOTE(JSON_EXTRACT(e.payload, '$.rating')) AS UNSIGNED) = 5 THEN 1 ELSE 0 END) AS ratings_5
-    FROM MarketingPatientContactEvents e
-    INNER JOIN MarketingPatientLists l ON l.id = e.list_id
-    INNER JOIN MarketingPatientListItems i ON i.id = e.item_id
-    WHERE l.objective_id = :objectiveId
-      AND i.clinica_id IN (:clinicIds)
-      AND (
-        JSON_UNQUOTE(JSON_EXTRACT(l.criteria, '$.review_request')) IN ('true', '1')
-        OR JSON_UNQUOTE(JSON_EXTRACT(l.criteria, '$.template_usage')) = 'solicitud_resena'
-      )
-      AND (
-        i.sent_at IS NOT NULL
-        OR i.dispatch_status IN ('queued','sending','sent','delivered','read','replied')
-      )
-      AND NOT EXISTS (
-        SELECT 1
-        FROM MarketingPatientContactEvents te
-        WHERE te.list_id = i.list_id
-          AND te.item_id = i.id
-          AND te.event_type IN ('mass_campaign_test_sent', 'mass_campaign_test_failed')
-      )
-      AND e.event_type IN ('review_rating_received', 'review_request_rating')
+      SUM(CASE WHEN CAST(JSON_UNQUOTE(JSON_EXTRACT(payload, '$.rating')) AS UNSIGNED) BETWEEN 1 AND 4 THEN 1 ELSE 0 END) AS ratings_1_to_4,
+      SUM(CASE WHEN CAST(JSON_UNQUOTE(JSON_EXTRACT(payload, '$.rating')) AS UNSIGNED) = 5 THEN 1 ELSE 0 END) AS ratings_5
+    FROM review_ratings
+    WHERE contact_rank = 1
     `,
     { replacements: { clinicIds, objectiveId: OBJECTIVE_ID }, type: QueryTypes.SELECT }
   );
@@ -3527,20 +3678,29 @@ async function getReviewRequestSummary(scope, options = {}) {
 
   const recentPrivateRatings = await db.sequelize.query(
     `
+    ${reviewRatingsCte}
     SELECT
-      COALESCE(i.name, p.nombre, 'Paciente') AS patient_name,
-      COALESCE(e.paciente_id, i.paciente_id) AS patient_id,
-      i.conversation_id AS conversation_id,
-      COALESCE(i.clinica_id, l.clinica_id) AS clinic_id,
-      cl.nombre_clinica AS clinic_name,
-      CAST(JSON_UNQUOTE(JSON_EXTRACT(e.payload, '$.rating')) AS UNSIGNED) AS rating,
+      COALESCE(rr.item_name, CONCAT_WS(' ', rr.paciente_nombre, rr.paciente_apellidos), 'Paciente') AS patient_name,
+      COALESCE(rr.event_paciente_id, rr.item_paciente_id) AS patient_id,
+      rr.conversation_id AS conversation_id,
+      rr.clinic_id AS clinic_id,
+      rr.clinic_name AS clinic_name,
+      CAST(JSON_UNQUOTE(JSON_EXTRACT(rr.payload, '$.rating')) AS UNSIGNED) AS rating,
       (
         SELECT JSON_UNQUOTE(JSON_EXTRACT(f.payload, '$.content'))
         FROM MarketingPatientContactEvents f
-        WHERE f.list_id = e.list_id
-          AND f.item_id = e.item_id
+        WHERE f.list_id = rr.list_id
+          AND f.item_id = rr.item_id
           AND f.event_type = 'review_private_feedback_received'
           AND JSON_UNQUOTE(JSON_EXTRACT(f.payload, '$.content')) IS NOT NULL
+          AND NOT EXISTS (
+            SELECT 1
+            FROM MarketingPatientContactEvents re
+            WHERE re.list_id = f.list_id
+              AND re.item_id = f.item_id
+              AND re.event_type IN ('review_rating_received', 'review_request_rating')
+              AND JSON_UNQUOTE(JSON_EXTRACT(re.payload, '$.inbound_message_id')) = JSON_UNQUOTE(JSON_EXTRACT(f.payload, '$.inbound_message_id'))
+          )
         ORDER BY f.occurred_at DESC
         LIMIT 1
       ) AS reason,
@@ -3548,8 +3708,8 @@ async function getReviewRequestSummary(scope, options = {}) {
         SELECT r.comment
         FROM MarketingPatientContactEvents gm
         INNER JOIN BusinessProfileReviews r ON r.matched_contact_event_id = gm.id
-        WHERE gm.list_id = e.list_id
-          AND gm.item_id = e.item_id
+        WHERE gm.list_id = rr.list_id
+          AND gm.item_id = rr.item_id
           AND gm.event_type = 'google_review_matched'
         ORDER BY r.create_time DESC
         LIMIT 1
@@ -3558,8 +3718,8 @@ async function getReviewRequestSummary(scope, options = {}) {
         SELECT r.reviewer_name
         FROM MarketingPatientContactEvents gm
         INNER JOIN BusinessProfileReviews r ON r.matched_contact_event_id = gm.id
-        WHERE gm.list_id = e.list_id
-          AND gm.item_id = e.item_id
+        WHERE gm.list_id = rr.list_id
+          AND gm.item_id = rr.item_id
           AND gm.event_type = 'google_review_matched'
         ORDER BY r.create_time DESC
         LIMIT 1
@@ -3567,36 +3727,14 @@ async function getReviewRequestSummary(scope, options = {}) {
       EXISTS (
         SELECT 1
         FROM MarketingPatientContactEvents gm
-        WHERE gm.list_id = e.list_id
-          AND gm.item_id = e.item_id
+        WHERE gm.list_id = rr.list_id
+          AND gm.item_id = rr.item_id
           AND gm.event_type = 'google_review_matched'
       ) AS google_review_matched,
-      e.occurred_at
-    FROM MarketingPatientContactEvents e
-    INNER JOIN MarketingPatientLists l ON l.id = e.list_id
-    INNER JOIN MarketingPatientListItems i ON i.id = e.item_id
-    LEFT JOIN Pacientes p ON p.id_paciente = e.paciente_id
-    LEFT JOIN Clinicas cl ON cl.id_clinica = i.clinica_id
-    WHERE l.objective_id = :objectiveId
-      AND i.clinica_id IN (:clinicIds)
-      AND (
-        JSON_UNQUOTE(JSON_EXTRACT(l.criteria, '$.review_request')) IN ('true', '1')
-        OR JSON_UNQUOTE(JSON_EXTRACT(l.criteria, '$.template_usage')) = 'solicitud_resena'
-      )
-      AND (
-        i.sent_at IS NOT NULL
-        OR i.dispatch_status IN ('queued','sending','sent','delivered','read','replied')
-      )
-      AND NOT EXISTS (
-        SELECT 1
-        FROM MarketingPatientContactEvents te
-        WHERE te.list_id = i.list_id
-          AND te.item_id = i.id
-          AND te.event_type IN ('mass_campaign_test_sent', 'mass_campaign_test_failed')
-      )
-      AND e.event_type IN ('review_rating_received', 'review_request_rating', 'review_rating_updated')
-      AND CAST(JSON_UNQUOTE(JSON_EXTRACT(e.payload, '$.rating')) AS UNSIGNED) BETWEEN 1 AND 5
-    ORDER BY e.occurred_at DESC
+      rr.occurred_at
+    FROM review_ratings rr
+    WHERE rr.contact_rank = 1
+    ORDER BY rr.occurred_at DESC
     LIMIT 50
     `,
     { replacements: { clinicIds, objectiveId: OBJECTIVE_ID }, type: QueryTypes.SELECT }
@@ -3604,38 +3742,19 @@ async function getReviewRequestSummary(scope, options = {}) {
 
   const reviewResponseHeatmapRows = await db.sequelize.query(
     `
+    ${reviewRatingsCte}
     SELECT
       CASE
-        WHEN MONTH(COALESCE(i.sent_at, e.occurred_at)) IN (12, 1, 2) THEN 'winter'
-        WHEN MONTH(COALESCE(i.sent_at, e.occurred_at)) IN (6, 7, 8) THEN 'summer'
+        WHEN MONTH(COALESCE(sent_at, occurred_at)) IN (12, 1, 2) THEN 'winter'
+        WHEN MONTH(COALESCE(sent_at, occurred_at)) IN (6, 7, 8) THEN 'summer'
         ELSE 'other'
       END AS season,
-      WEEKDAY(e.occurred_at) AS weekday,
-      HOUR(e.occurred_at) AS hour,
+      WEEKDAY(occurred_at) AS weekday,
+      HOUR(occurred_at) AS hour,
       COUNT(*) AS total
-    FROM MarketingPatientContactEvents e
-    INNER JOIN MarketingPatientLists l ON l.id = e.list_id
-    INNER JOIN MarketingPatientListItems i ON i.id = e.item_id
-    WHERE l.objective_id = :objectiveId
-      AND i.clinica_id IN (:clinicIds)
-      AND (
-        JSON_UNQUOTE(JSON_EXTRACT(l.criteria, '$.review_request')) IN ('true', '1')
-        OR JSON_UNQUOTE(JSON_EXTRACT(l.criteria, '$.template_usage')) = 'solicitud_resena'
-      )
-      AND (
-        i.sent_at IS NOT NULL
-        OR i.dispatch_status IN ('queued','sending','sent','delivered','read','replied')
-      )
-      AND NOT EXISTS (
-        SELECT 1
-        FROM MarketingPatientContactEvents te
-        WHERE te.list_id = i.list_id
-          AND te.item_id = i.id
-          AND te.event_type IN ('mass_campaign_test_sent', 'mass_campaign_test_failed')
-      )
-      AND e.event_type IN ('review_rating_received', 'review_request_rating', 'review_rating_updated')
-      AND CAST(JSON_UNQUOTE(JSON_EXTRACT(e.payload, '$.rating')) AS UNSIGNED) BETWEEN 1 AND 5
-    GROUP BY season, WEEKDAY(e.occurred_at), HOUR(e.occurred_at)
+    FROM review_ratings
+    WHERE contact_rank = 1
+    GROUP BY season, WEEKDAY(occurred_at), HOUR(occurred_at)
     ORDER BY season, weekday, hour
     `,
     { replacements: { clinicIds, objectiveId: OBJECTIVE_ID }, type: QueryTypes.SELECT }
@@ -4633,12 +4752,13 @@ async function hydrateListTemplateSnapshots(lists) {
   }
 }
 
-async function listCampaigns(scope) {
+async function listCampaigns(scope, options = {}) {
   const lists = await MarketingPatientList.findAll({
     where: {
       objective_id: OBJECTIVE_ID,
       status: { [Op.ne]: 'archived' },
       ...scopeToWhere(scope),
+      ...contextToCampaignWhere(options.context),
     },
     order: [['updated_at', 'DESC']],
     limit: 100,
@@ -5593,14 +5713,26 @@ function getDispatchProgress(list, counters = null, accountQuality = null) {
   const readRate = sent > 0 ? read / sent : null;
   const optOutRate = sent > 0 ? optOut / sent : null;
   const quality = getMarketingQualitySnapshot({ sent, optOut, spamReports: Number(config.spam_reports || 0) });
+  const status = config.status || list?.status || 'draft';
+  const replied = Number(currentCounters.replied || 0);
+  const pendingRepliesFallback = Math.max(0, sent - replied);
+  const completedAt = normalizeText(config.completed_at || '');
+  const completedBannerExpiresAt = normalizeText(config.completed_banner_expires_at || '')
+    || (String(status).toLowerCase() === 'completed' ? getDispatchCompletionExpiryIso(completedAt) : null);
+  const reviewPendingReplies = Number.isFinite(Number(config.review_pending_replies))
+    ? Number(config.review_pending_replies)
+    : pendingRepliesFallback;
+  const reviewPendingReminders = Number.isFinite(Number(config.review_pending_reminders))
+    ? Number(config.review_pending_reminders)
+    : reviewPendingReplies;
   return {
     ...config,
-    status: config.status || list?.status || 'draft',
+    status,
     job_id: config.job_id || null,
     sent,
     delivered: Number(currentCounters.delivered || 0),
     read,
-    replied: Number(currentCounters.replied || 0),
+    replied,
     failed: Number(currentCounters.failed || 0),
     opt_out: optOut,
     ready,
@@ -5615,6 +5747,10 @@ function getDispatchProgress(list, counters = null, accountQuality = null) {
     paused_reason: config.paused_reason || null,
     cancel_requested: config.cancel_requested === true,
     next_allowed_at: config.next_allowed_at || null,
+    completed_at: completedAt || null,
+    completed_banner_expires_at: completedBannerExpiresAt,
+    review_pending_replies: reviewPendingReplies,
+    review_pending_reminders: reviewPendingReminders,
     account: accountQuality || null,
     limits_warning: accountQuality?.messaging_limit_count && ready > accountQuality.messaging_limit_count
       ? `WhatsApp, por la calidad de tu cuenta de momento solo te deja enviar ${accountQuality.messaging_limit_count} mensajes en 24h. Este límite puede aumentar si mantienes buena puntuación.`
@@ -6456,10 +6592,21 @@ async function getDispatchStatus(scope, campaignId) {
   const counters = await getDispatchScopedCounters(list, filter);
   const reloaded = await MarketingPatientList.findByPk(list.id);
   const accountQuality = await getWhatsappAccountQualityForList(reloaded, scope);
+  const context = normalizeDispatchContext(dispatch.context);
+  const followUpCounters = context === 'review_request' && String(dispatch.status || '').toLowerCase() === 'completed'
+    ? await getReviewDispatchFollowUpCounters(reloaded, filter)
+    : null;
+  const progress = getDispatchProgress(reloaded, counters, accountQuality);
   return {
     success: true,
     campaign: serializeCampaign(reloaded),
-    dispatch: getDispatchProgress(reloaded, counters, accountQuality),
+    dispatch: followUpCounters
+      ? {
+        ...progress,
+        review_pending_replies: Number(followUpCounters.pending_replies || 0),
+        review_pending_reminders: Number(followUpCounters.pending_reminders || 0),
+      }
+      : progress,
   };
 }
 
@@ -7215,16 +7362,15 @@ async function runDispatchJob(payload = {}, jobRequest = null) {
   if (!batch.length) {
     await refreshListCounters(list.id);
     const finalCounters = await getDispatchScopedCounters(list, filter);
+    const completedAt = new Date();
+    const followUpCounters = context === 'review_request'
+      ? await getReviewDispatchFollowUpCounters(list, filter)
+      : null;
     await list.update({
       status: 'completed',
-      last_sent_at: new Date(),
+      last_sent_at: completedAt,
       criteria: mergeCriteria(list, {
-        dispatch: {
-          ...dispatch,
-          status: 'completed',
-          completed_at: new Date().toISOString(),
-          next_allowed_at: null,
-        },
+        dispatch: buildDispatchCompletedPatch(dispatch, followUpCounters, completedAt),
       }),
     });
     return { status: 'completed', result: { completed: true, list_id: list.id, counters: finalCounters } };
@@ -7338,17 +7484,18 @@ async function runDispatchJob(payload = {}, jobRequest = null) {
 
   const remaining = await countDispatchRemainingItems(list.id, filter);
   if (remaining <= 0) {
+    const completedAt = new Date();
+    const followUpCounters = context === 'review_request'
+      ? await getReviewDispatchFollowUpCounters(list, filter)
+      : null;
     await list.update({
       status: 'completed',
-      last_sent_at: new Date(),
+      last_sent_at: completedAt,
       criteria: mergeCriteria(list, {
-        dispatch: {
+        dispatch: buildDispatchCompletedPatch({
           ...getDispatchConfig(list),
-          status: 'completed',
           last_batch_index: batchIndex,
-          completed_at: new Date().toISOString(),
-          next_allowed_at: null,
-        },
+        }, followUpCounters, completedAt),
       }),
     });
     return { status: 'completed', result: { completed: true, list_id: list.id, counters: countersAfter } };
@@ -7448,6 +7595,7 @@ async function materializeInboundReply({ conversation, inboundMessage }) {
   if (
     inboundRatingCandidate &&
     metadata.source === 'marketing_bulk_sends' &&
+    normalizeKey(metadata.kind) !== 'review_private_feedback_request' &&
     !isReviewRatingTriggerMessage(triggerMessage)
   ) {
     const previousOutboundMessages = await Message.findAll({
