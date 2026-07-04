@@ -333,22 +333,24 @@ function mapAppointment(row, maps, now) {
 
 async function loadAppointments({ clinicIds, clinicMap, todayStart, todayEnd, now }) {
   if (!clinicIds.length || !CitaPaciente) {
-    return { today: [], pastAttendance: [] };
+    return { today: [], pastAttendance: [], next: [] };
   }
 
   const pastStart = new Date(todayStart);
   pastStart.setDate(pastStart.getDate() - 14);
 
-  const [todayRows, pastRows] = await Promise.all([
+  const appointmentAttributes = [
+    'id_cita', 'clinica_id', 'paciente_id', 'doctor_id', 'instalacion_id',
+    'tratamiento_id', 'titulo', 'motivo', 'tipo_cita', 'estado', 'inicio', 'fin',
+  ];
+
+  const [todayRows, pastRows, nextRows] = await Promise.all([
     CitaPaciente.findAll({
       where: {
         ...scopedWhere('clinica_id', clinicIds),
         inicio: { [Op.between]: [todayStart, todayEnd] },
       },
-      attributes: [
-        'id_cita', 'clinica_id', 'paciente_id', 'doctor_id', 'instalacion_id',
-        'tratamiento_id', 'titulo', 'motivo', 'tipo_cita', 'estado', 'inicio', 'fin',
-      ],
+      attributes: appointmentAttributes,
       order: [['inicio', 'ASC']],
       raw: true,
     }),
@@ -358,17 +360,25 @@ async function loadAppointments({ clinicIds, clinicMap, todayStart, todayEnd, no
         fin: { [Op.between]: [pastStart, now] },
         estado: { [Op.in]: [...ATTENDANCE_OPEN_STATUSES] },
       },
-      attributes: [
-        'id_cita', 'clinica_id', 'paciente_id', 'doctor_id', 'instalacion_id',
-        'tratamiento_id', 'titulo', 'motivo', 'tipo_cita', 'estado', 'inicio', 'fin',
-      ],
+      attributes: appointmentAttributes,
       order: [['fin', 'DESC']],
       limit: 30,
       raw: true,
     }),
+    CitaPaciente.findAll({
+      where: {
+        ...scopedWhere('clinica_id', clinicIds),
+        inicio: { [Op.gt]: todayEnd },
+        estado: { [Op.notIn]: [...CANCELLED_STATUSES] },
+      },
+      attributes: appointmentAttributes,
+      order: [['inicio', 'ASC']],
+      limit: 4,
+      raw: true,
+    }),
   ]);
 
-  const allRows = [...todayRows, ...pastRows];
+  const allRows = [...todayRows, ...pastRows, ...nextRows];
   const maps = await loadAppointmentMaps(allRows, clinicMap);
 
   return {
@@ -379,6 +389,7 @@ async function loadAppointments({ clinicIds, clinicMap, todayStart, todayEnd, no
       .filter((row) => !CANCELLED_STATUSES.has(String(row.estado || '').toLowerCase()))
       .map((row) => mapAppointment(row, maps, now))
       .filter((item) => item.attendanceDue),
+    next: nextRows.map((row) => mapAppointment(row, maps, now)),
   };
 }
 
@@ -981,6 +992,7 @@ async function getMainDashboard({ userId, query = {} }) {
       showOwnerFeedback: sections.ownerLike,
     },
     todayAppointments: appointments.today,
+    nextAppointments: appointments.next,
     pastAttendancePending: appointments.pastAttendance,
     doctorAppointmentsToday: doctorAppointments,
     pendingPatientConsents,

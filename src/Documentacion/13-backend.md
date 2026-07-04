@@ -75,6 +75,7 @@ Reglas:
 - `todayAppointments` usa rango de día completo y excluye citas canceladas/reprogramadas. `pastAttendancePending` devuelve citas ya finalizadas sin asistencia cerrada para que la UI pregunte si acudió.
 - Las acciones de asistencia siguen usando el endpoint canónico `PATCH /api/citas/:id/estado`.
 - Desde 2026-07-04 la respuesta incluye `setup` para primeros pasos generales, `criticalAlerts` para bloqueos técnicos, `growthOpportunities` para crecimiento y `meta.generatedAt` para mostrar la última actualización.
+- Desde 2026-07-04 la respuesta incluye `nextAppointments` para que el frontend explique estados vacíos de "citas de hoy" sin recomponer agenda en Angular. Se calcula en backend con la misma tabla base `CitasPacientes` y excluye canceladas/reprogramadas.
 - El feedback positivo de ejemplo no se devuelve; cuando se reactive debe venir como señal real atribuible a ClinicaClick.
 
 ### WhatsApp coexistencia: regla de gateway
