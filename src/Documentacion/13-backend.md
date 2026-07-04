@@ -91,7 +91,7 @@ Contrato:
 
 - `scope_type`: `group` o `clinic`.
 - `scope_id`: ID del grupo o clínica.
-- `feature_key`: `marketing`, `clinic.settings.edit`, `billing.reports.view`, `patients.view`, `patients.edit`, `appointments.manage`, `consents.manage`, `quickchat.read_patients`, `quickchat.read_team`, `quickchat.read_leads`.
+- `feature_key`: `marketing`, `clinic.settings.edit`, `team.manage`, `billing.reports.view`, `patients.view`, `patients.edit`, `appointments.manage`, `consents.manage`, `quickchat.read_patients`, `quickchat.read_team`, `quickchat.read_leads`.
 - `role_code`: `propietario`, `agencia`, `doctor`, `assistant`, `reception`, `admin_staff` o `unknown`.
 - `effect`: `allow` o `deny`; `state=inherit` borra el override.
 

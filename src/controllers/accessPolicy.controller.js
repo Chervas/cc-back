@@ -7,6 +7,7 @@ const ALLOWED_SCOPE_TYPES = new Set(['group', 'clinic']);
 const ALLOWED_FEATURE_KEYS = new Set([
   'marketing',
   'clinic.settings.edit',
+  'team.manage',
   'billing.reports.view',
   'patients.view',
   'patients.edit',
