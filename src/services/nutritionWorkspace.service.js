@@ -86,6 +86,45 @@ const REPORT_METRIC_DEFINITIONS = [
   { key: 'ectomorphy', label: 'Ectomorfia', unit: '', source: 'somatotype', decimals: 1, section: 'somatotype' },
 ];
 
+const PROJECTION_METRIC_DEFINITIONS = [
+  {
+    key: 'weight_kg',
+    label: 'Peso',
+    unit: 'kg',
+    source: 'raw_values',
+    decimals: 1,
+    per_week_key: 'weight_change_per_week_kg',
+    projected_key: 'projected_8_week_weight_kg',
+  },
+  {
+    key: 'waist_cm',
+    label: 'Cintura',
+    unit: 'cm',
+    source: 'raw_values',
+    decimals: 1,
+    per_week_key: 'waist_change_per_week_cm',
+    projected_key: 'projected_8_week_waist_cm',
+  },
+  {
+    key: 'skinfold_sum_mm',
+    label: 'Suma de pliegues',
+    unit: 'mm',
+    source: 'calculated_values',
+    decimals: 1,
+    per_week_key: 'skinfold_sum_change_per_week_mm',
+    projected_key: 'projected_8_week_skinfold_sum_mm',
+  },
+  {
+    key: 'body_fat_percent',
+    label: 'Grasa estimada',
+    unit: '%',
+    source: 'body_composition',
+    decimals: 1,
+    per_week_key: 'body_fat_change_per_week_percent',
+    projected_key: 'projected_8_week_body_fat_percent',
+  },
+];
+
 const REPORT_SECTION_DEFINITIONS = {
   base: 'Datos principales',
   anthropometry: 'Antropometría',
@@ -188,6 +227,13 @@ function formatDelta(metric = {}) {
   if (delta === null || delta === undefined) return '-';
   const sign = Number(delta) > 0 ? '+' : '';
   return `${sign}${delta}${metric.unit ? ` ${metric.unit}` : ''}`;
+}
+
+function formatProjectionMetricLabel(metric = {}) {
+  const label = String(metric.label || 'Métrica').trim();
+  return /estimad[ao]$/i.test(label)
+    ? `${label} 8 semanas`
+    : `${label} estimada 8 semanas`;
 }
 
 function normalizeProfileCode(value) {
@@ -492,43 +538,84 @@ function buildEvolution(measurements = []) {
   });
 }
 
+function getProjectionMetricValue(measurement, metricDefinition) {
+  if (!measurement || !metricDefinition) return null;
+  if (metricDefinition.source === 'raw_values') {
+    return measurement.raw_values?.[metricDefinition.key] ?? null;
+  }
+  if (metricDefinition.source === 'calculated_values') {
+    return measurement.calculated_values?.[metricDefinition.key] ?? null;
+  }
+  if (metricDefinition.source === 'body_composition') {
+    return measurement.calculated_values?.body_composition?.[metricDefinition.key] ?? null;
+  }
+  return null;
+}
+
+function buildProjectionMetric(chronologicalMeasurements = [], metricDefinition) {
+  const usable = chronologicalMeasurements
+    .map((measurement) => ({
+      measurement,
+      value: getProjectionMetricValue(measurement, metricDefinition),
+    }))
+    .filter((item) => Number.isFinite(item.value));
+
+  if (usable.length < 2) return null;
+
+  const previous = usable[usable.length - 2];
+  const current = usable[usable.length - 1];
+  const previousDate = new Date(previous.measurement.measured_at).getTime();
+  const currentDate = new Date(current.measurement.measured_at).getTime();
+  const weeks = (currentDate - previousDate) / (1000 * 60 * 60 * 24 * 7);
+  if (!Number.isFinite(weeks) || weeks <= 0) return null;
+
+  const changePerWeek = (current.value - previous.value) / weeks;
+  return {
+    key: metricDefinition.key,
+    label: metricDefinition.label,
+    unit: metricDefinition.unit,
+    previous_measurement_id: previous.measurement.id,
+    current_measurement_id: current.measurement.id,
+    previous_measured_at: previous.measurement.measured_at,
+    current_measured_at: current.measurement.measured_at,
+    observed_weeks: round(weeks, 1),
+    previous_value: round(previous.value, metricDefinition.decimals),
+    current_value: round(current.value, metricDefinition.decimals),
+    change_per_week: round(changePerWeek, 2),
+    projected_8_week_value: round(current.value + (changePerWeek * 8), metricDefinition.decimals),
+  };
+}
+
 function buildProjection(measurements = []) {
   const chronological = [...measurements].reverse().map(measurementToJson);
-  const usable = chronological.filter((item) => Number.isFinite(item.raw_values.weight_kg));
-  if (usable.length < 2) {
+  const metricProjections = PROJECTION_METRIC_DEFINITIONS
+    .map((metricDefinition) => buildProjectionMetric(chronological, metricDefinition))
+    .filter(Boolean);
+
+  if (!metricProjections.length) {
     return {
       available: false,
       reason: 'need_two_measurements',
+      metric_projections: [],
     };
   }
 
-  const first = usable[usable.length - 2];
-  const last = usable[usable.length - 1];
-  const firstDate = new Date(first.measured_at).getTime();
-  const lastDate = new Date(last.measured_at).getTime();
-  const weeks = (lastDate - firstDate) / (1000 * 60 * 60 * 24 * 7);
-  if (!Number.isFinite(weeks) || weeks <= 0) {
-    return {
-      available: false,
-      reason: 'same_measurement_date',
-    };
-  }
-
-  const weightPerWeek = (last.raw_values.weight_kg - first.raw_values.weight_kg) / weeks;
-  const waistPerWeek = Number.isFinite(last.raw_values.waist_cm) && Number.isFinite(first.raw_values.waist_cm)
-    ? (last.raw_values.waist_cm - first.raw_values.waist_cm) / weeks
-    : null;
+  const projectionByKey = new Map(metricProjections.map((projection) => [projection.key, projection]));
+  const primaryProjection = projectionByKey.get('weight_kg') || metricProjections[0];
 
   return {
     available: true,
-    based_on_measurement_ids: [first.id, last.id],
-    observed_weeks: round(weeks, 1),
-    weight_change_per_week_kg: round(weightPerWeek, 2),
-    waist_change_per_week_cm: waistPerWeek !== null ? round(waistPerWeek, 2) : null,
-    projected_8_week_weight_kg: round(last.raw_values.weight_kg + (weightPerWeek * 8), 1),
-    projected_8_week_waist_cm: waistPerWeek !== null
-      ? round(last.raw_values.waist_cm + (waistPerWeek * 8), 1)
-      : null,
+    based_on_measurement_ids: [primaryProjection.previous_measurement_id, primaryProjection.current_measurement_id],
+    observed_weeks: primaryProjection.observed_weeks,
+    metric_projections: metricProjections,
+    weight_change_per_week_kg: projectionByKey.get('weight_kg')?.change_per_week ?? null,
+    waist_change_per_week_cm: projectionByKey.get('waist_cm')?.change_per_week ?? null,
+    skinfold_sum_change_per_week_mm: projectionByKey.get('skinfold_sum_mm')?.change_per_week ?? null,
+    body_fat_change_per_week_percent: projectionByKey.get('body_fat_percent')?.change_per_week ?? null,
+    projected_8_week_weight_kg: projectionByKey.get('weight_kg')?.projected_8_week_value ?? null,
+    projected_8_week_waist_cm: projectionByKey.get('waist_cm')?.projected_8_week_value ?? null,
+    projected_8_week_skinfold_sum_mm: projectionByKey.get('skinfold_sum_mm')?.projected_8_week_value ?? null,
+    projected_8_week_body_fat_percent: projectionByKey.get('body_fat_percent')?.projected_8_week_value ?? null,
   };
 }
 
@@ -1217,6 +1304,16 @@ function buildNutritionReportHtml(reportData) {
       <p>No hay una medición anterior comparable para este informe.</p>
     </section>
   `;
+  const extraProjectionMetricsHtml = (projection?.metric_projections || [])
+    .filter((metric) => !['weight_kg', 'waist_cm'].includes(metric.key))
+    .map((metric) => `
+        <div class="metric">
+          <dt>${escapeHtml(formatProjectionMetricLabel(metric))}</dt>
+          <dd>${escapeHtml(formatMetricValue({ value: metric.projected_8_week_value, unit: metric.unit }))}</dd>
+          <span class="delta">${escapeHtml(formatDelta({ delta: metric.change_per_week, unit: `${metric.unit}/sem` }))}</span>
+        </div>
+      `)
+    .join('');
   const projectionHtml = projection?.available ? `
     <section class="card">
       <h2>Proyección temporal</h2>
@@ -1238,6 +1335,7 @@ function buildNutritionReportHtml(reportData) {
           <dt>Cintura estimada 8 semanas</dt>
           <dd>${escapeHtml(formatMetricValue({ value: projection.projected_8_week_waist_cm, unit: 'cm' }))}</dd>
         </div>
+        ${extraProjectionMetricsHtml}
       </div>
       <p class="muted small-note">Esta proyección es orientativa y debe interpretarse por el profesional junto al contexto clínico.</p>
     </section>

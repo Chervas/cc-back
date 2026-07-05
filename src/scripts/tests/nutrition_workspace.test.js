@@ -147,6 +147,14 @@ function run() {
   const second = measurementRow(2, '2026-02-26T10:00:00.000Z', {
     weight_kg: 92,
     waist_cm: 96,
+    skinfold_triceps_mm: 9,
+    skinfold_subscapular_mm: 11,
+    skinfold_biceps_mm: 4,
+    skinfold_iliac_crest_mm: 12,
+    skinfold_supraspinale_mm: 10,
+    skinfold_abdominal_mm: 16,
+    skinfold_front_thigh_mm: 14,
+    skinfold_medial_calf_mm: 7,
   });
   const third = measurementRow(3, '2026-04-23T10:00:00.000Z', {
     weight_kg: 120,
@@ -173,12 +181,22 @@ function run() {
   assert.equal(latestProjection.observed_weeks, 8);
   assert.equal(latestProjection.weight_change_per_week_kg, -1);
   assert.equal(latestProjection.waist_change_per_week_cm, -0.5);
+  assert.equal(latestProjection.skinfold_sum_change_per_week_mm, -1.37);
+  assert.equal(latestProjection.body_fat_change_per_week_percent, -0.16);
   assert.equal(latestProjection.projected_8_week_weight_kg, 84);
   assert.equal(latestProjection.projected_8_week_waist_cm, 92);
+  assert.equal(latestProjection.projected_8_week_skinfold_sum_mm, 72);
+  assert.equal(latestProjection.projected_8_week_body_fat_percent, 16.8);
+  assert.deepEqual(
+    latestProjection.metric_projections.map((metric) => metric.key),
+    ['weight_kg', 'waist_cm', 'skinfold_sum_mm', 'body_fat_percent'],
+  );
 
   const projectionForSecond = __testing.buildProjectionForMeasurement(rowsDesc, 2);
   assert.equal(projectionForSecond.projected_8_week_weight_kg, 84);
   assert.equal(projectionForSecond.projected_8_week_waist_cm, 92);
+  assert.equal(projectionForSecond.projected_8_week_skinfold_sum_mm, 72);
+  assert.equal(projectionForSecond.projected_8_week_body_fat_percent, 16.8);
 
   const projectionForThird = __testing.buildProjectionForMeasurement(rowsDesc, 3);
   assert.equal(projectionForThird.projected_8_week_weight_kg, 148);
@@ -218,6 +236,8 @@ function run() {
   assert.match(html, /Proyección temporal/);
   assert.match(html, /Peso estimado 8 semanas/);
   assert.match(html, /84 kg/);
+  assert.match(html, /Suma de pliegues estimada 8 semanas/);
+  assert.match(html, /Grasa estimada 8 semanas/);
   assert.match(html, /Bases de cálculo/);
   assert.match(html, /Composición corporal/);
   assert.match(html, /Grasa estimada/);
