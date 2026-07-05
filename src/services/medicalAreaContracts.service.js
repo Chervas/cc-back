@@ -212,6 +212,13 @@ const PATIENT_WORKSPACES = {
     label: 'Nutrición',
     icon: 'heroicons_outline:scale',
   },
+  capilar: {
+    enabled: false,
+    route: 'capilar',
+    labelKey: null,
+    label: 'Capilar',
+    icon: 'heroicons_outline:camera',
+  },
   general: {
     enabled: false,
     route: null,
@@ -232,6 +239,7 @@ const APPOINTMENT_ACTIONS = {
     compareIcon: 'heroicons_outline:arrows-right-left',
     noProfileMessage: 'Esta cita no tiene medición nutricional configurada',
     latestPrefix: 'Con anterior',
+    requiresProfile: true,
     profileDetails: {
       quick: 'Abrirá peso y perímetros principales para seguimiento.',
       express_isak: 'Abrirá pliegues, perímetros, diámetros y somatotipo.',
@@ -239,6 +247,20 @@ const APPOINTMENT_ACTIONS = {
     serviceDetails: {
       isak_study: 'Abrirá la ficha nutricional con perfil express/ISAK e informe.',
     },
+  },
+  capilar: {
+    enabled: false,
+    route: 'capilar',
+    label: 'Abrir seguimiento capilar',
+    compareLabel: 'Abrir evolución capilar',
+    detail: 'Abrirá la ficha capilar con zonas, fotos clínicas privadas y evolución.',
+    icon: 'heroicons_outline:camera',
+    compareIcon: 'heroicons_outline:arrows-right-left',
+    noProfileMessage: 'Esta cita no tiene seguimiento capilar configurado',
+    latestPrefix: 'Con anterior',
+    requiresProfile: false,
+    profileDetails: {},
+    serviceDetails: {},
   },
   general: {
     enabled: false,
@@ -250,6 +272,7 @@ const APPOINTMENT_ACTIONS = {
     compareIcon: 'heroicons_outline:arrows-right-left',
     noProfileMessage: 'Esta cita no tiene una acción clínica configurada',
     latestPrefix: 'Con anterior',
+    requiresProfile: false,
     profileDetails: {},
     serviceDetails: {},
   },
@@ -674,6 +697,7 @@ function normalizeAppointmentAction(value, fallback = APPOINTMENT_ACTIONS[FALLBA
     compareIcon: cleanString(source.compareIcon, fallback.compareIcon || fallback.icon || 'heroicons_outline:arrows-right-left'),
     noProfileMessage: cleanString(source.noProfileMessage, fallback.noProfileMessage || 'Esta cita no tiene una acción clínica configurada'),
     latestPrefix: cleanString(source.latestPrefix, fallback.latestPrefix || 'Con anterior'),
+    requiresProfile: source.requiresProfile === undefined ? !!fallback.requiresProfile : !!source.requiresProfile,
     profileDetails: normalizeStringMap(source.profileDetails, fallback.profileDetails),
     serviceDetails: normalizeStringMap(source.serviceDetails, fallback.serviceDetails),
   };
