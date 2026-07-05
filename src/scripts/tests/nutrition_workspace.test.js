@@ -177,6 +177,27 @@ function run() {
   assert.match(html, /Somatotipo Heath-Carter/);
   assert.doesNotMatch(html, /148 kg/);
 
+  const snapshotPayload = __testing.buildNutritionReportSnapshotPayload({
+    patient: { id: 1, name: 'Paciente Test', clinic_id: 1, clinic_name: 'Clinica Test' },
+    treatment: null,
+    appointment: null,
+    measurement: measurementJson(second),
+    report: secondReport,
+    projection: projectionForSecond,
+    profile_definitions: [],
+    field_definitions: {},
+    meta: {
+      formula_version: FORMULA_VERSION,
+      formula_references: FORMULA_REFERENCES,
+      generated_at: '2026-02-26T11:00:00.000Z',
+    },
+  }, html, '2026-02-26T11:00:00.000Z');
+  assert.equal(snapshotPayload.snapshot.kind, 'nutrition_measurement_report');
+  assert.equal(snapshotPayload.snapshot.measurement.id, 2);
+  assert.equal(snapshotPayload.snapshot.report.measurement_id, 2);
+  assert.equal(snapshotPayload.snapshot.meta.storage, 'patient_nutrition_report_snapshot');
+  assert.equal(snapshotPayload.snapshot_hash.length, 64);
+
   console.log('nutrition_workspace.test ok');
 }
 

@@ -39,6 +39,12 @@ module.exports = (sequelize, DataTypes) => {
           as: 'treatment',
         });
       }
+      if (models.PatientNutritionReport) {
+        PatientNutritionMeasurement.hasMany(models.PatientNutritionReport, {
+          foreignKey: 'measurement_id',
+          as: 'reports',
+        });
+      }
     }
   }
 

@@ -54,6 +54,29 @@ exports.renderPatientNutritionMeasurementReport = asyncHandler(async (req, res) 
   }
 });
 
+exports.createPatientNutritionMeasurementReportSnapshot = asyncHandler(async (req, res) => {
+  try {
+    const actorUserId = req.userData?.userId || null;
+    const snapshot = await nutritionWorkspaceService.createNutritionMeasurementReportSnapshot(
+      req.params.id,
+      req.params.measurementId,
+      actorUserId,
+    );
+    if (!snapshot) {
+      return res.status(202).json({
+        message: 'report_snapshot_not_persisted',
+        details: { reason: 'storage_table_unavailable' },
+      });
+    }
+    return res.status(201).json(snapshot);
+  } catch (error) {
+    if (error.status === 404 || ['patient_not_found', 'measurement_not_found', 'report_not_available'].includes(error.message)) {
+      return res.status(404).json({ message: 'Informe no encontrado' });
+    }
+    throw error;
+  }
+});
+
 exports.getPatientNutritionMeasurementReportPdf = asyncHandler(async (req, res) => {
   try {
     const { buffer, filename } = await nutritionWorkspaceService.generateNutritionMeasurementReportPdf(

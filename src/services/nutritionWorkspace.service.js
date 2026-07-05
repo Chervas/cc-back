@@ -1,5 +1,6 @@
 'use strict';
 
+const crypto = require('crypto');
 const fs = require('fs/promises');
 const os = require('os');
 const path = require('path');
@@ -96,6 +97,32 @@ function escapeHtml(value) {
     .replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;')
     .replace(/'/g, '&#039;');
+}
+
+function hashSnapshot(payload) {
+  return crypto
+    .createHash('sha256')
+    .update(JSON.stringify(payload || {}))
+    .digest('hex');
+}
+
+function isMissingReportTableError(error) {
+  const message = String(error?.message || '');
+  const code = String(error?.original?.code || error?.parent?.code || error?.code || '');
+  return code === 'ER_NO_SUCH_TABLE'
+    || code === '42P01'
+    || /PatientNutritionReports/i.test(message) && /doesn't exist|does not exist|no such table/i.test(message);
+}
+
+async function generateUniqueNutritionReportPublicId() {
+  const model = db.PatientNutritionReport;
+  if (!model) return `nrep_${crypto.randomBytes(10).toString('hex')}`;
+  for (let i = 0; i < 5; i += 1) {
+    const publicId = `nrep_${crypto.randomBytes(10).toString('hex')}`;
+    const existing = await model.findOne({ where: { public_id: publicId }, attributes: ['id'] });
+    if (!existing) return publicId;
+  }
+  return `nrep_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`;
 }
 
 function formatDate(value, withTime = true) {
@@ -560,6 +587,120 @@ function buildReports(measurements = []) {
     .reverse();
 }
 
+function nutritionReportSnapshotToJson(row) {
+  if (!row) return null;
+  const plain = typeof row.toJSON === 'function' ? row.toJSON() : row;
+  return {
+    id: plain.id,
+    public_id: plain.public_id,
+    measurement_id: plain.measurement_id,
+    patient_id: plain.patient_id,
+    clinic_id: plain.clinic_id,
+    appointment_id: plain.appointment_id,
+    treatment_id: plain.treatment_id,
+    report_type: plain.report_type,
+    title: plain.title,
+    status: plain.status,
+    formula_version: plain.formula_version,
+    snapshot_hash: plain.snapshot_hash,
+    pdf_asset_id: plain.pdf_asset_id,
+    storage_strategy: plain.storage_strategy || 'json_snapshot_printable_on_demand',
+    generated_by: plain.generated_by,
+    generated_at: plain.generated_at,
+    created_at: plain.created_at,
+    updated_at: plain.updated_at,
+  };
+}
+
+function attachReportSnapshots(reports = [], snapshotRows = []) {
+  const snapshotsByMeasurement = new Map();
+  (snapshotRows || []).forEach((row) => {
+    const snapshot = nutritionReportSnapshotToJson(row);
+    if (!snapshot || snapshot.status !== 'active') return;
+    const key = `${snapshot.measurement_id}:${snapshot.report_type}`;
+    const current = snapshotsByMeasurement.get(key);
+    if (!current || new Date(snapshot.generated_at).getTime() > new Date(current.generated_at).getTime()) {
+      snapshotsByMeasurement.set(key, snapshot);
+    }
+  });
+
+  return (reports || []).map((report) => {
+    const snapshot = snapshotsByMeasurement.get(`${report.measurement_id}:${report.report_type}`);
+    if (!snapshot) return report;
+    return {
+      ...report,
+      snapshot,
+      snapshot_id: snapshot.id,
+      snapshot_public_id: snapshot.public_id,
+      snapshot_hash: snapshot.snapshot_hash,
+      snapshot_created_at: snapshot.generated_at,
+      storage_strategy: snapshot.storage_strategy,
+    };
+  });
+}
+
+async function findActiveNutritionReportSnapshotsForPatient(patientId) {
+  if (!db.PatientNutritionReport || !patientId) return [];
+  try {
+    return await db.PatientNutritionReport.findAll({
+      where: {
+        patient_id: patientId,
+        status: 'active',
+      },
+      order: [['generated_at', 'DESC'], ['id', 'DESC']],
+      limit: 100,
+    });
+  } catch (error) {
+    if (isMissingReportTableError(error)) return [];
+    throw error;
+  }
+}
+
+async function findActiveNutritionReportSnapshot(measurementId, reportType = null) {
+  if (!db.PatientNutritionReport || !measurementId) return null;
+  try {
+    return await db.PatientNutritionReport.findOne({
+      where: {
+        measurement_id: measurementId,
+        status: 'active',
+        ...(reportType ? { report_type: reportType } : {}),
+      },
+      order: [['generated_at', 'DESC'], ['id', 'DESC']],
+    });
+  } catch (error) {
+    if (isMissingReportTableError(error)) return null;
+    throw error;
+  }
+}
+
+function buildNutritionReportSnapshotPayload(reportData, renderedHtml, generatedAt = new Date().toISOString()) {
+  const meta = {
+    ...(reportData.meta || {}),
+    generated_at: generatedAt,
+    pdf_strategy: 'json_snapshot_printable_on_demand',
+    storage: 'patient_nutrition_report_snapshot',
+  };
+
+  const snapshot = {
+    kind: 'nutrition_measurement_report',
+    snapshot_version: 1,
+    patient: reportData.patient,
+    treatment: reportData.treatment,
+    appointment: reportData.appointment,
+    measurement: reportData.measurement,
+    report: reportData.report,
+    profile_definitions: reportData.profile_definitions,
+    field_definitions: reportData.field_definitions,
+    projection: reportData.projection,
+    meta,
+  };
+
+  return {
+    snapshot,
+    snapshot_hash: hashSnapshot({ ...snapshot, rendered_html: renderedHtml || '' }),
+  };
+}
+
 async function findPatient(patientIdentifier) {
   const raw = String(patientIdentifier || '').trim();
   if (!raw) return null;
@@ -622,6 +763,8 @@ async function getPatientNutritionWorkspace(patientIdentifier) {
     order: [['measured_at', 'DESC'], ['id', 'DESC']],
     limit: 50,
   });
+  const reportSnapshots = await findActiveNutritionReportSnapshotsForPatient(patient.id_paciente);
+  const reports = attachReportSnapshots(buildReports(measurements), reportSnapshots);
 
   return {
     patient: {
@@ -637,7 +780,7 @@ async function getPatientNutritionWorkspace(patientIdentifier) {
     measurements: measurements.map(measurementToJson),
     evolution: buildEvolution(measurements),
     projection: buildProjection(measurements),
-    reports: buildReports(measurements),
+    reports,
     meta: {
       formula_version: FORMULA_VERSION,
       formula_references: FORMULA_REFERENCES.map(({ profiles, ...reference }) => reference),
@@ -698,10 +841,21 @@ async function createNutritionMeasurement(patientIdentifier, payload = {}, actor
     updated_by: toIntOrNull(actorUserId),
   });
 
-  return measurementToJson(row);
+  const measurement = measurementToJson(row);
+  try {
+    measurement.report_snapshot = await createNutritionMeasurementReportSnapshot(patient.id_paciente, row.id, actorUserId);
+  } catch (error) {
+    console.warn('[nutritionWorkspace] report snapshot creation failed', {
+      measurement_id: row.id,
+      message: error.message,
+    });
+    measurement.report_snapshot_error = 'report_snapshot_creation_failed';
+  }
+
+  return measurement;
 }
 
-async function getNutritionMeasurementReport(patientIdentifier, measurementIdentifier) {
+async function buildNutritionMeasurementReportData(patientIdentifier, measurementIdentifier) {
   const patient = await findPatient(patientIdentifier);
   if (!patient) {
     const error = new Error('patient_not_found');
@@ -777,6 +931,86 @@ async function getNutritionMeasurementReport(patientIdentifier, measurementIdent
       storage: 'not_persisted',
     },
   };
+}
+
+async function getNutritionMeasurementReport(patientIdentifier, measurementIdentifier) {
+  const reportData = await buildNutritionMeasurementReportData(patientIdentifier, measurementIdentifier);
+  const snapshot = await findActiveNutritionReportSnapshot(
+    reportData.measurement.id,
+    reportData.report.report_type,
+  );
+  const snapshotJson = nutritionReportSnapshotToJson(snapshot);
+  if (!snapshotJson) return reportData;
+  return {
+    ...reportData,
+    report: {
+      ...reportData.report,
+      snapshot: snapshotJson,
+      snapshot_id: snapshotJson.id,
+      snapshot_public_id: snapshotJson.public_id,
+      snapshot_hash: snapshotJson.snapshot_hash,
+      snapshot_created_at: snapshotJson.generated_at,
+      storage_strategy: snapshotJson.storage_strategy,
+    },
+    meta: {
+      ...reportData.meta,
+      storage: snapshotJson.storage_strategy,
+      snapshot_hash: snapshotJson.snapshot_hash,
+    },
+  };
+}
+
+async function createNutritionMeasurementReportSnapshot(patientIdentifier, measurementIdentifier, actorUserId = null) {
+  if (!db.PatientNutritionReport) return null;
+
+  const reportData = await buildNutritionMeasurementReportData(patientIdentifier, measurementIdentifier);
+  const existing = await findActiveNutritionReportSnapshot(
+    reportData.measurement.id,
+    reportData.report.report_type,
+  );
+  if (existing) return nutritionReportSnapshotToJson(existing);
+
+  const generatedAt = new Date().toISOString();
+  const normalizedReportData = {
+    ...reportData,
+    meta: {
+      ...reportData.meta,
+      generated_at: generatedAt,
+      storage: 'patient_nutrition_report_snapshot',
+    },
+  };
+  const renderedHtml = buildNutritionReportHtml(normalizedReportData);
+  const { snapshot, snapshot_hash: snapshotHash } = buildNutritionReportSnapshotPayload(
+    normalizedReportData,
+    renderedHtml,
+    generatedAt,
+  );
+
+  try {
+    const row = await db.PatientNutritionReport.create({
+      public_id: await generateUniqueNutritionReportPublicId(),
+      measurement_id: reportData.measurement.id,
+      patient_id: reportData.patient.id,
+      clinic_id: reportData.patient.clinic_id,
+      appointment_id: reportData.measurement.appointment_id || null,
+      treatment_id: reportData.measurement.treatment_id || null,
+      report_type: reportData.report.report_type,
+      title: reportData.report.title,
+      status: 'active',
+      formula_version: reportData.report.formula_version || FORMULA_VERSION,
+      snapshot_json: snapshot,
+      snapshot_html: renderedHtml,
+      snapshot_hash: snapshotHash,
+      pdf_asset_id: null,
+      storage_strategy: 'json_snapshot_printable_on_demand',
+      generated_by: toIntOrNull(actorUserId),
+      generated_at: generatedAt,
+    });
+    return nutritionReportSnapshotToJson(row);
+  } catch (error) {
+    if (isMissingReportTableError(error)) return null;
+    throw error;
+  }
 }
 
 function rawMeasurementRows(measurement = {}, profileDefinitions = PROFILE_DEFINITIONS, fieldDefinitions = FIELD_DEFINITIONS) {
@@ -1004,13 +1238,24 @@ async function htmlToPdfBuffer(html, filenameSeed = 'nutrition-report') {
 }
 
 async function renderNutritionMeasurementReport(patientIdentifier, measurementIdentifier) {
-  const reportData = await getNutritionMeasurementReport(patientIdentifier, measurementIdentifier);
+  const reportData = await buildNutritionMeasurementReportData(patientIdentifier, measurementIdentifier);
+  const snapshot = await findActiveNutritionReportSnapshot(
+    reportData.measurement.id,
+    reportData.report.report_type,
+  );
+  if (snapshot?.snapshot_html) {
+    return snapshot.snapshot_html;
+  }
   return buildNutritionReportHtml(reportData);
 }
 
 async function generateNutritionMeasurementReportPdf(patientIdentifier, measurementIdentifier) {
-  const reportData = await getNutritionMeasurementReport(patientIdentifier, measurementIdentifier);
-  const html = buildNutritionReportHtml(reportData);
+  const reportData = await buildNutritionMeasurementReportData(patientIdentifier, measurementIdentifier);
+  const snapshot = await findActiveNutritionReportSnapshot(
+    reportData.measurement.id,
+    reportData.report.report_type,
+  );
+  const html = snapshot?.snapshot_html || buildNutritionReportHtml(reportData);
   const filename = `informe-nutricion-${reportData.measurement.id}.pdf`;
   return {
     filename,
@@ -1027,6 +1272,7 @@ module.exports = {
   getPatientNutritionWorkspace,
   createNutritionMeasurement,
   getNutritionMeasurementReport,
+  createNutritionMeasurementReportSnapshot,
   renderNutritionMeasurementReport,
   generateNutritionMeasurementReportPdf,
   __testing: {
@@ -1034,6 +1280,8 @@ module.exports = {
     buildProjection,
     buildProjectionForMeasurement,
     buildNutritionReportHtml,
+    buildNutritionReportSnapshotPayload,
+    hashSnapshot,
     requiredFieldsForProfile,
     missingRequiredFieldsForProfile,
   },
