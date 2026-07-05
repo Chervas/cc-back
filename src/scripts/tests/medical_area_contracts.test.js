@@ -38,9 +38,26 @@ function assertNutritionContract(contract) {
     'arm_relaxed_cm',
     'calf_cm',
   ]);
+  assert.deepEqual(profileSchemas.get('quick')?.groups?.[0]?.required_fields, [
+    'weight_kg',
+    'stature_cm',
+  ]);
   assert.equal(
     profileSchemas.get('express_isak')?.groups?.some((group) => group.key === 'skinfolds' && group.fields.includes('skinfold_medial_calf_mm')),
     true,
+  );
+  assert.deepEqual(
+    profileSchemas.get('express_isak')?.groups?.find((group) => group.key === 'base')?.required_fields,
+    ['weight_kg', 'stature_cm'],
+  );
+  assert.deepEqual(
+    profileSchemas.get('express_isak')?.groups?.find((group) => group.key === 'skinfolds')?.required_fields,
+    [
+      'skinfold_triceps_mm',
+      'skinfold_subscapular_mm',
+      'skinfold_supraspinale_mm',
+      'skinfold_medial_calf_mm',
+    ],
   );
 
   const serviceKinds = byValue(contract.nutrition_service_kind_options);
@@ -83,6 +100,63 @@ function run() {
   assertNutritionContract(normalized);
   assert.equal(normalized.service_examples.includes('Consulta nutricional personalizada'), true);
   assert.equal(normalized.service_examples.includes('Valoraci\u00f3n nutricional'), true);
+
+  const normalizedWithRemovedRequired = normalizeContractPayload('nutricion', {
+    nutrition_measurement_profile_schemas: [
+      {
+        code: 'quick',
+        name: 'Perfil rápido custom',
+        description: 'Intento de quitar peso',
+        groups: [
+          {
+            key: 'base',
+            label: 'Datos base',
+            fields: ['waist_cm'],
+          },
+        ],
+      },
+      {
+        code: 'express_isak',
+        name: 'Perfil express custom',
+        description: 'Intento de quitar pliegues',
+        groups: [
+          {
+            key: 'base',
+            label: 'Datos base',
+            fields: ['stature_cm'],
+          },
+          {
+            key: 'skinfolds',
+            label: 'Pliegues',
+            fields: ['skinfold_biceps_mm'],
+          },
+          {
+            key: 'girths',
+            label: 'Perímetros',
+            fields: ['waist_cm'],
+          },
+        ],
+      },
+    ],
+  });
+  const guardedSchemas = new Map(normalizedWithRemovedRequired.nutrition_measurement_profile_schemas.map((profile) => [profile.code, profile]));
+  assert.deepEqual(guardedSchemas.get('express_isak').groups.map((group) => group.key), [
+    'base',
+    'skinfolds',
+    'girths',
+    'breadths',
+  ]);
+  assert.deepEqual(guardedSchemas.get('quick').groups[0].required_fields, ['weight_kg', 'stature_cm']);
+  assert.equal(guardedSchemas.get('quick').groups[0].fields.includes('weight_kg'), true);
+  assert.equal(guardedSchemas.get('quick').groups[0].fields.includes('stature_cm'), true);
+  assert.equal(
+    guardedSchemas.get('express_isak').groups.find((group) => group.key === 'skinfolds').fields.includes('skinfold_triceps_mm'),
+    true,
+  );
+  assert.equal(
+    guardedSchemas.get('express_isak').groups.find((group) => group.key === 'breadths').fields.includes('breadth_humerus_cm'),
+    true,
+  );
 
   const dental = getBaseContractForArea('dental');
   assert.equal(dental.patient_workspace.enabled, false);

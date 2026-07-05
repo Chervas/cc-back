@@ -227,6 +227,7 @@ const NUTRITION_MEASUREMENT_PROFILE_SCHEMAS = [
         key: 'base',
         label: 'Datos base',
         fields: ['weight_kg', 'stature_cm', 'waist_cm', 'hip_cm', 'arm_relaxed_cm', 'calf_cm'],
+        required_fields: ['weight_kg', 'stature_cm'],
       },
     ],
   },
@@ -239,6 +240,7 @@ const NUTRITION_MEASUREMENT_PROFILE_SCHEMAS = [
         key: 'base',
         label: 'Datos base',
         fields: ['weight_kg', 'stature_cm'],
+        required_fields: ['weight_kg', 'stature_cm'],
       },
       {
         key: 'skinfolds',
@@ -253,6 +255,12 @@ const NUTRITION_MEASUREMENT_PROFILE_SCHEMAS = [
           'skinfold_front_thigh_mm',
           'skinfold_medial_calf_mm',
         ],
+        required_fields: [
+          'skinfold_triceps_mm',
+          'skinfold_subscapular_mm',
+          'skinfold_supraspinale_mm',
+          'skinfold_medial_calf_mm',
+        ],
       },
       {
         key: 'girths',
@@ -264,11 +272,13 @@ const NUTRITION_MEASUREMENT_PROFILE_SCHEMAS = [
           'hip_cm',
           'calf_cm',
         ],
+        required_fields: ['arm_flexed_tensed_cm', 'calf_cm'],
       },
       {
         key: 'breadths',
         label: 'Diámetros',
         fields: ['breadth_humerus_cm', 'breadth_femur_cm'],
+        required_fields: ['breadth_humerus_cm', 'breadth_femur_cm'],
       },
     ],
   },
@@ -785,15 +795,26 @@ function normalizeNutritionMeasurementProfileSchemas(value, fallback = [], field
         return null;
       }
 
-      const groups = Array.isArray(profile?.groups)
-        ? profile.groups.map((group, index) => {
-          const fallbackGroup = fallbackProfile.groups?.[index] || fallbackProfile.groups?.[0] || {};
+      const providedGroups = Array.isArray(profile?.groups) ? profile.groups : [];
+      const providedGroupsByKey = new Map(providedGroups
+        .map((group) => [cleanString(group?.key), group])
+        .filter(([key]) => key));
+      const groups = Array.isArray(fallbackProfile.groups)
+        ? fallbackProfile.groups.map((fallbackGroup, index) => {
+          const group = providedGroupsByKey.get(fallbackGroup.key) || {};
+          const fallbackRequiredFields = normalizeStringArray(fallbackGroup.required_fields, [])
+            .filter((field) => knownFields.has(field) && (fallbackGroup.fields || []).includes(field));
           const groupFields = normalizeStringArray(group?.fields, fallbackGroup.fields || [])
             .filter((field) => knownFields.has(field));
+          const fieldsWithRequired = Array.from(new Set([
+            ...fallbackRequiredFields,
+            ...(groupFields.length ? groupFields : cloneJson(fallbackGroup.fields || [])),
+          ]));
           return {
             key: cleanString(group?.key, fallbackGroup.key || `group_${index + 1}`),
             label: cleanString(group?.label, fallbackGroup.label || 'Grupo'),
-            fields: groupFields.length ? groupFields : cloneJson(fallbackGroup.fields || []),
+            fields: fieldsWithRequired,
+            required_fields: fallbackRequiredFields,
           };
         })
         : cloneJson(fallbackProfile.groups || []);
