@@ -361,6 +361,18 @@ function buildProjection(measurements = []) {
   };
 }
 
+function buildProjectionForMeasurement(measurements = [], measurementId) {
+  const chronologicalRows = [...measurements].reverse();
+  const targetIndex = chronologicalRows.findIndex((item) => Number(measurementToJson(item)?.id) === Number(measurementId));
+  if (targetIndex < 0) {
+    return {
+      available: false,
+      reason: 'measurement_not_found',
+    };
+  }
+  return buildProjection(chronologicalRows.slice(0, targetIndex + 1).reverse());
+}
+
 function getReportMetricValue(measurement, metricDefinition) {
   if (!measurement || !metricDefinition) return null;
   const calculatedValues = measurement.calculated_values || {};
@@ -719,6 +731,7 @@ async function getNutritionMeasurementReport(patientIdentifier, measurementIdent
     appointment: appointment?.toJSON ? appointment.toJSON() : appointment,
     measurement,
     report,
+    projection: buildProjectionForMeasurement(measurements, measurement.id),
     meta: {
       formula_version: FORMULA_VERSION,
       generated_at: new Date().toISOString(),
@@ -744,7 +757,7 @@ function rawMeasurementRows(measurement = {}) {
 }
 
 function buildNutritionReportHtml(reportData) {
-  const { patient, treatment, appointment, measurement, report, meta } = reportData;
+  const { patient, treatment, appointment, measurement, report, projection, meta } = reportData;
   const profileLabel = measurement.profile_code === 'express_isak' ? 'Express/ISAK' : 'Rápido';
   const comparison = report.comparison || { available: false };
   const sectionsHtml = (report.sections || []).map((section) => `
@@ -783,6 +796,36 @@ function buildNutritionReportHtml(reportData) {
     <section class="card muted-card">
       <h2>Comparativa</h2>
       <p>No hay una medición anterior comparable para este informe.</p>
+    </section>
+  `;
+  const projectionHtml = projection?.available ? `
+    <section class="card">
+      <h2>Proyección temporal</h2>
+      <p class="muted">Estimación lineal simple basada en ${escapeHtml(projection.observed_weeks)} semanas observadas entre las dos últimas mediciones comparables del informe.</p>
+      <div class="metric-grid">
+        <div class="metric">
+          <dt>Cambio semanal peso</dt>
+          <dd>${escapeHtml(formatMetricValue({ value: projection.weight_change_per_week_kg, unit: 'kg' }))}</dd>
+        </div>
+        <div class="metric">
+          <dt>Peso estimado 8 semanas</dt>
+          <dd>${escapeHtml(formatMetricValue({ value: projection.projected_8_week_weight_kg, unit: 'kg' }))}</dd>
+        </div>
+        <div class="metric">
+          <dt>Cambio semanal cintura</dt>
+          <dd>${escapeHtml(formatMetricValue({ value: projection.waist_change_per_week_cm, unit: 'cm' }))}</dd>
+        </div>
+        <div class="metric">
+          <dt>Cintura estimada 8 semanas</dt>
+          <dd>${escapeHtml(formatMetricValue({ value: projection.projected_8_week_waist_cm, unit: 'cm' }))}</dd>
+        </div>
+      </div>
+      <p class="muted small-note">Esta proyección es orientativa y debe interpretarse por el profesional junto al contexto clínico.</p>
+    </section>
+  ` : `
+    <section class="card muted-card">
+      <h2>Proyección temporal</h2>
+      <p>Se necesitan dos mediciones con peso y fechas distintas para estimar tendencia.</p>
     </section>
   `;
   const rawHtml = rawMeasurementRows(measurement).map((group) => `
@@ -834,6 +877,7 @@ function buildNutritionReportHtml(reportData) {
     .metric dt { color: #64748b; font-size: 11px; }
     .metric dd { margin: 3px 0; font-size: 22px; font-weight: 800; }
     .delta { color: #0369a1; font-size: 11px; font-weight: 700; }
+    .small-note { margin: 10px 0 0; font-size: 11px; }
     table { width: 100%; border-collapse: collapse; }
     th, td { text-align: left; border-bottom: 1px solid #e2e8f0; padding: 7px 6px; }
     th { color: #64748b; font-size: 11px; text-transform: uppercase; letter-spacing: .04em; }
@@ -864,6 +908,7 @@ function buildNutritionReportHtml(reportData) {
     </section>
     ${sectionsHtml}
     ${comparisonHtml}
+    ${projectionHtml}
     ${narrativeHtml}
     ${qualityHtml}
     ${rawHtml}
