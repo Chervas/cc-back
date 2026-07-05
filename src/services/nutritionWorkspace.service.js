@@ -1573,7 +1573,7 @@ function buildReportNarrative(measurement, comparison, metrics = []) {
       notes.push('El fraccionamiento Kerr-Ross requiere el bloque avanzado completo de perímetros, diámetros, altura sentado y datos personales.');
     }
   } else {
-    notes.push('Perfil express para seguimiento de consulta.');
+    notes.push('Perfil Express para seguimiento de consulta.');
   }
 
   if (comparison?.available) {

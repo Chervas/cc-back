@@ -147,7 +147,7 @@ function run() {
       },
       {
         code: 'express_isak',
-        name: 'Perfil express custom',
+        name: 'Perfil Completa custom',
         description: 'Intento de quitar pliegues',
         groups: [
           {
