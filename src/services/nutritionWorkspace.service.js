@@ -80,6 +80,43 @@ const FORMULA_REFERENCES_BY_KEY = new Map(FORMULA_REFERENCES.map((reference) => 
 const PROFILE_DEFINITIONS = medicalAreaContracts.NUTRITION_MEASUREMENT_PROFILE_SCHEMAS;
 const FIELD_DEFINITIONS = medicalAreaContracts.NUTRITION_MEASUREMENT_FIELD_DEFINITIONS;
 
+function buildClinicalStoragePolicy({
+  storageStrategy = null,
+  status = null,
+  snapshotPersisted = true,
+  primary = null,
+} = {}) {
+  const normalizedStrategy = String(storageStrategy || '').trim() || (
+    snapshotPersisted
+      ? 'json_snapshot_printable_on_demand'
+      : 'calculated_report_not_persisted'
+  );
+  const normalizedStatus = String(status || '').trim().toLowerCase();
+  const isFinal = normalizedStatus === 'final' || normalizedStrategy.startsWith('final_');
+  const documentStatus = isFinal ? 'final' : 'draft';
+  const resolvedPrimary = primary || (snapshotPersisted ? 'database_snapshot' : 'calculated_report');
+  const label = snapshotPersisted
+    ? (isFinal ? 'Snapshot final privado' : 'Snapshot clínico privado')
+    : 'Informe calculado privado';
+
+  return {
+    sensitivity: 'clinical_private',
+    primary: resolvedPrimary,
+    snapshot_persisted: Boolean(snapshotPersisted),
+    pdf_strategy: 'generated_on_demand',
+    pdf_persisted: false,
+    public_media: false,
+    public_media_allowed: false,
+    private_binary_storage: 'pending',
+    storage_strategy: normalizedStrategy,
+    document_status: documentStatus,
+    label,
+    detail: snapshotPersisted
+      ? `${label}: JSON/HTML en base de datos privada; PDF generado bajo demanda; no persistido en PUBLIC_MEDIA.`
+      : `${label}: se calcula en backend y el PDF se genera bajo demanda; no persistido en PUBLIC_MEDIA.`,
+  };
+}
+
 const REPORT_METRIC_DEFINITIONS = [
   { key: 'weight_kg', label: 'Peso', unit: 'kg', source: 'raw_values', decimals: 1, section: 'base' },
   { key: 'bmi', label: 'IMC', unit: '', source: 'calculated_values', decimals: 1, section: 'base' },
@@ -992,6 +1029,12 @@ function buildReports(measurements = [], fieldDefinitions = FIELD_DEFINITIONS) {
         formula_references: formulaReferencesForProfile(measurement.profile_code),
         profile_code: measurement.profile_code,
         quality_flags: measurement.quality_flags || [],
+        storage_strategy: 'calculated_report_not_persisted',
+        clinical_storage: buildClinicalStoragePolicy({
+          storageStrategy: 'calculated_report_not_persisted',
+          snapshotPersisted: false,
+          primary: 'calculated_report',
+        }),
         summary: {
           bmi: measurement.calculated_values.bmi,
           waist_hip_ratio: measurement.calculated_values.waist_hip_ratio,
@@ -1013,6 +1056,7 @@ function buildReports(measurements = [], fieldDefinitions = FIELD_DEFINITIONS) {
 function nutritionReportSnapshotToJson(row) {
   if (!row) return null;
   const plain = typeof row.toJSON === 'function' ? row.toJSON() : row;
+  const storageStrategy = plain.storage_strategy || 'json_snapshot_printable_on_demand';
   return {
     id: plain.id,
     public_id: plain.public_id,
@@ -1027,7 +1071,13 @@ function nutritionReportSnapshotToJson(row) {
     formula_version: plain.formula_version,
     snapshot_hash: plain.snapshot_hash,
     pdf_asset_id: plain.pdf_asset_id,
-    storage_strategy: plain.storage_strategy || 'json_snapshot_printable_on_demand',
+    storage_strategy: storageStrategy,
+    clinical_storage: buildClinicalStoragePolicy({
+      storageStrategy,
+      status: plain.status,
+      snapshotPersisted: true,
+      primary: 'database_snapshot',
+    }),
     generated_by: plain.generated_by,
     generated_at: plain.generated_at,
     finalized_by: plain.finalized_by || null,
@@ -1103,6 +1153,7 @@ function attachReportSnapshots(reports = [], snapshotRows = []) {
       snapshot_hash: snapshot.snapshot_hash,
       snapshot_created_at: snapshot.generated_at,
       storage_strategy: snapshot.storage_strategy,
+      clinical_storage: snapshot.clinical_storage,
     };
   });
 }
@@ -1148,11 +1199,20 @@ async function findCurrentNutritionReportSnapshot(measurementId, reportType = nu
 }
 
 function buildNutritionReportSnapshotPayload(reportData, renderedHtml, generatedAt = new Date().toISOString()) {
+  const storageStrategy = reportData.meta?.storage_strategy
+    || reportData.meta?.storage
+    || 'json_snapshot_printable_on_demand';
   const meta = {
     ...(reportData.meta || {}),
     generated_at: generatedAt,
     pdf_strategy: 'json_snapshot_printable_on_demand',
     storage: 'patient_nutrition_report_snapshot',
+    clinical_storage: buildClinicalStoragePolicy({
+      storageStrategy,
+      status: reportData.meta?.document_status,
+      snapshotPersisted: true,
+      primary: 'database_snapshot',
+    }),
   };
 
   const snapshot = {
@@ -1424,6 +1484,11 @@ async function buildNutritionMeasurementReportData(patientIdentifier, measuremen
       generated_at: new Date().toISOString(),
       pdf_strategy: 'json_snapshot_printable_on_demand',
       storage: 'not_persisted',
+      clinical_storage: buildClinicalStoragePolicy({
+        storageStrategy: 'calculated_report_not_persisted',
+        snapshotPersisted: false,
+        primary: 'calculated_report',
+      }),
     },
   };
 }
@@ -1446,11 +1511,13 @@ async function getNutritionMeasurementReport(patientIdentifier, measurementIdent
       snapshot_hash: snapshotJson.snapshot_hash,
       snapshot_created_at: snapshotJson.generated_at,
       storage_strategy: snapshotJson.storage_strategy,
+      clinical_storage: snapshotJson.clinical_storage,
     },
     meta: {
       ...reportData.meta,
       storage: snapshotJson.storage_strategy,
       snapshot_hash: snapshotJson.snapshot_hash,
+      clinical_storage: snapshotJson.clinical_storage,
     },
   };
 }
@@ -1482,12 +1549,20 @@ async function createNutritionMeasurementReportSnapshot(patientIdentifier, measu
   }
 
   const generatedAt = new Date().toISOString();
+  const clinicalStorage = buildClinicalStoragePolicy({
+    storageStrategy: 'json_snapshot_printable_on_demand',
+    status: 'active',
+    snapshotPersisted: true,
+    primary: 'database_snapshot',
+  });
   const normalizedReportData = {
     ...reportData,
     meta: {
       ...reportData.meta,
       generated_at: generatedAt,
       storage: 'patient_nutrition_report_snapshot',
+      storage_strategy: 'json_snapshot_printable_on_demand',
+      clinical_storage: clinicalStorage,
     },
   };
   const renderedHtml = buildNutritionReportHtml(normalizedReportData);
@@ -1538,12 +1613,20 @@ async function finalizeNutritionMeasurementReportSnapshot(patientIdentifier, mea
   }
 
   const generatedAt = new Date().toISOString();
+  const clinicalStorage = buildClinicalStoragePolicy({
+    storageStrategy: 'final_json_snapshot_printable_on_demand',
+    status: 'final',
+    snapshotPersisted: true,
+    primary: 'database_snapshot',
+  });
   const normalizedReportData = {
     ...reportData,
     meta: {
       ...reportData.meta,
       generated_at: generatedAt,
       storage: 'patient_nutrition_report_snapshot',
+      storage_strategy: 'final_json_snapshot_printable_on_demand',
+      clinical_storage: clinicalStorage,
       document_status: 'final',
       finalized_at: generatedAt,
       finalized_by: toIntOrNull(actorUserId),
@@ -1615,6 +1698,14 @@ function buildNutritionReportHtml(reportData) {
   const profileLabel = measurement.profile_code === 'express_isak' ? 'Express/ISAK' : 'Rápido';
   const isFinalDocument = meta?.document_status === 'final';
   const documentStatusLabel = isFinalDocument ? 'Informe final' : 'Borrador calculado';
+  const clinicalStorage = meta?.clinical_storage || buildClinicalStoragePolicy({
+    storageStrategy: meta?.storage_strategy || meta?.storage,
+    status: meta?.document_status,
+    snapshotPersisted: meta?.storage === 'patient_nutrition_report_snapshot' || isFinalDocument,
+    primary: meta?.storage === 'patient_nutrition_report_snapshot' || isFinalDocument
+      ? 'database_snapshot'
+      : 'calculated_report',
+  });
   const comparison = report.comparison || { available: false };
   const sectionsHtml = (report.sections || []).map((section) => `
     <section class="card">
@@ -1824,7 +1915,7 @@ function buildNutritionReportHtml(reportData) {
     ${formulaReferencesHtml}
     ${rawHtml}
     <footer>
-      ${escapeHtml(documentStatusLabel)} desde medición #${escapeHtml(measurement.id)} con ${escapeHtml(meta.formula_version)}. Snapshot clínico privado con hash; no persistido en PUBLIC_MEDIA.
+      ${escapeHtml(documentStatusLabel)} desde medición #${escapeHtml(measurement.id)} con ${escapeHtml(meta.formula_version)}. ${escapeHtml(clinicalStorage.detail)}
     </footer>
   </main>
 </body>
@@ -1910,6 +2001,7 @@ module.exports = {
     buildCalculationTrace,
     buildNutritionReportHtml,
     buildNutritionReportSnapshotPayload,
+    buildClinicalStoragePolicy,
     hashSnapshot,
     requiredFieldsForProfile,
     missingRequiredFieldsForProfile,

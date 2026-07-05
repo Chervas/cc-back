@@ -172,6 +172,10 @@ function run() {
 
   const reports = __testing.buildReports(rowsDesc);
   const secondReport = reports.find((report) => report.measurement_id === 2);
+  assert.equal(secondReport.clinical_storage.public_media, false);
+  assert.equal(secondReport.clinical_storage.snapshot_persisted, false);
+  assert.equal(secondReport.clinical_storage.pdf_strategy, 'generated_on_demand');
+  assert.equal(secondReport.clinical_storage.pdf_persisted, false);
   assert.equal(secondReport.comparison.available, true);
   assert.equal(secondReport.calculation_trace.find((item) => item.key === 'bmi').status, 'applied');
   assert.equal(secondReport.calculation_trace.find((item) => item.key === 'bmi').source_references[0].key, 'bmi');
@@ -281,6 +285,7 @@ function run() {
   assert.match(html, /Durnin-Womersley/);
   assert.match(html, /Siri body density conversion/);
   assert.match(html, /Somatotipo Heath-Carter/);
+  assert.match(html, /Informe calculado privado/);
   assert.doesNotMatch(html, /148 kg/);
   const finalHtml = __testing.buildNutritionReportHtml({
     patient: { name: 'Paciente Test', clinic_name: 'Clinica Test' },
@@ -297,7 +302,7 @@ function run() {
     },
   });
   assert.match(finalHtml, /Informe final/);
-  assert.match(finalHtml, /Snapshot clínico privado/);
+  assert.match(finalHtml, /Snapshot final privado/);
   assert.match(finalHtml, /no persistido en PUBLIC_MEDIA/);
 
   const snapshotPayload = __testing.buildNutritionReportSnapshotPayload({
@@ -320,7 +325,22 @@ function run() {
   assert.equal(snapshotPayload.snapshot.measurement.id, 2);
   assert.equal(snapshotPayload.snapshot.report.measurement_id, 2);
   assert.equal(snapshotPayload.snapshot.meta.storage, 'patient_nutrition_report_snapshot');
+  assert.equal(snapshotPayload.snapshot.meta.clinical_storage.sensitivity, 'clinical_private');
+  assert.equal(snapshotPayload.snapshot.meta.clinical_storage.primary, 'database_snapshot');
+  assert.equal(snapshotPayload.snapshot.meta.clinical_storage.snapshot_persisted, true);
+  assert.equal(snapshotPayload.snapshot.meta.clinical_storage.pdf_strategy, 'generated_on_demand');
+  assert.equal(snapshotPayload.snapshot.meta.clinical_storage.pdf_persisted, false);
+  assert.equal(snapshotPayload.snapshot.meta.clinical_storage.public_media, false);
+  assert.equal(snapshotPayload.snapshot.meta.clinical_storage.public_media_allowed, false);
   assert.equal(snapshotPayload.snapshot_hash.length, 64);
+
+  const finalStorage = __testing.buildClinicalStoragePolicy({
+    storageStrategy: 'final_json_snapshot_printable_on_demand',
+    status: 'final',
+  });
+  assert.equal(finalStorage.document_status, 'final');
+  assert.equal(finalStorage.label, 'Snapshot final privado');
+  assert.equal(finalStorage.private_binary_storage, 'pending');
 
   console.log('nutrition_workspace.test ok');
 }
