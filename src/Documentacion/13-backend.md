@@ -109,13 +109,15 @@ Endpoints reales:
 |:---|:---|:---|
 | `GET /api/pacientes/:id/nutrition-workspace` | Operativo V1 dev | Devuelve perfiles rapido/express, campos, tratamientos de Nutricion, mediciones, evolucion, proyeccion e informes derivados. |
 | `POST /api/pacientes/:id/nutrition-measurements` | Operativo V1 dev | Registra una medicion nutricional real del paciente y calcula resultados versionados. |
+| `GET /api/pacientes/:id/nutrition-measurements/:measurementId/report/render` | Operativo V1 dev | Renderiza el informe HTML imprimible de una medicion. |
+| `GET /api/pacientes/:id/nutrition-measurements/:measurementId/report/pdf` | Operativo V1 dev | Genera el PDF bajo demanda con Chromium headless, sin persistirlo como fichero clinico. |
 
 Contrato:
 
 - `Tratamientos.clinical_config` guarda configuracion clinica por area. Para Nutricion se usa `clinical_config.nutrition.service_kind` (`consultation`, `follow_up`, `quick_measurement`, `isak_study`, `nutrition_plan_pack`) y `clinical_config.nutrition.measurement_profile_code` con `none`, `quick` o `express_isak`.
 - `PatientNutritionMeasurements` guarda mediciones por `patient_id`, `clinic_id`, `professional_id`, `appointment_id`, `treatment_id`, `profile_code`, `raw_values_json`, `calculated_values_json`, `formula_version` y `quality_flags_json`.
 - El motor `nutrition-basic-v1` calcula en backend IMC, ratio cintura/cadera, suma de pliegues, perimetros corregidos, somatotipo Heath-Carter cuando hay datos suficientes y proyeccion lineal simple con las ultimas dos mediciones.
-- Informes V1 son snapshots derivados de mediciones; PDF y storage clinico privado quedan pendientes. No usar `PUBLIC_MEDIA` para informes, fotos clinicas ni datos antropometricos identificables.
+- Informes V1 son snapshots derivados de mediciones. El HTML/PDF se genera bajo demanda desde la medicion y no se persiste. Storage clinico privado queda pendiente. No usar `PUBLIC_MEDIA` para informes, fotos clinicas ni datos antropometricos identificables.
 - `GET /api/citas/calendar` incluye `tratamiento.disciplina`, `tratamiento.categoria` y `tratamiento.clinical_config` para que la agenda pueda mostrar `Registrar medicion` cuando el tratamiento tenga perfil de medicion asociado.
 - Para citas de Nutricion con perfil de medicion asociado, `GET /api/citas/calendar` y `GET /api/citas/:id` adjuntan `nutrition_latest_measurement` si existe una medicion anterior del paciente. Se calcula en backend con una consulta separada a `PatientNutritionMeasurements` y enriquecimiento por mapa, sin recomponerlo desde Angular.
 
