@@ -312,6 +312,7 @@ function run() {
     treatment: null,
     appointment: null,
     measurement: measurementJson(second),
+    previous_measurement: measurementJson(first),
     report: secondReport,
     projection: projectionForSecond,
     meta: {
@@ -359,10 +360,15 @@ function run() {
   assert.match(html, /Proyección temporal/);
   assert.match(html, /Gráficas de evolución/);
   assert.match(html, /Distribución adiposa y muscular/);
+  assert.match(html, /Distribución corporal de grasa/);
   assert.match(html, /Somatocarta/);
   assert.match(html, /Índices de salud/);
   assert.match(html, /Rango orientativo/);
   assert.doesNotMatch(html, /Posición visual/);
+  assert.match(html, /stroke-dasharray="5 5"/);
+  assert.match(html, /Tronco<small>Previo /);
+  assert.match(html, /Extremidades<small>Previo /);
+  assert.doesNotMatch(html, /<strong>Previo tronco<\/strong>/);
   assert.match(html, /Peso estimado 8 semanas/);
   assert.match(html, /84 kg/);
   assert.match(html, /Suma de pliegues estimada 8 semanas/);
@@ -387,6 +393,7 @@ function run() {
     treatment: null,
     appointment: null,
     measurement: measurementJson(second),
+    previous_measurement: measurementJson(first),
     report: secondReport,
     projection: projectionForSecond,
     meta: {
@@ -421,7 +428,7 @@ function run() {
     },
   }, html, '2026-02-26T11:00:00.000Z');
   assert.equal(snapshotPayload.snapshot.kind, 'nutrition_measurement_report');
-  assert.equal(snapshotPayload.snapshot.snapshot_version, 7);
+  assert.equal(snapshotPayload.snapshot.snapshot_version, 8);
   assert.equal(snapshotPayload.snapshot.report.calculation_profile.code, CALCULATION_PROFILE.code);
   assert.equal(snapshotPayload.snapshot.measurement.id, 2);
   assert.equal(snapshotPayload.snapshot.report.measurement_id, 2);

@@ -13,7 +13,7 @@ const clinicalPrivateStorage = require('./clinicalPrivateStorage.service');
 const { Op } = db.Sequelize;
 const execFileAsync = promisify(execFile);
 const FORMULA_VERSION = 'nutrition-basic-v3';
-const NUTRITION_REPORT_SNAPSHOT_VERSION = 7;
+const NUTRITION_REPORT_SNAPSHOT_VERSION = 8;
 const NUTRITION_REPORT_CURRENT_STATUSES = ['final', 'active'];
 const DEFAULT_CHROMIUM_PATH = '/home/ubuntu/.cache/clinicaclick-browsers/chrome-headless-shell/linux-148.0.7778.56/chrome-headless-shell-linux64/chrome-headless-shell';
 
@@ -454,9 +454,9 @@ function finiteNumber(value) {
 
 function buildMetricSparklineSvg(metric, color = '#2563eb') {
   const points = [
-    { label: 'Anterior', value: finiteNumber(metric.previous_value) },
-    { label: 'Actual', value: finiteNumber(metric.current_value) },
-    { label: '8 sem.', value: finiteNumber(metric.projected_8_week_value) },
+    { label: 'Anterior', value: finiteNumber(metric.previous_value), x: 26, projection: false },
+    { label: 'Actual', value: finiteNumber(metric.current_value), x: 130, projection: false },
+    { label: '8 sem.', value: finiteNumber(metric.projected_8_week_value), x: 234, projection: true },
   ].filter((point) => point.value !== null);
 
   if (points.length < 2) return '';
@@ -467,21 +467,28 @@ function buildMetricSparklineSvg(metric, color = '#2563eb') {
   const range = max - min || Math.max(Math.abs(max), 1);
   const chartTop = 18;
   const chartBottom = 82;
-  const xByIndex = [26, 130, 234];
   const yForValue = (value) => chartBottom - (((value - min) / range) * (chartBottom - chartTop));
-  const svgPoints = points.map((point, index) => ({
+  const svgPoints = points.map((point) => ({
     ...point,
-    x: xByIndex[index],
     y: yForValue(point.value),
   }));
-  const polyline = svgPoints.map((point) => `${round(point.x, 1)},${round(point.y, 1)}`).join(' ');
+  const actualPoints = svgPoints.filter((point) => !point.projection);
+  const projectedPoint = svgPoints.find((point) => point.projection);
+  const projectionAnchor = actualPoints[actualPoints.length - 1];
+  const actualPolyline = actualPoints.length > 1
+    ? actualPoints.map((point) => `${round(point.x, 1)},${round(point.y, 1)}`).join(' ')
+    : '';
+  const projectionPolyline = projectionAnchor && projectedPoint
+    ? [projectionAnchor, projectedPoint].map((point) => `${round(point.x, 1)},${round(point.y, 1)}`).join(' ')
+    : '';
 
   return `
     <svg class="sparkline" viewBox="0 0 260 112" role="img" aria-label="${escapeHtml(metric.label || 'Métrica')}">
       <line x1="20" y1="${chartBottom}" x2="240" y2="${chartBottom}" class="chart-axis" />
-      <polyline points="${escapeHtml(polyline)}" fill="none" stroke="${escapeHtml(color)}" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" />
+      ${actualPolyline ? `<polyline points="${escapeHtml(actualPolyline)}" fill="none" stroke="${escapeHtml(color)}" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" />` : ''}
+      ${projectionPolyline ? `<polyline points="${escapeHtml(projectionPolyline)}" fill="none" stroke="${escapeHtml(color)}" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" stroke-dasharray="5 5" />` : ''}
       ${svgPoints.map((point) => `
-        <circle cx="${round(point.x, 1)}" cy="${round(point.y, 1)}" r="4.5" fill="${escapeHtml(color)}" />
+        <circle cx="${round(point.x, 1)}" cy="${round(point.y, 1)}" r="4.5" fill="${point.projection ? '#fff' : escapeHtml(color)}" stroke="${escapeHtml(color)}" stroke-width="${point.projection ? '2' : '0'}" />
         <text x="${round(point.x, 1)}" y="101" text-anchor="middle" class="chart-label">${escapeHtml(point.label)}</text>
         <text x="${round(point.x, 1)}" y="${Math.max(11, round(point.y - 9, 1))}" text-anchor="middle" class="chart-value">${escapeHtml(formatMetricValue({ value: point.value, unit: metric.unit }))}</text>
       `).join('')}
@@ -823,12 +830,16 @@ function buildFatDistributionHtml(current = null, previous = null) {
           ], { title: `${current.trunkPercent}%`, subtitle: 'tronco' })}
         </div>
         <div class="fat-distribution-values">
-          <div><span style="background:#fb923c"></span><strong>Tronco</strong><em>${escapeHtml(current.trunkPercent)}%</em></div>
-          <div><span style="background:#14b8a6"></span><strong>Extremidades</strong><em>${escapeHtml(current.extremitiesPercent)}%</em></div>
-          ${previous ? `
-            <div class="previous-line"><span></span><strong>Previo tronco</strong><em>${escapeHtml(previous.trunkPercent)}%</em></div>
-            <div class="previous-line"><span></span><strong>Previo extremidades</strong><em>${escapeHtml(previous.extremitiesPercent)}%</em></div>
-          ` : ''}
+          <div>
+            <span style="background:#fb923c"></span>
+            <strong>Tronco${previous ? `<small>Previo ${escapeHtml(previous.trunkPercent)}%</small>` : ''}</strong>
+            <em>${escapeHtml(current.trunkPercent)}%</em>
+          </div>
+          <div>
+            <span style="background:#14b8a6"></span>
+            <strong>Extremidades${previous ? `<small>Previo ${escapeHtml(previous.extremitiesPercent)}%</small>` : ''}</strong>
+            <em>${escapeHtml(current.extremitiesPercent)}%</em>
+          </div>
         </div>
       </div>
     </div>
@@ -3065,9 +3076,9 @@ function buildNutritionReportHtml(reportData) {
     .fat-distribution-values { display: grid; gap: 8px; }
     .fat-distribution-values div { display: grid; grid-template-columns: 10px 1fr auto; gap: 8px; align-items: center; border: 1px solid #e2e8f0; border-radius: 8px; padding: 8px; }
     .fat-distribution-values span { width: 10px; height: 10px; border-radius: 999px; display: inline-block; }
+    .fat-distribution-values strong { display: grid; gap: 2px; }
+    .fat-distribution-values small { color: #64748b; font-size: 10px; font-weight: 700; }
     .fat-distribution-values em { color: #0f172a; font-style: normal; font-weight: 850; }
-    .fat-distribution-values .previous-line { background: #f8fafc; }
-    .fat-distribution-values .previous-line span { background: #0f172a; opacity: .55; }
     .range-wrap { width: 170px; }
     .range-track { position: relative; width: 170px; height: 14px; border-radius: 999px; background: linear-gradient(90deg, #fee2e2, #ecfdf5 42%, #ecfdf5 58%, #fee2e2); border: 1px solid #cbd5e1; }
     .range-track i { position: absolute; top: -4px; width: 7px; height: 20px; border-radius: 999px; background: #0284c7; transform: translateX(-50%); }
