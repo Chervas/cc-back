@@ -17,6 +17,7 @@ const DoctorClinica = db.DoctorClinica;
 const DoctorHorario = db.DoctorHorario;
 const DoctorBloqueo = db.DoctorBloqueo;
 const Tratamiento = db.Tratamiento;
+const PatientNutritionMeasurement = db.PatientNutritionMeasurement;
 const FlowExecutionV2 = db.FlowExecutionV2;
 const AutomationFlowTemplateV2 = db.AutomationFlowTemplateV2;
 const Conversation = db.Conversation;
@@ -778,6 +779,93 @@ async function attachCalendarUnreadCountsToCitas(citas, userId) {
     return citas;
 }
 
+function isNutritionMeasurementEnabled(citaLike) {
+    const treatment = citaLike?.tratamiento || null;
+    const clinicalConfig = treatment?.clinical_config || null;
+    const nutrition = clinicalConfig?.nutrition || null;
+    const profileCode = String(nutrition?.measurement_profile_code || '').trim();
+    const discipline = String(treatment?.disciplina || '').trim().toLowerCase();
+    return (discipline === 'nutricion' || !!nutrition)
+        && ['quick', 'express_isak'].includes(profileCode);
+}
+
+function measurementSummaryForAgenda(row, citaLike) {
+    if (!row) return null;
+    const plain = plainCita(row);
+    const measuredAt = plain?.measured_at || null;
+    const appointmentDate = citaLike?.inicio || citaLike?.fin || null;
+    const measuredTs = measuredAt ? new Date(measuredAt).getTime() : NaN;
+    const appointmentTs = appointmentDate ? new Date(appointmentDate).getTime() : NaN;
+    const daysBetween = Number.isFinite(measuredTs) && Number.isFinite(appointmentTs)
+        ? Math.max(0, Math.round((appointmentTs - measuredTs) / (1000 * 60 * 60 * 24)))
+        : null;
+
+    return {
+        id: plain.id,
+        profile_code: plain.profile_code || null,
+        measured_at: measuredAt,
+        appointment_id: plain.appointment_id || null,
+        formula_version: plain.formula_version || null,
+        days_between_appointment: daysBetween,
+    };
+}
+
+async function attachNutritionLatestMeasurementsToCitas(citas) {
+    const list = Array.isArray(citas) ? citas : (citas ? [citas] : []);
+    if (!list.length || !PatientNutritionMeasurement) return citas;
+
+    const nutritionCitas = list
+        .map((cita) => ({ cita, plain: plainCita(cita) }))
+        .filter(({ plain }) => plain?.paciente_id && isNutritionMeasurementEnabled(plain));
+
+    if (!nutritionCitas.length) {
+        list.forEach((cita) => setCitaDataValue(cita, 'nutrition_latest_measurement', null));
+        return citas;
+    }
+
+    const patientIds = Array.from(new Set(
+        nutritionCitas
+            .map(({ plain }) => Number(plain.paciente_id))
+            .filter((id) => Number.isInteger(id) && id > 0)
+    ));
+
+    if (!patientIds.length) return citas;
+
+    const rows = await PatientNutritionMeasurement.findAll({
+        where: { patient_id: { [Op.in]: patientIds } },
+        attributes: ['id', 'patient_id', 'appointment_id', 'profile_code', 'measured_at', 'formula_version'],
+        order: [['patient_id', 'ASC'], ['measured_at', 'DESC'], ['id', 'DESC']],
+        limit: Math.max(100, patientIds.length * 20),
+    });
+
+    const measurementsByPatient = new Map();
+    rows.forEach((row) => {
+        const plain = plainCita(row);
+        const patientId = Number(plain?.patient_id);
+        if (!Number.isInteger(patientId) || patientId <= 0) return;
+        const bucket = measurementsByPatient.get(patientId) || [];
+        bucket.push(row);
+        measurementsByPatient.set(patientId, bucket);
+    });
+
+    nutritionCitas.forEach(({ cita, plain }) => {
+        const patientId = Number(plain.paciente_id);
+        const appointmentId = Number(plain.id_cita || plain.id || 0) || null;
+        const referenceTs = plain.inicio ? new Date(plain.inicio).getTime() : NaN;
+        const candidates = measurementsByPatient.get(patientId) || [];
+        const previous = candidates.find((row) => {
+            const measurement = plainCita(row);
+            if (appointmentId && Number(measurement.appointment_id || 0) === appointmentId) return false;
+            if (!Number.isFinite(referenceTs)) return true;
+            const measuredTs = measurement.measured_at ? new Date(measurement.measured_at).getTime() : NaN;
+            return Number.isFinite(measuredTs) && measuredTs <= referenceTs;
+        }) || null;
+        setCitaDataValue(cita, 'nutrition_latest_measurement', measurementSummaryForAgenda(previous, plain));
+    });
+
+    return citas;
+}
+
 function mapCalendarCitaRow(cita) {
     const plain = plainCita(cita);
     if (!plain) return null;
@@ -798,6 +886,7 @@ function mapCalendarCitaRow(cita) {
         fin: plain.fin,
         conversation_id: plain.conversation_id || null,
         unread_count: Number(plain.unread_count || 0) || 0,
+        nutrition_latest_measurement: plain.nutrition_latest_measurement || null,
         paciente: plain.paciente ? {
             id_paciente: plain.paciente.id_paciente,
             public_id: plain.paciente.public_id,
@@ -1842,6 +1931,7 @@ exports.getCitasCalendar = asyncHandler(async (req, res) => {
     });
 
     await attachCalendarUnreadCountsToCitas(citas, req.userData?.userId || null);
+    await attachNutritionLatestMeasurementsToCitas(citas);
 
     res.set('X-Agenda-Endpoint', 'calendar-lite');
     res.json(citas.map(mapCalendarCitaRow).filter(Boolean));
@@ -1874,6 +1964,7 @@ exports.getCitaById = asyncHandler(async (req, res) => {
     await attachFlowSummaryToCitas(cita);
     await attachUnreadCountsToCitas(cita, req.userData?.userId || null);
     await consentimientosService.attachConsentSummaryToCitas(cita);
+    await attachNutritionLatestMeasurementsToCitas(cita);
 
     let conversation_id = null;
     try {
