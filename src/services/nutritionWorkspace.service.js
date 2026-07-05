@@ -82,6 +82,26 @@ const FIELD_DEFINITIONS = {
   breadth_femur_cm: { label: 'Diámetro fémur', unit: 'cm', min: 5, max: 16 },
 };
 
+const REPORT_METRIC_DEFINITIONS = [
+  { key: 'weight_kg', label: 'Peso', unit: 'kg', source: 'raw_values', decimals: 1, section: 'base' },
+  { key: 'bmi', label: 'IMC', unit: '', source: 'calculated_values', decimals: 1, section: 'base' },
+  { key: 'waist_cm', label: 'Cintura', unit: 'cm', source: 'raw_values', decimals: 1, section: 'base' },
+  { key: 'hip_cm', label: 'Cadera', unit: 'cm', source: 'raw_values', decimals: 1, section: 'base' },
+  { key: 'waist_hip_ratio', label: 'Ratio cintura/cadera', unit: '', source: 'calculated_values', decimals: 2, section: 'base' },
+  { key: 'skinfold_sum_mm', label: 'Suma de pliegues', unit: 'mm', source: 'calculated_values', decimals: 1, section: 'anthropometry' },
+  { key: 'corrected_arm_girth_cm', label: 'Brazo corregido', unit: 'cm', source: 'calculated_values', decimals: 1, section: 'anthropometry' },
+  { key: 'corrected_calf_girth_cm', label: 'Pantorrilla corregida', unit: 'cm', source: 'calculated_values', decimals: 1, section: 'anthropometry' },
+  { key: 'endomorphy', label: 'Endomorfia', unit: '', source: 'somatotype', decimals: 1, section: 'somatotype' },
+  { key: 'mesomorphy', label: 'Mesomorfia', unit: '', source: 'somatotype', decimals: 1, section: 'somatotype' },
+  { key: 'ectomorphy', label: 'Ectomorfia', unit: '', source: 'somatotype', decimals: 1, section: 'somatotype' },
+];
+
+const REPORT_SECTION_DEFINITIONS = {
+  base: 'Datos principales',
+  anthropometry: 'Antropometría',
+  somatotype: 'Somatotipo Heath-Carter',
+};
+
 function toIntOrNull(value) {
   if (value === undefined || value === null || value === '') return null;
   const parsed = Number.parseInt(String(value), 10);
@@ -300,24 +320,178 @@ function buildProjection(measurements = []) {
   };
 }
 
-function buildReports(measurements = []) {
-  return measurements
-    .map(measurementToJson)
-    .filter((measurement) => measurement.profile_code === 'express_isak' || measurement.calculated_values.skinfold_sum_mm !== null)
-    .map((measurement) => ({
-      id: `nutrition-report-${measurement.id}`,
-      measurement_id: measurement.id,
-      report_type: measurement.profile_code === 'express_isak' ? 'express_isak' : 'quick_summary',
-      title: measurement.profile_code === 'express_isak' ? 'Informe antropometría ISAK' : 'Resumen nutricional',
-      created_at: measurement.measured_at,
-      formula_version: measurement.formula_version,
-      summary: {
-        bmi: measurement.calculated_values.bmi,
-        waist_hip_ratio: measurement.calculated_values.waist_hip_ratio,
-        skinfold_sum_mm: measurement.calculated_values.skinfold_sum_mm,
-        somatotype: measurement.calculated_values.somatotype,
-      },
+function getReportMetricValue(measurement, metricDefinition) {
+  if (!measurement || !metricDefinition) return null;
+  const calculatedValues = measurement.calculated_values || {};
+  if (metricDefinition.source === 'raw_values') {
+    return measurement.raw_values?.[metricDefinition.key] ?? null;
+  }
+  if (metricDefinition.source === 'calculated_values') {
+    return calculatedValues[metricDefinition.key] ?? null;
+  }
+  if (metricDefinition.source === 'somatotype') {
+    return calculatedValues.somatotype?.[metricDefinition.key] ?? null;
+  }
+  return null;
+}
+
+function normalizeMetricValue(value, decimals = 1) {
+  if (!Number.isFinite(value)) return value ?? null;
+  return round(value, decimals);
+}
+
+function buildReportMetric(measurement, previousMeasurement, metricDefinition) {
+  const value = getReportMetricValue(measurement, metricDefinition);
+  if (value === null || value === undefined || value === '') return null;
+
+  const previousValue = getReportMetricValue(previousMeasurement, metricDefinition);
+  const numericValue = Number(value);
+  const numericPreviousValue = Number(previousValue);
+  const canCompare = Number.isFinite(numericValue) && Number.isFinite(numericPreviousValue);
+  const delta = canCompare ? round(numericValue - numericPreviousValue, metricDefinition.decimals) : null;
+
+  return {
+    key: metricDefinition.key,
+    label: metricDefinition.label,
+    unit: metricDefinition.unit,
+    section: metricDefinition.section,
+    value: normalizeMetricValue(value, metricDefinition.decimals),
+    previous_value: canCompare ? normalizeMetricValue(previousValue, metricDefinition.decimals) : null,
+    delta,
+    trend: delta === null
+      ? 'not_comparable'
+      : Math.abs(delta) < (metricDefinition.decimals === 2 ? 0.01 : 0.05)
+        ? 'stable'
+        : delta > 0
+          ? 'up'
+          : 'down',
+  };
+}
+
+function buildReportSections(metrics = []) {
+  return Object.entries(REPORT_SECTION_DEFINITIONS)
+    .map(([key, title]) => ({
+      key,
+      title,
+      metrics: metrics.filter((metric) => metric.section === key),
+    }))
+    .filter((section) => section.metrics.length);
+}
+
+function buildMeasurementComparison(measurement, previousMeasurement, metrics = []) {
+  if (!measurement || !previousMeasurement) {
+    return {
+      available: false,
+      reason: 'need_previous_measurement',
+    };
+  }
+
+  const measuredAt = new Date(measurement.measured_at).getTime();
+  const previousMeasuredAt = new Date(previousMeasurement.measured_at).getTime();
+  const daysBetween = (measuredAt - previousMeasuredAt) / (1000 * 60 * 60 * 24);
+  const comparableMetrics = metrics
+    .filter((metric) => metric.delta !== null && metric.delta !== undefined)
+    .map((metric) => ({
+      key: metric.key,
+      label: metric.label,
+      unit: metric.unit,
+      value: metric.value,
+      previous_value: metric.previous_value,
+      delta: metric.delta,
+      trend: metric.trend,
     }));
+
+  if (!comparableMetrics.length) {
+    return {
+      available: false,
+      reason: 'no_comparable_metrics',
+      previous_measurement_id: previousMeasurement.id,
+      previous_measured_at: previousMeasurement.measured_at,
+    };
+  }
+
+  return {
+    available: true,
+    previous_measurement_id: previousMeasurement.id,
+    previous_measured_at: previousMeasurement.measured_at,
+    days_between: Number.isFinite(daysBetween) ? round(daysBetween, 0) : null,
+    metrics: comparableMetrics,
+  };
+}
+
+function buildReportNarrative(measurement, comparison, metrics = []) {
+  const notes = [];
+  const rawValues = measurement.raw_values || {};
+  const skinfoldCount = Object.keys(rawValues)
+    .filter((key) => key.startsWith('skinfold_') && Number.isFinite(rawValues[key]))
+    .length;
+
+  if (measurement.profile_code === 'express_isak') {
+    notes.push(skinfoldCount >= 8
+      ? 'Perfil express/ISAK con los 8 pliegues del perfil restringido registrados.'
+      : `Perfil express/ISAK parcial con ${skinfoldCount} de 8 pliegues registrados.`);
+  } else {
+    notes.push('Resumen rápido para seguimiento de consulta.');
+  }
+
+  if (comparison?.available) {
+    const weightMetric = comparison.metrics.find((metric) => metric.key === 'weight_kg');
+    const waistMetric = comparison.metrics.find((metric) => metric.key === 'waist_cm');
+    const changes = [weightMetric, waistMetric]
+      .filter(Boolean)
+      .map((metric) => `${metric.label.toLowerCase()} ${metric.delta > 0 ? '+' : ''}${metric.delta}${metric.unit ? ` ${metric.unit}` : ''}`);
+    notes.push(changes.length
+      ? `Comparado con la medición anterior: ${changes.join(', ')}.`
+      : 'Comparativa disponible frente a la medición anterior.');
+  } else {
+    notes.push('Registra otra medición en una fecha distinta para activar la comparativa temporal.');
+  }
+
+  if (measurement.quality_flags?.length) {
+    notes.push('Hay medidas fuera del rango esperado; conviene revisarlas antes de entregar el informe.');
+  }
+
+  if (!metrics.some((metric) => metric.section === 'somatotype')) {
+    notes.push('El somatotipo requiere perfil express/ISAK completo.');
+  }
+
+  return notes;
+}
+
+function buildReports(measurements = []) {
+  const chronological = [...measurements].reverse().map(measurementToJson);
+  return chronological
+    .map((measurement, index) => {
+      const previousMeasurement = chronological[index - 1] || null;
+      const metrics = REPORT_METRIC_DEFINITIONS
+        .map((metricDefinition) => buildReportMetric(measurement, previousMeasurement, metricDefinition))
+        .filter(Boolean);
+      if (!metrics.length) return null;
+
+      const comparison = buildMeasurementComparison(measurement, previousMeasurement, metrics);
+      return {
+        id: `nutrition-report-${measurement.id}`,
+        measurement_id: measurement.id,
+        report_type: measurement.profile_code === 'express_isak' ? 'express_isak' : 'quick_summary',
+        title: measurement.profile_code === 'express_isak' ? 'Informe antropometría ISAK' : 'Resumen rápido nutricional',
+        created_at: measurement.measured_at,
+        formula_version: measurement.formula_version,
+        profile_code: measurement.profile_code,
+        quality_flags: measurement.quality_flags || [],
+        summary: {
+          bmi: measurement.calculated_values.bmi,
+          waist_hip_ratio: measurement.calculated_values.waist_hip_ratio,
+          skinfold_sum_mm: measurement.calculated_values.skinfold_sum_mm,
+          somatotype: measurement.calculated_values.somatotype,
+          metric_count: metrics.length,
+        },
+        sections: buildReportSections(metrics),
+        comparison,
+        narrative: buildReportNarrative(measurement, comparison, metrics),
+      };
+    })
+    .filter(Boolean)
+    .reverse();
 }
 
 async function findPatient(patientIdentifier) {
