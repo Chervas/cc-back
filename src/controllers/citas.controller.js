@@ -70,6 +70,52 @@ function buildDateRangeWhere(startDate, endDate) {
     return { [Op.between]: [start, end] };
 }
 
+function normalizeMoneyValue(value) {
+    if (value === null || value === undefined || value === '') {
+        return null;
+    }
+    const numeric = Number(value);
+    if (!Number.isFinite(numeric) || numeric < 0) {
+        return null;
+    }
+    return Math.round(numeric * 100) / 100;
+}
+
+function appointmentTypePriceCode(tipoCita) {
+    const tipo = String(tipoCita || '').trim().toLowerCase();
+    return ['primera_con_trat', 'continuacion', 'revision', 'urgencia'].includes(tipo)
+        ? tipo
+        : null;
+}
+
+function resolveCitaAppointmentPrice(cita) {
+    const plain = plainCita(cita);
+    const tratamiento = plain?.tratamiento;
+    if (!tratamiento) {
+        return null;
+    }
+
+    const basePrice = normalizeMoneyValue(tratamiento.precio_base) ?? 0;
+    const priceCode = appointmentTypePriceCode(plain.tipo_cita);
+    if (!priceCode) {
+        return basePrice;
+    }
+
+    const configuredPrice = normalizeMoneyValue(
+        tratamiento.clinical_config?.appointment_type_prices?.[priceCode]
+    );
+    return configuredPrice !== null ? configuredPrice : basePrice;
+}
+
+function attachResolvedAppointmentPricesToCitas(citas) {
+    const list = Array.isArray(citas) ? citas : (citas ? [citas] : []);
+    list.forEach((cita) => {
+        const resolvedPrice = resolveCitaAppointmentPrice(cita);
+        setCitaDataValue(cita, 'precio_cita_resuelto', resolvedPrice);
+    });
+    return citas;
+}
+
 async function generateUniquePacientePublicId() {
     for (let i = 0; i < 8; i++) {
         const publicId = generatePacientePublicId();
@@ -884,6 +930,7 @@ function mapCalendarCitaRow(cita) {
         estado: plain.estado,
         inicio: plain.inicio,
         fin: plain.fin,
+        precio_cita_resuelto: resolveCitaAppointmentPrice(plain),
         conversation_id: plain.conversation_id || null,
         unread_count: Number(plain.unread_count || 0) || 0,
         nutrition_latest_measurement: plain.nutrition_latest_measurement || null,
@@ -906,6 +953,7 @@ function mapCalendarCitaRow(cita) {
             disciplina: plain.tratamiento.disciplina || null,
             categoria: plain.tratamiento.categoria || null,
             duracion_min: plain.tratamiento.duracion_min,
+            precio_base: plain.tratamiento.precio_base,
             color: plain.tratamiento.color,
             clinical_config: plain.tratamiento.clinical_config || null,
         } : null,
@@ -1783,6 +1831,7 @@ exports.createCita = asyncHandler(async (req, res) => {
         await attachFlowSummaryToCitas(citaCreada);
         await attachUnreadCountsToCitas(citaCreada, req.userData?.userId || null);
         await consentimientosService.attachConsentSummaryToCitas(citaCreada);
+        attachResolvedAppointmentPricesToCitas(citaCreada);
         emitAppointmentSocketEvent('appointment:created', citaCreada?.toJSON ? citaCreada.toJSON() : citaCreada);
 
         return res.status(201).json(citaCreada);
@@ -1844,6 +1893,7 @@ exports.getCitas = asyncHandler(async (req, res) => {
     await attachFlowSummaryToCitas(citas);
     await attachUnreadCountsToCitas(citas, req.userData?.userId || null);
     await consentimientosService.attachConsentSummaryToCitas(citas);
+    attachResolvedAppointmentPricesToCitas(citas);
     res.json(citas);
 });
 
@@ -1919,7 +1969,7 @@ exports.getCitasCalendar = asyncHandler(async (req, res) => {
                 model: Tratamiento,
                 as: 'tratamiento',
                 required: false,
-                attributes: ['id_tratamiento', 'nombre', 'disciplina', 'categoria', 'duracion_min', 'color', 'clinical_config'],
+                attributes: ['id_tratamiento', 'nombre', 'disciplina', 'categoria', 'duracion_min', 'precio_base', 'color', 'clinical_config'],
             },
             db.Usuario ? {
                 model: db.Usuario,
@@ -1965,6 +2015,7 @@ exports.getCitaById = asyncHandler(async (req, res) => {
     await attachUnreadCountsToCitas(cita, req.userData?.userId || null);
     await consentimientosService.attachConsentSummaryToCitas(cita);
     await attachNutritionLatestMeasurementsToCitas(cita);
+    attachResolvedAppointmentPricesToCitas(cita);
 
     let conversation_id = null;
     try {
