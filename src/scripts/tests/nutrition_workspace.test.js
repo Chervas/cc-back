@@ -4,6 +4,7 @@ const assert = require('node:assert/strict');
 
 const {
   FORMULA_VERSION,
+  FORMULA_REFERENCES,
   calculateNutritionValues,
   __testing,
 } = require('../../services/nutritionWorkspace.service');
@@ -133,12 +134,15 @@ function run() {
     projection: projectionForSecond,
     meta: {
       formula_version: FORMULA_VERSION,
+      formula_references: FORMULA_REFERENCES,
       generated_at: '2026-02-26T11:00:00.000Z',
     },
   });
   assert.match(html, /Proyección temporal/);
   assert.match(html, /Peso estimado 8 semanas/);
   assert.match(html, /84 kg/);
+  assert.match(html, /Bases de cálculo/);
+  assert.match(html, /Somatotipo Heath-Carter/);
   assert.doesNotMatch(html, /148 kg/);
 
   console.log('nutrition_workspace.test ok');

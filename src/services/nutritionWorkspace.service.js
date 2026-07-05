@@ -12,6 +12,41 @@ const execFileAsync = promisify(execFile);
 const FORMULA_VERSION = 'nutrition-basic-v1';
 const DEFAULT_CHROMIUM_PATH = '/home/ubuntu/.cache/clinicaclick-browsers/chrome-headless-shell/linux-148.0.7778.56/chrome-headless-shell-linux64/chrome-headless-shell';
 
+const FORMULA_REFERENCES = [
+  {
+    key: 'bmi',
+    label: 'IMC',
+    description: 'Peso en kg dividido por la estatura en metros al cuadrado.',
+    source: 'NHS BMI adult calculation',
+    url: 'https://www.nhs.uk/health-assessment-tools/calculate-your-body-mass-index/calculate-bmi-for-adults/',
+    profiles: ['quick', 'express_isak'],
+  },
+  {
+    key: 'isak_restricted_profile',
+    label: 'Perfil restringido ISAK',
+    description: 'Estructura de medición antropométrica restringida: masa, estatura, pliegues, perímetros y diámetros.',
+    source: 'ISAK restricted profile overview',
+    url: 'https://paulstokes.com.au/isak-restricted-profile/',
+    profiles: ['express_isak'],
+  },
+  {
+    key: 'heath_carter_somatotype',
+    label: 'Somatotipo Heath-Carter',
+    description: 'Cálculo de endomorfia, mesomorfia y ectomorfia a partir de medidas antropométricas.',
+    source: 'The Heath-Carter Anthropometric Somatotype Instruction Manual',
+    url: 'https://phentermineclinics.net/wp-content/uploads/2023/09/Heath-CarterManual.pdf',
+    profiles: ['express_isak'],
+  },
+  {
+    key: 'linear_projection',
+    label: 'Proyección temporal',
+    description: 'Estimación lineal simple basada en las dos últimas mediciones comparables con fechas distintas.',
+    source: 'ClinicaClick nutrition-basic-v1',
+    url: null,
+    profiles: ['quick', 'express_isak'],
+  },
+];
+
 const PROFILE_DEFINITIONS = [
   {
     code: 'quick',
@@ -163,6 +198,12 @@ function formatDelta(metric = {}) {
 
 function normalizeProfileCode(value) {
   return value === 'express_isak' ? 'express_isak' : 'quick';
+}
+
+function formulaReferencesForProfile(profileCode = 'quick') {
+  return FORMULA_REFERENCES
+    .filter((reference) => (reference.profiles || []).includes(profileCode))
+    .map(({ profiles, ...reference }) => reference);
 }
 
 function normalizeRawValues(values = {}) {
@@ -529,6 +570,7 @@ function buildReports(measurements = []) {
         title: measurement.profile_code === 'express_isak' ? 'Informe antropometría ISAK' : 'Resumen rápido nutricional',
         created_at: measurement.measured_at,
         formula_version: measurement.formula_version,
+        formula_references: formulaReferencesForProfile(measurement.profile_code),
         profile_code: measurement.profile_code,
         quality_flags: measurement.quality_flags || [],
         summary: {
@@ -624,6 +666,7 @@ async function getPatientNutritionWorkspace(patientIdentifier) {
     reports: buildReports(measurements),
     meta: {
       formula_version: FORMULA_VERSION,
+      formula_references: FORMULA_REFERENCES.map(({ profiles, ...reference }) => reference),
       generated_at: new Date().toISOString(),
     },
   };
@@ -734,6 +777,7 @@ async function getNutritionMeasurementReport(patientIdentifier, measurementIdent
     projection: buildProjectionForMeasurement(measurements, measurement.id),
     meta: {
       formula_version: FORMULA_VERSION,
+      formula_references: formulaReferencesForProfile(measurement.profile_code),
       generated_at: new Date().toISOString(),
       pdf_strategy: 'json_snapshot_printable_on_demand',
       storage: 'not_persisted',
@@ -849,6 +893,20 @@ function buildNutritionReportHtml(reportData) {
   const qualityHtml = (report.quality_flags || []).length
     ? `<section class="card warning"><h2>Revisión de datos</h2><ul>${report.quality_flags.map((flag) => `<li>${escapeHtml(flag.message || flag.code)}</li>`).join('')}</ul></section>`
     : '';
+  const formulaReferences = report.formula_references || meta.formula_references || [];
+  const formulaReferencesHtml = formulaReferences.length ? `
+    <section class="card muted-card">
+      <h2>Bases de cálculo</h2>
+      <ul>
+        ${formulaReferences.map((reference) => `
+          <li>
+            <strong>${escapeHtml(reference.label)}</strong>: ${escapeHtml(reference.description || reference.source || '')}
+            ${reference.url ? `<br><a href="${escapeHtml(reference.url)}">${escapeHtml(reference.source || reference.url)}</a>` : `<br><span class="muted">${escapeHtml(reference.source || '')}</span>`}
+          </li>
+        `).join('')}
+      </ul>
+    </section>
+  ` : '';
 
   return `<!doctype html>
 <html lang="es">
@@ -911,9 +969,10 @@ function buildNutritionReportHtml(reportData) {
     ${projectionHtml}
     ${narrativeHtml}
     ${qualityHtml}
+    ${formulaReferencesHtml}
     ${rawHtml}
     <footer>
-      Informe calculado bajo demanda desde medición #${escapeHtml(measurement.id)}. No persistido en PUBLIC_MEDIA.
+      Informe calculado bajo demanda desde medición #${escapeHtml(measurement.id)} con ${escapeHtml(meta.formula_version)}. No persistido en PUBLIC_MEDIA.
     </footer>
   </main>
 </body>
@@ -967,6 +1026,7 @@ async function generateNutritionMeasurementReportPdf(patientIdentifier, measurem
 
 module.exports = {
   FORMULA_VERSION,
+  FORMULA_REFERENCES,
   PROFILE_DEFINITIONS,
   FIELD_DEFINITIONS,
   calculateNutritionValues,
