@@ -1,9 +1,10 @@
 'use strict';
-const { Paciente, Clinica, PacienteRelacion, PacienteClinica, PacienteConsentimiento, CitaPaciente, Usuario, Tratamiento, sequelize } = require('../../models');
+const { Paciente, Clinica, PacienteRelacion, PacienteClinica, PacienteConsentimiento, CitaPaciente, Usuario, Tratamiento, PatientNutritionReport, PatientNutritionMeasurement, sequelize } = require('../../models');
 const { Op, literal, QueryTypes } = require('sequelize');
 const crypto = require('crypto');
 const { normalizePhoneDigits } = require('../lib/phone');
 const { normalizeHumanName } = require('../lib/name');
+const { canUserAccessFeature } = require('../lib/access-policy');
 
 const normalizePhone = (phone) => {
   return normalizePhoneDigits(phone);
@@ -252,6 +253,34 @@ const buildReviewActivityDescription = ({ rating, reason, reviewerName, clinicNa
   return {
     plain: fields.map(({ label, value }) => `${label}: ${value}`).join('\n') || 'Sin detalles',
     html: fields.map(({ label, value }) => `<div><strong>${escapeHtml(label)}:</strong> ${escapeHtml(value)}</div>`).join('') || '<div>Sin detalles</div>',
+  };
+};
+
+const shortHash = (value) => {
+  const hash = String(value || '').trim();
+  if (!hash) return null;
+  return hash.length > 16 ? `${hash.slice(0, 8)}...${hash.slice(-6)}` : hash;
+};
+
+const isMissingNutritionReportsTableError = (error) => {
+  const message = String(error?.message || error?.parent?.message || '');
+  return /PatientNutritionReports/i.test(message) && /doesn't exist|does not exist|no such table|unknown column/i.test(message);
+};
+
+const buildNutritionReportActivityDescription = ({ report, measurement, treatment }) => {
+  const fields = [];
+  if (report?.title) fields.push({ label: 'Informe', value: report.title });
+  const measuredDate = formatDateEs(measurement?.measured_at);
+  const measuredTime = formatTimeEs(measurement?.measured_at);
+  if (measuredDate) fields.push({ label: 'Medición', value: measuredTime ? `${measuredDate} ${measuredTime}` : measuredDate });
+  if (treatment?.nombre) fields.push({ label: 'Servicio', value: treatment.nombre });
+  if (report?.formula_version) fields.push({ label: 'Fórmula', value: report.formula_version });
+  const snapshot = shortHash(report?.snapshot_hash);
+  if (snapshot) fields.push({ label: 'Snapshot', value: snapshot });
+
+  return {
+    plain: fields.map(({ label, value }) => `${label}: ${value}`).join('\n') || 'Informe nutricional final',
+    html: fields.map(({ label, value }) => `<div><strong>${escapeHtml(label)}:</strong> ${escapeHtml(value)}</div>`).join('') || '<div>Informe nutricional final</div>',
   };
 };
 
@@ -692,7 +721,7 @@ exports.getPacienteById = async (req, res) => {
 
 exports.getPacienteActivity = async (req, res) => {
   try {
-    const paciente = await findPacienteByIdentifier(req.params.id, { attributes: ['id_paciente', 'public_id'] });
+    const paciente = await findPacienteByIdentifier(req.params.id, { attributes: ['id_paciente', 'public_id', 'clinica_id'] });
     if (!paciente) {
       return res.status(400).json({ message: 'Paciente inválido' });
     }
@@ -945,6 +974,108 @@ exports.getPacienteActivity = async (req, res) => {
           kind: kind || null,
         },
       });
+    }
+
+    const canViewNutritionActivity = PatientNutritionReport && PatientNutritionMeasurement
+      ? await canUserAccessFeature({
+          actorId: Number(req.userData?.userId),
+          featureKey: 'nutrition.workspace.view',
+          clinicId: Number(paciente.clinica_id),
+        }).catch(() => false)
+      : false;
+
+    if (canViewNutritionActivity) {
+      try {
+        const nutritionReports = await PatientNutritionReport.findAll({
+          where: {
+            patient_id: pacienteId,
+            status: 'final',
+          },
+          attributes: [
+            'id',
+            'public_id',
+            'measurement_id',
+            'appointment_id',
+            'treatment_id',
+            'report_type',
+            'title',
+            'status',
+            'formula_version',
+            'snapshot_hash',
+            'storage_strategy',
+            'finalized_by',
+            'finalized_at',
+          ],
+          include: [
+            PatientNutritionMeasurement
+              ? {
+                  model: PatientNutritionMeasurement,
+                  as: 'measurement',
+                  attributes: ['id', 'profile_code', 'measured_at'],
+                  required: false,
+                }
+              : null,
+            Tratamiento
+              ? {
+                  model: Tratamiento,
+                  as: 'treatment',
+                  attributes: ['id_tratamiento', 'nombre'],
+                  required: false,
+                }
+              : null,
+            Usuario
+              ? {
+                  model: Usuario,
+                  as: 'finalizedBy',
+                  attributes: ['id_usuario', 'nombre', 'apellidos', 'email_usuario'],
+                  required: false,
+                }
+              : null,
+          ].filter(Boolean),
+          order: [['finalized_at', 'DESC'], ['id', 'DESC']],
+          limit: 20,
+        });
+
+        for (const reportRow of nutritionReports) {
+          const report = typeof reportRow.get === 'function' ? reportRow.get({ plain: true }) : reportRow;
+          const descriptions = buildNutritionReportActivityDescription({
+            report,
+            measurement: report.measurement || null,
+            treatment: report.treatment || null,
+          });
+          const finalizedByUser = report.finalizedBy || usuariosById.get(Number(report.finalized_by));
+          items.push({
+            id: `nutrition-report-final-${report.id}`,
+            pacienteId: String(pacienteId),
+            fecha: report.finalized_at,
+            tipo: 'nutrition_report_finalized',
+            titulo: 'Informe de Nutrición cerrado',
+            descripcion: descriptions.plain,
+            descripcion_html: descriptions.html,
+            icono: 'heroicons_outline:document-chart-bar',
+            color: 'success',
+            citaId: report.appointment_id ? String(report.appointment_id) : undefined,
+            usuarioId: finalizedByUser ? String(finalizedByUser.id_usuario) : 'system',
+            usuarioNombre: buildActorLabel(finalizedByUser),
+            detalles: {
+              reportId: report.id,
+              reportPublicId: report.public_id || null,
+              measurementId: report.measurement_id || null,
+              appointmentId: report.appointment_id || null,
+              treatmentId: report.treatment_id || null,
+              reportType: report.report_type || null,
+              storageStrategy: report.storage_strategy || null,
+              snapshotHash: report.snapshot_hash || null,
+              profileCode: report.measurement?.profile_code || null,
+              status: report.status,
+            },
+          });
+        }
+      } catch (error) {
+        if (!isMissingNutritionReportsTableError(error)) {
+          throw error;
+        }
+      }
     }
 
     return res.json(items.sort((a, b) => new Date(b.fecha).getTime() - new Date(a.fecha).getTime()));
