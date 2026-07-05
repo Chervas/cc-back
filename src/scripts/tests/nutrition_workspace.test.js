@@ -81,6 +81,38 @@ function run() {
     source: 'Heath-Carter anthropometric somatotype',
   });
 
+  assert.deepEqual(__testing.requiredFieldsForProfile('quick'), [
+    'weight_kg',
+    'stature_cm',
+  ]);
+  assert.deepEqual(__testing.missingRequiredFieldsForProfile({ weight_kg: 80 }, 'quick'), [
+    {
+      field: 'stature_cm',
+      label: 'Estatura',
+      unit: 'cm',
+    },
+  ]);
+  assert.deepEqual(
+    __testing.missingRequiredFieldsForProfile({
+      weight_kg: 80,
+      stature_cm: 180,
+      skinfold_triceps_mm: 10,
+      skinfold_subscapular_mm: 12,
+      skinfold_supraspinale_mm: 11,
+      skinfold_medial_calf_mm: 8,
+      arm_flexed_tensed_cm: 34,
+      calf_cm: 38,
+      breadth_humerus_cm: 7,
+    }, 'express_isak'),
+    [
+      {
+        field: 'breadth_femur_cm',
+        label: 'Diámetro fémur',
+        unit: 'cm',
+      },
+    ],
+  );
+
   const first = measurementRow(1, '2026-01-01T10:00:00.000Z', {
     weight_kg: 100,
     waist_cm: 100,

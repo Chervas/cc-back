@@ -149,6 +149,28 @@ function fieldDefinitionsFromContract(contract = {}) {
     : FIELD_DEFINITIONS;
 }
 
+function requiredFieldsForProfile(profileCode = 'quick', profileDefinitions = PROFILE_DEFINITIONS) {
+  const profile = (profileDefinitions || PROFILE_DEFINITIONS).find((item) => item.code === profileCode)
+    || (profileDefinitions || PROFILE_DEFINITIONS)[0]
+    || {};
+  return Array.from(new Set((profile.groups || [])
+    .flatMap((group) => group.required_fields || [])
+    .filter(Boolean)));
+}
+
+function missingRequiredFieldsForProfile(rawValues = {}, profileCode = 'quick', profileDefinitions = PROFILE_DEFINITIONS, fieldDefinitions = FIELD_DEFINITIONS) {
+  return requiredFieldsForProfile(profileCode, profileDefinitions)
+    .filter((field) => {
+      const value = rawValues[field];
+      return value === undefined || value === null || value === '';
+    })
+    .map((field) => ({
+      field,
+      label: fieldDefinitions?.[field]?.label || field,
+      unit: fieldDefinitions?.[field]?.unit || '',
+    }));
+}
+
 function formulaReferencesForProfile(profileCode = 'quick') {
   return FORMULA_REFERENCES
     .filter((reference) => (reference.profiles || []).includes(profileCode))
@@ -635,8 +657,19 @@ async function createNutritionMeasurement(patientIdentifier, payload = {}, actor
 
   const profileCode = normalizeProfileCode(payload.profile_code);
   const nutritionContract = await getNutritionContractSafe();
+  const profileDefinitions = profileDefinitionsFromContract(nutritionContract);
   const fieldDefinitions = fieldDefinitionsFromContract(nutritionContract);
   const rawValues = normalizeRawValues(payload.raw_values || payload.values || {}, fieldDefinitions);
+  const missingRequiredFields = missingRequiredFieldsForProfile(rawValues, profileCode, profileDefinitions, fieldDefinitions);
+  if (missingRequiredFields.length) {
+    const error = new Error('missing_required_measurement_fields');
+    error.status = 400;
+    error.details = {
+      profile_code: profileCode,
+      missing_fields: missingRequiredFields,
+    };
+    throw error;
+  }
   const qualityFlags = qualityFlagsForValues(rawValues, fieldDefinitions);
   const calculatedValues = calculateNutritionValues(rawValues, profileCode);
   const clinicId = toIntOrNull(payload.clinic_id) || Number(patient.clinica_id);
@@ -1001,5 +1034,7 @@ module.exports = {
     buildProjection,
     buildProjectionForMeasurement,
     buildNutritionReportHtml,
+    requiredFieldsForProfile,
+    missingRequiredFieldsForProfile,
   },
 };
