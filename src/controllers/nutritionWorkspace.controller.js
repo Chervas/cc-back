@@ -151,10 +151,12 @@ exports.finalizePatientNutritionMeasurementReport = asyncHandler(async (req, res
 
 exports.getPatientNutritionMeasurementReportPdf = asyncHandler(async (req, res) => {
   try {
+    const actorUserId = req.userData?.userId || null;
     await assertNutritionAccess(req, 'nutrition.workspace.view');
     const { buffer, filename } = await nutritionWorkspaceService.generateNutritionMeasurementReportPdf(
       req.params.id,
       req.params.measurementId,
+      actorUserId,
     );
     res.setHeader('Content-Type', 'application/pdf');
     res.setHeader('Content-Disposition', `inline; filename="${filename}"`);

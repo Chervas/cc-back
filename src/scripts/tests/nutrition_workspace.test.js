@@ -425,6 +425,18 @@ function run() {
   assert.equal(finalStorage.label, 'Snapshot final privado');
   assert.equal(finalStorage.private_binary_storage, 'pending');
 
+  const finalStorageWithPdf = __testing.buildClinicalStoragePolicy({
+    storageStrategy: 'final_json_snapshot_printable_on_demand',
+    status: 'final',
+    pdfPersisted: true,
+    pdfAssetId: 42,
+  });
+  assert.equal(finalStorageWithPdf.pdf_strategy, 'private_asset_cached');
+  assert.equal(finalStorageWithPdf.pdf_persisted, true);
+  assert.equal(finalStorageWithPdf.pdf_asset_id, 42);
+  assert.equal(finalStorageWithPdf.private_binary_storage, 'clinical_private_asset');
+  assert.match(finalStorageWithPdf.detail, /asset clinico privado/);
+
   console.log('nutrition_workspace.test ok');
 }
 

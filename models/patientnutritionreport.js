@@ -51,6 +51,12 @@ module.exports = (sequelize, DataTypes) => {
           as: 'finalizedBy',
         });
       }
+      if (models.ClinicalPrivateAsset) {
+        PatientNutritionReport.belongsTo(models.ClinicalPrivateAsset, {
+          foreignKey: 'pdf_asset_id',
+          as: 'pdfAsset',
+        });
+      }
     }
   }
 

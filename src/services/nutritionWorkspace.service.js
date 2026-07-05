@@ -8,6 +8,7 @@ const { execFile } = require('child_process');
 const { promisify } = require('util');
 const db = require('../../models');
 const medicalAreaContracts = require('./medicalAreaContracts.service');
+const clinicalPrivateStorage = require('./clinicalPrivateStorage.service');
 
 const { Op } = db.Sequelize;
 const execFileAsync = promisify(execFile);
@@ -93,6 +94,9 @@ function buildClinicalStoragePolicy({
   status = null,
   snapshotPersisted = true,
   primary = null,
+  pdfPersisted = false,
+  pdfAssetId = null,
+  privateBinaryStorage = null,
 } = {}) {
   const normalizedStrategy = String(storageStrategy || '').trim() || (
     snapshotPersisted
@@ -111,16 +115,17 @@ function buildClinicalStoragePolicy({
     sensitivity: 'clinical_private',
     primary: resolvedPrimary,
     snapshot_persisted: Boolean(snapshotPersisted),
-    pdf_strategy: 'generated_on_demand',
-    pdf_persisted: false,
+    pdf_strategy: pdfPersisted ? 'private_asset_cached' : 'generated_on_demand',
+    pdf_persisted: Boolean(pdfPersisted),
+    pdf_asset_id: pdfAssetId || null,
     public_media: false,
     public_media_allowed: false,
-    private_binary_storage: 'pending',
+    private_binary_storage: privateBinaryStorage || (pdfPersisted ? 'clinical_private_asset' : 'pending'),
     storage_strategy: normalizedStrategy,
     document_status: documentStatus,
     label,
     detail: snapshotPersisted
-      ? `${label}: JSON/HTML en base de datos privada; PDF generado bajo demanda; no persistido en PUBLIC_MEDIA.`
+      ? `${label}: JSON/HTML en base de datos privada; PDF ${pdfPersisted ? 'persistido como asset clinico privado' : 'generado bajo demanda'}; no persistido en PUBLIC_MEDIA.`
       : `${label}: se calcula en backend y el PDF se genera bajo demanda; no persistido en PUBLIC_MEDIA.`,
   };
 }
@@ -1330,6 +1335,7 @@ function nutritionReportSnapshotToJson(row) {
   if (!row) return null;
   const plain = typeof row.toJSON === 'function' ? row.toJSON() : row;
   const storageStrategy = plain.storage_strategy || 'json_snapshot_printable_on_demand';
+  const pdfAssetId = toIntOrNull(plain.pdf_asset_id);
   return {
     id: plain.id,
     public_id: plain.public_id,
@@ -1343,13 +1349,16 @@ function nutritionReportSnapshotToJson(row) {
     status: plain.status,
     formula_version: plain.formula_version,
     snapshot_hash: plain.snapshot_hash,
-    pdf_asset_id: plain.pdf_asset_id,
+    pdf_asset_id: pdfAssetId,
     storage_strategy: storageStrategy,
     clinical_storage: buildClinicalStoragePolicy({
       storageStrategy,
       status: plain.status,
       snapshotPersisted: true,
       primary: 'database_snapshot',
+      pdfPersisted: Boolean(pdfAssetId),
+      pdfAssetId,
+      privateBinaryStorage: pdfAssetId ? 'clinical_private_asset' : null,
     }),
     generated_by: plain.generated_by,
     generated_at: plain.generated_at,
@@ -2237,19 +2246,78 @@ async function renderNutritionMeasurementReport(patientIdentifier, measurementId
   return buildNutritionReportHtml(reportData);
 }
 
-async function generateNutritionMeasurementReportPdf(patientIdentifier, measurementIdentifier) {
+async function persistFinalNutritionReportPdf(snapshot, reportData, buffer, filename, actorUserId = null) {
+  if (!snapshot || String(snapshot.status || '').trim().toLowerCase() !== 'final') return null;
+  if (!db.ClinicalPrivateAsset || !db.PatientNutritionReport) return null;
+
+  try {
+    const asset = await clinicalPrivateStorage.storeClinicalPrivateAsset({
+      purpose: 'nutrition_report_pdf',
+      clinicId: reportData.patient.clinic_id,
+      patientId: reportData.patient.id,
+      ownerType: 'patient_nutrition_report',
+      ownerId: snapshot.id,
+      contentType: 'application/pdf',
+      buffer,
+      originalFilename: filename,
+      createdBy: actorUserId,
+      metadata: {
+        measurement_id: reportData.measurement.id,
+        report_public_id: snapshot.public_id || null,
+        report_type: reportData.report.report_type,
+        formula_version: reportData.report.formula_version || FORMULA_VERSION,
+        snapshot_hash: snapshot.snapshot_hash || null,
+      },
+    });
+    snapshot.pdf_asset_id = asset.id;
+    await snapshot.save();
+    return asset;
+  } catch (error) {
+    console.warn('[nutritionWorkspace] private PDF cache skipped', {
+      measurement_id: reportData.measurement.id,
+      snapshot_id: snapshot.id,
+      error: error?.message || error,
+    });
+    return null;
+  }
+}
+
+async function generateNutritionMeasurementReportPdf(patientIdentifier, measurementIdentifier, actorUserId = null) {
   const reportData = await buildNutritionMeasurementReportData(patientIdentifier, measurementIdentifier);
   const snapshot = await findCurrentNutritionReportSnapshot(
     reportData.measurement.id,
     reportData.report.report_type,
   );
+  if (snapshot?.pdf_asset_id && isCurrentNutritionReportSnapshot(snapshot)) {
+    try {
+      const cached = await clinicalPrivateStorage.readClinicalPrivateAsset(snapshot.pdf_asset_id);
+      return {
+        filename: cached.filename || `informe-nutricion-${reportData.measurement.id}.pdf`,
+        buffer: cached.buffer,
+        cached: true,
+        pdf_asset_id: snapshot.pdf_asset_id,
+      };
+    } catch (error) {
+      console.warn('[nutritionWorkspace] private PDF cache read failed', {
+        measurement_id: reportData.measurement.id,
+        snapshot_id: snapshot.id,
+        pdf_asset_id: snapshot.pdf_asset_id,
+        error: error?.message || error,
+      });
+    }
+  }
+
   const html = snapshot?.snapshot_html && isCurrentNutritionReportSnapshot(snapshot)
     ? snapshot.snapshot_html
     : buildNutritionReportHtml(reportData);
   const filename = `informe-nutricion-${reportData.measurement.id}.pdf`;
+  const buffer = await htmlToPdfBuffer(html, `nutrition-${reportData.measurement.id}`);
+  const asset = await persistFinalNutritionReportPdf(snapshot, reportData, buffer, filename, actorUserId);
   return {
     filename,
-    buffer: await htmlToPdfBuffer(html, `nutrition-${reportData.measurement.id}`),
+    buffer,
+    cached: false,
+    pdf_asset_id: asset?.id || snapshot?.pdf_asset_id || null,
   };
 }
 
