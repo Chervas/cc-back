@@ -144,6 +144,11 @@ const NUTRITION_SERVICE_KIND_OPTIONS = [
     icon: 'heroicons_outline:clipboard-document-list',
     recommendedProfile: 'none',
     profileLabel: 'Sin medición obligatoria',
+    recommendedName: 'Consulta nutricional',
+    defaultCategory: 'Consulta nutricional',
+    defaultGenerateReport: false,
+    defaultComparePrevious: false,
+    defaultSessions: 1,
   },
   {
     value: 'follow_up',
@@ -152,6 +157,11 @@ const NUTRITION_SERVICE_KIND_OPTIONS = [
     icon: 'heroicons_outline:arrow-path',
     recommendedProfile: 'quick',
     profileLabel: 'Perfil rápido recomendado',
+    recommendedName: 'Seguimiento nutricional',
+    defaultCategory: 'Nutrición clínica',
+    defaultGenerateReport: false,
+    defaultComparePrevious: true,
+    defaultSessions: 1,
   },
   {
     value: 'quick_measurement',
@@ -160,6 +170,11 @@ const NUTRITION_SERVICE_KIND_OPTIONS = [
     icon: 'heroicons_outline:scale',
     recommendedProfile: 'quick',
     profileLabel: 'Perfil rápido',
+    recommendedName: 'Medición rápida nutricional',
+    defaultCategory: 'Consulta nutricional',
+    defaultGenerateReport: false,
+    defaultComparePrevious: true,
+    defaultSessions: 1,
   },
   {
     value: 'isak_study',
@@ -168,6 +183,11 @@ const NUTRITION_SERVICE_KIND_OPTIONS = [
     icon: 'heroicons_outline:chart-bar-square',
     recommendedProfile: 'express_isak',
     profileLabel: 'Perfil express/ISAK',
+    recommendedName: 'Estudio antropométrico ISAK',
+    defaultCategory: 'Antropometría ISAK',
+    defaultGenerateReport: true,
+    defaultComparePrevious: true,
+    defaultSessions: 1,
   },
   {
     value: 'nutrition_plan_pack',
@@ -176,6 +196,11 @@ const NUTRITION_SERVICE_KIND_OPTIONS = [
     icon: 'heroicons_outline:rectangle-stack',
     recommendedProfile: 'quick',
     profileLabel: 'Perfil rápido opcional',
+    recommendedName: 'Plan de seguimiento mensual',
+    defaultCategory: 'Nutrición clínica',
+    defaultGenerateReport: false,
+    defaultComparePrevious: true,
+    defaultSessions: 4,
   },
 ];
 
@@ -732,15 +757,33 @@ function normalizeNutritionServiceKindOptions(value, fallback = []) {
     return cloneJson(fallback);
   }
 
-  const options = value
-    .map((option) => ({
-      value: cleanString(option?.value),
-      label: cleanString(option?.label),
-      hint: cleanString(option?.hint),
-      icon: cleanString(option?.icon, 'heroicons_outline:clipboard-document-list'),
-      recommendedProfile: cleanString(option?.recommendedProfile, 'none'),
-      profileLabel: cleanString(option?.profileLabel),
-    }))
+  const fallbackByValue = new Map((fallback || []).map((option) => [option.value, option]));
+  const sourceByValue = new Map(value.map((option) => [cleanString(option?.value), option]).filter(([optionValue]) => optionValue));
+  const orderedValues = [
+    ...(fallback || []).map((option) => option.value),
+    ...Array.from(sourceByValue.keys()).filter((optionValue) => !fallbackByValue.has(optionValue)),
+  ];
+  const options = orderedValues
+    .map((optionValue) => {
+      const option = sourceByValue.get(optionValue) || {};
+      const fallbackOption = fallbackByValue.get(optionValue) || {};
+      const defaultSessions = Number.isFinite(Number(option?.defaultSessions))
+        ? Math.max(1, Number.parseInt(String(option.defaultSessions), 10))
+        : (fallbackOption.defaultSessions || 1);
+      return {
+        value: optionValue,
+        label: cleanString(option?.label, fallbackOption.label),
+        hint: cleanString(option?.hint, fallbackOption.hint),
+        icon: cleanString(option?.icon, fallbackOption.icon || 'heroicons_outline:clipboard-document-list'),
+        recommendedProfile: cleanString(option?.recommendedProfile, fallbackOption.recommendedProfile || 'none'),
+        profileLabel: cleanString(option?.profileLabel, fallbackOption.profileLabel),
+        recommendedName: cleanString(option?.recommendedName, fallbackOption.recommendedName),
+        defaultCategory: cleanString(option?.defaultCategory, fallbackOption.defaultCategory),
+        defaultGenerateReport: option?.defaultGenerateReport === undefined ? !!fallbackOption.defaultGenerateReport : !!option.defaultGenerateReport,
+        defaultComparePrevious: option?.defaultComparePrevious === undefined ? !!fallbackOption.defaultComparePrevious : !!option.defaultComparePrevious,
+        defaultSessions,
+      };
+    })
     .filter((option) => option.value && option.label && option.hint);
 
   return options.length ? options : cloneJson(fallback);

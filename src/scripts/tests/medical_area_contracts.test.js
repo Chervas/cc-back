@@ -64,10 +64,18 @@ function assertNutritionContract(contract) {
 
   const serviceKinds = byValue(contract.nutrition_service_kind_options);
   assert.equal(serviceKinds.get('consultation')?.recommendedProfile, 'none');
+  assert.equal(serviceKinds.get('consultation')?.recommendedName, 'Consulta nutricional');
+  assert.equal(serviceKinds.get('consultation')?.defaultGenerateReport, false);
+  assert.equal(serviceKinds.get('consultation')?.defaultComparePrevious, false);
   assert.equal(serviceKinds.get('follow_up')?.recommendedProfile, 'quick');
+  assert.equal(serviceKinds.get('follow_up')?.defaultCategory, 'Nutrición clínica');
   assert.equal(serviceKinds.get('quick_measurement')?.recommendedProfile, 'quick');
   assert.equal(serviceKinds.get('isak_study')?.recommendedProfile, 'express_isak');
+  assert.equal(serviceKinds.get('isak_study')?.recommendedName, 'Estudio antropométrico ISAK');
+  assert.equal(serviceKinds.get('isak_study')?.defaultCategory, 'Antropometría ISAK');
+  assert.equal(serviceKinds.get('isak_study')?.defaultGenerateReport, true);
   assert.equal(serviceKinds.get('nutrition_plan_pack')?.recommendedProfile, 'quick');
+  assert.equal(serviceKinds.get('nutrition_plan_pack')?.defaultSessions, 4);
 
   assert.equal(contract.patient_workspace.enabled, true);
   assert.equal(contract.patient_workspace.route, 'nutricion');
@@ -98,10 +106,22 @@ function run() {
     service_examples: ['Consulta nutricional personalizada'],
     patient_workspace: { enabled: true, route: 'nutricion' },
     appointment_action: { enabled: true, route: 'nutricion' },
+    nutrition_service_kind_options: [
+      {
+        value: 'isak_study',
+        label: 'ISAK custom',
+        hint: 'Custom sin defaults',
+        recommendedProfile: 'express_isak',
+      },
+    ],
   });
   assertNutritionContract(normalized);
   assert.equal(normalized.service_examples.includes('Consulta nutricional personalizada'), true);
   assert.equal(normalized.service_examples.includes('Valoraci\u00f3n nutricional'), true);
+  assert.equal(
+    byValue(normalized.nutrition_service_kind_options).get('isak_study')?.recommendedName,
+    'Estudio antropom\u00e9trico ISAK',
+  );
 
   const normalizedWithRemovedRequired = normalizeContractPayload('nutricion', {
     nutrition_measurement_profile_schemas: [
