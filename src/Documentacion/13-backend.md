@@ -125,6 +125,7 @@ Contrato:
 - Informes V1 son snapshots derivados de mediciones. El HTML/PDF se genera bajo demanda desde la medicion y no se persiste. Storage clinico privado queda pendiente. No usar `PUBLIC_MEDIA` para informes, fotos clinicas ni datos antropometricos identificables.
 - `GET /api/citas/calendar` incluye `tratamiento.disciplina`, `tratamiento.categoria` y `tratamiento.clinical_config` para que la agenda pueda mostrar `Registrar medicion` cuando el tratamiento tenga perfil de medicion asociado.
 - Para citas de Nutricion con perfil de medicion asociado, `GET /api/citas/calendar` y `GET /api/citas/:id` adjuntan `nutrition_latest_measurement` si existe una medicion anterior del paciente. Se calcula en backend con una consulta separada a `PatientNutritionMeasurements` y enriquecimiento por mapa, sin recomponerlo desde Angular.
+- `src/scripts/tests/medical_area_contracts.test.js` protege el contrato base de Nutricion: perfiles `none/quick/express_isak`, tipos de servicio, workspace de paciente y accion clinica de agenda.
 
 ### WhatsApp coexistencia: regla de gateway
 
