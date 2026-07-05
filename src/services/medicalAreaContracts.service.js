@@ -221,6 +221,40 @@ const PATIENT_WORKSPACES = {
   },
 };
 
+const APPOINTMENT_ACTIONS = {
+  nutricion: {
+    enabled: true,
+    route: 'nutricion',
+    label: 'Registrar medición',
+    compareLabel: 'Registrar y comparar',
+    detail: 'Abrirá la ficha nutricional para registrar medidas del perfil configurado.',
+    icon: 'heroicons_outline:scale',
+    compareIcon: 'heroicons_outline:arrows-right-left',
+    noProfileMessage: 'Esta cita no tiene medición nutricional configurada',
+    latestPrefix: 'Con anterior',
+    profileDetails: {
+      quick: 'Abrirá peso y perímetros principales para seguimiento.',
+      express_isak: 'Abrirá pliegues, perímetros, diámetros y somatotipo.',
+    },
+    serviceDetails: {
+      isak_study: 'Abrirá la ficha nutricional con perfil express/ISAK e informe.',
+    },
+  },
+  general: {
+    enabled: false,
+    route: null,
+    label: 'Abrir ficha clínica',
+    compareLabel: 'Abrir seguimiento',
+    detail: 'Abre el workspace clínico definido por el área médica.',
+    icon: 'heroicons_outline:squares-2x2',
+    compareIcon: 'heroicons_outline:arrows-right-left',
+    noProfileMessage: 'Esta cita no tiene una acción clínica configurada',
+    latestPrefix: 'Con anterior',
+    profileDetails: {},
+    serviceDetails: {},
+  },
+};
+
 const MEDICAL_AREA_CONTRACT_SECTIONS = {
   dental: [
     {
@@ -451,6 +485,7 @@ function getKnownCodes() {
     ...Object.keys(TREATMENT_SERVICE_EXAMPLES),
     ...Object.keys(MEDICAL_AREA_CONTRACT_SECTIONS),
     ...Object.keys(TREATMENT_SETUP_STEPS_BY_AREA),
+    ...Object.keys(APPOINTMENT_ACTIONS),
   ])).sort((a, b) => a.localeCompare(b, 'es'));
 }
 
@@ -613,6 +648,37 @@ function normalizePatientWorkspace(value, fallback = PATIENT_WORKSPACES[FALLBACK
   };
 }
 
+function normalizeStringMap(value, fallback = {}) {
+  const source = value && typeof value === 'object' && !Array.isArray(value) ? value : {};
+  const normalized = {};
+  Object.keys(source).forEach((key) => {
+    const cleanKey = cleanString(key);
+    const cleanValue = cleanString(source[key]);
+    if (cleanKey && cleanValue) {
+      normalized[cleanKey] = cleanValue;
+    }
+  });
+
+  return Object.keys(normalized).length ? normalized : cloneJson(fallback || {});
+}
+
+function normalizeAppointmentAction(value, fallback = APPOINTMENT_ACTIONS[FALLBACK_CODE]) {
+  const source = value && typeof value === 'object' ? value : {};
+  return {
+    enabled: source.enabled === undefined ? !!fallback.enabled : !!source.enabled,
+    route: source.route === null ? null : cleanString(source.route, fallback.route || null),
+    label: cleanString(source.label, fallback.label || 'Abrir ficha clínica'),
+    compareLabel: cleanString(source.compareLabel, fallback.compareLabel || fallback.label || 'Abrir seguimiento'),
+    detail: cleanString(source.detail, fallback.detail || ''),
+    icon: cleanString(source.icon, fallback.icon || 'heroicons_outline:squares-2x2'),
+    compareIcon: cleanString(source.compareIcon, fallback.compareIcon || fallback.icon || 'heroicons_outline:arrows-right-left'),
+    noProfileMessage: cleanString(source.noProfileMessage, fallback.noProfileMessage || 'Esta cita no tiene una acción clínica configurada'),
+    latestPrefix: cleanString(source.latestPrefix, fallback.latestPrefix || 'Con anterior'),
+    profileDetails: normalizeStringMap(source.profileDetails, fallback.profileDetails),
+    serviceDetails: normalizeStringMap(source.serviceDetails, fallback.serviceDetails),
+  };
+}
+
 function getBaseContractForArea(code) {
   const normalized = normalizeCode(code);
   const profile = TREATMENT_AREA_PROFILES[normalized] || TREATMENT_AREA_PROFILES[FALLBACK_CODE];
@@ -623,6 +689,7 @@ function getBaseContractForArea(code) {
     contract_sections: MEDICAL_AREA_CONTRACT_SECTIONS[normalized] || FALLBACK_AREA_CONTRACT_SECTIONS,
     setup_steps: TREATMENT_SETUP_STEPS_BY_AREA[normalized] || DEFAULT_TREATMENT_SETUP_STEPS,
     patient_workspace: PATIENT_WORKSPACES[normalized] || PATIENT_WORKSPACES[FALLBACK_CODE],
+    appointment_action: APPOINTMENT_ACTIONS[normalized] || APPOINTMENT_ACTIONS[FALLBACK_CODE],
     nutrition_service_kind_options: normalized === 'nutricion' ? NUTRITION_SERVICE_KIND_OPTIONS : [],
     nutrition_measurement_profile_options: normalized === 'nutricion' ? NUTRITION_MEASUREMENT_PROFILE_OPTIONS : [],
   };
@@ -640,6 +707,7 @@ function normalizeContractPayload(code, payload = {}) {
     contract_sections: normalizeContractSections(source?.contract_sections, normalizedBase.contract_sections),
     setup_steps: normalizeSetupSteps(source?.setup_steps, normalizedBase.setup_steps),
     patient_workspace: normalizePatientWorkspace(source?.patient_workspace, normalizedBase.patient_workspace),
+    appointment_action: normalizeAppointmentAction(source?.appointment_action, normalizedBase.appointment_action),
     nutrition_service_kind_options: normalizedCode === 'nutricion'
       ? normalizeNutritionServiceKindOptions(source?.nutrition_service_kind_options, normalizedBase.nutrition_service_kind_options)
       : [],
