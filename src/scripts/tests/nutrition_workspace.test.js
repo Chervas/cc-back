@@ -358,6 +358,10 @@ function run() {
   });
   assert.match(html, /Proyección temporal/);
   assert.match(html, /Gráficas de evolución/);
+  assert.match(html, /Distribución adiposa y muscular/);
+  assert.match(html, /Somatocarta/);
+  assert.match(html, /Índices de salud/);
+  assert.match(html, /Posición visual/);
   assert.match(html, /Peso estimado 8 semanas/);
   assert.match(html, /84 kg/);
   assert.match(html, /Suma de pliegues estimada 8 semanas/);
@@ -413,7 +417,7 @@ function run() {
     },
   }, html, '2026-02-26T11:00:00.000Z');
   assert.equal(snapshotPayload.snapshot.kind, 'nutrition_measurement_report');
-  assert.equal(snapshotPayload.snapshot.snapshot_version, 5);
+  assert.equal(snapshotPayload.snapshot.snapshot_version, 6);
   assert.equal(snapshotPayload.snapshot.report.calculation_profile.code, CALCULATION_PROFILE.code);
   assert.equal(snapshotPayload.snapshot.measurement.id, 2);
   assert.equal(snapshotPayload.snapshot.report.measurement_id, 2);

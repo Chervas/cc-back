@@ -13,7 +13,7 @@ const clinicalPrivateStorage = require('./clinicalPrivateStorage.service');
 const { Op } = db.Sequelize;
 const execFileAsync = promisify(execFile);
 const FORMULA_VERSION = 'nutrition-basic-v3';
-const NUTRITION_REPORT_SNAPSHOT_VERSION = 5;
+const NUTRITION_REPORT_SNAPSHOT_VERSION = 6;
 const NUTRITION_REPORT_CURRENT_STATUSES = ['final', 'active'];
 const DEFAULT_CHROMIUM_PATH = '/home/ubuntu/.cache/clinicaclick-browsers/chrome-headless-shell/linux-148.0.7778.56/chrome-headless-shell-linux64/chrome-headless-shell';
 
@@ -542,18 +542,259 @@ function buildCompositionVisualHtml(report) {
   return `
     <section class="card">
       <h2>${fractionation ? 'Fraccionamiento corporal' : 'Composición corporal'}</h2>
-      <div class="composition-bar">
-        ${segments.map((segment) => `<span style="width:${escapeHtml(round(segment.value, 1))}%;background:${escapeHtml(segment.color)}"></span>`).join('')}
-      </div>
-      <div class="legend-grid">
-        ${segments.map((segment) => `
-          <div class="legend-item">
-            <span style="background:${escapeHtml(segment.color)}"></span>
-            <strong>${escapeHtml(segment.label)}</strong>
-            <em>${escapeHtml(round(segment.value, 1))}%</em>
+      <div class="visual-grid">
+        <div>
+          ${buildDonutSvg(segments)}
+        </div>
+        <div>
+          <div class="composition-bar">
+            ${segments.map((segment) => `<span style="width:${escapeHtml(round(segment.value, 1))}%;background:${escapeHtml(segment.color)}"></span>`).join('')}
           </div>
-        `).join('')}
+          <div class="legend-grid">
+            ${segments.map((segment) => `
+              <div class="legend-item">
+                <span style="background:${escapeHtml(segment.color)}"></span>
+                <strong>${escapeHtml(segment.label)}</strong>
+                <em>${escapeHtml(round(segment.value, 1))}%</em>
+              </div>
+            `).join('')}
+          </div>
+        </div>
       </div>
+      <div class="bar-chart-grid">
+        ${buildComponentBarSvg(
+          fractionation
+            ? [
+              { label: 'Adiposo', value: fractionation.adipose_mass_kg, unit: 'kg', color: '#f97316' },
+              { label: 'Músculo', value: fractionation.muscle_mass_kg, unit: 'kg', color: '#14b8a6' },
+              { label: 'Óseo', value: fractionation.bone_mass_kg, unit: 'kg', color: '#6366f1' },
+              { label: 'Residual', value: fractionation.residual_mass_kg, unit: 'kg', color: '#64748b' },
+            ]
+            : [
+              { label: 'Masa grasa', value: composition?.fat_mass_kg, unit: 'kg', color: '#f97316' },
+              { label: 'Masa libre', value: composition?.fat_free_mass_kg, unit: 'kg', color: '#14b8a6' },
+            ],
+        )}
+      </div>
+    </section>
+  `;
+}
+
+function buildDonutSvg(segments = []) {
+  const total = segments.reduce((sum, segment) => sum + Math.max(0, finiteNumber(segment.value) || 0), 0);
+  if (!total) return '';
+  const radius = 54;
+  const circumference = 2 * Math.PI * radius;
+  let offset = 0;
+  return `
+    <svg class="donut-chart" viewBox="0 0 150 150" role="img">
+      <circle cx="75" cy="75" r="${radius}" fill="none" stroke="#e2e8f0" stroke-width="26"></circle>
+      ${segments.map((segment) => {
+        const value = Math.max(0, finiteNumber(segment.value) || 0);
+        const dash = (value / total) * circumference;
+        const circle = `<circle cx="75" cy="75" r="${radius}" fill="none" stroke="${escapeHtml(segment.color)}" stroke-width="26" stroke-dasharray="${round(dash, 2)} ${round(circumference - dash, 2)}" stroke-dashoffset="${round(-offset, 2)}" transform="rotate(-90 75 75)"></circle>`;
+        offset += dash;
+        return circle;
+      }).join('')}
+      <text x="75" y="72" text-anchor="middle" class="donut-title">Actual</text>
+      <text x="75" y="91" text-anchor="middle" class="donut-subtitle">${escapeHtml(segments.length)} bloques</text>
+    </svg>
+  `;
+}
+
+function buildComponentBarSvg(items = []) {
+  const normalized = items
+    .map((item) => ({ ...item, value: finiteNumber(item.value) }))
+    .filter((item) => item.value !== null && item.value > 0);
+  if (!normalized.length) return '';
+  const max = Math.max(...normalized.map((item) => item.value), 1);
+  const rowHeight = 34;
+  const height = 28 + (normalized.length * rowHeight);
+  return `
+    <svg class="bars-chart" viewBox="0 0 430 ${height}" role="img">
+      ${normalized.map((item, index) => {
+        const y = 22 + (index * rowHeight);
+        const width = Math.max(8, (item.value / max) * 250);
+        return `
+          <text x="0" y="${y + 13}" class="bar-label">${escapeHtml(item.label)}</text>
+          <rect x="130" y="${y}" width="${round(width, 1)}" height="18" rx="4" fill="${escapeHtml(item.color)}"></rect>
+          <text x="${round(140 + width, 1)}" y="${y + 13}" class="bar-value">${escapeHtml(formatMetricValue({ value: item.value, unit: item.unit }))}</text>
+        `;
+      }).join('')}
+    </svg>
+  `;
+}
+
+function sumFiniteValues(values = []) {
+  const usable = values.map((value) => finiteNumber(value)).filter((value) => value !== null);
+  return usable.length ? usable.reduce((sum, value) => sum + value, 0) : null;
+}
+
+function percentSegmentsFromGroups(groups = []) {
+  const normalized = groups
+    .map((group) => ({ ...group, value: sumFiniteValues(group.values || []) }))
+    .filter((group) => group.value !== null && group.value > 0);
+  const total = normalized.reduce((sum, group) => sum + group.value, 0);
+  if (!total) return [];
+  return normalized.map((group) => ({
+    ...group,
+    percent: round((group.value / total) * 100, 1),
+  }));
+}
+
+function buildDistributionVisualHtml(measurement = {}) {
+  const raw = measurement.raw_values || {};
+  const calculated = measurement.calculated_values || {};
+  const adiposeSegments = percentSegmentsFromGroups([
+    { label: 'Superior', color: '#38bdf8', values: [raw.skinfold_triceps_mm, raw.skinfold_biceps_mm, raw.skinfold_subscapular_mm] },
+    { label: 'Central', color: '#f97316', values: [raw.skinfold_iliac_crest_mm, raw.skinfold_supraspinale_mm, raw.skinfold_abdominal_mm] },
+    { label: 'Inferior', color: '#22c55e', values: [raw.skinfold_front_thigh_mm, raw.skinfold_medial_calf_mm] },
+  ]);
+  const muscleSegments = percentSegmentsFromGroups([
+    { label: 'Brazo', color: '#0f766e', values: [calculated.corrected_arm_girth_cm || raw.arm_flexed_tensed_cm || raw.arm_relaxed_cm] },
+    { label: 'Muslo', color: '#14b8a6', values: [raw.thigh_cm] },
+    { label: 'Pierna', color: '#5eead4', values: [calculated.corrected_calf_girth_cm || raw.calf_cm] },
+  ]);
+  if (!adiposeSegments.length && !muscleSegments.length) return '';
+
+  const segmentList = (title, segments) => segments.length ? `
+    <div class="distribution-panel">
+      <h3>${escapeHtml(title)}</h3>
+      ${segments.map((segment) => `
+        <div class="distribution-row">
+          <span>${escapeHtml(segment.label)}</span>
+          <strong>${escapeHtml(segment.percent)}%</strong>
+          <div><i style="width:${escapeHtml(segment.percent)}%;background:${escapeHtml(segment.color)}"></i></div>
+        </div>
+      `).join('')}
+    </div>
+  ` : '';
+
+  return `
+    <section class="card">
+      <h2>Distribución adiposa y muscular</h2>
+      <div class="visual-grid">
+        ${segmentList('Tejido adiposo', adiposeSegments)}
+        ${segmentList('Tejido muscular', muscleSegments)}
+      </div>
+    </section>
+  `;
+}
+
+function buildSomatotypeVisualHtml(report = {}) {
+  const somatotype = report?.summary?.somatotype || null;
+  if (!somatotype) return '';
+  const endomorphy = finiteNumber(somatotype.endomorphy);
+  const mesomorphy = finiteNumber(somatotype.mesomorphy);
+  const ectomorphy = finiteNumber(somatotype.ectomorphy);
+  if (endomorphy === null || mesomorphy === null || ectomorphy === null) return '';
+  const x = ectomorphy - endomorphy;
+  const y = (2 * mesomorphy) - (endomorphy + ectomorphy);
+  const plotX = 180 + (x * 18);
+  const plotY = 160 - (y * 10);
+  return `
+    <section class="card">
+      <h2>Somatocarta</h2>
+      <div class="somato-layout">
+        <svg class="somato-chart" viewBox="0 0 360 300" role="img">
+          <path d="M180 35 C250 60 305 142 300 245 L60 245 C55 142 110 60 180 35 Z" fill="none" stroke="#64748b" stroke-width="2" stroke-dasharray="5 5"></path>
+          <line x1="180" y1="35" x2="180" y2="245" stroke="#94a3b8" stroke-dasharray="4 4"></line>
+          <line x1="60" y1="245" x2="300" y2="245" stroke="#94a3b8" stroke-dasharray="4 4"></line>
+          <line x1="60" y1="245" x2="300" y2="95" stroke="#cbd5e1"></line>
+          <line x1="300" y1="245" x2="60" y2="95" stroke="#cbd5e1"></line>
+          <text x="180" y="25" text-anchor="middle" class="somato-label">Mesomorfia</text>
+          <text x="55" y="272" text-anchor="middle" class="somato-label">Endomorfia</text>
+          <text x="305" y="272" text-anchor="middle" class="somato-label">Ectomorfia</text>
+          <circle cx="${round(plotX, 1)}" cy="${round(plotY, 1)}" r="6" fill="#0f766e"></circle>
+        </svg>
+        <div class="somato-values">
+          <div><span>Endomorfia</span><strong>${escapeHtml(endomorphy)}</strong></div>
+          <div><span>Mesomorfia</span><strong>${escapeHtml(mesomorphy)}</strong></div>
+          <div><span>Ectomorfia</span><strong>${escapeHtml(ectomorphy)}</strong></div>
+        </div>
+      </div>
+    </section>
+  `;
+}
+
+function buildHealthIndexesHtml(measurement = {}) {
+  const raw = measurement.raw_values || {};
+  const calculated = measurement.calculated_values || {};
+  const weight = finiteNumber(raw.weight_kg);
+  const stature = finiteNumber(raw.stature_cm);
+  const waist = finiteNumber(raw.waist_cm);
+  const hip = finiteNumber(raw.hip_cm);
+  const waistHeight = waist !== null && stature ? round(waist / stature, 2) : null;
+  const conicity = waist !== null && weight && stature
+    ? round((waist / 100) / (0.109 * Math.sqrt(weight / (stature / 100))), 2)
+    : null;
+  const trunk = sumFiniteValues([raw.skinfold_subscapular_mm, raw.skinfold_iliac_crest_mm, raw.skinfold_supraspinale_mm, raw.skinfold_abdominal_mm]);
+  const extremities = sumFiniteValues([raw.skinfold_triceps_mm, raw.skinfold_biceps_mm, raw.skinfold_front_thigh_mm, raw.skinfold_medial_calf_mm]);
+  const fatDistribution = trunk !== null && extremities !== null && (trunk + extremities) > 0
+    ? round(trunk / (trunk + extremities), 2)
+    : null;
+  const rows = [
+    {
+      label: 'Índice cintura/cadera',
+      value: calculated.waist_hip_ratio,
+      range: '< 1,00',
+      ok: finiteNumber(calculated.waist_hip_ratio) !== null ? Number(calculated.waist_hip_ratio) < 1 : null,
+      interpretation: 'Indicador antropométrico de distribución central.',
+    },
+    {
+      label: 'Índice cintura/talla',
+      value: waistHeight,
+      range: '< 0,50',
+      ok: waistHeight !== null ? waistHeight < 0.5 : null,
+      interpretation: 'Relación entre cintura y estatura.',
+    },
+    {
+      label: 'Índice de conicidad',
+      value: conicity,
+      range: '< 1,40',
+      ok: conicity !== null ? conicity < 1.4 : null,
+      interpretation: 'Estimación de concentración abdominal.',
+    },
+    {
+      label: 'IMC',
+      value: calculated.bmi,
+      range: '18,5 - 24,9',
+      ok: finiteNumber(calculated.bmi) !== null ? Number(calculated.bmi) >= 18.5 && Number(calculated.bmi) <= 24.9 : null,
+      interpretation: 'Relación entre peso y estatura.',
+    },
+    {
+      label: 'Distribución grasa tronco/total',
+      value: fatDistribution,
+      range: 'seguimiento',
+      ok: null,
+      interpretation: 'Proporción de pliegues del tronco sobre pliegues registrados.',
+    },
+  ].filter((row) => row.value !== null && row.value !== undefined && row.value !== '');
+  if (!rows.length) return '';
+  return `
+    <section class="card">
+      <h2>Índices de salud</h2>
+      <table class="health-table">
+        <thead><tr><th>Índice</th><th>Valor</th><th>Rango</th></tr></thead>
+        <tbody>
+          ${rows.map((row) => `
+            <tr>
+              <td><strong>${escapeHtml(row.label)}</strong><br><span class="muted">${escapeHtml(row.interpretation)}</span></td>
+              <td><span class="health-badge ${row.ok === true ? 'health-ok' : row.ok === false ? 'health-alert' : 'health-neutral'}">${escapeHtml(row.value)}</span></td>
+              <td>${escapeHtml(row.range)}</td>
+            </tr>
+          `).join('')}
+        </tbody>
+      </table>
+      ${trunk !== null && extremities !== null ? `
+        <div class="fat-distribution">
+          <strong>Distribución corporal de grasa</strong>
+          ${buildDonutSvg([
+            { label: 'Tronco', value: trunk, color: '#fb923c' },
+            { label: 'Extremidades', value: extremities, color: '#14b8a6' },
+          ])}
+        </div>
+      ` : ''}
     </section>
   `;
 }
@@ -2400,11 +2641,28 @@ function rawMeasurementRows(measurement = {}, profileDefinitions = PROFILE_DEFIN
     fields: group.fields
       .filter((field) => rawValues[field] !== undefined && rawValues[field] !== null && rawValues[field] !== '')
       .map((field) => ({
+        key: field,
         label: fieldDefinitions[field]?.label || field,
         unit: fieldDefinitions[field]?.unit || '',
         value: rawValues[field],
+        min: fieldDefinitions[field]?.min ?? null,
+        max: fieldDefinitions[field]?.max ?? null,
       })),
   })).filter((group) => group.fields.length);
+}
+
+function rawFieldRangeMarkerHtml(field = {}) {
+  const value = finiteNumber(field.value);
+  const min = finiteNumber(field.min);
+  const max = finiteNumber(field.max);
+  if (value === null || min === null || max === null || max <= min) return '<span class="muted">-</span>';
+  const percent = Math.max(0, Math.min(100, ((value - min) / (max - min)) * 100));
+  return `
+    <div class="range-track">
+      <span class="range-mid"></span>
+      <i style="left:${escapeHtml(round(percent, 1))}%"></i>
+    </div>
+  `;
 }
 
 function buildNutritionReportHtml(reportData) {
@@ -2423,6 +2681,9 @@ function buildNutritionReportHtml(reportData) {
   const comparison = report.comparison || { available: false };
   const projectionVisualHtml = buildProjectionVisualHtml(projection);
   const compositionVisualHtml = buildCompositionVisualHtml(report);
+  const distributionVisualHtml = buildDistributionVisualHtml(measurement);
+  const somatotypeVisualHtml = buildSomatotypeVisualHtml(report);
+  const healthIndexesHtml = buildHealthIndexesHtml(measurement);
   const calculationProfileHtml = buildCalculationProfileHtml(
     report.calculation_profile || meta?.calculation_profile || CALCULATION_PROFILE,
   );
@@ -2526,11 +2787,13 @@ function buildNutritionReportHtml(reportData) {
     <section class="card">
       <h2>${escapeHtml(group.title)}</h2>
       <table>
+        <thead><tr><th>Medida</th><th>Resultado</th><th>Posición visual</th></tr></thead>
         <tbody>
           ${group.fields.map((field) => `
             <tr>
               <td>${escapeHtml(field.label)}</td>
               <td>${escapeHtml(field.value)} ${escapeHtml(field.unit)}</td>
+              <td>${rawFieldRangeMarkerHtml(field)}</td>
             </tr>
           `).join('')}
         </tbody>
@@ -2633,10 +2896,40 @@ function buildNutritionReportHtml(reportData) {
     .sparkline-caption { color: #64748b; font-size: 11px; font-weight: 700; margin-top: 4px; }
     .composition-bar { display: flex; width: 100%; height: 18px; overflow: hidden; border-radius: 999px; background: #e2e8f0; margin: 8px 0 12px; }
     .composition-bar span { display: block; min-width: 2px; height: 100%; }
+    .visual-grid { display: grid; grid-template-columns: 220px minmax(0, 1fr); gap: 18px; align-items: center; }
+    .donut-chart { width: 180px; height: 180px; display: block; margin: 0 auto; }
+    .donut-title { fill: #0f172a; font-size: 14px; font-weight: 850; }
+    .donut-subtitle { fill: #64748b; font-size: 10px; font-weight: 700; }
+    .bar-chart-grid { margin-top: 12px; }
+    .bars-chart { display: block; width: 100%; height: auto; }
+    .bar-label { fill: #334155; font-size: 12px; font-weight: 700; }
+    .bar-value { fill: #0f172a; font-size: 12px; font-weight: 800; }
     .legend-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px 14px; }
     .legend-item { display: grid; grid-template-columns: 10px 1fr auto; gap: 7px; align-items: center; font-size: 12px; }
     .legend-item span { width: 10px; height: 10px; border-radius: 999px; display: inline-block; }
     .legend-item em { color: #64748b; font-style: normal; font-weight: 800; }
+    .distribution-panel h3 { margin: 0 0 10px; color: #0369a1; font-size: 15px; }
+    .distribution-row { display: grid; grid-template-columns: 80px 55px minmax(0, 1fr); align-items: center; gap: 10px; margin: 10px 0; }
+    .distribution-row strong { text-align: right; font-size: 15px; }
+    .distribution-row div { height: 10px; border-radius: 999px; background: #e2e8f0; overflow: hidden; }
+    .distribution-row i { display: block; height: 100%; border-radius: 999px; }
+    .somato-layout { display: grid; grid-template-columns: minmax(0, 1fr) 190px; gap: 18px; align-items: center; }
+    .somato-chart { width: 100%; max-height: 330px; }
+    .somato-label { fill: #0f172a; font-size: 13px; font-weight: 850; }
+    .somato-values { display: grid; gap: 10px; }
+    .somato-values div { border: 1px solid #e2e8f0; border-radius: 8px; padding: 10px; }
+    .somato-values span { display: block; color: #64748b; font-size: 11px; font-weight: 700; }
+    .somato-values strong { display: block; margin-top: 4px; font-size: 24px; }
+    .health-table td:nth-child(2), .health-table td:nth-child(3) { text-align: right; white-space: nowrap; }
+    .health-badge { display: inline-flex; min-width: 44px; justify-content: center; border-radius: 4px; padding: 3px 6px; font-weight: 850; }
+    .health-ok { background: #16a34a; color: #fff; }
+    .health-alert { background: #e11d48; color: #fff; }
+    .health-neutral { background: #e2e8f0; color: #0f172a; }
+    .fat-distribution { margin-top: 14px; text-align: center; }
+    .fat-distribution .donut-chart { width: 150px; height: 150px; margin-top: 8px; }
+    .range-track { position: relative; width: 150px; height: 14px; border-radius: 999px; background: linear-gradient(90deg, #fee2e2, #ecfdf5 42%, #ecfdf5 58%, #fee2e2); border: 1px solid #cbd5e1; }
+    .range-track i { position: absolute; top: -4px; width: 7px; height: 20px; border-radius: 999px; background: #0284c7; transform: translateX(-50%); }
+    .range-mid { position: absolute; left: 50%; top: 0; bottom: 0; border-left: 1px solid rgba(15, 23, 42, .22); }
     .calculation-profile-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; margin-top: 12px; }
     .calculation-profile-grid div { border: 1px solid #e2e8f0; border-radius: 8px; padding: 10px; background: #fff; }
     .calculation-profile-grid dt { color: #64748b; font-size: 11px; text-transform: uppercase; letter-spacing: .04em; }
@@ -2672,6 +2965,9 @@ function buildNutritionReportHtml(reportData) {
     ${projectionVisualHtml}
     ${heroMetricsHtml}
     ${compositionVisualHtml}
+    ${distributionVisualHtml}
+    ${somatotypeVisualHtml}
+    ${healthIndexesHtml}
     ${sectionsHtml}
     ${comparisonHtml}
     ${projectionHtml}
