@@ -3,6 +3,10 @@ const express = require('express');
 const router = express.Router();
 const ctrl = require('../controllers/especialidades.controller');
 
+// Contratos de areas medicas consumidos por catalogo/agenda/workspaces
+router.get('/area-contracts', ctrl.getMedicalAreaContracts);
+router.get('/area-contracts/:code', ctrl.getMedicalAreaContract);
+
 // Especialidades de sistema (solo lectura)
 router.get('/sistema', ctrl.getEspecialidadesSistema);
 router.post('/sistema', ctrl.createEspecialidadSistema);

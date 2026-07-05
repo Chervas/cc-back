@@ -7,6 +7,7 @@ const EspecialidadClinica = db.EspecialidadesMedicasClinica;
 const UsuarioEspecialidades = db.UsuarioEspecialidades;
 const ClinicaEspecialidades = db.ClinicaEspecialidades;
 const Clinica = db.Clinica;
+const medicalAreaContractsService = require('../services/medicalAreaContracts.service');
 
 // Utilidad: asegurar que una disciplina esté incluida en la clínica
 async function ensureDisciplinaEnClinica(clinicaId, disciplina) {
@@ -28,6 +29,20 @@ async function ensureDisciplinaEnClinica(clinicaId, disciplina) {
 }
 
 // ============ ESPECIALIDADES DE SISTEMA ============
+
+exports.getMedicalAreaContracts = asyncHandler(async (req, res) => {
+    res.json(medicalAreaContractsService.getMedicalAreaContracts());
+});
+
+exports.getMedicalAreaContract = asyncHandler(async (req, res) => {
+    const code = String(req.params.code || '').trim().toLowerCase();
+    res.json({
+        version: medicalAreaContractsService.VERSION,
+        source: 'backend-static',
+        fallback_code: medicalAreaContractsService.FALLBACK_CODE,
+        contract: medicalAreaContractsService.getContractForArea(code)
+    });
+});
 
 // Listar especialidades de sistema (solo lectura para clínicas)
 exports.getEspecialidadesSistema = asyncHandler(async (req, res) => {

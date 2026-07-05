@@ -1,0 +1,464 @@
+'use strict';
+
+const FALLBACK_CODE = 'general';
+const VERSION = 'medical-area-contracts-v1';
+
+const TREATMENT_AREA_PROFILES = {
+  dental: {
+    label: 'Dental',
+    hint: 'Tratamientos que pueden depender de piezas, arcadas, laboratorio y consentimientos clínicos.',
+    defaultCategory: 'Odontología General',
+    defaultDuration: 30,
+    defaultSessions: 1,
+    supportsPiece: true,
+    supportsLaboratory: true,
+    applicationHint: 'Define si se aplica a una pieza, rango, arcada o de forma general.',
+    applicationOptions: [
+      { value: 'pieza', label: 'Pieza dental' },
+      { value: 'rango', label: 'Rango de piezas' },
+      { value: 'arcada', label: 'Arcada completa' },
+      { value: 'general', label: 'General' },
+    ],
+  },
+  capilar: {
+    label: 'Capilar',
+    hint: 'Tratamientos por zona o sesión, con seguimiento visual y evolución.',
+    defaultCategory: 'Diagnóstico capilar',
+    defaultDuration: 45,
+    defaultSessions: 1,
+    supportsPiece: false,
+    supportsLaboratory: false,
+    applicationHint: 'No usa piezas dentales. La zona capilar se gestionará en la ficha capilar del paciente.',
+    applicationOptions: [{ value: 'general', label: 'General / zona capilar' }],
+  },
+  nutricion: {
+    label: 'Nutrición',
+    hint: 'Servicios basados en objetivos, mediciones y revisiones periódicas.',
+    defaultCategory: 'Nutrición clínica',
+    defaultDuration: 45,
+    defaultSessions: 1,
+    supportsPiece: false,
+    supportsLaboratory: false,
+    applicationHint: 'No usa piezas ni laboratorio dental. El detalle vive en la ficha nutricional.',
+    applicationOptions: [{ value: 'general', label: 'General / seguimiento' }],
+  },
+  psicologia: {
+    label: 'Psicología',
+    hint: 'Sesiones asistenciales por modalidad, duración y seguimiento.',
+    defaultCategory: 'Terapia Individual',
+    defaultDuration: 50,
+    defaultSessions: 1,
+    supportsPiece: false,
+    supportsLaboratory: false,
+    applicationHint: 'No usa piezas. La modalidad y el seguimiento se definen en la ficha clínica.',
+    applicationOptions: [{ value: 'general', label: 'General / sesión' }],
+  },
+  fisioterapia: {
+    label: 'Fisioterapia',
+    hint: 'Tratamientos por zona corporal, sesiones y ejercicios asociados.',
+    defaultCategory: 'Rehabilitación',
+    defaultDuration: 45,
+    defaultSessions: 1,
+    supportsPiece: false,
+    supportsLaboratory: false,
+    applicationHint: 'No usa piezas dentales. La zona corporal se gestionará en la ficha funcional.',
+    applicationOptions: [{ value: 'general', label: 'General / zona corporal' }],
+  },
+  estetica: {
+    label: 'Estética',
+    hint: 'Tratamientos por zona, sesión, consentimiento y revisión visual.',
+    defaultCategory: 'Medicina Estética',
+    defaultDuration: 45,
+    defaultSessions: 1,
+    supportsPiece: false,
+    supportsLaboratory: false,
+    applicationHint: 'No usa piezas dentales. La zona tratada se gestiona como dato clínico del tratamiento.',
+    applicationOptions: [{ value: 'general', label: 'General / zona tratada' }],
+  },
+  veterinaria: {
+    label: 'Veterinaria',
+    hint: 'Servicios clínicos generales por mascota, procedimiento y seguimiento.',
+    defaultCategory: 'Consulta General',
+    defaultDuration: 30,
+    defaultSessions: 1,
+    supportsPiece: false,
+    supportsLaboratory: false,
+    applicationHint: 'No usa piezas dentales humanas. El detalle se gestiona en ficha específica.',
+    applicationOptions: [{ value: 'general', label: 'General' }],
+  },
+  podologia: {
+    label: 'Podología',
+    hint: 'Servicios por zona, biomecánica, plantillas y seguimiento.',
+    defaultCategory: 'Quiropodia',
+    defaultDuration: 30,
+    defaultSessions: 1,
+    supportsPiece: false,
+    supportsLaboratory: false,
+    applicationHint: 'No usa piezas dentales. La zona podológica vive en la ficha clínica.',
+    applicationOptions: [{ value: 'general', label: 'General / zona' }],
+  },
+  cirugia_digestiva: {
+    label: 'Cirugía General y Digestiva',
+    hint: 'Servicios quirúrgicos con valoración, procedimiento y seguimiento postoperatorio.',
+    defaultCategory: 'Consulta quirúrgica',
+    defaultDuration: 45,
+    defaultSessions: 1,
+    supportsPiece: false,
+    supportsLaboratory: false,
+    applicationHint: 'No usa piezas dentales. Los requisitos quirúrgicos se gestionan como protocolo del área.',
+    applicationOptions: [{ value: 'general', label: 'General / procedimiento' }],
+  },
+  general: {
+    label: 'General',
+    hint: 'Servicio clínico estándar sin campos específicos de área.',
+    defaultCategory: 'Consulta',
+    defaultDuration: 30,
+    defaultSessions: 1,
+    supportsPiece: false,
+    supportsLaboratory: false,
+    applicationHint: 'Configuración genérica para agenda, duración y presupuesto.',
+    applicationOptions: [{ value: 'general', label: 'General' }],
+  },
+};
+
+const TREATMENT_SERVICE_EXAMPLES = {
+  dental: ['Valoración dental', 'Limpieza dental', 'Revisión periodontal'],
+  capilar: ['Valoración capilar', 'Mesoterapia capilar', 'Seguimiento postinjerto'],
+  nutricion: ['Consulta nutricional', 'Seguimiento nutricional', 'Estudio antropométrico ISAK'],
+  psicologia: ['Sesión de terapia individual', 'Evaluación psicológica inicial', 'Seguimiento terapéutico'],
+  fisioterapia: ['Valoración fisioterapia', 'Sesión de rehabilitación', 'Revisión funcional'],
+  estetica: ['Valoración estética facial', 'Tratamiento facial', 'Revisión postratamiento'],
+  veterinaria: ['Consulta veterinaria', 'Revisión postoperatoria', 'Vacunación'],
+  podologia: ['Valoración podológica', 'Quiropodia', 'Revisión de plantillas'],
+  cirugia_digestiva: ['Consulta quirúrgica inicial', 'Revisión postoperatoria', 'Seguimiento digestivo'],
+  general: ['Consulta inicial', 'Revisión clínica', 'Seguimiento'],
+};
+
+const NUTRITION_SERVICE_KIND_OPTIONS = [
+  {
+    value: 'consultation',
+    label: 'Consulta o valoración',
+    hint: 'Servicio cobrable para primera visita o valoración. En agenda se marcará si es primera cita, revisión o seguimiento.',
+    icon: 'heroicons_outline:clipboard-document-list',
+    recommendedProfile: 'none',
+    profileLabel: 'Sin medición obligatoria',
+  },
+  {
+    value: 'follow_up',
+    label: 'Seguimiento nutricional',
+    hint: 'Revisión periódica del plan. Puede comparar con mediciones previas si se activa un perfil.',
+    icon: 'heroicons_outline:arrow-path',
+    recommendedProfile: 'quick',
+    profileLabel: 'Perfil rápido recomendado',
+  },
+  {
+    value: 'quick_measurement',
+    label: 'Medición rápida',
+    hint: 'Peso y perímetros principales para control recurrente y proyección temporal.',
+    icon: 'heroicons_outline:scale',
+    recommendedProfile: 'quick',
+    profileLabel: 'Perfil rápido',
+  },
+  {
+    value: 'isak_study',
+    label: 'Estudio express/ISAK',
+    hint: 'Pliegues, perímetros, diámetros, sumatorios y somatotipo para informe antropométrico.',
+    icon: 'heroicons_outline:chart-bar-square',
+    recommendedProfile: 'express_isak',
+    profileLabel: 'Perfil express/ISAK',
+  },
+  {
+    value: 'nutrition_plan_pack',
+    label: 'Plan o pack',
+    hint: 'Servicio de varias sesiones. Mantiene el tratamiento como producto cobrable y la medición como configuración clínica.',
+    icon: 'heroicons_outline:rectangle-stack',
+    recommendedProfile: 'quick',
+    profileLabel: 'Perfil rápido opcional',
+  },
+];
+
+const NUTRITION_MEASUREMENT_PROFILE_OPTIONS = [
+  {
+    value: 'none',
+    label: 'Sin medición',
+    hint: 'Servicio nutricional sin registro antropométrico asociado.',
+  },
+  {
+    value: 'quick',
+    label: 'Perfil rápido',
+    hint: 'Peso y perímetros principales para seguimiento recurrente.',
+  },
+  {
+    value: 'express_isak',
+    label: 'Perfil express/ISAK',
+    hint: 'Pliegues, perímetros y diámetros para informe antropométrico.',
+  },
+];
+
+const MEDICAL_AREA_CONTRACT_SECTIONS = {
+  dental: [
+    {
+      title: 'Servicio/tratamiento',
+      icon: 'heroicons_outline:clipboard-document-list',
+      body: 'El catálogo representa tratamientos presupuestables, normalmente ligados a pieza, rango o arcada.',
+      chips: ['Pieza dental', 'Presupuesto', 'Plan por sesiones'],
+    },
+    {
+      title: 'Cita',
+      icon: 'heroicons_outline:calendar-days',
+      body: 'La agenda decide si es primera cita, revisión, urgencia o continuación y arrastra duración/precio desde el tratamiento.',
+      chips: ['primera_con_trat', 'continuacion', 'revision'],
+    },
+    {
+      title: 'Workspace',
+      icon: 'heroicons_outline:squares-2x2',
+      body: 'Abre ficha dental, odontograma y reglas de laboratorio cuando el tratamiento lo requiere.',
+      chips: ['Odontograma', 'Laboratorio', 'Consentimientos'],
+    },
+  ],
+  nutricion: [
+    {
+      title: 'Servicio cobrable',
+      icon: 'heroicons_outline:clipboard-document-list',
+      body: 'El catálogo debe guardar servicios como Consulta nutricional, Seguimiento, Estudio ISAK o Plan mensual. No debe crear tratamientos llamados Primera cita.',
+      chips: ['Consulta nutricional', 'Seguimiento', 'Estudio ISAK', 'Pack'],
+    },
+    {
+      title: 'Tipo de cita',
+      icon: 'heroicons_outline:calendar-days',
+      body: 'La agenda marca primera visita, revisión o continuación. Si la primera visita tiene precio, se combina con un servicio cobrable.',
+      chips: ['primera_sin_trat', 'primera_con_trat', 'revision'],
+    },
+    {
+      title: 'Perfil clínico',
+      icon: 'heroicons_outline:scale',
+      body: 'El servicio puede activar medición rápida o express/ISAK; la ficha guarda medidas, informe, comparación y proyección temporal.',
+      chips: ['Sin medición', 'Perfil rápido', 'Express/ISAK', 'Informe'],
+    },
+  ],
+  capilar: [
+    {
+      title: 'Servicio/tratamiento',
+      icon: 'heroicons_outline:clipboard-document-list',
+      body: 'El catálogo diferencia valoración, procedimiento, sesiones de mantenimiento y packs de control.',
+      chips: ['Valoración', 'Procedimiento', 'Sesiones'],
+    },
+    {
+      title: 'Cita',
+      icon: 'heroicons_outline:calendar-days',
+      body: 'La agenda conserva el flujo de primera cita, continuación o revisión y puede activar recordatorios postprocedimiento.',
+      chips: ['Primera visita', 'Sesión', 'Control'],
+    },
+    {
+      title: 'Workspace',
+      icon: 'heroicons_outline:camera',
+      body: 'La ficha debe priorizar zonas capilares, fotos clínicas privadas, evolución y cuidados posteriores.',
+      chips: ['Fotos privadas', 'Zonas', 'Cuidados post'],
+    },
+  ],
+  psicologia: [
+    {
+      title: 'Servicio',
+      icon: 'heroicons_outline:clipboard-document-list',
+      body: 'El catálogo guarda sesiones, evaluaciones y bonos; la información clínica sensible vive en la ficha del paciente.',
+      chips: ['Sesión', 'Evaluación', 'Bono'],
+    },
+    {
+      title: 'Cita',
+      icon: 'heroicons_outline:calendar-days',
+      body: 'La agenda decide modalidad y recurrencia sin convertir cada revisión en un tratamiento nuevo.',
+      chips: ['Presencial', 'Online', 'Recurrente'],
+    },
+    {
+      title: 'Workspace',
+      icon: 'heroicons_outline:lock-closed',
+      body: 'La ficha debe separar notas privadas, objetivos terapéuticos y seguimiento.',
+      chips: ['Notas privadas', 'Objetivos', 'Seguimiento'],
+    },
+  ],
+  fisioterapia: [
+    {
+      title: 'Servicio',
+      icon: 'heroicons_outline:clipboard-document-list',
+      body: 'El catálogo guarda sesiones, bonos o valoraciones funcionales, no cada revisión operativa.',
+      chips: ['Valoración', 'Sesión', 'Bono'],
+    },
+    {
+      title: 'Cita',
+      icon: 'heroicons_outline:calendar-days',
+      body: 'La cita define primera visita, sesión de continuidad o reevaluación.',
+      chips: ['Primera visita', 'Sesión', 'Reevaluación'],
+    },
+    {
+      title: 'Workspace',
+      icon: 'heroicons_outline:hand-raised',
+      body: 'La ficha debe trabajar con zona corporal, ejercicios, evolución y alta funcional.',
+      chips: ['Zona corporal', 'Ejercicios', 'Evolución'],
+    },
+  ],
+  estetica: [
+    {
+      title: 'Servicio',
+      icon: 'heroicons_outline:clipboard-document-list',
+      body: 'El catálogo guarda sesiones, tratamientos por zona y packs estéticos.',
+      chips: ['Zona', 'Sesiones', 'Pack'],
+    },
+    {
+      title: 'Cita',
+      icon: 'heroicons_outline:calendar-days',
+      body: 'La agenda diferencia valoración, sesión y revisión, manteniendo el precio en el servicio.',
+      chips: ['Valoración', 'Sesión', 'Revisión'],
+    },
+    {
+      title: 'Workspace',
+      icon: 'heroicons_outline:sparkles',
+      body: 'La ficha debe activar zona tratada, consentimiento, fotos privadas y controles.',
+      chips: ['Consentimiento', 'Fotos privadas', 'Control'],
+    },
+  ],
+};
+
+const FALLBACK_AREA_CONTRACT_SECTIONS = [
+  {
+    title: 'Servicio/tratamiento',
+    icon: 'heroicons_outline:clipboard-document-list',
+    body: 'El catálogo guarda lo que se cobra o presupuesta.',
+    chips: ['Precio', 'Duración', 'Sesiones'],
+  },
+  {
+    title: 'Cita',
+    icon: 'heroicons_outline:calendar-days',
+    body: 'La agenda marca el flujo operativo sin duplicar servicios.',
+    chips: ['Primera cita', 'Revisión', 'Continuación'],
+  },
+  {
+    title: 'Workspace',
+    icon: 'heroicons_outline:squares-2x2',
+    body: 'La ficha clínica activa los campos propios del área médica.',
+    chips: ['Ficha clínica', 'Seguimiento', 'Informes'],
+  },
+];
+
+const DEFAULT_TREATMENT_SETUP_STEPS = [
+  {
+    title: 'Servicio cobrable',
+    icon: 'heroicons_outline:tag',
+    body: 'Área médica, familia y nombre del servicio que se presupuesta.',
+    section: 'service',
+  },
+  {
+    title: 'Precio y duración',
+    icon: 'heroicons_outline:currency-euro',
+    body: 'Importe, IVA, duración y sesiones por defecto.',
+    section: 'pricing',
+  },
+  {
+    title: 'Agenda y reglas',
+    icon: 'heroicons_outline:calendar-days',
+    body: 'Aplicación clínica, instalación, consentimientos y automatizaciones.',
+    section: 'agenda',
+  },
+];
+
+const TREATMENT_SETUP_STEPS_BY_AREA = {
+  dental: [
+    {
+      title: 'Tratamiento dental',
+      icon: 'heroicons_outline:tag',
+      body: 'Área, familia, nombre y si aplica a pieza, rango, arcada o general.',
+      section: 'service',
+    },
+    {
+      title: 'Precio y sesiones',
+      icon: 'heroicons_outline:currency-euro',
+      body: 'Importe, IVA, duración, sesiones y financiación.',
+      section: 'pricing',
+    },
+    {
+      title: 'Reglas clínicas',
+      icon: 'heroicons_outline:face-smile',
+      body: 'Pieza, laboratorio, consentimientos e instalación necesaria.',
+      section: 'clinical',
+    },
+    {
+      title: 'Agenda',
+      icon: 'heroicons_outline:calendar-days',
+      body: 'Profesionales, automatizaciones y visibilidad del servicio.',
+      section: 'agenda',
+    },
+  ],
+  nutricion: [
+    {
+      title: 'Servicio cobrable',
+      icon: 'heroicons_outline:tag',
+      body: 'Consulta, seguimiento, estudio ISAK o pack. No es el tipo de cita.',
+      section: 'service',
+    },
+    {
+      title: 'Precio y duración',
+      icon: 'heroicons_outline:currency-euro',
+      body: 'Importe, IVA, duración prevista y sesiones si es un plan.',
+      section: 'pricing',
+    },
+    {
+      title: 'Perfil de medición',
+      icon: 'heroicons_outline:scale',
+      body: 'Sin medición, perfil rápido o express/ISAK con informe y evolución.',
+      section: 'nutrition',
+    },
+    {
+      title: 'Agenda y reglas',
+      icon: 'heroicons_outline:calendar-days',
+      body: 'Tipo de cita, profesional, instalación y automatizaciones.',
+      section: 'agenda',
+    },
+  ],
+};
+
+function normalizeCode(code) {
+  return String(code || FALLBACK_CODE).trim().toLowerCase() || FALLBACK_CODE;
+}
+
+function getKnownCodes() {
+  return Array.from(new Set([
+    ...Object.keys(TREATMENT_AREA_PROFILES),
+    ...Object.keys(TREATMENT_SERVICE_EXAMPLES),
+    ...Object.keys(MEDICAL_AREA_CONTRACT_SECTIONS),
+    ...Object.keys(TREATMENT_SETUP_STEPS_BY_AREA),
+  ])).sort((a, b) => a.localeCompare(b, 'es'));
+}
+
+function getContractForArea(code) {
+  const normalized = normalizeCode(code);
+  const profile = TREATMENT_AREA_PROFILES[normalized] || TREATMENT_AREA_PROFILES[FALLBACK_CODE];
+  return {
+    code: normalized,
+    profile,
+    service_examples: TREATMENT_SERVICE_EXAMPLES[normalized] || TREATMENT_SERVICE_EXAMPLES[FALLBACK_CODE],
+    contract_sections: MEDICAL_AREA_CONTRACT_SECTIONS[normalized] || FALLBACK_AREA_CONTRACT_SECTIONS,
+    setup_steps: TREATMENT_SETUP_STEPS_BY_AREA[normalized] || DEFAULT_TREATMENT_SETUP_STEPS,
+    nutrition_service_kind_options: normalized === 'nutricion' ? NUTRITION_SERVICE_KIND_OPTIONS : [],
+    nutrition_measurement_profile_options: normalized === 'nutricion' ? NUTRITION_MEASUREMENT_PROFILE_OPTIONS : [],
+  };
+}
+
+function getMedicalAreaContracts() {
+  const contracts = {};
+  getKnownCodes().forEach((code) => {
+    contracts[code] = getContractForArea(code);
+  });
+
+  return {
+    version: VERSION,
+    source: 'backend-static',
+    fallback_code: FALLBACK_CODE,
+    contracts,
+  };
+}
+
+module.exports = {
+  VERSION,
+  FALLBACK_CODE,
+  getContractForArea,
+  getMedicalAreaContracts,
+};
