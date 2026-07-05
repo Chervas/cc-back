@@ -197,6 +197,83 @@ const NUTRITION_MEASUREMENT_PROFILE_OPTIONS = [
   },
 ];
 
+const NUTRITION_MEASUREMENT_FIELD_DEFINITIONS = {
+  weight_kg: { label: 'Peso', unit: 'kg', min: 20, max: 300 },
+  stature_cm: { label: 'Estatura', unit: 'cm', min: 80, max: 230 },
+  waist_cm: { label: 'Cintura', unit: 'cm', min: 30, max: 220 },
+  hip_cm: { label: 'Cadera', unit: 'cm', min: 30, max: 240 },
+  arm_relaxed_cm: { label: 'Brazo relajado', unit: 'cm', min: 10, max: 80 },
+  arm_flexed_tensed_cm: { label: 'Brazo flexionado', unit: 'cm', min: 10, max: 90 },
+  calf_cm: { label: 'Pantorrilla', unit: 'cm', min: 10, max: 90 },
+  skinfold_triceps_mm: { label: 'Tríceps', unit: 'mm', min: 1, max: 80 },
+  skinfold_subscapular_mm: { label: 'Subescapular', unit: 'mm', min: 1, max: 90 },
+  skinfold_biceps_mm: { label: 'Bíceps', unit: 'mm', min: 1, max: 70 },
+  skinfold_iliac_crest_mm: { label: 'Cresta ilíaca', unit: 'mm', min: 1, max: 100 },
+  skinfold_supraspinale_mm: { label: 'Supraespinal', unit: 'mm', min: 1, max: 100 },
+  skinfold_abdominal_mm: { label: 'Abdominal', unit: 'mm', min: 1, max: 120 },
+  skinfold_front_thigh_mm: { label: 'Muslo frontal', unit: 'mm', min: 1, max: 120 },
+  skinfold_medial_calf_mm: { label: 'Pantorrilla medial', unit: 'mm', min: 1, max: 90 },
+  breadth_humerus_cm: { label: 'Diámetro húmero', unit: 'cm', min: 3, max: 12 },
+  breadth_femur_cm: { label: 'Diámetro fémur', unit: 'cm', min: 5, max: 16 },
+};
+
+const NUTRITION_MEASUREMENT_PROFILE_SCHEMAS = [
+  {
+    code: 'quick',
+    name: 'Perfil rápido',
+    description: 'Seguimiento de consulta con peso y perímetros principales.',
+    groups: [
+      {
+        key: 'base',
+        label: 'Datos base',
+        fields: ['weight_kg', 'stature_cm', 'waist_cm', 'hip_cm', 'arm_relaxed_cm', 'calf_cm'],
+      },
+    ],
+  },
+  {
+    code: 'express_isak',
+    name: 'Perfil express/ISAK',
+    description: 'Perfil antropométrico restringido para informe y evolución.',
+    groups: [
+      {
+        key: 'base',
+        label: 'Datos base',
+        fields: ['weight_kg', 'stature_cm'],
+      },
+      {
+        key: 'skinfolds',
+        label: 'Pliegues',
+        fields: [
+          'skinfold_triceps_mm',
+          'skinfold_subscapular_mm',
+          'skinfold_biceps_mm',
+          'skinfold_iliac_crest_mm',
+          'skinfold_supraspinale_mm',
+          'skinfold_abdominal_mm',
+          'skinfold_front_thigh_mm',
+          'skinfold_medial_calf_mm',
+        ],
+      },
+      {
+        key: 'girths',
+        label: 'Perímetros',
+        fields: [
+          'arm_relaxed_cm',
+          'arm_flexed_tensed_cm',
+          'waist_cm',
+          'hip_cm',
+          'calf_cm',
+        ],
+      },
+      {
+        key: 'breadths',
+        label: 'Diámetros',
+        fields: ['breadth_humerus_cm', 'breadth_femur_cm'],
+      },
+    ],
+  },
+];
+
 const PATIENT_WORKSPACES = {
   dental: {
     enabled: false,
@@ -673,6 +750,67 @@ function normalizeNutritionMeasurementProfileOptions(value, fallback = []) {
   return options.length ? options : cloneJson(fallback);
 }
 
+function normalizeNutritionMeasurementFields(value, fallback = {}) {
+  const source = value && typeof value === 'object' && !Array.isArray(value) ? value : {};
+  const normalized = {};
+  Object.keys(fallback || {}).forEach((key) => {
+    const item = source[key] && typeof source[key] === 'object' ? source[key] : {};
+    const fallbackField = fallback[key] || {};
+    const next = {
+      label: cleanString(item.label, fallbackField.label || key),
+      unit: cleanString(item.unit, fallbackField.unit || ''),
+    };
+    const min = Number(item.min ?? fallbackField.min);
+    const max = Number(item.max ?? fallbackField.max);
+    if (Number.isFinite(min)) next.min = min;
+    if (Number.isFinite(max)) next.max = max;
+    normalized[key] = next;
+  });
+
+  return Object.keys(normalized).length ? normalized : cloneJson(fallback);
+}
+
+function normalizeNutritionMeasurementProfileSchemas(value, fallback = [], fields = {}) {
+  if (!Array.isArray(value)) {
+    return cloneJson(fallback);
+  }
+
+  const knownFields = new Set(Object.keys(fields || {}));
+  const fallbackByCode = new Map((fallback || []).map((profile) => [profile.code, profile]));
+  const schemas = value
+    .map((profile) => {
+      const code = cleanString(profile?.code);
+      const fallbackProfile = fallbackByCode.get(code);
+      if (!code || !fallbackProfile) {
+        return null;
+      }
+
+      const groups = Array.isArray(profile?.groups)
+        ? profile.groups.map((group, index) => {
+          const fallbackGroup = fallbackProfile.groups?.[index] || fallbackProfile.groups?.[0] || {};
+          const groupFields = normalizeStringArray(group?.fields, fallbackGroup.fields || [])
+            .filter((field) => knownFields.has(field));
+          return {
+            key: cleanString(group?.key, fallbackGroup.key || `group_${index + 1}`),
+            label: cleanString(group?.label, fallbackGroup.label || 'Grupo'),
+            fields: groupFields.length ? groupFields : cloneJson(fallbackGroup.fields || []),
+          };
+        })
+        : cloneJson(fallbackProfile.groups || []);
+
+      return {
+        code: fallbackProfile.code,
+        name: cleanString(profile?.name, fallbackProfile.name),
+        description: cleanString(profile?.description, fallbackProfile.description),
+        groups: groups.filter((group) => group.key && group.label && group.fields?.length),
+      };
+    })
+    .filter(Boolean);
+
+  const schemaByCode = new Map(schemas.map((schema) => [schema.code, schema]));
+  return fallback.map((profile) => schemaByCode.get(profile.code) || cloneJson(profile));
+}
+
 function normalizePatientWorkspace(value, fallback = PATIENT_WORKSPACES[FALLBACK_CODE]) {
   const source = value && typeof value === 'object' ? value : {};
   return {
@@ -764,6 +902,8 @@ function getBaseContractForArea(code) {
     appointment_action: APPOINTMENT_ACTIONS[normalized] || APPOINTMENT_ACTIONS[FALLBACK_CODE],
     nutrition_service_kind_options: normalized === 'nutricion' ? NUTRITION_SERVICE_KIND_OPTIONS : [],
     nutrition_measurement_profile_options: normalized === 'nutricion' ? NUTRITION_MEASUREMENT_PROFILE_OPTIONS : [],
+    nutrition_measurement_profile_schemas: normalized === 'nutricion' ? NUTRITION_MEASUREMENT_PROFILE_SCHEMAS : [],
+    nutrition_measurement_fields: normalized === 'nutricion' ? NUTRITION_MEASUREMENT_FIELD_DEFINITIONS : {},
   };
 }
 
@@ -785,6 +925,16 @@ function normalizeContractPayload(code, payload = {}) {
       : [],
     nutrition_measurement_profile_options: normalizedCode === 'nutricion'
       ? normalizeNutritionMeasurementProfileOptions(source?.nutrition_measurement_profile_options, normalizedBase.nutrition_measurement_profile_options)
+      : [],
+    nutrition_measurement_fields: normalizedCode === 'nutricion'
+      ? normalizeNutritionMeasurementFields(source?.nutrition_measurement_fields, normalizedBase.nutrition_measurement_fields)
+      : {},
+    nutrition_measurement_profile_schemas: normalizedCode === 'nutricion'
+      ? normalizeNutritionMeasurementProfileSchemas(
+        source?.nutrition_measurement_profile_schemas,
+        normalizedBase.nutrition_measurement_profile_schemas,
+        normalizedBase.nutrition_measurement_fields,
+      )
       : [],
   };
 
@@ -902,6 +1052,8 @@ async function upsertMedicalAreaContract(code, payload, updatedBy = null) {
 module.exports = {
   VERSION,
   FALLBACK_CODE,
+  NUTRITION_MEASUREMENT_FIELD_DEFINITIONS,
+  NUTRITION_MEASUREMENT_PROFILE_SCHEMAS,
   getBaseContractForArea,
   getContractForArea,
   getMedicalAreaContracts,

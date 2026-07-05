@@ -26,6 +26,22 @@ function assertNutritionContract(contract) {
     'quick',
     'express_isak',
   ]);
+  assert.equal(contract.nutrition_measurement_fields.weight_kg.label, 'Peso');
+  assert.equal(contract.nutrition_measurement_fields.skinfold_triceps_mm.unit, 'mm');
+
+  const profileSchemas = new Map(contract.nutrition_measurement_profile_schemas.map((profile) => [profile.code, profile]));
+  assert.deepEqual(profileSchemas.get('quick')?.groups?.[0]?.fields, [
+    'weight_kg',
+    'stature_cm',
+    'waist_cm',
+    'hip_cm',
+    'arm_relaxed_cm',
+    'calf_cm',
+  ]);
+  assert.equal(
+    profileSchemas.get('express_isak')?.groups?.some((group) => group.key === 'skinfolds' && group.fields.includes('skinfold_medial_calf_mm')),
+    true,
+  );
 
   const serviceKinds = byValue(contract.nutrition_service_kind_options);
   assert.equal(serviceKinds.get('consultation')?.recommendedProfile, 'none');

@@ -6,6 +6,7 @@ const path = require('path');
 const { execFile } = require('child_process');
 const { promisify } = require('util');
 const db = require('../../models');
+const medicalAreaContracts = require('./medicalAreaContracts.service');
 
 const { Op } = db.Sequelize;
 const execFileAsync = promisify(execFile);
@@ -47,82 +48,8 @@ const FORMULA_REFERENCES = [
   },
 ];
 
-const PROFILE_DEFINITIONS = [
-  {
-    code: 'quick',
-    name: 'Perfil rápido',
-    description: 'Seguimiento de consulta con peso y perímetros principales.',
-    groups: [
-      {
-        key: 'base',
-        label: 'Datos base',
-        fields: ['weight_kg', 'stature_cm', 'waist_cm', 'hip_cm', 'arm_relaxed_cm', 'calf_cm'],
-      },
-    ],
-  },
-  {
-    code: 'express_isak',
-    name: 'Perfil express/ISAK',
-    description: 'Perfil antropométrico restringido para informe y evolución.',
-    groups: [
-      {
-        key: 'base',
-        label: 'Datos base',
-        fields: ['weight_kg', 'stature_cm'],
-      },
-      {
-        key: 'skinfolds',
-        label: 'Pliegues',
-        fields: [
-          'skinfold_triceps_mm',
-          'skinfold_subscapular_mm',
-          'skinfold_biceps_mm',
-          'skinfold_iliac_crest_mm',
-          'skinfold_supraspinale_mm',
-          'skinfold_abdominal_mm',
-          'skinfold_front_thigh_mm',
-          'skinfold_medial_calf_mm',
-        ],
-      },
-      {
-        key: 'girths',
-        label: 'Perímetros',
-        fields: [
-          'arm_relaxed_cm',
-          'arm_flexed_tensed_cm',
-          'waist_cm',
-          'hip_cm',
-          'calf_cm',
-        ],
-      },
-      {
-        key: 'breadths',
-        label: 'Diámetros',
-        fields: ['breadth_humerus_cm', 'breadth_femur_cm'],
-      },
-    ],
-  },
-];
-
-const FIELD_DEFINITIONS = {
-  weight_kg: { label: 'Peso', unit: 'kg', min: 20, max: 300 },
-  stature_cm: { label: 'Estatura', unit: 'cm', min: 80, max: 230 },
-  waist_cm: { label: 'Cintura', unit: 'cm', min: 30, max: 220 },
-  hip_cm: { label: 'Cadera', unit: 'cm', min: 30, max: 240 },
-  arm_relaxed_cm: { label: 'Brazo relajado', unit: 'cm', min: 10, max: 80 },
-  arm_flexed_tensed_cm: { label: 'Brazo flexionado', unit: 'cm', min: 10, max: 90 },
-  calf_cm: { label: 'Pantorrilla', unit: 'cm', min: 10, max: 90 },
-  skinfold_triceps_mm: { label: 'Tríceps', unit: 'mm', min: 1, max: 80 },
-  skinfold_subscapular_mm: { label: 'Subescapular', unit: 'mm', min: 1, max: 90 },
-  skinfold_biceps_mm: { label: 'Bíceps', unit: 'mm', min: 1, max: 70 },
-  skinfold_iliac_crest_mm: { label: 'Cresta ilíaca', unit: 'mm', min: 1, max: 100 },
-  skinfold_supraspinale_mm: { label: 'Supraespinal', unit: 'mm', min: 1, max: 100 },
-  skinfold_abdominal_mm: { label: 'Abdominal', unit: 'mm', min: 1, max: 120 },
-  skinfold_front_thigh_mm: { label: 'Muslo frontal', unit: 'mm', min: 1, max: 120 },
-  skinfold_medial_calf_mm: { label: 'Pantorrilla medial', unit: 'mm', min: 1, max: 90 },
-  breadth_humerus_cm: { label: 'Diámetro húmero', unit: 'cm', min: 3, max: 12 },
-  breadth_femur_cm: { label: 'Diámetro fémur', unit: 'cm', min: 5, max: 16 },
-};
+const PROFILE_DEFINITIONS = medicalAreaContracts.NUTRITION_MEASUREMENT_PROFILE_SCHEMAS;
+const FIELD_DEFINITIONS = medicalAreaContracts.NUTRITION_MEASUREMENT_FIELD_DEFINITIONS;
 
 const REPORT_METRIC_DEFINITIONS = [
   { key: 'weight_kg', label: 'Peso', unit: 'kg', source: 'raw_values', decimals: 1, section: 'base' },
@@ -200,15 +127,37 @@ function normalizeProfileCode(value) {
   return value === 'express_isak' ? 'express_isak' : 'quick';
 }
 
+async function getNutritionContractSafe() {
+  try {
+    return await medicalAreaContracts.getContractForArea('nutricion');
+  } catch (error) {
+    return medicalAreaContracts.getBaseContractForArea('nutricion');
+  }
+}
+
+function profileDefinitionsFromContract(contract = {}) {
+  return Array.isArray(contract.nutrition_measurement_profile_schemas) && contract.nutrition_measurement_profile_schemas.length
+    ? contract.nutrition_measurement_profile_schemas
+    : PROFILE_DEFINITIONS;
+}
+
+function fieldDefinitionsFromContract(contract = {}) {
+  return contract.nutrition_measurement_fields
+    && typeof contract.nutrition_measurement_fields === 'object'
+    && Object.keys(contract.nutrition_measurement_fields).length
+    ? contract.nutrition_measurement_fields
+    : FIELD_DEFINITIONS;
+}
+
 function formulaReferencesForProfile(profileCode = 'quick') {
   return FORMULA_REFERENCES
     .filter((reference) => (reference.profiles || []).includes(profileCode))
     .map(({ profiles, ...reference }) => reference);
 }
 
-function normalizeRawValues(values = {}) {
+function normalizeRawValues(values = {}, fieldDefinitions = FIELD_DEFINITIONS) {
   const normalized = {};
-  Object.keys(FIELD_DEFINITIONS).forEach((field) => {
+  Object.keys(fieldDefinitions || FIELD_DEFINITIONS).forEach((field) => {
     const parsed = toNumberOrNull(values[field]);
     if (parsed !== null) normalized[field] = parsed;
   });
@@ -216,9 +165,9 @@ function normalizeRawValues(values = {}) {
   return normalized;
 }
 
-function qualityFlagsForValues(rawValues = {}) {
+function qualityFlagsForValues(rawValues = {}, fieldDefinitions = FIELD_DEFINITIONS) {
   const flags = [];
-  Object.entries(FIELD_DEFINITIONS).forEach(([key, def]) => {
+  Object.entries(fieldDefinitions || FIELD_DEFINITIONS).forEach(([key, def]) => {
     const value = rawValues[key];
     if (value === undefined || value === null) return;
     if (value < def.min || value > def.max) {
@@ -643,6 +592,9 @@ async function getPatientNutritionWorkspace(patientIdentifier) {
 
   const clinicId = Number(patient.clinica_id);
   const groupId = toIntOrNull(patient.clinica?.grupoClinicaId || patient.clinica?.grupo_clinica_id);
+  const nutritionContract = await getNutritionContractSafe();
+  const profileDefinitions = profileDefinitionsFromContract(nutritionContract);
+  const fieldDefinitions = fieldDefinitionsFromContract(nutritionContract);
   const measurements = await db.PatientNutritionMeasurement.findAll({
     where: { patient_id: patient.id_paciente },
     order: [['measured_at', 'DESC'], ['id', 'DESC']],
@@ -656,8 +608,8 @@ async function getPatientNutritionWorkspace(patientIdentifier) {
       name: [patient.nombre, patient.apellidos].filter(Boolean).join(' ').trim(),
       clinic_id: clinicId,
     },
-    profiles: PROFILE_DEFINITIONS,
-    fields: FIELD_DEFINITIONS,
+    profiles: profileDefinitions,
+    fields: fieldDefinitions,
     treatments: await getNutritionTreatments({ clinicId, groupId }),
     latest: measurementToJson(measurements[0]),
     measurements: measurements.map(measurementToJson),
@@ -667,6 +619,7 @@ async function getPatientNutritionWorkspace(patientIdentifier) {
     meta: {
       formula_version: FORMULA_VERSION,
       formula_references: FORMULA_REFERENCES.map(({ profiles, ...reference }) => reference),
+      measurement_contract_source: 'medical-area-contracts-v1',
       generated_at: new Date().toISOString(),
     },
   };
@@ -681,8 +634,10 @@ async function createNutritionMeasurement(patientIdentifier, payload = {}, actor
   }
 
   const profileCode = normalizeProfileCode(payload.profile_code);
-  const rawValues = normalizeRawValues(payload.raw_values || payload.values || {});
-  const qualityFlags = qualityFlagsForValues(rawValues);
+  const nutritionContract = await getNutritionContractSafe();
+  const fieldDefinitions = fieldDefinitionsFromContract(nutritionContract);
+  const rawValues = normalizeRawValues(payload.raw_values || payload.values || {}, fieldDefinitions);
+  const qualityFlags = qualityFlagsForValues(rawValues, fieldDefinitions);
   const calculatedValues = calculateNutritionValues(rawValues, profileCode);
   const clinicId = toIntOrNull(payload.clinic_id) || Number(patient.clinica_id);
   const measuredAt = payload.measured_at ? new Date(payload.measured_at) : new Date();
@@ -748,6 +703,9 @@ async function getNutritionMeasurementReport(patientIdentifier, measurementIdent
     throw error;
   }
 
+  const nutritionContract = await getNutritionContractSafe();
+  const profileDefinitions = profileDefinitionsFromContract(nutritionContract);
+  const fieldDefinitions = fieldDefinitionsFromContract(nutritionContract);
   const treatment = measurement.treatment_id && db.Tratamiento
     ? await db.Tratamiento.findByPk(measurement.treatment_id, {
       attributes: ['id_tratamiento', 'nombre', 'disciplina', 'categoria', 'clinical_config'],
@@ -774,10 +732,13 @@ async function getNutritionMeasurementReport(patientIdentifier, measurementIdent
     appointment: appointment?.toJSON ? appointment.toJSON() : appointment,
     measurement,
     report,
+    profile_definitions: profileDefinitions,
+    field_definitions: fieldDefinitions,
     projection: buildProjectionForMeasurement(measurements, measurement.id),
     meta: {
       formula_version: FORMULA_VERSION,
       formula_references: formulaReferencesForProfile(measurement.profile_code),
+      measurement_contract_source: 'medical-area-contracts-v1',
       generated_at: new Date().toISOString(),
       pdf_strategy: 'json_snapshot_printable_on_demand',
       storage: 'not_persisted',
@@ -785,16 +746,16 @@ async function getNutritionMeasurementReport(patientIdentifier, measurementIdent
   };
 }
 
-function rawMeasurementRows(measurement = {}) {
-  const profile = PROFILE_DEFINITIONS.find((item) => item.code === measurement.profile_code) || PROFILE_DEFINITIONS[0];
+function rawMeasurementRows(measurement = {}, profileDefinitions = PROFILE_DEFINITIONS, fieldDefinitions = FIELD_DEFINITIONS) {
+  const profile = profileDefinitions.find((item) => item.code === measurement.profile_code) || profileDefinitions[0] || PROFILE_DEFINITIONS[0];
   const rawValues = measurement.raw_values || {};
   return profile.groups.map((group) => ({
     title: group.label,
     fields: group.fields
       .filter((field) => rawValues[field] !== undefined && rawValues[field] !== null && rawValues[field] !== '')
       .map((field) => ({
-        label: FIELD_DEFINITIONS[field]?.label || field,
-        unit: FIELD_DEFINITIONS[field]?.unit || '',
+        label: fieldDefinitions[field]?.label || field,
+        unit: fieldDefinitions[field]?.unit || '',
         value: rawValues[field],
       })),
   })).filter((group) => group.fields.length);
@@ -872,7 +833,7 @@ function buildNutritionReportHtml(reportData) {
       <p>Se necesitan dos mediciones con peso y fechas distintas para estimar tendencia.</p>
     </section>
   `;
-  const rawHtml = rawMeasurementRows(measurement).map((group) => `
+  const rawHtml = rawMeasurementRows(measurement, reportData.profile_definitions, reportData.field_definitions).map((group) => `
     <section class="card">
       <h2>${escapeHtml(group.title)}</h2>
       <table>
