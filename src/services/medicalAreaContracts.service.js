@@ -197,6 +197,30 @@ const NUTRITION_MEASUREMENT_PROFILE_OPTIONS = [
   },
 ];
 
+const PATIENT_WORKSPACES = {
+  dental: {
+    enabled: false,
+    route: 'tratamientos',
+    labelKey: 'patients.detail.tabs.treatments',
+    label: 'Tratamientos',
+    icon: 'heroicons_outline:clipboard-document-list',
+  },
+  nutricion: {
+    enabled: true,
+    route: 'nutricion',
+    labelKey: 'patients.detail.tabs.nutrition',
+    label: 'Nutrición',
+    icon: 'heroicons_outline:scale',
+  },
+  general: {
+    enabled: false,
+    route: null,
+    labelKey: null,
+    label: 'Ficha clínica',
+    icon: 'heroicons_outline:squares-2x2',
+  },
+};
+
 const MEDICAL_AREA_CONTRACT_SECTIONS = {
   dental: [
     {
@@ -578,6 +602,17 @@ function normalizeNutritionMeasurementProfileOptions(value, fallback = []) {
   return options.length ? options : cloneJson(fallback);
 }
 
+function normalizePatientWorkspace(value, fallback = PATIENT_WORKSPACES[FALLBACK_CODE]) {
+  const source = value && typeof value === 'object' ? value : {};
+  return {
+    enabled: source.enabled === undefined ? !!fallback.enabled : !!source.enabled,
+    route: source.route === null ? null : cleanString(source.route, fallback.route || null),
+    labelKey: source.labelKey === null ? null : cleanString(source.labelKey, fallback.labelKey || null),
+    label: cleanString(source.label, fallback.label || 'Ficha clínica'),
+    icon: cleanString(source.icon, fallback.icon || 'heroicons_outline:squares-2x2'),
+  };
+}
+
 function getBaseContractForArea(code) {
   const normalized = normalizeCode(code);
   const profile = TREATMENT_AREA_PROFILES[normalized] || TREATMENT_AREA_PROFILES[FALLBACK_CODE];
@@ -587,6 +622,7 @@ function getBaseContractForArea(code) {
     service_examples: TREATMENT_SERVICE_EXAMPLES[normalized] || TREATMENT_SERVICE_EXAMPLES[FALLBACK_CODE],
     contract_sections: MEDICAL_AREA_CONTRACT_SECTIONS[normalized] || FALLBACK_AREA_CONTRACT_SECTIONS,
     setup_steps: TREATMENT_SETUP_STEPS_BY_AREA[normalized] || DEFAULT_TREATMENT_SETUP_STEPS,
+    patient_workspace: PATIENT_WORKSPACES[normalized] || PATIENT_WORKSPACES[FALLBACK_CODE],
     nutrition_service_kind_options: normalized === 'nutricion' ? NUTRITION_SERVICE_KIND_OPTIONS : [],
     nutrition_measurement_profile_options: normalized === 'nutricion' ? NUTRITION_MEASUREMENT_PROFILE_OPTIONS : [],
   };
@@ -603,6 +639,7 @@ function normalizeContractPayload(code, payload = {}) {
     service_examples: normalizeStringArray(source?.service_examples, normalizedBase.service_examples),
     contract_sections: normalizeContractSections(source?.contract_sections, normalizedBase.contract_sections),
     setup_steps: normalizeSetupSteps(source?.setup_steps, normalizedBase.setup_steps),
+    patient_workspace: normalizePatientWorkspace(source?.patient_workspace, normalizedBase.patient_workspace),
     nutrition_service_kind_options: normalizedCode === 'nutricion'
       ? normalizeNutritionServiceKindOptions(source?.nutrition_service_kind_options, normalizedBase.nutrition_service_kind_options)
       : [],
