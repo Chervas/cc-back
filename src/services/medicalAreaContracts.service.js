@@ -258,6 +258,8 @@ const NUTRITION_MEASUREMENT_PROFILE_SCHEMAS = [
         required_fields: [
           'skinfold_triceps_mm',
           'skinfold_subscapular_mm',
+          'skinfold_biceps_mm',
+          'skinfold_iliac_crest_mm',
           'skinfold_supraspinale_mm',
           'skinfold_medial_calf_mm',
         ],

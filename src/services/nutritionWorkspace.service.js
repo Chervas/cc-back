@@ -11,7 +11,7 @@ const medicalAreaContracts = require('./medicalAreaContracts.service');
 
 const { Op } = db.Sequelize;
 const execFileAsync = promisify(execFile);
-const FORMULA_VERSION = 'nutrition-basic-v1';
+const FORMULA_VERSION = 'nutrition-basic-v2';
 const DEFAULT_CHROMIUM_PATH = '/home/ubuntu/.cache/clinicaclick-browsers/chrome-headless-shell/linux-148.0.7778.56/chrome-headless-shell-linux64/chrome-headless-shell';
 
 const FORMULA_REFERENCES = [
@@ -40,10 +40,26 @@ const FORMULA_REFERENCES = [
     profiles: ['express_isak'],
   },
   {
+    key: 'durnin_womersley_body_density',
+    label: 'Densidad corporal Durnin-Womersley',
+    description: 'Estimación de densidad corporal por sexo y edad usando la suma de bíceps, tríceps, subescapular e ilíaco/suprailiaco.',
+    source: 'Durnin & Womersley 1974',
+    url: 'https://pubmed.ncbi.nlm.nih.gov/4843734/',
+    profiles: ['express_isak'],
+  },
+  {
+    key: 'siri_body_fat',
+    label: 'Porcentaje graso Siri',
+    description: 'Conversión de densidad corporal a porcentaje estimado de grasa corporal.',
+    source: 'Siri body density conversion',
+    url: 'https://www.ncbi.nlm.nih.gov/books/NBK235961/',
+    profiles: ['express_isak'],
+  },
+  {
     key: 'linear_projection',
     label: 'Proyección temporal',
     description: 'Estimación lineal simple basada en las dos últimas mediciones comparables con fechas distintas.',
-    source: 'ClinicaClick nutrition-basic-v1',
+    source: 'ClinicaClick nutrition-basic-v2',
     url: null,
     profiles: ['quick', 'express_isak'],
   },
@@ -61,6 +77,10 @@ const REPORT_METRIC_DEFINITIONS = [
   { key: 'skinfold_sum_mm', label: 'Suma de pliegues', unit: 'mm', source: 'calculated_values', decimals: 1, section: 'anthropometry' },
   { key: 'corrected_arm_girth_cm', label: 'Brazo corregido', unit: 'cm', source: 'calculated_values', decimals: 1, section: 'anthropometry' },
   { key: 'corrected_calf_girth_cm', label: 'Pantorrilla corregida', unit: 'cm', source: 'calculated_values', decimals: 1, section: 'anthropometry' },
+  { key: 'body_fat_percent', label: 'Grasa estimada', unit: '%', source: 'body_composition', decimals: 1, section: 'body_composition' },
+  { key: 'fat_mass_kg', label: 'Masa grasa estimada', unit: 'kg', source: 'body_composition', decimals: 1, section: 'body_composition' },
+  { key: 'fat_free_mass_kg', label: 'Masa libre de grasa', unit: 'kg', source: 'body_composition', decimals: 1, section: 'body_composition' },
+  { key: 'body_density', label: 'Densidad corporal', unit: 'g/ml', source: 'body_composition', decimals: 4, section: 'body_composition' },
   { key: 'endomorphy', label: 'Endomorfia', unit: '', source: 'somatotype', decimals: 1, section: 'somatotype' },
   { key: 'mesomorphy', label: 'Mesomorfia', unit: '', source: 'somatotype', decimals: 1, section: 'somatotype' },
   { key: 'ectomorphy', label: 'Ectomorfia', unit: '', source: 'somatotype', decimals: 1, section: 'somatotype' },
@@ -69,7 +89,27 @@ const REPORT_METRIC_DEFINITIONS = [
 const REPORT_SECTION_DEFINITIONS = {
   base: 'Datos principales',
   anthropometry: 'Antropometría',
+  body_composition: 'Composición corporal',
   somatotype: 'Somatotipo Heath-Carter',
+};
+
+const DURNIN_WOMERSLEY_COEFFICIENTS = {
+  male: [
+    { maxAge: 16, c: 1.1533, m: 0.0643, label: '<17' },
+    { maxAge: 19, c: 1.1620, m: 0.0630, label: '17-19' },
+    { maxAge: 29, c: 1.1631, m: 0.0632, label: '20-29' },
+    { maxAge: 39, c: 1.1422, m: 0.0544, label: '30-39' },
+    { maxAge: 49, c: 1.1620, m: 0.0700, label: '40-49' },
+    { maxAge: Infinity, c: 1.1715, m: 0.0779, label: '50+' },
+  ],
+  female: [
+    { maxAge: 16, c: 1.1369, m: 0.0598, label: '<17' },
+    { maxAge: 19, c: 1.1549, m: 0.0678, label: '17-19' },
+    { maxAge: 29, c: 1.1599, m: 0.0717, label: '20-29' },
+    { maxAge: 39, c: 1.1423, m: 0.0632, label: '30-39' },
+    { maxAge: 49, c: 1.1333, m: 0.0612, label: '40-49' },
+    { maxAge: Infinity, c: 1.1339, m: 0.0645, label: '50+' },
+  ],
 };
 
 function toIntOrNull(value) {
@@ -278,7 +318,97 @@ function calculateSomatotype(rawValues = {}) {
   };
 }
 
-function calculateNutritionValues(rawValues = {}, profileCode = 'quick') {
+function normalizeSexForBodyComposition(value) {
+  const normalized = String(value || '')
+    .trim()
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '');
+
+  if (!normalized) return null;
+  if (['hombre', 'masculino', 'male', 'man', 'varon', 'h'].includes(normalized)) return 'male';
+  if (['mujer', 'femenino', 'female', 'woman', 'f'].includes(normalized)) return 'female';
+  if (normalized.includes('hombre') || normalized.includes('mascul') || normalized.includes('varon')) return 'male';
+  if (normalized.includes('mujer') || normalized.includes('femen')) return 'female';
+  return null;
+}
+
+function calculateAgeYears(birthValue, referenceDate = new Date()) {
+  if (!birthValue) return null;
+  const birthDate = new Date(birthValue);
+  const refDate = new Date(referenceDate);
+  if (!Number.isFinite(birthDate.getTime()) || !Number.isFinite(refDate.getTime())) return null;
+  let age = refDate.getUTCFullYear() - birthDate.getUTCFullYear();
+  const monthDelta = refDate.getUTCMonth() - birthDate.getUTCMonth();
+  if (monthDelta < 0 || (monthDelta === 0 && refDate.getUTCDate() < birthDate.getUTCDate())) {
+    age -= 1;
+  }
+  return age >= 0 && age <= 130 ? age : null;
+}
+
+function normalizeAgeYears(value) {
+  const parsed = toIntOrNull(value);
+  return parsed !== null && parsed >= 0 && parsed <= 130 ? parsed : null;
+}
+
+function buildPatientFormulaContext(patient, referenceDate = new Date()) {
+  return {
+    sex: normalizeSexForBodyComposition(patient?.sexo),
+    age_years: calculateAgeYears(patient?.fecha_nacimiento, referenceDate) ?? normalizeAgeYears(patient?.edad),
+  };
+}
+
+function coefficientForDurninWomersley(sex, ageYears) {
+  if (!sex || !Number.isFinite(ageYears)) return null;
+  return (DURNIN_WOMERSLEY_COEFFICIENTS[sex] || []).find((item) => ageYears <= item.maxAge) || null;
+}
+
+function calculateBodyComposition(rawValues = {}, context = {}) {
+  const sex = normalizeSexForBodyComposition(context.sex);
+  const ageYears = normalizeAgeYears(context.age_years);
+  const weight = rawValues.weight_kg;
+  const biceps = rawValues.skinfold_biceps_mm;
+  const triceps = rawValues.skinfold_triceps_mm;
+  const subscapular = rawValues.skinfold_subscapular_mm;
+  const iliacCrest = rawValues.skinfold_iliac_crest_mm;
+
+  if (![weight, biceps, triceps, subscapular, iliacCrest].every((value) => Number.isFinite(value) && value > 0)) {
+    return null;
+  }
+
+  const coefficient = coefficientForDurninWomersley(sex, ageYears);
+  if (!coefficient) return null;
+
+  const skinfoldSum4 = biceps + triceps + subscapular + iliacCrest;
+  const bodyDensity = coefficient.c - (coefficient.m * Math.log10(skinfoldSum4));
+  if (!Number.isFinite(bodyDensity) || bodyDensity <= 0) return null;
+
+  const bodyFatPercent = (495 / bodyDensity) - 450;
+  if (!Number.isFinite(bodyFatPercent)) return null;
+
+  const fatMassKg = weight * (bodyFatPercent / 100);
+  return {
+    method: 'Durnin-Womersley 4 skinfold body density + Siri body fat',
+    sex,
+    age_years: ageYears,
+    age_band: coefficient.label,
+    skinfold_sum_4_mm: round(skinfoldSum4, 1),
+    body_density: round(bodyDensity, 4),
+    body_fat_percent: round(bodyFatPercent, 1),
+    fat_mass_kg: round(fatMassKg, 1),
+    fat_free_mass_kg: round(weight - fatMassKg, 1),
+    input_fields: [
+      'weight_kg',
+      'skinfold_biceps_mm',
+      'skinfold_triceps_mm',
+      'skinfold_subscapular_mm',
+      'skinfold_iliac_crest_mm',
+    ],
+    source: 'Durnin-Womersley 1974 + Siri conversion',
+  };
+}
+
+function calculateNutritionValues(rawValues = {}, profileCode = 'quick', context = {}) {
   const weight = rawValues.weight_kg;
   const height = rawValues.stature_cm;
   const waist = rawValues.waist_cm;
@@ -310,6 +440,7 @@ function calculateNutritionValues(rawValues = {}, profileCode = 'quick') {
       ? round(calf - (medialCalf / 10), 1)
       : null,
     somatotype: profileCode === 'express_isak' ? calculateSomatotype(rawValues) : null,
+    body_composition: profileCode === 'express_isak' ? calculateBodyComposition(rawValues, context) : null,
   };
 }
 
@@ -350,6 +481,7 @@ function buildEvolution(measurements = []) {
       hip_cm: item.raw_values.hip_cm ?? null,
       skinfold_sum_mm: item.calculated_values.skinfold_sum_mm ?? null,
       bmi: item.calculated_values.bmi ?? null,
+      body_fat_percent: item.calculated_values.body_composition?.body_fat_percent ?? null,
       delta_weight_kg: previous && Number.isFinite(weight) && Number.isFinite(previous.raw_values.weight_kg)
         ? round(weight - previous.raw_values.weight_kg, 1)
         : null,
@@ -423,6 +555,9 @@ function getReportMetricValue(measurement, metricDefinition) {
   }
   if (metricDefinition.source === 'somatotype') {
     return calculatedValues.somatotype?.[metricDefinition.key] ?? null;
+  }
+  if (metricDefinition.source === 'body_composition') {
+    return calculatedValues.body_composition?.[metricDefinition.key] ?? null;
   }
   return null;
 }
@@ -522,6 +657,11 @@ function buildReportNarrative(measurement, comparison, metrics = []) {
     notes.push(skinfoldCount >= 8
       ? 'Perfil express/ISAK con los 8 pliegues del perfil restringido registrados.'
       : `Perfil express/ISAK parcial con ${skinfoldCount} de 8 pliegues registrados.`);
+    if (measurement.calculated_values?.body_composition) {
+      notes.push('Composición corporal estimada con Durnin-Womersley y Siri a partir de 4 pliegues; debe interpretarse como estimación antropométrica.');
+    } else {
+      notes.push('La composición corporal estimada requiere sexo, edad, peso y los pliegues bíceps, tríceps, subescapular e ilíaco/suprailiaco.');
+    }
   } else {
     notes.push('Resumen rápido para seguimiento de consulta.');
   }
@@ -576,6 +716,7 @@ function buildReports(measurements = []) {
           waist_hip_ratio: measurement.calculated_values.waist_hip_ratio,
           skinfold_sum_mm: measurement.calculated_values.skinfold_sum_mm,
           somatotype: measurement.calculated_values.somatotype,
+          body_composition: measurement.calculated_values.body_composition,
           metric_count: metrics.length,
         },
         sections: buildReportSections(metrics),
@@ -765,6 +906,7 @@ async function getPatientNutritionWorkspace(patientIdentifier) {
   });
   const reportSnapshots = await findActiveNutritionReportSnapshotsForPatient(patient.id_paciente);
   const reports = attachReportSnapshots(buildReports(measurements), reportSnapshots);
+  const patientFormulaContext = buildPatientFormulaContext(patient);
 
   return {
     patient: {
@@ -772,6 +914,8 @@ async function getPatientNutritionWorkspace(patientIdentifier) {
       public_id: patient.public_id,
       name: [patient.nombre, patient.apellidos].filter(Boolean).join(' ').trim(),
       clinic_id: clinicId,
+      sex: patientFormulaContext.sex,
+      age_years: patientFormulaContext.age_years,
     },
     profiles: profileDefinitions,
     fields: fieldDefinitions,
@@ -814,7 +958,6 @@ async function createNutritionMeasurement(patientIdentifier, payload = {}, actor
     throw error;
   }
   const qualityFlags = qualityFlagsForValues(rawValues, fieldDefinitions);
-  const calculatedValues = calculateNutritionValues(rawValues, profileCode);
   const clinicId = toIntOrNull(payload.clinic_id) || Number(patient.clinica_id);
   const measuredAt = payload.measured_at ? new Date(payload.measured_at) : new Date();
 
@@ -823,6 +966,7 @@ async function createNutritionMeasurement(patientIdentifier, payload = {}, actor
     error.status = 400;
     throw error;
   }
+  const calculatedValues = calculateNutritionValues(rawValues, profileCode, buildPatientFormulaContext(patient, measuredAt));
 
   const row = await db.PatientNutritionMeasurement.create({
     patient_id: patient.id_paciente,
@@ -906,6 +1050,7 @@ async function buildNutritionMeasurementReportData(patientIdentifier, measuremen
         : [],
     })
     : null;
+  const patientFormulaContext = buildPatientFormulaContext(patient, measurement.measured_at);
 
   return {
     patient: {
@@ -914,6 +1059,8 @@ async function buildNutritionMeasurementReportData(patientIdentifier, measuremen
       name: [patient.nombre, patient.apellidos].filter(Boolean).join(' ').trim(),
       clinic_id: Number(patient.clinica_id),
       clinic_name: patient.clinica?.nombre_clinica || '',
+      sex: patientFormulaContext.sex,
+      age_years: patientFormulaContext.age_years,
     },
     treatment: treatment?.toJSON ? treatment.toJSON() : treatment,
     appointment: appointment?.toJSON ? appointment.toJSON() : appointment,
@@ -1284,5 +1431,9 @@ module.exports = {
     hashSnapshot,
     requiredFieldsForProfile,
     missingRequiredFieldsForProfile,
+    normalizeSexForBodyComposition,
+    calculateAgeYears,
+    buildPatientFormulaContext,
+    calculateBodyComposition,
   },
 };

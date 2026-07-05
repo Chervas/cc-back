@@ -26,6 +26,11 @@ const baseRawValues = {
   breadth_femur_cm: 9.5,
 };
 
+const maleAdultContext = {
+  sex: 'hombre',
+  age_years: 32,
+};
+
 function measurementRow(id, measuredAt, values) {
   const rawValues = {
     ...baseRawValues,
@@ -38,7 +43,7 @@ function measurementRow(id, measuredAt, values) {
     profile_code: 'express_isak',
     measured_at: measuredAt,
     raw_values_json: rawValues,
-    calculated_values_json: calculateNutritionValues(rawValues, 'express_isak'),
+    calculated_values_json: calculateNutritionValues(rawValues, 'express_isak', maleAdultContext),
     formula_version: FORMULA_VERSION,
     quality_flags_json: [],
     notes: '',
@@ -67,13 +72,33 @@ function run() {
     ...baseRawValues,
     weight_kg: 80,
     waist_cm: 82,
-  }, 'express_isak');
+  }, 'express_isak', maleAdultContext);
 
+  assert.equal(FORMULA_VERSION, 'nutrition-basic-v2');
   assert.equal(calculated.bmi, 24.7);
   assert.equal(calculated.waist_hip_ratio, 0.85);
   assert.equal(calculated.skinfold_sum_mm, 94);
   assert.equal(calculated.corrected_arm_girth_cm, 33);
   assert.equal(calculated.corrected_calf_girth_cm, 37.2);
+  assert.deepEqual(calculated.body_composition, {
+    method: 'Durnin-Womersley 4 skinfold body density + Siri body fat',
+    sex: 'male',
+    age_years: 32,
+    age_band: '30-39',
+    skinfold_sum_4_mm: 41,
+    body_density: 1.0545,
+    body_fat_percent: 19.4,
+    fat_mass_kg: 15.5,
+    fat_free_mass_kg: 64.5,
+    input_fields: [
+      'weight_kg',
+      'skinfold_biceps_mm',
+      'skinfold_triceps_mm',
+      'skinfold_subscapular_mm',
+      'skinfold_iliac_crest_mm',
+    ],
+    source: 'Durnin-Womersley 1974 + Siri conversion',
+  });
   assert.deepEqual(calculated.somatotype, {
     endomorphy: 3.2,
     mesomorphy: 4.8,
@@ -98,6 +123,8 @@ function run() {
       stature_cm: 180,
       skinfold_triceps_mm: 10,
       skinfold_subscapular_mm: 12,
+      skinfold_biceps_mm: 5,
+      skinfold_iliac_crest_mm: 14,
       skinfold_supraspinale_mm: 11,
       skinfold_medial_calf_mm: 8,
       arm_flexed_tensed_cm: 34,
@@ -170,10 +197,31 @@ function run() {
       generated_at: '2026-02-26T11:00:00.000Z',
     },
   });
+  assert.equal(
+    calculateNutritionValues({
+      ...baseRawValues,
+      weight_kg: 80,
+      waist_cm: 82,
+    }, 'express_isak').body_composition,
+    null,
+  );
+  assert.equal(__testing.normalizeSexForBodyComposition('mujer'), 'female');
+  assert.equal(__testing.calculateAgeYears('1994-07-06', '2026-07-05T10:00:00.000Z'), 31);
+  assert.deepEqual(__testing.buildPatientFormulaContext({
+    sexo: 'hombre',
+    fecha_nacimiento: '1994-07-06',
+    edad: 40,
+  }, '2026-07-05T10:00:00.000Z'), {
+    sex: 'male',
+    age_years: 31,
+  });
   assert.match(html, /Proyección temporal/);
   assert.match(html, /Peso estimado 8 semanas/);
   assert.match(html, /84 kg/);
   assert.match(html, /Bases de cálculo/);
+  assert.match(html, /Composición corporal/);
+  assert.match(html, /Grasa estimada/);
+  assert.match(html, /Durnin-Womersley/);
   assert.match(html, /Somatotipo Heath-Carter/);
   assert.doesNotMatch(html, /148 kg/);
 
