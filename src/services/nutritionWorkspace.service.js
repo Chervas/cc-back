@@ -13,7 +13,7 @@ const clinicalPrivateStorage = require('./clinicalPrivateStorage.service');
 const { Op } = db.Sequelize;
 const execFileAsync = promisify(execFile);
 const FORMULA_VERSION = 'nutrition-basic-v3';
-const NUTRITION_REPORT_SNAPSHOT_VERSION = 6;
+const NUTRITION_REPORT_SNAPSHOT_VERSION = 7;
 const NUTRITION_REPORT_CURRENT_STATUSES = ['final', 'active'];
 const DEFAULT_CHROMIUM_PATH = '/home/ubuntu/.cache/clinicaclick-browsers/chrome-headless-shell/linux-148.0.7778.56/chrome-headless-shell-linux64/chrome-headless-shell';
 
@@ -78,7 +78,7 @@ const FORMULA_REFERENCES = [
     key: 'linear_projection',
     label: 'Proyección temporal',
     description: 'Estimación lineal simple basada en las dos últimas mediciones comparables con fechas distintas.',
-    source: 'ClinicaClick nutrition-basic-v3',
+    source: 'Cálculo interno ClinicaClick',
     url: null,
     profiles: ['quick', 'express_isak'],
   },
@@ -191,8 +191,11 @@ function buildClinicalStoragePolicy({
   const documentStatus = isFinal ? 'final' : 'draft';
   const resolvedPrimary = primary || (snapshotPersisted ? 'database_snapshot' : 'calculated_report');
   const label = snapshotPersisted
-    ? (isFinal ? 'Snapshot final privado' : 'Snapshot clínico privado')
-    : 'Informe calculado privado';
+    ? (isFinal ? 'Informe clínico cerrado' : 'Informe clínico privado')
+    : 'Informe generado bajo demanda';
+  const detail = snapshotPersisted
+    ? `Documento clínico guardado en base de datos privada. PDF ${pdfPersisted ? 'guardado como archivo clínico privado' : 'generado bajo demanda'}.`
+    : 'Informe calculado en backend y PDF generado bajo demanda.';
 
   return {
     sensitivity: 'clinical_private',
@@ -207,9 +210,7 @@ function buildClinicalStoragePolicy({
     storage_strategy: normalizedStrategy,
     document_status: documentStatus,
     label,
-    detail: snapshotPersisted
-      ? `${label}: JSON/HTML en base de datos privada; PDF ${pdfPersisted ? 'persistido como asset clinico privado' : 'generado bajo demanda'}; no persistido en PUBLIC_MEDIA.`
-      : `${label}: se calcula en backend y el PDF se genera bajo demanda; no persistido en PUBLIC_MEDIA.`,
+    detail,
   };
 }
 
@@ -580,9 +581,11 @@ function buildCompositionVisualHtml(report) {
   `;
 }
 
-function buildDonutSvg(segments = []) {
+function buildDonutSvg(segments = [], options = {}) {
   const total = segments.reduce((sum, segment) => sum + Math.max(0, finiteNumber(segment.value) || 0), 0);
   if (!total) return '';
+  const title = options.title || 'Actual';
+  const subtitle = options.subtitle !== undefined ? options.subtitle : `${segments.length} bloques`;
   const radius = 54;
   const circumference = 2 * Math.PI * radius;
   let offset = 0;
@@ -596,8 +599,8 @@ function buildDonutSvg(segments = []) {
         offset += dash;
         return circle;
       }).join('')}
-      <text x="75" y="72" text-anchor="middle" class="donut-title">Actual</text>
-      <text x="75" y="91" text-anchor="middle" class="donut-subtitle">${escapeHtml(segments.length)} bloques</text>
+      <text x="75" y="72" text-anchor="middle" class="donut-title">${escapeHtml(title)}</text>
+      ${subtitle ? `<text x="75" y="91" text-anchor="middle" class="donut-subtitle">${escapeHtml(subtitle)}</text>` : ''}
     </svg>
   `;
 }
@@ -642,40 +645,108 @@ function percentSegmentsFromGroups(groups = []) {
   }));
 }
 
-function buildDistributionVisualHtml(measurement = {}) {
+function segmentByLabel(segments = [], label = '') {
+  return segments.find((segment) => String(segment.label).toLowerCase() === String(label).toLowerCase()) || null;
+}
+
+function segmentDeltaHtml(segment = {}, previousSegments = []) {
+  const previous = segmentByLabel(previousSegments, segment.label);
+  if (!previous || previous.percent === null || previous.percent === undefined) return '';
+  const delta = round(Number(segment.percent) - Number(previous.percent), 1);
+  if (!Number.isFinite(delta)) return '';
+  const sign = delta > 0 ? '+' : '';
+  const className = Math.abs(delta) < 0.1 ? 'delta-stable' : delta > 0 ? 'delta-bad' : 'delta-good';
+  return `<em class="${className}">${escapeHtml(sign)}${escapeHtml(delta)} pp vs previo</em>`;
+}
+
+function segmentRowsHtml(title, segments = [], previousSegments = []) {
+  if (!segments.length) return '';
+  return `
+    <div class="distribution-panel">
+      <h3>${escapeHtml(title)}</h3>
+      ${segments.map((segment) => {
+        const previous = segmentByLabel(previousSegments, segment.label);
+        return `
+          <div class="distribution-row">
+            <div class="distribution-row-head">
+              <span>${escapeHtml(segment.label)}</span>
+              <strong>${escapeHtml(segment.percent)}%</strong>
+              ${segmentDeltaHtml(segment, previousSegments)}
+            </div>
+            <div class="distribution-track">
+              <i style="width:${escapeHtml(segment.percent)}%;background:${escapeHtml(segment.color)}"></i>
+              ${previous ? `<b style="left:${escapeHtml(previous.percent)}%"></b>` : ''}
+            </div>
+          </div>
+        `;
+      }).join('')}
+    </div>
+  `;
+}
+
+function bodyDistributionSvg(adiposeSegments = [], muscleSegments = []) {
+  const upper = segmentByLabel(adiposeSegments, 'Superior')?.color || '#38bdf8';
+  const central = segmentByLabel(adiposeSegments, 'Central')?.color || '#f97316';
+  const lower = segmentByLabel(adiposeSegments, 'Inferior')?.color || '#22c55e';
+  const arm = segmentByLabel(muscleSegments, 'Brazo')?.color || '#0f766e';
+  const thigh = segmentByLabel(muscleSegments, 'Muslo')?.color || '#14b8a6';
+  const leg = segmentByLabel(muscleSegments, 'Pierna')?.color || '#5eead4';
+  return `
+    <svg class="body-map" viewBox="0 0 170 260" role="img" aria-label="Mapa corporal orientativo">
+      <circle cx="85" cy="28" r="18" fill="${escapeHtml(upper)}" opacity=".72"></circle>
+      <path d="M58 54 H112 L126 132 H44 Z" fill="${escapeHtml(central)}" opacity=".72"></path>
+      <path d="M48 61 L25 128" stroke="${escapeHtml(arm)}" stroke-width="15" stroke-linecap="round" opacity=".72"></path>
+      <path d="M122 61 L145 128" stroke="${escapeHtml(arm)}" stroke-width="15" stroke-linecap="round" opacity=".72"></path>
+      <path d="M61 133 L53 228" stroke="${escapeHtml(thigh)}" stroke-width="18" stroke-linecap="round" opacity=".72"></path>
+      <path d="M109 133 L117 228" stroke="${escapeHtml(thigh)}" stroke-width="18" stroke-linecap="round" opacity=".72"></path>
+      <path d="M53 204 L48 244" stroke="${escapeHtml(leg)}" stroke-width="12" stroke-linecap="round" opacity=".72"></path>
+      <path d="M117 204 L122 244" stroke="${escapeHtml(leg)}" stroke-width="12" stroke-linecap="round" opacity=".72"></path>
+      <path d="M58 54 H112 L126 132 H44 Z M61 133 L53 228 M109 133 L117 228" fill="none" stroke="#0f172a" stroke-opacity=".12" stroke-width="2"></path>
+    </svg>
+  `;
+}
+
+function buildDistributionVisualHtml(measurement = {}, previousMeasurement = null) {
   const raw = measurement.raw_values || {};
   const calculated = measurement.calculated_values || {};
+  const previousRaw = previousMeasurement?.raw_values || {};
+  const previousCalculated = previousMeasurement?.calculated_values || {};
   const adiposeSegments = percentSegmentsFromGroups([
     { label: 'Superior', color: '#38bdf8', values: [raw.skinfold_triceps_mm, raw.skinfold_biceps_mm, raw.skinfold_subscapular_mm] },
     { label: 'Central', color: '#f97316', values: [raw.skinfold_iliac_crest_mm, raw.skinfold_supraspinale_mm, raw.skinfold_abdominal_mm] },
     { label: 'Inferior', color: '#22c55e', values: [raw.skinfold_front_thigh_mm, raw.skinfold_medial_calf_mm] },
+  ]);
+  const previousAdiposeSegments = percentSegmentsFromGroups([
+    { label: 'Superior', color: '#38bdf8', values: [previousRaw.skinfold_triceps_mm, previousRaw.skinfold_biceps_mm, previousRaw.skinfold_subscapular_mm] },
+    { label: 'Central', color: '#f97316', values: [previousRaw.skinfold_iliac_crest_mm, previousRaw.skinfold_supraspinale_mm, previousRaw.skinfold_abdominal_mm] },
+    { label: 'Inferior', color: '#22c55e', values: [previousRaw.skinfold_front_thigh_mm, previousRaw.skinfold_medial_calf_mm] },
   ]);
   const muscleSegments = percentSegmentsFromGroups([
     { label: 'Brazo', color: '#0f766e', values: [calculated.corrected_arm_girth_cm || raw.arm_flexed_tensed_cm || raw.arm_relaxed_cm] },
     { label: 'Muslo', color: '#14b8a6', values: [raw.thigh_cm] },
     { label: 'Pierna', color: '#5eead4', values: [calculated.corrected_calf_girth_cm || raw.calf_cm] },
   ]);
+  const previousMuscleSegments = percentSegmentsFromGroups([
+    { label: 'Brazo', color: '#0f766e', values: [previousCalculated.corrected_arm_girth_cm || previousRaw.arm_flexed_tensed_cm || previousRaw.arm_relaxed_cm] },
+    { label: 'Muslo', color: '#14b8a6', values: [previousRaw.thigh_cm] },
+    { label: 'Pierna', color: '#5eead4', values: [previousCalculated.corrected_calf_girth_cm || previousRaw.calf_cm] },
+  ]);
   if (!adiposeSegments.length && !muscleSegments.length) return '';
-
-  const segmentList = (title, segments) => segments.length ? `
-    <div class="distribution-panel">
-      <h3>${escapeHtml(title)}</h3>
-      ${segments.map((segment) => `
-        <div class="distribution-row">
-          <span>${escapeHtml(segment.label)}</span>
-          <strong>${escapeHtml(segment.percent)}%</strong>
-          <div><i style="width:${escapeHtml(segment.percent)}%;background:${escapeHtml(segment.color)}"></i></div>
-        </div>
-      `).join('')}
-    </div>
-  ` : '';
 
   return `
     <section class="card">
       <h2>Distribución adiposa y muscular</h2>
-      <div class="visual-grid">
-        ${segmentList('Tejido adiposo', adiposeSegments)}
-        ${segmentList('Tejido muscular', muscleSegments)}
+      <p class="muted small-note">Reparte los pliegues y perímetros corregidos por zonas para ver dónde se concentra el cambio corporal. La marca vertical indica la medición previa cuando existe.</p>
+      <div class="distribution-layout">
+        ${segmentRowsHtml('Tejido adiposo', adiposeSegments, previousAdiposeSegments)}
+        <div class="body-map-wrap">
+          ${bodyDistributionSvg(adiposeSegments, muscleSegments)}
+          <div class="distribution-legend">
+            <span><i class="legend-current"></i>Actual</span>
+            ${previousMeasurement ? '<span><i class="legend-previous"></i>Previo</span>' : ''}
+          </div>
+        </div>
+        ${segmentRowsHtml('Tejido muscular', muscleSegments, previousMuscleSegments)}
       </div>
     </section>
   `;
@@ -717,7 +788,54 @@ function buildSomatotypeVisualHtml(report = {}) {
   `;
 }
 
-function buildHealthIndexesHtml(measurement = {}) {
+function fatDistributionSummary(measurement = {}) {
+  const raw = measurement?.raw_values || {};
+  const trunk = sumFiniteValues([raw.skinfold_subscapular_mm, raw.skinfold_iliac_crest_mm, raw.skinfold_supraspinale_mm, raw.skinfold_abdominal_mm]);
+  const extremities = sumFiniteValues([raw.skinfold_triceps_mm, raw.skinfold_biceps_mm, raw.skinfold_front_thigh_mm, raw.skinfold_medial_calf_mm]);
+  if (trunk === null || extremities === null || (trunk + extremities) <= 0) return null;
+  const total = trunk + extremities;
+  return {
+    trunk,
+    extremities,
+    trunkPercent: round((trunk / total) * 100, 1),
+    extremitiesPercent: round((extremities / total) * 100, 1),
+    index: round(trunk / total, 2),
+  };
+}
+
+function buildFatDistributionHtml(current = null, previous = null) {
+  if (!current) return '';
+  const delta = previous ? round(current.trunkPercent - previous.trunkPercent, 1) : null;
+  const deltaLabel = delta === null
+    ? ''
+    : `<span class="${Math.abs(delta) < 0.1 ? 'delta-stable' : delta > 0 ? 'delta-bad' : 'delta-good'}">${delta > 0 ? '+' : ''}${escapeHtml(delta)} pp tronco vs previo</span>`;
+  return `
+    <div class="fat-distribution">
+      <div class="fat-distribution-head">
+        <strong>Distribución corporal de grasa</strong>
+        ${deltaLabel}
+      </div>
+      <div class="fat-distribution-grid">
+        <div>
+          ${buildDonutSvg([
+            { label: 'Tronco', value: current.trunkPercent, color: '#fb923c' },
+            { label: 'Extremidades', value: current.extremitiesPercent, color: '#14b8a6' },
+          ], { title: `${current.trunkPercent}%`, subtitle: 'tronco' })}
+        </div>
+        <div class="fat-distribution-values">
+          <div><span style="background:#fb923c"></span><strong>Tronco</strong><em>${escapeHtml(current.trunkPercent)}%</em></div>
+          <div><span style="background:#14b8a6"></span><strong>Extremidades</strong><em>${escapeHtml(current.extremitiesPercent)}%</em></div>
+          ${previous ? `
+            <div class="previous-line"><span></span><strong>Previo tronco</strong><em>${escapeHtml(previous.trunkPercent)}%</em></div>
+            <div class="previous-line"><span></span><strong>Previo extremidades</strong><em>${escapeHtml(previous.extremitiesPercent)}%</em></div>
+          ` : ''}
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+function buildHealthIndexesHtml(measurement = {}, previousMeasurement = null) {
   const raw = measurement.raw_values || {};
   const calculated = measurement.calculated_values || {};
   const weight = finiteNumber(raw.weight_kg);
@@ -728,11 +846,8 @@ function buildHealthIndexesHtml(measurement = {}) {
   const conicity = waist !== null && weight && stature
     ? round((waist / 100) / (0.109 * Math.sqrt(weight / (stature / 100))), 2)
     : null;
-  const trunk = sumFiniteValues([raw.skinfold_subscapular_mm, raw.skinfold_iliac_crest_mm, raw.skinfold_supraspinale_mm, raw.skinfold_abdominal_mm]);
-  const extremities = sumFiniteValues([raw.skinfold_triceps_mm, raw.skinfold_biceps_mm, raw.skinfold_front_thigh_mm, raw.skinfold_medial_calf_mm]);
-  const fatDistribution = trunk !== null && extremities !== null && (trunk + extremities) > 0
-    ? round(trunk / (trunk + extremities), 2)
-    : null;
+  const fatDistribution = fatDistributionSummary(measurement);
+  const previousFatDistribution = previousMeasurement ? fatDistributionSummary(previousMeasurement) : null;
   const rows = [
     {
       label: 'Índice cintura/cadera',
@@ -763,11 +878,11 @@ function buildHealthIndexesHtml(measurement = {}) {
       interpretation: 'Relación entre peso y estatura.',
     },
     {
-      label: 'Distribución grasa tronco/total',
-      value: fatDistribution,
+      label: 'Índice de distribución grasa',
+      value: fatDistribution?.index,
       range: 'seguimiento',
       ok: null,
-      interpretation: 'Proporción de pliegues del tronco sobre pliegues registrados.',
+      interpretation: 'Proporción de grasa medida en tronco respecto al total de pliegues registrados.',
     },
   ].filter((row) => row.value !== null && row.value !== undefined && row.value !== '');
   if (!rows.length) return '';
@@ -775,7 +890,7 @@ function buildHealthIndexesHtml(measurement = {}) {
     <section class="card">
       <h2>Índices de salud</h2>
       <table class="health-table">
-        <thead><tr><th>Índice</th><th>Valor</th><th>Rango</th></tr></thead>
+        <thead><tr><th>Índice</th><th>Valor</th><th>Rango saludable</th></tr></thead>
         <tbody>
           ${rows.map((row) => `
             <tr>
@@ -786,15 +901,7 @@ function buildHealthIndexesHtml(measurement = {}) {
           `).join('')}
         </tbody>
       </table>
-      ${trunk !== null && extremities !== null ? `
-        <div class="fat-distribution">
-          <strong>Distribución corporal de grasa</strong>
-          ${buildDonutSvg([
-            { label: 'Tronco', value: trunk, color: '#fb923c' },
-            { label: 'Extremidades', value: extremities, color: '#14b8a6' },
-          ])}
-        </div>
-      ` : ''}
+      ${buildFatDistributionHtml(fatDistribution, previousFatDistribution)}
     </section>
   `;
 }
@@ -935,7 +1042,7 @@ function buildCalculationTrace(measurement = {}, fieldDefinitions = FIELD_DEFINI
     key: 'bmi',
     label: 'IMC',
     method: 'peso / estatura²',
-    source: 'nutrition-basic-v3',
+    source: 'Cálculo interno ClinicaClick',
     sourceKeys: ['bmi'],
     applied: Number.isFinite(Number(calculatedValues.bmi)),
     inputFields: bmiFields,
@@ -948,7 +1055,7 @@ function buildCalculationTrace(measurement = {}, fieldDefinitions = FIELD_DEFINI
     key: 'waist_hip_ratio',
     label: 'Ratio cintura/cadera',
     method: 'cintura / cadera',
-    source: 'nutrition-basic-v3',
+    source: 'Cálculo interno ClinicaClick',
     sourceKeys: ['waist_hip_ratio'],
     applied: Number.isFinite(Number(calculatedValues.waist_hip_ratio)),
     inputFields: waistHipFields,
@@ -964,7 +1071,7 @@ function buildCalculationTrace(measurement = {}, fieldDefinitions = FIELD_DEFINI
       key: 'skinfold_sum_mm',
       label: 'Suma de pliegues',
       method: 'suma de pliegues registrados',
-      source: 'nutrition-basic-v3',
+      source: 'Cálculo interno ClinicaClick',
       sourceKeys: ['isak_restricted_profile'],
       applied: Number.isFinite(Number(calculatedValues.skinfold_sum_mm)),
       inputFields: skinfoldFields,
@@ -979,7 +1086,7 @@ function buildCalculationTrace(measurement = {}, fieldDefinitions = FIELD_DEFINI
       key: 'corrected_arm_girth_cm',
       label: 'Brazo corregido',
       method: 'brazo flexionado - pliegue tríceps/10',
-      source: 'nutrition-basic-v3',
+      source: 'Cálculo interno ClinicaClick',
       sourceKeys: ['heath_carter_somatotype'],
       applied: Number.isFinite(Number(calculatedValues.corrected_arm_girth_cm)),
       inputFields: correctedArmFields,
@@ -994,7 +1101,7 @@ function buildCalculationTrace(measurement = {}, fieldDefinitions = FIELD_DEFINI
       key: 'corrected_calf_girth_cm',
       label: 'Pantorrilla corregida',
       method: 'pantorrilla - pliegue pantorrilla medial/10',
-      source: 'nutrition-basic-v3',
+      source: 'Cálculo interno ClinicaClick',
       sourceKeys: ['heath_carter_somatotype'],
       applied: Number.isFinite(Number(calculatedValues.corrected_calf_girth_cm)),
       inputFields: correctedCalfFields,
@@ -2065,6 +2172,7 @@ function buildNutritionReportSnapshotPayload(reportData, renderedHtml, generated
     treatment: reportData.treatment,
     appointment: reportData.appointment,
     measurement: reportData.measurement,
+    previous_measurement: reportData.previous_measurement || null,
     report: reportData.report,
     profile_definitions: reportData.profile_definitions,
     field_definitions: reportData.field_definitions,
@@ -2398,6 +2506,11 @@ async function buildNutritionMeasurementReportData(patientIdentifier, measuremen
     error.status = 404;
     throw error;
   }
+  const previousMeasurement = report.comparison?.previous_measurement_id
+    ? measurements
+      .map(measurementToJson)
+      .find((item) => Number(item.id) === Number(report.comparison.previous_measurement_id))
+    : null;
 
   const treatment = measurement.treatment_id && db.Tratamiento
     ? await db.Tratamiento.findByPk(measurement.treatment_id, {
@@ -2427,6 +2540,7 @@ async function buildNutritionMeasurementReportData(patientIdentifier, measuremen
     treatment: treatment?.toJSON ? treatment.toJSON() : treatment,
     appointment: appointment?.toJSON ? appointment.toJSON() : appointment,
     measurement,
+    previous_measurement: previousMeasurement,
     report,
     profile_definitions: profileDefinitions,
     field_definitions: fieldDefinitions,
@@ -2655,21 +2769,29 @@ function rawFieldRangeMarkerHtml(field = {}) {
   const value = finiteNumber(field.value);
   const min = finiteNumber(field.min);
   const max = finiteNumber(field.max);
-  if (value === null || min === null || max === null || max <= min) return '<span class="muted">-</span>';
+  if (value === null || min === null || max === null || max <= min) return '<span class="muted">Sin rango definido</span>';
   const percent = Math.max(0, Math.min(100, ((value - min) / (max - min)) * 100));
+  const inRange = value >= min && value <= max;
   return `
-    <div class="range-track">
-      <span class="range-mid"></span>
-      <i style="left:${escapeHtml(round(percent, 1))}%"></i>
+    <div class="range-wrap">
+      <div class="range-track">
+        <span class="range-mid"></span>
+        <i style="left:${escapeHtml(round(percent, 1))}%"></i>
+      </div>
+      <div class="range-labels"><span>${escapeHtml(min)}</span><span>${escapeHtml(max)}</span></div>
+      <div class="range-status ${inRange ? 'range-ok' : 'range-alert'}">${inRange ? 'Dentro del rango orientativo' : 'Revisar medida'}</div>
     </div>
   `;
 }
 
 function buildNutritionReportHtml(reportData) {
-  const { patient, treatment, appointment, measurement, report, projection, meta } = reportData;
+  const { patient, treatment, appointment, measurement, previous_measurement: previousMeasurement, report, projection, meta } = reportData;
   const profileLabel = nutritionProfileLabel(measurement.profile_code);
   const isFinalDocument = meta?.document_status === 'final';
-  const documentStatusLabel = isFinalDocument ? 'Informe final' : 'Borrador calculado';
+  const documentStatusLabel = isFinalDocument ? '' : 'Borrador calculado';
+  const documentStatusBadgeHtml = documentStatusLabel
+    ? `<span class="pill">${escapeHtml(documentStatusLabel)}</span>`
+    : '';
   const clinicalStorage = meta?.clinical_storage || buildClinicalStoragePolicy({
     storageStrategy: meta?.storage_strategy || meta?.storage,
     status: meta?.document_status,
@@ -2681,9 +2803,9 @@ function buildNutritionReportHtml(reportData) {
   const comparison = report.comparison || { available: false };
   const projectionVisualHtml = buildProjectionVisualHtml(projection);
   const compositionVisualHtml = buildCompositionVisualHtml(report);
-  const distributionVisualHtml = buildDistributionVisualHtml(measurement);
+  const distributionVisualHtml = buildDistributionVisualHtml(measurement, previousMeasurement);
   const somatotypeVisualHtml = buildSomatotypeVisualHtml(report);
-  const healthIndexesHtml = buildHealthIndexesHtml(measurement);
+  const healthIndexesHtml = buildHealthIndexesHtml(measurement, previousMeasurement);
   const calculationProfileHtml = buildCalculationProfileHtml(
     report.calculation_profile || meta?.calculation_profile || CALCULATION_PROFILE,
   );
@@ -2787,7 +2909,7 @@ function buildNutritionReportHtml(reportData) {
     <section class="card">
       <h2>${escapeHtml(group.title)}</h2>
       <table>
-        <thead><tr><th>Medida</th><th>Resultado</th><th>Posición visual</th></tr></thead>
+        <thead><tr><th>Medida</th><th>Resultado</th><th>Rango orientativo</th></tr></thead>
         <tbody>
           ${group.fields.map((field) => `
             <tr>
@@ -2861,7 +2983,6 @@ function buildNutritionReportHtml(reportData) {
     h2 { margin: 0 0 12px; font-size: 15px; }
     .muted { color: #64748b; }
     .pill { display: inline-flex; align-items: center; border-radius: 999px; background: #ecfdf5; color: #047857; padding: 4px 10px; font-size: 11px; font-weight: 700; }
-    .pill-final { background: #eef2ff; color: #3730a3; }
     .summary { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px 18px; margin-top: 16px; }
     .summary dt { color: #64748b; font-size: 11px; text-transform: uppercase; letter-spacing: .04em; }
     .summary dd { margin: 2px 0 0; font-weight: 700; }
@@ -2908,11 +3029,22 @@ function buildNutritionReportHtml(reportData) {
     .legend-item { display: grid; grid-template-columns: 10px 1fr auto; gap: 7px; align-items: center; font-size: 12px; }
     .legend-item span { width: 10px; height: 10px; border-radius: 999px; display: inline-block; }
     .legend-item em { color: #64748b; font-style: normal; font-weight: 800; }
+    .distribution-layout { display: grid; grid-template-columns: minmax(0, 1fr) 160px minmax(0, 1fr); gap: 18px; align-items: center; }
     .distribution-panel h3 { margin: 0 0 10px; color: #0369a1; font-size: 15px; }
-    .distribution-row { display: grid; grid-template-columns: 80px 55px minmax(0, 1fr); align-items: center; gap: 10px; margin: 10px 0; }
-    .distribution-row strong { text-align: right; font-size: 15px; }
-    .distribution-row div { height: 10px; border-radius: 999px; background: #e2e8f0; overflow: hidden; }
-    .distribution-row i { display: block; height: 100%; border-radius: 999px; }
+    .distribution-row { margin: 11px 0; }
+    .distribution-row-head { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; align-items: baseline; margin-bottom: 5px; }
+    .distribution-row-head strong { font-size: 17px; }
+    .distribution-row-head em { grid-column: 1 / -1; width: max-content; border-radius: 999px; padding: 2px 7px; font-style: normal; font-size: 10px; font-weight: 800; }
+    .distribution-track { position: relative; height: 11px; border-radius: 999px; background: #e2e8f0; overflow: visible; }
+    .distribution-track i { display: block; height: 100%; border-radius: 999px; }
+    .distribution-track b { position: absolute; top: -4px; width: 6px; height: 19px; border-radius: 999px; background: #0f172a; transform: translateX(-50%); opacity: .65; }
+    .body-map-wrap { text-align: center; }
+    .body-map { width: 132px; height: 202px; display: block; margin: 0 auto; }
+    .distribution-legend { display: inline-flex; gap: 10px; margin-top: 6px; color: #64748b; font-size: 10px; font-weight: 800; }
+    .distribution-legend span { display: inline-flex; align-items: center; gap: 4px; }
+    .distribution-legend i { width: 10px; height: 10px; border-radius: 999px; display: inline-block; }
+    .legend-current { background: #14b8a6; }
+    .legend-previous { background: #0f172a; opacity: .65; }
     .somato-layout { display: grid; grid-template-columns: minmax(0, 1fr) 190px; gap: 18px; align-items: center; }
     .somato-chart { width: 100%; max-height: 330px; }
     .somato-label { fill: #0f172a; font-size: 13px; font-weight: 850; }
@@ -2925,11 +3057,25 @@ function buildNutritionReportHtml(reportData) {
     .health-ok { background: #16a34a; color: #fff; }
     .health-alert { background: #e11d48; color: #fff; }
     .health-neutral { background: #e2e8f0; color: #0f172a; }
-    .fat-distribution { margin-top: 14px; text-align: center; }
-    .fat-distribution .donut-chart { width: 150px; height: 150px; margin-top: 8px; }
-    .range-track { position: relative; width: 150px; height: 14px; border-radius: 999px; background: linear-gradient(90deg, #fee2e2, #ecfdf5 42%, #ecfdf5 58%, #fee2e2); border: 1px solid #cbd5e1; }
+    .fat-distribution { margin-top: 14px; border-top: 1px solid #e2e8f0; padding-top: 14px; }
+    .fat-distribution-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 8px; }
+    .fat-distribution-head span { border-radius: 999px; padding: 2px 7px; font-size: 10px; font-weight: 800; }
+    .fat-distribution-grid { display: grid; grid-template-columns: 180px minmax(0, 1fr); gap: 18px; align-items: center; }
+    .fat-distribution .donut-chart { width: 150px; height: 150px; }
+    .fat-distribution-values { display: grid; gap: 8px; }
+    .fat-distribution-values div { display: grid; grid-template-columns: 10px 1fr auto; gap: 8px; align-items: center; border: 1px solid #e2e8f0; border-radius: 8px; padding: 8px; }
+    .fat-distribution-values span { width: 10px; height: 10px; border-radius: 999px; display: inline-block; }
+    .fat-distribution-values em { color: #0f172a; font-style: normal; font-weight: 850; }
+    .fat-distribution-values .previous-line { background: #f8fafc; }
+    .fat-distribution-values .previous-line span { background: #0f172a; opacity: .55; }
+    .range-wrap { width: 170px; }
+    .range-track { position: relative; width: 170px; height: 14px; border-radius: 999px; background: linear-gradient(90deg, #fee2e2, #ecfdf5 42%, #ecfdf5 58%, #fee2e2); border: 1px solid #cbd5e1; }
     .range-track i { position: absolute; top: -4px; width: 7px; height: 20px; border-radius: 999px; background: #0284c7; transform: translateX(-50%); }
     .range-mid { position: absolute; left: 50%; top: 0; bottom: 0; border-left: 1px solid rgba(15, 23, 42, .22); }
+    .range-labels { display: flex; justify-content: space-between; color: #64748b; font-size: 9px; margin-top: 2px; }
+    .range-status { margin-top: 2px; font-size: 10px; font-weight: 800; }
+    .range-ok { color: #047857; }
+    .range-alert { color: #b91c1c; }
     .calculation-profile-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; margin-top: 12px; }
     .calculation-profile-grid div { border: 1px solid #e2e8f0; border-radius: 8px; padding: 10px; background: #fff; }
     .calculation-profile-grid dt { color: #64748b; font-size: 11px; text-transform: uppercase; letter-spacing: .04em; }
@@ -2950,7 +3096,7 @@ function buildNutritionReportHtml(reportData) {
         <h1>${escapeHtml(report.title)}</h1>
         <p class="muted">${escapeHtml(patient.clinic_name || 'Clínica')} · Generado el ${escapeHtml(formatDate(meta.generated_at))}</p>
       </div>
-      <span class="pill ${isFinalDocument ? 'pill-final' : ''}">${escapeHtml(documentStatusLabel)} · ${escapeHtml(meta.formula_version)}</span>
+      ${documentStatusBadgeHtml}
     </header>
     <section class="card">
       <dl class="summary">
@@ -2959,7 +3105,6 @@ function buildNutritionReportHtml(reportData) {
         <div><dt>Medición</dt><dd>${escapeHtml(formatDate(measurement.measured_at))}</dd></div>
         <div><dt>Tratamiento</dt><dd>${escapeHtml(displayNutritionText(treatment?.nombre) || 'No asociado')}</dd></div>
         <div><dt>Cita</dt><dd>${escapeHtml(appointment?.inicio ? formatDate(appointment.inicio) : 'No asociada')}</dd></div>
-        <div><dt>Informe</dt><dd>${escapeHtml(report.id)}</dd></div>
       </dl>
     </section>
     ${projectionVisualHtml}
@@ -2978,7 +3123,7 @@ function buildNutritionReportHtml(reportData) {
     ${formulaReferencesHtml}
     ${rawHtml}
     <footer>
-      ${escapeHtml(documentStatusLabel)} desde medición #${escapeHtml(measurement.id)} con ${escapeHtml(meta.formula_version)}. ${escapeHtml(clinicalStorage.detail)}
+      Documento clínico privado. Calculado por ClinicaClick y generado bajo demanda para uso profesional.
     </footer>
   </main>
 </body>

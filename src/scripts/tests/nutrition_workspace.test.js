@@ -361,7 +361,8 @@ function run() {
   assert.match(html, /Distribución adiposa y muscular/);
   assert.match(html, /Somatocarta/);
   assert.match(html, /Índices de salud/);
-  assert.match(html, /Posición visual/);
+  assert.match(html, /Rango orientativo/);
+  assert.doesNotMatch(html, /Posición visual/);
   assert.match(html, /Peso estimado 8 semanas/);
   assert.match(html, /84 kg/);
   assert.match(html, /Suma de pliegues estimada 8 semanas/);
@@ -379,7 +380,7 @@ function run() {
   assert.match(html, /Cinco componentes Kerr-Ross/);
   assert.match(html, /Fraccionamiento Kerr-Ross 5 componentes/);
   assert.match(html, /Somatotipo Heath-Carter/);
-  assert.match(html, /Informe calculado privado/);
+  assert.match(html, /Documento clínico privado/);
   assert.doesNotMatch(html, /148 kg/);
   const finalHtml = __testing.buildNutritionReportHtml({
     patient: { name: 'Paciente Test', clinic_name: 'Clinica Test' },
@@ -396,9 +397,12 @@ function run() {
       document_status: 'final',
     },
   });
-  assert.match(finalHtml, /Informe final/);
-  assert.match(finalHtml, /Snapshot final privado/);
-  assert.match(finalHtml, /no persistido en PUBLIC_MEDIA/);
+  assert.doesNotMatch(finalHtml, /Informe final/);
+  assert.doesNotMatch(finalHtml, /<dt>Estado<\/dt>/);
+  assert.match(finalHtml, /Documento clínico privado/);
+  assert.doesNotMatch(finalHtml, /Snapshot final privado/);
+  assert.doesNotMatch(finalHtml, /nutrition-basic-v3/);
+  assert.doesNotMatch(finalHtml, /PUBLIC_MEDIA/);
 
   const snapshotPayload = __testing.buildNutritionReportSnapshotPayload({
     patient: { id: 1, name: 'Paciente Test', clinic_id: 1, clinic_name: 'Clinica Test' },
@@ -417,7 +421,7 @@ function run() {
     },
   }, html, '2026-02-26T11:00:00.000Z');
   assert.equal(snapshotPayload.snapshot.kind, 'nutrition_measurement_report');
-  assert.equal(snapshotPayload.snapshot.snapshot_version, 6);
+  assert.equal(snapshotPayload.snapshot.snapshot_version, 7);
   assert.equal(snapshotPayload.snapshot.report.calculation_profile.code, CALCULATION_PROFILE.code);
   assert.equal(snapshotPayload.snapshot.measurement.id, 2);
   assert.equal(snapshotPayload.snapshot.report.measurement_id, 2);
@@ -436,8 +440,9 @@ function run() {
     status: 'final',
   });
   assert.equal(finalStorage.document_status, 'final');
-  assert.equal(finalStorage.label, 'Snapshot final privado');
+  assert.equal(finalStorage.label, 'Informe clínico cerrado');
   assert.equal(finalStorage.private_binary_storage, 'pending');
+  assert.doesNotMatch(finalStorage.detail, /Snapshot|PUBLIC_MEDIA/);
 
   const finalStorageWithPdf = __testing.buildClinicalStoragePolicy({
     storageStrategy: 'final_json_snapshot_printable_on_demand',
@@ -449,7 +454,8 @@ function run() {
   assert.equal(finalStorageWithPdf.pdf_persisted, true);
   assert.equal(finalStorageWithPdf.pdf_asset_id, 42);
   assert.equal(finalStorageWithPdf.private_binary_storage, 'clinical_private_asset');
-  assert.match(finalStorageWithPdf.detail, /asset clinico privado/);
+  assert.match(finalStorageWithPdf.detail, /archivo clínico privado/);
+  assert.doesNotMatch(finalStorageWithPdf.detail, /Snapshot|PUBLIC_MEDIA/);
   assert.equal(
     __testing.displayNutritionText('Estudio antropométrico ISAK'),
     'Estudio antropométrico completo',
