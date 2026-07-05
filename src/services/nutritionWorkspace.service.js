@@ -352,6 +352,8 @@ function displayNutritionText(value) {
   const text = String(value || '').trim();
   if (!text) return '';
   return text
+    .replace(/Informe (?:de )?antropometr[ií]a ISAK/gi, 'Informe de antropometría completa')
+    .replace(/Informe antropom[eé]trico ISAK/gi, 'Informe de antropometría completa')
     .replace(/Estudio antropom[eé]trico ISAK/gi, 'Estudio antropométrico completo')
     .replace(/Antropometr[ií]a ISAK/gi, 'Antropometría avanzada')
     .replace(/Estudio ISAK/gi, 'Estudio antropométrico completo')
@@ -1662,7 +1664,7 @@ function nutritionReportSnapshotToJson(row) {
     appointment_id: plain.appointment_id,
     treatment_id: plain.treatment_id,
     report_type: plain.report_type,
-    title: plain.title,
+    title: displayNutritionText(plain.title) || plain.title,
     status: plain.status,
     formula_version: plain.formula_version,
     snapshot_hash: plain.snapshot_hash,
@@ -1870,8 +1872,8 @@ async function getNutritionTreatments({ clinicId, groupId }) {
     const plain = row.toJSON();
     return {
       id: plain.id_tratamiento,
-      name: plain.nombre,
-      category: plain.categoria,
+      name: displayNutritionText(plain.nombre) || plain.nombre,
+      category: displayNutritionText(plain.categoria) || plain.categoria,
       duration_min: plain.duracion_min,
       price_base: plain.precio_base,
       clinical_config: plain.clinical_config || null,
@@ -2838,5 +2840,7 @@ module.exports = {
     buildPatientFormulaContext,
     calculateBodyComposition,
     calculateKerrRossFiveComponent,
+    displayNutritionText,
+    nutritionReportSnapshotToJson,
   },
 };

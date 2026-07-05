@@ -446,6 +446,24 @@ function run() {
   assert.equal(finalStorageWithPdf.pdf_asset_id, 42);
   assert.equal(finalStorageWithPdf.private_binary_storage, 'clinical_private_asset');
   assert.match(finalStorageWithPdf.detail, /asset clinico privado/);
+  assert.equal(
+    __testing.displayNutritionText('Estudio antropométrico ISAK'),
+    'Estudio antropométrico completo',
+  );
+  assert.equal(
+    __testing.nutritionReportSnapshotToJson({
+      id: 99,
+      measurement_id: 2,
+      patient_id: 1,
+      clinic_id: 1,
+      report_type: 'express_isak',
+      title: 'Informe antropometría ISAK',
+      status: 'final',
+      snapshot_hash: 'abc',
+      storage_strategy: 'final_json_snapshot_printable_on_demand',
+    }).title,
+    'Informe de antropometría completa',
+  );
 
   console.log('nutrition_workspace.test ok');
 }
