@@ -6,6 +6,7 @@ const ctrl = require('../controllers/especialidades.controller');
 // Contratos de areas medicas consumidos por catalogo/agenda/workspaces
 router.get('/area-contracts', ctrl.getMedicalAreaContracts);
 router.get('/area-contracts/:code', ctrl.getMedicalAreaContract);
+router.put('/area-contracts/:code', ctrl.updateMedicalAreaContract);
 
 // Especialidades de sistema (solo lectura)
 router.get('/sistema', ctrl.getEspecialidadesSistema);

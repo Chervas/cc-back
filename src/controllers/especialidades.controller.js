@@ -31,17 +31,44 @@ async function ensureDisciplinaEnClinica(clinicaId, disciplina) {
 // ============ ESPECIALIDADES DE SISTEMA ============
 
 exports.getMedicalAreaContracts = asyncHandler(async (req, res) => {
-    res.json(medicalAreaContractsService.getMedicalAreaContracts());
+    res.json(await medicalAreaContractsService.getMedicalAreaContracts());
 });
 
 exports.getMedicalAreaContract = asyncHandler(async (req, res) => {
     const code = String(req.params.code || '').trim().toLowerCase();
     res.json({
         version: medicalAreaContractsService.VERSION,
-        source: 'backend-static',
+        source: 'backend-db',
         fallback_code: medicalAreaContractsService.FALLBACK_CODE,
-        contract: medicalAreaContractsService.getContractForArea(code)
+        contract: await medicalAreaContractsService.getContractForArea(code)
     });
+});
+
+exports.updateMedicalAreaContract = asyncHandler(async (req, res) => {
+    const code = String(req.params.code || '').trim().toLowerCase();
+    if (!code) {
+        return res.status(400).json({ message: 'code es obligatorio' });
+    }
+
+    try {
+        const updatedBy = Number(req.userData?.userId || req.user?.id || req.body?.updated_by || null) || null;
+        const contract = await medicalAreaContractsService.upsertMedicalAreaContract(
+            code,
+            req.body?.contract || req.body,
+            updatedBy
+        );
+        return res.json({
+            version: medicalAreaContractsService.VERSION,
+            source: 'backend-db',
+            fallback_code: medicalAreaContractsService.FALLBACK_CODE,
+            contract
+        });
+    } catch (error) {
+        if (error.statusCode === 503) {
+            return res.status(503).json({ message: 'La tabla de contratos de áreas médicas no está disponible todavía.' });
+        }
+        throw error;
+    }
 });
 
 // Listar especialidades de sistema (solo lectura para clínicas)

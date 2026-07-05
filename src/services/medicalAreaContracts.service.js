@@ -2,6 +2,8 @@
 
 const FALLBACK_CODE = 'general';
 const VERSION = 'medical-area-contracts-v1';
+const db = require('../../models');
+const MedicalAreaContract = db.MedicalAreaContract;
 
 const TREATMENT_AREA_PROFILES = {
   dental: {
@@ -428,7 +430,155 @@ function getKnownCodes() {
   ])).sort((a, b) => a.localeCompare(b, 'es'));
 }
 
-function getContractForArea(code) {
+function cloneJson(value) {
+  return JSON.parse(JSON.stringify(value));
+}
+
+function parseStoredContract(value) {
+  if (!value) return null;
+  if (typeof value === 'object') return value;
+  try {
+    return JSON.parse(value);
+  } catch (error) {
+    return null;
+  }
+}
+
+function cleanString(value, fallback = '') {
+  const cleaned = String(value ?? '').trim();
+  return cleaned || fallback;
+}
+
+function normalizeStringArray(value, fallback = []) {
+  if (!Array.isArray(value)) {
+    return cloneJson(fallback);
+  }
+
+  const unique = [];
+  value.forEach((item) => {
+    const cleaned = cleanString(item);
+    if (cleaned && !unique.includes(cleaned)) {
+      unique.push(cleaned);
+    }
+  });
+
+  return unique.length ? unique : cloneJson(fallback);
+}
+
+function normalizeApplicationOptions(value, fallback = []) {
+  if (!Array.isArray(value)) {
+    return cloneJson(fallback);
+  }
+
+  const options = value
+    .map((option) => ({
+      value: cleanString(option?.value || option?.code),
+      label: cleanString(option?.label),
+    }))
+    .filter((option) => option.value && option.label);
+
+  return options.length ? options : cloneJson(fallback);
+}
+
+function normalizeProfile(value, fallback) {
+  const source = value && typeof value === 'object' ? value : {};
+  return {
+    label: cleanString(source.label, fallback.label),
+    hint: cleanString(source.hint, fallback.hint),
+    defaultCategory: cleanString(source.defaultCategory, fallback.defaultCategory),
+    defaultDuration: Number.isFinite(Number(source.defaultDuration))
+      ? Math.max(1, Number.parseInt(String(source.defaultDuration), 10))
+      : fallback.defaultDuration,
+    defaultSessions: Number.isFinite(Number(source.defaultSessions))
+      ? Math.max(1, Number.parseInt(String(source.defaultSessions), 10))
+      : fallback.defaultSessions,
+    supportsPiece: source.supportsPiece === undefined ? !!fallback.supportsPiece : !!source.supportsPiece,
+    supportsLaboratory: source.supportsLaboratory === undefined ? !!fallback.supportsLaboratory : !!source.supportsLaboratory,
+    applicationHint: cleanString(source.applicationHint, fallback.applicationHint),
+    applicationOptions: normalizeApplicationOptions(source.applicationOptions, fallback.applicationOptions),
+  };
+}
+
+function normalizeContractSections(value, fallback = []) {
+  if (!Array.isArray(value)) {
+    return cloneJson(fallback);
+  }
+
+  const sections = value
+    .map((section, index) => {
+      const fallbackSection = fallback[index] || fallback[0] || {};
+      return {
+        title: cleanString(section?.title, fallbackSection.title || 'Sección'),
+        icon: cleanString(section?.icon, fallbackSection.icon || 'heroicons_outline:squares-2x2'),
+        body: cleanString(section?.body, fallbackSection.body || ''),
+        chips: normalizeStringArray(section?.chips, fallbackSection.chips || []),
+      };
+    })
+    .filter((section) => section.title && section.body);
+
+  return sections.length ? sections : cloneJson(fallback);
+}
+
+function normalizeSetupSteps(value, fallback = []) {
+  const validSections = new Set(['service', 'pricing', 'clinical', 'nutrition', 'agenda']);
+  if (!Array.isArray(value)) {
+    return cloneJson(fallback);
+  }
+
+  const steps = value
+    .map((step, index) => {
+      const fallbackStep = fallback[index] || fallback[0] || {};
+      const requestedSection = cleanString(step?.section, fallbackStep.section || 'service');
+      return {
+        title: cleanString(step?.title, fallbackStep.title || 'Paso'),
+        icon: cleanString(step?.icon, fallbackStep.icon || 'heroicons_outline:tag'),
+        body: cleanString(step?.body, fallbackStep.body || ''),
+        section: validSections.has(requestedSection)
+          ? requestedSection
+          : (validSections.has(fallbackStep.section) ? fallbackStep.section : 'service'),
+      };
+    })
+    .filter((step) => step.title && step.body);
+
+  return steps.length ? steps : cloneJson(fallback);
+}
+
+function normalizeNutritionServiceKindOptions(value, fallback = []) {
+  if (!Array.isArray(value)) {
+    return cloneJson(fallback);
+  }
+
+  const options = value
+    .map((option) => ({
+      value: cleanString(option?.value),
+      label: cleanString(option?.label),
+      hint: cleanString(option?.hint),
+      icon: cleanString(option?.icon, 'heroicons_outline:clipboard-document-list'),
+      recommendedProfile: cleanString(option?.recommendedProfile, 'none'),
+      profileLabel: cleanString(option?.profileLabel),
+    }))
+    .filter((option) => option.value && option.label && option.hint);
+
+  return options.length ? options : cloneJson(fallback);
+}
+
+function normalizeNutritionMeasurementProfileOptions(value, fallback = []) {
+  if (!Array.isArray(value)) {
+    return cloneJson(fallback);
+  }
+
+  const options = value
+    .map((option) => ({
+      value: cleanString(option?.value),
+      label: cleanString(option?.label),
+      hint: cleanString(option?.hint),
+    }))
+    .filter((option) => option.value && option.label && option.hint);
+
+  return options.length ? options : cloneJson(fallback);
+}
+
+function getBaseContractForArea(code) {
   const normalized = normalizeCode(code);
   const profile = TREATMENT_AREA_PROFILES[normalized] || TREATMENT_AREA_PROFILES[FALLBACK_CODE];
   return {
@@ -442,23 +592,140 @@ function getContractForArea(code) {
   };
 }
 
-function getMedicalAreaContracts() {
+function normalizeContractPayload(code, payload = {}) {
+  const base = getBaseContractForArea(code);
+  const source = payload?.contract && typeof payload.contract === 'object' ? payload.contract : payload;
+  const normalizedCode = normalizeCode(source?.code || code);
+  const normalizedBase = normalizedCode === base.code ? base : getBaseContractForArea(normalizedCode);
+  return {
+    code: normalizedCode,
+    profile: normalizeProfile(source?.profile, normalizedBase.profile),
+    service_examples: normalizeStringArray(source?.service_examples, normalizedBase.service_examples),
+    contract_sections: normalizeContractSections(source?.contract_sections, normalizedBase.contract_sections),
+    setup_steps: normalizeSetupSteps(source?.setup_steps, normalizedBase.setup_steps),
+    nutrition_service_kind_options: normalizedCode === 'nutricion'
+      ? normalizeNutritionServiceKindOptions(source?.nutrition_service_kind_options, normalizedBase.nutrition_service_kind_options)
+      : [],
+    nutrition_measurement_profile_options: normalizedCode === 'nutricion'
+      ? normalizeNutritionMeasurementProfileOptions(source?.nutrition_measurement_profile_options, normalizedBase.nutrition_measurement_profile_options)
+      : [],
+  };
+}
+
+function mergeContract(base, override) {
+  if (!override) {
+    return cloneJson(base);
+  }
+  return normalizeContractPayload(base.code, {
+    ...base,
+    ...override,
+    profile: { ...base.profile, ...(override.profile || {}) },
+  });
+}
+
+function isMissingTableError(error) {
+  const message = `${error?.name || ''} ${error?.message || ''} ${error?.parent?.code || ''}`;
+  return /no such table|doesn't exist|ER_NO_SUCH_TABLE|Unknown table/i.test(message);
+}
+
+async function getOverrideRows() {
+  if (!MedicalAreaContract) {
+    return [];
+  }
+
+  try {
+    return await MedicalAreaContract.findAll({
+      where: { active: true },
+      attributes: ['code', 'contract_json', 'version', 'updated_at'],
+      raw: true,
+    });
+  } catch (error) {
+    if (isMissingTableError(error)) {
+      return [];
+    }
+    throw error;
+  }
+}
+
+async function getOverrideMap() {
+  const rows = await getOverrideRows();
+  const map = new Map();
+  rows.forEach((row) => {
+    const code = normalizeCode(row.code);
+    const contract = parseStoredContract(row.contract_json);
+    if (contract) {
+      map.set(code, contract);
+    }
+  });
+  return map;
+}
+
+async function getContractForArea(code) {
+  const normalized = normalizeCode(code);
+  const base = getBaseContractForArea(normalized);
+  const overrides = await getOverrideMap();
+  return mergeContract(base, overrides.get(normalized));
+}
+
+async function getMedicalAreaContracts() {
+  const overrides = await getOverrideMap();
   const contracts = {};
-  getKnownCodes().forEach((code) => {
-    contracts[code] = getContractForArea(code);
+  const codes = new Set([...getKnownCodes(), ...Array.from(overrides.keys())]);
+  Array.from(codes).sort((a, b) => a.localeCompare(b, 'es')).forEach((code) => {
+    contracts[code] = mergeContract(getBaseContractForArea(code), overrides.get(code));
   });
 
   return {
     version: VERSION,
-    source: 'backend-static',
+    source: overrides.size ? 'backend-db' : 'backend-static',
     fallback_code: FALLBACK_CODE,
     contracts,
   };
 }
 
+async function upsertMedicalAreaContract(code, payload, updatedBy = null) {
+  if (!MedicalAreaContract) {
+    const error = new Error('MedicalAreaContract model is not available');
+    error.statusCode = 503;
+    throw error;
+  }
+
+  const normalized = normalizeContractPayload(code, payload);
+
+  try {
+    const existing = await MedicalAreaContract.findOne({ where: { code: normalized.code } });
+    if (existing) {
+      await existing.update({
+        contract_json: normalized,
+        version: 'custom-v1',
+        active: true,
+        updated_by: updatedBy || null,
+      });
+    } else {
+      await MedicalAreaContract.create({
+        code: normalized.code,
+        contract_json: normalized,
+        version: 'custom-v1',
+        active: true,
+        updated_by: updatedBy || null,
+      });
+    }
+  } catch (error) {
+    if (isMissingTableError(error)) {
+      error.statusCode = 503;
+    }
+    throw error;
+  }
+
+  return mergeContract(getBaseContractForArea(normalized.code), normalized);
+}
+
 module.exports = {
   VERSION,
   FALLBACK_CODE,
+  getBaseContractForArea,
   getContractForArea,
   getMedicalAreaContracts,
+  normalizeContractPayload,
+  upsertMedicalAreaContract,
 };

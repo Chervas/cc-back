@@ -113,11 +113,12 @@ Endpoints reales:
 | `GET /api/pacientes/:id/nutrition-measurements/:measurementId/report/pdf` | Operativo V1 dev | Genera el PDF bajo demanda con Chromium headless, sin persistirlo como fichero clinico. |
 | `GET /api/especialidades/area-contracts` | Operativo V1 dev | Devuelve contrato versionado por area medica para catalogo, agenda y workspaces: perfil de tratamiento, ejemplos de servicio, pasos de alta, secciones de contrato y opciones especificas de Nutricion. |
 | `GET /api/especialidades/area-contracts/:code` | Operativo V1 dev | Devuelve el contrato de un area concreta con fallback `general`. |
+| `PUT /api/especialidades/area-contracts/:code` | Operativo V1 dev | Persiste override del contrato de un area medica en `MedicalAreaContracts` manteniendo fallback al contrato base. |
 
 Contrato:
 
 - `Tratamientos.clinical_config` guarda configuracion clinica por area. Para Nutricion se usa `clinical_config.nutrition.service_kind` (`consultation`, `follow_up`, `quick_measurement`, `isak_study`, `nutrition_plan_pack`) y `clinical_config.nutrition.measurement_profile_code` con `none`, `quick` o `express_isak`.
-- El contrato de area medica se sirve desde backend como `medical-area-contracts-v1`. De momento es configuracion estatica versionada, no tabla editable; el front conserva fallback local para tolerar runtimes sin endpoint mientras se migra a contrato persistente.
+- El contrato de area medica se sirve desde backend como `medical-area-contracts-v1`. La tabla `MedicalAreaContracts` permite overrides por `code`; si no hay override o la tabla aun no existe en un runtime, el servicio vuelve al contrato base estatico. El front conserva fallback local para tolerar runtimes sin endpoint.
 - `PatientNutritionMeasurements` guarda mediciones por `patient_id`, `clinic_id`, `professional_id`, `appointment_id`, `treatment_id`, `profile_code`, `raw_values_json`, `calculated_values_json`, `formula_version` y `quality_flags_json`.
 - El motor `nutrition-basic-v1` calcula en backend IMC, ratio cintura/cadera, suma de pliegues, perimetros corregidos, somatotipo Heath-Carter cuando hay datos suficientes y proyeccion lineal simple con las ultimas dos mediciones.
 - Informes V1 son snapshots derivados de mediciones. El HTML/PDF se genera bajo demanda desde la medicion y no se persiste. Storage clinico privado queda pendiente. No usar `PUBLIC_MEDIA` para informes, fotos clinicas ni datos antropometricos identificables.
