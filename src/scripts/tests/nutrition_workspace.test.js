@@ -363,7 +363,7 @@ function run() {
   assert.match(html, /Suma de pliegues estimada 8 semanas/);
   assert.match(html, /Grasa estimada 8 semanas/);
   assert.match(html, /Perfil de cálculo aplicado/);
-  assert.match(html, /Perfil ClinicaClick ISAK v3/);
+  assert.match(html, /Perfil ClinicaClick Antropometría v3/);
   assert.match(html, /Fuentes de cálculo/);
   assert.match(html, /Trazabilidad de cálculo/);
   assert.match(html, /Aplicado/);
@@ -413,7 +413,7 @@ function run() {
     },
   }, html, '2026-02-26T11:00:00.000Z');
   assert.equal(snapshotPayload.snapshot.kind, 'nutrition_measurement_report');
-  assert.equal(snapshotPayload.snapshot.snapshot_version, 4);
+  assert.equal(snapshotPayload.snapshot.snapshot_version, 5);
   assert.equal(snapshotPayload.snapshot.report.calculation_profile.code, CALCULATION_PROFILE.code);
   assert.equal(snapshotPayload.snapshot.measurement.id, 2);
   assert.equal(snapshotPayload.snapshot.report.measurement_id, 2);

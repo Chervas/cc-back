@@ -79,8 +79,8 @@ function assertNutritionContract(contract) {
   assert.equal(serviceKinds.get('follow_up')?.defaultCategory, 'Nutrición clínica');
   assert.equal(serviceKinds.get('quick_measurement')?.recommendedProfile, 'quick');
   assert.equal(serviceKinds.get('isak_study')?.recommendedProfile, 'express_isak');
-  assert.equal(serviceKinds.get('isak_study')?.recommendedName, 'Estudio antropométrico ISAK');
-  assert.equal(serviceKinds.get('isak_study')?.defaultCategory, 'Antropometría ISAK');
+  assert.equal(serviceKinds.get('isak_study')?.recommendedName, 'Estudio antropométrico completo');
+  assert.equal(serviceKinds.get('isak_study')?.defaultCategory, 'Antropometría avanzada');
   assert.equal(serviceKinds.get('isak_study')?.defaultGenerateReport, true);
   assert.equal(serviceKinds.get('nutrition_plan_pack')?.recommendedProfile, 'quick');
   assert.equal(serviceKinds.get('nutrition_plan_pack')?.defaultSessions, 4);
@@ -99,7 +99,7 @@ function assertNutritionContract(contract) {
 
   assert.equal(contract.setup_steps.some((step) => step.section === 'nutrition'), true);
   assert.equal(
-    contract.contract_sections.some((section) => section.chips.includes('Perfil r\u00e1pido')),
+    contract.contract_sections.some((section) => section.chips.includes('Express')),
     true,
   );
 }
@@ -117,7 +117,7 @@ function run() {
     nutrition_service_kind_options: [
       {
         value: 'isak_study',
-        label: 'ISAK custom',
+        label: 'Perfil completo custom',
         hint: 'Custom sin defaults',
         recommendedProfile: 'express_isak',
       },
@@ -128,7 +128,7 @@ function run() {
   assert.equal(normalized.service_examples.includes('Valoraci\u00f3n nutricional'), true);
   assert.equal(
     byValue(normalized.nutrition_service_kind_options).get('isak_study')?.recommendedName,
-    'Estudio antropom\u00e9trico ISAK',
+    'Estudio antropom\u00e9trico completo',
   );
 
   const normalizedWithRemovedRequired = normalizeContractPayload('nutricion', {

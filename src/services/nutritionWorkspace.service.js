@@ -13,7 +13,7 @@ const clinicalPrivateStorage = require('./clinicalPrivateStorage.service');
 const { Op } = db.Sequelize;
 const execFileAsync = promisify(execFile);
 const FORMULA_VERSION = 'nutrition-basic-v3';
-const NUTRITION_REPORT_SNAPSHOT_VERSION = 4;
+const NUTRITION_REPORT_SNAPSHOT_VERSION = 5;
 const NUTRITION_REPORT_CURRENT_STATUSES = ['final', 'active'];
 const DEFAULT_CHROMIUM_PATH = '/home/ubuntu/.cache/clinicaclick-browsers/chrome-headless-shell/linux-148.0.7778.56/chrome-headless-shell-linux64/chrome-headless-shell';
 
@@ -28,9 +28,9 @@ const FORMULA_REFERENCES = [
   },
   {
     key: 'isak_restricted_profile',
-    label: 'Perfil restringido ISAK',
+    label: 'Perfil antropométrico completo',
     description: 'Estructura de medición antropométrica restringida: medidas base, pliegues, perímetros y diámetros.',
-    source: 'Australian Institute of Sport · ISAK Level 1 Restricted Profile',
+    source: 'Australian Institute of Sport anthropometry resources',
     url: 'https://www.ausport.gov.au/ais/performance-support/anthropometry',
     profiles: ['express_isak'],
   },
@@ -85,10 +85,60 @@ const FORMULA_REFERENCES = [
 ];
 
 const FORMULA_REFERENCES_BY_KEY = new Map(FORMULA_REFERENCES.map((reference) => [reference.key, reference]));
+const FAT_MASS_EQUATION_OPTIONS = [
+  {
+    code: 'durnin_womersley_siri',
+    label: 'Durnin-Womersley + Siri',
+    status: 'active',
+    source_reference_keys: ['durnin_womersley_body_density', 'siri_body_fat'],
+  },
+  {
+    code: 'faulkner_1966',
+    label: 'Faulkner (1966)',
+    status: 'planned',
+    source_reference_keys: [],
+  },
+  {
+    code: 'jackson_pollock_1975',
+    label: 'Jackson y Pollock (1975)',
+    status: 'planned',
+    source_reference_keys: [],
+  },
+  {
+    code: 'katch_mcardle_1973',
+    label: 'Katch-McArdle (1973)',
+    status: 'planned',
+    source_reference_keys: [],
+  },
+  {
+    code: 'sloan_1962',
+    label: 'Sloan (1962)',
+    status: 'planned',
+    source_reference_keys: [],
+  },
+  {
+    code: 'withers_1987',
+    label: 'Withers (1987)',
+    status: 'planned',
+    source_reference_keys: [],
+  },
+  {
+    code: 'yuhasz_carter_1982',
+    label: 'Yuhasz modificado por Carter (1982)',
+    status: 'planned',
+    source_reference_keys: [],
+  },
+  {
+    code: 'slaughter_1988',
+    label: 'Slaughter (1988)',
+    status: 'planned',
+    source_reference_keys: [],
+  },
+];
 const CALCULATION_PROFILE = {
-  code: 'clinicaclick-isak-v3',
-  label: 'Perfil ClinicaClick ISAK v3',
-  description: 'Perfil de cálculo aplicado por bloques: seguimiento básico, antropometría ISAK, composición corporal y proyección.',
+  code: 'clinicaclick-anthropometry-v3',
+  label: 'Perfil ClinicaClick Antropometría v3',
+  description: 'Perfil de cálculo aplicado por bloques: seguimiento express, antropometría completa, composición corporal y proyección.',
   strategy: 'calculation_blocks',
   fat_mass_model: {
     code: 'durnin_womersley_siri',
@@ -96,6 +146,7 @@ const CALCULATION_PROFILE = {
     role: 'Masa grasa estimada',
     source_reference_keys: ['durnin_womersley_body_density', 'siri_body_fat'],
   },
+  fat_mass_equations: FAT_MASS_EQUATION_OPTIONS,
   automatic_models: [
     {
       code: 'heath_carter_somatotype',
@@ -297,6 +348,18 @@ function escapeHtml(value) {
     .replace(/'/g, '&#039;');
 }
 
+function displayNutritionText(value) {
+  const text = String(value || '').trim();
+  if (!text) return '';
+  return text
+    .replace(/Estudio antropom[eé]trico ISAK/gi, 'Estudio antropométrico completo')
+    .replace(/Antropometr[ií]a ISAK/gi, 'Antropometría avanzada')
+    .replace(/Estudio ISAK/gi, 'Estudio antropométrico completo')
+    .replace(/Express\/ISAK/gi, 'Completa')
+    .replace(/express\/ISAK/gi, 'Completa')
+    .replace(/\bisak\b/gi, 'antropometría');
+}
+
 function hashSnapshot(payload) {
   return crypto
     .createHash('sha256')
@@ -348,11 +411,37 @@ function formatDelta(metric = {}) {
   return `${sign}${delta}${metric.unit ? ` ${metric.unit}` : ''}`;
 }
 
+function formatDeltaWithPercent(metric = {}) {
+  const delta = finiteNumber(metric.delta);
+  if (delta === null) return '-';
+  const previous = finiteNumber(metric.previous_value);
+  const sign = delta > 0 ? '+' : '';
+  const percent = previous !== null && previous !== 0
+    ? ` (${sign}${round((delta / previous) * 100, 1)}%)`
+    : '';
+  return `${sign}${delta}${metric.unit ? ` ${metric.unit}` : ''}${percent}`;
+}
+
+function metricTrendClass(metric = {}) {
+  if (metric.delta === null || metric.delta === undefined) return '';
+  const decreasePreferred = ['weight_kg', 'bmi', 'waist_cm', 'skinfold_sum_mm', 'body_fat_percent', 'fat_mass_kg', 'adipose_mass_kg'];
+  const delta = finiteNumber(metric.delta);
+  if (delta === null || Math.abs(delta) < 0.0001) return 'delta-stable';
+  const improved = decreasePreferred.includes(metric.key) ? delta < 0 : delta > 0;
+  return improved ? 'delta-good' : 'delta-bad';
+}
+
 function formatProjectionMetricLabel(metric = {}) {
   const label = String(metric.label || 'Métrica').trim();
   return /estimad[ao]$/i.test(label)
     ? `${label} 8 semanas`
     : `${label} estimada 8 semanas`;
+}
+
+function nutritionProfileLabel(profileCode, { sentenceCase = false } = {}) {
+  if (profileCode === 'express_isak') return sentenceCase ? 'Completa' : 'Completa';
+  if (profileCode === 'quick') return sentenceCase ? 'Express' : 'Express';
+  return sentenceCase ? 'Sin medición' : 'Sin medición';
 }
 
 function finiteNumber(value) {
@@ -468,14 +557,17 @@ function buildCompositionVisualHtml(report) {
 }
 
 function buildCalculationProfileHtml(profile = CALCULATION_PROFILE) {
+  const activeEquation = profile.fat_mass_model || FAT_MASS_EQUATION_OPTIONS.find((item) => item.status === 'active') || null;
+  const plannedEquations = (profile.fat_mass_equations || FAT_MASS_EQUATION_OPTIONS)
+    .filter((item) => item.code !== activeEquation?.code);
   return `
     <section class="card muted-card">
       <h2>Perfil de cálculo aplicado</h2>
       <p><strong>${escapeHtml(profile.label)}</strong>. ${escapeHtml(profile.description)}</p>
       <div class="calculation-profile-grid">
         <div>
-          <dt>Masa grasa</dt>
-          <dd>${escapeHtml(profile.fat_mass_model?.label || '-')}</dd>
+          <dt>Ecuación activa de masa grasa</dt>
+          <dd>${escapeHtml(activeEquation?.label || '-')}</dd>
         </div>
         ${(profile.automatic_models || []).map((item) => `
           <div>
@@ -484,6 +576,9 @@ function buildCalculationProfileHtml(profile = CALCULATION_PROFILE) {
           </div>
         `).join('')}
       </div>
+      ${plannedEquations.length ? `
+        <p class="muted small-note">Próximas ecuaciones seleccionables por informe: ${escapeHtml(plannedEquations.map((item) => item.label).join(', '))}. Hoy el motor recalcula masa grasa con la ecuación activa y mantiene Kerr-Ross, Heath-Carter y proyección como bloques automáticos.</p>
+      ` : ''}
     </section>
   `;
 }
@@ -1465,8 +1560,8 @@ function buildReportNarrative(measurement, comparison, metrics = []) {
 
   if (measurement.profile_code === 'express_isak') {
     notes.push(skinfoldCount >= 8
-      ? 'Perfil express/ISAK con los 8 pliegues del perfil restringido registrados.'
-      : `Perfil express/ISAK parcial con ${skinfoldCount} de 8 pliegues registrados.`);
+      ? 'Perfil completo con los 8 pliegues antropométricos registrados.'
+      : `Perfil completo parcial con ${skinfoldCount} de 8 pliegues registrados.`);
     if (measurement.calculated_values?.body_composition) {
       notes.push('Composición corporal estimada con Durnin-Womersley y Siri a partir de 4 pliegues; debe interpretarse como estimación antropométrica.');
     } else {
@@ -1478,7 +1573,7 @@ function buildReportNarrative(measurement, comparison, metrics = []) {
       notes.push('El fraccionamiento Kerr-Ross requiere el bloque avanzado completo de perímetros, diámetros, altura sentado y datos personales.');
     }
   } else {
-    notes.push('Resumen rápido para seguimiento de consulta.');
+    notes.push('Perfil express para seguimiento de consulta.');
   }
 
   if (comparison?.available) {
@@ -1499,7 +1594,7 @@ function buildReportNarrative(measurement, comparison, metrics = []) {
   }
 
   if (!metrics.some((metric) => metric.section === 'somatotype')) {
-    notes.push('El somatotipo requiere perfil express/ISAK completo.');
+    notes.push('El somatotipo requiere el perfil completo.');
   }
 
   return notes;
@@ -1521,7 +1616,7 @@ function buildReports(measurements = [], fieldDefinitions = FIELD_DEFINITIONS) {
         id: `nutrition-report-${measurement.id}`,
         measurement_id: measurement.id,
         report_type: measurement.profile_code === 'express_isak' ? 'express_isak' : 'quick_summary',
-        title: measurement.profile_code === 'express_isak' ? 'Informe antropometría ISAK' : 'Resumen rápido nutricional',
+        title: measurement.profile_code === 'express_isak' ? 'Informe de antropometría completa' : 'Informe express nutricional',
         created_at: measurement.measured_at,
         formula_version: measurement.formula_version,
         calculation_profile: CALCULATION_PROFILE,
@@ -2312,7 +2407,7 @@ function rawMeasurementRows(measurement = {}, profileDefinitions = PROFILE_DEFIN
 
 function buildNutritionReportHtml(reportData) {
   const { patient, treatment, appointment, measurement, report, projection, meta } = reportData;
-  const profileLabel = measurement.profile_code === 'express_isak' ? 'Express/ISAK' : 'Rápido';
+  const profileLabel = nutritionProfileLabel(measurement.profile_code);
   const isFinalDocument = meta?.document_status === 'final';
   const documentStatusLabel = isFinalDocument ? 'Informe final' : 'Borrador calculado';
   const clinicalStorage = meta?.clinical_storage || buildClinicalStoragePolicy({
@@ -2329,6 +2424,23 @@ function buildNutritionReportHtml(reportData) {
   const calculationProfileHtml = buildCalculationProfileHtml(
     report.calculation_profile || meta?.calculation_profile || CALCULATION_PROFILE,
   );
+  const heroMetrics = (report.sections || [])
+    .flatMap((section) => section.metrics || [])
+    .filter((metric) => ['weight_kg', 'bmi', 'skinfold_sum_mm', 'body_fat_percent'].includes(metric.key))
+    .slice(0, 4);
+  const heroMetricsHtml = heroMetrics.length ? `
+    <section class="hero-metrics">
+      ${heroMetrics.map((metric) => `
+        <div class="hero-metric">
+          <dt>${escapeHtml(metric.label)}</dt>
+          <dd>${escapeHtml(formatMetricValue(metric))}</dd>
+          ${metric.delta !== null && metric.delta !== undefined ? `
+            <span class="delta-pill ${metricTrendClass(metric)}">${escapeHtml(formatDeltaWithPercent(metric))}</span>
+          ` : '<span class="delta-pill delta-empty">Sin histórico</span>'}
+        </div>
+      `).join('')}
+    </section>
+  ` : '';
   const sectionsHtml = (report.sections || []).map((section) => `
     <section class="card">
       <h2>${escapeHtml(section.title)}</h2>
@@ -2337,7 +2449,7 @@ function buildNutritionReportHtml(reportData) {
           <div class="metric">
             <dt>${escapeHtml(metric.label)}</dt>
             <dd>${escapeHtml(formatMetricValue(metric))}</dd>
-            ${metric.delta !== null && metric.delta !== undefined ? `<span class="delta">${escapeHtml(formatDelta(metric))} vs anterior</span>` : ''}
+            ${metric.delta !== null && metric.delta !== undefined ? `<span class="delta ${metricTrendClass(metric)}">${escapeHtml(formatDeltaWithPercent(metric))} vs anterior</span>` : ''}
           </div>
         `).join('')}
       </div>
@@ -2355,7 +2467,7 @@ function buildNutritionReportHtml(reportData) {
               <td>${escapeHtml(metric.label)}</td>
               <td>${escapeHtml(metric.previous_value ?? '-')} ${escapeHtml(metric.unit || '')}</td>
               <td>${escapeHtml(metric.value ?? '-')} ${escapeHtml(metric.unit || '')}</td>
-              <td>${escapeHtml(formatDelta(metric))}</td>
+              <td><span class="delta ${metricTrendClass(metric)}">${escapeHtml(formatDeltaWithPercent(metric))}</span></td>
             </tr>
           `).join('')}
         </tbody>
@@ -2488,6 +2600,10 @@ function buildNutritionReportHtml(reportData) {
     .summary { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px 18px; margin-top: 16px; }
     .summary dt { color: #64748b; font-size: 11px; text-transform: uppercase; letter-spacing: .04em; }
     .summary dd { margin: 2px 0 0; font-weight: 700; }
+    .hero-metrics { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; margin-bottom: 14px; }
+    .hero-metric { background: #fff; border: 1px solid #dbe4ef; border-radius: 12px; padding: 14px; box-shadow: 0 12px 28px rgba(15, 23, 42, .07); break-inside: avoid; }
+    .hero-metric dt { color: #64748b; font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .04em; }
+    .hero-metric dd { margin: 6px 0 8px; font-size: 26px; line-height: 1; font-weight: 850; color: #0f172a; }
     .card { background: #fff; border: 1px solid #e2e8f0; border-radius: 10px; padding: 16px; margin-bottom: 14px; break-inside: avoid; }
     .muted-card { background: #f8fafc; }
     .warning { border-color: #f59e0b; background: #fffbeb; }
@@ -2495,7 +2611,12 @@ function buildNutritionReportHtml(reportData) {
     .metric { border: 1px solid #e2e8f0; border-radius: 8px; padding: 10px; }
     .metric dt { color: #64748b; font-size: 11px; }
     .metric dd { margin: 3px 0; font-size: 22px; font-weight: 800; }
-    .delta { color: #0369a1; font-size: 11px; font-weight: 700; }
+    .delta { color: #64748b; font-size: 11px; font-weight: 700; }
+    .delta-pill { display: inline-flex; align-items: center; border-radius: 999px; padding: 3px 8px; font-size: 11px; font-weight: 800; }
+    .delta-good { color: #047857; background: #dcfce7; }
+    .delta-bad { color: #b91c1c; background: #fee2e2; }
+    .delta-stable { color: #475569; background: #f1f5f9; }
+    .delta-empty { color: #64748b; background: #f1f5f9; }
     .status { display: inline-flex; border-radius: 999px; padding: 2px 8px; font-size: 10px; font-weight: 800; }
     .status-ok { background: #dcfce7; color: #047857; }
     .status-pending { background: #fef3c7; color: #92400e; }
@@ -2541,12 +2662,13 @@ function buildNutritionReportHtml(reportData) {
         <div><dt>Paciente</dt><dd>${escapeHtml(patient.name || 'Paciente')}</dd></div>
         <div><dt>Perfil</dt><dd>${escapeHtml(profileLabel)}</dd></div>
         <div><dt>Medición</dt><dd>${escapeHtml(formatDate(measurement.measured_at))}</dd></div>
-        <div><dt>Tratamiento</dt><dd>${escapeHtml(treatment?.nombre || 'No asociado')}</dd></div>
+        <div><dt>Tratamiento</dt><dd>${escapeHtml(displayNutritionText(treatment?.nombre) || 'No asociado')}</dd></div>
         <div><dt>Cita</dt><dd>${escapeHtml(appointment?.inicio ? formatDate(appointment.inicio) : 'No asociada')}</dd></div>
         <div><dt>Informe</dt><dd>${escapeHtml(report.id)}</dd></div>
       </dl>
     </section>
     ${projectionVisualHtml}
+    ${heroMetricsHtml}
     ${compositionVisualHtml}
     ${sectionsHtml}
     ${comparisonHtml}

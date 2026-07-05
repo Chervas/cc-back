@@ -126,7 +126,7 @@ const TREATMENT_AREA_PROFILES = {
 const TREATMENT_SERVICE_EXAMPLES = {
   dental: ['Valoración dental', 'Limpieza dental', 'Revisión periodontal'],
   capilar: ['Valoración capilar', 'Mesoterapia capilar', 'Seguimiento postinjerto'],
-  nutricion: ['Consulta nutricional', 'Valoración nutricional', 'Seguimiento nutricional', 'Estudio antropométrico ISAK', 'Plan de seguimiento mensual'],
+  nutricion: ['Consulta nutricional', 'Valoración nutricional', 'Seguimiento nutricional', 'Estudio antropométrico completo', 'Plan de seguimiento mensual'],
   psicologia: ['Sesión de terapia individual', 'Evaluación psicológica inicial', 'Seguimiento terapéutico'],
   fisioterapia: ['Valoración fisioterapia', 'Sesión de rehabilitación', 'Revisión funcional'],
   estetica: ['Valoración estética facial', 'Tratamiento facial', 'Revisión postratamiento'],
@@ -156,7 +156,7 @@ const NUTRITION_SERVICE_KIND_OPTIONS = [
     hint: 'Revisión periódica del plan. Puede comparar con mediciones previas si se activa un perfil.',
     icon: 'heroicons_outline:arrow-path',
     recommendedProfile: 'quick',
-    profileLabel: 'Perfil rápido recomendado',
+    profileLabel: 'Express recomendado',
     recommendedName: 'Seguimiento nutricional',
     defaultCategory: 'Nutrición clínica',
     defaultGenerateReport: false,
@@ -169,7 +169,7 @@ const NUTRITION_SERVICE_KIND_OPTIONS = [
     hint: 'Peso y perímetros principales para control recurrente y proyección temporal.',
     icon: 'heroicons_outline:scale',
     recommendedProfile: 'quick',
-    profileLabel: 'Perfil rápido',
+    profileLabel: 'Express',
     recommendedName: 'Medición rápida nutricional',
     defaultCategory: 'Consulta nutricional',
     defaultGenerateReport: false,
@@ -178,13 +178,13 @@ const NUTRITION_SERVICE_KIND_OPTIONS = [
   },
   {
     value: 'isak_study',
-    label: 'Estudio express/ISAK',
+    label: 'Estudio completo',
     hint: 'Pliegues, perímetros, diámetros, sumatorios y somatotipo para informe antropométrico.',
     icon: 'heroicons_outline:chart-bar-square',
     recommendedProfile: 'express_isak',
-    profileLabel: 'Perfil express/ISAK',
-    recommendedName: 'Estudio antropométrico ISAK',
-    defaultCategory: 'Antropometría ISAK',
+    profileLabel: 'Perfil completo',
+    recommendedName: 'Estudio antropométrico completo',
+    defaultCategory: 'Antropometría avanzada',
     defaultGenerateReport: true,
     defaultComparePrevious: true,
     defaultSessions: 1,
@@ -195,7 +195,7 @@ const NUTRITION_SERVICE_KIND_OPTIONS = [
     hint: 'Servicio de varias sesiones. Mantiene el tratamiento como producto cobrable y la medición como configuración clínica.',
     icon: 'heroicons_outline:rectangle-stack',
     recommendedProfile: 'quick',
-    profileLabel: 'Perfil rápido opcional',
+    profileLabel: 'Express opcional',
     recommendedName: 'Plan de seguimiento mensual',
     defaultCategory: 'Nutrición clínica',
     defaultGenerateReport: false,
@@ -212,12 +212,12 @@ const NUTRITION_MEASUREMENT_PROFILE_OPTIONS = [
   },
   {
     value: 'quick',
-    label: 'Perfil rápido',
+    label: 'Express',
     hint: 'Peso y perímetros principales para seguimiento recurrente.',
   },
   {
     value: 'express_isak',
-    label: 'Perfil express/ISAK',
+    label: 'Completa',
     hint: 'Pliegues, perímetros y diámetros para informe antropométrico.',
   },
 ];
@@ -254,7 +254,7 @@ const NUTRITION_MEASUREMENT_FIELD_DEFINITIONS = {
 const NUTRITION_MEASUREMENT_PROFILE_SCHEMAS = [
   {
     code: 'quick',
-    name: 'Perfil rápido',
+    name: 'Express',
     description: 'Seguimiento de consulta con peso y perímetros principales.',
     groups: [
       {
@@ -267,7 +267,7 @@ const NUTRITION_MEASUREMENT_PROFILE_SCHEMAS = [
   },
   {
     code: 'express_isak',
-    name: 'Perfil express/ISAK',
+    name: 'Completa',
     description: 'Perfil antropométrico restringido para informe y evolución.',
     groups: [
       {
@@ -385,7 +385,7 @@ const APPOINTMENT_ACTIONS = {
       express_isak: 'Abrirá pliegues, perímetros, diámetros y somatotipo.',
     },
     serviceDetails: {
-      isak_study: 'Abrirá la ficha nutricional con perfil express/ISAK e informe.',
+      isak_study: 'Abrirá la ficha nutricional con perfil completo e informe.',
     },
   },
   capilar: {
@@ -443,8 +443,8 @@ const MEDICAL_AREA_CONTRACT_SECTIONS = {
     {
       title: 'Servicio cobrable',
       icon: 'heroicons_outline:clipboard-document-list',
-      body: 'El catálogo debe guardar servicios como Consulta nutricional, Valoración nutricional, Seguimiento, Estudio ISAK o Plan mensual. No debe crear tratamientos llamados Primera cita.',
-      chips: ['Consulta nutricional', 'Valoración nutricional', 'Seguimiento', 'Estudio ISAK', 'Pack'],
+      body: 'El catálogo debe guardar servicios como Consulta nutricional, Valoración nutricional, Seguimiento, Estudio antropométrico completo o Plan mensual. No debe crear tratamientos llamados Primera cita.',
+      chips: ['Consulta nutricional', 'Valoración nutricional', 'Seguimiento', 'Antropometría completa', 'Pack'],
     },
     {
       title: 'Tipo de cita',
@@ -455,8 +455,8 @@ const MEDICAL_AREA_CONTRACT_SECTIONS = {
     {
       title: 'Perfil clínico',
       icon: 'heroicons_outline:scale',
-      body: 'El servicio puede activar medición rápida o express/ISAK; la ficha guarda medidas, informe, comparación y proyección temporal.',
-      chips: ['Sin medición', 'Perfil rápido', 'Express/ISAK', 'Informe'],
+      body: 'El servicio puede activar medición Express o Completa; la ficha guarda medidas, informe, comparación y proyección temporal.',
+      chips: ['Sin medición', 'Express', 'Completa', 'Informe'],
     },
   ],
   capilar: [
@@ -614,7 +614,7 @@ const TREATMENT_SETUP_STEPS_BY_AREA = {
     {
       title: 'Servicio cobrable',
       icon: 'heroicons_outline:tag',
-      body: 'Consulta, valoración, seguimiento, estudio ISAK o pack. No es el tipo de cita.',
+      body: 'Consulta, valoración, seguimiento, estudio antropométrico completo o pack. No es el tipo de cita.',
       section: 'service',
     },
     {
@@ -626,7 +626,7 @@ const TREATMENT_SETUP_STEPS_BY_AREA = {
     {
       title: 'Perfil de medición',
       icon: 'heroicons_outline:scale',
-      body: 'Sin medición, perfil rápido o express/ISAK con informe y evolución.',
+      body: 'Sin medición, Express o Completa con informe y evolución.',
       section: 'nutrition',
     },
     {
@@ -669,6 +669,25 @@ function parseStoredContract(value) {
 function cleanString(value, fallback = '') {
   const cleaned = String(value ?? '').trim();
   return cleaned || fallback;
+}
+
+function sanitizeNutritionLegalText(value) {
+  const cleaned = cleanString(value);
+  if (!cleaned) return '';
+  return cleaned
+    .replace(/Estudio antropom[eé]trico ISAK/gi, 'Estudio antropométrico completo')
+    .replace(/Antropometr[ií]a ISAK/gi, 'Antropometría avanzada')
+    .replace(/estudio ISAK/gi, 'estudio antropométrico completo')
+    .replace(/Express\/ISAK/gi, 'Completa')
+    .replace(/express\/ISAK/gi, 'Completa')
+    .replace(/Perfil r[aá]pido/gi, 'Express')
+    .replace(/\bisak\b/gi, 'antropometría');
+}
+
+function sanitizeNutritionTextArray(value = []) {
+  return Array.from(new Set((Array.isArray(value) ? value : [])
+    .map((item) => sanitizeNutritionLegalText(item))
+    .filter(Boolean)));
 }
 
 function normalizeStringArray(value, fallback = []) {
@@ -956,28 +975,71 @@ function normalizeNutritionContractDefaults(contract, fallback) {
 
   return {
     ...contract,
+    service_examples: sanitizeNutritionTextArray(contract.service_examples),
     contract_sections: contract.contract_sections.map((section, index) => {
-      if (index !== 0 || !serviceSection || /Valoraci[oó]n nutricional/i.test(section.body)) {
-        return section;
+      const sanitized = {
+        ...section,
+        title: sanitizeNutritionLegalText(section.title) || section.title,
+        body: sanitizeNutritionLegalText(section.body) || section.body,
+        chips: sanitizeNutritionTextArray(section.chips),
+      };
+      if (index !== 0 || !serviceSection || /Valoraci[oó]n nutricional/i.test(sanitized.body)) {
+        return sanitized;
       }
       return {
-        ...section,
+        ...sanitized,
         body: serviceSection.body,
         chips: normalizeStringArray([
           ...(serviceSection.chips || []),
-          ...(section.chips || []),
+          ...(sanitized.chips || []),
         ], serviceSection.chips || []),
       };
     }),
     setup_steps: contract.setup_steps.map((step) => {
-      if (step.section !== 'service' || !serviceStep || /valoraci[oó]n/i.test(step.body)) {
-        return step;
+      const sanitized = {
+        ...step,
+        title: sanitizeNutritionLegalText(step.title) || step.title,
+        body: sanitizeNutritionLegalText(step.body) || step.body,
+      };
+      if (step.section !== 'service' || !serviceStep || /valoraci[oó]n/i.test(sanitized.body)) {
+        return sanitized;
       }
       return {
-        ...step,
+        ...sanitized,
         body: serviceStep.body,
       };
     }),
+    appointment_action: {
+      ...contract.appointment_action,
+      detail: sanitizeNutritionLegalText(contract.appointment_action?.detail) || contract.appointment_action?.detail,
+      noProfileMessage: sanitizeNutritionLegalText(contract.appointment_action?.noProfileMessage) || contract.appointment_action?.noProfileMessage,
+      profileDetails: Object.fromEntries(Object.entries(contract.appointment_action?.profileDetails || {})
+        .map(([key, value]) => [key, sanitizeNutritionLegalText(value) || value])),
+      serviceDetails: Object.fromEntries(Object.entries(contract.appointment_action?.serviceDetails || {})
+        .map(([key, value]) => [key, sanitizeNutritionLegalText(value) || value])),
+    },
+    nutrition_service_kind_options: contract.nutrition_service_kind_options.map((option) => ({
+      ...option,
+      label: sanitizeNutritionLegalText(option.label) || option.label,
+      hint: sanitizeNutritionLegalText(option.hint) || option.hint,
+      profileLabel: sanitizeNutritionLegalText(option.profileLabel) || option.profileLabel,
+      recommendedName: sanitizeNutritionLegalText(option.recommendedName) || option.recommendedName,
+      defaultCategory: sanitizeNutritionLegalText(option.defaultCategory) || option.defaultCategory,
+    })),
+    nutrition_measurement_profile_options: contract.nutrition_measurement_profile_options.map((option) => ({
+      ...option,
+      label: sanitizeNutritionLegalText(option.label) || option.label,
+      hint: sanitizeNutritionLegalText(option.hint) || option.hint,
+    })),
+    nutrition_measurement_profile_schemas: contract.nutrition_measurement_profile_schemas.map((profile) => ({
+      ...profile,
+      name: sanitizeNutritionLegalText(profile.name) || profile.name,
+      description: sanitizeNutritionLegalText(profile.description) || profile.description,
+      groups: (profile.groups || []).map((group) => ({
+        ...group,
+        label: sanitizeNutritionLegalText(group.label) || group.label,
+      })),
+    })),
   };
 }
 
