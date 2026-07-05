@@ -101,6 +101,23 @@ Reglas:
 - Un administrador puede leer/escribir todos los ámbitos. Un propietario solo puede escribir overrides en sus clínicas/grupos; el resto de staff solo lee sus ámbitos accesibles.
 - La tabla `AccessPolicyOverrides` usa una clave única por `scope_type`, `scope_id`, `feature_key` y `role_code`.
 
+## Workspace Nutricion / ISAK
+
+Endpoints reales:
+
+| Endpoint | Estado | Uso |
+|:---|:---|:---|
+| `GET /api/pacientes/:id/nutrition-workspace` | Operativo V1 dev | Devuelve perfiles rapido/express, campos, tratamientos de Nutricion, mediciones, evolucion, proyeccion e informes derivados. |
+| `POST /api/pacientes/:id/nutrition-measurements` | Operativo V1 dev | Registra una medicion nutricional real del paciente y calcula resultados versionados. |
+
+Contrato:
+
+- `Tratamientos.clinical_config` guarda configuracion clinica por area. Para Nutricion se usa `clinical_config.nutrition.measurement_profile_code` con `none`, `quick` o `express_isak`.
+- `PatientNutritionMeasurements` guarda mediciones por `patient_id`, `clinic_id`, `professional_id`, `appointment_id`, `treatment_id`, `profile_code`, `raw_values_json`, `calculated_values_json`, `formula_version` y `quality_flags_json`.
+- El motor `nutrition-basic-v1` calcula en backend IMC, ratio cintura/cadera, suma de pliegues, perimetros corregidos, somatotipo Heath-Carter cuando hay datos suficientes y proyeccion lineal simple con las ultimas dos mediciones.
+- Informes V1 son snapshots derivados de mediciones; PDF y storage clinico privado quedan pendientes. No usar `PUBLIC_MEDIA` para informes, fotos clinicas ni datos antropometricos identificables.
+- La accion de agenda `Registrar medicion` debe consumir estos endpoints cuando el tratamiento tenga perfil de medicion asociado.
+
 ### WhatsApp coexistencia: regla de gateway
 
 Roadmap funcional y tecnico: `cc-front/src/Documentacion/14.3-whatsapp-coexistencia.md`.

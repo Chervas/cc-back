@@ -114,6 +114,10 @@ module.exports = (sequelize, DataTypes) => {
       type: DataTypes.JSON,
       allowNull: true
     },
+    clinical_config: {
+      type: DataTypes.JSON,
+      allowNull: true
+    },
     asignacion_instalacion_tipo: {
       type: DataTypes.ENUM('cualquiera', 'especificas'),
       allowNull: false,

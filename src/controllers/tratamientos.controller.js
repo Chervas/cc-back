@@ -203,6 +203,7 @@ exports.createTratamiento = asyncHandler(async (req, res) => {
         appointment_automation_template_key = null,
         appointment_automation_template_version = null,
         automation_template_bindings = null,
+        clinical_config = null,
         asignacion_instalacion_tipo = 'cualquiera',
         tipo_instalacion_requerida = null,
         instalaciones_habilitadas = null,
@@ -249,6 +250,9 @@ exports.createTratamiento = asyncHandler(async (req, res) => {
         automation_template_bindings: automation_template_bindings && typeof automation_template_bindings === 'object'
             ? automation_template_bindings
             : null,
+        clinical_config: clinical_config && typeof clinical_config === 'object'
+            ? clinical_config
+            : null,
         asignacion_instalacion_tipo: installationAssignmentType,
         tipo_instalacion_requerida: requiredInstallationType,
         instalaciones_habilitadas: enabledInstallationIds,
@@ -287,6 +291,7 @@ exports.updateTratamiento = asyncHandler(async (req, res) => {
         'appointment_automation_template_key',
         'appointment_automation_template_version',
         'automation_template_bindings',
+        'clinical_config',
         'asignacion_instalacion_tipo',
         'tipo_instalacion_requerida',
         'instalaciones_habilitadas',
@@ -297,6 +302,12 @@ exports.updateTratamiento = asyncHandler(async (req, res) => {
         if (req.body[field] !== undefined) {
             if (field === 'appointment_automation_template_version') {
                 tratamiento[field] = null;
+                return;
+            }
+            if (field === 'clinical_config') {
+                tratamiento[field] = req.body[field] && typeof req.body[field] === 'object'
+                    ? req.body[field]
+                    : null;
                 return;
             }
             if (field === 'asignacion_instalacion_tipo') {
