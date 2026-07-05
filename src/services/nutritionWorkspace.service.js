@@ -975,4 +975,10 @@ module.exports = {
   getNutritionMeasurementReport,
   renderNutritionMeasurementReport,
   generateNutritionMeasurementReportPdf,
+  __testing: {
+    buildReports,
+    buildProjection,
+    buildProjectionForMeasurement,
+    buildNutritionReportHtml,
+  },
 };
