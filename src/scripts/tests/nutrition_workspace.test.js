@@ -165,6 +165,9 @@ function run() {
   const reports = __testing.buildReports(rowsDesc);
   const secondReport = reports.find((report) => report.measurement_id === 2);
   assert.equal(secondReport.comparison.available, true);
+  assert.equal(secondReport.calculation_trace.find((item) => item.key === 'bmi').status, 'applied');
+  assert.equal(secondReport.calculation_trace.find((item) => item.key === 'body_composition').status, 'applied');
+  assert.deepEqual(secondReport.calculation_trace.find((item) => item.key === 'body_composition').missing_input_labels, []);
   assert.equal(secondReport.comparison.previous_measurement_id, 1);
   assert.equal(secondReport.comparison.days_between, 56);
   assert.equal(
@@ -223,6 +226,23 @@ function run() {
     }, 'express_isak').body_composition,
     null,
   );
+  const pendingTrace = __testing.buildCalculationTrace({
+    profile_code: 'express_isak',
+    raw_values: {
+      ...baseRawValues,
+      weight_kg: 80,
+      waist_cm: 82,
+    },
+    calculated_values: calculateNutritionValues({
+      ...baseRawValues,
+      weight_kg: 80,
+      waist_cm: 82,
+    }, 'express_isak'),
+  });
+  assert.deepEqual(
+    pendingTrace.find((item) => item.key === 'body_composition').missing_input_labels,
+    ['Sexo del paciente', 'Edad del paciente'],
+  );
   assert.equal(__testing.normalizeSexForBodyComposition('mujer'), 'female');
   assert.equal(__testing.calculateAgeYears('1994-07-06', '2026-07-05T10:00:00.000Z'), 31);
   assert.deepEqual(__testing.buildPatientFormulaContext({
@@ -239,6 +259,8 @@ function run() {
   assert.match(html, /Suma de pliegues estimada 8 semanas/);
   assert.match(html, /Grasa estimada 8 semanas/);
   assert.match(html, /Bases de cálculo/);
+  assert.match(html, /Trazabilidad de cálculo/);
+  assert.match(html, /Aplicado/);
   assert.match(html, /Composición corporal/);
   assert.match(html, /Grasa estimada/);
   assert.match(html, /Durnin-Womersley/);
@@ -261,6 +283,7 @@ function run() {
     },
   }, html, '2026-02-26T11:00:00.000Z');
   assert.equal(snapshotPayload.snapshot.kind, 'nutrition_measurement_report');
+  assert.equal(snapshotPayload.snapshot.snapshot_version, 2);
   assert.equal(snapshotPayload.snapshot.measurement.id, 2);
   assert.equal(snapshotPayload.snapshot.report.measurement_id, 2);
   assert.equal(snapshotPayload.snapshot.meta.storage, 'patient_nutrition_report_snapshot');

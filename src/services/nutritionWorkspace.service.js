@@ -12,6 +12,7 @@ const medicalAreaContracts = require('./medicalAreaContracts.service');
 const { Op } = db.Sequelize;
 const execFileAsync = promisify(execFile);
 const FORMULA_VERSION = 'nutrition-basic-v2';
+const NUTRITION_REPORT_SNAPSHOT_VERSION = 2;
 const DEFAULT_CHROMIUM_PATH = '/home/ubuntu/.cache/clinicaclick-browsers/chrome-headless-shell/linux-148.0.7778.56/chrome-headless-shell-linux64/chrome-headless-shell';
 
 const FORMULA_REFERENCES = [
@@ -282,6 +283,169 @@ function missingRequiredFieldsForProfile(rawValues = {}, profileCode = 'quick', 
       label: fieldDefinitions?.[field]?.label || field,
       unit: fieldDefinitions?.[field]?.unit || '',
     }));
+}
+
+function calculationInputLabel(field, fieldDefinitions = FIELD_DEFINITIONS) {
+  if (field === 'patient_sex') return 'Sexo del paciente';
+  if (field === 'patient_age') return 'Edad del paciente';
+  return fieldDefinitions?.[field]?.label || field;
+}
+
+function missingCalculationInputLabels(rawValues = {}, fields = [], fieldDefinitions = FIELD_DEFINITIONS) {
+  return fields
+    .filter((field) => {
+      const value = rawValues[field];
+      return value === undefined || value === null || value === '' || !Number.isFinite(Number(value));
+    })
+    .map((field) => calculationInputLabel(field, fieldDefinitions));
+}
+
+function buildCalculationTraceItem({
+  key,
+  label,
+  method,
+  source,
+  applied,
+  inputFields = [],
+  missingInputs = [],
+  outputKeys = [],
+}) {
+  const uniqueMissingInputs = Array.from(new Set(missingInputs.filter(Boolean)));
+  return {
+    key,
+    label,
+    method,
+    source,
+    status: applied ? 'applied' : 'pending',
+    applied: Boolean(applied),
+    input_fields: inputFields,
+    missing_input_labels: applied ? [] : uniqueMissingInputs,
+    output_keys: outputKeys,
+  };
+}
+
+function buildCalculationTrace(measurement = {}, fieldDefinitions = FIELD_DEFINITIONS) {
+  const profileCode = normalizeProfileCode(measurement.profile_code);
+  const rawValues = measurement.raw_values || {};
+  const calculatedValues = measurement.calculated_values || {};
+  const trace = [];
+
+  const bmiFields = ['weight_kg', 'stature_cm'];
+  trace.push(buildCalculationTraceItem({
+    key: 'bmi',
+    label: 'IMC',
+    method: 'peso / estatura²',
+    source: 'nutrition-basic-v2',
+    applied: Number.isFinite(Number(calculatedValues.bmi)),
+    inputFields: bmiFields,
+    missingInputs: missingCalculationInputLabels(rawValues, bmiFields, fieldDefinitions),
+    outputKeys: ['bmi'],
+  }));
+
+  const waistHipFields = ['waist_cm', 'hip_cm'];
+  trace.push(buildCalculationTraceItem({
+    key: 'waist_hip_ratio',
+    label: 'Ratio cintura/cadera',
+    method: 'cintura / cadera',
+    source: 'nutrition-basic-v2',
+    applied: Number.isFinite(Number(calculatedValues.waist_hip_ratio)),
+    inputFields: waistHipFields,
+    missingInputs: missingCalculationInputLabels(rawValues, waistHipFields, fieldDefinitions),
+    outputKeys: ['waist_hip_ratio'],
+  }));
+
+  const skinfoldFields = Object.keys(fieldDefinitions || FIELD_DEFINITIONS)
+    .filter((field) => field.startsWith('skinfold_'));
+  const skinfoldCount = skinfoldFields.filter((field) => Number.isFinite(Number(rawValues[field]))).length;
+  if (profileCode === 'express_isak' || skinfoldCount > 0) {
+    trace.push(buildCalculationTraceItem({
+      key: 'skinfold_sum_mm',
+      label: 'Suma de pliegues',
+      method: 'suma de pliegues registrados',
+      source: 'nutrition-basic-v2',
+      applied: Number.isFinite(Number(calculatedValues.skinfold_sum_mm)),
+      inputFields: skinfoldFields,
+      missingInputs: skinfoldCount > 0 ? [] : ['Al menos un pliegue'],
+      outputKeys: ['skinfold_sum_mm'],
+    }));
+  }
+
+  const correctedArmFields = ['arm_flexed_tensed_cm', 'skinfold_triceps_mm'];
+  if (profileCode === 'express_isak' || correctedArmFields.some((field) => rawValues[field] !== undefined)) {
+    trace.push(buildCalculationTraceItem({
+      key: 'corrected_arm_girth_cm',
+      label: 'Brazo corregido',
+      method: 'brazo flexionado - pliegue tríceps/10',
+      source: 'nutrition-basic-v2',
+      applied: Number.isFinite(Number(calculatedValues.corrected_arm_girth_cm)),
+      inputFields: correctedArmFields,
+      missingInputs: missingCalculationInputLabels(rawValues, correctedArmFields, fieldDefinitions),
+      outputKeys: ['corrected_arm_girth_cm'],
+    }));
+  }
+
+  const correctedCalfFields = ['calf_cm', 'skinfold_medial_calf_mm'];
+  if (profileCode === 'express_isak' || correctedCalfFields.some((field) => rawValues[field] !== undefined)) {
+    trace.push(buildCalculationTraceItem({
+      key: 'corrected_calf_girth_cm',
+      label: 'Pantorrilla corregida',
+      method: 'pantorrilla - pliegue pantorrilla medial/10',
+      source: 'nutrition-basic-v2',
+      applied: Number.isFinite(Number(calculatedValues.corrected_calf_girth_cm)),
+      inputFields: correctedCalfFields,
+      missingInputs: missingCalculationInputLabels(rawValues, correctedCalfFields, fieldDefinitions),
+      outputKeys: ['corrected_calf_girth_cm'],
+    }));
+  }
+
+  if (profileCode === 'express_isak') {
+    const somatotypeFields = [
+      'stature_cm',
+      'weight_kg',
+      'skinfold_triceps_mm',
+      'skinfold_subscapular_mm',
+      'skinfold_supraspinale_mm',
+      'skinfold_medial_calf_mm',
+      'breadth_humerus_cm',
+      'breadth_femur_cm',
+      'arm_flexed_tensed_cm',
+      'calf_cm',
+    ];
+    trace.push(buildCalculationTraceItem({
+      key: 'heath_carter_somatotype',
+      label: 'Somatotipo Heath-Carter',
+      method: 'endomorfia, mesomorfia y ectomorfia antropométricas',
+      source: 'Heath-Carter anthropometric somatotype',
+      applied: Boolean(calculatedValues.somatotype),
+      inputFields: somatotypeFields,
+      missingInputs: missingCalculationInputLabels(rawValues, somatotypeFields, fieldDefinitions),
+      outputKeys: ['endomorphy', 'mesomorphy', 'ectomorphy'],
+    }));
+
+    const bodyCompositionFields = [
+      'weight_kg',
+      'skinfold_biceps_mm',
+      'skinfold_triceps_mm',
+      'skinfold_subscapular_mm',
+      'skinfold_iliac_crest_mm',
+    ];
+    const missingBodyCompositionInputs = missingCalculationInputLabels(rawValues, bodyCompositionFields, fieldDefinitions);
+    if (!missingBodyCompositionInputs.length && !calculatedValues.body_composition) {
+      missingBodyCompositionInputs.push('Sexo del paciente', 'Edad del paciente');
+    }
+    trace.push(buildCalculationTraceItem({
+      key: 'body_composition',
+      label: 'Composición corporal',
+      method: 'Durnin-Womersley 4 pliegues + Siri',
+      source: 'Durnin-Womersley 1974 + Siri conversion',
+      applied: Boolean(calculatedValues.body_composition),
+      inputFields: [...bodyCompositionFields, 'patient_sex', 'patient_age'],
+      missingInputs: missingBodyCompositionInputs,
+      outputKeys: ['body_density', 'body_fat_percent', 'fat_mass_kg', 'fat_free_mass_kg'],
+    }));
+  }
+
+  return trace;
 }
 
 function formulaReferencesForProfile(profileCode = 'quick') {
@@ -777,7 +941,7 @@ function buildReportNarrative(measurement, comparison, metrics = []) {
   return notes;
 }
 
-function buildReports(measurements = []) {
+function buildReports(measurements = [], fieldDefinitions = FIELD_DEFINITIONS) {
   const chronological = [...measurements].reverse().map(measurementToJson);
   return chronological
     .map((measurement, index) => {
@@ -788,6 +952,7 @@ function buildReports(measurements = []) {
       if (!metrics.length) return null;
 
       const comparison = buildMeasurementComparison(measurement, previousMeasurement, metrics);
+      const calculationTrace = buildCalculationTrace(measurement, fieldDefinitions);
       return {
         id: `nutrition-report-${measurement.id}`,
         measurement_id: measurement.id,
@@ -808,6 +973,7 @@ function buildReports(measurements = []) {
         },
         sections: buildReportSections(metrics),
         comparison,
+        calculation_trace: calculationTrace,
         narrative: buildReportNarrative(measurement, comparison, metrics),
       };
     })
@@ -838,6 +1004,30 @@ function nutritionReportSnapshotToJson(row) {
     created_at: plain.created_at,
     updated_at: plain.updated_at,
   };
+}
+
+function parseSnapshotJson(row) {
+  if (!row) return null;
+  const plain = typeof row.toJSON === 'function' ? row.toJSON() : row;
+  const raw = plain.snapshot_json;
+  if (!raw) return null;
+  if (typeof raw === 'string') {
+    try {
+      return JSON.parse(raw);
+    } catch {
+      return null;
+    }
+  }
+  return typeof raw === 'object' ? raw : null;
+}
+
+function isCurrentNutritionReportSnapshot(row) {
+  const snapshot = parseSnapshotJson(row);
+  const version = Number(snapshot?.snapshot_version);
+  return Number.isFinite(version)
+    && version >= NUTRITION_REPORT_SNAPSHOT_VERSION
+    && Array.isArray(snapshot?.report?.calculation_trace)
+    && snapshot.report.calculation_trace.length > 0;
 }
 
 function attachReportSnapshots(reports = [], snapshotRows = []) {
@@ -911,7 +1101,7 @@ function buildNutritionReportSnapshotPayload(reportData, renderedHtml, generated
 
   const snapshot = {
     kind: 'nutrition_measurement_report',
-    snapshot_version: 1,
+    snapshot_version: NUTRITION_REPORT_SNAPSHOT_VERSION,
     patient: reportData.patient,
     treatment: reportData.treatment,
     appointment: reportData.appointment,
@@ -992,7 +1182,7 @@ async function getPatientNutritionWorkspace(patientIdentifier) {
     limit: 50,
   });
   const reportSnapshots = await findActiveNutritionReportSnapshotsForPatient(patient.id_paciente);
-  const reports = attachReportSnapshots(buildReports(measurements), reportSnapshots);
+  const reports = attachReportSnapshots(buildReports(measurements, fieldDefinitions), reportSnapshots);
   const patientFormulaContext = buildPatientFormulaContext(patient);
 
   return {
@@ -1129,16 +1319,16 @@ async function buildNutritionMeasurementReportData(patientIdentifier, measuremen
   }
 
   const measurement = measurementToJson(measurementRow);
-  const report = buildReports(measurements).find((item) => Number(item.measurement_id) === Number(measurement.id));
+  const nutritionContract = await getNutritionContractSafe();
+  const profileDefinitions = profileDefinitionsFromContract(nutritionContract);
+  const fieldDefinitions = fieldDefinitionsFromContract(nutritionContract);
+  const report = buildReports(measurements, fieldDefinitions).find((item) => Number(item.measurement_id) === Number(measurement.id));
   if (!report) {
     const error = new Error('report_not_available');
     error.status = 404;
     throw error;
   }
 
-  const nutritionContract = await getNutritionContractSafe();
-  const profileDefinitions = profileDefinitionsFromContract(nutritionContract);
-  const fieldDefinitions = fieldDefinitionsFromContract(nutritionContract);
   const treatment = measurement.treatment_id && db.Tratamiento
     ? await db.Tratamiento.findByPk(measurement.treatment_id, {
       attributes: ['id_tratamiento', 'nombre', 'disciplina', 'categoria', 'clinical_config'],
@@ -1217,7 +1407,13 @@ async function createNutritionMeasurementReportSnapshot(patientIdentifier, measu
     reportData.measurement.id,
     reportData.report.report_type,
   );
-  if (existing) return nutritionReportSnapshotToJson(existing);
+  if (existing && isCurrentNutritionReportSnapshot(existing)) {
+    return nutritionReportSnapshotToJson(existing);
+  }
+  if (existing) {
+    existing.status = 'superseded';
+    await existing.save();
+  }
 
   const generatedAt = new Date().toISOString();
   const normalizedReportData = {
@@ -1381,6 +1577,25 @@ function buildNutritionReportHtml(reportData) {
   const qualityHtml = (report.quality_flags || []).length
     ? `<section class="card warning"><h2>Revisión de datos</h2><ul>${report.quality_flags.map((flag) => `<li>${escapeHtml(flag.message || flag.code)}</li>`).join('')}</ul></section>`
     : '';
+  const calculationTrace = report.calculation_trace || [];
+  const calculationTraceHtml = calculationTrace.length ? `
+    <section class="card">
+      <h2>Trazabilidad de cálculo</h2>
+      <table>
+        <thead><tr><th>Cálculo</th><th>Estado</th><th>Método</th><th>Entradas pendientes</th></tr></thead>
+        <tbody>
+          ${calculationTrace.map((item) => `
+            <tr>
+              <td>${escapeHtml(item.label)}</td>
+              <td><span class="status ${item.applied ? 'status-ok' : 'status-pending'}">${item.applied ? 'Aplicado' : 'Pendiente'}</span></td>
+              <td>${escapeHtml(item.method || item.source || '')}</td>
+              <td>${escapeHtml(item.applied ? '-' : (item.missing_input_labels || []).join(', ') || 'Datos insuficientes')}</td>
+            </tr>
+          `).join('')}
+        </tbody>
+      </table>
+    </section>
+  ` : '';
   const formulaReferences = report.formula_references || meta.formula_references || [];
   const formulaReferencesHtml = formulaReferences.length ? `
     <section class="card muted-card">
@@ -1423,6 +1638,9 @@ function buildNutritionReportHtml(reportData) {
     .metric dt { color: #64748b; font-size: 11px; }
     .metric dd { margin: 3px 0; font-size: 22px; font-weight: 800; }
     .delta { color: #0369a1; font-size: 11px; font-weight: 700; }
+    .status { display: inline-flex; border-radius: 999px; padding: 2px 8px; font-size: 10px; font-weight: 800; }
+    .status-ok { background: #dcfce7; color: #047857; }
+    .status-pending { background: #fef3c7; color: #92400e; }
     .small-note { margin: 10px 0 0; font-size: 11px; }
     table { width: 100%; border-collapse: collapse; }
     th, td { text-align: left; border-bottom: 1px solid #e2e8f0; padding: 7px 6px; }
@@ -1457,6 +1675,7 @@ function buildNutritionReportHtml(reportData) {
     ${projectionHtml}
     ${narrativeHtml}
     ${qualityHtml}
+    ${calculationTraceHtml}
     ${formulaReferencesHtml}
     ${rawHtml}
     <footer>
@@ -1503,7 +1722,7 @@ async function renderNutritionMeasurementReport(patientIdentifier, measurementId
     reportData.measurement.id,
     reportData.report.report_type,
   );
-  if (snapshot?.snapshot_html) {
+  if (snapshot?.snapshot_html && isCurrentNutritionReportSnapshot(snapshot)) {
     return snapshot.snapshot_html;
   }
   return buildNutritionReportHtml(reportData);
@@ -1515,7 +1734,9 @@ async function generateNutritionMeasurementReportPdf(patientIdentifier, measurem
     reportData.measurement.id,
     reportData.report.report_type,
   );
-  const html = snapshot?.snapshot_html || buildNutritionReportHtml(reportData);
+  const html = snapshot?.snapshot_html && isCurrentNutritionReportSnapshot(snapshot)
+    ? snapshot.snapshot_html
+    : buildNutritionReportHtml(reportData);
   const filename = `informe-nutricion-${reportData.measurement.id}.pdf`;
   return {
     filename,
@@ -1540,6 +1761,7 @@ module.exports = {
     buildReports,
     buildProjection,
     buildProjectionForMeasurement,
+    buildCalculationTrace,
     buildNutritionReportHtml,
     buildNutritionReportSnapshotPayload,
     hashSnapshot,
