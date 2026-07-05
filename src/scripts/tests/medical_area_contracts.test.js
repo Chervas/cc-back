@@ -56,6 +56,8 @@ function assertNutritionContract(contract) {
 function run() {
   const nutrition = getBaseContractForArea('nutricion');
   assertNutritionContract(nutrition);
+  assert.equal(nutrition.service_examples.includes('Valoraci\u00f3n nutricional'), true);
+  assert.equal(nutrition.service_examples.includes('Plan de seguimiento mensual'), true);
 
   const normalized = normalizeContractPayload('nutricion', {
     service_examples: ['Consulta nutricional personalizada'],
@@ -63,7 +65,8 @@ function run() {
     appointment_action: { enabled: true, route: 'nutricion' },
   });
   assertNutritionContract(normalized);
-  assert.deepEqual(normalized.service_examples, ['Consulta nutricional personalizada']);
+  assert.equal(normalized.service_examples.includes('Consulta nutricional personalizada'), true);
+  assert.equal(normalized.service_examples.includes('Valoraci\u00f3n nutricional'), true);
 
   const dental = getBaseContractForArea('dental');
   assert.equal(dental.patient_workspace.enabled, false);

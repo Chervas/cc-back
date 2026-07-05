@@ -126,7 +126,7 @@ const TREATMENT_AREA_PROFILES = {
 const TREATMENT_SERVICE_EXAMPLES = {
   dental: ['Valoración dental', 'Limpieza dental', 'Revisión periodontal'],
   capilar: ['Valoración capilar', 'Mesoterapia capilar', 'Seguimiento postinjerto'],
-  nutricion: ['Consulta nutricional', 'Seguimiento nutricional', 'Estudio antropométrico ISAK'],
+  nutricion: ['Consulta nutricional', 'Valoración nutricional', 'Seguimiento nutricional', 'Estudio antropométrico ISAK', 'Plan de seguimiento mensual'],
   psicologia: ['Sesión de terapia individual', 'Evaluación psicológica inicial', 'Seguimiento terapéutico'],
   fisioterapia: ['Valoración fisioterapia', 'Sesión de rehabilitación', 'Revisión funcional'],
   estetica: ['Valoración estética facial', 'Tratamiento facial', 'Revisión postratamiento'],
@@ -303,8 +303,8 @@ const MEDICAL_AREA_CONTRACT_SECTIONS = {
     {
       title: 'Servicio cobrable',
       icon: 'heroicons_outline:clipboard-document-list',
-      body: 'El catálogo debe guardar servicios como Consulta nutricional, Seguimiento, Estudio ISAK o Plan mensual. No debe crear tratamientos llamados Primera cita.',
-      chips: ['Consulta nutricional', 'Seguimiento', 'Estudio ISAK', 'Pack'],
+      body: 'El catálogo debe guardar servicios como Consulta nutricional, Valoración nutricional, Seguimiento, Estudio ISAK o Plan mensual. No debe crear tratamientos llamados Primera cita.',
+      chips: ['Consulta nutricional', 'Valoración nutricional', 'Seguimiento', 'Estudio ISAK', 'Pack'],
     },
     {
       title: 'Tipo de cita',
@@ -474,7 +474,7 @@ const TREATMENT_SETUP_STEPS_BY_AREA = {
     {
       title: 'Servicio cobrable',
       icon: 'heroicons_outline:tag',
-      body: 'Consulta, seguimiento, estudio ISAK o pack. No es el tipo de cita.',
+      body: 'Consulta, valoración, seguimiento, estudio ISAK o pack. No es el tipo de cita.',
       section: 'service',
     },
     {
@@ -545,6 +545,19 @@ function normalizeStringArray(value, fallback = []) {
   });
 
   return unique.length ? unique : cloneJson(fallback);
+}
+
+function normalizeServiceExamples(code, value, fallback = []) {
+  const normalized = normalizeStringArray(value, fallback);
+  if (normalizeCode(code) !== 'nutricion') {
+    return normalized;
+  }
+
+  const required = TREATMENT_SERVICE_EXAMPLES.nutricion;
+  return [
+    ...required,
+    ...normalized.filter((item) => !required.includes(item)),
+  ];
 }
 
 function normalizeApplicationOptions(value, fallback = []) {
@@ -703,6 +716,41 @@ function normalizeAppointmentAction(value, fallback = APPOINTMENT_ACTIONS[FALLBA
   };
 }
 
+function normalizeNutritionContractDefaults(contract, fallback) {
+  if (contract.code !== 'nutricion') {
+    return contract;
+  }
+
+  const serviceSection = fallback.contract_sections?.[0];
+  const serviceStep = fallback.setup_steps?.find((step) => step.section === 'service');
+
+  return {
+    ...contract,
+    contract_sections: contract.contract_sections.map((section, index) => {
+      if (index !== 0 || !serviceSection || /Valoraci[oó]n nutricional/i.test(section.body)) {
+        return section;
+      }
+      return {
+        ...section,
+        body: serviceSection.body,
+        chips: normalizeStringArray([
+          ...(serviceSection.chips || []),
+          ...(section.chips || []),
+        ], serviceSection.chips || []),
+      };
+    }),
+    setup_steps: contract.setup_steps.map((step) => {
+      if (step.section !== 'service' || !serviceStep || /valoraci[oó]n/i.test(step.body)) {
+        return step;
+      }
+      return {
+        ...step,
+        body: serviceStep.body,
+      };
+    }),
+  };
+}
+
 function getBaseContractForArea(code) {
   const normalized = normalizeCode(code);
   const profile = TREATMENT_AREA_PROFILES[normalized] || TREATMENT_AREA_PROFILES[FALLBACK_CODE];
@@ -724,10 +772,10 @@ function normalizeContractPayload(code, payload = {}) {
   const source = payload?.contract && typeof payload.contract === 'object' ? payload.contract : payload;
   const normalizedCode = normalizeCode(source?.code || code);
   const normalizedBase = normalizedCode === base.code ? base : getBaseContractForArea(normalizedCode);
-  return {
+  const contract = {
     code: normalizedCode,
     profile: normalizeProfile(source?.profile, normalizedBase.profile),
-    service_examples: normalizeStringArray(source?.service_examples, normalizedBase.service_examples),
+    service_examples: normalizeServiceExamples(normalizedCode, source?.service_examples, normalizedBase.service_examples),
     contract_sections: normalizeContractSections(source?.contract_sections, normalizedBase.contract_sections),
     setup_steps: normalizeSetupSteps(source?.setup_steps, normalizedBase.setup_steps),
     patient_workspace: normalizePatientWorkspace(source?.patient_workspace, normalizedBase.patient_workspace),
@@ -739,6 +787,8 @@ function normalizeContractPayload(code, payload = {}) {
       ? normalizeNutritionMeasurementProfileOptions(source?.nutrition_measurement_profile_options, normalizedBase.nutrition_measurement_profile_options)
       : [],
   };
+
+  return normalizeNutritionContractDefaults(contract, normalizedBase);
 }
 
 function mergeContract(base, override) {
