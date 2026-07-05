@@ -12,7 +12,7 @@ const medicalAreaContracts = require('./medicalAreaContracts.service');
 const { Op } = db.Sequelize;
 const execFileAsync = promisify(execFile);
 const FORMULA_VERSION = 'nutrition-basic-v2';
-const NUTRITION_REPORT_SNAPSHOT_VERSION = 2;
+const NUTRITION_REPORT_SNAPSHOT_VERSION = 3;
 const DEFAULT_CHROMIUM_PATH = '/home/ubuntu/.cache/clinicaclick-browsers/chrome-headless-shell/linux-148.0.7778.56/chrome-headless-shell-linux64/chrome-headless-shell';
 
 const FORMULA_REFERENCES = [
@@ -27,10 +27,18 @@ const FORMULA_REFERENCES = [
   {
     key: 'isak_restricted_profile',
     label: 'Perfil restringido ISAK',
-    description: 'Estructura de medición antropométrica restringida: masa, estatura, pliegues, perímetros y diámetros.',
-    source: 'ISAK restricted profile overview',
-    url: 'https://paulstokes.com.au/isak-restricted-profile/',
+    description: 'Estructura de medición antropométrica restringida: medidas base, pliegues, perímetros y diámetros.',
+    source: 'Australian Institute of Sport · ISAK Level 1 Restricted Profile',
+    url: 'https://www.ausport.gov.au/ais/performance-support/anthropometry',
     profiles: ['express_isak'],
+  },
+  {
+    key: 'waist_hip_ratio',
+    label: 'Ratio cintura/cadera',
+    description: 'Relación entre perímetro de cintura y perímetro de cadera como indicador antropométrico.',
+    source: 'WHO waist circumference and waist-hip ratio report',
+    url: 'https://www.who.int/publications/i/item/9789241501491',
+    profiles: ['quick', 'express_isak'],
   },
   {
     key: 'heath_carter_somatotype',
@@ -65,6 +73,8 @@ const FORMULA_REFERENCES = [
     profiles: ['quick', 'express_isak'],
   },
 ];
+
+const FORMULA_REFERENCES_BY_KEY = new Map(FORMULA_REFERENCES.map((reference) => [reference.key, reference]));
 
 const PROFILE_DEFINITIONS = medicalAreaContracts.NUTRITION_MEASUREMENT_PROFILE_SCHEMAS;
 const FIELD_DEFINITIONS = medicalAreaContracts.NUTRITION_MEASUREMENT_FIELD_DEFINITIONS;
@@ -300,22 +310,33 @@ function missingCalculationInputLabels(rawValues = {}, fields = [], fieldDefinit
     .map((field) => calculationInputLabel(field, fieldDefinitions));
 }
 
+function publicFormulaReferencesForKeys(keys = []) {
+  return Array.from(new Set(keys.filter(Boolean)))
+    .map((key) => FORMULA_REFERENCES_BY_KEY.get(key))
+    .filter(Boolean)
+    .map(({ profiles, ...reference }) => reference);
+}
+
 function buildCalculationTraceItem({
   key,
   label,
   method,
   source,
+  sourceKeys = [],
   applied,
   inputFields = [],
   missingInputs = [],
   outputKeys = [],
 }) {
   const uniqueMissingInputs = Array.from(new Set(missingInputs.filter(Boolean)));
+  const sourceReferences = publicFormulaReferencesForKeys(sourceKeys);
   return {
     key,
     label,
     method,
     source,
+    source_reference_keys: sourceReferences.map((reference) => reference.key),
+    source_references: sourceReferences,
     status: applied ? 'applied' : 'pending',
     applied: Boolean(applied),
     input_fields: inputFields,
@@ -336,6 +357,7 @@ function buildCalculationTrace(measurement = {}, fieldDefinitions = FIELD_DEFINI
     label: 'IMC',
     method: 'peso / estatura²',
     source: 'nutrition-basic-v2',
+    sourceKeys: ['bmi'],
     applied: Number.isFinite(Number(calculatedValues.bmi)),
     inputFields: bmiFields,
     missingInputs: missingCalculationInputLabels(rawValues, bmiFields, fieldDefinitions),
@@ -348,6 +370,7 @@ function buildCalculationTrace(measurement = {}, fieldDefinitions = FIELD_DEFINI
     label: 'Ratio cintura/cadera',
     method: 'cintura / cadera',
     source: 'nutrition-basic-v2',
+    sourceKeys: ['waist_hip_ratio'],
     applied: Number.isFinite(Number(calculatedValues.waist_hip_ratio)),
     inputFields: waistHipFields,
     missingInputs: missingCalculationInputLabels(rawValues, waistHipFields, fieldDefinitions),
@@ -363,6 +386,7 @@ function buildCalculationTrace(measurement = {}, fieldDefinitions = FIELD_DEFINI
       label: 'Suma de pliegues',
       method: 'suma de pliegues registrados',
       source: 'nutrition-basic-v2',
+      sourceKeys: ['isak_restricted_profile'],
       applied: Number.isFinite(Number(calculatedValues.skinfold_sum_mm)),
       inputFields: skinfoldFields,
       missingInputs: skinfoldCount > 0 ? [] : ['Al menos un pliegue'],
@@ -377,6 +401,7 @@ function buildCalculationTrace(measurement = {}, fieldDefinitions = FIELD_DEFINI
       label: 'Brazo corregido',
       method: 'brazo flexionado - pliegue tríceps/10',
       source: 'nutrition-basic-v2',
+      sourceKeys: ['heath_carter_somatotype'],
       applied: Number.isFinite(Number(calculatedValues.corrected_arm_girth_cm)),
       inputFields: correctedArmFields,
       missingInputs: missingCalculationInputLabels(rawValues, correctedArmFields, fieldDefinitions),
@@ -391,6 +416,7 @@ function buildCalculationTrace(measurement = {}, fieldDefinitions = FIELD_DEFINI
       label: 'Pantorrilla corregida',
       method: 'pantorrilla - pliegue pantorrilla medial/10',
       source: 'nutrition-basic-v2',
+      sourceKeys: ['heath_carter_somatotype'],
       applied: Number.isFinite(Number(calculatedValues.corrected_calf_girth_cm)),
       inputFields: correctedCalfFields,
       missingInputs: missingCalculationInputLabels(rawValues, correctedCalfFields, fieldDefinitions),
@@ -416,6 +442,7 @@ function buildCalculationTrace(measurement = {}, fieldDefinitions = FIELD_DEFINI
       label: 'Somatotipo Heath-Carter',
       method: 'endomorfia, mesomorfia y ectomorfia antropométricas',
       source: 'Heath-Carter anthropometric somatotype',
+      sourceKeys: ['heath_carter_somatotype'],
       applied: Boolean(calculatedValues.somatotype),
       inputFields: somatotypeFields,
       missingInputs: missingCalculationInputLabels(rawValues, somatotypeFields, fieldDefinitions),
@@ -438,6 +465,7 @@ function buildCalculationTrace(measurement = {}, fieldDefinitions = FIELD_DEFINI
       label: 'Composición corporal',
       method: 'Durnin-Womersley 4 pliegues + Siri',
       source: 'Durnin-Womersley 1974 + Siri conversion',
+      sourceKeys: ['durnin_womersley_body_density', 'siri_body_fat'],
       applied: Boolean(calculatedValues.body_composition),
       inputFields: [...bodyCompositionFields, 'patient_sex', 'patient_age'],
       missingInputs: missingBodyCompositionInputs,
@@ -1027,7 +1055,8 @@ function isCurrentNutritionReportSnapshot(row) {
   return Number.isFinite(version)
     && version >= NUTRITION_REPORT_SNAPSHOT_VERSION
     && Array.isArray(snapshot?.report?.calculation_trace)
-    && snapshot.report.calculation_trace.length > 0;
+    && snapshot.report.calculation_trace.length > 0
+    && snapshot.report.calculation_trace.every((item) => Array.isArray(item?.source_references));
 }
 
 function attachReportSnapshots(reports = [], snapshotRows = []) {
@@ -1582,13 +1611,18 @@ function buildNutritionReportHtml(reportData) {
     <section class="card">
       <h2>Trazabilidad de cálculo</h2>
       <table>
-        <thead><tr><th>Cálculo</th><th>Estado</th><th>Método</th><th>Entradas pendientes</th></tr></thead>
+        <thead><tr><th>Cálculo</th><th>Estado</th><th>Método</th><th>Fuente</th><th>Entradas pendientes</th></tr></thead>
         <tbody>
           ${calculationTrace.map((item) => `
             <tr>
               <td>${escapeHtml(item.label)}</td>
               <td><span class="status ${item.applied ? 'status-ok' : 'status-pending'}">${item.applied ? 'Aplicado' : 'Pendiente'}</span></td>
               <td>${escapeHtml(item.method || item.source || '')}</td>
+              <td>${(item.source_references || []).length
+                ? item.source_references.map((reference) => reference.url
+                  ? `<a href="${escapeHtml(reference.url)}">${escapeHtml(reference.label || reference.source || reference.key)}</a>`
+                  : `<span>${escapeHtml(reference.label || reference.source || reference.key)}</span>`).join('<br>')
+                : escapeHtml(item.source || '-')}</td>
               <td>${escapeHtml(item.applied ? '-' : (item.missing_input_labels || []).join(', ') || 'Datos insuficientes')}</td>
             </tr>
           `).join('')}

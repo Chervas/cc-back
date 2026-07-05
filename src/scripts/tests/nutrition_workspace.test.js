@@ -75,6 +75,14 @@ function run() {
   }, 'express_isak', maleAdultContext);
 
   assert.equal(FORMULA_VERSION, 'nutrition-basic-v2');
+  assert.equal(
+    FORMULA_REFERENCES.find((reference) => reference.key === 'waist_hip_ratio').url,
+    'https://www.who.int/publications/i/item/9789241501491',
+  );
+  assert.equal(
+    FORMULA_REFERENCES.find((reference) => reference.key === 'isak_restricted_profile').url,
+    'https://www.ausport.gov.au/ais/performance-support/anthropometry',
+  );
   assert.equal(calculated.bmi, 24.7);
   assert.equal(calculated.waist_hip_ratio, 0.85);
   assert.equal(calculated.skinfold_sum_mm, 94);
@@ -166,7 +174,13 @@ function run() {
   const secondReport = reports.find((report) => report.measurement_id === 2);
   assert.equal(secondReport.comparison.available, true);
   assert.equal(secondReport.calculation_trace.find((item) => item.key === 'bmi').status, 'applied');
+  assert.equal(secondReport.calculation_trace.find((item) => item.key === 'bmi').source_references[0].key, 'bmi');
+  assert.equal(secondReport.calculation_trace.find((item) => item.key === 'waist_hip_ratio').source_references[0].key, 'waist_hip_ratio');
   assert.equal(secondReport.calculation_trace.find((item) => item.key === 'body_composition').status, 'applied');
+  assert.deepEqual(
+    secondReport.calculation_trace.find((item) => item.key === 'body_composition').source_reference_keys,
+    ['durnin_womersley_body_density', 'siri_body_fat'],
+  );
   assert.deepEqual(secondReport.calculation_trace.find((item) => item.key === 'body_composition').missing_input_labels, []);
   assert.equal(secondReport.comparison.previous_measurement_id, 1);
   assert.equal(secondReport.comparison.days_between, 56);
@@ -261,9 +275,11 @@ function run() {
   assert.match(html, /Bases de cálculo/);
   assert.match(html, /Trazabilidad de cálculo/);
   assert.match(html, /Aplicado/);
+  assert.match(html, /WHO waist circumference and waist-hip ratio report/);
   assert.match(html, /Composición corporal/);
   assert.match(html, /Grasa estimada/);
   assert.match(html, /Durnin-Womersley/);
+  assert.match(html, /Siri body density conversion/);
   assert.match(html, /Somatotipo Heath-Carter/);
   assert.doesNotMatch(html, /148 kg/);
 
@@ -283,7 +299,7 @@ function run() {
     },
   }, html, '2026-02-26T11:00:00.000Z');
   assert.equal(snapshotPayload.snapshot.kind, 'nutrition_measurement_report');
-  assert.equal(snapshotPayload.snapshot.snapshot_version, 2);
+  assert.equal(snapshotPayload.snapshot.snapshot_version, 3);
   assert.equal(snapshotPayload.snapshot.measurement.id, 2);
   assert.equal(snapshotPayload.snapshot.report.measurement_id, 2);
   assert.equal(snapshotPayload.snapshot.meta.storage, 'patient_nutrition_report_snapshot');
