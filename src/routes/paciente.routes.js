@@ -15,6 +15,9 @@ router.get('/:id/consentimientos', consentimientosController.listPatientDocument
 router.get('/:id/activity', pacienteController.getPacienteActivity);
 router.get('/:id/nutrition-workspace', nutritionWorkspaceController.getPatientNutritionWorkspace);
 router.post('/:id/nutrition-measurements', nutritionWorkspaceController.createPatientNutritionMeasurement);
+router.get('/:id/nutrition-measurements/:measurementId/photos', nutritionWorkspaceController.listPatientNutritionMeasurementPhotos);
+router.post('/:id/nutrition-measurements/:measurementId/photos', nutritionWorkspaceController.createPatientNutritionMeasurementPhoto);
+router.get('/:id/nutrition-measurements/:measurementId/photos/:photoId', nutritionWorkspaceController.getPatientNutritionMeasurementPhoto);
 router.post('/:id/nutrition-measurements/:measurementId/report/snapshot', nutritionWorkspaceController.createPatientNutritionMeasurementReportSnapshot);
 router.post('/:id/nutrition-measurements/:measurementId/report/finalize', nutritionWorkspaceController.finalizePatientNutritionMeasurementReport);
 router.get('/:id/nutrition-measurements/:measurementId/report/render', nutritionWorkspaceController.renderPatientNutritionMeasurementReport);

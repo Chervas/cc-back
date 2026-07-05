@@ -76,6 +76,75 @@ exports.createPatientNutritionMeasurement = asyncHandler(async (req, res) => {
   }
 });
 
+exports.listPatientNutritionMeasurementPhotos = asyncHandler(async (req, res) => {
+  try {
+    await assertNutritionAccess(req, 'nutrition.workspace.view');
+    const photos = await nutritionWorkspaceService.listNutritionMeasurementClinicalPhotos(
+      req.params.id,
+      req.params.measurementId,
+    );
+    return res.json({ items: photos });
+  } catch (error) {
+    const handled = sendNutritionError(error, res);
+    if (handled) return handled;
+    if (error.status === 404 || ['patient_not_found', 'measurement_not_found'].includes(error.message)) {
+      return res.status(404).json({ message: 'Medición no encontrada' });
+    }
+    throw error;
+  }
+});
+
+exports.createPatientNutritionMeasurementPhoto = asyncHandler(async (req, res) => {
+  try {
+    const actorUserId = req.userData?.userId || null;
+    await assertNutritionAccess(req, 'nutrition.workspace.view');
+    await assertNutritionAccess(req, 'nutrition.measurements.create');
+    const photo = await nutritionWorkspaceService.addNutritionMeasurementClinicalPhoto(
+      req.params.id,
+      req.params.measurementId,
+      req.body || {},
+      actorUserId,
+    );
+    return res.status(201).json(photo);
+  } catch (error) {
+    const handled = sendNutritionError(error, res);
+    if (handled) return handled;
+    if (error.status === 404 || ['patient_not_found', 'measurement_not_found'].includes(error.message)) {
+      return res.status(404).json({ message: 'Medición no encontrada' });
+    }
+    if (error.status === 400 || error.status === 413) {
+      return res.status(error.status).json({
+        message: error.message,
+        details: error.details || null,
+      });
+    }
+    throw error;
+  }
+});
+
+exports.getPatientNutritionMeasurementPhoto = asyncHandler(async (req, res) => {
+  try {
+    await assertNutritionAccess(req, 'nutrition.workspace.view');
+    const { asset, buffer, contentType, filename } = await nutritionWorkspaceService.readNutritionMeasurementClinicalPhoto(
+      req.params.id,
+      req.params.measurementId,
+      req.params.photoId,
+    );
+    res.setHeader('Content-Type', contentType || 'application/octet-stream');
+    res.setHeader('Content-Disposition', `inline; filename="${String(filename || `foto-nutricion-${asset.id}`).replace(/"/g, '')}"`);
+    res.setHeader('Content-Length', buffer.length);
+    res.setHeader('Cache-Control', 'private, no-store');
+    return res.send(buffer);
+  } catch (error) {
+    const handled = sendNutritionError(error, res);
+    if (handled) return handled;
+    if (error.status === 404 || ['patient_not_found', 'measurement_not_found', 'clinical_photo_not_found'].includes(error.message)) {
+      return res.status(404).json({ message: 'Foto no encontrada' });
+    }
+    throw error;
+  }
+});
+
 exports.renderPatientNutritionMeasurementReport = asyncHandler(async (req, res) => {
   try {
     await assertNutritionAccess(req, 'nutrition.workspace.view');

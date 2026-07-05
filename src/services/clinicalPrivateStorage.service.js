@@ -82,6 +82,8 @@ function assertPayload({ purpose, contentType, buffer }) {
   }
   const allowedForPurpose = purpose === 'nutrition_report_pdf' || purpose === 'consent_document_pdf'
     ? contentType === 'application/pdf'
+    : purpose === 'nutrition_clinical_photo'
+      ? ['image/jpeg', 'image/jpg', 'image/png', 'image/webp'].includes(contentType)
     : contentType === 'application/pdf' || contentType.startsWith('image/') || contentType === 'application/octet-stream';
   if (!allowedForPurpose) {
     const err = new Error('clinical_private_asset_content_type_not_allowed');

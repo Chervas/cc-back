@@ -982,9 +982,10 @@ function calculateNutritionValues(rawValues = {}, profileCode = 'quick', context
   };
 }
 
-function measurementToJson(row) {
+function measurementToJson(row, clinicalPhotos = []) {
   if (!row) return null;
   const plain = typeof row.toJSON === 'function' ? row.toJSON() : row;
+  const photos = Array.isArray(clinicalPhotos) ? clinicalPhotos : [];
   return {
     id: plain.id,
     patient_id: plain.patient_id,
@@ -999,9 +1000,64 @@ function measurementToJson(row) {
     formula_version: plain.formula_version || FORMULA_VERSION,
     quality_flags: plain.quality_flags_json || [],
     notes: plain.notes || '',
+    clinical_photos: photos,
+    clinical_photo_count: photos.length,
     created_at: plain.created_at,
     updated_at: plain.updated_at,
   };
+}
+
+function clinicalPhotoAssetToJson(asset) {
+  if (!asset) return null;
+  const plain = typeof asset.toJSON === 'function' ? asset.toJSON() : asset;
+  const metadata = plain.metadata && typeof plain.metadata === 'object' ? plain.metadata : {};
+  return {
+    id: plain.id,
+    public_id: plain.public_id,
+    measurement_id: toIntOrNull(plain.owner_id),
+    patient_id: plain.patient_id,
+    clinic_id: plain.clinic_id,
+    purpose: plain.purpose,
+    content_type: plain.content_type,
+    size_bytes: Number(plain.size_bytes || 0),
+    original_filename: plain.original_filename || null,
+    caption: metadata.caption || null,
+    measured_at: metadata.measured_at || null,
+    created_by: plain.created_by || null,
+    created_at: plain.created_at,
+    private_storage: {
+      sensitivity: plain.sensitivity || 'clinical_private',
+      provider: plain.provider || 'local_private',
+      public_media: false,
+    },
+  };
+}
+
+async function listNutritionPhotoAssetsForMeasurements(patientId, measurementIds = []) {
+  if (!db.ClinicalPrivateAsset || !patientId || !measurementIds.length) return [];
+  return db.ClinicalPrivateAsset.findAll({
+    where: {
+      patient_id: Number(patientId),
+      owner_type: 'patient_nutrition_measurement',
+      owner_id: { [Op.in]: measurementIds.map((id) => String(id)) },
+      purpose: 'nutrition_clinical_photo',
+      status: 'active',
+    },
+    order: [['created_at', 'DESC'], ['id', 'DESC']],
+    limit: Math.max(100, measurementIds.length * 10),
+  });
+}
+
+function groupClinicalPhotosByMeasurement(assets = []) {
+  const grouped = new Map();
+  (assets || []).forEach((asset) => {
+    const json = clinicalPhotoAssetToJson(asset);
+    if (!json?.measurement_id) return;
+    const list = grouped.get(json.measurement_id) || [];
+    list.push(json);
+    grouped.set(json.measurement_id, list);
+  });
+  return grouped;
 }
 
 function buildEvolution(measurements = []) {
@@ -1579,9 +1635,16 @@ async function getPatientNutritionWorkspace(patientIdentifier) {
     order: [['measured_at', 'DESC'], ['id', 'DESC']],
     limit: 50,
   });
+  const measurementIds = measurements.map((measurement) => Number(measurement.id)).filter(Boolean);
+  const photosByMeasurement = groupClinicalPhotosByMeasurement(
+    await listNutritionPhotoAssetsForMeasurements(patient.id_paciente, measurementIds),
+  );
   const reportSnapshots = await findCurrentNutritionReportSnapshotsForPatient(patient.id_paciente);
   const reports = attachReportSnapshots(buildReports(measurements, fieldDefinitions), reportSnapshots);
   const patientFormulaContext = buildPatientFormulaContext(patient);
+  const measurementJsonRows = measurements.map((measurement) => (
+    measurementToJson(measurement, photosByMeasurement.get(Number(measurement.id)) || [])
+  ));
 
   return {
     patient: {
@@ -1595,8 +1658,8 @@ async function getPatientNutritionWorkspace(patientIdentifier) {
     profiles: profileDefinitions,
     fields: fieldDefinitions,
     treatments: await getNutritionTreatments({ clinicId, groupId }),
-    latest: measurementToJson(measurements[0]),
-    measurements: measurements.map(measurementToJson),
+    latest: measurementJsonRows[0] || null,
+    measurements: measurementJsonRows,
     evolution: buildEvolution(measurements),
     projection: buildProjection(measurements),
     reports,
@@ -1607,6 +1670,109 @@ async function getPatientNutritionWorkspace(patientIdentifier) {
       generated_at: new Date().toISOString(),
     },
   };
+}
+
+async function findNutritionMeasurementForPatient(patientIdentifier, measurementIdentifier) {
+  const patient = await findPatient(patientIdentifier);
+  if (!patient) {
+    const error = new Error('patient_not_found');
+    error.status = 404;
+    throw error;
+  }
+  const measurementId = toIntOrNull(measurementIdentifier);
+  if (!measurementId) {
+    const error = new Error('measurement_not_found');
+    error.status = 404;
+    throw error;
+  }
+  const measurement = await db.PatientNutritionMeasurement.findOne({
+    where: {
+      id: measurementId,
+      patient_id: patient.id_paciente,
+    },
+  });
+  if (!measurement) {
+    const error = new Error('measurement_not_found');
+    error.status = 404;
+    throw error;
+  }
+  return { patient, measurement };
+}
+
+function decodeClinicalPhotoPayload(payload = {}) {
+  const raw = String(payload.data_url || payload.dataUrl || payload.base64 || payload.file_data || payload.fileData || '').trim();
+  if (!raw) {
+    const error = new Error('clinical_photo_payload_required');
+    error.status = 400;
+    throw error;
+  }
+  const dataUrlMatch = raw.match(/^data:([^;,]+);base64,(.+)$/i);
+  if (dataUrlMatch) {
+    return {
+      contentType: dataUrlMatch[1].toLowerCase(),
+      buffer: Buffer.from(dataUrlMatch[2], 'base64'),
+    };
+  }
+  return {
+    contentType: String(payload.content_type || payload.contentType || 'application/octet-stream').trim().toLowerCase(),
+    buffer: Buffer.from(raw, 'base64'),
+  };
+}
+
+async function listNutritionMeasurementClinicalPhotos(patientIdentifier, measurementIdentifier) {
+  const { patient, measurement } = await findNutritionMeasurementForPatient(patientIdentifier, measurementIdentifier);
+  const assets = await listNutritionPhotoAssetsForMeasurements(patient.id_paciente, [measurement.id]);
+  return assets.map(clinicalPhotoAssetToJson).filter(Boolean);
+}
+
+async function addNutritionMeasurementClinicalPhoto(patientIdentifier, measurementIdentifier, payload = {}, actorUserId = null) {
+  const { patient, measurement } = await findNutritionMeasurementForPatient(patientIdentifier, measurementIdentifier);
+  const decoded = decodeClinicalPhotoPayload(payload);
+  const asset = await clinicalPrivateStorage.storeClinicalPrivateAsset({
+    purpose: 'nutrition_clinical_photo',
+    clinicId: measurement.clinic_id || patient.clinica_id,
+    patientId: patient.id_paciente,
+    ownerType: 'patient_nutrition_measurement',
+    ownerId: measurement.id,
+    contentType: decoded.contentType,
+    buffer: decoded.buffer,
+    originalFilename: payload.original_filename || payload.filename || payload.name || null,
+    createdBy: actorUserId,
+    metadata: {
+      caption: payload.caption ? String(payload.caption).trim().slice(0, 500) : null,
+      measurement_id: measurement.id,
+      measured_at: measurement.measured_at,
+      profile_code: measurement.profile_code,
+      formula_version: measurement.formula_version || FORMULA_VERSION,
+    },
+  });
+  return clinicalPhotoAssetToJson(asset);
+}
+
+async function readNutritionMeasurementClinicalPhoto(patientIdentifier, measurementIdentifier, photoIdentifier) {
+  const { patient, measurement } = await findNutritionMeasurementForPatient(patientIdentifier, measurementIdentifier);
+  const photoId = toIntOrNull(photoIdentifier);
+  if (!photoId) {
+    const error = new Error('clinical_photo_not_found');
+    error.status = 404;
+    throw error;
+  }
+  const asset = await db.ClinicalPrivateAsset.findOne({
+    where: {
+      id: photoId,
+      patient_id: patient.id_paciente,
+      owner_type: 'patient_nutrition_measurement',
+      owner_id: String(measurement.id),
+      purpose: 'nutrition_clinical_photo',
+      status: 'active',
+    },
+  });
+  if (!asset) {
+    const error = new Error('clinical_photo_not_found');
+    error.status = 404;
+    throw error;
+  }
+  return clinicalPrivateStorage.readClinicalPrivateAsset(asset);
 }
 
 async function getPatientNutritionAccessContext(patientIdentifier) {
@@ -2331,6 +2497,9 @@ module.exports = {
   getPatientNutritionWorkspace,
   createNutritionMeasurement,
   getNutritionMeasurementReport,
+  listNutritionMeasurementClinicalPhotos,
+  addNutritionMeasurementClinicalPhoto,
+  readNutritionMeasurementClinicalPhoto,
   createNutritionMeasurementReportSnapshot,
   finalizeNutritionMeasurementReportSnapshot,
   renderNutritionMeasurementReport,
