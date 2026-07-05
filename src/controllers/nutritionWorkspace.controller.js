@@ -122,6 +122,33 @@ exports.createPatientNutritionMeasurementReportSnapshot = asyncHandler(async (re
   }
 });
 
+exports.finalizePatientNutritionMeasurementReport = asyncHandler(async (req, res) => {
+  try {
+    const actorUserId = req.userData?.userId || null;
+    await assertNutritionAccess(req, 'nutrition.workspace.view');
+    await assertNutritionAccess(req, 'nutrition.reports.finalize');
+    const snapshot = await nutritionWorkspaceService.finalizeNutritionMeasurementReportSnapshot(
+      req.params.id,
+      req.params.measurementId,
+      actorUserId,
+    );
+    if (!snapshot) {
+      return res.status(202).json({
+        message: 'report_snapshot_not_finalized',
+        details: { reason: 'storage_table_unavailable' },
+      });
+    }
+    return res.status(201).json(snapshot);
+  } catch (error) {
+    const handled = sendNutritionError(error, res);
+    if (handled) return handled;
+    if (error.status === 404 || ['patient_not_found', 'measurement_not_found', 'report_not_available'].includes(error.message)) {
+      return res.status(404).json({ message: 'Informe no encontrado' });
+    }
+    throw error;
+  }
+});
+
 exports.getPatientNutritionMeasurementReportPdf = asyncHandler(async (req, res) => {
   try {
     await assertNutritionAccess(req, 'nutrition.workspace.view');

@@ -13,6 +13,7 @@ const { Op } = db.Sequelize;
 const execFileAsync = promisify(execFile);
 const FORMULA_VERSION = 'nutrition-basic-v2';
 const NUTRITION_REPORT_SNAPSHOT_VERSION = 3;
+const NUTRITION_REPORT_CURRENT_STATUSES = ['final', 'active'];
 const DEFAULT_CHROMIUM_PATH = '/home/ubuntu/.cache/clinicaclick-browsers/chrome-headless-shell/linux-148.0.7778.56/chrome-headless-shell-linux64/chrome-headless-shell';
 
 const FORMULA_REFERENCES = [
@@ -1029,9 +1030,29 @@ function nutritionReportSnapshotToJson(row) {
     storage_strategy: plain.storage_strategy || 'json_snapshot_printable_on_demand',
     generated_by: plain.generated_by,
     generated_at: plain.generated_at,
+    finalized_by: plain.finalized_by || null,
+    finalized_at: plain.finalized_at || null,
     created_at: plain.created_at,
     updated_at: plain.updated_at,
   };
+}
+
+function reportSnapshotStatusRank(snapshot) {
+  const status = String(snapshot?.status || '').trim().toLowerCase();
+  if (status === 'final') return 0;
+  if (status === 'active') return 1;
+  return 2;
+}
+
+function shouldPreferNutritionReportSnapshot(candidate, current) {
+  if (!current) return true;
+  const candidateRank = reportSnapshotStatusRank(candidate);
+  const currentRank = reportSnapshotStatusRank(current);
+  if (candidateRank !== currentRank) return candidateRank < currentRank;
+  const candidateTime = new Date(candidate?.generated_at || candidate?.created_at || 0).getTime();
+  const currentTime = new Date(current?.generated_at || current?.created_at || 0).getTime();
+  if (candidateTime !== currentTime) return candidateTime > currentTime;
+  return Number(candidate?.id || 0) > Number(current?.id || 0);
 }
 
 function parseSnapshotJson(row) {
@@ -1063,10 +1084,10 @@ function attachReportSnapshots(reports = [], snapshotRows = []) {
   const snapshotsByMeasurement = new Map();
   (snapshotRows || []).forEach((row) => {
     const snapshot = nutritionReportSnapshotToJson(row);
-    if (!snapshot || snapshot.status !== 'active') return;
+    if (!snapshot || !NUTRITION_REPORT_CURRENT_STATUSES.includes(snapshot.status)) return;
     const key = `${snapshot.measurement_id}:${snapshot.report_type}`;
     const current = snapshotsByMeasurement.get(key);
-    if (!current || new Date(snapshot.generated_at).getTime() > new Date(current.generated_at).getTime()) {
+    if (shouldPreferNutritionReportSnapshot(snapshot, current)) {
       snapshotsByMeasurement.set(key, snapshot);
     }
   });
@@ -1086,13 +1107,13 @@ function attachReportSnapshots(reports = [], snapshotRows = []) {
   });
 }
 
-async function findActiveNutritionReportSnapshotsForPatient(patientId) {
+async function findCurrentNutritionReportSnapshotsForPatient(patientId) {
   if (!db.PatientNutritionReport || !patientId) return [];
   try {
     return await db.PatientNutritionReport.findAll({
       where: {
         patient_id: patientId,
-        status: 'active',
+        status: { [Op.in]: NUTRITION_REPORT_CURRENT_STATUSES },
       },
       order: [['generated_at', 'DESC'], ['id', 'DESC']],
       limit: 100,
@@ -1103,13 +1124,13 @@ async function findActiveNutritionReportSnapshotsForPatient(patientId) {
   }
 }
 
-async function findActiveNutritionReportSnapshot(measurementId, reportType = null) {
+async function findNutritionReportSnapshotByStatus(measurementId, reportType, status) {
   if (!db.PatientNutritionReport || !measurementId) return null;
   try {
     return await db.PatientNutritionReport.findOne({
       where: {
         measurement_id: measurementId,
-        status: 'active',
+        status,
         ...(reportType ? { report_type: reportType } : {}),
       },
       order: [['generated_at', 'DESC'], ['id', 'DESC']],
@@ -1118,6 +1139,12 @@ async function findActiveNutritionReportSnapshot(measurementId, reportType = nul
     if (isMissingReportTableError(error)) return null;
     throw error;
   }
+}
+
+async function findCurrentNutritionReportSnapshot(measurementId, reportType = null) {
+  const finalSnapshot = await findNutritionReportSnapshotByStatus(measurementId, reportType, 'final');
+  if (finalSnapshot) return finalSnapshot;
+  return findNutritionReportSnapshotByStatus(measurementId, reportType, 'active');
 }
 
 function buildNutritionReportSnapshotPayload(reportData, renderedHtml, generatedAt = new Date().toISOString()) {
@@ -1210,7 +1237,7 @@ async function getPatientNutritionWorkspace(patientIdentifier) {
     order: [['measured_at', 'DESC'], ['id', 'DESC']],
     limit: 50,
   });
-  const reportSnapshots = await findActiveNutritionReportSnapshotsForPatient(patient.id_paciente);
+  const reportSnapshots = await findCurrentNutritionReportSnapshotsForPatient(patient.id_paciente);
   const reports = attachReportSnapshots(buildReports(measurements, fieldDefinitions), reportSnapshots);
   const patientFormulaContext = buildPatientFormulaContext(patient);
 
@@ -1403,7 +1430,7 @@ async function buildNutritionMeasurementReportData(patientIdentifier, measuremen
 
 async function getNutritionMeasurementReport(patientIdentifier, measurementIdentifier) {
   const reportData = await buildNutritionMeasurementReportData(patientIdentifier, measurementIdentifier);
-  const snapshot = await findActiveNutritionReportSnapshot(
+  const snapshot = await findCurrentNutritionReportSnapshot(
     reportData.measurement.id,
     reportData.report.report_type,
   );
@@ -1432,9 +1459,19 @@ async function createNutritionMeasurementReportSnapshot(patientIdentifier, measu
   if (!db.PatientNutritionReport) return null;
 
   const reportData = await buildNutritionMeasurementReportData(patientIdentifier, measurementIdentifier);
-  const existing = await findActiveNutritionReportSnapshot(
+  const finalSnapshot = await findNutritionReportSnapshotByStatus(
     reportData.measurement.id,
     reportData.report.report_type,
+    'final',
+  );
+  if (finalSnapshot) {
+    return nutritionReportSnapshotToJson(finalSnapshot);
+  }
+
+  const existing = await findNutritionReportSnapshotByStatus(
+    reportData.measurement.id,
+    reportData.report.report_type,
+    'active',
   );
   if (existing && isCurrentNutritionReportSnapshot(existing)) {
     return nutritionReportSnapshotToJson(existing);
@@ -1487,6 +1524,77 @@ async function createNutritionMeasurementReportSnapshot(patientIdentifier, measu
   }
 }
 
+async function finalizeNutritionMeasurementReportSnapshot(patientIdentifier, measurementIdentifier, actorUserId = null) {
+  if (!db.PatientNutritionReport) return null;
+
+  const reportData = await buildNutritionMeasurementReportData(patientIdentifier, measurementIdentifier);
+  const existingFinal = await findNutritionReportSnapshotByStatus(
+    reportData.measurement.id,
+    reportData.report.report_type,
+    'final',
+  );
+  if (existingFinal) {
+    return nutritionReportSnapshotToJson(existingFinal);
+  }
+
+  const generatedAt = new Date().toISOString();
+  const normalizedReportData = {
+    ...reportData,
+    meta: {
+      ...reportData.meta,
+      generated_at: generatedAt,
+      storage: 'patient_nutrition_report_snapshot',
+      document_status: 'final',
+      finalized_at: generatedAt,
+      finalized_by: toIntOrNull(actorUserId),
+    },
+  };
+  const renderedHtml = buildNutritionReportHtml(normalizedReportData);
+  const { snapshot, snapshot_hash: snapshotHash } = buildNutritionReportSnapshotPayload(
+    normalizedReportData,
+    renderedHtml,
+    generatedAt,
+  );
+
+  try {
+    await db.PatientNutritionReport.update(
+      { status: 'superseded' },
+      {
+        where: {
+          measurement_id: reportData.measurement.id,
+          report_type: reportData.report.report_type,
+          status: 'active',
+        },
+      },
+    );
+    const row = await db.PatientNutritionReport.create({
+      public_id: await generateUniqueNutritionReportPublicId(),
+      measurement_id: reportData.measurement.id,
+      patient_id: reportData.patient.id,
+      clinic_id: reportData.patient.clinic_id,
+      appointment_id: reportData.measurement.appointment_id || null,
+      treatment_id: reportData.measurement.treatment_id || null,
+      report_type: reportData.report.report_type,
+      title: reportData.report.title,
+      status: 'final',
+      formula_version: reportData.report.formula_version || FORMULA_VERSION,
+      snapshot_json: snapshot,
+      snapshot_html: renderedHtml,
+      snapshot_hash: snapshotHash,
+      pdf_asset_id: null,
+      storage_strategy: 'final_json_snapshot_printable_on_demand',
+      generated_by: toIntOrNull(actorUserId),
+      generated_at: generatedAt,
+      finalized_by: toIntOrNull(actorUserId),
+      finalized_at: generatedAt,
+    });
+    return nutritionReportSnapshotToJson(row);
+  } catch (error) {
+    if (isMissingReportTableError(error)) return null;
+    throw error;
+  }
+}
+
 function rawMeasurementRows(measurement = {}, profileDefinitions = PROFILE_DEFINITIONS, fieldDefinitions = FIELD_DEFINITIONS) {
   const profile = profileDefinitions.find((item) => item.code === measurement.profile_code) || profileDefinitions[0] || PROFILE_DEFINITIONS[0];
   const rawValues = measurement.raw_values || {};
@@ -1505,6 +1613,8 @@ function rawMeasurementRows(measurement = {}, profileDefinitions = PROFILE_DEFIN
 function buildNutritionReportHtml(reportData) {
   const { patient, treatment, appointment, measurement, report, projection, meta } = reportData;
   const profileLabel = measurement.profile_code === 'express_isak' ? 'Express/ISAK' : 'Rápido';
+  const isFinalDocument = meta?.document_status === 'final';
+  const documentStatusLabel = isFinalDocument ? 'Informe final' : 'Borrador calculado';
   const comparison = report.comparison || { available: false };
   const sectionsHtml = (report.sections || []).map((section) => `
     <section class="card">
@@ -1661,6 +1771,7 @@ function buildNutritionReportHtml(reportData) {
     h2 { margin: 0 0 12px; font-size: 15px; }
     .muted { color: #64748b; }
     .pill { display: inline-flex; align-items: center; border-radius: 999px; background: #ecfdf5; color: #047857; padding: 4px 10px; font-size: 11px; font-weight: 700; }
+    .pill-final { background: #eef2ff; color: #3730a3; }
     .summary { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px 18px; margin-top: 16px; }
     .summary dt { color: #64748b; font-size: 11px; text-transform: uppercase; letter-spacing: .04em; }
     .summary dd { margin: 2px 0 0; font-weight: 700; }
@@ -1692,7 +1803,7 @@ function buildNutritionReportHtml(reportData) {
         <h1>${escapeHtml(report.title)}</h1>
         <p class="muted">${escapeHtml(patient.clinic_name || 'Clínica')} · Generado el ${escapeHtml(formatDate(meta.generated_at))}</p>
       </div>
-      <span class="pill">${escapeHtml(meta.formula_version)}</span>
+      <span class="pill ${isFinalDocument ? 'pill-final' : ''}">${escapeHtml(documentStatusLabel)} · ${escapeHtml(meta.formula_version)}</span>
     </header>
     <section class="card">
       <dl class="summary">
@@ -1713,7 +1824,7 @@ function buildNutritionReportHtml(reportData) {
     ${formulaReferencesHtml}
     ${rawHtml}
     <footer>
-      Informe calculado bajo demanda desde medición #${escapeHtml(measurement.id)} con ${escapeHtml(meta.formula_version)}. No persistido en PUBLIC_MEDIA.
+      ${escapeHtml(documentStatusLabel)} desde medición #${escapeHtml(measurement.id)} con ${escapeHtml(meta.formula_version)}. Snapshot clínico privado con hash; no persistido en PUBLIC_MEDIA.
     </footer>
   </main>
 </body>
@@ -1752,7 +1863,7 @@ async function htmlToPdfBuffer(html, filenameSeed = 'nutrition-report') {
 
 async function renderNutritionMeasurementReport(patientIdentifier, measurementIdentifier) {
   const reportData = await buildNutritionMeasurementReportData(patientIdentifier, measurementIdentifier);
-  const snapshot = await findActiveNutritionReportSnapshot(
+  const snapshot = await findCurrentNutritionReportSnapshot(
     reportData.measurement.id,
     reportData.report.report_type,
   );
@@ -1764,7 +1875,7 @@ async function renderNutritionMeasurementReport(patientIdentifier, measurementId
 
 async function generateNutritionMeasurementReportPdf(patientIdentifier, measurementIdentifier) {
   const reportData = await buildNutritionMeasurementReportData(patientIdentifier, measurementIdentifier);
-  const snapshot = await findActiveNutritionReportSnapshot(
+  const snapshot = await findCurrentNutritionReportSnapshot(
     reportData.measurement.id,
     reportData.report.report_type,
   );
@@ -1789,6 +1900,7 @@ module.exports = {
   createNutritionMeasurement,
   getNutritionMeasurementReport,
   createNutritionMeasurementReportSnapshot,
+  finalizeNutritionMeasurementReportSnapshot,
   renderNutritionMeasurementReport,
   generateNutritionMeasurementReportPdf,
   __testing: {

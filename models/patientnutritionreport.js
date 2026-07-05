@@ -45,6 +45,11 @@ module.exports = (sequelize, DataTypes) => {
           targetKey: 'id_usuario',
           as: 'generatedBy',
         });
+        PatientNutritionReport.belongsTo(models.Usuario, {
+          foreignKey: 'finalized_by',
+          targetKey: 'id_usuario',
+          as: 'finalizedBy',
+        });
       }
     }
   }
@@ -72,6 +77,8 @@ module.exports = (sequelize, DataTypes) => {
     },
     generated_by: { type: DataTypes.INTEGER, allowNull: true },
     generated_at: { type: DataTypes.DATE, allowNull: false, defaultValue: DataTypes.NOW },
+    finalized_by: { type: DataTypes.INTEGER, allowNull: true },
+    finalized_at: { type: DataTypes.DATE, allowNull: true },
   }, {
     sequelize,
     modelName: 'PatientNutritionReport',

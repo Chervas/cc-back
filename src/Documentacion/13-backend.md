@@ -91,7 +91,7 @@ Contrato:
 
 - `scope_type`: `group` o `clinic`.
 - `scope_id`: ID del grupo o clínica.
-- `feature_key`: `marketing`, `clinic.settings.edit`, `team.manage`, `billing.reports.view`, `patients.view`, `patients.edit`, `appointments.manage`, `consents.manage`, `quickchat.read_patients`, `quickchat.read_team`, `quickchat.read_leads`, `nutrition.workspace.view`, `nutrition.measurements.create`.
+- `feature_key`: `marketing`, `clinic.settings.edit`, `team.manage`, `billing.reports.view`, `patients.view`, `patients.edit`, `appointments.manage`, `consents.manage`, `quickchat.read_patients`, `quickchat.read_team`, `quickchat.read_leads`, `nutrition.workspace.view`, `nutrition.measurements.create`, `nutrition.reports.finalize`.
 - `role_code`: `propietario`, `agencia`, `doctor`, `assistant`, `reception`, `admin_staff` o `unknown`.
 - `effect`: `allow` o `deny`; `state=inherit` borra el override.
 
@@ -100,7 +100,7 @@ Reglas:
 - `administrador` no se persiste como `role_code`; mantiene acceso completo.
 - Un administrador puede leer/escribir todos los ámbitos. Un propietario solo puede escribir overrides en sus clínicas/grupos; el resto de staff solo lee sus ámbitos accesibles.
 - La tabla `AccessPolicyOverrides` usa una clave única por `scope_type`, `scope_id`, `feature_key` y `role_code`.
-- Nutrición consume estos permisos en backend: `nutrition.workspace.view` protege la ficha, informes HTML y PDF; `nutrition.measurements.create` protege alta de mediciones y snapshots persistidos, siempre junto a `nutrition.workspace.view`. Por defecto solo propietario, doctor y auxiliar acceden a mediciones clínicas; recepción, administración y agencia pueden habilitarse por override si la clínica lo decide.
+- Nutrición consume estos permisos en backend: `nutrition.workspace.view` protege la ficha, informes HTML y PDF; `nutrition.measurements.create` protege alta de mediciones y snapshots persistidos, siempre junto a `nutrition.workspace.view`; `nutrition.reports.finalize` protege el cierre de informes como snapshot final. Por defecto propietario y doctor pueden cerrar informes; auxiliar puede registrar mediciones pero no cerrar informes salvo override.
 
 ## Workspace Nutricion / ISAK
 
@@ -110,6 +110,7 @@ Endpoints reales:
 |:---|:---|:---|
 | `GET /api/pacientes/:id/nutrition-workspace` | Operativo V1 dev | Devuelve perfiles rapido/express, campos, tratamientos de Nutricion, mediciones, evolucion, proyeccion e informes derivados. |
 | `POST /api/pacientes/:id/nutrition-measurements` | Operativo V1 dev | Registra una medicion nutricional real del paciente y calcula resultados versionados. |
+| `POST /api/pacientes/:id/nutrition-measurements/:measurementId/report/finalize` | Operativo V1 dev | Cierra el snapshot del informe como `final`, supersede borradores activos y bloquea la regeneracion accidental de ese documento. |
 | `GET /api/pacientes/:id/nutrition-measurements/:measurementId/report/render` | Operativo V1 dev | Renderiza el informe HTML imprimible de una medicion. |
 | `GET /api/pacientes/:id/nutrition-measurements/:measurementId/report/pdf` | Operativo V1 dev | Genera el PDF bajo demanda con Chromium headless, sin persistirlo como fichero clinico. |
 | `GET /api/especialidades/area-contracts` | Operativo V1 dev | Devuelve contrato versionado por area medica para catalogo, agenda y workspaces: perfil de tratamiento, ejemplos de servicio, pasos de alta, secciones de contrato, accion clinica de agenda y opciones/schemas especificos de Nutricion. |
@@ -126,7 +127,7 @@ Contrato:
 - `PatientNutritionMeasurements` guarda mediciones por `patient_id`, `clinic_id`, `professional_id`, `appointment_id`, `treatment_id`, `profile_code`, `raw_values_json`, `calculated_values_json`, `formula_version` y `quality_flags_json`.
 - El motor `nutrition-basic-v2` calcula en backend IMC, ratio cintura/cadera, suma de pliegues, perimetros corregidos, somatotipo Heath-Carter cuando hay datos suficientes, composicion corporal estimada Durnin-Womersley + Siri si existen sexo/edad/peso/4 pliegues requeridos, y proyeccion lineal simple con las ultimas dos mediciones. Las mediciones historicas pueden conservar `nutrition-basic-v1` en su snapshot.
 - El contrato de workspace e informes incluye `formula_references` con bases publicas/metodologicas usadas por `nutrition-basic-v2` para que el frontend y el HTML/PDF puedan mostrar la trazabilidad de calculo. Incluye IMC, perfil restringido ISAK, somatotipo Heath-Carter, densidad corporal Durnin-Womersley, porcentaje graso Siri y la proyeccion lineal simple propia.
-- Informes V1 se materializan en `PatientNutritionReports` como snapshot JSON/HTML con `snapshot_hash`, `formula_version`, `report_type`, `measurement_id`, `patient_id`, `clinic_id`, `appointment_id` y `treatment_id`. Al crear una medicion se intenta crear automaticamente el snapshot activo; `POST /api/pacientes/:id/nutrition-measurements/:measurementId/report/snapshot` permite materializarlo para mediciones antiguas. El PDF sigue generandose bajo demanda desde el snapshot con Chromium y no se persiste como fuente primaria. Storage privado de binarios/fotos clinicas queda pendiente. No usar `PUBLIC_MEDIA` para informes, fotos clinicas ni datos antropometricos identificables.
+- Informes V1 se materializan en `PatientNutritionReports` como snapshot JSON/HTML con `snapshot_hash`, `formula_version`, `report_type`, `measurement_id`, `patient_id`, `clinic_id`, `appointment_id` y `treatment_id`. Al crear una medicion se intenta crear automaticamente el snapshot activo; `POST /api/pacientes/:id/nutrition-measurements/:measurementId/report/snapshot` permite materializarlo para mediciones antiguas. `POST /api/pacientes/:id/nutrition-measurements/:measurementId/report/finalize` crea un snapshot `final`, marca los borradores `active` como `superseded` y anota `finalized_by/finalized_at`; render y PDF priorizan siempre `final` sobre `active`. El PDF sigue generandose bajo demanda desde el snapshot con Chromium y no se persiste como fuente primaria. Storage privado de binarios/fotos clinicas queda pendiente. No usar `PUBLIC_MEDIA` para informes, fotos clinicas ni datos antropometricos identificables.
 - `GET /api/citas/calendar` incluye `tratamiento.disciplina`, `tratamiento.categoria` y `tratamiento.clinical_config` para que la agenda pueda mostrar `Registrar medicion` cuando el tratamiento tenga perfil de medicion asociado.
 - Para citas de Nutricion con perfil de medicion asociado, `GET /api/citas/calendar` y `GET /api/citas/:id` adjuntan `nutrition_latest_measurement` si existe una medicion anterior del paciente. Se calcula en backend con una consulta separada a `PatientNutritionMeasurements` y enriquecimiento por mapa, sin recomponerlo desde Angular.
 - `src/scripts/tests/medical_area_contracts.test.js` protege el contrato base de Nutricion: perfiles `none/quick/express_isak`, `required_fields`, tipos de servicio, workspace de paciente y accion clinica de agenda.

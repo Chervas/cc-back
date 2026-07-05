@@ -282,6 +282,23 @@ function run() {
   assert.match(html, /Siri body density conversion/);
   assert.match(html, /Somatotipo Heath-Carter/);
   assert.doesNotMatch(html, /148 kg/);
+  const finalHtml = __testing.buildNutritionReportHtml({
+    patient: { name: 'Paciente Test', clinic_name: 'Clinica Test' },
+    treatment: null,
+    appointment: null,
+    measurement: measurementJson(second),
+    report: secondReport,
+    projection: projectionForSecond,
+    meta: {
+      formula_version: FORMULA_VERSION,
+      formula_references: FORMULA_REFERENCES,
+      generated_at: '2026-02-26T11:00:00.000Z',
+      document_status: 'final',
+    },
+  });
+  assert.match(finalHtml, /Informe final/);
+  assert.match(finalHtml, /Snapshot clínico privado/);
+  assert.match(finalHtml, /no persistido en PUBLIC_MEDIA/);
 
   const snapshotPayload = __testing.buildNutritionReportSnapshotPayload({
     patient: { id: 1, name: 'Paciente Test', clinic_id: 1, clinic_name: 'Clinica Test' },

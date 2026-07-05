@@ -18,6 +18,7 @@ const ALLOWED_FEATURE_KEYS = new Set([
   'quickchat.read_leads',
   'nutrition.workspace.view',
   'nutrition.measurements.create',
+  'nutrition.reports.finalize',
 ]);
 
 const ALLOWED_ROLE_CODES = new Set([
@@ -144,6 +145,15 @@ const DEFAULT_FEATURES = {
     agencia: false,
     doctor: true,
     assistant: true,
+    reception: false,
+    admin_staff: false,
+    unknown: false,
+  },
+  'nutrition.reports.finalize': {
+    propietario: true,
+    agencia: false,
+    doctor: true,
+    assistant: false,
     reception: false,
     admin_staff: false,
     unknown: false,
