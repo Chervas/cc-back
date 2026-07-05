@@ -1021,6 +1021,21 @@ async function getPatientNutritionWorkspace(patientIdentifier) {
   };
 }
 
+async function getPatientNutritionAccessContext(patientIdentifier) {
+  const patient = await findPatient(patientIdentifier);
+  if (!patient) {
+    const error = new Error('patient_not_found');
+    error.status = 404;
+    throw error;
+  }
+
+  return {
+    patient_id: patient.id_paciente,
+    clinic_id: Number(patient.clinica_id),
+    group_id: toIntOrNull(patient.clinica?.grupoClinicaId || patient.clinica?.grupo_clinica_id),
+  };
+}
+
 async function createNutritionMeasurement(patientIdentifier, payload = {}, actorUserId = null) {
   const patient = await findPatient(patientIdentifier);
   if (!patient) {
@@ -1514,6 +1529,7 @@ module.exports = {
   PROFILE_DEFINITIONS,
   FIELD_DEFINITIONS,
   calculateNutritionValues,
+  getPatientNutritionAccessContext,
   getPatientNutritionWorkspace,
   createNutritionMeasurement,
   getNutritionMeasurementReport,

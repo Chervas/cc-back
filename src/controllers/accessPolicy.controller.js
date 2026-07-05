@@ -2,22 +2,14 @@
 
 const { Op } = require('sequelize');
 const { AccessPolicyOverride, UsuarioClinica, Clinica } = require('../../models');
-const { ADMIN_USER_IDS, STAFF_ROLES, isGlobalAdmin } = require('../lib/role-helpers');
+const { ADMIN_USER_IDS, STAFF_ROLES } = require('../lib/role-helpers');
+const {
+  ALLOWED_FEATURE_KEYS,
+  ALLOWED_ROLE_CODES,
+  normalizeFeatureKey,
+  normalizeRoleCode,
+} = require('../lib/access-policy');
 const ALLOWED_SCOPE_TYPES = new Set(['group', 'clinic']);
-const ALLOWED_FEATURE_KEYS = new Set([
-  'marketing',
-  'clinic.settings.edit',
-  'team.manage',
-  'billing.reports.view',
-  'patients.view',
-  'patients.edit',
-  'appointments.manage',
-  'consents.manage',
-  'quickchat.read_patients',
-  'quickchat.read_team',
-  'quickchat.read_leads',
-]);
-const ALLOWED_ROLE_CODES = new Set(['propietario', 'agencia', 'doctor', 'assistant', 'reception', 'admin_staff', 'unknown']);
 const ALLOWED_EFFECTS = new Set(['allow', 'deny']);
 
 const isAdmin = (userId) => ADMIN_USER_IDS.includes(Number(userId));
@@ -28,8 +20,6 @@ const parseIntOrNull = (value) => {
 };
 
 const normalizeScopeType = (value) => String(value || '').trim().toLowerCase();
-const normalizeFeatureKey = (value) => String(value || '').trim().toLowerCase();
-const normalizeRoleCode = (value) => String(value || '').trim().toLowerCase();
 
 async function getScopeAccess(actorId) {
   if (isAdmin(actorId)) {
