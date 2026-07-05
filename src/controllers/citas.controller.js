@@ -814,8 +814,11 @@ function mapCalendarCitaRow(cita) {
         tratamiento: plain.tratamiento ? {
             id_tratamiento: plain.tratamiento.id_tratamiento,
             nombre: plain.tratamiento.nombre,
+            disciplina: plain.tratamiento.disciplina || null,
+            categoria: plain.tratamiento.categoria || null,
             duracion_min: plain.tratamiento.duracion_min,
             color: plain.tratamiento.color,
+            clinical_config: plain.tratamiento.clinical_config || null,
         } : null,
         doctor: plain.doctor ? {
             id_usuario: plain.doctor.id_usuario,
@@ -1827,7 +1830,7 @@ exports.getCitasCalendar = asyncHandler(async (req, res) => {
                 model: Tratamiento,
                 as: 'tratamiento',
                 required: false,
-                attributes: ['id_tratamiento', 'nombre', 'duracion_min', 'color'],
+                attributes: ['id_tratamiento', 'nombre', 'disciplina', 'categoria', 'duracion_min', 'color', 'clinical_config'],
             },
             db.Usuario ? {
                 model: db.Usuario,
