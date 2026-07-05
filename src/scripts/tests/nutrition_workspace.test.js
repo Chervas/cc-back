@@ -74,7 +74,7 @@ function run() {
     waist_cm: 82,
   }, 'express_isak', maleAdultContext);
 
-  assert.equal(FORMULA_VERSION, 'nutrition-basic-v2');
+  assert.equal(FORMULA_VERSION, 'nutrition-basic-v3');
   assert.equal(
     FORMULA_REFERENCES.find((reference) => reference.key === 'waist_hip_ratio').url,
     'https://www.who.int/publications/i/item/9789241501491',
@@ -82,6 +82,10 @@ function run() {
   assert.equal(
     FORMULA_REFERENCES.find((reference) => reference.key === 'isak_restricted_profile').url,
     'https://www.ausport.gov.au/ais/performance-support/anthropometry',
+  );
+  assert.equal(
+    FORMULA_REFERENCES.find((reference) => reference.key === 'kerr_ross_five_component_fractionation').url,
+    'https://summit.sfu.ca/item/5139',
   );
   assert.equal(calculated.bmi, 24.7);
   assert.equal(calculated.waist_hip_ratio, 0.85);
@@ -112,6 +116,74 @@ function run() {
     mesomorphy: 4.8,
     ectomorphy: 2,
     source: 'Heath-Carter anthropometric somatotype',
+  });
+  assert.equal(calculated.body_fractionation, null);
+
+  const kerrRawValues = {
+    ...baseRawValues,
+    weight_kg: 80,
+    waist_cm: 82,
+    arm_relaxed_cm: 31,
+    forearm_cm: 28,
+    thigh_cm: 55,
+    chest_cm: 98,
+    head_cm: 56,
+    sitting_height_cm: 92,
+    breadth_biacromial_cm: 40,
+    breadth_biiliocristal_cm: 29,
+    depth_chest_ap_cm: 20,
+    breadth_chest_transverse_cm: 28,
+  };
+  assert.deepEqual(__testing.calculateKerrRossFiveComponent(kerrRawValues, maleAdultContext), {
+    method: 'Kerr-Ross five-component body mass fractionation',
+    sex: 'male',
+    age_years: 32,
+    skin_mass_kg: 4.1,
+    adipose_mass_kg: 21.2,
+    muscle_mass_kg: 36.2,
+    bone_mass_kg: 8.4,
+    residual_mass_kg: 8.8,
+    predicted_body_mass_kg: 78.8,
+    prediction_error_kg: -1.2,
+    prediction_error_percent: -1.5,
+    predicted_to_scale_ratio: 0.985,
+    skin_percent_of_body_mass: 5.2,
+    adipose_percent_of_body_mass: 26.5,
+    muscle_percent_of_body_mass: 45.2,
+    bone_percent_of_body_mass: 10.5,
+    residual_percent_of_body_mass: 11,
+    phantom_z: {
+      adipose: -1.31,
+      head_bone: 0,
+      body_bone: -0.46,
+      muscle: 1.13,
+      residual: 1.72,
+    },
+    input_fields: [
+      'weight_kg',
+      'stature_cm',
+      'sitting_height_cm',
+      'head_cm',
+      'skinfold_triceps_mm',
+      'skinfold_subscapular_mm',
+      'skinfold_supraspinale_mm',
+      'skinfold_abdominal_mm',
+      'skinfold_front_thigh_mm',
+      'skinfold_medial_calf_mm',
+      'arm_relaxed_cm',
+      'forearm_cm',
+      'thigh_cm',
+      'chest_cm',
+      'waist_cm',
+      'calf_cm',
+      'breadth_biacromial_cm',
+      'breadth_biiliocristal_cm',
+      'breadth_humerus_cm',
+      'breadth_femur_cm',
+      'depth_chest_ap_cm',
+      'breadth_chest_transverse_cm',
+    ],
+    source: 'Kerr 1988 / Ross-Kerr five-component fractionation',
   });
 
   assert.deepEqual(__testing.requiredFieldsForProfile('quick'), [
@@ -181,6 +253,15 @@ function run() {
   assert.equal(secondReport.calculation_trace.find((item) => item.key === 'bmi').source_references[0].key, 'bmi');
   assert.equal(secondReport.calculation_trace.find((item) => item.key === 'waist_hip_ratio').source_references[0].key, 'waist_hip_ratio');
   assert.equal(secondReport.calculation_trace.find((item) => item.key === 'body_composition').status, 'applied');
+  assert.equal(secondReport.calculation_trace.find((item) => item.key === 'body_fractionation').status, 'pending');
+  assert.deepEqual(
+    secondReport.calculation_trace.find((item) => item.key === 'body_fractionation').source_reference_keys,
+    ['kerr_ross_five_component_fractionation'],
+  );
+  assert.equal(
+    secondReport.calculation_trace.find((item) => item.key === 'body_fractionation').missing_input_labels.includes('Altura sentado'),
+    true,
+  );
   assert.deepEqual(
     secondReport.calculation_trace.find((item) => item.key === 'body_composition').source_reference_keys,
     ['durnin_womersley_body_density', 'siri_body_fat'],
@@ -284,6 +365,8 @@ function run() {
   assert.match(html, /Grasa estimada/);
   assert.match(html, /Durnin-Womersley/);
   assert.match(html, /Siri body density conversion/);
+  assert.match(html, /Cinco componentes Kerr-Ross/);
+  assert.match(html, /Fraccionamiento Kerr-Ross 5 componentes/);
   assert.match(html, /Somatotipo Heath-Carter/);
   assert.match(html, /Informe calculado privado/);
   assert.doesNotMatch(html, /148 kg/);

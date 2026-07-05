@@ -46,6 +46,14 @@ function assertNutritionContract(contract) {
     profileSchemas.get('express_isak')?.groups?.some((group) => group.key === 'skinfolds' && group.fields.includes('skinfold_medial_calf_mm')),
     true,
   );
+  assert.equal(
+    profileSchemas.get('express_isak')?.groups?.some((group) => group.key === 'breadths' && group.fields.includes('breadth_biacromial_cm')),
+    true,
+  );
+  assert.equal(
+    profileSchemas.get('express_isak')?.groups?.some((group) => group.key === 'kerr_fractionation' && group.fields.includes('sitting_height_cm')),
+    true,
+  );
   assert.deepEqual(
     profileSchemas.get('express_isak')?.groups?.find((group) => group.key === 'base')?.required_fields,
     ['weight_kg', 'stature_cm'],
@@ -167,6 +175,7 @@ function run() {
     'skinfolds',
     'girths',
     'breadths',
+    'kerr_fractionation',
   ]);
   assert.deepEqual(guardedSchemas.get('quick').groups[0].required_fields, ['weight_kg', 'stature_cm']);
   assert.equal(guardedSchemas.get('quick').groups[0].fields.includes('weight_kg'), true);
@@ -177,6 +186,10 @@ function run() {
   );
   assert.equal(
     guardedSchemas.get('express_isak').groups.find((group) => group.key === 'breadths').fields.includes('breadth_humerus_cm'),
+    true,
+  );
+  assert.equal(
+    guardedSchemas.get('express_isak').groups.find((group) => group.key === 'kerr_fractionation').fields.includes('sitting_height_cm'),
     true,
   );
 

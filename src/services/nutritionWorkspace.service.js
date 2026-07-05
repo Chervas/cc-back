@@ -11,7 +11,7 @@ const medicalAreaContracts = require('./medicalAreaContracts.service');
 
 const { Op } = db.Sequelize;
 const execFileAsync = promisify(execFile);
-const FORMULA_VERSION = 'nutrition-basic-v2';
+const FORMULA_VERSION = 'nutrition-basic-v3';
 const NUTRITION_REPORT_SNAPSHOT_VERSION = 3;
 const NUTRITION_REPORT_CURRENT_STATUSES = ['final', 'active'];
 const DEFAULT_CHROMIUM_PATH = '/home/ubuntu/.cache/clinicaclick-browsers/chrome-headless-shell/linux-148.0.7778.56/chrome-headless-shell-linux64/chrome-headless-shell';
@@ -66,10 +66,18 @@ const FORMULA_REFERENCES = [
     profiles: ['express_isak'],
   },
   {
+    key: 'kerr_ross_five_component_fractionation',
+    label: 'Fraccionamiento Kerr-Ross 5 componentes',
+    description: 'Estimación antropométrica de piel, tejido adiposo, masa muscular, masa ósea y masa residual mediante táctica Phantom.',
+    source: 'Kerr 1988, Simon Fraser University',
+    url: 'https://summit.sfu.ca/item/5139',
+    profiles: ['express_isak'],
+  },
+  {
     key: 'linear_projection',
     label: 'Proyección temporal',
     description: 'Estimación lineal simple basada en las dos últimas mediciones comparables con fechas distintas.',
-    source: 'ClinicaClick nutrition-basic-v2',
+    source: 'ClinicaClick nutrition-basic-v3',
     url: null,
     profiles: ['quick', 'express_isak'],
   },
@@ -130,6 +138,12 @@ const REPORT_METRIC_DEFINITIONS = [
   { key: 'fat_mass_kg', label: 'Masa grasa estimada', unit: 'kg', source: 'body_composition', decimals: 1, section: 'body_composition' },
   { key: 'fat_free_mass_kg', label: 'Masa libre de grasa', unit: 'kg', source: 'body_composition', decimals: 1, section: 'body_composition' },
   { key: 'body_density', label: 'Densidad corporal', unit: 'g/ml', source: 'body_composition', decimals: 4, section: 'body_composition' },
+  { key: 'adipose_mass_kg', label: 'Masa adiposa Kerr', unit: 'kg', source: 'body_fractionation', decimals: 1, section: 'five_component' },
+  { key: 'muscle_mass_kg', label: 'Masa muscular Kerr', unit: 'kg', source: 'body_fractionation', decimals: 1, section: 'five_component' },
+  { key: 'bone_mass_kg', label: 'Masa ósea Kerr', unit: 'kg', source: 'body_fractionation', decimals: 1, section: 'five_component' },
+  { key: 'skin_mass_kg', label: 'Masa piel Kerr', unit: 'kg', source: 'body_fractionation', decimals: 1, section: 'five_component' },
+  { key: 'residual_mass_kg', label: 'Masa residual Kerr', unit: 'kg', source: 'body_fractionation', decimals: 1, section: 'five_component' },
+  { key: 'prediction_error_percent', label: 'Error predicción Kerr', unit: '%', source: 'body_fractionation', decimals: 1, section: 'five_component' },
   { key: 'endomorphy', label: 'Endomorfia', unit: '', source: 'somatotype', decimals: 1, section: 'somatotype' },
   { key: 'mesomorphy', label: 'Mesomorfia', unit: '', source: 'somatotype', decimals: 1, section: 'somatotype' },
   { key: 'ectomorphy', label: 'Ectomorfia', unit: '', source: 'somatotype', decimals: 1, section: 'somatotype' },
@@ -172,12 +186,31 @@ const PROJECTION_METRIC_DEFINITIONS = [
     per_week_key: 'body_fat_change_per_week_percent',
     projected_key: 'projected_8_week_body_fat_percent',
   },
+  {
+    key: 'adipose_mass_kg',
+    label: 'Masa adiposa Kerr',
+    unit: 'kg',
+    source: 'body_fractionation',
+    decimals: 1,
+    per_week_key: 'adipose_mass_change_per_week_kg',
+    projected_key: 'projected_8_week_adipose_mass_kg',
+  },
+  {
+    key: 'muscle_mass_kg',
+    label: 'Masa muscular Kerr',
+    unit: 'kg',
+    source: 'body_fractionation',
+    decimals: 1,
+    per_week_key: 'muscle_mass_change_per_week_kg',
+    projected_key: 'projected_8_week_muscle_mass_kg',
+  },
 ];
 
 const REPORT_SECTION_DEFINITIONS = {
   base: 'Datos principales',
   anthropometry: 'Antropometría',
   body_composition: 'Composición corporal',
+  five_component: 'Cinco componentes Kerr-Ross',
   somatotype: 'Somatotipo Heath-Carter',
 };
 
@@ -394,7 +427,7 @@ function buildCalculationTrace(measurement = {}, fieldDefinitions = FIELD_DEFINI
     key: 'bmi',
     label: 'IMC',
     method: 'peso / estatura²',
-    source: 'nutrition-basic-v2',
+    source: 'nutrition-basic-v3',
     sourceKeys: ['bmi'],
     applied: Number.isFinite(Number(calculatedValues.bmi)),
     inputFields: bmiFields,
@@ -407,7 +440,7 @@ function buildCalculationTrace(measurement = {}, fieldDefinitions = FIELD_DEFINI
     key: 'waist_hip_ratio',
     label: 'Ratio cintura/cadera',
     method: 'cintura / cadera',
-    source: 'nutrition-basic-v2',
+    source: 'nutrition-basic-v3',
     sourceKeys: ['waist_hip_ratio'],
     applied: Number.isFinite(Number(calculatedValues.waist_hip_ratio)),
     inputFields: waistHipFields,
@@ -423,7 +456,7 @@ function buildCalculationTrace(measurement = {}, fieldDefinitions = FIELD_DEFINI
       key: 'skinfold_sum_mm',
       label: 'Suma de pliegues',
       method: 'suma de pliegues registrados',
-      source: 'nutrition-basic-v2',
+      source: 'nutrition-basic-v3',
       sourceKeys: ['isak_restricted_profile'],
       applied: Number.isFinite(Number(calculatedValues.skinfold_sum_mm)),
       inputFields: skinfoldFields,
@@ -438,7 +471,7 @@ function buildCalculationTrace(measurement = {}, fieldDefinitions = FIELD_DEFINI
       key: 'corrected_arm_girth_cm',
       label: 'Brazo corregido',
       method: 'brazo flexionado - pliegue tríceps/10',
-      source: 'nutrition-basic-v2',
+      source: 'nutrition-basic-v3',
       sourceKeys: ['heath_carter_somatotype'],
       applied: Number.isFinite(Number(calculatedValues.corrected_arm_girth_cm)),
       inputFields: correctedArmFields,
@@ -453,7 +486,7 @@ function buildCalculationTrace(measurement = {}, fieldDefinitions = FIELD_DEFINI
       key: 'corrected_calf_girth_cm',
       label: 'Pantorrilla corregida',
       method: 'pantorrilla - pliegue pantorrilla medial/10',
-      source: 'nutrition-basic-v2',
+      source: 'nutrition-basic-v3',
       sourceKeys: ['heath_carter_somatotype'],
       applied: Number.isFinite(Number(calculatedValues.corrected_calf_girth_cm)),
       inputFields: correctedCalfFields,
@@ -508,6 +541,53 @@ function buildCalculationTrace(measurement = {}, fieldDefinitions = FIELD_DEFINI
       inputFields: [...bodyCompositionFields, 'patient_sex', 'patient_age'],
       missingInputs: missingBodyCompositionInputs,
       outputKeys: ['body_density', 'body_fat_percent', 'fat_mass_kg', 'fat_free_mass_kg'],
+    }));
+
+    const bodyFractionationFields = [
+      'weight_kg',
+      'stature_cm',
+      'sitting_height_cm',
+      'head_cm',
+      'skinfold_triceps_mm',
+      'skinfold_subscapular_mm',
+      'skinfold_supraspinale_mm',
+      'skinfold_abdominal_mm',
+      'skinfold_front_thigh_mm',
+      'skinfold_medial_calf_mm',
+      'arm_relaxed_cm',
+      'forearm_cm',
+      'thigh_cm',
+      'chest_cm',
+      'waist_cm',
+      'calf_cm',
+      'breadth_biacromial_cm',
+      'breadth_biiliocristal_cm',
+      'breadth_humerus_cm',
+      'breadth_femur_cm',
+      'depth_chest_ap_cm',
+      'breadth_chest_transverse_cm',
+    ];
+    const missingBodyFractionationInputs = missingCalculationInputLabels(rawValues, bodyFractionationFields, fieldDefinitions);
+    if (!missingBodyFractionationInputs.length && !calculatedValues.body_fractionation) {
+      missingBodyFractionationInputs.push('Sexo del paciente', 'Edad del paciente');
+    }
+    trace.push(buildCalculationTraceItem({
+      key: 'body_fractionation',
+      label: 'Cinco componentes Kerr-Ross',
+      method: 'fraccionamiento antropométrico Kerr-Ross con táctica Phantom',
+      source: 'Kerr 1988 / Ross-Kerr 5 componentes',
+      sourceKeys: ['kerr_ross_five_component_fractionation'],
+      applied: Boolean(calculatedValues.body_fractionation),
+      inputFields: [...bodyFractionationFields, 'patient_sex', 'patient_age'],
+      missingInputs: missingBodyFractionationInputs,
+      outputKeys: [
+        'skin_mass_kg',
+        'adipose_mass_kg',
+        'muscle_mass_kg',
+        'bone_mass_kg',
+        'residual_mass_kg',
+        'predicted_body_mass_kg',
+      ],
     }));
   }
 
@@ -684,6 +764,182 @@ function calculateBodyComposition(rawValues = {}, context = {}) {
   };
 }
 
+function positiveNumber(value) {
+  return Number.isFinite(value) && value > 0 ? value : null;
+}
+
+function correctedGirthCm(girthCm, skinfoldMm) {
+  if (!Number.isFinite(girthCm) || !Number.isFinite(skinfoldMm)) return null;
+  const corrected = girthCm - ((Math.PI * skinfoldMm) / 10);
+  return corrected > 0 ? corrected : null;
+}
+
+function kerrSkinSurfaceConstant(sex, ageYears) {
+  if (!Number.isFinite(ageYears)) return null;
+  if (Number.isFinite(ageYears) && ageYears < 12) return 70.691;
+  if (sex === 'male') return 68.308;
+  if (sex === 'female') return 73.704;
+  return null;
+}
+
+function kerrSkinThicknessMm(sex) {
+  if (sex === 'male') return 2.07;
+  if (sex === 'female') return 1.96;
+  return null;
+}
+
+function percentOfWeight(value, weight) {
+  return Number.isFinite(value) && Number.isFinite(weight) && weight > 0
+    ? round((value / weight) * 100, 1)
+    : null;
+}
+
+function calculateKerrRossFiveComponent(rawValues = {}, context = {}) {
+  const sex = normalizeSexForBodyComposition(context.sex);
+  const ageYears = normalizeAgeYears(context.age_years);
+  const weight = positiveNumber(rawValues.weight_kg);
+  const height = positiveNumber(rawValues.stature_cm);
+  const sittingHeight = positiveNumber(rawValues.sitting_height_cm);
+  const head = positiveNumber(rawValues.head_cm);
+  const triceps = positiveNumber(rawValues.skinfold_triceps_mm);
+  const subscapular = positiveNumber(rawValues.skinfold_subscapular_mm);
+  const supraspinale = positiveNumber(rawValues.skinfold_supraspinale_mm);
+  const abdominal = positiveNumber(rawValues.skinfold_abdominal_mm);
+  const frontThighSkinfold = positiveNumber(rawValues.skinfold_front_thigh_mm);
+  const medialCalf = positiveNumber(rawValues.skinfold_medial_calf_mm);
+  const armRelaxed = positiveNumber(rawValues.arm_relaxed_cm);
+  const forearm = positiveNumber(rawValues.forearm_cm);
+  const thigh = positiveNumber(rawValues.thigh_cm);
+  const chest = positiveNumber(rawValues.chest_cm);
+  const waist = positiveNumber(rawValues.waist_cm);
+  const calf = positiveNumber(rawValues.calf_cm);
+  const biacromial = positiveNumber(rawValues.breadth_biacromial_cm);
+  const biiliocristal = positiveNumber(rawValues.breadth_biiliocristal_cm);
+  const humerus = positiveNumber(rawValues.breadth_humerus_cm);
+  const femur = positiveNumber(rawValues.breadth_femur_cm);
+  const chestAp = positiveNumber(rawValues.depth_chest_ap_cm);
+  const chestTransverse = positiveNumber(rawValues.breadth_chest_transverse_cm);
+  const skinSurfaceConstant = kerrSkinSurfaceConstant(sex, ageYears);
+  const skinThickness = kerrSkinThicknessMm(sex);
+
+  if (![
+    weight,
+    height,
+    sittingHeight,
+    head,
+    triceps,
+    subscapular,
+    supraspinale,
+    abdominal,
+    frontThighSkinfold,
+    medialCalf,
+    armRelaxed,
+    forearm,
+    thigh,
+    chest,
+    waist,
+    calf,
+    biacromial,
+    biiliocristal,
+    humerus,
+    femur,
+    chestAp,
+    chestTransverse,
+    skinSurfaceConstant,
+    skinThickness,
+  ].every((value) => Number.isFinite(value) && value > 0)) {
+    return null;
+  }
+
+  const heightRatio = 170.18 / height;
+  const sittingHeightRatio = 89.92 / sittingHeight;
+  const surfaceAreaM2 = (skinSurfaceConstant * (weight ** 0.425) * (height ** 0.725)) / 10000;
+  const skinMassKg = surfaceAreaM2 * skinThickness * 1.05;
+
+  const adiposeSkinfoldSum = triceps + subscapular + supraspinale + abdominal + frontThighSkinfold + medialCalf;
+  const adiposeZ = ((adiposeSkinfoldSum * heightRatio) - 116.41) / 34.79;
+  const adiposeMassKg = ((adiposeZ * 5.85) + 25.6) / (heightRatio ** 3);
+
+  const headBoneZ = (head - 56.0) / 1.44;
+  const headBoneMassKg = (headBoneZ * 0.18) + 1.20;
+  const bodyBoneSum = biacromial + biiliocristal + (2 * humerus) + (2 * femur);
+  const bodyBoneZ = ((bodyBoneSum * heightRatio) - 98.88) / 5.33;
+  const bodyBoneMassKg = ((bodyBoneZ * 1.34) + 6.70) / (heightRatio ** 3);
+  const boneMassKg = headBoneMassKg + bodyBoneMassKg;
+
+  const correctedArm = correctedGirthCm(armRelaxed, triceps);
+  const correctedThigh = correctedGirthCm(thigh, frontThighSkinfold);
+  const correctedCalf = correctedGirthCm(calf, medialCalf);
+  const correctedChest = correctedGirthCm(chest, subscapular);
+  const correctedWaist = correctedGirthCm(waist, abdominal);
+  if (![correctedArm, correctedThigh, correctedCalf, correctedChest, correctedWaist]
+    .every((value) => Number.isFinite(value) && value > 0)) {
+    return null;
+  }
+
+  const muscleGirthSum = correctedArm + forearm + correctedThigh + correctedCalf + correctedChest;
+  const muscleZ = ((muscleGirthSum * heightRatio) - 207.21) / 13.74;
+  const muscleMassKg = ((muscleZ * 5.4) + 24.5) / (heightRatio ** 3);
+
+  const residualSum = chestAp + chestTransverse + correctedWaist;
+  const residualZ = ((residualSum * sittingHeightRatio) - 109.35) / 7.08;
+  const residualMassKg = ((residualZ * 1.24) + 6.10) / (sittingHeightRatio ** 3);
+  const predictedBodyMassKg = skinMassKg + adiposeMassKg + boneMassKg + muscleMassKg + residualMassKg;
+  const predictionErrorKg = predictedBodyMassKg - weight;
+
+  return {
+    method: 'Kerr-Ross five-component body mass fractionation',
+    sex,
+    age_years: ageYears,
+    skin_mass_kg: round(skinMassKg, 1),
+    adipose_mass_kg: round(adiposeMassKg, 1),
+    muscle_mass_kg: round(muscleMassKg, 1),
+    bone_mass_kg: round(boneMassKg, 1),
+    residual_mass_kg: round(residualMassKg, 1),
+    predicted_body_mass_kg: round(predictedBodyMassKg, 1),
+    prediction_error_kg: round(predictionErrorKg, 1),
+    prediction_error_percent: round((predictionErrorKg / weight) * 100, 1),
+    predicted_to_scale_ratio: round(predictedBodyMassKg / weight, 3),
+    skin_percent_of_body_mass: percentOfWeight(skinMassKg, weight),
+    adipose_percent_of_body_mass: percentOfWeight(adiposeMassKg, weight),
+    muscle_percent_of_body_mass: percentOfWeight(muscleMassKg, weight),
+    bone_percent_of_body_mass: percentOfWeight(boneMassKg, weight),
+    residual_percent_of_body_mass: percentOfWeight(residualMassKg, weight),
+    phantom_z: {
+      adipose: round(adiposeZ, 2),
+      head_bone: round(headBoneZ, 2),
+      body_bone: round(bodyBoneZ, 2),
+      muscle: round(muscleZ, 2),
+      residual: round(residualZ, 2),
+    },
+    input_fields: [
+      'weight_kg',
+      'stature_cm',
+      'sitting_height_cm',
+      'head_cm',
+      'skinfold_triceps_mm',
+      'skinfold_subscapular_mm',
+      'skinfold_supraspinale_mm',
+      'skinfold_abdominal_mm',
+      'skinfold_front_thigh_mm',
+      'skinfold_medial_calf_mm',
+      'arm_relaxed_cm',
+      'forearm_cm',
+      'thigh_cm',
+      'chest_cm',
+      'waist_cm',
+      'calf_cm',
+      'breadth_biacromial_cm',
+      'breadth_biiliocristal_cm',
+      'breadth_humerus_cm',
+      'breadth_femur_cm',
+      'depth_chest_ap_cm',
+      'breadth_chest_transverse_cm',
+    ],
+    source: 'Kerr 1988 / Ross-Kerr five-component fractionation',
+  };
+}
+
 function calculateNutritionValues(rawValues = {}, profileCode = 'quick', context = {}) {
   const weight = rawValues.weight_kg;
   const height = rawValues.stature_cm;
@@ -717,6 +973,7 @@ function calculateNutritionValues(rawValues = {}, profileCode = 'quick', context
       : null,
     somatotype: profileCode === 'express_isak' ? calculateSomatotype(rawValues) : null,
     body_composition: profileCode === 'express_isak' ? calculateBodyComposition(rawValues, context) : null,
+    body_fractionation: profileCode === 'express_isak' ? calculateKerrRossFiveComponent(rawValues, context) : null,
   };
 }
 
@@ -778,6 +1035,9 @@ function getProjectionMetricValue(measurement, metricDefinition) {
   }
   if (metricDefinition.source === 'body_composition') {
     return measurement.calculated_values?.body_composition?.[metricDefinition.key] ?? null;
+  }
+  if (metricDefinition.source === 'body_fractionation') {
+    return measurement.calculated_values?.body_fractionation?.[metricDefinition.key] ?? null;
   }
   return null;
 }
@@ -842,10 +1102,14 @@ function buildProjection(measurements = []) {
     waist_change_per_week_cm: projectionByKey.get('waist_cm')?.change_per_week ?? null,
     skinfold_sum_change_per_week_mm: projectionByKey.get('skinfold_sum_mm')?.change_per_week ?? null,
     body_fat_change_per_week_percent: projectionByKey.get('body_fat_percent')?.change_per_week ?? null,
+    adipose_mass_change_per_week_kg: projectionByKey.get('adipose_mass_kg')?.change_per_week ?? null,
+    muscle_mass_change_per_week_kg: projectionByKey.get('muscle_mass_kg')?.change_per_week ?? null,
     projected_8_week_weight_kg: projectionByKey.get('weight_kg')?.projected_8_week_value ?? null,
     projected_8_week_waist_cm: projectionByKey.get('waist_cm')?.projected_8_week_value ?? null,
     projected_8_week_skinfold_sum_mm: projectionByKey.get('skinfold_sum_mm')?.projected_8_week_value ?? null,
     projected_8_week_body_fat_percent: projectionByKey.get('body_fat_percent')?.projected_8_week_value ?? null,
+    projected_8_week_adipose_mass_kg: projectionByKey.get('adipose_mass_kg')?.projected_8_week_value ?? null,
+    projected_8_week_muscle_mass_kg: projectionByKey.get('muscle_mass_kg')?.projected_8_week_value ?? null,
   };
 }
 
@@ -875,6 +1139,9 @@ function getReportMetricValue(measurement, metricDefinition) {
   }
   if (metricDefinition.source === 'body_composition') {
     return calculatedValues.body_composition?.[metricDefinition.key] ?? null;
+  }
+  if (metricDefinition.source === 'body_fractionation') {
+    return calculatedValues.body_fractionation?.[metricDefinition.key] ?? null;
   }
   return null;
 }
@@ -979,6 +1246,11 @@ function buildReportNarrative(measurement, comparison, metrics = []) {
     } else {
       notes.push('La composición corporal estimada requiere sexo, edad, peso y los pliegues bíceps, tríceps, subescapular e ilíaco/suprailiaco.');
     }
+    if (measurement.calculated_values?.body_fractionation) {
+      notes.push('Fraccionamiento Kerr-Ross disponible: piel, adiposo, músculo, hueso y residual con táctica Phantom.');
+    } else {
+      notes.push('El fraccionamiento Kerr-Ross requiere el bloque avanzado completo de perímetros, diámetros, altura sentado y datos personales.');
+    }
   } else {
     notes.push('Resumen rápido para seguimiento de consulta.');
   }
@@ -1041,6 +1313,7 @@ function buildReports(measurements = [], fieldDefinitions = FIELD_DEFINITIONS) {
           skinfold_sum_mm: measurement.calculated_values.skinfold_sum_mm,
           somatotype: measurement.calculated_values.somatotype,
           body_composition: measurement.calculated_values.body_composition,
+          body_fractionation: measurement.calculated_values.body_fractionation,
           metric_count: metrics.length,
         },
         sections: buildReportSections(metrics),
@@ -2009,5 +2282,6 @@ module.exports = {
     calculateAgeYears,
     buildPatientFormulaContext,
     calculateBodyComposition,
+    calculateKerrRossFiveComponent,
   },
 };
