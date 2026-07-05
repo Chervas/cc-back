@@ -13,7 +13,7 @@ const clinicalPrivateStorage = require('./clinicalPrivateStorage.service');
 const { Op } = db.Sequelize;
 const execFileAsync = promisify(execFile);
 const FORMULA_VERSION = 'nutrition-basic-v3';
-const NUTRITION_REPORT_SNAPSHOT_VERSION = 3;
+const NUTRITION_REPORT_SNAPSHOT_VERSION = 4;
 const NUTRITION_REPORT_CURRENT_STATUSES = ['final', 'active'];
 const DEFAULT_CHROMIUM_PATH = '/home/ubuntu/.cache/clinicaclick-browsers/chrome-headless-shell/linux-148.0.7778.56/chrome-headless-shell-linux64/chrome-headless-shell';
 
@@ -85,6 +85,38 @@ const FORMULA_REFERENCES = [
 ];
 
 const FORMULA_REFERENCES_BY_KEY = new Map(FORMULA_REFERENCES.map((reference) => [reference.key, reference]));
+const CALCULATION_PROFILE = {
+  code: 'clinicaclick-isak-v3',
+  label: 'Perfil ClinicaClick ISAK v3',
+  description: 'Perfil de cálculo aplicado por bloques: seguimiento básico, antropometría ISAK, composición corporal y proyección.',
+  strategy: 'calculation_blocks',
+  fat_mass_model: {
+    code: 'durnin_womersley_siri',
+    label: 'Durnin-Womersley + Siri',
+    role: 'Masa grasa estimada',
+    source_reference_keys: ['durnin_womersley_body_density', 'siri_body_fat'],
+  },
+  automatic_models: [
+    {
+      code: 'heath_carter_somatotype',
+      label: 'Somatotipo Heath-Carter',
+      role: 'Somatotipo',
+      source_reference_keys: ['heath_carter_somatotype'],
+    },
+    {
+      code: 'kerr_ross_five_component_fractionation',
+      label: 'Kerr-Ross 5 componentes',
+      role: 'Fraccionamiento por componentes',
+      source_reference_keys: ['kerr_ross_five_component_fractionation'],
+    },
+    {
+      code: 'linear_projection',
+      label: 'Proyección lineal simple',
+      role: 'Evolución temporal',
+      source_reference_keys: ['linear_projection'],
+    },
+  ],
+};
 
 const PROFILE_DEFINITIONS = medicalAreaContracts.NUTRITION_MEASUREMENT_PROFILE_SCHEMAS;
 const FIELD_DEFINITIONS = medicalAreaContracts.NUTRITION_MEASUREMENT_FIELD_DEFINITIONS;
@@ -321,6 +353,139 @@ function formatProjectionMetricLabel(metric = {}) {
   return /estimad[ao]$/i.test(label)
     ? `${label} 8 semanas`
     : `${label} estimada 8 semanas`;
+}
+
+function finiteNumber(value) {
+  const numeric = Number(value);
+  return Number.isFinite(numeric) ? numeric : null;
+}
+
+function buildMetricSparklineSvg(metric, color = '#2563eb') {
+  const points = [
+    { label: 'Anterior', value: finiteNumber(metric.previous_value) },
+    { label: 'Actual', value: finiteNumber(metric.current_value) },
+    { label: '8 sem.', value: finiteNumber(metric.projected_8_week_value) },
+  ].filter((point) => point.value !== null);
+
+  if (points.length < 2) return '';
+
+  const values = points.map((point) => point.value);
+  const min = Math.min(...values);
+  const max = Math.max(...values);
+  const range = max - min || Math.max(Math.abs(max), 1);
+  const chartTop = 18;
+  const chartBottom = 82;
+  const xByIndex = [26, 130, 234];
+  const yForValue = (value) => chartBottom - (((value - min) / range) * (chartBottom - chartTop));
+  const svgPoints = points.map((point, index) => ({
+    ...point,
+    x: xByIndex[index],
+    y: yForValue(point.value),
+  }));
+  const polyline = svgPoints.map((point) => `${round(point.x, 1)},${round(point.y, 1)}`).join(' ');
+
+  return `
+    <svg class="sparkline" viewBox="0 0 260 112" role="img" aria-label="${escapeHtml(metric.label || 'Métrica')}">
+      <line x1="20" y1="${chartBottom}" x2="240" y2="${chartBottom}" class="chart-axis" />
+      <polyline points="${escapeHtml(polyline)}" fill="none" stroke="${escapeHtml(color)}" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" />
+      ${svgPoints.map((point) => `
+        <circle cx="${round(point.x, 1)}" cy="${round(point.y, 1)}" r="4.5" fill="${escapeHtml(color)}" />
+        <text x="${round(point.x, 1)}" y="101" text-anchor="middle" class="chart-label">${escapeHtml(point.label)}</text>
+        <text x="${round(point.x, 1)}" y="${Math.max(11, round(point.y - 9, 1))}" text-anchor="middle" class="chart-value">${escapeHtml(formatMetricValue({ value: point.value, unit: metric.unit }))}</text>
+      `).join('')}
+    </svg>
+  `;
+}
+
+function buildProjectionVisualHtml(projection) {
+  const metrics = (projection?.metric_projections || [])
+    .filter((metric) => ['weight_kg', 'waist_cm', 'skinfold_sum_mm', 'body_fat_percent'].includes(metric.key))
+    .slice(0, 4);
+
+  if (!projection?.available || !metrics.length) return '';
+
+  const colors = ['#0f766e', '#2563eb', '#7c3aed', '#e11d48'];
+  return `
+    <section class="card">
+      <h2>Gráficas de evolución</h2>
+      <p class="muted">Anterior, actual y proyección lineal a 8 semanas por métrica comparable.</p>
+      <div class="sparkline-grid">
+        ${metrics.map((metric, index) => `
+          <div class="sparkline-card">
+            <div class="sparkline-title">${escapeHtml(metric.label || metric.key)}</div>
+            ${buildMetricSparklineSvg(metric, colors[index % colors.length])}
+            <div class="sparkline-caption">Ritmo ${escapeHtml(formatDelta({ delta: metric.change_per_week, unit: metric.unit ? `${metric.unit}/sem` : '/sem' }))}</div>
+          </div>
+        `).join('')}
+      </div>
+    </section>
+  `;
+}
+
+function buildCompositionVisualHtml(report) {
+  const fractionation = report?.summary?.body_fractionation || null;
+  const composition = report?.summary?.body_composition || null;
+  const segments = [];
+
+  if (fractionation) {
+    [
+      ['adipose_percent_of_body_mass', 'Adiposo', '#f97316'],
+      ['muscle_percent_of_body_mass', 'Músculo', '#14b8a6'],
+      ['bone_percent_of_body_mass', 'Óseo', '#6366f1'],
+      ['skin_percent_of_body_mass', 'Piel', '#f43f5e'],
+      ['residual_percent_of_body_mass', 'Residual', '#64748b'],
+    ].forEach(([key, label, color]) => {
+      const value = finiteNumber(fractionation[key]);
+      if (value !== null && value > 0) segments.push({ label, value, color });
+    });
+  } else if (composition) {
+    const fat = finiteNumber(composition.body_fat_percent);
+    if (fat !== null) {
+      segments.push({ label: 'Masa grasa', value: Math.max(0, Math.min(100, fat)), color: '#f97316' });
+      segments.push({ label: 'Masa libre de grasa', value: Math.max(0, Math.min(100, 100 - fat)), color: '#14b8a6' });
+    }
+  }
+
+  if (!segments.length) return '';
+
+  return `
+    <section class="card">
+      <h2>${fractionation ? 'Fraccionamiento corporal' : 'Composición corporal'}</h2>
+      <div class="composition-bar">
+        ${segments.map((segment) => `<span style="width:${escapeHtml(round(segment.value, 1))}%;background:${escapeHtml(segment.color)}"></span>`).join('')}
+      </div>
+      <div class="legend-grid">
+        ${segments.map((segment) => `
+          <div class="legend-item">
+            <span style="background:${escapeHtml(segment.color)}"></span>
+            <strong>${escapeHtml(segment.label)}</strong>
+            <em>${escapeHtml(round(segment.value, 1))}%</em>
+          </div>
+        `).join('')}
+      </div>
+    </section>
+  `;
+}
+
+function buildCalculationProfileHtml(profile = CALCULATION_PROFILE) {
+  return `
+    <section class="card muted-card">
+      <h2>Perfil de cálculo aplicado</h2>
+      <p><strong>${escapeHtml(profile.label)}</strong>. ${escapeHtml(profile.description)}</p>
+      <div class="calculation-profile-grid">
+        <div>
+          <dt>Masa grasa</dt>
+          <dd>${escapeHtml(profile.fat_mass_model?.label || '-')}</dd>
+        </div>
+        ${(profile.automatic_models || []).map((item) => `
+          <div>
+            <dt>${escapeHtml(item.role || item.code)}</dt>
+            <dd>${escapeHtml(item.label)}</dd>
+          </div>
+        `).join('')}
+      </div>
+    </section>
+  `;
 }
 
 function normalizeProfileCode(value) {
@@ -1359,6 +1524,7 @@ function buildReports(measurements = [], fieldDefinitions = FIELD_DEFINITIONS) {
         title: measurement.profile_code === 'express_isak' ? 'Informe antropometría ISAK' : 'Resumen rápido nutricional',
         created_at: measurement.measured_at,
         formula_version: measurement.formula_version,
+        calculation_profile: CALCULATION_PROFILE,
         formula_references: formulaReferencesForProfile(measurement.profile_code),
         profile_code: measurement.profile_code,
         quality_flags: measurement.quality_flags || [],
@@ -1463,6 +1629,7 @@ function isCurrentNutritionReportSnapshot(row) {
   const version = Number(snapshot?.snapshot_version);
   return Number.isFinite(version)
     && version >= NUTRITION_REPORT_SNAPSHOT_VERSION
+    && snapshot?.report?.calculation_profile?.code === CALCULATION_PROFILE.code
     && Array.isArray(snapshot?.report?.calculation_trace)
     && snapshot.report.calculation_trace.length > 0
     && snapshot.report.calculation_trace.every((item) => Array.isArray(item?.source_references));
@@ -1665,6 +1832,7 @@ async function getPatientNutritionWorkspace(patientIdentifier) {
     reports,
     meta: {
       formula_version: FORMULA_VERSION,
+      calculation_profile: CALCULATION_PROFILE,
       formula_references: FORMULA_REFERENCES.map(({ profiles, ...reference }) => reference),
       measurement_contract_source: 'medical-area-contracts-v1',
       generated_at: new Date().toISOString(),
@@ -1927,6 +2095,7 @@ async function buildNutritionMeasurementReportData(patientIdentifier, measuremen
     projection: buildProjectionForMeasurement(measurements, measurement.id),
     meta: {
       formula_version: FORMULA_VERSION,
+      calculation_profile: CALCULATION_PROFILE,
       formula_references: formulaReferencesForProfile(measurement.profile_code),
       measurement_contract_source: 'medical-area-contracts-v1',
       generated_at: new Date().toISOString(),
@@ -2155,6 +2324,11 @@ function buildNutritionReportHtml(reportData) {
       : 'calculated_report',
   });
   const comparison = report.comparison || { available: false };
+  const projectionVisualHtml = buildProjectionVisualHtml(projection);
+  const compositionVisualHtml = buildCompositionVisualHtml(report);
+  const calculationProfileHtml = buildCalculationProfileHtml(
+    report.calculation_profile || meta?.calculation_profile || CALCULATION_PROFILE,
+  );
   const sectionsHtml = (report.sections || []).map((section) => `
     <section class="card">
       <h2>${escapeHtml(section.title)}</h2>
@@ -2282,7 +2456,7 @@ function buildNutritionReportHtml(reportData) {
   const formulaReferences = report.formula_references || meta.formula_references || [];
   const formulaReferencesHtml = formulaReferences.length ? `
     <section class="card muted-card">
-      <h2>Bases de cálculo</h2>
+      <h2>Fuentes de cálculo</h2>
       <ul>
         ${formulaReferences.map((reference) => `
           <li>
@@ -2326,6 +2500,24 @@ function buildNutritionReportHtml(reportData) {
     .status-ok { background: #dcfce7; color: #047857; }
     .status-pending { background: #fef3c7; color: #92400e; }
     .small-note { margin: 10px 0 0; font-size: 11px; }
+    .sparkline-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+    .sparkline-card { border: 1px solid #e2e8f0; border-radius: 8px; padding: 10px; background: #fff; }
+    .sparkline-title { font-size: 12px; font-weight: 800; margin-bottom: 5px; }
+    .sparkline { display: block; width: 100%; height: auto; }
+    .chart-axis { stroke: #cbd5e1; stroke-width: 1; }
+    .chart-label { fill: #64748b; font-size: 10px; font-weight: 700; }
+    .chart-value { fill: #0f172a; font-size: 10px; font-weight: 800; }
+    .sparkline-caption { color: #64748b; font-size: 11px; font-weight: 700; margin-top: 4px; }
+    .composition-bar { display: flex; width: 100%; height: 18px; overflow: hidden; border-radius: 999px; background: #e2e8f0; margin: 8px 0 12px; }
+    .composition-bar span { display: block; min-width: 2px; height: 100%; }
+    .legend-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px 14px; }
+    .legend-item { display: grid; grid-template-columns: 10px 1fr auto; gap: 7px; align-items: center; font-size: 12px; }
+    .legend-item span { width: 10px; height: 10px; border-radius: 999px; display: inline-block; }
+    .legend-item em { color: #64748b; font-style: normal; font-weight: 800; }
+    .calculation-profile-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; margin-top: 12px; }
+    .calculation-profile-grid div { border: 1px solid #e2e8f0; border-radius: 8px; padding: 10px; background: #fff; }
+    .calculation-profile-grid dt { color: #64748b; font-size: 11px; text-transform: uppercase; letter-spacing: .04em; }
+    .calculation-profile-grid dd { margin: 3px 0 0; font-weight: 800; }
     table { width: 100%; border-collapse: collapse; }
     th, td { text-align: left; border-bottom: 1px solid #e2e8f0; padding: 7px 6px; }
     th { color: #64748b; font-size: 11px; text-transform: uppercase; letter-spacing: .04em; }
@@ -2354,11 +2546,14 @@ function buildNutritionReportHtml(reportData) {
         <div><dt>Informe</dt><dd>${escapeHtml(report.id)}</dd></div>
       </dl>
     </section>
+    ${projectionVisualHtml}
+    ${compositionVisualHtml}
     ${sectionsHtml}
     ${comparisonHtml}
     ${projectionHtml}
     ${narrativeHtml}
     ${qualityHtml}
+    ${calculationProfileHtml}
     ${calculationTraceHtml}
     ${formulaReferencesHtml}
     ${rawHtml}
@@ -2490,6 +2685,7 @@ async function generateNutritionMeasurementReportPdf(patientIdentifier, measurem
 module.exports = {
   FORMULA_VERSION,
   FORMULA_REFERENCES,
+  CALCULATION_PROFILE,
   PROFILE_DEFINITIONS,
   FIELD_DEFINITIONS,
   calculateNutritionValues,

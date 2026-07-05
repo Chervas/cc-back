@@ -5,6 +5,7 @@ const assert = require('node:assert/strict');
 const {
   FORMULA_VERSION,
   FORMULA_REFERENCES,
+  CALCULATION_PROFILE,
   calculateNutritionValues,
   __testing,
 } = require('../../services/nutritionWorkspace.service');
@@ -244,6 +245,8 @@ function run() {
 
   const reports = __testing.buildReports(rowsDesc);
   const secondReport = reports.find((report) => report.measurement_id === 2);
+  assert.equal(secondReport.calculation_profile.code, CALCULATION_PROFILE.code);
+  assert.equal(secondReport.calculation_profile.fat_mass_model.label, 'Durnin-Womersley + Siri');
   assert.equal(secondReport.clinical_storage.public_media, false);
   assert.equal(secondReport.clinical_storage.snapshot_persisted, false);
   assert.equal(secondReport.clinical_storage.pdf_strategy, 'generated_on_demand');
@@ -313,6 +316,7 @@ function run() {
     projection: projectionForSecond,
     meta: {
       formula_version: FORMULA_VERSION,
+      calculation_profile: CALCULATION_PROFILE,
       formula_references: FORMULA_REFERENCES,
       generated_at: '2026-02-26T11:00:00.000Z',
     },
@@ -353,11 +357,14 @@ function run() {
     age_years: 31,
   });
   assert.match(html, /Proyección temporal/);
+  assert.match(html, /Gráficas de evolución/);
   assert.match(html, /Peso estimado 8 semanas/);
   assert.match(html, /84 kg/);
   assert.match(html, /Suma de pliegues estimada 8 semanas/);
   assert.match(html, /Grasa estimada 8 semanas/);
-  assert.match(html, /Bases de cálculo/);
+  assert.match(html, /Perfil de cálculo aplicado/);
+  assert.match(html, /Perfil ClinicaClick ISAK v3/);
+  assert.match(html, /Fuentes de cálculo/);
   assert.match(html, /Trazabilidad de cálculo/);
   assert.match(html, /Aplicado/);
   assert.match(html, /WHO waist circumference and waist-hip ratio report/);
@@ -379,6 +386,7 @@ function run() {
     projection: projectionForSecond,
     meta: {
       formula_version: FORMULA_VERSION,
+      calculation_profile: CALCULATION_PROFILE,
       formula_references: FORMULA_REFERENCES,
       generated_at: '2026-02-26T11:00:00.000Z',
       document_status: 'final',
@@ -399,12 +407,14 @@ function run() {
     field_definitions: {},
     meta: {
       formula_version: FORMULA_VERSION,
+      calculation_profile: CALCULATION_PROFILE,
       formula_references: FORMULA_REFERENCES,
       generated_at: '2026-02-26T11:00:00.000Z',
     },
   }, html, '2026-02-26T11:00:00.000Z');
   assert.equal(snapshotPayload.snapshot.kind, 'nutrition_measurement_report');
-  assert.equal(snapshotPayload.snapshot.snapshot_version, 3);
+  assert.equal(snapshotPayload.snapshot.snapshot_version, 4);
+  assert.equal(snapshotPayload.snapshot.report.calculation_profile.code, CALCULATION_PROFILE.code);
   assert.equal(snapshotPayload.snapshot.measurement.id, 2);
   assert.equal(snapshotPayload.snapshot.report.measurement_id, 2);
   assert.equal(snapshotPayload.snapshot.meta.storage, 'patient_nutrition_report_snapshot');
