@@ -455,6 +455,7 @@ function run() {
   assert.match(html, /Pliegue tríceps/);
   assert.match(html, /Diámetros/);
   assert.match(html, /Distribución adiposa y muscular/);
+  assert.match(html, /Mapa corporal de distribución/);
   assert.match(html, /Actual [0-9.]+%/);
   assert.match(html, /Comparación [0-9.]+%/);
   assert.match(html, /body-distribution-neutral-front|Distribución corporal/);
@@ -531,6 +532,9 @@ function run() {
     },
   });
   assert.match(completeHtml, /Silueta con fraccionamiento tisular/);
+  assert.match(completeHtml, /Tejido graso estimado con pliegues y perímetros/);
+  assert.match(completeHtml, /component-inline-bar/);
+  assert.doesNotMatch(completeHtml, /bar-chart-grid/);
   assert.doesNotMatch(completeHtml, /Cinco componentes corporales estimados/);
   const clinicBrandHtml = __testing.buildNutritionReportHtml({
     patient: { name: 'Paciente Test', clinic_name: 'Clinica Norte', clinic_avatar_url: 'https://media.clinicaclick.com/logos/clinicas/clinica-norte.png' },
