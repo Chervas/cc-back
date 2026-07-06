@@ -384,6 +384,9 @@ function run() {
   });
   assert.match(html, /Proyección temporal/);
   assert.match(html, /Gráficas de evolución/);
+  assert.match(html, /Cómo leer el informe/);
+  assert.match(html, /Profesional explicando el informe/);
+  assert.match(html, /Seguimiento orientativo entre visitas/);
   assert.match(html, /Comparativas principales/);
   assert.match(html, /Pliegue tríceps/);
   assert.match(html, /Diámetros/);
@@ -399,7 +402,13 @@ function run() {
   assert.match(html, /Fraccionamiento molecular/);
   assert.match(html, /Fraccionamiento tisular/);
   assert.match(html, /Reserva energética del cuerpo/);
+  assert.match(html, /data:image\/webp;base64/);
+  assert.match(html, /Silueta de dos compartimentos/);
+  assert.match(html, /Mapa de zonas adiposas/);
+  assert.match(html, /Tres siluetas de referencia/);
+  assert.doesNotMatch(html, /skinfold-triceps\\.mp4/);
   assert.match(html, /Índices de salud/);
+  assert.match(html, /Índices antropométricos de salud/);
   assert.match(html, /Rango orientativo/);
   assert.doesNotMatch(html, /Posición visual/);
   assert.match(html, /stroke-dasharray="5 5"/);
@@ -426,6 +435,36 @@ function run() {
   assert.match(html, /Documento clínico privado/);
   assert.match(html, /data:image\/svg\+xml;base64/);
   assert.doesNotMatch(html, /148 kg/);
+  const completeMeasurement = {
+    id: 4,
+    patient_id: 1,
+    clinic_id: 1,
+    profile_code: 'express_isak',
+    measured_at: '2026-03-15T10:00:00.000Z',
+    raw_values: kerrRawValues,
+    calculated_values: calculateNutritionValues(kerrRawValues, 'express_isak', maleAdultContext),
+    formula_version: FORMULA_VERSION,
+    quality_flags: [],
+    notes: '',
+  };
+  const completeReport = __testing.buildReportForMeasurement(completeMeasurement, null);
+  const completeHtml = __testing.buildNutritionReportHtml({
+    patient: { name: 'Paciente Test', clinic_name: 'Clinica Test' },
+    treatment: null,
+    appointment: null,
+    measurement: completeMeasurement,
+    previous_measurement: null,
+    report: completeReport,
+    projection: __testing.buildProjectionForMeasurement([completeMeasurement], 4),
+    meta: {
+      formula_version: FORMULA_VERSION,
+      calculation_profile: CALCULATION_PROFILE,
+      formula_references: FORMULA_REFERENCES,
+      generated_at: '2026-03-15T11:00:00.000Z',
+    },
+  });
+  assert.match(completeHtml, /Silueta con fraccionamiento tisular/);
+  assert.match(completeHtml, /Cinco componentes corporales estimados/);
   const clinicBrandHtml = __testing.buildNutritionReportHtml({
     patient: { name: 'Paciente Test', clinic_name: 'Clinica Norte', clinic_avatar_url: 'https://media.clinicaclick.com/logos/clinicas/clinica-norte.png' },
     treatment: null,
