@@ -290,16 +290,21 @@ function buildConversationSearchClause(searchQuery) {
   ];
 
   const fullLike = makeLike(normalized);
+  const fullTextClause = { [Op.or]: textFieldClauses(fullLike) };
   const tokenClauses = normalized
     .split(' ')
     .map((token) => token.trim())
     .filter((token) => token.length >= 2)
     .map((token) => ({ [Op.or]: textFieldClauses(makeLike(token)) }));
 
+  if (!tokenClauses.length) {
+    return fullTextClause;
+  }
+
   return {
-    [Op.and]: [
-      { [Op.or]: textFieldClauses(fullLike) },
-      ...tokenClauses,
+    [Op.or]: [
+      fullTextClause,
+      { [Op.and]: tokenClauses },
     ],
   };
 }
