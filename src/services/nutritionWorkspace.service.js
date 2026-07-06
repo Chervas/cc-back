@@ -570,7 +570,7 @@ function buildProjectionVisualHtml(projection) {
   `;
 }
 
-function compositionVisualBlockHtml(title, subtitle, segments = [], barItems = []) {
+function compositionVisualBlockHtml(title, subtitle, segments = [], barItems = [], explainItems = []) {
   if (!segments.length) return '';
   return `
     <div class="composition-visual-block">
@@ -593,6 +593,17 @@ function compositionVisualBlockHtml(title, subtitle, segments = [], barItems = [
           </div>
         </div>
       </div>
+      ${explainItems.length ? `
+        <div class="component-explain-grid">
+          ${explainItems.map((item) => `
+            <div>
+              <span style="background:${escapeHtml(item.color)}"></span>
+              <strong>${escapeHtml(item.label)}</strong>
+              <small>${escapeHtml(item.detail)}</small>
+            </div>
+          `).join('')}
+        </div>
+      ` : ''}
       <div class="bar-chart-grid">${buildComponentBarSvg(barItems)}</div>
     </div>
   `;
@@ -625,7 +636,7 @@ function buildCompositionVisualHtml(report) {
       const leanPercent = Math.max(0, Math.min(100, 100 - fatPercent));
       blocks.push(compositionVisualBlockHtml(
         'Fraccionamiento molecular',
-        'Modelo de dos compartimentos calculado desde Durnin-Womersley + Siri: masa grasa y masa libre de grasa.',
+        'Lectura sencilla: separa el peso en grasa y masa libre de grasa. Sirve para ver si el cambio de peso viene sobre todo de tejido graso o de masa funcional.',
         [
           { label: 'Masa grasa', value: fatPercent, color: '#f97316' },
           { label: 'Masa libre de grasa', value: leanPercent, color: '#14b8a6' },
@@ -633,6 +644,10 @@ function buildCompositionVisualHtml(report) {
         [
           { label: 'Masa grasa', value: composition.fat_mass_kg, unit: 'kg', color: '#f97316' },
           { label: 'Masa libre', value: composition.fat_free_mass_kg, unit: 'kg', color: '#14b8a6' },
+        ],
+        [
+          { label: 'Masa grasa', color: '#f97316', detail: 'Reserva energética del cuerpo. No toda la grasa es mala; importa su evolución y distribución.' },
+          { label: 'Masa libre', color: '#14b8a6', detail: 'Todo lo que no es grasa: músculo, hueso, agua, órganos y otros tejidos.' },
         ],
       ));
     }
@@ -660,7 +675,7 @@ function buildCompositionVisualHtml(report) {
     if (segments.length) {
       blocks.push(compositionVisualBlockHtml(
         'Fraccionamiento tisular',
-        'Cinco componentes Kerr-Ross: adiposo, músculo, hueso, piel y residual.',
+        'Lectura sencilla: reparte el peso estimado en cinco tejidos para entender mejor de qué está compuesto el cuerpo, no solo cuánto pesa.',
         segments,
         [
           { label: 'Adiposo', value: fractionation.adipose_mass_kg, unit: 'kg', color: '#f97316' },
@@ -668,6 +683,13 @@ function buildCompositionVisualHtml(report) {
           { label: 'Óseo', value: fractionation.bone_mass_kg, unit: 'kg', color: '#6366f1' },
           { label: 'Piel', value: fractionation.skin_mass_kg, unit: 'kg', color: '#f43f5e' },
           { label: 'Residual', value: fractionation.residual_mass_kg, unit: 'kg', color: '#64748b' },
+        ],
+        [
+          { label: 'Adiposo', color: '#f97316', detail: 'Tejido graso estimado con pliegues y perímetros.' },
+          { label: 'Músculo', color: '#14b8a6', detail: 'Masa muscular estimada; ayuda a valorar ganancia o pérdida funcional.' },
+          { label: 'Óseo', color: '#6366f1', detail: 'Componente óseo estimado desde diámetros corporales.' },
+          { label: 'Piel', color: '#f43f5e', detail: 'Estimación del peso de la piel dentro del modelo.' },
+          { label: 'Residual', color: '#64748b', detail: 'Órganos, fluidos y otros tejidos no clasificados en los bloques anteriores.' },
         ],
       ));
     }
@@ -680,6 +702,7 @@ function buildCompositionVisualHtml(report) {
   return `
     <section class="card">
       <h2>Composición y fraccionamiento corporal</h2>
+      <p class="muted small-note">Esta parte traduce las medidas a bloques corporales. Es una estimación antropométrica para seguimiento clínico, no una prueba de imagen.</p>
       <div class="composition-block-grid">
         ${blocks.join('')}
       </div>
@@ -720,14 +743,14 @@ function buildComponentBarSvg(items = []) {
   const rowHeight = 34;
   const height = 28 + (normalized.length * rowHeight);
   return `
-    <svg class="bars-chart" viewBox="0 0 430 ${height}" role="img">
+    <svg class="bars-chart" viewBox="0 0 480 ${height}" role="img">
       ${normalized.map((item, index) => {
         const y = 22 + (index * rowHeight);
-        const width = Math.max(8, (item.value / max) * 250);
+        const width = Math.max(8, (item.value / max) * 260);
         return `
           <text x="0" y="${y + 13}" class="bar-label">${escapeHtml(item.label)}</text>
           <rect x="130" y="${y}" width="${round(width, 1)}" height="18" rx="4" fill="${escapeHtml(item.color)}"></rect>
-          <text x="${round(140 + width, 1)}" y="${y + 13}" class="bar-value">${escapeHtml(formatMetricValue({ value: item.value, unit: item.unit }))}</text>
+          <text x="470" y="${y + 13}" text-anchor="end" class="bar-value">${escapeHtml(formatMetricValue({ value: item.value, unit: item.unit }))}</text>
         `;
       }).join('')}
     </svg>
@@ -827,34 +850,34 @@ function segmentByLabel(segments = [], label = '') {
   return segments.find((segment) => String(segment.label).toLowerCase() === String(label).toLowerCase()) || null;
 }
 
-function segmentDeltaHtml(segment = {}, previousSegments = []) {
-  const previous = segmentByLabel(previousSegments, segment.label);
-  if (!previous || previous.percent === null || previous.percent === undefined) return '';
-  const delta = round(Number(segment.percent) - Number(previous.percent), 1);
+function segmentDeltaHtml(segment = {}, comparisonSegments = []) {
+  const comparison = segmentByLabel(comparisonSegments, segment.label);
+  if (!comparison || comparison.percent === null || comparison.percent === undefined) return '';
+  const delta = round(Number(segment.percent) - Number(comparison.percent), 1);
   if (!Number.isFinite(delta)) return '';
   const sign = delta > 0 ? '+' : '';
   const className = Math.abs(delta) < 0.1 ? 'delta-stable' : delta > 0 ? 'delta-bad' : 'delta-good';
-  return `<em class="${className}">${escapeHtml(sign)}${escapeHtml(delta)} pp vs previo</em>`;
+  return `<em class="${className}">${escapeHtml(sign)}${escapeHtml(delta)} pp vs comparación</em>`;
 }
 
-function segmentRowsHtml(title, segments = [], previousSegments = []) {
+function segmentRowsHtml(title, segments = [], comparisonSegments = []) {
   if (!segments.length) return '';
   return `
     <div class="distribution-panel">
       <h3>${escapeHtml(title)}</h3>
       ${segments.map((segment) => {
-        const previous = segmentByLabel(previousSegments, segment.label);
+        const comparison = segmentByLabel(comparisonSegments, segment.label);
         return `
           <div class="distribution-row">
             <div class="distribution-row-head">
               <span>${escapeHtml(segment.label)}</span>
               <strong>Actual ${escapeHtml(segment.percent)}%</strong>
-              ${previous ? `<small>Previo ${escapeHtml(previous.percent)}%</small>` : ''}
-              ${segmentDeltaHtml(segment, previousSegments)}
+              ${comparison ? `<small>Comparación ${escapeHtml(comparison.percent)}%</small>` : ''}
+              ${segmentDeltaHtml(segment, comparisonSegments)}
             </div>
             <div class="distribution-track">
               <i style="width:${escapeHtml(segment.percent)}%;background:${escapeHtml(segment.color)}"></i>
-              ${previous ? `<b style="left:${escapeHtml(previous.percent)}%"></b>` : ''}
+              ${comparison ? `<b style="left:${escapeHtml(comparison.percent)}%"></b>` : ''}
             </div>
           </div>
         `;
@@ -935,14 +958,15 @@ function buildDistributionVisualHtml(measurement = {}, previousMeasurement = nul
   return `
     <section class="card">
       <h2>Distribución adiposa y muscular</h2>
-      <p class="muted small-note">Reparte pliegues y perímetros corregidos por zonas. En cada fila, la barra muestra la medición actual y la marca vertical negra indica el porcentaje previo cuando existe.</p>
+      <p class="muted small-note">Lectura sencilla: muestra en qué zonas se concentra más la suma de pliegues o perímetros medidos. No es el porcentaje total de grasa o músculo del cuerpo; sirve para comparar distribución entre visitas.</p>
       <div class="distribution-layout">
         ${segmentRowsHtml('Tejido adiposo', adiposeSegments, previousAdiposeSegments)}
         <div class="body-map-wrap">
           ${bodyDistributionFigureHtml(adiposeSegments, muscleSegments)}
-          <div class="distribution-legend">
-            <span><i class="legend-current"></i>Zonas actuales</span>
-            ${previousMeasurement ? '<span><i class="legend-previous"></i>Marca previa en barras</span>' : ''}
+          <div class="distribution-key">
+            <div><i class="key-current"></i><strong>Color</strong><span>Valor actual de cada fila</span></div>
+            ${previousMeasurement ? '<div><i class="key-previous"></i><strong>Marca negra</strong><span>Medición elegida para comparar</span></div>' : ''}
+            <div><i class="key-body"></i><strong>Puntos del cuerpo</strong><span>Solo ubican las zonas</span></div>
           </div>
         </div>
         ${segmentRowsHtml('Tejido muscular', muscleSegments, previousMuscleSegments)}
@@ -960,8 +984,8 @@ function buildSomatotypeVisualHtml(report = {}, patient = {}) {
   if (endomorphy === null || mesomorphy === null || ectomorphy === null) return '';
   const x = ectomorphy - endomorphy;
   const y = (2 * mesomorphy) - (endomorphy + ectomorphy);
-  const plotX = 180 + (x * 18);
-  const plotY = 160 - (y * 10);
+  const plotX = Math.max(64, Math.min(296, 180 + (x * 18)));
+  const plotY = Math.max(48, Math.min(226, 154 - (y * 10)));
   const somatotypeImage = somatotypeImageDataUri(report, patient);
   const somatotypeImageHtml = somatotypeImage ? `
     <div class="somato-image-card">
@@ -973,17 +997,19 @@ function buildSomatotypeVisualHtml(report = {}, patient = {}) {
   return `
     <section class="card">
       <h2>Somatocarta</h2>
+      <p class="muted small-note">Lectura sencilla: sitúa el tipo corporal dominante en un triángulo. Arriba predomina la musculatura, a la izquierda la adiposidad relativa y a la derecha la linealidad o complexión más ligera.</p>
       <div class="somato-layout ${somatotypeImage ? 'somato-layout-with-image' : ''}">
-        <svg class="somato-chart" viewBox="0 0 360 300" role="img">
-          <path d="M180 35 C250 60 305 142 300 245 L60 245 C55 142 110 60 180 35 Z" fill="none" stroke="#64748b" stroke-width="2" stroke-dasharray="5 5"></path>
-          <line x1="180" y1="35" x2="180" y2="245" stroke="#94a3b8" stroke-dasharray="4 4"></line>
-          <line x1="60" y1="245" x2="300" y2="245" stroke="#94a3b8" stroke-dasharray="4 4"></line>
-          <line x1="60" y1="245" x2="300" y2="95" stroke="#cbd5e1"></line>
-          <line x1="300" y1="245" x2="60" y2="95" stroke="#cbd5e1"></line>
+        <svg class="somato-chart" viewBox="0 0 360 320" role="img">
+          <path d="M180 38 C250 64 305 138 300 226 L60 226 C55 138 110 64 180 38 Z" fill="none" stroke="#64748b" stroke-width="2" stroke-dasharray="5 5"></path>
+          <line x1="180" y1="38" x2="180" y2="226" stroke="#94a3b8" stroke-dasharray="4 4"></line>
+          <line x1="60" y1="226" x2="300" y2="226" stroke="#94a3b8" stroke-dasharray="4 4"></line>
+          <line x1="60" y1="226" x2="300" y2="92" stroke="#cbd5e1"></line>
+          <line x1="300" y1="226" x2="60" y2="92" stroke="#cbd5e1"></line>
           <text x="180" y="25" text-anchor="middle" class="somato-label">Mesomorfia</text>
-          <text x="55" y="272" text-anchor="middle" class="somato-label">Endomorfia</text>
-          <text x="305" y="272" text-anchor="middle" class="somato-label">Ectomorfia</text>
+          <text x="78" y="286" text-anchor="middle" class="somato-label">Endomorfia</text>
+          <text x="282" y="286" text-anchor="middle" class="somato-label">Ectomorfia</text>
           <circle cx="${round(plotX, 1)}" cy="${round(plotY, 1)}" r="6" fill="#0f766e"></circle>
+          <text x="${round(plotX, 1)}" y="${round(plotY - 12, 1)}" text-anchor="middle" class="somato-point-label">Paciente</text>
         </svg>
         <div class="somato-values">
           ${[
@@ -1094,7 +1120,7 @@ function buildFatDistributionHtml(current = null, previous = null) {
   const delta = previous ? round(current.trunkPercent - previous.trunkPercent, 1) : null;
   const deltaLabel = delta === null
     ? ''
-    : `<span class="${Math.abs(delta) < 0.1 ? 'delta-stable' : delta > 0 ? 'delta-bad' : 'delta-good'}">${delta > 0 ? '+' : ''}${escapeHtml(delta)} pp tronco vs previo</span>`;
+    : `<span class="${Math.abs(delta) < 0.1 ? 'delta-stable' : delta > 0 ? 'delta-bad' : 'delta-good'}">${delta > 0 ? '+' : ''}${escapeHtml(delta)} pp tronco vs comparación</span>`;
   return `
     <div class="fat-distribution">
       <div class="fat-distribution-head">
@@ -1111,12 +1137,12 @@ function buildFatDistributionHtml(current = null, previous = null) {
         <div class="fat-distribution-values">
           <div>
             <span style="background:#fb923c"></span>
-            <strong>Tronco${previous ? `<small>Previo ${escapeHtml(previous.trunkPercent)}%</small>` : ''}</strong>
+            <strong>Tronco${previous ? `<small>Comparación ${escapeHtml(previous.trunkPercent)}%</small>` : ''}</strong>
             <em>${escapeHtml(current.trunkPercent)}%</em>
           </div>
           <div>
             <span style="background:#14b8a6"></span>
-            <strong>Extremidades${previous ? `<small>Previo ${escapeHtml(previous.extremitiesPercent)}%</small>` : ''}</strong>
+            <strong>Extremidades${previous ? `<small>Comparación ${escapeHtml(previous.extremitiesPercent)}%</small>` : ''}</strong>
             <em>${escapeHtml(current.extremitiesPercent)}%</em>
           </div>
         </div>
@@ -3412,6 +3438,11 @@ function buildNutritionReportHtml(reportData, options = {}) {
     .composition-block-grid { display: grid; gap: 12px; }
     .composition-visual-block { border: 1px solid #e2e8f0; border-radius: 10px; padding: 12px; background: #fff; }
     .composition-visual-block h3 { margin: 0; font-size: 13px; color: #0f172a; }
+    .component-explain-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; margin-top: 12px; }
+    .component-explain-grid div { display: grid; grid-template-columns: 10px minmax(0, 1fr); gap: 4px 8px; align-items: start; border: 1px solid #e2e8f0; border-radius: 8px; padding: 8px; background: #f8fafc; }
+    .component-explain-grid span { width: 10px; height: 10px; border-radius: 999px; margin-top: 3px; }
+    .component-explain-grid strong { font-size: 11px; color: #0f172a; }
+    .component-explain-grid small { grid-column: 2; color: #64748b; font-size: 10px; line-height: 1.35; }
     .pending-visual { min-height: 132px; display: flex; flex-direction: column; justify-content: center; align-items: center; gap: 6px; border: 1px dashed #cbd5e1; border-radius: 10px; text-align: center; padding: 16px; }
     .pending-visual strong { color: #92400e; }
     .pending-visual span { color: #64748b; font-size: 11px; max-width: 520px; }
@@ -3439,20 +3470,24 @@ function buildNutritionReportHtml(reportData, options = {}) {
     .body-zone-lower { left: 68px; top: 174px; }
     .body-zone-arm { left: 28px; top: 116px; }
     .body-zone-leg { right: 39px; top: 180px; }
-    .distribution-legend { display: inline-flex; gap: 10px; margin-top: 6px; color: #64748b; font-size: 10px; font-weight: 800; }
-    .distribution-legend span { display: inline-flex; align-items: center; gap: 4px; }
-    .distribution-legend i { width: 10px; height: 10px; border-radius: 999px; display: inline-block; }
-    .legend-current { background: #14b8a6; }
-    .legend-previous { background: #0f172a; opacity: .65; }
-    .somato-layout { display: grid; grid-template-columns: minmax(0, 1fr) 190px; gap: 18px; align-items: center; }
-    .somato-layout-with-image { grid-template-columns: minmax(0, 1fr) 150px 170px; }
+    .distribution-key { display: grid; gap: 6px; margin-top: 8px; color: #64748b; font-size: 10px; text-align: left; }
+    .distribution-key div { display: grid; grid-template-columns: 14px minmax(0, 1fr); gap: 0 6px; align-items: center; }
+    .distribution-key i { width: 11px; height: 11px; border-radius: 999px; display: inline-block; grid-row: 1 / span 2; }
+    .distribution-key strong { color: #0f172a; font-size: 10px; }
+    .distribution-key span { grid-column: 2; line-height: 1.25; }
+    .key-current { background: linear-gradient(135deg, #38bdf8, #14b8a6, #f97316); }
+    .key-previous { background: #0f172a; opacity: .7; }
+    .key-body { background: #fff; border: 2px solid #14b8a6; }
+    .somato-layout { display: grid; grid-template-columns: minmax(0, 1fr) 210px; gap: 18px; align-items: center; }
+    .somato-layout-with-image { grid-template-columns: minmax(0, 1fr) 210px 170px; }
     .somato-chart { width: 100%; max-height: 330px; }
     .somato-label { fill: #0f172a; font-size: 13px; font-weight: 850; }
+    .somato-point-label { fill: #0f766e; font-size: 10px; font-weight: 850; }
     .somato-values { display: grid; gap: 10px; }
-    .somato-value-card { display: grid; grid-template-columns: 42px minmax(0, 1fr) auto; gap: 8px; align-items: center; border: 1px solid #e2e8f0; border-radius: 8px; padding: 8px; }
-    .somato-value-card img { width: 42px; height: 42px; object-fit: contain; border-radius: 8px; background: #f8fafc; }
+    .somato-value-card { display: grid; grid-template-columns: 46px minmax(0, 1fr); gap: 2px 9px; align-items: center; border: 1px solid #e2e8f0; border-radius: 8px; padding: 8px; }
+    .somato-value-card img { grid-row: 1 / span 2; width: 46px; height: 46px; object-fit: contain; border-radius: 8px; background: #f8fafc; }
     .somato-value-card span { display: block; color: #64748b; font-size: 11px; font-weight: 700; }
-    .somato-value-card strong { display: block; font-size: 22px; }
+    .somato-value-card strong { display: block; font-size: 24px; line-height: 1; color: #0f172a; }
     .somato-image-card { border: 1px solid #e2e8f0; border-radius: 10px; padding: 10px; text-align: center; background: #f8fafc; }
     .somato-image-card img { width: 100%; height: 170px; object-fit: contain; display: block; }
     .somato-image-card strong { display: block; margin-top: 6px; font-size: 12px; color: #0f172a; }
