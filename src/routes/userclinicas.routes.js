@@ -13,6 +13,14 @@ const ACTIVE_STAFF_INVITATION_WHERE = {
     ],
 };
 
+const normalizeClinicConfig = (configuracion) => {
+    const cfg = configuracion && typeof configuracion === 'object' ? configuracion : {};
+    return {
+        ...cfg,
+        disciplinas: Array.isArray(cfg.disciplinas) && cfg.disciplinas.length > 0 ? cfg.disciplinas : ['dental']
+    };
+};
+
 /**
  * Función auxiliar para obtener el userId del token JWT
  */
@@ -145,6 +153,7 @@ router.get('/list', async (req, res) => {
                     id_grupo: clinica.grupoClinica.id_grupo,
                     nombre_grupo: clinica.grupoClinica.nombre_grupo
                 } : null,
+                configuracion: normalizeClinicConfig(clinica.configuracion),
                 userRole: normalizeRole(assignmentByClinic.get(clinica.id_clinica)?.role),
                 userSubRole: assignmentByClinic.get(clinica.id_clinica)?.subrole || 'sistema',
                 // Permisos completos para administradores
@@ -245,6 +254,7 @@ router.get('/list', async (req, res) => {
                     id_grupo: clinica.grupoClinica.id_grupo,
                     nombre_grupo: clinica.grupoClinica.nombre_grupo
                 } : null,
+                configuracion: normalizeClinicConfig(clinica.configuracion),
                 userRole: clinica.UsuarioClinica.rol_clinica,
                 userSubRole: clinica.UsuarioClinica.subrol_clinica,
                 // Permisos basados en el rol asignado

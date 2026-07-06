@@ -2,14 +2,14 @@
 
 const { Op } = require('sequelize');
 const { AccessPolicyOverride, UsuarioClinica, Clinica } = require('../../models');
-const { ADMIN_USER_IDS, STAFF_ROLES, isGlobalAdmin } = require('../lib/role-helpers');
+const { ADMIN_USER_IDS, STAFF_ROLES } = require('../lib/role-helpers');
+const {
+  ALLOWED_FEATURE_KEYS,
+  ALLOWED_ROLE_CODES,
+  normalizeFeatureKey,
+  normalizeRoleCode,
+} = require('../lib/access-policy');
 const ALLOWED_SCOPE_TYPES = new Set(['group', 'clinic']);
-const ALLOWED_FEATURE_KEYS = new Set([
-  'marketing',
-  'quickchat.read_patients',
-  'quickchat.read_team',
-]);
-const ALLOWED_ROLE_CODES = new Set(['doctor', 'assistant', 'reception', 'admin_staff', 'unknown']);
 const ALLOWED_EFFECTS = new Set(['allow', 'deny']);
 
 const isAdmin = (userId) => ADMIN_USER_IDS.includes(Number(userId));
@@ -20,8 +20,6 @@ const parseIntOrNull = (value) => {
 };
 
 const normalizeScopeType = (value) => String(value || '').trim().toLowerCase();
-const normalizeFeatureKey = (value) => String(value || '').trim().toLowerCase();
-const normalizeRoleCode = (value) => String(value || '').trim().toLowerCase();
 
 async function getScopeAccess(actorId) {
   if (isAdmin(actorId)) {
@@ -117,14 +115,16 @@ exports.getOverrides = async (req, res) => {
 
     const scopeType = normalizeScopeType(req.query.scope_type);
     const scopeId = parseIntOrNull(req.query.scope_id);
-    const featureKey = normalizeFeatureKey(req.query.feature_key || 'marketing');
+    const requestedFeatureKey = req.query.feature_key ? normalizeFeatureKey(req.query.feature_key) : null;
 
-    if (!ALLOWED_FEATURE_KEYS.has(featureKey)) {
+    if (requestedFeatureKey && !ALLOWED_FEATURE_KEYS.has(requestedFeatureKey)) {
       return res.status(400).json({ message: 'feature_key invalid' });
     }
 
     const scopeAccess = await getScopeAccess(actorId);
-    const where = { feature_key: featureKey };
+    const where = requestedFeatureKey
+      ? { feature_key: requestedFeatureKey }
+      : { feature_key: { [Op.in]: Array.from(ALLOWED_FEATURE_KEYS) } };
 
     if (scopeType && scopeId != null) {
       if (!ALLOWED_SCOPE_TYPES.has(scopeType)) {
@@ -144,7 +144,7 @@ exports.getOverrides = async (req, res) => {
         clauses.push({ scope_type: 'group', scope_id: { [Op.in]: scopeAccess.readGroupIds } });
       }
       if (!clauses.length) {
-        return res.json({ feature_key: featureKey, items: [] });
+        return res.json({ feature_key: requestedFeatureKey || 'all', items: [] });
       }
       where[Op.or] = clauses;
     }
@@ -157,7 +157,7 @@ exports.getOverrides = async (req, res) => {
     });
 
     return res.json({
-      feature_key: featureKey,
+      feature_key: requestedFeatureKey || 'all',
       items: rows.map((r) => ({
         scope_type: r.scope_type,
         scope_id: Number(r.scope_id),

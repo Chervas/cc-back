@@ -26,6 +26,7 @@ const {
   UsuarioClinica,
   BusinessProfileReview,
   Campaign,
+  ClinicBusinessLocation,
   AutomationFlow,
 } = db;
 
@@ -221,7 +222,7 @@ async function resolveClinicScope(rawScope, memberships) {
   const clinics = clinicIds.length && Clinica
     ? await Clinica.findAll({
         where: scopedWhere('id_clinica', clinicIds),
-        attributes: ['id_clinica', 'nombre_clinica', 'url_avatar', 'grupoClinicaId'],
+        attributes: ['id_clinica', 'nombre_clinica', 'url_avatar', 'url_ficha_local', 'grupoClinicaId'],
         raw: true,
       })
     : [];
@@ -332,22 +333,24 @@ function mapAppointment(row, maps, now) {
 
 async function loadAppointments({ clinicIds, clinicMap, todayStart, todayEnd, now }) {
   if (!clinicIds.length || !CitaPaciente) {
-    return { today: [], pastAttendance: [] };
+    return { today: [], pastAttendance: [], next: [] };
   }
 
   const pastStart = new Date(todayStart);
   pastStart.setDate(pastStart.getDate() - 14);
 
-  const [todayRows, pastRows] = await Promise.all([
+  const appointmentAttributes = [
+    'id_cita', 'clinica_id', 'paciente_id', 'doctor_id', 'instalacion_id',
+    'tratamiento_id', 'titulo', 'motivo', 'tipo_cita', 'estado', 'inicio', 'fin',
+  ];
+
+  const [todayRows, pastRows, nextRows] = await Promise.all([
     CitaPaciente.findAll({
       where: {
         ...scopedWhere('clinica_id', clinicIds),
         inicio: { [Op.between]: [todayStart, todayEnd] },
       },
-      attributes: [
-        'id_cita', 'clinica_id', 'paciente_id', 'doctor_id', 'instalacion_id',
-        'tratamiento_id', 'titulo', 'motivo', 'tipo_cita', 'estado', 'inicio', 'fin',
-      ],
+      attributes: appointmentAttributes,
       order: [['inicio', 'ASC']],
       raw: true,
     }),
@@ -357,17 +360,25 @@ async function loadAppointments({ clinicIds, clinicMap, todayStart, todayEnd, no
         fin: { [Op.between]: [pastStart, now] },
         estado: { [Op.in]: [...ATTENDANCE_OPEN_STATUSES] },
       },
-      attributes: [
-        'id_cita', 'clinica_id', 'paciente_id', 'doctor_id', 'instalacion_id',
-        'tratamiento_id', 'titulo', 'motivo', 'tipo_cita', 'estado', 'inicio', 'fin',
-      ],
+      attributes: appointmentAttributes,
       order: [['fin', 'DESC']],
       limit: 30,
       raw: true,
     }),
+    CitaPaciente.findAll({
+      where: {
+        ...scopedWhere('clinica_id', clinicIds),
+        inicio: { [Op.gt]: todayEnd },
+        estado: { [Op.notIn]: [...CANCELLED_STATUSES] },
+      },
+      attributes: appointmentAttributes,
+      order: [['inicio', 'ASC']],
+      limit: 4,
+      raw: true,
+    }),
   ]);
 
-  const allRows = [...todayRows, ...pastRows];
+  const allRows = [...todayRows, ...pastRows, ...nextRows];
   const maps = await loadAppointmentMaps(allRows, clinicMap);
 
   return {
@@ -378,6 +389,7 @@ async function loadAppointments({ clinicIds, clinicMap, todayStart, todayEnd, no
       .filter((row) => !CANCELLED_STATUSES.has(String(row.estado || '').toLowerCase()))
       .map((row) => mapAppointment(row, maps, now))
       .filter((item) => item.attendanceDue),
+    next: nextRows.map((row) => mapAppointment(row, maps, now)),
   };
 }
 
@@ -427,31 +439,36 @@ async function countTasks({ clinicIds, todayStart, todayEnd }) {
   return { leadsPending, pendingConsents, pendingReviews, unconfirmedToday };
 }
 
-function taskItems(counts) {
+function taskItems(counts, todayDate, clinicIds) {
+  const singleClinicId = clinicIds.length === 1 ? clinicIds[0] : null;
   return [
     {
       id: 'leads_pending',
       label: 'Leads sin contactar',
       count: counts.leadsPending || 0,
       link: '/marketing/leads',
+      queryParams: { status: 'nuevo', contactado: '0' },
     },
     {
       id: 'unconfirmed_today',
       label: 'Pacientes sin confirmar cita hoy',
       count: counts.unconfirmedToday || 0,
       link: '/agenda-de-citas',
+      queryParams: { fecha: todayDate, clinica_id: singleClinicId },
     },
     {
       id: 'pending_consents',
       label: 'Consentimientos sin firmar',
       count: counts.pendingConsents || 0,
       link: '/consentimientos',
+      queryParams: { tab: 'pendientes', clinica_id: singleClinicId },
     },
     {
       id: 'pending_reviews',
       label: 'Reseñas Google sin contestar',
       count: counts.pendingReviews || 0,
       link: '/marketing/perfil-google',
+      queryParams: { reviews: 'unanswered', clinica_id: singleClinicId },
     },
   ];
 }
@@ -585,8 +602,38 @@ async function loadWeeklySchedule({ clinicIds, clinicMap, userId, todayIso }) {
   });
 }
 
-async function loadWhatsappConnected({ clinicIds, groupIds }) {
-  if (!ClinicMetaAsset || (!clinicIds.length && !groupIds.length)) return null;
+function parseJsonObject(value) {
+  if (!value) return {};
+  if (typeof value === 'object') return value;
+  if (typeof value === 'string') {
+    try {
+      const parsed = JSON.parse(value);
+      return parsed && typeof parsed === 'object' ? parsed : {};
+    } catch {
+      return {};
+    }
+  }
+  return {};
+}
+
+function hasMissingPaymentSignal(additional) {
+  const payment = parseJsonObject(additional.payment || additional.payment_method || additional.paymentMethod);
+  const status = String(payment.status || payment.state || payment.code || '').toLowerCase();
+  const errorCode = String(
+    payment.error_code ||
+    payment.code ||
+    additional.wa_error?.code ||
+    additional.last_error?.code ||
+    additional.lastError?.code ||
+    ''
+  );
+  return status.includes('missing') || status.includes('required') || errorCode === '131042';
+}
+
+async function loadWhatsappStatus({ clinicIds, groupIds }) {
+  if (!ClinicMetaAsset || (!clinicIds.length && !groupIds.length)) {
+    return { connected: null, paymentReady: null, paymentMissing: false };
+  }
   const scopeOr = [];
   if (clinicIds.length) {
     scopeOr.push({ clinicaId: { [Op.in]: clinicIds } });
@@ -606,8 +653,8 @@ async function loadWhatsappConnected({ clinicIds, groupIds }) {
     raw: true,
   });
 
-  return assets.some((asset) => {
-    const additional = typeof asset.additionalData === 'object' && asset.additionalData ? asset.additionalData : {};
+  const connected = assets.some((asset) => {
+    const additional = parseJsonObject(asset.additionalData);
     const status = String(
       additional.status ||
       additional.whatsapp_status ||
@@ -617,6 +664,164 @@ async function loadWhatsappConnected({ clinicIds, groupIds }) {
     ).toLowerCase();
     return Boolean(asset.phoneNumberId || asset.wabaId || ['connected', 'live', 'active'].includes(status));
   });
+  const paymentMissing = assets.some((asset) => hasMissingPaymentSignal(parseJsonObject(asset.additionalData)));
+
+  return {
+    connected,
+    paymentReady: connected && !paymentMissing,
+    paymentMissing,
+  };
+}
+
+async function loadSetupStatus({ clinicIds, groupIds, clinics, whatsappStatus }) {
+  if (!clinicIds.length) {
+    return { total: 0, completed: 0, items: [] };
+  }
+
+  const treatmentScope = [];
+  if (clinicIds.length) {
+    treatmentScope.push({ clinica_id: { [Op.in]: clinicIds } });
+  }
+  if (groupIds.length) {
+    treatmentScope.push({ grupo_clinica_id: { [Op.in]: groupIds } });
+  }
+
+  const [localProfileCount, staffCount, doctorClinics, installationCount, treatmentCount, appointmentCount] = await Promise.all([
+    ClinicBusinessLocation
+      ? ClinicBusinessLocation.count({
+          where: {
+            ...scopedWhere('clinica_id', clinicIds),
+            is_active: true,
+          },
+        })
+      : 0,
+    UsuarioClinica
+      ? UsuarioClinica.count({
+          where: {
+            ...scopedWhere('id_clinica', clinicIds),
+            rol_clinica: 'personaldeclinica',
+          },
+        })
+      : 0,
+    DoctorClinica
+      ? DoctorClinica.findAll({
+          where: {
+            ...scopedWhere('clinica_id', clinicIds),
+            activo: true,
+          },
+          attributes: ['id'],
+          raw: true,
+        })
+      : [],
+    Instalacion
+      ? Instalacion.count({
+          where: {
+            ...scopedWhere('clinica_id', clinicIds),
+            activo: true,
+          },
+        })
+      : 0,
+    Tratamiento && treatmentScope.length
+      ? Tratamiento.count({
+          where: {
+            activo: true,
+            [Op.or]: treatmentScope,
+          },
+        })
+      : 0,
+    CitaPaciente
+      ? CitaPaciente.count({
+          where: scopedWhere('clinica_id', clinicIds),
+        })
+      : 0,
+  ]);
+
+  const doctorClinicIds = uniqueInts(doctorClinics.map((row) => row.id));
+  const scheduleCount = doctorClinicIds.length && DoctorHorario
+    ? await DoctorHorario.count({
+        where: {
+          ...scopedWhere('doctor_clinica_id', doctorClinicIds),
+          activo: true,
+        },
+      })
+    : 0;
+
+  const hasLocalProfile = localProfileCount > 0 || (clinics || []).some((clinic) => String(clinic.url_ficha_local || '').trim());
+  const items = [
+    {
+      id: 'whatsapp_connected',
+      label: 'Conectar WhatsApp',
+      description: 'Necesario para plantillas, confirmaciones y recordatorios automáticos.',
+      completed: whatsappStatus.connected === true,
+      link: '/ajustes',
+      queryParams: { tab: 'connected-accounts' },
+      actionLabel: 'Conectar',
+    },
+    {
+      id: 'whatsapp_payment',
+      label: 'Validar método de pago de WhatsApp',
+      description: 'Evita bloqueos de envío por facturación de Meta.',
+      completed: whatsappStatus.paymentReady === true,
+      severity: whatsappStatus.paymentMissing ? 'critical' : 'normal',
+      link: '/ajustes',
+      queryParams: { tab: 'connected-accounts' },
+      actionLabel: 'Revisar',
+    },
+    {
+      id: 'local_profile',
+      label: 'Conectar ficha local',
+      description: 'Permite medir reseñas, visibilidad local y llamadas desde Google.',
+      completed: hasLocalProfile,
+      link: '/marketing/perfil-google',
+      actionLabel: 'Ver ficha',
+    },
+    {
+      id: 'staff',
+      label: 'Dar de alta al personal',
+      description: 'Añade doctores, recepción y auxiliares con su rol operativo.',
+      completed: staffCount > 0,
+      link: '/personal',
+      actionLabel: 'Personal',
+    },
+    {
+      id: 'schedules',
+      label: 'Publicar horarios',
+      description: 'Define disponibilidad para que agenda y recordatorios funcionen bien.',
+      completed: scheduleCount > 0,
+      link: '/personal',
+      actionLabel: 'Horarios',
+    },
+    {
+      id: 'installations',
+      label: 'Configurar instalaciones',
+      description: 'Boxes, salas y recursos que condicionan la agenda.',
+      completed: installationCount > 0,
+      link: '/instalaciones',
+      actionLabel: 'Instalaciones',
+    },
+    {
+      id: 'treatments',
+      label: 'Configurar tratamientos',
+      description: 'Duración, precio base y reglas clínicas de los servicios.',
+      completed: treatmentCount > 0,
+      link: '/catalogo-tratamientos',
+      actionLabel: 'Tratamientos',
+    },
+    {
+      id: 'appointments',
+      label: 'Comenzar a dar citas',
+      description: 'La operativa diaria empieza cuando la agenda ya tiene citas reales.',
+      completed: appointmentCount > 0,
+      link: '/agenda-de-citas',
+      actionLabel: 'Agenda',
+    },
+  ];
+
+  return {
+    total: items.length,
+    completed: items.filter((item) => item.completed).length,
+    items,
+  };
 }
 
 async function loadOpportunities({ clinicIds }) {
@@ -724,22 +929,29 @@ async function getMainDashboard({ userId, query = {} }) {
     pendingPatientConsents,
     doctorPendingConsents,
     weeklySchedule,
-    whatsappConnected,
+    whatsappStatus,
     opportunities,
   ] = await Promise.all([
     loadPendingConsentCards({ clinicIds: scope.clinicIds, limit: 6 }),
     doctorId ? loadPendingConsentCards({ clinicIds: scope.clinicIds, doctorId, limit: 6 }) : [],
     doctorId ? loadWeeklySchedule({ clinicIds: scope.clinicIds, clinicMap: scope.clinicMap, userId: doctorId, todayIso: today.date }) : [],
-    loadWhatsappConnected({ clinicIds: scope.clinicIds, groupIds: scope.groupIds }),
+    loadWhatsappStatus({ clinicIds: scope.clinicIds, groupIds: scope.groupIds }),
     loadOpportunities({ clinicIds: scope.clinicIds }),
   ]);
+
+  const setup = await loadSetupStatus({
+    clinicIds: scope.clinicIds,
+    groupIds: scope.groupIds,
+    clinics: scope.clinics,
+    whatsappStatus,
+  });
 
   const doctorAppointments = doctorId
     ? appointments.today.filter((item) => Number(item.doctorId) === Number(doctorId))
     : [];
 
   const errors = [];
-  if (whatsappConnected === false) {
+  if (whatsappStatus.connected === false) {
     errors.push({
       id: 'whatsapp_not_connected',
       title: 'No tienes WhatsApp conectado',
@@ -747,6 +959,15 @@ async function getMainDashboard({ userId, query = {} }) {
       link: '/ajustes',
       queryParams: { tab: 'connected-accounts' },
       actionLabel: 'Ir a Cuentas conectadas',
+    });
+  } else if (whatsappStatus.paymentMissing) {
+    errors.push({
+      id: 'whatsapp_payment_missing',
+      title: 'WhatsApp no tiene método de pago activo',
+      subtitle: 'Meta puede bloquear plantillas y recordatorios hasta que se configure la facturación.',
+      link: '/ajustes',
+      queryParams: { tab: 'connected-accounts' },
+      actionLabel: 'Revisar pago',
     });
   }
 
@@ -771,24 +992,22 @@ async function getMainDashboard({ userId, query = {} }) {
       showOwnerFeedback: sections.ownerLike,
     },
     todayAppointments: appointments.today,
+    nextAppointments: appointments.next,
     pastAttendancePending: appointments.pastAttendance,
     doctorAppointmentsToday: doctorAppointments,
     pendingPatientConsents,
     doctorPendingConsents,
     weeklySchedule,
     tasks: {
-      items: taskItems(counts),
+      items: taskItems(counts, today.date, scope.clinicIds),
       total: (counts.leadsPending || 0) + (counts.unconfirmedToday || 0) + (counts.pendingConsents || 0) + (counts.pendingReviews || 0),
     },
+    setup,
+    criticalAlerts: errors,
+    growthOpportunities: opportunities,
     opportunities,
     errors,
-    feedback: sections.ownerLike
-      ? [{
-          id: 'reviews_5_star_sample',
-          title: 'Enhorabuena, tienes 5 nuevas reseñas de 5 estrellas en Google obtenidas gracias a tu automatización.',
-          attribution: 'ClinicaClick',
-        }]
-      : [],
+    feedback: [],
     meta: {
       generatedAt: new Date().toISOString(),
       source: 'backend',

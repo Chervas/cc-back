@@ -85,7 +85,9 @@ function sendError(res, error, fallbackMessage) {
 exports.listCampaigns = async (req, res) => {
   try {
     const scope = await resolveScope(req, { allowAll: false });
-    const result = await marketingBulkSendsService.listCampaigns(scope);
+    const result = await marketingBulkSendsService.listCampaigns(scope, {
+      context: req.query.context || req.query.list_context || req.query.listContext || null,
+    });
     return res.json({
       ...result,
       scope: {

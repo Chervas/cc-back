@@ -17,6 +17,7 @@ const DoctorClinica = db.DoctorClinica;
 const DoctorHorario = db.DoctorHorario;
 const DoctorBloqueo = db.DoctorBloqueo;
 const Tratamiento = db.Tratamiento;
+const PatientNutritionMeasurement = db.PatientNutritionMeasurement;
 const FlowExecutionV2 = db.FlowExecutionV2;
 const AutomationFlowTemplateV2 = db.AutomationFlowTemplateV2;
 const Conversation = db.Conversation;
@@ -67,6 +68,52 @@ function buildDateRangeWhere(startDate, endDate) {
     const end = parseDateBoundary(endDate, true);
     if (!start || !end) return null;
     return { [Op.between]: [start, end] };
+}
+
+function normalizeMoneyValue(value) {
+    if (value === null || value === undefined || value === '') {
+        return null;
+    }
+    const numeric = Number(value);
+    if (!Number.isFinite(numeric) || numeric < 0) {
+        return null;
+    }
+    return Math.round(numeric * 100) / 100;
+}
+
+function appointmentTypePriceCode(tipoCita) {
+    const tipo = String(tipoCita || '').trim().toLowerCase();
+    return ['primera_con_trat', 'continuacion', 'revision', 'urgencia'].includes(tipo)
+        ? tipo
+        : null;
+}
+
+function resolveCitaAppointmentPrice(cita) {
+    const plain = plainCita(cita);
+    const tratamiento = plain?.tratamiento;
+    if (!tratamiento) {
+        return null;
+    }
+
+    const basePrice = normalizeMoneyValue(tratamiento.precio_base) ?? 0;
+    const priceCode = appointmentTypePriceCode(plain.tipo_cita);
+    if (!priceCode) {
+        return basePrice;
+    }
+
+    const configuredPrice = normalizeMoneyValue(
+        tratamiento.clinical_config?.appointment_type_prices?.[priceCode]
+    );
+    return configuredPrice !== null ? configuredPrice : basePrice;
+}
+
+function attachResolvedAppointmentPricesToCitas(citas) {
+    const list = Array.isArray(citas) ? citas : (citas ? [citas] : []);
+    list.forEach((cita) => {
+        const resolvedPrice = resolveCitaAppointmentPrice(cita);
+        setCitaDataValue(cita, 'precio_cita_resuelto', resolvedPrice);
+    });
+    return citas;
 }
 
 async function generateUniquePacientePublicId() {
@@ -778,6 +825,93 @@ async function attachCalendarUnreadCountsToCitas(citas, userId) {
     return citas;
 }
 
+function isNutritionMeasurementEnabled(citaLike) {
+    const treatment = citaLike?.tratamiento || null;
+    const clinicalConfig = treatment?.clinical_config || null;
+    const nutrition = clinicalConfig?.nutrition || null;
+    const profileCode = String(nutrition?.measurement_profile_code || '').trim();
+    const discipline = String(treatment?.disciplina || '').trim().toLowerCase();
+    return (discipline === 'nutricion' || !!nutrition)
+        && ['quick', 'express_isak'].includes(profileCode);
+}
+
+function measurementSummaryForAgenda(row, citaLike) {
+    if (!row) return null;
+    const plain = plainCita(row);
+    const measuredAt = plain?.measured_at || null;
+    const appointmentDate = citaLike?.inicio || citaLike?.fin || null;
+    const measuredTs = measuredAt ? new Date(measuredAt).getTime() : NaN;
+    const appointmentTs = appointmentDate ? new Date(appointmentDate).getTime() : NaN;
+    const daysBetween = Number.isFinite(measuredTs) && Number.isFinite(appointmentTs)
+        ? Math.max(0, Math.round((appointmentTs - measuredTs) / (1000 * 60 * 60 * 24)))
+        : null;
+
+    return {
+        id: plain.id,
+        profile_code: plain.profile_code || null,
+        measured_at: measuredAt,
+        appointment_id: plain.appointment_id || null,
+        formula_version: plain.formula_version || null,
+        days_between_appointment: daysBetween,
+    };
+}
+
+async function attachNutritionLatestMeasurementsToCitas(citas) {
+    const list = Array.isArray(citas) ? citas : (citas ? [citas] : []);
+    if (!list.length || !PatientNutritionMeasurement) return citas;
+
+    const nutritionCitas = list
+        .map((cita) => ({ cita, plain: plainCita(cita) }))
+        .filter(({ plain }) => plain?.paciente_id && isNutritionMeasurementEnabled(plain));
+
+    if (!nutritionCitas.length) {
+        list.forEach((cita) => setCitaDataValue(cita, 'nutrition_latest_measurement', null));
+        return citas;
+    }
+
+    const patientIds = Array.from(new Set(
+        nutritionCitas
+            .map(({ plain }) => Number(plain.paciente_id))
+            .filter((id) => Number.isInteger(id) && id > 0)
+    ));
+
+    if (!patientIds.length) return citas;
+
+    const rows = await PatientNutritionMeasurement.findAll({
+        where: { patient_id: { [Op.in]: patientIds } },
+        attributes: ['id', 'patient_id', 'appointment_id', 'profile_code', 'measured_at', 'formula_version'],
+        order: [['patient_id', 'ASC'], ['measured_at', 'DESC'], ['id', 'DESC']],
+        limit: Math.max(100, patientIds.length * 20),
+    });
+
+    const measurementsByPatient = new Map();
+    rows.forEach((row) => {
+        const plain = plainCita(row);
+        const patientId = Number(plain?.patient_id);
+        if (!Number.isInteger(patientId) || patientId <= 0) return;
+        const bucket = measurementsByPatient.get(patientId) || [];
+        bucket.push(row);
+        measurementsByPatient.set(patientId, bucket);
+    });
+
+    nutritionCitas.forEach(({ cita, plain }) => {
+        const patientId = Number(plain.paciente_id);
+        const appointmentId = Number(plain.id_cita || plain.id || 0) || null;
+        const referenceTs = plain.inicio ? new Date(plain.inicio).getTime() : NaN;
+        const candidates = measurementsByPatient.get(patientId) || [];
+        const previous = candidates.find((row) => {
+            const measurement = plainCita(row);
+            if (appointmentId && Number(measurement.appointment_id || 0) === appointmentId) return false;
+            if (!Number.isFinite(referenceTs)) return true;
+            const measuredTs = measurement.measured_at ? new Date(measurement.measured_at).getTime() : NaN;
+            return Number.isFinite(measuredTs) && measuredTs <= referenceTs;
+        }) || null;
+        setCitaDataValue(cita, 'nutrition_latest_measurement', measurementSummaryForAgenda(previous, plain));
+    });
+
+    return citas;
+}
+
 function mapCalendarCitaRow(cita) {
     const plain = plainCita(cita);
     if (!plain) return null;
@@ -796,8 +930,10 @@ function mapCalendarCitaRow(cita) {
         estado: plain.estado,
         inicio: plain.inicio,
         fin: plain.fin,
+        precio_cita_resuelto: resolveCitaAppointmentPrice(plain),
         conversation_id: plain.conversation_id || null,
         unread_count: Number(plain.unread_count || 0) || 0,
+        nutrition_latest_measurement: plain.nutrition_latest_measurement || null,
         paciente: plain.paciente ? {
             id_paciente: plain.paciente.id_paciente,
             public_id: plain.paciente.public_id,
@@ -814,8 +950,12 @@ function mapCalendarCitaRow(cita) {
         tratamiento: plain.tratamiento ? {
             id_tratamiento: plain.tratamiento.id_tratamiento,
             nombre: plain.tratamiento.nombre,
+            disciplina: plain.tratamiento.disciplina || null,
+            categoria: plain.tratamiento.categoria || null,
             duracion_min: plain.tratamiento.duracion_min,
+            precio_base: plain.tratamiento.precio_base,
             color: plain.tratamiento.color,
+            clinical_config: plain.tratamiento.clinical_config || null,
         } : null,
         doctor: plain.doctor ? {
             id_usuario: plain.doctor.id_usuario,
@@ -1691,6 +1831,7 @@ exports.createCita = asyncHandler(async (req, res) => {
         await attachFlowSummaryToCitas(citaCreada);
         await attachUnreadCountsToCitas(citaCreada, req.userData?.userId || null);
         await consentimientosService.attachConsentSummaryToCitas(citaCreada);
+        attachResolvedAppointmentPricesToCitas(citaCreada);
         emitAppointmentSocketEvent('appointment:created', citaCreada?.toJSON ? citaCreada.toJSON() : citaCreada);
 
         return res.status(201).json(citaCreada);
@@ -1752,6 +1893,7 @@ exports.getCitas = asyncHandler(async (req, res) => {
     await attachFlowSummaryToCitas(citas);
     await attachUnreadCountsToCitas(citas, req.userData?.userId || null);
     await consentimientosService.attachConsentSummaryToCitas(citas);
+    attachResolvedAppointmentPricesToCitas(citas);
     res.json(citas);
 });
 
@@ -1827,7 +1969,7 @@ exports.getCitasCalendar = asyncHandler(async (req, res) => {
                 model: Tratamiento,
                 as: 'tratamiento',
                 required: false,
-                attributes: ['id_tratamiento', 'nombre', 'duracion_min', 'color'],
+                attributes: ['id_tratamiento', 'nombre', 'disciplina', 'categoria', 'duracion_min', 'precio_base', 'color', 'clinical_config'],
             },
             db.Usuario ? {
                 model: db.Usuario,
@@ -1839,6 +1981,7 @@ exports.getCitasCalendar = asyncHandler(async (req, res) => {
     });
 
     await attachCalendarUnreadCountsToCitas(citas, req.userData?.userId || null);
+    await attachNutritionLatestMeasurementsToCitas(citas);
 
     res.set('X-Agenda-Endpoint', 'calendar-lite');
     res.json(citas.map(mapCalendarCitaRow).filter(Boolean));
@@ -1871,6 +2014,8 @@ exports.getCitaById = asyncHandler(async (req, res) => {
     await attachFlowSummaryToCitas(cita);
     await attachUnreadCountsToCitas(cita, req.userData?.userId || null);
     await consentimientosService.attachConsentSummaryToCitas(cita);
+    await attachNutritionLatestMeasurementsToCitas(cita);
+    attachResolvedAppointmentPricesToCitas(cita);
 
     let conversation_id = null;
     try {
