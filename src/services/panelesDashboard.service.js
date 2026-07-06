@@ -9,6 +9,7 @@ const {
   expandHorariosForRange,
   normalizeDateOnly,
 } = require('../lib/personal-schedule-recurring');
+const { isGlobalAdmin } = require('../lib/role-helpers');
 
 const {
   CitaPaciente,
@@ -144,7 +145,14 @@ function normalizeSubrolCode(label) {
   return 'unknown';
 }
 
+function panelScopeForbidden() {
+  const error = new Error('panel_scope_forbidden');
+  error.statusCode = 403;
+  return error;
+}
+
 async function loadUserContext({ userId, requestedClinicIds, requestedRole, requestedSubrol }) {
+  const globalAdmin = isGlobalAdmin(userId);
   const [user, memberships] = await Promise.all([
     userId && Usuario
       ? Usuario.findByPk(userId, {
@@ -166,8 +174,16 @@ async function loadUserContext({ userId, requestedClinicIds, requestedRole, requ
     memberships[0] ||
     null;
 
-  const role = String(requestedRole || selectedMembership?.rol_clinica || '').trim().toLowerCase();
-  const subrolLabel = String(requestedSubrol || selectedMembership?.subrol_clinica || '').trim();
+  const role = String(
+    globalAdmin
+      ? (requestedRole || 'administrador')
+      : selectedMembership?.rol_clinica || ''
+  ).trim().toLowerCase();
+  const subrolLabel = String(
+    globalAdmin
+      ? (requestedSubrol || selectedMembership?.subrol_clinica || '')
+      : selectedMembership?.subrol_clinica || ''
+  ).trim();
   const subrolCode = normalizeSubrolCode(subrolLabel);
 
   return {
@@ -192,12 +208,15 @@ async function loadUserContext({ userId, requestedClinicIds, requestedRole, requ
     subrolLabel,
     subrolCode,
     memberships,
+    globalAdmin,
   };
 }
 
-async function resolveClinicScope(rawScope, memberships) {
+async function resolveClinicScope(rawScope, memberships, { allowAllClinics = false } = {}) {
   const raw = String(rawScope || '').trim();
   let clinicIds = [];
+  const accessibleClinicIds = uniqueInts((memberships || []).map((row) => row.id_clinica));
+  const explicitScopeRequested = Boolean(raw && raw !== 'all');
 
   if (raw && raw !== 'all') {
     if (raw.startsWith('group:') && Clinica) {
@@ -215,8 +234,16 @@ async function resolveClinicScope(rawScope, memberships) {
     }
   }
 
+  if (!allowAllClinics && clinicIds.length) {
+    const allowed = new Set(accessibleClinicIds);
+    clinicIds = clinicIds.filter((clinicId) => allowed.has(Number(clinicId)));
+    if (explicitScopeRequested && !clinicIds.length) {
+      throw panelScopeForbidden();
+    }
+  }
+
   if (!clinicIds.length) {
-    clinicIds = uniqueInts((memberships || []).map((row) => row.id_clinica));
+    clinicIds = accessibleClinicIds;
   }
 
   const clinics = clinicIds.length && Clinica

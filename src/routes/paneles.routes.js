@@ -15,9 +15,14 @@ router.get('/main', authMiddleware, async (req, res) => {
         });
         res.json(dashboard);
     } catch (error) {
-        console.error('Error al obtener panel principal:', error);
-        res.status(500).json({
-            error: 'Error interno del servidor',
+        const statusCode = Number(error.statusCode || error.status || 500);
+        if (statusCode === 403) {
+            console.warn('Acceso denegado al panel principal:', error.message);
+        } else {
+            console.error('Error al obtener panel principal:', error);
+        }
+        res.status(statusCode >= 400 && statusCode < 600 ? statusCode : 500).json({
+            error: statusCode === 403 ? 'Acceso no permitido' : 'Error interno del servidor',
             message: error.message,
         });
     }
