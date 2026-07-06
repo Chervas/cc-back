@@ -202,6 +202,7 @@ const FEATURE_CATALOG = [
   {
     key: 'patients.view',
     group: 'clinical_operations',
+    kind: 'view',
     label: 'Ver pacientes',
     enforcement_status: 'route',
     sensitive: false,
@@ -209,13 +210,15 @@ const FEATURE_CATALOG = [
   {
     key: 'patients.edit',
     group: 'clinical_operations',
+    kind: 'action',
     label: 'Editar pacientes',
-    enforcement_status: 'prepared',
+    enforcement_status: 'backend',
     sensitive: false,
   },
   {
     key: 'appointments.manage',
     group: 'clinical_operations',
+    kind: 'action',
     label: 'Gestionar agenda',
     enforcement_status: 'backend',
     sensitive: false,
@@ -223,6 +226,7 @@ const FEATURE_CATALOG = [
   {
     key: 'consents.manage',
     group: 'clinical_operations',
+    kind: 'action',
     label: 'Gestionar consentimientos',
     enforcement_status: 'backend',
     sensitive: false,
@@ -230,6 +234,7 @@ const FEATURE_CATALOG = [
   {
     key: 'clinic.settings.edit',
     group: 'administration',
+    kind: 'action',
     label: 'Editar configuración de clínica',
     enforcement_status: 'route',
     sensitive: true,
@@ -237,6 +242,7 @@ const FEATURE_CATALOG = [
   {
     key: 'team.manage',
     group: 'administration',
+    kind: 'action',
     label: 'Gestionar personal y horarios',
     enforcement_status: 'route',
     sensitive: true,
@@ -244,6 +250,7 @@ const FEATURE_CATALOG = [
   {
     key: 'billing.reports.view',
     group: 'administration',
+    kind: 'view',
     label: 'Ver informes de facturación',
     enforcement_status: 'prepared',
     sensitive: true,
@@ -251,6 +258,7 @@ const FEATURE_CATALOG = [
   {
     key: 'nutrition.workspace.view',
     group: 'clinical_areas',
+    kind: 'view',
     label: 'Ver ficha de Nutrición',
     enforcement_status: 'backend',
     sensitive: false,
@@ -258,6 +266,7 @@ const FEATURE_CATALOG = [
   {
     key: 'nutrition.measurements.create',
     group: 'clinical_areas',
+    kind: 'action',
     label: 'Registrar mediciones de Nutrición',
     enforcement_status: 'backend',
     sensitive: false,
@@ -265,6 +274,7 @@ const FEATURE_CATALOG = [
   {
     key: 'nutrition.reports.finalize',
     group: 'clinical_areas',
+    kind: 'action',
     label: 'Cerrar informes de Nutrición',
     enforcement_status: 'backend',
     sensitive: true,
@@ -272,6 +282,7 @@ const FEATURE_CATALOG = [
   {
     key: 'marketing',
     group: 'marketing_conversations',
+    kind: 'view',
     label: 'Ver Marketing',
     enforcement_status: 'route',
     sensitive: false,
@@ -279,6 +290,7 @@ const FEATURE_CATALOG = [
   {
     key: 'quickchat.read_patients',
     group: 'marketing_conversations',
+    kind: 'read',
     label: 'QuickChat pacientes',
     enforcement_status: 'partial',
     sensitive: false,
@@ -286,6 +298,7 @@ const FEATURE_CATALOG = [
   {
     key: 'quickchat.read_leads',
     group: 'marketing_conversations',
+    kind: 'read',
     label: 'QuickChat leads',
     enforcement_status: 'partial',
     sensitive: false,
@@ -293,6 +306,7 @@ const FEATURE_CATALOG = [
   {
     key: 'quickchat.read_team',
     group: 'marketing_conversations',
+    kind: 'read',
     label: 'QuickChat equipo',
     enforcement_status: 'partial',
     sensitive: false,
