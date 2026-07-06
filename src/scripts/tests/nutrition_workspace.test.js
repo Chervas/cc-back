@@ -468,11 +468,14 @@ function run() {
   assert.match(html, /Fraccionamiento molecular/);
   assert.match(html, /Fraccionamiento tisular/);
   assert.match(html, /Reserva energética del cuerpo/);
+  assert.match(html, /component-explain-heading/);
+  assert.match(html, /component-explain-card-with-image/);
   assert.match(html, /component-inline-bar/);
   assert.doesNotMatch(html, /bar-chart-grid/);
   assert.match(html, /data:image\/webp;base64/);
   assert.match(html, /Silueta de dos compartimentos/);
   assert.match(html, /Mapa de zonas adiposas/);
+  assert.match(html, /distribution-reference-reverse/);
   assert.match(html, /Tres siluetas de referencia/);
   assert.doesNotMatch(html, /skinfold-triceps\\.mp4/);
   assert.match(html, /Índices de salud/);
