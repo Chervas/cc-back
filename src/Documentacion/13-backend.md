@@ -87,6 +87,7 @@ Endpoint real:
 
 | Endpoint | Estado | Uso |
 |:---|:---|:---|
+| `GET /api/access-policies/catalog` | Operativo V1 | Devuelve el catálogo backend de roles, capacidades y defaults base. |
 | `GET /api/access-policies/overrides` | Operativo V1 | Lista overrides accesibles para el usuario autenticado. |
 | `PUT /api/access-policies/overrides` | Operativo V1 | Crea, actualiza o elimina (`state=inherit`) un override por ámbito, capacidad y rol operativo. |
 
@@ -100,6 +101,7 @@ Contrato:
 
 Reglas:
 
+- El catálogo de defaults vive en `src/lib/access-policy.js` y se expone por API para que front y backend no definan matrices base divergentes. Angular conserva fallback local, pero debe hidratarse desde `GET /api/access-policies/catalog` cuando el backend responde.
 - `administrador` no se persiste como `role_code`; mantiene acceso completo.
 - Un administrador puede leer/escribir todos los ámbitos. Un propietario solo puede escribir overrides en sus clínicas/grupos; el resto de staff solo lee sus ámbitos accesibles.
 - La tabla `AccessPolicyOverrides` usa una clave única por `scope_type`, `scope_id`, `feature_key` y `role_code`.

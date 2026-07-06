@@ -160,6 +160,154 @@ const DEFAULT_FEATURES = {
   },
 };
 
+const ROLE_CATALOG = [
+  {
+    code: 'propietario',
+    label: 'Propietario',
+    description: 'Dirección completa de la clínica.',
+  },
+  {
+    code: 'agencia',
+    label: 'Agencia',
+    description: 'Gestión externa centrada en captación y seguimiento.',
+  },
+  {
+    code: 'doctor',
+    label: 'Doctor',
+    description: 'Trabajo clínico con pacientes y agenda.',
+  },
+  {
+    code: 'assistant',
+    label: 'Auxiliar',
+    description: 'Operativa diaria de consulta y mediciones.',
+  },
+  {
+    code: 'reception',
+    label: 'Recepción',
+    description: 'Recepción, ventas y coordinación de citas.',
+  },
+  {
+    code: 'admin_staff',
+    label: 'Administración',
+    description: 'Administración interna de la clínica.',
+  },
+  {
+    code: 'unknown',
+    label: 'Sin subrol',
+    description: 'Asignaciones sin subrol clínico normalizado.',
+  },
+];
+
+const FEATURE_CATALOG = [
+  {
+    key: 'patients.view',
+    group: 'clinical_operations',
+    label: 'Ver pacientes',
+    enforcement_status: 'route',
+    sensitive: false,
+  },
+  {
+    key: 'patients.edit',
+    group: 'clinical_operations',
+    label: 'Editar pacientes',
+    enforcement_status: 'prepared',
+    sensitive: false,
+  },
+  {
+    key: 'appointments.manage',
+    group: 'clinical_operations',
+    label: 'Gestionar agenda',
+    enforcement_status: 'route',
+    sensitive: false,
+  },
+  {
+    key: 'consents.manage',
+    group: 'clinical_operations',
+    label: 'Gestionar consentimientos',
+    enforcement_status: 'backend',
+    sensitive: false,
+  },
+  {
+    key: 'clinic.settings.edit',
+    group: 'administration',
+    label: 'Editar configuración de clínica',
+    enforcement_status: 'route',
+    sensitive: true,
+  },
+  {
+    key: 'team.manage',
+    group: 'administration',
+    label: 'Gestionar personal y horarios',
+    enforcement_status: 'route',
+    sensitive: true,
+  },
+  {
+    key: 'billing.reports.view',
+    group: 'administration',
+    label: 'Ver informes de facturación',
+    enforcement_status: 'prepared',
+    sensitive: true,
+  },
+  {
+    key: 'nutrition.workspace.view',
+    group: 'clinical_areas',
+    label: 'Ver ficha de Nutrición',
+    enforcement_status: 'backend',
+    sensitive: false,
+  },
+  {
+    key: 'nutrition.measurements.create',
+    group: 'clinical_areas',
+    label: 'Registrar mediciones de Nutrición',
+    enforcement_status: 'backend',
+    sensitive: false,
+  },
+  {
+    key: 'nutrition.reports.finalize',
+    group: 'clinical_areas',
+    label: 'Cerrar informes de Nutrición',
+    enforcement_status: 'backend',
+    sensitive: true,
+  },
+  {
+    key: 'marketing',
+    group: 'marketing_conversations',
+    label: 'Ver Marketing',
+    enforcement_status: 'route',
+    sensitive: false,
+  },
+  {
+    key: 'quickchat.read_patients',
+    group: 'marketing_conversations',
+    label: 'QuickChat pacientes',
+    enforcement_status: 'partial',
+    sensitive: false,
+  },
+  {
+    key: 'quickchat.read_leads',
+    group: 'marketing_conversations',
+    label: 'QuickChat leads',
+    enforcement_status: 'partial',
+    sensitive: false,
+  },
+  {
+    key: 'quickchat.read_team',
+    group: 'marketing_conversations',
+    label: 'QuickChat equipo',
+    enforcement_status: 'partial',
+    sensitive: false,
+  },
+];
+
+function getAccessPolicyCatalog() {
+  return {
+    version: 1,
+    roles: ROLE_CATALOG,
+    features: FEATURE_CATALOG,
+    defaults: DEFAULT_FEATURES,
+  };
+}
+
 function normalizeFeatureKey(value) {
   return String(value || '').trim().toLowerCase();
 }
@@ -270,9 +418,12 @@ module.exports = {
   ALLOWED_FEATURE_KEYS,
   ALLOWED_ROLE_CODES,
   DEFAULT_FEATURES,
+  FEATURE_CATALOG,
+  ROLE_CATALOG,
   assertUserCanAccessFeature,
   canUserAccessFeature,
   defaultForFeature,
+  getAccessPolicyCatalog,
   normalizeFeatureKey,
   normalizeRoleCode,
   roleCodeFromMembership,

@@ -6,6 +6,7 @@ const { ADMIN_USER_IDS, STAFF_ROLES } = require('../lib/role-helpers');
 const {
   ALLOWED_FEATURE_KEYS,
   ALLOWED_ROLE_CODES,
+  getAccessPolicyCatalog,
   normalizeFeatureKey,
   normalizeRoleCode,
 } = require('../lib/access-policy');
@@ -105,6 +106,20 @@ function isScopeWritable(actorId, scopeAccess, scopeType, scopeId) {
   if (scopeType === 'group') return scopeAccess.ownerGroupIds.includes(scopeId);
   return false;
 }
+
+exports.getCatalog = async (req, res) => {
+  try {
+    const actorId = Number(req.userData?.userId);
+    if (!Number.isFinite(actorId)) {
+      return res.status(401).json({ message: 'Auth failed!' });
+    }
+
+    return res.json(getAccessPolicyCatalog());
+  } catch (error) {
+    console.error('[accessPolicy.getCatalog] Error:', error);
+    return res.status(500).json({ message: 'Error retrieving access policy catalog', error: error.message });
+  }
+};
 
 exports.getOverrides = async (req, res) => {
   try {
