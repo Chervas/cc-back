@@ -561,7 +561,6 @@ function buildProjectionVisualHtml(projection) {
         body: 'Anterior, actual y proyección lineal a 8 semanas por métrica comparable.',
         imageFilename: 'images/nutrition-progress-evolution.webp',
         imageAlt: 'Evolución visual de medidas',
-        caption: 'Seguimiento orientativo entre visitas.',
       })}
       <div class="sparkline-grid">
         ${metrics.map((metric, index) => `
@@ -584,7 +583,6 @@ function buildReportVisualIntroHtml(measurement = {}) {
     <section class="card report-visual-intro report-visual-intro-with-image">
       <figure class="report-intro-main">
         ${patientImage}
-        <figcaption>Informe explicado paso a paso.</figcaption>
       </figure>
       <div class="report-intro-content">
         <div class="section-kicker">Guía de lectura</div>
@@ -615,7 +613,6 @@ function sectionVisualHeaderHtml({
   body = '',
   imageFilename = '',
   imageAlt = '',
-  caption = '',
   titleTag = 'h2',
 } = {}) {
   const image = imageFilename
@@ -627,7 +624,6 @@ function sectionVisualHeaderHtml({
       ${image ? `
         <figure class="section-story-figure">
           ${image}
-          ${caption ? `<figcaption>${escapeHtml(caption)}</figcaption>` : ''}
         </figure>
       ` : ''}
       <div class="section-story-copy">
@@ -635,6 +631,38 @@ function sectionVisualHeaderHtml({
         <${safeTitleTag}>${escapeHtml(title)}</${safeTitleTag}>
         ${body ? `<p class="muted small-note">${escapeHtml(body)}</p>` : ''}
       </div>
+    </div>
+  `;
+}
+
+function componentExplainGridHtml(explainItems = [], barItems = []) {
+  if (!explainItems.length) return '';
+  const normalizedBarItems = barItems
+    .map((item) => ({ ...item, value: finiteNumber(item.value) }))
+    .filter((item) => item.value !== null && item.value > 0);
+  const max = Math.max(...normalizedBarItems.map((item) => item.value), 1);
+  const barItemsByLabel = new Map(normalizedBarItems.map((item) => [item.label, item]));
+  return `
+    <div class="component-explain-grid">
+      ${explainItems.map((item) => {
+        const barItem = barItemsByLabel.get(item.label);
+        const width = barItem ? Math.max(4, (barItem.value / max) * 100) : 0;
+        return `
+          <div class="component-explain-card ${item.image ? 'component-explain-card-with-image' : ''}">
+            ${item.image ? reportAssetImageHtml(item.image, item.label, 'component-explain-img') : `<span style="background:${escapeHtml(item.color)}"></span>`}
+            <div class="component-explain-body">
+              <strong>${escapeHtml(item.label)}</strong>
+              <small>${escapeHtml(item.detail)}</small>
+              ${barItem ? `
+                <div class="component-inline-bar">
+                  <i style="width:${escapeHtml(round(width, 1))}%;background:${escapeHtml(barItem.color || item.color)}"></i>
+                  <em>${escapeHtml(formatMetricValue({ value: barItem.value, unit: barItem.unit }))}</em>
+                </div>
+              ` : ''}
+            </div>
+          </div>
+        `;
+      }).join('')}
     </div>
   `;
 }
@@ -649,7 +677,6 @@ function compositionVisualBlockHtml(title, subtitle, segments = [], barItems = [
         body: subtitle,
         imageFilename: visual?.filename || '',
         imageAlt: visual?.alt || title,
-        caption: visual?.caption || '',
         titleTag: 'h3',
       })}
       <div class="visual-grid composition-main-grid">
@@ -669,18 +696,7 @@ function compositionVisualBlockHtml(title, subtitle, segments = [], barItems = [
           </div>
         </div>
       </div>
-      ${explainItems.length ? `
-        <div class="component-explain-grid">
-          ${explainItems.map((item) => `
-            <div class="component-explain-card ${item.image ? 'component-explain-card-with-image' : ''}">
-              ${item.image ? reportAssetImageHtml(item.image, item.label, 'component-explain-img') : `<span style="background:${escapeHtml(item.color)}"></span>`}
-              <strong>${escapeHtml(item.label)}</strong>
-              <small>${escapeHtml(item.detail)}</small>
-            </div>
-          `).join('')}
-        </div>
-      ` : ''}
-      <div class="bar-chart-grid">${buildComponentBarSvg(barItems)}</div>
+      ${componentExplainGridHtml(explainItems, barItems)}
     </div>
   `;
 }
@@ -728,7 +744,6 @@ function buildCompositionVisualHtml(report) {
         {
           filename: 'images/nutrition-molecular-two-compartments.webp',
           alt: 'Silueta de dos compartimentos: masa grasa y masa libre de grasa',
-          caption: 'Dos bloques: grasa y masa libre de grasa.',
         },
       ));
     }
@@ -775,7 +790,6 @@ function buildCompositionVisualHtml(report) {
         {
           filename: 'images/nutrition-fractionation-overview.webp',
           alt: 'Silueta con fraccionamiento tisular de cinco componentes',
-          caption: 'Cinco componentes corporales estimados.',
         },
       ));
     }
@@ -816,29 +830,6 @@ function buildDonutSvg(segments = [], options = {}) {
       }).join('')}
       <text x="75" y="72" text-anchor="middle" class="donut-title">${escapeHtml(title)}</text>
       ${subtitle ? `<text x="75" y="91" text-anchor="middle" class="donut-subtitle">${escapeHtml(subtitle)}</text>` : ''}
-    </svg>
-  `;
-}
-
-function buildComponentBarSvg(items = []) {
-  const normalized = items
-    .map((item) => ({ ...item, value: finiteNumber(item.value) }))
-    .filter((item) => item.value !== null && item.value > 0);
-  if (!normalized.length) return '';
-  const max = Math.max(...normalized.map((item) => item.value), 1);
-  const rowHeight = 34;
-  const height = 28 + (normalized.length * rowHeight);
-  return `
-    <svg class="bars-chart" viewBox="0 0 480 ${height}" role="img">
-      ${normalized.map((item, index) => {
-        const y = 22 + (index * rowHeight);
-        const width = Math.max(8, (item.value / max) * 260);
-        return `
-          <text x="0" y="${y + 13}" class="bar-label">${escapeHtml(item.label)}</text>
-          <rect x="130" y="${y}" width="${round(width, 1)}" height="18" rx="4" fill="${escapeHtml(item.color)}"></rect>
-          <text x="470" y="${y + 13}" text-anchor="end" class="bar-value">${escapeHtml(formatMetricValue({ value: item.value, unit: item.unit }))}</text>
-        `;
-      }).join('')}
     </svg>
   `;
 }
@@ -1117,7 +1108,6 @@ function buildSomatotypeVisualHtml(report = {}, patient = {}) {
         body: 'Lectura sencilla: sitúa el tipo corporal dominante en un triángulo. Arriba predomina la musculatura, a la izquierda la adiposidad relativa y a la derecha la linealidad o complexión más ligera.',
         imageFilename: 'images/nutrition-somatotype-triad.webp',
         imageAlt: 'Tres siluetas de referencia de somatotipo',
-        caption: 'Adiposidad relativa, musculatura y linealidad se combinan.',
       })}
       <div class="somato-layout ${somatotypeImage ? 'somato-layout-with-image' : ''}">
         <svg class="somato-chart" viewBox="0 0 360 320" role="img">
@@ -1331,7 +1321,6 @@ function buildHealthIndexesHtml(measurement = {}, previousMeasurement = null) {
         body: 'Lectura sencilla: estos índices cruzan cintura, cadera, estatura y peso para orientar el seguimiento. Un aviso no sustituye la valoración del profesional.',
         imageFilename: 'images/nutrition-health-indices.webp',
         imageAlt: 'Índices antropométricos de salud',
-        caption: 'Indicadores de proporción corporal.',
       })}
       <table class="health-table">
           <thead><tr><th>Índice</th><th>Valor</th><th>Rango saludable</th></tr></thead>
@@ -3513,9 +3502,8 @@ function buildNutritionReportHtml(reportData, options = {}) {
     .report-visual-intro { display: grid; grid-template-columns: minmax(0, 1fr); padding: 0; overflow: hidden; }
     .report-visual-intro-with-image { grid-template-columns: 260px minmax(0, 1fr); }
     .report-visual-intro h2 { margin-bottom: 0; font-size: 16px; }
-    .report-intro-main { margin: 0; padding: 16px; background: #f8fafc; border-right: 1px solid #e2e8f0; display: grid; align-content: center; gap: 8px; min-height: 190px; }
-    .report-intro-img { width: 100%; height: 158px; object-fit: contain; object-position: center; display: block; }
-    .report-intro-main figcaption { color: #475569; font-size: 10px; font-weight: 800; line-height: 1.25; }
+    .report-intro-main { margin: 0; padding: 16px; background: transparent; border-right: 1px solid #e2e8f0; display: grid; align-content: center; min-height: 190px; }
+    .report-intro-img { width: 100%; height: 164px; object-fit: contain; object-position: center; display: block; mix-blend-mode: multiply; }
     .report-intro-content { padding: 18px 18px 16px; }
     .report-intro-title { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
     .report-intro-title span { flex: none; border-radius: 999px; background: #eef2ff; color: #4338ca; padding: 4px 10px; font-size: 10px; font-weight: 850; }
@@ -3550,9 +3538,8 @@ function buildNutritionReportHtml(reportData, options = {}) {
     .sparkline { display: block; width: 100%; height: auto; }
     .section-story-header { display: grid; gap: 14px; align-items: stretch; margin-bottom: 14px; }
     .section-story-header-with-image { grid-template-columns: 238px minmax(0, 1fr); overflow: hidden; border: 1px solid #e2e8f0; border-radius: 10px; background: #fff; }
-    .section-story-figure { margin: 0; padding: 16px; background: #f8fafc; border-right: 1px solid #e2e8f0; display: grid; align-content: center; gap: 8px; min-height: 170px; }
-    .section-story-img { width: 100%; height: 142px; object-fit: contain; object-position: center; display: block; mix-blend-mode: multiply; }
-    .section-story-figure figcaption { color: #475569; font-size: 10px; font-weight: 800; line-height: 1.3; }
+    .section-story-figure { margin: 0; padding: 16px; background: transparent; border-right: 1px solid #e2e8f0; display: grid; align-content: center; min-height: 170px; }
+    .section-story-img { width: 100%; height: 152px; object-fit: contain; object-position: center; display: block; mix-blend-mode: multiply; }
     .section-story-copy { min-width: 0; align-self: center; padding: 2px 0; }
     .section-story-header-with-image .section-story-copy { padding: 18px 18px 16px 0; }
     .section-story-copy h2, .section-story-copy h3 { margin: 2px 0 0; color: #0f172a; }
@@ -3568,10 +3555,6 @@ function buildNutritionReportHtml(reportData, options = {}) {
     .donut-chart { width: 180px; height: 180px; display: block; margin: 0 auto; }
     .donut-title { fill: #0f172a; font-size: 14px; font-weight: 850; }
     .donut-subtitle { fill: #64748b; font-size: 10px; font-weight: 700; }
-    .bar-chart-grid { margin-top: 12px; }
-    .bars-chart { display: block; width: 100%; height: auto; }
-    .bar-label { fill: #334155; font-size: 12px; font-weight: 700; }
-    .bar-value { fill: #0f172a; font-size: 12px; font-weight: 800; }
     .section-heading-row { display: flex; justify-content: space-between; gap: 16px; align-items: flex-start; margin-bottom: 12px; }
     .comparison-section-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
     .comparison-section-card { border: 1px solid #e2e8f0; border-radius: 10px; padding: 12px; background: #f8fafc; break-inside: avoid; }
@@ -3594,12 +3577,17 @@ function buildNutritionReportHtml(reportData, options = {}) {
     .composition-visual-block h3 { margin: 0; font-size: 13px; color: #0f172a; }
     .composition-main-grid { margin-top: 4px; }
     .component-explain-grid { display: grid; grid-template-columns: minmax(0, 1fr); gap: 0; margin-top: 14px; border-top: 1px solid #e2e8f0; }
-    .component-explain-card { display: grid; grid-template-columns: 14px minmax(0, 1fr); gap: 3px 10px; align-items: center; border-bottom: 1px solid #e2e8f0; padding: 10px 0; background: transparent; }
-    .component-explain-card-with-image { grid-template-columns: 96px minmax(0, 1fr); min-height: 106px; }
-    .component-explain-grid span { grid-row: 1 / span 2; width: 10px; height: 10px; border-radius: 999px; margin-top: 4px; display: block; }
-    .component-explain-img { grid-row: 1 / span 2; width: 86px; height: 96px; object-fit: contain; object-position: center; display: block; mix-blend-mode: multiply; filter: saturate(1.08) contrast(1.05); }
-    .component-explain-grid strong { font-size: 12px; color: #0f172a; align-self: end; }
-    .component-explain-grid small { grid-column: 2; color: #475569; font-size: 11px; line-height: 1.35; align-self: start; }
+    .component-explain-card { display: grid; grid-template-columns: 14px minmax(0, 1fr); gap: 0 12px; align-items: center; border-bottom: 1px solid #e2e8f0; padding: 12px 0; background: transparent; }
+    .component-explain-card-with-image { grid-template-columns: 148px minmax(0, 1fr); min-height: 168px; }
+    .component-explain-grid span { grid-row: 1; width: 10px; height: 10px; border-radius: 999px; margin-top: 4px; display: block; align-self: start; }
+    .component-explain-img { grid-row: 1; width: 132px; height: 152px; object-fit: contain; object-position: center; display: block; mix-blend-mode: multiply; filter: saturate(1.08) contrast(1.05); }
+    .component-explain-body { display: grid; gap: 5px; align-content: center; }
+    .component-explain-grid strong { font-size: 13px; color: #0f172a; }
+    .component-explain-grid small { color: #475569; font-size: 11px; line-height: 1.35; }
+    .component-inline-bar { display: grid; grid-template-columns: minmax(0, 1fr) 64px; gap: 10px; align-items: center; margin-top: 7px; }
+    .component-inline-bar::before { content: ''; grid-column: 1; grid-row: 1; height: 16px; border-radius: 999px; background: #e2e8f0; }
+    .component-inline-bar i { grid-column: 1; grid-row: 1; height: 16px; border-radius: 999px; display: block; min-width: 4px; z-index: 1; }
+    .component-inline-bar em { grid-column: 2; grid-row: 1; color: #0f172a; font-style: normal; font-size: 13px; font-weight: 850; text-align: right; }
     .pending-visual { min-height: 132px; display: flex; flex-direction: column; justify-content: center; align-items: center; gap: 6px; border: 1px dashed #cbd5e1; border-radius: 10px; text-align: center; padding: 16px; }
     .pending-visual strong { color: #92400e; }
     .pending-visual span { color: #64748b; font-size: 11px; max-width: 520px; }
@@ -3652,11 +3640,11 @@ function buildNutritionReportHtml(reportData, options = {}) {
     .somato-point-label { fill: #0f766e; font-size: 10px; font-weight: 850; }
     .somato-values { display: grid; gap: 10px; }
     .somato-value-card { display: grid; grid-template-columns: 46px minmax(0, 1fr); gap: 2px 9px; align-items: center; border: 1px solid #e2e8f0; border-radius: 8px; padding: 8px; }
-    .somato-value-card img { grid-row: 1 / span 2; width: 46px; height: 46px; object-fit: contain; border-radius: 8px; background: #f8fafc; }
+    .somato-value-card img { grid-row: 1 / span 2; width: 46px; height: 46px; object-fit: contain; border-radius: 8px; background: transparent; mix-blend-mode: multiply; }
     .somato-value-card span { display: block; color: #64748b; font-size: 11px; font-weight: 700; }
     .somato-value-card strong { display: block; font-size: 24px; line-height: 1; color: #0f172a; }
     .somato-image-card { border: 1px solid #e2e8f0; border-radius: 10px; padding: 10px; text-align: center; background: #f8fafc; }
-    .somato-image-card img { width: 100%; height: 170px; object-fit: contain; display: block; }
+    .somato-image-card img { width: 100%; height: 170px; object-fit: contain; display: block; mix-blend-mode: multiply; }
     .somato-image-card strong { display: block; margin-top: 6px; font-size: 12px; color: #0f172a; }
     .somato-image-card span { display: block; margin-top: 2px; color: #64748b; font-size: 10px; font-weight: 700; }
     .health-table td:nth-child(2), .health-table td:nth-child(3) { text-align: right; white-space: nowrap; }

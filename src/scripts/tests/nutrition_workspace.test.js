@@ -386,7 +386,8 @@ function run() {
   assert.match(html, /Gráficas de evolución/);
   assert.match(html, /Cómo leer el informe/);
   assert.match(html, /Profesional explicando el informe/);
-  assert.match(html, /Seguimiento orientativo entre visitas/);
+  assert.doesNotMatch(html, /Seguimiento orientativo entre visitas/);
+  assert.doesNotMatch(html, /Informe explicado paso a paso/);
   assert.match(html, /Comparativas principales/);
   assert.match(html, /Pliegue tríceps/);
   assert.match(html, /Diámetros/);
@@ -402,6 +403,8 @@ function run() {
   assert.match(html, /Fraccionamiento molecular/);
   assert.match(html, /Fraccionamiento tisular/);
   assert.match(html, /Reserva energética del cuerpo/);
+  assert.match(html, /component-inline-bar/);
+  assert.doesNotMatch(html, /bar-chart-grid/);
   assert.match(html, /data:image\/webp;base64/);
   assert.match(html, /Silueta de dos compartimentos/);
   assert.match(html, /Mapa de zonas adiposas/);
@@ -464,7 +467,7 @@ function run() {
     },
   });
   assert.match(completeHtml, /Silueta con fraccionamiento tisular/);
-  assert.match(completeHtml, /Cinco componentes corporales estimados/);
+  assert.doesNotMatch(completeHtml, /Cinco componentes corporales estimados/);
   const clinicBrandHtml = __testing.buildNutritionReportHtml({
     patient: { name: 'Paciente Test', clinic_name: 'Clinica Norte', clinic_avatar_url: 'https://media.clinicaclick.com/logos/clinicas/clinica-norte.png' },
     treatment: null,
