@@ -30,6 +30,7 @@ const { normalizePhoneDigits, getPhoneLookupCandidates } = require('../lib/phone
 const { normalizeHumanName } = require('../lib/name');
 const consentimientosService = require('../services/consentimientos.service');
 const appointmentNotificationCleanup = require('../services/appointmentNotificationCleanup.service');
+const { assertUserCanAccessFeature } = require('../lib/access-policy');
 
 const CITA_ESTADOS_VALIDOS = new Set(CITA_STATUS_VALUES);
 const ACTIVE_APPOINTMENT_WHERE = { estado: { [Op.ne]: 'cancelada' } };
@@ -43,6 +44,56 @@ const CITA_ESTADOS_RESUELVEN_NOTIFICACIONES = new Set([
     'no_asistio'
 ]);
 const generatePacientePublicId = () => `pac_${crypto.randomBytes(10).toString('hex')}`;
+
+async function assertAppointmentManageAccess(req, clinicId) {
+    const actorId = Number(req.userData?.userId);
+    const normalizedClinicId = Number(clinicId);
+
+    if (!Number.isFinite(actorId)) {
+        const error = new Error('auth_failed');
+        error.status = 401;
+        throw error;
+    }
+
+    if (!Number.isFinite(normalizedClinicId)) {
+        const error = new Error('clinic_id_required');
+        error.status = 400;
+        throw error;
+    }
+
+    await assertUserCanAccessFeature({
+        actorId,
+        featureKey: 'appointments.manage',
+        clinicId: normalizedClinicId,
+    });
+}
+
+function sendAppointmentAccessPolicyError(error, res) {
+    if (error.status === 401 || error.message === 'auth_failed') {
+        return res.status(401).json({ message: 'Auth failed!' });
+    }
+    if (error.status === 403 || error.message === 'access_policy_forbidden') {
+        return res.status(403).json({
+            message: 'No tienes permiso para gestionar la agenda',
+            details: error.details || null,
+        });
+    }
+    if (error.status === 400 && error.message === 'clinic_id_required') {
+        return res.status(400).json({ message: 'clinica_id es obligatorio' });
+    }
+    return null;
+}
+
+async function denyAppointmentManageAccessIfNeeded(req, res, clinicId) {
+    try {
+        await assertAppointmentManageAccess(req, clinicId);
+        return false;
+    } catch (error) {
+        const handled = sendAppointmentAccessPolicyError(error, res);
+        if (handled) return true;
+        throw error;
+    }
+}
 
 function isDateOnlyParam(value) {
     return typeof value === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(value.trim());
@@ -1661,6 +1712,7 @@ exports.createCita = asyncHandler(async (req, res) => {
         if (!clinica) {
             return res.status(400).json({ message: 'Clínica no encontrada' });
         }
+        await assertAppointmentManageAccess(req, clinica_id);
         const clinicTimezone = resolveClinicTimezone(clinica);
 
         // Resolver lead si viene
@@ -1836,6 +1888,8 @@ exports.createCita = asyncHandler(async (req, res) => {
 
         return res.status(201).json(citaCreada);
     } catch (err) {
+        const handled = sendAppointmentAccessPolicyError(err, res);
+        if (handled) return handled;
         console.error('❌ [createCita] Error:', err.message, err.original?.sqlMessage || '', err);
         return res.status(500).json({
             message: 'error_creating_cita',
@@ -2050,6 +2104,7 @@ exports.updateCitaNota = asyncHandler(async (req, res) => {
     if (!cita) {
         return res.status(404).json({ message: 'Cita no encontrada' });
     }
+    if (await denyAppointmentManageAccessIfNeeded(req, res, cita.clinica_id)) return;
 
     cita.nota = req.body?.nota == null ? null : String(req.body.nota).trim() || null;
     cita.updated_by = req.userData?.userId || null;
@@ -2132,6 +2187,7 @@ exports.updateCitaEstado = asyncHandler(async (req, res) => {
     if (!cita) {
         return res.status(404).json({ message: 'Cita no encontrada' });
     }
+    if (await denyAppointmentManageAccessIfNeeded(req, res, cita.clinica_id)) return;
 
     cita.estado = estadoRaw;
     cita.updated_by = req.userData?.userId || null;
@@ -2201,6 +2257,7 @@ exports.reagendarCita = asyncHandler(async (req, res) => {
     if (!cita) {
         return res.status(404).json({ message: 'Cita no encontrada' });
     }
+    if (await denyAppointmentManageAccessIfNeeded(req, res, cita.clinica_id)) return;
 
     const inicio = req.body?.inicio ? new Date(req.body.inicio) : null;
     const fin = req.body?.fin ? new Date(req.body.fin) : null;

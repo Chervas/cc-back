@@ -217,7 +217,7 @@ const FEATURE_CATALOG = [
     key: 'appointments.manage',
     group: 'clinical_operations',
     label: 'Gestionar agenda',
-    enforcement_status: 'route',
+    enforcement_status: 'backend',
     sensitive: false,
   },
   {
