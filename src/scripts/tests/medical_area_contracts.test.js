@@ -107,6 +107,11 @@ function assertNutritionContract(contract) {
   assert.equal(contract.appointment_action.profileDetails.quick.includes('peso'), true);
   assert.equal(contract.appointment_action.profileDetails.express_isak.includes('somatotipo'), true);
 
+  assert.equal(contract.protocol_rules.length >= 3, true);
+  assert.equal(contract.protocol_rules.some((rule) => rule.code === 'nutrition-measurement-before-report' && rule.action === 'block'), true);
+  assert.equal(contract.protocol_rules.some((rule) => rule.source_type === 'measurement' && rule.target_type === 'document'), true);
+  assert.equal(contract.protocol_rules.every((rule) => typeof rule.enabled === 'boolean'), true);
+
   assert.equal(contract.setup_steps.some((step) => step.section === 'nutrition'), true);
   assert.equal(
     contract.contract_sections.some((section) => section.chips.includes('Express')),
@@ -140,6 +145,42 @@ function run() {
     byValue(normalized.nutrition_service_kind_options).get('isak_study')?.recommendedName,
     'Estudio antropom\u00e9trico completo',
   );
+  assert.equal(normalized.protocol_rules.some((rule) => rule.code === 'nutrition-follow-up-after-measurement'), true);
+
+  const normalizedProtocolOverride = normalizeContractPayload('nutricion', {
+    protocol_rules: [
+      {
+        code: 'custom follow up',
+        title: 'Regla editable',
+        description: 'Permite configurar un recordatorio clínico',
+        source_type: 'invalid',
+        target_type: 'appointment',
+        wait_min_value: -5,
+        wait_min_unit: 'weeks',
+        condition: 'Cuando exista medición',
+        action: 'allow_override_with_reason',
+        scope: 'clinic',
+        enabled: false,
+      },
+    ],
+  });
+  assert.deepEqual(normalizedProtocolOverride.protocol_rules, [
+    {
+      code: 'custom_follow_up',
+      title: 'Regla editable',
+      description: 'Permite configurar un recordatorio clínico',
+      source_type: 'measurement',
+      source_ref: null,
+      target_type: 'appointment',
+      target_ref: null,
+      wait_min_value: 0,
+      wait_min_unit: 'weeks',
+      condition: 'Cuando exista medición',
+      action: 'allow_override_with_reason',
+      scope: 'clinic',
+      enabled: false,
+    },
+  ]);
 
   const normalizedWithRemovedRequired = normalizeContractPayload('nutricion', {
     nutrition_measurement_profile_schemas: [
@@ -205,6 +246,7 @@ function run() {
   const dental = getBaseContractForArea('dental');
   assert.equal(dental.patient_workspace.enabled, false);
   assert.equal(dental.appointment_action.enabled, false);
+  assert.equal(dental.protocol_rules.some((rule) => rule.code === 'dental-lab-before-prosthesis'), true);
   assert.deepEqual(dental.nutrition_measurement_profile_options, []);
 
   const unknown = getBaseContractForArea('area-inexistente');

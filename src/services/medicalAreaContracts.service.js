@@ -635,6 +635,120 @@ const TREATMENT_SETUP_STEPS_BY_AREA = {
   ],
 };
 
+const MEDICAL_AREA_PROTOCOL_RULES = {
+  dental: [
+    {
+      code: 'dental-consent-before-surgery',
+      title: 'Consentimiento antes de cirugía',
+      description: 'Bloquea la sesión quirúrgica si el consentimiento asociado no está firmado.',
+      source_type: 'document',
+      source_ref: 'surgical_consent_signed',
+      target_type: 'treatment',
+      target_ref: 'dental_surgery',
+      wait_min_value: 0,
+      wait_min_unit: 'days',
+      condition: 'Consentimiento quirúrgico firmado y vigente',
+      action: 'block',
+      scope: 'medical_area',
+      enabled: true,
+    },
+    {
+      code: 'dental-lab-before-prosthesis',
+      title: 'Laboratorio recibido antes de prótesis',
+      description: 'Impide programar la colocación si el trabajo de laboratorio requerido no consta como recibido.',
+      source_type: 'laboratory',
+      source_ref: 'lab_work_received',
+      target_type: 'treatment',
+      target_ref: 'prosthesis_placement',
+      wait_min_value: 0,
+      wait_min_unit: 'days',
+      condition: 'Pedido de laboratorio recibido en clínica',
+      action: 'block',
+      scope: 'treatment_group',
+      enabled: true,
+    },
+    {
+      code: 'dental-review-after-surgery',
+      title: 'Revisión tras cirugía',
+      description: 'Sugiere una revisión posterior a tratamientos quirúrgicos para cerrar seguimiento clínico.',
+      source_type: 'treatment',
+      source_ref: 'surgery_completed',
+      target_type: 'appointment',
+      target_ref: 'post_surgery_review',
+      wait_min_value: 7,
+      wait_min_unit: 'days',
+      condition: 'Tratamiento quirúrgico marcado como realizado',
+      action: 'suggest',
+      scope: 'medical_area',
+      enabled: true,
+    },
+  ],
+  nutricion: [
+    {
+      code: 'nutrition-measurement-before-report',
+      title: 'Medición completa antes de informe',
+      description: 'Evita generar un informe antropométrico completo sin una medición compatible.',
+      source_type: 'measurement',
+      source_ref: 'express_isak_completed',
+      target_type: 'document',
+      target_ref: 'nutrition_report',
+      wait_min_value: 0,
+      wait_min_unit: 'days',
+      condition: 'Medición Completa guardada con campos mínimos de cálculo',
+      action: 'block',
+      scope: 'medical_area',
+      enabled: true,
+    },
+    {
+      code: 'nutrition-follow-up-after-measurement',
+      title: 'Seguimiento tras medición',
+      description: 'Sugiere una cita de seguimiento cuando ya existe una medición reciente.',
+      source_type: 'measurement',
+      source_ref: 'latest_measurement',
+      target_type: 'appointment',
+      target_ref: 'nutrition_follow_up',
+      wait_min_value: 2,
+      wait_min_unit: 'weeks',
+      condition: 'Medición guardada con objetivo activo',
+      action: 'suggest',
+      scope: 'medical_area',
+      enabled: true,
+    },
+    {
+      code: 'nutrition-compare-with-previous',
+      title: 'Comparar con medición previa',
+      description: 'Sugiere comparar con la medición anterior cuando el perfil sea compatible.',
+      source_type: 'measurement',
+      source_ref: 'previous_compatible_measurement',
+      target_type: 'measurement',
+      target_ref: 'current_measurement',
+      wait_min_value: 0,
+      wait_min_unit: 'days',
+      condition: 'Existe medición anterior del mismo paciente y perfil comparable',
+      action: 'suggest',
+      scope: 'medical_area',
+      enabled: true,
+    },
+  ],
+  capilar: [
+    {
+      code: 'capilar-photo-before-control',
+      title: 'Foto clínica antes de control',
+      description: 'Sugiere añadir fotos privadas antes de valorar evolución capilar.',
+      source_type: 'document',
+      source_ref: 'clinical_photos',
+      target_type: 'appointment',
+      target_ref: 'capilar_control',
+      wait_min_value: 0,
+      wait_min_unit: 'days',
+      condition: 'Control evolutivo capilar abierto',
+      action: 'suggest',
+      scope: 'medical_area',
+      enabled: true,
+    },
+  ],
+};
+
 function normalizeCode(code) {
   return String(code || FALLBACK_CODE).trim().toLowerCase() || FALLBACK_CODE;
 }
@@ -645,6 +759,7 @@ function getKnownCodes() {
     ...Object.keys(TREATMENT_SERVICE_EXAMPLES),
     ...Object.keys(MEDICAL_AREA_CONTRACT_SECTIONS),
     ...Object.keys(TREATMENT_SETUP_STEPS_BY_AREA),
+    ...Object.keys(MEDICAL_AREA_PROTOCOL_RULES),
     ...Object.keys(APPOINTMENT_ACTIONS),
   ])).sort((a, b) => a.localeCompare(b, 'es'));
 }
@@ -821,6 +936,55 @@ function isLegacySetupStepCopy(section, title, body) {
   }
 
   return false;
+}
+
+function normalizeProtocolRules(value, fallback = []) {
+  const validEntityTypes = new Set(['treatment', 'test', 'clinical_condition', 'document', 'laboratory', 'measurement', 'appointment']);
+  const validActions = new Set(['suggest', 'block', 'allow_override_with_reason', 'system_block']);
+  const validScopes = new Set(['medical_area', 'treatment', 'treatment_group', 'clinic']);
+  const validWaitUnits = new Set(['days', 'weeks', 'months']);
+
+  if (value === undefined || value === null) {
+    return cloneJson(fallback);
+  }
+  if (!Array.isArray(value)) {
+    return cloneJson(fallback);
+  }
+
+  const fallbackByCode = new Map((fallback || []).map((rule) => [rule.code, rule]));
+  const rules = value
+    .map((rule, index) => {
+      const code = cleanString(rule?.code, `rule_${index + 1}`).replace(/[^a-z0-9_-]+/gi, '_').toLowerCase();
+      const matchedFallbackRule = fallbackByCode.get(code) || null;
+      const fallbackRule = matchedFallbackRule || fallback[index] || fallback[0] || {};
+      const sourceType = cleanString(rule?.source_type, fallbackRule.source_type || 'treatment');
+      const targetType = cleanString(rule?.target_type, fallbackRule.target_type || 'appointment');
+      const action = cleanString(rule?.action, fallbackRule.action || 'suggest');
+      const scope = cleanString(rule?.scope, fallbackRule.scope || 'medical_area');
+      const waitUnit = cleanString(rule?.wait_min_unit, fallbackRule.wait_min_unit || 'days');
+      const waitMinValue = Number.isFinite(Number(rule?.wait_min_value))
+        ? Math.max(0, Number.parseInt(String(rule.wait_min_value), 10))
+        : Math.max(0, Number.parseInt(String(fallbackRule.wait_min_value || 0), 10));
+
+      return {
+        code,
+        title: cleanString(rule?.title, fallbackRule.title || 'Regla de protocolo'),
+        description: cleanString(rule?.description, fallbackRule.description || ''),
+        source_type: validEntityTypes.has(sourceType) ? sourceType : (fallbackRule.source_type || 'treatment'),
+        source_ref: cleanString(rule?.source_ref, matchedFallbackRule?.source_ref || null) || null,
+        target_type: validEntityTypes.has(targetType) ? targetType : (fallbackRule.target_type || 'appointment'),
+        target_ref: cleanString(rule?.target_ref, matchedFallbackRule?.target_ref || null) || null,
+        wait_min_value: Number.isFinite(waitMinValue) ? waitMinValue : 0,
+        wait_min_unit: validWaitUnits.has(waitUnit) ? waitUnit : (fallbackRule.wait_min_unit || 'days'),
+        condition: cleanString(rule?.condition, fallbackRule.condition || ''),
+        action: validActions.has(action) ? action : (fallbackRule.action || 'suggest'),
+        scope: validScopes.has(scope) ? scope : (fallbackRule.scope || 'medical_area'),
+        enabled: rule?.enabled === undefined ? (fallbackRule.enabled === undefined ? true : !!fallbackRule.enabled) : !!rule.enabled,
+      };
+    })
+    .filter((rule, index, list) => rule.code && rule.title && rule.description && list.findIndex((item) => item.code === rule.code) === index);
+
+  return rules;
 }
 
 function normalizeNutritionServiceKindOptions(value, fallback = []) {
@@ -1044,6 +1208,12 @@ function normalizeNutritionContractDefaults(contract, fallback) {
       serviceDetails: Object.fromEntries(Object.entries(contract.appointment_action?.serviceDetails || {})
         .map(([key, value]) => [key, sanitizeNutritionLegalText(value) || value])),
     },
+    protocol_rules: contract.protocol_rules.map((rule) => ({
+      ...rule,
+      title: sanitizeNutritionLegalText(rule.title) || rule.title,
+      description: sanitizeNutritionLegalText(rule.description) || rule.description,
+      condition: sanitizeNutritionLegalText(rule.condition) || rule.condition,
+    })),
     nutrition_service_kind_options: contract.nutrition_service_kind_options.map((option) => ({
       ...option,
       label: sanitizeNutritionLegalText(option.label) || option.label,
@@ -1078,6 +1248,7 @@ function getBaseContractForArea(code) {
     service_examples: TREATMENT_SERVICE_EXAMPLES[normalized] || TREATMENT_SERVICE_EXAMPLES[FALLBACK_CODE],
     contract_sections: MEDICAL_AREA_CONTRACT_SECTIONS[normalized] || FALLBACK_AREA_CONTRACT_SECTIONS,
     setup_steps: TREATMENT_SETUP_STEPS_BY_AREA[normalized] || DEFAULT_TREATMENT_SETUP_STEPS,
+    protocol_rules: MEDICAL_AREA_PROTOCOL_RULES[normalized] || [],
     patient_workspace: PATIENT_WORKSPACES[normalized] || PATIENT_WORKSPACES[FALLBACK_CODE],
     appointment_action: APPOINTMENT_ACTIONS[normalized] || APPOINTMENT_ACTIONS[FALLBACK_CODE],
     nutrition_service_kind_options: normalized === 'nutricion' ? NUTRITION_SERVICE_KIND_OPTIONS : [],
@@ -1098,6 +1269,7 @@ function normalizeContractPayload(code, payload = {}) {
     service_examples: normalizeServiceExamples(normalizedCode, source?.service_examples, normalizedBase.service_examples),
     contract_sections: normalizeContractSections(source?.contract_sections, normalizedBase.contract_sections),
     setup_steps: normalizeSetupSteps(source?.setup_steps, normalizedBase.setup_steps),
+    protocol_rules: normalizeProtocolRules(source?.protocol_rules, normalizedBase.protocol_rules),
     patient_workspace: normalizePatientWorkspace(source?.patient_workspace, normalizedBase.patient_workspace),
     appointment_action: normalizeAppointmentAction(source?.appointment_action, normalizedBase.appointment_action),
     nutrition_service_kind_options: normalizedCode === 'nutricion'
