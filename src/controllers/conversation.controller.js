@@ -283,6 +283,14 @@ function buildConversationSearchClause(searchQuery) {
       )
     )
   `);
+  const messageContentClause = (like) => db.Sequelize.literal(`
+    \`Conversation\`.\`id\` IN (
+      SELECT DISTINCT m.conversation_id
+      FROM Messages m
+      WHERE m.conversation_id IS NOT NULL
+        AND LOWER(COALESCE(m.content, '')) LIKE ${likeSql(like)} ESCAPE '\\\\'
+    )
+  `);
   const textFieldClauses = (like) => [
     { contact_id: { [Op.like]: like } },
     { '$paciente.nombre$': { [Op.like]: like } },
@@ -317,6 +325,7 @@ function buildConversationSearchClause(searchQuery) {
       { [Op.like]: like }
     ),
     externalContactClause(like),
+    messageContentClause(like),
   ];
 
   const fullLike = makeLike(normalized);
