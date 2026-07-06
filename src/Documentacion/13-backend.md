@@ -77,6 +77,7 @@ Reglas:
 - Desde 2026-07-04 la respuesta incluye `setup` para primeros pasos generales, `criticalAlerts` para bloqueos técnicos, `growthOpportunities` para crecimiento y `meta.generatedAt` para mostrar la última actualización.
 - Desde 2026-07-04 la respuesta incluye `nextAppointments` para que el frontend explique estados vacíos de "citas de hoy" sin recomponer agenda en Angular. Se calcula en backend con la misma tabla base `CitasPacientes` y excluye canceladas/reprogramadas.
 - Desde 2026-07-06 `tasks.items` incluye `pending_attendance` cuando hay citas pasadas pendientes de cerrar asistencia, y `tasks.total` se calcula en backend sobre todos los items devueltos.
+- Desde 2026-07-06 el payload se recorta por rol: doctores reciben solo `doctorAppointmentsToday`, `doctorPendingConsents` y `weeklySchedule`; las citas/tareas operativas de clínica y `setup` solo se devuelven cuando `sections.showOperations`/`sections.showSetup` lo indica.
 - El feedback positivo de ejemplo no se devuelve; cuando se reactive debe venir como señal real atribuible a ClinicaClick.
 
 ## Control de acceso por capacidades

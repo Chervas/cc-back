@@ -331,7 +331,7 @@ function mapAppointment(row, maps, now) {
   };
 }
 
-async function loadAppointments({ clinicIds, clinicMap, todayStart, todayEnd, now }) {
+async function loadAppointments({ clinicIds, clinicMap, todayStart, todayEnd, now, doctorId = null, includePastAttendance = true, includeNext = true }) {
   if (!clinicIds.length || !CitaPaciente) {
     return { today: [], pastAttendance: [], next: [] };
   }
@@ -343,39 +343,47 @@ async function loadAppointments({ clinicIds, clinicMap, todayStart, todayEnd, no
     'id_cita', 'clinica_id', 'paciente_id', 'doctor_id', 'instalacion_id',
     'tratamiento_id', 'titulo', 'motivo', 'tipo_cita', 'estado', 'inicio', 'fin',
   ];
+  const appointmentScope = {
+    ...scopedWhere('clinica_id', clinicIds),
+    ...(doctorId ? { doctor_id: doctorId } : {}),
+  };
 
   const [todayRows, pastRows, nextRows] = await Promise.all([
     CitaPaciente.findAll({
       where: {
-        ...scopedWhere('clinica_id', clinicIds),
+        ...appointmentScope,
         inicio: { [Op.between]: [todayStart, todayEnd] },
       },
       attributes: appointmentAttributes,
       order: [['inicio', 'ASC']],
       raw: true,
     }),
-    CitaPaciente.findAll({
-      where: {
-        ...scopedWhere('clinica_id', clinicIds),
-        fin: { [Op.between]: [pastStart, now] },
-        estado: { [Op.in]: [...ATTENDANCE_OPEN_STATUSES] },
-      },
-      attributes: appointmentAttributes,
-      order: [['fin', 'DESC']],
-      limit: 30,
-      raw: true,
-    }),
-    CitaPaciente.findAll({
-      where: {
-        ...scopedWhere('clinica_id', clinicIds),
-        inicio: { [Op.gt]: todayEnd },
-        estado: { [Op.notIn]: [...CANCELLED_STATUSES] },
-      },
-      attributes: appointmentAttributes,
-      order: [['inicio', 'ASC']],
-      limit: 4,
-      raw: true,
-    }),
+    includePastAttendance
+      ? CitaPaciente.findAll({
+          where: {
+            ...appointmentScope,
+            fin: { [Op.between]: [pastStart, now] },
+            estado: { [Op.in]: [...ATTENDANCE_OPEN_STATUSES] },
+          },
+          attributes: appointmentAttributes,
+          order: [['fin', 'DESC']],
+          limit: 30,
+          raw: true,
+        })
+      : [],
+    includeNext
+      ? CitaPaciente.findAll({
+          where: {
+            ...appointmentScope,
+            inicio: { [Op.gt]: todayEnd },
+            estado: { [Op.notIn]: [...CANCELLED_STATUSES] },
+          },
+          attributes: appointmentAttributes,
+          order: [['inicio', 'ASC']],
+          limit: 4,
+          raw: true,
+        })
+      : [],
   ]);
 
   const allRows = [...todayRows, ...pastRows, ...nextRows];
@@ -923,20 +931,25 @@ async function getMainDashboard({ userId, query = {} }) {
 
   const scope = await resolveClinicScope(requestedScope, context.memberships);
   const sections = roleSections(context.role, context.subrolCode);
+  const doctorId = sections.doctor ? userId : null;
   const appointments = await loadAppointments({
     clinicIds: scope.clinicIds,
     clinicMap: scope.clinicMap,
     todayStart: today.start,
     todayEnd: today.end,
     now,
+    doctorId,
+    includePastAttendance: sections.operations,
+    includeNext: sections.operations,
   });
-  const counts = await countTasks({
-    clinicIds: scope.clinicIds,
-    todayStart: today.start,
-    todayEnd: today.end,
-  });
+  const counts = sections.operations
+    ? await countTasks({
+        clinicIds: scope.clinicIds,
+        todayStart: today.start,
+        todayEnd: today.end,
+      })
+    : { leadsPending: 0, pendingConsents: 0, pendingReviews: 0, unconfirmedToday: 0 };
 
-  const doctorId = sections.doctor ? userId : null;
   const [
     pendingPatientConsents,
     doctorPendingConsents,
@@ -944,22 +957,24 @@ async function getMainDashboard({ userId, query = {} }) {
     whatsappStatus,
     opportunities,
   ] = await Promise.all([
-    loadPendingConsentCards({ clinicIds: scope.clinicIds, limit: 6 }),
+    sections.operations ? loadPendingConsentCards({ clinicIds: scope.clinicIds, limit: 6 }) : [],
     doctorId ? loadPendingConsentCards({ clinicIds: scope.clinicIds, doctorId, limit: 6 }) : [],
     doctorId ? loadWeeklySchedule({ clinicIds: scope.clinicIds, clinicMap: scope.clinicMap, userId: doctorId, todayIso: today.date }) : [],
     loadWhatsappStatus({ clinicIds: scope.clinicIds, groupIds: scope.groupIds }),
     loadOpportunities({ clinicIds: scope.clinicIds }),
   ]);
 
-  const setup = await loadSetupStatus({
-    clinicIds: scope.clinicIds,
-    groupIds: scope.groupIds,
-    clinics: scope.clinics,
-    whatsappStatus,
-  });
+  const setup = sections.operations
+    ? await loadSetupStatus({
+        clinicIds: scope.clinicIds,
+        groupIds: scope.groupIds,
+        clinics: scope.clinics,
+        whatsappStatus,
+      })
+    : { total: 0, completed: 0, items: [] };
 
   const doctorAppointments = doctorId
-    ? appointments.today.filter((item) => Number(item.doctorId) === Number(doctorId))
+    ? appointments.today
     : [];
 
   const errors = [];
@@ -1003,18 +1018,19 @@ async function getMainDashboard({ userId, query = {} }) {
       showOperations: sections.operations,
       showDoctor: sections.doctor,
       showShared: sections.shared,
+      showSetup: sections.operations,
       showOwnerFeedback: sections.ownerLike,
     },
-    todayAppointments: appointments.today,
-    nextAppointments: appointments.next,
-    pastAttendancePending: appointments.pastAttendance,
+    todayAppointments: sections.operations ? appointments.today : [],
+    nextAppointments: sections.operations ? appointments.next : [],
+    pastAttendancePending: sections.operations ? appointments.pastAttendance : [],
     doctorAppointmentsToday: doctorAppointments,
     pendingPatientConsents,
     doctorPendingConsents,
     weeklySchedule,
     tasks: {
-      items: dashboardTasks,
-      total: dashboardTasks.reduce((total, item) => total + Number(item.count || 0), 0),
+      items: sections.operations ? dashboardTasks : [],
+      total: sections.operations ? dashboardTasks.reduce((total, item) => total + Number(item.count || 0), 0) : 0,
     },
     setup,
     criticalAlerts: errors,
