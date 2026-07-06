@@ -104,6 +104,7 @@ Reglas:
 - Un administrador puede leer/escribir todos los ámbitos. Un propietario solo puede escribir overrides en sus clínicas/grupos; el resto de staff solo lee sus ámbitos accesibles.
 - La tabla `AccessPolicyOverrides` usa una clave única por `scope_type`, `scope_id`, `feature_key` y `role_code`.
 - Nutrición consume estos permisos en backend: `nutrition.workspace.view` protege la ficha, informes HTML y PDF; `nutrition.measurements.create` protege alta de mediciones y snapshots persistidos, siempre junto a `nutrition.workspace.view`; `nutrition.reports.finalize` protege el cierre de informes como snapshot final. Por defecto propietario y doctor pueden cerrar informes; auxiliar puede registrar mediciones pero no cerrar informes salvo override.
+- QuickChat consume `quickchat.read_patients`, `quickchat.read_team` y `quickchat.read_leads` en `GET /api/conversations/permissions` para mostrar u ocultar pestañas según el scope activo. El acceso a conversaciones sigue validando pertenencia a clínica; el endurecimiento por categoría en todos los endpoints de mensajes queda como siguiente capa si se quiere convertir estas capacidades en ACL estricta de lectura.
 
 ## Workspace Nutricion / antropometria
 

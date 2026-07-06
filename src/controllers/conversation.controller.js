@@ -5,6 +5,7 @@ const { queues } = require('../services/queue.service');
 const { getIO } = require('../services/socket.service');
 const whatsappService = require('../services/whatsapp.service');
 const { findCanonicalWhatsappConversation } = require('../lib/canonical-conversation');
+const { canUserAccessFeature } = require('../lib/access-policy');
 
 const { Conversation, Message, UsuarioClinica, Paciente, LeadIntake, ConversationRead, Clinica, MarketingPatientListItem } = db;
 
@@ -119,18 +120,47 @@ async function getUserClinics(userId) {
   return { clinicIds, isAggregateAllowed };
 }
 
-function roleToPermissions(role) {
-  const normalized = String(role || '').toLowerCase();
-  if (ROLE_AGGREGATE.includes(normalized)) {
-    return { read_patients: true, read_team: true, read_leads: true };
+const QUICKCHAT_POLICY_FEATURES = {
+  read_patients: 'quickchat.read_patients',
+  read_team: 'quickchat.read_team',
+  read_leads: 'quickchat.read_leads',
+};
+
+async function canReadQuickChatFeatureForAnyClinic(userId, featureKey, clinicIds) {
+  for (const clinicId of clinicIds) {
+    // Keep this sequential: it avoids a burst of policy queries for owners with many clinics.
+    // The endpoint is called often by QuickChat while changing clinic context.
+    // eslint-disable-next-line no-await-in-loop
+    const allowed = await canUserAccessFeature({
+      actorId: userId,
+      featureKey,
+      clinicId,
+    });
+    if (allowed) return true;
   }
-  if (['administrador', 'admin', 'personaldeclinica', 'recepcion', 'assistant', 'auxiliar'].includes(normalized)) {
-    return { read_patients: true, read_team: true, read_leads: true };
+  return false;
+}
+
+async function getQuickChatPolicyPermissions(userId, clinicIds, selectedClinicId = null) {
+  const scopedClinicIds = selectedClinicId
+    ? clinicIds.filter((id) => Number(id) === Number(selectedClinicId))
+    : clinicIds;
+
+  if (!scopedClinicIds.length) {
+    return { read_patients: false, read_team: false, read_leads: false };
   }
-  if (['doctor', 'medico'].includes(normalized)) {
-    return { read_patients: true, read_team: false, read_leads: true };
-  }
-  return { read_patients: false, read_team: false, read_leads: false };
+
+  const [readPatients, readTeam, readLeads] = await Promise.all([
+    canReadQuickChatFeatureForAnyClinic(userId, QUICKCHAT_POLICY_FEATURES.read_patients, scopedClinicIds),
+    canReadQuickChatFeatureForAnyClinic(userId, QUICKCHAT_POLICY_FEATURES.read_team, scopedClinicIds),
+    canReadQuickChatFeatureForAnyClinic(userId, QUICKCHAT_POLICY_FEATURES.read_leads, scopedClinicIds),
+  ]);
+
+  return {
+    read_patients: readPatients,
+    read_team: readTeam,
+    read_leads: readLeads,
+  };
 }
 
 function parseClinicIdsParam(requestedClinicId) {
@@ -640,13 +670,13 @@ exports.getPermissions = async (req, res) => {
       memberships[0] ||
       null;
     const effectiveRole = String(selectedMembership?.rol_clinica || 'unknown').toLowerCase();
-    const perms = roleToPermissions(effectiveRole);
+    const policyPerms = await getQuickChatPolicyPermissions(userId, clinicIds, selectedClinicId);
 
     return res.json({
       selected_clinic_id: selectedClinicId,
-      read_patients: perms.read_patients,
-      read_team: perms.read_team,
-      read_leads: perms.read_leads,
+      read_patients: policyPerms.read_patients,
+      read_team: policyPerms.read_team,
+      read_leads: policyPerms.read_leads,
       can_use_all_clinics: !!isAggregateAllowed,
       effective_role: effectiveRole,
     });
