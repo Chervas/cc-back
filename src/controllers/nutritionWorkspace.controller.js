@@ -34,11 +34,21 @@ function sendNutritionError(error, res) {
   return null;
 }
 
-function reportBrandingOptionsFromRequest(req) {
+function reportOptionsFromRequest(req) {
   const rawMode = String(req.query?.report_branding_mode || req.query?.branding_mode || '').trim().toLowerCase();
-  return {
+  const options = {
     brandingMode: rawMode === 'clinic' ? 'clinic' : 'clinicaclick',
   };
+  const rawComparison = req.query?.compare_measurement_id ?? req.query?.comparison_measurement_id;
+  if (rawComparison !== undefined) {
+    const normalized = String(rawComparison).trim().toLowerCase();
+    if (!normalized || ['none', 'null', 'false', '0'].includes(normalized)) {
+      options.compareMeasurementId = null;
+    } else if (/^\d+$/.test(normalized)) {
+      options.compareMeasurementId = Number(normalized);
+    }
+  }
+  return options;
 }
 
 exports.getPatientNutritionWorkspace = asyncHandler(async (req, res) => {
@@ -158,13 +168,16 @@ exports.renderPatientNutritionMeasurementReport = asyncHandler(async (req, res) 
     const html = await nutritionWorkspaceService.renderNutritionMeasurementReport(
       req.params.id,
       req.params.measurementId,
-      reportBrandingOptionsFromRequest(req),
+      reportOptionsFromRequest(req),
     );
     res.setHeader('Content-Type', 'text/html; charset=utf-8');
     return res.send(html);
   } catch (error) {
     const handled = sendNutritionError(error, res);
     if (handled) return handled;
+    if (error.message === 'report_comparison_not_found') {
+      return res.status(404).json({ message: 'Medición de comparación no encontrada' });
+    }
     if (error.status === 404 || ['patient_not_found', 'measurement_not_found', 'report_not_available'].includes(error.message)) {
       return res.status(404).json({ message: 'Informe no encontrado' });
     }
@@ -234,7 +247,7 @@ exports.getPatientNutritionMeasurementReportPdf = asyncHandler(async (req, res) 
       req.params.id,
       req.params.measurementId,
       actorUserId,
-      reportBrandingOptionsFromRequest(req),
+      reportOptionsFromRequest(req),
     );
     res.setHeader('Content-Type', 'application/pdf');
     res.setHeader('Content-Disposition', `inline; filename="${filename}"`);
@@ -243,6 +256,9 @@ exports.getPatientNutritionMeasurementReportPdf = asyncHandler(async (req, res) 
   } catch (error) {
     const handled = sendNutritionError(error, res);
     if (handled) return handled;
+    if (error.message === 'report_comparison_not_found') {
+      return res.status(404).json({ message: 'Medición de comparación no encontrada' });
+    }
     if (error.status === 404 || ['patient_not_found', 'measurement_not_found', 'report_not_available'].includes(error.message)) {
       return res.status(404).json({ message: 'Informe no encontrado' });
     }

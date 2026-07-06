@@ -14,11 +14,13 @@ const clinicalPrivateStorage = require('./clinicalPrivateStorage.service');
 const { Op } = db.Sequelize;
 const execFileAsync = promisify(execFile);
 const FORMULA_VERSION = 'nutrition-basic-v3';
-const NUTRITION_REPORT_SNAPSHOT_VERSION = 9;
+const NUTRITION_REPORT_SNAPSHOT_VERSION = 10;
 const NUTRITION_REPORT_CURRENT_STATUSES = ['final', 'active'];
 const NUTRITION_REPORT_BRANDING_MODES = new Set(['clinicaclick', 'clinic']);
 const DEFAULT_CHROMIUM_PATH = '/home/ubuntu/.cache/clinicaclick-browsers/chrome-headless-shell/linux-148.0.7778.56/chrome-headless-shell-linux64/chrome-headless-shell';
-const NUTRITION_SOMATOTYPE_ASSET_DIR = path.join(__dirname, '..', 'assets', 'nutrition', 'somatotypes');
+const NUTRITION_ASSET_DIR = path.join(__dirname, '..', 'assets', 'nutrition');
+const NUTRITION_BRAND_ASSET_DIR = path.join(NUTRITION_ASSET_DIR, 'brand');
+const NUTRITION_SOMATOTYPE_ASSET_DIR = path.join(NUTRITION_ASSET_DIR, 'somatotypes');
 const nutritionReportImageCache = new Map();
 
 const FORMULA_REFERENCES = [
@@ -220,13 +222,36 @@ function buildClinicalStoragePolicy({
 
 const REPORT_METRIC_DEFINITIONS = [
   { key: 'weight_kg', label: 'Peso', unit: 'kg', source: 'raw_values', decimals: 1, section: 'base' },
+  { key: 'stature_cm', label: 'Estatura', unit: 'cm', source: 'raw_values', decimals: 1, section: 'base' },
+  { key: 'arm_span_cm', label: 'Envergadura', unit: 'cm', source: 'raw_values', decimals: 1, section: 'base' },
   { key: 'bmi', label: 'IMC', unit: '', source: 'calculated_values', decimals: 1, section: 'base' },
   { key: 'waist_cm', label: 'Cintura', unit: 'cm', source: 'raw_values', decimals: 1, section: 'base' },
   { key: 'hip_cm', label: 'Cadera', unit: 'cm', source: 'raw_values', decimals: 1, section: 'base' },
   { key: 'waist_hip_ratio', label: 'Ratio cintura/cadera', unit: '', source: 'calculated_values', decimals: 2, section: 'base' },
+  { key: 'skinfold_triceps_mm', label: 'Pliegue tríceps', unit: 'mm', source: 'raw_values', decimals: 1, section: 'skinfolds' },
+  { key: 'skinfold_subscapular_mm', label: 'Pliegue subescapular', unit: 'mm', source: 'raw_values', decimals: 1, section: 'skinfolds' },
+  { key: 'skinfold_biceps_mm', label: 'Pliegue bíceps', unit: 'mm', source: 'raw_values', decimals: 1, section: 'skinfolds' },
+  { key: 'skinfold_iliac_crest_mm', label: 'Pliegue cresta ilíaca', unit: 'mm', source: 'raw_values', decimals: 1, section: 'skinfolds' },
+  { key: 'skinfold_supraspinale_mm', label: 'Pliegue supraespinal', unit: 'mm', source: 'raw_values', decimals: 1, section: 'skinfolds' },
+  { key: 'skinfold_abdominal_mm', label: 'Pliegue abdominal', unit: 'mm', source: 'raw_values', decimals: 1, section: 'skinfolds' },
+  { key: 'skinfold_front_thigh_mm', label: 'Pliegue muslo frontal', unit: 'mm', source: 'raw_values', decimals: 1, section: 'skinfolds' },
+  { key: 'skinfold_medial_calf_mm', label: 'Pliegue pantorrilla medial', unit: 'mm', source: 'raw_values', decimals: 1, section: 'skinfolds' },
   { key: 'skinfold_sum_mm', label: 'Suma de pliegues', unit: 'mm', source: 'calculated_values', decimals: 1, section: 'anthropometry' },
+  { key: 'arm_relaxed_cm', label: 'Brazo relajado', unit: 'cm', source: 'raw_values', decimals: 1, section: 'girths' },
+  { key: 'arm_flexed_tensed_cm', label: 'Brazo flexionado', unit: 'cm', source: 'raw_values', decimals: 1, section: 'girths' },
+  { key: 'forearm_cm', label: 'Antebrazo', unit: 'cm', source: 'raw_values', decimals: 1, section: 'girths' },
+  { key: 'chest_cm', label: 'Tórax', unit: 'cm', source: 'raw_values', decimals: 1, section: 'girths' },
+  { key: 'thigh_cm', label: 'Muslo', unit: 'cm', source: 'raw_values', decimals: 1, section: 'girths' },
+  { key: 'calf_cm', label: 'Pantorrilla', unit: 'cm', source: 'raw_values', decimals: 1, section: 'girths' },
   { key: 'corrected_arm_girth_cm', label: 'Brazo corregido', unit: 'cm', source: 'calculated_values', decimals: 1, section: 'anthropometry' },
   { key: 'corrected_calf_girth_cm', label: 'Pantorrilla corregida', unit: 'cm', source: 'calculated_values', decimals: 1, section: 'anthropometry' },
+  { key: 'breadth_humerus_cm', label: 'Diámetro húmero', unit: 'cm', source: 'raw_values', decimals: 1, section: 'breadths' },
+  { key: 'breadth_wrist_bistyloid_cm', label: 'Diámetro biestiloideo', unit: 'cm', source: 'raw_values', decimals: 1, section: 'breadths' },
+  { key: 'breadth_femur_cm', label: 'Diámetro fémur', unit: 'cm', source: 'raw_values', decimals: 1, section: 'breadths' },
+  { key: 'breadth_biacromial_cm', label: 'Diámetro biacromial', unit: 'cm', source: 'raw_values', decimals: 1, section: 'breadths' },
+  { key: 'breadth_biiliocristal_cm', label: 'Diámetro biiliocrestal', unit: 'cm', source: 'raw_values', decimals: 1, section: 'breadths' },
+  { key: 'depth_chest_ap_cm', label: 'Diámetro tórax AP', unit: 'cm', source: 'raw_values', decimals: 1, section: 'breadths' },
+  { key: 'breadth_chest_transverse_cm', label: 'Diámetro tórax transverso', unit: 'cm', source: 'raw_values', decimals: 1, section: 'breadths' },
   { key: 'body_fat_percent', label: 'Grasa estimada', unit: '%', source: 'body_composition', decimals: 1, section: 'body_composition' },
   { key: 'fat_mass_kg', label: 'Masa grasa estimada', unit: 'kg', source: 'body_composition', decimals: 1, section: 'body_composition' },
   { key: 'fat_free_mass_kg', label: 'Masa libre de grasa', unit: 'kg', source: 'body_composition', decimals: 1, section: 'body_composition' },
@@ -301,6 +326,9 @@ const PROJECTION_METRIC_DEFINITIONS = [
 
 const REPORT_SECTION_DEFINITIONS = {
   base: 'Datos principales',
+  skinfolds: 'Pliegues',
+  girths: 'Perímetros',
+  breadths: 'Diámetros',
   anthropometry: 'Antropometría',
   body_composition: 'Composición corporal',
   five_component: 'Cinco componentes Kerr-Ross',
@@ -450,7 +478,8 @@ function metricTrendClass(metric = {}) {
   const decreasePreferred = ['weight_kg', 'bmi', 'waist_cm', 'skinfold_sum_mm', 'body_fat_percent', 'fat_mass_kg', 'adipose_mass_kg'];
   const delta = finiteNumber(metric.delta);
   if (delta === null || Math.abs(delta) < 0.0001) return 'delta-stable';
-  const improved = decreasePreferred.includes(metric.key) ? delta < 0 : delta > 0;
+  const key = String(metric.key || '');
+  const improved = decreasePreferred.includes(key) || key.startsWith('skinfold_') ? delta < 0 : delta > 0;
   return improved ? 'delta-good' : 'delta-bad';
 }
 
@@ -541,39 +570,14 @@ function buildProjectionVisualHtml(projection) {
   `;
 }
 
-function buildCompositionVisualHtml(report) {
-  const fractionation = report?.summary?.body_fractionation || null;
-  const composition = report?.summary?.body_composition || null;
-  const segments = [];
-
-  if (fractionation) {
-    [
-      ['adipose_percent_of_body_mass', 'Adiposo', '#f97316'],
-      ['muscle_percent_of_body_mass', 'Músculo', '#14b8a6'],
-      ['bone_percent_of_body_mass', 'Óseo', '#6366f1'],
-      ['skin_percent_of_body_mass', 'Piel', '#f43f5e'],
-      ['residual_percent_of_body_mass', 'Residual', '#64748b'],
-    ].forEach(([key, label, color]) => {
-      const value = finiteNumber(fractionation[key]);
-      if (value !== null && value > 0) segments.push({ label, value, color });
-    });
-  } else if (composition) {
-    const fat = finiteNumber(composition.body_fat_percent);
-    if (fat !== null) {
-      segments.push({ label: 'Masa grasa', value: Math.max(0, Math.min(100, fat)), color: '#f97316' });
-      segments.push({ label: 'Masa libre de grasa', value: Math.max(0, Math.min(100, 100 - fat)), color: '#14b8a6' });
-    }
-  }
-
+function compositionVisualBlockHtml(title, subtitle, segments = [], barItems = []) {
   if (!segments.length) return '';
-
   return `
-    <section class="card">
-      <h2>${fractionation ? 'Fraccionamiento corporal' : 'Composición corporal'}</h2>
+    <div class="composition-visual-block">
+      <h3>${escapeHtml(title)}</h3>
+      ${subtitle ? `<p class="muted small-note">${escapeHtml(subtitle)}</p>` : ''}
       <div class="visual-grid">
-        <div>
-          ${buildDonutSvg(segments)}
-        </div>
+        <div>${buildDonutSvg(segments, { title: 'Actual', subtitle: `${segments.length} bloques` })}</div>
         <div>
           <div class="composition-bar">
             ${segments.map((segment) => `<span style="width:${escapeHtml(round(segment.value, 1))}%;background:${escapeHtml(segment.color)}"></span>`).join('')}
@@ -589,20 +593,95 @@ function buildCompositionVisualHtml(report) {
           </div>
         </div>
       </div>
-      <div class="bar-chart-grid">
-        ${buildComponentBarSvg(
-          fractionation
-            ? [
-              { label: 'Adiposo', value: fractionation.adipose_mass_kg, unit: 'kg', color: '#f97316' },
-              { label: 'Músculo', value: fractionation.muscle_mass_kg, unit: 'kg', color: '#14b8a6' },
-              { label: 'Óseo', value: fractionation.bone_mass_kg, unit: 'kg', color: '#6366f1' },
-              { label: 'Residual', value: fractionation.residual_mass_kg, unit: 'kg', color: '#64748b' },
-            ]
-            : [
-              { label: 'Masa grasa', value: composition?.fat_mass_kg, unit: 'kg', color: '#f97316' },
-              { label: 'Masa libre', value: composition?.fat_free_mass_kg, unit: 'kg', color: '#14b8a6' },
-            ],
-        )}
+      <div class="bar-chart-grid">${buildComponentBarSvg(barItems)}</div>
+    </div>
+  `;
+}
+
+function pendingTraceHtml(report = {}, key = 'body_fractionation', title = 'Fraccionamiento tisular Kerr-Ross', detail = 'Se mostrará como gráfico de cinco componentes cuando el bloque avanzado esté completo.') {
+  const trace = (report.calculation_trace || []).find((item) => item.key === key);
+  const missing = trace?.missing_input_labels || [];
+  return `
+    <div class="composition-visual-block muted-card">
+      <h3>${escapeHtml(title)}</h3>
+      <p class="muted small-note">${escapeHtml(detail)}</p>
+      <div class="pending-visual">
+        <strong>Pendiente de datos</strong>
+        <span>${escapeHtml(missing.length ? missing.slice(0, 8).join(', ') : 'Faltan entradas para este cálculo')}</span>
+      </div>
+    </div>
+  `;
+}
+
+function buildCompositionVisualHtml(report) {
+  const fractionation = report?.summary?.body_fractionation || null;
+  const composition = report?.summary?.body_composition || null;
+  const blocks = [];
+
+  if (composition) {
+    const fat = finiteNumber(composition.body_fat_percent);
+    if (fat !== null) {
+      const fatPercent = Math.max(0, Math.min(100, fat));
+      const leanPercent = Math.max(0, Math.min(100, 100 - fatPercent));
+      blocks.push(compositionVisualBlockHtml(
+        'Fraccionamiento molecular',
+        'Modelo de dos compartimentos calculado desde Durnin-Womersley + Siri: masa grasa y masa libre de grasa.',
+        [
+          { label: 'Masa grasa', value: fatPercent, color: '#f97316' },
+          { label: 'Masa libre de grasa', value: leanPercent, color: '#14b8a6' },
+        ],
+        [
+          { label: 'Masa grasa', value: composition.fat_mass_kg, unit: 'kg', color: '#f97316' },
+          { label: 'Masa libre', value: composition.fat_free_mass_kg, unit: 'kg', color: '#14b8a6' },
+        ],
+      ));
+    }
+  } else {
+    blocks.push(pendingTraceHtml(
+      report,
+      'body_composition',
+      'Fraccionamiento molecular',
+      'Modelo de dos compartimentos: masa grasa y masa libre de grasa. Se calcula cuando sexo, edad, peso y pliegues requeridos están completos.',
+    ));
+  }
+
+  if (fractionation) {
+    const segments = [];
+    [
+      ['adipose_percent_of_body_mass', 'Adiposo', '#f97316'],
+      ['muscle_percent_of_body_mass', 'Músculo', '#14b8a6'],
+      ['bone_percent_of_body_mass', 'Óseo', '#6366f1'],
+      ['skin_percent_of_body_mass', 'Piel', '#f43f5e'],
+      ['residual_percent_of_body_mass', 'Residual', '#64748b'],
+    ].forEach(([key, label, color]) => {
+      const value = finiteNumber(fractionation[key]);
+      if (value !== null && value > 0) segments.push({ label, value, color });
+    });
+    if (segments.length) {
+      blocks.push(compositionVisualBlockHtml(
+        'Fraccionamiento tisular',
+        'Cinco componentes Kerr-Ross: adiposo, músculo, hueso, piel y residual.',
+        segments,
+        [
+          { label: 'Adiposo', value: fractionation.adipose_mass_kg, unit: 'kg', color: '#f97316' },
+          { label: 'Músculo', value: fractionation.muscle_mass_kg, unit: 'kg', color: '#14b8a6' },
+          { label: 'Óseo', value: fractionation.bone_mass_kg, unit: 'kg', color: '#6366f1' },
+          { label: 'Piel', value: fractionation.skin_mass_kg, unit: 'kg', color: '#f43f5e' },
+          { label: 'Residual', value: fractionation.residual_mass_kg, unit: 'kg', color: '#64748b' },
+        ],
+      ));
+    }
+  } else {
+    blocks.push(pendingTraceHtml(report, 'body_fractionation'));
+  }
+
+  if (!blocks.length) return '';
+
+  return `
+    <section class="card">
+      <h2>Composición y fraccionamiento corporal</h2>
+      <div class="composition-block-grid">
+        ${blocks.join('')}
       </div>
     </section>
   `;
@@ -655,6 +734,78 @@ function buildComponentBarSvg(items = []) {
   `;
 }
 
+function comparisonBarHtml(metric = {}) {
+  const current = Math.abs(finiteNumber(metric.value) || 0);
+  const previous = Math.abs(finiteNumber(metric.previous_value) || 0);
+  const max = Math.max(current, previous, 1);
+  const currentWidth = Math.max(4, Math.min(100, (current / max) * 100));
+  const previousWidth = Math.max(4, Math.min(100, (previous / max) * 100));
+  return `
+    <div class="comparison-bars">
+      <div><span>Actual</span><i class="${metricTrendClass(metric)}" style="width:${escapeHtml(round(currentWidth, 1))}%"></i><strong>${escapeHtml(formatMetricValue(metric))}</strong></div>
+      <div><span>Previo</span><i class="previous" style="width:${escapeHtml(round(previousWidth, 1))}%"></i><strong>${escapeHtml(formatMetricValue({ value: metric.previous_value, unit: metric.unit }))}</strong></div>
+    </div>
+  `;
+}
+
+function comparisonSectionTitle(section) {
+  const titles = {
+    base: 'Medidas básicas',
+    skinfolds: 'Pliegues',
+    girths: 'Perímetros',
+    breadths: 'Diámetros',
+    anthropometry: 'Antropometría calculada',
+    body_composition: 'Composición corporal',
+    five_component: 'Fraccionamiento tisular',
+    somatotype: 'Somatotipo',
+  };
+  return titles[section] || REPORT_SECTION_DEFINITIONS[section] || 'Otras métricas';
+}
+
+function buildComparisonOverviewHtml(comparison = {}) {
+  const metrics = (comparison.metrics || []).filter((metric) => metric.delta !== null && metric.delta !== undefined);
+  if (!comparison.available || !metrics.length) return '';
+  const priority = ['base', 'skinfolds', 'girths', 'breadths', 'body_composition', 'five_component', 'anthropometry', 'somatotype'];
+  const groups = new Map();
+  metrics.forEach((metric) => {
+    const section = metric.section || 'other';
+    if (!groups.has(section)) groups.set(section, []);
+    groups.get(section).push(metric);
+  });
+  const orderedSections = [
+    ...priority.filter((section) => groups.has(section)),
+    ...Array.from(groups.keys()).filter((section) => !priority.includes(section)),
+  ];
+
+  return `
+    <section class="card comparison-overview">
+      <div class="section-heading-row">
+        <div>
+          <h2>Comparativas principales</h2>
+          <p class="muted small-note">Actual frente a la medición previa por bloques clínicos. El color indica mejora o empeoramiento según la métrica.</p>
+        </div>
+        <span class="pill">${escapeHtml(comparison.days_between != null ? `${comparison.days_between} días` : 'Histórico')}</span>
+      </div>
+      <div class="comparison-section-grid">
+        ${orderedSections.map((section) => `
+          <div class="comparison-section-card">
+            <h3>${escapeHtml(comparisonSectionTitle(section))}</h3>
+            ${(groups.get(section) || []).slice(0, 8).map((metric) => `
+              <div class="comparison-metric">
+                <div class="comparison-metric-head">
+                  <strong>${escapeHtml(metric.label)}</strong>
+                  <span class="${metricTrendClass(metric)}">${escapeHtml(formatDeltaWithPercent(metric))}</span>
+                </div>
+                ${comparisonBarHtml(metric)}
+              </div>
+            `).join('')}
+          </div>
+        `).join('')}
+      </div>
+    </section>
+  `;
+}
+
 function sumFiniteValues(values = []) {
   const usable = values.map((value) => finiteNumber(value)).filter((value) => value !== null);
   return usable.length ? usable.reduce((sum, value) => sum + value, 0) : null;
@@ -697,7 +848,8 @@ function segmentRowsHtml(title, segments = [], previousSegments = []) {
           <div class="distribution-row">
             <div class="distribution-row-head">
               <span>${escapeHtml(segment.label)}</span>
-              <strong>${escapeHtml(segment.percent)}%</strong>
+              <strong>Actual ${escapeHtml(segment.percent)}%</strong>
+              ${previous ? `<small>Previo ${escapeHtml(previous.percent)}%</small>` : ''}
               ${segmentDeltaHtml(segment, previousSegments)}
             </div>
             <div class="distribution-track">
@@ -733,6 +885,26 @@ function bodyDistributionSvg(adiposeSegments = [], muscleSegments = []) {
   `;
 }
 
+function bodyDistributionFigureHtml(adiposeSegments = [], muscleSegments = []) {
+  const image = nutritionAssetDataUri('body-distribution-neutral-front.png');
+  if (!image) return bodyDistributionSvg(adiposeSegments, muscleSegments);
+  const upper = segmentByLabel(adiposeSegments, 'Superior');
+  const central = segmentByLabel(adiposeSegments, 'Central');
+  const lower = segmentByLabel(adiposeSegments, 'Inferior');
+  const arm = segmentByLabel(muscleSegments, 'Brazo');
+  const leg = segmentByLabel(muscleSegments, 'Pierna') || segmentByLabel(muscleSegments, 'Muslo');
+  return `
+    <div class="body-map-figure">
+      <img class="body-map-img" src="${image}" alt="Distribución corporal">
+      ${upper ? `<span class="body-zone body-zone-upper" style="background:${escapeHtml(upper.color)}" title="Adiposo superior"></span>` : ''}
+      ${central ? `<span class="body-zone body-zone-central" style="background:${escapeHtml(central.color)}" title="Adiposo central"></span>` : ''}
+      ${lower ? `<span class="body-zone body-zone-lower" style="background:${escapeHtml(lower.color)}" title="Adiposo inferior"></span>` : ''}
+      ${arm ? `<span class="body-zone body-zone-arm" style="background:${escapeHtml(arm.color)}" title="Muscular brazo"></span>` : ''}
+      ${leg ? `<span class="body-zone body-zone-leg" style="background:${escapeHtml(leg.color)}" title="Muscular pierna"></span>` : ''}
+    </div>
+  `;
+}
+
 function buildDistributionVisualHtml(measurement = {}, previousMeasurement = null) {
   const raw = measurement.raw_values || {};
   const calculated = measurement.calculated_values || {};
@@ -763,14 +935,14 @@ function buildDistributionVisualHtml(measurement = {}, previousMeasurement = nul
   return `
     <section class="card">
       <h2>Distribución adiposa y muscular</h2>
-      <p class="muted small-note">Reparte los pliegues y perímetros corregidos por zonas para ver dónde se concentra el cambio corporal. La marca vertical indica la medición previa cuando existe.</p>
+      <p class="muted small-note">Reparte pliegues y perímetros corregidos por zonas. En cada fila, la barra muestra la medición actual y la marca vertical negra indica el porcentaje previo cuando existe.</p>
       <div class="distribution-layout">
         ${segmentRowsHtml('Tejido adiposo', adiposeSegments, previousAdiposeSegments)}
         <div class="body-map-wrap">
-          ${bodyDistributionSvg(adiposeSegments, muscleSegments)}
+          ${bodyDistributionFigureHtml(adiposeSegments, muscleSegments)}
           <div class="distribution-legend">
-            <span><i class="legend-current"></i>Actual</span>
-            ${previousMeasurement ? '<span><i class="legend-previous"></i>Previo</span>' : ''}
+            <span><i class="legend-current"></i>Zonas actuales</span>
+            ${previousMeasurement ? '<span><i class="legend-previous"></i>Marca previa en barras</span>' : ''}
           </div>
         </div>
         ${segmentRowsHtml('Tejido muscular', muscleSegments, previousMuscleSegments)}
@@ -814,9 +986,20 @@ function buildSomatotypeVisualHtml(report = {}, patient = {}) {
           <circle cx="${round(plotX, 1)}" cy="${round(plotY, 1)}" r="6" fill="#0f766e"></circle>
         </svg>
         <div class="somato-values">
-          <div><span>Endomorfia</span><strong>${escapeHtml(endomorphy)}</strong></div>
-          <div><span>Mesomorfia</span><strong>${escapeHtml(mesomorphy)}</strong></div>
-          <div><span>Ectomorfia</span><strong>${escapeHtml(ectomorphy)}</strong></div>
+          ${[
+            { key: 'endo', label: 'Endomorfia', value: endomorphy },
+            { key: 'meso', label: 'Mesomorfia', value: mesomorphy },
+            { key: 'ecto', label: 'Ectomorfia', value: ectomorphy },
+          ].map((item) => {
+            const image = somatotypeImageDataUriForKey(item.key, report, patient);
+            return `
+              <div class="somato-value-card">
+                ${image ? `<img src="${image}" alt="${escapeHtml(item.label)}">` : ''}
+                <span>${escapeHtml(item.label)}</span>
+                <strong>${escapeHtml(item.value)}</strong>
+              </div>
+            `;
+          }).join('')}
         </div>
         ${somatotypeImageHtml}
       </div>
@@ -824,23 +1007,40 @@ function buildSomatotypeVisualHtml(report = {}, patient = {}) {
   `;
 }
 
-function nutritionImageDataUri(filename) {
-  if (!filename) return '';
-  if (nutritionReportImageCache.has(filename)) {
-    return nutritionReportImageCache.get(filename);
+function mimeTypeForAsset(filename) {
+  const extension = path.extname(filename || '').toLowerCase();
+  if (extension === '.webp') return 'image/webp';
+  if (extension === '.svg') return 'image/svg+xml';
+  return 'image/png';
+}
+
+function assetDataUri(filePath) {
+  if (!filePath) return '';
+  if (nutritionReportImageCache.has(filePath)) {
+    return nutritionReportImageCache.get(filePath);
   }
   try {
-    const filePath = path.join(NUTRITION_SOMATOTYPE_ASSET_DIR, filename);
     const buffer = fsSync.readFileSync(filePath);
-    const extension = path.extname(filename).toLowerCase();
-    const mimeType = extension === '.webp' ? 'image/webp' : 'image/png';
+    const mimeType = mimeTypeForAsset(filePath);
     const dataUri = `data:${mimeType};base64,${buffer.toString('base64')}`;
-    nutritionReportImageCache.set(filename, dataUri);
+    nutritionReportImageCache.set(filePath, dataUri);
     return dataUri;
   } catch (error) {
-    nutritionReportImageCache.set(filename, '');
+    nutritionReportImageCache.set(filePath, '');
     return '';
   }
+}
+
+function nutritionAssetDataUri(filename) {
+  return filename ? assetDataUri(path.join(NUTRITION_ASSET_DIR, filename)) : '';
+}
+
+function nutritionImageDataUri(filename) {
+  return filename ? assetDataUri(path.join(NUTRITION_SOMATOTYPE_ASSET_DIR, filename)) : '';
+}
+
+function clinicaclickLogoDataUri() {
+  return assetDataUri(path.join(NUTRITION_BRAND_ASSET_DIR, 'clinicaclick-logo-text.svg'));
 }
 
 function somatotypeDominanceLabel(somatotype = {}) {
@@ -863,10 +1063,15 @@ function somatotypeImageDataUri(report = {}, patient = {}) {
   ].filter((item) => item.value !== null);
   if (!values.length) return nutritionImageDataUri('somatotype-overview.png');
   const dominant = values.sort((a, b) => b.value - a.value)[0]?.key || 'meso';
+  return somatotypeImageDataUriForKey(dominant, report, patient);
+}
+
+function somatotypeImageDataUriForKey(key, report = {}, patient = {}) {
+  const normalized = ['endo', 'meso', 'ecto'].includes(key) ? key : 'meso';
   const patientSex = String(patient?.sex || report?.patient?.sex || report?.summary?.patient_sex || '').toLowerCase();
   const sex = patientSex === 'female' || patientSex === 'mujer' ? 'female' : 'male';
   const extension = sex === 'male' ? 'webp' : 'png';
-  return nutritionImageDataUri(`${dominant}-${sex}.${extension}`);
+  return nutritionImageDataUri(`${normalized}-${sex}.${extension}`);
 }
 
 function fatDistributionSummary(measurement = {}) {
@@ -2020,6 +2225,8 @@ function buildReportNarrative(measurement, comparison, metrics = []) {
     notes.push(changes.length
       ? `Comparado con la medición anterior: ${changes.join(', ')}.`
       : 'Comparativa disponible frente a la medición anterior.');
+  } else if (comparison?.reason === 'comparison_disabled') {
+    notes.push('Informe generado sin comparación temporal por selección del usuario.');
   } else {
     notes.push('Registra otra medición en una fecha distinta para activar la comparativa temporal.');
   }
@@ -2035,49 +2242,56 @@ function buildReportNarrative(measurement, comparison, metrics = []) {
   return notes;
 }
 
+function buildReportForMeasurement(measurement = {}, previousMeasurement = null, fieldDefinitions = FIELD_DEFINITIONS, options = {}) {
+  if (!measurement?.id) return null;
+  const metrics = REPORT_METRIC_DEFINITIONS
+    .map((metricDefinition) => buildReportMetric(measurement, previousMeasurement, metricDefinition))
+    .filter(Boolean);
+  if (!metrics.length) return null;
+
+  const comparison = previousMeasurement
+    ? buildMeasurementComparison(measurement, previousMeasurement, metrics)
+    : { available: false, reason: options.comparisonReason || 'need_previous_measurement', metrics: [] };
+  const calculationTrace = buildCalculationTrace(measurement, fieldDefinitions);
+  return {
+    id: `nutrition-report-${measurement.id}`,
+    measurement_id: measurement.id,
+    report_type: measurement.profile_code === 'express_isak' ? 'express_isak' : 'quick_summary',
+    title: measurement.profile_code === 'express_isak' ? 'Informe de antropometría completa' : 'Informe express nutricional',
+    created_at: measurement.measured_at,
+    formula_version: measurement.formula_version,
+    calculation_profile: CALCULATION_PROFILE,
+    formula_references: formulaReferencesForProfile(measurement.profile_code),
+    profile_code: measurement.profile_code,
+    quality_flags: measurement.quality_flags || [],
+    storage_strategy: 'calculated_report_not_persisted',
+    clinical_storage: buildClinicalStoragePolicy({
+      storageStrategy: 'calculated_report_not_persisted',
+      snapshotPersisted: false,
+      primary: 'calculated_report',
+    }),
+    summary: {
+      bmi: measurement.calculated_values.bmi,
+      waist_hip_ratio: measurement.calculated_values.waist_hip_ratio,
+      skinfold_sum_mm: measurement.calculated_values.skinfold_sum_mm,
+      somatotype: measurement.calculated_values.somatotype,
+      body_composition: measurement.calculated_values.body_composition,
+      body_fractionation: measurement.calculated_values.body_fractionation,
+      metric_count: metrics.length,
+    },
+    sections: buildReportSections(metrics),
+    comparison,
+    calculation_trace: calculationTrace,
+    narrative: buildReportNarrative(measurement, comparison, metrics),
+  };
+}
+
 function buildReports(measurements = [], fieldDefinitions = FIELD_DEFINITIONS) {
   const chronological = [...measurements].reverse().map(measurementToJson);
   return chronological
     .map((measurement, index) => {
       const previousMeasurement = chronological[index - 1] || null;
-      const metrics = REPORT_METRIC_DEFINITIONS
-        .map((metricDefinition) => buildReportMetric(measurement, previousMeasurement, metricDefinition))
-        .filter(Boolean);
-      if (!metrics.length) return null;
-
-      const comparison = buildMeasurementComparison(measurement, previousMeasurement, metrics);
-      const calculationTrace = buildCalculationTrace(measurement, fieldDefinitions);
-      return {
-        id: `nutrition-report-${measurement.id}`,
-        measurement_id: measurement.id,
-        report_type: measurement.profile_code === 'express_isak' ? 'express_isak' : 'quick_summary',
-        title: measurement.profile_code === 'express_isak' ? 'Informe de antropometría completa' : 'Informe express nutricional',
-        created_at: measurement.measured_at,
-        formula_version: measurement.formula_version,
-        calculation_profile: CALCULATION_PROFILE,
-        formula_references: formulaReferencesForProfile(measurement.profile_code),
-        profile_code: measurement.profile_code,
-        quality_flags: measurement.quality_flags || [],
-        storage_strategy: 'calculated_report_not_persisted',
-        clinical_storage: buildClinicalStoragePolicy({
-          storageStrategy: 'calculated_report_not_persisted',
-          snapshotPersisted: false,
-          primary: 'calculated_report',
-        }),
-        summary: {
-          bmi: measurement.calculated_values.bmi,
-          waist_hip_ratio: measurement.calculated_values.waist_hip_ratio,
-          skinfold_sum_mm: measurement.calculated_values.skinfold_sum_mm,
-          somatotype: measurement.calculated_values.somatotype,
-          body_composition: measurement.calculated_values.body_composition,
-          body_fractionation: measurement.calculated_values.body_fractionation,
-          metric_count: metrics.length,
-        },
-        sections: buildReportSections(metrics),
-        comparison,
-        calculation_trace: calculationTrace,
-        narrative: buildReportNarrative(measurement, comparison, metrics),
-      };
+      return buildReportForMeasurement(measurement, previousMeasurement, fieldDefinitions);
     })
     .filter(Boolean)
     .reverse();
@@ -2554,7 +2768,36 @@ async function createNutritionMeasurement(patientIdentifier, payload = {}, actor
   return measurement;
 }
 
-async function buildNutritionMeasurementReportData(patientIdentifier, measurementIdentifier) {
+function hasReportComparisonOverride(options = {}) {
+  return Object.prototype.hasOwnProperty.call(options || {}, 'compareMeasurementId');
+}
+
+function resolveReportComparisonRow(measurements = [], measurementRow = null, defaultReport = null, options = {}) {
+  if (!measurementRow) return null;
+  if (hasReportComparisonOverride(options)) {
+    if (options.compareMeasurementId === null) return null;
+    const requestedId = toIntOrNull(options.compareMeasurementId);
+    if (!requestedId || requestedId === Number(measurementRow.id)) return null;
+    const requestedRow = measurements.find((item) => Number(item.id) === Number(requestedId));
+    if (!requestedRow) {
+      const error = new Error('report_comparison_not_found');
+      error.status = 404;
+      throw error;
+    }
+    return requestedRow;
+  }
+
+  const defaultPreviousId = Number(defaultReport?.comparison?.previous_measurement_id || 0);
+  return defaultPreviousId
+    ? measurements.find((item) => Number(item.id) === defaultPreviousId) || null
+    : null;
+}
+
+function canUseStoredReportSnapshot(options = {}) {
+  return isDefaultReportBranding(options) && !hasReportComparisonOverride(options);
+}
+
+async function buildNutritionMeasurementReportData(patientIdentifier, measurementIdentifier, options = {}) {
   const patient = await findPatient(patientIdentifier);
   if (!patient) {
     const error = new Error('patient_not_found');
@@ -2591,11 +2834,11 @@ async function buildNutritionMeasurementReportData(patientIdentifier, measuremen
     error.status = 404;
     throw error;
   }
-  const previousMeasurement = report.comparison?.previous_measurement_id
-    ? measurements
-      .map(measurementToJson)
-      .find((item) => Number(item.id) === Number(report.comparison.previous_measurement_id))
-    : null;
+  const previousMeasurementRow = resolveReportComparisonRow(measurements, measurementRow, report, options);
+  const previousMeasurement = previousMeasurementRow ? measurementToJson(previousMeasurementRow) : null;
+  const effectiveReport = hasReportComparisonOverride(options)
+    ? buildReportForMeasurement(measurement, previousMeasurement, fieldDefinitions, { comparisonReason: 'comparison_disabled' })
+    : report;
 
   const treatment = measurement.treatment_id && db.Tratamiento
     ? await db.Tratamiento.findByPk(measurement.treatment_id, {
@@ -2627,7 +2870,7 @@ async function buildNutritionMeasurementReportData(patientIdentifier, measuremen
     appointment: appointment?.toJSON ? appointment.toJSON() : appointment,
     measurement,
     previous_measurement: previousMeasurement,
-    report,
+    report: effectiveReport,
     profile_definitions: profileDefinitions,
     field_definitions: fieldDefinitions,
     projection: buildProjectionForMeasurement(measurements, measurement.id),
@@ -2891,6 +3134,14 @@ function buildReportBrandHtml(patient = {}, brandingOptions = {}) {
       <div class="powered-by">Con la tecnología de ClinicaClick</div>
     `;
   }
+  const logo = clinicaclickLogoDataUri();
+  if (logo) {
+    return `
+      <div class="brand brand-default">
+        <img src="${logo}" alt="ClinicaClick">
+      </div>
+    `;
+  }
   return '<div class="brand">ClinicaClick</div>';
 }
 
@@ -2914,6 +3165,7 @@ function buildNutritionReportHtml(reportData, options = {}) {
   const comparison = report.comparison || { available: false };
   const projectionVisualHtml = buildProjectionVisualHtml(projection);
   const compositionVisualHtml = buildCompositionVisualHtml(report);
+  const comparisonOverviewHtml = buildComparisonOverviewHtml(comparison);
   const distributionVisualHtml = buildDistributionVisualHtml(measurement, previousMeasurement);
   const somatotypeVisualHtml = buildSomatotypeVisualHtml(report, patient);
   const healthIndexesHtml = buildHealthIndexesHtml(measurement, previousMeasurement);
@@ -3090,6 +3342,7 @@ function buildNutritionReportHtml(reportData, options = {}) {
     .page { max-width: 920px; margin: 0 auto; padding: 24px; }
     header { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 24px; align-items: start; border-bottom: 1px solid #cbd5e1; padding-bottom: 20px; margin-bottom: 20px; }
     .brand { font-weight: 800; letter-spacing: .02em; color: #4f46e5; font-size: 20px; }
+    .brand-default img { width: 188px; height: auto; display: block; }
     .brand-with-logo { display: inline-flex; align-items: center; gap: 10px; color: #0f172a; letter-spacing: 0; }
     .brand-with-logo img { width: 42px; height: 42px; border-radius: 10px; object-fit: contain; border: 1px solid #e2e8f0; background: #fff; padding: 4px; }
     .brand-initials { display: inline-flex; width: 42px; height: 42px; align-items: center; justify-content: center; border-radius: 10px; background: #eef2ff; color: #4f46e5; font-size: 13px; font-weight: 850; }
@@ -3140,6 +3393,28 @@ function buildNutritionReportHtml(reportData, options = {}) {
     .bars-chart { display: block; width: 100%; height: auto; }
     .bar-label { fill: #334155; font-size: 12px; font-weight: 700; }
     .bar-value { fill: #0f172a; font-size: 12px; font-weight: 800; }
+    .section-heading-row { display: flex; justify-content: space-between; gap: 16px; align-items: flex-start; margin-bottom: 12px; }
+    .comparison-section-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+    .comparison-section-card { border: 1px solid #e2e8f0; border-radius: 10px; padding: 12px; background: #f8fafc; break-inside: avoid; }
+    .comparison-section-card h3 { margin: 0 0 10px; font-size: 13px; color: #0f172a; }
+    .comparison-metric { border-top: 1px solid #e2e8f0; padding-top: 8px; margin-top: 8px; }
+    .comparison-metric:first-of-type { border-top: 0; padding-top: 0; margin-top: 0; }
+    .comparison-metric-head { display: flex; justify-content: space-between; gap: 10px; align-items: baseline; font-size: 11px; }
+    .comparison-metric-head span { border-radius: 999px; padding: 2px 7px; font-weight: 850; white-space: nowrap; }
+    .comparison-bars { display: grid; gap: 4px; margin-top: 6px; }
+    .comparison-bars div { display: grid; grid-template-columns: 44px minmax(0, 1fr) 58px; gap: 6px; align-items: center; font-size: 10px; color: #64748b; }
+    .comparison-bars i { height: 7px; border-radius: 999px; display: block; min-width: 4px; }
+    .comparison-bars i.delta-good { background: #10b981; }
+    .comparison-bars i.delta-bad { background: #ef4444; }
+    .comparison-bars i.delta-stable { background: #64748b; }
+    .comparison-bars i.previous { background: #cbd5e1; }
+    .comparison-bars strong { text-align: right; color: #0f172a; font-weight: 800; }
+    .composition-block-grid { display: grid; gap: 12px; }
+    .composition-visual-block { border: 1px solid #e2e8f0; border-radius: 10px; padding: 12px; background: #fff; }
+    .composition-visual-block h3 { margin: 0; font-size: 13px; color: #0f172a; }
+    .pending-visual { min-height: 132px; display: flex; flex-direction: column; justify-content: center; align-items: center; gap: 6px; border: 1px dashed #cbd5e1; border-radius: 10px; text-align: center; padding: 16px; }
+    .pending-visual strong { color: #92400e; }
+    .pending-visual span { color: #64748b; font-size: 11px; max-width: 520px; }
     .legend-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px 14px; }
     .legend-item { display: grid; grid-template-columns: 10px 1fr auto; gap: 7px; align-items: center; font-size: 12px; }
     .legend-item span { width: 10px; height: 10px; border-radius: 999px; display: inline-block; }
@@ -3149,12 +3424,21 @@ function buildNutritionReportHtml(reportData, options = {}) {
     .distribution-row { margin: 11px 0; }
     .distribution-row-head { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; align-items: baseline; margin-bottom: 5px; }
     .distribution-row-head strong { font-size: 17px; }
+    .distribution-row-head small { grid-column: 1 / -1; color: #64748b; font-size: 10px; font-weight: 750; }
     .distribution-row-head em { grid-column: 1 / -1; width: max-content; border-radius: 999px; padding: 2px 7px; font-style: normal; font-size: 10px; font-weight: 800; }
     .distribution-track { position: relative; height: 11px; border-radius: 999px; background: #e2e8f0; overflow: visible; }
     .distribution-track i { display: block; height: 100%; border-radius: 999px; }
     .distribution-track b { position: absolute; top: -4px; width: 6px; height: 19px; border-radius: 999px; background: #0f172a; transform: translateX(-50%); opacity: .65; }
     .body-map-wrap { text-align: center; }
     .body-map { width: 132px; height: 202px; display: block; margin: 0 auto; }
+    .body-map-figure { position: relative; width: 150px; height: 236px; margin: 0 auto; border-radius: 18px; background: #f8fafc; border: 1px solid #e2e8f0; overflow: hidden; }
+    .body-map-img { width: 100%; height: 100%; object-fit: contain; display: block; padding: 8px; }
+    .body-zone { position: absolute; display: block; width: 13px; height: 13px; border: 2px solid #fff; border-radius: 999px; box-shadow: 0 4px 10px rgba(15,23,42,.18); opacity: .92; }
+    .body-zone-upper { left: 68px; top: 38px; }
+    .body-zone-central { left: 68px; top: 106px; }
+    .body-zone-lower { left: 68px; top: 174px; }
+    .body-zone-arm { left: 28px; top: 116px; }
+    .body-zone-leg { right: 39px; top: 180px; }
     .distribution-legend { display: inline-flex; gap: 10px; margin-top: 6px; color: #64748b; font-size: 10px; font-weight: 800; }
     .distribution-legend span { display: inline-flex; align-items: center; gap: 4px; }
     .distribution-legend i { width: 10px; height: 10px; border-radius: 999px; display: inline-block; }
@@ -3165,9 +3449,10 @@ function buildNutritionReportHtml(reportData, options = {}) {
     .somato-chart { width: 100%; max-height: 330px; }
     .somato-label { fill: #0f172a; font-size: 13px; font-weight: 850; }
     .somato-values { display: grid; gap: 10px; }
-    .somato-values div { border: 1px solid #e2e8f0; border-radius: 8px; padding: 10px; }
-    .somato-values span { display: block; color: #64748b; font-size: 11px; font-weight: 700; }
-    .somato-values strong { display: block; margin-top: 4px; font-size: 24px; }
+    .somato-value-card { display: grid; grid-template-columns: 42px minmax(0, 1fr) auto; gap: 8px; align-items: center; border: 1px solid #e2e8f0; border-radius: 8px; padding: 8px; }
+    .somato-value-card img { width: 42px; height: 42px; object-fit: contain; border-radius: 8px; background: #f8fafc; }
+    .somato-value-card span { display: block; color: #64748b; font-size: 11px; font-weight: 700; }
+    .somato-value-card strong { display: block; font-size: 22px; }
     .somato-image-card { border: 1px solid #e2e8f0; border-radius: 10px; padding: 10px; text-align: center; background: #f8fafc; }
     .somato-image-card img { width: 100%; height: 170px; object-fit: contain; display: block; }
     .somato-image-card strong { display: block; margin-top: 6px; font-size: 12px; color: #0f172a; }
@@ -3227,8 +3512,9 @@ function buildNutritionReportHtml(reportData, options = {}) {
         <div><dt>Cita</dt><dd>${escapeHtml(appointment?.inicio ? formatDate(appointment.inicio) : 'No asociada')}</dd></div>
       </dl>
     </section>
-    ${projectionVisualHtml}
     ${heroMetricsHtml}
+    ${comparisonOverviewHtml}
+    ${projectionVisualHtml}
     ${compositionVisualHtml}
     ${distributionVisualHtml}
     ${somatotypeVisualHtml}
@@ -3281,12 +3567,14 @@ async function htmlToPdfBuffer(html, filenameSeed = 'nutrition-report') {
 }
 
 async function renderNutritionMeasurementReport(patientIdentifier, measurementIdentifier, options = {}) {
-  const reportData = await buildNutritionMeasurementReportData(patientIdentifier, measurementIdentifier);
-  const snapshot = await findCurrentNutritionReportSnapshot(
-    reportData.measurement.id,
-    reportData.report.report_type,
-  );
-  if (isDefaultReportBranding(options) && snapshot?.snapshot_html && isCurrentNutritionReportSnapshot(snapshot)) {
+  const reportData = await buildNutritionMeasurementReportData(patientIdentifier, measurementIdentifier, options);
+  const snapshot = canUseStoredReportSnapshot(options)
+    ? await findCurrentNutritionReportSnapshot(
+      reportData.measurement.id,
+      reportData.report.report_type,
+    )
+    : null;
+  if (snapshot?.snapshot_html && isCurrentNutritionReportSnapshot(snapshot)) {
     return snapshot.snapshot_html;
   }
   return buildNutritionReportHtml(reportData, options);
@@ -3329,12 +3617,14 @@ async function persistFinalNutritionReportPdf(snapshot, reportData, buffer, file
 }
 
 async function generateNutritionMeasurementReportPdf(patientIdentifier, measurementIdentifier, actorUserId = null, options = {}) {
-  const reportData = await buildNutritionMeasurementReportData(patientIdentifier, measurementIdentifier);
-  const snapshot = await findCurrentNutritionReportSnapshot(
-    reportData.measurement.id,
-    reportData.report.report_type,
-  );
-  if (isDefaultReportBranding(options) && snapshot?.pdf_asset_id && isCurrentNutritionReportSnapshot(snapshot)) {
+  const reportData = await buildNutritionMeasurementReportData(patientIdentifier, measurementIdentifier, options);
+  const snapshot = canUseStoredReportSnapshot(options)
+    ? await findCurrentNutritionReportSnapshot(
+      reportData.measurement.id,
+      reportData.report.report_type,
+    )
+    : null;
+  if (snapshot?.pdf_asset_id && isCurrentNutritionReportSnapshot(snapshot)) {
     try {
       const cached = await clinicalPrivateStorage.readClinicalPrivateAsset(snapshot.pdf_asset_id);
       return {
@@ -3353,12 +3643,12 @@ async function generateNutritionMeasurementReportPdf(patientIdentifier, measurem
     }
   }
 
-  const html = isDefaultReportBranding(options) && snapshot?.snapshot_html && isCurrentNutritionReportSnapshot(snapshot)
+  const html = snapshot?.snapshot_html && isCurrentNutritionReportSnapshot(snapshot)
     ? snapshot.snapshot_html
     : buildNutritionReportHtml(reportData, options);
   const filename = `informe-nutricion-${reportData.measurement.id}.pdf`;
   const buffer = await htmlToPdfBuffer(html, `nutrition-${reportData.measurement.id}`);
-  const asset = isDefaultReportBranding(options)
+  const asset = canUseStoredReportSnapshot(options)
     ? await persistFinalNutritionReportPdf(snapshot, reportData, buffer, filename, actorUserId)
     : null;
   return {
@@ -3388,6 +3678,7 @@ module.exports = {
   renderNutritionMeasurementReport,
   generateNutritionMeasurementReportPdf,
   __testing: {
+    buildReportForMeasurement,
     buildReports,
     buildProjection,
     buildProjectionForMeasurement,
