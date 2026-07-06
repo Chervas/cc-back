@@ -48,6 +48,10 @@ function reportOptionsFromRequest(req) {
       options.compareMeasurementId = Number(normalized);
     }
   }
+  const rawFatMassEquation = req.query?.fat_mass_equation ?? req.query?.fat_mass_equation_code;
+  if (rawFatMassEquation !== undefined) {
+    options.fatMassEquationCode = String(rawFatMassEquation).trim().toLowerCase();
+  }
   return options;
 }
 

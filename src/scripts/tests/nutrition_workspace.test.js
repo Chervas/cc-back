@@ -94,6 +94,8 @@ function run() {
   assert.equal(calculated.corrected_arm_girth_cm, 33);
   assert.equal(calculated.corrected_calf_girth_cm, 37.2);
   assert.deepEqual(calculated.body_composition, {
+    equation_code: 'durnin_womersley_siri',
+    equation_label: 'Durnin-Womersley + Siri',
     method: 'Durnin-Womersley 4 skinfold body density + Siri body fat',
     sex: 'male',
     age_years: 32,
@@ -111,7 +113,41 @@ function run() {
       'skinfold_iliac_crest_mm',
     ],
     source: 'Durnin-Womersley 1974 + Siri conversion',
+    source_reference_keys: ['durnin_womersley_body_density', 'siri_body_fat'],
   });
+  assert.deepEqual(
+    [
+      ['faulkner_1966', 13.6, 10.9, ['faulkner_body_fat']],
+      ['jackson_pollock_1975', 14.6, 11.7, ['jackson_pollock_body_fat']],
+      ['katch_mcardle_1973', 12.7, 10.1, ['katch_mcardle_body_density', 'siri_body_fat']],
+      ['sloan_1962', 13.8, 11, ['sloan_body_density', 'siri_body_fat']],
+      ['withers_1987', 14, 11.2, ['withers_body_density', 'siri_body_fat']],
+      ['yuhasz_carter_1982', 10.5, 8.4, ['yuhasz_carter_body_fat']],
+      ['slaughter_1988', 21, 16.8, ['slaughter_body_fat']],
+    ].map(([code, bodyFatPercent, fatMassKg, sourceKeys]) => {
+      const bodyComposition = calculateNutritionValues({
+        ...baseRawValues,
+        weight_kg: 80,
+        waist_cm: 82,
+        thigh_cm: 55,
+      }, 'express_isak', maleAdultContext, { fatMassEquationCode: code }).body_composition;
+      return [
+        bodyComposition.equation_code,
+        bodyComposition.body_fat_percent,
+        bodyComposition.fat_mass_kg,
+        bodyComposition.source_reference_keys,
+      ];
+    }),
+    [
+      ['faulkner_1966', 13.6, 10.9, ['faulkner_body_fat']],
+      ['jackson_pollock_1975', 14.6, 11.7, ['jackson_pollock_body_fat']],
+      ['katch_mcardle_1973', 12.7, 10.1, ['katch_mcardle_body_density', 'siri_body_fat']],
+      ['sloan_1962', 13.8, 11, ['sloan_body_density', 'siri_body_fat']],
+      ['withers_1987', 14, 11.2, ['withers_body_density', 'siri_body_fat']],
+      ['yuhasz_carter_1982', 10.5, 8.4, ['yuhasz_carter_body_fat']],
+      ['slaughter_1988', 21, 16.8, ['slaughter_body_fat']],
+    ],
+  );
   assert.deepEqual(calculated.somatotype, {
     endomorphy: 3.2,
     mesomorphy: 4.8,
@@ -280,6 +316,33 @@ function run() {
     secondReport.comparison.metrics.find((metric) => metric.key === 'waist_cm').delta,
     -4,
   );
+
+  const faulknerFirst = measurementJson(first);
+  faulknerFirst.calculated_values = calculateNutritionValues(
+    faulknerFirst.raw_values,
+    'express_isak',
+    maleAdultContext,
+    { fatMassEquationCode: 'faulkner_1966' },
+  );
+  const faulknerSecond = measurementJson(second);
+  faulknerSecond.calculated_values = calculateNutritionValues(
+    faulknerSecond.raw_values,
+    'express_isak',
+    maleAdultContext,
+    { fatMassEquationCode: 'faulkner_1966' },
+  );
+  const faulknerReport = __testing.buildReportForMeasurement(faulknerSecond, faulknerFirst);
+  assert.equal(faulknerReport.calculation_profile.fat_mass_model.code, 'faulkner_1966');
+  assert.equal(faulknerReport.summary.body_composition.body_fat_percent, 12.8);
+  assert.deepEqual(
+    faulknerReport.calculation_trace.find((item) => item.key === 'body_composition').source_reference_keys,
+    ['faulkner_body_fat'],
+  );
+  assert.deepEqual(
+    faulknerReport.formula_references.filter((reference) => reference.key.includes('durnin') || reference.key.includes('siri')).map((reference) => reference.key),
+    [],
+  );
+  assert.equal(faulknerReport.formula_references.some((reference) => reference.key === 'faulkner_body_fat'), true);
 
   const latestProjection = __testing.buildProjection([second, first]);
   assert.equal(latestProjection.available, true);
@@ -528,7 +591,7 @@ function run() {
     },
   }, html, '2026-02-26T11:00:00.000Z');
   assert.equal(snapshotPayload.snapshot.kind, 'nutrition_measurement_report');
-  assert.equal(snapshotPayload.snapshot.snapshot_version, 10);
+  assert.equal(snapshotPayload.snapshot.snapshot_version, 11);
   assert.equal(snapshotPayload.snapshot.report.calculation_profile.code, CALCULATION_PROFILE.code);
   assert.equal(snapshotPayload.snapshot.measurement.id, 2);
   assert.equal(snapshotPayload.snapshot.report.measurement_id, 2);

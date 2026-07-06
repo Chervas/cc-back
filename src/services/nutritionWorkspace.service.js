@@ -14,7 +14,7 @@ const clinicalPrivateStorage = require('./clinicalPrivateStorage.service');
 const { Op } = db.Sequelize;
 const execFileAsync = promisify(execFile);
 const FORMULA_VERSION = 'nutrition-basic-v3';
-const NUTRITION_REPORT_SNAPSHOT_VERSION = 10;
+const NUTRITION_REPORT_SNAPSHOT_VERSION = 11;
 const NUTRITION_REPORT_CURRENT_STATUSES = ['final', 'active'];
 const NUTRITION_REPORT_BRANDING_MODES = new Set(['clinicaclick', 'clinic']);
 const DEFAULT_CHROMIUM_PATH = '/home/ubuntu/.cache/clinicaclick-browsers/chrome-headless-shell/linux-148.0.7778.56/chrome-headless-shell-linux64/chrome-headless-shell';
@@ -63,6 +63,7 @@ const FORMULA_REFERENCES = [
     source: 'Durnin & Womersley 1974',
     url: 'https://pubmed.ncbi.nlm.nih.gov/4843734/',
     profiles: ['express_isak'],
+    fat_mass_equation: true,
   },
   {
     key: 'siri_body_fat',
@@ -71,6 +72,70 @@ const FORMULA_REFERENCES = [
     source: 'Siri body density conversion',
     url: 'https://www.ncbi.nlm.nih.gov/books/NBK235961/',
     profiles: ['express_isak'],
+    fat_mass_equation: true,
+  },
+  {
+    key: 'faulkner_body_fat',
+    label: 'Porcentaje graso Faulkner',
+    description: 'Estimación directa de porcentaje graso con cuatro pliegues: tríceps, subescapular, suprailiaco/supraespinal y abdominal.',
+    source: 'Faulkner 1966 / Yuhasz modificado',
+    url: 'https://pmc.ncbi.nlm.nih.gov/articles/PMC9467702/',
+    profiles: [],
+    fat_mass_equation: true,
+  },
+  {
+    key: 'jackson_pollock_body_fat',
+    label: 'Jackson-Pollock 4 sitios',
+    description: 'Estimación de porcentaje graso con abdominal, tríceps, muslo anterior, suprailiaco y edad.',
+    source: 'Jackson-Pollock skinfold equations',
+    url: 'https://www.measurement-toolkit.org/anthropometry/objective-methods/simple-measures-skinfolds',
+    profiles: [],
+    fat_mass_equation: true,
+  },
+  {
+    key: 'katch_mcardle_body_density',
+    label: 'Densidad corporal Katch-McArdle',
+    description: 'Estimación de densidad corporal con fórmulas específicas por sexo para población universitaria joven.',
+    source: 'Katch & McArdle 1973',
+    url: 'https://digitalcommons.wayne.edu/humbiol/vol45/iss3/12/',
+    profiles: [],
+    fat_mass_equation: true,
+  },
+  {
+    key: 'sloan_body_density',
+    label: 'Densidad corporal Sloan',
+    description: 'Estimación de densidad corporal con dos pliegues y fórmula específica por sexo.',
+    source: 'Sloan 1962/1967',
+    url: 'https://www.topendsports.com/testing/density-sloan.htm',
+    profiles: [],
+    fat_mass_equation: true,
+  },
+  {
+    key: 'withers_body_density',
+    label: 'Densidad corporal Withers',
+    description: 'Estimación de densidad corporal en población deportiva con sumas de pliegues antropométricos.',
+    source: 'Withers et al. 1987',
+    url: 'https://pubmed.ncbi.nlm.nih.gov/3569225/',
+    profiles: [],
+    fat_mass_equation: true,
+  },
+  {
+    key: 'yuhasz_carter_body_fat',
+    label: 'Porcentaje graso Yuhasz-Carter',
+    description: 'Estimación directa de porcentaje graso con seis pliegues usados en evaluación deportiva.',
+    source: 'Yuhasz modificado por Carter',
+    url: 'https://www.anthrometrix.com/pages/yuhasz-formula-for-body-fat-percentage',
+    profiles: [],
+    fat_mass_equation: true,
+  },
+  {
+    key: 'slaughter_body_fat',
+    label: 'Porcentaje graso Slaughter',
+    description: 'Estimación directa de porcentaje graso con tríceps y subescapular; referencia clásica en población juvenil.',
+    source: 'Slaughter et al. 1988',
+    url: 'https://search.r-project.org/CRAN/refmans/bodycomp/html/Slaughter.2sites.Matur.html',
+    profiles: [],
+    fat_mass_equation: true,
   },
   {
     key: 'kerr_ross_five_component_fractionation',
@@ -101,44 +166,44 @@ const FAT_MASS_EQUATION_OPTIONS = [
   {
     code: 'faulkner_1966',
     label: 'Faulkner (1966)',
-    status: 'planned',
-    source_reference_keys: [],
+    status: 'available',
+    source_reference_keys: ['faulkner_body_fat'],
   },
   {
     code: 'jackson_pollock_1975',
     label: 'Jackson y Pollock (1975)',
-    status: 'planned',
-    source_reference_keys: [],
+    status: 'available',
+    source_reference_keys: ['jackson_pollock_body_fat'],
   },
   {
     code: 'katch_mcardle_1973',
     label: 'Katch-McArdle (1973)',
-    status: 'planned',
-    source_reference_keys: [],
+    status: 'available',
+    source_reference_keys: ['katch_mcardle_body_density', 'siri_body_fat'],
   },
   {
     code: 'sloan_1962',
     label: 'Sloan (1962)',
-    status: 'planned',
-    source_reference_keys: [],
+    status: 'available',
+    source_reference_keys: ['sloan_body_density', 'siri_body_fat'],
   },
   {
     code: 'withers_1987',
     label: 'Withers (1987)',
-    status: 'planned',
-    source_reference_keys: [],
+    status: 'available',
+    source_reference_keys: ['withers_body_density', 'siri_body_fat'],
   },
   {
     code: 'yuhasz_carter_1982',
     label: 'Yuhasz modificado por Carter (1982)',
-    status: 'planned',
-    source_reference_keys: [],
+    status: 'available',
+    source_reference_keys: ['yuhasz_carter_body_fat'],
   },
   {
     code: 'slaughter_1988',
     label: 'Slaughter (1988)',
-    status: 'planned',
-    source_reference_keys: [],
+    status: 'available',
+    source_reference_keys: ['slaughter_body_fat'],
   },
 ];
 const CALCULATION_PROFILE = {
@@ -174,6 +239,39 @@ const CALCULATION_PROFILE = {
     },
   ],
 };
+const DEFAULT_FAT_MASS_EQUATION_CODE = 'durnin_womersley_siri';
+const FAT_MASS_EQUATION_OPTIONS_BY_CODE = new Map(FAT_MASS_EQUATION_OPTIONS.map((item) => [item.code, item]));
+
+function fatMassEquationOption(code = DEFAULT_FAT_MASS_EQUATION_CODE) {
+  return FAT_MASS_EQUATION_OPTIONS_BY_CODE.get(code) || FAT_MASS_EQUATION_OPTIONS_BY_CODE.get(DEFAULT_FAT_MASS_EQUATION_CODE);
+}
+
+function normalizeFatMassEquationCode(value) {
+  const normalized = String(value || '').trim().toLowerCase();
+  return FAT_MASS_EQUATION_OPTIONS_BY_CODE.has(normalized) ? normalized : DEFAULT_FAT_MASS_EQUATION_CODE;
+}
+
+function calculationProfileForFatMassEquation(code = DEFAULT_FAT_MASS_EQUATION_CODE) {
+  const equation = fatMassEquationOption(normalizeFatMassEquationCode(code));
+  const fatMassModel = {
+    code: equation.code,
+    label: equation.label,
+    role: 'Masa grasa estimada',
+    source_reference_keys: equation.source_reference_keys || [],
+  };
+  return {
+    ...CALCULATION_PROFILE,
+    fat_mass_model: fatMassModel,
+    fat_mass_equations: FAT_MASS_EQUATION_OPTIONS.map((item) => ({
+      ...item,
+      status: item.code === equation.code ? 'active' : 'available',
+    })),
+  };
+}
+
+function selectedFatMassEquationCodeFromOptions(options = {}) {
+  return normalizeFatMassEquationCode(options.fatMassEquationCode || options.fat_mass_equation);
+}
 
 const PROFILE_DEFINITIONS = medicalAreaContracts.NUTRITION_MEASUREMENT_PROFILE_SCHEMAS;
 const FIELD_DEFINITIONS = medicalAreaContracts.NUTRITION_MEASUREMENT_FIELD_DEFINITIONS;
@@ -649,7 +747,7 @@ function componentExplainGridHtml(explainItems = [], barItems = []) {
         const width = barItem ? Math.max(4, (barItem.value / max) * 100) : 0;
         return `
           <div class="component-explain-card ${item.image ? 'component-explain-card-with-image' : ''}">
-            ${item.image ? reportAssetImageHtml(item.image, item.label, 'component-explain-img') : `<span style="background:${escapeHtml(item.color)}"></span>`}
+            ${item.image ? '' : `<span class="component-explain-dot" style="background:${escapeHtml(item.color)}"></span>`}
             <div class="component-explain-body">
               <strong>${escapeHtml(item.label)}</strong>
               <small>${escapeHtml(item.detail)}</small>
@@ -660,6 +758,11 @@ function componentExplainGridHtml(explainItems = [], barItems = []) {
                 </div>
               ` : ''}
             </div>
+            ${item.image ? `
+              <figure class="component-explain-figure">
+                ${reportAssetImageHtml(item.image, item.label, 'component-explain-img')}
+              </figure>
+            ` : ''}
           </div>
         `;
       }).join('')}
@@ -1341,7 +1444,7 @@ function buildHealthIndexesHtml(measurement = {}, previousMeasurement = null) {
 
 function buildCalculationProfileHtml(profile = CALCULATION_PROFILE) {
   const activeEquation = profile.fat_mass_model || FAT_MASS_EQUATION_OPTIONS.find((item) => item.status === 'active') || null;
-  const plannedEquations = (profile.fat_mass_equations || FAT_MASS_EQUATION_OPTIONS)
+  const availableEquations = (profile.fat_mass_equations || FAT_MASS_EQUATION_OPTIONS)
     .filter((item) => item.code !== activeEquation?.code);
   return `
     <section class="card muted-card">
@@ -1359,8 +1462,8 @@ function buildCalculationProfileHtml(profile = CALCULATION_PROFILE) {
           </div>
         `).join('')}
       </div>
-      ${plannedEquations.length ? `
-        <p class="muted small-note">Próximas ecuaciones seleccionables por informe: ${escapeHtml(plannedEquations.map((item) => item.label).join(', '))}. Hoy el motor recalcula masa grasa con la ecuación activa y mantiene Kerr-Ross, Heath-Carter y proyección como bloques automáticos.</p>
+      ${availableEquations.length ? `
+        <p class="muted small-note">La ecuación de masa grasa se puede cambiar al generar HTML/PDF del informe: ${escapeHtml(availableEquations.map((item) => item.label).join(', '))}. Kerr-Ross, Heath-Carter y proyección siguen como bloques automáticos.</p>
       ` : ''}
     </section>
   `;
@@ -1433,7 +1536,7 @@ function publicFormulaReferencesForKeys(keys = []) {
   return Array.from(new Set(keys.filter(Boolean)))
     .map((key) => FORMULA_REFERENCES_BY_KEY.get(key))
     .filter(Boolean)
-    .map(({ profiles, ...reference }) => reference);
+    .map(({ profiles, fat_mass_equation: _fatMassEquation, ...reference }) => reference);
 }
 
 function buildCalculationTraceItem({
@@ -1568,7 +1671,10 @@ function buildCalculationTrace(measurement = {}, fieldDefinitions = FIELD_DEFINI
       outputKeys: ['endomorphy', 'mesomorphy', 'ectomorphy'],
     }));
 
-    const bodyCompositionFields = [
+    const bodyCompositionMeta = calculatedValues.body_composition ||
+      calculatedValues.body_composition_meta ||
+      bodyCompositionEquationMeta(DEFAULT_FAT_MASS_EQUATION_CODE);
+    const bodyCompositionFields = bodyCompositionMeta.input_fields || [
       'weight_kg',
       'skinfold_biceps_mm',
       'skinfold_triceps_mm',
@@ -1577,14 +1683,16 @@ function buildCalculationTrace(measurement = {}, fieldDefinitions = FIELD_DEFINI
     ];
     const missingBodyCompositionInputs = missingCalculationInputLabels(rawValues, bodyCompositionFields, fieldDefinitions);
     if (!missingBodyCompositionInputs.length && !calculatedValues.body_composition) {
-      missingBodyCompositionInputs.push('Sexo del paciente', 'Edad del paciente');
+      if (bodyCompositionMeta.requires_sex !== false) missingBodyCompositionInputs.push('Sexo del paciente');
+      if (bodyCompositionMeta.requires_age) missingBodyCompositionInputs.push('Edad del paciente');
+      if (!missingBodyCompositionInputs.length) missingBodyCompositionInputs.push('Datos insuficientes para esta ecuación');
     }
     trace.push(buildCalculationTraceItem({
       key: 'body_composition',
       label: 'Composición corporal',
-      method: 'Durnin-Womersley 4 pliegues + Siri',
-      source: 'Durnin-Womersley 1974 + Siri conversion',
-      sourceKeys: ['durnin_womersley_body_density', 'siri_body_fat'],
+      method: bodyCompositionMeta.method || bodyCompositionMeta.equation_label || 'Ecuación de masa grasa',
+      source: bodyCompositionMeta.source || bodyCompositionMeta.equation_label || 'Ecuación de masa grasa',
+      sourceKeys: bodyCompositionMeta.source_reference_keys || [],
       applied: Boolean(calculatedValues.body_composition),
       inputFields: [...bodyCompositionFields, 'patient_sex', 'patient_age'],
       missingInputs: missingBodyCompositionInputs,
@@ -1642,9 +1750,16 @@ function buildCalculationTrace(measurement = {}, fieldDefinitions = FIELD_DEFINI
   return trace;
 }
 
-function formulaReferencesForProfile(profileCode = 'quick') {
+function formulaReferencesForProfile(profileCode = 'quick', calculationProfile = CALCULATION_PROFILE) {
+  const selectedSourceKeys = new Set([
+    ...((calculationProfile?.fat_mass_model?.source_reference_keys) || []),
+    ...((calculationProfile?.automatic_models || []).flatMap((item) => item.source_reference_keys || [])),
+  ]);
   return FORMULA_REFERENCES
-    .filter((reference) => (reference.profiles || []).includes(profileCode))
+    .filter((reference) => {
+      if (reference.fat_mass_equation) return selectedSourceKeys.has(reference.key);
+      return (reference.profiles || []).includes(profileCode) || selectedSourceKeys.has(reference.key);
+    })
     .map(({ profiles, ...reference }) => reference);
 }
 
@@ -1767,49 +1882,232 @@ function coefficientForDurninWomersley(sex, ageYears) {
   return (DURNIN_WOMERSLEY_COEFFICIENTS[sex] || []).find((item) => ageYears <= item.maxAge) || null;
 }
 
-function calculateBodyComposition(rawValues = {}, context = {}) {
+function bodyCompositionEquationMeta(equationCode = DEFAULT_FAT_MASS_EQUATION_CODE, sex = null) {
+  const code = normalizeFatMassEquationCode(equationCode);
+  const equation = fatMassEquationOption(code);
+  const base = {
+    equation_code: equation.code,
+    equation_label: equation.label,
+    source_reference_keys: equation.source_reference_keys || [],
+    requires_sex: true,
+    requires_age: false,
+  };
+  if (code === 'durnin_womersley_siri') {
+    return {
+      ...base,
+      method: 'Durnin-Womersley 4 skinfold body density + Siri body fat',
+      source: 'Durnin-Womersley 1974 + Siri conversion',
+      requires_age: true,
+      input_fields: ['weight_kg', 'skinfold_biceps_mm', 'skinfold_triceps_mm', 'skinfold_subscapular_mm', 'skinfold_iliac_crest_mm'],
+    };
+  }
+  if (code === 'faulkner_1966') {
+    return {
+      ...base,
+      method: 'Faulkner 4 skinfold body fat',
+      source: 'Faulkner 1966',
+      input_fields: ['weight_kg', 'skinfold_triceps_mm', 'skinfold_subscapular_mm', 'skinfold_supraspinale_mm', 'skinfold_abdominal_mm'],
+    };
+  }
+  if (code === 'jackson_pollock_1975') {
+    return {
+      ...base,
+      method: 'Jackson-Pollock 4-site body fat',
+      source: 'Jackson-Pollock 4-site equation',
+      requires_age: true,
+      input_fields: ['weight_kg', 'skinfold_abdominal_mm', 'skinfold_triceps_mm', 'skinfold_front_thigh_mm', 'skinfold_iliac_crest_mm'],
+    };
+  }
+  if (code === 'katch_mcardle_1973') {
+    return {
+      ...base,
+      method: 'Katch-McArdle body density + Siri body fat',
+      source: 'Katch-McArdle 1973 + Siri conversion',
+      input_fields: sex === 'female'
+        ? ['weight_kg', 'skinfold_subscapular_mm', 'skinfold_iliac_crest_mm', 'breadth_humerus_cm', 'thigh_cm']
+        : ['weight_kg', 'skinfold_triceps_mm', 'skinfold_subscapular_mm', 'skinfold_abdominal_mm'],
+    };
+  }
+  if (code === 'sloan_1962') {
+    return {
+      ...base,
+      method: 'Sloan body density + Siri body fat',
+      source: 'Sloan 1962/1967 + Siri conversion',
+      input_fields: sex === 'female'
+        ? ['weight_kg', 'skinfold_iliac_crest_mm', 'skinfold_triceps_mm']
+        : ['weight_kg', 'skinfold_front_thigh_mm', 'skinfold_subscapular_mm'],
+    };
+  }
+  if (code === 'withers_1987') {
+    return {
+      ...base,
+      method: 'Withers body density + Siri body fat',
+      source: 'Withers 1987 + Siri conversion',
+      input_fields: sex === 'female'
+        ? ['weight_kg', 'skinfold_triceps_mm', 'skinfold_subscapular_mm', 'skinfold_supraspinale_mm', 'skinfold_medial_calf_mm']
+        : ['weight_kg', 'skinfold_triceps_mm', 'skinfold_subscapular_mm', 'skinfold_biceps_mm', 'skinfold_supraspinale_mm', 'skinfold_abdominal_mm', 'skinfold_front_thigh_mm', 'skinfold_medial_calf_mm'],
+    };
+  }
+  if (code === 'yuhasz_carter_1982') {
+    return {
+      ...base,
+      method: 'Yuhasz-Carter 6 skinfold body fat',
+      source: 'Yuhasz modified by Carter 1982',
+      input_fields: ['weight_kg', 'skinfold_triceps_mm', 'skinfold_subscapular_mm', 'skinfold_supraspinale_mm', 'skinfold_abdominal_mm', 'skinfold_front_thigh_mm', 'skinfold_medial_calf_mm'],
+    };
+  }
+  if (code === 'slaughter_1988') {
+    return {
+      ...base,
+      method: 'Slaughter 2 skinfold body fat',
+      source: 'Slaughter et al. 1988',
+      input_fields: ['weight_kg', 'skinfold_triceps_mm', 'skinfold_subscapular_mm'],
+    };
+  }
+  return bodyCompositionEquationMeta(DEFAULT_FAT_MASS_EQUATION_CODE, sex);
+}
+
+function siriBodyFatPercent(bodyDensity) {
+  if (!Number.isFinite(bodyDensity) || bodyDensity <= 0) return null;
+  const bodyFatPercent = (495 / bodyDensity) - 450;
+  return Number.isFinite(bodyFatPercent) ? bodyFatPercent : null;
+}
+
+function requiredPositiveValues(rawValues = {}, fields = []) {
+  const result = {};
+  for (const field of fields) {
+    const value = rawValues[field];
+    if (!Number.isFinite(value) || value <= 0) return null;
+    result[field] = value;
+  }
+  return result;
+}
+
+function bodyCompositionResult(rawValues = {}, context = {}, equationMeta = {}, values = {}) {
   const sex = normalizeSexForBodyComposition(context.sex);
   const ageYears = normalizeAgeYears(context.age_years);
   const weight = rawValues.weight_kg;
-  const biceps = rawValues.skinfold_biceps_mm;
-  const triceps = rawValues.skinfold_triceps_mm;
-  const subscapular = rawValues.skinfold_subscapular_mm;
-  const iliacCrest = rawValues.skinfold_iliac_crest_mm;
-
-  if (![weight, biceps, triceps, subscapular, iliacCrest].every((value) => Number.isFinite(value) && value > 0)) {
+  const bodyFatPercent = finiteNumber(values.body_fat_percent);
+  if (!Number.isFinite(weight) || weight <= 0 || bodyFatPercent === null || bodyFatPercent <= 0 || bodyFatPercent >= 80) {
     return null;
   }
-
-  const coefficient = coefficientForDurninWomersley(sex, ageYears);
-  if (!coefficient) return null;
-
-  const skinfoldSum4 = biceps + triceps + subscapular + iliacCrest;
-  const bodyDensity = coefficient.c - (coefficient.m * Math.log10(skinfoldSum4));
-  if (!Number.isFinite(bodyDensity) || bodyDensity <= 0) return null;
-
-  const bodyFatPercent = (495 / bodyDensity) - 450;
-  if (!Number.isFinite(bodyFatPercent)) return null;
-
   const fatMassKg = weight * (bodyFatPercent / 100);
+  const bodyDensity = values.body_density !== undefined && values.body_density !== null ? round(values.body_density, 4) : undefined;
   return {
-    method: 'Durnin-Womersley 4 skinfold body density + Siri body fat',
+    equation_code: equationMeta.equation_code,
+    equation_label: equationMeta.equation_label,
+    method: equationMeta.method,
     sex,
     age_years: ageYears,
-    age_band: coefficient.label,
-    skinfold_sum_4_mm: round(skinfoldSum4, 1),
-    body_density: round(bodyDensity, 4),
+    ...(bodyDensity !== undefined ? { body_density: bodyDensity } : {}),
     body_fat_percent: round(bodyFatPercent, 1),
     fat_mass_kg: round(fatMassKg, 1),
     fat_free_mass_kg: round(weight - fatMassKg, 1),
-    input_fields: [
-      'weight_kg',
-      'skinfold_biceps_mm',
-      'skinfold_triceps_mm',
-      'skinfold_subscapular_mm',
-      'skinfold_iliac_crest_mm',
-    ],
-    source: 'Durnin-Womersley 1974 + Siri conversion',
+    input_fields: equationMeta.input_fields || [],
+    source: equationMeta.source,
+    source_reference_keys: equationMeta.source_reference_keys || [],
+    ...(values.extra || {}),
   };
+}
+
+function calculateBodyComposition(rawValues = {}, context = {}, options = {}) {
+  const equationCode = selectedFatMassEquationCodeFromOptions(options);
+  const sex = normalizeSexForBodyComposition(context.sex);
+  const ageYears = normalizeAgeYears(context.age_years);
+  const equationMeta = bodyCompositionEquationMeta(equationCode, sex);
+  if (!sex || (equationMeta.requires_age && !Number.isFinite(ageYears))) return null;
+  if (!requiredPositiveValues(rawValues, equationMeta.input_fields || [])) return null;
+
+  if (equationCode === 'durnin_womersley_siri') {
+    const skinfoldSum4 = rawValues.skinfold_biceps_mm + rawValues.skinfold_triceps_mm + rawValues.skinfold_subscapular_mm + rawValues.skinfold_iliac_crest_mm;
+    const coefficient = coefficientForDurninWomersley(sex, ageYears);
+    if (!coefficient) return null;
+    const bodyDensity = coefficient.c - (coefficient.m * Math.log10(skinfoldSum4));
+    return bodyCompositionResult(rawValues, context, equationMeta, {
+      body_density: bodyDensity,
+      body_fat_percent: siriBodyFatPercent(bodyDensity),
+      extra: {
+        age_band: coefficient.label,
+        skinfold_sum_4_mm: round(skinfoldSum4, 1),
+      },
+    });
+  }
+
+  if (equationCode === 'faulkner_1966') {
+    const skinfoldSum4 = rawValues.skinfold_triceps_mm + rawValues.skinfold_subscapular_mm + rawValues.skinfold_supraspinale_mm + rawValues.skinfold_abdominal_mm;
+    return bodyCompositionResult(rawValues, context, equationMeta, {
+      body_fat_percent: 5.783 + (0.153 * skinfoldSum4),
+      extra: { skinfold_sum_4_mm: round(skinfoldSum4, 1) },
+    });
+  }
+
+  if (equationCode === 'jackson_pollock_1975') {
+    const skinfoldSum4 = rawValues.skinfold_abdominal_mm + rawValues.skinfold_triceps_mm + rawValues.skinfold_front_thigh_mm + rawValues.skinfold_iliac_crest_mm;
+    const bodyFatPercent = sex === 'female'
+      ? (0.29669 * skinfoldSum4) - (0.00043 * (skinfoldSum4 ** 2)) + (0.02963 * ageYears) + 1.4072
+      : (0.29288 * skinfoldSum4) - (0.0005 * (skinfoldSum4 ** 2)) + (0.15845 * ageYears) - 5.76377;
+    return bodyCompositionResult(rawValues, context, equationMeta, {
+      body_fat_percent: bodyFatPercent,
+      extra: { skinfold_sum_4_mm: round(skinfoldSum4, 1) },
+    });
+  }
+
+  if (equationCode === 'katch_mcardle_1973') {
+    const bodyDensity = sex === 'female'
+      ? 1.09246 - (0.00049 * rawValues.skinfold_subscapular_mm) - (0.00075 * rawValues.skinfold_iliac_crest_mm) + (0.00710 * rawValues.breadth_humerus_cm) - (0.00121 * rawValues.thigh_cm)
+      : 1.09665 - (0.00103 * rawValues.skinfold_triceps_mm) - (0.00056 * rawValues.skinfold_subscapular_mm) - (0.00054 * rawValues.skinfold_abdominal_mm);
+    return bodyCompositionResult(rawValues, context, equationMeta, {
+      body_density: bodyDensity,
+      body_fat_percent: siriBodyFatPercent(bodyDensity),
+    });
+  }
+
+  if (equationCode === 'sloan_1962') {
+    const bodyDensity = sex === 'female'
+      ? 1.0764 - (0.00081 * rawValues.skinfold_iliac_crest_mm) - (0.00088 * rawValues.skinfold_triceps_mm)
+      : 1.1043 - (0.001327 * rawValues.skinfold_front_thigh_mm) - (0.00131 * rawValues.skinfold_subscapular_mm);
+    return bodyCompositionResult(rawValues, context, equationMeta, {
+      body_density: bodyDensity,
+      body_fat_percent: siriBodyFatPercent(bodyDensity),
+    });
+  }
+
+  if (equationCode === 'withers_1987') {
+    const bodyDensity = sex === 'female'
+      ? 1.17484 - (0.07229 * Math.log10(rawValues.skinfold_triceps_mm + rawValues.skinfold_subscapular_mm + rawValues.skinfold_supraspinale_mm + rawValues.skinfold_medial_calf_mm))
+      : 1.0988 - (0.0004 * (rawValues.skinfold_triceps_mm + rawValues.skinfold_subscapular_mm + rawValues.skinfold_biceps_mm + rawValues.skinfold_supraspinale_mm + rawValues.skinfold_abdominal_mm + rawValues.skinfold_front_thigh_mm + rawValues.skinfold_medial_calf_mm));
+    return bodyCompositionResult(rawValues, context, equationMeta, {
+      body_density: bodyDensity,
+      body_fat_percent: siriBodyFatPercent(bodyDensity),
+    });
+  }
+
+  if (equationCode === 'yuhasz_carter_1982') {
+    const skinfoldSum6 = rawValues.skinfold_triceps_mm + rawValues.skinfold_subscapular_mm + rawValues.skinfold_supraspinale_mm + rawValues.skinfold_abdominal_mm + rawValues.skinfold_front_thigh_mm + rawValues.skinfold_medial_calf_mm;
+    const bodyFatPercent = sex === 'female'
+      ? (0.1548 * skinfoldSum6) + 3.58
+      : (0.1051 * skinfoldSum6) + 2.585;
+    return bodyCompositionResult(rawValues, context, equationMeta, {
+      body_fat_percent: bodyFatPercent,
+      extra: { skinfold_sum_6_mm: round(skinfoldSum6, 1) },
+    });
+  }
+
+  if (equationCode === 'slaughter_1988') {
+    const skinfoldSum2 = rawValues.skinfold_triceps_mm + rawValues.skinfold_subscapular_mm;
+    const bodyFatPercent = skinfoldSum2 > 35
+      ? (sex === 'female' ? (0.546 * skinfoldSum2) + 9.7 : (0.783 * skinfoldSum2) + 1.6)
+      : (sex === 'female' ? (1.33 * skinfoldSum2) - (0.013 * (skinfoldSum2 ** 2)) - 2.5 : (1.21 * skinfoldSum2) - (0.008 * (skinfoldSum2 ** 2)) - 1.7);
+    return bodyCompositionResult(rawValues, context, equationMeta, {
+      body_fat_percent: bodyFatPercent,
+      extra: {
+        skinfold_sum_2_mm: round(skinfoldSum2, 1),
+        applicability_note: 'Ecuación validada originalmente en población juvenil; interpretar en adultos como estimación orientativa.',
+      },
+    });
+  }
+
+  return null;
 }
 
 function positiveNumber(value) {
@@ -1988,7 +2286,7 @@ function calculateKerrRossFiveComponent(rawValues = {}, context = {}) {
   };
 }
 
-function calculateNutritionValues(rawValues = {}, profileCode = 'quick', context = {}) {
+function calculateNutritionValues(rawValues = {}, profileCode = 'quick', context = {}, options = {}) {
   const weight = rawValues.weight_kg;
   const height = rawValues.stature_cm;
   const waist = rawValues.waist_cm;
@@ -2020,7 +2318,10 @@ function calculateNutritionValues(rawValues = {}, profileCode = 'quick', context
       ? round(calf - (medialCalf / 10), 1)
       : null,
     somatotype: profileCode === 'express_isak' ? calculateSomatotype(rawValues) : null,
-    body_composition: profileCode === 'express_isak' ? calculateBodyComposition(rawValues, context) : null,
+    body_composition: profileCode === 'express_isak' ? calculateBodyComposition(rawValues, context, options) : null,
+    body_composition_meta: profileCode === 'express_isak'
+      ? bodyCompositionEquationMeta(selectedFatMassEquationCodeFromOptions(options), normalizeSexForBodyComposition(context.sex))
+      : null,
     body_fractionation: profileCode === 'express_isak' ? calculateKerrRossFiveComponent(rawValues, context) : null,
   };
 }
@@ -2038,10 +2339,10 @@ function measurementToJson(row, clinicalPhotos = []) {
     treatment_id: plain.treatment_id,
     profile_code: plain.profile_code,
     measured_at: plain.measured_at,
-    raw_values: plain.raw_values_json || {},
-    calculated_values: plain.calculated_values_json || {},
+    raw_values: plain.raw_values_json || plain.raw_values || {},
+    calculated_values: plain.calculated_values_json || plain.calculated_values || {},
     formula_version: plain.formula_version || FORMULA_VERSION,
-    quality_flags: plain.quality_flags_json || [],
+    quality_flags: plain.quality_flags_json || plain.quality_flags || [],
     notes: plain.notes || '',
     clinical_photos: photos,
     clinical_photo_count: photos.length,
@@ -2346,9 +2647,11 @@ function buildReportNarrative(measurement, comparison, metrics = []) {
       ? 'Perfil completo con los 8 pliegues antropométricos registrados.'
       : `Perfil completo parcial con ${skinfoldCount} de 8 pliegues registrados.`);
     if (measurement.calculated_values?.body_composition) {
-      notes.push('Composición corporal estimada con Durnin-Womersley y Siri a partir de 4 pliegues; debe interpretarse como estimación antropométrica.');
+      const equationLabel = measurement.calculated_values.body_composition.equation_label || 'la ecuación seleccionada';
+      notes.push(`Composición corporal estimada con ${equationLabel}; debe interpretarse como estimación antropométrica.`);
     } else {
-      notes.push('La composición corporal estimada requiere sexo, edad, peso y los pliegues bíceps, tríceps, subescapular e ilíaco/suprailiaco.');
+      const equationLabel = measurement.calculated_values?.body_composition_meta?.equation_label || 'la ecuación seleccionada';
+      notes.push(`La composición corporal estimada con ${equationLabel} requiere completar sus datos de entrada y el contexto del paciente.`);
     }
     if (measurement.calculated_values?.body_fractionation) {
       notes.push('Fraccionamiento Kerr-Ross disponible: piel, adiposo, músculo, hueso y residual con táctica Phantom.');
@@ -2387,6 +2690,8 @@ function buildReportNarrative(measurement, comparison, metrics = []) {
 
 function buildReportForMeasurement(measurement = {}, previousMeasurement = null, fieldDefinitions = FIELD_DEFINITIONS, options = {}) {
   if (!measurement?.id) return null;
+  const calculationProfile = options.calculationProfile ||
+    calculationProfileForFatMassEquation(measurement.calculated_values?.body_composition_meta?.equation_code);
   const metrics = REPORT_METRIC_DEFINITIONS
     .map((metricDefinition) => buildReportMetric(measurement, previousMeasurement, metricDefinition))
     .filter(Boolean);
@@ -2403,8 +2708,8 @@ function buildReportForMeasurement(measurement = {}, previousMeasurement = null,
     title: measurement.profile_code === 'express_isak' ? 'Informe de antropometría completa' : 'Informe express nutricional',
     created_at: measurement.measured_at,
     formula_version: measurement.formula_version,
-    calculation_profile: CALCULATION_PROFILE,
-    formula_references: formulaReferencesForProfile(measurement.profile_code),
+    calculation_profile: calculationProfile,
+    formula_references: formulaReferencesForProfile(measurement.profile_code, calculationProfile),
     profile_code: measurement.profile_code,
     quality_flags: measurement.quality_flags || [],
     storage_strategy: 'calculated_report_not_persisted',
@@ -2915,6 +3220,30 @@ function hasReportComparisonOverride(options = {}) {
   return Object.prototype.hasOwnProperty.call(options || {}, 'compareMeasurementId');
 }
 
+function hasReportFatMassEquationOverride(options = {}) {
+  return selectedFatMassEquationCodeFromOptions(options) !== DEFAULT_FAT_MASS_EQUATION_CODE;
+}
+
+function measurementForReportCalculation(measurement = {}, patient = null, options = {}) {
+  const json = measurementToJson(measurement);
+  if (!json) return null;
+  const equationCode = selectedFatMassEquationCodeFromOptions(options);
+  const context = buildPatientFormulaContext(patient, json.measured_at);
+  const calculatedValues = {
+    ...(json.calculated_values || {}),
+    body_composition: json.profile_code === 'express_isak'
+      ? calculateBodyComposition(json.raw_values || {}, context, { fatMassEquationCode: equationCode })
+      : null,
+    body_composition_meta: json.profile_code === 'express_isak'
+      ? bodyCompositionEquationMeta(equationCode, normalizeSexForBodyComposition(context.sex))
+      : null,
+  };
+  return {
+    ...json,
+    calculated_values: calculatedValues,
+  };
+}
+
 function resolveReportComparisonRow(measurements = [], measurementRow = null, defaultReport = null, options = {}) {
   if (!measurementRow) return null;
   if (hasReportComparisonOverride(options)) {
@@ -2937,7 +3266,7 @@ function resolveReportComparisonRow(measurements = [], measurementRow = null, de
 }
 
 function canUseStoredReportSnapshot(options = {}) {
-  return isDefaultReportBranding(options) && !hasReportComparisonOverride(options);
+  return isDefaultReportBranding(options) && !hasReportComparisonOverride(options) && !hasReportFatMassEquationOverride(options);
 }
 
 async function buildNutritionMeasurementReportData(patientIdentifier, measurementIdentifier, options = {}) {
@@ -2967,20 +3296,27 @@ async function buildNutritionMeasurementReportData(patientIdentifier, measuremen
     throw error;
   }
 
-  const measurement = measurementToJson(measurementRow);
   const nutritionContract = await getNutritionContractSafe();
   const profileDefinitions = profileDefinitionsFromContract(nutritionContract);
   const fieldDefinitions = fieldDefinitionsFromContract(nutritionContract);
-  const report = buildReports(measurements, fieldDefinitions).find((item) => Number(item.measurement_id) === Number(measurement.id));
+  const equationCode = selectedFatMassEquationCodeFromOptions(options);
+  const calculationProfile = calculationProfileForFatMassEquation(equationCode);
+  const reportMeasurements = measurements
+    .map((item) => measurementForReportCalculation(item, patient, { fatMassEquationCode: equationCode }))
+    .filter(Boolean);
+  const measurement = reportMeasurements.find((item) => Number(item.id) === Number(measurementRow.id));
+  const report = buildReports(reportMeasurements, fieldDefinitions).find((item) => Number(item.measurement_id) === Number(measurement.id));
   if (!report) {
     const error = new Error('report_not_available');
     error.status = 404;
     throw error;
   }
   const previousMeasurementRow = resolveReportComparisonRow(measurements, measurementRow, report, options);
-  const previousMeasurement = previousMeasurementRow ? measurementToJson(previousMeasurementRow) : null;
+  const previousMeasurement = previousMeasurementRow
+    ? reportMeasurements.find((item) => Number(item.id) === Number(previousMeasurementRow.id)) || measurementForReportCalculation(previousMeasurementRow, patient, { fatMassEquationCode: equationCode })
+    : null;
   const effectiveReport = hasReportComparisonOverride(options)
-    ? buildReportForMeasurement(measurement, previousMeasurement, fieldDefinitions, { comparisonReason: 'comparison_disabled' })
+    ? buildReportForMeasurement(measurement, previousMeasurement, fieldDefinitions, { comparisonReason: 'comparison_disabled', calculationProfile })
     : report;
 
   const treatment = measurement.treatment_id && db.Tratamiento
@@ -3016,11 +3352,12 @@ async function buildNutritionMeasurementReportData(patientIdentifier, measuremen
     report: effectiveReport,
     profile_definitions: profileDefinitions,
     field_definitions: fieldDefinitions,
-    projection: buildProjectionForMeasurement(measurements, measurement.id),
+    projection: buildProjectionForMeasurement(reportMeasurements, measurement.id),
     meta: {
       formula_version: FORMULA_VERSION,
-      calculation_profile: CALCULATION_PROFILE,
-      formula_references: formulaReferencesForProfile(measurement.profile_code),
+      calculation_profile: calculationProfile,
+      formula_references: formulaReferencesForProfile(measurement.profile_code, calculationProfile),
+      fat_mass_equation_code: equationCode,
       measurement_contract_source: 'medical-area-contracts-v1',
       generated_at: new Date().toISOString(),
       pdf_strategy: 'json_snapshot_printable_on_demand',
@@ -3500,10 +3837,10 @@ function buildNutritionReportHtml(reportData, options = {}) {
     .summary dd { margin: 2px 0 0; font-weight: 700; }
     .section-kicker { color: #4f46e5; font-size: 10px; font-weight: 850; text-transform: uppercase; letter-spacing: .06em; }
     .report-visual-intro { display: grid; grid-template-columns: minmax(0, 1fr); padding: 0; overflow: hidden; }
-    .report-visual-intro-with-image { grid-template-columns: 260px minmax(0, 1fr); }
+    .report-visual-intro-with-image { grid-template-columns: 270px minmax(0, 1fr); }
     .report-visual-intro h2 { margin-bottom: 0; font-size: 16px; }
-    .report-intro-main { margin: 0; padding: 16px; background: transparent; border-right: 1px solid #e2e8f0; display: grid; align-content: center; min-height: 190px; }
-    .report-intro-img { width: 100%; height: 164px; object-fit: contain; object-position: center; display: block; mix-blend-mode: multiply; }
+    .report-intro-main { margin: 0; padding: 14px 10px 14px 16px; background: transparent; display: grid; align-content: center; min-height: 190px; }
+    .report-intro-img { width: 100%; height: 170px; object-fit: contain; object-position: center; display: block; mix-blend-mode: multiply; }
     .report-intro-content { padding: 18px 18px 16px; }
     .report-intro-title { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
     .report-intro-title span { flex: none; border-radius: 999px; background: #eef2ff; color: #4338ca; padding: 4px 10px; font-size: 10px; font-weight: 850; }
@@ -3537,11 +3874,11 @@ function buildNutritionReportHtml(reportData, options = {}) {
     .sparkline-title { font-size: 12px; font-weight: 800; margin-bottom: 5px; }
     .sparkline { display: block; width: 100%; height: auto; }
     .section-story-header { display: grid; gap: 14px; align-items: stretch; margin-bottom: 14px; }
-    .section-story-header-with-image { grid-template-columns: 238px minmax(0, 1fr); overflow: hidden; border: 1px solid #e2e8f0; border-radius: 10px; background: #fff; }
-    .section-story-figure { margin: 0; padding: 16px; background: transparent; border-right: 1px solid #e2e8f0; display: grid; align-content: center; min-height: 170px; }
-    .section-story-img { width: 100%; height: 152px; object-fit: contain; object-position: center; display: block; mix-blend-mode: multiply; }
+    .section-story-header-with-image { grid-template-columns: 252px minmax(0, 1fr); overflow: hidden; border: 1px solid #e2e8f0; border-radius: 10px; background: #fff; }
+    .section-story-figure { margin: 0; padding: 12px 8px 12px 14px; background: transparent; display: grid; align-content: center; min-height: 178px; }
+    .section-story-img { width: 100%; height: 162px; object-fit: contain; object-position: center; display: block; mix-blend-mode: multiply; }
     .section-story-copy { min-width: 0; align-self: center; padding: 2px 0; }
-    .section-story-header-with-image .section-story-copy { padding: 18px 18px 16px 0; }
+    .section-story-header-with-image .section-story-copy { padding: 18px 18px 16px 4px; }
     .section-story-copy h2, .section-story-copy h3 { margin: 2px 0 0; color: #0f172a; }
     .section-story-copy h2 { font-size: 16px; }
     .section-story-copy h3 { font-size: 14px; }
@@ -3577,17 +3914,18 @@ function buildNutritionReportHtml(reportData, options = {}) {
     .composition-visual-block h3 { margin: 0; font-size: 13px; color: #0f172a; }
     .composition-main-grid { margin-top: 4px; }
     .component-explain-grid { display: grid; grid-template-columns: minmax(0, 1fr); gap: 0; margin-top: 14px; border-top: 1px solid #e2e8f0; }
-    .component-explain-card { display: grid; grid-template-columns: 14px minmax(0, 1fr); gap: 0 12px; align-items: center; border-bottom: 1px solid #e2e8f0; padding: 12px 0; background: transparent; }
-    .component-explain-card-with-image { grid-template-columns: 148px minmax(0, 1fr); min-height: 168px; }
-    .component-explain-grid span { grid-row: 1; width: 10px; height: 10px; border-radius: 999px; margin-top: 4px; display: block; align-self: start; }
-    .component-explain-img { grid-row: 1; width: 132px; height: 152px; object-fit: contain; object-position: center; display: block; mix-blend-mode: multiply; filter: saturate(1.08) contrast(1.05); }
-    .component-explain-body { display: grid; gap: 5px; align-content: center; }
+    .component-explain-card { display: grid; grid-template-columns: 14px minmax(0, 1fr); gap: 0 12px; align-items: center; border-bottom: 1px solid #e2e8f0; padding: 13px 0; background: transparent; }
+    .component-explain-card-with-image { grid-template-columns: minmax(0, 1fr) 206px; gap: 16px; min-height: 218px; align-items: center; }
+    .component-explain-dot { grid-row: 1; width: 10px; height: 10px; border-radius: 999px; margin-top: 4px; display: block; align-self: start; }
+    .component-explain-figure { margin: 0; min-height: 206px; display: grid; place-items: center; background: transparent; overflow: hidden; }
+    .component-explain-img { width: 194px; height: 206px; object-fit: contain; object-position: center; display: block; mix-blend-mode: multiply; filter: saturate(1.08) contrast(1.05); }
+    .component-explain-body { display: grid; gap: 6px; align-content: center; }
     .component-explain-grid strong { font-size: 13px; color: #0f172a; }
     .component-explain-grid small { color: #475569; font-size: 11px; line-height: 1.35; }
-    .component-inline-bar { display: grid; grid-template-columns: minmax(0, 1fr) 64px; gap: 10px; align-items: center; margin-top: 7px; }
-    .component-inline-bar::before { content: ''; grid-column: 1; grid-row: 1; height: 16px; border-radius: 999px; background: #e2e8f0; }
-    .component-inline-bar i { grid-column: 1; grid-row: 1; height: 16px; border-radius: 999px; display: block; min-width: 4px; z-index: 1; }
-    .component-inline-bar em { grid-column: 2; grid-row: 1; color: #0f172a; font-style: normal; font-size: 13px; font-weight: 850; text-align: right; }
+    .component-inline-bar { display: grid; grid-template-columns: minmax(0, 1fr) 68px; gap: 10px; align-items: center; margin-top: 9px; }
+    .component-inline-bar::before { content: ''; grid-column: 1; grid-row: 1; height: 18px; border-radius: 999px; background: #e2e8f0; }
+    .component-inline-bar i { grid-column: 1; grid-row: 1; height: 18px; border-radius: 999px; display: block; min-width: 4px; z-index: 1; }
+    .component-inline-bar em { grid-column: 2; grid-row: 1; color: #0f172a; font-style: normal; font-size: 14px; font-weight: 850; text-align: right; }
     .pending-visual { min-height: 132px; display: flex; flex-direction: column; justify-content: center; align-items: center; gap: 6px; border: 1px dashed #cbd5e1; border-radius: 10px; text-align: center; padding: 16px; }
     .pending-visual strong { color: #92400e; }
     .pending-visual span { color: #64748b; font-size: 11px; max-width: 520px; }
@@ -3643,8 +3981,8 @@ function buildNutritionReportHtml(reportData, options = {}) {
     .somato-value-card img { grid-row: 1 / span 2; width: 46px; height: 46px; object-fit: contain; border-radius: 8px; background: transparent; mix-blend-mode: multiply; }
     .somato-value-card span { display: block; color: #64748b; font-size: 11px; font-weight: 700; }
     .somato-value-card strong { display: block; font-size: 24px; line-height: 1; color: #0f172a; }
-    .somato-image-card { border: 1px solid #e2e8f0; border-radius: 10px; padding: 10px; text-align: center; background: #f8fafc; }
-    .somato-image-card img { width: 100%; height: 170px; object-fit: contain; display: block; mix-blend-mode: multiply; }
+    .somato-image-card { border: 0; border-radius: 10px; padding: 0; text-align: center; background: transparent; }
+    .somato-image-card img { width: 100%; height: 190px; object-fit: contain; display: block; mix-blend-mode: multiply; }
     .somato-image-card strong { display: block; margin-top: 6px; font-size: 12px; color: #0f172a; }
     .somato-image-card span { display: block; margin-top: 2px; color: #64748b; font-size: 10px; font-weight: 700; }
     .health-table td:nth-child(2), .health-table td:nth-child(3) { text-align: right; white-space: nowrap; }
