@@ -28,6 +28,8 @@ function assertNutritionContract(contract) {
   ]);
   assert.equal(contract.nutrition_measurement_fields.weight_kg.label, 'Peso');
   assert.equal(contract.nutrition_measurement_fields.skinfold_triceps_mm.unit, 'mm');
+  assert.equal(contract.nutrition_measurement_fields.arm_span_cm.unit, 'cm');
+  assert.equal(contract.nutrition_measurement_fields.breadth_wrist_bistyloid_cm.label, 'Diámetro biestiloideo');
 
   const profileSchemas = new Map(contract.nutrition_measurement_profile_schemas.map((profile) => [profile.code, profile]));
   assert.deepEqual(profileSchemas.get('quick')?.groups?.[0]?.fields, [
@@ -51,7 +53,15 @@ function assertNutritionContract(contract) {
     true,
   );
   assert.equal(
-    profileSchemas.get('express_isak')?.groups?.some((group) => group.key === 'kerr_fractionation' && group.fields.includes('sitting_height_cm')),
+    profileSchemas.get('express_isak')?.groups?.some((group) => group.key === 'base' && group.fields.includes('sitting_height_cm')),
+    true,
+  );
+  assert.equal(
+    profileSchemas.get('express_isak')?.groups?.some((group) => group.key === 'base' && group.fields.includes('arm_span_cm')),
+    true,
+  );
+  assert.equal(
+    profileSchemas.get('express_isak')?.groups?.some((group) => group.key === 'breadths' && group.fields.includes('breadth_wrist_bistyloid_cm')),
     true,
   );
   assert.deepEqual(
@@ -175,7 +185,6 @@ function run() {
     'skinfolds',
     'girths',
     'breadths',
-    'kerr_fractionation',
   ]);
   assert.deepEqual(guardedSchemas.get('quick').groups[0].required_fields, ['weight_kg', 'stature_cm']);
   assert.equal(guardedSchemas.get('quick').groups[0].fields.includes('weight_kg'), true);
@@ -189,7 +198,7 @@ function run() {
     true,
   );
   assert.equal(
-    guardedSchemas.get('express_isak').groups.find((group) => group.key === 'kerr_fractionation').fields.includes('sitting_height_cm'),
+    guardedSchemas.get('express_isak').groups.find((group) => group.key === 'breadths').fields.includes('breadth_wrist_bistyloid_cm'),
     true,
   );
 

@@ -1,6 +1,7 @@
 'use strict';
 
 const crypto = require('crypto');
+const fsSync = require('fs');
 const fs = require('fs/promises');
 const os = require('os');
 const path = require('path');
@@ -13,9 +14,11 @@ const clinicalPrivateStorage = require('./clinicalPrivateStorage.service');
 const { Op } = db.Sequelize;
 const execFileAsync = promisify(execFile);
 const FORMULA_VERSION = 'nutrition-basic-v3';
-const NUTRITION_REPORT_SNAPSHOT_VERSION = 8;
+const NUTRITION_REPORT_SNAPSHOT_VERSION = 9;
 const NUTRITION_REPORT_CURRENT_STATUSES = ['final', 'active'];
 const DEFAULT_CHROMIUM_PATH = '/home/ubuntu/.cache/clinicaclick-browsers/chrome-headless-shell/linux-148.0.7778.56/chrome-headless-shell-linux64/chrome-headless-shell';
+const NUTRITION_SOMATOTYPE_ASSET_DIR = path.join(__dirname, '..', 'assets', 'nutrition', 'somatotypes');
+const nutritionReportImageCache = new Map();
 
 const FORMULA_REFERENCES = [
   {
@@ -759,7 +762,7 @@ function buildDistributionVisualHtml(measurement = {}, previousMeasurement = nul
   `;
 }
 
-function buildSomatotypeVisualHtml(report = {}) {
+function buildSomatotypeVisualHtml(report = {}, patient = {}) {
   const somatotype = report?.summary?.somatotype || null;
   if (!somatotype) return '';
   const endomorphy = finiteNumber(somatotype.endomorphy);
@@ -770,10 +773,18 @@ function buildSomatotypeVisualHtml(report = {}) {
   const y = (2 * mesomorphy) - (endomorphy + ectomorphy);
   const plotX = 180 + (x * 18);
   const plotY = 160 - (y * 10);
+  const somatotypeImage = somatotypeImageDataUri(report, patient);
+  const somatotypeImageHtml = somatotypeImage ? `
+    <div class="somato-image-card">
+      <img src="${somatotypeImage}" alt="${escapeHtml(somatotypeDominanceLabel(somatotype))}">
+      <strong>${escapeHtml(somatotypeDominanceLabel(somatotype))}</strong>
+      <span>Referencia visual orientativa</span>
+    </div>
+  ` : '';
   return `
     <section class="card">
       <h2>Somatocarta</h2>
-      <div class="somato-layout">
+      <div class="somato-layout ${somatotypeImage ? 'somato-layout-with-image' : ''}">
         <svg class="somato-chart" viewBox="0 0 360 300" role="img">
           <path d="M180 35 C250 60 305 142 300 245 L60 245 C55 142 110 60 180 35 Z" fill="none" stroke="#64748b" stroke-width="2" stroke-dasharray="5 5"></path>
           <line x1="180" y1="35" x2="180" y2="245" stroke="#94a3b8" stroke-dasharray="4 4"></line>
@@ -790,9 +801,55 @@ function buildSomatotypeVisualHtml(report = {}) {
           <div><span>Mesomorfia</span><strong>${escapeHtml(mesomorphy)}</strong></div>
           <div><span>Ectomorfia</span><strong>${escapeHtml(ectomorphy)}</strong></div>
         </div>
+        ${somatotypeImageHtml}
       </div>
     </section>
   `;
+}
+
+function nutritionImageDataUri(filename) {
+  if (!filename) return '';
+  if (nutritionReportImageCache.has(filename)) {
+    return nutritionReportImageCache.get(filename);
+  }
+  try {
+    const filePath = path.join(NUTRITION_SOMATOTYPE_ASSET_DIR, filename);
+    const buffer = fsSync.readFileSync(filePath);
+    const extension = path.extname(filename).toLowerCase();
+    const mimeType = extension === '.webp' ? 'image/webp' : 'image/png';
+    const dataUri = `data:${mimeType};base64,${buffer.toString('base64')}`;
+    nutritionReportImageCache.set(filename, dataUri);
+    return dataUri;
+  } catch (error) {
+    nutritionReportImageCache.set(filename, '');
+    return '';
+  }
+}
+
+function somatotypeDominanceLabel(somatotype = {}) {
+  const values = [
+    { key: 'endo', label: 'Endomorfia dominante', value: finiteNumber(somatotype.endomorphy) },
+    { key: 'meso', label: 'Mesomorfia dominante', value: finiteNumber(somatotype.mesomorphy) },
+    { key: 'ecto', label: 'Ectomorfia dominante', value: finiteNumber(somatotype.ectomorphy) },
+  ].filter((item) => item.value !== null);
+  if (!values.length) return 'Somatotipo de referencia';
+  return values.sort((a, b) => b.value - a.value)[0].label;
+}
+
+function somatotypeImageDataUri(report = {}, patient = {}) {
+  const somatotype = report?.summary?.somatotype || null;
+  if (!somatotype) return nutritionImageDataUri('somatotype-overview.png');
+  const values = [
+    { key: 'endo', value: finiteNumber(somatotype.endomorphy) },
+    { key: 'meso', value: finiteNumber(somatotype.mesomorphy) },
+    { key: 'ecto', value: finiteNumber(somatotype.ectomorphy) },
+  ].filter((item) => item.value !== null);
+  if (!values.length) return nutritionImageDataUri('somatotype-overview.png');
+  const dominant = values.sort((a, b) => b.value - a.value)[0]?.key || 'meso';
+  const patientSex = String(patient?.sex || report?.patient?.sex || report?.summary?.patient_sex || '').toLowerCase();
+  const sex = patientSex === 'female' || patientSex === 'mujer' ? 'female' : 'male';
+  const extension = sex === 'male' ? 'webp' : 'png';
+  return nutritionImageDataUri(`${dominant}-${sex}.${extension}`);
 }
 
 function fatDistributionSummary(measurement = {}) {
@@ -2815,7 +2872,7 @@ function buildNutritionReportHtml(reportData) {
   const projectionVisualHtml = buildProjectionVisualHtml(projection);
   const compositionVisualHtml = buildCompositionVisualHtml(report);
   const distributionVisualHtml = buildDistributionVisualHtml(measurement, previousMeasurement);
-  const somatotypeVisualHtml = buildSomatotypeVisualHtml(report);
+  const somatotypeVisualHtml = buildSomatotypeVisualHtml(report, patient);
   const healthIndexesHtml = buildHealthIndexesHtml(measurement, previousMeasurement);
   const calculationProfileHtml = buildCalculationProfileHtml(
     report.calculation_profile || meta?.calculation_profile || CALCULATION_PROFILE,
@@ -3057,12 +3114,17 @@ function buildNutritionReportHtml(reportData) {
     .legend-current { background: #14b8a6; }
     .legend-previous { background: #0f172a; opacity: .65; }
     .somato-layout { display: grid; grid-template-columns: minmax(0, 1fr) 190px; gap: 18px; align-items: center; }
+    .somato-layout-with-image { grid-template-columns: minmax(0, 1fr) 150px 170px; }
     .somato-chart { width: 100%; max-height: 330px; }
     .somato-label { fill: #0f172a; font-size: 13px; font-weight: 850; }
     .somato-values { display: grid; gap: 10px; }
     .somato-values div { border: 1px solid #e2e8f0; border-radius: 8px; padding: 10px; }
     .somato-values span { display: block; color: #64748b; font-size: 11px; font-weight: 700; }
     .somato-values strong { display: block; margin-top: 4px; font-size: 24px; }
+    .somato-image-card { border: 1px solid #e2e8f0; border-radius: 10px; padding: 10px; text-align: center; background: #f8fafc; }
+    .somato-image-card img { width: 100%; height: 170px; object-fit: contain; display: block; }
+    .somato-image-card strong { display: block; margin-top: 6px; font-size: 12px; color: #0f172a; }
+    .somato-image-card span { display: block; margin-top: 2px; color: #64748b; font-size: 10px; font-weight: 700; }
     .health-table td:nth-child(2), .health-table td:nth-child(3) { text-align: right; white-space: nowrap; }
     .health-badge { display: inline-flex; min-width: 44px; justify-content: center; border-radius: 4px; padding: 3px 6px; font-weight: 850; }
     .health-ok { background: #16a34a; color: #fff; }

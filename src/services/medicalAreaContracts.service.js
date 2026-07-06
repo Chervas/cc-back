@@ -225,6 +225,7 @@ const NUTRITION_MEASUREMENT_PROFILE_OPTIONS = [
 const NUTRITION_MEASUREMENT_FIELD_DEFINITIONS = {
   weight_kg: { label: 'Peso', unit: 'kg', min: 20, max: 300 },
   stature_cm: { label: 'Estatura', unit: 'cm', min: 80, max: 230 },
+  arm_span_cm: { label: 'Envergadura de brazos', unit: 'cm', min: 80, max: 260 },
   waist_cm: { label: 'Cintura', unit: 'cm', min: 30, max: 220 },
   hip_cm: { label: 'Cadera', unit: 'cm', min: 30, max: 240 },
   arm_relaxed_cm: { label: 'Brazo relajado', unit: 'cm', min: 10, max: 80 },
@@ -246,6 +247,7 @@ const NUTRITION_MEASUREMENT_FIELD_DEFINITIONS = {
   breadth_biacromial_cm: { label: 'Diámetro biacromial', unit: 'cm', min: 20, max: 60 },
   breadth_biiliocristal_cm: { label: 'Diámetro biiliocrestal', unit: 'cm', min: 15, max: 50 },
   breadth_humerus_cm: { label: 'Diámetro húmero', unit: 'cm', min: 3, max: 12 },
+  breadth_wrist_bistyloid_cm: { label: 'Diámetro biestiloideo', unit: 'cm', min: 3, max: 12 },
   breadth_femur_cm: { label: 'Diámetro fémur', unit: 'cm', min: 5, max: 16 },
   depth_chest_ap_cm: { label: 'Diámetro tórax AP', unit: 'cm', min: 10, max: 40 },
   breadth_chest_transverse_cm: { label: 'Diámetro tórax transverso', unit: 'cm', min: 15, max: 50 },
@@ -273,7 +275,7 @@ const NUTRITION_MEASUREMENT_PROFILE_SCHEMAS = [
       {
         key: 'base',
         label: 'Datos base',
-        fields: ['weight_kg', 'stature_cm'],
+        fields: ['weight_kg', 'stature_cm', 'sitting_height_cm', 'arm_span_cm'],
         required_fields: ['weight_kg', 'stature_cm'],
       },
       {
@@ -319,6 +321,7 @@ const NUTRITION_MEASUREMENT_PROFILE_SCHEMAS = [
         label: 'Diámetros',
         fields: [
           'breadth_humerus_cm',
+          'breadth_wrist_bistyloid_cm',
           'breadth_femur_cm',
           'breadth_biacromial_cm',
           'breadth_biiliocristal_cm',
@@ -326,12 +329,6 @@ const NUTRITION_MEASUREMENT_PROFILE_SCHEMAS = [
           'breadth_chest_transverse_cm',
         ],
         required_fields: ['breadth_humerus_cm', 'breadth_femur_cm'],
-      },
-      {
-        key: 'kerr_fractionation',
-        label: 'Kerr cinco componentes',
-        fields: ['sitting_height_cm'],
-        required_fields: [],
       },
     ],
   },
