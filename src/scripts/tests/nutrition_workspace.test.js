@@ -388,6 +388,26 @@ function run() {
   assert.match(html, /Somatotipo Heath-Carter/);
   assert.match(html, /Documento clínico privado/);
   assert.doesNotMatch(html, /148 kg/);
+  const clinicBrandHtml = __testing.buildNutritionReportHtml({
+    patient: { name: 'Paciente Test', clinic_name: 'Clinica Norte', clinic_avatar_url: 'https://media.clinicaclick.com/logos/clinicas/clinica-norte.png' },
+    treatment: null,
+    appointment: null,
+    measurement: measurementJson(second),
+    previous_measurement: measurementJson(first),
+    report: secondReport,
+    projection: projectionForSecond,
+    profile_definitions: [],
+    field_definitions: {},
+    meta: {
+      formula_version: FORMULA_VERSION,
+      calculation_profile: CALCULATION_PROFILE,
+      formula_references: FORMULA_REFERENCES,
+      generated_at: '2026-02-26T11:00:00.000Z',
+    },
+  }, { brandingMode: 'clinic' });
+  assert.match(clinicBrandHtml, /Clinica Norte/);
+  assert.match(clinicBrandHtml, /logos\/clinicas\/clinica-norte\.png/);
+  assert.match(clinicBrandHtml, /Con la tecnología de ClinicaClick/);
   const finalHtml = __testing.buildNutritionReportHtml({
     patient: { name: 'Paciente Test', clinic_name: 'Clinica Test' },
     treatment: null,

@@ -16,6 +16,7 @@ const execFileAsync = promisify(execFile);
 const FORMULA_VERSION = 'nutrition-basic-v3';
 const NUTRITION_REPORT_SNAPSHOT_VERSION = 9;
 const NUTRITION_REPORT_CURRENT_STATUSES = ['final', 'active'];
+const NUTRITION_REPORT_BRANDING_MODES = new Set(['clinicaclick', 'clinic']);
 const DEFAULT_CHROMIUM_PATH = '/home/ubuntu/.cache/clinicaclick-browsers/chrome-headless-shell/linux-148.0.7778.56/chrome-headless-shell-linux64/chrome-headless-shell';
 const NUTRITION_SOMATOTYPE_ASSET_DIR = path.join(__dirname, '..', 'assets', 'nutrition', 'somatotypes');
 const nutritionReportImageCache = new Map();
@@ -350,6 +351,22 @@ function escapeHtml(value) {
     .replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;')
     .replace(/'/g, '&#039;');
+}
+
+function normalizeReportBrandingOptions(options = {}) {
+  const rawMode = String(options?.brandingMode || options?.report_branding_mode || '').trim().toLowerCase();
+  const mode = NUTRITION_REPORT_BRANDING_MODES.has(rawMode) ? rawMode : 'clinicaclick';
+  return { mode };
+}
+
+function isDefaultReportBranding(options = {}) {
+  return normalizeReportBrandingOptions(options).mode === 'clinicaclick';
+}
+
+function initialsFromName(value) {
+  const parts = String(value || '').trim().split(/\s+/).filter(Boolean);
+  const initials = parts.slice(0, 2).map((part) => part[0]).join('').toUpperCase();
+  return initials || 'CC';
 }
 
 function displayNutritionText(value) {
@@ -2602,6 +2619,7 @@ async function buildNutritionMeasurementReportData(patientIdentifier, measuremen
       name: [patient.nombre, patient.apellidos].filter(Boolean).join(' ').trim(),
       clinic_id: Number(patient.clinica_id),
       clinic_name: patient.clinica?.nombre_clinica || '',
+      clinic_avatar_url: patient.clinica?.url_avatar || '',
       sex: patientFormulaContext.sex,
       age_years: patientFormulaContext.age_years,
     },
@@ -2852,8 +2870,33 @@ function rawFieldRangeMarkerHtml(field = {}) {
   `;
 }
 
-function buildNutritionReportHtml(reportData) {
+function buildReportBrandHtml(patient = {}, brandingOptions = {}) {
+  const branding = normalizeReportBrandingOptions(brandingOptions);
+  if (branding.mode === 'clinic') {
+    const clinicName = patient.clinic_name || 'Clínica';
+    if (patient.clinic_avatar_url) {
+      return `
+        <div class="brand brand-with-logo">
+          <img src="${escapeHtml(patient.clinic_avatar_url)}" alt="${escapeHtml(clinicName)}">
+          <span>${escapeHtml(clinicName)}</span>
+        </div>
+        <div class="powered-by">Con la tecnología de ClinicaClick</div>
+      `;
+    }
+    return `
+      <div class="brand brand-with-logo">
+        <span class="brand-initials">${escapeHtml(initialsFromName(clinicName))}</span>
+        <span>${escapeHtml(clinicName)}</span>
+      </div>
+      <div class="powered-by">Con la tecnología de ClinicaClick</div>
+    `;
+  }
+  return '<div class="brand">ClinicaClick</div>';
+}
+
+function buildNutritionReportHtml(reportData, options = {}) {
   const { patient, treatment, appointment, measurement, previous_measurement: previousMeasurement, report, projection, meta } = reportData;
+  const brandHtml = buildReportBrandHtml(patient, options);
   const profileLabel = nutritionProfileLabel(measurement.profile_code);
   const isFinalDocument = meta?.document_status === 'final';
   const documentStatusLabel = isFinalDocument ? '' : 'Borrador calculado';
@@ -3047,6 +3090,10 @@ function buildNutritionReportHtml(reportData) {
     .page { max-width: 920px; margin: 0 auto; padding: 24px; }
     header { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 24px; align-items: start; border-bottom: 1px solid #cbd5e1; padding-bottom: 20px; margin-bottom: 20px; }
     .brand { font-weight: 800; letter-spacing: .02em; color: #4f46e5; font-size: 20px; }
+    .brand-with-logo { display: inline-flex; align-items: center; gap: 10px; color: #0f172a; letter-spacing: 0; }
+    .brand-with-logo img { width: 42px; height: 42px; border-radius: 10px; object-fit: contain; border: 1px solid #e2e8f0; background: #fff; padding: 4px; }
+    .brand-initials { display: inline-flex; width: 42px; height: 42px; align-items: center; justify-content: center; border-radius: 10px; background: #eef2ff; color: #4f46e5; font-size: 13px; font-weight: 850; }
+    .powered-by { margin-top: 3px; color: #64748b; font-size: 10px; font-weight: 700; }
     h1 { margin: 8px 0 0; font-size: 28px; line-height: 1.1; }
     h2 { margin: 0 0 12px; font-size: 15px; }
     .muted { color: #64748b; }
@@ -3165,7 +3212,7 @@ function buildNutritionReportHtml(reportData) {
   <main class="page">
     <header>
       <div>
-        <div class="brand">ClinicaClick</div>
+        ${brandHtml}
         <h1>${escapeHtml(report.title)}</h1>
         <p class="muted">${escapeHtml(patient.clinic_name || 'Clínica')} · Generado el ${escapeHtml(formatDate(meta.generated_at))}</p>
       </div>
@@ -3233,16 +3280,16 @@ async function htmlToPdfBuffer(html, filenameSeed = 'nutrition-report') {
   }
 }
 
-async function renderNutritionMeasurementReport(patientIdentifier, measurementIdentifier) {
+async function renderNutritionMeasurementReport(patientIdentifier, measurementIdentifier, options = {}) {
   const reportData = await buildNutritionMeasurementReportData(patientIdentifier, measurementIdentifier);
   const snapshot = await findCurrentNutritionReportSnapshot(
     reportData.measurement.id,
     reportData.report.report_type,
   );
-  if (snapshot?.snapshot_html && isCurrentNutritionReportSnapshot(snapshot)) {
+  if (isDefaultReportBranding(options) && snapshot?.snapshot_html && isCurrentNutritionReportSnapshot(snapshot)) {
     return snapshot.snapshot_html;
   }
-  return buildNutritionReportHtml(reportData);
+  return buildNutritionReportHtml(reportData, options);
 }
 
 async function persistFinalNutritionReportPdf(snapshot, reportData, buffer, filename, actorUserId = null) {
@@ -3281,13 +3328,13 @@ async function persistFinalNutritionReportPdf(snapshot, reportData, buffer, file
   }
 }
 
-async function generateNutritionMeasurementReportPdf(patientIdentifier, measurementIdentifier, actorUserId = null) {
+async function generateNutritionMeasurementReportPdf(patientIdentifier, measurementIdentifier, actorUserId = null, options = {}) {
   const reportData = await buildNutritionMeasurementReportData(patientIdentifier, measurementIdentifier);
   const snapshot = await findCurrentNutritionReportSnapshot(
     reportData.measurement.id,
     reportData.report.report_type,
   );
-  if (snapshot?.pdf_asset_id && isCurrentNutritionReportSnapshot(snapshot)) {
+  if (isDefaultReportBranding(options) && snapshot?.pdf_asset_id && isCurrentNutritionReportSnapshot(snapshot)) {
     try {
       const cached = await clinicalPrivateStorage.readClinicalPrivateAsset(snapshot.pdf_asset_id);
       return {
@@ -3306,12 +3353,14 @@ async function generateNutritionMeasurementReportPdf(patientIdentifier, measurem
     }
   }
 
-  const html = snapshot?.snapshot_html && isCurrentNutritionReportSnapshot(snapshot)
+  const html = isDefaultReportBranding(options) && snapshot?.snapshot_html && isCurrentNutritionReportSnapshot(snapshot)
     ? snapshot.snapshot_html
-    : buildNutritionReportHtml(reportData);
+    : buildNutritionReportHtml(reportData, options);
   const filename = `informe-nutricion-${reportData.measurement.id}.pdf`;
   const buffer = await htmlToPdfBuffer(html, `nutrition-${reportData.measurement.id}`);
-  const asset = await persistFinalNutritionReportPdf(snapshot, reportData, buffer, filename, actorUserId);
+  const asset = isDefaultReportBranding(options)
+    ? await persistFinalNutritionReportPdf(snapshot, reportData, buffer, filename, actorUserId)
+    : null;
   return {
     filename,
     buffer,

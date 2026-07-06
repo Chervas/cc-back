@@ -34,6 +34,13 @@ function sendNutritionError(error, res) {
   return null;
 }
 
+function reportBrandingOptionsFromRequest(req) {
+  const rawMode = String(req.query?.report_branding_mode || req.query?.branding_mode || '').trim().toLowerCase();
+  return {
+    brandingMode: rawMode === 'clinic' ? 'clinic' : 'clinicaclick',
+  };
+}
+
 exports.getPatientNutritionWorkspace = asyncHandler(async (req, res) => {
   try {
     await assertNutritionAccess(req, 'nutrition.workspace.view');
@@ -151,6 +158,7 @@ exports.renderPatientNutritionMeasurementReport = asyncHandler(async (req, res) 
     const html = await nutritionWorkspaceService.renderNutritionMeasurementReport(
       req.params.id,
       req.params.measurementId,
+      reportBrandingOptionsFromRequest(req),
     );
     res.setHeader('Content-Type', 'text/html; charset=utf-8');
     return res.send(html);
@@ -226,6 +234,7 @@ exports.getPatientNutritionMeasurementReportPdf = asyncHandler(async (req, res) 
       req.params.id,
       req.params.measurementId,
       actorUserId,
+      reportBrandingOptionsFromRequest(req),
     );
     res.setHeader('Content-Type', 'application/pdf');
     res.setHeader('Content-Disposition', `inline; filename="${filename}"`);
