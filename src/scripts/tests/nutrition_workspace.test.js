@@ -471,6 +471,7 @@ function run() {
   assert.match(html, /component-explain-heading/);
   assert.match(html, /component-explain-card-with-image/);
   assert.match(html, /component-inline-bar/);
+  assert.doesNotMatch(html, /class="composition-bar"/);
   assert.doesNotMatch(html, /bar-chart-grid/);
   assert.match(html, /data:image\/webp;base64/);
   assert.match(html, /Silueta de dos compartimentos/);
