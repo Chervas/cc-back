@@ -439,9 +439,19 @@ async function countTasks({ clinicIds, todayStart, todayEnd }) {
   return { leadsPending, pendingConsents, pendingReviews, unconfirmedToday };
 }
 
-function taskItems(counts, todayDate, clinicIds) {
+function taskItems(counts, todayDate, clinicIds, pendingAttendanceCount = 0) {
   const singleClinicId = clinicIds.length === 1 ? clinicIds[0] : null;
-  return [
+  const pendingAttendance = Number(pendingAttendanceCount || 0);
+  const items = [
+    ...(pendingAttendance > 0
+      ? [{
+          id: 'pending_attendance',
+          label: 'Citas pendientes de cerrar asistencia',
+          count: pendingAttendance,
+          link: '/agenda-de-citas',
+          queryParams: { clinica_id: singleClinicId },
+        }]
+      : []),
     {
       id: 'leads_pending',
       label: 'Leads sin contactar',
@@ -471,6 +481,8 @@ function taskItems(counts, todayDate, clinicIds) {
       queryParams: { reviews: 'unanswered', clinica_id: singleClinicId },
     },
   ];
+
+  return items;
 }
 
 async function loadPendingConsentCards({ clinicIds, doctorId = null, limit = 6 }) {
@@ -971,6 +983,8 @@ async function getMainDashboard({ userId, query = {} }) {
     });
   }
 
+  const dashboardTasks = taskItems(counts, today.date, scope.clinicIds, appointments.pastAttendance.length);
+
   return {
     user: context.user,
     role: {
@@ -999,8 +1013,8 @@ async function getMainDashboard({ userId, query = {} }) {
     doctorPendingConsents,
     weeklySchedule,
     tasks: {
-      items: taskItems(counts, today.date, scope.clinicIds),
-      total: (counts.leadsPending || 0) + (counts.unconfirmedToday || 0) + (counts.pendingConsents || 0) + (counts.pendingReviews || 0),
+      items: dashboardTasks,
+      total: dashboardTasks.reduce((total, item) => total + Number(item.count || 0), 0),
     },
     setup,
     criticalAlerts: errors,
