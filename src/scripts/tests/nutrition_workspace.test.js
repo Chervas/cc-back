@@ -463,6 +463,7 @@ function run() {
   assert.match(html, /Somatocarta/);
   assert.match(html, /Lectura sencilla/);
   assert.match(html, /Paciente/);
+  assert.doesNotMatch(html, /Referencia visual orientativa/);
   assert.match(html, /Fraccionamiento molecular/);
   assert.match(html, /Fraccionamiento tisular/);
   assert.match(html, /Reserva energética del cuerpo/);
