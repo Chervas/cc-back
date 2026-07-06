@@ -234,6 +234,14 @@ async function resolveClinicScope(rawScope, memberships, { allowAllClinics = fal
     }
   }
 
+  if (allowAllClinics && (!raw || raw === 'all') && !clinicIds.length && Clinica) {
+    const rows = await Clinica.findAll({
+      attributes: ['id_clinica'],
+      raw: true,
+    });
+    clinicIds = rows.map((row) => row.id_clinica);
+  }
+
   if (!allowAllClinics && clinicIds.length) {
     const allowed = new Set(accessibleClinicIds);
     clinicIds = clinicIds.filter((clinicId) => allowed.has(Number(clinicId)));
@@ -956,7 +964,9 @@ async function getMainDashboard({ userId, query = {} }) {
     requestedSubrol: query.subrol,
   });
 
-  const scope = await resolveClinicScope(requestedScope, context.memberships);
+  const scope = await resolveClinicScope(requestedScope, context.memberships, {
+    allowAllClinics: context.globalAdmin,
+  });
   const sections = roleSections(context.role, context.subrolCode);
   const doctorId = sections.doctor ? userId : null;
   const appointments = await loadAppointments({
