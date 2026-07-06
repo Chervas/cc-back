@@ -563,13 +563,13 @@ const DEFAULT_TREATMENT_SETUP_STEPS = [
   {
     title: 'Servicio cobrable',
     icon: 'heroicons_outline:tag',
-    body: 'Área médica, familia y nombre del servicio que se presupuesta.',
+    body: 'Área médica, familia y nombre del servicio o tratamiento que se cobra.',
     section: 'service',
   },
   {
-    title: 'Precio y duración',
+    title: 'Tarifas y duración',
     icon: 'heroicons_outline:currency-euro',
-    body: 'Importe, IVA, duración y sesiones por defecto.',
+    body: 'Precio base y excepciones opcionales para primera visita, seguimiento, revisión o urgencia.',
     section: 'pricing',
   },
   {
@@ -589,9 +589,9 @@ const TREATMENT_SETUP_STEPS_BY_AREA = {
       section: 'service',
     },
     {
-      title: 'Precio y sesiones',
+      title: 'Tarifas y sesiones',
       icon: 'heroicons_outline:currency-euro',
-      body: 'Importe, IVA, duración, sesiones y financiación.',
+      body: 'Precio base, sesiones y precios propios si primera visita, revisión o urgencia no cuestan igual.',
       section: 'pricing',
     },
     {
@@ -615,9 +615,9 @@ const TREATMENT_SETUP_STEPS_BY_AREA = {
       section: 'service',
     },
     {
-      title: 'Precio y duración',
+      title: 'Tarifas y duración',
       icon: 'heroicons_outline:currency-euro',
-      body: 'Importe, IVA, duración prevista y sesiones si es un plan.',
+      body: 'Precio base del servicio y precio propio si primera visita, revisión o seguimiento cambian.',
       section: 'pricing',
     },
     {
@@ -629,7 +629,7 @@ const TREATMENT_SETUP_STEPS_BY_AREA = {
     {
       title: 'Agenda y reglas',
       icon: 'heroicons_outline:calendar-days',
-      body: 'Tipo de cita, profesional, instalación y automatizaciones.',
+      body: 'Tipo de cita en agenda, profesional, instalación y automatizaciones.',
       section: 'agenda',
     },
   ],
@@ -776,22 +776,51 @@ function normalizeSetupSteps(value, fallback = []) {
     return cloneJson(fallback);
   }
 
+  const fallbackBySection = new Map((fallback || [])
+    .filter((step) => validSections.has(step?.section))
+    .map((step) => [step.section, step]));
+
   const steps = value
     .map((step, index) => {
-      const fallbackStep = fallback[index] || fallback[0] || {};
-      const requestedSection = cleanString(step?.section, fallbackStep.section || 'service');
+      const indexedFallbackStep = fallback[index] || fallback[0] || {};
+      const requestedSection = cleanString(step?.section, indexedFallbackStep.section || 'service');
+      const resolvedSection = validSections.has(requestedSection)
+        ? requestedSection
+        : (validSections.has(indexedFallbackStep.section) ? indexedFallbackStep.section : 'service');
+      const fallbackStep = fallbackBySection.get(resolvedSection) || indexedFallbackStep;
+      const title = cleanString(step?.title, fallbackStep.title || 'Paso');
+      const body = cleanString(step?.body, fallbackStep.body || '');
+      const useFallbackCopy = isLegacySetupStepCopy(resolvedSection, title, body);
       return {
-        title: cleanString(step?.title, fallbackStep.title || 'Paso'),
+        title: useFallbackCopy ? (fallbackStep.title || title) : title,
         icon: cleanString(step?.icon, fallbackStep.icon || 'heroicons_outline:tag'),
-        body: cleanString(step?.body, fallbackStep.body || ''),
-        section: validSections.has(requestedSection)
-          ? requestedSection
-          : (validSections.has(fallbackStep.section) ? fallbackStep.section : 'service'),
+        body: useFallbackCopy ? (fallbackStep.body || body) : body,
+        section: resolvedSection,
       };
     })
     .filter((step) => step.title && step.body);
 
   return steps.length ? steps : cloneJson(fallback);
+}
+
+function isLegacySetupStepCopy(section, title, body) {
+  const normalizedTitle = cleanString(title).toLowerCase();
+  const normalizedBody = cleanString(body).toLowerCase();
+
+  if (section === 'service') {
+    return normalizedBody === 'área médica, familia y nombre del servicio que se presupuesta.';
+  }
+
+  if (section === 'pricing') {
+    return ['precio y duración', 'precio y sesiones'].includes(normalizedTitle)
+      || normalizedBody.startsWith('importe, iva');
+  }
+
+  if (section === 'agenda') {
+    return normalizedBody === 'tipo de cita, profesional, instalación y automatizaciones.';
+  }
+
+  return false;
 }
 
 function normalizeNutritionServiceKindOptions(value, fallback = []) {
