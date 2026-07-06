@@ -553,21 +553,16 @@ function buildProjectionVisualHtml(projection) {
   if (!projection?.available || !metrics.length) return '';
 
   const colors = ['#0f766e', '#2563eb', '#7c3aed', '#e11d48'];
-  const progressImage = reportAssetImageHtml('images/nutrition-progress-evolution.webp', 'Evolución visual de medidas', 'projection-support-img');
   return `
     <section class="card">
-      <div class="section-visual-heading ${progressImage ? 'section-visual-heading-with-image' : ''}">
-        <div>
-          <h2>Gráficas de evolución</h2>
-          <p class="muted">Anterior, actual y proyección lineal a 8 semanas por métrica comparable.</p>
-        </div>
-        ${progressImage ? `
-          <figure>
-            ${progressImage}
-            <figcaption>Seguimiento orientativo entre visitas.</figcaption>
-          </figure>
-        ` : ''}
-      </div>
+      ${sectionVisualHeaderHtml({
+        kicker: 'Evolución',
+        title: 'Gráficas de evolución',
+        body: 'Anterior, actual y proyección lineal a 8 semanas por métrica comparable.',
+        imageFilename: 'images/nutrition-progress-evolution.webp',
+        imageAlt: 'Evolución visual de medidas',
+        caption: 'Seguimiento orientativo entre visitas.',
+      })}
       <div class="sparkline-grid">
         ${metrics.map((metric, index) => `
           <div class="sparkline-card">
@@ -614,41 +609,65 @@ function reportAssetImageHtml(filename, alt, className = '') {
   return `<img${className ? ` class="${escapeHtml(className)}"` : ''} src="${src}" alt="${escapeHtml(alt)}">`;
 }
 
+function sectionVisualHeaderHtml({
+  kicker = '',
+  title = '',
+  body = '',
+  imageFilename = '',
+  imageAlt = '',
+  caption = '',
+  titleTag = 'h2',
+} = {}) {
+  const image = imageFilename
+    ? reportAssetImageHtml(imageFilename, imageAlt || title, 'section-story-img')
+    : '';
+  const safeTitleTag = titleTag === 'h3' ? 'h3' : 'h2';
+  return `
+    <div class="section-story-header ${image ? 'section-story-header-with-image' : ''}">
+      ${image ? `
+        <figure class="section-story-figure">
+          ${image}
+          ${caption ? `<figcaption>${escapeHtml(caption)}</figcaption>` : ''}
+        </figure>
+      ` : ''}
+      <div class="section-story-copy">
+        ${kicker ? `<div class="section-kicker">${escapeHtml(kicker)}</div>` : ''}
+        <${safeTitleTag}>${escapeHtml(title)}</${safeTitleTag}>
+        ${body ? `<p class="muted small-note">${escapeHtml(body)}</p>` : ''}
+      </div>
+    </div>
+  `;
+}
+
 function compositionVisualBlockHtml(title, subtitle, segments = [], barItems = [], explainItems = [], visual = {}) {
   if (!segments.length) return '';
-  const visualImage = visual?.filename
-    ? reportAssetImageHtml(visual.filename, visual.alt || title, 'composition-support-img')
-    : '';
   return `
     <div class="composition-visual-block">
-      <div class="composition-block-layout ${visualImage ? 'composition-block-layout-with-image' : ''}">
+      ${sectionVisualHeaderHtml({
+        kicker: 'Composición corporal',
+        title,
+        body: subtitle,
+        imageFilename: visual?.filename || '',
+        imageAlt: visual?.alt || title,
+        caption: visual?.caption || '',
+        titleTag: 'h3',
+      })}
+      <div class="visual-grid composition-main-grid">
+        <div>${buildDonutSvg(segments, { title: 'Actual', subtitle: `${segments.length} bloques` })}</div>
         <div>
-          <h3>${escapeHtml(title)}</h3>
-          ${subtitle ? `<p class="muted small-note">${escapeHtml(subtitle)}</p>` : ''}
-          <div class="visual-grid">
-            <div>${buildDonutSvg(segments, { title: 'Actual', subtitle: `${segments.length} bloques` })}</div>
-            <div>
-              <div class="composition-bar">
-                ${segments.map((segment) => `<span style="width:${escapeHtml(round(segment.value, 1))}%;background:${escapeHtml(segment.color)}"></span>`).join('')}
+          <div class="composition-bar">
+            ${segments.map((segment) => `<span style="width:${escapeHtml(round(segment.value, 1))}%;background:${escapeHtml(segment.color)}"></span>`).join('')}
+          </div>
+          <div class="legend-grid">
+            ${segments.map((segment) => `
+              <div class="legend-item">
+                <span style="background:${escapeHtml(segment.color)}"></span>
+                <strong>${escapeHtml(segment.label)}</strong>
+                <em>${escapeHtml(round(segment.value, 1))}%</em>
               </div>
-              <div class="legend-grid">
-                ${segments.map((segment) => `
-                  <div class="legend-item">
-                    <span style="background:${escapeHtml(segment.color)}"></span>
-                    <strong>${escapeHtml(segment.label)}</strong>
-                    <em>${escapeHtml(round(segment.value, 1))}%</em>
-                  </div>
-                `).join('')}
-              </div>
-            </div>
+            `).join('')}
           </div>
         </div>
-        ${visualImage ? `
-          <figure class="composition-support">
-            ${visualImage}
-            ${visual.caption ? `<figcaption>${escapeHtml(visual.caption)}</figcaption>` : ''}
-          </figure>
-        ` : ''}
       </div>
       ${explainItems.length ? `
         <div class="component-explain-grid">
@@ -1008,9 +1027,9 @@ function distributionReferenceHtml() {
         </figure>
       ` : ''}
       ${muscle ? `
-        <figure>
-          ${muscle}
+        <figure class="distribution-reference-reverse">
           <figcaption><strong>Perímetros</strong><span>Brazo, muslo y pierna.</span></figcaption>
+          ${muscle}
         </figure>
       ` : ''}
     </div>
@@ -1046,8 +1065,13 @@ function buildDistributionVisualHtml(measurement = {}, previousMeasurement = nul
 
   return `
     <section class="card">
-      <h2>Distribución adiposa y muscular</h2>
-      <p class="muted small-note">Lectura sencilla: muestra en qué zonas se concentra más la suma de pliegues o perímetros medidos. No es el porcentaje total de grasa o músculo del cuerpo; sirve para comparar distribución entre visitas.</p>
+      <div class="section-story-header">
+        <div class="section-story-copy">
+          <div class="section-kicker">Distribución corporal</div>
+          <h2>Distribución adiposa y muscular</h2>
+          <p class="muted small-note">Lectura sencilla: muestra en qué zonas se concentra más la suma de pliegues o perímetros medidos. No es el porcentaje total de grasa o músculo del cuerpo; sirve para comparar distribución entre visitas.</p>
+        </div>
+      </div>
       <div class="distribution-layout">
         ${segmentRowsHtml('Tejido adiposo', adiposeSegments, previousAdiposeSegments)}
         <div class="body-map-wrap">
@@ -1078,7 +1102,6 @@ function buildSomatotypeVisualHtml(report = {}, patient = {}) {
   const plotX = Math.max(64, Math.min(296, 180 + (x * 18)));
   const plotY = Math.max(48, Math.min(226, 154 - (y * 10)));
   const somatotypeImage = somatotypeImageDataUri(report, patient);
-  const somatotypeTriad = reportAssetImageHtml('images/nutrition-somatotype-triad.webp', 'Tres siluetas de referencia de somatotipo', 'somato-triad-img');
   const somatotypeImageHtml = somatotypeImage ? `
     <div class="somato-image-card">
       <img src="${somatotypeImage}" alt="${escapeHtml(somatotypeDominanceLabel(somatotype))}">
@@ -1088,8 +1111,14 @@ function buildSomatotypeVisualHtml(report = {}, patient = {}) {
   ` : '';
   return `
     <section class="card">
-      <h2>Somatocarta</h2>
-      <p class="muted small-note">Lectura sencilla: sitúa el tipo corporal dominante en un triángulo. Arriba predomina la musculatura, a la izquierda la adiposidad relativa y a la derecha la linealidad o complexión más ligera.</p>
+      ${sectionVisualHeaderHtml({
+        kicker: 'Somatotipo',
+        title: 'Somatocarta',
+        body: 'Lectura sencilla: sitúa el tipo corporal dominante en un triángulo. Arriba predomina la musculatura, a la izquierda la adiposidad relativa y a la derecha la linealidad o complexión más ligera.',
+        imageFilename: 'images/nutrition-somatotype-triad.webp',
+        imageAlt: 'Tres siluetas de referencia de somatotipo',
+        caption: 'Adiposidad relativa, musculatura y linealidad se combinan.',
+      })}
       <div class="somato-layout ${somatotypeImage ? 'somato-layout-with-image' : ''}">
         <svg class="somato-chart" viewBox="0 0 360 320" role="img">
           <path d="M180 38 C250 64 305 138 300 226 L60 226 C55 138 110 64 180 38 Z" fill="none" stroke="#64748b" stroke-width="2" stroke-dasharray="5 5"></path>
@@ -1121,12 +1150,6 @@ function buildSomatotypeVisualHtml(report = {}, patient = {}) {
         </div>
         ${somatotypeImageHtml}
       </div>
-      ${somatotypeTriad ? `
-        <figure class="somato-triad-card">
-          ${somatotypeTriad}
-          <figcaption>Referencia visual: adiposidad relativa, musculatura y linealidad se combinan; no es una clasificación estética.</figcaption>
-        </figure>
-      ` : ''}
     </section>
   `;
 }
@@ -1300,21 +1323,16 @@ function buildHealthIndexesHtml(measurement = {}, previousMeasurement = null) {
     },
   ].filter((row) => row.value !== null && row.value !== undefined && row.value !== '');
   if (!rows.length) return '';
-  const healthImage = reportAssetImageHtml('images/nutrition-health-indices.webp', 'Índices antropométricos de salud', 'health-support-img');
   return `
     <section class="card">
-      <div class="section-visual-heading ${healthImage ? 'section-visual-heading-with-image' : ''}">
-        <div>
-          <h2>Índices de salud</h2>
-          <p class="muted small-note">Lectura sencilla: estos índices cruzan cintura, cadera, estatura y peso para orientar el seguimiento. Un aviso no sustituye la valoración del profesional.</p>
-        </div>
-        ${healthImage ? `
-          <figure>
-            ${healthImage}
-            <figcaption>Indicadores de proporción corporal.</figcaption>
-          </figure>
-        ` : ''}
-      </div>
+      ${sectionVisualHeaderHtml({
+        kicker: 'Seguimiento',
+        title: 'Índices de salud',
+        body: 'Lectura sencilla: estos índices cruzan cintura, cadera, estatura y peso para orientar el seguimiento. Un aviso no sustituye la valoración del profesional.',
+        imageFilename: 'images/nutrition-health-indices.webp',
+        imageAlt: 'Índices antropométricos de salud',
+        caption: 'Indicadores de proporción corporal.',
+      })}
       <table class="health-table">
           <thead><tr><th>Índice</th><th>Valor</th><th>Rango saludable</th></tr></thead>
           <tbody>
@@ -3530,12 +3548,16 @@ function buildNutritionReportHtml(reportData, options = {}) {
     .sparkline-card { border: 1px solid #e2e8f0; border-radius: 8px; padding: 10px; background: #fff; }
     .sparkline-title { font-size: 12px; font-weight: 800; margin-bottom: 5px; }
     .sparkline { display: block; width: 100%; height: auto; }
-    .section-visual-heading { display: grid; gap: 12px; align-items: center; margin-bottom: 12px; }
-    .section-visual-heading-with-image { grid-template-columns: minmax(0, 1fr) 190px; }
-    .section-visual-heading h2 { margin-bottom: 4px; }
-    .section-visual-heading figure { margin: 0; border: 1px solid #e2e8f0; border-radius: 10px; padding: 10px; background: #f8fafc; text-align: left; }
-    .projection-support-img, .health-support-img { width: 100%; height: 112px; object-fit: contain; display: block; border-radius: 8px; }
-    .section-visual-heading figcaption { margin-top: 6px; color: #475569; font-size: 10px; font-weight: 800; line-height: 1.25; }
+    .section-story-header { display: grid; gap: 14px; align-items: stretch; margin-bottom: 14px; }
+    .section-story-header-with-image { grid-template-columns: 238px minmax(0, 1fr); overflow: hidden; border: 1px solid #e2e8f0; border-radius: 10px; background: #fff; }
+    .section-story-figure { margin: 0; padding: 16px; background: #f8fafc; border-right: 1px solid #e2e8f0; display: grid; align-content: center; gap: 8px; min-height: 170px; }
+    .section-story-img { width: 100%; height: 142px; object-fit: contain; object-position: center; display: block; mix-blend-mode: multiply; }
+    .section-story-figure figcaption { color: #475569; font-size: 10px; font-weight: 800; line-height: 1.3; }
+    .section-story-copy { min-width: 0; align-self: center; padding: 2px 0; }
+    .section-story-header-with-image .section-story-copy { padding: 18px 18px 16px 0; }
+    .section-story-copy h2, .section-story-copy h3 { margin: 2px 0 0; color: #0f172a; }
+    .section-story-copy h2 { font-size: 16px; }
+    .section-story-copy h3 { font-size: 14px; }
     .chart-axis { stroke: #cbd5e1; stroke-width: 1; }
     .chart-label { fill: #64748b; font-size: 10px; font-weight: 700; }
     .chart-value { fill: #0f172a; font-size: 10px; font-weight: 800; }
@@ -3567,20 +3589,17 @@ function buildNutritionReportHtml(reportData, options = {}) {
     .comparison-bars i.previous { background: #cbd5e1; }
     .comparison-bars strong { text-align: right; color: #0f172a; font-weight: 800; }
     .composition-block-grid { display: grid; gap: 12px; }
-    .composition-visual-block { border: 1px solid #e2e8f0; border-radius: 10px; padding: 12px; background: #fff; }
-    .composition-block-layout { display: grid; gap: 12px; }
-    .composition-block-layout-with-image { grid-template-columns: minmax(0, 1fr) 210px; align-items: start; }
+    .composition-visual-block { border-top: 1px solid #e2e8f0; padding-top: 14px; background: transparent; }
+    .composition-visual-block:first-child { border-top: 0; padding-top: 0; }
     .composition-visual-block h3 { margin: 0; font-size: 13px; color: #0f172a; }
-    .composition-support { margin: 0; border: 1px solid #e2e8f0; border-radius: 10px; padding: 12px; background: #f8fafc; text-align: left; }
-    .composition-support-img { width: 100%; height: 194px; object-fit: contain; display: block; border-radius: 8px; }
-    .composition-support figcaption { margin-top: 8px; color: #475569; font-size: 10px; font-weight: 800; line-height: 1.3; }
-    .component-explain-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; margin-top: 12px; }
-    .component-explain-card { display: grid; grid-template-columns: 14px minmax(0, 1fr); gap: 3px 8px; align-items: start; border: 1px solid #e2e8f0; border-radius: 8px; padding: 9px; background: #fff; }
-    .component-explain-card-with-image { grid-template-columns: 64px minmax(0, 1fr); min-height: 88px; }
-    .component-explain-grid span { width: 10px; height: 10px; border-radius: 999px; margin-top: 4px; }
-    .component-explain-img { grid-row: 1 / span 2; width: 64px; height: 74px; object-fit: contain; border-radius: 8px; background: #f8fafc; border: 1px solid #e2e8f0; }
-    .component-explain-grid strong { font-size: 12px; color: #0f172a; }
-    .component-explain-grid small { grid-column: 2; color: #64748b; font-size: 11px; line-height: 1.35; }
+    .composition-main-grid { margin-top: 4px; }
+    .component-explain-grid { display: grid; grid-template-columns: minmax(0, 1fr); gap: 0; margin-top: 14px; border-top: 1px solid #e2e8f0; }
+    .component-explain-card { display: grid; grid-template-columns: 14px minmax(0, 1fr); gap: 3px 10px; align-items: center; border-bottom: 1px solid #e2e8f0; padding: 10px 0; background: transparent; }
+    .component-explain-card-with-image { grid-template-columns: 96px minmax(0, 1fr); min-height: 106px; }
+    .component-explain-grid span { grid-row: 1 / span 2; width: 10px; height: 10px; border-radius: 999px; margin-top: 4px; display: block; }
+    .component-explain-img { grid-row: 1 / span 2; width: 86px; height: 96px; object-fit: contain; object-position: center; display: block; mix-blend-mode: multiply; filter: saturate(1.08) contrast(1.05); }
+    .component-explain-grid strong { font-size: 12px; color: #0f172a; align-self: end; }
+    .component-explain-grid small { grid-column: 2; color: #475569; font-size: 11px; line-height: 1.35; align-self: start; }
     .pending-visual { min-height: 132px; display: flex; flex-direction: column; justify-content: center; align-items: center; gap: 6px; border: 1px dashed #cbd5e1; border-radius: 10px; text-align: center; padding: 16px; }
     .pending-visual strong { color: #92400e; }
     .pending-visual span { color: #64748b; font-size: 11px; max-width: 520px; }
@@ -3618,8 +3637,11 @@ function buildNutritionReportHtml(reportData, options = {}) {
     .key-previous { background: #0f172a; opacity: .7; }
     .key-body { background: #fff; border: 2px solid #14b8a6; }
     .distribution-reference { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; margin-top: 12px; }
-    .distribution-reference figure { margin: 0; display: grid; grid-template-columns: 130px minmax(0, 1fr); gap: 14px; align-items: center; border: 1px solid #e2e8f0; border-radius: 10px; padding: 10px; background: #fff; }
-    .distribution-ref-img { width: 130px; height: 150px; object-fit: contain; display: block; border-radius: 8px; }
+    .distribution-reference figure { margin: 0; display: grid; grid-template-columns: 130px minmax(0, 1fr); gap: 14px; align-items: center; border: 1px solid #e2e8f0; border-radius: 10px; padding: 10px; background: #f8fafc; overflow: hidden; }
+    .distribution-reference-reverse { grid-template-columns: minmax(0, 1fr) 130px; }
+    .distribution-reference-reverse figcaption { text-align: right; }
+    .distribution-reference-reverse .distribution-ref-img { justify-self: end; }
+    .distribution-ref-img { width: 130px; height: 150px; object-fit: contain; object-position: center; display: block; mix-blend-mode: multiply; }
     .distribution-reference figcaption { color: #475569; font-size: 11px; line-height: 1.35; }
     .distribution-reference figcaption strong { display: block; color: #0f172a; font-size: 12px; margin-bottom: 3px; }
     .distribution-reference figcaption span { display: block; }
@@ -3637,9 +3659,6 @@ function buildNutritionReportHtml(reportData, options = {}) {
     .somato-image-card img { width: 100%; height: 170px; object-fit: contain; display: block; }
     .somato-image-card strong { display: block; margin-top: 6px; font-size: 12px; color: #0f172a; }
     .somato-image-card span { display: block; margin-top: 2px; color: #64748b; font-size: 10px; font-weight: 700; }
-    .somato-triad-card { display: grid; grid-template-columns: 210px minmax(0, 1fr); gap: 12px; align-items: center; margin: 12px 0 0; border: 1px solid #e2e8f0; border-radius: 10px; padding: 10px; background: #f8fafc; }
-    .somato-triad-img { width: 210px; height: 122px; object-fit: contain; border-radius: 8px; background: #fff; display: block; }
-    .somato-triad-card figcaption { color: #475569; font-size: 10px; font-weight: 750; line-height: 1.35; }
     .health-table td:nth-child(2), .health-table td:nth-child(3) { text-align: right; white-space: nowrap; }
     .health-badge { display: inline-flex; min-width: 44px; justify-content: center; border-radius: 4px; padding: 3px 6px; font-weight: 850; }
     .health-ok { background: #16a34a; color: #fff; }
