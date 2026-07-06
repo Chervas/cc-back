@@ -72,7 +72,7 @@ Reglas:
 
 - El panel se sirve desde backend; el frontend no debe recomponerlo con llamadas paralelas a agenda, leads, consentimientos o reseñas.
 - El servicio `panelesDashboard.service.js` evita `include`/left joins para el contrato del panel: consulta tablas base y enriquece en memoria por mapas de IDs.
-- `todayAppointments` usa rango de día completo y excluye citas canceladas/reprogramadas. `pastAttendancePending` devuelve citas ya finalizadas sin asistencia cerrada para que la UI pregunte si acudió.
+- `todayAppointments` usa rango de día completo y excluye citas canceladas/reprogramadas y citas ya cerradas como `completada`/`no_asistio`, porque el bloque operativo representa "citas que esperamos hoy". `doctorAppointmentsToday` conserva la agenda del doctor con el estado de cada cita del día. `pastAttendancePending` devuelve citas ya finalizadas sin asistencia cerrada para que la UI pregunte si acudió.
 - Las acciones de asistencia siguen usando el endpoint canónico `PATCH /api/citas/:id/estado`.
 - Desde 2026-07-04 la respuesta incluye `setup` para primeros pasos generales, `criticalAlerts` para bloqueos técnicos, `growthOpportunities` para crecimiento y `meta.generatedAt` para mostrar la última actualización.
 - Desde 2026-07-04 la respuesta incluye `nextAppointments` para que el frontend explique estados vacíos de "citas de hoy" sin recomponer agenda en Angular. Se calcula en backend con la misma tabla base `CitasPacientes` y excluye canceladas/reprogramadas.

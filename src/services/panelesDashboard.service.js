@@ -39,6 +39,7 @@ const ATTENDANCE_OPEN_STATUSES = new Set([
   'recordatorio_confirmado',
 ]);
 const CANCELLED_STATUSES = new Set(['cancelada', 'reprogramada']);
+const CLOSED_ATTENDANCE_STATUSES = new Set(['completada', 'no_asistio']);
 const UNCONFIRMED_TODAY_STATUSES = ['pendiente', 'info_enviada', 'recordatorio_enviado'];
 const PENDING_CONSENT_STATUSES = ['pending', 'sent', 'viewed'];
 
@@ -366,7 +367,17 @@ function mapAppointment(row, maps, now) {
   };
 }
 
-async function loadAppointments({ clinicIds, clinicMap, todayStart, todayEnd, now, doctorId = null, includePastAttendance = true, includeNext = true }) {
+async function loadAppointments({
+  clinicIds,
+  clinicMap,
+  todayStart,
+  todayEnd,
+  now,
+  doctorId = null,
+  includePastAttendance = true,
+  includeNext = true,
+  includeClosedToday = false,
+}) {
   if (!clinicIds.length || !CitaPaciente) {
     return { today: [], pastAttendance: [], next: [] };
   }
@@ -427,6 +438,7 @@ async function loadAppointments({ clinicIds, clinicMap, todayStart, todayEnd, no
   return {
     today: todayRows
       .filter((row) => !CANCELLED_STATUSES.has(String(row.estado || '').toLowerCase()))
+      .filter((row) => includeClosedToday || !CLOSED_ATTENDANCE_STATUSES.has(String(row.estado || '').toLowerCase()))
       .map((row) => mapAppointment(row, maps, now)),
     pastAttendance: pastRows
       .filter((row) => !CANCELLED_STATUSES.has(String(row.estado || '').toLowerCase()))
@@ -978,6 +990,7 @@ async function getMainDashboard({ userId, query = {} }) {
     doctorId,
     includePastAttendance: sections.operations,
     includeNext: sections.operations,
+    includeClosedToday: sections.doctor,
   });
   const counts = sections.operations
     ? await countTasks({
