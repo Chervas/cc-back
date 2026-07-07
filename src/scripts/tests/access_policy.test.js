@@ -21,6 +21,17 @@ async function run() {
   assert.equal(accessPolicy.defaultForFeature('appointments.view', 'unknown'), true);
   assert.equal(accessPolicy.defaultForFeature('appointments.manage', 'unknown'), false);
 
+  assert.equal(accessPolicy.ALLOWED_FEATURE_KEYS.has('consents.view'), true);
+  assert.equal(features.get('consents.view')?.kind, 'view');
+  assert.equal(features.get('consents.view')?.enforcement_status, 'route');
+
+  assert.equal(accessPolicy.ALLOWED_FEATURE_KEYS.has('consents.manage'), true);
+  assert.equal(features.get('consents.manage')?.kind, 'action');
+  assert.equal(features.get('consents.manage')?.enforcement_status, 'partial');
+
+  assert.equal(accessPolicy.defaultForFeature('consents.view', 'unknown'), false);
+  assert.equal(accessPolicy.defaultForFeature('consents.manage', 'unknown'), false);
+
   console.log('access_policy.test.js OK');
 }
 

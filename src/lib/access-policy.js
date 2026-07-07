@@ -13,6 +13,7 @@ const ALLOWED_FEATURE_KEYS = new Set([
   'patients.edit',
   'appointments.view',
   'appointments.manage',
+  'consents.view',
   'consents.manage',
   'quickchat.read_patients',
   'quickchat.read_team',
@@ -97,6 +98,15 @@ const DEFAULT_FEATURES = {
     unknown: true,
   },
   'appointments.manage': {
+    propietario: true,
+    agencia: true,
+    doctor: true,
+    assistant: true,
+    reception: true,
+    admin_staff: true,
+    unknown: false,
+  },
+  'consents.view': {
     propietario: true,
     agencia: true,
     doctor: true,
@@ -240,6 +250,14 @@ const FEATURE_CATALOG = [
     label: 'Gestionar agenda',
     enforcement_status: 'backend',
     sensitive: false,
+  },
+  {
+    key: 'consents.view',
+    group: 'clinical_operations',
+    kind: 'view',
+    label: 'Ver consentimientos',
+    enforcement_status: 'route',
+    sensitive: true,
   },
   {
     key: 'consents.manage',
