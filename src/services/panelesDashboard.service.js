@@ -821,7 +821,7 @@ async function loadSetupStatus({ clinicIds, groupIds, clinics, whatsappStatus })
       description: 'Necesario para plantillas, confirmaciones y recordatorios automáticos.',
       completed: whatsappStatus.connected === true,
       link: '/ajustes',
-      queryParams: { tab: 'connected-accounts' },
+      queryParams: { panel: 'connected-accounts' },
       actionLabel: 'Conectar',
     },
     {
@@ -831,7 +831,7 @@ async function loadSetupStatus({ clinicIds, groupIds, clinics, whatsappStatus })
       completed: whatsappStatus.paymentReady === true,
       severity: whatsappStatus.paymentMissing ? 'critical' : 'normal',
       link: '/ajustes',
-      queryParams: { tab: 'connected-accounts' },
+      queryParams: { panel: 'connected-accounts' },
       actionLabel: 'Revisar',
     },
     {
@@ -1034,7 +1034,7 @@ async function getMainDashboard({ userId, query = {} }) {
       title: 'No tienes WhatsApp conectado',
       subtitle: 'Conecta o asigna el numero para enviar plantillas y automatizaciones.',
       link: '/ajustes',
-      queryParams: { tab: 'connected-accounts' },
+      queryParams: { panel: 'connected-accounts' },
       actionLabel: 'Ir a Cuentas conectadas',
     });
   } else if (whatsappStatus.paymentMissing) {
@@ -1043,7 +1043,7 @@ async function getMainDashboard({ userId, query = {} }) {
       title: 'WhatsApp no tiene método de pago activo',
       subtitle: 'Meta puede bloquear plantillas y recordatorios hasta que se configure la facturación.',
       link: '/ajustes',
-      queryParams: { tab: 'connected-accounts' },
+      queryParams: { panel: 'connected-accounts' },
       actionLabel: 'Revisar pago',
     });
   }
