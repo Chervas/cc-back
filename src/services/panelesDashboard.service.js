@@ -152,7 +152,7 @@ function panelScopeForbidden() {
   return error;
 }
 
-async function loadUserContext({ userId, requestedClinicIds, requestedRole, requestedSubrol }) {
+async function loadUserContext({ userId, requestedClinicIds }) {
   const globalAdmin = isGlobalAdmin(userId);
   const [user, memberships] = await Promise.all([
     userId && Usuario
@@ -177,12 +177,12 @@ async function loadUserContext({ userId, requestedClinicIds, requestedRole, requ
 
   const role = String(
     globalAdmin
-      ? (requestedRole || 'administrador')
+      ? 'administrador'
       : selectedMembership?.rol_clinica || ''
   ).trim().toLowerCase();
   const subrolLabel = String(
     globalAdmin
-      ? (requestedSubrol || selectedMembership?.subrol_clinica || '')
+      ? (selectedMembership?.subrol_clinica || '')
       : selectedMembership?.subrol_clinica || ''
   ).trim();
   const subrolCode = normalizeSubrolCode(subrolLabel);
@@ -1135,8 +1135,6 @@ async function getMainDashboard({ userId, query = {} }) {
   const context = await loadUserContext({
     userId,
     requestedClinicIds: firstRequestedClinicIds,
-    requestedRole: query.role,
-    requestedSubrol: query.subrol,
   });
 
   const scope = await resolveClinicScope(requestedScope, context.memberships, {

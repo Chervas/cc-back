@@ -84,6 +84,20 @@ async function run() {
   assert.equal(dashboard.rolePresentation?.mode, 'clinic_operations');
   assert.equal(typeof dashboard.rolePresentation?.title, 'string');
 
+  const dashboardWithSpoofedRole = await panelesDashboardService.getMainDashboard({
+    userId: adminId,
+    query: {
+      clinica_id: String(clinicId),
+      date: '2026-07-06',
+      role: 'paciente',
+      subrol: 'doctor',
+    },
+  });
+
+  assert.equal(dashboardWithSpoofedRole.role.code, 'administrador');
+  assert.equal(dashboardWithSpoofedRole.sections.showOperations, true);
+  assert.notEqual(dashboardWithSpoofedRole.rolePresentation?.mode, 'restricted');
+
   const patientMembership = await pickPatientMembership();
   if (patientMembership) {
     const patientDashboard = await panelesDashboardService.getMainDashboard({
