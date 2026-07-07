@@ -228,7 +228,7 @@ const FEATURE_CATALOG = [
     group: 'clinical_operations',
     kind: 'action',
     label: 'Gestionar consentimientos',
-    enforcement_status: 'backend',
+    enforcement_status: 'partial',
     sensitive: false,
   },
   {
