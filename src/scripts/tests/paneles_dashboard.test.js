@@ -5,6 +5,7 @@ require('dotenv').config();
 const assert = require('node:assert/strict');
 const db = require('../../../models');
 const panelesDashboardService = require('../../services/panelesDashboard.service');
+const { __testing } = panelesDashboardService;
 
 function firstGlobalAdminId() {
   const raw = process.env.ADMIN_USER_IDS || '1,44';
@@ -42,6 +43,28 @@ async function pickPatientMembership() {
 }
 
 async function run() {
+  assert.equal(__testing.statusUi('no_asistio').label, 'No asistió');
+  assert.equal(
+    __testing.isExpectedTodayAppointment({ rawStatus: 'pendiente', attendanceDue: true }),
+    false,
+    'Open appointments whose end already passed must move out of todayAppointments'
+  );
+  assert.equal(
+    __testing.isExpectedTodayAppointment({ rawStatus: 'pendiente', attendanceDue: false }),
+    true,
+    'Open appointments that are not due for attendance still count as expected today'
+  );
+  assert.equal(
+    __testing.isExpectedTodayAppointment({ rawStatus: 'completada', attendanceDue: false }),
+    false,
+    'Closed appointments do not count as expected today for operations'
+  );
+  assert.equal(
+    __testing.isExpectedTodayAppointment({ rawStatus: 'completada', attendanceDue: false }, { includeClosedToday: true }),
+    true,
+    'Doctor day view keeps closed appointments with their state'
+  );
+
   const adminId = firstGlobalAdminId();
   const clinicId = await pickClinicForGlobalAdmin(adminId);
 

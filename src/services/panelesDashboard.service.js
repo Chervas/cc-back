@@ -125,7 +125,7 @@ function statusUi(rawStatus) {
     case 'completada':
       return { status: 'attended', label: 'Acudió' };
     case 'no_asistio':
-      return { status: 'no-show', label: 'No asistio' };
+      return { status: 'no-show', label: 'No asistió' };
     case 'cancelada':
       return { status: 'cancelled', label: 'Cancelada' };
     case 'reprogramada':
@@ -367,6 +367,19 @@ function mapAppointment(row, maps, now) {
   };
 }
 
+function isExpectedTodayAppointment(item, { includeClosedToday = false } = {}) {
+  const status = String(item?.rawStatus || '').toLowerCase();
+  if (CANCELLED_STATUSES.has(status)) return false;
+  if (includeClosedToday) return true;
+  if (CLOSED_ATTENDANCE_STATUSES.has(status)) return false;
+  return item?.attendanceDue !== true;
+}
+
+function isInactiveTodayAppointment(item, { includeClosedToday = false } = {}) {
+  const status = String(item?.rawStatus || '').toLowerCase();
+  return CANCELLED_STATUSES.has(status) || (!includeClosedToday && CLOSED_ATTENDANCE_STATUSES.has(status));
+}
+
 async function loadAppointments({
   clinicIds,
   clinicMap,
@@ -442,13 +455,9 @@ async function loadAppointments({
 
   return {
     today: mappedToday
-      .filter((item) => !CANCELLED_STATUSES.has(String(item.rawStatus || '').toLowerCase()))
-      .filter((item) => includeClosedToday || !CLOSED_ATTENDANCE_STATUSES.has(String(item.rawStatus || '').toLowerCase())),
+      .filter((item) => isExpectedTodayAppointment(item, { includeClosedToday })),
     inactiveToday: mappedToday
-      .filter((item) => {
-        const status = String(item.rawStatus || '').toLowerCase();
-        return CANCELLED_STATUSES.has(status) || (!includeClosedToday && CLOSED_ATTENDANCE_STATUSES.has(status));
-      }),
+      .filter((item) => isInactiveTodayAppointment(item, { includeClosedToday })),
     pastAttendance: pastRows
       .filter((row) => !CANCELLED_STATUSES.has(String(row.estado || '').toLowerCase()))
       .map((row) => mapAppointment(row, maps, now))
@@ -1258,4 +1267,9 @@ async function getMainDashboard({ userId, query = {} }) {
 
 module.exports = {
   getMainDashboard,
+  __testing: {
+    isExpectedTodayAppointment,
+    isInactiveTodayAppointment,
+    statusUi,
+  },
 };
