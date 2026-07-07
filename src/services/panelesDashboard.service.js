@@ -435,11 +435,17 @@ async function loadAppointments({
   const allRows = [...todayRows, ...pastRows, ...nextRows];
   const maps = await loadAppointmentMaps(allRows, clinicMap);
 
+  const mappedToday = todayRows.map((row) => mapAppointment(row, maps, now));
+
   return {
-    today: todayRows
-      .filter((row) => !CANCELLED_STATUSES.has(String(row.estado || '').toLowerCase()))
-      .filter((row) => includeClosedToday || !CLOSED_ATTENDANCE_STATUSES.has(String(row.estado || '').toLowerCase()))
-      .map((row) => mapAppointment(row, maps, now)),
+    today: mappedToday
+      .filter((item) => !CANCELLED_STATUSES.has(String(item.rawStatus || '').toLowerCase()))
+      .filter((item) => includeClosedToday || !CLOSED_ATTENDANCE_STATUSES.has(String(item.rawStatus || '').toLowerCase())),
+    inactiveToday: mappedToday
+      .filter((item) => {
+        const status = String(item.rawStatus || '').toLowerCase();
+        return CANCELLED_STATUSES.has(status) || (!includeClosedToday && CLOSED_ATTENDANCE_STATUSES.has(status));
+      }),
     pastAttendance: pastRows
       .filter((row) => !CANCELLED_STATUSES.has(String(row.estado || '').toLowerCase()))
       .map((row) => mapAppointment(row, maps, now))
@@ -1072,6 +1078,7 @@ async function getMainDashboard({ userId, query = {} }) {
       showOwnerFeedback: sections.ownerLike,
     },
     todayAppointments: sections.operations ? appointments.today : [],
+    inactiveTodayAppointments: sections.operations ? appointments.inactiveToday : [],
     nextAppointments: sections.operations ? appointments.next : [],
     pastAttendancePending: sections.operations ? appointments.pastAttendance : [],
     doctorAppointmentsToday: doctorAppointments,

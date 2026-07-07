@@ -48,6 +48,7 @@ async function run() {
   assert.equal(dashboard?.meta?.source, 'backend');
   assert.deepEqual(dashboard.scope.clinicIds, [clinicId]);
   assert.equal(dashboard.sections.showShared, true);
+  assert.equal(Array.isArray(dashboard.inactiveTodayAppointments), true);
 
   console.log('paneles_dashboard.test.js OK');
 }
