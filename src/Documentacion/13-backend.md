@@ -98,7 +98,7 @@ Contrato:
 
 - `scope_type`: `group` o `clinic`.
 - `scope_id`: ID del grupo o clínica.
-- `feature_key`: `marketing`, `clinic.settings.edit`, `team.manage`, `billing.reports.view`, `patients.view`, `patients.edit`, `appointments.manage`, `consents.manage`, `quickchat.read_patients`, `quickchat.read_team`, `quickchat.read_leads`, `nutrition.workspace.view`, `nutrition.measurements.create`, `nutrition.reports.finalize`.
+- `feature_key`: `marketing`, `clinic.settings.edit`, `team.manage`, `billing.reports.view`, `patients.view`, `patients.edit`, `appointments.view`, `appointments.manage`, `consents.manage`, `quickchat.read_patients`, `quickchat.read_team`, `quickchat.read_leads`, `nutrition.workspace.view`, `nutrition.measurements.create`, `nutrition.reports.finalize`.
 - `role_code`: `propietario`, `agencia`, `doctor`, `assistant`, `reception`, `admin_staff` o `unknown`.
 - `effect`: `allow` o `deny`; `state=inherit` borra el override.
 
@@ -111,7 +111,7 @@ Reglas:
 - `GET /api/access-policies/assignments` usa el mismo scope de lectura que `overrides` y agrupa `UsuarioClinica` por `role_code` normalizado. Sirve para que Ajustes muestre qué usuarios reales heredarán cada cambio de la matriz.
 - La tabla `AccessPolicyOverrides` usa una clave única por `scope_type`, `scope_id`, `feature_key` y `role_code`.
 - Pacientes consume `patients.edit` en mutaciones de ficha: creación, actualización, transferencia de contacto, vinculación a clínica y borrado. En actualización se valida la clínica actual y, si cambia `clinica_id`, también la clínica destino.
-- Agenda consume `appointments.manage` en mutaciones reales de cita: `POST /api/citas`, `PATCH /api/citas/:id/estado`, `PATCH /api/citas/:id/nota` y `PATCH /api/citas/:id/reagendar`. Las lecturas de agenda quedan fuera de este permiso de escritura.
+- Agenda separa lectura y escritura: `appointments.view` permite abrir la vista de agenda en frontend; `appointments.manage` se reserva para mutaciones reales de cita (`POST /api/citas`, `PATCH /api/citas/:id/estado`, `PATCH /api/citas/:id/nota` y `PATCH /api/citas/:id/reagendar`). Las lecturas de agenda quedan fuera de este permiso de escritura.
 - Nutrición consume estos permisos en backend: `nutrition.workspace.view` protege la ficha, informes HTML y PDF; `nutrition.measurements.create` protege alta de mediciones y snapshots persistidos, siempre junto a `nutrition.workspace.view`; `nutrition.reports.finalize` protege el cierre de informes como snapshot final. Por defecto propietario y doctor pueden cerrar informes; auxiliar puede registrar mediciones pero no cerrar informes salvo override.
 - Consentimientos consume `consents.manage` de forma parcial en adjuntos clínicos: los assets `consent_document_pdf` se listan/descargan desde `GET /api/pacientes/:id/clinical-attachments` solo si el rol tiene esa capacidad. Las acciones internas de `/api/consentimientos/*` siguen pendientes de enforcement granular por esta misma capacidad.
 - QuickChat consume `quickchat.read_patients`, `quickchat.read_team` y `quickchat.read_leads` en `GET /api/conversations/permissions` para mostrar u ocultar pestañas según el scope activo. El acceso a conversaciones sigue validando pertenencia a clínica; el endurecimiento por categoría en todos los endpoints de mensajes queda como siguiente capa si se quiere convertir estas capacidades en ACL estricta de lectura.

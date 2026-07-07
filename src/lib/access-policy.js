@@ -11,6 +11,7 @@ const ALLOWED_FEATURE_KEYS = new Set([
   'billing.reports.view',
   'patients.view',
   'patients.edit',
+  'appointments.view',
   'appointments.manage',
   'consents.manage',
   'quickchat.read_patients',
@@ -85,6 +86,15 @@ const DEFAULT_FEATURES = {
     reception: true,
     admin_staff: true,
     unknown: false,
+  },
+  'appointments.view': {
+    propietario: true,
+    agencia: true,
+    doctor: true,
+    assistant: true,
+    reception: true,
+    admin_staff: true,
+    unknown: true,
   },
   'appointments.manage': {
     propietario: true,
@@ -213,6 +223,14 @@ const FEATURE_CATALOG = [
     kind: 'action',
     label: 'Editar pacientes',
     enforcement_status: 'backend',
+    sensitive: false,
+  },
+  {
+    key: 'appointments.view',
+    group: 'clinical_operations',
+    kind: 'view',
+    label: 'Ver agenda',
+    enforcement_status: 'route',
     sensitive: false,
   },
   {
