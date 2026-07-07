@@ -14,7 +14,7 @@ const clinicalPrivateStorage = require('./clinicalPrivateStorage.service');
 const { Op } = db.Sequelize;
 const execFileAsync = promisify(execFile);
 const FORMULA_VERSION = 'nutrition-basic-v3';
-const NUTRITION_REPORT_SNAPSHOT_VERSION = 11;
+const NUTRITION_REPORT_SNAPSHOT_VERSION = 12;
 const NUTRITION_REPORT_CURRENT_STATUSES = ['final', 'active'];
 const NUTRITION_REPORT_BRANDING_MODES = new Set(['clinicaclick', 'clinic']);
 const DEFAULT_CHROMIUM_PATH = '/home/ubuntu/.cache/clinicaclick-browsers/chrome-headless-shell/linux-148.0.7778.56/chrome-headless-shell-linux64/chrome-headless-shell';
@@ -3837,8 +3837,8 @@ function buildNutritionReportHtml(reportData, options = {}) {
     .report-visual-intro { display: grid; grid-template-columns: minmax(0, 1fr); padding: 0; overflow: hidden; }
     .report-visual-intro-with-image { grid-template-columns: minmax(0, 1fr) 270px; }
     .report-visual-intro h2 { margin-bottom: 0; font-size: 16px; }
-    .report-intro-main { margin: 0; padding: 14px 16px 14px 10px; background: transparent; display: grid; align-content: center; min-height: 190px; }
-    .report-intro-img { width: 100%; height: 170px; object-fit: contain; object-position: center; display: block; mix-blend-mode: multiply; }
+    .report-intro-main { margin: 0; padding: 10px 16px 10px 8px; background: transparent; display: grid; align-content: center; min-height: 190px; }
+    .report-intro-img { width: 100%; height: 190px; object-fit: contain; object-position: center right; display: block; background: transparent; mix-blend-mode: normal; }
     .report-intro-content { padding: 18px 18px 16px; }
     .report-intro-title { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
     .report-intro-title span { flex: none; border-radius: 999px; background: #eef2ff; color: #4338ca; padding: 4px 10px; font-size: 10px; font-weight: 850; }
@@ -3872,9 +3872,9 @@ function buildNutritionReportHtml(reportData, options = {}) {
     .sparkline-title { font-size: 12px; font-weight: 800; margin-bottom: 5px; }
     .sparkline { display: block; width: 100%; height: auto; }
     .section-story-header { display: grid; gap: 14px; align-items: stretch; margin-bottom: 14px; }
-    .section-story-header-with-image { grid-template-columns: minmax(0, 1fr) 270px; overflow: hidden; border-radius: 10px; background: transparent; }
-    .section-story-figure { margin: 0; padding: 8px 0 8px 14px; background: transparent; display: grid; align-content: center; min-height: 184px; }
-    .section-story-img { width: 100%; height: 176px; object-fit: contain; object-position: center; display: block; mix-blend-mode: multiply; }
+    .section-story-header-with-image { grid-template-columns: minmax(0, 1fr) 260px; overflow: hidden; border-radius: 10px; background: transparent; }
+    .section-story-figure { margin: 0; padding: 4px 0 8px 16px; background: transparent; display: grid; place-items: center end; min-height: 178px; }
+    .section-story-img { width: 100%; height: 178px; object-fit: contain; object-position: center right; display: block; background: transparent; mix-blend-mode: normal; }
     .section-story-copy { min-width: 0; align-self: center; padding: 2px 0; }
     .section-story-header-with-image .section-story-copy { padding: 16px 0 14px 18px; }
     .section-story-copy h2, .section-story-copy h3 { margin: 2px 0 0; color: #0f172a; }
@@ -3910,19 +3910,19 @@ function buildNutritionReportHtml(reportData, options = {}) {
     .composition-visual-block h3 { margin: 0; font-size: 13px; color: #0f172a; }
     .composition-main-grid { margin-top: 4px; }
     .component-explain-grid { display: grid; grid-template-columns: minmax(0, 1fr); gap: 0; margin-top: 16px; border-top: 1px solid #e2e8f0; }
-    .component-explain-card { display: grid; grid-template-columns: minmax(0, 1fr); gap: 12px; align-items: center; border-bottom: 1px solid #e2e8f0; padding: 15px 0; background: transparent; break-inside: avoid; }
-    .component-explain-card-with-image { grid-template-columns: minmax(0, 1fr) 390px; gap: 28px; min-height: 380px; }
+    .component-explain-card { display: grid; grid-template-columns: minmax(0, 1fr); gap: 12px; align-items: center; border-bottom: 1px solid #e2e8f0; padding: 18px 0; background: transparent; break-inside: avoid; }
+    .component-explain-card-with-image { grid-template-columns: minmax(0, 1fr) minmax(340px, 430px); gap: 32px; min-height: 430px; }
     .component-explain-heading { display: flex; align-items: center; gap: 8px; }
     .component-explain-dot { flex: none; width: 11px; height: 11px; border-radius: 999px; display: block; box-shadow: 0 0 0 4px rgba(226, 232, 240, .65); }
-    .component-explain-figure { margin: 0; min-height: 368px; display: grid; place-items: center end; background: transparent; overflow: hidden; }
-    .component-explain-img { width: 390px; height: 368px; object-fit: contain; object-position: center; display: block; mix-blend-mode: multiply; filter: saturate(1.08) contrast(1.06); }
-    .component-explain-body { display: grid; gap: 8px; align-content: center; }
+    .component-explain-figure { margin: 0; min-height: 410px; display: grid; place-items: center end; background: transparent; overflow: hidden; }
+    .component-explain-img { width: 430px; height: 410px; object-fit: contain; object-position: center right; display: block; background: transparent; mix-blend-mode: normal; filter: saturate(1.08) contrast(1.06); }
+    .component-explain-body { display: grid; gap: 10px; align-content: center; }
     .component-explain-grid strong { font-size: 15px; color: #0f172a; }
     .component-explain-grid small { color: #475569; font-size: 12px; line-height: 1.45; max-width: 48ch; }
-    .component-inline-bar { display: grid; grid-template-columns: minmax(0, 1fr) 84px; gap: 12px; align-items: center; margin-top: 12px; }
-    .component-inline-bar::before { content: ''; grid-column: 1; grid-row: 1; height: 22px; border-radius: 999px; background: #e2e8f0; }
-    .component-inline-bar i { grid-column: 1; grid-row: 1; height: 22px; border-radius: 999px; display: block; min-width: 4px; z-index: 1; }
-    .component-inline-bar em { grid-column: 2; grid-row: 1; color: #0f172a; font-style: normal; font-size: 15px; font-weight: 850; text-align: right; }
+    .component-inline-bar { display: grid; grid-template-columns: minmax(0, 1fr) 92px; gap: 12px; align-items: center; margin-top: 14px; max-width: 560px; }
+    .component-inline-bar::before { content: ''; grid-column: 1; grid-row: 1; height: 26px; border-radius: 999px; background: #e2e8f0; }
+    .component-inline-bar i { grid-column: 1; grid-row: 1; height: 26px; border-radius: 999px; display: block; min-width: 4px; z-index: 1; }
+    .component-inline-bar em { grid-column: 2; grid-row: 1; color: #0f172a; font-style: normal; font-size: 16px; font-weight: 850; text-align: right; }
     .pending-visual { min-height: 132px; display: flex; flex-direction: column; justify-content: center; align-items: center; gap: 6px; border: 1px dashed #cbd5e1; border-radius: 10px; text-align: center; padding: 16px; }
     .pending-visual strong { color: #92400e; }
     .pending-visual span { color: #64748b; font-size: 11px; max-width: 520px; }
@@ -3964,7 +3964,7 @@ function buildNutritionReportHtml(reportData, options = {}) {
     .distribution-reference-reverse { grid-template-columns: minmax(0, 1fr) 170px; }
     .distribution-reference-reverse figcaption { text-align: right; }
     .distribution-reference-reverse .distribution-ref-img { justify-self: end; }
-    .distribution-ref-img { width: 170px; height: 186px; object-fit: contain; object-position: center; display: block; mix-blend-mode: multiply; }
+    .distribution-ref-img { width: 184px; height: 204px; object-fit: contain; object-position: center; display: block; background: transparent; mix-blend-mode: normal; }
     .distribution-reference figcaption { color: #475569; font-size: 12px; line-height: 1.4; }
     .distribution-reference figcaption strong { display: block; color: #0f172a; font-size: 13px; margin-bottom: 4px; }
     .distribution-reference figcaption span { display: block; }
@@ -3976,11 +3976,11 @@ function buildNutritionReportHtml(reportData, options = {}) {
     .somato-values { display: grid; gap: 10px; }
     .somato-value-card { display: grid; grid-template-columns: 68px minmax(0, 1fr); gap: 2px 11px; align-items: center; border: 0; border-bottom: 1px solid #e2e8f0; border-radius: 0; padding: 8px 0; background: transparent; }
     .somato-value-card:last-child { border-bottom: 0; }
-    .somato-value-card img { grid-row: 1 / span 2; width: 68px; height: 74px; object-fit: contain; border-radius: 0; background: transparent; mix-blend-mode: multiply; filter: saturate(1.06) contrast(1.04); }
+    .somato-value-card img { grid-row: 1 / span 2; width: 76px; height: 84px; object-fit: contain; border-radius: 0; background: transparent; mix-blend-mode: normal; filter: saturate(1.06) contrast(1.04); }
     .somato-value-card span { display: block; color: #64748b; font-size: 11px; font-weight: 700; }
     .somato-value-card strong { display: block; font-size: 24px; line-height: 1; color: #0f172a; }
     .somato-image-card { border: 0; border-radius: 10px; padding: 0; text-align: center; background: transparent; }
-    .somato-image-card img { width: 100%; height: 228px; object-fit: contain; display: block; background: transparent; mix-blend-mode: multiply; filter: saturate(1.06) contrast(1.04); }
+    .somato-image-card img { width: 100%; height: 248px; object-fit: contain; display: block; background: transparent; mix-blend-mode: normal; filter: saturate(1.06) contrast(1.04); }
     .somato-image-card strong { display: block; margin-top: 6px; font-size: 12px; color: #0f172a; }
     .health-table td:nth-child(2), .health-table td:nth-child(3) { text-align: right; white-space: nowrap; }
     .health-badge { display: inline-flex; min-width: 44px; justify-content: center; border-radius: 4px; padding: 3px 6px; font-weight: 850; }
@@ -4021,7 +4021,7 @@ function buildNutritionReportHtml(reportData, options = {}) {
       .hero-metrics, .metric-grid, .comparison-section-grid, .sparkline-grid, .legend-grid, .summary, .report-reading-list, .distribution-reference { grid-template-columns: minmax(0, 1fr); }
       .component-explain-card-with-image { grid-template-columns: minmax(0, 1fr); }
       .component-explain-figure { min-height: auto; place-items: center; }
-      .component-explain-img { width: 100%; max-width: 390px; height: 310px; }
+      .component-explain-img { width: 100%; max-width: 430px; height: 340px; }
       .distribution-reference figure, .distribution-reference-reverse { grid-template-columns: minmax(0, 1fr); }
       .distribution-reference-reverse figcaption { text-align: left; }
       .distribution-reference-reverse .distribution-ref-img { justify-self: start; }
