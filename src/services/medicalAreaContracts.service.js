@@ -133,7 +133,7 @@ const TREATMENT_SERVICE_EXAMPLES = {
   veterinaria: ['Consulta veterinaria', 'Revisión postoperatoria', 'Vacunación'],
   podologia: ['Valoración podológica', 'Quiropodia', 'Revisión de plantillas'],
   cirugia_digestiva: ['Consulta quirúrgica inicial', 'Revisión postoperatoria', 'Seguimiento digestivo'],
-  general: ['Consulta inicial', 'Revisión clínica', 'Seguimiento'],
+  general: ['Consulta inicial', 'Revisión clínica', 'Seguimiento clínico'],
 };
 
 const NUTRITION_SERVICE_KIND_OPTIONS = [
