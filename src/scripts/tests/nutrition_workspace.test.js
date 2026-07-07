@@ -464,12 +464,15 @@ function run() {
   assert.match(html, /Somatocarta/);
   assert.match(html, /Lectura sencilla/);
   assert.match(html, /Paciente/);
+  assert.match(html, /somato-image-card \{[^}]*background: transparent/);
+  assert.match(html, /somato-image-card img \{[^}]*mix-blend-mode: multiply/);
   assert.doesNotMatch(html, /Referencia visual orientativa/);
   assert.match(html, /Fraccionamiento molecular/);
   assert.match(html, /Fraccionamiento tisular/);
   assert.match(html, /Reserva energética del cuerpo/);
   assert.match(html, /component-explain-heading/);
   assert.match(html, /component-explain-card-with-image/);
+  assert.match(html, /component-explain-card-with-image \{[^}]*minmax\(360px, 520px\)/);
   assert.match(html, /component-inline-bar/);
   assert.doesNotMatch(html, /class="composition-bar"/);
   assert.doesNotMatch(html, /bar-chart-grid/);
@@ -600,7 +603,7 @@ function run() {
     },
   }, html, '2026-02-26T11:00:00.000Z');
   assert.equal(snapshotPayload.snapshot.kind, 'nutrition_measurement_report');
-  assert.equal(snapshotPayload.snapshot.snapshot_version, 12);
+  assert.equal(snapshotPayload.snapshot.snapshot_version, 13);
   assert.equal(snapshotPayload.snapshot.report.calculation_profile.code, CALCULATION_PROFILE.code);
   assert.equal(snapshotPayload.snapshot.measurement.id, 2);
   assert.equal(snapshotPayload.snapshot.report.measurement_id, 2);
