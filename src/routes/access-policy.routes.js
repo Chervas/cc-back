@@ -8,6 +8,7 @@ router.use(authMiddleware);
 
 router.get('/catalog', accessPolicyController.getCatalog);
 router.get('/overrides', accessPolicyController.getOverrides);
+router.get('/assignments', accessPolicyController.getAssignments);
 router.put('/overrides', accessPolicyController.upsertOverride);
 
 module.exports = router;

@@ -91,6 +91,7 @@ Endpoint real:
 |:---|:---|:---|
 | `GET /api/access-policies/catalog` | Operativo V1 | Devuelve el catálogo backend de roles, capacidades y defaults base. |
 | `GET /api/access-policies/overrides` | Operativo V1 | Lista overrides accesibles para el usuario autenticado. |
+| `GET /api/access-policies/assignments` | Operativo V1 | Devuelve usuarios afectados por rol/subrol en un ámbito de clínica o grupo. |
 | `PUT /api/access-policies/overrides` | Operativo V1 | Crea, actualiza o elimina (`state=inherit`) un override por ámbito, capacidad y rol operativo. |
 
 Contrato:
@@ -107,6 +108,7 @@ Reglas:
 - Cada feature del catálogo expone `kind`: `view` para acceso de vista/módulo, `read` para lectura de conversaciones o datos y `action` para permisos de escritura o gestión. `Ajustes > Control de acceso` usa esa clasificación para enseñar primero los accesos básicos de vista/lectura y después la matriz completa de acciones por rol.
 - `administrador` no se persiste como `role_code`; mantiene acceso completo.
 - Un administrador puede leer/escribir todos los ámbitos. Un propietario solo puede escribir overrides en sus clínicas/grupos; el resto de staff solo lee sus ámbitos accesibles.
+- `GET /api/access-policies/assignments` usa el mismo scope de lectura que `overrides` y agrupa `UsuarioClinica` por `role_code` normalizado. Sirve para que Ajustes muestre qué usuarios reales heredarán cada cambio de la matriz.
 - La tabla `AccessPolicyOverrides` usa una clave única por `scope_type`, `scope_id`, `feature_key` y `role_code`.
 - Pacientes consume `patients.edit` en mutaciones de ficha: creación, actualización, transferencia de contacto, vinculación a clínica y borrado. En actualización se valida la clínica actual y, si cambia `clinica_id`, también la clínica destino.
 - Agenda consume `appointments.manage` en mutaciones reales de cita: `POST /api/citas`, `PATCH /api/citas/:id/estado`, `PATCH /api/citas/:id/nota` y `PATCH /api/citas/:id/reagendar`. Las lecturas de agenda quedan fuera de este permiso de escritura.

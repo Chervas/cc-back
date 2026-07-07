@@ -1,12 +1,13 @@
 'use strict';
 
 const { Op } = require('sequelize');
-const { AccessPolicyOverride, UsuarioClinica, Clinica } = require('../../models');
+const { AccessPolicyOverride, UsuarioClinica, Clinica, Usuario } = require('../../models');
 const { ADMIN_USER_IDS, STAFF_ROLES } = require('../lib/role-helpers');
 const {
   ALLOWED_FEATURE_KEYS,
   ALLOWED_ROLE_CODES,
   getAccessPolicyCatalog,
+  roleCodeFromMembership,
   normalizeFeatureKey,
   normalizeRoleCode,
 } = require('../lib/access-policy');
@@ -185,6 +186,131 @@ exports.getOverrides = async (req, res) => {
   } catch (error) {
     console.error('[accessPolicy.getOverrides] Error:', error);
     return res.status(500).json({ message: 'Error retrieving access policy overrides', error: error.message });
+  }
+};
+
+async function getClinicRowsForScope(scopeType, scopeId) {
+  if (scopeType === 'clinic') {
+    const clinic = await Clinica.findByPk(scopeId, {
+      attributes: ['id_clinica', 'nombre_clinica', 'grupoClinicaId'],
+      raw: true,
+    });
+    return clinic ? [clinic] : [];
+  }
+
+  return Clinica.findAll({
+    where: { grupoClinicaId: scopeId },
+    attributes: ['id_clinica', 'nombre_clinica', 'grupoClinicaId'],
+    order: [['nombre_clinica', 'ASC']],
+    raw: true,
+  });
+}
+
+exports.getAssignments = async (req, res) => {
+  try {
+    const actorId = Number(req.userData?.userId);
+    if (!Number.isFinite(actorId)) {
+      return res.status(401).json({ message: 'Auth failed!' });
+    }
+
+    const scopeType = normalizeScopeType(req.query.scope_type);
+    const scopeId = parseIntOrNull(req.query.scope_id);
+
+    if (!ALLOWED_SCOPE_TYPES.has(scopeType)) {
+      return res.status(400).json({ message: 'scope_type invalid' });
+    }
+    if (scopeId == null) {
+      return res.status(400).json({ message: 'scope_id invalid' });
+    }
+
+    const scopeAccess = await getScopeAccess(actorId);
+    if (!isScopeReadable(scopeAccess, scopeType, scopeId)) {
+      return res.status(403).json({ message: 'Forbidden' });
+    }
+
+    const clinics = await getClinicRowsForScope(scopeType, scopeId);
+    const clinicIds = clinics.map((clinic) => Number(clinic.id_clinica)).filter(Number.isFinite);
+    if (!clinicIds.length) {
+      return res.json({ scope_type: scopeType, scope_id: scopeId, roles: [], total: 0 });
+    }
+
+    const memberships = await UsuarioClinica.findAll({
+      where: {
+        id_clinica: { [Op.in]: clinicIds },
+        rol_clinica: { [Op.in]: STAFF_ROLES },
+      },
+      attributes: ['id_usuario', 'id_clinica', 'rol_clinica', 'subrol_clinica', 'estado_invitacion'],
+      order: [['id_clinica', 'ASC'], ['rol_clinica', 'ASC'], ['subrol_clinica', 'ASC']],
+      raw: true,
+    });
+
+    const userIds = [...new Set(memberships.map((row) => Number(row.id_usuario)).filter(Number.isFinite))];
+    const users = userIds.length
+      ? await Usuario.findAll({
+          where: { id_usuario: { [Op.in]: userIds } },
+          attributes: ['id_usuario', 'nombre', 'apellidos', 'email_usuario', 'avatar', 'cargo_usuario', 'estado_cuenta'],
+          raw: true,
+        })
+      : [];
+
+    const userMap = new Map(users.map((user) => [Number(user.id_usuario), user]));
+    const clinicMap = new Map(clinics.map((clinic) => [Number(clinic.id_clinica), clinic]));
+    const roleCatalog = getAccessPolicyCatalog().roles || [];
+    const roleMap = new Map(roleCatalog.map((role) => [role.code, role]));
+    const grouped = new Map();
+
+    for (const membership of memberships) {
+      const roleCode = roleCodeFromMembership(membership);
+      const user = userMap.get(Number(membership.id_usuario));
+      const clinic = clinicMap.get(Number(membership.id_clinica));
+      const role = roleMap.get(roleCode);
+      if (!grouped.has(roleCode)) {
+        grouped.set(roleCode, {
+          role_code: roleCode,
+          label: role?.label || roleCode,
+          description: role?.description || null,
+          count: 0,
+          users: [],
+        });
+      }
+
+      const bucket = grouped.get(roleCode);
+      bucket.count += 1;
+      bucket.users.push({
+        id: Number(membership.id_usuario),
+        name: [user?.nombre, user?.apellidos].filter(Boolean).join(' ').trim() || user?.email_usuario || `Usuario ${membership.id_usuario}`,
+        email: user?.email_usuario || null,
+        avatar: user?.avatar || null,
+        title: user?.cargo_usuario || null,
+        account_status: user?.estado_cuenta || null,
+        clinic_id: Number(membership.id_clinica),
+        clinic_name: clinic?.nombre_clinica || `Clínica ${membership.id_clinica}`,
+        role: membership.rol_clinica,
+        subrole: membership.subrol_clinica || null,
+        invitation_status: membership.estado_invitacion || null,
+      });
+    }
+
+    const roles = roleCatalog
+      .map((role) => grouped.get(role.code) || {
+        role_code: role.code,
+        label: role.label,
+        description: role.description || null,
+        count: 0,
+        users: [],
+      })
+      .filter((role) => role.count > 0 || ['propietario', 'agencia', 'doctor', 'assistant', 'reception', 'admin_staff'].includes(role.role_code));
+
+    return res.json({
+      scope_type: scopeType,
+      scope_id: scopeId,
+      clinic_ids: clinicIds,
+      total: memberships.length,
+      roles,
+    });
+  } catch (error) {
+    console.error('[accessPolicy.getAssignments] Error:', error);
+    return res.status(500).json({ message: 'Error retrieving access policy assignments', error: error.message });
   }
 };
 
