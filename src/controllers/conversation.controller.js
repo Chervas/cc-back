@@ -126,6 +126,12 @@ const QUICKCHAT_POLICY_FEATURES = {
   read_leads: 'quickchat.read_leads',
 };
 
+const QUICKCHAT_CATEGORY_FEATURES = {
+  patients: QUICKCHAT_POLICY_FEATURES.read_patients,
+  team: QUICKCHAT_POLICY_FEATURES.read_team,
+  leads: QUICKCHAT_POLICY_FEATURES.read_leads,
+};
+
 async function canReadQuickChatFeatureForAnyClinic(userId, featureKey, clinicIds) {
   for (const clinicId of clinicIds) {
     // Keep this sequential: it avoids a burst of policy queries for owners with many clinics.
@@ -161,6 +167,176 @@ async function getQuickChatPolicyPermissions(userId, clinicIds, selectedClinicId
     read_team: readTeam,
     read_leads: readLeads,
   };
+}
+
+function normalizeClinicIdList(values) {
+  return Array.from(new Set(
+    (Array.isArray(values) ? values : [values])
+      .map((value) => Number(value))
+      .filter((value) => Number.isFinite(value))
+  ));
+}
+
+function clinicIdCondition(clinicIds) {
+  const ids = normalizeClinicIdList(clinicIds);
+  if (ids.length === 1) return ids[0];
+  return { [Op.in]: ids };
+}
+
+function resolveConversationClinicScope({ clinicIds, isAggregateAllowed, requestedClinicId }) {
+  if (requestedClinicId && requestedClinicId !== 'all') {
+    const parsed = parseClinicIdsParam(requestedClinicId);
+    if (!parsed || !ensureAccess({ clinicIds, isAggregateAllowed }, requestedClinicId)) {
+      return { error: 'access_denied', clinicIds: [] };
+    }
+    return { clinicIds: normalizeClinicIdList(parsed) };
+  }
+
+  return { clinicIds: normalizeClinicIdList(clinicIds) };
+}
+
+function getQuickChatConversationCategory(conversation) {
+  if (!conversation) return null;
+  const plain = typeof conversation.toJSON === 'function' ? conversation.toJSON() : conversation;
+  const channel = String(plain.channel || '').toLowerCase();
+  const contactId = String(plain.contact_id || '').toLowerCase();
+  if (channel === 'internal' || contactId === 'team') {
+    return 'team';
+  }
+  if (plain.patient_id || plain.paciente) {
+    return 'patients';
+  }
+  return 'leads';
+}
+
+function getQuickChatFeatureForCategory(category) {
+  return QUICKCHAT_CATEGORY_FEATURES[category] || null;
+}
+
+async function getAllowedQuickChatClinicIdsByCategory(userId, clinicIds) {
+  const result = { patients: [], team: [], leads: [] };
+  const scopedClinicIds = normalizeClinicIdList(clinicIds);
+
+  for (const clinicId of scopedClinicIds) {
+    // Keep this per-clinic so clinic-level overrides remain authoritative in aggregate views.
+    // eslint-disable-next-line no-await-in-loop
+    const [readPatients, readTeam, readLeads] = await Promise.all([
+      canUserAccessFeature({
+        actorId: userId,
+        featureKey: QUICKCHAT_POLICY_FEATURES.read_patients,
+        clinicId,
+      }),
+      canUserAccessFeature({
+        actorId: userId,
+        featureKey: QUICKCHAT_POLICY_FEATURES.read_team,
+        clinicId,
+      }),
+      canUserAccessFeature({
+        actorId: userId,
+        featureKey: QUICKCHAT_POLICY_FEATURES.read_leads,
+        clinicId,
+      }),
+    ]);
+
+    if (readPatients) result.patients.push(clinicId);
+    if (readTeam) result.team.push(clinicId);
+    if (readLeads) result.leads.push(clinicId);
+  }
+
+  return result;
+}
+
+function buildQuickChatCategoryWhere(allowedClinicIdsByCategory = {}) {
+  const orClauses = [];
+  const patientClinicIds = normalizeClinicIdList(allowedClinicIdsByCategory.patients || []);
+  const teamClinicIds = normalizeClinicIdList(allowedClinicIdsByCategory.team || []);
+  const leadClinicIds = normalizeClinicIdList(allowedClinicIdsByCategory.leads || []);
+
+  if (patientClinicIds.length) {
+    orClauses.push({
+      [Op.and]: [
+        { clinic_id: clinicIdCondition(patientClinicIds) },
+        { channel: { [Op.ne]: 'internal' } },
+        { patient_id: { [Op.not]: null } },
+      ],
+    });
+  }
+
+  if (teamClinicIds.length) {
+    orClauses.push({
+      [Op.and]: [
+        { clinic_id: clinicIdCondition(teamClinicIds) },
+        { channel: 'internal' },
+      ],
+    });
+  }
+
+  if (leadClinicIds.length) {
+    orClauses.push({
+      [Op.and]: [
+        { clinic_id: clinicIdCondition(leadClinicIds) },
+        { channel: { [Op.ne]: 'internal' } },
+        { patient_id: null },
+      ],
+    });
+  }
+
+  if (!orClauses.length) return null;
+  return { [Op.or]: orClauses };
+}
+
+function buildQuickChatCategorySql(allowedClinicIdsByCategory = {}, replacements = {}) {
+  const clauses = [];
+  const patientClinicIds = normalizeClinicIdList(allowedClinicIdsByCategory.patients || []);
+  const teamClinicIds = normalizeClinicIdList(allowedClinicIdsByCategory.team || []);
+  const leadClinicIds = normalizeClinicIdList(allowedClinicIdsByCategory.leads || []);
+
+  if (patientClinicIds.length) {
+    replacements.quickchatReadPatientsClinicIds = patientClinicIds;
+    clauses.push("(c.clinic_id IN (:quickchatReadPatientsClinicIds) AND c.channel <> 'internal' AND c.patient_id IS NOT NULL)");
+  }
+  if (teamClinicIds.length) {
+    replacements.quickchatReadTeamClinicIds = teamClinicIds;
+    clauses.push("(c.clinic_id IN (:quickchatReadTeamClinicIds) AND c.channel = 'internal')");
+  }
+  if (leadClinicIds.length) {
+    replacements.quickchatReadLeadsClinicIds = leadClinicIds;
+    clauses.push("(c.clinic_id IN (:quickchatReadLeadsClinicIds) AND c.channel <> 'internal' AND c.patient_id IS NULL)");
+  }
+
+  return clauses.length ? `(${clauses.join(' OR ')})` : null;
+}
+
+async function canReadQuickChatConversation(userId, conversation) {
+  const category = getQuickChatConversationCategory(conversation);
+  const featureKey = getQuickChatFeatureForCategory(category);
+  const clinicId = Number(conversation?.clinic_id);
+  if (!featureKey || !Number.isFinite(clinicId)) {
+    return false;
+  }
+  return canUserAccessFeature({ actorId: userId, featureKey, clinicId });
+}
+
+async function ensureQuickChatConversationReadAccess(userId, conversation) {
+  const allowed = await canReadQuickChatConversation(userId, conversation);
+  if (allowed) return true;
+
+  const category = getQuickChatConversationCategory(conversation);
+  const error = new Error('quickchat_category_forbidden');
+  error.status = 403;
+  error.details = {
+    category,
+    feature_key: getQuickChatFeatureForCategory(category),
+    clinic_id: Number(conversation?.clinic_id) || null,
+  };
+  throw error;
+}
+
+function sendQuickChatCategoryForbidden(res, error = null) {
+  return res.status(403).json({
+    error: 'Acceso denegado a la categoría de QuickChat',
+    details: error?.details || undefined,
+  });
 }
 
 function parseClinicIdsParam(requestedClinicId) {
@@ -544,17 +720,16 @@ async function hydrateMarketingContactFallbacks(conversations = [], options = {}
 
 async function getTotalUnreadCountForUser(userId, clinicIds, isAggregateAllowed, requestedClinicId) {
   const replacements = { userId };
-  const clinicClauses = [];
-  if (requestedClinicId && requestedClinicId !== 'all') {
-    const parsed = parseClinicIdsParam(requestedClinicId);
-    if (!parsed || !ensureAccess({ clinicIds, isAggregateAllowed }, requestedClinicId)) {
-      return 0;
-    }
-    replacements.clinicIds = parsed;
-    clinicClauses.push('c.clinic_id IN (:clinicIds)');
-  } else if (!isAggregateAllowed) {
-    replacements.clinicIds = clinicIds;
-    clinicClauses.push('c.clinic_id IN (:clinicIds)');
+  const scope = resolveConversationClinicScope({ clinicIds, isAggregateAllowed, requestedClinicId });
+  if (scope.error || !scope.clinicIds.length) {
+    return 0;
+  }
+
+  replacements.clinicIds = scope.clinicIds;
+  const allowedClinicIdsByCategory = await getAllowedQuickChatClinicIdsByCategory(userId, scope.clinicIds);
+  const categorySql = buildQuickChatCategorySql(allowedClinicIdsByCategory, replacements);
+  if (!categorySql) {
+    return 0;
   }
 
   const [row] = await db.sequelize.query(
@@ -567,7 +742,8 @@ async function getTotalUnreadCountForUser(userId, clinicIds, isAggregateAllowed,
        AND cr.user_id = :userId
       WHERE m.direction = 'inbound'
         AND m.createdAt > COALESCE(cr.last_read_at, '1970-01-01')
-        ${clinicClauses.length ? `AND ${clinicClauses.join(' AND ')}` : ''}
+        AND c.clinic_id IN (:clinicIds)
+        AND ${categorySql}
     `,
     { replacements, type: db.Sequelize.QueryTypes.SELECT }
   );
@@ -591,6 +767,22 @@ exports.listConversations = async (req, res) => {
     }
 
     const where = {};
+    const scope = resolveConversationClinicScope({ clinicIds, isAggregateAllowed, requestedClinicId: clinic_id });
+    if (scope.error || !scope.clinicIds.length) {
+      return res.status(403).json({ error: 'Acceso denegado a la clínica' });
+    }
+    where.clinic_id = clinicIdCondition(scope.clinicIds);
+
+    const allowedClinicIdsByCategory = await getAllowedQuickChatClinicIdsByCategory(userId, scope.clinicIds);
+    const categoryWhere = buildQuickChatCategoryWhere(allowedClinicIdsByCategory);
+    if (!categoryWhere) {
+      res.set('X-Has-More', 'false');
+      res.set('X-Next-Offset', String(offset));
+      res.set('X-Total-Unread', '0');
+      return res.json([]);
+    }
+    where[Op.and] = [categoryWhere];
+
     let patient = null;
     let lead = null;
     let canonicalConversationId = null;
@@ -834,6 +1026,11 @@ exports.getMessages = async (req, res) => {
     if (!ensureAccess({ clinicIds, isAggregateAllowed }, conversation.clinic_id)) {
       return res.status(403).json({ error: 'Acceso denegado a la clínica' });
     }
+    try {
+      await ensureQuickChatConversationReadAccess(userId, conversation);
+    } catch (accessError) {
+      return sendQuickChatCategoryForbidden(res, accessError);
+    }
 
     const messages = await Message.findAll({
       where: { conversation_id: conversation.id },
@@ -870,6 +1067,11 @@ exports.streamMessageMedia = async (req, res) => {
     const { clinicIds, isAggregateAllowed } = await getUserClinics(userId);
     if (!ensureAccess({ clinicIds, isAggregateAllowed }, conversation.clinic_id)) {
       return res.status(403).json({ error: 'Acceso denegado a la clínica' });
+    }
+    try {
+      await ensureQuickChatConversationReadAccess(userId, conversation);
+    } catch (accessError) {
+      return sendQuickChatCategoryForbidden(res, accessError);
     }
 
     const metadata = message.metadata || {};
@@ -942,6 +1144,11 @@ exports.getConversationByPatient = async (req, res) => {
     if (!ensureAccess({ clinicIds, isAggregateAllowed }, conversation.clinic_id)) {
       return res.status(403).json({ error: 'Acceso denegado a la clínica' });
     }
+    try {
+      await ensureQuickChatConversationReadAccess(userId, conversation);
+    } catch (accessError) {
+      return sendQuickChatCategoryForbidden(res, accessError);
+    }
 
     const messages = await Message.findAll({
       where: { conversation_id: conversation.id },
@@ -982,6 +1189,11 @@ exports.getConversationByLead = async (req, res) => {
     if (!ensureAccess({ clinicIds, isAggregateAllowed }, conversation.clinic_id)) {
       return res.status(403).json({ error: 'Acceso denegado a la clínica' });
     }
+    try {
+      await ensureQuickChatConversationReadAccess(userId, conversation);
+    } catch (accessError) {
+      return sendQuickChatCategoryForbidden(res, accessError);
+    }
 
     const messages = await Message.findAll({
       where: { conversation_id: conversation.id },
@@ -1009,6 +1221,11 @@ exports.markAsRead = async (req, res) => {
     const { clinicIds, isAggregateAllowed } = await getUserClinics(userId);
     if (!ensureAccess({ clinicIds, isAggregateAllowed }, conversation.clinic_id)) {
       return res.status(403).json({ error: 'Acceso denegado a la clínica' });
+    }
+    try {
+      await ensureQuickChatConversationReadAccess(userId, conversation);
+    } catch (accessError) {
+      return sendQuickChatCategoryForbidden(res, accessError);
     }
 
     await ConversationRead.upsert({
@@ -1082,6 +1299,12 @@ exports.postMessage = async (req, res) => {
     if (!ensureAccess({ clinicIds, isAggregateAllowed }, conversation.clinic_id)) {
       await transaction.rollback();
       return res.status(403).json({ error: 'Acceso denegado a la clínica' });
+    }
+    try {
+      await ensureQuickChatConversationReadAccess(userId, conversation);
+    } catch (accessError) {
+      await transaction.rollback();
+      return sendQuickChatCategoryForbidden(res, accessError);
     }
 
     const isTemplate = useTemplate || message_type === 'template';
@@ -1333,6 +1556,11 @@ exports.sendScheduledMessageNow = async (req, res) => {
     if (!ensureAccess({ clinicIds, isAggregateAllowed }, conversation.clinic_id)) {
       return res.status(403).json({ error: 'Acceso denegado a la clínica' });
     }
+    try {
+      await ensureQuickChatConversationReadAccess(userId, conversation);
+    } catch (accessError) {
+      return sendQuickChatCategoryForbidden(res, accessError);
+    }
     if (conversation.channel !== 'whatsapp' || msg.direction !== 'outbound') {
       return res.status(400).json({ error: 'not_whatsapp_outbound_message' });
     }
@@ -1420,6 +1648,16 @@ exports.createInternalMessage = async (req, res) => {
       await transaction.rollback();
       return res.status(403).json({ error: 'Acceso denegado a la clínica' });
     }
+    try {
+      await ensureQuickChatConversationReadAccess(userId, {
+        clinic_id,
+        channel: 'internal',
+        contact_id: 'team',
+      });
+    } catch (accessError) {
+      await transaction.rollback();
+      return sendQuickChatCategoryForbidden(res, accessError);
+    }
 
     const conversation =
       (await Conversation.findOne({
@@ -1475,7 +1713,10 @@ exports.createInternalMessage = async (req, res) => {
 };
 
 exports.__testing = {
+  buildQuickChatCategorySql,
+  buildQuickChatCategoryWhere,
   buildConversationSearchClause,
+  getQuickChatConversationCategory,
   normalizeSearchQuery,
   normalizeTextSearchValue,
 };

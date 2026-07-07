@@ -328,7 +328,7 @@ const FEATURE_CATALOG = [
     group: 'marketing_conversations',
     kind: 'read',
     label: 'QuickChat pacientes',
-    enforcement_status: 'partial',
+    enforcement_status: 'backend',
     sensitive: false,
   },
   {
@@ -336,7 +336,7 @@ const FEATURE_CATALOG = [
     group: 'marketing_conversations',
     kind: 'read',
     label: 'QuickChat leads',
-    enforcement_status: 'partial',
+    enforcement_status: 'backend',
     sensitive: false,
   },
   {
@@ -344,7 +344,7 @@ const FEATURE_CATALOG = [
     group: 'marketing_conversations',
     kind: 'read',
     label: 'QuickChat equipo',
-    enforcement_status: 'partial',
+    enforcement_status: 'backend',
     sensitive: false,
   },
 ];

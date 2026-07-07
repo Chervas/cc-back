@@ -3,6 +3,7 @@
 require('dotenv').config();
 
 const assert = require('node:assert/strict');
+const { Op } = require('sequelize');
 const db = require('../../../models');
 const { __testing } = require('../../controllers/conversation.controller');
 
@@ -43,6 +44,42 @@ async function run() {
   );
   assert.match(literalSql, /JSON_EXTRACT\(mpli\.custom_fields, '\$\.nombre'\)/);
   assert.match(literalSql, /JSON_EXTRACT\(mpli\.custom_fields, '\$\.apellidos'\)/);
+
+  assert.equal(
+    __testing.getQuickChatConversationCategory({ channel: 'internal', patient_id: 123, contact_id: 'team' }),
+    'team'
+  );
+  assert.equal(
+    __testing.getQuickChatConversationCategory({ channel: 'whatsapp', patient_id: 123 }),
+    'patients'
+  );
+  assert.equal(
+    __testing.getQuickChatConversationCategory({ channel: 'whatsapp', lead_id: 456 }),
+    'leads'
+  );
+  assert.equal(
+    __testing.getQuickChatConversationCategory({ channel: 'whatsapp', contact_id: '+34600111222' }),
+    'leads'
+  );
+
+  const categoryWhere = __testing.buildQuickChatCategoryWhere({
+    patients: [1, 2],
+    team: [3],
+    leads: [],
+  });
+  assert.equal(categoryWhere[Op.or].length, 2);
+  assert.deepEqual(categoryWhere[Op.or][0][Op.and][0].clinic_id[Op.in], [1, 2]);
+  assert.equal(categoryWhere[Op.or][0][Op.and][2].patient_id[Op.not], null);
+  assert.equal(categoryWhere[Op.or][1][Op.and][0].clinic_id, 3);
+  assert.equal(categoryWhere[Op.or][1][Op.and][1].channel, 'internal');
+  assert.equal(__testing.buildQuickChatCategoryWhere({ patients: [], team: [], leads: [] }), null);
+
+  const replacements = {};
+  const categorySql = __testing.buildQuickChatCategorySql({ patients: [1], team: [], leads: [2] }, replacements);
+  assert.match(categorySql, /c\.patient_id IS NOT NULL/);
+  assert.match(categorySql, /c\.patient_id IS NULL/);
+  assert.deepEqual(replacements.quickchatReadPatientsClinicIds, [1]);
+  assert.deepEqual(replacements.quickchatReadLeadsClinicIds, [2]);
 
   console.log('conversation_search.test.js OK');
 }

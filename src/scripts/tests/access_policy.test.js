@@ -32,6 +32,13 @@ async function run() {
   assert.equal(accessPolicy.defaultForFeature('consents.view', 'unknown'), false);
   assert.equal(accessPolicy.defaultForFeature('consents.manage', 'unknown'), false);
 
+  assert.equal(features.get('quickchat.read_patients')?.kind, 'read');
+  assert.equal(features.get('quickchat.read_patients')?.enforcement_status, 'backend');
+  assert.equal(features.get('quickchat.read_team')?.kind, 'read');
+  assert.equal(features.get('quickchat.read_team')?.enforcement_status, 'backend');
+  assert.equal(features.get('quickchat.read_leads')?.kind, 'read');
+  assert.equal(features.get('quickchat.read_leads')?.enforcement_status, 'backend');
+
   console.log('access_policy.test.js OK');
 }
 
