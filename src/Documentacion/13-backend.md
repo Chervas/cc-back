@@ -79,6 +79,7 @@ Reglas:
 - Desde 2026-07-06 `tasks.items` incluye `pending_attendance` cuando hay citas pasadas pendientes de cerrar asistencia, y `tasks.total` se calcula en backend sobre todos los items devueltos.
 - Desde 2026-07-06 el payload se recorta por rol: doctores reciben solo `doctorAppointmentsToday`, `doctorPendingConsents` y `weeklySchedule`; las citas/tareas operativas de clínica y `setup` solo se devuelven cuando `sections.showOperations`/`sections.showSetup` lo indica.
 - Desde 2026-07-06 el recorte por rol y clínica no confía en `role`/`subrol` enviados por query para usuarios normales: el backend deriva rol/subrol desde `UsuarioClinica` y filtra `clinica_id` contra las clínicas asignadas al usuario. Si se pide una clínica fuera de scope devuelve `403 panel_scope_forbidden`. Solo el admin global conserva override operativo para QA/admin.
+- Desde 2026-07-07 la respuesta incluye `rolePresentation` (`mode`, `eyebrow`, `title`, `subtitle`, `icon`, acción opcional) para que el frontend pinte la narrativa del panel por rol sin inferirla ni recomponer datos. `paciente` y `laboratorio` reciben `mode=restricted` y no ven bloques operativos internos.
 - El feedback positivo de ejemplo no se devuelve; cuando se reactive debe venir como señal real atribuible a ClinicaClick.
 
 ## Control de acceso por capacidades

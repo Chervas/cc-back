@@ -970,6 +970,62 @@ function roleSections(role, subrolCode) {
   return { ownerLike, operations, doctor, shared };
 }
 
+function rolePresentation(role, subrolCode, sections) {
+  const normalizedRole = String(role || '').toLowerCase();
+  const normalizedSubrol = String(subrolCode || '').toLowerCase();
+
+  if (!sections.shared) {
+    return {
+      mode: 'restricted',
+      eyebrow: 'Panel interno no disponible',
+      title: 'Este rol no tiene panel operativo interno',
+      subtitle: normalizedRole === 'laboratorio'
+        ? 'El laboratorio debe trabajar desde los flujos compartidos de casos y documentos, no desde la operativa diaria de clínica.'
+        : 'Los pacientes no ven citas internas, tareas de equipo ni configuración de clínica desde este panel.',
+      icon: 'heroicons_outline:lock-closed',
+      primaryActionLabel: null,
+      primaryActionLink: null,
+    };
+  }
+
+  if (sections.doctor) {
+    return {
+      mode: 'doctor',
+      eyebrow: 'Operativa del doctor',
+      title: 'Mi jornada clínica',
+      subtitle: 'Citas asignadas, consentimientos pendientes de mis pacientes y horario de esta semana.',
+      icon: 'heroicons_outline:user-circle',
+      primaryActionLabel: 'Ver mi ficha',
+      primaryActionLink: '/personal',
+    };
+  }
+
+  if (sections.operations) {
+    const assistantLike = ['assistant', 'reception', 'admin_staff'].includes(normalizedSubrol);
+    return {
+      mode: assistantLike ? 'assistant_operations' : 'clinic_operations',
+      eyebrow: 'Operativa diaria de la clínica',
+      title: assistantLike ? 'Recepción y coordinación del día' : 'Lo importante de hoy',
+      subtitle: assistantLike
+        ? 'Confirmaciones, asistencia, consentimientos y tareas que mantienen la agenda al día.'
+        : 'Primeros pasos, agenda, asistencia, consentimientos y oportunidades que requieren acción.',
+      icon: 'heroicons_outline:clipboard-document-check',
+      primaryActionLabel: 'Ver agenda',
+      primaryActionLink: '/agenda-de-citas',
+    };
+  }
+
+  return {
+    mode: 'shared_growth',
+    eyebrow: 'Crecimiento y configuración',
+    title: 'Oportunidades de mejora',
+    subtitle: 'Este rol no gestiona la agenda diaria, pero sí puede revisar recomendaciones y bloqueos de marketing.',
+    icon: 'heroicons_outline:light-bulb',
+    primaryActionLabel: 'Ver campañas',
+    primaryActionLink: '/marketing/campanas',
+  };
+}
+
 async function getMainDashboard({ userId, query = {} }) {
   const requestedScope = query.clinica_id || query.clinic_id || query.clinicId || null;
   const firstRequestedClinicIds = requestedScope && String(requestedScope) !== 'all' && !String(requestedScope).startsWith('group:')
@@ -989,6 +1045,7 @@ async function getMainDashboard({ userId, query = {} }) {
     allowAllClinics: context.globalAdmin,
   });
   const sections = roleSections(context.role, context.subrolCode);
+  const presentation = rolePresentation(context.role, context.subrolCode, sections);
   const doctorId = sections.doctor ? userId : null;
   const appointments = await loadAppointments({
     clinicIds: scope.clinicIds,
@@ -1068,6 +1125,7 @@ async function getMainDashboard({ userId, query = {} }) {
       subrolLabel: context.subrolLabel || null,
       subrolCode: context.subrolCode,
     },
+    rolePresentation: presentation,
     scope: {
       clinicIds: scope.clinicIds,
       clinicName: scope.clinics.length === 1 ? scope.clinics[0].nombre_clinica : 'Clínicas seleccionadas',
