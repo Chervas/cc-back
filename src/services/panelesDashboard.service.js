@@ -374,11 +374,12 @@ async function loadAppointments({
   todayEnd,
   now,
   doctorId = null,
+  includeToday = true,
   includePastAttendance = true,
   includeNext = true,
   includeClosedToday = false,
 }) {
-  if (!clinicIds.length || !CitaPaciente) {
+  if (!clinicIds.length || !CitaPaciente || (!includeToday && !includePastAttendance && !includeNext)) {
     return { today: [], pastAttendance: [], next: [] };
   }
 
@@ -395,15 +396,17 @@ async function loadAppointments({
   };
 
   const [todayRows, pastRows, nextRows] = await Promise.all([
-    CitaPaciente.findAll({
-      where: {
-        ...appointmentScope,
-        inicio: { [Op.between]: [todayStart, todayEnd] },
-      },
-      attributes: appointmentAttributes,
-      order: [['inicio', 'ASC']],
-      raw: true,
-    }),
+    includeToday
+      ? CitaPaciente.findAll({
+          where: {
+            ...appointmentScope,
+            inicio: { [Op.between]: [todayStart, todayEnd] },
+          },
+          attributes: appointmentAttributes,
+          order: [['inicio', 'ASC']],
+          raw: true,
+        })
+      : [],
     includePastAttendance
       ? CitaPaciente.findAll({
           where: {
@@ -994,6 +997,7 @@ async function getMainDashboard({ userId, query = {} }) {
     todayEnd: today.end,
     now,
     doctorId,
+    includeToday: sections.operations || sections.doctor,
     includePastAttendance: sections.operations,
     includeNext: sections.operations,
     includeClosedToday: sections.doctor,
@@ -1016,8 +1020,8 @@ async function getMainDashboard({ userId, query = {} }) {
     sections.operations ? loadPendingConsentCards({ clinicIds: scope.clinicIds, limit: 6 }) : [],
     doctorId ? loadPendingConsentCards({ clinicIds: scope.clinicIds, doctorId, limit: 6 }) : [],
     doctorId ? loadWeeklySchedule({ clinicIds: scope.clinicIds, clinicMap: scope.clinicMap, userId: doctorId, todayIso: today.date }) : [],
-    loadWhatsappStatus({ clinicIds: scope.clinicIds, groupIds: scope.groupIds }),
-    loadOpportunities({ clinicIds: scope.clinicIds }),
+    sections.shared ? loadWhatsappStatus({ clinicIds: scope.clinicIds, groupIds: scope.groupIds }) : { connected: null, paymentReady: null, paymentMissing: false },
+    sections.shared ? loadOpportunities({ clinicIds: scope.clinicIds }) : [],
   ]);
 
   const setup = sections.operations
@@ -1034,7 +1038,7 @@ async function getMainDashboard({ userId, query = {} }) {
     : [];
 
   const errors = [];
-  if (whatsappStatus.connected === false) {
+  if (sections.shared && whatsappStatus.connected === false) {
     errors.push({
       id: 'whatsapp_not_connected',
       title: 'No tienes WhatsApp conectado',
@@ -1043,7 +1047,7 @@ async function getMainDashboard({ userId, query = {} }) {
       queryParams: { panel: 'connected-accounts' },
       actionLabel: 'Ir a Cuentas conectadas',
     });
-  } else if (whatsappStatus.paymentMissing) {
+  } else if (sections.shared && whatsappStatus.paymentMissing) {
     errors.push({
       id: 'whatsapp_payment_missing',
       title: 'WhatsApp no tiene método de pago activo',

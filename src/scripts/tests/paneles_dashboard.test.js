@@ -33,6 +33,14 @@ async function pickClinicForGlobalAdmin(adminId) {
   return Number((unassigned || clinics[0]).id_clinica);
 }
 
+async function pickPatientMembership() {
+  return db.UsuarioClinica.findOne({
+    where: { rol_clinica: 'paciente' },
+    attributes: ['id_usuario', 'id_clinica'],
+    raw: true,
+  });
+}
+
 async function run() {
   const adminId = firstGlobalAdminId();
   const clinicId = await pickClinicForGlobalAdmin(adminId);
@@ -49,6 +57,26 @@ async function run() {
   assert.deepEqual(dashboard.scope.clinicIds, [clinicId]);
   assert.equal(dashboard.sections.showShared, true);
   assert.equal(Array.isArray(dashboard.inactiveTodayAppointments), true);
+
+  const patientMembership = await pickPatientMembership();
+  if (patientMembership) {
+    const patientDashboard = await panelesDashboardService.getMainDashboard({
+      userId: Number(patientMembership.id_usuario),
+      query: {
+        clinica_id: String(patientMembership.id_clinica),
+        date: '2026-07-06',
+      },
+    });
+
+    assert.equal(patientDashboard.sections.showShared, false);
+    assert.equal(patientDashboard.sections.showOperations, false);
+    assert.equal(patientDashboard.sections.showDoctor, false);
+    assert.deepEqual(patientDashboard.todayAppointments, []);
+    assert.deepEqual(patientDashboard.inactiveTodayAppointments, []);
+    assert.deepEqual(patientDashboard.growthOpportunities, []);
+    assert.deepEqual(patientDashboard.criticalAlerts, []);
+    assert.deepEqual(patientDashboard.errors, []);
+  }
 
   console.log('paneles_dashboard.test.js OK');
 }
