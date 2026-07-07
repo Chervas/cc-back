@@ -393,7 +393,7 @@ async function loadAppointments({
   includeClosedToday = false,
 }) {
   if (!clinicIds.length || !CitaPaciente || (!includeToday && !includePastAttendance && !includeNext)) {
-    return { today: [], pastAttendance: [], next: [] };
+    return { today: [], inactiveToday: [], pastAttendance: [], next: [] };
   }
 
   const pastStart = new Date(todayStart);
@@ -1268,6 +1268,7 @@ module.exports = {
   __testing: {
     isExpectedTodayAppointment,
     isInactiveTodayAppointment,
+    loadAppointments,
     statusUi,
   },
 };

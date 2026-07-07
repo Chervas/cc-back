@@ -64,6 +64,17 @@ async function run() {
     true,
     'Doctor day view keeps closed appointments with their state'
   );
+  assert.deepEqual(
+    await __testing.loadAppointments({
+      clinicIds: [],
+      clinicMap: new Map(),
+      todayStart: new Date('2026-07-06T00:00:00.000Z'),
+      todayEnd: new Date('2026-07-06T23:59:59.999Z'),
+      now: new Date('2026-07-06T12:00:00.000Z'),
+    }),
+    { today: [], inactiveToday: [], pastAttendance: [], next: [] },
+    'Empty appointment scope must preserve the full dashboard contract'
+  );
 
   const adminId = firstGlobalAdminId();
   const clinicId = await pickClinicForGlobalAdmin(adminId);
