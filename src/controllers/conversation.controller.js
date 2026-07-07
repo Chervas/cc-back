@@ -268,6 +268,9 @@ function buildConversationSearchClause(searchQuery) {
     OR LOWER(COALESCE(mpli.phone, '')) LIKE ${likeSql(like)} ESCAPE '\\\\'
     OR LOWER(COALESCE(mpli.email, '')) LIKE ${likeSql(like)} ESCAPE '\\\\'
     OR LOWER(COALESCE(JSON_UNQUOTE(JSON_EXTRACT(mpli.custom_fields, '$.nombre_completo')), '')) LIKE ${likeSql(like)} ESCAPE '\\\\'
+    OR LOWER(COALESCE(JSON_UNQUOTE(JSON_EXTRACT(mpli.custom_fields, '$.nombre')), '')) LIKE ${likeSql(like)} ESCAPE '\\\\'
+    OR LOWER(COALESCE(JSON_UNQUOTE(JSON_EXTRACT(mpli.custom_fields, '$.apellido')), '')) LIKE ${likeSql(like)} ESCAPE '\\\\'
+    OR LOWER(COALESCE(JSON_UNQUOTE(JSON_EXTRACT(mpli.custom_fields, '$.apellidos')), '')) LIKE ${likeSql(like)} ESCAPE '\\\\'
   )`;
   const externalContactClause = (like) => db.Sequelize.literal(`
     (
@@ -275,7 +278,6 @@ function buildConversationSearchClause(searchQuery) {
         SELECT DISTINCT mpli.conversation_id
         FROM MarketingPatientListItems mpli
         WHERE mpli.conversation_id IS NOT NULL
-          AND (mpli.phone IS NULL OR mpli.phone = '')
           AND ${marketingItemMatchesSearch(like)}
       )
       OR ${conversationPhoneDigits} IN (
@@ -1470,4 +1472,10 @@ exports.createInternalMessage = async (req, res) => {
     console.error('Error createInternalMessage', err);
     return res.status(500).json({ error: 'Error en chat interno' });
   }
+};
+
+exports.__testing = {
+  buildConversationSearchClause,
+  normalizeSearchQuery,
+  normalizeTextSearchValue,
 };
