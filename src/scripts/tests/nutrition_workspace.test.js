@@ -449,6 +449,8 @@ function run() {
   assert.match(html, /Gráficas de evolución/);
   assert.match(html, /Cómo leer el informe/);
   assert.match(html, /Profesional explicando el informe/);
+  assert.match(html, /report-intro-img \{[^}]*mix-blend-mode: multiply/);
+  assert.match(html, /section-story-img \{[^}]*mix-blend-mode: multiply/);
   assert.doesNotMatch(html, /Seguimiento orientativo entre visitas/);
   assert.doesNotMatch(html, /Informe explicado paso a paso/);
   assert.match(html, /Comparativas principales/);
@@ -480,6 +482,7 @@ function run() {
   assert.match(html, /Silueta de dos compartimentos/);
   assert.match(html, /Mapa de zonas adiposas/);
   assert.match(html, /distribution-reference-reverse/);
+  assert.match(html, /distribution-ref-img \{[^}]*mix-blend-mode: multiply/);
   assert.match(html, /Tres siluetas de referencia/);
   assert.doesNotMatch(html, /skinfold-triceps\\.mp4/);
   assert.match(html, /Índices de salud/);
@@ -603,7 +606,7 @@ function run() {
     },
   }, html, '2026-02-26T11:00:00.000Z');
   assert.equal(snapshotPayload.snapshot.kind, 'nutrition_measurement_report');
-  assert.equal(snapshotPayload.snapshot.snapshot_version, 14);
+  assert.equal(snapshotPayload.snapshot.snapshot_version, 15);
   assert.equal(snapshotPayload.snapshot.report.calculation_profile.code, CALCULATION_PROFILE.code);
   assert.equal(snapshotPayload.snapshot.measurement.id, 2);
   assert.equal(snapshotPayload.snapshot.report.measurement_id, 2);

@@ -14,7 +14,7 @@ const clinicalPrivateStorage = require('./clinicalPrivateStorage.service');
 const { Op } = db.Sequelize;
 const execFileAsync = promisify(execFile);
 const FORMULA_VERSION = 'nutrition-basic-v3';
-const NUTRITION_REPORT_SNAPSHOT_VERSION = 14;
+const NUTRITION_REPORT_SNAPSHOT_VERSION = 15;
 const NUTRITION_REPORT_CURRENT_STATUSES = ['final', 'active'];
 const NUTRITION_REPORT_BRANDING_MODES = new Set(['clinicaclick', 'clinic']);
 const DEFAULT_CHROMIUM_PATH = '/home/ubuntu/.cache/clinicaclick-browsers/chrome-headless-shell/linux-148.0.7778.56/chrome-headless-shell-linux64/chrome-headless-shell';
@@ -3838,7 +3838,7 @@ function buildNutritionReportHtml(reportData, options = {}) {
     .report-visual-intro-with-image { grid-template-columns: minmax(0, 1fr) 270px; }
     .report-visual-intro h2 { margin-bottom: 0; font-size: 16px; }
     .report-intro-main { margin: 0; padding: 10px 16px 10px 8px; background: transparent; display: grid; align-content: center; min-height: 190px; }
-    .report-intro-img { width: 100%; height: 190px; object-fit: contain; object-position: center right; display: block; background: transparent; mix-blend-mode: normal; }
+    .report-intro-img { width: 100%; height: 190px; object-fit: contain; object-position: center right; display: block; background: transparent; mix-blend-mode: multiply; filter: saturate(1.06) contrast(1.04); }
     .report-intro-content { padding: 18px 18px 16px; }
     .report-intro-title { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
     .report-intro-title span { flex: none; border-radius: 999px; background: #eef2ff; color: #4338ca; padding: 4px 10px; font-size: 10px; font-weight: 850; }
@@ -3874,7 +3874,7 @@ function buildNutritionReportHtml(reportData, options = {}) {
     .section-story-header { display: grid; gap: 14px; align-items: stretch; margin-bottom: 14px; }
     .section-story-header-with-image { grid-template-columns: minmax(0, 1fr) 260px; overflow: hidden; border-radius: 10px; background: transparent; }
     .section-story-figure { margin: 0; padding: 4px 0 8px 16px; background: transparent; display: grid; place-items: center end; min-height: 178px; }
-    .section-story-img { width: 100%; height: 178px; object-fit: contain; object-position: center right; display: block; background: transparent; mix-blend-mode: normal; }
+    .section-story-img { width: 100%; height: 178px; object-fit: contain; object-position: center right; display: block; background: transparent; mix-blend-mode: multiply; filter: saturate(1.06) contrast(1.04); }
     .section-story-copy { min-width: 0; align-self: center; padding: 2px 0; }
     .section-story-header-with-image .section-story-copy { padding: 16px 0 14px 18px; }
     .section-story-copy h2, .section-story-copy h3 { margin: 2px 0 0; color: #0f172a; }
@@ -3965,7 +3965,7 @@ function buildNutritionReportHtml(reportData, options = {}) {
     .distribution-reference-reverse { grid-template-columns: minmax(0, 1fr) 170px; }
     .distribution-reference-reverse figcaption { text-align: right; }
     .distribution-reference-reverse .distribution-ref-img { justify-self: end; }
-    .distribution-ref-img { width: 184px; height: 204px; object-fit: contain; object-position: center; display: block; background: transparent; mix-blend-mode: normal; }
+    .distribution-ref-img { width: 184px; height: 204px; object-fit: contain; object-position: center; display: block; background: transparent; mix-blend-mode: multiply; filter: saturate(1.06) contrast(1.04); }
     .distribution-reference figcaption { color: #475569; font-size: 12px; line-height: 1.4; }
     .distribution-reference figcaption strong { display: block; color: #0f172a; font-size: 13px; margin-bottom: 4px; }
     .distribution-reference figcaption span { display: block; }
