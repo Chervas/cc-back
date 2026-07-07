@@ -241,6 +241,10 @@ function normalizePhoneDigits(value) {
   return String(value || '').replace(/\D+/g, '').replace(/^00/, '');
 }
 
+function sqlPhoneDigitsExpression(expression) {
+  return `REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(COALESCE(${expression}, ''), '+', ''), ' ', ''), '-', ''), '(', ''), ')', ''), '.', '')`;
+}
+
 function escapeLikePattern(value) {
   return String(value || '').replace(/[\\%_]/g, (match) => `\\${match}`);
 }
@@ -257,32 +261,70 @@ function buildConversationSearchClause(searchQuery) {
 
   const makeLike = (value) => `%${escapeLikePattern(String(value || '').toLowerCase())}%`;
   const likeSql = (like) => db.sequelize.escape(like);
+  const conversationPhoneDigits = sqlPhoneDigitsExpression('`Conversation`.`contact_id`');
+  const marketingPhoneDigits = sqlPhoneDigitsExpression('mpli.phone');
+  const marketingItemMatchesSearch = (like) => `(
+    LOWER(COALESCE(mpli.name, '')) LIKE ${likeSql(like)} ESCAPE '\\\\'
+    OR LOWER(COALESCE(mpli.phone, '')) LIKE ${likeSql(like)} ESCAPE '\\\\'
+    OR LOWER(COALESCE(mpli.email, '')) LIKE ${likeSql(like)} ESCAPE '\\\\'
+    OR LOWER(COALESCE(JSON_UNQUOTE(JSON_EXTRACT(mpli.custom_fields, '$.nombre_completo')), '')) LIKE ${likeSql(like)} ESCAPE '\\\\'
+  )`;
   const externalContactClause = (like) => db.Sequelize.literal(`
     (
       \`Conversation\`.\`id\` IN (
         SELECT DISTINCT mpli.conversation_id
         FROM MarketingPatientListItems mpli
         WHERE mpli.conversation_id IS NOT NULL
-          AND (
-            LOWER(COALESCE(mpli.name, '')) LIKE ${likeSql(like)} ESCAPE '\\\\'
-            OR LOWER(COALESCE(mpli.phone, '')) LIKE ${likeSql(like)} ESCAPE '\\\\'
-            OR LOWER(COALESCE(mpli.email, '')) LIKE ${likeSql(like)} ESCAPE '\\\\'
-            OR LOWER(COALESCE(JSON_UNQUOTE(JSON_EXTRACT(mpli.custom_fields, '$.nombre_completo')), '')) LIKE ${likeSql(like)} ESCAPE '\\\\'
-          )
+          AND (mpli.phone IS NULL OR mpli.phone = '')
+          AND ${marketingItemMatchesSearch(like)}
       )
-      OR \`Conversation\`.\`contact_id\` IN (
-        SELECT DISTINCT mpli.phone
+      OR ${conversationPhoneDigits} IN (
+        SELECT DISTINCT ${marketingPhoneDigits}
         FROM MarketingPatientListItems mpli
         WHERE mpli.phone IS NOT NULL
-          AND (
-            LOWER(COALESCE(mpli.name, '')) LIKE ${likeSql(like)} ESCAPE '\\\\'
-            OR LOWER(COALESCE(mpli.phone, '')) LIKE ${likeSql(like)} ESCAPE '\\\\'
-            OR LOWER(COALESCE(mpli.email, '')) LIKE ${likeSql(like)} ESCAPE '\\\\'
-            OR LOWER(COALESCE(JSON_UNQUOTE(JSON_EXTRACT(mpli.custom_fields, '$.nombre_completo')), '')) LIKE ${likeSql(like)} ESCAPE '\\\\'
-          )
+          AND mpli.phone <> ''
+          AND ${marketingItemMatchesSearch(like)}
+      )
+      OR RIGHT(${conversationPhoneDigits}, 9) IN (
+        SELECT DISTINCT RIGHT(${marketingPhoneDigits}, 9)
+        FROM MarketingPatientListItems mpli
+        WHERE mpli.phone IS NOT NULL
+          AND mpli.phone <> ''
+          AND ${marketingItemMatchesSearch(like)}
       )
     )
   `);
+  const digitExternalContactClause = (digits) => {
+    const digitsLike = db.sequelize.escape(`%${escapeLikePattern(digits)}%`);
+    return db.Sequelize.literal(`
+      (
+        ${conversationPhoneDigits} LIKE ${digitsLike} ESCAPE '\\\\'
+        OR ${conversationPhoneDigits} IN (
+          SELECT DISTINCT ${marketingPhoneDigits}
+          FROM MarketingPatientListItems mpli
+          WHERE mpli.phone IS NOT NULL
+            AND mpli.phone <> ''
+            AND ${marketingPhoneDigits} LIKE ${digitsLike} ESCAPE '\\\\'
+        )
+        OR RIGHT(${conversationPhoneDigits}, 9) IN (
+          SELECT DISTINCT RIGHT(${marketingPhoneDigits}, 9)
+          FROM MarketingPatientListItems mpli
+          WHERE mpli.phone IS NOT NULL
+            AND mpli.phone <> ''
+            AND ${marketingPhoneDigits} LIKE ${digitsLike} ESCAPE '\\\\'
+        )
+      )
+    `);
+  };
+  const digitFieldClauses = (digits) => {
+    const digitsLike = db.sequelize.escape(`%${escapeLikePattern(digits)}%`);
+    return [
+      db.Sequelize.literal(`${conversationPhoneDigits} LIKE ${digitsLike} ESCAPE '\\\\'`),
+      db.Sequelize.literal(`${sqlPhoneDigitsExpression('`paciente`.`telefono_movil`')} LIKE ${digitsLike} ESCAPE '\\\\'`),
+      db.Sequelize.literal(`${sqlPhoneDigitsExpression('`lead`.`telefono`')} LIKE ${digitsLike} ESCAPE '\\\\'`),
+      digitExternalContactClause(digits),
+    ];
+  };
   const textFieldClauses = (like) => [
     { contact_id: { [Op.like]: like } },
     { '$paciente.nombre$': { [Op.like]: like } },
@@ -320,12 +362,25 @@ function buildConversationSearchClause(searchQuery) {
   ];
 
   const fullLike = makeLike(normalized);
-  const fullTextClause = { [Op.or]: textFieldClauses(fullLike) };
+  const normalizedDigits = normalizePhoneDigits(normalized);
+  const fullClauses = [
+    ...textFieldClauses(fullLike),
+    ...(normalizedDigits.length >= 5 ? digitFieldClauses(normalizedDigits) : []),
+  ];
+  const fullTextClause = { [Op.or]: fullClauses };
   const tokenClauses = normalized
     .split(' ')
     .map((token) => token.trim())
     .filter((token) => token.length >= 2)
-    .map((token) => ({ [Op.or]: textFieldClauses(makeLike(token)) }));
+    .map((token) => {
+      const tokenDigits = normalizePhoneDigits(token);
+      return {
+        [Op.or]: [
+          ...textFieldClauses(makeLike(token)),
+          ...(tokenDigits.length >= 3 ? digitFieldClauses(tokenDigits) : []),
+        ],
+      };
+    });
 
   if (!tokenClauses.length) {
     return fullTextClause;
@@ -351,21 +406,65 @@ function buildMarketingContactPhoneCandidates(value) {
   ])).filter(Boolean);
 }
 
-function marketingContactMatchesConversation(item, conversation) {
-  if (!item || !conversation) return false;
-  if (item.conversation_id && Number(item.conversation_id) === Number(conversation.id)) {
-    return true;
+function parseCustomFields(value) {
+  if (!value) return {};
+  if (typeof value === 'object') return value;
+  if (typeof value !== 'string') return {};
+  try {
+    const parsed = JSON.parse(value);
+    return parsed && typeof parsed === 'object' ? parsed : {};
+  } catch {
+    return {};
   }
+}
+
+function normalizeTextSearchValue(value) {
+  return String(value || '')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function marketingItemSearchScore(item, searchQuery) {
+  const normalized = normalizeTextSearchValue(searchQuery);
+  if (!normalized || !item) return 0;
+
+  const fields = parseCustomFields(item.custom_fields);
+  const haystack = normalizeTextSearchValue([
+    item.name,
+    item.phone,
+    item.email,
+    fields.nombre_completo,
+    fields.nombre,
+    fields.apellido,
+    fields.apellidos,
+  ].filter(Boolean).join(' '));
+  const tokens = normalized.split(' ').filter((token) => token.length >= 2);
+  if (!tokens.length) return haystack.includes(normalized) ? 100 : 0;
+  return tokens.every((token) => haystack.includes(token)) ? 100 : 0;
+}
+
+function marketingContactMatchScore(item, conversation) {
+  if (!item || !conversation) return 0;
+  const conversationIdMatches = item.conversation_id && Number(item.conversation_id) === Number(conversation.id);
   const contactDigits = normalizePhoneDigits(conversation.contact_id);
   const itemDigits = normalizePhoneDigits(item.phone);
-  return !!contactDigits && !!itemDigits && (
+  const phoneMatches = !!contactDigits && !!itemDigits && (
     contactDigits === itemDigits
     || contactDigits.endsWith(itemDigits)
     || itemDigits.endsWith(contactDigits)
   );
+
+  if (conversationIdMatches && phoneMatches) return 40;
+  if (phoneMatches) return 30;
+  if (conversationIdMatches && !itemDigits) return 20;
+  if (conversationIdMatches) return 10;
+  return 0;
 }
 
-async function hydrateMarketingContactFallbacks(conversations = []) {
+async function hydrateMarketingContactFallbacks(conversations = [], options = {}) {
   if (!MarketingPatientListItem || !Array.isArray(conversations) || !conversations.length) {
     return conversations;
   }
@@ -415,9 +514,18 @@ async function hydrateMarketingContactFallbacks(conversations = []) {
     ) {
       continue;
     }
-    const item = items.find((row) => marketingContactMatchesConversation(row, conversation));
+    let item = null;
+    let bestScore = 0;
+    for (const row of items) {
+      const score = marketingContactMatchScore(row, conversation)
+        + marketingItemSearchScore(row, options.searchQuery);
+      if (score > bestScore) {
+        item = row;
+        bestScore = score;
+      }
+    }
     if (!item?.name) continue;
-    const fields = item.custom_fields && typeof item.custom_fields === 'object' ? item.custom_fields : {};
+    const fields = parseCustomFields(item.custom_fields);
     const contactName = fields.nombre_completo || item.name;
     conversation.contact = {
       ...(conversation.contact || {}),
@@ -624,7 +732,7 @@ exports.listConversations = async (req, res) => {
       data.unread_count = unreadMap.get(data.id) ?? 0;
       return data;
     });
-    const payload = await hydrateMarketingContactFallbacks(rawPayload);
+    const payload = await hydrateMarketingContactFallbacks(rawPayload, { searchQuery });
     const totalUnread = await getTotalUnreadCountForUser(userId, clinicIds, isAggregateAllowed, clinic_id);
 
     res.set('X-Has-More', hasMore ? 'true' : 'false');
