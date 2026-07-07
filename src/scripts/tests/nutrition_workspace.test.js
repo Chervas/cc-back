@@ -472,7 +472,7 @@ function run() {
   assert.match(html, /Reserva energética del cuerpo/);
   assert.match(html, /component-explain-heading/);
   assert.match(html, /component-explain-card-with-image/);
-  assert.match(html, /component-explain-card-with-image \{[^}]*minmax\(360px, 520px\)/);
+  assert.match(html, /component-explain-card-with-image \{[^}]*minmax\(400px, 560px\)/);
   assert.match(html, /component-inline-bar/);
   assert.doesNotMatch(html, /class="composition-bar"/);
   assert.doesNotMatch(html, /bar-chart-grid/);
@@ -603,7 +603,7 @@ function run() {
     },
   }, html, '2026-02-26T11:00:00.000Z');
   assert.equal(snapshotPayload.snapshot.kind, 'nutrition_measurement_report');
-  assert.equal(snapshotPayload.snapshot.snapshot_version, 13);
+  assert.equal(snapshotPayload.snapshot.snapshot_version, 14);
   assert.equal(snapshotPayload.snapshot.report.calculation_profile.code, CALCULATION_PROFILE.code);
   assert.equal(snapshotPayload.snapshot.measurement.id, 2);
   assert.equal(snapshotPayload.snapshot.report.measurement_id, 2);

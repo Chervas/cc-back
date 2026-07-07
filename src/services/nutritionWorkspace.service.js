@@ -14,7 +14,7 @@ const clinicalPrivateStorage = require('./clinicalPrivateStorage.service');
 const { Op } = db.Sequelize;
 const execFileAsync = promisify(execFile);
 const FORMULA_VERSION = 'nutrition-basic-v3';
-const NUTRITION_REPORT_SNAPSHOT_VERSION = 13;
+const NUTRITION_REPORT_SNAPSHOT_VERSION = 14;
 const NUTRITION_REPORT_CURRENT_STATUSES = ['final', 'active'];
 const NUTRITION_REPORT_BRANDING_MODES = new Set(['clinicaclick', 'clinic']);
 const DEFAULT_CHROMIUM_PATH = '/home/ubuntu/.cache/clinicaclick-browsers/chrome-headless-shell/linux-148.0.7778.56/chrome-headless-shell-linux64/chrome-headless-shell';
@@ -988,7 +988,7 @@ function buildComparisonOverviewHtml(comparison = {}) {
         </div>
         <span class="pill">${escapeHtml(comparison.days_between != null ? `${comparison.days_between} días` : 'Histórico')}</span>
       </div>
-      <div class="comparison-section-grid">
+      <div class="comparison-section-grid ${orderedSections.length === 1 ? 'comparison-section-grid-single' : ''}">
         ${orderedSections.map((section) => `
           <div class="comparison-section-card">
             <h3>${escapeHtml(comparisonSectionTitle(section))}</h3>
@@ -3890,6 +3890,7 @@ function buildNutritionReportHtml(reportData, options = {}) {
     .donut-subtitle { fill: #64748b; font-size: 10px; font-weight: 700; }
     .section-heading-row { display: flex; justify-content: space-between; gap: 16px; align-items: flex-start; margin-bottom: 12px; }
     .comparison-section-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+    .comparison-section-grid-single { grid-template-columns: minmax(0, 1fr); }
     .comparison-section-card { border: 1px solid #e2e8f0; border-radius: 10px; padding: 12px; background: #f8fafc; break-inside: avoid; }
     .comparison-section-card h3 { margin: 0 0 10px; font-size: 13px; color: #0f172a; }
     .comparison-metric { border-top: 1px solid #e2e8f0; padding-top: 8px; margin-top: 8px; }
@@ -3911,11 +3912,11 @@ function buildNutritionReportHtml(reportData, options = {}) {
     .composition-main-grid { margin-top: 4px; }
     .component-explain-grid { display: grid; grid-template-columns: minmax(0, 1fr); gap: 0; margin-top: 16px; border-top: 1px solid #e2e8f0; }
     .component-explain-card { display: grid; grid-template-columns: minmax(0, 1fr); gap: 12px; align-items: center; border-bottom: 1px solid #e2e8f0; padding: 22px 0; background: transparent; break-inside: avoid; }
-    .component-explain-card-with-image { grid-template-columns: minmax(0, .86fr) minmax(360px, 520px); gap: 34px; min-height: 440px; }
+    .component-explain-card-with-image { grid-template-columns: minmax(0, .82fr) minmax(400px, 560px); gap: 36px; min-height: 470px; }
     .component-explain-heading { display: flex; align-items: center; gap: 8px; }
     .component-explain-dot { flex: none; width: 11px; height: 11px; border-radius: 999px; display: block; box-shadow: 0 0 0 4px rgba(226, 232, 240, .65); }
-    .component-explain-figure { margin: 0; min-height: 420px; display: grid; place-items: center end; background: transparent; overflow: hidden; }
-    .component-explain-img { width: 520px; height: 430px; object-fit: contain; object-position: center right; display: block; background: transparent; mix-blend-mode: multiply; filter: saturate(1.08) contrast(1.06); transform: scale(1.08); transform-origin: center right; }
+    .component-explain-figure { margin: 0; min-height: 450px; display: grid; place-items: center end; background: transparent; overflow: hidden; }
+    .component-explain-img { width: 560px; height: 460px; object-fit: contain; object-position: center right; display: block; background: transparent; mix-blend-mode: multiply; filter: saturate(1.08) contrast(1.06); transform: scale(1.08); transform-origin: center right; }
     .component-explain-body { display: grid; gap: 12px; align-content: center; }
     .component-explain-grid strong { font-size: 15px; color: #0f172a; }
     .component-explain-grid small { color: #475569; font-size: 12px; line-height: 1.45; max-width: 48ch; }
