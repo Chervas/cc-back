@@ -623,6 +623,95 @@ async function loadPendingConsentCards({ clinicIds, doctorId = null, limit = 6 }
   });
 }
 
+function locationPublicUrl(location) {
+  const raw = parseJsonObject(location?.raw_payload);
+  return raw.metadata?.mapsUri || raw.mapsUri || null;
+}
+
+async function loadUnansweredReviewCards({ clinicIds, clinicMap, limit = 4 }) {
+  if (!clinicIds.length || !BusinessProfileReview) return [];
+
+  const reviews = await BusinessProfileReview.findAll({
+    where: {
+      ...scopedWhere('clinica_id', clinicIds),
+      has_reply: false,
+    },
+    attributes: [
+      'id',
+      'clinica_id',
+      'business_location_id',
+      'review_name',
+      'reviewer_name',
+      'reviewer_profile_photo_url',
+      'star_rating',
+      'comment',
+      'create_time',
+      'update_time',
+      'is_negative',
+      'matched_paciente_id',
+      'match_confidence',
+    ],
+    order: [['create_time', 'DESC']],
+    limit,
+    raw: true,
+  });
+
+  if (!reviews.length) return [];
+
+  const locationIds = uniqueInts(reviews.map((review) => review.business_location_id));
+  const patientIds = uniqueInts(reviews.map((review) => review.matched_paciente_id));
+  const [locations, patients] = await Promise.all([
+    locationIds.length && ClinicBusinessLocation
+      ? ClinicBusinessLocation.findAll({
+          where: scopedWhere('id', locationIds),
+          attributes: ['id', 'location_name', 'raw_payload'],
+          raw: true,
+        })
+      : [],
+    patientIds.length && Paciente
+      ? Paciente.findAll({
+          where: scopedWhere('id_paciente', patientIds),
+          attributes: ['id_paciente', 'nombre', 'apellidos'],
+          raw: true,
+        })
+      : [],
+  ]);
+
+  const locationMap = new Map(locations.map((row) => [Number(row.id), row]));
+  const patientMap = new Map(patients.map((row) => [Number(row.id_paciente), row]));
+
+  return reviews.map((review) => {
+    const clinic = clinicMap.get(Number(review.clinica_id));
+    const location = locationMap.get(Number(review.business_location_id));
+    const patient = patientMap.get(Number(review.matched_paciente_id));
+    const reviewId = Number(review.id);
+    return {
+      id: String(reviewId),
+      reviewId,
+      reviewName: review.review_name || null,
+      clinicId: Number(review.clinica_id) || null,
+      clinicName: clinic?.nombre_clinica || `Clínica ${review.clinica_id}`,
+      locationName: location?.location_name || null,
+      reviewerName: review.reviewer_name || 'Paciente de Google',
+      reviewerAvatar: review.reviewer_profile_photo_url || null,
+      rating: Number(review.star_rating || 0),
+      comment: review.comment || '',
+      createdAt: review.create_time || review.update_time || null,
+      isNegative: review.is_negative === true || Number(review.star_rating || 0) <= 3,
+      matchedPatientId: Number(review.matched_paciente_id) || null,
+      matchedPatientName: patient ? fullName(patient, null) : null,
+      matchConfidence: review.match_confidence != null ? Number(review.match_confidence) : null,
+      replyExternalUrl: locationPublicUrl(location),
+      link: '/marketing/perfil-google',
+      queryParams: {
+        reviews: 'unanswered',
+        review_id: reviewId,
+        clinica_id: Number(review.clinica_id) || null,
+      },
+    };
+  });
+}
+
 async function loadWeeklySchedule({ clinicIds, clinicMap, userId, todayIso }) {
   if (!userId || !clinicIds.length || !DoctorClinica || !DoctorHorario) return [];
 
@@ -1069,12 +1158,14 @@ async function getMainDashboard({ userId, query = {} }) {
 
   const [
     pendingPatientConsents,
+    unansweredReviews,
     doctorPendingConsents,
     weeklySchedule,
     whatsappStatus,
     opportunities,
   ] = await Promise.all([
     sections.operations ? loadPendingConsentCards({ clinicIds: scope.clinicIds, limit: 6 }) : [],
+    sections.operations ? loadUnansweredReviewCards({ clinicIds: scope.clinicIds, clinicMap: scope.clinicMap, limit: 4 }) : [],
     doctorId ? loadPendingConsentCards({ clinicIds: scope.clinicIds, doctorId, limit: 6 }) : [],
     doctorId ? loadWeeklySchedule({ clinicIds: scope.clinicIds, clinicMap: scope.clinicMap, userId: doctorId, todayIso: today.date }) : [],
     sections.shared ? loadWhatsappStatus({ clinicIds: scope.clinicIds, groupIds: scope.groupIds }) : { connected: null, paymentReady: null, paymentMissing: false },
@@ -1145,6 +1236,7 @@ async function getMainDashboard({ userId, query = {} }) {
     pastAttendancePending: sections.operations ? appointments.pastAttendance : [],
     doctorAppointmentsToday: doctorAppointments,
     pendingPatientConsents,
+    unansweredReviews: sections.operations ? unansweredReviews : [],
     doctorPendingConsents,
     weeklySchedule,
     tasks: {

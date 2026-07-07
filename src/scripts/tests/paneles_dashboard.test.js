@@ -57,6 +57,7 @@ async function run() {
   assert.deepEqual(dashboard.scope.clinicIds, [clinicId]);
   assert.equal(dashboard.sections.showShared, true);
   assert.equal(Array.isArray(dashboard.inactiveTodayAppointments), true);
+  assert.equal(Array.isArray(dashboard.unansweredReviews), true);
   assert.equal(dashboard.rolePresentation?.mode, 'clinic_operations');
   assert.equal(typeof dashboard.rolePresentation?.title, 'string');
 
@@ -76,6 +77,7 @@ async function run() {
     assert.equal(patientDashboard.rolePresentation?.mode, 'restricted');
     assert.deepEqual(patientDashboard.todayAppointments, []);
     assert.deepEqual(patientDashboard.inactiveTodayAppointments, []);
+    assert.deepEqual(patientDashboard.unansweredReviews, []);
     assert.deepEqual(patientDashboard.growthOpportunities, []);
     assert.deepEqual(patientDashboard.criticalAlerts, []);
     assert.deepEqual(patientDashboard.errors, []);
