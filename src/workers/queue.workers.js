@@ -2,6 +2,7 @@
 const { QueryTypes } = require('sequelize');
 const { createWorker } = require('../services/queue.service');
 const whatsappService = require('../services/whatsapp.service');
+const groqAudioService = require('../services/groqAudio.service');
 const whatsappTemplatesService = require('../services/whatsappTemplates.service');
 const whatsappPhonesService = require('../services/whatsappPhones.service');
 const automationDefaultsService = require('../services/automationDefaults.service');
@@ -52,6 +53,131 @@ function truncateText(value, max = 120) {
     return `${normalized.slice(0, max - 1)}…`;
 }
 
+function normalizeMimeType(value) {
+    return cleanString(value).split(';')[0].trim().toLowerCase() || 'audio/ogg';
+}
+
+function extensionForMimeType(mimeType) {
+    const normalized = normalizeMimeType(mimeType);
+    if (normalized.includes('mpeg') || normalized.includes('mp3')) return 'mp3';
+    if (normalized.includes('mp4') || normalized.includes('m4a')) return 'm4a';
+    if (normalized.includes('wav')) return 'wav';
+    if (normalized.includes('webm')) return 'webm';
+    if (normalized.includes('ogg') || normalized.includes('opus')) return 'ogg';
+    return 'audio';
+}
+
+function serializeError(error) {
+    const message = cleanString(error?.message || error);
+    return message || 'unknown_error';
+}
+
+function buildAudioTranscriptionContent(transcriptionText) {
+    const text = cleanString(transcriptionText);
+    return text
+        ? text
+        : 'Audio recibido. No se pudo transcribir automáticamente.';
+}
+
+async function buildAudioInboundDescriptor({ msg, clinicId, normalizedType }) {
+    const audio = msg?.audio || {};
+    const mediaId = cleanString(audio?.id) || null;
+    const mimeType = normalizeMimeType(audio?.mime_type);
+    const sha256 = cleanString(audio?.sha256) || null;
+    const metadataExtra = {
+        media: {
+            kind: 'audio',
+            id: mediaId,
+            mime_type: mimeType,
+            sha256,
+            voice: audio?.voice === true,
+            provider: 'whatsapp',
+            stored: false,
+            playable: false,
+        },
+        audio_transcribed: false,
+    };
+
+    const markFailed = (reason, error = null) => {
+        const content = buildAudioTranscriptionContent('');
+        metadataExtra.audio_transcription = {
+            status: 'failed',
+            provider: 'groq',
+            model: cleanString(process.env.GROQ_STT_MODEL) || 'whisper-large-v3-turbo',
+            reason,
+            error: error ? serializeError(error) : null,
+            transcribed_at: new Date().toISOString(),
+        };
+        metadataExtra.resume_text = content;
+        return {
+            rawType: 'audio',
+            messageType: normalizedType,
+            content,
+            webOriginRef: null,
+            resumeText: content,
+            metadataExtra,
+        };
+    };
+
+    if (!mediaId) {
+        return markFailed('missing_media_id');
+    }
+
+    try {
+        const clinicConfig = await whatsappService.getClinicConfig(clinicId);
+        if (!clinicConfig?.accessToken) {
+            return markFailed('missing_whatsapp_access_token');
+        }
+
+        const download = await whatsappService.downloadMediaBuffer({
+            mediaId,
+            accessToken: clinicConfig.accessToken,
+        });
+        const mediaInfo = download?.mediaInfo || {};
+        const resolvedMimeType = normalizeMimeType(download?.contentType || mediaInfo?.mime_type || mimeType);
+        metadataExtra.media = {
+            ...metadataExtra.media,
+            mime_type: resolvedMimeType,
+            sha256: cleanString(mediaInfo?.sha256) || sha256,
+            file_size: Number(mediaInfo?.file_size || 0) || null,
+            url_available: Boolean(mediaInfo?.url),
+        };
+
+        const transcription = await groqAudioService.transcribeAudioBuffer({
+            buffer: download.buffer,
+            mimeType: resolvedMimeType,
+            fileName: `whatsapp-${mediaId}.${extensionForMimeType(resolvedMimeType)}`,
+        });
+        const transcriptionText = cleanString(transcription?.text);
+        const content = buildAudioTranscriptionContent(transcriptionText);
+        metadataExtra.audio_transcribed = true;
+        metadataExtra.audio_transcription = {
+            status: 'success',
+            provider: transcription.provider || 'groq',
+            model: transcription.model || cleanString(process.env.GROQ_STT_MODEL) || 'whisper-large-v3-turbo',
+            text: transcriptionText,
+            transcribed_at: new Date().toISOString(),
+        };
+        metadataExtra.resume_text = transcriptionText;
+
+        return {
+            rawType: 'audio',
+            messageType: normalizedType,
+            content,
+            webOriginRef: null,
+            resumeText: transcriptionText,
+            metadataExtra,
+        };
+    } catch (error) {
+        console.error('[whatsapp] Error transcribiendo audio inbound', {
+            clinicId,
+            mediaId,
+            error: serializeError(error),
+        });
+        return markFailed('transcription_failed', error);
+    }
+}
+
 function normalizeInboundMessageType(rawType) {
     const normalized = cleanString(rawType).toLowerCase();
     if (['text', 'image', 'template', 'event', 'reaction'].includes(normalized)) {
@@ -63,6 +189,10 @@ function normalizeInboundMessageType(rawType) {
 async function buildInboundMessageDescriptor({ msg, clinicId }) {
     const rawType = cleanString(msg?.type).toLowerCase() || 'text';
     const normalizedType = normalizeInboundMessageType(rawType);
+
+    if (rawType === 'audio') {
+        return buildAudioInboundDescriptor({ msg, clinicId, normalizedType });
+    }
 
     if (rawType === 'reaction') {
         const emoji = cleanString(msg?.reaction?.emoji);

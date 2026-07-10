@@ -256,7 +256,7 @@ exports.listConversations = async (req, res) => {
 
     const conversations = await Conversation.findAll({
       where,
-      order: [['last_message_at', 'DESC']],
+      order: [['last_message_at', 'DESC'], ['createdAt', 'DESC'], ['id', 'DESC']],
       include: [
         { model: Paciente, as: 'paciente', attributes: ['id_paciente', 'nombre', 'apellidos', 'foto', 'telefono_movil', 'email'] },
         { model: LeadIntake, as: 'lead', attributes: ['id', 'nombre', 'telefono', 'email'] },
@@ -388,6 +388,69 @@ exports.getMessages = async (req, res) => {
   } catch (err) {
     console.error('Error getMessages', err);
     return res.status(500).json({ error: 'Error obteniendo mensajes' });
+  }
+};
+
+exports.streamMessageMedia = async (req, res) => {
+  try {
+    const userId = req.userData?.userId;
+    const messageId = Number(req.params.messageId || req.params.message_id);
+    if (!Number.isFinite(messageId) || messageId <= 0) {
+      return res.status(400).json({ error: 'message_id_invalid' });
+    }
+
+    const message = await Message.findByPk(messageId, { raw: true });
+    if (!message) {
+      return res.status(404).json({ error: 'message_not_found' });
+    }
+
+    const conversation = await Conversation.findByPk(message.conversation_id, { raw: true });
+    if (!conversation) {
+      return res.status(404).json({ error: 'conversation_not_found' });
+    }
+
+    const { clinicIds, isAggregateAllowed } = await getUserClinics(userId);
+    if (!ensureAccess({ clinicIds, isAggregateAllowed }, conversation.clinic_id)) {
+      return res.status(403).json({ error: 'Acceso denegado a la clínica' });
+    }
+
+    const metadata = message.metadata || {};
+    const media = metadata.media || {};
+    const kind = String(media.kind || '').toLowerCase();
+    const mediaId = String(media.id || '').trim();
+    if (kind !== 'audio' || !mediaId) {
+      return res.status(410).json({ error: 'audio_unavailable' });
+    }
+
+    const clinicConfig = await whatsappService.getClinicConfig(conversation.clinic_id);
+    if (!clinicConfig?.accessToken) {
+      return res.status(410).json({ error: 'audio_unavailable' });
+    }
+
+    try {
+      const { buffer, contentType, mediaInfo } = await whatsappService.downloadMediaBuffer({
+        mediaId,
+        accessToken: clinicConfig.accessToken,
+      });
+      const mimeType = contentType || mediaInfo?.mime_type || media.mime_type || 'audio/ogg';
+      res.set({
+        'Content-Type': mimeType,
+        'Content-Length': buffer.length,
+        'Cache-Control': 'no-store',
+        'Content-Disposition': `inline; filename="whatsapp-audio-${messageId}"`,
+      });
+      return res.send(buffer);
+    } catch (downloadError) {
+      const status = downloadError?.response?.status;
+      if ([400, 401, 403, 404, 410].includes(Number(status))) {
+        return res.status(410).json({ error: 'audio_unavailable' });
+      }
+      console.error('Error streamMessageMedia', downloadError?.message || downloadError);
+      return res.status(502).json({ error: 'audio_download_failed' });
+    }
+  } catch (err) {
+    console.error('Error streamMessageMedia', err);
+    return res.status(500).json({ error: 'Error obteniendo audio' });
   }
 };
 

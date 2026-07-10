@@ -9,6 +9,10 @@ const LIMITED_MODE_MAX_OUTBOUND_PER_24H = Number.parseInt(
     process.env.WHATSAPP_LIMITED_MODE_MAX_OUTBOUND_24H || '5',
     10
 );
+const WHATSAPP_MEDIA_DOWNLOAD_MAX_BYTES = Number.parseInt(
+    process.env.WHATSAPP_MEDIA_DOWNLOAD_MAX_BYTES || '25000000',
+    10
+);
 
 class WhatsAppService {
     constructor() {
@@ -390,6 +394,57 @@ class WhatsAppService {
         });
 
         return response.data;
+    }
+
+    async getMediaInfo({ mediaId, accessToken }) {
+        if (!mediaId) {
+            throw new Error('whatsapp_media_id_required');
+        }
+        if (!accessToken) {
+            throw new Error('whatsapp_access_token_required');
+        }
+
+        const url = `https://graph.facebook.com/${this.apiVersion}/${mediaId}`;
+        const response = await axios.get(url, {
+            headers: {
+                Authorization: `Bearer ${accessToken}`,
+            },
+        });
+
+        return response.data;
+    }
+
+    async downloadMediaBuffer({ mediaId, accessToken, maxBytes = WHATSAPP_MEDIA_DOWNLOAD_MAX_BYTES }) {
+        const mediaInfo = await this.getMediaInfo({ mediaId, accessToken });
+        const mediaUrl = mediaInfo?.url;
+        if (!mediaUrl) {
+            throw new Error('whatsapp_media_url_missing');
+        }
+
+        const fileSize = Number(mediaInfo?.file_size || 0);
+        if (Number.isFinite(fileSize) && fileSize > 0 && maxBytes > 0 && fileSize > maxBytes) {
+            throw new Error('whatsapp_media_too_large');
+        }
+
+        const response = await axios.get(mediaUrl, {
+            headers: {
+                Authorization: `Bearer ${accessToken}`,
+            },
+            responseType: 'arraybuffer',
+            timeout: 30000,
+            maxBodyLength: maxBytes > 0 ? maxBytes : Infinity,
+            maxContentLength: maxBytes > 0 ? maxBytes : Infinity,
+        });
+        const buffer = Buffer.from(response.data || []);
+        if (maxBytes > 0 && buffer.length > maxBytes) {
+            throw new Error('whatsapp_media_too_large');
+        }
+
+        return {
+            mediaInfo,
+            buffer,
+            contentType: response.headers?.['content-type'] || mediaInfo?.mime_type || null,
+        };
     }
 
     /**

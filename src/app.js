@@ -385,13 +385,15 @@ server.listen(PORT, () => {
 });
 
 // Importante: staging puede levantar un backend separado en otro puerto.
-// Para evitar duplicar workers (jobs/colas), el scheduler se controla con JOBS_AUTO_START.
-const shouldAutoStart = process.env.NODE_ENV === 'production' || process.env.JOBS_AUTO_START === 'true';
+// El liderazgo del cron debe ser explícito para evitar que varios runtimes
+// (integracion/auth/staging) encolen el mismo trabajo por hora.
+const isCronLeader = process.env.JOBS_CRON_LEADER === 'true';
+const shouldAutoStart = isCronLeader && (process.env.NODE_ENV === 'production' || process.env.JOBS_AUTO_START === 'true');
 if (shouldAutoStart) {
     jobScheduler.start();
     console.log('🔁 Job scheduler iniciado');
 } else {
-    console.log('⏸️ Job scheduler deshabilitado (JOBS_AUTO_START=false)');
+    console.log(`⏸️ Job scheduler deshabilitado (JOBS_CRON_LEADER=${process.env.JOBS_CRON_LEADER || 'false'}, JOBS_AUTO_START=${process.env.JOBS_AUTO_START || 'false'})`);
 }
 
 // Inicializar jobs automáticamente en producción
@@ -410,6 +412,8 @@ if (shouldAutoStart) {
       console.error('❌ Error al iniciar jobs automáticamente:', error);
     }
   }, 5000);
+} else {
+  console.log(`⏸️ Cron jobs deshabilitados en este runtime (JOBS_CRON_LEADER=${process.env.JOBS_CRON_LEADER || 'false'})`);
 }
 
 

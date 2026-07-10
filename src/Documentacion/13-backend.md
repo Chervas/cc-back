@@ -4,6 +4,169 @@
 
 ---
 
+## 2026-03-27 - Integración de terceros Meta/Google: estado exacto
+
+### Estado actual del producto
+
+La parte de ClinicaClick ya está operativa para soportar conexiones propias e heredadas:
+
+- `scopeConnectionResolver.service.js` y `effectiveMarketingAssets.service.js` ya resuelven:
+  - conexión técnica;
+  - assignment por clínica/grupo;
+  - activos efectivos;
+  - fallback global de Meta Pixel/CAPI cuando aplica;
+- `Marketing > Campañas` y `Ajustes > Cuentas conectadas` ya exponen:
+  - conexión heredada de grupo;
+  - conexión propia de clínica;
+  - CTA para conectar otra cuenta para la clínica;
+  - selección de activos efectivos para esa clínica.
+
+### Bloqueo actual
+
+El bloqueo actual para conectar una cuenta Meta de un tercero externo ya no está en el backend de ClinicaClick.
+Está en Meta App Review / permisos de la app `1807844546609897`.
+
+Estado verificado por Graph a fecha `2026-03-27`:
+
+- permisos `live` confirmados:
+  - `public_profile`
+  - `email`
+  - `whatsapp_business_management`
+  - `whatsapp_business_messaging`
+- el OAuth de Meta que lanzamos pide además:
+  - `public_profile`
+  - `pages_read_engagement`
+  - `pages_show_list`
+  - `pages_manage_ads`
+  - `pages_manage_metadata`
+  - `ads_read`
+  - `leads_retrieval`
+  - `instagram_basic`
+  - `instagram_manage_insights`
+
+Mientras esos permisos de negocio no estén operativos para usuarios externos, Meta responde con errores del tipo:
+
+- `Parece que esta aplicación no está disponible`
+
+### Permisos previstos para solicitar / revisar
+
+Se deja documentado como lista de trabajo con Meta:
+
+- `publish_video`
+- `instagram_branded_content_creator`
+- `instagram_branded_content_brand`
+- `instagram_business_basic`
+- `pages_manage_ads`
+- `instagram_business_manage_messages`
+- `instagram_manage_messages`
+- `pages_manage_metadata`
+- `ads_read`
+- `pages_read_engagement`
+- `pages_show_list`
+- `business_management`
+
+Y deben mantenerse vigentes:
+
+- `public_profile`
+- `whatsapp_business_messaging`
+- `whatsapp_business_management`
+
+### Nota sobre `business_management`
+
+`business_management` es recomendable, pero no resuelve por sí solo la integración completa.
+
+Es especialmente relevante porque Meta restringe `GET /me/accounts` para páginas vinculadas a un Business si el usuario no concede `business_management` y no tiene rol en ese business.
+
+Pero ClinicaClick necesita además:
+
+- listar cuentas publicitarias (`/me/adaccounts`);
+- suscribir páginas a `leadgen` (`/{page-id}/subscribed_apps`);
+- leer leads;
+- operar con permisos de anuncios y páginas.
+
+Por tanto, `business_management` debe entenderse como permiso complementario, no sustitutivo.
+
+### Decisión operativa hasta que Meta apruebe permisos
+
+Mientras ese review no se cierre:
+
+- no debe considerarse cerrada la conexión de terceros Meta desde clínica;
+- no debe forzarse más lógica sobre “conectar otra cuenta” si el bloqueo viene de Meta;
+- el trabajo puede seguir avanzando en:
+  - automatizaciones;
+  - citas;
+  - nodos;
+  - leads;
+  - intake;
+  - UX interna de `Campañas` y `Ajustes`.
+
+## 2026-03-28 - Aislamiento de colas entre runtimes y checks visibles de entorno
+
+En esta máquina `dev` y `staging` comparten base de datos. El riesgo real no está solo en la configuración de PM2, sino en que ambos runtimes pueden intentar consumir la misma cola de `JobRequests`.
+
+### Medida aplicada
+
+- cada job nuevo guarda `payload.__runtime_namespace`;
+- si no existe `JOB_RUNTIME_NAMESPACE`, el backend usa `port:<PORT>` como fallback estable;
+- `claimNextJob`, `claimJobById` y `resetRunningJobs` ya filtran por ese namespace.
+
+### Consecuencia operativa
+
+- `clinicaclick-integracion` debe reclamar solo jobs de `port:3004`;
+- `clinicaclick-staging` debe reclamar solo jobs de `port:3001`;
+- esto evita que una automatización creada y monitorizada en `localhost` siga ejecutándose “por detrás” en `staging`, dejando el monitor local sin eventos en tiempo real.
+
+### Monitorización
+
+`GET /api/job-requests/worker/status` expone ahora:
+
+- `runtimeNamespace`
+- `runtimeInfo.summaryLabel`
+- `systemChecks.groqApiKey`
+- `systemChecks.runtimeNamespace`
+
+La UI de `Ajustes > Monitoreo del sistema` debe usar estos checks como semáforo visible, no solo los logs de servidor.
+El check de `GROQ_API_KEY` describe siempre el proceso activo en ese instante; si cambia `.env`, hay que reiniciar el backend para que el estado reflejado sea real.
+
+## 2026-04-01 - Propagación de plantillas WhatsApp con versionado técnico interno
+
+### Problema real detectado
+
+Editar una plantilla de catálogo y propagarla no bastaba cuando ya existía en Meta una versión aprobada con el mismo nombre técnico y un contrato distinto.
+
+Caso real:
+
+- `clinicaclick_confirmacion_cita` aprobada en Meta con `4` variables;
+- nueva definición local con `5` variables;
+- intentar reabrir revisión sobre el mismo `name` devolvía errores genéricos de Meta;
+- esperar al job horario no resolvía nada porque no había una revisión real nueva.
+
+### Regla nueva
+
+Cuando el contenido Meta-facing cambia para una plantilla de catálogo:
+
+1. ClinicaClick mantiene la **misma plantilla lógica** (`catalog_template_id`).
+2. El backend crea una **variante técnica** en Meta:
+   - `clinicaclick_confirmacion_cita_v2`
+   - `clinicaclick_confirmacion_cita_v3`
+   - etc.
+3. El override local de cada clínica pasa a apuntar a esa variante técnica.
+4. La UI sigue agrupando por `catalog_template_id`, no por `name`, para no duplicar la plantilla lógica.
+
+### Estados
+
+- `PENDING`: existe una revisión real abierta en Meta para la variante técnica actual.
+- `PENDING_LOCAL`: ni la variante técnica nueva ni una revisión equivalente han quedado abiertas en Meta.
+
+### Sync
+
+`syncTemplatesForWaba(...)` ya no degrada una plantilla versionada a `PENDING_LOCAL` si:
+
+- el `meta_template_id` coincide con la revisión remota, o
+- el `name` técnico versionado (`_v2`, `_v3`, ...) coincide con la plantilla remota de esa misma familia.
+
+Eso evita perder el enlace a revisiones `PENDING` recién creadas cuando Meta devuelve componentes normalizados de forma distinta.
+
 ## 2026-03-26 - Activos efectivos de marketing por clínica/grupo
 
 `Marketing > Campañas`, `Ajustes > Cuentas conectadas`, el intake web y Meta CAPI ya no deben razonar solo en términos de “hay una conexión”.
@@ -60,6 +223,18 @@ Google solo trabaja con lo guardado en `IntakeConfig.config.google_ads`.
 - `GET /api/intake/config`
 - `POST /api/intake/leads`
 - `POST /api/intake/events`
+
+Matiz operativo importante en multi-sede:
+- si el snippet llega firmado correctamente y resuelve una `clinic_id` válida, el backend ya no aborta la ingesta solo porque el `group_id` derivado no pueda validarse.
+- en ese caso se prioriza la clínica, se continúa con `group_id = null` y se evita romper casos como `tel_modal` o `CallInitiated` por una inconsistencia accesoria de scope.
+
+Resolución adicional en webs de grupo:
+- si el snippet llega con `data-group-id` y el payload trae el nombre de la clínica, `POST /api/intake/leads` intenta resolver la clínica dentro de ese grupo antes de usar el mapeo por dominio o la clínica por defecto;
+- se leen claves como `clinica`, `clinic`, `clinic_name`, `sede`, `centro`, `ubicacion` tanto en `lead_data` como en `form_submission.fields`;
+- la comparación usa `buildClinicMatcher(...)`, sin tildes y sin pisar una `clinic_id` explícita ni una clínica ya resuelta por dominio;
+- cuando hace match, queda auditado en:
+  - `clinic_match_source = clinic_name_field`
+  - `clinic_match_value = <texto recibido>`
 
 ### Pixel de Meta
 
@@ -368,7 +543,8 @@ Defaults actuales de interés:
 - `JOBS_GOOGLE_ADS_SCHEDULE`: `20 0 * * *`
 - `JOBS_ADS_MIDDAY_SCHEDULE`: `0 12 * * *`
 - `JOBS_WHATSAPP_PHONES_SCHEDULE`: `*/15 * * * *`
-- `JOBS_WHATSAPP_TEMPLATES_SCHEDULE`: `0 * * * *`
+- `JOBS_WHATSAPP_TEMPLATES_SCHEDULE`: `*/20 * * * *`
+- `WHATSAPP_PROPAGATE_RESYNC_DELAY_MINUTES`: `12`
 
 Ventanas y límites asociados:
 
@@ -385,6 +561,63 @@ Regla operativa:
 
 - cambiar el default en código no modifica producción/integración si la variable ya existe en `.env` o en PM2;
 - si se ajusta el cron, hay que revisar también el valor efectivo en entorno y reiniciar con actualización de variables si aplica.
+
+Refresco diferido tras `Propagar`:
+
+- además del cron periódico, una propagación de plantilla sobre clínicas conectadas encola una sync diferida por `wabaId`;
+- por defecto se programa a los `12` minutos (`WHATSAPP_PROPAGATE_RESYNC_DELAY_MINUTES`);
+- esto cubre el caso en que Meta aprueba la revisión pocos minutos después de abrirla, sin depender del cron periódico;
+- la sync diferida se deduplica por ventana para no encolar varias iguales si se propagan varias plantillas seguidas sobre el mismo WABA.
+
+Cron periódico de plantillas WhatsApp:
+
+- ya no recorre todos los WABA activos a ciegas;
+- por defecto corre cada `20` minutos;
+- solo encola sync para WABAs que tengan alguna plantilla activa en `PENDING` o `IN_REVIEW`;
+- si no hay pendientes reales, no hace llamadas de revisión a Meta.
+
+### Liderazgo explícito del cron
+
+Desde `2026-04-01`, el arranque del scheduler ya no debe depender de que varios runtimes compartan `JOBS_AUTO_START=true`.
+
+Nueva regla:
+
+- `JOBS_WORKER_ENABLED` controla el worker de `JobRequests`.
+  - Por defecto se considera `true`.
+  - Si vale `false`, este runtime no ejecuta automatizaciones, resumes ni jobs diferidos aunque el backend esté online.
+- `JOBS_CRON_LEADER=true`: este runtime es el que manda y arranca `metaSyncJobs.start()`.
+- `JOBS_CRON_LEADER=false`: este runtime no debe encolar cron jobs periódicos.
+
+Importante:
+
+- `jobScheduler.start()` y `metaSyncJobs.start()` ya no significan lo mismo.
+- `staging` debe poder ejecutar sus automatizaciones (`appointment_created`, `wait_response`, resumes) aunque no sea el leader de cron.
+
+Configuración operativa actual:
+
+- `clinicaclick-integracion`: `JOBS_CRON_LEADER=true`
+- `clinicaclick-auth`: `JOBS_CRON_LEADER=false`
+- `clinicaclick-staging`: `JOBS_CRON_LEADER=false`
+
+Objetivo:
+
+- evitar duplicados horarios de `whatsapp_templates_sync`;
+- evitar que `auth` o `staging` compitan con `integracion` sobre la misma base de datos;
+- poder migrar el liderazgo sin tocar código.
+
+### Regla de migración a staging
+
+Cuando `staging` deba convertirse en el runtime que manda los cron jobs:
+
+1. poner `JOBS_CRON_LEADER=false` en `integracion`;
+2. poner `JOBS_CRON_LEADER=true` en `staging`;
+3. reiniciar ambos procesos con actualización de `.env`.
+
+Importante:
+
+- no deben coexistir dos runtimes con `JOBS_CRON_LEADER=true` contra la misma base;
+- `JOBS_AUTO_START=true` por sí solo ya no basta para arrancar cron.
+- `JOBS_CRON_LEADER=false` no debe apagar el worker de `JobRequests`; solo desactiva los cron periódicos.
 
 ## 2026-03-23 - Cache ad-level de Google Ads para análisis de campañas
 
@@ -1020,6 +1253,8 @@ Mitigación:
       - `paciente_telefono`
       - `tratamiento`
       - `phone_match`
+    - Esta ruta sirve para **resolución manual asistida** cuando no hubo auto-match.
+    - Al crear una cita manual, `createCita` intenta primero resolver un `LeadIntake` pendiente de llamada en la misma clínica y con el mismo teléfono. Si lo encuentra y la cita no es `continuacion`, vincula automáticamente la cita al lead, hereda `campana_id` y cierra el `call_outcome` como `citado`.
   - `GET /api/intake/leads/:id/activity`
     - Añade actividad de cita (`Cita agendada`, `Estado de cita actualizado`) construida desde `CitasPacientes`.
     - Resuelve actor con `created_by` / `updated_by -> Usuarios`.
@@ -1139,20 +1374,41 @@ En `.env` / `.env.example`:
 - `GROQ_MODEL_FAST` (default `llama-3.1-8b-instant`)
 - `GROQ_TIMEOUT_MS` (default `20000`)
 - `GROQ_STT_MODEL` (default `whisper-large-v3-turbo`, para transcripción de audio inbound WhatsApp)
+- `GROQ_STT_TIMEOUT_MS` (default `30000`; si no existe usa `GROQ_TIMEOUT_MS`)
+- `WHATSAPP_MEDIA_DOWNLOAD_MAX_BYTES` (default `25000000`, límite defensivo para descargar media inbound antes de STT)
 
 ### Notas operativas
 
 - La API key de Groq se usa **solo en backend**.
-- Si `GROQ_API_KEY` falta, `condition/ai_analysis` falla en runtime con `groq_api_key_not_configured`. Eso no impide el trigger ni el envío inicial de WhatsApp; bloquea el avance al llegar al nodo IA.
+- Si `GROQ_API_KEY` falta, `condition/ai_analysis` falla en runtime con `groq_api_key_not_configured`. No hay fallback silencioso.
 - El output del nodo guarda además metadatos técnicos (`_ai_provider`, `_ai_model`, `_ai_analysis_mode`, `_ai_usage`) para auditoría y depuración.
+- Al arrancar el backend, `src/app.js` deja un warning explícito en logs si `GROQ_API_KEY` no está definida.
+- Además, `/api/job-requests/worker/status` marca `GROQ_API_KEY` como check fallido para que soporte lo vea desde UI.
 - Requisito de producto pendiente: persistir consumo por usuario/clinic para facturación por uso.
 
 ### Audio inbound (WhatsApp) y hoja de ruta local
 
 - Estado actual:
-  - Los audios entrantes de WhatsApp se transcriben en backend usando Groq STT (`GROQ_STT_MODEL`).
-  - Se persiste la transcripción en `Messages.content` y metadata técnica en `Messages.metadata`.
+  - `workers/queue.workers.js` detecta `message.type = audio` en webhooks inbound de WhatsApp.
+  - El worker descarga la media con el token activo de la clínica (`whatsappService.downloadMediaBuffer(...)`) y transcribe el buffer con Groq STT (`src/services/groqAudio.service.js`).
+  - Se persiste como `Messages.message_type = text` para no migrar el enum actual. La semántica real queda en `Messages.metadata.media.kind = audio`.
+  - `Messages.content` queda visible para soporte/QuickChat como el texto transcrito limpio, sin cabecera redundante. El badge de UI indica que procede de audio.
+  - `Messages.metadata.audio_transcribed = true` y `Messages.metadata.audio_transcription` guarda `status`, `provider`, `model`, `text` y `transcribed_at`.
+  - `resume_text` se emite por socket y se entrega al runtime V2 con el texto transcrito limpio, sin la cabecera visible. Así los nodos `wait_response` y `condition/ai_analysis` analizan lo que dijo el paciente.
+  - Si falla descarga/STT, se persiste el mensaje `Audio recibido. No se pudo transcribir automáticamente.` con `metadata.audio_transcription.status = failed`; no se rompe el webhook ni se pierde trazabilidad.
   - **No** se persiste aún el binario de audio ni media estática propia.
+  - Para escuchar el audio, `GET /api/conversations/messages/:messageId/media` valida permisos de conversación, solicita a Meta una URL temporal desde `metadata.media.id`, descarga el binario en backend y lo devuelve como stream/buffer autenticado al navegador.
+  - Si el mensaje no tiene `metadata.media.id`, si el token ya no puede recuperar el audio o si Meta ya no lo conserva, el endpoint responde `410 audio_unavailable`. La UI muestra snackbar: `El audio ya no está disponible. La transcripción seguirá visible debajo.`
+  - Esta reproducción es transicional y depende de la disponibilidad temporal de media en Meta. No debe tratarse como archivo histórico permanente.
+- Reparación de audios huérfanos:
+  - Si un worker antiguo guardó un audio como mensaje vacío con `metadata.media.kind = audio` pero sin `metadata.media.id`, no se puede pedir a Meta el audio solo con la fila de `Messages`.
+  - Antes de darlo por perdido, se puede intentar recuperar el `media_id` desde el payload original de BullMQ/Redis (`bull:webhook_whatsapp:<jobId>`) si el job aún existe.
+  - Si ese payload conserva `messages[].audio.id`, se puede reparar la fila de `Messages` asociando por `metadata.wamid`, descargar desde Meta y transcribir de nuevo.
+  - Esto es una vía de contingencia, no un contrato operativo: si Redis ya purgó el job o Meta ya no conserva la media, solo quedará registrar el audio como no disponible.
+- Estrategia de almacenamiento:
+  - Fase actual: no hay storage propio; se solicita a Meta bajo demanda para transcribir y reproducir.
+  - Fase con estáticos privados: al recibir un audio, además de transcribirlo, se guardará el binario en almacenamiento privado/autenticado (p.ej. S3 compatible o storage local protegido), se persistirá una referencia interna en `Messages.metadata.media.storage`, y el reproductor priorizará ese storage frente a Meta.
+  - La migración a storage propio debe definir retención, borrado, permisos, cifrado y auditoría, porque los audios pueden contener datos sanitarios o personales.
 - Objetivo futuro (servidor local):
   - Sustituir la llamada cloud STT por un servicio local de transcripción (p.ej. `faster-whisper`/`whisper.cpp`) detrás de un endpoint interno.
   - Mantener el mismo contrato de salida (`content` + `metadata.audio_transcription`) para no romper QuickChat ni automations.
@@ -1223,6 +1479,20 @@ Esto evita dos regresiones:
 2. que el nodo IA reciba texto vacío al analizar la confirmación.
 3. que una misma respuesta reactive varias ejecuciones pendientes en la misma conversación. Si hay varias `wait_response` abiertas para el mismo chat, el backend reanuda solo la más reciente y cancela las anteriores con `cancelled_reason = superseded_by_newer_waiting_execution`.
 
+Regla funcional validada en QA para `condition/ai_analysis` con `preset_key = confirm_appointment`:
+
+- reacción positiva explícita (`👍`, `✅`, `👌`, `🙌` y variantes cercanas) sobre el mensaje escuchado:
+  - se trata como `confirmado` de forma determinista;
+  - no depende del LLM;
+  - enruta por `on_success`.
+- reacción negativa o neutra (`👎`, `🤔`, etc.):
+  - no se fuerza como éxito;
+  - se analiza como respuesta no confirmatoria y debe terminar en `on_fail` salvo que el preset futuro decida otra semántica explícita.
+- emoji escrito como texto normal:
+  - no se trata como `reaction`;
+  - entra como `text`;
+  - lo analiza la IA/preset igual que cualquier otra respuesta escrita.
+
 Checklist obligatorio al pasar a `staging` y luego a `main`:
 
 - validar que el backend del entorno usa `QUEUE_PREFIX` propio;
@@ -1243,6 +1513,55 @@ Checklist obligatorio al pasar a `staging` y luego a `main`:
     - si reaparecen dos conversaciones para el mismo número en la misma clínica, tratarlo como regresión porque rompe trazabilidad, ventana 24h y reanudación de `wait_response`.
     - al entrar una respuesta, `wait_response` reutiliza el job pendiente de la ejecución marcándolo con `resume_mode = response`; si el payload del job histórico no traía ese campo, el executor cae a `waiting_meta.resume_mode` y `waiting_meta.pending_response_text` antes de asumir `timeout`.
     - el backend que reanuda no tiene que ser el mismo que recibió el webhook. En integración se da por correcto que el webhook pueda entrar por otro proceso PM2 y que la reanudación final la haga `clinicaclick-integracion` a través del bus Redis.
+
+#### Riesgos reales validados en QA y qué revisar antes de migrar
+
+Estos puntos ya no son teoría. Han fallado de verdad durante QA en `integracion` y deben tratarse como checklist de migración:
+
+- `wait_response` no debe arrancar el contador desde la entrada al nodo si el mensaje quedó retenido por `quiet_hours`.
+  - Regla válida: el timeout empieza en `scheduled_for` o en la hora efectiva de salida del mensaje escuchado.
+  - Síntoma si falla:
+    - el paciente recibe el mensaje tarde;
+    - el timeout vence antes o casi al mismo tiempo que la lectura real del mensaje.
+
+- La reanudación por inbound no debe reciclar a ciegas el job histórico de timeout.
+  - Regla válida: la respuesta crea o actualiza un job dedicado con `resume_mode = response`.
+  - Síntoma si falla:
+    - la ejecución se queda en `waiting`;
+    - el webhook persiste el inbound;
+    - pero el scheduler sigue tratando el caso como `timeout`.
+
+- La conversación usada para reanudar debe ser la escuchada por el nodo (`listens_to_node_id`) y no una conversación antigua arrastrada en `context`.
+  - Síntoma si falla:
+    - el mensaje del paciente entra en QuickChat;
+    - pero la ejecución no consume la respuesta correcta.
+
+- El backend que recibe el webhook puede no ser el backend que ejecuta la automatización.
+  - Regla válida:
+    - `clinicaclick-auth` puede persistir el inbound;
+    - `clinicaclick-integracion` o el runtime activo del entorno debe reclamar el job `automations_v2_execute`.
+  - Síntoma si falla:
+    - en logs de webhook aparece `owned_by_other_runtime:*`;
+    - la ejecución queda en `waiting`;
+    - el inbound existe en BD y se ve en la UI.
+
+- El `runtime namespace` del job debe coincidir con el scheduler que realmente reclama jobs.
+  - Regla válida:
+    - jobs del entorno activo `integracion`: `port:3004`;
+    - jobs del entorno activo `staging`: `port:3001`;
+    - si en el futuro `crm` usa otro backend PM2 para reclamar jobs, debe tener su namespace explícito y único.
+  - Síntoma si falla:
+    - el job existe;
+    - `next_run_at` ya venció;
+    - pero el scheduler nunca lo reclama porque filtra por otro `__runtime_namespace`.
+
+- Las pruebas manuales por shell también deben respetar ese namespace real.
+  - Regla válida:
+    - si se crean ejecuciones/jobs desde `node -e`, scripts puntuales o seeds de QA, hay que exportar `JOB_RUNTIME_NAMESPACE` del runtime activo antes de tocar `JobRequests` o `FlowExecutionsV2`.
+  - Síntoma si falla:
+    - el job queda con `cwd:/...`;
+    - el scheduler real filtra por `port:*`;
+    - la prueba parece rota aunque el runtime productivo esté bien.
 
   - Normalización de teléfono para CRM + WhatsApp:
     - se centraliza en `src/lib/phone.js`;
@@ -1359,6 +1678,57 @@ Consecuencias:
 - No debe dispararse más de un flujo V2 por el mismo `appointment_created`.
 - Un template `without_treatment` no debe asignarse desde `PUT /api/tratamientos/:id/automation-template`.
 
+### `condition/field_check` temporal
+
+El nodo `condition/field_check` admite ahora dos contratos:
+
+1. `simple`
+   - comparador clásico `left_ref + operator + right_value`
+2. `appointment_booking_timing`
+   - switch temporal específico de cita creada
+
+Contrato del modo temporal:
+
+```json
+{
+  "mode": "appointment_booking_timing",
+  "switch_type": "appointment_booking",
+  "switch_rules": [
+    { "id": "branch_1", "match_window": "same_day" },
+    { "id": "branch_2", "match_window": "day_before" },
+    { "id": "branch_3", "match_window": "more_than_day_before" }
+  ]
+}
+```
+
+Salidas requeridas:
+
+- una por cada `switch_rule.id`
+- `on_else`
+
+Semántica:
+
+- usa la fecha local de la clínica
+- compara `CitasPacientes.created_at` frente a la fecha local de la cita (`inicio`)
+- cada regla cubre una ventana cerrada por día natural
+  - `same_day`: la cita se añadió a la agenda el mismo día que la cita
+  - `day_before`: la cita se añadió a la agenda el día anterior al de la cita
+  - `more_than_day_before`: la cita se añadió a la agenda más de un día antes de la fecha de la cita
+- si no encaja en ninguna regla, sale por `on_else`
+
+Validaciones:
+
+- `switch_rules` no puede estar vacío
+- no se repite `match_window`
+- cada regla necesita su salida en `node.outputs`
+- `on_else` es obligatorio
+
+### `control/join` multirrama
+
+- `control/join` sigue usando `mode = any`
+- pero en integración ya converge dos o más ramas
+- no depende de que la bifurcación previa sea estrictamente binaria
+
 ### Scheduler de cita
 
 `appointment_reminder_window` y `appointment_after` se ejecutan mediante `JobRequests`, no por cambio de estado.
@@ -1381,6 +1751,140 @@ Reglas importantes:
 - el entorno debe aislar sus colas con `QUEUE_PREFIX` propio;
 - si varios procesos consumen la misma tabla/cola de jobs en un entorno, todos deben conocer `appointment_automation_schedule_fire` o bien solo uno de ellos debe actuar como scheduler. Si no, el síntoma es `No handler registered for job type 'appointment_automation_schedule_fire'`.
 - Regla aplicada desde el 2026-03-24: cada scheduler debe reclamar solo los tipos que sabe ejecutar (`claimNextJob(..., allowedTypes)`). Esto evita que runtimes auxiliares como `clinicaclick-auth` fallen jobs de automatización V2 que pertenecen al backend funcional.
+
+### Diagnóstico real de una cita que "no disparó" la automatización
+
+Si una cita parece no haber disparado `appointment_created`, el orden correcto de diagnóstico en integración es:
+
+1. revisar `FlowExecutionsV2` por `trigger_entity_type = appointment` y `trigger_entity_id = <id_cita>`;
+2. revisar `FlowExecutionLogsV2` para localizar el nodo exacto que falló;
+3. revisar `AutomationFlowTemplatesV2.nodes` de la versión ejecutada, no solo la versión que el editor tenga abierta;
+4. revisar la plantilla real en `WhatsappTemplates`, no el nombre lógico del nodo.
+
+Caso real validado el `2026-03-27`:
+
+- cita `99`
+- clínica `57` (`Propdental Eixample`)
+- doctora `Doctora`
+- flujo ejecutado:
+  - `FlowExecutionsV2.id = 41`
+  - `template_version_id = 45`
+  - `public_id = flw_1da2804bd8552a43`
+  - `version = 14`
+- resultado:
+  - `status = failed`
+  - `last_error = whatsapp_send_failed:(#132000) Number of parameters does not match the expected number of params`
+
+La automatización **sí disparó**.
+Lo que falló fue el nodo `N2 action/send_whatsapp`.
+
+#### Error de configuración detectado
+
+El nodo `N2` enviaba:
+
+- `1 = {{paciente.nombre}}`
+- `2 = {{profesional.nombre}}`
+- `3 = {{cita.fecha}}`
+- `4 = {{cita.hora}}`
+- `5 = {{clinica.direccion}}`
+
+Pero la plantilla real `clinicaclick_confirmacion_cita` (`WhatsappTemplates.id = 17`) solo tenía **4 placeholders** en `BODY` mientras el catálogo ya iba por 5.
+
+Corrección aplicada en `feat/integracion` el `2026-03-27`:
+
+- `send_whatsapp` ya usa contrato semántico (`variables_named`) y reconstruye `variables` según la plantilla operativa real;
+- el runtime acepta que el nodo conserve variables adicionales semánticas aunque la plantilla activa todavía no las exponga posicionalmente;
+- al propagar una plantilla, backend recompone automáticamente las automatizaciones V2 que la usan.
+
+#### Estado actual de los flujos de cita
+
+Tras el saneado del 2026-03-28, los flujos activos de cita quedan con esta semántica:
+
+1. `wait_response` escuchando al nodo equivocado
+   - corregido: `wait_response` escucha al nodo outbound real (`N2`)
+
+2. `condition/ai_analysis` en preset `confirm_appointment`
+   - `on_success` significa `decision = confirmado`
+   - `on_fail` significa cualquier otro caso (`no_confirmado`, `dudas` o fallo técnico)
+   - no se usa ya un `field_check` intermedio en estos flujos porque complicaba el grafo sin aportar nada al usuario
+   - adicionalmente, ciertas reacciones positivas de WhatsApp (`👍`, `✅`, `👌`, `🙌`) se resuelven de forma determinista como `confirmado` antes de pasar por LLM
+
+3. Falta de Groq en local o staging
+   - el flujo falla de forma explícita en el nodo `condition/ai_analysis`
+   - el error esperado es `groq_api_key_not_configured`
+   - esto debe tratarse como problema de entorno, no como decisión funcional del flujo
+
+4. Monitor de ejecuciones
+   - `GET /api/automations/v2/executions` ya ordena por `updated_at DESC, id DESC`
+   - así una ejecución antigua que recibe una respuesta nueva vuelve arriba en el monitor y no parece "desaparecida"
+
+Corrección aplicada en los flujos activos de cita el `2026-03-28`:
+
+- `wait_response` escucha al nodo outbound correcto (`N2`);
+- `condition/ai_analysis` para `confirm_appointment` enruta directamente `confirmado` por `on_success` y el resto por `on_fail`;
+- el monitor de ejecuciones ordena por última actividad.
+
+### Preview de atribución en cita manual
+
+- `GET /api/citas/manual-attribution-preview`
+  - Se usa desde agenda cuando ya hay paciente identificado en una cita manual.
+  - Backend resuelve tres casos:
+    1. `pending_call_auto_link`: existe un `LeadIntake` pendiente de llamada en la misma clínica y con el mismo teléfono. Al guardar la cita manual se vinculará automáticamente.
+    2. `patient_origin`: no hay llamada pendiente, pero sí un origen histórico conocido del paciente por teléfono/email.
+    3. `manual_no_attribution`: no se encontró señal fiable.
+  - Si `tipo_cita = continuacion`, devuelve `kind = continuation` y no intenta vincular leads de adquisición.
+
+#### Estado actual del catálogo de automatizaciones
+
+El `2026-03-27` la capa `AutomationFlowCatalog` no actúa todavía como fuente de verdad viva del sistema:
+
+- `propagateCatalogAutomationToClinics(...)` crea o actualiza una nueva versión V2 por clínica y la **publica automáticamente** a partir de un `template_key` enlazado;
+- la propagación debe resolver siempre el flujo base neutro del catálogo y no reutilizar copias de clínica como fuente;
+- cada familia propagada por clínica debe tener `public_id` propio, distinto del asset base del catálogo;
+- desactiva la versión publicada anterior de la misma familia en la clínica y deja activa la recién propagada;
+- no versiona ni valida el contrato de placeholders de las plantillas WhatsApp que usan esos nodos;
+- varios registros históricos del catálogo siguen con `template_key = NULL`, por lo que no son propagables como catálogo funcional.
+
+Implicación:
+
+- hoy no existe una garantía fuerte de alineación entre:
+  - `AutomationFlowCatalog`
+  - `AutomationFlowTemplatesV2` publicados
+  - `WhatsappTemplateCatalog`
+  - `WhatsappTemplates` operativas de la WABA
+
+Si se quiere usar el catálogo como gobierno real, hacen falta al menos estas garantías:
+
+1. todo item de catálogo debe enlazar a un `template_key` válido y publicado;
+2. cada nodo `action/send_whatsapp` debe conservar contrato verificable de la plantilla elegida (`template_id`/`catalog_template_id` + número/semántica de placeholders);
+3. publicar un flujo debe invalidarse si el contrato real de `WhatsappTemplates.components` ya no coincide con el nodo.
+
+Regla operativa vigente tras el fix del `2026-04-01`:
+
+- si el catálogo enlaza un flujo base por `public_id`, la propagación a clínicas debe:
+  - preferir la versión **sin scope** (`clinic_id = null`, `group_id = null`);
+  - normalizar cualquier `template_key` heredado quitando sufijos previos `__clinic_<id>`;
+  - generar el `template_key` final de clínica como `<base>__clinic_<id>`;
+  - asignar un `public_id` propio a la familia propagada de esa clínica.
+
+Esto evita dos regresiones:
+
+1. que el `template_key` se vaya concatenando (`base__clinic_1__clinic_19__clinic_22...`);
+2. que publicar una copia de clínica desactive por accidente el flujo base del catálogo al compartir `public_id`.
+
+#### Semántica pendiente de normalizar en contexto de cita
+
+Contrato de negocio deseado:
+
+- `usuario.*` = usuario logado que crea la cita
+- `profesional.*` = doctor/profesional asignado a la cita
+
+Estado real del runtime el `2026-03-27`:
+
+- `flowEngineV2` sigue poblando `profesional.nombre` y `profesional.email` a partir de `created_by`;
+- la variable del doctor asignado no está separada todavía en el contexto estándar.
+
+Esto explica casos como la cita `99`, donde el mensaje usó `Graci Gonzalez` aunque la cita estaba asignada a `Doctora`.
 
 - Ventana de 24h en WhatsApp
   - La ventana de texto libre se considera abierta solo si existe `last_inbound_at` real dentro de las últimas 24 horas.
@@ -1458,7 +1962,8 @@ Reglas importantes:
     - `clinica.url_ficha_local`
 
 - Criterio
-  - `profesional.*` es el alias público recomendado para el usuario operativo que agenda la cita.
+  - `usuario.*` es el usuario operativo que agenda/crea la cita.
+  - `profesional.*` es el doctor o profesional asignado a la cita.
   - `cita.usuario_*` se conserva como alias de compatibilidad para plantillas anteriores.
   - No se inventan valores derivados: la URL de ficha local solo se expone si existe en `Clinicas.url_ficha_local`.
 
@@ -1542,7 +2047,7 @@ Reglas:
 - `catalogo-automatizaciones`
   - Sigue expuesto como catálogo de metadatos.
   - Ya no debe crear ni editar `AutomationFlow` legacy.
-  - La propagación a clínicas crea o actualiza borradores V2 por clínica, enlazados operativamente por `template_key`.
+  - La propagación a clínicas crea o actualiza versiones V2 por clínica, las publica automáticamente y las enlaza operativamente por `template_key`.
   - `template_version` queda como campo histórico de transición y deja de ser binding operativo.
 
 - Tratamientos y cita
@@ -1551,6 +2056,10 @@ Reglas:
     - tratamiento guarda `appointment_automation_template_key`;
     - runtime resuelve la última versión publicada activa (`published_at != null`, `is_active = true`);
     - las versiones publicadas anteriores del mismo `template_key` pasan a `deprecadas`.
+  - Desactivar un flujo publicado en clínica lo saca de la resolución operativa:
+    - `appointment_created` no lo volverá a seleccionar en `resolveClinicFallbackTemplate(...)`;
+    - los recordatorios/after ya programados no se ejecutan, porque `fireScheduledTrigger(...)` vuelve a comprobar `is_active = true` y `published_at != null` antes de lanzar la ejecución;
+    - el resultado práctico es que desactivar el flujo en clínica detiene la automatización sin necesidad de borrar jobs pendientes.
   - Las superficies v1 de flujos de cita (`AppointmentFlowTemplate`, `AppointmentFlowInstance`, `/api/tratamientos/:id/flow`, `/api/appointment-flow-templates`) se consideran retiradas en integración.
 
 - Merge hygiene
@@ -1590,7 +2099,57 @@ Reglas:
   - `lead_id`
 - Se evita hacer match por `appointment_id` en respuestas WhatsApp.
 - El `JobRequest` de tipo `automations_v2_execute` se actualiza con `resume_mode=response` y el payload inbound consolidado antes de volver al scheduler.
+- La respuesta inbound no debe sobrescribir el timeout histórico sin más. Debe existir un job efectivo reclamable por el scheduler con:
+  - `resume_mode = response`
+  - `response_text`
+  - `inbound_message_id`
+  - `inbound_conversation_id`
+- `waiting_meta.runtime_namespace` y `payload.__runtime_namespace` deben apuntar al mismo runtime que reclama jobs en ese entorno.
+- Si el mensaje outbound escuchado salió más tarde por horario silencioso, `wait_starts_at` debe anclarse a esa hora efectiva de salida, no a la entrada inicial al nodo.
 - Si una ejecución se queda en `waiting` pero el job asociado falla con `No handler registered for job type 'automations_v2_execute'`, el problema es de scheduler/claiming, no de plantilla ni del nodo `wait_response`.
+- En QA de automatizaciones con WhatsApp conviene distinguir siempre:
+  - reacción (`message_type = reaction`);
+  - emoji enviado como texto (`message_type = text`);
+  - texto ambiguo (`Tengo dudas`, `No podré ir`, etc.).
+  El flujo puede tratarlos distinto aunque visualmente el usuario vea solo un emoji o una respuesta corta.
+
+### Checklist cerrada para migrar a `staging` o al backend que sirva CRM
+
+Antes de mover tráfico real o de declarar estable el runtime nuevo, verificar en este orden:
+
+1. Namespaces
+   - cada PM2 que reclame jobs debe tener un `JOB_RUNTIME_NAMESPACE` estable o un `PORT` estable;
+   - revisar que el scheduler del entorno objetivo filtra exactamente por ese namespace;
+   - no dejar jobs vivos con namespace del entorno anterior.
+
+2. Liderazgo de cron
+   - exactamente un runtime con `JOBS_CRON_LEADER=true` por base de datos;
+   - el resto `false`.
+
+3. Colas y webhook
+   - `QUEUE_PREFIX` aislado por entorno;
+   - webhook WhatsApp entrando por el runtime previsto o, si entra por otro, Redis/socket-bus funcionando.
+
+4. Reanudación V2
+   - crear una ejecución real con `wait_response`;
+   - responder desde WhatsApp;
+   - validar que:
+     - se crea job `resume_mode=response`;
+     - el scheduler del entorno objetivo lo reclama solo;
+     - la ejecución sale de `waiting` sin intervención manual.
+
+5. Horario silencioso
+   - repetir una prueba con `quiet_hours` o con `scheduled_for` forzado;
+   - validar que el timeout empieza cuando el paciente ve el mensaje, no antes.
+
+6. QuickChat / CRM
+   - el inbound debe verse en la conversación canónica;
+   - la automatización debe consumir esa misma conversación;
+   - no debe aparecer doble conversación ni reanudación sobre un chat viejo.
+
+7. QA manual
+   - cualquier script manual que cree ejecuciones o jobs debe exportar el namespace real del entorno objetivo;
+   - si no, los jobs quedarán invisibles para el scheduler y la prueba será falsa.
 
 ### Execution monitor
 
@@ -1758,6 +2317,65 @@ La atribución CRM usa `LeadIntake` y solo se acepta cuando el match con la camp
 9. `objective + global`
 
 La respuesta se consume ya desde el wizard y no debe tratarse como contrato futuro.
+
+### 7.1. Estado real de plantillas WhatsApp propagadas
+
+Para `WhatsappTemplates`, el backend ya distingue entre:
+
+- `PENDING`: la plantilla se ha enviado realmente a Meta y está en revisión.
+- `PENDING_LOCAL`: el catálogo local cambió y se propagó a clínica, pero todavía no existe una revisión remota equivalente en Meta para esa versión.
+- `APPROVED`, `REJECTED`, `SIN_CONECTAR`: se mantienen con su semántica habitual.
+
+Regla operativa:
+
+- si existe una plantilla remota con el mismo nombre pero distinto contrato Meta-facing, la propagación debe intentar abrir igualmente una revisión real en Meta;
+- si Meta acepta esa creación, el override local queda en `PENDING`;
+- si Meta la rechaza, el override local queda en `PENDING_LOCAL` y se persiste el motivo exacto devuelto por Meta en `rejection_reason`;
+- el `syncTemplatesForWaba(...)` solo sube el override a `APPROVED` cuando el contenido remoto coincide realmente.
+- el `syncTemplatesForWaba(...)` tampoco debe heredar el `meta_template_id` de la plantilla remota vieja cuando el contenido no coincide, para no dar a entender que esa revisión remota corresponde al override local.
+
+Diagnóstico real aplicado el `2026-03-31`:
+
+- se verificó directamente contra Meta que `clinicaclick_confirmacion_cita` seguía aprobada solo con `4` placeholders;
+- la versión local propagada con `5` placeholders no tenía revisión real abierta en Meta;
+- por eso podían pasar días sin cambiar de estado: no era un fallo del job, sino un estado local mal interpretado.
+
+Implicación operativa:
+
+- si una plantilla queda en `PENDING_LOCAL`, esperar no basta por sí solo;
+- ese estado significa que ClinicaClick tiene un cambio local, pero Meta todavía no tiene una versión remota equivalente aprobable para ese contenido.
+
+Además, el motor V2 ya bloquea el envío de plantillas que no estén en `APPROVED`.
+
+### 7.2. Catálogo de plantillas: `Propagada` vs `Aprobada`
+
+En `catalogo-plantillas` ya no debe asumirse que ambos conceptos significan lo mismo:
+
+- `Propagada = Sí`:
+  - la propagación local terminó correctamente;
+  - la cola de backend acabó sin error;
+  - el catálogo selló `last_propagated_at`;
+  - no implica aprobación remota en Meta.
+
+- `Aprobada = Sí`:
+  - la versión técnica más reciente propagada de esa familia ya está `APPROVED` en Meta;
+  - si la versión más nueva sigue `PENDING`, el catálogo debe mostrar `Aprobada = No` aunque `Propagada = Sí`.
+  - el cálculo se hace sobre la versión técnica más nueva de las instancias remotas activas (`waba_id != null`);
+  - clínicas sin WABA o placeholders `SIN_CONECTAR` no cuentan para el `Sí`;
+  - si una sola clínica conectada queda `PENDING`, `REJECTED` o `PENDING_LOCAL` en esa versión más nueva, el catálogo muestra `Aprobada = No`.
+
+- `Propagada = En proceso`:
+  - la plantilla ya fue encolada para propagación;
+  - el worker aún no ha terminado;
+  - cuando el worker completa, pasa a `Sí` o vuelve implícitamente a `No` si luego se edita otra vez.
+
+Reglas de validación local antes de propagar a Meta:
+
+- el `BODY` no puede empezar por una variable;
+- el `BODY` no puede terminar en una variable;
+- no puede haber variables consecutivas sin texto fijo entre ellas.
+
+Si se incumplen, backend debe devolver `400 invalid_template_body` y no encolar la propagación.
 
 ### 8. `Campañas Admin` (`AdminCampaignPlaybook`)
 

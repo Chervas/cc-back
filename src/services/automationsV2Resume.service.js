@@ -9,7 +9,6 @@ const FlowExecutionV2 = db.FlowExecutionV2;
 const AutomationFlowTemplateV2 = db.AutomationFlowTemplateV2;
 const JobRequest = db.JobRequest;
 const FORM_MATCH_MODES = new Set(['url_contains', 'url_equals', 'form_id', 'selector']);
-const BUFFERED_RESPONSE_TIMERS = new Map();
 
 function cleanString(value) {
   if (value === undefined || value === null) return null;
@@ -41,6 +40,45 @@ function normalizeEmail(value) {
 
 function normalizePhone(value) {
   return normalizePhoneDigits(value);
+}
+
+function detectCurrentRuntimeNamespace() {
+  const explicit = cleanString(
+    typeof jobRequestsService.getCurrentRuntimeNamespace === 'function'
+      ? jobRequestsService.getCurrentRuntimeNamespace()
+      : null
+  );
+  if (explicit) return explicit;
+
+  const envNamespace = cleanString(process.env.JOB_RUNTIME_NAMESPACE) || cleanString(process.env.RUNTIME_NAMESPACE);
+  if (envNamespace) return envNamespace;
+
+  const port = cleanString(process.env.PORT);
+  if (port) return `port:${port}`;
+
+  const cwd = cleanString(process.cwd());
+  if (cwd) return `cwd:${cwd}`;
+
+  return 'runtime:unknown';
+}
+
+const CURRENT_RUNTIME_NAMESPACE = detectCurrentRuntimeNamespace();
+
+function getQueuedJobRuntimeNamespace(jobPayload = null) {
+  if (!jobPayload || typeof jobPayload !== 'object' || Array.isArray(jobPayload)) return null;
+  return cleanString(jobPayload.__runtime_namespace);
+}
+
+function getExecutionRuntimeNamespace(execution, queuedJob = null) {
+  const waitingRuntime = cleanString(execution?.waiting_meta?.runtime_namespace);
+  if (waitingRuntime) return waitingRuntime;
+  return getQueuedJobRuntimeNamespace(queuedJob?.payload);
+}
+
+function isExecutionOwnedByCurrentRuntime(execution, queuedJob = null) {
+  const ownerRuntime = getExecutionRuntimeNamespace(execution, queuedJob);
+  if (!ownerRuntime) return true;
+  return ownerRuntime === CURRENT_RUNTIME_NAMESPACE;
 }
 
 function getByPath(obj, path) {
@@ -179,72 +217,24 @@ function appendMultilineText(baseText, nextText) {
   return `${base}\n${next}`;
 }
 
+function resolvePositiveInt(value) {
+  const parsed = Number.parseInt(String(value), 10);
+  return Number.isInteger(parsed) && parsed >= 0 ? parsed : null;
+}
+
 function getResponseBufferConfig(waitNode) {
   const cfg = waitNode?.config && typeof waitNode.config === 'object' ? waitNode.config : {};
+  const explicitDelayMs = resolvePositiveInt(cfg.response_buffer_delay_ms);
+  const explicitDelaySeconds = resolvePositiveInt(cfg.response_buffer_delay_seconds);
+  const envDelayMs = resolvePositiveInt(process.env.AUTOMATIONS_V2_RESPONSE_BUFFER_MS);
+  const resolvedDelayMs = explicitDelayMs
+    ?? (explicitDelaySeconds !== null ? explicitDelaySeconds * 1000 : null)
+    ?? envDelayMs
+    ?? 5 * 1000;
   return {
     enabled: parseBool(cfg.response_buffer_enabled, true),
-    delayMs: 60 * 1000,
+    delayMs: resolvedDelayMs,
   };
-}
-
-function clearBufferedResponseTimer(executionId) {
-  const normalizedExecutionId = toIntOrNull(executionId);
-  if (!normalizedExecutionId) return;
-  const existing = BUFFERED_RESPONSE_TIMERS.get(normalizedExecutionId);
-  if (existing) {
-    clearTimeout(existing);
-    BUFFERED_RESPONSE_TIMERS.delete(normalizedExecutionId);
-  }
-}
-
-async function triggerBufferedResponseResume(executionId) {
-  const normalizedExecutionId = toIntOrNull(executionId);
-  clearBufferedResponseTimer(normalizedExecutionId);
-  if (!normalizedExecutionId) return;
-
-  const execution = await FlowExecutionV2.findByPk(normalizedExecutionId);
-  if (!execution || execution.status !== 'waiting') {
-    return;
-  }
-
-  const waitingMeta = execution.waiting_meta && typeof execution.waiting_meta === 'object'
-    ? execution.waiting_meta
-    : {};
-
-  if (cleanString(waitingMeta.resume_mode) !== 'response') {
-    return;
-  }
-
-  const responseText = cleanString(waitingMeta.pending_response_text);
-  if (!responseText) {
-    return;
-  }
-
-  const flowEngineV2Service = require('./flowEngineV2.service');
-  await flowEngineV2Service.runExecution(normalizedExecutionId, {
-    resumeMode: 'response',
-    responseText,
-  });
-}
-
-function scheduleBufferedResponseResume(executionId, waitUntil) {
-  const parsedExecutionId = toIntOrNull(executionId);
-  const targetAt = waitUntil ? new Date(waitUntil).getTime() : NaN;
-  if (!parsedExecutionId || !Number.isFinite(targetAt)) {
-    return;
-  }
-
-  clearBufferedResponseTimer(parsedExecutionId);
-  const delayMs = Math.max(0, targetAt - Date.now()) + 150;
-  const timer = setTimeout(() => {
-    triggerBufferedResponseResume(parsedExecutionId).catch(() => {});
-  }, delayMs);
-
-  if (typeof timer.unref === 'function') {
-    timer.unref();
-  }
-
-  BUFFERED_RESPONSE_TIMERS.set(parsedExecutionId, timer);
 }
 
 async function findQueuedResumeJob(executionId, resumeMode) {
@@ -257,7 +247,10 @@ async function findQueuedResumeJob(executionId, resumeMode) {
     FROM JobRequests
     WHERE type = 'automations_v2_execute'
       AND status IN ('pending', 'waiting', 'running')
-      AND JSON_EXTRACT(payload, '$.execution_id') = :executionId
+      AND (
+        JSON_EXTRACT(payload, '$.execution_id') = :executionId
+        OR JSON_EXTRACT(payload, '$.executionId') = :executionId
+      )
       AND JSON_UNQUOTE(JSON_EXTRACT(payload, '$.resume_mode')) = :resumeMode
     ORDER BY id DESC
     LIMIT 1
@@ -283,7 +276,10 @@ async function findQueuedExecutionJob(executionId) {
     FROM JobRequests
     WHERE type = 'automations_v2_execute'
       AND status IN ('pending', 'waiting', 'running')
-      AND JSON_EXTRACT(payload, '$.execution_id') = :executionId
+      AND (
+        JSON_EXTRACT(payload, '$.execution_id') = :executionId
+        OR JSON_EXTRACT(payload, '$.executionId') = :executionId
+      )
     ORDER BY id DESC
     LIMIT 1
     `,
@@ -501,7 +497,6 @@ async function enqueueInboundResponseResume({
         },
       });
 
-      clearBufferedResponseTimer(staleExecution.id);
       await cancelQueuedExecutionJob(staleExecution.id, 'superseded_by_newer_waiting_execution');
     }
 
@@ -515,22 +510,34 @@ async function enqueueInboundResponseResume({
   for (const execution of effectiveMatches) {
     executionIds.push(execution.id);
     try {
+      const queuedJob = await findQueuedExecutionJob(execution.id);
       const waitNode = getWaitResponseNode(execution);
       const buffer = getResponseBufferConfig(waitNode);
+      const ownerRuntime = getExecutionRuntimeNamespace(execution, queuedJob) || CURRENT_RUNTIME_NAMESPACE;
 
       if (buffer.enabled) {
         const waitUntil = new Date(Date.now() + buffer.delayMs);
         const existingWaitingMeta = execution.waiting_meta && typeof execution.waiting_meta === 'object'
           ? execution.waiting_meta
           : {};
-        const mergedText = appendMultilineText(existingWaitingMeta.pending_response_text, text);
-        const pendingCount = Number(existingWaitingMeta.pending_response_count || 0) + 1;
+        const normalizedInboundMessageId = toIntOrNull(inboundMessageId);
+        const lastInboundMessageId = toIntOrNull(existingWaitingMeta.last_inbound_message_id);
+        const sameInboundMessage = normalizedInboundMessageId
+          && lastInboundMessageId
+          && normalizedInboundMessageId === lastInboundMessageId;
+        const mergedText = sameInboundMessage
+          ? (cleanString(existingWaitingMeta.pending_response_text) || text)
+          : appendMultilineText(existingWaitingMeta.pending_response_text, text);
+        const pendingCount = sameInboundMessage
+          ? Math.max(1, Number(existingWaitingMeta.pending_response_count || 1))
+          : Number(existingWaitingMeta.pending_response_count || 0) + 1;
 
         await execution.update({
           status: 'waiting',
           wait_until: waitUntil,
           waiting_meta: {
             ...existingWaitingMeta,
+            runtime_namespace: ownerRuntime,
             resume_mode: 'response',
             pending_response_text: mergedText,
             pending_response_count: pendingCount,
@@ -540,30 +547,47 @@ async function enqueueInboundResponseResume({
           },
         });
 
-        const queuedJob = await findQueuedExecutionJob(execution.id);
         const queuedPayload = queuedJob?.payload && typeof queuedJob.payload === 'object'
           ? queuedJob.payload
           : {};
         const responsePayload = {
           ...queuedPayload,
           execution_id: execution.id,
+          executionId: execution.id,
           resume_mode: 'response',
+          response_text: mergedText,
           inbound_channel: channel,
           inbound_conversation_id: normalizedConversationId,
           inbound_message_id: inboundMessageId || null,
           inbound_patient_id: normalizedPatientId || null,
           inbound_lead_id: normalizedLeadId || null,
+          __runtime_namespace: ownerRuntime,
         };
-        if (queuedJob) {
-          const queuedStatus = cleanString(queuedJob.status);
-          if (queuedStatus === 'waiting' || queuedStatus === 'pending' || queuedStatus === 'running') {
-            await jobRequestsService.markCancelled(queuedJob.id, {
-              errorMessage: 'superseded_by_local_buffered_response_resume',
-            });
-          }
+        const queuedResumeJob = await findQueuedResponseResumeJob(execution.id);
+        const queuedResumeStatus = cleanString(queuedResumeJob?.status);
+        if (queuedResumeJob && (queuedResumeStatus === 'waiting' || queuedResumeStatus === 'pending' || queuedResumeStatus === 'running')) {
+          await JobRequest.update(
+            {
+              status: 'waiting',
+              next_run_at: waitUntil,
+              payload: responsePayload,
+              error_message: null,
+              result_summary: null,
+              updated_at: new Date(),
+            },
+            { where: { id: queuedResumeJob.id } }
+          );
+        } else {
+          await jobRequestsService.enqueueJobRequest({
+            type: 'automations_v2_execute',
+            priority: 'critical',
+            status: 'waiting',
+            origin: 'automations_v2_inbound',
+            nextRunAt: waitUntil,
+            payload: responsePayload,
+          });
+          enqueued += 1;
         }
-
-        scheduleBufferedResponseResume(execution.id, waitUntil);
       } else {
         const job = await jobRequestsService.enqueueJobRequest({
           type: 'automations_v2_execute',
@@ -571,6 +595,7 @@ async function enqueueInboundResponseResume({
           origin: 'automations_v2_inbound',
           payload: {
             execution_id: execution.id,
+            executionId: execution.id,
             resume_mode: 'response',
             response_text: text,
             inbound_channel: channel,
@@ -687,6 +712,15 @@ async function enqueueInboundFormSubmissionResume({
   for (const execution of matched) {
     executionIds.push(execution.id);
     try {
+      const queuedJob = await findQueuedExecutionJob(execution.id);
+      if (!isExecutionOwnedByCurrentRuntime(execution, queuedJob)) {
+        errors.push({
+          execution_id: execution.id,
+          message: `owned_by_other_runtime:${getExecutionRuntimeNamespace(execution, queuedJob)}`,
+        });
+        continue;
+      }
+
       const existingWaitingMeta = execution.waiting_meta && typeof execution.waiting_meta === 'object'
         ? execution.waiting_meta
         : {};
@@ -696,6 +730,7 @@ async function enqueueInboundFormSubmissionResume({
         wait_until: new Date(),
         waiting_meta: {
           ...existingWaitingMeta,
+          runtime_namespace: getExecutionRuntimeNamespace(execution, queuedJob) || CURRENT_RUNTIME_NAMESPACE,
           resume_mode: 'form_submission',
           pending_form_submission: submission,
           last_form_submission_at: normalizedSubmittedAt,
@@ -703,15 +738,15 @@ async function enqueueInboundFormSubmissionResume({
         },
       });
 
-      const queuedJob = await findQueuedResumeJob(execution.id, 'form_submission');
-      if (queuedJob) {
-        if (cleanString(queuedJob.status) === 'waiting') {
+      const queuedResumeJob = await findQueuedResumeJob(execution.id, 'form_submission');
+      if (queuedResumeJob) {
+        if (cleanString(queuedResumeJob.status) === 'waiting') {
           await JobRequest.update(
             {
               next_run_at: new Date(),
               updated_at: new Date(),
             },
-            { where: { id: queuedJob.id } }
+            { where: { id: queuedResumeJob.id } }
           );
         }
       } else {
@@ -721,6 +756,7 @@ async function enqueueInboundFormSubmissionResume({
           origin: 'automations_v2_form_submission',
           payload: {
             execution_id: execution.id,
+            executionId: execution.id,
             resume_mode: 'form_submission',
             form_submission_event_id: toIntOrNull(formSubmissionEventId),
             lead_intake_id: normalizedLeadId,

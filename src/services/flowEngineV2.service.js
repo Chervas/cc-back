@@ -1,11 +1,14 @@
 'use strict';
 
+const fs = require('fs');
 const { Op } = require('sequelize');
 const axios = require('axios');
 const db = require('../../models');
 const { getIO } = require('./socket.service');
 const { queues } = require('./queue.service');
+const jobRequestsService = require('./jobRequests.service');
 const { normalizeCitaStatus, normalizeLeadStatus } = require('../lib/status-catalog');
+const { ADMIN_USER_IDS } = require('../lib/role-helpers');
 
 const AutomationFlowTemplateV2 = db.AutomationFlowTemplateV2;
 const FlowExecutionV2 = db.FlowExecutionV2;
@@ -51,6 +54,26 @@ function cleanString(value) {
   const normalized = String(value).trim();
   return normalized || null;
 }
+
+function detectCurrentRuntimeNamespace() {
+  const explicit = cleanString(process.env.JOB_RUNTIME_NAMESPACE)
+    || cleanString(process.env.RUNTIME_NAMESPACE);
+  if (explicit) return explicit;
+
+  const port = cleanString(process.env.PORT);
+  if (port) return `port:${port}`;
+
+  const cwd = cleanString(process.cwd());
+  if (cwd) return `cwd:${cwd}`;
+
+  return 'runtime:unknown';
+}
+
+const CURRENT_RUNTIME_NAMESPACE =
+  (typeof jobRequestsService.getCurrentRuntimeNamespace === 'function'
+    ? cleanString(jobRequestsService.getCurrentRuntimeNamespace())
+    : null)
+  || detectCurrentRuntimeNamespace();
 
 function parseBool(value, fallback = false) {
   if (value === undefined || value === null || value === '') return fallback;
@@ -889,7 +912,30 @@ function buildAiSimulatedOutput(outputFormat, analysisMode, model) {
 
 async function runGroqAiAnalysis({ prompt, inputText, outputFormat, outputFields, analysisMode, maxTokens }) {
   const apiKey = cleanString(process.env.GROQ_API_KEY);
+  try {
+    fs.appendFileSync('/tmp/cc-groq-debug.log', `${JSON.stringify({
+      ts: new Date().toISOString(),
+      source: 'backendclinicaclick',
+      pid: process.pid,
+      cwd: process.cwd(),
+      port: process.env.PORT || null,
+      runtimeNamespace: process.env.JOB_RUNTIME_NAMESPACE || process.env.RUNTIME_NAMESPACE || null,
+      hasGroqKey: !!apiKey,
+      groqKeyPrefix: apiKey ? `${String(apiKey).slice(0, 6)}...` : null,
+      hasBaseUrl: !!cleanString(process.env.GROQ_API_BASE_URL),
+      analysisMode: normalizeAiAnalysisMode(analysisMode),
+    })}\n`);
+  } catch (_) {
+    // no-op debug fallback
+  }
   if (!apiKey) {
+    console.error('[ai_analysis] GROQ_API_KEY ausente en runtime activo', {
+      pid: process.pid,
+      cwd: process.cwd(),
+      port: process.env.PORT || null,
+      runtimeNamespace: process.env.JOB_RUNTIME_NAMESPACE || process.env.RUNTIME_NAMESPACE || null,
+      hasBaseUrl: !!cleanString(process.env.GROQ_API_BASE_URL),
+    });
     throw new Error('groq_api_key_not_configured');
   }
 
@@ -2890,6 +2936,7 @@ async function processNode(node, context, runtime = {}) {
         },
         waiting_meta: {
           type: nodeType,
+          runtime_namespace: CURRENT_RUNTIME_NAMESPACE,
           listens_to_node_id: cleanString(config?.listens_to_node_id),
           on_response: readOutputTarget(node, 'on_response'),
           on_timeout: readOutputTarget(node, 'on_timeout'),
@@ -2917,6 +2964,7 @@ async function processNode(node, context, runtime = {}) {
         },
         waiting_meta: {
           type: nodeType,
+          runtime_namespace: CURRENT_RUNTIME_NAMESPACE,
           match_mode: matchMode,
           match_value: matchValue,
           on_submit: readOutputTarget(node, 'on_submit'),
@@ -3243,6 +3291,31 @@ async function runExecution(executionId, options = {}) {
     ) {
       return execution;
     }
+
+    const [claimedRows] = await FlowExecutionV2.update(
+      {
+        status: 'running',
+        updated_at: new Date(),
+      },
+      {
+        where: {
+          id: execution.id,
+          status: 'waiting',
+        },
+      }
+    );
+
+    if (!claimedRows) {
+      const freshExecution = await FlowExecutionV2.findByPk(executionId, {
+        include: [{
+          model: AutomationFlowTemplateV2,
+          as: 'templateVersion',
+        }],
+      });
+      return freshExecution || execution;
+    }
+
+    execution.status = 'running';
 
     const responseText = options.responseText ?? getByPath(execution.waiting_meta, 'pending_response_text') ?? null;
     const formSubmission = options.formSubmission ?? getByPath(execution.waiting_meta, 'pending_form_submission') ?? null;
