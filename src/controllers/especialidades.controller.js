@@ -224,26 +224,6 @@ exports.getEspecialidadesClinica = asyncHandler(async (req, res) => {
         return items;
     });
 
-    // Fallback: si no hay relaciones (para compatibilidad), devolver sistema + personalizadas activas
-    if (resultado.length === 0) {
-        const whereSistema = { activo: true };
-        const whereClinica = { id_clinica: clinicaId, activo: true };
-        if (disciplina) {
-            whereSistema.disciplina = disciplina;
-            whereClinica.disciplina = disciplina;
-        }
-
-        const [sistema, clinica] = await Promise.all([
-            EspecialidadSistema.findAll({ where: whereSistema }),
-            EspecialidadClinica.findAll({ where: whereClinica })
-        ]);
-
-        resultado = [
-            ...sistema.map(e => ({ ...e.toJSON(), origen: 'sistema' })),
-            ...clinica.map(e => ({ ...e.toJSON(), origen: 'clinica' }))
-        ];
-    }
-
     res.json(resultado);
 });
 

@@ -19,6 +19,17 @@ const APPOINTMENT_TRIGGER_TYPES = new Set([
     'consent_required',
 ]);
 const APPOINTMENT_CREATED_WITHOUT_TREATMENT_SCOPE = 'without_treatment';
+const MEDICAL_AREA_ALIASES = {
+    nutricion_clinica: 'nutricion',
+    estetica_medica: 'estetica',
+    medicina_estetica: 'estetica',
+    capilar_medicina: 'capilar',
+    dental_clinica: 'dental',
+    odontologia: 'dental',
+    odontologia_general: 'dental',
+    cirugia_general_y_digestiva: 'cirugia_digestiva',
+    cirugia_general_digestiva: 'cirugia_digestiva',
+};
 
 function toIntOrNull(value) {
     if (value === undefined || value === null || value === '') return null;
@@ -63,6 +74,55 @@ function normalizeInstallationIds(value) {
         }
     });
     return Array.from(uniqueIds);
+}
+
+function normalizeClinicDisciplines(configuracion) {
+    let config = configuracion && typeof configuracion === 'object' ? configuracion : {};
+    if (typeof configuracion === 'string') {
+        try {
+            config = JSON.parse(configuracion);
+        } catch (_) {
+            config = {};
+        }
+    }
+
+    const raw = Array.isArray(config.disciplinas)
+        ? config.disciplinas
+        : (config.disciplina ? [config.disciplina] : []);
+    const normalized = [...new Set(
+        raw
+            .map((item) => String(item || '').trim().toLowerCase())
+            .map((item) => MEDICAL_AREA_ALIASES[item] || item)
+            .filter(Boolean)
+    )];
+    return normalized.length ? normalized : ['dental'];
+}
+
+function expandTreatmentDisciplineCodes(codes) {
+    const normalizedCodes = [...new Set(
+        (Array.isArray(codes) ? codes : [codes])
+            .map((item) => String(item || '').trim().toLowerCase())
+            .filter(Boolean)
+            .map((item) => MEDICAL_AREA_ALIASES[item] || item)
+    )];
+    const expanded = new Set(normalizedCodes);
+    Object.entries(MEDICAL_AREA_ALIASES).forEach(([alias, canonical]) => {
+        if (expanded.has(canonical)) {
+            expanded.add(alias);
+        }
+    });
+    return [...expanded];
+}
+
+async function resolveClinicDisciplines(clinicId) {
+    const parsedClinicId = toIntOrNull(clinicId);
+    if (!parsedClinicId) return ['dental'];
+
+    const clinic = await Clinica.findByPk(parsedClinicId, {
+        attributes: ['configuracion'],
+        raw: true,
+    });
+    return normalizeClinicDisciplines(clinic?.configuracion);
 }
 
 function extractTriggerConfig(template) {
@@ -149,7 +209,11 @@ exports.getTratamientos = asyncHandler(async (req, res) => {
         }
     }
 
-    if (disciplina) where.disciplina = disciplina;
+    if (disciplina) {
+        where.disciplina = { [Op.in]: expandTreatmentDisciplineCodes(disciplina) };
+    } else if (clinicIdNum) {
+        where.disciplina = { [Op.in]: expandTreatmentDisciplineCodes(await resolveClinicDisciplines(clinicIdNum)) };
+    }
     if (categoria) where.categoria = categoria;
     if (especialidad) where.especialidad = especialidad;
     if (activo !== undefined) {
