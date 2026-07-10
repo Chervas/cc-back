@@ -6785,9 +6785,7 @@ async function startCampaignDispatch(scope, campaignId, body = {}, actor = null)
   const reference = scheduledAt && scheduledAt.getTime() > Date.now() ? scheduledAt : new Date();
   const businessAllowedAt = getNextBusinessAllowedAt(reference, dispatch.business_hours);
   const nextRunAt = businessAllowedAt.getTime() > Date.now() + 1000 ? businessAllowedAt : null;
-  const job = await enqueueDispatchJob({ list, scope, nextRunAt, userId, context, filter });
-  triggerDispatchJobIfReady(job, nextRunAt);
-  const nextDispatch = {
+  const baseDispatch = {
     ...dispatch,
     status: nextRunAt ? 'scheduled' : 'queued',
     context,
@@ -6795,7 +6793,7 @@ async function startCampaignDispatch(scope, campaignId, body = {}, actor = null)
     filter,
     whatsapp_template_id: template?.id || null,
     template_snapshot: buildTemplateSnapshot(template),
-    job_id: job.id,
+    job_id: null,
     batch_size: dispatch.batch_size,
     delay_ms: dispatch.delay_ms,
     min_read_rate: dispatch.min_read_rate,
@@ -6809,7 +6807,16 @@ async function startCampaignDispatch(scope, campaignId, body = {}, actor = null)
   };
   await list.update({
     status: nextRunAt ? 'scheduled' : 'sending',
-    criteria: mergeCriteria(list, { dispatch_config: dispatch, dispatch: nextDispatch }),
+    criteria: mergeCriteria(list, { dispatch_config: dispatch, dispatch: baseDispatch }),
+  });
+  const primedList = await MarketingPatientList.findByPk(list.id);
+  const job = await enqueueDispatchJob({ list: primedList || list, scope, nextRunAt, userId, context, filter });
+  const nextDispatch = {
+    ...baseDispatch,
+    job_id: job.id,
+  };
+  await (primedList || list).update({
+    criteria: mergeCriteria(primedList || list, { dispatch_config: dispatch, dispatch: nextDispatch }),
   });
   await MarketingPatientContactEvent.create({
     list_id: list.id,
@@ -6825,6 +6832,7 @@ async function startCampaignDispatch(scope, campaignId, body = {}, actor = null)
     },
     occurred_at: new Date(),
   });
+  await triggerDispatchJobIfReady(job, nextRunAt);
   const reloaded = await MarketingPatientList.findByPk(list.id);
   const scopedCounters = await getDispatchScopedCounters(reloaded, filter);
   return {
@@ -6891,12 +6899,10 @@ async function resumeCampaignDispatch(scope, campaignId, body = {}, actor = null
   }
   const nextAllowed = getNextBusinessAllowedAt(new Date(), dispatch.business_hours);
   const nextRunAt = nextAllowed.getTime() > Date.now() + 1000 ? nextAllowed : null;
-  const job = await enqueueDispatchJob({ list, scope, nextRunAt, userId, context, filter });
-  triggerDispatchJobIfReady(job, nextRunAt);
-  const nextDispatch = {
+  const baseDispatch = {
     ...dispatch,
     status: nextRunAt ? 'scheduled' : 'queued',
-    job_id: job.id,
+    job_id: null,
     cancel_requested: false,
     paused_reason: null,
     resumed_at: new Date().toISOString(),
@@ -6904,7 +6910,16 @@ async function resumeCampaignDispatch(scope, campaignId, body = {}, actor = null
   };
   await list.update({
     status: nextRunAt ? 'scheduled' : 'sending',
-    criteria: mergeCriteria(list, { dispatch: nextDispatch }),
+    criteria: mergeCriteria(list, { dispatch: baseDispatch }),
+  });
+  const primedList = await MarketingPatientList.findByPk(list.id);
+  const job = await enqueueDispatchJob({ list: primedList || list, scope, nextRunAt, userId, context, filter });
+  const nextDispatch = {
+    ...baseDispatch,
+    job_id: job.id,
+  };
+  await (primedList || list).update({
+    criteria: mergeCriteria(primedList || list, { dispatch: nextDispatch }),
   });
   await MarketingPatientContactEvent.create({
     list_id: list.id,
@@ -6913,6 +6928,7 @@ async function resumeCampaignDispatch(scope, campaignId, body = {}, actor = null
     payload: { user_id: userId || null, job_id: job.id, remaining },
     occurred_at: new Date(),
   });
+  await triggerDispatchJobIfReady(job, nextRunAt);
   const counters = await refreshListCounters(list.id);
   const reloaded = await MarketingPatientList.findByPk(list.id);
   return {
