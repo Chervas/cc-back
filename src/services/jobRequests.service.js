@@ -7,6 +7,7 @@ const PRIORITY_ORDER = ['critical', 'high', 'normal', 'low'];
 const STATUS_WAIT_LIST = ['pending', 'waiting'];
 const PRIORITY_CASE_SQL = `(CASE priority WHEN 'critical' THEN 0 WHEN 'high' THEN 1 WHEN 'normal' THEN 2 ELSE 3 END)`;
 const DEFAULT_MAX_ATTEMPTS = Number(process.env.JOB_REQUESTS_MAX_ATTEMPTS || 5);
+const RUNTIME_NAMESPACE_PAYLOAD_KEY = '__runtime_namespace';
 
 const normalizePriority = (priority = 'normal') => {
   const normalized = String(priority || '').toLowerCase();
@@ -27,6 +28,82 @@ const priorityListToWhere = (priorityList) => {
     .map((priority) => normalizePriority(priority))
     .filter((value, index, array) => PRIORITY_ORDER.includes(value) && array.indexOf(value) === index);
   return normalized.length ? { [Op.in]: normalized } : undefined;
+};
+
+const typeListToWhere = (typeList) => {
+  if (!Array.isArray(typeList) || !typeList.length) {
+    return undefined;
+  }
+  const normalized = typeList
+    .map((type) => String(type || '').trim())
+    .filter((value, index, array) => value && array.indexOf(value) === index);
+  return normalized.length ? { [Op.in]: normalized } : undefined;
+};
+
+const cleanString = (value) => {
+  const normalized = String(value || '').trim();
+  return normalized || null;
+};
+
+const detectCurrentRuntimeNamespace = () => {
+  const explicit = cleanString(process.env.JOB_RUNTIME_NAMESPACE)
+    || cleanString(process.env.RUNTIME_NAMESPACE);
+  if (explicit) return explicit;
+
+  const port = cleanString(process.env.PORT);
+  if (port) return `port:${port}`;
+
+  const cwd = cleanString(process.cwd());
+  if (cwd) return `cwd:${cwd}`;
+
+  return 'runtime:unknown';
+};
+
+const CURRENT_RUNTIME_NAMESPACE = detectCurrentRuntimeNamespace();
+
+const buildScopedPayload = (payload = {}) => {
+  const base = payload && typeof payload === 'object' && !Array.isArray(payload)
+    ? { ...payload }
+    : {};
+
+  if (!base[RUNTIME_NAMESPACE_PAYLOAD_KEY]) {
+    base[RUNTIME_NAMESPACE_PAYLOAD_KEY] = CURRENT_RUNTIME_NAMESPACE;
+  }
+
+  return base;
+};
+
+const buildRuntimeScopeWhere = ({ includeUnscoped = true } = {}) => {
+  const jsonPath = `$."${RUNTIME_NAMESPACE_PAYLOAD_KEY}"`;
+  const extractedNamespace = sequelize.literal(
+    `JSON_UNQUOTE(JSON_EXTRACT(payload, '${jsonPath}'))`
+  );
+  const rawNamespace = sequelize.literal(
+    `JSON_EXTRACT(payload, '${jsonPath}')`
+  );
+
+  const clauses = [
+    sequelize.where(extractedNamespace, CURRENT_RUNTIME_NAMESPACE),
+  ];
+
+  if (includeUnscoped) {
+    clauses.push(sequelize.where(rawNamespace, { [Op.is]: null }));
+  }
+
+  return { [Op.or]: clauses };
+};
+
+const payloadRuntimeNamespace = (payload = null) => {
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return null;
+  return cleanString(payload[RUNTIME_NAMESPACE_PAYLOAD_KEY]);
+};
+
+const matchesCurrentRuntimeNamespace = (payload = null, { allowUnscoped = true } = {}) => {
+  const payloadNamespace = payloadRuntimeNamespace(payload);
+  if (!payloadNamespace) {
+    return allowUnscoped;
+  }
+  return payloadNamespace === CURRENT_RUNTIME_NAMESPACE;
 };
 
 const baseOrder = [
@@ -55,13 +132,14 @@ async function enqueueJobRequest({
 
   const normalizedPriority = normalizePriority(priority);
   const normalizedStatus = normalizeStatus(status);
+  const scopedPayload = buildScopedPayload(payload);
 
   const job = await JobRequest.create({
     type,
     priority: normalizedPriority,
     status: normalizedStatus,
     origin,
-    payload,
+    payload: scopedPayload,
     requested_by: requestedBy,
     requested_by_name: requestedByName,
     requested_by_role: requestedByRole,
@@ -95,7 +173,7 @@ function buildWaitingScope(now) {
   };
 }
 
-async function claimNextJob(priorityList) {
+async function claimNextJob(priorityList, typeList) {
   const now = new Date();
   return sequelize.transaction(
     {
@@ -107,6 +185,12 @@ async function claimNextJob(priorityList) {
       if (priorityWhere) {
         where.priority = priorityWhere;
       }
+      const typeWhere = typeListToWhere(typeList);
+      if (typeWhere) {
+        where.type = typeWhere;
+      }
+      where[Op.and] = where[Op.and] || [];
+      where[Op.and].push(buildRuntimeScopeWhere());
 
       const job = await JobRequest.findOne({
         where,
@@ -169,6 +253,10 @@ async function claimJobById(jobId) {
       }
 
       if (!STATUS_WAIT_LIST.includes(job.status)) {
+        return null;
+      }
+
+      if (!matchesCurrentRuntimeNamespace(job.payload)) {
         return null;
       }
 
@@ -260,7 +348,10 @@ async function resetRunningJobs() {
       error_message: 'Reprogramado automáticamente después de reinicio del servicio'
     },
     {
-      where: { status: 'running' }
+      where: {
+        status: 'running',
+        [Op.and]: [buildRuntimeScopeWhere()]
+      }
     }
   );
 }
@@ -301,5 +392,7 @@ module.exports = {
   setSyncLog,
   resetRunningJobs,
   listJobRequests,
-  findJobById
+  findJobById,
+  getCurrentRuntimeNamespace: () => CURRENT_RUNTIME_NAMESPACE,
+  matchesCurrentRuntimeNamespace
 };
