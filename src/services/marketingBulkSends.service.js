@@ -21,6 +21,7 @@ const publicMediaPersonalizationService = require('./publicMediaPersonalization.
 
 const {
   Clinica,
+  ClinicaHorario,
   ClinicMetaAsset,
   Conversation,
   MarketingPatientContactEvent,
@@ -882,10 +883,12 @@ function getMadridParts(date = new Date()) {
     hour12: false,
   });
   const parts = Object.fromEntries(formatter.formatToParts(date).map((part) => [part.type, part.value]));
+  const localDay = new Date(Date.UTC(Number(parts.year), Number(parts.month) - 1, Number(parts.day))).getUTCDay();
   return {
     year: Number(parts.year),
     month: Number(parts.month),
     day: Number(parts.day),
+    weekday: localDay === 0 ? 7 : localDay,
     hour: Number(parts.hour),
     minute: Number(parts.minute),
     second: Number(parts.second),
@@ -960,7 +963,25 @@ function normalizeBusinessHours(input = {}) {
     start_time: formatBusinessTime(startMinutes),
     end_time: formatBusinessTime(endMinutes),
     timezone: raw.timezone || DISPATCH_TIMEZONE,
+    allowed_weekdays: normalizeAllowedWeekdays(raw.allowed_weekdays || raw.weekdays || raw.days),
   };
+}
+
+function normalizeAllowedWeekdays(value) {
+  const raw = Array.isArray(value) ? value : [];
+  const days = raw
+    .map((day) => Number(day))
+    .filter((day) => Number.isInteger(day) && day >= 1 && day <= 7);
+  return [...new Set(days)].sort((a, b) => a - b);
+}
+
+function isAllowedBusinessWeekday(parts, allowedWeekdays = []) {
+  return !allowedWeekdays.length || allowedWeekdays.includes(Number(parts.weekday || 0));
+}
+
+function addLocalDays(parts, days) {
+  const localNoon = zonedDateToUtc({ ...parts, hour: 12, minute: 0, second: 0 });
+  return getMadridParts(new Date(localNoon.getTime() + days * 24 * 60 * 60 * 1000));
 }
 
 function getNextBusinessAllowedAt(reference = new Date(), businessHours = null) {
@@ -969,15 +990,20 @@ function getNextBusinessAllowedAt(reference = new Date(), businessHours = null) 
   const currentMinutes = parts.hour * 60 + parts.minute;
   const startMinutes = parseBusinessTimeToMinutes(window.start_time ?? window.start, DISPATCH_BUSINESS_START_HOUR * 60);
   const endMinutes = parseBusinessTimeToMinutes(window.end_time ?? window.end, DISPATCH_BUSINESS_END_HOUR * 60);
-  if (currentMinutes >= startMinutes && currentMinutes < endMinutes) {
+  if (isAllowedBusinessWeekday(parts, window.allowed_weekdays) && currentMinutes >= startMinutes && currentMinutes < endMinutes) {
     return reference;
   }
-  if (currentMinutes < startMinutes) {
+  if (isAllowedBusinessWeekday(parts, window.allowed_weekdays) && currentMinutes < startMinutes) {
     return zonedDateToUtc({ ...parts, hour: Math.floor(startMinutes / 60), minute: startMinutes % 60, second: 0 });
   }
-  const tomorrow = new Date(zonedDateToUtc({ ...parts, hour: 12, minute: 0, second: 0 }).getTime() + 24 * 60 * 60 * 1000);
-  const nextParts = getMadridParts(tomorrow);
-  return zonedDateToUtc({ ...nextParts, hour: Math.floor(startMinutes / 60), minute: startMinutes % 60, second: 0 });
+  for (let offset = 1; offset <= 7; offset += 1) {
+    const nextParts = addLocalDays(parts, offset);
+    if (isAllowedBusinessWeekday(nextParts, window.allowed_weekdays)) {
+      return zonedDateToUtc({ ...nextParts, hour: Math.floor(startMinutes / 60), minute: startMinutes % 60, second: 0 });
+    }
+  }
+  const fallbackParts = addLocalDays(parts, 1);
+  return zonedDateToUtc({ ...fallbackParts, hour: Math.floor(startMinutes / 60), minute: startMinutes % 60, second: 0 });
 }
 
 function isWithinBusinessHours(date = new Date(), businessHours = null) {
@@ -986,7 +1012,7 @@ function isWithinBusinessHours(date = new Date(), businessHours = null) {
   const currentMinutes = parts.hour * 60 + parts.minute;
   const startMinutes = parseBusinessTimeToMinutes(window.start_time ?? window.start, DISPATCH_BUSINESS_START_HOUR * 60);
   const endMinutes = parseBusinessTimeToMinutes(window.end_time ?? window.end, DISPATCH_BUSINESS_END_HOUR * 60);
-  return currentMinutes >= startMinutes && currentMinutes < endMinutes;
+  return isAllowedBusinessWeekday(parts, window.allowed_weekdays) && currentMinutes >= startMinutes && currentMinutes < endMinutes;
 }
 
 function parseMessagingLimit(value) {
@@ -5605,6 +5631,36 @@ function getClinicIdForList(list, fallbackScope = {}) {
   return Number.isInteger(fromScope) && fromScope > 0 ? fromScope : null;
 }
 
+function getSingleClinicIdForDispatchCalendar(list, fallbackScope = {}) {
+  const fromList = Number(list?.clinica_id || 0);
+  if (Number.isInteger(fromList) && fromList > 0) return fromList;
+  const listClinicIds = Array.isArray(list?.clinic_ids)
+    ? list.clinic_ids.map((id) => Number(id)).filter((id) => Number.isInteger(id) && id > 0)
+    : [];
+  if (listClinicIds.length === 1) return listClinicIds[0];
+  const scopeClinicIds = Array.isArray(fallbackScope?.clinicIds)
+    ? fallbackScope.clinicIds.map((id) => Number(id)).filter((id) => Number.isInteger(id) && id > 0)
+    : [];
+  return scopeClinicIds.length === 1 ? scopeClinicIds[0] : null;
+}
+
+async function hydrateDispatchBusinessHoursForList(list, scope = {}, businessHours = null) {
+  const normalized = normalizeBusinessHours(businessHours || {});
+  if (normalized.allowed_weekdays?.length || !ClinicaHorario) return normalized;
+  const clinicId = getSingleClinicIdForDispatchCalendar(list, scope);
+  if (!clinicId) return normalized;
+  const rows = await ClinicaHorario.findAll({
+    attributes: ['dia_semana'],
+    where: {
+      clinica_id: clinicId,
+      activo: true,
+    },
+    raw: true,
+  }).catch(() => []);
+  const allowedWeekdays = normalizeAllowedWeekdays(rows.map((row) => row.dia_semana));
+  return allowedWeekdays.length ? { ...normalized, allowed_weekdays: allowedWeekdays } : normalized;
+}
+
 async function loadClinicForTemplateVariables(clinicId) {
   const safeClinicId = Number(clinicId || 0);
   if (!safeClinicId || !Clinica) return null;
@@ -6783,10 +6839,12 @@ async function startCampaignDispatch(scope, campaignId, body = {}, actor = null)
   const accountQuality = await getWhatsappAccountQualityForList(list, scope);
   const scheduledAt = parseDate(body.scheduled_at || list.criteria?.scheduled_at);
   const reference = scheduledAt && scheduledAt.getTime() > Date.now() ? scheduledAt : new Date();
-  const businessAllowedAt = getNextBusinessAllowedAt(reference, dispatch.business_hours);
+  const dispatchBusinessHours = await hydrateDispatchBusinessHoursForList(list, scope, dispatch.business_hours);
+  const businessAllowedAt = getNextBusinessAllowedAt(reference, dispatchBusinessHours);
   const nextRunAt = businessAllowedAt.getTime() > Date.now() + 1000 ? businessAllowedAt : null;
   const baseDispatch = {
     ...dispatch,
+    business_hours: dispatchBusinessHours,
     status: nextRunAt ? 'scheduled' : 'queued',
     context,
     label: context === 'welcome' ? 'Bienvenida WhatsApp' : dispatch.label || null,
@@ -6807,7 +6865,7 @@ async function startCampaignDispatch(scope, campaignId, body = {}, actor = null)
   };
   await list.update({
     status: nextRunAt ? 'scheduled' : 'sending',
-    criteria: mergeCriteria(list, { dispatch_config: dispatch, dispatch: baseDispatch }),
+    criteria: mergeCriteria(list, { dispatch_config: { ...dispatch, business_hours: dispatchBusinessHours }, dispatch: baseDispatch }),
   });
   const primedList = await MarketingPatientList.findByPk(list.id);
   const job = await enqueueDispatchJob({ list: primedList || list, scope, nextRunAt, userId, context, filter });
@@ -6816,7 +6874,7 @@ async function startCampaignDispatch(scope, campaignId, body = {}, actor = null)
     job_id: job.id,
   };
   await (primedList || list).update({
-    criteria: mergeCriteria(primedList || list, { dispatch_config: dispatch, dispatch: nextDispatch }),
+    criteria: mergeCriteria(primedList || list, { dispatch_config: { ...dispatch, business_hours: dispatchBusinessHours }, dispatch: nextDispatch }),
   });
   await MarketingPatientContactEvent.create({
     list_id: list.id,
@@ -6897,10 +6955,12 @@ async function resumeCampaignDispatch(scope, campaignId, body = {}, actor = null
     err.status = 409;
     throw err;
   }
-  const nextAllowed = getNextBusinessAllowedAt(new Date(), dispatch.business_hours);
+  const dispatchBusinessHours = await hydrateDispatchBusinessHoursForList(list, scope, dispatch.business_hours);
+  const nextAllowed = getNextBusinessAllowedAt(new Date(), dispatchBusinessHours);
   const nextRunAt = nextAllowed.getTime() > Date.now() + 1000 ? nextAllowed : null;
   const baseDispatch = {
     ...dispatch,
+    business_hours: dispatchBusinessHours,
     status: nextRunAt ? 'scheduled' : 'queued',
     job_id: null,
     cancel_requested: false,
@@ -7243,7 +7303,12 @@ async function runDispatchJob(payload = {}, jobRequest = null) {
   if (!list || list.objective_id !== OBJECTIVE_ID || String(list.status || '').toLowerCase() === 'archived') {
     return { status: 'completed', result: { skipped: true, reason: 'list_not_found_or_archived', list_id: listId } };
   }
-  const dispatch = getDispatchConfig(list);
+  const rawDispatch = getDispatchConfig(list);
+  const dispatchBusinessHours = await hydrateDispatchBusinessHoursForList(list, scope, rawDispatch.business_hours);
+  const dispatch = {
+    ...rawDispatch,
+    business_hours: dispatchBusinessHours,
+  };
   const payloadFilter = payload.filter && typeof payload.filter === 'object' && normalizeText(payload.filter.import_batch_id)
     ? payload.filter
     : null;
