@@ -227,6 +227,31 @@ function appendMultilineText(baseText, nextText) {
   return `${base}\n${next}`;
 }
 
+async function getInboundMessageMediaContext(inboundMessageId) {
+  const messageId = toIntOrNull(inboundMessageId);
+  if (!messageId) return null;
+  const message = await Message.findByPk(messageId, {
+    attributes: ['id', 'metadata'],
+    raw: true,
+  });
+  const metadata = message?.metadata && typeof message.metadata === 'object'
+    ? message.metadata
+    : {};
+  const media = metadata.media && typeof metadata.media === 'object'
+    ? metadata.media
+    : null;
+  const kind = cleanString(media?.kind)?.toLowerCase() || null;
+  if (!kind) return null;
+  return {
+    kind,
+    id: cleanString(media?.id) || null,
+    mime_type: cleanString(media?.mime_type) || null,
+    sha256: cleanString(media?.sha256) || null,
+    provider: cleanString(media?.provider) || null,
+    playable: Boolean(media?.playable),
+  };
+}
+
 function resolvePositiveInt(value) {
   const parsed = Number.parseInt(String(value), 10);
   return Number.isInteger(parsed) && parsed >= 0 ? parsed : null;
@@ -652,8 +677,10 @@ async function enqueueInboundResponseResume({
   const normalizedPatientId = toIntOrNull(patientId);
   const normalizedLeadId = toIntOrNull(leadId);
   const text = cleanString(messageText);
+  const inboundMedia = await getInboundMessageMediaContext(inboundMessageId);
+  const hasResumableMedia = inboundMedia?.kind === 'sticker';
 
-  if (!normalizedClinicId || !normalizedConversationId || !text) {
+  if (!normalizedClinicId || !normalizedConversationId || (!text && !hasResumableMedia)) {
     return { enabled: true, matched: 0, enqueued: 0, execution_ids: [] };
   }
 
@@ -774,6 +801,9 @@ async function enqueueInboundResponseResume({
             pending_response_count: pendingCount,
             last_inbound_message_at: new Date().toISOString(),
             last_inbound_message_id: inboundMessageId || null,
+            last_inbound_media_kind: inboundMedia?.kind || null,
+            last_inbound_media_id: inboundMedia?.id || null,
+            last_inbound_media_mime_type: inboundMedia?.mime_type || null,
             inbound_channel: channel,
           },
         });
@@ -787,6 +817,9 @@ async function enqueueInboundResponseResume({
           executionId: execution.id,
           resume_mode: 'response',
           response_text: mergedText,
+          response_media_kind: inboundMedia?.kind || null,
+          response_media_id: inboundMedia?.id || null,
+          response_media_mime_type: inboundMedia?.mime_type || null,
           inbound_channel: channel,
           inbound_conversation_id: normalizedConversationId,
           inbound_message_id: inboundMessageId || null,
@@ -830,6 +863,9 @@ async function enqueueInboundResponseResume({
             executionId: execution.id,
             resume_mode: 'response',
             response_text: text,
+            response_media_kind: inboundMedia?.kind || null,
+            response_media_id: inboundMedia?.id || null,
+            response_media_mime_type: inboundMedia?.mime_type || null,
             inbound_channel: channel,
             inbound_conversation_id: normalizedConversationId,
             inbound_message_id: inboundMessageId || null,

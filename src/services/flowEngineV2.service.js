@@ -1689,6 +1689,18 @@ function buildDeterministicConfirmAppointmentOutput(context = {}) {
   if (textDecision) return textDecision;
 
   const responseContext = isObject(context?.last_response_context) ? context.last_response_context : {};
+  const responseMediaKind = normalizeKey(responseContext.response_media_kind);
+  if (responseMediaKind === 'sticker') {
+    return {
+      decision: 'incongruente',
+      confianza: 0.2,
+      motivo: 'El paciente respondió con un sticker. El modelo actual no analiza el contenido visual del sticker, por lo que no se puede confirmar la intención automáticamente.',
+      _ai_provider: 'deterministic_rule',
+      _ai_model: 'confirm_appointment_unreadable_sticker',
+      _ai_analysis_mode: 'rule',
+    };
+  }
+
   const responseMessageType = normalizeKey(
     responseContext.response_message_type
     || responseContext.message_type
@@ -1741,6 +1753,7 @@ function buildDeterministicAppointmentUnconfirmedReplyOutput(context = {}) {
 
   const text = normalizeIntentText(rawResponse);
   const responseContext = isObject(context?.last_response_context) ? context.last_response_context : {};
+  const responseMediaKind = normalizeKey(responseContext.response_media_kind);
   const reactionEmoji = cleanString(responseContext.reaction_emoji);
   if (!text && isPositiveConfirmationEmojiText(reactionEmoji)) {
     return {
@@ -1749,6 +1762,17 @@ function buildDeterministicAppointmentUnconfirmedReplyOutput(context = {}) {
       motivo: `El paciente reaccionó ${reactionEmoji} de forma positiva al aviso.`,
       _ai_provider: 'deterministic_rule',
       _ai_model: 'appointment_unconfirmed_reply_reaction_confirm',
+      _ai_analysis_mode: 'rule',
+    };
+  }
+
+  if (!text && responseMediaKind === 'sticker') {
+    return {
+      decision: 'duda',
+      confianza: 0.2,
+      motivo: 'El paciente respondió con un sticker. El modelo actual no analiza el contenido visual del sticker, por lo que recepción debe revisarlo.',
+      _ai_provider: 'deterministic_rule',
+      _ai_model: 'appointment_unconfirmed_reply_unreadable_sticker',
       _ai_analysis_mode: 'rule',
     };
   }
@@ -4579,7 +4603,15 @@ async function processNode(node, context, runtime = {}) {
   }
 }
 
-async function resumeWaitingNode(execution, node, context, { mode, responseText, formSubmission }) {
+async function resumeWaitingNode(execution, node, context, {
+  mode,
+  responseText,
+  formSubmission,
+  inboundMessageId: inboundMessageIdOption = null,
+  responseMediaKind = null,
+  responseMediaId = null,
+  responseMediaMimeType = null,
+}) {
   const nodeType = cleanString(node?.type) || '';
 
   if (nodeType === 'delay/wait_response') {
@@ -4594,7 +4626,8 @@ async function resumeWaitingNode(execution, node, context, { mode, responseText,
       const waitingMeta = execution?.waiting_meta && typeof execution.waiting_meta === 'object'
         ? execution.waiting_meta
         : {};
-      const inboundMessageId = toIntOrNull(waitingMeta.last_inbound_message_id);
+      const inboundMessageId = toIntOrNull(waitingMeta.last_inbound_message_id)
+        || toIntOrNull(inboundMessageIdOption);
       const inboundMessage = inboundMessageId
         ? await Message.findByPk(inboundMessageId, {
             attributes: ['id', 'message_type', 'content', 'metadata', 'sent_at', 'createdAt'],
@@ -4602,6 +4635,22 @@ async function resumeWaitingNode(execution, node, context, { mode, responseText,
           })
         : null;
       const inboundMetadata = isObject(inboundMessage?.metadata) ? inboundMessage.metadata : {};
+      const inboundMedia = isObject(inboundMetadata.media) ? inboundMetadata.media : {};
+      const mediaKind = cleanString(
+        waitingMeta.last_inbound_media_kind
+        || responseMediaKind
+        || inboundMedia.kind
+      );
+      const mediaId = cleanString(
+        waitingMeta.last_inbound_media_id
+        || responseMediaId
+        || inboundMedia.id
+      );
+      const mediaMimeType = cleanString(
+        waitingMeta.last_inbound_media_mime_type
+        || responseMediaMimeType
+        || inboundMedia.mime_type
+      );
       const inboundReaction = isObject(inboundMetadata.reaction) ? inboundMetadata.reaction : {};
       const listensTo = cleanString(waitingMeta.listens_to_node_id)
         || cleanString(node?.config?.listens_to_node_id);
@@ -4628,6 +4677,9 @@ async function resumeWaitingNode(execution, node, context, { mode, responseText,
         response_message_id: toIntOrNull(inboundMessage?.id),
         response_message_type: cleanString(inboundMessage?.message_type) || null,
         response_message_preview: cleanString(inboundMessage?.content) || null,
+        response_media_kind: mediaKind || null,
+        response_media_id: mediaId || null,
+        response_media_mime_type: mediaMimeType || null,
         reaction_emoji: cleanString(inboundReaction.emoji) || null,
         reaction_target_message_id: cleanString(
           inboundReaction.target_message_id
@@ -4658,6 +4710,9 @@ async function resumeWaitingNode(execution, node, context, { mode, responseText,
           response_message_id: toIntOrNull(inboundMessage?.id),
           response_message_type: cleanString(inboundMessage?.message_type) || null,
           response_message_preview: cleanString(inboundMessage?.content) || null,
+          response_media_kind: mediaKind || null,
+          response_media_id: mediaId || null,
+          response_media_mime_type: mediaMimeType || null,
           reaction_emoji: cleanString(inboundReaction.emoji) || null,
           reaction_target_message_id: cleanString(
             inboundReaction.target_message_id
@@ -4892,6 +4947,10 @@ async function runExecution(executionId, options = {}) {
       mode: resumeMode,
       responseText,
       formSubmission,
+      inboundMessageId: options.inboundMessageId,
+      responseMediaKind: options.responseMediaKind,
+      responseMediaId: options.responseMediaId,
+      responseMediaMimeType: options.responseMediaMimeType,
     });
 
     context = resumeInfo.context;

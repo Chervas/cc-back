@@ -2225,7 +2225,14 @@ Regla funcional validada en QA para `condition/ai_analysis` con `preset_key = co
 - emoji escrito como texto normal:
   - no se trata como `reaction`;
   - entra como `text`;
-  - lo analiza la IA/preset igual que cualquier otra respuesta escrita.
+  - lo analiza la IA/preset igual que cualquier otra respuesta escrita;
+  - si el texto completo es un emoji positivo soportado, se considera confirmación determinista; si llega como sticker sin texto, no.
+- sticker recibido como media (`Messages.metadata.media.kind = sticker`):
+  - se muestra en QuickChat como miniatura autenticada mediante `GET /api/conversations/messages/:messageId/media`;
+  - el `delay/wait_response` puede reanudar la automatización aunque no haya texto y guarda `response_media_kind`, `response_media_id` y `response_media_mime_type` en el contexto;
+  - `confirm_appointment` devuelve `decision=incongruente` de forma determinista porque el modelo actual no analiza el contenido visual del sticker;
+  - `appointment_unconfirmed_reply` devuelve `decision=duda` para que recepción lo revise;
+  - no se confirma, cancela ni reprograma una cita solo por recibir un sticker. Si se añade IA multimodal real, deberá cambiarse esta regla de forma explícita y auditable.
 
 Checklist obligatorio al pasar a `staging` y luego a `main`:
 

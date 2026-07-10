@@ -87,6 +87,19 @@ async function runAutomationFlowV2Job(payload = {}) {
     options.responseText = waitingMeta.pending_response_text;
   }
 
+  if (payload.inbound_message_id !== undefined) {
+    options.inboundMessageId = payload.inbound_message_id;
+  }
+  if (payload.response_media_kind !== undefined) {
+    options.responseMediaKind = payload.response_media_kind;
+  }
+  if (payload.response_media_id !== undefined) {
+    options.responseMediaId = payload.response_media_id;
+  }
+  if (payload.response_media_mime_type !== undefined) {
+    options.responseMediaMimeType = payload.response_media_mime_type;
+  }
+
   if (payload.form_submission !== undefined) {
     options.formSubmission = payload.form_submission;
   } else if (options.resumeMode === 'form_submission') {
