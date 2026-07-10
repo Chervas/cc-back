@@ -2378,7 +2378,7 @@ async function sendReviewRatingFollowUp({ list, item, conversation, rating, clin
     ? (googleReviewUrl
       ? (rewardEnabled
         ? `😊 Queremos obsequiarte con "${rewardDescription || 'un detalle'}" si la compartes en Google. Pincha aquí y se publicará, esto nos ayudará muchísimo porque todo el mundo podrá verla 👉 ${googleReviewUrl}. Tras hacerlo, escríbenos para que te indiquemos cómo tramitar tu regalo.`
-        : `😊 Pincha aquí y se publicará en Google, esto nos ayudará muchísimo porque todo el mundo podrá verla 👉 ${googleReviewUrl}\n\nPor favor 🙏🙏`)
+        : `😊 Pincha aquí y se publicará en Google, esto nos ayudará muchísimo porque todo el mundo podrá verla. *¡Y por favor! 🙏🙏 déjanos unas breves palabras en la reseña que puedan ayudar a pacientes como tú* 👉 ${googleReviewUrl}\n\n*Si mencionas a alguien del equipo en la reseña* le haremos llegar el detalle ¡Gracias!`)
       : 'Gracias por tu valoración. Hemos registrado tu opinión.')
     : 'Gracias por responder. ¿Nos ayudarías contándonos el motivo de esta valoración? Puedes escribirlo aquí mismo y lo revisaremos con el equipo.';
   if (!isWithinWhatsappSessionWindow(occurredAt)) {
