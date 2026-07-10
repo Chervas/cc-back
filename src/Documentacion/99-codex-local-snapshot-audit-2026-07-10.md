@@ -6,7 +6,7 @@ Dejar todos los cambios locales relevantes empujados o inventariados para poder 
 
 ## Estado de runtimes activos
 
-- `pm2-back-dev` ejecuta `/home/ubuntu/wt/back-dev`, rama `dev`, commit `1980145`.
+- `pm2-back-dev` ejecuta `/home/ubuntu/wt/back-dev`, rama `dev`. El ultimo commit de codigo previo a esta auditoria era `1980145`; el HEAD actual de `dev` pasa a ser `2ab3b45` por este documento.
 - `pm2-front-dev` ejecuta `/home/ubuntu/wt/front-dev`, rama `dev`, commit `20a5e229`.
 - `pm2-back-staging` ejecuta `/home/ubuntu/wt/back-staging`, rama `staging`, commit `2d1dcf6`.
 - `pm2-gateway` ejecuta `/home/ubuntu/wt/gateway`, rama `staging`, commit local `84c3e79`.
@@ -16,7 +16,7 @@ Nota importante: `/home/ubuntu/backendclinicaclick` no sirve staging. Ese checko
 ## Ramas principales
 
 - `/home/ubuntu/wt/front-dev`: limpio y alineado con `origin/dev` en `20a5e229`.
-- `/home/ubuntu/wt/back-dev`: limpio y alineado con `origin/dev` en `1980145`.
+- `/home/ubuntu/wt/back-dev`: limpio y alineado con `origin/dev` en `2ab3b45` (`docs: audit local snapshots for staging reminder debug`).
 - `/home/ubuntu/wt/front-staging`: limpio y alineado con `origin/staging` en `e87aa5ec`.
 - `/home/ubuntu/wt/back-staging`: limpio y alineado con `origin/staging` en `2d1dcf6`.
 - `/home/ubuntu/wt/gateway`: limpio, pero despues de `git fetch` queda 60 commits por detras de `origin/staging`. No se ha actualizado ni reiniciado para no tocar runtime de gateway mientras se investiga staging.
