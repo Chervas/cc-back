@@ -7517,7 +7517,7 @@ async function runDispatchJob(payload = {}, jobRequest = null) {
     return { status: 'completed', result: { completed: true, list_id: list.id, counters: countersAfter } };
   }
 
-  const nextAllowed = new Date(Date.now() + batchDelayMs);
+  const nextAllowed = getNextBusinessAllowedAt(new Date(Date.now() + batchDelayMs), dispatch.business_hours);
   await list.update({
     status: 'sending',
     criteria: mergeCriteria(list, {
