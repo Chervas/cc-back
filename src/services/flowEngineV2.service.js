@@ -60,7 +60,7 @@ const FIELD_CHECK_VALUE_TYPES = new Set(['string', 'number', 'boolean']);
 const FIELD_CHECK_MODE_VALUES = new Set(['simple', 'appointment_booking_timing']);
 const FIELD_CHECK_SWITCH_TYPE_VALUES = new Set(['appointment_booking']);
 const FIELD_CHECK_APPOINTMENT_WINDOW_VALUES = new Set(['same_day', 'day_before', 'more_than_day_before']);
-const PROTECTED_APPOINTMENT_STATUSES = new Set(['cancelada', 'reprogramada', 'completada', 'no_asistio']);
+const PROTECTED_APPOINTMENT_STATUSES = new Set(['cancelada', 'completada', 'no_asistio']);
 const APPOINTMENT_NOTIFICATION_RESOLVED_STATUSES = new Set([
   'info_confirmada',
   'recordatorio_confirmado',
