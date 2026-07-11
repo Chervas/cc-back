@@ -12,7 +12,10 @@ const syncJobs = require('../../jobs/sync.jobs');
 
 async function testArchiveAuditAndIdempotency() {
   const updates = [];
+  const audits = [];
   const row = {
+    id: 10,
+    version: 1,
     status: 'active',
     grupo_clinica_id: null,
     clinica_id: 58,
@@ -56,6 +59,13 @@ async function testArchiveAuditAndIdempotency() {
     },
   };
   const archivedAt = new Date('2026-07-11T02:00:00.000Z');
+  const auditModel = {
+    async create(values, options) {
+      assert.equal(options.transaction, transaction);
+      audits.push(values);
+      return values;
+    },
+  };
   const first = await adminController.__test.archiveMatchingAssignment({
     provider: 'google_ads',
     customerId: '1851215478',
@@ -64,6 +74,7 @@ async function testArchiveAuditAndIdempotency() {
     reason: 'La campaña corresponde a otra sede',
     userId: 1,
     assignmentModel,
+    auditModel,
     clinicModel,
     accountScopeResolver,
     sequelize,
@@ -79,7 +90,13 @@ async function testArchiveAuditAndIdempotency() {
     archive_reason: 'La campaña corresponde a otra sede',
     archived_by_user_id: 1,
     archived_at: archivedAt,
+    version: 2,
   });
+  assert.equal(audits.length, 1);
+  assert.equal(audits[0].event_type, 'archived');
+  assert.equal(audits[0].from_version, 1);
+  assert.equal(audits[0].to_version, 2);
+  assert.equal(audits[0].reason, 'La campaña corresponde a otra sede');
 
   const second = await adminController.__test.archiveMatchingAssignment({
     provider: 'google_ads',
@@ -89,12 +106,14 @@ async function testArchiveAuditAndIdempotency() {
     reason: 'Reintento que no debe sobrescribir la auditoría original',
     userId: 2,
     assignmentModel,
+    auditModel,
     clinicModel,
     accountScopeResolver,
     sequelize,
   });
   assert.equal(second.idempotent, true);
   assert.equal(updates.length, 1, 'An idempotent archive must preserve the first audit evidence');
+  assert.equal(audits.length, 1, 'An idempotent archive must not duplicate append-only evidence');
 
   const missing = await adminController.__test.archiveMatchingAssignment({
     provider: 'meta_ads',
@@ -104,6 +123,7 @@ async function testArchiveAuditAndIdempotency() {
     reason: 'No existe',
     userId: 1,
     assignmentModel: { findOne: async () => null },
+    auditModel,
     clinicModel,
     accountScopeResolver,
     sequelize,
@@ -127,6 +147,7 @@ async function testArchiveAuditAndIdempotency() {
         },
       }),
     },
+    auditModel,
     clinicModel,
     accountScopeResolver,
     sequelize,
@@ -148,6 +169,7 @@ async function testArchiveAuditAndIdempotency() {
         return row;
       },
     },
+    auditModel,
     clinicModel,
     accountScopeResolver: async (options) => {
       assert.equal(options.transaction, transaction);
@@ -322,7 +344,7 @@ function testReactivationAndRouteContract() {
   );
   const confirmStart = controllerSource.indexOf('exports.confirmMatching');
   const archiveStart = controllerSource.indexOf('exports.archiveMatching');
-  const archiveEnd = controllerSource.indexOf('exports.listBankTransactions', archiveStart);
+  const archiveEnd = controllerSource.indexOf('function matchingAssignmentId', archiveStart);
   assert.ok(confirmStart >= 0 && archiveStart > confirmStart);
   assert.match(controllerSource.slice(confirmStart, archiveStart), /\.\.\.assignmentReactivationAuditReset\(\)/,
     'Manual confirmation must explicitly clear tombstone audit fields');

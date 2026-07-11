@@ -243,6 +243,9 @@ async function saveAssignmentWithinScope({
   groupId,
   groupClinicIds,
   transaction,
+  returnMetadata = false,
+  prepareValues = null,
+  isNoop = null,
 } = {}) {
   if (!assignmentModel || !transaction || !values) {
     throw new TypeError('assignmentModel, values y transaction son obligatorios');
@@ -262,18 +265,46 @@ async function saveAssignmentWithinScope({
     if (!assignmentBelongsToGroup(existing, groupId, groupClinicIds)) {
       throw assignmentScopeConflict('La campaña ya tiene una decisión revisada en otro grupo y no puede moverse implícitamente.');
     }
-    return existing.update(values, { transaction });
+    const previous = typeof existing.get === 'function'
+      ? existing.get({ plain: true })
+      : { ...existing };
+    const nextValues = typeof prepareValues === 'function'
+      ? prepareValues(existing, values)
+      : values;
+    if (typeof isNoop === 'function' && isNoop(previous, nextValues)) {
+      return returnMetadata
+        ? { row: existing, created: false, previous, changed: false }
+        : existing;
+    }
+    const row = await existing.update(nextValues, { transaction });
+    return returnMetadata ? { row, created: false, previous, changed: true } : row;
   }
 
   try {
-    return await assignmentModel.create(values, { transaction });
+    const createValues = typeof prepareValues === 'function'
+      ? prepareValues(null, values)
+      : values;
+    const row = await assignmentModel.create(createValues, { transaction });
+    return returnMetadata ? { row, created: true, previous: null, changed: true } : row;
   } catch (error) {
     if (error?.name !== 'SequelizeUniqueConstraintError') throw error;
     const raced = await findLocked();
     if (!raced || !assignmentBelongsToGroup(raced, groupId, groupClinicIds)) {
       throw assignmentScopeConflict('La campaña recibió una decisión concurrente en otro grupo y no puede moverse implícitamente.');
     }
-    return raced.update(values, { transaction });
+    const previous = typeof raced.get === 'function'
+      ? raced.get({ plain: true })
+      : { ...raced };
+    const nextValues = typeof prepareValues === 'function'
+      ? prepareValues(raced, values)
+      : values;
+    if (typeof isNoop === 'function' && isNoop(previous, nextValues)) {
+      return returnMetadata
+        ? { row: raced, created: false, previous, changed: false }
+        : raced;
+    }
+    const row = await raced.update(nextValues, { transaction });
+    return returnMetadata ? { row, created: false, previous, changed: true } : row;
   }
 }
 
@@ -416,6 +447,125 @@ async function findAssociationAccountScope({
   });
 }
 
+async function findManagedCampaignAssociationAccountScope({
+  groupId,
+  clinicId,
+  provider,
+  accountId,
+  transaction = null,
+  lock = false,
+  models = db,
+} = {}) {
+  const normalizedGroupId = positiveInt(groupId);
+  const normalizedClinicId = positiveInt(clinicId);
+  const normalizedProvider = normalizeProvider(provider);
+  const normalizedAccountId = cleanAccountId(accountId);
+  if ((!normalizedGroupId && !normalizedClinicId) || !normalizedProvider || !normalizedAccountId) {
+    return null;
+  }
+
+  if (!normalizedClinicId) {
+    const resolved = await findAssociationAccountScope({
+      groupId: normalizedGroupId,
+      provider: normalizedProvider,
+      accountId: normalizedAccountId,
+      transaction,
+      lock,
+      models,
+    });
+    return resolved
+      ? {
+          scope: { group_id: normalizedGroupId, clinic_id: null },
+          account: resolved.account,
+        }
+      : null;
+  }
+
+  const queryLock = lock && transaction ? transaction.LOCK.UPDATE : null;
+  const clinic = await models.Clinica.findOne({
+    where: { id_clinica: normalizedClinicId },
+    attributes: ['id_clinica', 'nombre_clinica', 'grupoClinicaId', 'estado_clinica'],
+    raw: true,
+    transaction,
+    ...(queryLock ? { lock: queryLock } : {}),
+  });
+  if (!clinic || !isEligibleClinic(clinic)) return null;
+  const resolvedGroupId = positiveInt(clinic.grupoClinicaId ?? clinic.grupo_clinica_id);
+  if (normalizedGroupId && resolvedGroupId !== normalizedGroupId) return null;
+
+  const scopeWhere = {
+    [Op.or]: [
+      ...(resolvedGroupId ? [{ assignmentScope: 'group', grupoClinicaId: resolvedGroupId }] : []),
+      { assignmentScope: 'clinic', clinicaId: normalizedClinicId },
+    ],
+  };
+  const mappingModel = normalizedProvider === 'google_ads'
+    ? models.ClinicGoogleAdsAccount
+    : models.ClinicMetaAsset;
+  const assignmentModel = normalizedProvider === 'google_ads'
+    ? models.GoogleConnectionAssignment
+    : models.MetaConnectionAssignment;
+  const mappingAttributes = normalizedProvider === 'google_ads'
+    ? [
+        'clinicaId', 'grupoClinicaId', 'assignmentScope', 'googleConnectionId',
+        'customerId', 'descriptiveName', 'isActive',
+      ]
+    : [
+        'clinicaId', 'grupoClinicaId', 'assignmentScope', 'metaConnectionId',
+        'assetType', 'metaAssetId', 'metaAssetName', 'isActive',
+      ];
+  const assignmentAttributes = normalizedProvider === 'google_ads'
+    ? ['assignmentScope', 'clinicaId', 'grupoClinicaId', 'googleConnectionId', 'status']
+    : ['assignmentScope', 'clinicaId', 'grupoClinicaId', 'metaConnectionId', 'status'];
+  const mappingWhere = {
+    isActive: true,
+    ...scopeWhere,
+    ...(normalizedProvider === 'meta_ads' ? { assetType: 'ad_account' } : {}),
+  };
+  const authorizationWhere = {
+    status: { [Op.in]: Array.from(VISIBLE_AUTHORIZATION_STATUSES) },
+    ...scopeWhere,
+  };
+  const loadMappings = () => mappingModel.findAll({
+    where: mappingWhere,
+    attributes: mappingAttributes,
+    raw: true,
+    transaction,
+    ...(queryLock ? { lock: queryLock } : {}),
+  });
+  const loadAssignments = () => assignmentModel.findAll({
+    where: authorizationWhere,
+    attributes: assignmentAttributes,
+    raw: true,
+    transaction,
+    ...(queryLock ? { lock: queryLock } : {}),
+  });
+  let mappings;
+  let assignments;
+  if (queryLock) {
+    mappings = await loadMappings();
+    assignments = await loadAssignments();
+  } else {
+    [mappings, assignments] = await Promise.all([loadMappings(), loadAssignments()]);
+  }
+  const eligibleClinicIds = new Set([normalizedClinicId]);
+  const account = dedupeAccountCandidates(mappings.map((mapping) => accountCandidate({
+    mapping,
+    provider: normalizedProvider,
+    groupId: resolvedGroupId,
+    eligibleClinicIds,
+    assignments,
+  }))).find((candidate) => (
+    candidate.account_id === normalizedAccountId && candidate.selectable === true
+  ));
+  return account
+    ? {
+        scope: { group_id: resolvedGroupId, clinic_id: normalizedClinicId },
+        account,
+      }
+    : null;
+}
+
 async function upsertInventoryWithinScope({
   groupId,
   provider,
@@ -452,6 +602,7 @@ module.exports = {
   buildAssociationOptions,
   findAssociationAccountInOptions,
   findAssociationAccountScope,
+  findManagedCampaignAssociationAccountScope,
   assignmentBelongsToGroup,
   cleanAccountId,
   listAssociationOptions,

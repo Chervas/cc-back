@@ -262,6 +262,40 @@ async function testAssignmentSaveBoundary() {
   assert.equal(updated, existing);
   assert.equal(updates.length, 1);
 
+  let noopUpdates = 0;
+  const noopExisting = {
+    ...values,
+    id: 88,
+    version: 4,
+    get() { return { ...this }; },
+    async update() {
+      noopUpdates += 1;
+      return this;
+    },
+  };
+  const noop = await associationScopes.saveAssignmentWithinScope({
+    assignmentModel: {
+      findOne: async () => noopExisting,
+      create: async () => { throw new Error('No-op must not create'); },
+    },
+    values,
+    groupId: 5,
+    groupClinicIds: new Set([58]),
+    transaction,
+    returnMetadata: true,
+    prepareValues: (_current, payload) => ({ ...payload, version: 5 }),
+    isNoop: (previous, next) => (
+      previous.provider === next.provider
+      && previous.customer_id === next.customer_id
+      && previous.campaign_id === next.campaign_id
+      && previous.clinica_id === next.clinica_id
+      && previous.status === next.status
+    ),
+  });
+  assert.equal(noop.changed, false);
+  assert.equal(noop.row, noopExisting);
+  assert.equal(noopUpdates, 0, 'An identical confirmation must not update timestamps or version');
+
   let crossCreateCalls = 0;
   await assert.rejects(() => associationScopes.saveAssignmentWithinScope({
     assignmentModel: {
@@ -420,6 +454,112 @@ async function testDbLoaderUsesExplicitAttributes() {
   }
 }
 
+async function testManagedCampaignAccountScopeResolver() {
+  const data = fixtures();
+  data.googleAccounts.push({
+    clinicaId: 74,
+    grupoClinicaId: 5,
+    assignmentScope: 'clinic',
+    googleConnectionId: 23,
+    customerId: '5555555555',
+    descriptiveName: 'Cuenta de otra clínica del mismo grupo',
+    isActive: true,
+  });
+  const calls = [];
+  const transaction = { LOCK: { UPDATE: 'UPDATE' } };
+  const models = {
+    Clinica: {
+      async findOne(options) {
+        calls.push({ name: 'Clinica.findOne', options });
+        return data.clinics.find((row) => row.id_clinica === options.where.id_clinica) || null;
+      },
+    },
+    ClinicGoogleAdsAccount: {
+      async findAll(options) {
+        calls.push({ name: 'ClinicGoogleAdsAccount.findAll', options });
+        return data.googleAccounts;
+      },
+    },
+    GoogleConnectionAssignment: {
+      async findAll(options) {
+        calls.push({ name: 'GoogleConnectionAssignment.findAll', options });
+        return data.googleAssignments;
+      },
+    },
+    ClinicMetaAsset: {
+      async findAll(options) {
+        calls.push({ name: 'ClinicMetaAsset.findAll', options });
+        return data.metaAssets;
+      },
+    },
+    MetaConnectionAssignment: {
+      async findAll(options) {
+        calls.push({ name: 'MetaConnectionAssignment.findAll', options });
+        return data.metaAssignments;
+      },
+    },
+  };
+
+  const google = await associationScopes.findManagedCampaignAssociationAccountScope({
+    groupId: 5,
+    clinicId: 36,
+    provider: 'google_ads',
+    accountId: '185-121-5478',
+    transaction,
+    lock: true,
+    models,
+  });
+  assert.deepEqual(google, {
+    scope: { group_id: 5, clinic_id: 36 },
+    account: {
+      provider: 'google_ads',
+      account_id: '1851215478',
+      display_id: '185-121-5478',
+      account_name: 'Dental - Parallel Campaign',
+      assignment_origin: 'group',
+      authorization_status: 'active',
+      selectable: true,
+    },
+  });
+  assert.equal(await associationScopes.findManagedCampaignAssociationAccountScope({
+    groupId: 5,
+    clinicId: 36,
+    provider: 'google_ads',
+    accountId: '5555555555',
+    transaction,
+    lock: true,
+    models,
+  }), null, 'A clinic campaign must not use an account mapped to another clinic in the group');
+  assert.equal(await associationScopes.findManagedCampaignAssociationAccountScope({
+    groupId: 28,
+    clinicId: 36,
+    provider: 'google_ads',
+    accountId: '1851215478',
+    transaction,
+    lock: true,
+    models,
+  }), null, 'Contradictory campaign clinic/group scope must fail closed');
+  const meta = await associationScopes.findManagedCampaignAssociationAccountScope({
+    groupId: 5,
+    clinicId: 36,
+    provider: 'meta_ads',
+    accountId: 'act_1486528992022670',
+    transaction,
+    lock: true,
+    models,
+  });
+  assert.equal(meta.account.account_id, '1486528992022670');
+  assert.equal(meta.account.assignment_origin, 'clinic');
+  assert.ok(calls.length > 0);
+  assert.equal(calls.every((call) => call.options.lock === 'UPDATE'), true,
+    'Managed campaign account resolution must lock clinic, mapping and authorization rows for write reuse');
+  for (const call of calls) {
+    assert.ok(Array.isArray(call.options.attributes));
+    assert.equal(call.options.attributes.includes('accessToken'), false);
+    assert.equal(call.options.attributes.includes('refreshToken'), false);
+  }
+}
+
 function testRouteAndControllerContract() {
   const routeSource = fs.readFileSync(
     path.resolve(__dirname, '../../routes/adminManagedCampaigns.routes.js'),
@@ -455,6 +595,9 @@ function testRouteAndControllerContract() {
   assert.doesNotMatch(confirmSource, /ExternalCampaignAssignment\.upsert/,
     'A provider campaign must not be moved by a cross-scope ON DUPLICATE UPDATE race');
   assert.match(confirmSource, /saveAssignmentWithinScope/);
+  assert.match(confirmSource, /isNoop: matchingConfirmationIsNoop/);
+  assert.match(confirmSource, /savedResult\.changed === false/,
+    'An idempotent confirmation must skip duplicate audit creation');
 
   const archiveHelperStart = controllerSource.indexOf('async function archiveMatchingAssignment');
   const archiveHelperEnd = controllerSource.indexOf('function explicitTrue', archiveHelperStart);
@@ -491,6 +634,7 @@ async function run() {
   await testAssignmentSaveBoundary();
   await testInventoryWriteBoundary();
   await testDbLoaderUsesExplicitAttributes();
+  await testManagedCampaignAccountScopeResolver();
   testRouteAndControllerContract();
   console.log('managed_campaign_association_scopes.test.js OK');
 }

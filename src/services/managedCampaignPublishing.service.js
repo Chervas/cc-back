@@ -12,6 +12,15 @@ const SUPPORTED_FAMILIES = Object.freeze({
   google_ads: Object.freeze(['google_search', 'google_pmax']),
   meta_ads: Object.freeze(['meta_reach', 'meta_instant_form']),
 });
+const META_CTA_TYPES = Object.freeze({
+  meta_reach: Object.freeze([
+    'BOOK_NOW', 'CONTACT_US', 'GET_QUOTE', 'LEARN_MORE', 'SIGN_UP',
+  ]),
+  meta_instant_form: Object.freeze([
+    'APPLY_NOW', 'BOOK_NOW', 'DOWNLOAD', 'GET_OFFER', 'GET_QUOTE',
+    'LEARN_MORE', 'SIGN_UP', 'SUBSCRIBE',
+  ]),
+});
 const REQUIRED_GATE_EVIDENCE = Object.freeze([
   'prepayment_verified',
   'budget_approved',
@@ -46,9 +55,14 @@ function text(value, max = 2048) {
   return clean ? clean.slice(0, max) : null;
 }
 
+function currencyCode(value) {
+  const clean = text(value, 16);
+  return clean && /^[a-z]{3}$/i.test(clean) ? clean.toUpperCase() : null;
+}
+
 function httpUrl(value) {
   const candidate = text(value, 2048);
-  return candidate ? publicHttpUrl(candidate) : null;
+  return candidate && !sensitiveUrl(candidate) ? publicHttpUrl(candidate) : null;
 }
 
 function positiveNumber(value) {
@@ -88,14 +102,62 @@ function normalizedKey(key) {
 
 function isSecretKey(key) {
   const normalized = normalizedKey(key);
-  return /(^|_)(access_token|refresh_token|client_secret|api_key|private_key|password|passwd|authorization|cookie|session|hmac_key|credentials?|secret|token)($|_)/.test(normalized);
+  return /(^|_)(access_token|refresh_token|client_secret|api_key|private_key|password|passwd|authorization|cookie|session|hmac_key|credentials?|secret|token|appsecret_proof|signed_request|signature)($|_)/.test(normalized);
+}
+
+function isSensitiveQueryKey(key) {
+  const normalized = normalizedKey(key);
+  return isSecretKey(normalized)
+    || /^(sig|key|auth|code|proof|aws_access_key_id)$/i.test(normalized);
+}
+
+function decodedSensitiveText(value) {
+  let current = String(value || '').replace(/\+/g, ' ');
+  for (let pass = 0; pass < 4; pass += 1) {
+    if (/(?:^|[?&#\s])(access_token|refresh_token|client_secret|api_key|private_key|password|authorization|cookie|session|credential|secret|token|appsecret_proof|signed_request|signature|awsaccesskeyid|aws_access_key_id)=/i.test(current)) return true;
+    let decoded;
+    try {
+      decoded = decodeURIComponent(current);
+    } catch (_error) {
+      return false;
+    }
+    if (decoded === current) break;
+    current = decoded.replace(/\+/g, ' ');
+  }
+  return false;
+}
+
+function sensitiveUrl(value) {
+  if (typeof value !== 'string') return false;
+  const clean = value.trim();
+  if (/(?:^|[?&#\s])(access_token|refresh_token|client_secret|api_key|private_key|password|authorization|cookie|session|credential|secret|token|appsecret_proof|signed_request|signature|awsaccesskeyid|aws_access_key_id)=/i.test(clean)) return true;
+  if (!/^(?:https?:)?\/\//i.test(clean)) return false;
+  if (decodedSensitiveText(clean)) return true;
+  if (!/^https?:\/\//i.test(clean)) return false;
+  let parsed;
+  try {
+    parsed = new URL(clean);
+  } catch (_error) {
+    return false;
+  }
+  if (Array.from(parsed.searchParams.keys()).some(isSensitiveQueryKey)) return true;
+  if (Array.from(parsed.searchParams.values()).some(decodedSensitiveText)) return true;
+  return decodedSensitiveText(parsed.hash.slice(1));
+}
+
+function containsSensitiveUrl(value, depth = 0) {
+  if (depth > 12 || value === null || value === undefined) return false;
+  if (typeof value === 'string') return sensitiveUrl(value);
+  if (Array.isArray(value)) return value.some((item) => containsSensitiveUrl(item, depth + 1));
+  if (typeof value !== 'object') return false;
+  return Object.values(value).some((item) => containsSensitiveUrl(item, depth + 1));
 }
 
 function sanitizeForPlan(value, depth = 0) {
   if (depth > 12 || value === undefined || typeof value === 'function' || typeof value === 'symbol') return null;
   if (value === null || typeof value === 'boolean') return value;
   if (typeof value === 'number') return Number.isFinite(value) ? value : null;
-  if (typeof value === 'string') return value.slice(0, 10000);
+  if (typeof value === 'string') return sensitiveUrl(value) ? null : value.slice(0, 10000);
   if (value instanceof Date) return value.toISOString();
   if (Array.isArray(value)) return value.map((item) => sanitizeForPlan(item, depth + 1));
   if (typeof value !== 'object') return null;
@@ -131,13 +193,25 @@ function valuesAt(object, paths) {
   return null;
 }
 
-function stringArray(value) {
+function stringArray(value, max = 2048) {
   const source = Array.isArray(value) ? value : (value === undefined || value === null ? [] : [value]);
-  return source.map((item) => text(item, 2048)).filter(Boolean);
+  return source.map((item) => text(item, max)).filter(Boolean);
 }
 
-function assetArray(config, paths) {
-  return stringArray(valuesAt(config, paths));
+function assetArray(config, paths, max = 2048) {
+  return stringArray(valuesAt(config, paths), max);
+}
+
+function stringArrayAlias(object, keys, max = 10000) {
+  const candidates = keys
+    .map((key) => object?.[key])
+    .filter((value) => value !== undefined && value !== null && value !== '');
+  const values = candidates.map((value) => stringArray(value, max));
+  return {
+    value: values[0] || [],
+    conflict: candidates.length > 1
+      && new Set(values.map((items) => JSON.stringify(items))).size > 1,
+  };
 }
 
 function safePlatformReferences(provider, rawRefs) {
@@ -166,6 +240,67 @@ function providerAccountId(provider, refs) {
     : text(valuesAt(refs, ['meta_ads_ad_account_id', 'ad_account_id', 'meta_ads_account_id', 'account_id']), 128);
 }
 
+function normalizedProviderAccountId(value) {
+  return String(value || '').replace(/[^0-9]/g, '').slice(0, 64) || null;
+}
+
+function managedCampaignPublishingAccountScopeInput(campaign) {
+  const row = plainCampaign(campaign);
+  if (!row) {
+    return {
+      groupId: null,
+      clinicId: null,
+      provider: null,
+      accountId: null,
+    };
+  }
+  const provider = text(row.provider, 32);
+  const refs = safePlatformReferences(provider, row.platform_refs);
+  return {
+    groupId: positiveInteger(row.grupo_clinica_id),
+    clinicId: positiveInteger(row.clinica_id),
+    provider,
+    accountId: providerAccountId(provider, refs),
+  };
+}
+
+function publishingAccountScopeIsAuthorized(campaign, specification, authorization) {
+  const row = plainCampaign(campaign);
+  const resolvedScope = safeObject(authorization?.scope);
+  const resolvedAccount = safeObject(authorization?.account);
+  const expectedProvider = text(row?.provider, 32);
+  const expectedAccountId = normalizedProviderAccountId(specification?.account_id);
+  const expectedGroupId = positiveInteger(row?.grupo_clinica_id);
+  const expectedClinicId = positiveInteger(row?.clinica_id);
+  const resolvedGroupId = positiveInteger(resolvedScope.group_id);
+  const resolvedClinicId = positiveInteger(resolvedScope.clinic_id);
+
+  return Boolean(
+    expectedProvider
+    && expectedAccountId
+    && resolvedAccount.provider === expectedProvider
+    && normalizedProviderAccountId(resolvedAccount.account_id) === expectedAccountId
+    && resolvedAccount.authorization_status === 'active'
+    && resolvedAccount.selectable === true
+    && (!expectedGroupId || resolvedGroupId === expectedGroupId)
+    && (!expectedClinicId || resolvedClinicId === expectedClinicId)
+  );
+}
+
+function scalarAlias(object, keys, normalize = (value) => value) {
+  const candidates = keys
+    .map((key) => object?.[key])
+    .filter((value) => value !== undefined && value !== null && value !== '');
+  const values = candidates.map((value) => text(value, 256));
+  const comparable = values.map((value) => (value ? normalize(value) : null));
+  return {
+    value: values[0] || null,
+    normalized: comparable[0] || null,
+    conflict: candidates.length > 1
+      && (comparable.some((value) => !value) || new Set(comparable).size > 1),
+  };
+}
+
 function blocker(code, field, message) {
   return { code, field, message };
 }
@@ -189,8 +324,8 @@ function commonSpecification(campaign, provider, family, refs) {
   const approvedMediaBudgetCap = approvedGross && fundedGross && mediaBudgetNet
     ? Math.round(((approvedGross * mediaBudgetNet / fundedGross) + Number.EPSILON) * 100) / 100
     : null;
-  const fundingCurrency = text(funding.currency, 3)?.toUpperCase() || null;
-  const clientCurrency = text(budget.currency, 3)?.toUpperCase() || null;
+  const fundingCurrency = currencyCode(funding.currency);
+  const clientCurrency = currencyCode(budget.currency);
   return {
     provider,
     family,
@@ -223,7 +358,7 @@ function commonSpecification(campaign, provider, family, refs) {
   };
 }
 
-function addGoogleBudgetBlockers(budget, blockers) {
+function addMediaBudgetBlockers(budget, blockers) {
   if (!budget.approved_client_gross_amount) {
     blockers.push(blocker('positive_budget_required', 'budget_config.amount', 'El presupuesto bruto del cliente debe ser mayor que cero.'));
   }
@@ -275,7 +410,7 @@ function buildGoogleSearchSpec(campaign, refs, blockers) {
   if (!common.account_id) blockers.push(blocker('provider_account_required', 'platform_refs.customer_id', 'Falta una cuenta Google Ads asignada.'));
   else if (!/^\d{10}$/.test(common.account_id.replace(/-/g, ''))) blockers.push(blocker('provider_account_invalid', 'platform_refs.customer_id', 'La cuenta Google Ads debe ser un customer ID de 10 dígitos.'));
   if (!common.name) blockers.push(blocker('campaign_name_required', 'name', 'Falta el nombre de campaña.'));
-  addGoogleBudgetBlockers(common.budget, blockers);
+  addMediaBudgetBlockers(common.budget, blockers);
   if (!finalUrl) blockers.push(blocker(rawFinalUrl ? 'final_url_invalid' : 'final_url_required', 'destination_config.final_url', 'Google Search requiere una URL final http(s) válida.'));
   requireCount(blockers, headlines, 3, 'search_headlines_required', 'creative_config.headlines', 'Google Search requiere al menos tres titulares proporcionados.');
   requireCount(blockers, descriptions, 2, 'search_descriptions_required', 'creative_config.descriptions', 'Google Search requiere al menos dos descripciones proporcionadas.');
@@ -306,7 +441,7 @@ function buildGooglePmaxSpec(campaign, refs, blockers) {
   if (!common.account_id) blockers.push(blocker('provider_account_required', 'platform_refs.customer_id', 'Falta una cuenta Google Ads asignada.'));
   else if (!/^\d{10}$/.test(common.account_id.replace(/-/g, ''))) blockers.push(blocker('provider_account_invalid', 'platform_refs.customer_id', 'La cuenta Google Ads debe ser un customer ID de 10 dígitos.'));
   if (!common.name) blockers.push(blocker('campaign_name_required', 'name', 'Falta el nombre de campaña.'));
-  addGoogleBudgetBlockers(common.budget, blockers);
+  addMediaBudgetBlockers(common.budget, blockers);
   requireCount(blockers, finalUrls, 1, 'pmax_final_url_required', 'destination_config.final_urls', 'Performance Max requiere al menos una URL final.');
   if (rawFinalUrls.length !== finalUrls.length) blockers.push(blocker('pmax_final_url_invalid', 'destination_config.final_urls', 'Todas las URLs de Performance Max deben usar http(s) y no incluir credenciales.'));
   requireCount(blockers, headlines, 3, 'pmax_headlines_required', 'creative_config.headlines', 'Performance Max requiere al menos tres titulares proporcionados.');
@@ -323,54 +458,149 @@ function buildGooglePmaxSpec(campaign, refs, blockers) {
   };
 }
 
-function metaCreative(campaign) {
+function metaCreative(campaign, blockers) {
   const creative = safeObject(campaign.creative_config);
+  const primaryTexts = stringArrayAlias(creative, ['primary_texts', 'primary_text', 'messages']);
+  const headlines = stringArrayAlias(creative, ['headlines', 'headline', 'titles']);
+  const descriptions = stringArrayAlias(creative, ['descriptions', 'description']);
+  const media = stringArrayAlias(creative, ['media', 'media_asset_ids', 'image_hashes', 'video_ids']);
+  const callToAction = scalarAlias(creative, ['call_to_action', 'cta_type']);
+  for (const [alias, code, field, message] of [
+    [primaryTexts, 'meta_primary_text_alias_conflict', 'creative_config.primary_text', 'Los aliases de texto principal contienen contenidos distintos.'],
+    [headlines, 'meta_headline_alias_conflict', 'creative_config.headline', 'Los aliases de titular contienen contenidos distintos.'],
+    [descriptions, 'meta_description_alias_conflict', 'creative_config.description', 'Los aliases de descripción contienen contenidos distintos.'],
+    [media, 'meta_media_alias_conflict', 'creative_config.media', 'Los aliases de creatividad contienen referencias distintas.'],
+    [callToAction, 'meta_cta_alias_conflict', 'creative_config.call_to_action', 'Los aliases de CTA contienen valores distintos.'],
+  ]) {
+    if (alias.conflict) blockers.push(blocker(code, field, `${message} Conserva una única fuente explícita.`));
+  }
   return {
-    primary_texts: assetArray(creative, ['primary_texts', 'primary_text', 'messages']),
-    headlines: assetArray(creative, ['headlines', 'headline', 'titles']),
-    descriptions: assetArray(creative, ['descriptions', 'description']),
-    media: assetArray(creative, ['media', 'media_asset_ids', 'image_hashes', 'video_ids']),
-    call_to_action: text(valuesAt(creative, ['call_to_action', 'cta_type']), 64),
+    primary_texts: primaryTexts.value,
+    headlines: headlines.value,
+    descriptions: descriptions.value,
+    media: media.value,
+    call_to_action: callToAction.value,
   };
 }
 
 function buildMetaSpec(campaign, family, refs, blockers, warnings) {
+  if (containsSensitiveUrl({
+    target_config: campaign.target_config,
+    audience_config: campaign.audience_config,
+    schedule_config: campaign.schedule_config,
+    destination_config: campaign.destination_config,
+    creative_config: campaign.creative_config,
+    tracking_plan: campaign.tracking_plan,
+  })) {
+    blockers.push(blocker(
+      'meta_sensitive_url_forbidden',
+      'campaign',
+      'La configuración Meta contiene una URL con credenciales, tokens o firma; se ha eliminado del plan y debe sustituirse por una referencia segura.',
+    ));
+  }
   const common = commonSpecification(campaign, 'meta_ads', family, refs);
-  const creative = metaCreative(campaign);
-  const pageId = text(valuesAt(refs, ['page_id', 'meta_ads_page_id']), 128);
-  const instantFormId = text(
-    valuesAt(common.destination, ['instant_form_id', 'form_id'])
-      || valuesAt(refs, ['instant_form_id', 'meta_ads_instant_form_id']),
-    128
+  const creative = metaCreative(campaign, blockers);
+  const trackingPlan = safeObject(campaign.tracking_plan);
+  const policyReadiness = safeObject(campaign.policy_readiness);
+  const accountRef = scalarAlias(
+    refs,
+    ['ad_account_id', 'meta_ads_ad_account_id', 'account_id', 'meta_ads_account_id'],
+    (value) => value.replace(/^act_/, ''),
   );
+  const campaignRef = scalarAlias(refs, ['campaign_id', 'meta_ads_campaign_id']);
+  const pageRef = scalarAlias(refs, ['page_id', 'meta_ads_page_id']);
+  const instagramRef = scalarAlias(refs, ['instagram_actor_id', 'meta_ads_instagram_actor_id']);
+  const pixelRef = scalarAlias(refs, ['pixel_id', 'meta_ads_pixel_id']);
+  const formRef = scalarAlias(refs, ['instant_form_id', 'meta_ads_instant_form_id']);
+  for (const [alias, code, field, message] of [
+    [accountRef, 'meta_account_alias_conflict', 'platform_refs.ad_account_id', 'Las referencias de cuenta Meta contienen IDs distintos.'],
+    [campaignRef, 'meta_campaign_alias_conflict', 'platform_refs.campaign_id', 'Las referencias de campaña Meta contienen IDs distintos.'],
+    [pageRef, 'meta_page_alias_conflict', 'platform_refs.page_id', 'Las referencias de página Meta contienen IDs distintos.'],
+    [instagramRef, 'meta_instagram_alias_conflict', 'platform_refs.instagram_actor_id', 'Las referencias de Instagram contienen IDs distintos.'],
+    [pixelRef, 'meta_pixel_alias_conflict', 'platform_refs.pixel_id', 'Las referencias de píxel Meta contienen IDs distintos.'],
+    [formRef, 'meta_instant_form_ref_alias_conflict', 'platform_refs.instant_form_id', 'Las referencias de formulario Meta contienen IDs distintos.'],
+  ]) {
+    if (alias.conflict) blockers.push(blocker(code, field, `${message} Conserva una única referencia explícita.`));
+  }
+  common.account_id = accountRef.value;
+  common.existing_campaign_id = campaignRef.value;
+  common.operation = campaignRef.value ? 'update_existing' : 'create_new';
+  const pageId = pageRef.value;
+  const pixelId = pixelRef.value;
+  const instantFormAliases = [
+    common.destination.instant_form_id,
+    common.destination.form_id,
+    formRef.value,
+  ].filter((value) => value !== undefined && value !== null && value !== '');
+  const normalizedInstantFormAliases = instantFormAliases.map((value) => text(value, 128));
+  if (instantFormAliases.length > 1
+    && (normalizedInstantFormAliases.some((value) => !value)
+      || new Set(normalizedInstantFormAliases).size > 1)) {
+    blockers.push(blocker('meta_instant_form_alias_conflict', 'destination_config', 'Los aliases de formulario instantáneo contienen IDs distintos; conserva una única referencia explícita.'));
+  }
+  const instantFormId = normalizedInstantFormAliases[0] || null;
+  const destinationAliases = [
+    common.destination.final_url,
+    common.destination.landing_url,
+    common.destination.url,
+    common.destination.effective_url,
+  ].filter((value) => value !== undefined && value !== null && value !== '');
+  const normalizedDestinationAliases = destinationAliases.map(httpUrl);
+  if (destinationAliases.length > 1
+    && (normalizedDestinationAliases.some((value) => !value)
+      || new Set(normalizedDestinationAliases).size > 1)) {
+    blockers.push(blocker('meta_destination_alias_conflict', 'destination_config', 'Los aliases de destino Meta contienen URLs distintas; conserva una única URL final.'));
+  }
+  const rawMetaDestination = destinationAliases[0] || null;
+  const metaDestination = normalizedDestinationAliases[0] || null;
 
   if (!common.account_id) blockers.push(blocker('provider_account_required', 'platform_refs.ad_account_id', 'Falta una cuenta publicitaria Meta asignada.'));
   else if (!/^(?:act_)?\d+$/.test(common.account_id)) blockers.push(blocker('provider_account_invalid', 'platform_refs.ad_account_id', 'La cuenta Meta debe ser un ID numérico, con prefijo act_ opcional.'));
   if (!pageId) blockers.push(blocker('meta_page_required', 'platform_refs.page_id', 'Meta requiere una página asignada como identidad.'));
   else if (!/^\d+$/.test(pageId)) blockers.push(blocker('meta_page_invalid', 'platform_refs.page_id', 'La página Meta debe usar un ID numérico.'));
   if (!common.name) blockers.push(blocker('campaign_name_required', 'name', 'Falta el nombre de campaña.'));
-  if (!common.budget.approved_client_gross_amount) blockers.push(blocker('positive_budget_required', 'budget_config.amount', 'El presupuesto debe ser mayor que cero.'));
+  addMediaBudgetBlockers(common.budget, blockers);
   requireCount(blockers, creative.primary_texts, 1, 'meta_primary_text_required', 'creative_config.primary_text', 'Meta requiere un texto principal proporcionado.');
   requireCount(blockers, creative.media, 1, 'meta_media_required', 'creative_config.media', 'Meta requiere una imagen o vídeo proporcionado.');
-  if (!creative.call_to_action) blockers.push(blocker('meta_cta_required', 'creative_config.call_to_action', 'Meta requiere un CTA explícito.'));
-  else if (!/^[A-Z][A-Z0-9_]{1,63}$/.test(creative.call_to_action)) blockers.push(blocker('meta_cta_invalid', 'creative_config.call_to_action', 'El CTA Meta debe usar un valor canónico como LEARN_MORE.'));
+  if (creative.call_to_action && !(META_CTA_TYPES[family] || []).includes(creative.call_to_action)) {
+    blockers.push(blocker('meta_cta_invalid', 'creative_config.call_to_action', `El CTA no pertenece a la lista admitida para ${family}; usa un valor revisado como LEARN_MORE.`));
+  }
   if (family === 'meta_instant_form' && !instantFormId) {
     blockers.push(blocker('meta_instant_form_required', 'destination_config.instant_form_id', 'La campaña de formulario requiere un formulario instantáneo existente.'));
   } else if (family === 'meta_instant_form' && !/^\d+$/.test(instantFormId)) {
     blockers.push(blocker('meta_instant_form_invalid', 'destination_config.instant_form_id', 'El formulario instantáneo debe usar un ID numérico.'));
   }
-  const metaDestination = valuesAt(common.destination, ['url', 'final_url', 'effective_url']);
-  if (family === 'meta_reach' && !metaDestination) {
+  if (family === 'meta_instant_form' && !creative.call_to_action) {
+    blockers.push(blocker('meta_cta_required', 'creative_config.call_to_action', 'El formulario instantáneo requiere un CTA explícito.'));
+  } else if (family === 'meta_reach' && metaDestination && !creative.call_to_action) {
+    blockers.push(blocker('meta_cta_required', 'creative_config.call_to_action', 'El anuncio de alcance con destino web requiere un CTA explícito.'));
+  } else if (family === 'meta_reach' && !metaDestination && creative.call_to_action) {
+    blockers.push(blocker('meta_cta_destination_required', 'destination_config.final_url', 'No se puede preparar un CTA de alcance sin una URL pública de destino.'));
+  }
+  if (family === 'meta_reach' && !rawMetaDestination) {
     warnings.push(warning('meta_destination_optional', 'destination_config', 'No se ha indicado URL; el plan de alcance queda limitado al destino nativo configurado.'));
-  } else if (family === 'meta_reach' && !httpUrl(metaDestination)) {
+  } else if (family === 'meta_reach' && !metaDestination) {
     blockers.push(blocker('meta_destination_invalid', 'destination_config.final_url', 'La URL de destino Meta debe usar http(s) y no incluir credenciales.'));
   }
 
   return {
     ...common,
     provider_objective: family === 'meta_instant_form' ? 'OUTCOME_LEADS' : 'OUTCOME_AWARENESS',
-    identity: { page_id: pageId, instagram_actor_id: text(valuesAt(refs, ['instagram_actor_id', 'meta_ads_instagram_actor_id']), 128) },
+    identity: { page_id: pageId, instagram_actor_id: instagramRef.value },
     instant_form_id: family === 'meta_instant_form' ? instantFormId : null,
+    destination: {
+      final_url: family === 'meta_reach' ? metaDestination : null,
+      instant_form_id: family === 'meta_instant_form' ? instantFormId : null,
+    },
+    tracking: {
+      status: text(trackingPlan.status, 32)?.toLowerCase() || null,
+      conversion_actions_ready: trackingPlan.conversion_actions_ready === true,
+      pixel_id: pixelId,
+    },
+    compliance: {
+      dsa_beneficiary: text(valuesAt(policyReadiness, ['dsa_beneficiary', 'dsa.beneficiary']), 10000),
+      dsa_payor: text(valuesAt(policyReadiness, ['dsa_payor', 'dsa.payor']), 10000),
+    },
     creative,
   };
 }
@@ -418,7 +648,11 @@ function addOperationalBlockers(campaign, evidence, blockers) {
   }
 }
 
-function buildManagedCampaignPublishingPlan({ campaign, gateEvidence = {} } = {}) {
+function buildManagedCampaignPublishingPlan({
+  campaign,
+  gateEvidence = {},
+  accountAuthorization = null,
+} = {}) {
   const row = plainCampaign(campaign);
   if (!row) {
     const error = new Error('ManagedCampaign es obligatorio');
@@ -443,6 +677,15 @@ function buildManagedCampaignPublishingPlan({ campaign, gateEvidence = {} } = {}
     specification = buildGooglePmaxSpec(row, refs, blockers);
   } else if (provider === 'meta_ads' && ['meta_reach', 'meta_instant_form'].includes(family)) {
     specification = buildMetaSpec(row, family, refs, blockers, warnings);
+  }
+
+  if (specification.account_id
+    && !publishingAccountScopeIsAuthorized(row, specification, accountAuthorization)) {
+    blockers.push(blocker(
+      'provider_account_scope_forbidden',
+      provider === 'meta_ads' ? 'platform_refs.ad_account_id' : 'platform_refs.customer_id',
+      'La cuenta publicitaria seleccionada no pertenece al ámbito autorizado de esta clínica o grupo, o su autorización ya no está activa. Elige una cuenta autorizada antes de publicar.',
+    ));
   }
 
   const evidence = Object.fromEntries(REQUIRED_GATE_EVIDENCE.map((key) => [key, gateEvidence?.[key] === true]));
@@ -607,5 +850,6 @@ module.exports = {
   evaluateManagedCampaignExecutionGates,
   isSecretKey,
   httpUrl,
+  managedCampaignPublishingAccountScopeInput,
   sanitizeForPlan,
 };

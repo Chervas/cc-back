@@ -6,8 +6,9 @@ const path = require('node:path');
 const {
   REQUIRED_EXECUTION_CONFIRMATIONS,
   assertManagedCampaignExecutionGates,
-  buildManagedCampaignPublishingPlan,
+  buildManagedCampaignPublishingPlan: buildManagedCampaignPublishingPlanWithoutAuthorization,
   evaluateManagedCampaignExecutionGates,
+  managedCampaignPublishingAccountScopeInput,
 } = require('../../services/managedCampaignPublishing.service');
 const {
   buildManagedCampaignDryRunAdapter,
@@ -68,6 +69,31 @@ function baseCampaign(overrides = {}) {
   };
 }
 
+function authorizedAccountScope(campaign) {
+  const input = managedCampaignPublishingAccountScopeInput(campaign);
+  if (!input.provider || !input.accountId) return null;
+  return {
+    scope: {
+      group_id: input.groupId,
+      clinic_id: input.clinicId,
+    },
+    account: {
+      provider: input.provider,
+      account_id: String(input.accountId).replace(/[^0-9]/g, ''),
+      assignment_origin: input.clinicId ? 'clinic' : 'group',
+      authorization_status: 'active',
+      selectable: true,
+    },
+  };
+}
+
+function buildManagedCampaignPublishingPlan(input = {}) {
+  return buildManagedCampaignPublishingPlanWithoutAuthorization({
+    ...input,
+    accountAuthorization: authorizedAccountScope(input.campaign),
+  });
+}
+
 function fullConfirmation(plan) {
   return {
     plan_hash: plan.plan_hash,
@@ -100,6 +126,52 @@ function directSearchSpecification(overrides = {}) {
     creative: {
       headlines: ['Implantes dentales', 'Recupera tu sonrisa', 'Valoración personalizada'],
       descriptions: ['Equipo especializado.', 'Solicita una valoración.'],
+    },
+    ...overrides,
+  };
+}
+
+function directMetaSpecification(family = 'meta_reach', overrides = {}) {
+  return {
+    provider: 'meta_ads',
+    family,
+    operation: 'create_new',
+    existing_campaign_id: null,
+    account_id: 'act_123456789',
+    name: 'Captación Meta Badalona',
+    objective_id: 'new_patients',
+    provider_objective: family === 'meta_instant_form' ? 'OUTCOME_LEADS' : 'OUTCOME_AWARENESS',
+    budget: {
+      approved_client_gross_amount: 500,
+      funded_client_gross_amount: 500,
+      commission_amount: 50,
+      media_budget_total: 450,
+      media_budget_available: 450,
+      approved_media_budget_cap: 450,
+      provider_media_budget_amount: 450,
+      currency: 'EUR',
+      period: 'monthly',
+    },
+    targeting: { geo_locations: { cities: ['Badalona'] } },
+    audience: { eligibility_status: 'ready' },
+    schedule: { start_date: '2026-08-01', end_date: '2026-08-31' },
+    destination: family === 'meta_instant_form'
+      ? { instant_form_id: '7890123' }
+      : { final_url: 'https://example.test/meta' },
+    identity: { page_id: '456789', instagram_actor_id: '987654' },
+    compliance: { dsa_beneficiary: 'Clínica Propdental', dsa_payor: 'ClinicaClick SL' },
+    instant_form_id: family === 'meta_instant_form' ? '7890123' : null,
+    tracking: {
+      status: 'ready',
+      conversion_actions_ready: true,
+      pixel_id: '1234567890',
+    },
+    creative: {
+      primary_texts: ['Cuida tu sonrisa'],
+      headlines: ['Clínica dental en Badalona'],
+      descriptions: ['Pide una valoración personalizada.'],
+      media: ['asset:image:meta-1'],
+      call_to_action: 'LEARN_MORE',
     },
     ...overrides,
   };
@@ -140,6 +212,54 @@ function testDeterministicGoogleSearchPlan() {
   assert.doesNotMatch(serialized, /must-never-leak|secret-google-token|also-secret|hidden/);
   assert.doesNotMatch(serialized, /access_token|accessToken|refreshToken|clientSecret/);
   assert.match(serialized, /managed-google-ads-dry-run-adapter\/v1/);
+}
+
+function testPublishingAccountScopeAuthorization() {
+  const campaign = baseCampaign();
+  const unverified = buildManagedCampaignPublishingPlanWithoutAuthorization({ campaign, gateEvidence });
+  assert.equal(unverified.readiness.ready, false);
+  assert.equal(
+    unverified.readiness.blockers.some((item) => item.code === 'provider_account_scope_forbidden'),
+    true,
+    'An account reference without server-side scope evidence must fail closed',
+  );
+
+  const wrongClinic = buildManagedCampaignPublishingPlanWithoutAuthorization({
+    campaign,
+    gateEvidence,
+    accountAuthorization: {
+      ...authorizedAccountScope(campaign),
+      scope: { group_id: 5, clinic_id: 999 },
+    },
+  });
+  assert.equal(
+    wrongClinic.readiness.blockers.some((item) => item.code === 'provider_account_scope_forbidden'),
+    true,
+    'Authorization for another clinic in the group must be rejected',
+  );
+
+  const revoked = buildManagedCampaignPublishingPlanWithoutAuthorization({
+    campaign,
+    gateEvidence,
+    accountAuthorization: {
+      ...authorizedAccountScope(campaign),
+      account: {
+        ...authorizedAccountScope(campaign).account,
+        authorization_status: 'reauthorization_required',
+        selectable: false,
+      },
+    },
+  });
+  assert.equal(
+    revoked.readiness.blockers.some((item) => item.code === 'provider_account_scope_forbidden'),
+    true,
+    'A stale provider authorization must be rejected',
+  );
+
+  const authorized = buildManagedCampaignPublishingPlan({ campaign, gateEvidence });
+  assert.equal(authorized.readiness.ready, true);
+  assert.notEqual(unverified.plan_hash, authorized.plan_hash,
+    'Scope authorization must be part of the deterministic readiness hash');
 }
 
 function testNoInventedAssetsAndUnsupportedFamily() {
@@ -330,7 +450,14 @@ function testOtherSupportedFamilies() {
     provider: 'meta_ads',
     family: 'meta_reach',
     target_config: { geo: { city: 'Badalona' } },
+    audience_config: { eligibility_status: 'ready' },
     platform_refs: { ad_account_id: 'act_123', page_id: '456' },
+    schedule_config: { start_date: '2026-08-01', end_date: '2026-08-31' },
+    policy_readiness: {
+      status: 'ready',
+      dsa_beneficiary: 'Clínica Propdental',
+      dsa_payor: 'ClinicaClick SL',
+    },
     creative_config: {
       assets_ready: true,
       primary_text: 'Cuida tu sonrisa',
@@ -340,11 +467,128 @@ function testOtherSupportedFamilies() {
     },
   });
   const reach = buildManagedCampaignPublishingPlan({ campaign: metaBase, gateEvidence });
-  assert.equal(reach.readiness.ready, false);
+  const repeatedReach = buildManagedCampaignPublishingPlan({ campaign: { ...metaBase }, gateEvidence: { ...gateEvidence } });
+  assert.equal(reach.readiness.ready, true);
+  assert.equal(reach.plan_hash, repeatedReach.plan_hash);
   assert.equal(reach.specification.provider_objective, 'OUTCOME_AWARENESS');
-  assert.equal(reach.execution.dry_run_adapter_available, false);
-  assert.equal(reach.readiness.blockers.some((item) => item.code === 'dry_run_adapter_unavailable'), true);
-  assert.equal(reach.dry_run_adapter.operations.length, 0);
+  assert.equal(reach.execution.dry_run_adapter_available, true);
+  assert.equal(reach.execution.execution_adapter_available, false);
+  assert.equal(reach.dry_run_adapter.operations.length, 5);
+  assert.equal(reach.dry_run_adapter.operations[0].resource_type, 'Campaign');
+  assert.equal(reach.dry_run_adapter.operations[0].payload_preview.status, 'PAUSED');
+  assert.equal(reach.dry_run_adapter.operations[1].payload_preview.status, 'PAUSED');
+  assert.equal(reach.dry_run_adapter.operations[3].payload_preview.published, false);
+  assert.equal(reach.dry_run_adapter.operations[4].payload_preview.status, 'PAUSED');
+  assert.equal(reach.dry_run_adapter.network_calls_performed, 0);
+  assert.equal(reach.dry_run_adapter.provider_call_performed, false);
+  assert.match(JSON.stringify(reach), /managed-meta-ads-dry-run-adapter\/v1/);
+
+  const overlongMeta = buildManagedCampaignPublishingPlan({
+    campaign: {
+      ...metaBase,
+      creative_config: {
+        assets_ready: true,
+        primary_text: 'p'.repeat(2201),
+        headline: 'Clínica dental en Badalona',
+        media: ['m'.repeat(2049)],
+        call_to_action: 'A'.repeat(65),
+      },
+    },
+    gateEvidence,
+  });
+  const overlongMetaCodes = new Set(overlongMeta.readiness.blockers.map((item) => item.code));
+  assert.equal(overlongMeta.readiness.ready, false);
+  assert.equal(overlongMetaCodes.has('adapter_meta_primary_texts_too_long'), true);
+  assert.equal(overlongMetaCodes.has('adapter_meta_media_too_long'), true);
+  assert.equal(overlongMetaCodes.has('adapter_meta_media_required'), true);
+  assert.equal(overlongMetaCodes.has('adapter_meta_cta_invalid'), true);
+
+  const signedMetaPlan = buildManagedCampaignPublishingPlan({
+    campaign: {
+      ...metaBase,
+      destination_config: { final_url: 'https://example.com/?access_token=PLAN_URL_SECRET' },
+      creative_config: {
+        ...metaBase.creative_config,
+        media: ['https://blob.example.com/a?X-Amz-Signature=PLAN_MEDIA_SECRET'],
+        appsecret_proof: 'PLAN_PROOF_SECRET',
+        signed_request: 'PLAN_SIGNED_SECRET',
+      },
+    },
+    gateEvidence,
+  });
+  assert.equal(signedMetaPlan.readiness.ready, false);
+  assert.equal(signedMetaPlan.readiness.blockers.some((item) => item.code === 'meta_sensitive_url_forbidden'), true);
+  assert.doesNotMatch(
+    JSON.stringify(signedMetaPlan),
+    /PLAN_URL_SECRET|PLAN_MEDIA_SECRET|PLAN_PROOF_SECRET|PLAN_SIGNED_SECRET|appsecret_proof|signed_request/,
+  );
+
+  const metaDestinationConflict = buildManagedCampaignPublishingPlan({
+    campaign: {
+      ...metaBase,
+      destination_config: {
+        final_url: 'https://example.test/trusted',
+        url: 'https://example.test/other',
+      },
+    },
+    gateEvidence,
+  });
+  assert.equal(metaDestinationConflict.readiness.ready, false);
+  assert.equal(metaDestinationConflict.readiness.blockers.some((item) => item.code === 'meta_destination_alias_conflict'), true);
+
+  const landingUrlOnly = buildManagedCampaignPublishingPlan({
+    campaign: { ...metaBase, destination_config: { landing_url: 'https://example.test/landing' } },
+    gateEvidence,
+  });
+  assert.equal(landingUrlOnly.readiness.ready, true);
+  assert.equal(landingUrlOnly.specification.destination.final_url, 'https://example.test/landing');
+
+  const platformAliasConflict = buildManagedCampaignPublishingPlan({
+    campaign: {
+      ...metaBase,
+      platform_refs: {
+        ad_account_id: 'act_111',
+        page_id: '444',
+        pixel_id: '555',
+        meta_ads: { ad_account_id: 'act_222', page_id: '333', pixel_id: '666' },
+      },
+    },
+    gateEvidence,
+  });
+  const platformAliasCodes = new Set(platformAliasConflict.readiness.blockers.map((item) => item.code));
+  assert.equal(platformAliasConflict.readiness.ready, false);
+  assert.equal(platformAliasCodes.has('meta_account_alias_conflict'), true);
+  assert.equal(platformAliasCodes.has('meta_page_alias_conflict'), true);
+  assert.equal(platformAliasCodes.has('meta_pixel_alias_conflict'), true);
+  assert.equal(platformAliasConflict.specification.account_id, 'act_111');
+  assert.equal(platformAliasConflict.specification.identity.page_id, '444');
+
+  const creativeAliasConflict = buildManagedCampaignPublishingPlan({
+    campaign: {
+      ...metaBase,
+      creative_config: {
+        assets_ready: true,
+        primary_texts: ['Texto revisado'],
+        primary_text: 'Texto distinto',
+        headlines: ['Titular revisado'],
+        headline: 'Titular distinto',
+        descriptions: ['Descripción revisada'],
+        description: 'Descripción distinta',
+        media: ['asset:image:meta-1'],
+        image_hashes: ['abcdefabcdefabcdefabcdefabcdefab'],
+        call_to_action: 'LEARN_MORE',
+        cta_type: 'GET_QUOTE',
+      },
+    },
+    gateEvidence,
+  });
+  const creativeAliasCodes = new Set(creativeAliasConflict.readiness.blockers.map((item) => item.code));
+  assert.equal(creativeAliasConflict.readiness.ready, false);
+  assert.equal(creativeAliasCodes.has('meta_primary_text_alias_conflict'), true);
+  assert.equal(creativeAliasCodes.has('meta_headline_alias_conflict'), true);
+  assert.equal(creativeAliasCodes.has('meta_description_alias_conflict'), true);
+  assert.equal(creativeAliasCodes.has('meta_media_alias_conflict'), true);
+  assert.equal(creativeAliasCodes.has('meta_cta_alias_conflict'), true);
 
   const instant = buildManagedCampaignPublishingPlan({
     campaign: {
@@ -354,16 +598,30 @@ function testOtherSupportedFamilies() {
     },
     gateEvidence,
   });
-  assert.equal(instant.readiness.ready, false);
-  assert.equal(instant.readiness.blockers.some((item) => item.code === 'dry_run_adapter_unavailable'), true);
+  assert.equal(instant.readiness.ready, true);
+  assert.equal(instant.execution.dry_run_adapter_available, true);
+  assert.equal(instant.dry_run_adapter.operations.length, 5);
+  assert.equal(instant.dry_run_adapter.operations[1].payload_preview.optimization_goal, 'LEAD_GENERATION');
+  assert.equal(instant.dry_run_adapter.operations[3].payload_preview.instant_form_id, '789');
   assert.equal(instant.specification.instant_form_id, '789');
   assert.equal(instant.specification.provider_objective, 'OUTCOME_LEADS');
+  const instantAuthorization = evaluateManagedCampaignExecutionGates({
+    plan: instant,
+    confirmation: fullConfirmation(instant),
+  });
+  assert.equal(instantAuthorization.allowed, false);
+  assert.equal(instantAuthorization.failures.some((item) => item.code === 'execution_adapter_unavailable'), true);
+  assert.equal(instantAuthorization.failures.some((item) => item.code === 'dry_run_manifest_invalid'), false);
 }
 
-function testGoogleDryRunAdapterRegistry() {
+function testDryRunAdapterRegistry() {
   assert.equal(hasManagedCampaignDryRunAdapter('google_ads', 'google_search'), true);
   assert.equal(hasManagedCampaignDryRunAdapter('google_ads', 'google_pmax'), true);
-  assert.equal(hasManagedCampaignDryRunAdapter('meta_ads', 'meta_reach'), false);
+  assert.equal(hasManagedCampaignDryRunAdapter('meta_ads', 'meta_reach'), true);
+  assert.equal(hasManagedCampaignDryRunAdapter('meta_ads', 'meta_instant_form'), true);
+  assert.equal(hasManagedCampaignDryRunAdapter('meta_ads', 'meta_catalog_sales'), false);
+  assert.equal(hasManagedCampaignDryRunAdapter('META_ADS', 'meta_reach'), false);
+  assert.equal(hasManagedCampaignDryRunAdapter('meta_ads', 'meta_reach_preview'), false);
 
   const plan = buildManagedCampaignPublishingPlan({ campaign: baseCampaign(), gateEvidence });
   const direct = buildManagedCampaignDryRunAdapter({
@@ -380,7 +638,7 @@ function testGoogleDryRunAdapterRegistry() {
 
   const unsupported = buildManagedCampaignDryRunAdapter({
     provider: 'meta_ads',
-    family: 'meta_reach',
+    family: 'meta_catalog_sales',
     specification: plan.specification,
   });
   assert.equal(unsupported.dry_run_adapter_available, false);
@@ -534,6 +792,420 @@ function testDirectAdapterRejectsMalformedEffectivePayloads() {
   assert.equal(forgedCap.operations[0].payload_preview.amount_micros, 14_802_631);
 }
 
+function testMetaDryRunAdapterSafetyAndValidation() {
+  const reachSpecification = directMetaSpecification('meta_reach');
+  reachSpecification.access_token = 'must-never-leak';
+  reachSpecification.creative.clientSecret = 'also-hidden';
+  const reach = buildManagedCampaignDryRunAdapter({
+    provider: 'meta_ads',
+    family: 'meta_reach',
+    specification: reachSpecification,
+  });
+  const repeated = buildManagedCampaignDryRunAdapter({
+    provider: 'meta_ads',
+    family: 'meta_reach',
+    specification: directMetaSpecification('meta_reach'),
+  });
+  assert.equal(reach.readiness.ready, true);
+  assert.equal(reach.account_id, 'act_123456789');
+  assert.equal(reach.operations.length, 5);
+  assert.deepEqual(reach.operations.map((item) => item.order), [1, 2, 3, 4, 5]);
+  assert.deepEqual(reach.operations.map((item) => item.resource_type), [
+    'Campaign', 'AdSet', 'AdCreativeAsset', 'AdCreative', 'Ad',
+  ]);
+  assert.deepEqual(reach.operations[2].payload_preview.media_references, [{
+    reference: 'asset:image:meta-1',
+    asset_type: 'IMAGE',
+    resolution_source: 'INTERNAL_ASSET',
+  }]);
+  assert.equal(reach.operations.every((item) => item.provider_call_performed === false), true);
+  assert.equal(reach.operations[0].payload_preview.status, 'PAUSED');
+  assert.equal(reach.operations[1].payload_preview.status, 'PAUSED');
+  assert.equal(reach.budget.planning_daily_amount_minor_units, 1480);
+  assert.equal(reach.operations[1].payload_preview.lifetime_budget_minor_units, 45000);
+  assert.equal(reach.safety.maximum_planned_spend_minor_units, 45000);
+  assert.equal(reach.operations[1].payload_preview.start_time, '2026-08-01T00:00:00.000Z');
+  assert.equal(reach.operations[1].payload_preview.end_time, '2026-08-31T23:59:59.999Z');
+  assert.equal(reach.operations[3].payload_preview.published, false);
+  assert.equal(reach.operations[4].payload_preview.status, 'PAUSED');
+  assert.equal(reach.provider_call_performed, false);
+  assert.equal(reach.network_calls_performed, 0);
+  assert.equal(reach.execution_adapter_available, false);
+  assert.equal(reach.safety.provider_objects_created, false);
+  assert.equal(reach.safety.generated_assets_allowed, false);
+  assert.equal(reach.safety.destructive_replace, false);
+  assert.equal(reach.manifest_hash, repeated.manifest_hash);
+  assert.equal(reach.idempotency.fingerprint, repeated.idempotency.fingerprint);
+  assert.equal(reach.idempotency.persisted_audit_key_required, true);
+  assert.equal(reach.idempotency.provider_request_id_generated, false);
+  const serializedReach = JSON.stringify(reach);
+  assert.doesNotMatch(serializedReach, /must-never-leak|also-hidden|access_token|clientSecret/);
+
+  const exactMinorUnits = buildManagedCampaignDryRunAdapter({
+    provider: 'meta_ads',
+    family: 'meta_reach',
+    specification: directMetaSpecification('meta_reach', {
+      budget: {
+        approved_client_gross_amount: 100.30,
+        funded_client_gross_amount: 100.30,
+        commission_amount: 10.01,
+        media_budget_total: 90.29,
+        media_budget_available: 90.29,
+        approved_media_budget_cap: 90.29,
+        provider_media_budget_amount: 90.29,
+        currency: 'EUR',
+        period: 'monthly',
+      },
+    }),
+  });
+  assert.equal(exactMinorUnits.readiness.ready, true);
+  assert.equal(exactMinorUnits.operations[1].payload_preview.lifetime_budget_minor_units, 9029);
+
+  const changedCreative = buildManagedCampaignDryRunAdapter({
+    provider: 'meta_ads',
+    family: 'meta_reach',
+    specification: directMetaSpecification('meta_reach', {
+      creative: {
+        ...directMetaSpecification('meta_reach').creative,
+        primary_texts: ['Una creatividad diferente'],
+      },
+    }),
+  });
+  assert.notEqual(changedCreative.manifest_hash, reach.manifest_hash);
+  assert.notEqual(changedCreative.idempotency.fingerprint, reach.idempotency.fingerprint);
+
+  const instant = buildManagedCampaignDryRunAdapter({
+    provider: 'meta_ads',
+    family: 'meta_instant_form',
+    specification: directMetaSpecification('meta_instant_form'),
+  });
+  assert.equal(instant.readiness.ready, true);
+  assert.equal(instant.operations[1].payload_preview.destination_type, 'ON_AD');
+  assert.equal(instant.operations[1].payload_preview.optimization_goal, 'LEAD_GENERATION');
+  assert.equal(instant.operations[3].payload_preview.instant_form_id, '7890123');
+  assert.equal(instant.operations[3].payload_preview.tracking.measurement_mode, 'instant_form_native_lead');
+  assert.equal(instant.readiness.warnings.some((item) => item.code === 'adapter_meta_instant_form_not_verified'), true);
+  assert.equal(instant.readiness.warnings.some((item) => item.code === 'adapter_meta_media_resolution_not_verified'), true);
+  assert.equal(instant.readiness.warnings.some((item) => item.code === 'adapter_meta_pixel_not_verified'), true);
+
+  const malformed = buildManagedCampaignDryRunAdapter({
+    provider: 'meta_ads',
+    family: 'meta_instant_form',
+    specification: directMetaSpecification('meta_instant_form', {
+      account_id: 'account-not-numeric',
+      provider_objective: 'OUTCOME_AWARENESS',
+      targeting: {},
+      destination: { instant_form_id: {} },
+      instant_form_id: {},
+      identity: { page_id: {}, instagram_actor_id: 'invalid' },
+      tracking: { status: 'pending', conversion_actions_ready: false, pixel_id: 'pixel-bad' },
+      creative: {
+        primary_texts: [{}],
+        headlines: [],
+        descriptions: [],
+        media: [{}],
+        call_to_action: 'learn-more',
+      },
+    }),
+  });
+  assert.equal(malformed.readiness.ready, false);
+  const malformedCodes = new Set(malformed.readiness.blockers.map((item) => item.code));
+  for (const expectedCode of [
+    'adapter_meta_account_required',
+    'adapter_meta_objective_invalid',
+    'adapter_meta_page_required',
+    'adapter_meta_instagram_actor_invalid',
+    'adapter_meta_primary_texts_invalid',
+    'adapter_meta_primary_texts_required',
+    'adapter_meta_media_invalid',
+    'adapter_meta_media_required',
+    'adapter_meta_cta_invalid',
+    'adapter_meta_cta_required',
+    'adapter_meta_form_headline_required',
+    'adapter_meta_instant_form_required',
+    'adapter_meta_targeting_required',
+    'adapter_meta_pixel_invalid',
+    'adapter_meta_tracking_not_ready',
+  ]) {
+    assert.equal(malformedCodes.has(expectedCode), true, `missing blocker ${expectedCode}`);
+  }
+  assert.deepEqual(malformed.operations[2].payload_preview.media_references, []);
+  assert.equal(malformed.operations[3].payload_preview.instant_form_id, null);
+  assert.doesNotMatch(JSON.stringify(malformed), /\[object Object\]/);
+
+  const privateDestination = buildManagedCampaignDryRunAdapter({
+    provider: 'meta_ads',
+    family: 'meta_reach',
+    specification: directMetaSpecification('meta_reach', {
+      destination: { final_url: 'https://operator:secret@127.0.0.1/private' },
+    }),
+  });
+  assert.equal(privateDestination.readiness.ready, false);
+  assert.equal(privateDestination.readiness.blockers.some((item) => item.code === 'adapter_meta_destination_invalid'), true);
+  assert.equal(privateDestination.operations[3].payload_preview.destination_url, null);
+  assert.doesNotMatch(JSON.stringify(privateDestination), /operator|secret|127\.0\.0\.1/);
+
+  const directDestinationConflict = buildManagedCampaignDryRunAdapter({
+    provider: 'meta_ads',
+    family: 'meta_reach',
+    specification: directMetaSpecification('meta_reach', {
+      destination: {
+        final_url: 'https://example.test/trusted',
+        url: 'https://example.test/other',
+      },
+    }),
+  });
+  assert.equal(directDestinationConflict.readiness.ready, false);
+  assert.equal(directDestinationConflict.readiness.blockers.some((item) => item.code === 'adapter_meta_destination_alias_conflict'), true);
+
+  const directFormConflict = buildManagedCampaignDryRunAdapter({
+    provider: 'meta_ads',
+    family: 'meta_instant_form',
+    specification: directMetaSpecification('meta_instant_form', {
+      instant_form_id: '7890123',
+      destination: { instant_form_id: '9999999' },
+    }),
+  });
+  assert.equal(directFormConflict.readiness.ready, false);
+  assert.equal(directFormConflict.readiness.blockers.some((item) => item.code === 'adapter_meta_instant_form_alias_conflict'), true);
+
+  const signedArtifacts = buildManagedCampaignDryRunAdapter({
+    provider: 'meta_ads',
+    family: 'meta_reach',
+    specification: directMetaSpecification('meta_reach', {
+      destination: { final_url: 'https://example.com/?access_token=URL_SECRET&appsecret_proof=PROOF_SECRET' },
+      creative: {
+        ...directMetaSpecification('meta_reach').creative,
+        media: ['https://blob.example.com/a?sig=AZURE_SECRET&key=API_SECRET'],
+        appsecret_proof: 'NESTED_PROOF_SECRET',
+        signed_request: 'SIGNED_REQUEST_SECRET',
+      },
+    }),
+  });
+  assert.equal(signedArtifacts.readiness.ready, false);
+  assert.equal(signedArtifacts.readiness.blockers.some((item) => item.code === 'adapter_meta_sensitive_url_forbidden'), true);
+  assert.equal(signedArtifacts.readiness.blockers.some((item) => item.code === 'adapter_meta_media_required'), true);
+  assert.doesNotMatch(
+    JSON.stringify(signedArtifacts),
+    /URL_SECRET|PROOF_SECRET|AZURE_SECRET|API_SECRET|NESTED_PROOF_SECRET|SIGNED_REQUEST_SECRET|appsecret_proof|signed_request/,
+  );
+  for (const [unsafeUrl, leakedMarker] of [
+    ['https://example.com/?redirect=https%3A%2F%2Fother.example%2F%3Faccess_token%3DNESTED_SECRET', 'NESTED_SECRET'],
+    ['https://example.com/#access_token%3DFRAGMENT_SECRET', 'FRAGMENT_SECRET'],
+    ['https://example.com/?utm_content=client_secret%3DVALUE_SECRET', 'VALUE_SECRET'],
+    ['https://example.com/?AWSAccessKeyId=AWS_KEY_ONLY', 'AWS_KEY_ONLY'],
+  ]) {
+    const encodedSecret = buildManagedCampaignDryRunAdapter({
+      provider: 'meta_ads',
+      family: 'meta_reach',
+      specification: directMetaSpecification('meta_reach', { destination: { final_url: unsafeUrl } }),
+    });
+    assert.equal(encodedSecret.readiness.ready, false, unsafeUrl);
+    assert.equal(encodedSecret.readiness.blockers.some((item) => item.code === 'adapter_meta_sensitive_url_forbidden'), true);
+    assert.equal(JSON.stringify(encodedSecret).includes(leakedMarker), false);
+  }
+  const safeTrackingQuery = buildManagedCampaignDryRunAdapter({
+    provider: 'meta_ads',
+    family: 'meta_reach',
+    specification: directMetaSpecification('meta_reach', {
+      destination: { final_url: 'https://example.com/landing?utm_source=meta&utm_campaign=implantes&utm_content=ahorro%2020%25' },
+    }),
+  });
+  assert.equal(safeTrackingQuery.readiness.ready, true);
+  const safePercentCopy = buildManagedCampaignDryRunAdapter({
+    provider: 'meta_ads',
+    family: 'meta_reach',
+    specification: directMetaSpecification('meta_reach', {
+      creative: {
+        ...directMetaSpecification('meta_reach').creative,
+        primary_texts: ['Ahorra un 20% en tu valoración inicial'],
+      },
+    }),
+  });
+  assert.equal(safePercentCopy.readiness.ready, true);
+  assert.deepEqual(safePercentCopy.operations[3].payload_preview.primary_texts, ['Ahorra un 20% en tu valoración inicial']);
+
+  const semanticallyInvalid = buildManagedCampaignDryRunAdapter({
+    provider: 'meta_ads',
+    family: 'meta_reach',
+    specification: directMetaSpecification('meta_reach', {
+      targeting: { nonsense: true },
+      creative: {
+        ...directMetaSpecification('meta_reach').creative,
+        media: ['not-a-meta-asset'],
+        call_to_action: 'NOT_A_REAL_META_CTA',
+      },
+    }),
+  });
+  const semanticCodes = new Set(semanticallyInvalid.readiness.blockers.map((item) => item.code));
+  assert.equal(semanticallyInvalid.readiness.ready, false);
+  assert.equal(semanticCodes.has('adapter_meta_geo_targeting_required'), true);
+  assert.equal(semanticCodes.has('adapter_meta_media_reference_invalid'), true);
+  assert.equal(semanticCodes.has('adapter_meta_media_required'), true);
+  assert.equal(semanticCodes.has('adapter_meta_cta_invalid'), true);
+
+  for (const invalidTargeting of [
+    { geo: { latitude: 91, longitude: 181, radius_km: -1 } },
+    { geo_locations: { countries: [123] } },
+    { geo: { city: 42 } },
+  ]) {
+    const invalidGeo = buildManagedCampaignDryRunAdapter({
+      provider: 'meta_ads',
+      family: 'meta_reach',
+      specification: directMetaSpecification('meta_reach', { targeting: invalidTargeting }),
+    });
+    assert.equal(invalidGeo.readiness.ready, false);
+    assert.equal(invalidGeo.readiness.blockers.some((item) => item.code === 'adapter_meta_geo_targeting_invalid'), true);
+    assert.deepEqual(invalidGeo.operations[1].payload_preview.targeting_review_snapshot, { geo: {} });
+  }
+
+  const ambiguousCreative = buildManagedCampaignDryRunAdapter({
+    provider: 'meta_ads',
+    family: 'meta_reach',
+    specification: directMetaSpecification('meta_reach', {
+      creative: {
+        ...directMetaSpecification('meta_reach').creative,
+        primary_texts: ['Texto uno', 'Texto dos'],
+        headlines: ['Titular uno', 'Titular dos'],
+        media: ['asset:image:meta-1', 'asset:image:meta-2'],
+      },
+    }),
+  });
+  const ambiguousCodes = new Set(ambiguousCreative.readiness.blockers.map((item) => item.code));
+  assert.equal(ambiguousCreative.readiness.ready, false);
+  assert.equal(ambiguousCodes.has('adapter_meta_primary_texts_too_many'), true);
+  assert.equal(ambiguousCodes.has('adapter_meta_headlines_too_many'), true);
+  assert.equal(ambiguousCodes.has('adapter_meta_media_too_many'), true);
+  assert.equal(ambiguousCreative.operations[3].payload_preview.creative_format, 'SINGLE_MEDIA');
+  assert.equal(ambiguousCreative.operations[3].payload_preview.variation_strategy, 'NONE');
+
+  const unsupportedCurrency = buildManagedCampaignDryRunAdapter({
+    provider: 'meta_ads',
+    family: 'meta_reach',
+    specification: directMetaSpecification('meta_reach', {
+      budget: { ...directMetaSpecification('meta_reach').budget, currency: 'JPY' },
+    }),
+  });
+  assert.equal(unsupportedCurrency.readiness.ready, false);
+  assert.equal(unsupportedCurrency.readiness.blockers.some((item) => item.code === 'adapter_budget_currency_unsupported'), true);
+
+  const unsupportedDailyBudget = buildManagedCampaignDryRunAdapter({
+    provider: 'meta_ads',
+    family: 'meta_reach',
+    specification: directMetaSpecification('meta_reach', {
+      budget: { ...directMetaSpecification('meta_reach').budget, period: 'daily' },
+    }),
+  });
+  assert.equal(unsupportedDailyBudget.readiness.ready, false);
+  assert.equal(unsupportedDailyBudget.readiness.blockers.some((item) => item.code === 'adapter_budget_period_unsupported'), true);
+
+  const missingScheduleEnd = buildManagedCampaignDryRunAdapter({
+    provider: 'meta_ads',
+    family: 'meta_reach',
+    specification: directMetaSpecification('meta_reach', {
+      schedule: { start_date: '2026-08-01' },
+    }),
+  });
+  assert.equal(missingScheduleEnd.readiness.ready, false);
+  assert.equal(missingScheduleEnd.readiness.blockers.some((item) => item.code === 'adapter_meta_schedule_end_required'), true);
+
+  const invalidCalendar = buildManagedCampaignDryRunAdapter({
+    provider: 'meta_ads',
+    family: 'meta_reach',
+    specification: directMetaSpecification('meta_reach', {
+      schedule: { start_date: '2026-02-01', end_date: '2026-02-31' },
+    }),
+  });
+  assert.equal(invalidCalendar.readiness.ready, false);
+  assert.equal(invalidCalendar.readiness.blockers.some((item) => item.code === 'adapter_meta_schedule_end_invalid'), true);
+
+  for (const [schedule, expectedCode] of [
+    [{ start_date: '2026-08-01', end_date: '2026-08-02' }, 'adapter_meta_schedule_monthly_window_invalid'],
+    [{ start_date: '2026-08-01', end_date: '2027-08-01' }, 'adapter_meta_schedule_monthly_window_invalid'],
+    [{
+      start_time: '2026-08-10T00:00:00Z',
+      start_date: '2026-08-01',
+      end_time: '2026-09-08T00:00:00Z',
+      end_date: '2026-08-31',
+    }, 'adapter_meta_schedule_start_alias_conflict'],
+  ]) {
+    const invalidWindow = buildManagedCampaignDryRunAdapter({
+      provider: 'meta_ads',
+      family: 'meta_reach',
+      specification: directMetaSpecification('meta_reach', { schedule }),
+    });
+    assert.equal(invalidWindow.readiness.ready, false);
+    assert.equal(invalidWindow.readiness.blockers.some((item) => item.code === expectedCode), true);
+  }
+  for (const schedule of [
+    { start_date: '2027-02-01', end_date: '2027-02-28' },
+    { start_date: '2028-02-01', end_date: '2028-02-29' },
+  ]) {
+    const februaryWindow = buildManagedCampaignDryRunAdapter({
+      provider: 'meta_ads',
+      family: 'meta_reach',
+      specification: directMetaSpecification('meta_reach', { schedule }),
+    });
+    assert.equal(februaryWindow.readiness.ready, true, JSON.stringify(schedule));
+  }
+
+  const contradictoryTracking = buildManagedCampaignDryRunAdapter({
+    provider: 'meta_ads',
+    family: 'meta_reach',
+    specification: directMetaSpecification('meta_reach', {
+      tracking: { status: 'failed', conversion_actions_ready: true, pixel_id: '1234567890' },
+    }),
+  });
+  assert.equal(contradictoryTracking.readiness.ready, false);
+  assert.equal(contradictoryTracking.readiness.blockers.some((item) => item.code === 'adapter_meta_tracking_not_ready'), true);
+
+  const pendingAudience = buildManagedCampaignDryRunAdapter({
+    provider: 'meta_ads',
+    family: 'meta_reach',
+    specification: directMetaSpecification('meta_reach', {
+      audience: { eligibility_status: 'warning', reasons: ['pending_internal_review'] },
+    }),
+  });
+  assert.equal(pendingAudience.readiness.ready, false);
+  assert.equal(pendingAudience.readiness.blockers.some((item) => item.code === 'adapter_meta_audience_not_ready'), true);
+  assert.deepEqual(pendingAudience.operations[1].payload_preview.audience_review_snapshot, { eligibility_status: 'warning' });
+
+  const missingDsa = buildManagedCampaignDryRunAdapter({
+    provider: 'meta_ads',
+    family: 'meta_reach',
+    specification: directMetaSpecification('meta_reach', { compliance: {} }),
+  });
+  assert.equal(missingDsa.readiness.ready, false);
+  assert.equal(missingDsa.readiness.blockers.some((item) => item.code === 'adapter_meta_dsa_beneficiary_required'), true);
+  assert.equal(missingDsa.readiness.blockers.some((item) => item.code === 'adapter_meta_dsa_payor_required'), true);
+
+  const update = buildManagedCampaignDryRunAdapter({
+    provider: 'meta_ads',
+    family: 'meta_reach',
+    specification: directMetaSpecification('meta_reach', {
+      operation: 'update_existing',
+      existing_campaign_id: '23851234567890123',
+    }),
+  });
+  assert.equal(update.readiness.ready, true);
+  assert.equal(update.operations[0].action, 'resolve');
+  assert.equal(update.operations[0].payload_preview.preserve_existing_status, true);
+  assert.equal(Object.prototype.hasOwnProperty.call(update.operations[0].payload_preview, 'status'), false);
+  assert.equal(update.operations[1].payload_preview.status, 'PAUSED');
+  assert.equal(update.operations[4].payload_preview.status, 'PAUSED');
+  assert.equal(update.safety.initial_campaign_status, null);
+  assert.equal(update.safety.existing_campaign_status_preserved, true);
+
+  const missingExistingId = buildManagedCampaignDryRunAdapter({
+    provider: 'meta_ads',
+    family: 'meta_reach',
+    specification: directMetaSpecification('meta_reach', { operation: 'update_existing' }),
+  });
+  assert.equal(missingExistingId.readiness.ready, false);
+  assert.equal(missingExistingId.readiness.blockers.some((item) => item.code === 'adapter_existing_campaign_id_required'), true);
+  assert.deepEqual(missingExistingId.operations, []);
+}
+
 function testUpdateExistingAdapterSemantics() {
   const missingId = buildManagedCampaignDryRunAdapter({
     provider: 'google_ads',
@@ -613,6 +1285,21 @@ function testPrivateDestinationsCannotEnterPublishingPlans() {
     assert.equal(plan.readiness.ready, false, `${finalUrl} must block publishing`);
     assert.equal(plan.readiness.blockers.some((item) => item.code === 'final_url_invalid'), true);
   }
+
+  const benignQuery = buildManagedCampaignPublishingPlan({
+    campaign: baseCampaign({ destination_config: { final_url: 'https://example.test/implantes?lang=es' } }),
+    gateEvidence,
+  });
+  assert.equal(benignQuery.readiness.ready, true);
+  assert.match(benignQuery.specification.final_url, /\?lang=es$/);
+
+  const secretQuery = buildManagedCampaignPublishingPlan({
+    campaign: baseCampaign({ destination_config: { final_url: 'https://example.test/implantes?access_token=GOOGLE_URL_SECRET' } }),
+    gateEvidence,
+  });
+  assert.equal(secretQuery.readiness.ready, false);
+  assert.equal(secretQuery.readiness.blockers.some((item) => ['final_url_invalid', 'final_url_required'].includes(item.code)), true);
+  assert.doesNotMatch(JSON.stringify(secretQuery), /GOOGLE_URL_SECRET|access_token/);
 }
 
 function testFutureExecutionGates() {
@@ -670,9 +1357,14 @@ function testNoProviderIntegration() {
       'node:crypto',
       '../lib/safeHttpTarget',
     ]],
+    ['../../services/managedCampaignMetaAdsDryRunAdapter.service.js', [
+      'node:crypto',
+      '../lib/safeHttpTarget',
+    ]],
     ['../../services/managedCampaignProviderAdapterRegistry.service.js', [
       'node:crypto',
       './managedCampaignGoogleAdsDryRunAdapter.service',
+      './managedCampaignMetaAdsDryRunAdapter.service',
     ]],
   ]);
   for (const [relativePath, allowedImports] of modules) {
@@ -723,6 +1415,8 @@ function testAdminDryRunApiContract() {
   assert.match(routeSource, /router\.get\('\/:id\/publishing-plan', controller\.getPublishingPlan\)/);
   assert.match(routeSource, /router\.post\('\/:id\/publishing-dry-run', controller\.createPublishingDryRun\)/);
   assert.match(routeSource, /router\.get\('\/:id\/publishing-audits', controller\.listPublishingAudits\)/);
+  assert.match(routeSource, /Cache-Control['"],\s*['"]no-store/,
+    'Authenticated admin GET/HEAD responses must opt out of browser and intermediary caches');
   assert.doesNotMatch(routeSource, /publishing-execute|\/execute|executePublishing/,
     'No provider execution route may exist in the dry-run phase');
 
@@ -730,12 +1424,16 @@ function testAdminDryRunApiContract() {
   const persistDryRun = sourceSection(controllerSource, 'exports.createPublishingDryRun', 'exports.listPublishingAudits');
   const listAudits = sourceSection(controllerSource, 'exports.listPublishingAudits', 'exports.createCampaign');
   assert.match(readPlan, /assertOperator\(req, res\)/);
+  assert.match(readPlan, /managedCampaignPublishingAccountAuthorization\(row\)/);
+  assert.match(readPlan, /accountAuthorization/);
   assert.doesNotMatch(readPlan, /ManagedCampaignPublishingAudit\.create/,
     'GET publishing-plan must remain read-only');
   assert.match(readPlan, /audit_persisted:\s*false/);
   assert.match(readPlan, /external_mutation_performed:\s*false/);
 
   assert.match(persistDryRun, /assertOperator\(req, res\)/);
+  assert.match(persistDryRun, /managedCampaignPublishingAccountAuthorization\(row\)/);
+  assert.match(persistDryRun, /accountAuthorization/);
   assert.match(persistDryRun, /req\.body\?\.confirm_dry_run !== true/);
   assert.match(persistDryRun, /idempotency_key_required/);
   assert.match(persistDryRun, /expected_plan_hash_required/);
@@ -755,11 +1453,13 @@ function testAdminDryRunApiContract() {
 
 function run() {
   testDeterministicGoogleSearchPlan();
+  testPublishingAccountScopeAuthorization();
   testNoInventedAssetsAndUnsupportedFamily();
   testCommissionNeverEntersProviderBudget();
   testOtherSupportedFamilies();
-  testGoogleDryRunAdapterRegistry();
+  testDryRunAdapterRegistry();
   testDirectAdapterRejectsMalformedEffectivePayloads();
+  testMetaDryRunAdapterSafetyAndValidation();
   testUpdateExistingAdapterSemantics();
   testStructuredValuesCannotMasqueradeAsProviderAssets();
   testPrivateDestinationsCannotEnterPublishingPlans();

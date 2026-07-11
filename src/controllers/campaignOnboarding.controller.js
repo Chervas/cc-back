@@ -33,6 +33,10 @@ const {
 const {
   provisionManagedCampaignsFromStrategy
 } = require('../services/managedCampaignProvisioning.service');
+const {
+  canonicalExternalCampaignIdentity,
+  externalCampaignIdentityKey,
+} = require('../services/externalCampaignAssignmentTargets.service');
 
 const GoogleConnection = db.GoogleConnection;
 const MetaConnection = db.MetaConnection;
@@ -294,13 +298,8 @@ function buildExternalCampaignMetrics(payload) {
   for (const target of targets) {
     const campaigns = Array.isArray(target?.campaigns) ? target.campaigns : [];
     for (const campaign of campaigns) {
-      const provider = String(campaign?.provider || '').trim().toLowerCase();
-      const externalCampaignId = String(campaign?.external_campaign_id || '').trim();
-      if (!externalCampaignId || (provider !== 'google_ads' && provider !== 'meta_ads')) {
-        continue;
-      }
-
-      const key = `${provider}:${externalCampaignId}`;
+      const key = externalCampaignIdentityKey(campaign);
+      if (!key) continue;
       if (uniqueCampaigns.has(key)) {
         continue;
       }
@@ -331,7 +330,7 @@ function hydrateExternalTargetsWithMetrics(rawTargets, metricsIndex) {
   return targets.map((target) => ({
     ...target,
     campaigns: target.campaigns.map((campaign) => {
-      const key = `${campaign.provider}:${campaign.external_campaign_id}`;
+      const key = externalCampaignIdentityKey(campaign);
       const liveMetrics = metricsIndex.get(key);
       if (!liveMetrics) {
         return campaign;
@@ -434,22 +433,20 @@ async function enrichSingleMetaCampaignReference({ scope, campaignRef }) {
   };
 }
 
-async function resolveAnalysisCampaignReference({ strategy, payload, scope, provider, externalCampaignId }) {
+async function resolveAnalysisCampaignReference({ strategy, payload, scope, identity }) {
   const normalizedTargets = Array.isArray(strategy?.external_targets) && strategy.external_targets.length
     ? strategy.external_targets
     : normalizeExternalTargets(payload?.external_targets);
+  const requestedKey = externalCampaignIdentityKey(identity);
   const baseRef = normalizedTargets
     .flatMap((target) => Array.isArray(target?.campaigns) ? target.campaigns : [])
-    .find((campaign) => (
-      String(campaign?.provider || '').trim().toLowerCase() === provider
-      && String(campaign?.external_campaign_id || '').trim() === externalCampaignId
-    ));
+    .find((campaign) => externalCampaignIdentityKey(campaign) === requestedKey);
 
   if (!baseRef) {
     return null;
   }
 
-  if (provider === 'google_ads') {
+  if (identity.provider === 'google_ads') {
     return {
       ...baseRef,
       destination_detection: normalizeExternalCampaignDetection(baseRef.destination_detection || createWebDestinationDetection('google_ads_default', 'medium'))
@@ -482,7 +479,8 @@ function buildExternalCampaignAliasIndex(rawTargets) {
 
   for (const target of targets) {
     for (const campaign of target.campaigns) {
-      const campaignKey = `${campaign.provider}:${campaign.external_campaign_id}`;
+      const campaignKey = externalCampaignIdentityKey(campaign);
+      if (!campaignKey) continue;
       const tokens = new Set([
         normalizeLookupToken(campaign.external_campaign_id),
         normalizeLookupToken(campaign.name)
@@ -608,7 +606,7 @@ function buildTargetSummaries(externalTargets, targetDestinations, leadMetricsIn
       channelConversions += safeNumber(campaign?.metrics?.conversions);
 
       const leadMetrics = leadMetricsIndex instanceof Map
-        ? leadMetricsIndex.get(`${campaign.provider}:${campaign.external_campaign_id}`)
+        ? leadMetricsIndex.get(externalCampaignIdentityKey(campaign))
         : null;
       if (leadMetrics) {
         leads += safeNumber(leadMetrics.leads);
@@ -2199,28 +2197,36 @@ function normalizeExternalCampaignAssignments(rawAssignments) {
   if (!Array.isArray(rawAssignments)) return [];
   return rawAssignments
     .filter((item) => item && typeof item === 'object')
-    .map((item) => ({
-      provider: String(item.provider || '').trim().toLowerCase(),
-      external_campaign_id: String(item.external_campaign_id || '').trim(),
-      account_id: String(item.account_id || '').trim(),
-      account_name: typeof item.account_name === 'string' ? String(item.account_name).trim() || null : null,
-      name: typeof item.name === 'string' ? String(item.name).trim() || null : null,
-      status: typeof item.status === 'string' ? String(item.status).trim() || null : null,
-      metrics: item.metrics && typeof item.metrics === 'object'
-        ? {
-            impressions: safeNumber(item.metrics.impressions),
-            clicks: safeNumber(item.metrics.clicks),
-            spend: safeNumber(item.metrics.spend),
-            conversions: safeNumber(item.metrics.conversions)
-          }
-        : {
-            impressions: 0,
-            clicks: 0,
-            spend: 0,
-            conversions: 0
-          },
-      destination_detection: normalizeExternalCampaignDetection(item.destination_detection)
-    }))
+    .map((item) => {
+      const identity = canonicalExternalCampaignIdentity(item);
+      const provider = String(item.provider || '').trim().toLowerCase();
+      const externalCampaignId = String(item.external_campaign_id ?? item.campaign_id ?? '').trim();
+      const accountId = String(item.account_id ?? item.customer_id ?? '').trim();
+      return {
+        provider: identity?.provider || provider,
+        external_campaign_id: identity?.external_campaign_id || externalCampaignId,
+        campaign_id: identity?.campaign_id || externalCampaignId,
+        account_id: identity?.account_id || accountId,
+        customer_id: identity?.customer_id || accountId,
+        account_name: typeof item.account_name === 'string' ? String(item.account_name).trim() || null : null,
+        name: typeof item.name === 'string' ? String(item.name).trim() || null : null,
+        status: typeof item.status === 'string' ? String(item.status).trim() || null : null,
+        metrics: item.metrics && typeof item.metrics === 'object'
+          ? {
+              impressions: safeNumber(item.metrics.impressions),
+              clicks: safeNumber(item.metrics.clicks),
+              spend: safeNumber(item.metrics.spend),
+              conversions: safeNumber(item.metrics.conversions)
+            }
+          : {
+              impressions: 0,
+              clicks: 0,
+              spend: 0,
+              conversions: 0
+            },
+        destination_detection: normalizeExternalCampaignDetection(item.destination_detection)
+      };
+    })
     .filter((item) => (
       (item.provider === 'google_ads' || item.provider === 'meta_ads')
       && item.external_campaign_id
@@ -3257,24 +3263,20 @@ async function buildMetaCampaignAnalysisRows({ scope, campaignRef, timeframe }) 
 
 function collectExternalCampaignRefs(payload) {
   const refs = {
-    google_ads: { accountIds: new Set(), campaignIds: new Set() },
-    meta_ads: { accountIds: new Set(), campaignIds: new Set() }
+    google_ads: { accountIds: new Set(), campaignIds: new Set(), identities: new Map() },
+    meta_ads: { accountIds: new Set(), campaignIds: new Set(), identities: new Map() }
   };
 
   const targets = Array.isArray(payload?.external_targets) ? payload.external_targets : [];
   for (const target of targets) {
     const campaigns = Array.isArray(target?.campaigns) ? target.campaigns : [];
     for (const campaign of campaigns) {
-      const provider = String(campaign?.provider || '').trim().toLowerCase();
-      const accountId = String(campaign?.account_id || '').trim();
-      const externalCampaignId = String(campaign?.external_campaign_id || '').trim();
-      if ((provider !== 'google_ads' && provider !== 'meta_ads') || !externalCampaignId) {
-        continue;
-      }
-      if (accountId) {
-        refs[provider].accountIds.add(accountId);
-      }
-      refs[provider].campaignIds.add(externalCampaignId);
+      const identity = canonicalExternalCampaignIdentity(campaign);
+      const key = externalCampaignIdentityKey(identity);
+      if (!identity || !key) continue;
+      refs[identity.provider].accountIds.add(identity.account_id);
+      refs[identity.provider].campaignIds.add(identity.campaign_id);
+      refs[identity.provider].identities.set(key, identity);
     }
   }
 
@@ -3295,6 +3297,7 @@ async function loadCurrentExternalCampaignMetricsIndex({ scope, payload, days = 
   if (googleCustomerIds.length && googleCampaignIds.length) {
     const googleRows = await GoogleAdsInsightsDaily.findAll({
       attributes: [
+        'customerId',
         'campaignId',
         [fn('SUM', col('costMicros')), 'costMicros'],
         [fn('SUM', col('conversions')), 'conversions']
@@ -3305,14 +3308,19 @@ async function loadCurrentExternalCampaignMetricsIndex({ scope, payload, days = 
         date: { [Op.between]: [startStr, endStr] },
         ...buildMetricsScopeWhere(scope, { clinicField: 'clinicaId', groupField: 'grupoClinicaId' })
       },
-      group: ['campaignId'],
+      group: ['customerId', 'campaignId'],
       raw: true
     });
 
     for (const row of googleRows) {
-      const campaignId = String(row.campaignId || '').trim();
-      if (!campaignId) continue;
-      result.set(`google_ads:${campaignId}`, {
+      const identity = canonicalExternalCampaignIdentity({
+        provider: 'google_ads',
+        customer_id: row.customerId,
+        campaign_id: row.campaignId,
+      });
+      const key = externalCampaignIdentityKey(identity);
+      if (!key || !refs.google_ads.identities.has(key)) continue;
+      result.set(key, {
         investment: microsToCurrency(row.costMicros),
         conversions: safeNumber(row.conversions)
       });
@@ -3337,6 +3345,7 @@ async function loadCurrentExternalCampaignMetricsIndex({ scope, payload, days = 
 
     const campaignInsightRows = await SocialAdsInsightsDaily.findAll({
       attributes: [
+        'ad_account_id',
         'entity_id',
         [fn('SUM', col('spend')), 'spend']
       ],
@@ -3347,7 +3356,7 @@ async function loadCurrentExternalCampaignMetricsIndex({ scope, payload, days = 
         date: { [Op.between]: [startStr, endStr] },
         ...buildMetricsScopeWhere(scope, { clinicField: 'clinica_id', groupField: 'grupo_clinica_id' })
       },
-      group: ['entity_id'],
+      group: ['ad_account_id', 'entity_id'],
       raw: true
     });
 
@@ -3425,33 +3434,45 @@ async function loadCurrentExternalCampaignMetricsIndex({ scope, payload, days = 
 
     const metaMetrics = new Map();
     for (const row of campaignInsightRows) {
-      const entityId = String(row.entity_id || '').trim();
-      if (!entityId) continue;
-      metaMetrics.set(entityId, {
+      const key = externalCampaignIdentityKey({
+        provider: 'meta_ads',
+        account_id: row.ad_account_id,
+        campaign_id: row.entity_id,
+      });
+      if (!key || !refs.meta_ads.identities.has(key)) continue;
+      metaMetrics.set(key, {
         investment: safeNumber(row.spend),
         conversions: 0
       });
     }
     for (const row of adRolledRows) {
-      const entityId = String(row.entity_id || '').trim();
-      if (!entityId) continue;
-      const current = metaMetrics.get(entityId) || { investment: 0, conversions: 0 };
-      metaMetrics.set(entityId, {
+      const key = externalCampaignIdentityKey({
+        provider: 'meta_ads',
+        account_id: row.ad_account_id,
+        campaign_id: row.entity_id,
+      });
+      if (!key || !refs.meta_ads.identities.has(key)) continue;
+      const current = metaMetrics.get(key) || { investment: 0, conversions: 0 };
+      metaMetrics.set(key, {
         investment: current.investment > 0 ? current.investment : safeNumber(row.spend),
         conversions: current.conversions
       });
     }
     for (const row of adRolledActionRows) {
-      const entityId = String(row.entity_id || '').trim();
-      if (!entityId) continue;
-      const current = metaMetrics.get(entityId) || { investment: 0, conversions: 0 };
-      metaMetrics.set(entityId, {
+      const key = externalCampaignIdentityKey({
+        provider: 'meta_ads',
+        account_id: row.ad_account_id,
+        campaign_id: row.entity_id,
+      });
+      if (!key || !refs.meta_ads.identities.has(key)) continue;
+      const current = metaMetrics.get(key) || { investment: 0, conversions: 0 };
+      metaMetrics.set(key, {
         investment: current.investment,
         conversions: current.conversions + safeNumber(row.conversions)
       });
     }
-    for (const [entityId, metrics] of metaMetrics.entries()) {
-      result.set(`meta_ads:${entityId}`, metrics);
+    for (const [key, metrics] of metaMetrics.entries()) {
+      result.set(key, metrics);
     }
   }
 
@@ -3518,29 +3539,21 @@ async function buildLiveStrategyMetrics(rows, campaign, payload) {
   let liveLeads = 0;
   let liveCrmConversions = 0;
 
-  for (const campaignId of refs.google_ads.campaignIds) {
-    const metrics = currentExternalMetrics.get(`google_ads:${campaignId}`);
+  for (const key of [
+    ...refs.google_ads.identities.keys(),
+    ...refs.meta_ads.identities.keys(),
+  ]) {
+    const metrics = currentExternalMetrics.get(key);
     if (!metrics) continue;
     liveInvestment += safeNumber(metrics.investment);
     liveConversions += safeNumber(metrics.conversions);
   }
 
-  for (const campaignId of refs.meta_ads.campaignIds) {
-    const metrics = currentExternalMetrics.get(`meta_ads:${campaignId}`);
-    if (!metrics) continue;
-    liveInvestment += safeNumber(metrics.investment);
-    liveConversions += safeNumber(metrics.conversions);
-  }
-
-  for (const campaignId of refs.google_ads.campaignIds) {
-    const metrics = currentLeadMetrics.get(`google_ads:${campaignId}`);
-    if (!metrics) continue;
-    liveLeads += safeNumber(metrics.leads);
-    liveCrmConversions += safeNumber(metrics.crm_conversions);
-  }
-
-  for (const campaignId of refs.meta_ads.campaignIds) {
-    const metrics = currentLeadMetrics.get(`meta_ads:${campaignId}`);
+  for (const key of [
+    ...refs.google_ads.identities.keys(),
+    ...refs.meta_ads.identities.keys(),
+  ]) {
+    const metrics = currentLeadMetrics.get(key);
     if (!metrics) continue;
     liveLeads += safeNumber(metrics.leads);
     liveCrmConversions += safeNumber(metrics.crm_conversions);
@@ -3746,12 +3759,8 @@ async function findExternalCampaignAssignmentConflicts(clinicIds, externalTarget
   const requestedKeys = new Set();
   for (const target of normalizeExternalTargets(externalTargets)) {
     for (const campaign of target.campaigns) {
-      const provider = String(campaign?.provider || '').trim().toLowerCase();
-      const externalCampaignId = String(campaign?.external_campaign_id || '').trim();
-      if (!externalCampaignId || (provider !== 'google_ads' && provider !== 'meta_ads')) {
-        continue;
-      }
-      requestedKeys.add(`${provider}:${externalCampaignId}`);
+      const key = externalCampaignIdentityKey(campaign);
+      if (key) requestedKeys.add(key);
     }
   }
 
@@ -3790,9 +3799,9 @@ async function findExternalCampaignAssignmentConflicts(clinicIds, externalTarget
     const rowTargets = normalizeExternalTargets(payload.external_targets);
     for (const target of rowTargets) {
       for (const campaign of target.campaigns) {
-        const provider = String(campaign?.provider || '').trim().toLowerCase();
-        const externalCampaignId = String(campaign?.external_campaign_id || '').trim();
-        const key = `${provider}:${externalCampaignId}`;
+        const identity = canonicalExternalCampaignIdentity(campaign);
+        const key = externalCampaignIdentityKey(identity);
+        if (!identity || !key) continue;
         if (!requestedKeys.has(key) || seen.has(`${requestId}:${key}`)) {
           continue;
         }
@@ -3800,10 +3809,13 @@ async function findExternalCampaignAssignmentConflicts(clinicIds, externalTarget
         conflicts.push({
           request_id: requestId,
           clinica_id: parseInteger(row.clinica_id) || null,
-          campaign_id: parseInteger(row.campaign_id) || null,
+          strategy_campaign_id: parseInteger(row.campaign_id) || null,
           status,
-          provider,
-          external_campaign_id: externalCampaignId,
+          provider: identity.provider,
+          account_id: identity.account_id,
+          customer_id: identity.customer_id,
+          campaign_id: identity.campaign_id,
+          external_campaign_id: identity.external_campaign_id,
           target_kind: target.kind,
           treatment_id: target.treatment_id || null,
           treatment_name: target.treatment_name || null
@@ -5289,11 +5301,17 @@ exports.getMarketingStrategyAnalysisCampaign = asyncHandler(async (req, res) => 
 
   const provider = String(req.query?.provider || '').trim().toLowerCase();
   const externalCampaignId = String(req.query?.external_campaign_id || '').trim();
-  if (!VALID_PROVIDERS.has(provider) || !externalCampaignId) {
+  const requestedIdentity = canonicalExternalCampaignIdentity({
+    provider,
+    account_id: req.query?.account_id,
+    customer_id: req.query?.customer_id,
+    campaign_id: externalCampaignId,
+  });
+  if (!requestedIdentity) {
     return res.status(400).json({
       success: false,
       error: 'validation_error',
-      message: 'provider y external_campaign_id son obligatorios'
+      message: 'provider, account_id/customer_id y external_campaign_id son obligatorios'
     });
   }
 
@@ -5321,8 +5339,7 @@ exports.getMarketingStrategyAnalysisCampaign = asyncHandler(async (req, res) => 
     strategy,
     payload,
     scope,
-    provider,
-    externalCampaignId
+    identity: requestedIdentity,
   });
 
   if (!campaignRef) {
@@ -5333,15 +5350,18 @@ exports.getMarketingStrategyAnalysisCampaign = asyncHandler(async (req, res) => 
     });
   }
 
-  const rowsOut = provider === 'meta_ads'
+  const rowsOut = requestedIdentity.provider === 'meta_ads'
     ? await buildMetaCampaignAnalysisRows({ scope, campaignRef, timeframe })
     : await buildGoogleCampaignAnalysisRows({ scope, campaignRef, timeframe });
 
   return res.json({
     success: true,
     strategy_id: strategy.id,
-    provider,
-    external_campaign_id: externalCampaignId,
+    provider: requestedIdentity.provider,
+    account_id: requestedIdentity.account_id,
+    customer_id: requestedIdentity.customer_id,
+    campaign_id: requestedIdentity.campaign_id,
+    external_campaign_id: requestedIdentity.external_campaign_id,
     timeframe: {
       key: timeframe.key,
       start: formatDate(timeframe.start),
@@ -5447,7 +5467,10 @@ exports.updateMarketingStrategy = asyncHandler(async (req, res) => {
       targetKeys.add(targetKey);
 
       for (const campaign of target.campaigns) {
-        const campaignKey = `${campaign.provider}:${campaign.external_campaign_id}`;
+        const campaignKey = externalCampaignIdentityKey(campaign);
+        if (!campaignKey) {
+          return res.status(400).json({ success: false, error: 'validation_error', message: 'Cada campaña externa debe incluir proveedor, cuenta y campaign_id válidos.' });
+        }
         if (assignedCampaignKeys.has(campaignKey)) {
           return res.status(400).json({ success: false, error: 'validation_error', message: 'La misma campaña externa no puede asignarse a dos targets distintos.' });
         }
@@ -5805,7 +5828,10 @@ exports.createMarketingStrategy = asyncHandler(async (req, res) => {
       targetKeys.add(targetKey);
 
       for (const campaign of target.campaigns) {
-        const campaignKey = `${campaign.provider}:${campaign.external_campaign_id}`;
+        const campaignKey = externalCampaignIdentityKey(campaign);
+        if (!campaignKey) {
+          return res.status(400).json({ success: false, error: 'validation_error', message: 'Cada campaña externa debe incluir proveedor, cuenta y campaign_id válidos.' });
+        }
         if (assignedCampaignKeys.has(campaignKey)) {
           return res.status(400).json({ success: false, error: 'validation_error', message: 'La misma campaña externa no puede asignarse a dos targets distintos.' });
         }

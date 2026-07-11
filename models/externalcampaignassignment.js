@@ -17,6 +17,31 @@ module.exports = (sequelize, DataTypes) => {
           as: 'clinic',
         });
       }
+      if (models.Campaign) {
+        ExternalCampaignAssignment.belongsTo(models.Campaign, {
+          foreignKey: 'strategy_campaign_id',
+          as: 'strategy_campaign',
+        });
+      }
+      if (models.CampaignRequest) {
+        ExternalCampaignAssignment.belongsTo(models.CampaignRequest, {
+          foreignKey: 'campaign_request_id',
+          as: 'target_request',
+        });
+      }
+      if (models.Tratamiento) {
+        ExternalCampaignAssignment.belongsTo(models.Tratamiento, {
+          foreignKey: 'target_treatment_id',
+          targetKey: 'id_tratamiento',
+          as: 'target_treatment',
+        });
+      }
+      if (models.ExternalCampaignAssignmentAudit) {
+        ExternalCampaignAssignment.hasMany(models.ExternalCampaignAssignmentAudit, {
+          foreignKey: 'assignment_id',
+          as: 'audits',
+        });
+      }
     }
   }
 
@@ -36,6 +61,15 @@ module.exports = (sequelize, DataTypes) => {
     archive_reason: DataTypes.STRING(1024),
     archived_by_user_id: DataTypes.INTEGER,
     archived_at: DataTypes.DATE,
+    strategy_campaign_id: DataTypes.INTEGER,
+    campaign_request_id: DataTypes.INTEGER,
+    target_kind: DataTypes.ENUM('generic', 'treatment'),
+    target_treatment_id: DataTypes.INTEGER,
+    target_confidence: DataTypes.DECIMAL(5, 4),
+    target_explanation: DataTypes.STRING(1024),
+    target_updated_by_user_id: DataTypes.INTEGER,
+    target_updated_at: DataTypes.DATE,
+    version: { type: DataTypes.INTEGER.UNSIGNED, allowNull: false, defaultValue: 1 },
     approved_by_user_id: DataTypes.INTEGER,
     approved_at: DataTypes.DATE,
   }, {

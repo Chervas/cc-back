@@ -9,10 +9,12 @@ const { publicHttpUrl } = require('../lib/safeHttpTarget');
 const {
   REQUIRED_GATE_EVIDENCE,
   buildManagedCampaignPublishingPlan,
+  managedCampaignPublishingAccountScopeInput,
 } = require('../services/managedCampaignPublishing.service');
 const {
   assignmentBelongsToGroup,
   findAssociationAccountScope,
+  findManagedCampaignAssociationAccountScope,
   listAssociationOptions,
   saveAssignmentWithinScope,
   upsertInventoryWithinScope,
@@ -26,11 +28,25 @@ const {
   requireActiveCampaignOperator,
   updateManagedCampaignCoordination,
 } = require('../services/managedCampaignCoordination.service');
+const {
+  AUDIT_EVENT_TYPES,
+  appendAssignmentAudit,
+  assignmentAuditDto,
+  assignmentDto,
+  buildChanges: buildAssignmentChanges,
+  clearExternalAssignmentTarget,
+  listValidStrategyTargetsForClinic,
+  matchingIssueForAssignment,
+  updateExternalAssignmentTarget,
+} = require('../services/externalCampaignAssignmentTargets.service');
 
 const {
   Clinica,
+  Campaign,
+  CampaignRequest,
   ExternalCampaignInventory,
   ExternalCampaignAssignment,
+  ExternalCampaignAssignmentAudit,
   GoogleAdsInsightsDaily,
   ManagedCampaign,
   ManagedCampaignOperationAudit,
@@ -40,6 +56,7 @@ const {
   ManagedCampaignBankTransaction,
   ManagedCampaignReconciliationMatch,
   ManagedCampaignPublishingAudit,
+  Tratamiento,
   Usuario,
 } = db;
 
@@ -51,6 +68,12 @@ const PROVIDERS = new Set(['google_ads', 'meta_ads']);
 const FAMILIES = new Set(['google_search', 'google_pmax', 'google_smart_observe', 'meta_reach', 'meta_instant_form']);
 const CLIENT_PROPOSAL_FAMILIES = new Set(['google_search', 'google_pmax', 'meta_reach', 'meta_instant_form']);
 const MATCH_KINDS = new Set(['exact', 'alias', 'fuzzy', 'manual']);
+const ASSIGNMENT_REVIEW_FIELDS = Object.freeze([
+  'inventory_id', 'provider', 'customer_id', 'campaign_id',
+  'campaign_name_snapshot', 'grupo_clinica_id', 'clinica_id',
+  'match_kind', 'match_confidence', 'match_explanation', 'status',
+  'archive_reason', 'archived_by_user_id', 'archived_at',
+]);
 const STOP_WORDS = new Set(['propdental', 'clinica', 'clinicas', 'dental', 'dentales', 'centre', 'centro']);
 const STATUS_TRANSITIONS = {
   draft: new Set(['pending_client_review', 'pending_admin_review', 'blocked', 'cancelled']),
@@ -260,6 +283,30 @@ function assignmentReactivationAuditReset() {
   };
 }
 
+function matchingConfirmationIsNoop(currentValue, nextValue) {
+  const current = safeObject(currentValue);
+  const next = safeObject(nextValue);
+  const numericFields = [
+    'inventory_id', 'grupo_clinica_id', 'clinica_id', 'approved_by_user_id',
+  ];
+  const textFields = [
+    'provider', 'customer_id', 'campaign_id', 'campaign_name_snapshot',
+    'match_kind', 'match_explanation', 'status', 'archive_reason',
+  ];
+  if (numericFields.some((field) => Number(current[field] || 0) !== Number(next[field] || 0))) return false;
+  if (textFields.some((field) => String(current[field] || '') !== String(next[field] || ''))) return false;
+  const currentConfidence = current.match_confidence === null || current.match_confidence === undefined
+    ? null
+    : Number(current.match_confidence);
+  const nextConfidence = next.match_confidence === null || next.match_confidence === undefined
+    ? null
+    : Number(next.match_confidence);
+  if (currentConfidence !== nextConfidence) return false;
+  return !current.archived_at && !next.archived_at
+    && !positiveInt(current.archived_by_user_id)
+    && !positiveInt(next.archived_by_user_id);
+}
+
 async function archiveMatchingAssignment({
   provider,
   customerId,
@@ -268,6 +315,7 @@ async function archiveMatchingAssignment({
   reason,
   userId,
   assignmentModel = ExternalCampaignAssignment,
+  auditModel = ExternalCampaignAssignmentAudit,
   clinicModel = Clinica,
   accountScopeResolver = findAssociationAccountScope,
   sequelize = db.sequelize,
@@ -326,12 +374,32 @@ async function archiveMatchingAssignment({
       result = { ...result, assignment, idempotent: true };
       return;
     }
-    await assignment.update({
+    const before = typeof assignment.get === 'function'
+      ? assignment.get({ plain: true })
+      : { ...assignment };
+    const fromVersion = Math.max(1, Number(before.version) || 1);
+    const archiveValues = {
       status: 'archived',
       archive_reason: reason,
       archived_by_user_id: userId,
       archived_at: now(),
-    }, { transaction });
+      version: fromVersion + 1,
+    };
+    await assignment.update(archiveValues, { transaction });
+    const after = typeof assignment.get === 'function'
+      ? assignment.get({ plain: true })
+      : assignment;
+    await appendAssignmentAudit({
+      auditModel,
+      assignmentId: after.id,
+      eventType: AUDIT_EVENT_TYPES.ARCHIVED,
+      actorUserId: userId,
+      fromVersion,
+      toVersion: fromVersion + 1,
+      reason,
+      changes: buildAssignmentChanges(before, after, ASSIGNMENT_REVIEW_FIELDS),
+      transaction,
+    });
     result = { ...result, assignment };
   });
   return result;
@@ -360,6 +428,15 @@ async function verifiedPrepaymentForCampaign(row) {
   return hasVerifiedPrepaymentEntries(entries);
 }
 
+async function managedCampaignPublishingAccountAuthorization(row) {
+  const scopeInput = managedCampaignPublishingAccountScopeInput(row);
+  if (!scopeInput.provider || !scopeInput.accountId
+    || (!scopeInput.groupId && !scopeInput.clinicId)) {
+    return null;
+  }
+  return findManagedCampaignAssociationAccountScope(scopeInput);
+}
+
 async function managedLaunchGateReasons(row, userId) {
   const funding = await ManagedCampaignFundingAccount.findOne({
     where: { managed_campaign_id: row.id },
@@ -375,6 +452,7 @@ async function managedLaunchGateReasons(row, userId) {
     || tracking.conversion_actions_ready === true;
   const clientApproved = review.client_approval_required !== true || !!review.client_approved_at;
   const plain = typeof row?.get === 'function' ? row.get({ plain: true }) : row;
+  const accountAuthorization = await managedCampaignPublishingAccountAuthorization(row);
   const plan = buildManagedCampaignPublishingPlan({
     campaign: {
       ...plain,
@@ -390,6 +468,7 @@ async function managedLaunchGateReasons(row, userId) {
       tracking_verified: trackingReady,
       creative_rights_confirmed: creative.rights_confirmed === true,
     },
+    accountAuthorization,
   });
   return plan.readiness.blockers.map((item) => item.message);
 }
@@ -702,7 +781,8 @@ exports.getPublishingPlan = asyncHandler(async (req, res) => {
   if (!row) return res.status(404).json({ success: false, error: 'not_found' });
   const prepaymentVerified = await verifiedPrepaymentForCampaign(row);
   const gateEvidence = publishingGateEvidence(req.query, prepaymentVerified);
-  const plan = buildManagedCampaignPublishingPlan({ campaign: row, gateEvidence });
+  const accountAuthorization = await managedCampaignPublishingAccountAuthorization(row);
+  const plan = buildManagedCampaignPublishingPlan({ campaign: row, gateEvidence, accountAuthorization });
   res.set('Cache-Control', 'no-store');
   return res.json({
     success: true,
@@ -741,7 +821,8 @@ exports.createPublishingDryRun = asyncHandler(async (req, res) => {
 
   const prepaymentVerified = await verifiedPrepaymentForCampaign(row);
   const gateEvidence = publishingGateEvidence(req.body, prepaymentVerified);
-  const plan = buildManagedCampaignPublishingPlan({ campaign: row, gateEvidence });
+  const accountAuthorization = await managedCampaignPublishingAccountAuthorization(row);
+  const plan = buildManagedCampaignPublishingPlan({ campaign: row, gateEvidence, accountAuthorization });
   if (plan.plan_hash !== expectedPlanHash) {
     return res.status(409).json({
       success: false,
@@ -1569,6 +1650,7 @@ exports.confirmMatching = asyncHandler(async (req, res) => {
           throw error;
         }
         const kind = MATCH_KINDS.has(item?.match_kind) ? item.match_kind : 'manual';
+        const reviewedAt = new Date();
         const assignmentValues = {
           inventory_id: source.id || null,
           provider,
@@ -1583,13 +1665,51 @@ exports.confirmMatching = asyncHandler(async (req, res) => {
           status: 'active',
           ...assignmentReactivationAuditReset(),
           approved_by_user_id: userId,
-          approved_at: new Date(),
+          approved_at: reviewedAt,
         };
-        const row = await saveAssignmentWithinScope({
+        const savedResult = await saveAssignmentWithinScope({
           assignmentModel: ExternalCampaignAssignment,
           values: assignmentValues,
           groupId,
           groupClinicIds,
+          transaction,
+          returnMetadata: true,
+          prepareValues: (current, baseValues) => {
+            const currentValues = current && typeof current.get === 'function'
+              ? current.get({ plain: true })
+              : current;
+            if (currentValues?.campaign_request_id
+              && Number(currentValues.clinica_id) !== Number(baseValues.clinica_id)) {
+              const error = new Error('Desvincula primero el target de estrategia antes de mover la campaña a otra clínica.');
+              error.httpStatus = 409;
+              error.code = 'matching_target_clear_required';
+              throw error;
+            }
+            const version = currentValues ? Math.max(1, Number(currentValues.version) || 1) + 1 : 1;
+            return { ...baseValues, version };
+          },
+          isNoop: matchingConfirmationIsNoop,
+        });
+        const row = savedResult.row;
+        if (savedResult.changed === false) {
+          saved.push(row);
+          continue;
+        }
+        const previous = savedResult.previous;
+        const after = typeof row?.get === 'function' ? row.get({ plain: true }) : row;
+        const fromVersion = previous ? Math.max(1, Number(previous.version) || 1) : 0;
+        const toVersion = Math.max(1, Number(after?.version) || 1);
+        const eventType = previous?.status === 'archived'
+          ? AUDIT_EVENT_TYPES.REACTIVATED
+          : AUDIT_EVENT_TYPES.CLINIC_ASSIGNED;
+        await appendAssignmentAudit({
+          auditModel: ExternalCampaignAssignmentAudit,
+          assignmentId: after.id,
+          eventType,
+          actorUserId: userId,
+          fromVersion,
+          toVersion,
+          changes: buildAssignmentChanges(previous || {}, after, ASSIGNMENT_REVIEW_FIELDS),
           transaction,
         });
         saved.push(row);
@@ -1672,6 +1792,221 @@ exports.archiveMatching = asyncHandler(async (req, res) => {
     status: 'archived',
     idempotent: result.idempotent,
     archived_at: result.assignment.archived_at || null,
+  });
+});
+
+function matchingAssignmentId(value) {
+  const normalized = String(value || '').trim();
+  return /^\d{1,20}$/.test(normalized) ? normalized : null;
+}
+
+async function loadMatchingReadScope(res, source = {}) {
+  const groupId = positiveInt(source.group_id);
+  const provider = cleanString(source.provider, 32);
+  const customerId = cleanCustomerId(source.customer_id);
+  if (!groupId || !PROVIDERS.has(provider) || !customerId) {
+    res.status(400).json({ success: false, error: 'group_provider_customer_required' });
+    return null;
+  }
+  if (!(await requireAssociationAccountScope(res, { groupId, provider, customerId }))) return null;
+  const clinics = await Clinica.findAll({
+    where: { grupoClinicaId: groupId },
+    attributes: ['id_clinica', 'nombre_clinica', 'grupoClinicaId', 'estado_clinica'],
+    raw: true,
+  });
+  return {
+    groupId,
+    provider,
+    customerId,
+    clinics,
+    groupClinicIds: new Set(clinics.map((clinic) => Number(clinic.id_clinica))),
+  };
+}
+
+exports.listMatchingIssues = asyncHandler(async (req, res) => {
+  if (!assertOperator(req, res)) return;
+  const scope = await loadMatchingReadScope(res, req.query);
+  if (!scope) return;
+  const assignments = await ExternalCampaignAssignment.findAll({
+    where: {
+      provider: scope.provider,
+      customer_id: scope.customerId,
+      status: 'active',
+    },
+    attributes: [
+      'id', 'inventory_id', 'provider', 'customer_id', 'campaign_id',
+      'campaign_name_snapshot', 'grupo_clinica_id', 'clinica_id',
+      'match_kind', 'match_confidence', 'match_explanation', 'status',
+      'archive_reason', 'archived_at', 'strategy_campaign_id', 'campaign_request_id',
+      'target_kind', 'target_treatment_id', 'target_confidence',
+      'target_explanation', 'target_updated_by_user_id', 'target_updated_at', 'version',
+    ],
+    raw: true,
+    order: [['updated_at', 'DESC'], ['id', 'DESC']],
+  });
+  const scopedAssignments = assignments.filter((assignment) => (
+    assignmentBelongsToGroup(assignment, scope.groupId, scope.groupClinicIds)
+  ));
+  const clinicById = new Map(scope.clinics.map((clinic) => [Number(clinic.id_clinica), clinic]));
+  const catalogByClinic = new Map();
+  for (const clinicId of Array.from(new Set(scopedAssignments.map((row) => Number(row.clinica_id))))) {
+    const clinic = clinicById.get(clinicId);
+    if (!clinic || !isActiveClinic(clinic) || /\btest\b/i.test(String(clinic.nombre_clinica || ''))) {
+      catalogByClinic.set(clinicId, []);
+      continue;
+    }
+    catalogByClinic.set(clinicId, await listValidStrategyTargetsForClinic({
+      clinic,
+      requestModel: CampaignRequest,
+      campaignModel: Campaign,
+      treatmentModel: Tratamiento,
+    }));
+  }
+  const reviewedAssignments = scopedAssignments.map((assignment) => {
+    const targetOptions = catalogByClinic.get(Number(assignment.clinica_id)) || [];
+    const issue = matchingIssueForAssignment(assignment, targetOptions);
+    return {
+      assignment: assignmentDto(assignment),
+      issue: issue ? { code: issue.code, message: issue.message } : null,
+      target_options: targetOptions,
+    };
+  });
+  const issues = reviewedAssignments
+    .filter((item) => !!item.issue)
+    .map((item) => ({ ...item.issue, assignment: item.assignment, target_options: item.target_options }));
+  res.set('Cache-Control', 'no-store');
+  return res.json({
+    success: true,
+    scope: {
+      group_id: scope.groupId,
+      provider: scope.provider,
+      account_id: scope.customerId,
+      customer_id: scope.customerId,
+    },
+    summary: {
+      active_assignments: scopedAssignments.length,
+      issues: issues.length,
+      reviewed_targets: scopedAssignments.length - issues.length,
+    },
+    assignments: reviewedAssignments,
+    items: issues,
+  });
+});
+
+exports.updateMatchingTarget = asyncHandler(async (req, res) => {
+  const userId = assertOperator(req, res);
+  if (!userId) return;
+  const assignmentId = matchingAssignmentId(req.params.id);
+  if (!assignmentId) return res.status(400).json({ success: false, error: 'matching_assignment_id_invalid' });
+  try {
+    const result = await updateExternalAssignmentTarget({
+      assignmentId,
+      actorUserId: userId,
+      input: req.body,
+      sequelize: db.sequelize,
+      assignmentModel: ExternalCampaignAssignment,
+      auditModel: ExternalCampaignAssignmentAudit,
+      inventoryModel: ExternalCampaignInventory,
+      clinicModel: Clinica,
+      requestModel: CampaignRequest,
+      campaignModel: Campaign,
+      treatmentModel: Tratamiento,
+      accountScopeResolver: findAssociationAccountScope,
+    });
+    res.set('Cache-Control', 'no-store');
+    return res.json({
+      success: true,
+      changed: result.changed,
+      version: result.version,
+      assignment: assignmentDto(result.assignment),
+      audit: result.audit ? assignmentAuditDto(result.audit) : null,
+    });
+  } catch (error) {
+    return res.status(error.httpStatus || 500).json({
+      success: false,
+      error: error.code || 'matching_target_update_failed',
+      message: error.message || 'No se pudo actualizar el target.',
+      ...(error.currentVersion ? { current_version: error.currentVersion } : {}),
+    });
+  }
+});
+
+exports.clearMatchingTarget = asyncHandler(async (req, res) => {
+  const userId = assertOperator(req, res);
+  if (!userId) return;
+  const assignmentId = matchingAssignmentId(req.params.id);
+  if (!assignmentId) return res.status(400).json({ success: false, error: 'matching_assignment_id_invalid' });
+  try {
+    const result = await clearExternalAssignmentTarget({
+      assignmentId,
+      actorUserId: userId,
+      input: req.body,
+      sequelize: db.sequelize,
+      assignmentModel: ExternalCampaignAssignment,
+      auditModel: ExternalCampaignAssignmentAudit,
+      clinicModel: Clinica,
+      requestModel: CampaignRequest,
+      accountScopeResolver: findAssociationAccountScope,
+    });
+    res.set('Cache-Control', 'no-store');
+    return res.json({
+      success: true,
+      changed: result.changed,
+      version: result.version,
+      assignment: assignmentDto(result.assignment),
+      audit: result.audit ? assignmentAuditDto(result.audit) : null,
+    });
+  } catch (error) {
+    return res.status(error.httpStatus || 500).json({
+      success: false,
+      error: error.code || 'matching_target_clear_failed',
+      message: error.message || 'No se pudo limpiar el target.',
+      ...(error.currentVersion ? { current_version: error.currentVersion } : {}),
+    });
+  }
+});
+
+exports.listMatchingAssignmentAudits = asyncHandler(async (req, res) => {
+  if (!assertOperator(req, res)) return;
+  const assignmentId = matchingAssignmentId(req.params.id);
+  if (!assignmentId) return res.status(400).json({ success: false, error: 'matching_assignment_id_invalid' });
+  const scope = await loadMatchingReadScope(res, req.query);
+  if (!scope) return;
+  const assignment = await ExternalCampaignAssignment.findByPk(assignmentId, {
+    attributes: [
+      'id', 'provider', 'customer_id', 'campaign_id', 'campaign_name_snapshot',
+      'grupo_clinica_id', 'clinica_id', 'match_kind', 'match_confidence',
+      'match_explanation', 'status', 'archive_reason', 'archived_at',
+      'strategy_campaign_id', 'campaign_request_id', 'target_kind',
+      'target_treatment_id', 'target_confidence', 'target_explanation',
+      'target_updated_by_user_id', 'target_updated_at', 'version',
+    ],
+    raw: true,
+  });
+  if (!assignment) return res.status(404).json({ success: false, error: 'matching_assignment_not_found' });
+  if (assignment.provider !== scope.provider
+    || cleanCustomerId(assignment.customer_id) !== scope.customerId
+    || !assignmentBelongsToGroup(assignment, scope.groupId, scope.groupClinicIds)) {
+    return res.status(409).json({ success: false, error: 'matching_assignment_scope_conflict' });
+  }
+  const requestedLimit = Number.parseInt(String(req.query?.limit || '50'), 10);
+  const limit = Math.min(100, Math.max(1, Number.isInteger(requestedLimit) ? requestedLimit : 50));
+  const audits = await ExternalCampaignAssignmentAudit.findAll({
+    where: { assignment_id: assignmentId },
+    include: [{
+      model: Usuario,
+      as: 'actor',
+      attributes: ['id_usuario', 'nombre', 'apellidos'],
+      required: false,
+    }],
+    order: [['created_at', 'DESC'], ['id', 'DESC']],
+    limit,
+  });
+  res.set('Cache-Control', 'no-store');
+  return res.json({
+    success: true,
+    assignment: assignmentDto(assignment),
+    items: audits.map(assignmentAuditDto),
   });
 });
 

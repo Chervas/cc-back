@@ -3387,6 +3387,23 @@ La asociación asistida no acepta IDs de cuenta escritos a ciegas como autoridad
 
 `GET /matching/proposals`, `POST /matching/confirm`, `POST /matching/archive` y ambos endpoints `/inventory` vuelven a comprobar en servidor `group_id + provider + customer_id` contra ese scope activo; el selector frontend no constituye autorización. Archivar exige `group_id`. Confirmar reconsulta y bloquea dentro de la misma transacción clínicas, mapeos y autorizaciones, y guarda mediante `create` o actualización de una fila ya validada, nunca mediante un `upsert` que pudiera moverla por carrera. La pertenencia histórica usa todas las clínicas que siguen dentro del grupo; la selección de destino usa solo activas y no-test. Así una decisión legacy de una clínica desactivada puede reasignarse o archivarse, pero esa clínica no reaparece como destino. Si una decisión previa pertenece a otro grupo devuelve `matching_assignment_scope_conflict` sin escribir. El archivo revalida y bloquea en su propia transacción clínicas, autorización y decisión externa global antes del tombstone. El `POST /inventory` revalida una sola vez bajo los mismos locks y agrupa todos los upserts en esa transacción: una revocación aborta el lote antes de su primera escritura. El catálogo y estos guards no llaman a Google/Meta ni refrescan credenciales.
 
+La identidad externa canónica es `provider + account_id + customer_id + campaign_id` (los dos campos de cuenta se normalizan al mismo ID autorizado y `external_campaign_id` es el alias de presentación de `campaign_id`). Métricas, deduplicación, conflictos de estrategia y análisis usan esa identidad completa: el mismo `campaign_id` en dos cuentas no colisiona ni mezcla gasto. El análisis exige también `account_id` o `customer_id`; no resuelve una campaña solo por proveedor e ID.
+
+La revisión de target se opera sin inferencias por nombre:
+
+| Método | Ruta | Contrato |
+|---|---|---|
+| GET | `/matching/issues` | Asociaciones activas, issue honesto y catálogo allowlisted de estrategias/targets válidos para la misma clínica. |
+| PATCH | `/matching/assignments/:id/target` | Asigna o cambia target con `expected_version`, estrategia y request, confianza y explicación. |
+| DELETE | `/matching/assignments/:id/target` | Limpia el target con CAS y motivo obligatorio. |
+| GET | `/matching/assignments/:id/audits` | Historial append-only de clínica, reactivación, archivo y cambios de target. |
+
+Un target válido apunta a un `CampaignRequest` de la misma clínica cuya estrategia está `active`, tiene `objective_id=new_patients` y `mode_snapshot=connect_only`; la campaña asociada debe estar activa y no gestionada. `generic` solo es válido para una estrategia genérica. Un target `treatment` debe figurar en los tratamientos de esa estrategia y seguir activo, visible y dentro del scope de la clínica. PATCH/DELETE bloquean grupo, autorización, asociación, requests y catálogo dentro de la transacción, aplican CAS por `version` y sincronizan `CampaignRequest.solicitud.external_targets` sin borrar targets que queden con `campaigns: []`. La identidad canónica evita duplicarla en dos targets. Una asociación con target no se puede mover de clínica hasta limpiarlo explícitamente.
+
+`ExternalCampaignAssignmentAudits` no admite update/destroy. Registra `clinic_assigned`, `reactivated`, `archived`, `target_assigned`, `target_changed` y `target_cleared`, con actor, versiones y cambios. La migración crea además un punto inicial `clinic_assigned_backfill`/`archived_backfill` para cada decisión preexistente; si no existe usuario histórico, declara actor `system` en vez de inventarlo. El backfill no asigna targets. Reactivar limpia el tombstone de la fila actual, pero conserva los eventos históricos.
+
+El tombstone automático continúa limitado deliberadamente a Google Ads. Su sync real consulta asociaciones activas y archivadas antes de fuzzy/default. El sync Meta todavía no consume `ExternalCampaignAssignment`; por eso `POST /matching/archive` devuelve `archive_provider_not_supported` para Meta y no promete una protección que no existe.
+
 La coordinación interna usa exclusivamente estas rutas:
 
 | Método | Ruta | Contrato |
@@ -3399,7 +3416,7 @@ El PATCH bloquea `completed/cancelled`, pero permite coordinar una campaña `act
 
 Cada cambio real incrementa una sola versión y crea en la misma transacción una fila `coordination_updated` con actor, versión anterior/nueva y únicamente `{before, after}` de los campos modificados. Si falla el audit, también se revierte la campaña. El modelo de auditoría rechaza update/destroy y la API no expone rutas para mutarlo. `POST /` y el `PATCH /:id` genérico rechazan campos de coordinación para que no exista una vía sin CAS, validación de responsable y auditoría. `review_config.client_next_action` sigue siendo exclusivamente la acción visible para el cliente; `next_action` y `operational_blocker` son internos y no aparecen en el DTO cliente.
 
-Tablas reales: `ManagedCampaigns`, `ManagedCampaignFundingAccounts`, `ManagedCampaignLedgerEntries`, `ManagedCampaignSpendSnapshots`, `ManagedCampaignBankTransactions`, `ManagedCampaignReconciliationMatches`, `ManagedCampaignPublishingAudits`, `ManagedCampaignOperationAudits`, `ExternalCampaignInventories` y `ExternalCampaignAssignments`.
+Tablas reales: `ManagedCampaigns`, `ManagedCampaignFundingAccounts`, `ManagedCampaignLedgerEntries`, `ManagedCampaignSpendSnapshots`, `ManagedCampaignBankTransactions`, `ManagedCampaignReconciliationMatches`, `ManagedCampaignPublishingAudits`, `ManagedCampaignOperationAudits`, `ExternalCampaignInventories`, `ExternalCampaignAssignments` y `ExternalCampaignAssignmentAudits`.
 
 Límites que no deben ocultarse:
 

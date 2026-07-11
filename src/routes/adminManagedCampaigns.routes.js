@@ -5,6 +5,12 @@ const authMiddleware = require('./auth.middleware');
 const controller = require('../controllers/adminManagedCampaigns.controller');
 
 const router = express.Router();
+router.use((req, res, next) => {
+  if (req.method === 'GET' || req.method === 'HEAD') {
+    res.set('Cache-Control', 'no-store');
+  }
+  next();
+});
 router.use(authMiddleware);
 
 router.get('/access', controller.getAccess);
@@ -15,6 +21,10 @@ router.get('/matching/options', controller.getMatchingOptions);
 router.get('/matching/proposals', controller.listMatchingProposals);
 router.post('/matching/confirm', controller.confirmMatching);
 router.post('/matching/archive', controller.archiveMatching);
+router.get('/matching/issues', controller.listMatchingIssues);
+router.patch('/matching/assignments/:id/target', controller.updateMatchingTarget);
+router.delete('/matching/assignments/:id/target', controller.clearMatchingTarget);
+router.get('/matching/assignments/:id/audits', controller.listMatchingAssignmentAudits);
 router.get('/inventory', controller.listExternalInventory);
 router.post('/inventory', controller.upsertExternalInventory);
 router.get('/bank-transactions', controller.listBankTransactions);

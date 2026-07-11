@@ -5,11 +5,16 @@ const {
   buildGoogleAdsDryRunAdapter,
   canonicalStringify,
 } = require('./managedCampaignGoogleAdsDryRunAdapter.service');
+const {
+  buildMetaAdsDryRunAdapter,
+} = require('./managedCampaignMetaAdsDryRunAdapter.service');
 
 const REGISTRY_SCHEMA_VERSION = 'managed-provider-dry-run-adapter-registry/v1';
 const registry = new Map([
   ['google_ads:google_search', buildGoogleAdsDryRunAdapter],
   ['google_ads:google_pmax', buildGoogleAdsDryRunAdapter],
+  ['meta_ads:meta_reach', buildMetaAdsDryRunAdapter],
+  ['meta_ads:meta_instant_form', buildMetaAdsDryRunAdapter],
 ]);
 
 function clean(value, max = 128) {
