@@ -14,6 +14,8 @@ async function testArchiveAuditAndIdempotency() {
   const updates = [];
   const row = {
     status: 'active',
+    grupo_clinica_id: null,
+    clinica_id: 58,
     archive_reason: null,
     archived_by_user_id: null,
     archived_at: null,
@@ -24,6 +26,23 @@ async function testArchiveAuditAndIdempotency() {
   };
   const transaction = { LOCK: { UPDATE: 'UPDATE' } };
   const sequelize = { transaction: async (callback) => callback(transaction) };
+  const clinicModel = {
+    async findAll(options) {
+      assert.equal(options.transaction, transaction);
+      assert.equal(options.lock, 'UPDATE');
+      assert.deepEqual(options.where, { grupoClinicaId: 5 });
+      return [
+        { id_clinica: 58, nombre_clinica: 'Sede legacy desactivada', estado_clinica: false },
+        { id_clinica: 36, nombre_clinica: 'Sede activa', estado_clinica: true },
+      ];
+    },
+  };
+  const accountScopeResolver = async (options) => {
+    assert.equal(options.groupId, 5);
+    assert.equal(options.transaction, transaction);
+    assert.equal(options.lock, true);
+    return { account: { account_id: options.accountId } };
+  };
   const assignmentModel = {
     async findOne(options) {
       assert.deepEqual(options.where, {
@@ -41,13 +60,18 @@ async function testArchiveAuditAndIdempotency() {
     provider: 'google_ads',
     customerId: '1851215478',
     campaignId: '21800484692',
+    groupId: 5,
     reason: 'La campaña corresponde a otra sede',
     userId: 1,
     assignmentModel,
+    clinicModel,
+    accountScopeResolver,
     sequelize,
     now: () => archivedAt,
   });
   assert.equal(first.notFound, false);
+  assert.equal(first.scopeConflict, false,
+    'A legacy assignment to an inactive clinic that still belongs to the group must remain archivable');
   assert.equal(first.idempotent, false);
   assert.equal(updates.length, 1);
   assert.deepEqual(updates[0], {
@@ -61,9 +85,12 @@ async function testArchiveAuditAndIdempotency() {
     provider: 'google_ads',
     customerId: '1851215478',
     campaignId: '21800484692',
+    groupId: 5,
     reason: 'Reintento que no debe sobrescribir la auditoría original',
     userId: 2,
     assignmentModel,
+    clinicModel,
+    accountScopeResolver,
     sequelize,
   });
   assert.equal(second.idempotent, true);
@@ -73,12 +100,64 @@ async function testArchiveAuditAndIdempotency() {
     provider: 'meta_ads',
     customerId: '999',
     campaignId: 'missing',
+    groupId: 5,
     reason: 'No existe',
     userId: 1,
     assignmentModel: { findOne: async () => null },
+    clinicModel,
+    accountScopeResolver,
     sequelize,
   });
   assert.equal(missing.notFound, true);
+
+  const crossGroup = await adminController.__test.archiveMatchingAssignment({
+    provider: 'google_ads',
+    customerId: '1851215478',
+    campaignId: 'cross-group',
+    groupId: 5,
+    reason: 'No debe archivarse',
+    userId: 1,
+    assignmentModel: {
+      findOne: async () => ({
+        status: 'active',
+        grupo_clinica_id: 28,
+        clinica_id: 74,
+        async update() {
+          throw new Error('A cross-group assignment must not be updated');
+        },
+      }),
+    },
+    clinicModel,
+    accountScopeResolver,
+    sequelize,
+  });
+  assert.equal(crossGroup.scopeConflict, true);
+  assert.equal(crossGroup.assignment, null);
+
+  let forbiddenAssignmentReads = 0;
+  const revokedDuringArchive = await adminController.__test.archiveMatchingAssignment({
+    provider: 'google_ads',
+    customerId: '1851215478',
+    campaignId: 'revoked-during-archive',
+    groupId: 5,
+    reason: 'No debe escribirse',
+    userId: 1,
+    assignmentModel: {
+      findOne: async () => {
+        forbiddenAssignmentReads += 1;
+        return row;
+      },
+    },
+    clinicModel,
+    accountScopeResolver: async (options) => {
+      assert.equal(options.transaction, transaction);
+      assert.equal(options.lock, true);
+      return null;
+    },
+    sequelize,
+  });
+  assert.equal(revokedDuringArchive.accountScopeForbidden, true);
+  assert.equal(forbiddenAssignmentReads, 0, 'Revoked scope must abort before reading or mutating the assignment');
 }
 
 async function testArchivedAssignmentWinsOverFuzzyAndDefault() {

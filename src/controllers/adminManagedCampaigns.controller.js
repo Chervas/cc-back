@@ -10,6 +10,13 @@ const {
   REQUIRED_GATE_EVIDENCE,
   buildManagedCampaignPublishingPlan,
 } = require('../services/managedCampaignPublishing.service');
+const {
+  assignmentBelongsToGroup,
+  findAssociationAccountScope,
+  listAssociationOptions,
+  saveAssignmentWithinScope,
+  upsertInventoryWithinScope,
+} = require('../services/managedCampaignAssociationScopes.service');
 
 const {
   Clinica,
@@ -65,6 +72,27 @@ function assertOperator(req, res) {
   return userId;
 }
 
+async function requireAssociationAccountScope(res, {
+  groupId,
+  provider,
+  customerId,
+  transaction = null,
+} = {}) {
+  const scope = await findAssociationAccountScope({
+    groupId,
+    provider,
+    accountId: customerId,
+    transaction,
+  });
+  if (scope) return scope;
+  res.status(403).json({
+    success: false,
+    error: 'matching_account_scope_forbidden',
+    message: 'La cuenta publicitaria no está autorizada y activa para el grupo indicado.',
+  });
+  return null;
+}
+
 exports.getAccess = asyncHandler(async (req, res) => {
   const userId = Number.parseInt(String(req.userData?.userId || ''), 10);
   res.set('Cache-Control', 'no-store');
@@ -88,6 +116,10 @@ function cleanCustomerId(value) {
 function positiveInt(value) {
   const parsed = Number.parseInt(String(value ?? ''), 10);
   return Number.isInteger(parsed) && parsed > 0 ? parsed : null;
+}
+
+function isActiveClinic(row) {
+  return [true, 1, '1'].includes(row?.estado_clinica);
 }
 
 function money(value) {
@@ -178,14 +210,47 @@ async function archiveMatchingAssignment({
   provider,
   customerId,
   campaignId,
+  groupId,
   reason,
   userId,
   assignmentModel = ExternalCampaignAssignment,
+  clinicModel = Clinica,
+  accountScopeResolver = findAssociationAccountScope,
   sequelize = db.sequelize,
   now = () => new Date(),
 }) {
-  let result = { assignment: null, idempotent: false, notFound: false };
+  let result = {
+    assignment: null,
+    idempotent: false,
+    notFound: false,
+    scopeConflict: false,
+    accountScopeForbidden: false,
+    groupScopeChanged: false,
+  };
   await sequelize.transaction(async (transaction) => {
+    const groupClinics = await clinicModel.findAll({
+      where: { grupoClinicaId: groupId },
+      attributes: ['id_clinica', 'nombre_clinica', 'estado_clinica'],
+      raw: true,
+      transaction,
+      lock: transaction.LOCK.UPDATE,
+    });
+    const groupClinicIds = new Set(groupClinics.map((clinic) => Number(clinic.id_clinica)));
+    if (!groupClinicIds.size) {
+      result = { ...result, groupScopeChanged: true };
+      return;
+    }
+    const accountScope = await accountScopeResolver({
+      groupId,
+      provider,
+      accountId: customerId,
+      transaction,
+      lock: true,
+    });
+    if (!accountScope) {
+      result = { ...result, accountScopeForbidden: true };
+      return;
+    }
     const assignment = await assignmentModel.findOne({
       where: {
         provider,
@@ -196,11 +261,15 @@ async function archiveMatchingAssignment({
       lock: transaction.LOCK.UPDATE,
     });
     if (!assignment) {
-      result = { assignment: null, idempotent: false, notFound: true };
+      result = { ...result, notFound: true };
+      return;
+    }
+    if (!assignmentBelongsToGroup(assignment, groupId, groupClinicIds)) {
+      result = { ...result, scopeConflict: true };
       return;
     }
     if (assignment.status === 'archived') {
-      result = { assignment, idempotent: true, notFound: false };
+      result = { ...result, assignment, idempotent: true };
       return;
     }
     await assignment.update({
@@ -209,7 +278,7 @@ async function archiveMatchingAssignment({
       archived_by_user_id: userId,
       archived_at: now(),
     }, { transaction });
-    result = { assignment, idempotent: false, notFound: false };
+    result = { ...result, assignment };
   });
   return result;
 }
@@ -1206,6 +1275,13 @@ exports.recordSpend = asyncHandler(async (req, res) => {
   return res.json({ success: true, spend_date: spendDate, amount, funding: fundingAdminDto(funding) });
 });
 
+exports.getMatchingOptions = asyncHandler(async (req, res) => {
+  if (!assertOperator(req, res)) return;
+  const groups = await listAssociationOptions();
+  res.set('Cache-Control', 'no-store');
+  return res.json({ success: true, groups });
+});
+
 exports.listMatchingProposals = asyncHandler(async (req, res) => {
   if (!assertOperator(req, res)) return;
   const groupId = positiveInt(req.query?.group_id);
@@ -1214,13 +1290,16 @@ exports.listMatchingProposals = asyncHandler(async (req, res) => {
   if (!groupId || !PROVIDERS.has(provider) || !customerId) {
     return res.status(400).json({ success: false, error: 'group_id_provider_customer_required' });
   }
+  if (!(await requireAssociationAccountScope(res, { groupId, provider, customerId }))) return;
   const clinics = await Clinica.findAll({
-    where: { grupoClinicaId: groupId, estado_clinica: true },
-    attributes: ['id_clinica', 'nombre_clinica', 'grupoClinicaId'],
+    where: { grupoClinicaId: groupId },
+    attributes: ['id_clinica', 'nombre_clinica', 'grupoClinicaId', 'estado_clinica'],
     raw: true,
     order: [['nombre_clinica', 'ASC']],
   });
-  const eligibleClinics = clinics.filter((clinic) => !/\btest\b/i.test(String(clinic.nombre_clinica || '')));
+  const eligibleClinics = clinics.filter((clinic) => isActiveClinic(clinic)
+    && !/\btest\b/i.test(String(clinic.nombre_clinica || '')));
+  const groupClinicIds = new Set(clinics.map((clinic) => Number(clinic.id_clinica)));
   const campaigns = await campaignInventoryRows(customerId, provider);
   const assignments = await ExternalCampaignAssignment.findAll({
     where: { provider, customer_id: customerId, status: { [Op.in]: ['active', 'archived'] } },
@@ -1236,8 +1315,14 @@ exports.listMatchingProposals = asyncHandler(async (req, res) => {
     const second = candidates[1] || null;
     const margin = best ? best.score - (second?.score || 0) : 0;
     const reviewedAssignment = assignmentByCampaign.get(String(campaign.campaign_id)) || null;
-    const existing = reviewedAssignment?.status === 'active' ? reviewedAssignment : null;
-    const tombstoned = reviewedAssignment?.status === 'archived';
+    const assignmentInScope = assignmentBelongsToGroup(
+      reviewedAssignment,
+      groupId,
+      groupClinicIds
+    );
+    const scopeConflict = !!reviewedAssignment && !assignmentInScope;
+    const existing = assignmentInScope && reviewedAssignment?.status === 'active' ? reviewedAssignment : null;
+    const tombstoned = assignmentInScope && reviewedAssignment?.status === 'archived';
     return {
       provider,
       customer_id: customerId,
@@ -1250,20 +1335,21 @@ exports.listMatchingProposals = asyncHandler(async (req, res) => {
       last_seen_at: campaign.last_seen_at || null,
       source: campaign.source || null,
       existing_assignment: existing,
-      suggested_clinic: !tombstoned && best && best.score >= 0.65 ? {
+      assignment_scope_conflict: scopeConflict,
+      suggested_clinic: !scopeConflict && !tombstoned && best && best.score >= 0.65 ? {
         id: best.clinic.id_clinica,
         name: best.clinic.nombre_clinica,
         score: Number(best.score.toFixed(4)),
         kind: best.kind,
         explanation: best.explanation,
       } : null,
-      alternatives: tombstoned ? [] : candidates.slice(1, 4).filter((item) => item.score >= 0.6).map((item) => ({
+      alternatives: scopeConflict || tombstoned ? [] : candidates.slice(1, 4).filter((item) => item.score >= 0.6).map((item) => ({
         id: item.clinic.id_clinica,
         name: item.clinic.nombre_clinica,
         score: Number(item.score.toFixed(4)),
       })),
-      auto_eligible: !tombstoned && !!best && best.score >= 0.9 && margin >= 0.12,
-      ambiguous: !tombstoned && !!best && best.score >= 0.65 && margin < 0.12,
+      auto_eligible: !scopeConflict && !tombstoned && !!best && best.score >= 0.9 && margin >= 0.12,
+      ambiguous: !scopeConflict && !tombstoned && !!best && best.score >= 0.65 && margin < 0.12,
       assignment_tombstone: tombstoned ? {
         reason: reviewedAssignment.archive_reason || null,
         archived_at: reviewedAssignment.archived_at || null,
@@ -1281,7 +1367,8 @@ exports.listMatchingProposals = asyncHandler(async (req, res) => {
       proposed: proposals.filter((item) => !item.existing_assignment && !!item.suggested_clinic).length,
       auto_eligible: proposals.filter((item) => !item.existing_assignment && item.auto_eligible).length,
       ambiguous: proposals.filter((item) => item.ambiguous).length,
-      unassigned: proposals.filter((item) => !item.existing_assignment && !item.suggested_clinic).length,
+      unassigned: proposals.filter((item) => !item.assignment_scope_conflict && !item.existing_assignment && !item.suggested_clinic).length,
+      scope_conflicts: proposals.filter((item) => item.assignment_scope_conflict).length,
     },
     proposals,
   });
@@ -1297,24 +1384,55 @@ exports.confirmMatching = asyncHandler(async (req, res) => {
   if (!groupId || !PROVIDERS.has(provider) || !customerId || !items.length) {
     return res.status(400).json({ success: false, error: 'assignments_required' });
   }
-  const validClinics = await Clinica.findAll({ where: { grupoClinicaId: groupId, estado_clinica: true }, attributes: ['id_clinica', 'nombre_clinica'], raw: true });
-  const clinicIds = new Set(validClinics.filter((clinic) => !/\btest\b/i.test(String(clinic.nombre_clinica || ''))).map((clinic) => Number(clinic.id_clinica)));
+  if (!(await requireAssociationAccountScope(res, { groupId, provider, customerId }))) return;
   const inventory = await campaignInventoryRows(customerId, provider);
   const inventoryByCampaign = new Map(inventory.map((item) => [String(item.campaign_id), item]));
   const saved = [];
   try {
     await db.sequelize.transaction(async (transaction) => {
+      const lockedClinics = await Clinica.findAll({
+        where: { grupoClinicaId: groupId },
+        attributes: ['id_clinica', 'nombre_clinica', 'estado_clinica'],
+        raw: true,
+        transaction,
+        lock: transaction.LOCK.UPDATE,
+      });
+      const groupClinicIds = new Set(lockedClinics.map((clinic) => Number(clinic.id_clinica)));
+      const eligibleTargetClinicIds = new Set(lockedClinics
+        .filter((clinic) => isActiveClinic(clinic)
+          && !/\btest\b/i.test(String(clinic.nombre_clinica || '')))
+        .map((clinic) => Number(clinic.id_clinica)));
+      if (!eligibleTargetClinicIds.size) {
+        const error = new Error('El grupo ya no contiene clínicas activas elegibles.');
+        error.httpStatus = 409;
+        error.code = 'matching_group_scope_changed';
+        throw error;
+      }
+      const transactionScope = await findAssociationAccountScope({
+        groupId,
+        provider,
+        accountId: customerId,
+        transaction,
+        lock: true,
+      });
+      if (!transactionScope) {
+        const error = new Error('La autorización de la cuenta cambió antes de confirmar. Recarga las opciones.');
+        error.httpStatus = 403;
+        error.code = 'matching_account_scope_forbidden';
+        throw error;
+      }
       for (const item of items) {
         const campaignId = cleanString(item?.campaign_id, 128);
         const clinicId = positiveInt(item?.clinica_id);
         const source = inventoryByCampaign.get(String(campaignId));
-        if (!campaignId || !clinicId || !clinicIds.has(clinicId) || !source) {
+        if (!campaignId || !clinicId || !eligibleTargetClinicIds.has(clinicId) || !source) {
           const error = new Error(`Asignación inválida para campaña ${campaignId || '?'}`);
           error.httpStatus = 400;
+          error.code = 'matching_assignment_invalid';
           throw error;
         }
         const kind = MATCH_KINDS.has(item?.match_kind) ? item.match_kind : 'manual';
-        const [row] = await ExternalCampaignAssignment.upsert({
+        const assignmentValues = {
           inventory_id: source.id || null,
           provider,
           customer_id: customerId,
@@ -1329,14 +1447,21 @@ exports.confirmMatching = asyncHandler(async (req, res) => {
           ...assignmentReactivationAuditReset(),
           approved_by_user_id: userId,
           approved_at: new Date(),
-        }, { transaction });
+        };
+        const row = await saveAssignmentWithinScope({
+          assignmentModel: ExternalCampaignAssignment,
+          values: assignmentValues,
+          groupId,
+          groupClinicIds,
+          transaction,
+        });
         saved.push(row);
       }
     });
   } catch (error) {
     return res.status(error.httpStatus || 500).json({
       success: false,
-      error: 'matching_confirmation_failed',
+      error: error.code || 'matching_confirmation_failed',
       message: error.message || 'No se pudieron confirmar las asociaciones'
     });
   }
@@ -1346,12 +1471,13 @@ exports.confirmMatching = asyncHandler(async (req, res) => {
 exports.archiveMatching = asyncHandler(async (req, res) => {
   const userId = assertOperator(req, res);
   if (!userId) return;
+  const groupId = positiveInt(req.body?.group_id);
   const provider = cleanString(req.body?.provider, 32);
   const customerId = cleanCustomerId(req.body?.customer_id);
   const campaignId = cleanString(req.body?.campaign_id, 128);
   const reason = cleanString(req.body?.reason, 1024);
-  if (!PROVIDERS.has(provider) || !customerId || !campaignId) {
-    return res.status(400).json({ success: false, error: 'provider_customer_campaign_required' });
+  if (!groupId || !PROVIDERS.has(provider) || !customerId || !campaignId) {
+    return res.status(400).json({ success: false, error: 'group_provider_customer_campaign_required' });
   }
   if (provider !== 'google_ads') {
     return res.status(409).json({
@@ -1363,13 +1489,13 @@ exports.archiveMatching = asyncHandler(async (req, res) => {
   if (!reason) {
     return res.status(400).json({ success: false, error: 'archive_reason_required' });
   }
-
   let result;
   try {
     result = await archiveMatchingAssignment({
       provider,
       customerId,
       campaignId,
+      groupId,
       reason,
       userId,
     });
@@ -1380,8 +1506,29 @@ exports.archiveMatching = asyncHandler(async (req, res) => {
       message: error.message || 'No se pudo archivar la asociación',
     });
   }
+  if (result.groupScopeChanged) {
+    return res.status(409).json({
+      success: false,
+      error: 'matching_group_scope_changed',
+      message: 'El grupo cambió antes de archivar. Recarga las opciones.',
+    });
+  }
+  if (result.accountScopeForbidden) {
+    return res.status(403).json({
+      success: false,
+      error: 'matching_account_scope_forbidden',
+      message: 'La autorización de la cuenta cambió antes de archivar. Recarga las opciones.',
+    });
+  }
   if (result.notFound) {
     return res.status(404).json({ success: false, error: 'matching_assignment_not_found' });
+  }
+  if (result.scopeConflict) {
+    return res.status(409).json({
+      success: false,
+      error: 'matching_assignment_scope_conflict',
+      message: 'La asignación pertenece a otro grupo y no puede archivarse desde este scope.',
+    });
   }
   return res.json({
     success: true,
@@ -1543,26 +1690,31 @@ exports.confirmReconciliation = asyncHandler(async (req, res) => {
 
 exports.listExternalInventory = asyncHandler(async (req, res) => {
   if (!assertOperator(req, res)) return;
+  const groupId = positiveInt(req.query?.group_id);
   const provider = cleanString(req.query?.provider, 32) || 'google_ads';
   const customerId = cleanCustomerId(req.query?.customer_id);
-  if (!PROVIDERS.has(provider) || !customerId) return res.status(400).json({ success: false, error: 'provider_customer_required' });
+  if (!groupId || !PROVIDERS.has(provider) || !customerId) {
+    return res.status(400).json({ success: false, error: 'group_provider_customer_required' });
+  }
+  if (!(await requireAssociationAccountScope(res, { groupId, provider, customerId }))) return;
   return res.json({ success: true, items: await campaignInventoryRows(customerId, provider) });
 });
 
 exports.upsertExternalInventory = asyncHandler(async (req, res) => {
   const userId = assertOperator(req, res);
   if (!userId) return;
+  const groupId = positiveInt(req.body?.group_id);
   const provider = cleanString(req.body?.provider, 32);
   const customerId = cleanCustomerId(req.body?.customer_id);
   const campaigns = Array.isArray(req.body?.campaigns) ? req.body.campaigns : [];
-  if (!PROVIDERS.has(provider) || !customerId || !campaigns.length) {
+  if (!groupId || !PROVIDERS.has(provider) || !customerId || !campaigns.length) {
     return res.status(400).json({ success: false, error: 'inventory_required' });
   }
-  let saved = 0;
+  const rows = [];
   for (const item of campaigns) {
     const campaignId = cleanString(item?.campaign_id, 128);
     if (!campaignId) continue;
-    await ExternalCampaignInventory.upsert({
+    rows.push({
       provider,
       customer_id: customerId,
       account_name: cleanString(req.body?.account_name, 255),
@@ -1575,7 +1727,21 @@ exports.upsertExternalInventory = asyncHandler(async (req, res) => {
       destination_detection: safeObject(item?.destination_detection, null),
       last_seen_at: item?.last_seen_at ? new Date(item.last_seen_at) : new Date(),
     });
-    saved += 1;
+  }
+  let saved;
+  try {
+    saved = await upsertInventoryWithinScope({
+      groupId,
+      provider,
+      accountId: customerId,
+      rows,
+    });
+  } catch (error) {
+    return res.status(error.httpStatus || 500).json({
+      success: false,
+      error: error.code || 'inventory_upsert_failed',
+      message: error.message || 'No se pudo guardar el inventario externo.',
+    });
   }
   return res.json({ success: true, saved });
 });

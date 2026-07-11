@@ -9,6 +9,7 @@ router.use(authMiddleware);
 
 router.get('/access', controller.getAccess);
 router.get('/dashboard', controller.getDashboard);
+router.get('/matching/options', controller.getMatchingOptions);
 router.get('/matching/proposals', controller.listMatchingProposals);
 router.post('/matching/confirm', controller.confirmMatching);
 router.post('/matching/archive', controller.archiveMatching);

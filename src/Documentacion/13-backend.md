@@ -3379,14 +3379,20 @@ Rutas internas actuales bajo `/api/admin/managed-campaigns`:
 - transición de lifecycle y `activate-management`;
 - top-ups manuales con comisión fija/porcentual y snapshots de gasto;
 - inventario de campañas, propuestas fuzzy, confirmación y archivado/tombstone campaña -> clínica;
-- briefing/propuesta y plan de publicación dry-run determinista, sanitizado, idempotente y auditable;
+- briefing/propuesta, plan de publicación dry-run determinista y adaptador Google Ads dry-run versionado para Search/PMax, sanitizados, idempotentes y auditables;
 - movimientos bancarios manuales, propuestas y confirmación de conciliación parcial.
+
+La asociación asistida no acepta IDs de cuenta escritos a ciegas como autoridad. `GET /matching/options` construye, solo desde base de datos, un catálogo de grupos con clínicas activas y cuentas Google/Meta mapeadas. La respuesta usa una lista blanca (`group_id`, nombre, número de clínicas elegibles y, por cuenta, proveedor, ID externo de presentación, nombre, origen, estado de autorización y `selectable`); nunca serializa conexiones, tokens, correos, `login_customer_id`, `additionalData` ni errores internos de OAuth. Una autorización `reauthorization_required` puede mostrarse, pero no permite consultar ni confirmar inventario.
+
+`GET /matching/proposals`, `POST /matching/confirm`, `POST /matching/archive` y ambos endpoints `/inventory` vuelven a comprobar en servidor `group_id + provider + customer_id` contra ese scope activo; el selector frontend no constituye autorización. Archivar exige `group_id`. Confirmar reconsulta y bloquea dentro de la misma transacción clínicas, mapeos y autorizaciones, y guarda mediante `create` o actualización de una fila ya validada, nunca mediante un `upsert` que pudiera moverla por carrera. La pertenencia histórica usa todas las clínicas que siguen dentro del grupo; la selección de destino usa solo activas y no-test. Así una decisión legacy de una clínica desactivada puede reasignarse o archivarse, pero esa clínica no reaparece como destino. Si una decisión previa pertenece a otro grupo devuelve `matching_assignment_scope_conflict` sin escribir. El archivo revalida y bloquea en su propia transacción clínicas, autorización y decisión externa global antes del tombstone. El `POST /inventory` revalida una sola vez bajo los mismos locks y agrupa todos los upserts en esa transacción: una revocación aborta el lote antes de su primera escritura. El catálogo y estos guards no llaman a Google/Meta ni refrescan credenciales.
 
 Tablas reales: `ManagedCampaigns`, `ManagedCampaignFundingAccounts`, `ManagedCampaignLedgerEntries`, `ManagedCampaignSpendSnapshots`, `ManagedCampaignBankTransactions`, `ManagedCampaignReconciliationMatches`, `ManagedCampaignPublishingAudits`, `ExternalCampaignInventories` y `ExternalCampaignAssignments`.
 
 Límites que no deben ocultarse:
 
-- `active/launching/paused` son estados internos; el dry-run soporta Google Search/PMax y Meta Reach/Instant Form, pero no existe ruta/adaptador de ejecución para publicar, pausar u optimizar;
+- `active/launching/paused` son estados internos; Google Search/PMax dispone de un adaptador **dry-run** que produce un manifiesto ordenado de operaciones con campaña inicial `PAUSED`, presupuesto normalizado y reemplazo destructivo desactivado. El importe preparado para Google sale exclusivamente del menor entre neto de medios, saldo neto disponible y asignación neta del presupuesto aprobado; el bruto y la comisión nunca alimentan `amount_micros`. Se valida `bruto cobrado - comisión = neto`, `disponible <= neto`, prepago completo y moneda, y la conversión mensual usa `floor` en micros para no superar el saldo. Meta conserva solo la spec de simulación y queda bloqueado como no listo mientras no tenga adaptador explícito;
+- ningún dry-run constituye un adaptador de ejecución: el verificador recalcula hash de plan y manifiesto y consulta un registry interno de ejecución actualmente vacío. Por tanto, incluso un plan con todas las confirmaciones queda denegado y no existe ruta para publicar, pausar u optimizar;
+- los hashes actuales demuestran consistencia, no autenticidad frente a un actor capaz de reconstruir el payload. Antes de añadir cualquier clave al registry real, la ruta futura deberá reconstruir el plan desde la campaña/funding actuales dentro del servidor o contrastarlo con un audit persistido y autenticado; nunca aceptar el plan recibido como fuente autoritativa;
 - el dry-run persistido exige `expected_plan_hash`; cambios concurrentes en spec, saldo o gates devuelven `publishing_plan_changed` y no crean una auditoría distinta de la mostrada;
 - propuesta cliente, edición admin, transición y activación usan revisión/versión compare-and-swap; URLs de destino deben ser HTTP(S) públicas sin credenciales y la preview exige HTTPS;
 - `recordTopup` exige `payment_verified=true`, bloquea la cuenta de fondos dentro de la transacción y deduplica por `funding_account_id + entry_type + external_ref`; `activate-management` requiere saldo + al menos un asiento de cobro verificado. Esto demuestra una comprobación manual, no un `ReconciliationMatch` bancario;
@@ -3394,6 +3400,7 @@ Límites que no deben ocultarse:
 - la conciliación actual vincula movimiento bancario con funding/cobro cliente, no snapshot de gasto con cargo real de proveedor; `bank_difference` sigue `null`, `provisional_margin` contiene la comisión y `realised_margin` permanece `null`;
 - no hay payment provider, fiscalidad, refund/chargeback, importación bancaria, disputa ni cierre de periodo;
 - frontend y backend consultan la misma allowlist `ADMIN_USER_IDS` + `CAMPAIGN_OPERATOR_USER_IDS`; siguen faltando capacidades granulares separadas;
+- esa allowlist continúa siendo una capacidad global de backoffice. El scope grupo/cuenta evita cruces y corrupción entre clientes, pero no convierte a un operador allowlisted en usuario tenant-scoped;
 - la estrategia legacy no puede pasar directamente a `active` si es `managed_service`: debe operarse desde este lifecycle interno.
 
 Snapshot Propdental en DB dev:
