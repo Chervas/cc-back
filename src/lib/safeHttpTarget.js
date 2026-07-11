@@ -125,6 +125,46 @@ function isUnsafeIpAddress(address) {
   return true;
 }
 
+/**
+ * Performs the synchronous part of public URL validation. This is suitable for
+ * persisting a destination or client preview: it rejects credentials, local
+ * hostnames and non-public IP literals without performing a network lookup.
+ * Call resolveSafeHttpTarget as well before the server ever fetches the URL.
+ */
+function publicHttpUrl(rawUrl, { requireHttps = false } = {}) {
+  if (typeof rawUrl !== 'string') return null;
+  const clean = rawUrl.trim();
+  if (!clean) return null;
+
+  let parsed;
+  try {
+    parsed = new URL(clean);
+  } catch (_error) {
+    return null;
+  }
+  if (!['http:', 'https:'].includes(parsed.protocol)
+    || (requireHttps && parsed.protocol !== 'https:')
+    || parsed.username
+    || parsed.password) {
+    return null;
+  }
+
+  const hostname = normalizeHostname(parsed.hostname);
+  if (!hostname
+    || hostname === 'localhost'
+    || hostname.endsWith('.localhost')
+    || hostname.endsWith('.local')
+    || hostname.endsWith('.internal')
+    || hostname.endsWith('.lan')) {
+    return null;
+  }
+  const literalFamily = net.isIP(hostname);
+  if (literalFamily && isUnsafeIpAddress(hostname)) return null;
+  // A single-label non-IP hostname is an intranet target, not a public URL.
+  if (!literalFamily && !hostname.includes('.')) return null;
+  return parsed.toString();
+}
+
 function normalizeResolvedAddresses(rows) {
   const unique = new Map();
   for (const row of Array.isArray(rows) ? rows : []) {
@@ -215,6 +255,7 @@ module.exports = {
   createPinnedLookup,
   isUnsafeIpAddress,
   normalizeHostname,
+  publicHttpUrl,
   resolvePublicAddresses,
   resolveSafeHttpTarget,
   targetError,

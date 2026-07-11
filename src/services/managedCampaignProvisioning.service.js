@@ -147,35 +147,7 @@ async function provisionManagedCampaignsFromStrategy({
   return ids;
 }
 
-async function updateManagedCampaignSpecsFromStrategy({
-  strategyCampaignId,
-  userId,
-  payload,
-  budgetMonthly,
-  channels,
-}) {
-  const rows = await ManagedCampaign.findAll({
-    where: {
-      strategy_campaign_id: strategyCampaignId,
-      status: { [Op.notIn]: ['launching', 'active', 'completed', 'cancelled'] },
-    },
-  });
-  const allocations = new Map(paidChannelAllocations(channels, money(budgetMonthly)).map((item) => [item.provider, item.amount]));
-  for (const row of rows) {
-    const amount = allocations.get(row.provider);
-    if (amount === undefined) continue;
-    const spec = managedSpec({ payload, provider: row.provider, amount, totalBudget: budgetMonthly });
-    await row.update({
-      ...spec,
-      updated_by_user_id: userId,
-      version: Number(row.version || 1) + 1,
-    });
-  }
-  return rows.map((row) => row.id);
-}
-
 module.exports = {
   paidChannelAllocations,
   provisionManagedCampaignsFromStrategy,
-  updateManagedCampaignSpecsFromStrategy,
 };

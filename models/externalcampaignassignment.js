@@ -33,6 +33,9 @@ module.exports = (sequelize, DataTypes) => {
     match_confidence: DataTypes.DECIMAL(5, 4),
     match_explanation: DataTypes.STRING(512),
     status: { type: DataTypes.ENUM('active', 'archived'), allowNull: false, defaultValue: 'active' },
+    archive_reason: DataTypes.STRING(1024),
+    archived_by_user_id: DataTypes.INTEGER,
+    archived_at: DataTypes.DATE,
     approved_by_user_id: DataTypes.INTEGER,
     approved_at: DataTypes.DATE,
   }, {

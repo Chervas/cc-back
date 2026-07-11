@@ -82,6 +82,7 @@ router.get('/managed-campaigns', managedCampaignsController.listClientCampaigns)
 router.post('/managed-campaigns/request', managedCampaignsController.requestAutopilot);
 router.get('/managed-campaigns/:id', managedCampaignsController.getClientCampaign);
 router.post('/managed-campaigns/:id/approve', managedCampaignsController.approveClientProposal);
+router.post('/managed-campaigns/:id/request-changes', managedCampaignsController.requestClientProposalChanges);
 
 // Google Ads onboarding helpers
 router.get('/google-ads/conversion-actions', campaignOnboardingController.listGoogleAdsConversionActions);

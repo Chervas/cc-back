@@ -20,6 +20,7 @@ const { ADMIN_ROLES, STAFF_ROLES } = require('../../lib/role-helpers');
 const {
   createPinnedLookup,
   isUnsafeIpAddress,
+  publicHttpUrl,
   resolvePublicAddresses,
   resolveSafeHttpTarget,
 } = require('../../lib/safeHttpTarget');
@@ -104,6 +105,7 @@ function testConnectOnlyConflictRegression() {
     'transitionMarketingStrategyStatus'
   );
   const create = controllerSection(source, 'createMarketingStrategy');
+  const transition = controllerSection(source, 'transitionMarketingStrategyStatus', 'createMarketingStrategy');
 
   const declarationIndex = update.indexOf('const targetClinicIds = clinicIdsFromStrategyRows(rows);');
   const conflictIndex = update.indexOf('findExternalCampaignAssignmentConflicts(targetClinicIds, externalTargets');
@@ -113,6 +115,18 @@ function testConnectOnlyConflictRegression() {
     'Update must exclude its own CampaignRequest rows');
   assert.doesNotMatch(create, /excludeRequestIds:\s*rows\.map/,
     'Create must not reference update-only rows');
+  assert.doesNotMatch(update, /updateManagedCampaignSpecsFromStrategy|ManagedCampaign\.update/,
+    'Legacy strategy edits must not rewrite the managed campaign source of truth');
+  assert.doesNotMatch(transition, /ManagedCampaign\.update/,
+    'Legacy strategy lifecycle must not bypass managed campaign gates');
+  assert.match(create, /provisionManagedCampaignsFromStrategy\(/,
+    'Initial managed_service creation must still provision its managed specs once');
+  const provisioningSource = fs.readFileSync(
+    path.resolve(__dirname, '../../services/managedCampaignProvisioning.service.js'),
+    'utf8'
+  );
+  assert.doesNotMatch(provisioningSource, /updateManagedCampaignSpecsFromStrategy/);
+  assert.match(provisioningSource, /provisionManagedCampaignsFromStrategy/);
 
   for (const [exportName, nextExportName, access] of [
     ['getMarketingStrategyDetail', 'getMarketingStrategyMetrics', 'read'],
@@ -297,6 +311,19 @@ async function testSafeHttpTargets() {
   assert.equal(isUnsafeIpAddress('1.1.1.1'), false);
   assert.equal(isUnsafeIpAddress('2606:4700:4700::1111'), false);
   assert.equal(isUnsafeIpAddress('2001:4860:4860::8888'), false);
+  assert.equal(publicHttpUrl('https://www.propdental.es/implantes/'), 'https://www.propdental.es/implantes/');
+  assert.equal(publicHttpUrl('https://www.propdental.es/preview', { requireHttps: true }), 'https://www.propdental.es/preview');
+  for (const unsafeUrl of [
+    'http://127.0.0.1/private',
+    'https://localhost/private',
+    'https://campaign.internal/preview',
+    'https://user:password@example.com/preview',
+    'https://169.254.169.254/latest/meta-data',
+    'https://intranet/preview',
+  ]) {
+    assert.equal(publicHttpUrl(unsafeUrl), null, `${unsafeUrl} must not be accepted as a public campaign URL`);
+  }
+  assert.equal(publicHttpUrl('http://www.propdental.es/preview', { requireHttps: true }), null);
 
   await assert.rejects(
     resolvePublicAddresses('mixed.example', {

@@ -107,6 +107,28 @@ const {
 const MS_PER_DAY = 24 * 60 * 60 * 1000;
 const DEFAULT_SEARCH_CONSOLE_BULK_CHUNK_SIZE = 500;
 
+function reviewedCampaignAssignmentDirective(assignment) {
+  if (!assignment) return null;
+  if (assignment.status === 'archived') {
+    return {
+      tombstoned: true,
+      clinicaId: null,
+      source: 'reviewed_campaign_archived',
+      matchValue: null,
+    };
+  }
+  const clinicaId = Number.parseInt(String(assignment.clinica_id || ''), 10);
+  if (assignment.status === 'active' && Number.isInteger(clinicaId) && clinicaId > 0) {
+    return {
+      tombstoned: false,
+      clinicaId,
+      source: 'reviewed_campaign',
+      matchValue: assignment.match_kind || 'manual',
+    };
+  }
+  return null;
+}
+
 function resolveSearchConsoleBulkChunkSize() {
   const configured = Number(process.env.SEARCH_CONSOLE_BULK_CHUNK_SIZE || 0);
   return Number.isInteger(configured) && configured > 0
@@ -3848,9 +3870,9 @@ try {
             provider: 'google_ads',
             customer_id: customerId,
             campaign_id: { [Op.in]: resultCampaignIds },
-            status: 'active'
+            status: { [Op.in]: ['active', 'archived'] }
           },
-          attributes: ['campaign_id', 'clinica_id', 'match_kind', 'match_confidence'],
+          attributes: ['campaign_id', 'clinica_id', 'match_kind', 'match_confidence', 'status'],
           raw: true
         })
       : [];
@@ -3942,15 +3964,12 @@ try {
       if (campaignAssignments.has(key)) {
         return campaignAssignments.get(key);
       }
-      const reviewed = reviewedAssignmentByCampaign.get(key);
-      if (reviewed?.clinica_id) {
-        const reviewedResult = {
-          clinicaId: Number(reviewed.clinica_id),
-          source: 'reviewed_campaign',
-          matchValue: reviewed.match_kind || 'manual'
-        };
+      const reviewedResult = reviewedCampaignAssignmentDirective(reviewedAssignmentByCampaign.get(key));
+      if (reviewedResult) {
         campaignAssignments.set(key, reviewedResult);
-        await resolveAttributionIssue('campaign', key, reviewedResult.clinicaId);
+        if (!reviewedResult.tombstoned) {
+          await resolveAttributionIssue('campaign', key, reviewedResult.clinicaId);
+        }
         return reviewedResult;
       }
       let assignmentResult = { clinicaId: null, source: null, matchValue: null };
@@ -4053,8 +4072,21 @@ try {
       let targetClinicId = null;
       let matchSource = null;
       let matchValue = null;
+      const reviewedDirective = reviewedCampaignAssignmentDirective(
+        reviewedAssignmentByCampaign.get(campaignId)
+      );
 
-      if (assignment.mode === 'manual') {
+      if (reviewedDirective) {
+        // A human-reviewed campaign decision is authoritative. Active mappings
+        // and archive tombstones both win over account defaults and
+        // campaign/ad-group fuzzy matching on every rerun.
+        targetClinicId = reviewedDirective.clinicaId;
+        matchSource = reviewedDirective.source;
+        matchValue = reviewedDirective.matchValue;
+        if (!reviewedDirective.tombstoned) {
+          await resolveAttributionIssue('campaign', campaignId, targetClinicId);
+        }
+      } else if (assignment.mode === 'manual') {
         targetClinicId = defaultClinicId || null;
         matchSource = targetClinicId ? 'manual' : null;
       } else if (assignment.mode === 'group-manual') {
@@ -4078,7 +4110,10 @@ try {
         }
       }
 
-      if (!targetClinicId && assignment.mode === 'manual' && defaultClinicId) {
+      if (!reviewedDirective
+        && !targetClinicId
+        && assignment.mode === 'manual'
+        && defaultClinicId) {
         targetClinicId = defaultClinicId;
         matchSource = 'manual';
       }
@@ -4136,5 +4171,6 @@ const metaSyncJobs = new MetaSyncJobs();
 
 module.exports = {
   metaSyncJobs,
-  MetaSyncJobs
+  MetaSyncJobs,
+  __test: { reviewedCampaignAssignmentDirective }
 };

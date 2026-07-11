@@ -23,6 +23,12 @@ module.exports = (sequelize, DataTypes) => {
           as: 'spend_snapshots',
         });
       }
+      if (models.ManagedCampaignPublishingAudit) {
+        ManagedCampaign.hasMany(models.ManagedCampaignPublishingAudit, {
+          foreignKey: 'managed_campaign_id',
+          as: 'publishing_audits',
+        });
+      }
     }
   }
 

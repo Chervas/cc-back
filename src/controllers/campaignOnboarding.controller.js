@@ -31,8 +31,7 @@ const {
   requestIdsFromRows
 } = require('../lib/marketingScopeAccess');
 const {
-  provisionManagedCampaignsFromStrategy,
-  updateManagedCampaignSpecsFromStrategy
+  provisionManagedCampaignsFromStrategy
 } = require('../services/managedCampaignProvisioning.service');
 
 const GoogleConnection = db.GoogleConnection;
@@ -5545,24 +5544,6 @@ exports.updateMarketingStrategy = asyncHandler(async (req, res) => {
     });
   }
 
-  if (effectiveMode === 'managed_service' && representative.campaign_id) {
-    await updateManagedCampaignSpecsFromStrategy({
-      strategyCampaignId: representative.campaign_id,
-      userId,
-      payload: {
-        promotion_type: promotionType,
-        treatments,
-        area_medica_id: areaMedicaId,
-        area_medica_nombre: areaMedicaNombre,
-        destination,
-        measurement,
-        geo,
-      },
-      budgetMonthly,
-      channels,
-    });
-  }
-
   const refreshedRows = await loadStrategyRowsByIdentifier(req.params.id);
   const campaignsById = await loadCampaignsByIds(refreshedRows.map((row) => row.campaign_id));
   const strategy = buildStrategyItemFromRows(refreshedRows, campaignsById);
@@ -5682,27 +5663,6 @@ exports.transitionMarketingStrategyStatus = asyncHandler(async (req, res) => {
       where: { id: strategy.campaign_id }
     });
 
-    if (strategy.mode === 'managed_service') {
-      const managedStatus = nextStatus === 'pending_approval'
-        ? 'pending_admin_review'
-        : nextStatus === 'completed'
-          ? 'completed'
-          : nextStatus === 'paused'
-            ? 'paused'
-            : null;
-      if (managedStatus) {
-        await db.ManagedCampaign.update({
-          status: managedStatus,
-          updated_by_user_id: userId,
-          updated_at: now
-        }, {
-          where: {
-            strategy_campaign_id: strategy.campaign_id,
-            status: { [Op.notIn]: ['launching', 'active', 'completed', 'cancelled'] }
-          }
-        });
-      }
-    }
   }
 
   return res.json({

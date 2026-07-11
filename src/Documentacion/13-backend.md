@@ -3368,23 +3368,27 @@ Rutas cliente actuales:
 | Método | Ruta | Uso |
 |---|---|---|
 | GET | `/api/marketing/managed-campaigns?clinic_id=` | Proyección segura sin comisión, neto de medios ni refs internas. |
-| POST | `/api/marketing/managed-campaigns/request` | Solicitud en observación + funding vacío. |
+| POST | `/api/marketing/managed-campaigns/request` | Solicitud con presupuesto orientativo, benchmark congelado, observación + funding vacío. |
 | GET | `/api/marketing/managed-campaigns/:id` | Detalle cliente por scope. |
 | POST | `/api/marketing/managed-campaigns/:id/approve` | Aprobación cliente cuando está en `pending_client_review`. |
+| POST | `/api/marketing/managed-campaigns/:id/request-changes` | Cambios del cliente con motivo obligatorio. |
 
 Rutas internas actuales bajo `/api/admin/managed-campaigns`:
 
 - dashboard/listado/detalle/creación/edición;
 - transición de lifecycle y `activate-management`;
 - top-ups manuales con comisión fija/porcentual y snapshots de gasto;
-- inventario de campañas, propuestas fuzzy y confirmación campaña -> clínica;
+- inventario de campañas, propuestas fuzzy, confirmación y archivado/tombstone campaña -> clínica;
+- briefing/propuesta y plan de publicación dry-run determinista, sanitizado, idempotente y auditable;
 - movimientos bancarios manuales, propuestas y confirmación de conciliación parcial.
 
-Tablas reales: `ManagedCampaigns`, `ManagedCampaignFundingAccounts`, `ManagedCampaignLedgerEntries`, `ManagedCampaignSpendSnapshots`, `ManagedCampaignBankTransactions`, `ManagedCampaignReconciliationMatches`, `ExternalCampaignInventories` y `ExternalCampaignAssignments`.
+Tablas reales: `ManagedCampaigns`, `ManagedCampaignFundingAccounts`, `ManagedCampaignLedgerEntries`, `ManagedCampaignSpendSnapshots`, `ManagedCampaignBankTransactions`, `ManagedCampaignReconciliationMatches`, `ManagedCampaignPublishingAudits`, `ExternalCampaignInventories` y `ExternalCampaignAssignments`.
 
 Límites que no deben ocultarse:
 
-- `active/launching/paused` son estados internos; no existe adaptador para publicar, pausar u optimizar en Google/Meta;
+- `active/launching/paused` son estados internos; el dry-run soporta Google Search/PMax y Meta Reach/Instant Form, pero no existe ruta/adaptador de ejecución para publicar, pausar u optimizar;
+- el dry-run persistido exige `expected_plan_hash`; cambios concurrentes en spec, saldo o gates devuelven `publishing_plan_changed` y no crean una auditoría distinta de la mostrada;
+- propuesta cliente, edición admin, transición y activación usan revisión/versión compare-and-swap; URLs de destino deben ser HTTP(S) públicas sin credenciales y la preview exige HTTPS;
 - `recordTopup` exige `payment_verified=true`, bloquea la cuenta de fondos dentro de la transacción y deduplica por `funding_account_id + entry_type + external_ref`; `activate-management` requiere saldo + al menos un asiento de cobro verificado. Esto demuestra una comprobación manual, no un `ReconciliationMatch` bancario;
 - `recordSpend` bloquea la cuenta de fondos y actualiza snapshot, saldo y asiento en una sola transacción; un reintento concurrente con el mismo total no duplica gasto;
 - la conciliación actual vincula movimiento bancario con funding/cobro cliente, no snapshot de gasto con cargo real de proveedor; `bank_difference` sigue `null`, `provisional_margin` contiene la comisión y `realised_margin` permanece `null`;
@@ -3400,7 +3404,8 @@ Snapshot Propdental en DB dev:
 - el matcher excluye clínicas cuyo nombre contiene `test` y no modifica el proveedor;
 - las decisiones revisadas rehacen también la atribución histórica (`clinicMatchSource=reviewed_campaign`);
 - el unique de `GoogleAdsInsightsDaily` incluye campaña/fecha/cuenta/ad group/network/device normalizados para evitar multiplicar totales de campaña.
-- existe una única spec controlada para Badalona en `draft + observe + unfunded`, con presupuesto solicitado de 500 EUR y financiación/gasto/saldo a cero; no hay piloto activo ni movimientos financieros reales.
+- existe una spec piloto controlada en `draft + observe + unfunded`, con financiación/gasto/saldo a cero; conserva sus referencias/destinos y un benchmark histórico congelado. Las cifras comerciales permanecen en la base y en las vistas autorizadas, no en la documentación versionada; no hay piloto activo ni movimientos financieros reales.
+- archivar una asignación Google registra motivo/actor/fecha y hace que el sync persista métricas futuras sin clínica (`reviewed_campaign_archived`) hasta una reactivación manual, incluso en cuentas con default manual; no borra historia ni toca Ads. El endpoint rechaza Meta hasta que su sync consuma estas decisiones, para no prometer un tombstone falso.
 
 Tracking Propdental: el `IntakeConfig` de grupo conserva el destino legacy `185...` y añade dos `destinations` explícitos por evento para `185...` (acciones `7680...`) y `599...` (acciones `7540...`). `lead`, `contact` y `schedule` están habilitados; `purchase` permanece apagado hasta disponer de un evento fiable. `send_to=null` es coherente con acciones offline `UPLOAD_CLICKS` y no implica inyección de tag web.
 

@@ -5,6 +5,11 @@ const crypto = require('crypto');
 const { Op, fn, col, literal } = require('sequelize');
 const db = require('../../models');
 const { ADMIN_USER_IDS } = require('../lib/role-helpers');
+const { publicHttpUrl } = require('../lib/safeHttpTarget');
+const {
+  REQUIRED_GATE_EVIDENCE,
+  buildManagedCampaignPublishingPlan,
+} = require('../services/managedCampaignPublishing.service');
 
 const {
   Clinica,
@@ -17,8 +22,7 @@ const {
   ManagedCampaignSpendSnapshot,
   ManagedCampaignBankTransaction,
   ManagedCampaignReconciliationMatch,
-  Campaign,
-  CampaignRequest,
+  ManagedCampaignPublishingAudit,
 } = db;
 
 const MANAGED_STATUSES = new Set([
@@ -27,6 +31,7 @@ const MANAGED_STATUSES = new Set([
 ]);
 const PROVIDERS = new Set(['google_ads', 'meta_ads']);
 const FAMILIES = new Set(['google_search', 'google_pmax', 'google_smart_observe', 'meta_reach', 'meta_instant_form']);
+const CLIENT_PROPOSAL_FAMILIES = new Set(['google_search', 'google_pmax', 'meta_reach', 'meta_instant_form']);
 const MATCH_KINDS = new Set(['exact', 'alias', 'fuzzy', 'manual']);
 const STOP_WORDS = new Set(['propdental', 'clinica', 'clinicas', 'dental', 'dentales', 'centre', 'centro']);
 const STATUS_TRANSITIONS = {
@@ -71,6 +76,7 @@ exports.getAccess = asyncHandler(async (req, res) => {
 
 function cleanString(value, max = 1024) {
   if (value === undefined || value === null) return null;
+  if (!['string', 'number', 'bigint'].includes(typeof value)) return null;
   const clean = String(value).trim();
   return clean ? clean.slice(0, max) : null;
 }
@@ -97,9 +103,196 @@ function safeObject(value, fallback = {}) {
   return value && typeof value === 'object' && !Array.isArray(value) ? value : fallback;
 }
 
+function safeHttpUrl(value, options) {
+  return publicHttpUrl(value, options);
+}
+
+function proposalReadiness(campaign) {
+  const budget = safeObject(campaign?.budget_config);
+  const target = safeObject(campaign?.target_config);
+  const destination = safeObject(campaign?.destination_config);
+  const creative = safeObject(campaign?.creative_config);
+  const review = safeObject(campaign?.review_config);
+  const blockers = [];
+  if (!CLIENT_PROPOSAL_FAMILIES.has(String(campaign?.family || ''))) {
+    blockers.push('Selecciona una familia publicitaria concreta para el piloto');
+  }
+  if (money(budget.amount) < 100) blockers.push('El presupuesto mensual propuesto debe ser de al menos 100 €');
+  if ((cleanString(review.client_proposal_summary, 4000) || '').length < 20) {
+    blockers.push('Añade un resumen de propuesta para el cliente');
+  }
+  if ((cleanString(target.proposal_summary, 2000) || '').length < 10) {
+    blockers.push('Define el público, zona o tratamiento objetivo');
+  }
+  const destinationReady = campaign?.family === 'meta_instant_form'
+    ? !!cleanString(destination.instant_form_id, 128)
+    : !!safeHttpUrl(destination.final_url || destination.effective_url || destination.landing_url || destination.url);
+  if (!destinationReady) blockers.push('Configura un destino válido para la familia seleccionada');
+  if (!safeHttpUrl(creative.client_preview_url, { requireHttps: true })) {
+    blockers.push('Añade una vista previa https pública para que el cliente pueda revisarla');
+  }
+  return { ready: blockers.length === 0, blockers };
+}
+
+function protectedReviewConfigPatch(currentValue, requestedValue) {
+  const current = safeObject(currentValue);
+  const requested = safeObject(requestedValue);
+  return {
+    ...requested,
+    client_approval_required: current.client_approval_required === true,
+    admin_approval_required: current.admin_approval_required === true,
+    requested_at: current.requested_at || null,
+    client_approved_at: current.client_approved_at || null,
+    client_approved_by_user_id: current.client_approved_by_user_id || null,
+    client_change_request: current.client_change_request || null,
+    proposal_revision: Math.max(0, Math.trunc(Number(current.proposal_revision) || 0)),
+    transition: current.transition || null,
+  };
+}
+
+function protectedPlatformRefsPatch(currentValue, requestedValue) {
+  const current = safeObject(currentValue);
+  const requested = safeObject(requestedValue);
+  return {
+    ...requested,
+    ...(Array.isArray(current.benchmark_external_campaigns)
+      ? { benchmark_external_campaigns: current.benchmark_external_campaigns }
+      : {}),
+  };
+}
+
 function hasVerifiedPrepaymentEntries(entries = []) {
   return (Array.isArray(entries) ? entries : [])
     .some((entry) => safeObject(entry?.metadata).payment_verified === true);
+}
+
+function assignmentReactivationAuditReset() {
+  return {
+    archive_reason: null,
+    archived_by_user_id: null,
+    archived_at: null,
+  };
+}
+
+async function archiveMatchingAssignment({
+  provider,
+  customerId,
+  campaignId,
+  reason,
+  userId,
+  assignmentModel = ExternalCampaignAssignment,
+  sequelize = db.sequelize,
+  now = () => new Date(),
+}) {
+  let result = { assignment: null, idempotent: false, notFound: false };
+  await sequelize.transaction(async (transaction) => {
+    const assignment = await assignmentModel.findOne({
+      where: {
+        provider,
+        customer_id: customerId,
+        campaign_id: campaignId,
+      },
+      transaction,
+      lock: transaction.LOCK.UPDATE,
+    });
+    if (!assignment) {
+      result = { assignment: null, idempotent: false, notFound: true };
+      return;
+    }
+    if (assignment.status === 'archived') {
+      result = { assignment, idempotent: true, notFound: false };
+      return;
+    }
+    await assignment.update({
+      status: 'archived',
+      archive_reason: reason,
+      archived_by_user_id: userId,
+      archived_at: now(),
+    }, { transaction });
+    result = { assignment, idempotent: false, notFound: false };
+  });
+  return result;
+}
+
+function explicitTrue(value) {
+  return value === true || String(value || '').trim().toLowerCase() === 'true';
+}
+
+function publishingGateEvidence(input, prepaymentVerified) {
+  const source = safeObject(input?.gate_evidence, safeObject(input));
+  return Object.fromEntries(REQUIRED_GATE_EVIDENCE.map((gate) => [
+    gate,
+    gate === 'prepayment_verified' ? prepaymentVerified === true : explicitTrue(source[gate]),
+  ]));
+}
+
+async function verifiedPrepaymentForCampaign(row) {
+  const funding = row?.funding || null;
+  if (!funding) return false;
+  const entries = await ManagedCampaignLedgerEntry.findAll({
+    where: { funding_account_id: funding.id, entry_type: 'topup' },
+    attributes: ['metadata'],
+    raw: true,
+  });
+  return hasVerifiedPrepaymentEntries(entries);
+}
+
+async function managedLaunchGateReasons(row, userId) {
+  const funding = await ManagedCampaignFundingAccount.findOne({
+    where: { managed_campaign_id: row.id },
+    raw: true,
+  });
+  const prepaymentVerified = await verifiedPrepaymentForCampaign({ funding });
+  const review = safeObject(row.review_config);
+  const policy = safeObject(row.policy_readiness);
+  const tracking = safeObject(row.tracking_plan);
+  const creative = safeObject(row.creative_config);
+  const policyReady = ['ready', 'configured', 'approved'].includes(String(policy.status || '').toLowerCase());
+  const trackingReady = ['ready', 'configured'].includes(String(tracking.status || '').toLowerCase())
+    || tracking.conversion_actions_ready === true;
+  const clientApproved = review.client_approval_required !== true || !!review.client_approved_at;
+  const plain = typeof row?.get === 'function' ? row.get({ plain: true }) : row;
+  const plan = buildManagedCampaignPublishingPlan({
+    campaign: {
+      ...plain,
+      funding,
+      status: 'approved_to_launch',
+      approved_at: row.approved_at || new Date(),
+      approved_by_user_id: row.approved_by_user_id || userId,
+    },
+    gateEvidence: {
+      prepayment_verified: prepaymentVerified,
+      budget_approved: clientApproved,
+      policy_reviewed: policyReady,
+      tracking_verified: trackingReady,
+      creative_rights_confirmed: creative.rights_confirmed === true,
+    },
+  });
+  return plan.readiness.blockers.map((item) => item.message);
+}
+
+function publishingAuditDto(row, { includePlan = true } = {}) {
+  const plain = typeof row?.get === 'function' ? row.get({ plain: true }) : row;
+  if (!plain) return null;
+  return {
+    id: plain.id,
+    managed_campaign_id: plain.managed_campaign_id,
+    plan_id: plain.plan_id,
+    plan_hash: plain.plan_hash,
+    campaign_version: Number(plain.campaign_version),
+    provider: plain.provider,
+    family: plain.family,
+    mode: plain.mode,
+    readiness_status: plain.readiness_status,
+    blocker_count: Number(plain.blocker_count || 0),
+    warning_count: Number(plain.warning_count || 0),
+    gate_evidence: safeObject(plain.gate_evidence),
+    idempotency_key: plain.idempotency_key,
+    requested_by_user_id: Number(plain.requested_by_user_id),
+    provider_call_performed: plain.provider_call_performed === true,
+    created_at: plain.created_at,
+    ...(includePlan ? { plan_snapshot: safeObject(plain.plan_snapshot) } : {}),
+  };
 }
 
 function normalizeText(value) {
@@ -243,11 +436,19 @@ function fundingAdminDto(funding) {
   };
 }
 
+function managedCampaignDisplayName(value) {
+  const name = cleanString(value, 255);
+  return name
+    ? name.replace(/\s*\(\s*observaci[oó]n\s*\)\s*$/iu, '').trim()
+    : null;
+}
+
 function campaignAdminDto(row) {
   const plain = typeof row?.get === 'function' ? row.get({ plain: true }) : row;
   const funding = plain?.funding || null;
   return {
     ...plain,
+    name: managedCampaignDisplayName(plain?.name),
     funding: fundingAdminDto(funding),
     client_finance_preview: fundingPublicDto(funding, plain?.budget_config?.leads || 0),
   };
@@ -365,6 +566,150 @@ exports.getCampaign = asyncHandler(async (req, res) => {
   return res.json({ success: true, campaign: campaignAdminDto(row), ledger, spend });
 });
 
+exports.getPublishingPlan = asyncHandler(async (req, res) => {
+  if (!assertOperator(req, res)) return;
+  const row = (await listCampaignRows({ id: req.params.id }))[0];
+  if (!row) return res.status(404).json({ success: false, error: 'not_found' });
+  const prepaymentVerified = await verifiedPrepaymentForCampaign(row);
+  const gateEvidence = publishingGateEvidence(req.query, prepaymentVerified);
+  const plan = buildManagedCampaignPublishingPlan({ campaign: row, gateEvidence });
+  res.set('Cache-Control', 'no-store');
+  return res.json({
+    success: true,
+    dry_run: true,
+    audit_persisted: false,
+    external_mutation_performed: false,
+    execute_available: false,
+    plan,
+  });
+});
+
+exports.createPublishingDryRun = asyncHandler(async (req, res) => {
+  const userId = assertOperator(req, res);
+  if (!userId) return;
+  if (req.body?.confirm_dry_run !== true) {
+    return res.status(400).json({
+      success: false,
+      error: 'dry_run_confirmation_required',
+      message: 'confirm_dry_run=true es obligatorio; esta ruta nunca publica en proveedores.',
+    });
+  }
+  const idempotencyKey = cleanString(req.body?.idempotency_key, 191);
+  if (!idempotencyKey) {
+    return res.status(400).json({ success: false, error: 'idempotency_key_required' });
+  }
+  const expectedPlanHash = cleanString(req.body?.expected_plan_hash, 64);
+  if (!expectedPlanHash || !/^[a-f0-9]{64}$/i.test(expectedPlanHash)) {
+    return res.status(400).json({
+      success: false,
+      error: 'expected_plan_hash_required',
+      message: 'Calcula y confirma el plan mostrado antes de guardar la simulación.',
+    });
+  }
+  const row = (await listCampaignRows({ id: req.params.id }))[0];
+  if (!row) return res.status(404).json({ success: false, error: 'not_found' });
+
+  const prepaymentVerified = await verifiedPrepaymentForCampaign(row);
+  const gateEvidence = publishingGateEvidence(req.body, prepaymentVerified);
+  const plan = buildManagedCampaignPublishingPlan({ campaign: row, gateEvidence });
+  if (plan.plan_hash !== expectedPlanHash) {
+    return res.status(409).json({
+      success: false,
+      error: 'publishing_plan_changed',
+      message: 'La campaña, su saldo o las confirmaciones cambiaron. Recalcula el plan antes de auditarlo.',
+      expected_plan_hash: expectedPlanHash,
+      current_plan_hash: plan.plan_hash,
+      current_plan: plan,
+    });
+  }
+  const existing = await ManagedCampaignPublishingAudit.findOne({
+    where: { managed_campaign_id: row.id, idempotency_key: idempotencyKey },
+  });
+  if (existing) {
+    if (existing.plan_hash !== plan.plan_hash) {
+      return res.status(409).json({
+        success: false,
+        error: 'idempotency_key_reused',
+        message: 'La clave de idempotencia ya está asociada a otro plan de esta campaña.',
+        existing_plan_hash: existing.plan_hash,
+      });
+    }
+    return res.json({
+      success: true,
+      dry_run: true,
+      idempotent: true,
+      external_mutation_performed: false,
+      execute_available: false,
+      audit: publishingAuditDto(existing),
+      plan,
+    });
+  }
+
+  let audit;
+  let created = true;
+  try {
+    audit = await ManagedCampaignPublishingAudit.create({
+      id: crypto.randomUUID(),
+      managed_campaign_id: row.id,
+      plan_id: plan.plan_id,
+      plan_hash: plan.plan_hash,
+      campaign_version: Number(plan.campaign.version || 1),
+      provider: plan.campaign.provider,
+      family: plan.campaign.family,
+      mode: 'dry_run',
+      readiness_status: plan.readiness.ready ? 'ready' : 'blocked',
+      blocker_count: plan.readiness.blockers.length,
+      warning_count: plan.readiness.warnings.length,
+      gate_evidence: plan.gate_evidence,
+      plan_snapshot: plan,
+      idempotency_key: idempotencyKey,
+      requested_by_user_id: userId,
+      provider_call_performed: false,
+    });
+  } catch (error) {
+    const isUniqueCollision = error?.name === 'SequelizeUniqueConstraintError'
+      || error?.original?.code === 'ER_DUP_ENTRY'
+      || error?.parent?.code === 'ER_DUP_ENTRY';
+    if (!isUniqueCollision) throw error;
+    created = false;
+    audit = await ManagedCampaignPublishingAudit.findOne({
+      where: { managed_campaign_id: row.id, idempotency_key: idempotencyKey },
+    });
+    if (!audit || audit.plan_hash !== plan.plan_hash) {
+      return res.status(409).json({ success: false, error: 'idempotency_key_reused' });
+    }
+  }
+
+  return res.status(created ? 201 : 200).json({
+    success: true,
+    dry_run: true,
+    idempotent: !created,
+    external_mutation_performed: false,
+    execute_available: false,
+    audit: publishingAuditDto(audit),
+    plan,
+  });
+});
+
+exports.listPublishingAudits = asyncHandler(async (req, res) => {
+  if (!assertOperator(req, res)) return;
+  const campaign = await ManagedCampaign.findByPk(req.params.id, { attributes: ['id'], raw: true });
+  if (!campaign) return res.status(404).json({ success: false, error: 'not_found' });
+  const limit = Math.min(100, Math.max(1, positiveInt(req.query?.limit) || 25));
+  const rows = await ManagedCampaignPublishingAudit.findAll({
+    where: { managed_campaign_id: campaign.id },
+    order: [['created_at', 'DESC']],
+    limit,
+  });
+  res.set('Cache-Control', 'no-store');
+  return res.json({
+    success: true,
+    dry_run_only: true,
+    external_mutation_performed: false,
+    items: rows.map((item) => publishingAuditDto(item)),
+  });
+});
+
 exports.createCampaign = asyncHandler(async (req, res) => {
   const userId = assertOperator(req, res);
   if (!userId) return;
@@ -436,18 +781,100 @@ exports.updateCampaign = asyncHandler(async (req, res) => {
   if (!userId) return;
   const row = await ManagedCampaign.findByPk(req.params.id);
   if (!row) return res.status(404).json({ success: false, error: 'not_found' });
-  if (['launching', 'active', 'completed'].includes(row.status)) {
+  if (['approved_to_launch', 'launching', 'active', 'completed', 'cancelled'].includes(row.status)) {
     return res.status(409).json({ success: false, error: 'immutable_live_spec', message: 'Pausa o crea una nueva versión antes de cambiar una campaña viva.' });
   }
+  const requestedFields = new Set(Object.keys(safeObject(req.body)));
+  if (row.status === 'pending_client_review'
+    && Array.from(requestedFields).some((field) => field !== 'assigned_to_user_id')) {
+    return res.status(409).json({
+      success: false,
+      error: 'proposal_locked_for_client_review',
+      message: 'La propuesta está bloqueada mientras el cliente la revisa. Solicita cambios antes de editarla.',
+    });
+  }
+  const clientMaterialFields = new Set([
+    'name', 'provider', 'family', 'target_config', 'budget_config', 'schedule_config',
+    'destination_config', 'audience_config', 'creative_config', 'review_config',
+  ]);
+  if (row.status === 'pending_admin_review'
+    && Array.from(requestedFields).some((field) => clientMaterialFields.has(field))) {
+    return res.status(409).json({
+      success: false,
+      error: 'client_reapproval_required',
+      message: 'Pasa la campaña a Cambios solicitados antes de modificar contenido aprobado por el cliente.',
+    });
+  }
+  if (['paused', 'blocked'].includes(row.status)
+    && Array.from(requestedFields).some((field) => clientMaterialFields.has(field))) {
+    return res.status(409).json({
+      success: false,
+      error: 'managed_revision_required',
+      message: 'Devuelve la campaña a borrador o crea una nueva revisión antes de modificar contenido pausado o bloqueado.',
+    });
+  }
   const patch = {};
+  const requestedProvider = cleanString(req.body?.provider, 32);
+  const requestedFamily = cleanString(req.body?.family, 64);
+  const nextProvider = requestedProvider || row.provider;
+  const nextFamily = requestedFamily || row.family;
+  if ((requestedProvider && !PROVIDERS.has(requestedProvider))
+    || (requestedFamily && !FAMILIES.has(requestedFamily))
+    || ((nextProvider === 'google_ads') !== String(nextFamily || '').startsWith('google_'))) {
+    return res.status(400).json({ success: false, error: 'provider_family_mismatch' });
+  }
+  if (requestedProvider) patch.provider = requestedProvider;
+  if (requestedFamily) patch.family = requestedFamily;
   for (const field of ['target_config', 'budget_config', 'schedule_config', 'destination_config', 'audience_config', 'creative_config', 'tracking_plan', 'platform_refs', 'review_config', 'policy_readiness']) {
     if (req.body?.[field] !== undefined) patch[field] = safeObject(req.body[field]);
+  }
+  if (patch.review_config) {
+    patch.review_config = protectedReviewConfigPatch(row.review_config, patch.review_config);
+  }
+  if (patch.platform_refs) {
+    patch.platform_refs = protectedPlatformRefsPatch(row.platform_refs, patch.platform_refs);
+  }
+  const destination = safeObject(patch.destination_config, safeObject(row.destination_config));
+  const creative = safeObject(patch.creative_config, safeObject(row.creative_config));
+  const destinationUrls = [
+    destination.final_url,
+    destination.effective_url,
+    destination.landing_url,
+    destination.url,
+    ...(Array.isArray(destination.final_urls) ? destination.final_urls : []),
+    ...(Array.isArray(destination.urls) ? destination.urls : []),
+  ].filter((candidate) => candidate !== undefined && candidate !== null && candidate !== '');
+  const urlCandidates = [
+    ...destinationUrls.map((candidate) => ({ candidate, isPreview: false })),
+    ...(creative.client_preview_url
+      ? [{ candidate: creative.client_preview_url, isPreview: true }]
+      : []),
+  ];
+  for (const { candidate, isPreview } of urlCandidates) {
+    if (!safeHttpUrl(candidate, { requireHttps: isPreview })) {
+      return res.status(400).json({
+        success: false,
+        error: 'invalid_http_url',
+        message: isPreview
+          ? 'La vista previa debe usar una URL https pública y sin credenciales.'
+          : 'Los destinos deben usar una URL http(s) pública y sin credenciales.',
+      });
+    }
   }
   if (cleanString(req.body?.name, 255)) patch.name = cleanString(req.body.name, 255);
   if (positiveInt(req.body?.assigned_to_user_id)) patch.assigned_to_user_id = positiveInt(req.body.assigned_to_user_id);
   patch.updated_by_user_id = userId;
   patch.version = Number(row.version || 1) + 1;
-  await row.update(patch);
+  const [updatedCount] = await ManagedCampaign.update(patch, {
+    where: { id: row.id, status: row.status, version: row.version },
+  });
+  if (!updatedCount) {
+    return res.status(409).json({
+      success: false,
+      error: 'update_conflict',
+      message: 'La campaña cambió mientras editabas. Recarga antes de volver a guardar.',
+    });
+  }
   const updated = (await listCampaignRows({ id: row.id }))[0];
   return res.json({ success: true, campaign: campaignAdminDto(updated) });
 });
@@ -461,61 +888,62 @@ exports.transitionCampaign = asyncHandler(async (req, res) => {
   if (!nextStatus || !MANAGED_STATUSES.has(nextStatus) || !STATUS_TRANSITIONS[row.status]?.has(nextStatus)) {
     return res.status(409).json({ success: false, error: 'invalid_transition', message: `${row.status} → ${nextStatus || '?'} no está permitido` });
   }
-  if (['approved_to_launch', 'launching', 'active'].includes(nextStatus)) {
-    const funding = await ManagedCampaignFundingAccount.findOne({ where: { managed_campaign_id: row.id }, raw: true });
-    const policy = safeObject(row.policy_readiness);
-    const tracking = safeObject(row.tracking_plan);
-    const reasons = [];
-    if (row.operation_mode !== 'managed') reasons.push('La campaña sigue en observación');
-    if (!funding || money(funding.available_amount) <= 0) reasons.push('No hay saldo publicitario neto disponible');
-    if (policy.status === 'blocked') reasons.push(...(Array.isArray(policy.reasons) ? policy.reasons : ['Política bloqueada']));
-    if (!['ready', 'configured'].includes(String(tracking.status || '').toLowerCase()) && tracking.conversion_actions_ready !== true) {
-      reasons.push('Tracking y conversiones pendientes');
+  if (nextStatus === 'pending_client_review') {
+    const proposal = proposalReadiness(row);
+    if (!proposal.ready) {
+      return res.status(409).json({ success: false, error: 'proposal_gate_failed', reasons: proposal.blockers });
     }
+  }
+  if (nextStatus === 'pending_admin_review') {
+    const review = safeObject(row.review_config);
+    if (review.client_approval_required === true && !review.client_approved_at) {
+      return res.status(409).json({
+        success: false,
+        error: 'client_approval_required',
+        reasons: ['El cliente debe aprobar la propuesta antes de la revisión administrativa'],
+      });
+    }
+  }
+  if (['approved_to_launch', 'launching', 'active'].includes(nextStatus)) {
+    const reasons = await managedLaunchGateReasons(row, userId);
     if (reasons.length) {
       return res.status(409).json({ success: false, error: 'launch_gate_failed', reasons });
     }
   }
-  await row.update({
+  const currentReview = safeObject(row.review_config);
+  const reviewPatch = nextStatus === 'pending_client_review'
+    ? {
+        ...currentReview,
+        proposal_revision: Math.max(0, Math.trunc(Number(currentReview.proposal_revision) || 0)) + 1,
+        client_approved_at: null,
+        client_approved_by_user_id: null,
+        client_next_action: 'Revisar y aprobar la propuesta preparada por ClinicaClick',
+      }
+    : nextStatus === 'changes_requested'
+      ? {
+          ...currentReview,
+          client_approved_at: null,
+          client_approved_by_user_id: null,
+          client_next_action: 'El equipo de ClinicaClick está preparando una revisión de la propuesta',
+        }
+      : currentReview;
+  const clearsAdminApproval = ['draft', 'pending_client_review', 'pending_admin_review', 'changes_requested', 'blocked'].includes(nextStatus);
+  const [updated] = await ManagedCampaign.update({
     status: nextStatus,
-    approved_by_user_id: nextStatus === 'approved_to_launch' ? userId : row.approved_by_user_id,
-    approved_at: nextStatus === 'approved_to_launch' ? new Date() : row.approved_at,
+    review_config: reviewPatch,
+    approved_by_user_id: nextStatus === 'approved_to_launch' ? userId : (clearsAdminApproval ? null : row.approved_by_user_id),
+    approved_at: nextStatus === 'approved_to_launch' ? new Date() : (clearsAdminApproval ? null : row.approved_at),
     updated_by_user_id: userId,
     version: Number(row.version || 1) + 1,
+  }, {
+    where: { id: row.id, status: row.status, version: row.version },
   });
-  if (row.strategy_campaign_id && Campaign && CampaignRequest) {
-    const legacyStatus = nextStatus === 'active'
-      ? 'active'
-      : nextStatus === 'paused'
-        ? 'paused'
-        : ['completed', 'cancelled'].includes(nextStatus)
-          ? 'completed'
-          : 'pending_approval';
-    const requestRows = await CampaignRequest.findAll({
-      where: { campaign_id: row.strategy_campaign_id },
-      attributes: ['id', 'solicitud'],
-    });
-    for (const requestRow of requestRows) {
-      const payload = safeObject(requestRow.solicitud);
-      if (payload.kind !== 'marketing_strategy') continue;
-      await requestRow.update({
-        estado: legacyStatus === 'active'
-          ? 'activa'
-          : legacyStatus === 'paused'
-            ? 'pausada'
-            : legacyStatus === 'completed'
-              ? 'finalizada'
-              : 'pendiente_aceptacion',
-        solicitud: { ...payload, status: legacyStatus, managed_status: nextStatus }
-      });
-    }
-    const legacyCampaignPatch = {
-      activa: nextStatus === 'active',
-      fecha_fin: ['completed', 'cancelled'].includes(nextStatus) ? new Date() : null,
-    };
-    if (nextStatus === 'active') legacyCampaignPatch.fecha_inicio = new Date();
-    await Campaign.update(legacyCampaignPatch, { where: { id: row.strategy_campaign_id } });
+  if (!updated) {
+    return res.status(409).json({ success: false, error: 'transition_conflict', message: 'El estado cambió mientras se procesaba la transición.' });
   }
+  // strategy_campaign_id/campaign_request_id identify the immutable Connect-only
+  // benchmark. ManagedCampaign is the lifecycle source of truth: changing a
+  // pilot must never pause, complete or rewrite the strategy it was compared to.
   return res.json({ success: true, campaign: campaignAdminDto((await listCampaignRows({ id: row.id }))[0]) });
 });
 
@@ -524,6 +952,15 @@ exports.activateManagement = asyncHandler(async (req, res) => {
   if (!userId) return;
   const row = await ManagedCampaign.findByPk(req.params.id);
   if (!row) return res.status(404).json({ success: false, error: 'not_found' });
+  const review = safeObject(row.review_config);
+  if (row.status !== 'pending_admin_review'
+    || (review.client_approval_required === true && !review.client_approved_at)) {
+    return res.status(409).json({
+      success: false,
+      error: 'management_activation_state_invalid',
+      message: 'Activa la gestión solo después de que el cliente apruebe la propuesta y pase a revisión interna.',
+    });
+  }
   const funding = await ManagedCampaignFundingAccount.findOne({ where: { managed_campaign_id: row.id } });
   const topups = funding
     ? await ManagedCampaignLedgerEntry.findAll({
@@ -540,7 +977,20 @@ exports.activateManagement = asyncHandler(async (req, res) => {
       message: 'Registra como verificado el cobro por adelantado antes de activar Piloto automático.',
     });
   }
-  await row.update({ operation_mode: 'managed', updated_by_user_id: userId, version: Number(row.version || 1) + 1 });
+  const [updated] = await ManagedCampaign.update({
+    operation_mode: 'managed',
+    updated_by_user_id: userId,
+    version: Number(row.version || 1) + 1,
+  }, {
+    where: { id: row.id, status: 'pending_admin_review', version: row.version },
+  });
+  if (!updated) {
+    return res.status(409).json({
+      success: false,
+      error: 'management_activation_conflict',
+      message: 'La campaña cambió mientras se activaba la gestión. Recarga antes de reintentarlo.',
+    });
+  }
   return res.json({ success: true, campaign: campaignAdminDto((await listCampaignRows({ id: row.id }))[0]) });
 });
 
@@ -772,7 +1222,10 @@ exports.listMatchingProposals = asyncHandler(async (req, res) => {
   });
   const eligibleClinics = clinics.filter((clinic) => !/\btest\b/i.test(String(clinic.nombre_clinica || '')));
   const campaigns = await campaignInventoryRows(customerId, provider);
-  const assignments = await ExternalCampaignAssignment.findAll({ where: { provider, customer_id: customerId, status: 'active' }, raw: true });
+  const assignments = await ExternalCampaignAssignment.findAll({
+    where: { provider, customer_id: customerId, status: { [Op.in]: ['active', 'archived'] } },
+    raw: true,
+  });
   const assignmentByCampaign = new Map(assignments.map((item) => [String(item.campaign_id), item]));
 
   const proposals = campaigns.map((campaign) => {
@@ -782,7 +1235,9 @@ exports.listMatchingProposals = asyncHandler(async (req, res) => {
     const best = candidates[0] || null;
     const second = candidates[1] || null;
     const margin = best ? best.score - (second?.score || 0) : 0;
-    const existing = assignmentByCampaign.get(String(campaign.campaign_id)) || null;
+    const reviewedAssignment = assignmentByCampaign.get(String(campaign.campaign_id)) || null;
+    const existing = reviewedAssignment?.status === 'active' ? reviewedAssignment : null;
+    const tombstoned = reviewedAssignment?.status === 'archived';
     return {
       provider,
       customer_id: customerId,
@@ -795,20 +1250,24 @@ exports.listMatchingProposals = asyncHandler(async (req, res) => {
       last_seen_at: campaign.last_seen_at || null,
       source: campaign.source || null,
       existing_assignment: existing,
-      suggested_clinic: best && best.score >= 0.65 ? {
+      suggested_clinic: !tombstoned && best && best.score >= 0.65 ? {
         id: best.clinic.id_clinica,
         name: best.clinic.nombre_clinica,
         score: Number(best.score.toFixed(4)),
         kind: best.kind,
         explanation: best.explanation,
       } : null,
-      alternatives: candidates.slice(1, 4).filter((item) => item.score >= 0.6).map((item) => ({
+      alternatives: tombstoned ? [] : candidates.slice(1, 4).filter((item) => item.score >= 0.6).map((item) => ({
         id: item.clinic.id_clinica,
         name: item.clinic.nombre_clinica,
         score: Number(item.score.toFixed(4)),
       })),
-      auto_eligible: !!best && best.score >= 0.9 && margin >= 0.12,
-      ambiguous: !!best && best.score >= 0.65 && margin < 0.12,
+      auto_eligible: !tombstoned && !!best && best.score >= 0.9 && margin >= 0.12,
+      ambiguous: !tombstoned && !!best && best.score >= 0.65 && margin < 0.12,
+      assignment_tombstone: tombstoned ? {
+        reason: reviewedAssignment.archive_reason || null,
+        archived_at: reviewedAssignment.archived_at || null,
+      } : null,
     };
   });
 
@@ -867,6 +1326,7 @@ exports.confirmMatching = asyncHandler(async (req, res) => {
           match_confidence: item?.match_confidence !== undefined ? clamp(Number(item.match_confidence) || 0, 0, 1) : null,
           match_explanation: cleanString(item?.match_explanation, 512),
           status: 'active',
+          ...assignmentReactivationAuditReset(),
           approved_by_user_id: userId,
           approved_at: new Date(),
         }, { transaction });
@@ -881,6 +1341,54 @@ exports.confirmMatching = asyncHandler(async (req, res) => {
     });
   }
   return res.json({ success: true, saved: saved.length });
+});
+
+exports.archiveMatching = asyncHandler(async (req, res) => {
+  const userId = assertOperator(req, res);
+  if (!userId) return;
+  const provider = cleanString(req.body?.provider, 32);
+  const customerId = cleanCustomerId(req.body?.customer_id);
+  const campaignId = cleanString(req.body?.campaign_id, 128);
+  const reason = cleanString(req.body?.reason, 1024);
+  if (!PROVIDERS.has(provider) || !customerId || !campaignId) {
+    return res.status(400).json({ success: false, error: 'provider_customer_campaign_required' });
+  }
+  if (provider !== 'google_ads') {
+    return res.status(409).json({
+      success: false,
+      error: 'archive_provider_not_supported',
+      message: 'El tombstone de atribución automática está disponible solo para Google Ads por ahora.',
+    });
+  }
+  if (!reason) {
+    return res.status(400).json({ success: false, error: 'archive_reason_required' });
+  }
+
+  let result;
+  try {
+    result = await archiveMatchingAssignment({
+      provider,
+      customerId,
+      campaignId,
+      reason,
+      userId,
+    });
+  } catch (error) {
+    return res.status(500).json({
+      success: false,
+      error: 'matching_archive_failed',
+      message: error.message || 'No se pudo archivar la asociación',
+    });
+  }
+  if (result.notFound) {
+    return res.status(404).json({ success: false, error: 'matching_assignment_not_found' });
+  }
+  return res.json({
+    success: true,
+    status: 'archived',
+    idempotent: result.idempotent,
+    archived_at: result.assignment.archived_at || null,
+  });
 });
 
 exports.listBankTransactions = asyncHandler(async (req, res) => {
@@ -1073,4 +1581,19 @@ exports.upsertExternalInventory = asyncHandler(async (req, res) => {
 });
 
 // Funciones puras expuestas únicamente para pruebas de regresión financiera.
-exports.__test = { commissionFor, fundingPublicDto, fundingAdminDto, hasVerifiedPrepaymentEntries, money };
+exports.__test = {
+  commissionFor,
+  fundingPublicDto,
+  fundingAdminDto,
+  hasVerifiedPrepaymentEntries,
+  money,
+  publishingAuditDto,
+  publishingGateEvidence,
+  archiveMatchingAssignment,
+  assignmentReactivationAuditReset,
+  proposalReadiness,
+  protectedReviewConfigPatch,
+  protectedPlatformRefsPatch,
+  managedLaunchGateReasons,
+  managedCampaignDisplayName,
+};
