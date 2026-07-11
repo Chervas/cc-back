@@ -2,6 +2,9 @@
 
 const crypto = require('node:crypto');
 const { publicHttpUrl } = require('../lib/safeHttpTarget');
+const {
+  buildManagedCampaignDryRunAdapter,
+} = require('./managedCampaignProviderAdapterRegistry.service');
 
 const PLAN_SCHEMA_VERSION = 'managed-campaign-publishing-plan/v1';
 const AUTHORIZATION_SCHEMA_VERSION = 'managed-campaign-publishing-authorization/v1';
@@ -23,6 +26,10 @@ const REQUIRED_EXECUTION_CONFIRMATIONS = Object.freeze([
   'confirm_tracking_configuration',
   'confirm_creative_rights',
 ]);
+// Intentionally empty while this module is dry-run only. A future provider
+// execution adapter must be registered here in code; a client-supplied plan
+// flag can never enable external mutations by itself.
+const EXECUTION_ADAPTER_KEYS = Object.freeze([]);
 
 function plainCampaign(campaign) {
   if (!campaign || typeof campaign !== 'object') return null;
@@ -45,10 +52,26 @@ function httpUrl(value) {
 }
 
 function positiveNumber(value) {
+  if (!['string', 'number', 'bigint'].includes(typeof value)) return null;
+  if (typeof value === 'string' && !value.trim()) return null;
   const parsed = Number(value);
   return Number.isFinite(parsed) && parsed > 0
     ? Math.round((parsed + Number.EPSILON) * 100) / 100
     : null;
+}
+
+function nonNegativeNumber(value) {
+  if (!['string', 'number', 'bigint'].includes(typeof value)) return null;
+  if (typeof value === 'string' && !value.trim()) return null;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed >= 0
+    ? Math.round((parsed + Number.EPSILON) * 100) / 100
+    : null;
+}
+
+function moneyCents(value) {
+  const parsed = nonNegativeNumber(value);
+  return parsed === null ? null : Math.round(parsed * 100);
 }
 
 function positiveInteger(value) {
@@ -157,6 +180,17 @@ function requireCount(blockers, values, minimum, code, field, message) {
 
 function commonSpecification(campaign, provider, family, refs) {
   const budget = safeObject(campaign.budget_config);
+  const funding = safeObject(campaign.funding);
+  const approvedGross = positiveNumber(budget.amount);
+  const fundedGross = positiveNumber(funding.client_gross_funded);
+  const commissionAmount = nonNegativeNumber(funding.commission_amount);
+  const mediaBudgetNet = positiveNumber(funding.media_budget_net);
+  const mediaBudgetAvailable = positiveNumber(funding.available_amount);
+  const approvedMediaBudgetCap = approvedGross && fundedGross && mediaBudgetNet
+    ? Math.round(((approvedGross * mediaBudgetNet / fundedGross) + Number.EPSILON) * 100) / 100
+    : null;
+  const fundingCurrency = text(funding.currency, 3)?.toUpperCase() || null;
+  const clientCurrency = text(budget.currency, 3)?.toUpperCase() || null;
   return {
     provider,
     family,
@@ -168,8 +202,18 @@ function commonSpecification(campaign, provider, family, refs) {
     name: text(campaign.name, 255),
     objective_id: text(campaign.objective_id, 64),
     budget: {
-      amount: positiveNumber(budget.amount),
-      currency: text(budget.currency, 3)?.toUpperCase() || null,
+      approved_client_gross_amount: approvedGross,
+      funded_client_gross_amount: fundedGross,
+      commission_amount: commissionAmount,
+      media_budget_total: mediaBudgetNet,
+      media_budget_available: mediaBudgetAvailable,
+      approved_media_budget_cap: approvedMediaBudgetCap,
+      provider_media_budget_amount: mediaBudgetNet && mediaBudgetAvailable && approvedMediaBudgetCap
+        ? Math.min(mediaBudgetNet, mediaBudgetAvailable, approvedMediaBudgetCap)
+        : null,
+      currency: fundingCurrency || clientCurrency,
+      client_currency: clientCurrency,
+      funding_currency: fundingCurrency,
       period: text(budget.period, 32),
     },
     targeting: sanitizeForPlan(safeObject(campaign.target_config)),
@@ -177,6 +221,45 @@ function commonSpecification(campaign, provider, family, refs) {
     schedule: sanitizeForPlan(safeObject(campaign.schedule_config)),
     destination: sanitizeForPlan(safeObject(campaign.destination_config)),
   };
+}
+
+function addGoogleBudgetBlockers(budget, blockers) {
+  if (!budget.approved_client_gross_amount) {
+    blockers.push(blocker('positive_budget_required', 'budget_config.amount', 'El presupuesto bruto del cliente debe ser mayor que cero.'));
+  }
+  if (!budget.funded_client_gross_amount) {
+    blockers.push(blocker('funded_gross_required', 'funding.client_gross_funded', 'Falta el importe bruto realmente cobrado por adelantado.'));
+  }
+  if (budget.commission_amount === null) {
+    blockers.push(blocker('commission_snapshot_required', 'funding.commission_amount', 'Falta el snapshot de comisión del prepago.'));
+  }
+  if (!budget.media_budget_total) {
+    blockers.push(blocker('media_budget_net_required', 'funding.media_budget_net', 'Falta el presupuesto neto reservado para publicidad.'));
+  }
+  if (!budget.media_budget_available) {
+    blockers.push(blocker('media_budget_available_required', 'funding.available_amount', 'No queda saldo neto disponible para publicidad.'));
+  }
+  if (budget.funded_client_gross_amount && budget.approved_client_gross_amount
+    && budget.funded_client_gross_amount < budget.approved_client_gross_amount) {
+    blockers.push(blocker('funding_below_approved_budget', 'funding.client_gross_funded', 'El prepago todavía no cubre el presupuesto bruto aprobado.'));
+  }
+  const fundedCents = moneyCents(budget.funded_client_gross_amount);
+  const commissionCents = moneyCents(budget.commission_amount);
+  const mediaBudgetCents = moneyCents(budget.media_budget_total);
+  if (fundedCents !== null && commissionCents !== null && mediaBudgetCents !== null
+    && fundedCents - commissionCents !== mediaBudgetCents) {
+    blockers.push(blocker('funding_breakdown_inconsistent', 'funding', 'El bruto cobrado menos la comisión no coincide con el neto de medios.'));
+  }
+  if (budget.media_budget_available && budget.media_budget_total
+    && budget.media_budget_available > budget.media_budget_total) {
+    blockers.push(blocker('available_media_exceeds_net', 'funding.available_amount', 'El saldo disponible no puede superar el neto total de medios.'));
+  }
+  if (!budget.approved_media_budget_cap) {
+    blockers.push(blocker('approved_media_budget_cap_required', 'funding', 'No se pudo calcular la asignación neta correspondiente al presupuesto aprobado.'));
+  }
+  if (budget.client_currency && budget.funding_currency && budget.client_currency !== budget.funding_currency) {
+    blockers.push(blocker('funding_currency_mismatch', 'funding.currency', 'La moneda del prepago no coincide con la moneda aprobada para la campaña.'));
+  }
 }
 
 function buildGoogleSearchSpec(campaign, refs, blockers) {
@@ -192,7 +275,7 @@ function buildGoogleSearchSpec(campaign, refs, blockers) {
   if (!common.account_id) blockers.push(blocker('provider_account_required', 'platform_refs.customer_id', 'Falta una cuenta Google Ads asignada.'));
   else if (!/^\d{10}$/.test(common.account_id.replace(/-/g, ''))) blockers.push(blocker('provider_account_invalid', 'platform_refs.customer_id', 'La cuenta Google Ads debe ser un customer ID de 10 dígitos.'));
   if (!common.name) blockers.push(blocker('campaign_name_required', 'name', 'Falta el nombre de campaña.'));
-  if (!common.budget.amount) blockers.push(blocker('positive_budget_required', 'budget_config.amount', 'El presupuesto debe ser mayor que cero.'));
+  addGoogleBudgetBlockers(common.budget, blockers);
   if (!finalUrl) blockers.push(blocker(rawFinalUrl ? 'final_url_invalid' : 'final_url_required', 'destination_config.final_url', 'Google Search requiere una URL final http(s) válida.'));
   requireCount(blockers, headlines, 3, 'search_headlines_required', 'creative_config.headlines', 'Google Search requiere al menos tres titulares proporcionados.');
   requireCount(blockers, descriptions, 2, 'search_descriptions_required', 'creative_config.descriptions', 'Google Search requiere al menos dos descripciones proporcionadas.');
@@ -223,7 +306,7 @@ function buildGooglePmaxSpec(campaign, refs, blockers) {
   if (!common.account_id) blockers.push(blocker('provider_account_required', 'platform_refs.customer_id', 'Falta una cuenta Google Ads asignada.'));
   else if (!/^\d{10}$/.test(common.account_id.replace(/-/g, ''))) blockers.push(blocker('provider_account_invalid', 'platform_refs.customer_id', 'La cuenta Google Ads debe ser un customer ID de 10 dígitos.'));
   if (!common.name) blockers.push(blocker('campaign_name_required', 'name', 'Falta el nombre de campaña.'));
-  if (!common.budget.amount) blockers.push(blocker('positive_budget_required', 'budget_config.amount', 'El presupuesto debe ser mayor que cero.'));
+  addGoogleBudgetBlockers(common.budget, blockers);
   requireCount(blockers, finalUrls, 1, 'pmax_final_url_required', 'destination_config.final_urls', 'Performance Max requiere al menos una URL final.');
   if (rawFinalUrls.length !== finalUrls.length) blockers.push(blocker('pmax_final_url_invalid', 'destination_config.final_urls', 'Todas las URLs de Performance Max deben usar http(s) y no incluir credenciales.'));
   requireCount(blockers, headlines, 3, 'pmax_headlines_required', 'creative_config.headlines', 'Performance Max requiere al menos tres titulares proporcionados.');
@@ -266,7 +349,7 @@ function buildMetaSpec(campaign, family, refs, blockers, warnings) {
   if (!pageId) blockers.push(blocker('meta_page_required', 'platform_refs.page_id', 'Meta requiere una página asignada como identidad.'));
   else if (!/^\d+$/.test(pageId)) blockers.push(blocker('meta_page_invalid', 'platform_refs.page_id', 'La página Meta debe usar un ID numérico.'));
   if (!common.name) blockers.push(blocker('campaign_name_required', 'name', 'Falta el nombre de campaña.'));
-  if (!common.budget.amount) blockers.push(blocker('positive_budget_required', 'budget_config.amount', 'El presupuesto debe ser mayor que cero.'));
+  if (!common.budget.approved_client_gross_amount) blockers.push(blocker('positive_budget_required', 'budget_config.amount', 'El presupuesto debe ser mayor que cero.'));
   requireCount(blockers, creative.primary_texts, 1, 'meta_primary_text_required', 'creative_config.primary_text', 'Meta requiere un texto principal proporcionado.');
   requireCount(blockers, creative.media, 1, 'meta_media_required', 'creative_config.media', 'Meta requiere una imagen o vídeo proporcionado.');
   if (!creative.call_to_action) blockers.push(blocker('meta_cta_required', 'creative_config.call_to_action', 'Meta requiere un CTA explícito.'));
@@ -365,6 +448,17 @@ function buildManagedCampaignPublishingPlan({ campaign, gateEvidence = {} } = {}
   const evidence = Object.fromEntries(REQUIRED_GATE_EVIDENCE.map((key) => [key, gateEvidence?.[key] === true]));
   addOperationalBlockers(row, evidence, blockers);
   const sanitizedSpecification = sanitizeForPlan(specification);
+  const dryRunAdapter = buildManagedCampaignDryRunAdapter({
+    provider,
+    family,
+    specification: sanitizedSpecification,
+  });
+  for (const item of dryRunAdapter.readiness.blockers || []) {
+    if (!blockers.some((existing) => existing.code === item.code)) blockers.push(item);
+  }
+  for (const item of dryRunAdapter.readiness.warnings || []) {
+    if (!warnings.some((existing) => existing.code === item.code)) warnings.push(item);
+  }
   const deterministicPayload = {
     schema_version: PLAN_SCHEMA_VERSION,
     mode: 'dry_run',
@@ -377,6 +471,7 @@ function buildManagedCampaignPublishingPlan({ campaign, gateEvidence = {} } = {}
       family,
     },
     specification: sanitizedSpecification,
+    dry_run_adapter: dryRunAdapter,
     gate_evidence: evidence,
     readiness: {
       ready: blockers.length === 0,
@@ -384,6 +479,10 @@ function buildManagedCampaignPublishingPlan({ campaign, gateEvidence = {} } = {}
       warnings,
     },
     execution: {
+      dry_run_adapter_available: dryRunAdapter.dry_run_adapter_available === true,
+      dry_run_adapter_version: dryRunAdapter.adapter_version || null,
+      dry_run_operation_count: Array.isArray(dryRunAdapter.operations) ? dryRunAdapter.operations.length : 0,
+      execution_adapter_available: false,
       adapter_available: false,
       provider_call_performed: false,
       required_confirmations: [...REQUIRED_EXECUTION_CONFIRMATIONS],
@@ -397,6 +496,28 @@ function buildManagedCampaignPublishingPlan({ campaign, gateEvidence = {} } = {}
   };
 }
 
+function deterministicPublishingPayload(plan) {
+  const source = safeObject(plan);
+  // Keep this projection byte-for-byte equivalent to deterministicPayload in
+  // buildManagedCampaignPublishingPlan. Re-sanitizing here is asymmetric: for
+  // example, a legitimate safety key containing "authorization" would be
+  // removed only during verification and invalidate every genuine plan.
+  return {
+    schema_version: source.schema_version,
+    mode: source.mode,
+    campaign: source.campaign,
+    specification: source.specification,
+    dry_run_adapter: source.dry_run_adapter,
+    gate_evidence: source.gate_evidence,
+    readiness: source.readiness,
+    execution: source.execution,
+  };
+}
+
+function hasManagedCampaignExecutionAdapter(provider, family) {
+  return EXECUTION_ADAPTER_KEYS.includes(`${text(provider, 32)}:${text(family, 64)}`);
+}
+
 function evaluateManagedCampaignExecutionGates({ plan, confirmation = {} } = {}) {
   const failures = [];
   if (!plan || plan.schema_version !== PLAN_SCHEMA_VERSION || plan.mode !== 'dry_run') {
@@ -404,6 +525,33 @@ function evaluateManagedCampaignExecutionGates({ plan, confirmation = {} } = {})
   }
   if (plan?.readiness?.ready !== true || (plan?.readiness?.blockers || []).length > 0) {
     failures.push(blocker('plan_not_ready', 'plan.readiness', 'El plan conserva blockers de publicación.'));
+  }
+  const planHash = text(plan?.plan_hash, 64);
+  const recomputedPlanHash = planHash && /^[a-f0-9]{64}$/i.test(planHash)
+    ? sha256(canonicalStringify(deterministicPublishingPayload(plan)))
+    : null;
+  if (!recomputedPlanHash || recomputedPlanHash !== planHash) {
+    failures.push(blocker('plan_hash_invalid', 'plan.plan_hash', 'El hash interno del plan no coincide con su contenido canónico.'));
+  }
+  const expectedPlanId = recomputedPlanHash
+    ? `managed:${text(plan?.campaign?.id, 64) || 'missing'}:v${positiveInteger(plan?.campaign?.version) || 1}:${recomputedPlanHash.slice(0, 16)}`
+    : null;
+  if (!expectedPlanId || text(plan?.plan_id, 191) !== expectedPlanId) {
+    failures.push(blocker('plan_id_invalid', 'plan.plan_id', 'El identificador del plan no corresponde con campaña, versión y hash.'));
+  }
+  const expectedDryRunAdapter = buildManagedCampaignDryRunAdapter({
+    provider: plan?.campaign?.provider,
+    family: plan?.campaign?.family,
+    specification: plan?.specification,
+  });
+  if (expectedDryRunAdapter.dry_run_adapter_available !== true
+    || canonicalStringify(expectedDryRunAdapter) !== canonicalStringify(plan?.dry_run_adapter)) {
+    failures.push(blocker('dry_run_manifest_invalid', 'plan.dry_run_adapter', 'El manifiesto dry-run no coincide con el adaptador versionado del servidor.'));
+  }
+  if (!hasManagedCampaignExecutionAdapter(plan?.campaign?.provider, plan?.campaign?.family)
+    || plan?.execution?.execution_adapter_available !== true
+    || plan?.execution?.adapter_available !== true) {
+    failures.push(blocker('execution_adapter_unavailable', 'plan.execution', 'No existe un adaptador de ejecución registrado para esta familia; el dry-run nunca autoriza una mutación externa.'));
   }
   if (!text(confirmation.plan_hash, 64) || confirmation.plan_hash !== plan?.plan_hash) {
     failures.push(blocker('plan_hash_confirmation_required', 'confirmation.plan_hash', 'La confirmación no corresponde al hash del plan.'));
