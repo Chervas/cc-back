@@ -33,6 +33,12 @@ const jobRequestsService = require('../services/jobRequests.service');
 const { previewLeadImport, executeLeadImport } = require('../services/leadImport.service');
 const { findCanonicalWhatsappConversation } = require('../lib/canonical-conversation');
 const { normalizePhoneDigits } = require('../lib/phone');
+const { normalizeConfiguredLocations } = require('../lib/intake-public-locations');
+const { resolveChatStateClinicSelection } = require('../lib/intakeChatLocation');
+const {
+  isQuickChatSummaryRequest,
+  materializeIntakeQuickChatSummary,
+} = require('../services/intakeQuickChatSummary.service');
 const { buildClinicMatcher } = require('../lib/clinicAttribution');
 const {
   getAccessibleMarketingClinicIds,
@@ -555,6 +561,20 @@ const emitLeadSocketEvent = async (eventName, payload, { clinicId, groupId } = {
   uniqueClinicIds.forEach((id) => {
     io.to(`clinic:${id}`).emit(eventName, payload);
   });
+};
+
+const emitQuickChatSummarySocketEvent = (result) => {
+  if (!result?.message || (!result.created && !result.updated)) return;
+  const io = getIO();
+  if (!io || !result.clinic_id) return;
+
+  io.to(`clinic:${result.clinic_id}`).emit(
+    result.created ? 'message:created' : 'message:updated',
+    {
+      ...result.message,
+      conversation_id: String(result.conversation_id),
+    }
+  );
 };
 
 const buildLeadCreatedSocketPayload = (lead) => {
@@ -1125,7 +1145,8 @@ exports.ingestLead = asyncHandler(async (req, res) => {
   } = body;
 
   // Compat: intake.js usa clinic_id; el backend histórico usa clinica_id
-  const explicitClinicId = parseInteger(coalesce(clinica_id, clinic_id, body.clinicaId, body.clinicId));
+  const explicitClinicIdRaw = coalesce(clinica_id, clinic_id, body.clinicaId, body.clinicId);
+  const explicitClinicId = parseInteger(explicitClinicIdRaw);
   const explicitGroupId = parseInteger(coalesce(grupo_clinica_id, group_id, body.grupoClinicaId, body.groupId));
   let clinicaIdParsed = explicitClinicId;
   let grupoClinicaIdParsed = explicitGroupId;
@@ -1210,6 +1231,39 @@ exports.ingestLead = asyncHandler(async (req, res) => {
   }
 
   const isGroupScopedRequest = explicitClinicId === null && explicitGroupId !== null;
+
+  // Runtime 3.2.1 conserva la sede solo en chat_state; 3.2.3 también la replica
+  // como clinic_id. En scope de grupo validamos ambos caminos y, si llegan los
+  // dos valores, exigimos que coincidan antes de confiar en ellos.
+  const chatGroupConfigRecord = [cfg, groupCfg, domainCfg]
+    .find((record) => record?.assignment_scope === 'group') || null;
+  const mustValidateGroupChatLocation = clinicaIdParsed === null
+    || cfg?.assignment_scope === 'group';
+  if (mustValidateGroupChatLocation) {
+    const chatClinicSelection = await resolveChatStateClinicSelection({
+      body,
+      requestedGroupId: grupoClinicaIdParsed,
+      submittedClinicId: explicitClinicIdRaw,
+      configRecord: chatGroupConfigRecord,
+      findClinicById: (candidateClinicId) => Clinica.findOne({
+        where: { id_clinica: candidateClinicId },
+        attributes: ['id_clinica', 'grupoClinicaId', 'estado_clinica'],
+        raw: true,
+      }),
+    });
+    if (chatClinicSelection.matched) {
+      clinicaIdParsed = chatClinicSelection.clinicId;
+      grupoClinicaIdParsed = chatClinicSelection.groupId;
+      clinicMatchSource = 'chat_location';
+      clinicMatchValue = String(chatClinicSelection.clinicId);
+    } else if (chatClinicSelection.hasCandidate) {
+      return res.status(422).json({
+        success: false,
+        error: 'invalid_chat_location',
+        message: 'La sede seleccionada no es válida para este formulario',
+      });
+    }
+  }
 
   if (clinicaIdParsed === null && grupoClinicaIdParsed !== null && clinicNameHint && isGroupScopedRequest) {
     const groupClinics = await Clinica.findAll({
@@ -1453,6 +1507,62 @@ exports.ingestLead = asyncHandler(async (req, res) => {
       }
     } else {
       throw err;
+    }
+  }
+
+  // Esta acción pública materializa un aviso interno en QuickChat. Debe
+  // reutilizar el lead del paso save_lead cuando el dedupe lo encuentre y
+  // terminar aquí: no representa una segunda conversión publicitaria ni debe
+  // invocar Meta CAPI, Google Ads o una salida real de WhatsApp.
+  if (isQuickChatSummaryRequest(body)) {
+    if (lead && shouldEmitLeadCreated) {
+      try {
+        await emitLeadSocketEvent('lead:created', buildLeadCreatedSocketPayload(lead), {
+          clinicId: lead.clinica_id || clinicaIdParsed,
+          groupId: lead.grupo_clinica_id || grupoClinicaIdParsed,
+        });
+      } catch (emitErr) {
+        console.warn('⚠️ No se pudo emitir lead:created:', emitErr.message || emitErr);
+      }
+    }
+
+    try {
+      const summaryResult = await materializeIntakeQuickChatSummary({
+        leadId: lead?.id || dedupeConflict?.existingId,
+        clinicId: clinicaIdParsed,
+        body,
+        pageUrl: pageUrlValue,
+        landingUrl: landingUrlValue,
+      });
+
+      try {
+        emitQuickChatSummarySocketEvent(summaryResult);
+      } catch (emitErr) {
+        console.warn('⚠️ No se pudo emitir el resumen QuickChat:', emitErr.message || emitErr);
+      }
+
+      return res.status(dedupeConflict ? 200 : 201).json({
+        id: summaryResult.lead_id,
+        deduped: !!dedupeConflict,
+        quickchat_summary_sent: true,
+        quickchat_summary_saved: true,
+        quickchat_summary_created: summaryResult.created,
+        conversation_id: summaryResult.conversation_id,
+        message_id: summaryResult.message_id,
+      });
+    } catch (summaryError) {
+      const status = Number(summaryError?.status);
+      const safeStatus = Number.isInteger(status) && status >= 400 && status < 500 ? status : 500;
+      console.warn('⚠️ No se pudo materializar el resumen QuickChat:', summaryError.message || summaryError);
+      return res.status(safeStatus).json({
+        id: lead?.id || dedupeConflict?.existingId || null,
+        quickchat_summary_sent: false,
+        quickchat_summary_saved: false,
+        error: summaryError?.code || 'quickchat_summary_failed',
+        message: safeStatus === 500
+          ? 'No se pudo crear el resumen QuickChat'
+          : summaryError.message,
+      });
     }
   }
 
@@ -2102,34 +2212,6 @@ const defaultConfigPayload = (clinicId, groupId) => ({
   has_hmac: false,
   config: {}
 });
-
-const normalizeConfiguredLocations = (locations, availableLocations) => {
-  const available = Array.isArray(availableLocations) ? availableLocations : [];
-  const byId = new Map();
-
-  for (const location of available) {
-    const id = location?.id;
-    if (id === undefined || id === null || id === '') continue;
-    byId.set(String(id), location);
-  }
-
-  const configured = Array.isArray(locations) ? locations : [];
-  return configured.map((location) => {
-    if (!location || typeof location !== 'object') return location;
-
-    const id = location.id ?? location.value ?? location.clinic_id ?? location.clinica_id;
-    const fresh = id !== undefined && id !== null && id !== '' ? byId.get(String(id)) : null;
-    if (!fresh) return location;
-
-    return {
-      ...location,
-      label: fresh.label || location.label,
-      phone: location.phone || fresh.phone || null,
-      whatsapp: location.whatsapp || fresh.whatsapp || null,
-      address: location.address || fresh.address || null,
-    };
-  });
-};
 
 const resolveSharedWebGroupConfigForClinic = async (clinicId) => {
   const parsedClinicId = parseInteger(clinicId);
