@@ -3379,6 +3379,7 @@ Rutas internas actuales bajo `/api/admin/managed-campaigns`:
 - transición de lifecycle y `activate-management`;
 - top-ups manuales con comisión fija/porcentual y snapshots de gasto;
 - inventario de campañas, propuestas fuzzy, confirmación y archivado/tombstone campaña -> clínica;
+- cola interna por empleado con responsable, siguiente acción, bloqueo operativo y auditoría append-only;
 - briefing/propuesta, plan de publicación dry-run determinista y adaptador Google Ads dry-run versionado para Search/PMax, sanitizados, idempotentes y auditables;
 - movimientos bancarios manuales, propuestas y confirmación de conciliación parcial.
 
@@ -3386,7 +3387,19 @@ La asociación asistida no acepta IDs de cuenta escritos a ciegas como autoridad
 
 `GET /matching/proposals`, `POST /matching/confirm`, `POST /matching/archive` y ambos endpoints `/inventory` vuelven a comprobar en servidor `group_id + provider + customer_id` contra ese scope activo; el selector frontend no constituye autorización. Archivar exige `group_id`. Confirmar reconsulta y bloquea dentro de la misma transacción clínicas, mapeos y autorizaciones, y guarda mediante `create` o actualización de una fila ya validada, nunca mediante un `upsert` que pudiera moverla por carrera. La pertenencia histórica usa todas las clínicas que siguen dentro del grupo; la selección de destino usa solo activas y no-test. Así una decisión legacy de una clínica desactivada puede reasignarse o archivarse, pero esa clínica no reaparece como destino. Si una decisión previa pertenece a otro grupo devuelve `matching_assignment_scope_conflict` sin escribir. El archivo revalida y bloquea en su propia transacción clínicas, autorización y decisión externa global antes del tombstone. El `POST /inventory` revalida una sola vez bajo los mismos locks y agrupa todos los upserts en esa transacción: una revocación aborta el lote antes de su primera escritura. El catálogo y estos guards no llaman a Google/Meta ni refrescan credenciales.
 
-Tablas reales: `ManagedCampaigns`, `ManagedCampaignFundingAccounts`, `ManagedCampaignLedgerEntries`, `ManagedCampaignSpendSnapshots`, `ManagedCampaignBankTransactions`, `ManagedCampaignReconciliationMatches`, `ManagedCampaignPublishingAudits`, `ExternalCampaignInventories` y `ExternalCampaignAssignments`.
+La coordinación interna usa exclusivamente estas rutas:
+
+| Método | Ruta | Contrato |
+|---|---|---|
+| GET | `/operators` | Operadores de la allowlist que existen y continúan con `estado_cuenta=activo`; DTO limitado a ID, nombre visible, email y avatar. |
+| PATCH | `/:id/coordination` | Patch por presencia de `assigned_to_user_id`, `next_action` y/o `operational_blocker`, con `expected_version` entero obligatorio. `null` desasigna/limpia; texto en blanco se normaliza a `null`. |
+| GET | `/:id/coordination-audits` | Historial descendente append-only, 30 filas por defecto y máximo 100. |
+
+El PATCH bloquea `completed/cancelled`, pero permite coordinar una campaña `active`, `launching`, `paused` o `blocked` sin reabrir ni alterar su lifecycle. Actor y nuevo responsable se vuelven a validar como operadores allowlisted activos dentro de la transacción. La campaña se bloquea, se compara la versión vista por el navegador y se actualiza con `WHERE id + version`; un conflicto devuelve `operation_version_conflict`. Un patch normalizado sin diferencias devuelve `changed=false`, conserva versión/`updated_at` y no crea audit, pero una versión obsoleta falla incluso si el valor enviado coincide.
+
+Cada cambio real incrementa una sola versión y crea en la misma transacción una fila `coordination_updated` con actor, versión anterior/nueva y únicamente `{before, after}` de los campos modificados. Si falla el audit, también se revierte la campaña. El modelo de auditoría rechaza update/destroy y la API no expone rutas para mutarlo. `POST /` y el `PATCH /:id` genérico rechazan campos de coordinación para que no exista una vía sin CAS, validación de responsable y auditoría. `review_config.client_next_action` sigue siendo exclusivamente la acción visible para el cliente; `next_action` y `operational_blocker` son internos y no aparecen en el DTO cliente.
+
+Tablas reales: `ManagedCampaigns`, `ManagedCampaignFundingAccounts`, `ManagedCampaignLedgerEntries`, `ManagedCampaignSpendSnapshots`, `ManagedCampaignBankTransactions`, `ManagedCampaignReconciliationMatches`, `ManagedCampaignPublishingAudits`, `ManagedCampaignOperationAudits`, `ExternalCampaignInventories` y `ExternalCampaignAssignments`.
 
 Límites que no deben ocultarse:
 
@@ -3399,7 +3412,7 @@ Límites que no deben ocultarse:
 - `recordSpend` bloquea la cuenta de fondos y actualiza snapshot, saldo y asiento en una sola transacción; un reintento concurrente con el mismo total no duplica gasto;
 - la conciliación actual vincula movimiento bancario con funding/cobro cliente, no snapshot de gasto con cargo real de proveedor; `bank_difference` sigue `null`, `provisional_margin` contiene la comisión y `realised_margin` permanece `null`;
 - no hay payment provider, fiscalidad, refund/chargeback, importación bancaria, disputa ni cierre de periodo;
-- frontend y backend consultan la misma allowlist `ADMIN_USER_IDS` + `CAMPAIGN_OPERATOR_USER_IDS`; siguen faltando capacidades granulares separadas;
+- frontend y backend consultan la misma allowlist `ADMIN_USER_IDS` + `CAMPAIGN_OPERATOR_USER_IDS`; salvo el probe fail-closed `/access`, todo el router administrativo exige además una cuenta de usuario activa. Siguen faltando capacidades granulares separadas;
 - esa allowlist continúa siendo una capacidad global de backoffice. El scope grupo/cuenta evita cruces y corrupción entre clientes, pero no convierte a un operador allowlisted en usuario tenant-scoped;
 - la estrategia legacy no puede pasar directamente a `active` si es `managed_service`: debe operarse desde este lifecycle interno.
 

@@ -8,6 +8,8 @@ const router = express.Router();
 router.use(authMiddleware);
 
 router.get('/access', controller.getAccess);
+router.use(controller.requireActiveOperator);
+router.get('/operators', controller.getOperators);
 router.get('/dashboard', controller.getDashboard);
 router.get('/matching/options', controller.getMatchingOptions);
 router.get('/matching/proposals', controller.listMatchingProposals);
@@ -21,6 +23,8 @@ router.get('/reconciliation/proposals', controller.getReconciliationProposals);
 router.post('/reconciliation/confirm', controller.confirmReconciliation);
 router.get('/', controller.listCampaigns);
 router.post('/', controller.createCampaign);
+router.patch('/:id/coordination', controller.updateCoordination);
+router.get('/:id/coordination-audits', controller.listCoordinationAudits);
 router.get('/:id/publishing-plan', controller.getPublishingPlan);
 router.post('/:id/publishing-dry-run', controller.createPublishingDryRun);
 router.get('/:id/publishing-audits', controller.listPublishingAudits);

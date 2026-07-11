@@ -29,6 +29,19 @@ module.exports = (sequelize, DataTypes) => {
           as: 'publishing_audits',
         });
       }
+      if (models.Usuario) {
+        ManagedCampaign.belongsTo(models.Usuario, {
+          foreignKey: 'assigned_to_user_id',
+          targetKey: 'id_usuario',
+          as: 'assignee',
+        });
+      }
+      if (models.ManagedCampaignOperationAudit) {
+        ManagedCampaign.hasMany(models.ManagedCampaignOperationAudit, {
+          foreignKey: 'managed_campaign_id',
+          as: 'operation_audits',
+        });
+      }
     }
   }
 
@@ -61,6 +74,8 @@ module.exports = (sequelize, DataTypes) => {
     review_config: { type: DataTypes.JSON, allowNull: false, defaultValue: {} },
     policy_readiness: { type: DataTypes.JSON, allowNull: false, defaultValue: { status: 'warning', reasons: ['pending_review'] } },
     assigned_to_user_id: DataTypes.INTEGER,
+    next_action: DataTypes.TEXT,
+    operational_blocker: DataTypes.TEXT,
     approved_by_user_id: DataTypes.INTEGER,
     approved_at: DataTypes.DATE,
     version: { type: DataTypes.INTEGER, allowNull: false, defaultValue: 1 },

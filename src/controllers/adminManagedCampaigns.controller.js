@@ -17,6 +17,15 @@ const {
   saveAssignmentWithinScope,
   upsertInventoryWithinScope,
 } = require('../services/managedCampaignAssociationScopes.service');
+const {
+  COORDINATION_FIELDS,
+  campaignOperatorIds,
+  listActiveCampaignOperators,
+  operationAuditDto,
+  operatorSummaryDto,
+  requireActiveCampaignOperator,
+  updateManagedCampaignCoordination,
+} = require('../services/managedCampaignCoordination.service');
 
 const {
   Clinica,
@@ -24,12 +33,14 @@ const {
   ExternalCampaignAssignment,
   GoogleAdsInsightsDaily,
   ManagedCampaign,
+  ManagedCampaignOperationAudit,
   ManagedCampaignFundingAccount,
   ManagedCampaignLedgerEntry,
   ManagedCampaignSpendSnapshot,
   ManagedCampaignBankTransaction,
   ManagedCampaignReconciliationMatch,
   ManagedCampaignPublishingAudit,
+  Usuario,
 } = db;
 
 const MANAGED_STATUSES = new Set([
@@ -56,11 +67,7 @@ const STATUS_TRANSITIONS = {
 };
 
 function operatorIds() {
-  const configured = String(process.env.CAMPAIGN_OPERATOR_USER_IDS || '')
-    .split(',')
-    .map((value) => Number.parseInt(value.trim(), 10))
-    .filter((value) => Number.isInteger(value) && value > 0);
-  return new Set([...ADMIN_USER_IDS, ...configured]);
+  return campaignOperatorIds(ADMIN_USER_IDS, process.env.CAMPAIGN_OPERATOR_USER_IDS);
 }
 
 function assertOperator(req, res) {
@@ -95,11 +102,58 @@ async function requireAssociationAccountScope(res, {
 
 exports.getAccess = asyncHandler(async (req, res) => {
   const userId = Number.parseInt(String(req.userData?.userId || ''), 10);
+  const allowedById = Number.isInteger(userId) && operatorIds().has(userId);
+  const activeUser = allowedById
+    ? await Usuario.findOne({
+        where: { id_usuario: userId, estado_cuenta: 'activo' },
+        attributes: ['id_usuario'],
+        raw: true,
+      })
+    : null;
   res.set('Cache-Control', 'no-store');
   return res.json({
     success: true,
-    allowed: Number.isInteger(userId) && operatorIds().has(userId),
+    allowed: !!activeUser,
   });
+});
+
+async function requireActiveOperatorRequest(req, res) {
+  const userId = assertOperator(req, res);
+  if (!userId) return null;
+  try {
+    await requireActiveCampaignOperator({
+      userId,
+      allowedOperatorIds: operatorIds(),
+      userModel: Usuario,
+    });
+    return userId;
+  } catch (error) {
+    res.status(error.httpStatus || 403).json({
+      success: false,
+      error: error.code || 'campaign_operator_inactive',
+      message: error.message,
+    });
+    return null;
+  }
+}
+
+exports.requireActiveOperator = asyncHandler(async (req, res, next) => {
+  const userId = await requireActiveOperatorRequest(req, res);
+  if (!userId) return;
+  req.campaignOperatorUserId = userId;
+  return next();
+});
+
+exports.getOperators = asyncHandler(async (req, res) => {
+  const userId = positiveInt(req.campaignOperatorUserId)
+    || await requireActiveOperatorRequest(req, res);
+  if (!userId) return;
+  const items = await listActiveCampaignOperators({
+    allowedOperatorIds: operatorIds(),
+    userModel: Usuario,
+  });
+  res.set('Cache-Control', 'no-store');
+  return res.json({ success: true, current_user_id: userId, items });
 });
 
 function cleanString(value, max = 1024) {
@@ -515,9 +569,12 @@ function managedCampaignDisplayName(value) {
 function campaignAdminDto(row) {
   const plain = typeof row?.get === 'function' ? row.get({ plain: true }) : row;
   const funding = plain?.funding || null;
+  const assignee = operatorSummaryDto(plain?.assignee);
   return {
     ...plain,
     name: managedCampaignDisplayName(plain?.name),
+    assignee,
+    responsible_name: assignee?.display_name || null,
     funding: fundingAdminDto(funding),
     client_finance_preview: fundingPublicDto(funding, plain?.budget_config?.leads || 0),
   };
@@ -528,6 +585,7 @@ async function listCampaignRows(where = {}) {
     where,
     include: [
       { model: Clinica, as: 'clinic', attributes: ['id_clinica', 'nombre_clinica', 'grupoClinicaId'], required: false },
+      { model: Usuario, as: 'assignee', attributes: ['id_usuario', 'nombre', 'apellidos'], required: false },
       { model: ManagedCampaignFundingAccount, as: 'funding', required: false },
     ],
     order: [['updated_at', 'DESC']],
@@ -596,9 +654,12 @@ exports.getDashboard = asyncHandler(async (req, res) => {
     success: true,
     summary: {
       total: campaigns.length,
-      attention: campaigns.filter((row) => ['pending_admin_review', 'blocked', 'changes_requested'].includes(row.status)).length,
+      attention: campaigns.filter((row) => ['pending_admin_review', 'blocked', 'changes_requested'].includes(row.status)
+        || !!String(row.operational_blocker || '').trim()).length,
       active: campaigns.filter((row) => row.status === 'active').length,
       observe: campaigns.filter((row) => row.operation_mode === 'observe').length,
+      unassigned: campaigns.filter((row) => !row.assigned_to_user_id).length,
+      operational_blockers: campaigns.filter((row) => !!String(row.operational_blocker || '').trim()).length,
       unmatched_bank_transactions: bankUnmatched,
       active_assignments: assignments,
       ...Object.fromEntries(Object.entries(totals).map(([key, value]) => [key, money(value)])),
@@ -779,9 +840,74 @@ exports.listPublishingAudits = asyncHandler(async (req, res) => {
   });
 });
 
+exports.updateCoordination = asyncHandler(async (req, res) => {
+  const userId = assertOperator(req, res);
+  if (!userId) return;
+  let result;
+  try {
+    result = await updateManagedCampaignCoordination({
+      campaignId: req.params.id,
+      actorUserId: userId,
+      allowedOperatorIds: operatorIds(),
+      input: req.body,
+      sequelize: db.sequelize,
+      campaignModel: ManagedCampaign,
+      auditModel: ManagedCampaignOperationAudit,
+      userModel: Usuario,
+    });
+  } catch (error) {
+    const status = error.httpStatus || 500;
+    return res.status(status).json({
+      success: false,
+      error: error.code || 'coordination_update_failed',
+      message: status >= 500
+        ? 'No se pudo guardar la coordinación de la campaña.'
+        : error.message,
+      ...(error.currentVersion !== undefined ? { current_version: error.currentVersion } : {}),
+    });
+  }
+  const row = (await listCampaignRows({ id: req.params.id }))[0];
+  if (!row) return res.status(404).json({ success: false, error: 'not_found' });
+  return res.json({
+    success: true,
+    changed: result.changed,
+    audit_id: result.audit?.id || null,
+    campaign: campaignAdminDto(row),
+  });
+});
+
+exports.listCoordinationAudits = asyncHandler(async (req, res) => {
+  const userId = await requireActiveOperatorRequest(req, res);
+  if (!userId) return;
+  const campaign = await ManagedCampaign.findByPk(req.params.id, { attributes: ['id'], raw: true });
+  if (!campaign) return res.status(404).json({ success: false, error: 'not_found' });
+  const limit = Math.min(100, Math.max(1, positiveInt(req.query?.limit) || 30));
+  const rows = await ManagedCampaignOperationAudit.findAll({
+    where: { managed_campaign_id: campaign.id },
+    include: [{
+      model: Usuario,
+      as: 'actor',
+      attributes: ['id_usuario', 'nombre', 'apellidos'],
+      required: false,
+    }],
+    order: [['created_at', 'DESC'], ['id', 'DESC']],
+    limit,
+  });
+  res.set('Cache-Control', 'no-store');
+  return res.json({ success: true, items: rows.map(operationAuditDto) });
+});
+
 exports.createCampaign = asyncHandler(async (req, res) => {
   const userId = assertOperator(req, res);
   if (!userId) return;
+  const requestedFields = new Set(Object.keys(safeObject(req.body)));
+  if (COORDINATION_FIELDS.some((field) => requestedFields.has(field))) {
+    return res.status(400).json({
+      success: false,
+      error: 'coordination_requires_dedicated_endpoint',
+      message: 'Crea primero la campaña y usa después el endpoint auditado de coordinación.',
+    });
+  }
   const clinicId = positiveInt(req.body?.clinica_id);
   const provider = cleanString(req.body?.provider, 32);
   const family = cleanString(req.body?.family, 64);
@@ -826,7 +952,6 @@ exports.createCampaign = asyncHandler(async (req, res) => {
       platform_refs: safeObject(req.body?.platform_refs),
       review_config: safeObject(req.body?.review_config, { client_approval_required: true, admin_approval_required: true }),
       policy_readiness: safeObject(req.body?.policy_readiness, { status: 'warning', reasons: ['pending_review'] }),
-      assigned_to_user_id: positiveInt(req.body?.assigned_to_user_id),
       created_by_user_id: userId,
       updated_by_user_id: userId,
     }, { transaction });
@@ -848,14 +973,20 @@ exports.createCampaign = asyncHandler(async (req, res) => {
 exports.updateCampaign = asyncHandler(async (req, res) => {
   const userId = assertOperator(req, res);
   if (!userId) return;
+  const requestedFields = new Set(Object.keys(safeObject(req.body)));
+  if (COORDINATION_FIELDS.some((field) => requestedFields.has(field))) {
+    return res.status(400).json({
+      success: false,
+      error: 'coordination_requires_dedicated_endpoint',
+      message: 'Responsable, siguiente acción y bloqueo solo se editan en el endpoint auditado de coordinación.',
+    });
+  }
   const row = await ManagedCampaign.findByPk(req.params.id);
   if (!row) return res.status(404).json({ success: false, error: 'not_found' });
   if (['approved_to_launch', 'launching', 'active', 'completed', 'cancelled'].includes(row.status)) {
     return res.status(409).json({ success: false, error: 'immutable_live_spec', message: 'Pausa o crea una nueva versión antes de cambiar una campaña viva.' });
   }
-  const requestedFields = new Set(Object.keys(safeObject(req.body)));
-  if (row.status === 'pending_client_review'
-    && Array.from(requestedFields).some((field) => field !== 'assigned_to_user_id')) {
+  if (row.status === 'pending_client_review' && requestedFields.size > 0) {
     return res.status(409).json({
       success: false,
       error: 'proposal_locked_for_client_review',
@@ -931,7 +1062,13 @@ exports.updateCampaign = asyncHandler(async (req, res) => {
     }
   }
   if (cleanString(req.body?.name, 255)) patch.name = cleanString(req.body.name, 255);
-  if (positiveInt(req.body?.assigned_to_user_id)) patch.assigned_to_user_id = positiveInt(req.body.assigned_to_user_id);
+  if (!Object.keys(patch).length) {
+    return res.status(400).json({
+      success: false,
+      error: 'campaign_update_fields_required',
+      message: 'No hay campos editables para guardar.',
+    });
+  }
   patch.updated_by_user_id = userId;
   patch.version = Number(row.version || 1) + 1;
   const [updatedCount] = await ManagedCampaign.update(patch, {
