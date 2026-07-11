@@ -7,6 +7,7 @@ const { Op } = require('sequelize');
 const db = require('../../../models');
 const {
   clinicIdsFromStrategyRows,
+  getAccessibleMarketingClinicIds,
   hasMarketingClinicScopeAccess,
   requestIdsFromRows,
 } = require('../../lib/marketingScopeAccess');
@@ -25,6 +26,12 @@ const {
   resolveSafeHttpTarget,
 } = require('../../lib/safeHttpTarget');
 const { resolveEffectiveTrackingConfig } = require('../../services/effectiveMarketingAssets.service');
+const {
+  configuredLocationsWithinAllowedScope,
+  parseIntakeId,
+  restrictAvailableLocationsToConfigured,
+  resolveIntakeLocationVisibility,
+} = require('../../lib/intakeLocations');
 
 function controllerSection(source, exportName, nextExportName = null) {
   const start = source.indexOf(`exports.${exportName}`);
@@ -76,6 +83,13 @@ async function testScopeAuthorization() {
     membershipModel: partialMembershipModel,
     globalAdminCheck: () => false,
   }), false, 'Every clinic in a multi-clinic strategy must be authorized');
+  assert.deepEqual(await getAccessibleMarketingClinicIds({
+    userId: 77,
+    clinicIds: [4, 9],
+    access: 'read',
+    membershipModel: partialMembershipModel,
+    globalAdminCheck: () => false,
+  }), [4], 'Scoped DTOs must be able to filter candidates to accessible clinics');
 
   await hasMarketingClinicScopeAccess({
     userId: 77,
@@ -201,6 +215,8 @@ function testIntakeConfigScopeRegression() {
 
   assert.match(upsert, /requireIntakeConfigScopeAccess\(req, res, \{[\s\S]*access: 'write'[\s\S]*\}\)/,
     'Intake configuration writes must be scope authorized');
+  assert.match(upsert, /configuredLocationsWithinAllowedScope\(configuredLocations, allowedLocationClinicIds\)/,
+    'Both root and nested config locations must be checked after payload merging');
   assert.match(clinicSecret, /requireIntakeConfigScopeAccess\(req, res, \{ clinicId, access: 'read' \}\)/,
     'Clinic HMAC secrets must be scope authorized');
   assert.match(groupSecret, /requireIntakeConfigScopeAccess\(req, res, \{ groupId, access: 'read' \}\)/,
@@ -215,6 +231,116 @@ function testIntakeConfigScopeRegression() {
     'When both IDs are supplied, authorization must cover both clinic and group scopes');
   assert.match(accessHelper, /clinicIds\.push\(clinicId\)/);
   assert.match(accessHelper, /clinicIds\.push\(\.\.\.rows\.map/);
+}
+
+function testPublicIntakeLocationsRespectConfiguredSubset() {
+  const available = [
+    { id: 60, label: 'Clinica test reseñas', phone: '600000000' },
+    { id: 58, label: 'Propdental Badalona', phone: '611111111' },
+    { id: 19, label: 'Propdental Sants', phone: '622222222' },
+    { id: 36, label: 'Propdental Francia', phone: '633333333' },
+  ];
+  const configured = [
+    { id: '19', label: 'Sants' },
+    { clinic_id: 58, label: 'Badalona' },
+    { id: '999', label: 'Stale location' },
+    { id: 19, label: 'Duplicate Sants' },
+  ];
+
+  assert.deepEqual(
+    restrictAvailableLocationsToConfigured(available, configured),
+    [available[2], available[1]],
+    'Public intake must expose only configured locations, in configured order',
+  );
+  assert.equal(
+    restrictAvailableLocationsToConfigured(available, []).length,
+    0,
+    'Public group intake must expose no location until an explicit subset is configured',
+  );
+  assert.equal(
+    configuredLocationsWithinAllowedScope(configured, [19, 58]),
+    false,
+    'Stale or out-of-scope configured locations must be rejected on write',
+  );
+  assert.equal(
+    configuredLocationsWithinAllowedScope(configured.slice(0, 2), [19, 58]),
+    true,
+    'Configured aliases are accepted when every location is in the writable scope',
+  );
+  assert.equal(
+    configuredLocationsWithinAllowedScope([], [19, 58]),
+    true,
+    'Clearing the configured location subset remains valid',
+  );
+  assert.deepEqual(
+    resolveIntakeLocationVisibility(available, [], { clinicId: 36 }),
+    {
+      availableLocations: [available[3]],
+      configuredLocations: [{ id: 36 }],
+    },
+    'An empty clinic config must fall back only to that clinic before editor normalization',
+  );
+  assert.deepEqual(
+    resolveIntakeLocationVisibility(available, [], { clinicId: null }),
+    { availableLocations: [], configuredLocations: [] },
+    'An empty group config must not expand to the full editor directory',
+  );
+  assert.deepEqual(
+    resolveIntakeLocationVisibility(available, [], { includeAllLocations: true, clinicId: 36 }),
+    { availableLocations: available, configuredLocations: [] },
+    'The authenticated editor may still receive all candidates for selection',
+  );
+  assert.deepEqual(
+    resolveIntakeLocationVisibility(available, configured, {
+      includeAllLocations: true,
+      clinicId: 36,
+      allowedClinicIds: [36, 19],
+    }),
+    {
+      availableLocations: [available[2], available[3]],
+      configuredLocations: [configured[0], configured[3]],
+    },
+    'The editor DTO must remove candidates and selected locations outside user scope',
+  );
+
+  const controllerPath = path.resolve(__dirname, '../../controllers/intake.controller.js');
+  const controllerSource = fs.readFileSync(controllerPath, 'utf8');
+  assert.match(controllerSource, /resolveIntakeLocationVisibility\([\s\S]*payload\.locations[\s\S]*includeAllLocations/,
+    'The public controller must decide visibility from the persisted subset before normalization');
+  assert.match(controllerSource, /exports\.getIntakeConfigAdmin[\s\S]*requireIntakeConfigScopeAccess\(req, res, \{[\s\S]*access: 'read'/,
+    'The full editor DTO must require authenticated scope access');
+  assert.match(controllerSource, /clinicId !== null && groupId !== null[\s\S]*ambiguous_scope/,
+    'The editor DTO must reject mixed clinic and group scopes');
+
+  const routePath = path.resolve(__dirname, '../../routes/intake.routes.js');
+  const routeSource = fs.readFileSync(routePath, 'utf8');
+  const publicConfigRoute = routeSource.indexOf("router.get('/config',");
+  const protectBoundary = routeSource.indexOf('router.use(protect)');
+  const adminConfigRoute = routeSource.indexOf("router.get('/config/admin',");
+  assert.ok(publicConfigRoute >= 0 && publicConfigRoute < protectBoundary);
+  assert.ok(adminConfigRoute > protectBoundary,
+    'The editor config route must be registered behind auth middleware');
+
+  const appPath = path.resolve(__dirname, '../../app.js');
+  const appSource = fs.readFileSync(appPath, 'utf8');
+  assert.doesNotMatch(appSource, /pathname\.startsWith\('\/api\/intake\/'\)/,
+    'Protected intake routes must not inherit permissive public CORS');
+  assert.match(appSource, /'\/api\/intake\/whatsapp-origin'/,
+    'The public widget origin endpoint must retain external CORS');
+}
+
+function testStrictIntakeIds() {
+  assert.equal(parseIntakeId(57), 57);
+  assert.equal(parseIntakeId('57'), 57);
+  assert.equal(parseIntakeId(' 57 '), 57);
+  for (const value of [57.9, '57.9', '57.0', '057', '5e1', '0x39', 0, -1, '', null, Number.MAX_SAFE_INTEGER + 1]) {
+    assert.equal(parseIntakeId(value), null, `Unsafe intake id must be rejected: ${String(value)}`);
+  }
+
+  const controllerPath = path.resolve(__dirname, '../../controllers/intake.controller.js');
+  const controllerSource = fs.readFileSync(controllerPath, 'utf8');
+  assert.match(controllerSource, /const parseInteger = parseIntakeId;/,
+    'Every intake endpoint must use the strict scope/record id parser');
 }
 
 function testGoogleCampaignFallback() {
@@ -382,6 +508,8 @@ async function run() {
   testConnectOnlyConflictRegression();
   testCampaignScopeAndWritableModesRegression();
   testIntakeConfigScopeRegression();
+  testPublicIntakeLocationsRespectConfiguredSubset();
+  testStrictIntakeIds();
   testGoogleCampaignFallback();
   testGoogleTrackingInheritance();
   await testSafeHttpTargets();

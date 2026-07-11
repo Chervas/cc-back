@@ -34,8 +34,16 @@ const { previewLeadImport, executeLeadImport } = require('../services/leadImport
 const { findCanonicalWhatsappConversation } = require('../lib/canonical-conversation');
 const { normalizePhoneDigits } = require('../lib/phone');
 const { buildClinicMatcher } = require('../lib/clinicAttribution');
-const { hasMarketingClinicScopeAccess } = require('../lib/marketingScopeAccess');
+const {
+  getAccessibleMarketingClinicIds,
+  hasMarketingClinicScopeAccess,
+} = require('../lib/marketingScopeAccess');
 const { resolveSafeHttpTarget } = require('../lib/safeHttpTarget');
+const {
+  configuredLocationsWithinAllowedScope,
+  parseIntakeId,
+  resolveIntakeLocationVisibility,
+} = require('../lib/intakeLocations');
 const {
   extractGoogleTagId,
   normalizeMetaAdsConfig,
@@ -59,12 +67,7 @@ const LEAD_ACTIVE_APPOINTMENT_STATES = new Set([
 const SIGNATURE_HEADER = 'x-cc-signature';
 const SIGNATURE_HEADER_SHA = 'x-cc-signature-sha256';
 const EVENT_ID_HEADER = 'x-cc-event-id';
-const parseInteger = (value) => {
-  if (value === undefined || value === null) return null;
-  if (typeof value === 'string' && !value.trim()) return null;
-  const n = Number(value);
-  return Number.isFinite(n) ? n : null;
-};
+const parseInteger = parseIntakeId;
 const requireIntakeConfigScopeAccess = async (req, res, { clinicId = null, groupId = null, access = 'read' } = {}) => {
   const userId = Number.parseInt(String(req.userData?.userId || ''), 10);
   let clinicIds = [];
@@ -85,6 +88,32 @@ const requireIntakeConfigScopeAccess = async (req, res, { clinicId = null, group
   if (allowed) return true;
   res.status(403).json({ success: false, error: 'scope_forbidden' });
   return false;
+};
+
+const resolveIntakeCandidateClinicIds = async ({ clinicId = null, groupId = null } = {}) => {
+  if (groupId !== null) {
+    const rows = await Clinica.findAll({
+      where: { grupoClinicaId: groupId },
+      attributes: ['id_clinica'],
+      raw: true,
+    });
+    return rows.map((row) => row.id_clinica).filter(Boolean);
+  }
+
+  if (clinicId === null) return [];
+  const clinic = await Clinica.findOne({
+    where: { id_clinica: clinicId },
+    attributes: ['id_clinica', 'grupoClinicaId'],
+    raw: true,
+  });
+  if (!clinic?.grupoClinicaId) return [clinicId];
+
+  const rows = await Clinica.findAll({
+    where: { grupoClinicaId: clinic.grupoClinicaId },
+    attributes: ['id_clinica'],
+    raw: true,
+  });
+  return rows.map((row) => row.id_clinica).filter(Boolean);
 };
 const countMojibakeMarkers = (value) => {
   if (!value || typeof value !== 'string') return 0;
@@ -2085,13 +2114,6 @@ const normalizeConfiguredLocations = (locations, availableLocations) => {
   }
 
   const configured = Array.isArray(locations) ? locations : [];
-  if (!configured.length) {
-    return available.map((location) => ({
-      id: String(location.id),
-      label: location.label,
-    }));
-  }
-
   return configured.map((location) => {
     if (!location || typeof location !== 'object') return location;
 
@@ -2147,7 +2169,11 @@ const resolveSharedWebGroupConfigForClinic = async (clinicId) => {
   };
 };
 
-exports.getIntakeConfig = asyncHandler(async (req, res) => {
+const getIntakeConfig = async (
+  req,
+  res,
+  { includeAllLocations = false, allowedLocationClinicIds = null } = {},
+) => {
   // La config es “source of truth” para el snippet; evitar 304/ETag y cachés agresivas.
   res.set('Cache-Control', 'no-store');
 
@@ -2444,7 +2470,27 @@ exports.getIntakeConfig = asyncHandler(async (req, res) => {
     // No bloquear el snippet por un fallo de soporte UI.
     payload.available_locations = [];
   }
-  payload.locations = normalizeConfiguredLocations(payload.locations, payload.available_locations);
+  // Preserve the persisted subset before editor normalization: that helper
+  // deliberately expands an empty list to every candidate for admin editing.
+  // Public responses must instead expose only the configured subset. A clinic
+  // scope may safely fall back to itself; an empty group scope exposes none.
+  const locationVisibility = resolveIntakeLocationVisibility(
+    payload.available_locations,
+    payload.locations,
+    {
+      includeAllLocations,
+      clinicId: payload.clinic_id,
+      allowedClinicIds: allowedLocationClinicIds,
+    },
+  );
+  payload.available_locations = locationVisibility.availableLocations;
+  payload.locations = normalizeConfiguredLocations(
+    locationVisibility.configuredLocations,
+    payload.available_locations,
+  );
+  if (payload.config && typeof payload.config === 'object' && !Array.isArray(payload.config)) {
+    payload.config = { ...payload.config, locations: payload.locations };
+  }
 
   // Estado de apertura + flujos especiales de "clínica cerrada".
   // Si no hay horario estructurado, open_now queda null y el widget mantiene su lógica normal.
@@ -2477,6 +2523,39 @@ exports.getIntakeConfig = asyncHandler(async (req, res) => {
   }
 
   return res.json(payload);
+};
+
+exports.getIntakeConfig = asyncHandler(async (req, res) => getIntakeConfig(req, res));
+
+exports.getIntakeConfigAdmin = asyncHandler(async (req, res) => {
+  const clinicId = parseInteger(req.query.clinic_id);
+  const groupId = parseInteger(req.query.group_id);
+  if (clinicId === null && groupId === null) {
+    return res.status(400).json({ success: false, error: 'clinic_or_group_required' });
+  }
+  if (clinicId !== null && groupId !== null) {
+    return res.status(400).json({ success: false, error: 'ambiguous_scope' });
+  }
+  if (!(await requireIntakeConfigScopeAccess(req, res, {
+    clinicId,
+    groupId,
+    access: 'read'
+  }))) return;
+
+  let allowedLocationClinicIds = null;
+  if (clinicId !== null && groupId === null) {
+    const candidateClinicIds = await resolveIntakeCandidateClinicIds({ clinicId });
+    allowedLocationClinicIds = await getAccessibleMarketingClinicIds({
+      userId: req.userData?.userId,
+      clinicIds: candidateClinicIds,
+      access: 'read',
+    });
+  }
+
+  return getIntakeConfig(req, res, {
+    includeAllLocations: true,
+    allowedLocationClinicIds,
+  });
 });
 
 exports.upsertIntakeConfig = asyncHandler(async (req, res) => {
@@ -2564,6 +2643,23 @@ exports.upsertIntakeConfig = asyncHandler(async (req, res) => {
         ? body.snippet_verification.checked_urls
         : {}
     };
+  }
+
+  if (Object.prototype.hasOwnProperty.call(config, 'locations') && !Array.isArray(config.locations)) {
+    return res.status(400).json({ success: false, error: 'locations_invalid' });
+  }
+  const candidateLocationClinicIds = await resolveIntakeCandidateClinicIds({
+    clinicId: scope === 'clinic' ? clinicId : null,
+    groupId: scope === 'group' ? groupId : null,
+  });
+  const allowedLocationClinicIds = await getAccessibleMarketingClinicIds({
+    userId: req.userData?.userId,
+    clinicIds: candidateLocationClinicIds,
+    access: 'write',
+  });
+  const configuredLocations = Array.isArray(config.locations) ? config.locations : [];
+  if (!configuredLocationsWithinAllowedScope(configuredLocations, allowedLocationClinicIds)) {
+    return res.status(403).json({ success: false, error: 'location_scope_forbidden' });
   }
 
   // Importante: si el frontend no envía hmac_key, NO debemos borrar la clave existente.

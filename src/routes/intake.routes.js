@@ -13,6 +13,7 @@ router.post('/whatsapp-origin', intakeController.registerWhatsappOrigin);
 
 // Rutas protegidas
 router.use(protect);
+router.get('/config/admin', intakeController.getIntakeConfigAdmin);
 router.get('/verify-snippet', intakeController.verifySnippetInstalled);
 router.get('/config/:clinicId/secret', intakeController.getIntakeConfigSecretClinic);
 router.get('/config/group/:groupId/secret', intakeController.getIntakeConfigSecretGroup);

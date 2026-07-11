@@ -84,13 +84,15 @@ const STATIC_CORS_ORIGINS = new Set([
 const HTTP_JSON_BODY_LIMIT = process.env.HTTP_JSON_BODY_LIMIT || '25mb';
 
 function isPublicIntakePath(pathname = '') {
-    return (
-        typeof pathname === 'string' &&
-        (pathname === '/api/intake/config' ||
-            pathname === '/api/intake/leads' ||
-            pathname === '/api/intake/events' ||
-            pathname.startsWith('/api/intake/'))
-    );
+    if (typeof pathname !== 'string') return false;
+    const normalizedPath = pathname.split('?')[0].replace(/\/+$/, '');
+    return new Set([
+        '/api/intake/config',
+        '/api/intake/leads',
+        '/api/intake/leads/webhook',
+        '/api/intake/events',
+        '/api/intake/whatsapp-origin'
+    ]).has(normalizedPath);
 }
 
 const corsOptionsDelegate = (req, callback) => {
