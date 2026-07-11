@@ -47,6 +47,36 @@ function extractGoogleTagId(sendTo) {
   return match ? match[1].toUpperCase() : null;
 }
 
+function normalizeGoogleAdsDestinations(rawDestinations, fallbackCurrency = 'EUR') {
+  if (!Array.isArray(rawDestinations)) return [];
+  const normalized = [];
+  const seenTargets = new Set();
+  for (let index = 0; index < rawDestinations.length; index += 1) {
+    const raw = rawDestinations[index];
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) continue;
+    const customerId = cleanGoogleCustomerId(raw.customer_id || raw.customerId) || null;
+    const conversionAction = cleanString(raw.conversion_action || raw.conversionAction);
+    const conversionActionId = cleanString(raw.conversion_action_id || raw.conversionActionId);
+    const sendTo = cleanString(raw.send_to || raw.sendTo);
+    const identity = [customerId, conversionAction, conversionActionId, sendTo].join('|');
+    if (seenTargets.has(identity)) continue;
+    seenTargets.add(identity);
+    normalized.push({
+      key: cleanString(raw.key || raw.destination_key || raw.destinationKey)
+        || `destination_${customerId || index + 1}`,
+      enabled: raw.enabled !== false,
+      customer_id: customerId,
+      conversion_action: conversionAction,
+      conversion_action_id: conversionActionId,
+      send_to: sendTo,
+      currency: cleanString(raw.currency) || fallbackCurrency,
+      ...(raw.value !== undefined ? { value: raw.value } : {}),
+      ...(raw.consent !== undefined ? { consent: raw.consent } : {})
+    });
+  }
+  return normalized;
+}
+
 function normalizeMetaAdsConfig(rawConfig) {
   if (!rawConfig || typeof rawConfig !== 'object' || Array.isArray(rawConfig)) {
     return {
@@ -94,7 +124,7 @@ function normalizeGoogleAdsConfig(rawConfig) {
 
   for (const [eventKey, eventValue] of Object.entries(rawEvents)) {
     if (!eventValue || typeof eventValue !== 'object' || Array.isArray(eventValue)) continue;
-    normalized.events[eventKey] = {
+    const normalizedEvent = {
       enabled: eventValue.enabled !== false,
       customer_id: cleanGoogleCustomerId(eventValue.customer_id || eventValue.customerId) || null,
       conversion_action: cleanString(eventValue.conversion_action || eventValue.conversionAction),
@@ -102,6 +132,13 @@ function normalizeGoogleAdsConfig(rawConfig) {
       send_to: cleanString(eventValue.send_to || eventValue.sendTo),
       currency: cleanString(eventValue.currency) || normalized.currency
     };
+    if (Object.prototype.hasOwnProperty.call(eventValue, 'destinations')) {
+      normalizedEvent.destinations = normalizeGoogleAdsDestinations(
+        eventValue.destinations,
+        cleanString(eventValue.currency) || normalized.currency
+      );
+    }
+    normalized.events[eventKey] = normalizedEvent;
   }
 
   return normalized;
@@ -119,29 +156,61 @@ function hasGoogleAdsConfig(rawConfig) {
   }
   return Object.values(normalized.events || {}).some((eventCfg) => (
     eventCfg?.customer_id || eventCfg?.conversion_action || eventCfg?.conversion_action_id || eventCfg?.send_to
+      || (Array.isArray(eventCfg?.destinations) && eventCfg.destinations.length > 0)
   ));
 }
 
-function mergeGoogleAdsEvents(baseEvents = {}, overrideEvents = {}) {
+function mergeGoogleAdsEvents(baseEvents = {}, overrideEvents = {}, rawOverrideEvents = {}) {
   const merged = { ...baseEvents };
   for (const [eventKey, overrideValue] of Object.entries(overrideEvents || {})) {
     const baseValue = merged[eventKey] && typeof merged[eventKey] === 'object' ? merged[eventKey] : {};
-    merged[eventKey] = {
-      ...baseValue,
-      ...overrideValue
+    const rawValue = rawOverrideEvents[eventKey] && typeof rawOverrideEvents[eventKey] === 'object'
+      ? rawOverrideEvents[eventKey]
+      : {};
+    const pickEventValue = (snakeKey, camelKey, fallbackValue) => (
+      Object.prototype.hasOwnProperty.call(rawValue, snakeKey)
+        || (camelKey && Object.prototype.hasOwnProperty.call(rawValue, camelKey))
+        ? overrideValue[snakeKey]
+        : fallbackValue
+    );
+    const mergedEvent = {
+      enabled: Object.prototype.hasOwnProperty.call(rawValue, 'enabled') ? overrideValue.enabled : baseValue.enabled,
+      customer_id: pickEventValue('customer_id', 'customerId', baseValue.customer_id),
+      conversion_action: pickEventValue('conversion_action', 'conversionAction', baseValue.conversion_action),
+      conversion_action_id: pickEventValue('conversion_action_id', 'conversionActionId', baseValue.conversion_action_id),
+      send_to: pickEventValue('send_to', 'sendTo', baseValue.send_to),
+      currency: Object.prototype.hasOwnProperty.call(rawValue, 'currency') ? overrideValue.currency : baseValue.currency
     };
+    if (Object.prototype.hasOwnProperty.call(rawValue, 'destinations')) {
+      mergedEvent.destinations = overrideValue.destinations;
+    } else if (Object.prototype.hasOwnProperty.call(baseValue, 'destinations')) {
+      mergedEvent.destinations = baseValue.destinations;
+    }
+    merged[eventKey] = mergedEvent;
   }
   return merged;
 }
 
 function mergeGoogleAdsConfig(baseConfig, overrideConfig) {
   const base = normalizeGoogleAdsConfig(baseConfig);
-  const override = normalizeGoogleAdsConfig(overrideConfig);
+  const rawOverride = overrideConfig && typeof overrideConfig === 'object' && !Array.isArray(overrideConfig)
+    ? overrideConfig
+    : {};
+  const override = normalizeGoogleAdsConfig(rawOverride);
+  const pickOverride = (snakeKey, camelKey, normalizedValue, fallbackValue) => (
+    Object.prototype.hasOwnProperty.call(rawOverride, snakeKey)
+      || (camelKey && Object.prototype.hasOwnProperty.call(rawOverride, camelKey))
+      ? normalizedValue
+      : fallbackValue
+  );
   return {
-    ...base,
-    ...override,
-    enabled: override.enabled !== undefined ? override.enabled : base.enabled,
-    events: mergeGoogleAdsEvents(base.events, override.events)
+    enabled: Object.prototype.hasOwnProperty.call(rawOverride, 'enabled') ? override.enabled : base.enabled,
+    customer_id: pickOverride('customer_id', 'customerId', override.customer_id, base.customer_id),
+    conversion_action: pickOverride('conversion_action', 'conversionAction', override.conversion_action, base.conversion_action),
+    conversion_action_id: pickOverride('conversion_action_id', 'conversionActionId', override.conversion_action_id, base.conversion_action_id),
+    send_to: pickOverride('send_to', 'sendTo', override.send_to, base.send_to),
+    currency: Object.prototype.hasOwnProperty.call(rawOverride, 'currency') ? override.currency : base.currency,
+    events: mergeGoogleAdsEvents(base.events, override.events, rawOverride.events || {})
   };
 }
 
@@ -302,7 +371,7 @@ function resolveEffectiveTrackingConfig(scope, records = {}) {
   const clinicGoogle = normalizeGoogleAdsConfig(clinicConfig.google_ads);
   const effectiveGoogle = assignmentScope === 'group'
     ? groupGoogle
-    : mergeGoogleAdsConfig(groupGoogle, clinicGoogle);
+    : mergeGoogleAdsConfig(groupConfig.google_ads, clinicConfig.google_ads);
   const googleSource = assignmentScope === 'group'
     ? (hasGoogleAdsConfig(groupConfig.google_ads) ? 'group' : null)
     : hasGoogleAdsConfig(clinicConfig.google_ads)
@@ -560,9 +629,11 @@ async function resolveEffectiveMarketingState({ clinicIdRaw = null, groupIdRaw =
 
 module.exports = {
   extractGoogleTagId,
+  mergeGoogleAdsConfig,
   normalizeMetaAdAccountId,
   normalizeMetaAdsConfig,
   normalizeGoogleAdsConfig,
+  normalizeGoogleAdsDestinations,
   loadScopeIntakeRecords,
   resolveEffectiveTrackingConfig,
   listScopedMetaAssets,

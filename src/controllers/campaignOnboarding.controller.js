@@ -18,10 +18,22 @@ const {
 const {
   extractGoogleTagId,
   listMetaPixelsForScopeAdAccount,
+  mergeGoogleAdsConfig: mergeEffectiveGoogleAdsConfig,
   normalizeMetaAdAccountId,
   normalizeMetaAdsConfig,
   resolveEffectiveMarketingState
 } = require('../services/effectiveMarketingAssets.service');
+const { resolveScopedGoogleAdsRuntime } = require('../services/googleAdsScopedRuntime.service');
+const {
+  clinicIdsFromStrategyRows,
+  hasMarketingClinicScopeAccess,
+  normalizeClinicIds,
+  requestIdsFromRows
+} = require('../lib/marketingScopeAccess');
+const {
+  provisionManagedCampaignsFromStrategy,
+  updateManagedCampaignSpecsFromStrategy
+} = require('../services/managedCampaignProvisioning.service');
 
 const GoogleConnection = db.GoogleConnection;
 const MetaConnection = db.MetaConnection;
@@ -37,6 +49,8 @@ const Tratamiento = db.Tratamiento;
 const LeadIntake = db.LeadIntake;
 const GoogleAdsInsightsDaily = db.GoogleAdsInsightsDaily;
 const GoogleAdsAdInsightsDaily = db.GoogleAdsAdInsightsDaily;
+const ExternalCampaignInventory = db.ExternalCampaignInventory;
+const ExternalCampaignAssignment = db.ExternalCampaignAssignment;
 const SocialAdsEntity = db.SocialAdsEntity;
 const SocialAdsInsightsDaily = db.SocialAdsInsightsDaily;
 const SocialAdsActionsDaily = db.SocialAdsActionsDaily;
@@ -45,7 +59,10 @@ const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID || '';
 const GOOGLE_CLIENT_SECRET = process.env.GOOGLE_CLIENT_SECRET || '';
 const GOOGLE_ADS_SCOPE = 'https://www.googleapis.com/auth/adwords';
 
+// `managed_self` is retained only to read historical configurations. New
+// onboarding/strategy writes must use one of the two current product modes.
 const VALID_MODES = new Set(['connect_only', 'managed_self', 'managed_service']);
+const CREATABLE_MODES = new Set(['connect_only', 'managed_service']);
 const VALID_PROVIDERS = new Set(['google_ads', 'meta_ads']);
 const VALID_EVENTS = ['lead', 'contact', 'schedule', 'purchase'];
 const VALID_STRATEGY_OBJECTIVES = new Set(['new_patients']);
@@ -188,11 +205,32 @@ function normalizeGoogleAdsConfig(rawConfig) {
   for (const key of VALID_EVENTS) {
     const eventCfg = events[key];
     if (!eventCfg || typeof eventCfg !== 'object') continue;
-    normalized.events[key] = {
+    const hasDestinations = Object.prototype.hasOwnProperty.call(eventCfg, 'destinations');
+    const destinations = hasDestinations && Array.isArray(eventCfg.destinations)
+      ? eventCfg.destinations
+          .filter((item) => item && typeof item === 'object' && !Array.isArray(item))
+          .map((item, index) => ({
+            key: String(item.key || item.destination_key || item.destinationKey || `destination_${index + 1}`).trim().slice(0, 128),
+            enabled: item.enabled !== false,
+            customer_id: normalizeCustomerId(item.customer_id || item.customerId || '') || null,
+            conversion_action: item.conversion_action || item.conversionAction || null,
+            conversion_action_id: item.conversion_action_id || item.conversionActionId || null,
+            send_to: item.send_to || item.sendTo || null,
+            currency: normalizeCurrency(item.currency || eventCfg.currency || normalized.currency || 'EUR'),
+            ...(item.value !== undefined ? { value: item.value } : {}),
+            ...(item.consent !== undefined ? { consent: item.consent } : {})
+          }))
+      : [];
+    const normalizedEvent = {
       enabled: eventCfg.enabled !== false,
+      customer_id: normalizeCustomerId(eventCfg.customer_id || eventCfg.customerId || '') || null,
+      conversion_action: eventCfg.conversion_action || eventCfg.conversionAction || null,
       conversion_action_id: eventCfg.conversion_action_id || eventCfg.conversionActionId || null,
+      send_to: eventCfg.send_to || eventCfg.sendTo || null,
       currency: normalizeCurrency(eventCfg.currency || normalized.currency || 'EUR')
     };
+    if (hasDestinations) normalizedEvent.destinations = destinations;
+    normalized.events[key] = normalizedEvent;
   }
   return normalized;
 }
@@ -654,23 +692,6 @@ function asNullableNumber(rawValue) {
   }
   const value = Number(rawValue);
   return Number.isFinite(value) ? value : null;
-}
-
-function mergeGoogleAdsEvents(baseEvents, patchEvents) {
-  const out = {};
-  const base = baseEvents && typeof baseEvents === 'object' ? baseEvents : {};
-  const patch = patchEvents && typeof patchEvents === 'object' ? patchEvents : {};
-  for (const key of VALID_EVENTS) {
-    const b = base[key] && typeof base[key] === 'object' ? base[key] : {};
-    const p = patch[key] && typeof patch[key] === 'object' ? patch[key] : {};
-    if (!Object.keys(b).length && !Object.keys(p).length) continue;
-    out[key] = {
-      enabled: p.enabled !== undefined ? !!p.enabled : (b.enabled !== false),
-      conversion_action_id: p.conversion_action_id || p.conversionActionId || b.conversion_action_id || b.conversionActionId || null,
-      currency: normalizeCurrency(p.currency || b.currency || 'EUR')
-    };
-  }
-  return out;
 }
 
 async function ensureGoogleAccessToken(conn, { allowExpired = false } = {}) {
@@ -1939,13 +1960,10 @@ async function upsertIntakeGoogleAdsForScope(scope, googleAdsPatch) {
   }
 
   const existingConfig = existing.config && typeof existing.config === 'object' ? existing.config : {};
-  const currentGoogle = normalizeGoogleAdsConfig(existingConfig.google_ads || {});
-  const patchGoogle = normalizeGoogleAdsConfig(googleAdsPatch || {});
-  const mergedGoogle = {
-    ...currentGoogle,
-    ...patchGoogle,
-    events: mergeGoogleAdsEvents(currentGoogle.events, patchGoogle.events)
-  };
+  const rawGooglePatch = googleAdsPatch && typeof googleAdsPatch === 'object' && !Array.isArray(googleAdsPatch)
+    ? googleAdsPatch
+    : {};
+  const mergedGoogle = mergeEffectiveGoogleAdsConfig(existingConfig.google_ads || {}, rawGooglePatch);
   const nextConfig = {
     ...existingConfig,
     google_ads: mergedGoogle
@@ -3634,6 +3652,37 @@ async function loadStrategyRowsByIdentifier(strategyId) {
   return directRequest ? [directRequest] : [];
 }
 
+async function requireMarketingClinicScope(req, res, clinicIds, access = 'read') {
+  const allowed = await hasMarketingClinicScopeAccess({
+    userId: getUserId(req),
+    clinicIds,
+    access
+  });
+  if (allowed) return true;
+
+  res.status(403).json({
+    success: false,
+    error: 'scope_forbidden',
+    message: 'No tienes acceso a todas las clínicas de esta configuración.'
+  });
+  return false;
+}
+
+async function resolveOnboardingClinicIds(record, payload) {
+  const scope = payload?.scope && typeof payload.scope === 'object' ? payload.scope : {};
+  const assignmentScope = String(scope.assignment_scope || '').trim().toLowerCase();
+  const groupId = parseInteger(scope.group_id);
+  if (assignmentScope === 'group' && groupId) {
+    return listClinicIdsForGroup(groupId);
+  }
+
+  return normalizeClinicIds([
+    scope.clinic_id,
+    ...(Array.isArray(scope.clinic_ids) ? scope.clinic_ids : []),
+    record?.clinica_id
+  ]);
+}
+
 async function resolveModeForClinic(clinicId) {
   if (!clinicId) return null;
   const clinic = await Clinica.findOne({
@@ -3941,6 +3990,8 @@ async function ensureConversionActionsInternal({ accessToken, customerId, loginC
       const mutate = await googleAdsRequest('POST', `customers/${normalizeCustomerId(customerId)}/conversionActions:mutate`, {
         accessToken,
         loginCustomerId: loginCustomerId || undefined,
+        singleAttempt: true,
+        timeoutMs: 15000,
         data: { operations }
       });
       const results = Array.isArray(mutate?.results) ? mutate.results : [];
@@ -4043,6 +4094,7 @@ exports.getCampaignOnboardingBootstrap = asyncHandler(async (req, res) => {
     groupIdRaw: req.query.group_id,
     assignmentScopeRaw: req.query.assignment_scope
   });
+  if (!(await requireMarketingClinicScope(req, res, scope.clinic_ids, 'read'))) return;
   const activeMode = await resolveActiveModeForScope(scope);
   const scopedRequest = Boolean(scope.clinic_id || scope.group_id);
   const marketingState = await resolveEffectiveMarketingState({
@@ -4132,7 +4184,8 @@ exports.getCampaignOnboardingBootstrap = asyncHandler(async (req, res) => {
       group_web_primary_url: scope.group?.web_primary_url || null,
       group_web_assignment_mode: scope.group?.web_assignment_mode || null
     },
-    modes: ['connect_only', 'managed_self', 'managed_service'],
+    modes: ['connect_only', 'managed_service'],
+    legacy_modes: ['managed_self'],
     active_mode: activeMode,
     google_ads: {
       connected: googleConnected,
@@ -4208,6 +4261,7 @@ exports.listMetaPixels = asyncHandler(async (req, res) => {
     groupIdRaw: req.query.group_id,
     assignmentScopeRaw: req.query.assignment_scope
   });
+  if (!(await requireMarketingClinicScope(req, res, scope.clinic_ids, 'read'))) return;
 
   const pixels = await listMetaPixelsForScopeAdAccount({
     scope,
@@ -4256,6 +4310,7 @@ exports.listExternalCampaigns = asyncHandler(async (req, res) => {
     groupIdRaw: req.query.group_id,
     assignmentScopeRaw: req.query.assignment_scope
   });
+  if (!(await requireMarketingClinicScope(req, res, scope.clinic_ids, 'read'))) return;
 
   const providerFilter = String(req.query.provider || '').trim().toLowerCase();
   const includeGoogle = !providerFilter || providerFilter === 'google_ads';
@@ -4296,6 +4351,21 @@ exports.listExternalCampaigns = asyncHandler(async (req, res) => {
 
   let googleCampaigns = [];
   if (includeGoogle && googleAccountMap.size > 0) {
+    const customerIds = Array.from(googleAccountMap.keys());
+    const reviewedAssignments = ExternalCampaignAssignment
+      ? await ExternalCampaignAssignment.findAll({
+          where: {
+            provider: 'google_ads',
+            customer_id: { [Op.in]: customerIds },
+            status: 'active'
+          },
+          raw: true
+        })
+      : [];
+    const reviewedByCampaign = new Map(reviewedAssignments.map((row) => [
+      `${normalizeCustomerId(row.customer_id || '')}:${String(row.campaign_id || '')}`,
+      row
+    ]));
     const rows = await GoogleAdsInsightsDaily.findAll({
       attributes: [
         'customerId',
@@ -4311,7 +4381,7 @@ exports.listExternalCampaigns = asyncHandler(async (req, res) => {
         [fn('SUM', col('conversions')), 'conversions']
       ],
       where: {
-        customerId: { [Op.in]: Array.from(googleAccountMap.keys()) },
+        customerId: { [Op.in]: customerIds },
         date: { [Op.between]: [startStr, endStr] },
         ...buildMetricsScopeWhere(scope, { clinicField: 'clinicaId', groupField: 'grupoClinicaId' })
       },
@@ -4320,7 +4390,26 @@ exports.listExternalCampaigns = asyncHandler(async (req, res) => {
       raw: true
     });
 
-    googleCampaigns = reduceExternalCampaignRows(rows.map((row) => ({
+    const scopedRows = rows
+      .map((row) => {
+        const assignment = reviewedByCampaign.get(`${normalizeCustomerId(row.customerId || '')}:${String(row.campaignId || '')}`);
+        return assignment
+          ? {
+              ...row,
+              clinicaId: Number(assignment.clinica_id) || null,
+              grupoClinicaId: Number(assignment.grupo_clinica_id) || row.grupoClinicaId || null,
+              reviewed_assignment: true,
+              reviewed_match_kind: assignment.match_kind || null
+            }
+          : row;
+      })
+      .filter((row) => (
+        scope.assignment_scope === 'group'
+        || (row.reviewed_assignment && Number(row.clinicaId) === Number(scope.clinic_id))
+        || (!row.reviewed_assignment && Number(row.clinicaId) === Number(scope.clinic_id))
+      ));
+
+    googleCampaigns = reduceExternalCampaignRows(scopedRows.map((row) => ({
       ...row,
       spend: microsToCurrency(row.costMicros)
     })), {
@@ -4337,6 +4426,53 @@ exports.listExternalCampaigns = asyncHandler(async (req, res) => {
         ...item,
         destination_detection: createWebDestinationDetection('google_ads_default', 'medium')
       }));
+
+    if (ExternalCampaignInventory) {
+      const inventoryRows = await ExternalCampaignInventory.findAll({
+        where: {
+          provider: 'google_ads',
+          customer_id: { [Op.in]: customerIds }
+        },
+        raw: true,
+        order: [['campaign_name', 'ASC']]
+      });
+      const existingKeys = new Set(googleCampaigns.map((item) => `${normalizeCustomerId(item.account_id)}:${item.external_campaign_id}`));
+      for (const inventory of inventoryRows) {
+        const key = `${normalizeCustomerId(inventory.customer_id)}:${String(inventory.campaign_id)}`;
+        if (existingKeys.has(key)) continue;
+        const assignment = reviewedByCampaign.get(key);
+        if (
+          scope.assignment_scope !== 'group'
+          && (!assignment || Number(assignment.clinica_id) !== Number(scope.clinic_id))
+        ) {
+          continue;
+        }
+        if (activeOnly && !isGoogleCampaignActive(inventory.status)) continue;
+        googleCampaigns.push({
+          provider: 'google_ads',
+          account_id: normalizeCustomerId(inventory.customer_id),
+          account_name: inventory.account_name || googleAccountMap.get(normalizeCustomerId(inventory.customer_id))?.descriptive_name || null,
+          external_campaign_id: String(inventory.campaign_id),
+          name: inventory.campaign_name || null,
+          status: inventory.status || null,
+          clinic_ids: assignment?.clinica_id ? [Number(assignment.clinica_id)] : [],
+          group_ids: assignment?.grupo_clinica_id ? [Number(assignment.grupo_clinica_id)] : (scope.group_id ? [Number(scope.group_id)] : []),
+          assignment_origin: assignment ? 'reviewed' : 'inventory',
+          metrics: inventory.latest_metrics && typeof inventory.latest_metrics === 'object'
+            ? {
+                impressions: safeNumber(inventory.latest_metrics.impressions),
+                clicks: safeNumber(inventory.latest_metrics.clicks),
+                spend: safeNumber(inventory.latest_metrics.spend),
+                conversions: safeNumber(inventory.latest_metrics.conversions)
+              }
+            : { impressions: 0, clicks: 0, spend: 0, conversions: 0 },
+          last_seen_at: inventory.last_seen_at || null,
+          destination_detection: inventory.destination_detection || createWebDestinationDetection('google_ads_inventory', 'medium')
+        });
+        existingKeys.add(key);
+      }
+      googleCampaigns.sort((left, right) => safeNumber(right.metrics?.spend) - safeNumber(left.metrics?.spend) || String(left.name || '').localeCompare(String(right.name || '')));
+    }
   }
 
   const metaWhere = buildScopeWhere(scope);
@@ -4605,36 +4741,43 @@ exports.listGoogleAdsConversionActions = asyncHandler(async (req, res) => {
 
   const customerId = normalizeCustomerId(req.query.customer_id || '');
   if (!customerId) return res.status(400).json({ success: false, error: 'customer_id_required' });
-
-  const scope = (req.query.clinic_id || req.query.group_id)
-    ? await resolveScopeFromInput({
-      clinicIdRaw: req.query.clinic_id,
-      groupIdRaw: req.query.group_id,
-      assignmentScopeRaw: req.query.assignment_scope
-    })
-    : {
-      assignment_scope: 'clinic',
-      clinic_id: null,
-      group_id: null,
-      clinics: [],
-      clinic_ids: [],
-      group: null
-    };
-
-  const connection = await GoogleConnection.findOne({ where: { userId } });
-  if (!connection) return res.status(404).json({ success: false, error: 'no_connection' });
-  if (!hasScopeText(connection.scopes || '', GOOGLE_ADS_SCOPE)) {
-    return res.status(403).json({ success: false, error: 'insufficient_scope' });
+  if (!req.query.clinic_id && !req.query.group_id) {
+    return res.status(400).json({ success: false, error: 'scope_required' });
   }
 
-  const { accessToken } = await ensureGoogleAdsAccess(connection);
-  const loginCustomerId = normalizeCustomerId(req.query.login_customer_id || '')
-    || await resolveLoginCustomerId(connection.id, customerId, scope);
+  const scope = await resolveScopeFromInput({
+    clinicIdRaw: req.query.clinic_id,
+    groupIdRaw: req.query.group_id,
+    assignmentScopeRaw: req.query.assignment_scope
+  });
+  if (!(await requireMarketingClinicScope(req, res, scope.clinic_ids, 'read'))) return;
 
-  const result = await listConversionActionsInternal({ accessToken, customerId, loginCustomerId });
+  let runtime;
+  try {
+    runtime = await resolveScopedGoogleAdsRuntime({
+      userId,
+      clinicId: scope.clinic_id,
+      groupId: scope.group_id,
+      assignmentScope: scope.assignment_scope,
+      customerId
+    });
+  } catch (error) {
+    return res.status(error.httpStatus || 409).json({
+      success: false,
+      error: String(error.code || 'scoped_google_connection_error').toLowerCase(),
+      message: error.message
+    });
+  }
+
+  const result = await listConversionActionsInternal({
+    accessToken: runtime.accessToken,
+    customerId,
+    loginCustomerId: runtime.loginCustomerId
+  });
   return res.json({
     success: true,
     customer_id: customerId,
+    connection_source: runtime.connectionSource,
     actions: result.actions,
     suggested_mapping: result.suggested_mapping
   });
@@ -4646,42 +4789,51 @@ exports.ensureGoogleAdsConversionActions = asyncHandler(async (req, res) => {
 
   const customerId = normalizeCustomerId(req.body?.customer_id || '');
   if (!customerId) return res.status(400).json({ success: false, error: 'invalid_customer_id' });
+  if (!req.body?.clinic_id && !req.body?.group_id) {
+    return res.status(400).json({ success: false, error: 'scope_required' });
+  }
 
   const currency = normalizeCurrency(req.body?.currency || 'EUR');
-  const createMissing = req.body?.create_missing !== false;
+  const createMissing = req.body?.create_missing === true;
+  if (createMissing && req.body?.confirm_external_mutation !== true) {
+    return res.status(409).json({
+      success: false,
+      error: 'external_mutation_confirmation_required',
+      message: 'Confirma explícitamente la creación de conversiones en Google Ads.'
+    });
+  }
   const events = Array.isArray(req.body?.events) && req.body.events.length
     ? req.body.events.map((e) => String(e || '').trim().toLowerCase())
     : VALID_EVENTS;
 
-  const scope = (req.body?.clinic_id || req.body?.group_id)
-    ? await resolveScopeFromInput({
-      clinicIdRaw: req.body?.clinic_id,
-      groupIdRaw: req.body?.group_id,
-      assignmentScopeRaw: req.body?.assignment_scope
-    })
-    : {
-      assignment_scope: 'clinic',
-      clinic_id: null,
-      group_id: null,
-      clinics: [],
-      clinic_ids: [],
-      group: null
-    };
+  const scope = await resolveScopeFromInput({
+    clinicIdRaw: req.body?.clinic_id,
+    groupIdRaw: req.body?.group_id,
+    assignmentScopeRaw: req.body?.assignment_scope
+  });
+  if (!(await requireMarketingClinicScope(req, res, scope.clinic_ids, 'write'))) return;
 
-  const connection = await GoogleConnection.findOne({ where: { userId } });
-  if (!connection) return res.status(404).json({ success: false, error: 'no_connection' });
-  if (!hasScopeText(connection.scopes || '', GOOGLE_ADS_SCOPE)) {
-    return res.status(403).json({ success: false, error: 'insufficient_scope' });
+  let runtime;
+  try {
+    runtime = await resolveScopedGoogleAdsRuntime({
+      userId,
+      clinicId: scope.clinic_id,
+      groupId: scope.group_id,
+      assignmentScope: scope.assignment_scope,
+      customerId
+    });
+  } catch (error) {
+    return res.status(error.httpStatus || 409).json({
+      success: false,
+      error: String(error.code || 'scoped_google_connection_error').toLowerCase(),
+      message: error.message
+    });
   }
 
-  const { accessToken } = await ensureGoogleAdsAccess(connection);
-  const loginCustomerId = normalizeCustomerId(req.body?.login_customer_id || '')
-    || await resolveLoginCustomerId(connection.id, customerId, scope);
-
   const ensured = await ensureConversionActionsInternal({
-    accessToken,
+    accessToken: runtime.accessToken,
     customerId,
-    loginCustomerId,
+    loginCustomerId: runtime.loginCustomerId,
     currency,
     events,
     createMissing
@@ -4698,6 +4850,8 @@ exports.ensureGoogleAdsConversionActions = asyncHandler(async (req, res) => {
   return res.json({
     success: true,
     customer_id: customerId,
+    connection_source: runtime.connectionSource,
+    external_mutation_performed: createMissing && ensured.created.length > 0,
     created: ensured.created,
     existing: ensured.existing,
     mapping: ensured.mapping,
@@ -4710,7 +4864,7 @@ exports.startCampaignOnboarding = asyncHandler(async (req, res) => {
   if (!userId) return res.status(401).json({ success: false, error: 'unauthenticated' });
 
   const mode = String(req.body?.mode || '').trim().toLowerCase();
-  if (!VALID_MODES.has(mode)) {
+  if (!CREATABLE_MODES.has(mode)) {
     return res.status(400).json({ success: false, error: 'validation_error', message: 'mode inválido' });
   }
 
@@ -4729,6 +4883,7 @@ exports.startCampaignOnboarding = asyncHandler(async (req, res) => {
     groupIdRaw: req.body?.group_id,
     assignmentScopeRaw: req.body?.assignment_scope
   });
+  if (!(await requireMarketingClinicScope(req, res, scope.clinic_ids, 'write'))) return;
   const marketingState = await resolveEffectiveMarketingState({
     clinicIdRaw: scope.clinic_id,
     groupIdRaw: scope.group_id,
@@ -4752,7 +4907,9 @@ exports.startCampaignOnboarding = asyncHandler(async (req, res) => {
     return res.status(409).json({ success: false, error: 'onboarding_already_running' });
   }
 
-  const steps = initSteps(providers);
+  const steps = mode === 'managed_service'
+    ? [{ key: 'pilot_request', status: 'pending' }]
+    : initSteps(providers);
   const initialPayload = {
     kind: 'campaign_onboarding',
     status: 'in_progress',
@@ -4783,7 +4940,18 @@ exports.startCampaignOnboarding = asyncHandler(async (req, res) => {
   try {
     const result = {};
 
-    if (providers.includes('google_ads')) {
+    if (mode === 'managed_service') {
+      markStep(steps, 'pilot_request', 'done');
+      result.pilot = {
+        operation_mode: 'observe',
+        funding_status: 'unfunded',
+        requires_prepayment: true,
+        automatic_conversion_setup: true,
+        next_action: 'configure_strategy'
+      };
+    }
+
+    if (mode === 'connect_only' && providers.includes('google_ads')) {
       const googleResolved = await resolveGoogleConnectionForScope({
         userId,
         clinicIdRaw: scope.clinic_id,
@@ -4804,6 +4972,14 @@ exports.startCampaignOnboarding = asyncHandler(async (req, res) => {
 
       const scopeAccounts = marketingState.google.available_accounts || [];
       const requestedCustomer = normalizeCustomerId(req.body?.google_ads?.customer_id || '');
+      if (requestedCustomer && !scopeAccounts.some((account) => (
+        normalizeCustomerId(account?.customer_id || '') === requestedCustomer
+      ))) {
+        const customerScopeError = new Error('La cuenta de Google Ads no está asignada a esta clínica o grupo');
+        customerScopeError.code = 'CUSTOMER_NOT_ASSIGNED_TO_SCOPE';
+        customerScopeError.httpStatus = 403;
+        throw customerScopeError;
+      }
       const selectedCustomer = requestedCustomer
         || marketingState.google.effective_assets?.account?.customer_id
         || scopeAccounts[0]?.customer_id
@@ -4815,7 +4991,8 @@ exports.startCampaignOnboarding = asyncHandler(async (req, res) => {
       markStep(steps, 'google_map_account', 'done', { customer_id: selectedCustomer });
       const loginCustomerId = await resolveLoginCustomerId(googleConnection.id, selectedCustomer, scope);
 
-      const autoCreate = req.body?.google_ads?.auto_create_missing_conversions === true;
+      const autoCreate = req.body?.google_ads?.auto_create_missing_conversions === true
+        && req.body?.google_ads?.confirm_external_mutation === true;
       const ensurePayload = await ensureConversionActionsInternal({
         accessToken,
         customerId: selectedCustomer,
@@ -4843,7 +5020,7 @@ exports.startCampaignOnboarding = asyncHandler(async (req, res) => {
       };
     }
 
-    if (providers.includes('meta_ads')) {
+    if (mode === 'connect_only' && providers.includes('meta_ads')) {
       const metaResolved = await resolveMetaConnectionForScope({
         userId,
         clinicIdRaw: scope.clinic_id,
@@ -4867,16 +5044,34 @@ exports.startCampaignOnboarding = asyncHandler(async (req, res) => {
         throw new Error('No hay cuenta publicitaria de Meta mapeada para esta clínica');
       }
 
+      const requestedPixelId = String(req.body?.meta_ads?.pixel_id || '').trim() || null;
+      if (requestedPixelId) {
+        const scopedPixels = await listMetaPixelsForScopeAdAccount({
+          scope,
+          adAccountId: selectedMetaAccount.ad_account_id,
+          connectionId: selectedMetaAccount.connection_id || metaConnection.id
+        });
+        if (!scopedPixels.some((pixel) => String(pixel?.pixel_id || '').trim() === requestedPixelId)) {
+          const pixelScopeError = new Error('El píxel de Meta no pertenece a la cuenta publicitaria asignada a esta clínica o grupo');
+          pixelScopeError.code = 'PIXEL_NOT_ASSIGNED_TO_SCOPE';
+          pixelScopeError.httpStatus = 403;
+          throw pixelScopeError;
+        }
+      }
+      const selectedPixelId = requestedPixelId
+        || marketingState.meta.effective_assets?.pixel?.pixel_id
+        || null;
+
       await upsertIntakeMetaAdsForScope(scope, {
         enabled: true,
         connection_id: selectedMetaAccount.connection_id || metaConnection.id,
         ad_account_id: selectedMetaAccount.ad_account_id,
-        pixel_id: req.body?.meta_ads?.pixel_id || marketingState.meta.effective_assets?.pixel?.pixel_id || null
+        pixel_id: selectedPixelId
       });
       markStep(steps, 'meta_map_assets', 'done');
       result.meta_ads = {
         ad_account_id: selectedMetaAccount.ad_account_id,
-        pixel_id: req.body?.meta_ads?.pixel_id || marketingState.meta.effective_assets?.pixel?.pixel_id || null
+        pixel_id: selectedPixelId
       };
     }
 
@@ -4917,10 +5112,12 @@ exports.startCampaignOnboarding = asyncHandler(async (req, res) => {
       solicitud: failedPayload
     });
 
-    const status = err.code === 'INSUFFICIENT_SCOPE' ? 403 : 500;
+    const status = Number(err.httpStatus) || (err.code === 'INSUFFICIENT_SCOPE' ? 403 : 500);
     return res.status(status).json({
       success: false,
-      error: status === 403 ? 'insufficient_scope' : 'internal_error',
+      error: status === 403
+        ? String(err.code || 'insufficient_scope').toLowerCase()
+        : 'internal_error',
       message: err.message || 'Error iniciando onboarding',
       onboarding_id: request.id
     });
@@ -4941,6 +5138,8 @@ exports.getCampaignOnboardingStatus = asyncHandler(async (req, res) => {
   if (payload.kind !== 'campaign_onboarding') {
     return res.status(404).json({ success: false, error: 'not_found' });
   }
+  const onboardingClinicIds = await resolveOnboardingClinicIds(record, payload);
+  if (!(await requireMarketingClinicScope(req, res, onboardingClinicIds, 'read'))) return;
 
   return res.json({
     success: true,
@@ -4961,6 +5160,7 @@ exports.listMarketingStrategies = asyncHandler(async (req, res) => {
     groupIdRaw: req.query.group_id,
     assignmentScopeRaw: req.query.assignment_scope
   });
+  if (!(await requireMarketingClinicScope(req, res, scope.clinic_ids, 'read'))) return;
 
   const targetClinicIds = scope.assignment_scope === 'clinic'
     ? [scope.clinic_id].filter(Boolean)
@@ -5026,6 +5226,7 @@ exports.getMarketingStrategyDetail = asyncHandler(async (req, res) => {
   if (!rows.length) {
     return res.status(404).json({ success: false, error: 'not_found', message: 'Estrategia no encontrada' });
   }
+  if (!(await requireMarketingClinicScope(req, res, clinicIdsFromStrategyRows(rows), 'read'))) return;
 
   const campaignsById = await loadCampaignsByIds(rows.map((row) => row.campaign_id));
   const strategy = buildStrategyItemFromRows(rows, campaignsById);
@@ -5059,6 +5260,7 @@ exports.getMarketingStrategyMetrics = asyncHandler(async (req, res) => {
   if (!rows.length) {
     return res.status(404).json({ success: false, error: 'not_found', message: 'Estrategia no encontrada' });
   }
+  if (!(await requireMarketingClinicScope(req, res, clinicIdsFromStrategyRows(rows), 'read'))) return;
 
   const campaignsById = await loadCampaignsByIds(rows.map((row) => row.campaign_id));
   const strategy = buildStrategyItemFromRows(rows, campaignsById);
@@ -5100,6 +5302,7 @@ exports.getMarketingStrategyAnalysisCampaign = asyncHandler(async (req, res) => 
   if (!rows.length) {
     return res.status(404).json({ success: false, error: 'not_found', message: 'Estrategia no encontrada' });
   }
+  if (!(await requireMarketingClinicScope(req, res, clinicIdsFromStrategyRows(rows), 'read'))) return;
 
   const campaignsById = await loadCampaignsByIds(rows.map((row) => row.campaign_id));
   const strategy = buildStrategyItemFromRows(rows, campaignsById);
@@ -5158,6 +5361,7 @@ exports.updateMarketingStrategy = asyncHandler(async (req, res) => {
   if (!rows.length) {
     return res.status(404).json({ success: false, error: 'not_found', message: 'Estrategia no encontrada' });
   }
+  if (!(await requireMarketingClinicScope(req, res, clinicIdsFromStrategyRows(rows), 'write'))) return;
 
   const representative = rows[0];
   const currentPayload = representative?.solicitud && typeof representative.solicitud === 'object' ? representative.solicitud : {};
@@ -5204,6 +5408,7 @@ exports.updateMarketingStrategy = asyncHandler(async (req, res) => {
   const addonCalls = effectiveMode === 'managed_service'
     ? req.body?.addon_calls === true
     : false;
+  const targetClinicIds = clinicIdsFromStrategyRows(rows);
 
   if (promotionType !== 'generic' && !treatments.length) {
     return res.status(400).json({ success: false, error: 'validation_error', message: 'Selecciona al menos un tratamiento' });
@@ -5213,6 +5418,9 @@ exports.updateMarketingStrategy = asyncHandler(async (req, res) => {
   }
   if (!channels.length && effectiveMode !== 'connect_only') {
     return res.status(400).json({ success: false, error: 'validation_error', message: 'Selecciona al menos un canal' });
+  }
+  if (effectiveMode === 'managed_service' && !channels.some((item) => ['google_ads', 'meta_ads'].includes(item.channel) && item.enabled !== false)) {
+    return res.status(400).json({ success: false, error: 'validation_error', message: 'Piloto automático requiere Google Ads o Meta Ads' });
   }
 
   if (effectiveMode === 'connect_only') {
@@ -5264,7 +5472,9 @@ exports.updateMarketingStrategy = asyncHandler(async (req, res) => {
       }
     }
 
-    const externalCampaignConflicts = await findExternalCampaignAssignmentConflicts(targetClinicIds, externalTargets);
+    const externalCampaignConflicts = await findExternalCampaignAssignmentConflicts(targetClinicIds, externalTargets, {
+      excludeRequestIds: requestIdsFromRows(rows)
+    });
     if (externalCampaignConflicts.length > 0) {
       return res.status(409).json({
         success: false,
@@ -5278,7 +5488,6 @@ exports.updateMarketingStrategy = asyncHandler(async (req, res) => {
   const currentStatus = effectiveMode === 'connect_only'
     ? 'active'
     : normalizeStrategyStatus(currentPayload.status || representative.estado);
-  const targetClinicIds = Array.from(new Set(rows.map((row) => parseInteger(row.clinica_id)).filter(Boolean)));
   const campaignName = buildStrategyName({
     objectiveId,
     treatments,
@@ -5336,6 +5545,24 @@ exports.updateMarketingStrategy = asyncHandler(async (req, res) => {
     });
   }
 
+  if (effectiveMode === 'managed_service' && representative.campaign_id) {
+    await updateManagedCampaignSpecsFromStrategy({
+      strategyCampaignId: representative.campaign_id,
+      userId,
+      payload: {
+        promotion_type: promotionType,
+        treatments,
+        area_medica_id: areaMedicaId,
+        area_medica_nombre: areaMedicaNombre,
+        destination,
+        measurement,
+        geo,
+      },
+      budgetMonthly,
+      channels,
+    });
+  }
+
   const refreshedRows = await loadStrategyRowsByIdentifier(req.params.id);
   const campaignsById = await loadCampaignsByIds(refreshedRows.map((row) => row.campaign_id));
   const strategy = buildStrategyItemFromRows(refreshedRows, campaignsById);
@@ -5379,10 +5606,18 @@ exports.transitionMarketingStrategyStatus = asyncHandler(async (req, res) => {
   if (!rows.length) {
     return res.status(404).json({ success: false, error: 'not_found', message: 'Estrategia no encontrada' });
   }
+  if (!(await requireMarketingClinicScope(req, res, clinicIdsFromStrategyRows(rows), 'write'))) return;
 
   const campaignsById = await loadCampaignsByIds(rows.map((row) => row.campaign_id));
   const strategy = buildStrategyItemFromRows(rows, campaignsById);
   const currentStatus = normalizeStrategyStatus(strategy?.status);
+  if (strategy?.mode === 'managed_service' && nextStatus === 'active') {
+    return res.status(409).json({
+      success: false,
+      error: 'managed_launch_requires_admin_gate',
+      message: 'Piloto automático solo puede activarse desde Operación de campañas tras confirmar prepago, tracking y revisión.'
+    });
+  }
 
   if (!canTransitionStrategy(currentStatus, nextStatus)) {
     return res.status(409).json({
@@ -5446,6 +5681,28 @@ exports.transitionMarketingStrategyStatus = asyncHandler(async (req, res) => {
     }, {
       where: { id: strategy.campaign_id }
     });
+
+    if (strategy.mode === 'managed_service') {
+      const managedStatus = nextStatus === 'pending_approval'
+        ? 'pending_admin_review'
+        : nextStatus === 'completed'
+          ? 'completed'
+          : nextStatus === 'paused'
+            ? 'paused'
+            : null;
+      if (managedStatus) {
+        await db.ManagedCampaign.update({
+          status: managedStatus,
+          updated_by_user_id: userId,
+          updated_at: now
+        }, {
+          where: {
+            strategy_campaign_id: strategy.campaign_id,
+            status: { [Op.notIn]: ['launching', 'active', 'completed', 'cancelled'] }
+          }
+        });
+      }
+    }
   }
 
   return res.json({
@@ -5486,6 +5743,7 @@ exports.createMarketingStrategy = asyncHandler(async (req, res) => {
   if (!targetClinicIds.length) {
     return res.status(400).json({ success: false, error: 'validation_error', message: 'No hay clínicas válidas en el scope seleccionado' });
   }
+  if (!(await requireMarketingClinicScope(req, res, targetClinicIds, 'write'))) return;
 
   if (objectiveId === 'new_patients' && scope.assignment_scope !== 'clinic') {
     return res.status(400).json({
@@ -5516,6 +5774,13 @@ exports.createMarketingStrategy = asyncHandler(async (req, res) => {
       success: false,
       error: 'mode_not_configured',
       message: 'Antes de crear una estrategia debes completar la configuración técnica del scope.'
+    });
+  }
+  if (!CREATABLE_MODES.has(effectiveMode)) {
+    return res.status(409).json({
+      success: false,
+      error: 'legacy_mode_read_only',
+      message: 'La configuración antigua de gestión propia es solo de lectura. Selecciona Conecta y mide o Piloto automático antes de crear una estrategia.'
     });
   }
 
@@ -5549,6 +5814,9 @@ exports.createMarketingStrategy = asyncHandler(async (req, res) => {
   const channels = normalizeStrategyChannels(req.body?.channels);
   if (!channels.length && effectiveMode !== 'connect_only') {
     return res.status(400).json({ success: false, error: 'validation_error', message: 'Selecciona al menos un canal' });
+  }
+  if (effectiveMode === 'managed_service' && !channels.some((item) => ['google_ads', 'meta_ads'].includes(item.channel) && item.enabled !== false)) {
+    return res.status(400).json({ success: false, error: 'validation_error', message: 'Piloto automático requiere Google Ads o Meta Ads' });
   }
 
   if (effectiveMode === 'connect_only') {
@@ -5601,9 +5869,7 @@ exports.createMarketingStrategy = asyncHandler(async (req, res) => {
       }
     }
 
-    const externalCampaignConflicts = await findExternalCampaignAssignmentConflicts(targetClinicIds, externalTargets, {
-      excludeRequestIds: rows.map((row) => parseInteger(row.id)).filter((value) => value)
-    });
+    const externalCampaignConflicts = await findExternalCampaignAssignmentConflicts(targetClinicIds, externalTargets);
     if (externalCampaignConflicts.length > 0) {
       return res.status(409).json({
         success: false,
@@ -5635,72 +5901,93 @@ exports.createMarketingStrategy = asyncHandler(async (req, res) => {
 
   const initialStatus = effectiveMode === 'connect_only' ? 'active' : 'draft';
 
-  const campaign = await Campaign.create({
-    nombre: campaignName,
-    tipo: dominantType,
-    clinica_id: scope.assignment_scope === 'clinic' ? scope.clinic_id : null,
-    grupo_clinica_id: scope.group_id || null,
-    campaign_id_externo: null,
-    gestionada: effectiveMode !== 'connect_only',
-    activa: effectiveMode === 'connect_only',
-    fecha_inicio: null,
-    fecha_fin: null,
-    presupuesto: budgetMonthly
-  });
-
   const geo = req.body?.geo && typeof req.body.geo === 'object' ? req.body.geo : {};
   const destination = req.body?.destination && typeof req.body.destination === 'object' ? req.body.destination : null;
   const measurement = req.body?.measurement && typeof req.body.measurement === 'object' ? req.body.measurement : null;
   const automation = req.body?.automation && typeof req.body.automation === 'object' ? req.body.automation : null;
   const addonCalls = effectiveMode === 'managed_service' ? req.body?.addon_calls === true : false;
 
+  let campaign;
   const createdRequests = [];
-  for (const clinicId of targetClinicIds) {
-    const payload = {
-      kind: 'marketing_strategy',
-      status: initialStatus,
-      objective_id: objectiveId,
-      mode_snapshot: effectiveMode,
-    scope: {
-      assignment_scope: scope.assignment_scope,
-      clinic_id: scope.assignment_scope === 'clinic' ? clinicId : null,
-      group_id: scope.group_id || null,
-      clinic_ids: targetClinicIds
-      },
-      summary: {
-        name: campaignName,
-        budget_monthly: budgetMonthly,
+  let managedCampaignIds = [];
+  await db.sequelize.transaction(async (transaction) => {
+    campaign = await Campaign.create({
+      nombre: campaignName,
+      tipo: dominantType,
+      clinica_id: scope.assignment_scope === 'clinic' ? scope.clinic_id : null,
+      grupo_clinica_id: scope.group_id || null,
+      campaign_id_externo: null,
+      gestionada: effectiveMode !== 'connect_only',
+      activa: effectiveMode === 'connect_only',
+      fecha_inicio: null,
+      fecha_fin: null,
+      presupuesto: budgetMonthly
+    }, { transaction });
+
+    for (const clinicId of targetClinicIds) {
+      const payload = {
+        kind: 'marketing_strategy',
+        status: initialStatus,
+        objective_id: objectiveId,
+        mode_snapshot: effectiveMode,
+        scope: {
+          assignment_scope: scope.assignment_scope,
+          clinic_id: scope.assignment_scope === 'clinic' ? clinicId : null,
+          group_id: scope.group_id || null,
+          clinic_ids: targetClinicIds
+        },
+        summary: {
+          name: campaignName,
+          budget_monthly: budgetMonthly,
+          area_medica_id: areaMedicaId,
+          area_medica_nombre: areaMedicaNombre
+        },
+        promotion_type: promotionType,
         area_medica_id: areaMedicaId,
-        area_medica_nombre: areaMedicaNombre
-      },
-      promotion_type: promotionType,
-      area_medica_id: areaMedicaId,
-      area_medica_nombre: areaMedicaNombre,
-      treatments,
-      external_targets: externalTargets,
-      target_destinations: targetDestinations,
-      destination,
-      measurement,
-      geo,
-      channels,
-      automation,
-      addons: {
-        call_leads: addonCalls
-}
-    };
+        area_medica_nombre: areaMedicaNombre,
+        treatments,
+        external_targets: externalTargets,
+        target_destinations: targetDestinations,
+        destination,
+        measurement,
+        geo,
+        channels,
+        automation,
+        addons: { call_leads: addonCalls }
+      };
 
-    const request = await CampaignRequest.create({
-      clinica_id: clinicId,
-      campaign_id: campaign.id,
-      estado: mapStrategyStatusToRequestState(initialStatus),
-      solicitud: payload
-    });
+      const request = await CampaignRequest.create({
+        clinica_id: clinicId,
+        campaign_id: campaign.id,
+        estado: mapStrategyStatusToRequestState(initialStatus),
+        solicitud: payload
+      }, { transaction });
 
-    createdRequests.push({
-      id: request.id,
-      clinica_id: clinicId
-    });
-  }
+      createdRequests.push({ id: request.id, clinica_id: clinicId });
+    }
+
+    if (effectiveMode === 'managed_service') {
+      managedCampaignIds = await provisionManagedCampaignsFromStrategy({
+        strategyCampaign: campaign,
+        campaignRequest: createdRequests[0] || null,
+        clinicId: targetClinicIds[0],
+        groupId: scope.group_id || null,
+        userId,
+        payload: {
+          promotion_type: promotionType,
+          treatments,
+          area_medica_id: areaMedicaId,
+          area_medica_nombre: areaMedicaNombre,
+          destination,
+          measurement,
+          geo,
+        },
+        budgetMonthly,
+        channels,
+        transaction,
+      });
+    }
+  });
 
   return res.status(201).json({
     success: true,
@@ -5722,7 +6009,8 @@ exports.createMarketingStrategy = asyncHandler(async (req, res) => {
       status: initialStatus,
       clinic_ids: targetClinicIds,
       addon_calls: addonCalls,
-      request_ids: createdRequests.map((item) => item.id)
+      request_ids: createdRequests.map((item) => item.id),
+      managed_campaign_ids: managedCampaignIds
     }
   });
 });

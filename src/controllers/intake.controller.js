@@ -26,7 +26,7 @@ const ClinicaHorario = db.ClinicaHorario;
 const WhatsAppWebOrigin = db.WhatsAppWebOrigin;
 const { enqueueInboundFormSubmissionResume } = require('../services/automationsV2Resume.service');
 const { sendMetaEvent, buildUserData: buildMetaUserData } = require('../services/metaCapi.service');
-const { uploadClickConversion } = require('../services/googleAdsConversion.service');
+const { maybeUploadGoogleConversion } = require('../services/googleAdsConversionUpload.service');
 const webEventsService = require('../services/webEvents.service');
 const { getIO } = require('../services/socket.service');
 const jobRequestsService = require('../services/jobRequests.service');
@@ -34,6 +34,8 @@ const { previewLeadImport, executeLeadImport } = require('../services/leadImport
 const { findCanonicalWhatsappConversation } = require('../lib/canonical-conversation');
 const { normalizePhoneDigits } = require('../lib/phone');
 const { buildClinicMatcher } = require('../lib/clinicAttribution');
+const { hasMarketingClinicScopeAccess } = require('../lib/marketingScopeAccess');
+const { resolveSafeHttpTarget } = require('../lib/safeHttpTarget');
 const {
   extractGoogleTagId,
   normalizeMetaAdsConfig,
@@ -62,6 +64,27 @@ const parseInteger = (value) => {
   if (typeof value === 'string' && !value.trim()) return null;
   const n = Number(value);
   return Number.isFinite(n) ? n : null;
+};
+const requireIntakeConfigScopeAccess = async (req, res, { clinicId = null, groupId = null, access = 'read' } = {}) => {
+  const userId = Number.parseInt(String(req.userData?.userId || ''), 10);
+  let clinicIds = [];
+
+  if (clinicId !== null) {
+    clinicIds.push(clinicId);
+  }
+  if (groupId !== null) {
+    const rows = await Clinica.findAll({
+      where: { grupoClinicaId: groupId },
+      attributes: ['id_clinica'],
+      raw: true,
+    });
+    clinicIds.push(...rows.map((row) => row.id_clinica).filter(Boolean));
+  }
+
+  const allowed = await hasMarketingClinicScopeAccess({ userId, clinicIds, access });
+  if (allowed) return true;
+  res.status(403).json({ success: false, error: 'scope_forbidden' });
+  return false;
 };
 const countMojibakeMarkers = (value) => {
   if (!value || typeof value !== 'string') return 0;
@@ -898,57 +921,6 @@ const stableStringify = (obj) => {
   return `{${keys.map(k => `${JSON.stringify(k)}:${stableStringify(obj[k])}`).join(',')}}`;
 };
 
-const cleanGoogleCustomerId = (value) => {
-  if (value === undefined || value === null) return null;
-  const clean = String(value).replace(/\D/g, '');
-  return clean || null;
-};
-
-const GOOGLE_DATETIME_REGEX = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}[+-]\d{2}:\d{2}$/;
-const toGoogleAdsDateTime = (value) => {
-  if (typeof value === 'string' && GOOGLE_DATETIME_REGEX.test(value.trim())) {
-    return value.trim();
-  }
-  const parsed = parseDate(value) || new Date();
-  const d = parsed;
-  const pad = (n) => String(n).padStart(2, '0');
-  const year = d.getFullYear();
-  const month = pad(d.getMonth() + 1);
-  const day = pad(d.getDate());
-  const hours = pad(d.getHours());
-  const minutes = pad(d.getMinutes());
-  const seconds = pad(d.getSeconds());
-  const offsetMinutes = -d.getTimezoneOffset();
-  const sign = offsetMinutes >= 0 ? '+' : '-';
-  const abs = Math.abs(offsetMinutes);
-  const tzH = pad(Math.floor(abs / 60));
-  const tzM = pad(abs % 60);
-  return `${year}-${month}-${day} ${hours}:${minutes}:${seconds}${sign}${tzH}:${tzM}`;
-};
-
-const normalizeGoogleConsent = (consent) => {
-  if (consent === undefined || consent === null) return null;
-  const fromValue = (v) => {
-    if (v === undefined || v === null) return null;
-    if (typeof v === 'boolean') return v ? 'GRANTED' : 'DENIED';
-    const s = String(v).trim().toLowerCase();
-    if (!s) return null;
-    if (['granted', 'grant', 'accepted', 'accept', 'yes', 'true', '1', 'optin', 'opt_in'].includes(s)) return 'GRANTED';
-    if (['denied', 'deny', 'rejected', 'reject', 'no', 'false', '0', 'optout', 'opt_out'].includes(s)) return 'DENIED';
-    return null;
-  };
-  if (typeof consent !== 'object' || Array.isArray(consent)) {
-    return fromValue(consent);
-  }
-  return fromValue(
-    consent.ad_user_data ??
-    consent.adUserData ??
-    consent.marketing ??
-    consent.analytics ??
-    consent.value
-  );
-};
-
 const boolConsent = (value) => {
   if (value === undefined || value === null || value === '') return null;
   if (typeof value === 'boolean') return value;
@@ -973,172 +945,6 @@ const isConsentModeEnabledForRecord = (record) => {
     ? record.config
     : {};
   return cfg.features?.consent_mode_enabled === true;
-};
-
-const parseSendToActionId = (sendTo) => {
-  if (!sendTo) return null;
-  const parts = String(sendTo).trim().split('/');
-  if (parts.length < 2) return null;
-  const maybeId = String(parts[1] || '').trim();
-  if (/^\d+$/.test(maybeId)) return maybeId;
-  return null;
-};
-
-const buildConversionActionResource = ({ customerId, conversionAction, conversionActionId, sendTo }) => {
-  const cleanCustomer = cleanGoogleCustomerId(customerId);
-  const rawAction = conversionAction ? String(conversionAction).trim() : '';
-  if (rawAction.startsWith('customers/')) return rawAction;
-  if (/^\d+$/.test(rawAction) && cleanCustomer) {
-    return `customers/${cleanCustomer}/conversionActions/${rawAction}`;
-  }
-
-  const actionId =
-    (conversionActionId && /^\d+$/.test(String(conversionActionId).trim()) ? String(conversionActionId).trim() : null) ||
-    parseSendToActionId(sendTo);
-  if (actionId && cleanCustomer) {
-    return `customers/${cleanCustomer}/conversionActions/${actionId}`;
-  }
-  return null;
-};
-
-const normalizeGoogleAdsConfig = (rawConfig) => {
-  if (!rawConfig || typeof rawConfig !== 'object' || Array.isArray(rawConfig)) return {};
-  return {
-    ...rawConfig,
-    customer_id: cleanGoogleCustomerId(rawConfig.customer_id) || rawConfig.customer_id || null,
-    conversion_action: rawConfig.conversion_action || null,
-    conversion_action_id: rawConfig.conversion_action_id || null,
-    send_to: rawConfig.send_to || null,
-    currency: rawConfig.currency || null
-  };
-};
-
-const getGoogleAdsEventConfig = (googleAdsCfg, eventName) => {
-  const eventKey = String(eventName || '').trim().toLowerCase();
-  const mapped =
-    eventKey === 'contact' ? 'contact'
-      : eventKey === 'schedule' ? 'schedule'
-        : eventKey === 'purchase' ? 'purchase'
-          : 'lead';
-
-  const nested = googleAdsCfg?.events && typeof googleAdsCfg.events === 'object'
-    ? (googleAdsCfg.events[mapped] || {})
-    : {};
-
-  return {
-    enabled: nested.enabled !== undefined ? !!nested.enabled : (googleAdsCfg.enabled !== false),
-    customer_id: cleanGoogleCustomerId(
-      nested.customer_id ??
-      googleAdsCfg[`${mapped}_customer_id`] ??
-      googleAdsCfg.customer_id ??
-      process.env.GOOGLE_ADS_CUSTOMER_ID
-    ),
-    conversion_action:
-      nested.conversion_action ??
-      googleAdsCfg[`${mapped}_conversion_action`] ??
-      googleAdsCfg.conversion_action ??
-      null,
-    conversion_action_id:
-      nested.conversion_action_id ??
-      googleAdsCfg[`${mapped}_conversion_action_id`] ??
-      googleAdsCfg.conversion_action_id ??
-      null,
-    send_to:
-      nested.send_to ??
-      googleAdsCfg[`${mapped}_send_to`] ??
-      googleAdsCfg.send_to ??
-      null,
-    value: coalesce(
-      nested.value,
-      googleAdsCfg[`${mapped}_value`],
-      googleAdsCfg.value,
-      mapped === 'purchase' ? null : 0
-    ),
-    currency: coalesce(
-      nested.currency,
-      googleAdsCfg[`${mapped}_currency`],
-      googleAdsCfg.currency,
-      'EUR'
-    ),
-    consent: normalizeGoogleConsent(
-      nested.consent ??
-      googleAdsCfg[`${mapped}_consent`] ??
-      googleAdsCfg.consent
-    )
-  };
-};
-
-const maybeUploadGoogleConversion = async ({
-  cfgRecord,
-  googleAdsConfig,
-  eventName,
-  customData,
-  userData,
-  consent,
-  eventId
-}) => {
-  const cfgObj = cfgRecord && typeof cfgRecord.config === 'object' ? cfgRecord.config : {};
-  const googleCfg = googleAdsConfig
-    ? normalizeGoogleAdsConfig(googleAdsConfig)
-    : normalizeGoogleAdsConfig(cfgObj.google_ads || {});
-  const eventCfg = getGoogleAdsEventConfig(googleCfg, eventName);
-
-  if (!eventCfg.enabled) {
-    return { sent: false, reason: 'google_ads_disabled' };
-  }
-
-  const gclid = customData.gclid || null;
-  const gbraid = customData.gbraid || null;
-  const wbraid = customData.wbraid || null;
-  if (!gclid && !gbraid && !wbraid) {
-    return { sent: false, reason: 'no_click_id' };
-  }
-
-  const customerId = cleanGoogleCustomerId(
-    customData.customer_id ||
-    customData.google_customer_id ||
-    eventCfg.customer_id
-  );
-  if (!customerId) {
-    return { sent: false, reason: 'missing_customer_id' };
-  }
-
-  const conversionAction = buildConversionActionResource({
-    customerId,
-    conversionAction: customData.conversion_action || eventCfg.conversion_action,
-    conversionActionId: customData.conversion_action_id || eventCfg.conversion_action_id,
-    sendTo: customData.send_to || eventCfg.send_to
-  });
-  if (!conversionAction) {
-    return { sent: false, reason: 'missing_conversion_action' };
-  }
-
-  const valueRaw = coalesce(customData.value, eventCfg.value, 0);
-  const value = Number.isFinite(Number(valueRaw)) ? Number(valueRaw) : 0;
-  const currency = String(coalesce(customData.currency, eventCfg.currency, 'EUR') || 'EUR').toUpperCase();
-  const conversionDateTime = toGoogleAdsDateTime(customData.conversion_time || customData.conversionDateTime || new Date());
-
-  const consentStatus =
-    normalizeGoogleConsent(customData.consent) ||
-    normalizeGoogleConsent(consent) ||
-    eventCfg.consent ||
-    null;
-
-  const result = await uploadClickConversion({
-    customerId,
-    conversionAction,
-    gclid,
-    gbraid,
-    wbraid,
-    value,
-    currency,
-    conversionDateTime,
-    externalId: eventId || null,
-    email: userData?.email || null,
-    phone: userData?.phone || userData?.telefono || null,
-    consentStatus
-  });
-  return { sent: true, result };
 };
 
 const validateSignature = (req) => {
@@ -1757,20 +1563,22 @@ exports.ingestLead = asyncHandler(async (req, res) => {
       send_to: coalesce(body.send_to, body.sendTo),
       consent: coalesce(body.consent, body.consentimiento_canal)
     };
-    if (allowLeadAdPlatformEvents) {
-      await maybeUploadGoogleConversion({
-        cfgRecord: cfg,
-        googleAdsConfig: effectiveTracking.google_ads,
-        eventName: normalizedEventNameForCapi,
-        customData: googleCustomData,
-        userData: {
-          email: leadEmail,
-          phone: leadTelefono
-        },
-        consent: coalesce(body.consent, body.consentimiento_canal),
-        eventId: lead.event_id || `lead-${lead.id}`
-      });
-    }
+    await maybeUploadGoogleConversion({
+      cfgRecord: cfg,
+      googleAdsConfig: effectiveTracking.google_ads,
+      eventName: normalizedEventNameForCapi,
+      customData: googleCustomData,
+      userData: {
+        email: leadEmail,
+        phone: leadTelefono
+      },
+      consent: coalesce(body.consent, body.consentimiento_canal),
+      eventId: lead.event_id || `lead-${lead.id}`,
+      clinicId: clinicaIdParsed,
+      groupId: grupoClinicaIdParsed,
+      assignmentScope: effectiveTracking.google_ads?.config_source === 'group' ? 'group' : 'clinic',
+      allowUpload: allowLeadAdPlatformEvents
+    });
   } catch (adsErr) {
     console.warn('⚠️ Google Ads upload error (ingestLead):', adsErr.response?.data || adsErr.message || adsErr);
   }
@@ -2449,7 +2257,7 @@ exports.getIntakeConfig = asyncHandler(async (req, res) => {
     payload.flow = cfg.flow || payload.flow;
     payload.flows = cfg.flows || payload.flows;
     payload.appearance = { ...payload.appearance, ...(cfg.appearance || {}) };
-    payload.google_ads = { ...payload.google_ads, ...normalizeGoogleAdsConfig(effectiveTracking.google_ads || {}) };
+    payload.google_ads = { ...payload.google_ads, ...normalizeEffectiveGoogleAdsConfig(effectiveTracking.google_ads || {}) };
     payload.meta_ads = { ...payload.meta_ads, ...normalizeMetaAdsConfig(effectiveTracking.meta_ads || {}) };
     payload.tracking = {
       meta_ads: {
@@ -2479,7 +2287,7 @@ exports.getIntakeConfig = asyncHandler(async (req, res) => {
       return res.status(403).json({ message: 'Domain not allowed' });
     }
   } else {
-    payload.google_ads = { ...payload.google_ads, ...normalizeGoogleAdsConfig(effectiveTracking.google_ads || {}) };
+    payload.google_ads = { ...payload.google_ads, ...normalizeEffectiveGoogleAdsConfig(effectiveTracking.google_ads || {}) };
     payload.meta_ads = { ...payload.meta_ads, ...normalizeMetaAdsConfig(effectiveTracking.meta_ads || {}) };
     payload.tracking = {
       meta_ads: {
@@ -2675,6 +2483,7 @@ exports.upsertIntakeConfig = asyncHandler(async (req, res) => {
   const clinicId = parseInteger(req.params.clinicId);
   const groupId = parseInteger(req.body?.group_id);
   if (!clinicId && !groupId) return res.status(400).json({ message: 'clinicId o group_id requerido' });
+  if (!(await requireIntakeConfigScopeAccess(req, res, { clinicId: groupId ? null : clinicId, groupId, access: 'write' }))) return;
 
   const scope = groupId ? 'group' : 'clinic';
   if (scope === 'clinic') {
@@ -2711,7 +2520,7 @@ exports.upsertIntakeConfig = asyncHandler(async (req, res) => {
     config = {
       ...existingConfig,
       ...body.config,
-      ...(body.config.google_ads ? { google_ads: normalizeGoogleAdsConfig(body.config.google_ads) } : {}),
+      ...(body.config.google_ads ? { google_ads: normalizeEffectiveGoogleAdsConfig(body.config.google_ads) } : {}),
       ...(body.config.meta_ads ? { meta_ads: normalizeMetaAdsConfig(body.config.meta_ads) } : {})
     };
   } else {
@@ -2720,7 +2529,7 @@ exports.upsertIntakeConfig = asyncHandler(async (req, res) => {
     const flows = Array.isArray(body.flows) ? body.flows : undefined;
     const appearance = body.appearance && typeof body.appearance === 'object' && !Array.isArray(body.appearance) ? body.appearance : undefined;
     const googleAds = body.google_ads && typeof body.google_ads === 'object' && !Array.isArray(body.google_ads)
-      ? normalizeGoogleAdsConfig(body.google_ads)
+      ? normalizeEffectiveGoogleAdsConfig(body.google_ads)
       : undefined;
     const metaAds = body.meta_ads && typeof body.meta_ads === 'object' && !Array.isArray(body.meta_ads)
       ? normalizeMetaAdsConfig(body.meta_ads)
@@ -2792,6 +2601,7 @@ exports.upsertIntakeConfig = asyncHandler(async (req, res) => {
 exports.getIntakeConfigSecretClinic = asyncHandler(async (req, res) => {
   const clinicId = parseInteger(req.params.clinicId);
   if (clinicId === null) return res.status(400).json({ message: 'clinicId requerido' });
+  if (!(await requireIntakeConfigScopeAccess(req, res, { clinicId, access: 'read' }))) return;
 
   const record = await IntakeConfig.findOne({ where: { clinic_id: clinicId }, raw: true });
   return res.json({
@@ -2804,6 +2614,7 @@ exports.getIntakeConfigSecretClinic = asyncHandler(async (req, res) => {
 exports.getIntakeConfigSecretGroup = asyncHandler(async (req, res) => {
   const groupId = parseInteger(req.params.groupId);
   if (groupId === null) return res.status(400).json({ message: 'groupId requerido' });
+  if (!(await requireIntakeConfigScopeAccess(req, res, { groupId, access: 'read' }))) return;
 
   const record = await IntakeConfig.findOne({ where: { group_id: groupId, assignment_scope: 'group' }, raw: true });
   return res.json({
@@ -2839,6 +2650,7 @@ exports.verifySnippetInstalled = asyncHandler(async (req, res) => {
   if (clinicId === null && groupId === null) {
     return res.status(400).json({ installed: false, details: 'clinic_id o group_id requerido' });
   }
+  if (!(await requireIntakeConfigScopeAccess(req, res, { clinicId, groupId, access: 'read' }))) return;
 
   let record = null;
   if (clinicId !== null) {
@@ -2890,16 +2702,22 @@ exports.verifySnippetInstalled = asyncHandler(async (req, res) => {
   }
   const uniqueCandidates = Array.from(new Set(candidates));
 
-  const fetchFirstHtml = async (urls, bypassCache = false) => {
-    let lastError = null;
-
-    for (const url of urls) {
+  const fetchSafeHtml = async (initialUrl, bypassCache = false) => {
+    let currentUrl = initialUrl;
+    for (let redirectCount = 0; redirectCount <= 5; redirectCount += 1) {
+      const safeTarget = await resolveSafeHttpTarget(currentUrl);
+      if (!isDomainAllowed(allowlist, normalizeDomain(safeTarget.hostname))) {
+        throw new Error('La redirección salió del dominio allowlisteado');
+      }
       try {
-        const resp = await axios.get(url, {
+        const resp = await axios.get(safeTarget.url, {
           timeout: 8000,
-          maxRedirects: 5,
+          maxRedirects: 0,
           maxContentLength: 2 * 1024 * 1024,
           maxBodyLength: 2 * 1024 * 1024,
+          httpAgent: safeTarget.httpAgent,
+          httpsAgent: safeTarget.httpsAgent,
+          proxy: false,
           headers: {
             'User-Agent': 'ClinicaClick Snippet Verifier/1.0',
             'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
@@ -2908,11 +2726,34 @@ exports.verifySnippetInstalled = asyncHandler(async (req, res) => {
               'Pragma': 'no-cache'
             } : {})
           },
-          validateStatus: (s) => s >= 200 && s < 400
+          validateStatus: (status) => status >= 200 && status < 400
         });
-        if (typeof resp.data === 'string' && resp.data.length > 0) {
-          return { html: resp.data, finalUrl: url, lastError: null };
+        if (resp.status >= 300 && resp.status < 400) {
+          const location = String(resp.headers?.location || '').trim();
+          if (!location || redirectCount === 5) {
+            throw new Error('La web devolvió demasiadas redirecciones o una redirección inválida');
+          }
+          currentUrl = new URL(location, safeTarget.url).toString();
+          continue;
         }
+        if (typeof resp.data === 'string' && resp.data.length > 0) {
+          return { html: resp.data, finalUrl: safeTarget.url, lastError: null };
+        }
+        throw new Error('La web no devolvió contenido HTML');
+      } finally {
+        safeTarget.httpAgent.destroy();
+        safeTarget.httpsAgent.destroy();
+      }
+    }
+    throw new Error('La web superó el límite de redirecciones');
+  };
+
+  const fetchFirstHtml = async (urls, bypassCache = false) => {
+    let lastError = null;
+
+    for (const url of urls) {
+      try {
+        return await fetchSafeHtml(url, bypassCache);
       } catch (e) {
         lastError = e;
       }
@@ -2955,9 +2796,7 @@ exports.verifySnippetInstalled = asyncHandler(async (req, res) => {
       const host = normalizeDomain(url.hostname);
       return Boolean(
         host === 'clinicaclick.com' ||
-        host.endsWith('.clinicaclick.com') ||
-        host === 'localhost' ||
-        host === '127.0.0.1'
+        host.endsWith('.clinicaclick.com')
       );
     } catch {
       return false;
@@ -2967,21 +2806,45 @@ exports.verifySnippetInstalled = asyncHandler(async (req, res) => {
   const fetchSnippetScriptInfo = async (src, checkedUrl) => {
     if (!src || !isClinicaClickAssetHost(src, checkedUrl)) return null;
     try {
-      const url = new URL(src, checkedUrl || `https://${domain}/`).toString();
-      const resp = await axios.get(url, {
-        timeout: 5000,
-        maxRedirects: 3,
-        maxContentLength: 512 * 1024,
-        maxBodyLength: 512 * 1024,
-        headers: {
-          'User-Agent': 'ClinicaClick Snippet Verifier/1.0',
-          'Accept': 'application/javascript,text/javascript,*/*;q=0.8',
-          'Cache-Control': 'no-cache',
-          'Pragma': 'no-cache',
-        },
-        validateStatus: (s) => s >= 200 && s < 400,
-      });
-      const body = typeof resp.data === 'string' ? resp.data : '';
+      let currentUrl = new URL(src, checkedUrl || `https://${domain}/`).toString();
+      let body = '';
+      for (let redirectCount = 0; redirectCount <= 3; redirectCount += 1) {
+        const safeTarget = await resolveSafeHttpTarget(currentUrl);
+        if (!isClinicaClickAssetHost(safeTarget.url, safeTarget.url)) {
+          throw new Error('El runtime redirigió fuera de los dominios de ClinicaClick');
+        }
+        try {
+          const resp = await axios.get(safeTarget.url, {
+            timeout: 5000,
+            maxRedirects: 0,
+            maxContentLength: 512 * 1024,
+            maxBodyLength: 512 * 1024,
+            httpAgent: safeTarget.httpAgent,
+            httpsAgent: safeTarget.httpsAgent,
+            proxy: false,
+            headers: {
+              'User-Agent': 'ClinicaClick Snippet Verifier/1.0',
+              'Accept': 'application/javascript,text/javascript,*/*;q=0.8',
+              'Cache-Control': 'no-cache',
+              'Pragma': 'no-cache',
+            },
+            validateStatus: (status) => status >= 200 && status < 400,
+          });
+          if (resp.status >= 300 && resp.status < 400) {
+            const location = String(resp.headers?.location || '').trim();
+            if (!location || redirectCount === 3) {
+              throw new Error('El runtime devolvió demasiadas redirecciones o una redirección inválida');
+            }
+            currentUrl = new URL(location, safeTarget.url).toString();
+            continue;
+          }
+          body = typeof resp.data === 'string' ? resp.data : '';
+          break;
+        } finally {
+          safeTarget.httpAgent.destroy();
+          safeTarget.httpsAgent.destroy();
+        }
+      }
       if (!body) return null;
       const version =
         body.match(/ClinicaClick\s+Intake\s+Snippet\s+v([0-9]+(?:\.[0-9]+){0,3})/i)?.[1] ||
@@ -3019,10 +2882,17 @@ exports.verifySnippetInstalled = asyncHandler(async (req, res) => {
       /_googlesitekitConsents/i.test(html) ||
       /wp-consent-api/i.test(html);
 
+    // JoinChat es el chat heredado que estamos sustituyendo por el runtime de
+    // ClinicaClick. Informarlo en la misma verificacion permite migrar en dos
+    // tiempos: instalar y verificar primero; desactivar JoinChat despues.
+    const joinChatDetected = /(?:joinchat|creame-whatsapp-me|joinchat-premium)/i.test(html);
+
     return {
       cookie_notice_detected: providers.length > 0,
       cookie_notice_provider: providers.join(', ') || null,
       google_consent_mode_detected: googleConsentModeDetected,
+      legacy_chat_detected: joinChatDetected,
+      legacy_chat_provider: joinChatDetected ? 'JoinChat' : null,
     };
   };
 
@@ -3151,6 +3021,8 @@ exports.verifySnippetInstalled = asyncHandler(async (req, res) => {
       cookie_notice_detected: !!primaryEvaluation.cookie_notice_detected,
       cookie_notice_provider: primaryEvaluation.cookie_notice_provider || null,
       google_consent_mode_detected: !!primaryEvaluation.google_consent_mode_detected,
+      legacy_chat_detected: !!primaryEvaluation.legacy_chat_detected,
+      legacy_chat_provider: primaryEvaluation.legacy_chat_provider || null,
     });
   }
 
@@ -3170,6 +3042,8 @@ exports.verifySnippetInstalled = asyncHandler(async (req, res) => {
         cookie_notice_detected: !!bypassEvaluation.cookie_notice_detected,
         cookie_notice_provider: bypassEvaluation.cookie_notice_provider || null,
         google_consent_mode_detected: !!bypassEvaluation.google_consent_mode_detected,
+        legacy_chat_detected: !!bypassEvaluation.legacy_chat_detected,
+        legacy_chat_provider: bypassEvaluation.legacy_chat_provider || null,
         details: 'La web devuelve el snippet correcto al saltar caché, pero la página normal sigue sirviendo una versión antigua o sin HMAC. Purga la caché de WordPress, del hosting o de la CDN y vuelve a verificar.'
       });
     }
@@ -3535,20 +3409,22 @@ exports.receiveIntakeEvent = asyncHandler(async (req, res) => {
   // 2) config.google_ads (clínica/grupo)
   // 3) variables de entorno
   try {
-    if (allowAdPlatformEvents) {
-      await maybeUploadGoogleConversion({
-        cfgRecord: cfg,
-        googleAdsConfig: effectiveTracking.google_ads,
-        eventName: eventName || 'ViewContent',
-        customData: {
-          ...custom_data,
-          conversion_time: coalesce(custom_data.conversion_time, custom_data.conversionDateTime, body.event_time)
-        },
-        userData: user_data,
-        consent: body.consent || null,
-        eventId: body.event_id || user_data.external_id || null
-      });
-    }
+    await maybeUploadGoogleConversion({
+      cfgRecord: cfg,
+      googleAdsConfig: effectiveTracking.google_ads,
+      eventName: eventName || 'ViewContent',
+      customData: {
+        ...custom_data,
+        conversion_time: coalesce(custom_data.conversion_time, custom_data.conversionDateTime, body.event_time)
+      },
+      userData: user_data,
+      consent: body.consent || null,
+      eventId: body.event_id || user_data.external_id || null,
+      clinicId: clinicIdParsed,
+      groupId: groupIdParsed,
+      assignmentScope: effectiveTracking.google_ads?.config_source === 'group' ? 'group' : 'clinic',
+      allowUpload: allowAdPlatformEvents
+    });
   } catch (adsErr) {
     console.warn('⚠️ Google Ads upload error (events):', adsErr.response?.data || adsErr.message || adsErr);
   }

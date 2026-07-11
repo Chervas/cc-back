@@ -3310,13 +3310,109 @@ En esa carga se guardan, entre otros:
 | GET | `/api/marketing/google-ads/conversion-actions` | Operativo | readiness de conversiones Google Ads |
 | POST | `/api/marketing/google-ads/conversion-actions/ensure` | Operativo | crea/reutiliza conversiones recomendadas |
 
+#### Contrato seguro de conversiones Google Ads (2026-07-11)
+
+- listado y `ensure` requieren `clinic_id` o `group_id`; ya no toman la conexión Google del usuario como credencial implícita;
+- la conexión OAuth y la cuenta Ads se resuelven por scope y se valida que `customer_id` esté asignado a ese mismo scope y conexión;
+- `POST .../ensure` es de solo lectura por defecto (`create_missing=false`); para crear acciones externas exige simultáneamente `create_missing=true` y `confirm_external_mutation=true`;
+- el `login_customer_id` se toma del mapeo `ClinicGoogleAdsAccount`, no del request ni de una cuenta manager global;
+- la carga server-side no acepta que el navegador sustituya `customer_id` o `conversion_action` configurados;
+- un evento puede tener varios destinos mediante `events.<evento>.destinations`; cada destino resuelve de forma independiente la conexión OAuth y el `ClinicGoogleAdsAccount` que contiene su `customer_id`;
+- cada intento viable queda en `GoogleAdsConversionUploadAttempts` con `destination_key`, scope, conexión resuelta, estado, motivo y metadatos saneados; el click id se conserva solo como hash y no se guardan email ni teléfono;
+- `dedupe_key` evita repetir un evento ya aceptado en el mismo `customer_id + conversion_action`; destinos Google distintos se deduplican de forma independiente y los reintentos fallidos conservan un historial acotado;
+- el agregado devuelve `accepted=true` si al menos un destino fue aceptado (en este intento o previamente por dedupe), `sent_count` para las subidas nuevas y `partial=true` cuando otro destino falla o se omite; un fallo de una cuenta no invalida la aceptación de la otra;
+- solo `lead`, `contact`, `schedule` y `purchase` pueden subir conversiones; eventos de navegación como `ViewContent` no hacen fallback a `lead` aunque lleven `gclid`;
+- una denegación de consentimiento bloquea la llamada externa y se registra como `skipped/consent_not_granted`;
+- los tests dirigidos no llaman a Google: `node src/scripts/tests/google_ads_conversion_tracking.test.js`.
+
+Formato de configuración multi-cuenta por evento:
+
+```json
+{
+  "google_ads": {
+    "enabled": true,
+    "currency": "EUR",
+    "events": {
+      "lead": {
+        "enabled": true,
+        "destinations": [
+          {
+            "key": "cuenta_paralela_185",
+            "enabled": true,
+            "customer_id": "1851215478",
+            "conversion_action_id": "<ID_ACCION_LEAD_185>",
+            "currency": "EUR"
+          },
+          {
+            "key": "cuenta_principal_599",
+            "enabled": true,
+            "customer_id": "5992356722",
+            "conversion_action_id": "<ID_ACCION_LEAD_599>",
+            "currency": "EUR"
+          }
+        ]
+      }
+    }
+  }
+}
+```
+
+Se repite el mismo esquema en `contact`, `schedule` y `purchase`, usando en cada uno el ID de su acción. `key` es una etiqueta estable de auditoría y no la aporta el navegador. Si la propiedad `destinations` no existe, continúa vigente el formato histórico de un único `customer_id`/`conversion_action_id` por evento. Un `destinations: []` explícito no hace fallback: deja el evento sin destinos y, por tanto, sin subida. En modo multi-destino, cualquier `customer_id`, `conversion_action`, `conversion_action_id` o `send_to` recibido desde el navegador invalida la selección completa y audita todos los destinos como `request_target_override_not_allowed`.
+
+#### `new_patients` y Piloto automático: runtime dev real (2026-07-11)
+
+La respuesta de bootstrap ofrece solo `connect_only` y `managed_service`; `managed_self` permanece en `legacy_modes` para lectura histórica. Guardar una estrategia `managed_service` provisiona una spec `ManagedCampaign` por canal de pago, en `draft + observe`, junto con su cuenta `unfunded`. No llama a Google/Meta.
+
+Rutas cliente actuales:
+
+| Método | Ruta | Uso |
+|---|---|---|
+| GET | `/api/marketing/managed-campaigns?clinic_id=` | Proyección segura sin comisión, neto de medios ni refs internas. |
+| POST | `/api/marketing/managed-campaigns/request` | Solicitud en observación + funding vacío. |
+| GET | `/api/marketing/managed-campaigns/:id` | Detalle cliente por scope. |
+| POST | `/api/marketing/managed-campaigns/:id/approve` | Aprobación cliente cuando está en `pending_client_review`. |
+
+Rutas internas actuales bajo `/api/admin/managed-campaigns`:
+
+- dashboard/listado/detalle/creación/edición;
+- transición de lifecycle y `activate-management`;
+- top-ups manuales con comisión fija/porcentual y snapshots de gasto;
+- inventario de campañas, propuestas fuzzy y confirmación campaña -> clínica;
+- movimientos bancarios manuales, propuestas y confirmación de conciliación parcial.
+
+Tablas reales: `ManagedCampaigns`, `ManagedCampaignFundingAccounts`, `ManagedCampaignLedgerEntries`, `ManagedCampaignSpendSnapshots`, `ManagedCampaignBankTransactions`, `ManagedCampaignReconciliationMatches`, `ExternalCampaignInventories` y `ExternalCampaignAssignments`.
+
+Límites que no deben ocultarse:
+
+- `active/launching/paused` son estados internos; no existe adaptador para publicar, pausar u optimizar en Google/Meta;
+- `recordTopup` exige `payment_verified=true`, bloquea la cuenta de fondos dentro de la transacción y deduplica por `funding_account_id + entry_type + external_ref`; `activate-management` requiere saldo + al menos un asiento de cobro verificado. Esto demuestra una comprobación manual, no un `ReconciliationMatch` bancario;
+- `recordSpend` bloquea la cuenta de fondos y actualiza snapshot, saldo y asiento en una sola transacción; un reintento concurrente con el mismo total no duplica gasto;
+- la conciliación actual vincula movimiento bancario con funding/cobro cliente, no snapshot de gasto con cargo real de proveedor; `bank_difference` sigue `null`, `provisional_margin` contiene la comisión y `realised_margin` permanece `null`;
+- no hay payment provider, fiscalidad, refund/chargeback, importación bancaria, disputa ni cierre de periodo;
+- frontend y backend consultan la misma allowlist `ADMIN_USER_IDS` + `CAMPAIGN_OPERATOR_USER_IDS`; siguen faltando capacidades granulares separadas;
+- la estrategia legacy no puede pasar directamente a `active` si es `managed_service`: debe operarse desde este lifecycle interno.
+
+Snapshot Propdental en DB dev:
+
+- dos cuentas: `1851215478` (25 campañas, 19 asignadas, 6 sin asignar) y `5992356722` (51 campañas, 25 asignadas, 26 sin asignar);
+- total revisado: 76 campañas, 44 asignaciones activas a ocho sedes y 32 sin asignar;
+- distribución combinada: Francia 10, Badalona 7, Hospitalet 7, Eixample 4, Sant Marti 4, Nou Barris 4, Sants 4 y Glories 4;
+- el matcher excluye clínicas cuyo nombre contiene `test` y no modifica el proveedor;
+- las decisiones revisadas rehacen también la atribución histórica (`clinicMatchSource=reviewed_campaign`);
+- el unique de `GoogleAdsInsightsDaily` incluye campaña/fecha/cuenta/ad group/network/device normalizados para evitar multiplicar totales de campaña.
+- existe una única spec controlada para Badalona en `draft + observe + unfunded`, con presupuesto solicitado de 500 EUR y financiación/gasto/saldo a cero; no hay piloto activo ni movimientos financieros reales.
+
+Tracking Propdental: el `IntakeConfig` de grupo conserva el destino legacy `185...` y añade dos `destinations` explícitos por evento para `185...` (acciones `7680...`) y `599...` (acciones `7540...`). `lead`, `contact` y `schedule` están habilitados; `purchase` permanece apagado hasta disponer de un evento fiable. `send_to=null` es coherente con acciones offline `UPLOAD_CLICKS` y no implica inyección de tag web.
+
+Instalación web segura: leer el secreto, guardar configuración y verificar el snippet exige permiso sobre todas las clínicas del scope. El verificador solo acepta dominios autorizados, resuelve todas sus IP, rechaza rangos privados/loopback/link-local/reservados, fija el DNS en el agente HTTP para impedir rebinding y revalida cada redirección. La inspección del runtime solo admite `clinicaclick.com` o subdominios, con el mismo control; nunca sigue automáticamente una redirección ni permite `localhost`.
+
 ### 3. Reglas de negocio activas hoy
 
 - **Una estrategia en curso por objetivo y scope.** Backend bloquea crear otra estrategia activa/en curso para el mismo objetivo.
 - **`connect_only` requiere campañas externas vinculadas.** No es válido como estrategia "vacía".
 - **Una campaña externa no se reutiliza entre estrategias en curso.**
 - **`connect_only` nace activa.** No sigue workflow de aprobación.
-- **`managed_*` mantienen lifecycle clásico** (`draft`, `pending_approval`, `active`, `paused`, `completed`) donde aplica.
+- **`managed_service` usa dos capas.** La estrategia legacy conserva su estado de negocio; la operación real usa el lifecycle más rico de `ManagedCampaign` y bloquea activar la estrategia fuera del panel interno.
 
 ### 4. `connect_only`: campañas externas por target
 

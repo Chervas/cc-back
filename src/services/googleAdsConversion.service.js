@@ -1,50 +1,55 @@
 'use strict';
-const axios = require('axios');
+
 const crypto = require('crypto');
+const { googleAdsRequest, normalizeCustomerId } = require('../lib/googleAdsClient');
 
-const DEV_TOKEN = process.env.GOOGLE_ADS_DEVELOPER_TOKEN;
-const CLIENT_ID = process.env.GOOGLE_CLIENT_ID;
-const CLIENT_SECRET = process.env.GOOGLE_CLIENT_SECRET;
-const REFRESH_TOKEN = process.env.GOOGLE_ADS_REFRESH_TOKEN;
-const LOGIN_CUSTOMER_ID = (process.env.GOOGLE_ADS_MANAGER_ID || '').replace(/-/g, '');
-const API_VERSION = process.env.GOOGLE_ADS_API_VERSION || 'v23';
-const DEFAULT_CUSTOMER_ID = (process.env.GOOGLE_ADS_CUSTOMER_ID || '').replace(/-/g, '');
+function scopedCredentialError() {
+  const error = new Error('Se requiere el access token OAuth resuelto para la clínica o grupo');
+  error.code = 'SCOPED_GOOGLE_CREDENTIAL_REQUIRED';
+  return error;
+}
 
-async function getAccessToken() {
-  if (!CLIENT_ID || !CLIENT_SECRET || !REFRESH_TOKEN) {
-    throw new Error('Faltan GOOGLE_CLIENT_ID/SECRET o GOOGLE_ADS_REFRESH_TOKEN');
+function assertSuccessfulUploadResponse(data) {
+  const partialFailure = data?.partialFailureError || data?.partial_failure_error || null;
+  if (!partialFailure) return data;
+
+  const error = new Error(
+    partialFailure.message || 'Google Ads rechazó parcial o totalmente la conversión'
+  );
+  error.code = 'GOOGLE_ADS_PARTIAL_FAILURE';
+  error.providerError = partialFailure;
+  throw error;
+}
+
+async function createConversionActions({
+  customerId,
+  actions = [],
+  accessToken,
+  loginCustomerId = null,
+  validateOnly = false,
+  request = googleAdsRequest
+} = {}) {
+  if (!accessToken) throw scopedCredentialError();
+  const cleanCustomerId = normalizeCustomerId(customerId);
+  if (!cleanCustomerId) {
+    const error = new Error('customerId es obligatorio');
+    error.code = 'CUSTOMER_ID_REQUIRED';
+    throw error;
   }
-  const { data } = await axios.post('https://oauth2.googleapis.com/token', new URLSearchParams({
-    client_id: CLIENT_ID,
-    client_secret: CLIENT_SECRET,
-    refresh_token: REFRESH_TOKEN,
-    grant_type: 'refresh_token'
-  }), { timeout: 8000 });
-  return data.access_token;
-}
 
-function buildHeaders(accessToken) {
-  return {
-    Authorization: `Bearer ${accessToken}`,
-    'developer-token': DEV_TOKEN,
-    ...(LOGIN_CUSTOMER_ID ? { 'login-customer-id': LOGIN_CUSTOMER_ID } : {})
-  };
-}
-
-async function createConversionActions(customerId, actions = []) {
-  if (!DEV_TOKEN) throw new Error('Falta GOOGLE_ADS_DEVELOPER_TOKEN');
-  const accessToken = await getAccessToken();
-  const url = `https://googleads.googleapis.com/${API_VERSION}/customers/${String(customerId).replace(/-/g, '')}/conversionActions:mutate`;
-  const operations = actions.map(a => ({ create: a }));
-  const { data } = await axios.post(url, { operations }, {
-    headers: buildHeaders(accessToken),
-    timeout: 10000
+  return request('POST', `customers/${cleanCustomerId}/conversionActions:mutate`, {
+    accessToken,
+    loginCustomerId: loginCustomerId || undefined,
+    singleAttempt: true,
+    timeoutMs: 10000,
+    data: {
+      operations: actions.map((action) => ({ create: action })),
+      validateOnly: validateOnly === true
+    }
   });
-  return data;
 }
 
-async function uploadClickConversion({
-  customerId = DEFAULT_CUSTOMER_ID,
+function buildClickConversion({
   conversionAction,
   gclid,
   gbraid,
@@ -57,30 +62,73 @@ async function uploadClickConversion({
   phone,
   consentStatus
 }) {
-  if (!DEV_TOKEN) throw new Error('Falta GOOGLE_ADS_DEVELOPER_TOKEN');
-  const accessToken = await getAccessToken();
-  const url = `https://googleads.googleapis.com/${API_VERSION}/customers/${String(customerId).replace(/-/g, '')}:uploadClickConversions`;
   const userIdentifiers = buildUserIdentifiers({ email, phone });
   const conversion = {
     conversionAction,
     conversionDateTime,
     currencyCode: currency,
     conversionValue: value,
+    ...(gclid ? { gclid } : {}),
+    ...(gbraid ? { gbraid } : {}),
+    ...(wbraid ? { wbraid } : {}),
+    ...(externalId ? { orderId: externalId } : {})
+  };
+  if (userIdentifiers.length) conversion.userIdentifiers = userIdentifiers;
+  if (consentStatus) conversion.consent = { adUserData: consentStatus };
+  return conversion;
+}
+
+async function uploadClickConversion({
+  customerId,
+  conversionAction,
+  gclid,
+  gbraid,
+  wbraid,
+  value = 0,
+  currency = 'EUR',
+  conversionDateTime,
+  externalId,
+  email,
+  phone,
+  consentStatus,
+  accessToken,
+  loginCustomerId = null,
+  validateOnly = false,
+  request = googleAdsRequest
+}) {
+  if (!accessToken) throw scopedCredentialError();
+  const cleanCustomerId = normalizeCustomerId(customerId);
+  if (!cleanCustomerId) {
+    const error = new Error('customerId es obligatorio');
+    error.code = 'CUSTOMER_ID_REQUIRED';
+    throw error;
+  }
+
+  const conversion = buildClickConversion({
+    conversionAction,
     gclid,
     gbraid,
     wbraid,
-    orderId: externalId
-  };
-  if (userIdentifiers.length) {
-    conversion.userIdentifiers = userIdentifiers;
-  }
-  if (consentStatus) {
-    conversion.consent = { adUserData: consentStatus };
-  }
-  const conversions = [conversion];
-  const body = { customerId: String(customerId).replace(/-/g, ''), conversions, partialFailure: true, validateOnly: false };
-  const { data } = await axios.post(url, body, { headers: buildHeaders(accessToken), timeout: 10000 });
-  return data;
+    value,
+    currency,
+    conversionDateTime,
+    externalId,
+    email,
+    phone,
+    consentStatus
+  });
+  const data = await request('POST', `customers/${cleanCustomerId}:uploadClickConversions`, {
+    accessToken,
+    loginCustomerId: loginCustomerId || undefined,
+    singleAttempt: true,
+    timeoutMs: 10000,
+    data: {
+      conversions: [conversion],
+      partialFailure: true,
+      validateOnly: validateOnly === true
+    }
+  });
+  return assertSuccessfulUploadResponse(data);
 }
 
 function sha256(value) {
@@ -105,37 +153,24 @@ function normalizeAndHashPhone(phone) {
   if (!phone) return null;
   let digits = String(phone).replace(/\D/g, '');
   if (!digits) return null;
-  if (digits.startsWith('00')) {
-    digits = digits.slice(2);
-  }
-  // E.164 (incluyendo + prefijo país)
+  if (digits.startsWith('00')) digits = digits.slice(2);
   return sha256(`+${digits}`);
 }
 
 function buildUserIdentifiers({ email, phone }) {
   const out = [];
   const hashedEmail = normalizeAndHashEmail(email);
-  if (hashedEmail) {
-    out.push({
-      hashedEmail,
-      userIdentifierSource: 'FIRST_PARTY'
-    });
-  }
+  if (hashedEmail) out.push({ hashedEmail, userIdentifierSource: 'FIRST_PARTY' });
   const hashedPhone = normalizeAndHashPhone(phone);
-  if (hashedPhone) {
-    out.push({
-      hashedPhoneNumber: hashedPhone,
-      userIdentifierSource: 'FIRST_PARTY'
-    });
-  }
+  if (hashedPhone) out.push({ hashedPhoneNumber: hashedPhone, userIdentifierSource: 'FIRST_PARTY' });
   return out;
 }
 
-function leadActionPayload(name = 'Lead – ClinicaClick') {
+function leadActionPayload(name = 'Lead - ClinicaClick') {
   return {
     name,
-    category: 'LEAD',
-    type: 'WEBPAGE',
+    category: 'SUBMIT_LEAD_FORM',
+    type: 'UPLOAD_CLICKS',
     status: 'ENABLED',
     includeInConversionsMetric: true,
     valueSettings: {
@@ -143,31 +178,25 @@ function leadActionPayload(name = 'Lead – ClinicaClick') {
       alwaysUseDefaultValue: false,
       defaultCurrencyCode: 'EUR'
     },
-    countingType: 'ONE_PER_CLICK',
-    attributionModelSettings: { attributionModel: 'LAST_CLICK' }
+    countingType: 'ONE_PER_CLICK'
   };
 }
 
-function purchaseActionPayload(name = 'Purchase – ClinicaClick') {
+function purchaseActionPayload(name = 'Purchase - ClinicaClick') {
   return {
-    name,
-    category: 'PURCHASE',
-    type: 'WEBPAGE',
-    status: 'ENABLED',
-    includeInConversionsMetric: true,
-    valueSettings: {
-      defaultValue: 0,
-      alwaysUseDefaultValue: false,
-      defaultCurrencyCode: 'EUR'
-    },
-    countingType: 'ONE_PER_CLICK',
-    attributionModelSettings: { attributionModel: 'LAST_CLICK' }
+    ...leadActionPayload(name),
+    category: 'PURCHASE'
   };
 }
 
 module.exports = {
+  assertSuccessfulUploadResponse,
+  buildClickConversion,
+  buildUserIdentifiers,
   createConversionActions,
   leadActionPayload,
+  normalizeAndHashEmail,
+  normalizeAndHashPhone,
   purchaseActionPayload,
   uploadClickConversion
 };

@@ -144,13 +144,22 @@ function buildBaseUrls() {
   const versions = [mainVersion, ...fallbacks];
   const bases = [];
   for (const version of versions) {
-    bases.push(`${endpoint}/googleads/${version}`);
     bases.push(`${endpoint}/${version}`);
+    // Compatibilidad con proxies históricos que montaban /googleads/<version>.
+    bases.push(`${endpoint}/googleads/${version}`);
   }
   return bases;
 }
 
-async function googleAdsRequest(method = 'GET', path, { accessToken, loginCustomerId, params, data } = {}) {
+async function googleAdsRequest(method = 'GET', path, {
+  accessToken,
+  loginCustomerId,
+  params,
+  data,
+  singleAttempt = false,
+  waitNextHour = false,
+  timeoutMs = 0
+} = {}) {
   const { developerToken } = ensureGoogleAdsConfig();
   const quotaLimit = parseInt(process.env.GOOGLE_ADS_DAILY_QUOTA || '1500', 10);
   await ensureDailyWindow(quotaLimit);
@@ -197,16 +206,17 @@ async function googleAdsRequest(method = 'GET', path, { accessToken, loginCustom
     queryParams.alt = 'json';
   }
 
-  const preferredMethods = Array.isArray(method) ? method : [method];
-  if (!preferredMethods.includes('POST')) {
+  const preferredMethods = Array.isArray(method) ? [...method] : [method];
+  if (!singleAttempt && !preferredMethods.includes('POST')) {
     preferredMethods.push('POST');
   }
+  const requestBaseUrls = singleAttempt ? baseUrls.slice(0, 1) : baseUrls;
 
   let lastError = null;
   for (const httpMethod of preferredMethods) {
-    for (let i = 0; i < baseUrls.length; i += 1) {
-      const base = baseUrls[i];
-      const isLastAttempt = httpMethod === preferredMethods[preferredMethods.length - 1] && i === baseUrls.length - 1;
+    for (let i = 0; i < requestBaseUrls.length; i += 1) {
+      const base = requestBaseUrls[i];
+      const isLastAttempt = httpMethod === preferredMethods[preferredMethods.length - 1] && i === requestBaseUrls.length - 1;
       const requestUrl = `${base}/${path}`;
       try {
         const headers = (httpMethod === 'POST')
@@ -217,7 +227,8 @@ async function googleAdsRequest(method = 'GET', path, { accessToken, loginCustom
           url: requestUrl,
           params: queryParams,
           data: typeof data === 'undefined' ? (httpMethod === 'POST' ? {} : undefined) : data,
-          headers
+          headers,
+          timeout: timeoutMs
         });
         const h = resp.headers || {};
         const appUsage = parseUsageHeader(h['x-app-usage']);
@@ -279,6 +290,7 @@ async function resumeGoogleAdsUsage() {
 }
 
 module.exports = {
+  buildBaseUrls,
   googleAdsRequest,
   normalizeCustomerId,
   formatCustomerId,
