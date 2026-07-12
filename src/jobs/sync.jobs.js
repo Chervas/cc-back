@@ -39,6 +39,7 @@ const { enqueueSyncPhonesForAllWabas } = require('../services/whatsappPhones.ser
 const marketingCompetitionService = require('../services/marketingCompetition.service');
 const webEventsService = require('../services/webEvents.service');
 const googleReviewMatchService = require('../services/googleReviewMatch.service');
+const { reconcileGoogleDataManagerDiagnostics } = require('../services/googleDataManagerDiagnostics.service');
 
 const GOOGLE_BUSINESS_PERFORMANCE_API = 'https://businessprofileperformance.googleapis.com/v1';
 const GOOGLE_MY_BUSINESS_API = 'https://mybusiness.googleapis.com/v4';
@@ -229,6 +230,7 @@ class MetaSyncJobs {
       adsBackfill: 'Backfill semanal de Ads con ventana extendida para consolidar atribución y cierres.',
       googleAdsSync: 'Sincroniza campañas y métricas diarias de Google Ads para cuentas vinculadas.',
       googleAdsBackfill: 'Backfill de Google Ads para nuevas cuentas o rangos extendidos.',
+      googleDataManagerDiagnostics: 'Concilia la aceptación asíncrona de conversiones enviadas a Google Data Manager.',
       webSync: 'Sincroniza Search Console (serie diaria) y PSI reciente para clínicas mapeadas.',
       webBackfill: 'Backfill histórico de Search Console (12–16 meses) para cache y rapidez.',
       analyticsSync: 'Sincroniza métricas de Google Analytics 4 (sesiones, usuarios, fuentes, audiencias).',
@@ -258,6 +260,7 @@ class MetaSyncJobs {
         adsBackfill: process.env.JOBS_ADS_BACKFILL_SCHEDULE || '0 4 * * 0',
         googleAdsSync: process.env.JOBS_GOOGLE_ADS_SCHEDULE || '20 0 * * *',
         googleAdsBackfill: process.env.JOBS_GOOGLE_ADS_BACKFILL_SCHEDULE || '30 5 * * 0',
+        googleDataManagerDiagnostics: process.env.JOBS_GOOGLE_DATA_MANAGER_DIAGNOSTICS_SCHEDULE || '*/30 * * * *',
         webSync: process.env.JOBS_WEB_SCHEDULE || '15 4 * * *',
         webBackfill: process.env.JOBS_WEB_BACKFILL_SCHEDULE || '30 4 * * 0',
         analyticsSync: process.env.JOBS_ANALYTICS_SCHEDULE || '45 4 * * *',
@@ -353,6 +356,11 @@ class MetaSyncJobs {
       this.registerJob('adsBackfill', this.config.schedules.adsBackfill, () => this.executeAdsBackfill());
       this.registerJob('googleAdsSync', this.config.schedules.googleAdsSync, () => this.executeGoogleAdsSync());
       this.registerJob('googleAdsBackfill', this.config.schedules.googleAdsBackfill, () => this.executeGoogleAdsBackfill());
+      this.registerJob(
+        'googleDataManagerDiagnostics',
+        this.config.schedules.googleDataManagerDiagnostics,
+        () => this.executeGoogleDataManagerDiagnostics()
+      );
       this.registerJob('webSync', this.config.schedules.webSync, () => this.executeWebSync());
       this.registerJob('webBackfill', this.config.schedules.webBackfill, () => this.executeWebBackfill());
       this.registerJob('analyticsSync', this.config.schedules.analyticsSync, () => this.executeAnalyticsSync());
@@ -1691,6 +1699,32 @@ class MetaSyncJobs {
         error_message: error.message
       });
       console.error('❌ Error en competitionSync:', error);
+      throw error;
+    }
+  }
+
+  async executeGoogleDataManagerDiagnostics(options = {}) {
+    const syncLog = await SyncLog.create({
+      job_type: 'google_data_manager_diagnostics',
+      status: 'running',
+      start_time: new Date(),
+      records_processed: 0
+    });
+    try {
+      const report = await reconcileGoogleDataManagerDiagnostics(options);
+      await syncLog.update({
+        status: report.errors > 0 && report.checked === report.errors ? 'failed' : 'completed',
+        end_time: new Date(),
+        records_processed: report.checked || 0,
+        status_report: report
+      });
+      return { status: 'completed', processed: report.checked || 0, report };
+    } catch (error) {
+      await syncLog.update({
+        status: 'failed',
+        end_time: new Date(),
+        error_message: error.message
+      });
       throw error;
     }
   }

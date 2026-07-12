@@ -17,15 +17,19 @@ module.exports = (sequelize, DataTypes) => {
     conversionAction: { type: DataTypes.STRING(256), allowNull: true, field: 'conversion_action' },
     eventName: { type: DataTypes.STRING(64), allowNull: false, field: 'event_name' },
     eventId: { type: DataTypes.STRING(191), allowNull: true, field: 'event_id' },
-    clickIdType: { type: DataTypes.ENUM('gclid', 'gbraid', 'wbraid'), allowNull: false, field: 'click_id_type' },
-    clickIdHash: { type: DataTypes.STRING(64), allowNull: false, field: 'click_id_hash' },
+    clickIdType: { type: DataTypes.ENUM('gclid', 'gbraid', 'wbraid'), allowNull: true, field: 'click_id_type' },
+    clickIdHash: { type: DataTypes.STRING(64), allowNull: true, field: 'click_id_hash' },
     consentStatus: {
       type: DataTypes.ENUM('GRANTED', 'DENIED', 'UNSPECIFIED'),
       allowNull: false,
       defaultValue: 'UNSPECIFIED',
       field: 'consent_status'
     },
-    status: { type: DataTypes.ENUM('pending', 'succeeded', 'failed', 'skipped'), allowNull: false, defaultValue: 'pending' },
+    status: {
+      type: DataTypes.ENUM('pending', 'accepted', 'succeeded', 'partial_success', 'failed', 'skipped'),
+      allowNull: false,
+      defaultValue: 'pending'
+    },
     reason: { type: DataTypes.STRING(128), allowNull: true },
     providerRequestId: { type: DataTypes.STRING(191), allowNull: true, field: 'provider_request_id' },
     attemptCount: { type: DataTypes.INTEGER.UNSIGNED, allowNull: false, defaultValue: 1, field: 'attempt_count' },
