@@ -145,7 +145,10 @@ const inspectSnippetRuntime = async ({
     runtime_declared_version: declaredRuntimeVersion,
     runtime_compatible: runtimeCompatible,
     runtime_source: runtimeSource,
-    consent_mode_detected: runtimeCompatible,
+    // This is only a capability of the served runtime. The controller must
+    // additionally observe the install attributes and the provider bootstrap
+    // in page HTML before reporting consent_mode_detected.
+    consent_mode_capable: runtimeCompatible,
   };
 };
 

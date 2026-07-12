@@ -98,6 +98,13 @@ const multiDestinationConfig = {
 
 function baseUploadInput(overrides = {}) {
   return {
+    cfgRecord: {
+      id: 24,
+      clinic_id: 58,
+      group_id: 5,
+      assignment_scope: 'group',
+      config: { features: { consent_mode_enabled: true } }
+    },
     googleAdsConfig: scopedConfig,
     eventName: 'Lead',
     customData: { gclid: 'secret-click-id' },
@@ -107,6 +114,7 @@ function baseUploadInput(overrides = {}) {
     clinicId: 58,
     groupId: 5,
     assignmentScope: 'group',
+    consentModeEnabled: true,
     ...overrides
   };
 }
@@ -423,6 +431,7 @@ async function testConsentModeRequiresPerVisitorAdvertisingConsent() {
     label,
     consent,
     consentModeEnabled,
+    configuredConsentModeEnabled = consentModeEnabled,
     expectedSent,
     expectedStatus,
     googleAdsConfig = scopedConfig
@@ -438,7 +447,7 @@ async function testConsentModeRequiresPerVisitorAdvertisingConsent() {
           clinic_id: 58,
           group_id: 5,
           assignment_scope: 'group',
-          config: { features: { consent_mode_enabled: consentModeEnabled } }
+          config: { features: { consent_mode_enabled: configuredConsentModeEnabled } }
         },
         googleAdsConfig,
         consent,
@@ -537,25 +546,33 @@ async function testConsentModeRequiresPerVisitorAdvertisingConsent() {
     expectedStatus: 'UNSPECIFIED'
   });
   await runCase({
-    label: 'Consent Mode off preserves legacy analytics-only uploads',
+    label: 'Consent Mode off blocks legacy analytics-only uploads',
     consent: { analytics: true },
     consentModeEnabled: false,
-    expectedSent: true,
+    expectedSent: false,
     expectedStatus: 'UNSPECIFIED'
   });
   await runCase({
-    label: 'Consent Mode off preserves uploads without consent payload',
+    label: 'Consent Mode off blocks uploads without consent payload',
     consent: null,
     consentModeEnabled: false,
-    expectedSent: true,
+    expectedSent: false,
     expectedStatus: 'UNSPECIFIED'
   });
   await runCase({
-    label: 'Consent Mode off preserves scalar legacy advertising consent',
+    label: 'A request flag cannot replace missing Consent Mode configuration',
+    consent: { marketing: true },
+    consentModeEnabled: true,
+    configuredConsentModeEnabled: false,
+    expectedSent: false,
+    expectedStatus: 'UNSPECIFIED'
+  });
+  await runCase({
+    label: 'Consent Mode off cannot use scalar legacy advertising consent',
     consent: 'granted',
     consentModeEnabled: false,
-    expectedSent: true,
-    expectedStatus: 'GRANTED'
+    expectedSent: false,
+    expectedStatus: 'UNSPECIFIED'
   });
   await runCase({
     label: 'Explicit marketing denial is respected with Consent Mode off',
@@ -659,6 +676,19 @@ async function testMultiDestinationSuccessAndDedupe() {
     selectConfiguredEventConfigs(configs, { customer_id: '185-121-5478' }).configs.map((item) => item.customer_id),
     ['1851215478']
   );
+  assert.deepEqual(
+    selectConfiguredEventConfigs(configs, {
+      attribution: { cc_gads_customer_id: '599-235-6722' }
+    }).configs.map((item) => item.customer_id),
+    ['5992356722'],
+    'The destination selector must honor signed attribution customer variants'
+  );
+  assert.deepEqual(
+    selectConfiguredEventConfigs(configs, {
+      google_ads_customer_id: '185-121-5478'
+    }).configs.map((item) => item.customer_id),
+    ['1851215478']
+  );
 
   const auditModel = new FakeAuditModel();
   const harness = createMultiDestinationDependencies({ auditModel });
@@ -724,6 +754,49 @@ async function testMultiDestinationCampaignSelector() {
   const rows = Array.from(auditModel.rows.values());
   assert.deepEqual(rows.map((row) => row.status), ['accepted']);
   assert.equal(rows[0].destinationKey, 'propdental_main_599');
+
+  const urlFallback = await maybeUploadGoogleConversion({
+    ...baseUploadInput({
+      googleAdsConfig: multiDestinationConfig,
+      eventId: 'lead-gad-campaign-selected-43',
+      customData: {
+        gclid: 'secret-click-id-url',
+        page_url: 'https://www.propdental.es/?gclid=click&gad_campaignid=2222222222'
+      }
+    }),
+    dependencies: harness.dependencies
+  });
+  assert.equal(urlFallback.sent, true);
+  assert.equal(urlFallback.customer_id, '5992356722');
+
+  const ccPriority = await maybeUploadGoogleConversion({
+    ...baseUploadInput({
+      googleAdsConfig: multiDestinationConfig,
+      eventId: 'lead-cc-campaign-selected-44',
+      customData: {
+        gclid: 'secret-click-id-cc',
+        page_url: 'https://www.propdental.es/?cc_gads_campaign_id=1111111111&gad_campaignid=2222222222'
+      }
+    }),
+    dependencies: harness.dependencies
+  });
+  assert.equal(ccPriority.sent, true);
+  assert.equal(ccPriority.customer_id, '1851215478');
+
+  const malformed = await maybeUploadGoogleConversion({
+    ...baseUploadInput({
+      googleAdsConfig: multiDestinationConfig,
+      eventId: 'lead-malformed-campaign-45',
+      customData: {
+        gclid: 'secret-click-id-malformed',
+        campaign_id: '2222222222x'
+      }
+    }),
+    dependencies: harness.dependencies
+  });
+  assert.equal(malformed.sent, false);
+  assert.equal(malformed.reason, 'ambiguous_destination');
+  assert.equal(malformed.destination_count, 0);
 }
 
 async function testSelectedDestinationProviderFailure() {

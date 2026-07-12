@@ -8,6 +8,7 @@ const {
   uploadConversionEvent
 } = require('./googleDataManagerConversion.service');
 const { resolveScopedGoogleAdsRuntime } = require('./googleAdsScopedRuntime.service');
+const { extractGoogleLeadIdentity } = require('../lib/google-lead-routing');
 
 const GOOGLE_DATETIME_REGEX = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}[+-]\d{2}:\d{2}$/;
 
@@ -320,9 +321,8 @@ function selectConfiguredEventConfigs(eventConfigs = [], customData = {}) {
   const configured = Array.isArray(eventConfigs) ? eventConfigs : [];
   if (!configured.length) return { configs: [], reason: null, selector: null };
 
-  const requestedCustomerId = cleanGoogleCustomerId(
-    customData.customer_id ?? customData.customerId ?? customData.google_customer_id
-  );
+  const requestedIdentity = extractGoogleLeadIdentity(customData);
+  const requestedCustomerId = requestedIdentity.customerId;
   let candidates = configured;
   if (requestedCustomerId) {
     candidates = configured.filter((item) => item.customer_id === requestedCustomerId);
@@ -343,13 +343,7 @@ function selectConfiguredEventConfigs(eventConfigs = [], customData = {}) {
     };
   }
 
-  const requestedCampaignId = cleanGoogleCustomerId(
-    customData.campaign_id
-      ?? customData.campaignId
-      ?? customData.google_campaign_id
-      ?? customData.googleCampaignId
-      ?? customData.campaignid
-  );
+  const requestedCampaignId = requestedIdentity.campaignId;
   if (requestedCampaignId) {
     const campaignMatches = candidates.filter((item) => (
       Array.isArray(item.campaign_ids) && item.campaign_ids.includes(requestedCampaignId)
@@ -661,16 +655,14 @@ async function uploadGoogleConversionDestination({
     sendTo: eventConfig.send_to
   });
   const configuredConsentModeEnabled = cfgObject.features?.consent_mode_enabled === true;
-  const requiresExplicitAdvertisingConsent = consentModeEnabled === true || configuredConsentModeEnabled;
-  const requestConsentStatus = requiresExplicitAdvertisingConsent
-    ? mergeExplicitGoogleAdvertisingConsent(customData.consent, consent)
-    : mergeGoogleConsent(customData.consent, consent);
-  // A static/legacy config value may preserve old installations without
-  // Consent Mode, but it can never stand in for per-visitor consent when the
-  // scope has Consent Mode enabled.
-  const consentStatus = requestConsentStatus
-    || (!requiresExplicitAdvertisingConsent ? eventConfig.consent : null)
-    || null;
+  // Advertising conversions always require an explicit, per-visitor grant.
+  // A disabled/missing Consent Mode configuration is a blocker, never a
+  // legacy permission or an invitation to infer consent from analytics/contact.
+  const requiresExplicitAdvertisingConsent = true;
+  const requestConsentStatus = mergeExplicitGoogleAdvertisingConsent(customData.consent, consent);
+  const consentStatus = configuredConsentModeEnabled && consentModeEnabled !== false
+    ? requestConsentStatus
+    : (requestConsentStatus === 'DENIED' ? 'DENIED' : null);
   const dedupeKey = buildConversionUploadDedupeKey({
     customerId: eventConfig.customer_id,
     conversionAction,
@@ -707,7 +699,9 @@ async function uploadGoogleConversionDestination({
       has_user_id: Boolean(userData?.userId || userData?.user_id || customData.user_id || customData.userId),
       user_data_policy: userDataPolicy.reason,
       user_data_requested: userDataPolicy.requested,
-      user_data_sent: userDataPolicy.enabled && userIdentifiers.length > 0
+      user_data_sent: userDataPolicy.enabled && userIdentifiers.length > 0,
+      consent_mode_configured: configuredConsentModeEnabled,
+      explicit_advertising_consent_required: requiresExplicitAdvertisingConsent
     }
   };
 

@@ -5,6 +5,8 @@ const fs = require('node:fs');
 const path = require('node:path');
 const {
   extractGoogleLeadIdentity,
+  normalizeGoogleCampaignId,
+  resolveGoogleAdsCampaignId,
   resolveGoogleLeadRoute,
   selectUnambiguousAccount,
 } = require('../../lib/google-lead-routing');
@@ -29,6 +31,26 @@ function assignmentModel(row, calls = []) {
 }
 
 async function run() {
+  assert.equal(normalizeGoogleCampaignId('21316904358'), '21316904358');
+  assert.equal(normalizeGoogleCampaignId('21316x904358'), null, 'Campaign ids must be digits only');
+  assert.equal(normalizeGoogleCampaignId('1'.repeat(33)), null, 'Campaign ids must fit persisted fields');
+  assert.equal(resolveGoogleAdsCampaignId({
+    ccCandidates: ['21316904358'],
+    canonicalCandidates: ['11111111111'],
+    gadCandidates: ['22222222222'],
+    urls: ['https://www.propdental.es/?cc_gads_campaign_id=33333333333&gad_campaignid=44444444444'],
+  }), '21316904358', 'Explicit cc_gads attribution has highest priority');
+  assert.equal(resolveGoogleAdsCampaignId({
+    canonicalCandidates: ['11111111111'],
+    urls: ['https://www.propdental.es/?cc_gads_campaign_id=21316904358&gad_campaignid=44444444444'],
+  }), '21316904358', 'A cc_gads URL suffix must win over legacy/canonical fallbacks');
+  assert.equal(resolveGoogleAdsCampaignId({
+    urls: ['https://www.propdental.es/?gad_campaignid=21316904358'],
+  }), '21316904358', 'Google gad_campaignid must be recovered from the landing URL');
+  assert.equal(resolveGoogleAdsCampaignId({
+    urls: ['https://www.propdental.es/?gad_campaignid=21316904358x'],
+  }), null, 'Malformed query values must not become routing keys');
+
   assert.deepEqual(extractGoogleLeadIdentity({
     account_id: '599-235-6722',
     external_campaign_id: 21193562335,
@@ -41,6 +63,29 @@ async function run() {
   }), {
     customerId: '1851215478',
     campaignId: '21794207214',
+  });
+  assert.deepEqual(extractGoogleLeadIdentity({
+    customer_id: '185-121-5478',
+    page_url: 'https://www.propdental.es/?gclid=click&gad_campaignid=21316904358',
+  }), {
+    customerId: '1851215478',
+    campaignId: '21316904358',
+  });
+  assert.deepEqual(extractGoogleLeadIdentity({
+    attribution: {
+      cc_gads_customer_id: '599-235-6722',
+      google_ads_campaign_id: '23925478530',
+    },
+  }), {
+    customerId: '5992356722',
+    campaignId: '23925478530',
+  });
+  assert.deepEqual(extractGoogleLeadIdentity({
+    google_ads_customer_id: '185-121-5478',
+    cc_gads_campaign_id: '21316904358',
+  }), {
+    customerId: '1851215478',
+    campaignId: '21316904358',
   });
 
   const groupAccount = {
@@ -130,6 +175,25 @@ async function run() {
   assert.equal(campaignRoute.matchValue, '5992356722:21193562335');
   assert.equal(campaignRoute.preserveGroupScope, false);
 
+  const urlCampaignCalls = [];
+  const urlCampaignRoute = await resolveGoogleLeadRoute({
+    body: {
+      customer_id: '185-121-5478',
+      page_url: 'https://www.propdental.es/?gclid=click&gad_campaignid=21316904358',
+    },
+    accountModel: accountModel([groupAccount]),
+    assignmentModel: assignmentModel({
+      provider: 'google_ads',
+      customer_id: '1851215478',
+      campaign_id: '21316904358',
+      grupo_clinica_id: 5,
+      clinica_id: 56,
+      status: 'active',
+    }, urlCampaignCalls),
+  });
+  assert.equal(urlCampaignCalls[0].where.campaign_id, '21316904358');
+  assert.equal(urlCampaignRoute.clinicId, 56);
+
   const wrongGroupRoute = await resolveGoogleLeadRoute({
     body: { customer_id: '5992356722', campaign_id: '21193562335' },
     accountModel: accountModel([{ ...groupAccount, customerId: '5992356722' }]),
@@ -175,6 +239,15 @@ async function run() {
     'The attribution audit must retain the resolved clinic routing source');
   assert.match(controllerSource, /clinic_match_value:\s*clinicMatchValue\s*\|\|\s*null/,
     'The attribution audit must retain the resolved clinic routing value');
+  assert.match(controllerSource, /const googleAdsCampaignIdValue = resolveGoogleAdsCampaignId\(/,
+    'Lead intake must persist the strict campaign fallback');
+
+  const webEventsSource = fs.readFileSync(
+    path.join(__dirname, '../../services/webEvents.service.js'),
+    'utf8',
+  );
+  assert.match(webEventsSource, /const googleIdentity = extractGoogleLeadIdentity\(/,
+    'Web events must use the same strict campaign fallback');
 
   console.log('google_lead_routing.test.js OK');
 }

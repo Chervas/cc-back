@@ -76,7 +76,9 @@ async function run() {
     assert.equal(result.runtime_declared_version, '99.0.0');
     assert.equal(result.runtime_version, '3.2.1');
     assert.equal(result.runtime_compatible, false);
-    assert.equal(result.consent_mode_detected, false);
+    assert.equal(result.consent_mode_capable, false);
+    assert.equal(result.consent_mode_detected, undefined,
+      'Runtime capability alone must not claim an installed consent bootstrap');
     assert.equal(calls.length, 2);
   }
 
@@ -93,7 +95,8 @@ async function run() {
     });
     assert.equal(result.runtime_version, '3.3.0');
     assert.equal(result.runtime_compatible, true);
-    assert.equal(result.consent_mode_detected, true);
+    assert.equal(result.consent_mode_capable, true);
+    assert.equal(result.consent_mode_detected, undefined);
   }
 
   {

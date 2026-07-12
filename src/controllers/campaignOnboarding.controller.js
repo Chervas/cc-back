@@ -44,6 +44,13 @@ const {
   canonicalExternalCampaignIdentity,
   externalCampaignIdentityKey,
 } = require('../services/externalCampaignAssignmentTargets.service');
+const {
+  buildVerificationConfigHash,
+  canonicalizeIntakeDomain,
+  canonicalizeIntakeDomains,
+  cookieNoticeProviderMatches,
+  verifyVerificationAttestation,
+} = require('../lib/intake-verification-attestation');
 
 const GoogleConnection = db.GoogleConnection;
 const MetaConnection = db.MetaConnection;
@@ -2145,6 +2152,139 @@ function buildGoogleAdsCapabilities(connected, hasAdsScope, hasDataManagerScope 
   };
 }
 
+function normalizeConsentDomain(value) {
+  return canonicalizeIntakeDomain(value);
+}
+
+function normalizeConsentDomains(values) {
+  let source = values;
+  if (typeof source === 'string') {
+    try { source = JSON.parse(source); } catch (_error) { source = [source]; }
+  }
+  return canonicalizeIntakeDomains(Array.isArray(source) ? source : []);
+}
+
+function assessConsentMeasurementReadiness(marketingState) {
+  const scope = marketingState?.scope || {};
+  const record = scope.assignment_scope === 'group'
+    ? marketingState?.records?.groupRecord
+    : (marketingState?.records?.clinicRecord || marketingState?.records?.groupRecord);
+  const config = record?.config && typeof record.config === 'object' && !Array.isArray(record.config)
+    ? record.config
+    : {};
+  const features = config.features && typeof config.features === 'object' && !Array.isArray(config.features)
+    ? config.features
+    : {};
+  const texts = config.texts && typeof config.texts === 'object' && !Array.isArray(config.texts)
+    ? config.texts
+    : {};
+  const verification = config.snippet_verification
+    && typeof config.snippet_verification === 'object'
+    && !Array.isArray(config.snippet_verification)
+    ? config.snippet_verification
+    : {};
+  const domains = normalizeConsentDomains(record?.domains);
+  const provider = String(features.consent_provider || '').trim().toLowerCase();
+  const externalCmpProvider = String(features.external_cmp_provider || '').trim().toLowerCase();
+  const recordScopeType = String(record?.assignment_scope || '').trim().toLowerCase() === 'group'
+    || (!record?.clinic_id && record?.group_id)
+    ? 'group'
+    : 'clinic';
+  const recordScopeId = recordScopeType === 'group'
+    ? parseInteger(record?.group_id)
+    : parseInteger(record?.clinic_id);
+  const configHash = buildVerificationConfigHash({
+    scopeType: recordScopeType,
+    scopeId: recordScopeId,
+    domains: record?.domains,
+    config,
+    hmacKey: record?.hmac_key,
+  });
+  const issues = [];
+  const add = (reason, extra = {}) => issues.push({ reason, ...extra });
+
+  if (features.consent_mode_enabled !== true) add('consent_mode_disabled');
+  if (!['clinicaclick', 'external_cmp'].includes(provider)) add('consent_provider_missing');
+  if (provider === 'external_cmp' && !externalCmpProvider) add('external_cmp_provider_missing');
+  if (!domains.length) add('consent_domains_missing');
+  const missingLegal = [
+    ['legal', texts.legal_url || texts.terms_url],
+    ['cookies', texts.cookies_url],
+    ['privacy', texts.privacy_url]
+  ].filter(([, value]) => !String(value || '').trim()).map(([key]) => key);
+  if (missingLegal.length) add('consent_legal_urls_missing', { missing: missingLegal });
+  const rawAttestations = verification.attestations_by_domain
+    && typeof verification.attestations_by_domain === 'object'
+    && !Array.isArray(verification.attestations_by_domain)
+    ? verification.attestations_by_domain
+    : {};
+  const attestations = new Map();
+  const validAttestationExpirations = [];
+  for (const [rawDomain, token] of Object.entries(rawAttestations)) {
+    const domain = normalizeConsentDomain(rawDomain);
+    if (domain && !attestations.has(domain) && typeof token === 'string') {
+      attestations.set(domain, token);
+    }
+  }
+
+  for (const domain of domains) {
+    const token = attestations.get(domain);
+    if (!token) {
+      add('consent_attestation_missing', { domain });
+      continue;
+    }
+    const attestation = verifyVerificationAttestation(token, {
+      scopeType: recordScopeType,
+      scopeId: recordScopeId,
+      domain,
+      configHash,
+    });
+    if (!attestation.valid) {
+      add('consent_attestation_invalid', { domain, details: attestation.reason });
+      continue;
+    }
+    validAttestationExpirations.push(Number(attestation.claims?.exp));
+    const signals = attestation.claims?.signals || {};
+    if (signals.installed !== true) add('consent_domain_unverified', { domain });
+    if (signals.runtime_compatible !== true) add('consent_runtime_incompatible', { domain });
+    if (signals.consent_mode_detected !== true) add('consent_signal_unverified', { domain });
+    if (signals.google_consent_mode_detected !== true) add('google_consent_mode_unverified', { domain });
+    if (provider === 'external_cmp' && (
+      signals.cookie_notice_detected !== true
+        || !cookieNoticeProviderMatches(signals.cookie_notice_provider, externalCmpProvider)
+    )) {
+      add('external_cmp_unverified', {
+        domain,
+        expected_provider: externalCmpProvider || null,
+        detected_provider: signals.cookie_notice_provider || null,
+        details: signals.cookie_notice_detected === true
+          ? 'external_cmp_provider_mismatch'
+          : 'external_cmp_not_detected',
+      });
+    }
+    const pages = signals.legal_pages && typeof signals.legal_pages === 'object' ? signals.legal_pages : {};
+    const invalidPages = ['legal', 'cookies', 'privacy'].filter((key) => (
+      pages[key]?.configured !== true || pages[key]?.reachable !== true
+    ));
+    if (invalidPages.length) add('consent_legal_urls_unverified', { domain, missing: invalidPages });
+  }
+
+  const reasons = listToUniqueArray(issues.map((issue) => issue.reason));
+  const minimumExpiration = validAttestationExpirations
+    .filter((value) => Number.isSafeInteger(value) && value > 0)
+    .reduce((minimum, value) => minimum === null || value < minimum ? value : minimum, null);
+  return {
+    ready: issues.length === 0,
+    validated: issues.length === 0,
+    reason: reasons[0] || null,
+    reasons,
+    issues,
+    provider: ['clinicaclick', 'external_cmp'].includes(provider) ? provider : null,
+    domains,
+    expires_at: minimumExpiration ? new Date(minimumExpiration * 1000).toISOString() : null,
+  };
+}
+
 function resolveEnabledConversionEvents(rawGoogleAdsConfig) {
   const rawEvents = rawGoogleAdsConfig?.events && typeof rawGoogleAdsConfig.events === 'object'
     && !Array.isArray(rawGoogleAdsConfig.events)
@@ -3866,10 +4006,51 @@ function buildStrategyMetrics(campaign, payload) {
 
 function strategyPayloadUsesGoogleAds(payload) {
   const channels = Array.isArray(payload?.channels) ? payload.channels : [];
-  return channels.some((channel) => (
+  const channelUsesGoogle = channels.some((channel) => (
     String(channel?.channel || channel || '').trim().toLowerCase() === 'google_ads'
       && (typeof channel !== 'object' || channel?.enabled !== false)
-  )) || payload?.measurement?.channel_native?.google_ads_conversions === true;
+  ));
+  if (channelUsesGoogle || payload?.measurement?.channel_native?.google_ads_conversions === true) {
+    return true;
+  }
+
+  const googleConfig = payload?.google_ads && typeof payload.google_ads === 'object'
+    && !Array.isArray(payload.google_ads)
+    ? payload.google_ads
+    : null;
+  if (googleConfig && googleConfig.enabled !== false && (
+    googleConfig.customer_id
+      || googleConfig.account_id
+      || Array.isArray(googleConfig.targets)
+      || Array.isArray(googleConfig.destinations)
+      || googleConfig.events
+  )) {
+    return true;
+  }
+
+  const providerIsGoogle = (value) => {
+    const source = value && typeof value === 'object' && !Array.isArray(value) ? value : {};
+    return Boolean(
+      source.google_ads_customer_id
+        || source.cc_gads_customer_id
+        || source.google_customer_id
+    ) || ['provider', 'platform', 'network', 'channel', 'source', 'type'].some((key) => (
+      ['google_ads', 'google', 'adwords'].includes(String(source[key] || '').trim().toLowerCase())
+    ));
+  };
+  const targetCollections = [
+    payload?.external_targets,
+    payload?.targets,
+    payload?.measurement?.targets,
+    payload?.measurement?.external_targets,
+  ];
+  return targetCollections.some((collection) => (
+    Array.isArray(collection) && collection.some((target) => (
+      providerIsGoogle(target)
+        || (Array.isArray(target?.campaigns) && target.campaigns.some(providerIsGoogle))
+        || (Array.isArray(target?.targets) && target.targets.some(providerIsGoogle))
+    ))
+  ));
 }
 
 async function buildLiveStrategyMetrics(rows, campaign, payload) {
@@ -4428,7 +4609,8 @@ async function evaluateGoogleConversionOnboardingReadiness({
   rawGoogleAdsConfig,
   fallbackCustomerId,
   currency = 'EUR',
-  createMissing = false
+  createMissing = false,
+  consentReadiness = null
 }) {
   const plan = buildRequiredConversionPlan(rawGoogleAdsConfig, fallbackCustomerId);
   const mappingsByCustomer = {};
@@ -4575,13 +4757,32 @@ async function evaluateGoogleConversionOnboardingReadiness({
     }
   }
 
-  const readiness = assessConversionOnboardingReadiness({
+  const conversionReadiness = assessConversionOnboardingReadiness({
     plan: planWithRuntimeIssues,
     mappingsByCustomer,
     actionsByCustomer,
     capabilitiesByCustomer,
     validationsByTarget
   });
+  const reportedConsentIssues = Array.isArray(consentReadiness?.issues)
+    ? consentReadiness.issues
+    : [];
+  const consentIssues = consentReadiness?.ready === true && consentReadiness?.validated === true
+    ? []
+    : (reportedConsentIssues.length > 0
+        ? reportedConsentIssues
+        : [{ reason: 'consent_readiness_pending' }]);
+  const combinedIssues = [...conversionReadiness.issues, ...consentIssues];
+  const combinedReasons = listToUniqueArray(combinedIssues.map((issue) => issue.reason));
+  const readiness = {
+    ...conversionReadiness,
+    ready: conversionReadiness.ready && consentIssues.length === 0,
+    validated: conversionReadiness.validated && consentIssues.length === 0,
+    reason: combinedReasons[0] || null,
+    reasons: combinedReasons,
+    issues: combinedIssues,
+    consent_readiness: consentReadiness || null
+  };
   return {
     ...readiness,
     mappings_by_customer: mappingsByCustomer,
@@ -4645,6 +4846,7 @@ exports.getCampaignOnboardingBootstrap = asyncHandler(async (req, res) => {
     : (marketingState.records.clinicRecord || marketingState.records.groupRecord);
   const intakeGoogleAds = normalizeGoogleAdsConfig(marketingState.tracking.google_ads || {});
   const intakeMetaAds = normalizeMetaAdsConfig(marketingState.tracking.meta_ads || {});
+  const consentReadiness = assessConsentMeasurementReadiness(marketingState);
 
   let googleConnected = false;
   let googleReason = null;
@@ -4727,6 +4929,7 @@ exports.getCampaignOnboardingBootstrap = asyncHandler(async (req, res) => {
     modes: ['connect_only', 'managed_service'],
     legacy_modes: ['managed_self'],
     active_mode: activeMode,
+    consent_readiness: consentReadiness,
     google_ads: {
       connected: googleConnected,
       reason: googleReason,
@@ -5668,6 +5871,18 @@ exports.startCampaignOnboarding = asyncHandler(async (req, res) => {
     groupIdRaw: scope.group_id,
     assignmentScopeRaw: scope.assignment_scope
   });
+  const consentReadiness = assessConsentMeasurementReadiness(marketingState);
+  if (!consentReadiness.ready || !consentReadiness.validated) {
+    return res.status(409).json({
+      success: false,
+      error: 'consent_readiness_pending',
+      message: 'La medición de privacidad no está verificada. Comprueba el aviso de cookies y Consent Mode en todos los dominios antes de continuar.',
+      reason: consentReadiness.reason || 'consent_readiness_pending',
+      reasons: consentReadiness.reasons,
+      issues: consentReadiness.issues,
+      consent_readiness: consentReadiness,
+    });
+  }
 
   const anchorClinicId = scope.clinic_id || scope.clinic_ids[0] || null;
   const running = await CampaignRequest.findAll({
@@ -5777,7 +5992,8 @@ exports.startCampaignOnboarding = asyncHandler(async (req, res) => {
         rawGoogleAdsConfig: marketingState.tracking.google_ads || {},
         fallbackCustomerId: selectedCustomer,
         currency: req.body?.google_ads?.currency || 'EUR',
-        createMissing: autoCreate
+        createMissing: autoCreate,
+        consentReadiness
       });
 
       if (!conversionReadiness.ready || !conversionReadiness.validated) {
@@ -6328,9 +6544,10 @@ exports.updateMarketingStrategy = asyncHandler(async (req, res) => {
     }
   }
 
-  const currentStatus = effectiveMode === 'connect_only'
-    ? 'active'
-    : normalizeStrategyStatus(currentPayload.status || representative.estado);
+  // Editing strategy details must never be an activation shortcut. In
+  // particular, a connect_only draft stays a draft until the explicit status
+  // transition runs the Google/Data Manager readiness gate.
+  const currentStatus = normalizeStrategyStatus(currentPayload.status || representative.estado);
   const campaignName = buildStrategyName({
     objectiveId,
     treatments,
@@ -6445,7 +6662,7 @@ exports.transitionMarketingStrategyStatus = asyncHandler(async (req, res) => {
   }
 
   let activationReadiness = null;
-  if (strategy?.mode === 'connect_only' && nextStatus === 'active' && strategyPayloadUsesGoogleAds(rows[0]?.solicitud || {})) {
+  if (strategy?.mode === 'connect_only' && nextStatus === 'active') {
     const strategyPayload = rows[0]?.solicitud && typeof rows[0].solicitud === 'object'
       ? rows[0].solicitud
       : {};
@@ -6455,26 +6672,16 @@ exports.transitionMarketingStrategyStatus = asyncHandler(async (req, res) => {
       groupIdRaw: strategyScope.group_id,
       assignmentScopeRaw: strategyScope.assignment_scope
     });
-    const fallbackCustomerId = marketingState.google.effective_assets?.account?.customer_id
-      || normalizeGoogleAdsConfig(marketingState.tracking.google_ads || {}).customer_id
-      || marketingState.google.available_accounts?.[0]?.customer_id
-      || null;
-    const readiness = await evaluateGoogleConversionOnboardingReadiness({
-      userId,
-      scope: strategyScope,
-      rawGoogleAdsConfig: marketingState.tracking.google_ads || {},
-      fallbackCustomerId,
-      currency: normalizeGoogleAdsConfig(marketingState.tracking.google_ads || {}).currency || 'EUR',
-      createMissing: false
-    });
-    if (!readiness.ready || !readiness.validated) {
+    const consentReadiness = assessConsentMeasurementReadiness(marketingState);
+    if (!consentReadiness.ready || !consentReadiness.validated) {
       return res.status(409).json({
         success: false,
-        error: 'conversion_readiness_pending',
-        message: 'La estrategia sigue en borrador: completa y valida las conversiones de ClinicaClick antes de activarla.',
-        reason: readiness.reason || 'conversion_readiness_pending',
-        reasons: readiness.reasons,
-        issues: readiness.issues,
+        error: 'consent_readiness_pending',
+        message: 'La estrategia sigue en borrador: verifica el aviso de cookies y Consent Mode en todos los dominios antes de activarla.',
+        reason: consentReadiness.reason || 'consent_readiness_pending',
+        reasons: consentReadiness.reasons,
+        issues: consentReadiness.issues,
+        consent_readiness: consentReadiness,
         status: 'draft'
       });
     }
@@ -6483,9 +6690,42 @@ exports.transitionMarketingStrategyStatus = asyncHandler(async (req, res) => {
       validated: true,
       validate_only: true,
       validated_at: new Date().toISOString(),
-      enabled_events: readiness.enabled_events,
-      customer_ids: readiness.customer_ids
+      consent_readiness: consentReadiness,
+      enabled_events: [],
+      customer_ids: []
     };
+
+    if (strategyPayloadUsesGoogleAds(strategyPayload)) {
+      const fallbackCustomerId = marketingState.google.effective_assets?.account?.customer_id
+        || normalizeGoogleAdsConfig(marketingState.tracking.google_ads || {}).customer_id
+        || marketingState.google.available_accounts?.[0]?.customer_id
+        || null;
+      const readiness = await evaluateGoogleConversionOnboardingReadiness({
+        userId,
+        scope: strategyScope,
+        rawGoogleAdsConfig: marketingState.tracking.google_ads || {},
+        fallbackCustomerId,
+        currency: normalizeGoogleAdsConfig(marketingState.tracking.google_ads || {}).currency || 'EUR',
+        createMissing: false,
+        consentReadiness
+      });
+      if (!readiness.ready || !readiness.validated) {
+        return res.status(409).json({
+          success: false,
+          error: 'conversion_readiness_pending',
+          message: 'La estrategia sigue en borrador: completa y valida las conversiones de ClinicaClick antes de activarla.',
+          reason: readiness.reason || 'conversion_readiness_pending',
+          reasons: readiness.reasons,
+          issues: readiness.issues,
+          status: 'draft'
+        });
+      }
+      activationReadiness = {
+        ...activationReadiness,
+        enabled_events: readiness.enabled_events,
+        customer_ids: readiness.customer_ids
+      };
+    }
   }
 
   const directVerifiedConnectOnlyActivation = strategy?.mode === 'connect_only'
@@ -6875,6 +7115,7 @@ exports.createMarketingStrategy = asyncHandler(async (req, res) => {
 
 exports.__test = {
   applyCanonicalMappingsToGoogleAdsConfig,
+  assessConsentMeasurementReadiness,
   assessConversionOnboardingReadiness,
   buildRequiredConversionPlan,
   buildClinicaclickConversionActionCreate,
