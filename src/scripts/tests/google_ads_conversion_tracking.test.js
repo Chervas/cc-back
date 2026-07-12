@@ -15,9 +15,11 @@ const {
   getGoogleAdsEventConfigs,
   hasRequestedActionOverride,
   maybeUploadGoogleConversion,
+  normalizeExplicitAdUserDataConsent,
   normalizeGoogleConsent,
   prepareAuditRow,
   requestedTargetMismatchesConfig,
+  resolveDocumentedEnhancedConversionAuthorization,
   resolveUserDataPolicy,
   selectConfiguredEventConfigs
 } = require('../../services/googleAdsConversionUpload.service');
@@ -95,6 +97,47 @@ const multiDestinationConfig = {
     }
   }
 };
+
+function withDocumentedEnhancedConversionAuthorization(base = scopedConfig, overrides = {}) {
+  const authorization = {
+    google_evidence_ref: 'google-email-thread-2025-06-18',
+    google_guidance_at: '2025-06-18T00:00:00.000Z',
+    advertiser_authorization_ref: 'advertiser-decision-2026-07-12',
+    advertiser_authorized_at: '2026-07-12T00:00:00.000Z',
+    permitted_identifiers: ['email', 'phone'],
+    policy_ambiguity_acknowledged: true,
+    formal_policy_exception_claimed: false,
+    measurement_only: true,
+    customer_match_enabled: false,
+    conversion_based_customer_lists_enabled: false,
+    remarketing_enabled: false,
+    ad_personalization: 'DENIED',
+    ...(overrides.authorization || {})
+  };
+  const allowlistEntry = {
+    enabled: true,
+    customer_id: '5992356722',
+    event_name: 'lead',
+    authorization,
+    ...(overrides.allowlistEntry || {})
+  };
+  return {
+    ...base,
+    events: {
+      ...(base.events || {}),
+      lead: {
+        ...(base.events?.lead || {}),
+        user_data_enabled: true
+      }
+    },
+    enhanced_conversions: {
+      enabled: true,
+      policy_mode: 'documented_google_account_team_guidance_and_advertiser_authorization',
+      allowlist: [allowlistEntry],
+      ...(overrides.policy || {})
+    }
+  };
+}
 
 function baseUploadInput(overrides = {}) {
   return {
@@ -364,6 +407,391 @@ async function testHealthcareUserDataIsBlocked() {
   assert.equal(row.requestMetadata.user_data_requested, true);
   assert.equal(row.requestMetadata.user_data_sent, false);
   assert.equal(JSON.stringify(row).includes('patient@example.com'), false);
+}
+
+async function testDocumentedEnhancedConversionAuthorizationIsScopedAndAudited() {
+  const auditModel = new FakeAuditModel();
+  let uploadPayload = null;
+  const googleAdsConfig = withDocumentedEnhancedConversionAuthorization();
+  const result = await maybeUploadGoogleConversion({
+    ...baseUploadInput({
+      googleAdsConfig,
+      customData: {
+        gclid: 'secret-click-id',
+        page_url: 'https://propdental.es/implantes/',
+        treatment: 'implantes',
+        remarketing: true,
+        audience: 'patients'
+      },
+      userData: {
+        email: ' Patient.Name+campaign@gmail.com ',
+        phone: '+34 600 000 000',
+        givenName: 'Ana',
+        familyName: 'García',
+        regionCode: 'ES',
+        postalCode: '08018',
+        userId: 'patient-42',
+        userProperties: { treatment: 'implantes' }
+      },
+      consent: { ad_user_data: 'granted', ad_personalization: 'denied' },
+      eventId: 'lead-enhanced-authorized-42'
+    }),
+    dependencies: {
+      now: () => new Date('2026-07-12T12:00:00.000Z'),
+      auditModel,
+      resolveRuntime: async () => ({
+        accessToken: 'scoped-token',
+        loginCustomerId: '2863224233',
+        connection: { id: 23 },
+        assignment: { id: 4 },
+        connectionSource: 'scope_assignment_group'
+      }),
+      uploadConversion: async (payload) => {
+        uploadPayload = payload;
+        return { requestId: 'enhanced-request-1' };
+      }
+    }
+  });
+
+  assert.equal(result.sent, true);
+  assert.equal(uploadPayload.email, ' Patient.Name+campaign@gmail.com ');
+  assert.equal(uploadPayload.phone, '+34 600 000 000');
+  assert.equal(uploadPayload.adPersonalizationStatus, 'DENIED');
+  assert.equal(uploadPayload.consentStatus, 'GRANTED');
+  assert.equal(uploadPayload.enhancedConversionAuthorization.customerId, '5992356722');
+  assert.equal(uploadPayload.enhancedConversionAuthorization.eventName, 'lead');
+  assert.equal(uploadPayload.enhancedConversionAuthorization.googleEvidenceRef, 'google-email-thread-2025-06-18');
+  assert.equal(uploadPayload.enhancedConversionAuthorization.advertiserAuthorizationRef, 'advertiser-decision-2026-07-12');
+  assert.equal(uploadPayload.enhancedConversionAuthorization.formalPolicyExceptionClaimed, false);
+  for (const forbiddenKey of [
+    'givenName',
+    'familyName',
+    'regionCode',
+    'postalCode',
+    'address',
+    'clientId',
+    'userId',
+    'userProperties',
+    'page_url',
+    'treatment',
+    'remarketing',
+    'audience'
+  ]) {
+    assert.equal(Object.prototype.hasOwnProperty.call(uploadPayload, forbiddenKey), false, `${forbiddenKey} must not be forwarded`);
+  }
+
+  const row = Array.from(auditModel.rows.values())[0];
+  assert.equal(row.requestMetadata.user_data_policy, 'authorized_documented_guidance_and_advertiser_authorization');
+  assert.equal(row.requestMetadata.user_data_sent, true);
+  assert.deepEqual(row.requestMetadata.user_identifier_types, ['email', 'phone']);
+  assert.equal(row.requestMetadata.has_address, false);
+  assert.equal(row.requestMetadata.enhanced_conversion_authorized, true);
+  assert.equal(row.requestMetadata.enhanced_conversion_google_evidence_ref, 'google-email-thread-2025-06-18');
+  assert.equal(
+    row.requestMetadata.enhanced_conversion_advertiser_authorization_ref,
+    'advertiser-decision-2026-07-12'
+  );
+  assert.equal(row.requestMetadata.enhanced_conversion_policy_ambiguity_acknowledged, true);
+  assert.equal(row.requestMetadata.enhanced_conversion_formal_policy_exception_claimed, false);
+  assert.equal(row.requestMetadata.enhanced_conversion_ad_personalization, 'DENIED');
+  assert.equal(row.requestMetadata.enhanced_conversion_page_url_sent, false);
+  assert.equal(row.requestMetadata.enhanced_conversion_treatment_sent, false);
+  assert.equal(row.requestMetadata.enhanced_conversion_remarketing_enabled, false);
+  assert.equal(row.requestMetadata.enhanced_conversion_customer_match_enabled, false);
+  assert.equal(row.requestMetadata.enhanced_conversion_authorization_digest.length, 64);
+  const serializedAudit = JSON.stringify(row);
+  for (const forbidden of ['Patient.Name', '+34 600 000 000', 'implantes', 'patient-42', '08018']) {
+    assert.equal(serializedAudit.includes(forbidden), false, `${forbidden} must not enter the audit row`);
+  }
+}
+
+async function testAuthorizedUserDataCanBeTheOnlyIdentifier() {
+  const auditModel = new FakeAuditModel();
+  let uploadPayload = null;
+  const result = await maybeUploadGoogleConversion({
+    ...baseUploadInput({
+      googleAdsConfig: withDocumentedEnhancedConversionAuthorization(),
+      customData: {},
+      userData: { email: 'patient@example.com', phone: '+34600000000' },
+      consent: { ad_user_data: 'granted', ad_personalization: 'denied' },
+      eventId: 'lead-user-data-only-authorized'
+    }),
+    dependencies: {
+      now: new Date('2026-07-12T12:00:00.000Z'),
+      auditModel,
+      resolveRuntime: async () => ({
+        accessToken: 'scoped-token',
+        connection: { id: 23 },
+        assignment: { id: 4 }
+      }),
+      uploadConversion: async (payload) => {
+        uploadPayload = payload;
+        return { requestId: 'enhanced-request-2' };
+      }
+    }
+  });
+  assert.equal(result.sent, true);
+  assert.equal(uploadPayload.gclid, undefined);
+  assert.equal(uploadPayload.gbraid, undefined);
+  assert.equal(uploadPayload.wbraid, undefined);
+  assert.equal(uploadPayload.email, 'patient@example.com');
+  const row = Array.from(auditModel.rows.values())[0];
+  assert.equal(row.clickIdType, null);
+  assert.equal(row.requestMetadata.user_identifier_count, 2);
+}
+
+function testEnhancedConversionAuthorizationMatrixAndEvidenceGuards() {
+  const now = new Date('2026-07-12T12:00:00.000Z');
+  for (const customerId of ['1851215478', '5992356722']) {
+    for (const eventName of ['lead', 'contact', 'schedule']) {
+      const config = withDocumentedEnhancedConversionAuthorization(scopedConfig, {
+        allowlistEntry: { customer_id: customerId, event_name: eventName }
+      });
+      const resolved = resolveDocumentedEnhancedConversionAuthorization(config, {
+        customer_id: customerId,
+        event_name: eventName,
+        user_data_enabled: true
+      }, { now });
+      assert.equal(resolved.valid, true, `${customerId}/${eventName} must be eligible for explicit authorization`);
+      assert.equal(resolved.authorization.customerId, customerId);
+      assert.equal(resolved.authorization.eventName, eventName);
+      assert.equal(resolved.authorization.formalPolicyExceptionClaimed, false);
+    }
+  }
+
+  const invalidCases = [
+    {
+      label: 'feature flag is disabled by default',
+      config: withDocumentedEnhancedConversionAuthorization(scopedConfig, {
+        policy: { enabled: false }
+      }),
+      eventConfig: { customer_id: '5992356722', event_name: 'lead' },
+      reason: 'policy_disabled'
+    },
+    {
+      label: 'honest policy mode is mandatory',
+      config: withDocumentedEnhancedConversionAuthorization(scopedConfig, {
+        policy: { policy_mode: 'written_google_policy_exception' }
+      }),
+      eventConfig: { customer_id: '5992356722', event_name: 'lead' },
+      reason: 'policy_mode_invalid'
+    },
+    {
+      label: 'allowlist entry must be explicitly enabled',
+      config: withDocumentedEnhancedConversionAuthorization(scopedConfig, {
+        allowlistEntry: { enabled: false }
+      }),
+      eventConfig: { customer_id: '5992356722', event_name: 'lead' },
+      reason: 'account_event_not_allowlisted'
+    },
+    {
+      label: 'outside Propdental account',
+      config: withDocumentedEnhancedConversionAuthorization(scopedConfig, {
+        allowlistEntry: { customer_id: '1112223333' }
+      }),
+      eventConfig: { customer_id: '1112223333', event_name: 'lead' },
+      reason: 'outside_propdental_account_event_scope'
+    },
+    {
+      label: 'purchase is outside event scope',
+      config: withDocumentedEnhancedConversionAuthorization(scopedConfig, {
+        allowlistEntry: { event_name: 'purchase' }
+      }),
+      eventConfig: { customer_id: '5992356722', event_name: 'purchase' },
+      reason: 'outside_propdental_account_event_scope'
+    },
+    {
+      label: 'account mismatch',
+      config: withDocumentedEnhancedConversionAuthorization(scopedConfig, {
+        allowlistEntry: { customer_id: '1851215478' }
+      }),
+      eventConfig: { customer_id: '5992356722', event_name: 'lead' },
+      reason: 'account_event_not_allowlisted'
+    },
+    {
+      label: 'duplicate allowlist entry',
+      config: withDocumentedEnhancedConversionAuthorization(scopedConfig, {
+        policy: {
+          allowlist: [
+            withDocumentedEnhancedConversionAuthorization().enhanced_conversions.allowlist[0],
+            withDocumentedEnhancedConversionAuthorization().enhanced_conversions.allowlist[0]
+          ]
+        }
+      }),
+      eventConfig: { customer_id: '5992356722', event_name: 'lead' },
+      reason: 'duplicate_account_event_authorization'
+    },
+    {
+      label: 'Google evidence must be opaque, not a URL',
+      config: withDocumentedEnhancedConversionAuthorization(scopedConfig, {
+        authorization: { google_evidence_ref: 'https://mail.google.com/thread/1' }
+      }),
+      eventConfig: { customer_id: '5992356722', event_name: 'lead' },
+      reason: 'authorization_metadata_invalid'
+    },
+    {
+      label: 'advertiser authorization is required',
+      config: withDocumentedEnhancedConversionAuthorization(scopedConfig, {
+        authorization: { advertiser_authorization_ref: null }
+      }),
+      eventConfig: { customer_id: '5992356722', event_name: 'lead' },
+      reason: 'authorization_metadata_invalid'
+    },
+    {
+      label: 'formal exception cannot be claimed',
+      config: withDocumentedEnhancedConversionAuthorization(scopedConfig, {
+        authorization: { formal_policy_exception_claimed: true }
+      }),
+      eventConfig: { customer_id: '5992356722', event_name: 'lead' },
+      reason: 'authorization_metadata_invalid'
+    },
+    {
+      label: 'policy ambiguity must be acknowledged',
+      config: withDocumentedEnhancedConversionAuthorization(scopedConfig, {
+        authorization: { policy_ambiguity_acknowledged: false }
+      }),
+      eventConfig: { customer_id: '5992356722', event_name: 'lead' },
+      reason: 'authorization_metadata_invalid'
+    },
+    {
+      label: 'measurement only is mandatory',
+      config: withDocumentedEnhancedConversionAuthorization(scopedConfig, {
+        authorization: { measurement_only: false }
+      }),
+      eventConfig: { customer_id: '5992356722', event_name: 'lead' },
+      reason: 'authorization_metadata_invalid'
+    },
+    {
+      label: 'names are not permitted identifiers',
+      config: withDocumentedEnhancedConversionAuthorization(scopedConfig, {
+        authorization: { permitted_identifiers: ['email', 'name'] }
+      }),
+      eventConfig: { customer_id: '5992356722', event_name: 'lead' },
+      reason: 'authorization_metadata_invalid'
+    },
+    {
+      label: 'remarketing must stay disabled',
+      config: withDocumentedEnhancedConversionAuthorization(scopedConfig, {
+        authorization: { remarketing_enabled: true }
+      }),
+      eventConfig: { customer_id: '5992356722', event_name: 'lead' },
+      reason: 'authorization_metadata_invalid'
+    },
+    {
+      label: 'customer match must stay disabled',
+      config: withDocumentedEnhancedConversionAuthorization(scopedConfig, {
+        authorization: { customer_match_enabled: true }
+      }),
+      eventConfig: { customer_id: '5992356722', event_name: 'lead' },
+      reason: 'authorization_metadata_invalid'
+    },
+    {
+      label: 'conversion based lists must stay disabled',
+      config: withDocumentedEnhancedConversionAuthorization(scopedConfig, {
+        authorization: { conversion_based_customer_lists_enabled: true }
+      }),
+      eventConfig: { customer_id: '5992356722', event_name: 'lead' },
+      reason: 'authorization_metadata_invalid'
+    },
+    {
+      label: 'ad personalization must be denied',
+      config: withDocumentedEnhancedConversionAuthorization(scopedConfig, {
+        authorization: { ad_personalization: 'GRANTED' }
+      }),
+      eventConfig: { customer_id: '5992356722', event_name: 'lead' },
+      reason: 'authorization_metadata_invalid'
+    },
+    {
+      label: 'expired authorization',
+      config: withDocumentedEnhancedConversionAuthorization(scopedConfig, {
+        authorization: { expires_at: '2026-07-11T00:00:00.000Z' }
+      }),
+      eventConfig: { customer_id: '5992356722', event_name: 'lead' },
+      reason: 'authorization_expired'
+    },
+    {
+      label: 'future advertiser authorization is not valid yet',
+      config: withDocumentedEnhancedConversionAuthorization(scopedConfig, {
+        authorization: { advertiser_authorized_at: '2026-07-13T00:00:00.000Z' }
+      }),
+      eventConfig: { customer_id: '5992356722', event_name: 'lead' },
+      reason: 'authorization_not_yet_valid'
+    }
+  ];
+  for (const testCase of invalidCases) {
+    const resolved = resolveDocumentedEnhancedConversionAuthorization(
+      testCase.config,
+      { ...testCase.eventConfig, user_data_enabled: true },
+      { now }
+    );
+    assert.equal(resolved.valid, false, testCase.label);
+    assert.equal(resolved.reason, testCase.reason, testCase.label);
+  }
+}
+
+async function testAdUserDataConsentIsMandatoryForEnhancedSignals() {
+  assert.equal(normalizeExplicitAdUserDataConsent({ marketing: true }), null);
+  assert.equal(normalizeExplicitAdUserDataConsent('granted'), null);
+  assert.equal(normalizeExplicitAdUserDataConsent({ ad_user_data: 'granted' }), 'GRANTED');
+  assert.equal(normalizeExplicitAdUserDataConsent({ adUserData: 'denied' }), 'DENIED');
+  assert.equal(normalizeExplicitAdUserDataConsent({
+    ad_user_data: 'granted',
+    adUserData: 'denied'
+  }), 'DENIED');
+
+  const config = withDocumentedEnhancedConversionAuthorization();
+  const eventConfig = getGoogleAdsEventConfigs(config, 'lead')[0];
+  assert.equal(resolveUserDataPolicy(config, eventConfig, {
+    adUserDataConsentStatus: null,
+    now: new Date('2026-07-12T12:00:00.000Z')
+  }).reason, 'blocked_ad_user_data_consent_missing');
+
+  const auditModel = new FakeAuditModel();
+  let uploadPayload = null;
+  const clickOnly = await maybeUploadGoogleConversion({
+    ...baseUploadInput({
+      googleAdsConfig: config,
+      consent: { marketing: true },
+      eventId: 'lead-marketing-only-consent'
+    }),
+    dependencies: {
+      now: new Date('2026-07-12T12:00:00.000Z'),
+      auditModel,
+      resolveRuntime: async () => ({ accessToken: 'scoped-token', connection: { id: 23 } }),
+      uploadConversion: async (payload) => {
+        uploadPayload = payload;
+        return { requestId: 'click-only-request' };
+      }
+    }
+  });
+  assert.equal(clickOnly.sent, true, 'The permitted click-id conversion should still be sent');
+  assert.equal(uploadPayload.email, undefined);
+  assert.equal(uploadPayload.phone, undefined);
+  assert.equal(uploadPayload.enhancedConversionAuthorization, undefined);
+  assert.equal(
+    Array.from(auditModel.rows.values())[0].requestMetadata.user_data_policy,
+    'blocked_ad_user_data_consent_missing'
+  );
+
+  const noIdentifierAudit = new FakeAuditModel();
+  let called = false;
+  const noIdentifier = await maybeUploadGoogleConversion({
+    ...baseUploadInput({
+      googleAdsConfig: config,
+      customData: {},
+      consent: { marketing: true },
+      eventId: 'lead-marketing-only-without-click'
+    }),
+    dependencies: {
+      now: new Date('2026-07-12T12:00:00.000Z'),
+      auditModel: noIdentifierAudit,
+      resolveRuntime: async () => { called = true; },
+      uploadConversion: async () => { called = true; }
+    }
+  });
+  assert.equal(noIdentifier.sent, false);
+  assert.equal(noIdentifier.reason, 'no_permitted_identifiers');
+  assert.equal(called, false);
 }
 
 async function testConsentAndTargetGuards() {
@@ -1266,6 +1694,10 @@ async function run() {
   await testConversionActionCreationRequiresScopedToken();
   await testAuditedUploadAndIdempotency();
   await testHealthcareUserDataIsBlocked();
+  await testDocumentedEnhancedConversionAuthorizationIsScopedAndAudited();
+  await testAuthorizedUserDataCanBeTheOnlyIdentifier();
+  testEnhancedConversionAuthorizationMatrixAndEvidenceGuards();
+  await testAdUserDataConsentIsMandatoryForEnhancedSignals();
   await testConsentAndTargetGuards();
   testAdvertisingConsentNormalizationKeepsPurposesSeparate();
   await testConsentModeRequiresPerVisitorAdvertisingConsent();

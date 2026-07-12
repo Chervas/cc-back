@@ -4,7 +4,11 @@ const crypto = require('crypto');
 const db = require('../../models');
 const {
   GOOGLE_DATA_MANAGER_SCOPE,
-  buildUserIdentifiers,
+  GOOGLE_ENHANCED_CONVERSION_ALLOWED_IDENTIFIERS,
+  GOOGLE_ENHANCED_CONVERSION_POLICY_MODE,
+  GOOGLE_ENHANCED_CONVERSION_PROPDENTAL_CUSTOMER_IDS,
+  GOOGLE_ENHANCED_CONVERSION_PROPDENTAL_EVENTS,
+  buildEnhancedConversionUserIdentifiers,
   uploadConversionEvent
 } = require('./googleDataManagerConversion.service');
 const { resolveScopedGoogleAdsRuntime } = require('./googleAdsScopedRuntime.service');
@@ -90,6 +94,26 @@ function mergeExplicitGoogleAdvertisingConsent(...values) {
         || Object.prototype.hasOwnProperty.call(value, 'marketing')
       )
   )));
+}
+
+function normalizeExplicitAdUserDataConsent(...values) {
+  const statuses = [];
+  for (const value of values) {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) continue;
+    const hasSnakeCase = Object.prototype.hasOwnProperty.call(value, 'ad_user_data');
+    const hasCamelCase = Object.prototype.hasOwnProperty.call(value, 'adUserData');
+    if (!hasSnakeCase && !hasCamelCase) continue;
+    for (const candidate of [
+      ...(hasSnakeCase ? [value.ad_user_data] : []),
+      ...(hasCamelCase ? [value.adUserData] : [])
+    ]) {
+      const status = normalizeGoogleConsent({ ad_user_data: candidate });
+      if (status) statuses.push(status);
+    }
+  }
+  if (statuses.includes('DENIED')) return 'DENIED';
+  if (statuses.includes('GRANTED')) return 'GRANTED';
+  return null;
 }
 
 function parseSendToActionId(sendTo) {
@@ -592,17 +616,169 @@ function hasRequestedActionOverride(customData = {}) {
   );
 }
 
-function resolveUserDataPolicy(googleConfig = {}, eventConfig = {}) {
+function normalizeOpaquePolicyReference(value, maxLength = 191) {
+  const normalized = cleanString(value);
+  if (!normalized || normalized.length > maxLength) return null;
+  // Evidence is referenced by an opaque email-thread/decision id. URLs are not accepted
+  // here so a landing page or treatment URL cannot become event metadata.
+  if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{5,190}$/.test(normalized)) return null;
+  return normalized;
+}
+
+function normalizeAuthorizationDate(value) {
+  const raw = cleanString(value);
+  if (!raw) return null;
+  const parsed = new Date(raw);
+  return Number.isFinite(parsed.getTime()) ? parsed.toISOString() : null;
+}
+
+function getEnhancedConversionPolicyConfig(googleConfig = {}) {
+  const raw = googleConfig.enhanced_conversions ?? googleConfig.enhancedConversions;
+  return raw && typeof raw === 'object' && !Array.isArray(raw) ? raw : {};
+}
+
+function resolveDocumentedEnhancedConversionAuthorization(googleConfig = {}, eventConfig = {}, options = {}) {
+  const policyConfig = getEnhancedConversionPolicyConfig(googleConfig);
+  if (policyConfig.enabled !== true) return { valid: false, reason: 'policy_disabled' };
+  const policyMode = cleanString(policyConfig.policy_mode ?? policyConfig.policyMode)?.toLowerCase();
+  if (policyMode !== GOOGLE_ENHANCED_CONVERSION_POLICY_MODE) {
+    return { valid: false, reason: 'policy_mode_invalid' };
+  }
+  const customerId = cleanGoogleCustomerId(eventConfig.customer_id);
+  const eventName = cleanString(eventConfig.event_name)?.toLowerCase() || null;
+  if (!customerId || !eventName) return { valid: false, reason: 'destination_scope_missing' };
+  if (
+    !GOOGLE_ENHANCED_CONVERSION_PROPDENTAL_CUSTOMER_IDS.includes(customerId)
+    || !GOOGLE_ENHANCED_CONVERSION_PROPDENTAL_EVENTS.includes(eventName)
+  ) {
+    return { valid: false, reason: 'outside_propdental_account_event_scope' };
+  }
+  const allowlist = Array.isArray(policyConfig.allowlist) ? policyConfig.allowlist : [];
+  const matches = allowlist.filter((entry) => (
+    entry
+      && typeof entry === 'object'
+      && !Array.isArray(entry)
+      && entry.enabled === true
+      && cleanGoogleCustomerId(entry.customer_id ?? entry.customerId) === customerId
+      && cleanString(entry.event_name ?? entry.eventName ?? entry.event)?.toLowerCase() === eventName
+  ));
+  if (matches.length === 0) return { valid: false, reason: 'account_event_not_allowlisted' };
+  if (matches.length > 1) return { valid: false, reason: 'duplicate_account_event_authorization' };
+
+  const rawAuthorization = matches[0].authorization;
+  if (!rawAuthorization || typeof rawAuthorization !== 'object' || Array.isArray(rawAuthorization)) {
+    return { valid: false, reason: 'authorization_metadata_missing' };
+  }
+  const googleEvidenceRef = normalizeOpaquePolicyReference(
+    rawAuthorization.google_evidence_ref ?? rawAuthorization.googleEvidenceRef,
+    191
+  );
+  const advertiserAuthorizationRef = normalizeOpaquePolicyReference(
+    rawAuthorization.advertiser_authorization_ref ?? rawAuthorization.advertiserAuthorizationRef,
+    191
+  );
+  const googleGuidanceAt = normalizeAuthorizationDate(
+    rawAuthorization.google_guidance_at ?? rawAuthorization.googleGuidanceAt
+  );
+  const advertiserAuthorizedAt = normalizeAuthorizationDate(
+    rawAuthorization.advertiser_authorized_at ?? rawAuthorization.advertiserAuthorizedAt
+  );
+  const expiresAtRaw = rawAuthorization.expires_at ?? rawAuthorization.expiresAt;
+  const expiresAt = expiresAtRaw ? normalizeAuthorizationDate(expiresAtRaw) : null;
+  const rawPermittedIdentifiers = rawAuthorization.permitted_identifiers
+    ?? rawAuthorization.permittedIdentifiers;
+  const permittedIdentifiers = Array.isArray(rawPermittedIdentifiers)
+    ? rawPermittedIdentifiers.map((value) => String(value || '').trim().toLowerCase())
+    : [];
+  const identifiersAreValid = permittedIdentifiers.length > 0
+    && permittedIdentifiers.every((value) => GOOGLE_ENHANCED_CONVERSION_ALLOWED_IDENTIFIERS.includes(value))
+    && new Set(permittedIdentifiers).size === permittedIdentifiers.length;
+  if (
+    !googleEvidenceRef
+    || !advertiserAuthorizationRef
+    || !googleGuidanceAt
+    || !advertiserAuthorizedAt
+    || (expiresAtRaw && !expiresAt)
+    || !identifiersAreValid
+    || rawAuthorization.policy_ambiguity_acknowledged !== true
+    || rawAuthorization.formal_policy_exception_claimed !== false
+    || rawAuthorization.measurement_only !== true
+    || rawAuthorization.customer_match_enabled !== false
+    || rawAuthorization.conversion_based_customer_lists_enabled !== false
+    || rawAuthorization.remarketing_enabled !== false
+    || String(rawAuthorization.ad_personalization || '').trim().toUpperCase() !== 'DENIED'
+  ) {
+    return { valid: false, reason: 'authorization_metadata_invalid' };
+  }
+  const now = options.now instanceof Date ? options.now : new Date(options.now || Date.now());
+  if (!Number.isFinite(now.getTime())) return { valid: false, reason: 'authorization_check_time_invalid' };
+  if (
+    new Date(googleGuidanceAt).getTime() > now.getTime() + 5 * 60 * 1000
+    || new Date(advertiserAuthorizedAt).getTime() > now.getTime() + 5 * 60 * 1000
+  ) {
+    return { valid: false, reason: 'authorization_not_yet_valid' };
+  }
+  if (expiresAt && new Date(expiresAt).getTime() <= now.getTime()) {
+    return { valid: false, reason: 'authorization_expired' };
+  }
+
+  const authorization = {
+    policyMode: GOOGLE_ENHANCED_CONVERSION_POLICY_MODE,
+    customerId,
+    eventName,
+    googleEvidenceRef,
+    advertiserAuthorizationRef,
+    googleGuidanceAt,
+    advertiserAuthorizedAt,
+    expiresAt,
+    permittedIdentifiers,
+    policyAmbiguityAcknowledged: true,
+    formalPolicyExceptionClaimed: false,
+    measurementOnly: true,
+    customerMatchEnabled: false,
+    conversionBasedCustomerListsEnabled: false,
+    remarketingEnabled: false,
+    adPersonalizationStatus: 'DENIED'
+  };
+  return {
+    valid: true,
+    reason: 'authorized_documented_guidance_and_advertiser_authorization',
+    authorization: {
+      ...authorization,
+      digest: sha256(JSON.stringify(authorization))
+    }
+  };
+}
+
+function resolveUserDataPolicy(googleConfig = {}, eventConfig = {}, options = {}) {
   const explicitlyRequested = eventConfig.user_data_enabled === true
     || googleConfig.user_data_enabled === true
     || googleConfig.userDataEnabled === true;
-  // ClinicaClick procesa actividad sanitaria/dental. La política de datos de
-  // Google no permite Enhanced Conversions con información de categorías de
-  // salud, por lo que ninguna configuración del cliente puede habilitarlo.
+  if (!explicitlyRequested) {
+    return { enabled: false, requested: false, reason: 'blocked_healthcare' };
+  }
+  const resolved = resolveDocumentedEnhancedConversionAuthorization(googleConfig, eventConfig, options);
+  if (!resolved.valid) {
+    const reason = ['policy_disabled', 'policy_mode_invalid'].includes(resolved.reason)
+      ? 'blocked_healthcare'
+      : `blocked_${resolved.reason}`;
+    return { enabled: false, requested: true, reason };
+  }
+  if (options.adUserDataConsentStatus !== 'GRANTED') {
+    return {
+      enabled: false,
+      requested: true,
+      reason: options.adUserDataConsentStatus === 'DENIED'
+        ? 'blocked_ad_user_data_consent_denied'
+        : 'blocked_ad_user_data_consent_missing',
+      authorization: resolved.authorization
+    };
+  }
   return {
-    enabled: false,
-    requested: explicitlyRequested,
-    reason: 'blocked_healthcare'
+    enabled: true,
+    requested: true,
+    reason: resolved.reason,
+    authorization: resolved.authorization
   };
 }
 
@@ -651,17 +827,32 @@ async function uploadGoogleConversionDestination({
     || googleConfig.phone_country_code
     || process.env.GOOGLE_DATA_MANAGER_DEFAULT_PHONE_COUNTRY_CODE
     || null;
-  const userDataPolicy = resolveUserDataPolicy(googleConfig, eventConfig);
+  const configuredConsentModeEnabled = cfgObject.features?.consent_mode_enabled === true;
+  // Advertising conversions always require an explicit, per-visitor grant.
+  // A disabled/missing Consent Mode configuration is a blocker, never a
+  // legacy permission or an invitation to infer consent from analytics/contact.
+  const requiresExplicitAdvertisingConsent = true;
+  const requestConsentStatus = mergeExplicitGoogleAdvertisingConsent(customData.consent, consent);
+  const requestedAdUserDataConsentStatus = normalizeExplicitAdUserDataConsent(customData.consent, consent);
+  const consentStatus = configuredConsentModeEnabled && consentModeEnabled !== false
+    ? requestConsentStatus
+    : (requestConsentStatus === 'DENIED' ? 'DENIED' : null);
+  const adUserDataConsentStatus = configuredConsentModeEnabled && consentModeEnabled !== false
+    ? requestedAdUserDataConsentStatus
+    : (requestedAdUserDataConsentStatus === 'DENIED' ? 'DENIED' : null);
+  const authorizationCheckNow = typeof dependencies.now === 'function'
+    ? dependencies.now()
+    : (dependencies.now || new Date());
+  const userDataPolicy = resolveUserDataPolicy(googleConfig, eventConfig, {
+    adUserDataConsentStatus,
+    now: authorizationCheckNow
+  });
   const userIdentifiers = userDataPolicy.enabled
-    ? buildUserIdentifiers({
+    ? buildEnhancedConversionUserIdentifiers({
         email: userData?.email || null,
         phone: userData?.phone || userData?.telefono || null,
         defaultPhoneCountryCode,
-        givenName: userData?.givenName ?? userData?.given_name ?? userData?.firstName ?? userData?.first_name,
-        familyName: userData?.familyName ?? userData?.family_name ?? userData?.lastName ?? userData?.last_name,
-        regionCode: userData?.regionCode ?? userData?.region_code ?? userData?.countryCode ?? userData?.country_code,
-        postalCode: userData?.postalCode ?? userData?.postal_code ?? userData?.zip ?? userData?.zip_code,
-        address: userData?.address
+        permittedIdentifiers: userDataPolicy.authorization?.permittedIdentifiers
       })
     : [];
   const userIdentifierHash = userIdentifiers.length
@@ -675,15 +866,6 @@ async function uploadGoogleConversionDestination({
     conversionActionId: eventConfig.conversion_action_id,
     sendTo: eventConfig.send_to
   });
-  const configuredConsentModeEnabled = cfgObject.features?.consent_mode_enabled === true;
-  // Advertising conversions always require an explicit, per-visitor grant.
-  // A disabled/missing Consent Mode configuration is a blocker, never a
-  // legacy permission or an invitation to infer consent from analytics/contact.
-  const requiresExplicitAdvertisingConsent = true;
-  const requestConsentStatus = mergeExplicitGoogleAdvertisingConsent(customData.consent, consent);
-  const consentStatus = configuredConsentModeEnabled && consentModeEnabled !== false
-    ? requestConsentStatus
-    : (requestConsentStatus === 'DENIED' ? 'DENIED' : null);
   const dedupeKey = buildConversionUploadDedupeKey({
     customerId: eventConfig.customer_id,
     conversionAction,
@@ -712,8 +894,11 @@ async function uploadGoogleConversionDestination({
       has_value: coalesce(customData.value, eventConfig.value) !== undefined,
       has_email: Boolean(userData?.email),
       has_phone: Boolean(userData?.phone || userData?.telefono),
-      has_address: userIdentifiers.some((identifier) => Boolean(identifier.address)),
+      has_address: false,
       user_identifier_count: userIdentifiers.length,
+      user_identifier_types: userIdentifiers.map((identifier) => (
+        identifier.emailAddress ? 'email' : 'phone'
+      )),
       has_click_id: Boolean(clickId),
       click_id_type: clickId?.type || null,
       has_client_id: Boolean(customData.client_id || customData.clientId || customData.ga_client_id),
@@ -721,8 +906,31 @@ async function uploadGoogleConversionDestination({
       user_data_policy: userDataPolicy.reason,
       user_data_requested: userDataPolicy.requested,
       user_data_sent: userDataPolicy.enabled && userIdentifiers.length > 0,
+      enhanced_conversion_authorized: userDataPolicy.enabled,
+      enhanced_conversion_policy_mode: userDataPolicy.authorization?.policyMode || null,
+      enhanced_conversion_google_evidence_ref: userDataPolicy.authorization?.googleEvidenceRef || null,
+      enhanced_conversion_google_guidance_at: userDataPolicy.authorization?.googleGuidanceAt || null,
+      enhanced_conversion_advertiser_authorization_ref:
+        userDataPolicy.authorization?.advertiserAuthorizationRef || null,
+      enhanced_conversion_advertiser_authorized_at:
+        userDataPolicy.authorization?.advertiserAuthorizedAt || null,
+      enhanced_conversion_expires_at: userDataPolicy.authorization?.expiresAt || null,
+      enhanced_conversion_authorization_digest: userDataPolicy.authorization?.digest || null,
+      enhanced_conversion_policy_ambiguity_acknowledged:
+        userDataPolicy.authorization?.policyAmbiguityAcknowledged === true,
+      enhanced_conversion_formal_policy_exception_claimed:
+        userDataPolicy.authorization?.formalPolicyExceptionClaimed === true,
+      enhanced_conversion_measurement_only: userDataPolicy.authorization?.measurementOnly === true,
+      enhanced_conversion_audience_use: false,
+      enhanced_conversion_page_url_sent: false,
+      enhanced_conversion_treatment_sent: false,
+      enhanced_conversion_remarketing_enabled: false,
+      enhanced_conversion_customer_match_enabled: false,
+      enhanced_conversion_conversion_based_customer_lists_enabled: false,
+      enhanced_conversion_ad_personalization: userDataPolicy.authorization?.adPersonalizationStatus || null,
       consent_mode_configured: configuredConsentModeEnabled,
-      explicit_advertising_consent_required: requiresExplicitAdvertisingConsent
+      explicit_advertising_consent_required: requiresExplicitAdvertisingConsent,
+      explicit_ad_user_data_consent_status: adUserDataConsentStatus || 'UNSPECIFIED'
     }
   };
 
@@ -822,19 +1030,17 @@ async function uploadGoogleConversionDestination({
       conversionDateTime,
       externalId: eventId || null,
       ...(userDataPolicy.enabled ? {
-        email: userData?.email || null,
-        phone: userData?.phone || userData?.telefono || null,
-        givenName: userData?.givenName ?? userData?.given_name ?? userData?.firstName ?? userData?.first_name,
-        familyName: userData?.familyName ?? userData?.family_name ?? userData?.lastName ?? userData?.last_name,
-        regionCode: userData?.regionCode ?? userData?.region_code ?? userData?.countryCode ?? userData?.country_code,
-        postalCode: userData?.postalCode ?? userData?.postal_code ?? userData?.zip ?? userData?.zip_code,
-        address: userData?.address || null,
-        clientId: customData.client_id || customData.clientId || customData.ga_client_id || null,
-        userId: userData?.userId || userData?.user_id || customData.user_id || customData.userId || null,
-        userProperties: eventConfig.user_properties || userProperties || userData?.userProperties || userData?.user_properties || null
+        ...(userDataPolicy.authorization?.permittedIdentifiers.includes('email')
+          ? { email: userData?.email || null }
+          : {}),
+        ...(userDataPolicy.authorization?.permittedIdentifiers.includes('phone')
+          ? { phone: userData?.phone || userData?.telefono || null }
+          : {}),
+        enhancedConversionAuthorization: userDataPolicy.authorization
       } : {}),
       eventName: eventConfig.event_name,
       consentStatus,
+      adPersonalizationStatus: userDataPolicy.enabled ? 'DENIED' : null,
       accessToken: runtime.accessToken,
       loginCustomerId: runtime.loginCustomerId,
       defaultPhoneCountryCode
@@ -1029,9 +1235,11 @@ module.exports = {
   hasRequestedTargetOverride,
   maybeUploadGoogleConversion,
   mergeGoogleConsent,
+  normalizeExplicitAdUserDataConsent,
   normalizeGoogleConsent,
   prepareAuditRow,
   requestedTargetMismatchesConfig,
+  resolveDocumentedEnhancedConversionAuthorization,
   resolveUserDataPolicy,
   selectConfiguredEventConfigs,
   selectClickId,

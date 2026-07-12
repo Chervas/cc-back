@@ -5,6 +5,10 @@ const axios = require('axios');
 
 const GOOGLE_DATA_MANAGER_SCOPE = 'https://www.googleapis.com/auth/datamanager';
 const GOOGLE_DATA_MANAGER_USER_DATA_POLICY = 'blocked_healthcare';
+const GOOGLE_ENHANCED_CONVERSION_POLICY_MODE = 'documented_google_account_team_guidance_and_advertiser_authorization';
+const GOOGLE_ENHANCED_CONVERSION_ALLOWED_IDENTIFIERS = Object.freeze(['email', 'phone']);
+const GOOGLE_ENHANCED_CONVERSION_PROPDENTAL_CUSTOMER_IDS = Object.freeze(['1851215478', '5992356722']);
+const GOOGLE_ENHANCED_CONVERSION_PROPDENTAL_EVENTS = Object.freeze(['lead', 'contact', 'schedule']);
 const DEFAULT_DATA_MANAGER_BASE_URL = 'https://datamanager.googleapis.com/v1';
 
 function scopedCredentialError() {
@@ -21,6 +25,11 @@ function cleanString(value) {
   if (value === undefined || value === null) return null;
   const cleaned = String(value).trim();
   return cleaned || null;
+}
+
+function isOpaquePolicyReference(value) {
+  const normalized = cleanString(value);
+  return Boolean(normalized && /^[A-Za-z0-9][A-Za-z0-9._:-]{5,190}$/.test(normalized));
 }
 
 function sha256Hex(value) {
@@ -141,6 +150,121 @@ function buildUserIdentifiers({
   return identifiers;
 }
 
+function buildEnhancedConversionUserIdentifiers({
+  email,
+  phone,
+  defaultPhoneCountryCode = null,
+  permittedIdentifiers = GOOGLE_ENHANCED_CONVERSION_ALLOWED_IDENTIFIERS
+} = {}) {
+  const permitted = new Set(
+    (Array.isArray(permittedIdentifiers) ? permittedIdentifiers : [])
+      .map((value) => String(value || '').trim().toLowerCase())
+      .filter((value) => GOOGLE_ENHANCED_CONVERSION_ALLOWED_IDENTIFIERS.includes(value))
+  );
+  const identifiers = [];
+  // Email and phone are deliberately preferred and are the only identifiers
+  // supported by the documented-guidance path. This is not a formal policy
+  // exception. Names/address are never used as a fallback because they add
+  // context that is unnecessary for this use case.
+  if (permitted.has('email')) {
+    const emailAddress = normalizeAndHashEmail(email);
+    if (emailAddress) identifiers.push({ emailAddress });
+  }
+  if (permitted.has('phone')) {
+    const phoneNumber = normalizeAndHashPhone(phone, defaultPhoneCountryCode);
+    if (phoneNumber) identifiers.push({ phoneNumber });
+  }
+  return identifiers;
+}
+
+function enhancedConversionAuthorizationError(reason) {
+  const error = new Error(
+    'Las señales de Conversiones mejoradas requieren orientación documentada y autorización expresa del anunciante'
+  );
+  error.code = reason === 'ad_user_data_consent_not_granted'
+    ? 'ENHANCED_CONVERSION_AD_USER_DATA_CONSENT_REQUIRED'
+    : reason === 'ad_personalization_not_denied'
+      ? 'ENHANCED_CONVERSION_AD_PERSONALIZATION_MUST_BE_DENIED'
+      : 'ENHANCED_CONVERSION_AUTHORIZATION_REQUIRED';
+  error.policyReason = reason;
+  return error;
+}
+
+function validateEnhancedConversionAuthorization({
+  authorization,
+  customerId,
+  eventName,
+  consentStatus,
+  adPersonalizationStatus,
+  now = new Date()
+} = {}) {
+  if (!authorization || typeof authorization !== 'object' || Array.isArray(authorization)) {
+    return { valid: false, reason: 'authorization_missing' };
+  }
+  const normalizedCustomerId = cleanDigits(customerId);
+  const normalizedEventName = cleanString(eventName)?.toLowerCase() || null;
+  const permittedIdentifiers = Array.isArray(authorization.permittedIdentifiers)
+    ? authorization.permittedIdentifiers.map((value) => String(value || '').trim().toLowerCase())
+    : [];
+  const hasOnlySupportedIdentifiers = permittedIdentifiers.length > 0
+    && permittedIdentifiers.every((value) => GOOGLE_ENHANCED_CONVERSION_ALLOWED_IDENTIFIERS.includes(value))
+    && new Set(permittedIdentifiers).size === permittedIdentifiers.length;
+  if (
+    authorization.policyMode !== GOOGLE_ENHANCED_CONVERSION_POLICY_MODE
+    || !GOOGLE_ENHANCED_CONVERSION_PROPDENTAL_CUSTOMER_IDS.includes(normalizedCustomerId)
+    || !GOOGLE_ENHANCED_CONVERSION_PROPDENTAL_EVENTS.includes(normalizedEventName)
+    || cleanDigits(authorization.customerId) !== normalizedCustomerId
+    || cleanString(authorization.eventName)?.toLowerCase() !== normalizedEventName
+    || !isOpaquePolicyReference(authorization.googleEvidenceRef)
+    || !isOpaquePolicyReference(authorization.advertiserAuthorizationRef)
+    || !cleanString(authorization.googleGuidanceAt)
+    || !cleanString(authorization.advertiserAuthorizedAt)
+    || authorization.policyAmbiguityAcknowledged !== true
+    || authorization.formalPolicyExceptionClaimed !== false
+    || authorization.measurementOnly !== true
+    || authorization.customerMatchEnabled !== false
+    || authorization.conversionBasedCustomerListsEnabled !== false
+    || authorization.remarketingEnabled !== false
+    || authorization.adPersonalizationStatus !== 'DENIED'
+    || !hasOnlySupportedIdentifiers
+  ) {
+    return { valid: false, reason: 'authorization_scope_invalid' };
+  }
+  const googleGuidanceAt = new Date(authorization.googleGuidanceAt);
+  const advertiserAuthorizedAt = new Date(authorization.advertiserAuthorizedAt);
+  const checkedAt = now instanceof Date ? now : new Date(now);
+  if (
+    !Number.isFinite(googleGuidanceAt.getTime())
+    || !Number.isFinite(advertiserAuthorizedAt.getTime())
+    || !Number.isFinite(checkedAt.getTime())
+  ) {
+    return { valid: false, reason: 'authorization_date_invalid' };
+  }
+  if (
+    googleGuidanceAt.getTime() > checkedAt.getTime() + 5 * 60 * 1000
+    || advertiserAuthorizedAt.getTime() > checkedAt.getTime() + 5 * 60 * 1000
+  ) {
+    return { valid: false, reason: 'authorization_not_yet_valid' };
+  }
+  if (authorization.expiresAt) {
+    const expiresAt = new Date(authorization.expiresAt);
+    if (!Number.isFinite(expiresAt.getTime()) || expiresAt.getTime() <= checkedAt.getTime()) {
+      return { valid: false, reason: 'authorization_expired' };
+    }
+  }
+  if (String(consentStatus || '').trim().toUpperCase() !== 'GRANTED') {
+    return { valid: false, reason: 'ad_user_data_consent_not_granted' };
+  }
+  if (String(adPersonalizationStatus || '').trim().toUpperCase() !== 'DENIED') {
+    return { valid: false, reason: 'ad_personalization_not_denied' };
+  }
+  return {
+    valid: true,
+    reason: 'authorized_documented_guidance_and_advertiser_authorization',
+    permittedIdentifiers
+  };
+}
+
 function buildUserProperties(input) {
   if (!input || typeof input !== 'object' || Array.isArray(input)) return null;
   const properties = {};
@@ -200,15 +324,21 @@ function toRfc3339(value) {
   return parsed.toISOString();
 }
 
-function buildConsent(consentStatus) {
+function buildConsent(consentStatus, adPersonalizationStatus = null) {
+  const consent = {};
   const normalized = String(consentStatus || '').trim().toUpperCase();
   if (normalized === 'GRANTED' || normalized === 'CONSENT_GRANTED') {
-    return { adUserData: 'CONSENT_GRANTED' };
+    consent.adUserData = 'CONSENT_GRANTED';
+  } else if (normalized === 'DENIED' || normalized === 'CONSENT_DENIED') {
+    consent.adUserData = 'CONSENT_DENIED';
   }
-  if (normalized === 'DENIED' || normalized === 'CONSENT_DENIED') {
-    return { adUserData: 'CONSENT_DENIED' };
+  const normalizedPersonalization = String(adPersonalizationStatus || '').trim().toUpperCase();
+  if (normalizedPersonalization === 'GRANTED' || normalizedPersonalization === 'CONSENT_GRANTED') {
+    consent.adPersonalization = 'CONSENT_GRANTED';
+  } else if (normalizedPersonalization === 'DENIED' || normalizedPersonalization === 'CONSENT_DENIED') {
+    consent.adPersonalization = 'CONSENT_DENIED';
   }
-  return null;
+  return Object.keys(consent).length ? consent : null;
 }
 
 function buildAdIdentifiers({ gclid, gbraid, wbraid } = {}) {
@@ -230,6 +360,10 @@ function buildDataManagerEventRequest({
   externalId,
   eventName,
   consentStatus,
+  adPersonalizationStatus = null,
+  email = null,
+  phone = null,
+  enhancedConversionAuthorization = null,
   loginCustomerId = null,
   eventSource = 'WEB',
   defaultPhoneCountryCode = process.env.GOOGLE_DATA_MANAGER_DEFAULT_PHONE_COUNTRY_CODE || null,
@@ -275,19 +409,43 @@ function buildDataManagerEventRequest({
   if (normalizedEventName) event.eventName = normalizedEventName;
   const adIdentifiers = buildAdIdentifiers({ gclid, gbraid, wbraid });
   if (adIdentifiers) event.adIdentifiers = adIdentifiers;
-  const consent = buildConsent(consentStatus);
+  const consent = buildConsent(consentStatus, adPersonalizationStatus);
   if (consent) event.consent = consent;
-  if (!event.adIdentifiers) {
-    const error = new Error('Se requiere un click id; UserData está bloqueado para actividad sanitaria');
+  const userDataWasProvided = Boolean(cleanString(email) || cleanString(phone));
+  const enhancedConversionWasRequested = userDataWasProvided || Boolean(enhancedConversionAuthorization);
+  let userIdentifiers = [];
+  if (enhancedConversionWasRequested) {
+    const authorizationResult = validateEnhancedConversionAuthorization({
+      authorization: enhancedConversionAuthorization,
+      customerId: operatingAccountId,
+      eventName: normalizedEventName,
+      consentStatus,
+      adPersonalizationStatus
+    });
+    if (!authorizationResult.valid) {
+      throw enhancedConversionAuthorizationError(authorizationResult.reason);
+    }
+    userIdentifiers = buildEnhancedConversionUserIdentifiers({
+      email,
+      phone,
+      defaultPhoneCountryCode,
+      permittedIdentifiers: authorizationResult.permittedIdentifiers
+    });
+    if (userIdentifiers.length) event.userData = { userIdentifiers };
+  }
+  if (!event.adIdentifiers && !userIdentifiers.length) {
+    const error = new Error('Se requiere un click id o una señal de usuario expresamente autorizada');
     error.code = 'NO_IDENTIFIERS_PROVIDED';
     throw error;
   }
 
-  return {
+  const payload = {
     destinations: [destination],
     events: [event],
     validateOnly: validateOnly === true
   };
+  if (userIdentifiers.length) payload.encoding = 'HEX';
+  return payload;
 }
 
 function getDataManagerBaseUrl() {
@@ -360,10 +518,15 @@ async function retrieveRequestStatus({
 module.exports = {
   GOOGLE_DATA_MANAGER_SCOPE,
   GOOGLE_DATA_MANAGER_USER_DATA_POLICY,
+  GOOGLE_ENHANCED_CONVERSION_ALLOWED_IDENTIFIERS,
+  GOOGLE_ENHANCED_CONVERSION_POLICY_MODE,
+  GOOGLE_ENHANCED_CONVERSION_PROPDENTAL_CUSTOMER_IDS,
+  GOOGLE_ENHANCED_CONVERSION_PROPDENTAL_EVENTS,
   buildAdIdentifiers,
   buildAddressIdentifier,
   buildConsent,
   buildDataManagerEventRequest,
+  buildEnhancedConversionUserIdentifiers,
   buildUserIdentifiers,
   buildUserProperties,
   extractConversionActionId,
@@ -376,5 +539,6 @@ module.exports = {
   requireQuotaProjectId,
   scopedCredentialError,
   toRfc3339,
-  uploadConversionEvent
+  uploadConversionEvent,
+  validateEnhancedConversionAuthorization
 };

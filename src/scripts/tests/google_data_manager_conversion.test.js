@@ -7,12 +7,16 @@ const db = require('../../../models');
 const {
   GOOGLE_DATA_MANAGER_SCOPE,
   GOOGLE_DATA_MANAGER_USER_DATA_POLICY,
+  GOOGLE_ENHANCED_CONVERSION_POLICY_MODE,
   buildDataManagerEventRequest,
+  buildEnhancedConversionUserIdentifiers,
   normalizeAndHashEmail,
   normalizeAndHashName,
+  normalizeAndHashPhone,
   normalizePhoneE164,
   retrieveRequestStatus,
-  uploadConversionEvent
+  uploadConversionEvent,
+  validateEnhancedConversionAuthorization
 } = require('../../services/googleDataManagerConversion.service');
 const {
   classifyDiagnostics,
@@ -22,6 +26,28 @@ const { missingGoogleScopes } = require('../../services/googleAdsScopedRuntime.s
 const {
   __test: campaignOnboardingTest
 } = require('../../controllers/campaignOnboarding.controller');
+
+function documentedAuthorization(overrides = {}) {
+  return {
+    policyMode: GOOGLE_ENHANCED_CONVERSION_POLICY_MODE,
+    customerId: '5992356722',
+    eventName: 'lead',
+    googleEvidenceRef: 'google-email-thread-2025-06-18',
+    advertiserAuthorizationRef: 'advertiser-decision-2026-07-12',
+    googleGuidanceAt: '2025-06-18T00:00:00.000Z',
+    advertiserAuthorizedAt: '2026-07-12T00:00:00.000Z',
+    expiresAt: null,
+    permittedIdentifiers: ['email', 'phone'],
+    policyAmbiguityAcknowledged: true,
+    formalPolicyExceptionClaimed: false,
+    measurementOnly: true,
+    customerMatchEnabled: false,
+    conversionBasedCustomerListsEnabled: false,
+    remarketingEnabled: false,
+    adPersonalizationStatus: 'DENIED',
+    ...overrides
+  };
+}
 
 function testPayloadMappingAndHealthcarePolicy() {
   const payload = buildDataManagerEventRequest({
@@ -33,8 +59,6 @@ function testPayloadMappingAndHealthcarePolicy() {
     currency: 'eur',
     conversionDateTime: '2026-07-12 10:30:00+02:00',
     externalId: 'lead-42',
-    email: ' Patient.Name+campaign@gmail.com ',
-    phone: '600 000 000',
     givenName: '  María-José ',
     familyName: ' O\'Connor ',
     regionCode: 'es',
@@ -85,6 +109,172 @@ function testPayloadMappingAndHealthcarePolicy() {
   assert.equal(normalizePhoneE164('600000000', null), null, 'Local phones require an explicit country code');
 }
 
+function testAuthorizedEnhancedConversionPayload() {
+  const authorization = documentedAuthorization();
+  const payload = buildDataManagerEventRequest({
+    customerId: '599-235-6722',
+    conversionAction: '7540337982',
+    gclid: 'opaque-click-id',
+    conversionDateTime: '2026-07-12T08:30:00.000Z',
+    externalId: 'lead-enhanced-42',
+    eventName: 'lead',
+    consentStatus: 'GRANTED',
+    adPersonalizationStatus: 'DENIED',
+    email: ' Patient.Name+campaign@gmail.com ',
+    phone: '600 000 000',
+    defaultPhoneCountryCode: '34',
+    enhancedConversionAuthorization: authorization,
+    // These fields must remain ignored even if a caller supplies them.
+    pageUrl: 'https://propdental.es/implantes/',
+    treatment: 'implantes',
+    remarketing: true,
+    givenName: 'Ana',
+    familyName: 'García',
+    address: { postalCode: '08018' },
+    userProperties: { audience: 'patients' }
+  });
+
+  assert.equal(payload.encoding, 'HEX');
+  assert.deepEqual(payload.events[0].consent, {
+    adUserData: 'CONSENT_GRANTED',
+    adPersonalization: 'CONSENT_DENIED'
+  });
+  assert.deepEqual(payload.events[0].userData, {
+    userIdentifiers: [
+      { emailAddress: normalizeAndHashEmail('patientname@gmail.com') },
+      { phoneNumber: normalizeAndHashPhone('+34600000000') }
+    ]
+  });
+  assert.deepEqual(
+    buildEnhancedConversionUserIdentifiers({
+      email: 'PATIENT.NAME+campaign@GMAIL.COM',
+      phone: '+34 600 000 000',
+      permittedIdentifiers: ['email', 'phone']
+    }),
+    payload.events[0].userData.userIdentifiers
+  );
+  const serialized = JSON.stringify(payload);
+  for (const forbidden of [
+    'Patient.Name',
+    '600 000 000',
+    'propdental.es',
+    'implantes',
+    'remarketing',
+    'García',
+    '08018',
+    'patients'
+  ]) {
+    assert.equal(serialized.includes(forbidden), false, `${forbidden} must not be sent`);
+  }
+
+  const userDataOnly = buildDataManagerEventRequest({
+    customerId: '5992356722',
+    conversionAction: '7540337982',
+    conversionDateTime: '2026-07-12T08:30:00.000Z',
+    externalId: 'lead-enhanced-user-data-only',
+    eventName: 'lead',
+    consentStatus: 'GRANTED',
+    adPersonalizationStatus: 'DENIED',
+    email: 'patient@example.com',
+    phone: '+34600000000',
+    enhancedConversionAuthorization: authorization
+  });
+  assert.equal(userDataOnly.events[0].adIdentifiers, undefined);
+  assert.equal(userDataOnly.events[0].userData.userIdentifiers.length, 2);
+}
+
+function testEnhancedConversionAuthorizationGuards() {
+  const common = {
+    customerId: '5992356722',
+    conversionAction: '7540337982',
+    gclid: 'opaque-click-id',
+    eventName: 'lead',
+    consentStatus: 'GRANTED',
+    adPersonalizationStatus: 'DENIED',
+    email: 'patient@example.com',
+    phone: '+34600000000'
+  };
+  assert.throws(
+    () => buildDataManagerEventRequest(common),
+    (error) => error.code === 'ENHANCED_CONVERSION_AUTHORIZATION_REQUIRED'
+      && error.policyReason === 'authorization_missing'
+  );
+  assert.throws(
+    () => buildDataManagerEventRequest({
+      ...common,
+      consentStatus: 'DENIED',
+      enhancedConversionAuthorization: documentedAuthorization()
+    }),
+    (error) => error.code === 'ENHANCED_CONVERSION_AD_USER_DATA_CONSENT_REQUIRED'
+  );
+  assert.throws(
+    () => buildDataManagerEventRequest({
+      ...common,
+      adPersonalizationStatus: 'GRANTED',
+      enhancedConversionAuthorization: documentedAuthorization()
+    }),
+    (error) => error.code === 'ENHANCED_CONVERSION_AD_PERSONALIZATION_MUST_BE_DENIED'
+  );
+  assert.throws(
+    () => buildDataManagerEventRequest({
+      ...common,
+      enhancedConversionAuthorization: documentedAuthorization({ customerId: '1851215478' })
+    }),
+    (error) => error.policyReason === 'authorization_scope_invalid'
+  );
+  assert.throws(
+    () => buildDataManagerEventRequest({
+      ...common,
+      enhancedConversionAuthorization: documentedAuthorization({ eventName: 'schedule' })
+    }),
+    (error) => error.policyReason === 'authorization_scope_invalid'
+  );
+  assert.throws(
+    () => buildDataManagerEventRequest({
+      ...common,
+      customerId: '1112223333',
+      enhancedConversionAuthorization: documentedAuthorization({ customerId: '1112223333' })
+    }),
+    (error) => error.policyReason === 'authorization_scope_invalid'
+  );
+  assert.throws(
+    () => buildDataManagerEventRequest({
+      ...common,
+      eventName: 'purchase',
+      enhancedConversionAuthorization: documentedAuthorization({ eventName: 'purchase' })
+    }),
+    (error) => error.policyReason === 'authorization_scope_invalid'
+  );
+  assert.throws(
+    () => buildDataManagerEventRequest({
+      ...common,
+      enhancedConversionAuthorization: documentedAuthorization({ remarketingEnabled: true })
+    }),
+    (error) => error.policyReason === 'authorization_scope_invalid'
+  );
+
+  assert.deepEqual(validateEnhancedConversionAuthorization({
+    authorization: documentedAuthorization({ permittedIdentifiers: ['email'] }),
+    customerId: '5992356722',
+    eventName: 'lead',
+    consentStatus: 'GRANTED',
+    adPersonalizationStatus: 'DENIED',
+    now: new Date('2026-07-12T00:00:00.000Z')
+  }), {
+    valid: true,
+    reason: 'authorized_documented_guidance_and_advertiser_authorization',
+    permittedIdentifiers: ['email']
+  });
+  assert.equal(validateEnhancedConversionAuthorization({
+    authorization: documentedAuthorization({ expiresAt: '2026-07-11T00:00:00.000Z' }),
+    customerId: '5992356722',
+    eventName: 'lead',
+    consentStatus: 'GRANTED',
+    adPersonalizationStatus: 'DENIED',
+    now: new Date('2026-07-12T00:00:00.000Z')
+  }).reason, 'authorization_expired');
+}
+
 function testAlternativeClickIdsAndGuards() {
   const gbraid = buildDataManagerEventRequest({
     customerId: '5992356722',
@@ -113,7 +303,7 @@ function testAlternativeClickIdsAndGuards() {
       phone: '+34600000000',
       conversionDateTime: new Date('2026-07-12T08:30:00Z')
     }),
-    (error) => error.code === 'NO_IDENTIFIERS_PROVIDED'
+    (error) => error.code === 'ENHANCED_CONVERSION_AUTHORIZATION_REQUIRED'
   );
 
   assert.throws(
@@ -283,6 +473,8 @@ function testScopeAndProvisioningContracts() {
 
 async function run() {
   testPayloadMappingAndHealthcarePolicy();
+  testAuthorizedEnhancedConversionPayload();
+  testEnhancedConversionAuthorizationGuards();
   testAlternativeClickIdsAndGuards();
   await testTransportContract();
   testDiagnosticsClassification();

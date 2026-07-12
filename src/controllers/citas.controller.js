@@ -31,6 +31,7 @@ const { normalizeHumanName } = require('../lib/name');
 const consentimientosService = require('../services/consentimientos.service');
 const appointmentNotificationCleanup = require('../services/appointmentNotificationCleanup.service');
 const { maybeUploadLeadLifecycleConversion } = require('../services/googleLeadLifecycleConversion.service');
+const { processAppointmentLeadMilestones } = require('../services/appointmentLeadMilestone.service');
 const { assertUserCanAccessFeature } = require('../lib/access-policy');
 
 const CITA_ESTADOS_VALIDOS = new Set(CITA_STATUS_VALUES);
@@ -222,15 +223,6 @@ async function ensureConsentPackageAndAutomation(cita, req, triggerSource = 'app
         return null;
     }
 }
-
-const LEAD_ACTIVE_APPOINTMENT_STATES = new Set([
-    'pendiente',
-    'info_enviada',
-    'info_confirmada',
-    'recordatorio_enviado',
-    'recordatorio_confirmado',
-    'reprogramada',
-]);
 
 const LEAD_SOURCE_LABELS = {
     meta_ads: 'Meta Ads',
@@ -553,54 +545,6 @@ exports.getManualAttributionPreview = asyncHandler(async (req, res) => {
         },
     });
 });
-
-async function syncLeadStatusFromAppointments(leadId) {
-    const normalizedLeadId = parsePositiveInt(leadId);
-    if (!normalizedLeadId || !LeadIntake) return null;
-
-    const lead = await LeadIntake.findByPk(normalizedLeadId);
-    if (!lead) return null;
-
-    if (['convertido', 'descartado', 'acudio_cita'].includes(String(lead.status_lead || '').toLowerCase())) {
-        return lead;
-    }
-
-    const citas = await CitaPaciente.findAll({
-        where: { lead_intake_id: normalizedLeadId },
-        attributes: ['id_cita', 'estado', 'inicio'],
-        order: [['inicio', 'DESC'], ['id_cita', 'DESC']],
-        raw: true,
-    });
-
-    const activeAppointment = citas.find((row) =>
-        LEAD_ACTIVE_APPOINTMENT_STATES.has(String(row?.estado || '').toLowerCase())
-    ) || null;
-
-    let nextStatus = String(lead.status_lead || '').toLowerCase() || 'nuevo';
-    let nextAppointmentId = parsePositiveInt(lead.call_outcome_appointment_id);
-
-    if (activeAppointment) {
-        nextStatus = 'citado';
-        nextAppointmentId = parsePositiveInt(activeAppointment.id_cita);
-    } else {
-        if (nextStatus === 'citado') {
-            nextStatus = 'info_recibida';
-        }
-        nextAppointmentId = null;
-    }
-
-    const changedStatus = nextStatus !== String(lead.status_lead || '').toLowerCase();
-    const changedAppointmentId = nextAppointmentId !== parsePositiveInt(lead.call_outcome_appointment_id);
-    if (!changedStatus && !changedAppointmentId) {
-        return lead;
-    }
-
-    await lead.update({
-        status_lead: nextStatus,
-        call_outcome_appointment_id: nextAppointmentId,
-    });
-    return lead;
-}
 
 async function attachFlowSummaryToCitas(citas) {
     const list = Array.isArray(citas) ? citas : (citas ? [citas] : []);
@@ -1835,17 +1779,20 @@ exports.createCita = asyncHandler(async (req, res) => {
 
         // Marcar lead como citado si aplica
         if (lead) {
-            const leadUpdatePayload = {
-                status_lead: 'citado',
-                call_outcome_appointment_id: cita.id_cita,
-            };
-            if (lead.call_initiated && !lead.call_outcome) {
-                leadUpdatePayload.call_outcome = 'citado';
-                leadUpdatePayload.call_outcome_at = new Date();
-                leadUpdatePayload.call_outcome_notes = lead.call_outcome_notes
-                    || 'Lead vinculado automáticamente al crear una cita manual con el mismo teléfono.';
+            const currentLeadStatus = String(lead.status_lead || '').trim().toLowerCase();
+            if (!['convertido', 'descartado', 'acudio_cita'].includes(currentLeadStatus)) {
+                const leadUpdatePayload = {
+                    status_lead: 'citado',
+                    call_outcome_appointment_id: cita.id_cita,
+                };
+                if (lead.call_initiated && !lead.call_outcome) {
+                    leadUpdatePayload.call_outcome = 'citado';
+                    leadUpdatePayload.call_outcome_at = new Date();
+                    leadUpdatePayload.call_outcome_notes = lead.call_outcome_notes
+                        || 'Lead vinculado automáticamente al crear una cita manual con el mismo teléfono.';
+                }
+                await lead.update(leadUpdatePayload);
             }
-            await lead.update(leadUpdatePayload);
 
             if (!explicitLeadIntakeId && resolvedLeadIntakeId && LeadAttributionAudit) {
                 try {
@@ -1884,6 +1831,13 @@ exports.createCita = asyncHandler(async (req, res) => {
                     conversionError?.response?.data || conversionError?.message || conversionError
                 );
             }
+        }
+
+        if (estadoRaw === 'completada') {
+            await processAppointmentLeadMilestones({
+                cita,
+                previousStatus: null,
+            });
         }
 
         const citaCreada = await CitaPaciente.findByPk(cita.id_cita, {
@@ -2207,11 +2161,12 @@ exports.updateCitaEstado = asyncHandler(async (req, res) => {
     }
     if (await denyAppointmentManageAccessIfNeeded(req, res, cita.clinica_id)) return;
 
+    const previousStatus = cita.estado;
     cita.estado = estadoRaw;
     cita.updated_by = req.userData?.userId || null;
     await cita.save();
 
-    await syncLeadStatusFromAppointments(cita.lead_intake_id);
+    await processAppointmentLeadMilestones({ cita, previousStatus });
 
     try {
         const automationEvent = mapEstadoToAutomationV2Event(estadoRaw);
@@ -2331,6 +2286,8 @@ exports.reagendarCita = asyncHandler(async (req, res) => {
     }
     if (await denyAppointmentManageAccessIfNeeded(req, res, cita.clinica_id)) return;
 
+    const previousStatus = cita.estado;
+
     const inicio = req.body?.inicio ? new Date(req.body.inicio) : null;
     const fin = req.body?.fin ? new Date(req.body.fin) : null;
     if (!inicio || !fin || !Number.isFinite(inicio.getTime()) || !Number.isFinite(fin.getTime()) || fin <= inicio) {
@@ -2400,7 +2357,7 @@ exports.reagendarCita = asyncHandler(async (req, res) => {
     cita.updated_by = req.userData?.userId || null;
     await cita.save();
 
-    await syncLeadStatusFromAppointments(cita.lead_intake_id);
+    await processAppointmentLeadMilestones({ cita, previousStatus });
 
     try {
         await appointmentAutomationV2Runtime.cancelActiveExecutionsForCita(cita, {

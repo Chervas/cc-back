@@ -185,6 +185,7 @@ function testConfigurationRequiresExplicitScope() {
     strategy_ref: 'strategy:new-patients:group-5',
     campaign_ids: ['101', '102'],
     canonical_action_ids: ACTION_IDS,
+    bidding_action_keys: ['lead', 'contact', 'schedule'],
     supplemental_action_ids: [],
     owned_custom_goal_resource_name: null,
   }]);
@@ -223,6 +224,33 @@ function testConfigurationRequiresExplicitScope() {
     () => normalizeConfiguredAccounts([configuredAccount({ supplemental_action_ids: [ACTION_IDS.lead] })]),
     (error) => error.code === 'SUPPLEMENTAL_ACTION_CANONICAL_DUPLICATE',
   );
+  assert.throws(
+    () => normalizeConfiguredAccounts([configuredAccount({ bidding_action_keys: [] })]),
+    (error) => error.code === 'BIDDING_ACTION_KEYS_INVALID',
+  );
+  assert.throws(
+    () => normalizeConfiguredAccounts([configuredAccount({ bidding_action_keys: ['purchase'] })]),
+    (error) => error.code === 'BIDDING_ACTION_KEY_NOT_ALLOWED',
+  );
+}
+
+function testScheduleOnlyBiddingStillAuditsAllCanonicalSignals() {
+  const account = normalizeConfiguredAccounts([configuredAccount({
+    bidding_action_keys: ['schedule', 'schedule'],
+  })])[0];
+  const plan = buildClinicaclickGoalPolicyPlan({ account, snapshot: baseSnapshot() });
+
+  assert.equal(plan.ready, true);
+  assert.deepEqual(account.bidding_action_keys, ['schedule']);
+  assert.deepEqual(plan.desired_custom_goal.required_canonical_action_keys, ['schedule']);
+  assert.deepEqual(plan.desired_custom_goal.tracked_canonical_action_keys, ['lead', 'contact', 'schedule']);
+  assert.deepEqual(plan.desired_custom_goal.conversion_actions, [
+    `customers/${CUSTOMER}/conversionActions/${ACTION_IDS.schedule}`,
+  ]);
+  assert.equal(plan.canonical_actions.lead.included_in_goal, false);
+  assert.equal(plan.canonical_actions.contact.included_in_goal, false);
+  assert.equal(plan.canonical_actions.schedule.included_in_goal, true);
+  assertSafePlanOperations(account, plan);
 }
 
 function testSupplementalAdCallsExtendMembershipWithoutMutation() {
@@ -1004,6 +1032,7 @@ function testDailyStableSchedulerIsWiredWithoutMigration() {
 
 async function main() {
   testConfigurationRequiresExplicitScope();
+  testScheduleOnlyBiddingStillAuditsAllCanonicalSignals();
   testSupplementalAdCallsExtendMembershipWithoutMutation();
   testSupplementalActionsFailClosedOnProviderState();
   testExistingThreeActionGoalRemainsBackwardCompatible();
