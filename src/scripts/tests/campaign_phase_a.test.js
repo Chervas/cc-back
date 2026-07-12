@@ -190,7 +190,7 @@ function testCampaignScopeAndWritableModesRegression() {
     'Historical managed_self must not create new strategies');
 
   const customerScopeCheck = start.indexOf("customerScopeError.code = 'CUSTOMER_NOT_ASSIGNED_TO_SCOPE'");
-  const conversionEnsure = start.indexOf('ensureConversionActionsInternal({');
+  const conversionEnsure = start.indexOf('evaluateGoogleConversionOnboardingReadiness({');
   assert.ok(customerScopeCheck >= 0 && customerScopeCheck < conversionEnsure,
     'Requested Google Ads customers must be checked against scoped assignments before listing or creating conversion actions');
 
