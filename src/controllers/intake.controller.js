@@ -71,6 +71,7 @@ const {
   resolveGoogleAdsCampaignId,
   resolveGoogleLeadRoute,
 } = require('../lib/google-lead-routing');
+const { deriveLeadConsentMetadata } = require('../lib/intake-lead-consent');
 const {
   extractGoogleTagId,
   normalizeMetaAdsConfig,
@@ -1434,6 +1435,7 @@ exports.ingestLead = asyncHandler(async (req, res) => {
   const leadTelefono = coalesce(leadData.telefono, formLeadData.telefono, telefono);
   const leadNotas = sanitizeLeadNoteText(coalesce(leadData.notas, notas));
   const consentValue = coalesce(req.body?.consent, consentimiento_canal);
+  const derivedConsentMetadata = deriveLeadConsentMetadata(consentValue);
 
   if (clinicaIdParsed !== null) {
     const clinic = await Clinica.findOne({ where: { id_clinica: clinicaIdParsed } });
@@ -1559,10 +1561,12 @@ exports.ingestLead = asyncHandler(async (req, res) => {
     notas: leadNotas || null,
     status_lead: normalizedStatus,
     consentimiento_canal: consentValue || null,
-    consent_basis: consent_basis || null,
-    consent_captured_at: parseDate(consent_captured_at),
-    consent_source: consent_source || pageUrlValue || landingUrlValue || null,
-    consent_version: consent_version || null,
+    consent_basis: consent_basis || derivedConsentMetadata.basis || null,
+    consent_captured_at: consent_captured_at
+      ? parseDate(consent_captured_at)
+      : derivedConsentMetadata.capturedAt,
+    consent_source: consent_source || derivedConsentMetadata.source || pageUrlValue || landingUrlValue || null,
+    consent_version: consent_version || derivedConsentMetadata.version || null,
     external_source: externalSource,
     external_id: externalId,
     intake_payload_hash: payloadHash
