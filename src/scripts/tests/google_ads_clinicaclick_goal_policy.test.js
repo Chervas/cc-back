@@ -428,8 +428,22 @@ async function testDefaultProviderPreviewOnlySearches() {
       },
       campaign: { id, name: `Campaign ${id}`, status: 'ENABLED', advertisingChannelType: 'SEARCH' },
     })),
-    campaign_conversion_goal: [],
-    customer_conversion_goal: [],
+    campaign_conversion_goal: CAMPAIGN_IDS.map((id, index) => ({
+      campaignConversionGoal: {
+        resourceName: `customers/${CUSTOMER}/campaignConversionGoals/${id}~SUBMIT_LEAD_FORM~WEBSITE`,
+        campaign: `customers/${CUSTOMER}/campaigns/${id}`,
+        category: 'SUBMIT_LEAD_FORM',
+        origin: 'WEBSITE',
+        ...(index === 0 ? { biddable: true } : {}),
+      },
+      campaign: { id, name: `Campaign ${id}` },
+    })),
+    customer_conversion_goal: [{ customerConversionGoal: {
+      resourceName: `customers/${CUSTOMER}/customerConversionGoals/SUBMIT_LEAD_FORM~WEBSITE`,
+      category: 'SUBMIT_LEAD_FORM',
+      origin: 'WEBSITE',
+      // Google omite el escalar cuando vale false.
+    } }],
   };
   const snapshot = await fetchGoalPolicySnapshot({
     runtime: { customerId: CUSTOMER, accessToken: 'token', loginCustomerId: '2863224233' },
@@ -444,6 +458,8 @@ async function testDefaultProviderPreviewOnlySearches() {
   assert.equal(paths.length, 6);
   assert.equal(snapshot.conversion_actions.length, 5);
   assert.equal(snapshot.campaign_configs.length, 2);
+  assert.deepEqual(snapshot.campaign_conversion_goals.map((goal) => goal.biddable), [true, false]);
+  assert.equal(snapshot.customer_conversion_goals[0].biddable, false);
   assert.equal(paths.some((item) => item.includes(':mutate')), false);
 }
 

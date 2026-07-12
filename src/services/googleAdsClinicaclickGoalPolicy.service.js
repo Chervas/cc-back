@@ -285,7 +285,10 @@ function campaignGoalFromRow(row) {
     campaign_name: cleanString(campaign.name),
     category: cleanString(goal.category)?.toUpperCase() || null,
     origin: cleanString(goal.origin)?.toUpperCase() || null,
-    biddable: typeof goal.biddable === 'boolean' ? goal.biddable : null,
+    // En el JSON protobuf de Google, los escalares con su valor por defecto
+    // se omiten. Como esta consulta selecciona expresamente `biddable`, la
+    // ausencia del campo significa `false`, no “estado desconocido”.
+    biddable: goal.biddable === true,
   };
 }
 
@@ -295,7 +298,7 @@ function customerGoalFromRow(row) {
     resource_name: cleanString(goal.resourceName ?? goal.resource_name),
     category: cleanString(goal.category)?.toUpperCase() || null,
     origin: cleanString(goal.origin)?.toUpperCase() || null,
-    biddable: typeof goal.biddable === 'boolean' ? goal.biddable : null,
+    biddable: goal.biddable === true,
   };
 }
 
