@@ -168,6 +168,11 @@ function getBaseGoogleAdsEventConfig(googleAdsConfig, eventName) {
       ?? googleAdsConfig.user_properties
       ?? googleAdsConfig.userProperties
       ?? null,
+    user_data_enabled: nested.user_data_enabled === true
+      || nested.userDataEnabled === true
+      || googleAdsConfig[`${mapped}_user_data_enabled`] === true
+      || googleAdsConfig.user_data_enabled === true
+      || googleAdsConfig.userDataEnabled === true,
     campaign_ids: normalizeConfiguredCampaignIds(
       nested.campaign_ids,
       nested.campaignIds,
@@ -227,6 +232,9 @@ function getGoogleAdsEventConfigs(googleAdsConfig, eventName) {
         raw.phone_country_code ?? raw.phoneCountryCode ?? base.phone_country_code
       ),
       user_properties: raw.user_properties ?? raw.userProperties ?? base.user_properties ?? null,
+      user_data_enabled: raw.user_data_enabled === true
+        || raw.userDataEnabled === true
+        || base.user_data_enabled === true,
       campaign_ids: normalizeConfiguredCampaignIds(
         raw.campaign_ids,
         raw.campaignIds,
@@ -547,6 +555,20 @@ function hasRequestedActionOverride(customData = {}) {
   );
 }
 
+function resolveUserDataPolicy(googleConfig = {}, eventConfig = {}) {
+  const explicitlyRequested = eventConfig.user_data_enabled === true
+    || googleConfig.user_data_enabled === true
+    || googleConfig.userDataEnabled === true;
+  // ClinicaClick procesa actividad sanitaria/dental. La política de datos de
+  // Google no permite Enhanced Conversions con información de categorías de
+  // salud, por lo que ninguna configuración del cliente puede habilitarlo.
+  return {
+    enabled: false,
+    requested: explicitlyRequested,
+    reason: 'blocked_healthcare'
+  };
+}
+
 async function uploadGoogleConversionDestination({
   cfgRecord,
   googleAdsConfig,
@@ -591,19 +613,19 @@ async function uploadGoogleConversionDestination({
     || googleConfig.phone_country_code
     || process.env.GOOGLE_DATA_MANAGER_DEFAULT_PHONE_COUNTRY_CODE
     || null;
-  const userIdentifiers = buildUserIdentifiers({
-    email: userData?.email || null,
-    phone: userData?.phone || userData?.telefono || null,
-    defaultPhoneCountryCode,
-    givenName: userData?.givenName ?? userData?.given_name ?? userData?.firstName ?? userData?.first_name,
-    familyName: userData?.familyName ?? userData?.family_name ?? userData?.lastName ?? userData?.last_name,
-    regionCode: userData?.regionCode ?? userData?.region_code ?? userData?.countryCode ?? userData?.country_code,
-    postalCode: userData?.postalCode ?? userData?.postal_code ?? userData?.zip ?? userData?.zip_code,
-    address: userData?.address
-  });
-  if (!clickId && !userIdentifiers.length) {
-    return destinationResult({ sent: false, reason: 'no_identifiers' });
-  }
+  const userDataPolicy = resolveUserDataPolicy(googleConfig, eventConfig);
+  const userIdentifiers = userDataPolicy.enabled
+    ? buildUserIdentifiers({
+        email: userData?.email || null,
+        phone: userData?.phone || userData?.telefono || null,
+        defaultPhoneCountryCode,
+        givenName: userData?.givenName ?? userData?.given_name ?? userData?.firstName ?? userData?.first_name,
+        familyName: userData?.familyName ?? userData?.family_name ?? userData?.lastName ?? userData?.last_name,
+        regionCode: userData?.regionCode ?? userData?.region_code ?? userData?.countryCode ?? userData?.country_code,
+        postalCode: userData?.postalCode ?? userData?.postal_code ?? userData?.zip ?? userData?.zip_code,
+        address: userData?.address
+      })
+    : [];
   const userIdentifierHash = userIdentifiers.length
     ? sha256(JSON.stringify(userIdentifiers))
     : null;
@@ -652,7 +674,10 @@ async function uploadGoogleConversionDestination({
       has_click_id: Boolean(clickId),
       click_id_type: clickId?.type || null,
       has_client_id: Boolean(customData.client_id || customData.clientId || customData.ga_client_id),
-      has_user_id: Boolean(userData?.userId || userData?.user_id || customData.user_id || customData.userId)
+      has_user_id: Boolean(userData?.userId || userData?.user_id || customData.user_id || customData.userId),
+      user_data_policy: userDataPolicy.reason,
+      user_data_requested: userDataPolicy.requested,
+      user_data_sent: userDataPolicy.enabled && userIdentifiers.length > 0
     }
   };
 
@@ -668,6 +693,7 @@ async function uploadGoogleConversionDestination({
     return destinationResult({ sent: false, reason: finalReason, audit_id: prepared.row?.id || null });
   };
 
+  if (!clickId && !userIdentifiers.length) return skip('no_permitted_identifiers');
   if (!eventConfig.enabled) return skip('google_ads_disabled');
   if (!eventConfig.customer_id) return skip('missing_scoped_customer_id');
   if (!conversionAction) return skip('missing_or_invalid_scoped_conversion_action');
@@ -746,17 +772,19 @@ async function uploadGoogleConversionDestination({
       currency,
       conversionDateTime,
       externalId: eventId || null,
-      email: userData?.email || null,
-      phone: userData?.phone || userData?.telefono || null,
-      givenName: userData?.givenName ?? userData?.given_name ?? userData?.firstName ?? userData?.first_name,
-      familyName: userData?.familyName ?? userData?.family_name ?? userData?.lastName ?? userData?.last_name,
-      regionCode: userData?.regionCode ?? userData?.region_code ?? userData?.countryCode ?? userData?.country_code,
-      postalCode: userData?.postalCode ?? userData?.postal_code ?? userData?.zip ?? userData?.zip_code,
-      address: userData?.address || null,
-      clientId: customData.client_id || customData.clientId || customData.ga_client_id || null,
-      userId: userData?.userId || userData?.user_id || customData.user_id || customData.userId || null,
+      ...(userDataPolicy.enabled ? {
+        email: userData?.email || null,
+        phone: userData?.phone || userData?.telefono || null,
+        givenName: userData?.givenName ?? userData?.given_name ?? userData?.firstName ?? userData?.first_name,
+        familyName: userData?.familyName ?? userData?.family_name ?? userData?.lastName ?? userData?.last_name,
+        regionCode: userData?.regionCode ?? userData?.region_code ?? userData?.countryCode ?? userData?.country_code,
+        postalCode: userData?.postalCode ?? userData?.postal_code ?? userData?.zip ?? userData?.zip_code,
+        address: userData?.address || null,
+        clientId: customData.client_id || customData.clientId || customData.ga_client_id || null,
+        userId: userData?.userId || userData?.user_id || customData.user_id || customData.userId || null,
+        userProperties: eventConfig.user_properties || userProperties || userData?.userProperties || userData?.user_properties || null
+      } : {}),
       eventName: eventConfig.event_name,
-      userProperties: eventConfig.user_properties || userProperties || userData?.userProperties || userData?.user_properties || null,
       consentStatus,
       accessToken: runtime.accessToken,
       loginCustomerId: runtime.loginCustomerId,
@@ -954,6 +982,7 @@ module.exports = {
   normalizeGoogleConsent,
   prepareAuditRow,
   requestedTargetMismatchesConfig,
+  resolveUserDataPolicy,
   selectConfiguredEventConfigs,
   selectClickId,
   toGoogleAdsDateTime,

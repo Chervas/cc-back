@@ -4875,8 +4875,9 @@ exports.validateGoogleDataManagerConversion = asyncHandler(async (req, res) => {
       conversionAction: `customers/${customerId}/conversionActions/${conversionActionId}`,
       conversionDateTime: new Date(),
       externalId: `cc-dry-run-${Date.now()}`,
-      email: 'data-manager-validation@clinicaclick.invalid',
-      consentStatus: 'GRANTED',
+      // Placeholder usado por la documentación oficial para validar el
+      // contrato sin PII ni un click real. validateOnly impide la ingestión.
+      gclid: 'GCLID_1',
       value: 0,
       currency: 'EUR',
       eventSource: 'WEB',

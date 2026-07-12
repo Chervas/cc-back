@@ -4,6 +4,7 @@ const crypto = require('crypto');
 const axios = require('axios');
 
 const GOOGLE_DATA_MANAGER_SCOPE = 'https://www.googleapis.com/auth/datamanager';
+const GOOGLE_DATA_MANAGER_USER_DATA_POLICY = 'blocked_healthcare';
 const DEFAULT_DATA_MANAGER_BASE_URL = 'https://datamanager.googleapis.com/v1';
 
 function scopedCredentialError() {
@@ -227,19 +228,7 @@ function buildDataManagerEventRequest({
   currency = 'EUR',
   conversionDateTime,
   externalId,
-  email,
-  phone,
-  givenName,
-  firstName,
-  familyName,
-  lastName,
-  regionCode,
-  postalCode,
-  address,
-  clientId,
-  userId,
   eventName,
-  userProperties,
   consentStatus,
   loginCustomerId = null,
   eventSource = 'WEB',
@@ -284,31 +273,12 @@ function buildDataManagerEventRequest({
   if (transactionId) event.transactionId = transactionId;
   const normalizedEventName = cleanString(eventName);
   if (normalizedEventName) event.eventName = normalizedEventName;
-  const normalizedClientId = cleanString(clientId);
-  if (normalizedClientId) event.clientId = normalizedClientId;
-  const normalizedUserId = cleanString(userId);
-  if (normalizedUserId) event.userId = normalizedUserId;
   const adIdentifiers = buildAdIdentifiers({ gclid, gbraid, wbraid });
   if (adIdentifiers) event.adIdentifiers = adIdentifiers;
-  const userIdentifiers = buildUserIdentifiers({
-    email,
-    phone,
-    defaultPhoneCountryCode,
-    givenName,
-    firstName,
-    familyName,
-    lastName,
-    regionCode,
-    postalCode,
-    address
-  });
-  if (userIdentifiers.length) event.userData = { userIdentifiers };
-  const normalizedUserProperties = buildUserProperties(userProperties);
-  if (normalizedUserProperties) event.userProperties = normalizedUserProperties;
   const consent = buildConsent(consentStatus);
   if (consent) event.consent = consent;
-  if (!event.adIdentifiers && !event.userData) {
-    const error = new Error('Se requiere al menos un click id o un identificador de usuario válido');
+  if (!event.adIdentifiers) {
+    const error = new Error('Se requiere un click id; UserData está bloqueado para actividad sanitaria');
     error.code = 'NO_IDENTIFIERS_PROVIDED';
     throw error;
   }
@@ -316,7 +286,6 @@ function buildDataManagerEventRequest({
   return {
     destinations: [destination],
     events: [event],
-    ...(event.userData ? { encoding: 'HEX' } : {}),
     validateOnly: validateOnly === true
   };
 }
@@ -390,6 +359,7 @@ async function retrieveRequestStatus({
 
 module.exports = {
   GOOGLE_DATA_MANAGER_SCOPE,
+  GOOGLE_DATA_MANAGER_USER_DATA_POLICY,
   buildAdIdentifiers,
   buildAddressIdentifier,
   buildConsent,
