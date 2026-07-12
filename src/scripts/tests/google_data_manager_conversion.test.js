@@ -6,6 +6,7 @@ const path = require('node:path');
 const db = require('../../../models');
 const {
   GOOGLE_DATA_MANAGER_SCOPE,
+  GOOGLE_DATA_MANAGER_USER_DATA_POLICY,
   buildDataManagerEventRequest,
   normalizeAndHashEmail,
   normalizeAndHashName,
@@ -22,7 +23,7 @@ const {
   __test: campaignOnboardingTest
 } = require('../../controllers/campaignOnboarding.controller');
 
-function testPayloadMappingAndHashing() {
+function testPayloadMappingAndHealthcarePolicy() {
   const payload = buildDataManagerEventRequest({
     customerId: '599-235-6722',
     conversionAction: 'customers/5992356722/conversionActions/7540337982',
@@ -63,31 +64,22 @@ function testPayloadMappingAndHashing() {
   assert.equal(payload.events[0].currency, 'EUR');
   assert.equal(payload.events[0].eventSource, 'WEB');
   assert.equal(payload.events[0].eventName, 'lead');
-  assert.equal(payload.events[0].clientId, '123456789.1761581763');
-  assert.equal(payload.events[0].userId, 'patient-42');
+  assert.equal(payload.events[0].clientId, undefined);
+  assert.equal(payload.events[0].userId, undefined);
   assert.deepEqual(payload.events[0].consent, { adUserData: 'CONSENT_GRANTED' });
-  assert.deepEqual(payload.events[0].userProperties, {
-    customerType: 'NEW',
-    customerValueBucket: 'HIGH',
-    additionalUserProperties: [{ propertyName: 'clinic_scope', value: '58' }]
-  });
-  assert.equal(payload.encoding, 'HEX');
+  assert.equal(payload.events[0].userProperties, undefined);
+  assert.equal(payload.events[0].userData, undefined);
+  assert.equal(payload.encoding, undefined);
   assert.equal(payload.validateOnly, false);
-  assert.equal(payload.events[0].userData.userIdentifiers.length, 3);
-  assert.equal(payload.events[0].userData.userIdentifiers[0].emailAddress, normalizeAndHashEmail('patientname@gmail.com'));
-  assert.equal(payload.events[0].userData.userIdentifiers[1].phoneNumber.length, 64);
-  assert.deepEqual(payload.events[0].userData.userIdentifiers[2], {
-    address: {
-      givenName: normalizeAndHashName('maríajosé'),
-      familyName: normalizeAndHashName('oconnor'),
-      regionCode: 'ES',
-      postalCode: '08018'
-    }
-  });
+  assert.equal(GOOGLE_DATA_MANAGER_USER_DATA_POLICY, 'blocked_healthcare');
   const serialized = JSON.stringify(payload);
   assert.equal(serialized.includes('Patient.Name'), false);
   assert.equal(serialized.includes('600 000 000'), false);
+  assert.equal(serialized.includes('patient-42'), false);
+  assert.equal(serialized.includes('clinic_scope'), false);
   assert.equal(serialized.includes('203.0.113.42'), false, 'No IP is sent in the EEA-safe payload');
+  assert.equal(normalizeAndHashEmail(' Patient.Name+campaign@gmail.com '), normalizeAndHashEmail('patientname@gmail.com'));
+  assert.equal(normalizeAndHashName('María-José'), normalizeAndHashName('maríajosé'));
   assert.equal(normalizePhoneE164('600 000 000', '34'), '+34600000000');
   assert.equal(normalizePhoneE164('+34600000000', null), '+34600000000');
   assert.equal(normalizePhoneE164('600000000', null), null, 'Local phones require an explicit country code');
@@ -106,22 +98,23 @@ function testAlternativeClickIdsAndGuards() {
   const dryRun = buildDataManagerEventRequest({
     customerId: '5992356722',
     conversionAction: '7540337982',
-    email: 'data-manager-validation@clinicaclick.invalid',
+    gclid: 'GCLID_1',
     conversionDateTime: new Date(),
     validateOnly: true
   });
   assert.equal(dryRun.validateOnly, true);
-  assert.equal(dryRun.events[0].userData.userIdentifiers[0].emailAddress.length, 64);
+  assert.deepEqual(dryRun.events[0].adIdentifiers, { gclid: 'GCLID_1' });
+  assert.equal(dryRun.events[0].userData, undefined);
 
-  const userDataOnly = buildDataManagerEventRequest({
-    customerId: '5992356722',
-    conversionAction: '7540337982',
-    phone: '+34600000000',
-    conversionDateTime: new Date('2026-07-12T08:30:00Z')
-  });
-  assert.equal(Object.prototype.hasOwnProperty.call(userDataOnly.events[0], 'adIdentifiers'), false);
-  assert.equal(userDataOnly.events[0].userData.userIdentifiers.length, 1);
-  assert.equal(userDataOnly.encoding, 'HEX');
+  assert.throws(
+    () => buildDataManagerEventRequest({
+      customerId: '5992356722',
+      conversionAction: '7540337982',
+      phone: '+34600000000',
+      conversionDateTime: new Date('2026-07-12T08:30:00Z')
+    }),
+    (error) => error.code === 'NO_IDENTIFIERS_PROVIDED'
+  );
 
   assert.throws(
     () => buildDataManagerEventRequest({ customerId: '5992356722', conversionAction: '7540337982' }),
@@ -283,11 +276,13 @@ function testScopeAndProvisioningContracts() {
   assert.match(onboarding, /current\.clinicaclick_mapping/);
   assert.match(onboarding, /confirm_external_mutation/);
   assert.match(onboarding, /primaryForGoal: false/);
+  assert.match(onboarding, /gclid: 'GCLID_1'/);
+  assert.doesNotMatch(onboarding, /data-manager-validation@clinicaclick\.invalid/);
   assert.doesNotMatch(onboarding, /conversionActions:remove/);
 }
 
 async function run() {
-  testPayloadMappingAndHashing();
+  testPayloadMappingAndHealthcarePolicy();
   testAlternativeClickIdsAndGuards();
   await testTransportContract();
   testDiagnosticsClassification();

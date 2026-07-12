@@ -10,11 +10,12 @@ Cada evento conserva:
 - `gclid`, `gbraid` o `wbraid` como identificador publicitario, cuando existe;
 - `transactionId` estable para deduplicación también en Google;
 - fecha en RFC 3339, valor, moneda y origen;
-- `eventName`, `clientId`, `userId` y propiedades del usuario cuando están disponibles;
-- email, teléfono y nombre/dirección completos normalizados y convertidos a SHA-256 hexadecimal según corresponda;
+- `eventName`;
 - `adUserData` cuando el consentimiento está disponible.
 
-No se transmite la IP. Un evento puede usar datos proporcionados por el usuario aunque no haya click ID, siempre que tenga al menos un identificador válido. El dedupe propio usa cuenta, acción, evento y el hash del click ID o, en su ausencia, una huella de los identificadores ya hasheados; los valores personales nunca se guardan en la auditoría.
+No se transmiten IP, email, teléfono, nombre, dirección, `clientId`, `userId`, propiedades de usuario ni atributos de sesión. ClinicaClick conserva los datos first-party necesarios en su CRM, pero la política de datos de Google prohíbe usar Enhanced Conversions con conversiones relacionadas con salud o servicios médicos. Por eso `user_data_enabled` vale `false` por defecto y el backend fuerza `user_data_policy=blocked_healthcare` aunque una configuración intente habilitarlo. Cambiar esta regla exige una revisión legal y de política futura, además de un cambio de código explícito.
+
+Sin un click ID permitido el evento se audita como `no_permitted_identifiers` y no sale a Google. El dedupe propio usa cuenta, acción, evento y el hash del click ID; el valor del click tampoco se guarda en claro.
 
 Si un evento tiene más de un destino configurado, no se envía a todos por defecto. `customer_id` solo puede seleccionar una cuenta que ya figure en la configuración; también puede usarse una asociación configurada de `campaign_id`. Sin un selector inequívoco se devuelve `ambiguous_destination`. El cliente nunca puede indicar ni sustituir `conversion_action`, `conversion_action_id` o `send_to`.
 
@@ -27,10 +28,10 @@ Un HTTP 200 solo deja el intento en `accepted`: Google procesa la petición de f
 3. Configurar `GOOGLE_OAUTH_SCOPES` con los scopes actuales más `datamanager`.
 4. Configurar `GOOGLE_DATA_MANAGER_QUOTA_PROJECT` con el ID del proyecto Cloud y conceder `serviceusage.services.use` al principal OAuth. Todas las peticiones REST envían ese valor en `x-goog-user-project`.
 5. Reconectar cada asignación Google usada por marketing. Un refresh token previo no adquiere scopes nuevos.
-6. En cada cuenta de Google Ads, aceptar los términos de datos de clientes y de conversiones mejoradas y habilitar las conversiones mejoradas. La cuenta de acceso debe tener permiso de escritura sobre la cuenta operativa.
+6. La cuenta de acceso debe tener permiso de escritura sobre la cuenta operativa. Para cuentas sanitarias/dentales, mantener desactivadas las conversiones mejoradas; no se solicita ni se recomienda su activación.
 7. Ejecutar el endpoint autenticado `POST /api/marketing/google-ads/conversions/data-manager/validate` para cada cuenta/acción. Usa `validateOnly=true` y no ingiere una conversión.
 
-El dry-run comprueba formato, scope, acceso, destino y restricciones síncronas. No genera `requestId` utilizable en Diagnostics y no demuestra atribución. La validación completa requiere una conversión consentida con click ID real, seguida de Diagnostics al menos 30 minutos después.
+El dry-run usa el placeholder publicitario `GCLID_1` de la documentación oficial, `validateOnly=true` y cero PII. Comprueba formato, scope, acceso, destino y restricciones síncronas; no genera `requestId` utilizable en Diagnostics ni demuestra atribución. La validación completa requiere una conversión consentida con click ID real, seguida de Diagnostics al menos 30 minutos después.
 
 ## Provisioning de acciones
 
@@ -43,7 +44,7 @@ La creación de acciones continúa en Google Ads API porque Data Manager es el t
 
 La promoción posterior a acción primaria o su incorporación a un objetivo personalizado no forma parte de este flujo. Solo podrá ejecutarse como una mutación separada, explícita y auditada después de que Diagnostics confirme eventos correctos; nunca se degradan ni desactivan automáticamente las acciones del cliente. Si ya existe una acción con el nombre canónico exacto, se reutiliza sin duplicarla ni cambiar su estado o prioridad.
 
-Una acción canónica preexistente con `ONE_PER_CLICK` también se reutiliza sin modificarla. Los eventos con `gclid` o solo `UserData` pueden seguir procesándose, pero Google puede rechazar sus eventos `gbraid`/`wbraid` con `PROCESSING_ERROR_REASON_ONE_PER_CLICK_CONVERSION_ACTION_NOT_PERMITTED_WITH_BRAID`. Corregir esa acción requiere una decisión y mutación explícitas; Diagnostics conserva el motivo para que no se confunda con una conversión correcta.
+Una acción canónica preexistente con `ONE_PER_CLICK` también se reutiliza sin modificarla. Los eventos con `gclid` pueden seguir procesándose, pero Google puede rechazar sus eventos `gbraid`/`wbraid` con `PROCESSING_ERROR_REASON_ONE_PER_CLICK_CONVERSION_ACTION_NOT_PERMITTED_WITH_BRAID`. Corregir esa acción requiere una decisión y mutación explícitas; Diagnostics conserva el motivo para que no se confunda con una conversión correcta.
 
 ## Referencias oficiales
 
@@ -53,3 +54,4 @@ Una acción canónica preexistente con `ONE_PER_CLICK` también se reutiliza sin
 - https://developers.google.com/data-manager/api/devguides/diagnostics
 - https://developers.google.com/data-manager/api/devguides/quickstart/set-up-access
 - https://developers.google.com/google-ads/api/docs/conversions/goals/overview
+- https://support.google.com/google-ads/answer/7475709

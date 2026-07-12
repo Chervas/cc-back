@@ -17,6 +17,7 @@ const {
   maybeUploadGoogleConversion,
   prepareAuditRow,
   requestedTargetMismatchesConfig,
+  resolveUserDataPolicy,
   selectConfiguredEventConfigs
 } = require('../../services/googleAdsConversionUpload.service');
 const {
@@ -279,6 +280,10 @@ async function testAuditedUploadAndIdempotency() {
   assert.equal(uploadPayload.customerId, '5992356722');
   assert.equal(uploadPayload.gclid, 'secret-click-id');
   assert.equal(uploadPayload.eventName, 'lead');
+  assert.equal(uploadPayload.email, undefined);
+  assert.equal(uploadPayload.phone, undefined);
+  assert.equal(uploadPayload.clientId, undefined);
+  assert.equal(uploadPayload.userId, undefined);
   assert.equal(uploadPayload.conversionAction, 'customers/5992356722/conversionActions/7540337982');
 
   const row = Array.from(auditModel.rows.values())[0];
@@ -289,6 +294,8 @@ async function testAuditedUploadAndIdempotency() {
   assert.equal(row.providerRequestId, 'request-1');
   assert.equal(row.clickIdHash.length, 64);
   assert.notEqual(row.clickIdHash, 'secret-click-id');
+  assert.equal(row.requestMetadata.user_data_policy, 'blocked_healthcare');
+  assert.equal(row.requestMetadata.user_data_sent, false);
   assert.equal(JSON.stringify(row).includes('patient@example.com'), false);
 
   const duplicate = await maybeUploadGoogleConversion({
@@ -302,12 +309,13 @@ async function testAuditedUploadAndIdempotency() {
   assert.equal(runtimeCalls, 1, 'A duplicate must not refresh or resolve OAuth again');
 }
 
-async function testUserDataOnlyUploadAndDedupe() {
+async function testHealthcareUserDataIsBlocked() {
   const auditModel = new FakeAuditModel();
-  let uploadPayload = null;
+  let runtimeCalls = 0;
   let uploadCalls = 0;
   const input = {
     ...baseUploadInput({
+      googleAdsConfig: { ...scopedConfig, user_data_enabled: true },
       customData: { client_id: '123456789.1761581763' },
       userData: {
         email: 'patient@example.com',
@@ -322,39 +330,31 @@ async function testUserDataOnlyUploadAndDedupe() {
     }),
     dependencies: {
       auditModel,
-      resolveRuntime: async () => ({
-        accessToken: 'scoped-token',
-        loginCustomerId: null,
-        connection: { id: 23 },
-        assignment: { id: 4 },
-        connectionSource: 'scope_assignment_group'
-      }),
-      uploadConversion: async (payload) => {
-        uploadCalls += 1;
-        uploadPayload = payload;
-        return { requestId: 'request-user-only-1' };
-      }
+      resolveRuntime: async () => { runtimeCalls += 1; },
+      uploadConversion: async () => { uploadCalls += 1; }
     }
   };
 
-  const first = await maybeUploadGoogleConversion(input);
-  assert.equal(first.sent, true);
-  assert.equal(uploadCalls, 1);
-  assert.equal(uploadPayload.gclid, undefined);
-  assert.equal(uploadPayload.gbraid, undefined);
-  assert.equal(uploadPayload.wbraid, undefined);
-  assert.equal(uploadPayload.clientId, '123456789.1761581763');
-  assert.equal(uploadPayload.userId, 'patient-42');
-  assert.equal(uploadPayload.givenName, 'Ana');
+  assert.deepEqual(resolveUserDataPolicy({ user_data_enabled: true }, {}), {
+    enabled: false,
+    requested: true,
+    reason: 'blocked_healthcare'
+  });
+  const blocked = await maybeUploadGoogleConversion(input);
+  assert.equal(blocked.sent, false);
+  assert.equal(blocked.reason, 'no_permitted_identifiers');
+  assert.equal(runtimeCalls, 0);
+  assert.equal(uploadCalls, 0);
   const row = Array.from(auditModel.rows.values())[0];
+  assert.equal(row.status, 'skipped');
   assert.equal(row.clickIdType, null);
   assert.equal(row.clickIdHash, null);
-  assert.equal(row.requestMetadata.user_identifier_count, 3);
-  assert.equal(row.requestMetadata.has_address, true);
-
-  const duplicate = await maybeUploadGoogleConversion(input);
-  assert.equal(duplicate.reason, 'duplicate_already_accepted');
-  assert.equal(uploadCalls, 1);
+  assert.equal(row.requestMetadata.user_identifier_count, 0);
+  assert.equal(row.requestMetadata.has_address, false);
+  assert.equal(row.requestMetadata.user_data_policy, 'blocked_healthcare');
+  assert.equal(row.requestMetadata.user_data_requested, true);
+  assert.equal(row.requestMetadata.user_data_sent, false);
+  assert.equal(JSON.stringify(row).includes('patient@example.com'), false);
 }
 
 async function testConsentAndTargetGuards() {
@@ -952,7 +952,7 @@ async function run() {
   await testLowLevelUploadRequiresScopedToken();
   await testConversionActionCreationRequiresScopedToken();
   await testAuditedUploadAndIdempotency();
-  await testUserDataOnlyUploadAndDedupe();
+  await testHealthcareUserDataIsBlocked();
   await testConsentAndTargetGuards();
   await testFailedUploadIsAudited();
   await testMultiDestinationSuccessAndDedupe();
