@@ -40,6 +40,9 @@ const marketingCompetitionService = require('../services/marketingCompetition.se
 const webEventsService = require('../services/webEvents.service');
 const googleReviewMatchService = require('../services/googleReviewMatch.service');
 const { reconcileGoogleDataManagerDiagnostics } = require('../services/googleDataManagerDiagnostics.service');
+const {
+  executePersistedGoalPolicyAudit,
+} = require('../services/googleAdsClinicaclickGoalPolicy.service');
 
 const GOOGLE_BUSINESS_PERFORMANCE_API = 'https://businessprofileperformance.googleapis.com/v1';
 const GOOGLE_MY_BUSINESS_API = 'https://mybusiness.googleapis.com/v4';
@@ -231,6 +234,7 @@ class MetaSyncJobs {
       googleAdsSync: 'Sincroniza campañas y métricas diarias de Google Ads para cuentas vinculadas.',
       googleAdsBackfill: 'Backfill de Google Ads para nuevas cuentas o rangos extendidos.',
       googleDataManagerDiagnostics: 'Concilia la aceptación asíncrona de conversiones enviadas a Google Data Manager.',
+      googleConversionGoalPolicyAudit: 'Audita sin autoreparar acciones canónicas, custom goal y campañas opt-in de ClinicaClick.',
       webSync: 'Sincroniza Search Console (serie diaria) y PSI reciente para clínicas mapeadas.',
       webBackfill: 'Backfill histórico de Search Console (12–16 meses) para cache y rapidez.',
       analyticsSync: 'Sincroniza métricas de Google Analytics 4 (sesiones, usuarios, fuentes, audiencias).',
@@ -261,6 +265,7 @@ class MetaSyncJobs {
         googleAdsSync: process.env.JOBS_GOOGLE_ADS_SCHEDULE || '20 0 * * *',
         googleAdsBackfill: process.env.JOBS_GOOGLE_ADS_BACKFILL_SCHEDULE || '30 5 * * 0',
         googleDataManagerDiagnostics: process.env.JOBS_GOOGLE_DATA_MANAGER_DIAGNOSTICS_SCHEDULE || '*/30 * * * *',
+        googleConversionGoalPolicyAudit: process.env.JOBS_GOOGLE_CONVERSION_GOAL_POLICY_AUDIT_SCHEDULE || '17 */6 * * *',
         webSync: process.env.JOBS_WEB_SCHEDULE || '15 4 * * *',
         webBackfill: process.env.JOBS_WEB_BACKFILL_SCHEDULE || '30 4 * * 0',
         analyticsSync: process.env.JOBS_ANALYTICS_SCHEDULE || '45 4 * * *',
@@ -360,6 +365,11 @@ class MetaSyncJobs {
         'googleDataManagerDiagnostics',
         this.config.schedules.googleDataManagerDiagnostics,
         () => this.executeGoogleDataManagerDiagnostics()
+      );
+      this.registerJob(
+        'googleConversionGoalPolicyAudit',
+        this.config.schedules.googleConversionGoalPolicyAudit,
+        () => this.executeGoogleConversionGoalPolicyAudit()
       );
       this.registerJob('webSync', this.config.schedules.webSync, () => this.executeWebSync());
       this.registerJob('webBackfill', this.config.schedules.webBackfill, () => this.executeWebBackfill());
@@ -1727,6 +1737,10 @@ class MetaSyncJobs {
       });
       throw error;
     }
+  }
+
+  async executeGoogleConversionGoalPolicyAudit() {
+    return executePersistedGoalPolicyAudit();
   }
 
   async executeWebEventsAggregate(options = {}) {
