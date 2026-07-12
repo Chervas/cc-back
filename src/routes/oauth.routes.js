@@ -71,7 +71,8 @@ const DEFAULT_GOOGLE_SCOPES = [
     'https://www.googleapis.com/auth/webmasters.readonly',
     'https://www.googleapis.com/auth/analytics.readonly',
     'https://www.googleapis.com/auth/business.manage',
-    'https://www.googleapis.com/auth/adwords'
+    'https://www.googleapis.com/auth/adwords',
+    'https://www.googleapis.com/auth/datamanager'
 ].join(' ');
 
 const GOOGLE_SCOPES = (process.env.GOOGLE_OAUTH_SCOPES || DEFAULT_GOOGLE_SCOPES).split(/\s+/).join(' ');
@@ -856,7 +857,7 @@ router.get('/google/callback', async (req, res) => {
             userName,
             accessToken,
             refreshToken: refreshToken || existing?.refreshToken || null,
-            scopes: GOOGLE_SCOPES,
+            scopes: tokenResp.data?.scope || GOOGLE_SCOPES,
             expiresAt
         };
         if (existing) {

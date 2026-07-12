@@ -87,5 +87,6 @@ router.post('/managed-campaigns/:id/request-changes', managedCampaignsController
 // Google Ads onboarding helpers
 router.get('/google-ads/conversion-actions', campaignOnboardingController.listGoogleAdsConversionActions);
 router.post('/google-ads/conversion-actions/ensure', campaignOnboardingController.ensureGoogleAdsConversionActions);
+router.post('/google-ads/conversions/data-manager/validate', campaignOnboardingController.validateGoogleDataManagerConversion);
 
 module.exports = router;

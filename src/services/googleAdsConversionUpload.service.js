@@ -2,7 +2,11 @@
 
 const crypto = require('crypto');
 const db = require('../../models');
-const { uploadClickConversion } = require('./googleAdsConversion.service');
+const {
+  GOOGLE_DATA_MANAGER_SCOPE,
+  buildUserIdentifiers,
+  uploadConversionEvent
+} = require('./googleDataManagerConversion.service');
 const { resolveScopedGoogleAdsRuntime } = require('./googleAdsScopedRuntime.service');
 
 const GOOGLE_DATETIME_REGEX = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}[+-]\d{2}:\d{2}$/;
@@ -102,6 +106,18 @@ function normalizeGoogleAdsConfig(rawConfig) {
   };
 }
 
+function normalizeConfiguredCampaignIds(...values) {
+  const normalized = [];
+  for (const value of values) {
+    const candidates = Array.isArray(value) ? value : [value];
+    for (const candidate of candidates) {
+      const cleaned = cleanGoogleCustomerId(candidate);
+      if (cleaned && !normalized.includes(cleaned)) normalized.push(cleaned);
+    }
+  }
+  return normalized;
+}
+
 function getBaseGoogleAdsEventConfig(googleAdsConfig, eventName) {
   const eventKey = String(eventName || '').trim().toLowerCase();
   const mapped = eventKey === ''
@@ -139,6 +155,25 @@ function getBaseGoogleAdsEventConfig(googleAdsConfig, eventName) {
       ?? null,
     value: coalesce(nested.value, googleAdsConfig[`${mapped}_value`], googleAdsConfig.value, mapped === 'purchase' ? null : 0),
     currency: coalesce(nested.currency, googleAdsConfig[`${mapped}_currency`], googleAdsConfig.currency, 'EUR'),
+    phone_country_code: cleanGoogleCustomerId(
+      nested.phone_country_code
+        ?? nested.phoneCountryCode
+        ?? googleAdsConfig[`${mapped}_phone_country_code`]
+        ?? googleAdsConfig.phone_country_code
+        ?? googleAdsConfig.phoneCountryCode
+    ),
+    user_properties: nested.user_properties
+      ?? nested.userProperties
+      ?? googleAdsConfig[`${mapped}_user_properties`]
+      ?? googleAdsConfig.user_properties
+      ?? googleAdsConfig.userProperties
+      ?? null,
+    campaign_ids: normalizeConfiguredCampaignIds(
+      nested.campaign_ids,
+      nested.campaignIds,
+      nested.campaign_id,
+      nested.campaignId
+    ),
     consent: normalizeGoogleConsent(
       nested.consent
         ?? googleAdsConfig[`${mapped}_consent`]
@@ -188,6 +223,17 @@ function getGoogleAdsEventConfigs(googleAdsConfig, eventName) {
         ?? (canInheritBaseAction ? base.send_to : null),
       value: coalesce(raw.value, base.value),
       currency: coalesce(raw.currency, base.currency, 'EUR'),
+      phone_country_code: cleanGoogleCustomerId(
+        raw.phone_country_code ?? raw.phoneCountryCode ?? base.phone_country_code
+      ),
+      user_properties: raw.user_properties ?? raw.userProperties ?? base.user_properties ?? null,
+      campaign_ids: normalizeConfiguredCampaignIds(
+        raw.campaign_ids,
+        raw.campaignIds,
+        raw.campaign_id,
+        raw.campaignId,
+        base.campaign_ids
+      ),
       consent: normalizeGoogleConsent(raw.consent) || base.consent || null
     };
     const canonicalAction = buildConversionActionResource({
@@ -223,14 +269,81 @@ function selectClickId(customData = {}) {
   return null;
 }
 
-function buildConversionUploadDedupeKey({ customerId, conversionAction, eventName, eventId, clickIdHash }) {
+function buildConversionUploadDedupeKey({
+  customerId,
+  conversionAction,
+  eventName,
+  eventId,
+  clickIdHash,
+  userIdentifierHash
+}) {
   return sha256([
     cleanGoogleCustomerId(customerId) || 'missing-customer',
     cleanString(conversionAction) || 'missing-action',
     cleanString(eventName) || 'lead',
     cleanString(eventId) || 'missing-event-id',
-    cleanString(clickIdHash) || 'missing-click-id'
+    cleanString(clickIdHash) || cleanString(userIdentifierHash) || 'missing-identifiers'
   ].join('|'));
+}
+
+function selectConfiguredEventConfigs(eventConfigs = [], customData = {}) {
+  const configured = Array.isArray(eventConfigs) ? eventConfigs : [];
+  if (!configured.length) return { configs: [], reason: null, selector: null };
+
+  const requestedCustomerId = cleanGoogleCustomerId(
+    customData.customer_id ?? customData.customerId ?? customData.google_customer_id
+  );
+  let candidates = configured;
+  if (requestedCustomerId) {
+    candidates = configured.filter((item) => item.customer_id === requestedCustomerId);
+    if (!candidates.length) {
+      return {
+        configs: [],
+        reason: 'request_customer_not_configured',
+        selector: { customer_id: requestedCustomerId }
+      };
+    }
+  }
+
+  if (candidates.length === 1) {
+    return {
+      configs: candidates,
+      reason: null,
+      selector: requestedCustomerId ? { customer_id: requestedCustomerId } : null
+    };
+  }
+
+  const requestedCampaignId = cleanGoogleCustomerId(
+    customData.campaign_id
+      ?? customData.campaignId
+      ?? customData.google_campaign_id
+      ?? customData.googleCampaignId
+      ?? customData.campaignid
+  );
+  if (requestedCampaignId) {
+    const campaignMatches = candidates.filter((item) => (
+      Array.isArray(item.campaign_ids) && item.campaign_ids.includes(requestedCampaignId)
+    ));
+    if (campaignMatches.length === 1) {
+      return {
+        configs: campaignMatches,
+        reason: null,
+        selector: {
+          ...(requestedCustomerId ? { customer_id: requestedCustomerId } : {}),
+          campaign_id: requestedCampaignId
+        }
+      };
+    }
+  }
+
+  return {
+    configs: [],
+    reason: 'ambiguous_destination',
+    selector: {
+      ...(requestedCustomerId ? { customer_id: requestedCustomerId } : {}),
+      ...(requestedCampaignId ? { campaign_id: requestedCampaignId } : {})
+    }
+  };
 }
 
 function appendHistory(row) {
@@ -249,7 +362,9 @@ function appendHistory(row) {
 
 async function prepareAuditRow({ auditModel, values, status, reason = null }) {
   const existing = await auditModel.findOne({ where: { dedupeKey: values.dedupeKey } });
-  if (existing?.status === 'succeeded') return { row: existing, duplicate: true, inProgress: false };
+  if (['accepted', 'succeeded', 'partial_success'].includes(existing?.status)) {
+    return { row: existing, duplicate: true, inProgress: false, terminalStatus: existing.status };
+  }
   const existingAttemptedAt = existing?.attemptedAt ? new Date(existing.attemptedAt).getTime() : 0;
   const pendingIsFresh = existing?.status === 'pending'
     && Number.isFinite(existingAttemptedAt)
@@ -282,8 +397,11 @@ async function prepareAuditRow({ auditModel, values, status, reason = null }) {
       if (!concurrent) throw error;
       return {
         row: concurrent,
-        duplicate: concurrent.status === 'succeeded',
+        duplicate: ['accepted', 'succeeded', 'partial_success'].includes(concurrent.status),
         inProgress: concurrent.status === 'pending',
+        terminalStatus: ['accepted', 'succeeded', 'partial_success'].includes(concurrent.status)
+          ? concurrent.status
+          : null,
         collision: true
       };
     }
@@ -320,6 +438,9 @@ function providerRequestId(result) {
 
 function summarizeResponse(result) {
   return {
+    transport: 'google_data_manager',
+    request_accepted: Boolean(result?.requestId || result?.request_id),
+    processing_status: (result?.requestId || result?.request_id) ? 'PROCESSING' : null,
     result_count: Array.isArray(result?.results) ? result.results.length : 0,
     partial_failure: Boolean(result?.partialFailureError || result?.partial_failure_error),
     has_job_id: Boolean(result?.jobId || result?.job_id)
@@ -415,6 +536,17 @@ function hasRequestedTargetOverride(customData = {}) {
   );
 }
 
+function hasRequestedActionOverride(customData = {}) {
+  return Boolean(
+    customData.conversion_action
+      || customData.conversionAction
+      || customData.conversion_action_id
+      || customData.conversionActionId
+      || customData.send_to
+      || customData.sendTo
+  );
+}
+
 async function uploadGoogleConversionDestination({
   cfgRecord,
   googleAdsConfig,
@@ -428,12 +560,12 @@ async function uploadGoogleConversionDestination({
   groupId = null,
   assignmentScope = null,
   allowUpload = true,
-  rejectTargetOverride = false,
+  userProperties = null,
   dependencies = {}
 }) {
   const auditModel = dependencies.auditModel || db.GoogleAdsConversionUploadAttempt;
   const resolveRuntime = dependencies.resolveRuntime || resolveScopedGoogleAdsRuntime;
-  const uploadConversion = dependencies.uploadConversion || uploadClickConversion;
+  const uploadConversion = dependencies.uploadConversion || uploadConversionEvent;
   const cfgObject = cfgRecord && typeof cfgRecord.config === 'object' ? cfgRecord.config : {};
   const googleConfig = googleAdsConfig
     ? normalizeGoogleAdsConfig(googleAdsConfig)
@@ -455,7 +587,26 @@ async function uploadGoogleConversionDestination({
   };
   const destinationResult = (result) => ({ ...destinationMeta, ...result });
   const clickId = selectClickId(customData);
-  if (!clickId) return destinationResult({ sent: false, reason: 'no_click_id' });
+  const defaultPhoneCountryCode = eventConfig.phone_country_code
+    || googleConfig.phone_country_code
+    || process.env.GOOGLE_DATA_MANAGER_DEFAULT_PHONE_COUNTRY_CODE
+    || null;
+  const userIdentifiers = buildUserIdentifiers({
+    email: userData?.email || null,
+    phone: userData?.phone || userData?.telefono || null,
+    defaultPhoneCountryCode,
+    givenName: userData?.givenName ?? userData?.given_name ?? userData?.firstName ?? userData?.first_name,
+    familyName: userData?.familyName ?? userData?.family_name ?? userData?.lastName ?? userData?.last_name,
+    regionCode: userData?.regionCode ?? userData?.region_code ?? userData?.countryCode ?? userData?.country_code,
+    postalCode: userData?.postalCode ?? userData?.postal_code ?? userData?.zip ?? userData?.zip_code,
+    address: userData?.address
+  });
+  if (!clickId && !userIdentifiers.length) {
+    return destinationResult({ sent: false, reason: 'no_identifiers' });
+  }
+  const userIdentifierHash = userIdentifiers.length
+    ? sha256(JSON.stringify(userIdentifiers))
+    : null;
 
   const scope = buildScope({ cfgRecord, googleConfig, clinicId, groupId, assignmentScope });
   const conversionAction = buildConversionActionResource({
@@ -473,7 +624,8 @@ async function uploadGoogleConversionDestination({
     conversionAction,
     eventName: eventConfig.event_name,
     eventId,
-    clickIdHash: clickId.hash
+    clickIdHash: clickId?.hash || null,
+    userIdentifierHash
   });
   const auditBase = {
     dedupeKey,
@@ -486,21 +638,30 @@ async function uploadGoogleConversionDestination({
     conversionAction,
     eventName: eventConfig.event_name,
     eventId: truncate(eventId, 191),
-    clickIdType: clickId.type,
-    clickIdHash: clickId.hash,
+    clickIdType: clickId?.type || null,
+    clickIdHash: clickId?.hash || null,
     consentStatus: consentStatus || 'UNSPECIFIED',
     requestMetadata: {
+      transport: 'google_data_manager',
       currency: String(coalesce(customData.currency, eventConfig.currency, 'EUR')).toUpperCase(),
       has_value: coalesce(customData.value, eventConfig.value) !== undefined,
       has_email: Boolean(userData?.email),
-      has_phone: Boolean(userData?.phone || userData?.telefono)
+      has_phone: Boolean(userData?.phone || userData?.telefono),
+      has_address: userIdentifiers.some((identifier) => Boolean(identifier.address)),
+      user_identifier_count: userIdentifiers.length,
+      has_click_id: Boolean(clickId),
+      click_id_type: clickId?.type || null,
+      has_client_id: Boolean(customData.client_id || customData.clientId || customData.ga_client_id),
+      has_user_id: Boolean(userData?.userId || userData?.user_id || customData.user_id || customData.userId)
     }
   };
 
   const skip = async (reason) => {
     const prepared = await prepareAuditRow({ auditModel, values: auditBase, status: 'skipped', reason });
     const finalReason = prepared.duplicate
-      ? 'duplicate_already_succeeded'
+      ? (prepared.terminalStatus === 'succeeded'
+          ? 'duplicate_already_succeeded'
+          : 'duplicate_already_accepted')
       : prepared.inProgress
         ? 'duplicate_upload_in_progress'
         : reason;
@@ -510,7 +671,7 @@ async function uploadGoogleConversionDestination({
   if (!eventConfig.enabled) return skip('google_ads_disabled');
   if (!eventConfig.customer_id) return skip('missing_scoped_customer_id');
   if (!conversionAction) return skip('missing_or_invalid_scoped_conversion_action');
-  if (rejectTargetOverride && hasRequestedTargetOverride(customData)) {
+  if (hasRequestedActionOverride(customData)) {
     return skip('request_target_override_not_allowed');
   }
   if (requestedTargetMismatchesConfig(customData, eventConfig, conversionAction)) {
@@ -520,8 +681,15 @@ async function uploadGoogleConversionDestination({
   if (!scope.clinicId && !scope.groupId) return skip('scope_required');
 
   const existingAudit = await auditModel.findOne({ where: { dedupeKey } });
-  if (existingAudit?.status === 'succeeded') {
-    return destinationResult({ sent: false, reason: 'duplicate_already_succeeded', audit_id: existingAudit.id || null });
+  if (['accepted', 'succeeded', 'partial_success'].includes(existingAudit?.status)) {
+    return destinationResult({
+      sent: false,
+      accepted: true,
+      reason: existingAudit.status === 'succeeded'
+        ? 'duplicate_already_succeeded'
+        : 'duplicate_already_accepted',
+      audit_id: existingAudit.id || null
+    });
   }
   const existingAttemptedAt = existingAudit?.attemptedAt ? new Date(existingAudit.attemptedAt).getTime() : 0;
   if (existingAudit?.status === 'pending' && existingAttemptedAt > Date.now() - 5 * 60 * 1000) {
@@ -534,7 +702,8 @@ async function uploadGoogleConversionDestination({
       clinicId: scope.clinicId,
       groupId: scope.groupId,
       assignmentScope: scope.assignmentScope,
-      customerId: eventConfig.customer_id
+      customerId: eventConfig.customer_id,
+      requiredScopes: [GOOGLE_DATA_MANAGER_SCOPE]
     });
   } catch (error) {
     return skip(String(error.code || 'scoped_connection_unavailable').toLowerCase());
@@ -549,7 +718,14 @@ async function uploadGoogleConversionDestination({
   };
   const prepared = await prepareAuditRow({ auditModel, values, status: 'pending' });
   if (prepared.duplicate) {
-    return destinationResult({ sent: false, reason: 'duplicate_already_succeeded', audit_id: prepared.row?.id || null });
+    return destinationResult({
+      sent: false,
+      accepted: true,
+      reason: prepared.terminalStatus === 'succeeded'
+        ? 'duplicate_already_succeeded'
+        : 'duplicate_already_accepted',
+      audit_id: prepared.row?.id || null
+    });
   }
   if (prepared.inProgress) {
     return destinationResult({ sent: false, reason: 'duplicate_upload_in_progress', audit_id: prepared.row?.id || null });
@@ -565,17 +741,33 @@ async function uploadGoogleConversionDestination({
     result = await uploadConversion({
       customerId: eventConfig.customer_id,
       conversionAction,
-      [clickId.type]: clickId.value,
+      ...(clickId ? { [clickId.type]: clickId.value } : {}),
       value,
       currency,
       conversionDateTime,
       externalId: eventId || null,
       email: userData?.email || null,
       phone: userData?.phone || userData?.telefono || null,
+      givenName: userData?.givenName ?? userData?.given_name ?? userData?.firstName ?? userData?.first_name,
+      familyName: userData?.familyName ?? userData?.family_name ?? userData?.lastName ?? userData?.last_name,
+      regionCode: userData?.regionCode ?? userData?.region_code ?? userData?.countryCode ?? userData?.country_code,
+      postalCode: userData?.postalCode ?? userData?.postal_code ?? userData?.zip ?? userData?.zip_code,
+      address: userData?.address || null,
+      clientId: customData.client_id || customData.clientId || customData.ga_client_id || null,
+      userId: userData?.userId || userData?.user_id || customData.user_id || customData.userId || null,
+      eventName: eventConfig.event_name,
+      userProperties: eventConfig.user_properties || userProperties || userData?.userProperties || userData?.user_properties || null,
       consentStatus,
       accessToken: runtime.accessToken,
-      loginCustomerId: runtime.loginCustomerId
+      loginCustomerId: runtime.loginCustomerId,
+      defaultPhoneCountryCode
     });
+    if (!providerRequestId(result)) {
+      const protocolError = new Error('Google Data Manager no devolvió requestId');
+      protocolError.code = 'DATA_MANAGER_REQUEST_ID_MISSING';
+      protocolError.providerError = result;
+      throw protocolError;
+    }
   } catch (rawError) {
     const error = annotateError(rawError, {
       conversionDestination: destinationMeta,
@@ -583,10 +775,17 @@ async function uploadGoogleConversionDestination({
     });
     const summary = summarizeProviderError(error);
     summary.message = redactSensitiveText(summary.message, [
-      clickId.value,
+      clickId?.value,
       userData?.email,
       userData?.phone,
-      userData?.telefono
+      userData?.telefono,
+      customData.client_id,
+      customData.clientId,
+      customData.ga_client_id,
+      userData?.userId,
+      userData?.user_id,
+      customData.user_id,
+      customData.userId
     ]);
     try {
       await prepared.row.update({
@@ -611,11 +810,11 @@ async function uploadGoogleConversionDestination({
 
   try {
     await prepared.row.update({
-      status: 'succeeded',
-      reason: null,
+      status: 'accepted',
+      reason: 'provider_processing',
       providerRequestId: providerRequestId(result),
       responseMetadata: summarizeResponse(result),
-      completedAt: new Date()
+      completedAt: null
     });
   } catch (auditError) {
     throw auditPersistenceError({
@@ -624,7 +823,13 @@ async function uploadGoogleConversionDestination({
       conversionAccepted: true
     });
   }
-  return destinationResult({ sent: true, result, audit_id: prepared.row?.id || null });
+  return destinationResult({
+    sent: true,
+    accepted: true,
+    reason: 'provider_processing',
+    result,
+    audit_id: prepared.row?.id || null
+  });
 }
 
 async function maybeUploadGoogleConversion(options) {
@@ -634,8 +839,12 @@ async function maybeUploadGoogleConversion(options) {
   const googleConfig = options?.googleAdsConfig
     ? normalizeGoogleAdsConfig(options.googleAdsConfig)
     : normalizeGoogleAdsConfig(cfgObject.google_ads || {});
-  const eventConfigs = getGoogleAdsEventConfigs(googleConfig, options?.eventName);
-  const rejectTargetOverride = eventConfigs.length > 1 && hasRequestedTargetOverride(options?.customData || {});
+  const configuredEventConfigs = getGoogleAdsEventConfigs(googleConfig, options?.eventName);
+  const destinationSelection = selectConfiguredEventConfigs(
+    configuredEventConfigs,
+    options?.customData || {}
+  );
+  const eventConfigs = destinationSelection.configs;
   const results = [];
   const providerErrors = [];
   const processingErrors = [];
@@ -645,8 +854,7 @@ async function maybeUploadGoogleConversion(options) {
       results.push(await uploadGoogleConversionDestination({
         ...options,
         googleAdsConfig: googleConfig,
-        eventConfig,
-        rejectTargetOverride
+        eventConfig
       }));
     } catch (error) {
       const destination = error.conversionDestination || {
@@ -677,7 +885,8 @@ async function maybeUploadGoogleConversion(options) {
 
   const sentCount = results.filter((item) => item.sent === true).length;
   const alreadySucceededCount = results.filter((item) => item.reason === 'duplicate_already_succeeded').length;
-  const acceptedCount = sentCount + alreadySucceededCount;
+  const alreadyAcceptedCount = results.filter((item) => item.reason === 'duplicate_already_accepted').length;
+  const acceptedCount = sentCount + alreadySucceededCount + alreadyAcceptedCount;
   const failedCount = results.filter((item) => item.reason === 'provider_error').length;
   const processingErrorCount = results.filter((item) => (
     item.reason === 'audit_persistence_error' || item.reason === 'destination_processing_error'
@@ -689,6 +898,7 @@ async function maybeUploadGoogleConversion(options) {
     destination_count: results.length,
     sent_count: sentCount,
     already_succeeded_count: alreadySucceededCount,
+    already_accepted_count: alreadyAcceptedCount,
     accepted_count: acceptedCount,
     failed_count: failedCount,
     processing_error_count: processingErrorCount,
@@ -696,9 +906,13 @@ async function maybeUploadGoogleConversion(options) {
     destinations: results
   };
   if (results.length === 0) {
-    aggregate.reason = getBaseGoogleAdsEventConfig(googleConfig, options?.eventName)
-      ? 'no_configured_destination'
-      : 'unsupported_conversion_event';
+    aggregate.reason = destinationSelection.reason || (
+      getBaseGoogleAdsEventConfig(googleConfig, options?.eventName)
+        ? 'no_configured_destination'
+        : 'unsupported_conversion_event'
+    );
+    aggregate.configured_destination_count = configuredEventConfigs.length;
+    if (destinationSelection.selector) aggregate.destination_selector = destinationSelection.selector;
   }
 
   if (processingErrors.length > 0) {
@@ -734,11 +948,13 @@ module.exports = {
   buildConversionUploadDedupeKey,
   getGoogleAdsEventConfig,
   getGoogleAdsEventConfigs,
+  hasRequestedActionOverride,
   hasRequestedTargetOverride,
   maybeUploadGoogleConversion,
   normalizeGoogleConsent,
   prepareAuditRow,
   requestedTargetMismatchesConfig,
+  selectConfiguredEventConfigs,
   selectClickId,
   toGoogleAdsDateTime,
   uploadGoogleConversionDestination

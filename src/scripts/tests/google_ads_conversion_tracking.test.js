@@ -13,9 +13,11 @@ const {
 const {
   buildConversionActionResource,
   getGoogleAdsEventConfigs,
+  hasRequestedActionOverride,
   maybeUploadGoogleConversion,
   prepareAuditRow,
-  requestedTargetMismatchesConfig
+  requestedTargetMismatchesConfig,
+  selectConfiguredEventConfigs
 } = require('../../services/googleAdsConversionUpload.service');
 const {
   resolveScopedGoogleAdsRuntime
@@ -76,6 +78,7 @@ const multiDestinationConfig = {
           enabled: true,
           customer_id: '185-121-5478',
           conversion_action_id: '7680195320',
+          campaign_ids: ['1111111111'],
           currency: 'EUR'
         },
         {
@@ -83,6 +86,7 @@ const multiDestinationConfig = {
           enabled: true,
           customer_id: '599-235-6722',
           conversion_action_id: '7540337982',
+          campaign_ids: ['2222222222'],
           currency: 'EUR'
         }
       ]
@@ -244,7 +248,8 @@ async function testAuditedUploadAndIdempotency() {
         clinicId: 58,
         groupId: 5,
         assignmentScope: 'group',
-        customerId: '5992356722'
+        customerId: '5992356722',
+        requiredScopes: ['https://www.googleapis.com/auth/datamanager']
       });
       return {
         accessToken: 'scoped-token',
@@ -257,7 +262,7 @@ async function testAuditedUploadAndIdempotency() {
     uploadConversion: async (payload) => {
       uploadCalls += 1;
       uploadPayload = payload;
-      return { jobId: 'job-1', results: [{}] };
+      return { requestId: 'request-1' };
     }
   };
 
@@ -273,14 +278,15 @@ async function testAuditedUploadAndIdempotency() {
   assert.equal(uploadPayload.loginCustomerId, '2863224233');
   assert.equal(uploadPayload.customerId, '5992356722');
   assert.equal(uploadPayload.gclid, 'secret-click-id');
+  assert.equal(uploadPayload.eventName, 'lead');
   assert.equal(uploadPayload.conversionAction, 'customers/5992356722/conversionActions/7540337982');
 
   const row = Array.from(auditModel.rows.values())[0];
-  assert.equal(row.status, 'succeeded');
+  assert.equal(row.status, 'accepted');
   assert.equal(row.googleConnectionId, 23);
   assert.equal(row.googleConnectionAssignmentId, 4);
   assert.equal(row.consentStatus, 'GRANTED');
-  assert.equal(row.providerRequestId, 'job-1');
+  assert.equal(row.providerRequestId, 'request-1');
   assert.equal(row.clickIdHash.length, 64);
   assert.notEqual(row.clickIdHash, 'secret-click-id');
   assert.equal(JSON.stringify(row).includes('patient@example.com'), false);
@@ -291,9 +297,64 @@ async function testAuditedUploadAndIdempotency() {
   });
   assert.equal(duplicate.sent, false);
   assert.equal(duplicate.accepted, true);
-  assert.equal(duplicate.reason, 'duplicate_already_succeeded');
-  assert.equal(uploadCalls, 1, 'A succeeded event must never be uploaded twice');
+  assert.equal(duplicate.reason, 'duplicate_already_accepted');
+  assert.equal(uploadCalls, 1, 'A provider-accepted event must never be uploaded twice');
   assert.equal(runtimeCalls, 1, 'A duplicate must not refresh or resolve OAuth again');
+}
+
+async function testUserDataOnlyUploadAndDedupe() {
+  const auditModel = new FakeAuditModel();
+  let uploadPayload = null;
+  let uploadCalls = 0;
+  const input = {
+    ...baseUploadInput({
+      customData: { client_id: '123456789.1761581763' },
+      userData: {
+        email: 'patient@example.com',
+        phone: '+34600000000',
+        givenName: 'Ana',
+        familyName: 'García',
+        regionCode: 'ES',
+        postalCode: '08018',
+        userId: 'patient-42'
+      },
+      eventId: 'lead-user-data-only-42'
+    }),
+    dependencies: {
+      auditModel,
+      resolveRuntime: async () => ({
+        accessToken: 'scoped-token',
+        loginCustomerId: null,
+        connection: { id: 23 },
+        assignment: { id: 4 },
+        connectionSource: 'scope_assignment_group'
+      }),
+      uploadConversion: async (payload) => {
+        uploadCalls += 1;
+        uploadPayload = payload;
+        return { requestId: 'request-user-only-1' };
+      }
+    }
+  };
+
+  const first = await maybeUploadGoogleConversion(input);
+  assert.equal(first.sent, true);
+  assert.equal(uploadCalls, 1);
+  assert.equal(uploadPayload.gclid, undefined);
+  assert.equal(uploadPayload.gbraid, undefined);
+  assert.equal(uploadPayload.wbraid, undefined);
+  assert.equal(uploadPayload.clientId, '123456789.1761581763');
+  assert.equal(uploadPayload.userId, 'patient-42');
+  assert.equal(uploadPayload.givenName, 'Ana');
+  const row = Array.from(auditModel.rows.values())[0];
+  assert.equal(row.clickIdType, null);
+  assert.equal(row.clickIdHash, null);
+  assert.equal(row.requestMetadata.user_identifier_count, 3);
+  assert.equal(row.requestMetadata.has_address, true);
+
+  const duplicate = await maybeUploadGoogleConversion(input);
+  assert.equal(duplicate.reason, 'duplicate_already_accepted');
+  assert.equal(uploadCalls, 1);
 }
 
 async function testConsentAndTargetGuards() {
@@ -322,7 +383,25 @@ async function testConsentAndTargetGuards() {
       uploadConversion: async () => { throw new Error('must not upload'); }
     }
   });
-  assert.equal(mismatch.reason, 'request_target_mismatch');
+  assert.equal(mismatch.reason, 'request_customer_not_configured');
+  assert.equal(mismatchAudit.rows.size, 0);
+
+  const overrideAudit = new FakeAuditModel();
+  const override = await maybeUploadGoogleConversion({
+    ...baseUploadInput({
+      customData: {
+        gclid: 'secret-click-id',
+        conversion_action_id: '7540337982'
+      }
+    }),
+    dependencies: {
+      auditModel: overrideAudit,
+      resolveRuntime: async () => { throw new Error('must not resolve'); },
+      uploadConversion: async () => { throw new Error('must not upload'); }
+    }
+  });
+  assert.equal(override.reason, 'request_target_override_not_allowed');
+  assert.equal(overrideAudit.rows.size, 1);
 }
 
 async function testFailedUploadIsAudited() {
@@ -379,7 +458,7 @@ function createMultiDestinationDependencies({ auditModel, failCustomers = new Se
           error.code = `REJECTED_${payload.customerId}`;
           throw error;
         }
-        return { jobId: `job-${payload.customerId}`, results: [{}] };
+        return { requestId: `request-${payload.customerId}` };
       }
     }
   };
@@ -413,141 +492,134 @@ async function testMultiDestinationSuccessAndDedupe() {
     }
   }, 'lead');
   assert.equal(equivalentTargets.length, 1, 'Equivalent action representations must not create two uploads');
+  assert.equal(selectConfiguredEventConfigs(configs, {}).reason, 'ambiguous_destination');
+  assert.deepEqual(
+    selectConfiguredEventConfigs(configs, { customer_id: '185-121-5478' }).configs.map((item) => item.customer_id),
+    ['1851215478']
+  );
 
   const auditModel = new FakeAuditModel();
   const harness = createMultiDestinationDependencies({ auditModel });
   const first = await maybeUploadGoogleConversion({
-    ...baseUploadInput({ googleAdsConfig: multiDestinationConfig }),
+    ...baseUploadInput({
+      googleAdsConfig: multiDestinationConfig,
+      customData: { gclid: 'secret-click-id', customer_id: '185-121-5478' }
+    }),
     dependencies: harness.dependencies
   });
 
   assert.equal(first.sent, true);
   assert.equal(first.partial, false);
-  assert.equal(first.destination_count, 2);
-  assert.equal(first.sent_count, 2);
+  assert.equal(first.destination_count, 1);
+  assert.equal(first.sent_count, 1);
   assert.equal(first.failed_count, 0);
   assert.equal(first.skipped_count, 0);
-  assert.deepEqual(harness.runtimeInputs.map((item) => item.customerId), ['1851215478', '5992356722']);
-  assert.deepEqual(harness.uploadPayloads.map((item) => item.customerId), ['1851215478', '5992356722']);
-  assert.deepEqual(harness.uploadPayloads.map((item) => item.accessToken), [
-    'scoped-token-1851215478',
-    'scoped-token-5992356722'
-  ]);
+  assert.deepEqual(harness.runtimeInputs.map((item) => item.customerId), ['1851215478']);
+  assert.deepEqual(harness.uploadPayloads.map((item) => item.customerId), ['1851215478']);
+  assert.deepEqual(harness.uploadPayloads.map((item) => item.accessToken), ['scoped-token-1851215478']);
 
   const rows = Array.from(auditModel.rows.values());
-  assert.equal(rows.length, 2);
-  assert.deepEqual(rows.map((row) => row.destinationKey), [
-    'propdental_parallel_185',
-    'propdental_main_599'
-  ]);
-  assert.deepEqual(rows.map((row) => row.status), ['succeeded', 'succeeded']);
-  assert.notEqual(rows[0].dedupeKey, rows[1].dedupeKey);
+  assert.equal(rows.length, 1);
+  assert.deepEqual(rows.map((row) => row.destinationKey), ['propdental_parallel_185']);
+  assert.deepEqual(rows.map((row) => row.status), ['accepted']);
 
   const duplicate = await maybeUploadGoogleConversion({
-    ...baseUploadInput({ googleAdsConfig: multiDestinationConfig }),
+    ...baseUploadInput({
+      googleAdsConfig: multiDestinationConfig,
+      customData: { gclid: 'secret-click-id', customer_id: '185-121-5478' }
+    }),
     dependencies: harness.dependencies
   });
   assert.equal(duplicate.sent, false);
   assert.equal(duplicate.sent_count, 0);
-  assert.equal(duplicate.skipped_count, 2);
-  assert.deepEqual(duplicate.destinations.map((item) => item.reason), [
-    'duplicate_already_succeeded',
-    'duplicate_already_succeeded'
-  ]);
-  assert.equal(harness.runtimeInputs.length, 2, 'Dedupe must be checked before resolving either account again');
-  assert.equal(harness.uploadPayloads.length, 2, 'Each configured target must upload at most once');
+  assert.equal(duplicate.skipped_count, 1);
+  assert.deepEqual(duplicate.destinations.map((item) => item.reason), ['duplicate_already_accepted']);
+  assert.equal(harness.runtimeInputs.length, 1, 'Dedupe must be checked before resolving the selected account again');
+  assert.equal(harness.uploadPayloads.length, 1, 'The selected target must upload at most once');
 }
 
-async function testMultiDestinationPartialSuccess() {
+async function testMultiDestinationCampaignSelector() {
   const auditModel = new FakeAuditModel();
-  const harness = createMultiDestinationDependencies({
-    auditModel,
-    failCustomers: new Set(['5992356722'])
-  });
+  const harness = createMultiDestinationDependencies({ auditModel });
   const result = await maybeUploadGoogleConversion({
     ...baseUploadInput({
       googleAdsConfig: multiDestinationConfig,
-      eventId: 'lead-partial-42'
+      eventId: 'lead-campaign-selected-42',
+      customData: { gclid: 'secret-click-id', campaign_id: '2222222222' }
     }),
     dependencies: harness.dependencies
   });
 
-  assert.equal(result.sent, true, 'One account success must keep the aggregate successful');
+  assert.equal(result.sent, true);
   assert.equal(result.accepted, true);
-  assert.equal(result.partial, true);
+  assert.equal(result.partial, false);
   assert.equal(result.sent_count, 1);
-  assert.equal(result.failed_count, 1);
+  assert.equal(result.failed_count, 0);
   assert.equal(result.skipped_count, 0);
-  assert.deepEqual(result.destinations.map((item) => item.reason || null), [null, 'provider_error']);
+  assert.equal(result.customer_id, '5992356722');
+  assert.deepEqual(harness.uploadPayloads.map((item) => item.customerId), ['5992356722']);
 
   const rows = Array.from(auditModel.rows.values());
-  assert.deepEqual(rows.map((row) => row.status), ['succeeded', 'failed']);
-  assert.equal(rows[1].destinationKey, 'propdental_main_599');
-  assert.equal(rows[1].lastErrorMessage.includes('secret-click-id'), false);
-  assert.equal(rows[1].lastErrorMessage.includes('patient@example.com'), false);
+  assert.deepEqual(rows.map((row) => row.status), ['accepted']);
+  assert.equal(rows[0].destinationKey, 'propdental_main_599');
 }
 
-async function testMultiDestinationAllProviderFailures() {
+async function testSelectedDestinationProviderFailure() {
   const auditModel = new FakeAuditModel();
   const harness = createMultiDestinationDependencies({
     auditModel,
-    failCustomers: new Set(['1851215478', '5992356722'])
+    failCustomers: new Set(['1851215478'])
   });
   await assert.rejects(
     maybeUploadGoogleConversion({
       ...baseUploadInput({
         googleAdsConfig: multiDestinationConfig,
-        eventId: 'lead-all-failed-42'
+        eventId: 'lead-selected-failed-42',
+        customData: { gclid: 'secret-click-id', customer_id: '1851215478' }
       }),
       dependencies: harness.dependencies
     }),
     (error) => {
-      assert.equal(error.code, 'GOOGLE_ADS_ALL_DESTINATIONS_FAILED');
-      assert.equal(error.errors.length, 2);
-      assert.equal(error.conversionResult.sent, false);
-      assert.equal(error.conversionResult.accepted, false);
-      assert.equal(error.conversionResult.failed_count, 2);
+      assert.equal(error.code, 'REJECTED_1851215478');
       return true;
     }
   );
-  assert.deepEqual(
-    Array.from(auditModel.rows.values()).map((row) => row.status),
-    ['failed', 'failed']
-  );
+  const [row] = Array.from(auditModel.rows.values());
+  assert.equal(row.status, 'failed');
+  assert.equal(row.destinationKey, 'propdental_parallel_185');
+  assert.equal(row.lastErrorMessage.includes('secret-click-id'), false);
+  assert.equal(row.lastErrorMessage.includes('patient@example.com'), false);
 }
 
-async function testRetryKeepsPreviouslyAcceptedDestination() {
+async function testAmbiguousAndUnknownDestinationAreFailClosed() {
   const auditModel = new FakeAuditModel();
-  const harness = createMultiDestinationDependencies({
-    auditModel,
-    failCustomers: new Set(['5992356722'])
-  });
-  const input = {
+  const harness = createMultiDestinationDependencies({ auditModel });
+  const ambiguous = await maybeUploadGoogleConversion({
     ...baseUploadInput({
       googleAdsConfig: multiDestinationConfig,
-      eventId: 'lead-retry-partial-42'
+      eventId: 'lead-ambiguous-42'
     }),
     dependencies: harness.dependencies
-  };
+  });
+  assert.equal(ambiguous.sent, false);
+  assert.equal(ambiguous.accepted, false);
+  assert.equal(ambiguous.reason, 'ambiguous_destination');
+  assert.equal(ambiguous.destination_count, 0);
+  assert.equal(ambiguous.configured_destination_count, 2);
 
-  const first = await maybeUploadGoogleConversion(input);
-  assert.equal(first.sent_count, 1);
-  assert.equal(first.failed_count, 1);
-
-  const retry = await maybeUploadGoogleConversion(input);
-  assert.equal(retry.sent, false, 'The accepted destination is not sent twice');
-  assert.equal(retry.accepted, true, 'The aggregate must retain the prior accepted destination');
-  assert.equal(retry.partial, true);
-  assert.equal(retry.sent_count, 0);
-  assert.equal(retry.already_succeeded_count, 1);
-  assert.equal(retry.accepted_count, 1);
-  assert.equal(retry.failed_count, 1);
-  assert.deepEqual(retry.destinations.map((item) => item.reason), [
-    'duplicate_already_succeeded',
-    'provider_error'
-  ]);
-  assert.equal(harness.uploadPayloads.filter((item) => item.customerId === '1851215478').length, 1);
-  assert.equal(harness.uploadPayloads.filter((item) => item.customerId === '5992356722').length, 2);
+  const unknown = await maybeUploadGoogleConversion({
+    ...baseUploadInput({
+      googleAdsConfig: multiDestinationConfig,
+      eventId: 'lead-unknown-customer-42',
+      customData: { gclid: 'secret-click-id', customer_id: '1112223333' }
+    }),
+    dependencies: harness.dependencies
+  });
+  assert.equal(unknown.reason, 'request_customer_not_configured');
+  assert.deepEqual(unknown.destination_selector, { customer_id: '1112223333' });
+  assert.equal(harness.runtimeInputs.length, 0);
+  assert.equal(harness.uploadPayloads.length, 0);
+  assert.equal(auditModel.rows.size, 0);
 }
 
 async function testGlobalKillSwitchAndExplicitEmptyDestinations() {
@@ -556,7 +628,8 @@ async function testGlobalKillSwitchAndExplicitEmptyDestinations() {
   const disabled = await maybeUploadGoogleConversion({
     ...baseUploadInput({
       googleAdsConfig: { ...multiDestinationConfig, enabled: false },
-      eventId: 'lead-globally-disabled-42'
+      eventId: 'lead-globally-disabled-42',
+      customData: { gclid: 'secret-click-id', customer_id: '1851215478' }
     }),
     dependencies: {
       auditModel: disabledAudit,
@@ -566,12 +639,9 @@ async function testGlobalKillSwitchAndExplicitEmptyDestinations() {
   });
   assert.equal(disabled.sent, false);
   assert.equal(disabled.accepted, false);
-  assert.deepEqual(disabled.destinations.map((item) => item.reason), [
-    'google_ads_disabled',
-    'google_ads_disabled'
-  ]);
+  assert.deepEqual(disabled.destinations.map((item) => item.reason), ['google_ads_disabled']);
   assert.equal(disabledCalls, 0);
-  assert.equal(disabledAudit.rows.size, 2);
+  assert.equal(disabledAudit.rows.size, 1);
 
   const explicitEmpty = {
     enabled: true,
@@ -630,7 +700,7 @@ async function testAuditPersistenceFailureIsNotProviderFailure() {
     const row = await originalCreate(values);
     const originalUpdate = row.update.bind(row);
     row.update = async (patch) => {
-      if (patch.status === 'succeeded') {
+      if (patch.status === 'accepted') {
         const error = new Error('database unavailable');
         error.code = 'ER_DB_DOWN';
         throw error;
@@ -654,7 +724,7 @@ async function testAuditPersistenceFailureIsNotProviderFailure() {
         }),
         uploadConversion: async () => {
           uploadCalls += 1;
-          return { jobId: 'accepted-before-audit-failure', results: [{}] };
+          return { requestId: 'accepted-before-audit-failure' };
         }
       }
     }),
@@ -694,13 +764,10 @@ async function testMultiDestinationGuardsAreAppliedPerDestination() {
     }
   });
   assert.equal(override.sent, false);
-  assert.equal(override.skipped_count, 2);
-  assert.deepEqual(override.destinations.map((item) => item.reason), [
-    'request_target_override_not_allowed',
-    'request_target_override_not_allowed'
-  ]);
+  assert.equal(override.skipped_count, 1);
+  assert.deepEqual(override.destinations.map((item) => item.reason), ['request_target_override_not_allowed']);
   assert.equal(overrideCalls, 0);
-  assert.equal(overrideAudit.rows.size, 2);
+  assert.equal(overrideAudit.rows.size, 1);
 
   const deniedAudit = new FakeAuditModel();
   let deniedCalls = 0;
@@ -708,6 +775,7 @@ async function testMultiDestinationGuardsAreAppliedPerDestination() {
     ...baseUploadInput({
       googleAdsConfig: multiDestinationConfig,
       eventId: 'lead-denied-42',
+      customData: { gclid: 'secret-click-id', customer_id: '1851215478' },
       consent: { ad_user_data: 'denied' },
       allowUpload: false
     }),
@@ -718,13 +786,10 @@ async function testMultiDestinationGuardsAreAppliedPerDestination() {
     }
   });
   assert.equal(denied.sent, false);
-  assert.equal(denied.skipped_count, 2);
-  assert.deepEqual(denied.destinations.map((item) => item.reason), [
-    'consent_not_granted',
-    'consent_not_granted'
-  ]);
+  assert.equal(denied.skipped_count, 1);
+  assert.deepEqual(denied.destinations.map((item) => item.reason), ['consent_not_granted']);
   assert.equal(deniedCalls, 0);
-  assert.equal(deniedAudit.rows.size, 2);
+  assert.equal(deniedAudit.rows.size, 1);
 }
 
 function testMultiDestinationConfigInheritance() {
@@ -877,6 +942,8 @@ function testConfiguredActionCannotCrossCustomer() {
     { customer_id: '5992356722', send_to: 'AW-123/lead-label' },
     'customers/5992356722/conversionActions/7540337982'
   ), false);
+  assert.equal(hasRequestedActionOverride({ customer_id: '5992356722' }), false);
+  assert.equal(hasRequestedActionOverride({ conversion_action_id: '7540337982' }), true);
 }
 
 async function run() {
@@ -885,12 +952,13 @@ async function run() {
   await testLowLevelUploadRequiresScopedToken();
   await testConversionActionCreationRequiresScopedToken();
   await testAuditedUploadAndIdempotency();
+  await testUserDataOnlyUploadAndDedupe();
   await testConsentAndTargetGuards();
   await testFailedUploadIsAudited();
   await testMultiDestinationSuccessAndDedupe();
-  await testMultiDestinationPartialSuccess();
-  await testMultiDestinationAllProviderFailures();
-  await testRetryKeepsPreviouslyAcceptedDestination();
+  await testMultiDestinationCampaignSelector();
+  await testSelectedDestinationProviderFailure();
+  await testAmbiguousAndUnknownDestinationAreFailClosed();
   await testGlobalKillSwitchAndExplicitEmptyDestinations();
   await testUnsupportedEventsNeverFallbackToLead();
   await testAuditPersistenceFailureIsNotProviderFailure();

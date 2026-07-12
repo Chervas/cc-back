@@ -25,6 +25,10 @@ const {
 } = require('../services/effectiveMarketingAssets.service');
 const { resolveScopedGoogleAdsRuntime } = require('../services/googleAdsScopedRuntime.service');
 const {
+  GOOGLE_DATA_MANAGER_SCOPE,
+  uploadConversionEvent: uploadGoogleDataManagerConversion
+} = require('../services/googleDataManagerConversion.service');
+const {
   clinicIdsFromStrategyRows,
   hasMarketingClinicScopeAccess,
   normalizeClinicIds,
@@ -2023,6 +2027,7 @@ function mapConversionActionRow(row) {
     category: conversion.category || null,
     type: conversion.type || null,
     status: conversion.status || null,
+    counting_type: conversion.countingType || null,
     include_in_conversions_metric: conversion.includeInConversionsMetric !== false,
     primary_for_goal: conversion.primaryForGoal !== false,
     send_to: extractSendToFromTagSnippets(conversion.tagSnippets || [])
@@ -2053,6 +2058,38 @@ function buildSuggestedMapping(actions) {
   }
 
   return mapping;
+}
+
+function buildClinicaclickManagedMapping(actions) {
+  const mapping = { lead: null, contact: null, schedule: null, purchase: null };
+  const canonicalNames = new Map(
+    VALID_EVENTS.map((key) => [String(EVENT_CATALOG[key].name || '').trim().toLowerCase(), key])
+  );
+  for (const action of Array.isArray(actions) ? actions : []) {
+    const key = canonicalNames.get(String(action?.name || '').trim().toLowerCase());
+    if (key && !mapping[key] && action?.id) mapping[key] = String(action.id);
+  }
+  return mapping;
+}
+
+function buildClinicaclickConversionActionCreate(eventKey, currency) {
+  if (!VALID_EVENTS.includes(eventKey)) return null;
+  return {
+    name: EVENT_CATALOG[eventKey].name,
+    category: EVENT_CATALOG[eventKey].category,
+    type: 'UPLOAD_CLICKS',
+    status: 'ENABLED',
+    // Las acciones nuevas empiezan como secundarias: recibir datos no debe
+    // alterar pujas ni duplicar la columna "Conversiones" del cliente.
+    primaryForGoal: false,
+    valueSettings: {
+      defaultValue: 0,
+      alwaysUseDefaultValue: false,
+      defaultCurrencyCode: normalizeCurrency(currency)
+    },
+    // Data Manager rechaza gbraid/wbraid contra acciones ONE_PER_CLICK.
+    countingType: 'MANY_PER_CLICK'
+  };
 }
 
 function listToUniqueArray(values) {
@@ -3926,6 +3963,7 @@ async function listConversionActionsInternal({ accessToken, customerId, loginCus
     '  conversion_action.category,',
     '  conversion_action.type,',
     '  conversion_action.status,',
+    '  conversion_action.counting_type,',
     '  conversion_action.include_in_conversions_metric,',
     '  conversion_action.primary_for_goal,',
     '  conversion_action.tag_snippets',
@@ -3951,7 +3989,8 @@ async function listConversionActionsInternal({ accessToken, customerId, loginCus
 
   return {
     actions,
-    suggested_mapping: buildSuggestedMapping(actions)
+    suggested_mapping: buildSuggestedMapping(actions),
+    clinicaclick_mapping: buildClinicaclickManagedMapping(actions)
   };
 }
 
@@ -3960,7 +3999,10 @@ async function ensureConversionActionsInternal({ accessToken, customerId, loginC
     (Array.isArray(events) && events.length ? events : VALID_EVENTS).filter((key) => VALID_EVENTS.includes(key))
   );
   const current = await listConversionActionsInternal({ accessToken, customerId, loginCustomerId });
-  const existingMapping = current.suggested_mapping || {};
+  // Provisioning no adopta acciones del cliente por coincidencias vagas. Solo
+  // reutiliza nombres canónicos de ClinicaClick y nunca modifica ni elimina el
+  // resto de acciones existentes en la cuenta.
+  const existingMapping = current.clinicaclick_mapping || {};
   const created = [];
   const existing = [];
 
@@ -3970,7 +4012,9 @@ async function ensureConversionActionsInternal({ accessToken, customerId, loginC
       existing.push({
         event: key,
         id: existingMapping[key],
-        name: matched?.name || EVENT_CATALOG[key].name
+        name: matched?.name || EVENT_CATALOG[key].name,
+        primary_for_goal: matched?.primary_for_goal ?? null,
+        counting_type: matched?.counting_type || null
       });
     }
   }
@@ -3982,18 +4026,7 @@ async function ensureConversionActionsInternal({ accessToken, customerId, loginC
       if (existingMapping[key]) continue;
       toCreateEvents.push(key);
       operations.push({
-        create: {
-          name: EVENT_CATALOG[key].name,
-          category: EVENT_CATALOG[key].category,
-          type: 'UPLOAD_CLICKS',
-          status: 'ENABLED',
-          valueSettings: {
-            defaultValue: 0,
-            alwaysUseDefaultValue: false,
-            defaultCurrencyCode: normalizeCurrency(currency)
-          },
-          countingType: 'ONE_PER_CLICK'
-        }
+        create: buildClinicaclickConversionActionCreate(key, currency)
       });
     }
 
@@ -4015,7 +4048,8 @@ async function ensureConversionActionsInternal({ accessToken, customerId, loginC
         created.push({
           event,
           id,
-          name: EVENT_CATALOG[event].name
+          name: EVENT_CATALOG[event].name,
+          primary_for_goal: false
         });
       }
     }
@@ -4790,7 +4824,84 @@ exports.listGoogleAdsConversionActions = asyncHandler(async (req, res) => {
     customer_id: customerId,
     connection_source: runtime.connectionSource,
     actions: result.actions,
-    suggested_mapping: result.suggested_mapping
+    suggested_mapping: result.suggested_mapping,
+    clinicaclick_mapping: result.clinicaclick_mapping
+  });
+});
+
+exports.validateGoogleDataManagerConversion = asyncHandler(async (req, res) => {
+  const userId = getUserId(req);
+  if (!userId) return res.status(401).json({ success: false, error: 'unauthenticated' });
+
+  const customerId = normalizeCustomerId(req.body?.customer_id || '');
+  const conversionActionId = String(req.body?.conversion_action_id || '').trim();
+  if (!customerId || !/^\d+$/.test(conversionActionId)) {
+    return res.status(400).json({ success: false, error: 'customer_and_conversion_action_required' });
+  }
+  if (!req.body?.clinic_id && !req.body?.group_id) {
+    return res.status(400).json({ success: false, error: 'scope_required' });
+  }
+
+  const scope = await resolveScopeFromInput({
+    clinicIdRaw: req.body?.clinic_id,
+    groupIdRaw: req.body?.group_id,
+    assignmentScopeRaw: req.body?.assignment_scope
+  });
+  if (!(await requireMarketingClinicScope(req, res, scope.clinic_ids, 'read'))) return;
+
+  let runtime;
+  try {
+    runtime = await resolveScopedGoogleAdsRuntime({
+      userId,
+      clinicId: scope.clinic_id,
+      groupId: scope.group_id,
+      assignmentScope: scope.assignment_scope,
+      customerId,
+      requiredScopes: [GOOGLE_DATA_MANAGER_SCOPE]
+    });
+  } catch (error) {
+    return res.status(error.httpStatus || 409).json({
+      success: false,
+      error: String(error.code || 'scoped_google_connection_error').toLowerCase(),
+      message: error.message,
+      missing_scopes: error.missingScopes || []
+    });
+  }
+
+  try {
+    await uploadGoogleDataManagerConversion({
+      customerId,
+      conversionAction: `customers/${customerId}/conversionActions/${conversionActionId}`,
+      conversionDateTime: new Date(),
+      externalId: `cc-dry-run-${Date.now()}`,
+      email: 'data-manager-validation@clinicaclick.invalid',
+      consentStatus: 'GRANTED',
+      value: 0,
+      currency: 'EUR',
+      eventSource: 'WEB',
+      accessToken: runtime.accessToken,
+      loginCustomerId: runtime.loginCustomerId,
+      validateOnly: true
+    });
+  } catch (error) {
+    const providerError = error?.response?.data?.error || null;
+    return res.status(Number(error?.response?.status) || 409).json({
+      success: false,
+      validated: false,
+      validate_only: true,
+      error: String(providerError?.status || error?.code || 'data_manager_validation_failed').toLowerCase(),
+      message: providerError?.message || error.message || 'Google no pudo validar la configuración de Data Manager',
+      details: Array.isArray(providerError?.details) ? providerError.details : []
+    });
+  }
+
+  return res.json({
+    success: true,
+    validated: true,
+    validate_only: true,
+    customer_id: customerId,
+    conversion_action_id: conversionActionId,
+    message: 'Google validó la estructura y los permisos sin ingerir la conversión.'
   });
 });
 
@@ -6000,3 +6111,8 @@ exports.createMarketingStrategy = asyncHandler(async (req, res) => {
     }
   });
 });
+
+exports.__test = {
+  buildClinicaclickConversionActionCreate,
+  buildClinicaclickManagedMapping
+};

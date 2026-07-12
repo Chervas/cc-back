@@ -7,6 +7,7 @@ const { normalizeCustomerId } = require('../lib/googleAdsClient');
 const { resolveGoogleConnectionForScope } = require('./scopeConnectionResolver.service');
 
 const GOOGLE_ADS_SCOPE = 'https://www.googleapis.com/auth/adwords';
+const GOOGLE_DATA_MANAGER_SCOPE = 'https://www.googleapis.com/auth/datamanager';
 
 function parseInteger(raw) {
   if (raw === undefined || raw === null || raw === '') return null;
@@ -22,6 +23,21 @@ function hasGoogleAdsScope(scopes) {
     .includes(GOOGLE_ADS_SCOPE);
 }
 
+function normalizeRequiredScopes(requiredScopes) {
+  const values = Array.isArray(requiredScopes) && requiredScopes.length
+    ? requiredScopes
+    : [GOOGLE_ADS_SCOPE];
+  return Array.from(new Set(values.map((scope) => String(scope || '').trim()).filter(Boolean)));
+}
+
+function missingGoogleScopes(scopes, requiredScopes) {
+  const granted = new Set(String(scopes || '')
+    .split(/[\s,]+/)
+    .map((scope) => scope.trim())
+    .filter(Boolean));
+  return normalizeRequiredScopes(requiredScopes).filter((scope) => !granted.has(scope));
+}
+
 function runtimeError(code, message, httpStatus = 400) {
   const error = new Error(message);
   error.code = code;
@@ -29,10 +45,22 @@ function runtimeError(code, message, httpStatus = 400) {
   return error;
 }
 
-async function ensureGoogleConnectionAccessToken(connection, { axiosClient = axios } = {}) {
+async function ensureGoogleConnectionAccessToken(connection, {
+  axiosClient = axios,
+  requiredScopes = [GOOGLE_ADS_SCOPE]
+} = {}) {
   if (!connection) throw runtimeError('NO_SCOPED_CONNECTION', 'No existe conexión Google asignada al scope', 404);
-  if (!hasGoogleAdsScope(connection.scopes)) {
-    throw runtimeError('INSUFFICIENT_SCOPE', 'La conexión Google asignada no tiene permisos de Google Ads', 403);
+  const missingScopes = missingGoogleScopes(connection.scopes, requiredScopes);
+  if (missingScopes.length) {
+    const error = runtimeError(
+      'INSUFFICIENT_SCOPE',
+      missingScopes.includes(GOOGLE_DATA_MANAGER_SCOPE)
+        ? 'La conexión Google requiere reautorización con permisos de Data Manager'
+        : 'La conexión Google asignada no tiene todos los permisos requeridos',
+      403
+    );
+    error.missingScopes = missingScopes;
+    throw error;
   }
   if (!connection.accessToken) {
     throw runtimeError('NO_TOKEN', 'La conexión Google asignada no tiene access token', 409);
@@ -117,7 +145,8 @@ async function resolveScopedGoogleAdsRuntime({
   customerId,
   resolver = resolveGoogleConnectionForScope,
   accountModel = db.ClinicGoogleAdsAccount,
-  ensureAccessToken = ensureGoogleConnectionAccessToken
+  ensureAccessToken = ensureGoogleConnectionAccessToken,
+  requiredScopes = [GOOGLE_ADS_SCOPE]
 }) {
   const cleanCustomerId = normalizeCustomerId(customerId);
   if (!cleanCustomerId) throw runtimeError('CUSTOMER_ID_REQUIRED', 'customer_id es obligatorio', 400);
@@ -156,7 +185,7 @@ async function resolveScopedGoogleAdsRuntime({
     );
   }
 
-  const token = await ensureAccessToken(connection);
+  const token = await ensureAccessToken(connection, { requiredScopes });
   return {
     accessToken: token.accessToken,
     connection,
@@ -171,9 +200,12 @@ async function resolveScopedGoogleAdsRuntime({
 
 module.exports = {
   GOOGLE_ADS_SCOPE,
+  GOOGLE_DATA_MANAGER_SCOPE,
   buildScopedGoogleAccountWhere,
   ensureGoogleConnectionAccessToken,
   hasGoogleAdsScope,
+  missingGoogleScopes,
+  normalizeRequiredScopes,
   resolveScopedGoogleAdsRuntime,
   runtimeError
 };

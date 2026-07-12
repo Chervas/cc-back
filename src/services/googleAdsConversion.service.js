@@ -172,13 +172,13 @@ function leadActionPayload(name = 'Lead - ClinicaClick') {
     category: 'SUBMIT_LEAD_FORM',
     type: 'UPLOAD_CLICKS',
     status: 'ENABLED',
-    includeInConversionsMetric: true,
+    primaryForGoal: false,
     valueSettings: {
       defaultValue: 0,
       alwaysUseDefaultValue: false,
       defaultCurrencyCode: 'EUR'
     },
-    countingType: 'ONE_PER_CLICK'
+    countingType: 'MANY_PER_CLICK'
   };
 }
 
