@@ -50,6 +50,7 @@ const {
   parseIntakeId,
   resolveIntakeLocationVisibility,
 } = require('../lib/intakeLocations');
+const { detectLegacyJoinChat } = require('../lib/intake-legacy-chat');
 const {
   extractGoogleTagId,
   normalizeMetaAdsConfig,
@@ -3063,7 +3064,7 @@ exports.verifySnippetInstalled = asyncHandler(async (req, res) => {
     // JoinChat es el chat heredado que estamos sustituyendo por el runtime de
     // ClinicaClick. Informarlo en la misma verificacion permite migrar en dos
     // tiempos: instalar y verificar primero; desactivar JoinChat despues.
-    const joinChatDetected = /(?:joinchat|creame-whatsapp-me|joinchat-premium)/i.test(html);
+    const joinChatDetected = detectLegacyJoinChat(html);
 
     return {
       cookie_notice_detected: providers.length > 0,
