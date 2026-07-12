@@ -993,12 +993,12 @@ async function testPersistedAuditUsesSyncLogAndExistingAlertFlow() {
   assert.equal(notifications[0].event, 'jobs.failed');
 }
 
-function testHourlySchedulerIsWiredWithoutMigration() {
+function testDailyStableSchedulerIsWiredWithoutMigration() {
   const jobsSource = fs.readFileSync(path.resolve(__dirname, '../../jobs/sync.jobs.js'), 'utf8');
   const envSource = fs.readFileSync(path.resolve(__dirname, '../../../.env.example'), 'utf8');
-  assert.match(jobsSource, /googleConversionGoalPolicyAudit:[\s\S]*17 \* \* \* \*/);
+  assert.match(jobsSource, /googleConversionGoalPolicyAudit:[\s\S]*17 2 \* \* \*/);
   assert.match(jobsSource, /executeGoogleConversionGoalPolicyAudit\(\)[\s\S]*executePersistedGoalPolicyAudit\(\)/);
-  assert.match(envSource, /JOBS_GOOGLE_CONVERSION_GOAL_POLICY_AUDIT_SCHEDULE="17 \* \* \* \*"/);
+  assert.match(envSource, /JOBS_GOOGLE_CONVERSION_GOAL_POLICY_AUDIT_SCHEDULE="17 2 \* \* \*"/);
   assert.equal(fs.existsSync(path.resolve(__dirname, '../../../migrations/20260712110000-google-goal-policy.js')), false);
 }
 
@@ -1025,7 +1025,7 @@ async function main() {
   await testDiagnosticsReaderNeverUpdatesAttempts();
   await testDiscoveryOnlyReadsExplicitOptIns();
   await testPersistedAuditUsesSyncLogAndExistingAlertFlow();
-  testHourlySchedulerIsWiredWithoutMigration();
+  testDailyStableSchedulerIsWiredWithoutMigration();
   console.log('google_ads_clinicaclick_goal_policy.test.js OK');
 }
 
