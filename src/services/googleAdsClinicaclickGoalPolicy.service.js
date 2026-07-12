@@ -16,10 +16,11 @@ const {
   runtimeError,
 } = require('./googleAdsScopedRuntime.service');
 
-const SCHEMA_VERSION = 'clinicaclick-google-ads-conversion-goal-policy/v2';
+const SCHEMA_VERSION = 'clinicaclick-google-ads-conversion-goal-policy/v3';
 const GOAL_NAME = 'Clinicaclick · Captar nuevos pacientes';
 const STRATEGY_KEY = 'new_patients';
 const DESIRED_ACTION_KEYS = Object.freeze(['lead', 'contact', 'schedule']);
+const DEFAULT_BIDDING_ACTION_KEYS = DESIRED_ACTION_KEYS;
 const ALL_CANONICAL_KEYS = Object.freeze([...DESIRED_ACTION_KEYS, 'purchase']);
 const CANONICAL_ACTIONS = Object.freeze({
   lead: Object.freeze({ key: 'lead', name: 'Lead - ClinicaClick' }),
@@ -199,11 +200,41 @@ function normalizeSupplementalActionIds(raw, customerId, canonicalActionIds) {
   return ids;
 }
 
+function normalizeBiddingActionKeys(raw, customerId) {
+  if (raw === undefined || raw === null) return [...DEFAULT_BIDDING_ACTION_KEYS];
+  if (!Array.isArray(raw) || raw.length === 0) {
+    throw runtimeError(
+      'BIDDING_ACTION_KEYS_INVALID',
+      `bidding_action_keys de ${customerId} debe ser una lista no vacía`,
+      400,
+    );
+  }
+  const output = [];
+  const seen = new Set();
+  for (const value of raw) {
+    const key = String(value || '').trim().toLowerCase();
+    if (!DESIRED_ACTION_KEYS.includes(key)) {
+      throw runtimeError(
+        'BIDDING_ACTION_KEY_NOT_ALLOWED',
+        `${key || 'El valor vacío'} no es una acción canónica apta para puja`,
+        400,
+      );
+    }
+    if (seen.has(key)) continue;
+    seen.add(key);
+    output.push(key);
+  }
+  return output.sort((left, right) => (
+    DESIRED_ACTION_KEYS.indexOf(left) - DESIRED_ACTION_KEYS.indexOf(right)
+  ));
+}
+
 /**
  * Configuración por cuenta:
  * {
  *   customer_id, strategy_ref, campaign_ids,
  *   canonical_action_ids: { lead, contact, schedule, purchase? },
+ *   bidding_action_keys?: ['lead'|'contact'|'schedule'],
  *   supplemental_action_ids?: string[],
  *   owned_custom_goal_resource_name?
  * }
@@ -259,12 +290,17 @@ function normalizeConfiguredAccounts(configuredAccounts) {
       customerId,
       actionIds,
     );
+    const biddingActionKeys = normalizeBiddingActionKeys(
+      raw?.bidding_action_keys ?? raw?.biddingActionKeys,
+      customerId,
+    );
     return {
       customer_id: customerId,
       strategy_key: STRATEGY_KEY,
       strategy_ref: strategyRef,
       campaign_ids: campaignIds,
       canonical_action_ids: actionIds,
+      bidding_action_keys: biddingActionKeys,
       supplemental_action_ids: supplementalActionIds,
       owned_custom_goal_resource_name: normalizeOwnedGoalResource(
         customerId,
@@ -532,7 +568,7 @@ function canonicalActionState(account, snapshot, blockers) {
       expected_name: definition.name,
       configured_id: configuredId,
       action,
-      included_in_goal: DESIRED_ACTION_KEYS.includes(key),
+      included_in_goal: account.bidding_action_keys.includes(key),
     };
     if (!DESIRED_ACTION_KEYS.includes(key) || !action) continue;
     const expectedResource = actionResourceName(account.customer_id, configuredId);
@@ -669,7 +705,7 @@ function ownedGoalState(account, snapshot, desiredActions, supplementalActions, 
     ));
   }
 
-  const desiredResourceNames = DESIRED_ACTION_KEYS.map((key) => desiredActions[key]?.action?.resource_name)
+  const desiredResourceNames = account.bidding_action_keys.map((key) => desiredActions[key]?.action?.resource_name)
     .filter(Boolean)
     .concat(supplementalActions.valid_resource_names || []);
   return {
@@ -952,12 +988,14 @@ function buildClinicaclickGoalPolicyPlan({ account, snapshot }) {
     strategy_key: account.strategy_key,
     strategy_ref: account.strategy_ref,
     configured_campaign_ids: account.campaign_ids,
+    bidding_action_keys: account.bidding_action_keys,
     supplemental_action_ids: account.supplemental_action_ids,
     owned_custom_goal_resource_name: account.owned_custom_goal_resource_name,
     desired_custom_goal: {
       name: GOAL_NAME,
       conversion_actions: goalState.desired_conversion_actions,
-      required_canonical_action_keys: DESIRED_ACTION_KEYS,
+      required_canonical_action_keys: account.bidding_action_keys,
+      tracked_canonical_action_keys: DESIRED_ACTION_KEYS,
       supplemental_action_ids: account.supplemental_action_ids,
       purchase_excluded: true,
     },
@@ -1069,7 +1107,7 @@ function assertSafePlanOperations(account, plan) {
   }
   const desired = plan.desired_custom_goal.conversion_actions || [];
   const expectedDesired = [
-    ...DESIRED_ACTION_KEYS.map((key) => actionResourceName(account.customer_id, account.canonical_action_ids[key])),
+    ...account.bidding_action_keys.map((key) => actionResourceName(account.customer_id, account.canonical_action_ids[key])),
     ...(account.supplemental_action_ids || []).map((id) => actionResourceName(account.customer_id, id)),
   ];
   if (
@@ -1078,7 +1116,7 @@ function assertSafePlanOperations(account, plan) {
   ) {
     throw runtimeError(
       'GOAL_POLICY_MEMBERSHIP_INVALID',
-      'El custom goal no coincide exactamente con las tres acciones canónicas y la allowlist AD_CALL',
+      'El custom goal no coincide exactamente con las acciones de puja aprobadas y la allowlist AD_CALL',
       403,
     );
   }
@@ -1088,7 +1126,7 @@ function assertSafePlanOperations(account, plan) {
   if (purchaseResource && desired.includes(purchaseResource)) {
     throw runtimeError('GOAL_POLICY_PURCHASE_INCLUDED', 'Purchase no puede formar parte de este custom goal', 403);
   }
-  for (const key of DESIRED_ACTION_KEYS) {
+  for (const key of account.bidding_action_keys) {
     if (!desired.includes(actionResourceName(account.customer_id, account.canonical_action_ids[key]))) {
       throw runtimeError('GOAL_POLICY_MEMBERSHIP_INVALID', `Falta ${CANONICAL_ACTIONS[key].name}`, 403);
     }
