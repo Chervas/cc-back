@@ -182,7 +182,9 @@ async function fetchCampaignAttributionState({
   const response = await request('POST', `customers/${normalizedCustomerId}/googleAds:search`, {
     accessToken,
     loginCustomerId: loginCustomerId || undefined,
-    data: { query, pageSize: MAX_CAMPAIGNS_PER_ACCOUNT },
+    // Google Ads API v21+ removed pageSize from Search requests. Including it
+    // makes an otherwise valid GAQL query fail with INVALID_ARGUMENT.
+    data: { query },
     singleAttempt: true,
   });
   return (Array.isArray(response?.results) ? response.results : [])
