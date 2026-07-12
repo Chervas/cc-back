@@ -9,6 +9,7 @@ const {
   expandHorariosForRange,
   normalizeDateOnly,
 } = require('../lib/personal-schedule-recurring');
+const { isGlobalAdmin } = require('../lib/role-helpers');
 
 const {
   CitaPaciente,
@@ -38,6 +39,7 @@ const ATTENDANCE_OPEN_STATUSES = new Set([
   'recordatorio_confirmado',
 ]);
 const CANCELLED_STATUSES = new Set(['cancelada', 'reprogramada']);
+const CLOSED_ATTENDANCE_STATUSES = new Set(['completada', 'no_asistio']);
 const UNCONFIRMED_TODAY_STATUSES = ['pendiente', 'info_enviada', 'recordatorio_enviado'];
 const PENDING_CONSENT_STATUSES = ['pending', 'sent', 'viewed'];
 
@@ -123,7 +125,7 @@ function statusUi(rawStatus) {
     case 'completada':
       return { status: 'attended', label: 'Acudió' };
     case 'no_asistio':
-      return { status: 'no-show', label: 'No asistio' };
+      return { status: 'no-show', label: 'No asistió' };
     case 'cancelada':
       return { status: 'cancelled', label: 'Cancelada' };
     case 'reprogramada':
@@ -144,7 +146,14 @@ function normalizeSubrolCode(label) {
   return 'unknown';
 }
 
-async function loadUserContext({ userId, requestedClinicIds, requestedRole, requestedSubrol }) {
+function panelScopeForbidden() {
+  const error = new Error('panel_scope_forbidden');
+  error.statusCode = 403;
+  return error;
+}
+
+async function loadUserContext({ userId, requestedClinicIds }) {
+  const globalAdmin = isGlobalAdmin(userId);
   const [user, memberships] = await Promise.all([
     userId && Usuario
       ? Usuario.findByPk(userId, {
@@ -166,8 +175,16 @@ async function loadUserContext({ userId, requestedClinicIds, requestedRole, requ
     memberships[0] ||
     null;
 
-  const role = String(requestedRole || selectedMembership?.rol_clinica || '').trim().toLowerCase();
-  const subrolLabel = String(requestedSubrol || selectedMembership?.subrol_clinica || '').trim();
+  const role = String(
+    globalAdmin
+      ? 'administrador'
+      : selectedMembership?.rol_clinica || ''
+  ).trim().toLowerCase();
+  const subrolLabel = String(
+    globalAdmin
+      ? (selectedMembership?.subrol_clinica || '')
+      : selectedMembership?.subrol_clinica || ''
+  ).trim();
   const subrolCode = normalizeSubrolCode(subrolLabel);
 
   return {
@@ -192,12 +209,15 @@ async function loadUserContext({ userId, requestedClinicIds, requestedRole, requ
     subrolLabel,
     subrolCode,
     memberships,
+    globalAdmin,
   };
 }
 
-async function resolveClinicScope(rawScope, memberships) {
+async function resolveClinicScope(rawScope, memberships, { allowAllClinics = false } = {}) {
   const raw = String(rawScope || '').trim();
   let clinicIds = [];
+  const accessibleClinicIds = uniqueInts((memberships || []).map((row) => row.id_clinica));
+  const explicitScopeRequested = Boolean(raw && raw !== 'all');
 
   if (raw && raw !== 'all') {
     if (raw.startsWith('group:') && Clinica) {
@@ -215,8 +235,24 @@ async function resolveClinicScope(rawScope, memberships) {
     }
   }
 
+  if (allowAllClinics && (!raw || raw === 'all') && !clinicIds.length && Clinica) {
+    const rows = await Clinica.findAll({
+      attributes: ['id_clinica'],
+      raw: true,
+    });
+    clinicIds = rows.map((row) => row.id_clinica);
+  }
+
+  if (!allowAllClinics && clinicIds.length) {
+    const allowed = new Set(accessibleClinicIds);
+    clinicIds = clinicIds.filter((clinicId) => allowed.has(Number(clinicId)));
+    if (explicitScopeRequested && !clinicIds.length) {
+      throw panelScopeForbidden();
+    }
+  }
+
   if (!clinicIds.length) {
-    clinicIds = uniqueInts((memberships || []).map((row) => row.id_clinica));
+    clinicIds = accessibleClinicIds;
   }
 
   const clinics = clinicIds.length && Clinica
@@ -331,9 +367,33 @@ function mapAppointment(row, maps, now) {
   };
 }
 
-async function loadAppointments({ clinicIds, clinicMap, todayStart, todayEnd, now }) {
-  if (!clinicIds.length || !CitaPaciente) {
-    return { today: [], pastAttendance: [], next: [] };
+function isExpectedTodayAppointment(item, { includeClosedToday = false } = {}) {
+  const status = String(item?.rawStatus || '').toLowerCase();
+  if (CANCELLED_STATUSES.has(status)) return false;
+  if (includeClosedToday) return true;
+  if (CLOSED_ATTENDANCE_STATUSES.has(status)) return false;
+  return item?.attendanceDue !== true;
+}
+
+function isInactiveTodayAppointment(item, { includeClosedToday = false } = {}) {
+  const status = String(item?.rawStatus || '').toLowerCase();
+  return CANCELLED_STATUSES.has(status) || (!includeClosedToday && CLOSED_ATTENDANCE_STATUSES.has(status));
+}
+
+async function loadAppointments({
+  clinicIds,
+  clinicMap,
+  todayStart,
+  todayEnd,
+  now,
+  doctorId = null,
+  includeToday = true,
+  includePastAttendance = true,
+  includeNext = true,
+  includeClosedToday = false,
+}) {
+  if (!clinicIds.length || !CitaPaciente || (!includeToday && !includePastAttendance && !includeNext)) {
+    return { today: [], inactiveToday: [], pastAttendance: [], next: [] };
   }
 
   const pastStart = new Date(todayStart);
@@ -343,48 +403,61 @@ async function loadAppointments({ clinicIds, clinicMap, todayStart, todayEnd, no
     'id_cita', 'clinica_id', 'paciente_id', 'doctor_id', 'instalacion_id',
     'tratamiento_id', 'titulo', 'motivo', 'tipo_cita', 'estado', 'inicio', 'fin',
   ];
+  const appointmentScope = {
+    ...scopedWhere('clinica_id', clinicIds),
+    ...(doctorId ? { doctor_id: doctorId } : {}),
+  };
 
   const [todayRows, pastRows, nextRows] = await Promise.all([
-    CitaPaciente.findAll({
-      where: {
-        ...scopedWhere('clinica_id', clinicIds),
-        inicio: { [Op.between]: [todayStart, todayEnd] },
-      },
-      attributes: appointmentAttributes,
-      order: [['inicio', 'ASC']],
-      raw: true,
-    }),
-    CitaPaciente.findAll({
-      where: {
-        ...scopedWhere('clinica_id', clinicIds),
-        fin: { [Op.between]: [pastStart, now] },
-        estado: { [Op.in]: [...ATTENDANCE_OPEN_STATUSES] },
-      },
-      attributes: appointmentAttributes,
-      order: [['fin', 'DESC']],
-      limit: 30,
-      raw: true,
-    }),
-    CitaPaciente.findAll({
-      where: {
-        ...scopedWhere('clinica_id', clinicIds),
-        inicio: { [Op.gt]: todayEnd },
-        estado: { [Op.notIn]: [...CANCELLED_STATUSES] },
-      },
-      attributes: appointmentAttributes,
-      order: [['inicio', 'ASC']],
-      limit: 4,
-      raw: true,
-    }),
+    includeToday
+      ? CitaPaciente.findAll({
+          where: {
+            ...appointmentScope,
+            inicio: { [Op.between]: [todayStart, todayEnd] },
+          },
+          attributes: appointmentAttributes,
+          order: [['inicio', 'ASC']],
+          raw: true,
+        })
+      : [],
+    includePastAttendance
+      ? CitaPaciente.findAll({
+          where: {
+            ...appointmentScope,
+            fin: { [Op.between]: [pastStart, now] },
+            estado: { [Op.in]: [...ATTENDANCE_OPEN_STATUSES] },
+          },
+          attributes: appointmentAttributes,
+          order: [['fin', 'DESC']],
+          limit: 30,
+          raw: true,
+        })
+      : [],
+    includeNext
+      ? CitaPaciente.findAll({
+          where: {
+            ...appointmentScope,
+            inicio: { [Op.gt]: todayEnd },
+            estado: { [Op.notIn]: [...CANCELLED_STATUSES] },
+          },
+          attributes: appointmentAttributes,
+          order: [['inicio', 'ASC']],
+          limit: 4,
+          raw: true,
+        })
+      : [],
   ]);
 
   const allRows = [...todayRows, ...pastRows, ...nextRows];
   const maps = await loadAppointmentMaps(allRows, clinicMap);
 
+  const mappedToday = todayRows.map((row) => mapAppointment(row, maps, now));
+
   return {
-    today: todayRows
-      .filter((row) => !CANCELLED_STATUSES.has(String(row.estado || '').toLowerCase()))
-      .map((row) => mapAppointment(row, maps, now)),
+    today: mappedToday
+      .filter((item) => isExpectedTodayAppointment(item, { includeClosedToday })),
+    inactiveToday: mappedToday
+      .filter((item) => isInactiveTodayAppointment(item, { includeClosedToday })),
     pastAttendance: pastRows
       .filter((row) => !CANCELLED_STATUSES.has(String(row.estado || '').toLowerCase()))
       .map((row) => mapAppointment(row, maps, now))
@@ -439,9 +512,19 @@ async function countTasks({ clinicIds, todayStart, todayEnd }) {
   return { leadsPending, pendingConsents, pendingReviews, unconfirmedToday };
 }
 
-function taskItems(counts, todayDate, clinicIds) {
+function taskItems(counts, todayDate, clinicIds, pendingAttendanceCount = 0) {
   const singleClinicId = clinicIds.length === 1 ? clinicIds[0] : null;
-  return [
+  const pendingAttendance = Number(pendingAttendanceCount || 0);
+  const items = [
+    ...(pendingAttendance > 0
+      ? [{
+          id: 'pending_attendance',
+          label: 'Citas pendientes de cerrar asistencia',
+          count: pendingAttendance,
+          link: '/agenda-de-citas',
+          queryParams: { clinica_id: singleClinicId },
+        }]
+      : []),
     {
       id: 'leads_pending',
       label: 'Leads sin contactar',
@@ -471,6 +554,8 @@ function taskItems(counts, todayDate, clinicIds) {
       queryParams: { reviews: 'unanswered', clinica_id: singleClinicId },
     },
   ];
+
+  return items;
 }
 
 async function loadPendingConsentCards({ clinicIds, doctorId = null, limit = 6 }) {
@@ -543,6 +628,95 @@ async function loadPendingConsentCards({ clinicIds, doctorId = null, limit = 6 }
       treatmentName: treatment?.nombre || 'Sin tratamiento asignado',
       updatedAt: doc.updatedAt || null,
       link: '/consentimientos',
+    };
+  });
+}
+
+function locationPublicUrl(location) {
+  const raw = parseJsonObject(location?.raw_payload);
+  return raw.metadata?.mapsUri || raw.mapsUri || null;
+}
+
+async function loadUnansweredReviewCards({ clinicIds, clinicMap, limit = 4 }) {
+  if (!clinicIds.length || !BusinessProfileReview) return [];
+
+  const reviews = await BusinessProfileReview.findAll({
+    where: {
+      ...scopedWhere('clinica_id', clinicIds),
+      has_reply: false,
+    },
+    attributes: [
+      'id',
+      'clinica_id',
+      'business_location_id',
+      'review_name',
+      'reviewer_name',
+      'reviewer_profile_photo_url',
+      'star_rating',
+      'comment',
+      'create_time',
+      'update_time',
+      'is_negative',
+      'matched_paciente_id',
+      'match_confidence',
+    ],
+    order: [['create_time', 'DESC']],
+    limit,
+    raw: true,
+  });
+
+  if (!reviews.length) return [];
+
+  const locationIds = uniqueInts(reviews.map((review) => review.business_location_id));
+  const patientIds = uniqueInts(reviews.map((review) => review.matched_paciente_id));
+  const [locations, patients] = await Promise.all([
+    locationIds.length && ClinicBusinessLocation
+      ? ClinicBusinessLocation.findAll({
+          where: scopedWhere('id', locationIds),
+          attributes: ['id', 'location_name', 'raw_payload'],
+          raw: true,
+        })
+      : [],
+    patientIds.length && Paciente
+      ? Paciente.findAll({
+          where: scopedWhere('id_paciente', patientIds),
+          attributes: ['id_paciente', 'nombre', 'apellidos'],
+          raw: true,
+        })
+      : [],
+  ]);
+
+  const locationMap = new Map(locations.map((row) => [Number(row.id), row]));
+  const patientMap = new Map(patients.map((row) => [Number(row.id_paciente), row]));
+
+  return reviews.map((review) => {
+    const clinic = clinicMap.get(Number(review.clinica_id));
+    const location = locationMap.get(Number(review.business_location_id));
+    const patient = patientMap.get(Number(review.matched_paciente_id));
+    const reviewId = Number(review.id);
+    return {
+      id: String(reviewId),
+      reviewId,
+      reviewName: review.review_name || null,
+      clinicId: Number(review.clinica_id) || null,
+      clinicName: clinic?.nombre_clinica || `Clínica ${review.clinica_id}`,
+      locationName: location?.location_name || null,
+      reviewerName: review.reviewer_name || 'Paciente de Google',
+      reviewerAvatar: review.reviewer_profile_photo_url || null,
+      rating: Number(review.star_rating || 0),
+      comment: review.comment || '',
+      createdAt: review.create_time || review.update_time || null,
+      isNegative: review.is_negative === true || Number(review.star_rating || 0) <= 3,
+      matchedPatientId: Number(review.matched_paciente_id) || null,
+      matchedPatientName: patient ? fullName(patient, null) : null,
+      matchConfidence: review.match_confidence != null ? Number(review.match_confidence) : null,
+      replyExternalUrl: locationPublicUrl(location),
+      link: '/marketing/perfil-google',
+      queryParams: {
+        reviews: 'unanswered',
+        review_id: reviewId,
+        clinica_id: Number(review.clinica_id) || null,
+      },
     };
   });
 }
@@ -754,7 +928,7 @@ async function loadSetupStatus({ clinicIds, groupIds, clinics, whatsappStatus })
       description: 'Necesario para plantillas, confirmaciones y recordatorios automáticos.',
       completed: whatsappStatus.connected === true,
       link: '/ajustes',
-      queryParams: { tab: 'connected-accounts' },
+      queryParams: { panel: 'connected-accounts' },
       actionLabel: 'Conectar',
     },
     {
@@ -764,7 +938,7 @@ async function loadSetupStatus({ clinicIds, groupIds, clinics, whatsappStatus })
       completed: whatsappStatus.paymentReady === true,
       severity: whatsappStatus.paymentMissing ? 'critical' : 'normal',
       link: '/ajustes',
-      queryParams: { tab: 'connected-accounts' },
+      queryParams: { panel: 'connected-accounts' },
       actionLabel: 'Revisar',
     },
     {
@@ -894,6 +1068,62 @@ function roleSections(role, subrolCode) {
   return { ownerLike, operations, doctor, shared };
 }
 
+function rolePresentation(role, subrolCode, sections) {
+  const normalizedRole = String(role || '').toLowerCase();
+  const normalizedSubrol = String(subrolCode || '').toLowerCase();
+
+  if (!sections.shared) {
+    return {
+      mode: 'restricted',
+      eyebrow: 'Panel interno no disponible',
+      title: 'Este rol no tiene panel operativo interno',
+      subtitle: normalizedRole === 'laboratorio'
+        ? 'El laboratorio debe trabajar desde los flujos compartidos de casos y documentos, no desde la operativa diaria de clínica.'
+        : 'Los pacientes no ven citas internas, tareas de equipo ni configuración de clínica desde este panel.',
+      icon: 'heroicons_outline:lock-closed',
+      primaryActionLabel: null,
+      primaryActionLink: null,
+    };
+  }
+
+  if (sections.doctor) {
+    return {
+      mode: 'doctor',
+      eyebrow: 'Operativa del doctor',
+      title: 'Mi jornada clínica',
+      subtitle: 'Citas asignadas, consentimientos pendientes de mis pacientes y horario de esta semana.',
+      icon: 'heroicons_outline:user-circle',
+      primaryActionLabel: 'Ver mi ficha',
+      primaryActionLink: '/personal',
+    };
+  }
+
+  if (sections.operations) {
+    const assistantLike = ['assistant', 'reception', 'admin_staff'].includes(normalizedSubrol);
+    return {
+      mode: assistantLike ? 'assistant_operations' : 'clinic_operations',
+      eyebrow: 'Operativa diaria de la clínica',
+      title: assistantLike ? 'Recepción y coordinación del día' : 'Lo importante de hoy',
+      subtitle: assistantLike
+        ? 'Confirmaciones, asistencia, consentimientos y tareas que mantienen la agenda al día.'
+        : 'Primeros pasos, agenda, asistencia, consentimientos y oportunidades que requieren acción.',
+      icon: 'heroicons_outline:clipboard-document-check',
+      primaryActionLabel: 'Ver agenda',
+      primaryActionLink: '/agenda-de-citas',
+    };
+  }
+
+  return {
+    mode: 'shared_growth',
+    eyebrow: 'Crecimiento y configuración',
+    title: 'Oportunidades de mejora',
+    subtitle: 'Este rol no gestiona la agenda diaria, pero sí puede revisar recomendaciones y bloqueos de marketing.',
+    icon: 'heroicons_outline:light-bulb',
+    primaryActionLabel: 'Ver campañas',
+    primaryActionLink: '/marketing/campanas',
+  };
+}
+
 async function getMainDashboard({ userId, query = {} }) {
   const requestedScope = query.clinica_id || query.clinic_id || query.clinicId || null;
   const firstRequestedClinicIds = requestedScope && String(requestedScope) !== 'all' && !String(requestedScope).startsWith('group:')
@@ -905,71 +1135,85 @@ async function getMainDashboard({ userId, query = {} }) {
   const context = await loadUserContext({
     userId,
     requestedClinicIds: firstRequestedClinicIds,
-    requestedRole: query.role,
-    requestedSubrol: query.subrol,
   });
 
-  const scope = await resolveClinicScope(requestedScope, context.memberships);
+  const scope = await resolveClinicScope(requestedScope, context.memberships, {
+    allowAllClinics: context.globalAdmin,
+  });
   const sections = roleSections(context.role, context.subrolCode);
+  const presentation = rolePresentation(context.role, context.subrolCode, sections);
+  const doctorId = sections.doctor ? userId : null;
   const appointments = await loadAppointments({
     clinicIds: scope.clinicIds,
     clinicMap: scope.clinicMap,
     todayStart: today.start,
     todayEnd: today.end,
     now,
+    doctorId,
+    includeToday: sections.operations || sections.doctor,
+    includePastAttendance: sections.operations,
+    includeNext: sections.operations,
+    includeClosedToday: sections.doctor,
   });
-  const counts = await countTasks({
-    clinicIds: scope.clinicIds,
-    todayStart: today.start,
-    todayEnd: today.end,
-  });
+  const counts = sections.operations
+    ? await countTasks({
+        clinicIds: scope.clinicIds,
+        todayStart: today.start,
+        todayEnd: today.end,
+      })
+    : { leadsPending: 0, pendingConsents: 0, pendingReviews: 0, unconfirmedToday: 0 };
 
-  const doctorId = sections.doctor ? userId : null;
   const [
     pendingPatientConsents,
+    unansweredReviews,
     doctorPendingConsents,
     weeklySchedule,
     whatsappStatus,
     opportunities,
   ] = await Promise.all([
-    loadPendingConsentCards({ clinicIds: scope.clinicIds, limit: 6 }),
+    sections.operations ? loadPendingConsentCards({ clinicIds: scope.clinicIds, limit: 6 }) : [],
+    sections.operations ? loadUnansweredReviewCards({ clinicIds: scope.clinicIds, clinicMap: scope.clinicMap, limit: 4 }) : [],
     doctorId ? loadPendingConsentCards({ clinicIds: scope.clinicIds, doctorId, limit: 6 }) : [],
     doctorId ? loadWeeklySchedule({ clinicIds: scope.clinicIds, clinicMap: scope.clinicMap, userId: doctorId, todayIso: today.date }) : [],
-    loadWhatsappStatus({ clinicIds: scope.clinicIds, groupIds: scope.groupIds }),
-    loadOpportunities({ clinicIds: scope.clinicIds }),
+    sections.shared ? loadWhatsappStatus({ clinicIds: scope.clinicIds, groupIds: scope.groupIds }) : { connected: null, paymentReady: null, paymentMissing: false },
+    sections.shared ? loadOpportunities({ clinicIds: scope.clinicIds }) : [],
   ]);
 
-  const setup = await loadSetupStatus({
-    clinicIds: scope.clinicIds,
-    groupIds: scope.groupIds,
-    clinics: scope.clinics,
-    whatsappStatus,
-  });
+  const setup = sections.operations
+    ? await loadSetupStatus({
+        clinicIds: scope.clinicIds,
+        groupIds: scope.groupIds,
+        clinics: scope.clinics,
+        whatsappStatus,
+      })
+    : { total: 0, completed: 0, items: [] };
 
   const doctorAppointments = doctorId
-    ? appointments.today.filter((item) => Number(item.doctorId) === Number(doctorId))
+    ? appointments.today
     : [];
 
   const errors = [];
-  if (whatsappStatus.connected === false) {
+  if (sections.shared && whatsappStatus.connected === false) {
     errors.push({
       id: 'whatsapp_not_connected',
       title: 'No tienes WhatsApp conectado',
       subtitle: 'Conecta o asigna el numero para enviar plantillas y automatizaciones.',
       link: '/ajustes',
-      queryParams: { tab: 'connected-accounts' },
+      queryParams: { panel: 'connected-accounts' },
       actionLabel: 'Ir a Cuentas conectadas',
     });
-  } else if (whatsappStatus.paymentMissing) {
+  } else if (sections.shared && whatsappStatus.paymentMissing) {
     errors.push({
       id: 'whatsapp_payment_missing',
       title: 'WhatsApp no tiene método de pago activo',
       subtitle: 'Meta puede bloquear plantillas y recordatorios hasta que se configure la facturación.',
       link: '/ajustes',
-      queryParams: { tab: 'connected-accounts' },
+      queryParams: { panel: 'connected-accounts' },
       actionLabel: 'Revisar pago',
     });
   }
+
+  const dashboardTasks = taskItems(counts, today.date, scope.clinicIds, appointments.pastAttendance.length);
 
   return {
     user: context.user,
@@ -979,6 +1223,7 @@ async function getMainDashboard({ userId, query = {} }) {
       subrolLabel: context.subrolLabel || null,
       subrolCode: context.subrolCode,
     },
+    rolePresentation: presentation,
     scope: {
       clinicIds: scope.clinicIds,
       clinicName: scope.clinics.length === 1 ? scope.clinics[0].nombre_clinica : 'Clínicas seleccionadas',
@@ -989,18 +1234,21 @@ async function getMainDashboard({ userId, query = {} }) {
       showOperations: sections.operations,
       showDoctor: sections.doctor,
       showShared: sections.shared,
+      showSetup: sections.operations,
       showOwnerFeedback: sections.ownerLike,
     },
-    todayAppointments: appointments.today,
-    nextAppointments: appointments.next,
-    pastAttendancePending: appointments.pastAttendance,
+    todayAppointments: sections.operations ? appointments.today : [],
+    inactiveTodayAppointments: sections.operations ? appointments.inactiveToday : [],
+    nextAppointments: sections.operations ? appointments.next : [],
+    pastAttendancePending: sections.operations ? appointments.pastAttendance : [],
     doctorAppointmentsToday: doctorAppointments,
     pendingPatientConsents,
+    unansweredReviews: sections.operations ? unansweredReviews : [],
     doctorPendingConsents,
     weeklySchedule,
     tasks: {
-      items: taskItems(counts, today.date, scope.clinicIds),
-      total: (counts.leadsPending || 0) + (counts.unconfirmedToday || 0) + (counts.pendingConsents || 0) + (counts.pendingReviews || 0),
+      items: sections.operations ? dashboardTasks : [],
+      total: sections.operations ? dashboardTasks.reduce((total, item) => total + Number(item.count || 0), 0) : 0,
     },
     setup,
     criticalAlerts: errors,
@@ -1017,4 +1265,10 @@ async function getMainDashboard({ userId, query = {} }) {
 
 module.exports = {
   getMainDashboard,
+  __testing: {
+    isExpectedTodayAppointment,
+    isInactiveTodayAppointment,
+    loadAppointments,
+    statusUi,
+  },
 };

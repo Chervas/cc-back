@@ -449,12 +449,15 @@ function run() {
   assert.match(html, /Gráficas de evolución/);
   assert.match(html, /Cómo leer el informe/);
   assert.match(html, /Profesional explicando el informe/);
+  assert.match(html, /report-intro-img \{[^}]*mix-blend-mode: multiply/);
+  assert.match(html, /section-story-img \{[^}]*mix-blend-mode: multiply/);
   assert.doesNotMatch(html, /Seguimiento orientativo entre visitas/);
   assert.doesNotMatch(html, /Informe explicado paso a paso/);
   assert.match(html, /Comparativas principales/);
   assert.match(html, /Pliegue tríceps/);
   assert.match(html, /Diámetros/);
   assert.match(html, /Distribución adiposa y muscular/);
+  assert.match(html, /Mapa corporal de distribución/);
   assert.match(html, /Actual [0-9.]+%/);
   assert.match(html, /Comparación [0-9.]+%/);
   assert.match(html, /body-distribution-neutral-front|Distribución corporal/);
@@ -463,14 +466,23 @@ function run() {
   assert.match(html, /Somatocarta/);
   assert.match(html, /Lectura sencilla/);
   assert.match(html, /Paciente/);
+  assert.match(html, /somato-image-card \{[^}]*background: transparent/);
+  assert.match(html, /somato-image-card img \{[^}]*mix-blend-mode: multiply/);
+  assert.doesNotMatch(html, /Referencia visual orientativa/);
   assert.match(html, /Fraccionamiento molecular/);
   assert.match(html, /Fraccionamiento tisular/);
   assert.match(html, /Reserva energética del cuerpo/);
+  assert.match(html, /component-explain-heading/);
+  assert.match(html, /component-explain-card-with-image/);
+  assert.match(html, /component-explain-card-with-image \{[^}]*minmax\(400px, 560px\)/);
   assert.match(html, /component-inline-bar/);
+  assert.doesNotMatch(html, /class="composition-bar"/);
   assert.doesNotMatch(html, /bar-chart-grid/);
   assert.match(html, /data:image\/webp;base64/);
   assert.match(html, /Silueta de dos compartimentos/);
   assert.match(html, /Mapa de zonas adiposas/);
+  assert.match(html, /distribution-reference-reverse/);
+  assert.match(html, /distribution-ref-img \{[^}]*mix-blend-mode: multiply/);
   assert.match(html, /Tres siluetas de referencia/);
   assert.doesNotMatch(html, /skinfold-triceps\\.mp4/);
   assert.match(html, /Índices de salud/);
@@ -530,6 +542,9 @@ function run() {
     },
   });
   assert.match(completeHtml, /Silueta con fraccionamiento tisular/);
+  assert.match(completeHtml, /Tejido graso estimado con pliegues y perímetros/);
+  assert.match(completeHtml, /component-inline-bar/);
+  assert.doesNotMatch(completeHtml, /bar-chart-grid/);
   assert.doesNotMatch(completeHtml, /Cinco componentes corporales estimados/);
   const clinicBrandHtml = __testing.buildNutritionReportHtml({
     patient: { name: 'Paciente Test', clinic_name: 'Clinica Norte', clinic_avatar_url: 'https://media.clinicaclick.com/logos/clinicas/clinica-norte.png' },
@@ -591,7 +606,7 @@ function run() {
     },
   }, html, '2026-02-26T11:00:00.000Z');
   assert.equal(snapshotPayload.snapshot.kind, 'nutrition_measurement_report');
-  assert.equal(snapshotPayload.snapshot.snapshot_version, 11);
+  assert.equal(snapshotPayload.snapshot.snapshot_version, 15);
   assert.equal(snapshotPayload.snapshot.report.calculation_profile.code, CALCULATION_PROFILE.code);
   assert.equal(snapshotPayload.snapshot.measurement.id, 2);
   assert.equal(snapshotPayload.snapshot.report.measurement_id, 2);

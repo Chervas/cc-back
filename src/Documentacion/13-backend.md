@@ -72,10 +72,15 @@ Reglas:
 
 - El panel se sirve desde backend; el frontend no debe recomponerlo con llamadas paralelas a agenda, leads, consentimientos o reseñas.
 - El servicio `panelesDashboard.service.js` evita `include`/left joins para el contrato del panel: consulta tablas base y enriquece en memoria por mapas de IDs.
-- `todayAppointments` usa rango de día completo y excluye citas canceladas/reprogramadas. `pastAttendancePending` devuelve citas ya finalizadas sin asistencia cerrada para que la UI pregunte si acudió.
+- `todayAppointments` usa rango de día completo y excluye citas canceladas/reprogramadas, citas ya cerradas como `completada`/`no_asistio` y citas abiertas cuyo `fin` ya pasó, porque el bloque operativo representa "citas que esperamos hoy". `doctorAppointmentsToday` conserva la agenda del doctor con el estado de cada cita del día. `pastAttendancePending` devuelve citas ya finalizadas sin asistencia cerrada para que la UI pregunte si acudió.
 - Las acciones de asistencia siguen usando el endpoint canónico `PATCH /api/citas/:id/estado`.
 - Desde 2026-07-04 la respuesta incluye `setup` para primeros pasos generales, `criticalAlerts` para bloqueos técnicos, `growthOpportunities` para crecimiento y `meta.generatedAt` para mostrar la última actualización.
 - Desde 2026-07-04 la respuesta incluye `nextAppointments` para que el frontend explique estados vacíos de "citas de hoy" sin recomponer agenda en Angular. Se calcula en backend con la misma tabla base `CitasPacientes` y excluye canceladas/reprogramadas.
+- Desde 2026-07-06 `tasks.items` incluye `pending_attendance` cuando hay citas pasadas pendientes de cerrar asistencia, y `tasks.total` se calcula en backend sobre todos los items devueltos.
+- Desde 2026-07-06 el payload se recorta por rol: doctores reciben solo `doctorAppointmentsToday`, `doctorPendingConsents` y `weeklySchedule`; las citas/tareas operativas de clínica y `setup` solo se devuelven cuando `sections.showOperations`/`sections.showSetup` lo indica.
+- Desde 2026-07-07 el recorte por rol y clínica no confía en `role`/`subrol` enviados por query: el backend deriva rol/subrol desde sesión y `UsuarioClinica`, filtra `clinica_id` contra las clínicas asignadas al usuario y el admin global queda como `administrador`. Si se pide una clínica fuera de scope devuelve `403 panel_scope_forbidden`.
+- Desde 2026-07-07 la respuesta incluye `rolePresentation` (`mode`, `eyebrow`, `title`, `subtitle`, `icon`, acción opcional) para que el frontend pinte la narrativa del panel por rol sin inferirla ni recomponer datos. `paciente` y `laboratorio` reciben `mode=restricted` y no ven bloques operativos internos.
+- Desde 2026-07-07 la respuesta incluye `unansweredReviews` para roles operativos: lista acotada de reseñas de Google sin respuesta con autor, puntuación, comentario, clínica, paciente conciliado si existe, enlace interno filtrado a `Marketing > Perfil Google` y URL externa de Google cuando está disponible. El frontend no debe llamar a `/api/local/clinica/:id/reviews` desde el panel principal para recomponer este bloque.
 - El feedback positivo de ejemplo no se devuelve; cuando se reactive debe venir como señal real atribuible a ClinicaClick.
 
 ## Control de acceso por capacidades
@@ -84,23 +89,32 @@ Endpoint real:
 
 | Endpoint | Estado | Uso |
 |:---|:---|:---|
+| `GET /api/access-policies/catalog` | Operativo V1 | Devuelve el catálogo backend de roles, capacidades y defaults base. |
 | `GET /api/access-policies/overrides` | Operativo V1 | Lista overrides accesibles para el usuario autenticado. |
+| `GET /api/access-policies/assignments` | Operativo V1 | Devuelve usuarios afectados por rol/subrol en un ámbito de clínica o grupo. |
 | `PUT /api/access-policies/overrides` | Operativo V1 | Crea, actualiza o elimina (`state=inherit`) un override por ámbito, capacidad y rol operativo. |
 
 Contrato:
 
 - `scope_type`: `group` o `clinic`.
 - `scope_id`: ID del grupo o clínica.
-- `feature_key`: `marketing`, `clinic.settings.edit`, `team.manage`, `billing.reports.view`, `patients.view`, `patients.edit`, `appointments.manage`, `consents.manage`, `quickchat.read_patients`, `quickchat.read_team`, `quickchat.read_leads`, `nutrition.workspace.view`, `nutrition.measurements.create`, `nutrition.reports.finalize`.
+- `feature_key`: `marketing`, `clinic.settings.edit`, `team.manage`, `billing.reports.view`, `patients.view`, `patients.edit`, `appointments.view`, `appointments.manage`, `consents.view`, `consents.manage`, `quickchat.read_patients`, `quickchat.read_team`, `quickchat.read_leads`, `nutrition.workspace.view`, `nutrition.measurements.create`, `nutrition.reports.finalize`.
 - `role_code`: `propietario`, `agencia`, `doctor`, `assistant`, `reception`, `admin_staff` o `unknown`.
 - `effect`: `allow` o `deny`; `state=inherit` borra el override.
 
 Reglas:
 
+- El catálogo de defaults vive en `src/lib/access-policy.js` y se expone por API para que front y backend no definan matrices base divergentes. Angular conserva fallback local, pero debe hidratarse desde `GET /api/access-policies/catalog` cuando el backend responde.
+- Cada feature del catálogo expone `kind`: `view` para acceso de vista/módulo, `read` para lectura de conversaciones o datos y `action` para permisos de escritura o gestión. `Ajustes > Control de acceso` usa esa clasificación para enseñar primero los accesos básicos de vista/lectura y después la matriz completa de acciones por rol.
 - `administrador` no se persiste como `role_code`; mantiene acceso completo.
 - Un administrador puede leer/escribir todos los ámbitos. Un propietario solo puede escribir overrides en sus clínicas/grupos; el resto de staff solo lee sus ámbitos accesibles.
+- `GET /api/access-policies/assignments` usa el mismo scope de lectura que `overrides` y agrupa `UsuarioClinica` por `role_code` normalizado. Sirve para que Ajustes muestre qué usuarios reales heredarán cada cambio de la matriz.
 - La tabla `AccessPolicyOverrides` usa una clave única por `scope_type`, `scope_id`, `feature_key` y `role_code`.
+- Pacientes consume `patients.edit` en mutaciones de ficha: creación, actualización, transferencia de contacto, vinculación a clínica y borrado. En actualización se valida la clínica actual y, si cambia `clinica_id`, también la clínica destino.
+- Agenda separa lectura y escritura: `appointments.view` permite abrir la vista de agenda en frontend; `appointments.manage` se reserva para mutaciones reales de cita (`POST /api/citas`, `PATCH /api/citas/:id/estado`, `PATCH /api/citas/:id/nota` y `PATCH /api/citas/:id/reagendar`). Las lecturas de agenda quedan fuera de este permiso de escritura.
 - Nutrición consume estos permisos en backend: `nutrition.workspace.view` protege la ficha, informes HTML y PDF; `nutrition.measurements.create` protege alta de mediciones y snapshots persistidos, siempre junto a `nutrition.workspace.view`; `nutrition.reports.finalize` protege el cierre de informes como snapshot final. Por defecto propietario y doctor pueden cerrar informes; auxiliar puede registrar mediciones pero no cerrar informes salvo override.
+- Consentimientos separa lectura y gestión: `consents.view` permite abrir `/consentimientos`, listar plantillas/documentos pendientes y abrir/descargar PDFs de consentimiento (`consent_document_pdf`) en adjuntos clínicos. `consents.manage` protege las mutaciones privadas principales: crear/editar plantillas clínicas, vincular requisitos, generar paquetes, enviar a firma, preparar tablet, firma profesional y revocación. Las rutas públicas/tablet mantienen su token propio.
+- QuickChat consume `quickchat.read_patients`, `quickchat.read_team` y `quickchat.read_leads` en `GET /api/conversations/permissions` para mostrar u ocultar pestañas según el scope activo y aplica esas mismas capacidades como ACL real de categoría en listado, contador de no leídos, lectura de mensajes, media, marcado como leído, envío y chat interno. Pacientes exige `read_patients`; equipo exige `read_team`; leads/contactos externos sin paciente exigen `read_leads`.
 
 ## Workspace Nutricion / antropometria
 
@@ -119,7 +133,7 @@ Endpoints reales:
 | `GET /api/pacientes/:id/clinical-attachments` | Operativo V1 dev | Lista assets clinicos privados del paciente desde `ClinicalPrivateAssets`, filtrados por permiso y proposito. |
 | `GET /api/pacientes/:id/clinical-attachments/:attachmentId` | Operativo V1 dev | Sirve un asset clinico privado por `public_id` o `id`, con `Cache-Control: private, no-store` y sin URL publica. |
 | `GET /api/pacientes/:id/activity` | Operativo V1 dev | Incluye eventos `nutrition_report_finalized` para informes finales de Nutricion cuando el rol puede ver `nutrition.workspace.view`. |
-| `GET /api/especialidades/area-contracts` | Operativo V1 dev | Devuelve contrato versionado por area medica para catalogo, agenda y workspaces: perfil de tratamiento, ejemplos de servicio, pasos de alta, secciones de contrato, accion clinica de agenda y opciones/schemas especificos de Nutricion. |
+| `GET /api/especialidades/area-contracts` | Operativo V1 dev | Devuelve contrato versionado por area medica para catalogo, agenda y workspaces: perfil de tratamiento, ejemplos de servicio, pasos de alta, secciones de contrato, reglas estructuradas de protocolo, accion clinica de agenda y opciones/schemas especificos de Nutricion. |
 | `GET /api/especialidades/area-contracts/:code` | Operativo V1 dev | Devuelve el contrato de un area concreta con fallback `general`. |
 | `PUT /api/especialidades/area-contracts/:code` | Operativo V1 dev | Persiste override del contrato de un area medica en `MedicalAreaContracts` manteniendo fallback al contrato base. |
 
@@ -127,21 +141,24 @@ Contrato:
 
 - `Tratamientos.clinical_config` guarda configuracion clinica por area. Para Nutricion se usa `clinical_config.nutrition.service_kind` (`consultation`, `follow_up`, `quick_measurement`, `isak_study`, `nutrition_plan_pack`) y `clinical_config.nutrition.measurement_profile_code` con `none`, `quick` o `express_isak`.
 - `Tratamientos.clinical_config.appointment_type_prices` puede guardar overrides opcionales de precio por tipo de cita con claves `primera_con_trat`, `continuacion`, `revision` y `urgencia`. Agenda usa ese importe como propuesta visual cuando existe; si falta, usa `Tratamientos.precio_base`. No aplica a `primera_sin_trat` porque no hay tratamiento/servicio asociado.
-- El contrato de area medica se sirve desde backend como `medical-area-contracts-v1`. La tabla `MedicalAreaContracts` permite overrides por `code`; si no hay override o la tabla aun no existe en un runtime, el servicio vuelve al contrato base estatico. El front conserva fallback local para tolerar runtimes sin endpoint. El contrato incluye `patient_workspace` para indicar si un area activa debe abrir una pestaña clinica propia en ficha de paciente; Nutricion activa `nutricion` y Capilar deja `capilar` definido pero desactivado hasta crear el workspace real. Tambien incluye `appointment_action` para que agenda lea etiqueta, detalle, icono, ruta y si requiere perfil clinico desde backend en vez de hardcodearla en Angular.
+- El contrato de area medica se sirve desde backend como `medical-area-contracts-v1`. La tabla `MedicalAreaContracts` permite overrides por `code`; si no hay override o la tabla aun no existe en un runtime, el servicio vuelve al contrato base estatico. El front conserva fallback local para tolerar runtimes sin endpoint. El contrato incluye `patient_workspace` para indicar si un area activa debe abrir una pestaña clinica propia en ficha de paciente; Nutricion activa `nutricion` y Capilar deja `capilar` definido pero desactivado hasta crear el workspace real. Tambien incluye `appointment_action` para que agenda lea etiqueta, detalle, icono, ruta y si requiere perfil clinico desde backend en vez de hardcodearla en Angular. Desde 2026-07-06 incluye `protocol_rules`: reglas estructuradas con origen, destino, espera minima, condicion, accion y alcance para que `/areas-medicas-admin` gobierne dependencias/protocolos sin depender de texto libre.
 - En Nutricion, cada `nutrition_service_kind_options` incluye defaults operativos para el alta de tratamiento: `recommendedName`, `defaultCategory`, `recommendedProfile`, `defaultGenerateReport`, `defaultComparePrevious` y `defaultSessions`. Los overrides parciales de `MedicalAreaContracts` se normalizan por `value` contra el contrato base para no perder defaults ni borrar otras opciones de servicio.
 - Nutricion declara en ese contrato `nutrition_measurement_profile_options`, `nutrition_measurement_profile_schemas` y `nutrition_measurement_fields`. Cada grupo de schema puede declarar `required_fields`: el normalizador los reinyecta si un override antiguo o manual intenta quitarlos, porque sostienen calculos como IMC, somatotipo y diametros/perimetros corregidos. El perfil tecnico `express_isak` se muestra como `Completa` e incluye tambien campos avanzados opcionales para Kerr-Ross (`sitting_height_cm`, `head_cm`, perimetros de antebrazo/muslo/torax, diametros biacromial/biiliocrestal y diametros toracicos). El workspace nutricional consume esos campos para devolver `profiles` y `fields`, normalizar `raw_values_json`, validar requeridos/rangos y renderizar informes con labels vigentes. `POST /api/pacientes/:id/nutrition-measurements` rechaza perfiles incompletos con `missing_required_measurement_fields`. Los codigos tecnicos de perfiles/campos permanecen cerrados en esta fase para no romper formulas ni historico; los nombres visibles no deben usar marcas de terceros.
 - El contrato base de Nutricion expone ejemplos de servicio cobrable (`Consulta nutricional`, `Valoracion nutricional`, `Seguimiento nutricional`, `Estudio antropometrico completo`, `Plan de seguimiento mensual`) para que el catalogo no empuje a crear tratamientos llamados `Primera cita` o `Revision`.
+- Al crear una especialidad profesional propia de clínica o añadir una especialidad de sistema a una clínica, los endpoints de especialidades devuelven `disciplinas` con la lista actualizada de áreas médicas de la clínica, normalizada en minúsculas y sin duplicados. El frontend usa esa lista para mostrar áreas activas formateadas y no inferir estados intermedios.
 - `PatientNutritionMeasurements` guarda mediciones por `patient_id`, `clinic_id`, `professional_id`, `appointment_id`, `treatment_id`, `profile_code`, `raw_values_json`, `calculated_values_json`, `formula_version` y `quality_flags_json`.
 - El motor `nutrition-basic-v3` calcula en backend IMC, ratio cintura/cadera, suma de pliegues, perimetros corregidos, somatotipo Heath-Carter cuando hay datos suficientes, composicion corporal estimada con ecuacion seleccionable, fraccionamiento Kerr-Ross de cinco componentes cuando esta completo el bloque avanzado y proyeccion lineal simple con las ultimas dos mediciones. Las mediciones historicas pueden conservar `nutrition-basic-v1` o `nutrition-basic-v2` en su snapshot.
 - Workspace e informes exponen `calculation_profile=clinicaclick-anthropometry-v3`: la formula guardada por defecto de masa grasa es Durnin-Womersley + Siri, pero `render`/`pdf` aceptan recalculo bajo demanda con Faulkner, Jackson-Pollock 4 sitios, Katch-McArdle, Sloan, Withers, Yuhasz-Carter o Slaughter. Heath-Carter, Kerr-Ross y proyeccion lineal siguen siendo bloques automaticos de calculo/trazabilidad.
 - El contrato de workspace e informes incluye `formula_references` con bases publicas/metodologicas usadas por `nutrition-basic-v3` para que el frontend y el HTML/PDF puedan mostrar la trazabilidad de calculo. Incluye IMC, perfil antropometrico completo, somatotipo Heath-Carter, la ecuacion de masa grasa aplicada en ese informe, Kerr-Ross cinco componentes y la proyeccion lineal simple propia.
 - Informes V1 se materializan en `PatientNutritionReports` como snapshot JSON/HTML con `snapshot_hash`, `formula_version`, `report_type`, `measurement_id`, `patient_id`, `clinic_id`, `appointment_id` y `treatment_id`. Al crear una medicion se intenta crear automaticamente el snapshot activo; `POST /api/pacientes/:id/nutrition-measurements/:measurementId/report/snapshot` permite materializarlo para mediciones antiguas. `POST /api/pacientes/:id/nutrition-measurements/:measurementId/report/finalize` crea un snapshot `final`, marca los borradores `active` como `superseded` y anota `finalized_by/finalized_at`; render y PDF priorizan siempre `final` sobre `active`. El contrato de workspace/informe expone `clinical_storage` para indicar `clinical_private`, snapshot privado en base de datos y `public_media=false`. Desde `ClinicalPrivateAssets`, el primer PDF solicitado de un informe `final` se cachea como asset clinico privado (`PatientNutritionReports.pdf_asset_id`) y las siguientes descargas leen ese binario privado; los borradores siguen generandose bajo demanda. No usar `PUBLIC_MEDIA` para informes, fotos clinicas ni datos antropometricos identificables.
 - `GET /api/pacientes/:id/nutrition-measurements/:measurementId/report/render` y `/report/pdf` aceptan `compare_measurement_id=<measurement_id>` para renderizar HTML/PDF contra una medicion concreta y `compare_measurement_id=none` para generar el documento sin comparativa. Tambien aceptan `fat_mass_equation=<code>` para recalcular masa grasa con otra ecuacion disponible. Cuando se usa comparacion o ecuacion alternativa, el backend renderiza bajo demanda y no reutiliza ni reescribe snapshots finales; asi la UI puede cambiar la comparacion/formula sin romper la inmutabilidad clinica del informe cerrado.
-- El HTML/PDF de Nutricion debe ser entendible por paciente no tecnico: fraccionamiento molecular/tisular incluye explicaciones cortas, la distribucion adiposa/muscular diferencia `Actual` y `Comparacion` y la somatocarta mantiene etiquetas y valores separados para evitar solapes. La imagen central de distribucion solo localiza zonas; las barras son la fuente visual de valores. Desde `snapshot_version=11`, las cabeceras visuales no incluyen captions bajo la ilustracion, cada tejido muestra su barra debajo del texto propio y las siluetas de somatotipo usan fondo transparente para evitar recuadros blancos.
+- El HTML/PDF de Nutricion debe ser entendible por paciente no tecnico: fraccionamiento molecular/tisular incluye explicaciones cortas, la distribucion adiposa/muscular diferencia `Actual` y `Comparacion` y la somatocarta mantiene etiquetas y valores separados para evitar solapes. La imagen central de distribucion solo localiza zonas; las barras son la fuente visual de valores. Desde `snapshot_version=15`, las cabeceras visuales no incluyen captions bajo la ilustracion, las imagenes de cabecera se integran sin tarjeta/fondo blanco propio, distribucion usa una cabecera visual consistente, cada tejido muestra su barra debajo del texto propio con ilustracion grande, las siluetas de somatotipo usan fondo transparente sin tarjeta blanca alrededor y las comparativas de un solo grupo ocupan todo el ancho para evitar columnas vacias.
 - Los assets visuales estaticos del informe viven en `src/assets/nutrition/images` y se embeben como `data:` dentro del HTML/PDF generado por backend. Son ilustraciones genericas sin dato clinico ni paciente; no van a `PUBLIC_MEDIA`. El video de pliegue subido como referencia queda fuera del informe hasta cerrar una ayuda interactiva especifica de mediciones.
+- `GET /api/paneles/main` devuelve `inactiveTodayAppointments` además de `todayAppointments`. `todayAppointments` conserva solo citas activas esperadas y no vencidas; `inactiveTodayAppointments` recoge citas del día cerradas, canceladas o reprogramadas para que el frontend explique estados vacíos sin contarlas como citas esperadas. Las citas abiertas vencidas salen en `pastAttendancePending`.
+- Para roles `paciente` y `laboratorio`, `GET /api/paneles/main` no entrega bloques internos de clínica: no carga citas operativas, oportunidades, alertas, errores de configuración ni tareas. El aislamiento se aplica en backend aunque el frontend también oculte esas secciones.
 - `ClinicalPrivateAssets` es la tabla base para binarios clinicos privados: PDFs finales cacheados, fotos clinicas de Nutricion y futuros adjuntos de historia. En dev usa provider `local_private` con raiz configurable `CLINICAL_PRIVATE_STORAGE_ROOT` y fallback fuera del checkout (`../clinical-private-storage`). El contrato esta preparado para migrar a S3 privado sin exponer URL publica.
 - Las fotos clinicas de Nutricion se guardan con `purpose=nutrition_clinical_photo`, `owner_type=patient_nutrition_measurement`, `owner_id=<measurement_id>`, `patient_id` y `clinic_id`. Listado y descarga quedan protegidos por `nutrition.workspace.view`; subida queda protegida por `nutrition.measurements.create`.
-- La pestana `Adjuntos` del paciente consume `GET /api/pacientes/:id/clinical-attachments`. El backend filtra por permisos segun `purpose`: `nutrition_report_pdf` y `nutrition_clinical_photo` requieren `nutrition.workspace.view`, `consent_document_pdf` requiere `consents.manage`, y `clinical_attachment` requiere `patients.view`. La subida general queda pendiente hasta cerrar categorias clinicas y permisos de escritura; no se debe volver al mock ni a `PUBLIC_MEDIA`.
+- La pestana `Adjuntos` del paciente consume `GET /api/pacientes/:id/clinical-attachments`. El backend filtra por permisos segun `purpose`: `nutrition_report_pdf` y `nutrition_clinical_photo` requieren `nutrition.workspace.view`, `consent_document_pdf` requiere `consents.view`, y `clinical_attachment` requiere `patients.view`. La subida general queda pendiente hasta cerrar categorias clinicas y permisos de escritura; no se debe volver al mock ni a `PUBLIC_MEDIA`.
 - `GET /api/pacientes/:id/activity` expone cada informe final como evento `nutrition_report_finalized`, con titulo, icono, resumen de medicion/servicio/formula/hash y actor de cierre. El evento solo se adjunta si el usuario tiene `nutrition.workspace.view` en la clinica del paciente, para que QuickChat, agenda y la ficha del paciente compartan la misma actividad sin duplicar consultas en Angular.
 - `GET /api/citas/calendar` incluye `tratamiento.disciplina`, `tratamiento.categoria` y `tratamiento.clinical_config` para que la agenda pueda mostrar `Registrar medicion` cuando el tratamiento tenga perfil de medicion asociado.
 - Para citas de Nutricion con perfil de medicion asociado, `GET /api/citas/calendar` y `GET /api/citas/:id` adjuntan `nutrition_latest_measurement` si existe una medicion anterior del paciente. Se calcula en backend con una consulta separada a `PatientNutritionMeasurements` y enriquecimiento por mapa, sin recomponerlo desde Angular.
@@ -930,7 +947,8 @@ Reglas:
 - Si un contacto externo responde por WhatsApp, el webhook resuelve la conversacion por telefono. Si existe paciente se vincula `patient_id`; si no existe, se conserva contacto externo y el opt-out comercial se aplica por `phone_digits`.
 - QuickChat no debe crear `Paciente` ni `LeadIntake` para poder nombrar un contacto externo de una lista. Cuando una conversacion WhatsApp no tiene `patient_id` ni `lead_id`, el backend puede hidratar `conversation.contact` desde `MarketingPatientListItems` por `conversation_id` o telefono normalizado.
 - `GET /api/conversations` pagina por `limit/offset` y devuelve `X-Has-More`/`X-Next-Offset`; QuickChat debe consumirlo con scroll infinito. Tambien devuelve `X-Total-Unread`, calculado sobre todo el scope accesible y no sobre la pagina cargada, para que el badge de pendientes no dependa de la paginacion. La pestaña visible `Otros` mantiene `filter=leads` por compatibilidad, pero backend incluye `lead_id` y conversaciones externas de campañas presentes en `MarketingPatientListItems.conversation_id`, excluyendo siempre conversaciones con `patient_id`.
-- La busqueda de `GET /api/conversations?q=...` debe cubrir pacientes, leads, `contact_id` y contactos externos de listas/campanas (`MarketingPatientListItems.name`, `phone`, `email` y `custom_fields.nombre_completo`). No buscar en todo `Messages.content` desde este endpoint sin un indice/previsualizacion materializada, porque penaliza la bandeja paginada de QuickChat.
+- `GET /api/conversations` y `X-Total-Unread` aplican ACL por categoría: conversaciones con `patient_id` requieren `quickchat.read_patients`, `channel=internal` requiere `quickchat.read_team` y conversaciones WhatsApp/externas sin paciente requieren `quickchat.read_leads`. La misma categoría se valida en `GET /api/conversations/:id/messages`, media, marcar leído, envío normal y `send-now`.
+- La busqueda de `GET /api/conversations?q=...` debe cubrir pacientes, leads, `contact_id` y contactos externos de listas/campanas (`MarketingPatientListItems.name`, `phone`, `email` y `custom_fields.nombre_completo`). Las busquedas con varias palabras aceptan coincidencia de frase completa o todos los tokens en cualquier campo, para que `Nombre Apellido2` encuentre pacientes con nombre compuesto o dos apellidos. No buscar en todo `Messages.content` desde este endpoint sin un indice/previsualizacion materializada, porque penaliza la bandeja paginada de QuickChat.
 - `POST /campaigns/:id/prepare` y `/test-send` validan todas las variables de la plantilla real contra los items `ready`; si falta algun valor devuelven `409` con `details.missing_variables[]` y no usan ejemplos de plantilla como fallback operativo.
 - `GET /campaigns/:id`, `/campaigns/:id/recipients` y `/campaigns/:id/dispatch` hacen una reconciliacion ligera antes de responder: leen `Messages.metadata.wa_status_history`, materializan `sent/delivered/read/failed/replied` en `MarketingPatientListItems`, refrescan contadores y devuelven `report` agregado. Esto corrige informes atrasados sin cargar toda la lista en frontend.
 - El `report` de envios masivos expone `opt_out_share` (bajas sobre contactos realmente enviados), `read_hours` (lecturas por hora), clicks de enlaces, clicks por contacto y pais aproximado de click. Los listados detallados de abiertos/no abiertos/respuestas/bajas/clicks deben seguir saliendo de endpoints paginados, no de arrays completos en UI.
@@ -3300,13 +3318,157 @@ En esa carga se guardan, entre otros:
 | GET | `/api/marketing/google-ads/conversion-actions` | Operativo | readiness de conversiones Google Ads |
 | POST | `/api/marketing/google-ads/conversion-actions/ensure` | Operativo | crea/reutiliza conversiones recomendadas |
 
+#### Contrato seguro de conversiones Google Ads (2026-07-11)
+
+- listado y `ensure` requieren `clinic_id` o `group_id`; ya no toman la conexión Google del usuario como credencial implícita;
+- la conexión OAuth y la cuenta Ads se resuelven por scope y se valida que `customer_id` esté asignado a ese mismo scope y conexión;
+- `POST .../ensure` es de solo lectura por defecto (`create_missing=false`); para crear acciones externas exige simultáneamente `create_missing=true` y `confirm_external_mutation=true`;
+- el `login_customer_id` se toma del mapeo `ClinicGoogleAdsAccount`, no del request ni de una cuenta manager global;
+- la carga server-side no acepta que el navegador sustituya `customer_id` o `conversion_action` configurados;
+- un evento puede tener varios destinos mediante `events.<evento>.destinations`; cada destino resuelve de forma independiente la conexión OAuth y el `ClinicGoogleAdsAccount` que contiene su `customer_id`;
+- cada intento viable queda en `GoogleAdsConversionUploadAttempts` con `destination_key`, scope, conexión resuelta, estado, motivo y metadatos saneados; el click id se conserva solo como hash y no se guardan email ni teléfono;
+- `dedupe_key` evita repetir un evento ya aceptado en el mismo `customer_id + conversion_action`; destinos Google distintos se deduplican de forma independiente y los reintentos fallidos conservan un historial acotado;
+- el agregado devuelve `accepted=true` si al menos un destino fue aceptado (en este intento o previamente por dedupe), `sent_count` para las subidas nuevas y `partial=true` cuando otro destino falla o se omite; un fallo de una cuenta no invalida la aceptación de la otra;
+- solo `lead`, `contact`, `schedule` y `purchase` pueden subir conversiones; eventos de navegación como `ViewContent` no hacen fallback a `lead` aunque lleven `gclid`;
+- una denegación de consentimiento bloquea la llamada externa y se registra como `skipped/consent_not_granted`;
+- los tests dirigidos no llaman a Google: `node src/scripts/tests/google_ads_conversion_tracking.test.js`.
+
+Formato de configuración multi-cuenta por evento:
+
+```json
+{
+  "google_ads": {
+    "enabled": true,
+    "currency": "EUR",
+    "events": {
+      "lead": {
+        "enabled": true,
+        "destinations": [
+          {
+            "key": "cuenta_paralela_185",
+            "enabled": true,
+            "customer_id": "1851215478",
+            "conversion_action_id": "<ID_ACCION_LEAD_185>",
+            "currency": "EUR"
+          },
+          {
+            "key": "cuenta_principal_599",
+            "enabled": true,
+            "customer_id": "5992356722",
+            "conversion_action_id": "<ID_ACCION_LEAD_599>",
+            "currency": "EUR"
+          }
+        ]
+      }
+    }
+  }
+}
+```
+
+Se repite el mismo esquema en `contact`, `schedule` y `purchase`, usando en cada uno el ID de su acción. `key` es una etiqueta estable de auditoría y no la aporta el navegador. Si la propiedad `destinations` no existe, continúa vigente el formato histórico de un único `customer_id`/`conversion_action_id` por evento. Un `destinations: []` explícito no hace fallback: deja el evento sin destinos y, por tanto, sin subida. En modo multi-destino, cualquier `customer_id`, `conversion_action`, `conversion_action_id` o `send_to` recibido desde el navegador invalida la selección completa y audita todos los destinos como `request_target_override_not_allowed`.
+
+#### `new_patients` y Piloto automático: runtime dev real (2026-07-11)
+
+La respuesta de bootstrap ofrece solo `connect_only` y `managed_service`; `managed_self` permanece en `legacy_modes` para lectura histórica. Guardar una estrategia `managed_service` provisiona una spec `ManagedCampaign` por canal de pago, en `draft + observe`, junto con su cuenta `unfunded`. No llama a Google/Meta.
+
+Rutas cliente actuales:
+
+| Método | Ruta | Uso |
+|---|---|---|
+| GET | `/api/marketing/managed-campaigns?clinic_id=` | Proyección segura sin comisión, neto de medios ni refs internas. |
+| POST | `/api/marketing/managed-campaigns/request` | Solicitud con presupuesto orientativo, benchmark congelado, observación + funding vacío. |
+| GET | `/api/marketing/managed-campaigns/:id` | Detalle cliente por scope. |
+| POST | `/api/marketing/managed-campaigns/:id/approve` | Aprobación cliente cuando está en `pending_client_review`. |
+| POST | `/api/marketing/managed-campaigns/:id/request-changes` | Cambios del cliente con motivo obligatorio. |
+
+Rutas internas actuales bajo `/api/admin/managed-campaigns`:
+
+- dashboard/listado/detalle/creación/edición;
+- transición de lifecycle y `activate-management`;
+- top-ups manuales con comisión fija/porcentual y snapshots de gasto;
+- inventario de campañas, propuestas fuzzy, confirmación y archivado/tombstone campaña -> clínica;
+- cola interna por empleado con responsable, siguiente acción, bloqueo operativo y auditoría append-only;
+- briefing/propuesta, plan de publicación dry-run determinista y adaptador Google Ads dry-run versionado para Search/PMax, sanitizados, idempotentes y auditables;
+- movimientos bancarios manuales, propuestas y confirmación de conciliación parcial.
+
+La asociación asistida no acepta IDs de cuenta escritos a ciegas como autoridad. `GET /matching/options` construye, solo desde base de datos, un catálogo de grupos con clínicas activas y cuentas Google/Meta mapeadas. La respuesta usa una lista blanca (`group_id`, nombre, número de clínicas elegibles y, por cuenta, proveedor, ID externo de presentación, nombre, origen, estado de autorización y `selectable`); nunca serializa conexiones, tokens, correos, `login_customer_id`, `additionalData` ni errores internos de OAuth. Una autorización `reauthorization_required` puede mostrarse, pero no permite consultar ni confirmar inventario.
+
+`GET /matching/proposals`, `POST /matching/confirm`, `POST /matching/archive` y ambos endpoints `/inventory` vuelven a comprobar en servidor `group_id + provider + customer_id` contra ese scope activo; el selector frontend no constituye autorización. Archivar exige `group_id`. Confirmar reconsulta y bloquea dentro de la misma transacción clínicas, mapeos y autorizaciones, y guarda mediante `create` o actualización de una fila ya validada, nunca mediante un `upsert` que pudiera moverla por carrera. La pertenencia histórica usa todas las clínicas que siguen dentro del grupo; la selección de destino usa solo activas y no-test. Así una decisión legacy de una clínica desactivada puede reasignarse o archivarse, pero esa clínica no reaparece como destino. Si una decisión previa pertenece a otro grupo devuelve `matching_assignment_scope_conflict` sin escribir. El archivo revalida y bloquea en su propia transacción clínicas, autorización y decisión externa global antes del tombstone. El `POST /inventory` revalida una sola vez bajo los mismos locks y agrupa todos los upserts en esa transacción: una revocación aborta el lote antes de su primera escritura. El catálogo y estos guards no llaman a Google/Meta ni refrescan credenciales.
+
+La identidad externa canónica es `provider + account_id + customer_id + campaign_id` (los dos campos de cuenta se normalizan al mismo ID autorizado y `external_campaign_id` es el alias de presentación de `campaign_id`). Métricas, deduplicación, conflictos de estrategia y análisis usan esa identidad completa: el mismo `campaign_id` en dos cuentas no colisiona ni mezcla gasto. El análisis exige también `account_id` o `customer_id`; no resuelve una campaña solo por proveedor e ID.
+
+La revisión de target se opera sin inferencias por nombre:
+
+| Método | Ruta | Contrato |
+|---|---|---|
+| GET | `/matching/issues` | Asociaciones activas, issue honesto y catálogo allowlisted de estrategias/targets válidos para la misma clínica. |
+| PATCH | `/matching/assignments/:id/target` | Asigna o cambia target con `expected_version`, estrategia y request, confianza y explicación. |
+| DELETE | `/matching/assignments/:id/target` | Limpia el target con CAS y motivo obligatorio. |
+| GET | `/matching/assignments/:id/audits` | Historial append-only de clínica, reactivación, archivo y cambios de target. |
+
+Un target válido apunta a un `CampaignRequest` de la misma clínica cuya estrategia está `active`, tiene `objective_id=new_patients` y `mode_snapshot=connect_only`; la campaña asociada debe estar activa y no gestionada. `generic` solo es válido para una estrategia genérica. Un target `treatment` debe figurar en los tratamientos de esa estrategia y seguir activo, visible y dentro del scope de la clínica. PATCH/DELETE bloquean grupo, autorización, asociación, requests y catálogo dentro de la transacción, aplican CAS por `version` y sincronizan `CampaignRequest.solicitud.external_targets` sin borrar targets que queden con `campaigns: []`. La identidad canónica evita duplicarla en dos targets. Una asociación con target no se puede mover de clínica hasta limpiarlo explícitamente.
+
+`ExternalCampaignAssignmentAudits` no admite update/destroy. Registra `clinic_assigned`, `reactivated`, `archived`, `target_assigned`, `target_changed` y `target_cleared`, con actor, versiones y cambios. La migración crea además un punto inicial `clinic_assigned_backfill`/`archived_backfill` para cada decisión preexistente; si no existe usuario histórico, declara actor `system` en vez de inventarlo. El backfill no asigna targets. Reactivar limpia el tombstone de la fila actual, pero conserva los eventos históricos.
+
+El tombstone automático continúa limitado deliberadamente a Google Ads. Su sync real consulta asociaciones activas y archivadas antes de fuzzy/default. El sync Meta todavía no consume `ExternalCampaignAssignment`; por eso `POST /matching/archive` devuelve `archive_provider_not_supported` para Meta y no promete una protección que no existe.
+
+La coordinación interna usa exclusivamente estas rutas:
+
+| Método | Ruta | Contrato |
+|---|---|---|
+| GET | `/operators` | Operadores de la allowlist que existen y continúan con `estado_cuenta=activo`; DTO limitado a ID, nombre visible, email y avatar. |
+| PATCH | `/:id/coordination` | Patch por presencia de `assigned_to_user_id`, `next_action` y/o `operational_blocker`, con `expected_version` entero obligatorio. `null` desasigna/limpia; texto en blanco se normaliza a `null`. |
+| GET | `/:id/coordination-audits` | Historial descendente append-only, 30 filas por defecto y máximo 100. |
+
+El PATCH bloquea `completed/cancelled`, pero permite coordinar una campaña `active`, `launching`, `paused` o `blocked` sin reabrir ni alterar su lifecycle. Actor y nuevo responsable se vuelven a validar como operadores allowlisted activos dentro de la transacción. La campaña se bloquea, se compara la versión vista por el navegador y se actualiza con `WHERE id + version`; un conflicto devuelve `operation_version_conflict`. Un patch normalizado sin diferencias devuelve `changed=false`, conserva versión/`updated_at` y no crea audit, pero una versión obsoleta falla incluso si el valor enviado coincide.
+
+Cada cambio real incrementa una sola versión y crea en la misma transacción una fila `coordination_updated` con actor, versión anterior/nueva y únicamente `{before, after}` de los campos modificados. Si falla el audit, también se revierte la campaña. El modelo de auditoría rechaza update/destroy y la API no expone rutas para mutarlo. `POST /` y el `PATCH /:id` genérico rechazan campos de coordinación para que no exista una vía sin CAS, validación de responsable y auditoría. `review_config.client_next_action` sigue siendo exclusivamente la acción visible para el cliente; `next_action` y `operational_blocker` son internos y no aparecen en el DTO cliente.
+
+Tablas reales: `ManagedCampaigns`, `ManagedCampaignFundingAccounts`, `ManagedCampaignLedgerEntries`, `ManagedCampaignSpendSnapshots`, `ManagedCampaignBankTransactions`, `ManagedCampaignReconciliationMatches`, `ManagedCampaignPublishingAudits`, `ManagedCampaignOperationAudits`, `ExternalCampaignInventories`, `ExternalCampaignAssignments` y `ExternalCampaignAssignmentAudits`.
+
+Límites que no deben ocultarse:
+
+- `active/launching/paused` son estados internos; Google Search/PMax dispone de un adaptador **dry-run** que produce un manifiesto ordenado de operaciones con campaña inicial `PAUSED`, presupuesto normalizado y reemplazo destructivo desactivado. El importe preparado para Google sale exclusivamente del menor entre neto de medios, saldo neto disponible y asignación neta del presupuesto aprobado; el bruto y la comisión nunca alimentan `amount_micros`. Se valida `bruto cobrado - comisión = neto`, `disponible <= neto`, prepago completo y moneda, y la conversión mensual usa `floor` en micros para no superar el saldo. Meta conserva solo la spec de simulación y queda bloqueado como no listo mientras no tenga adaptador explícito;
+- ningún dry-run constituye un adaptador de ejecución: el verificador recalcula hash de plan y manifiesto y consulta un registry interno de ejecución actualmente vacío. Por tanto, incluso un plan con todas las confirmaciones queda denegado y no existe ruta para publicar, pausar u optimizar;
+- los hashes actuales demuestran consistencia, no autenticidad frente a un actor capaz de reconstruir el payload. Antes de añadir cualquier clave al registry real, la ruta futura deberá reconstruir el plan desde la campaña/funding actuales dentro del servidor o contrastarlo con un audit persistido y autenticado; nunca aceptar el plan recibido como fuente autoritativa;
+- el dry-run persistido exige `expected_plan_hash`; cambios concurrentes en spec, saldo o gates devuelven `publishing_plan_changed` y no crean una auditoría distinta de la mostrada;
+- propuesta cliente, edición admin, transición y activación usan revisión/versión compare-and-swap; URLs de destino deben ser HTTP(S) públicas sin credenciales y la preview exige HTTPS;
+- `recordTopup` exige `payment_verified=true`, bloquea la cuenta de fondos dentro de la transacción y deduplica por `funding_account_id + entry_type + external_ref`; `activate-management` requiere saldo + al menos un asiento de cobro verificado. Esto demuestra una comprobación manual, no un `ReconciliationMatch` bancario;
+- `recordSpend` bloquea la cuenta de fondos y actualiza snapshot, saldo y asiento en una sola transacción; un reintento concurrente con el mismo total no duplica gasto;
+- la conciliación actual vincula movimiento bancario con funding/cobro cliente, no snapshot de gasto con cargo real de proveedor; `bank_difference` sigue `null`, `provisional_margin` contiene la comisión y `realised_margin` permanece `null`;
+- no hay payment provider, fiscalidad, refund/chargeback, importación bancaria, disputa ni cierre de periodo;
+- frontend y backend consultan la misma allowlist `ADMIN_USER_IDS` + `CAMPAIGN_OPERATOR_USER_IDS`; salvo el probe fail-closed `/access`, todo el router administrativo exige además una cuenta de usuario activa. Siguen faltando capacidades granulares separadas;
+- esa allowlist continúa siendo una capacidad global de backoffice. El scope grupo/cuenta evita cruces y corrupción entre clientes, pero no convierte a un operador allowlisted en usuario tenant-scoped;
+- la estrategia legacy no puede pasar directamente a `active` si es `managed_service`: debe operarse desde este lifecycle interno.
+
+Snapshot Propdental en DB dev:
+
+- dos cuentas: `1851215478` (25 campañas, 19 asignadas, 6 sin asignar) y `5992356722` (51 campañas, 25 asignadas, 26 sin asignar);
+- total revisado: 76 campañas, 44 asignaciones activas a ocho sedes y 32 sin asignar;
+- distribución combinada: Francia 10, Badalona 7, Hospitalet 7, Eixample 4, Sant Marti 4, Nou Barris 4, Sants 4 y Glories 4;
+- el matcher excluye clínicas cuyo nombre contiene `test` y no modifica el proveedor;
+- las decisiones revisadas rehacen también la atribución histórica (`clinicMatchSource=reviewed_campaign`);
+- el unique de `GoogleAdsInsightsDaily` incluye campaña/fecha/cuenta/ad group/network/device normalizados para evitar multiplicar totales de campaña.
+- existe una spec piloto controlada en `draft + observe + unfunded`, con financiación/gasto/saldo a cero; conserva sus referencias/destinos y un benchmark histórico congelado. Las cifras comerciales permanecen en la base y en las vistas autorizadas, no en la documentación versionada; no hay piloto activo ni movimientos financieros reales.
+- archivar una asignación Google registra motivo/actor/fecha y hace que el sync persista métricas futuras sin clínica (`reviewed_campaign_archived`) hasta una reactivación manual, incluso en cuentas con default manual; no borra historia ni toca Ads. El endpoint rechaza Meta hasta que su sync consuma estas decisiones, para no prometer un tombstone falso.
+
+Tracking Propdental: el `IntakeConfig` de grupo conserva el destino legacy `185...` y añade dos `destinations` explícitos por evento para `185...` (acciones `7680...`) y `599...` (acciones `7540...`). `lead`, `contact` y `schedule` están habilitados; `purchase` permanece apagado hasta disponer de un evento fiable. `send_to=null` es coherente con acciones offline `UPLOAD_CLICKS` y no implica inyección de tag web.
+
+Instalación web segura: leer el secreto, guardar configuración y verificar el snippet exige permiso sobre todas las clínicas del scope. El verificador solo acepta dominios autorizados, resuelve todas sus IP, rechaza rangos privados/loopback/link-local/reservados, fija el DNS en el agente HTTP para impedir rebinding y revalida cada redirección. La inspección del runtime solo admite `clinicaclick.com` o subdominios, con el mismo control; nunca sigue automáticamente una redirección ni permite `localhost`.
+
+`GET /api/intake/config` restringe siempre `available_locations` a los IDs presentes en `config.locations`, aunque el caller omita `domain`; una configuración de clínica vacía cae únicamente en su propia clínica y un scope de grupo sin lista explícita devuelve cero sedes. El editor usa `GET /api/intake/config/admin`, protegido y autorizado por scope, para recibir candidatas sin convertir una lista vacía en selección: rechaza mezclar `clinic_id` y `group_id`, en scope clínica solo devuelve sedes a las que el usuario tiene acceso y en scope grupo exige acceso a todas. `locations` sigue representando exclusivamente la selección persistida. El `PUT` valida la lista final ya fusionada —tanto si llegó en root como en `config.locations`— contra las clínicas candidatas y administrables del scope; un ID ajeno devuelve `location_scope_forbidden` antes del `upsert`. El CORS externo se limita a las rutas públicas exactas y no incluye `/config/admin` ni endpoints `/secret`. Esto evita que la omisión de un query param, una lista vacía, un scope ambiguo o un permiso parcial exponga o convierta en destino una clínica interna, histórica o de prueba.
+
+En los chats de scope grupo, la sede elegida viaja en `chat_state.data.location` y se valida antes de aplicar cualquier clínica fallback: debe existir, estar activa, pertenecer al grupo efectivo y formar parte de `config.locations`. Los runtimes nuevos replican también el ID como `clinic_id`, pero el backend conserva compatibilidad segura con `intake.js` 3.2.1. Una sede enviada pero inválida se rechaza; solo se usa el fallback histórico cuando el flujo no envía ninguna sede. `locations[].public_label` permite mostrar un nombre contextual sin cambiar el ID ni el routing clínico.
+
+La acción `send_quickchat_summary` se reconoce exclusivamente por `source_detail=chatbot_quickchat`. Reutiliza el `LeadIntake` deduplicado, crea o revincula su conversación canónica y guarda un único `Message` interno de tipo `event`, idempotente y oculto al paciente. Este camino retorna antes de FormSubmission, Meta CAPI y Google Ads y no contiene ninguna salida WhatsApp. Los reintentos actualizan/consolidan el mismo resumen en lugar de duplicar mensajes.
+
 ### 3. Reglas de negocio activas hoy
 
 - **Una estrategia en curso por objetivo y scope.** Backend bloquea crear otra estrategia activa/en curso para el mismo objetivo.
 - **`connect_only` requiere campañas externas vinculadas.** No es válido como estrategia "vacía".
 - **Una campaña externa no se reutiliza entre estrategias en curso.**
 - **`connect_only` nace activa.** No sigue workflow de aprobación.
-- **`managed_*` mantienen lifecycle clásico** (`draft`, `pending_approval`, `active`, `paused`, `completed`) donde aplica.
+- **`managed_service` usa dos capas.** La estrategia legacy conserva su estado de negocio; la operación real usa el lifecycle más rico de `ManagedCampaign` y bloquea activar la estrategia fuera del panel interno.
 
 ### 4. `connect_only`: campañas externas por target
 

@@ -5,6 +5,7 @@ const { queues } = require('../services/queue.service');
 const { getIO } = require('../services/socket.service');
 const whatsappService = require('../services/whatsapp.service');
 const { findCanonicalWhatsappConversation } = require('../lib/canonical-conversation');
+const { canUserAccessFeature } = require('../lib/access-policy');
 
 const { Conversation, Message, UsuarioClinica, Paciente, LeadIntake, ConversationRead, Clinica, MarketingPatientListItem } = db;
 
@@ -119,18 +120,223 @@ async function getUserClinics(userId) {
   return { clinicIds, isAggregateAllowed };
 }
 
-function roleToPermissions(role) {
-  const normalized = String(role || '').toLowerCase();
-  if (ROLE_AGGREGATE.includes(normalized)) {
-    return { read_patients: true, read_team: true, read_leads: true };
+const QUICKCHAT_POLICY_FEATURES = {
+  read_patients: 'quickchat.read_patients',
+  read_team: 'quickchat.read_team',
+  read_leads: 'quickchat.read_leads',
+};
+
+const QUICKCHAT_CATEGORY_FEATURES = {
+  patients: QUICKCHAT_POLICY_FEATURES.read_patients,
+  team: QUICKCHAT_POLICY_FEATURES.read_team,
+  leads: QUICKCHAT_POLICY_FEATURES.read_leads,
+};
+
+async function canReadQuickChatFeatureForAnyClinic(userId, featureKey, clinicIds) {
+  for (const clinicId of clinicIds) {
+    // Keep this sequential: it avoids a burst of policy queries for owners with many clinics.
+    // The endpoint is called often by QuickChat while changing clinic context.
+    // eslint-disable-next-line no-await-in-loop
+    const allowed = await canUserAccessFeature({
+      actorId: userId,
+      featureKey,
+      clinicId,
+    });
+    if (allowed) return true;
   }
-  if (['administrador', 'admin', 'personaldeclinica', 'recepcion', 'assistant', 'auxiliar'].includes(normalized)) {
-    return { read_patients: true, read_team: true, read_leads: true };
+  return false;
+}
+
+async function getQuickChatPolicyPermissions(userId, clinicIds, selectedClinicId = null) {
+  const scopedClinicIds = selectedClinicId
+    ? clinicIds.filter((id) => Number(id) === Number(selectedClinicId))
+    : clinicIds;
+
+  if (!scopedClinicIds.length) {
+    return { read_patients: false, read_team: false, read_leads: false };
   }
-  if (['doctor', 'medico'].includes(normalized)) {
-    return { read_patients: true, read_team: false, read_leads: true };
+
+  const [readPatients, readTeam, readLeads] = await Promise.all([
+    canReadQuickChatFeatureForAnyClinic(userId, QUICKCHAT_POLICY_FEATURES.read_patients, scopedClinicIds),
+    canReadQuickChatFeatureForAnyClinic(userId, QUICKCHAT_POLICY_FEATURES.read_team, scopedClinicIds),
+    canReadQuickChatFeatureForAnyClinic(userId, QUICKCHAT_POLICY_FEATURES.read_leads, scopedClinicIds),
+  ]);
+
+  return {
+    read_patients: readPatients,
+    read_team: readTeam,
+    read_leads: readLeads,
+  };
+}
+
+function normalizeClinicIdList(values) {
+  return Array.from(new Set(
+    (Array.isArray(values) ? values : [values])
+      .map((value) => Number(value))
+      .filter((value) => Number.isFinite(value))
+  ));
+}
+
+function clinicIdCondition(clinicIds) {
+  const ids = normalizeClinicIdList(clinicIds);
+  if (ids.length === 1) return ids[0];
+  return { [Op.in]: ids };
+}
+
+function resolveConversationClinicScope({ clinicIds, isAggregateAllowed, requestedClinicId }) {
+  if (requestedClinicId && requestedClinicId !== 'all') {
+    const parsed = parseClinicIdsParam(requestedClinicId);
+    if (!parsed || !ensureAccess({ clinicIds, isAggregateAllowed }, requestedClinicId)) {
+      return { error: 'access_denied', clinicIds: [] };
+    }
+    return { clinicIds: normalizeClinicIdList(parsed) };
   }
-  return { read_patients: false, read_team: false, read_leads: false };
+
+  return { clinicIds: normalizeClinicIdList(clinicIds) };
+}
+
+function getQuickChatConversationCategory(conversation) {
+  if (!conversation) return null;
+  const plain = typeof conversation.toJSON === 'function' ? conversation.toJSON() : conversation;
+  const channel = String(plain.channel || '').toLowerCase();
+  const contactId = String(plain.contact_id || '').toLowerCase();
+  if (channel === 'internal' || contactId === 'team') {
+    return 'team';
+  }
+  if (plain.patient_id || plain.paciente) {
+    return 'patients';
+  }
+  return 'leads';
+}
+
+function getQuickChatFeatureForCategory(category) {
+  return QUICKCHAT_CATEGORY_FEATURES[category] || null;
+}
+
+async function getAllowedQuickChatClinicIdsByCategory(userId, clinicIds) {
+  const result = { patients: [], team: [], leads: [] };
+  const scopedClinicIds = normalizeClinicIdList(clinicIds);
+
+  for (const clinicId of scopedClinicIds) {
+    // Keep this per-clinic so clinic-level overrides remain authoritative in aggregate views.
+    // eslint-disable-next-line no-await-in-loop
+    const [readPatients, readTeam, readLeads] = await Promise.all([
+      canUserAccessFeature({
+        actorId: userId,
+        featureKey: QUICKCHAT_POLICY_FEATURES.read_patients,
+        clinicId,
+      }),
+      canUserAccessFeature({
+        actorId: userId,
+        featureKey: QUICKCHAT_POLICY_FEATURES.read_team,
+        clinicId,
+      }),
+      canUserAccessFeature({
+        actorId: userId,
+        featureKey: QUICKCHAT_POLICY_FEATURES.read_leads,
+        clinicId,
+      }),
+    ]);
+
+    if (readPatients) result.patients.push(clinicId);
+    if (readTeam) result.team.push(clinicId);
+    if (readLeads) result.leads.push(clinicId);
+  }
+
+  return result;
+}
+
+function buildQuickChatCategoryWhere(allowedClinicIdsByCategory = {}) {
+  const orClauses = [];
+  const patientClinicIds = normalizeClinicIdList(allowedClinicIdsByCategory.patients || []);
+  const teamClinicIds = normalizeClinicIdList(allowedClinicIdsByCategory.team || []);
+  const leadClinicIds = normalizeClinicIdList(allowedClinicIdsByCategory.leads || []);
+
+  if (patientClinicIds.length) {
+    orClauses.push({
+      [Op.and]: [
+        { clinic_id: clinicIdCondition(patientClinicIds) },
+        { channel: { [Op.ne]: 'internal' } },
+        { patient_id: { [Op.not]: null } },
+      ],
+    });
+  }
+
+  if (teamClinicIds.length) {
+    orClauses.push({
+      [Op.and]: [
+        { clinic_id: clinicIdCondition(teamClinicIds) },
+        { channel: 'internal' },
+      ],
+    });
+  }
+
+  if (leadClinicIds.length) {
+    orClauses.push({
+      [Op.and]: [
+        { clinic_id: clinicIdCondition(leadClinicIds) },
+        { channel: { [Op.ne]: 'internal' } },
+        { patient_id: null },
+      ],
+    });
+  }
+
+  if (!orClauses.length) return null;
+  return { [Op.or]: orClauses };
+}
+
+function buildQuickChatCategorySql(allowedClinicIdsByCategory = {}, replacements = {}) {
+  const clauses = [];
+  const patientClinicIds = normalizeClinicIdList(allowedClinicIdsByCategory.patients || []);
+  const teamClinicIds = normalizeClinicIdList(allowedClinicIdsByCategory.team || []);
+  const leadClinicIds = normalizeClinicIdList(allowedClinicIdsByCategory.leads || []);
+
+  if (patientClinicIds.length) {
+    replacements.quickchatReadPatientsClinicIds = patientClinicIds;
+    clauses.push("(c.clinic_id IN (:quickchatReadPatientsClinicIds) AND c.channel <> 'internal' AND c.patient_id IS NOT NULL)");
+  }
+  if (teamClinicIds.length) {
+    replacements.quickchatReadTeamClinicIds = teamClinicIds;
+    clauses.push("(c.clinic_id IN (:quickchatReadTeamClinicIds) AND c.channel = 'internal')");
+  }
+  if (leadClinicIds.length) {
+    replacements.quickchatReadLeadsClinicIds = leadClinicIds;
+    clauses.push("(c.clinic_id IN (:quickchatReadLeadsClinicIds) AND c.channel <> 'internal' AND c.patient_id IS NULL)");
+  }
+
+  return clauses.length ? `(${clauses.join(' OR ')})` : null;
+}
+
+async function canReadQuickChatConversation(userId, conversation) {
+  const category = getQuickChatConversationCategory(conversation);
+  const featureKey = getQuickChatFeatureForCategory(category);
+  const clinicId = Number(conversation?.clinic_id);
+  if (!featureKey || !Number.isFinite(clinicId)) {
+    return false;
+  }
+  return canUserAccessFeature({ actorId: userId, featureKey, clinicId });
+}
+
+async function ensureQuickChatConversationReadAccess(userId, conversation) {
+  const allowed = await canReadQuickChatConversation(userId, conversation);
+  if (allowed) return true;
+
+  const category = getQuickChatConversationCategory(conversation);
+  const error = new Error('quickchat_category_forbidden');
+  error.status = 403;
+  error.details = {
+    category,
+    feature_key: getQuickChatFeatureForCategory(category),
+    clinic_id: Number(conversation?.clinic_id) || null,
+  };
+  throw error;
+}
+
+function sendQuickChatCategoryForbidden(res, error = null) {
+  return res.status(403).json({
+    error: 'Acceso denegado a la categoría de QuickChat',
+    details: error?.details || undefined,
+  });
 }
 
 function parseClinicIdsParam(requestedClinicId) {
@@ -211,6 +417,10 @@ function normalizePhoneDigits(value) {
   return String(value || '').replace(/\D+/g, '').replace(/^00/, '');
 }
 
+function sqlPhoneDigitsExpression(expression) {
+  return `REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(COALESCE(${expression}, ''), '+', ''), ' ', ''), '-', ''), '(', ''), ')', ''), '.', '')`;
+}
+
 function escapeLikePattern(value) {
   return String(value || '').replace(/[\\%_]/g, (match) => `\\${match}`);
 }
@@ -227,32 +437,72 @@ function buildConversationSearchClause(searchQuery) {
 
   const makeLike = (value) => `%${escapeLikePattern(String(value || '').toLowerCase())}%`;
   const likeSql = (like) => db.sequelize.escape(like);
+  const conversationPhoneDigits = sqlPhoneDigitsExpression('`Conversation`.`contact_id`');
+  const marketingPhoneDigits = sqlPhoneDigitsExpression('mpli.phone');
+  const marketingItemMatchesSearch = (like) => `(
+    LOWER(COALESCE(mpli.name, '')) LIKE ${likeSql(like)} ESCAPE '\\\\'
+    OR LOWER(COALESCE(mpli.phone, '')) LIKE ${likeSql(like)} ESCAPE '\\\\'
+    OR LOWER(COALESCE(mpli.email, '')) LIKE ${likeSql(like)} ESCAPE '\\\\'
+    OR LOWER(COALESCE(JSON_UNQUOTE(JSON_EXTRACT(mpli.custom_fields, '$.nombre_completo')), '')) LIKE ${likeSql(like)} ESCAPE '\\\\'
+    OR LOWER(COALESCE(JSON_UNQUOTE(JSON_EXTRACT(mpli.custom_fields, '$.nombre')), '')) LIKE ${likeSql(like)} ESCAPE '\\\\'
+    OR LOWER(COALESCE(JSON_UNQUOTE(JSON_EXTRACT(mpli.custom_fields, '$.apellido')), '')) LIKE ${likeSql(like)} ESCAPE '\\\\'
+    OR LOWER(COALESCE(JSON_UNQUOTE(JSON_EXTRACT(mpli.custom_fields, '$.apellidos')), '')) LIKE ${likeSql(like)} ESCAPE '\\\\'
+  )`;
   const externalContactClause = (like) => db.Sequelize.literal(`
     (
       \`Conversation\`.\`id\` IN (
         SELECT DISTINCT mpli.conversation_id
         FROM MarketingPatientListItems mpli
         WHERE mpli.conversation_id IS NOT NULL
-          AND (
-            LOWER(COALESCE(mpli.name, '')) LIKE ${likeSql(like)} ESCAPE '\\\\'
-            OR LOWER(COALESCE(mpli.phone, '')) LIKE ${likeSql(like)} ESCAPE '\\\\'
-            OR LOWER(COALESCE(mpli.email, '')) LIKE ${likeSql(like)} ESCAPE '\\\\'
-            OR LOWER(COALESCE(JSON_UNQUOTE(JSON_EXTRACT(mpli.custom_fields, '$.nombre_completo')), '')) LIKE ${likeSql(like)} ESCAPE '\\\\'
-          )
+          AND ${marketingItemMatchesSearch(like)}
       )
-      OR \`Conversation\`.\`contact_id\` IN (
-        SELECT DISTINCT mpli.phone
+      OR ${conversationPhoneDigits} IN (
+        SELECT DISTINCT ${marketingPhoneDigits}
         FROM MarketingPatientListItems mpli
         WHERE mpli.phone IS NOT NULL
-          AND (
-            LOWER(COALESCE(mpli.name, '')) LIKE ${likeSql(like)} ESCAPE '\\\\'
-            OR LOWER(COALESCE(mpli.phone, '')) LIKE ${likeSql(like)} ESCAPE '\\\\'
-            OR LOWER(COALESCE(mpli.email, '')) LIKE ${likeSql(like)} ESCAPE '\\\\'
-            OR LOWER(COALESCE(JSON_UNQUOTE(JSON_EXTRACT(mpli.custom_fields, '$.nombre_completo')), '')) LIKE ${likeSql(like)} ESCAPE '\\\\'
-          )
+          AND mpli.phone <> ''
+          AND ${marketingItemMatchesSearch(like)}
+      )
+      OR RIGHT(${conversationPhoneDigits}, 9) IN (
+        SELECT DISTINCT RIGHT(${marketingPhoneDigits}, 9)
+        FROM MarketingPatientListItems mpli
+        WHERE mpli.phone IS NOT NULL
+          AND mpli.phone <> ''
+          AND ${marketingItemMatchesSearch(like)}
       )
     )
   `);
+  const digitExternalContactClause = (digits) => {
+    const digitsLike = db.sequelize.escape(`%${escapeLikePattern(digits)}%`);
+    return db.Sequelize.literal(`
+      (
+        ${conversationPhoneDigits} LIKE ${digitsLike} ESCAPE '\\\\'
+        OR ${conversationPhoneDigits} IN (
+          SELECT DISTINCT ${marketingPhoneDigits}
+          FROM MarketingPatientListItems mpli
+          WHERE mpli.phone IS NOT NULL
+            AND mpli.phone <> ''
+            AND ${marketingPhoneDigits} LIKE ${digitsLike} ESCAPE '\\\\'
+        )
+        OR RIGHT(${conversationPhoneDigits}, 9) IN (
+          SELECT DISTINCT RIGHT(${marketingPhoneDigits}, 9)
+          FROM MarketingPatientListItems mpli
+          WHERE mpli.phone IS NOT NULL
+            AND mpli.phone <> ''
+            AND ${marketingPhoneDigits} LIKE ${digitsLike} ESCAPE '\\\\'
+        )
+      )
+    `);
+  };
+  const digitFieldClauses = (digits) => {
+    const digitsLike = db.sequelize.escape(`%${escapeLikePattern(digits)}%`);
+    return [
+      db.Sequelize.literal(`${conversationPhoneDigits} LIKE ${digitsLike} ESCAPE '\\\\'`),
+      db.Sequelize.literal(`${sqlPhoneDigitsExpression('`paciente`.`telefono_movil`')} LIKE ${digitsLike} ESCAPE '\\\\'`),
+      db.Sequelize.literal(`${sqlPhoneDigitsExpression('`lead`.`telefono`')} LIKE ${digitsLike} ESCAPE '\\\\'`),
+      digitExternalContactClause(digits),
+    ];
+  };
   const textFieldClauses = (like) => [
     { contact_id: { [Op.like]: like } },
     { '$paciente.nombre$': { [Op.like]: like } },
@@ -290,16 +540,34 @@ function buildConversationSearchClause(searchQuery) {
   ];
 
   const fullLike = makeLike(normalized);
+  const normalizedDigits = normalizePhoneDigits(normalized);
+  const fullClauses = [
+    ...textFieldClauses(fullLike),
+    ...(normalizedDigits.length >= 5 ? digitFieldClauses(normalizedDigits) : []),
+  ];
+  const fullTextClause = { [Op.or]: fullClauses };
   const tokenClauses = normalized
     .split(' ')
     .map((token) => token.trim())
     .filter((token) => token.length >= 2)
-    .map((token) => ({ [Op.or]: textFieldClauses(makeLike(token)) }));
+    .map((token) => {
+      const tokenDigits = normalizePhoneDigits(token);
+      return {
+        [Op.or]: [
+          ...textFieldClauses(makeLike(token)),
+          ...(tokenDigits.length >= 3 ? digitFieldClauses(tokenDigits) : []),
+        ],
+      };
+    });
+
+  if (!tokenClauses.length) {
+    return fullTextClause;
+  }
 
   return {
-    [Op.and]: [
-      { [Op.or]: textFieldClauses(fullLike) },
-      ...tokenClauses,
+    [Op.or]: [
+      fullTextClause,
+      { [Op.and]: tokenClauses },
     ],
   };
 }
@@ -316,21 +584,65 @@ function buildMarketingContactPhoneCandidates(value) {
   ])).filter(Boolean);
 }
 
-function marketingContactMatchesConversation(item, conversation) {
-  if (!item || !conversation) return false;
-  if (item.conversation_id && Number(item.conversation_id) === Number(conversation.id)) {
-    return true;
+function parseCustomFields(value) {
+  if (!value) return {};
+  if (typeof value === 'object') return value;
+  if (typeof value !== 'string') return {};
+  try {
+    const parsed = JSON.parse(value);
+    return parsed && typeof parsed === 'object' ? parsed : {};
+  } catch {
+    return {};
   }
+}
+
+function normalizeTextSearchValue(value) {
+  return String(value || '')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function marketingItemSearchScore(item, searchQuery) {
+  const normalized = normalizeTextSearchValue(searchQuery);
+  if (!normalized || !item) return 0;
+
+  const fields = parseCustomFields(item.custom_fields);
+  const haystack = normalizeTextSearchValue([
+    item.name,
+    item.phone,
+    item.email,
+    fields.nombre_completo,
+    fields.nombre,
+    fields.apellido,
+    fields.apellidos,
+  ].filter(Boolean).join(' '));
+  const tokens = normalized.split(' ').filter((token) => token.length >= 2);
+  if (!tokens.length) return haystack.includes(normalized) ? 100 : 0;
+  return tokens.every((token) => haystack.includes(token)) ? 100 : 0;
+}
+
+function marketingContactMatchScore(item, conversation) {
+  if (!item || !conversation) return 0;
+  const conversationIdMatches = item.conversation_id && Number(item.conversation_id) === Number(conversation.id);
   const contactDigits = normalizePhoneDigits(conversation.contact_id);
   const itemDigits = normalizePhoneDigits(item.phone);
-  return !!contactDigits && !!itemDigits && (
+  const phoneMatches = !!contactDigits && !!itemDigits && (
     contactDigits === itemDigits
     || contactDigits.endsWith(itemDigits)
     || itemDigits.endsWith(contactDigits)
   );
+
+  if (conversationIdMatches && phoneMatches) return 40;
+  if (phoneMatches) return 30;
+  if (conversationIdMatches && !itemDigits) return 20;
+  if (conversationIdMatches) return 10;
+  return 0;
 }
 
-async function hydrateMarketingContactFallbacks(conversations = []) {
+async function hydrateMarketingContactFallbacks(conversations = [], options = {}) {
   if (!MarketingPatientListItem || !Array.isArray(conversations) || !conversations.length) {
     return conversations;
   }
@@ -380,9 +692,18 @@ async function hydrateMarketingContactFallbacks(conversations = []) {
     ) {
       continue;
     }
-    const item = items.find((row) => marketingContactMatchesConversation(row, conversation));
+    let item = null;
+    let bestScore = 0;
+    for (const row of items) {
+      const score = marketingContactMatchScore(row, conversation)
+        + marketingItemSearchScore(row, options.searchQuery);
+      if (score > bestScore) {
+        item = row;
+        bestScore = score;
+      }
+    }
     if (!item?.name) continue;
-    const fields = item.custom_fields && typeof item.custom_fields === 'object' ? item.custom_fields : {};
+    const fields = parseCustomFields(item.custom_fields);
     const contactName = fields.nombre_completo || item.name;
     conversation.contact = {
       ...(conversation.contact || {}),
@@ -399,17 +720,16 @@ async function hydrateMarketingContactFallbacks(conversations = []) {
 
 async function getTotalUnreadCountForUser(userId, clinicIds, isAggregateAllowed, requestedClinicId) {
   const replacements = { userId };
-  const clinicClauses = [];
-  if (requestedClinicId && requestedClinicId !== 'all') {
-    const parsed = parseClinicIdsParam(requestedClinicId);
-    if (!parsed || !ensureAccess({ clinicIds, isAggregateAllowed }, requestedClinicId)) {
-      return 0;
-    }
-    replacements.clinicIds = parsed;
-    clinicClauses.push('c.clinic_id IN (:clinicIds)');
-  } else if (!isAggregateAllowed) {
-    replacements.clinicIds = clinicIds;
-    clinicClauses.push('c.clinic_id IN (:clinicIds)');
+  const scope = resolveConversationClinicScope({ clinicIds, isAggregateAllowed, requestedClinicId });
+  if (scope.error || !scope.clinicIds.length) {
+    return 0;
+  }
+
+  replacements.clinicIds = scope.clinicIds;
+  const allowedClinicIdsByCategory = await getAllowedQuickChatClinicIdsByCategory(userId, scope.clinicIds);
+  const categorySql = buildQuickChatCategorySql(allowedClinicIdsByCategory, replacements);
+  if (!categorySql) {
+    return 0;
   }
 
   const [row] = await db.sequelize.query(
@@ -422,7 +742,8 @@ async function getTotalUnreadCountForUser(userId, clinicIds, isAggregateAllowed,
        AND cr.user_id = :userId
       WHERE m.direction = 'inbound'
         AND m.createdAt > COALESCE(cr.last_read_at, '1970-01-01')
-        ${clinicClauses.length ? `AND ${clinicClauses.join(' AND ')}` : ''}
+        AND c.clinic_id IN (:clinicIds)
+        AND ${categorySql}
     `,
     { replacements, type: db.Sequelize.QueryTypes.SELECT }
   );
@@ -446,6 +767,22 @@ exports.listConversations = async (req, res) => {
     }
 
     const where = {};
+    const scope = resolveConversationClinicScope({ clinicIds, isAggregateAllowed, requestedClinicId: clinic_id });
+    if (scope.error || !scope.clinicIds.length) {
+      return res.status(403).json({ error: 'Acceso denegado a la clínica' });
+    }
+    where.clinic_id = clinicIdCondition(scope.clinicIds);
+
+    const allowedClinicIdsByCategory = await getAllowedQuickChatClinicIdsByCategory(userId, scope.clinicIds);
+    const categoryWhere = buildQuickChatCategoryWhere(allowedClinicIdsByCategory);
+    if (!categoryWhere) {
+      res.set('X-Has-More', 'false');
+      res.set('X-Next-Offset', String(offset));
+      res.set('X-Total-Unread', '0');
+      return res.json([]);
+    }
+    where[Op.and] = [categoryWhere];
+
     let patient = null;
     let lead = null;
     let canonicalConversationId = null;
@@ -589,7 +926,7 @@ exports.listConversations = async (req, res) => {
       data.unread_count = unreadMap.get(data.id) ?? 0;
       return data;
     });
-    const payload = await hydrateMarketingContactFallbacks(rawPayload);
+    const payload = await hydrateMarketingContactFallbacks(rawPayload, { searchQuery });
     const totalUnread = await getTotalUnreadCountForUser(userId, clinicIds, isAggregateAllowed, clinic_id);
 
     res.set('X-Has-More', hasMore ? 'true' : 'false');
@@ -635,13 +972,13 @@ exports.getPermissions = async (req, res) => {
       memberships[0] ||
       null;
     const effectiveRole = String(selectedMembership?.rol_clinica || 'unknown').toLowerCase();
-    const perms = roleToPermissions(effectiveRole);
+    const policyPerms = await getQuickChatPolicyPermissions(userId, clinicIds, selectedClinicId);
 
     return res.json({
       selected_clinic_id: selectedClinicId,
-      read_patients: perms.read_patients,
-      read_team: perms.read_team,
-      read_leads: perms.read_leads,
+      read_patients: policyPerms.read_patients,
+      read_team: policyPerms.read_team,
+      read_leads: policyPerms.read_leads,
       can_use_all_clinics: !!isAggregateAllowed,
       effective_role: effectiveRole,
     });
@@ -689,6 +1026,11 @@ exports.getMessages = async (req, res) => {
     if (!ensureAccess({ clinicIds, isAggregateAllowed }, conversation.clinic_id)) {
       return res.status(403).json({ error: 'Acceso denegado a la clínica' });
     }
+    try {
+      await ensureQuickChatConversationReadAccess(userId, conversation);
+    } catch (accessError) {
+      return sendQuickChatCategoryForbidden(res, accessError);
+    }
 
     const messages = await Message.findAll({
       where: { conversation_id: conversation.id },
@@ -725,6 +1067,11 @@ exports.streamMessageMedia = async (req, res) => {
     const { clinicIds, isAggregateAllowed } = await getUserClinics(userId);
     if (!ensureAccess({ clinicIds, isAggregateAllowed }, conversation.clinic_id)) {
       return res.status(403).json({ error: 'Acceso denegado a la clínica' });
+    }
+    try {
+      await ensureQuickChatConversationReadAccess(userId, conversation);
+    } catch (accessError) {
+      return sendQuickChatCategoryForbidden(res, accessError);
     }
 
     const metadata = message.metadata || {};
@@ -797,6 +1144,11 @@ exports.getConversationByPatient = async (req, res) => {
     if (!ensureAccess({ clinicIds, isAggregateAllowed }, conversation.clinic_id)) {
       return res.status(403).json({ error: 'Acceso denegado a la clínica' });
     }
+    try {
+      await ensureQuickChatConversationReadAccess(userId, conversation);
+    } catch (accessError) {
+      return sendQuickChatCategoryForbidden(res, accessError);
+    }
 
     const messages = await Message.findAll({
       where: { conversation_id: conversation.id },
@@ -837,6 +1189,11 @@ exports.getConversationByLead = async (req, res) => {
     if (!ensureAccess({ clinicIds, isAggregateAllowed }, conversation.clinic_id)) {
       return res.status(403).json({ error: 'Acceso denegado a la clínica' });
     }
+    try {
+      await ensureQuickChatConversationReadAccess(userId, conversation);
+    } catch (accessError) {
+      return sendQuickChatCategoryForbidden(res, accessError);
+    }
 
     const messages = await Message.findAll({
       where: { conversation_id: conversation.id },
@@ -864,6 +1221,11 @@ exports.markAsRead = async (req, res) => {
     const { clinicIds, isAggregateAllowed } = await getUserClinics(userId);
     if (!ensureAccess({ clinicIds, isAggregateAllowed }, conversation.clinic_id)) {
       return res.status(403).json({ error: 'Acceso denegado a la clínica' });
+    }
+    try {
+      await ensureQuickChatConversationReadAccess(userId, conversation);
+    } catch (accessError) {
+      return sendQuickChatCategoryForbidden(res, accessError);
     }
 
     await ConversationRead.upsert({
@@ -937,6 +1299,12 @@ exports.postMessage = async (req, res) => {
     if (!ensureAccess({ clinicIds, isAggregateAllowed }, conversation.clinic_id)) {
       await transaction.rollback();
       return res.status(403).json({ error: 'Acceso denegado a la clínica' });
+    }
+    try {
+      await ensureQuickChatConversationReadAccess(userId, conversation);
+    } catch (accessError) {
+      await transaction.rollback();
+      return sendQuickChatCategoryForbidden(res, accessError);
     }
 
     const isTemplate = useTemplate || message_type === 'template';
@@ -1188,6 +1556,11 @@ exports.sendScheduledMessageNow = async (req, res) => {
     if (!ensureAccess({ clinicIds, isAggregateAllowed }, conversation.clinic_id)) {
       return res.status(403).json({ error: 'Acceso denegado a la clínica' });
     }
+    try {
+      await ensureQuickChatConversationReadAccess(userId, conversation);
+    } catch (accessError) {
+      return sendQuickChatCategoryForbidden(res, accessError);
+    }
     if (conversation.channel !== 'whatsapp' || msg.direction !== 'outbound') {
       return res.status(400).json({ error: 'not_whatsapp_outbound_message' });
     }
@@ -1275,6 +1648,16 @@ exports.createInternalMessage = async (req, res) => {
       await transaction.rollback();
       return res.status(403).json({ error: 'Acceso denegado a la clínica' });
     }
+    try {
+      await ensureQuickChatConversationReadAccess(userId, {
+        clinic_id,
+        channel: 'internal',
+        contact_id: 'team',
+      });
+    } catch (accessError) {
+      await transaction.rollback();
+      return sendQuickChatCategoryForbidden(res, accessError);
+    }
 
     const conversation =
       (await Conversation.findOne({
@@ -1327,4 +1710,13 @@ exports.createInternalMessage = async (req, res) => {
     console.error('Error createInternalMessage', err);
     return res.status(500).json({ error: 'Error en chat interno' });
   }
+};
+
+exports.__testing = {
+  buildQuickChatCategorySql,
+  buildQuickChatCategoryWhere,
+  buildConversationSearchClause,
+  getQuickChatConversationCategory,
+  normalizeSearchQuery,
+  normalizeTextSearchValue,
 };

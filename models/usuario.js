@@ -11,6 +11,20 @@ module.exports = (sequelize, DataTypes) => {
         otherKey: 'id_clinica',
         as: 'Clinicas'
       });
+      if (models.ManagedCampaign) {
+        Usuario.hasMany(models.ManagedCampaign, {
+          foreignKey: 'assigned_to_user_id',
+          sourceKey: 'id_usuario',
+          as: 'assignedManagedCampaigns',
+        });
+      }
+      if (models.ManagedCampaignOperationAudit) {
+        Usuario.hasMany(models.ManagedCampaignOperationAudit, {
+          foreignKey: 'actor_user_id',
+          sourceKey: 'id_usuario',
+          as: 'managedCampaignOperationAudits',
+        });
+      }
     }
   }
 

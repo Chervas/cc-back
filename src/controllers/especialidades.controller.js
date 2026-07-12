@@ -9,16 +9,33 @@ const ClinicaEspecialidades = db.ClinicaEspecialidades;
 const Clinica = db.Clinica;
 const medicalAreaContractsService = require('../services/medicalAreaContracts.service');
 
+function normalizeDisciplinaList(value) {
+    const items = Array.isArray(value) ? value : [];
+    return [...new Set(
+        items
+            .map((item) => String(item || '').trim().toLowerCase())
+            .filter(Boolean)
+    )];
+}
+
 // Utilidad: asegurar que una disciplina esté incluida en la clínica
 async function ensureDisciplinaEnClinica(clinicaId, disciplina) {
-    if (!clinicaId || !disciplina) return;
+    if (!clinicaId || !disciplina) return [];
     const clinica = await Clinica.findByPk(clinicaId);
-    if (!clinica) return;
+    if (!clinica) return [];
 
     const currentConfig = clinica.configuracion || {};
-    const currentDisc = Array.isArray(currentConfig.disciplinas) ? [...currentConfig.disciplinas] : [];
-    if (!currentDisc.includes(disciplina)) {
-        currentDisc.push(disciplina);
+    const currentDisc = normalizeDisciplinaList(currentConfig.disciplinas);
+    const normalizedDisciplina = String(disciplina || '').trim().toLowerCase();
+    if (!currentDisc.includes(normalizedDisciplina)) {
+        currentDisc.push(normalizedDisciplina);
+        await clinica.update({
+            configuracion: {
+                ...currentConfig,
+                disciplinas: currentDisc
+            }
+        });
+    } else if (JSON.stringify(currentConfig.disciplinas || []) !== JSON.stringify(currentDisc)) {
         await clinica.update({
             configuracion: {
                 ...currentConfig,
@@ -26,6 +43,8 @@ async function ensureDisciplinaEnClinica(clinicaId, disciplina) {
             }
         });
     }
+
+    return currentDisc;
 }
 
 // ============ ESPECIALIDADES DE SISTEMA ============
@@ -205,26 +224,6 @@ exports.getEspecialidadesClinica = asyncHandler(async (req, res) => {
         return items;
     });
 
-    // Fallback: si no hay relaciones (para compatibilidad), devolver sistema + personalizadas activas
-    if (resultado.length === 0) {
-        const whereSistema = { activo: true };
-        const whereClinica = { id_clinica: clinicaId, activo: true };
-        if (disciplina) {
-            whereSistema.disciplina = disciplina;
-            whereClinica.disciplina = disciplina;
-        }
-
-        const [sistema, clinica] = await Promise.all([
-            EspecialidadSistema.findAll({ where: whereSistema }),
-            EspecialidadClinica.findAll({ where: whereClinica })
-        ]);
-
-        resultado = [
-            ...sistema.map(e => ({ ...e.toJSON(), origen: 'sistema' })),
-            ...clinica.map(e => ({ ...e.toJSON(), origen: 'clinica' }))
-        ];
-    }
-
     res.json(resultado);
 });
 
@@ -243,9 +242,12 @@ exports.createEspecialidadClinica = asyncHandler(async (req, res) => {
         origen: 'clinica'
     });
 
-    await ensureDisciplinaEnClinica(id_clinica, disciplina);
+    const disciplinas = await ensureDisciplinaEnClinica(id_clinica, disciplina);
 
-    res.status(201).json(especialidad);
+    res.status(201).json({
+        ...especialidad.toJSON(),
+        disciplinas
+    });
 });
 
 // Actualizar especialidad de clínica
@@ -288,7 +290,11 @@ exports.addEspecialidadSistemaAClinica = asyncHandler(async (req, res) => {
         where: { id_clinica, id_especialidad_sistema }
     });
     if (existente) {
-        return res.status(200).json(existente);
+        const disciplinas = await ensureDisciplinaEnClinica(id_clinica, especialidad.disciplina);
+        return res.status(200).json({
+            ...existente.toJSON(),
+            disciplinas
+        });
     }
 
     const relacion = await ClinicaEspecialidades.create({
@@ -297,9 +303,12 @@ exports.addEspecialidadSistemaAClinica = asyncHandler(async (req, res) => {
         origen: 'sistema'
     });
 
-    await ensureDisciplinaEnClinica(id_clinica, especialidad.disciplina);
+    const disciplinas = await ensureDisciplinaEnClinica(id_clinica, especialidad.disciplina);
 
-    res.status(201).json(relacion);
+    res.status(201).json({
+        ...relacion.toJSON(),
+        disciplinas
+    });
 });
 
 // Eliminar relación de especialidad de sistema en una clínica

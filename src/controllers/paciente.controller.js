@@ -4,7 +4,7 @@ const { Op, literal, QueryTypes } = require('sequelize');
 const crypto = require('crypto');
 const { normalizePhoneDigits } = require('../lib/phone');
 const { normalizeHumanName } = require('../lib/name');
-const { canUserAccessFeature } = require('../lib/access-policy');
+const { assertUserCanAccessFeature, canUserAccessFeature } = require('../lib/access-policy');
 
 const normalizePhone = (phone) => {
   return normalizePhoneDigits(phone);
@@ -41,6 +41,45 @@ const accentFoldSql = (expression) => ACCENT_FOLD_REPLACEMENTS.reduce(
 const generatePacientePublicId = () => `pac_${crypto.randomBytes(10).toString('hex')}`;
 
 const isNumericPacienteIdentifier = (value) => /^\d+$/.test(String(value || '').trim());
+
+async function assertPatientEditAccess(req, clinicId) {
+  const actorId = Number(req.userData?.userId);
+  const normalizedClinicId = Number(clinicId);
+
+  if (!Number.isFinite(actorId)) {
+    const error = new Error('auth_failed');
+    error.status = 401;
+    throw error;
+  }
+
+  if (!Number.isFinite(normalizedClinicId)) {
+    const error = new Error('clinic_id_required');
+    error.status = 400;
+    throw error;
+  }
+
+  await assertUserCanAccessFeature({
+    actorId,
+    featureKey: 'patients.edit',
+    clinicId: normalizedClinicId,
+  });
+}
+
+function sendAccessPolicyError(error, res) {
+  if (error.status === 401 || error.message === 'auth_failed') {
+    return res.status(401).json({ message: 'Auth failed!' });
+  }
+  if (error.status === 403 || error.message === 'access_policy_forbidden') {
+    return res.status(403).json({
+      message: 'No tienes permiso para editar pacientes',
+      details: error.details || null,
+    });
+  }
+  if (error.status === 400 && error.message === 'clinic_id_required') {
+    return res.status(400).json({ message: 'clinica_id es obligatorio' });
+  }
+  return null;
+}
 
 const generateUniquePacientePublicId = async () => {
   for (let i = 0; i < 8; i++) {
@@ -1101,6 +1140,7 @@ exports.createPaciente = async (req, res) => {
     if (!clinica_id) {
       return res.status(400).json({ message: 'clinica_id es obligatorio' });
     }
+    await assertPatientEditAccess(req, clinica_id);
 
     if (normPhone || normEmail) {
       const existente = await findDuplicatePaciente({
@@ -1171,6 +1211,8 @@ exports.createPaciente = async (req, res) => {
       vinculado: true
     });
   } catch (error) {
+    const handled = sendAccessPolicyError(error, res);
+    if (handled) return handled;
     res.status(500).json({ message: 'Error creating paciente', error: error.message });
   }
 };
@@ -1187,11 +1229,13 @@ exports.vincularPacienteAClinica = async (req, res) => {
     if (!targetClinicaId) {
       return res.status(400).json({ message: 'clinica_id es obligatorio' });
     }
+    await assertPatientEditAccess(req, targetClinicaId);
 
     const paciente = await findPacienteByIdentifier(id, { include: [{ model: Clinica, as: 'clinica' }] });
     if (!paciente) {
       return res.status(404).json({ message: 'Paciente no encontrado' });
     }
+    await assertPatientEditAccess(req, paciente.clinica_id);
 
     const clinicaOrigen = paciente.clinica;
     const clinicaDestino = await Clinica.findByPk(targetClinicaId);
@@ -1221,6 +1265,8 @@ exports.vincularPacienteAClinica = async (req, res) => {
 
     return res.json({ message: 'Paciente vinculado correctamente', vinculado: true });
   } catch (error) {
+    const handled = sendAccessPolicyError(error, res);
+    if (handled) return handled;
     res.status(500).json({ message: 'Error al vincular paciente', error: error.message });
   }
 };
@@ -1232,6 +1278,10 @@ exports.updatePaciente = async (req, res) => {
       return res.status(404).json({ message: 'Paciente not found' });
     }
     const nextClinicaId = req.body.clinica_id !== undefined ? req.body.clinica_id : paciente.clinica_id;
+    await assertPatientEditAccess(req, paciente.clinica_id);
+    if (Number(nextClinicaId) !== Number(paciente.clinica_id)) {
+      await assertPatientEditAccess(req, nextClinicaId);
+    }
     const nextTelefono = req.body.telefono_movil !== undefined ? req.body.telefono_movil : paciente.telefono_movil;
     const nextEmail = req.body.email !== undefined ? req.body.email : paciente.email;
     const normPhone = normalizePhone(nextTelefono);
@@ -1282,6 +1332,8 @@ exports.updatePaciente = async (req, res) => {
       paciente
     });
   } catch (error) {
+    const handled = sendAccessPolicyError(error, res);
+    if (handled) return handled;
     res.status(500).json({ message: 'Error updating paciente', error: error.message });
   }
 };
@@ -1303,6 +1355,7 @@ exports.transferirContacto = async (req, res) => {
     if (!paciente) {
       return res.status(404).json({ message: 'Paciente no encontrado' });
     }
+    await assertPatientEditAccess(req, paciente.clinica_id);
 
     if (normPhone || normEmail) {
       const duplicado = await findDuplicatePaciente({
@@ -1342,6 +1395,8 @@ exports.transferirContacto = async (req, res) => {
 
     res.json({ message: 'Contacto transferido al paciente', paciente: updated });
   } catch (error) {
+    const handled = sendAccessPolicyError(error, res);
+    if (handled) return handled;
     res.status(500).json({ message: 'Error al transferir contacto', error: error.message });
   }
 };
@@ -1352,9 +1407,12 @@ exports.deletePaciente = async (req, res) => {
     if (!paciente) {
       return res.status(404).json({ message: 'Paciente not found' });
     }
+    await assertPatientEditAccess(req, paciente.clinica_id);
     await paciente.destroy();
     res.json({ message: 'Paciente eliminado' });
   } catch (error) {
+    const handled = sendAccessPolicyError(error, res);
+    if (handled) return handled;
     res.status(500).json({ message: 'Error deleting paciente', error: error.message });
   }
 };

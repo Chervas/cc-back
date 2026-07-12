@@ -28,6 +28,11 @@ const url = `${META_API_BASE_URL}/...`;
 const { metaGet } = require('../lib/metaClient');
 const { buildClinicMatcher } = require('../lib/clinicAttribution');
 const { googleAdsRequest, getGoogleAdsUsageStatus, resumeGoogleAdsUsage, ensureGoogleAdsConfig, normalizeCustomerId, formatCustomerId } = require('../lib/googleAdsClient');
+const {
+  buildCampaignLevelMetricsQuery,
+  prepareCampaignLevelFallbackRows,
+  shouldMarkGoogleAdsAccountSynced,
+} = require('../lib/googleAdsSyncHelpers');
 const notificationService = require('../services/notifications.service');
 const { enqueueSyncForAllWabas } = require('../services/whatsappTemplates.service');
 const { enqueueSyncPhonesForAllWabas } = require('../services/whatsappPhones.service');
@@ -82,6 +87,8 @@ const {
   GoogleConnection,
   ClinicGoogleAdsAccount,
   GoogleAdsInsightsDaily,
+  ExternalCampaignInventory,
+  ExternalCampaignAssignment,
   Clinica,
   GrupoClinica,
   WebGaDaily,
@@ -99,6 +106,28 @@ const {
 
 const MS_PER_DAY = 24 * 60 * 60 * 1000;
 const DEFAULT_SEARCH_CONSOLE_BULK_CHUNK_SIZE = 500;
+
+function reviewedCampaignAssignmentDirective(assignment) {
+  if (!assignment) return null;
+  if (assignment.status === 'archived') {
+    return {
+      tombstoned: true,
+      clinicaId: null,
+      source: 'reviewed_campaign_archived',
+      matchValue: null,
+    };
+  }
+  const clinicaId = Number.parseInt(String(assignment.clinica_id || ''), 10);
+  if (assignment.status === 'active' && Number.isInteger(clinicaId) && clinicaId > 0) {
+    return {
+      tombstoned: false,
+      clinicaId,
+      source: 'reviewed_campaign',
+      matchValue: assignment.match_kind || 'manual',
+    };
+  }
+  return null;
+}
 
 function resolveSearchConsoleBulkChunkSize() {
   const configured = Number(process.env.SEARCH_CONSOLE_BULK_CHUNK_SIZE || 0);
@@ -150,6 +179,10 @@ function parseGoogleReasons(raw) {
 }
 
 function evaluateGooglePublishingIssue(campaign) {
+  const campaignStatus = String(campaign?.status || '').trim().toUpperCase();
+  // Una campaña pausada por decisión del anunciante no es una incidencia de
+  // publicación de la cuenta. Solo diagnosticamos campañas que deberían servir.
+  if (campaignStatus && campaignStatus !== 'ENABLED') return null;
   const servingStatus = String(campaign?.servingStatus || campaign?.serving_status || '').trim().toUpperCase();
   const primaryStatus = String(campaign?.primaryStatus || campaign?.primary_status || '').trim().toUpperCase();
   const reasons = parseGoogleReasons(campaign?.primaryStatusReasons || campaign?.primary_status_reasons || null)
@@ -3260,6 +3293,11 @@ try {
             report.skipped += 1;
             continue;
           }
+          if (!shouldMarkGoogleAdsAccountSynced(stats)) {
+            report.skipped += 1;
+            report.notes.push(`Cuenta ${formatCustomerId(account.customerId)} sin inventario o métricas persistidas; lastSyncedAt no se actualiza.`);
+            continue;
+          }
           report.processed += 1;
           report.rows += stats.rows || 0;
           await ClinicGoogleAdsAccount.update({ lastSyncedAt: new Date() }, { where: { id: account.id } });
@@ -3414,6 +3452,11 @@ try {
           });
           if (stats?.skipped) {
             report.skipped += 1;
+            continue;
+          }
+          if (!shouldMarkGoogleAdsAccountSynced(stats)) {
+            report.skipped += 1;
+            report.notes.push(`Cuenta ${formatCustomerId(account.customerId)} sin inventario o métricas persistidas; lastSyncedAt no se actualiza.`);
             continue;
           }
           report.processed += 1;
@@ -3579,13 +3622,13 @@ try {
       return Array.from(messages);
     };
 
-    let rows = 0;
+    let persistedMetricsRows = 0;
     const dayMs = 86400000;
     let cursor = new Date(start);
 
     const processedCampaignDates = new Set();
 
-    await this._syncGoogleAdsPublishingState(account, {
+    const persistedInventoryRows = await this._syncGoogleAdsPublishingState(account, {
       accessToken,
       effectiveLoginCustomerId,
       report
@@ -3618,7 +3661,7 @@ try {
                 processedCampaignDates.add(`${campaignId}:${date}`);
               }
             }
-            await this._persistGoogleAdsResults({
+            persistedMetricsRows += await this._persistGoogleAdsResults({
               account,
               assignment,
               groupId,
@@ -3626,7 +3669,6 @@ try {
               results,
               report
             });
-            rows += results.length;
             pageToken = nextToken;
           } while (pageToken);
 
@@ -3641,7 +3683,13 @@ try {
             if (report && Array.isArray(report.notes)) {
               report.notes.push(skipNote);
             }
-            return { rows, skipped: true, skippedReason: 'manager_account' };
+            return {
+              rows: persistedMetricsRows,
+              persistedMetricsRows,
+              persistedInventoryRows: 0,
+              skipped: true,
+              skippedReason: 'manager_account'
+            };
           }
 
           if (isInvalidArgumentError(err) && variantIndex < metricVariants.length - 1) {
@@ -3658,9 +3706,9 @@ try {
         }
       }
 
-      // Fallback: campañas Performance Max sin filas a nivel ad_group
+      // Fallback: cualquier campaña sin filas a nivel ad_group (SMART, PMAX y otros casos).
       try {
-        const fallbackRows = await this._fetchPerformanceMaxMetrics({
+        const fallbackRows = await this._fetchCampaignLevelMetrics({
           account,
           assignment,
           groupId,
@@ -3672,16 +3720,21 @@ try {
           processedCampaignDates,
           report
         });
-        rows += fallbackRows;
+        persistedMetricsRows += fallbackRows;
       } catch (fallbackErr) {
-        console.error('⚠️ Error en fallback Performance Max:', fallbackErr.message || fallbackErr);
-        report?.notes?.push?.(`PMAX fallback ${startDate}..${endDate}: ${fallbackErr.message || fallbackErr}`);
+        console.error('⚠️ Error en fallback Google Ads a nivel campaña:', fallbackErr.message || fallbackErr);
+        report?.notes?.push?.(`Campaign fallback ${startDate}..${endDate}: ${fallbackErr.message || fallbackErr}`);
       }
 
       cursor = new Date(chunkEnd.getTime() + dayMs);
     }
 
-    return { rows, metricVariant: metricVariants[variantIndex]?.name };
+    return {
+      rows: persistedMetricsRows,
+      persistedMetricsRows,
+      persistedInventoryRows,
+      metricVariant: metricVariants[variantIndex]?.name
+    };
   }
 
   async _syncGoogleAdsPublishingState(account, { accessToken, effectiveLoginCustomerId, report }) {
@@ -3693,13 +3746,15 @@ try {
       '  campaign.status,',
       '  campaign.serving_status,',
       '  campaign.primary_status,',
-      '  campaign.primary_status_reasons',
+      '  campaign.primary_status_reasons,',
+      '  campaign.advertising_channel_type',
       'FROM campaign',
       "WHERE campaign.status != 'REMOVED'"
     ].join('\n');
 
     let pageToken = null;
     let selectedIssue = null;
+    let persistedInventoryRows = 0;
     do {
       const resp = await googleAdsRequest('POST', `customers/${customerId}/googleAds:search`, {
         accessToken,
@@ -3709,6 +3764,20 @@ try {
       const results = resp?.results || [];
       for (const row of results) {
         const campaign = row?.campaign || {};
+        if (ExternalCampaignInventory && campaign.id) {
+          await ExternalCampaignInventory.upsert({
+            provider: 'google_ads',
+            customer_id: customerId,
+            account_name: account.descriptiveName || null,
+            campaign_id: String(campaign.id),
+            campaign_name: campaign.name || null,
+            status: campaign.status || null,
+            channel_type: campaign.advertisingChannelType || campaign.advertising_channel_type || null,
+            source: 'provider_sync',
+            last_seen_at: new Date()
+          });
+          persistedInventoryRows += 1;
+        }
         const issue = evaluateGooglePublishingIssue(campaign);
         if (!issue) {
           continue;
@@ -3736,9 +3805,11 @@ try {
     if (selectedIssue && report && Array.isArray(report.notes)) {
       report.notes.push(`Google Ads publishing issue ${account.customerId}: ${selectedIssue.status}`);
     }
+
+    return persistedInventoryRows;
   }
 
-  async _fetchPerformanceMaxMetrics({
+  async _fetchCampaignLevelMetrics({
     account,
     assignment,
     groupId,
@@ -3751,25 +3822,7 @@ try {
     report
   }) {
     const customerId = normalizeCustomerId(account.customerId);
-    const query = [
-      'SELECT',
-      '  campaign.id,',
-      '  campaign.name,',
-      '  campaign.status,',
-      '  campaign.serving_status,',
-      '  campaign.primary_status,',
-      '  campaign.primary_status_reasons,',
-      '  campaign.advertising_channel_type,',
-      '  segments.date,',
-      '  metrics.impressions,',
-      '  metrics.clicks,',
-      '  metrics.cost_micros,',
-      '  metrics.conversions,',
-      '  metrics.conversions_value',
-      'FROM campaign',
-      "WHERE campaign.advertising_channel_type = 'PERFORMANCE_MAX'",
-      `  AND segments.date BETWEEN '${startDate}' AND '${endDate}'`
-    ].join('\n');
+    const query = buildCampaignLevelMetricsQuery(startDate, endDate);
 
     let fallbackRows = 0;
     let pageToken = null;
@@ -3779,23 +3832,13 @@ try {
         loginCustomerId: effectiveLoginCustomerId,
         data: { query, pageToken }
       });
-      const results = (resp?.results || []).filter((row) => {
-        const campaignId = row?.campaign?.id ? String(row.campaign.id) : null;
-        const date = row?.segments?.date;
-        if (!campaignId || !date) {
-          return false;
-        }
-        const key = `${campaignId}:${date}`;
-        if (processedCampaignDates.has(key)) {
-          return false;
-        }
-        processedCampaignDates.add(key);
-        return true;
-      });
+      const results = prepareCampaignLevelFallbackRows(
+        resp?.results || [],
+        processedCampaignDates
+      );
 
       if (results.length) {
-        fallbackRows += results.length;
-        await this._persistGoogleAdsResults({
+        fallbackRows += await this._persistGoogleAdsResults({
           account,
           assignment,
           groupId,
@@ -3812,16 +3855,36 @@ try {
   }
   async _persistGoogleAdsResults({ account, assignment, groupId, defaultClinicId, results, report }) {
     if (!Array.isArray(results) || !results.length) {
-      return;
+      return 0;
     }
 
     const matcher = assignment && assignment.matcher ? assignment.matcher : null;
     const groupClinicaId = groupId || account.grupoClinicaId || (account.clinica ? account.clinica.grupoClinicaId : null) || null;
     const customerId = normalizeCustomerId(account.customerId);
+    const resultCampaignIds = Array.from(new Set(results
+      .map((row) => String(row?.campaign?.id || '').trim())
+      .filter(Boolean)));
+    const reviewedAssignments = ExternalCampaignAssignment && resultCampaignIds.length
+      ? await ExternalCampaignAssignment.findAll({
+          where: {
+            provider: 'google_ads',
+            customer_id: customerId,
+            campaign_id: { [Op.in]: resultCampaignIds },
+            status: { [Op.in]: ['active', 'archived'] }
+          },
+          attributes: ['campaign_id', 'clinica_id', 'match_kind', 'match_confidence', 'status'],
+          raw: true
+        })
+      : [];
+    const reviewedAssignmentByCampaign = new Map(reviewedAssignments.map((row) => [
+      String(row.campaign_id),
+      row
+    ]));
     const campaignAssignments = new Map();
     const adGroupAssignments = new Map();
     const recordedIssues = new Set();
     const resolvedIssues = new Set();
+    let persistedRows = 0;
 
     const recordAttributionIssue = async ({ entityLevel, entityId, campaignId = null, campaignName = null, adGroupName = null, tokens = [], candidates = [] }) => {
       if (!matcher || assignment.mode !== 'group-auto') {
@@ -3900,6 +3963,14 @@ try {
       }
       if (campaignAssignments.has(key)) {
         return campaignAssignments.get(key);
+      }
+      const reviewedResult = reviewedCampaignAssignmentDirective(reviewedAssignmentByCampaign.get(key));
+      if (reviewedResult) {
+        campaignAssignments.set(key, reviewedResult);
+        if (!reviewedResult.tombstoned) {
+          await resolveAttributionIssue('campaign', key, reviewedResult.clinicaId);
+        }
+        return reviewedResult;
       }
       let assignmentResult = { clinicaId: null, source: null, matchValue: null };
       if (matcher && assignment.mode === 'group-auto') {
@@ -4001,8 +4072,21 @@ try {
       let targetClinicId = null;
       let matchSource = null;
       let matchValue = null;
+      const reviewedDirective = reviewedCampaignAssignmentDirective(
+        reviewedAssignmentByCampaign.get(campaignId)
+      );
 
-      if (assignment.mode === 'manual') {
+      if (reviewedDirective) {
+        // A human-reviewed campaign decision is authoritative. Active mappings
+        // and archive tombstones both win over account defaults and
+        // campaign/ad-group fuzzy matching on every rerun.
+        targetClinicId = reviewedDirective.clinicaId;
+        matchSource = reviewedDirective.source;
+        matchValue = reviewedDirective.matchValue;
+        if (!reviewedDirective.tombstoned) {
+          await resolveAttributionIssue('campaign', campaignId, targetClinicId);
+        }
+      } else if (assignment.mode === 'manual') {
         targetClinicId = defaultClinicId || null;
         matchSource = targetClinicId ? 'manual' : null;
       } else if (assignment.mode === 'group-manual') {
@@ -4026,7 +4110,10 @@ try {
         }
       }
 
-      if (!targetClinicId && assignment.mode === 'manual' && defaultClinicId) {
+      if (!reviewedDirective
+        && !targetClinicId
+        && assignment.mode === 'manual'
+        && defaultClinicId) {
         targetClinicId = defaultClinicId;
         matchSource = 'manual';
       }
@@ -4064,6 +4151,7 @@ try {
           clinicMatchSource: matchSource || null,
           clinicMatchValue: matchValue || null
         });
+        persistedRows += 1;
       } catch (err) {
         console.error('❌ Error guardando fila Google Ads', {
           customerId: account.customerId,
@@ -4074,6 +4162,7 @@ try {
         });
       }
     }
+    return persistedRows;
   }
 }
 
@@ -4082,5 +4171,6 @@ const metaSyncJobs = new MetaSyncJobs();
 
 module.exports = {
   metaSyncJobs,
-  MetaSyncJobs
+  MetaSyncJobs,
+  __test: { reviewedCampaignAssignmentDirective }
 };

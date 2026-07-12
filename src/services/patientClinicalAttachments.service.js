@@ -21,7 +21,7 @@ const PURPOSE_CONFIG = {
   },
   consent_document_pdf: {
     category: 'consentimientos',
-    featureKey: 'consents.manage',
+    featureKey: 'consents.view',
     title: 'Consentimiento informado',
     icon: 'heroicons_outline:document-check',
   },

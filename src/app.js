@@ -39,6 +39,7 @@ const marketingTrackingRoutes = require('./routes/marketingTracking.routes');
 const automationsRoutes = require('./routes/automations.routes');
 const automationCatalogRoutes = require('./routes/automationCatalog.routes');
 const adminCampaignPlaybooksRoutes = require('./routes/adminCampaignPlaybooks.routes');
+const adminManagedCampaignsRoutes = require('./routes/adminManagedCampaigns.routes');
 const consentimientosRoutes = require('./routes/consentimientos.routes');
 const metaRoutes = require('./routes/meta.routes');
 const citasRoutes = require('./routes/citas.routes');
@@ -83,13 +84,15 @@ const STATIC_CORS_ORIGINS = new Set([
 const HTTP_JSON_BODY_LIMIT = process.env.HTTP_JSON_BODY_LIMIT || '25mb';
 
 function isPublicIntakePath(pathname = '') {
-    return (
-        typeof pathname === 'string' &&
-        (pathname === '/api/intake/config' ||
-            pathname === '/api/intake/leads' ||
-            pathname === '/api/intake/events' ||
-            pathname.startsWith('/api/intake/'))
-    );
+    if (typeof pathname !== 'string') return false;
+    const normalizedPath = pathname.split('?')[0].replace(/\/+$/, '');
+    return new Set([
+        '/api/intake/config',
+        '/api/intake/leads',
+        '/api/intake/leads/webhook',
+        '/api/intake/events',
+        '/api/intake/whatsapp-origin'
+    ]).has(normalizedPath);
 }
 
 const corsOptionsDelegate = (req, callback) => {
@@ -190,6 +193,8 @@ app.use('/api/automation-catalog', automationCatalogRoutes);
 console.log('Ruta /api/automation-catalog configurada');
 app.use('/api/admin/campaign-playbooks', adminCampaignPlaybooksRoutes);
 console.log('Ruta /api/admin/campaign-playbooks configurada');
+app.use('/api/admin/managed-campaigns', adminManagedCampaignsRoutes);
+console.log('Ruta /api/admin/managed-campaigns configurada');
 app.use('/api/consentimientos', consentimientosRoutes);
 console.log('Ruta /api/consentimientos configurada');
 app.use('/api/meta', metaRoutes);

@@ -7,6 +7,7 @@ const marketingReportsController = require('../controllers/marketingReports.cont
 const marketingCompetitionController = require('../controllers/marketingCompetition.controller');
 const marketingReactivationController = require('../controllers/marketingReactivation.controller');
 const marketingBulkSendsController = require('../controllers/marketingBulkSends.controller');
+const managedCampaignsController = require('../controllers/managedCampaigns.controller');
 
 router.use(authMiddleware);
 
@@ -75,6 +76,13 @@ router.get('/strategies/:id', campaignOnboardingController.getMarketingStrategyD
 router.get('/strategies/:id/analysis/campaign', campaignOnboardingController.getMarketingStrategyAnalysisCampaign);
 router.patch('/strategies/:id/status', campaignOnboardingController.transitionMarketingStrategyStatus);
 router.get('/strategies/:id/metrics', campaignOnboardingController.getMarketingStrategyMetrics);
+
+// Piloto automático: la proyección cliente nunca expone comisión, coste neto ni cuentas internas.
+router.get('/managed-campaigns', managedCampaignsController.listClientCampaigns);
+router.post('/managed-campaigns/request', managedCampaignsController.requestAutopilot);
+router.get('/managed-campaigns/:id', managedCampaignsController.getClientCampaign);
+router.post('/managed-campaigns/:id/approve', managedCampaignsController.approveClientProposal);
+router.post('/managed-campaigns/:id/request-changes', managedCampaignsController.requestClientProposalChanges);
 
 // Google Ads onboarding helpers
 router.get('/google-ads/conversion-actions', campaignOnboardingController.listGoogleAdsConversionActions);
