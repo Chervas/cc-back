@@ -39,6 +39,7 @@ const {
   matchingIssueForAssignment,
   updateExternalAssignmentTarget,
 } = require('../services/externalCampaignAssignmentTargets.service');
+const { configuredClinicMarketingAliases } = require('../lib/clinic-marketing-aliases');
 
 const {
   Clinica,
@@ -533,17 +534,27 @@ function levenshtein(a, b) {
   return row[right.length];
 }
 
-function clinicAliases(clinicName) {
-  const normalized = normalizeText(clinicName);
-  const tokens = words(clinicName).filter((token) => !STOP_WORDS.has(token));
-  const short = tokens.join(' ');
-  return Array.from(new Set([normalized, short, ...tokens.filter((token) => token.length >= 4)].filter(Boolean)));
+function clinicAliases(clinic) {
+  const clinicName = clinic?.nombre_clinica || clinic?.name || clinic;
+  const values = [clinicName, ...configuredClinicMarketingAliases(clinic)];
+  const aliases = [];
+  for (const value of values) {
+    const normalized = normalizeText(value);
+    const tokens = words(value).filter((token) => !STOP_WORDS.has(token));
+    const short = tokens.join(' ');
+    aliases.push(normalized, short, ...tokens.filter((token) => token.length >= 4));
+  }
+  return Array.from(new Set(aliases.filter(Boolean)));
 }
 
 function scoreClinicMatch(campaignName, clinic) {
   const normalizedCampaign = normalizeText(campaignName);
-  const aliases = clinicAliases(clinic.nombre_clinica);
+  const aliases = clinicAliases(clinic);
   const normalizedClinic = normalizeText(clinic.nombre_clinica);
+  const matchingAlias = aliases
+    .filter((alias) => alias !== normalizedClinic && alias.length >= 4)
+    .sort((left, right) => right.length - left.length)
+    .find((alias) => normalizedCampaign.includes(alias));
   const shortAlias = aliases.find((alias) => alias !== normalizedClinic && alias.includes(' '))
     || aliases.find((alias) => alias !== normalizedClinic)
     || normalizedClinic;
@@ -551,8 +562,8 @@ function scoreClinicMatch(campaignName, clinic) {
   if (normalizedCampaign.includes(normalizedClinic)) {
     return { score: 1, kind: 'exact', explanation: `Contiene “${clinic.nombre_clinica}”` };
   }
-  if (shortAlias && shortAlias.length >= 4 && normalizedCampaign.includes(shortAlias)) {
-    return { score: 0.97, kind: 'alias', explanation: `Contiene el alias “${shortAlias}”` };
+  if (matchingAlias) {
+    return { score: 0.97, kind: 'alias', explanation: `Contiene el alias “${matchingAlias}”` };
   }
 
   const campaignWords = words(campaignName);
@@ -1511,7 +1522,7 @@ exports.listMatchingProposals = asyncHandler(async (req, res) => {
   if (!(await requireAssociationAccountScope(res, { groupId, provider, customerId }))) return;
   const clinics = await Clinica.findAll({
     where: { grupoClinicaId: groupId },
-    attributes: ['id_clinica', 'nombre_clinica', 'grupoClinicaId', 'estado_clinica'],
+    attributes: ['id_clinica', 'nombre_clinica', 'grupoClinicaId', 'estado_clinica', 'configuracion'],
     raw: true,
     order: [['nombre_clinica', 'ASC']],
   });

@@ -52,6 +52,10 @@ const {
 } = require('../lib/intakeLocations');
 const { detectLegacyJoinChat } = require('../lib/intake-legacy-chat');
 const {
+  configuredClinicIds,
+  matchClinicByPageUrl,
+} = require('../lib/intake-page-clinic');
+const {
   extractGoogleTagId,
   normalizeMetaAdsConfig,
   normalizeGoogleAdsConfig: normalizeEffectiveGoogleAdsConfig,
@@ -657,6 +661,18 @@ const resolveClinicByPhoneWithinGroup = async (groupId, phone) => {
     clinic.telefono_movil,
     clinic.telefono_whatsapp,
   ].some((value) => normalizePhone(value) === normalizedPhone)) || null;
+};
+
+const resolveClinicByPageUrlWithinGroup = async (groupId, pageUrl, configRecord = null) => {
+  const parsedGroupId = parseInteger(groupId);
+  if (parsedGroupId === null || !pageUrl) return null;
+
+  const clinics = await Clinica.findAll({
+    where: { grupoClinicaId: parsedGroupId },
+    attributes: ['id_clinica', 'grupoClinicaId', 'nombre_clinica', 'url_web', 'estado_clinica'],
+    raw: true,
+  });
+  return matchClinicByPageUrl(pageUrl, clinics, configuredClinicIds(configRecord));
 };
 
 const CALL_OUTCOMES = new Set(['citado', 'informacion', 'no_contactado']);
@@ -1284,6 +1300,19 @@ exports.ingestLead = asyncHandler(async (req, res) => {
       clinicaIdParsed = matchedClinicId;
       clinicMatchSource = clinicMatchSource || 'clinic_name_field';
       clinicMatchValue = clinicMatchValue || clinicNameHint;
+    }
+  }
+
+  if (clinicaIdParsed === null && grupoClinicaIdParsed !== null && pageUrlForDomain) {
+    const pageClinic = await resolveClinicByPageUrlWithinGroup(
+      grupoClinicaIdParsed,
+      pageUrlForDomain,
+      chatGroupConfigRecord,
+    );
+    if (pageClinic) {
+      clinicaIdParsed = parseInteger(pageClinic.id_clinica);
+      clinicMatchSource = clinicMatchSource || 'page_url';
+      clinicMatchValue = clinicMatchValue || pageUrlForDomain;
     }
   }
 
@@ -3346,7 +3375,13 @@ exports.registerWhatsappOrigin = asyncHandler(async (req, res) => {
     groupIdParsed = domainGroupId;
   }
   if (clinicIdParsed === null && groupIdParsed !== null) {
-    clinicIdParsed = await resolveFallbackClinicForGroup(groupIdParsed);
+    const pageClinic = await resolveClinicByPageUrlWithinGroup(
+      groupIdParsed,
+      pageUrl,
+      [cfg, groupCfg, domainCfg].find((record) => record?.assignment_scope === 'group') || null,
+    );
+    clinicIdParsed = parseInteger(pageClinic?.id_clinica)
+      || await resolveFallbackClinicForGroup(groupIdParsed);
   }
   if (clinicIdParsed === null && groupIdParsed === null) {
     return res.status(400).json({ success: false, message: 'clinic_id o group_id requerido' });
@@ -3500,7 +3535,22 @@ exports.receiveIntakeEvent = asyncHandler(async (req, res) => {
     groupIdParsed = domainGroupId;
   }
   if (clinicIdParsed === null && groupIdParsed !== null) {
-    clinicIdParsed = await resolveFallbackClinicForGroup(groupIdParsed);
+    const pageClinic = await resolveClinicByPageUrlWithinGroup(
+      groupIdParsed,
+      eventSourceUrl,
+      [cfg, groupCfg, domainCfg].find((record) => record?.assignment_scope === 'group') || null,
+    );
+    clinicIdParsed = parseInteger(pageClinic?.id_clinica);
+  }
+  if (clinicIdParsed === null && groupIdParsed !== null && String(eventName).trim().toLowerCase() === 'callinitiated') {
+    const clickedTel = cleanString(coalesce(
+      body.clicked_tel,
+      body.clickedTel,
+      eventDataFromBody.clicked_tel,
+      eventDataFromBody.clickedTel,
+    ));
+    const phoneClinic = await resolveClinicByPhoneWithinGroup(groupIdParsed, clickedTel);
+    clinicIdParsed = parseInteger(phoneClinic?.id_clinica);
   }
 
   if (cfg && cfg.hmac_key) {
