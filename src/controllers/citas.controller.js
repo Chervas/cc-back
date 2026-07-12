@@ -30,8 +30,11 @@ const { normalizePhoneDigits, getPhoneLookupCandidates } = require('../lib/phone
 const { normalizeHumanName } = require('../lib/name');
 const consentimientosService = require('../services/consentimientos.service');
 const appointmentNotificationCleanup = require('../services/appointmentNotificationCleanup.service');
-const { maybeUploadLeadLifecycleConversion } = require('../services/googleLeadLifecycleConversion.service');
 const { processAppointmentLeadMilestones } = require('../services/appointmentLeadMilestone.service');
+const {
+    ensureQualifiedLeadConversion,
+    uploadScheduleForLinkedAppointment,
+} = require('../services/leadQualificationMilestone.service');
 const { assertUserCanAccessFeature } = require('../lib/access-policy');
 
 const CITA_ESTADOS_VALIDOS = new Set(CITA_STATUS_VALUES);
@@ -1779,6 +1782,15 @@ exports.createCita = asyncHandler(async (req, res) => {
 
         // Marcar lead como citado si aplica
         if (lead) {
+            // Una cita real implica que el contacto ya era un Lead válido. Este
+            // hito se envía antes de Schedule y comparte un eventId estable con
+            // la cualificación manual para no duplicar conversiones.
+            await ensureQualifiedLeadConversion({
+                lead,
+                occurredAt: cita.created_at || new Date(),
+                logger: console,
+            });
+
             const currentLeadStatus = String(lead.status_lead || '').trim().toLowerCase();
             if (!['convertido', 'descartado', 'acudio_cita'].includes(currentLeadStatus)) {
                 const leadUpdatePayload = {
@@ -1815,22 +1827,11 @@ exports.createCita = asyncHandler(async (req, res) => {
                 }
             }
 
-            try {
-                await maybeUploadLeadLifecycleConversion({
-                    lead,
-                    eventName: 'schedule',
-                    eventId: `appointment-${cita.id_cita}`,
-                    clinicId: clinica_id,
-                    value: 0,
-                    currency: 'EUR',
-                    occurredAt: cita.created_at || new Date(),
-                });
-            } catch (conversionError) {
-                console.warn(
-                    '⚠️ No se pudo enviar la conversión Schedule de la cita:',
-                    conversionError?.response?.data || conversionError?.message || conversionError
-                );
-            }
+            await uploadScheduleForLinkedAppointment({
+                lead,
+                appointment: cita,
+                logger: console,
+            });
         }
 
         if (estadoRaw === 'completada') {

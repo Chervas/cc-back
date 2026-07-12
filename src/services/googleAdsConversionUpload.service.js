@@ -192,12 +192,16 @@ function getBaseGoogleAdsEventConfig(googleAdsConfig, eventName) {
   const eventKey = String(eventName || '').trim().toLowerCase();
   const mapped = eventKey === ''
     ? 'lead'
-    : ['lead', 'contact', 'schedule', 'purchase'].includes(eventKey)
+    : ['lead', 'contact', 'qualified_lead', 'schedule', 'purchase'].includes(eventKey)
       ? eventKey
       : null;
   if (!mapped) return null;
-  const nested = googleAdsConfig?.events && typeof googleAdsConfig.events === 'object'
-    ? (googleAdsConfig.events[mapped] || {})
+  const rawEvents = googleAdsConfig?.events && typeof googleAdsConfig.events === 'object'
+    ? googleAdsConfig.events
+    : {};
+  const hasExplicitEventConfig = Object.prototype.hasOwnProperty.call(rawEvents, mapped);
+  const nested = hasExplicitEventConfig
+    ? (rawEvents[mapped] || {})
     : {};
   // An action resource, action id and send_to are alternative representations
   // of one target. Resolve them as a unit so an event-specific id cannot be
@@ -209,11 +213,15 @@ function getBaseGoogleAdsEventConfig(googleAdsConfig, eventName) {
       conversion_action_id: googleAdsConfig[`${mapped}_conversion_action_id`],
       send_to: googleAdsConfig[`${mapped}_send_to`]
     },
-    googleAdsConfig
+    // `qualified_lead` nunca puede heredar la acción global legacy de Lead:
+    // solo existe si su acción CRM está mapeada de forma explícita.
+    mapped === 'qualified_lead' ? null : googleAdsConfig
   );
   return {
     event_name: mapped,
-    enabled: googleAdsConfig.enabled !== false && nested.enabled !== false,
+    enabled: googleAdsConfig.enabled !== false
+      && nested.enabled !== false
+      && (mapped !== 'qualified_lead' || hasExplicitEventConfig),
     customer_id: cleanGoogleCustomerId(
       nested.customer_id
         ?? nested.customerId

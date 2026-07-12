@@ -14,7 +14,7 @@ const Campana = db.Campana;
 
 const CHANNELS = new Set(['paid', 'organic', 'unknown']);
 const SOURCES = new Set(['meta_ads', 'google_ads', 'web', 'whatsapp', 'call_click', 'tiktok_ads', 'seo', 'direct', 'local_services']);
-const STATUSES = new Set(['nuevo', 'contactado', 'esperando_info', 'info_recibida', 'citado', 'acudio_cita', 'convertido', 'descartado']);
+const STATUSES = new Set(['nuevo', 'contactado', 'esperando_info', 'info_recibida', 'cualificado', 'citado', 'acudio_cita', 'convertido', 'descartado']);
 const DEDUPE_WINDOW_HOURS = parseInt(process.env.INTAKE_DEDUPE_WINDOW_HOURS || '24', 10);
 const IMPORT_MAX_ROWS = 5000;
 

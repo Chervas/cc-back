@@ -66,7 +66,7 @@ module.exports = (sequelize, DataTypes) => {
     num_contactos: { type: DataTypes.INTEGER, allowNull: false, defaultValue: 0 },
     ultimo_contacto: { type: DataTypes.DATE, allowNull: true },
     status_lead: {
-      type: DataTypes.ENUM('nuevo', 'contactado', 'esperando_info', 'info_recibida', 'citado', 'acudio_cita', 'convertido', 'descartado'),
+      type: DataTypes.ENUM('nuevo', 'contactado', 'esperando_info', 'info_recibida', 'cualificado', 'citado', 'acudio_cita', 'convertido', 'descartado'),
       allowNull: false,
       defaultValue: 'nuevo'
     },

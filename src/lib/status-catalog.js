@@ -134,12 +134,21 @@ const LEAD_STATUSES = Object.freeze([
     is_terminal: false,
   },
   {
+    value: 'cualificado',
+    label: 'Lead válido',
+    description: 'Contacto válido, localizado y con interés real',
+    color: 'violet',
+    icon: 'heroicons_outline:check-badge',
+    order: 5,
+    is_terminal: false,
+  },
+  {
     value: 'citado',
     label: 'Citado',
     description: 'Cita agendada',
     color: 'teal',
     icon: 'heroicons_outline:calendar',
-    order: 5,
+    order: 6,
     is_terminal: false,
   },
   {
@@ -148,7 +157,7 @@ const LEAD_STATUSES = Object.freeze([
     description: 'Asistió a la cita',
     color: 'emerald',
     icon: 'heroicons_outline:check-circle',
-    order: 6,
+    order: 7,
     is_terminal: false,
   },
   {
@@ -157,7 +166,7 @@ const LEAD_STATUSES = Object.freeze([
     description: 'Convertido a paciente',
     color: 'emerald',
     icon: 'heroicons_outline:check',
-    order: 7,
+    order: 8,
     is_terminal: true,
   },
   {
@@ -166,16 +175,17 @@ const LEAD_STATUSES = Object.freeze([
     description: 'Lead descartado',
     color: 'rose',
     icon: 'heroicons_outline:x-circle',
-    order: 8,
+    order: 9,
     is_terminal: true,
   },
 ]);
 
 const LEAD_ALLOWED_TRANSITIONS = Object.freeze({
   nuevo: ['contactado', 'esperando_info', 'citado', 'descartado'],
-  contactado: ['esperando_info', 'info_recibida', 'citado', 'descartado'],
-  esperando_info: ['info_recibida', 'contactado', 'citado', 'descartado'],
-  info_recibida: ['citado', 'contactado', 'descartado'],
+  contactado: ['esperando_info', 'info_recibida', 'cualificado', 'citado', 'descartado'],
+  esperando_info: ['info_recibida', 'contactado', 'cualificado', 'citado', 'descartado'],
+  info_recibida: ['cualificado', 'citado', 'contactado', 'descartado'],
+  cualificado: ['citado', 'contactado', 'info_recibida', 'descartado'],
   citado: ['acudio_cita', 'descartado'],
   acudio_cita: ['convertido', 'descartado'],
   convertido: [],

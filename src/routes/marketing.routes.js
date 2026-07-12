@@ -8,6 +8,7 @@ const marketingCompetitionController = require('../controllers/marketingCompetit
 const marketingReactivationController = require('../controllers/marketingReactivation.controller');
 const marketingBulkSendsController = require('../controllers/marketingBulkSends.controller');
 const managedCampaignsController = require('../controllers/managedCampaigns.controller');
+const campaignOptimizationController = require('../controllers/campaignOptimization.controller');
 
 router.use(authMiddleware);
 
@@ -77,6 +78,10 @@ router.get('/strategies/:id/analysis/campaign', campaignOnboardingController.get
 router.patch('/strategies/:id/status', campaignOnboardingController.transitionMarketingStrategyStatus);
 router.get('/strategies/:id/metrics', campaignOnboardingController.getMarketingStrategyMetrics);
 
+// Estado auditable del lifecycle de optimización. Es deliberadamente GET-only:
+// evaluar una política no muta Google Ads ni aprueba transiciones.
+router.get('/campaign-optimization/status', campaignOptimizationController.getOptimizationStatus);
+
 // Piloto automático: la proyección cliente nunca expone comisión, coste neto ni cuentas internas.
 router.get('/managed-campaigns', managedCampaignsController.listClientCampaigns);
 router.post('/managed-campaigns/request', managedCampaignsController.requestAutopilot);
@@ -88,5 +93,6 @@ router.post('/managed-campaigns/:id/request-changes', managedCampaignsController
 router.get('/google-ads/conversion-actions', campaignOnboardingController.listGoogleAdsConversionActions);
 router.post('/google-ads/conversion-actions/ensure', campaignOnboardingController.ensureGoogleAdsConversionActions);
 router.post('/google-ads/conversions/data-manager/validate', campaignOnboardingController.validateGoogleDataManagerConversion);
+router.post('/google-ads/conversions/enhanced/activation-gate', campaignOnboardingController.gateEnhancedConversionsActivation);
 
 module.exports = router;
