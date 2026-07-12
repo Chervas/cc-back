@@ -527,6 +527,7 @@ async function loadCurrentLeadAttributionMetricsIndex({ scope, payload, days = 3
       'status_lead'
     ],
     where: {
+      archived_at: null,
       created_at: { [Op.between]: [start, end] },
       status_lead: { [Op.ne]: 'descartado' },
       ...buildMetricsScopeWhere(scope, { clinicField: 'clinica_id', groupField: 'grupo_clinica_id' })
