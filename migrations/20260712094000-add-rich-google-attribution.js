@@ -29,11 +29,21 @@ module.exports = {
         type: Sequelize.STRING(191),
         allowNull: true,
       });
+      await addIfMissing(queryInterface, tableName, 'google_ads_customer_id', {
+        type: Sequelize.STRING(32),
+        allowNull: true,
+      });
+      await addIfMissing(queryInterface, tableName, 'google_ads_campaign_id', {
+        type: Sequelize.STRING(32),
+        allowNull: true,
+      });
     }
   },
 
   async down(queryInterface) {
     for (const tableName of ['WhatsAppWebOrigins', 'WebEvents', 'LeadIntakes']) {
+      await removeIfPresent(queryInterface, tableName, 'google_ads_campaign_id');
+      await removeIfPresent(queryInterface, tableName, 'google_ads_customer_id');
       await removeIfPresent(queryInterface, tableName, 'ga_client_id');
       await removeIfPresent(queryInterface, tableName, 'wbraid');
       await removeIfPresent(queryInterface, tableName, 'gbraid');

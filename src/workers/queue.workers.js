@@ -1402,6 +1402,8 @@ createWorker('webhook_whatsapp', async (job) => {
                     gbraid: webOrigin.gbraid || null,
                     wbraid: webOrigin.wbraid || null,
                     ga_client_id: webOrigin.ga_client_id || null,
+                    google_ads_customer_id: webOrigin.google_ads_customer_id || null,
+                    google_ads_campaign_id: webOrigin.google_ads_campaign_id || null,
                     fbclid: webOrigin.fbclid || null,
                     ttclid: webOrigin.ttclid || null,
                 } } : {}),

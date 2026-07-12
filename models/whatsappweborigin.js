@@ -101,6 +101,14 @@ module.exports = (sequelize, DataTypes) => {
         type: DataTypes.STRING(191),
         allowNull: true,
       },
+      google_ads_customer_id: {
+        type: DataTypes.STRING(32),
+        allowNull: true,
+      },
+      google_ads_campaign_id: {
+        type: DataTypes.STRING(32),
+        allowNull: true,
+      },
       fbclid: {
         type: DataTypes.STRING(128),
         allowNull: true,

@@ -1147,6 +1147,8 @@ exports.ingestLead = asyncHandler(async (req, res) => {
     gbraid,
     wbraid,
     ga_client_id,
+    google_ads_customer_id,
+    google_ads_campaign_id,
     fbclid,
     ttclid,
     referrer,
@@ -1385,6 +1387,21 @@ exports.ingestLead = asyncHandler(async (req, res) => {
   const gbraidValue = coalesce(attribution.gbraid, gbraid, body.gBraid);
   const wbraidValue = coalesce(attribution.wbraid, wbraid, body.wBraid);
   const gaClientIdValue = coalesce(attribution.ga_client_id, attribution.client_id, ga_client_id, body.gaClientId, body.client_id);
+  const googleAdsCustomerIdValue = coalesce(
+    attribution.google_ads_customer_id,
+    attribution.cc_gads_customer_id,
+    google_ads_customer_id,
+    body.cc_gads_customer_id,
+    body.customer_id,
+    body.google_customer_id
+  );
+  const googleAdsCampaignIdValue = coalesce(
+    attribution.google_ads_campaign_id,
+    attribution.cc_gads_campaign_id,
+    google_ads_campaign_id,
+    body.cc_gads_campaign_id,
+    body.google_campaign_id
+  );
   const fbclidValue = coalesce(attribution.fbclid, fbclid);
   const ttclidValue = coalesce(attribution.ttclid, ttclid);
   const referrerValue = coalesce(attribution.referrer, referrer);
@@ -1506,6 +1523,8 @@ exports.ingestLead = asyncHandler(async (req, res) => {
     gbraid: gbraidValue || null,
     wbraid: wbraidValue || null,
     ga_client_id: gaClientIdValue || null,
+    google_ads_customer_id: googleAdsCustomerIdValue || null,
+    google_ads_campaign_id: googleAdsCampaignIdValue || null,
     fbclid: fbclidValue || null,
     ttclid: ttclidValue || null,
     referrer: referrerValue || null,
@@ -1752,7 +1771,8 @@ exports.ingestLead = asyncHandler(async (req, res) => {
       value: coalesce(body.value, body.conversion_value),
       currency: coalesce(body.currency, body.conversion_currency),
       conversion_time: coalesce(body.conversion_time, body.conversionDateTime, new Date()),
-      customer_id: coalesce(body.customer_id, body.customerId, body.google_customer_id),
+      customer_id: coalesce(googleAdsCustomerIdValue, body.customerId),
+      campaign_id: googleAdsCampaignIdValue || null,
       conversion_action: coalesce(body.conversion_action, body.conversionAction),
       conversion_action_id: coalesce(body.conversion_action_id, body.conversionActionId),
       send_to: coalesce(body.send_to, body.sendTo),
@@ -3521,6 +3541,8 @@ exports.registerWhatsappOrigin = asyncHandler(async (req, res) => {
     gbraid: truncateString(body.gbraid || body.gBraid, 255),
     wbraid: truncateString(body.wbraid || body.wBraid, 255),
     ga_client_id: truncateString(body.ga_client_id || body.gaClientId || body.client_id, 191),
+    google_ads_customer_id: truncateString(body.google_ads_customer_id || body.cc_gads_customer_id, 32),
+    google_ads_campaign_id: truncateString(body.google_ads_campaign_id || body.cc_gads_campaign_id, 32),
     fbclid: truncateString(body.fbclid, 128),
     ttclid: truncateString(body.ttclid, 128),
     event_id: truncateString(req.headers[EVENT_ID_HEADER] || body.event_id || body.eventId, 128),
