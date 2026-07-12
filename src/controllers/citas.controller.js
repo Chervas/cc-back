@@ -30,6 +30,7 @@ const { normalizePhoneDigits, getPhoneLookupCandidates } = require('../lib/phone
 const { normalizeHumanName } = require('../lib/name');
 const consentimientosService = require('../services/consentimientos.service');
 const appointmentNotificationCleanup = require('../services/appointmentNotificationCleanup.service');
+const { maybeUploadLeadLifecycleConversion } = require('../services/googleLeadLifecycleConversion.service');
 const { assertUserCanAccessFeature } = require('../lib/access-policy');
 
 const CITA_ESTADOS_VALIDOS = new Set(CITA_STATUS_VALUES);
@@ -1865,6 +1866,23 @@ exports.createCita = asyncHandler(async (req, res) => {
                 } catch (auditErr) {
                     console.warn('⚠️ No se pudo registrar auditoría de auto-link de cita manual:', auditErr.message || auditErr);
                 }
+            }
+
+            try {
+                await maybeUploadLeadLifecycleConversion({
+                    lead,
+                    eventName: 'schedule',
+                    eventId: `appointment-${cita.id_cita}`,
+                    clinicId: clinica_id,
+                    value: 0,
+                    currency: 'EUR',
+                    occurredAt: cita.created_at || new Date(),
+                });
+            } catch (conversionError) {
+                console.warn(
+                    '⚠️ No se pudo enviar la conversión Schedule de la cita:',
+                    conversionError?.response?.data || conversionError?.message || conversionError
+                );
             }
         }
 
