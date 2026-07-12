@@ -129,6 +129,29 @@ function normalizeGoogleAdsConfig(rawConfig) {
   };
 }
 
+function normalizeGoogleAdsActionTarget(rawTarget = {}) {
+  const target = rawTarget && typeof rawTarget === 'object' && !Array.isArray(rawTarget)
+    ? rawTarget
+    : {};
+  return {
+    conversion_action: cleanString(target.conversion_action ?? target.conversionAction),
+    conversion_action_id: cleanString(target.conversion_action_id ?? target.conversionActionId),
+    send_to: cleanString(target.send_to ?? target.sendTo)
+  };
+}
+
+function resolveGoogleAdsActionTarget(...rawTargets) {
+  for (const rawTarget of rawTargets) {
+    const target = normalizeGoogleAdsActionTarget(rawTarget);
+    if (target.conversion_action || target.conversion_action_id || target.send_to) return target;
+  }
+  return {
+    conversion_action: null,
+    conversion_action_id: null,
+    send_to: null
+  };
+}
+
 function normalizeConfiguredCampaignIds(...values) {
   const normalized = [];
   for (const value of values) {
@@ -152,6 +175,18 @@ function getBaseGoogleAdsEventConfig(googleAdsConfig, eventName) {
   const nested = googleAdsConfig?.events && typeof googleAdsConfig.events === 'object'
     ? (googleAdsConfig.events[mapped] || {})
     : {};
+  // An action resource, action id and send_to are alternative representations
+  // of one target. Resolve them as a unit so an event-specific id cannot be
+  // paired with (and then shadowed by) the legacy global Lead resource.
+  const actionTarget = resolveGoogleAdsActionTarget(
+    nested,
+    {
+      conversion_action: googleAdsConfig[`${mapped}_conversion_action`],
+      conversion_action_id: googleAdsConfig[`${mapped}_conversion_action_id`],
+      send_to: googleAdsConfig[`${mapped}_send_to`]
+    },
+    googleAdsConfig
+  );
   return {
     event_name: mapped,
     enabled: googleAdsConfig.enabled !== false && nested.enabled !== false,
@@ -161,21 +196,9 @@ function getBaseGoogleAdsEventConfig(googleAdsConfig, eventName) {
         ?? googleAdsConfig[`${mapped}_customer_id`]
         ?? googleAdsConfig.customer_id
     ),
-    conversion_action: nested.conversion_action
-      ?? nested.conversionAction
-      ?? googleAdsConfig[`${mapped}_conversion_action`]
-      ?? googleAdsConfig.conversion_action
-      ?? null,
-    conversion_action_id: nested.conversion_action_id
-      ?? nested.conversionActionId
-      ?? googleAdsConfig[`${mapped}_conversion_action_id`]
-      ?? googleAdsConfig.conversion_action_id
-      ?? null,
-    send_to: nested.send_to
-      ?? nested.sendTo
-      ?? googleAdsConfig[`${mapped}_send_to`]
-      ?? googleAdsConfig.send_to
-      ?? null,
+    conversion_action: actionTarget.conversion_action,
+    conversion_action_id: actionTarget.conversion_action_id,
+    send_to: actionTarget.send_to,
     value: coalesce(nested.value, googleAdsConfig[`${mapped}_value`], googleAdsConfig.value, mapped === 'purchase' ? null : 0),
     currency: coalesce(nested.currency, googleAdsConfig[`${mapped}_currency`], googleAdsConfig.currency, 'EUR'),
     phone_country_code: cleanGoogleCustomerId(
@@ -232,6 +255,10 @@ function getGoogleAdsEventConfigs(googleAdsConfig, eventName) {
     if (!raw || typeof raw !== 'object' || Array.isArray(raw)) continue;
     const customerId = cleanGoogleCustomerId(raw.customer_id || raw.customerId);
     const canInheritBaseAction = customerId && customerId === base.customer_id;
+    const actionTarget = resolveGoogleAdsActionTarget(
+      raw,
+      canInheritBaseAction ? base : null
+    );
     const destination = {
       event_name: base.event_name,
       destination_key: truncate(
@@ -240,15 +267,9 @@ function getGoogleAdsEventConfigs(googleAdsConfig, eventName) {
       ),
       enabled: base.enabled && raw.enabled !== false,
       customer_id: customerId,
-      conversion_action: raw.conversion_action
-        ?? raw.conversionAction
-        ?? (canInheritBaseAction ? base.conversion_action : null),
-      conversion_action_id: raw.conversion_action_id
-        ?? raw.conversionActionId
-        ?? (canInheritBaseAction ? base.conversion_action_id : null),
-      send_to: raw.send_to
-        ?? raw.sendTo
-        ?? (canInheritBaseAction ? base.send_to : null),
+      conversion_action: actionTarget.conversion_action,
+      conversion_action_id: actionTarget.conversion_action_id,
+      send_to: actionTarget.send_to,
       value: coalesce(raw.value, base.value),
       currency: coalesce(raw.currency, base.currency, 'EUR'),
       phone_country_code: cleanGoogleCustomerId(

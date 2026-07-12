@@ -75,7 +75,7 @@ Evidencia de Propdental al 2026-07-12:
 ## Monitorización
 
 - Diagnostics de cargas Data Manager: cada 30 minutos.
-- Auditoría read-only de acciones, custom goal y campañas opt-in: cada hora, en el minuto 17.
+- Auditoría read-only de acciones, custom goal y campañas opt-in estables: una vez al día, a las 02:17. El `apply` hace además una verificación inmediata antes y después de cualquier cambio aprobado.
 - La auditoría no autorepara ni hace mutaciones externas; cualquier cambio exige preview, digest vigente y confirmación explícita.
 
 ## Referencias oficiales

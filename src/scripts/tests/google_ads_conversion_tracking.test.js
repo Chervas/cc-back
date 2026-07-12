@@ -643,6 +643,84 @@ function createMultiDestinationDependencies({ auditModel, failCustomers = new Se
   };
 }
 
+function testEventSpecificActionsDoNotInheritGlobalLeadResource() {
+  const actionIds = {
+    lead: ['7680195320', '7540337982'],
+    contact: ['7680195323', '7540337985'],
+    schedule: ['7680638785', '7540337988'],
+    purchase: ['7680638788', '7540337991']
+  };
+  const events = {};
+  for (const [eventName, [firstActionId, secondActionId]] of Object.entries(actionIds)) {
+    events[eventName] = {
+      enabled: eventName !== 'purchase',
+      conversion_action: null,
+      conversion_action_id: firstActionId,
+      destinations: [
+        {
+          key: 'propdental_parallel_185',
+          enabled: true,
+          customer_id: '1851215478',
+          conversion_action: null,
+          conversion_action_id: firstActionId
+        },
+        {
+          key: 'propdental_main_599',
+          enabled: true,
+          customer_id: '5992356722',
+          conversion_action: null,
+          conversion_action_id: secondActionId
+        }
+      ]
+    };
+  }
+  const config = {
+    enabled: true,
+    customer_id: '1851215478',
+    conversion_action: 'customers/1851215478/conversionActions/7680195320',
+    conversion_action_id: '7680195320',
+    events
+  };
+
+  for (const [eventName, expectedIds] of Object.entries(actionIds)) {
+    const configs = getGoogleAdsEventConfigs(config, eventName);
+    assert.equal(configs.length, 2);
+    assert.deepEqual(configs.map((item) => item.conversion_action), [null, null],
+      `${eventName} destinations must not inherit the global Lead resource`);
+    assert.deepEqual(configs.map((item) => item.conversion_action_id), expectedIds);
+    assert.deepEqual(configs.map((item) => buildConversionActionResource({
+      customerId: item.customer_id,
+      conversionAction: item.conversion_action,
+      conversionActionId: item.conversion_action_id,
+      sendTo: item.send_to
+    })), [
+      `customers/1851215478/conversionActions/${expectedIds[0]}`,
+      `customers/5992356722/conversionActions/${expectedIds[1]}`
+    ]);
+  }
+
+  const singleAccountContact = getGoogleAdsEventConfigs({
+    enabled: true,
+    customer_id: '1851215478',
+    conversion_action: 'customers/1851215478/conversionActions/7680195320',
+    conversion_action_id: '7680195320',
+    events: {
+      contact: {
+        enabled: true,
+        conversion_action: null,
+        conversion_action_id: '7680195323'
+      }
+    }
+  }, 'contact')[0];
+  assert.equal(singleAccountContact.conversion_action, null);
+  assert.equal(buildConversionActionResource({
+    customerId: singleAccountContact.customer_id,
+    conversionAction: singleAccountContact.conversion_action,
+    conversionActionId: singleAccountContact.conversion_action_id,
+    sendTo: singleAccountContact.send_to
+  }), 'customers/1851215478/conversionActions/7680195323');
+}
+
 async function testMultiDestinationSuccessAndDedupe() {
   const configs = getGoogleAdsEventConfigs(multiDestinationConfig, 'Lead');
   assert.equal(configs.length, 2);
@@ -1192,6 +1270,7 @@ async function run() {
   testAdvertisingConsentNormalizationKeepsPurposesSeparate();
   await testConsentModeRequiresPerVisitorAdvertisingConsent();
   await testFailedUploadIsAudited();
+  testEventSpecificActionsDoNotInheritGlobalLeadResource();
   await testMultiDestinationSuccessAndDedupe();
   await testMultiDestinationCampaignSelector();
   await testSelectedDestinationProviderFailure();
