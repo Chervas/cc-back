@@ -2,6 +2,8 @@
 
 // Contrato oficial de objetivos por campaña y custom goals:
 // https://developers.google.com/google-ads/api/docs/conversions/goals/campaign-goals
+// AD_CALL es el tipo oficial para llamadas originadas al pulsar un anuncio:
+// https://developers.google.com/google-ads/api/reference/rpc/v21/ConversionActionTypeEnum.ConversionActionType
 // Los tres mutates usados abajo admiten validate_only en Google Ads API v21.
 
 const crypto = require('node:crypto');
@@ -14,7 +16,7 @@ const {
   runtimeError,
 } = require('./googleAdsScopedRuntime.service');
 
-const SCHEMA_VERSION = 'clinicaclick-google-ads-conversion-goal-policy/v1';
+const SCHEMA_VERSION = 'clinicaclick-google-ads-conversion-goal-policy/v2';
 const GOAL_NAME = 'Clinicaclick · Captar nuevos pacientes';
 const STRATEGY_KEY = 'new_patients';
 const DESIRED_ACTION_KEYS = Object.freeze(['lead', 'contact', 'schedule']);
@@ -29,6 +31,7 @@ const CANONICAL_BY_NAME = new Map(
   Object.values(CANONICAL_ACTIONS).map((item) => [item.name, item]),
 );
 const MAX_CAMPAIGNS_PER_ACCOUNT = 200;
+const MAX_SUPPLEMENTAL_ACTIONS_PER_ACCOUNT = 20;
 const MAX_DIAGNOSTIC_ROWS = 200;
 const DEFAULT_DIAGNOSTIC_FRESHNESS_HOURS = 6;
 const NEW_GOAL_PLACEHOLDER = '@clinicaclick/new-custom-conversion-goal';
@@ -163,6 +166,53 @@ function normalizeCanonicalActionIds(raw, customerId) {
   return output;
 }
 
+function normalizeSupplementalActionIds(raw, customerId, canonicalActionIds) {
+  if (raw === undefined || raw === null) return [];
+  if (!Array.isArray(raw)) {
+    throw runtimeError(
+      'SUPPLEMENTAL_ACTION_IDS_INVALID',
+      `supplemental_action_ids de ${customerId} debe ser una lista explícita`,
+      400,
+    );
+  }
+  const ids = sortedUniqueIds(raw, {
+    label: `Las acciones suplementarias de ${customerId}`,
+    maximum: MAX_SUPPLEMENTAL_ACTIONS_PER_ACCOUNT,
+  });
+  const canonicalEntries = Object.entries(canonicalActionIds || {});
+  for (const id of ids) {
+    const canonical = canonicalEntries.find(([, canonicalId]) => canonicalId === id);
+    if (!canonical) continue;
+    if (canonical[0] === 'purchase') {
+      throw runtimeError(
+        'SUPPLEMENTAL_ACTION_PURCHASE_FORBIDDEN',
+        'Purchase nunca puede declararse como acción suplementaria',
+        400,
+      );
+    }
+    throw runtimeError(
+      'SUPPLEMENTAL_ACTION_CANONICAL_DUPLICATE',
+      `${CANONICAL_ACTIONS[canonical[0]].name} ya es obligatoria y no puede repetirse como suplementaria`,
+      400,
+    );
+  }
+  return ids;
+}
+
+/**
+ * Configuración por cuenta:
+ * {
+ *   customer_id, strategy_ref, campaign_ids,
+ *   canonical_action_ids: { lead, contact, schedule, purchase? },
+ *   supplemental_action_ids?: string[],
+ *   owned_custom_goal_resource_name?
+ * }
+ *
+ * `supplemental_action_ids` es una allowlist opcional y no cambia la política
+ * de las tres acciones canónicas. Cada ID se relee de Google y solo entra en
+ * el custom goal si pertenece a la cuenta, está ENABLED y es AD_CALL. El
+ * servicio jamás muta la propia ConversionAction suplementaria.
+ */
 function normalizeConfiguredAccounts(configuredAccounts) {
   if (!Array.isArray(configuredAccounts) || configuredAccounts.length === 0) {
     throw runtimeError('GOAL_POLICY_ACCOUNTS_REQUIRED', 'Debe indicarse al menos una cuenta Google Ads', 400);
@@ -204,12 +254,18 @@ function normalizeConfiguredAccounts(configuredAccounts) {
       raw?.canonical_action_ids ?? raw?.canonicalActionIds ?? raw?.canonical_actions,
       customerId,
     );
+    const supplementalActionIds = normalizeSupplementalActionIds(
+      raw?.supplemental_action_ids ?? raw?.supplementalActionIds,
+      customerId,
+      actionIds,
+    );
     return {
       customer_id: customerId,
       strategy_key: STRATEGY_KEY,
       strategy_ref: strategyRef,
       campaign_ids: campaignIds,
       canonical_action_ids: actionIds,
+      supplemental_action_ids: supplementalActionIds,
       owned_custom_goal_resource_name: normalizeOwnedGoalResource(
         customerId,
         raw?.owned_custom_goal_resource_name ?? raw?.ownedCustomGoalResourceName,
@@ -504,7 +560,75 @@ function canonicalActionState(account, snapshot, blockers) {
   return result;
 }
 
-function ownedGoalState(account, snapshot, desiredActions, blockers) {
+function supplementalActionState(account, snapshot, blockers) {
+  const providerActions = Array.isArray(snapshot.conversion_actions) ? snapshot.conversion_actions : [];
+  const items = [];
+  const validResourceNames = [];
+  for (const actionId of account.supplemental_action_ids || []) {
+    const matches = providerActions.filter((action) => action.id === actionId);
+    if (matches.length !== 1) {
+      blockers.push(blocker(
+        matches.length ? 'SUPPLEMENTAL_ACTION_ID_AMBIGUOUS' : 'SUPPLEMENTAL_ACTION_NOT_FOUND',
+        matches.length
+          ? `Google devolvió más de una acción con ID ${actionId}`
+          : `No existe la acción suplementaria ${actionId}`,
+        { action_id: actionId },
+      ));
+      items.push({ action_id: actionId, action: null, valid: false });
+      continue;
+    }
+    const action = matches[0];
+    const itemBlockers = [];
+    const expectedResource = actionResourceName(account.customer_id, actionId);
+    if (action.name === CANONICAL_ACTIONS.purchase.name) {
+      itemBlockers.push(blocker(
+        'SUPPLEMENTAL_ACTION_PURCHASE_FORBIDDEN',
+        'Purchase nunca puede formar parte de las acciones suplementarias',
+        { action_id: actionId },
+      ));
+    } else if (CANONICAL_BY_NAME.has(action.name)) {
+      itemBlockers.push(blocker(
+        'SUPPLEMENTAL_ACTION_CANONICAL_NAME_FORBIDDEN',
+        'Una acción con nombre canónico no puede entrar por la allowlist suplementaria',
+        { action_id: actionId, action_name: action.name },
+      ));
+    }
+    if (action.resource_name !== expectedResource || action.owner_customer !== `customers/${account.customer_id}`) {
+      itemBlockers.push(blocker(
+        'SUPPLEMENTAL_ACTION_ACCOUNT_MISMATCH',
+        `La acción suplementaria ${actionId} no pertenece inequívocamente a la cuenta`,
+        { action_id: actionId },
+      ));
+    }
+    if (action.status !== 'ENABLED') {
+      itemBlockers.push(blocker(
+        'SUPPLEMENTAL_ACTION_NOT_ENABLED',
+        `La acción suplementaria ${actionId} no está ENABLED`,
+        { action_id: actionId, observed: action.status },
+      ));
+    }
+    if (action.type !== 'AD_CALL') {
+      itemBlockers.push(blocker(
+        'SUPPLEMENTAL_ACTION_TYPE_NOT_ALLOWED',
+        `La acción suplementaria ${actionId} es ${action.type || 'de tipo desconocido'}; solo se admite AD_CALL`,
+        { action_id: actionId, observed: action.type, allowed_types: ['AD_CALL'] },
+      ));
+    }
+    blockers.push(...itemBlockers);
+    const valid = itemBlockers.length === 0;
+    if (valid) validResourceNames.push(action.resource_name);
+    items.push({
+      action_id: actionId,
+      action,
+      valid,
+      blockers: itemBlockers,
+      included_in_goal: valid,
+    });
+  }
+  return { items, valid_resource_names: validResourceNames };
+}
+
+function ownedGoalState(account, snapshot, desiredActions, supplementalActions, blockers) {
   const goals = Array.isArray(snapshot.custom_goals) ? snapshot.custom_goals : [];
   const nameMatches = goals.filter((goal) => goal.name === GOAL_NAME);
   const ownedResource = account.owned_custom_goal_resource_name;
@@ -546,7 +670,8 @@ function ownedGoalState(account, snapshot, desiredActions, blockers) {
   }
 
   const desiredResourceNames = DESIRED_ACTION_KEYS.map((key) => desiredActions[key]?.action?.resource_name)
-    .filter(Boolean);
+    .filter(Boolean)
+    .concat(supplementalActions.valid_resource_names || []);
   return {
     owned_goal: ownedGoal,
     goal_resource_for_plan: ownedGoal?.resource_name || NEW_GOAL_PLACEHOLDER,
@@ -735,8 +860,13 @@ function buildClinicaclickGoalPolicyPlan({ account, snapshot }) {
 
   const canonical = canonicalActionState(account, snapshot, blockers);
   const actions = Array.isArray(snapshot.conversion_actions) ? snapshot.conversion_actions : [];
-  const clientActions = actions.filter((action) => !CANONICAL_BY_NAME.has(action.name));
-  const goalState = ownedGoalState(account, snapshot, canonical, blockers);
+  const supplemental = supplementalActionState(account, snapshot, blockers);
+  const supplementalIds = new Set(account.supplemental_action_ids || []);
+  const clientActions = actions.filter((action) => !CANONICAL_BY_NAME.has(action.name)).map((action) => ({
+    ...action,
+    supplemental_allowlisted: supplementalIds.has(action.id),
+  }));
+  const goalState = ownedGoalState(account, snapshot, canonical, supplemental, blockers);
   const campaignState = configuredCampaignState(account, snapshot, goalState, blockers);
   const campaignGoalState = campaignConversionGoalState(account, snapshot, blockers);
   const warnings = [];
@@ -769,6 +899,13 @@ function buildClinicaclickGoalPolicyPlan({ account, snapshot }) {
       included_in_goal: entry.included_in_goal,
     };
   });
+  actionState.push(...supplemental.items.map((item) => ({
+    key: 'supplemental_ad_call',
+    configured_id: item.action_id,
+    action: item.action,
+    included_in_goal: item.included_in_goal === true,
+    valid: item.valid === true,
+  })));
   const campaignStateForDigest = campaignState.configured.map((item) => ({
     campaign_id: item.campaign_id,
     resource_name: item.resource_name || null,
@@ -815,10 +952,13 @@ function buildClinicaclickGoalPolicyPlan({ account, snapshot }) {
     strategy_key: account.strategy_key,
     strategy_ref: account.strategy_ref,
     configured_campaign_ids: account.campaign_ids,
+    supplemental_action_ids: account.supplemental_action_ids,
     owned_custom_goal_resource_name: account.owned_custom_goal_resource_name,
     desired_custom_goal: {
       name: GOAL_NAME,
       conversion_actions: goalState.desired_conversion_actions,
+      required_canonical_action_keys: DESIRED_ACTION_KEYS,
+      supplemental_action_ids: account.supplemental_action_ids,
       purchase_excluded: true,
     },
     observed_custom_goal: goalState.owned_goal,
@@ -837,6 +977,7 @@ function buildClinicaclickGoalPolicyPlan({ account, snapshot }) {
     custom_goal_state_digest: sha256(stableStringify(snapshot.custom_goals || [])),
     plan_digest: sha256(stableStringify(planCore)),
     canonical_actions: canonical,
+    supplemental_actions: supplemental.items,
     client_actions: clientActions,
     configured_campaigns: campaignState.configured,
     current_customer_conversion_goals: snapshot.customer_conversion_goals || [],
@@ -927,8 +1068,19 @@ function assertSafePlanOperations(account, plan) {
     throw runtimeError('GOAL_POLICY_PLAN_NOT_CANONICAL', 'El plan no conserva el contrato canónico', 403);
   }
   const desired = plan.desired_custom_goal.conversion_actions || [];
-  if (desired.length !== DESIRED_ACTION_KEYS.length) {
-    throw runtimeError('GOAL_POLICY_MEMBERSHIP_INVALID', 'El custom goal debe contener exactamente tres acciones', 403);
+  const expectedDesired = [
+    ...DESIRED_ACTION_KEYS.map((key) => actionResourceName(account.customer_id, account.canonical_action_ids[key])),
+    ...(account.supplemental_action_ids || []).map((id) => actionResourceName(account.customer_id, id)),
+  ];
+  if (
+    desired.length !== expectedDesired.length
+    || stableStringify(desired.slice().sort()) !== stableStringify(expectedDesired.slice().sort())
+  ) {
+    throw runtimeError(
+      'GOAL_POLICY_MEMBERSHIP_INVALID',
+      'El custom goal no coincide exactamente con las tres acciones canónicas y la allowlist AD_CALL',
+      403,
+    );
   }
   const purchaseResource = account.canonical_action_ids.purchase
     ? actionResourceName(account.customer_id, account.canonical_action_ids.purchase)
@@ -939,6 +1091,29 @@ function assertSafePlanOperations(account, plan) {
   for (const key of DESIRED_ACTION_KEYS) {
     if (!desired.includes(actionResourceName(account.customer_id, account.canonical_action_ids[key]))) {
       throw runtimeError('GOAL_POLICY_MEMBERSHIP_INVALID', `Falta ${CANONICAL_ACTIONS[key].name}`, 403);
+    }
+  }
+  const supplementalById = new Map(
+    (plan.supplemental_actions || []).map((item) => [item.action_id, item]),
+  );
+  for (const actionId of account.supplemental_action_ids || []) {
+    const item = supplementalById.get(actionId);
+    const action = item?.action;
+    if (
+      !item
+      || item.valid !== true
+      || action?.id !== actionId
+      || action?.type !== 'AD_CALL'
+      || action?.status !== 'ENABLED'
+      || CANONICAL_BY_NAME.has(action?.name)
+      || action?.resource_name !== actionResourceName(account.customer_id, actionId)
+      || action?.owner_customer !== `customers/${account.customer_id}`
+    ) {
+      throw runtimeError(
+        'GOAL_POLICY_SUPPLEMENTAL_ACTION_NOT_SAFE',
+        `La acción suplementaria ${actionId} no cumple el contrato AD_CALL`,
+        403,
+      );
     }
   }
   if ((plan.operations?.conversion_actions || []).length
@@ -1418,6 +1593,17 @@ async function auditClinicaclickGoalPolicy({
             status: account.plan.canonical_actions[key]?.action?.status || null,
             counting_type: account.plan.canonical_actions[key]?.action?.counting_type || null,
             primary_for_goal: account.plan.canonical_actions[key]?.action?.primary_for_goal ?? null,
+          }))
+        : [],
+      supplemental_actions: account.plan
+        ? (account.plan.supplemental_actions || []).map((item) => ({
+            id: item.action_id,
+            name: item.action?.name || null,
+            status: item.action?.status || null,
+            type: item.action?.type || null,
+            resource_name: item.action?.resource_name || null,
+            valid: item.valid === true,
+            included_in_goal: item.included_in_goal === true,
           }))
         : [],
       diagnostics,

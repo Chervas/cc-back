@@ -1785,8 +1785,9 @@ exports.ingestLead = asyncHandler(async (req, res) => {
     console.warn('⚠️ No se pudo enviar evento Meta CAPI:', e.message || e);
   }
 
-  // Google Ads Enhanced Conversions (server-side) al capturar lead/contact.
-  // Solo aplica cuando existe click id (gclid/gbraid/wbraid) y conversión configurada.
+  // Conversión server-side de Google Ads al capturar lead/contact.
+  // El contrato sanitario actual usa click id (gclid/gbraid/wbraid) y no PII;
+  // Enhanced Conversions queda como una capacidad separada y bloqueada por defecto.
   try {
     const googleCustomData = {
       gclid: gclidValue || null,
