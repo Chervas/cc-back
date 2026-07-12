@@ -265,7 +265,7 @@ class MetaSyncJobs {
         googleAdsSync: process.env.JOBS_GOOGLE_ADS_SCHEDULE || '20 0 * * *',
         googleAdsBackfill: process.env.JOBS_GOOGLE_ADS_BACKFILL_SCHEDULE || '30 5 * * 0',
         googleDataManagerDiagnostics: process.env.JOBS_GOOGLE_DATA_MANAGER_DIAGNOSTICS_SCHEDULE || '*/30 * * * *',
-        googleConversionGoalPolicyAudit: process.env.JOBS_GOOGLE_CONVERSION_GOAL_POLICY_AUDIT_SCHEDULE || '17 */6 * * *',
+        googleConversionGoalPolicyAudit: process.env.JOBS_GOOGLE_CONVERSION_GOAL_POLICY_AUDIT_SCHEDULE || '17 * * * *',
         webSync: process.env.JOBS_WEB_SCHEDULE || '15 4 * * *',
         webBackfill: process.env.JOBS_WEB_BACKFILL_SCHEDULE || '30 4 * * 0',
         analyticsSync: process.env.JOBS_ANALYTICS_SCHEDULE || '45 4 * * *',
