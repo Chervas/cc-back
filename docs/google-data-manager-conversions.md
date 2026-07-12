@@ -67,7 +67,7 @@ Al superar el gate se habilitan conjuntamente el disclosure y runtime, `google_a
 
 ## Escalera de optimización y botón Play
 
-Conectar Google Ads y medir conversiones no autoriza a cambiar los objetivos de las campañas. En Propdental **no debe pulsarse Play para aplicar el objetivo Schedule actual**: las campañas no tienen señal suficiente de `Schedule`, y sustituir de golpe sus objetivos históricos dejaría a Smart Bidding sin el volumen que utiliza hoy.
+Conectar Google Ads y medir conversiones no autoriza a cambiar los objetivos de las campañas. En Propdental el botón/estado interno `Play` **no aplica objetivos en Google**: para `connect_only` relee Consent Mode, ejecuta la comprobación de conversiones con `validateOnly` y actualiza únicamente `CampaignRequest`/`Campaign`. Los badges `Activa` de las campañas externas no son botones. La policy de objetivos se aprueba y aplica por una ruta separada; nunca debe sustituirse de golpe el objetivo histórico por Schedule sin la señal necesaria.
 
 La escalera segura es `Qualified Lead → Schedule → Purchase`:
 
