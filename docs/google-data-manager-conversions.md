@@ -73,6 +73,7 @@ Evidencia de Propdental al 2026-07-12:
 - `1851215478` conserva `Llamadas desde anuncios PROPDENTAL` y la variante Francia como `AD_CALL`, ambas con umbral de 5 segundos. `call_view` devolvió 13 llamadas en los 90 días anteriores: seis recibidas y cuatro de al menos 60 segundos. El umbral actual no debe cambiarse sin revisar calidad y obtener aprobación.
 - `5992356722` usa para sus Smart campaigns la acción Google `Calls from Smart Campaign Ads` con umbral de 30 segundos. La campaña Smart de Hospitalet registró tres `Business profile - Call` en los últimos 30 días.
 - Las acciones de clic telefónico observadas no deben convertirse en señal principal como sustituto de una llamada real.
+- Una consulta live read-only forzada a Google Ads API v24 devolvió correctamente las acciones `AD_CALL` y registros recientes de `call_view`, con la misma forma usada en v21. `UploadCallConversions` también sigue presente en v24. El transporte de conversiones de clic ya está migrado a Data Manager; el cliente general de Google Ads continúa configurado en v21 y debe promoverse a v24, con regresiones del resto de consultas y mutaciones, antes de la retirada prevista de v21.
 
 ## Monitorización
 
