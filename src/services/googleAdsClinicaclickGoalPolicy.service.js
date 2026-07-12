@@ -16,17 +16,29 @@ const {
   runtimeError,
 } = require('./googleAdsScopedRuntime.service');
 
-const SCHEMA_VERSION = 'clinicaclick-google-ads-conversion-goal-policy/v3';
+const SCHEMA_VERSION = 'clinicaclick-google-ads-conversion-goal-policy/v4';
+// Nombre reservado por la policy v3. Se conserva exclusivamente para detectar
+// configuraciones antiguas: nunca se crea ni se actualiza desde v4.
 const GOAL_NAME = 'Clinicaclick · Captar nuevos pacientes';
+const GOAL_NAME_PREFIX = 'Clinicaclick · Nuevos pacientes';
 const STRATEGY_KEY = 'new_patients';
-const DESIRED_ACTION_KEYS = Object.freeze(['lead', 'contact', 'schedule']);
-const DEFAULT_BIDDING_ACTION_KEYS = DESIRED_ACTION_KEYS;
-const ALL_CANONICAL_KEYS = Object.freeze([...DESIRED_ACTION_KEYS, 'purchase']);
+const OBSERVATION_ACTION_KEYS = Object.freeze(['lead', 'contact']);
+const BIDDING_SIGNAL_KEYS = Object.freeze(['qualified_lead', 'schedule', 'purchase']);
+const ALL_CANONICAL_KEYS = Object.freeze([...OBSERVATION_ACTION_KEYS, ...BIDDING_SIGNAL_KEYS]);
+// Alias exportado por compatibilidad. En v4 son las acciones que se auditan y
+// se mantienen secundarias globalmente, no las que comparten un custom goal.
+const DESIRED_ACTION_KEYS = ALL_CANONICAL_KEYS;
 const CANONICAL_ACTIONS = Object.freeze({
   lead: Object.freeze({ key: 'lead', name: 'Lead - ClinicaClick' }),
   contact: Object.freeze({ key: 'contact', name: 'Contact - ClinicaClick' }),
+  qualified_lead: Object.freeze({ key: 'qualified_lead', name: 'Qualified Lead - ClinicaClick' }),
   schedule: Object.freeze({ key: 'schedule', name: 'Schedule - ClinicaClick' }),
   purchase: Object.freeze({ key: 'purchase', name: 'Purchase - ClinicaClick' }),
+});
+const STAGE_LABELS = Object.freeze({
+  qualified_lead: 'Lead cualificado',
+  schedule: 'Cita cerrada',
+  purchase: 'Tratamiento aceptado',
 });
 const CANONICAL_BY_NAME = new Map(
   Object.values(CANONICAL_ACTIONS).map((item) => [item.name, item]),
@@ -109,6 +121,21 @@ function sha256(value) {
   return crypto.createHash('sha256').update(String(value)).digest('hex');
 }
 
+function cohortKey({ strategyRef, campaignIds }) {
+  return sha256(stableStringify({
+    strategy_ref: strategyRef,
+    campaign_ids: campaignIds,
+  })).slice(0, 10);
+}
+
+function stageGoalName(stage, cohort) {
+  const label = STAGE_LABELS[stage];
+  if (!label || !/^[a-f0-9]{10}$/.test(String(cohort || ''))) {
+    throw runtimeError('GOAL_POLICY_STAGE_INVALID', 'No se puede construir un custom goal sin etapa y cohorte válidas', 400);
+  }
+  return `${GOAL_NAME_PREFIX} · ${label} · cohorte ${cohort}`;
+}
+
 function goalResourcePattern(customerId) {
   return new RegExp(`^customers/${customerId}/customConversionGoals/\\d+$`);
 }
@@ -147,13 +174,6 @@ function normalizeCanonicalActionIds(raw, customerId) {
   const output = {};
   for (const key of ALL_CANONICAL_KEYS) {
     const id = cleanPositiveId(source[key]);
-    if (!id && DESIRED_ACTION_KEYS.includes(key)) {
-      throw runtimeError(
-        'CANONICAL_ACTION_ID_REQUIRED',
-        `${CANONICAL_ACTIONS[key].name} necesita un ID canónico explícito en ${customerId}`,
-        400,
-      );
-    }
     output[key] = id || null;
   }
   const ids = Object.values(output).filter(Boolean);
@@ -200,20 +220,24 @@ function normalizeSupplementalActionIds(raw, customerId, canonicalActionIds) {
   return ids;
 }
 
-function normalizeBiddingActionKeys(raw, customerId) {
-  if (raw === undefined || raw === null) return [...DEFAULT_BIDDING_ACTION_KEYS];
-  if (!Array.isArray(raw) || raw.length === 0) {
-    throw runtimeError(
-      'BIDDING_ACTION_KEYS_INVALID',
-      `bidding_action_keys de ${customerId} debe ser una lista no vacía`,
-      400,
-    );
+function normalizeBiddingSelection(raw, customerId) {
+  const explicitlyMissing = raw === undefined || raw === null;
+  const source = explicitlyMissing
+    ? ['lead', 'contact', 'schedule']
+    : (Array.isArray(raw) ? raw : [raw]);
+  if (source.length === 0) {
+    return {
+      input_keys: [],
+      bidding_action_key: null,
+      migration_required: true,
+      migration_reasons: ['BIDDING_SIGNAL_REQUIRED'],
+    };
   }
   const output = [];
   const seen = new Set();
-  for (const value of raw) {
+  for (const value of source) {
     const key = String(value || '').trim().toLowerCase();
-    if (!DESIRED_ACTION_KEYS.includes(key)) {
+    if (!ALL_CANONICAL_KEYS.includes(key)) {
       throw runtimeError(
         'BIDDING_ACTION_KEY_NOT_ALLOWED',
         `${key || 'El valor vacío'} no es una acción canónica apta para puja`,
@@ -224,25 +248,36 @@ function normalizeBiddingActionKeys(raw, customerId) {
     seen.add(key);
     output.push(key);
   }
-  return output.sort((left, right) => (
-    DESIRED_ACTION_KEYS.indexOf(left) - DESIRED_ACTION_KEYS.indexOf(right)
-  ));
+  output.sort((left, right) => ALL_CANONICAL_KEYS.indexOf(left) - ALL_CANONICAL_KEYS.indexOf(right));
+  const validSingleStage = output.length === 1 && BIDDING_SIGNAL_KEYS.includes(output[0]);
+  const migrationReasons = [];
+  if (explicitlyMissing) migrationReasons.push('LEGACY_BIDDING_SELECTION_IMPLICIT');
+  if (output.some((key) => OBSERVATION_ACTION_KEYS.includes(key))) {
+    migrationReasons.push('LEGACY_OBSERVATION_ACTION_USED_FOR_BIDDING');
+  }
+  if (output.length !== 1) migrationReasons.push('MULTIPLE_BIDDING_SIGNALS_NOT_ALLOWED');
+  if (!validSingleStage && !migrationReasons.length) migrationReasons.push('BIDDING_SIGNAL_REQUIRED');
+  return {
+    input_keys: output,
+    bidding_action_key: validSingleStage ? output[0] : null,
+    migration_required: migrationReasons.length > 0,
+    migration_reasons: migrationReasons,
+  };
 }
 
 /**
  * Configuración por cuenta:
  * {
  *   customer_id, strategy_ref, campaign_ids,
- *   canonical_action_ids: { lead, contact, schedule, purchase? },
- *   bidding_action_keys?: ['lead'|'contact'|'schedule'],
+ *   canonical_action_ids: { lead, contact, qualified_lead, schedule, purchase },
+ *   bidding_action_key: 'qualified_lead'|'schedule'|'purchase',
  *   supplemental_action_ids?: string[],
  *   owned_custom_goal_resource_name?
  * }
  *
- * `supplemental_action_ids` es una allowlist opcional y no cambia la política
- * de las tres acciones canónicas. Cada ID se relee de Google y solo entra en
- * el custom goal si pertenece a la cuenta, está ENABLED y es AD_CALL. El
- * servicio jamás muta la propia ConversionAction suplementaria.
+ * Los `supplemental_action_ids` de v3 se siguen leyendo para diagnosticar la
+ * migración, pero v4 no los incorpora al custom goal. Cada cohorte y etapa usa
+ * un goal inmutable e inequívoco con exactamente una señal canónica.
  */
 function normalizeConfiguredAccounts(configuredAccounts) {
   if (!Array.isArray(configuredAccounts) || configuredAccounts.length === 0) {
@@ -290,17 +325,34 @@ function normalizeConfiguredAccounts(configuredAccounts) {
       customerId,
       actionIds,
     );
-    const biddingActionKeys = normalizeBiddingActionKeys(
-      raw?.bidding_action_keys ?? raw?.biddingActionKeys,
+    const biddingSelection = normalizeBiddingSelection(
+      raw?.bidding_action_key
+        ?? raw?.biddingActionKey
+        ?? raw?.policy_stage
+        ?? raw?.policyStage
+        ?? raw?.bidding_action_keys
+        ?? raw?.biddingActionKeys,
       customerId,
     );
+    const cohort = cohortKey({ strategyRef, campaignIds });
     return {
       customer_id: customerId,
       strategy_key: STRATEGY_KEY,
       strategy_ref: strategyRef,
       campaign_ids: campaignIds,
       canonical_action_ids: actionIds,
-      bidding_action_keys: biddingActionKeys,
+      bidding_action_key: biddingSelection.bidding_action_key,
+      bidding_action_keys: biddingSelection.input_keys,
+      policy_stage: biddingSelection.bidding_action_key,
+      cohort_key: cohort,
+      custom_goal_name: biddingSelection.bidding_action_key
+        ? stageGoalName(biddingSelection.bidding_action_key, cohort)
+        : null,
+      migration_required: biddingSelection.migration_required || supplementalActionIds.length > 0,
+      migration_reasons: [
+        ...biddingSelection.migration_reasons,
+        ...(supplementalActionIds.length ? ['SUPPLEMENTAL_BIDDING_ACTIONS_NOT_SUPPORTED'] : []),
+      ],
       supplemental_action_ids: supplementalActionIds,
       owned_custom_goal_resource_name: normalizeOwnedGoalResource(
         customerId,
@@ -360,6 +412,7 @@ function campaignConfigFromRow(row) {
     campaign_name: cleanString(campaign.name),
     campaign_status: cleanString(campaign.status)?.toUpperCase() || null,
     advertising_channel_type: cleanString(campaign.advertisingChannelType ?? campaign.advertising_channel_type)?.toUpperCase() || null,
+    advertising_channel_sub_type: cleanString(campaign.advertisingChannelSubType ?? campaign.advertising_channel_sub_type)?.toUpperCase() || null,
     goal_config_level: cleanString(config.goalConfigLevel ?? config.goal_config_level)?.toUpperCase() || null,
     custom_conversion_goal: cleanString(config.customConversionGoal ?? config.custom_conversion_goal),
     custom_goal_name: cleanString(customGoal.name),
@@ -475,6 +528,7 @@ async function fetchGoalPolicySnapshot({ runtime, account, request = googleAdsRe
       '  campaign.name,',
       '  campaign.status,',
       '  campaign.advertising_channel_type,',
+      '  campaign.advertising_channel_sub_type,',
       '  custom_conversion_goal.name,',
       '  custom_conversion_goal.status',
       'FROM conversion_goal_campaign_config',
@@ -546,6 +600,13 @@ function canonicalActionState(account, snapshot, blockers) {
         { action_key: key, action_ids: nameMatches.map((action) => action.id) },
       ));
     }
+    if (!configuredId) {
+      blockers.push(blocker(
+        'CANONICAL_ACTION_ID_REQUIRED',
+        `${definition.name} necesita un ID canónico explícito en ${account.customer_id}`,
+        { action_key: key },
+      ));
+    }
     if (configuredId && !configuredMatch) {
       blockers.push(blocker(
         'CANONICAL_ACTION_NOT_FOUND',
@@ -568,9 +629,9 @@ function canonicalActionState(account, snapshot, blockers) {
       expected_name: definition.name,
       configured_id: configuredId,
       action,
-      included_in_goal: account.bidding_action_keys.includes(key),
+      included_in_goal: account.bidding_action_key === key,
     };
-    if (!DESIRED_ACTION_KEYS.includes(key) || !action) continue;
+    if (!action || !configuredId) continue;
     const expectedResource = actionResourceName(account.customer_id, configuredId);
     for (const issue of [
       action.id !== configuredId
@@ -658,7 +719,7 @@ function supplementalActionState(account, snapshot, blockers) {
       action,
       valid,
       blockers: itemBlockers,
-      included_in_goal: valid,
+      included_in_goal: false,
     });
   }
   return { items, valid_resource_names: validResourceNames };
@@ -666,7 +727,9 @@ function supplementalActionState(account, snapshot, blockers) {
 
 function ownedGoalState(account, snapshot, desiredActions, supplementalActions, blockers) {
   const goals = Array.isArray(snapshot.custom_goals) ? snapshot.custom_goals : [];
-  const nameMatches = goals.filter((goal) => goal.name === GOAL_NAME);
+  const expectedName = account.custom_goal_name;
+  const nameMatches = expectedName ? goals.filter((goal) => goal.name === expectedName) : [];
+  const legacyGoals = goals.filter((goal) => goal.name === GOAL_NAME);
   const ownedResource = account.owned_custom_goal_resource_name;
   let ownedGoal = ownedResource
     ? goals.find((goal) => goal.resource_name === ownedResource) || null
@@ -679,11 +742,24 @@ function ownedGoalState(account, snapshot, desiredActions, supplementalActions, 
       { resource_name: ownedResource },
     ));
   }
-  if (ownedGoal && ownedGoal.name !== GOAL_NAME) {
+  if (ownedGoal && ownedGoal.name === GOAL_NAME) {
+    blockers.push(blocker(
+      'LEGACY_CUSTOM_GOAL_MIGRATION_REQUIRED',
+      'El recurso configurado usa el goal genérico v3; debe asignarse un goal nuevo y específico de etapa/cohorte',
+      { resource_name: ownedGoal.resource_name, observed_name: ownedGoal.name },
+    ));
+  } else if (ownedGoal && ownedGoal.name !== expectedName) {
     blockers.push(blocker(
       'OWNED_CUSTOM_GOAL_NAME_MISMATCH',
-      'El recurso declarado como propio tiene otro nombre y no se sobrescribirá',
-      { resource_name: ownedGoal.resource_name, observed_name: ownedGoal.name },
+      'El recurso declarado como propio pertenece a otra etapa o cohorte y no se sobrescribirá',
+      { resource_name: ownedGoal.resource_name, observed_name: ownedGoal.name, expected_name: expectedName },
+    ));
+  }
+  if (legacyGoals.length && !legacyGoals.some((goal) => goal.resource_name === ownedResource)) {
+    blockers.push(blocker(
+      'LEGACY_CUSTOM_GOAL_MIGRATION_REQUIRED',
+      'Existe un goal genérico v3; no se reutilizará ni modificará silenciosamente',
+      { resource_names: legacyGoals.map((goal) => goal.resource_name) },
     ));
   }
   const foreignNameCollisions = nameMatches.filter((goal) => goal.resource_name !== ownedResource);
@@ -705,15 +781,21 @@ function ownedGoalState(account, snapshot, desiredActions, supplementalActions, 
     ));
   }
 
-  const desiredResourceNames = account.bidding_action_keys.map((key) => desiredActions[key]?.action?.resource_name)
-    .filter(Boolean)
-    .concat(supplementalActions.valid_resource_names || []);
+  const desiredResourceNames = account.bidding_action_key
+    ? [desiredActions[account.bidding_action_key]?.action?.resource_name].filter(Boolean)
+    : [];
   return {
     owned_goal: ownedGoal,
     goal_resource_for_plan: ownedGoal?.resource_name || NEW_GOAL_PLACEHOLDER,
     desired_conversion_actions: desiredResourceNames,
     name_collisions: nameMatches,
+    legacy_goals: legacyGoals,
   };
+}
+
+function isSmartCampaign(config) {
+  return config?.advertising_channel_type === 'SMART'
+    || String(config?.advertising_channel_sub_type || '').includes('SMART');
 }
 
 function configuredCampaignState(account, snapshot, goalState, blockers) {
@@ -745,6 +827,18 @@ function configuredCampaignState(account, snapshot, goalState, blockers) {
         { campaign_id: campaignId },
       ));
     }
+    const smartCampaign = isSmartCampaign(current);
+    if (smartCampaign) {
+      blockers.push(blocker(
+        'SMART_CAMPAIGN_OBSERVE_ONLY',
+        `La campaña Smart ${campaignId} solo se audita; Google no permite aplicar esta policy de custom goal con garantías`,
+        {
+          campaign_id: campaignId,
+          advertising_channel_type: current.advertising_channel_type,
+          advertising_channel_sub_type: current.advertising_channel_sub_type,
+        },
+      ));
+    }
     const currentGoal = current.custom_conversion_goal;
     const ownedResource = goalState.owned_goal?.resource_name || null;
     if (currentGoal && currentGoal !== ownedResource) {
@@ -756,7 +850,7 @@ function configuredCampaignState(account, snapshot, goalState, blockers) {
     }
     const changed = currentGoal !== goalState.goal_resource_for_plan;
     configured.push({ ...current, found: true, changed });
-    if (changed) {
+    if (changed && !smartCampaign) {
       operations.push({
         update: {
           resourceName: expectedResource,
@@ -790,6 +884,11 @@ function campaignConversionGoalState(account, snapshot, blockers) {
   const before = [];
   const operations = [];
   const rollbackOperations = [];
+  const smartCampaignIds = new Set(
+    (Array.isArray(snapshot.campaign_configs) ? snapshot.campaign_configs : [])
+      .filter(isSmartCampaign)
+      .map((config) => config.campaign_id),
+  );
   for (const campaignId of account.campaign_ids) {
     const rows = providerGoals.filter((goal) => goal.campaign_id === campaignId);
     if (!rows.length) {
@@ -849,7 +948,7 @@ function campaignConversionGoalState(account, snapshot, blockers) {
         origin: goal.origin,
         biddable: goal.biddable,
       });
-      if (goal.biddable !== true) continue;
+      if (goal.biddable !== true || smartCampaignIds.has(campaignId)) continue;
       operations.push({
         update: {
           resourceName: goal.resource_name,
@@ -878,6 +977,20 @@ function campaignConversionGoalState(account, snapshot, blockers) {
 
 function buildClinicaclickGoalPolicyPlan({ account, snapshot }) {
   const blockers = [];
+  if (account.migration_required) {
+    blockers.push(blocker(
+      'GOAL_POLICY_MIGRATION_REQUIRED',
+      'La configuración pertenece al contrato v3 o intenta usar más de una señal; debe migrarse explícitamente antes de aplicar',
+      { reasons: account.migration_reasons || [] },
+    ));
+  }
+  if (!account.bidding_action_key || !BIDDING_SIGNAL_KEYS.includes(account.bidding_action_key)) {
+    blockers.push(blocker(
+      'GOAL_POLICY_SINGLE_BIDDING_SIGNAL_REQUIRED',
+      'Cada policy/cohorte debe elegir exactamente una señal: qualified_lead, schedule o purchase',
+      { observed: account.bidding_action_keys || [] },
+    ));
+  }
   const conversionTracking = snapshot?.conversion_tracking || {};
   if (conversionTracking.customer_id !== account.customer_id) {
     blockers.push(blocker(
@@ -911,7 +1024,7 @@ function buildClinicaclickGoalPolicyPlan({ account, snapshot }) {
   if (!goalState.owned_goal) {
     goalOperation = {
       create: {
-        name: GOAL_NAME,
+        name: account.custom_goal_name,
         conversionActions: goalState.desired_conversion_actions,
         status: 'ENABLED',
       },
@@ -946,6 +1059,8 @@ function buildClinicaclickGoalPolicyPlan({ account, snapshot }) {
     campaign_id: item.campaign_id,
     resource_name: item.resource_name || null,
     campaign_status: item.campaign_status || null,
+    advertising_channel_type: item.advertising_channel_type || null,
+    advertising_channel_sub_type: item.advertising_channel_sub_type || null,
     goal_config_level: item.goal_config_level || null,
     custom_conversion_goal: item.custom_conversion_goal || null,
   }));
@@ -987,17 +1102,23 @@ function buildClinicaclickGoalPolicyPlan({ account, snapshot }) {
     customer_id: account.customer_id,
     strategy_key: account.strategy_key,
     strategy_ref: account.strategy_ref,
+    policy_stage: account.policy_stage,
+    cohort_key: account.cohort_key,
     configured_campaign_ids: account.campaign_ids,
+    bidding_action_key: account.bidding_action_key,
     bidding_action_keys: account.bidding_action_keys,
     supplemental_action_ids: account.supplemental_action_ids,
     owned_custom_goal_resource_name: account.owned_custom_goal_resource_name,
     desired_custom_goal: {
-      name: GOAL_NAME,
+      name: account.custom_goal_name,
       conversion_actions: goalState.desired_conversion_actions,
-      required_canonical_action_keys: account.bidding_action_keys,
+      required_canonical_action_keys: account.bidding_action_key ? [account.bidding_action_key] : [],
       tracked_canonical_action_keys: DESIRED_ACTION_KEYS,
-      supplemental_action_ids: account.supplemental_action_ids,
-      purchase_excluded: true,
+      observation_only_action_keys: OBSERVATION_ACTION_KEYS,
+      supplemental_action_ids: [],
+      single_bidding_signal: true,
+      purchase_included: account.bidding_action_key === 'purchase',
+      legacy_generic_goal_forbidden: true,
     },
     observed_custom_goal: goalState.owned_goal,
     outside_opt_in_campaigns: campaignState.outside_opt_in.map((item) => item.campaign_id),
@@ -1005,10 +1126,17 @@ function buildClinicaclickGoalPolicyPlan({ account, snapshot }) {
     rollback,
     blockers,
     warnings,
+    migration: {
+      required: account.migration_required || goalState.legacy_goals.length > 0,
+      reasons: account.migration_reasons || [],
+      legacy_custom_goal_resources: goalState.legacy_goals.map((goal) => goal.resource_name),
+    },
   };
   return {
     ...planCore,
     ready: blockers.length === 0,
+    apply_allowed: blockers.length === 0,
+    observe_only: blockers.some((item) => item.code === 'SMART_CAMPAIGN_OBSERVE_ONLY'),
     changed: !!goalOperation || campaignState.operations.length > 0 || campaignGoalState.operations.length > 0,
     action_state_digest: sha256(stableStringify(actionState)),
     campaign_state_digest: sha256(stableStringify(campaignStateForDigest)),
@@ -1102,13 +1230,20 @@ function assertSafePlanOperations(account, plan) {
   if (!plan?.ready) {
     throw runtimeError('GOAL_POLICY_PLAN_BLOCKED', 'El plan contiene bloqueos y no puede aplicarse', 409);
   }
-  if (plan.desired_custom_goal?.name !== GOAL_NAME || plan.desired_custom_goal?.purchase_excluded !== true) {
+  if (
+    !account.bidding_action_key
+    || !BIDDING_SIGNAL_KEYS.includes(account.bidding_action_key)
+    || account.migration_required
+    || plan.desired_custom_goal?.name !== account.custom_goal_name
+    || plan.desired_custom_goal?.name === GOAL_NAME
+    || plan.desired_custom_goal?.single_bidding_signal !== true
+    || plan.desired_custom_goal?.legacy_generic_goal_forbidden !== true
+  ) {
     throw runtimeError('GOAL_POLICY_PLAN_NOT_CANONICAL', 'El plan no conserva el contrato canónico', 403);
   }
   const desired = plan.desired_custom_goal.conversion_actions || [];
   const expectedDesired = [
-    ...account.bidding_action_keys.map((key) => actionResourceName(account.customer_id, account.canonical_action_ids[key])),
-    ...(account.supplemental_action_ids || []).map((id) => actionResourceName(account.customer_id, id)),
+    actionResourceName(account.customer_id, account.canonical_action_ids[account.bidding_action_key]),
   ];
   if (
     desired.length !== expectedDesired.length
@@ -1116,43 +1251,21 @@ function assertSafePlanOperations(account, plan) {
   ) {
     throw runtimeError(
       'GOAL_POLICY_MEMBERSHIP_INVALID',
-      'El custom goal no coincide exactamente con las acciones de puja aprobadas y la allowlist AD_CALL',
+      'El custom goal no contiene exactamente la única señal canónica aprobada',
       403,
     );
   }
-  const purchaseResource = account.canonical_action_ids.purchase
-    ? actionResourceName(account.customer_id, account.canonical_action_ids.purchase)
-    : null;
-  if (purchaseResource && desired.includes(purchaseResource)) {
-    throw runtimeError('GOAL_POLICY_PURCHASE_INCLUDED', 'Purchase no puede formar parte de este custom goal', 403);
+  if (desired.length !== 1 || !desired.includes(expectedDesired[0])) {
+    throw runtimeError('GOAL_POLICY_MEMBERSHIP_INVALID', `Falta ${CANONICAL_ACTIONS[account.bidding_action_key].name}`, 403);
   }
-  for (const key of account.bidding_action_keys) {
-    if (!desired.includes(actionResourceName(account.customer_id, account.canonical_action_ids[key]))) {
-      throw runtimeError('GOAL_POLICY_MEMBERSHIP_INVALID', `Falta ${CANONICAL_ACTIONS[key].name}`, 403);
+  for (const key of OBSERVATION_ACTION_KEYS) {
+    const resourceName = actionResourceName(account.customer_id, account.canonical_action_ids[key]);
+    if (desired.includes(resourceName)) {
+      throw runtimeError('GOAL_POLICY_OBSERVATION_ACTION_INCLUDED', `${CANONICAL_ACTIONS[key].name} debe ser solo observación`, 403);
     }
   }
-  const supplementalById = new Map(
-    (plan.supplemental_actions || []).map((item) => [item.action_id, item]),
-  );
-  for (const actionId of account.supplemental_action_ids || []) {
-    const item = supplementalById.get(actionId);
-    const action = item?.action;
-    if (
-      !item
-      || item.valid !== true
-      || action?.id !== actionId
-      || action?.type !== 'AD_CALL'
-      || action?.status !== 'ENABLED'
-      || CANONICAL_BY_NAME.has(action?.name)
-      || action?.resource_name !== actionResourceName(account.customer_id, actionId)
-      || action?.owner_customer !== `customers/${account.customer_id}`
-    ) {
-      throw runtimeError(
-        'GOAL_POLICY_SUPPLEMENTAL_ACTION_NOT_SAFE',
-        `La acción suplementaria ${actionId} no cumple el contrato AD_CALL`,
-        403,
-      );
-    }
+  if ((account.supplemental_action_ids || []).length || (plan.desired_custom_goal.supplemental_action_ids || []).length) {
+    throw runtimeError('GOAL_POLICY_SUPPLEMENTAL_ACTION_NOT_SAFE', 'La policy v4 no admite señales suplementarias de puja', 403);
   }
   if ((plan.operations?.conversion_actions || []).length
     || (plan.operations?.customer_conversion_goals || []).length) {
@@ -1167,7 +1280,7 @@ function assertSafePlanOperations(account, plan) {
     }
     if (goalOperation.create) {
       if (
-        goalOperation.create.name !== GOAL_NAME
+        goalOperation.create.name !== account.custom_goal_name
         || goalOperation.create.status !== 'ENABLED'
         || stableStringify(goalOperation.create.conversionActions) !== stableStringify(desired)
       ) {
@@ -1181,6 +1294,12 @@ function assertSafePlanOperations(account, plan) {
     ) {
       throw runtimeError('GOAL_POLICY_CUSTOM_GOAL_OPERATION_INVALID', 'La actualización del custom goal no es canónica', 403);
     }
+  }
+  if ((plan.configured_campaigns || []).some((campaign) => (
+    campaign.advertising_channel_type === 'SMART'
+    || String(campaign.advertising_channel_sub_type || '').includes('SMART')
+  ))) {
+    throw runtimeError('SMART_CAMPAIGN_OBSERVE_ONLY', 'Las campañas Smart son solo observación', 403);
   }
   const allowedCampaigns = new Set(account.campaign_ids);
   for (const operation of plan.operations?.campaign_goal_configs || []) {
@@ -1814,10 +1933,13 @@ async function executePersistedGoalPolicyAudit({ dependencies = {} } = {}) {
 
 module.exports = {
   ALL_CANONICAL_KEYS,
+  BIDDING_SIGNAL_KEYS,
   CANONICAL_ACTIONS,
   DESIRED_ACTION_KEYS,
   GOAL_NAME,
+  GOAL_NAME_PREFIX,
   NEW_GOAL_PLACEHOLDER,
+  OBSERVATION_ACTION_KEYS,
   SCHEMA_VERSION,
   STRATEGY_KEY,
   applyClinicaclickGoalPolicy,
@@ -1833,5 +1955,6 @@ module.exports = {
   loadDiagnosticsSnapshot,
   normalizeConfiguredAccounts,
   previewClinicaclickGoalPolicy,
+  stageGoalName,
   stableStringify,
 };

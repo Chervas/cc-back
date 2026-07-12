@@ -26,6 +26,11 @@ const {
 const { resolveScopedGoogleAdsRuntime } = require('../services/googleAdsScopedRuntime.service');
 const {
   GOOGLE_DATA_MANAGER_SCOPE,
+  GOOGLE_ENHANCED_CONVERSION_ALLOWED_IDENTIFIERS,
+  GOOGLE_ENHANCED_CONVERSION_POLICY_MODE,
+  GOOGLE_ENHANCED_CONVERSION_PROPDENTAL_CUSTOMER_IDS,
+  GOOGLE_ENHANCED_CONVERSION_PROPDENTAL_EVENTS,
+  validateEnhancedConversionAuthorization,
   uploadConversionEvent: uploadGoogleDataManagerConversion
 } = require('../services/googleDataManagerConversion.service');
 const {
@@ -75,13 +80,17 @@ const SocialAdsActionsDaily = db.SocialAdsActionsDaily;
 const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID || '';
 const GOOGLE_CLIENT_SECRET = process.env.GOOGLE_CLIENT_SECRET || '';
 const GOOGLE_ADS_SCOPE = 'https://www.googleapis.com/auth/adwords';
+const ENHANCED_CONVERSION_ACTIVATION_GATE_VERSION = 1;
+const ENHANCED_CONVERSION_PROPDENTAL_GROUP_ID = 5;
+const ENHANCED_CONVERSION_GOOGLE_EVIDENCE_REF = '4-1893000040437';
+const ENHANCED_CONVERSION_GOOGLE_GUIDANCE_AT = '2026-03-23T07:11:00.000Z';
 
 // `managed_self` is retained only to read historical configurations. New
 // onboarding/strategy writes must use one of the two current product modes.
 const VALID_MODES = new Set(['connect_only', 'managed_self', 'managed_service']);
 const CREATABLE_MODES = new Set(['connect_only', 'managed_service']);
 const VALID_PROVIDERS = new Set(['google_ads', 'meta_ads']);
-const VALID_EVENTS = ['lead', 'contact', 'schedule', 'purchase'];
+const VALID_EVENTS = ['lead', 'contact', 'qualified_lead', 'schedule', 'purchase'];
 const DEFAULT_ENABLED_CONVERSION_EVENTS = ['lead', 'contact', 'schedule'];
 const VALID_STRATEGY_OBJECTIVES = new Set(['new_patients']);
 const VALID_STRATEGY_CHANNELS = new Set(['meta_ads', 'google_ads', 'whatsapp', 'email', 'remarketing', 'landing', 'youtube', 'phone']);
@@ -111,6 +120,11 @@ const EVENT_CATALOG = {
     name: 'Contact - ClinicaClick',
     category: 'CONTACT',
     detect: ['contact', 'llamada', 'call']
+  },
+  qualified_lead: {
+    name: 'Qualified Lead - ClinicaClick',
+    category: 'QUALIFIED_LEAD',
+    detect: ['qualified lead', 'lead válido', 'lead valido', 'cualificado']
   },
   schedule: {
     name: 'Schedule - ClinicaClick',
@@ -2060,6 +2074,7 @@ function buildSuggestedMapping(actions) {
   const mapping = {
     lead: null,
     contact: null,
+    qualified_lead: null,
     schedule: null,
     purchase: null
   };
@@ -2083,7 +2098,7 @@ function buildSuggestedMapping(actions) {
 }
 
 function buildClinicaclickManagedMapping(actions) {
-  const mapping = { lead: null, contact: null, schedule: null, purchase: null };
+  const mapping = { lead: null, contact: null, qualified_lead: null, schedule: null, purchase: null };
   const canonicalNames = new Map(
     VALID_EVENTS.map((key) => [String(EVENT_CATALOG[key].name || '').trim().toLowerCase(), key])
   );
@@ -2127,7 +2142,12 @@ function listToUniqueArray(values) {
   return out;
 }
 
-function buildGoogleAdsCapabilities(connected, hasAdsScope, hasDataManagerScope = false) {
+function buildGoogleAdsCapabilities(
+  connected,
+  hasAdsScope,
+  hasDataManagerScope = false,
+  accounts = []
+) {
   const adsEnabled = !!connected && !!hasAdsScope;
   const quotaProjectConfigured = Boolean(
     process.env.GOOGLE_DATA_MANAGER_QUOTA_PROJECT
@@ -2136,20 +2156,115 @@ function buildGoogleAdsCapabilities(connected, hasAdsScope, hasDataManagerScope 
   const dataManagerMissing = [];
   if (!hasDataManagerScope) dataManagerMissing.push('oauth_scope');
   if (!quotaProjectConfigured) dataManagerMissing.push('quota_project');
+  const dataManagerReady = adsEnabled && dataManagerMissing.length === 0;
+  const enhancedConversionsEnabledAccounts = (Array.isArray(accounts) ? accounts : [])
+    .filter((account) => (
+      account?.enhanced_conversions_for_leads_enabled === true
+      && GOOGLE_ENHANCED_CONVERSION_PROPDENTAL_CUSTOMER_IDS.includes(
+        normalizeCustomerId(account?.customer_id || '')
+      )
+    ))
+    .map((account) => account.customer_id)
+    .filter(Boolean);
   return {
     can_list_conversion_actions: adsEnabled,
     can_create_conversion_actions: adsEnabled,
-    // Healthcare conversions must not contain customer-provided identifiers.
-    can_upload_enhanced_conversions: false,
-    can_upload_server_side_conversions: adsEnabled && dataManagerMissing.length === 0,
-    data_manager_ready: adsEnabled && dataManagerMissing.length === 0,
+    // Data Manager y la autorización documentada hacen posible el envío, pero
+    // Google exige además activar el ajuste en cada cuenta de Ads. Ese campo
+    // es de solo lectura en la API y se presenta por cuenta en el bootstrap.
+    enhanced_conversions_supported: dataManagerReady,
+    can_upload_enhanced_conversions:
+      dataManagerReady && enhancedConversionsEnabledAccounts.length > 0,
+    enhanced_conversions_enabled_accounts: enhancedConversionsEnabledAccounts,
+    enhanced_conversions_require_account_activation:
+      dataManagerReady && enhancedConversionsEnabledAccounts.length === 0,
+    can_upload_server_side_conversions: dataManagerReady,
+    data_manager_ready: dataManagerReady,
     data_manager_scope_granted: !!hasDataManagerScope,
     data_manager_quota_project_configured: quotaProjectConfigured,
     data_manager_missing: dataManagerMissing,
     conversion_validation_required: true,
     conversion_validation_status: 'not_validated',
-    user_data_policy: 'blocked_healthcare'
+    user_data_policy: 'documented_account_authorization_required'
   };
+}
+
+function readGoogleConversionTrackingSettings(response, customerId) {
+  const rows = Array.isArray(response?.results) ? response.results : [];
+  const customer = rows[0]?.customer || {};
+  const settings = customer.conversionTrackingSetting
+    || customer.conversion_tracking_setting
+    || {};
+  const conversionCustomer = String(
+    settings.googleAdsConversionCustomer
+      ?? settings.google_ads_conversion_customer
+      ?? ''
+  ).trim() || null;
+  return {
+    customer_id: normalizeCustomerId(customer.id || customerId),
+    accepted_customer_data_terms:
+      (settings.acceptedCustomerDataTerms ?? settings.accepted_customer_data_terms) === true,
+    enhanced_conversions_for_leads_enabled:
+      (settings.enhancedConversionsForLeadsEnabled
+        ?? settings.enhanced_conversions_for_leads_enabled) === true,
+    google_ads_conversion_customer: conversionCustomer,
+    conversion_customer_id: conversionCustomer
+      ? normalizeCustomerId(conversionCustomer.split('/').pop())
+      : null
+  };
+}
+
+async function enrichGoogleAdsAccountsWithConversionTracking({
+  userId,
+  scope,
+  accounts
+}) {
+  const rows = Array.isArray(accounts) ? accounts : [];
+  return Promise.all(rows.map(async (account) => {
+    const customerId = normalizeCustomerId(account?.customer_id || '');
+    if (!customerId) return account;
+    try {
+      const runtime = await resolveScopedGoogleAdsRuntime({
+        userId,
+        clinicId: scope.clinic_id,
+        groupId: scope.group_id,
+        assignmentScope: scope.assignment_scope,
+        customerId
+      });
+      const response = await googleAdsRequest(
+        'POST',
+        `customers/${customerId}/googleAds:search`,
+        {
+          accessToken: runtime.accessToken,
+          loginCustomerId: runtime.loginCustomerId || undefined,
+          singleAttempt: true,
+          timeoutMs: 20_000,
+          data: {
+            query: [
+              'SELECT',
+              '  customer.id,',
+              '  customer.conversion_tracking_setting.accepted_customer_data_terms,',
+              '  customer.conversion_tracking_setting.enhanced_conversions_for_leads_enabled,',
+              '  customer.conversion_tracking_setting.google_ads_conversion_customer',
+              'FROM customer'
+            ].join('\n')
+          }
+        }
+      );
+      return {
+        ...account,
+        ...readGoogleConversionTrackingSettings(response, customerId),
+        conversion_tracking_settings_available: true
+      };
+    } catch (error) {
+      return {
+        ...account,
+        conversion_tracking_settings_available: false,
+        conversion_tracking_settings_error:
+          String(error?.code || error?.response?.data?.error?.status || 'unavailable').toLowerCase()
+      };
+    }
+  }));
 }
 
 function normalizeConsentDomain(value) {
@@ -2282,6 +2397,335 @@ function assessConsentMeasurementReadiness(marketingState) {
     provider: ['clinicaclick', 'external_cmp'].includes(provider) ? provider : null,
     domains,
     expires_at: minimumExpiration ? new Date(minimumExpiration * 1000).toISOString() : null,
+  };
+}
+
+function asPlainObject(value) {
+  return value && typeof value === 'object' && !Array.isArray(value) ? value : {};
+}
+
+function cloneJsonObject(value) {
+  return JSON.parse(JSON.stringify(asPlainObject(value)));
+}
+
+function collectEnhancedConversionActivationTargets(rawGoogleAdsConfig) {
+  const googleAds = asPlainObject(rawGoogleAdsConfig);
+  const events = asPlainObject(googleAds.events);
+  const pairs = [];
+  const issues = [];
+
+  for (const eventName of GOOGLE_ENHANCED_CONVERSION_PROPDENTAL_EVENTS) {
+    const eventConfig = events[eventName];
+    if (!eventConfig || typeof eventConfig !== 'object' || Array.isArray(eventConfig)) continue;
+    const rawDestinations = Object.prototype.hasOwnProperty.call(eventConfig, 'destinations')
+      ? (Array.isArray(eventConfig.destinations) ? eventConfig.destinations : [])
+      : [eventConfig];
+    if (rawDestinations.length === 0) {
+      issues.push({ reason: 'enhanced_conversion_destination_missing', event: eventName });
+      continue;
+    }
+    for (const destination of rawDestinations) {
+      if (!destination || typeof destination !== 'object' || Array.isArray(destination)) continue;
+      const customerId = normalizeCustomerId(
+        destination.customer_id
+          || destination.customerId
+          || eventConfig.customer_id
+          || eventConfig.customerId
+          || googleAds.customer_id
+          || googleAds.customerId
+          || ''
+      );
+      if (!customerId) {
+        issues.push({ reason: 'enhanced_conversion_destination_customer_missing', event: eventName });
+        continue;
+      }
+      pairs.push({ customer_id: customerId, event_name: eventName });
+    }
+  }
+
+  const dedupedPairs = [];
+  const seen = new Set();
+  for (const pair of pairs) {
+    const key = `${pair.customer_id}:${pair.event_name}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    dedupedPairs.push(pair);
+  }
+  return {
+    pairs: dedupedPairs,
+    customer_ids: listToUniqueArray(dedupedPairs.map((pair) => pair.customer_id)),
+    event_names: listToUniqueArray(dedupedPairs.map((pair) => pair.event_name)),
+    issues
+  };
+}
+
+function readAdvertiserEnhancedConversionAuthorization(input) {
+  const body = asPlainObject(input);
+  const nested = asPlainObject(body.advertiser_authorization);
+  return {
+    confirmed: nested.confirmed === true || body.advertiser_authorization_confirmed === true,
+    reference: String(
+      nested.reference
+        || nested.ref
+        || body.advertiser_authorization_ref
+        || ''
+    ).trim() || null,
+    authorized_at: String(
+      nested.authorized_at
+        || nested.authorizedAt
+        || body.advertiser_authorized_at
+        || ''
+    ).trim() || null
+  };
+}
+
+function buildEnhancedConversionAuthorization({ customerId, eventName, advertiserAuthorization }) {
+  return {
+    policyMode: GOOGLE_ENHANCED_CONVERSION_POLICY_MODE,
+    customerId,
+    eventName,
+    googleEvidenceRef: ENHANCED_CONVERSION_GOOGLE_EVIDENCE_REF,
+    advertiserAuthorizationRef: advertiserAuthorization.reference,
+    googleGuidanceAt: ENHANCED_CONVERSION_GOOGLE_GUIDANCE_AT,
+    advertiserAuthorizedAt: advertiserAuthorization.authorized_at,
+    expiresAt: null,
+    permittedIdentifiers: [...GOOGLE_ENHANCED_CONVERSION_ALLOWED_IDENTIFIERS],
+    policyAmbiguityAcknowledged: true,
+    formalPolicyExceptionClaimed: false,
+    measurementOnly: true,
+    customerMatchEnabled: false,
+    conversionBasedCustomerListsEnabled: false,
+    remarketingEnabled: false,
+    adPersonalizationStatus: 'DENIED'
+  };
+}
+
+function serializeEnhancedConversionAuthorization(authorization) {
+  return {
+    google_evidence_ref: authorization.googleEvidenceRef,
+    advertiser_authorization_ref: authorization.advertiserAuthorizationRef,
+    google_guidance_at: authorization.googleGuidanceAt,
+    advertiser_authorized_at: authorization.advertiserAuthorizedAt,
+    permitted_identifiers: authorization.permittedIdentifiers,
+    policy_ambiguity_acknowledged: authorization.policyAmbiguityAcknowledged,
+    formal_policy_exception_claimed: authorization.formalPolicyExceptionClaimed,
+    measurement_only: authorization.measurementOnly,
+    customer_match_enabled: authorization.customerMatchEnabled,
+    conversion_based_customer_lists_enabled: authorization.conversionBasedCustomerListsEnabled,
+    remarketing_enabled: authorization.remarketingEnabled,
+    ad_personalization: authorization.adPersonalizationStatus
+  };
+}
+
+function validateEnhancedConversionActivationAllowlist(enhancedConfig, now = new Date()) {
+  const config = asPlainObject(enhancedConfig);
+  const allowlist = Array.isArray(config.allowlist) ? config.allowlist : [];
+  const issues = [];
+  for (const entry of allowlist) {
+    const customerId = normalizeCustomerId(entry?.customer_id || '');
+    const eventName = String(entry?.event_name || '').trim().toLowerCase();
+    const raw = asPlainObject(entry?.authorization);
+    const authorization = {
+      policyMode: config.policy_mode,
+      customerId,
+      eventName,
+      googleEvidenceRef: raw.google_evidence_ref,
+      advertiserAuthorizationRef: raw.advertiser_authorization_ref,
+      googleGuidanceAt: raw.google_guidance_at,
+      advertiserAuthorizedAt: raw.advertiser_authorized_at,
+      expiresAt: raw.expires_at || null,
+      permittedIdentifiers: raw.permitted_identifiers,
+      policyAmbiguityAcknowledged: raw.policy_ambiguity_acknowledged,
+      formalPolicyExceptionClaimed: raw.formal_policy_exception_claimed,
+      measurementOnly: raw.measurement_only,
+      customerMatchEnabled: raw.customer_match_enabled,
+      conversionBasedCustomerListsEnabled: raw.conversion_based_customer_lists_enabled,
+      remarketingEnabled: raw.remarketing_enabled,
+      adPersonalizationStatus: raw.ad_personalization
+    };
+    const validation = validateEnhancedConversionAuthorization({
+      authorization,
+      customerId,
+      eventName,
+      consentStatus: 'GRANTED',
+      adPersonalizationStatus: 'DENIED',
+      now
+    });
+    if (!validation.valid) {
+      issues.push({
+        reason: 'enhanced_conversion_authorization_invalid',
+        customer_id: customerId || null,
+        event: eventName || null,
+        details: validation.reason
+      });
+    }
+  }
+  if (allowlist.length === 0) issues.push({ reason: 'enhanced_conversion_allowlist_empty' });
+  return issues;
+}
+
+function buildEnhancedConversionActivationPlan({
+  scope,
+  intakeRecord,
+  consentReadiness,
+  scopedAccounts,
+  enrichedAccounts,
+  dataManagerReady,
+  requestBody,
+  actorUserId,
+  now = new Date()
+}) {
+  const issues = [];
+  const add = (reason, extra = {}) => issues.push({ reason, ...extra });
+  if (scope?.assignment_scope !== 'group' || Number(scope?.group_id) !== ENHANCED_CONVERSION_PROPDENTAL_GROUP_ID) {
+    add('enhanced_conversion_scope_not_allowlisted');
+  }
+  if (!intakeRecord) add('intake_config_missing');
+  if (dataManagerReady !== true) add('google_data_manager_not_ready');
+  if (!consentReadiness?.ready || !consentReadiness?.validated) {
+    add('consent_readiness_pending', { reasons: consentReadiness?.reasons || [] });
+  }
+
+  const currentConfig = asPlainObject(intakeRecord?.config);
+  const features = asPlainObject(currentConfig.features);
+  if (String(features.consent_provider || '').trim().toLowerCase() !== 'clinicaclick') {
+    add('clinicaclick_consent_provider_required');
+  }
+  if (features.ad_personalization_enabled !== false) {
+    add('ad_personalization_must_be_denied');
+  }
+
+  const googleAds = asPlainObject(currentConfig.google_ads);
+  const targets = collectEnhancedConversionActivationTargets(googleAds);
+  issues.push(...targets.issues);
+  if (targets.pairs.length === 0) add('enhanced_conversion_events_missing');
+
+  const mappedByCustomer = new Map((Array.isArray(scopedAccounts) ? scopedAccounts : [])
+    .filter((account) => account?.mapped_to_scope === true)
+    .map((account) => [normalizeCustomerId(account?.customer_id || ''), account]));
+  const settingsByCustomer = new Map((Array.isArray(enrichedAccounts) ? enrichedAccounts : [])
+    .map((account) => [normalizeCustomerId(account?.customer_id || ''), account]));
+  for (const customerId of targets.customer_ids) {
+    if (!GOOGLE_ENHANCED_CONVERSION_PROPDENTAL_CUSTOMER_IDS.includes(customerId)) {
+      add('enhanced_conversion_customer_not_allowlisted', { customer_id: customerId });
+      continue;
+    }
+    if (!mappedByCustomer.has(customerId)) {
+      add('enhanced_conversion_customer_not_mapped', { customer_id: customerId });
+      continue;
+    }
+    const settings = settingsByCustomer.get(customerId);
+    if (!settings || settings.conversion_tracking_settings_available !== true) {
+      add('enhanced_conversion_account_settings_unavailable', { customer_id: customerId });
+      continue;
+    }
+    if (settings.accepted_customer_data_terms !== true) {
+      add('enhanced_conversion_customer_data_terms_not_accepted', { customer_id: customerId });
+    }
+    if (settings.enhanced_conversions_for_leads_enabled !== true) {
+      add('enhanced_conversions_for_leads_not_enabled', { customer_id: customerId });
+    }
+  }
+
+  const advertiserAuthorization = readAdvertiserEnhancedConversionAuthorization(requestBody);
+  if (advertiserAuthorization.confirmed !== true) add('advertiser_authorization_confirmation_required');
+  if (!advertiserAuthorization.reference) add('advertiser_authorization_ref_required');
+  if (!advertiserAuthorization.authorized_at) add('advertiser_authorized_at_required');
+
+  const allowlist = targets.pairs.map((pair) => {
+    const authorization = buildEnhancedConversionAuthorization({
+      customerId: pair.customer_id,
+      eventName: pair.event_name,
+      advertiserAuthorization
+    });
+    const validation = validateEnhancedConversionAuthorization({
+      authorization,
+      customerId: pair.customer_id,
+      eventName: pair.event_name,
+      consentStatus: 'GRANTED',
+      adPersonalizationStatus: 'DENIED',
+      now
+    });
+    if (!validation.valid) {
+      add('enhanced_conversion_authorization_invalid', {
+        customer_id: pair.customer_id,
+        event: pair.event_name,
+        details: validation.reason
+      });
+    }
+    return {
+      enabled: true,
+      customer_id: pair.customer_id,
+      event_name: pair.event_name,
+      authorization: serializeEnhancedConversionAuthorization(authorization)
+    };
+  });
+
+  const appliedAt = now.toISOString();
+  const nextConfig = cloneJsonObject(currentConfig);
+  nextConfig.features = {
+    ...asPlainObject(nextConfig.features),
+    ad_personalization_enabled: false,
+    google_ads_user_data_enabled: true,
+    google_ads_user_data_disclosure_confirmed: true,
+    google_ads_user_data_runtime_enabled: true
+  };
+  const nextGoogleAds = {
+    ...asPlainObject(nextConfig.google_ads),
+    user_data_enabled: true
+  };
+  const nextEvents = { ...asPlainObject(nextGoogleAds.events) };
+  for (const eventName of targets.event_names) {
+    nextEvents[eventName] = {
+      ...asPlainObject(nextEvents[eventName]),
+      user_data_enabled: true
+    };
+  }
+  nextGoogleAds.events = nextEvents;
+  nextGoogleAds.enhanced_conversions = {
+    enabled: true,
+    policy_mode: GOOGLE_ENHANCED_CONVERSION_POLICY_MODE,
+    allowlist,
+    activation_audit: {
+      gate_version: ENHANCED_CONVERSION_ACTIVATION_GATE_VERSION,
+      applied_at: appliedAt,
+      actor_user_id: actorUserId || null,
+      group_id: ENHANCED_CONVERSION_PROPDENTAL_GROUP_ID,
+      customer_ids: targets.customer_ids,
+      event_names: targets.event_names,
+      google_evidence_ref: ENHANCED_CONVERSION_GOOGLE_EVIDENCE_REF,
+      advertiser_authorization_ref: advertiserAuthorization.reference,
+      consent_attestation_expires_at: consentReadiness?.expires_at || null,
+      measurement_only: true,
+      permitted_identifiers: [...GOOGLE_ENHANCED_CONVERSION_ALLOWED_IDENTIFIERS],
+      ad_personalization: 'DENIED',
+      customer_match_enabled: false,
+      conversion_based_customer_lists_enabled: false,
+      remarketing_enabled: false
+    }
+  };
+  nextConfig.google_ads = nextGoogleAds;
+
+  return {
+    ready: issues.length === 0,
+    issues,
+    targets,
+    advertiserAuthorization,
+    nextConfig,
+    summary: {
+      gate_version: ENHANCED_CONVERSION_ACTIVATION_GATE_VERSION,
+      group_id: ENHANCED_CONVERSION_PROPDENTAL_GROUP_ID,
+      customer_ids: targets.customer_ids,
+      event_names: targets.event_names,
+      google_evidence_ref: ENHANCED_CONVERSION_GOOGLE_EVIDENCE_REF,
+      advertiser_authorization_ref: advertiserAuthorization.reference,
+      measurement_only: true,
+      permitted_identifiers: [...GOOGLE_ENHANCED_CONVERSION_ALLOWED_IDENTIFIERS],
+      ad_personalization: 'DENIED',
+      customer_match_enabled: false,
+      conversion_based_customer_lists_enabled: false,
+      remarketing_enabled: false
+    }
   };
 }
 
@@ -4577,6 +5021,13 @@ async function ensureConversionActionsInternal({
         conversion_action_id: existingMapping.contact || null,
         currency: normalizeCurrency(currency)
       },
+      qualified_lead: {
+        // No se activa por defecto: solo queda disponible cuando la acción se
+        // ha solicitado y existe inequívocamente en esta cuenta.
+        enabled: Boolean(existingMapping.qualified_lead),
+        conversion_action_id: existingMapping.qualified_lead || null,
+        currency: normalizeCurrency(currency)
+      },
       schedule: {
         enabled: true,
         conversion_action_id: existingMapping.schedule || null,
@@ -4596,6 +5047,7 @@ async function ensureConversionActionsInternal({
     mapping: {
       lead: existingMapping.lead || null,
       contact: existingMapping.contact || null,
+      qualified_lead: existingMapping.qualified_lead || null,
       schedule: existingMapping.schedule || null,
       purchase: existingMapping.purchase || null
     },
@@ -4888,6 +5340,14 @@ exports.getCampaignOnboardingBootstrap = asyncHandler(async (req, res) => {
     selectedCustomerId = googleAccounts[0].customer_id;
   }
 
+  if (googleConnected && googleAccounts.length > 0) {
+    googleAccounts = await enrichGoogleAdsAccountsWithConversionTracking({
+      userId,
+      scope,
+      accounts: googleAccounts
+    });
+  }
+
   let metaConnected = false;
   let metaReason = null;
   const metaAssets = marketingState.meta.available_assets || {
@@ -4955,7 +5415,12 @@ exports.getCampaignOnboardingBootstrap = asyncHandler(async (req, res) => {
         send_to: intakeGoogleAds.send_to || null,
         tag_id: marketingState.google.effective_assets?.tag_id || extractGoogleTagId(intakeGoogleAds.send_to)
       },
-      capabilities: buildGoogleAdsCapabilities(googleConnected, hasAdsScope, hasDataManagerScope)
+      capabilities: buildGoogleAdsCapabilities(
+        googleConnected,
+        hasAdsScope,
+        hasDataManagerScope,
+        googleAccounts
+      )
     },
     meta_ads: {
       connected: metaConnected,
@@ -5475,6 +5940,176 @@ exports.listExternalCampaigns = asyncHandler(async (req, res) => {
         campaigns: metaCampaigns
       }
     }
+  });
+});
+
+exports.gateEnhancedConversionsActivation = asyncHandler(async (req, res) => {
+  const userId = getUserId(req);
+  if (!userId) return res.status(401).json({ success: false, error: 'unauthenticated' });
+
+  const requestedGroupId = parseInteger(req.body?.group_id);
+  const requestedScope = String(req.body?.assignment_scope || 'group').trim().toLowerCase();
+  if (
+    requestedScope !== 'group'
+    || requestedGroupId !== ENHANCED_CONVERSION_PROPDENTAL_GROUP_ID
+  ) {
+    return res.status(403).json({
+      success: false,
+      error: 'enhanced_conversion_scope_not_allowlisted',
+      message: 'Este gate solo está habilitado para el grupo Propdental autorizado.'
+    });
+  }
+
+  const scope = await resolveScopeFromInput({
+    clinicIdRaw: null,
+    groupIdRaw: requestedGroupId,
+    assignmentScopeRaw: 'group'
+  });
+  if (!(await requireMarketingClinicScope(req, res, scope.clinic_ids, 'write'))) return;
+
+  const marketingState = await resolveEffectiveMarketingState({
+    clinicIdRaw: null,
+    groupIdRaw: requestedGroupId,
+    assignmentScopeRaw: 'group'
+  });
+  const intakeRecord = marketingState.records.groupRecord || null;
+  const consentReadiness = assessConsentMeasurementReadiness(marketingState);
+  const scopedAccounts = marketingState.google.available_accounts || [];
+  let enrichedAccounts = scopedAccounts.map((account) => ({
+    ...account,
+    conversion_tracking_settings_available: false
+  }));
+  let dataManagerReady = false;
+
+  const googleResolved = await resolveGoogleConnectionForScope({
+    userId,
+    clinicIdRaw: null,
+    groupIdRaw: requestedGroupId,
+    assignmentScopeRaw: 'group',
+    allowLegacyUserFallback: false
+  });
+  const connection = googleResolved.connection;
+  const hasAdsScope = hasScopeText(connection?.scopes || '', GOOGLE_ADS_SCOPE);
+  const hasDataManagerScope = hasScopeText(connection?.scopes || '', GOOGLE_DATA_MANAGER_SCOPE);
+  const quotaProjectConfigured = Boolean(
+    process.env.GOOGLE_DATA_MANAGER_QUOTA_PROJECT
+      || process.env.GOOGLE_CLOUD_PROJECT
+  );
+  if (connection && hasAdsScope && hasDataManagerScope && quotaProjectConfigured) {
+    try {
+      await ensureGoogleAdsAccess(connection);
+      dataManagerReady = true;
+      enrichedAccounts = await enrichGoogleAdsAccountsWithConversionTracking({
+        userId,
+        scope,
+        accounts: scopedAccounts
+      });
+    } catch (_error) {
+      dataManagerReady = false;
+    }
+  }
+
+  const now = new Date();
+  const plan = buildEnhancedConversionActivationPlan({
+    scope,
+    intakeRecord,
+    consentReadiness,
+    scopedAccounts,
+    enrichedAccounts,
+    dataManagerReady,
+    requestBody: req.body,
+    actorUserId: userId,
+    now
+  });
+  if (!plan.ready) {
+    return res.status(409).json({
+      success: false,
+      error: 'enhanced_conversion_activation_gate_blocked',
+      message: 'Conversiones mejoradas siguen bloqueadas. No se ha modificado IntakeConfig ni Google Ads.',
+      dry_run: true,
+      ready: false,
+      issues: plan.issues,
+      plan: plan.summary,
+      external_mutation_performed: false,
+      intake_config_updated: false
+    });
+  }
+
+  const applyRequested = req.body?.apply === true;
+  if (!applyRequested) {
+    return res.json({
+      success: true,
+      dry_run: true,
+      ready: true,
+      plan: plan.summary,
+      external_mutation_performed: false,
+      intake_config_updated: false,
+      next_action: 'Repite con apply=true y confirm_external_mutation=true cuando quieras habilitar el runtime.'
+    });
+  }
+  if (req.body?.confirm_external_mutation !== true) {
+    return res.status(409).json({
+      success: false,
+      error: 'activation_confirmation_required',
+      message: 'apply=true requiere confirm_external_mutation=true.',
+      dry_run: true,
+      ready: true,
+      plan: plan.summary,
+      external_mutation_performed: false,
+      intake_config_updated: false
+    });
+  }
+
+  const preflightUpdatedAt = intakeRecord?.updated_at || intakeRecord?.updatedAt || null;
+  await db.sequelize.transaction(async (transaction) => {
+    const locked = await IntakeConfig.findOne({
+      where: {
+        group_id: ENHANCED_CONVERSION_PROPDENTAL_GROUP_ID,
+        assignment_scope: 'group'
+      },
+      transaction,
+      lock: transaction.LOCK.UPDATE
+    });
+    if (!locked) {
+      const error = new Error('IntakeConfig de Propdental no encontrado');
+      error.code = 'INTAKE_CONFIG_MISSING';
+      error.httpStatus = 409;
+      throw error;
+    }
+    const lockedUpdatedAt = locked.updated_at || locked.updatedAt || null;
+    if (
+      preflightUpdatedAt
+      && lockedUpdatedAt
+      && new Date(preflightUpdatedAt).getTime() !== new Date(lockedUpdatedAt).getTime()
+    ) {
+      const error = new Error('IntakeConfig cambió durante la comprobación; vuelve a ejecutar el preview');
+      error.code = 'INTAKE_CONFIG_CHANGED_DURING_GATE';
+      error.httpStatus = 409;
+      throw error;
+    }
+    const authorizationIssues = validateEnhancedConversionActivationAllowlist(
+      plan.nextConfig.google_ads?.enhanced_conversions,
+      now
+    );
+    if (authorizationIssues.length > 0) {
+      const error = new Error('La allowlist de autorizaciones no superó la validación final');
+      error.code = 'ENHANCED_CONVERSION_AUTHORIZATION_INVALID';
+      error.httpStatus = 409;
+      error.authorizationIssues = authorizationIssues;
+      throw error;
+    }
+    await locked.update({ config: plan.nextConfig }, { transaction });
+  });
+
+  return res.json({
+    success: true,
+    dry_run: false,
+    ready: true,
+    activated: true,
+    plan: plan.summary,
+    external_mutation_performed: false,
+    intake_config_updated: true,
+    google_ads_mutated: false
   });
 });
 
@@ -7117,10 +7752,15 @@ exports.__test = {
   applyCanonicalMappingsToGoogleAdsConfig,
   assessConsentMeasurementReadiness,
   assessConversionOnboardingReadiness,
+  buildEnhancedConversionActivationPlan,
+  buildGoogleAdsCapabilities,
   buildRequiredConversionPlan,
   buildClinicaclickConversionActionCreate,
   buildClinicaclickManagedMapping,
   conversionValidationKey,
+  collectEnhancedConversionActivationTargets,
+  readGoogleConversionTrackingSettings,
   resolveEnabledConversionEvents,
-  strategyPayloadUsesGoogleAds
+  strategyPayloadUsesGoogleAds,
+  validateEnhancedConversionActivationAllowlist
 };

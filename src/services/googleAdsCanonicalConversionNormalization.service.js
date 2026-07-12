@@ -13,10 +13,11 @@ const DESIRED_COUNTING_TYPE = 'MANY_PER_CLICK';
 const DESIRED_PRIMARY_FOR_GOAL = false;
 const EXPECTED_ACTION_TYPE = 'UPLOAD_CLICKS';
 const MUTABLE_STATUSES = new Set(['ENABLED', 'HIDDEN']);
-const MAX_ACTIONS_PER_ACCOUNT = 4;
+const MAX_ACTIONS_PER_ACCOUNT = 5;
 const CANONICAL_ACTIONS = Object.freeze({
   lead: Object.freeze({ key: 'lead', name: 'Lead - ClinicaClick' }),
   contact: Object.freeze({ key: 'contact', name: 'Contact - ClinicaClick' }),
+  qualified_lead: Object.freeze({ key: 'qualified_lead', name: 'Qualified Lead - ClinicaClick' }),
   schedule: Object.freeze({ key: 'schedule', name: 'Schedule - ClinicaClick' }),
   purchase: Object.freeze({ key: 'purchase', name: 'Purchase - ClinicaClick' }),
 });

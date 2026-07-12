@@ -4,7 +4,9 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const {
+  BIDDING_SIGNAL_KEYS,
   GOAL_NAME,
+  GOAL_NAME_PREFIX,
   NEW_GOAL_PLACEHOLDER,
   applyClinicaclickGoalPolicy,
   assertSafePlanOperations,
@@ -16,6 +18,7 @@ const {
   loadDiagnosticsSnapshot,
   normalizeConfiguredAccounts,
   previewClinicaclickGoalPolicy,
+  stageGoalName,
 } = require('../../services/googleAdsClinicaclickGoalPolicy.service');
 
 const CUSTOMER = '1851215478';
@@ -26,12 +29,14 @@ const CAMPAIGN_IDS = ['101', '102'];
 const ACTION_IDS = Object.freeze({
   lead: '1',
   contact: '2',
-  schedule: '3',
-  purchase: '4',
+  qualified_lead: '3',
+  schedule: '4',
+  purchase: '5',
 });
 const ACTION_NAMES = Object.freeze({
   lead: 'Lead - ClinicaClick',
   contact: 'Contact - ClinicaClick',
+  qualified_lead: 'Qualified Lead - ClinicaClick',
   schedule: 'Schedule - ClinicaClick',
   purchase: 'Purchase - ClinicaClick',
 });
@@ -47,6 +52,7 @@ function configuredAccount(overrides = {}) {
     strategy_ref: 'strategy:new-patients:group-5',
     campaign_ids: CAMPAIGN_IDS,
     canonical_action_ids: ACTION_IDS,
+    bidding_action_key: 'qualified_lead',
     ...overrides,
   };
 }
@@ -94,7 +100,7 @@ function campaignConfig(campaignId, customGoal = null, overrides = {}) {
     advertising_channel_type: 'SEARCH',
     goal_config_level: customGoal ? 'CAMPAIGN' : 'CUSTOMER',
     custom_conversion_goal: customGoal,
-    custom_goal_name: customGoal ? GOAL_NAME : null,
+    custom_goal_name: customGoal ? expectedGoalName() : null,
     custom_goal_status: customGoal ? 'ENABLED' : null,
     ...overrides,
   };
@@ -104,7 +110,7 @@ function customGoal(resourceName = GOAL_RESOURCE, conversionActions = desiredAct
   return {
     id: resourceName.split('/').pop(),
     resource_name: resourceName,
-    name: GOAL_NAME,
+    name: expectedGoalName(),
     status: 'ENABLED',
     conversion_actions: conversionActions.slice().sort(),
     ...overrides,
@@ -112,9 +118,11 @@ function customGoal(resourceName = GOAL_RESOURCE, conversionActions = desiredAct
 }
 
 function desiredActionResources() {
-  return ['lead', 'contact', 'schedule'].map((key) => (
-    `customers/${CUSTOMER}/conversionActions/${ACTION_IDS[key]}`
-  ));
+  return [`customers/${CUSTOMER}/conversionActions/${ACTION_IDS.qualified_lead}`];
+}
+
+function expectedGoalName(overrides = {}) {
+  return normalizeConfiguredAccounts([configuredAccount(overrides)])[0].custom_goal_name;
 }
 
 function baseSnapshot(overrides = {}) {
@@ -128,6 +136,7 @@ function baseSnapshot(overrides = {}) {
     conversion_actions: [
       canonicalAction('lead'),
       canonicalAction('contact'),
+      canonicalAction('qualified_lead'),
       canonicalAction('schedule'),
       canonicalAction('purchase'),
       {
@@ -176,19 +185,17 @@ function clone(value) {
 }
 
 function testConfigurationRequiresExplicitScope() {
-  assert.deepEqual(normalizeConfiguredAccounts([configuredAccount({
+  const normalized = normalizeConfiguredAccounts([configuredAccount({
     customer_id: '185-121-5478',
     campaign_ids: ['0102', '101', '101'],
-  })]), [{
-    customer_id: CUSTOMER,
-    strategy_key: 'new_patients',
-    strategy_ref: 'strategy:new-patients:group-5',
-    campaign_ids: ['101', '102'],
-    canonical_action_ids: ACTION_IDS,
-    bidding_action_keys: ['lead', 'contact', 'schedule'],
-    supplemental_action_ids: [],
-    owned_custom_goal_resource_name: null,
-  }]);
+  })])[0];
+  assert.equal(normalized.customer_id, CUSTOMER);
+  assert.deepEqual(normalized.campaign_ids, ['101', '102']);
+  assert.deepEqual(normalized.canonical_action_ids, ACTION_IDS);
+  assert.equal(normalized.bidding_action_key, 'qualified_lead');
+  assert.deepEqual(normalized.bidding_action_keys, ['qualified_lead']);
+  assert.equal(normalized.migration_required, false);
+  assert.match(normalized.custom_goal_name, new RegExp(`^${GOAL_NAME_PREFIX}`));
   assert.throws(
     () => normalizeConfiguredAccounts([configuredAccount({ campaign_ids: [] })]),
     (error) => error.code === 'GOAL_POLICY_CAMPAIGNS_REQUIRED',
@@ -197,12 +204,12 @@ function testConfigurationRequiresExplicitScope() {
     () => normalizeConfiguredAccounts([configuredAccount({ strategy_ref: '' })]),
     (error) => error.code === 'GOAL_POLICY_STRATEGY_REF_REQUIRED',
   );
-  assert.throws(
-    () => normalizeConfiguredAccounts([configuredAccount({
-      canonical_action_ids: { ...ACTION_IDS, schedule: null },
-    })]),
-    (error) => error.code === 'CANONICAL_ACTION_ID_REQUIRED',
-  );
+  const missingAction = normalizeConfiguredAccounts([configuredAccount({
+    canonical_action_ids: { ...ACTION_IDS, schedule: null },
+  })])[0];
+  const missingActionPlan = buildClinicaclickGoalPolicyPlan({ account: missingAction, snapshot: baseSnapshot() });
+  assert.equal(missingActionPlan.ready, false);
+  assert.ok(missingActionPlan.blockers.some((item) => item.code === 'CANONICAL_ACTION_ID_REQUIRED'));
   assert.throws(
     () => normalizeConfiguredAccounts([configuredAccount({
       owned_custom_goal_resource_name: `customers/${FOREIGN_CUSTOMER}/customConversionGoals/77`,
@@ -224,52 +231,51 @@ function testConfigurationRequiresExplicitScope() {
     () => normalizeConfiguredAccounts([configuredAccount({ supplemental_action_ids: [ACTION_IDS.lead] })]),
     (error) => error.code === 'SUPPLEMENTAL_ACTION_CANONICAL_DUPLICATE',
   );
-  assert.throws(
-    () => normalizeConfiguredAccounts([configuredAccount({ bidding_action_keys: [] })]),
-    (error) => error.code === 'BIDDING_ACTION_KEYS_INVALID',
-  );
-  assert.throws(
-    () => normalizeConfiguredAccounts([configuredAccount({ bidding_action_keys: ['purchase'] })]),
-    (error) => error.code === 'BIDDING_ACTION_KEY_NOT_ALLOWED',
-  );
+  const empty = normalizeConfiguredAccounts([configuredAccount({
+    bidding_action_key: undefined,
+    bidding_action_keys: [],
+  })])[0];
+  assert.equal(empty.migration_required, true);
+  assert.equal(empty.bidding_action_key, null);
+  assert.equal(normalizeConfiguredAccounts([configuredAccount({ bidding_action_key: 'purchase' })])[0].bidding_action_key, 'purchase');
 }
 
 function testScheduleOnlyBiddingStillAuditsAllCanonicalSignals() {
   const account = normalizeConfiguredAccounts([configuredAccount({
-    bidding_action_keys: ['schedule', 'schedule'],
+    bidding_action_key: 'schedule',
   })])[0];
   const plan = buildClinicaclickGoalPolicyPlan({ account, snapshot: baseSnapshot() });
 
   assert.equal(plan.ready, true);
   assert.deepEqual(account.bidding_action_keys, ['schedule']);
   assert.deepEqual(plan.desired_custom_goal.required_canonical_action_keys, ['schedule']);
-  assert.deepEqual(plan.desired_custom_goal.tracked_canonical_action_keys, ['lead', 'contact', 'schedule']);
+  assert.deepEqual(plan.desired_custom_goal.tracked_canonical_action_keys, ['lead', 'contact', 'qualified_lead', 'schedule', 'purchase']);
   assert.deepEqual(plan.desired_custom_goal.conversion_actions, [
     `customers/${CUSTOMER}/conversionActions/${ACTION_IDS.schedule}`,
   ]);
   assert.equal(plan.canonical_actions.lead.included_in_goal, false);
   assert.equal(plan.canonical_actions.contact.included_in_goal, false);
   assert.equal(plan.canonical_actions.schedule.included_in_goal, true);
+  assert.equal(plan.canonical_actions.qualified_lead.included_in_goal, false);
+  assert.equal(plan.canonical_actions.purchase.included_in_goal, false);
   assertSafePlanOperations(account, plan);
 }
 
-function testSupplementalAdCallsExtendMembershipWithoutMutation() {
+function testSupplementalAdCallsRequireExplicitMigrationAndStayOutOfGoal() {
   const account = normalizeConfiguredAccounts([configuredAccount({ supplemental_action_ids: ['10'] })])[0];
   const snapshot = baseSnapshot({
     conversion_actions: [...baseSnapshot().conversion_actions, supplementalCallAction()],
   });
   const plan = buildClinicaclickGoalPolicyPlan({ account, snapshot });
-  assert.equal(plan.ready, true);
-  assert.deepEqual(plan.desired_custom_goal.conversion_actions, [
-    ...desiredActionResources(),
-    `customers/${CUSTOMER}/conversionActions/10`,
-  ]);
+  assert.equal(plan.ready, false);
+  assert.equal(plan.migration.required, true);
+  assert.ok(plan.blockers.some((item) => item.code === 'GOAL_POLICY_MIGRATION_REQUIRED'));
+  assert.deepEqual(plan.desired_custom_goal.conversion_actions, desiredActionResources());
   assert.equal(plan.supplemental_actions.length, 1);
   assert.equal(plan.supplemental_actions[0].valid, true);
   assert.equal(plan.supplemental_actions[0].action.type, 'AD_CALL');
   assert.equal(plan.client_actions.find((action) => action.id === '10').supplemental_allowlisted, true);
   assert.equal(JSON.stringify(plan.operations.conversion_actions), '[]');
-  assertSafePlanOperations(account, plan);
 }
 
 function testSupplementalActionsFailClosedOnProviderState() {
@@ -316,7 +322,7 @@ function testSupplementalActionsFailClosedOnProviderState() {
   }
 }
 
-function testExistingThreeActionGoalRemainsBackwardCompatible() {
+function testExistingStageGoalIsStableAndLegacyGenericGoalIsBlocked() {
   const settledSnapshot = baseSnapshot({
     custom_goals: [customGoal(GOAL_RESOURCE, desiredActionResources())],
     campaign_configs: CAMPAIGN_IDS.map((id) => campaignConfig(id, GOAL_RESOURCE)),
@@ -330,35 +336,40 @@ function testExistingThreeActionGoalRemainsBackwardCompatible() {
   assert.equal(unchanged.changed, false);
   assert.equal(unchanged.operations.custom_goal, null);
 
-  const supplementalAccount = normalizeConfiguredAccounts([configuredAccount({
+  const legacyAccount = normalizeConfiguredAccounts([configuredAccount({
     owned_custom_goal_resource_name: GOAL_RESOURCE,
-    supplemental_action_ids: ['10'],
+    bidding_action_key: undefined,
   })])[0];
-  const extended = buildClinicaclickGoalPolicyPlan({
-    account: supplementalAccount,
-    snapshot: {
-      ...settledSnapshot,
-      conversion_actions: [...settledSnapshot.conversion_actions, supplementalCallAction()],
-    },
+  const legacy = buildClinicaclickGoalPolicyPlan({
+    account: legacyAccount,
+    snapshot: baseSnapshot({
+      custom_goals: [customGoal(GOAL_RESOURCE, [
+        `customers/${CUSTOMER}/conversionActions/${ACTION_IDS.lead}`,
+        `customers/${CUSTOMER}/conversionActions/${ACTION_IDS.contact}`,
+        `customers/${CUSTOMER}/conversionActions/${ACTION_IDS.schedule}`,
+      ], { name: GOAL_NAME })],
+      campaign_configs: CAMPAIGN_IDS.map((id) => campaignConfig(id, GOAL_RESOURCE)),
+    }),
   });
-  assert.equal(extended.ready, true);
-  assert.deepEqual(extended.operations.custom_goal.update.conversionActions, [
-    ...desiredActionResources(),
-    `customers/${CUSTOMER}/conversionActions/10`,
-  ]);
-  assert.deepEqual(extended.rollback.custom_goal_before.conversion_actions, desiredActionResources().slice().sort());
-  assert.equal(extended.operations.campaign_goal_configs.length, 0);
-  assert.equal(extended.operations.campaign_conversion_goals.length, 0);
+  assert.equal(legacy.ready, false);
+  assert.equal(legacy.migration.required, true);
+  assert.ok(legacy.blockers.some((item) => item.code === 'GOAL_POLICY_MIGRATION_REQUIRED'));
+  assert.ok(legacy.blockers.some((item) => item.code === 'LEGACY_CUSTOM_GOAL_MIGRATION_REQUIRED'));
 }
 
-function testPlanContainsOnlyThreeSecondaryCanonicalActions() {
+function testPlanContainsExactlyOneSecondaryCanonicalBiddingSignal() {
   const account = normalizeConfiguredAccounts([configuredAccount()])[0];
   const plan = buildClinicaclickGoalPolicyPlan({ account, snapshot: baseSnapshot() });
   assert.equal(plan.ready, true);
   assert.equal(plan.changed, true);
-  assert.equal(plan.operations.custom_goal.create.name, GOAL_NAME);
+  assert.equal(plan.operations.custom_goal.create.name, account.custom_goal_name);
+  assert.notEqual(plan.operations.custom_goal.create.name, GOAL_NAME);
   assert.deepEqual(plan.operations.custom_goal.create.conversionActions, desiredActionResources());
-  assert.equal(JSON.stringify(plan.operations).includes('/conversionActions/4'), false, 'Purchase must stay outside the custom goal');
+  assert.equal(plan.desired_custom_goal.single_bidding_signal, true);
+  assert.equal(plan.desired_custom_goal.purchase_included, false);
+  assert.ok(['lead', 'contact', 'schedule', 'purchase'].every((key) => (
+    !plan.desired_custom_goal.conversion_actions.includes(`customers/${CUSTOMER}/conversionActions/${ACTION_IDS[key]}`)
+  )));
   assert.deepEqual(plan.operations.conversion_actions, []);
   assert.deepEqual(plan.operations.customer_conversion_goals, []);
   assert.deepEqual(
@@ -382,6 +393,87 @@ function testPlanContainsOnlyThreeSecondaryCanonicalActions() {
   assertSafePlanOperations(account, plan);
 }
 
+function testEachStageAndCohortGetsAnUnambiguousGoal() {
+  const stages = ['qualified_lead', 'schedule', 'purchase'];
+  assert.deepEqual(BIDDING_SIGNAL_KEYS, stages);
+  const names = new Set();
+  for (const stage of stages) {
+    const account = normalizeConfiguredAccounts([configuredAccount({ bidding_action_key: stage })])[0];
+    const plan = buildClinicaclickGoalPolicyPlan({ account, snapshot: baseSnapshot() });
+    assert.equal(plan.ready, true, stage);
+    assert.deepEqual(plan.desired_custom_goal.conversion_actions, [
+      `customers/${CUSTOMER}/conversionActions/${ACTION_IDS[stage]}`,
+    ]);
+    assert.equal(plan.desired_custom_goal.purchase_included, stage === 'purchase');
+    assert.equal(plan.operations.custom_goal.create.name, stageGoalName(stage, account.cohort_key));
+    names.add(account.custom_goal_name);
+    assertSafePlanOperations(account, plan);
+  }
+  const secondCohort = normalizeConfiguredAccounts([configuredAccount({
+    campaign_ids: ['101'],
+  })])[0];
+  names.add(secondCohort.custom_goal_name);
+  assert.equal(names.size, 4);
+
+  const scheduleAccount = normalizeConfiguredAccounts([configuredAccount({
+    bidding_action_key: 'schedule',
+    owned_custom_goal_resource_name: GOAL_RESOURCE,
+  })])[0];
+  const qlGoal = customGoal(GOAL_RESOURCE, desiredActionResources());
+  const reusedAcrossStages = buildClinicaclickGoalPolicyPlan({
+    account: scheduleAccount,
+    snapshot: baseSnapshot({
+      custom_goals: [qlGoal],
+      campaign_configs: CAMPAIGN_IDS.map((id) => campaignConfig(id, GOAL_RESOURCE)),
+    }),
+  });
+  assert.equal(reusedAcrossStages.ready, false);
+  assert.ok(reusedAcrossStages.blockers.some((item) => item.code === 'OWNED_CUSTOM_GOAL_NAME_MISMATCH'));
+}
+
+function testMultipleSignalsAndLegacyObservationSignalsAreMigrationOnly() {
+  const cases = [
+    { bidding_action_key: undefined, bidding_action_keys: ['qualified_lead', 'schedule'] },
+    { bidding_action_key: undefined, bidding_action_keys: ['lead'] },
+    { bidding_action_key: undefined, bidding_action_keys: ['lead', 'contact', 'schedule'] },
+  ];
+  for (const raw of cases) {
+    const account = normalizeConfiguredAccounts([configuredAccount(raw)])[0];
+    const plan = buildClinicaclickGoalPolicyPlan({ account, snapshot: baseSnapshot() });
+    assert.equal(account.migration_required, true);
+    assert.equal(account.bidding_action_key, null);
+    assert.equal(plan.ready, false);
+    assert.equal(plan.apply_allowed, false);
+    assert.ok(plan.blockers.some((item) => item.code === 'GOAL_POLICY_SINGLE_BIDDING_SIGNAL_REQUIRED'));
+    assert.deepEqual(plan.desired_custom_goal.conversion_actions, []);
+  }
+}
+
+function testSmartCampaignsAreObserveOnly() {
+  const account = normalizeConfiguredAccounts([configuredAccount()])[0];
+  const snapshot = baseSnapshot({
+    campaign_configs: [
+      campaignConfig('101', null, { advertising_channel_type: 'SMART' }),
+      campaignConfig('102'),
+    ],
+  });
+  const plan = buildClinicaclickGoalPolicyPlan({ account, snapshot });
+  assert.equal(plan.ready, false);
+  assert.equal(plan.apply_allowed, false);
+  assert.equal(plan.observe_only, true);
+  assert.ok(plan.blockers.some((item) => item.code === 'SMART_CAMPAIGN_OBSERVE_ONLY'));
+  assert.equal(plan.operations.campaign_goal_configs.some((operation) => (
+    operation.update.resourceName.endsWith('/101')
+  )), false);
+  assert.equal(plan.operations.campaign_conversion_goals.some((operation) => (
+    operation.update.resourceName.includes('/101~')
+  )), false);
+  assert.throws(
+    () => assertSafePlanOperations(account, plan),
+    (error) => error.code === 'GOAL_POLICY_PLAN_BLOCKED',
+  );
+}
+
 function testCanonicalActionsMustAlreadyBeSafe() {
   for (const [change, expectedCode] of [
     [{ status: 'REMOVED' }, 'CANONICAL_ACTION_NOT_ENABLED'],
@@ -393,6 +485,7 @@ function testCanonicalActionsMustAlreadyBeSafe() {
       conversion_actions: [
         canonicalAction('lead', change),
         canonicalAction('contact'),
+        canonicalAction('qualified_lead'),
         canonicalAction('schedule'),
         canonicalAction('purchase'),
       ],
@@ -435,7 +528,7 @@ function testCampaignGoalEnumerationFailsClosed() {
 }
 
 function testForeignGoalsAreNeverOverwritten() {
-  const foreignGoal = customGoal(GOAL_RESOURCE, desiredActionResources(), { name: GOAL_NAME });
+  const foreignGoal = customGoal(GOAL_RESOURCE, desiredActionResources());
   const collisionPlan = buildClinicaclickGoalPolicyPlan({
     account: normalizeConfiguredAccounts([configuredAccount()])[0],
     snapshot: baseSnapshot({ custom_goals: [foreignGoal] }),
@@ -614,7 +707,7 @@ async function testDefaultProviderPreviewOnlySearches() {
     },
   });
   assert.equal(paths.length, 6);
-  assert.equal(snapshot.conversion_actions.length, 5);
+  assert.equal(snapshot.conversion_actions.length, 6);
   assert.equal(snapshot.campaign_configs.length, 2);
   assert.deepEqual(snapshot.campaign_conversion_goals.map((goal) => goal.biddable), [true, false]);
   assert.equal(snapshot.customer_conversion_goals[0].biddable, false);
@@ -672,7 +765,7 @@ async function testApplyRequiresConfirmationAndFreshDigest() {
 
 async function testApplyExistingGoalValidatesBeforeMutation() {
   const state = baseSnapshot({
-    custom_goals: [customGoal(GOAL_RESOURCE, [desiredActionResources()[0]])],
+    custom_goals: [customGoal(GOAL_RESOURCE, [])],
     campaign_configs: [campaignConfig('101'), campaignConfig('102', GOAL_RESOURCE)],
   });
   const account = configuredAccount({ owned_custom_goal_resource_name: GOAL_RESOURCE });
@@ -722,7 +815,7 @@ async function testApplyExistingGoalValidatesBeforeMutation() {
   assert.equal(state.conversion_actions.find((item) => item.id === '9').primary_for_goal, true, 'Client action stays untouched');
 }
 
-async function testApplyAddsAllowlistedAdCallWithoutMutatingAction() {
+async function testApplyRejectsLegacySupplementalAdCallBeforeMutation() {
   const state = baseSnapshot({
     conversion_actions: [...baseSnapshot().conversion_actions, supplementalCallAction()],
     custom_goals: [customGoal(GOAL_RESOURCE, desiredActionResources())],
@@ -738,36 +831,23 @@ async function testApplyAddsAllowlistedAdCallWithoutMutatingAction() {
   }));
   const digest = await previewDigestFor(state, account);
   assert.notEqual(digest, digestWithoutAllowlist);
-  const callActionBefore = clone(state.conversion_actions.find((item) => item.id === '10'));
   const requests = [];
-  const result = await applyClinicaclickGoalPolicy({
-    scope: { group_id: 5, assignment_scope: 'group' },
-    configuredAccounts: [account],
-    expectedDigest: digest,
-    confirmExternalMutation: true,
-    dependencies: {
-      now: deterministicClock(),
-      resolveRuntime: runtimeResolver(),
-      fetchSnapshot: async () => clone(state),
-      request: async (_method, requestPath, options) => {
-        requests.push({ path: requestPath, data: clone(options.data) });
-        assert.equal(requestPath.endsWith('customConversionGoals:mutate'), true);
-        assert.equal(requestPath.includes('conversionActions:mutate'), false);
-        if (options.data.validateOnly === false) {
-          state.custom_goals[0].conversion_actions = options.data.operations[0].update.conversionActions.slice().sort();
-        }
-        return { results: [] };
+  await assert.rejects(
+    applyClinicaclickGoalPolicy({
+      scope: { group_id: 5, assignment_scope: 'group' },
+      configuredAccounts: [account],
+      expectedDigest: digest,
+      confirmExternalMutation: true,
+      dependencies: {
+        now: deterministicClock(),
+        resolveRuntime: runtimeResolver(),
+        fetchSnapshot: async () => clone(state),
+        request: async (...args) => requests.push(args),
       },
-    },
-  });
-  assert.equal(result.outcome, 'applied');
-  assert.equal(result.external_mutation_count, 1);
-  assert.deepEqual(requests.map((item) => item.data.validateOnly), [true, false]);
-  assert.deepEqual(state.conversion_actions.find((item) => item.id === '10'), callActionBefore);
-  assert.deepEqual(state.custom_goals[0].conversion_actions, [
-    ...desiredActionResources(),
-    `customers/${CUSTOMER}/conversionActions/10`,
-  ].sort());
+    }),
+    (error) => error.code === 'GOAL_POLICY_PLAN_BLOCKED',
+  );
+  assert.equal(requests.length, 0);
 }
 
 async function testApplyNewGoalReturnsAndCanPersistOwnership() {
@@ -1033,10 +1113,13 @@ function testDailyStableSchedulerIsWiredWithoutMigration() {
 async function main() {
   testConfigurationRequiresExplicitScope();
   testScheduleOnlyBiddingStillAuditsAllCanonicalSignals();
-  testSupplementalAdCallsExtendMembershipWithoutMutation();
+  testSupplementalAdCallsRequireExplicitMigrationAndStayOutOfGoal();
   testSupplementalActionsFailClosedOnProviderState();
-  testExistingThreeActionGoalRemainsBackwardCompatible();
-  testPlanContainsOnlyThreeSecondaryCanonicalActions();
+  testExistingStageGoalIsStableAndLegacyGenericGoalIsBlocked();
+  testPlanContainsExactlyOneSecondaryCanonicalBiddingSignal();
+  testEachStageAndCohortGetsAnUnambiguousGoal();
+  testMultipleSignalsAndLegacyObservationSignalsAreMigrationOnly();
+  testSmartCampaignsAreObserveOnly();
   testCanonicalActionsMustAlreadyBeSafe();
   testCampaignGoalEnumerationFailsClosed();
   testForeignGoalsAreNeverOverwritten();
@@ -1046,7 +1129,7 @@ async function main() {
   await testDefaultProviderPreviewOnlySearches();
   await testApplyRequiresConfirmationAndFreshDigest();
   await testApplyExistingGoalValidatesBeforeMutation();
-  await testApplyAddsAllowlistedAdCallWithoutMutatingAction();
+  await testApplyRejectsLegacySupplementalAdCallBeforeMutation();
   await testApplyNewGoalReturnsAndCanPersistOwnership();
   await testDriftAfterValidateOnlyStopsBeforeRealMutation();
   await testAuditIsReadOnlyAndIncludesDiagnosticsFreshness();

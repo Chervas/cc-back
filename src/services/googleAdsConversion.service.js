@@ -189,6 +189,15 @@ function purchaseActionPayload(name = 'Purchase - ClinicaClick') {
   };
 }
 
+function qualifiedLeadActionPayload(name = 'Qualified Lead - ClinicaClick') {
+  return {
+    ...leadActionPayload(name),
+    // Categoría oficial para leads validados/importados desde CRM. La acción
+    // sigue naciendo secundaria mediante primaryForGoal=false.
+    category: 'QUALIFIED_LEAD'
+  };
+}
+
 module.exports = {
   assertSuccessfulUploadResponse,
   buildClickConversion,
@@ -198,5 +207,6 @@ module.exports = {
   normalizeAndHashEmail,
   normalizeAndHashPhone,
   purchaseActionPayload,
+  qualifiedLeadActionPayload,
   uploadClickConversion
 };

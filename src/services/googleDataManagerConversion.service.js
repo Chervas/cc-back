@@ -8,7 +8,7 @@ const GOOGLE_DATA_MANAGER_USER_DATA_POLICY = 'blocked_healthcare';
 const GOOGLE_ENHANCED_CONVERSION_POLICY_MODE = 'documented_google_account_team_guidance_and_advertiser_authorization';
 const GOOGLE_ENHANCED_CONVERSION_ALLOWED_IDENTIFIERS = Object.freeze(['email', 'phone']);
 const GOOGLE_ENHANCED_CONVERSION_PROPDENTAL_CUSTOMER_IDS = Object.freeze(['1851215478', '5992356722']);
-const GOOGLE_ENHANCED_CONVERSION_PROPDENTAL_EVENTS = Object.freeze(['lead', 'contact', 'schedule']);
+const GOOGLE_ENHANCED_CONVERSION_PROPDENTAL_EVENTS = Object.freeze(['lead', 'contact', 'qualified_lead', 'schedule']);
 const DEFAULT_DATA_MANAGER_BASE_URL = 'https://datamanager.googleapis.com/v1';
 
 function scopedCredentialError() {

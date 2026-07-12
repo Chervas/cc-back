@@ -40,7 +40,7 @@ const DAY_MS = 86400000;
 const CITED_LEAD_STATUSES = new Set(['citado', 'acudio_cita', 'convertido']);
 const ATTENDED_LEAD_STATUSES = new Set(['acudio_cita', 'convertido']);
 const CONVERTED_LEAD_STATUSES = new Set(['convertido']);
-const CONTACTED_LEAD_STATUSES = new Set(['contactado', 'esperando_info', 'info_recibida', 'citado', 'acudio_cita', 'convertido']);
+const CONTACTED_LEAD_STATUSES = new Set(['contactado', 'esperando_info', 'info_recibida', 'cualificado', 'citado', 'acudio_cita', 'convertido']);
 
 function parseDate(value, fallback) {
   if (!value) return fallback;

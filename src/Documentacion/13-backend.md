@@ -3342,7 +3342,7 @@ En esa carga se guardan, entre otros:
 - cada intento viable queda en `GoogleAdsConversionUploadAttempts` con `destination_key`, scope, conexión resuelta, estado, motivo y metadatos saneados; el click id se conserva solo como hash y no se guardan email ni teléfono;
 - `dedupe_key` evita repetir un evento ya aceptado en el mismo `customer_id + conversion_action`; destinos Google distintos se deduplican de forma independiente y los reintentos fallidos conservan un historial acotado;
 - el agregado devuelve `accepted=true` si al menos un destino fue aceptado (en este intento o previamente por dedupe), `sent_count` para las subidas nuevas y `partial=true` cuando otro destino falla o se omite; un fallo de una cuenta no invalida la aceptación de la otra;
-- solo `lead`, `contact`, `schedule` y `purchase` pueden subir conversiones; eventos de navegación como `ViewContent` no hacen fallback a `lead` aunque lleven `gclid`;
+- solo `lead`, `contact`, `qualified_lead`, `schedule` y `purchase` pueden subir conversiones; eventos de navegación como `ViewContent` no hacen fallback a `lead` aunque lleven `gclid`; `qualified_lead` exige siempre un destino explícito y nunca hereda la acción global legacy de Lead;
 - una denegación de consentimiento bloquea la llamada externa y se registra como `skipped/consent_not_granted`;
 - los tests dirigidos no llaman a Google: `node src/scripts/tests/google_ads_conversion_tracking.test.js`.
 

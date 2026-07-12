@@ -78,10 +78,15 @@ const {
   normalizeGoogleAdsConfig: normalizeEffectiveGoogleAdsConfig,
   resolveEffectiveTrackingConfig
 } = require('../services/effectiveMarketingAssets.service');
+const {
+  ensureQualifiedLeadConversion,
+  maybeUploadQualifiedLeadStatusTransition,
+  uploadScheduleForLinkedAppointment,
+} = require('../services/leadQualificationMilestone.service');
 
 const CHANNELS = new Set(['paid', 'organic', 'unknown']);
 const SOURCES = new Set(['meta_ads', 'google_ads', 'web', 'whatsapp', 'call_click', 'tiktok_ads', 'seo', 'direct', 'local_services']);
-const STATUSES = new Set(['nuevo', 'contactado', 'esperando_info', 'info_recibida', 'citado', 'acudio_cita', 'convertido', 'descartado']);
+const STATUSES = new Set(['nuevo', 'contactado', 'esperando_info', 'info_recibida', 'cualificado', 'citado', 'acudio_cita', 'convertido', 'descartado']);
 const DEDUPE_WINDOW_HOURS = parseInt(process.env.INTAKE_DEDUPE_WINDOW_HOURS || '24', 10);
 const LEAD_ACTIVE_APPOINTMENT_STATES = new Set([
   'pendiente',
@@ -4783,6 +4788,7 @@ exports.getLeadStats = asyncHandler(async (req, res) => {
   const contactados = await LeadIntake.count({ where: { ...where, status_lead: 'contactado' } });
   const esperando_info = await LeadIntake.count({ where: { ...where, status_lead: 'esperando_info' } });
   const info_recibida = await LeadIntake.count({ where: { ...where, status_lead: 'info_recibida' } });
+  const cualificados = await LeadIntake.count({ where: { ...where, status_lead: 'cualificado' } });
   const citados = await LeadIntake.count({ where: { ...where, status_lead: 'citado' } });
   const acudio_cita = await LeadIntake.count({ where: { ...where, status_lead: 'acudio_cita' } });
   const convertidos = await LeadIntake.count({ where: { ...where, status_lead: 'convertido' } });
@@ -4796,6 +4802,7 @@ exports.getLeadStats = asyncHandler(async (req, res) => {
     contactados,
     esperando_info,
     info_recibida,
+    cualificados,
     citados,
     acudio_cita,
     convertidos,
@@ -4821,6 +4828,7 @@ exports.updateLeadStatus = asyncHandler(async (req, res) => {
     return res.status(400).json({ message: 'motivo_descarte es obligatorio al descartar' });
   }
 
+  const previousStatus = String(lead.status_lead || '').trim().toLowerCase();
   const updatePayload = {};
   if (status_lead) updatePayload.status_lead = status_lead;
   if (notas_internas !== undefined) updatePayload.notas_internas = notas_internas;
@@ -4829,11 +4837,34 @@ exports.updateLeadStatus = asyncHandler(async (req, res) => {
 
   await lead.update(updatePayload);
 
+  let qualifiedLeadConversion = null;
+  if (status_lead === 'cualificado') {
+    qualifiedLeadConversion = await maybeUploadQualifiedLeadStatusTransition({
+      lead,
+      previousStatus,
+      nextStatus: status_lead,
+      occurredAt: lead.updated_at || new Date(),
+      logger: console,
+    });
+  }
+
   try {
     await LeadAttributionAudit.create({
       lead_intake_id: lead.id,
       raw_payload: { status_lead, notas_internas, asignado_a, motivo_descarte },
-      attribution_steps: { action: 'status_update', userId: req.userData?.userId || null }
+      attribution_steps: {
+        action: 'status_update',
+        userId: req.userData?.userId || null,
+        previous_status: previousStatus,
+        qualified_lead_event_id: status_lead === 'cualificado' ? `lead-${lead.id}-qualified` : null,
+        qualified_lead_conversion: qualifiedLeadConversion
+          ? {
+              sent: qualifiedLeadConversion.sent === true,
+              accepted: qualifiedLeadConversion.accepted === true,
+              reason: qualifiedLeadConversion.reason || null,
+            }
+          : null,
+      }
     });
   } catch (auditErr) {
     console.warn('⚠️ No se pudo registrar auditoría de cambio de estado:', auditErr.message || auditErr);
@@ -4918,7 +4949,12 @@ exports.registrarContacto = asyncHandler(async (req, res) => {
     historial_contactos: historial,
     num_contactos: (lead.num_contactos || 0) + 1,
     ultimo_contacto: new Date(),
-    status_lead: 'contactado',
+    // Registrar otro intento no degrada hitos CRM ya alcanzados. Volver a
+    // `contactado` desde `cualificado` solo puede ser una transición explícita.
+    status_lead: ['cualificado', 'citado', 'acudio_cita', 'convertido', 'descartado']
+      .includes(String(lead.status_lead || '').trim().toLowerCase())
+      ? lead.status_lead
+      : 'contactado',
   };
   if (hasReminderField) {
     updatePayload.callback_reminder_at = reminderAt ? reminderAt.toISOString() : null;
@@ -5027,10 +5063,31 @@ exports.saveCallOutcome = asyncHandler(async (req, res) => {
   if (!CALL_OUTCOMES.has(outcome)) {
     return res.status(400).json({ message: 'call_outcome inválido' });
   }
+  if (appointmentId !== null && outcome !== 'citado') {
+    return res.status(400).json({ message: 'appointment_id solo es válido para call_outcome citado' });
+  }
 
   const lead = await LeadIntake.findByPk(leadId);
   if (!lead) {
     return res.status(404).json({ message: 'Lead no encontrado' });
+  }
+
+  let linkedAppointment = null;
+  if (appointmentId !== null) {
+    linkedAppointment = await CitaPaciente.findByPk(appointmentId);
+    if (!linkedAppointment) {
+      return res.status(404).json({ message: 'Cita no encontrada' });
+    }
+    if (parseInteger(linkedAppointment.clinica_id) !== parseInteger(lead.clinica_id)) {
+      return res.status(409).json({ message: 'La cita no pertenece a la clínica del lead' });
+    }
+    const linkedLeadId = parseInteger(linkedAppointment.lead_intake_id);
+    if (linkedLeadId !== null && linkedLeadId !== leadId) {
+      return res.status(409).json({ message: 'La cita ya está vinculada a otro lead' });
+    }
+    if (!LEAD_ACTIVE_APPOINTMENT_STATES.has(String(linkedAppointment.estado || '').trim().toLowerCase())) {
+      return res.status(409).json({ message: 'La cita no está activa y no puede cerrar este lead' });
+    }
   }
 
   const updatePayload = {
@@ -5065,13 +5122,50 @@ exports.saveCallOutcome = asyncHandler(async (req, res) => {
     updatePayload.status_lead = 'contactado';
   }
 
+  if (linkedAppointment && parseInteger(linkedAppointment.lead_intake_id) !== leadId) {
+    await linkedAppointment.update({
+      lead_intake_id: leadId,
+      ...(lead.campana_id && !linkedAppointment.campana_id ? { campana_id: lead.campana_id } : {}),
+    });
+  }
+
+  let qualifiedLeadConversion = null;
+  if (outcome === 'citado' && linkedAppointment) {
+    qualifiedLeadConversion = await ensureQualifiedLeadConversion({
+      lead,
+      occurredAt: linkedAppointment.created_at || new Date(),
+      logger: console,
+    });
+  }
+
   await lead.update(updatePayload);
+
+  let scheduleConversion = null;
+  if (outcome === 'citado' && linkedAppointment) {
+    scheduleConversion = await uploadScheduleForLinkedAppointment({
+      lead,
+      appointment: linkedAppointment,
+      logger: console,
+    });
+  }
 
   try {
     await LeadAttributionAudit.create({
       lead_intake_id: lead.id,
       raw_payload: { outcome, appointment_id: appointmentId, notes },
-      attribution_steps: { action: 'call_outcome', userId: req.userData?.userId || null }
+      attribution_steps: {
+        action: 'call_outcome',
+        userId: req.userData?.userId || null,
+        appointment_linked: Boolean(linkedAppointment),
+        qualified_lead_event_id: linkedAppointment ? `lead-${lead.id}-qualified` : null,
+        schedule_event_id: linkedAppointment ? `appointment-${linkedAppointment.id_cita}` : null,
+        qualified_lead_conversion: qualifiedLeadConversion
+          ? { sent: qualifiedLeadConversion.sent === true, accepted: qualifiedLeadConversion.accepted === true, reason: qualifiedLeadConversion.reason || null }
+          : null,
+        schedule_conversion: scheduleConversion
+          ? { sent: scheduleConversion.sent === true, accepted: scheduleConversion.accepted === true, reason: scheduleConversion.reason || null }
+          : null,
+      }
     });
   } catch (auditErr) {
     console.warn('⚠️ No se pudo registrar auditoría de call_outcome:', auditErr.message || auditErr);

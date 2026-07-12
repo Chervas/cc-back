@@ -433,6 +433,7 @@ function testScopeAndProvisioningContracts() {
   ]), {
     lead: 'cc-lead',
     contact: 'cc-contact',
+    qualified_lead: null,
     schedule: null,
     purchase: null
   });
@@ -449,6 +450,60 @@ function testScopeAndProvisioningContracts() {
     },
     countingType: 'MANY_PER_CLICK'
   });
+  assert.deepEqual(campaignOnboardingTest.buildClinicaclickConversionActionCreate('qualified_lead', 'eur'), {
+    name: 'Qualified Lead - ClinicaClick',
+    category: 'QUALIFIED_LEAD',
+    type: 'UPLOAD_CLICKS',
+    status: 'ENABLED',
+    primaryForGoal: false,
+    valueSettings: {
+      defaultValue: 0,
+      alwaysUseDefaultValue: false,
+      defaultCurrencyCode: 'EUR'
+    },
+    countingType: 'MANY_PER_CLICK'
+  });
+  assert.equal(
+    campaignOnboardingTest.resolveEnabledConversionEvents({ events: {} }).includes('qualified_lead'),
+    false,
+  );
+  assert.equal(
+    campaignOnboardingTest.resolveEnabledConversionEvents({
+      events: { qualified_lead: { enabled: true } },
+    }).includes('qualified_lead'),
+    true,
+  );
+
+  assert.deepEqual(campaignOnboardingTest.readGoogleConversionTrackingSettings({
+    results: [{
+      customer: {
+        id: '5992356722',
+        conversionTrackingSetting: {
+          acceptedCustomerDataTerms: true,
+          // Google omite los booleanos protobuf cuyo valor es false.
+          googleAdsConversionCustomer: 'customers/5992356722'
+        }
+      }
+    }]
+  }, '5992356722'), {
+    customer_id: '5992356722',
+    accepted_customer_data_terms: true,
+    enhanced_conversions_for_leads_enabled: false,
+    google_ads_conversion_customer: 'customers/5992356722',
+    conversion_customer_id: '5992356722'
+  });
+
+  const enhancedCapabilities = campaignOnboardingTest.buildGoogleAdsCapabilities(
+    true,
+    true,
+    true,
+    [{ customer_id: '1851215478', enhanced_conversions_for_leads_enabled: true }]
+  );
+  assert.equal(enhancedCapabilities.enhanced_conversions_supported, true);
+  assert.equal(enhancedCapabilities.can_upload_enhanced_conversions, true);
+  assert.deepEqual(enhancedCapabilities.enhanced_conversions_enabled_accounts, ['1851215478']);
+  assert.equal(enhancedCapabilities.enhanced_conversions_require_account_activation, false);
+  assert.equal(enhancedCapabilities.user_data_policy, 'documented_account_authorization_required');
 
   const uploader = fs.readFileSync(
     path.resolve(__dirname, '../../services/googleAdsConversionUpload.service.js'),
