@@ -2257,6 +2257,7 @@ exports.deleteCita = asyncHandler(async (req, res) => {
     if (!cita) {
         return res.status(404).json({ message: 'Cita no encontrada' });
     }
+    if (await denyAppointmentManageAccessIfNeeded(req, res, cita.clinica_id)) return;
 
     if (String(cita.estado || '').trim().toLowerCase() !== 'cancelada') {
         return res.status(409).json({ message: 'Solo se pueden eliminar citas canceladas' });

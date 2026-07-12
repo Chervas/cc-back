@@ -3,6 +3,8 @@
 require('dotenv').config();
 
 const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const path = require('node:path');
 const db = require('../../../models');
 const accessPolicy = require('../../lib/access-policy');
 
@@ -38,6 +40,19 @@ async function run() {
   assert.equal(features.get('quickchat.read_team')?.enforcement_status, 'backend');
   assert.equal(features.get('quickchat.read_leads')?.kind, 'read');
   assert.equal(features.get('quickchat.read_leads')?.enforcement_status, 'backend');
+
+  const citasController = fs.readFileSync(
+    path.resolve(__dirname, '../../controllers/citas.controller.js'),
+    'utf8'
+  );
+  const deleteStart = citasController.indexOf('exports.deleteCita =');
+  const deleteEnd = citasController.indexOf('exports.reagendarCita =', deleteStart);
+  const deleteSection = citasController.slice(deleteStart, deleteEnd);
+  assert.match(
+    deleteSection,
+    /denyAppointmentManageAccessIfNeeded\(req, res, cita\.clinica_id\)/,
+    'Deleting a cancelled appointment must enforce appointments.manage after staging/dev merge'
+  );
 
   console.log('access_policy.test.js OK');
 }
