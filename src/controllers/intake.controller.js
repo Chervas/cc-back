@@ -2259,7 +2259,9 @@ const defaultConfigPayload = (clinicId, groupId) => ({
     viewcontent_enabled: true,
     form_intercept_enabled: true,
     webevents_enabled: true,
-    consent_mode_enabled: false
+    consent_mode_enabled: false,
+    consent_provider: 'clinicaclick',
+    external_cmp_provider: 'complianz'
   },
   flow: DEFAULT_CHAT_FLOW,
   flows: null,

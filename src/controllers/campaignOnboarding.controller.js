@@ -2106,12 +2106,25 @@ function listToUniqueArray(values) {
   return out;
 }
 
-function buildGoogleAdsCapabilities(connected, hasAdsScope) {
-  const enabled = !!connected && !!hasAdsScope;
+function buildGoogleAdsCapabilities(connected, hasAdsScope, hasDataManagerScope = false) {
+  const adsEnabled = !!connected && !!hasAdsScope;
+  const quotaProjectConfigured = Boolean(
+    process.env.GOOGLE_DATA_MANAGER_QUOTA_PROJECT
+      || process.env.GOOGLE_CLOUD_PROJECT
+  );
+  const dataManagerMissing = [];
+  if (!hasDataManagerScope) dataManagerMissing.push('oauth_scope');
+  if (!quotaProjectConfigured) dataManagerMissing.push('quota_project');
   return {
-    can_list_conversion_actions: enabled,
-    can_create_conversion_actions: enabled,
-    can_upload_enhanced_conversions: enabled
+    can_list_conversion_actions: adsEnabled,
+    can_create_conversion_actions: adsEnabled,
+    // Healthcare conversions must not contain customer-provided identifiers.
+    can_upload_enhanced_conversions: false,
+    can_upload_server_side_conversions: adsEnabled && dataManagerMissing.length === 0,
+    data_manager_scope_granted: !!hasDataManagerScope,
+    data_manager_quota_project_configured: quotaProjectConfigured,
+    data_manager_missing: dataManagerMissing,
+    user_data_policy: 'blocked_healthcare'
   };
 }
 
@@ -4157,6 +4170,7 @@ exports.getCampaignOnboardingBootstrap = asyncHandler(async (req, res) => {
   let googleConnected = false;
   let googleReason = null;
   let hasAdsScope = false;
+  let hasDataManagerScope = false;
   let googleAccounts = marketingState.google.available_accounts || [];
   let selectedCustomerId = marketingState.google.effective_assets?.account?.customer_id || intakeGoogleAds.customer_id || null;
 
@@ -4172,6 +4186,7 @@ exports.getCampaignOnboardingBootstrap = asyncHandler(async (req, res) => {
     googleReason = 'no_connection';
   } else {
     hasAdsScope = hasScopeText(googleConnection.scopes || '', GOOGLE_ADS_SCOPE);
+    hasDataManagerScope = hasScopeText(googleConnection.scopes || '', GOOGLE_DATA_MANAGER_SCOPE);
     if (!hasAdsScope) {
       googleReason = 'insufficient_scope';
     } else {
@@ -4258,7 +4273,7 @@ exports.getCampaignOnboardingBootstrap = asyncHandler(async (req, res) => {
         send_to: intakeGoogleAds.send_to || null,
         tag_id: marketingState.google.effective_assets?.tag_id || extractGoogleTagId(intakeGoogleAds.send_to)
       },
-      capabilities: buildGoogleAdsCapabilities(googleConnected, hasAdsScope)
+      capabilities: buildGoogleAdsCapabilities(googleConnected, hasAdsScope, hasDataManagerScope)
     },
     meta_ads: {
       connected: metaConnected,
