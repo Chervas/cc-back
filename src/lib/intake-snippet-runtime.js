@@ -53,10 +53,11 @@ const parseLoaderRuntimeDescriptor = ({ body, loaderUrl, tag }) => {
   const declaredVersion = normalizeVersion(
     source.match(/\bRUNTIME_VERSION\s*=\s*['\"]([0-9]+(?:\.[0-9]+){0,3})['\"]/i)?.[1]
   );
-  const runtimeFile =
-    source.match(/\bRUNTIME_FILE\s*=\s*['\"]([^'\"]+)['\"]/i)?.[1] ||
-    'intake.js';
+  const runtimeFile = source.match(/\bRUNTIME_FILE\s*=\s*['\"]([^'\"]+)['\"]/i)?.[1] || null;
   const explicitRuntimeUrl = readScriptAttr(tag, 'data-runtime-url');
+  if (!explicitRuntimeUrl && !runtimeFile) {
+    return { declaredVersion, runtimeUrl: null };
+  }
   try {
     const runtimeUrl = new URL(explicitRuntimeUrl || runtimeFile, loaderUrl).toString();
     const parsed = new URL(runtimeUrl);

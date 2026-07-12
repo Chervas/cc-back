@@ -99,6 +99,24 @@ async function run() {
   {
     const calls = [];
     const result = await inspectSnippetRuntime({
+      tags: ['<script src="https://crm.clinicaclick.com/assets/loader.js" data-group-id="5">'],
+      checkedUrl,
+      isAllowedAssetUrl: allowed,
+      fetchScript: makeFetcher({
+        // Un fichero llamado loader.js no demuestra qué runtime ejecuta.
+        'https://crm.clinicaclick.com/assets/loader.js': 'console.log("generic loader")',
+        'https://crm.clinicaclick.com/assets/intake.js': runtimeSource('3.3.0'),
+      }, calls),
+    });
+    assert.equal(result.uses_loader, true);
+    assert.equal(result.runtime_version, null);
+    assert.equal(result.runtime_compatible, false);
+    assert.deepEqual(calls, ['https://crm.clinicaclick.com/assets/loader.js']);
+  }
+
+  {
+    const calls = [];
+    const result = await inspectSnippetRuntime({
       tags: ['<script src="https://crm.clinicaclick.com/assets/intake.js?v=99.0.0" data-group-id="5">'],
       checkedUrl,
       isAllowedAssetUrl: allowed,
