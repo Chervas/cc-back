@@ -751,6 +751,27 @@ Por tanto, cuando aparezcan leads Meta/Google sin entrar en CRM, la primera revi
 - page/form/account mapeados al grupo o clínica correctos;
 - coherencia entre el `clinic_match_*` guardado y los activos materializados.
 
+## 2026-07-12 - Routing de leads Google Ads en cuentas compartidas
+
+`ClinicGoogleAdsAccount.clinicaId` no es un destino válido cuando
+`assignmentScope = group`: algunas cuentas compartidas conservan ahí una clínica
+representativa por compatibilidad histórica.
+
+Para `source = google_ads`, el intake aplica este orden:
+
+1. normaliza `customer_id` o su alias `account_id`;
+2. si también llega `campaign_id` o `external_campaign_id`, busca una
+   `ExternalCampaignAssignment` activa por la identidad completa
+   `google_ads + customer_id + campaign_id` y usa su clínica;
+3. si la cuenta es de grupo y no hay assignment, mantiene el lead en scope de
+   grupo para que nombre de sede o URL canónica resuelvan la clínica;
+4. si esas señales tampoco existen, guarda el lead a nivel de grupo y no lo
+   adjudica a la clínica representativa ni al primer centro del grupo.
+
+Las cuentas con `assignmentScope = clinic` siguen resolviendo directamente su
+`clinicaId`. Si el mismo `customer_id` está activo en scopes distintos y el
+request no aporta contexto suficiente, el resolver lo considera ambiguo.
+
 ## 2026-03-24 - Importación manual de leads sobre `LeadIntake`
 
 `Marketing > Leads` ya no necesita crear leads uno a uno cuando la fuente llega como CSV/Excel.

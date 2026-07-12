@@ -55,6 +55,7 @@ const {
   configuredClinicIds,
   matchClinicByPageUrl,
 } = require('../lib/intake-page-clinic');
+const { resolveGoogleLeadRoute } = require('../lib/google-lead-routing');
 const {
   extractGoogleTagId,
   normalizeMetaAdsConfig,
@@ -1167,6 +1168,8 @@ exports.ingestLead = asyncHandler(async (req, res) => {
   const explicitGroupId = parseInteger(coalesce(grupo_clinica_id, group_id, body.grupoClinicaId, body.groupId));
   let clinicaIdParsed = explicitClinicId;
   let grupoClinicaIdParsed = explicitGroupId;
+  const normalizedSourceForRouting = SOURCES.has(source) ? source : null;
+  let canResolveGroupClinicHint = explicitClinicId === null && explicitGroupId !== null;
   const campanaIdParsed = parseInteger(campana_id);
   const attribution = body?.attribution || {};
   const leadData = body?.lead_data || {};
@@ -1247,8 +1250,6 @@ exports.ingestLead = asyncHandler(async (req, res) => {
     grupoClinicaIdParsed = domainGroupId;
   }
 
-  const isGroupScopedRequest = explicitClinicId === null && explicitGroupId !== null;
-
   // Runtime 3.2.1 conserva la sede solo en chat_state; 3.2.3 también la replica
   // como clinic_id. En scope de grupo validamos ambos caminos y, si llegan los
   // dos valores, exigimos que coincidan antes de confiar en ellos.
@@ -1282,7 +1283,34 @@ exports.ingestLead = asyncHandler(async (req, res) => {
     }
   }
 
-  if (clinicaIdParsed === null && grupoClinicaIdParsed !== null && clinicNameHint && isGroupScopedRequest) {
+  let preserveGoogleGroupScope = false;
+  if (clinicaIdParsed === null && normalizedSourceForRouting === 'google_ads') {
+    const googleRoute = await resolveGoogleLeadRoute({
+      body,
+      currentGroupId: grupoClinicaIdParsed,
+      accountModel: ClinicGoogleAdsAccount,
+      assignmentModel: db.ExternalCampaignAssignment,
+    });
+    if (googleRoute.matched) {
+      if (googleRoute.groupId !== null) {
+        grupoClinicaIdParsed = googleRoute.groupId;
+        canResolveGroupClinicHint = true;
+      }
+      if (googleRoute.clinicId !== null) {
+        clinicaIdParsed = googleRoute.clinicId;
+        clinicMatchSource = googleRoute.matchSource;
+        clinicMatchValue = googleRoute.matchValue;
+      }
+      preserveGoogleGroupScope = googleRoute.preserveGroupScope;
+    }
+  }
+
+  if (
+    clinicaIdParsed === null
+    && grupoClinicaIdParsed !== null
+    && clinicNameHint
+    && canResolveGroupClinicHint
+  ) {
     const groupClinics = await Clinica.findAll({
       where: { grupoClinicaId: grupoClinicaIdParsed },
       attributes: ['id_clinica', 'nombre_clinica'],
@@ -1322,7 +1350,7 @@ exports.ingestLead = asyncHandler(async (req, res) => {
     clinicMatchValue = clinicMatchValue || domain;
   }
 
-  if (clinicaIdParsed === null && grupoClinicaIdParsed !== null) {
+  if (clinicaIdParsed === null && grupoClinicaIdParsed !== null && !preserveGoogleGroupScope) {
     const fallbackClinicId = await resolveFallbackClinicForGroup(grupoClinicaIdParsed);
     if (fallbackClinicId !== null) {
       clinicaIdParsed = fallbackClinicId;
@@ -1391,7 +1419,7 @@ exports.ingestLead = asyncHandler(async (req, res) => {
   }
 
   const normalizedChannel = CHANNELS.has(channel) ? channel : 'unknown';
-  const normalizedSource = SOURCES.has(source) ? source : null;
+  const normalizedSource = normalizedSourceForRouting;
   const normalizedStatus = STATUSES.has(status_lead) ? status_lead : 'nuevo';
 
   const normalizedEmail = normalizeEmail(leadEmail);
@@ -1438,21 +1466,6 @@ exports.ingestLead = asyncHandler(async (req, res) => {
         page_id: pageId ? String(pageId) : null,
         ad_account_id: adAccountId ? String(adAccountId) : null
       });
-    }
-  }
-
-  if (!clinicaIdParsed && normalizedSource === 'google_ads') {
-    const customerId = coalesce(req.body?.customer_id, req.body?.customerId, req.body?.google_customer_id, req.body?.payload?.customer_id);
-    if (customerId && db.ClinicGoogleAdsAccount) {
-      const account = await db.ClinicGoogleAdsAccount.findOne({
-        where: { customerId: String(customerId), isActive: true }
-      });
-      if (account) {
-        clinicaIdParsed = account.clinicaId || clinicaIdParsed;
-        grupoClinicaIdParsed = account.grupoClinicaId || grupoClinicaIdParsed;
-        clinicMatchSource = clinicMatchSource || 'google_ads_customer';
-        clinicMatchValue = clinicMatchValue || String(customerId);
-      }
     }
   }
 
@@ -1508,8 +1521,8 @@ exports.ingestLead = asyncHandler(async (req, res) => {
   let shouldEmitLeadCreated = false;
   try {
     lead = await dedupeAndCreateLead(leadPayload, req.body || {}, {
-      clinic_match_source: clinic_match_source || null,
-      clinic_match_value: clinic_match_value || null
+      clinic_match_source: clinicMatchSource || null,
+      clinic_match_value: clinicMatchValue || null
     });
     shouldEmitLeadCreated = true;
   } catch (err) {
