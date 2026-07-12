@@ -10,7 +10,6 @@ const {
   applyCanonicalMappingsToGoogleAdsConfig,
   assessConversionOnboardingReadiness,
   buildRequiredConversionPlan,
-  buildClinicaclickConversionActionUpdate,
   conversionValidationKey,
   resolveEnabledConversionEvents,
   strategyPayloadUsesGoogleAds
@@ -197,44 +196,14 @@ function testBraidIncompatibleCountingTypeIsBlocked() {
 }
 
 function testExplicitCanonicalNormalizationDoesNotTouchClientActions() {
-  const canonical = buildClinicaclickConversionActionUpdate({
-    id: '1001',
-    resource_name: 'customers/5992356722/conversionActions/1001',
-    name: 'Lead - ClinicaClick',
-    type: 'UPLOAD_CLICKS',
-    counting_type: 'ONE_PER_CLICK',
-    primary_for_goal: true
-  }, 'lead', '5992356722');
-  assert.deepEqual(canonical.operation, {
-    update: {
-      resourceName: 'customers/5992356722/conversionActions/1001',
-      countingType: 'MANY_PER_CLICK',
-      primaryForGoal: false
-    },
-    updateMask: 'counting_type,primary_for_goal'
-  });
-  assert.equal(buildClinicaclickConversionActionUpdate({
-    id: 'client-1',
-    name: 'Formulario de contacto principal',
-    type: 'UPLOAD_CLICKS',
-    counting_type: 'ONE_PER_CLICK',
-    primary_for_goal: true
-  }, 'lead', '5992356722'), null);
-  assert.equal(buildClinicaclickConversionActionUpdate({
-    id: '1001',
-    name: 'Lead - ClinicaClick',
-    type: 'WEBPAGE',
-    counting_type: 'ONE_PER_CLICK',
-    primary_for_goal: true
-  }, 'lead', '5992356722'), null);
-
   const controller = fs.readFileSync(
     path.resolve(__dirname, '../../controllers/campaignOnboarding.controller.js'),
     'utf8'
   );
   assert.match(controller, /normalize_existing/);
-  assert.match(controller, /validateOnly: true/);
-  assert.match(controller, /updateMask: 'counting_type,primary_for_goal'/);
+  assert.match(controller, /normalizeCanonicalGoogleAdsConversions/);
+  assert.match(controller, /expected_actions: expectedActions/);
+  assert.doesNotMatch(controller, /buildClinicaclickConversionActionUpdate/);
 }
 
 function testPrimaryCanonicalActionIsNotReadyForBiddingSafety() {

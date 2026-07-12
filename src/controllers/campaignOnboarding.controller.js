@@ -29,6 +29,9 @@ const {
   uploadConversionEvent: uploadGoogleDataManagerConversion
 } = require('../services/googleDataManagerConversion.service');
 const {
+  normalizeCanonicalGoogleAdsConversions
+} = require('../services/googleAdsCanonicalConversionNormalization.service');
+const {
   clinicIdsFromStrategyRows,
   hasMarketingClinicScopeAccess,
   normalizeClinicIds,
@@ -2101,40 +2104,6 @@ function buildClinicaclickConversionActionCreate(eventKey, currency) {
     },
     // Data Manager rechaza gbraid/wbraid contra acciones ONE_PER_CLICK.
     countingType: 'MANY_PER_CLICK'
-  };
-}
-
-function buildClinicaclickConversionActionUpdate(action, eventKey, customerId) {
-  if (!action || !VALID_EVENTS.includes(eventKey)) return null;
-  const actionId = String(action.id || '').trim();
-  if (
-    !actionId
-    || String(action.name || '').trim() !== EVENT_CATALOG[eventKey].name
-    || String(action.type || '').toUpperCase() !== 'UPLOAD_CLICKS'
-  ) return null;
-  if (
-    String(action.counting_type || '').toUpperCase() === 'MANY_PER_CLICK'
-    && action.primary_for_goal === false
-  ) return null;
-  const cleanCustomerId = normalizeCustomerId(customerId);
-  if (!cleanCustomerId) return null;
-  return {
-    operation: {
-      update: {
-        resourceName: action.resource_name
-          || `customers/${cleanCustomerId}/conversionActions/${actionId}`,
-        countingType: 'MANY_PER_CLICK',
-        primaryForGoal: false
-      },
-      updateMask: 'counting_type,primary_for_goal'
-    },
-    audit: {
-      event: eventKey,
-      id: actionId,
-      name: action.name,
-      previous_counting_type: action.counting_type || null,
-      previous_primary_for_goal: action.primary_for_goal
-    }
   };
 }
 
@@ -4344,23 +4313,19 @@ async function ensureConversionActionsInternal({
   loginCustomerId,
   currency,
   events,
-  createMissing,
-  normalizeExisting = false,
-  normalizationValidateOnly = false
+  createMissing
 }) {
   const requestedEvents = listToUniqueArray(
     (Array.isArray(events) && events.length ? events : DEFAULT_ENABLED_CONVERSION_EVENTS)
       .filter((key) => VALID_EVENTS.includes(key))
   );
-  let current = await listConversionActionsInternal({ accessToken, customerId, loginCustomerId });
+  const current = await listConversionActionsInternal({ accessToken, customerId, loginCustomerId });
   // Provisioning no adopta acciones del cliente por coincidencias vagas. Solo
   // reutiliza nombres canónicos de ClinicaClick y nunca modifica ni elimina el
   // resto de acciones existentes en la cuenta.
   const existingMapping = current.clinicaclick_mapping || {};
   const created = [];
   const existing = [];
-  const normalized = [];
-  let normalizationValidation = null;
 
   for (const key of requestedEvents) {
     if (existingMapping[key]) {
@@ -4408,67 +4373,6 @@ async function ensureConversionActionsInternal({
           primary_for_goal: false
         });
       }
-      current = await listConversionActionsInternal({ accessToken, customerId, loginCustomerId });
-    }
-  }
-
-  if (normalizeExisting) {
-    const operations = [];
-    const toNormalize = [];
-    for (const key of requestedEvents) {
-      const actionId = existingMapping[key];
-      if (!actionId) continue;
-      const action = current.actions.find((candidate) => String(candidate?.id || '') === String(actionId));
-      const update = buildClinicaclickConversionActionUpdate(action, key, customerId);
-      if (!update) continue;
-      operations.push(update.operation);
-      toNormalize.push(update.audit);
-    }
-    if (operations.length) {
-      await googleAdsRequest('POST', `customers/${normalizeCustomerId(customerId)}/conversionActions:mutate`, {
-        accessToken,
-        loginCustomerId: loginCustomerId || undefined,
-        singleAttempt: true,
-        timeoutMs: 15000,
-        data: {
-          operations,
-          partialFailure: false,
-          validateOnly: true
-        }
-      });
-      normalizationValidation = {
-        validated: true,
-        validate_only: true,
-        applied: false,
-        operation_count: operations.length
-      };
-      if (!normalizationValidateOnly) {
-        await googleAdsRequest('POST', `customers/${normalizeCustomerId(customerId)}/conversionActions:mutate`, {
-          accessToken,
-          loginCustomerId: loginCustomerId || undefined,
-          singleAttempt: true,
-          timeoutMs: 15000,
-          data: {
-            operations,
-            partialFailure: false,
-            validateOnly: false
-          }
-        });
-        normalizationValidation.applied = true;
-      }
-      normalized.push(...toNormalize.map((item) => ({
-        ...item,
-        counting_type: 'MANY_PER_CLICK',
-        primary_for_goal: false,
-        applied: !normalizationValidateOnly
-      })));
-    } else {
-      normalizationValidation = {
-        validated: true,
-        validate_only: true,
-        applied: false,
-        operation_count: 0
-      };
     }
   }
 
@@ -4508,8 +4412,6 @@ async function ensureConversionActionsInternal({
   return {
     created,
     existing,
-    normalized,
-    normalization_validation: normalizationValidation,
     mapping: {
       lead: existingMapping.lead || null,
       contact: existingMapping.contact || null,
@@ -5582,11 +5484,11 @@ exports.ensureGoogleAdsConversionActions = asyncHandler(async (req, res) => {
       message: 'La prevalidación sin cambios solo está disponible para ajustar acciones canónicas existentes.'
     });
   }
-  if ((createMissing || (normalizeExisting && !normalizationValidateOnly)) && req.body?.confirm_external_mutation !== true) {
+  if (createMissing && req.body?.confirm_external_mutation !== true) {
     return res.status(409).json({
       success: false,
       error: 'external_mutation_confirmation_required',
-      message: 'Confirma explícitamente la creación o ajuste de acciones canónicas en Google Ads.'
+      message: 'Confirma explícitamente la creación de acciones canónicas en Google Ads.'
     });
   }
   const events = Array.isArray(req.body?.events) && req.body.events.length
@@ -5625,20 +5527,91 @@ exports.ensureGoogleAdsConversionActions = asyncHandler(async (req, res) => {
       loginCustomerId: runtime.loginCustomerId,
       currency,
       events,
-      createMissing,
-      normalizeExisting,
-      normalizationValidateOnly
+      createMissing
     });
   } catch (error) {
     const providerError = error?.response?.data?.error || null;
     return res.status(Number(error?.response?.status) || 409).json({
       success: false,
-      error: normalizeExisting
-        ? 'canonical_action_normalization_failed'
-        : 'canonical_action_provisioning_failed',
-      message: providerError?.message || error.message || 'Google no pudo ajustar las acciones canónicas de ClinicaClick.',
+      error: 'canonical_action_provisioning_failed',
+      message: providerError?.message || error.message || 'Google no pudo crear las acciones canónicas de ClinicaClick.',
       details: Array.isArray(providerError?.details) ? providerError.details : []
     });
+  }
+
+  let normalization = null;
+  let normalized = [];
+  let normalizationValidation = null;
+  if (normalizeExisting) {
+    const expectedActions = listToUniqueArray(events)
+      .filter((eventKey) => VALID_EVENTS.includes(eventKey))
+      .map((eventKey) => ({
+        id: ensured.mapping[eventKey] || null,
+        name: EVENT_CATALOG[eventKey].name
+      }))
+      .filter((action) => !!action.id);
+    if (!expectedActions.length) {
+      return res.status(409).json({
+        success: false,
+        error: 'canonical_conversion_action_missing',
+        message: 'No hay acciones canónicas verificadas que se puedan ajustar en esta cuenta.'
+      });
+    }
+    const applyNormalization = req.body?.confirm_external_mutation === true && !normalizationValidateOnly;
+    try {
+      normalization = await normalizeCanonicalGoogleAdsConversions({
+        scope: {
+          user_id: userId,
+          clinic_id: scope.clinic_id,
+          group_id: scope.group_id,
+          assignment_scope: scope.assignment_scope
+        },
+        configuredAccounts: [{
+          customer_id: customerId,
+          expected_actions: expectedActions
+        }],
+        apply: applyNormalization,
+        validateOnly: normalizationValidateOnly,
+        confirmExternalMutation: applyNormalization
+      });
+    } catch (error) {
+      return res.status(error.httpStatus || 409).json({
+        success: false,
+        error: String(error.code || 'canonical_action_normalization_failed').toLowerCase(),
+        message: error.message || 'No se pudo preparar el ajuste de acciones canónicas.'
+      });
+    }
+    const accountNormalization = normalization.accounts?.[0] || null;
+    const allowedOutcomes = applyNormalization
+      ? new Set(['applied', 'unchanged'])
+      : normalizationValidateOnly
+        ? new Set(['validated', 'unchanged'])
+        : new Set(['ready', 'unchanged']);
+    if (!accountNormalization || !allowedOutcomes.has(accountNormalization.outcome)) {
+      const blocker = accountNormalization?.blockers?.[0]
+        || accountNormalization?.plan?.blockers?.[0]
+        || accountNormalization?.error
+        || null;
+      return res.status(409).json({
+        success: false,
+        error: 'canonical_action_normalization_blocked',
+        message: blocker?.message || 'La normalización canónica quedó bloqueada y no se aplicó.',
+        normalization
+      });
+    }
+    normalized = (accountNormalization.plan?.actions || [])
+      .filter((action) => action?.outcome === 'update_ready')
+      .map((action) => ({
+        event: action.key || null,
+        id: action.id,
+        name: action.name,
+        previous_counting_type: action.before?.counting_type || null,
+        previous_primary_for_goal: action.before?.primary_for_goal ?? null,
+        counting_type: 'MANY_PER_CLICK',
+        primary_for_goal: false,
+        applied: accountNormalization.outcome === 'applied'
+      }));
+    normalizationValidation = accountNormalization.validation || null;
   }
 
   if (scope.clinic_id || scope.group_id) {
@@ -5654,11 +5627,12 @@ exports.ensureGoogleAdsConversionActions = asyncHandler(async (req, res) => {
     customer_id: customerId,
     connection_source: runtime.connectionSource,
     external_mutation_performed: ensured.created.length > 0
-      || ensured.normalized.some((item) => item.applied === true),
+      || normalized.some((item) => item.applied === true),
     created: ensured.created,
     existing: ensured.existing,
-    normalized: ensured.normalized,
-    normalization_validation: ensured.normalization_validation,
+    normalized,
+    normalization_validation: normalizationValidation,
+    normalization,
     mapping: ensured.mapping,
     recommended_google_ads_config: ensured.recommended_google_ads_config
   });
@@ -6904,7 +6878,6 @@ exports.__test = {
   assessConversionOnboardingReadiness,
   buildRequiredConversionPlan,
   buildClinicaclickConversionActionCreate,
-  buildClinicaclickConversionActionUpdate,
   buildClinicaclickManagedMapping,
   conversionValidationKey,
   resolveEnabledConversionEvents,
