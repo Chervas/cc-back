@@ -121,6 +121,7 @@ async function maybeUploadLeadLifecycleConversion({
     groupId: resolved.groupId,
     assignmentScope: resolved.config.assignment_scope === 'group' ? 'group' : 'clinic',
     allowUpload,
+    consentModeEnabled,
   });
 }
 

@@ -106,10 +106,77 @@ async function testDeniedMarketingFailsClosed() {
   assert.equal(allowUpload, false);
 }
 
+async function captureLifecycleUpload({ consent, consentModeEnabled }) {
+  let uploadInput = null;
+  await maybeUploadLeadLifecycleConversion({
+    lead: leadFixture({ consentimiento_canal: consent }),
+    eventName: 'schedule',
+    eventId: `appointment-consent-${consentModeEnabled ? 'on' : 'off'}-${JSON.stringify(consent)}`,
+    dependencies: {
+      IntakeConfig: {
+        async findOne() {
+          return {
+            id: 24,
+            assignment_scope: 'group',
+            group_id: 5,
+            config: {
+              features: { consent_mode_enabled: consentModeEnabled },
+              google_ads: { enabled: true },
+            },
+          };
+        },
+      },
+      maybeUploadGoogleConversion: async (input) => {
+        uploadInput = input;
+        return { sent: input.allowUpload };
+      },
+    },
+  });
+  return uploadInput;
+}
+
+async function testLifecycleConsentPurposeAndModeGuards() {
+  const legacyAnalytics = await captureLifecycleUpload({
+    consent: { analytics: true },
+    consentModeEnabled: true,
+  });
+  assert.equal(legacyAnalytics.allowUpload, false);
+  assert.equal(legacyAnalytics.consentModeEnabled, true);
+
+  const contactOnly = await captureLifecycleUpload({
+    consent: { contact: true, phone: true, whatsapp: true },
+    consentModeEnabled: true,
+  });
+  assert.equal(contactOnly.allowUpload, false);
+
+  const absent = await captureLifecycleUpload({ consent: null, consentModeEnabled: true });
+  assert.equal(absent.allowUpload, false);
+
+  const marketing = await captureLifecycleUpload({
+    consent: { marketing: true },
+    consentModeEnabled: true,
+  });
+  assert.equal(marketing.allowUpload, true);
+
+  const adUserData = await captureLifecycleUpload({
+    consent: { ad_user_data: 'granted' },
+    consentModeEnabled: true,
+  });
+  assert.equal(adUserData.allowUpload, true);
+
+  const legacyModeOff = await captureLifecycleUpload({
+    consent: { analytics: true },
+    consentModeEnabled: false,
+  });
+  assert.equal(legacyModeOff.allowUpload, true);
+  assert.equal(legacyModeOff.consentModeEnabled, false);
+}
+
 async function run() {
   testPayloadKeepsRichAttribution();
   await testScheduleUsesGroupConfigAndConsent();
   await testDeniedMarketingFailsClosed();
+  await testLifecycleConsentPurposeAndModeGuards();
   console.log('google_lead_lifecycle_conversion.test.js OK');
 }
 

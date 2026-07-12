@@ -60,13 +60,35 @@ function normalizeGoogleConsent(consent) {
     return null;
   };
   if (typeof consent !== 'object' || Array.isArray(consent)) return fromValue(consent);
-  return fromValue(
-    consent.ad_user_data
-      ?? consent.adUserData
-      ?? consent.marketing
-      ?? consent.analytics
-      ?? consent.value
-  );
+  // Contact/phone/WhatsApp and analytics permissions are separate purposes. They
+  // must never be promoted to permission to send advertising conversions.
+  const statuses = [
+    fromValue(consent.ad_user_data ?? consent.adUserData),
+    fromValue(consent.marketing)
+  ].filter(Boolean);
+  if (statuses.includes('DENIED')) return 'DENIED';
+  if (statuses.includes('GRANTED')) return 'GRANTED';
+  return null;
+}
+
+function mergeGoogleConsent(...values) {
+  const statuses = values.map(normalizeGoogleConsent).filter(Boolean);
+  if (statuses.includes('DENIED')) return 'DENIED';
+  if (statuses.includes('GRANTED')) return 'GRANTED';
+  return null;
+}
+
+function mergeExplicitGoogleAdvertisingConsent(...values) {
+  return mergeGoogleConsent(...values.filter((value) => (
+    value
+      && typeof value === 'object'
+      && !Array.isArray(value)
+      && (
+        Object.prototype.hasOwnProperty.call(value, 'ad_user_data')
+        || Object.prototype.hasOwnProperty.call(value, 'adUserData')
+        || Object.prototype.hasOwnProperty.call(value, 'marketing')
+      )
+  )));
 }
 
 function parseSendToActionId(sendTo) {
@@ -582,6 +604,7 @@ async function uploadGoogleConversionDestination({
   groupId = null,
   assignmentScope = null,
   allowUpload = true,
+  consentModeEnabled = null,
   userProperties = null,
   dependencies = {}
 }) {
@@ -637,9 +660,16 @@ async function uploadGoogleConversionDestination({
     conversionActionId: eventConfig.conversion_action_id,
     sendTo: eventConfig.send_to
   });
-  const consentStatus = normalizeGoogleConsent(customData.consent)
-    || normalizeGoogleConsent(consent)
-    || eventConfig.consent
+  const configuredConsentModeEnabled = cfgObject.features?.consent_mode_enabled === true;
+  const requiresExplicitAdvertisingConsent = consentModeEnabled === true || configuredConsentModeEnabled;
+  const requestConsentStatus = requiresExplicitAdvertisingConsent
+    ? mergeExplicitGoogleAdvertisingConsent(customData.consent, consent)
+    : mergeGoogleConsent(customData.consent, consent);
+  // A static/legacy config value may preserve old installations without
+  // Consent Mode, but it can never stand in for per-visitor consent when the
+  // scope has Consent Mode enabled.
+  const consentStatus = requestConsentStatus
+    || (!requiresExplicitAdvertisingConsent ? eventConfig.consent : null)
     || null;
   const dedupeKey = buildConversionUploadDedupeKey({
     customerId: eventConfig.customer_id,
@@ -703,7 +733,11 @@ async function uploadGoogleConversionDestination({
   if (requestedTargetMismatchesConfig(customData, eventConfig, conversionAction)) {
     return skip('request_target_mismatch');
   }
-  if (allowUpload === false || consentStatus === 'DENIED') return skip('consent_not_granted');
+  if (
+    allowUpload === false
+    || consentStatus === 'DENIED'
+    || (requiresExplicitAdvertisingConsent && consentStatus !== 'GRANTED')
+  ) return skip('consent_not_granted');
   if (!scope.clinicId && !scope.groupId) return skip('scope_required');
 
   const existingAudit = await auditModel.findOne({ where: { dedupeKey } });
@@ -979,6 +1013,7 @@ module.exports = {
   hasRequestedActionOverride,
   hasRequestedTargetOverride,
   maybeUploadGoogleConversion,
+  mergeGoogleConsent,
   normalizeGoogleConsent,
   prepareAuditRow,
   requestedTargetMismatchesConfig,

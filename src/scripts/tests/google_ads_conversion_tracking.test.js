@@ -15,6 +15,7 @@ const {
   getGoogleAdsEventConfigs,
   hasRequestedActionOverride,
   maybeUploadGoogleConversion,
+  normalizeGoogleConsent,
   prepareAuditRow,
   requestedTargetMismatchesConfig,
   resolveUserDataPolicy,
@@ -402,6 +403,167 @@ async function testConsentAndTargetGuards() {
   });
   assert.equal(override.reason, 'request_target_override_not_allowed');
   assert.equal(overrideAudit.rows.size, 1);
+}
+
+function testAdvertisingConsentNormalizationKeepsPurposesSeparate() {
+  assert.equal(normalizeGoogleConsent({ analytics: true }), null);
+  assert.equal(normalizeGoogleConsent({ ad_storage: 'granted' }), null);
+  assert.equal(normalizeGoogleConsent({ analytics: 'granted', contact: true, phone: true }), null);
+  assert.equal(normalizeGoogleConsent({ value: 'granted' }), null);
+  assert.equal(normalizeGoogleConsent({ marketing: true, analytics: false }), 'GRANTED');
+  assert.equal(normalizeGoogleConsent({ marketing: false, analytics: true }), 'DENIED');
+  assert.equal(normalizeGoogleConsent({ ad_user_data: 'granted' }), 'GRANTED');
+  assert.equal(normalizeGoogleConsent({ adUserData: 'denied', marketing: true }), 'DENIED');
+  assert.equal(normalizeGoogleConsent('granted'), 'GRANTED');
+}
+
+async function testConsentModeRequiresPerVisitorAdvertisingConsent() {
+  let caseIndex = 0;
+  const runCase = async ({
+    label,
+    consent,
+    consentModeEnabled,
+    expectedSent,
+    expectedStatus,
+    googleAdsConfig = scopedConfig
+  }) => {
+    caseIndex += 1;
+    const auditModel = new FakeAuditModel();
+    let runtimeCalls = 0;
+    let uploadCalls = 0;
+    const result = await maybeUploadGoogleConversion({
+      ...baseUploadInput({
+        cfgRecord: {
+          id: 90 + caseIndex,
+          clinic_id: 58,
+          group_id: 5,
+          assignment_scope: 'group',
+          config: { features: { consent_mode_enabled: consentModeEnabled } }
+        },
+        googleAdsConfig,
+        consent,
+        consentModeEnabled,
+        eventId: `lead-consent-case-${caseIndex}`
+      }),
+      dependencies: {
+        auditModel,
+        resolveRuntime: async () => {
+          runtimeCalls += 1;
+          return {
+            accessToken: 'scoped-token',
+            loginCustomerId: '2863224233',
+            connection: { id: 23 },
+            assignment: { id: 4 },
+            connectionSource: 'scope_assignment_group'
+          };
+        },
+        uploadConversion: async () => {
+          uploadCalls += 1;
+          return { requestId: `request-consent-${caseIndex}` };
+        }
+      }
+    });
+
+    assert.equal(result.sent, expectedSent, label);
+    assert.equal(runtimeCalls, expectedSent ? 1 : 0, `${label}: runtime`);
+    assert.equal(uploadCalls, expectedSent ? 1 : 0, `${label}: upload`);
+    const audit = Array.from(auditModel.rows.values())[0];
+    assert.equal(audit.consentStatus, expectedStatus, `${label}: audit consent`);
+    if (!expectedSent) assert.equal(result.reason, 'consent_not_granted', `${label}: reason`);
+  };
+
+  await runCase({
+    label: 'Consent Mode on must ignore legacy analytics consent',
+    consent: { analytics: true },
+    consentModeEnabled: true,
+    expectedSent: false,
+    expectedStatus: 'UNSPECIFIED'
+  });
+  await runCase({
+    label: 'Consent Mode on requires marketing or ad_user_data instead of ad_storage alone',
+    consent: { ad_storage: 'granted' },
+    consentModeEnabled: true,
+    expectedSent: false,
+    expectedStatus: 'UNSPECIFIED'
+  });
+  await runCase({
+    label: 'Consent Mode on requires a named advertising purpose',
+    consent: 'granted',
+    consentModeEnabled: true,
+    expectedSent: false,
+    expectedStatus: 'UNSPECIFIED'
+  });
+  await runCase({
+    label: 'Consent Mode on must keep contact permission separate',
+    consent: { contact: true, phone: true, whatsapp: true },
+    consentModeEnabled: true,
+    expectedSent: false,
+    expectedStatus: 'UNSPECIFIED'
+  });
+  await runCase({
+    label: 'Consent Mode on must fail closed when consent is absent',
+    consent: null,
+    consentModeEnabled: true,
+    expectedSent: false,
+    expectedStatus: 'UNSPECIFIED'
+  });
+  await runCase({
+    label: 'Consent Mode on accepts explicit marketing permission',
+    consent: { marketing: true },
+    consentModeEnabled: true,
+    expectedSent: true,
+    expectedStatus: 'GRANTED'
+  });
+  await runCase({
+    label: 'Consent Mode on accepts explicit ad_user_data permission',
+    consent: { ad_user_data: 'granted' },
+    consentModeEnabled: true,
+    expectedSent: true,
+    expectedStatus: 'GRANTED'
+  });
+  await runCase({
+    label: 'Any explicit advertising denial wins over a grant',
+    consent: { marketing: true, ad_user_data: 'denied' },
+    consentModeEnabled: true,
+    expectedSent: false,
+    expectedStatus: 'DENIED'
+  });
+  await runCase({
+    label: 'Static legacy consent cannot replace visitor consent',
+    consent: null,
+    consentModeEnabled: true,
+    googleAdsConfig: { ...scopedConfig, consent: 'granted' },
+    expectedSent: false,
+    expectedStatus: 'UNSPECIFIED'
+  });
+  await runCase({
+    label: 'Consent Mode off preserves legacy analytics-only uploads',
+    consent: { analytics: true },
+    consentModeEnabled: false,
+    expectedSent: true,
+    expectedStatus: 'UNSPECIFIED'
+  });
+  await runCase({
+    label: 'Consent Mode off preserves uploads without consent payload',
+    consent: null,
+    consentModeEnabled: false,
+    expectedSent: true,
+    expectedStatus: 'UNSPECIFIED'
+  });
+  await runCase({
+    label: 'Consent Mode off preserves scalar legacy advertising consent',
+    consent: 'granted',
+    consentModeEnabled: false,
+    expectedSent: true,
+    expectedStatus: 'GRANTED'
+  });
+  await runCase({
+    label: 'Explicit marketing denial is respected with Consent Mode off',
+    consent: { marketing: false },
+    consentModeEnabled: false,
+    expectedSent: false,
+    expectedStatus: 'DENIED'
+  });
 }
 
 async function testFailedUploadIsAudited() {
@@ -954,6 +1116,8 @@ async function run() {
   await testAuditedUploadAndIdempotency();
   await testHealthcareUserDataIsBlocked();
   await testConsentAndTargetGuards();
+  testAdvertisingConsentNormalizationKeepsPurposesSeparate();
+  await testConsentModeRequiresPerVisitorAdvertisingConsent();
   await testFailedUploadIsAudited();
   await testMultiDestinationSuccessAndDedupe();
   await testMultiDestinationCampaignSelector();

@@ -26,7 +26,10 @@ const ClinicaHorario = db.ClinicaHorario;
 const WhatsAppWebOrigin = db.WhatsAppWebOrigin;
 const { enqueueInboundFormSubmissionResume } = require('../services/automationsV2Resume.service');
 const { sendMetaEvent, buildUserData: buildMetaUserData } = require('../services/metaCapi.service');
-const { maybeUploadGoogleConversion } = require('../services/googleAdsConversionUpload.service');
+const {
+  maybeUploadGoogleConversion,
+  normalizeGoogleConsent,
+} = require('../services/googleAdsConversionUpload.service');
 const webEventsService = require('../services/webEvents.service');
 const { getIO } = require('../services/socket.service');
 const jobRequestsService = require('../services/jobRequests.service');
@@ -988,22 +991,10 @@ const stableStringify = (obj) => {
   return `{${keys.map(k => `${JSON.stringify(k)}:${stableStringify(obj[k])}`).join(',')}}`;
 };
 
-const boolConsent = (value) => {
-  if (value === undefined || value === null || value === '') return null;
-  if (typeof value === 'boolean') return value;
-  const normalized = String(value).trim().toLowerCase();
-  if (['granted', 'grant', 'accepted', 'accept', 'yes', 'true', '1', 'optin', 'opt_in'].includes(normalized)) return true;
-  if (['denied', 'deny', 'rejected', 'reject', 'no', 'false', '0', 'optout', 'opt_out'].includes(normalized)) return false;
-  return null;
-};
-
 const normalizeMarketingConsent = (consent) => {
-  if (!consent || typeof consent !== 'object' || Array.isArray(consent)) return null;
-  const marketing = boolConsent(consent.marketing ?? consent.ad_storage ?? consent.adStorage);
-  const adUserData = boolConsent(consent.ad_user_data ?? consent.adUserData ?? marketing);
-  const adPersonalization = boolConsent(consent.ad_personalization ?? consent.adPersonalization ?? marketing);
-  if (marketing === false || adUserData === false || adPersonalization === false) return false;
-  if (marketing === true || adUserData === true || adPersonalization === true) return true;
+  const normalized = normalizeGoogleConsent(consent);
+  if (normalized === 'GRANTED') return true;
+  if (normalized === 'DENIED') return false;
   return null;
 };
 
@@ -1792,7 +1783,8 @@ exports.ingestLead = asyncHandler(async (req, res) => {
       clinicId: clinicaIdParsed,
       groupId: grupoClinicaIdParsed,
       assignmentScope: effectiveTracking.google_ads?.config_source === 'group' ? 'group' : 'clinic',
-      allowUpload: allowLeadAdPlatformEvents
+      allowUpload: allowLeadAdPlatformEvents,
+      consentModeEnabled: leadConsentModeEnabled
     });
   } catch (adsErr) {
     console.warn('⚠️ Google Ads upload error (ingestLead):', adsErr.response?.data || adsErr.message || adsErr);
@@ -3795,7 +3787,8 @@ exports.receiveIntakeEvent = asyncHandler(async (req, res) => {
       clinicId: clinicIdParsed,
       groupId: groupIdParsed,
       assignmentScope: effectiveTracking.google_ads?.config_source === 'group' ? 'group' : 'clinic',
-      allowUpload: allowAdPlatformEvents
+      allowUpload: allowAdPlatformEvents,
+      consentModeEnabled
     });
   } catch (adsErr) {
     console.warn('⚠️ Google Ads upload error (events):', adsErr.response?.data || adsErr.message || adsErr);
