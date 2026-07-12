@@ -54,6 +54,7 @@ const {
   resolveIntakeLocationVisibility,
 } = require('../lib/intakeLocations');
 const { detectLegacyJoinChat } = require('../lib/intake-legacy-chat');
+const { inspectSnippetRuntime } = require('../lib/intake-snippet-runtime');
 const {
   configuredClinicIds,
   matchClinicByPageUrl,
@@ -3105,24 +3106,6 @@ exports.verifySnippetInstalled = asyncHandler(async (req, res) => {
     }
   };
 
-  const readScriptAttr = (tag, attr) => {
-    const re = new RegExp(`${attr}\\s*=\\s*['"]([^'"]+)['"]`, 'i');
-    return tag.match(re)?.[1] || null;
-  };
-
-  const versionAtLeast = (actual, minimum) => {
-    if (!actual) return false;
-    const a = String(actual).split('.').map((part) => parseInt(part, 10) || 0);
-    const b = String(minimum).split('.').map((part) => parseInt(part, 10) || 0);
-    for (let i = 0; i < Math.max(a.length, b.length); i += 1) {
-      const av = a[i] || 0;
-      const bv = b[i] || 0;
-      if (av > bv) return true;
-      if (av < bv) return false;
-    }
-    return true;
-  };
-
   const isClinicaClickAssetHost = (src, checkedUrl) => {
     try {
       const url = new URL(src, checkedUrl || `https://${domain}/`);
@@ -3141,6 +3124,7 @@ exports.verifySnippetInstalled = asyncHandler(async (req, res) => {
     try {
       let currentUrl = new URL(src, checkedUrl || `https://${domain}/`).toString();
       let body = '';
+      let finalUrl = null;
       for (let redirectCount = 0; redirectCount <= 3; redirectCount += 1) {
         const safeTarget = await resolveSafeHttpTarget(currentUrl);
         if (!isClinicaClickAssetHost(safeTarget.url, safeTarget.url)) {
@@ -3172,6 +3156,7 @@ exports.verifySnippetInstalled = asyncHandler(async (req, res) => {
             continue;
           }
           body = typeof resp.data === 'string' ? resp.data : '';
+          finalUrl = safeTarget.url;
           break;
         } finally {
           safeTarget.httpAgent.destroy();
@@ -3179,14 +3164,7 @@ exports.verifySnippetInstalled = asyncHandler(async (req, res) => {
         }
       }
       if (!body) return null;
-      const version =
-        body.match(/ClinicaClick\s+Intake\s+Snippet\s+v([0-9]+(?:\.[0-9]+){0,3})/i)?.[1] ||
-        body.match(/\bversion\s*:\s*['"]([0-9]+(?:\.[0-9]+){0,3})['"]/i)?.[1] ||
-        null;
-      const hasConsentRuntime =
-        /consent_mode_enabled/i.test(body) &&
-        (/gtag\s*\(\s*['"]consent['"]/i.test(body) || /Consent\s+Mode/i.test(body));
-      return { version, hasConsentRuntime };
+      return { body, finalUrl: finalUrl || currentUrl };
     } catch (err) {
       console.warn('[intake] No se pudo inspeccionar runtime del snippet', src, err?.message || err);
       return null;
@@ -3230,38 +3208,12 @@ exports.verifySnippetInstalled = asyncHandler(async (req, res) => {
   };
 
   const getSnippetRuntimeInfo = async (tags, checkedUrl) => {
-    let usesLoader = false;
-    let runtimeVersion = null;
-    let consentModeDetected = false;
-
-    for (const tag of tags) {
-      const src = readScriptAttr(tag, 'src') || '';
-      if (/loader\.js/i.test(src)) {
-        usesLoader = true;
-        consentModeDetected = true;
-      }
-      if (/intake\.js/i.test(src)) {
-        const version = src.match(/[?&]v=([0-9]+(?:\.[0-9]+){0,3})/i)?.[1] || null;
-        runtimeVersion = version || runtimeVersion;
-        if (versionAtLeast(version, '3.2.1')) {
-          consentModeDetected = true;
-        }
-        if (!consentModeDetected || !runtimeVersion) {
-          const scriptInfo = await fetchSnippetScriptInfo(src, checkedUrl);
-          if (scriptInfo?.version) {
-            runtimeVersion = scriptInfo.version;
-          }
-          if (
-            scriptInfo?.hasConsentRuntime ||
-            versionAtLeast(scriptInfo?.version, '3.2.1')
-          ) {
-            consentModeDetected = true;
-          }
-        }
-      }
-    }
-
-    return { uses_loader: usesLoader, runtime_version: runtimeVersion, consent_mode_detected: consentModeDetected };
+    return inspectSnippetRuntime({
+      tags,
+      checkedUrl,
+      fetchScript: fetchSnippetScriptInfo,
+      isAllowedAssetUrl: isClinicaClickAssetHost,
+    });
   };
 
   const evaluateSnippetHtml = async (htmlToCheck, checkedUrl) => {
@@ -3354,6 +3306,8 @@ exports.verifySnippetInstalled = asyncHandler(async (req, res) => {
       consent_mode_detected: !!primaryEvaluation.consent_mode_detected,
       uses_loader: !!primaryEvaluation.uses_loader,
       runtime_version: primaryEvaluation.runtime_version || null,
+      runtime_declared_version: primaryEvaluation.runtime_declared_version || null,
+      runtime_compatible: !!primaryEvaluation.runtime_compatible,
       cookie_notice_detected: !!primaryEvaluation.cookie_notice_detected,
       cookie_notice_provider: primaryEvaluation.cookie_notice_provider || null,
       google_consent_mode_detected: !!primaryEvaluation.google_consent_mode_detected,
@@ -3376,6 +3330,8 @@ exports.verifySnippetInstalled = asyncHandler(async (req, res) => {
         consent_mode_detected: !!bypassEvaluation.consent_mode_detected,
         uses_loader: !!bypassEvaluation.uses_loader,
         runtime_version: bypassEvaluation.runtime_version || null,
+        runtime_declared_version: bypassEvaluation.runtime_declared_version || null,
+        runtime_compatible: !!bypassEvaluation.runtime_compatible,
         cookie_notice_detected: !!bypassEvaluation.cookie_notice_detected,
         cookie_notice_provider: bypassEvaluation.cookie_notice_provider || null,
         google_consent_mode_detected: !!bypassEvaluation.google_consent_mode_detected,
