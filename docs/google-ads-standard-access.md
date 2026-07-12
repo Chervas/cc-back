@@ -13,7 +13,7 @@
     - Fetching accounts, campaigns, ad groups, ads, and performance metrics.
     - Creating/ managing campaigns (Search, Performance Max, Display).
     - Creating conversion actions (Lead, Purchase) per client.
-    - Sending server-to-server conversions (enhanced conversions, gclid/gbraid/wbraid).
+    - Sending server-to-server offline conversions with permitted click identifiers (`gclid`/`gbraid`/`wbraid`).
   - Intake pipeline: `/api/intake/leads` and `/api/intake/events` receive web/Meta leads; dedupe, hash PII, and store attribution.
   - CAPI Meta already active; Google Ads conversions will mirror the same events.
 - **Data flow (high level):**
@@ -28,7 +28,7 @@
 ## 2. API Endpoints (Google Ads)
 - Campaign management: list/create campaigns, budgets, ad groups, ads (Search/PMax/Display).
 - Conversion actions: create “Lead – ClinicaClick” and “Purchase – ClinicaClick” per account.
-- Conversion uploads: server-side uploads with enhanced conversions data (hashed email/phone, external_id).
+- Conversion uploads: server-side uploads with click identifiers and a stable transaction ID. Clinicaclick does not send hashed email/phone for healthcare or dental conversions because Google classifies these as sensitive categories.
 - Reporting: daily/periodic metrics (cost, clicks, impressions, conversions, conv value, CPA/ROAS).
 
 ## 3. Data & Privacy
