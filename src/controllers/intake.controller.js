@@ -1068,7 +1068,9 @@ async function dedupeAndCreateLead(leadPayload, rawPayload = {}, attributionStep
   };
 
   if (payload.external_source && payload.external_id) {
-    const existingExternal = await LeadIntake.findOne({ where: { external_source: payload.external_source, external_id: payload.external_id } });
+    const existingExternal = await LeadIntake.findOne({
+      where: { external_source: payload.external_source, external_id: payload.external_id, archived_at: null }
+    });
     if (existingExternal) {
       const err = new Error('Lead duplicado (external_id)');
       err.status = 409;
@@ -1078,7 +1080,7 @@ async function dedupeAndCreateLead(leadPayload, rawPayload = {}, attributionStep
   }
 
   if (payload.event_id) {
-    const existing = await LeadIntake.findOne({ where: { event_id: payload.event_id } });
+    const existing = await LeadIntake.findOne({ where: { event_id: payload.event_id, archived_at: null } });
     if (existing) {
       const err = new Error('Lead duplicado (event_id)');
       err.status = 409;
@@ -1089,6 +1091,7 @@ async function dedupeAndCreateLead(leadPayload, rawPayload = {}, attributionStep
 
   if (normalizedPhone || normalizedEmail) {
     const dedupeWhere = {
+      archived_at: null,
       created_at: { [Op.gte]: dedupeCutoff },
       [Op.or]: []
     };
@@ -1141,6 +1144,9 @@ exports.ingestLead = asyncHandler(async (req, res) => {
     utm_content,
     utm_term,
     gclid,
+    gbraid,
+    wbraid,
+    ga_client_id,
     fbclid,
     ttclid,
     referrer,
@@ -1376,6 +1382,9 @@ exports.ingestLead = asyncHandler(async (req, res) => {
   const utmContent = coalesce(attribution.utm_content, utm_content);
   const utmTerm = coalesce(attribution.utm_term, utm_term);
   const gclidValue = coalesce(attribution.gclid, gclid);
+  const gbraidValue = coalesce(attribution.gbraid, gbraid, body.gBraid);
+  const wbraidValue = coalesce(attribution.wbraid, wbraid, body.wBraid);
+  const gaClientIdValue = coalesce(attribution.ga_client_id, attribution.client_id, ga_client_id, body.gaClientId, body.client_id);
   const fbclidValue = coalesce(attribution.fbclid, fbclid);
   const ttclidValue = coalesce(attribution.ttclid, ttclid);
   const referrerValue = coalesce(attribution.referrer, referrer);
@@ -1494,6 +1503,9 @@ exports.ingestLead = asyncHandler(async (req, res) => {
     utm_content: utmContent || null,
     utm_term: utmTerm || null,
     gclid: gclidValue || null,
+    gbraid: gbraidValue || null,
+    wbraid: wbraidValue || null,
+    ga_client_id: gaClientIdValue || null,
     fbclid: fbclidValue || null,
     ttclid: ttclidValue || null,
     referrer: referrerValue || null,
@@ -1734,8 +1746,9 @@ exports.ingestLead = asyncHandler(async (req, res) => {
   try {
     const googleCustomData = {
       gclid: gclidValue || null,
-      gbraid: coalesce(attribution.gbraid, body.gbraid, body.gBraid) || null,
-      wbraid: coalesce(attribution.wbraid, body.wbraid, body.wBraid) || null,
+      gbraid: gbraidValue || null,
+      wbraid: wbraidValue || null,
+      client_id: gaClientIdValue || null,
       value: coalesce(body.value, body.conversion_value),
       currency: coalesce(body.currency, body.conversion_currency),
       conversion_time: coalesce(body.conversion_time, body.conversionDateTime, new Date()),
@@ -3415,6 +3428,9 @@ exports.registerWhatsappOrigin = asyncHandler(async (req, res) => {
     utm_content: truncateString(body.utm_content, 128),
     utm_term: truncateString(body.utm_term, 128),
     gclid: truncateString(body.gclid, 128),
+    gbraid: truncateString(body.gbraid || body.gBraid, 255),
+    wbraid: truncateString(body.wbraid || body.wBraid, 255),
+    ga_client_id: truncateString(body.ga_client_id || body.gaClientId || body.client_id, 191),
     fbclid: truncateString(body.fbclid, 128),
     ttclid: truncateString(body.ttclid, 128),
     event_id: truncateString(req.headers[EVENT_ID_HEADER] || body.event_id || body.eventId, 128),
@@ -3925,6 +3941,8 @@ const buildLeadListPayload = async (query = {}) => {
   } = query;
 
   const where = {};
+  const includeArchived = ['1', 'true', 'yes'].includes(String(query.includeArchived || query.include_archived || '').toLowerCase());
+  if (!includeArchived) where.archived_at = null;
   const clinicIdRaw = clinicId || query.clinica_id;
   const groupIdRaw = groupId || query.grupo_clinica_id;
   const clinicIdsParsed = parseIntegerList(clinicIdRaw);
@@ -4369,6 +4387,8 @@ exports.getLeadStats = asyncHandler(async (req, res) => {
   } = req.query;
 
   const where = {};
+  const includeArchived = ['1', 'true', 'yes'].includes(String(req.query.includeArchived || req.query.include_archived || '').toLowerCase());
+  if (!includeArchived) where.archived_at = null;
   const clinicIdRaw = clinicId || req.query.clinica_id;
   const groupIdRaw = groupId || req.query.grupo_clinica_id;
   const clinicIdsParsed = parseIntegerList(clinicIdRaw);

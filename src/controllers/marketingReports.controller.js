@@ -289,6 +289,7 @@ async function resolveReportScope(req) {
 
 async function aggregateLeads(scope, range) {
   const where = {
+    archived_at: null,
     ...scopedWhere('clinica_id', scope),
     ...buildSequelizeDateWhere('created_at', range),
   };
@@ -351,6 +352,7 @@ async function aggregateLeadSeries(scope, range) {
       [fn('COUNT', col('id')), 'count'],
     ],
     where: {
+      archived_at: null,
       ...scopedWhere('clinica_id', scope),
       ...buildSequelizeDateWhere('created_at', range),
     },
@@ -1098,7 +1100,8 @@ async function aggregateWebPages(scope, range, seoPages = []) {
                     0 AS whatsapp_confirmados,
                     0 AS formularios
                FROM LeadIntakes
-              WHERE created_at >= :startTs AND created_at < :endTs ${leadClinicSql}
+              WHERE archived_at IS NULL
+                AND created_at >= :startTs AND created_at < :endTs ${leadClinicSql}
               GROUP BY COALESCE(NULLIF(page_url, ''), NULLIF(landing_url, ''), 'Sin página')
              UNION ALL
              SELECT COALESCE(NULLIF(page_url, ''), 'Sin página') AS url,

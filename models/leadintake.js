@@ -41,6 +41,9 @@ module.exports = (sequelize, DataTypes) => {
     utm_content: { type: DataTypes.STRING(128), allowNull: true },
     utm_term: { type: DataTypes.STRING(128), allowNull: true },
     gclid: { type: DataTypes.STRING(128), allowNull: true },
+    gbraid: { type: DataTypes.STRING(255), allowNull: true },
+    wbraid: { type: DataTypes.STRING(255), allowNull: true },
+    ga_client_id: { type: DataTypes.STRING(191), allowNull: true },
     fbclid: { type: DataTypes.STRING(128), allowNull: true },
     ttclid: { type: DataTypes.STRING(128), allowNull: true },
     referrer: { type: DataTypes.STRING(512), allowNull: true },
@@ -94,7 +97,9 @@ module.exports = (sequelize, DataTypes) => {
     consent_version: { type: DataTypes.STRING(64), allowNull: true },
     external_source: { type: DataTypes.STRING(64), allowNull: true },
     external_id: { type: DataTypes.STRING(128), allowNull: true },
-    intake_payload_hash: { type: DataTypes.STRING(64), allowNull: true }
+    intake_payload_hash: { type: DataTypes.STRING(64), allowNull: true },
+    archived_at: { type: DataTypes.DATE, allowNull: true },
+    archive_reason: { type: DataTypes.STRING(64), allowNull: true }
   }, {
     sequelize,
     modelName: 'LeadIntake',
