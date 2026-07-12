@@ -2776,7 +2776,25 @@ exports.upsertIntakeConfig = asyncHandler(async (req, res) => {
         : [],
       cookie_notice_detected: !!body.snippet_verification.cookie_notice_detected,
       cookie_notice_provider: body.snippet_verification.cookie_notice_provider || null,
+      cookie_notice_domains: Array.isArray(body.snippet_verification.cookie_notice_domains)
+        ? body.snippet_verification.cookie_notice_domains
+        : [],
+      cookie_notice_providers_by_domain:
+        body.snippet_verification.cookie_notice_providers_by_domain
+        && typeof body.snippet_verification.cookie_notice_providers_by_domain === 'object'
+        && !Array.isArray(body.snippet_verification.cookie_notice_providers_by_domain)
+          ? body.snippet_verification.cookie_notice_providers_by_domain
+          : {},
       google_consent_mode_detected: !!body.snippet_verification.google_consent_mode_detected,
+      google_consent_mode_domains: Array.isArray(body.snippet_verification.google_consent_mode_domains)
+        ? body.snippet_verification.google_consent_mode_domains
+        : [],
+      legal_pages_by_domain:
+        body.snippet_verification.legal_pages_by_domain
+        && typeof body.snippet_verification.legal_pages_by_domain === 'object'
+        && !Array.isArray(body.snippet_verification.legal_pages_by_domain)
+          ? body.snippet_verification.legal_pages_by_domain
+          : {},
       checked_urls: body.snippet_verification.checked_urls && typeof body.snippet_verification.checked_urls === 'object'
         ? body.snippet_verification.checked_urls
         : {}
@@ -2994,6 +3012,73 @@ exports.verifySnippetInstalled = asyncHandler(async (req, res) => {
     }
 
     return { html: null, finalUrl: null, lastError };
+  };
+
+  const verifyConfiguredLegalPages = async (checkedUrl) => {
+    const config = record?.config && typeof record.config === 'object' && !Array.isArray(record.config)
+      ? record.config
+      : {};
+    const texts = config?.texts && typeof config.texts === 'object' && !Array.isArray(config.texts)
+      ? config.texts
+      : {};
+    const definitions = {
+      legal: texts.legal_url || texts.terms_url || null,
+      cookies: texts.cookies_url || null,
+      privacy: texts.privacy_url || null,
+    };
+    const baseUrl = checkedUrl || `https://${stripWww(domain)}/`;
+    const pages = {};
+
+    for (const [key, configuredValue] of Object.entries(definitions)) {
+      const raw = String(configuredValue || '').trim();
+      if (!raw) {
+        pages[key] = { configured: false, reachable: false, url: null, reason: 'missing_url' };
+        continue;
+      }
+      let absoluteUrl;
+      try {
+        absoluteUrl = new URL(raw, baseUrl).toString();
+        const host = normalizeDomain(new URL(absoluteUrl).hostname);
+        if (!host || !isDomainAllowed(allowlist, host)) {
+          pages[key] = { configured: true, reachable: false, url: absoluteUrl, reason: 'domain_not_allowed' };
+          continue;
+        }
+      } catch (_error) {
+        pages[key] = { configured: true, reachable: false, url: raw, reason: 'invalid_url' };
+        continue;
+      }
+
+      try {
+        const fetched = await fetchSafeHtml(absoluteUrl, false);
+        pages[key] = {
+          configured: true,
+          reachable: true,
+          url: absoluteUrl,
+          checked_url: fetched.finalUrl || absoluteUrl,
+          reason: null,
+        };
+      } catch (error) {
+        pages[key] = {
+          configured: true,
+          reachable: false,
+          url: absoluteUrl,
+          reason: 'unreachable',
+          details: truncateString(error?.message || 'No se pudo abrir la URL', 255),
+        };
+      }
+    }
+
+    const values = Object.values(pages);
+    return {
+      legal_pages: pages,
+      legal_urls_detected: values.every((page) => page.configured && page.reachable),
+      missing_legal_urls: Object.entries(pages)
+        .filter(([, page]) => !page.configured)
+        .map(([key]) => key),
+      unreachable_legal_urls: Object.entries(pages)
+        .filter(([, page]) => page.configured && !page.reachable)
+        .map(([key]) => key),
+    };
   };
 
   const withCacheBust = (url) => {
@@ -3245,6 +3330,9 @@ exports.verifySnippetInstalled = asyncHandler(async (req, res) => {
   }
 
   const primaryEvaluation = await evaluateSnippetHtml(primaryFetch.html, primaryFetch.finalUrl);
+  const legalPageVerification = await verifyConfiguredLegalPages(
+    primaryEvaluation.checked_url || primaryFetch.finalUrl
+  );
   if (primaryEvaluation.installed) {
     return res.json({
       installed: true,
@@ -3257,6 +3345,7 @@ exports.verifySnippetInstalled = asyncHandler(async (req, res) => {
       google_consent_mode_detected: !!primaryEvaluation.google_consent_mode_detected,
       legacy_chat_detected: !!primaryEvaluation.legacy_chat_detected,
       legacy_chat_provider: primaryEvaluation.legacy_chat_provider || null,
+      ...legalPageVerification,
     });
   }
 
@@ -3278,12 +3367,13 @@ exports.verifySnippetInstalled = asyncHandler(async (req, res) => {
         google_consent_mode_detected: !!bypassEvaluation.google_consent_mode_detected,
         legacy_chat_detected: !!bypassEvaluation.legacy_chat_detected,
         legacy_chat_provider: bypassEvaluation.legacy_chat_provider || null,
+        ...legalPageVerification,
         details: 'La web devuelve el snippet correcto al saltar caché, pero la página normal sigue sirviendo una versión antigua o sin HMAC. Purga la caché de WordPress, del hosting o de la CDN y vuelve a verificar.'
       });
     }
   }
 
-  return res.json(primaryEvaluation);
+  return res.json({ ...primaryEvaluation, ...legalPageVerification });
 });
 
 // ===========================
