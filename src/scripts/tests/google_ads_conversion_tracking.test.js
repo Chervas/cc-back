@@ -28,6 +28,7 @@ const {
 } = require('../../services/googleAdsScopedRuntime.service');
 const {
   mergeGoogleAdsConfig,
+  mergeProvisionedGoogleAdsConfig,
   normalizeGoogleAdsConfig,
   resolveEffectiveTrackingConfig
 } = require('../../services/effectiveMarketingAssets.service');
@@ -1645,6 +1646,144 @@ function testPropertyAwareGoogleAdsMerge() {
   assert.equal(cleared.events.lead.enabled, false, 'An omitted event switch must remain disabled');
 }
 
+function provisionedQualifiedLeadPatch(customerId, conversionActionId) {
+  return {
+    enabled: true,
+    customer_id: customerId,
+    currency: 'EUR',
+    events: {
+      lead: {
+        enabled: true,
+        conversion_action_id: `lead-${conversionActionId}`,
+        currency: 'EUR'
+      },
+      qualified_lead: {
+        enabled: true,
+        conversion_action_id: conversionActionId,
+        currency: 'EUR'
+      }
+    }
+  };
+}
+
+function testProvisionedActionsMergeByCustomerDestination() {
+  const base = {
+    enabled: true,
+    currency: 'EUR',
+    events: {
+      lead: {
+        enabled: true,
+        destinations: [
+          {
+            key: 'propdental_main_599',
+            customer_id: '599-235-6722',
+            conversion_action_id: 'lead-599',
+            campaign_ids: ['2222222222']
+          },
+          {
+            key: 'propdental_parallel_185',
+            customer_id: '185-121-5478',
+            conversion_action_id: 'lead-185',
+            campaign_ids: ['1111111111']
+          }
+        ]
+      }
+    }
+  };
+
+  const first = mergeProvisionedGoogleAdsConfig(
+    base,
+    provisionedQualifiedLeadPatch('599-235-6722', 'qualified-599'),
+    { customerId: '599-235-6722', eventKeys: ['qualified_lead'] }
+  );
+  const second = mergeProvisionedGoogleAdsConfig(
+    first,
+    provisionedQualifiedLeadPatch('185-121-5478', 'qualified-185'),
+    { customerId: '185-121-5478', eventKeys: ['qualified_lead'] }
+  );
+
+  assert.deepEqual(
+    second.events.qualified_lead.destinations.map((destination) => ({
+      key: destination.key,
+      customer_id: destination.customer_id,
+      conversion_action_id: destination.conversion_action_id,
+      campaign_ids: destination.campaign_ids
+    })),
+    [
+      {
+        key: 'propdental_main_599',
+        customer_id: '5992356722',
+        conversion_action_id: 'qualified-599',
+        campaign_ids: ['2222222222']
+      },
+      {
+        key: 'propdental_parallel_185',
+        customer_id: '1851215478',
+        conversion_action_id: 'qualified-185',
+        campaign_ids: ['1111111111']
+      }
+    ]
+  );
+  assert.deepEqual(
+    second.events.lead.destinations.map((destination) => destination.conversion_action_id),
+    ['lead-599', 'lead-185'],
+    'Provisioning only qualified_lead must not overwrite another event snapshot'
+  );
+
+  const repeated = mergeProvisionedGoogleAdsConfig(
+    second,
+    provisionedQualifiedLeadPatch('185-121-5478', 'qualified-185-new'),
+    { customerId: '185-121-5478', eventKeys: ['qualified_lead'] }
+  );
+  assert.equal(repeated.events.qualified_lead.destinations.length, 2);
+  assert.equal(
+    repeated.events.qualified_lead.destinations[1].conversion_action_id,
+    'qualified-185-new'
+  );
+  assert.equal(repeated.events.qualified_lead.destinations[1].key, 'propdental_parallel_185');
+  assert.deepEqual(repeated.events.qualified_lead.destinations[1].campaign_ids, ['1111111111']);
+
+  const repairedLegacy = mergeProvisionedGoogleAdsConfig(
+    {
+      ...base,
+      customer_id: '185-121-5478',
+      events: {
+        ...base.events,
+        qualified_lead: {
+          enabled: true,
+          conversion_action_id: 'qualified-185',
+          currency: 'EUR'
+        }
+      }
+    },
+    provisionedQualifiedLeadPatch('599-235-6722', 'qualified-599'),
+    { customerId: '599-235-6722', eventKeys: ['qualified_lead'] }
+  );
+  assert.deepEqual(
+    repairedLegacy.events.qualified_lead.destinations.map((destination) => ({
+      key: destination.key,
+      customer_id: destination.customer_id,
+      conversion_action_id: destination.conversion_action_id,
+      campaign_ids: destination.campaign_ids
+    })),
+    [
+      {
+        key: 'propdental_parallel_185',
+        customer_id: '1851215478',
+        conversion_action_id: 'qualified-185',
+        campaign_ids: ['1111111111']
+      },
+      {
+        key: 'propdental_main_599',
+        customer_id: '5992356722',
+        conversion_action_id: 'qualified-599',
+        campaign_ids: ['2222222222']
+      }
+    ],
+    'A legacy single-account event must become two explicit destinations without losing the old account'
+  );
+}
+
 function testStaticSafetyContracts() {
   const conversionService = fs.readFileSync(
     path.resolve(__dirname, '../../services/googleAdsConversion.service.js'),
@@ -1713,6 +1852,7 @@ async function run() {
   await testMultiDestinationGuardsAreAppliedPerDestination();
   testMultiDestinationConfigInheritance();
   testPropertyAwareGoogleAdsMerge();
+  testProvisionedActionsMergeByCustomerDestination();
   testStaticSafetyContracts();
   testMutationUsesCanonicalEndpointFirst();
   testConfiguredActionCannotCrossCustomer();

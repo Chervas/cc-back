@@ -19,6 +19,7 @@ const {
   extractGoogleTagId,
   listMetaPixelsForScopeAdAccount,
   mergeGoogleAdsConfig: mergeEffectiveGoogleAdsConfig,
+  mergeProvisionedGoogleAdsConfig,
   normalizeMetaAdAccountId,
   normalizeMetaAdsConfig,
   resolveEffectiveMarketingState
@@ -1978,19 +1979,22 @@ async function resolveActiveModeForScope(scope) {
   return null;
 }
 
-async function upsertIntakeGoogleAdsForScope(scope, googleAdsPatch) {
+async function upsertIntakeGoogleAdsForScope(scope, googleAdsPatch, provisioningOptions = null) {
   const where = scope.assignment_scope === 'group'
     ? { group_id: scope.group_id, assignment_scope: 'group' }
     : { clinic_id: scope.clinic_id };
 
   const existing = await IntakeConfig.findOne({ where });
   if (!existing) {
+    const nextGoogleAds = provisioningOptions
+      ? mergeProvisionedGoogleAdsConfig({}, googleAdsPatch, provisioningOptions)
+      : normalizeGoogleAdsConfig(googleAdsPatch);
     await IntakeConfig.create({
       clinic_id: scope.assignment_scope === 'clinic' ? scope.clinic_id : null,
       group_id: scope.assignment_scope === 'group' ? scope.group_id : null,
       assignment_scope: scope.assignment_scope,
       domains: [],
-      config: { google_ads: normalizeGoogleAdsConfig(googleAdsPatch) },
+      config: { google_ads: nextGoogleAds },
       hmac_key: null
     });
     return;
@@ -2000,7 +2004,13 @@ async function upsertIntakeGoogleAdsForScope(scope, googleAdsPatch) {
   const rawGooglePatch = googleAdsPatch && typeof googleAdsPatch === 'object' && !Array.isArray(googleAdsPatch)
     ? googleAdsPatch
     : {};
-  const mergedGoogle = mergeEffectiveGoogleAdsConfig(existingConfig.google_ads || {}, rawGooglePatch);
+  const mergedGoogle = provisioningOptions
+    ? mergeProvisionedGoogleAdsConfig(
+        existingConfig.google_ads || {},
+        rawGooglePatch,
+        provisioningOptions
+      )
+    : mergeEffectiveGoogleAdsConfig(existingConfig.google_ads || {}, rawGooglePatch);
   const nextConfig = {
     ...existingConfig,
     google_ads: mergedGoogle
@@ -6457,6 +6467,9 @@ exports.ensureGoogleAdsConversionActions = asyncHandler(async (req, res) => {
       ...ensured.recommended_google_ads_config,
       enabled: true,
       customer_id: customerId
+    }, {
+      customerId,
+      eventKeys: listToUniqueArray(events.filter((eventKey) => VALID_EVENTS.includes(eventKey)))
     });
   }
 

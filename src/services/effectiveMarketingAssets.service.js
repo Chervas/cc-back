@@ -238,6 +238,168 @@ function mergeGoogleAdsConfig(baseConfig, overrideConfig) {
   };
 }
 
+function hasGoogleAdsActionTarget(config) {
+  return Boolean(
+    cleanString(config?.conversion_action || config?.conversionAction)
+    || cleanString(config?.conversion_action_id || config?.conversionActionId)
+    || cleanString(config?.send_to || config?.sendTo)
+  );
+}
+
+function findGoogleAdsDestinationTemplate(config, eventKey, customerId) {
+  const events = config?.events && typeof config.events === 'object'
+    ? config.events
+    : {};
+  const orderedEvents = [events[eventKey], ...Object.entries(events)
+    .filter(([candidateKey]) => candidateKey !== eventKey)
+    .map(([, eventConfig]) => eventConfig)];
+
+  for (const eventConfig of orderedEvents) {
+    const destinations = Array.isArray(eventConfig?.destinations)
+      ? eventConfig.destinations
+      : [];
+    const match = destinations.find((destination) => (
+      cleanGoogleCustomerId(destination?.customer_id || destination?.customerId) === customerId
+    ));
+    if (match) return match;
+  }
+
+  return null;
+}
+
+function buildLegacyGoogleAdsDestination(config, eventKey, template) {
+  const eventConfig = config?.events?.[eventKey];
+  if (!eventConfig || !hasGoogleAdsActionTarget(eventConfig)) return null;
+  const customerId = cleanGoogleCustomerId(eventConfig.customer_id || config.customer_id);
+  if (!customerId) return null;
+
+  return {
+    key: cleanString(template?.key) || `destination_${customerId}`,
+    enabled: eventConfig.enabled !== false,
+    customer_id: customerId,
+    conversion_action: cleanString(eventConfig.conversion_action),
+    conversion_action_id: cleanString(eventConfig.conversion_action_id),
+    send_to: cleanString(eventConfig.send_to),
+    currency: cleanString(eventConfig.currency) || cleanString(config.currency) || 'EUR',
+    campaign_ids: eventConfig.campaign_ids?.length
+      ? eventConfig.campaign_ids
+      : (template?.campaign_ids || [])
+  };
+}
+
+// The provisioning endpoint can be called once per Ads account for the same
+// scope. Keep those canonical actions as explicit per-account destinations so
+// provisioning a second account never replaces the first account's action.
+function mergeProvisionedGoogleAdsConfig(baseConfig, provisionedConfig, options = {}) {
+  const normalizedBase = normalizeGoogleAdsConfig(baseConfig);
+  const rawProvisioned = provisionedConfig && typeof provisionedConfig === 'object'
+    && !Array.isArray(provisionedConfig)
+    ? provisionedConfig
+    : {};
+  const customerId = cleanGoogleCustomerId(
+    options.customerId
+    || options.customer_id
+    || rawProvisioned.customer_id
+    || rawProvisioned.customerId
+  );
+  const hasExplicitEventKeys = Array.isArray(options.eventKeys)
+    || Array.isArray(options.event_keys);
+  const rawEventKeys = Array.isArray(options.eventKeys)
+    ? options.eventKeys
+    : Array.isArray(options.event_keys)
+      ? options.event_keys
+      : [];
+  const eventKeys = [...new Set(rawEventKeys
+    .map((value) => cleanString(value)?.toLowerCase())
+    .filter((eventKey) => eventKey && rawProvisioned.events?.[eventKey]))];
+
+  if (!customerId || !hasExplicitEventKeys) {
+    return mergeGoogleAdsConfig(normalizedBase, rawProvisioned);
+  }
+  if (eventKeys.length === 0) return normalizedBase;
+
+  // A recommendation contains a snapshot of every canonical event in the
+  // current Ads account. Only merge the events explicitly requested by the
+  // caller; the rest may belong to other destinations already configured.
+  const scopedProvisioned = {
+    ...rawProvisioned,
+    events: Object.fromEntries(eventKeys.map((eventKey) => [
+      eventKey,
+      rawProvisioned.events[eventKey]
+    ]))
+  };
+  const normalizedProvisioned = normalizeGoogleAdsConfig(scopedProvisioned);
+  const merged = mergeGoogleAdsConfig(normalizedBase, scopedProvisioned);
+
+  for (const eventKey of eventKeys) {
+    const provisionedEvent = normalizedProvisioned.events[eventKey];
+    if (!hasGoogleAdsActionTarget(provisionedEvent)) {
+      if (normalizedBase.events[eventKey]) {
+        merged.events[eventKey] = normalizedBase.events[eventKey];
+      }
+      continue;
+    }
+
+    const baseEvent = normalizedBase.events[eventKey] || null;
+    const hadExplicitDestinations = Object.prototype.hasOwnProperty.call(baseEvent || {}, 'destinations');
+    const destinations = hadExplicitDestinations ? [...baseEvent.destinations] : [];
+    const template = findGoogleAdsDestinationTemplate(normalizedBase, eventKey, customerId);
+
+    if (!hadExplicitDestinations) {
+      const legacyCustomerId = cleanGoogleCustomerId(baseEvent?.customer_id || normalizedBase.customer_id);
+      const legacyTemplate = legacyCustomerId
+        ? findGoogleAdsDestinationTemplate(normalizedBase, eventKey, legacyCustomerId)
+        : null;
+      const legacyDestination = buildLegacyGoogleAdsDestination(
+        normalizedBase,
+        eventKey,
+        legacyTemplate
+      );
+      if (legacyDestination) destinations.push(legacyDestination);
+    }
+
+    const existingDestination = destinations.find((destination) => (
+      cleanGoogleCustomerId(destination?.customer_id) === customerId
+    ));
+    const destinationTemplate = existingDestination || template;
+    const nextDestination = {
+      ...(existingDestination || {}),
+      key: cleanString(destinationTemplate?.key) || `destination_${customerId}`,
+      enabled: provisionedEvent.enabled !== false,
+      customer_id: customerId,
+      conversion_action: cleanString(provisionedEvent.conversion_action),
+      conversion_action_id: cleanString(provisionedEvent.conversion_action_id),
+      send_to: cleanString(provisionedEvent.send_to),
+      currency: cleanString(provisionedEvent.currency) || merged.currency || 'EUR',
+      campaign_ids: existingDestination
+        ? (existingDestination.campaign_ids || [])
+        : (destinationTemplate?.campaign_ids || provisionedEvent.campaign_ids || [])
+    };
+
+    let inserted = false;
+    const nextDestinations = [];
+    for (const destination of destinations) {
+      if (cleanGoogleCustomerId(destination?.customer_id) !== customerId) {
+        nextDestinations.push(destination);
+      } else if (!inserted) {
+        nextDestinations.push(nextDestination);
+        inserted = true;
+      }
+    }
+    if (!inserted) nextDestinations.push(nextDestination);
+
+    merged.events[eventKey] = {
+      ...merged.events[eventKey],
+      destinations: normalizeGoogleAdsDestinations(
+        nextDestinations,
+        provisionedEvent.currency || merged.currency
+      )
+    };
+  }
+
+  return merged;
+}
+
 function mergeMetaAdsConfig(baseConfig, overrideConfig) {
   const base = normalizeMetaAdsConfig(baseConfig);
   const override = normalizeMetaAdsConfig(overrideConfig);
@@ -654,6 +816,7 @@ async function resolveEffectiveMarketingState({ clinicIdRaw = null, groupIdRaw =
 module.exports = {
   extractGoogleTagId,
   mergeGoogleAdsConfig,
+  mergeProvisionedGoogleAdsConfig,
   normalizeMetaAdAccountId,
   normalizeMetaAdsConfig,
   normalizeGoogleAdsConfig,
