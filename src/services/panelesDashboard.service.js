@@ -475,6 +475,7 @@ async function countTasks({ clinicIds, todayStart, todayEnd }) {
     LeadIntake
       ? LeadIntake.count({
           where: {
+            archived_at: null,
             ...scopedWhere('clinica_id', clinicIds),
             status_lead: { [Op.in]: ['nuevo', 'esperando_info', 'info_recibida'] },
             num_contactos: 0,

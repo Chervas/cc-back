@@ -33,6 +33,21 @@ function cleanGoogleCustomerId(raw) {
   return cleaned || null;
 }
 
+function normalizeGoogleCampaignIds(...rawValues) {
+  const seen = new Set();
+  const normalized = [];
+  for (const rawValue of rawValues) {
+    const values = Array.isArray(rawValue) ? rawValue : rawValue == null ? [] : [rawValue];
+    for (const value of values) {
+      const campaignId = cleanGoogleCustomerId(value);
+      if (!campaignId || seen.has(campaignId)) continue;
+      seen.add(campaignId);
+      normalized.push(campaignId);
+    }
+  }
+  return normalized;
+}
+
 function normalizeMetaAdAccountId(raw) {
   const value = cleanString(raw);
   if (!value) return null;
@@ -70,6 +85,7 @@ function normalizeGoogleAdsDestinations(rawDestinations, fallbackCurrency = 'EUR
       conversion_action_id: conversionActionId,
       send_to: sendTo,
       currency: cleanString(raw.currency) || fallbackCurrency,
+      campaign_ids: normalizeGoogleCampaignIds(raw.campaign_ids, raw.campaignIds),
       ...(raw.value !== undefined ? { value: raw.value } : {}),
       ...(raw.consent !== undefined ? { consent: raw.consent } : {})
     });
@@ -132,6 +148,10 @@ function normalizeGoogleAdsConfig(rawConfig) {
       send_to: cleanString(eventValue.send_to || eventValue.sendTo),
       currency: cleanString(eventValue.currency) || normalized.currency
     };
+    normalizedEvent.campaign_ids = normalizeGoogleCampaignIds(
+      eventValue.campaign_ids,
+      eventValue.campaignIds
+    );
     if (Object.prototype.hasOwnProperty.call(eventValue, 'destinations')) {
       normalizedEvent.destinations = normalizeGoogleAdsDestinations(
         eventValue.destinations,
@@ -179,7 +199,11 @@ function mergeGoogleAdsEvents(baseEvents = {}, overrideEvents = {}, rawOverrideE
       conversion_action: pickEventValue('conversion_action', 'conversionAction', baseValue.conversion_action),
       conversion_action_id: pickEventValue('conversion_action_id', 'conversionActionId', baseValue.conversion_action_id),
       send_to: pickEventValue('send_to', 'sendTo', baseValue.send_to),
-      currency: Object.prototype.hasOwnProperty.call(rawValue, 'currency') ? overrideValue.currency : baseValue.currency
+      currency: Object.prototype.hasOwnProperty.call(rawValue, 'currency') ? overrideValue.currency : baseValue.currency,
+      campaign_ids: (
+        Object.prototype.hasOwnProperty.call(rawValue, 'campaign_ids')
+          || Object.prototype.hasOwnProperty.call(rawValue, 'campaignIds')
+      ) ? overrideValue.campaign_ids : (baseValue.campaign_ids || [])
     };
     if (Object.prototype.hasOwnProperty.call(rawValue, 'destinations')) {
       mergedEvent.destinations = overrideValue.destinations;

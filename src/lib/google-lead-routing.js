@@ -18,6 +18,53 @@ function normalizeGoogleCustomerId(value) {
   return digits || null;
 }
 
+function normalizeGoogleCampaignId(value) {
+  const normalized = cleanToken(value);
+  // Los campos persistidos reservan 32 caracteres. Rechazar entradas mas
+  // largas evita que un parametro de URL manipulado rompa la ingesta en MySQL.
+  return normalized && /^\d{1,32}$/.test(normalized) ? normalized : null;
+}
+
+function queryParamFromUrl(value, key) {
+  const normalized = cleanToken(value);
+  if (!normalized) return null;
+  try {
+    return new URL(normalized, 'https://clinicaclick.invalid/').searchParams.get(key);
+  } catch (_error) {
+    return null;
+  }
+}
+
+function firstValidCampaignId(values) {
+  for (const value of values || []) {
+    const normalized = normalizeGoogleCampaignId(value);
+    if (normalized) return normalized;
+  }
+  return null;
+}
+
+/**
+ * Resuelve el id de campaña sin convertir identificadores arbitrarios en
+ * números. Nuestro sufijo cc_gads_* tiene prioridad sobre el parámetro legacy
+ * gad_campaignid; las URLs permiten recuperar atribución aunque el navegador
+ * no haya replicado todavía esos parámetros al payload.
+ */
+function resolveGoogleAdsCampaignId({
+  ccCandidates = [],
+  canonicalCandidates = [],
+  gadCandidates = [],
+  urls = [],
+} = {}) {
+  const urlValues = (Array.isArray(urls) ? urls : [urls]).filter(Boolean);
+  return firstValidCampaignId([
+    ...(Array.isArray(ccCandidates) ? ccCandidates : [ccCandidates]),
+    ...urlValues.map((value) => queryParamFromUrl(value, 'cc_gads_campaign_id')),
+    ...(Array.isArray(canonicalCandidates) ? canonicalCandidates : [canonicalCandidates]),
+    ...(Array.isArray(gadCandidates) ? gadCandidates : [gadCandidates]),
+    ...urlValues.map((value) => queryParamFromUrl(value, 'gad_campaignid')),
+  ]);
+}
+
 function firstPresent(...values) {
   return values.find((value) => cleanToken(value)) ?? null;
 }
@@ -25,9 +72,22 @@ function firstPresent(...values) {
 function extractGoogleLeadIdentity(body = {}) {
   const payload = body?.payload && typeof body.payload === 'object' ? body.payload : {};
   const googleAds = body?.google_ads && typeof body.google_ads === 'object' ? body.google_ads : {};
+  const attribution = body?.attribution && typeof body.attribution === 'object' ? body.attribution : {};
+  const customData = body?.custom_data && typeof body.custom_data === 'object' ? body.custom_data : {};
+  const eventData = body?.event_data && typeof body.event_data === 'object' ? body.event_data : {};
 
   return {
     customerId: normalizeGoogleCustomerId(firstPresent(
+      attribution.cc_gads_customer_id,
+      attribution.ccGadsCustomerId,
+      attribution.google_ads_customer_id,
+      attribution.googleAdsCustomerId,
+      attribution.google_customer_id,
+      attribution.customer_id,
+      body.cc_gads_customer_id,
+      body.ccGadsCustomerId,
+      body.google_ads_customer_id,
+      body.googleAdsCustomerId,
       body.customer_id,
       body.customerId,
       body.google_customer_id,
@@ -37,26 +97,100 @@ function extractGoogleLeadIdentity(body = {}) {
       googleAds.customerId,
       googleAds.account_id,
       googleAds.accountId,
+      googleAds.cc_gads_customer_id,
+      googleAds.google_ads_customer_id,
+      payload.cc_gads_customer_id,
+      payload.google_ads_customer_id,
       payload.customer_id,
       payload.customerId,
       payload.google_customer_id,
       payload.account_id,
       payload.accountId,
+      customData.cc_gads_customer_id,
+      customData.google_ads_customer_id,
+      customData.customer_id,
+      customData.customerId,
+      eventData.cc_gads_customer_id,
+      eventData.google_ads_customer_id,
+      eventData.customer_id,
     )),
-    campaignId: cleanToken(firstPresent(
-      body.external_campaign_id,
-      body.externalCampaignId,
-      body.campaign_id,
-      body.campaignId,
-      googleAds.external_campaign_id,
-      googleAds.externalCampaignId,
-      googleAds.campaign_id,
-      googleAds.campaignId,
-      payload.external_campaign_id,
-      payload.externalCampaignId,
-      payload.campaign_id,
-      payload.campaignId,
-    )),
+    campaignId: resolveGoogleAdsCampaignId({
+      ccCandidates: [
+        attribution.cc_gads_campaign_id,
+        attribution.ccGadsCampaignId,
+        body.cc_gads_campaign_id,
+        body.ccGadsCampaignId,
+        googleAds.cc_gads_campaign_id,
+        payload.cc_gads_campaign_id,
+        customData.cc_gads_campaign_id,
+        eventData.cc_gads_campaign_id,
+      ],
+      canonicalCandidates: [
+        attribution.google_ads_campaign_id,
+        attribution.googleAdsCampaignId,
+        attribution.google_campaign_id,
+        attribution.campaign_id,
+        body.google_ads_campaign_id,
+        body.googleAdsCampaignId,
+        body.google_campaign_id,
+        body.googleCampaignId,
+        body.campaignid,
+        body.external_campaign_id,
+        body.externalCampaignId,
+        body.campaign_id,
+        body.campaignId,
+        googleAds.google_ads_campaign_id,
+        googleAds.external_campaign_id,
+        googleAds.externalCampaignId,
+        googleAds.campaign_id,
+        googleAds.campaignId,
+        payload.google_ads_campaign_id,
+        payload.external_campaign_id,
+        payload.externalCampaignId,
+        payload.campaign_id,
+        payload.campaignId,
+        customData.google_ads_campaign_id,
+        customData.google_campaign_id,
+        customData.campaign_id,
+        customData.campaignId,
+        eventData.google_ads_campaign_id,
+        eventData.google_campaign_id,
+        eventData.campaign_id,
+      ],
+      gadCandidates: [
+        attribution.gad_campaignid,
+        attribution.gadCampaignId,
+        body.gad_campaignid,
+        body.gadCampaignId,
+        googleAds.gad_campaignid,
+        payload.gad_campaignid,
+        customData.gad_campaignid,
+        customData.gadCampaignId,
+        eventData.gad_campaignid,
+      ],
+      urls: [
+        attribution.page_url,
+        attribution.pageUrl,
+        attribution.landing_url,
+        attribution.landingUrl,
+        body.page_url,
+        body.pageUrl,
+        body.landing_url,
+        body.landingUrl,
+        body.event_source_url,
+        body.eventSourceUrl,
+        payload.page_url,
+        payload.landing_url,
+        customData.page_url,
+        customData.pageUrl,
+        customData.landing_url,
+        customData.landingUrl,
+        customData.event_source_url,
+        eventData.page_url,
+        eventData.pageUrl,
+        eventData.landing_url,
+      ],
+    }),
   };
 }
 
@@ -182,7 +316,9 @@ async function resolveGoogleLeadRoute({
 
 module.exports = {
   extractGoogleLeadIdentity,
+  normalizeGoogleCampaignId,
   normalizeGoogleCustomerId,
+  resolveGoogleAdsCampaignId,
   resolveGoogleLeadRoute,
   selectUnambiguousAccount,
 };

@@ -29,6 +29,9 @@ const {
   uploadConversionEvent: uploadGoogleDataManagerConversion
 } = require('../services/googleDataManagerConversion.service');
 const {
+  normalizeCanonicalGoogleAdsConversions
+} = require('../services/googleAdsCanonicalConversionNormalization.service');
+const {
   clinicIdsFromStrategyRows,
   hasMarketingClinicScopeAccess,
   normalizeClinicIds,
@@ -41,6 +44,13 @@ const {
   canonicalExternalCampaignIdentity,
   externalCampaignIdentityKey,
 } = require('../services/externalCampaignAssignmentTargets.service');
+const {
+  buildVerificationConfigHash,
+  canonicalizeIntakeDomain,
+  canonicalizeIntakeDomains,
+  cookieNoticeProviderMatches,
+  verifyVerificationAttestation,
+} = require('../lib/intake-verification-attestation');
 
 const GoogleConnection = db.GoogleConnection;
 const MetaConnection = db.MetaConnection;
@@ -72,6 +82,7 @@ const VALID_MODES = new Set(['connect_only', 'managed_self', 'managed_service'])
 const CREATABLE_MODES = new Set(['connect_only', 'managed_service']);
 const VALID_PROVIDERS = new Set(['google_ads', 'meta_ads']);
 const VALID_EVENTS = ['lead', 'contact', 'schedule', 'purchase'];
+const DEFAULT_ENABLED_CONVERSION_EVENTS = ['lead', 'contact', 'schedule'];
 const VALID_STRATEGY_OBJECTIVES = new Set(['new_patients']);
 const VALID_STRATEGY_CHANNELS = new Set(['meta_ads', 'google_ads', 'whatsapp', 'email', 'remarketing', 'landing', 'youtube', 'phone']);
 const VALID_STRATEGY_STATUSES = new Set(['draft', 'pending_approval', 'active', 'paused', 'completed']);
@@ -184,7 +195,7 @@ function getUserId(req) {
 
 function hasScopeText(scopesText, scope) {
   if (!scopesText || !scope) return false;
-  return String(scopesText).split(/\s+/).includes(scope);
+  return String(scopesText).split(/[\s,]+/).includes(scope);
 }
 
 function normalizeGoogleAdsConfig(rawConfig) {
@@ -224,6 +235,11 @@ function normalizeGoogleAdsConfig(rawConfig) {
             conversion_action_id: item.conversion_action_id || item.conversionActionId || null,
             send_to: item.send_to || item.sendTo || null,
             currency: normalizeCurrency(item.currency || eventCfg.currency || normalized.currency || 'EUR'),
+            campaign_ids: listToUniqueArray(
+              (Array.isArray(item.campaign_ids) ? item.campaign_ids : Array.isArray(item.campaignIds) ? item.campaignIds : [])
+                .map((value) => normalizeCustomerId(value))
+                .filter(Boolean)
+            ),
             ...(item.value !== undefined ? { value: item.value } : {}),
             ...(item.consent !== undefined ? { consent: item.consent } : {})
           }))
@@ -236,6 +252,11 @@ function normalizeGoogleAdsConfig(rawConfig) {
       send_to: eventCfg.send_to || eventCfg.sendTo || null,
       currency: normalizeCurrency(eventCfg.currency || normalized.currency || 'EUR')
     };
+    normalizedEvent.campaign_ids = listToUniqueArray(
+      (Array.isArray(eventCfg.campaign_ids) ? eventCfg.campaign_ids : Array.isArray(eventCfg.campaignIds) ? eventCfg.campaignIds : [])
+        .map((value) => normalizeCustomerId(value))
+        .filter(Boolean)
+    );
     if (hasDestinations) normalizedEvent.destinations = destinations;
     normalized.events[key] = normalizedEvent;
   }
@@ -527,6 +548,7 @@ async function loadCurrentLeadAttributionMetricsIndex({ scope, payload, days = 3
       'status_lead'
     ],
     where: {
+      archived_at: null,
       created_at: { [Op.between]: [start, end] },
       status_lead: { [Op.ne]: 'descartado' },
       ...buildMetricsScopeWhere(scope, { clinicField: 'clinica_id', groupField: 'grupo_clinica_id' })
@@ -2105,13 +2127,435 @@ function listToUniqueArray(values) {
   return out;
 }
 
-function buildGoogleAdsCapabilities(connected, hasAdsScope) {
-  const enabled = !!connected && !!hasAdsScope;
+function buildGoogleAdsCapabilities(connected, hasAdsScope, hasDataManagerScope = false) {
+  const adsEnabled = !!connected && !!hasAdsScope;
+  const quotaProjectConfigured = Boolean(
+    process.env.GOOGLE_DATA_MANAGER_QUOTA_PROJECT
+      || process.env.GOOGLE_CLOUD_PROJECT
+  );
+  const dataManagerMissing = [];
+  if (!hasDataManagerScope) dataManagerMissing.push('oauth_scope');
+  if (!quotaProjectConfigured) dataManagerMissing.push('quota_project');
   return {
-    can_list_conversion_actions: enabled,
-    can_create_conversion_actions: enabled,
-    can_upload_enhanced_conversions: enabled
+    can_list_conversion_actions: adsEnabled,
+    can_create_conversion_actions: adsEnabled,
+    // Healthcare conversions must not contain customer-provided identifiers.
+    can_upload_enhanced_conversions: false,
+    can_upload_server_side_conversions: adsEnabled && dataManagerMissing.length === 0,
+    data_manager_ready: adsEnabled && dataManagerMissing.length === 0,
+    data_manager_scope_granted: !!hasDataManagerScope,
+    data_manager_quota_project_configured: quotaProjectConfigured,
+    data_manager_missing: dataManagerMissing,
+    conversion_validation_required: true,
+    conversion_validation_status: 'not_validated',
+    user_data_policy: 'blocked_healthcare'
   };
+}
+
+function normalizeConsentDomain(value) {
+  return canonicalizeIntakeDomain(value);
+}
+
+function normalizeConsentDomains(values) {
+  let source = values;
+  if (typeof source === 'string') {
+    try { source = JSON.parse(source); } catch (_error) { source = [source]; }
+  }
+  return canonicalizeIntakeDomains(Array.isArray(source) ? source : []);
+}
+
+function assessConsentMeasurementReadiness(marketingState) {
+  const scope = marketingState?.scope || {};
+  const record = scope.assignment_scope === 'group'
+    ? marketingState?.records?.groupRecord
+    : (marketingState?.records?.clinicRecord || marketingState?.records?.groupRecord);
+  const config = record?.config && typeof record.config === 'object' && !Array.isArray(record.config)
+    ? record.config
+    : {};
+  const features = config.features && typeof config.features === 'object' && !Array.isArray(config.features)
+    ? config.features
+    : {};
+  const texts = config.texts && typeof config.texts === 'object' && !Array.isArray(config.texts)
+    ? config.texts
+    : {};
+  const verification = config.snippet_verification
+    && typeof config.snippet_verification === 'object'
+    && !Array.isArray(config.snippet_verification)
+    ? config.snippet_verification
+    : {};
+  const domains = normalizeConsentDomains(record?.domains);
+  const provider = String(features.consent_provider || '').trim().toLowerCase();
+  const externalCmpProvider = String(features.external_cmp_provider || '').trim().toLowerCase();
+  const recordScopeType = String(record?.assignment_scope || '').trim().toLowerCase() === 'group'
+    || (!record?.clinic_id && record?.group_id)
+    ? 'group'
+    : 'clinic';
+  const recordScopeId = recordScopeType === 'group'
+    ? parseInteger(record?.group_id)
+    : parseInteger(record?.clinic_id);
+  const configHash = buildVerificationConfigHash({
+    scopeType: recordScopeType,
+    scopeId: recordScopeId,
+    domains: record?.domains,
+    config,
+    hmacKey: record?.hmac_key,
+  });
+  const issues = [];
+  const add = (reason, extra = {}) => issues.push({ reason, ...extra });
+
+  if (features.consent_mode_enabled !== true) add('consent_mode_disabled');
+  if (!['clinicaclick', 'external_cmp'].includes(provider)) add('consent_provider_missing');
+  if (provider === 'external_cmp' && !externalCmpProvider) add('external_cmp_provider_missing');
+  if (!domains.length) add('consent_domains_missing');
+  const missingLegal = [
+    ['legal', texts.legal_url || texts.terms_url],
+    ['cookies', texts.cookies_url],
+    ['privacy', texts.privacy_url]
+  ].filter(([, value]) => !String(value || '').trim()).map(([key]) => key);
+  if (missingLegal.length) add('consent_legal_urls_missing', { missing: missingLegal });
+  const rawAttestations = verification.attestations_by_domain
+    && typeof verification.attestations_by_domain === 'object'
+    && !Array.isArray(verification.attestations_by_domain)
+    ? verification.attestations_by_domain
+    : {};
+  const attestations = new Map();
+  const validAttestationExpirations = [];
+  for (const [rawDomain, token] of Object.entries(rawAttestations)) {
+    const domain = normalizeConsentDomain(rawDomain);
+    if (domain && !attestations.has(domain) && typeof token === 'string') {
+      attestations.set(domain, token);
+    }
+  }
+
+  for (const domain of domains) {
+    const token = attestations.get(domain);
+    if (!token) {
+      add('consent_attestation_missing', { domain });
+      continue;
+    }
+    const attestation = verifyVerificationAttestation(token, {
+      scopeType: recordScopeType,
+      scopeId: recordScopeId,
+      domain,
+      configHash,
+    });
+    if (!attestation.valid) {
+      add('consent_attestation_invalid', { domain, details: attestation.reason });
+      continue;
+    }
+    validAttestationExpirations.push(Number(attestation.claims?.exp));
+    const signals = attestation.claims?.signals || {};
+    if (signals.installed !== true) add('consent_domain_unverified', { domain });
+    if (signals.runtime_compatible !== true) add('consent_runtime_incompatible', { domain });
+    if (signals.consent_mode_detected !== true) add('consent_signal_unverified', { domain });
+    if (signals.google_consent_mode_detected !== true) add('google_consent_mode_unverified', { domain });
+    if (provider === 'external_cmp' && (
+      signals.cookie_notice_detected !== true
+        || !cookieNoticeProviderMatches(signals.cookie_notice_provider, externalCmpProvider)
+    )) {
+      add('external_cmp_unverified', {
+        domain,
+        expected_provider: externalCmpProvider || null,
+        detected_provider: signals.cookie_notice_provider || null,
+        details: signals.cookie_notice_detected === true
+          ? 'external_cmp_provider_mismatch'
+          : 'external_cmp_not_detected',
+      });
+    }
+    const pages = signals.legal_pages && typeof signals.legal_pages === 'object' ? signals.legal_pages : {};
+    const invalidPages = ['legal', 'cookies', 'privacy'].filter((key) => (
+      pages[key]?.configured !== true || pages[key]?.reachable !== true
+    ));
+    if (invalidPages.length) add('consent_legal_urls_unverified', { domain, missing: invalidPages });
+  }
+
+  const reasons = listToUniqueArray(issues.map((issue) => issue.reason));
+  const minimumExpiration = validAttestationExpirations
+    .filter((value) => Number.isSafeInteger(value) && value > 0)
+    .reduce((minimum, value) => minimum === null || value < minimum ? value : minimum, null);
+  return {
+    ready: issues.length === 0,
+    validated: issues.length === 0,
+    reason: reasons[0] || null,
+    reasons,
+    issues,
+    provider: ['clinicaclick', 'external_cmp'].includes(provider) ? provider : null,
+    domains,
+    expires_at: minimumExpiration ? new Date(minimumExpiration * 1000).toISOString() : null,
+  };
+}
+
+function resolveEnabledConversionEvents(rawGoogleAdsConfig) {
+  const rawEvents = rawGoogleAdsConfig?.events && typeof rawGoogleAdsConfig.events === 'object'
+    && !Array.isArray(rawGoogleAdsConfig.events)
+    ? rawGoogleAdsConfig.events
+    : {};
+  return VALID_EVENTS.filter((eventKey) => {
+    const eventConfig = rawEvents[eventKey];
+    if (eventKey === 'purchase') return eventConfig?.enabled === true;
+    if (!eventConfig || typeof eventConfig !== 'object' || Array.isArray(eventConfig)) {
+      return DEFAULT_ENABLED_CONVERSION_EVENTS.includes(eventKey);
+    }
+    return eventConfig.enabled !== false;
+  });
+}
+
+function conversionValidationKey(customerId, eventKey, actionId) {
+  return [normalizeCustomerId(customerId) || 'missing', eventKey || 'missing', String(actionId || 'missing')].join(':');
+}
+
+function buildRequiredConversionPlan(rawGoogleAdsConfig, fallbackCustomerId = null) {
+  const normalized = normalizeGoogleAdsConfig(rawGoogleAdsConfig || {});
+  const enabledEvents = resolveEnabledConversionEvents(rawGoogleAdsConfig || {});
+  const targets = [];
+  const issues = [];
+
+  for (const eventKey of enabledEvents) {
+    const eventConfig = normalized.events[eventKey] || {};
+    const hasExplicitDestinations = Object.prototype.hasOwnProperty.call(eventConfig, 'destinations');
+    const eventTargets = hasExplicitDestinations
+      ? (eventConfig.destinations || []).filter((destination) => destination?.enabled !== false)
+      : [{
+          key: `legacy_${eventKey}`,
+          enabled: true,
+          customer_id: eventConfig.customer_id || normalized.customer_id || normalizeCustomerId(fallbackCustomerId),
+          conversion_action_id: eventConfig.conversion_action_id
+            || (eventKey === 'lead' ? normalized.conversion_action_id : null),
+          campaign_ids: eventConfig.campaign_ids || []
+        }];
+
+    if (!eventTargets.length) {
+      issues.push({
+        reason: 'conversion_destination_missing',
+        event: eventKey
+      });
+      continue;
+    }
+
+    for (const destination of eventTargets) {
+      const customerId = normalizeCustomerId(destination?.customer_id || '');
+      const campaignIds = listToUniqueArray(
+        (Array.isArray(destination?.campaign_ids) ? destination.campaign_ids : [])
+          .map((value) => normalizeCustomerId(value))
+          .filter(Boolean)
+      );
+      targets.push({
+        event: eventKey,
+        destination_key: String(destination?.key || `destination_${customerId || targets.length + 1}`),
+        customer_id: customerId || null,
+        configured_action_id: String(destination?.conversion_action_id || '').trim() || null,
+        campaign_ids: campaignIds
+      });
+      if (!customerId) {
+        issues.push({
+          reason: 'conversion_destination_customer_missing',
+          event: eventKey,
+          destination_key: String(destination?.key || '') || null
+        });
+      }
+    }
+
+    const distinctCustomers = listToUniqueArray(
+      eventTargets.map((destination) => normalizeCustomerId(destination?.customer_id || '')).filter(Boolean)
+    );
+    if (distinctCustomers.length > 1) {
+      const campaignOwners = new Map();
+      for (const destination of eventTargets) {
+        const customerId = normalizeCustomerId(destination?.customer_id || '');
+        const campaignIds = listToUniqueArray(
+          (Array.isArray(destination?.campaign_ids) ? destination.campaign_ids : [])
+            .map((value) => normalizeCustomerId(value))
+            .filter(Boolean)
+        );
+        if (!customerId || !campaignIds.length) {
+          issues.push({
+            reason: 'attribution_selector_missing',
+            event: eventKey,
+            customer_id: customerId || null,
+            destination_key: String(destination?.key || '') || null
+          });
+          continue;
+        }
+        for (const campaignId of campaignIds) {
+          const previousOwner = campaignOwners.get(campaignId);
+          if (previousOwner && previousOwner !== customerId) {
+            issues.push({
+              reason: 'attribution_selector_ambiguous',
+              event: eventKey,
+              campaign_id: campaignId,
+              customer_ids: [previousOwner, customerId]
+            });
+          } else {
+            campaignOwners.set(campaignId, customerId);
+          }
+        }
+      }
+    }
+  }
+
+  return {
+    enabled_events: enabledEvents,
+    customer_ids: listToUniqueArray(targets.map((target) => target.customer_id).filter(Boolean)),
+    targets,
+    issues
+  };
+}
+
+function assessConversionOnboardingReadiness({
+  plan,
+  mappingsByCustomer = {},
+  actionsByCustomer = {},
+  capabilitiesByCustomer = {},
+  validationsByTarget = {}
+} = {}) {
+  const normalizedPlan = plan || { enabled_events: [], customer_ids: [], targets: [], issues: [] };
+  const issues = [...(Array.isArray(normalizedPlan.issues) ? normalizedPlan.issues : [])];
+  const canonicalTargets = [];
+
+  for (const customerId of normalizedPlan.customer_ids || []) {
+    const capability = capabilitiesByCustomer[customerId] || {};
+    if (capability.data_manager_scope_granted !== true) {
+      issues.push({ reason: 'data_manager_scope_missing', customer_id: customerId });
+    }
+    if (capability.data_manager_quota_project_configured !== true) {
+      issues.push({ reason: 'data_manager_quota_project_missing', customer_id: customerId });
+    }
+  }
+
+  for (const target of normalizedPlan.targets || []) {
+    if (!target.customer_id) continue;
+    const mapping = mappingsByCustomer[target.customer_id] || {};
+    const actionId = String(mapping[target.event] || '').trim() || null;
+    if (!actionId) {
+      issues.push({
+        reason: 'canonical_conversion_action_missing',
+        customer_id: target.customer_id,
+        event: target.event,
+        destination_key: target.destination_key
+      });
+      continue;
+    }
+    const action = (actionsByCustomer[target.customer_id] || [])
+      .find((candidate) => String(candidate?.id || '') === actionId);
+    const actionEnabled = !!action && String(action.status || '').toUpperCase() === 'ENABLED';
+    const braidCompatible = !!action && String(action.counting_type || '').toUpperCase() === 'MANY_PER_CLICK';
+    const secondaryForBidding = !!action && action.primary_for_goal === false;
+    if (!actionEnabled) {
+      issues.push({
+        reason: 'canonical_conversion_action_not_enabled',
+        customer_id: target.customer_id,
+        event: target.event,
+        conversion_action_id: actionId
+      });
+    }
+    if (action && !braidCompatible) {
+      issues.push({
+        reason: 'braid_incompatible_counting_type',
+        customer_id: target.customer_id,
+        event: target.event,
+        conversion_action_id: actionId,
+        conversion_action_name: action.name || null,
+        counting_type: action.counting_type || null,
+        required_counting_type: 'MANY_PER_CLICK'
+      });
+    }
+    if (action && !secondaryForBidding) {
+      issues.push({
+        reason: 'canonical_action_primary_for_goal',
+        customer_id: target.customer_id,
+        event: target.event,
+        conversion_action_id: actionId,
+        conversion_action_name: action.name || null,
+        primary_for_goal: action.primary_for_goal
+      });
+    }
+    const validationKey = conversionValidationKey(target.customer_id, target.event, actionId);
+    const validation = validationsByTarget[validationKey];
+    if (actionEnabled && braidCompatible && secondaryForBidding && validation?.validated !== true) {
+      issues.push({
+        reason: validation?.status === 'failed'
+          ? 'data_manager_validation_failed'
+          : 'data_manager_validation_pending',
+        customer_id: target.customer_id,
+        event: target.event,
+        conversion_action_id: actionId,
+        message: validation?.message || null
+      });
+    }
+    canonicalTargets.push({
+      ...target,
+      conversion_action_id: actionId,
+      validation_key: validationKey,
+      validated: validation?.validated === true
+    });
+  }
+
+  const uniqueReasons = listToUniqueArray(issues.map((issue) => issue.reason));
+  return {
+    ready: issues.length === 0,
+    validated: issues.length === 0 && canonicalTargets.every((target) => target.validated),
+    reason: uniqueReasons[0] || null,
+    reasons: uniqueReasons,
+    issues,
+    enabled_events: normalizedPlan.enabled_events || [],
+    customer_ids: normalizedPlan.customer_ids || [],
+    targets: canonicalTargets
+  };
+}
+
+function applyCanonicalMappingsToGoogleAdsConfig(rawGoogleAdsConfig, fallbackCustomerId, mappingsByCustomer) {
+  const source = rawGoogleAdsConfig && typeof rawGoogleAdsConfig === 'object' && !Array.isArray(rawGoogleAdsConfig)
+    ? rawGoogleAdsConfig
+    : {};
+  const next = JSON.parse(JSON.stringify(source));
+  next.enabled = true;
+  next.currency = normalizeCurrency(next.currency || 'EUR');
+  next.customer_id = normalizeCustomerId(next.customer_id || fallbackCustomerId || '') || null;
+  next.events = next.events && typeof next.events === 'object' && !Array.isArray(next.events)
+    ? next.events
+    : {};
+
+  for (const eventKey of resolveEnabledConversionEvents(next)) {
+    const eventConfig = next.events[eventKey] && typeof next.events[eventKey] === 'object'
+      && !Array.isArray(next.events[eventKey])
+      ? next.events[eventKey]
+      : {};
+    eventConfig.enabled = true;
+    eventConfig.currency = normalizeCurrency(eventConfig.currency || next.currency);
+    if (Object.prototype.hasOwnProperty.call(eventConfig, 'destinations')) {
+      eventConfig.destinations = Array.isArray(eventConfig.destinations)
+        ? eventConfig.destinations.map((destination) => {
+            if (!destination || typeof destination !== 'object' || Array.isArray(destination)) return destination;
+            const customerId = normalizeCustomerId(destination.customer_id || destination.customerId || '');
+            const actionId = String(mappingsByCustomer?.[customerId]?.[eventKey] || '').trim() || null;
+            if (!customerId || !actionId) return destination;
+            return {
+              ...destination,
+              customer_id: customerId,
+              conversion_action_id: actionId,
+              conversion_action: `customers/${customerId}/conversionActions/${actionId}`
+            };
+          })
+        : [];
+    } else {
+      const customerId = normalizeCustomerId(eventConfig.customer_id || next.customer_id || fallbackCustomerId || '');
+      const actionId = String(mappingsByCustomer?.[customerId]?.[eventKey] || '').trim() || null;
+      eventConfig.customer_id = customerId || null;
+      eventConfig.conversion_action_id = actionId;
+      eventConfig.conversion_action = customerId && actionId
+        ? `customers/${customerId}/conversionActions/${actionId}`
+        : null;
+    }
+    next.events[eventKey] = eventConfig;
+  }
+
+  const baseCustomerId = normalizeCustomerId(next.customer_id || fallbackCustomerId || '');
+  const baseLeadActionId = String(mappingsByCustomer?.[baseCustomerId]?.lead || '').trim() || null;
+  next.conversion_action_id = baseLeadActionId;
+  next.conversion_action = baseCustomerId && baseLeadActionId
+    ? `customers/${baseCustomerId}/conversionActions/${baseLeadActionId}`
+    : null;
+  return next;
 }
 
 function parseClinicIds(rawValue) {
@@ -3560,6 +4004,55 @@ function buildStrategyMetrics(campaign, payload) {
   };
 }
 
+function strategyPayloadUsesGoogleAds(payload) {
+  const channels = Array.isArray(payload?.channels) ? payload.channels : [];
+  const channelUsesGoogle = channels.some((channel) => (
+    String(channel?.channel || channel || '').trim().toLowerCase() === 'google_ads'
+      && (typeof channel !== 'object' || channel?.enabled !== false)
+  ));
+  if (channelUsesGoogle || payload?.measurement?.channel_native?.google_ads_conversions === true) {
+    return true;
+  }
+
+  const googleConfig = payload?.google_ads && typeof payload.google_ads === 'object'
+    && !Array.isArray(payload.google_ads)
+    ? payload.google_ads
+    : null;
+  if (googleConfig && googleConfig.enabled !== false && (
+    googleConfig.customer_id
+      || googleConfig.account_id
+      || Array.isArray(googleConfig.targets)
+      || Array.isArray(googleConfig.destinations)
+      || googleConfig.events
+  )) {
+    return true;
+  }
+
+  const providerIsGoogle = (value) => {
+    const source = value && typeof value === 'object' && !Array.isArray(value) ? value : {};
+    return Boolean(
+      source.google_ads_customer_id
+        || source.cc_gads_customer_id
+        || source.google_customer_id
+    ) || ['provider', 'platform', 'network', 'channel', 'source', 'type'].some((key) => (
+      ['google_ads', 'google', 'adwords'].includes(String(source[key] || '').trim().toLowerCase())
+    ));
+  };
+  const targetCollections = [
+    payload?.external_targets,
+    payload?.targets,
+    payload?.measurement?.targets,
+    payload?.measurement?.external_targets,
+  ];
+  return targetCollections.some((collection) => (
+    Array.isArray(collection) && collection.some((target) => (
+      providerIsGoogle(target)
+        || (Array.isArray(target?.campaigns) && target.campaigns.some(providerIsGoogle))
+        || (Array.isArray(target?.targets) && target.targets.some(providerIsGoogle))
+    ))
+  ));
+}
+
 async function buildLiveStrategyMetrics(rows, campaign, payload) {
   const baseMetrics = buildStrategyMetrics(campaign, payload);
   const scope = extractStrategyScopeFromPayload(payload, rows);
@@ -3629,9 +4122,7 @@ function buildStrategyItemFromRows(rows, campaignsById) {
   const clinicIds = Array.from(new Set(orderedRows.map((row) => parseInteger(row.clinica_id)).filter((value) => value)));
   const mode = payload.mode_snapshot || payload.mode || null;
   const normalizedStatus = normalizeStrategyStatus(payload.status || representative.estado);
-  const status = mode === 'connect_only' && (normalizedStatus === 'draft' || normalizedStatus === 'pending_approval')
-    ? 'active'
-    : normalizedStatus;
+  const status = normalizedStatus;
   const externalTargets = normalizeExternalTargets(payload.external_targets);
   const targetDestinations = normalizeTargetDestinations(payload.target_destinations);
 
@@ -3646,6 +4137,9 @@ function buildStrategyItemFromRows(rows, campaignsById) {
     area_medica_nombre: payload.area_medica_nombre ?? payload.summary?.area_medica_nombre ?? null,
     mode,
     status,
+    activation_readiness: payload.activation_readiness && typeof payload.activation_readiness === 'object'
+      ? payload.activation_readiness
+      : null,
     budget_monthly: Number(payload.summary?.budget_monthly ?? campaign?.presupuesto ?? 0) || 0,
     scope_type: payload.scope?.assignment_scope || 'clinic',
     scope_id: payload.scope?.assignment_scope === 'group'
@@ -3994,9 +4488,17 @@ async function listConversionActionsInternal({ accessToken, customerId, loginCus
   };
 }
 
-async function ensureConversionActionsInternal({ accessToken, customerId, loginCustomerId, currency, events, createMissing }) {
+async function ensureConversionActionsInternal({
+  accessToken,
+  customerId,
+  loginCustomerId,
+  currency,
+  events,
+  createMissing
+}) {
   const requestedEvents = listToUniqueArray(
-    (Array.isArray(events) && events.length ? events : VALID_EVENTS).filter((key) => VALID_EVENTS.includes(key))
+    (Array.isArray(events) && events.length ? events : DEFAULT_ENABLED_CONVERSION_EVENTS)
+      .filter((key) => VALID_EVENTS.includes(key))
   );
   const current = await listConversionActionsInternal({ accessToken, customerId, loginCustomerId });
   // Provisioning no adopta acciones del cliente por coincidencias vagas. Solo
@@ -4101,6 +4603,198 @@ async function ensureConversionActionsInternal({ accessToken, customerId, loginC
   };
 }
 
+async function evaluateGoogleConversionOnboardingReadiness({
+  userId,
+  scope,
+  rawGoogleAdsConfig,
+  fallbackCustomerId,
+  currency = 'EUR',
+  createMissing = false,
+  consentReadiness = null
+}) {
+  const plan = buildRequiredConversionPlan(rawGoogleAdsConfig, fallbackCustomerId);
+  const mappingsByCustomer = {};
+  const actionsByCustomer = {};
+  const capabilitiesByCustomer = {};
+  const validationsByTarget = {};
+  const runtimesByCustomer = {};
+  const runtimeIssues = [];
+  const created = [];
+  const quotaProjectConfigured = Boolean(
+    process.env.GOOGLE_DATA_MANAGER_QUOTA_PROJECT
+      || process.env.GOOGLE_CLOUD_PROJECT
+  );
+
+  for (const customerId of plan.customer_ids) {
+    let runtime;
+    try {
+      runtime = await resolveScopedGoogleAdsRuntime({
+        userId,
+        clinicId: scope.clinic_id,
+        groupId: scope.group_id,
+        assignmentScope: scope.assignment_scope,
+        customerId,
+        requiredScopes: [GOOGLE_ADS_SCOPE]
+      });
+    } catch (error) {
+      capabilitiesByCustomer[customerId] = {
+        data_manager_scope_granted: false,
+        data_manager_quota_project_configured: quotaProjectConfigured
+      };
+      runtimeIssues.push({
+        reason: String(error.code || 'scoped_google_runtime_unavailable').toLowerCase(),
+        customer_id: customerId,
+        message: error.message || null
+      });
+      continue;
+    }
+
+    runtimesByCustomer[customerId] = runtime;
+    const hasDataManagerScope = hasScopeText(runtime.connection?.scopes || '', GOOGLE_DATA_MANAGER_SCOPE);
+    capabilitiesByCustomer[customerId] = {
+      data_manager_scope_granted: hasDataManagerScope,
+      data_manager_quota_project_configured: quotaProjectConfigured
+    };
+
+    const customerEvents = listToUniqueArray(
+      plan.targets
+        .filter((target) => target.customer_id === customerId)
+        .map((target) => target.event)
+    );
+    try {
+      let ensured = await ensureConversionActionsInternal({
+        accessToken: runtime.accessToken,
+        customerId,
+        loginCustomerId: runtime.loginCustomerId,
+        currency,
+        events: customerEvents,
+        createMissing
+      });
+      if (ensured.created.length) {
+        created.push(...ensured.created.map((item) => ({ ...item, customer_id: customerId })));
+        ensured = await ensureConversionActionsInternal({
+          accessToken: runtime.accessToken,
+          customerId,
+          loginCustomerId: runtime.loginCustomerId,
+          currency,
+          events: customerEvents,
+          createMissing: false
+        });
+      }
+      const listed = await listConversionActionsInternal({
+        accessToken: runtime.accessToken,
+        customerId,
+        loginCustomerId: runtime.loginCustomerId
+      });
+      mappingsByCustomer[customerId] = listed.clinicaclick_mapping || {};
+      actionsByCustomer[customerId] = listed.actions || [];
+    } catch (error) {
+      runtimeIssues.push({
+        reason: 'conversion_actions_read_failed',
+        customer_id: customerId,
+        message: error?.response?.data?.error?.message || error.message || null
+      });
+    }
+  }
+
+  const planWithRuntimeIssues = {
+    ...plan,
+    issues: [...plan.issues, ...runtimeIssues]
+  };
+  const preValidation = assessConversionOnboardingReadiness({
+    plan: planWithRuntimeIssues,
+    mappingsByCustomer,
+    actionsByCustomer,
+    capabilitiesByCustomer,
+    validationsByTarget
+  });
+
+  for (const target of preValidation.targets) {
+    const capability = capabilitiesByCustomer[target.customer_id] || {};
+    const runtime = runtimesByCustomer[target.customer_id];
+    const action = (actionsByCustomer[target.customer_id] || [])
+      .find((candidate) => String(candidate?.id || '') === target.conversion_action_id);
+    if (
+      !runtime
+      || capability.data_manager_scope_granted !== true
+      || capability.data_manager_quota_project_configured !== true
+      || String(action?.status || '').toUpperCase() !== 'ENABLED'
+      || String(action?.counting_type || '').toUpperCase() !== 'MANY_PER_CLICK'
+      || action?.primary_for_goal !== false
+    ) continue;
+    if (validationsByTarget[target.validation_key]) continue;
+    try {
+      await uploadGoogleDataManagerConversion({
+        customerId: target.customer_id,
+        conversionAction: `customers/${target.customer_id}/conversionActions/${target.conversion_action_id}`,
+        conversionDateTime: new Date(),
+        externalId: `cc-onboarding-validation-${target.event}-${Date.now()}`,
+        gclid: 'GCLID_1',
+        value: 0,
+        currency,
+        eventName: target.event,
+        eventSource: 'WEB',
+        accessToken: runtime.accessToken,
+        loginCustomerId: runtime.loginCustomerId,
+        validateOnly: true
+      });
+      validationsByTarget[target.validation_key] = {
+        status: 'validated',
+        validated: true,
+        validate_only: true,
+        checked_at: new Date().toISOString()
+      };
+    } catch (error) {
+      const providerError = error?.response?.data?.error || null;
+      validationsByTarget[target.validation_key] = {
+        status: 'failed',
+        validated: false,
+        validate_only: true,
+        checked_at: new Date().toISOString(),
+        error: String(providerError?.status || error?.code || 'data_manager_validation_failed').toLowerCase(),
+        message: providerError?.message || error.message || 'Google no pudo validar Data Manager'
+      };
+    }
+  }
+
+  const conversionReadiness = assessConversionOnboardingReadiness({
+    plan: planWithRuntimeIssues,
+    mappingsByCustomer,
+    actionsByCustomer,
+    capabilitiesByCustomer,
+    validationsByTarget
+  });
+  const reportedConsentIssues = Array.isArray(consentReadiness?.issues)
+    ? consentReadiness.issues
+    : [];
+  const consentIssues = consentReadiness?.ready === true && consentReadiness?.validated === true
+    ? []
+    : (reportedConsentIssues.length > 0
+        ? reportedConsentIssues
+        : [{ reason: 'consent_readiness_pending' }]);
+  const combinedIssues = [...conversionReadiness.issues, ...consentIssues];
+  const combinedReasons = listToUniqueArray(combinedIssues.map((issue) => issue.reason));
+  const readiness = {
+    ...conversionReadiness,
+    ready: conversionReadiness.ready && consentIssues.length === 0,
+    validated: conversionReadiness.validated && consentIssues.length === 0,
+    reason: combinedReasons[0] || null,
+    reasons: combinedReasons,
+    issues: combinedIssues,
+    consent_readiness: consentReadiness || null
+  };
+  return {
+    ...readiness,
+    mappings_by_customer: mappingsByCustomer,
+    capabilities_by_customer: capabilitiesByCustomer,
+    validations_by_target: validationsByTarget,
+    created_actions: created,
+    canonical_google_ads_config: readiness.ready
+      ? applyCanonicalMappingsToGoogleAdsConfig(rawGoogleAdsConfig, fallbackCustomerId, mappingsByCustomer)
+      : null
+  };
+}
+
 function initSteps(providers) {
   const steps = [];
   if (providers.includes('google_ads')) {
@@ -4152,10 +4846,12 @@ exports.getCampaignOnboardingBootstrap = asyncHandler(async (req, res) => {
     : (marketingState.records.clinicRecord || marketingState.records.groupRecord);
   const intakeGoogleAds = normalizeGoogleAdsConfig(marketingState.tracking.google_ads || {});
   const intakeMetaAds = normalizeMetaAdsConfig(marketingState.tracking.meta_ads || {});
+  const consentReadiness = assessConsentMeasurementReadiness(marketingState);
 
   let googleConnected = false;
   let googleReason = null;
   let hasAdsScope = false;
+  let hasDataManagerScope = false;
   let googleAccounts = marketingState.google.available_accounts || [];
   let selectedCustomerId = marketingState.google.effective_assets?.account?.customer_id || intakeGoogleAds.customer_id || null;
 
@@ -4171,6 +4867,7 @@ exports.getCampaignOnboardingBootstrap = asyncHandler(async (req, res) => {
     googleReason = 'no_connection';
   } else {
     hasAdsScope = hasScopeText(googleConnection.scopes || '', GOOGLE_ADS_SCOPE);
+    hasDataManagerScope = hasScopeText(googleConnection.scopes || '', GOOGLE_DATA_MANAGER_SCOPE);
     if (!hasAdsScope) {
       googleReason = 'insufficient_scope';
     } else {
@@ -4232,6 +4929,7 @@ exports.getCampaignOnboardingBootstrap = asyncHandler(async (req, res) => {
     modes: ['connect_only', 'managed_service'],
     legacy_modes: ['managed_self'],
     active_mode: activeMode,
+    consent_readiness: consentReadiness,
     google_ads: {
       connected: googleConnected,
       reason: googleReason,
@@ -4257,7 +4955,7 @@ exports.getCampaignOnboardingBootstrap = asyncHandler(async (req, res) => {
         send_to: intakeGoogleAds.send_to || null,
         tag_id: marketingState.google.effective_assets?.tag_id || extractGoogleTagId(intakeGoogleAds.send_to)
       },
-      capabilities: buildGoogleAdsCapabilities(googleConnected, hasAdsScope)
+      capabilities: buildGoogleAdsCapabilities(googleConnected, hasAdsScope, hasDataManagerScope)
     },
     meta_ads: {
       connected: metaConnected,
@@ -4835,8 +5533,12 @@ exports.validateGoogleDataManagerConversion = asyncHandler(async (req, res) => {
 
   const customerId = normalizeCustomerId(req.body?.customer_id || '');
   const conversionActionId = String(req.body?.conversion_action_id || '').trim();
+  const eventKey = String(req.body?.event || '').trim().toLowerCase() || null;
   if (!customerId || !/^\d+$/.test(conversionActionId)) {
     return res.status(400).json({ success: false, error: 'customer_and_conversion_action_required' });
+  }
+  if (eventKey && !VALID_EVENTS.includes(eventKey)) {
+    return res.status(400).json({ success: false, error: 'invalid_conversion_event' });
   }
   if (!req.body?.clinic_id && !req.body?.group_id) {
     return res.status(400).json({ success: false, error: 'scope_required' });
@@ -4857,7 +5559,7 @@ exports.validateGoogleDataManagerConversion = asyncHandler(async (req, res) => {
       groupId: scope.group_id,
       assignmentScope: scope.assignment_scope,
       customerId,
-      requiredScopes: [GOOGLE_DATA_MANAGER_SCOPE]
+      requiredScopes: [GOOGLE_ADS_SCOPE, GOOGLE_DATA_MANAGER_SCOPE]
     });
   } catch (error) {
     return res.status(error.httpStatus || 409).json({
@@ -4865,6 +5567,62 @@ exports.validateGoogleDataManagerConversion = asyncHandler(async (req, res) => {
       error: String(error.code || 'scoped_google_connection_error').toLowerCase(),
       message: error.message,
       missing_scopes: error.missingScopes || []
+    });
+  }
+
+  const listed = await listConversionActionsInternal({
+    accessToken: runtime.accessToken,
+    customerId,
+    loginCustomerId: runtime.loginCustomerId
+  });
+  const canonicalMapping = listed.clinicaclick_mapping || {};
+  const canonicalEvent = eventKey || VALID_EVENTS.find((key) => canonicalMapping[key] === conversionActionId) || null;
+  if (!canonicalEvent || canonicalMapping[canonicalEvent] !== conversionActionId) {
+    return res.status(409).json({
+      success: false,
+      validated: false,
+      validate_only: true,
+      error: 'canonical_conversion_action_required',
+      message: 'La validación solo admite una acción canónica de ClinicaClick para este evento.'
+    });
+  }
+  const canonicalAction = listed.actions.find((action) => String(action?.id || '') === conversionActionId);
+  if (String(canonicalAction?.status || '').toUpperCase() !== 'ENABLED') {
+    return res.status(409).json({
+      success: false,
+      validated: false,
+      validate_only: true,
+      error: 'canonical_conversion_action_not_enabled',
+      message: 'La acción canónica de ClinicaClick no está habilitada en Google Ads.'
+    });
+  }
+  if (String(canonicalAction?.counting_type || '').toUpperCase() !== 'MANY_PER_CLICK') {
+    return res.status(409).json({
+      success: false,
+      validated: false,
+      validate_only: true,
+      error: 'braid_incompatible_counting_type',
+      message: 'La acción canónica usa un recuento incompatible con gbraid/wbraid. Debe revisarse antes de validar Data Manager.',
+      customer_id: customerId,
+      event: canonicalEvent,
+      conversion_action_id: conversionActionId,
+      conversion_action_name: canonicalAction?.name || null,
+      counting_type: canonicalAction?.counting_type || null,
+      required_counting_type: 'MANY_PER_CLICK'
+    });
+  }
+  if (canonicalAction?.primary_for_goal !== false) {
+    return res.status(409).json({
+      success: false,
+      validated: false,
+      validate_only: true,
+      error: 'canonical_action_primary_for_goal',
+      message: 'La acción canónica sigue siendo primaria. Debe pasar a secundaria antes de validar para no alterar pujas del cliente.',
+      customer_id: customerId,
+      event: canonicalEvent,
+      conversion_action_id: conversionActionId,
+      conversion_action_name: canonicalAction?.name || null,
+      primary_for_goal: canonicalAction?.primary_for_goal
     });
   }
 
@@ -4879,6 +5637,7 @@ exports.validateGoogleDataManagerConversion = asyncHandler(async (req, res) => {
       gclid: 'GCLID_1',
       value: 0,
       currency: 'EUR',
+      eventName: canonicalEvent,
       eventSource: 'WEB',
       accessToken: runtime.accessToken,
       loginCustomerId: runtime.loginCustomerId,
@@ -4902,6 +5661,7 @@ exports.validateGoogleDataManagerConversion = asyncHandler(async (req, res) => {
     validate_only: true,
     customer_id: customerId,
     conversion_action_id: conversionActionId,
+    event: canonicalEvent,
     message: 'Google validó la estructura y los permisos sin ingerir la conversión.'
   });
 });
@@ -4918,16 +5678,25 @@ exports.ensureGoogleAdsConversionActions = asyncHandler(async (req, res) => {
 
   const currency = normalizeCurrency(req.body?.currency || 'EUR');
   const createMissing = req.body?.create_missing === true;
+  const normalizeExisting = req.body?.normalize_existing === true;
+  const normalizationValidateOnly = req.body?.validate_only === true;
+  if (createMissing && normalizationValidateOnly) {
+    return res.status(400).json({
+      success: false,
+      error: 'validate_only_create_not_supported',
+      message: 'La prevalidación sin cambios solo está disponible para ajustar acciones canónicas existentes.'
+    });
+  }
   if (createMissing && req.body?.confirm_external_mutation !== true) {
     return res.status(409).json({
       success: false,
       error: 'external_mutation_confirmation_required',
-      message: 'Confirma explícitamente la creación de conversiones en Google Ads.'
+      message: 'Confirma explícitamente la creación de acciones canónicas en Google Ads.'
     });
   }
   const events = Array.isArray(req.body?.events) && req.body.events.length
     ? req.body.events.map((e) => String(e || '').trim().toLowerCase())
-    : VALID_EVENTS;
+    : DEFAULT_ENABLED_CONVERSION_EVENTS;
 
   const scope = await resolveScopeFromInput({
     clinicIdRaw: req.body?.clinic_id,
@@ -4953,14 +5722,100 @@ exports.ensureGoogleAdsConversionActions = asyncHandler(async (req, res) => {
     });
   }
 
-  const ensured = await ensureConversionActionsInternal({
-    accessToken: runtime.accessToken,
-    customerId,
-    loginCustomerId: runtime.loginCustomerId,
-    currency,
-    events,
-    createMissing
-  });
+  let ensured;
+  try {
+    ensured = await ensureConversionActionsInternal({
+      accessToken: runtime.accessToken,
+      customerId,
+      loginCustomerId: runtime.loginCustomerId,
+      currency,
+      events,
+      createMissing
+    });
+  } catch (error) {
+    const providerError = error?.response?.data?.error || null;
+    return res.status(Number(error?.response?.status) || 409).json({
+      success: false,
+      error: 'canonical_action_provisioning_failed',
+      message: providerError?.message || error.message || 'Google no pudo crear las acciones canónicas de ClinicaClick.',
+      details: Array.isArray(providerError?.details) ? providerError.details : []
+    });
+  }
+
+  let normalization = null;
+  let normalized = [];
+  let normalizationValidation = null;
+  if (normalizeExisting) {
+    const expectedActions = listToUniqueArray(events)
+      .filter((eventKey) => VALID_EVENTS.includes(eventKey))
+      .map((eventKey) => ({
+        id: ensured.mapping[eventKey] || null,
+        name: EVENT_CATALOG[eventKey].name
+      }))
+      .filter((action) => !!action.id);
+    if (!expectedActions.length) {
+      return res.status(409).json({
+        success: false,
+        error: 'canonical_conversion_action_missing',
+        message: 'No hay acciones canónicas verificadas que se puedan ajustar en esta cuenta.'
+      });
+    }
+    const applyNormalization = req.body?.confirm_external_mutation === true && !normalizationValidateOnly;
+    try {
+      normalization = await normalizeCanonicalGoogleAdsConversions({
+        scope: {
+          user_id: userId,
+          clinic_id: scope.clinic_id,
+          group_id: scope.group_id,
+          assignment_scope: scope.assignment_scope
+        },
+        configuredAccounts: [{
+          customer_id: customerId,
+          expected_actions: expectedActions
+        }],
+        apply: applyNormalization,
+        validateOnly: normalizationValidateOnly,
+        confirmExternalMutation: applyNormalization
+      });
+    } catch (error) {
+      return res.status(error.httpStatus || 409).json({
+        success: false,
+        error: String(error.code || 'canonical_action_normalization_failed').toLowerCase(),
+        message: error.message || 'No se pudo preparar el ajuste de acciones canónicas.'
+      });
+    }
+    const accountNormalization = normalization.accounts?.[0] || null;
+    const allowedOutcomes = applyNormalization
+      ? new Set(['applied', 'unchanged'])
+      : normalizationValidateOnly
+        ? new Set(['validated', 'unchanged'])
+        : new Set(['ready', 'unchanged']);
+    if (!accountNormalization || !allowedOutcomes.has(accountNormalization.outcome)) {
+      const blocker = accountNormalization?.blockers?.[0]
+        || accountNormalization?.plan?.blockers?.[0]
+        || accountNormalization?.error
+        || null;
+      return res.status(409).json({
+        success: false,
+        error: 'canonical_action_normalization_blocked',
+        message: blocker?.message || 'La normalización canónica quedó bloqueada y no se aplicó.',
+        normalization
+      });
+    }
+    normalized = (accountNormalization.plan?.actions || [])
+      .filter((action) => action?.outcome === 'update_ready')
+      .map((action) => ({
+        event: action.key || null,
+        id: action.id,
+        name: action.name,
+        previous_counting_type: action.before?.counting_type || null,
+        previous_primary_for_goal: action.before?.primary_for_goal ?? null,
+        counting_type: 'MANY_PER_CLICK',
+        primary_for_goal: false,
+        applied: accountNormalization.outcome === 'applied'
+      }));
+    normalizationValidation = accountNormalization.validation || null;
+  }
 
   if (scope.clinic_id || scope.group_id) {
     await upsertIntakeGoogleAdsForScope(scope, {
@@ -4974,9 +5829,13 @@ exports.ensureGoogleAdsConversionActions = asyncHandler(async (req, res) => {
     success: true,
     customer_id: customerId,
     connection_source: runtime.connectionSource,
-    external_mutation_performed: createMissing && ensured.created.length > 0,
+    external_mutation_performed: ensured.created.length > 0
+      || normalized.some((item) => item.applied === true),
     created: ensured.created,
     existing: ensured.existing,
+    normalized,
+    normalization_validation: normalizationValidation,
+    normalization,
     mapping: ensured.mapping,
     recommended_google_ads_config: ensured.recommended_google_ads_config
   });
@@ -5012,6 +5871,18 @@ exports.startCampaignOnboarding = asyncHandler(async (req, res) => {
     groupIdRaw: scope.group_id,
     assignmentScopeRaw: scope.assignment_scope
   });
+  const consentReadiness = assessConsentMeasurementReadiness(marketingState);
+  if (!consentReadiness.ready || !consentReadiness.validated) {
+    return res.status(409).json({
+      success: false,
+      error: 'consent_readiness_pending',
+      message: 'La medición de privacidad no está verificada. Comprueba el aviso de cookies y Consent Mode en todos los dominios antes de continuar.',
+      reason: consentReadiness.reason || 'consent_readiness_pending',
+      reasons: consentReadiness.reasons,
+      issues: consentReadiness.issues,
+      consent_readiness: consentReadiness,
+    });
+  }
 
   const anchorClinicId = scope.clinic_id || scope.clinic_ids[0] || null;
   const running = await CampaignRequest.findAll({
@@ -5090,7 +5961,7 @@ exports.startCampaignOnboarding = asyncHandler(async (req, res) => {
         throw scopeErr;
       }
 
-      const { accessToken } = await ensureGoogleAdsAccess(googleConnection);
+      await ensureGoogleAdsAccess(googleConnection);
       markStep(steps, 'google_connect', 'done');
 
       const scopeAccounts = marketingState.google.available_accounts || [];
@@ -5112,34 +5983,88 @@ exports.startCampaignOnboarding = asyncHandler(async (req, res) => {
       }
 
       markStep(steps, 'google_map_account', 'done', { customer_id: selectedCustomer });
-      const loginCustomerId = await resolveLoginCustomerId(googleConnection.id, selectedCustomer, scope);
 
       const autoCreate = req.body?.google_ads?.auto_create_missing_conversions === true
         && req.body?.google_ads?.confirm_external_mutation === true;
-      const ensurePayload = await ensureConversionActionsInternal({
-        accessToken,
-        customerId: selectedCustomer,
-        loginCustomerId,
+      const conversionReadiness = await evaluateGoogleConversionOnboardingReadiness({
+        userId,
+        scope,
+        rawGoogleAdsConfig: marketingState.tracking.google_ads || {},
+        fallbackCustomerId: selectedCustomer,
         currency: req.body?.google_ads?.currency || 'EUR',
-        events: VALID_EVENTS,
-        createMissing: autoCreate
+        createMissing: autoCreate,
+        consentReadiness
       });
 
-      markStep(steps, 'conversion_actions', 'done');
+      if (!conversionReadiness.ready || !conversionReadiness.validated) {
+        markStep(steps, 'conversion_actions', 'pending', {
+          reason: conversionReadiness.reason || 'conversion_readiness_pending',
+          reasons: conversionReadiness.reasons,
+          readiness: {
+            ready: false,
+            validated: false,
+            enabled_events: conversionReadiness.enabled_events,
+            customer_ids: conversionReadiness.customer_ids,
+            issues: conversionReadiness.issues,
+            validations_by_target: conversionReadiness.validations_by_target
+          }
+        });
+        const pendingPayload = {
+          ...initialPayload,
+          status: 'pending',
+          current_step: 'conversion_actions',
+          steps,
+          result: {
+            google_ads: {
+              customer_id: selectedCustomer,
+              readiness: conversionReadiness
+            }
+          }
+        };
+        await request.update({
+          estado: 'en_creacion',
+          solicitud: pendingPayload
+        });
+        return res.status(409).json({
+          success: false,
+          error: 'conversion_readiness_pending',
+          message: 'Las conversiones de ClinicaClick siguen pendientes y la campaña no se puede activar todavía.',
+          reason: conversionReadiness.reason || 'conversion_readiness_pending',
+          reasons: conversionReadiness.reasons,
+          issues: conversionReadiness.issues,
+          onboarding_id: request.id,
+          status: 'pending',
+          current_step: 'conversion_actions',
+          steps
+        });
+      }
 
-      const mergedGoogleAds = {
-        ...ensurePayload.recommended_google_ads_config,
-        enabled: true,
-        customer_id: selectedCustomer,
-        send_to: req.body?.google_ads?.send_to || null
-      };
+      markStep(steps, 'conversion_actions', 'done', {
+        readiness: {
+          ready: true,
+          validated: true,
+          validate_only: true,
+          enabled_events: conversionReadiness.enabled_events,
+          customer_ids: conversionReadiness.customer_ids,
+          validations_by_target: conversionReadiness.validations_by_target
+        }
+      });
+
+      const mergedGoogleAds = conversionReadiness.canonical_google_ads_config;
       await upsertIntakeGoogleAdsForScope(scope, mergedGoogleAds);
       markStep(steps, 'persist_intake_config', 'done');
 
       result.google_ads = {
         customer_id: selectedCustomer,
-        mapping: ensurePayload.mapping,
-        created_actions: ensurePayload.created
+        mappings_by_customer: conversionReadiness.mappings_by_customer,
+        created_actions: conversionReadiness.created_actions,
+        readiness: {
+          ready: true,
+          validated: true,
+          validate_only: true,
+          enabled_events: conversionReadiness.enabled_events,
+          customer_ids: conversionReadiness.customer_ids
+        }
       };
     }
 
@@ -5619,9 +6544,10 @@ exports.updateMarketingStrategy = asyncHandler(async (req, res) => {
     }
   }
 
-  const currentStatus = effectiveMode === 'connect_only'
-    ? 'active'
-    : normalizeStrategyStatus(currentPayload.status || representative.estado);
+  // Editing strategy details must never be an activation shortcut. In
+  // particular, a connect_only draft stays a draft until the explicit status
+  // transition runs the Google/Data Manager readiness gate.
+  const currentStatus = normalizeStrategyStatus(currentPayload.status || representative.estado);
   const campaignName = buildStrategyName({
     objectiveId,
     treatments,
@@ -5735,7 +6661,78 @@ exports.transitionMarketingStrategyStatus = asyncHandler(async (req, res) => {
     });
   }
 
-  if (!canTransitionStrategy(currentStatus, nextStatus)) {
+  let activationReadiness = null;
+  if (strategy?.mode === 'connect_only' && nextStatus === 'active') {
+    const strategyPayload = rows[0]?.solicitud && typeof rows[0].solicitud === 'object'
+      ? rows[0].solicitud
+      : {};
+    const strategyScope = extractStrategyScopeFromPayload(strategyPayload, rows);
+    const marketingState = await resolveEffectiveMarketingState({
+      clinicIdRaw: strategyScope.clinic_id,
+      groupIdRaw: strategyScope.group_id,
+      assignmentScopeRaw: strategyScope.assignment_scope
+    });
+    const consentReadiness = assessConsentMeasurementReadiness(marketingState);
+    if (!consentReadiness.ready || !consentReadiness.validated) {
+      return res.status(409).json({
+        success: false,
+        error: 'consent_readiness_pending',
+        message: 'La estrategia sigue en borrador: verifica el aviso de cookies y Consent Mode en todos los dominios antes de activarla.',
+        reason: consentReadiness.reason || 'consent_readiness_pending',
+        reasons: consentReadiness.reasons,
+        issues: consentReadiness.issues,
+        consent_readiness: consentReadiness,
+        status: 'draft'
+      });
+    }
+    activationReadiness = {
+      ready: true,
+      validated: true,
+      validate_only: true,
+      validated_at: new Date().toISOString(),
+      consent_readiness: consentReadiness,
+      enabled_events: [],
+      customer_ids: []
+    };
+
+    if (strategyPayloadUsesGoogleAds(strategyPayload)) {
+      const fallbackCustomerId = marketingState.google.effective_assets?.account?.customer_id
+        || normalizeGoogleAdsConfig(marketingState.tracking.google_ads || {}).customer_id
+        || marketingState.google.available_accounts?.[0]?.customer_id
+        || null;
+      const readiness = await evaluateGoogleConversionOnboardingReadiness({
+        userId,
+        scope: strategyScope,
+        rawGoogleAdsConfig: marketingState.tracking.google_ads || {},
+        fallbackCustomerId,
+        currency: normalizeGoogleAdsConfig(marketingState.tracking.google_ads || {}).currency || 'EUR',
+        createMissing: false,
+        consentReadiness
+      });
+      if (!readiness.ready || !readiness.validated) {
+        return res.status(409).json({
+          success: false,
+          error: 'conversion_readiness_pending',
+          message: 'La estrategia sigue en borrador: completa y valida las conversiones de ClinicaClick antes de activarla.',
+          reason: readiness.reason || 'conversion_readiness_pending',
+          reasons: readiness.reasons,
+          issues: readiness.issues,
+          status: 'draft'
+        });
+      }
+      activationReadiness = {
+        ...activationReadiness,
+        enabled_events: readiness.enabled_events,
+        customer_ids: readiness.customer_ids
+      };
+    }
+  }
+
+  const directVerifiedConnectOnlyActivation = strategy?.mode === 'connect_only'
+    && currentStatus === 'draft'
+    && nextStatus === 'active'
+    && activationReadiness?.validated === true;
+  if (!canTransitionStrategy(currentStatus, nextStatus) && !directVerifiedConnectOnlyActivation) {
     return res.status(409).json({
       success: false,
       error: 'invalid_transition',
@@ -5778,6 +6775,7 @@ exports.transitionMarketingStrategyStatus = asyncHandler(async (req, res) => {
       solicitud: {
         ...payload,
         status: nextStatus,
+        ...(activationReadiness ? { activation_readiness: activationReadiness } : {}),
         status_history: history,
         updated_at: nowIso
       },
@@ -5997,7 +6995,9 @@ exports.createMarketingStrategy = asyncHandler(async (req, res) => {
     clinicCount: targetClinicIds.length
   });
 
-  const initialStatus = effectiveMode === 'connect_only' ? 'active' : 'draft';
+  // Crear la estrategia no equivale a lanzarla. Incluso en connect_only debe
+  // permanecer en borrador hasta que el gate de medición valide Data Manager.
+  const initialStatus = 'draft';
 
   const geo = req.body?.geo && typeof req.body.geo === 'object' ? req.body.geo : {};
   const destination = req.body?.destination && typeof req.body.destination === 'object' ? req.body.destination : null;
@@ -6016,7 +7016,7 @@ exports.createMarketingStrategy = asyncHandler(async (req, res) => {
       grupo_clinica_id: scope.group_id || null,
       campaign_id_externo: null,
       gestionada: effectiveMode !== 'connect_only',
-      activa: effectiveMode === 'connect_only',
+      activa: false,
       fecha_inicio: null,
       fecha_fin: null,
       presupuesto: budgetMonthly
@@ -6114,6 +7114,13 @@ exports.createMarketingStrategy = asyncHandler(async (req, res) => {
 });
 
 exports.__test = {
+  applyCanonicalMappingsToGoogleAdsConfig,
+  assessConsentMeasurementReadiness,
+  assessConversionOnboardingReadiness,
+  buildRequiredConversionPlan,
   buildClinicaclickConversionActionCreate,
-  buildClinicaclickManagedMapping
+  buildClinicaclickManagedMapping,
+  conversionValidationKey,
+  resolveEnabledConversionEvents,
+  strategyPayloadUsesGoogleAds
 };

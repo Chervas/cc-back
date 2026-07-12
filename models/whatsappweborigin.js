@@ -89,6 +89,26 @@ module.exports = (sequelize, DataTypes) => {
         type: DataTypes.STRING(128),
         allowNull: true,
       },
+      gbraid: {
+        type: DataTypes.STRING(255),
+        allowNull: true,
+      },
+      wbraid: {
+        type: DataTypes.STRING(255),
+        allowNull: true,
+      },
+      ga_client_id: {
+        type: DataTypes.STRING(191),
+        allowNull: true,
+      },
+      google_ads_customer_id: {
+        type: DataTypes.STRING(32),
+        allowNull: true,
+      },
+      google_ads_campaign_id: {
+        type: DataTypes.STRING(32),
+        allowNull: true,
+      },
       fbclid: {
         type: DataTypes.STRING(128),
         allowNull: true,
@@ -140,4 +160,3 @@ module.exports = (sequelize, DataTypes) => {
 
   return WhatsAppWebOrigin;
 };
-

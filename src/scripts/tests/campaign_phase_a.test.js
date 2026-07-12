@@ -131,6 +131,10 @@ function testConnectOnlyConflictRegression() {
     'Create must not reference update-only rows');
   assert.doesNotMatch(update, /updateManagedCampaignSpecsFromStrategy|ManagedCampaign\.update/,
     'Legacy strategy edits must not rewrite the managed campaign source of truth');
+  assert.doesNotMatch(update, /effectiveMode\s*===\s*'connect_only'[\s\S]{0,80}\?\s*'active'/,
+    'Editing a connect_only draft must not activate it without the readiness transition');
+  assert.match(update, /const currentStatus = normalizeStrategyStatus\(currentPayload\.status \|\| representative\.estado\)/,
+    'Strategy edits must preserve the current lifecycle status');
   assert.doesNotMatch(transition, /ManagedCampaign\.update/,
     'Legacy strategy lifecycle must not bypass managed campaign gates');
   assert.match(create, /provisionManagedCampaignsFromStrategy\(/,
@@ -186,13 +190,21 @@ function testCampaignScopeAndWritableModesRegression() {
   assert.match(source, /const CREATABLE_MODES = new Set\(\['connect_only', 'managed_service'\]\)/);
   assert.match(start, /if \(!CREATABLE_MODES\.has\(mode\)\)/,
     'Historical managed_self must not be accepted by new onboarding writes');
+  assert.match(start, /error:\s*'consent_readiness_pending'/,
+    'Every onboarding provider must pass the privacy readiness gate before start');
   assert.match(create, /if \(!CREATABLE_MODES\.has\(effectiveMode\)\)/,
     'Historical managed_self must not create new strategies');
 
   const customerScopeCheck = start.indexOf("customerScopeError.code = 'CUSTOMER_NOT_ASSIGNED_TO_SCOPE'");
-  const conversionEnsure = start.indexOf('ensureConversionActionsInternal({');
+  const conversionEnsure = start.indexOf('evaluateGoogleConversionOnboardingReadiness({');
   assert.ok(customerScopeCheck >= 0 && customerScopeCheck < conversionEnsure,
     'Requested Google Ads customers must be checked against scoped assignments before listing or creating conversion actions');
+
+  const transition = controllerSection(source, 'transitionMarketingStrategyStatus', 'createMarketingStrategy');
+  const consentGate = transition.indexOf("error: 'consent_readiness_pending'");
+  const googleGate = transition.indexOf('if (strategyPayloadUsesGoogleAds(strategyPayload))');
+  assert.ok(consentGate >= 0 && googleGate > consentGate,
+    'Consent readiness must gate Meta/web activation independently, before the optional Google gate');
 
   const scopedPixelLookup = start.indexOf('listMetaPixelsForScopeAdAccount({');
   const pixelScopeCheck = start.indexOf("pixelScopeError.code = 'PIXEL_NOT_ASSIGNED_TO_SCOPE'");
@@ -217,6 +229,10 @@ function testIntakeConfigScopeRegression() {
     'Intake configuration writes must be scope authorized');
   assert.match(upsert, /configuredLocationsWithinAllowedScope\(configuredLocations, allowedLocationClinicIds\)/,
     'Both root and nested config locations must be checked after payload merging');
+  assert.match(upsert, /rebuildTrustedSnippetVerification\(/,
+    'Client-provided verification summaries must be rebuilt from signed attestations');
+  assert.doesNotMatch(upsert, /verified:\s*!!body\.snippet_verification\.verified/,
+    'The intake upsert must not persist a client-forged verified flag');
   assert.match(clinicSecret, /requireIntakeConfigScopeAccess\(req, res, \{ clinicId, access: 'read' \}\)/,
     'Clinic HMAC secrets must be scope authorized');
   assert.match(groupSecret, /requireIntakeConfigScopeAccess\(req, res, \{ groupId, access: 'read' \}\)/,
@@ -501,6 +517,15 @@ async function testSafeHttpTargets() {
     'Runtime inspection must never re-enable localhost as an official asset host');
   assert.equal((verify.match(/maxRedirects:\s*0/g) || []).length, 2,
     'Both page HTML and runtime script requests must validate redirects manually');
+  assert.match(verify, /data-consent-mode-enabled/);
+  assert.match(verify, /data-consent-provider/);
+  assert.match(verify, /data-clinicaclick-consent-bootstrap/);
+  assert.match(verify, /cookieNoticeProviderMatches\(/,
+    'An external CMP must match the provider configured for the scope');
+  assert.match(verify, /verification_attestation:/,
+    'Successful verification must return a server-signed attestation');
+  assert.doesNotMatch(verify, /wp-consent-api/i,
+    'WP Consent API is not proof that Google Consent Mode is installed');
 }
 
 async function run() {

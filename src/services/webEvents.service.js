@@ -3,6 +3,7 @@
 const crypto = require('crypto');
 const { Op, QueryTypes } = require('sequelize');
 const db = require('../../models');
+const { extractGoogleLeadIdentity } = require('../lib/google-lead-routing');
 
 const {
   WebEvent,
@@ -139,6 +140,12 @@ async function recordWebEvent({ req, body, cfgRecord, clinicId, groupId, eventNa
   }
 
   const pageUrl = cleanString(eventSourceUrl || body?.page_url || body?.pageUrl || eventData.page_url || eventData.pageUrl, 1024);
+  const googleIdentity = extractGoogleLeadIdentity({
+    ...(body && typeof body === 'object' ? body : {}),
+    page_url: pageUrl,
+    custom_data: custom,
+    event_data: eventData,
+  });
   const occurredAt = parseDate(body?.event_time || body?.occurred_at || eventData.occurred_at || eventData.timestamp, new Date());
 
   const row = await WebEvent.create({
@@ -160,6 +167,11 @@ async function recordWebEvent({ req, body, cfgRecord, clinicId, groupId, eventNa
     utm_content: cleanString(body?.utm_content || custom.utm_content, 255),
     utm_term: cleanString(body?.utm_term || custom.utm_term, 255),
     gclid: cleanString(body?.gclid || custom.gclid, 255),
+    gbraid: cleanString(body?.gbraid || body?.gBraid || custom.gbraid, 255),
+    wbraid: cleanString(body?.wbraid || body?.wBraid || custom.wbraid, 255),
+    ga_client_id: cleanString(body?.ga_client_id || body?.gaClientId || body?.client_id || custom.ga_client_id || custom.client_id, 191),
+    google_ads_customer_id: cleanString(googleIdentity.customerId, 32),
+    google_ads_campaign_id: googleIdentity.campaignId,
     fbclid: cleanString(body?.fbclid || custom.fbclid, 255),
     ttclid: cleanString(body?.ttclid || custom.ttclid, 255),
     msclkid: cleanString(body?.msclkid || custom.msclkid, 255),

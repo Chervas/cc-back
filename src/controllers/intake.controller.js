@@ -26,7 +26,10 @@ const ClinicaHorario = db.ClinicaHorario;
 const WhatsAppWebOrigin = db.WhatsAppWebOrigin;
 const { enqueueInboundFormSubmissionResume } = require('../services/automationsV2Resume.service');
 const { sendMetaEvent, buildUserData: buildMetaUserData } = require('../services/metaCapi.service');
-const { maybeUploadGoogleConversion } = require('../services/googleAdsConversionUpload.service');
+const {
+  maybeUploadGoogleConversion,
+  normalizeGoogleConsent,
+} = require('../services/googleAdsConversionUpload.service');
 const webEventsService = require('../services/webEvents.service');
 const { getIO } = require('../services/socket.service');
 const jobRequestsService = require('../services/jobRequests.service');
@@ -51,11 +54,23 @@ const {
   resolveIntakeLocationVisibility,
 } = require('../lib/intakeLocations');
 const { detectLegacyJoinChat } = require('../lib/intake-legacy-chat');
+const { inspectSnippetRuntime } = require('../lib/intake-snippet-runtime');
+const {
+  buildVerificationConfigHash,
+  canonicalizeIntakeDomain,
+  canonicalizeIntakeDomains,
+  cookieNoticeProviderMatches,
+  issueVerificationAttestation,
+  verifyVerificationAttestation,
+} = require('../lib/intake-verification-attestation');
 const {
   configuredClinicIds,
   matchClinicByPageUrl,
 } = require('../lib/intake-page-clinic');
-const { resolveGoogleLeadRoute } = require('../lib/google-lead-routing');
+const {
+  resolveGoogleAdsCampaignId,
+  resolveGoogleLeadRoute,
+} = require('../lib/google-lead-routing');
 const {
   extractGoogleTagId,
   normalizeMetaAdsConfig,
@@ -747,10 +762,14 @@ const extractWhatsAppNumber = (asset) => {
 };
 const normalizeDomain = (domain) => {
   if (!domain || typeof domain !== 'string') return null;
-  const d = domain.trim().toLowerCase();
-  if (!d) return null;
-  // Evitar valores con punto final (p. ej. "example.com.")
-  return d.endsWith('.') ? d.slice(0, -1) : d;
+  const raw = domain.trim().toLowerCase();
+  if (!raw) return null;
+  if (raw === '*') return raw;
+  if (raw.startsWith('*.')) {
+    const root = canonicalizeIntakeDomain(raw.slice(2));
+    return root ? `*.${root}` : null;
+  }
+  return canonicalizeIntakeDomain(raw) || null;
 };
 const stripWww = (host) => (host && host.startsWith('www.') ? host.slice(4) : host);
 const isDomainAllowed = (allowlist, domain) => {
@@ -988,22 +1007,10 @@ const stableStringify = (obj) => {
   return `{${keys.map(k => `${JSON.stringify(k)}:${stableStringify(obj[k])}`).join(',')}}`;
 };
 
-const boolConsent = (value) => {
-  if (value === undefined || value === null || value === '') return null;
-  if (typeof value === 'boolean') return value;
-  const normalized = String(value).trim().toLowerCase();
-  if (['granted', 'grant', 'accepted', 'accept', 'yes', 'true', '1', 'optin', 'opt_in'].includes(normalized)) return true;
-  if (['denied', 'deny', 'rejected', 'reject', 'no', 'false', '0', 'optout', 'opt_out'].includes(normalized)) return false;
-  return null;
-};
-
 const normalizeMarketingConsent = (consent) => {
-  if (!consent || typeof consent !== 'object' || Array.isArray(consent)) return null;
-  const marketing = boolConsent(consent.marketing ?? consent.ad_storage ?? consent.adStorage);
-  const adUserData = boolConsent(consent.ad_user_data ?? consent.adUserData ?? marketing);
-  const adPersonalization = boolConsent(consent.ad_personalization ?? consent.adPersonalization ?? marketing);
-  if (marketing === false || adUserData === false || adPersonalization === false) return false;
-  if (marketing === true || adUserData === true || adPersonalization === true) return true;
+  const normalized = normalizeGoogleConsent(consent);
+  if (normalized === 'GRANTED') return true;
+  if (normalized === 'DENIED') return false;
   return null;
 };
 
@@ -1068,7 +1075,9 @@ async function dedupeAndCreateLead(leadPayload, rawPayload = {}, attributionStep
   };
 
   if (payload.external_source && payload.external_id) {
-    const existingExternal = await LeadIntake.findOne({ where: { external_source: payload.external_source, external_id: payload.external_id } });
+    const existingExternal = await LeadIntake.findOne({
+      where: { external_source: payload.external_source, external_id: payload.external_id, archived_at: null }
+    });
     if (existingExternal) {
       const err = new Error('Lead duplicado (external_id)');
       err.status = 409;
@@ -1078,7 +1087,7 @@ async function dedupeAndCreateLead(leadPayload, rawPayload = {}, attributionStep
   }
 
   if (payload.event_id) {
-    const existing = await LeadIntake.findOne({ where: { event_id: payload.event_id } });
+    const existing = await LeadIntake.findOne({ where: { event_id: payload.event_id, archived_at: null } });
     if (existing) {
       const err = new Error('Lead duplicado (event_id)');
       err.status = 409;
@@ -1089,6 +1098,7 @@ async function dedupeAndCreateLead(leadPayload, rawPayload = {}, attributionStep
 
   if (normalizedPhone || normalizedEmail) {
     const dedupeWhere = {
+      archived_at: null,
       created_at: { [Op.gte]: dedupeCutoff },
       [Op.or]: []
     };
@@ -1141,6 +1151,11 @@ exports.ingestLead = asyncHandler(async (req, res) => {
     utm_content,
     utm_term,
     gclid,
+    gbraid,
+    wbraid,
+    ga_client_id,
+    google_ads_customer_id,
+    google_ads_campaign_id,
     fbclid,
     ttclid,
     referrer,
@@ -1376,11 +1391,43 @@ exports.ingestLead = asyncHandler(async (req, res) => {
   const utmContent = coalesce(attribution.utm_content, utm_content);
   const utmTerm = coalesce(attribution.utm_term, utm_term);
   const gclidValue = coalesce(attribution.gclid, gclid);
+  const gbraidValue = coalesce(attribution.gbraid, gbraid, body.gBraid);
+  const wbraidValue = coalesce(attribution.wbraid, wbraid, body.wBraid);
+  const gaClientIdValue = coalesce(attribution.ga_client_id, attribution.client_id, ga_client_id, body.gaClientId, body.client_id);
+  const pageUrlValue = coalesce(attribution.page_url, page_url, body.pageUrl);
+  const landingUrlValue = coalesce(attribution.landing_url, landing_url, body.landingUrl);
+  const googleAdsCustomerIdValue = coalesce(
+    attribution.ccGadsCustomerId,
+    attribution.google_ads_customer_id,
+    attribution.googleAdsCustomerId,
+    attribution.cc_gads_customer_id,
+    google_ads_customer_id,
+    body.googleAdsCustomerId,
+    body.cc_gads_customer_id,
+    body.ccGadsCustomerId,
+    body.customer_id,
+    body.google_customer_id
+  );
+  const googleAdsCampaignIdValue = resolveGoogleAdsCampaignId({
+    ccCandidates: [
+      attribution.cc_gads_campaign_id,
+      body.cc_gads_campaign_id,
+    ],
+    canonicalCandidates: [
+      attribution.google_ads_campaign_id,
+      google_ads_campaign_id,
+      body.google_campaign_id,
+    ],
+    gadCandidates: [
+      attribution.gad_campaignid,
+      body.gad_campaignid,
+      body.gadCampaignId,
+    ],
+    urls: [pageUrlValue, landingUrlValue],
+  });
   const fbclidValue = coalesce(attribution.fbclid, fbclid);
   const ttclidValue = coalesce(attribution.ttclid, ttclid);
   const referrerValue = coalesce(attribution.referrer, referrer);
-  const pageUrlValue = coalesce(attribution.page_url, page_url);
-  const landingUrlValue = coalesce(attribution.landing_url, landing_url);
 
   const leadNombre = sanitizeText(coalesce(leadData.nombre, formLeadData.nombre, nombre));
   const leadEmail = coalesce(leadData.email, formLeadData.email, email);
@@ -1494,6 +1541,11 @@ exports.ingestLead = asyncHandler(async (req, res) => {
     utm_content: utmContent || null,
     utm_term: utmTerm || null,
     gclid: gclidValue || null,
+    gbraid: gbraidValue || null,
+    wbraid: wbraidValue || null,
+    ga_client_id: gaClientIdValue || null,
+    google_ads_customer_id: googleAdsCustomerIdValue || null,
+    google_ads_campaign_id: googleAdsCampaignIdValue || null,
     fbclid: fbclidValue || null,
     ttclid: ttclidValue || null,
     referrer: referrerValue || null,
@@ -1734,12 +1786,14 @@ exports.ingestLead = asyncHandler(async (req, res) => {
   try {
     const googleCustomData = {
       gclid: gclidValue || null,
-      gbraid: coalesce(attribution.gbraid, body.gbraid, body.gBraid) || null,
-      wbraid: coalesce(attribution.wbraid, body.wbraid, body.wBraid) || null,
+      gbraid: gbraidValue || null,
+      wbraid: wbraidValue || null,
+      client_id: gaClientIdValue || null,
       value: coalesce(body.value, body.conversion_value),
       currency: coalesce(body.currency, body.conversion_currency),
       conversion_time: coalesce(body.conversion_time, body.conversionDateTime, new Date()),
-      customer_id: coalesce(body.customer_id, body.customerId, body.google_customer_id),
+      customer_id: coalesce(googleAdsCustomerIdValue, body.customerId),
+      campaign_id: googleAdsCampaignIdValue || null,
       conversion_action: coalesce(body.conversion_action, body.conversionAction),
       conversion_action_id: coalesce(body.conversion_action_id, body.conversionActionId),
       send_to: coalesce(body.send_to, body.sendTo),
@@ -1759,7 +1813,8 @@ exports.ingestLead = asyncHandler(async (req, res) => {
       clinicId: clinicaIdParsed,
       groupId: grupoClinicaIdParsed,
       assignmentScope: effectiveTracking.google_ads?.config_source === 'group' ? 'group' : 'clinic',
-      allowUpload: allowLeadAdPlatformEvents
+      allowUpload: allowLeadAdPlatformEvents,
+      consentModeEnabled: leadConsentModeEnabled
     });
   } catch (adsErr) {
     console.warn('⚠️ Google Ads upload error (ingestLead):', adsErr.response?.data || adsErr.message || adsErr);
@@ -2226,7 +2281,9 @@ const defaultConfigPayload = (clinicId, groupId) => ({
     viewcontent_enabled: true,
     form_intercept_enabled: true,
     webevents_enabled: true,
-    consent_mode_enabled: false
+    consent_mode_enabled: false,
+    consent_provider: 'clinicaclick',
+    external_cmp_provider: 'complianz'
   },
   flow: DEFAULT_CHAT_FLOW,
   flows: null,
@@ -2427,6 +2484,15 @@ const getIntakeConfig = async (
     };
     payload.texts = { ...payload.texts, ...(cfg.texts || {}) };
     payload.snippet_verification = cfg.snippet_verification || null;
+    if (!includeAllLocations && payload.snippet_verification) {
+      // The public runtime needs feature flags, not reusable admin proofs.
+      const {
+        attestations_by_domain: _attestations,
+        attestation_config_hash: _configHash,
+        ...publicVerificationSummary
+      } = payload.snippet_verification;
+      payload.snippet_verification = publicVerificationSummary;
+    }
     payload.locations = cfg.locations || [];
     payload.config = cfg;
     payload.has_hmac = !!record.hmac_key;
@@ -2683,6 +2749,154 @@ exports.getIntakeConfigAdmin = asyncHandler(async (req, res) => {
   });
 });
 
+const snippetAttestationError = (reason, domain = null) => {
+  const error = new Error('La verificación de la web ya no es válida. Vuelve a comprobar los dominios antes de guardar.');
+  error.code = 'snippet_verification_attestation_invalid';
+  error.reason = reason || 'attestation_invalid';
+  error.domain = domain || null;
+  return error;
+};
+
+const positiveSnippetVerificationClaim = (verification) => {
+  if (!verification || typeof verification !== 'object' || Array.isArray(verification)) return false;
+  return [
+    'verified',
+    'runtime_compatible',
+    'consent_mode_detected',
+    'cookie_notice_detected',
+    'google_consent_mode_detected',
+  ].some((key) => verification[key] === true)
+    || [
+      'domains',
+      'runtime_compatible_domains',
+      'consent_mode_domains',
+      'cookie_notice_domains',
+      'google_consent_mode_domains',
+    ].some((key) => Array.isArray(verification[key]) && verification[key].length > 0);
+};
+
+const rebuildTrustedSnippetVerification = ({
+  rawVerification,
+  scopeType,
+  scopeId,
+  domains,
+  config,
+  hmacKey,
+  rejectInvalid,
+}) => {
+  const source = rawVerification && typeof rawVerification === 'object' && !Array.isArray(rawVerification)
+    ? rawVerification
+    : {};
+  const rawAttestations = source.attestations_by_domain
+    && typeof source.attestations_by_domain === 'object'
+    && !Array.isArray(source.attestations_by_domain)
+    ? source.attestations_by_domain
+    : {};
+  if (rejectInvalid && Object.keys(rawAttestations).length === 0 && positiveSnippetVerificationClaim(source)) {
+    throw snippetAttestationError('attestation_missing');
+  }
+
+  const configuredDomains = canonicalizeIntakeDomains(domains);
+  const configuredDomainSet = new Set(configuredDomains);
+  const configHash = buildVerificationConfigHash({
+    scopeType,
+    scopeId,
+    domains,
+    config,
+    hmacKey,
+  });
+  const validByDomain = new Map();
+
+  for (const [rawDomain, rawToken] of Object.entries(rawAttestations)) {
+    const domain = canonicalizeIntakeDomain(rawDomain);
+    const token = typeof rawToken === 'string' ? rawToken.trim() : '';
+    if (!domain || !token || !configuredDomainSet.has(domain) || validByDomain.has(domain)) {
+      if (rejectInvalid) {
+        throw snippetAttestationError(
+          !configuredDomainSet.has(domain) ? 'attestation_domain_not_configured' : 'attestation_malformed',
+          domain || rawDomain,
+        );
+      }
+      continue;
+    }
+    const verified = verifyVerificationAttestation(token, {
+      scopeType,
+      scopeId,
+      domain,
+      configHash,
+    });
+    if (!verified.valid) {
+      if (rejectInvalid) throw snippetAttestationError(verified.reason, domain);
+      continue;
+    }
+    validByDomain.set(domain, { token, claims: verified.claims });
+  }
+
+  const attestationsByDomain = {};
+  const expiresByDomain = {};
+  const runtimeVersionsByDomain = {};
+  const cookieProvidersByDomain = {};
+  const legalPagesByDomain = {};
+  const checkedUrls = {};
+  const installedDomains = [];
+  const runtimeDomains = [];
+  const consentDomains = [];
+  const cookieDomains = [];
+  const googleConsentDomains = [];
+  const legalDomains = [];
+  const issuedAtValues = [];
+
+  for (const domain of configuredDomains) {
+    const item = validByDomain.get(domain);
+    if (!item) continue;
+    const { token, claims } = item;
+    const signals = claims.signals || {};
+    attestationsByDomain[domain] = token;
+    expiresByDomain[domain] = new Date(Number(claims.exp) * 1000).toISOString();
+    issuedAtValues.push(Number(claims.iat));
+    if (signals.installed === true) installedDomains.push(domain);
+    if (signals.runtime_compatible === true) runtimeDomains.push(domain);
+    if (signals.consent_mode_detected === true) consentDomains.push(domain);
+    if (signals.cookie_notice_detected === true) cookieDomains.push(domain);
+    if (signals.google_consent_mode_detected === true) googleConsentDomains.push(domain);
+    if (signals.legal_urls_detected === true) legalDomains.push(domain);
+    runtimeVersionsByDomain[domain] = signals.runtime_version || null;
+    cookieProvidersByDomain[domain] = signals.cookie_notice_provider || null;
+    legalPagesByDomain[domain] = signals.legal_pages || {};
+    checkedUrls[domain] = signals.checked_url || null;
+  }
+
+  const everyDomain = (covered) => configuredDomains.length > 0
+    && configuredDomains.every((domain) => covered.includes(domain));
+  const providers = Array.from(new Set(
+    Object.values(cookieProvidersByDomain).filter(Boolean),
+  ));
+  const latestIssuedAt = issuedAtValues.length > 0 ? Math.max(...issuedAtValues) : null;
+
+  return {
+    verified: everyDomain(installedDomains),
+    verified_at: latestIssuedAt ? new Date(latestIssuedAt * 1000).toISOString() : null,
+    domains: installedDomains,
+    runtime_compatible: everyDomain(runtimeDomains),
+    runtime_compatible_domains: runtimeDomains,
+    runtime_versions_by_domain: runtimeVersionsByDomain,
+    consent_mode_detected: everyDomain(consentDomains),
+    consent_mode_domains: consentDomains,
+    cookie_notice_detected: everyDomain(cookieDomains),
+    cookie_notice_provider: providers.join(', ') || null,
+    cookie_notice_domains: cookieDomains,
+    cookie_notice_providers_by_domain: cookieProvidersByDomain,
+    google_consent_mode_detected: everyDomain(googleConsentDomains),
+    google_consent_mode_domains: googleConsentDomains,
+    legal_urls_detected: everyDomain(legalDomains),
+    legal_pages_by_domain: legalPagesByDomain,
+    checked_urls: checkedUrls,
+    attestations_by_domain: attestationsByDomain,
+    attestation_expires_at_by_domain: expiresByDomain,
+    attestation_config_hash: configHash,
+  };
+};
+
 exports.upsertIntakeConfig = asyncHandler(async (req, res) => {
   const clinicId = parseInteger(req.params.clinicId);
   const groupId = parseInteger(req.body?.group_id);
@@ -2752,24 +2966,6 @@ exports.upsertIntakeConfig = asyncHandler(async (req, res) => {
       ...(locations ? { locations } : {})
     };
   }
-  if (body.snippet_verification && typeof body.snippet_verification === 'object' && !Array.isArray(body.snippet_verification)) {
-    config.snippet_verification = {
-      verified: !!body.snippet_verification.verified,
-      verified_at: body.snippet_verification.verified_at || new Date().toISOString(),
-      domains: Array.isArray(body.snippet_verification.domains) ? body.snippet_verification.domains : [],
-      consent_mode_detected: !!body.snippet_verification.consent_mode_detected,
-      consent_mode_domains: Array.isArray(body.snippet_verification.consent_mode_domains)
-        ? body.snippet_verification.consent_mode_domains
-        : [],
-      cookie_notice_detected: !!body.snippet_verification.cookie_notice_detected,
-      cookie_notice_provider: body.snippet_verification.cookie_notice_provider || null,
-      google_consent_mode_detected: !!body.snippet_verification.google_consent_mode_detected,
-      checked_urls: body.snippet_verification.checked_urls && typeof body.snippet_verification.checked_urls === 'object'
-        ? body.snippet_verification.checked_urls
-        : {}
-    };
-  }
-
   if (Object.prototype.hasOwnProperty.call(config, 'locations') && !Array.isArray(config.locations)) {
     return res.status(400).json({ success: false, error: 'locations_invalid' });
   }
@@ -2803,6 +2999,42 @@ exports.upsertIntakeConfig = asyncHandler(async (req, res) => {
     }
   }
 
+  const hasRootVerification = Object.prototype.hasOwnProperty.call(body, 'snippet_verification');
+  const hasNestedVerification = Boolean(
+    body.config
+      && typeof body.config === 'object'
+      && !Array.isArray(body.config)
+      && Object.prototype.hasOwnProperty.call(body.config, 'snippet_verification')
+  );
+  const submittedVerification = hasRootVerification
+    ? body.snippet_verification
+    : (hasNestedVerification ? body.config.snippet_verification : null);
+  const verificationSource = hasRootVerification || hasNestedVerification
+    ? submittedVerification
+    : existingConfig.snippet_verification;
+  try {
+    config.snippet_verification = rebuildTrustedSnippetVerification({
+      rawVerification: verificationSource,
+      scopeType: scope,
+      scopeId: scope === 'group' ? groupId : clinicId,
+      domains,
+      config,
+      hmacKey: nextHmacKey,
+      rejectInvalid: hasRootVerification || hasNestedVerification,
+    });
+  } catch (error) {
+    if (error?.code === 'snippet_verification_attestation_invalid') {
+      return res.status(400).json({
+        success: false,
+        error: error.code,
+        reason: error.reason,
+        domain: error.domain,
+        message: error.message,
+      });
+    }
+    throw error;
+  }
+
   await IntakeConfig.upsert({
     clinic_id: clinicId || null,
     group_id: groupId || null,
@@ -2812,7 +3044,7 @@ exports.upsertIntakeConfig = asyncHandler(async (req, res) => {
     hmac_key: nextHmacKey
   });
 
-  res.json({ success: true });
+  res.json({ success: true, snippet_verification: config.snippet_verification });
 });
 
 // ======================================
@@ -2871,6 +3103,9 @@ exports.verifySnippetInstalled = asyncHandler(async (req, res) => {
   if (clinicId === null && groupId === null) {
     return res.status(400).json({ installed: false, details: 'clinic_id o group_id requerido' });
   }
+  if (clinicId !== null && groupId !== null) {
+    return res.status(400).json({ installed: false, details: 'El scope de verificación es ambiguo' });
+  }
   if (!(await requireIntakeConfigScopeAccess(req, res, { clinicId, groupId, access: 'read' }))) return;
 
   let record = null;
@@ -2895,6 +3130,16 @@ exports.verifySnippetInstalled = asyncHandler(async (req, res) => {
   const scope = groupId !== null ? 'group' : 'clinic';
   const expectedId = scope === 'group' ? (record.group_id || groupId) : (record.clinic_id || clinicId);
   const expectedAttr = scope === 'group' ? 'data-group-id' : 'data-clinic-id';
+  const recordConfig = record?.config && typeof record.config === 'object' && !Array.isArray(record.config)
+    ? record.config
+    : {};
+  const recordFeatures = recordConfig.features && typeof recordConfig.features === 'object'
+    && !Array.isArray(recordConfig.features)
+    ? recordConfig.features
+    : {};
+  const configuredConsentEnabled = recordFeatures.consent_mode_enabled === true;
+  const configuredConsentProvider = String(recordFeatures.consent_provider || '').trim().toLowerCase();
+  const configuredExternalCmpProvider = String(recordFeatures.external_cmp_provider || '').trim().toLowerCase();
 
   // Construir URLs candidatas a verificar.
   // Si el usuario pasa una URL completa, la respetamos (pero debe coincidir el host allowlisted).
@@ -2983,6 +3228,73 @@ exports.verifySnippetInstalled = asyncHandler(async (req, res) => {
     return { html: null, finalUrl: null, lastError };
   };
 
+  const verifyConfiguredLegalPages = async (checkedUrl) => {
+    const config = record?.config && typeof record.config === 'object' && !Array.isArray(record.config)
+      ? record.config
+      : {};
+    const texts = config?.texts && typeof config.texts === 'object' && !Array.isArray(config.texts)
+      ? config.texts
+      : {};
+    const definitions = {
+      legal: texts.legal_url || texts.terms_url || null,
+      cookies: texts.cookies_url || null,
+      privacy: texts.privacy_url || null,
+    };
+    const baseUrl = checkedUrl || `https://${stripWww(domain)}/`;
+    const pages = {};
+
+    for (const [key, configuredValue] of Object.entries(definitions)) {
+      const raw = String(configuredValue || '').trim();
+      if (!raw) {
+        pages[key] = { configured: false, reachable: false, url: null, reason: 'missing_url' };
+        continue;
+      }
+      let absoluteUrl;
+      try {
+        absoluteUrl = new URL(raw, baseUrl).toString();
+        const host = normalizeDomain(new URL(absoluteUrl).hostname);
+        if (!host || !isDomainAllowed(allowlist, host)) {
+          pages[key] = { configured: true, reachable: false, url: absoluteUrl, reason: 'domain_not_allowed' };
+          continue;
+        }
+      } catch (_error) {
+        pages[key] = { configured: true, reachable: false, url: raw, reason: 'invalid_url' };
+        continue;
+      }
+
+      try {
+        const fetched = await fetchSafeHtml(absoluteUrl, false);
+        pages[key] = {
+          configured: true,
+          reachable: true,
+          url: absoluteUrl,
+          checked_url: fetched.finalUrl || absoluteUrl,
+          reason: null,
+        };
+      } catch (error) {
+        pages[key] = {
+          configured: true,
+          reachable: false,
+          url: absoluteUrl,
+          reason: 'unreachable',
+          details: truncateString(error?.message || 'No se pudo abrir la URL', 255),
+        };
+      }
+    }
+
+    const values = Object.values(pages);
+    return {
+      legal_pages: pages,
+      legal_urls_detected: values.every((page) => page.configured && page.reachable),
+      missing_legal_urls: Object.entries(pages)
+        .filter(([, page]) => !page.configured)
+        .map(([key]) => key),
+      unreachable_legal_urls: Object.entries(pages)
+        .filter(([, page]) => page.configured && !page.reachable)
+        .map(([key]) => key),
+    };
+  };
+
   const withCacheBust = (url) => {
     try {
       const u = new URL(url);
@@ -2991,24 +3303,6 @@ exports.verifySnippetInstalled = asyncHandler(async (req, res) => {
     } catch {
       return url;
     }
-  };
-
-  const readScriptAttr = (tag, attr) => {
-    const re = new RegExp(`${attr}\\s*=\\s*['"]([^'"]+)['"]`, 'i');
-    return tag.match(re)?.[1] || null;
-  };
-
-  const versionAtLeast = (actual, minimum) => {
-    if (!actual) return false;
-    const a = String(actual).split('.').map((part) => parseInt(part, 10) || 0);
-    const b = String(minimum).split('.').map((part) => parseInt(part, 10) || 0);
-    for (let i = 0; i < Math.max(a.length, b.length); i += 1) {
-      const av = a[i] || 0;
-      const bv = b[i] || 0;
-      if (av > bv) return true;
-      if (av < bv) return false;
-    }
-    return true;
   };
 
   const isClinicaClickAssetHost = (src, checkedUrl) => {
@@ -3029,6 +3323,7 @@ exports.verifySnippetInstalled = asyncHandler(async (req, res) => {
     try {
       let currentUrl = new URL(src, checkedUrl || `https://${domain}/`).toString();
       let body = '';
+      let finalUrl = null;
       for (let redirectCount = 0; redirectCount <= 3; redirectCount += 1) {
         const safeTarget = await resolveSafeHttpTarget(currentUrl);
         if (!isClinicaClickAssetHost(safeTarget.url, safeTarget.url)) {
@@ -3060,6 +3355,7 @@ exports.verifySnippetInstalled = asyncHandler(async (req, res) => {
             continue;
           }
           body = typeof resp.data === 'string' ? resp.data : '';
+          finalUrl = safeTarget.url;
           break;
         } finally {
           safeTarget.httpAgent.destroy();
@@ -3067,14 +3363,7 @@ exports.verifySnippetInstalled = asyncHandler(async (req, res) => {
         }
       }
       if (!body) return null;
-      const version =
-        body.match(/ClinicaClick\s+Intake\s+Snippet\s+v([0-9]+(?:\.[0-9]+){0,3})/i)?.[1] ||
-        body.match(/\bversion\s*:\s*['"]([0-9]+(?:\.[0-9]+){0,3})['"]/i)?.[1] ||
-        null;
-      const hasConsentRuntime =
-        /consent_mode_enabled/i.test(body) &&
-        (/gtag\s*\(\s*['"]consent['"]/i.test(body) || /Consent\s+Mode/i.test(body));
-      return { version, hasConsentRuntime };
+      return { body, finalUrl: finalUrl || currentUrl };
     } catch (err) {
       console.warn('[intake] No se pudo inspeccionar runtime del snippet', src, err?.message || err);
       return null;
@@ -3098,10 +3387,11 @@ exports.verifySnippetInstalled = asyncHandler(async (req, res) => {
     add('Cookie Notice', /cookie-notice|cn-notice/i);
     add('GDPR Cookie Compliance', /moove_gdpr|gdpr-cookie-compliance/i);
 
+    // Detect an actual default command in served HTML. WP Consent API merely
+    // exposes a category API and is not proof that Google Consent Mode is
+    // configured or that a default-denied command runs before advertising.
     const googleConsentModeDetected =
-      /gtag\s*\(\s*['"]consent['"]\s*,\s*['"]default['"]/i.test(html) ||
-      /_googlesitekitConsents/i.test(html) ||
-      /wp-consent-api/i.test(html);
+      /(?:\b|\.)gtag\s*\(\s*['"]consent['"]\s*,\s*['"]default['"]/i.test(html);
 
     // JoinChat es el chat heredado que estamos sustituyendo por el runtime de
     // ClinicaClick. Informarlo en la misma verificacion permite migrar en dos
@@ -3111,6 +3401,7 @@ exports.verifySnippetInstalled = asyncHandler(async (req, res) => {
     return {
       cookie_notice_detected: providers.length > 0,
       cookie_notice_provider: providers.join(', ') || null,
+      cookie_notice_providers: providers,
       google_consent_mode_detected: googleConsentModeDetected,
       legacy_chat_detected: joinChatDetected,
       legacy_chat_provider: joinChatDetected ? 'JoinChat' : null,
@@ -3118,38 +3409,12 @@ exports.verifySnippetInstalled = asyncHandler(async (req, res) => {
   };
 
   const getSnippetRuntimeInfo = async (tags, checkedUrl) => {
-    let usesLoader = false;
-    let runtimeVersion = null;
-    let consentModeDetected = false;
-
-    for (const tag of tags) {
-      const src = readScriptAttr(tag, 'src') || '';
-      if (/loader\.js/i.test(src)) {
-        usesLoader = true;
-        consentModeDetected = true;
-      }
-      if (/intake\.js/i.test(src)) {
-        const version = src.match(/[?&]v=([0-9]+(?:\.[0-9]+){0,3})/i)?.[1] || null;
-        runtimeVersion = version || runtimeVersion;
-        if (versionAtLeast(version, '3.2.1')) {
-          consentModeDetected = true;
-        }
-        if (!consentModeDetected || !runtimeVersion) {
-          const scriptInfo = await fetchSnippetScriptInfo(src, checkedUrl);
-          if (scriptInfo?.version) {
-            runtimeVersion = scriptInfo.version;
-          }
-          if (
-            scriptInfo?.hasConsentRuntime ||
-            versionAtLeast(scriptInfo?.version, '3.2.1')
-          ) {
-            consentModeDetected = true;
-          }
-        }
-      }
-    }
-
-    return { uses_loader: usesLoader, runtime_version: runtimeVersion, consent_mode_detected: consentModeDetected };
+    return inspectSnippetRuntime({
+      tags,
+      checkedUrl,
+      fetchScript: fetchSnippetScriptInfo,
+      isAllowedAssetUrl: isClinicaClickAssetHost,
+    });
   };
 
   const evaluateSnippetHtml = async (htmlToCheck, checkedUrl) => {
@@ -3185,6 +3450,38 @@ exports.verifySnippetInstalled = asyncHandler(async (req, res) => {
     }
 
     const runtimeInfo = await getSnippetRuntimeInfo(tagsForScope, checkedUrl);
+    const consentAttributesDetected = tagsForScope.some((tag) => {
+      const enabled = tag.match(/data-consent-mode-enabled\s*=\s*['"]([^'"]+)['"]/i)?.[1];
+      const provider = tag.match(/data-consent-provider\s*=\s*['"]([^'"]+)['"]/i)?.[1];
+      return String(enabled || '').trim().toLowerCase() === 'true'
+        && String(provider || '').trim().toLowerCase() === configuredConsentProvider;
+    });
+    const clinicaclickBootstrapDetected =
+      /data-clinicaclick-consent-bootstrap\s*=\s*['"][^'"]+['"]/i.test(htmlToCheck)
+      && /ClinicaClickConsentBootstrap/i.test(htmlToCheck)
+      && /(?:\b|\.)gtag\s*\(\s*['"]consent['"]\s*,\s*['"]default['"]/i.test(htmlToCheck);
+    const providerBootstrapDetected = configuredConsentProvider === 'clinicaclick'
+      ? clinicaclickBootstrapDetected
+      : (
+          configuredConsentProvider === 'external_cmp'
+          && externalCookieNoticeInfo.cookie_notice_detected === true
+          && cookieNoticeProviderMatches(
+            externalCookieNoticeInfo.cookie_notice_providers,
+            configuredExternalCmpProvider,
+          )
+          && externalCookieNoticeInfo.google_consent_mode_detected === true
+        );
+    const consentModeDetected = configuredConsentEnabled
+      && ['clinicaclick', 'external_cmp'].includes(configuredConsentProvider)
+      && runtimeInfo.runtime_compatible === true
+      && consentAttributesDetected
+      && providerBootstrapDetected;
+    const detectedRuntime = {
+      ...runtimeInfo,
+      consent_attributes_detected: consentAttributesDetected,
+      consent_bootstrap_detected: providerBootstrapDetected,
+      consent_mode_detected: consentModeDetected,
+    };
 
     // Si existe HMAC en backend, aceptar cualquier tag del scope que tenga la clave vigente.
     // Esto evita falsos negativos cuando queda un plugin/snippet antiguo activo además del nuevo.
@@ -3196,7 +3493,7 @@ exports.verifySnippetInstalled = asyncHandler(async (req, res) => {
       });
 
       if (hmacKeys.includes(expectedHmac)) {
-        return { installed: true, checked_url: checkedUrl, ...runtimeInfo, ...externalCookieNoticeInfo };
+        return { installed: true, checked_url: checkedUrl, ...detectedRuntime, ...externalCookieNoticeInfo, consent_mode_detected: consentModeDetected };
       }
 
       if (hmacKeys.every((key) => !key)) {
@@ -3218,7 +3515,7 @@ exports.verifySnippetInstalled = asyncHandler(async (req, res) => {
       };
     }
 
-    return { installed: true, checked_url: checkedUrl, ...runtimeInfo, ...externalCookieNoticeInfo };
+    return { installed: true, checked_url: checkedUrl, ...detectedRuntime, ...externalCookieNoticeInfo, consent_mode_detected: consentModeDetected };
   };
 
   const primaryFetch = await fetchFirstHtml(uniqueCandidates, false);
@@ -3232,18 +3529,44 @@ exports.verifySnippetInstalled = asyncHandler(async (req, res) => {
   }
 
   const primaryEvaluation = await evaluateSnippetHtml(primaryFetch.html, primaryFetch.finalUrl);
+  const legalPageVerification = await verifyConfiguredLegalPages(
+    primaryEvaluation.checked_url || primaryFetch.finalUrl
+  );
   if (primaryEvaluation.installed) {
+    const configHash = buildVerificationConfigHash({
+      scopeType: scope,
+      scopeId: expectedId,
+      domains: record.domains,
+      config: recordConfig,
+      hmacKey: record.hmac_key,
+    });
+    const attestation = issueVerificationAttestation({
+      scopeType: scope,
+      scopeId: expectedId,
+      domain,
+      configHash,
+      signals: {
+        ...primaryEvaluation,
+        ...legalPageVerification,
+      },
+    });
     return res.json({
       installed: true,
       checked_url: primaryEvaluation.checked_url,
       consent_mode_detected: !!primaryEvaluation.consent_mode_detected,
       uses_loader: !!primaryEvaluation.uses_loader,
       runtime_version: primaryEvaluation.runtime_version || null,
+      runtime_declared_version: primaryEvaluation.runtime_declared_version || null,
+      runtime_compatible: !!primaryEvaluation.runtime_compatible,
       cookie_notice_detected: !!primaryEvaluation.cookie_notice_detected,
       cookie_notice_provider: primaryEvaluation.cookie_notice_provider || null,
       google_consent_mode_detected: !!primaryEvaluation.google_consent_mode_detected,
       legacy_chat_detected: !!primaryEvaluation.legacy_chat_detected,
       legacy_chat_provider: primaryEvaluation.legacy_chat_provider || null,
+      ...legalPageVerification,
+      verification_attestation: attestation.token,
+      verification_attestation_expires_at: attestation.expiresAt,
+      verification_attestation_error: attestation.reason,
     });
   }
 
@@ -3260,17 +3583,20 @@ exports.verifySnippetInstalled = asyncHandler(async (req, res) => {
         consent_mode_detected: !!bypassEvaluation.consent_mode_detected,
         uses_loader: !!bypassEvaluation.uses_loader,
         runtime_version: bypassEvaluation.runtime_version || null,
+        runtime_declared_version: bypassEvaluation.runtime_declared_version || null,
+        runtime_compatible: !!bypassEvaluation.runtime_compatible,
         cookie_notice_detected: !!bypassEvaluation.cookie_notice_detected,
         cookie_notice_provider: bypassEvaluation.cookie_notice_provider || null,
         google_consent_mode_detected: !!bypassEvaluation.google_consent_mode_detected,
         legacy_chat_detected: !!bypassEvaluation.legacy_chat_detected,
         legacy_chat_provider: bypassEvaluation.legacy_chat_provider || null,
+        ...legalPageVerification,
         details: 'La web devuelve el snippet correcto al saltar caché, pero la página normal sigue sirviendo una versión antigua o sin HMAC. Purga la caché de WordPress, del hosting o de la CDN y vuelve a verificar.'
       });
     }
   }
 
-  return res.json(primaryEvaluation);
+  return res.json({ ...primaryEvaluation, ...legalPageVerification });
 });
 
 // ===========================
@@ -3328,6 +3654,12 @@ exports.registerWhatsappOrigin = asyncHandler(async (req, res) => {
   let clinicIdParsed = parseInteger(coalesce(body.clinic_id, body.clinica_id, body.clinicId));
   let groupIdParsed = parseInteger(coalesce(body.group_id, body.grupo_clinica_id, body.groupId));
   const pageUrl = truncateString(coalesce(body.page_url, body.pageUrl), 1024);
+  const googleAdsCampaignId = resolveGoogleAdsCampaignId({
+    ccCandidates: [body.cc_gads_campaign_id],
+    canonicalCandidates: [body.google_ads_campaign_id, body.google_campaign_id],
+    gadCandidates: [body.gad_campaignid, body.gadCampaignId],
+    urls: [pageUrl, body.landing_url, body.landingUrl],
+  });
   const derivedDomain = getHostnameFromUrl(pageUrl || '');
   const domain = normalizeDomain(coalesce(body.domain, derivedDomain));
   if (domain && !/^[a-z0-9.-]+$/.test(domain)) {
@@ -3415,6 +3747,11 @@ exports.registerWhatsappOrigin = asyncHandler(async (req, res) => {
     utm_content: truncateString(body.utm_content, 128),
     utm_term: truncateString(body.utm_term, 128),
     gclid: truncateString(body.gclid, 128),
+    gbraid: truncateString(body.gbraid || body.gBraid, 255),
+    wbraid: truncateString(body.wbraid || body.wBraid, 255),
+    ga_client_id: truncateString(body.ga_client_id || body.gaClientId || body.client_id, 191),
+    google_ads_customer_id: truncateString(body.google_ads_customer_id || body.cc_gads_customer_id, 32),
+    google_ads_campaign_id: googleAdsCampaignId,
     fbclid: truncateString(body.fbclid, 128),
     ttclid: truncateString(body.ttclid, 128),
     event_id: truncateString(req.headers[EVENT_ID_HEADER] || body.event_id || body.eventId, 128),
@@ -3484,6 +3821,38 @@ exports.receiveIntakeEvent = asyncHandler(async (req, res) => {
   if (body.fbclid && custom_data.fbclid == null) custom_data.fbclid = body.fbclid;
   if (body.value != null && custom_data.value == null) custom_data.value = body.value;
   if (body.currency && custom_data.currency == null) custom_data.currency = body.currency;
+  const googleAdsCampaignId = resolveGoogleAdsCampaignId({
+    ccCandidates: [
+      body.cc_gads_campaign_id,
+      customDataFromBody.cc_gads_campaign_id,
+      eventDataFromBody.cc_gads_campaign_id,
+    ],
+    canonicalCandidates: [
+      body.google_ads_campaign_id,
+      body.google_campaign_id,
+      customDataFromBody.google_ads_campaign_id,
+      customDataFromBody.google_campaign_id,
+      customDataFromBody.campaign_id,
+      eventDataFromBody.google_ads_campaign_id,
+    ],
+    gadCandidates: [
+      body.gad_campaignid,
+      body.gadCampaignId,
+      customDataFromBody.gad_campaignid,
+      eventDataFromBody.gad_campaignid,
+    ],
+    urls: [
+      eventSourceUrl,
+      body.landing_url,
+      body.landingUrl,
+      eventDataFromBody.landing_url,
+      eventDataFromBody.landingUrl,
+    ],
+  });
+  if (googleAdsCampaignId) {
+    custom_data.campaign_id = googleAdsCampaignId;
+    custom_data.google_ads_campaign_id = googleAdsCampaignId;
+  }
 
   const userDataFromBody =
     body.user_data && typeof body.user_data === 'object' && !Array.isArray(body.user_data) ? body.user_data : {};
@@ -3665,7 +4034,8 @@ exports.receiveIntakeEvent = asyncHandler(async (req, res) => {
       clinicId: clinicIdParsed,
       groupId: groupIdParsed,
       assignmentScope: effectiveTracking.google_ads?.config_source === 'group' ? 'group' : 'clinic',
-      allowUpload: allowAdPlatformEvents
+      allowUpload: allowAdPlatformEvents,
+      consentModeEnabled
     });
   } catch (adsErr) {
     console.warn('⚠️ Google Ads upload error (events):', adsErr.response?.data || adsErr.message || adsErr);
@@ -3925,6 +4295,8 @@ const buildLeadListPayload = async (query = {}) => {
   } = query;
 
   const where = {};
+  const includeArchived = ['1', 'true', 'yes'].includes(String(query.includeArchived || query.include_archived || '').toLowerCase());
+  if (!includeArchived) where.archived_at = null;
   const clinicIdRaw = clinicId || query.clinica_id;
   const groupIdRaw = groupId || query.grupo_clinica_id;
   const clinicIdsParsed = parseIntegerList(clinicIdRaw);
@@ -4369,6 +4741,8 @@ exports.getLeadStats = asyncHandler(async (req, res) => {
   } = req.query;
 
   const where = {};
+  const includeArchived = ['1', 'true', 'yes'].includes(String(req.query.includeArchived || req.query.include_archived || '').toLowerCase());
+  if (!includeArchived) where.archived_at = null;
   const clinicIdRaw = clinicId || req.query.clinica_id;
   const groupIdRaw = groupId || req.query.grupo_clinica_id;
   const clinicIdsParsed = parseIntegerList(clinicIdRaw);
