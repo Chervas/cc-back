@@ -1,5 +1,10 @@
 'use strict';
 const axios = require('axios');
+const META_PROVIDER_HTTP_TIMEOUT_MS = Math.max(
+    1000,
+    Number(process.env.META_PROVIDER_HTTP_TIMEOUT_MS || process.env.SYNC_PROVIDER_HTTP_TIMEOUT_MS || 30000) || 30000
+);
+const metaHttp = axios.create({ timeout: META_PROVIDER_HTTP_TIMEOUT_MS });
 // ✅ Importar cliente Meta a nivel global para evitar "metaGet is not defined"
 const { metaGet } = require('../lib/metaClient');
 const { buildClinicMatcher } = require('../lib/clinicAttribution');
@@ -669,7 +674,7 @@ async function syncFacebookPageMetrics(asset, accessToken, startDate, endDate) {
         }
 
         // Obtener el número de seguidores actuales de la página
-        const metricsResponse = await axios.get(`${META_API_BASE_URL}/${asset.metaAssetId}`, {
+        const metricsResponse = await metaHttp.get(`${META_API_BASE_URL}/${asset.metaAssetId}`, {
             params: {
                 fields: 'fan_count',
                 access_token: tokenForPage
@@ -736,7 +741,7 @@ async function syncFacebookPageMetrics(asset, accessToken, startDate, endDate) {
 
             // 1) Intentar orgánico oficial
             try {
-                const reachResp = await axios.get(`${META_API_BASE_URL}/${asset.metaAssetId}/insights`, {
+                const reachResp = await metaHttp.get(`${META_API_BASE_URL}/${asset.metaAssetId}/insights`, {
                     params: { ...paramsBase, metric: 'page_impressions_organic_unique' }
                 });
                 valuesOrganic = reachResp.data?.data?.[0]?.values || [];
@@ -751,10 +756,10 @@ async function syncFacebookPageMetrics(asset, accessToken, startDate, endDate) {
                 usedApproximation = true;
                 try {
                     // 2) Aproximación: total_unique - paid_unique
-                    const totalResp = await axios.get(`${META_API_BASE_URL}/${asset.metaAssetId}/insights`, {
+                    const totalResp = await metaHttp.get(`${META_API_BASE_URL}/${asset.metaAssetId}/insights`, {
                         params: { ...paramsBase, metric: 'page_impressions_unique' }
                     });
-                    const paidResp = await axios.get(`${META_API_BASE_URL}/${asset.metaAssetId}/insights`, {
+                    const paidResp = await metaHttp.get(`${META_API_BASE_URL}/${asset.metaAssetId}/insights`, {
                         params: { ...paramsBase, metric: 'page_impressions_paid_unique' }
                     });
                     const totalVals = totalResp.data?.data?.[0]?.values || [];
@@ -795,7 +800,7 @@ async function syncFacebookPageMetrics(asset, accessToken, startDate, endDate) {
 
             // 1.b Guardar alcance total único (reach_total) por día: page_impressions_unique
             try {
-                const totalResp = await axios.get(`${META_API_BASE_URL}/${asset.metaAssetId}/insights`, {
+                const totalResp = await metaHttp.get(`${META_API_BASE_URL}/${asset.metaAssetId}/insights`, {
                     params: { ...paramsBase, metric: 'page_impressions_unique' }
                 });
                 const totalVals = totalResp.data?.data?.[0]?.values || [];
@@ -829,7 +834,7 @@ async function syncFacebookPageMetrics(asset, accessToken, startDate, endDate) {
                     // A partir del 15/11/2025, Meta indica usar "views"
                     metricName = 'views';
                 }
-                const imprResp = await axios.get(`${META_API_BASE_URL}/${asset.metaAssetId}/insights`, {
+                const imprResp = await metaHttp.get(`${META_API_BASE_URL}/${asset.metaAssetId}/insights`, {
                     params: { ...paramsBase, metric: metricName }
                 });
                 const imprVals = imprResp.data?.data?.[0]?.values || [];
@@ -856,7 +861,7 @@ async function syncFacebookPageMetrics(asset, accessToken, startDate, endDate) {
 
             // 1.d Guardar visitas a la página por día: page_views_total
             try {
-                const viewsResp = await axios.get(`${META_API_BASE_URL}/${asset.metaAssetId}/insights`, {
+                const viewsResp = await metaHttp.get(`${META_API_BASE_URL}/${asset.metaAssetId}/insights`, {
                     params: { since, until, period: 'day', access_token: tokenForPage, metric: 'page_views_total' }
                 });
                 const vals = viewsResp.data?.data?.[0]?.values || [];
@@ -923,7 +928,7 @@ async function syncInstagramMetrics(asset, accessToken, startDate, endDate) {
             while (chunkStart <= until) {
                 const chunkEnd = Math.min(chunkStart + MAX_RANGE_SECONDS, until);
                 try {
-                    const response = await axios.get(`${META_API_BASE_URL}/${asset.metaAssetId}/insights`, {
+                    const response = await metaHttp.get(`${META_API_BASE_URL}/${asset.metaAssetId}/insights`, {
                         params: {
                             metric: 'follower_count',
                             period: 'day',
@@ -961,7 +966,7 @@ async function syncInstagramMetrics(asset, accessToken, startDate, endDate) {
         }
 
         // Obtener total actual de seguidores
-        const followersTotalResponse = await axios.get(`${META_API_BASE_URL}/${asset.metaAssetId}`, {
+        const followersTotalResponse = await metaHttp.get(`${META_API_BASE_URL}/${asset.metaAssetId}`, {
             params: {
                 fields: 'followers_count',
 
@@ -1053,7 +1058,7 @@ async function syncInstagramMetrics(asset, accessToken, startDate, endDate) {
             uReach.setDate(uReach.getDate() + 1);
             const sinceStr = sReach.toISOString().slice(0,10);
             const untilStr = uReach.toISOString().slice(0,10);
-            const reachResp = await axios.get(`${META_API_BASE_URL}/${asset.metaAssetId}/insights`, {
+            const reachResp = await metaHttp.get(`${META_API_BASE_URL}/${asset.metaAssetId}/insights`, {
                 params: {
                     metric: 'reach',
                     period: 'day',
@@ -1092,7 +1097,7 @@ async function syncInstagramMetrics(asset, accessToken, startDate, endDate) {
             if (singleDay) {
                 const sinceStr = s.toISOString().slice(0,10);
                 const untilStr = new Date(e.getTime() + 24*60*60*1000).toISOString().slice(0,10);
-                const resp = await axios.get(`${META_API_BASE_URL}/${asset.metaAssetId}/insights`, {
+                const resp = await metaHttp.get(`${META_API_BASE_URL}/${asset.metaAssetId}/insights`, {
                     params: {
                         metric: 'profile_views',
                         metric_type: 'total_value',
@@ -1126,7 +1131,7 @@ async function syncInstagramMetrics(asset, accessToken, startDate, endDate) {
             if (singleDay) {
                 const sinceStr = s.toISOString().slice(0,10);
                 const untilStr = new Date(e.getTime() + 24*60*60*1000).toISOString().slice(0,10);
-                const resp = await axios.get(`${META_API_BASE_URL}/${asset.metaAssetId}/insights`, {
+                const resp = await metaHttp.get(`${META_API_BASE_URL}/${asset.metaAssetId}/insights`, {
                     params: {
                         metric: 'total_interactions',
                         metric_type: 'total_value',
@@ -1170,7 +1175,7 @@ async function syncInstagramMetrics(asset, accessToken, startDate, endDate) {
                     if (m === 'content_views' || m === 'views') {
                         p.metric_type = 'total_value';
                     }
-                    const resp = await axios.get(`${META_API_BASE_URL}/${asset.metaAssetId}/insights`, { params: p });
+                    const resp = await metaHttp.get(`${META_API_BASE_URL}/${asset.metaAssetId}/insights`, { params: p });
                     const node = resp.data?.data?.[0];
                     const arr = node?.values || [];
                     if (Array.isArray(arr) && arr.length > 0) { values = arr; usedMetric = m; break; }
@@ -2954,7 +2959,7 @@ async function validateToken(connectionId) {
         }
         
         // Validar token con la API de Meta
-        const validationResponse = await axios.get(`${META_API_BASE_URL}/debug_token`, {
+        const validationResponse = await metaHttp.get(`${META_API_BASE_URL}/debug_token`, {
             params: {
                 input_token: connection.accessToken,
                 access_token: connection.accessToken

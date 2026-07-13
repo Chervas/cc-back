@@ -83,6 +83,10 @@ module.exports = (sequelize, DataTypes) => {
     updatedAt: 'updated_at',
     indexes: [
       {
+        name: 'idx_job_requests_type_status_created_at',
+        fields: ['type', 'status', 'created_at']
+      },
+      {
         fields: ['status', 'priority']
       },
       {

@@ -18,24 +18,15 @@ const { getUsageStatus } = require('../lib/metaClient');
 const { getGoogleAdsUsageStatus, resumeGoogleAdsUsage } = require('../lib/googleAdsClient');
 const jobRequestsService = require('../services/jobRequests.service');
 const jobScheduler = require('../services/jobScheduler.service');
+const { SCHEDULED_JOB_DEFINITIONS } = require('../config/scheduledJobCatalog');
 const fs = require('fs');
 const path = require('path');
 const { SyncLog, TokenValidation, SocialStatDaily, ApiUsageCounter } = require('../../models');
 const { Op } = require('sequelize');
 
-const JOB_NAME_TO_QUEUE_TYPE = {
-  adsSync: 'meta_ads_recent',
-  adsSyncMidday: 'meta_ads_midday',
-  adsBackfill: 'meta_ads_backfill',
-  googleAdsSync: 'google_ads_recent',
-  googleAdsBackfill: 'google_ads_backfill',
-  analyticsSync: 'analytics_recent',
-  analyticsBackfill: 'analytics_backfill',
-  webSync: 'web_recent',
-  webBackfill: 'web_backfill',
-  businessProfileSync: 'business_profile_recent',
-  businessProfileBackfill: 'business_profile_backfill'
-};
+const JOB_NAME_TO_QUEUE_TYPE = Object.fromEntries(
+  Object.entries(SCHEDULED_JOB_DEFINITIONS).map(([jobName, definition]) => [jobName, definition.type])
+);
 
 function isCronLeaderRuntime() {
   return process.env.JOBS_CRON_LEADER === 'true';
@@ -116,6 +107,9 @@ function getJobsSafeInfo() {
       schedule: jobData.schedule,
       status: jobData.status,
       lastExecution: jobData.lastExecution,
+      lastEnqueuedAt: jobData.lastEnqueuedAt || null,
+      lastEnqueueAttempt: jobData.lastEnqueueAttempt || null,
+      lastJobRequestId: jobData.lastJobRequestId || null,
       lastError: jobData.lastError || null,
       description: metaSyncJobs.jobDescriptions?.[name] || ''
     };
@@ -438,19 +432,26 @@ exports.runJob = async (req, res) => {
     const userName = req.userData?.name || null;
     const queueType = JOB_NAME_TO_QUEUE_TYPE[jobName] || null;
     const payload = (req.body && typeof req.body.payload === 'object') ? req.body.payload : {};
-    const priority = req.body?.priority || (queueType && queueType.includes('backfill') ? 'high' : 'normal');
+    const catalogPriority = SCHEDULED_JOB_DEFINITIONS[jobName]?.priority || null;
+    const priority = req.body?.priority
+      || (queueType && queueType.includes('backfill') ? 'high' : catalogPriority)
+      || 'normal';
     const runImmediately = Boolean(req.body?.runImmediately);
 
     if (queueType) {
-      const jobRequest = await jobRequestsService.enqueueJobRequest({
+      const enqueueResult = await jobRequestsService.enqueueUniqueJobRequest({
         type: queueType,
         payload,
         priority,
         origin: `manual:${jobName}`,
         requestedBy: userId,
         requestedByName: userName,
-        requestedByRole: userRole
+        requestedByRole: userRole,
+        maxAttempts: SCHEDULED_JOB_DEFINITIONS[jobName]?.maxAttempts
+          || metaSyncJobs.config.retries.maxAttempts
+          || 3,
       });
+      const jobRequest = enqueueResult.job;
 
       if (runImmediately || jobRequest.priority === 'critical') {
         jobScheduler.triggerImmediate(jobRequest.id).catch((error) => {
@@ -459,8 +460,11 @@ exports.runJob = async (req, res) => {
       }
 
       return res.json({
-        message: `Job '${jobName}' encolado`,
+        message: enqueueResult.created
+          ? `Job '${jobName}' encolado`
+          : `Job '${jobName}' ya estaba encolado`,
         jobName,
+        created: enqueueResult.created,
         jobRequest: {
           id: jobRequest.id,
           type: jobRequest.type,
@@ -538,13 +542,14 @@ exports.runTargetedWebBackfill = async (req, res) => {
       });
     }
 
-    const job = await jobRequestsService.enqueueJobRequest({
-      type: 'web_backfill',
+    const enqueueResult = await jobRequestsService.enqueueUniqueJobRequest({
+      type: 'web_backfill_for_sites',
       payload: { mappings },
       priority: 'high',
       origin: 'web:targeted-backfill',
       requestedBy: req.userData?.userId || null
     });
+    const { job } = enqueueResult;
 
     jobScheduler.triggerImmediate(job.id).catch((error) => {
       console.error('❌ Error ejecutando backfill dirigido de Search Console desde cola:', error);
@@ -552,7 +557,8 @@ exports.runTargetedWebBackfill = async (req, res) => {
 
     return res.status(202).json({
       success: true,
-      enqueued: mappings.length,
+      enqueued: enqueueResult.created ? mappings.length : 0,
+      alreadyQueued: !enqueueResult.created,
       jobRequestId: job.id,
       message: 'Backfill dirigido encolado'
     });
@@ -589,13 +595,14 @@ exports.runTargetedAnalyticsBackfill = async (req, res) => {
       });
     }
 
-    const job = await jobRequestsService.enqueueJobRequest({
-      type: 'analytics_backfill',
+    const enqueueResult = await jobRequestsService.enqueueUniqueJobRequest({
+      type: 'analytics_backfill_properties',
       payload: { mappings },
       priority: 'high',
       origin: 'analytics:targeted-backfill',
       requestedBy: req.userData?.userId || null
     });
+    const { job } = enqueueResult;
 
     jobScheduler.triggerImmediate(job.id).catch((error) => {
       console.error('❌ Error ejecutando backfill dirigido de Analytics desde cola:', error);
@@ -603,7 +610,8 @@ exports.runTargetedAnalyticsBackfill = async (req, res) => {
 
     return res.status(202).json({
       success: true,
-      enqueued: mappings.length,
+      enqueued: enqueueResult.created ? mappings.length : 0,
+      alreadyQueued: !enqueueResult.created,
       jobRequestId: job.id,
       message: 'Backfill de Analytics encolado'
     });

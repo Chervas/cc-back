@@ -417,8 +417,15 @@ const isCronLeader = process.env.JOBS_CRON_LEADER === 'true';
 const shouldStartWorker = process.env.JOBS_WORKER_ENABLED !== 'false';
 const shouldStartCron = isCronLeader && (process.env.NODE_ENV === 'production' || process.env.JOBS_AUTO_START === 'true');
 if (shouldStartWorker) {
-    jobScheduler.start();
-    console.log('🔁 Job scheduler iniciado');
+    jobScheduler.start()
+      .then((report) => {
+        if (report?.status === 'started') {
+          console.log(`🔁 Job scheduler iniciado y recuperación completada en ${report.startupAttempts || 1} intento(s)`);
+        } else {
+          console.log(`⏹️ Job scheduler detenido durante el arranque (${report?.status || 'sin estado'})`);
+        }
+      })
+      .catch((error) => console.error('❌ No se pudo iniciar el Job scheduler:', error.message));
 } else {
     console.log(`⏸️ Job scheduler deshabilitado (JOBS_WORKER_ENABLED=${process.env.JOBS_WORKER_ENABLED || 'true'})`);
 }

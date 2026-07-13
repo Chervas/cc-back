@@ -138,7 +138,7 @@ exports.updateGroup = async (req, res) => {
     const clinicIds = Array.from(new Set(clinics.map(c => Number(c.id_clinica)).filter(Number.isInteger)));
 
     if (clinicIds.length && payload.ads && payload.ads.mode) {
-      const metaJob = await jobRequestsService.enqueueJobRequest({
+      const { job: metaJob } = await jobRequestsService.enqueueUniqueJobRequest({
         type: 'meta_ads_recent',
         payload: { clinicIds },
         priority: 'high',
@@ -151,7 +151,7 @@ exports.updateGroup = async (req, res) => {
         console.error('❌ Error en resync Meta Ads tras actualizar grupo:', err)
       );
 
-      const googleJob = await jobRequestsService.enqueueJobRequest({
+      const { job: googleJob } = await jobRequestsService.enqueueUniqueJobRequest({
         type: 'google_ads_recent',
         payload: { clinicIds },
         priority: 'high',

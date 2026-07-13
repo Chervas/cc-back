@@ -1687,6 +1687,41 @@ exports.ingestLead = asyncHandler(async (req, res) => {
     }
   }
 
+  // La primera llamada del widget (`source_detail=chatbot`) ya contiene el
+  // estado final del chat. Materializamos aquí el resumen interno antes de
+  // cualquier proveedor publicitario; la segunda llamada
+  // `chatbot_quickchat` queda como reintento idempotente. Así, aunque el
+  // navegador abandone la página mientras Meta/Google siguen respondiendo, el
+  // lead no queda huérfano en QuickChat y tampoco sacrificamos el tracking.
+  let embeddedQuickChatSummary = null;
+  const isCompletedChatbotLead = String(source_detail || '').trim().toLowerCase() === 'chatbot'
+    && body?.chat_state
+    && typeof body.chat_state === 'object'
+    && !Array.isArray(body.chat_state);
+  if (isCompletedChatbotLead && lead) {
+    try {
+      embeddedQuickChatSummary = await materializeIntakeQuickChatSummary({
+        leadId: lead.id,
+        clinicId: clinicaIdParsed,
+        body: {
+          ...body,
+          source_detail: 'chatbot_quickchat',
+        },
+        pageUrl: pageUrlValue,
+        landingUrl: landingUrlValue,
+      });
+      try {
+        emitQuickChatSummarySocketEvent(embeddedQuickChatSummary);
+      } catch (emitErr) {
+        console.warn('⚠️ No se pudo emitir el resumen QuickChat embebido:', emitErr.message || emitErr);
+      }
+    } catch (summaryError) {
+      // El lead ya está persistido. Conservamos la ingestión y dejamos que la
+      // llamada idempotente explícita del widget pueda reintentar el resumen.
+      console.warn('⚠️ No se pudo materializar el resumen QuickChat embebido:', summaryError.message || summaryError);
+    }
+  }
+
   let formSubmissionEvent = null;
   if (formSubmission && FormSubmissionEvent) {
     try {
@@ -1847,7 +1882,18 @@ exports.ingestLead = asyncHandler(async (req, res) => {
     console.warn('⚠️ Google Ads upload error (ingestLead):', adsErr.response?.data || adsErr.message || adsErr);
   }
 
-  res.status(201).json({ id: lead.id });
+  res.status(201).json({
+    id: lead.id,
+    ...(embeddedQuickChatSummary
+      ? {
+          quickchat_summary_saved: true,
+          quickchat_summary_created: embeddedQuickChatSummary.created,
+          conversation_id: embeddedQuickChatSummary.conversation_id,
+          message_id: embeddedQuickChatSummary.message_id,
+        }
+      : {}),
+  });
+
 });
 
 exports.previewLeadImport = asyncHandler(async (req, res) => {

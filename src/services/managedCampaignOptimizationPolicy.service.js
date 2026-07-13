@@ -649,7 +649,7 @@ function assertManagementConsent(campaign, targetStatus = null) {
   const row = plain(campaign) || {};
   const status = targetStatus || row.status;
   const blockers = [];
-  if (isConnectOnly(row)) blockers.push(blocker('CONNECT_ONLY_BIDDING_MUTATION_FORBIDDEN', 'Conecta y mide nunca puede mutar objetivos o pujas.'));
+  if (isConnectOnly(row)) blockers.push(blocker('CONNECT_ONLY_BIDDING_MUTATION_FORBIDDEN', 'Mide y mejora nunca puede mutar objetivos o pujas.'));
   if (!EXECUTABLE_STATUSES.has(status)) blockers.push(blocker('GOAL_POLICY_EXECUTION_STATUS_INVALID', 'La campaña no está aprobada para lanzamiento ni viva.'));
   if (row.provider !== 'google_ads' || !MANAGED_GOOGLE_FAMILIES.has(row.family)) blockers.push(blocker('GOAL_POLICY_EXECUTION_FAMILY_INVALID', 'La familia no admite ejecución gestionada de objetivos.'));
   if (!positiveInteger(row.approved_by_user_id) || !row.approved_at) blockers.push(blocker('ADMIN_MANAGEMENT_APPROVAL_REQUIRED', 'El gate admin del piloto no está aprobado.'));

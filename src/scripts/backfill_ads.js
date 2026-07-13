@@ -5,9 +5,7 @@ const path = require('path');
 require('dotenv').config({ path: path.join(__dirname, '..', '..', '.env') });
 
 const db = require('../../models');
-const { metaSyncJobs } = require('../jobs/sync.jobs');
 const jobRequestsService = require('../services/jobRequests.service');
-const jobScheduler = require('../services/jobScheduler.service');
 
 const HELP_TEXT = `Uso: node src/scripts/backfill_ads.js [opciones]
 
@@ -150,9 +148,6 @@ async function run() {
     return;
   }
 
-  await metaSyncJobs.initialize().catch(() => {});
-  jobScheduler.start();
-
   const results = [];
   const platforms = Array.isArray(parsed.platforms) && parsed.platforms.length ? parsed.platforms : ['meta', 'google'];
 
@@ -167,29 +162,31 @@ async function run() {
         ? (parsed.mode === 'recent' ? 'meta_ads_recent' : 'meta_ads_backfill')
         : (parsed.mode === 'recent' ? 'google_ads_recent' : 'google_ads_backfill');
 
-    const job = await jobRequestsService.enqueueJobRequest({
+    const enqueueResult = await jobRequestsService.enqueueUniqueJobRequest({
       type,
       payload: { ...jobOptions },
       priority: parsed.mode === 'recent' ? 'normal' : 'high',
       origin: `cli:backfill_ads:${platform}:${parsed.mode}`,
       requestedBy: null
     });
+    const job = enqueueResult.job;
 
-    console.log(`▶️ Encolado job ${job.id} (${type}). Ejecutando...`);
-    await jobScheduler.triggerImmediate(job.id);
-    const refreshed = await jobRequestsService.findJobById(job.id);
+    console.log(
+      enqueueResult.created
+        ? `▶️ Encolado job ${job.id} (${type}) para el worker del backend.`
+        : `ℹ️ Ya existía el job activo ${job.id} (${type}) para este alcance.`
+    );
     results.push({
       platform,
       mode: parsed.mode,
       jobId: job.id,
-      status: refreshed?.status || 'unknown',
-      error: refreshed?.error_message || null,
-      result: refreshed?.result_summary || null
+      created: enqueueResult.created,
+      status: job.status || 'pending',
+      scope: job.payload?.__dedupe_scope || null
     });
   }
 
-  jobScheduler.stop();
-  console.log('✅ Ejecución finalizada:', results);
+  console.log('✅ Solicitudes entregadas al scheduler durable:', results);
 }
 
 run()
