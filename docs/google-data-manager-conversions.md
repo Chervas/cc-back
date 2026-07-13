@@ -43,9 +43,9 @@ El dry-run usa el placeholder publicitario `GCLID_1` de la documentación oficia
 
 `POST /api/marketing/google-ads/conversions/enhanced/activation-gate` se conserva como vía interna de preview/compatibilidad para el `IntakeConfig` del grupo Propdental `5`; nunca crea acciones ni modifica Google Ads. La activación ordinaria no depende de este endpoint ni de un botón Play: la ejecuta el reconciliador interno del job `googleDataManagerDiagnostics` cada 30 minutos cuando todo está listo.
 
-El reconciliador tiene dos fases. La primera materializa inmediatamente `ad_personalization_enabled=true` y `visitor_choice`, con audit y clave versionada, aunque el gate Enhanced siga bloqueado; no habilita email/teléfono ni concede consentimiento. La segunda habilita Conversiones mejoradas y sus valores solo cuando todas las cuentas y attestations están listas. Ambas fases son transaccionales e idempotentes.
+El job separa dos reconciliaciones. La primera es global y no depende del gate ni de Google: pagina todas las `IntakeConfig` por ID y, en una transacción corta con `FOR UPDATE` por fila, materializa `ad_personalization_enabled=true` y `visitor_choice` con audit v2 del scope real. No habilita email/teléfono ni concede consentimiento (`grants_consent=false`), conserva el resto de `locked.config`, acepta el audit v1 sano de Propdental y es idempotente. La segunda reconciliación queda limitada a Propdental y habilita Conversiones mejoradas y sus valores solo cuando todas las cuentas y attestations están listas.
 
-La **segunda fase Enhanced** queda bloqueada, sin cambios parciales en user data, si Data Manager no está listo, falla el acceso al scope, Consent Mode o las attestations y URLs, el proveedor no es Clinicaclick, falta la fuente de consentimiento del visitante, alguna cuenta destino no está mapeada/allowlisted, no ha aceptado los términos de datos o Google aún devuelve `enhanced_conversions_for_leads_enabled=false`. Ese bloqueo no revierte ni impide la primera fase `visitor_choice`, que puede estar activa por separado. Antes del update Enhanced se valida cada pareja cuenta/evento y se bloquea la fila de `IntakeConfig` dentro de una transacción. Una clave SHA-256 versionada hace el proceso idempotente; una configuración concurrentemente modificada se deja para el siguiente ciclo. Bootstrap solo muestra el estado y nunca escribe.
+La **reconciliación Enhanced** queda bloqueada, sin cambios parciales en user data, si Data Manager no está listo, falla el acceso al scope, Consent Mode o las attestations y URLs, el proveedor no es Clinicaclick, falta la fuente de consentimiento del visitante, alguna cuenta destino no está mapeada/allowlisted, no ha aceptado los términos de datos o Google aún devuelve `enhanced_conversions_for_leads_enabled=false`. Ese bloqueo no revierte ni impide la capacidad global `visitor_choice`. Antes del update Enhanced se valida cada pareja cuenta/evento y se bloquea la fila de `IntakeConfig` dentro de una transacción. Una clave SHA-256 versionada hace el proceso idempotente; una configuración concurrentemente modificada se deja para el siguiente ciclo. El barrido global se audita aparte en `SyncLog.status_report.visitor_choice_personalization_reconciliation`; Bootstrap solo muestra el estado y nunca escribe.
 
 Al superar el gate se habilitan conjuntamente el disclosure y runtime de Conversiones mejoradas, `google_ads.user_data_enabled` y los eventos existentes Lead, Contact, Qualified Lead y Schedule. La capacidad `ad_personalization_enabled=true` con fuente `visitor_choice` se conserva, pero no nace necesariamente en esta fase porque puede haberse materializado antes. Ese `true` no concede consentimiento: permite emitir la elección real del visitante. La allowlist incluye el ticket `4-1893000040437`, la autorización del anunciante y las restricciones de medición: solo email/teléfono, sin Purchase, nombre, dirección, Customer Match, listas ni remarketing. El audit embebido contiene referencias, cuentas, eventos, estado por cuenta, clave de reconciliación y fecha, pero ninguna PII del paciente.
 
@@ -190,6 +190,20 @@ Objetivo: demostrar el recorrido real posterior al gate sin crear un paciente, c
 6. **Escalar con propietario claro.** Intake/routing/consentimiento corresponde al equipo web/CRM; `accepted` estancado o diagnóstico de destino a integración Google; discrepancia tras `succeeded` a operación Ads con customer, acción, transaction/event ID y `provider_request_id`, nunca con PII cruda.
 
 La UI todavía no expone un bloque único con toda esta cadena. Hasta que exista, la evidencia canónica es CRM + `GoogleAdsConversionUploadAttempts` + `SyncLog` + reporting Google. No se debe presentar el estado verde de instalación o el HTTP 200 inicial como prueba de conversión atribuida.
+
+## Invariante de configuración y prueba de no regresión
+
+Verificar o guardar la web, añadir dominios y provisionar acciones no pueden degradar la capacidad Enhanced ya activada. `IntakeConfig.config` tiene ownership mixto y cualquier writer read-modify-write debe bloquear la fila y aplicar un patch estrecho sobre el JSON raw más reciente.
+
+Antes y después de una comprobación live comparar, sin imprimir PII:
+
+- `features.ad_personalization_*` y `features.google_ads_user_data_*`;
+- `google_ads.user_data_enabled`, `enhanced_conversions.activation_audit` y su reconciliation key;
+- `google_ads.goal_policy` si existe;
+- `events.*.user_data_enabled`, valores, `value_is_revenue`, destinos y Qualified Lead;
+- dominios, HMAC-presente y `snippet_verification`.
+
+Solo `snippet_verification` debe cambiar al pulsar Verificar. Después ejecutar Diagnostics: el gate debe responder `already_active`, no reactivar una configuración que el editor haya borrado. La regresión automatizada es `node src/scripts/tests/intake_config_write_merge.test.js`; Diagnostics sigue siendo red de seguridad y no justifica un writer destructivo.
 
 ## Referencias oficiales
 
