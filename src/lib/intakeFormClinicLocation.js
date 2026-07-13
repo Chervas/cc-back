@@ -20,6 +20,72 @@ function normalizedAlias(value) {
   return sanitize(String(value).normalize('NFKC')) || null;
 }
 
+function cleanClinicLabel(value) {
+  if (typeof value !== 'string') return null;
+  const cleaned = value
+    .normalize('NFKC')
+    .replace(/[\u0000-\u001F\u007F]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  if (!cleaned || /^\d+$/.test(cleaned)) return null;
+  return cleaned;
+}
+
+function normalizeFieldKey(value) {
+  return String(value || '')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .trim()
+    .replace(/[^a-z0-9]+/g, '_')
+    .replace(/^_+|_+$/g, '');
+}
+
+function isClinicLabelField(key) {
+  const normalized = normalizeFieldKey(key);
+  if (!normalized || /(^|_)(?:id|ids)$/.test(normalized)) return false;
+  return normalized.includes('clinic')
+    || normalized.includes('clinica')
+    || normalized.includes('sede')
+    || normalized.includes('centro')
+    || normalized.includes('ubicacion');
+}
+
+/**
+ * Extract a human location label while ignoring routing ids such as
+ * `clinica_id=0`. Runtime group forms deliberately submit that zero sentinel
+ * and keep the selected human label in form_submission.fields.
+ */
+function extractClinicLabelHint(...sources) {
+  const directKeys = [
+    'clinica',
+    'clínica',
+    'clinic',
+    'clinic_name',
+    'clinicName',
+    'clinic_name_text',
+    'clinicText',
+    'sede',
+    'centro',
+  ];
+
+  for (const source of sources) {
+    if (!source || typeof source !== 'object' || Array.isArray(source)) continue;
+
+    for (const key of directKeys) {
+      const label = cleanClinicLabel(source[key]);
+      if (label) return label;
+    }
+
+    for (const [key, value] of Object.entries(source)) {
+      if (!isClinicLabelField(key)) continue;
+      const label = cleanClinicLabel(value);
+      if (label) return label;
+    }
+  }
+  return null;
+}
+
 function addAlias(target, value) {
   if (Array.isArray(value)) {
     value.forEach((item) => addAlias(target, item));
@@ -171,8 +237,12 @@ function resolveConfiguredFormClinicLocation({
 }
 
 module.exports = {
+  cleanClinicLabel,
   containsWholeAlias,
+  extractClinicLabelHint,
+  isClinicLabelField,
   locationAliases,
+  normalizeFieldKey,
   normalizedAlias,
   resolveConfiguredFormClinicLocation,
 };

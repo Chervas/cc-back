@@ -38,7 +38,10 @@ const { findCanonicalWhatsappConversation } = require('../lib/canonical-conversa
 const { normalizePhoneDigits } = require('../lib/phone');
 const { normalizeConfiguredLocations } = require('../lib/intake-public-locations');
 const { resolveChatStateClinicSelection } = require('../lib/intakeChatLocation');
-const { resolveConfiguredFormClinicLocation } = require('../lib/intakeFormClinicLocation');
+const {
+  extractClinicLabelHint,
+  resolveConfiguredFormClinicLocation,
+} = require('../lib/intakeFormClinicLocation');
 const {
   isQuickChatSummaryRequest,
   materializeIntakeQuickChatSummary,
@@ -252,49 +255,6 @@ const normalizeLookupKey = (value = '') => String(value || '')
   .replace(/[\u0300-\u036f]/g, '')
   .toLowerCase()
   .trim();
-
-const extractNamedValue = (input, matcher) => {
-  if (!input || typeof input !== 'object' || Array.isArray(input)) {
-    return null;
-  }
-
-  const entries = Object.entries(input)
-    .map(([key, value]) => [normalizeLookupKey(key), cleanString(value)])
-    .filter(([key, value]) => key && value);
-
-  const hit = entries.find(([key]) => matcher(key));
-  return hit?.[1] || null;
-};
-
-const extractClinicNameHint = (...sources) => {
-  for (const source of sources) {
-    const direct = cleanString(
-      coalesce(
-        source?.clinica,
-        source?.clínica,
-        source?.clinic,
-        source?.clinic_name,
-        source?.clinicName,
-        source?.clinic_name_text,
-        source?.clinicText,
-        source?.sede,
-        source?.centro
-      )
-    );
-    if (direct) return direct;
-
-    const byName = extractNamedValue(source, (key) => (
-      key.includes('clinic')
-      || key.includes('clinica')
-      || key.includes('sede')
-      || key.includes('centro')
-      || key.includes('ubicacion')
-      || key.includes('ubicacion_clinica')
-    ));
-    if (byName) return byName;
-  }
-  return null;
-};
 
 const resolveFallbackClinicForGroup = async (groupId) => {
   const normalizedGroupId = parseInteger(groupId);
@@ -1198,7 +1158,7 @@ exports.ingestLead = asyncHandler(async (req, res) => {
   const leadData = body?.lead_data || {};
   const formSubmission = normalizeFormSubmission(body?.form_submission || body?.formSubmission);
   const formLeadData = extractLeadDataFromFormFields(formSubmission?.fields || {});
-  const clinicNameHint = extractClinicNameHint(body, leadData, formLeadData, formSubmission?.fields || {});
+  const clinicNameHint = extractClinicLabelHint(body, leadData, formLeadData, formSubmission?.fields || {});
 
   // Validación por dominio + HMAC por clínica/grupo cuando hay IntakeConfig guardada.
   // Fallback legacy: INTAKE_WEB_SECRET solo se usa si NO existe configuración.
