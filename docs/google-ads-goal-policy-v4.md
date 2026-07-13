@@ -118,9 +118,18 @@ el segundo exige el digest obtenido por preview.
 La promoción `qualified_lead → schedule` permanece fail-closed. Además del
 contrato existente de dos evaluaciones consecutivas y sus umbrales, el
 executor exige evidencia persistida de ambas evaluaciones y aprobación de
-operador. Hoy el agregador no dispone de la serie semanal por fecha real de
-cita (`SCHEDULE_WEEKLY_HISTORY_UNAVAILABLE`), por lo que no se inventa un
-reparto desde `attempted_at` y Schedule no puede aplicarse automáticamente.
-Cuando exista evidencia válida, la nueva etapa elimina el ownership de QL y
-crea/asigna el goal inmutable específico de Schedule; nunca reescribe el goal
-de QL.
+operador. Hoy faltan dos piezas para completar el recorrido end-to-end:
+
+- el agregador no dispone de la serie semanal por fecha real de cita
+  (`SCHEDULE_WEEKLY_HISTORY_UNAVAILABLE`), por lo que no se inventa un reparto
+  desde `attempted_at`;
+- existe `applyApprovedLifecycleTransition` como helper puro y el executor sabe
+  validar un `approved_transition` ya persistido, pero ninguna ruta actual
+  materializa esa aprobación ni invoca el helper para escribir el cambio de
+  etapa.
+
+Por tanto, el soporte del planner/executor para Schedule no equivale todavía a
+una transición operativa automática. Cuando se integren el agregador y el
+writer/orquestador de aprobación, la nueva etapa eliminará el ownership de QL
+y creará/asignará el goal inmutable específico de Schedule; nunca reescribirá
+el goal de QL.
