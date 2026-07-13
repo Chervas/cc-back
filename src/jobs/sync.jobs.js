@@ -42,6 +42,7 @@ const googleReviewMatchService = require('../services/googleReviewMatch.service'
 const { reconcileGoogleDataManagerDiagnostics } = require('../services/googleDataManagerDiagnostics.service');
 const {
   reconcileEnhancedConversionsInternalActivation,
+  reconcileVerifiedConnectOnlyStrategyActivationReadiness,
 } = require('../controllers/campaignOnboarding.controller');
 const {
   executePersistedGoalPolicyAudit,
@@ -1753,14 +1754,50 @@ class MetaSyncJobs {
           google_ads_mutated: false
         };
       }
+      let strategyReadinessReconciliation = {
+        status: 'skipped',
+        reason: 'enhanced_activation_not_ready',
+        updated: false,
+        idempotent: true,
+        reconciled: 0,
+        validate_only: true,
+        external_mutation_performed: false,
+        google_ads_mutated: false
+      };
+      let strategyReadinessError = null;
+      if (['activated', 'already_active'].includes(internalActivation.status) && internalActivation.ready === true) {
+        try {
+          strategyReadinessReconciliation = await reconcileVerifiedConnectOnlyStrategyActivationReadiness({
+            enhancedActivation: internalActivation,
+            now: options.now || new Date()
+          });
+        } catch (error) {
+          strategyReadinessError = error;
+          strategyReadinessReconciliation = {
+            status: 'error',
+            updated: false,
+            idempotent: false,
+            reconciled: 0,
+            validate_only: true,
+            error: {
+              code: error.code || 'CONNECT_ONLY_STRATEGY_READINESS_RECONCILIATION_ERROR',
+              message: 'Falló la reconciliación de readiness de las estrategias Conecta y mide'
+            },
+            external_mutation_performed: false,
+            google_ads_mutated: false
+          };
+        }
+      }
       const diagnostics = await reconcileGoogleDataManagerDiagnostics(options);
       const report = {
         ...diagnostics,
-        internal_enhanced_conversion_activation: internalActivation
+        internal_enhanced_conversion_activation: internalActivation,
+        connect_only_strategy_readiness_reconciliation: strategyReadinessReconciliation
       };
       const jobStatus = (
         (report.errors > 0 && report.checked === report.errors)
         || internalActivation.status === 'error'
+        || strategyReadinessReconciliation.status === 'error'
       ) ? 'failed' : 'completed';
       await syncLog.update({
         status: jobStatus,
@@ -1768,6 +1805,12 @@ class MetaSyncJobs {
         records_processed: report.checked || 0,
         status_report: report
       });
+      if (strategyReadinessError) {
+        strategyReadinessError.code = strategyReadinessError.code
+          || 'CONNECT_ONLY_STRATEGY_READINESS_RECONCILIATION_ERROR';
+        strategyReadinessError.strategy_readiness_report = strategyReadinessReconciliation;
+        throw strategyReadinessError;
+      }
       return { status: jobStatus, processed: report.checked || 0, report };
     } catch (error) {
       await syncLog.update({

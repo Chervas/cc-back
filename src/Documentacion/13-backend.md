@@ -1,6 +1,9 @@
 > **Módulo:** Arquitectura del Backend
-> **Última actualización:** 2026-04-15
-> **Relacionado con:** [20.1-motor-flujos-v2](./20.1-motor-flujos-v2.md) | documento operativo `cc-front/src/Documentacion/31-roadmap-arquitectura-entornos-gateway.md`
+> **Última actualización:** 2026-07-13
+> **Relacionado con:** `cc-front/src/Documentacion/20.1-motor-flujos-v2.md` | documento operativo `cc-front/src/Documentacion/31-roadmap-arquitectura-entornos-gateway.md`
+> **Fuente canónica:** este archivo del repositorio backend. `cc-front/src/Documentacion/13-backend.md` es un espejo completo para conservar los enlaces internos del manual frontend; cualquier cambio se hace aquí primero y después se sincroniza el espejo.
+
+Runbooks operativos backend: `back-dev/docs/README.md`, con acceso directo a Data Manager/Conversiones mejoradas, política de goals y E2E/limpieza de intake.
 
 ---
 
@@ -651,13 +654,15 @@ Matiz operativo importante en multi-sede:
 - si el snippet llega firmado correctamente y resuelve una `clinic_id` válida, el backend ya no aborta la ingesta solo porque el `group_id` derivado no pueda validarse.
 - en ese caso se prioriza la clínica, se continúa con `group_id = null` y se evita romper casos como `tel_modal` o `CallInitiated` por una inconsistencia accesoria de scope.
 
-Resolución adicional en webs de grupo:
-- si el snippet llega con `data-group-id` y el payload trae el nombre de la clínica, `POST /api/intake/leads` intenta resolver la clínica dentro de ese grupo antes de usar el mapeo por dominio o la clínica por defecto;
-- se leen claves como `clinica`, `clinic`, `clinic_name`, `sede`, `centro`, `ubicacion` tanto en `lead_data` como en `form_submission.fields`;
-- la comparación usa `buildClinicMatcher(...)`, sin tildes y sin pisar una `clinic_id` explícita ni una clínica ya resuelta por dominio;
-- cuando hace match, queda auditado en:
-  - `clinic_match_source = clinic_name_field`
-  - `clinic_match_value = <texto recibido>`
+Resolución de formularios interceptados en webs de grupo:
+
+- manda el contrato estricto de **Routing autoritativo de formularios de grupo (2026-07-13)** documentado más abajo; esta regla sustituye al fallback histórico por dominio o clínica predeterminada para formularios que declaran una sede;
+- `IntakeConfig.config.locations` contiene los únicos IDs admisibles; etiquetas públicas y nombres internos solo son aliases de esos IDs, no amplían el scope;
+- `clinica_id=0`/`clinic_id=0` es un sentinel técnico y se ignora como pista; la etiqueta humana se obtiene después de `form_submission.fields`/`lead_data`;
+- desconocido, ambiguo, inactivo o fuera de grupo devuelve `422 invalid_form_location` **antes** de cualquier fallback, persistencia o evento;
+- una coincidencia válida queda auditada como `clinic_match_source=configured_location_label` y conserva en `clinic_match_value` la etiqueta recibida.
+
+Chat y modal telefónico mantienen sus resolutores específicos: el chat usa la sede elegida dentro del flujo configurado y el modal resuelve por el teléfono pulsado. No deben reutilizar el fallback estricto de formularios ni atribuirse la fuente `configured_location_label` si la sede procede de otra señal.
 
 Herencia de configuración web al crear grupos:
 - `groupAssets.service.copyClinicIntakeConfigToGroup` copia `IntakeConfig` de clínica a grupo conservando dominios, HMAC y `config` completo.
@@ -3371,7 +3376,8 @@ Los `external_targets` guardados dentro de una estrategia son un snapshot editab
 - la reconciliación solo actualiza `IntakeConfig`: no crea ni modifica acciones, objetivos, pujas o campañas en Google. Usa bloqueo transaccional, revalidación de allowlist y una clave SHA-256 versionada; repetir el job con el mismo estado devuelve `already_active` sin escribir. Un cambio concurrente devuelve `stale_retry` y se revisa en el siguiente ciclo;
 - `GET /campaign-onboarding/bootstrap` es estrictamente read-only: expone `active`, `pending_reconciliation` o `blocked`, pero nunca ejecuta la activación. No hay dependencia del botón Play;
 - el audit embebido conserva versión, clave, fuente, cuentas y resultado de cada gate; `SyncLog.status_report.internal_enhanced_conversion_activation` registra cada ciclo sin PII y declara `google_ads_mutated=false`;
-- la política de valores v1 usa Lead `0 EUR`, Contact `0 EUR`, Qualified Lead `10 EUR` y Schedule `40 EUR` como pesos de reporting/optimización (`value_is_revenue=false`). Purchase no se materializa por este gate y solo usa valor económico real. Este flujo no cambia automáticamente la estrategia de puja ni los objetivos de Google;
+- tras un gate Enhanced sano, `googleDataManagerDiagnostics` llama a `reconcileVerifiedConnectOnlyStrategyActivationReadiness`: relee acciones y ejecuta Data Manager `validateOnly` con `createMissing=false`; solo las clínicas `19/35/56/58/59` declaradas en `groupRecord.config.locations` pueden heredar la configuración web de `propdental.es`, mientras Francia `36` y Eixample `57` quedan bloqueadas hasta tener `IntakeConfig` propio válido. Para cada request Propdental `active + connect_only + new_patients + Google`, revalida snapshots ausentes, caducados o con drift de clave/scope/cuentas, exige evidencia completa por action/target y vuelve a comprobar fingerprints bajo locks antes de corregir únicamente `solicitud.activation_readiness`. Guarda scope validado, snapshot anterior y clave de reconciliación, tolera concurrencia, es idempotente y se audita en `SyncLog.status_report.connect_only_strategy_readiness_reconciliation`. Declara `external_mutation_performed=false`/`google_ads_mutated=false`, no toca `Campaign`, goals, pujas o Google y no activa Piloto automático;
+- la política de valores v1 usa Lead `0 EUR`, Contact `0 EUR`, Qualified Lead `10 EUR` y Schedule `40 EUR` como pesos de reporting/optimización (`value_is_revenue=false`). Schedule es una cita agendada/vinculada, no necesariamente confirmada o atendida. Purchase no se materializa por este gate: aunque el servicio actual puede construirlo con `Tratamientos.precio_base` o `0`, Propdental lo mantiene deshabilitado porque ese catálogo no demuestra ingreso/margen real. Este flujo no cambia automáticamente la estrategia de puja ni los objetivos de Google;
 - estado live verificado el 2026-07-13: una lectura directa a Google devolvió `enhanced_conversions_for_leads_enabled=true` para `1851215478` y `5992356722`; a las 06:42 UTC el reconciliador dejó el scope en `activated`, con disclosure/runtime de user data, `google_ads.user_data_enabled` y los eventos/valores Enhanced habilitados. La activación interna no dependió de Play ni mutó Google Ads.
 - validación posterior al gate: Data Manager aceptó dos payloads `validateOnly=true`, uno por cuenta y acción Lead canónica, con email/teléfono sintéticos ya normalizados/hasheados y ambas señales de consentimiento en `GRANTED`. Hubo `requestId` en las dos respuestas y cero ingestión. Los E2E de CF7/chat/teléfono, realizados con Marketing denegado y sin click IDs, no generaron intentos de conversión; la próxima prueba de atribución completa será un lead publicitario natural consentido observado por Diagnostics.
 

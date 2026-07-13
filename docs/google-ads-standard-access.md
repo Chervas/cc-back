@@ -53,10 +53,10 @@ The versioned default policy uses:
 | Lead | 0 EUR | Observation |
 | Contact | 0 EUR | Observation |
 | Qualified Lead | 10 EUR | Relative optimization/reporting weight |
-| Schedule | 40 EUR | Relative optimization/reporting weight |
-| Purchase | CRM value | Real treatment value only when reliable |
+| Schedule | 40 EUR | Relative optimization/reporting weight for an appointment scheduled and linked to the lead; not necessarily confirmed or attended |
+| Purchase | Disabled in Propdental | Current code can derive catalog `precio_base`/`0`; this is not accepted/paid revenue and cannot be a bidding value |
 
-The `10/40` values are not revenue, price, margin or ROAS and do not authorize `Maximize Conversion Value`. Qualified Lead is the initial managed bidding signal; Schedule and Purchase require later lifecycle evidence.
+The `10/40` values are not revenue, price, margin or ROAS and do not authorize `Maximize Conversion Value`. Qualified Lead is the initial managed bidding signal; Schedule requires later lifecycle evidence. Purchase must remain disabled until CRM persists an authoritative accepted/paid amount or margin with sufficient coverage; the treatment catalog price does not satisfy that contract.
 
 ## 5. Consent, Enhanced conversions and healthcare restrictions
 
@@ -87,6 +87,7 @@ Schedule is not yet an end-to-end operational transition. The evaluator lacks a 
 - Propdental customer accounts: `1851215478` and `5992356722`.
 - Both accounts have accepted data terms and have Enhanced conversions for leads enabled.
 - Lead, Contact, Qualified Lead and Schedule are configured with explicit per-account destinations; Purchase remains outside Enhanced and requires a reliable CRM value/event.
+- The current milestone service can build Purchase from a completed appointment with treatment and `Tratamientos.precio_base` (or `0`). Propdental keeps the event disabled because that value is neither authoritative revenue nor margin.
 - Current Propdental managed-campaign snapshot remains `draft + observe + unfunded`; no active managed pilot or applied optimization policy is implied by conversion readiness.
 - Call reporting is disabled for both accounts by advertiser decision; historical call actions/assets are not deleted and `AD_CALL` is not part of the Clinicaclick custom goal.
 
