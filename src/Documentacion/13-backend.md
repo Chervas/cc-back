@@ -2173,6 +2173,15 @@ En `.env` / `.env.example`:
   - Procesa `CallInitiated` para tel-modal.
   - Si el lead deduplicado todavía no tenía `clinica_id`, el runtime lo enriquece a partir del request o del teléfono pulsado dentro del grupo.
   - Emite `lead:call_initiated` por socket a la clínica resuelta.
+
+### Routing autoritativo de formularios de grupo (2026-07-13)
+
+- Para un formulario interceptado con scope de grupo, `IntakeConfig.config.locations` define los únicos IDs de clínica admisibles. El nombre interno de `Clinicas` y `label`/`public_label` solo son aliases para los IDs presentes en esa lista; nunca amplían el scope.
+- `extractClinicLabelHint` separa etiquetas humanas de campos técnicos. En particular, ignora `clinica_id=0`/`clinic_id=0` y toma después la etiqueta de `form_submission.fields.clinica`. Esto evita que el sentinel del runtime eclipse una sede elegida.
+- `resolveConfiguredFormClinicLocation` normaliza mayúsculas y acentos, exige una coincidencia inequívoca y comprueba grupo y estado activo. Desconocido, ambiguo, inactivo o fuera de grupo devuelve `422 invalid_form_location` antes de `resolveFallbackClinicForGroup`, `dedupeAndCreateLead` o cualquier evento.
+- Propdental usa cinco destinos configurados: Sants `19`, Nou Barris `35`, Sant Martí `56`, Badalona `58` y Hospitalet `59`. La clínica histórica `55` no participa.
+- E2E público del CF7 `77822`: `Propdental Sant Martí` creó un único `web_form` en `56`, `clinic_match_source=configured_location_label` y un `FormSubmissionEvent`. Chat/QuickChat conservaron también `56`, con un resumen interno oculto; el modal de `tel:602480829` creó `tel_modal` en `56` y `CallInitiated` quedó enlazado.
+- Las tres pruebas se hicieron sin click IDs y con Marketing denegado; no existieron intentos Google. Dry-run, rollback y limpieza comprometida dejaron cero restos sintéticos y devolvieron el grupo `5` a cuatro leads reales (`MAX(id)=7186`). El procedimiento reproducible está en `docs/intake-e2e-cleanup.md`.
 - `PUT /api/intake/leads/:id/call-outcome`
   - Registra el resultado operativo de la llamada (`citado`, `informacion`, `no_contactado`).
   - Emite `lead:call_outcome` por socket para cerrar alertas pendientes en UI.
@@ -3364,6 +3373,7 @@ Los `external_targets` guardados dentro de una estrategia son un snapshot editab
 - el audit embebido conserva versión, clave, fuente, cuentas y resultado de cada gate; `SyncLog.status_report.internal_enhanced_conversion_activation` registra cada ciclo sin PII y declara `google_ads_mutated=false`;
 - la política de valores v1 usa Lead `0 EUR`, Contact `0 EUR`, Qualified Lead `10 EUR` y Schedule `40 EUR` como pesos de reporting/optimización (`value_is_revenue=false`). Purchase no se materializa por este gate y solo usa valor económico real. Este flujo no cambia automáticamente la estrategia de puja ni los objetivos de Google;
 - estado live verificado el 2026-07-13: una lectura directa a Google devolvió `enhanced_conversions_for_leads_enabled=true` para `1851215478` y `5992356722`; a las 06:42 UTC el reconciliador dejó el scope en `activated`, con disclosure/runtime de user data, `google_ads.user_data_enabled` y los eventos/valores Enhanced habilitados. La activación interna no dependió de Play ni mutó Google Ads.
+- validación posterior al gate: Data Manager aceptó dos payloads `validateOnly=true`, uno por cuenta y acción Lead canónica, con email/teléfono sintéticos ya normalizados/hasheados y ambas señales de consentimiento en `GRANTED`. Hubo `requestId` en las dos respuestas y cero ingestión. Los E2E de CF7/chat/teléfono, realizados con Marketing denegado y sin click IDs, no generaron intentos de conversión; la próxima prueba de atribución completa será un lead publicitario natural consentido observado por Diagnostics.
 
 Formato de configuración multi-cuenta por evento:
 
