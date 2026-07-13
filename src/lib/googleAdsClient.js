@@ -158,7 +158,10 @@ async function googleAdsRequest(method = 'GET', path, {
   data,
   singleAttempt = false,
   waitNextHour = false,
-  timeoutMs = 0
+  timeoutMs = Math.max(
+    1000,
+    Number(process.env.GOOGLE_ADS_HTTP_TIMEOUT_MS || process.env.SYNC_PROVIDER_HTTP_TIMEOUT_MS || 30000) || 30000
+  )
 } = {}) {
   const { developerToken } = ensureGoogleAdsConfig();
   const quotaLimit = parseInt(process.env.GOOGLE_ADS_DAILY_QUOTA || '1500', 10);

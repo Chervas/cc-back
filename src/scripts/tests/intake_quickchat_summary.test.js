@@ -139,6 +139,23 @@ async function testSummaryMaterialization() {
   assert.equal(canonicalCalls[0].leadId, lead.id);
   assert.equal(canonicalCalls[0].createIfMissing, true);
 
+  const suppliedTransaction = { LOCK: { UPDATE: 'SUPPLIED_UPDATE' } };
+  const transactionReuse = await materializeIntakeQuickChatSummary({
+    leadId: lead.id,
+    clinicId: 56,
+    body,
+  }, {
+    ...dependencies,
+    transaction: suppliedTransaction,
+    sequelize: {
+      transaction: async () => {
+        throw new Error('must not open a nested transaction');
+      },
+    },
+  });
+  assert.equal(transactionReuse.created, false);
+  assert.equal(canonicalCalls.at(-1).transaction, suppliedTransaction);
+
   const retry = await materializeIntakeQuickChatSummary({
     leadId: lead.id,
     clinicId: 56,
@@ -388,10 +405,13 @@ function testControllerStopsBeforeExternalTracking() {
   const ingestEnd = source.indexOf('exports.previewLeadImport =', ingestStart);
   const ingest = source.slice(ingestStart, ingestEnd);
   const quickStart = ingest.indexOf('if (isQuickChatSummaryRequest(body))');
-  const quickEnd = ingest.indexOf('let formSubmissionEvent = null', quickStart);
+  const quickEnd = ingest.indexOf('// La primera llamada del widget (`source_detail=chatbot`)', quickStart);
   const quickBlock = ingest.slice(quickStart, quickEnd);
   const metaSend = ingest.indexOf('await sendMetaEvent({');
   const googleSend = ingest.indexOf('await maybeUploadGoogleConversion({');
+  const embeddedSummaryComment = ingest.indexOf('// La primera llamada del widget (`source_detail=chatbot`)');
+  const embeddedSummaryCall = ingest.indexOf('embeddedQuickChatSummary = await materializeIntakeQuickChatSummary({');
+  const persistedLeadResponse = ingest.lastIndexOf('res.status(201).json({');
   const chatLocationResolution = ingest.indexOf('await resolveChatStateClinicSelection({');
   const groupFallback = ingest.indexOf('await resolveFallbackClinicForGroup(');
   const invalidLocationResponse = ingest.indexOf("error: 'invalid_chat_location'");
@@ -403,6 +423,15 @@ function testControllerStopsBeforeExternalTracking() {
   assert.doesNotMatch(quickBlock, /sendMetaEvent|maybeUploadGoogleConversion|outboundWhatsApp|queues\./);
   assert.ok(quickEnd < metaSend, 'QuickChat summary must return before Meta CAPI');
   assert.ok(quickEnd < googleSend, 'QuickChat summary must return before Google Ads uploads');
+  assert.equal(embeddedSummaryComment, quickEnd, 'save_lead must document its embedded QuickChat fallback');
+  assert.ok(
+    embeddedSummaryCall > quickEnd && embeddedSummaryCall < metaSend && embeddedSummaryCall < googleSend,
+    'save_lead must materialize QuickChat before Meta/Google so a client timeout cannot orphan the lead'
+  );
+  assert.ok(
+    persistedLeadResponse > metaSend && persistedLeadResponse > googleSend,
+    'save_lead must preserve the existing best-effort tracking before acknowledging the request'
+  );
   assert.ok(
     chatLocationResolution >= 0 && chatLocationResolution < groupFallback,
     'chat_state.data.location must be validated before applying the group fallback clinic'

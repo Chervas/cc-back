@@ -8624,7 +8624,7 @@ exports.updateMarketingStrategy = asyncHandler(async (req, res) => {
       return res.status(400).json({
         success: false,
         error: 'validation_error',
-        message: 'Vincula al menos una campaña externa para continuar con Solo Conectar.'
+        message: 'Vincula al menos una campaña externa para continuar con Mide y mejora.'
       });
     }
 
@@ -9008,7 +9008,7 @@ exports.createMarketingStrategy = asyncHandler(async (req, res) => {
     return res.status(409).json({
       success: false,
       error: 'legacy_mode_read_only',
-      message: 'La configuración antigua de gestión propia es solo de lectura. Selecciona Conecta y mide o Piloto automático antes de crear una estrategia.'
+      message: 'La configuración antigua de gestión propia es solo de lectura. Selecciona Mide y mejora o Piloto automático antes de crear una estrategia.'
     });
   }
 
@@ -9057,7 +9057,7 @@ exports.createMarketingStrategy = asyncHandler(async (req, res) => {
       return res.status(400).json({
         success: false,
         error: 'validation_error',
-        message: 'Vincula al menos una campaña externa para continuar con Solo Conectar.'
+        message: 'Vincula al menos una campaña externa para continuar con Mide y mejora.'
       });
     }
 

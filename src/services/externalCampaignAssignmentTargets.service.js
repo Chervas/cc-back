@@ -373,7 +373,7 @@ function matchingIssueForAssignment(assignment, targetOptions) {
     treatment_id: item.target_treatment_id,
   })) {
     code = 'target_invalid';
-    message = 'El target guardado ya no pertenece a una estrategia activa Conecta y mide de la misma clínica.';
+    message = 'El target guardado ya no pertenece a una estrategia activa Mide y mejora de la misma clínica.';
   } else if (item.target_confidence === null || item.target_confidence === undefined
     || !cleanText(item.target_explanation, 1024)) {
     code = 'target_review_metadata_missing';
@@ -679,7 +679,7 @@ async function resolveRequestedTarget({
     || positiveInt(plain(request).campaign_id) !== parsed.strategyCampaignId) {
     throw assignmentTargetError(
       'matching_target_strategy_invalid',
-      'El target debe pertenecer a una estrategia Captar nuevos pacientes, Conecta y mide y activa.',
+      'El target debe pertenecer a una estrategia Captar nuevos pacientes, Mide y mejora y activa.',
       409
     );
   }

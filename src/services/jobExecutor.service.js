@@ -8,10 +8,15 @@ const marketingBulkSendsService = require('./marketingBulkSends.service');
 const googleReviewMatchService = require('./googleReviewMatch.service');
 const { buildNotificationContent } = require('./notifications.service');
 const { emitNotificationCreated } = require('./notificationsRealtime.service');
+const {
+  SCHEDULED_JOB_DEFINITIONS,
+  BACKGROUND_INTEGRATION_JOB_TYPES,
+} = require('../config/scheduledJobCatalog');
 
 const DEFAULT_TIMEOUT_MS = Number(process.env.JOB_EXECUTOR_MAX_RUNTIME_MS || 30 * 60 * 1000);
 const DEFAULT_WAITING_BACKOFF_MS = Number(process.env.JOB_SCHEDULER_WAITING_BACKOFF_MS || 15 * 60 * 1000);
 const DEFAULT_FLOW_WAITING_BACKOFF_MS = Number(process.env.FLOW_V2_WAITING_BACKOFF_MS || 60 * 1000);
+const BACKGROUND_INTEGRATION_TYPES = new Set(BACKGROUND_INTEGRATION_JOB_TYPES);
 
 const FlowExecutionV2 = db.FlowExecutionV2;
 const LeadIntake = db.LeadIntake;
@@ -324,26 +329,53 @@ async function runAppointmentAutomationScheduleJob(payload = {}) {
   };
 }
 
+function buildScheduledJobHandlers() {
+  return Object.values(SCHEDULED_JOB_DEFINITIONS).reduce((handlers, definition) => {
+    handlers[definition.type] = async (payload = {}, jobRequest = null) => {
+      const executor = metaSyncJobs[definition.executorMethod];
+      if (typeof executor !== 'function') {
+        throw new Error(
+          `Scheduled job '${definition.type}' references missing executor '${definition.executorMethod}'`
+        );
+      }
+      const executorPayload = {
+        ...(definition.payloadDefaults || {}),
+        ...(payload || {}),
+      };
+      if (definition.attachJobRequestId && jobRequest?.id) {
+        executorPayload.jobRequestId = jobRequest.id;
+      }
+      const result = await executor.call(metaSyncJobs, executorPayload);
+      if (
+        result?.status === 'failed'
+        && result.retryable === undefined
+        && definition.reportedFailureRetryable === false
+      ) {
+        return { ...result, retryable: false };
+      }
+      return result;
+    };
+    return handlers;
+  }, {});
+}
+
 const JOB_HANDLERS = {
-  meta_ads_recent: async (payload = {}) => metaSyncJobs.executeAdsSync(payload),
-  meta_ads_midday: async (payload = {}) => metaSyncJobs.executeAdsSync({ ...payload, windowLabel: 'midday' }),
-  meta_ads_backfill: async (payload = {}) => metaSyncJobs.executeAdsBackfill(payload),
-  meta_ads_backfill_for_sites: async (payload = {}) => metaSyncJobs.executeAdsBackfillForSites?.(payload) ?? metaSyncJobs.executeAdsBackfill(payload),
-  google_ads_recent: async (payload = {}) => metaSyncJobs.executeGoogleAdsSync(payload),
-  google_ads_backfill: async (payload = {}) => metaSyncJobs.executeGoogleAdsBackfill(payload),
-  web_recent: async (payload = {}) => metaSyncJobs.executeWebSync(payload),
-  web_backfill: async (payload = {}) => metaSyncJobs.executeWebBackfill(payload),
+  ...buildScheduledJobHandlers(),
+  meta_ads_backfill_for_sites: async (payload = {}) => {
+    const mappings = Array.isArray(payload.mappings) ? payload.mappings : [];
+    const clinicIds = Array.from(new Set([
+      ...(Array.isArray(payload.clinicIds) ? payload.clinicIds : []),
+      ...mappings.map((item) => item?.clinicId ?? item?.clinicaId),
+    ].map(Number).filter(Number.isFinite)));
+    if (!clinicIds.length) {
+      throw new Error('meta_ads_backfill_for_sites requires mappings or clinicIds');
+    }
+    return metaSyncJobs.executeAdsBackfill({ ...payload, clinicIds });
+  },
   web_backfill_for_sites: async (payload = {}) => metaSyncJobs.executeWebBackfillForSites(payload.siteMappings || payload.mappings || []),
-  analytics_recent: async (payload = {}) => metaSyncJobs.executeAnalyticsSync(payload),
-  analytics_backfill: async (payload = {}) => metaSyncJobs.executeAnalyticsBackfill(payload),
   analytics_backfill_properties: async (payload = {}) => metaSyncJobs.executeAnalyticsBackfillForProperties(payload.mappings || []),
-  business_profile_recent: async (payload = {}) => metaSyncJobs.executeBusinessProfileSync(payload),
-  business_profile_reviews_recent: async (payload = {}) => metaSyncJobs.executeBusinessProfileReviewsSync(payload),
-  business_profile_backfill: async (payload = {}) => metaSyncJobs.executeBusinessProfileBackfill(payload),
   business_profile_backfill_locations: async (payload = {}) => metaSyncJobs.executeBusinessProfileBackfillForLocations(payload.mappings || []),
   business_profile_review_match: async (payload = {}) => googleReviewMatchService.runBusinessProfileReviewMatchJob(payload),
-  competition_refresh: async (payload = {}) => metaSyncJobs.executeCompetitionSync(payload),
-  web_events_aggregate: async (payload = {}) => metaSyncJobs.executeWebEventsAggregate(payload),
   whatsapp_coexistence_sync_contacts: async (payload = {}) => whatsappCoexistenceService.runContactsSyncJob(payload),
   whatsapp_coexistence_sync_history: async (payload = {}) => whatsappCoexistenceService.runHistorySyncJob(payload),
   whatsapp_template_create: async (payload = {}) => runWhatsappTemplateCreateJob(payload),
@@ -371,6 +403,93 @@ const asPromiseWithTimeout = (promise, timeoutMs) => {
   ]);
 };
 
+const shouldUseExecutionTimeout = (jobType) => !BACKGROUND_INTEGRATION_TYPES.has(normalizeJobType(jobType));
+
+const buildTimeoutFailureResult = () => ({
+  status: 'failed',
+  nextRunAt: null,
+  syncLogId: null,
+  retryable: false,
+  error: new Error(
+    'Se excedió el tiempo máximo; no se reintentará automáticamente porque la ejecución original no puede cancelarse'
+  ),
+});
+
+const asNonNegativeCount = (value) => {
+  const count = Number(value);
+  return Number.isFinite(count) && count >= 0 ? count : null;
+};
+
+const readFirstCount = (containers, keys) => {
+  for (const container of containers) {
+    if (!container || typeof container !== 'object') continue;
+    for (const key of keys) {
+      const count = asNonNegativeCount(container[key]);
+      if (count !== null) return count;
+    }
+  }
+  return null;
+};
+
+function normalizeScheduledExecutionResult(result) {
+  if (!result || result.status !== 'completed') {
+    return result;
+  }
+
+  const containers = [result, result.report, result.status_report].filter(Boolean);
+  const errorCount = Math.max(0, ...containers.map((container) => {
+    const value = container?.errors;
+    return Array.isArray(value) ? value.length : (asNonNegativeCount(value) || 0);
+  }));
+
+  if (!errorCount) {
+    return result;
+  }
+
+  const processed = readFirstCount(containers, [
+    'processedAccounts',
+    'processedProperties',
+    'processedLocations',
+    'processedAssets',
+    'processedSites',
+    'processed',
+    'recordsProcessed',
+    'records_processed',
+    'succeeded',
+    'successes',
+  ]) || 0;
+  const explicitEligible = readFirstCount(containers, [
+    'accounts',
+    'properties',
+    'locations',
+    'assets',
+    'sites',
+    'campaigns',
+    'eligible',
+    'checked',
+    'scanned',
+    'total',
+  ]);
+  const eligible = Math.max(explicitEligible || 0, processed + errorCount);
+
+  if (eligible > 0 && processed === 0) {
+    return {
+      ...result,
+      status: 'failed',
+      retryable: true,
+      total_failure: true,
+      outcome: { eligible, processed, errors: errorCount },
+    };
+  }
+
+  return {
+    ...result,
+    status: 'completed_with_errors',
+    partial: true,
+    outcome: { eligible, processed, errors: errorCount },
+  };
+}
+
 function resolveNextRun({ pauseUntil, backoffMs }) {
   if (pauseUntil) {
     const resume = new Date(pauseUntil);
@@ -396,10 +515,16 @@ async function runJob(jobRequest) {
 
   try {
     const payload = jobRequest.payload || {};
-    const result = await asPromiseWithTimeout(
-      handler(payload, jobRequest),
-      DEFAULT_TIMEOUT_MS
-    );
+    const execution = Promise.resolve().then(() => handler(payload, jobRequest));
+    // Promise.race no cancela el handler original. Los cron del catálogo deben
+    // finalizar por sí mismos para que nunca se reprograme un segundo barrido
+    // mientras el primero aún puede seguir mutando proveedores o la BD.
+    const rawResult = shouldUseExecutionTimeout(jobType)
+      ? await asPromiseWithTimeout(execution, DEFAULT_TIMEOUT_MS)
+      : await execution;
+    const result = BACKGROUND_INTEGRATION_TYPES.has(jobType)
+      ? normalizeScheduledExecutionResult(rawResult)
+      : rawResult;
 
     if (result && result.status === 'waiting') {
       const nextRunAt = resolveNextRun({
@@ -410,7 +535,22 @@ async function runJob(jobRequest) {
         status: 'waiting',
         nextRunAt,
         syncLogId: result.syncLogId || null,
+        error: result.error instanceof Error ? result.error : null,
         result
+      };
+    }
+
+    if (result && result.status === 'failed') {
+      const handlerError = result.error instanceof Error
+        ? result.error
+        : new Error(result.error_message || `${jobType} devolvió estado failed`);
+      return {
+        status: 'failed',
+        nextRunAt: null,
+        syncLogId: result.syncLogId || null,
+        error: handlerError,
+        retryable: result.retryable !== false,
+        result,
       };
     }
 
@@ -422,12 +562,7 @@ async function runJob(jobRequest) {
     };
   } catch (error) {
     if (error && error.message === 'JOB_EXECUTOR_TIMEOUT') {
-      return {
-        status: 'waiting',
-        nextRunAt: resolveNextRun({ backoffMs: DEFAULT_WAITING_BACKOFF_MS }),
-        syncLogId: null,
-        error: new Error('Se excedió el tiempo máximo de ejecución')
-      };
+      return buildTimeoutFailureResult();
     }
 
     return {
@@ -441,5 +576,8 @@ async function runJob(jobRequest) {
 
 module.exports = {
   runJob,
-  JOB_HANDLERS
+  JOB_HANDLERS,
+  _shouldUseExecutionTimeout: shouldUseExecutionTimeout,
+  _buildTimeoutFailureResult: buildTimeoutFailureResult,
+  _normalizeScheduledExecutionResult: normalizeScheduledExecutionResult,
 };

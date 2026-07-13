@@ -27,7 +27,7 @@ the managed goal contract in
 2. ClinicaClick reads account/campaign inventory and maps each external campaign using the full provider + account + campaign identity.
 3. `intake.js` and the CRM create idempotent milestones with attribution. A configured `customer_id`, campaign association or destination key selects exactly one allowed conversion destination.
 4. The backend uploads the event with a stable transaction ID, a permitted `gclid`/`gbraid`/`wbraid` when present, and/or allowlisted Enhanced user data when expressly authorized.
-5. Data Manager returns synchronous acceptance; `googleDataManagerDiagnostics` retrieves the final asynchronous result every 30 minutes.
+5. Data Manager returns synchronous acceptance; the durable `google_data_manager_diagnostics` `JobRequest` retrieves the final asynchronous result every 30 minutes and links its `SyncLog`.
 6. Reporting combines Ads metrics with ClinicaClick's audited CRM milestones. An accepted HTTP response is never presented as proof of final attribution.
 
 ## 3. Canonical conversion actions

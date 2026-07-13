@@ -16,6 +16,14 @@
 const cron = require('node-cron');
 const axios = require('axios');
 const crypto = require('crypto');
+const SYNC_PROVIDER_HTTP_TIMEOUT_MS = Math.max(
+  1000,
+  Number(process.env.SYNC_PROVIDER_HTTP_TIMEOUT_MS || 30000) || 30000
+);
+// Los jobs de integración comparten un carril secuencial. Un socket sin
+// límite bloquearía todos los proveedores. La instancia es local para no
+// alterar el timeout de otros controladores del backend.
+const syncHttp = axios.create({ timeout: SYNC_PROVIDER_HTTP_TIMEOUT_MS });
 const { Op } = require('sequelize');
 // Unificar lógica: reutilizar las funciones del controlador
 const { 
@@ -39,6 +47,11 @@ const { enqueueSyncPhonesForAllWabas } = require('../services/whatsappPhones.ser
 const marketingCompetitionService = require('../services/marketingCompetition.service');
 const webEventsService = require('../services/webEvents.service');
 const googleReviewMatchService = require('../services/googleReviewMatch.service');
+const jobRequestsService = require('../services/jobRequests.service');
+const {
+  SCHEDULED_JOB_DEFINITIONS,
+  getScheduledJobDefinition,
+} = require('../config/scheduledJobCatalog');
 const { reconcileGoogleDataManagerDiagnostics } = require('../services/googleDataManagerDiagnostics.service');
 const {
   reconcileEnhancedConversionsInternalActivation,
@@ -361,43 +374,15 @@ class MetaSyncJobs {
     try {
       console.log('🚀 Inicializando Sistema de Jobs Cron...');
       
-      // Registrar jobs con configuraciones del .env
-      this.registerJob('metricsSync', this.config.schedules.metricsSync, () => this.executeMetricsSync());
-      this.registerJob('tokenValidation', this.config.schedules.tokenValidation, () => this.executeTokenValidation());
-      this.registerJob('dataCleanup', this.config.schedules.dataCleanup, () => this.executeDataCleanup());
-      this.registerJob('healthCheck', this.config.schedules.healthCheck, () => this.executeHealthCheck());
-      this.registerJob('adsSync', this.config.schedules.adsSync, () => this.executeAdsSync());
-      this.registerJob('adsSyncMidday', this.config.schedules.adsSyncMidday, () => this.executeAdsSync({ windowLabel: 'midday' }));
-      this.registerJob('adsBackfill', this.config.schedules.adsBackfill, () => this.executeAdsBackfill());
-      this.registerJob('googleAdsSync', this.config.schedules.googleAdsSync, () => this.executeGoogleAdsSync());
-      this.registerJob('googleAdsBackfill', this.config.schedules.googleAdsBackfill, () => this.executeGoogleAdsBackfill());
-      this.registerJob(
-        'googleDataManagerDiagnostics',
-        this.config.schedules.googleDataManagerDiagnostics,
-        () => this.executeGoogleDataManagerDiagnostics()
-      );
-      this.registerJob(
-        'googleConversionGoalPolicyAudit',
-        this.config.schedules.googleConversionGoalPolicyAudit,
-        () => this.executeGoogleConversionGoalPolicyAudit()
-      );
-      this.registerJob(
-        'campaignOptimizationEvaluation',
-        this.config.schedules.campaignOptimizationEvaluation,
-        () => this.executeCampaignOptimizationEvaluation()
-      );
-      this.registerJob('webSync', this.config.schedules.webSync, () => this.executeWebSync());
-      this.registerJob('webBackfill', this.config.schedules.webBackfill, () => this.executeWebBackfill());
-      this.registerJob('analyticsSync', this.config.schedules.analyticsSync, () => this.executeAnalyticsSync());
-      this.registerJob('analyticsBackfill', this.config.schedules.analyticsBackfill, () => this.executeAnalyticsBackfill());
-      this.registerJob('businessProfileSync', this.config.schedules.businessProfileSync, () => this.executeBusinessProfileSync());
-      this.registerJob('businessProfileReviewsSync', this.config.schedules.businessProfileReviewsSync, () => this.executeBusinessProfileReviewsSync());
-      this.registerJob('businessProfileBackfill', this.config.schedules.businessProfileBackfill, () => this.executeBusinessProfileBackfill());
-      this.registerJob('competitionSync', this.config.schedules.competitionSync, () => this.executeCompetitionSync());
-      this.registerJob('webEventsAggregate', this.config.schedules.webEventsAggregate, () => this.executeWebEventsAggregate());
-      this.registerJob('whatsappTemplatesSync', this.config.schedules.whatsappTemplatesSync, () => this.executeWhatsappTemplatesSync());
-      this.registerJob('whatsappPhonesSync', this.config.schedules.whatsappPhonesSync, () => this.executeWhatsappPhonesSync());
-      this.registerJob('automationHealthCheck', this.config.schedules.automationHealthCheck, () => this.executeAutomationHealthCheck());
+      // node-cron solo dispara la creación durable. Ningún callback periódico
+      // ejecuta negocio directamente: todos pasan por JobRequest + scheduler.
+      for (const jobName of Object.keys(SCHEDULED_JOB_DEFINITIONS)) {
+        const schedule = this.config.schedules[jobName];
+        if (!schedule) {
+          throw new Error(`Falta schedule para el job periódico '${jobName}'`);
+        }
+        this.registerJob(jobName, schedule, () => this.enqueueScheduledJob(jobName));
+      }
 
       this.isInitialized = true;
       
@@ -447,11 +432,50 @@ class MetaSyncJobs {
       schedule,
       handler,
       lastExecution: null,
+      lastEnqueuedAt: null,
+      lastEnqueueAttempt: null,
+      lastJobRequestId: null,
       status: 'registered',
       description: this.jobDescriptions[name] || ''
     });
 
     console.log(`📝 Job '${name}' registrado con programación: ${schedule} (${this.config.timezone})`);
+  }
+
+  /**
+   * Materializa el disparo cron como JobRequest durable.
+   *
+   * Si el ciclo anterior sigue pending/running/waiting en este mismo runtime,
+   * se conserva ese job y no se crea un barrido paralelo.
+   */
+  async enqueueScheduledJob(jobName, options = {}) {
+    const definition = getScheduledJobDefinition(jobName);
+    if (!definition) {
+      throw new Error(`Job periódico '${jobName}' no definido en el catálogo`);
+    }
+
+    const result = await jobRequestsService.enqueueUniqueJobRequest({
+      type: definition.type,
+      payload: options.payload || {},
+      priority: options.priority || definition.priority || 'normal',
+      origin: options.origin || `cron:${jobName}`,
+      maxAttempts: Number(
+        options.maxAttempts
+        || definition.maxAttempts
+        || this.config.retries.maxAttempts
+        || 3
+      ),
+      nextRunAt: options.nextRunAt || null,
+    });
+
+    return {
+      status: result.created ? 'enqueued' : 'already_queued',
+      queued: result.created,
+      already_queued: !result.created,
+      job_request_id: result.job.id,
+      job_type: definition.type,
+      runtime_namespace: result.job.payload?.__runtime_namespace || null,
+    };
   }
 
   /**
@@ -532,14 +556,26 @@ class MetaSyncJobs {
         
         const result = await handler();
         
-        // Actualizar información del job
+        // El callback cron solo materializa un JobRequest. La finalización real
+        // se observa en JobRequests/SyncLogs, no en el monitor de node-cron.
         const jobData = this.jobs.get(jobName);
         if (jobData) {
-          jobData.lastExecution = new Date();
-          jobData.status = 'completed';
+          if (result?.job_request_id) {
+            jobData.lastEnqueuedAt = new Date();
+            jobData.lastJobRequestId = result.job_request_id;
+            jobData.status = result.queued ? 'enqueued' : 'already_queued';
+          } else {
+            jobData.lastExecution = new Date();
+            jobData.status = 'completed';
+          }
+          jobData.lastError = null;
         }
 
-        console.log(`✅ Job '${jobName}' completado exitosamente`);
+        console.log(
+          result?.job_request_id
+            ? `📥 Job '${jobName}' ${result.queued ? 'encolado' : 'ya estaba encolado'} (${result.job_request_id})`
+            : `✅ Job '${jobName}' completado exitosamente`
+        );
         return result;
         
       } catch (error) {
@@ -549,7 +585,11 @@ class MetaSyncJobs {
           // Actualizar estado del job como fallido
           const jobData = this.jobs.get(jobName);
           if (jobData) {
-            jobData.lastExecution = new Date();
+            if (getScheduledJobDefinition(jobName)) {
+              jobData.lastEnqueueAttempt = new Date();
+            } else {
+              jobData.lastExecution = new Date();
+            }
             jobData.status = 'failed';
             jobData.lastError = error.message;
           }
@@ -714,15 +754,29 @@ class MetaSyncJobs {
     
     try {
       const result = await jobData.handler();
-      
-      jobData.lastExecution = new Date();
-      jobData.status = 'completed';
-      
-      console.log(`✅ Job '${jobName}' ejecutado correctamente`);
+
+      if (result?.job_request_id) {
+        jobData.lastEnqueuedAt = new Date();
+        jobData.lastJobRequestId = result.job_request_id;
+        jobData.status = result.queued ? 'enqueued' : 'already_queued';
+        jobData.lastError = null;
+        console.log(
+          `📥 Job '${jobName}' ${result.queued ? 'encolado' : 'ya estaba encolado'} (${result.job_request_id})`
+        );
+      } else {
+        jobData.lastExecution = new Date();
+        jobData.status = 'completed';
+        jobData.lastError = null;
+        console.log(`✅ Job '${jobName}' ejecutado correctamente`);
+      }
       return result;
       
     } catch (error) {
-      jobData.lastExecution = new Date();
+      if (getScheduledJobDefinition(jobName)) {
+        jobData.lastEnqueueAttempt = new Date();
+      } else {
+        jobData.lastExecution = new Date();
+      }
       jobData.status = 'failed';
       jobData.lastError = error.message;
       
@@ -746,6 +800,7 @@ class MetaSyncJobs {
 
   try {
     let totalProcessed = 0;
+    let processedAssets = 0;
     const errors = [];
 
     // Obtener todos los assets activos (FB Page + IG Business) con conexión válida
@@ -771,6 +826,7 @@ class MetaSyncJobs {
       try {
         const processed = await this.syncAssetMetrics(asset);
         totalProcessed += processed;
+        processedAssets += 1;
         console.log(`✅ Asset ${asset.metaAssetName}: ${processed} métricas sincronizadas`);
         // Progreso + estado de uso API
         try {
@@ -792,20 +848,36 @@ class MetaSyncJobs {
       }
     }
 
-    // Actualizar log de sincronización
+    const totalFailure = activeAssets.length > 0
+      && processedAssets === 0
+      && errors.length > 0;
+    const report = {
+      assets: activeAssets.length,
+      processedAssets,
+      totalMetrics: totalProcessed,
+      errors
+    };
+
+    // SyncLogs solo admite completed/failed; el detalle parcial queda en el
+    // reporte y JobRequest lo expone como completed_with_errors.
     await syncLog.update({
-      status: 'completed',
+      status: totalFailure ? 'failed' : 'completed',
       end_time: new Date(),
       records_processed: totalProcessed,
-      status_report: JSON.stringify({
-        assetsProcessed: activeAssets.length,
-        totalMetrics: totalProcessed,
-        errors: errors.length > 0 ? errors : null
-      })
+      error_message: totalFailure ? 'Fallaron todos los assets elegibles' : null,
+      status_report: report
     });
 
     console.log(`✅ Sincronización completada: ${totalProcessed} métricas procesadas`);
-    return { success: true, processed: totalProcessed };
+    return {
+      status: totalFailure ? 'failed' : 'completed',
+      retryable: totalFailure ? true : undefined,
+      assets: activeAssets.length,
+      processed: processedAssets,
+      metricsProcessed: totalProcessed,
+      errors,
+      report
+    };
 
   } catch (error) {
     console.error('❌ Error en sincronización de métricas:', error);
@@ -1141,6 +1213,12 @@ class MetaSyncJobs {
         if (!byClinic.has(a.clinicaId)) byClinic.set(a.clinicaId, []);
         byClinic.get(a.clinicaId).push(a);
       }
+      const report = {
+        sites: assets.length,
+        clinics: byClinic.size,
+        processed: 0,
+        errors: []
+      };
       const end = new Date(); end.setHours(0,0,0,0);
       const start = new Date(end); start.setDate(start.getDate() - (this.config.web.recentDays-1));
       let processed = 0;
@@ -1155,7 +1233,7 @@ class MetaSyncJobs {
           try {
             const expiresAt = conn.expiresAt ? new Date(conn.expiresAt).getTime() : 0;
             if (expiresAt && expiresAt < Date.now() + 60000 && conn.refreshToken) {
-              const tr = await axios.post('https://oauth2.googleapis.com/token', new URLSearchParams({
+              const tr = await syncHttp.post('https://oauth2.googleapis.com/token', new URLSearchParams({
                 client_id: process.env.GOOGLE_CLIENT_ID,
                 client_secret: process.env.GOOGLE_CLIENT_SECRET,
                 grant_type: 'refresh_token',
@@ -1170,7 +1248,7 @@ class MetaSyncJobs {
           // Timeseries por siteUrl (guardar por clínica+site+fecha)
           for (const a of arr) {
             const url = `https://www.googleapis.com/webmasters/v3/sites/${encodeURIComponent(a.siteUrl)}/searchAnalytics/query`;
-            const resp = await axios.post(url, { startDate: fmt(start), endDate: fmt(end), dimensions: ['date'], rowLimit: 25000 }, { headers: { Authorization: `Bearer ${accessToken}` } });
+            const resp = await syncHttp.post(url, { startDate: fmt(start), endDate: fmt(end), dimensions: ['date'], rowLimit: 25000 }, { headers: { Authorization: `Bearer ${accessToken}` } });
             const rows = resp.data?.rows || [];
             for (const r of rows) {
               const date = r.keys?.[0]; if (!date) continue;
@@ -1210,7 +1288,7 @@ class MetaSyncJobs {
             const urlQ = `https://www.googleapis.com/webmasters/v3/sites/${encodeURIComponent(a.siteUrl)}/searchAnalytics/query`;
             const ranges = useChunks ? Array.from(monthChunks(start, end)) : [{ s: fmt(start), e: fmt(end) }];
             for (const rg of ranges) {
-              const respQ = await axios.post(urlQ, { startDate: rg.s, endDate: rg.e, dimensions: ['date','query','page'], rowLimit: 25000 }, { headers: { Authorization: `Bearer ${accessToken}` } });
+              const respQ = await syncHttp.post(urlQ, { startDate: rg.s, endDate: rg.e, dimensions: ['date','query','page'], rowLimit: 25000 }, { headers: { Authorization: `Bearer ${accessToken}` } });
               const rowsQ = respQ.data?.rows || [];
               for (const r of rowsQ) {
                 const date = r.keys?.[0];
@@ -1301,19 +1379,19 @@ class MetaSyncJobs {
               if (!tooSoon) {
                 const siteUrl = arr.find(s=>s.siteUrl.startsWith('http'))?.siteUrl || ('https://' + arr[0].siteUrl.replace('sc-domain:',''));
                 const params = { url: siteUrl, strategy: 'mobile', category: ['performance','accessibility'], key: process.env.GOOGLE_PSI_API_KEY };
-                const psi = await axios.get('https://www.googleapis.com/pagespeedonline/v5/runPagespeed', { params });
+                const psi = await syncHttp.get('https://www.googleapis.com/pagespeedonline/v5/runPagespeed', { params });
                 const lr = psi.data?.lighthouseResult || {};
                 let https_ok = null, https_status = null, sitemap_found = null, sitemap_url = null, sitemap_status = null;
                 try {
                   const origin = new URL(siteUrl).origin;
-                  const r = await axios.get(origin, { timeout: 3500, maxRedirects: 2, validateStatus: ()=>true });
+                  const r = await syncHttp.get(origin, { timeout: 3500, maxRedirects: 2, validateStatus: ()=>true });
                   https_status = r.status; https_ok = (r.status>=200 && r.status<400);
                 } catch {}
                 try {
                   const origin = new URL(siteUrl).origin;
                   const cands = [`${origin}/sitemap.xml`, `${origin}/sitemap_index.xml`];
                   for (const u of cands) {
-                    try { const h = await axios.head(u, { timeout: 2500, validateStatus: ()=>true }); if (h.status>=200 && h.status<400) { sitemap_found=true; sitemap_url=u; sitemap_status=h.status; break; } } catch {}
+                    try { const h = await syncHttp.head(u, { timeout: 2500, validateStatus: ()=>true }); if (h.status>=200 && h.status<400) { sitemap_found=true; sitemap_url=u; sitemap_status=h.status; break; } } catch {}
                   }
                   if (sitemap_found !== true) sitemap_found = false;
                 } catch {}
@@ -1323,7 +1401,7 @@ class MetaSyncJobs {
                   const siteProperty = arr[0].siteUrl;
                   const inspectUrl = siteUrl;
                   const inspectEndpoint = 'https://searchconsole.googleapis.com/v1/urlInspection/index:inspect';
-                  const respI = await axios.post(inspectEndpoint, { inspectionUrl: inspectUrl, siteUrl: siteProperty }, { headers: { Authorization: `Bearer ${accessToken}` } });
+                  const respI = await syncHttp.post(inspectEndpoint, { inspectionUrl: inspectUrl, siteUrl: siteProperty }, { headers: { Authorization: `Bearer ${accessToken}` } });
                   const verdict = respI.data?.inspectionResult?.indexStatusResult?.verdict || '';
                   const coverageState = respI.data?.inspectionResult?.indexStatusResult?.coverageState || '';
                   indexed_ok = (String(verdict).toUpperCase() === 'PASS') || /indexed/i.test(String(coverageState));
@@ -1347,15 +1425,22 @@ class MetaSyncJobs {
           // (Cobertura eliminada)
 
           processed++;
+          report.processed = processed;
           await syncLog.update({ records_processed: processed });
           if (this.config.web.betweenClinicsSleepMs>0) await new Promise(r=>setTimeout(r,this.config.web.betweenClinicsSleepMs));
         } catch (err) {
           console.error('❌ webSync clínica error:', clinicaId, err.message);
+          report.errors.push({ clinicaId, message: err.message });
         }
       }
-      await syncLog.update({ status:'completed', end_time:new Date(), records_processed: processed });
+      await syncLog.update({
+        status:'completed',
+        end_time:new Date(),
+        records_processed: processed,
+        status_report: report
+      });
       console.log('✅ webSync completado:', processed);
-      return { status:'completed', processed };
+      return { status:'completed', processed, report };
     } catch (e) {
       await syncLog.update({ status:'failed', end_time:new Date(), error_message: e.message });
       console.error('❌ Error en webSync:', e);
@@ -1407,12 +1492,21 @@ class MetaSyncJobs {
       start.setDate(start.getDate() - (spanDays - 1));
       const startStr = this._formatDate(start);
       const endStr = this._formatDate(end);
-      const report = { properties: properties.length, start: startStr, end: endStr, rows: 0, dimensionRows: 0, errors: [] };
+      const report = {
+        properties: properties.length,
+        processedProperties: 0,
+        start: startStr,
+        end: endStr,
+        rows: 0,
+        dimensionRows: 0,
+        errors: []
+      };
       let processed = 0;
       for (const property of properties) {
         try {
           const { accessToken } = await this._ensureGoogleAccessToken(property.googleConnectionId);
           const counts = await this._syncGaProperty(property, accessToken, startStr, endStr);
+          report.processedProperties += 1;
           processed += counts.rows || 0;
           report.rows += counts.rows || 0;
           report.dimensionRows += counts.dimensionRows || 0;
@@ -1507,19 +1601,45 @@ class MetaSyncJobs {
     if (!Array.isArray(propertyMappings) || propertyMappings.length === 0) {
       throw new Error('propertyMappings must contain at least one { clinicId, propertyId|propertyName }');
     }
-    const ids = [];
-    const names = [];
+    const mappingsByClinic = new Map();
     propertyMappings.forEach((item) => {
-      if (item?.propertyId) { ids.push(Number(item.propertyId)); }
-      if (item?.propertyName) { names.push(String(item.propertyName)); }
+      const clinicId = item?.clinicId ?? item?.clinicaId;
+      if (!clinicId) return;
+      if (!mappingsByClinic.has(clinicId)) {
+        mappingsByClinic.set(clinicId, { ids: [], names: [] });
+      }
+      const group = mappingsByClinic.get(clinicId);
+      if (item?.propertyId) { group.ids.push(Number(item.propertyId)); }
+      if (item?.propertyName) { group.names.push(String(item.propertyName)); }
     });
+    if (!mappingsByClinic.size) {
+      throw new Error('propertyMappings must include clinicId for every targeted property');
+    }
     const prev = this.config.analytics.recentDays;
     const prevMode = this._analyticsBackfillMode;
     this.config.analytics.recentDays = this.config.analytics.backfillDays;
     this._analyticsBackfillMode = true;
     try {
-      const clinicId = propertyMappings[0]?.clinicId || null;
-      return await this.executeAnalyticsSync({ propertyIds: ids, propertyNames: names, clinicId });
+      const aggregate = {
+        status: 'completed',
+        processed: 0,
+        report: { properties: 0, processedProperties: 0, rows: 0, dimensionRows: 0, errors: [] }
+      };
+      for (const [clinicId, mapping] of mappingsByClinic.entries()) {
+        const result = await this.executeAnalyticsSync({
+          propertyIds: mapping.ids,
+          propertyNames: mapping.names,
+          clinicId
+        });
+        const report = result?.report || {};
+        aggregate.processed += Number(result?.processed || 0);
+        aggregate.report.properties += Number(report.properties || 0);
+        aggregate.report.processedProperties += Number(report.processedProperties || 0);
+        aggregate.report.rows += Number(report.rows || result?.processed || 0);
+        aggregate.report.dimensionRows += Number(report.dimensionRows || 0);
+        aggregate.report.errors.push(...(Array.isArray(report.errors) ? report.errors : []));
+      }
+      return aggregate;
     } finally {
       this._analyticsBackfillMode = prevMode;
       this.config.analytics.recentDays = prev;
@@ -1683,9 +1803,38 @@ class MetaSyncJobs {
     if (!Array.isArray(locationMappings) || locationMappings.length === 0) {
       throw new Error('locationMappings must contain at least one { clinicId, locationId }');
     }
-    const locationIds = Array.from(new Set(locationMappings.map((item) => String(item?.locationId || '').trim()).filter(Boolean)));
-    const clinicId = locationMappings[0]?.clinicId || locationMappings[0]?.clinicaId || null;
-    return this.executeBusinessProfileBackfill({ clinicId, locationIds });
+    const mappingsByClinic = new Map();
+    locationMappings.forEach((item) => {
+      const clinicId = item?.clinicId ?? item?.clinicaId;
+      const locationId = String(item?.locationId || '').trim();
+      if (!clinicId || !locationId) return;
+      if (!mappingsByClinic.has(clinicId)) mappingsByClinic.set(clinicId, new Set());
+      mappingsByClinic.get(clinicId).add(locationId);
+    });
+    if (!mappingsByClinic.size) {
+      throw new Error('locationMappings must include clinicId and locationId');
+    }
+
+    const aggregate = {
+      status: 'completed',
+      processed: 0,
+      report: { locations: 0, processed: 0, metricRows: 0, reviews: 0, posts: 0, errors: [] }
+    };
+    for (const [clinicId, locationIds] of mappingsByClinic.entries()) {
+      const result = await this.executeBusinessProfileBackfill({
+        clinicId,
+        locationIds: [...locationIds]
+      });
+      const report = result?.report || {};
+      aggregate.processed += Number(result?.processed || report.processed || 0);
+      aggregate.report.locations += Number(report.locations || 0);
+      aggregate.report.processed += Number(report.processed || result?.processed || 0);
+      aggregate.report.metricRows += Number(report.metricRows || 0);
+      aggregate.report.reviews += Number(report.reviews || 0);
+      aggregate.report.posts += Number(report.posts || 0);
+      aggregate.report.errors.push(...(Array.isArray(report.errors) ? report.errors : []));
+    }
+    return aggregate;
   }
 
   async executeCompetitionSync(options = {}) {
@@ -1736,6 +1885,10 @@ class MetaSyncJobs {
       records_processed: 0
     });
     try {
+      const jobRequestId = Number(options.jobRequestId || options.job_request_id || 0);
+      if (Number.isInteger(jobRequestId) && jobRequestId > 0) {
+        await jobRequestsService.setSyncLog(jobRequestId, syncLog.id);
+      }
       let visitorChoicePersonalization;
       try {
         visitorChoicePersonalization = await reconcileVisitorChoicePersonalizationCapabilities({
@@ -1800,7 +1953,7 @@ class MetaSyncJobs {
             validate_only: true,
             error: {
               code: error.code || 'CONNECT_ONLY_STRATEGY_READINESS_RECONCILIATION_ERROR',
-              message: 'Falló la reconciliación de readiness de las estrategias Conecta y mide'
+              message: 'Falló la reconciliación de readiness de las estrategias Mide y mejora'
             },
             external_mutation_performed: false,
             google_ads_mutated: false
@@ -1833,7 +1986,12 @@ class MetaSyncJobs {
         strategyReadinessError.strategy_readiness_report = strategyReadinessReconciliation;
         throw strategyReadinessError;
       }
-      return { status: jobStatus, processed: report.checked || 0, report };
+      return {
+        status: jobStatus,
+        processed: report.checked || 0,
+        report,
+        syncLogId: syncLog.id,
+      };
     } catch (error) {
       await syncLog.update({
         status: 'failed',
@@ -1900,7 +2058,7 @@ class MetaSyncJobs {
     }
 
     const params = this._buildBusinessProfileMetricParams(start, end);
-    const response = await axios.get(
+    const response = await syncHttp.get(
       `${GOOGLE_BUSINESS_PERFORMANCE_API}/${locationName}:fetchMultiDailyMetricsTimeSeries`,
       { params, headers: { Authorization: `Bearer ${accessToken}` } }
     );
@@ -1956,7 +2114,7 @@ class MetaSyncJobs {
     let page = 0;
     do {
       page += 1;
-      const response = await axios.get(`${GOOGLE_MY_BUSINESS_API}/${resourceBase}/reviews`, {
+      const response = await syncHttp.get(`${GOOGLE_MY_BUSINESS_API}/${resourceBase}/reviews`, {
         params: { pageSize: 50, pageToken: nextPageToken || undefined },
         headers: { Authorization: `Bearer ${accessToken}` }
       });
@@ -2017,7 +2175,7 @@ class MetaSyncJobs {
     let nextPageToken = null;
     let processed = 0;
     do {
-      const response = await axios.get(`${GOOGLE_MY_BUSINESS_API}/${resourceBase}/localPosts`, {
+      const response = await syncHttp.get(`${GOOGLE_MY_BUSINESS_API}/${resourceBase}/localPosts`, {
         params: { pageSize: 100, pageToken: nextPageToken || undefined },
         headers: { Authorization: `Bearer ${accessToken}` }
       });
@@ -2070,7 +2228,7 @@ class MetaSyncJobs {
     }
 
     try {
-      const response = await axios.get(`${GOOGLE_BUSINESS_INFORMATION_API}/locations/${locationId}`, {
+      const response = await syncHttp.get(`${GOOGLE_BUSINESS_INFORMATION_API}/locations/${locationId}`, {
         params: { readMask: GOOGLE_BUSINESS_LOCATION_READ_MASK },
         headers: { Authorization: `Bearer ${accessToken}` }
       });
@@ -2227,7 +2385,7 @@ class MetaSyncJobs {
         grant_type: 'refresh_token',
         refresh_token: conn.refreshToken
       });
-      const resp = await axios.post('https://oauth2.googleapis.com/token', params.toString(), { headers: { 'Content-Type': 'application/x-www-form-urlencoded' } });
+      const resp = await syncHttp.post('https://oauth2.googleapis.com/token', params.toString(), { headers: { 'Content-Type': 'application/x-www-form-urlencoded' } });
       accessToken = resp.data?.access_token || accessToken;
       const expiresIn = resp.data?.expires_in || 3600;
       await conn.update({ accessToken, expiresAt: new Date(Date.now() + expiresIn * 1000) });
@@ -2238,7 +2396,7 @@ class MetaSyncJobs {
   async _runGaReport(accessToken, propertyName, body) {
     if (!propertyName) { throw new Error('Propiedad GA sin propertyName'); }
     const url = `https://analyticsdata.googleapis.com/v1beta/${propertyName}:runReport`;
-    const resp = await axios.post(url, body, { headers: { Authorization: `Bearer ${accessToken}` } });
+    const resp = await syncHttp.post(url, body, { headers: { Authorization: `Bearer ${accessToken}` } });
     return resp.data || {};
   }
 
@@ -2391,8 +2549,7 @@ async syncAssetMetrics(asset) {
   // Token preferente: pageAccessToken y fallback al de usuario
   const accessToken = asset.pageAccessToken || asset.metaConnection?.accessToken;
   if (!accessToken) {
-    console.warn(`⚠️ Asset ${asset.id} sin token disponible (page/user). Omitido.`);
-    return 0;
+    throw new Error(`Asset ${asset.id} sin token disponible (page/user)`);
   }
 
   // Ventana de sincronización: últimos N días hasta ayer (por defecto 7)
@@ -2410,7 +2567,7 @@ async syncAssetMetrics(asset) {
         processed = typeof result === 'number' ? result : (result?.recordsProcessed || 0);
       } catch (e) {
         console.error(`❌ Error en sync (FB Page) para asset ${asset.id}:`, e.message);
-        processed = 0;
+        throw e;
       }
       break;
     }
@@ -2420,7 +2577,7 @@ async syncAssetMetrics(asset) {
         processed = typeof result === 'number' ? result : (result?.recordsProcessed || 0);
       } catch (e) {
         console.error(`❌ Error en sync (IG Business) para asset ${asset.id}:`, e.message);
-        processed = 0;
+        throw e;
       }
       break;
     }
@@ -2445,7 +2602,7 @@ async syncFacebookPageMetrics(asset) {
 
   try {
     // Obtener número total de seguidores actuales
-    const response = await axios.get(
+    const response = await syncHttp.get(
       `${process.env.META_API_BASE_URL}/${asset.metaAssetId}`,
       {
         params: {
@@ -2509,7 +2666,7 @@ async syncFacebookPageMetrics(asset) {
     const since = until - 30 * 24 * 60 * 60; // últimos 30 días
 
     // Variación diaria de seguidores
-    const followersDayResp = await axios.get(
+    const followersDayResp = await syncHttp.get(
       `${process.env.META_API_BASE_URL}/${asset.metaAssetId}/insights`,
       {
         params: {
@@ -2539,7 +2696,7 @@ async syncFacebookPageMetrics(asset) {
     }
 
     // Total actual de seguidores
-    const followersTotalResp = await axios.get(
+    const followersTotalResp = await syncHttp.get(
       `${process.env.META_API_BASE_URL}/${asset.metaAssetId}`,
       {
         params: {
@@ -2564,7 +2721,7 @@ async syncFacebookPageMetrics(asset) {
 
     // Alcance diario a nivel de cuenta (IG User Insights)
     try {
-      const reachResp = await axios.get(
+      const reachResp = await syncHttp.get(
         `${process.env.META_API_BASE_URL}/${asset.metaAssetId}/insights`,
         {
           params: {
@@ -2702,7 +2859,7 @@ async syncFacebookPageMetrics(asset) {
    */
   async validateToken(token, assetId) {
     try {
-      const response = await axios.get(
+      const response = await syncHttp.get(
         `${META_API_BASE_URL}/${assetId}`,
         {
           params: {
@@ -3130,7 +3287,7 @@ async executeAutomationHealthCheck() {
         }
       });
       console.warn('⚠️ Barrido de automatizaciones con incidencias:', report);
-      return { status: 'failed', ...report };
+      return { status: 'failed', retryable: false, ...report };
     }
 
     console.log('✅ Barrido de automatizaciones sin incidencias críticas');
@@ -3214,7 +3371,7 @@ async executeHealthCheck() {
       });
 
       if (connection && connection.accessToken) {
-        const testResponse = await axios.get(`${META_API_BASE_URL}/me`, {
+        const testResponse = await syncHttp.get(`${META_API_BASE_URL}/me`, {
           params: { access_token: connection.accessToken },
           timeout: 5000
         });
@@ -3323,6 +3480,9 @@ try {
             schedule: data.schedule,
             status: data.status,
             lastExecution: data.lastExecution,
+            lastEnqueuedAt: data.lastEnqueuedAt,
+            lastEnqueueAttempt: data.lastEnqueueAttempt,
+            lastJobRequestId: data.lastJobRequestId,
             lastError: data.lastError,
             description: this.jobDescriptions[name] || ''
           }
@@ -3345,6 +3505,43 @@ try {
       validationNotes: 'Validación: /debug_token para tokens de usuario; tokens de página permanentes se contabilizan. Retenciones y recuentos diarios en SyncLogs. Rate-limit controlado por cabeceras X-*Usage con pausa hasta la siguiente hora si se supera el umbral.'
     };
   }
+
+  async _deferGoogleAdsExecution({
+    syncLog,
+    report,
+    retryAt,
+    reason = 'provider_paused',
+    code = null,
+  }) {
+    const parsedRetryAt = new Date(retryAt);
+    const nextAllowedAt = Number.isNaN(parsedRetryAt.getTime())
+      ? new Date(Date.now() + 15 * 60 * 1000)
+      : parsedRetryAt;
+    const waitingReport = {
+      ...report,
+      waiting: true,
+      deferred: true,
+      waiting_reason: reason,
+      waiting_code: code,
+      next_allowed_at: nextAllowedAt.toISOString(),
+    };
+
+    // SyncLogs no admite waiting. Este intento terminó correctamente como
+    // diferido; JobRequest es quien conserva waiting + next_run_at.
+    await syncLog.update({
+      status: 'completed',
+      end_time: new Date(),
+      records_processed: Number(report?.processed || 0),
+      status_report: waitingReport,
+    });
+
+    return {
+      status: 'waiting',
+      ...waitingReport,
+      nextAllowedAt,
+    };
+  }
+
   /**
    * Job: Sincronización reciente de Google Ads
    */
@@ -3415,8 +3612,13 @@ try {
       if (usageStatus.pauseUntil && usageStatus.pauseUntil > Date.now()) {
         const waitSeconds = Math.ceil((usageStatus.pauseUntil - Date.now()) / 1000);
         console.warn(`⏸️ Google Ads en pausa hasta ${new Date(usageStatus.pauseUntil).toISOString()} (faltan ${waitSeconds}s)`);
-        await syncLog.update({ status: 'waiting', end_time: new Date(), records_processed: 0, status_report: { ...report, waiting: true } });
-        return { status: 'waiting', ...report, waiting: true };
+        return this._deferGoogleAdsExecution({
+          syncLog,
+          report,
+          retryAt: usageStatus.pauseUntil,
+          reason: 'usage_pause_active',
+          code: 'GOOGLE_ADS_PAUSED',
+        });
       }
 
       for (const account of accounts) {
@@ -3488,8 +3690,13 @@ try {
                 details
               }
             });
-            await syncLog.update({ status: 'waiting', end_time: new Date(), records_processed: report.processed, status_report: { ...report, waiting: true } });
-            return { status: 'waiting', ...report, waiting: true };
+            return this._deferGoogleAdsExecution({
+              syncLog,
+              report,
+              retryAt: err.retryAt,
+              reason: 'quota_or_usage_pause',
+              code: err.code,
+            });
           }
           console.error('❌ Error en googleAdsSync para cuenta:', account.customerId, err.message, details);
           report.errors.push({ customerId: account.customerId, error: err.message, details });
@@ -3638,8 +3845,13 @@ try {
           if (err?.code === 'GOOGLE_ADS_QUOTA_REACHED' || err?.code === 'GOOGLE_ADS_PAUSED') {
             console.warn('⏸️ googleAdsBackfill detenido por cuota:', err.message);
             report.errors.push({ customerId: account.customerId, error: err.message, code: err.code, details });
-            await syncLog.update({ status: 'waiting', end_time: new Date(), records_processed: report.processed, status_report: { ...report, waiting: true } });
-            return { status: 'waiting', ...report, waiting: true };
+            return this._deferGoogleAdsExecution({
+              syncLog,
+              report,
+              retryAt: err.retryAt,
+              reason: 'quota_or_usage_pause',
+              code: err.code,
+            });
           }
           console.error('❌ Error en googleAdsBackfill para cuenta:', account.customerId, err.message, details);
           report.errors.push({ customerId: account.customerId, error: err.message, details });
@@ -3670,7 +3882,7 @@ try {
 
     if (conn.refreshToken && (!expiresAt || expiresAt.getTime() <= threshold)) {
       try {
-        const tr = await axios.post('https://oauth2.googleapis.com/token', new URLSearchParams({
+        const tr = await syncHttp.post('https://oauth2.googleapis.com/token', new URLSearchParams({
           client_id: process.env.GOOGLE_CLIENT_ID,
           client_secret: process.env.GOOGLE_CLIENT_SECRET,
           grant_type: 'refresh_token',

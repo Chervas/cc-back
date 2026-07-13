@@ -369,13 +369,14 @@ async function materializeIntakeQuickChatSummary({
   const LeadIntake = overrides.LeadIntake || db.LeadIntake;
   const Message = overrides.Message || db.Message;
   const canonicalResolver = overrides.findCanonicalWhatsappConversation || findCanonicalWhatsappConversation;
+  const suppliedTransaction = overrides.transaction || null;
   const normalizedLeadId = positiveInteger(leadId);
 
   if (!normalizedLeadId) {
     throw createServiceError(409, 'quickchat_summary_lead_missing', 'No se pudo resolver el lead del resumen QuickChat');
   }
 
-  return sequelize.transaction(async (transaction) => {
+  const materialize = async (transaction) => {
     const lock = transaction?.LOCK?.UPDATE;
     const lead = await LeadIntake.findByPk(normalizedLeadId, {
       transaction,
@@ -514,7 +515,15 @@ async function materializeIntakeQuickChatSummary({
         metadata,
       },
     };
-  });
+  };
+
+  // Los callers normales conservan una transacción propia. Las reparaciones
+  // controladas pueden aportar una transacción ya abierta para incluir en el
+  // mismo commit sus guardas, la materialización y sus postcondiciones.
+  if (suppliedTransaction) {
+    return materialize(suppliedTransaction);
+  }
+  return sequelize.transaction(materialize);
 }
 
 module.exports = {

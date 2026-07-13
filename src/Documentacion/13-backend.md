@@ -26,7 +26,7 @@ Variables críticas:
 | `RUNTIME_ROLE` | `api` en dev/staging; `gateway` en gateway |
 | `JOB_RUNTIME_NAMESPACE` | `dev`, `staging` o `gateway` según proceso |
 | `QUEUE_PREFIX` | debe coincidir con el namespace operativo |
-| `JOBS_WORKER_ENABLED` | `true` en API dev/staging; `false` en gateway |
+| `JOBS_WORKER_ENABLED` | `true` en exactamente un proceso por `JOB_RUNTIME_NAMESPACE`; `false` en cualquier réplica adicional y en gateway |
 | `JOBS_CRON_LEADER` | `true` solo en `pm2-back-staging` hasta que exista prod |
 | `JOB_RUNTIME_CLAIM_UNSCOPED` | por defecto `false` cuando hay namespace explícito; solo `true` en migración controlada |
 | `JOB_RUNTIME_NAMESPACE_ALIASES` | lista separada por comas para migraciones controladas de namespaces legacy; por defecto vacío |
@@ -41,6 +41,7 @@ Reglas de jobs:
 - Un runtime con namespace explícito no reclama jobs sin namespace salvo `JOB_RUNTIME_CLAIM_UNSCOPED=true`.
 - Un runtime solo reclama aliases legacy si `JOB_RUNTIME_NAMESPACE_ALIASES` se define explícitamente.
 - `pm2-gateway` no ejecuta scheduler de negocio ni cron.
+- Debe existir **un único proceso con `JOBS_WORKER_ENABLED=true` por namespace**. El reset de `running` al arrancar presupone este contrato; levantar dos workers con el mismo namespace no es una topología HA soportada.
 
 Reglas de inbound externo:
 
@@ -1281,6 +1282,13 @@ Ventanas y límites asociados:
 - `JOBS_AUTOMATION_HEALTH_LOOKBACK_HOURS`
 - `JOBS_AUTOMATION_HEALTH_STALE_RUNNING_MINUTES`
 - `JOBS_AUTOMATION_HEALTH_OVERDUE_GRACE_MINUTES`
+- `JOB_SCHEDULER_RETRY_BASE_DELAY_MS`
+- `JOB_SCHEDULER_RETRY_MAX_DELAY_MS`
+- `JOB_SCHEDULER_BACKGROUND_INTERVAL_MS`: frecuencia del drain exclusivo de integraciones, `5000` ms por defecto.
+- `JOB_REQUEST_ENQUEUE_UNIQUE_TRANSACTION_RETRIES`
+- `SYNC_PROVIDER_HTTP_TIMEOUT_MS`: timeout de las llamadas HTTP realizadas por los sync, `30000` ms por defecto.
+- `META_PROVIDER_HTTP_TIMEOUT_MS`: override para los helpers de métricas Meta, hereda el anterior.
+- `GOOGLE_ADS_HTTP_TIMEOUT_MS`: override de Google Ads; nunca debe volver a `0` (sin límite).
 
 Regla operativa:
 
@@ -1332,15 +1340,43 @@ Nueva regla:
 - `JOBS_WORKER_ENABLED` controla el worker de `JobRequests`.
   - Por defecto se considera `true`.
   - Si vale `false`, este runtime no ejecuta automatizaciones, resumes ni jobs diferidos aunque el backend esté online.
+  - Debe estar `true` en un solo proceso por `JOB_RUNTIME_NAMESPACE`. Las réplicas API del mismo namespace deben llevarlo a `false`; `resetRunningJobs()` no implementa ownership ni heartbeat multi-worker.
 - `JOBS_CRON_LEADER=true`: este runtime es el que manda y arranca `metaSyncJobs.start()`.
 - `JOBS_CRON_LEADER=false`: este runtime no debe encolar cron jobs periódicos.
 - Los endpoints administrativos que arrancan o reinician `metaSyncJobs` deben rechazar runtimes no líderes (`cron_not_leader`). Parar jobs se permite para limpiar un runtime que se haya quedado arrancado por error.
 - `node-cron` v4 arranca las tareas creadas con `cron.schedule()` al registrarlas, aunque se pase `scheduled:false`. Por eso `src/jobs/sync.jobs.js` debe llamar a `job.stop()` justo después de registrar cada job y dejar que solo `metaSyncJobs.start()` los active. Si se quita ese `stop()`, `dev` vuelve a duplicar cron aunque `JOBS_CRON_LEADER=false`.
 
+#### Orquestación durable única de tareas periódicas (2026-07-13)
+
+Los 24 horarios de `src/jobs/sync.jobs.js` comparten desde esta fecha el mismo contrato. El catálogo canónico `src/config/scheduledJobCatalog.js` relaciona nombre visible, tipo de `JobRequest`, prioridad, método `execute*`, payload por defecto y excepciones explícitas de intentos.
+
+- `node-cron` no ejecuta `execute*`: únicamente llama a `enqueueScheduledJob()` para materializar un `JobRequest` con `payload.__runtime_namespace`;
+- el scheduler de `JobRequests` reclama únicamente tipos presentes en `JOB_HANDLERS`; el executor resuelve el método declarado por el catálogo y conserva los métodos `execute*` como implementación de negocio, incluidos sus `SyncLog` o reportes persistidos cuando correspondan;
+- el endpoint manual de jobs consulta el mismo catálogo y usa `enqueueUniqueJobRequest`. La deduplicación se hace por `type + runtime + alcance`, guardado como `payload.__dedupe_scope`: un barrido global no suprime otro dirigido a una clínica/grupo/mapeo, pero dos solicitudes sobre el mismo conjunto sí se consolidan;
+- la deduplicación considera activos `pending`, `queued`, `running` y `waiting`. La lectura y creación se ejecutan en una transacción `SERIALIZABLE`; ante el deadlock posible de dos inserciones simultáneas sobre una fila aún inexistente, se reintenta la transacción completa (`JOB_REQUEST_ENQUEUE_UNIQUE_TRANSACTION_RETRIES`, 3 por defecto). Un job terminal no bloquea el siguiente ciclo. El índice `idx_job_requests_type_status_created_at`, creado por la migración `20260713130000-add-job-request-scheduler-index.js`, evita escanear toda `JobRequests` para cada disparo;
+- `queued` es un estado reclamable real, igual que `pending` y `waiting` vencido. Un `waiting` futuro no puede saltarse su `next_run_at` ni siquiera mediante `triggerImmediate()`;
+- un fallo devuelto o lanzado pasa a `waiting` con backoff exponencial (`JOB_SCHEDULER_RETRY_BASE_DELAY_MS`, 60 s por defecto; `JOB_SCHEDULER_RETRY_MAX_DELAY_MS`, 30 min por defecto) mientras `attempts < max_attempts`. Al agotar intentos queda `failed`;
+- en el arranque, `start()` espera a que `resetRunningJobs()` termine antes de instalar timers o iniciar el primer drain. Si la BD falla, mantiene el worker no-ready y reintenta continuamente con backoff exponencial acotado (`JOB_SCHEDULER_STARTUP_RETRY_BASE_DELAY_MS`, 1 s por defecto; `JOB_SCHEDULER_STARTUP_RETRY_MAX_DELAY_MS`, 30 s por defecto); `stop()` cancela la espera. Devuelve a `waiting` únicamente jobs interrumpidos con intentos disponibles y terminaliza como `failed` los que ya los habían agotado. `triggerImmediate()` comparte ese gate de readiness, por lo que tampoco puede reclamar durante el reset;
+- los 24 tipos del catálogo y los cuatro backfills dirigidos (`meta_ads_backfill_for_sites`, `web_backfill_for_sites`, `analytics_backfill_properties`, `business_profile_backfill_locations`) se ejecutan en un **único carril background global y secuencial**. Las prioridades critical/standard siguen atendiendo CRM, automatizaciones y recordatorios sin esperar a un backfill largo, pero dentro de integraciones un backfill largo sí puede retrasar Diagnostics, revisiones y el resto de syncs: se prioriza exclusión/durabilidad sobre latencia. El drain adquiere además un advisory lock MySQL `GET_LOCK` ligado a una conexión para impedir que dos procesos drenen simultáneamente ese carril; el crash de la conexión libera el lock. Este lease es defensa adicional, **no habilita HA ni sustituye el contrato de un solo worker JobRequest por namespace**, porque el reset de arranque no tiene ownership/heartbeat. Un disparo inmediato de integración se une al mismo drain coalescido; no reclama por ID ni puede solapar modos mutables recent/backfill;
+- OAuth de Analytics y los endpoints dirigidos encolan sus tipos `*_for_*` y el executor conserva el array exacto de `mappings`, incluso si contiene varias clínicas. `node src/scripts/backfill_ads.js` solo encola en el runtime configurado: no arranca un scheduler auxiliar, no resetea `running` ni compite con el backend;
+- estos 28 tipos no usan el timeout genérico basado en `Promise.race`: esa técnica no cancela el handler original. En su lugar todas las llamadas HTTP del sync usan instancias Axios locales con timeout finito y Google Ads tiene un default no nulo. Así un socket colgado se cancela en el proveedor sin mutar el singleton Axios del resto del backend. Para jobs no background que aún usan el timeout genérico, un timeout es terminal y `retryable=false`;
+- los barridos por elementos nunca convierten un fallo total en éxito: `eligible > 0`, `processed = 0` y errores produce `failed` reintentable; si hay elementos procesados y errores queda `completed_with_errors` en el resumen durable. `metricsSync` propaga los errores de cada asset en vez de convertirlos en cero silenciosamente;
+- toda escritura normal de settlement (`completed`, `waiting` o `failed`) usa compare-and-set `WHERE id=? AND status='running'`. Cero filas es un conflicto ya resuelto: se relee el job y no se sobrescribe el estado más nuevo dejado por reset/cancelación/otra escritura. Si la escritura lanza un error, no se traga: actualiza `workerState.lastError`, incrementa `settlementFailures`, aborta el drain y se propaga. Antes de depender de un reinicio se repite **solo la escritura de estado** con el mismo compare-and-set; si el handler ya terminó, se persiste `completed` sin volver a ejecutarlo. Si la BD sigue caída, el job queda `running` y `resetRunningJobs()` lo recupera al arrancar. `getStatus().systemChecks.settlementPersistence` expone el último fallo y su recuperación;
+- `SyncLogs.status` solo admite `pending|running|completed|failed`: una pausa de cuota/uso de Google Ads cierra ese intento como `completed` con `status_report.waiting=true`, motivo, código y `next_allowed_at`; el `JobRequest` conserva el estado durable `waiting` y el `next_run_at` real. Nunca se escribe el enum inválido `waiting` en `SyncLogs`;
+- `sync_log_id` se conserva también durante `waiting`/`failed`. Diagnostics Data Manager enlaza el `SyncLog` nada más crearlo para que incluso un fallo o reinicio deje una relación navegable;
+- `automation_health_check` y `google_conversion_goal_policy_audit` tratan sus hallazgos funcionales como `retryable=false`: ese es el resultado del barrido y no deben repetir tres veces las mismas notificaciones. Si cualquiera lanza un error técnico, sí conserva los intentos y el backoff durable comunes.
+
+El monitor de `node-cron` muestra `enqueued`/`already_queued`, `lastEnqueuedAt` y `lastJobRequestId`. No usa `completed` al terminar de encolar: la finalización de negocio pertenece a `JobRequests`/`SyncLogs`.
+
+BullMQ sigue siendo la cola especializada de WhatsApp y otros transportes. En tareas como `whatsapp_templates_sync`, el flujo completo es `cron -> JobRequest durable -> execute* -> BullMQ por WABA`; no existe una ejecución de negocio lateral desde el callback cron.
+
+Regresión canónica: `node src/scripts/tests/scheduled_jobs_orchestration.test.js`. Comprueba cobertura exacta de los 24 horarios, mappings dirigidos, alcance de deduplicación, índice/migración, `queued`, separación y exclusión mutua de carriles, advisory lease, monitor de enqueue, clasificación total/parcial, timeouts HTTP, `sync_log_id`, enum de `SyncLogs`, backoff, agotamiento, startup gate/retry/stop y settlements CAS con conflicto. El test espera a que BullMQ esté ready antes de cerrar sus conexiones para no dejar errores tardíos de ioredis. `job_executor.test.js`, que sí usa BD, fija un namespace de test único antes de importar el scheduler y no reclama jobs sin scope.
+
 Importante:
 
-- `jobScheduler.start()` y `metaSyncJobs.start()` ya no significan lo mismo.
+- `jobScheduler.start()` consume y ejecuta `JobRequests`; `metaSyncJobs.start()` solo activa los disparadores que los encolan. No son intercambiables.
 - `staging` debe poder ejecutar sus automatizaciones (`appointment_created`, `wait_response`, resumes) aunque no sea el leader de cron.
+- Un solo proceso puede consumir cada namespace. Antes de añadir réplicas del backend hay que mantener `JOBS_WORKER_ENABLED=false` en ellas o diseñar ownership/heartbeat; el advisory lock del background no hace seguro el reset global de `running` para múltiples workers.
 
 Configuración operativa actual:
 
@@ -1350,7 +1386,7 @@ Configuración operativa actual:
 
 Objetivo:
 
-- evitar duplicados horarios de `whatsapp_templates_sync`;
+- evitar duplicados de cualquiera de las 24 tareas periódicas, incluida `whatsapp_templates_sync`;
 - evitar que `dev`, `gateway` o cualquier runtime secundario compita con `staging` sobre la misma base de datos;
 - poder migrar el liderazgo sin tocar código.
 
@@ -3540,6 +3576,8 @@ Instalación web segura: leer el secreto, guardar configuración y verificar el 
 En los chats de scope grupo, la sede elegida viaja en `chat_state.data.location` y se valida antes de aplicar cualquier clínica fallback: debe existir, estar activa, pertenecer al grupo efectivo y formar parte de `config.locations`. Los runtimes nuevos replican también el ID como `clinic_id`, pero el backend conserva compatibilidad segura con `intake.js` 3.2.1. Una sede enviada pero inválida se rechaza; solo se usa el fallback histórico cuando el flujo no envía ninguna sede. `locations[].public_label` permite mostrar un nombre contextual sin cambiar el ID ni el routing clínico.
 
 La acción `send_quickchat_summary` se reconoce exclusivamente por `source_detail=chatbot_quickchat`. Reutiliza el `LeadIntake` deduplicado, crea o revincula su conversación canónica y guarda un único `Message` interno de tipo `event`, idempotente y oculto al paciente. Este camino retorna antes de FormSubmission, Meta CAPI y Google Ads y no contiene ninguna salida WhatsApp. Los reintentos actualizan/consolidan el mismo resumen en lugar de duplicar mensajes.
+
+`save_lead` materializa también el resumen interno cuando recibe el estado final del chatbot, antes de esperar Meta CAPI o Google Ads. La acción pública posterior `send_quickchat_summary` se mantiene como reintento idempotente, no como único punto de persistencia. Esta separación evita el fallo observado en `LeadIntake #7184`: el navegador agotó el margen de navegación, Nginx registró `499`, el lead sobrevivió porque ya estaba creado y la segunda solicitud nunca llegó a ejecutarse. La respuesta HTTP permanece después del tracking best-effort para no abrir un hueco de pérdida ante una caída del proceso; lo que deja de depender de esa respuesta es la aparición del lead en QuickChat.
 
 ### 3. Reglas de negocio activas hoy
 

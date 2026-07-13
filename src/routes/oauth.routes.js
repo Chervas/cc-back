@@ -1138,8 +1138,8 @@ router.post('/google/analytics/map-properties', async (req, res) => {
 
         if (propertiesToBackfill.length) {
             try {
-                const job = await jobRequestsService.enqueueJobRequest({
-                    type: 'analytics_backfill',
+                const { job } = await jobRequestsService.enqueueUniqueJobRequest({
+                    type: 'analytics_backfill_properties',
                     payload: withRequestedRuntimeNamespace(req, { mappings: propertiesToBackfill }),
                     priority: 'high',
                     origin: 'analytics:map-properties',
@@ -1317,7 +1317,7 @@ router.post('/google/local/map-locations', async (req, res) => {
 
         if (locationsToBackfill.length) {
             try {
-                const job = await jobRequestsService.enqueueJobRequest({
+                const { job } = await jobRequestsService.enqueueUniqueJobRequest({
                     type: 'business_profile_backfill_locations',
                     payload: withRequestedRuntimeNamespace(req, { mappings: locationsToBackfill }),
                     priority: 'high',
@@ -1925,7 +1925,7 @@ router.post('/google/ads/map-accounts', async (req, res) => {
         const clinicIds = Array.from(clinicsToSync).filter((id) => Number.isInteger(id));
         if (clinicIds.length) {
             try {
-                const job = await jobRequestsService.enqueueJobRequest({
+                const { job } = await jobRequestsService.enqueueUniqueJobRequest({
                     type: 'google_ads_recent',
                     payload: withRequestedRuntimeNamespace(req, { clinicIds }),
                     priority: 'critical',
@@ -2194,7 +2194,7 @@ router.post('/google/map-assets', async (req, res) => {
 
         if (sitesToBackfill.length) {
             try {
-                const job = await jobRequestsService.enqueueJobRequest({
+                const { job } = await jobRequestsService.enqueueUniqueJobRequest({
                     type: 'web_backfill_for_sites',
                     payload: withRequestedRuntimeNamespace(req, { siteMappings: sitesToBackfill }),
                     priority: 'high',
@@ -2873,7 +2873,7 @@ router.post('/meta/map-assets', async (req, res) => {
         const clinicIds = Array.from(clinicsToSync).filter((id) => Number.isInteger(id));
         if (clinicIds.length) {
             try {
-                const job = await jobRequestsService.enqueueJobRequest({
+                const { job } = await jobRequestsService.enqueueUniqueJobRequest({
                     type: 'meta_ads_recent',
                     payload: withRequestedRuntimeNamespace(req, { clinicIds }),
                     priority: 'critical',
@@ -3143,7 +3143,7 @@ router.delete('/meta/mappings/:mappingId', async (req, res) => {
 
         if (clinicaId) {
             try {
-                const job = await jobRequestsService.enqueueJobRequest({
+                const { job } = await jobRequestsService.enqueueUniqueJobRequest({
                     type: 'meta_ads_recent',
                     payload: withRequestedRuntimeNamespace(req, { clinicIds: [clinicaId] }),
                     priority: 'high',

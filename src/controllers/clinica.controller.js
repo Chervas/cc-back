@@ -626,7 +626,7 @@ exports.updateClinica = async (req, res) => {
 
                     if (adsAutomatic) {
                         console.log(`🚀 Encolando resync automático para la clínica ${clinicIdNumeric}`);
-                        const metaJob = await jobRequestsService.enqueueJobRequest({
+                        const { job: metaJob } = await jobRequestsService.enqueueUniqueJobRequest({
                             type: 'meta_ads_recent',
                             payload: { clinicIds: [clinicIdNumeric] },
                             priority: 'critical',
@@ -639,7 +639,7 @@ exports.updateClinica = async (req, res) => {
                             console.error('❌ Error ejecutando resync Meta Ads post-asignación:', err);
                         });
 
-                        const googleJob = await jobRequestsService.enqueueJobRequest({
+                        const { job: googleJob } = await jobRequestsService.enqueueUniqueJobRequest({
                             type: 'google_ads_recent',
                             payload: { clinicIds: [clinicIdNumeric] },
                             priority: 'critical',
