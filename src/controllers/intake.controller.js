@@ -84,6 +84,9 @@ const {
   resolveEffectiveTrackingConfig
 } = require('../services/effectiveMarketingAssets.service');
 const {
+  mergeIntakeConfigForEditorWrite,
+} = require('../lib/intake-config-write-merge');
+const {
   ensureQualifiedLeadConversion,
   maybeUploadQualifiedLeadStatusTransition,
   uploadScheduleForLinkedAppointment,
@@ -2497,8 +2500,27 @@ const getIntakeConfig = async (
       } = payload.snippet_verification;
       payload.snippet_verification = publicVerificationSummary;
     }
+    if (!includeAllLocations && payload.features) {
+      const {
+        ad_personalization_activation_audit: _personalizationAudit,
+        ...publicFeatures
+      } = payload.features;
+      payload.features = publicFeatures;
+    }
     payload.locations = cfg.locations || [];
-    payload.config = cfg;
+    payload.config = includeAllLocations
+      ? cfg
+      : {
+          features: payload.features,
+          flow: payload.flow,
+          flows: payload.flows,
+          appearance: payload.appearance,
+          google_ads: payload.google_ads,
+          meta_ads: payload.meta_ads,
+          texts: payload.texts,
+          snippet_verification: payload.snippet_verification,
+          locations: payload.locations,
+        };
     payload.has_hmac = !!record.hmac_key;
     if (sharedWebContext?.record) {
       payload.effective_config_source = 'group_web_shared';
@@ -2941,88 +2963,22 @@ exports.upsertIntakeConfig = asyncHandler(async (req, res) => {
   }
 
   const body = req.body && typeof req.body === 'object' ? req.body : {};
-  const domains = Array.isArray(body.domains) ? body.domains : [];
+  const verificationOnlyMutation = body.mutation_kind === 'snippet_verification';
+  const submittedDomains = Array.isArray(body.domains) ? body.domains : [];
   const hasHmacKeyField = Object.prototype.hasOwnProperty.call(body, 'hmac_key');
   const requestedHmacKey = body.hmac_key;
-  const existing = await IntakeConfig.findOne({
-    where: scope === 'group'
-      ? { group_id: groupId, assignment_scope: 'group' }
-      : { clinic_id: clinicId },
-    raw: true
-  });
-  const existingConfig = existing?.config && typeof existing.config === 'object' && !Array.isArray(existing.config)
-    ? existing.config
-    : {};
-
-  // Compatibilidad:
-  // - UI suele enviar features/flow/texts/locations en root.
-  // - Backwards: si viene body.config, lo respetamos.
-  let config = { ...existingConfig };
-  if (body.config && typeof body.config === 'object' && !Array.isArray(body.config)) {
-    config = {
-      ...existingConfig,
-      ...body.config,
-      ...(body.config.google_ads ? { google_ads: normalizeEffectiveGoogleAdsConfig(body.config.google_ads) } : {}),
-      ...(body.config.meta_ads ? { meta_ads: normalizeMetaAdsConfig(body.config.meta_ads) } : {})
-    };
-  } else {
-    const features = body.features && typeof body.features === 'object' ? body.features : undefined;
-    const flow = body.flow && typeof body.flow === 'object' ? body.flow : undefined;
-    const flows = Array.isArray(body.flows) ? body.flows : undefined;
-    const appearance = body.appearance && typeof body.appearance === 'object' && !Array.isArray(body.appearance) ? body.appearance : undefined;
-    const googleAds = body.google_ads && typeof body.google_ads === 'object' && !Array.isArray(body.google_ads)
-      ? normalizeEffectiveGoogleAdsConfig(body.google_ads)
-      : undefined;
-    const metaAds = body.meta_ads && typeof body.meta_ads === 'object' && !Array.isArray(body.meta_ads)
-      ? normalizeMetaAdsConfig(body.meta_ads)
-      : undefined;
-    const texts = body.texts && typeof body.texts === 'object' ? body.texts : undefined;
-    const locations = Array.isArray(body.locations) ? body.locations : undefined;
-    config = {
-      ...existingConfig,
-      ...(features ? { features } : {}),
-      ...(flow ? { flow } : {}),
-      ...(flows ? { flows } : {}),
-      ...(appearance ? { appearance } : {}),
-      ...(googleAds ? { google_ads: googleAds } : {}),
-      ...(metaAds ? { meta_ads: metaAds } : {}),
-      ...(texts ? { texts } : {}),
-      ...(locations ? { locations } : {})
-    };
+  let allowedLocationClinicIds = [];
+  if (!verificationOnlyMutation) {
+    const candidateLocationClinicIds = await resolveIntakeCandidateClinicIds({
+      clinicId: scope === 'clinic' ? clinicId : null,
+      groupId: scope === 'group' ? groupId : null,
+    });
+    allowedLocationClinicIds = await getAccessibleMarketingClinicIds({
+      userId: req.userData?.userId,
+      clinicIds: candidateLocationClinicIds,
+      access: 'write',
+    });
   }
-  if (Object.prototype.hasOwnProperty.call(config, 'locations') && !Array.isArray(config.locations)) {
-    return res.status(400).json({ success: false, error: 'locations_invalid' });
-  }
-  const candidateLocationClinicIds = await resolveIntakeCandidateClinicIds({
-    clinicId: scope === 'clinic' ? clinicId : null,
-    groupId: scope === 'group' ? groupId : null,
-  });
-  const allowedLocationClinicIds = await getAccessibleMarketingClinicIds({
-    userId: req.userData?.userId,
-    clinicIds: candidateLocationClinicIds,
-    access: 'write',
-  });
-  const configuredLocations = Array.isArray(config.locations) ? config.locations : [];
-  if (!configuredLocationsWithinAllowedScope(configuredLocations, allowedLocationClinicIds)) {
-    return res.status(403).json({ success: false, error: 'location_scope_forbidden' });
-  }
-
-  // Importante: si el frontend no envía hmac_key, NO debemos borrar la clave existente.
-  // El endpoint público /api/intake/config no devuelve la clave por seguridad; el admin UI podría no tenerla en memoria.
-  let nextHmacKey = null;
-  if (hasHmacKeyField) {
-    // Permite rotación explícita (string) o borrado explícito (null / '').
-    nextHmacKey = requestedHmacKey ? String(requestedHmacKey) : null;
-  } else {
-    // Preservar clave actual si existe
-    nextHmacKey = existing?.hmac_key || null;
-
-    // Auto-generación: si se está configurando una allowlist de dominios y aún no hay clave, crearla.
-    if (!nextHmacKey && Array.isArray(domains) && domains.length > 0) {
-      nextHmacKey = crypto.randomBytes(32).toString('hex');
-    }
-  }
-
   const hasRootVerification = Object.prototype.hasOwnProperty.call(body, 'snippet_verification');
   const hasNestedVerification = Boolean(
     body.config
@@ -3033,42 +2989,125 @@ exports.upsertIntakeConfig = asyncHandler(async (req, res) => {
   const submittedVerification = hasRootVerification
     ? body.snippet_verification
     : (hasNestedVerification ? body.config.snippet_verification : null);
-  const verificationSource = hasRootVerification || hasNestedVerification
-    ? submittedVerification
-    : existingConfig.snippet_verification;
-  try {
-    config.snippet_verification = rebuildTrustedSnippetVerification({
-      rawVerification: verificationSource,
-      scopeType: scope,
-      scopeId: scope === 'group' ? groupId : clinicId,
+  const scopeWhere = scope === 'group'
+    ? { group_id: groupId, assignment_scope: 'group' }
+    : { clinic_id: clinicId };
+
+  const persistence = await db.sequelize.transaction(async (transaction) => {
+    // Serialize editor writes with the automatic gate/reconciliation jobs. The
+    // merge must use the latest committed server-owned state, not the snapshot
+    // that happened to be returned when the editor screen was opened.
+    const existing = await IntakeConfig.findOne({
+      where: scopeWhere,
+      transaction,
+      lock: transaction.LOCK.UPDATE,
+      raw: true,
+    });
+    const existingConfig = existing?.config && typeof existing.config === 'object'
+      && !Array.isArray(existing.config)
+      ? existing.config
+      : {};
+    if (verificationOnlyMutation && !existing) {
+      return {
+        error: {
+          status: 404,
+          body: { success: false, error: 'intake_config_not_found' },
+        },
+      };
+    }
+    const domains = verificationOnlyMutation
+      ? (Array.isArray(existing?.domains) ? existing.domains : [])
+      : submittedDomains;
+    const config = verificationOnlyMutation
+      ? { ...existingConfig }
+      : mergeIntakeConfigForEditorWrite(
+          existingConfig,
+          body,
+          normalizeEffectiveGoogleAdsConfig,
+          normalizeMetaAdsConfig,
+        );
+
+    if (!verificationOnlyMutation
+      && Object.prototype.hasOwnProperty.call(config, 'locations')
+      && !Array.isArray(config.locations)) {
+      return { error: { status: 400, body: { success: false, error: 'locations_invalid' } } };
+    }
+    const configuredLocations = Array.isArray(config.locations) ? config.locations : [];
+    if (!verificationOnlyMutation
+      && !configuredLocationsWithinAllowedScope(configuredLocations, allowedLocationClinicIds)) {
+      return { error: { status: 403, body: { success: false, error: 'location_scope_forbidden' } } };
+    }
+
+    // If the frontend omits hmac_key, preserve the value read under lock.
+    let nextHmacKey = null;
+    if (verificationOnlyMutation) {
+      nextHmacKey = existing?.hmac_key || null;
+    } else if (hasHmacKeyField) {
+      nextHmacKey = requestedHmacKey ? String(requestedHmacKey) : null;
+    } else {
+      nextHmacKey = existing?.hmac_key || null;
+      if (!nextHmacKey && domains.length > 0) {
+        nextHmacKey = crypto.randomBytes(32).toString('hex');
+      }
+    }
+
+    const verificationSource = hasRootVerification || hasNestedVerification
+      ? submittedVerification
+      : existingConfig.snippet_verification;
+    if (verificationOnlyMutation && !hasRootVerification && !hasNestedVerification) {
+      return {
+        error: {
+          status: 400,
+          body: { success: false, error: 'snippet_verification_required' },
+        },
+      };
+    }
+    try {
+      config.snippet_verification = rebuildTrustedSnippetVerification({
+        rawVerification: verificationSource,
+        scopeType: scope,
+        scopeId: scope === 'group' ? groupId : clinicId,
+        domains,
+        config,
+        hmacKey: nextHmacKey,
+        rejectInvalid: hasRootVerification || hasNestedVerification,
+      });
+    } catch (error) {
+      if (error?.code === 'snippet_verification_attestation_invalid') {
+        return {
+          error: {
+            status: 400,
+            body: {
+              success: false,
+              error: error.code,
+              reason: error.reason,
+              domain: error.domain,
+              message: error.message,
+            },
+          },
+        };
+      }
+      throw error;
+    }
+
+    await IntakeConfig.upsert({
+      clinic_id: clinicId || null,
+      group_id: groupId || null,
+      assignment_scope: scope,
       domains,
       config,
-      hmacKey: nextHmacKey,
-      rejectInvalid: hasRootVerification || hasNestedVerification,
-    });
-  } catch (error) {
-    if (error?.code === 'snippet_verification_attestation_invalid') {
-      return res.status(400).json({
-        success: false,
-        error: error.code,
-        reason: error.reason,
-        domain: error.domain,
-        message: error.message,
-      });
-    }
-    throw error;
-  }
-
-  await IntakeConfig.upsert({
-    clinic_id: clinicId || null,
-    group_id: groupId || null,
-    assignment_scope: scope,
-    domains,
-    config,
-    hmac_key: nextHmacKey
+      hmac_key: nextHmacKey,
+    }, { transaction });
+    return { config };
   });
 
-  res.json({ success: true, snippet_verification: config.snippet_verification });
+  if (persistence.error) {
+    return res.status(persistence.error.status).json(persistence.error.body);
+  }
+  return res.json({
+    success: true,
+    snippet_verification: persistence.config.snippet_verification,
+  });
 });
 
 // ======================================

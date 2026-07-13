@@ -13,6 +13,9 @@ const {
 } = require('../lib/googleAdsClient');
 const { metaGet } = require('../lib/metaClient');
 const {
+  overlayNormalizedGoogleAdsConfig,
+} = require('../lib/intake-config-write-merge');
+const {
   resolveGoogleConnectionForScope,
   resolveMetaConnectionForScope
 } = require('../services/scopeConnectionResolver.service');
@@ -93,7 +96,7 @@ const ENHANCED_CONVERSION_ADVERTISER_AUTHORIZED_AT =
   process.env.GOOGLE_ENHANCED_CONVERSION_ADVERTISER_AUTHORIZED_AT
   || '2026-07-13T00:00:00.000Z';
 const ENHANCED_CONVERSION_VALUE_POLICY_VERSION = 1;
-const AD_PERSONALIZATION_CAPABILITY_VERSION = 1;
+const AD_PERSONALIZATION_CAPABILITY_VERSION = 2;
 const ENHANCED_CONVERSION_REPORTING_VALUES_EUR = Object.freeze({
   lead: 0,
   contact: 0,
@@ -2003,36 +2006,39 @@ async function upsertCampaignSettingsForScope(scope, campaignPatch) {
     ? { group_id: scope.group_id, assignment_scope: 'group' }
     : { clinic_id: scope.clinic_id };
 
-  const existing = await IntakeConfig.findOne({ where });
   const patch = normalizeCampaignConfig(campaignPatch || {});
-
-  if (!existing) {
-    await IntakeConfig.create({
-      clinic_id: scope.assignment_scope === 'clinic' ? scope.clinic_id : null,
-      group_id: scope.assignment_scope === 'group' ? scope.group_id : null,
-      assignment_scope: scope.assignment_scope,
-      domains: [],
-      config: { campaigns: patch },
-      hmac_key: null
+  return db.sequelize.transaction(async (transaction) => {
+    const existing = await IntakeConfig.findOne({
+      where,
+      transaction,
+      lock: transaction.LOCK.UPDATE,
     });
-    return patch;
-  }
+    const existingConfig = existing?.config && typeof existing.config === 'object'
+      && !Array.isArray(existing.config)
+      ? existing.config
+      : {};
+    const currentCampaigns = normalizeCampaignConfig(existingConfig.campaigns || {});
+    const nextCampaigns = { ...currentCampaigns, ...patch };
 
-  const existingConfig = existing.config && typeof existing.config === 'object' ? existing.config : {};
-  const currentCampaigns = normalizeCampaignConfig(existingConfig.campaigns || {});
-  const nextCampaigns = {
-    ...currentCampaigns,
-    ...patch
-  };
-
-  await existing.update({
-    config: {
-      ...existingConfig,
-      campaigns: nextCampaigns
+    if (!existing) {
+      await IntakeConfig.create({
+        clinic_id: scope.assignment_scope === 'clinic' ? scope.clinic_id : null,
+        group_id: scope.assignment_scope === 'group' ? scope.group_id : null,
+        assignment_scope: scope.assignment_scope,
+        domains: [],
+        config: { campaigns: nextCampaigns },
+        hmac_key: null,
+      }, { transaction });
+      return nextCampaigns;
     }
+    await existing.update({
+      config: {
+        ...existingConfig,
+        campaigns: nextCampaigns,
+      },
+    }, { transaction });
+    return nextCampaigns;
   });
-
-  return nextCampaigns;
 }
 
 async function listClinicIdsForGroup(groupId) {
@@ -2165,38 +2171,50 @@ async function upsertIntakeGoogleAdsForScope(scope, googleAdsPatch, provisioning
     ? { group_id: scope.group_id, assignment_scope: 'group' }
     : { clinic_id: scope.clinic_id };
 
-  const existing = await IntakeConfig.findOne({ where });
-  if (!existing) {
-    const nextGoogleAds = provisioningOptions
-      ? mergeProvisionedGoogleAdsConfig({}, googleAdsPatch, provisioningOptions)
-      : normalizeGoogleAdsConfig(googleAdsPatch);
-    await IntakeConfig.create({
-      clinic_id: scope.assignment_scope === 'clinic' ? scope.clinic_id : null,
-      group_id: scope.assignment_scope === 'group' ? scope.group_id : null,
-      assignment_scope: scope.assignment_scope,
-      domains: [],
-      config: { google_ads: nextGoogleAds },
-      hmac_key: null
+  return db.sequelize.transaction(async (transaction) => {
+    const existing = await IntakeConfig.findOne({
+      where,
+      transaction,
+      lock: transaction.LOCK.UPDATE,
     });
-    return;
-  }
+    const existingConfig = existing?.config && typeof existing.config === 'object'
+      && !Array.isArray(existing.config)
+      ? existing.config
+      : {};
+    const rawGooglePatch = googleAdsPatch && typeof googleAdsPatch === 'object'
+      && !Array.isArray(googleAdsPatch)
+      ? googleAdsPatch
+      : {};
+    const normalizedMergedGoogle = provisioningOptions
+      ? mergeProvisionedGoogleAdsConfig(
+          existingConfig.google_ads || {},
+          rawGooglePatch,
+          provisioningOptions
+        )
+      : mergeEffectiveGoogleAdsConfig(existingConfig.google_ads || {}, rawGooglePatch);
+    const nextGoogleAds = overlayNormalizedGoogleAdsConfig(
+      existingConfig.google_ads,
+      normalizedMergedGoogle,
+    );
 
-  const existingConfig = existing.config && typeof existing.config === 'object' ? existing.config : {};
-  const rawGooglePatch = googleAdsPatch && typeof googleAdsPatch === 'object' && !Array.isArray(googleAdsPatch)
-    ? googleAdsPatch
-    : {};
-  const mergedGoogle = provisioningOptions
-    ? mergeProvisionedGoogleAdsConfig(
-        existingConfig.google_ads || {},
-        rawGooglePatch,
-        provisioningOptions
-      )
-    : mergeEffectiveGoogleAdsConfig(existingConfig.google_ads || {}, rawGooglePatch);
-  const nextConfig = {
-    ...existingConfig,
-    google_ads: mergedGoogle
-  };
-  await existing.update({ config: nextConfig });
+    if (!existing) {
+      await IntakeConfig.create({
+        clinic_id: scope.assignment_scope === 'clinic' ? scope.clinic_id : null,
+        group_id: scope.assignment_scope === 'group' ? scope.group_id : null,
+        assignment_scope: scope.assignment_scope,
+        domains: [],
+        config: { google_ads: nextGoogleAds },
+        hmac_key: null,
+      }, { transaction });
+      return;
+    }
+    await existing.update({
+      config: {
+        ...existingConfig,
+        google_ads: nextGoogleAds,
+      },
+    }, { transaction });
+  });
 }
 
 async function upsertIntakeMetaAdsForScope(scope, metaAdsPatch) {
@@ -2205,35 +2223,42 @@ async function upsertIntakeMetaAdsForScope(scope, metaAdsPatch) {
     : { clinic_id: scope.clinic_id };
 
   const normalizedPatch = normalizeMetaAdsConfig(metaAdsPatch || {});
-  const existing = await IntakeConfig.findOne({ where });
-  if (!existing) {
-    await IntakeConfig.create({
-      clinic_id: scope.assignment_scope === 'clinic' ? scope.clinic_id : null,
-      group_id: scope.assignment_scope === 'group' ? scope.group_id : null,
-      assignment_scope: scope.assignment_scope,
-      domains: [],
-      config: { meta_ads: normalizedPatch },
-      hmac_key: null
+  return db.sequelize.transaction(async (transaction) => {
+    const existing = await IntakeConfig.findOne({
+      where,
+      transaction,
+      lock: transaction.LOCK.UPDATE,
     });
-    return normalizedPatch;
-  }
+    const existingConfig = existing?.config && typeof existing.config === 'object'
+      && !Array.isArray(existing.config)
+      ? existing.config
+      : {};
+    const currentMeta = normalizeMetaAdsConfig(existingConfig.meta_ads || {});
+    const mergedMeta = {
+      ...currentMeta,
+      ...normalizedPatch,
+      enabled: normalizedPatch.enabled !== undefined ? normalizedPatch.enabled : currentMeta.enabled,
+    };
 
-  const existingConfig = existing.config && typeof existing.config === 'object' ? existing.config : {};
-  const currentMeta = normalizeMetaAdsConfig(existingConfig.meta_ads || {});
-  const mergedMeta = {
-    ...currentMeta,
-    ...normalizedPatch,
-    enabled: normalizedPatch.enabled !== undefined ? normalizedPatch.enabled : currentMeta.enabled
-  };
-
-  await existing.update({
-    config: {
-      ...existingConfig,
-      meta_ads: mergedMeta
+    if (!existing) {
+      await IntakeConfig.create({
+        clinic_id: scope.assignment_scope === 'clinic' ? scope.clinic_id : null,
+        group_id: scope.assignment_scope === 'group' ? scope.group_id : null,
+        assignment_scope: scope.assignment_scope,
+        domains: [],
+        config: { meta_ads: mergedMeta },
+        hmac_key: null,
+      }, { transaction });
+      return mergedMeta;
     }
+    await existing.update({
+      config: {
+        ...existingConfig,
+        meta_ads: mergedMeta,
+      },
+    }, { transaction });
+    return mergedMeta;
   });
-
-  return mergedMeta;
 }
 
 function extractSendToFromTagSnippets(tagSnippets) {
@@ -2630,18 +2655,55 @@ function internalAdvertiserAuthorizationRequest() {
 function adPersonalizationCapabilityReconciliationKey() {
   return crypto.createHash('sha256').update(JSON.stringify({
     version: AD_PERSONALIZATION_CAPABILITY_VERSION,
+    enabled: true,
+    consent_source: 'visitor_choice',
+    grants_consent: false
+  })).digest('hex');
+}
+
+function legacyPropdentalPersonalizationCapabilityReconciliationKey() {
+  return crypto.createHash('sha256').update(JSON.stringify({
+    version: 1,
     group_id: ENHANCED_CONVERSION_PROPDENTAL_GROUP_ID,
     enabled: true,
     consent_source: 'visitor_choice'
   })).digest('hex');
 }
 
+function visitorChoicePersonalizationScope(intakeRecord) {
+  const record = asPlainObject(intakeRecord);
+  const intakeConfigId = parseInteger(record.id);
+  const clinicId = parseInteger(record.clinic_id);
+  const groupId = parseInteger(record.group_id);
+  const assignmentScope = String(record.assignment_scope || '').trim().toLowerCase() === 'group'
+    ? 'group'
+    : 'clinic';
+  return {
+    intake_config_id: intakeConfigId,
+    assignment_scope: assignmentScope,
+    clinic_id: clinicId,
+    group_id: groupId,
+  };
+}
+
+function visitorChoicePersonalizationWhere(intakeRecord) {
+  const scope = visitorChoicePersonalizationScope(intakeRecord);
+  if (scope.intake_config_id) return { id: scope.intake_config_id };
+  if (scope.assignment_scope === 'group' && scope.group_id) {
+    return { group_id: scope.group_id, assignment_scope: 'group' };
+  }
+  if (scope.clinic_id) return { clinic_id: scope.clinic_id, assignment_scope: 'clinic' };
+  return null;
+}
+
 function buildVisitorChoicePersonalizationConfig(currentConfig, {
+  intakeRecord = null,
   now = new Date(),
   activationSource = 'google_data_manager_diagnostics_job'
 } = {}) {
   const nextConfig = cloneJsonObject(currentConfig);
   const reconciliationKey = adPersonalizationCapabilityReconciliationKey();
+  const scope = visitorChoicePersonalizationScope(intakeRecord);
   nextConfig.features = {
     ...asPlainObject(nextConfig.features),
     ad_personalization_enabled: true,
@@ -2651,7 +2713,7 @@ function buildVisitorChoicePersonalizationConfig(currentConfig, {
       reconciliation_key: reconciliationKey,
       activation_source: activationSource,
       applied_at: now.toISOString(),
-      group_id: ENHANCED_CONVERSION_PROPDENTAL_GROUP_ID,
+      ...scope,
       grants_consent: false,
       independent_of_enhanced_conversion_gate: true
     }
@@ -2659,16 +2721,35 @@ function buildVisitorChoicePersonalizationConfig(currentConfig, {
   return { nextConfig, reconciliationKey };
 }
 
-function isVisitorChoicePersonalizationCapabilityApplied(config) {
+function isVisitorChoicePersonalizationCapabilityApplied(config, intakeRecord = null) {
   const features = asPlainObject(asPlainObject(config).features);
   const audit = asPlainObject(features.ad_personalization_activation_audit);
-  return Boolean(
+  const commonStateApplied = Boolean(
     features.ad_personalization_enabled === true
     && features.ad_personalization_consent_source === 'visitor_choice'
-    && audit.version === AD_PERSONALIZATION_CAPABILITY_VERSION
-    && audit.reconciliation_key === adPersonalizationCapabilityReconciliationKey()
     && audit.grants_consent === false
     && audit.independent_of_enhanced_conversion_gate === true
+  );
+  const currentCapabilityApplied = commonStateApplied
+    && audit.version === AD_PERSONALIZATION_CAPABILITY_VERSION
+    && audit.reconciliation_key === adPersonalizationCapabilityReconciliationKey();
+  const legacyPropdentalCapabilityApplied = commonStateApplied
+    && audit.version === 1
+    && Number(audit.group_id) === ENHANCED_CONVERSION_PROPDENTAL_GROUP_ID
+    && audit.reconciliation_key === legacyPropdentalPersonalizationCapabilityReconciliationKey();
+  if (!currentCapabilityApplied && !legacyPropdentalCapabilityApplied) return false;
+  if (!intakeRecord) return true;
+
+  const scope = visitorChoicePersonalizationScope(intakeRecord);
+  if (legacyPropdentalCapabilityApplied) {
+    return scope.assignment_scope === 'group'
+      && scope.group_id === ENHANCED_CONVERSION_PROPDENTAL_GROUP_ID;
+  }
+  return Boolean(
+    (!scope.intake_config_id || Number(audit.intake_config_id) === scope.intake_config_id)
+    && audit.assignment_scope === scope.assignment_scope
+    && parseInteger(audit.clinic_id) === scope.clinic_id
+    && parseInteger(audit.group_id) === scope.group_id
   );
 }
 
@@ -2676,13 +2757,18 @@ async function persistVisitorChoicePersonalizationCapability({
   intakeRecord,
   now = new Date(),
   activationSource = 'google_data_manager_diagnostics_job',
-  dependencies = {}
+  dependencies = {},
+  forceLockedRead = false,
 }) {
   if (!intakeRecord) {
     return { status: 'blocked', updated: false, idempotent: false, reason: 'intake_config_missing' };
   }
   const reconciliationKey = adPersonalizationCapabilityReconciliationKey();
-  if (isVisitorChoicePersonalizationCapabilityApplied(intakeRecord.config)) {
+  const where = visitorChoicePersonalizationWhere(intakeRecord);
+  if (!where) {
+    return { status: 'blocked', updated: false, idempotent: false, reason: 'intake_config_scope_invalid' };
+  }
+  if (!forceLockedRead && isVisitorChoicePersonalizationCapabilityApplied(intakeRecord.config, intakeRecord)) {
     return {
       status: 'already_active',
       updated: false,
@@ -2693,20 +2779,16 @@ async function persistVisitorChoicePersonalizationCapability({
 
   const sequelize = dependencies.sequelize || db.sequelize;
   const intakeConfigModel = dependencies.IntakeConfig || IntakeConfig;
-  const preflightUpdatedAt = intakeRecord.updated_at || intakeRecord.updatedAt || null;
   return sequelize.transaction(async (transaction) => {
     const locked = await intakeConfigModel.findOne({
-      where: {
-        group_id: ENHANCED_CONVERSION_PROPDENTAL_GROUP_ID,
-        assignment_scope: 'group'
-      },
+      where,
       transaction,
       lock: transaction.LOCK.UPDATE
     });
     if (!locked) {
       return { status: 'blocked', updated: false, idempotent: false, reason: 'intake_config_missing' };
     }
-    if (isVisitorChoicePersonalizationCapabilityApplied(locked.config)) {
+    if (isVisitorChoicePersonalizationCapabilityApplied(locked.config, locked)) {
       return {
         status: 'already_active',
         updated: false,
@@ -2714,20 +2796,11 @@ async function persistVisitorChoicePersonalizationCapability({
         reconciliation_key: reconciliationKey
       };
     }
-    const lockedUpdatedAt = locked.updated_at || locked.updatedAt || null;
-    if (
-      preflightUpdatedAt
-      && lockedUpdatedAt
-      && new Date(preflightUpdatedAt).getTime() !== new Date(lockedUpdatedAt).getTime()
-    ) {
-      return {
-        status: 'stale_retry',
-        updated: false,
-        idempotent: false,
-        reason: 'intake_config_changed_during_reconciliation'
-      };
-    }
-    const built = buildVisitorChoicePersonalizationConfig(locked.config, { now, activationSource });
+    const built = buildVisitorChoicePersonalizationConfig(locked.config, {
+      intakeRecord: locked,
+      now,
+      activationSource,
+    });
     await locked.update({ config: built.nextConfig }, { transaction });
     return {
       status: 'activated',
@@ -2737,6 +2810,88 @@ async function persistVisitorChoicePersonalizationCapability({
       config: built.nextConfig
     };
   });
+}
+
+async function reconcileVisitorChoicePersonalizationCapabilities(options = {}) {
+  const now = options.now instanceof Date ? options.now : new Date(options.now || Date.now());
+  const dependencies = options.dependencies || {};
+  const intakeConfigModel = dependencies.IntakeConfig || IntakeConfig;
+  const requestedBatchSize = Number.parseInt(String(options.batchSize || ''), 10);
+  const batchSize = Number.isInteger(requestedBatchSize) && requestedBatchSize > 0
+    ? Math.min(requestedBatchSize, 1000)
+    : 100;
+  const report = {
+    status: 'completed',
+    scanned: 0,
+    activated: 0,
+    already_active: 0,
+    missing: 0,
+    errors: [],
+    idempotent: true,
+    grants_consent: false,
+    external_mutation_performed: false,
+    google_ads_mutated: false,
+  };
+
+  let lastId = 0;
+  while (true) {
+    const rows = await intakeConfigModel.findAll({
+      where: lastId > 0 ? { id: { [Op.gt]: lastId } } : {},
+      attributes: ['id', 'clinic_id', 'group_id', 'assignment_scope'],
+      order: [['id', 'ASC']],
+      limit: batchSize,
+      raw: true,
+    });
+    if (!rows.length) break;
+
+    for (const intakeRecord of rows) {
+      report.scanned += 1;
+      try {
+        const result = await persistVisitorChoicePersonalizationCapability({
+          intakeRecord,
+          now,
+          activationSource: 'google_data_manager_diagnostics_job',
+          dependencies,
+          // The periodic reconciler always verifies the latest row under lock;
+          // its initial findAll is only an identity scan, never a config snapshot.
+          forceLockedRead: true,
+        });
+        if (result.status === 'activated') {
+          report.activated += 1;
+          report.idempotent = false;
+        } else if (result.status === 'already_active') {
+          report.already_active += 1;
+        } else if (result.reason === 'intake_config_missing') {
+          report.missing += 1;
+        } else {
+          report.errors.push({
+            intake_config_id: parseInteger(intakeRecord.id),
+            reason: result.reason || result.status || 'personalization_reconciliation_blocked',
+          });
+        }
+      } catch (error) {
+        report.errors.push({
+          intake_config_id: parseInteger(intakeRecord.id),
+          reason: error.code || 'personalization_reconciliation_error',
+        });
+      }
+    }
+
+    const pageLastId = rows.reduce((maximum, row) => (
+      Math.max(maximum, parseInteger(row.id) || 0)
+    ), lastId);
+    if (pageLastId <= lastId) {
+      report.errors.push({
+        intake_config_id: null,
+        reason: 'personalization_reconciliation_pagination_stalled',
+      });
+      break;
+    }
+    lastId = pageLastId;
+  }
+
+  if (report.errors.length > 0) report.status = 'completed_with_errors';
+  return report;
 }
 
 function collectEnhancedConversionActivationTargets(rawGoogleAdsConfig) {
@@ -2999,6 +3154,7 @@ function buildEnhancedConversionActivationPlan({
   const appliedAt = now.toISOString();
   const nextConfig = cloneJsonObject(currentConfig);
   const personalizationCapability = buildVisitorChoicePersonalizationConfig(nextConfig, {
+    intakeRecord,
     now,
     activationSource
   });
@@ -6670,7 +6826,10 @@ exports.getCampaignOnboardingBootstrap = asyncHandler(async (req, res) => {
     const currentFeatures = asPlainObject(asPlainObject(intakeRecord?.config).features);
     const capabilityEnabled = currentFeatures.ad_personalization_enabled === true
       && currentFeatures.ad_personalization_consent_source === 'visitor_choice';
-    const capabilityAudited = isVisitorChoicePersonalizationCapabilityApplied(intakeRecord?.config);
+    const capabilityAudited = isVisitorChoicePersonalizationCapabilityApplied(
+      intakeRecord?.config,
+      intakeRecord,
+    );
     internalEnhancedConversionActivation = {
       applicable: true,
       automatic: true,
@@ -9104,6 +9263,7 @@ exports.__test = {
   persistVisitorChoicePersonalizationCapability,
   readGoogleConversionTrackingSettings,
   reconcileEnhancedConversionsInternalActivation,
+  reconcileVisitorChoicePersonalizationCapabilities,
   reconcileVerifiedConnectOnlyStrategyActivationReadiness,
   resolveEnabledConversionEvents,
   strategyPayloadUsesGoogleAds,
@@ -9111,5 +9271,7 @@ exports.__test = {
 };
 
 exports.reconcileEnhancedConversionsInternalActivation = reconcileEnhancedConversionsInternalActivation;
+exports.reconcileVisitorChoicePersonalizationCapabilities =
+  reconcileVisitorChoicePersonalizationCapabilities;
 exports.reconcileVerifiedConnectOnlyStrategyActivationReadiness =
   reconcileVerifiedConnectOnlyStrategyActivationReadiness;

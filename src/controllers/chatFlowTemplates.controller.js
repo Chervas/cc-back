@@ -255,6 +255,103 @@ function dedupeCatalogFlows(flows) {
   return { flows: deduped, changed };
 }
 
+function buildChatFlowTemplateConfigMutation({
+  base,
+  templateId,
+  templateRules,
+  clinicConfiguracion,
+  currentConfig,
+}) {
+  const lockedConfig = normalizeConfigObject(currentConfig);
+  const clinicDisciplinaCodes = normalizeDisciplinesFromClinicConfig(clinicConfiguracion);
+  const disciplineMatches = matchesDisciplines(base.disciplina_codes, clinicDisciplinaCodes);
+  const shouldBeDefault = !!base.is_active
+    && isDefaultTemplateForClinic(base.is_default_for, clinicDisciplinaCodes)
+    && !base.show_when_clinic_closed;
+  const shouldBeClosed = !!base.is_active && !!base.show_when_clinic_closed;
+  const shouldAddIfMissing = !!base.is_active && disciplineMatches;
+  const flows = Array.isArray(lockedConfig.flows) ? cloneJson(lockedConfig.flows) : [];
+  const hadExistingCatalogCopy = flows.some((flowRule) => getCatalogTemplateId(flowRule) === templateId);
+
+  if (!shouldAddIfMissing && !hadExistingCatalogCopy) {
+    return { shouldWrite: false, nextConfig: lockedConfig };
+  }
+
+  let changed = false;
+  const nextFlows = [...flows];
+  for (const templateRule of templateRules) {
+    const existingIndex = findCatalogFlowIndex(nextFlows, templateId, templateRule.index);
+    if (!shouldAddIfMissing && existingIndex < 0) continue;
+
+    const enabled = shouldBeDefault || shouldBeClosed
+      ? true
+      : (existingIndex >= 0 ? !!nextFlows[existingIndex].enabled : false);
+    const nextRule = buildCatalogFlowRule({
+      template: base,
+      flowRule: templateRule,
+      forceDefault: shouldBeDefault && templateRule.index === 0,
+      forceClosed: shouldBeClosed,
+      enabled: !!base.is_active && enabled,
+    });
+
+    if (existingIndex >= 0) {
+      const previous = nextFlows[existingIndex] || {};
+      const preservedDefault = !shouldBeDefault && !shouldBeClosed && !!base.is_active && disciplineMatches
+        ? !!previous.is_default
+        : false;
+      nextFlows[existingIndex] = {
+        ...previous,
+        ...nextRule,
+        id: previous.id || nextRule.id,
+        enabled: !!base.is_active && enabled,
+        is_default: shouldBeDefault && templateRule.index === 0 ? true : preservedDefault,
+      };
+    } else {
+      nextFlows.push(nextRule);
+    }
+    changed = true;
+  }
+
+  if (shouldBeDefault) {
+    for (const flowRule of nextFlows) {
+      const isThisTemplateDefault = getCatalogTemplateId(flowRule) === templateId
+        && getCatalogTemplateFlowIndex(flowRule) === 0;
+      if (flowRule.is_default !== isThisTemplateDefault) {
+        flowRule.is_default = isThisTemplateDefault;
+        changed = true;
+      }
+    }
+  } else if (!base.is_active || !disciplineMatches) {
+    for (const flowRule of nextFlows) {
+      if (getCatalogTemplateId(flowRule) !== templateId) continue;
+      if (flowRule.enabled !== false || flowRule.is_default !== false) {
+        flowRule.enabled = false;
+        flowRule.is_default = false;
+        changed = true;
+      }
+    }
+  }
+
+  const deduped = dedupeCatalogFlows(nextFlows);
+  if (deduped.changed) {
+    nextFlows.splice(0, nextFlows.length, ...deduped.flows);
+    changed = true;
+  }
+
+  const defaultRule = nextFlows.find((flowRule) => (
+    flowRule.is_default && flowRule.flow?.steps?.length > 0
+  ));
+  return {
+    shouldWrite: changed
+      && JSON.stringify(lockedConfig.flows || []) !== JSON.stringify(nextFlows),
+    nextConfig: {
+      ...lockedConfig,
+      flows: nextFlows,
+      ...(defaultRule ? { flow: cloneJson(defaultRule.flow) } : {}),
+    },
+  };
+}
+
 async function propagateChatFlowTemplateToExistingConfigs(template) {
   if (!IntakeConfig) return { updated: 0, skipped: 0, reason: 'intake_config_unavailable' };
 
@@ -265,21 +362,10 @@ async function propagateChatFlowTemplateToExistingConfigs(template) {
     return { updated: 0, skipped: 0, reason: 'empty_template' };
   }
 
-  const [configs, clinics] = await Promise.all([
-    IntakeConfig.findAll({
-      where: {
-        clinic_id: { [Op.ne]: null },
-        assignment_scope: 'clinic',
-      },
-    }),
-    Clinica.findAll({
-      attributes: ['id_clinica', 'configuracion'],
-      raw: true,
-    }),
-  ]);
-  const configByClinicId = new Map((configs || [])
-    .map((record) => [Number(record.clinic_id), record])
-    .filter(([clinicId]) => Number.isFinite(clinicId)));
+  const clinics = await Clinica.findAll({
+    attributes: ['id_clinica', 'configuracion'],
+    raw: true,
+  });
 
   let created = 0;
   let updated = 0;
@@ -292,108 +378,38 @@ async function propagateChatFlowTemplateToExistingConfigs(template) {
       continue;
     }
 
-    const record = configByClinicId.get(clinicId) || null;
-    const clinicDisciplinaCodes = normalizeDisciplinesFromClinicConfig(clinic.configuracion);
-    const disciplineMatches = matchesDisciplines(base.disciplina_codes, clinicDisciplinaCodes);
-    const shouldBeDefault = !!base.is_active && isDefaultTemplateForClinic(base.is_default_for, clinicDisciplinaCodes) && !base.show_when_clinic_closed;
-    const shouldBeClosed = !!base.is_active && !!base.show_when_clinic_closed;
-    const shouldAddIfMissing = !!base.is_active && disciplineMatches;
-
-    const currentConfig = normalizeConfigObject(record?.config);
-    const flows = Array.isArray(currentConfig.flows) ? cloneJson(currentConfig.flows) : [];
-    const hadExistingCatalogCopy = flows.some((flowRule) => getCatalogTemplateId(flowRule) === templateId);
-
-    if (!shouldAddIfMissing && !hadExistingCatalogCopy) {
-      skipped += 1;
-      continue;
-    }
-
-    let changed = false;
-    const nextFlows = [...flows];
-
-    for (const templateRule of templateRules) {
-      const existingIndex = findCatalogFlowIndex(nextFlows, templateId, templateRule.index);
-      if (!shouldAddIfMissing && existingIndex < 0) continue;
-
-      const enabled = shouldBeDefault || shouldBeClosed
-        ? true
-        : (existingIndex >= 0 ? !!nextFlows[existingIndex].enabled : false);
-      const nextRule = buildCatalogFlowRule({
-        template: base,
-        flowRule: templateRule,
-        forceDefault: shouldBeDefault && templateRule.index === 0,
-        forceClosed: shouldBeClosed,
-        enabled: !!base.is_active && enabled,
+    const outcome = await db.sequelize.transaction(async (transaction) => {
+      const locked = await IntakeConfig.findOne({
+        where: { clinic_id: clinicId, assignment_scope: 'clinic' },
+        transaction,
+        lock: transaction.LOCK.UPDATE,
       });
+      const mutation = buildChatFlowTemplateConfigMutation({
+        base,
+        templateId,
+        templateRules,
+        clinicConfiguracion: clinic.configuracion,
+        currentConfig: locked?.config,
+      });
+      if (!mutation.shouldWrite) return 'skipped';
 
-      if (existingIndex >= 0) {
-        const previous = nextFlows[existingIndex] || {};
-        const preservedDefault = !shouldBeDefault && !shouldBeClosed && !!base.is_active && disciplineMatches
-          ? !!previous.is_default
-          : false;
-        nextFlows[existingIndex] = {
-          ...previous,
-          ...nextRule,
-          id: previous.id || nextRule.id,
-          enabled: !!base.is_active && enabled,
-          is_default: shouldBeDefault && templateRule.index === 0 ? true : preservedDefault,
-        };
-      } else {
-        nextFlows.push(nextRule);
+      if (locked) {
+        await locked.update({ config: mutation.nextConfig }, { transaction });
+        return 'updated';
       }
-      changed = true;
-    }
-
-    if (shouldBeDefault) {
-      for (const flowRule of nextFlows) {
-        const isThisTemplateDefault = getCatalogTemplateId(flowRule) === templateId && getCatalogTemplateFlowIndex(flowRule) === 0;
-        if (flowRule.is_default !== isThisTemplateDefault) {
-          flowRule.is_default = isThisTemplateDefault;
-          changed = true;
-        }
-      }
-    } else if (!base.is_active || !disciplineMatches) {
-      for (const flowRule of nextFlows) {
-        if (getCatalogTemplateId(flowRule) !== templateId) continue;
-        if (flowRule.enabled !== false || flowRule.is_default !== false) {
-          flowRule.enabled = false;
-          flowRule.is_default = false;
-          changed = true;
-        }
-      }
-    }
-
-    const deduped = dedupeCatalogFlows(nextFlows);
-    if (deduped.changed) {
-      nextFlows.splice(0, nextFlows.length, ...deduped.flows);
-      changed = true;
-    }
-
-    const defaultRule = nextFlows.find((flowRule) => flowRule.is_default && flowRule.flow?.steps?.length > 0);
-    const nextConfig = {
-      ...currentConfig,
-      flows: nextFlows,
-      ...(defaultRule ? { flow: cloneJson(defaultRule.flow) } : {}),
-    };
-
-    if (changed && JSON.stringify(currentConfig.flows || []) !== JSON.stringify(nextFlows)) {
-      if (record) {
-        await record.update({ config: nextConfig });
-        updated += 1;
-      } else {
-        await IntakeConfig.create({
-          clinic_id: clinicId,
-          group_id: null,
-          assignment_scope: 'clinic',
-          domains: [],
-          config: nextConfig,
-          hmac_key: null,
-        });
-        created += 1;
-      }
-    } else {
-      skipped += 1;
-    }
+      await IntakeConfig.create({
+        clinic_id: clinicId,
+        group_id: null,
+        assignment_scope: 'clinic',
+        domains: [],
+        config: mutation.nextConfig,
+        hmac_key: null,
+      }, { transaction });
+      return 'created';
+    });
+    if (outcome === 'updated') updated += 1;
+    else if (outcome === 'created') created += 1;
+    else skipped += 1;
   }
 
   return { created, updated, skipped };
@@ -663,4 +679,8 @@ exports.duplicateChatFlowTemplate = async (req, res) => {
   } catch (error) {
     res.status(500).json({ message: 'Error duplicando plantilla', error: error.message });
   }
+};
+
+exports.__test = {
+  buildChatFlowTemplateConfigMutation,
 };

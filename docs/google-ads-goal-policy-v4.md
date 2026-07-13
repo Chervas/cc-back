@@ -66,6 +66,8 @@ cambiar su configuración de objetivos.
 - el plan conserva los datos anteriores necesarios para rollback manual;
 - la auditoría diaria detecta drift, pero no autorepara.
 
+`config.google_ads.goal_policy` pertenece exclusivamente al runtime de campañas gestionadas. Marketing > Web, la verificación del snippet y el provisioning de acciones deben conservarlo byte a byte junto con cualquier campo futuro no reconocido. Los writers de `IntakeConfig` leen la fila más reciente bajo lock y superponen únicamente su patch; un normalizador de lectura nunca reemplaza el objeto persistido. La regresión `intake_config_write_merge.test.js` cubre explícitamente `google_ads.goal_policy`, Enhanced, valores y campos desconocidos.
+
 El servicio no decide cuándo avanzar de `qualified_lead` a `schedule` o
 `purchase`: recibe la etapa ya aprobada por el ciclo de optimización y limita
 la mutación al goal exclusivo de esa etapa/cohorte.

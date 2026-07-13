@@ -42,6 +42,7 @@ const googleReviewMatchService = require('../services/googleReviewMatch.service'
 const { reconcileGoogleDataManagerDiagnostics } = require('../services/googleDataManagerDiagnostics.service');
 const {
   reconcileEnhancedConversionsInternalActivation,
+  reconcileVisitorChoicePersonalizationCapabilities,
   reconcileVerifiedConnectOnlyStrategyActivationReadiness,
 } = require('../controllers/campaignOnboarding.controller');
 const {
@@ -240,7 +241,7 @@ class MetaSyncJobs {
       adsBackfill: 'Backfill semanal de Ads con ventana extendida para consolidar atribución y cierres.',
       googleAdsSync: 'Sincroniza campañas y métricas diarias de Google Ads para cuentas vinculadas.',
       googleAdsBackfill: 'Backfill de Google Ads para nuevas cuentas o rangos extendidos.',
-      googleDataManagerDiagnostics: 'Concilia conversiones Data Manager y la activación interna idempotente de Conversiones mejoradas.',
+      googleDataManagerDiagnostics: 'Concilia Data Manager, la capacidad visitor_choice de todas las webs y el gate interno de Conversiones mejoradas.',
       googleConversionGoalPolicyAudit: 'Audita sin autoreparar acciones canónicas, custom goal y campañas opt-in de ClinicaClick.',
       campaignOptimizationEvaluation: 'Evalúa diariamente políticas persistidas de optimización sin cambiar objetivos ni mutar Google Ads.',
       webSync: 'Sincroniza Search Console (serie diaria) y PSI reciente para clínicas mapeadas.',
@@ -1735,6 +1736,24 @@ class MetaSyncJobs {
       records_processed: 0
     });
     try {
+      let visitorChoicePersonalization;
+      try {
+        visitorChoicePersonalization = await reconcileVisitorChoicePersonalizationCapabilities({
+          now: options.now || new Date()
+        });
+      } catch (error) {
+        visitorChoicePersonalization = {
+          status: 'error',
+          scanned: 0,
+          activated: 0,
+          already_active: 0,
+          errors: [{ reason: error.code || 'PERSONALIZATION_CAPABILITY_RECONCILIATION_ERROR' }],
+          idempotent: false,
+          grants_consent: false,
+          external_mutation_performed: false,
+          google_ads_mutated: false
+        };
+      }
       let internalActivation;
       try {
         internalActivation = await reconcileEnhancedConversionsInternalActivation({
@@ -1791,11 +1810,14 @@ class MetaSyncJobs {
       const diagnostics = await reconcileGoogleDataManagerDiagnostics(options);
       const report = {
         ...diagnostics,
+        visitor_choice_personalization_reconciliation: visitorChoicePersonalization,
         internal_enhanced_conversion_activation: internalActivation,
         connect_only_strategy_readiness_reconciliation: strategyReadinessReconciliation
       };
       const jobStatus = (
         (report.errors > 0 && report.checked === report.errors)
+        || visitorChoicePersonalization.status === 'error'
+        || visitorChoicePersonalization.errors?.length > 0
         || internalActivation.status === 'error'
         || strategyReadinessReconciliation.status === 'error'
       ) ? 'failed' : 'completed';
