@@ -88,6 +88,27 @@ Los agregados `WebPageDaily`, `WebClickDaily` y `WebSessionDaily` se reconstruye
 cada 15 minutos desde los `WebEvents` restantes. No se borran por marcador; tras
 la limpieza hay que esperar a la siguiente agregación y verificar el recálculo.
 
+## Evidencia de limpieza Enhanced controlada (2026-07-13)
+
+Los leads controlados `#7207`, `#7209` y `#7210` y sus artefactos se retiraron
+siguiendo exactamente `dry-run -> simulate -> apply`, con
+`--acknowledge-external-conversions-not-retracted`. El postcheck devolvió cero
+restos para esos IDs. Los leads reales `#7184/#7193/#7194` permanecieron intactos.
+
+Esta limpieza no convierte los resultados del proveedor en éxitos: los intentos
+`#19/#21/#22` habían terminado `FAILURE/INVALID_GCLID` porque usaban click IDs
+sintéticos. El intento `#22` sí acreditó el transporte controlado de dos hashes,
+un registro recibido y cero warnings, pero no una conversión atribuida.
+
+`LeadIntake #7208` no se ha limpiado. Su intento `#20`, request ID
+`6b1d7941-d6d2-4668-8b15-8e93be8748de`, seguía `PROCESSING` en la lectura
+`JobRequest #23745` / `SyncLog #65219` de las `22:00:12 UTC`, con `checked=1`,
+`processing=1`, `record_count=0` y cero errors/warnings. Conserva intactas una fila
+de atribución y el intento local para que el scheduler pueda completar la
+auditoría. Solo después de un terminal puede repetirse este procedimiento y
+documentar su postcheck; borrar antes incumpliría la guarda de diagnóstico
+terminal definida en **Preparar la prueba**.
+
 ## Propdental `/pedir-hora`: exigir clínica
 
 La opción `Sin preferencia` no está definida en la plantilla del tema. La
