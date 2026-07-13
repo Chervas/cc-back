@@ -38,6 +38,7 @@ const { findCanonicalWhatsappConversation } = require('../lib/canonical-conversa
 const { normalizePhoneDigits } = require('../lib/phone');
 const { normalizeConfiguredLocations } = require('../lib/intake-public-locations');
 const { resolveChatStateClinicSelection } = require('../lib/intakeChatLocation');
+const { resolveConfiguredFormClinicLocation } = require('../lib/intakeFormClinicLocation');
 const {
   isQuickChatSummaryRequest,
   materializeIntakeQuickChatSummary,
@@ -1331,25 +1332,49 @@ exports.ingestLead = asyncHandler(async (req, res) => {
     clinicaIdParsed === null
     && grupoClinicaIdParsed !== null
     && clinicNameHint
-    && canResolveGroupClinicHint
   ) {
     const groupClinics = await Clinica.findAll({
       where: { grupoClinicaId: grupoClinicaIdParsed },
-      attributes: ['id_clinica', 'nombre_clinica'],
+      attributes: ['id_clinica', 'grupoClinicaId', 'nombre_clinica', 'estado_clinica'],
       raw: true,
     });
-    const clinicMatcher = buildClinicMatcher(groupClinics, {
-      allowFallback: true,
-      requireDelimiter: false,
-    });
-    const clinicMatch = clinicMatcher.matchFromText(clinicNameHint, {
-      source: 'clinic_name_field',
-    });
-    const matchedClinicId = parseInteger(clinicMatch?.match?.clinic?.id);
-    if (matchedClinicId !== null) {
-      clinicaIdParsed = matchedClinicId;
-      clinicMatchSource = clinicMatchSource || 'clinic_name_field';
-      clinicMatchValue = clinicMatchValue || clinicNameHint;
+
+    const authoritativeGroupConfig = chatGroupConfigRecord?.assignment_scope === 'group'
+      ? chatGroupConfigRecord
+      : null;
+    if (authoritativeGroupConfig) {
+      const configuredClinicMatch = resolveConfiguredFormClinicLocation({
+        hint: clinicNameHint,
+        requestedGroupId: grupoClinicaIdParsed,
+        configRecord: authoritativeGroupConfig,
+        clinics: groupClinics,
+      });
+      if (configuredClinicMatch.matched) {
+        clinicaIdParsed = configuredClinicMatch.clinicId;
+        clinicMatchSource = clinicMatchSource || 'configured_location_label';
+        clinicMatchValue = clinicMatchValue || clinicNameHint;
+      } else if (configuredClinicMatch.hasCandidate) {
+        return res.status(422).json({
+          success: false,
+          error: 'invalid_form_location',
+          message: 'La sede seleccionada no es válida para este formulario',
+        });
+      }
+    } else if (canResolveGroupClinicHint) {
+      // Compatibilidad con instalaciones legacy sin configuración de sedes.
+      const clinicMatcher = buildClinicMatcher(groupClinics, {
+        allowFallback: true,
+        requireDelimiter: false,
+      });
+      const clinicMatch = clinicMatcher.matchFromText(clinicNameHint, {
+        source: 'clinic_name_field',
+      });
+      const matchedClinicId = parseInteger(clinicMatch?.match?.clinic?.id);
+      if (matchedClinicId !== null) {
+        clinicaIdParsed = matchedClinicId;
+        clinicMatchSource = clinicMatchSource || 'clinic_name_field';
+        clinicMatchValue = clinicMatchValue || clinicNameHint;
+      }
     }
   }
 
