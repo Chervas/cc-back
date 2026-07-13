@@ -1357,6 +1357,7 @@ exports.ingestLead = asyncHandler(async (req, res) => {
         return res.status(422).json({
           success: false,
           error: 'invalid_form_location',
+          reason: configuredClinicMatch.reason || 'invalid_location',
           message: 'La sede seleccionada no es válida para este formulario',
         });
       }
