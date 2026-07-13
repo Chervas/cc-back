@@ -55,7 +55,7 @@ const {
   canonicalizeIntakeDomain,
   canonicalizeIntakeDomains,
   cookieNoticeProviderMatches,
-  verifyVerificationAttestation,
+  verifyPersistedVerificationAttestation,
 } = require('../lib/intake-verification-attestation');
 
 const GoogleConnection = db.GoogleConnection;
@@ -2358,7 +2358,7 @@ function assessConsentMeasurementReadiness(marketingState) {
       add('consent_attestation_missing', { domain });
       continue;
     }
-    const attestation = verifyVerificationAttestation(token, {
+    const attestation = verifyPersistedVerificationAttestation(token, {
       scopeType: recordScopeType,
       scopeId: recordScopeId,
       domain,
@@ -2368,7 +2368,7 @@ function assessConsentMeasurementReadiness(marketingState) {
       add('consent_attestation_invalid', { domain, details: attestation.reason });
       continue;
     }
-    validAttestationExpirations.push(Number(attestation.claims?.exp));
+    validAttestationExpirations.push(Number(attestation.operationalExpiresAt));
     const signals = attestation.claims?.signals || {};
     if (signals.installed !== true) add('consent_domain_unverified', { domain });
     if (signals.runtime_compatible !== true) add('consent_runtime_incompatible', { domain });

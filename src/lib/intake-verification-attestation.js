@@ -6,6 +6,8 @@ const ATTESTATION_TYPE = 'cc-intake-verification';
 const ATTESTATION_VERSION = 1;
 const DEFAULT_ATTESTATION_TTL_SECONDS = 15 * 60;
 const MAX_ATTESTATION_TTL_SECONDS = 20 * 60;
+const DEFAULT_PERSISTED_VERIFICATION_TTL_SECONDS = 24 * 60 * 60;
+const MAX_PERSISTED_VERIFICATION_TTL_SECONDS = 7 * 24 * 60 * 60;
 
 function canonicalizeIntakeDomain(value) {
   const raw = String(value || '').trim();
@@ -200,12 +202,24 @@ function issueVerificationAttestation({
   };
 }
 
-function verifyVerificationAttestation(token, {
+function resolvePersistedVerificationTtlSeconds(value) {
+  const configured = value ?? process.env.INTAKE_PERSISTED_VERIFICATION_TTL_SECONDS;
+  return Math.min(
+    Math.max(
+      1,
+      Number.parseInt(String(configured ?? ''), 10) || DEFAULT_PERSISTED_VERIFICATION_TTL_SECONDS,
+    ),
+    MAX_PERSISTED_VERIFICATION_TTL_SECONDS,
+  );
+}
+
+function verifyVerificationAttestationClaims(token, {
   scopeType,
   scopeId,
   domain,
   configHash,
   nowMs = Date.now(),
+  allowExpired = false,
 } = {}) {
   const secret = resolveAttestationSecret();
   if (!secret) return { valid: false, reason: 'attestation_secret_missing', claims: null };
@@ -244,7 +258,7 @@ function verifyVerificationAttestation(token, {
   if (issuedAt > nowSeconds + 30) {
     return { valid: false, reason: 'attestation_not_yet_valid', claims: null };
   }
-  if (expiresAt <= nowSeconds) {
+  if (!allowExpired && expiresAt <= nowSeconds) {
     return { valid: false, reason: 'attestation_expired', claims };
   }
 
@@ -265,15 +279,60 @@ function verifyVerificationAttestation(token, {
   return { valid: true, reason: null, claims: { ...claims, signals: safeSignals(claims.signals) } };
 }
 
+function verifyVerificationAttestation(token, expected = {}) {
+  return verifyVerificationAttestationClaims(token, expected);
+}
+
+/**
+ * Verifies evidence that was already accepted and persisted by the backend.
+ *
+ * The signed token remains intentionally short-lived so it cannot be replayed
+ * as a new admin submission. Once accepted, the same signed claims can support
+ * readiness for a separate operational window. Signature, scope, domain,
+ * config hash and the original short token TTL are still checked every time.
+ */
+function verifyPersistedVerificationAttestation(token, {
+  operationalTtlSeconds,
+  ...expected
+} = {}) {
+  const result = verifyVerificationAttestationClaims(token, {
+    ...expected,
+    allowExpired: true,
+  });
+  if (!result.valid) return result;
+
+  const nowSeconds = Math.floor((expected.nowMs ?? Date.now()) / 1000);
+  const ttlSeconds = resolvePersistedVerificationTtlSeconds(operationalTtlSeconds);
+  const operationalExpiresAt = Number(result.claims.iat) + ttlSeconds;
+  if (operationalExpiresAt <= nowSeconds) {
+    return {
+      valid: false,
+      reason: 'attestation_operational_expired',
+      claims: result.claims,
+      operationalExpiresAt,
+    };
+  }
+
+  return {
+    ...result,
+    operationalExpiresAt,
+    operationalExpiresAtIso: new Date(operationalExpiresAt * 1000).toISOString(),
+  };
+}
+
 module.exports = {
   ATTESTATION_TYPE,
   ATTESTATION_VERSION,
   DEFAULT_ATTESTATION_TTL_SECONDS,
   MAX_ATTESTATION_TTL_SECONDS,
+  DEFAULT_PERSISTED_VERIFICATION_TTL_SECONDS,
+  MAX_PERSISTED_VERIFICATION_TTL_SECONDS,
   buildVerificationConfigHash,
   canonicalizeIntakeDomain,
   canonicalizeIntakeDomains,
   cookieNoticeProviderMatches,
   issueVerificationAttestation,
+  resolvePersistedVerificationTtlSeconds,
+  verifyPersistedVerificationAttestation,
   verifyVerificationAttestation,
 };

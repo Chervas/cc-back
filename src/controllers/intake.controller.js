@@ -61,6 +61,7 @@ const {
   canonicalizeIntakeDomains,
   cookieNoticeProviderMatches,
   issueVerificationAttestation,
+  verifyPersistedVerificationAttestation,
   verifyVerificationAttestation,
 } = require('../lib/intake-verification-attestation');
 const {
@@ -2829,7 +2830,9 @@ const rebuildTrustedSnippetVerification = ({
       }
       continue;
     }
-    const verified = verifyVerificationAttestation(token, {
+    let verified = (rejectInvalid
+      ? verifyVerificationAttestation
+      : verifyPersistedVerificationAttestation)(token, {
       scopeType,
       scopeId,
       domain,
@@ -2839,11 +2842,26 @@ const rebuildTrustedSnippetVerification = ({
       if (rejectInvalid) throw snippetAttestationError(verified.reason, domain);
       continue;
     }
-    validByDomain.set(domain, { token, claims: verified.claims });
+    if (rejectInvalid) {
+      const persisted = verifyPersistedVerificationAttestation(token, {
+        scopeType,
+        scopeId,
+        domain,
+        configHash,
+      });
+      if (!persisted.valid) throw snippetAttestationError(persisted.reason, domain);
+      verified = { ...verified, ...persisted };
+    }
+    validByDomain.set(domain, {
+      token,
+      claims: verified.claims,
+      operationalExpiresAtIso: verified.operationalExpiresAtIso || null,
+    });
   }
 
   const attestationsByDomain = {};
   const expiresByDomain = {};
+  const verificationExpiresByDomain = {};
   const runtimeVersionsByDomain = {};
   const cookieProvidersByDomain = {};
   const legalPagesByDomain = {};
@@ -2863,6 +2881,8 @@ const rebuildTrustedSnippetVerification = ({
     const signals = claims.signals || {};
     attestationsByDomain[domain] = token;
     expiresByDomain[domain] = new Date(Number(claims.exp) * 1000).toISOString();
+    verificationExpiresByDomain[domain] = item.operationalExpiresAtIso
+      || new Date(Number(claims.exp) * 1000).toISOString();
     issuedAtValues.push(Number(claims.iat));
     if (signals.installed === true) installedDomains.push(domain);
     if (signals.runtime_compatible === true) runtimeDomains.push(domain);
@@ -2903,6 +2923,7 @@ const rebuildTrustedSnippetVerification = ({
     checked_urls: checkedUrls,
     attestations_by_domain: attestationsByDomain,
     attestation_expires_at_by_domain: expiresByDomain,
+    verification_expires_at_by_domain: verificationExpiresByDomain,
     attestation_config_hash: configHash,
   };
 };
