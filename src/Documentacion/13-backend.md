@@ -3339,6 +3339,8 @@ En esa carga se guardan, entre otros:
 | GET | `/api/marketing/google-ads/conversion-actions` | Operativo | readiness de conversiones Google Ads |
 | POST | `/api/marketing/google-ads/conversion-actions/ensure` | Operativo | crea/reutiliza conversiones recomendadas |
 
+Los `external_targets` guardados dentro de una estrategia son un snapshot editable, no la fuente del estado actual de Google/Meta. Al listar o abrir una estrategia, backend superpone `name` y `status` desde `ExternalCampaignInventory` por identidad `provider + account + campaign`, conservando el snapshot y sus métricas. El selector de campañas aplica la misma superposición después de agregar históricos; `MAX(campaignStatus)` no puede decidir si una campaña está activa y `active_only` se filtra solo después de incorporar el inventario actual.
+
 #### Contrato seguro de conversiones Google Ads (2026-07-11)
 
 - la comprobación de dominio emite una attestation firmada de corta duración: solo puede enviarse como prueba nueva durante 15 minutos; una vez aceptada por backend, readiness revalida siempre firma, scope, dominio, HMAC y hash de configuración, pero usa una vigencia operativa separada de 24 horas (`INTAKE_PERSISTED_VERIFICATION_TTL_SECONDS`, máximo 7 días). Cambiar dominios, proveedor, URLs legales o HMAC invalida la prueba aunque siga dentro de esa ventana;

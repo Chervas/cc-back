@@ -387,6 +387,93 @@ function hydrateExternalTargetsWithMetrics(rawTargets, metricsIndex) {
   }));
 }
 
+function buildCurrentExternalCampaignInventoryIndex(rows = []) {
+  const index = new Map();
+  for (const row of Array.isArray(rows) ? rows : []) {
+    const identity = canonicalExternalCampaignIdentity({
+      provider: row?.provider,
+      account_id: row?.customer_id,
+      customer_id: row?.customer_id,
+      campaign_id: row?.campaign_id,
+      external_campaign_id: row?.campaign_id,
+    });
+    const key = externalCampaignIdentityKey(identity);
+    if (!key) continue;
+
+    const previous = index.get(key);
+    const previousSeenAt = new Date(previous?.last_seen_at || previous?.updated_at || 0).getTime();
+    const currentSeenAt = new Date(row?.last_seen_at || row?.updated_at || 0).getTime();
+    if (previous && previousSeenAt > currentSeenAt) continue;
+    index.set(key, row);
+  }
+  return index;
+}
+
+function overlayExternalTargetsWithInventory(rawTargets, inventoryIndex) {
+  const targets = normalizeExternalTargets(rawTargets);
+  if (!(inventoryIndex instanceof Map) || inventoryIndex.size === 0) {
+    return targets;
+  }
+
+  return targets.map((target) => ({
+    ...target,
+    campaigns: target.campaigns.map((campaign) => {
+      const inventory = inventoryIndex.get(externalCampaignIdentityKey(campaign));
+      if (!inventory) return campaign;
+      const currentName = String(inventory.campaign_name || '').trim();
+      const currentStatus = String(inventory.status || '').trim();
+      return {
+        ...campaign,
+        ...(currentName ? { name: currentName } : {}),
+        ...(currentStatus ? { status: currentStatus } : {}),
+      };
+    }),
+  }));
+}
+
+async function loadCurrentExternalCampaignInventoryIndex(payloads = []) {
+  if (!ExternalCampaignInventory) return new Map();
+
+  const refs = {
+    google_ads: { accountIds: new Set(), campaignIds: new Set(), identities: new Set() },
+    meta_ads: { accountIds: new Set(), campaignIds: new Set(), identities: new Set() },
+  };
+  for (const payload of Array.isArray(payloads) ? payloads : []) {
+    const payloadRefs = collectExternalCampaignRefs(payload);
+    for (const provider of ['google_ads', 'meta_ads']) {
+      for (const value of payloadRefs[provider].accountIds) refs[provider].accountIds.add(value);
+      for (const value of payloadRefs[provider].campaignIds) refs[provider].campaignIds.add(value);
+      for (const key of payloadRefs[provider].identities.keys()) refs[provider].identities.add(key);
+    }
+  }
+
+  const where = [];
+  for (const provider of ['google_ads', 'meta_ads']) {
+    const accountIds = Array.from(refs[provider].accountIds).filter(Boolean);
+    const campaignIds = Array.from(refs[provider].campaignIds).filter(Boolean);
+    if (!accountIds.length || !campaignIds.length) continue;
+    where.push({
+      provider,
+      customer_id: { [Op.in]: accountIds },
+      campaign_id: { [Op.in]: campaignIds },
+    });
+  }
+  if (!where.length) return new Map();
+
+  const rows = await ExternalCampaignInventory.findAll({
+    where: { [Op.or]: where },
+    raw: true,
+  });
+  return buildCurrentExternalCampaignInventoryIndex(rows.filter((row) => {
+    const key = externalCampaignIdentityKey({
+      provider: row.provider,
+      account_id: row.customer_id,
+      campaign_id: row.campaign_id,
+    });
+    return refs[row.provider]?.identities.has(key) === true;
+  }));
+}
+
 async function enrichSingleMetaCampaignReference({ scope, campaignRef }) {
   const campaignId = String(campaignRef?.external_campaign_id || '').trim();
   if (!campaignId) {
@@ -1045,6 +1132,85 @@ function createWebDestinationDetection(reason = 'web', confidence = 'medium', ur
     instant_form: null,
     creative_preview: null
   };
+}
+
+function mergeCurrentGoogleCampaignInventory({
+  campaigns = [],
+  inventoryRows = [],
+  reviewedByCampaign = new Map(),
+  googleAccountMap = new Map(),
+  scope = {},
+  activeOnly = true,
+} = {}) {
+  const merged = (Array.isArray(campaigns) ? campaigns : []).map((item) => ({ ...item }));
+  const byKey = new Map(merged.map((item, index) => [
+    `${normalizeCustomerId(item.account_id)}:${String(item.external_campaign_id || '')}`,
+    index,
+  ]));
+
+  for (const inventory of Array.isArray(inventoryRows) ? inventoryRows : []) {
+    const customerId = normalizeCustomerId(inventory?.customer_id || '');
+    const campaignId = String(inventory?.campaign_id || '').trim();
+    if (!customerId || !campaignId) continue;
+    const key = `${customerId}:${campaignId}`;
+    const assignment = reviewedByCampaign.get(key);
+    const existingIndex = byKey.get(key);
+    const currentName = String(inventory.campaign_name || '').trim() || null;
+    const currentStatus = String(inventory.status || '').trim() || null;
+    if (existingIndex !== undefined) {
+      const existing = merged[existingIndex];
+      merged[existingIndex] = {
+        ...existing,
+        account_name: inventory.account_name
+          || googleAccountMap.get(customerId)?.descriptive_name
+          || existing.account_name
+          || null,
+        name: currentName || existing.name || null,
+        status: currentStatus || existing.status || null,
+        last_seen_at: inventory.last_seen_at || existing.last_seen_at || null,
+        assignment_origin: assignment ? 'reviewed' : existing.assignment_origin,
+      };
+      continue;
+    }
+    if (
+      scope.assignment_scope !== 'group'
+      && (!assignment || Number(assignment.clinica_id) !== Number(scope.clinic_id))
+    ) {
+      continue;
+    }
+
+    merged.push({
+      provider: 'google_ads',
+      account_id: customerId,
+      account_name: inventory.account_name || googleAccountMap.get(customerId)?.descriptive_name || null,
+      external_campaign_id: campaignId,
+      name: currentName,
+      status: currentStatus,
+      clinic_ids: assignment?.clinica_id ? [Number(assignment.clinica_id)] : [],
+      group_ids: assignment?.grupo_clinica_id
+        ? [Number(assignment.grupo_clinica_id)]
+        : (scope.group_id ? [Number(scope.group_id)] : []),
+      assignment_origin: assignment ? 'reviewed' : 'inventory',
+      metrics: inventory.latest_metrics && typeof inventory.latest_metrics === 'object'
+        ? {
+            impressions: safeNumber(inventory.latest_metrics.impressions),
+            clicks: safeNumber(inventory.latest_metrics.clicks),
+            spend: safeNumber(inventory.latest_metrics.spend),
+            conversions: safeNumber(inventory.latest_metrics.conversions),
+          }
+        : { impressions: 0, clicks: 0, spend: 0, conversions: 0 },
+      last_seen_at: inventory.last_seen_at || null,
+      destination_detection: inventory.destination_detection || createWebDestinationDetection('google_ads_inventory', 'medium'),
+    });
+    byKey.set(key, merged.length - 1);
+  }
+
+  return merged
+    .filter((item) => !activeOnly || isGoogleCampaignActive(item.status))
+    .sort((left, right) => (
+      safeNumber(right.metrics?.spend) - safeNumber(left.metrics?.spend)
+      || String(left.name || '').localeCompare(String(right.name || ''))
+    ));
 }
 
 function createMetaLeadFormDetection(reason = 'meta_lead_form_detected') {
@@ -4564,7 +4730,7 @@ async function buildLiveStrategyMetrics(rows, campaign, payload) {
   };
 }
 
-function buildStrategyItemFromRows(rows, campaignsById) {
+function buildStrategyItemFromRows(rows, campaignsById, inventoryIndex = null) {
   const normalizedRows = Array.isArray(rows) ? rows.filter(Boolean) : [];
   if (!normalizedRows.length) return null;
 
@@ -4577,7 +4743,7 @@ function buildStrategyItemFromRows(rows, campaignsById) {
   const mode = payload.mode_snapshot || payload.mode || null;
   const normalizedStatus = normalizeStrategyStatus(payload.status || representative.estado);
   const status = normalizedStatus;
-  const externalTargets = normalizeExternalTargets(payload.external_targets);
+  const externalTargets = overlayExternalTargetsWithInventory(payload.external_targets, inventoryIndex);
   const targetDestinations = normalizeTargetDestinations(payload.target_destinations);
 
   return {
@@ -5639,8 +5805,7 @@ exports.listExternalCampaigns = asyncHandler(async (req, res) => {
       extraMapper: (row) => ({
         account_name: googleAccountMap.get(normalizeCustomerId(row.customerId || ''))?.descriptive_name || null
       })
-    }).filter((item) => !activeOnly || isGoogleCampaignActive(item.status))
-      .map((item) => ({
+    }).map((item) => ({
         ...item,
         destination_detection: createWebDestinationDetection('google_ads_default', 'medium')
       }));
@@ -5654,42 +5819,16 @@ exports.listExternalCampaigns = asyncHandler(async (req, res) => {
         raw: true,
         order: [['campaign_name', 'ASC']]
       });
-      const existingKeys = new Set(googleCampaigns.map((item) => `${normalizeCustomerId(item.account_id)}:${item.external_campaign_id}`));
-      for (const inventory of inventoryRows) {
-        const key = `${normalizeCustomerId(inventory.customer_id)}:${String(inventory.campaign_id)}`;
-        if (existingKeys.has(key)) continue;
-        const assignment = reviewedByCampaign.get(key);
-        if (
-          scope.assignment_scope !== 'group'
-          && (!assignment || Number(assignment.clinica_id) !== Number(scope.clinic_id))
-        ) {
-          continue;
-        }
-        if (activeOnly && !isGoogleCampaignActive(inventory.status)) continue;
-        googleCampaigns.push({
-          provider: 'google_ads',
-          account_id: normalizeCustomerId(inventory.customer_id),
-          account_name: inventory.account_name || googleAccountMap.get(normalizeCustomerId(inventory.customer_id))?.descriptive_name || null,
-          external_campaign_id: String(inventory.campaign_id),
-          name: inventory.campaign_name || null,
-          status: inventory.status || null,
-          clinic_ids: assignment?.clinica_id ? [Number(assignment.clinica_id)] : [],
-          group_ids: assignment?.grupo_clinica_id ? [Number(assignment.grupo_clinica_id)] : (scope.group_id ? [Number(scope.group_id)] : []),
-          assignment_origin: assignment ? 'reviewed' : 'inventory',
-          metrics: inventory.latest_metrics && typeof inventory.latest_metrics === 'object'
-            ? {
-                impressions: safeNumber(inventory.latest_metrics.impressions),
-                clicks: safeNumber(inventory.latest_metrics.clicks),
-                spend: safeNumber(inventory.latest_metrics.spend),
-                conversions: safeNumber(inventory.latest_metrics.conversions)
-              }
-            : { impressions: 0, clicks: 0, spend: 0, conversions: 0 },
-          last_seen_at: inventory.last_seen_at || null,
-          destination_detection: inventory.destination_detection || createWebDestinationDetection('google_ads_inventory', 'medium')
-        });
-        existingKeys.add(key);
-      }
-      googleCampaigns.sort((left, right) => safeNumber(right.metrics?.spend) - safeNumber(left.metrics?.spend) || String(left.name || '').localeCompare(String(right.name || '')));
+      googleCampaigns = mergeCurrentGoogleCampaignInventory({
+        campaigns: googleCampaigns,
+        inventoryRows,
+        reviewedByCampaign,
+        googleAccountMap,
+        scope,
+        activeOnly,
+      });
+    } else {
+      googleCampaigns = googleCampaigns.filter((item) => !activeOnly || isGoogleCampaignActive(item.status));
     }
   }
 
@@ -6877,6 +7016,9 @@ exports.listMarketingStrategies = asyncHandler(async (req, res) => {
   });
 
   const campaignsById = await loadCampaignsByIds(strategyRows.map((row) => row.campaign_id));
+  const inventoryIndex = await loadCurrentExternalCampaignInventoryIndex(strategyRows.map((row) => (
+    row?.solicitud && typeof row.solicitud === 'object' ? row.solicitud : {}
+  )));
   const strategyMap = new Map();
   for (const row of strategyRows) {
     const key = row.campaign_id || row.id;
@@ -6887,7 +7029,7 @@ exports.listMarketingStrategies = asyncHandler(async (req, res) => {
   }
 
   const items = Array.from(strategyMap.values())
-    .map((rows) => buildStrategyItemFromRows(rows, campaignsById))
+    .map((rows) => buildStrategyItemFromRows(rows, campaignsById, inventoryIndex))
     .filter(Boolean)
     .filter((item) => !objectiveFilter || item.objective_id === objectiveFilter)
     .sort((a, b) => String(b.updated_at || b.created_at).localeCompare(String(a.updated_at || a.created_at)));
@@ -6924,13 +7066,14 @@ exports.getMarketingStrategyDetail = asyncHandler(async (req, res) => {
   }
   if (!(await requireMarketingClinicScope(req, res, clinicIdsFromStrategyRows(rows), 'read'))) return;
 
+  const payload = rows[0]?.solicitud && typeof rows[0].solicitud === 'object' ? rows[0].solicitud : {};
+  const inventoryIndex = await loadCurrentExternalCampaignInventoryIndex([payload]);
   const campaignsById = await loadCampaignsByIds(rows.map((row) => row.campaign_id));
-  const strategy = buildStrategyItemFromRows(rows, campaignsById);
+  const strategy = buildStrategyItemFromRows(rows, campaignsById, inventoryIndex);
   if (!strategy) {
     return res.status(404).json({ success: false, error: 'not_found', message: 'Estrategia no encontrada' });
   }
 
-  const payload = rows[0]?.solicitud && typeof rows[0].solicitud === 'object' ? rows[0].solicitud : {};
   strategy.metrics = await buildLiveStrategyMetrics(
     rows,
     strategy.campaign_id ? campaignsById.get(strategy.campaign_id) || null : null,
@@ -6939,7 +7082,10 @@ exports.getMarketingStrategyDetail = asyncHandler(async (req, res) => {
   const scope = extractStrategyScopeFromPayload(payload, rows);
   const liveExternalMetrics = await loadCurrentExternalCampaignMetricsIndex({ scope, payload });
   const liveLeadMetrics = await loadCurrentLeadAttributionMetricsIndex({ scope, payload });
-  strategy.external_targets = hydrateExternalTargetsWithMetrics(payload.external_targets, liveExternalMetrics);
+  strategy.external_targets = overlayExternalTargetsWithInventory(
+    hydrateExternalTargetsWithMetrics(payload.external_targets, liveExternalMetrics),
+    inventoryIndex
+  );
   strategy.target_summaries = buildTargetSummaries(strategy.external_targets, payload.target_destinations, liveLeadMetrics);
 
   return res.json({
@@ -7765,6 +7911,7 @@ exports.__test = {
   applyCanonicalMappingsToGoogleAdsConfig,
   assessConsentMeasurementReadiness,
   assessConversionOnboardingReadiness,
+  buildCurrentExternalCampaignInventoryIndex,
   buildEnhancedConversionActivationPlan,
   buildGoogleAdsCapabilities,
   buildRequiredConversionPlan,
@@ -7772,6 +7919,8 @@ exports.__test = {
   buildClinicaclickManagedMapping,
   conversionValidationKey,
   collectEnhancedConversionActivationTargets,
+  mergeCurrentGoogleCampaignInventory,
+  overlayExternalTargetsWithInventory,
   readGoogleConversionTrackingSettings,
   resolveEnabledConversionEvents,
   strategyPayloadUsesGoogleAds,
