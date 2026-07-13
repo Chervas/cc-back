@@ -102,7 +102,7 @@ un registro recibido y cero warnings, pero no una conversión atribuida.
 
 `LeadIntake #7208` no se ha limpiado. Su intento `#20`, request ID
 `6b1d7941-d6d2-4668-8b15-8e93be8748de`, seguía `PROCESSING` en la lectura
-`JobRequest #23745` / `SyncLog #65219` de las `22:00:12 UTC`, con `checked=1`,
+`JobRequest #23779` / `SyncLog #65252` de las `23:30:04 UTC`, con `checked=1`,
 `processing=1`, `record_count=0` y cero errors/warnings. Conserva intactas una fila
 de atribución y el intento local para que el scheduler pueda completar la
 auditoría. Solo después de un terminal puede repetirse este procedimiento y
