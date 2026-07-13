@@ -89,6 +89,7 @@ const {
 } = require('../lib/intake-config-write-merge');
 const {
   buildMarketingOriginWhere,
+  buildLeadCreatedDescription,
   buildLeadAttributionView,
 } = require('../lib/lead-attribution-view');
 const {
@@ -862,50 +863,9 @@ const sanitizeLeadNoteText = (value) => {
     .trim();
 };
 
-const LEAD_SOURCE_LABELS = {
-  web: 'web',
-  google_ads: 'Google Ads',
-  meta_ads: 'Meta Ads',
-  tiktok_ads: 'TikTok Ads',
-  whatsapp: 'WhatsApp',
-  call_click: 'llamada',
-  seo: 'SEO',
-  direct: 'directo',
-  local_services: 'Local Services',
-};
-
-const LEAD_SOURCE_DETAIL_LABELS = {
-  tel_modal: 'web por teléfono',
-  tel_modal_call: 'llamada desde la web',
-  web_form: 'formulario web',
-  chat: 'chat web',
-  whatsapp_inbound: 'WhatsApp',
-};
-
 const LEAD_CONTACT_REASON_LABELS = {
   no_contesta: 'No contesta',
   otro: 'Otro motivo',
-};
-
-const buildLeadCreatedDescription = (lead) => {
-  const detailKey = cleanString(lead?.source_detail);
-  const sourceKey = cleanString(lead?.source);
-  const detailLabel = detailKey ? LEAD_SOURCE_DETAIL_LABELS[detailKey] : null;
-  if (detailLabel) {
-    const lines = [`Origen: ${detailLabel}`];
-    if (detailKey === 'tel_modal' || detailKey === 'tel_modal_call') {
-      const clickedPhone = cleanString(lead?.telefono);
-      const pageUrl = cleanString(lead?.page_url || lead?.landing_url);
-      if (clickedPhone) lines.push(`Teléfono pulsado: ${clickedPhone}`);
-      if (pageUrl) lines.push(`Página de origen: ${pageUrl}`);
-    }
-    return lines.join('\n');
-  }
-  const sourceLabel = sourceKey ? LEAD_SOURCE_LABELS[sourceKey] || sourceKey : null;
-  if (sourceLabel) {
-    return `Origen: ${sourceLabel}`;
-  }
-  return 'Nuevo lead';
 };
 
 const formatLeadContactReason = (value) => {
