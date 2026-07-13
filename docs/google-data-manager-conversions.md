@@ -49,6 +49,8 @@ La **reconciliación Enhanced** queda bloqueada, sin cambios parciales en user d
 
 Al superar el gate se habilitan conjuntamente el disclosure y runtime de Conversiones mejoradas, `google_ads.user_data_enabled` y los eventos existentes Lead, Contact, Qualified Lead y Schedule. La capacidad `ad_personalization_enabled=true` con fuente `visitor_choice` se conserva, pero no nace necesariamente en esta fase porque puede haberse materializado antes. Ese `true` no concede consentimiento: permite emitir la elección real del visitante. La allowlist incluye el ticket `4-1893000040437`, la autorización del anunciante y las restricciones de medición: solo email/teléfono, sin Purchase, nombre, dirección, Customer Match, listas ni remarketing. El audit embebido contiene referencias, cuentas, eventos, estado por cuenta, clave de reconciliación y fecha, pero ninguna PII del paciente.
 
+El gate Enhanced v3 también fija `google_ads.phone_country_code=34` en este `IntakeConfig` español. El uploader usa ese valor solo para convertir teléfonos locales a E.164 antes de SHA-256; un teléfono ya internacional conserva su país. Francia no está incluida en las locations de este scope y debe definir un `IntakeConfig` de clínica con su código correcto. Si no existe un país inequívoco, el teléfono se omite y nunca se adivina.
+
 La política de valores es versionada y declarada como peso de reporting/optimización, no ingreso: Lead `0 EUR`, Contact `0 EUR`, Qualified Lead `10 EUR` y Schedule `40 EUR`. Purchase queda fuera de esta activación y solo puede enviar un valor económico real del CRM. El reconciliador no cambia objetivos, acciones primarias, pujas ni campañas en Google.
 
 Tras una activación Enhanced sana, el mismo job llama a `reconcileVerifiedConnectOnlyStrategyActivationReadiness`. Este segundo reconciliador elimina snapshots internos obsoletos de readiness, no activa nada nuevo en el proveedor: vuelve a leer acciones Google y ejecuta Data Manager con `validateOnly` y `createMissing=false`. Solo considera `CampaignRequest` `active` cuyo payload sea `new_patients + connect_only + Google`; vuelve a validar también snapshots previamente verdes cuando cambia la clave, el scope, las cuentas o vence el consentimiento. En el rollout actual, únicamente las clínicas `19`, `35`, `56`, `58` y `59`, declaradas en `groupRecord.config.locations`, pueden usar la configuración web de `propdental.es`; cada evidencia guarda `validated_scope.source=group_web_location`. Francia `36` y Eixample `57` no heredan ese consentimiento y permanecen bloqueadas hasta disponer de un `IntakeConfig` propio válido. El reconciliador exige el customer set exacto del gate, evidencia completa por action/target, fingerprint/CAS de estrategia y configuración, y vuelve a comparar todo bajo locks antes de escribir únicamente `solicitud.activation_readiness`. Conserva el snapshot anterior en `activation_readiness_reconciliation`, tolera ejecuciones concurrentes, es idempotente y se audita en `SyncLog.status_report.connect_only_strategy_readiness_reconciliation`. Devuelve expresamente `external_mutation_performed=false` y `google_ads_mutated=false`; no modifica `Campaign`, acciones, goals, pujas ni Google y no convierte `connect_only` en Piloto automático.
@@ -73,6 +75,8 @@ Tras una activación Enhanced sana, el mismo job llama a `reconcileVerifiedConne
 - Staging backend `323e4a4` y frontend `a1c875ea` cerraron esa regresión. A las `09:38:42 UTC`, Chromium admin pulsó Verificar: el fingerprint protegido abreviado `a04c971…044b` permaneció idéntico y cambió solo `snippet_verification.verified_at`; Enhanced, user data y personalización siguieron activas; valores `0/0/10/40` y Purchase deshabilitado se conservaron.
 - El reconciliador post-Verificar devolvió `already_active`, `ready=true`, idempotente y `google_ads_mutated=false`. Ambas cuentas mantenían términos/Enhanced activos y Data Manager aceptó `validateOnly`. El GET público no expuso attestations, hash, HMAC, Enhanced, `goal_policy` ni auditorías.
 - La reconciliación global `visitor_choice` examinó 18 configuraciones: 17 `activated`, 1 `already_active`, 0 errores y `grants_consent=false`. Esto materializa capacidad, no consentimiento.
+- Una validación posterior al gate volvió a enviar email y teléfono sintéticos con `validateOnly=true`, consentimiento `GRANTED` y la autorización exacta a las acciones Lead de `185...` y `599...`; ambas cuentas devolvieron aceptación y `requestId`. La prueba no ingirió conversiones ni reutilizó click IDs reales. Detectó además que los teléfonos locales necesitaban país explícito; el gate v3 lo corrigió con `34` para el scope español.
+- Los leads de prueba manuales `7191/7192` eran QuickChat sin click ID, anteriores al gate y sin intento Google. Se eliminaron con guardas exactas junto con sus conversaciones, mensajes de resumen, lecturas y dos page views de la sesión de test. `7193` y el intento natural `#10` quedaron intactos.
 
 ## Hitos offline del CRM
 
@@ -141,6 +145,7 @@ Evidencia de Propdental al 2026-07-12:
 ## Monitorización
 
 - Diagnostics de cargas Data Manager: cada 30 minutos.
+- Implementación actual: cron directo en el proceso líder mediante `sync.jobs.js`, con retry y `SyncLog`; no crea un `JobRequest` ni pasa por BullMQ. Un reinicio depende del siguiente ciclo. Su migración a una cola durable requiere un tipo, lease y worker explícitos y no debe darse por hecha en la UI o documentación.
 - En el mismo ciclo se reconcilia la activación interna de Conversiones mejoradas. La operación es idempotente, transaccional y auditada en `SyncLog`; todas las consultas a Google son de solo lectura y el resultado declara expresamente `google_ads_mutated=false`. El barrido global comprobado cerró 18 filas como 17 `activated`, 1 `already_active`, 0 errores y siempre `grants_consent=false`.
 - Después del gate Enhanced, ese ciclo también reconcilia snapshots `activation_readiness` obsoletos de las estrategias Propdental `connect_only`; solo escribe el JSON de `CampaignRequest` bajo lock y lo registra en `connect_only_strategy_readiness_reconciliation`. No crea una policy ni activa Piloto automático.
 - Auditoría read-only de acciones, custom goal y campañas opt-in estables: una vez al día, a las 02:17. El `apply` hace además una verificación inmediata antes y después de cualquier cambio aprobado.
@@ -161,7 +166,8 @@ Objetivo pendiente: demostrar identificadores Enhanced en un evento natural post
           event_id, created_at
    FROM LeadIntakes
    WHERE grupo_clinica_id = 5
-     AND source = 'google_ads'
+     AND (gclid IS NOT NULL OR gbraid IS NOT NULL OR wbraid IS NOT NULL
+          OR google_ads_customer_id IS NOT NULL OR google_ads_campaign_id IS NOT NULL)
    ORDER BY id DESC
    LIMIT 20;
    ```
