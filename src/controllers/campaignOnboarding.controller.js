@@ -5855,6 +5855,675 @@ async function evaluateGoogleConversionOnboardingReadiness({
   };
 }
 
+function readCampaignRequestStrategyPayload(row) {
+  const raw = row?.solicitud ?? row?.get?.('solicitud') ?? null;
+  if (raw && typeof raw === 'object' && !Array.isArray(raw)) return raw;
+  if (typeof raw !== 'string' || !raw.trim()) return {};
+  try {
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
+  } catch (_error) {
+    return {};
+  }
+}
+
+function stableStrategyReadinessStringify(value) {
+  if (value === null) return 'null';
+  if (value === undefined) return '"__undefined__"';
+  if (typeof value !== 'object') return JSON.stringify(value);
+  if (Array.isArray(value)) {
+    return `[${value.map(stableStrategyReadinessStringify).join(',')}]`;
+  }
+  return `{${Object.keys(value).sort().map((key) => (
+    `${JSON.stringify(key)}:${stableStrategyReadinessStringify(value[key])}`
+  )).join(',')}}`;
+}
+
+function strategyReadinessFingerprint(value) {
+  return crypto.createHash('sha256').update(stableStrategyReadinessStringify(value)).digest('hex');
+}
+
+function strategyReadinessRelevantPayload(payload) {
+  const source = asPlainObject(payload);
+  return {
+    kind: source.kind || null,
+    objective_id: source.objective_id || null,
+    status: source.status || null,
+    mode_snapshot: source.mode_snapshot || null,
+    mode: source.mode || null,
+    scope: source.scope || null,
+    channels: source.channels || null,
+    measurement: source.measurement || null,
+    google_ads: source.google_ads || null,
+    external_targets: source.external_targets || null,
+    targets: source.targets || null,
+    destination: source.destination || null
+  };
+}
+
+function readIntakeRecordConfig(record) {
+  const raw = record?.config ?? record?.get?.('config') ?? null;
+  if (raw && typeof raw === 'object' && !Array.isArray(raw)) return raw;
+  if (typeof raw !== 'string' || !raw.trim()) return {};
+  try {
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
+  } catch (_error) {
+    return {};
+  }
+}
+
+function intakeRecordReadinessFingerprint(record) {
+  return strategyReadinessFingerprint({
+    id: parseInteger(record?.id),
+    assignment_scope: String(record?.assignment_scope || record?.assignmentScope || '').trim().toLowerCase(),
+    clinic_id: parseInteger(record?.clinic_id ?? record?.clinicId),
+    group_id: parseInteger(record?.group_id ?? record?.groupId),
+    domains: normalizeConsentDomains(record?.domains),
+    config: readIntakeRecordConfig(record),
+    updated_at: String(record?.updated_at || record?.updatedAt || '') || null
+  });
+}
+
+function extractStrategyGoogleCustomerIds(payload) {
+  const customerIds = [];
+  for (const collection of [payload?.external_targets, payload?.targets]) {
+    for (const target of Array.isArray(collection) ? collection : []) {
+      const campaigns = Array.isArray(target?.campaigns)
+        ? target.campaigns
+        : (Array.isArray(target?.external_campaigns) ? target.external_campaigns : []);
+      for (const campaign of campaigns) {
+        const provider = String(campaign?.provider || campaign?.type || '').trim().toLowerCase();
+        if (provider && provider !== 'google_ads' && provider !== 'google') continue;
+        const customerId = normalizeCustomerId(
+          campaign?.customer_id
+            || campaign?.provider_account_id
+            || campaign?.account_id
+            || ''
+        );
+        if (customerId) customerIds.push(customerId);
+      }
+    }
+  }
+  return listToUniqueArray(customerIds).sort();
+}
+
+function isPropdentalConnectOnlyGoogleReadinessCandidate(row) {
+  const payload = readCampaignRequestStrategyPayload(row);
+  const scope = asPlainObject(payload.scope);
+  return String(row?.estado || '').trim().toLowerCase() === STRATEGY_REQUEST_STATE_MAP.active
+    && payload.kind === 'marketing_strategy'
+    && payload.objective_id === 'new_patients'
+    && String(payload.mode_snapshot || payload.mode || '').trim().toLowerCase() === 'connect_only'
+    && String(payload.status || '').trim().toLowerCase() === 'active'
+    && parseInteger(scope.group_id) === ENHANCED_CONVERSION_PROPDENTAL_GROUP_ID
+    && strategyPayloadUsesGoogleAds(payload);
+}
+
+function buildPropdentalStrategyReadinessCandidate(row) {
+  const payload = readCampaignRequestStrategyPayload(row);
+  const scope = asPlainObject(payload.scope);
+  const id = parseInteger(row?.id);
+  const rowClinicId = parseInteger(row?.clinica_id ?? row?.clinicaId);
+  const payloadClinicId = parseInteger(scope.clinic_id);
+  const groupId = parseInteger(scope.group_id);
+  const assignmentScope = String(scope.assignment_scope || '').trim().toLowerCase();
+  const scopedClinicIds = normalizeClinicIds(scope.clinic_ids || []);
+  let invalidReason = null;
+  if (!id) invalidReason = 'strategy_request_id_invalid';
+  else if (assignmentScope !== 'clinic') invalidReason = 'strategy_scope_must_be_clinic';
+  else if (!rowClinicId || !payloadClinicId) invalidReason = 'strategy_clinic_scope_missing';
+  else if (rowClinicId !== payloadClinicId) invalidReason = 'strategy_row_clinic_mismatch';
+  else if (groupId !== ENHANCED_CONVERSION_PROPDENTAL_GROUP_ID) invalidReason = 'strategy_group_scope_mismatch';
+  else if (scopedClinicIds.length !== 1 || scopedClinicIds[0] !== payloadClinicId) {
+    invalidReason = 'strategy_scope_clinic_ids_mismatch';
+  }
+  const customerIds = extractStrategyGoogleCustomerIds(payload);
+  if (!invalidReason && customerIds.length === 0) invalidReason = 'strategy_google_customer_scope_missing';
+  if (!invalidReason && customerIds.some((customerId) => (
+    !GOOGLE_ENHANCED_CONVERSION_PROPDENTAL_CUSTOMER_IDS.includes(customerId)
+  ))) {
+    invalidReason = 'strategy_google_customer_scope_not_allowlisted';
+  }
+  return {
+    id,
+    row,
+    payload,
+    clinic_id: payloadClinicId,
+    group_id: groupId,
+    customer_ids: customerIds,
+    invalid_reason: invalidReason,
+    strategy_fingerprint: strategyReadinessFingerprint({
+      id,
+      estado: String(row?.estado || '').trim().toLowerCase(),
+      clinica_id: rowClinicId,
+      payload: strategyReadinessRelevantPayload(payload)
+    })
+  };
+}
+
+function hasExplicitGoogleMeasurementConfig(rawConfig) {
+  const config = asPlainObject(rawConfig);
+  if (config.enabled === false) return false;
+  if (normalizeCustomerId(config.customer_id || config.customerId || '')) return true;
+  const events = asPlainObject(config.events);
+  return Object.values(events).some((eventConfig) => {
+    const event = asPlainObject(eventConfig);
+    if (event.enabled === false) return false;
+    if (normalizeCustomerId(event.customer_id || event.customerId || '')) return true;
+    if (event.conversion_action_id || event.conversionActionId || event.conversion_action || event.send_to) return true;
+    return (Array.isArray(event.destinations) ? event.destinations : []).some((destination) => (
+      normalizeCustomerId(destination?.customer_id || destination?.customerId || '')
+        && Boolean(
+          destination?.conversion_action_id
+          || destination?.conversionActionId
+          || destination?.conversion_action
+          || destination?.send_to
+        )
+    ));
+  });
+}
+
+function exactCustomerScope(left, right) {
+  const normalizedLeft = listToUniqueArray((left || []).map(normalizeCustomerId).filter(Boolean)).sort();
+  const normalizedRight = listToUniqueArray((right || []).map(normalizeCustomerId).filter(Boolean)).sort();
+  return stableStrategyReadinessStringify(normalizedLeft) === stableStrategyReadinessStringify(normalizedRight);
+}
+
+function buildSanitizedStrategyValidationTargets(readiness) {
+  const validations = asPlainObject(readiness?.validations_by_target);
+  return (Array.isArray(readiness?.targets) ? readiness.targets : []).map((target) => {
+    const validationKey = String(target?.validation_key || '').trim() || null;
+    const validation = validationKey ? asPlainObject(validations[validationKey]) : {};
+    return {
+      customer_id: normalizeCustomerId(target?.customer_id || '') || null,
+      event: String(target?.event || '').trim().toLowerCase() || null,
+      conversion_action_id: String(target?.conversion_action_id || '').trim() || null,
+      validation_key: validationKey,
+      validate_only: validation.validate_only === true,
+      validated: validation.validated === true,
+      checked_at: String(validation.checked_at || '').trim() || null
+    };
+  }).filter((target) => (
+    target.customer_id
+      && target.event
+      && target.conversion_action_id
+      && target.validation_key
+      && target.validate_only
+      && target.validated
+      && target.checked_at
+  ));
+}
+
+function consentReadinessIsCurrent(consentReadiness, now = new Date()) {
+  const expiresAt = Date.parse(String(consentReadiness?.expires_at || ''));
+  return consentReadiness?.ready === true
+    && consentReadiness?.validated === true
+    && Number.isFinite(expiresAt)
+    && expiresAt > now.getTime();
+}
+
+function strategyReadinessSnapshotIsCurrent(payload, evidence, now = new Date()) {
+  const snapshot = asPlainObject(payload?.activation_readiness);
+  const validatedScope = asPlainObject(snapshot.validated_scope);
+  const currentTargets = Array.isArray(snapshot.validated_targets) ? snapshot.validated_targets : [];
+  return consentReadinessIsCurrent(evidence.consent_readiness, now)
+    && snapshot.ready === true
+    && snapshot.validated === true
+    && snapshot.validate_only === true
+    && snapshot.reconciliation_key === evidence.reconciliation_key
+    && exactCustomerScope(snapshot.customer_ids, evidence.customer_ids)
+    && snapshot?.consent_readiness?.expires_at === evidence.consent_readiness?.expires_at
+    && validatedScope.assignment_scope === evidence.validated_scope.assignment_scope
+    && parseInteger(validatedScope.group_id) === evidence.validated_scope.group_id
+    && parseInteger(validatedScope.clinic_id) === evidence.validated_scope.clinic_id
+    && validatedScope.source === evidence.validated_scope.source
+    && snapshot.scope_fingerprint === evidence.scope_fingerprint
+    && snapshot.strategy_fingerprint === evidence.strategy_fingerprint
+    && currentTargets.length > 0
+    && currentTargets.every((target) => (
+      target?.validate_only === true
+        && target?.validated === true
+        && Boolean(target?.customer_id && target?.event && target?.conversion_action_id && target?.checked_at)
+    ));
+}
+
+/**
+ * Reconciles the historical activation snapshot of active Propdental
+ * connect_only strategies after the scoped Enhanced gate is healthy.
+ *
+ * This performs Google reads plus Data Manager validateOnly requests through
+ * evaluateGoogleConversionOnboardingReadiness. It never creates conversion
+ * actions, uploads a real conversion or mutates Campaign/Google state.
+ */
+async function reconcileVerifiedConnectOnlyStrategyActivationReadiness(options = {}) {
+  const now = options.now instanceof Date ? options.now : new Date(options.now || Date.now());
+  const dependencies = options.dependencies || {};
+  const enhancedActivation = options.enhancedActivation || options.enhanced_activation || null;
+  const activationStatus = String(enhancedActivation?.status || '').trim().toLowerCase();
+  const reconciliationKey = String(enhancedActivation?.reconciliation_key || '').trim() || null;
+  if (
+    !['activated', 'already_active'].includes(activationStatus)
+    || enhancedActivation?.ready !== true
+  ) {
+    return {
+      status: 'skipped',
+      reason: 'enhanced_activation_not_ready',
+      updated: false,
+      idempotent: true,
+      reconciled: 0,
+      validate_only: true,
+      external_mutation_performed: false,
+      google_ads_mutated: false
+    };
+  }
+
+  const gateCustomerIds = listToUniqueArray(
+    (Array.isArray(enhancedActivation.customer_ids) ? enhancedActivation.customer_ids : [])
+      .map((value) => normalizeCustomerId(value))
+      .filter(Boolean)
+  );
+  if (
+    !reconciliationKey
+    || reconciliationKey.length > 191
+    || gateCustomerIds.length === 0
+    || gateCustomerIds.some((customerId) => (
+      !GOOGLE_ENHANCED_CONVERSION_PROPDENTAL_CUSTOMER_IDS.includes(customerId)
+    ))
+  ) {
+    return {
+      status: 'blocked',
+      reason: !reconciliationKey || reconciliationKey.length > 191
+        ? 'enhanced_activation_reconciliation_key_invalid'
+        : 'enhanced_activation_customer_scope_invalid',
+      updated: false,
+      idempotent: false,
+      reconciled: 0,
+      customer_ids: gateCustomerIds,
+      validate_only: true,
+      external_mutation_performed: false,
+      google_ads_mutated: false
+    };
+  }
+
+  const campaignRequestModel = dependencies.CampaignRequest || CampaignRequest;
+  const pendingRows = await campaignRequestModel.findAll({
+    where: { estado: STRATEGY_REQUEST_STATE_MAP.active },
+    attributes: ['id', 'clinica_id', 'estado', 'solicitud']
+  });
+  const candidates = (Array.isArray(pendingRows) ? pendingRows : [])
+    .filter(isPropdentalConnectOnlyGoogleReadinessCandidate)
+    .map(buildPropdentalStrategyReadinessCandidate);
+  const candidateIds = candidates.map((candidate) => candidate.id).filter(Boolean);
+  if (candidates.length === 0) {
+    return {
+      status: 'already_reconciled',
+      reason: 'no_pending_strategy_readiness',
+      updated: false,
+      idempotent: true,
+      reconciled: 0,
+      validate_only: true,
+      external_mutation_performed: false,
+      google_ads_mutated: false
+    };
+  }
+
+  const resolveScope = dependencies.resolveScopeFromInput || resolveScopeFromInput;
+  const resolveMarketingState = dependencies.resolveEffectiveMarketingState || resolveEffectiveMarketingState;
+  const assessConsent = dependencies.assessConsentMeasurementReadiness || assessConsentMeasurementReadiness;
+  const evaluateReadiness = dependencies.evaluateGoogleConversionOnboardingReadiness
+    || evaluateGoogleConversionOnboardingReadiness;
+  const groupScope = await resolveScope({
+    clinicIdRaw: null,
+    groupIdRaw: ENHANCED_CONVERSION_PROPDENTAL_GROUP_ID,
+    assignmentScopeRaw: 'group'
+  });
+  if (
+    groupScope?.assignment_scope !== 'group'
+    || parseInteger(groupScope?.group_id) !== ENHANCED_CONVERSION_PROPDENTAL_GROUP_ID
+  ) {
+    return {
+      status: 'blocked',
+      reason: 'strategy_readiness_scope_not_allowlisted',
+      updated: false,
+      idempotent: false,
+      reconciled: 0,
+      validate_only: true,
+      external_mutation_performed: false,
+      google_ads_mutated: false
+    };
+  }
+
+  const groupMarketingState = await resolveMarketingState({
+    clinicIdRaw: null,
+    groupIdRaw: ENHANCED_CONVERSION_PROPDENTAL_GROUP_ID,
+    assignmentScopeRaw: 'group'
+  });
+  const groupRecord = groupMarketingState?.records?.groupRecord || null;
+  const groupConfig = readIntakeRecordConfig(groupRecord);
+  const groupLocationIds = new Set((Array.isArray(groupConfig.locations) ? groupConfig.locations : [])
+    .map((location) => parseInteger(location?.id || location?.clinic_id))
+    .filter(Boolean));
+  const groupConsentReadiness = assessConsent(groupMarketingState);
+  const blockedById = new Map();
+  const addBlocked = (candidate, reason, extra = {}) => {
+    if (!candidate?.id || blockedById.has(candidate.id)) return;
+    blockedById.set(candidate.id, {
+      id: candidate.id,
+      clinic_id: candidate.clinic_id || null,
+      reason,
+      ...(extra.reasons?.length ? { reasons: extra.reasons } : {}),
+      ...(extra.issues?.length ? { issues: extra.issues } : {})
+    });
+  };
+  const evaluationCache = new Map();
+  const validatedCandidates = [];
+  const currentIds = [];
+
+  for (const candidate of candidates) {
+    if (candidate.invalid_reason) {
+      addBlocked(candidate, candidate.invalid_reason);
+      continue;
+    }
+    const clinicScope = await resolveScope({
+      clinicIdRaw: candidate.clinic_id,
+      groupIdRaw: null,
+      assignmentScopeRaw: 'clinic'
+    });
+    if (
+      clinicScope?.assignment_scope !== 'clinic'
+      || parseInteger(clinicScope?.clinic_id) !== candidate.clinic_id
+      || parseInteger(clinicScope?.group_id) !== candidate.group_id
+    ) {
+      addBlocked(candidate, 'strategy_resolved_scope_mismatch');
+      continue;
+    }
+
+    const isGroupWebLocation = groupLocationIds.has(candidate.clinic_id);
+    let evaluationScope;
+    let marketingState;
+    let sourceRecord;
+    let rawGoogleAdsConfig;
+    let consentReadiness;
+    let source;
+    if (isGroupWebLocation) {
+      evaluationScope = groupScope;
+      marketingState = groupMarketingState;
+      sourceRecord = groupRecord;
+      rawGoogleAdsConfig = groupConfig.google_ads || {};
+      consentReadiness = groupConsentReadiness;
+      source = 'group_web_location';
+    } else {
+      const clinicMarketingState = await resolveMarketingState({
+        clinicIdRaw: candidate.clinic_id,
+        groupIdRaw: null,
+        assignmentScopeRaw: 'clinic'
+      });
+      sourceRecord = clinicMarketingState?.records?.clinicRecord || null;
+      const clinicConfig = readIntakeRecordConfig(sourceRecord);
+      rawGoogleAdsConfig = clinicConfig.google_ads || {};
+      evaluationScope = clinicScope;
+      marketingState = {
+        ...clinicMarketingState,
+        scope: clinicScope,
+        records: { clinicRecord: sourceRecord, groupRecord: null },
+        tracking: { ...(clinicMarketingState?.tracking || {}), google_ads: rawGoogleAdsConfig }
+      };
+      consentReadiness = assessConsent(marketingState);
+      source = 'clinic';
+      if (!sourceRecord) {
+        addBlocked(candidate, 'clinic_scope_intake_config_missing');
+        continue;
+      }
+      if (!hasExplicitGoogleMeasurementConfig(rawGoogleAdsConfig)) {
+        addBlocked(candidate, 'clinic_scope_google_measurement_config_missing');
+        continue;
+      }
+    }
+    const sourceRecordId = parseInteger(sourceRecord?.id);
+    if (!sourceRecordId || !hasExplicitGoogleMeasurementConfig(rawGoogleAdsConfig)) {
+      addBlocked(candidate, source === 'group_web_location'
+        ? 'group_scope_google_measurement_config_missing'
+        : 'clinic_scope_google_measurement_config_missing');
+      continue;
+    }
+    const normalizedGoogleAdsConfig = normalizeGoogleAdsConfig(rawGoogleAdsConfig);
+    const validatedScope = {
+      assignment_scope: source === 'group_web_location' ? 'group' : 'clinic',
+      group_id: candidate.group_id,
+      clinic_id: candidate.clinic_id,
+      source
+    };
+    const sourceRecordFingerprint = intakeRecordReadinessFingerprint(sourceRecord);
+    const scopeFingerprint = strategyReadinessFingerprint({
+      validated_scope: validatedScope,
+      source_record_id: sourceRecordId,
+      source_record_fingerprint: sourceRecordFingerprint,
+      customer_ids: candidate.customer_ids,
+      google_ads: rawGoogleAdsConfig,
+      consent_expires_at: consentReadiness?.expires_at || null
+    });
+    const evidenceBase = {
+      reconciliation_key: reconciliationKey,
+      customer_ids: candidate.customer_ids,
+      consent_readiness: consentReadiness,
+      validated_scope: validatedScope,
+      scope_fingerprint: scopeFingerprint,
+      strategy_fingerprint: candidate.strategy_fingerprint
+    };
+    if (!consentReadinessIsCurrent(consentReadiness, now)) {
+      addBlocked(candidate, 'strategy_consent_readiness_not_current', {
+        reasons: consentReadiness?.reasons || [],
+        issues: consentReadiness?.issues || []
+      });
+      continue;
+    }
+    if (strategyReadinessSnapshotIsCurrent(candidate.payload, evidenceBase, now)) {
+      currentIds.push(candidate.id);
+      continue;
+    }
+
+    const evaluationIdentity = strategyReadinessFingerprint({
+      assignment_scope: evaluationScope.assignment_scope,
+      clinic_id: evaluationScope.assignment_scope === 'clinic' ? evaluationScope.clinic_id : null,
+      group_id: evaluationScope.group_id,
+      source_record_fingerprint: sourceRecordFingerprint,
+      customer_ids: candidate.customer_ids,
+      consent_readiness: consentReadiness
+    });
+    let evaluation = evaluationCache.get(evaluationIdentity);
+    if (!evaluation) {
+      const fallbackCustomerId = normalizedGoogleAdsConfig.customer_id
+        || marketingState?.google?.effective_assets?.account?.customer_id
+        || candidate.customer_ids[0]
+        || null;
+      const readiness = await evaluateReadiness({
+        userId: null,
+        scope: evaluationScope,
+        rawGoogleAdsConfig,
+        fallbackCustomerId,
+        currency: normalizedGoogleAdsConfig.currency || 'EUR',
+        createMissing: false,
+        consentReadiness
+      });
+      const readinessCustomerIds = listToUniqueArray(
+        (Array.isArray(readiness?.customer_ids) ? readiness.customer_ids : [])
+          .map((value) => normalizeCustomerId(value))
+          .filter(Boolean)
+      ).sort();
+      const validatedTargets = buildSanitizedStrategyValidationTargets(readiness);
+      const expectedTargetCount = Array.isArray(readiness?.targets) ? readiness.targets.length : 0;
+      const customerScopeMatches = exactCustomerScope(readinessCustomerIds, candidate.customer_ids)
+        && exactCustomerScope(readinessCustomerIds, gateCustomerIds);
+      const validationEvidenceComplete = expectedTargetCount > 0
+        && validatedTargets.length === expectedTargetCount;
+      evaluation = {
+        readiness,
+        customer_ids: readinessCustomerIds,
+        validated_targets: validatedTargets,
+        ready: readiness?.ready === true
+          && readiness?.validated === true
+          && customerScopeMatches
+          && validationEvidenceComplete,
+        reason: !customerScopeMatches
+          ? 'strategy_readiness_customer_scope_mismatch'
+          : !validationEvidenceComplete
+            ? 'strategy_validation_evidence_incomplete'
+            : (readiness?.reason || 'strategy_conversion_readiness_pending')
+      };
+      evaluationCache.set(evaluationIdentity, evaluation);
+    }
+    if (!evaluation.ready) {
+      addBlocked(candidate, evaluation.reason, {
+        reasons: evaluation.readiness?.reasons || [],
+        issues: evaluation.readiness?.issues || []
+      });
+      continue;
+    }
+    validatedCandidates.push({
+      ...candidate,
+      source_record_id: sourceRecordId,
+      source_record_fingerprint: sourceRecordFingerprint,
+      consent_readiness: consentReadiness,
+      validated_scope: validatedScope,
+      scope_fingerprint: scopeFingerprint,
+      customer_ids: evaluation.customer_ids,
+      enabled_events: evaluation.readiness.enabled_events || [],
+      validated_targets: evaluation.validated_targets
+    });
+  }
+
+  const sequelize = dependencies.sequelize || db.sequelize;
+  const intakeConfigModel = dependencies.IntakeConfig || IntakeConfig;
+  const nowIso = now.toISOString();
+  if (validatedCandidates.length === 0) {
+    const blocked = Array.from(blockedById.values());
+    return {
+      status: blocked.length > 0 ? 'blocked' : 'already_reconciled',
+      reason: blocked.length > 0 ? 'strategy_readiness_blocked' : 'no_pending_strategy_readiness',
+      updated: false,
+      idempotent: blocked.length === 0,
+      reconciled: 0,
+      candidate_ids: candidateIds,
+      current_ids: currentIds,
+      blocked,
+      validate_only: true,
+      external_mutation_performed: false,
+      google_ads_mutated: false
+    };
+  }
+  return sequelize.transaction(async (transaction) => {
+    const sourceRecordIds = listToUniqueArray(validatedCandidates.map((candidate) => candidate.source_record_id))
+      .map(Number);
+    const lockedSourceRecords = await intakeConfigModel.findAll({
+      where: { id: { [Op.in]: sourceRecordIds } },
+      transaction,
+      lock: transaction.LOCK.UPDATE
+    });
+    const lockedSourceRecordsById = new Map((Array.isArray(lockedSourceRecords) ? lockedSourceRecords : [])
+      .map((record) => [parseInteger(record?.id), record]));
+    const persistenceCandidates = [];
+    for (const candidate of validatedCandidates) {
+      const lockedSourceRecord = lockedSourceRecordsById.get(candidate.source_record_id) || null;
+      if (
+        !lockedSourceRecord
+        || intakeRecordReadinessFingerprint(lockedSourceRecord) !== candidate.source_record_fingerprint
+      ) {
+        addBlocked(candidate, 'measurement_scope_changed_during_validation');
+        continue;
+      }
+      persistenceCandidates.push(candidate);
+    }
+    const persistenceCandidateIds = persistenceCandidates.map((candidate) => candidate.id);
+    const lockedRows = persistenceCandidateIds.length > 0
+      ? await campaignRequestModel.findAll({
+          where: { id: { [Op.in]: persistenceCandidateIds } },
+          transaction,
+          lock: transaction.LOCK.UPDATE
+        })
+      : [];
+    const candidatesById = new Map(persistenceCandidates.map((candidate) => [candidate.id, candidate]));
+    let reconciled = 0;
+    const reconciledIds = [];
+    for (const row of Array.isArray(lockedRows) ? lockedRows : []) {
+      const id = parseInteger(row?.id);
+      const candidate = candidatesById.get(id) || null;
+      if (!candidate || !isPropdentalConnectOnlyGoogleReadinessCandidate(row)) {
+        if (candidate) addBlocked(candidate, 'strategy_changed_during_validation');
+        continue;
+      }
+      const payload = readCampaignRequestStrategyPayload(row);
+      const lockedCandidate = buildPropdentalStrategyReadinessCandidate(row);
+      if (
+        lockedCandidate.invalid_reason
+        || lockedCandidate.strategy_fingerprint !== candidate.strategy_fingerprint
+        || !exactCustomerScope(lockedCandidate.customer_ids, candidate.customer_ids)
+      ) {
+        addBlocked(candidate, lockedCandidate.invalid_reason || 'strategy_changed_during_validation');
+        continue;
+      }
+      const evidence = {
+        reconciliation_key: reconciliationKey,
+        customer_ids: candidate.customer_ids,
+        consent_readiness: candidate.consent_readiness,
+        validated_scope: candidate.validated_scope,
+        scope_fingerprint: candidate.scope_fingerprint,
+        strategy_fingerprint: candidate.strategy_fingerprint
+      };
+      if (strategyReadinessSnapshotIsCurrent(payload, evidence, now)) {
+        currentIds.push(candidate.id);
+        continue;
+      }
+      const previousActivationReadiness = payload.activation_readiness || null;
+      await row.update({
+        solicitud: {
+          ...payload,
+          activation_readiness: {
+            ready: true,
+            validated: true,
+            validate_only: true,
+            validated_at: nowIso,
+            enabled_events: candidate.enabled_events,
+            customer_ids: candidate.customer_ids,
+            consent_readiness: candidate.consent_readiness,
+            reconciliation_key: reconciliationKey,
+            reconciled_by: 'google_data_manager_diagnostics_job',
+            validated_scope: candidate.validated_scope,
+            scope_fingerprint: candidate.scope_fingerprint,
+            strategy_fingerprint: candidate.strategy_fingerprint,
+            validated_targets: candidate.validated_targets
+          },
+          activation_readiness_reconciliation: {
+            source: 'google_data_manager_diagnostics_job',
+            reconciliation_key: reconciliationKey,
+            reconciled_at: nowIso,
+            previous_activation_readiness: previousActivationReadiness
+          }
+        }
+      }, { transaction });
+      reconciled += 1;
+      reconciledIds.push(parseInteger(row.id));
+    }
+    const blocked = Array.from(blockedById.values());
+    return {
+      status: reconciled > 0
+        ? (blocked.length > 0 ? 'partially_reconciled' : 'reconciled')
+        : (blocked.length > 0 ? 'blocked' : 'already_reconciled'),
+      updated: reconciled > 0,
+      idempotent: reconciled === 0 && blocked.length === 0,
+      reconciled,
+      candidate_ids: candidateIds,
+      reconciled_ids: reconciledIds.filter(Boolean),
+      current_ids: listToUniqueArray(currentIds).map(Number),
+      blocked,
+      reconciliation_key: reconciliationKey,
+      validate_only: true,
+      external_mutation_performed: false,
+      google_ads_mutated: false
+    };
+  });
+}
+
 function initSteps(providers) {
   const steps = [];
   if (providers.includes('google_ads')) {
@@ -8435,9 +9104,12 @@ exports.__test = {
   persistVisitorChoicePersonalizationCapability,
   readGoogleConversionTrackingSettings,
   reconcileEnhancedConversionsInternalActivation,
+  reconcileVerifiedConnectOnlyStrategyActivationReadiness,
   resolveEnabledConversionEvents,
   strategyPayloadUsesGoogleAds,
   validateEnhancedConversionActivationAllowlist
 };
 
 exports.reconcileEnhancedConversionsInternalActivation = reconcileEnhancedConversionsInternalActivation;
+exports.reconcileVerifiedConnectOnlyStrategyActivationReadiness =
+  reconcileVerifiedConnectOnlyStrategyActivationReadiness;
