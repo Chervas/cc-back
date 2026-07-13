@@ -1597,6 +1597,44 @@ function testMultiDestinationConfigInheritance() {
     false,
     'Normalizing legacy config must not turn an absent destination list into an explicit empty list'
   );
+
+  const enhancedConfig = {
+    ...multiDestinationConfig,
+    user_data_enabled: true,
+    phone_country_code: '34',
+    enhanced_conversions: {
+      enabled: true,
+      policy_mode: 'documented_google_account_team_guidance_and_advertiser_authorization',
+      allowlist: [{ customer_id: '1851215478', event_name: 'lead', enabled: true }]
+    },
+    events: {
+      ...multiDestinationConfig.events,
+      lead: {
+        ...multiDestinationConfig.events.lead,
+        user_data_enabled: true,
+        value: 10
+      }
+    }
+  };
+  const enhancedNormalized = normalizeGoogleAdsConfig(enhancedConfig);
+  assert.equal(enhancedNormalized.user_data_enabled, true);
+  assert.equal(enhancedNormalized.phone_country_code, '34');
+  assert.equal(enhancedNormalized.enhanced_conversions.enabled, true);
+  assert.equal(enhancedNormalized.events.lead.user_data_enabled, true);
+  assert.equal(enhancedNormalized.events.lead.value, 10);
+
+  const enhancedInherited = resolveEffectiveTrackingConfig({ assignment_scope: 'clinic' }, {
+    groupRecord: { config: { google_ads: enhancedConfig } },
+    clinicRecord: { config: { meta_ads: { enabled: true } } }
+  });
+  assert.equal(enhancedInherited.google_ads.user_data_enabled, true);
+  assert.equal(enhancedInherited.google_ads.enhanced_conversions.enabled, true);
+  assert.equal(enhancedInherited.google_ads.events.lead.user_data_enabled, true);
+  assert.equal(
+    getGoogleAdsEventConfigs(enhancedInherited.google_ads, 'lead')[0].user_data_enabled,
+    true,
+    'Effective group tracking must not strip enhanced-conversion authorization before upload'
+  );
 }
 
 function testPropertyAwareGoogleAdsMerge() {

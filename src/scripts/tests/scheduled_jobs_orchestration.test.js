@@ -28,9 +28,22 @@ function testCatalogCoversEveryCronAndExecutor() {
   const catalogNames = definitions.map(([name]) => name).sort();
   const types = definitions.map(([, definition]) => definition.type);
 
-  assert.equal(definitions.length, 24);
+  assert.equal(definitions.length, 30);
   assert.deepEqual(catalogNames, configuredNames);
   assert.equal(new Set(types).size, types.length, 'scheduled job types must be unique');
+  for (const jobName of [
+    'opsGlobalDiscovery',
+    'opsSummary',
+    'opsGoogleBusinessProfileDaily',
+    'opsSearchConsoleDaily',
+    'opsGoogleBusinessProfileRequested',
+  ]) {
+    assert.equal(
+      SCHEDULED_JOB_DEFINITIONS[jobName].timezone,
+      'UTC',
+      `${jobName} must preserve the historical host-cron timezone`
+    );
+  }
 
   for (const [jobName, definition] of definitions) {
     assert.equal(typeof metaSyncJobs[definition.executorMethod], 'function', `${jobName} executor missing`);
@@ -38,6 +51,14 @@ function testCatalogCoversEveryCronAndExecutor() {
   }
 
   const syncJobsSource = fs.readFileSync(path.resolve(__dirname, '../../jobs/sync.jobs.js'), 'utf8');
+  for (const opsScript of [
+    '../push_ops_global_discovery.js',
+    '../push_ops_summary.js',
+    '../push_ops_google_business_profile.js',
+    '../push_ops_search_console.js',
+  ]) {
+    assert.equal(fs.existsSync(path.resolve(__dirname, opsScript)), true, `${opsScript} missing`);
+  }
   const initializeStart = syncJobsSource.indexOf('async initialize()');
   const registerStart = syncJobsSource.indexOf('\n  registerJob(', initializeStart);
   const initializeBody = syncJobsSource.slice(initializeStart, registerStart);

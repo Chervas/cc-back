@@ -64,6 +64,8 @@ const {
 const {
   evaluateDuePolicies: evaluateDueCampaignOptimizationPolicies,
 } = require('../services/campaignOptimizationEvaluation.service');
+const { runPm2LogRetention } = require('../services/pm2LogRetention.service');
+const { runOpsBridge } = require('../services/opsBridgeRunner.service');
 
 const GOOGLE_BUSINESS_PERFORMANCE_API = 'https://businessprofileperformance.googleapis.com/v1';
 const GOOGLE_MY_BUSINESS_API = 'https://mybusiness.googleapis.com/v4';
@@ -269,8 +271,14 @@ class MetaSyncJobs {
       whatsappTemplatesSync: 'Sincroniza estados de plantillas WhatsApp para todos los WABA activos.',
       whatsappPhonesSync: 'Sincroniza números WhatsApp (existencia/estado) para evitar datos desactualizados.',
       automationHealthCheck: 'Barrido funcional de automatizaciones críticas: flujos fallidos, jobs vencidos y ejecuciones atascadas.',
+      opsGlobalDiscovery: 'Descubre y actualiza en OPS las cuentas y campañas accesibles de Google Ads y Meta.',
+      opsSummary: 'Publica en OPS el resumen operativo de clientes, campañas, social, local y web.',
+      opsGoogleBusinessProfileDaily: 'Publica diariamente en OPS fichas, reseñas y publicaciones de Perfil de Empresa.',
+      opsSearchConsoleDaily: 'Publica diariamente en OPS las métricas recientes de Search Console.',
+      opsGoogleBusinessProfileRequested: 'Atiende en OPS las sincronizaciones de Perfil de Empresa solicitadas por un operador.',
       tokenValidation: 'Valida tokens (usuario/página) y registra estado/errores recientes.',
       dataCleanup: 'Limpia registros antiguos según retenciones configuradas (logs, validaciones, métricas).',
+      pm2LogRetention: 'Rota los logs PM2 activos y elimina ficheros técnicos que superan la retención configurada.',
       healthCheck: 'Comprueba salud de BD, disponibilidad de Meta API y actividad reciente.'
     };
 
@@ -280,6 +288,7 @@ class MetaSyncJobs {
         metricsSync: process.env.JOBS_METRICS_SCHEDULE || '0 2 * * *',
         tokenValidation: process.env.JOBS_TOKEN_VALIDATION_SCHEDULE || '0 */6 * * *',
         dataCleanup: process.env.JOBS_CLEANUP_SCHEDULE || '0 3 * * 0',
+        pm2LogRetention: process.env.JOBS_PM2_LOG_RETENTION_SCHEDULE || '17 3 * * *',
         healthCheck: process.env.JOBS_HEALTH_CHECK_SCHEDULE || '0 * * * *',
         adsSync: process.env.JOBS_ADS_SCHEDULE || '30 0 * * *',
         adsSyncMidday: process.env.JOBS_ADS_MIDDAY_SCHEDULE || '0 12 * * *',
@@ -300,7 +309,12 @@ class MetaSyncJobs {
         webEventsAggregate: process.env.JOBS_WEB_EVENTS_AGGREGATE_SCHEDULE || '*/15 * * * *',
         whatsappTemplatesSync: process.env.JOBS_WHATSAPP_TEMPLATES_SCHEDULE || '*/20 * * * *',
         whatsappPhonesSync: process.env.JOBS_WHATSAPP_PHONES_SCHEDULE || '*/15 * * * *',
-        automationHealthCheck: process.env.JOBS_AUTOMATION_HEALTH_CHECK_SCHEDULE || '0 10,16 * * *'
+        automationHealthCheck: process.env.JOBS_AUTOMATION_HEALTH_CHECK_SCHEDULE || '0 10,16 * * *',
+        opsGlobalDiscovery: process.env.JOBS_OPS_GLOBAL_DISCOVERY_SCHEDULE || '17 */4 * * *',
+        opsSummary: process.env.JOBS_OPS_SUMMARY_SCHEDULE || '31 */6 * * *',
+        opsGoogleBusinessProfileDaily: process.env.JOBS_OPS_GBP_DAILY_SCHEDULE || '43 6 * * *',
+        opsSearchConsoleDaily: process.env.JOBS_OPS_SEARCH_CONSOLE_SCHEDULE || '12 7 * * *',
+        opsGoogleBusinessProfileRequested: process.env.JOBS_OPS_GBP_REQUESTED_SCHEDULE || '18,48 * * * *'
       },
       timezone: process.env.JOBS_TIMEZONE || 'Europe/Madrid',
       autoStart: process.env.JOBS_AUTO_START === 'true',
@@ -341,7 +355,8 @@ class MetaSyncJobs {
       dataRetention: {
         syncLogs: parseInt(process.env.JOBS_SYNC_LOGS_RETENTION) || 90,
         tokenValidations: parseInt(process.env.JOBS_TOKEN_VALIDATIONS_RETENTION) || 30,
-        socialStats: parseInt(process.env.JOBS_SOCIAL_STATS_RETENTION) || 730
+        socialStats: parseInt(process.env.JOBS_SOCIAL_STATS_RETENTION) || 730,
+        pm2Logs: parseInt(process.env.PM2_LOG_RETENTION_DAYS) || 60
       },
       retries: {
         maxAttempts: parseInt(process.env.JOBS_MAX_RETRIES) || 3,
@@ -381,7 +396,8 @@ class MetaSyncJobs {
         if (!schedule) {
           throw new Error(`Falta schedule para el job periódico '${jobName}'`);
         }
-        this.registerJob(jobName, schedule, () => this.enqueueScheduledJob(jobName));
+        const timezone = SCHEDULED_JOB_DEFINITIONS[jobName].timezone || this.config.timezone;
+        this.registerJob(jobName, schedule, () => this.enqueueScheduledJob(jobName), timezone);
       }
 
       this.isInitialized = true;
@@ -413,12 +429,12 @@ class MetaSyncJobs {
   /**
    * Registra un job con su programación
    */
-  registerJob(name, schedule, handler) {
+  registerJob(name, schedule, handler, timezone = this.config.timezone) {
     const job = cron.schedule(schedule, async () => {
       await this.executeWithRetry(name, handler);
     }, {
       scheduled: false,
-      timezone: this.config.timezone // Usar timezone del .env
+      timezone
     });
     // node-cron v4 starts tasks created with schedule() immediately. Keep the
     // explicit lifecycle controlled by start()/stop() so non-leader runtimes do
@@ -430,6 +446,7 @@ class MetaSyncJobs {
     this.jobs.set(name, {
       job,
       schedule,
+      timezone,
       handler,
       lastExecution: null,
       lastEnqueuedAt: null,
@@ -439,7 +456,7 @@ class MetaSyncJobs {
       description: this.jobDescriptions[name] || ''
     });
 
-    console.log(`📝 Job '${name}' registrado con programación: ${schedule} (${this.config.timezone})`);
+    console.log(`📝 Job '${name}' registrado con programación: ${schedule} (${timezone})`);
   }
 
   /**
@@ -1953,7 +1970,7 @@ class MetaSyncJobs {
             validate_only: true,
             error: {
               code: error.code || 'CONNECT_ONLY_STRATEGY_READINESS_RECONCILIATION_ERROR',
-              message: 'Falló la reconciliación de readiness de las estrategias Mide y mejora'
+              message: 'Falló la reconciliación de readiness de las estrategias Conecta y mejora'
             },
             external_mutation_performed: false,
             google_ads_mutated: false
@@ -2937,6 +2954,68 @@ async syncFacebookPageMetrics(asset) {
   }
 
   /**
+   * Job: rotación y retención de logs técnicos PM2.
+   * La programación solo crea el JobRequest; esta ejecución queda serializada
+   * y auditada por el mismo orquestador durable que el resto de integraciones.
+   */
+  async executePm2LogRetention(payload = {}) {
+    console.log('🧹 Iniciando rotación y retención de logs PM2...');
+    const report = await runPm2LogRetention({
+      retentionDays: payload.retentionDays || this.config.dataRetention.pm2Logs,
+      directory: payload.directory || undefined,
+      dryRun: payload.dryRun === true,
+    });
+    console.log(
+      `✅ Logs PM2: ${report.files_rotated} rotados y ${report.files_deleted} eliminados `
+      + `(retención ${report.retention_days} días)`
+    );
+    return report;
+  }
+
+  async executeOpsGlobalDiscovery() {
+    return runOpsBridge({ scriptName: 'push_ops_global_discovery.js' });
+  }
+
+  async executeOpsSummary() {
+    return runOpsBridge({ scriptName: 'push_ops_summary.js' });
+  }
+
+  async executeOpsGoogleBusinessProfile(payload = {}) {
+    const onlyRequested = payload.onlyRequested === true;
+    return runOpsBridge({
+      scriptName: 'push_ops_google_business_profile.js',
+      env: onlyRequested
+        ? {
+          OPS_GBP_ONLY_REQUESTED: true,
+          OPS_GBP_LOCATION_LIMIT: 5,
+          OPS_GBP_CONNECTION_EMAIL: 'carlos.hervas@modmarketing.net',
+          OPS_GBP_REVIEW_MAX_PAGES: 4,
+          OPS_GBP_POST_MAX_PAGES: 2,
+        }
+        : {
+          OPS_GBP_DISCOVER_OFFICIAL_LOCATIONS: true,
+          OPS_GBP_DISCOVER_LIMIT: 300,
+          OPS_GBP_CONNECTION_EMAIL: 'carlos.hervas@modmarketing.net',
+          OPS_GBP_REVIEW_MAX_PAGES: 4,
+          OPS_GBP_POST_MAX_PAGES: 2,
+          OPS_GBP_LOCATION_LIMIT: 50,
+        },
+    });
+  }
+
+  async executeOpsSearchConsole() {
+    return runOpsBridge({
+      scriptName: 'push_ops_search_console.js',
+      env: {
+        OPS_SEARCH_CONSOLE_CONNECTION_EMAIL: 'carlos.hervas@modmarketing.net',
+        OPS_SEARCH_CONSOLE_SITE_LIMIT: 100,
+        SEARCH_CONSOLE_ROW_LIMIT: 500,
+        SEARCH_CONSOLE_LOOKBACK_DAYS: 7,
+      },
+    });
+  }
+
+  /**
    * Limpia logs de sincronización antiguos
    */
   async cleanupSyncLogs() {
@@ -3478,6 +3557,7 @@ try {
           name,
           {
             schedule: data.schedule,
+            timezone: data.timezone || this.config.timezone,
             status: data.status,
             lastExecution: data.lastExecution,
             lastEnqueuedAt: data.lastEnqueuedAt,

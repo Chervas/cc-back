@@ -1,6 +1,23 @@
 const { JobRequest, sequelize } = require('../../models');
 const jobRequestsService = require('../services/jobRequests.service');
 const jobScheduler = require('../services/jobScheduler.service');
+const { isGlobalAdmin } = require('../lib/role-helpers');
+
+const assertGlobalAdmin = (req, res) => {
+  if (!isGlobalAdmin(req.userData?.userId)) {
+    res.status(403).json({ error: 'admin_only' });
+    return false;
+  }
+  return true;
+};
+
+const sanitizeHttpJobPayload = (type, rawPayload) => {
+  const payload = rawPayload && typeof rawPayload === 'object' && !Array.isArray(rawPayload)
+    ? rawPayload
+    : {};
+  if (String(type || '').trim() !== 'system_pm2_log_retention') return payload;
+  return { dryRun: payload.dryRun === true };
+};
 
 const parseIntSafe = (value, fallback) => {
   const parsed = Number.parseInt(value, 10);
@@ -110,6 +127,7 @@ exports.summary = async (_req, res) => {
 
 exports.create = async (req, res) => {
   try {
+    if (!assertGlobalAdmin(req, res)) return;
     const { type, payload, priority, origin, maxAttempts, nextRunAt, runImmediately } = req.body;
     const userId = req.userData?.userId || null;
     const userRole = req.userData?.role || null;
@@ -117,7 +135,7 @@ exports.create = async (req, res) => {
 
     const job = await jobRequestsService.enqueueJobRequest({
       type,
-      payload,
+      payload: sanitizeHttpJobPayload(type, payload),
       priority,
       origin: origin || 'manual',
       requestedBy: userId,
@@ -145,6 +163,7 @@ exports.create = async (req, res) => {
 
 exports.cancel = async (req, res) => {
   try {
+    if (!assertGlobalAdmin(req, res)) return;
     const { id } = req.params;
     const job = await jobRequestsService.findJobById(id);
     if (!job) {
@@ -165,6 +184,7 @@ exports.cancel = async (req, res) => {
 
 exports.retry = async (req, res) => {
   try {
+    if (!assertGlobalAdmin(req, res)) return;
     const { id } = req.params;
     const job = await jobRequestsService.findJobById(id);
     if (!job) {
@@ -188,6 +208,7 @@ exports.retry = async (req, res) => {
 
 exports.trigger = async (req, res) => {
   try {
+    if (!assertGlobalAdmin(req, res)) return;
     const { id } = req.params;
     const triggered = await jobScheduler.triggerImmediate(id);
     res.json({ triggered });

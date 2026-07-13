@@ -4,6 +4,7 @@ const axios = require('axios');
 const { Op } = require('sequelize');
 const db = require('../../models');
 const { queues } = require('./queue.service');
+const jobRequestsService = require('./jobRequests.service');
 const { recomposeAutomationsUsingTemplate } = require('./whatsappTemplateAutomationSync.service');
 const {
   haveSameTemplateComponents,
@@ -997,6 +998,12 @@ async function resolveWabaAssetById(wabaId) {
       isActive: true,
       wabaId,
       assetType: { [Op.in]: ['whatsapp_business_account', 'whatsapp_phone_number'] },
+      waAccessToken: {
+        [Op.and]: [
+          { [Op.ne]: null },
+          { [Op.ne]: '' },
+        ],
+      },
     },
     order: [['updatedAt', 'DESC']],
   });
@@ -1884,14 +1891,67 @@ async function enqueueSyncTemplatesJob(data, options = {}) {
     dedupeWindowMs: options.dedupeWindowMs,
   });
 
+  if (delayMs > 0) {
+    const wabaId = String(data?.wabaId || data?.waba_id || '').trim();
+    if (!wabaId) {
+      throw new Error('whatsapp_template_sync_delayed requires data.wabaId');
+    }
+    const nextRunAt = new Date(Date.now() + delayMs);
+    const { job } = await jobRequestsService.enqueueUniqueJobRequest({
+      type: 'whatsapp_template_sync_delayed',
+      priority: 'normal',
+      status: 'waiting',
+      origin: 'whatsapp_template_followup',
+      maxAttempts: 5,
+      nextRunAt,
+      dedupeScope: jobId || `waba:${wabaId}:${nextRunAt.toISOString()}`,
+      // Nunca persistir accessToken en JobRequests: el handler resuelve el
+      // asset activo y sus credenciales justo antes de consultar Meta.
+      payload: {
+        wabaId,
+        trigger: String(data?.trigger || 'template_followup').trim() || 'template_followup',
+        scheduled_for: nextRunAt.toISOString(),
+      },
+    });
+    return job;
+  }
+
   return queues.whatsappTemplateSync.add('sync', data, {
     attempts: 5,
     backoff: { type: 'exponential', delay: 60000 },
-    ...(delayMs > 0 ? { delay: delayMs } : {}),
-    ...(jobId ? { jobId } : {}),
     removeOnComplete: true,
     removeOnFail: false,
   });
+}
+
+async function runDelayedSyncTemplatesJob(payload = {}) {
+  const wabaId = String(payload.wabaId || payload.waba_id || '').trim();
+  if (!wabaId) {
+    throw new Error('whatsapp_template_sync_delayed requires payload.wabaId');
+  }
+
+  const scheduledFor = new Date(payload.scheduled_for || '');
+  if (Number.isFinite(scheduledFor.getTime()) && scheduledFor.getTime() > Date.now() + 1000) {
+    return {
+      status: 'waiting',
+      nextAllowedAt: scheduledFor,
+      result: { waiting: true, wabaId, scheduled_for: scheduledFor.toISOString() },
+    };
+  }
+
+  const asset = await resolveWabaAssetById(wabaId);
+  if (!asset?.waAccessToken) {
+    throw new Error('whatsapp_template_sync_delayed missing active WABA credentials');
+  }
+
+  await syncTemplatesForWaba({ wabaId, accessToken: asset.waAccessToken });
+  return {
+    status: 'completed',
+    result: {
+      wabaId,
+      trigger: String(payload.trigger || 'template_followup').trim() || 'template_followup',
+    },
+  };
 }
 
 async function enqueueSyncForAllWabas(options = {}) {
@@ -1955,6 +2015,7 @@ module.exports = {
   enqueueCreateTemplatesJob,
   enqueuePropagateCatalogTemplateJob,
   enqueueSyncTemplatesJob,
+  runDelayedSyncTemplatesJob,
   enqueueSyncForAllWabas,
   upsertClinicOverrideTemplateForClinic,
 };

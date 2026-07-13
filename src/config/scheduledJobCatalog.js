@@ -10,6 +10,11 @@ const SCHEDULED_JOB_DEFINITIONS = Object.freeze({
   metricsSync: Object.freeze({ type: 'meta_metrics_daily', priority: 'normal', executorMethod: 'executeMetricsSync' }),
   tokenValidation: Object.freeze({ type: 'meta_token_validation', priority: 'normal', executorMethod: 'executeTokenValidation' }),
   dataCleanup: Object.freeze({ type: 'system_data_cleanup', priority: 'low', executorMethod: 'executeDataCleanup' }),
+  pm2LogRetention: Object.freeze({
+    type: 'system_pm2_log_retention',
+    priority: 'low',
+    executorMethod: 'executePm2LogRetention',
+  }),
   healthCheck: Object.freeze({ type: 'system_health_check', priority: 'low', executorMethod: 'executeHealthCheck' }),
   adsSync: Object.freeze({ type: 'meta_ads_recent', priority: 'normal', executorMethod: 'executeAdsSync' }),
   adsSyncMidday: Object.freeze({
@@ -72,17 +77,52 @@ const SCHEDULED_JOB_DEFINITIONS = Object.freeze({
     executorMethod: 'executeAutomationHealthCheck',
     reportedFailureRetryable: false,
   }),
+  opsGlobalDiscovery: Object.freeze({
+    type: 'ops_global_discovery',
+    priority: 'low',
+    executorMethod: 'executeOpsGlobalDiscovery',
+    // Los cinco bridges migran desde el crontab del host, que operaba en UTC.
+    // Mantener su zona evita desplazar ejecuciones durante el cutover o por DST.
+    timezone: 'UTC',
+  }),
+  opsSummary: Object.freeze({
+    type: 'ops_summary',
+    priority: 'low',
+    executorMethod: 'executeOpsSummary',
+    timezone: 'UTC',
+  }),
+  opsGoogleBusinessProfileDaily: Object.freeze({
+    type: 'ops_google_business_profile_daily',
+    priority: 'low',
+    executorMethod: 'executeOpsGoogleBusinessProfile',
+    payloadDefaults: Object.freeze({ onlyRequested: false }),
+    timezone: 'UTC',
+  }),
+  opsSearchConsoleDaily: Object.freeze({
+    type: 'ops_search_console_daily',
+    priority: 'low',
+    executorMethod: 'executeOpsSearchConsole',
+    timezone: 'UTC',
+  }),
+  opsGoogleBusinessProfileRequested: Object.freeze({
+    type: 'ops_google_business_profile_requested',
+    priority: 'low',
+    executorMethod: 'executeOpsGoogleBusinessProfile',
+    payloadDefaults: Object.freeze({ onlyRequested: true }),
+    timezone: 'UTC',
+  }),
 });
 
 const getScheduledJobDefinition = (jobName) => SCHEDULED_JOB_DEFINITIONS[jobName] || null;
 
-// Backfills que se crean a demanda pero comparten los mismos clientes,
-// límites y flags mutables que los barridos periódicos.
+// Integraciones dirigidas que se crean a demanda pero comparten los mismos
+// clientes, límites y flags mutables que los barridos periódicos.
 const TARGETED_INTEGRATION_JOB_TYPES = Object.freeze([
   'meta_ads_backfill_for_sites',
   'web_backfill_for_sites',
   'analytics_backfill_properties',
   'business_profile_backfill_locations',
+  'whatsapp_template_sync_delayed',
 ]);
 
 const BACKGROUND_INTEGRATION_JOB_TYPES = Object.freeze([

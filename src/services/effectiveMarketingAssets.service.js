@@ -33,6 +33,11 @@ function cleanGoogleCustomerId(raw) {
   return cleaned || null;
 }
 
+function hasOwnAlias(source, snakeKey, camelKey) {
+  return Object.prototype.hasOwnProperty.call(source, snakeKey)
+    || Boolean(camelKey && Object.prototype.hasOwnProperty.call(source, camelKey));
+}
+
 function normalizeGoogleCampaignIds(...rawValues) {
   const seen = new Set();
   const normalized = [];
@@ -87,7 +92,16 @@ function normalizeGoogleAdsDestinations(rawDestinations, fallbackCurrency = 'EUR
       currency: cleanString(raw.currency) || fallbackCurrency,
       campaign_ids: normalizeGoogleCampaignIds(raw.campaign_ids, raw.campaignIds),
       ...(raw.value !== undefined ? { value: raw.value } : {}),
-      ...(raw.consent !== undefined ? { consent: raw.consent } : {})
+      ...(raw.consent !== undefined ? { consent: raw.consent } : {}),
+      ...(raw.user_data_enabled !== undefined || raw.userDataEnabled !== undefined
+        ? { user_data_enabled: raw.user_data_enabled === true || raw.userDataEnabled === true }
+        : {}),
+      ...(raw.phone_country_code !== undefined || raw.phoneCountryCode !== undefined
+        ? { phone_country_code: cleanGoogleCustomerId(raw.phone_country_code || raw.phoneCountryCode) }
+        : {}),
+      ...(raw.user_properties !== undefined || raw.userProperties !== undefined
+        ? { user_properties: raw.user_properties ?? raw.userProperties }
+        : {})
     });
   }
   return normalized;
@@ -131,6 +145,34 @@ function normalizeGoogleAdsConfig(rawConfig) {
     conversion_action_id: cleanString(rawConfig.conversion_action_id || rawConfig.conversionActionId),
     send_to: cleanString(rawConfig.send_to || rawConfig.sendTo),
     currency: cleanString(rawConfig.currency) || 'EUR',
+    ...(hasOwnAlias(rawConfig, 'phone_country_code', 'phoneCountryCode')
+      ? {
+        phone_country_code: cleanGoogleCustomerId(
+          rawConfig.phone_country_code || rawConfig.phoneCountryCode
+        ) || null,
+      }
+      : {}),
+    ...(hasOwnAlias(rawConfig, 'user_data_enabled', 'userDataEnabled')
+      ? { user_data_enabled: rawConfig.user_data_enabled === true || rawConfig.userDataEnabled === true }
+      : {}),
+    ...(hasOwnAlias(rawConfig, 'enhanced_conversions', 'enhancedConversions')
+      ? {
+        enhanced_conversions: rawConfig.enhanced_conversions
+          && typeof rawConfig.enhanced_conversions === 'object'
+          && !Array.isArray(rawConfig.enhanced_conversions)
+          ? { ...rawConfig.enhanced_conversions }
+          : (rawConfig.enhancedConversions
+            && typeof rawConfig.enhancedConversions === 'object'
+            && !Array.isArray(rawConfig.enhancedConversions)
+            ? { ...rawConfig.enhancedConversions }
+            : null),
+      }
+      : {}),
+    ...(rawConfig.value !== undefined ? { value: rawConfig.value } : {}),
+    ...(rawConfig.consent !== undefined ? { consent: rawConfig.consent } : {}),
+    ...(rawConfig.user_properties !== undefined || rawConfig.userProperties !== undefined
+      ? { user_properties: rawConfig.user_properties ?? rawConfig.userProperties }
+      : {}),
     events: {}
   };
 
@@ -146,7 +188,22 @@ function normalizeGoogleAdsConfig(rawConfig) {
       conversion_action: cleanString(eventValue.conversion_action || eventValue.conversionAction),
       conversion_action_id: cleanString(eventValue.conversion_action_id || eventValue.conversionActionId),
       send_to: cleanString(eventValue.send_to || eventValue.sendTo),
-      currency: cleanString(eventValue.currency) || normalized.currency
+      currency: cleanString(eventValue.currency) || normalized.currency,
+      ...(hasOwnAlias(eventValue, 'phone_country_code', 'phoneCountryCode')
+        ? {
+          phone_country_code: cleanGoogleCustomerId(
+            eventValue.phone_country_code || eventValue.phoneCountryCode
+          ) || null,
+        }
+        : {}),
+      ...(hasOwnAlias(eventValue, 'user_data_enabled', 'userDataEnabled')
+        ? { user_data_enabled: eventValue.user_data_enabled === true || eventValue.userDataEnabled === true }
+        : {}),
+      ...(eventValue.value !== undefined ? { value: eventValue.value } : {}),
+      ...(eventValue.consent !== undefined ? { consent: eventValue.consent } : {}),
+      ...(eventValue.user_properties !== undefined || eventValue.userProperties !== undefined
+        ? { user_properties: eventValue.user_properties ?? eventValue.userProperties }
+        : {})
     };
     normalizedEvent.campaign_ids = normalizeGoogleCampaignIds(
       eventValue.campaign_ids,
@@ -200,6 +257,27 @@ function mergeGoogleAdsEvents(baseEvents = {}, overrideEvents = {}, rawOverrideE
       conversion_action_id: pickEventValue('conversion_action_id', 'conversionActionId', baseValue.conversion_action_id),
       send_to: pickEventValue('send_to', 'sendTo', baseValue.send_to),
       currency: Object.prototype.hasOwnProperty.call(rawValue, 'currency') ? overrideValue.currency : baseValue.currency,
+      phone_country_code: pickEventValue(
+        'phone_country_code',
+        'phoneCountryCode',
+        baseValue.phone_country_code
+      ),
+      user_data_enabled: pickEventValue(
+        'user_data_enabled',
+        'userDataEnabled',
+        baseValue.user_data_enabled
+      ),
+      value: Object.prototype.hasOwnProperty.call(rawValue, 'value')
+        ? overrideValue.value
+        : baseValue.value,
+      consent: Object.prototype.hasOwnProperty.call(rawValue, 'consent')
+        ? overrideValue.consent
+        : baseValue.consent,
+      user_properties: pickEventValue(
+        'user_properties',
+        'userProperties',
+        baseValue.user_properties
+      ),
       campaign_ids: (
         Object.prototype.hasOwnProperty.call(rawValue, 'campaign_ids')
           || Object.prototype.hasOwnProperty.call(rawValue, 'campaignIds')
@@ -234,6 +312,32 @@ function mergeGoogleAdsConfig(baseConfig, overrideConfig) {
     conversion_action_id: pickOverride('conversion_action_id', 'conversionActionId', override.conversion_action_id, base.conversion_action_id),
     send_to: pickOverride('send_to', 'sendTo', override.send_to, base.send_to),
     currency: Object.prototype.hasOwnProperty.call(rawOverride, 'currency') ? override.currency : base.currency,
+    phone_country_code: pickOverride(
+      'phone_country_code',
+      'phoneCountryCode',
+      override.phone_country_code,
+      base.phone_country_code
+    ),
+    user_data_enabled: pickOverride(
+      'user_data_enabled',
+      'userDataEnabled',
+      override.user_data_enabled,
+      base.user_data_enabled
+    ),
+    enhanced_conversions: pickOverride(
+      'enhanced_conversions',
+      'enhancedConversions',
+      override.enhanced_conversions,
+      base.enhanced_conversions
+    ),
+    value: Object.prototype.hasOwnProperty.call(rawOverride, 'value') ? override.value : base.value,
+    consent: Object.prototype.hasOwnProperty.call(rawOverride, 'consent') ? override.consent : base.consent,
+    user_properties: pickOverride(
+      'user_properties',
+      'userProperties',
+      override.user_properties,
+      base.user_properties
+    ),
     events: mergeGoogleAdsEvents(base.events, override.events, rawOverride.events || {})
   };
 }
