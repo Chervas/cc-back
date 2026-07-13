@@ -3341,6 +3341,7 @@ En esa carga se guardan, entre otros:
 
 #### Contrato seguro de conversiones Google Ads (2026-07-11)
 
+- la comprobación de dominio emite una attestation firmada de corta duración: solo puede enviarse como prueba nueva durante 15 minutos; una vez aceptada por backend, readiness revalida siempre firma, scope, dominio, HMAC y hash de configuración, pero usa una vigencia operativa separada de 24 horas (`INTAKE_PERSISTED_VERIFICATION_TTL_SECONDS`, máximo 7 días). Cambiar dominios, proveedor, URLs legales o HMAC invalida la prueba aunque siga dentro de esa ventana;
 - listado y `ensure` requieren `clinic_id` o `group_id`; ya no toman la conexión Google del usuario como credencial implícita;
 - la conexión OAuth y la cuenta Ads se resuelven por scope y se valida que `customer_id` esté asignado a ese mismo scope y conexión;
 - `POST .../ensure` es de solo lectura por defecto (`create_missing=false`); para crear acciones externas exige simultáneamente `create_missing=true` y `confirm_external_mutation=true`;

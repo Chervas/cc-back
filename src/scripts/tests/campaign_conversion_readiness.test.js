@@ -7,6 +7,7 @@ const db = require('../../../models');
 const { __test } = require('../../controllers/campaignOnboarding.controller');
 const {
   buildVerificationConfigHash,
+  DEFAULT_PERSISTED_VERIFICATION_TTL_SECONDS,
   issueVerificationAttestation,
 } = require('../../lib/intake-verification-attestation');
 
@@ -101,7 +102,7 @@ function readyConsentState(provider = 'clinicaclick', options = {}) {
 function testConsentReadinessIsAHardGate() {
   const ready = assessConsentMeasurementReadiness(readyConsentState());
   assert.equal(ready.ready, true);
-  assert.ok(ready.expires_at, 'Readiness must expose the nearest valid attestation expiry');
+  assert.ok(ready.expires_at, 'Readiness must expose the persisted verification expiry');
 
   const timerNow = Date.now();
   const timerState = assessConsentMeasurementReadiness(readyConsentState('clinicaclick', {
@@ -113,8 +114,8 @@ function testConsentReadinessIsAHardGate() {
   }));
   assert.equal(
     timerState.expires_at,
-    new Date((Math.floor(timerNow / 1000) + 30) * 1000).toISOString(),
-    'The UI timer must use the earliest valid domain attestation',
+    new Date((Math.floor(timerNow / 1000) + DEFAULT_PERSISTED_VERIFICATION_TTL_SECONDS) * 1000).toISOString(),
+    'The UI timer must use the operational lease, not the short submission token',
   );
 
   const disabledState = readyConsentState();
@@ -180,12 +181,19 @@ function testConsentReadinessIsAHardGate() {
   assert.equal(forged.ready, false, 'Unsigned booleans must never satisfy readiness');
   assert.ok(forged.reasons.includes('consent_attestation_missing'));
 
-  const expired = assessConsentMeasurementReadiness(readyConsentState('clinicaclick', {
+  const submissionExpired = assessConsentMeasurementReadiness(readyConsentState('clinicaclick', {
     nowMs: Date.now() - 60_000,
     ttlSeconds: 1,
   }));
-  assert.equal(expired.ready, false);
-  assert.ok(expired.issues.some((issue) => issue.details === 'attestation_expired'));
+  assert.equal(submissionExpired.ready, true,
+    'A short-lived token already persisted by the backend remains operationally valid');
+
+  const operationallyExpired = assessConsentMeasurementReadiness(readyConsentState('clinicaclick', {
+    nowMs: Date.now() - ((DEFAULT_PERSISTED_VERIFICATION_TTL_SECONDS + 60) * 1_000),
+    ttlSeconds: 1,
+  }));
+  assert.equal(operationallyExpired.ready, false);
+  assert.ok(operationallyExpired.issues.some((issue) => issue.details === 'attestation_operational_expired'));
 
   const changedConfigState = readyConsentState();
   changedConfigState.records.groupRecord.config.texts.cookies_url = '/otra-politica/';

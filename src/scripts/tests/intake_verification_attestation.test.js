@@ -6,7 +6,9 @@ const {
   canonicalizeIntakeDomain,
   canonicalizeIntakeDomains,
   cookieNoticeProviderMatches,
+  DEFAULT_PERSISTED_VERIFICATION_TTL_SECONDS,
   issueVerificationAttestation,
+  verifyPersistedVerificationAttestation,
   verifyVerificationAttestation,
 } = require('../../lib/intake-verification-attestation');
 
@@ -89,6 +91,25 @@ function run() {
     ...expected,
     nowMs: nowMs + (901 * 1_000),
   }).reason, 'attestation_expired');
+
+  const persisted = verifyPersistedVerificationAttestation(issued.token, {
+    ...expected,
+    nowMs: nowMs + (901 * 1_000),
+  });
+  assert.equal(persisted.valid, true, 'An accepted proof remains valid after its short submission TTL');
+  assert.equal(
+    persisted.operationalExpiresAtIso,
+    new Date((Math.floor(nowMs / 1000) + DEFAULT_PERSISTED_VERIFICATION_TTL_SECONDS) * 1000).toISOString(),
+  );
+  assert.equal(verifyPersistedVerificationAttestation(issued.token, {
+    ...expected,
+    nowMs: nowMs + ((DEFAULT_PERSISTED_VERIFICATION_TTL_SECONDS + 1) * 1_000),
+  }).reason, 'attestation_operational_expired');
+  assert.equal(verifyPersistedVerificationAttestation(issued.token, {
+    ...expected,
+    configHash: 'f'.repeat(64),
+    nowMs: nowMs + (901 * 1_000),
+  }).reason, 'attestation_config_mismatch');
 
   const rotatedHash = buildVerificationConfigHash({
     scopeType: 'group',
