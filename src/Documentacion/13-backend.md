@@ -3349,6 +3349,17 @@ Los `external_targets` guardados dentro de una estrategia son un snapshot editab
 - una denegación de consentimiento bloquea la llamada externa y se registra como `skipped/consent_not_granted`;
 - los tests dirigidos no llaman a Google: `node src/scripts/tests/google_ads_conversion_tracking.test.js`.
 
+#### Activación automática y consentimiento de Conversiones mejoradas (2026-07-13)
+
+- `ad_personalization` ya no se fija a `DENIED`: el uploader deriva la elección real por visitante y la envía a Data Manager como `GRANTED` al aceptar marketing/todo o `DENIED` al rechazarlo. `ad_user_data` sigue siendo una señal explícita e independiente y la PII hasheada solo se habilita con `GRANTED`;
+- `features.ad_personalization_enabled=true` es una capacidad para reflejar esa elección, no una concesión de consentimiento. El default usa `ad_personalization_consent_source=visitor_choice`; si falta una elección válida, no se envía user data;
+- no se habilitan Customer Match, listas basadas en conversiones, audiencias ni remarketing. Tampoco se envían URL, tratamiento o contexto clínico junto a email/teléfono;
+- el job `googleDataManagerDiagnostics`, ya programado cada 30 minutos, aplica primero la capacidad `visitor_choice` aunque Enhanced siga bloqueado. Esta fase es independiente, auditada y no habilita user data. Después reconcilia la activación Enhanced del grupo Propdental solo cuando **todas** las cuentas configuradas están mapeadas, tienen términos aceptados, devuelven `enhanced_conversions_for_leads_enabled=true`, Consent Mode/attestations están vigentes y OAuth dispone de Ads + Data Manager y quota project;
+- la reconciliación solo actualiza `IntakeConfig`: no crea ni modifica acciones, objetivos, pujas o campañas en Google. Usa bloqueo transaccional, revalidación de allowlist y una clave SHA-256 versionada; repetir el job con el mismo estado devuelve `already_active` sin escribir. Un cambio concurrente devuelve `stale_retry` y se revisa en el siguiente ciclo;
+- `GET /campaign-onboarding/bootstrap` es estrictamente read-only: expone `active`, `pending_reconciliation` o `blocked`, pero nunca ejecuta la activación. No hay dependencia del botón Play;
+- el audit embebido conserva versión, clave, fuente, cuentas y resultado de cada gate; `SyncLog.status_report.internal_enhanced_conversion_activation` registra cada ciclo sin PII y declara `google_ads_mutated=false`;
+- la política de valores v1 usa Lead `0 EUR`, Contact `0 EUR`, Qualified Lead `10 EUR` y Schedule `40 EUR` como pesos de reporting/optimización (`value_is_revenue=false`). Purchase no se materializa por este gate y solo usa valor económico real. Este flujo no cambia automáticamente la estrategia de puja ni los objetivos de Google.
+
 Formato de configuración multi-cuenta por evento:
 
 ```json

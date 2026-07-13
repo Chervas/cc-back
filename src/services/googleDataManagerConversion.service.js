@@ -183,8 +183,8 @@ function enhancedConversionAuthorizationError(reason) {
   );
   error.code = reason === 'ad_user_data_consent_not_granted'
     ? 'ENHANCED_CONVERSION_AD_USER_DATA_CONSENT_REQUIRED'
-    : reason === 'ad_personalization_not_denied'
-      ? 'ENHANCED_CONVERSION_AD_PERSONALIZATION_MUST_BE_DENIED'
+    : reason === 'ad_personalization_consent_missing'
+      ? 'ENHANCED_CONVERSION_AD_PERSONALIZATION_CONSENT_REQUIRED'
       : 'ENHANCED_CONVERSION_AUTHORIZATION_REQUIRED';
   error.policyReason = reason;
   return error;
@@ -225,7 +225,7 @@ function validateEnhancedConversionAuthorization({
     || authorization.customerMatchEnabled !== false
     || authorization.conversionBasedCustomerListsEnabled !== false
     || authorization.remarketingEnabled !== false
-    || authorization.adPersonalizationStatus !== 'DENIED'
+    || authorization.adPersonalizationSource !== 'visitor_consent'
     || !hasOnlySupportedIdentifiers
   ) {
     return { valid: false, reason: 'authorization_scope_invalid' };
@@ -255,8 +255,8 @@ function validateEnhancedConversionAuthorization({
   if (String(consentStatus || '').trim().toUpperCase() !== 'GRANTED') {
     return { valid: false, reason: 'ad_user_data_consent_not_granted' };
   }
-  if (String(adPersonalizationStatus || '').trim().toUpperCase() !== 'DENIED') {
-    return { valid: false, reason: 'ad_personalization_not_denied' };
+  if (!['GRANTED', 'DENIED'].includes(String(adPersonalizationStatus || '').trim().toUpperCase())) {
+    return { valid: false, reason: 'ad_personalization_consent_missing' };
   }
   return {
     valid: true,

@@ -15,9 +15,9 @@ Cada evento conserva:
 
 El transporte estándar de conversiones offline no transmite IP, email, teléfono, nombre, dirección, `clientId`, `userId`, propiedades de usuario, URL ni atributos de sesión. Usa únicamente el identificador publicitario permitido y los datos del evento. ClinicaClick conserva en su CRM los datos first-party necesarios.
 
-Existe una capacidad técnica separada para **Conversiones mejoradas**, desactivada por defecto y limitada en código a Propdental, a las cuentas `1851215478` y `5992356722` y a Lead, Contact, Qualified Lead y Schedule. Su uso en estas cuentas se considera autorizado con el alcance descrito en el ticket de soporte de Google aportado por el anunciante, `4-1893000040437`, y con la autorización del propio anunciante. El contrato es estricto: solo normaliza y envía email y teléfono como hashes SHA-256 HEX después de un consentimiento explícito; fuerza `adUserData=GRANTED`, `adPersonalization=DENIED` y excluye nombre, dirección, URL, clínica, tratamiento, motivo de consulta, cualquier información clínica, Customer Match, listas basadas en conversiones, audiencias y remarketing. Cada cuenta y evento necesita una allowlist y referencias de esa autorización. El audit guarda el digest y las referencias, nunca la PII cruda.
+Existe una capacidad técnica separada para **Conversiones mejoradas**, limitada en código a Propdental, a las cuentas `1851215478` y `5992356722` y a Lead, Contact, Qualified Lead y Schedule. Su uso en estas cuentas se considera autorizado con el alcance descrito en el ticket de soporte de Google aportado por el anunciante, `4-1893000040437`, y con la autorización del propio anunciante. El contrato es estricto: solo normaliza y envía email y teléfono como hashes SHA-256 HEX después de un consentimiento explícito. `adUserData` debe ser `GRANTED`; `adPersonalization` no se fuerza: refleja la elección real del visitante (`GRANTED` si acepta marketing/todo, `DENIED` si lo rechaza). Se excluyen nombre, dirección, URL, clínica, tratamiento, motivo de consulta, cualquier información clínica, Customer Match, listas basadas en conversiones, audiencias y remarketing. Cada cuenta y evento necesita una allowlist y referencias de esa autorización. El audit guarda el digest, las referencias y el estado de consentimiento, nunca la PII cruda.
 
-Esta autorización funcional no equivale a que la característica esté encendida. La configuración live mantiene todavía `enhanced_conversions.enabled=false` y `user_data_enabled=false`, y en ambas cuentas Google Ads devuelve `enhanced_conversions_for_leads_enabled=false`. Este último interruptor es de solo lectura en la API de Google Ads y debe activarse desde la interfaz de Google Ads antes del primer envío real con email o teléfono. Un `validateOnly` correcto o un HTTP 200 solo prueban formato y acceso técnico.
+Esta autorización funcional no equivale a que la característica esté encendida. El interruptor `enhanced_conversions_for_leads_enabled` es de solo lectura en la API de Google Ads y debe estar activado en cada cuenta antes del primer envío real con email o teléfono. Un `validateOnly` correcto o un HTTP 200 solo prueban formato y acceso técnico. Cuando todas las cuentas del scope cumplen los requisitos, el job interno activa únicamente la configuración Enhanced de ClinicaClick; nunca pulsa ni muta ese interruptor en Google. La capacidad independiente de reflejar `adPersonalization` según la elección del visitante no espera a ese gate y se activa en una fase interna separada.
 
 Sin un click ID permitido, o sin user data expresamente autorizado, el evento se audita como `no_permitted_identifiers` y no sale a Google. El dedupe propio usa cuenta, acción, evento y el hash del identificador disponible; ni el click ID ni la PII se guardan en claro.
 
@@ -39,11 +39,15 @@ El dry-run usa el placeholder publicitario `GCLID_1` de la documentación oficia
 
 ### Gate de activación de Conversiones mejoradas
 
-`POST /api/marketing/google-ads/conversions/enhanced/activation-gate` prepara exclusivamente el `IntakeConfig` del grupo Propdental `5`; nunca crea acciones ni modifica Google Ads. Es preview por defecto. Para aplicar exige `apply=true`, `confirm_external_mutation=true` y una autorización del anunciante con `confirmed=true`, referencia opaca y fecha.
+`POST /api/marketing/google-ads/conversions/enhanced/activation-gate` se conserva como vía interna de preview/compatibilidad para el `IntakeConfig` del grupo Propdental `5`; nunca crea acciones ni modifica Google Ads. La activación ordinaria no depende de este endpoint ni de un botón Play: la ejecuta el reconciliador interno del job `googleDataManagerDiagnostics` cada 30 minutos cuando todo está listo.
 
-El apply queda bloqueado con `409`, sin cambio parcial, si Data Manager no está listo, falla el acceso al scope, Consent Mode o las attestations y URLs, el proveedor no es Clinicaclick, `ad_personalization` no está denegado, alguna cuenta destino no está mapeada/allowlisted, no ha aceptado los términos de datos o Google aún devuelve `enhanced_conversions_for_leads_enabled=false`. Antes del update se valida cada pareja cuenta/evento con el validador de autorización del uploader y se bloquea la fila de `IntakeConfig` dentro de una transacción.
+El reconciliador tiene dos fases. La primera materializa inmediatamente `ad_personalization_enabled=true` y `visitor_choice`, con audit y clave versionada, aunque el gate Enhanced siga bloqueado; no habilita email/teléfono ni concede consentimiento. La segunda habilita Conversiones mejoradas y sus valores solo cuando todas las cuentas y attestations están listas. Ambas fases son transaccionales e idempotentes.
 
-Al superar el gate se habilitan conjuntamente el disclosure y runtime, `google_ads.user_data_enabled` y los eventos existentes Lead, Contact, Qualified Lead y Schedule. La allowlist incluye el ticket `4-1893000040437`, la autorización del anunciante y las restricciones de medición: solo email/teléfono, sin Purchase, nombre, dirección, Customer Match, listas, remarketing ni personalización. El audit embebido contiene referencias, cuentas, eventos, actor interno y fecha, pero ninguna PII del paciente.
+La reconciliación queda bloqueada, sin cambio parcial, si Data Manager no está listo, falla el acceso al scope, Consent Mode o las attestations y URLs, el proveedor no es Clinicaclick, falta la fuente de consentimiento del visitante, alguna cuenta destino no está mapeada/allowlisted, no ha aceptado los términos de datos o Google aún devuelve `enhanced_conversions_for_leads_enabled=false`. Antes del update se valida cada pareja cuenta/evento y se bloquea la fila de `IntakeConfig` dentro de una transacción. Una clave SHA-256 versionada hace el proceso idempotente; una configuración concurrentemente modificada se deja para el siguiente ciclo. Bootstrap solo muestra el estado y nunca escribe.
+
+Al superar el gate se habilitan conjuntamente el disclosure y runtime, `google_ads.user_data_enabled`, la capacidad `ad_personalization_enabled=true` con fuente `visitor_choice` y los eventos existentes Lead, Contact, Qualified Lead y Schedule. Ese `true` no concede consentimiento: permite emitir la elección real del visitante. La allowlist incluye el ticket `4-1893000040437`, la autorización del anunciante y las restricciones de medición: solo email/teléfono, sin Purchase, nombre, dirección, Customer Match, listas ni remarketing. El audit embebido contiene referencias, cuentas, eventos, estado por cuenta, clave de reconciliación y fecha, pero ninguna PII del paciente.
+
+La política de valores es versionada y declarada como peso de reporting/optimización, no ingreso: Lead `0 EUR`, Contact `0 EUR`, Qualified Lead `10 EUR` y Schedule `40 EUR`. Purchase queda fuera de esta activación y solo puede enviar un valor económico real del CRM. El reconciliador no cambia objetivos, acciones primarias, pujas ni campañas en Google.
 
 ### Evidencia Propdental del 2026-07-12
 
@@ -61,7 +65,9 @@ Al superar el gate se habilitan conjuntamente el disclosure y runtime, `google_a
 
 ## Hitos offline del CRM
 
-- `Schedule` se genera cuando una cita vinculada a un lead se agenda. Es una conversión offline del CRM aunque su valor sea cero.
+- `Qualified Lead` y `Schedule` no fijan un valor en el payload del hito. El uploader hereda el valor configurado para el evento; la política del gate usa respectivamente `10 EUR` y `40 EUR`.
+- Esos `10/40` son pesos relativos de reporting y optimización, no ingresos, precio, margen ni ROAS. Tampoco activan ni autorizan un cambio automático a `Maximize Conversion Value`; mientras se optimiza por estos hitos, la estrategia prevista sigue siendo `Maximize Conversions`.
+- `Schedule` se genera cuando una cita vinculada a un lead se agenda.
 - Una cita completada sin tratamiento actualiza el lead a `acudio_cita`; no se reutiliza una acción de Google con semántica incorrecta.
 - Una cita completada con `tratamiento_id`, o de tipo `primera_con_trat`, actualiza el lead a `convertido` y genera `Purchase - ClinicaClick` con ID idempotente `appointment-{id}-treatment-completed`.
 - Purchase usa el `precio_base` válido del tratamiento o `0 EUR` cuando no hay un valor fiable. No envía el nombre ni el tipo de tratamiento ni ningún dato clínico como parámetro.
@@ -69,7 +75,7 @@ Al superar el gate se habilitan conjuntamente el disclosure y runtime, `google_a
 
 ## Escalera de optimización y botón Play
 
-Conectar Google Ads y medir conversiones no autoriza a cambiar los objetivos de las campañas. En Propdental el botón/estado interno `Play` **no aplica objetivos en Google**: para `connect_only` relee Consent Mode, ejecuta la comprobación de conversiones con `validateOnly` y actualiza únicamente `CampaignRequest`/`Campaign`. Los badges `Activa` de las campañas externas no son botones. La policy de objetivos se aprueba y aplica por una ruta separada; nunca debe sustituirse de golpe el objetivo histórico por Schedule sin la señal necesaria.
+Conectar Google Ads y medir conversiones no autoriza a cambiar los objetivos de las campañas. En Propdental el botón/estado interno `Play` **no aplica objetivos en Google**: para `connect_only` relee Consent Mode, ejecuta la comprobación de conversiones con `validateOnly` y actualiza únicamente `CampaignRequest`/`Campaign`. Los badges `Activa` de las campañas externas no son botones. Solo el gate admin de una `ManagedCampaign` en Piloto automático autoriza al executor gestionado a aplicar su goal de `Qualified Lead`; nunca debe sustituirse de golpe por Schedule sin la señal necesaria.
 
 La escalera segura es `Qualified Lead → Schedule → Purchase`:
 
@@ -77,16 +83,16 @@ La escalera segura es `Qualified Lead → Schedule → Purchase`:
 2. **Schedule.** Puede proponerse con al menos 30 citas cerradas en 30 días, cuatro semanas consecutivas con un mínimo de 5 por semana, éxito de carga igual o superior al 95 % y un cooldown mínimo de 14 días desde el último cambio de objetivo.
 3. **Purchase.** Puede proponerse después de cuatro semanas en Schedule, con al menos 30 tratamientos en 30 días, valor económico real en al menos el 90 % de los eventos y valor de respaldo en un máximo del 5 %. El precio de catálogo o un importe ficticio no cuentan como valor real.
 
-Una evaluación correcta no basta: cada peldaño requiere **dos evaluaciones consecutivas** separadas al menos 24 horas. Si una evaluación intermedia falla, la secuencia vuelve a empezar. Cumplir los umbrales solo genera una recomendación pendiente de aprobación; no muta Google Ads.
+El Piloto automático comienza en `Qualified Lead` al entrar en `launching`, después de su aprobación administrativa y del preview/validateOnly/readback de Google. Desde ese punto, una evaluación correcta no basta para cambiar de etapa: `Qualified Lead → Schedule` y los peldaños posteriores requieren **dos evaluaciones consecutivas** separadas al menos 24 horas. Si una evaluación intermedia falla, la secuencia vuelve a empezar. Cumplir los umbrales solo genera una recomendación pendiente de aprobación; el evaluador puro no muta Google Ads.
 
-El servicio puro `campaignOptimizationLifecycle.service.js` materializa este contrato. No consulta ni modifica modelos, jobs, controladores o proveedores, y devuelve siempre `provider_mutation=null`. Cualquier futura integración debe conservar preview, digest, actor aprobador y auditoría antes de invocar por separado una mutación de Google.
+El servicio puro `campaignOptimizationLifecycle.service.js` materializa este contrato. No consulta ni modifica modelos, jobs, controladores o proveedores, y devuelve siempre `provider_mutation=null`. La integración separada de ManagedCampaign conserva preview, digest, actor aprobador, `validateOnly` y readback antes de permitir el cambio de status.
 
 ### Cómo encaja con los dos modos
 
 - **Conecta y mide** (`connect_only`): recopila, atribuye y audita las señales, pero no cambia las pujas. Cuando se cumplen dos evaluaciones, muestra una propuesta que debe aprobar el **cliente**; la aprobación del contrato tampoco aplica por sí sola el cambio en Google.
-- **Piloto automático** (`managed_service`): evalúa la misma escalera y los mismos límites. La propuesta debe aprobarla un **operador de ClinicaClick**. Solo una capa posterior, explícita y auditada podrá aplicar por lotes las campañas autorizadas y ejecutar su rollback; el evaluador nunca lo hace silenciosamente.
+- **Piloto automático** (`managed_service`): al entrar en `launching/active` provisiona idempotentemente una policy por ManagedCampaign y el goal v4 de QL. El executor actúa por una sola cuenta/cohorte, fuera de transacciones DB, y el status solo avanza con readback healthy. Las promociones posteriores exigen aprobación de un **operador de ClinicaClick** y las dos evaluaciones del contrato; el evaluador nunca muta Google silenciosamente.
 
-Por tanto, el usuario no tendrá que avisar manualmente al cabo de unos días cuando exista el job de integración: el sistema podrá reevaluar periódicamente. Mientras esa integración no exista, el contrato es deliberadamente solo de decisión y ninguna campaña cambia de objetivo.
+La reevaluación periódica ya puede descubrir policies activas. La promoción automática a Schedule sigue bloqueada hasta disponer de una serie semanal por fecha real de cita; `attempted_at` no se usa como sustituto ni se fabrican datos.
 
 ## Provisioning de acciones
 
@@ -123,6 +129,7 @@ Evidencia de Propdental al 2026-07-12:
 ## Monitorización
 
 - Diagnostics de cargas Data Manager: cada 30 minutos.
+- En el mismo ciclo se reconcilia la activación interna de Conversiones mejoradas. La operación es idempotente, transaccional y auditada en `SyncLog`; todas las consultas a Google son de solo lectura y el resultado declara expresamente `google_ads_mutated=false`.
 - Auditoría read-only de acciones, custom goal y campañas opt-in estables: una vez al día, a las 02:17. El `apply` hace además una verificación inmediata antes y después de cualquier cambio aprobado.
 - La auditoría no autorepara ni hace mutaciones externas; cualquier cambio exige preview, digest vigente y confirmación explícita.
 
