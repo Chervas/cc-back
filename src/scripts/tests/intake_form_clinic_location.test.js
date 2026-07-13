@@ -5,6 +5,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 
 const {
+  extractClinicLabelHint,
   resolveConfiguredFormClinicLocation,
 } = require('../../lib/intakeFormClinicLocation');
 
@@ -59,6 +60,21 @@ function testFivePropdentalLocations() {
   const publicAlias = resolve('BARCELONA - SANT MARTI');
   assert.equal(publicAlias.matched, true);
   assert.equal(publicAlias.clinicId, 56, 'The configured public alias must resolve accent-insensitively');
+}
+
+function testRuntimeZeroClinicIdDoesNotShadowFormLabel() {
+  const hint = extractClinicLabelHint(
+    { clinica_id: 0, clinic_id: 0, grupo_clinica_id: 5 },
+    { nombre: 'Persona de prueba' },
+    { clinica: 'Propdental Sant Martí' },
+    { clinica: 'Propdental Sant Martí' },
+  );
+  assert.equal(hint, 'Propdental Sant Martí');
+  assert.equal(extractClinicLabelHint({ clinica_id: 56, grupo_clinica_id: 5 }), null);
+  assert.equal(
+    extractClinicLabelHint({ clinic: { id: 56 }, clinic_name: 'Propdental Sant Martí' }),
+    'Propdental Sant Martí',
+  );
 }
 
 function testFailClosed() {
@@ -134,6 +150,7 @@ function testControllerOrder() {
 }
 
 testFivePropdentalLocations();
+testRuntimeZeroClinicIdDoesNotShadowFormLabel();
 testFailClosed();
 testControllerOrder();
 console.log('intake_form_clinic_location.test.js OK');
