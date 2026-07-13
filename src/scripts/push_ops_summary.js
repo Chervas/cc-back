@@ -4,6 +4,7 @@
 
 const path = require('path');
 const axios = require('axios');
+const { syncOpsClients } = require('../services/opsClientSync.service');
 
 require('dotenv').config({ path: path.resolve(process.cwd(), '.env') });
 
@@ -81,6 +82,29 @@ async function query(sql, replacements = {}) {
 
 async function post(endpoint, payload) {
   const response = await axios.post(`${apiUrl}${endpoint}`, payload, {
+    headers: {
+      'content-type': 'application/json',
+      'x-ops-api-key': apiToken
+    },
+    timeout: 30000
+  });
+
+  return response.data;
+}
+
+async function get(endpoint) {
+  const response = await axios.get(`${apiUrl}${endpoint}`, {
+    headers: {
+      'x-ops-api-key': apiToken
+    },
+    timeout: 30000
+  });
+
+  return response.data;
+}
+
+async function patch(endpoint, payload) {
+  const response = await axios.patch(`${apiUrl}${endpoint}`, payload, {
     headers: {
       'content-type': 'application/json',
       'x-ops-api-key': apiToken
@@ -577,7 +601,7 @@ async function syncClients() {
       AND nombre_clinica <> ''
   `);
 
-  return postBatch('/api/internal/clients', clients.map((client) => ({
+  const payloads = clients.map((client) => ({
     name: client.nombre_clinica,
     brand: client.nombre_clinica,
     business_unit: businessUnit,
@@ -587,7 +611,22 @@ async function syncClients() {
     email: client.email || null,
     phone: client.phone || null,
     notes: client.url_web ? `Web: ${client.url_web}` : null
-  })));
+  }));
+  const dashboard = await get('/api/internal/clients-dashboard');
+  const result = await syncOpsClients({
+    payloads,
+    existingClients: dashboard?.items || [],
+    patchClient: (id, payload) => patch(`/api/internal/clients/${encodeURIComponent(id)}`, payload),
+    createClients: (items) => post('/api/internal/clients', { items }),
+  });
+
+  if (result.name_conflicts) {
+    console.warn(
+      `[ops-push] ${result.name_conflicts} client name conflict(s) kept their canonical external identity`
+    );
+  }
+
+  return result.total;
 }
 
 async function syncCampaignStructure(startDate) {

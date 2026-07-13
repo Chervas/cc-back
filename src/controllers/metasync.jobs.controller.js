@@ -457,8 +457,17 @@ exports.runJob = async (req, res) => {
     const userRole = req.userData?.role || null;
     const userName = req.userData?.name || null;
     const queueType = JOB_NAME_TO_QUEUE_TYPE[jobName] || null;
-    const payload = sanitizeManualJobPayload(queueType, req.body?.payload);
-    const catalogPriority = SCHEDULED_JOB_DEFINITIONS[jobName]?.priority || null;
+    const scheduledDefinition = SCHEDULED_JOB_DEFINITIONS[jobName] || null;
+    const suppliedPayload = req.body?.payload
+      && typeof req.body.payload === 'object'
+      && !Array.isArray(req.body.payload)
+      ? req.body.payload
+      : {};
+    const payload = sanitizeManualJobPayload(queueType, {
+      ...(scheduledDefinition?.payloadDefaults || {}),
+      ...suppliedPayload,
+    });
+    const catalogPriority = scheduledDefinition?.priority || null;
     const priority = req.body?.priority
       || (queueType && queueType.includes('backfill') ? 'high' : catalogPriority)
       || 'normal';
@@ -473,7 +482,7 @@ exports.runJob = async (req, res) => {
         requestedBy: userId,
         requestedByName: userName,
         requestedByRole: userRole,
-        maxAttempts: SCHEDULED_JOB_DEFINITIONS[jobName]?.maxAttempts
+        maxAttempts: scheduledDefinition?.maxAttempts
           || metaSyncJobs.config.retries.maxAttempts
           || 3,
       });

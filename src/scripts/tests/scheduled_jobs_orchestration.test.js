@@ -248,6 +248,43 @@ async function testCronMonitorReportsEnqueueNotBusinessCompletion() {
   assert.equal(jobData.lastExecution, null);
 }
 
+async function testScheduledEnqueueMergesCatalogPayloadDefaults() {
+  const jobs = new MetaSyncJobs();
+  const originalEnqueue = jobRequestsService.enqueueUniqueJobRequest;
+  const calls = [];
+  jobRequestsService.enqueueUniqueJobRequest = async (args) => {
+    calls.push(args);
+    return {
+      created: true,
+      job: {
+        id: 950 + calls.length,
+        payload: args.payload,
+      },
+    };
+  };
+
+  try {
+    await jobs.enqueueScheduledJob('opsGoogleBusinessProfileRequested');
+    await jobs.enqueueScheduledJob('adsSyncMidday');
+    await jobs.enqueueScheduledJob('opsGoogleBusinessProfileRequested', {
+      payload: { onlyRequested: false, source: 'explicit-override' },
+    });
+    await jobs.enqueueScheduledJob('adsSyncMidday', {
+      payload: { windowLabel: 'manual-window' },
+    });
+
+    assert.deepEqual(calls[0].payload, { onlyRequested: true });
+    assert.deepEqual(calls[1].payload, { windowLabel: 'midday' });
+    assert.deepEqual(calls[2].payload, {
+      onlyRequested: false,
+      source: 'explicit-override',
+    });
+    assert.deepEqual(calls[3].payload, { windowLabel: 'manual-window' });
+  } finally {
+    jobRequestsService.enqueueUniqueJobRequest = originalEnqueue;
+  }
+}
+
 async function testBackgroundLaneIsSeparateAndSequential() {
   const originalClaim = jobRequestsService.claimNextJob;
   const originalRun = jobExecutor.runJob;
@@ -1067,6 +1104,7 @@ async function run() {
   await testTargetedHandlersKeepTheirExactMappings();
   await testQueuedStatusAndSchedulerIndexContract();
   await testCronMonitorReportsEnqueueNotBusinessCompletion();
+  await testScheduledEnqueueMergesCatalogPayloadDefaults();
   await testBackgroundLaneIsSeparateAndSequential();
   await testBackgroundLaneUsesDurableMysqlLease();
   await testImmediateBackgroundTriggerJoinsBackgroundDrain();
