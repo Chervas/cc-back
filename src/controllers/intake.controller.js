@@ -21,6 +21,7 @@ const ClinicMetaAsset = db.ClinicMetaAsset;
 const MetaConnection = db.MetaConnection;
 const ClinicGoogleAdsAccount = db.ClinicGoogleAdsAccount;
 const IntakeConfig = db.IntakeConfig;
+const ExternalCampaignInventory = db.ExternalCampaignInventory;
 const ChatFlowTemplate = db.ChatFlowTemplate;
 const ClinicaHorario = db.ClinicaHorario;
 const WhatsAppWebOrigin = db.WhatsAppWebOrigin;
@@ -86,6 +87,10 @@ const {
 const {
   mergeIntakeConfigForEditorWrite,
 } = require('../lib/intake-config-write-merge');
+const {
+  buildMarketingOriginWhere,
+  buildLeadAttributionView,
+} = require('../lib/lead-attribution-view');
 const {
   ensureQualifiedLeadConversion,
   maybeUploadQualifiedLeadStatusTransition,
@@ -515,8 +520,70 @@ const enrichLeadsWithLinkedAppointments = async (leadRows = []) => {
   });
 };
 
+const enrichLeadsWithAttributionView = async (leadRows = []) => {
+  const leads = leadRows.map((lead) => toPlain(lead));
+  if (!leads.length) return leads;
+
+  const googleKeys = Array.from(new Map(
+    leads
+      .filter((lead) => cleanString(lead?.google_ads_campaign_id))
+      .map((lead) => {
+        const campaignId = cleanString(lead.google_ads_campaign_id);
+        const customerId = cleanString(lead.google_ads_customer_id);
+        return [`${customerId || '*'}:${campaignId}`, { customerId, campaignId }];
+      })
+  ).values());
+
+  const inventoryRows = ExternalCampaignInventory && googleKeys.length
+    ? await ExternalCampaignInventory.findAll({
+        where: {
+          provider: 'google_ads',
+          [Op.or]: googleKeys.map(({ customerId, campaignId }) => ({
+            campaign_id: campaignId,
+            ...(customerId ? { customer_id: customerId } : {}),
+          })),
+        },
+        attributes: ['provider', 'customer_id', 'campaign_id', 'campaign_name'],
+        order: [['last_seen_at', 'DESC'], ['id', 'DESC']],
+        raw: true,
+      })
+    : [];
+
+  const inventoryByExactKey = new Map();
+  const inventoryByCampaignKey = new Map();
+  for (const row of inventoryRows) {
+    const campaignId = cleanString(row.campaign_id);
+    if (!campaignId) continue;
+    const customerId = cleanString(row.customer_id);
+    if (customerId && !inventoryByExactKey.has(`${customerId}:${campaignId}`)) {
+      inventoryByExactKey.set(`${customerId}:${campaignId}`, row);
+    }
+    if (!inventoryByCampaignKey.has(campaignId)) {
+      inventoryByCampaignKey.set(campaignId, row);
+    } else {
+      const current = inventoryByCampaignKey.get(campaignId);
+      if (current && cleanString(current.customer_id) !== customerId) {
+        // A campaign id without its customer is not a safe cross-account key.
+        inventoryByCampaignKey.set(campaignId, null);
+      }
+    }
+  }
+
+  return leads.map((lead) => {
+    const campaignId = cleanString(lead.google_ads_campaign_id);
+    const customerId = cleanString(lead.google_ads_customer_id);
+    const inventory = campaignId
+      ? (customerId
+          ? inventoryByExactKey.get(`${customerId}:${campaignId}`)
+          : inventoryByCampaignKey.get(campaignId))
+      : null;
+    return buildLeadAttributionView(lead, inventory);
+  });
+};
+
 const enrichLeadsForUi = async (leadRows = []) => {
-  const withPatientMatches = await enrichLeadsWithPatientMatches(leadRows);
+  const withAttribution = await enrichLeadsWithAttributionView(leadRows);
+  const withPatientMatches = await enrichLeadsWithPatientMatches(withAttribution);
   return enrichLeadsWithLinkedAppointments(withPatientMatches);
 };
 
@@ -4372,7 +4439,10 @@ const buildLeadListPayload = async (query = {}) => {
   if (groupIdParsed !== null) where.grupo_clinica_id = groupIdParsed;
   if (campanaIdParsed !== null) where.campana_id = campanaIdParsed;
   if (channel && CHANNELS.has(channel)) where.channel = channel;
-  if (source && SOURCES.has(source)) where.source = source;
+  if (source && SOURCES.has(source)) {
+    const originWhere = buildMarketingOriginWhere(source, Op);
+    if (originWhere) where[Op.and] = [...(where[Op.and] || []), originWhere];
+  }
   if (status && STATUSES.has(status)) where.status_lead = status;
 
   if (startDate || endDate) {
@@ -4818,7 +4888,10 @@ exports.getLeadStats = asyncHandler(async (req, res) => {
   if (groupIdParsed !== null) where.grupo_clinica_id = groupIdParsed;
   if (campanaIdParsed !== null) where.campana_id = campanaIdParsed;
   if (channel && CHANNELS.has(channel)) where.channel = channel;
-  if (source && SOURCES.has(source)) where.source = source;
+  if (source && SOURCES.has(source)) {
+    const originWhere = buildMarketingOriginWhere(source, Op);
+    if (originWhere) where[Op.and] = [...(where[Op.and] || []), originWhere];
+  }
 
   if (startDate || endDate) {
     where.created_at = {};

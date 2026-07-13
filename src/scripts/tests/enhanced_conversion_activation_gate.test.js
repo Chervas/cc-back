@@ -355,6 +355,7 @@ function testReadyPlanIsRestrictedAndAuditable() {
   assert.equal(plan.nextConfig.features.ad_personalization_enabled, true);
   assert.equal(plan.nextConfig.features.ad_personalization_consent_source, 'visitor_choice');
   assert.equal(plan.nextConfig.google_ads.user_data_enabled, true);
+  assert.equal(plan.nextConfig.google_ads.phone_country_code, '34');
   assert.equal(plan.nextConfig.google_ads.events.lead.user_data_enabled, true);
   assert.equal(plan.nextConfig.google_ads.events.qualified_lead.user_data_enabled, true);
   assert.equal(plan.nextConfig.google_ads.events.schedule.user_data_enabled, true);
@@ -391,11 +392,12 @@ function testReadyPlanIsRestrictedAndAuditable() {
     []
   );
   const audit = plan.nextConfig.google_ads.enhanced_conversions.activation_audit;
-  assert.equal(audit.gate_version, 2);
+  assert.equal(audit.gate_version, 3);
   assert.equal(typeof audit.reconciliation_key, 'string');
   assert.equal(audit.reconciliation_key.length, 64);
   assert.equal(audit.actor_user_id, 7);
   assert.equal(audit.google_evidence_ref, '4-1893000040437');
+  assert.equal(audit.phone_country_code, '34');
   assert.equal(audit.customer_match_enabled, false);
   assert.equal(audit.remarketing_enabled, false);
   assert.equal(audit.ad_personalization_source, 'visitor_consent');
