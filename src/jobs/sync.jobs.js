@@ -41,6 +41,9 @@ const webEventsService = require('../services/webEvents.service');
 const googleReviewMatchService = require('../services/googleReviewMatch.service');
 const { reconcileGoogleDataManagerDiagnostics } = require('../services/googleDataManagerDiagnostics.service');
 const {
+  reconcileEnhancedConversionsInternalActivation,
+} = require('../controllers/campaignOnboarding.controller');
+const {
   executePersistedGoalPolicyAudit,
 } = require('../services/googleAdsClinicaclickGoalPolicy.service');
 const {
@@ -236,7 +239,7 @@ class MetaSyncJobs {
       adsBackfill: 'Backfill semanal de Ads con ventana extendida para consolidar atribución y cierres.',
       googleAdsSync: 'Sincroniza campañas y métricas diarias de Google Ads para cuentas vinculadas.',
       googleAdsBackfill: 'Backfill de Google Ads para nuevas cuentas o rangos extendidos.',
-      googleDataManagerDiagnostics: 'Concilia la aceptación asíncrona de conversiones enviadas a Google Data Manager.',
+      googleDataManagerDiagnostics: 'Concilia conversiones Data Manager y la activación interna idempotente de Conversiones mejoradas.',
       googleConversionGoalPolicyAudit: 'Audita sin autoreparar acciones canónicas, custom goal y campañas opt-in de ClinicaClick.',
       campaignOptimizationEvaluation: 'Evalúa diariamente políticas persistidas de optimización sin cambiar objetivos ni mutar Google Ads.',
       webSync: 'Sincroniza Search Console (serie diaria) y PSI reciente para clínicas mapeadas.',
@@ -1731,14 +1734,41 @@ class MetaSyncJobs {
       records_processed: 0
     });
     try {
-      const report = await reconcileGoogleDataManagerDiagnostics(options);
+      let internalActivation;
+      try {
+        internalActivation = await reconcileEnhancedConversionsInternalActivation({
+          now: options.now || new Date()
+        });
+      } catch (error) {
+        internalActivation = {
+          status: 'error',
+          updated: false,
+          idempotent: false,
+          ready: false,
+          error: {
+            code: error.code || 'INTERNAL_ACTIVATION_RECONCILIATION_ERROR',
+            message: 'Falló la reconciliación interna de Conversiones mejoradas'
+          },
+          external_mutation_performed: false,
+          google_ads_mutated: false
+        };
+      }
+      const diagnostics = await reconcileGoogleDataManagerDiagnostics(options);
+      const report = {
+        ...diagnostics,
+        internal_enhanced_conversion_activation: internalActivation
+      };
+      const jobStatus = (
+        (report.errors > 0 && report.checked === report.errors)
+        || internalActivation.status === 'error'
+      ) ? 'failed' : 'completed';
       await syncLog.update({
-        status: report.errors > 0 && report.checked === report.errors ? 'failed' : 'completed',
+        status: jobStatus,
         end_time: new Date(),
         records_processed: report.checked || 0,
         status_report: report
       });
-      return { status: 'completed', processed: report.checked || 0, report };
+      return { status: jobStatus, processed: report.checked || 0, report };
     } catch (error) {
       await syncLog.update({
         status: 'failed',

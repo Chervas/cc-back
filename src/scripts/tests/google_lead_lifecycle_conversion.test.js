@@ -6,6 +6,33 @@ const {
   buildLifecycleConversionPayload,
   maybeUploadLeadLifecycleConversion,
 } = require('../../services/googleLeadLifecycleConversion.service');
+const {
+  maybeUploadGoogleConversion,
+} = require('../../services/googleAdsConversionUpload.service');
+
+class FakeAuditModel {
+  constructor() {
+    this.rows = new Map();
+    this.nextId = 1;
+  }
+
+  async findOne({ where }) {
+    return this.rows.get(where.dedupeKey) || null;
+  }
+
+  async create(values) {
+    const row = {
+      id: this.nextId++,
+      ...values,
+      async update(patch) {
+        Object.assign(this, patch);
+        return this;
+      },
+    };
+    this.rows.set(values.dedupeKey, row);
+    return row;
+  }
+}
 
 function leadFixture(overrides = {}) {
   return {
@@ -40,6 +67,24 @@ function testPayloadKeepsRichAttribution() {
   assert.equal(payload.customData.campaign_id, '987654321');
   assert.equal(payload.userData.email, 'patient@example.com');
   assert.equal(payload.eventName, 'schedule');
+  assert.equal(payload.customData.value, 0, 'An explicit zero value must be preserved');
+}
+
+function testPayloadOmitsMissingValueAndPreservesRealPurchaseValue() {
+  const configuredWeightPayload = buildLifecycleConversionPayload({
+    lead: leadFixture(),
+    eventName: 'qualified_lead',
+    eventId: 'lead-42-qualified',
+  });
+  assert.equal(Object.hasOwn(configuredWeightPayload.customData, 'value'), false);
+
+  const purchasePayload = buildLifecycleConversionPayload({
+    lead: leadFixture(),
+    eventName: 'purchase',
+    eventId: 'appointment-99-treatment-completed',
+    value: 1250.5,
+  });
+  assert.equal(purchasePayload.customData.value, 1250.5);
 }
 
 async function testScheduleUsesGroupConfigAndConsent() {
@@ -58,7 +103,10 @@ async function testScheduleUsesGroupConfigAndConsent() {
               group_id: 5,
               config: {
                 features: { consent_mode_enabled: true },
-                google_ads: { enabled: true, events: { schedule: { enabled: true } } },
+                google_ads: {
+                  enabled: true,
+                  events: { schedule: { enabled: true, value: 40, currency: 'EUR' } },
+                },
               },
             };
           }
@@ -75,6 +123,78 @@ async function testScheduleUsesGroupConfigAndConsent() {
   assert.equal(uploadInput.eventName, 'schedule');
   assert.equal(uploadInput.assignmentScope, 'group');
   assert.equal(uploadInput.allowUpload, true);
+  assert.equal(Object.hasOwn(uploadInput.customData, 'value'), false);
+  assert.equal(uploadInput.googleAdsConfig.events.schedule.value, 40);
+}
+
+async function testConfiguredLifecycleWeightsReachUploader() {
+  const auditModel = new FakeAuditModel();
+  const uploaded = [];
+  const configRecord = {
+    id: 24,
+    assignment_scope: 'group',
+    group_id: 5,
+    config: {
+      features: { consent_mode_enabled: true },
+      google_ads: {
+        enabled: true,
+        events: {
+          qualified_lead: {
+            enabled: true,
+            customer_id: '5992356722',
+            conversion_action_id: '123456789',
+            value: 10,
+            currency: 'EUR',
+          },
+          schedule: {
+            enabled: true,
+            customer_id: '5992356722',
+            conversion_action_id: '987654321',
+            value: 40,
+            currency: 'EUR',
+          },
+        },
+      },
+    },
+  };
+  const dependencies = {
+    IntakeConfig: { findOne: async () => configRecord },
+    maybeUploadGoogleConversion: (input) => maybeUploadGoogleConversion({
+      ...input,
+      dependencies: {
+        auditModel,
+        resolveRuntime: async () => ({
+          accessToken: 'scoped-token',
+          loginCustomerId: '2863224233',
+          connection: { id: 23 },
+          assignment: { id: 4 },
+          connectionSource: 'scope_assignment_group',
+        }),
+        uploadConversion: async (payload) => {
+          uploaded.push(payload);
+          return { requestId: `request-${uploaded.length}` };
+        },
+      },
+    }),
+  };
+
+  await maybeUploadLeadLifecycleConversion({
+    lead: leadFixture(),
+    eventName: 'qualified_lead',
+    eventId: 'lead-42-qualified',
+    dependencies,
+  });
+  await maybeUploadLeadLifecycleConversion({
+    lead: leadFixture(),
+    eventName: 'schedule',
+    eventId: 'appointment-99',
+    dependencies,
+  });
+
+  assert.deepEqual(uploaded.map(({ eventName, value, currency }) => ({ eventName, value, currency })), [
+    { eventName: 'qualified_lead', value: 10, currency: 'EUR' },
+    { eventName: 'schedule', value: 40, currency: 'EUR' },
+  ]);
 }
 
 async function testDeniedMarketingFailsClosed() {
@@ -174,7 +294,9 @@ async function testLifecycleConsentPurposeAndModeGuards() {
 
 async function run() {
   testPayloadKeepsRichAttribution();
+  testPayloadOmitsMissingValueAndPreservesRealPurchaseValue();
   await testScheduleUsesGroupConfigAndConsent();
+  await testConfiguredLifecycleWeightsReachUploader();
   await testDeniedMarketingFailsClosed();
   await testLifecycleConsentPurposeAndModeGuards();
   console.log('google_lead_lifecycle_conversion.test.js OK');

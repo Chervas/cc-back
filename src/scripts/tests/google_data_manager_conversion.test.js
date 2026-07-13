@@ -24,6 +24,9 @@ const {
 } = require('../../services/googleDataManagerDiagnostics.service');
 const { missingGoogleScopes } = require('../../services/googleAdsScopedRuntime.service');
 const {
+  normalizeExplicitAdPersonalizationConsent
+} = require('../../services/googleAdsConversionUpload.service');
+const {
   __test: campaignOnboardingTest
 } = require('../../controllers/campaignOnboarding.controller');
 
@@ -44,7 +47,7 @@ function documentedAuthorization(overrides = {}) {
     customerMatchEnabled: false,
     conversionBasedCustomerListsEnabled: false,
     remarketingEnabled: false,
-    adPersonalizationStatus: 'DENIED',
+    adPersonalizationSource: 'visitor_consent',
     ...overrides
   };
 }
@@ -119,7 +122,7 @@ function testAuthorizedEnhancedConversionPayload() {
     externalId: 'lead-enhanced-42',
     eventName: 'lead',
     consentStatus: 'GRANTED',
-    adPersonalizationStatus: 'DENIED',
+    adPersonalizationStatus: 'GRANTED',
     email: ' Patient.Name+campaign@gmail.com ',
     phone: '600 000 000',
     defaultPhoneCountryCode: '34',
@@ -137,7 +140,7 @@ function testAuthorizedEnhancedConversionPayload() {
   assert.equal(payload.encoding, 'HEX');
   assert.deepEqual(payload.events[0].consent, {
     adUserData: 'CONSENT_GRANTED',
-    adPersonalization: 'CONSENT_DENIED'
+    adPersonalization: 'CONSENT_GRANTED'
   });
   assert.deepEqual(payload.events[0].userData, {
     userIdentifiers: [
@@ -181,6 +184,23 @@ function testAuthorizedEnhancedConversionPayload() {
   });
   assert.equal(userDataOnly.events[0].adIdentifiers, undefined);
   assert.equal(userDataOnly.events[0].userData.userIdentifiers.length, 2);
+
+  const deniedPersonalization = buildDataManagerEventRequest({
+    customerId: '5992356722',
+    conversionAction: '7540337982',
+    gclid: 'opaque-click-id-denied-personalization',
+    conversionDateTime: '2026-07-12T08:30:00.000Z',
+    externalId: 'lead-enhanced-denied-personalization',
+    eventName: 'lead',
+    consentStatus: 'GRANTED',
+    adPersonalizationStatus: 'DENIED',
+    email: 'patient@example.com',
+    enhancedConversionAuthorization: authorization
+  });
+  assert.equal(
+    deniedPersonalization.events[0].consent.adPersonalization,
+    'CONSENT_DENIED'
+  );
 }
 
 function testEnhancedConversionAuthorizationGuards() {
@@ -210,11 +230,16 @@ function testEnhancedConversionAuthorizationGuards() {
   assert.throws(
     () => buildDataManagerEventRequest({
       ...common,
-      adPersonalizationStatus: 'GRANTED',
+      adPersonalizationStatus: null,
       enhancedConversionAuthorization: documentedAuthorization()
     }),
-    (error) => error.code === 'ENHANCED_CONVERSION_AD_PERSONALIZATION_MUST_BE_DENIED'
+    (error) => error.code === 'ENHANCED_CONVERSION_AD_PERSONALIZATION_CONSENT_REQUIRED'
   );
+  assert.doesNotThrow(() => buildDataManagerEventRequest({
+    ...common,
+    adPersonalizationStatus: 'GRANTED',
+    enhancedConversionAuthorization: documentedAuthorization()
+  }));
   assert.throws(
     () => buildDataManagerEventRequest({
       ...common,
@@ -273,6 +298,18 @@ function testEnhancedConversionAuthorizationGuards() {
     adPersonalizationStatus: 'DENIED',
     now: new Date('2026-07-12T00:00:00.000Z')
   }).reason, 'authorization_expired');
+}
+
+function testVisitorAdPersonalizationNormalization() {
+  assert.equal(normalizeExplicitAdPersonalizationConsent({ ad_personalization: true }), 'GRANTED');
+  assert.equal(normalizeExplicitAdPersonalizationConsent({ adPersonalization: 'denied' }), 'DENIED');
+  assert.equal(normalizeExplicitAdPersonalizationConsent({ marketing: true }), 'GRANTED');
+  assert.equal(normalizeExplicitAdPersonalizationConsent({ marketing: false }), 'DENIED');
+  assert.equal(normalizeExplicitAdPersonalizationConsent(
+    { marketing: true },
+    { ad_personalization: false }
+  ), 'DENIED', 'an explicit denial must win over any grant');
+  assert.equal(normalizeExplicitAdPersonalizationConsent({ analytics: true }), null);
 }
 
 function testAlternativeClickIdsAndGuards() {
@@ -530,6 +567,7 @@ async function run() {
   testPayloadMappingAndHealthcarePolicy();
   testAuthorizedEnhancedConversionPayload();
   testEnhancedConversionAuthorizationGuards();
+  testVisitorAdPersonalizationNormalization();
   testAlternativeClickIdsAndGuards();
   await testTransportContract();
   testDiagnosticsClassification();

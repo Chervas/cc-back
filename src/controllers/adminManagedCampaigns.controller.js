@@ -29,6 +29,14 @@ const {
   updateManagedCampaignCoordination,
 } = require('../services/managedCampaignCoordination.service');
 const {
+  acquireManagedCampaignOptimizationLease,
+  activateManagedCampaignOptimizationPolicy,
+  executeManagedCampaignGoalPolicy,
+  provisionManagedCampaignOptimization,
+  previewManagedCampaignGoalPolicy,
+  releaseManagedCampaignOptimizationLease,
+} = require('../services/managedCampaignOptimizationPolicy.service');
+const {
   AUDIT_EVENT_TYPES,
   appendAssignmentAudit,
   assignmentAuditDto,
@@ -1226,23 +1234,303 @@ exports.transitionCampaign = asyncHandler(async (req, res) => {
         }
       : currentReview;
   const clearsAdminApproval = ['draft', 'pending_client_review', 'pending_admin_review', 'changes_requested', 'blocked'].includes(nextStatus);
-  const [updated] = await ManagedCampaign.update({
-    status: nextStatus,
-    review_config: reviewPatch,
-    approved_by_user_id: nextStatus === 'approved_to_launch' ? userId : (clearsAdminApproval ? null : row.approved_by_user_id),
-    approved_at: nextStatus === 'approved_to_launch' ? new Date() : (clearsAdminApproval ? null : row.approved_at),
-    updated_by_user_id: userId,
-    version: Number(row.version || 1) + 1,
-  }, {
-    where: { id: row.id, status: row.status, version: row.version },
-  });
-  if (!updated) {
-    return res.status(409).json({ success: false, error: 'transition_conflict', message: 'El estado cambió mientras se procesaba la transición.' });
+  let optimization = null;
+  let optimizationLeaseToken = null;
+  try {
+    let stagedCampaign = null;
+    let provisioning = null;
+    if (row.provider === 'google_ads' && ['launching', 'active'].includes(nextStatus)) {
+      // Transacción corta: deja policy/config local durable antes de cualquier
+      // llamada externa. Un fallo de Google no avanza el status y un retry
+      // conserva el ownership de cualquier custom goal ya creado.
+      provisioning = await db.sequelize.transaction(async (transaction) => {
+        const locked = await ManagedCampaign.findByPk(row.id, {
+          transaction,
+          lock: transaction.LOCK.UPDATE,
+        });
+        if (!locked || locked.status !== row.status || Number(locked.version) !== Number(row.version)) {
+          const error = new Error('El estado cambió mientras se procesaba la transición.');
+          error.code = 'transition_conflict';
+          error.httpStatus = 409;
+          throw error;
+        }
+        stagedCampaign = { ...locked.get({ plain: true }), status: nextStatus };
+        const prepared = await provisionManagedCampaignOptimization({
+          campaign: stagedCampaign,
+          targetStatus: nextStatus,
+          transaction,
+        });
+        if (!prepared.skipped) {
+          const acquired = await acquireManagedCampaignOptimizationLease({
+            managedCampaignId: locked.id,
+            actorUserId: userId,
+            purpose: `transition:${row.status}->${nextStatus}`,
+            transaction,
+          });
+          optimizationLeaseToken = acquired.token;
+        }
+        return prepared;
+      });
+      if (!provisioning.skipped) {
+        const currentBeforeExecution = await ManagedCampaign.findByPk(row.id, {
+          attributes: ['id', 'status', 'version'],
+          raw: true,
+        });
+        if (!currentBeforeExecution
+          || currentBeforeExecution.status !== row.status
+          || Number(currentBeforeExecution.version) !== Number(row.version)) {
+          const error = new Error('La campaña cambió antes de ejecutar la policy de Google.');
+          error.code = 'transition_conflict';
+          error.httpStatus = 409;
+          throw error;
+        }
+        const execution = await executeManagedCampaignGoalPolicy({
+          campaign: stagedCampaign,
+          provisioning,
+          targetStatus: nextStatus,
+          actorUserId: userId,
+        });
+        optimization = {
+          policy_id: Number(provisioning.policy?.id) || null,
+          policy_created: provisioning.created === true,
+          stage: provisioning.plan.stage,
+          customer_id: provisioning.plan.customer_id,
+          campaign_ids: provisioning.plan.campaign_ids,
+          preview_digest: execution.digest,
+          outcome: execution.result.outcome,
+          verification_healthy: execution.result.verification?.healthy === true,
+        };
+      } else {
+        optimization = {
+          skipped: true,
+          reason: provisioning.plan.reason,
+          external_mutation_count: 0,
+        };
+      }
+    }
+
+    // Segunda transacción corta: el status solo avanza después de un readback
+    // healthy (o del skip explícito de connect_only/observe-only).
+    await db.sequelize.transaction(async (transaction) => {
+      const locked = await ManagedCampaign.findByPk(row.id, {
+        transaction,
+        lock: transaction.LOCK.UPDATE,
+      });
+      if (!locked || locked.status !== row.status || Number(locked.version) !== Number(row.version)) {
+        const error = new Error('El estado cambió mientras se procesaba la transición.');
+        error.code = 'transition_conflict';
+        error.httpStatus = 409;
+        throw error;
+      }
+      if (provisioning && !provisioning.skipped) {
+        await activateManagedCampaignOptimizationPolicy({
+          managedCampaignId: locked.id,
+          leaseToken: optimizationLeaseToken,
+          transaction,
+        });
+      }
+      const [updated] = await ManagedCampaign.update({
+        status: nextStatus,
+        review_config: reviewPatch,
+        approved_by_user_id: nextStatus === 'approved_to_launch' ? userId : (clearsAdminApproval ? null : locked.approved_by_user_id),
+        approved_at: nextStatus === 'approved_to_launch' ? new Date() : (clearsAdminApproval ? null : locked.approved_at),
+        updated_by_user_id: userId,
+        version: Number(locked.version || 1) + 1,
+      }, {
+        where: { id: locked.id, status: locked.status, version: locked.version },
+        transaction,
+      });
+      if (!updated) {
+        const error = new Error('El estado cambió mientras se procesaba la transición.');
+        error.code = 'transition_conflict';
+        error.httpStatus = 409;
+        throw error;
+      }
+    });
+    optimizationLeaseToken = null;
+  } catch (error) {
+    if (optimizationLeaseToken) {
+      try {
+        await releaseManagedCampaignOptimizationLease({
+          managedCampaignId: row.id,
+          leaseToken: optimizationLeaseToken,
+        });
+      } catch (releaseError) {
+        console.error('[managed-goal-policy] No se pudo liberar el lease tras un fallo', {
+          campaign_id: row.id,
+          code: releaseError.code || null,
+          message: releaseError.message,
+        });
+      }
+      optimizationLeaseToken = null;
+    }
+    if (error.httpStatus || error.blockers) {
+      return res.status(error.httpStatus || 409).json({
+        success: false,
+        error: error.code || 'managed_goal_policy_failed',
+        message: error.message,
+        blockers: error.blockers || [],
+      });
+    }
+    throw error;
   }
   // strategy_campaign_id/campaign_request_id identify the immutable Connect-only
   // benchmark. ManagedCampaign is the lifecycle source of truth: changing a
   // pilot must never pause, complete or rewrite the strategy it was compared to.
-  return res.json({ success: true, campaign: campaignAdminDto((await listCampaignRows({ id: row.id }))[0]) });
+  return res.json({
+    success: true,
+    campaign: campaignAdminDto((await listCampaignRows({ id: row.id }))[0]),
+    ...(optimization ? { optimization } : {}),
+  });
+});
+
+async function prepareManagedGoalPolicyContext(row, { targetStatus, transaction }) {
+  return provisionManagedCampaignOptimization({
+    campaign: row,
+    targetStatus,
+    transaction,
+  });
+}
+
+exports.previewGoalPolicy = asyncHandler(async (req, res) => {
+  const userId = assertOperator(req, res);
+  if (!userId) return;
+  const row = await ManagedCampaign.findByPk(req.params.id);
+  if (!row) return res.status(404).json({ success: false, error: 'not_found' });
+  const targetStatus = row.status === 'approved_to_launch' ? 'launching' : row.status;
+  try {
+    const provisioning = await db.sequelize.transaction((transaction) => (
+      prepareManagedGoalPolicyContext(row, { targetStatus, transaction })
+    ));
+    if (provisioning.skipped) {
+      return res.status(409).json({
+        success: false,
+        error: 'goal_policy_observe_only',
+        reason: provisioning.plan.reason,
+      });
+    }
+    const preview = await previewManagedCampaignGoalPolicy({
+      campaign: row,
+      provisioning,
+      targetStatus,
+      dependencies: { actorUserId: userId },
+    });
+    return res.json({
+      success: true,
+      policy_id: Number(provisioning.policy?.id) || null,
+      stage: provisioning.plan.stage,
+      preview,
+    });
+  } catch (error) {
+    if (error.httpStatus || error.blockers) {
+      return res.status(error.httpStatus || 409).json({
+        success: false,
+        error: error.code || 'managed_goal_policy_failed',
+        message: error.message,
+        blockers: error.blockers || [],
+      });
+    }
+    throw error;
+  }
+});
+
+exports.applyGoalPolicy = asyncHandler(async (req, res) => {
+  const userId = assertOperator(req, res);
+  if (!userId) return;
+  const expectedDigest = cleanString(req.body?.expected_digest, 64);
+  if (!expectedDigest || !/^[a-f0-9]{64}$/.test(expectedDigest)) {
+    return res.status(400).json({ success: false, error: 'goal_policy_expected_digest_required' });
+  }
+  const row = await ManagedCampaign.findByPk(req.params.id);
+  if (!row) return res.status(404).json({ success: false, error: 'not_found' });
+  const targetStatus = row.status === 'approved_to_launch' ? 'launching' : row.status;
+  let executionLeaseToken = null;
+  try {
+    const provisioning = await db.sequelize.transaction(async (transaction) => {
+      const locked = await ManagedCampaign.findByPk(row.id, {
+        transaction,
+        lock: transaction.LOCK.UPDATE,
+      });
+      if (!locked || Number(locked.version) !== Number(row.version) || locked.status !== row.status) {
+        const error = new Error('La campaña cambió desde el preview.');
+        error.code = 'goal_policy_campaign_changed';
+        error.httpStatus = 409;
+        throw error;
+      }
+      const prepared = await prepareManagedGoalPolicyContext(locked, { targetStatus, transaction });
+      if (prepared.skipped) {
+        const error = new Error('Esta campaña es de observación y no admite mutaciones de puja.');
+        error.code = 'goal_policy_observe_only';
+        error.httpStatus = 409;
+        throw error;
+      }
+      const acquired = await acquireManagedCampaignOptimizationLease({
+        managedCampaignId: locked.id,
+        actorUserId: userId,
+        purpose: 'manual_goal_policy_apply',
+        transaction,
+      });
+      executionLeaseToken = acquired.token;
+      return prepared;
+    });
+    const current = await ManagedCampaign.findByPk(row.id);
+    if (!current || Number(current.version) !== Number(row.version) || current.status !== row.status) {
+      const error = new Error('La campaña cambió desde el preview.');
+      error.code = 'goal_policy_campaign_changed';
+      error.httpStatus = 409;
+      throw error;
+    }
+    const applied = await executeManagedCampaignGoalPolicy({
+      campaign: current,
+      provisioning,
+      targetStatus,
+      expectedDigest,
+      actorUserId: userId,
+    });
+    const released = await releaseManagedCampaignOptimizationLease({
+      managedCampaignId: row.id,
+      leaseToken: executionLeaseToken,
+    });
+    if (!released.released) {
+      const error = new Error('La reserva de ejecución cambió antes de cerrar la aplicación.');
+      error.code = 'GOAL_POLICY_EXECUTION_LEASE_MISMATCH';
+      error.httpStatus = 409;
+      throw error;
+    }
+    executionLeaseToken = null;
+    return res.json({
+      success: true,
+      policy_id: Number(provisioning.policy?.id) || null,
+      stage: provisioning.plan.stage,
+      digest: applied.digest,
+      result: applied.result,
+    });
+  } catch (error) {
+    if (executionLeaseToken) {
+      try {
+        await releaseManagedCampaignOptimizationLease({
+          managedCampaignId: row.id,
+          leaseToken: executionLeaseToken,
+        });
+      } catch (releaseError) {
+        console.error('[managed-goal-policy] No se pudo liberar el lease del apply', {
+          campaign_id: row.id,
+          code: releaseError.code || null,
+          message: releaseError.message,
+        });
+      }
+      executionLeaseToken = null;
+    }
+    if (error.httpStatus || error.blockers) {
+      return res.status(error.httpStatus || 409).json({
+        success: false,
+        error: error.code || 'managed_goal_policy_failed',
+        message: error.message,
+        blockers: error.blockers || [],
+      });
+    }
+    throw error;
+  }
 });
 
 exports.activateManagement = asyncHandler(async (req, res) => {

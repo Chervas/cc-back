@@ -15,6 +15,7 @@ const {
   getGoogleAdsEventConfigs,
   hasRequestedActionOverride,
   maybeUploadGoogleConversion,
+  normalizeExplicitAdPersonalizationConsent,
   normalizeExplicitAdUserDataConsent,
   normalizeGoogleConsent,
   prepareAuditRow,
@@ -112,7 +113,7 @@ function withDocumentedEnhancedConversionAuthorization(base = scopedConfig, over
     customer_match_enabled: false,
     conversion_based_customer_lists_enabled: false,
     remarketing_enabled: false,
-    ad_personalization: 'DENIED',
+    ad_personalization_source: 'visitor_consent',
     ...(overrides.authorization || {})
   };
   const allowlistEntry = {
@@ -434,7 +435,7 @@ async function testDocumentedEnhancedConversionAuthorizationIsScopedAndAudited()
         userId: 'patient-42',
         userProperties: { treatment: 'implantes' }
       },
-      consent: { ad_user_data: 'granted', ad_personalization: 'denied' },
+      consent: { ad_user_data: 'granted', marketing: true },
       eventId: 'lead-enhanced-authorized-42'
     }),
     dependencies: {
@@ -457,7 +458,7 @@ async function testDocumentedEnhancedConversionAuthorizationIsScopedAndAudited()
   assert.equal(result.sent, true);
   assert.equal(uploadPayload.email, ' Patient.Name+campaign@gmail.com ');
   assert.equal(uploadPayload.phone, '+34 600 000 000');
-  assert.equal(uploadPayload.adPersonalizationStatus, 'DENIED');
+  assert.equal(uploadPayload.adPersonalizationStatus, 'GRANTED');
   assert.equal(uploadPayload.consentStatus, 'GRANTED');
   assert.equal(uploadPayload.enhancedConversionAuthorization.customerId, '5992356722');
   assert.equal(uploadPayload.enhancedConversionAuthorization.eventName, 'lead');
@@ -494,7 +495,8 @@ async function testDocumentedEnhancedConversionAuthorizationIsScopedAndAudited()
   );
   assert.equal(row.requestMetadata.enhanced_conversion_policy_ambiguity_acknowledged, true);
   assert.equal(row.requestMetadata.enhanced_conversion_formal_policy_exception_claimed, false);
-  assert.equal(row.requestMetadata.enhanced_conversion_ad_personalization, 'DENIED');
+  assert.equal(row.requestMetadata.enhanced_conversion_ad_personalization_source, 'visitor_consent');
+  assert.equal(row.requestMetadata.visitor_ad_personalization_consent_status, 'GRANTED');
   assert.equal(row.requestMetadata.enhanced_conversion_page_url_sent, false);
   assert.equal(row.requestMetadata.enhanced_conversion_treatment_sent, false);
   assert.equal(row.requestMetadata.enhanced_conversion_remarketing_enabled, false);
@@ -536,6 +538,7 @@ async function testAuthorizedUserDataCanBeTheOnlyIdentifier() {
   assert.equal(uploadPayload.gbraid, undefined);
   assert.equal(uploadPayload.wbraid, undefined);
   assert.equal(uploadPayload.email, 'patient@example.com');
+  assert.equal(uploadPayload.adPersonalizationStatus, 'DENIED');
   const row = Array.from(auditModel.rows.values())[0];
   assert.equal(row.clickIdType, null);
   assert.equal(row.requestMetadata.user_identifier_count, 2);
@@ -695,9 +698,9 @@ function testEnhancedConversionAuthorizationMatrixAndEvidenceGuards() {
       reason: 'authorization_metadata_invalid'
     },
     {
-      label: 'ad personalization must be denied',
+      label: 'ad personalization must come from visitor consent',
       config: withDocumentedEnhancedConversionAuthorization(scopedConfig, {
-        authorization: { ad_personalization: 'GRANTED' }
+        authorization: { ad_personalization_source: 'static_account_value' }
       }),
       eventConfig: { customer_id: '5992356722', event_name: 'lead' },
       reason: 'authorization_metadata_invalid'
@@ -739,11 +742,15 @@ async function testAdUserDataConsentIsMandatoryForEnhancedSignals() {
     ad_user_data: 'granted',
     adUserData: 'denied'
   }), 'DENIED');
+  assert.equal(normalizeExplicitAdPersonalizationConsent({ marketing: true }), 'GRANTED');
+  assert.equal(normalizeExplicitAdPersonalizationConsent({ marketing: false }), 'DENIED');
+  assert.equal(normalizeExplicitAdPersonalizationConsent({ ad_personalization: 'granted' }), 'GRANTED');
 
   const config = withDocumentedEnhancedConversionAuthorization();
   const eventConfig = getGoogleAdsEventConfigs(config, 'lead')[0];
   assert.equal(resolveUserDataPolicy(config, eventConfig, {
     adUserDataConsentStatus: null,
+    adPersonalizationConsentStatus: 'GRANTED',
     now: new Date('2026-07-12T12:00:00.000Z')
   }).reason, 'blocked_ad_user_data_consent_missing');
 

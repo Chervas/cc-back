@@ -2294,7 +2294,14 @@ const defaultConfigPayload = (clinicId, groupId) => ({
     webevents_enabled: true,
     consent_mode_enabled: false,
     consent_provider: 'clinicaclick',
-    external_cmp_provider: 'complianz'
+    external_cmp_provider: 'complianz',
+    // Capability flag only: the emitted value is always the visitor's choice.
+    // Defaults never imply GRANTED consent.
+    ad_personalization_enabled: true,
+    ad_personalization_consent_source: 'visitor_choice',
+    google_ads_user_data_enabled: false,
+    google_ads_user_data_disclosure_confirmed: false,
+    google_ads_user_data_runtime_enabled: false
   },
   flow: DEFAULT_CHAT_FLOW,
   flows: null,

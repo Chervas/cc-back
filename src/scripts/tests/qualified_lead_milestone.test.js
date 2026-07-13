@@ -56,14 +56,14 @@ async function testExplicitQualifiedTransitionIsIdempotentAndMinimal() {
   assert.equal(uploads.length, 1);
   assert.equal(uploads[0].eventName, 'qualified_lead');
   assert.equal(uploads[0].eventId, 'lead-7180-qualified');
-  assert.equal(uploads[0].value, 0);
+  assert.equal(Object.hasOwn(uploads[0], 'value'), false);
   assert.equal(Object.hasOwn(uploads[0], 'customData'), false);
   const externalPayload = buildLifecycleConversionPayload({
     lead,
     eventName: uploads[0].eventName,
     eventId: uploads[0].eventId,
-    value: uploads[0].value,
   });
+  assert.equal(Object.hasOwn(externalPayload.customData, 'value'), false);
   assert.equal(JSON.stringify(externalPayload).includes('dato clínico'), false);
   assert.equal(Object.hasOwn(externalPayload.userData, 'notes'), false);
 
@@ -109,6 +109,8 @@ async function testDirectAppointmentUsesSameQualifiedIdBeforeSchedule() {
     'appointment-321',
   ]);
   assert.deepEqual(uploads.map((item) => item.eventName), ['qualified_lead', 'schedule']);
+  assert.equal(Object.hasOwn(uploads[0], 'value'), false);
+  assert.equal(Object.hasOwn(uploads[1], 'value'), false);
 
   const wrongLink = await uploadScheduleForLinkedAppointment({
     lead,

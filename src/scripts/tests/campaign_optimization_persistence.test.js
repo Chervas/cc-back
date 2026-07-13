@@ -162,6 +162,52 @@ async function testCasConflictIsExplicit() {
   );
 }
 
+async function testActiveGoalPolicyLeaseSkipsEvaluationWithoutWriting() {
+  let attemptReads = 0;
+  let evaluationWrites = 0;
+  let policyWrites = 0;
+  const service = createCampaignOptimizationEvaluationService({
+    Policy: {
+      async update() {
+        policyWrites += 1;
+        return [1];
+      },
+    },
+    Evaluation: {
+      async findOne() { return null; },
+      async create() {
+        evaluationWrites += 1;
+        return {};
+      },
+    },
+    Attempt: {
+      async findAll() {
+        attemptReads += 1;
+        return [];
+      },
+    },
+    sequelize: null,
+  });
+  const leased = policy({
+    lifecycleState: {
+      ...policy().lifecycleState,
+      execution_lease: {
+        token: 'lease-token',
+        purpose: 'transition:approved_to_launch->launching',
+        acquired_at: '2026-07-12T11:55:00.000Z',
+        expires_at: '2026-07-12T12:30:00.000Z',
+      },
+    },
+  });
+  const result = await service.evaluatePolicy(leased, { now: NOW });
+  assert.equal(result.skipped, true);
+  assert.equal(result.reason, 'goal_policy_execution_in_progress');
+  assert.equal(result.lease.expires_at, '2026-07-12T12:30:00.000Z');
+  assert.equal(attemptReads, 0);
+  assert.equal(evaluationWrites, 0);
+  assert.equal(policyWrites, 0);
+}
+
 function testSourceContractsAreReadOnlyAndMonitored() {
   const root = path.resolve(__dirname, '../../..');
   const migration = fs.readFileSync(path.join(root, 'migrations/20260712110000-create-campaign-optimization-lifecycle.js'), 'utf8');
@@ -186,6 +232,7 @@ async function run() {
   testScheduleAndPurchaseDoNotInventEvidence();
   await testDailyEvaluationPersistsWithCasAndIsIdempotent();
   await testCasConflictIsExplicit();
+  await testActiveGoalPolicyLeaseSkipsEvaluationWithoutWriting();
   testSourceContractsAreReadOnlyAndMonitored();
   console.log('campaign_optimization_persistence.test.js: ok');
 }
