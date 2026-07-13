@@ -7,29 +7,35 @@ Runbooks operativos backend: `back-dev/docs/README.md`, con acceso directo a Dat
 
 ---
 
-## 2026-07-13 - Corte dev: 30 jobs, Consent v5, leads y `team.view`
+## 2026-07-13 - Corte desplegado: jobs unificados, Consent v5 y `Conecta y mejora`
 
-Este bloque documenta cambios presentes en `back-dev`/`front-dev` pero todavía pendientes de promoción. No sustituye la evidencia de staging indicada en los runbooks.
+Release staging: backend `9643fb8`, promovido desde dev `88d0f71`/`f84bc14`; frontend `b796439c`, promovido desde dev `bd076ed4`/`81efd03f`, build `60e0edc03c6c9306`. Propdental continúa en `connect_only`; Piloto automático no está activo.
 
 ### Orquestación periódica única
 
-`SCHEDULED_JOB_DEFINITIONS` contiene 30 tareas periódicas. Las seis nuevas son `system_pm2_log_retention` y cinco bridges OPS (`ops_global_discovery`, `ops_summary`, `ops_google_business_profile_daily`, `ops_search_console_daily`, `ops_google_business_profile_requested`). `node-cron` solo crea `JobRequest`; el worker durable ejecuta, reintenta, recupera y audita. Los cinco bridges conservan zona `UTC` y los mismos horarios/variables del crontab previo. `OPS_INTERNAL_API_TOKEN` es obligatorio; no se registra ni se incluye en documentación.
+`SCHEDULED_JOB_DEFINITIONS` contiene 30 tareas periódicas. Las seis nuevas son `system_pm2_log_retention` y cinco bridges OPS (`ops_global_discovery`, `ops_summary`, `ops_google_business_profile_daily`, `ops_search_console_daily`, `ops_google_business_profile_requested`). `node-cron` solo crea `JobRequest`; el worker durable ejecuta, reintenta, recupera y audita. Los bridges conservan `UTC`. `OPS_INTERNAL_API_TOKEN` es obligatorio y nunca se registra.
 
-El inventario completo del executor contiene 46 handlers. También pasan por `JobRequest` las dos programaciones puntuales que antes dependían de un `delay` de BullMQ: `automation_whatsapp_quiet_send` para mensajes retenidos por horario silencioso y `whatsapp_template_sync_delayed` para la comprobación posterior a crear/propagar una plantilla. Ambas persisten `waiting + next_run_at`, deduplican por mensaje o por ventana/WABA y permiten hasta cinco intentos con el backoff común. El payload durable no contiene teléfono, texto del mensaje ni token: el handler relee el mensaje/asset activo al vencer. BullMQ recibe únicamente el transporte inmediato de WhatsApp una vez reclamado el `JobRequest`.
+El inventario completo contiene 46 handlers. Las 5 integraciones dirigidas/background son `meta_ads_backfill_for_sites`, `web_backfill_for_sites`, `analytics_backfill_properties`, `business_profile_backfill_locations` y `whatsapp_template_sync_delayed`. También `automation_whatsapp_quiet_send` usa `JobRequest`. Las esperas persisten `waiting + next_run_at`, deduplican y releen el activo al vencer sin guardar teléfono, texto ni token. BullMQ recibe únicamente transporte inmediato.
 
-El runner OPS limita scripts mediante allowlist, hereda entorno, conserva una cola de stdout/stderr de 64 KiB, corta a las tres horas y termina hijos en reinicios ordenados. El job PM2 rota rutas activas y ejecuta `pm2 reloadLogs`; elimina solo ficheros inactivos más antiguos que `PM2_LOG_RETENTION_DAYS` (60 por defecto). Esto no toca `SyncLogs`: esos son registros funcionales en BD y conservan su retención independiente (90 días por defecto).
+El runner OPS usa allowlist, cola de salida de 64 KiB, timeout de tres horas y terminación ordenada. El alta programada y la manual fusionan `definition.payloadDefaults` antes del payload explícito. `#23670`, invocado sin payload, persistió `onlyRequested=true`, namespace `staging` y terminó al primer intento: prueba que el default de seguridad no depende del caller.
 
-**Cutover pendiente:** el crontab de `ubuntu` aún contiene las cinco líneas OPS. Antes de activar el catálogo en staging hay que configurar variables, desplegar, validar los `JobRequest` y retirar las cinco líneas en la misma ventana antes del siguiente tick. Crontab y catálogo no pueden quedar activos a la vez.
+**Cutover cerrado:** `pm2-back-staging` tiene `JOBS_CRON_LEADER=true` y `JOBS_WORKER_ENABLED=true` y registró las 30 tareas. Las cinco líneas OPS se retiraron del crontab de `ubuntu`; root tampoco contiene tareas de aplicación. Evidencia: `#23664` discovery completó; `#23665` summary falló y detectó la colisión; `#23666` GBP diario y `#23667` Search Console completaron; `#23668` requested completó; `#23669` summary completó tras el fix de identidad; `#23670` requested sin payload completó.
+
+La auditoría del host no encontró timers systemd de ClinicaClick/OPS, jobs `at` ni `cron_restart` PM2. La programación de negocio queda en `JobRequest`; BullMQ se limita a transportes inmediatos.
+
+La identidad OPS resuelve primero `source_platform + external_id` y tolera diferencias de nombre/mayúsculas/acentos. El interno `448`/externo `55`, sin activos locales, quedó archivado como `Propdental Sant Martí (histórica 55)`; el `449`/`56` permanece activo/canónico con su ubicación. No se borró histórico ni se tocaron leads o reseñas CRM.
+
+Retención PM2: `#23671` dry-run estimó 22 ficheros/35.049.980.564 bytes a eliminar y 8/20.773.812.184 a rotar, sin escribir. `#23672` real completó al primer intento en 271 s: rotó 8 activos de 20.773.830.159 a 1.395.219.608 bytes, eliminó los 22 caducados y dejó 8 logs activos, 8 `.gz`, cero raw/tmp/>60d, directorio ~1,3 GiB, 224 GiB libres y 4 procesos online. Se retiró `/etc/logrotate.d/clinicaclick-ops-bridges`. `SyncLogs` conserva su retención funcional separada.
 
 ### Consent v5 y conversión
 
-La UI/runtime dev usa `google_ads_user_data_marketing_v5`, hash `f3f260f0508bb2dd842e4b7616b45333048ba7b64b831245714ac53a161a8b4a` y el texto DPO exacto definido en `20.4`. Marketing sigue siendo la elección publicitaria visible; el backend conserva señales separadas y solo transporta identificadores normalizados/hasheados cuando existe consentimiento y readiness. No transporta texto libre, tratamientos, motivos periciales/legales, diagnósticos ni notas clínicas.
+La UI/runtime desplegada usa `google_ads_user_data_marketing_v5`, hash `f3f260f0508bb2dd842e4b7616b45333048ba7b64b831245714ac53a161a8b4a` y el texto DPO exacto. Marketing es la elección publicitaria visible; antes de decidir las señales están denegadas y `Aceptar todo` concede `ad_user_data` + `ad_personalization`. El backend solo transporta identificadores normalizados/hasheados con consentimiento/readiness. Nunca transporta texto libre, tratamientos, motivos periciales/legales, diagnósticos ni notas clínicas.
 
 Evidencia read-only sin PII: `LeadIntake #7184`, Nou Barris y Google Ads, originó el intento `#7`, `SUCCESS` por GCLID con consentimiento concedido pero `user_identifier_count=0`; fue offline click-only, no Enhanced por identificadores. `#7194` originó el intento `#11`, `skipped` con `consent_not_granted`. Ambos conservan estado CRM `nuevo`; su contenido de consulta solo sirve para triage humano. Un interés estético se valida contra catálogo/capacidad y una solicitud pericial se deriva al equipo correspondiente; `qualified_lead` exige contacto real, respuesta e interés verificado, y `schedule` exige cita vinculada.
 
 Al pasar un lead a `descartado`, `PATCH /api/intake/leads/:id` exige `motivo_descarte`, lo persiste y lo incluye en `LeadAttributionAudit.raw_payload`. El frontend incorpora `tratamiento_no_ofrecido` y `consulta_no_asistencial` como dos opciones de feedback: el primero requiere confirmar que el servicio no se presta ni deriva; el segundo requiere confirmar que no existe circuito asistencial/interno adecuado. No son un enum cerrado del backend: el campo `STRING(512)` admite otros motivos estructurados y notas. Este dato puede alimentar diagnóstico/recomendaciones, pero nunca se transporta a Google/Meta como contenido del paciente.
 
-Hallazgo posterior crítico, corregido solo en `back-dev`: `effectiveMarketingAssets.normalizeGoogleAdsConfig` y los merges por scope descartaban `user_data_enabled`, `enhanced_conversions`, `phone_country_code`, `value`, `consent` y `user_properties` en niveles top-level, evento o destino. Por eso los leads naturales `#7200`, `#7202` y `#7203`, aun con consentimiento y hashes disponibles, llegaron a Data Manager por GCLID con `user_data_policy=blocked_healthcare` y `user_data_sent=false`. La corrección preserva esas propiedades al normalizar/heredar; el contrato `google_ads_conversion_tracking.test.js` pasa y el readback del config efectivo devuelve `user_data_enabled=true` en ambos destinos. **No afirmar todavía que existe un nuevo envío Enhanced verificado**: falta desplegar y observar el siguiente lead real consentido con `user_identifier_count > 0`/diagnóstico terminal.
+El fix desplegado de `effectiveMarketingAssets` preserva `user_data_enabled`, `enhanced_conversions`, `phone_country_code`, `value`, `consent` y `user_properties` en top-level, evento y destino; el readback devuelve user data activo en ambas cuentas. Los leads `#7200/#7202/#7203` fueron previos al fix y no acreditan identificadores. **Sigue pendiente** un intento consentido posterior con `user_data_requested=true`, `user_data_sent=true`, email/teléfono SHA-256 y resultado terminal aceptado.
 
 ### Capacidad de personal
 
@@ -38,6 +44,8 @@ Hallazgo posterior crítico, corregido solo en `back-dev`: `effectiveMarketingAs
 ### Contrato comercial
 
 `connect_only` se muestra como **Conecta y mejora**: conecta cuentas, importa/unifica leads, atribuye el ciclo, envía conversiones consentidas mejoradas/offline y genera diagnósticos/recomendaciones. No modifica campañas, custom goals, pujas, presupuesto o estados. Piloto automático es una orden `managed_service` separada y aprobada.
+
+Chromium live confirmó Consent v5 móvil, chat esperando seis segundos después del consentimiento, Leads/Campañas/Personal/Agenda y la corrección del `400`: solo se llamó `/api/marketing/bulk-sends/campaigns?scope=group:5&context=mass_sends`, con `200` y sin request sin scope. Meta Francia continúa sin cuenta publicitaria/píxel configurados. `Conseguir más reseñas` está cerrado/listo.
 
 ## 2026-04-12 - Arquitectura operativa dev/staging/gateway
 
