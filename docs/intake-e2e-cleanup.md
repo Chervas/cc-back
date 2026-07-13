@@ -134,3 +134,45 @@ La verificación final debe hacerse tanto con `wp post meta get 77822 _form`
 como en Chromium: el placeholder `Elige una Clínica` no permite enviar, cada una
 de las cinco sedes sí, y una prueba manipulada con `Sin preferencia` debe ser
 rechazada por CF7 sin generar `wpcf7mailsent` ni `LeadIntake`.
+
+## Cierre Propdental del 2026-07-13
+
+El parche se aplicó sobre el CF7 `77822` después de guardar el backup
+`/home/propdentalssh/backups/propdental-cf7-77822-before-20260713-0720.txt`.
+WordPress sirve desde entonces el placeholder más las cinco sedes concretas y
+ya no contiene `Sin preferencia`.
+
+El primer E2E controlado descubrió un fallo real: la etiqueta
+`Propdental Sant Martí` no coincidía con el nombre público configurado y el
+fallback de grupo la enviaba a Sants. Ese lead y sus eventos se eliminaron antes
+de desplegar la corrección. El contrato corregido es:
+
+- `IntakeConfig.config.locations` es la lista autoritativa de IDs admitidos;
+- las etiquetas `label`/`public_label` y el nombre actual de la clínica solo
+  aportan aliases para esos IDs configurados;
+- el sentinel técnico `clinica_id=0` del runtime no se interpreta como nombre y
+  no oculta `form_submission.fields.clinica`;
+- un alias desconocido, ambiguo, inactivo o fuera del grupo responde `422
+  invalid_form_location` antes del fallback, de crear el lead o de emitir
+  eventos;
+- `Propdental Sant Martí` y `Barcelona - Sant Martí` resuelven a la clínica
+  canónica `56`; las otras cuatro sedes resuelven a `19`, `35`, `58` y `59`.
+
+Después del despliegue se ejecutaron tres E2E públicos separados, siempre en una
+sesión nueva, sin `gclid`/`gbraid`/`wbraid` y con Marketing desmarcado:
+
+1. CF7 creó un único lead `web_form` en `clinic_id=56`, con
+   `clinic_match_source=configured_location_label`, un `FormSubmissionEvent` y
+   cero intentos Google.
+2. Chat seleccionó `Barcelona - Sant Martí`, creó un único lead `chatbot` en
+   `56`, deduplicó el segundo POST y materializó una conversación QuickChat con
+   un único `quickchat_summary` oculto al paciente.
+3. El modal del enlace `tel:602480829` creó un único lead `tel_modal` en `56`,
+   guardó consentimiento de contacto sin reactivar Marketing y registró
+   `CallInitiated` enlazado al lead.
+
+Cada ejecución pasó por dry-run, simulación con rollback y aplicación del script
+de limpieza. El postcheck final dejó cero leads, formularios, conversaciones,
+mensajes, eventos web o intentos de conversión sintéticos. El grupo `5` volvió a
+su baseline de cuatro leads reales, con máximo `7186`; los IDs sintéticos
+`7187`-`7190` no conservan filas asociadas.
