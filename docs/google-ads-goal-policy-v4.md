@@ -69,3 +69,58 @@ cambiar su configuración de objetivos.
 El servicio no decide cuándo avanzar de `qualified_lead` a `schedule` o
 `purchase`: recibe la etapa ya aprobada por el ciclo de optimización y limita
 la mutación al goal exclusivo de esa etapa/cohorte.
+
+## Piloto automático: provisioning y ejecución
+
+`managedCampaignOptimizationPolicy.service.js` conecta este contrato con
+`ManagedCampaign` sin ampliar su radio de impacto:
+
+- al entrar una campaña Google Search/PMax gestionada en `launching` o
+  `active`, exige `account_id`, `campaign_ids` y los cinco IDs canónicos
+  resueltos desde el `IntakeConfig` del scope;
+- crea idempotentemente una única `CampaignOptimizationPolicy` por
+  `ManagedCampaign`, comenzando en `qualified_lead`, y persiste la
+  cuenta/cohorte en `google_ads.goal_policy` v4. La policy queda `paused`
+  durante el apply y solo pasa a `active` junto al CAS final de status;
+- una misma cuenta puede tener varias cohortes con `strategy_ref` distinto,
+  pero sus `campaign_ids` deben ser disjuntos. Ownership se identifica por
+  `customer_id + strategy_ref + cohort`;
+- `connect_only`, `operation_mode=observe` y Google Smart nunca llegan al
+  executor ni cambian pujas.
+
+La entrada en `launching` usa tres fases. Primero, una transacción DB corta
+provisiona policy/config, adquiere un lease durable de 30 minutos sobre esa
+`ManagedCampaign` y hace commit. Un segundo POST concurrente queda bloqueado
+antes de llamar a Google. Después, fuera de cualquier transacción DB, el
+executor obtiene un preview y su digest y llama a
+`applyClinicaclickGoalPolicy` para ejecutar, por una sola cuenta/cohorte,
+`validateOnly`, comprobación de drift, apply y readback. Solo con readback
+healthy una segunda transacción corta cambia el status de la campaña. Si
+Google falla, la campaña no entra en `launching`; la policy local y cualquier
+`owned_custom_goal_resource_name` ya creado quedan durables para un retry sin
+duplicar goals. Al crear un custom goal nuevo, su ownership se persiste
+inmediatamente después de obtener y verificar el `resource_name`, antes de
+validar o mutar asociaciones de campañas. El lease se consume en el CAS final
+o se libera al fallar; si el proceso muere, caduca sin autorizar mutaciones por
+sí mismo.
+
+El evaluador diario no reemplaza `lifecycleState` mientras haya un lease
+vigente: registra la policy como omitida y espera al siguiente ciclo. Si una
+evaluación empezó antes de adquirir el lease, el CAS por `version` impide que
+su escritura posterior borre la reserva.
+
+El consentimiento para esta ejecución procede exclusivamente del gate admin
+persistido del Piloto automático (`approved_by_user_id`, `approved_at` y
+`operation_mode=managed`). No existe ruta GET de apply. Los POST operativos
+`/:id/goal-policy/preview` y `/:id/goal-policy/apply` permiten revisar/reintentar;
+el segundo exige el digest obtenido por preview.
+
+La promoción `qualified_lead → schedule` permanece fail-closed. Además del
+contrato existente de dos evaluaciones consecutivas y sus umbrales, el
+executor exige evidencia persistida de ambas evaluaciones y aprobación de
+operador. Hoy el agregador no dispone de la serie semanal por fecha real de
+cita (`SCHEDULE_WEEKLY_HISTORY_UNAVAILABLE`), por lo que no se inventa un
+reparto desde `attempted_at` y Schedule no puede aplicarse automáticamente.
+Cuando exista evidencia válida, la nueva etapa elimina el ownership de QL y
+crea/asigna el goal inmutable específico de Schedule; nunca reescribe el goal
+de QL.

@@ -856,6 +856,7 @@ async function testApplyNewGoalReturnsAndCanPersistOwnership() {
   const digest = await previewDigestFor(state, account);
   const calls = [];
   const persisted = [];
+  const timeline = [];
   const result = await applyClinicaclickGoalPolicy({
     scope: { group_id: 5, assignment_scope: 'group' },
     configuredAccounts: [account],
@@ -865,9 +866,13 @@ async function testApplyNewGoalReturnsAndCanPersistOwnership() {
       now: deterministicClock(),
       resolveRuntime: runtimeResolver(),
       fetchSnapshot: async () => clone(state),
-      persistOwnership: async (payload) => persisted.push(payload),
+      persistOwnership: async (payload) => {
+        persisted.push(payload);
+        timeline.push('ownership:persisted');
+      },
       request: async (_method, requestPath, options) => {
         calls.push({ path: requestPath, data: clone(options.data) });
+        timeline.push(`${requestPath.split('/').pop()}:${options.data.validateOnly}`);
         if (requestPath.endsWith('customConversionGoals:mutate') && options.data.validateOnly === false) {
           state.custom_goals.push(customGoal(NEW_GOAL_RESOURCE));
           return { results: [{ resourceName: NEW_GOAL_RESOURCE }] };
@@ -891,6 +896,11 @@ async function testApplyNewGoalReturnsAndCanPersistOwnership() {
   assert.equal(result.ownership.custom_goal_resource_name, NEW_GOAL_RESOURCE);
   assert.equal(result.ownership.persisted, true);
   assert.equal(persisted.length, 1);
+  assert.ok(
+    timeline.indexOf('ownership:persisted')
+      < timeline.indexOf('conversionGoalCampaignConfigs:mutate:true'),
+    'Ownership must be durable before validating or mutating campaign associations',
+  );
   const configMutates = calls.filter((call) => call.path.endsWith('conversionGoalCampaignConfigs:mutate'));
   assert.deepEqual(configMutates.map((call) => call.data.validateOnly), [true, false]);
   assert.ok(configMutates.every((call) => call.data.operations.every((operation) => (
@@ -901,6 +911,54 @@ async function testApplyNewGoalReturnsAndCanPersistOwnership() {
     [true, false],
   );
   assert.equal(calls.some((call) => call.path.endsWith('conversionActions:mutate')), false);
+}
+
+async function testOwnershipPersistenceFailureStopsBeforeCampaignMutation() {
+  const state = baseSnapshot();
+  const account = configuredAccount();
+  const digest = await previewDigestFor(state, account);
+  const calls = [];
+  await assert.rejects(
+    applyClinicaclickGoalPolicy({
+      scope: { group_id: 5, assignment_scope: 'group' },
+      configuredAccounts: [account],
+      expectedDigest: digest,
+      confirmExternalMutation: true,
+      dependencies: {
+        now: deterministicClock(),
+        resolveRuntime: runtimeResolver(),
+        fetchSnapshot: async () => clone(state),
+        persistOwnership: async () => {
+          const error = new Error('database unavailable');
+          error.code = 'OWNERSHIP_WRITE_FAILED';
+          throw error;
+        },
+        request: async (_method, requestPath, options) => {
+          calls.push({ path: requestPath, data: clone(options.data) });
+          if (requestPath.endsWith('customConversionGoals:mutate') && options.data.validateOnly === false) {
+            state.custom_goals.push(customGoal(NEW_GOAL_RESOURCE));
+            return { results: [{ resourceName: NEW_GOAL_RESOURCE }] };
+          }
+          return {};
+        },
+      },
+    }),
+    (error) => (
+      error.code === 'OWNERSHIP_WRITE_FAILED'
+      && error.createdGoalResourceName === NEW_GOAL_RESOURCE
+      && error.externalMutationCount === 1
+    ),
+  );
+  assert.equal(
+    calls.some((call) => (
+      call.data.validateOnly === false
+      && (
+        call.path.endsWith('conversionGoalCampaignConfigs:mutate')
+        || call.path.endsWith('campaignConversionGoals:mutate')
+      )
+    )),
+    false,
+  );
 }
 
 async function testDriftAfterValidateOnlyStopsBeforeRealMutation() {
@@ -1131,6 +1189,7 @@ async function main() {
   await testApplyExistingGoalValidatesBeforeMutation();
   await testApplyRejectsLegacySupplementalAdCallBeforeMutation();
   await testApplyNewGoalReturnsAndCanPersistOwnership();
+  await testOwnershipPersistenceFailureStopsBeforeCampaignMutation();
   await testDriftAfterValidateOnlyStopsBeforeRealMutation();
   await testAuditIsReadOnlyAndIncludesDiagnosticsFreshness();
   await testAuditIncludesAndAlertsUnsafeSupplementalAction();

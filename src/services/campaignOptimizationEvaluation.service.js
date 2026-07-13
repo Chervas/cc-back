@@ -35,6 +35,15 @@ function utcDate(value) {
   return value.toISOString().slice(0, 10);
 }
 
+function activeExecutionLease(policy, now) {
+  const lease = policy?.lifecycleState?.execution_lease;
+  if (!lease || typeof lease !== 'object' || Array.isArray(lease)) return null;
+  const expiresAt = dateOrNull(lease.expires_at);
+  return String(lease.token || '').trim() && expiresAt && expiresAt.getTime() > now.getTime()
+    ? { expires_at: expiresAt.toISOString(), purpose: String(lease.purpose || '') || null }
+    : null;
+}
+
 function stableValue(value) {
   if (Array.isArray(value)) return value.map(stableValue);
   if (!value || typeof value !== 'object') return value;
@@ -309,6 +318,17 @@ function createCampaignOptimizationEvaluationService(overrides = {}) {
     const policy = plain(policyRow);
     const evaluatedAt = dateOrNull(now);
     if (!evaluatedAt) throw new TypeError('now debe ser una fecha válida');
+    const executionLease = activeExecutionLease(policy, evaluatedAt);
+    if (executionLease) {
+      return {
+        evaluation: null,
+        created: false,
+        idempotent: true,
+        skipped: true,
+        reason: 'goal_policy_execution_in_progress',
+        lease: executionLease,
+      };
+    }
     const evaluationDate = utcDate(evaluatedAt);
     const existing = await findDailyEvaluation(policy.id, evaluationDate, transaction);
     if (existing) return { evaluation: plain(existing), created: false, idempotent: true };
@@ -410,11 +430,12 @@ function createCampaignOptimizationEvaluationService(overrides = {}) {
 
   async function evaluateDuePolicies({ now = new Date() } = {}) {
     const policies = await discoverDuePolicies(now);
-    const report = { discovered: policies.length, evaluated: 0, idempotent: 0, failed: 0, errors: [] };
+    const report = { discovered: policies.length, evaluated: 0, idempotent: 0, skipped: 0, failed: 0, errors: [] };
     for (const policy of policies) {
       try {
         const result = await evaluatePolicyAtomically(policy, { now });
         if (result.created) report.evaluated += 1;
+        else if (result.skipped) report.skipped += 1;
         else report.idempotent += 1;
       } catch (error) {
         report.failed += 1;
@@ -440,6 +461,7 @@ module.exports = {
   DEFAULT_STALE_HOURS,
   DEFAULT_WINDOW_DAYS,
   TRACKED_EVENTS,
+  activeExecutionLease,
   buildAttemptWhere,
   buildLifecycleMetrics,
   createCampaignOptimizationEvaluationService,

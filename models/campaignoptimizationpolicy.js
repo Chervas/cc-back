@@ -30,7 +30,7 @@ module.exports = (sequelize, DataTypes) => {
     indexes: [
       { fields: ['status', 'next_evaluation_at'] },
       { fields: ['scope_type', 'scope_id', 'status'] },
-      { fields: ['managed_campaign_id'] },
+      { fields: ['managed_campaign_id'], unique: true, name: 'uniq_campaign_optimization_policy_managed_campaign' },
       { fields: ['strategy_id'] }
     ],
     validate: {

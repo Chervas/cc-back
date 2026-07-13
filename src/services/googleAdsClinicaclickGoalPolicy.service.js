@@ -283,7 +283,8 @@ function normalizeConfiguredAccounts(configuredAccounts) {
   if (!Array.isArray(configuredAccounts) || configuredAccounts.length === 0) {
     throw runtimeError('GOAL_POLICY_ACCOUNTS_REQUIRED', 'Debe indicarse al menos una cuenta Google Ads', 400);
   }
-  const seen = new Set();
+  const seenCohorts = new Set();
+  const campaignOwnersByCustomer = new Map();
   return configuredAccounts.map((raw, index) => {
     const customerId = cleanCustomerId(raw?.customer_id ?? raw?.customerId);
     if (!customerId) {
@@ -293,10 +294,6 @@ function normalizeConfiguredAccounts(configuredAccounts) {
         400,
       );
     }
-    if (seen.has(customerId)) {
-      throw runtimeError('GOAL_POLICY_CUSTOMER_DUPLICATE', `La cuenta ${customerId} aparece repetida`, 400);
-    }
-    seen.add(customerId);
     const strategyRef = cleanString(raw?.strategy_ref ?? raw?.strategyRef ?? raw?.strategy_id ?? raw?.strategyId);
     if (!strategyRef) {
       throw runtimeError(
@@ -305,6 +302,15 @@ function normalizeConfiguredAccounts(configuredAccounts) {
         400,
       );
     }
+    const cohortIdentity = `${customerId}:${strategyRef}`;
+    if (seenCohorts.has(cohortIdentity)) {
+      throw runtimeError(
+        'GOAL_POLICY_COHORT_DUPLICATE',
+        `La cohorte ${strategyRef} de la cuenta ${customerId} aparece repetida`,
+        400,
+      );
+    }
+    seenCohorts.add(cohortIdentity);
     const campaignIds = sortedUniqueIds(raw?.campaign_ids ?? raw?.campaignIds, {
       label: `Las campañas de ${customerId}`,
       maximum: MAX_CAMPAIGNS_PER_ACCOUNT,
@@ -316,6 +322,17 @@ function normalizeConfiguredAccounts(configuredAccounts) {
         400,
       );
     }
+    const campaignOwners = campaignOwnersByCustomer.get(customerId) || new Map();
+    const overlappingCampaigns = campaignIds.filter((campaignId) => campaignOwners.has(campaignId));
+    if (overlappingCampaigns.length) {
+      throw runtimeError(
+        'GOAL_POLICY_CAMPAIGN_COHORT_OVERLAP',
+        `Las campañas ${overlappingCampaigns.join(', ')} de ${customerId} pertenecen a más de una cohorte`,
+        400,
+      );
+    }
+    campaignIds.forEach((campaignId) => campaignOwners.set(campaignId, strategyRef));
+    campaignOwnersByCustomer.set(customerId, campaignOwners);
     const actionIds = normalizeCanonicalActionIds(
       raw?.canonical_action_ids ?? raw?.canonicalActionIds ?? raw?.canonical_actions,
       customerId,
@@ -1481,10 +1498,18 @@ async function applyClinicaclickGoalPolicy({
 
   const goalOperation = plan.operations.custom_goal;
   const createsGoal = !!goalOperation?.create;
+  if (createsGoal && typeof dependencies.persistOwnership !== 'function') {
+    throw runtimeError(
+      'GOAL_POLICY_OWNERSHIP_PERSISTENCE_REQUIRED',
+      'Crear un custom goal requiere persistencia durable de ownership antes de asociar campañas',
+      409,
+    );
+  }
   let campaignOperations = plan.operations.campaign_goal_configs;
   const campaignConversionGoalOperations = plan.operations.campaign_conversion_goals;
   let goalResource = plan.observed_custom_goal?.resource_name || null;
   let externalMutationCount = 0;
+  let ownershipPersisted = false;
 
   await mutateCustomGoal({ runtime, operation: goalOperation, validateOnly: true, request });
   if (!createsGoal) {
@@ -1544,6 +1569,26 @@ async function applyClinicaclickGoalPolicy({
         error.externalMutationCount = externalMutationCount;
         throw error;
       }
+      if (typeof dependencies.persistOwnership === 'function') {
+        try {
+          await dependencies.persistOwnership({
+            scope,
+            customer_id: account.customer_id,
+            strategy_ref: account.strategy_ref,
+            custom_goal_resource_name: goalResource,
+          });
+          ownershipPersisted = true;
+        } catch (error) {
+          // Google ya creó el recurso. Propagarlo permite que el caller deje
+          // ownership durable antes de cualquier retry y evita goals huérfanos.
+          error.createdGoalResourceName = error.createdGoalResourceName || goalResource;
+          error.externalMutationCount = Math.max(
+            Number(error.externalMutationCount) || 0,
+            externalMutationCount,
+          );
+          throw error;
+        }
+      }
       await mutateCampaignGoalConfigs({ runtime, operations: campaignOperations, validateOnly: true, request });
     }
   }
@@ -1559,17 +1604,6 @@ async function applyClinicaclickGoalPolicy({
     request,
   });
   if (campaignConversionGoalOperations.length) externalMutationCount += 1;
-
-  let ownershipPersisted = false;
-  if (createsGoal && typeof dependencies.persistOwnership === 'function') {
-    await dependencies.persistOwnership({
-      scope,
-      customer_id: account.customer_id,
-      strategy_ref: account.strategy_ref,
-      custom_goal_resource_name: goalResource,
-    });
-    ownershipPersisted = true;
-  }
 
   const verificationAccount = {
     ...account,
@@ -1818,7 +1852,13 @@ async function discoverGoalPolicyAuditTargets({ intakeModel = db.IntakeConfig } 
           ...raw,
           strategy_ref: raw.strategy_ref || policy.strategy_ref,
         }]);
-        const key = `${scope.assignment_scope}:${scope.group_id || scope.clinic_id || 'missing'}:${account.customer_id}`;
+        const key = [
+          scope.assignment_scope,
+          scope.group_id || scope.clinic_id || 'missing',
+          account.customer_id,
+          account.strategy_ref,
+          account.cohort_key,
+        ].join(':');
         if (seen.has(key)) {
           throw runtimeError('GOAL_POLICY_AUDIT_TARGET_DUPLICATE', `El target ${key} aparece repetido`, 400);
         }

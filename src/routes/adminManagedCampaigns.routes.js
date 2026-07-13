@@ -38,6 +38,8 @@ router.get('/:id/coordination-audits', controller.listCoordinationAudits);
 router.get('/:id/publishing-plan', controller.getPublishingPlan);
 router.post('/:id/publishing-dry-run', controller.createPublishingDryRun);
 router.get('/:id/publishing-audits', controller.listPublishingAudits);
+router.post('/:id/goal-policy/preview', controller.previewGoalPolicy);
+router.post('/:id/goal-policy/apply', controller.applyGoalPolicy);
 router.get('/:id', controller.getCampaign);
 router.patch('/:id', controller.updateCampaign);
 router.post('/:id/status', controller.transitionCampaign);
