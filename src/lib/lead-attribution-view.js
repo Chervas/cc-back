@@ -6,6 +6,29 @@ const text = (value) => present(value) ? String(value).trim() : null;
 
 const GOOGLE_UTM_SOURCES = new Set(['google', 'googleads', 'google_ads', 'adwords']);
 const PAID_UTM_MEDIA = new Set(['cpc', 'ppc', 'paid', 'paid_search', 'paidsearch', 'display']);
+const MARKETING_ORIGIN_LABELS = Object.freeze({
+  web: 'Web',
+  google_ads: 'Google Ads',
+  meta_ads: 'Meta Ads',
+  tiktok_ads: 'TikTok Ads',
+  whatsapp: 'WhatsApp',
+  call_click: 'Llamada',
+  seo: 'SEO',
+  direct: 'Directo',
+  social_organic: 'Redes sociales',
+  local_services: 'Local Services',
+  unknown: 'Desconocido',
+});
+const CONTACT_METHOD_LABELS = Object.freeze({
+  web_phone: 'Teléfono de la web',
+  web_chat: 'Chat web',
+  web_form: 'Formulario web',
+  platform_form: 'Formulario del anuncio',
+  whatsapp: 'WhatsApp',
+  phone: 'Teléfono',
+  web: 'Web',
+  unknown: 'Desconocido',
+});
 
 const resolveLeadMarketingOrigin = (lead = {}) => {
   if (
@@ -91,6 +114,24 @@ const buildMarketingOriginWhere = (source, Op) => {
   return { source: normalized };
 };
 
+const buildLeadCreatedDescription = (lead = {}) => {
+  const contactMethod = resolveLeadContactMethod(lead);
+  const marketingOrigin = resolveLeadMarketingOrigin(lead);
+  const contactLabel = CONTACT_METHOD_LABELS[contactMethod] || contactMethod;
+  const originLabel = MARKETING_ORIGIN_LABELS[marketingOrigin] || marketingOrigin;
+  const lines = [];
+  if (contactLabel) lines.push(`Contacto: ${contactLabel}`);
+  if (originLabel) lines.push(`Origen: ${originLabel}`);
+
+  if (contactMethod === 'web_phone') {
+    const clickedPhone = text(lead.telefono);
+    const pageUrl = text(lead.page_url) || text(lead.landing_url);
+    if (clickedPhone) lines.push(`Teléfono pulsado: ${clickedPhone}`);
+    if (pageUrl) lines.push(`Página de entrada: ${pageUrl}`);
+  }
+  return lines.length ? lines.join('\n') : 'Nuevo lead';
+};
+
 const buildLeadAttributionView = (lead = {}, inventory = null) => {
   const marketingOrigin = resolveLeadMarketingOrigin(lead);
   const contactMethod = resolveLeadContactMethod(lead);
@@ -125,5 +166,6 @@ module.exports = {
   resolveLeadMarketingOrigin,
   resolveLeadContactMethod,
   buildMarketingOriginWhere,
+  buildLeadCreatedDescription,
   buildLeadAttributionView,
 };

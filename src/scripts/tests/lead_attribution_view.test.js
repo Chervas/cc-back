@@ -5,6 +5,7 @@ const {
   resolveLeadMarketingOrigin,
   resolveLeadContactMethod,
   buildMarketingOriginWhere,
+  buildLeadCreatedDescription,
   buildLeadAttributionView,
 } = require('../../lib/lead-attribution-view');
 
@@ -71,5 +72,17 @@ assert.deepEqual(
     },
   }
 );
+
+const createdDescription = buildLeadCreatedDescription({
+  source: 'web',
+  source_detail: 'tel_modal',
+  gclid: 'gclid-real',
+  telefono: '+34600000000',
+  page_url: 'https://www.propdental.es/pedir-hora/',
+});
+assert.match(createdDescription, /^Contacto: Teléfono de la web$/m);
+assert.match(createdDescription, /^Origen: Google Ads$/m);
+assert.match(createdDescription, /^Página de entrada: https:\/\/www\.propdental\.es\/pedir-hora\/$/m);
+assert.doesNotMatch(createdDescription, /Origen: web por teléfono/);
 
 console.log('lead_attribution_view.test.js OK');
