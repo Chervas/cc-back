@@ -53,7 +53,7 @@ La política de valores es versionada y declarada como peso de reporting/optimiz
 
 Tras una activación Enhanced sana, el mismo job llama a `reconcileVerifiedConnectOnlyStrategyActivationReadiness`. Este segundo reconciliador elimina snapshots internos obsoletos de readiness, no activa nada nuevo en el proveedor: vuelve a leer acciones Google y ejecuta Data Manager con `validateOnly` y `createMissing=false`. Solo considera `CampaignRequest` `active` cuyo payload sea `new_patients + connect_only + Google`; vuelve a validar también snapshots previamente verdes cuando cambia la clave, el scope, las cuentas o vence el consentimiento. En el rollout actual, únicamente las clínicas `19`, `35`, `56`, `58` y `59`, declaradas en `groupRecord.config.locations`, pueden usar la configuración web de `propdental.es`; cada evidencia guarda `validated_scope.source=group_web_location`. Francia `36` y Eixample `57` no heredan ese consentimiento y permanecen bloqueadas hasta disponer de un `IntakeConfig` propio válido. El reconciliador exige el customer set exacto del gate, evidencia completa por action/target, fingerprint/CAS de estrategia y configuración, y vuelve a comparar todo bajo locks antes de escribir únicamente `solicitud.activation_readiness`. Conserva el snapshot anterior en `activation_readiness_reconciliation`, tolera ejecuciones concurrentes, es idempotente y se audita en `SyncLog.status_report.connect_only_strategy_readiness_reconciliation`. Devuelve expresamente `external_mutation_performed=false` y `google_ads_mutated=false`; no modifica `Campaign`, acciones, goals, pujas ni Google y no convierte `connect_only` en Piloto automático.
 
-### Evidencia Propdental del 2026-07-12 y activación del 2026-07-13
+### Evidencia Propdental del 2026-07-12 y cierre live del 2026-07-13
 
 - El OAuth del grupo `5` conserva ocho scopes e incluye `https://www.googleapis.com/auth/datamanager`.
 - Lead, Contact y Schedule devolvieron HTTP 200 con `validateOnly=true` en `1851215478` y `5992356722`: seis validaciones correctas y cero conversiones ficticias ingeridas.
@@ -69,6 +69,10 @@ Tras una activación Enhanced sana, el mismo job llama a `reconcileVerifiedConne
 - El selector se corrigió para resolver `conversion_action`, `conversion_action_id` y `send_to` como una única alternativa por evento/destino. Hay regresiones para Lead, Contact, Schedule y Purchase en las dos cuentas. En staging resuelven respectivamente a las acciones canónicas esperadas y ya no heredan el resource de Lead.
 - La attestation que entrega la verificación web conserva un TTL corto de 15 minutos para impedir replays como prueba nueva. Una prueba ya aceptada mantiene una vigencia operativa firmada de 24 horas y no se pierde al guardar después: scope, dominio, HMAC, configuración, URLs legales y señales detectadas se siguen comprobando. El frontend usa esta expiración operativa y deja de bloquear la estrategia a los 15 minutos.
 - Tras desplegar la corrección se reenvió el contacto únicamente a `Contact - ClinicaClick` de `1851215478`, con el mismo evento, click ID y consentimiento, sin PII. Diagnostics confirmó el Contact correcto. El envío previo a Lead también llegó a materializarse y se retiró mediante `ConversionAdjustment` con el mismo `transactionId`; Google aceptó la retracción y el audit quedó marcado como `retracted_wrong_action`.
+- El primer lead publicitario natural posterior, `LeadIntake #7193`, entró en Badalona `58` como `paid`, `web/tel_modal`. Su intento Contact `#10`, customer `1851215478`, action `7680195323`, consentimiento `GRANTED` y GCLID, pasó `accepted -> SUCCESS`. Diagnostics devolvió un registro, cero warnings/errores y `attempt_count=1`, sin duplicado. Fue GCLID-only porque se creó antes de corregir la sobrescritura de configuración y no demuestra todavía user data Enhanced.
+- Staging backend `323e4a4` y frontend `a1c875ea` cerraron esa regresión. A las `09:38:42 UTC`, Chromium admin pulsó Verificar: el fingerprint protegido abreviado `a04c971…044b` permaneció idéntico y cambió solo `snippet_verification.verified_at`; Enhanced, user data y personalización siguieron activas; valores `0/0/10/40` y Purchase deshabilitado se conservaron.
+- El reconciliador post-Verificar devolvió `already_active`, `ready=true`, idempotente y `google_ads_mutated=false`. Ambas cuentas mantenían términos/Enhanced activos y Data Manager aceptó `validateOnly`. El GET público no expuso attestations, hash, HMAC, Enhanced, `goal_policy` ni auditorías.
+- La reconciliación global `visitor_choice` examinó 18 configuraciones: 17 `activated`, 1 `already_active`, 0 errores y `grants_consent=false`. Esto materializa capacidad, no consentimiento.
 
 ## Hitos offline del CRM
 
@@ -137,14 +141,14 @@ Evidencia de Propdental al 2026-07-12:
 ## Monitorización
 
 - Diagnostics de cargas Data Manager: cada 30 minutos.
-- En el mismo ciclo se reconcilia la activación interna de Conversiones mejoradas. La operación es idempotente, transaccional y auditada en `SyncLog`; todas las consultas a Google son de solo lectura y el resultado declara expresamente `google_ads_mutated=false`.
+- En el mismo ciclo se reconcilia la activación interna de Conversiones mejoradas. La operación es idempotente, transaccional y auditada en `SyncLog`; todas las consultas a Google son de solo lectura y el resultado declara expresamente `google_ads_mutated=false`. El barrido global comprobado cerró 18 filas como 17 `activated`, 1 `already_active`, 0 errores y siempre `grants_consent=false`.
 - Después del gate Enhanced, ese ciclo también reconcilia snapshots `activation_readiness` obsoletos de las estrategias Propdental `connect_only`; solo escribe el JSON de `CampaignRequest` bajo lock y lo registra en `connect_only_strategy_readiness_reconciliation`. No crea una policy ni activa Piloto automático.
 - Auditoría read-only de acciones, custom goal y campañas opt-in estables: una vez al día, a las 02:17. El `apply` hace además una verificación inmediata antes y después de cualquier cambio aprobado.
 - La auditoría no autorepara ni hace mutaciones externas; cualquier cambio exige preview, digest vigente y confirmación explícita.
 
-### Runbook: siguiente lead publicitario natural de Propdental
+### Runbook: siguiente lead natural con identificadores mejorados de Propdental
 
-Objetivo: demostrar el recorrido real posterior al gate sin crear un paciente, cita ni conversión sintética. No se debe reutilizar un click ID, PII o evento de otro visitante. El operador espera un lead que llegue de forma natural desde una campaña activa y lo sigue por su ID interno.
+Objetivo pendiente: demostrar identificadores Enhanced en un evento natural posterior al fix, sin crear un paciente, cita ni conversión sintética. El recorrido natural por GCLID ya quedó cerrado con `LeadIntake #7193` / intento `#10` en `SUCCESS`, pero ese evento era pre-fix y no llevaba user data. No se debe reutilizar un click ID, PII o evento de otro visitante. El operador espera otro lead que llegue de forma natural desde una campaña activa y lo sigue por su ID interno.
 
 1. **Localizar el lead sin exponer PII ni click IDs.** En la vista CRM confirmar sede, canal, fecha y origen. Para diagnóstico DB puede usarse una consulta de presencia, nunca seleccionar el valor crudo:
 
@@ -204,6 +208,8 @@ Antes y después de una comprobación live comparar, sin imprimir PII:
 - dominios, HMAC-presente y `snippet_verification`.
 
 Solo `snippet_verification` debe cambiar al pulsar Verificar. Después ejecutar Diagnostics: el gate debe responder `already_active`, no reactivar una configuración que el editor haya borrado. La regresión automatizada es `node src/scripts/tests/intake_config_write_merge.test.js`; Diagnostics sigue siendo red de seguridad y no justifica un writer destructivo.
+
+Prueba live cerrada el 2026-07-13 `09:38:42 UTC`: sobre staging backend `323e4a4` / frontend `a1c875ea`, el fingerprint protegido abreviado `a04c971…044b` fue idéntico antes/después y solo cambió `verified_at`. El gate devolvió `already_active`, `ready=true`, fue idempotente y no mutó Google. La proyección pública no contenía attestations, hash, HMAC, Enhanced, `goal_policy` ni auditorías.
 
 ## Referencias oficiales
 

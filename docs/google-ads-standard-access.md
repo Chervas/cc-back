@@ -69,7 +69,7 @@ The standard offline path can upload a permitted click identifier without PII. E
 - Name, address, URL, clinic, treatment, consultation reason, clinical data, IP, user agent and arbitrary session/user properties are never used as Enhanced identifiers.
 - No Customer Match, conversion-based lists, healthcare audiences or remarketing are enabled by this capability.
 
-On 2026-07-13 a direct Google read confirmed `enhanced_conversions_for_leads_enabled=true` for both Propdental accounts. At 06:42 UTC the internal reconciler recorded `activated` with disclosure/runtime and `google_ads.user_data_enabled` enabled. The reconciler only updates the scoped `IntakeConfig`; it does not mutate the Google switch and does not depend on Play.
+On 2026-07-13 a direct Google read confirmed accepted data terms and `enhanced_conversions_for_leads_enabled=true` for both Propdental accounts, and Data Manager accepted `validateOnly` for each account. After the live Web verification at `09:38:42 UTC`, the internal reconciler returned `already_active`, `ready=true`, was idempotent and reported `google_ads_mutated=false`. The reconciler only updates the scoped `IntakeConfig`; it does not mutate the Google switch and does not depend on Play.
 
 ## 6. Managed goal policy
 
@@ -90,6 +90,9 @@ Schedule is not yet an end-to-end operational transition. The evaluator lacks a 
 - The current milestone service can build Purchase from a completed appointment with treatment and `Tratamientos.precio_base` (or `0`). Propdental keeps the event disabled because that value is neither authoritative revenue nor margin.
 - Current Propdental managed-campaign snapshot remains `draft + observe + unfunded`; no active managed pilot or applied optimization policy is implied by conversion readiness.
 - Call reporting is disabled for both accounts by advertiser decision; historical call actions/assets are not deleted and `AD_CALL` is not part of the Clinicaclick custom goal.
+- The first natural paid lead, `LeadIntake #7193` for Badalona `58`, produced Contact attempt `#10` for customer `1851215478` / action `7680195323`. With consent `GRANTED` and a GCLID, it moved from `accepted` to `SUCCESS`; Diagnostics returned one record, no warnings/errors and no duplicate. It was GCLID-only because it predated the ownership fix, so a later natural consented lead is still required to evidence Enhanced identifiers.
+- Staging backend `323e4a4` and frontend `a1c875ea` passed the live ownership regression at `09:38:42 UTC`: clicking Verify left the protected fingerprint `a04c971…044b` unchanged and only updated `snippet_verification.verified_at`. Enhanced/user-data/personalization capabilities, values `0/0/10/40` and disabled Purchase were preserved. The public config omitted attestations, verification hash, HMAC, Enhanced config, `goal_policy` and audits.
+- The global `visitor_choice` reconciliation scanned 18 configurations: 17 `activated`, 1 `already_active`, 0 errors and `grants_consent=false`. Capability materialization never grants visitor consent.
 
 ## 8. Security, access and audit
 
