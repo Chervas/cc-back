@@ -121,9 +121,62 @@ async function testPm2HttpPayloadIsRestrictedToDryRun() {
   }
 }
 
+async function testManualRunMergesCatalogPayloadDefaults() {
+  const originalUniqueEnqueue = jobRequestsService.enqueueUniqueJobRequest;
+  const calls = [];
+
+  try {
+    jobRequestsService.enqueueUniqueJobRequest = async (args) => {
+      calls.push(args);
+      return {
+        created: true,
+        job: {
+          id: 200 + calls.length,
+          type: args.type,
+          status: 'pending',
+          priority: args.priority,
+          payload: args.payload,
+          created_at: new Date(),
+        },
+      };
+    };
+
+    for (const request of [
+      { params: { jobName: 'opsGoogleBusinessProfileRequested' }, body: {} },
+      { params: { jobName: 'adsSyncMidday' }, body: {} },
+      {
+        params: { jobName: 'opsGoogleBusinessProfileRequested' },
+        body: { payload: { onlyRequested: false, source: 'explicit-override' } },
+      },
+      {
+        params: { jobName: 'adsSyncMidday' },
+        body: { payload: { windowLabel: 'manual-window' } },
+      },
+    ]) {
+      const response = responseHarness();
+      await metaJobsController.runJob({
+        ...request,
+        userData: { userId: 1 },
+      }, response);
+      assert.equal(response.statusCode, 200);
+    }
+
+    assert.deepEqual(calls[0].payload, { onlyRequested: true });
+    assert.deepEqual(calls[1].payload, { windowLabel: 'midday' });
+    assert.deepEqual(calls[2].payload, {
+      onlyRequested: false,
+      source: 'explicit-override',
+    });
+    assert.deepEqual(calls[3].payload, { windowLabel: 'manual-window' });
+  } finally {
+    jobRequestsService.enqueueUniqueJobRequest = originalUniqueEnqueue;
+  }
+}
+
 async function run() {
   await testNormalUserCannotManageOrRunJobs();
   await testPm2HttpPayloadIsRestrictedToDryRun();
+  await testManualRunMergesCatalogPayloadDefaults();
   console.log('job_admin_authorization.test.js: OK');
 }
 

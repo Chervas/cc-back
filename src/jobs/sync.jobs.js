@@ -471,9 +471,19 @@ class MetaSyncJobs {
       throw new Error(`Job periódico '${jobName}' no definido en el catálogo`);
     }
 
+    const suppliedPayload = options.payload
+      && typeof options.payload === 'object'
+      && !Array.isArray(options.payload)
+      ? options.payload
+      : {};
+    const payload = {
+      ...(definition.payloadDefaults || {}),
+      ...suppliedPayload,
+    };
+
     const result = await jobRequestsService.enqueueUniqueJobRequest({
       type: definition.type,
-      payload: options.payload || {},
+      payload,
       priority: options.priority || definition.priority || 'normal',
       origin: options.origin || `cron:${jobName}`,
       maxAttempts: Number(
