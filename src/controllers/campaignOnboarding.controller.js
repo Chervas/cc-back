@@ -85,8 +85,12 @@ const SocialAdsActionsDaily = db.SocialAdsActionsDaily;
 const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID || '';
 const GOOGLE_CLIENT_SECRET = process.env.GOOGLE_CLIENT_SECRET || '';
 const GOOGLE_ADS_SCOPE = 'https://www.googleapis.com/auth/adwords';
-const ENHANCED_CONVERSION_ACTIVATION_GATE_VERSION = 2;
+const ENHANCED_CONVERSION_ACTIVATION_GATE_VERSION = 3;
 const ENHANCED_CONVERSION_PROPDENTAL_GROUP_ID = 5;
+// The group-scoped Propdental web configuration covers the Spanish sites.
+// Local phone numbers therefore need an explicit country code before hashing;
+// France remains outside this IntakeConfig and must use its own clinic scope.
+const ENHANCED_CONVERSION_PROPDENTAL_PHONE_COUNTRY_CODE = '34';
 const ENHANCED_CONVERSION_GOOGLE_EVIDENCE_REF = '4-1893000040437';
 const ENHANCED_CONVERSION_GOOGLE_GUIDANCE_AT = '2026-03-23T07:11:00.000Z';
 const ENHANCED_CONVERSION_ADVERTISER_AUTHORIZATION_REF =
@@ -2637,6 +2641,7 @@ function enhancedConversionActivationReconciliationKey({ targets, advertiserAuth
     advertiser_authorization_ref: advertiserAuthorization?.reference || null,
     advertiser_authorized_at: advertiserAuthorization?.authorized_at || null,
     ad_personalization_source: 'visitor_consent',
+    phone_country_code: ENHANCED_CONVERSION_PROPDENTAL_PHONE_COUNTRY_CODE,
     value_policy_version: ENHANCED_CONVERSION_VALUE_POLICY_VERSION
   };
   return crypto.createHash('sha256').update(JSON.stringify(canonical)).digest('hex');
@@ -3170,7 +3175,8 @@ function buildEnhancedConversionActivationPlan({
   };
   const nextGoogleAds = {
     ...asPlainObject(nextConfig.google_ads),
-    user_data_enabled: true
+    user_data_enabled: true,
+    phone_country_code: ENHANCED_CONVERSION_PROPDENTAL_PHONE_COUNTRY_CODE
   };
   const nextEvents = { ...asPlainObject(nextGoogleAds.events) };
   for (const eventName of targets.event_names) {
@@ -3224,6 +3230,7 @@ function buildEnhancedConversionActivationPlan({
       },
       measurement_only: true,
       permitted_identifiers: [...GOOGLE_ENHANCED_CONVERSION_ALLOWED_IDENTIFIERS],
+      phone_country_code: ENHANCED_CONVERSION_PROPDENTAL_PHONE_COUNTRY_CODE,
       ad_personalization_source: 'visitor_consent',
       customer_match_enabled: false,
       conversion_based_customer_lists_enabled: false,
@@ -3259,6 +3266,7 @@ function buildEnhancedConversionActivationPlan({
       advertiser_authorization_ref: advertiserAuthorization.reference,
       measurement_only: true,
       permitted_identifiers: [...GOOGLE_ENHANCED_CONVERSION_ALLOWED_IDENTIFIERS],
+      phone_country_code: ENHANCED_CONVERSION_PROPDENTAL_PHONE_COUNTRY_CODE,
       ad_personalization_source: 'visitor_consent',
       customer_match_enabled: false,
       conversion_based_customer_lists_enabled: false,
@@ -3292,6 +3300,7 @@ function isEnhancedConversionActivationApplied(config, reconciliationKey) {
     reconciliationKey
     && enhanced.enabled === true
     && googleAds.user_data_enabled === true
+    && String(googleAds.phone_country_code || '') === ENHANCED_CONVERSION_PROPDENTAL_PHONE_COUNTRY_CODE
     && features.ad_personalization_enabled === true
     && features.google_ads_user_data_enabled === true
     && features.google_ads_user_data_disclosure_confirmed === true
