@@ -1843,8 +1843,10 @@ exports.ingestLead = asyncHandler(async (req, res) => {
   }
 
   // Conversión server-side de Google Ads al capturar lead/contact.
-  // El contrato sanitario actual usa click id (gclid/gbraid/wbraid) y no PII;
-  // Enhanced Conversions queda como una capacidad separada y bloqueada por defecto.
+  // Siempre que sea posible se atribuye por click id. Para los scopes/eventos
+  // autorizados y con consentimiento explícito, la misma petición añade email
+  // y teléfono normalizados + SHA-256 como Conversión mejorada; nunca adjunta
+  // tratamiento, página sensible ni datos clínicos.
   try {
     const googleCustomData = {
       gclid: gclidValue || null,

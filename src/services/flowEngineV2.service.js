@@ -175,6 +175,7 @@ const CURRENT_RUNTIME_NAMESPACE =
     ? cleanString(jobRequestsService.getCurrentRuntimeNamespace())
     : null)
   || detectCurrentRuntimeNamespace();
+const QUIET_HOURS_WHATSAPP_JOB_TYPE = 'automation_whatsapp_quiet_send';
 
 function parseBool(value, fallback = false) {
   if (value === undefined || value === null || value === '') return fallback;
@@ -2485,6 +2486,160 @@ async function resolveWhatsAppSenderConfig({ config, context, clinicId }) {
   };
 }
 
+async function enqueueQuietHoursWhatsappJob({ messageId, conversationId, scheduledAt }) {
+  const normalizedMessageId = toIntOrNull(messageId);
+  const normalizedConversationId = toIntOrNull(conversationId);
+  const nextRunAt = scheduledAt instanceof Date ? scheduledAt : new Date(scheduledAt || '');
+  if (!normalizedMessageId || !normalizedConversationId || !Number.isFinite(nextRunAt.getTime())) {
+    throw new Error('automation_whatsapp_quiet_send_invalid_schedule');
+  }
+
+  const { job } = await jobRequestsService.enqueueUniqueJobRequest({
+    type: QUIET_HOURS_WHATSAPP_JOB_TYPE,
+    priority: 'high',
+    status: 'waiting',
+    origin: 'automations_v2_quiet_hours',
+    maxAttempts: 5,
+    nextRunAt,
+    dedupeScope: `message:${normalizedMessageId}`,
+    // El JobRequest no persiste destinatario, contenido ni credenciales. El
+    // handler los recompone en el momento de entrega desde Message y assets.
+    payload: {
+      message_id: normalizedMessageId,
+      conversation_id: normalizedConversationId,
+      scheduled_for: nextRunAt.toISOString(),
+    },
+  });
+  return job;
+}
+
+async function resolveScheduledWhatsappSenderConfig({ metadata, clinicId }) {
+  const senderOriginId = toIntOrNull(metadata?.sender_origin_id);
+  if (senderOriginId) {
+    const specific = await resolveSpecificSenderConfig({ senderOriginId, clinicId });
+    if (!specific?.accessToken || !specific?.phoneNumberId) {
+      throw new Error('whatsapp_sender_origin_missing_credentials');
+    }
+    return specific;
+  }
+
+  const scheduledPhoneNumberId = cleanString(metadata?.phoneNumberId || metadata?.phoneId);
+  if (scheduledPhoneNumberId) {
+    const originalAsset = await ClinicMetaAsset.findOne({
+      where: {
+        assetType: 'whatsapp_phone_number',
+        phoneNumberId: scheduledPhoneNumberId,
+        isActive: true,
+      },
+      attributes: ['id'],
+      order: [['updatedAt', 'DESC']],
+      raw: true,
+    });
+    if (originalAsset?.id) {
+      const specific = await resolveSpecificSenderConfig({ senderOriginId: originalAsset.id, clinicId });
+      if (!specific?.accessToken || !specific?.phoneNumberId) {
+        throw new Error('whatsapp_sender_origin_missing_credentials');
+      }
+      return specific;
+    }
+  }
+
+  const clinicConfig = await whatsappService.getClinicConfig(clinicId);
+  if (!clinicConfig?.accessToken || !clinicConfig?.phoneNumberId) {
+    throw new Error('whatsapp_config_missing');
+  }
+  return clinicConfig;
+}
+
+async function runScheduledWhatsappSendJob(payload = {}) {
+  const messageId = toIntOrNull(payload.message_id || payload.messageId);
+  if (!messageId) {
+    throw new Error('automation_whatsapp_quiet_send requires payload.message_id');
+  }
+
+  const msg = await Message.findByPk(messageId);
+  if (!msg) {
+    return {
+      status: 'completed',
+      result: { skipped: true, reason: 'message_not_found', message_id: messageId },
+    };
+  }
+
+  const currentStatus = toLowerSafe(msg.status);
+  if (['sent', 'delivered', 'read'].includes(currentStatus)) {
+    return {
+      status: 'completed',
+      result: { skipped: true, reason: 'already_sent', message_id: messageId },
+    };
+  }
+
+  const metadata = msg.metadata && typeof msg.metadata === 'object' ? msg.metadata : {};
+  const scheduledAt = new Date(payload.scheduled_for || metadata.scheduled_for || '');
+  if (Number.isFinite(scheduledAt.getTime()) && scheduledAt.getTime() > Date.now() + 1000) {
+    return {
+      status: 'waiting',
+      nextAllowedAt: scheduledAt,
+      result: { waiting: true, message_id: messageId, scheduled_for: scheduledAt.toISOString() },
+    };
+  }
+
+  const conversationId = toIntOrNull(payload.conversation_id || payload.conversationId || msg.conversation_id);
+  if (!conversationId || Number(msg.conversation_id) !== conversationId) {
+    throw new Error('automation_whatsapp_quiet_send conversation mismatch');
+  }
+  const conversation = await Conversation.findByPk(conversationId);
+  if (!conversation) {
+    return {
+      status: 'completed',
+      result: { skipped: true, reason: 'conversation_not_found', message_id: messageId },
+    };
+  }
+
+  const clinicId = toIntOrNull(conversation.clinic_id);
+  const recipient = whatsappService.normalizePhoneNumber(metadata.recipient);
+  if (!clinicId || !recipient) {
+    throw new Error('automation_whatsapp_quiet_send missing clinic or recipient');
+  }
+  const clinicConfig = await resolveScheduledWhatsappSenderConfig({ metadata, clinicId });
+  const transportJobId = `automation-whatsapp-${messageId}`;
+  const transportJob = await queues.outboundWhatsApp.add('send', {
+    messageId: msg.id,
+    conversationId: conversation.id,
+    to: recipient,
+    body: msg.content || '',
+    useTemplate: String(msg.message_type || '').toLowerCase() === 'template',
+    templateName: cleanString(metadata.template_name),
+    templateLanguage: cleanString(metadata.template_language) || 'es_ES',
+    templateParams: metadata.template_params && typeof metadata.template_params === 'object'
+      ? metadata.template_params
+      : {},
+    templateComponents: null,
+    clinicConfig,
+  }, {
+    jobId: transportJobId,
+    removeOnComplete: false,
+    removeOnFail: false,
+  });
+
+  await msg.update({
+    status: 'pending',
+    metadata: {
+      ...metadata,
+      quiet_hours_job_dispatched_at: new Date().toISOString(),
+      quiet_hours_transport_job_id: String(transportJob?.id || transportJobId),
+    },
+  });
+
+  return {
+    status: 'completed',
+    result: {
+      message_id: messageId,
+      conversation_id: conversationId,
+      transport_job_id: String(transportJob?.id || transportJobId),
+    },
+  };
+}
+
 function resolveTemplateVariablesWithKeys(
   config,
   context,
@@ -2994,23 +3149,13 @@ async function handleSendWhatsapp(node, context, runtime) {
   emitMessageCreatedToConversationRooms(conversation, msg);
 
   if (quietWindow.delayMs > 0) {
+    let scheduledJob = null;
     try {
-      await queues.outboundWhatsApp.add(
-        'send',
-        {
-          messageId: msg.id,
-          conversationId: conversation.id,
-          to: recipientData.recipient,
-          body: messageContent,
-          useTemplate: messageType === 'template',
-          templateName: template?.name || null,
-          templateLanguage: metadata.template_language,
-          templateParams,
-          templateComponents: null,
-          clinicConfig: senderData.clinic_config,
-        },
-        { delay: quietWindow.delayMs }
-      );
+      scheduledJob = await enqueueQuietHoursWhatsappJob({
+        messageId: msg.id,
+        conversationId: conversation.id,
+        scheduledAt: quietWindow.scheduledAt || new Date(Date.now() + quietWindow.delayMs),
+      });
     } catch (enqueueErr) {
       const enqueueError = enqueueErr?.message || 'enqueue_failed';
       await msg.update({
@@ -3041,6 +3186,7 @@ async function handleSendWhatsapp(node, context, runtime) {
         ...(msg.metadata || {}),
         scheduled_for: quietWindow.scheduledAt ? quietWindow.scheduledAt.toISOString() : null,
         queued_by_quiet_hours: true,
+        quiet_hours_job_request_id: scheduledJob?.id || null,
       },
     });
     await conversation.update({ last_message_at: new Date() });
@@ -3067,6 +3213,7 @@ async function handleSendWhatsapp(node, context, runtime) {
         limited_mode: !!limitStatus?.limitedMode,
         quiet_hours_applied: true,
         scheduled_for: quietWindow.scheduledAt ? quietWindow.scheduledAt.toISOString() : null,
+        job_request_id: scheduledJob?.id || null,
         sender_clinic_id: clinicId,
         sender_clinic_name: cleanString(senderClinic?.nombre_clinica),
         recipient_patient_id: recipientPatientId,
@@ -5161,4 +5308,6 @@ async function runExecution(executionId, options = {}) {
 
 module.exports = {
   runExecution,
+  enqueueQuietHoursWhatsappJob,
+  runScheduledWhatsappSendJob,
 };

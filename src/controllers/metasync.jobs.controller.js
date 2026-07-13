@@ -19,6 +19,7 @@ const { getGoogleAdsUsageStatus, resumeGoogleAdsUsage } = require('../lib/google
 const jobRequestsService = require('../services/jobRequests.service');
 const jobScheduler = require('../services/jobScheduler.service');
 const { SCHEDULED_JOB_DEFINITIONS } = require('../config/scheduledJobCatalog');
+const { isGlobalAdmin } = require('../lib/role-helpers');
 const fs = require('fs');
 const path = require('path');
 const { SyncLog, TokenValidation, SocialStatDaily, ApiUsageCounter } = require('../../models');
@@ -27,6 +28,25 @@ const { Op } = require('sequelize');
 const JOB_NAME_TO_QUEUE_TYPE = Object.fromEntries(
   Object.entries(SCHEDULED_JOB_DEFINITIONS).map(([jobName, definition]) => [jobName, definition.type])
 );
+
+function assertGlobalAdmin(req, res) {
+  if (!isGlobalAdmin(req.userData?.userId)) {
+    res.status(403).json({ error: 'admin_only' });
+    return false;
+  }
+  return true;
+}
+
+function sanitizeManualJobPayload(queueType, rawPayload) {
+  const payload = rawPayload && typeof rawPayload === 'object' && !Array.isArray(rawPayload)
+    ? rawPayload
+    : {};
+  if (queueType !== 'system_pm2_log_retention') return payload;
+  // El directorio y la retención pertenecen a la configuración del runtime.
+  // La API manual solo puede pedir una simulación, nunca ampliar el alcance de
+  // borrado ni reducir la ventana definida por operaciones.
+  return { dryRun: payload.dryRun === true };
+}
 
 function isCronLeaderRuntime() {
   return process.env.JOBS_CRON_LEADER === 'true';
@@ -60,6 +80,7 @@ function parseStatusReport(value) {
  */
 exports.initializeJobs = async (req, res) => {
   try {
+    if (!assertGlobalAdmin(req, res)) return;
     console.log('🚀 Solicitud de inicialización de jobs recibida');
     if (!isCronLeaderRuntime()) {
       return rejectNonLeaderCronStart(res);
@@ -105,6 +126,7 @@ function getJobsSafeInfo() {
   for (const [name, jobData] of metaSyncJobs.jobs) {
     safeJobs[name] = {
       schedule: jobData.schedule,
+      timezone: jobData.timezone || metaSyncJobs.config.timezone,
       status: jobData.status,
       lastExecution: jobData.lastExecution,
       lastEnqueuedAt: jobData.lastEnqueuedAt || null,
@@ -352,6 +374,7 @@ exports.tailJobLog = async (req, res) => {
  */
 exports.startJobs = async (req, res) => {
   try {
+    if (!assertGlobalAdmin(req, res)) return;
     if (!isCronLeaderRuntime()) {
       return rejectNonLeaderCronStart(res);
     }
@@ -378,6 +401,7 @@ exports.startJobs = async (req, res) => {
  */
 exports.stopJobs = async (req, res) => {
   try {
+    if (!assertGlobalAdmin(req, res)) return;
     const result = metaSyncJobs.stop();
     
     res.json({
@@ -400,6 +424,7 @@ exports.stopJobs = async (req, res) => {
  */
 exports.restartJobs = async (req, res) => {
   try {
+    if (!assertGlobalAdmin(req, res)) return;
     if (!isCronLeaderRuntime()) {
       return rejectNonLeaderCronStart(res);
     }
@@ -426,12 +451,13 @@ exports.restartJobs = async (req, res) => {
  */
 exports.runJob = async (req, res) => {
   try {
+    if (!assertGlobalAdmin(req, res)) return;
     const { jobName } = req.params;
     const userId = req.userData?.userId || null;
     const userRole = req.userData?.role || null;
     const userName = req.userData?.name || null;
     const queueType = JOB_NAME_TO_QUEUE_TYPE[jobName] || null;
-    const payload = (req.body && typeof req.body.payload === 'object') ? req.body.payload : {};
+    const payload = sanitizeManualJobPayload(queueType, req.body?.payload);
     const catalogPriority = SCHEDULED_JOB_DEFINITIONS[jobName]?.priority || null;
     const priority = req.body?.priority
       || (queueType && queueType.includes('backfill') ? 'high' : catalogPriority)

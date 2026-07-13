@@ -34,6 +34,17 @@ async function run() {
   assert.equal(accessPolicy.defaultForFeature('consents.view', 'unknown'), false);
   assert.equal(accessPolicy.defaultForFeature('consents.manage', 'unknown'), false);
 
+  assert.equal(accessPolicy.ALLOWED_FEATURE_KEYS.has('team.view'), true);
+  assert.equal(features.get('team.view')?.kind, 'view');
+  assert.equal(features.get('team.view')?.enforcement_status, 'route');
+  assert.equal(accessPolicy.defaultForFeature('team.view', 'reception'), true);
+  assert.equal(accessPolicy.defaultForFeature('team.view', 'doctor'), true);
+  assert.equal(accessPolicy.defaultForFeature('team.view', 'unknown'), false);
+
+  assert.equal(features.get('team.manage')?.kind, 'action');
+  assert.equal(features.get('team.manage')?.enforcement_status, 'partial');
+  assert.equal(accessPolicy.defaultForFeature('team.manage', 'reception'), false);
+
   assert.equal(features.get('quickchat.read_patients')?.kind, 'read');
   assert.equal(features.get('quickchat.read_patients')?.enforcement_status, 'backend');
   assert.equal(features.get('quickchat.read_team')?.kind, 'read');
