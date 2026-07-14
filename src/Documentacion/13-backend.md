@@ -142,7 +142,7 @@ Contrato:
 
 - `scope_type`: `group` o `clinic`.
 - `scope_id`: ID del grupo o clínica.
-- `feature_key`: `marketing`, `clinic.settings.edit`, `team.view`, `team.manage`, `billing.reports.view`, `patients.view`, `patients.edit`, `appointments.view`, `appointments.manage`, `consents.view`, `consents.manage`, `quickchat.read_patients`, `quickchat.read_team`, `quickchat.read_leads`, `nutrition.workspace.view`, `nutrition.measurements.create`, `nutrition.reports.finalize`.
+- `feature_key`: `marketing`, `clinic.settings.view`, `clinic.settings.edit`, `team.view`, `team.manage`, `billing.reports.view`, `patients.view`, `patients.edit`, `appointments.view`, `appointments.manage`, `consents.view`, `consents.manage`, `quickchat.read_patients`, `quickchat.read_team`, `quickchat.read_leads`, `nutrition.workspace.view`, `nutrition.measurements.create`, `nutrition.reports.finalize`.
 - `role_code`: `propietario`, `agencia`, `doctor`, `assistant`, `reception`, `admin_staff` o `unknown`.
 - `effect`: `allow` o `deny`; `state=inherit` borra el override.
 
@@ -4241,3 +4241,99 @@ Plantillas:
 - `WhatsappTemplates.status` es la fuente de verdad WABA. Una plantilla `MessageTemplates` pendiente no está aprobada ni sincronizable por Meta si no existe registro WABA.
 - `PENDING_LOCAL` en una plantilla WABA custom significa que ClinicaClick la guardó localmente, pero Meta no dejó abierta una revisión real. La UI debe mostrarla como `No enviada a Meta` y no como aprobada ni en revisión.
 - `DELETE /api/whatsapp/templates/:id` devuelve `409 template_linked_to_campaigns` si la plantilla está referenciada por campañas/listas no archivadas. La UI debe pedir confirmación explícita antes de ocultarla; las campañas conservan `template_snapshot`, pero no deben poder reutilizar una plantilla oculta.
+
+## Contrato backend: ayuda de acceso a la clinica (2026-07-14)
+
+`Clinicas.configuracion.access_guidance` tiene el contrato:
+
+```json
+{
+  "enabled": true,
+  "directions": "Entra por el pasaje lateral junto a la farmacia.",
+  "image_asset_id": 123,
+  "image_url": "https://media.clinicaclick.com/.../access.jpg"
+}
+```
+
+La ausencia del subarbol equivale a desactivado. Desactivar conserva texto e
+imagen; retirarla pone sus dos campos a `null`. El PATCH de clinica fusiona
+`configuracion` sin sustituir el documento completo y debe preservar
+`agenda_settings`, `disciplinas` y claves concurrentes/desconocidas. La frontera
+backend valida booleano, texto de hasta 500 caracteres, id positivo y URL HTTPS.
+
+Los endpoints de clinica dejaron de confiar solo en la UI: lectura requiere JWT,
+scope efectivo y `clinic.settings.view`; PATCH requiere
+`clinic.settings.edit`. `POST /api/public-media/upload` aplica el mismo scope de
+edicion para `purpose=clinic_access_image`, exige
+`non_clinical_asserted=true`, valida el contenido y normaliza a JPEG sin EXIF.
+El asset conserva auditoria de usuario, clinica, grupo, hash, MIME y key opaco.
+Cada sustitucion genera un key nuevo y versionado. Desactivar o retirar solo
+cambia la referencia de `Clinicas.configuracion`: hoy no borra fisicamente S3,
+por lo que el asset anterior queda huerfano pero auditable hasta que exista un
+ciclo seguro de retencion, comprobacion de referencias y cleanup por
+`JobRequest`.
+
+La capacidad de edicion de ficha no autoriza operaciones de administracion
+global: crear o eliminar una clinica queda limitado al admin global. Mover una
+clinica entre grupos o desvincularla exige ser admin global o propietario
+explicito de todas las clinicas que integran cada grupo afectado, tanto origen
+como destino; un grupo vacio solo puede recibir su primera clinica mediante
+admin global. Las respuestas de solo lectura omiten `datos_fiscales_clinica`;
+los editores autorizados lo reciben en el detalle. El rol `unknown` conserva
+lectura de ajustes por compatibilidad con asignaciones antiguas, nunca edicion.
+
+Automatizaciones V2 aplana el subarbol como
+`clinica.indicaciones_acceso` e `clinica.access_guidance_image_url`. La variable de
+catalogo `indicaciones_acceso_clinica` se enlaza con la primera; es distinta del
+alias legacy `indicaciones`, que sigue significando URL de como llegar.
+
+La seleccion condicional sucede en el mismo `action/send_whatsapp`. Solo
+`primera_sin_trat` y `primera_con_trat` pueden tomar la variante. Las demas citas
+conservan la plantilla base heredada. Config incompleta o plantilla efectiva no
+`APPROVED` produce fallback base observable. El `Message` guarda rama,
+parametros y `template_components`; el envio inmediato y el job de quiet hours
+usan ese snapshot sin volver a leer configuracion.
+
+Antes de seleccionar la variante, el runtime vuelve a comprobar que
+`image_asset_id` siga siendo un `PublicMediaAsset` activo, publico, con
+`purpose=clinic_access_image`, perteneciente a la misma clinica y con la misma
+URL. Un fallo o mismatch cae a la base y queda en
+`access_guidance_fallback_reason`; nunca envia una URL arbitraria guardada por
+fuera del PATCH validado.
+
+La materializacion de cada `action/send_whatsapp` usa
+`Messages.automation_delivery_key=flow:<execution_id>:node:<node_id>:outbound`,
+unica globalmente por la migracion
+`20260714121000-add-message-automation-delivery-key.js`. El guard se ejecuta
+antes de releer plantilla, conversacion o credenciales, por lo que un replay no
+duplica el recordatorio aunque cambie el telefono del paciente. El evento
+interno usa la misma familia con sufijo `:event`.
+
+Para primeras visitas con la opcion activada, incluso cuando se usa fallback a
+la base, el handoff es durable: primero persiste `Message`, rama, cabecera,
+destinatario, WABA/phone y el `jobId` determinista; despues publica BullMQ. Las
+quiet hours persisten ademas `queued_by_quiet_hours` y `scheduled_for` antes de
+crear `JobRequest(type=automation_whatsapp_quiet_send)`. Si falla ese handoff,
+la misma `FlowExecutionV2` queda `waiting` en el nodo actual y el JobRequest la
+reanuda con `retry_current_node`, backoff exponencial y maximo cinco intentos.
+Las citas recurrentes conservan el transporte historico sin este opt-in de
+reintentos.
+
+El worker relee credenciales activas, pero exige que `phoneNumberId` y `wabaId`
+coincidan con el snapshot que selecciono la plantilla. Un cambio de remitente
+falla observablemente en lugar de intentar una plantilla sobre otro WABA. Solo
+se reintentan fallos seguros anteriores a una respuesta del proveedor (DNS de
+conexion, 429 o 5xx explicitos). Timeout, `ECONNRESET` o respuesta ambigua se
+marcan `delivery_unknown` y no repiten el POST; un WAMID ya aceptado tampoco se
+reenvia aunque falle despues una escritura local. Bull conserva completados 24
+horas/1000 jobs y fallidos 7 dias/5000 jobs.
+
+Que el log del nodo o la `FlowExecutionV2` termine en success significa que el
+handoff durable quedo confirmado, no que Meta ya entrego. La fuente final es
+`Messages.status`, `metadata.wamid`/`outbound_retry` y el webhook. El catalogo
+alternativo usa BODY con texto fijo despues de `{{5}}` (`Si necesitas ayuda,
+respóndenos por aquí.`), porque Meta rechaza cuerpos que terminan en variable.
+La migracion de catalogo es transaccional, no pisa una variante preexistente y
+su `down` reconoce nombres tecnicos versionados, limpia el binding de nodos y
+desactiva instancias locales antes de retirar el catalogo. No puede borrar una
+plantilla que ya se haya creado externamente en Meta.
