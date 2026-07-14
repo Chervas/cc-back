@@ -1469,13 +1469,15 @@ async function buildImportedItemPayloads(scope, body, transaction) {
         ? `Sede importada no reconocida dentro del grupo: ${importedClinic}.`
         : 'No se ha podido asociar este contacto a una clínica del grupo. Añade una columna sede/clinica o revisa el teléfono/email.')
       : null;
-    const rawTreatment = readImportValue(row, columnMapping, 'treatment') || body.treatment || 'Sin tratamiento asignado';
-    const resolvedTreatment = await resolveImportedTreatment(rawTreatment, treatmentContext, {
-      clinicId: rowClinicId,
-      createIfMissing: validPhone && !!rowClinicId && !clinicAssignmentError,
-    });
-    const treatment = resolvedTreatment.name;
-    const treatmentId = resolvedTreatment.id;
+    const rawTreatment = normalizeText(readImportValue(row, columnMapping, 'treatment') || body.treatment || '');
+    const resolvedTreatment = rawTreatment
+      ? await resolveImportedTreatment(rawTreatment, treatmentContext, {
+        clinicId: rowClinicId,
+        createIfMissing: validPhone && !!rowClinicId && !clinicAssignmentError,
+      })
+      : { id: null, name: null };
+    const treatment = resolvedTreatment.name || null;
+    const treatmentId = resolvedTreatment.id || null;
 
     if (!patient && validPhone && rowClinicId && !clinicAssignmentError) {
       patient = await Paciente.create({

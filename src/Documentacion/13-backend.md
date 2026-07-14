@@ -989,8 +989,8 @@ Qué persiste:
 - `Pacientes`: crea ficha real si el móvil no existe en el scope. Si existe, reutiliza la ficha y solo completa campos vacíos (`nombre`, `apellidos`, móviles/fijo, email); no sobrescribe datos ya informados.
 - `PacienteClinicas`: vincula el paciente a la sede efectiva si procede.
 - `PatientCustomFields`: guarda columnas extra importadas como campos personalizados de paciente/lista, completando solo valores vacíos en importaciones sucesivas.
-- `Tratamientos`: puede crear tratamientos importados cuando no hay match y la importación lo permite.
-- `CitasPacientes`: crea una cita histórica completada con `motivo = "Importación de pacientes para reactivación"` y título `Histórico: ...` para poder medir última atención/tratamiento. Estas citas son contexto, no agenda activa.
+- `Tratamientos`: puede crear tratamientos importados cuando no hay match y la importación lo permite. En importaciones de reseñas el tratamiento es opcional; si no viene informado, no se crea un tratamiento artificial.
+- `CitasPacientes`: crea una cita histórica completada con `motivo = "Importación de pacientes para reactivación"` y título `Histórico: ...` para poder medir última atención/tratamiento cuando existe tratamiento enlazado. Estas citas son contexto, no agenda activa. Si el import de reseñas no trae tratamiento, se conserva la fecha en la lista pero no se crea cita histórica con tratamiento falso.
 - `MarketingPatientLists` y `MarketingPatientListItems`: congelan la audiencia importada, estado de cada fila, motivos de exclusión y variables disponibles para la campaña.
 - `MarketingPatientContactEvents`: audita acciones posteriores de exclusión/restauración/envío.
 
@@ -998,6 +998,7 @@ Reglas de seguridad operativa:
 
 - La importación histórica no crea `Lead`.
 - Las citas históricas importadas no deben disparar `appointment_created`, recordatorios de cita ni automatizaciones de agenda. El runtime las omite por `motivo = "Importación de pacientes para reactivación"` o título `Histórico:`.
+- En reseñas, el tratamiento no es obligatorio: bastan nombre, móvil, fecha de atención y sede si el scope es de grupo. En reactivación clínica el tratamiento sigue siendo necesario para aplicar reglas de inactividad por tratamiento.
 - Las filas sin móvil, con teléfono inválido, duplicadas, con sede ambigua/no reconocida, baja comercial o cita futura quedan excluidas con motivo visible; no bloquean la importación completa.
 - Si se reimporta el mismo paciente, el teléfono móvil manda. El paciente se actualiza de forma conservadora: se completan huecos, no se machacan datos existentes.
 
