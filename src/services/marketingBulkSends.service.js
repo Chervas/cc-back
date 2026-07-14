@@ -7768,14 +7768,29 @@ async function materializeInboundReply({ conversation, inboundMessage }) {
   const item = await MarketingPatientListItem.findOne({ where: { id: itemId, list_id: listId } });
   if (!item) return { applied: false, reason: 'item_not_found' };
   const repliedAt = inboundMessage.sent_at || inboundMessage.createdAt || new Date();
-  const existingReply = await MarketingPatientContactEvent.findOne({
-    where: {
-      list_id: listId,
-      item_id: itemId,
-      event_type: 'mass_campaign_message_replied',
-    },
-    order: [['occurred_at', 'DESC']],
-  });
+  const isTestTrigger = normalizeKey(metadata.kind) === 'mass_campaign_test';
+  let existingReply = null;
+  if (isTestTrigger) {
+    const replyEvents = await MarketingPatientContactEvent.findAll({
+      where: {
+        list_id: listId,
+        item_id: itemId,
+        event_type: 'mass_campaign_message_replied',
+      },
+      order: [['occurred_at', 'DESC']],
+      limit: 25,
+    });
+    existingReply = replyEvents.find((event) => Number(event.payload?.trigger_message_id || 0) === Number(triggerMessage.id || 0)) || null;
+  } else {
+    existingReply = await MarketingPatientContactEvent.findOne({
+      where: {
+        list_id: listId,
+        item_id: itemId,
+        event_type: 'mass_campaign_message_replied',
+      },
+      order: [['occurred_at', 'DESC']],
+    });
+  }
   const privateFeedback = await materializeReviewPrivateFeedback({
     list,
     item,
@@ -7806,11 +7821,11 @@ async function materializeInboundReply({ conversation, inboundMessage }) {
     : null;
   const existingRating = reviewRating
     ? await findExistingReviewRatingEvent(listId, itemId, {
-      sameTriggerOnly: false,
+      sameTriggerOnly: isTestTrigger,
       triggerMessageId: triggerMessage.id,
     })
     : null;
-  const alreadyReplied = existingReply || (item.replied_at && String(item.dispatch_status || '').toLowerCase() === 'replied');
+  const alreadyReplied = existingReply || (!isTestTrigger && item.replied_at && String(item.dispatch_status || '').toLowerCase() === 'replied');
   if (alreadyReplied) {
     if (!item.replied_at || String(item.dispatch_status || '').toLowerCase() !== 'replied') {
       await item.update({
