@@ -2410,7 +2410,11 @@ async function sendReviewRatingFollowUp({ list, item, conversation, rating, clin
   const googleReviewUrl = normalizeText(clinic?.url_dejar_resena || criteria?.link_tracking?.google_review_url || '');
   const rewardEnabled = criteria.review_gift_enabled === true || String(criteria.review_gift_enabled || '').toLowerCase() === 'true';
   const rewardDescription = normalizeText(criteria.review_gift_description || '');
-  const reviewTeamMembersText = normalizeText(criteria.review_team_members_text || '');
+  const reviewTeamMembersText = normalizeText(
+    criteria.review_team_members_text
+    || triggerMetadata.review_team_members_text
+    || ''
+  );
   const body = isPositive
     ? (googleReviewUrl
       ? (rewardEnabled
@@ -6300,8 +6304,32 @@ async function prepareCampaign(scope, campaignId, body = {}, userId = null) {
 async function sendTest(scope, campaignId, body = {}) {
   const list = await MarketingPatientList.findByPk(campaignId);
   ensureScopeAccess(list, scope);
-  const listCriteria = asPlainObject(list?.criteria);
+  let listCriteria = asPlainObject(list?.criteria);
   const templateUsage = normalizeTemplateUsage(body.template_usage || listCriteria.template_usage || 'promocion');
+  if (isReviewTemplateUsage(templateUsage)) {
+    const nextCriteria = { ...listCriteria };
+    if (body.review_display_clinic_name !== undefined || body.reviewDisplayClinicName !== undefined) {
+      nextCriteria.review_display_clinic_name = normalizeText(body.review_display_clinic_name || body.reviewDisplayClinicName || '') || null;
+    }
+    if (body.review_sender_name !== undefined || body.reviewSenderName !== undefined) {
+      nextCriteria.review_sender_name = normalizeText(body.review_sender_name || body.reviewSenderName || '') || null;
+    }
+    if (body.review_team_photo_url !== undefined || body.reviewTeamPhotoUrl !== undefined) {
+      nextCriteria.review_team_photo_url = normalizeText(body.review_team_photo_url || body.reviewTeamPhotoUrl || '') || null;
+    }
+    if (body.review_team_photo_overlay_color !== undefined || body.reviewTeamPhotoOverlayColor !== undefined) {
+      nextCriteria.review_team_photo_overlay_color = publicMediaPersonalizationService.normalizeHexColor(
+        body.review_team_photo_overlay_color || body.reviewTeamPhotoOverlayColor
+      );
+    }
+    if (body.review_team_members_text !== undefined || body.reviewTeamMembersText !== undefined) {
+      nextCriteria.review_team_members_text = normalizeText(body.review_team_members_text || body.reviewTeamMembersText || '') || null;
+    }
+    if (JSON.stringify(nextCriteria) !== JSON.stringify(listCriteria)) {
+      await list.update({ criteria: nextCriteria });
+      listCriteria = nextCriteria;
+    }
+  }
   const selectedTemplateId =
     body.whatsapp_template_id
     || body.template_id
@@ -6426,6 +6454,11 @@ async function sendTest(scope, campaignId, body = {}) {
       template_language: template.language || 'es',
       template_params: params,
       template_components: templateComponents,
+      review_display_clinic_name: listCriteria.review_display_clinic_name || null,
+      review_sender_name: listCriteria.review_sender_name || null,
+      review_team_photo_url: listCriteria.review_team_photo_url || null,
+      review_team_photo_overlay_color: listCriteria.review_team_photo_overlay_color || null,
+      review_team_members_text: listCriteria.review_team_members_text || null,
       recipient: targetPhone,
       phoneNumberId: clinicConfig.phoneNumberId || null,
       wabaId: clinicConfig.wabaId || null,
