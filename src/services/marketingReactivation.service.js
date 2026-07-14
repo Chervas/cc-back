@@ -101,6 +101,69 @@ function normalizeNameFormat(value) {
   return 'auto';
 }
 
+const IMPORT_NAME_PARTICLES = new Set(['de', 'del', 'la', 'las', 'los', 'da', 'das', 'do', 'dos', 'y', 'i']);
+const IMPORT_COMMON_FIRST_NAMES = new Set([
+  'aaron', 'abel', 'abril', 'adria', 'africa', 'agustin', 'aicha', 'aidan', 'ainoha', 'aitor',
+  'albert', 'alberto', 'aleixandra', 'alejandra', 'alejandro', 'alex', 'alexander', 'alicia',
+  'ana', 'andrea', 'anna', 'antonio', 'arturo', 'belen', 'betty', 'carla', 'carles', 'carlos',
+  'carmen', 'cecilia', 'chus', 'cristina', 'dario', 'david', 'demetrio', 'denny', 'edouard',
+  'eduardo', 'enrique', 'eva', 'francisco', 'hugo', 'ignasi', 'inmaculada', 'inma',
+  'javier', 'jesus', 'joan', 'joel', 'jordi', 'jorge', 'jose', 'juan', 'laura', 'lorena',
+  'lucia', 'luis', 'margarita', 'maria', 'marta', 'miguel', 'miquel', 'montse', 'nicolas',
+  'pedro', 'rita', 'rocio', 'sara', 'sergio', 'silvia', 'vero', 'veronica', 'zoila',
+]);
+
+function isLikelyImportFirstNameToken(value) {
+  return IMPORT_COMMON_FIRST_NAMES.has(normalizeKey(value));
+}
+
+function isImportNameParticle(value) {
+  return IMPORT_NAME_PARTICLES.has(normalizeKey(value));
+}
+
+function looksLikeImportSurnameFirstOrder(parts) {
+  return parts.length >= 2
+    && isLikelyImportFirstNameToken(parts[parts.length - 1])
+    && !isLikelyImportFirstNameToken(parts[0]);
+}
+
+function splitAutoImportNameParts(parts) {
+  if (!parts.length) return { nombre: 'Paciente', apellidos: '' };
+  if (parts.length === 1) return { nombre: parts[0], apellidos: '' };
+
+  if (looksLikeImportSurnameFirstOrder(parts)) {
+    let firstNameStart = parts.length - 1;
+    while (
+      firstNameStart > 1
+      && (
+        isLikelyImportFirstNameToken(parts[firstNameStart - 1])
+        || isImportNameParticle(parts[firstNameStart - 1])
+      )
+    ) {
+      firstNameStart -= 1;
+    }
+    return {
+      nombre: parts.slice(firstNameStart).join(' '),
+      apellidos: parts.slice(0, firstNameStart).join(' '),
+    };
+  }
+
+  let firstNameEnd = 1;
+  if (parts.length >= 2 && isLikelyImportFirstNameToken(parts[1])) {
+    firstNameEnd = 2;
+  }
+  while (firstNameEnd < parts.length - 1 && isImportNameParticle(parts[firstNameEnd])) {
+    firstNameEnd += 1;
+    if (firstNameEnd < parts.length && isLikelyImportFirstNameToken(parts[firstNameEnd])) {
+      firstNameEnd += 1;
+    }
+  }
+  return {
+    nombre: parts.slice(0, firstNameEnd).join(' '),
+    apellidos: parts.slice(firstNameEnd).join(' '),
+  };
+}
+
 function splitFullName(value, format = 'auto') {
   const nameFormat = normalizeNameFormat(format);
   const normalized = toTitleCaseName(value);
@@ -120,10 +183,13 @@ function splitFullName(value, format = 'auto') {
   if (parts.length === 1) {
     return { nombre: parts[0], apellidos: '' };
   }
-  if (nameFormat === 'last_last_first' && parts.length >= 3) {
+  if (nameFormat === 'auto') {
+    return splitAutoImportNameParts(parts);
+  }
+  if (nameFormat === 'last_last_first' && parts.length >= 2) {
     return {
-      nombre: parts.slice(2).join(' '),
-      apellidos: parts.slice(0, 2).join(' '),
+      nombre: parts.length >= 3 ? parts.slice(2).join(' ') : parts[1],
+      apellidos: parts.length >= 3 ? parts.slice(0, 2).join(' ') : parts[0],
     };
   }
   if (nameFormat === 'full') {
@@ -1469,13 +1535,15 @@ async function buildImportedItemPayloads(scope, body, transaction) {
         ? `Sede importada no reconocida dentro del grupo: ${importedClinic}.`
         : 'No se ha podido asociar este contacto a una clínica del grupo. Añade una columna sede/clinica o revisa el teléfono/email.')
       : null;
-    const rawTreatment = readImportValue(row, columnMapping, 'treatment') || body.treatment || 'Sin tratamiento asignado';
-    const resolvedTreatment = await resolveImportedTreatment(rawTreatment, treatmentContext, {
-      clinicId: rowClinicId,
-      createIfMissing: validPhone && !!rowClinicId && !clinicAssignmentError,
-    });
-    const treatment = resolvedTreatment.name;
-    const treatmentId = resolvedTreatment.id;
+    const rawTreatment = normalizeText(readImportValue(row, columnMapping, 'treatment') || body.treatment || '');
+    const resolvedTreatment = rawTreatment
+      ? await resolveImportedTreatment(rawTreatment, treatmentContext, {
+        clinicId: rowClinicId,
+        createIfMissing: validPhone && !!rowClinicId && !clinicAssignmentError,
+      })
+      : { id: null, name: null };
+    const treatment = resolvedTreatment.name || null;
+    const treatmentId = resolvedTreatment.id || null;
 
     if (!patient && validPhone && rowClinicId && !clinicAssignmentError) {
       patient = await Paciente.create({
