@@ -105,6 +105,17 @@ function state(overrides = {}) {
       attempted_at: '2026-07-13T07:30:04.000Z',
     }],
     attributionAudits: [{ id: 9001, lead_intake_id: 7201 }],
+    quickChatOutboxJobs: [{
+      id: 9101,
+      type: 'intake_quickchat_summary_materialize',
+      status: 'completed',
+      payload: {
+        lead_id: 7201,
+        audit_id: 9001,
+        __runtime_namespace: 'staging',
+      },
+      created_at: '2026-07-13T07:30:01.000Z',
+    }],
     contactAttempts: [],
     flowInstances: [],
     eventIds: conversionEventIds(leads, appointments),
@@ -148,6 +159,23 @@ assert.equal(validateQuickChatMessage({
 const valid = validateState(state(), options(), NOW);
 assert.equal(valid.externalConversionRows, 0);
 assert.deepEqual(valid.clinicIds, [19]);
+
+assert.throws(
+  () => validateState(state({
+    quickChatOutboxJobs: [{ ...state().quickChatOutboxJobs[0], status: 'running' }],
+  }), options(), NOW),
+  /is running/,
+);
+
+assert.throws(
+  () => validateState(state({
+    quickChatOutboxJobs: [{
+      ...state().quickChatOutboxJobs[0],
+      payload: { lead_id: 7201, audit_id: 9999 },
+    }],
+  }), options(), NOW),
+  /exact audit/,
+);
 
 assert.throws(
   () => validateState(state({

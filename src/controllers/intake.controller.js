@@ -45,8 +45,14 @@ const {
 } = require('../lib/intakeFormClinicLocation');
 const {
   isQuickChatSummaryRequest,
-  materializeIntakeQuickChatSummary,
+  validateQuickChatContact,
 } = require('../services/intakeQuickChatSummary.service');
+const {
+  isCompletedChatbotLeadRequest,
+  persistLeadAuditAndQuickChatOutbox,
+  persistExistingLeadAuditAndQuickChatOutbox,
+  triggerIntakeQuickChatSummaryFastPath,
+} = require('../services/intakeQuickChatOutbox.service');
 const { buildClinicMatcher } = require('../lib/clinicAttribution');
 const {
   getAccessibleMarketingClinicIds,
@@ -623,20 +629,6 @@ const emitLeadSocketEvent = async (eventName, payload, { clinicId, groupId } = {
   });
 };
 
-const emitQuickChatSummarySocketEvent = (result) => {
-  if (!result?.message || (!result.created && !result.updated)) return;
-  const io = getIO();
-  if (!io || !result.clinic_id) return;
-
-  io.to(`clinic:${result.clinic_id}`).emit(
-    result.created ? 'message:created' : 'message:updated',
-    {
-      ...result.message,
-      conversation_id: String(result.conversation_id),
-    }
-  );
-};
-
 const buildLeadCreatedSocketPayload = (lead) => {
   const plain = toPlain(lead);
   return {
@@ -1059,7 +1051,7 @@ const validateMetaSignature = (req) => {
   return crypto.timingSafeEqual(expectedBuf, providedBuf);
 };
 
-async function dedupeAndCreateLead(leadPayload, rawPayload = {}, attributionSteps = {}) {
+async function dedupeAndCreateLead(leadPayload, rawPayload = {}, attributionSteps = {}, options = {}) {
   const normalizedEmail = normalizeEmail(leadPayload.email);
   const normalizedPhone = normalizePhone(leadPayload.telefono);
   const dedupeCutoff = new Date(Date.now() - (DEDUPE_WINDOW_HOURS * 60 * 60 * 1000));
@@ -1072,48 +1064,69 @@ async function dedupeAndCreateLead(leadPayload, rawPayload = {}, attributionStep
     phone_hash: normalizedPhone ? hashValue(normalizedPhone) : null
   };
 
-  if (payload.external_source && payload.external_id) {
-    const existingExternal = await LeadIntake.findOne({
-      where: { external_source: payload.external_source, external_id: payload.external_id, archived_at: null }
-    });
-    if (existingExternal) {
-      const err = new Error('Lead duplicado (external_id)');
-      err.status = 409;
-      err.existingId = existingExternal.id;
-      throw err;
-    }
-  }
-
-  if (payload.event_id) {
-    const existing = await LeadIntake.findOne({ where: { event_id: payload.event_id, archived_at: null } });
-    if (existing) {
-      const err = new Error('Lead duplicado (event_id)');
-      err.status = 409;
-      err.existingId = existing.id;
-      throw err;
-    }
-  }
-
-  if (normalizedPhone || normalizedEmail) {
-    const dedupeWhere = {
-      archived_at: null,
-      created_at: { [Op.gte]: dedupeCutoff },
-      [Op.or]: []
-    };
-    if (normalizedPhone) dedupeWhere[Op.or].push({ phone_hash: payload.phone_hash });
-    if (normalizedEmail) dedupeWhere[Op.or].push({ email_hash: payload.email_hash });
-    if (dedupeWhere[Op.or].length > 0) {
-      const existingRecent = await LeadIntake.findOne({ where: dedupeWhere });
-      if (existingRecent) {
-        const err = new Error('Lead duplicado (contacto reciente)');
+  const createLead = async (transaction = null) => {
+    const queryOptions = transaction ? { transaction } : {};
+    if (payload.external_source && payload.external_id) {
+      const existingExternal = await LeadIntake.findOne({
+        where: { external_source: payload.external_source, external_id: payload.external_id, archived_at: null },
+        ...queryOptions,
+      });
+      if (existingExternal) {
+        const err = new Error('Lead duplicado (external_id)');
         err.status = 409;
-        err.existingId = existingRecent.id;
+        err.existingId = existingExternal.id;
         throw err;
       }
     }
+
+    if (payload.event_id) {
+      const existing = await LeadIntake.findOne({
+        where: { event_id: payload.event_id, archived_at: null },
+        ...queryOptions,
+      });
+      if (existing) {
+        const err = new Error('Lead duplicado (event_id)');
+        err.status = 409;
+        err.existingId = existing.id;
+        throw err;
+      }
+    }
+
+    if (normalizedPhone || normalizedEmail) {
+      const dedupeWhere = {
+        archived_at: null,
+        created_at: { [Op.gte]: dedupeCutoff },
+        [Op.or]: []
+      };
+      if (normalizedPhone) dedupeWhere[Op.or].push({ phone_hash: payload.phone_hash });
+      if (normalizedEmail) dedupeWhere[Op.or].push({ email_hash: payload.email_hash });
+      if (dedupeWhere[Op.or].length > 0) {
+        const existingRecent = await LeadIntake.findOne({ where: dedupeWhere, ...queryOptions });
+        if (existingRecent) {
+          const err = new Error('Lead duplicado (contacto reciente)');
+          err.status = 409;
+          err.existingId = existingRecent.id;
+          throw err;
+        }
+      }
+    }
+
+    return LeadIntake.create(payload, queryOptions);
+  };
+
+  if (options.quickChatOutbox === true) {
+    const persisted = await persistLeadAuditAndQuickChatOutbox({
+      createLead,
+      rawPayload,
+      attributionSteps,
+    });
+    if (typeof options.onQuickChatOutboxCreated === 'function') {
+      options.onQuickChatOutboxCreated(persisted);
+    }
+    return persisted.lead;
   }
 
-  const lead = await LeadIntake.create(payload);
+  const lead = await createLead();
 
   try {
     await LeadAttributionAudit.create({
@@ -1458,6 +1471,29 @@ exports.ingestLead = asyncHandler(async (req, res) => {
   const leadNotas = sanitizeLeadNoteText(coalesce(leadData.notas, notas));
   const consentValue = coalesce(req.body?.consent, consentimiento_canal);
   const derivedConsentMetadata = deriveLeadConsentMetadata(consentValue);
+  const isCompletedChatbotLead = isCompletedChatbotLeadRequest(body);
+  const isDirectQuickChatSummary = isQuickChatSummaryRequest(body);
+  const isQuickChatOutboxLead = isCompletedChatbotLead || isDirectQuickChatSummary;
+  if (isQuickChatOutboxLead) {
+    const quickChatContact = validateQuickChatContact({
+      body,
+      lead: {
+        telefono: leadTelefono,
+        email: leadEmail,
+      },
+    });
+    if (!quickChatContact.phone_valid || !quickChatContact.email_valid) {
+      const invalidPhone = !quickChatContact.phone_valid;
+      return res.status(422).json({
+        id: null,
+        quickchat_summary_saved: false,
+        error: invalidPhone ? 'quickchat_phone_invalid' : 'quickchat_email_invalid',
+        message: invalidPhone
+          ? 'Introduce un teléfono válido de entre 9 y 15 dígitos'
+          : 'Introduce un email válido o deja el campo vacío',
+      });
+    }
+  }
 
   if (clinicaIdParsed !== null) {
     const clinic = await Clinica.findOne({ where: { id_clinica: clinicaIdParsed } });
@@ -1594,16 +1630,32 @@ exports.ingestLead = asyncHandler(async (req, res) => {
     intake_payload_hash: payloadHash
   };
 
+  let quickChatOutboxJob = null;
   let lead;
   let dedupeConflict = null;
   let shouldEmitLeadCreated = false;
   try {
     lead = await dedupeAndCreateLead(leadPayload, req.body || {}, {
       clinic_match_source: clinicMatchSource || null,
-      clinic_match_value: clinicMatchValue || null
+      clinic_match_value: clinicMatchValue || null,
+      resolved_clinic_id: clinicaIdParsed,
+      resolved_group_id: grupoClinicaIdParsed,
+    }, {
+      quickChatOutbox: isQuickChatOutboxLead,
+      onQuickChatOutboxCreated: ({ job }) => {
+        quickChatOutboxJob = job || null;
+      },
     });
     shouldEmitLeadCreated = true;
   } catch (err) {
+    if (err.status === 422 && isQuickChatOutboxLead) {
+      return res.status(422).json({
+        id: null,
+        quickchat_summary_saved: false,
+        error: err.code || 'invalid_quickchat_contact',
+        message: err.message,
+      });
+    }
     if (err.status === 409) {
       dedupeConflict = err;
       lead = err.existingId ? await LeadIntake.findByPk(err.existingId) : null;
@@ -1621,7 +1673,34 @@ exports.ingestLead = asyncHandler(async (req, res) => {
         if (!lead.clinic_match_value && clinicMatchValue) {
           leadUpdates.clinic_match_value = clinicMatchValue;
         }
-        if (Object.keys(leadUpdates).length) {
+        if (isQuickChatOutboxLead) {
+          try {
+            const persisted = await persistExistingLeadAuditAndQuickChatOutbox({
+              leadId: lead.id,
+              rawPayload: req.body || {},
+              attributionSteps: {
+                clinic_match_source: clinicMatchSource || null,
+                clinic_match_value: clinicMatchValue || null,
+                resolved_clinic_id: clinicaIdParsed,
+                resolved_group_id: grupoClinicaIdParsed,
+              },
+              leadUpdates,
+            });
+            lead = persisted.lead;
+            quickChatOutboxJob = persisted.job || null;
+            shouldEmitLeadCreated = Object.keys(leadUpdates).length > 0;
+          } catch (outboxError) {
+            if (outboxError.status === 422) {
+              return res.status(422).json({
+                id: null,
+                quickchat_summary_saved: false,
+                error: outboxError.code || 'invalid_quickchat_contact',
+                message: outboxError.message,
+              });
+            }
+            throw outboxError;
+          }
+        } else if (Object.keys(leadUpdates).length) {
           await lead.update(leadUpdates);
           shouldEmitLeadCreated = true;
         }
@@ -1631,11 +1710,31 @@ exports.ingestLead = asyncHandler(async (req, res) => {
     }
   }
 
-  // Esta acción pública materializa un aviso interno en QuickChat. Debe
-  // reutilizar el lead del paso save_lead cuando el dedupe lo encuentre y
-  // terminar aquí: no representa una segunda conversión publicitaria ni debe
-  // invocar Meta CAPI, Google Ads o una salida real de WhatsApp.
-  if (isQuickChatSummaryRequest(body)) {
+  // Ambos contratos del widget dejan audit + JobRequest en el mismo commit,
+  // también cuando el lead se deduplica. El fast path consume ese mismo job;
+  // nunca materializa por una segunda vía lateral.
+  let quickChatFastPathOutcome = null;
+  if (isQuickChatOutboxLead && lead && quickChatOutboxJob?.id) {
+    try {
+      quickChatFastPathOutcome = await triggerIntakeQuickChatSummaryFastPath(quickChatOutboxJob.id);
+    } catch (summaryError) {
+      // Defensa final: el servicio relee JobRequest incluso si triggerImmediate
+      // falla. Si también fallase esta envoltura, solo sabemos que el outbox fue
+      // confirmado; no inventamos un estado pending/waiting.
+      quickChatFastPathOutcome = {
+        quickchat_summary_saved: false,
+        quickchat_summary_queued: false,
+        quickchat_summary_outcome_unknown: true,
+        quickchat_summary_state: 'unknown_durable',
+        job_status: null,
+      };
+      console.warn('⚠️ No se pudo consumir inmediatamente el outbox QuickChat:', summaryError.message || summaryError);
+    }
+  }
+
+  // Esta segunda acción pública termina aquí: representa solo el resumen
+  // interno y jamás invoca Meta CAPI, Google Ads ni una salida de WhatsApp.
+  if (isDirectQuickChatSummary) {
     if (lead && shouldEmitLeadCreated) {
       try {
         await emitLeadSocketEvent('lead:created', buildLeadCreatedSocketPayload(lead), {
@@ -1647,80 +1746,63 @@ exports.ingestLead = asyncHandler(async (req, res) => {
       }
     }
 
-    try {
-      const summaryResult = await materializeIntakeQuickChatSummary({
-        leadId: lead?.id || dedupeConflict?.existingId,
-        clinicId: clinicaIdParsed,
-        body,
-        pageUrl: pageUrlValue,
-        landingUrl: landingUrlValue,
-      });
-
-      try {
-        emitQuickChatSummarySocketEvent(summaryResult);
-      } catch (emitErr) {
-        console.warn('⚠️ No se pudo emitir el resumen QuickChat:', emitErr.message || emitErr);
-      }
-
+    if (quickChatFastPathOutcome?.quickchat_summary_saved === true) {
       return res.status(dedupeConflict ? 200 : 201).json({
-        id: summaryResult.lead_id,
+        id: lead?.id || dedupeConflict?.existingId,
         deduped: !!dedupeConflict,
         quickchat_summary_sent: true,
         quickchat_summary_saved: true,
-        quickchat_summary_created: summaryResult.created,
-        conversation_id: summaryResult.conversation_id,
-        message_id: summaryResult.message_id,
+        quickchat_summary_queued: false,
+        quickchat_summary_stale: quickChatFastPathOutcome.stale === true,
+        quickchat_summary_created: quickChatFastPathOutcome.created,
+        conversation_id: quickChatFastPathOutcome.conversation_id,
+        message_id: quickChatFastPathOutcome.message_id,
       });
-    } catch (summaryError) {
-      const status = Number(summaryError?.status);
-      const safeStatus = Number.isInteger(status) && status >= 400 && status < 500 ? status : 500;
-      console.warn('⚠️ No se pudo materializar el resumen QuickChat:', summaryError.message || summaryError);
-      return res.status(safeStatus).json({
+    }
+
+    if (quickChatFastPathOutcome?.quickchat_summary_queued === true) {
+      return res.status(202).json({
         id: lead?.id || dedupeConflict?.existingId || null,
+        deduped: !!dedupeConflict,
         quickchat_summary_sent: false,
         quickchat_summary_saved: false,
-        error: summaryError?.code || 'quickchat_summary_failed',
-        message: safeStatus === 500
-          ? 'No se pudo crear el resumen QuickChat'
-          : summaryError.message,
+        quickchat_summary_queued: true,
+        job_status: quickChatFastPathOutcome.job_status,
       });
     }
+
+    if (quickChatFastPathOutcome?.quickchat_summary_outcome_unknown === true) {
+      return res.status(202).json({
+        id: lead?.id || dedupeConflict?.existingId || null,
+        deduped: !!dedupeConflict,
+        quickchat_summary_sent: false,
+        quickchat_summary_saved: false,
+        quickchat_summary_queued: false,
+        quickchat_summary_outcome_unknown: true,
+        quickchat_summary_state: 'unknown_durable',
+      });
+    }
+
+    const terminalHttpStatus = Number(quickChatFastPathOutcome?.http_status);
+    const safeTerminalStatus = Number.isInteger(terminalHttpStatus)
+      && terminalHttpStatus >= 400
+      && terminalHttpStatus < 500
+      ? terminalHttpStatus
+      : 500;
+    return res.status(safeTerminalStatus).json({
+      id: lead?.id || dedupeConflict?.existingId || null,
+      deduped: !!dedupeConflict,
+      quickchat_summary_sent: false,
+      quickchat_summary_saved: false,
+      quickchat_summary_queued: false,
+      error: quickChatFastPathOutcome?.error_code || 'quickchat_summary_failed',
+      message: quickChatFastPathOutcome?.error_message || 'No se pudo crear el resumen QuickChat',
+    });
   }
 
-  // La primera llamada del widget (`source_detail=chatbot`) ya contiene el
-  // estado final del chat. Materializamos aquí el resumen interno antes de
-  // cualquier proveedor publicitario; la segunda llamada
-  // `chatbot_quickchat` queda como reintento idempotente. Así, aunque el
-  // navegador abandone la página mientras Meta/Google siguen respondiendo, el
-  // lead no queda huérfano en QuickChat y tampoco sacrificamos el tracking.
-  let embeddedQuickChatSummary = null;
-  const isCompletedChatbotLead = String(source_detail || '').trim().toLowerCase() === 'chatbot'
-    && body?.chat_state
-    && typeof body.chat_state === 'object'
-    && !Array.isArray(body.chat_state);
-  if (isCompletedChatbotLead && lead) {
-    try {
-      embeddedQuickChatSummary = await materializeIntakeQuickChatSummary({
-        leadId: lead.id,
-        clinicId: clinicaIdParsed,
-        body: {
-          ...body,
-          source_detail: 'chatbot_quickchat',
-        },
-        pageUrl: pageUrlValue,
-        landingUrl: landingUrlValue,
-      });
-      try {
-        emitQuickChatSummarySocketEvent(embeddedQuickChatSummary);
-      } catch (emitErr) {
-        console.warn('⚠️ No se pudo emitir el resumen QuickChat embebido:', emitErr.message || emitErr);
-      }
-    } catch (summaryError) {
-      // El lead ya está persistido. Conservamos la ingestión y dejamos que la
-      // llamada idempotente explícita del widget pueda reintentar el resumen.
-      console.warn('⚠️ No se pudo materializar el resumen QuickChat embebido:', summaryError.message || summaryError);
-    }
-  }
+  const embeddedQuickChatSummary = quickChatFastPathOutcome?.quickchat_summary_saved === true
+    ? quickChatFastPathOutcome
+    : null;
 
   let formSubmissionEvent = null;
   if (formSubmission && FormSubmissionEvent) {
@@ -1773,6 +1855,59 @@ exports.ingestLead = asyncHandler(async (req, res) => {
     } catch (emitErr) {
       console.warn('⚠️ No se pudo emitir lead:created:', emitErr.message || emitErr);
     }
+  }
+
+  // Un cierre `chatbot` deduplicado ya conserva su audit/outbox y no es una
+  // nueva conversión publicitaria. Devuelve el outcome del mismo job antes de
+  // Meta/Google; el 409 general inferior queda reservado al resto de dedupes.
+  if (dedupeConflict && isCompletedChatbotLead) {
+    if (quickChatFastPathOutcome?.quickchat_summary_saved === true) {
+      return res.status(200).json({
+        id: lead?.id || dedupeConflict.existingId,
+        deduped: true,
+        quickchat_summary_saved: true,
+        quickchat_summary_queued: false,
+        quickchat_summary_stale: quickChatFastPathOutcome.stale === true,
+        quickchat_summary_created: quickChatFastPathOutcome.created,
+        conversation_id: quickChatFastPathOutcome.conversation_id,
+        message_id: quickChatFastPathOutcome.message_id,
+      });
+    }
+    if (quickChatFastPathOutcome?.quickchat_summary_queued === true) {
+      return res.status(202).json({
+        id: lead?.id || dedupeConflict.existingId,
+        deduped: true,
+        quickchat_summary_saved: false,
+        quickchat_summary_queued: true,
+        job_status: quickChatFastPathOutcome.job_status,
+      });
+    }
+    if (quickChatFastPathOutcome?.quickchat_summary_outcome_unknown === true) {
+      return res.status(202).json({
+        id: lead?.id || dedupeConflict.existingId,
+        deduped: true,
+        quickchat_summary_saved: false,
+        quickchat_summary_queued: false,
+        quickchat_summary_outcome_unknown: true,
+        quickchat_summary_state: 'unknown_durable',
+      });
+    }
+    const terminalHttpStatus = Number(quickChatFastPathOutcome?.http_status);
+    const safeTerminalStatus = Number.isInteger(terminalHttpStatus)
+      && terminalHttpStatus >= 400
+      && terminalHttpStatus < 500
+      ? terminalHttpStatus
+      : 500;
+    return res.status(safeTerminalStatus).json({
+      id: lead?.id || dedupeConflict.existingId,
+      deduped: true,
+      quickchat_summary_saved: false,
+      quickchat_summary_queued: false,
+      error: quickChatFastPathOutcome?.error_code || 'quickchat_summary_failed',
+      ...(quickChatFastPathOutcome?.error_message
+        ? { message: quickChatFastPathOutcome.error_message }
+        : {}),
+    });
   }
 
   if (dedupeConflict) {
@@ -1884,14 +2019,60 @@ exports.ingestLead = asyncHandler(async (req, res) => {
     console.warn('⚠️ Google Ads upload error (ingestLead):', adsErr.response?.data || adsErr.message || adsErr);
   }
 
-  res.status(201).json({
+  const quickChatSummaryQueued = isCompletedChatbotLead
+    && quickChatFastPathOutcome?.quickchat_summary_queued === true;
+  const quickChatSummaryOutcomeUnknown = isCompletedChatbotLead
+    && quickChatFastPathOutcome?.quickchat_summary_outcome_unknown === true;
+  const quickChatSummaryFailed = isCompletedChatbotLead
+    && quickChatFastPathOutcome?.quickchat_summary_saved !== true
+    && quickChatFastPathOutcome?.quickchat_summary_queued !== true
+    && quickChatFastPathOutcome?.quickchat_summary_outcome_unknown !== true;
+  const quickChatTerminalHttpStatus = Number(quickChatFastPathOutcome?.http_status);
+  const safeQuickChatTerminalStatus = Number.isInteger(quickChatTerminalHttpStatus)
+    && quickChatTerminalHttpStatus >= 400
+    && quickChatTerminalHttpStatus < 500
+    ? quickChatTerminalHttpStatus
+    : 500;
+  const ingestResponseStatus = quickChatSummaryQueued || quickChatSummaryOutcomeUnknown
+    ? 202
+    : (quickChatSummaryFailed ? safeQuickChatTerminalStatus : 201);
+
+  res.status(ingestResponseStatus).json({
     id: lead.id,
+    ...(dedupeConflict ? { deduped: true } : {}),
     ...(embeddedQuickChatSummary
       ? {
           quickchat_summary_saved: true,
+          quickchat_summary_queued: false,
+          quickchat_summary_stale: embeddedQuickChatSummary.stale === true,
           quickchat_summary_created: embeddedQuickChatSummary.created,
           conversation_id: embeddedQuickChatSummary.conversation_id,
           message_id: embeddedQuickChatSummary.message_id,
+        }
+      : {}),
+    ...(quickChatSummaryQueued
+      ? {
+          quickchat_summary_saved: false,
+          quickchat_summary_queued: true,
+          job_status: quickChatFastPathOutcome.job_status,
+        }
+      : {}),
+    ...(quickChatSummaryOutcomeUnknown
+      ? {
+          quickchat_summary_saved: false,
+          quickchat_summary_queued: false,
+          quickchat_summary_outcome_unknown: true,
+          quickchat_summary_state: 'unknown_durable',
+        }
+      : {}),
+    ...(quickChatSummaryFailed
+      ? {
+          quickchat_summary_saved: false,
+          quickchat_summary_queued: false,
+          error: quickChatFastPathOutcome?.error_code || 'quickchat_summary_failed',
+          ...(quickChatFastPathOutcome?.error_message
+            ? { message: quickChatFastPathOutcome.error_message }
+            : {}),
         }
       : {}),
   });

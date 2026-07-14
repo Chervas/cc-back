@@ -336,7 +336,7 @@ async function enqueueJobRequest({
   maxAttempts = DEFAULT_MAX_ATTEMPTS,
   nextRunAt = null,
   resultSummary = null
-}) {
+}, options = {}) {
   if (!type) {
     throw new Error('type is required to enqueue a job request');
   }
@@ -345,7 +345,8 @@ async function enqueueJobRequest({
   const normalizedStatus = normalizeStatus(status);
   const scopedPayload = buildScopedPayload(payload);
 
-  const job = await JobRequest.create({
+  const JobRequestModel = options.JobRequestModel || JobRequest;
+  const job = await JobRequestModel.create({
     type,
     priority: normalizedPriority,
     status: normalizedStatus,
@@ -357,7 +358,7 @@ async function enqueueJobRequest({
     max_attempts: maxAttempts,
     next_run_at: nextRunAt,
     result_summary: resultSummary
-  });
+  }, options.transaction ? { transaction: options.transaction } : undefined);
 
   return job;
 }

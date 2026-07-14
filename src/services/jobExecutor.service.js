@@ -6,6 +6,7 @@ const whatsappCoexistenceService = require('./whatsappCoexistence.service');
 const whatsappTemplatesService = require('./whatsappTemplates.service');
 const marketingBulkSendsService = require('./marketingBulkSends.service');
 const googleReviewMatchService = require('./googleReviewMatch.service');
+const intakeQuickChatOutboxService = require('./intakeQuickChatOutbox.service');
 const { buildNotificationContent } = require('./notifications.service');
 const { emitNotificationCreated } = require('./notificationsRealtime.service');
 const {
@@ -387,6 +388,9 @@ const JOB_HANDLERS = {
   automation_whatsapp_quiet_send: async (payload = {}) => flowEngineV2Service.runScheduledWhatsappSendJob(payload),
   appointment_automation_schedule_fire: async (payload = {}) => runAppointmentAutomationScheduleJob(payload),
   lead_callback_reminder_notify: async (payload = {}, jobRequest) => runLeadCallbackReminderJob(payload, jobRequest),
+  intake_quickchat_summary_materialize: async (payload = {}) => (
+    intakeQuickChatOutboxService.runIntakeQuickChatSummaryMaterializeJob(payload)
+  ),
 };
 
 function normalizeJobType(value) {
