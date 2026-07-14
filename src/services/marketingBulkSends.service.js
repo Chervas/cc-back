@@ -2414,7 +2414,7 @@ async function sendReviewRatingFollowUp({ list, item, conversation, rating, clin
   const body = isPositive
     ? (googleReviewUrl
       ? (rewardEnabled
-        ? `😊 Queremos obsequiarte con "${rewardDescription || 'un detalle'}" si la compartes en Google. Pincha aquí y se publicará, esto nos ayudará muchísimo porque todo el mundo podrá verla 👉 ${googleReviewUrl}. Tras hacerlo, escríbenos para que te indiquemos cómo tramitar tu regalo.`
+        ? `😊 Queremos obsequiarte con "${rewardDescription || 'un detalle'}" si la compartes en Google. Pincha aquí y se publicará, esto nos ayudará muchísimo porque todo el mundo podrá verla 👉 ${googleReviewUrl}. Tras hacerlo, escríbenos para que te indiquemos cómo tramitar tu regalo.\n\n${buildReviewTeamMentionFollowUpLine(reviewTeamMembersText)}`
         : `😊 Pincha aquí y se publicará en Google, esto nos ayudará muchísimo porque todo el mundo podrá verla. *¡Y por favor! 🙏🙏 déjanos unas breves palabras en la reseña que puedan ayudar a pacientes como tú* 👉 ${googleReviewUrl}\n\n${buildReviewTeamMentionFollowUpLine(reviewTeamMembersText)}`)
       : 'Gracias por tu valoración. Hemos registrado tu opinión.')
     : 'Gracias por responder. ¿Nos ayudarías contándonos el motivo de esta valoración? Puedes escribirlo aquí mismo y lo revisaremos con el equipo.';
@@ -2469,7 +2469,7 @@ async function sendReviewRatingFollowUp({ list, item, conversation, rating, clin
         review_threshold: threshold,
         review_gift_enabled: rewardEnabled,
         review_gift_description: rewardEnabled ? rewardDescription : null,
-        review_team_members_text: rewardEnabled ? null : reviewTeamMembersText || null,
+        review_team_members_text: reviewTeamMembersText || null,
         google_review_link_mode: isPositive && googleReviewUrl ? 'text_url' : null,
         trigger_message_id: triggerMessage?.id || null,
         recipient: followUpRecipient,
