@@ -964,6 +964,54 @@ Tablas pendientes:
 - `MarketingPatientListImports`
 - `MarketingPatientListFieldDefinitions`
 
+#### Importación histórica de pacientes
+
+La importación histórica se usa en `Marketing > Campañas > Conseguir reseñas` y en el flujo de reactivación para convertir un CSV/XLSX clínico en audiencia operativa. No es un importador de leads ni una carga genérica de contactos comerciales.
+
+Puntos de entrada:
+
+- Frontend: `front-dev/src/app/modules/admin/apps/marketing/campanas/campanas.component.ts` y `.html`, bloque de importación de pacientes históricos.
+- Backend: `back-dev/src/services/marketingReactivation.service.js`, principalmente `buildImportedItemPayloads`.
+- API: `POST /api/marketing/reactivation/lists` con `source=import`, `import_rows`, `column_mapping`, `name_format`, `treatment_mappings`, `custom_fields_schema` e `import_file_name`.
+
+De dónde bebe:
+
+- CSV/XLSX subido por el usuario, parseado en frontend con `xlsx`.
+- Mapeo de columnas elegido por el usuario o inferido por alias (`Nombre`, `Móvil`, `Descripción Tratamiento`, `Fecha Fin Realización`, `Ubicación de la Clínica`, etc.).
+- Catálogo de `Tratamientos` para enlazar tratamientos existentes o crear nombres importados si se permite.
+- `Clinicas`/grupo seleccionado para resolver sede. En scope de grupo, una sede parcial como `eixample` solo se asigna si la coincidencia es única.
+- `Pacientes` y `PacienteClinicas` para localizar fichas existentes por teléfono móvil dentro del scope.
+- `CitasPacientes` para excluir pacientes con cita futura y para crear contexto histórico completado.
+- `MarketingContactOptOut` para bajas comerciales/no contactar.
+
+Qué persiste:
+
+- `Pacientes`: crea ficha real si el móvil no existe en el scope. Si existe, reutiliza la ficha y solo completa campos vacíos (`nombre`, `apellidos`, móviles/fijo, email); no sobrescribe datos ya informados.
+- `PacienteClinicas`: vincula el paciente a la sede efectiva si procede.
+- `PatientCustomFields`: guarda columnas extra importadas como campos personalizados de paciente/lista, completando solo valores vacíos en importaciones sucesivas.
+- `Tratamientos`: puede crear tratamientos importados cuando no hay match y la importación lo permite.
+- `CitasPacientes`: crea una cita histórica completada con `motivo = "Importación de pacientes para reactivación"` y título `Histórico: ...` para poder medir última atención/tratamiento. Estas citas son contexto, no agenda activa.
+- `MarketingPatientLists` y `MarketingPatientListItems`: congelan la audiencia importada, estado de cada fila, motivos de exclusión y variables disponibles para la campaña.
+- `MarketingPatientContactEvents`: audita acciones posteriores de exclusión/restauración/envío.
+
+Reglas de seguridad operativa:
+
+- La importación histórica no crea `Lead`.
+- Las citas históricas importadas no deben disparar `appointment_created`, recordatorios de cita ni automatizaciones de agenda. El runtime las omite por `motivo = "Importación de pacientes para reactivación"` o título `Histórico:`.
+- Las filas sin móvil, con teléfono inválido, duplicadas, con sede ambigua/no reconocida, baja comercial o cita futura quedan excluidas con motivo visible; no bloquean la importación completa.
+- Si se reimporta el mismo paciente, el teléfono móvil manda. El paciente se actualiza de forma conservadora: se completan huecos, no se machacan datos existentes.
+
+Nombre y apellidos:
+
+- Si el fichero trae columnas separadas (`Nombre` + `Apellidos`), el backend usa ambas.
+- Si solo trae una columna de nombre completo, `name_format` decide cómo partirlo:
+  - `auto`: invierte `Apellidos, Nombre` si hay coma; sin coma conserva el valor de forma conservadora para no romper nombres compuestos.
+  - `first_last`: `Nombre Apellidos`.
+  - `last_comma_first`: `Apellidos, Nombre`.
+  - `last_last_first`: `Apellido Nombre` o `Apellidos Apellidos Nombre`.
+  - `full`: no separa, usa el texto completo como nombre.
+- Si el CSV solo trae nombre de pila, como exports donde `Nombre = ABEL/ABRIL/ADRIA`, no se pueden completar apellidos porque no existen en el archivo. La UI debe avisarlo en el paso de mapeo.
+
 Reglas:
 
 - Los campos extra importados van en JSON tipado, no en columnas dinámicas.

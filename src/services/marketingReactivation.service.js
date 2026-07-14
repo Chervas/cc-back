@@ -120,10 +120,10 @@ function splitFullName(value, format = 'auto') {
   if (parts.length === 1) {
     return { nombre: parts[0], apellidos: '' };
   }
-  if (nameFormat === 'last_last_first' && parts.length >= 3) {
+  if (nameFormat === 'last_last_first' && parts.length >= 2) {
     return {
-      nombre: parts.slice(2).join(' '),
-      apellidos: parts.slice(0, 2).join(' '),
+      nombre: parts.length >= 3 ? parts.slice(2).join(' ') : parts[1],
+      apellidos: parts.length >= 3 ? parts.slice(0, 2).join(' ') : parts[0],
     };
   }
   if (nameFormat === 'full') {
