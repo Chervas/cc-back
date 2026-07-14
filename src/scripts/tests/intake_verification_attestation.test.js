@@ -58,6 +58,8 @@ function run() {
       runtime_compatible: true,
       consent_mode_detected: true,
       google_consent_mode_detected: true,
+      legacy_chat_detected: true,
+      legacy_chat_provider: 'JoinChat',
       legal_urls_detected: true,
       legal_pages: {
         legal: { configured: true, reachable: true },
@@ -76,7 +78,10 @@ function run() {
     configHash: hash,
     nowMs: nowMs + 1_000,
   };
-  assert.equal(verifyVerificationAttestation(issued.token, expected).valid, true);
+  const verified = verifyVerificationAttestation(issued.token, expected);
+  assert.equal(verified.valid, true);
+  assert.equal(verified.claims.signals.legacy_chat_detected, true);
+  assert.equal(verified.claims.signals.legacy_chat_provider, 'JoinChat');
   assert.equal(verifyVerificationAttestation(`${issued.token}x`, expected).reason, 'attestation_signature_invalid');
   assert.equal(verifyVerificationAttestation(issued.token, { ...expected, scopeId: 6 }).reason, 'attestation_scope_mismatch');
   assert.equal(verifyVerificationAttestation(issued.token, {
