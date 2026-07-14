@@ -1025,10 +1025,15 @@ function buildCustomFieldSchema(rows, mapping, explicitSchema = []) {
 
 async function loadImportTreatments(scope, defaultClinicId, transaction) {
   const groupId = Number(scope?.groupId || 0);
+  const clinicIds = Array.isArray(scope?.clinicIds) ? scope.clinicIds.filter(Number.isInteger) : [];
   const orClauses = [
     { origen: 'sistema' },
-    { clinica_id: defaultClinicId },
   ];
+  if (clinicIds.length) {
+    orClauses.push({ clinica_id: { [Op.in]: clinicIds } });
+  } else if (defaultClinicId) {
+    orClauses.push({ clinica_id: defaultClinicId });
+  }
   if (Number.isInteger(groupId) && groupId > 0) {
     orClauses.push({ grupo_clinica_id: groupId });
   }
@@ -1045,17 +1050,76 @@ async function loadImportTreatments(scope, defaultClinicId, transaction) {
 function indexTreatments(treatments) {
   const byId = new Map();
   const byKey = new Map();
+  const byCode = new Map();
   for (const treatment of treatments || []) {
     const plain = treatment?.get ? treatment.get({ plain: true }) : treatment;
     const id = Number(plain.id_tratamiento || 0);
     if (id) byId.set(id, plain);
     const key = normalizeKey(plain.nombre);
     if (key && !byKey.has(key)) byKey.set(key, plain);
+    const codeKey = normalizeKey(plain.codigo);
+    if (codeKey && !byCode.has(codeKey)) byCode.set(codeKey, plain);
   }
-  return { byId, byKey };
+  return { byId, byKey, byCode };
 }
 
-async function resolveImportedTreatment(rawTreatment, context) {
+function rememberImportedTreatment(context, treatment) {
+  const plain = treatment?.get ? treatment.get({ plain: true }) : treatment;
+  if (!plain?.id_tratamiento) return plain;
+  context.treatmentsById.set(Number(plain.id_tratamiento), plain);
+  const nameKey = normalizeKey(plain.nombre);
+  if (nameKey && !context.treatmentsByKey.has(nameKey)) {
+    context.treatmentsByKey.set(nameKey, plain);
+  }
+  const codeKey = normalizeKey(plain.codigo);
+  if (codeKey && !context.treatmentsByCode.has(codeKey)) {
+    context.treatmentsByCode.set(codeKey, plain);
+  }
+  return plain;
+}
+
+async function findExistingImportedTreatment(mappedName, context) {
+  const mappedKey = normalizeKey(mappedName);
+  const mappedCode = mappedKey.slice(0, 50);
+  const scoped = context.treatmentsByKey.get(mappedKey)
+    || context.treatmentsByCode.get(mappedCode);
+  if (scoped?.id_tratamiento) {
+    return scoped;
+  }
+  if (!mappedCode && !mappedKey) return null;
+
+  const orClauses = [];
+  if (mappedCode) orClauses.push({ codigo: mappedCode });
+  if (mappedName) orClauses.push({ nombre: mappedName });
+  if (!orClauses.length) return null;
+
+  const existing = await Tratamiento.findOne({
+    where: { [Op.or]: orClauses },
+    order: [
+      ['activo', 'DESC'],
+      ['id_tratamiento', 'ASC'],
+    ],
+    transaction: context.transaction,
+  });
+  return existing ? rememberImportedTreatment(context, existing) : null;
+}
+
+async function buildUniqueTreatmentCode(baseCode, transaction) {
+  const base = normalizeKey(baseCode).slice(0, 42) || `tratamiento_${crypto.randomBytes(3).toString('hex')}`;
+  for (let index = 0; index < 20; index += 1) {
+    const suffix = index === 0 ? '' : `_${index + 1}`;
+    const code = `${base}${suffix}`.slice(0, 50);
+    const existing = await Tratamiento.findOne({
+      where: { codigo: code },
+      attributes: ['id_tratamiento'],
+      transaction,
+    });
+    if (!existing) return code;
+  }
+  return `${base.slice(0, 36)}_${crypto.randomBytes(6).toString('hex')}`.slice(0, 50);
+}
+
+async function resolveImportedTreatment(rawTreatment, context, options = {}) {
   const sourceName = titleCaseIfNeeded(rawTreatment || 'Sin tratamiento asignado');
   const sourceKey = normalizeKey(sourceName);
   const mapping = context.treatmentMappings.get(sourceKey);
@@ -1067,15 +1131,17 @@ async function resolveImportedTreatment(rawTreatment, context) {
 
   const mappedName = titleCaseIfNeeded(mapping?.treatment_name || sourceName);
   const mappedKey = normalizeKey(mappedName);
-  const existing = context.treatmentsByKey.get(mappedKey) || context.treatmentsByKey.get(sourceKey);
+  const existing = await findExistingImportedTreatment(mappedName, context)
+    || context.treatmentsByKey.get(sourceKey);
   if (existing?.id_tratamiento) {
     return { id: Number(existing.id_tratamiento), name: existing.nombre || mappedName };
   }
 
-  if (!mapping || mapping.create_if_missing) {
+  if (options.createIfMissing !== false && (!mapping || mapping.create_if_missing)) {
+    const code = await buildUniqueTreatmentCode(mappedKey, context.transaction);
     const created = await Tratamiento.create({
       nombre: mappedName,
-      codigo: normalizeKey(mappedName).slice(0, 50) || null,
+      codigo: code,
       descripcion: 'Creado vacío desde importación de pacientes para reactivación.',
       disciplina: 'general',
       especialidad: null,
@@ -1084,7 +1150,7 @@ async function resolveImportedTreatment(rawTreatment, context) {
       precio_base: 0,
       color: null,
       origen: 'clinica',
-      clinica_id: context.defaultClinicId,
+      clinica_id: Number(options.clinicId || context.defaultClinicId),
       grupo_clinica_id: null,
       activo: true,
       sesiones_defecto: 1,
@@ -1092,9 +1158,7 @@ async function resolveImportedTreatment(rawTreatment, context) {
       requiere_zona: false,
       asignacion_instalacion_tipo: 'cualquiera',
     }, { transaction: context.transaction });
-    const plain = created.get({ plain: true });
-    context.treatmentsById.set(Number(plain.id_tratamiento), plain);
-    context.treatmentsByKey.set(normalizeKey(plain.nombre), plain);
+    const plain = rememberImportedTreatment(context, created);
     return { id: Number(plain.id_tratamiento), name: plain.nombre };
   }
 
@@ -1241,6 +1305,7 @@ async function buildImportedItemPayloads(scope, body, transaction) {
     treatmentMappings,
     treatmentsById: treatmentIndex.byId,
     treatmentsByKey: treatmentIndex.byKey,
+    treatmentsByCode: treatmentIndex.byCode,
     defaultClinicId,
     transaction,
   };
@@ -1283,10 +1348,6 @@ async function buildImportedItemPayloads(scope, body, transaction) {
     const email = readImportValue(row, columnMapping, 'email') || null;
     const importedClinic = readImportValue(row, columnMapping, 'clinic') || null;
     const importedClinicId = resolveImportedClinicId(importedClinic, clinicLookup);
-    const rawTreatment = readImportValue(row, columnMapping, 'treatment') || body.treatment || 'Sin tratamiento asignado';
-    const resolvedTreatment = await resolveImportedTreatment(rawTreatment, treatmentContext);
-    const treatment = resolvedTreatment.name;
-    const treatmentId = resolvedTreatment.id;
     const lastVisit = parseImportDate(readImportValue(row, columnMapping, 'last_visit_at'));
     const customFields = buildCustomFields(row, columnMapping, customFieldsSchema);
     let patient = phoneDigits ? patientByPhone.get(phoneDigits) : null;
@@ -1301,6 +1362,13 @@ async function buildImportedItemPayloads(scope, body, transaction) {
         ? `Sede importada no reconocida dentro del grupo: ${importedClinic}.`
         : 'No se ha podido asociar este contacto a una clínica del grupo. Añade una columna sede/clinica o revisa el teléfono/email.')
       : null;
+    const rawTreatment = readImportValue(row, columnMapping, 'treatment') || body.treatment || 'Sin tratamiento asignado';
+    const resolvedTreatment = await resolveImportedTreatment(rawTreatment, treatmentContext, {
+      clinicId: rowClinicId,
+      createIfMissing: validPhone && !!rowClinicId && !clinicAssignmentError,
+    });
+    const treatment = resolvedTreatment.name;
+    const treatmentId = resolvedTreatment.id;
 
     if (!patient && validPhone && rowClinicId && !clinicAssignmentError) {
       patient = await Paciente.create({
