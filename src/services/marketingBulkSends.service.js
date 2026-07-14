@@ -2037,7 +2037,14 @@ function contextToCampaignWhere(context) {
     : { [Op.and]: [Sequelize.literal(`NOT ${reviewCondition}`)] };
 }
 
-function extractReviewRatingFromInboundMessage(message) {
+function cleanReviewInlineFeedbackReason(value) {
+  return normalizeText(value || '')
+    .replace(/^[\s.,;:!¡¿?\-–—]+/, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function extractReviewRatingDetailsFromInboundMessage(message) {
   const metadata = asPlainObject(message?.metadata);
   const candidates = [
     message?.content,
@@ -2060,25 +2067,41 @@ function extractReviewRatingFromInboundMessage(message) {
   for (const candidate of candidates) {
     const starCount = (candidate.match(/[⭐★]/g) || []).length;
     if (starCount >= 1 && starCount <= 5 && !/[0-9]/.test(candidate)) {
-      return starCount;
+      return { rating: starCount, reason: '', source_text: candidate };
     }
 
     const explicitMatch = candidate.match(/(?:^|[^\d])([1-5])\s*(?:\/\s*5|de\s*5|estrellas?|stars?|⭐|★)(?:$|[^\d])/i);
     if (explicitMatch) {
       const rating = Number(explicitMatch[1]);
-      if (rating >= 1 && rating <= 5) return rating;
+      if (rating >= 1 && rating <= 5) {
+        return {
+          rating,
+          reason: cleanReviewInlineFeedbackReason(candidate.slice(explicitMatch.index + explicitMatch[0].length)),
+          source_text: candidate,
+        };
+      }
     }
 
     if (candidate.length <= 40) {
       const compactMatch = candidate.match(/(?:^|[^\d])([1-5])(?:$|[^\d])/i);
       if (compactMatch) {
         const rating = Number(compactMatch[1]);
-        if (rating >= 1 && rating <= 5) return rating;
+        if (rating >= 1 && rating <= 5) {
+          return {
+            rating,
+            reason: cleanReviewInlineFeedbackReason(candidate.slice(compactMatch.index + compactMatch[0].length)),
+            source_text: candidate,
+          };
+        }
       }
     }
   }
 
-  return null;
+  return { rating: null, reason: '', source_text: '' };
+}
+
+function extractReviewRatingFromInboundMessage(message) {
+  return extractReviewRatingDetailsFromInboundMessage(message).rating || null;
 }
 
 async function findExistingReviewRatingEvent(listId, itemId, options = {}) {
@@ -2139,16 +2162,11 @@ function isReviewRatingTriggerMessage(triggerMessage) {
   return normalizeKey(metadata.dispatch_context) === 'review_request' && isReviewTemplateUsage(metadata.template_usage);
 }
 
-async function materializeReviewPrivateFeedback({ list, item, inboundMessage, triggerMessage, occurredAt }) {
-  const triggerMetadata = asPlainObject(triggerMessage?.metadata);
-  if (!isReviewRequestList(list) || triggerMetadata.kind !== 'review_private_feedback_request') {
-    return { applied: false };
-  }
-  const content = normalizeText(inboundMessage.content);
-  if (!content) return { applied: false };
-  const rating = Number(triggerMetadata.review_rating || 0) || null;
-  const inboundMessageId = Number(inboundMessage.id || 0);
+async function storeReviewPrivateFeedbackEvent({ list, item, inboundMessage, triggerMessage, occurredAt, rating, content, source = 'private_feedback_reply' }) {
+  const normalizedContent = normalizeText(content);
+  if (!isReviewRequestList(list) || !normalizedContent) return { applied: false, reason: 'not_review_feedback' };
 
+  const inboundMessageId = Number(inboundMessage?.id || 0);
   const recentFeedback = await MarketingPatientContactEvent.findAll({
     where: {
       list_id: list.id,
@@ -2158,8 +2176,38 @@ async function materializeReviewPrivateFeedback({ list, item, inboundMessage, tr
     order: [['occurred_at', 'DESC']],
     limit: 25,
   });
-  const alreadyStored = recentFeedback.find((event) => Number(event.payload?.inbound_message_id || 0) === inboundMessageId);
+  const alreadyStored = inboundMessageId
+    ? recentFeedback.find((event) => Number(event.payload?.inbound_message_id || 0) === inboundMessageId)
+    : null;
   if (alreadyStored) return { applied: false, reason: 'already_feedback_received' };
+
+  await MarketingPatientContactEvent.create({
+    list_id: list.id,
+    item_id: item.id,
+    paciente_id: item.paciente_id || null,
+    event_type: 'review_private_feedback_received',
+    channel: 'whatsapp',
+    payload: {
+      inbound_message_id: inboundMessage?.id || null,
+      trigger_message_id: triggerMessage?.id || null,
+      rating: Number(rating || 0) || null,
+      content: normalizedContent,
+      source,
+    },
+    occurred_at: occurredAt,
+  });
+  return { applied: true };
+}
+
+async function materializeReviewPrivateFeedback({ list, item, inboundMessage, triggerMessage, occurredAt }) {
+  const triggerMetadata = asPlainObject(triggerMessage?.metadata);
+  if (!isReviewRequestList(list) || triggerMetadata.kind !== 'review_private_feedback_request') {
+    return { applied: false };
+  }
+  const content = normalizeText(inboundMessage.content);
+  if (!content) return { applied: false };
+  const rating = Number(triggerMetadata.review_rating || 0) || null;
+  const inboundMessageId = Number(inboundMessage.id || 0);
   if (inboundMessageId) {
     const recentRatings = await MarketingPatientContactEvent.findAll({
       where: {
@@ -2176,21 +2224,15 @@ async function materializeReviewPrivateFeedback({ list, item, inboundMessage, tr
     }
   }
 
-  await MarketingPatientContactEvent.create({
-    list_id: list.id,
-    item_id: item.id,
-    paciente_id: item.paciente_id || null,
-    event_type: 'review_private_feedback_received',
-    channel: 'whatsapp',
-    payload: {
-      inbound_message_id: inboundMessage.id,
-      trigger_message_id: triggerMessage?.id || null,
-      rating,
-      content,
-    },
-    occurred_at: occurredAt,
+  return storeReviewPrivateFeedbackEvent({
+    list,
+    item,
+    inboundMessage,
+    triggerMessage,
+    occurredAt,
+    rating,
+    content,
   });
-  return { applied: true };
 }
 
 function buildReviewPrivateFeedbackAckText(item) {
@@ -2353,6 +2395,56 @@ function buildReviewTeamMentionFollowUpLine(teamMembersText) {
   return clean
     ? `*Si mencionas a alguien del equipo en la reseña,* como a ${clean}, ${isPlural ? 'les' : 'le'} haremos llegar el detalle que has tenido acordándote de ${isPlural ? 'ellos' : 'él'} ¡Gracias!`
     : '*Si mencionas a alguien del equipo en la reseña* le haremos llegar el detalle ¡Gracias!';
+}
+
+async function sendReviewRatingFollowUpOrStoreInlineFeedback({ list, item, conversation, rating, clinicId, triggerMessage, inboundMessage, occurredAt, inlineFeedbackReason }) {
+  const reason = cleanReviewInlineFeedbackReason(inlineFeedbackReason);
+  if (Number(rating || 0) > 0 && Number(rating || 0) < 5 && reason) {
+    const feedback = await storeReviewPrivateFeedbackEvent({
+      list,
+      item,
+      inboundMessage,
+      triggerMessage,
+      occurredAt,
+      rating,
+      content: reason,
+      source: 'inline_rating_comment',
+    });
+    await MarketingPatientContactEvent.create({
+      list_id: list.id,
+      item_id: item.id,
+      paciente_id: item.paciente_id || null,
+      event_type: 'review_rating_followup_skipped',
+      channel: 'whatsapp',
+      payload: {
+        status: 'skipped',
+        reason: 'inline_private_feedback_received',
+        kind: 'review_private_feedback_request',
+        rating,
+        trigger_message_id: triggerMessage?.id || null,
+        inbound_message_id: inboundMessage?.id || null,
+        feedback_stored: feedback.applied === true,
+      },
+      occurred_at: occurredAt,
+    });
+    return {
+      sent: false,
+      status: 'skipped',
+      kind: 'review_private_feedback_request',
+      reason: 'inline_private_feedback_received',
+      feedback,
+    };
+  }
+
+  return sendReviewRatingFollowUp({
+    list,
+    item,
+    conversation,
+    rating,
+    clinicId,
+    triggerMessage,
+    occurredAt,
+  });
 }
 
 async function sendReviewRatingFollowUp({ list, item, conversation, rating, clinicId, triggerMessage, occurredAt }) {
@@ -3089,19 +3181,46 @@ async function getLastReviewRequestTemplateForScope(scope) {
     ],
     limit: 75,
   });
+
+  let merged = null;
+  const mergeTextField = (target, source, field) => {
+    if (normalizeText(target[field] || '')) return;
+    const value = normalizeText(source[field] || '');
+    if (value) target[field] = value;
+  };
+
   for (const row of rows) {
     if (!listInScope(row, scope)) continue;
     const serialized = serializeReviewRequestTemplateFromList(row);
-    const hasMessageConfig = !!(
-      serialized?.review_sender_name
-      || serialized?.review_team_photo_url
-      || serialized?.review_team_members_text
-      || serialized?.review_gift_enabled
-      || serialized?.review_gift_description
-    );
-    if (hasMessageConfig) return serialized;
+    if (!serialized) continue;
+
+    if (!merged) {
+      merged = { ...serialized };
+    } else {
+      mergeTextField(merged, serialized, 'review_display_clinic_name');
+      mergeTextField(merged, serialized, 'review_sender_name');
+      mergeTextField(merged, serialized, 'review_team_photo_url');
+      mergeTextField(merged, serialized, 'review_team_members_text');
+      mergeTextField(merged, serialized, 'review_gift_description');
+      if (!merged.review_gift_enabled && serialized.review_gift_enabled) {
+        merged.review_gift_enabled = true;
+      }
+    }
+
+    if (!normalizeText(merged.review_team_photo_overlay_color || '') && serialized.review_team_photo_overlay_color) {
+      merged.review_team_photo_overlay_color = serialized.review_team_photo_overlay_color;
+    }
   }
-  return null;
+
+  const hasMessageConfig = !!(
+    normalizeText(merged?.review_display_clinic_name || '')
+    || normalizeText(merged?.review_sender_name || '')
+    || normalizeText(merged?.review_team_photo_url || '')
+    || normalizeText(merged?.review_team_members_text || '')
+    || merged?.review_gift_enabled
+    || normalizeText(merged?.review_gift_description || '')
+  );
+  return hasMessageConfig ? merged : null;
 }
 
 async function getReviewAutomationTemplate(scope, { includeInactive = false } = {}) {
@@ -7829,7 +7948,8 @@ async function materializeInboundReply({ conversation, inboundMessage }) {
     limit: 1,
   });
   let metadata = asPlainObject(triggerMessage?.metadata);
-  const inboundRatingCandidate = extractReviewRatingFromInboundMessage(inboundMessage);
+  const inboundRatingDetails = extractReviewRatingDetailsFromInboundMessage(inboundMessage);
+  const inboundRatingCandidate = inboundRatingDetails.rating || null;
   if (
     inboundRatingCandidate &&
     metadata.source === 'marketing_bulk_sends' &&
@@ -7918,8 +8038,9 @@ async function materializeInboundReply({ conversation, inboundMessage }) {
     };
   }
   const reviewRating = isReviewRequestList(list) && isReviewRatingTriggerMessage(triggerMessage)
-    ? extractReviewRatingFromInboundMessage(inboundMessage)
+    ? inboundRatingCandidate
     : null;
+  const inlineReviewFeedbackReason = reviewRating ? inboundRatingDetails.reason : '';
   const existingRating = reviewRating
     ? await findExistingReviewRatingEvent(listId, itemId, {
       sameTriggerOnly: isTestTrigger,
@@ -7988,14 +8109,16 @@ async function materializeInboundReply({ conversation, inboundMessage }) {
           },
           occurred_at: repliedAt,
         });
-        await sendReviewRatingFollowUp({
+        await sendReviewRatingFollowUpOrStoreInlineFeedback({
           list,
           item,
           conversation,
           rating: reviewRating,
           clinicId: item.clinica_id || list.clinica_id || conversation.clinic_id || null,
           triggerMessage,
+          inboundMessage,
           occurredAt: repliedAt,
+          inlineFeedbackReason: inlineReviewFeedbackReason,
         });
         await refreshListCounters(listId);
         return {
@@ -8023,14 +8146,16 @@ async function materializeInboundReply({ conversation, inboundMessage }) {
         },
         occurred_at: repliedAt,
       });
-      await sendReviewRatingFollowUp({
+      await sendReviewRatingFollowUpOrStoreInlineFeedback({
         list,
         item,
         conversation,
         rating: reviewRating,
         clinicId: item.clinica_id || list.clinica_id || conversation.clinic_id || null,
         triggerMessage,
+        inboundMessage,
         occurredAt: repliedAt,
+        inlineFeedbackReason: inlineReviewFeedbackReason,
       });
       await refreshListCounters(listId);
       return { applied: true, list_id: listId, item_id: itemId, review_rating: reviewRating };
@@ -8072,14 +8197,16 @@ async function materializeInboundReply({ conversation, inboundMessage }) {
       },
       occurred_at: repliedAt,
     });
-    await sendReviewRatingFollowUp({
+    await sendReviewRatingFollowUpOrStoreInlineFeedback({
       list,
       item,
       conversation,
       rating: reviewRating,
       clinicId: item.clinica_id || list.clinica_id || conversation.clinic_id || null,
       triggerMessage,
+      inboundMessage,
       occurredAt: repliedAt,
+      inlineFeedbackReason: inlineReviewFeedbackReason,
     });
   }
   await refreshListCounters(listId);

@@ -4220,6 +4220,11 @@ async function handleReviewFollowup(node, context) {
   const rating = toIntOrNull(responseOutput?.response_rating)
     || toIntOrNull(context?.last_response_context?.response_rating)
     || extractReviewRatingFromResponseText(responseText);
+  const ratingReason = cleanString(
+    responseOutput?.response_rating_reason
+    || context?.last_response_context?.response_rating_reason
+    || extractReviewRatingDetailsFromResponseText(responseText).reason
+  ) || null;
   const threshold = 5;
   const followupKind = cleanString(resolveTemplateValue(config?.followup_kind, context)) || 'google_review';
   const publicReviewRequested = followupKind === 'google_review';
@@ -4230,6 +4235,7 @@ async function handleReviewFollowup(node, context) {
       status: 'review_followup_tracked',
       followup_kind: followupKind,
       rating,
+      response_rating_reason: ratingReason,
       review_threshold: threshold,
       public_review_requested: publicReviewRequested,
       response_source_node_id: responseSourceNodeId,
@@ -4803,17 +4809,45 @@ function evaluateResponseExists(config, context) {
   return responseText !== undefined && responseText !== null && String(responseText).trim() !== '';
 }
 
-function extractReviewRatingFromResponseText(value) {
+function cleanReviewInlineFeedbackReason(value) {
+  return cleanString(value || '')
+    .replace(/^[\s.,;:!¡¿?\-–—]+/, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function extractReviewRatingDetailsFromResponseText(value) {
   const text = cleanString(value);
-  if (!text) return null;
+  if (!text) return { rating: null, reason: '' };
   const starCount = (text.match(/[⭐★]/g) || []).length;
   if (starCount >= 1 && starCount <= 5 && !/[0-9]/.test(text)) {
-    return starCount;
+    return { rating: starCount, reason: '' };
   }
-  const match = text.match(/(?:^|[^\d])([1-5])(?:\s*(?:\/\s*5|de\s*5|estrellas?|stars?|⭐|★))?(?:$|[^\d])/i);
-  if (!match) return null;
-  const rating = Number(match[1]);
-  return rating >= 1 && rating <= 5 ? rating : null;
+  const explicitMatch = text.match(/(?:^|[^\d])([1-5])\s*(?:\/\s*5|de\s*5|estrellas?|stars?|⭐|★)(?:$|[^\d])/i);
+  if (explicitMatch) {
+    const rating = Number(explicitMatch[1]);
+    return rating >= 1 && rating <= 5
+      ? {
+        rating,
+        reason: cleanReviewInlineFeedbackReason(text.slice(explicitMatch.index + explicitMatch[0].length)),
+      }
+      : { rating: null, reason: '' };
+  }
+  const compactMatch = text.length <= 40
+    ? text.match(/(?:^|[^\d])([1-5])(?:$|[^\d])/i)
+    : null;
+  if (!compactMatch) return { rating: null, reason: '' };
+  const rating = Number(compactMatch[1]);
+  return rating >= 1 && rating <= 5
+    ? {
+      rating,
+      reason: cleanReviewInlineFeedbackReason(text.slice(compactMatch.index + compactMatch[0].length)),
+    }
+    : { rating: null, reason: '' };
+}
+
+function extractReviewRatingFromResponseText(value) {
+  return extractReviewRatingDetailsFromResponseText(value).rating || null;
 }
 
 function parseWaitUntilExpression(expression, context) {
@@ -5499,11 +5533,14 @@ async function resumeWaitingNode(execution, node, context, {
         || listenedOutput?.body
       );
       const respondedAt = new Date().toISOString();
-      const responseRating = extractReviewRatingFromResponseText(responseText);
+      const responseRatingDetails = extractReviewRatingDetailsFromResponseText(responseText);
+      const responseRating = responseRatingDetails.rating || null;
+      const responseRatingReason = responseRatingDetails.reason || null;
       nextContext = mergeNodeOutput(nextContext, node.id, {
         status: 'responded',
         response_text: responseText ?? null,
         response_rating: responseRating,
+        response_rating_reason: responseRatingReason,
         response_lines: String(responseText || '')
           .split(/\r?\n/)
           .map((line) => cleanString(line))
@@ -5541,6 +5578,7 @@ async function resumeWaitingNode(execution, node, context, {
         last_response_context: {
           response_text: responseText ?? null,
           response_rating: responseRating,
+          response_rating_reason: responseRatingReason,
           response_message_id: toIntOrNull(inboundMessage?.id),
           response_message_type: cleanString(inboundMessage?.message_type) || null,
           response_message_preview: cleanString(inboundMessage?.content) || null,
