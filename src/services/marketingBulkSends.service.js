@@ -3047,6 +3047,63 @@ function serializeReviewAutomationTemplate(template) {
   };
 }
 
+function serializeReviewRequestTemplateFromList(list) {
+  if (!list) return null;
+  const plain = list.get ? list.get({ plain: true }) : list;
+  const criteria = asPlainObject(plain.criteria);
+  if (!isReviewTemplateUsage(criteria.template_usage) && criteria.review_request !== true && String(criteria.review_request || '').toLowerCase() !== 'true') {
+    return null;
+  }
+  return {
+    id: plain.id,
+    public_id: null,
+    template_key: `review_request_list_${plain.id}`,
+    version: 1,
+    name: normalizeText(plain.name || plain.list_name || '') || 'Solicitud de reseñas',
+    is_active: ['queued', 'sending', 'sent', 'prepared'].includes(normalizeKey(plain.status)),
+    review_source: normalizeReviewRequestSource(criteria.review_source),
+    review_threshold: normalizeReviewThreshold(criteria.review_threshold),
+    whatsapp_template_id: Number(criteria.whatsapp_template_id || plain.template_id || plain.template_snapshot?.id || 0) || null,
+    template_name: normalizeText(criteria.template_name || plain.template_snapshot?.name || '') || REVIEW_TEMPLATE_NAME,
+    review_gift_enabled: criteria.review_gift_enabled === true || String(criteria.review_gift_enabled || '').toLowerCase() === 'true',
+    review_gift_description: normalizeText(criteria.review_gift_description || '') || null,
+    review_display_clinic_name: normalizeText(criteria.review_display_clinic_name || '') || null,
+    review_sender_name: normalizeText(criteria.review_sender_name || '') || null,
+    review_team_photo_url: normalizeText(criteria.review_team_photo_url || '') || null,
+    review_team_photo_overlay_color: publicMediaPersonalizationService.normalizeHexColor(
+      criteria.review_team_photo_overlay_color || publicMediaPersonalizationService.DEFAULT_OVERLAY_COLOR
+    ),
+    review_team_members_text: normalizeText(criteria.review_team_members_text || '') || null,
+  };
+}
+
+async function getLastReviewRequestTemplateForScope(scope) {
+  const rows = await MarketingPatientList.findAll({
+    where: {
+      objective_id: OBJECTIVE_ID,
+      status: { [Op.ne]: 'archived' },
+    },
+    order: [
+      ['updated_at', 'DESC'],
+      ['id', 'DESC'],
+    ],
+    limit: 75,
+  });
+  for (const row of rows) {
+    if (!listInScope(row, scope)) continue;
+    const serialized = serializeReviewRequestTemplateFromList(row);
+    const hasMessageConfig = !!(
+      serialized?.review_sender_name
+      || serialized?.review_team_photo_url
+      || serialized?.review_team_members_text
+      || serialized?.review_gift_enabled
+      || serialized?.review_gift_description
+    );
+    if (hasMessageConfig) return serialized;
+  }
+  return null;
+}
+
 async function getReviewAutomationTemplate(scope, { includeInactive = false } = {}) {
   if (!AutomationFlowTemplateV2) return null;
   const rows = await AutomationFlowTemplateV2.findAll({
@@ -3559,6 +3616,7 @@ async function getReviewRequestSummary(scope, options = {}) {
         treatment_options: [],
         automation_enabled: false,
         automation_template: null,
+        last_request_template: null,
         approved_template_available: false,
         approved_reminder_template_available: false,
         google_review_url_available: false,
@@ -3817,8 +3875,9 @@ async function getReviewRequestSummary(scope, options = {}) {
     { replacements: { clinicIds }, type: QueryTypes.SELECT }
   );
 
-  const [automationTemplate, approvedReviewTemplate, approvedReminderTemplate, approvedPhotoReviewTemplate, googleReviewUrlAvailable, clinicStatuses] = await Promise.all([
+  const [automationTemplate, lastRequestTemplate, approvedReviewTemplate, approvedReminderTemplate, approvedPhotoReviewTemplate, googleReviewUrlAvailable, clinicStatuses] = await Promise.all([
     getReviewAutomationTemplate(scope, { includeInactive: true }),
+    getLastReviewRequestTemplateForScope(effectiveScope),
     findApprovedReviewWhatsappTemplate(effectiveScope),
     findApprovedReviewReminderWhatsappTemplate(effectiveScope),
     findApprovedReviewWhatsappTemplate(effectiveScope, null, { preferPhoto: true }),
@@ -3891,6 +3950,7 @@ async function getReviewRequestSummary(scope, options = {}) {
       google_rating_summary: googleRatingSummary,
       automation_enabled: automationEnabled,
       automation_template: effectiveAutomationTemplate,
+      last_request_template: lastRequestTemplate,
       approved_template_available: !!effectiveApprovedTemplateId && !!effectiveApprovedReminderTemplateId,
       approved_template_id: effectiveApprovedTemplateId,
       approved_reminder_template_available: !!effectiveApprovedReminderTemplateId,
