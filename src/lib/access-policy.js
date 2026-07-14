@@ -6,6 +6,7 @@ const { isGlobalAdmin } = require('./role-helpers');
 
 const ALLOWED_FEATURE_KEYS = new Set([
   'marketing',
+  'clinic.settings.view',
   'clinic.settings.edit',
   'team.view',
   'team.manage',
@@ -39,6 +40,15 @@ const DEFAULT_FEATURES = {
     propietario: true,
     agencia: true,
     doctor: false,
+    assistant: true,
+    reception: true,
+    admin_staff: true,
+    unknown: true,
+  },
+  'clinic.settings.view': {
+    propietario: true,
+    agencia: true,
+    doctor: true,
     assistant: true,
     reception: true,
     admin_staff: true,
@@ -278,11 +288,19 @@ const FEATURE_CATALOG = [
     sensitive: false,
   },
   {
+    key: 'clinic.settings.view',
+    group: 'administration',
+    kind: 'view',
+    label: 'Ver configuración de clínica',
+    enforcement_status: 'backend',
+    sensitive: true,
+  },
+  {
     key: 'clinic.settings.edit',
     group: 'administration',
     kind: 'action',
     label: 'Editar configuración de clínica',
-    enforcement_status: 'route',
+    enforcement_status: 'backend',
     sensitive: true,
   },
   {
@@ -451,6 +469,10 @@ async function canUserAccessFeature({ actorId, featureKey, clinicId }) {
     where: {
       id_usuario: Number(actorId),
       id_clinica: normalizedClinicId,
+      [Op.or]: [
+        { estado_invitacion: 'aceptada' },
+        { estado_invitacion: null },
+      ],
     },
     attributes: ['rol_clinica', 'subrol_clinica'],
     raw: true,
@@ -467,6 +489,58 @@ async function canUserAccessFeature({ actorId, featureKey, clinicId }) {
   });
 
   return override ?? defaultForFeature(normalizedFeatureKey, roleCode);
+}
+
+function normalizeClinicIds(values) {
+  return Array.from(new Set((Array.isArray(values) ? values : [values])
+    .map((value) => Number.parseInt(String(value), 10))
+    .filter((value) => Number.isInteger(value) && value > 0)));
+}
+
+async function getAccessibleClinicIdsForFeature({ actorId, featureKey, clinicIds = null }) {
+  const normalizedActorId = Number.parseInt(String(actorId), 10);
+  const normalizedFeatureKey = normalizeFeatureKey(featureKey);
+  const requestedClinicIds = clinicIds === null || clinicIds === undefined
+    ? null
+    : normalizeClinicIds(clinicIds);
+
+  if (!Number.isInteger(normalizedActorId) || normalizedActorId <= 0) return [];
+  if (!ALLOWED_FEATURE_KEYS.has(normalizedFeatureKey)) return [];
+  if (requestedClinicIds && requestedClinicIds.length === 0) return [];
+
+  if (isGlobalAdmin(normalizedActorId)) {
+    if (requestedClinicIds) return requestedClinicIds;
+    const clinics = await Clinica.findAll({ attributes: ['id_clinica'], raw: true });
+    return normalizeClinicIds(clinics.map((clinic) => clinic.id_clinica));
+  }
+
+  const membershipWhere = {
+    id_usuario: normalizedActorId,
+    [Op.or]: [
+      { estado_invitacion: 'aceptada' },
+      { estado_invitacion: null },
+    ],
+  };
+  if (requestedClinicIds) {
+    membershipWhere.id_clinica = { [Op.in]: requestedClinicIds };
+  }
+
+  const memberships = await UsuarioClinica.findAll({
+    where: membershipWhere,
+    attributes: ['id_clinica'],
+    raw: true,
+  });
+  const candidateIds = normalizeClinicIds(memberships.map((membership) => membership.id_clinica));
+  const decisions = await Promise.all(candidateIds.map(async (clinicId) => ({
+    clinicId,
+    allowed: await canUserAccessFeature({
+      actorId: normalizedActorId,
+      featureKey: normalizedFeatureKey,
+      clinicId,
+    }),
+  })));
+
+  return decisions.filter((decision) => decision.allowed).map((decision) => decision.clinicId);
 }
 
 async function assertUserCanAccessFeature({ actorId, featureKey, clinicId }) {
@@ -491,6 +565,7 @@ module.exports = {
   assertUserCanAccessFeature,
   canUserAccessFeature,
   defaultForFeature,
+  getAccessibleClinicIdsForFeature,
   getAccessPolicyCatalog,
   normalizeFeatureKey,
   normalizeRoleCode,

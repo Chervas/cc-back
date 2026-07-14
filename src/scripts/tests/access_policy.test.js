@@ -8,6 +8,76 @@ const path = require('node:path');
 const db = require('../../../models');
 const accessPolicy = require('../../lib/access-policy');
 
+async function testClinicSettingsAuthorizationMatrix() {
+  const originals = {
+    membershipFindOne: db.UsuarioClinica.findOne,
+    clinicFindByPk: db.Clinica.findByPk,
+    overrideFindAll: db.AccessPolicyOverride.findAll,
+  };
+  let membership = null;
+  let overrides = [];
+
+  db.UsuarioClinica.findOne = async ({ where }) => {
+    assert.ok(where.id_usuario);
+    assert.ok(where.id_clinica);
+    assert.ok(where[db.Sequelize.Op.or], 'active invitation condition must be enforced');
+    return membership;
+  };
+  db.Clinica.findByPk = async () => ({ id_clinica: 66, grupoClinicaId: 29 });
+  db.AccessPolicyOverride.findAll = async () => overrides;
+
+  try {
+    membership = { rol_clinica: 'propietario', subrol_clinica: null };
+    assert.equal(await accessPolicy.canUserAccessFeature({
+      actorId: 9001,
+      featureKey: 'clinic.settings.view',
+      clinicId: 66,
+    }), true);
+    assert.equal(await accessPolicy.canUserAccessFeature({
+      actorId: 9001,
+      featureKey: 'clinic.settings.edit',
+      clinicId: 66,
+    }), true);
+
+    membership = { rol_clinica: 'personaldeclinica', subrol_clinica: 'Doctores' };
+    assert.equal(await accessPolicy.canUserAccessFeature({
+      actorId: 9002,
+      featureKey: 'clinic.settings.view',
+      clinicId: 66,
+    }), true);
+    assert.equal(await accessPolicy.canUserAccessFeature({
+      actorId: 9002,
+      featureKey: 'clinic.settings.edit',
+      clinicId: 66,
+    }), false);
+
+    overrides = [{ scope_type: 'clinic', scope_id: 66, effect: 'deny' }];
+    assert.equal(await accessPolicy.canUserAccessFeature({
+      actorId: 9002,
+      featureKey: 'clinic.settings.view',
+      clinicId: 66,
+    }), false);
+    overrides = [{ scope_type: 'group', scope_id: 29, effect: 'allow' }];
+    assert.equal(await accessPolicy.canUserAccessFeature({
+      actorId: 9002,
+      featureKey: 'clinic.settings.edit',
+      clinicId: 66,
+    }), true);
+
+    membership = null;
+    overrides = [];
+    assert.equal(await accessPolicy.canUserAccessFeature({
+      actorId: 9003,
+      featureKey: 'clinic.settings.view',
+      clinicId: 66,
+    }), false);
+  } finally {
+    db.UsuarioClinica.findOne = originals.membershipFindOne;
+    db.Clinica.findByPk = originals.clinicFindByPk;
+    db.AccessPolicyOverride.findAll = originals.overrideFindAll;
+  }
+}
+
 async function run() {
   const catalog = accessPolicy.getAccessPolicyCatalog();
   const features = new Map(catalog.features.map((feature) => [feature.key, feature]));
@@ -22,6 +92,33 @@ async function run() {
 
   assert.equal(accessPolicy.defaultForFeature('appointments.view', 'unknown'), true);
   assert.equal(accessPolicy.defaultForFeature('appointments.manage', 'unknown'), false);
+
+  assert.equal(accessPolicy.ALLOWED_FEATURE_KEYS.has('clinic.settings.view'), true);
+  assert.equal(features.get('clinic.settings.view')?.kind, 'view');
+  assert.equal(features.get('clinic.settings.view')?.enforcement_status, 'backend');
+  for (const roleCode of ['propietario', 'agencia', 'doctor', 'assistant', 'reception', 'admin_staff']) {
+    assert.equal(
+      accessPolicy.defaultForFeature('clinic.settings.view', roleCode),
+      true,
+      `${roleCode} must be able to view its assigned clinic by default`,
+    );
+  }
+  // Compatibilidad: asignaciones antiguas cuyo rol aún no normaliza deben poder
+  // leer los ajustes, pero nunca editarlos.
+  assert.equal(accessPolicy.defaultForFeature('clinic.settings.view', 'unknown'), true);
+  assert.equal(features.get('clinic.settings.edit')?.kind, 'action');
+  assert.equal(features.get('clinic.settings.edit')?.enforcement_status, 'backend');
+  assert.equal(accessPolicy.defaultForFeature('clinic.settings.edit', 'propietario'), true);
+  assert.equal(accessPolicy.defaultForFeature('clinic.settings.edit', 'admin_staff'), true);
+  assert.equal(accessPolicy.defaultForFeature('clinic.settings.edit', 'agencia'), false);
+  assert.equal(accessPolicy.defaultForFeature('clinic.settings.edit', 'doctor'), false);
+  assert.equal(accessPolicy.defaultForFeature('clinic.settings.edit', 'assistant'), false);
+  assert.equal(accessPolicy.defaultForFeature('clinic.settings.edit', 'reception'), false);
+  assert.equal(accessPolicy.defaultForFeature('clinic.settings.edit', 'unknown'), false);
+
+  // PUBLIC_MEDIA reutiliza este permiso para review_team_photo: una agencia
+  // asignada al scope debe seguir pudiendo gestionar la foto de resenas.
+  assert.equal(accessPolicy.defaultForFeature('marketing', 'agencia'), true);
 
   assert.equal(accessPolicy.ALLOWED_FEATURE_KEYS.has('consents.view'), true);
   assert.equal(features.get('consents.view')?.kind, 'view');
@@ -64,6 +161,8 @@ async function run() {
     /denyAppointmentManageAccessIfNeeded\(req, res, cita\.clinica_id\)/,
     'Deleting a cancelled appointment must enforce appointments.manage after staging/dev merge'
   );
+
+  await testClinicSettingsAuthorizationMatrix();
 
   console.log('access_policy.test.js OK');
 }

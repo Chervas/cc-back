@@ -1060,9 +1060,35 @@ async function enqueueExecutionForTemplate(cita, template, options = {}) {
     windowIdentifier: options.window_identifier,
   });
 
+  const ensureExecutionDispatch = async (execution, requestedBy) => {
+    if (!['running', 'waiting'].includes(cleanString(execution?.status).toLowerCase())) {
+      return null;
+    }
+    const { job } = await jobRequestsService.enqueueUniqueJobRequest({
+      type: 'automations_v2_execute',
+      priority: 'critical',
+      origin: 'appointment_automation_v2',
+      payload: { execution_id: execution.id },
+      dedupeScope: `flow_execution:${execution.id}`,
+      requestedBy,
+      requestedByName: cleanString(options.user_name) || null,
+      requestedByRole: cleanString(options.user_role) || 'system',
+    });
+    jobScheduler.triggerImmediate(job.id).catch(() => {});
+    return job;
+  };
+
   const existing = await FlowExecutionV2.findOne({ where: { idempotency_key: idempotencyKey } });
   if (existing) {
-    return { success: true, deduplicated: true, execution: existing, template };
+    const requestedBy = toIntOrNull(options.user_id) || toIntOrNull(template.created_by) || 1;
+    const queueJob = await ensureExecutionDispatch(existing, requestedBy);
+    return {
+      success: true,
+      deduplicated: true,
+      execution: existing,
+      template,
+      queue_job_id: queueJob?.id || null,
+    };
   }
 
   const scope = await resolveClinicScope(cita);
@@ -1075,22 +1101,33 @@ async function enqueueExecutionForTemplate(cita, template, options = {}) {
     triggerData: options.trigger_data || null,
   });
 
-  const createdExecution = await FlowExecutionV2.create({
-    idempotency_key: idempotencyKey,
-    template_version_id: template.id,
-    engine_version: template.engine_version || 'v2',
-    status: 'running',
-    context,
-    current_node_id: template.entry_node_id,
-    trigger_type: eventName,
-    trigger_entity_type: 'appointment',
-    trigger_entity_id: citaId,
-    clinic_id: scope.clinic_id,
-    group_id: scope.group_id,
-    created_by: requestedBy,
-  });
+  let createdExecution = null;
+  let executionCreated = false;
+  try {
+    createdExecution = await FlowExecutionV2.create({
+      idempotency_key: idempotencyKey,
+      template_version_id: template.id,
+      engine_version: template.engine_version || 'v2',
+      status: 'running',
+      context,
+      current_node_id: template.entry_node_id,
+      trigger_type: eventName,
+      trigger_entity_type: 'appointment',
+      trigger_entity_id: citaId,
+      clinic_id: scope.clinic_id,
+      group_id: scope.group_id,
+      created_by: requestedBy,
+    });
+    executionCreated = true;
+  } catch (error) {
+    const uniqueConflict = error?.name === 'SequelizeUniqueConstraintError'
+      || /idempotency/i.test(String(error?.message || ''));
+    if (!uniqueConflict) throw error;
+    createdExecution = await FlowExecutionV2.findOne({ where: { idempotency_key: idempotencyKey } });
+    if (!createdExecution) throw error;
+  }
   const io = getIO();
-  if (io) {
+  if (io && executionCreated) {
     const clinicId = toIntOrNull(createdExecution.clinic_id);
     const payload = {
       execution_id: createdExecution.id,
@@ -1108,23 +1145,14 @@ async function enqueueExecutionForTemplate(cita, template, options = {}) {
     else io.emit('flow_execution:created', payload);
   }
 
-  const queueJob = await jobRequestsService.enqueueJobRequest({
-    type: 'automations_v2_execute',
-    priority: 'critical',
-    origin: 'appointment_automation_v2',
-    payload: { execution_id: createdExecution.id },
-    requestedBy,
-    requestedByName: cleanString(options.user_name) || null,
-    requestedByRole: cleanString(options.user_role) || 'system',
-  });
-  jobScheduler.triggerImmediate(queueJob.id).catch(() => {});
+  const queueJob = await ensureExecutionDispatch(createdExecution, requestedBy);
 
   return {
     success: true,
-    deduplicated: false,
+    deduplicated: !executionCreated,
     execution: createdExecution,
     template,
-    queue_job_id: queueJob.id,
+    queue_job_id: queueJob?.id || null,
   };
 }
 
@@ -1600,13 +1628,18 @@ async function fireScheduledTrigger(payload = {}) {
 module.exports = {
   APPOINTMENT_TRIGGER_TYPES,
   SCHEDULED_APPOINTMENT_TRIGGER_TYPES,
+  buildIdempotencyKey,
+  buildScheduledWindowIdentifier,
+  computeScheduledRunAt,
   enqueueExecutionForCita,
   enqueueExecutionForTemplate,
   cancelActiveExecutionsForCita,
   syncScheduledTriggersForCita,
   backfillScheduledTriggersForTemplate,
   fireScheduledTrigger,
+  getTemplateTriggerConfig,
   getExecutionsByAppointmentId,
   getLatestExecutionByAppointmentId,
   getExecutionLogs,
+  isAppointmentConfirmedForReminder,
 };

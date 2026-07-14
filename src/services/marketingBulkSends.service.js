@@ -2345,6 +2345,16 @@ async function sendReviewPrivateFeedbackAcknowledgement({ list, item, conversati
   return { sent: status === 'sent', status };
 }
 
+function buildReviewTeamMentionFollowUpLine(teamMembersText) {
+  const clean = normalizeText(teamMembersText || '').replace(/\s+/g, ' ');
+  const isPlural = clean.includes('|')
+    ? clean.split('|').map((item) => normalizeText(item)).filter(Boolean).length > 1
+    : /\s+o\s+/i.test(clean);
+  return clean
+    ? `*Si mencionas a alguien del equipo en la reseña,* como a ${clean}, ${isPlural ? 'les' : 'le'} haremos llegar el detalle que has tenido acordándote de ${isPlural ? 'ellos' : 'él'} ¡Gracias!`
+    : '*Si mencionas a alguien del equipo en la reseña* le haremos llegar el detalle ¡Gracias!';
+}
+
 async function sendReviewRatingFollowUp({ list, item, conversation, rating, clinicId, triggerMessage, occurredAt }) {
   if (!isReviewRequestList(list) || !rating) return { sent: false, reason: 'not_review_rating' };
 
@@ -2400,11 +2410,12 @@ async function sendReviewRatingFollowUp({ list, item, conversation, rating, clin
   const googleReviewUrl = normalizeText(clinic?.url_dejar_resena || criteria?.link_tracking?.google_review_url || '');
   const rewardEnabled = criteria.review_gift_enabled === true || String(criteria.review_gift_enabled || '').toLowerCase() === 'true';
   const rewardDescription = normalizeText(criteria.review_gift_description || '');
+  const reviewTeamMembersText = normalizeText(criteria.review_team_members_text || '');
   const body = isPositive
     ? (googleReviewUrl
       ? (rewardEnabled
         ? `😊 Queremos obsequiarte con "${rewardDescription || 'un detalle'}" si la compartes en Google. Pincha aquí y se publicará, esto nos ayudará muchísimo porque todo el mundo podrá verla 👉 ${googleReviewUrl}. Tras hacerlo, escríbenos para que te indiquemos cómo tramitar tu regalo.`
-        : `😊 Pincha aquí y se publicará en Google, esto nos ayudará muchísimo porque todo el mundo podrá verla. *¡Y por favor! 🙏🙏 déjanos unas breves palabras en la reseña que puedan ayudar a pacientes como tú* 👉 ${googleReviewUrl}\n\n*Si mencionas a alguien del equipo en la reseña* le haremos llegar el detalle ¡Gracias!`)
+        : `😊 Pincha aquí y se publicará en Google, esto nos ayudará muchísimo porque todo el mundo podrá verla. *¡Y por favor! 🙏🙏 déjanos unas breves palabras en la reseña que puedan ayudar a pacientes como tú* 👉 ${googleReviewUrl}\n\n${buildReviewTeamMentionFollowUpLine(reviewTeamMembersText)}`)
       : 'Gracias por tu valoración. Hemos registrado tu opinión.')
     : 'Gracias por responder. ¿Nos ayudarías contándonos el motivo de esta valoración? Puedes escribirlo aquí mismo y lo revisaremos con el equipo.';
   if (!isWithinWhatsappSessionWindow(occurredAt)) {
@@ -2458,6 +2469,7 @@ async function sendReviewRatingFollowUp({ list, item, conversation, rating, clin
         review_threshold: threshold,
         review_gift_enabled: rewardEnabled,
         review_gift_description: rewardEnabled ? rewardDescription : null,
+        review_team_members_text: rewardEnabled ? null : reviewTeamMembersText || null,
         google_review_link_mode: isPositive && googleReviewUrl ? 'text_url' : null,
         trigger_message_id: triggerMessage?.id || null,
         recipient: followUpRecipient,
@@ -3027,6 +3039,7 @@ function serializeReviewAutomationTemplate(template) {
     review_team_photo_overlay_color: publicMediaPersonalizationService.normalizeHexColor(
       config.review_team_photo_overlay_color || publicMediaPersonalizationService.DEFAULT_OVERLAY_COLOR
     ),
+    review_team_members_text: normalizeText(config.review_team_members_text || '') || null,
   };
 }
 
@@ -3939,6 +3952,7 @@ function buildReviewAutomationNodes({
   reviewSenderName = '',
   reviewTeamPhotoUrl = '',
   reviewTeamPhotoOverlayColor = publicMediaPersonalizationService.DEFAULT_OVERLAY_COLOR,
+  reviewTeamMembersText = '',
 }) {
   const threshold = normalizeReviewThreshold(reviewThreshold);
   const giftEnabled = reviewGiftEnabled === true || String(reviewGiftEnabled || '').toLowerCase() === 'true';
@@ -3976,6 +3990,7 @@ function buildReviewAutomationNodes({
         review_sender_name: normalizeText(reviewSenderName || '') || null,
         review_team_photo_url: normalizeText(reviewTeamPhotoUrl || '') || null,
         review_team_photo_overlay_color: publicMediaPersonalizationService.normalizeHexColor(reviewTeamPhotoOverlayColor),
+        review_team_members_text: normalizeText(reviewTeamMembersText || '') || null,
         require_message_anchor_for_wait: true,
         wait_for_message_ms: 6000,
       },
@@ -4092,6 +4107,7 @@ async function upsertReviewRequestAutomationForClinic(scope, body = {}, userId =
   const reviewTeamPhotoOverlayColor = publicMediaPersonalizationService.normalizeHexColor(
     body.review_team_photo_overlay_color || body.reviewTeamPhotoOverlayColor
   );
+  const reviewTeamMembersText = normalizeText(body.review_team_members_text || body.reviewTeamMembersText || '');
 
   let approvedTemplate = null;
   if (whatsappTemplateId) {
@@ -4170,6 +4186,7 @@ async function upsertReviewRequestAutomationForClinic(scope, body = {}, userId =
     reviewSenderName,
     reviewTeamPhotoUrl,
     reviewTeamPhotoOverlayColor,
+    reviewTeamMembersText,
   });
   const displayName = await buildReviewAutomationDisplayName(scope);
   const payload = {
@@ -4303,6 +4320,7 @@ async function createAndStartReviewRequestForAppointment(options = {}) {
   const reviewTeamPhotoOverlayColor = publicMediaPersonalizationService.normalizeHexColor(
     options.reviewTeamPhotoOverlayColor || options.review_team_photo_overlay_color
   );
+  const reviewTeamMembersText = normalizeText(options.reviewTeamMembersText || options.review_team_members_text || '');
   const candidate = await buildReviewRequestCandidateForAppointment(scope, {
     review_appointment_id: appointmentId,
     review_source: reviewSource,
@@ -4355,6 +4373,7 @@ async function createAndStartReviewRequestForAppointment(options = {}) {
       review_sender_name: reviewSenderName || resolveReviewSenderName({ criteria: {} }),
       review_team_photo_url: reviewTeamPhotoUrl || null,
       review_team_photo_overlay_color: reviewTeamPhotoOverlayColor,
+      review_team_members_text: reviewTeamMembersText || null,
       whatsapp_template_id: template.id,
       link_tracking: {
         enabled: true,
@@ -4929,6 +4948,7 @@ async function createCampaign(scope, body = {}, userId = null) {
         review_team_photo_overlay_color: isReviewRequest
           ? publicMediaPersonalizationService.normalizeHexColor(body.review_team_photo_overlay_color || body.reviewTeamPhotoOverlayColor)
           : null,
+        review_team_members_text: isReviewRequest ? normalizeText(body.review_team_members_text || body.reviewTeamMembersText || '') || null : null,
         review_automation_enabled: false,
         import_file_name: body.import_file_name || null,
         column_mapping: columnMapping,
@@ -6203,6 +6223,9 @@ async function prepareCampaign(scope, campaignId, body = {}, userId = null) {
           || body.reviewTeamPhotoOverlayColor
           || list.criteria?.review_team_photo_overlay_color
         )
+        : null,
+      review_team_members_text: isReviewRequest
+        ? normalizeText(body.review_team_members_text || body.reviewTeamMembersText || list.criteria?.review_team_members_text || '') || null
         : null,
       review_automation_enabled: false,
       link_tracking: buildLinkTrackingCriteria(body, list.criteria || {}),

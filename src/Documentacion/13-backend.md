@@ -142,7 +142,7 @@ Contrato:
 
 - `scope_type`: `group` o `clinic`.
 - `scope_id`: ID del grupo o clínica.
-- `feature_key`: `marketing`, `clinic.settings.edit`, `team.view`, `team.manage`, `billing.reports.view`, `patients.view`, `patients.edit`, `appointments.view`, `appointments.manage`, `consents.view`, `consents.manage`, `quickchat.read_patients`, `quickchat.read_team`, `quickchat.read_leads`, `nutrition.workspace.view`, `nutrition.measurements.create`, `nutrition.reports.finalize`.
+- `feature_key`: `marketing`, `clinic.settings.view`, `clinic.settings.edit`, `team.view`, `team.manage`, `billing.reports.view`, `patients.view`, `patients.edit`, `appointments.view`, `appointments.manage`, `consents.view`, `consents.manage`, `quickchat.read_patients`, `quickchat.read_team`, `quickchat.read_leads`, `nutrition.workspace.view`, `nutrition.measurements.create`, `nutrition.reports.finalize`.
 - `role_code`: `propietario`, `agencia`, `doctor`, `assistant`, `reception`, `admin_staff` o `unknown`.
 - `effect`: `allow` o `deny`; `state=inherit` borra el override.
 
@@ -973,6 +973,7 @@ Reglas:
 - Los nombres de pacientes creados/actualizados desde importación se normalizan a formato nombre propio.
 - Si la importacion de reactivacion trae nombres en formato `Apellidos, Nombre`, backend debe invertirlos al persistir `Pacientes.nombre`/`Pacientes.apellidos` y al materializar variables de lista. Este caso aparece en CSV historicos de eventos o tratamientos.
 - La importacion de pacientes historicos reconoce `phone_landline`/`telefono_fijo` como campo nativo separado de `phone`/`telefono_movil`. `phone` sigue siendo el movil operativo para WhatsApp; `phone_landline` se persiste en `Pacientes.telefono_secundario` cuando se crea el paciente o cuando el paciente existente no lo tenia informado.
+- La importacion de pacientes historicos para resenas reconoce alias habituales de CSV clinico: `descripcion_tratamiento`/`nombre_tratamiento` como tratamiento, `fecha_fin_realizacion`/`fecha_fin_tratamiento`/`fecha_inicio_tratamiento` como fecha clinica y `ubicacion_de_la_clinica`/`ubicacion_clinica` como sede. Si hay fecha de inicio y fin, se prioriza la fecha de fin/realizacion. En scope de grupo, una sede abreviada como `eixample` solo se asigna automaticamente si coincide con una unica clinica del grupo; si es ambigua o no existe, la fila queda excluida con motivo.
 - La importacion de reactivacion solo debe crear pacientes cuando el archivo representa historico clinico/tratamiento de la clinica y se necesita evaluar condiciones de reactivacion. No debe usarse como importador generico de contactos comerciales.
 - Alias de importación soportados para nombre completo: `nombre`, `nombre_completo`, `nombre_y_apellidos`, `nombre_apellidos`, `nombre_paciente`, `full_name`.
 - Los nombres de listas de reactivacion autogeneradas no deben depender del nombre de archivo. Backend compone `Reactivacion · tratamiento · condicion` cuando `source=import` o cuando recibe nombres legacy tipo `Importacion <archivo>`; `criteria.import_file_name` conserva la trazabilidad del fichero.
@@ -4088,6 +4089,7 @@ Actualización 2026-05-06:
 - En reseñas, `appointment_completed` significa que la cita se ha marcado con `estado = completada`, es decir, el paciente ha acudido o la clínica la da por realizada. No equivale a `info_confirmada` ni a `recordatorio_confirmado`, que solo indican confirmación previa del paciente. La automatización vigente no envía en ese instante: entra primero en `delay/fixed` de 24h.
 - La escala de reseña es `1-5`; el filtro público queda fijado en `5/5`. Las plantillas WABA `solicitud_resena` y `recordatorio_resena_sin_respuesta` ya no usan botones rápidos: WhatsApp colapsa 5 opciones bajo "ver todas las opciones" y Meta rechaza emojis/formato en botones. Ambas muestran la escala con estrellas en el cuerpo en orden descendente (`5 ⭐⭐⭐⭐⭐` ... `1 ⭐`) y el paciente responde escribiendo `1`, `2`, `3`, `4` o `5`. El copy base actual incluye `firma_resenas`/`review_sender_name` para firmar el mensaje inicial y abre con: `Soy {{firma_resenas}} de {{nombre_clinica}}. ¿Te puedo hacer una pregunta? Como viste, en la clínica somos una pequeña familia...`; muestra directamente las cinco opciones. En reseñas, las variables `{{nombre}}`, `{{nombre_paciente}}` y equivalentes deben resolverse solo con nombre de pila para que el saludo sea natural; `{{nombre_completo}}` queda reservado para usos explícitos. Al recibir la respuesta, `materializeInboundReply` crea `review_rating_received`; si la valoración es `5/5` envía follow-up con `{{clinica.url_dejar_resena}}` como URL visible en texto, y si es `1-4` pide motivo como opinión privada. Si responde `1-4` y después `5`, se ignora el cambio para no llevarlo a Google; si responde `5` y después baja a `1-4`, se pide motivo privado una sola vez. El texto que llega después de un `review_private_feedback_request` se trata siempre como motivo privado y no se vuelve a parsear como valoración, aunque contenga números como tiempos de espera o fechas; la valoración mostrada se conserva desde el mensaje que originó la petición de motivo. Si por reintento/webhook tardío el mismo inbound ya quedó registrado como `review_rating_received`, no se guarda de nuevo como `review_private_feedback_received` ni se pinta en actividad/resumen como motivo. Se evita `interactive cta_url` para reseñas porque puede abrir Google en un contexto que obliga a iniciar sesión, mientras el enlace directo conserva mejor el flujo de escritura de reseña. Los follow-ups tras respuesta usan texto libre porque el inbound del paciente abre ventana de 24h; si en el futuro se diferencian o retrasan fuera de esa ventana deberán tener fallback por plantilla aprobada. Si el paciente deja motivo, se guarda como `review_private_feedback_received` y se envía acuse `review_private_feedback_ack` para cerrar la conversación. Si el paciente no contesta a la primera solicitud, se envía recordatorio 24h después; si tampoco responde en 24h tras ese recordatorio, se cierra el flujo. Las solicitudes manuales en cola (`mass_sends`) programan el mismo recordatorio/no-respuesta por item para no comportarse distinto a la automatización futura. En envíos de prueba (`mass_campaign_test`), el follow-up debe enviarse al número de prueba guardado en `metadata.recipient`, no al teléfono del contacto usado para renderizar variables; además, cada prueba se evalúa por `trigger_message_id` para poder repetir tests sobre el mismo contacto/lista sin bloquear el nuevo follow-up.
 - Si una campaña/lista de reseñas se prepara con premio, `criteria.review_gift_enabled` y `criteria.review_gift_description` gobiernan el follow-up de `5/5`. Sin premio: mensaje corto con URL visible para publicar en Google. Con premio: texto corto con la descripción del regalo, URL visible y la instrucción de escribir al WhatsApp para tramitarlo. Este follow-up no es plantilla WABA: se envía como mensaje de sesión justo después de recibir la valoración del paciente, aprovechando la ventana de 24h abierta por ese inbound. El backend usa un margen operativo de 23h50; si el webhook/materialización llega fuera de ventana, no intenta enviar texto libre y registra `review_rating_followup_skipped` con `reason=whatsapp_session_window_expired`.
+- Desde 2026-07-14 el follow-up positivo sin premio acepta `criteria.review_team_members_text` para humanizar el cierre: si existe, añade `Si mencionas a alguien del equipo en la reseña, como a Dario el dentista o Vero en recepción, les haremos llegar el detalle...`; si no existe, mantiene el fallback genérico `Si mencionas a alguien del equipo en la reseña...`. Este texto se guarda en criterios de la lista y en la configuración del nodo `action/request_review`, se usa también en campañas automáticas futuras y no requiere aprobación de Meta porque se envía como mensaje de sesión tras la respuesta `5/5`, no como plantilla WABA.
 - La resolución de plantillas de reseñas prioriza copias `APPROVED` cuyo BODY coincide exactamente con el catálogo vigente y contiene el remitente configurable (`firma_resenas`/placeholder 3). Si una automatización antigua apunta a un `whatsapp_template_id` aprobado pero con copy obsoleto, el backend busca primero una copia aprobada del mismo catálogo/WABA con el cuerpo actual antes de reutilizarla; si no existe, no desbloquea el envío. En listados efectivos de plantillas, una copia aprobada compatible tiene prioridad sobre una copia más nueva en revisión para que `Marketing > Plantillas` muestre las plantillas de sistema utilizables como solo lectura. Desde 2026-07-02, `syncTemplatesForWaba` mantiene localmente inactivas las copias de `clinicaclick_solicitar_resena` y `clinicaclick_solicitar_resena_foto` cuyo BODY no incluya el remitente (`firma_resenas`/`review_sender_name`), aunque sigan existiendo en Meta como histórico aprobado/rechazado.
 - En listados de automatizaciones V2 con scope de clínica/grupo, la base global de reseñas no debe mostrarse como automatización operativa. Las filas publicadas deprecadas/inactivas tampoco se muestran en `Todos`; si una clínica no tiene copia operativa activa o borrador visible, `Campañas > Conseguir reseñas` es el punto de activación/configuración. Esto evita que una base de catálogo parezca activa para una clínica.
 - El wizard de reseñas envía `dispatch_config`, `schedule_mode` y `scheduled_at` en `prepare`/`send`. `dispatch_config` define si sale poco a poco o en tandas (`mode`, `batch_size`, `delay_ms`) y si se usa horario de clínica o una ventana concreta (`time_mode`, `business_hours`, `scheduled_time`, `window_start_time`, `window_end_time`). Para `context=review_request`, el backend permite el ritmo recomendado de 1 envío/minuto; el resto de envíos masivos mantienen el mínimo operativo general de 2 minutos. El worker de `marketing_bulk_send_dispatch` debe usar este snapshot guardado en `criteria`, no recalcularlo desde la configuración actual de la clínica.
@@ -4241,3 +4243,115 @@ Plantillas:
 - `WhatsappTemplates.status` es la fuente de verdad WABA. Una plantilla `MessageTemplates` pendiente no está aprobada ni sincronizable por Meta si no existe registro WABA.
 - `PENDING_LOCAL` en una plantilla WABA custom significa que ClinicaClick la guardó localmente, pero Meta no dejó abierta una revisión real. La UI debe mostrarla como `No enviada a Meta` y no como aprobada ni en revisión.
 - `DELETE /api/whatsapp/templates/:id` devuelve `409 template_linked_to_campaigns` si la plantilla está referenciada por campañas/listas no archivadas. La UI debe pedir confirmación explícita antes de ocultarla; las campañas conservan `template_snapshot`, pero no deben poder reutilizar una plantilla oculta.
+
+## Contrato backend: ayuda de acceso a la clinica (2026-07-14)
+
+`Clinicas.configuracion.access_guidance` tiene el contrato:
+
+```json
+{
+  "enabled": true,
+  "directions": "Entra por el pasaje lateral junto a la farmacia.",
+  "image_asset_id": 123,
+  "image_url": "https://media.clinicaclick.com/.../access.jpg"
+}
+```
+
+La ausencia del subarbol equivale a desactivado. Desactivar conserva texto e
+imagen; retirarla pone sus dos campos a `null`. El PATCH de clinica fusiona
+`configuracion` sin sustituir el documento completo y debe preservar
+`agenda_settings`, `disciplinas` y claves concurrentes/desconocidas. La frontera
+backend valida booleano, texto de hasta 500 caracteres, id positivo y URL HTTPS.
+
+Los endpoints de clinica dejaron de confiar solo en la UI: lectura requiere JWT,
+scope efectivo y `clinic.settings.view`; PATCH requiere
+`clinic.settings.edit`. `POST /api/public-media/upload` aplica el mismo scope de
+edicion para `purpose=clinic_access_image`, exige
+`non_clinical_asserted=true`, valida el contenido y normaliza a JPEG sin EXIF.
+El asset conserva auditoria de usuario, clinica, grupo, hash, MIME y key opaco.
+Cada sustitucion genera un key nuevo y versionado. Desactivar o retirar solo
+cambia la referencia de `Clinicas.configuracion`: hoy no borra fisicamente S3,
+por lo que el asset anterior queda huerfano pero auditable hasta que exista un
+ciclo seguro de retencion, comprobacion de referencias y cleanup por
+`JobRequest`.
+
+La capacidad de edicion de ficha no autoriza operaciones de administracion
+global: crear o eliminar una clinica queda limitado al admin global. Mover una
+clinica entre grupos o desvincularla exige ser admin global o propietario
+explicito de todas las clinicas que integran cada grupo afectado, tanto origen
+como destino; un grupo vacio solo puede recibir su primera clinica mediante
+admin global. Las respuestas de solo lectura omiten `datos_fiscales_clinica`;
+los editores autorizados lo reciben en el detalle. El rol `unknown` conserva
+lectura de ajustes por compatibilidad con asignaciones antiguas, nunca edicion.
+
+Automatizaciones V2 aplana el subarbol como
+`clinica.indicaciones_acceso` e `clinica.access_guidance_image_url`. La variable de
+catalogo `indicaciones_acceso_clinica` se enlaza con la primera; es distinta del
+alias legacy `indicaciones`, que sigue significando URL de como llegar.
+
+La automatizacion de las 08:00 expone la decision en su grafo publicado. Como
+las versiones publicadas son inmutables, la migracion crea una version nueva de
+cada familia afectada y conserva intacta la anterior y sus ejecuciones. El tramo
+queda asi: activador -> `condition/field_check` sobre
+`clinica.access_guidance_reminder_enabled` -> envio variante o envio base ->
+`control/join` -> el `condition/ai_analysis` que ya existia. El booleano solo es
+verdadero para `primera_sin_trat`/`primera_con_trat` con la opcion marcada; las
+citas recurrentes entran siempre en la rama base.
+
+El envio de la rama especial vuelve a comprobar texto, asset, plantilla
+`APPROVED`, cuerpo vigente y WABA antes de materializar. Si alguna precondicion
+falla, usa dentro de ese mismo nodo la plantilla base declarada en
+`fallback_*`, dejando `access_guidance_fallback_reason` observable. No se usa
+`on_fail -> otro envio`: ese patron podria duplicar si el resultado del POST a
+Meta fuera ambiguo. El `Message` guarda rama, parametros y
+`template_components`; el envio inmediato y el job de quiet hours usan ese
+snapshot sin volver a decidir.
+
+Antes de seleccionar la variante, el runtime vuelve a comprobar que
+`image_asset_id` siga siendo un `PublicMediaAsset` activo, publico, con
+`purpose=clinic_access_image`, perteneciente a la misma clinica y con la misma
+URL. Un fallo o mismatch cae a la base y queda en
+`access_guidance_fallback_reason`; nunca envia una URL arbitraria guardada por
+fuera del PATCH validado.
+
+La materializacion ordinaria de `action/send_whatsapp` usa
+`flow:<execution_id>:node:<node_id>`. Los dos nodos alternativos de este
+recordatorio declaran el mismo `delivery_slot=same_day_first_visit_reminder`, de
+modo que ambos resuelven a
+`Messages.automation_delivery_key=flow:<execution_id>:slot:same_day_first_visit_reminder:outbound`.
+La clave es unica globalmente por la migracion
+`20260714121000-add-message-automation-delivery-key.js`. El guard se ejecuta
+antes de releer plantilla, conversacion o credenciales, por lo que un replay no
+duplica el recordatorio aunque se reevalúe la condicion o cambie el telefono del
+paciente. El evento interno usa la misma familia con sufijo `:event`.
+
+Para primeras visitas con la opcion activada, incluso cuando se usa fallback a
+la base, el handoff es durable: primero persiste `Message`, rama, cabecera,
+destinatario, WABA/phone y el `jobId` determinista; despues publica BullMQ. Las
+quiet hours persisten ademas `queued_by_quiet_hours` y `scheduled_for` antes de
+crear `JobRequest(type=automation_whatsapp_quiet_send)`. Si falla ese handoff,
+la misma `FlowExecutionV2` queda `waiting` en el nodo actual y el JobRequest la
+reanuda con `retry_current_node`, backoff exponencial y maximo cinco intentos.
+Las citas recurrentes conservan el transporte historico sin este opt-in de
+reintentos.
+
+El worker relee credenciales activas, pero exige que `phoneNumberId` y `wabaId`
+coincidan con el snapshot que selecciono la plantilla. Un cambio de remitente
+falla observablemente en lugar de intentar una plantilla sobre otro WABA. Solo
+se reintentan fallos seguros anteriores a una respuesta del proveedor (DNS de
+conexion, 429 o 5xx explicitos). Timeout, `ECONNRESET` o respuesta ambigua se
+marcan `delivery_unknown` y no repiten el POST; un WAMID ya aceptado tampoco se
+reenvia aunque falle despues una escritura local. Bull conserva completados 24
+horas/1000 jobs y fallidos 7 dias/5000 jobs.
+
+Que el log del nodo o la `FlowExecutionV2` termine en success significa que el
+handoff durable quedo confirmado, no que Meta ya entrego. La fuente final es
+`Messages.status`, `metadata.wamid`/`outbound_retry` y el webhook. El catalogo
+alternativo usa BODY con texto fijo despues de `{{5}}` (`Si necesitas ayuda,
+respóndenos por aquí.`), porque Meta rechaza cuerpos que terminan en variable.
+La migracion de catalogo es transaccional e idempotente: reutiliza una definicion
+canonica existente y aborta si encuentra otra incompatible. Para cada familia
+publica `MAX(version)+1`, desactiva solo la version activa anterior y nunca
+reescribe historicos. Un segundo `up` reutiliza la version marcada; `down`
+reactiva la predecesora y deja catalogo/version nueva inactivos, sin borrar
+plantillas ni filas que puedan estar referenciadas por ejecuciones.

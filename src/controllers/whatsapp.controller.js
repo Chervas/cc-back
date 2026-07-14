@@ -8,6 +8,9 @@ const whatsappPaymentStatusService = require('../services/whatsappPaymentStatus.
 const { enqueueSyncPhonesJob, syncPhonesForWaba } = require('../services/whatsappPhones.service');
 const whatsappCoexistenceService = require('../services/whatsappCoexistence.service');
 const { buildWhatsappTemplateVariableContract } = require('../lib/whatsapp-template-contract');
+const {
+  buildWhatsappTemplateCatalogCoverage,
+} = require('../lib/whatsapp-template-catalog-coverage');
 
 const {
   ClinicMetaAsset,
@@ -354,6 +357,12 @@ function nodeUsesWhatsappTemplate(node, { templateId, templateName, catalogTempl
   const nodeFallbackTemplateId = String(config.fallback_template_id || '').trim();
   const nodeFallbackTemplateName = String(config.fallback_template_name || '').trim().toLowerCase();
   const nodeFallbackCatalogTemplateId = Number(config.fallback_catalog_template_id);
+  const accessVariant = isObject(config.access_guidance_variant)
+    ? config.access_guidance_variant
+    : {};
+  const variantTemplateId = String(accessVariant.template_id || '').trim();
+  const variantTemplateName = String(accessVariant.template_name || '').trim().toLowerCase();
+  const variantCatalogTemplateId = Number(accessVariant.catalog_template_id);
   return (
     (templateId && nodeTemplateId === String(templateId))
     || (!!templateName && !!nodeTemplateName && nodeTemplateName === String(templateName).trim().toLowerCase())
@@ -361,6 +370,9 @@ function nodeUsesWhatsappTemplate(node, { templateId, templateName, catalogTempl
     || (templateId && nodeFallbackTemplateId === String(templateId))
     || (!!templateName && !!nodeFallbackTemplateName && nodeFallbackTemplateName === String(templateName).trim().toLowerCase())
     || (Number.isFinite(nodeFallbackCatalogTemplateId) && nodeFallbackCatalogTemplateId > 0 && nodeFallbackCatalogTemplateId === Number(catalogTemplateId))
+    || (templateId && variantTemplateId === String(templateId))
+    || (!!templateName && !!variantTemplateName && variantTemplateName === String(templateName).trim().toLowerCase())
+    || (Number.isFinite(variantCatalogTemplateId) && variantCatalogTemplateId > 0 && variantCatalogTemplateId === Number(catalogTemplateId))
   );
 }
 
@@ -1651,30 +1663,52 @@ exports.listCatalog = async (req, res) => {
             catalog_template_id: { [Op.in]: catalogIds },
             is_active: true,
           },
-          attributes: ['catalog_template_id', 'name', 'status', 'waba_id', 'clinic_id'],
+          attributes: [
+            'id',
+            'catalog_template_id',
+            'name',
+            'category',
+            'components',
+            'status',
+            'waba_id',
+            'clinic_id',
+            'meta_template_id',
+            'updatedAt',
+          ],
           raw: true,
         })
       : [];
 
-    const clinicIds = Array.from(
-      new Set(
-        instances
-          .map((instance) => Number(instance?.clinic_id))
-          .filter((value) => Number.isFinite(value) && value > 0)
-      )
-    );
-
-    const clinics = clinicIds.length
-      ? await Clinica.findAll({
-          where: { id_clinica: { [Op.in]: clinicIds } },
-          attributes: ['id_clinica', 'nombre_clinica'],
-          raw: true,
-        })
-      : [];
-
-    const clinicNameById = new Map(
-      clinics.map((clinic) => [Number(clinic.id_clinica), String(clinic.nombre_clinica || '').trim() || `Clínica ${clinic.id_clinica}`])
-    );
+    const [clinics, whatsappAssets] = await Promise.all([
+      Clinica.findAll({
+        attributes: ['id_clinica', 'nombre_clinica', 'grupoClinicaId', 'configuracion'],
+        raw: true,
+      }),
+      ClinicMetaAsset.findAll({
+        where: {
+          isActive: true,
+          assetType: { [Op.in]: ['whatsapp_phone_number', 'whatsapp_business_account'] },
+        },
+        attributes: [
+          'id',
+          'clinicaId',
+          'grupoClinicaId',
+          'assignmentScope',
+          'assetType',
+          'wabaId',
+          'phoneNumberId',
+          [
+            db.sequelize.literal(
+              "CASE WHEN waAccessToken IS NOT NULL AND TRIM(waAccessToken) <> '' THEN 1 ELSE 0 END"
+            ),
+            'hasCredentials',
+          ],
+          'isActive',
+          'updatedAt',
+        ],
+        raw: true,
+      }),
+    ]);
 
     const automationCatalogItems = await AutomationFlowCatalog.findAll({
       attributes: ['id', 'name', 'display_name', 'template_key', 'template_version', 'is_active'],
@@ -1702,47 +1736,23 @@ exports.listCatalog = async (req, res) => {
         const isPending = rawPropagationState === 'pending';
         const propagated = !isPending && !!lastPropagatedAt && (!updatedAt || updatedAt.getTime() <= lastPropagatedAt.getTime());
         const familyRows = instancesByCatalogId.get(Number(data?.id)) || [];
-        const versions = familyRows
-          .map((row) => extractTechnicalTemplateVersion(data?.name, row?.name))
-          .filter((value) => Number.isFinite(value));
-        const latestVersion = versions.length ? Math.max(...versions) : null;
-        const latestRows = latestVersion
-          ? familyRows.filter((row) => extractTechnicalTemplateVersion(data?.name, row?.name) === latestVersion)
-          : [];
-        const latestRemoteRows = latestRows.filter((row) => !!String(row?.waba_id || '').trim());
-        const latestClinicRows = latestRows.filter((row) => {
-          const clinicId = Number(row?.clinic_id);
-          if (!Number.isFinite(clinicId) || clinicId <= 0) return false;
-          return String(row?.status || '').trim().toUpperCase() !== 'SIN_CONECTAR';
+        const coverage = buildWhatsappTemplateCatalogCoverage({
+          catalog: data,
+          familyRows,
+          clinics,
+          assets: whatsappAssets,
         });
-        const approvedClinicRows = latestClinicRows.filter((row) => String(row?.status || '').trim().toUpperCase() === 'APPROVED');
         const approvalStale =
           !isPending &&
           (
             (!!lastPropagatedAt && !!updatedAt && updatedAt.getTime() > lastPropagatedAt.getTime()) ||
             (!lastPropagatedAt &&
-              latestRows.length > 0 &&
+              familyRows.length > 0 &&
               !!createdAt &&
               !!updatedAt &&
               updatedAt.getTime() > createdAt.getTime())
           );
-        const unapprovedClinics = latestClinicRows
-          .filter((row) => String(row?.status || '').trim().toUpperCase() !== 'APPROVED')
-          .map((row) => {
-            const clinicId = Number(row?.clinic_id);
-            return {
-              clinic_id: clinicId,
-              clinic_name: clinicNameById.get(clinicId) || `Clínica ${clinicId}`,
-              status: String(row?.status || '').trim().toUpperCase() || null,
-            };
-          });
-        const approvedByCoverage =
-          latestClinicRows.length > 0
-            ? approvedClinicRows.length === latestClinicRows.length
-            : (latestRemoteRows.length > 0 &&
-              latestRemoteRows.every((row) => String(row?.status || '').trim().toUpperCase() === 'APPROVED'));
-        const approved = !isPending && !approvalStale && approvedByCoverage;
-        const approvalTotal = latestClinicRows.length > 0 ? latestClinicRows.length : latestRemoteRows.length;
+        const approved = !isPending && !approvalStale && coverage.approved_by_coverage;
         const associatedAutomations = automationCatalogItems
           .filter((automationItem) => {
             const linkedTemplate = automationLinkedTemplatesByCatalogId.get(Number(automationItem.id));
@@ -1762,9 +1772,9 @@ exports.listCatalog = async (req, res) => {
           ...data,
           propagated,
           approved,
-          approved_count: approved ? (latestClinicRows.length > 0 ? approvedClinicRows.length : latestRemoteRows.length) : 0,
-          approved_total: approvalTotal,
-          unapproved_clinics: unapprovedClinics,
+          approved_count: coverage.approved_count,
+          approved_total: coverage.approved_total,
+          unapproved_clinics: coverage.unapproved_clinics,
           automation_count: associatedAutomations.length,
           automations: associatedAutomations,
           approval_state: isPending

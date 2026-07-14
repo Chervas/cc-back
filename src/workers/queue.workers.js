@@ -1,5 +1,6 @@
 'use strict';
 const { QueryTypes } = require('sequelize');
+const { UnrecoverableError } = require('bullmq');
 const { createWorker } = require('../services/queue.service');
 const whatsappService = require('../services/whatsapp.service');
 const groqAudioService = require('../services/groqAudio.service');
@@ -14,6 +15,7 @@ const whatsappPaymentStatusService = require('../services/whatsappPaymentStatus.
 const whatsappConnectionStatusService = require('../services/whatsappConnectionStatus.service');
 const { getIO } = require('../services/socket.service');
 const { findCanonicalWhatsappConversation } = require('../lib/canonical-conversation');
+const { buildWhatsappOutboundRetryDecision } = require('../lib/whatsapp-outbound-retry');
 const db = require('../../models');
 
 const { Conversation, Message, ClinicMetaAsset, Clinica, WhatsAppWebOrigin } = db;
@@ -734,6 +736,9 @@ createBusinessWorker('outbound_whatsapp', async (job) => {
         templateLanguage,
         templateParams,
         templateComponents,
+        retryOnFailure,
+        resolveClinicConfigAtSend,
+        clinicId,
         clinicConfig,
     } = job.data;
 
@@ -750,7 +755,14 @@ createBusinessWorker('outbound_whatsapp', async (job) => {
     msg.status = 'sending';
     await msg.save();
 
+    let providerAccepted = false;
     try {
+        const effectiveClinicConfig = resolveClinicConfigAtSend === true
+            ? await require('../services/flowEngineV2.service').resolveScheduledWhatsappSenderConfig({
+                metadata: msg.metadata || {},
+                clinicId: Number(clinicId || 0) || null,
+            })
+            : clinicConfig;
         const waResponse = await whatsappService.sendMessage({
             to,
             body,
@@ -759,17 +771,34 @@ createBusinessWorker('outbound_whatsapp', async (job) => {
             templateLanguage,
             templateParams,
             templateComponents,
-            clinicConfig,
+            clinicConfig: effectiveClinicConfig,
         });
+        providerAccepted = true;
         msg.status = 'sent';
-        msg.metadata = { ...(msg.metadata || {}), wa_response: waResponse, wamid: waResponse?.messages?.[0]?.id };
+        const previousRetry = msg.metadata?.outbound_retry;
+        msg.metadata = {
+            ...(msg.metadata || {}),
+            error: null,
+            wa_response: waResponse,
+            wamid: waResponse?.messages?.[0]?.id,
+            ...(previousRetry
+                ? {
+                    outbound_retry: {
+                        ...previousRetry,
+                        retrying: false,
+                        exhausted: false,
+                        completed_at: new Date().toISOString(),
+                    },
+                }
+                : {}),
+        };
         msg.sent_at = new Date();
         await msg.save();
 
         await whatsappConnectionStatusService.clearDisconnectedAfterSuccess({
-            clinicId: clinicConfig?.clinicId || null,
-            phoneId: clinicConfig?.phoneNumberId || msg.metadata?.phoneNumberId || msg.metadata?.phoneId || null,
-            wabaId: clinicConfig?.wabaId || msg.metadata?.wabaId || null,
+            clinicId: effectiveClinicConfig?.clinicId || clinicId || null,
+            phoneId: effectiveClinicConfig?.phoneNumberId || msg.metadata?.phoneNumberId || msg.metadata?.phoneId || null,
+            wabaId: effectiveClinicConfig?.wabaId || msg.metadata?.wabaId || null,
             messageId: msg.id,
             source: 'outbound_whatsapp_worker',
         }).catch(() => null);
@@ -790,58 +819,116 @@ createBusinessWorker('outbound_whatsapp', async (job) => {
             }
         }
     } catch (err) {
-        msg.status = 'failed';
-        msg.metadata = { ...(msg.metadata || {}), error: err?.response?.data || err.message };
+        if (providerAccepted) {
+            // Meta ya devolvio WAMID. Un fallo posterior de DB/socket no debe
+            // volver a ejecutar el POST y duplicar el recordatorio.
+            console.error('[outbound_whatsapp] Fallo local tras aceptacion de Meta', {
+                messageId,
+                error: serializeError(err),
+            });
+            try {
+                msg.status = 'sent';
+                msg.metadata = {
+                    ...(msg.metadata || {}),
+                    post_acceptance_error: serializeError(err),
+                    post_acceptance_error_at: new Date().toISOString(),
+                };
+                await msg.save();
+            } catch (_persistAfterAcceptanceError) {
+                // El webhook por WAMID seguira siendo la fuente final. No se
+                // relanza porque hacerlo podria repetir un envio aceptado.
+            }
+            return;
+        }
+        const retryDecision = buildWhatsappOutboundRetryDecision({
+            error: err,
+            retryOnFailure: retryOnFailure === true && !providerAccepted,
+            attemptsMade: job.attemptsMade,
+            maxAttempts: job.opts?.attempts,
+        });
+        msg.status = providerAccepted
+            ? 'sent'
+            : (retryDecision.should_retry ? 'pending' : 'failed');
+        msg.metadata = {
+            ...(msg.metadata || {}),
+            error: err?.response?.data || err.message,
+            outbound_retry: {
+                enabled: retryDecision.retry_enabled,
+                retryable: retryDecision.retryable,
+                retrying: retryDecision.should_retry,
+                reason: providerAccepted ? 'provider_accepted_postprocess_failed' : retryDecision.reason,
+                current_attempt: retryDecision.current_attempt,
+                max_attempts: retryDecision.max_attempts,
+                attempts_remaining: retryDecision.attempts_remaining,
+                exhausted: retryDecision.retry_enabled
+                    && retryDecision.retryable
+                    && retryDecision.attempts_remaining === 0,
+                recorded_at: new Date().toISOString(),
+            },
+        };
         await msg.save();
 
-        // Si Meta indica que el numero no esta registrado, marcamos el estado
-        // para forzar el paso de registro en el frontend.
-        try {
-            const rawError = err?.response?.data;
-            const nestedError = rawError?.error?.error || rawError?.error || {};
-            const errorCode = nestedError?.code || null;
-            const errorMessage = nestedError?.message || err?.message || 'whatsapp_send_failed';
-            if (errorCode === 133010 && clinicConfig?.phoneNumberId) {
-                const asset = await ClinicMetaAsset.findOne({
-                    where: {
-                        assetType: 'whatsapp_phone_number',
-                        phoneNumberId: clinicConfig.phoneNumberId,
-                        isActive: true,
-                    },
-                });
-                if (asset) {
-                    const additionalData = asset.additionalData || {};
-                    additionalData.registration = {
-                        ...(additionalData.registration || {}),
-                        status: 'not_registered',
-                        requiresPin: true,
-                        lastAttemptAt: new Date().toISOString(),
-                        lastErrorCode: errorCode,
-                        lastErrorMessage: errorMessage,
-                    };
-                    asset.additionalData = additionalData;
-                    await asset.save();
+        if (!providerAccepted) {
+            // Si Meta indica que el numero no esta registrado, marcamos el
+            // estado para forzar el paso de registro en el frontend.
+            try {
+                const rawError = err?.response?.data;
+                const nestedError = rawError?.error?.error || rawError?.error || {};
+                const errorCode = nestedError?.code || null;
+                const errorMessage = nestedError?.message || err?.message || 'whatsapp_send_failed';
+                if (errorCode === 133010 && (clinicConfig?.phoneNumberId || msg.metadata?.phoneNumberId || msg.metadata?.phoneId)) {
+                    const failedPhoneNumberId = clinicConfig?.phoneNumberId || msg.metadata?.phoneNumberId || msg.metadata?.phoneId;
+                    const asset = await ClinicMetaAsset.findOne({
+                        where: {
+                            assetType: 'whatsapp_phone_number',
+                            phoneNumberId: failedPhoneNumberId,
+                            isActive: true,
+                        },
+                    });
+                    if (asset) {
+                        const additionalData = asset.additionalData || {};
+                        additionalData.registration = {
+                            ...(additionalData.registration || {}),
+                            status: 'not_registered',
+                            requiresPin: true,
+                            lastAttemptAt: new Date().toISOString(),
+                            lastErrorCode: errorCode,
+                            lastErrorMessage: errorMessage,
+                        };
+                        asset.additionalData = additionalData;
+                        await asset.save();
+                    }
                 }
-            }
 
-            await whatsappConnectionStatusService.markDisconnectedAfterProviderError({
-                error: rawError || err,
-                clinicId: clinicConfig?.clinicId || null,
-                phoneId: clinicConfig?.phoneNumberId || msg.metadata?.phoneNumberId || msg.metadata?.phoneId || null,
-                wabaId: clinicConfig?.wabaId || msg.metadata?.wabaId || null,
-                messageId: msg.id,
-                recipient: to || msg.metadata?.recipient || null,
-                source: 'outbound_whatsapp_worker',
-            });
-        } catch (regErr) {
-            console.warn('[outbound_whatsapp] No se pudo actualizar estado de registro', regErr?.message || regErr);
+                await whatsappConnectionStatusService.markDisconnectedAfterProviderError({
+                    error: rawError || err,
+                    clinicId: clinicConfig?.clinicId || clinicId || null,
+                    phoneId: clinicConfig?.phoneNumberId || msg.metadata?.phoneNumberId || msg.metadata?.phoneId || null,
+                    wabaId: clinicConfig?.wabaId || msg.metadata?.wabaId || null,
+                    messageId: msg.id,
+                    recipient: to || msg.metadata?.recipient || null,
+                    source: 'outbound_whatsapp_worker',
+                });
+            } catch (regErr) {
+                console.warn('[outbound_whatsapp] No se pudo actualizar estado de registro', regErr?.message || regErr);
+            }
         }
 
         const io = getIO();
         if (io) {
             io.emit('message:updated', { id: msg.id, conversation_id: conversationId, status: msg.status, error: msg.metadata?.error });
         }
-        // No re-lanzamos para evitar reintentos infinitos con token inválido
+        if (
+            retryDecision.should_retry
+            || (retryDecision.retry_enabled && retryDecision.retryable)
+        ) {
+            throw err;
+        }
+        if (retryDecision.retry_enabled) {
+            throw new UnrecoverableError(err?.message || 'whatsapp_send_failed');
+        }
+        // Los demás envíos conservan el comportamiento histórico: un error
+        // funcional o un resultado ya aceptado por Meta no se reintenta.
     }
 });
 

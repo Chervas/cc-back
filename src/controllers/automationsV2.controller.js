@@ -2998,6 +2998,10 @@ function validateNodeConfig(node, nodeMap, templateLookup = {}) {
     const fallbackTemplateName = cleanString(config.fallback_template_name);
     const hasFallbackCatalogTemplateId = !isConfigValueEmpty(config.fallback_catalog_template_id);
     const hasFallbackTemplate = hasFallbackTemplateId || !!fallbackTemplateName || hasFallbackCatalogTemplateId;
+    const accessGuidanceDelivery = isObject(config.access_guidance_delivery)
+      ? config.access_guidance_delivery
+      : null;
+    const isAccessGuidanceVariantNode = cleanString(accessGuidanceDelivery?.role) === 'variant';
     const manualMessageText =
       cleanString(config.manual_message_text) ||
       cleanString(config.manual_text) ||
@@ -3031,6 +3035,16 @@ function validateNodeConfig(node, nodeMap, templateLookup = {}) {
           'node_config_required',
           `El nodo ${nodeId} requiere una plantilla cuando message_mode = template`,
           { node_id: nodeId, node_type: nodeType, key: 'template_id' }
+        )
+      );
+    }
+
+    if (isAccessGuidanceVariantNode && !hasFallbackTemplate) {
+      errors.push(
+        buildValidationError(
+          'node_config_required',
+          `El nodo ${nodeId} requiere una plantilla habitual de respaldo`,
+          { node_id: nodeId, node_type: nodeType, key: 'fallback_template_id' }
         )
       );
     }
@@ -3182,7 +3196,7 @@ function validateNodeConfig(node, nodeMap, templateLookup = {}) {
       }
     }
 
-    if (messageMode === 'manual' && hasFallbackTemplate) {
+    if ((messageMode === 'manual' || isAccessGuidanceVariantNode) && hasFallbackTemplate) {
       const fallbackTemplateId = parseIntOrNull(config.fallback_template_id);
       const fallbackCatalogTemplateId = parseIntOrNull(config.fallback_catalog_template_id);
       const fallbackRow = (fallbackTemplateId && templateLookup.byId instanceof Map

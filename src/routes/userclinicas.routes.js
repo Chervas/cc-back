@@ -4,6 +4,11 @@ const jwt = require('jsonwebtoken');
 const { Op } = require('sequelize');
 const { Clinica, UsuarioClinica, Usuario, GrupoClinica } = require('../../models');
 const { ADMIN_USER_IDS, STAFF_ROLES, isGlobalAdmin } = require('../lib/role-helpers');
+const {
+    filterClinicConfigurationForSettingsAccess,
+    normalizeClinicConfigurationForRead,
+} = require('../lib/clinic-configuration');
+const { canUserAccessFeature } = require('../lib/access-policy');
 
 const router = express.Router();
 const ACTIVE_STAFF_INVITATION_WHERE = {
@@ -13,11 +18,17 @@ const ACTIVE_STAFF_INVITATION_WHERE = {
     ],
 };
 
-const normalizeClinicConfig = (configuracion) => {
-    const cfg = configuracion && typeof configuracion === 'object' ? configuracion : {};
+const normalizeClinicConfig = normalizeClinicConfigurationForRead;
+
+const serializeUserSummary = (usuario) => {
+    const plain = usuario?.get ? usuario.get({ plain: true }) : (usuario || {});
     return {
-        ...cfg,
-        disciplinas: Array.isArray(cfg.disciplinas) && cfg.disciplinas.length > 0 ? cfg.disciplinas : ['dental']
+        id_usuario: plain.id_usuario,
+        nombre: plain.nombre || null,
+        apellidos: plain.apellidos || null,
+        email_usuario: plain.email_usuario || null,
+        url_avatar: plain.url_avatar || null,
+        isAdmin: plain.isAdmin === true,
     };
 };
 
@@ -188,7 +199,7 @@ router.get('/list', async (req, res) => {
                 userType: 'administrador',
                 message: `${clinicas.length} clínicas del sistema (acceso completo)`,
                 // ✅ CAMBIO 4: Incluir el usuario con la bandera isAdmin
-                user: usuario,
+                user: serializeUserSummary(usuario),
                 userRole: 'administrador' // ✅ CAMBIO 5: Establecer el rol principal como administrador
             });
 
@@ -234,6 +245,29 @@ router.get('/list', async (req, res) => {
             ))];
             console.log('👤 Roles únicos extraídos:', rolesUnicos);
 
+            const [canViewSettingsByClinic, canManageSettingsByClinic] = await Promise.all([
+                Promise.all(
+                    (usuario.clinicas || []).map(async (clinica) => [
+                        Number(clinica.id_clinica),
+                        await canUserAccessFeature({
+                            actorId: userId,
+                            featureKey: 'clinic.settings.view',
+                            clinicId: clinica.id_clinica,
+                        }),
+                    ])
+                ).then((entries) => new Map(entries)),
+                Promise.all(
+                (usuario.clinicas || []).map(async (clinica) => [
+                    Number(clinica.id_clinica),
+                    await canUserAccessFeature({
+                        actorId: userId,
+                        featureKey: 'clinic.settings.edit',
+                        clinicId: clinica.id_clinica,
+                    }),
+                ])
+                ).then((entries) => new Map(entries)),
+            ]);
+
             // Formatear respuesta para usuarios normales
             const clinicas = (usuario.clinicas || []).map(clinica => ({
                 id: clinica.id_clinica,
@@ -254,13 +288,18 @@ router.get('/list', async (req, res) => {
                     id_grupo: clinica.grupoClinica.id_grupo,
                     nombre_grupo: clinica.grupoClinica.nombre_grupo
                 } : null,
-                configuracion: normalizeClinicConfig(clinica.configuracion),
+                configuracion: filterClinicConfigurationForSettingsAccess(
+                    clinica.configuracion,
+                    canViewSettingsByClinic.get(Number(clinica.id_clinica)) === true,
+                ),
                 userRole: clinica.UsuarioClinica.rol_clinica,
                 userSubRole: clinica.UsuarioClinica.subrol_clinica,
                 // Permisos basados en el rol asignado
                 permissions: {
                     canMapAssets: STAFF_ROLES.includes(clinica.UsuarioClinica.rol_clinica),
-                    canManageSettings: clinica.UsuarioClinica.rol_clinica === 'propietario',
+                    canViewSettings: canViewSettingsByClinic.get(Number(clinica.id_clinica)) === true,
+                    canManageSettings: canViewSettingsByClinic.get(Number(clinica.id_clinica)) === true
+                        && canManageSettingsByClinic.get(Number(clinica.id_clinica)) === true,
                     canViewReports: STAFF_ROLES.includes(clinica.UsuarioClinica.rol_clinica),
                     isSystemAdmin: false
                 }
@@ -282,7 +321,7 @@ router.get('/list', async (req, res) => {
                 userType: 'normal',
                 message: `${clinicas.length} clínicas asignadas`,
                 // ✅ CAMBIO 6: Incluir el usuario (sin isAdmin para usuarios normales)
-                user: usuario,
+                user: serializeUserSummary(usuario),
                 userRole: rolesUnicos.length > 0 ? rolesUnicos[0] : 'paciente' // ✅ CAMBIO 7: Primer rol disponible
             });
         }
@@ -378,5 +417,9 @@ router.get('/:id', async (req, res) => {
         });
     }
 });
+
+router._private = {
+    serializeUserSummary,
+};
 
 module.exports = router;

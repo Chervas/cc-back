@@ -830,8 +830,12 @@ const IMPORT_ALIASES = {
   phone: ['telefono', 'teléfono', 'tela_fono', 'movil', 'móvil', 'ma_vil', 'telefono_movil', 'phone', 'mobile', 'whatsapp'],
   phone_landline: ['telefono_fijo', 'teléfono_fijo', 'telefono_secundario', 'teléfono_secundario', 'fijo', 'phone_landline', 'landline', 'fixed_phone', 'telefono_casa'],
   email: ['email', 'correo', 'correo_electronico', 'mail'],
-  treatment: ['tratamiento', 'treatment', 'servicio', 'procedimiento'],
+  treatment: ['tratamiento', 'descripcion_tratamiento', 'descripción_tratamiento', 'nombre_tratamiento', 'tratamiento_realizado', 'treatment', 'servicio', 'procedimiento'],
   last_visit_at: [
+    'fecha_fin_realizacion',
+    'fecha_fin_realización',
+    'fecha_fin_tratamiento',
+    'fecha_inicio_tratamiento',
     'fecha_tratamiento',
     'fecha_de_tratamiento',
     'fecha_realizacion',
@@ -843,7 +847,7 @@ const IMPORT_ALIASES = {
     'last_visit',
     'last_visit_at',
   ],
-  clinic: ['clinica', 'clínica', 'sede', 'centro', 'clinic', 'location'],
+  clinic: ['clinica', 'clínica', 'sede', 'centro', 'ubicacion_de_la_clinica', 'ubicación_de_la_clínica', 'ubicacion_clinica', 'ubicación_clínica', 'ubicacion', 'ubicación', 'clinic', 'location'],
 };
 
 function findImportHeader(headers, aliases) {
@@ -879,14 +883,18 @@ async function loadImportClinicLookup(scope, transaction) {
   });
   const byId = new Map();
   const byName = new Map();
+  const searchEntries = [];
   for (const clinic of clinics) {
     const id = Number(clinic.id_clinica);
     if (!id) continue;
     byId.set(id, id);
     const normalizedName = normalizeKey(clinic.nombre_clinica || '');
-    if (normalizedName) byName.set(normalizedName, id);
+    if (normalizedName) {
+      byName.set(normalizedName, id);
+      searchEntries.push({ id, key: normalizedName });
+    }
   }
-  return { byId, byName, clinicIds };
+  return { byId, byName, clinicIds, searchEntries };
 }
 
 function resolveImportedClinicId(importedClinic, lookup) {
@@ -896,7 +904,24 @@ function resolveImportedClinicId(importedClinic, lookup) {
   if (Number.isInteger(numericId) && lookup.byId.has(numericId)) {
     return numericId;
   }
-  return lookup.byName.get(normalizeKey(normalized)) || null;
+  const normalizedKey = normalizeKey(normalized);
+  const exact = lookup.byName.get(normalizedKey);
+  if (exact) return exact;
+  if (normalizedKey.length < 3) return null;
+
+  const entries = Array.isArray(lookup.searchEntries)
+    ? lookup.searchEntries
+    : Array.from(lookup.byName.entries()).map(([key, id]) => ({ key, id }));
+  const matches = Array.from(new Set(
+    entries
+      .filter((entry) => entry?.key && (
+        entry.key.includes(normalizedKey)
+        || normalizedKey.includes(entry.key)
+      ))
+      .map((entry) => Number(entry.id))
+      .filter(Boolean)
+  ));
+  return matches.length === 1 ? matches[0] : null;
 }
 
 function readImportValue(row, mapping, field) {

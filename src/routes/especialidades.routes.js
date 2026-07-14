@@ -2,6 +2,7 @@
 const express = require('express');
 const router = express.Router();
 const ctrl = require('../controllers/especialidades.controller');
+const authMiddleware = require('./auth.middleware');
 
 // Contratos de areas medicas consumidos por catalogo/agenda/workspaces
 router.get('/area-contracts', ctrl.getMedicalAreaContracts);
@@ -15,16 +16,16 @@ router.patch('/sistema/:id', ctrl.updateEspecialidadSistema);
 router.delete('/sistema/:id', ctrl.deleteEspecialidadSistema);
 
 // Especialidades de clínica (sistema + personalizadas)
-router.get('/clinica/:id/en-uso', ctrl.checkEspecialidadClinicaEnUso);
-router.get('/clinica/:clinicaId', ctrl.getEspecialidadesClinica); // vía path param
-router.get('/clinica', ctrl.getEspecialidadesClinica);
-router.post('/clinica', ctrl.createEspecialidadClinica);
-router.patch('/clinica/:id', ctrl.updateEspecialidadClinica);
-router.delete('/clinica/:id', ctrl.deleteEspecialidadClinica);
+router.get('/clinica/:id/en-uso', authMiddleware, ctrl.checkEspecialidadClinicaEnUso);
+router.get('/clinica/:clinicaId', authMiddleware, ctrl.getEspecialidadesClinica); // vía path param
+router.get('/clinica', authMiddleware, ctrl.getEspecialidadesClinica);
+router.post('/clinica', authMiddleware, ctrl.createEspecialidadClinica);
+router.patch('/clinica/:id', authMiddleware, ctrl.updateEspecialidadClinica);
+router.delete('/clinica/:id', authMiddleware, ctrl.deleteEspecialidadClinica);
 
 // Relaciones de especialidades del sistema con clínica
-router.post('/clinica/sistema', ctrl.addEspecialidadSistemaAClinica);
-router.delete('/clinica/sistema/:clinicaId/:especialidadId', ctrl.removeEspecialidadSistemaDeClinica);
+router.post('/clinica/sistema', authMiddleware, ctrl.addEspecialidadSistemaAClinica);
+router.delete('/clinica/sistema/:clinicaId/:especialidadId', authMiddleware, ctrl.removeEspecialidadSistemaDeClinica);
 
 // Usuario-Especialidades
 router.get('/usuario/:id_usuario', ctrl.getEspecialidadesUsuario);
