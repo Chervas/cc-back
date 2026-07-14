@@ -269,21 +269,32 @@ async function testReplayMaterializationUsesOneGlobalDeliveryKey() {
       { id: 9001 },
       { id: 'send-reminder' }
     );
+    const sharedSlotKey = flowEngineV2Service.buildAutomationWhatsappDeliveryKey(
+      { id: 9001 },
+      { id: 'send-access', config: { delivery_slot: 'same_day_first_visit_reminder' } }
+    );
+    const sharedSlotKeyFromOtherBranch = flowEngineV2Service.buildAutomationWhatsappDeliveryKey(
+      { id: 9001 },
+      { id: 'send-base', config: { delivery_slot: 'same_day_first_visit_reminder' } }
+    );
+    assert.equal(deliveryKey, 'flow:9001:node:send-reminder');
+    assert.equal(sharedSlotKey, 'flow:9001:slot:same_day_first_visit_reminder');
+    assert.equal(sharedSlotKeyFromOtherBranch, sharedSlotKey);
     const values = {
       conversation_id: 601,
       direction: 'outbound',
       message_type: 'template',
       status: 'pending',
-      metadata: { automation_delivery_key: deliveryKey },
+      metadata: { automation_delivery_key: sharedSlotKey },
     };
     const [first, raced] = await Promise.all([
       flowEngineV2Service.findOrCreateAutomationWhatsappMessage({
-        deliveryKey,
+        deliveryKey: sharedSlotKey,
         messageType: 'template',
         values,
       }),
       flowEngineV2Service.findOrCreateAutomationWhatsappMessage({
-        deliveryKey,
+        deliveryKey: sharedSlotKeyFromOtherBranch,
         messageType: 'template',
         values,
       }),
@@ -293,7 +304,7 @@ async function testReplayMaterializationUsesOneGlobalDeliveryKey() {
     assert.equal(stored.size, 1);
     assert.equal(
       calls[0].where.automation_delivery_key,
-      'flow:9001:node:send-reminder:outbound'
+      'flow:9001:slot:same_day_first_visit_reminder:outbound'
     );
 
     const migrationSource = fs.readFileSync(

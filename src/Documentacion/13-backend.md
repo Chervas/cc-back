@@ -4288,12 +4288,23 @@ Automatizaciones V2 aplana el subarbol como
 catalogo `indicaciones_acceso_clinica` se enlaza con la primera; es distinta del
 alias legacy `indicaciones`, que sigue significando URL de como llegar.
 
-La seleccion condicional sucede en el mismo `action/send_whatsapp`. Solo
-`primera_sin_trat` y `primera_con_trat` pueden tomar la variante. Las demas citas
-conservan la plantilla base heredada. Config incompleta o plantilla efectiva no
-`APPROVED` produce fallback base observable. El `Message` guarda rama,
-parametros y `template_components`; el envio inmediato y el job de quiet hours
-usan ese snapshot sin volver a leer configuracion.
+La automatizacion de las 08:00 expone la decision en su grafo publicado. Como
+las versiones publicadas son inmutables, la migracion crea una version nueva de
+cada familia afectada y conserva intacta la anterior y sus ejecuciones. El tramo
+queda asi: activador -> `condition/field_check` sobre
+`clinica.access_guidance_reminder_enabled` -> envio variante o envio base ->
+`control/join` -> el `condition/ai_analysis` que ya existia. El booleano solo es
+verdadero para `primera_sin_trat`/`primera_con_trat` con la opcion marcada; las
+citas recurrentes entran siempre en la rama base.
+
+El envio de la rama especial vuelve a comprobar texto, asset, plantilla
+`APPROVED`, cuerpo vigente y WABA antes de materializar. Si alguna precondicion
+falla, usa dentro de ese mismo nodo la plantilla base declarada en
+`fallback_*`, dejando `access_guidance_fallback_reason` observable. No se usa
+`on_fail -> otro envio`: ese patron podria duplicar si el resultado del POST a
+Meta fuera ambiguo. El `Message` guarda rama, parametros y
+`template_components`; el envio inmediato y el job de quiet hours usan ese
+snapshot sin volver a decidir.
 
 Antes de seleccionar la variante, el runtime vuelve a comprobar que
 `image_asset_id` siga siendo un `PublicMediaAsset` activo, publico, con
@@ -4302,13 +4313,16 @@ URL. Un fallo o mismatch cae a la base y queda en
 `access_guidance_fallback_reason`; nunca envia una URL arbitraria guardada por
 fuera del PATCH validado.
 
-La materializacion de cada `action/send_whatsapp` usa
-`Messages.automation_delivery_key=flow:<execution_id>:node:<node_id>:outbound`,
-unica globalmente por la migracion
+La materializacion ordinaria de `action/send_whatsapp` usa
+`flow:<execution_id>:node:<node_id>`. Los dos nodos alternativos de este
+recordatorio declaran el mismo `delivery_slot=same_day_first_visit_reminder`, de
+modo que ambos resuelven a
+`Messages.automation_delivery_key=flow:<execution_id>:slot:same_day_first_visit_reminder:outbound`.
+La clave es unica globalmente por la migracion
 `20260714121000-add-message-automation-delivery-key.js`. El guard se ejecuta
 antes de releer plantilla, conversacion o credenciales, por lo que un replay no
-duplica el recordatorio aunque cambie el telefono del paciente. El evento
-interno usa la misma familia con sufijo `:event`.
+duplica el recordatorio aunque se reevalúe la condicion o cambie el telefono del
+paciente. El evento interno usa la misma familia con sufijo `:event`.
 
 Para primeras visitas con la opcion activada, incluso cuando se usa fallback a
 la base, el handoff es durable: primero persiste `Message`, rama, cabecera,
@@ -4334,7 +4348,9 @@ handoff durable quedo confirmado, no que Meta ya entrego. La fuente final es
 `Messages.status`, `metadata.wamid`/`outbound_retry` y el webhook. El catalogo
 alternativo usa BODY con texto fijo despues de `{{5}}` (`Si necesitas ayuda,
 respóndenos por aquí.`), porque Meta rechaza cuerpos que terminan en variable.
-La migracion de catalogo es transaccional, no pisa una variante preexistente y
-su `down` reconoce nombres tecnicos versionados, limpia el binding de nodos y
-desactiva instancias locales antes de retirar el catalogo. No puede borrar una
-plantilla que ya se haya creado externamente en Meta.
+La migracion de catalogo es transaccional e idempotente: reutiliza una definicion
+canonica existente y aborta si encuentra otra incompatible. Para cada familia
+publica `MAX(version)+1`, desactiva solo la version activa anterior y nunca
+reescribe historicos. Un segundo `up` reutiliza la version marcada; `down`
+reactiva la predecesora y deja catalogo/version nueva inactivos, sin borrar
+plantillas ni filas que puedan estar referenciadas por ejecuciones.

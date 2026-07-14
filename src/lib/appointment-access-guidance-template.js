@@ -45,6 +45,13 @@ function templateHasImageHeader(template) {
   ));
 }
 
+function isAccessGuidanceReminderBranchEnabled({ appointmentType, accessGuidance } = {}) {
+  const normalizedAppointmentType = cleanText(appointmentType).toLowerCase();
+  const normalizedAccessGuidance = normalizeAccessGuidance(accessGuidance);
+  return FIRST_VISIT_APPOINTMENT_TYPE_SET.has(normalizedAppointmentType)
+    && normalizedAccessGuidance.enabled;
+}
+
 function evaluateAccessGuidanceVariantEligibility({
   appointmentType,
   accessGuidance,
@@ -145,7 +152,15 @@ function selectAccessGuidanceTemplateBranch({
 
   const expectedWabaId = cleanText(targetWabaId);
   const templateWabaId = cleanText(plain?.waba_id || plain?.wabaId);
-  if (expectedWabaId && templateWabaId !== expectedWabaId) {
+  if (!expectedWabaId) {
+    return {
+      ...baseDecision,
+      fallback_used: true,
+      fallback_reason: 'access_guidance_target_waba_unverified',
+      variant_status: status,
+    };
+  }
+  if (templateWabaId !== expectedWabaId) {
     return {
       ...baseDecision,
       fallback_used: true,
@@ -224,6 +239,7 @@ module.exports = {
   buildAccessGuidanceTemplateComponents,
   buildAutomationWhatsappTransportJobOptions,
   evaluateAccessGuidanceVariantEligibility,
+  isAccessGuidanceReminderBranchEnabled,
   isHttpsUrl,
   selectAccessGuidanceTemplateBranch,
   templateHasImageHeader,

@@ -19,6 +19,7 @@ const {
   buildAccessGuidanceTemplateComponents,
   buildAutomationWhatsappTransportJobOptions,
   evaluateAccessGuidanceVariantEligibility,
+  isAccessGuidanceReminderBranchEnabled,
   selectAccessGuidanceTemplateBranch,
 } = require('../lib/appointment-access-guidance-template');
 const {
@@ -720,6 +721,11 @@ async function enrichContextForTemplateResolution(context, targets = {}) {
     if (clinic) {
       const clinicConfiguration = parseClinicConfig(clinic.configuracion) || {};
       const accessGuidance = normalizeAccessGuidance(clinicConfiguration.access_guidance);
+      const appointmentType = cleanString(
+        out?.cita?.tipo_cita
+        || out?.appointment?.tipo_cita
+        || out?.trigger?.data?.tipo_cita
+      );
       const clinicPatchBase = {
         id: toIntOrNull(clinic.id_clinica),
         id_clinica: toIntOrNull(clinic.id_clinica),
@@ -737,6 +743,10 @@ async function enrichContextForTemplateResolution(context, targets = {}) {
         configuracion: clinic.configuracion || null,
         access_guidance: accessGuidance,
         access_guidance_enabled: accessGuidance.enabled,
+        access_guidance_reminder_enabled: isAccessGuidanceReminderBranchEnabled({
+          appointmentType,
+          accessGuidance,
+        }),
         indicaciones_acceso: accessGuidance.directions,
         access_guidance_image_asset_id: accessGuidance.image_asset_id,
         access_guidance_image_url: accessGuidance.image_url,
@@ -2895,7 +2905,14 @@ async function loadConfiguredWhatsappTemplate(
 function buildAutomationWhatsappDeliveryKey(execution, node) {
   const executionId = toIntOrNull(execution?.id);
   const nodeId = cleanString(node?.id);
-  if (!executionId || !nodeId) return null;
+  const deliverySlot = cleanString(node?.config?.delivery_slot)
+    ?.toLowerCase()
+    .replace(/[^a-z0-9._-]+/g, '_')
+    .replace(/^_+|_+$/g, '')
+    .slice(0, 80);
+  if (!executionId) return null;
+  if (deliverySlot) return `flow:${executionId}:slot:${deliverySlot}`;
+  if (!nodeId) return null;
   return `flow:${executionId}:node:${nodeId}`;
 }
 
@@ -3080,6 +3097,26 @@ function buildWhatsappTransportHandoffRetryState({
   };
 }
 
+function isExplicitAccessGuidanceVariantNode(config) {
+  const delivery = isObject(config?.access_guidance_delivery)
+    ? config.access_guidance_delivery
+    : null;
+  return cleanString(delivery?.role) === 'variant'
+    && parseBool(delivery?.fallback_on_unavailable, false) === true;
+}
+
+function buildFallbackWhatsappTemplateConfig(config) {
+  return {
+    ...config,
+    template_id: config?.fallback_template_id || '',
+    template_name: config?.fallback_template_name || '',
+    catalog_template_id: config?.fallback_catalog_template_id || null,
+    require_current_catalog_body: config?.fallback_require_current_catalog_body === true,
+    variables: isObject(config?.fallback_variables) ? config.fallback_variables : {},
+    variables_named: isObject(config?.fallback_variables_named) ? config.fallback_variables_named : {},
+  };
+}
+
 async function handleSendWhatsapp(node, context, runtime) {
   const config = node?.config && typeof node.config === 'object' ? node.config : {};
   const execution = runtime?.execution || null;
@@ -3151,36 +3188,20 @@ async function handleSendWhatsapp(node, context, runtime) {
 
   if (messageMode === 'template') {
     senderData = await getSenderData();
-    const baseTemplate = await loadConfiguredWhatsappTemplate(config, templateContext, {
-      templateIdKey: 'template_id',
-      templateNameKey: 'template_name',
-      catalogTemplateIdKey: 'catalog_template_id',
-      targetWabaId: senderData.clinic_config?.wabaId || '',
-      requireCurrentCatalogBody: parseBool(resolveTemplateValue(config?.require_current_catalog_body, templateContext), false),
-    });
-    if (!baseTemplate) {
-      throw new Error('whatsapp_template_id_missing');
-    }
-
-    const baseTemplateStatus = toLowerSafe(baseTemplate.status);
-    if (isTemplateBlockedForSend(baseTemplateStatus)) {
-      throw new Error(`whatsapp_template_not_approved:${baseTemplate.status}`);
-    }
-
-    template = baseTemplate;
     let selectedTemplateConfig = config;
-    const accessGuidanceVariantConfig = isObject(config.access_guidance_variant)
-      ? config.access_guidance_variant
-      : null;
-    if (accessGuidanceVariantConfig) {
-      const variantConfigured = parseBool(
-        resolveTemplateValue(accessGuidanceVariantConfig.enabled, templateContext),
-        false
-      ) && !!(
-        toIntOrNull(resolveTemplateValue(accessGuidanceVariantConfig.catalog_template_id, templateContext))
-        || cleanString(resolveTemplateValue(accessGuidanceVariantConfig.template_name, templateContext))
-        || toIntOrNull(resolveTemplateValue(accessGuidanceVariantConfig.template_id, templateContext))
+    const explicitAccessGuidanceVariant = isExplicitAccessGuidanceVariantNode(config);
+
+    if (explicitAccessGuidanceVariant) {
+      const fallbackConfig = buildFallbackWhatsappTemplateConfig(config);
+      const hasVariantReference = !!(
+        toIntOrNull(resolveTemplateValue(config.catalog_template_id, templateContext))
+        || cleanString(resolveTemplateValue(config.template_name, templateContext))
+        || toIntOrNull(resolveTemplateValue(config.template_id, templateContext))
       );
+      const variantConfigured = parseBool(
+        resolveTemplateValue(config.access_guidance_delivery?.enabled, templateContext),
+        true
+      ) && hasVariantReference;
       const appointmentType = cleanString(
         templateContext?.cita?.tipo_cita
         || templateContext?.appointment?.tipo_cita
@@ -3201,20 +3222,13 @@ async function handleSendWhatsapp(node, context, runtime) {
       let variantLookupError = null;
       if (eligibility.eligible && !accessGuidanceAssetError) {
         try {
-          variantTemplate = await loadConfiguredWhatsappTemplate(
-            accessGuidanceVariantConfig,
-            templateContext,
-            {
-              targetWabaId: senderData.clinic_config?.wabaId || '',
-              requireCurrentCatalogBody: parseBool(
-                resolveTemplateValue(
-                  accessGuidanceVariantConfig.require_current_catalog_body,
-                  templateContext
-                ),
-                true
-              ),
-            }
-          );
+          variantTemplate = await loadConfiguredWhatsappTemplate(config, templateContext, {
+            targetWabaId: senderData.clinic_config?.wabaId || '',
+            requireCurrentCatalogBody: parseBool(
+              resolveTemplateValue(config.require_current_catalog_body, templateContext),
+              true
+            ),
+          });
         } catch (error) {
           variantLookupError = error;
         }
@@ -3239,12 +3253,124 @@ async function handleSendWhatsapp(node, context, runtime) {
       }
       if (accessGuidanceDecision.variant_used) {
         template = variantTemplate;
-        selectedTemplateConfig = accessGuidanceVariantConfig;
+        selectedTemplateConfig = config;
+      } else {
+        const accessFallbackTemplate = await loadConfiguredWhatsappTemplate(config, templateContext, {
+          templateIdKey: 'fallback_template_id',
+          templateNameKey: 'fallback_template_name',
+          catalogTemplateIdKey: 'fallback_catalog_template_id',
+          targetWabaId: senderData.clinic_config?.wabaId || '',
+          requireCurrentCatalogBody: parseBool(
+            resolveTemplateValue(config?.fallback_require_current_catalog_body, templateContext),
+            false
+          ),
+        });
+        if (!accessFallbackTemplate) {
+          throw new Error('whatsapp_access_guidance_fallback_template_missing');
+        }
+        const fallbackStatus = toLowerSafe(accessFallbackTemplate.status);
+        if (isTemplateBlockedForSend(fallbackStatus)) {
+          throw new Error(`whatsapp_access_guidance_fallback_template_not_approved:${accessFallbackTemplate.status}`);
+        }
+        template = accessFallbackTemplate;
+        selectedTemplateConfig = fallbackConfig;
       }
-      // Solo las primeras visitas con la opcion activada (incluido fallback
-      // base observable) usan el handoff durable. Las citas recurrentes
-      // conservan exactamente el transporte historico.
       useDurableAccessGuidanceTransport = accessGuidanceDecision.variant_requested;
+    } else {
+      const baseTemplate = await loadConfiguredWhatsappTemplate(config, templateContext, {
+        templateIdKey: 'template_id',
+        templateNameKey: 'template_name',
+        catalogTemplateIdKey: 'catalog_template_id',
+        targetWabaId: senderData.clinic_config?.wabaId || '',
+        requireCurrentCatalogBody: parseBool(resolveTemplateValue(config?.require_current_catalog_body, templateContext), false),
+      });
+      if (!baseTemplate) {
+        throw new Error('whatsapp_template_id_missing');
+      }
+
+      const baseTemplateStatus = toLowerSafe(baseTemplate.status);
+      if (isTemplateBlockedForSend(baseTemplateStatus)) {
+        throw new Error(`whatsapp_template_not_approved:${baseTemplate.status}`);
+      }
+
+      template = baseTemplate;
+      const accessGuidanceVariantConfig = isObject(config.access_guidance_variant)
+        ? config.access_guidance_variant
+        : null;
+      if (accessGuidanceVariantConfig) {
+        const variantConfigured = parseBool(
+          resolveTemplateValue(accessGuidanceVariantConfig.enabled, templateContext),
+          false
+        ) && !!(
+          toIntOrNull(resolveTemplateValue(accessGuidanceVariantConfig.catalog_template_id, templateContext))
+          || cleanString(resolveTemplateValue(accessGuidanceVariantConfig.template_name, templateContext))
+          || toIntOrNull(resolveTemplateValue(accessGuidanceVariantConfig.template_id, templateContext))
+        );
+        const appointmentType = cleanString(
+          templateContext?.cita?.tipo_cita
+          || templateContext?.appointment?.tipo_cita
+          || templateContext?.trigger?.data?.tipo_cita
+        );
+        const accessGuidance = templateContext?.clinica?.access_guidance
+          || templateContext?.clinic?.access_guidance
+          || null;
+        const eligibility = evaluateAccessGuidanceVariantEligibility({
+          appointmentType,
+          accessGuidance,
+          variantConfigured,
+        });
+        const accessGuidanceAssetError = eligibility.eligible
+          ? await validateAccessGuidancePublicMediaAsset({ clinicId, accessGuidance })
+          : null;
+        let variantTemplate = null;
+        let variantLookupError = null;
+        if (eligibility.eligible && !accessGuidanceAssetError) {
+          try {
+            variantTemplate = await loadConfiguredWhatsappTemplate(
+              accessGuidanceVariantConfig,
+              templateContext,
+              {
+                targetWabaId: senderData.clinic_config?.wabaId || '',
+                requireCurrentCatalogBody: parseBool(
+                  resolveTemplateValue(
+                    accessGuidanceVariantConfig.require_current_catalog_body,
+                    templateContext
+                  ),
+                  true
+                ),
+              }
+            );
+          } catch (error) {
+            variantLookupError = error;
+          }
+        }
+        accessGuidanceDecision = selectAccessGuidanceTemplateBranch({
+          appointmentType,
+          accessGuidance,
+          variantConfigured,
+          variantTemplate,
+          targetWabaId: senderData.clinic_config?.wabaId || '',
+          lookupError: variantLookupError,
+        });
+        if (accessGuidanceAssetError) {
+          accessGuidanceDecision = {
+            branch: 'base',
+            variant_requested: eligibility.is_first_visit && eligibility.access_guidance.enabled,
+            variant_used: false,
+            fallback_used: true,
+            fallback_reason: accessGuidanceAssetError,
+            access_guidance: eligibility.access_guidance,
+          };
+        }
+        if (accessGuidanceDecision.variant_used) {
+          template = variantTemplate;
+          selectedTemplateConfig = accessGuidanceVariantConfig;
+        }
+        // Solo las primeras visitas con la opcion activada (incluido fallback
+        // base observable) usan el handoff durable. Las citas recurrentes
+        // conservan exactamente el transporte historico.
+        useDurableAccessGuidanceTransport = accessGuidanceDecision.variant_requested;
+      }
     }
 
     templateParams = resolveTemplateVariables(selectedTemplateConfig, templateContext, template);
@@ -4662,6 +4788,12 @@ function evaluateFieldCheck(config, context) {
   };
 }
 
+function isAccessGuidanceReminderFieldCheck(config) {
+  const leftRef = isObject(config?.left_ref) ? config.left_ref : null;
+  const path = cleanString(leftRef?.path)?.toLowerCase();
+  return ['clinica.access_guidance_reminder_enabled', 'clinic.access_guidance_reminder_enabled'].includes(path);
+}
+
 function evaluateResponseExists(config, context) {
   const listensTo = cleanString(config?.listens_to_node_id);
   if (!listensTo) return false;
@@ -5250,10 +5382,32 @@ async function processNode(node, context, runtime = {}) {
     }
 
     case 'condition/field_check': {
-      const result = evaluateFieldCheck(config, context);
+      let evaluationContext = context;
+      if (isAccessGuidanceReminderFieldCheck(config)) {
+        let targets = resolveRuntimeTargets(runtime?.execution, context);
+        targets = await backfillRuntimeTargets(runtime?.execution, targets);
+        evaluationContext = await enrichContextForTemplateResolution(context, targets);
+      }
+      const result = evaluateFieldCheck(config, evaluationContext);
+      const observableResult = isAccessGuidanceReminderFieldCheck(config)
+        ? {
+            ...result,
+            branch: result.decision ? 'access_guidance' : 'base',
+            clinic_id: toIntOrNull(
+              evaluationContext?.clinica?.id_clinica
+              || evaluationContext?.clinic?.id_clinica
+            ),
+            appointment_type: cleanString(
+              evaluationContext?.cita?.tipo_cita
+              || evaluationContext?.appointment?.tipo_cita
+            ),
+            access_guidance_enabled: evaluationContext?.clinica?.access_guidance_enabled === true
+              || evaluationContext?.clinic?.access_guidance_enabled === true,
+          }
+        : result;
       return {
         kind: 'success',
-        output: result,
+        output: observableResult,
         next_node_id: readOutputTarget(node, result.next_output_key),
       };
     }
