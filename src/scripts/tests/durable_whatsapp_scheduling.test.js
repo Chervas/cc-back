@@ -172,7 +172,7 @@ async function testQuietHoursHandlerWaitsAndDispatchesIdempotentTransportJob() {
 }
 
 async function testHandlersAndLaneInventory() {
-  assert.equal(Object.keys(jobExecutor.JOB_HANDLERS).length, 46);
+  assert.equal(Object.keys(jobExecutor.JOB_HANDLERS).length, 47);
   assert.equal(typeof jobExecutor.JOB_HANDLERS.automation_whatsapp_quiet_send, 'function');
   assert.equal(typeof jobExecutor.JOB_HANDLERS.whatsapp_template_sync_delayed, 'function');
   assert.equal(BACKGROUND_INTEGRATION_JOB_TYPES.includes('whatsapp_template_sync_delayed'), true);

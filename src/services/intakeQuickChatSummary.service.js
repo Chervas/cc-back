@@ -4,6 +4,7 @@ const crypto = require('crypto');
 const db = require('../../models');
 const { findCanonicalWhatsappConversation } = require('../lib/canonical-conversation');
 const { normalizePhoneDigits } = require('../lib/phone');
+const { Op } = db.Sequelize;
 
 const QUICKCHAT_SOURCE_DETAIL = 'chatbot_quickchat';
 const QUICKCHAT_SUMMARY_KIND = 'quickchat_summary';
@@ -213,6 +214,45 @@ function isQuickChatSummaryRequest(body = {}) {
   return String(sourceDetail || '').toLowerCase() === QUICKCHAT_SOURCE_DETAIL;
 }
 
+function validateQuickChatContact({ body = {}, lead = null } = {}) {
+  const chatState = getChatState(body);
+  const chatData = chatState.data;
+  const leadData = body?.lead_data && typeof body.lead_data === 'object' && !Array.isArray(body.lead_data)
+    ? body.lead_data
+    : {};
+  const rawPhone = firstText([
+    chatData.telefono,
+    chatData.phone,
+    chatData.tel,
+    chatData.mobile,
+    chatData.movil,
+    leadData.telefono,
+    leadData.phone,
+    leadData.tel,
+    body.telefono,
+    body.phone,
+    body.tel,
+    lead?.telefono,
+  ], 80);
+  const rawEmail = firstText([
+    chatData.email,
+    chatData.correo,
+    leadData.email,
+    body.email,
+    lead?.email,
+  ], 254);
+  const telefono = sanitizePhone(rawPhone);
+  const email = sanitizeEmail(rawEmail);
+
+  return {
+    telefono,
+    email,
+    phone_valid: Boolean(telefono),
+    email_present: Boolean(rawEmail),
+    email_valid: !rawEmail || Boolean(email),
+  };
+}
+
 function buildSanitizedSummary({ body = {}, lead = null, pageUrl = null, landingUrl = null } = {}) {
   const chatState = getChatState(body);
   const chatData = chatState.data;
@@ -346,6 +386,56 @@ function isSummaryMessageForLead(message, leadId) {
     && Number(metadata.lead_intake_id || metadata.lead_id || 0) === Number(leadId);
 }
 
+function getSummaryAuditId(message, leadId) {
+  if (!isSummaryMessageForLead(message, leadId)) return null;
+  return positiveInteger(parseMetadata(message?.metadata).intake_audit_id);
+}
+
+async function findLatestPersistedSummaryAudit({
+  Conversation,
+  Message,
+  clinicId,
+  leadId,
+  transaction,
+  lock,
+}) {
+  const conversations = await Conversation.findAll({
+    where: {
+      clinic_id: clinicId,
+      channel: 'whatsapp',
+      lead_id: leadId,
+    },
+    attributes: ['id'],
+    transaction,
+    ...(lock ? { lock } : {}),
+  });
+  const conversationIds = conversations
+    .map((conversation) => positiveInteger(conversation?.id))
+    .filter(Boolean);
+  if (!conversationIds.length) return null;
+
+  const messages = await Message.findAll({
+    where: {
+      conversation_id: { [Op.in]: conversationIds },
+      message_type: 'event',
+    },
+    order: [['id', 'ASC']],
+    transaction,
+    ...(lock ? { lock } : {}),
+  });
+  let latest = null;
+  for (const message of messages) {
+    const auditId = getSummaryAuditId(message, leadId);
+    if (!auditId || (latest && latest.audit_id >= auditId)) continue;
+    latest = {
+      audit_id: auditId,
+      conversation_id: positiveInteger(message.conversation_id),
+      message_id: positiveInteger(message.id),
+    };
+  }
+  return latest;
+}
+
 function createServiceError(status, code, message) {
   const error = new Error(message);
   error.status = status;
@@ -361,16 +451,19 @@ function positiveInteger(value) {
 async function materializeIntakeQuickChatSummary({
   leadId,
   clinicId = null,
+  auditId = null,
   body = {},
   pageUrl = null,
   landingUrl = null,
 } = {}, overrides = {}) {
   const sequelize = overrides.sequelize || db.sequelize;
   const LeadIntake = overrides.LeadIntake || db.LeadIntake;
+  const Conversation = overrides.Conversation || db.Conversation;
   const Message = overrides.Message || db.Message;
   const canonicalResolver = overrides.findCanonicalWhatsappConversation || findCanonicalWhatsappConversation;
   const suppliedTransaction = overrides.transaction || null;
   const normalizedLeadId = positiveInteger(leadId);
+  const normalizedAuditId = positiveInteger(auditId);
 
   if (!normalizedLeadId) {
     throw createServiceError(409, 'quickchat_summary_lead_missing', 'No se pudo resolver el lead del resumen QuickChat');
@@ -398,6 +491,36 @@ async function materializeIntakeQuickChatSummary({
     const effectiveClinicId = leadClinicId || requestedClinicId;
     if (!effectiveClinicId) {
       throw createServiceError(422, 'quickchat_summary_clinic_required', 'Se necesita una clínica para crear el resumen QuickChat');
+    }
+
+    // El lead queda bloqueado durante toda la transacción, por lo que dos jobs
+    // del mismo lead se serializan. Antes de resolver/crear/mezclar una
+    // conversación, se consulta el marcador durable de todos sus resúmenes.
+    // Un audit antiguo sale aquí sin tocar mensaje ni last_message_at.
+    if (normalizedAuditId) {
+      const latestPersisted = await findLatestPersistedSummaryAudit({
+        Conversation,
+        Message,
+        clinicId: effectiveClinicId,
+        leadId: normalizedLeadId,
+        transaction,
+        lock,
+      });
+      if (latestPersisted?.audit_id > normalizedAuditId) {
+        return {
+          created: false,
+          updated: false,
+          consolidated: false,
+          stale: true,
+          stale_reason: 'newer_audit_already_materialized',
+          persisted_audit_id: latestPersisted.audit_id,
+          clinic_id: effectiveClinicId,
+          lead_id: normalizedLeadId,
+          conversation_id: latestPersisted.conversation_id,
+          message_id: latestPersisted.message_id,
+          message: null,
+        };
+      }
     }
 
     const summary = buildSanitizedSummary({ body, lead, pageUrl, landingUrl });
@@ -441,6 +564,7 @@ async function materializeIntakeQuickChatSummary({
       action: QUICKCHAT_SUMMARY_KIND,
       hidden_from_patient: true,
       lead_intake_id: normalizedLeadId,
+      ...(normalizedAuditId ? { intake_audit_id: normalizedAuditId } : {}),
       summary_hash: summaryHash,
       summary: {
         page_url: summary.page_url,
@@ -473,7 +597,11 @@ async function materializeIntakeQuickChatSummary({
         || message.message_type !== 'event'
         || message.status !== 'sent'
         || existingMetadata.hidden_from_patient !== true
-        || String(existingMetadata.source_detail || '').toLowerCase() !== QUICKCHAT_SOURCE_DETAIL;
+        || String(existingMetadata.source_detail || '').toLowerCase() !== QUICKCHAT_SOURCE_DETAIL
+        // Aunque el resumen sea byte a byte idéntico, el watermark debe
+        // avanzar al audit aceptado más reciente. La guarda previa garantiza
+        // que aquí nunca retroceda a un audit inferior.
+        || (normalizedAuditId && getSummaryAuditId(message, normalizedLeadId) !== normalizedAuditId);
       if (needsUpdate) {
         await message.update({
           direction: 'inbound',
@@ -532,6 +660,7 @@ module.exports = {
   isQuickChatSummaryRequest,
   buildSanitizedSummary,
   buildQuickChatSummaryContent,
+  validateQuickChatContact,
   materializeIntakeQuickChatSummary,
   __testing: {
     cleanText,
@@ -539,5 +668,7 @@ module.exports = {
     sanitizeStructuredValue,
     hashSummary,
     isSummaryMessageForLead,
+    getSummaryAuditId,
+    findLatestPersistedSummaryAudit,
   },
 };

@@ -342,6 +342,13 @@ async function loadState(db, options, transaction = null, lock = false) {
      WHERE lead_intake_id IN (:leadIds)
      ORDER BY id${lockClause}
   `, common, transaction);
+  const quickChatOutboxJobs = await selectRows(db, `
+    SELECT id, type, status, payload, created_at
+      FROM JobRequests
+     WHERE type = 'intake_quickchat_summary_materialize'
+       AND CAST(JSON_UNQUOTE(JSON_EXTRACT(payload, '$.lead_id')) AS UNSIGNED) IN (:leadIds)
+     ORDER BY id${lockClause}
+  `, common, transaction);
   const contactAttempts = await selectRows(db, `
     SELECT id, lead_intake_id
       FROM LeadContactAttempts
@@ -369,6 +376,7 @@ async function loadState(db, options, transaction = null, lock = false) {
     webEvents,
     conversionAttempts,
     attributionAudits,
+    quickChatOutboxJobs,
     contactAttempts,
     flowInstances,
     eventIds,
@@ -543,6 +551,24 @@ function validateState(state, options, now = new Date()) {
     );
   }
 
+  const auditsById = new Map(
+    state.attributionAudits.map((audit) => [Number(audit.id), Number(audit.lead_intake_id)])
+  );
+  for (const job of state.quickChatOutboxJobs || []) {
+    const payload = parseJsonObject(job.payload);
+    const jobLeadId = Number(payload.lead_id);
+    const jobAuditId = Number(payload.audit_id);
+    if (!leadsById.has(jobLeadId)) {
+      throw new Error(`QuickChat outbox ${job.id} references a lead outside the verified scope`);
+    }
+    if (!Number.isInteger(jobAuditId) || auditsById.get(jobAuditId) !== jobLeadId) {
+      throw new Error(`QuickChat outbox ${job.id} does not reference the exact audit for lead ${jobLeadId}`);
+    }
+    if (String(job.status) === 'running') {
+      throw new Error(`QuickChat outbox ${job.id} is running; wait for the worker before cleanup`);
+    }
+  }
+
   return {
     externalConversionRows,
     clinicIds: Array.from(clinicIds).sort((a, b) => a - b),
@@ -569,6 +595,7 @@ function summaryFor(state, options, validation) {
     counts: {
       leads: state.leads.length,
       attribution_audits: state.attributionAudits.length,
+      quickchat_outbox_jobs: (state.quickChatOutboxJobs || []).length,
       contact_attempts: state.contactAttempts.length,
       flow_instances: state.flowInstances.length,
       conversations: state.conversations.length,
@@ -593,6 +620,7 @@ async function deleteIds(db, table, key, ids, transaction) {
 }
 
 async function removeState(db, state, options, transaction) {
+  await deleteIds(db, 'JobRequests', 'id', placeholders(state.quickChatOutboxJobs || []), transaction);
   await deleteIds(db, 'GoogleAdsConversionUploadAttempts', 'id', placeholders(state.conversionAttempts), transaction);
   await deleteIds(db, 'WebEvents', 'id', placeholders(state.webEvents), transaction);
   await deleteIds(db, 'FormSubmissionEvents', 'id', placeholders(state.formSubmissions), transaction);
@@ -613,6 +641,12 @@ async function postcheck(db, state, options, transaction = null) {
     ['appointments', 'SELECT COUNT(*) AS count FROM CitasPacientes WHERE lead_intake_id IN (:leadIds)', { leadIds: options.leadIds }],
     ['appointment_holds', 'SELECT COUNT(*) AS count FROM AppointmentHolds WHERE lead_intake_id IN (:leadIds)', { leadIds: options.leadIds }],
     ['attribution_audits', 'SELECT COUNT(*) AS count FROM LeadAttributionAudits WHERE lead_intake_id IN (:leadIds)', { leadIds: options.leadIds }],
+    ['quickchat_outbox_jobs', `
+      SELECT COUNT(*) AS count
+        FROM JobRequests
+       WHERE type = 'intake_quickchat_summary_materialize'
+         AND CAST(JSON_UNQUOTE(JSON_EXTRACT(payload, '$.lead_id')) AS UNSIGNED) IN (:leadIds)
+    `, { leadIds: options.leadIds }],
     ['contact_attempts', 'SELECT COUNT(*) AS count FROM LeadContactAttempts WHERE lead_intake_id IN (:leadIds)', { leadIds: options.leadIds }],
     ['flow_instances', 'SELECT COUNT(*) AS count FROM LeadFlowInstances WHERE lead_id IN (:leadIds)', { leadIds: options.leadIds }],
   ];

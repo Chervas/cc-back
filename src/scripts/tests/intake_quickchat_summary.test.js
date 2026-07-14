@@ -7,6 +7,7 @@ const db = require('../../../models');
 const {
   isQuickChatSummaryRequest,
   buildSanitizedSummary,
+  validateQuickChatContact,
   materializeIntakeQuickChatSummary,
 } = require('../../services/intakeQuickChatSummary.service');
 const {
@@ -114,6 +115,20 @@ async function testSummaryMaterialization() {
     sanitized.extra_pairs.find((pair) => pair.key === 'Vive en Barcelona o Catalunya'),
     { key: 'Vive en Barcelona o Catalunya', value: 'Sí' }
   );
+
+  const invalidPhone = validateQuickChatContact({
+    body: { source_detail: 'chatbot', chat_state: { data: { telefono: '14725' } } },
+  });
+  assert.equal(invalidPhone.phone_valid, false);
+  const invalidEmail = validateQuickChatContact({
+    body: {
+      source_detail: 'chatbot',
+      chat_state: { data: { telefono: '+34600111222', email: 'correo-invalido' } },
+    },
+  });
+  assert.equal(invalidEmail.phone_valid, true);
+  assert.equal(invalidEmail.email_present, true);
+  assert.equal(invalidEmail.email_valid, false);
 
   const first = await materializeIntakeQuickChatSummary({
     leadId: lead.id,
@@ -227,6 +242,132 @@ async function testSummaryMaterialization() {
   );
   lead.telefono = originalPhone;
   assert.equal(messages.length, 1, 'An invalid contact must not create a shared or internal fallback chat');
+}
+
+async function testNewestAuditWinsWithoutTouchingStaleSummary() {
+  const messages = [];
+  let conversationUpdateCount = 0;
+  let messageUpdateCount = 0;
+  const lead = {
+    id: 191,
+    clinica_id: 56,
+    nombre: 'Paciente ordenado',
+    telefono: '+34600111222',
+    email: 'orden@example.com',
+  };
+  const conversation = {
+    id: 1701,
+    clinic_id: 56,
+    lead_id: lead.id,
+    last_message_at: new Date('2026-07-14T08:00:00.000Z'),
+    async update(patch) {
+      conversationUpdateCount += 1;
+      Object.assign(this, patch);
+    },
+  };
+  const Message = {
+    findAll: async ({ where }) => {
+      const rawConversationFilter = where.conversation_id;
+      const conversationIds = rawConversationFilter && typeof rawConversationFilter === 'object'
+        ? Object.getOwnPropertySymbols(rawConversationFilter)
+          .flatMap((symbol) => rawConversationFilter[symbol] || [])
+          .map(Number)
+        : [Number(rawConversationFilter)];
+      return messages.filter((message) => (
+        conversationIds.includes(Number(message.conversation_id))
+        && message.message_type === where.message_type
+      ));
+    },
+    create: async (payload) => {
+      const message = makeMessage(messages, payload, 1801);
+      const baseUpdate = message.update.bind(message);
+      message.update = async (patch) => {
+        messageUpdateCount += 1;
+        return baseUpdate(patch);
+      };
+      return message;
+    },
+  };
+  const dependencies = {
+    sequelize: {
+      transaction: async (work) => work({ LOCK: { UPDATE: 'UPDATE' } }),
+    },
+    LeadIntake: {
+      findByPk: async (id) => (Number(id) === lead.id ? lead : null),
+    },
+    Conversation: {
+      findAll: async ({ where }) => (
+        Number(where.clinic_id) === 56 && Number(where.lead_id) === lead.id
+          ? [conversation]
+          : []
+      ),
+    },
+    Message,
+    findCanonicalWhatsappConversation: async () => conversation,
+  };
+  const bodyFor = (nombre) => ({
+    source_detail: 'chatbot_quickchat',
+    chat_state: { data: { nombre, telefono: '+34600111222', email: 'orden@example.com' } },
+  });
+
+  const legacy = await materializeIntakeQuickChatSummary({
+    leadId: lead.id,
+    clinicId: 56,
+    body: bodyFor('Resumen X'),
+  }, dependencies);
+  assert.equal(legacy.created, true);
+  assert.equal(messages[0].metadata.intake_audit_id, undefined, 'legacy summaries have no ordering marker');
+  const legacyContent = messages[0].content;
+
+  const marker100 = await materializeIntakeQuickChatSummary({
+    leadId: lead.id,
+    clinicId: 56,
+    auditId: 100,
+    body: bodyFor('Resumen X'),
+  }, dependencies);
+  assert.equal(marker100.updated, true, 'an identical legacy summary must adopt the first durable marker');
+  assert.equal(messages[0].metadata.intake_audit_id, 100);
+  assert.equal(messages[0].content, legacyContent, 'adopting a marker must not require a content change');
+
+  const marker102 = await materializeIntakeQuickChatSummary({
+    leadId: lead.id,
+    clinicId: 56,
+    auditId: 102,
+    body: bodyFor('Resumen X'),
+  }, dependencies);
+  assert.equal(marker102.updated, true, 'identical content must still advance the durable watermark');
+  assert.equal(messages[0].metadata.intake_audit_id, 102);
+  assert.equal(messages[0].content, legacyContent);
+
+  const contentAfterNewest = messages[0].content;
+  const metadataAfterNewest = JSON.stringify(messages[0].metadata);
+  const lastMessageAfterNewest = conversation.last_message_at;
+  const conversationUpdatesAfterNewest = conversationUpdateCount;
+  const messageUpdatesAfterNewest = messageUpdateCount;
+
+  const stale = await materializeIntakeQuickChatSummary({
+    leadId: lead.id,
+    clinicId: 56,
+    auditId: 101,
+    body: bodyFor('Resumen Y que llega tarde'),
+  }, dependencies);
+  assert.equal(stale.stale, true);
+  assert.equal(stale.persisted_audit_id, 102);
+  assert.equal(messages[0].content, contentAfterNewest);
+  assert.equal(JSON.stringify(messages[0].metadata), metadataAfterNewest);
+  assert.equal(conversation.last_message_at, lastMessageAfterNewest);
+  assert.equal(conversationUpdateCount, conversationUpdatesAfterNewest);
+  assert.equal(messageUpdateCount, messageUpdatesAfterNewest);
+
+  const duplicateNewest = await materializeIntakeQuickChatSummary({
+    leadId: lead.id,
+    clinicId: 56,
+    auditId: 102,
+    body: bodyFor('Resumen X'),
+  }, dependencies);
+  assert.equal(duplicateNewest.stale, undefined);
+  assert.equal(duplicateNewest.updated, false);
+  assert.equal(messages.length, 1, 'double POST/retry must preserve one summary');
 }
 
 function testPublicLocationAlias() {
@@ -404,33 +545,66 @@ function testControllerStopsBeforeExternalTracking() {
   const ingestStart = source.indexOf('exports.ingestLead =');
   const ingestEnd = source.indexOf('exports.previewLeadImport =', ingestStart);
   const ingest = source.slice(ingestStart, ingestEnd);
-  const quickStart = ingest.indexOf('if (isQuickChatSummaryRequest(body))');
-  const quickEnd = ingest.indexOf('// La primera llamada del widget (`source_detail=chatbot`)', quickStart);
+  const quickStart = ingest.indexOf('if (isDirectQuickChatSummary)');
+  const quickEnd = ingest.indexOf('const embeddedQuickChatSummary =', quickStart);
   const quickBlock = ingest.slice(quickStart, quickEnd);
   const metaSend = ingest.indexOf('await sendMetaEvent({');
   const googleSend = ingest.indexOf('await maybeUploadGoogleConversion({');
-  const embeddedSummaryComment = ingest.indexOf('// La primera llamada del widget (`source_detail=chatbot`)');
-  const embeddedSummaryCall = ingest.indexOf('embeddedQuickChatSummary = await materializeIntakeQuickChatSummary({');
-  const persistedLeadResponse = ingest.lastIndexOf('res.status(201).json({');
+  const outboxFastPathCall = ingest.indexOf('quickChatFastPathOutcome = await triggerIntakeQuickChatSummaryFastPath(');
+  const persistedLeadResponse = ingest.lastIndexOf('res.status(ingestResponseStatus).json({');
   const chatLocationResolution = ingest.indexOf('await resolveChatStateClinicSelection({');
   const groupFallback = ingest.indexOf('await resolveFallbackClinicForGroup(');
   const invalidLocationResponse = ingest.indexOf("error: 'invalid_chat_location'");
   const leadCreation = ingest.indexOf('await dedupeAndCreateLead(');
+  const quickChatContactValidation = ingest.indexOf('const quickChatContact = validateQuickChatContact({');
+  const dedupChatbotOutcome = ingest.indexOf('if (dedupeConflict && isCompletedChatbotLead)');
+  const generalDedupeOutcome = ingest.indexOf('if (dedupeConflict) {', dedupChatbotOutcome + 1);
+  const fastPathCatchStart = ingest.indexOf('} catch (summaryError) {', outboxFastPathCall);
+  const fastPathCatchEnd = ingest.indexOf('\n    }', fastPathCatchStart) + 6;
+  const fastPathCatch = ingest.slice(fastPathCatchStart, fastPathCatchEnd);
 
   assert.ok(quickStart >= 0 && quickEnd > quickStart);
-  assert.match(quickBlock, /materializeIntakeQuickChatSummary\(/);
+  assert.doesNotMatch(quickBlock, /materializeIntakeQuickChatSummary\(/);
+  assert.match(quickBlock, /quickChatFastPathOutcome\?\.quickchat_summary_saved === true/);
   assert.match(quickBlock, /return res\.status\(dedupeConflict \? 200 : 201\)/);
+  assert.match(quickBlock, /return res\.status\(202\)/);
+  assert.match(quickBlock, /quickchat_summary_queued: true/);
   assert.doesNotMatch(quickBlock, /sendMetaEvent|maybeUploadGoogleConversion|outboundWhatsApp|queues\./);
   assert.ok(quickEnd < metaSend, 'QuickChat summary must return before Meta CAPI');
   assert.ok(quickEnd < googleSend, 'QuickChat summary must return before Google Ads uploads');
-  assert.equal(embeddedSummaryComment, quickEnd, 'save_lead must document its embedded QuickChat fallback');
   assert.ok(
-    embeddedSummaryCall > quickEnd && embeddedSummaryCall < metaSend && embeddedSummaryCall < googleSend,
-    'save_lead must materialize QuickChat before Meta/Google so a client timeout cannot orphan the lead'
+    outboxFastPathCall >= 0 && outboxFastPathCall < quickStart && outboxFastPathCall < metaSend && outboxFastPathCall < googleSend,
+    'both source_detail contracts must consume the durable outbox before branching or invoking providers'
   );
+  assert.ok(
+    dedupChatbotOutcome > outboxFastPathCall
+      && dedupChatbotOutcome < generalDedupeOutcome
+      && generalDedupeOutcome < metaSend
+      && generalDedupeOutcome < googleSend,
+    'deduplicated chatbot must return its outbox outcome before the general 409 and advertising providers'
+  );
+  const dedupChatbotBlock = ingest.slice(dedupChatbotOutcome, generalDedupeOutcome);
+  assert.match(dedupChatbotBlock, /return res\.status\(200\)/);
+  assert.match(dedupChatbotBlock, /return res\.status\(202\)/);
+  assert.match(dedupChatbotBlock, /return res\.status\(safeTerminalStatus\)/);
+  assert.match(dedupChatbotBlock, /quickChatFastPathOutcome\?\.error_code \|\| 'quickchat_summary_failed'/);
+  assert.doesNotMatch(dedupChatbotBlock, /sendMetaEvent|maybeUploadGoogleConversion/);
+  assert.match(
+    ingest.slice(generalDedupeOutcome, metaSend),
+    /return res\.status\(409\)/,
+    'non-chatbot dedupe must preserve the general 409 contract'
+  );
+  assert.match(fastPathCatch, /quickchat_summary_outcome_unknown: true/);
+  assert.match(fastPathCatch, /quickchat_summary_state: 'unknown_durable'/);
+  assert.doesNotMatch(fastPathCatch, /job_status: 'pending'|quickchat_summary_queued: true/);
   assert.ok(
     persistedLeadResponse > metaSend && persistedLeadResponse > googleSend,
     'save_lead must preserve the existing best-effort tracking before acknowledging the request'
+  );
+  assert.match(
+    ingest.slice(persistedLeadResponse, ingest.length),
+    /\.\.\.\(embeddedQuickChatSummary[\s\S]*?quickchat_summary_saved: true[\s\S]*?quickchat_summary_queued: false/,
+    'save_lead may report a saved summary only when the fast path returned a real saved result'
   );
   assert.ok(
     chatLocationResolution >= 0 && chatLocationResolution < groupFallback,
@@ -451,6 +625,40 @@ function testControllerStopsBeforeExternalTracking() {
       && invalidLocationResponse < leadCreation,
     'An invalid supplied chat location must fail before fallback, dedupe, lead creation, or external events'
   );
+  assert.ok(
+    quickChatContactValidation >= 0 && quickChatContactValidation < leadCreation,
+    'completed/direct QuickChat requests must reject invalid contact data before lead creation'
+  );
+  assert.match(
+    ingest.slice(quickChatContactValidation, leadCreation),
+    /return res\.status\(422\)[\s\S]*quickchat_summary_saved: false/
+  );
+
+  const controllerSource = fs.readFileSync(controllerPath, 'utf8');
+  const persistenceStart = controllerSource.indexOf('async function dedupeAndCreateLead(');
+  const persistenceEnd = controllerSource.indexOf('\nexports.ingestLead =', persistenceStart);
+  const persistenceBlock = controllerSource.slice(persistenceStart, persistenceEnd);
+  assert.match(persistenceBlock, /persistLeadAuditAndQuickChatOutbox\(/);
+  assert.match(persistenceBlock, /quickChatOutbox === true/);
+  assert.match(ingest, /const isQuickChatOutboxLead = isCompletedChatbotLead \|\| isDirectQuickChatSummary/);
+  assert.match(ingest, /quickChatOutbox: isQuickChatOutboxLead/);
+  assert.match(ingest, /onQuickChatOutboxCreated/);
+  assert.match(ingest, /persistExistingLeadAuditAndQuickChatOutbox\([\s\S]*?rawPayload: req\.body \|\| \{\}/);
+  assert.equal(
+    (ingest.match(/resolved_clinic_id: clinicaIdParsed/g) || []).length,
+    2,
+    'new and deduplicated outboxes must persist the resolved clinic in their exact audit'
+  );
+  assert.equal(
+    (ingest.match(/resolved_group_id: grupoClinicaIdParsed/g) || []).length,
+    2,
+    'new and deduplicated outboxes must persist the resolved group in their exact audit'
+  );
+  assert.doesNotMatch(
+    ingest,
+    /await materializeIntakeQuickChatSummary/,
+    'neither chatbot source_detail may bypass JobRequest with a lateral DB call'
+  );
 
   const servicePath = path.resolve(__dirname, '../../services/intakeQuickChatSummary.service.js');
   const serviceSource = fs.readFileSync(servicePath, 'utf8');
@@ -463,6 +671,7 @@ function testControllerStopsBeforeExternalTracking() {
 
 async function run() {
   await testSummaryMaterialization();
+  await testNewestAuditWinsWithoutTouchingStaleSummary();
   testPublicLocationAlias();
   await testGroupChatLocationSelection();
   testControllerStopsBeforeExternalTracking();
