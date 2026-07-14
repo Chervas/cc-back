@@ -1,6 +1,16 @@
 'use strict';
 
-const { Clinica, GrupoClinica, Servicio, ClinicMetaAsset, ClinicGoogleAdsAccount, Usuario, UsuarioClinica, ClinicaHorario } = require('../../models');
+const {
+    Clinica,
+    GrupoClinica,
+    Servicio,
+    ClinicMetaAsset,
+    ClinicGoogleAdsAccount,
+    Usuario,
+    UsuarioClinica,
+    ClinicaHorario,
+    PublicMediaAsset,
+} = require('../../models');
 const bcrypt = require('bcryptjs');
 const { Op } = require('sequelize');
 const { metaSyncJobs } = require('../jobs/sync.jobs');
@@ -8,13 +18,152 @@ const jobRequestsService = require('../services/jobRequests.service');
 const jobScheduler = require('../services/jobScheduler.service');
 const automationDefaultsService = require('../services/automationDefaults.service');
 const { STAFF_ROLES, ADMIN_ROLES, isGlobalAdmin } = require('../lib/role-helpers');
+const {
+    assertUserCanAccessFeature,
+    canUserAccessFeature,
+    getAccessibleClinicIdsForFeature,
+} = require('../lib/access-policy');
+const {
+    isPlainObject,
+    mergeClinicConfiguration,
+    normalizeClinicConfigurationForRead,
+} = require('../lib/clinic-configuration');
 
+const CLINIC_VIEW_FEATURE = 'clinic.settings.view';
+const CLINIC_EDIT_FEATURE = 'clinic.settings.edit';
 const ACTIVE_STAFF_INVITATION_WHERE = {
     [Op.or]: [
         { estado_invitacion: 'aceptada' },
         { estado_invitacion: null },
     ],
 };
+
+function normalizeClinicDataForResponse(value, { includeSensitive = false } = {}) {
+    const data = value?.toJSON ? value.toJSON() : { ...(value || {}) };
+    data.configuracion = normalizeClinicConfigurationForRead(data.configuracion);
+    if (!includeSensitive) {
+        delete data.datos_fiscales_clinica;
+    }
+    return data;
+}
+
+function parseRequestedClinicIds(value) {
+    if (value === undefined || value === null || value === '' || value === 'all') return null;
+    return Array.from(new Set(String(value)
+        .split(',')
+        .map((item) => Number.parseInt(item.trim(), 10))
+        .filter((item) => Number.isInteger(item) && item > 0)));
+}
+
+function respondControllerError(res, error, fallbackMessage) {
+    const status = Number(error?.status);
+    if (Number.isInteger(status) && status >= 400 && status < 500) {
+        return res.status(status).json({
+            message: error.message,
+            details: error.details || null,
+        });
+    }
+    return res.status(500).json({ message: fallbackMessage, error: error?.message });
+}
+
+async function assertClinicAccess(actorId, clinicId, featureKey) {
+    await assertUserCanAccessFeature({ actorId, featureKey, clinicId });
+}
+
+async function assertUserCanAssignClinicToGroup(actorId, groupId) {
+    const normalizedGroupId = parseIntOrNull(groupId);
+    if (!normalizedGroupId) {
+        const error = new Error('clinic_group_id_invalid');
+        error.status = 400;
+        throw error;
+    }
+    const group = await GrupoClinica.findByPk(normalizedGroupId, {
+        attributes: ['id_grupo'],
+        raw: true,
+    });
+    if (!group) {
+        const error = new Error('clinic_group_not_found');
+        error.status = 404;
+        throw error;
+    }
+    if (isGlobalAdmin(actorId)) return;
+
+    const groupClinics = await Clinica.findAll({
+        where: { grupoClinicaId: normalizedGroupId },
+        attributes: ['id_clinica'],
+        raw: true,
+    });
+    const groupClinicIds = groupClinics
+        .map((clinic) => parseIntOrNull(clinic.id_clinica))
+        .filter(Boolean);
+    if (!groupClinicIds.length) {
+        const error = new Error('clinic_group_assignment_requires_global_admin_for_empty_group');
+        error.status = 403;
+        throw error;
+    }
+    const ownerMemberships = await UsuarioClinica.findAll({
+        where: {
+            id_usuario: Number(actorId),
+            id_clinica: { [Op.in]: groupClinicIds },
+            rol_clinica: 'propietario',
+            ...ACTIVE_STAFF_INVITATION_WHERE,
+        },
+        attributes: ['id_clinica'],
+        raw: true,
+    });
+    const ownedClinicIds = new Set(ownerMemberships.map((row) => Number(row.id_clinica)));
+    if (groupClinicIds.some((clinicId) => !ownedClinicIds.has(Number(clinicId)))) {
+        const error = new Error('clinic_group_assignment_scope_forbidden');
+        error.status = 403;
+        throw error;
+    }
+}
+
+async function assertUserCanChangeClinicGroup(actorId, previousGroupId, requestedGroupId) {
+    const affectedGroupIds = Array.from(new Set([
+        parseIntOrNull(previousGroupId),
+        parseIntOrNull(requestedGroupId),
+    ].filter(Boolean)));
+    for (const groupId of affectedGroupIds) {
+        await assertUserCanAssignClinicToGroup(actorId, groupId);
+    }
+}
+
+async function assertAccessGuidanceAsset({ configuration, clinicId, transaction }) {
+    const guidance = configuration?.access_guidance;
+    if (!guidance?.image_asset_id) return;
+    if (!PublicMediaAsset) {
+        const error = new Error('clinic_access_guidance_asset_model_unavailable');
+        error.status = 503;
+        throw error;
+    }
+
+    const asset = await PublicMediaAsset.findOne({
+        where: {
+            id: guidance.image_asset_id,
+            scope_type: 'clinic',
+            clinica_id: Number(clinicId),
+            purpose: 'clinic_access_image',
+            sensitivity: 'public',
+            status: 'active',
+        },
+        attributes: ['id', 'public_url'],
+        transaction,
+        raw: true,
+    });
+    if (!asset) {
+        const error = new Error('clinic_access_guidance_asset_not_available');
+        error.status = 409;
+        error.details = { image_asset_id: guidance.image_asset_id };
+        throw error;
+    }
+    if (String(asset.public_url || '') !== String(guidance.image_url || '')) {
+        const error = new Error('clinic_access_guidance_asset_url_mismatch');
+        error.status = 409;
+        error.details = { image_asset_id: guidance.image_asset_id };
+        throw error;
+    }
+}
 
 const parseIntOrNull = (value) => {
     const n = Number.parseInt(String(value), 10);
@@ -187,53 +336,59 @@ function normalizeHorariosPayload(clinicaId, body) {
 exports.getAllClinicas = async (req, res) => {
     try {
         const { clinica_id } = req.query;
-        const where = {};
-        if (clinica_id && clinica_id !== 'all') {
-            if (typeof clinica_id === 'string' && clinica_id.includes(',')) {
-                where.id_clinica = { [Op.in]: clinica_id.split(',').map(id => parseInt(id)).filter(n => !isNaN(n)) };
-            } else {
-                where.id_clinica = clinica_id;
-            }
+        const requestedClinicIds = parseRequestedClinicIds(clinica_id);
+        if (requestedClinicIds && requestedClinicIds.length === 0) {
+            return res.json([]);
         }
+        const accessibleClinicIds = await getAccessibleClinicIdsForFeature({
+            actorId: req.userData?.userId,
+            featureKey: CLINIC_VIEW_FEATURE,
+            clinicIds: requestedClinicIds,
+        });
+        if (!accessibleClinicIds.length) return res.json([]);
+
         const clinicas = await Clinica.findAll({
-            where,
+            where: { id_clinica: { [Op.in]: accessibleClinicIds } },
             order: [['nombre_clinica', 'ASC']]
         });
-        const payload = clinicas.map(c => {
-            const data = c.toJSON();
-            const cfg = data.configuracion || {};
-            data.configuracion = {
-                ...cfg,
-                disciplinas: Array.isArray(cfg.disciplinas) && cfg.disciplinas.length > 0 ? cfg.disciplinas : ['dental']
-            };
-            return data;
-        });
+        const payload = clinicas.map(normalizeClinicDataForResponse);
         res.json(payload);
     } catch (error) {
-        res.status(500).json({ message: 'Error retrieving clinicas', error: error.message });
+        return respondControllerError(res, error, 'Error retrieving clinicas');
     }
 };
 
 // Buscar clínicas
 exports.searchClinicas = async (req, res) => {
     try {
-        const query = req.query.query;
+        const query = String(req.query.query || '').trim();
+        const accessibleClinicIds = await getAccessibleClinicIdsForFeature({
+            actorId: req.userData?.userId,
+            featureKey: CLINIC_VIEW_FEATURE,
+        });
+        if (!accessibleClinicIds.length) return res.json([]);
         const clinicas = await Clinica.findAll({
             where: {
+                id_clinica: { [Op.in]: accessibleClinicIds },
                 nombre_clinica: { [Op.like]: `%${query}%` }
             },
             order: [['nombre_clinica', 'ASC']]
         });
-        res.status(200).json(clinicas);
+        res.status(200).json(clinicas.map(normalizeClinicDataForResponse));
     } catch (error) {
         console.error('Error al buscar clínicas:', error);
-        res.status(500).json({ message: 'Error al procesar la búsqueda', error: error.message });
+        return respondControllerError(res, error, 'Error al procesar la búsqueda');
     }
 };
 
 // Obtener una clínica por ID (incluyendo la asociación con GrupoClinica)
 exports.getClinicaById = async (req, res) => {
     try {
+        const clinicId = parseIntOrNull(req.params.id);
+        if (!clinicId) {
+            return res.status(400).json({ message: 'id inválido' });
+        }
+        await assertClinicAccess(req.userData?.userId, clinicId, CLINIC_VIEW_FEATURE);
         const clinica = await Clinica.findByPk(req.params.id, {
             include: [
                 {
@@ -265,16 +420,18 @@ exports.getClinicaById = async (req, res) => {
         if (!clinica) {
             return res.status(404).json({ message: 'Clinica not found' });
         }
-        const clinicaData = clinica.toJSON();
-        const cfg = clinicaData.configuracion || {};
-        clinicaData.configuracion = {
-            ...cfg,
-            disciplinas: Array.isArray(cfg.disciplinas) && cfg.disciplinas.length > 0 ? cfg.disciplinas : ['dental']
-        };
+        const canEdit = await canUserAccessFeature({
+            actorId: req.userData?.userId,
+            featureKey: CLINIC_EDIT_FEATURE,
+            clinicId,
+        });
+        const clinicaData = normalizeClinicDataForResponse(clinica, {
+            includeSensitive: canEdit,
+        });
         await enrichClinicContactFields(clinicaData);
         res.json(clinicaData);
     } catch (error) {
-        res.status(500).json({ message: 'Error retrieving clinica', error: error.message });
+        return respondControllerError(res, error, 'Error retrieving clinica');
     }
 };
 
@@ -362,8 +519,10 @@ exports.putHorarios = async (req, res) => {
 
 // Crear una nueva clínica (con grupoClinicaId opcional)
 exports.createClinica = async (req, res) => {
-    console.log('Intentando crear clinica con datos:', req.body);
     try {
+        if (!isGlobalAdmin(req.userData?.userId)) {
+            return res.status(403).json({ message: 'No tienes permisos para crear clínicas' });
+        }
         const {
             nombre_clinica,
             telefono,
@@ -397,7 +556,18 @@ exports.createClinica = async (req, res) => {
             grupoClinicaId  // Campo opcional para asignar grupo
         } = req.body;
 
-        const configPayload = configuracion && typeof configuracion === 'object' ? configuracion : {};
+        if (configuracion !== undefined && !isPlainObject(configuracion)) {
+            return res.status(400).json({ message: 'clinic_configuration_patch_must_be_an_object' });
+        }
+        if (grupoClinicaId !== undefined && grupoClinicaId !== null && grupoClinicaId !== '') {
+            await assertUserCanAssignClinicToGroup(req.userData?.userId, grupoClinicaId);
+        }
+        const configPayload = mergeClinicConfiguration({}, configuracion || {});
+        if (configPayload.access_guidance?.image_asset_id || configPayload.access_guidance?.image_url) {
+            return res.status(400).json({
+                message: 'clinic_access_guidance_asset_requires_existing_clinic',
+            });
+        }
         if (!Array.isArray(configPayload.disciplinas) || configPayload.disciplinas.length === 0) {
             configPayload.disciplinas = ['dental'];
         }
@@ -450,7 +620,7 @@ exports.createClinica = async (req, res) => {
         });
     } catch (error) {
         console.error('Error al crear la clínica:', error);
-        res.status(500).json({ message: 'Error al crear la clínica', error: error.message });
+        return respondControllerError(res, error, 'Error al crear la clínica');
     }
 };
 
@@ -460,20 +630,8 @@ exports.createClinica = async (req, res) => {
 
 exports.updateClinica = async (req, res) => {
     try {
-        // ✅ DEBUG COMPLETO para identificar el problema
-        console.log('=== DEBUG RUTA ===');
-        console.log('URL completa:', req.url);
-        console.log('Método:', req.method);
-        console.log('Params completos:', req.params);
-        console.log('Param id_clinica:', req.params.id_clinica);
-        console.log('Param id:', req.params.id);
-        console.log('==================');
-        
-        // ✅ INTENTAR AMBAS OPCIONES
         const idFromBody = req.body?.id_clinica ?? req.body?.id;
-        let id_clinica = req.params.id_clinica || req.params.id || idFromBody;
-        
-        console.log('ID de clínica final:', id_clinica);
+        const id_clinica = parseIntOrNull(req.params.id_clinica || req.params.id || idFromBody);
 
         // ✅ INCLUIR TODOS LOS CAMPOS que pueden venir del frontend
         const {
@@ -509,39 +667,23 @@ exports.updateClinica = async (req, res) => {
             grupoClinicaId
         } = req.body;
 
-        console.log('Datos recibidos para actualizar clínica:', req.body);
-
-        // ✅ VERIFICAR que id_clinica no sea undefined
         if (!id_clinica) {
-            console.error('❌ ID de clínica no encontrado en params');
-            return res.status(400).json({ 
-                message: 'ID de clínica requerido',
-                debug: {
-                    url: req.url,
-                    params: req.params,
-                    method: req.method
-                }
-            });
+            return res.status(400).json({ message: 'ID de clínica requerido' });
+        }
+        await assertClinicAccess(req.userData?.userId, id_clinica, CLINIC_EDIT_FEATURE);
+        if (configuracion !== undefined && !isPlainObject(configuracion)) {
+            const error = new Error('clinic_configuration_patch_must_be_an_object');
+            error.status = 400;
+            throw error;
         }
 
-        const clinicaExistente = await Clinica.findByPk(id_clinica);
-        if (!clinicaExistente) {
-            return res.status(404).json({ message: 'Clínica no encontrada' });
-        }
-        const previousGroupId = clinicaExistente.grupoClinicaId || null;
-
-        let configToSave = configuracion !== undefined ? configuracion : (clinicaExistente.configuracion || {});
-        if (!Array.isArray(configToSave?.disciplinas) || configToSave.disciplinas.length === 0) {
-            configToSave = { ...configToSave, disciplinas: ['dental'] };
-        }
         const receivedAnyPhoneField = [telefono, telefono_fijo, telefono_movil, telefono_whatsapp]
             .some((value) => value !== undefined);
         const telefonoCompat = receivedAnyPhoneField
             ? (telefono || telefono_fijo || telefono_movil || telefono_whatsapp || null)
             : undefined;
 
-        // ✅ ACTUALIZAR con TODOS los campos
-        const [updatedRowsCount] = await Clinica.update({
+        const candidateUpdates = {
             nombre_clinica,
             telefono: telefonoCompat,
             telefono_fijo,
@@ -570,19 +712,68 @@ exports.updateClinica = async (req, res) => {
             estado_clinica,
             datos_fiscales_clinica,
             redes_sociales,
-            configuracion: configToSave,
             grupoClinicaId
-        }, {
-            where: { id_clinica: id_clinica }
+        };
+        const scalarUpdates = Object.fromEntries(
+            Object.entries(candidateUpdates).filter(([, value]) => value !== undefined)
+        );
+
+        const transactionResult = await Clinica.sequelize.transaction(async (transaction) => {
+            // El lock hace que dos PATCH parciales lean siempre el JSON confirmado más
+            // reciente. El merge profundo conserva agenda_settings, disciplinas y claves
+            // futuras que no formen parte de este formulario.
+            const clinicaExistente = await Clinica.findByPk(id_clinica, {
+                transaction,
+                lock: transaction.LOCK.UPDATE,
+            });
+            if (!clinicaExistente) {
+                const error = new Error('Clínica no encontrada');
+                error.status = 404;
+                throw error;
+            }
+
+            const previousGroupId = parseIntOrNull(clinicaExistente.grupoClinicaId);
+            const requestedGroupId = grupoClinicaId === undefined
+                ? previousGroupId
+                : (grupoClinicaId === null || grupoClinicaId === '' ? null : parseIntOrNull(grupoClinicaId));
+            if (grupoClinicaId !== undefined && grupoClinicaId !== null && grupoClinicaId !== '' && !requestedGroupId) {
+                const error = new Error('clinic_group_id_invalid');
+                error.status = 400;
+                throw error;
+            }
+            if (requestedGroupId !== previousGroupId) {
+                // Una transición altera el scope compartido de Meta/Google de ambos
+                // grupos. Exigimos autoridad sobre el origen incluso al desvincular,
+                // y también sobre el destino cuando exista.
+                await assertUserCanChangeClinicGroup(
+                    req.userData?.userId,
+                    previousGroupId,
+                    requestedGroupId
+                );
+            }
+            if (grupoClinicaId !== undefined) {
+                scalarUpdates.grupoClinicaId = requestedGroupId;
+            }
+            if (configuracion !== undefined) {
+                scalarUpdates.configuracion = mergeClinicConfiguration(
+                    clinicaExistente.configuracion,
+                    configuracion
+                );
+                if (Object.prototype.hasOwnProperty.call(configuracion, 'access_guidance')) {
+                    await assertAccessGuidanceAsset({
+                        configuration: scalarUpdates.configuracion,
+                        clinicId: id_clinica,
+                        transaction,
+                    });
+                }
+            }
+
+            if (Object.keys(scalarUpdates).length) {
+                await clinicaExistente.update(scalarUpdates, { transaction });
+            }
+            return { previousGroupId };
         });
 
-        // MySQL puede devolver 0 filas afectadas si no hubo cambios en los valores.
-        // Ya verificamos existencia arriba, así que no tratamos este caso como "no encontrada".
-        if (updatedRowsCount === 0) {
-            console.log('ℹ️ Clínica sin cambios detectados en update, devolviendo entidad actual.');
-        }
-
-        // ✅ OBTENER la clínica actualizada con TODOS los campos
         const updatedClinica = await Clinica.findByPk(id_clinica, {
             include: [{
                 model: GrupoClinica,
@@ -591,12 +782,14 @@ exports.updateClinica = async (req, res) => {
             }]
         });
 
-        console.log('Clínica actualizada con éxito:', updatedClinica);
-
         const newGroupId = updatedClinica?.grupoClinicaId ?? null;
         const clinicIdNumeric = Number(id_clinica);
-        if (!Number.isNaN(clinicIdNumeric) && previousGroupId !== newGroupId) {
-            console.log('🔄 Cambio de grupo detectado:', { previousGroupId, newGroupId, clinicId: clinicIdNumeric });
+        if (!Number.isNaN(clinicIdNumeric) && transactionResult.previousGroupId !== newGroupId) {
+            console.log('🔄 Cambio de grupo detectado:', {
+                previousGroupId: transactionResult.previousGroupId,
+                newGroupId,
+                clinicId: clinicIdNumeric,
+            });
             try {
                 if (newGroupId) {
                     const groupConfig = await GrupoClinica.findByPk(newGroupId);
@@ -671,21 +864,13 @@ exports.updateClinica = async (req, res) => {
                 console.error('❌ Error actualizando assignmentScope post cambio de grupo:', assignmentError);
             }
         }
-        const updatedData = updatedClinica.toJSON();
-        const cfg = updatedData.configuracion || {};
-        updatedData.configuracion = {
-            ...cfg,
-            disciplinas: Array.isArray(cfg.disciplinas) && cfg.disciplinas.length > 0 ? cfg.disciplinas : ['dental']
-        };
+        const updatedData = normalizeClinicDataForResponse(updatedClinica, { includeSensitive: true });
         await enrichClinicContactFields(updatedData);
         res.status(200).json(updatedData);
 
     } catch (error) {
         console.error('Error updating clinic:', error);
-        res.status(500).json({ 
-            message: 'Error al actualizar la clínica', 
-            error: error.message 
-        });
+        return respondControllerError(res, error, 'Error al actualizar la clínica');
     }
 };
 
@@ -697,6 +882,9 @@ exports.updateClinica = async (req, res) => {
 // Eliminar una clínica
 exports.deleteClinica = async (req, res) => {
     try {
+        if (!isGlobalAdmin(req.userData?.userId)) {
+            return res.status(403).json({ message: 'Solo un administrador global puede eliminar clínicas' });
+        }
         const clinica = await Clinica.findByPk(req.params.id);
         if (!clinica) {
             return res.status(404).json({ message: 'Clinica not found' });
@@ -704,7 +892,7 @@ exports.deleteClinica = async (req, res) => {
         await clinica.destroy();
         res.json({ message: 'Clinica deleted' });
     } catch (error) {
-        res.status(500).json({ message: 'Error deleting clinica', error: error.message });
+        return respondControllerError(res, error, 'Error deleting clinica');
     }
 };
 
@@ -712,6 +900,7 @@ exports.deleteClinica = async (req, res) => {
 exports.addServicioToClinica = async (req, res) => {
     try {
         const { id_clinica, id_servicio } = req.body;
+        await assertClinicAccess(req.userData?.userId, id_clinica, CLINIC_EDIT_FEATURE);
         const clinica = await Clinica.findByPk(id_clinica);
         const servicio = await Servicio.findByPk(id_servicio);
 
@@ -722,7 +911,7 @@ exports.addServicioToClinica = async (req, res) => {
         await clinica.addServicio(servicio);
         res.status(200).send({ message: 'Servicio asignado a clínica correctamente' });
     } catch (error) {
-        res.status(500).send({ message: 'Error al asignar servicio a clínica', error: error.message });
+        return respondControllerError(res, error, 'Error al asignar servicio a clínica');
     }
 };
 
@@ -742,4 +931,10 @@ exports.getServiciosByClinica = async (req, res) => {
     } catch (error) {
         res.status(500).send({ message: 'Error al obtener servicios de la clínica', error: error.message });
     }
+};
+
+exports._private = {
+    assertUserCanAssignClinicToGroup,
+    assertUserCanChangeClinicGroup,
+    normalizeClinicDataForResponse,
 };

@@ -19,6 +19,7 @@ const VARIABLE_METADATA = {
   url_ficha_local_clinica: { description: 'URL de la ficha local de la clínica', example: 'https://g.page/r/...' },
   url_perfil_google_clinica: { description: 'URL del Perfil de Empresa Google de la clínica', example: 'https://www.google.com/maps/search/?api=1&query=Clinica&query_place_id=...' },
   url_como_llegar_clinica: { description: 'URL de Google Maps para llegar a la clínica', example: 'https://www.google.com/maps/dir/?api=1&destination=Clinica&destination_place_id=...' },
+  indicaciones_acceso_clinica: { description: 'Indicaciones adicionales para encontrar el acceso de la clínica', example: 'Entra por el pasaje lateral junto a la farmacia y sube a la primera planta.' },
   url_dejar_resena_clinica: { description: 'URL oficial para dejar una reseña en Google', example: 'https://g.page/r/abcd1234/review' },
   tratamiento: { description: 'Nombre del tratamiento', example: 'Ortodoncia' },
   enlace: { description: 'Enlace dinámico', example: 'https://clinicaclick.com' },
@@ -83,6 +84,7 @@ const VARIABLE_ALIASES = {
   indicaciones: 'url_como_llegar_clinica',
   directions_url: 'url_como_llegar_clinica',
   clinic_directions_url: 'url_como_llegar_clinica',
+  indicaciones_acceso_clinica: 'indicaciones_acceso_clinica',
   url_dejar_resena_clinica: 'url_dejar_resena_clinica',
   url_resena_google_clinica: 'url_dejar_resena_clinica',
   google_review_url: 'url_dejar_resena_clinica',
@@ -111,6 +113,7 @@ const SYSTEM_DEFAULT_NAMED_BINDINGS = {
   url_ficha_local_clinica: '{{clinica.url_ficha_local}}',
   url_perfil_google_clinica: '{{clinica.url_perfil_google}}',
   url_como_llegar_clinica: '{{clinica.url_como_llegar}}',
+  indicaciones_acceso_clinica: '{{clinica.indicaciones_acceso}}',
   url_dejar_resena_clinica: '{{clinica.url_dejar_resena}}',
 };
 
@@ -121,6 +124,9 @@ const SYSTEM_TEMPLATE_OVERRIDES = {
   },
   clinicaclick_recordatorio_dia_antes: {
     5: ['nombre_paciente', 'hora_cita', 'nombre_clinica', 'direccion_clinica', 'telefono_clinica'],
+  },
+  clinicaclick_recordatorio_mismo_dia_primera_visita_acceso_dificil: {
+    5: ['nombre_paciente', 'hora_cita', 'direccion_clinica', 'url_como_llegar_clinica', 'indicaciones_acceso_clinica'],
   },
   clinicaclick_solicitar_resena: {
     2: ['nombre_paciente', 'nombre_clinica'],

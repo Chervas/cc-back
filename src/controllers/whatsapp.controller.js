@@ -354,6 +354,12 @@ function nodeUsesWhatsappTemplate(node, { templateId, templateName, catalogTempl
   const nodeFallbackTemplateId = String(config.fallback_template_id || '').trim();
   const nodeFallbackTemplateName = String(config.fallback_template_name || '').trim().toLowerCase();
   const nodeFallbackCatalogTemplateId = Number(config.fallback_catalog_template_id);
+  const accessVariant = isObject(config.access_guidance_variant)
+    ? config.access_guidance_variant
+    : {};
+  const variantTemplateId = String(accessVariant.template_id || '').trim();
+  const variantTemplateName = String(accessVariant.template_name || '').trim().toLowerCase();
+  const variantCatalogTemplateId = Number(accessVariant.catalog_template_id);
   return (
     (templateId && nodeTemplateId === String(templateId))
     || (!!templateName && !!nodeTemplateName && nodeTemplateName === String(templateName).trim().toLowerCase())
@@ -361,6 +367,9 @@ function nodeUsesWhatsappTemplate(node, { templateId, templateName, catalogTempl
     || (templateId && nodeFallbackTemplateId === String(templateId))
     || (!!templateName && !!nodeFallbackTemplateName && nodeFallbackTemplateName === String(templateName).trim().toLowerCase())
     || (Number.isFinite(nodeFallbackCatalogTemplateId) && nodeFallbackCatalogTemplateId > 0 && nodeFallbackCatalogTemplateId === Number(catalogTemplateId))
+    || (templateId && variantTemplateId === String(templateId))
+    || (!!templateName && !!variantTemplateName && variantTemplateName === String(templateName).trim().toLowerCase())
+    || (Number.isFinite(variantCatalogTemplateId) && variantCatalogTemplateId > 0 && variantCatalogTemplateId === Number(catalogTemplateId))
   );
 }
 

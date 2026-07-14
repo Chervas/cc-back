@@ -80,7 +80,12 @@ async function runAutomationFlowV2Job(payload = {}) {
   if (payload.resume_mode === 'response' || payload.resume_mode === 'timeout' || payload.resume_mode === 'form_submission') {
     options.resumeMode = payload.resume_mode;
   } else if (execution.status === 'waiting') {
-    if (waitingResumeMode === 'response' || waitingResumeMode === 'timeout' || waitingResumeMode === 'form_submission') {
+    if (
+      waitingResumeMode === 'response'
+      || waitingResumeMode === 'timeout'
+      || waitingResumeMode === 'form_submission'
+      || waitingResumeMode === 'retry_current_node'
+    ) {
       options.resumeMode = waitingResumeMode;
     } else {
       options.resumeMode = 'timeout';

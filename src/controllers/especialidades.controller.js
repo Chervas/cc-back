@@ -8,6 +8,11 @@ const UsuarioEspecialidades = db.UsuarioEspecialidades;
 const ClinicaEspecialidades = db.ClinicaEspecialidades;
 const Clinica = db.Clinica;
 const medicalAreaContractsService = require('../services/medicalAreaContracts.service');
+const { canUserAccessFeature } = require('../lib/access-policy');
+const {
+    mergeClinicConfiguration,
+    parseConfiguration,
+} = require('../lib/clinic-configuration');
 
 function normalizeDisciplinaList(value) {
     const items = Array.isArray(value) ? value : [];
@@ -21,30 +26,51 @@ function normalizeDisciplinaList(value) {
 // Utilidad: asegurar que una disciplina esté incluida en la clínica
 async function ensureDisciplinaEnClinica(clinicaId, disciplina) {
     if (!clinicaId || !disciplina) return [];
-    const clinica = await Clinica.findByPk(clinicaId);
-    if (!clinica) return [];
-
-    const currentConfig = clinica.configuracion || {};
-    const currentDisc = normalizeDisciplinaList(currentConfig.disciplinas);
     const normalizedDisciplina = String(disciplina || '').trim().toLowerCase();
-    if (!currentDisc.includes(normalizedDisciplina)) {
-        currentDisc.push(normalizedDisciplina);
-        await clinica.update({
-            configuracion: {
-                ...currentConfig,
-                disciplinas: currentDisc
-            }
+    return Clinica.sequelize.transaction(async (transaction) => {
+        const clinica = await Clinica.findByPk(clinicaId, {
+            transaction,
+            lock: transaction.LOCK.UPDATE,
         });
-    } else if (JSON.stringify(currentConfig.disciplinas || []) !== JSON.stringify(currentDisc)) {
-        await clinica.update({
-            configuracion: {
-                ...currentConfig,
-                disciplinas: currentDisc
-            }
-        });
-    }
+        if (!clinica) return [];
 
-    return currentDisc;
+        const currentConfig = parseConfiguration(clinica.configuracion);
+        const currentDisc = normalizeDisciplinaList(currentConfig.disciplinas);
+        if (!currentDisc.includes(normalizedDisciplina)) {
+            currentDisc.push(normalizedDisciplina);
+        }
+        if (JSON.stringify(currentConfig.disciplinas || []) !== JSON.stringify(currentDisc)) {
+            await clinica.update({
+                configuracion: mergeClinicConfiguration(currentConfig, {
+                    disciplinas: currentDisc,
+                }),
+            }, { transaction });
+        }
+        return currentDisc;
+    });
+}
+
+async function canAccessClinicFeature(req, res, clinicId, featureKey) {
+    const actorId = Number(req.userData?.userId || req.user?.id || 0);
+    const parsedClinicId = Number(clinicId);
+    if (!actorId) {
+        res.status(401).json({ message: 'Token JWT inválido o no proporcionado' });
+        return false;
+    }
+    if (!Number.isInteger(parsedClinicId) || parsedClinicId <= 0) {
+        res.status(400).json({ message: 'clinica_id inválido' });
+        return false;
+    }
+    const allowed = await canUserAccessFeature({
+        actorId,
+        featureKey,
+        clinicId: parsedClinicId,
+    });
+    if (!allowed) {
+        res.status(403).json({ message: 'No tienes permisos para esta clínica' });
+        return false;
+    }
+    return true;
 }
 
 // ============ ESPECIALIDADES DE SISTEMA ============
@@ -187,6 +213,7 @@ exports.getEspecialidadesClinica = asyncHandler(async (req, res) => {
     const clinicaId = req.params.clinicaId || req.params.id || req.query.clinica_id;
     const { disciplina } = req.query;
     if (!clinicaId) return res.status(400).json({ message: 'clinica_id es obligatorio' });
+    if (!await canAccessClinicFeature(req, res, clinicaId, 'clinic.settings.view')) return;
 
     const relaciones = await ClinicaEspecialidades.findAll({
         where: { id_clinica: clinicaId },
@@ -233,6 +260,7 @@ exports.createEspecialidadClinica = asyncHandler(async (req, res) => {
     if (!id_clinica || !nombre || !disciplina) {
         return res.status(400).json({ message: 'id_clinica, nombre y disciplina son obligatorios' });
     }
+    if (!await canAccessClinicFeature(req, res, id_clinica, 'clinic.settings.edit')) return;
 
     const especialidad = await EspecialidadClinica.create({ id_clinica, nombre, disciplina, activo: true });
 
@@ -255,6 +283,7 @@ exports.updateEspecialidadClinica = asyncHandler(async (req, res) => {
     const { id } = req.params;
     const especialidad = await EspecialidadClinica.findByPk(id);
     if (!especialidad) return res.status(404).json({ message: 'Especialidad no encontrada' });
+    if (!await canAccessClinicFeature(req, res, especialidad.id_clinica, 'clinic.settings.edit')) return;
 
     const { nombre, activo } = req.body;
     if (nombre !== undefined) especialidad.nombre = nombre;
@@ -268,6 +297,7 @@ exports.deleteEspecialidadClinica = asyncHandler(async (req, res) => {
     const { id } = req.params;
     const especialidad = await EspecialidadClinica.findByPk(id);
     if (!especialidad) return res.status(404).json({ message: 'Especialidad no encontrada' });
+    if (!await canAccessClinicFeature(req, res, especialidad.id_clinica, 'clinic.settings.edit')) return;
 
     especialidad.activo = false;
     await especialidad.save();
@@ -280,6 +310,7 @@ exports.addEspecialidadSistemaAClinica = asyncHandler(async (req, res) => {
     if (!id_clinica || !id_especialidad_sistema) {
         return res.status(400).json({ message: 'id_clinica e id_especialidad_sistema son obligatorios' });
     }
+    if (!await canAccessClinicFeature(req, res, id_clinica, 'clinic.settings.edit')) return;
 
     const especialidad = await EspecialidadSistema.findByPk(id_especialidad_sistema);
     if (!especialidad) {
@@ -317,6 +348,7 @@ exports.removeEspecialidadSistemaDeClinica = asyncHandler(async (req, res) => {
     if (!clinicaId || !especialidadId) {
         return res.status(400).json({ message: 'clinicaId y especialidadId son obligatorios' });
     }
+    if (!await canAccessClinicFeature(req, res, clinicaId, 'clinic.settings.edit')) return;
 
     const relacion = await ClinicaEspecialidades.findOne({
         where: { id_clinica: clinicaId, id_especialidad_sistema: especialidadId }
@@ -381,6 +413,7 @@ exports.checkEspecialidadClinicaEnUso = asyncHandler(async (req, res) => {
     if (!especialidad) {
         return res.status(404).json({ message: 'Especialidad no encontrada' });
     }
+    if (!await canAccessClinicFeature(req, res, especialidad.id_clinica, 'clinic.settings.view')) return;
 
     // Contar asignaciones de usuarios a esta especialidad de clínica
     const cantidadProfesionales = await UsuarioEspecialidades.count({
@@ -392,3 +425,8 @@ exports.checkEspecialidadClinicaEnUso = asyncHandler(async (req, res) => {
         cantidadProfesionales
     });
 });
+
+exports._private = {
+    ensureDisciplinaEnClinica,
+    normalizeDisciplinaList,
+};

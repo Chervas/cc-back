@@ -53,6 +53,12 @@ module.exports = (sequelize, DataTypes) => {
         allowNull: true,
         comment: 'wamid, template data, error codes, etc.',
       },
+      automation_delivery_key: {
+        type: DataTypes.STRING(191),
+        allowNull: true,
+        unique: true,
+        comment: 'Clave idempotente global para una entrega materializada por Automatizaciones V2',
+      },
       sent_at: {
         type: DataTypes.DATE,
         allowNull: true,

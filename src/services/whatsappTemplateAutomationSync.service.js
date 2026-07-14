@@ -29,6 +29,12 @@ function nodeUsesTemplate(node, { templateId, templateName, catalogTemplateId })
   const nodeFallbackTemplateId = cleanString(config.fallback_template_id);
   const nodeFallbackTemplateName = cleanString(config.fallback_template_name).toLowerCase();
   const nodeFallbackCatalogTemplateId = Number(config.fallback_catalog_template_id);
+  const accessVariant = isObject(config.access_guidance_variant)
+    ? config.access_guidance_variant
+    : {};
+  const variantTemplateId = cleanString(accessVariant.template_id);
+  const variantTemplateName = cleanString(accessVariant.template_name).toLowerCase();
+  const variantCatalogTemplateId = Number(accessVariant.catalog_template_id);
   return (
     (templateId && nodeTemplateId === String(templateId))
     || (!!templateName && !!nodeTemplateName && nodeTemplateName === String(templateName).trim().toLowerCase())
@@ -36,6 +42,9 @@ function nodeUsesTemplate(node, { templateId, templateName, catalogTemplateId })
     || (templateId && nodeFallbackTemplateId === String(templateId))
     || (!!templateName && !!nodeFallbackTemplateName && nodeFallbackTemplateName === String(templateName).trim().toLowerCase())
     || (Number.isFinite(nodeFallbackCatalogTemplateId) && nodeFallbackCatalogTemplateId > 0 && nodeFallbackCatalogTemplateId === Number(catalogTemplateId))
+    || (templateId && variantTemplateId === String(templateId))
+    || (!!templateName && !!variantTemplateName && variantTemplateName === String(templateName).trim().toLowerCase())
+    || (Number.isFinite(variantCatalogTemplateId) && variantCatalogTemplateId > 0 && variantCatalogTemplateId === Number(catalogTemplateId))
   );
 }
 
@@ -86,6 +95,15 @@ async function recomposeAutomationsUsingTemplate({ templateInstance, logger = co
         || (!!templateName && cleanString(config.fallback_template_name).toLowerCase() === String(templateName).trim().toLowerCase())
         || (Number.isFinite(Number(config.fallback_catalog_template_id)) && Number(config.fallback_catalog_template_id) === Number(catalogTemplateId))
       );
+      const accessGuidanceVariant = isObject(config.access_guidance_variant)
+        ? config.access_guidance_variant
+        : null;
+      const usesAccessGuidanceVariant = !!accessGuidanceVariant && (
+        (templateId && cleanString(accessGuidanceVariant.template_id) === String(templateId))
+        || (!!templateName && cleanString(accessGuidanceVariant.template_name).toLowerCase() === String(templateName).trim().toLowerCase())
+        || (Number.isFinite(Number(accessGuidanceVariant.catalog_template_id))
+          && Number(accessGuidanceVariant.catalog_template_id) === Number(catalogTemplateId))
+      );
 
       const namedBindings = usesPrimaryTemplate
         ? buildEffectiveNamedBindings(
@@ -111,6 +129,36 @@ async function recomposeAutomationsUsingTemplate({ templateInstance, logger = co
           templateVariables
         )
         : normalizePositionalBindings(config.fallback_variables);
+      const accessGuidanceNamedBindings = usesAccessGuidanceVariant
+        ? buildEffectiveNamedBindings(
+          normalizeNamedBindings(accessGuidanceVariant.variables_named),
+          normalizePositionalBindings(accessGuidanceVariant.variables),
+          templateVariables
+        )
+        : normalizeNamedBindings(accessGuidanceVariant?.variables_named);
+      const accessGuidancePositionalBindings = usesAccessGuidanceVariant
+        ? buildPositionalBindingsFromNamed(
+          accessGuidanceNamedBindings,
+          accessGuidanceVariant?.variables,
+          templateVariables
+        )
+        : normalizePositionalBindings(accessGuidanceVariant?.variables);
+      const nextAccessGuidanceVariant = accessGuidanceVariant
+        ? {
+            ...accessGuidanceVariant,
+            template_id: usesAccessGuidanceVariant && Number.isFinite(templateId) && templateId > 0
+              ? String(templateId)
+              : (accessGuidanceVariant.template_id || ''),
+            template_name: usesAccessGuidanceVariant
+              ? (templateName || accessGuidanceVariant.template_name || '')
+              : (accessGuidanceVariant.template_name || ''),
+            catalog_template_id: usesAccessGuidanceVariant && Number.isFinite(catalogTemplateId) && catalogTemplateId > 0
+              ? catalogTemplateId
+              : (accessGuidanceVariant.catalog_template_id || null),
+            variables_named: accessGuidanceNamedBindings,
+            variables: accessGuidancePositionalBindings,
+          }
+        : null;
 
       const nextConfig = {
         ...config,
@@ -136,6 +184,9 @@ async function recomposeAutomationsUsingTemplate({ templateInstance, logger = co
           : (config.fallback_catalog_template_id || null),
         fallback_variables_named: fallbackNamedBindings,
         fallback_variables: fallbackPositionalBindings,
+        ...(nextAccessGuidanceVariant
+          ? { access_guidance_variant: nextAccessGuidanceVariant }
+          : {}),
       };
 
       if (JSON.stringify(nextConfig) !== JSON.stringify(config)) {
@@ -175,5 +226,6 @@ async function recomposeAutomationsUsingTemplate({ templateInstance, logger = co
 }
 
 module.exports = {
+  nodeUsesTemplate,
   recomposeAutomationsUsingTemplate,
 };

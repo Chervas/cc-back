@@ -13,7 +13,11 @@ const DEFAULT_DISTRIBUTION_ID = 'E3TRXQ4DMSYUVL';
 const VERSIONED_CACHE_CONTROL = 'public, max-age=31536000, immutable';
 const NON_VERSIONED_CACHE_CONTROL = 'public, max-age=300';
 const MAX_IMAGE_BYTES = 8 * 1024 * 1024;
+const MAX_WHATSAPP_IMAGE_BYTES = 5 * 1024 * 1024;
 const MAX_TEXT_BYTES = 128 * 1024;
+const MAX_IMAGE_PIXELS = 40 * 1000 * 1000;
+const CLINIC_ACCESS_IMAGE_WIDTH = 1200;
+const CLINIC_ACCESS_IMAGE_HEIGHT = 675;
 const ASSUME_ROLE_REFRESH_SKEW_MS = 5 * 60 * 1000;
 
 let cachedAssumedRoleCredentials = null;
@@ -53,6 +57,7 @@ function assertAllowedPurpose(purpose) {
   const allowed = new Set([
     'review_team_photo',
     'whatsapp_image',
+    'clinic_access_image',
     'clinic_logo',
     'marketing_image',
     'frontend_asset',
@@ -132,6 +137,147 @@ async function normalizeWhatsappImageToJpeg(buffer) {
     .toBuffer();
 }
 
+function normalizeImageContentType(value) {
+  const normalized = cleanText(value).toLowerCase();
+  return normalized === 'image/jpg' ? 'image/jpeg' : normalized;
+}
+
+function contentTypeForSharpFormat(format) {
+  const formats = {
+    jpeg: 'image/jpeg',
+    png: 'image/png',
+    webp: 'image/webp',
+    gif: 'image/gif',
+  };
+  return formats[String(format || '').toLowerCase()] || null;
+}
+
+async function inspectImagePayload(buffer, declaredContentType) {
+  let metadata;
+  try {
+    metadata = await sharp(buffer, {
+      failOn: 'error',
+      animated: false,
+      limitInputPixels: MAX_IMAGE_PIXELS,
+    }).metadata();
+  } catch (cause) {
+    const exceedsPixelLimit = /pixel limit|exceeds? .*pixels?/i.test(String(cause?.message || ''));
+    const err = new Error(exceedsPixelLimit
+      ? 'public_media_image_dimensions_not_allowed'
+      : 'public_media_invalid_image');
+    err.status = exceedsPixelLimit ? 413 : 400;
+    if (exceedsPixelLimit) err.details = { maxPixels: MAX_IMAGE_PIXELS };
+    err.cause = cause;
+    throw err;
+  }
+
+  const actualContentType = contentTypeForSharpFormat(metadata.format);
+  if (!actualContentType || !metadata.width || !metadata.height) {
+    const err = new Error('public_media_unsupported_image_format');
+    err.status = 400;
+    throw err;
+  }
+  if (Number(metadata.width) * Number(metadata.height) > MAX_IMAGE_PIXELS) {
+    const err = new Error('public_media_image_dimensions_not_allowed');
+    err.status = 413;
+    err.details = {
+      maxPixels: MAX_IMAGE_PIXELS,
+      width: metadata.width,
+      height: metadata.height,
+    };
+    throw err;
+  }
+
+  const declared = normalizeImageContentType(declaredContentType);
+  if (declared && declared !== actualContentType) {
+    const err = new Error('public_media_content_type_mismatch');
+    err.status = 400;
+    err.details = { declaredContentType: declared, actualContentType };
+    throw err;
+  }
+
+  return {
+    actualContentType,
+    width: Number(metadata.width),
+    height: Number(metadata.height),
+    format: String(metadata.format || ''),
+  };
+}
+
+async function normalizeClinicAccessImageToJpeg(buffer) {
+  return sharp(buffer, {
+    failOn: 'error',
+    animated: false,
+    limitInputPixels: MAX_IMAGE_PIXELS,
+  })
+    .rotate()
+    .resize(CLINIC_ACCESS_IMAGE_WIDTH, CLINIC_ACCESS_IMAGE_HEIGHT, {
+      fit: 'contain',
+      background: '#ffffff',
+      withoutEnlargement: false,
+    })
+    .flatten({ background: '#ffffff' })
+    .jpeg({ quality: 86, mozjpeg: true, chromaSubsampling: '4:2:0' })
+    .toBuffer();
+}
+
+async function preparePublicMediaPayload(input = {}) {
+  const purpose = assertAllowedPurpose(input.purpose);
+  let contentType = inferContentType(input);
+  let buffer = Buffer.isBuffer(input.buffer) ? input.buffer : decodePayload(input);
+
+  // Limitar los bytes originales antes de decodificar con Sharp evita que una
+  // imagen comprimida enorme use CPU/memoria antes de ser rechazada.
+  assertPublicMediaPayload({ purpose, contentType, buffer });
+
+  let sourceImage = null;
+  let transformed = false;
+  if (IMAGE_TYPES.has(contentType)) {
+    sourceImage = await inspectImagePayload(buffer, contentType);
+  }
+
+  if (purpose === 'clinic_access_image') {
+    buffer = await normalizeClinicAccessImageToJpeg(buffer);
+    contentType = 'image/jpeg';
+    transformed = true;
+  } else if (shouldNormalizeWhatsappImage({ purpose, contentType })) {
+    buffer = await normalizeWhatsappImageToJpeg(buffer);
+    contentType = 'image/jpeg';
+    transformed = true;
+  }
+
+  assertPublicMediaPayload({ purpose, contentType, buffer });
+  if (purpose === 'clinic_access_image' && buffer.length > MAX_WHATSAPP_IMAGE_BYTES) {
+    const err = new Error('clinic_access_image_too_large_for_whatsapp');
+    err.status = 413;
+    err.details = { maxBytes: MAX_WHATSAPP_IMAGE_BYTES, sizeBytes: buffer.length };
+    throw err;
+  }
+
+  const outputImage = IMAGE_TYPES.has(contentType)
+    ? await inspectImagePayload(buffer, contentType)
+    : null;
+
+  return {
+    purpose,
+    contentType,
+    buffer,
+    imageMetadata: sourceImage ? {
+      source_content_type: sourceImage.actualContentType,
+      source_width: sourceImage.width,
+      source_height: sourceImage.height,
+      output_content_type: outputImage?.actualContentType || contentType,
+      output_width: outputImage?.width || null,
+      output_height: outputImage?.height || null,
+      transformed,
+      metadata_stripped: purpose === 'clinic_access_image',
+      whatsapp_compatible: purpose === 'clinic_access_image'
+        ? buffer.length <= MAX_WHATSAPP_IMAGE_BYTES
+        : null,
+    } : null,
+  };
+}
+
 function publicUrlForKey(key) {
   const { baseUrl } = getConfig();
   return `${baseUrl}/${key.split('/').map(encodeURIComponent).join('/')}`;
@@ -143,6 +289,8 @@ function prefixForPurpose(purpose) {
       return 'whatsapp/reviews/team';
     case 'whatsapp_image':
       return 'whatsapp/images';
+    case 'clinic_access_image':
+      return 'whatsapp/clinic-access';
     case 'clinic_logo':
       return 'logos/clinicas';
     case 'marketing_image':
@@ -247,14 +395,13 @@ function cloudFrontClient() {
 }
 
 async function uploadPublicMedia(input = {}) {
-  const purpose = assertAllowedPurpose(input.purpose);
-  let contentType = inferContentType(input);
-  let buffer = Buffer.isBuffer(input.buffer) ? input.buffer : decodePayload(input);
-  if (shouldNormalizeWhatsappImage({ purpose, contentType })) {
-    buffer = await normalizeWhatsappImageToJpeg(buffer);
-    contentType = 'image/jpeg';
-  }
-  assertPublicMediaPayload({ purpose, contentType, buffer });
+  const prepared = await preparePublicMediaPayload(input);
+  const {
+    purpose,
+    contentType,
+    buffer,
+    imageMetadata,
+  } = prepared;
 
   const { region, bucket } = getConfig();
   const sha256 = crypto.createHash('sha256').update(buffer).digest('hex');
@@ -302,7 +449,8 @@ async function uploadPublicMedia(input = {}) {
     sizeBytes: buffer.length,
     sha256,
     etag: response.ETag || null,
-    cacheControl
+    cacheControl,
+    imageMetadata,
   };
 }
 
@@ -341,15 +489,30 @@ function getPublicMediaStatus() {
     allowed_use: 'public_non_clinical_assets_only',
     clinical_storage: false,
     bucket_public: false,
-    acl_public_read: false
+    acl_public_read: false,
+    clinic_access_image: {
+      content_type: 'image/jpeg',
+      width: CLINIC_ACCESS_IMAGE_WIDTH,
+      height: CLINIC_ACCESS_IMAGE_HEIGHT,
+      max_source_bytes: MAX_IMAGE_BYTES,
+      max_output_bytes: MAX_WHATSAPP_IMAGE_BYTES,
+      strips_metadata: true,
+      physical_delete_supported: false,
+    },
   };
 }
 
 module.exports = {
+  CLINIC_ACCESS_IMAGE_HEIGHT,
+  CLINIC_ACCESS_IMAGE_WIDTH,
+  MAX_IMAGE_BYTES,
+  MAX_IMAGE_PIXELS,
+  MAX_WHATSAPP_IMAGE_BYTES,
   VERSIONED_CACHE_CONTROL,
   getConfig,
   getPublicMediaStatus,
   uploadPublicMedia,
   invalidatePublicMediaKey,
-  publicUrlForKey
+  preparePublicMediaPayload,
+  publicUrlForKey,
 };
