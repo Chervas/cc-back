@@ -29,7 +29,13 @@ Las citas solo son eliminables si contienen el marcador y no tienen
 `paciente_id`. No se debe crear un paciente real en esta prueba. QuickChat solo
 se limpia si es una conversación aislada con exactamente un
 `quickchat_summary` oculto; cualquier mensaje normal o saliente bloquea el
-borrado.
+borrado. El script incluye además cualquier
+`JobRequest.type=intake_quickchat_summary_materialize` cuyo `payload.lead_id`
+sea uno de los IDs explícitos. Comprueba que `payload.audit_id` pertenezca
+exactamente a ese lead y rechaza la limpieza si el job está `running`. Puede
+haber más de un outbox para el mismo lead: tanto el cierre `chatbot` como el
+reintento `chatbot_quickchat` deduplicado conservan su propio audit del payload
+recibido, aunque el materializador consolide ambos en un solo mensaje interno.
 
 ## Verificar, simular y aplicar
 
@@ -65,11 +71,19 @@ El modo apply borra únicamente los identificadores cargados y validados dentro
 de una transacción serializable. Después comprueba que queden cero filas para:
 
 - `LeadIntakes` y sus filas de atribución, contacto y flujo en cascada;
+- el outbox QuickChat exacto (`JobRequests`) antes de borrar su audit/lead;
 - `Conversations`, `Messages` y `ConversationReads` aislados;
 - `FormSubmissionEvents` vinculados;
 - `WebEvents` de las sesiones exactas;
 - `GoogleAdsConversionUploadAttempts` de los eventos exactos;
 - citas de prueba marcadas explícitamente y sus holds vinculados.
+
+Los outbox `pending`, `waiting`, `completed`, `failed` o `cancelled` se bloquean
+con `FOR UPDATE` en `simulate/apply` y se eliminan dentro de la misma
+transacción. Un outbox `running` nunca se borra: hay que esperar a que el worker
+lo deje terminal o reintentable y volver a empezar por el dry-run. El postcheck
+incluye `quickchat_outbox_jobs=0`, de modo que la limpieza no deja una tarea
+huérfana capaz de recrear una conversación después de borrar el lead.
 
 Los intentos confirmados por Google aparecen en dry-run, pero bloquean
 simulate/apply. El borrado local **no** revierte una conversión en Google. Si es
@@ -101,9 +115,10 @@ sintéticos. El intento `#22` sí acreditó el transporte controlado de dos hash
 un registro recibido y cero warnings, pero no una conversión atribuida.
 
 `LeadIntake #7208` no se ha limpiado. Su intento `#20`, request ID
-`6b1d7941-d6d2-4668-8b15-8e93be8748de`, seguía `PROCESSING` en la lectura
-`JobRequest #23779` / `SyncLog #65252` de las `23:30:04 UTC`, con `checked=1`,
-`processing=1`, `record_count=0` y cero errors/warnings. Conserva intactas una fila
+`6b1d7941-d6d2-4668-8b15-8e93be8748de`, seguía `accepted/provider_processing`
+en la lectura `JobRequest #23801` / `SyncLog #65272`, cerrada a las
+`00:34:26 UTC`: destino `PROCESSING`, `checked=1`, `processing=1`,
+`record_count=0` y cero errors/warnings. Conserva intactas una fila
 de atribución y el intento local para que el scheduler pueda completar la
 auditoría. Solo después de un terminal puede repetirse este procedimiento y
 documentar su postcheck; borrar antes incumpliría la guarda de diagnóstico
@@ -197,3 +212,37 @@ de limpieza. El postcheck final dejó cero leads, formularios, conversaciones,
 mensajes, eventos web o intentos de conversión sintéticos. El grupo `5` volvió a
 su baseline de cuatro leads reales, con máximo `7186`; los IDs sintéticos
 `7187`-`7190` no conservan filas asociadas.
+
+## Cierre del outbox QuickChat postdeploy (2026-07-14)
+
+Tras desplegar backend staging `9b82958` se ejecutó una única prueba pública
+móvil sobre `https://www.propdental.es/`, runtime `3.4.5`, con marcador
+`CC-E2E-QUICKCHAT-20260713-0110`. La sesión rechazó Marketing, conservó
+`ad_user_data=denied` y `ad_personalization=denied`, no tenía click IDs y bloqueó
+los endpoints publicitarios del navegador. Eligió explícitamente Sant Martí
+`56` y recorrió el chat real hasta `Sí, contactadme`.
+
+- `chatbot` devolvió `201` y `chatbot_quickchat` deduplicó con `200` sobre el
+  mismo `LeadIntake #7213`;
+- los audits `#7400/#7401` fijaron `resolved_clinic_id=56` y crearon los
+  `JobRequests #23818/#23819`, ambos `completed` al primer intento;
+- el resultado durable dejó una sola `Conversation #3574` y un único
+  `Message #43072`, `kind=quickchat_summary`, cuyo watermark final era el audit
+  posterior `7401`;
+- existieron cero `GoogleAdsConversionUploadAttempts` para sus event IDs.
+
+La limpieza se hizo inmediatamente con el script documentado: el dry-run
+verificó 1 lead, 2 audits, 2 outbox, 1 conversación, 1 mensaje y 1 WebEvent; la
+simulación devolvió cero en todos los postchecks y revirtió; `--apply` confirmó
+los mismos IDs y su postcheck comprometido dejó todos los contadores en cero.
+Los leads reales no formaron parte del scope.
+
+El mismo despliegue permitió recuperar tres chats reales de Sants que habían
+quedado sin resumen durante el bloqueo anterior. Tras releer y bloquear el lead
+y su último audit, validar contacto y comprobar ausencia de conversación/job,
+se encolaron `#7185/#7366`, `#7195/#7380` y `#7196/#7381` como
+`intake_quickchat_summary_materialize` de namespace `staging`. Los jobs
+`#23820/#23821/#23822` completaron al primer intento y crearon exactamente las
+conversaciones `#3575/#3576/#3577` y mensajes `#43073/#43074/#43075` en la sede
+persistida `19`. No hubo materialización lateral: la cuenta de intentos Google
+de esos leads permaneció idéntica antes y después (`3 -> 3`).
