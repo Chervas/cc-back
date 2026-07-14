@@ -183,6 +183,12 @@ function testWritersUseLockedLatestRowAndPublicConfigIsSanitized() {
   assert.match(intakeUpsert, /mergeIntakeConfigForEditorWrite/);
   assert.match(intakeUpsert, /\}, \{ transaction \}\)/);
   assert.match(intakeUpsert, /body\.mutation_kind === 'snippet_verification'/);
+  assert.match(intakeUpsert, /body\.mutation_kind === 'domain_add'/);
+  assert.match(intakeUpsert, /canonicalizeIntakeDomains\(\[\.\.\.existingDomains, domainToAdd\]\)/);
+  assert.match(intakeUpsert, /partialMutation && !existing/);
+  assert.match(intakeSource, /locationIds\.has\(parsedClinicId\)/);
+  assert.match(intakeUpsert, /if \(partialMutation\) \{[\s\S]*scope = 'group';[\s\S]*groupId = sharedWebContext\.groupId;/);
+  assert.match(intakeUpsert, /clinic_id: scope === 'clinic' \? \(clinicId \|\| null\) : null/);
   assert.match(intakeUpsert, /verificationOnlyMutation[\s\S]*existing\?\.domains/);
   assert.match(intakeUpsert, /verificationOnlyMutation[\s\S]*\{ \.\.\.existingConfig \}/);
 

@@ -101,6 +101,9 @@ const ENHANCED_CONVERSION_ADVERTISER_AUTHORIZED_AT =
   || '2026-07-13T00:00:00.000Z';
 const ENHANCED_CONVERSION_VALUE_POLICY_VERSION = 1;
 const AD_PERSONALIZATION_CAPABILITY_VERSION = 2;
+const CAMPAIGN_REPORTING_TIME_ZONE = 'Europe/Madrid';
+const QUALIFIED_LEAD_STATUSES = new Set(['cualificado', 'citado', 'acudio_cita', 'convertido']);
+const APPOINTMENT_LEAD_STATUSES = new Set(['citado', 'acudio_cita', 'convertido']);
 const ENHANCED_CONVERSION_REPORTING_VALUES_EUR = Object.freeze({
   lead: 0,
   contact: 0,
@@ -199,6 +202,19 @@ function normalizeLookupToken(value) {
 }
 
 function resolveLeadProvider(lead) {
+  if (
+    normalizeLookupToken(lead?.google_ads_customer_id)
+    || normalizeLookupToken(lead?.google_ads_campaign_id)
+    || normalizeLookupToken(lead?.gclid)
+    || normalizeLookupToken(lead?.gbraid)
+    || normalizeLookupToken(lead?.wbraid)
+  ) {
+    return 'google_ads';
+  }
+  if (normalizeLookupToken(lead?.fbclid)) {
+    return 'meta_ads';
+  }
+
   const candidates = [
     lead?.source,
     lead?.external_source,
@@ -213,6 +229,92 @@ function resolveLeadProvider(lead) {
   }
 
   return null;
+}
+
+function dateOnlyUtc(year, month, day) {
+  return new Date(Date.UTC(year, month - 1, day));
+}
+
+function shiftDateOnlyUtc(date, days) {
+  const shifted = new Date(date.getTime());
+  shifted.setUTCDate(shifted.getUTCDate() + days);
+  return shifted;
+}
+
+function parseDateOnlyUtc(raw, fallback = null) {
+  const match = String(raw || '').trim().match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (!match) return fallback;
+  const parsed = dateOnlyUtc(Number(match[1]), Number(match[2]), Number(match[3]));
+  return Number.isNaN(parsed.getTime()) ? fallback : parsed;
+}
+
+function zonedCalendarParts(date, timeZone = CAMPAIGN_REPORTING_TIME_ZONE) {
+  const parts = new Intl.DateTimeFormat('en-CA', {
+    timeZone,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hourCycle: 'h23'
+  }).formatToParts(date);
+  const values = Object.fromEntries(parts.map((part) => [part.type, part.value]));
+  return {
+    year: Number(values.year),
+    month: Number(values.month),
+    day: Number(values.day),
+    hour: Number(values.hour),
+    minute: Number(values.minute),
+    second: Number(values.second)
+  };
+}
+
+function zonedDateTimeToUtc({ year, month, day, hour = 0, minute = 0, second = 0 }, timeZone = CAMPAIGN_REPORTING_TIME_ZONE) {
+  const targetUtc = Date.UTC(year, month - 1, day, hour, minute, second);
+  let candidate = targetUtc;
+
+  // Resolve the time-zone offset at the target instant. Repeating handles the
+  // offset transition around DST boundaries without relying on MySQL tz tables.
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const parts = zonedCalendarParts(new Date(candidate), timeZone);
+    const representedUtc = Date.UTC(
+      parts.year,
+      parts.month - 1,
+      parts.day,
+      parts.hour,
+      parts.minute,
+      parts.second
+    );
+    const next = candidate + (targetUtc - representedUtc);
+    if (next === candidate) break;
+    candidate = next;
+  }
+
+  return new Date(candidate);
+}
+
+function buildZonedCalendarRange(startDate, endDate, timeZone = CAMPAIGN_REPORTING_TIME_ZONE) {
+  const start = startDate instanceof Date ? startDate : parseDateOnlyUtc(startDate);
+  const end = endDate instanceof Date ? endDate : parseDateOnlyUtc(endDate);
+  if (!start || !end || Number.isNaN(start.getTime()) || Number.isNaN(end.getTime())) {
+    return null;
+  }
+
+  const endNext = shiftDateOnlyUtc(end, 1);
+  return {
+    start: zonedDateTimeToUtc({
+      year: start.getUTCFullYear(),
+      month: start.getUTCMonth() + 1,
+      day: start.getUTCDate()
+    }, timeZone),
+    endExclusive: zonedDateTimeToUtc({
+      year: endNext.getUTCFullYear(),
+      month: endNext.getUTCMonth() + 1,
+      day: endNext.getUTCDate()
+    }, timeZone),
+    timeZone
+  };
 }
 
 function microsToCurrency(value) {
@@ -648,18 +750,162 @@ function buildExternalCampaignAliasIndex(rawTargets) {
   return aliasIndex;
 }
 
-async function loadCurrentLeadAttributionMetricsIndex({ scope, payload, days = 30 }) {
+function buildLeadAttributionMetrics(rows, rawTargets) {
+  const aliasIndex = buildExternalCampaignAliasIndex(rawTargets);
+  const linkedCampaignKeys = new Set();
+  for (const target of normalizeExternalTargets(rawTargets)) {
+    for (const campaign of target.campaigns) {
+      const key = externalCampaignIdentityKey(campaign);
+      if (key) linkedCampaignKeys.add(key);
+    }
+  }
+
+  const metricsIndex = new Map();
+  const unassignedIndex = new Map();
+  const aggregate = {
+    clinic_paid_leads: 0,
+    linked_leads: 0,
+    linked_qualified_leads: 0,
+    linked_appointments: 0,
+    linked_crm_conversions: 0,
+    unassigned_clinic_leads: 0,
+    unassigned_by_provider: {
+      google_ads: 0,
+      meta_ads: 0
+    }
+  };
+
+  const incrementUnassigned = (row, provider, directIdentity = null) => {
+    aggregate.unassigned_clinic_leads += 1;
+    if (Object.prototype.hasOwnProperty.call(aggregate.unassigned_by_provider, provider)) {
+      aggregate.unassigned_by_provider[provider] += 1;
+    }
+
+    const accountId = provider === 'google_ads'
+      ? normalizeCustomerId(row?.google_ads_customer_id || '') || null
+      : null;
+    const campaignId = provider === 'google_ads'
+      ? normalizeLookupToken(row?.google_ads_campaign_id) || null
+      : null;
+    const key = directIdentity
+      ? externalCampaignIdentityKey(directIdentity)
+      : `${provider}:${accountId || 'unknown'}:${campaignId || 'unknown'}`;
+    const current = unassignedIndex.get(key) || {
+      provider,
+      account_id: accountId,
+      campaign_id: campaignId,
+      leads: 0
+    };
+    current.leads += 1;
+    unassignedIndex.set(key, current);
+  };
+
+  for (const row of Array.isArray(rows) ? rows : []) {
+    if (row?.archived_at || String(row?.status_lead || '').trim().toLowerCase() === 'descartado') {
+      continue;
+    }
+
+    const provider = resolveLeadProvider(row);
+    if (!provider) continue;
+    aggregate.clinic_paid_leads += 1;
+
+    const matchedCampaigns = new Set();
+    const richAccountId = provider === 'google_ads'
+      ? normalizeCustomerId(row?.google_ads_customer_id || '')
+      : '';
+    const richCampaignId = provider === 'google_ads'
+      ? normalizeLookupToken(row?.google_ads_campaign_id)
+      : '';
+    const hasCanonicalRichIdentity = Boolean(richAccountId && richCampaignId);
+    const directIdentity = hasCanonicalRichIdentity
+      ? canonicalExternalCampaignIdentity({
+          provider,
+          account_id: richAccountId,
+          campaign_id: richCampaignId
+        })
+      : null;
+
+    // Rich attribution is authoritative. If account + campaign points outside
+    // this strategy, do not fall back to a stale UTM name that happens to match.
+    if (directIdentity) {
+      const directKey = externalCampaignIdentityKey(directIdentity);
+      if (directKey && linkedCampaignKeys.has(directKey)) {
+        matchedCampaigns.add(directKey);
+      }
+    } else {
+      const tokens = [
+        richCampaignId,
+        normalizeLookupToken(row?.utm_campaign),
+        normalizeLookupToken(row?.source_detail)
+      ].filter(Boolean);
+
+      for (const token of tokens) {
+        const aliasKey = `${provider}:${token}`;
+        const campaignKeys = aliasIndex.get(aliasKey);
+        if (!campaignKeys || campaignKeys.size !== 1) continue;
+        for (const campaignKey of campaignKeys) {
+          matchedCampaigns.add(campaignKey);
+        }
+      }
+    }
+
+    if (matchedCampaigns.size !== 1) {
+      incrementUnassigned(row, provider, directIdentity);
+      continue;
+    }
+
+    const [campaignKey] = Array.from(matchedCampaigns);
+    const current = metricsIndex.get(campaignKey) || {
+      leads: 0,
+      qualified_leads: 0,
+      appointments: 0,
+      crm_conversions: 0
+    };
+    const status = String(row?.status_lead || '').trim().toLowerCase();
+
+    current.leads += 1;
+    aggregate.linked_leads += 1;
+    if (QUALIFIED_LEAD_STATUSES.has(status)) {
+      current.qualified_leads += 1;
+      aggregate.linked_qualified_leads += 1;
+    }
+    if (APPOINTMENT_LEAD_STATUSES.has(status)) {
+      current.appointments += 1;
+      aggregate.linked_appointments += 1;
+    }
+    if (status === 'convertido') {
+      current.crm_conversions += 1;
+      aggregate.linked_crm_conversions += 1;
+    }
+
+    metricsIndex.set(campaignKey, current);
+  }
+
+  return {
+    metricsIndex,
+    aggregate,
+    unassignedCampaigns: Array.from(unassignedIndex.values())
+      .sort((a, b) => safeNumber(b.leads) - safeNumber(a.leads))
+  };
+}
+
+async function loadCurrentLeadAttributionMetrics({
+  scope,
+  payload,
+  days = 30,
+  startDate = null,
+  endDate = null,
+  timeZone = CAMPAIGN_REPORTING_TIME_ZONE
+}) {
   if (!LeadIntake) {
-    return new Map();
+    return buildLeadAttributionMetrics([], payload?.external_targets);
   }
 
-  const aliasIndex = buildExternalCampaignAliasIndex(payload?.external_targets);
-  if (aliasIndex.size === 0) {
-    return new Map();
-  }
-
-  const end = new Date();
-  const start = new Date(end.getTime() - (days * 24 * 60 * 60 * 1000));
+  const calendarRange = startDate && endDate
+    ? buildZonedCalendarRange(startDate, endDate, timeZone)
+    : null;
+  const end = calendarRange?.endExclusive || new Date();
+  const start = calendarRange?.start || new Date(end.getTime() - (days * 24 * 60 * 60 * 1000));
 
   const rows = await LeadIntake.findAll({
     attributes: [
@@ -669,61 +915,30 @@ async function loadCurrentLeadAttributionMetricsIndex({ scope, payload, days = 3
       'utm_source',
       'utm_campaign',
       'source_detail',
-      'status_lead'
+      'status_lead',
+      'google_ads_customer_id',
+      'google_ads_campaign_id',
+      'gclid',
+      'gbraid',
+      'wbraid',
+      'fbclid',
+      'archived_at'
     ],
     where: {
       archived_at: null,
-      created_at: { [Op.between]: [start, end] },
+      created_at: { [Op.gte]: start, [Op.lt]: end },
       status_lead: { [Op.ne]: 'descartado' },
       ...buildMetricsScopeWhere(scope, { clinicField: 'clinica_id', groupField: 'grupo_clinica_id' })
     },
     raw: true
   });
 
-  const metricsIndex = new Map();
+  return buildLeadAttributionMetrics(rows, payload?.external_targets);
+}
 
-  for (const row of rows) {
-    const provider = resolveLeadProvider(row);
-    if (!provider) {
-      continue;
-    }
-
-    const matchedCampaigns = new Set();
-    const tokens = [
-      normalizeLookupToken(row?.utm_campaign),
-      normalizeLookupToken(row?.source_detail)
-    ].filter(Boolean);
-
-    for (const token of tokens) {
-      const aliasKey = `${provider}:${token}`;
-      const campaignKeys = aliasIndex.get(aliasKey);
-      if (!campaignKeys || campaignKeys.size !== 1) {
-        continue;
-      }
-      for (const campaignKey of campaignKeys) {
-        matchedCampaigns.add(campaignKey);
-      }
-    }
-
-    if (matchedCampaigns.size !== 1) {
-      continue;
-    }
-
-    const [campaignKey] = Array.from(matchedCampaigns);
-    const current = metricsIndex.get(campaignKey) || {
-      leads: 0,
-      crm_conversions: 0
-    };
-
-    current.leads += 1;
-    if (String(row?.status_lead || '').trim().toLowerCase() === 'convertido') {
-      current.crm_conversions += 1;
-    }
-
-    metricsIndex.set(campaignKey, current);
-  }
-
-  return metricsIndex;
+async function loadCurrentLeadAttributionMetricsIndex(options) {
+  const result = await loadCurrentLeadAttributionMetrics(options);
+  return result.metricsIndex;
 }
 
 function buildTargetSummaries(externalTargets, targetDestinations, leadMetricsIndex = new Map()) {
@@ -2620,6 +2835,65 @@ function assessConsentMeasurementReadiness(marketingState) {
   };
 }
 
+function resolveWebMeasurementMarketingState(scope, marketingState) {
+  const requestedScope = scope || marketingState?.scope || {};
+  const records = marketingState?.records || {};
+  const clinicRecord = records.clinicRecord || null;
+  const groupRecord = records.groupRecord || null;
+
+  if (requestedScope.assignment_scope === 'group') {
+    return {
+      source: 'group',
+      assignment_scope: 'group',
+      clinic_id: null,
+      group_id: parseInteger(requestedScope.group_id || groupRecord?.group_id),
+      record: groupRecord,
+      marketingState: {
+        ...marketingState,
+        scope: {
+          ...(marketingState?.scope || {}),
+          assignment_scope: 'group',
+          clinic_id: null,
+          group_id: parseInteger(requestedScope.group_id || groupRecord?.group_id)
+        },
+        records: { clinicRecord: null, groupRecord }
+      }
+    };
+  }
+
+  const clinicId = parseInteger(requestedScope.clinic_id);
+  const groupConfig = readIntakeRecordConfig(groupRecord);
+  const groupLocationIds = new Set((Array.isArray(groupConfig.locations) ? groupConfig.locations : [])
+    .map((location) => parseInteger(location?.id || location?.clinic_id))
+    .filter(Boolean));
+  const usesGroupWebMeasurement = Boolean(groupRecord && clinicId && groupLocationIds.has(clinicId));
+  const record = usesGroupWebMeasurement ? groupRecord : (clinicRecord || groupRecord);
+  const assignmentScope = usesGroupWebMeasurement || (!clinicRecord && groupRecord) ? 'group' : 'clinic';
+  const groupId = parseInteger(requestedScope.group_id || groupRecord?.group_id);
+
+  return {
+    source: usesGroupWebMeasurement
+      ? 'group_web_location'
+      : (assignmentScope === 'group' ? 'group_fallback' : 'clinic'),
+    assignment_scope: assignmentScope,
+    clinic_id: clinicId,
+    group_id: groupId,
+    record,
+    marketingState: {
+      ...marketingState,
+      scope: {
+        ...(marketingState?.scope || {}),
+        assignment_scope: assignmentScope,
+        clinic_id: assignmentScope === 'clinic' ? clinicId : null,
+        group_id: groupId
+      },
+      records: assignmentScope === 'group'
+        ? { clinicRecord: null, groupRecord: record }
+        : { clinicRecord: record, groupRecord: null }
+    }
+  };
+}
+
 function asPlainObject(value) {
   return value && typeof value === 'object' && !Array.isArray(value) ? value : {};
 }
@@ -3984,13 +4258,18 @@ function extractStrategyScopeFromPayload(payload, rows = []) {
   };
 }
 
-function resolveAnalysisDateRange(timeframeRaw, startDateRaw, endDateRaw) {
-  const today = new Date();
-  today.setHours(0, 0, 0, 0);
+function resolveAnalysisDateRange(
+  timeframeRaw,
+  startDateRaw,
+  endDateRaw,
+  { now = new Date(), timeZone = CAMPAIGN_REPORTING_TIME_ZONE } = {}
+) {
+  const todayParts = zonedCalendarParts(now, timeZone);
+  const today = dateOnlyUtc(todayParts.year, todayParts.month, todayParts.day);
 
   const normalized = String(timeframeRaw || '').trim().toLowerCase();
-  const explicitStart = startDateRaw ? parseDate(startDateRaw, null) : null;
-  const explicitEnd = endDateRaw ? parseDate(endDateRaw, null) : null;
+  const explicitStart = startDateRaw ? parseDateOnlyUtc(startDateRaw, null) : null;
+  const explicitEnd = endDateRaw ? parseDateOnlyUtc(endDateRaw, null) : null;
   if (explicitStart && explicitEnd) {
     return {
       key: normalized || 'custom',
@@ -4004,22 +4283,22 @@ function resolveAnalysisDateRange(timeframeRaw, startDateRaw, endDateRaw) {
 
   switch (normalized) {
     case 'yesterday':
-      start.setDate(start.getDate() - 1);
-      end.setDate(end.getDate() - 1);
+      start.setUTCDate(start.getUTCDate() - 1);
+      end.setUTCDate(end.getUTCDate() - 1);
       break;
     case 'last_week':
-      start.setDate(start.getDate() - 13);
-      end.setDate(end.getDate() - 7);
+      start.setUTCDate(start.getUTCDate() - 13);
+      end.setUTCDate(end.getUTCDate() - 7);
       break;
     case 'last_month':
-      start.setDate(start.getDate() - 29);
+      start.setUTCDate(start.getUTCDate() - 29);
       break;
     case 'all_time':
-      start.setFullYear(2020, 0, 1);
+      start.setUTCFullYear(2020, 0, 1);
       break;
     case 'last_7_days':
     default:
-      start.setDate(start.getDate() - 6);
+      start.setUTCDate(start.getUTCDate() - 6);
       break;
   }
 
@@ -4076,7 +4355,11 @@ function buildAnalysisLeafRow({
     summary: null,
     mock: mock === true,
     spend: Number(normalizedSpend.toFixed(2)),
+    // Compatibility alias: historically rows[].leads contained the advertising
+    // provider's conversion metric. New consumers must use provider_conversions
+    // and the top-level crm_metrics for actual ClinicaClick leads.
     leads: normalizedLeads,
+    provider_conversions: normalizedLeads,
     cpl: normalizedLeads && normalizedLeads > 0 ? Number((normalizedSpend / normalizedLeads).toFixed(2)) : null,
     ctr: computedCtr != null ? Number(computedCtr.toFixed(2)) : null,
     impressions: normalizedImpressions,
@@ -4096,6 +4379,49 @@ function buildAnalysisLeafRow({
     instant_form_questions: Array.isArray(instantFormQuestions) ? instantFormQuestions : [],
     follow_up_url: followUpUrl || null,
     status_text: statusText || null
+  };
+}
+
+function buildCampaignAnalysisMetricContract({ provider, campaignRef, rows, leadAttribution }) {
+  const campaignKey = externalCampaignIdentityKey(campaignRef);
+  const campaignMetrics = campaignKey
+    ? leadAttribution?.metricsIndex?.get(campaignKey)
+    : null;
+  const aggregate = leadAttribution?.aggregate || {};
+  const unassignedByProvider = aggregate.unassigned_by_provider || {};
+  const providerConversions = (Array.isArray(rows) ? rows : []).reduce((sum, row) => (
+    sum + safeNumber(row?.provider_conversions ?? row?.leads)
+  ), 0);
+  const providerSpend = (Array.isArray(rows) ? rows : []).reduce((sum, row) => (
+    sum + safeNumber(row?.spend)
+  ), 0);
+  const crmLeads = safeNumber(campaignMetrics?.leads);
+
+  return {
+    crm_metrics: {
+      leads: crmLeads,
+      qualified_leads: safeNumber(campaignMetrics?.qualified_leads),
+      appointments: safeNumber(campaignMetrics?.appointments),
+      crm_conversions: safeNumber(campaignMetrics?.crm_conversions),
+      cost_per_lead: crmLeads > 0 ? Number((providerSpend / crmLeads).toFixed(2)) : null,
+      unassigned_clinic_leads: safeNumber(unassignedByProvider[provider]),
+      strategy_linked_leads: safeNumber(aggregate.linked_leads),
+      clinic_paid_leads: safeNumber(aggregate.clinic_paid_leads)
+    },
+    provider_metrics: {
+      spend: Number(providerSpend.toFixed(2)),
+      conversions: Number(providerConversions.toFixed(6))
+    },
+    unassigned_campaigns: (Array.isArray(leadAttribution?.unassignedCampaigns)
+      ? leadAttribution.unassignedCampaigns
+      : [])
+      .filter((item) => item.provider === provider),
+    metric_contract: {
+      version: 2,
+      reporting_time_zone: CAMPAIGN_REPORTING_TIME_ZONE,
+      rows_leads_semantics: 'provider_conversions_legacy',
+      crm_leads_field: 'crm_metrics.leads'
+    }
   };
 }
 
@@ -6735,12 +7061,11 @@ exports.getCampaignOnboardingBootstrap = asyncHandler(async (req, res) => {
     groupIdRaw: scope.group_id,
     assignmentScopeRaw: scope.assignment_scope
   });
-  const intakeRecord = scope.assignment_scope === 'group'
-    ? marketingState.records.groupRecord
-    : (marketingState.records.clinicRecord || marketingState.records.groupRecord);
+  const webMeasurementState = resolveWebMeasurementMarketingState(scope, marketingState);
+  const intakeRecord = webMeasurementState.record;
   const intakeGoogleAds = normalizeGoogleAdsConfig(marketingState.tracking.google_ads || {});
   const intakeMetaAds = normalizeMetaAdsConfig(marketingState.tracking.meta_ads || {});
-  const consentReadiness = assessConsentMeasurementReadiness(marketingState);
+  const consentReadiness = assessConsentMeasurementReadiness(webMeasurementState.marketingState);
 
   let googleConnected = false;
   let googleReason = null;
@@ -6900,7 +7225,12 @@ exports.getCampaignOnboardingBootstrap = asyncHandler(async (req, res) => {
         ? (scope.clinics?.[0]?.url_web || null)
         : null,
       group_web_primary_url: scope.group?.web_primary_url || null,
-      group_web_assignment_mode: scope.group?.web_assignment_mode || null
+      group_web_assignment_mode: scope.group?.web_assignment_mode || null,
+      web_measurement_scope: webMeasurementState.assignment_scope,
+      web_measurement_source: webMeasurementState.source,
+      web_measurement_group_id: webMeasurementState.assignment_scope === 'group'
+        ? webMeasurementState.group_id
+        : null
     },
     modes: ['connect_only', 'managed_service'],
     legacy_modes: ['managed_self'],
@@ -8525,6 +8855,19 @@ exports.getMarketingStrategyAnalysisCampaign = asyncHandler(async (req, res) => 
   const rowsOut = requestedIdentity.provider === 'meta_ads'
     ? await buildMetaCampaignAnalysisRows({ scope, campaignRef, timeframe })
     : await buildGoogleCampaignAnalysisRows({ scope, campaignRef, timeframe });
+  const leadAttribution = await loadCurrentLeadAttributionMetrics({
+    scope,
+    payload,
+    startDate: timeframe.start,
+    endDate: timeframe.end,
+    timeZone: CAMPAIGN_REPORTING_TIME_ZONE
+  });
+  const metricContract = buildCampaignAnalysisMetricContract({
+    provider: requestedIdentity.provider,
+    campaignRef,
+    rows: rowsOut,
+    leadAttribution
+  });
 
   return res.json({
     success: true,
@@ -8540,6 +8883,7 @@ exports.getMarketingStrategyAnalysisCampaign = asyncHandler(async (req, res) => 
       end: formatDate(timeframe.end)
     },
     cached: true,
+    ...metricContract,
     rows: rowsOut
   });
 });
@@ -9252,10 +9596,13 @@ exports.__test = {
   applyCanonicalMappingsToGoogleAdsConfig,
   assessConsentMeasurementReadiness,
   assessConversionOnboardingReadiness,
+  buildCampaignAnalysisMetricContract,
   buildCurrentExternalCampaignInventoryIndex,
   buildEnhancedConversionActivationPlan,
+  buildLeadAttributionMetrics,
   buildGoogleAdsCapabilities,
   buildRequiredConversionPlan,
+  buildZonedCalendarRange,
   buildClinicaclickConversionActionCreate,
   buildClinicaclickManagedMapping,
   conversionValidationKey,
@@ -9274,6 +9621,9 @@ exports.__test = {
   reconcileEnhancedConversionsInternalActivation,
   reconcileVisitorChoicePersonalizationCapabilities,
   reconcileVerifiedConnectOnlyStrategyActivationReadiness,
+  resolveAnalysisDateRange,
+  resolveLeadProvider,
+  resolveWebMeasurementMarketingState,
   resolveEnabledConversionEvents,
   strategyPayloadUsesGoogleAds,
   validateEnhancedConversionActivationAllowlist

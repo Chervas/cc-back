@@ -2597,20 +2597,25 @@ const resolveSharedWebGroupConfigForClinic = async (clinicId) => {
     attributes: ['id_grupo', 'nombre_grupo', 'web_assignment_mode'],
     raw: true
   });
-  if (group?.web_assignment_mode !== 'automatic') {
-    return { clinicRow, groupId, group, record: null };
-  }
-
   const record = await IntakeConfig.findOne({
     where: { group_id: groupId, assignment_scope: 'group' },
     raw: true
   });
+  const recordConfig = record?.config && typeof record.config === 'object'
+    && !Array.isArray(record.config)
+    ? record.config
+    : {};
+  const locationIds = new Set((Array.isArray(recordConfig.locations) ? recordConfig.locations : [])
+    .map((location) => parseInteger(location?.id || location?.clinic_id))
+    .filter(Boolean));
+  const usesSharedWebConfig = group?.web_assignment_mode === 'automatic'
+    || locationIds.has(parsedClinicId);
 
   return {
     clinicRow,
     groupId,
     group,
-    record: record || null
+    record: usesSharedWebConfig ? (record || null) : null
   };
 };
 
@@ -3135,6 +3140,7 @@ const rebuildTrustedSnippetVerification = ({
   const verificationExpiresByDomain = {};
   const runtimeVersionsByDomain = {};
   const cookieProvidersByDomain = {};
+  const legacyChatProvidersByDomain = {};
   const legalPagesByDomain = {};
   const checkedUrls = {};
   const installedDomains = [];
@@ -3142,6 +3148,7 @@ const rebuildTrustedSnippetVerification = ({
   const consentDomains = [];
   const cookieDomains = [];
   const googleConsentDomains = [];
+  const legacyChatDomains = [];
   const legalDomains = [];
   const issuedAtValues = [];
 
@@ -3160,9 +3167,11 @@ const rebuildTrustedSnippetVerification = ({
     if (signals.consent_mode_detected === true) consentDomains.push(domain);
     if (signals.cookie_notice_detected === true) cookieDomains.push(domain);
     if (signals.google_consent_mode_detected === true) googleConsentDomains.push(domain);
+    if (signals.legacy_chat_detected === true) legacyChatDomains.push(domain);
     if (signals.legal_urls_detected === true) legalDomains.push(domain);
     runtimeVersionsByDomain[domain] = signals.runtime_version || null;
     cookieProvidersByDomain[domain] = signals.cookie_notice_provider || null;
+    legacyChatProvidersByDomain[domain] = signals.legacy_chat_provider || null;
     legalPagesByDomain[domain] = signals.legal_pages || {};
     checkedUrls[domain] = signals.checked_url || null;
   }
@@ -3171,6 +3180,9 @@ const rebuildTrustedSnippetVerification = ({
     && configuredDomains.every((domain) => covered.includes(domain));
   const providers = Array.from(new Set(
     Object.values(cookieProvidersByDomain).filter(Boolean),
+  ));
+  const legacyChatProviders = Array.from(new Set(
+    Object.values(legacyChatProvidersByDomain).filter(Boolean),
   ));
   const latestIssuedAt = issuedAtValues.length > 0 ? Math.max(...issuedAtValues) : null;
 
@@ -3189,6 +3201,10 @@ const rebuildTrustedSnippetVerification = ({
     cookie_notice_providers_by_domain: cookieProvidersByDomain,
     google_consent_mode_detected: everyDomain(googleConsentDomains),
     google_consent_mode_domains: googleConsentDomains,
+    legacy_chat_detected: legacyChatDomains.length > 0,
+    legacy_chat_provider: legacyChatProviders.join(', ') || null,
+    legacy_chat_domains: legacyChatDomains,
+    legacy_chat_providers_by_domain: legacyChatProvidersByDomain,
     legal_urls_detected: everyDomain(legalDomains),
     legal_pages_by_domain: legalPagesByDomain,
     checked_urls: checkedUrls,
@@ -3201,30 +3217,50 @@ const rebuildTrustedSnippetVerification = ({
 
 exports.upsertIntakeConfig = asyncHandler(async (req, res) => {
   const clinicId = parseInteger(req.params.clinicId);
-  const groupId = parseInteger(req.body?.group_id);
-  if (!clinicId && !groupId) return res.status(400).json({ message: 'clinicId o group_id requerido' });
-  if (!(await requireIntakeConfigScopeAccess(req, res, { clinicId: groupId ? null : clinicId, groupId, access: 'write' }))) return;
-
-  const scope = groupId ? 'group' : 'clinic';
-  if (scope === 'clinic') {
-    const sharedWebContext = await resolveSharedWebGroupConfigForClinic(clinicId);
-    if (sharedWebContext?.record) {
-      return res.status(409).json({
-        message: 'Esta clínica usa la configuración web del grupo. Selecciona el grupo para editarla para todas las clínicas.',
-        assignment_scope: 'group',
-        group_id: sharedWebContext.groupId,
-        clinic_id: clinicId
-      });
-    }
-  }
+  const requestedGroupId = parseInteger(req.body?.group_id);
+  if (!clinicId && !requestedGroupId) return res.status(400).json({ message: 'clinicId o group_id requerido' });
+  if (!(await requireIntakeConfigScopeAccess(req, res, {
+    clinicId: requestedGroupId ? null : clinicId,
+    groupId: requestedGroupId,
+    access: 'write'
+  }))) return;
 
   const body = req.body && typeof req.body === 'object' ? req.body : {};
   const verificationOnlyMutation = body.mutation_kind === 'snippet_verification';
+  const domainAddMutation = body.mutation_kind === 'domain_add';
+  const partialMutation = verificationOnlyMutation || domainAddMutation;
+  let groupId = requestedGroupId;
+  let scope = groupId ? 'group' : 'clinic';
+  if (scope === 'clinic') {
+    const sharedWebContext = await resolveSharedWebGroupConfigForClinic(clinicId);
+    if (sharedWebContext?.record) {
+      if (partialMutation) {
+        // The caller remains authorized against the selected clinic. Only the
+        // two narrow, lock-protected mutations may resolve their effective web
+        // row automatically; a full group editor write still requires group
+        // scope so one clinic cannot replace shared configuration.
+        scope = 'group';
+        groupId = sharedWebContext.groupId;
+      } else {
+        return res.status(409).json({
+          message: 'Esta clínica usa la configuración web del grupo. Selecciona el grupo para editarla para todas las clínicas.',
+          assignment_scope: 'group',
+          group_id: sharedWebContext.groupId,
+          clinic_id: clinicId
+        });
+      }
+    }
+  }
+
+  const domainToAdd = domainAddMutation ? canonicalizeIntakeDomain(body.domain) : null;
+  if (domainAddMutation && !domainToAdd) {
+    return res.status(400).json({ success: false, error: 'intake_domain_invalid' });
+  }
   const submittedDomains = Array.isArray(body.domains) ? body.domains : [];
   const hasHmacKeyField = Object.prototype.hasOwnProperty.call(body, 'hmac_key');
   const requestedHmacKey = body.hmac_key;
   let allowedLocationClinicIds = [];
-  if (!verificationOnlyMutation) {
+  if (!partialMutation) {
     const candidateLocationClinicIds = await resolveIntakeCandidateClinicIds({
       clinicId: scope === 'clinic' ? clinicId : null,
       groupId: scope === 'group' ? groupId : null,
@@ -3263,7 +3299,7 @@ exports.upsertIntakeConfig = asyncHandler(async (req, res) => {
       && !Array.isArray(existing.config)
       ? existing.config
       : {};
-    if (verificationOnlyMutation && !existing) {
+    if (partialMutation && !existing) {
       return {
         error: {
           status: 404,
@@ -3271,10 +3307,13 @@ exports.upsertIntakeConfig = asyncHandler(async (req, res) => {
         },
       };
     }
+    const existingDomains = canonicalizeIntakeDomains(Array.isArray(existing?.domains) ? existing.domains : []);
     const domains = verificationOnlyMutation
-      ? (Array.isArray(existing?.domains) ? existing.domains : [])
-      : submittedDomains;
-    const config = verificationOnlyMutation
+      ? existingDomains
+      : domainAddMutation
+        ? canonicalizeIntakeDomains([...existingDomains, domainToAdd])
+        : submittedDomains;
+    const config = partialMutation
       ? { ...existingConfig }
       : mergeIntakeConfigForEditorWrite(
           existingConfig,
@@ -3283,20 +3322,20 @@ exports.upsertIntakeConfig = asyncHandler(async (req, res) => {
           normalizeMetaAdsConfig,
         );
 
-    if (!verificationOnlyMutation
+    if (!partialMutation
       && Object.prototype.hasOwnProperty.call(config, 'locations')
       && !Array.isArray(config.locations)) {
       return { error: { status: 400, body: { success: false, error: 'locations_invalid' } } };
     }
     const configuredLocations = Array.isArray(config.locations) ? config.locations : [];
-    if (!verificationOnlyMutation
+    if (!partialMutation
       && !configuredLocationsWithinAllowedScope(configuredLocations, allowedLocationClinicIds)) {
       return { error: { status: 403, body: { success: false, error: 'location_scope_forbidden' } } };
     }
 
     // If the frontend omits hmac_key, preserve the value read under lock.
     let nextHmacKey = null;
-    if (verificationOnlyMutation) {
+    if (partialMutation) {
       nextHmacKey = existing?.hmac_key || null;
     } else if (hasHmacKeyField) {
       nextHmacKey = requestedHmacKey ? String(requestedHmacKey) : null;
@@ -3347,14 +3386,14 @@ exports.upsertIntakeConfig = asyncHandler(async (req, res) => {
     }
 
     await IntakeConfig.upsert({
-      clinic_id: clinicId || null,
+      clinic_id: scope === 'clinic' ? (clinicId || null) : null,
       group_id: groupId || null,
       assignment_scope: scope,
       domains,
       config,
       hmac_key: nextHmacKey,
     }, { transaction });
-    return { config };
+    return { config, domains };
   });
 
   if (persistence.error) {
@@ -3362,6 +3401,7 @@ exports.upsertIntakeConfig = asyncHandler(async (req, res) => {
   }
   return res.json({
     success: true,
+    domains: persistence.domains,
     snippet_verification: persistence.config.snippet_verification,
   });
 });
@@ -3375,9 +3415,13 @@ exports.getIntakeConfigSecretClinic = asyncHandler(async (req, res) => {
   if (clinicId === null) return res.status(400).json({ message: 'clinicId requerido' });
   if (!(await requireIntakeConfigScopeAccess(req, res, { clinicId, access: 'read' }))) return;
 
-  const record = await IntakeConfig.findOne({ where: { clinic_id: clinicId }, raw: true });
+  const sharedWebContext = await resolveSharedWebGroupConfigForClinic(clinicId);
+  const record = sharedWebContext?.record
+    || await IntakeConfig.findOne({ where: { clinic_id: clinicId }, raw: true });
   return res.json({
     clinic_id: clinicId,
+    assignment_scope: sharedWebContext?.record ? 'group' : 'clinic',
+    group_id: sharedWebContext?.record ? sharedWebContext.groupId : null,
     has_hmac: !!record?.hmac_key,
     hmac_key: record?.hmac_key || null
   });
@@ -3428,8 +3472,12 @@ exports.verifySnippetInstalled = asyncHandler(async (req, res) => {
   if (!(await requireIntakeConfigScopeAccess(req, res, { clinicId, groupId, access: 'read' }))) return;
 
   let record = null;
+  let effectiveGroupId = groupId;
   if (clinicId !== null) {
-    record = await IntakeConfig.findOne({ where: { clinic_id: clinicId }, raw: true });
+    const sharedWebContext = await resolveSharedWebGroupConfigForClinic(clinicId);
+    record = sharedWebContext?.record
+      || await IntakeConfig.findOne({ where: { clinic_id: clinicId }, raw: true });
+    effectiveGroupId = sharedWebContext?.record ? sharedWebContext.groupId : null;
   }
   if (!record && groupId !== null) {
     record = await IntakeConfig.findOne({ where: { group_id: groupId, assignment_scope: 'group' }, raw: true });
@@ -3446,8 +3494,8 @@ exports.verifySnippetInstalled = asyncHandler(async (req, res) => {
     return res.status(403).json({ installed: false, details: 'Dominio no permitido para esta configuración' });
   }
 
-  const scope = groupId !== null ? 'group' : 'clinic';
-  const expectedId = scope === 'group' ? (record.group_id || groupId) : (record.clinic_id || clinicId);
+  const scope = effectiveGroupId !== null ? 'group' : 'clinic';
+  const expectedId = scope === 'group' ? (record.group_id || effectiveGroupId) : (record.clinic_id || clinicId);
   const expectedAttr = scope === 'group' ? 'data-group-id' : 'data-clinic-id';
   const recordConfig = record?.config && typeof record.config === 'object' && !Array.isArray(record.config)
     ? record.config

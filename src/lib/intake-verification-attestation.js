@@ -152,6 +152,8 @@ function safeSignals(value) {
     cookie_notice_detected: source.cookie_notice_detected === true,
     cookie_notice_provider: String(source.cookie_notice_provider || '').slice(0, 128) || null,
     google_consent_mode_detected: source.google_consent_mode_detected === true,
+    legacy_chat_detected: source.legacy_chat_detected === true,
+    legacy_chat_provider: String(source.legacy_chat_provider || '').slice(0, 64) || null,
     legal_urls_detected: source.legal_urls_detected === true,
     legal_pages: legalPages,
     checked_url: String(source.checked_url || '').slice(0, 2048) || null,
