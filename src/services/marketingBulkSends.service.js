@@ -6367,23 +6367,64 @@ async function sendTest(scope, campaignId, body = {}) {
   let listCriteria = asPlainObject(list?.criteria);
   const templateUsage = normalizeTemplateUsage(body.template_usage || listCriteria.template_usage || 'promocion');
   if (isReviewTemplateUsage(templateUsage)) {
+    const fallbackTemplate = await getLastReviewRequestTemplateForScope(scope).catch(() => null);
+    const pickReviewText = (...values) => {
+      for (const value of values) {
+        const normalized = normalizeText(value || '');
+        if (normalized) return normalized;
+      }
+      return '';
+    };
     const nextCriteria = { ...listCriteria };
     if (body.review_display_clinic_name !== undefined || body.reviewDisplayClinicName !== undefined) {
-      nextCriteria.review_display_clinic_name = normalizeText(body.review_display_clinic_name || body.reviewDisplayClinicName || '') || null;
+      nextCriteria.review_display_clinic_name = pickReviewText(
+        body.review_display_clinic_name,
+        body.reviewDisplayClinicName,
+        listCriteria.review_display_clinic_name,
+        fallbackTemplate?.review_display_clinic_name
+      ) || null;
+    } else if (!normalizeText(nextCriteria.review_display_clinic_name || '') && fallbackTemplate?.review_display_clinic_name) {
+      nextCriteria.review_display_clinic_name = fallbackTemplate.review_display_clinic_name;
     }
     if (body.review_sender_name !== undefined || body.reviewSenderName !== undefined) {
-      nextCriteria.review_sender_name = normalizeText(body.review_sender_name || body.reviewSenderName || '') || null;
+      nextCriteria.review_sender_name = pickReviewText(
+        body.review_sender_name,
+        body.reviewSenderName,
+        listCriteria.review_sender_name,
+        fallbackTemplate?.review_sender_name
+      ) || null;
+    } else if (!normalizeText(nextCriteria.review_sender_name || '') && fallbackTemplate?.review_sender_name) {
+      nextCriteria.review_sender_name = fallbackTemplate.review_sender_name;
     }
     if (body.review_team_photo_url !== undefined || body.reviewTeamPhotoUrl !== undefined) {
-      nextCriteria.review_team_photo_url = normalizeText(body.review_team_photo_url || body.reviewTeamPhotoUrl || '') || null;
+      nextCriteria.review_team_photo_url = pickReviewText(
+        body.review_team_photo_url,
+        body.reviewTeamPhotoUrl,
+        listCriteria.review_team_photo_url,
+        fallbackTemplate?.review_team_photo_url
+      ) || null;
+    } else if (!normalizeText(nextCriteria.review_team_photo_url || '') && fallbackTemplate?.review_team_photo_url) {
+      nextCriteria.review_team_photo_url = fallbackTemplate.review_team_photo_url;
     }
     if (body.review_team_photo_overlay_color !== undefined || body.reviewTeamPhotoOverlayColor !== undefined) {
       nextCriteria.review_team_photo_overlay_color = publicMediaPersonalizationService.normalizeHexColor(
-        body.review_team_photo_overlay_color || body.reviewTeamPhotoOverlayColor
+        body.review_team_photo_overlay_color
+        || body.reviewTeamPhotoOverlayColor
+        || listCriteria.review_team_photo_overlay_color
+        || fallbackTemplate?.review_team_photo_overlay_color
       );
+    } else if (!normalizeText(nextCriteria.review_team_photo_overlay_color || '') && fallbackTemplate?.review_team_photo_overlay_color) {
+      nextCriteria.review_team_photo_overlay_color = fallbackTemplate.review_team_photo_overlay_color;
     }
     if (body.review_team_members_text !== undefined || body.reviewTeamMembersText !== undefined) {
-      nextCriteria.review_team_members_text = normalizeText(body.review_team_members_text || body.reviewTeamMembersText || '') || null;
+      nextCriteria.review_team_members_text = pickReviewText(
+        body.review_team_members_text,
+        body.reviewTeamMembersText,
+        listCriteria.review_team_members_text,
+        fallbackTemplate?.review_team_members_text
+      ) || null;
+    } else if (!normalizeText(nextCriteria.review_team_members_text || '') && fallbackTemplate?.review_team_members_text) {
+      nextCriteria.review_team_members_text = fallbackTemplate.review_team_members_text;
     }
     if (JSON.stringify(nextCriteria) !== JSON.stringify(listCriteria)) {
       await list.update({ criteria: nextCriteria });
