@@ -110,16 +110,166 @@ const normalizeKey = (value) => String(value || '')
 
 const normalizeLookupToken = (value) => normalizeKey(value).replace(/_/g, ' ').trim();
 
+const IMPORT_NAME_PARTICLES = new Set(['de', 'del', 'la', 'las', 'los', 'da', 'das', 'do', 'dos', 'y', 'i']);
+const IMPORT_COMMON_FIRST_NAMES = new Set([
+  'aaron', 'abel', 'abril', 'adria', 'africa', 'agustin', 'aicha', 'aidan', 'ainoha', 'aitor',
+  'albert', 'alberto', 'aleixandra', 'alejandra', 'alejandro', 'alex', 'alexander', 'alicia',
+  'ana', 'andrea', 'anna', 'antonio', 'arturo', 'belen', 'betty', 'carla', 'carles', 'carlos',
+  'carmen', 'cecilia', 'chus', 'cristina', 'dario', 'david', 'demetrio', 'denny', 'edouard',
+  'eduardo', 'enrique', 'eva', 'francisco', 'hugo', 'ignasi', 'inmaculada', 'inma',
+  'javier', 'jesus', 'joan', 'joel', 'jordi', 'jorge', 'jose', 'juan', 'laura', 'lorena',
+  'lucia', 'luis', 'margarita', 'maria', 'marta', 'miguel', 'miquel', 'montse', 'nicolas',
+  'pedro', 'rita', 'rocio', 'sara', 'sergio', 'silvia', 'vero', 'veronica', 'zoila',
+]);
+
+const toTitleCaseName = (value) => {
+  const text = sanitizeText(cleanString(value));
+  if (!text) return '';
+
+  return text
+    .toLocaleLowerCase('es-ES')
+    .split(/\s+/)
+    .filter(Boolean)
+    .map((part, index) => {
+      const normalized = normalizeKey(part);
+      if (index > 0 && IMPORT_NAME_PARTICLES.has(normalized)) return part;
+      return part.charAt(0).toLocaleUpperCase('es-ES') + part.slice(1);
+    })
+    .join(' ');
+};
+
+const normalizeImportNameFormat = (value) => {
+  const format = normalizeKey(value);
+  if (['first_last', 'last_comma_first', 'last_last_first', 'full', 'auto'].includes(format)) return format;
+  return 'auto';
+};
+
+const isLikelyImportFirstNameToken = (value) => IMPORT_COMMON_FIRST_NAMES.has(normalizeKey(value));
+
+const isImportNameParticle = (value) => IMPORT_NAME_PARTICLES.has(normalizeKey(value));
+
+const looksLikeImportSurnameFirstOrder = (parts) => parts.length >= 2
+  && isLikelyImportFirstNameToken(parts[parts.length - 1])
+  && !isLikelyImportFirstNameToken(parts[0]);
+
+const splitAutoImportNameParts = (parts) => {
+  if (!parts.length) return { nombre: 'Lead', apellidos: '' };
+  if (parts.length === 1) return { nombre: parts[0], apellidos: '' };
+
+  if (looksLikeImportSurnameFirstOrder(parts)) {
+    let firstNameStart = parts.length - 1;
+    while (
+      firstNameStart > 1
+      && (
+        isLikelyImportFirstNameToken(parts[firstNameStart - 1])
+        || isImportNameParticle(parts[firstNameStart - 1])
+      )
+    ) {
+      firstNameStart -= 1;
+    }
+    return {
+      nombre: parts.slice(firstNameStart).join(' '),
+      apellidos: parts.slice(0, firstNameStart).join(' '),
+    };
+  }
+
+  let firstNameEnd = 1;
+  if (parts.length >= 2 && isLikelyImportFirstNameToken(parts[1])) {
+    firstNameEnd = 2;
+  }
+  while (firstNameEnd < parts.length - 1 && isImportNameParticle(parts[firstNameEnd])) {
+    firstNameEnd += 1;
+    if (firstNameEnd < parts.length && isLikelyImportFirstNameToken(parts[firstNameEnd])) {
+      firstNameEnd += 1;
+    }
+  }
+
+  return {
+    nombre: parts.slice(0, firstNameEnd).join(' '),
+    apellidos: parts.slice(firstNameEnd).join(' '),
+  };
+};
+
+const splitImportedLeadName = (value, format = 'auto') => {
+  const nameFormat = normalizeImportNameFormat(format);
+  const normalized = toTitleCaseName(value);
+  if (!normalized) return { nombre: 'Lead', apellidos: '' };
+
+  if ((nameFormat === 'auto' || nameFormat === 'last_comma_first') && normalized.includes(',')) {
+    const [lastNameRaw, ...firstNameRaw] = normalized.split(',');
+    const firstName = toTitleCaseName(firstNameRaw.join(',').trim() || lastNameRaw);
+    const lastName = toTitleCaseName(firstNameRaw.length ? lastNameRaw : '');
+    return {
+      nombre: firstName || 'Lead',
+      apellidos: lastName,
+    };
+  }
+
+  const parts = normalized.split(/\s+/).filter(Boolean);
+  if (parts.length === 1 || nameFormat === 'full') {
+    return { nombre: normalized, apellidos: '' };
+  }
+  if (nameFormat === 'auto') {
+    return splitAutoImportNameParts(parts);
+  }
+  if (nameFormat === 'last_last_first' && parts.length >= 2) {
+    return {
+      nombre: parts.length >= 3 ? parts.slice(2).join(' ') : parts[1],
+      apellidos: parts.length >= 3 ? parts.slice(0, 2).join(' ') : parts[0],
+    };
+  }
+
+  return {
+    nombre: parts.slice(0, 2).join(' '),
+    apellidos: parts.slice(2).join(' '),
+  };
+};
+
+const inferLeadImportNameFormat = (rows = [], mapping = {}) => {
+  const nameColumn = Object.entries(mapping || {})
+    .find(([, destination]) => destination === 'nombre')?.[0];
+  if (!nameColumn) return 'auto';
+
+  const samples = rows
+    .slice(0, 200)
+    .map((row) => cleanString(row?.[nameColumn]))
+    .filter(Boolean);
+  if (!samples.length) return 'auto';
+
+  const commaRatio = samples.filter((value) => value.includes(',')).length / samples.length;
+  if (commaRatio >= 0.2) return 'last_comma_first';
+
+  const singleTokenRatio = samples.filter((value) => value.split(/\s+/).filter(Boolean).length <= 1).length / samples.length;
+  if (singleTokenRatio >= 0.65) return 'full';
+
+  const multiTokenSamples = samples
+    .map((value) => toTitleCaseName(value).split(/\s+/).filter(Boolean))
+    .filter((parts) => parts.length >= 2);
+  if (!multiTokenSamples.length) return 'auto';
+
+  const surnameFirstCount = multiTokenSamples.filter((parts) => looksLikeImportSurnameFirstOrder(parts)).length;
+  if (surnameFirstCount / multiTokenSamples.length >= 0.55) return 'last_last_first';
+
+  return 'auto';
+};
+
 const inferChannelFromSource = (source) => {
   if (source === 'meta_ads' || source === 'google_ads' || source === 'tiktok_ads' || source === 'local_services') return 'paid';
   if (source === 'seo') return 'organic';
   return 'unknown';
 };
 
-const composeImportedFullName = (nombre, apellidos) => {
-  const cleanNombre = sanitizeText(cleanString(nombre));
-  const cleanApellidos = sanitizeText(cleanString(apellidos));
-  return [cleanNombre, cleanApellidos].filter(Boolean).join(' ').trim() || cleanNombre || cleanApellidos || null;
+const composeImportedFullName = (nombre, apellidos, nameFormat = 'auto') => {
+  const cleanNombre = toTitleCaseName(nombre);
+  const cleanApellidos = toTitleCaseName(apellidos);
+  if (cleanNombre && cleanApellidos) {
+    return [cleanNombre, cleanApellidos].join(' ').trim();
+  }
+  if (cleanNombre) {
+    const split = splitImportedLeadName(cleanNombre, nameFormat);
+    return [split.nombre, split.apellidos].filter(Boolean).join(' ').trim() || cleanNombre;
+  }
+  return cleanApellidos || null;
 };
 
 const buildUtcDate = ({ year, month, day, hours = 0, minutes = 0, seconds = 0 }) => {
@@ -436,7 +586,7 @@ const normalizeRowPayload = (row, mapping, config, campaignIndex, options = {}) 
   const baseNotes = Array.isArray(mapped.notas) ? mapped.notas.filter(Boolean) : [];
   const mergedNotes = [...baseNotes, ...noteLines].filter(Boolean).join('\n');
   const normalizedStatus = 'nuevo';
-  const normalizedName = composeImportedFullName(mapped.nombre, mapped.apellidos);
+  const normalizedName = composeImportedFullName(mapped.nombre, mapped.apellidos, options.nameFormat);
   const normalizedEmail = normalizeEmail(mapped.email);
   const normalizedPhone = normalizePhone(mapped.telefono);
 
@@ -743,8 +893,12 @@ const analyzeImportRows = async (input = {}) => {
     .map(([column]) => column);
   const createdAtValues = createdAtColumns.flatMap((column) => rows.map((row) => row?.[column]));
   const createdAtOrder = inferDateOrder(createdAtValues);
+  const requestedNameFormat = normalizeImportNameFormat(input.name_format);
+  const nameFormat = requestedNameFormat === 'auto'
+    ? inferLeadImportNameFormat(rows, mapping)
+    : requestedNameFormat;
 
-  const normalizedRows = rows.map((row) => normalizeRowPayload(row, mapping, config, null, { createdAtOrder }));
+  const normalizedRows = rows.map((row) => normalizeRowPayload(row, mapping, config, null, { createdAtOrder, nameFormat }));
   const existingIndexes = await loadExistingIndexes(config, normalizedRows);
 
   const seenKeys = new Set();

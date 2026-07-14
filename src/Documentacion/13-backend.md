@@ -834,9 +834,16 @@ El navegador lee `csv/xls/xlsx`, lo convierte a filas JSON y backend se encarga 
 
 - validar clínica y source de destino;
 - aplicar mapeo de columnas;
+- normalizar nombres con `name_format=auto` por defecto. Si el archivo trae
+  `Apellidos, Nombre` o `Apellidos Apellidos Nombre`, se reordena antes de
+  validar/importar; si trae columna separada de `apellidos`, se une al nombre;
 - ejecutar exclusiones;
 - comprobar duplicados;
 - crear `LeadIntake` y `LeadAttributionAudit` cuando procede.
+
+La importación manual de leads solo crea entradas `LeadIntake`. No debe crear
+citas reales ni disparar automatizaciones de agenda/recordatorios por el hecho
+de importar el histórico.
 
 Esto mantiene el contrato estable y evita acoplar Express a formatos de Excel.
 
