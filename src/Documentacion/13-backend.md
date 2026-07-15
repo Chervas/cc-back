@@ -46,14 +46,14 @@ La publicación de foto valida asset activo, `scope_type=clinic`, `clinica_id`, 
 - Las actualizaciones parciales de `raw_payload` se fusionan bajo lock/transacción o escritura JSON atómica. Detalles, media, timestamps y publicación de foto no deben sobrescribirse entre sí con una snapshot antigua del JSON.
 - La misma conexión/token se reutiliza dentro de la pasada para reducir refreshes OAuth. Un fallo auxiliar de servicios/media se registra por bloque y no impide conservar métricas/reseñas que sí terminaron.
 
-`BusinessProfileDailyMetrics` queda endurecida por la migración `20260715151000-dedupe-business-profile-daily-metrics.js`:
+`BusinessProfileDailyMetrics` queda endurecida por la migración `20260715151000-dedupe-business-profile-daily-metrics.js`, aplicada en la base compartida el 2026-07-15:
 
 1. conserva por `business_location_id + metric_type + COALESCE(metric_subtype,'') + date` la fila con `updated_at` más reciente y, en empate, mayor `id`;
 2. normaliza `metric_subtype=NULL` a cadena vacía;
 3. crea `uniq_business_profile_metric_location_type_subtype_date`;
 4. el sync puede usar upsert idempotente sin volver a acumular duplicados.
 
-Esta migración debe ejecutarse **antes de reiniciar código nuevo**: el modelo ya declara `metric_subtype NOT NULL` y el upsert depende del índice único.
+Esta migración debía ejecutarse **antes de reiniciar código nuevo**: el modelo ya declara `metric_subtype NOT NULL` y el upsert depende del índice único. El corte ya está aplicado; la verificación posterior dejó `22.077` filas, cero subtipos `NULL`, `22.077` subtipos vacíos y cero grupos duplicados.
 
 ### Competencia local: gate contractual, coste, caché y orquestación
 
@@ -86,16 +86,18 @@ Para controlar coste/abuso:
 La detección best-effort de redes desde la web de un competidor también debe usar el helper de destino HTTP seguro: esquema público, resolución DNS validada/pinneada, redirects manuales revalidados, `proxy=false`, límite de tamaño y timeout. No se debe volver a hacer `axios.get(website_url)` directamente porque abriría SSRF mediante URL/redirect/DNS.
 
 Migraciones de este corte, con autorización separada (no ejecutar
-`db:migrate` en lote):
+`db:migrate` en lote). Estado real a 2026-07-15:
 
-1. `20260715150000-create-marketing-competition-heatmap-cache.js`;
-2. `20260715151000-dedupe-business-profile-daily-metrics.js`;
-3. `20260715151500-enable-multiple-oauth-connections.js`, solo después de
-   publicar el runtime multi-conexión en backend y gateway y pausar callbacks;
-4. `20260715152000-purge-google-places-competition-content.js`, únicamente con
-   aprobación operativa explícita por ser irreversible.
+1. `20260715150000-create-marketing-competition-heatmap-cache.js`: **aplicada**;
+2. `20260715151000-dedupe-business-profile-daily-metrics.js`: **aplicada**;
+3. `20260715151500-enable-multiple-oauth-connections.js`: **aplicada** después
+   de publicar el runtime multi-conexión en backend y gateway y pausar
+   `connect`/`callback`;
+4. `20260715152000-purge-google-places-competition-content.js`: **pendiente** y
+   únicamente aplicable con aprobación operativa explícita por ser
+   irreversible.
 
-Preflight de la base compartida a 2026-07-15 (debe repetirse justo antes): métricas GBP `22.231` filas, todas con subtipo `NULL`, un grupo duplicado; competencia `48/49` filas con `source/place_id` Google y `69` snapshots totales, de los que `68` quedarían afectados. La `1510` hace UPDATE+DDL y requiere comprobar carga/locks. La `1520` anonimiza/desactiva esas 48 filas y elimina los 68 snapshots afectados de forma irreversible: no se aplica por inercia con el resto, sino tras mostrar el conteo vigente y obtener aprobación operativa explícita.
+Preflight histórico previo a las migraciones: métricas GBP `22.231` filas, todas con subtipo `NULL` y un grupo duplicado; competencia `48/49` filas con `source/place_id` Google y `69` snapshots totales, de los que `68` quedarían afectados. Tras `1510`, GBP quedó en `22.077` filas, cero subtipos `NULL` y cero grupos duplicados. Los conteos de competencia son solo una fotografía previa: deben repetirse inmediatamente antes de solicitar autorización. La `1520` anonimiza/desactiva las filas afectadas y elimina sus snapshots de forma irreversible; no se aplica por inercia con el resto ni con un `db:migrate` general.
 
 Referencias normativas: [Places API policies](https://developers.google.com/maps/documentation/places/web-service/policies), [Google Maps Platform EEA Terms](https://cloud.google.com/terms/maps-platform/eea), [EEA Places permitted uses](https://cloud.google.com/terms/maps-platform/eea-places-api-permitted-uses) y [Static Maps caching FAQ](https://developers.google.com/maps/faq#can-i-generate-a-map-image-using-the-maps-static-api-which-i-store-and-serve-from-my-website).
 
@@ -1705,9 +1707,12 @@ Esto evita duplicidades de gasto o conversiones en otros endpoints.
 
 ## 2026-03-18 - Diseño objetivo de conexiones OAuth por scope
 
-> **Estado a 2026-07-15:** implementado y probado en `wt/back-dev`; el gateway
-> público todavía usa OAuth legacy. El cutover y la migración `1515` están
-> pendientes y deben desplegarse de forma coordinada.
+> **Estado a 2026-07-15:** runtime multi-conexión publicado en backend dev
+> (`a7da8b6`) y en staging/gateway (`11530e5`); migración `1515` aplicada. Los
+> endpoints OAuth `connect` y `callback` permanecen temporalmente cerrados con
+> HTTP `503`. Falta rotar `META_APP_SECRET`, ejecutar el smoke final y reabrir
+> de forma controlada. El frontend de staging ya fue promovido y publicado
+> (build `f372b53b7419004b`).
 
 ### Limitación que originó la migración (contexto histórico)
 
@@ -2158,11 +2163,14 @@ Cuando dual-read y dual-write estén estables:
 2. retirar copy/UI basada en “Conectado como X”;
 3. dejar `MetaConnection` / `GoogleConnection` como grant técnico, no como concepto de producto.
 
-### Estado implementado en dev a 2026-07-15
+### Estado implementado y desplegado a 2026-07-15
 
-El contrato nuevo está implementado en `wt/back-dev`, pero la migración de
-multi-conexión **no está aplicada** y no debe aplicarse hasta completar el
-cutover coordinado del gateway público.
+El contrato nuevo está implementado en `wt/back-dev` (`a7da8b6`) y promovido a
+`wt/back-staging` y `/home/ubuntu/wt/gateway` (`11530e5`). La migración de
+multi-conexión `1515` está aplicada. El corte sigue en ventana de mantenimiento:
+Nginx responde `503` tanto en `connect` como en `callback` de Google y Meta, de
+modo que no puede iniciarse ni completarse un grant mientras se rota el secreto
+Meta y se ejecuta el smoke final.
 
 Piezas canónicas:
 
@@ -2253,21 +2261,32 @@ proveedor y dos sitios Search Console que conservan su token exacto.
 
 ### Cutover obligatorio de multi-conexión
 
+> **Estado operativo del corte (2026-07-15):** completados publicación de
+> writers nuevos, reinicios controlados y migraciones `1500`, `1510` y `1515`.
+> Backend dev está en `a7da8b6`; backend staging y gateway están en `11530e5`.
+> Los gates Nginx de `connect`/`callback` siguen devolviendo `503`. Quedan
+> pendientes la rotación de `META_APP_SECRET`, el smoke OAuth posterior y la
+> reapertura ordenada. El frontend de staging ya está publicado con el build
+> `f372b53b7419004b`. La migración `1520` queda fuera de este cutover y exige
+> aprobación explícita independiente.
+
 No ejecutar un `db:migrate` general: después de `1515` existe la migración
 irreversible `20260715152000-purge-google-places-competition-content.js`, que
 requiere autorización separada. El objetivo de este bloque se aplica de forma
 aislada hasta `20260715151500-enable-multiple-oauth-connections.js`.
 
-En un esquema donde `1500`, `1510` y `1515` siguen pendientes, `--to 1515`
-ejecuta también las dos anteriores. El corte debe declararlo y repetir su
-preflight. Para aplicar primero las migraciones compatibles de Informes:
+Como referencia para otros entornos: si `1500`, `1510` y `1515` siguen
+pendientes, `--to 1515` ejecuta también las dos anteriores. El corte debe
+declararlo y repetir su preflight. Para aplicar primero las migraciones
+compatibles de Informes:
 
 ```bash
 npx sequelize-cli db:migrate --to 20260715151000-dedupe-business-profile-daily-metrics.js
 ```
 
 Después de publicar y validar todos los writers nuevos sobre el esquema viejo,
-la ampliación multi-conexión se aplica aisladamente con:
+la ampliación multi-conexión se aplica aisladamente con (ya ejecutado en la base
+compartida el 2026-07-15):
 
 ```bash
 npx sequelize-cli db:migrate --to 20260715151500-enable-multiple-oauth-connections.js
@@ -2296,11 +2315,11 @@ Alternativa con parada: bloquear por completo `/oauth`, detener todos los
 writers legacy, aplicar `1515` y arrancar únicamente los runtimes nuevos. Nunca
 aplicar `1515` mientras un proceso legacy siga en memoria.
 
-El gateway activo todavía contiene una copia OAuth legacy y un secreto Meta que
-estuvo versionado. Ese secreto se considera comprometido: al publicar el
-gateway nuevo debe leerse exclusivamente de entorno, y después hay que rotarlo
-en Meta y actualizar el entorno de forma coordinada. Nunca copiar el valor a
-logs, commits o documentación.
+El gateway activo ya ejecuta el runtime OAuth nuevo y lee el secreto Meta
+exclusivamente del entorno. Sin embargo, el valor anterior estuvo versionado y
+se considera comprometido: debe rotarse en Meta, actualizarse en el entorno y
+validarse antes de retirar los `503`. Nunca copiar el valor a logs, commits o
+documentación.
 
 ### Riesgos y mitigaciones
 
