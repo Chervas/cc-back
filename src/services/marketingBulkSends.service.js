@@ -16,6 +16,7 @@ const { getIO } = require('./socket.service');
 const {
   mergeClinicLinksIntoContext,
   resolveClinicGoogleLocalLinks,
+  resolveClinicGoogleReviewLinks,
 } = require('./googleLocalLinks.service');
 const publicMediaPersonalizationService = require('./publicMediaPersonalization.service');
 
@@ -5889,7 +5890,16 @@ async function loadClinicForTemplateVariables(clinicId) {
   const clinic = await Clinica.findByPk(safeClinicId, { raw: true });
   if (!clinic) return null;
   const links = await resolveClinicGoogleLocalLinks(clinic);
-  return mergeClinicLinksIntoContext(clinic, links);
+  const merged = mergeClinicLinksIntoContext(clinic, links);
+  const reviewLinks = await resolveClinicGoogleReviewLinks(clinic);
+  if (reviewLinks?.url_dejar_resena) {
+    merged.url_dejar_resena = reviewLinks.url_dejar_resena;
+    merged.review_profile_alias = reviewLinks.review_profile_alias === true;
+    merged.review_profile_alias_clinic_id = reviewLinks.review_profile_alias_clinic_id || null;
+    merged.review_profile_alias_location_id = reviewLinks.review_profile_alias_location_id || null;
+    merged.review_profile_alias_location_name = reviewLinks.review_profile_alias_location_name || null;
+  }
+  return merged;
 }
 
 async function getWhatsappAccountQualityForList(list, scope = {}) {
