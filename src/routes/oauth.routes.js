@@ -77,6 +77,9 @@ const {
     deactivateGoogleMappingsForScope,
     deactivateMetaMappingsForScope
 } = require('../services/oauthScopedDisconnect.service');
+const {
+    resolveEffectiveGoogleMappings
+} = require('../services/effectiveMarketingAssets.service');
 
 // Configuración de la App de Meta
 const META_APP_ID = '1807844546609897'; // <-- App ID correcto
@@ -906,6 +909,7 @@ const PROVIDER_INVENTORY_PATHS = new Set([
 ]);
 const EXPLICIT_SCOPE_REQUIRED_PATHS = new Set([
     ...PROVIDER_INVENTORY_PATHS,
+    '/google/effective-mappings',
     '/google/connect',
     '/meta/connect',
     '/google/ads/request-link',
@@ -964,6 +968,31 @@ router.use(async (req, res, next) => {
             success: false,
             error: error?.code || 'marketing_connection_scope_authorization_failed',
             message: error?.message || 'No se pudo autorizar el scope solicitado.'
+        });
+    }
+});
+
+/**
+ * Inventario efectivo Google del scope solicitado.
+ *
+ * Es una proyección DB-only y de solo lectura: no consulta APIs de Google, no
+ * crea assignments y no sustituye a los endpoints `mappings` editables.
+ */
+router.get('/google/effective-mappings', async (req, res) => {
+    try {
+        const userId = getUserIdFromToken(req);
+        if (!userId) {
+            return res.status(401).json({ success: false, error: 'Usuario no autenticado' });
+        }
+        const effective = await resolveEffectiveGoogleMappings(getScopeInputFromRequest(req));
+        return res.json({ success: true, ...effective });
+    } catch (error) {
+        if (sendKnownOAuthMappingError(res, error)) return;
+        console.error('❌ Error en /oauth/google/effective-mappings:', error.message);
+        return res.status(500).json({
+            success: false,
+            error: 'effective_google_mappings_failed',
+            message: 'No se pudieron cargar los activos Google efectivos.'
         });
     }
 });
