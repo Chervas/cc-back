@@ -1246,6 +1246,7 @@ async function resolvePrimaryClinic(scope) {
     order: [['last_synced_at', 'DESC'], ['updated_at', 'DESC']],
     raw: true
   });
+  const businessAddress = businessLocation?.raw_payload?.storefrontAddress || {};
 
   return {
     ...clinic,
@@ -1253,6 +1254,15 @@ async function resolvePrimaryClinic(scope) {
     business_location_id: businessLocation?.location_id || null,
     business_primary_category: businessLocation?.primary_category || null,
     business_sync_status: businessLocation?.sync_status || null,
+    business_locality: cleanString(businessAddress.locality),
+    business_administrative_area: cleanString(businessAddress.administrativeArea),
+    business_postal_code: cleanString(businessAddress.postalCode),
+    business_address_lines: Array.isArray(businessAddress.addressLines)
+      ? businessAddress.addressLines.map(cleanString).filter(Boolean)
+      : [],
+    business_labels: Array.isArray(businessLocation?.raw_payload?.labels)
+      ? businessLocation.raw_payload.labels.map(cleanString).filter(Boolean)
+      : [],
     business_place_id: normalizePlaceId(businessLocation?.raw_payload?.metadata?.placeId)
       || normalizePlaceId(businessLocation?.raw_payload?.placeId)
       || null
@@ -1264,19 +1274,27 @@ function competitionServiceHint(clinic) {
     || cleanString(clinic?.servicios)
     || cleanString(clinic?.descripcion)?.split(/[.,;]/)[0]
     || cleanString(clinic?.business_primary_category)
+    || cleanString(clinic?.business_labels?.[0])
     || null;
 }
 
 function clinicLocationLabel(clinic) {
-  const parts = [clinic?.ciudad, clinic?.provincia, clinic?.codigo_postal]
+  const parts = [
+    clinic?.ciudad || clinic?.business_locality,
+    clinic?.provincia || clinic?.business_administrative_area,
+    clinic?.codigo_postal || clinic?.business_postal_code
+  ]
     .map(cleanString)
     .filter(Boolean);
-  return parts.length ? parts.join(', ') : cleanString(clinic?.direccion);
+  return parts.length ? parts.join(', ') : (cleanString(clinic?.direccion) || cleanString(clinic?.business_address_lines?.[0]));
 }
 
 function rankingTermsForClinic(clinic, limit = DEFAULT_RANKING_LIMIT) {
   const serviceHint = competitionServiceHint(clinic);
-  const city = cleanString(clinic?.ciudad) || cleanString(clinic?.provincia);
+  const city = cleanString(clinic?.ciudad)
+    || cleanString(clinic?.business_locality)
+    || cleanString(clinic?.provincia)
+    || cleanString(clinic?.business_administrative_area);
   if (!serviceHint || !city) return [];
 
   const disciplineKeys = Array.isArray(clinic?.configuracion?.disciplinas)
