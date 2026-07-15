@@ -8,6 +8,7 @@ const ClinicBusinessLocation = db.ClinicBusinessLocation;
 const BusinessProfileDailyMetric = db.BusinessProfileDailyMetric;
 const BusinessProfileReview = db.BusinessProfileReview;
 const BusinessProfilePost = db.BusinessProfilePost;
+const { resolveClinicGoogleReviewProfile } = require('../services/googleLocalLinks.service');
 
 const LOCAL_METRIC_GROUPS = {
   profile_views: [
@@ -69,7 +70,22 @@ function resolveDateRange(startDate, endDate, fallbackDays = 90) {
 router.get('/clinica/:clinicaId/status', async (req, res) => {
   try {
     const { clinicaId } = req.params;
-    const locations = await ClinicBusinessLocation.findAll({ where: { clinica_id: clinicaId, is_active: true }, order: [['location_name', 'ASC']] });
+    const purpose = String(req.query?.purpose || '').trim().toLowerCase();
+    let locations = await ClinicBusinessLocation.findAll({ where: { clinica_id: clinicaId, is_active: true }, order: [['location_name', 'ASC']] });
+    let reviewAlias = null;
+
+    if (purpose === 'reviews') {
+      const profile = await resolveClinicGoogleReviewProfile(clinicaId);
+      if (profile?.alias && profile?.location && profile?.links?.url_dejar_resena) {
+        locations = [profile.location];
+        reviewAlias = {
+          source_clinic_id: Number(clinicaId || 0) || null,
+          alias_clinic_id: Number(profile.location.clinica_id || profile.locationClinic?.id_clinica || 0) || null,
+          alias_clinic_name: profile.locationClinic?.nombre_clinica || null,
+        };
+      }
+    }
+
     const mapped = locations.map((loc) => {
       const raw = loc.raw_payload && typeof loc.raw_payload === 'object' ? loc.raw_payload : {};
       const address = raw.storefrontAddress || raw.address || {};
@@ -98,6 +114,10 @@ router.get('/clinica/:clinicaId/status', async (req, res) => {
         },
         mapsUri: raw.metadata?.mapsUri || null,
         newReviewUri: raw.metadata?.newReviewUri || null,
+        reviewAlias: !!reviewAlias,
+        reviewAliasSourceClinicId: reviewAlias?.source_clinic_id || null,
+        reviewAliasClinicId: reviewAlias?.alias_clinic_id || null,
+        reviewAliasClinicName: reviewAlias?.alias_clinic_name || null,
         rawPayload: raw
       };
     });

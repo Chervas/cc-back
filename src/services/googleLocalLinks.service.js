@@ -9,6 +9,19 @@ function cleanString(value) {
   return typeof value === 'string' ? value.trim() : '';
 }
 
+function asPlainObject(value) {
+  if (!value) return {};
+  if (typeof value === 'string') {
+    try {
+      const parsed = JSON.parse(value);
+      return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
+    } catch (_) {
+      return {};
+    }
+  }
+  return value && typeof value === 'object' && !Array.isArray(value) ? value : {};
+}
+
 function normalizePlaceId(value) {
   const raw = cleanString(value);
   if (!raw) return '';
@@ -95,6 +108,138 @@ async function findActiveBusinessLocation(clinicId) {
   });
 }
 
+async function loadClinic(clinicOrId) {
+  if (typeof clinicOrId === 'object' && clinicOrId !== null) return clinicOrId;
+  const clinicId = Number(clinicOrId || 0);
+  if (!clinicId || !Clinica) return {};
+  return Clinica.findByPk(clinicId, {
+    attributes: ['id_clinica', 'nombre_clinica', 'direccion', 'url_ficha_local', 'configuracion'],
+    raw: true,
+  }) || {};
+}
+
+function firstPositiveInteger(...values) {
+  for (const value of values) {
+    const parsed = Number(value || 0);
+    if (Number.isInteger(parsed) && parsed > 0) return parsed;
+  }
+  return null;
+}
+
+function firstString(...values) {
+  for (const value of values) {
+    const parsed = cleanString(value);
+    if (parsed) return parsed;
+  }
+  return '';
+}
+
+function getReviewProfileAliasConfig(clinic) {
+  const config = asPlainObject(clinic?.configuracion);
+  const reviews = asPlainObject(config.reviews || config.resenas || config.review_requests);
+  const alias = asPlainObject(reviews.google_business_profile_alias || reviews.business_profile_alias);
+  const clinicId = firstPositiveInteger(
+    alias.clinic_id,
+    alias.clinica_id,
+    alias.clinicId,
+    reviews.google_business_profile_alias_clinic_id,
+    reviews.google_business_location_alias_clinic_id,
+    reviews.review_google_profile_alias_clinic_id,
+    config.review_google_business_profile_alias_clinic_id,
+    config.review_google_profile_alias_clinic_id,
+    config.review_google_alias_clinic_id
+  );
+  const businessLocationId = firstPositiveInteger(
+    alias.business_location_id,
+    alias.businessLocationId,
+    reviews.google_business_profile_alias_business_location_id,
+    reviews.google_business_location_alias_business_location_id,
+    config.review_google_business_profile_alias_business_location_id
+  );
+  const locationId = firstString(
+    alias.location_id,
+    alias.locationId,
+    reviews.google_business_profile_alias_location_id,
+    reviews.google_business_location_alias_location_id,
+    config.review_google_business_profile_alias_location_id
+  );
+
+  if (!clinicId && !businessLocationId && !locationId) return null;
+  return { clinicId, businessLocationId, locationId };
+}
+
+async function findReviewAliasLocation(clinic) {
+  const alias = getReviewProfileAliasConfig(clinic);
+  if (!alias || !ClinicBusinessLocation) return null;
+
+  let location = null;
+  if (alias.businessLocationId) {
+    location = await ClinicBusinessLocation.findOne({
+      where: { id: alias.businessLocationId, is_active: true },
+      raw: true,
+    });
+  }
+  if (!location && alias.locationId) {
+    location = await ClinicBusinessLocation.findOne({
+      where: { location_id: alias.locationId, is_active: true },
+      order: [['last_synced_at', 'DESC'], ['updated_at', 'DESC']],
+      raw: true,
+    });
+  }
+  if (!location && alias.clinicId) {
+    location = await findActiveBusinessLocation(alias.clinicId);
+  }
+  if (!location) return null;
+
+  const aliasClinicId = Number(location.clinica_id || alias.clinicId || 0);
+  const aliasClinic = aliasClinicId && Clinica
+    ? await Clinica.findByPk(aliasClinicId, {
+      attributes: ['id_clinica', 'nombre_clinica', 'direccion', 'url_ficha_local', 'configuracion'],
+      raw: true,
+    })
+    : null;
+
+  return { alias, location, clinic: aliasClinic || {} };
+}
+
+async function resolveClinicGoogleReviewProfile(clinicOrId) {
+  const clinic = await loadClinic(clinicOrId);
+  const clinicId = Number(clinic?.id_clinica || clinic?.clinica_id || clinic?.id || 0);
+  const baseLinks = await resolveClinicGoogleLocalLinks(clinicId ? clinic : clinicOrId);
+  const aliasLocation = await findReviewAliasLocation(clinic);
+  if (!aliasLocation?.location) {
+    return {
+      clinic,
+      location: null,
+      locationClinic: null,
+      alias: false,
+      links: baseLinks,
+    };
+  }
+
+  const aliasLinks = buildLinksFromBusinessLocation(aliasLocation.location, aliasLocation.clinic || clinic);
+  return {
+    clinic,
+    location: aliasLocation.location,
+    locationClinic: aliasLocation.clinic || {},
+    alias: true,
+    links: {
+      ...baseLinks,
+      url_dejar_resena: cleanString(aliasLinks.url_dejar_resena) || cleanString(baseLinks.url_dejar_resena),
+      review_profile_alias: true,
+      review_profile_alias_clinic_id: Number(aliasLocation.location.clinica_id || 0) || null,
+      review_profile_alias_business_location_id: Number(aliasLocation.location.id || 0) || null,
+      review_profile_alias_location_id: cleanString(aliasLocation.location.location_id),
+      review_profile_alias_location_name: cleanString(aliasLocation.location.location_name),
+    },
+  };
+}
+
+async function resolveClinicGoogleReviewLinks(clinicOrId) {
+  const profile = await resolveClinicGoogleReviewProfile(clinicOrId);
+  return profile.links;
+}
+
 async function resolveClinicGoogleLocalLinks(clinicOrId) {
   let clinic = typeof clinicOrId === 'object' && clinicOrId !== null ? clinicOrId : {};
   const clinicId = Number(
@@ -162,4 +307,6 @@ module.exports = {
   buildGoogleMapsProfileUrl,
   mergeClinicLinksIntoContext,
   resolveClinicGoogleLocalLinks,
+  resolveClinicGoogleReviewLinks,
+  resolveClinicGoogleReviewProfile,
 };
