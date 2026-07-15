@@ -113,7 +113,7 @@ async function run() {
   assert.equal(accessPolicy.defaultForFeature('clinic.settings.edit', 'agencia'), false);
   assert.equal(accessPolicy.defaultForFeature('clinic.settings.edit', 'doctor'), false);
   assert.equal(accessPolicy.defaultForFeature('clinic.settings.edit', 'assistant'), false);
-  assert.equal(accessPolicy.defaultForFeature('clinic.settings.edit', 'reception'), false);
+  assert.equal(accessPolicy.defaultForFeature('clinic.settings.edit', 'reception'), true);
   assert.equal(accessPolicy.defaultForFeature('clinic.settings.edit', 'unknown'), false);
 
   // PUBLIC_MEDIA reutiliza este permiso para review_team_photo: una agencia
@@ -140,7 +140,8 @@ async function run() {
 
   assert.equal(features.get('team.manage')?.kind, 'action');
   assert.equal(features.get('team.manage')?.enforcement_status, 'partial');
-  assert.equal(accessPolicy.defaultForFeature('team.manage', 'reception'), false);
+  assert.equal(accessPolicy.defaultForFeature('team.manage', 'reception'), true);
+  assert.equal(accessPolicy.defaultForFeature('team.manage', 'admin_staff'), true);
 
   assert.equal(features.get('quickchat.read_patients')?.kind, 'read');
   assert.equal(features.get('quickchat.read_patients')?.enforcement_status, 'backend');
