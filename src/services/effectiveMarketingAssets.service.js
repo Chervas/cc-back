@@ -1123,7 +1123,7 @@ async function listScopedGoogleAccounts(scope, dependencies = {}) {
     return {
       customer_id: customerId,
       formatted_customer_id: customerId
-        ? `${customerId.slice(0, 3)}-${customerId.slice(3, 6)}-${customerId.slice(6, 9)}`
+        ? `${customerId.slice(0, 3)}-${customerId.slice(3, 6)}-${customerId.slice(6)}`
         : null,
       descriptive_name: row.descriptiveName || null,
       currency_code: row.currencyCode || null,
@@ -1255,6 +1255,57 @@ async function resolveEffectiveMarketingAssetInventory(
   };
 }
 
+function buildEffectiveGoogleMappingMetadata(asset, scope, descriptors = {}) {
+  const assignmentOrigin = cleanString(asset?.assignment_origin) || 'clinic';
+  const ownerClinicId = parseInteger(asset?.clinic_id);
+  const groupId = parseInteger(asset?.group_id) || getScopeGroupId(scope);
+  const isClinicScope = getScopeAssignmentScope(scope) === 'clinic';
+  const targetClinicId = isClinicScope
+    ? getScopeClinicId(scope)
+    : null;
+
+  return {
+    ...asset,
+    assignment_origin: assignmentOrigin,
+    inherited: assignmentOrigin === 'shared' || (isClinicScope && assignmentOrigin === 'group'),
+    read_only: true,
+    target_clinic_id: targetClinicId,
+    owner_clinic_id: ownerClinicId,
+    source_scope: {
+      type: assignmentOrigin,
+      clinic_id: assignmentOrigin === 'group' ? null : ownerClinicId,
+      group_id: groupId,
+      group_name: descriptors?.group_name || null
+    }
+  };
+}
+
+function buildEffectiveGoogleMappings(inventory) {
+  const scope = inventory?.scope || {};
+  const descriptors = inventory?.descriptors || {};
+  const properties = inventory?.google?.available_assets || {};
+  const decorate = (items) => (Array.isArray(items) ? items : [])
+    .map((asset) => buildEffectiveGoogleMappingMetadata(asset, scope, descriptors));
+
+  return {
+    scope,
+    descriptors,
+    effective_mappings: {
+      search_console: decorate(properties.search_console),
+      analytics: decorate(properties.analytics),
+      business_profile: decorate(properties.business_profile),
+      google_ads: decorate(inventory?.google?.available_accounts)
+    }
+  };
+}
+
+async function resolveEffectiveGoogleMappings(params, dependencies = {}) {
+  const inventoryResolver = dependencies.resolveEffectiveMarketingAssetInventory
+    || resolveEffectiveMarketingAssetInventory;
+  const inventory = await inventoryResolver(params, dependencies);
+  return buildEffectiveGoogleMappings(inventory);
+}
+
 async function resolveEffectiveMarketingState(
   { clinicIdRaw = null, groupIdRaw = null, assignmentScopeRaw = null },
   dependencies = {}
@@ -1316,5 +1367,8 @@ module.exports = {
   pickEffectiveGoogleAccount,
   listMetaPixelsForScopeAdAccount,
   resolveEffectiveMarketingAssetInventory,
+  resolveEffectiveGoogleMappings,
+  buildEffectiveGoogleMappings,
+  buildEffectiveGoogleMappingMetadata,
   resolveEffectiveMarketingState
 };
