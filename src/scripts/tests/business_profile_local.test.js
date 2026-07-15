@@ -8,6 +8,7 @@ const {
   GBP_MEDIA_CATEGORIES,
   resolveDateRange,
   resolvePhotoMutationClinicIds,
+  serializeLocation,
   normalizeServiceItem,
   normalizeMediaItem,
   buildGoogleRatingSummary,
@@ -82,6 +83,9 @@ function testContentNormalization() {
     },
   }, 0);
   assert.equal(photo.type, 'portada');
+  assert.equal(photo.label, 'Foto de portada');
+  assert.equal(photo.mediaFormat, 'PHOTO');
+  assert.equal(photo.isVideo, false);
   assert.equal(photo.widthPixels, 1200);
   assert.deepEqual(photo.attribution, {
     profileName: 'Paciente que compartió la foto',
@@ -94,9 +98,113 @@ function testContentNormalization() {
   assert.equal(normalizeMediaItem({ locationAssociation: { category: 'TEAM' } }, 2).type, 'equipo');
   assert.equal(normalizeMediaItem({ locationAssociation: { category: 'LOGO' } }, 3).type, 'logo');
   assert.equal(normalizeMediaItem({ locationAssociation: { category: 'PROFILE' } }, 4).type, 'logo');
+  const video = normalizeMediaItem({
+    mediaFormat: 'VIDEO',
+    googleUrl: 'https://example.test/video-preview.jpg',
+    thumbnailUrl: 'https://example.test/video-thumbnail.jpg',
+    sourceUrl: 'https://example.test/clinic-tour.mp4',
+    locationAssociation: { category: 'ADDITIONAL' },
+  }, 5);
+  assert.equal(video.isVideo, true);
+  assert.equal(video.label, 'Vídeo de la clínica');
+  assert.equal(video.url, 'https://example.test/video-preview.jpg');
+  assert.equal(video.thumbnailUrl, 'https://example.test/video-thumbnail.jpg');
+  assert.equal(video.playbackUrl, 'https://example.test/clinic-tour.mp4');
+  assert.equal(normalizeMediaItem({
+    description: 'additional',
+    locationAssociation: { category: 'ADDITIONAL' },
+  }, 6).label, 'Foto de la clínica');
+  assert.equal(normalizeMediaItem({
+    mediaFormat: 'VIDEO',
+    description: 'additional',
+    locationAssociation: { category: 'ADDITIONAL' },
+  }, 7).label, 'Vídeo de la clínica');
   assert.equal(GBP_MEDIA_CATEGORIES.includes('TEAMS'), true);
   assert.equal(GBP_MEDIA_CATEGORIES.includes('LOGO'), true);
   assert.equal(GBP_MEDIA_CATEGORIES.includes('TEAM'), false, 'legacy TEAM must never be published to GBP');
+}
+
+function testVerificationStateUsesProviderSignalWithoutGuessing() {
+  const base = {
+    id: 1,
+    location_id: 'locations/1',
+    location_name: 'Clínica',
+    is_verified: false,
+    is_suspended: false,
+    raw_payload: {},
+  };
+  const providerFalseWithoutDiagnostic = serializeLocation({
+    ...base,
+    raw_payload: { metadata: { hasVoiceOfMerchant: false } },
+  });
+  assert.equal(providerFalseWithoutDiagnostic.verification.state, 'unknown');
+  assert.match(providerFalseWithoutDiagnostic.verification.detail, /no confirma/);
+
+  const pendingVerification = serializeLocation({
+    ...base,
+    raw_payload: {
+      metadata: { hasVoiceOfMerchant: false },
+      clinicaclick_voice_of_merchant_state: {
+        hasVoiceOfMerchant: false,
+        verify: { hasPendingVerification: true },
+      },
+    },
+  });
+  assert.equal(pendingVerification.verification.state, 'pending');
+  assert.equal(pendingVerification.verification.label, 'Verificación pendiente de completar');
+  assert.equal(pendingVerification.verification.action, 'complete_verification');
+
+  const ownershipConflict = serializeLocation({
+    ...base,
+    raw_payload: {
+      clinicaclick_voice_of_merchant_state: {
+        hasVoiceOfMerchant: false,
+        resolveOwnershipConflict: { conflictingLocations: ['locations/2'] },
+      },
+    },
+  });
+  assert.equal(ownershipConflict.verification.state, 'attention');
+  assert.equal(ownershipConflict.verification.label, 'Conflicto de propiedad');
+  assert.equal(ownershipConflict.verification.action, 'resolve_ownership_conflict');
+
+  const disabledByGuidelines = serializeLocation({
+    ...base,
+    raw_payload: {
+      clinicaclick_voice_of_merchant_state: {
+        hasVoiceOfMerchant: false,
+        complyWithGuidelines: { recommendationReason: 'BUSINESS_LOCATION_DISABLED' },
+      },
+    },
+  });
+  assert.equal(disabledByGuidelines.verification.state, 'attention');
+  assert.equal(disabledByGuidelines.verification.label, 'Ficha desactivada');
+  assert.equal(disabledByGuidelines.verification.action, 'comply_with_guidelines');
+
+  const providerWinsOverStaleColumn = serializeLocation({
+    ...base,
+    is_verified: false,
+    raw_payload: { metadata: { hasVoiceOfMerchant: true } },
+  });
+  assert.equal(providerWinsOverStaleColumn.verified, true);
+  assert.equal(providerWinsOverStaleColumn.verification.state, 'verified');
+
+  const legacyVerifiedFallback = serializeLocation({ ...base, is_verified: true });
+  assert.equal(legacyVerifiedFallback.verified, true);
+  assert.equal(legacyVerifiedFallback.verification.state, 'verified');
+
+  const suspendedOverridesVerification = serializeLocation({
+    ...base,
+    is_verified: true,
+    is_suspended: true,
+    raw_payload: { metadata: { hasVoiceOfMerchant: true } },
+  });
+  assert.equal(suspendedOverridesVerification.verified, false);
+  assert.equal(suspendedOverridesVerification.verification.state, 'attention');
+  assert.match(suspendedOverridesVerification.verification.detail, /suspendida/);
+
+  const unknown = serializeLocation(base);
+  assert.equal(unknown.verification.state, 'unknown');
+  assert.doesNotMatch(unknown.verification.detail, /pendiente/i);
 }
 
 function testRatingTargets() {
@@ -145,6 +253,8 @@ function testSecurityAndSyncContracts() {
   assert.match(syncJobs, /_syncBusinessProfileMedia/, 'full GBP sync must include media');
   assert.match(syncJobs, /clinicaclick_reviews_synced_at/, 'review-only sync needs its own freshness timestamp');
   assert.match(syncJobs, /metadata\?\.hasVoiceOfMerchant/, 'GBP verification must use the Business Information Voice of Merchant field');
+  assert.match(syncJobs, /mybusinessverifications\.googleapis\.com\/v1/, 'full GBP sync must request the canonical Voice of Merchant diagnosis');
+  assert.match(syncJobs, /clinicaclick_voice_of_merchant_state/, 'Voice of Merchant diagnosis must be persisted for the UI');
   assert.match(localService, /description\s*&&\s*category\s*!==\s*'COVER'/, 'GBP COVER uploads must omit descriptions');
   assert.match(localService, /purpose:\s*'marketing_image'/, 'GBP uploads must select only marketing media assets');
   assert.match(localService, /owner_type:\s*'google_business_profile_media'/, 'GBP uploads must select only assets owned by the GBP media flow');
@@ -192,6 +302,7 @@ async function run() {
   testMetricDeduplicationAndTotals();
   testMetricTotalsAcrossLocations();
   testContentNormalization();
+  testVerificationStateUsesProviderSignalWithoutGuessing();
   testRatingTargets();
   testOnlyNonPatientMarketingAssetsCanReachGoogle();
   testSecurityAndSyncContracts();

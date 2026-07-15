@@ -70,6 +70,7 @@ const { runOpsBridge } = require('../services/opsBridgeRunner.service');
 const GOOGLE_BUSINESS_PERFORMANCE_API = 'https://businessprofileperformance.googleapis.com/v1';
 const GOOGLE_MY_BUSINESS_API = 'https://mybusiness.googleapis.com/v4';
 const GOOGLE_BUSINESS_INFORMATION_API = 'https://mybusinessbusinessinformation.googleapis.com/v1';
+const GOOGLE_BUSINESS_VERIFICATIONS_API = 'https://mybusinessverifications.googleapis.com/v1';
 const GOOGLE_BUSINESS_LOCATION_READ_MASK = [
   'name',
   'title',
@@ -1937,6 +1938,11 @@ class MetaSyncJobs {
           } catch (sectionError) {
             sectionErrors.push({ section: 'details', message: sectionError.response?.data?.error?.message || sectionError.message });
           }
+          try {
+            await this._syncBusinessProfileVoiceOfMerchantState(location, accessToken);
+          } catch (sectionError) {
+            sectionErrors.push({ section: 'verification', message: sectionError.response?.data?.error?.message || sectionError.message });
+          }
           const metricRows = await this._syncBusinessProfileMetrics(location, accessToken, start, end);
           const reviews = await this._syncBusinessProfileReviews(location, accessToken);
           const posts = await this._syncBusinessProfilePosts(location, accessToken);
@@ -2821,6 +2827,33 @@ class MetaSyncJobs {
     });
 
     return details;
+  }
+
+  async _syncBusinessProfileVoiceOfMerchantState(location, accessToken) {
+    const locationName = this._normalizeBusinessProfilePerformanceLocation(location.location_id);
+    if (!locationName) {
+      throw new Error('Ubicación Google Business Profile sin location_id para consultar verificación');
+    }
+    const response = await syncHttp.get(
+      `${GOOGLE_BUSINESS_VERIFICATIONS_API}/${locationName}/VoiceOfMerchantState`,
+      { headers: { Authorization: `Bearer ${accessToken}` } }
+    );
+    const state = response.data && typeof response.data === 'object' ? response.data : {};
+    const recommendationReason = state.complyWithGuidelines?.recommendationReason || null;
+    const columnPatch = {};
+    if (typeof state.hasVoiceOfMerchant === 'boolean') {
+      columnPatch.is_verified = state.hasVoiceOfMerchant;
+    }
+    if (recommendationReason === 'BUSINESS_LOCATION_SUSPENDED') {
+      columnPatch.is_suspended = true;
+    } else if (state.hasVoiceOfMerchant === true) {
+      columnPatch.is_suspended = false;
+    }
+    await this._mergeBusinessProfileLocation(location, {
+      clinicaclick_voice_of_merchant_state: state,
+      clinicaclick_verification_synced_at: new Date().toISOString(),
+    }, columnPatch);
+    return state;
   }
 
   _buildBusinessProfileMetricParams(start, end) {

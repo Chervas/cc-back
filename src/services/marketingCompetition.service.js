@@ -230,6 +230,22 @@ const PLACE_FIELD_MASK = [
   'places.photos'
 ].join(',');
 
+// El descubrimiento solo necesita identidad, ubicación y categoría. Mantener
+// fuera de esta consulta rating, teléfono, web y fotos evita elevarla al SKU
+// Enterprise y una llamada adicional de foto por cada sugerencia. Los datos
+// completos se consultan únicamente después de que el usuario añade el perfil.
+const COMPETITION_SUGGESTION_FIELD_MASK = [
+  'places.id',
+  'places.displayName',
+  'places.formattedAddress',
+  'places.location',
+  'places.primaryType',
+  'places.primaryTypeDisplayName',
+  'places.types',
+  'places.googleMapsUri',
+  'places.businessStatus'
+].join(',');
+
 const PLACE_DETAILS_FIELD_MASK = [
   'id',
   'displayName',
@@ -2265,23 +2281,32 @@ async function searchGooglePlaces({
   maxResultCount = DEFAULT_LIMIT,
   locationBias = null,
   locationRestriction = null,
-  rankPreference = null
+  rankPreference = null,
+  fieldMask = PLACE_FIELD_MASK
 }) {
   const body = {
     textQuery: query,
     languageCode: DEFAULT_LANGUAGE,
     regionCode: DEFAULT_REGION,
-    maxResultCount
+    pageSize: Math.max(1, Math.min(20, Number(maxResultCount) || DEFAULT_LIMIT))
   };
   if (locationRestriction) body.locationRestriction = locationRestriction;
   else if (locationBias) body.locationBias = locationBias;
   if (rankPreference) body.rankPreference = rankPreference;
-  return cachedCompetitionValue(cacheKey(['places-search', body]), COMPETITION_PLACES_CACHE_TTL_MS, async () => {
+  return cachedCompetitionValue(cacheKey(['places-search', fieldMask, body]), COMPETITION_PLACES_CACHE_TTL_MS, async () => {
     const response = await axios.post(`${GOOGLE_PLACES_API_BASE}/places:searchText`, body, {
-      headers: buildPlaceHeaders(PLACE_FIELD_MASK),
+      headers: buildPlaceHeaders(fieldMask),
       timeout: 15000
     });
     return Array.isArray(response.data?.places) ? response.data.places : [];
+  });
+}
+
+async function searchCompetitionSuggestions(query, limit = DEFAULT_LIMIT) {
+  return searchGooglePlaces({
+    query,
+    maxResultCount: limit,
+    fieldMask: COMPETITION_SUGGESTION_FIELD_MASK
   });
 }
 
@@ -3825,8 +3850,8 @@ async function suggestCompetitors(scope, { query = null, limit = DEFAULT_LIMIT }
   const ownPlaceIds = await resolveOwnBusinessPlaceIds(scope);
 
   try {
-    const places = await searchGooglePlaces({ query: textQuery, maxResultCount: normalizedLimit });
-    const suggestions = await Promise.all(places.map(async (place) => {
+    const places = await searchCompetitionSuggestions(textQuery, normalizedLimit);
+    const suggestions = places.map((place, providerIndex) => {
       const normalized = normalizePlace(place);
       const relevance = competitorRelevanceForClinic({
         name: normalized.name,
@@ -3842,9 +3867,17 @@ async function suggestCompetitors(scope, { query = null, limit = DEFAULT_LIMIT }
         || (normalizedPlaceId && existingPlaceIds.has(normalizedPlaceId))
         || [...existingNames].some((existingName) => businessNamesMatch(normalizedName, existingName));
       const relevanceBoost = relevance.status === 'match' ? 1000 : (relevance.status === 'review' ? -500 : 0);
-      const score = Math.round(relevanceBoost + ((normalized.rating || 0) * 20) + Math.log10((normalized.review_count || 0) + 1) * 35);
-      return attachPlacePhotoUrl({ ...normalized, relevance, already_added: alreadyAdded, is_own_clinic: isOwnClinic, suggested_score: score }, { maxWidthPx: 640 });
-    }));
+      // Respeta la relevancia del proveedor sin pedir valoraciones/reseñas en
+      // la consulta de descubrimiento. Un índice menor obtiene mayor peso.
+      const score = Math.round(relevanceBoost + Math.max(0, normalizedLimit - providerIndex));
+      return {
+        ...normalized,
+        relevance,
+        already_added: alreadyAdded,
+        is_own_clinic: isOwnClinic,
+        suggested_score: score
+      };
+    });
 
     const sortedSuggestions = suggestions
       .filter((item) => item.name && !item.is_own_clinic)
@@ -4288,6 +4321,7 @@ module.exports = {
     LOCAL_HEATMAP_CACHE_ALGORITHM_VERSION,
     LOCAL_HEATMAP_EFFECTIVE_GRID_SIZE,
     LOCAL_HEATMAP_PLACE_FIELD_MASK,
+    COMPETITION_SUGGESTION_FIELD_MASK,
     LOCAL_HEATMAP_REFRESH_JOB_TYPE,
     buildLocalHeatmapSearchBody,
     collectLocalHeatmapPoints,
@@ -4299,6 +4333,8 @@ module.exports = {
     normalizeLocalHeatmapTerm,
     persistedOwnClinicProfile,
     rankingHeatmapOffsets,
+    searchCompetitionSuggestions,
+    searchGooglePlaces,
     resolveOwnClinicHeatmapProfile,
     totalProviderRequests,
     payloadIncludesGooglePlacesContent,

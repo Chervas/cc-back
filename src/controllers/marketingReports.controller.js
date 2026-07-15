@@ -246,9 +246,21 @@ function sourceMatchesSocialOrganic(utmSource) {
   return ['instagram', 'facebook', 'fb', 'ig', 'linkedin', 'tiktok', 'social', 'threads'].some((token) => value.includes(token));
 }
 
+function hasAttributionValue(value) {
+  return String(value ?? '').trim().length > 0;
+}
+
 function deriveChannelKey(row) {
   const source = String(row.source || 'unknown').toLowerCase();
   const utmSource = String(row.utm_source || '').toLowerCase();
+  if (
+    hasAttributionValue(row.google_ads_customer_id)
+    || hasAttributionValue(row.google_ads_campaign_id)
+    || hasAttributionValue(row.gclid)
+    || hasAttributionValue(row.gbraid)
+    || hasAttributionValue(row.wbraid)
+  ) return 'google_ads';
+  if (hasAttributionValue(row.fbclid)) return 'meta_ads';
   if (source === 'google_ads') return 'google_ads';
   if (source === 'meta_ads' || source === 'tiktok_ads') return 'meta_ads';
   if (source === 'seo') return 'seo';
@@ -259,6 +271,33 @@ function deriveChannelKey(row) {
   if (source === 'direct') return 'direct';
   return 'web';
 }
+
+const LEAD_ACQUISITION_CHANNEL_SQL = `CASE
+  WHEN NULLIF(TRIM(COALESCE(google_ads_customer_id, '')), '') IS NOT NULL
+    OR NULLIF(TRIM(COALESCE(google_ads_campaign_id, '')), '') IS NOT NULL
+    OR NULLIF(TRIM(COALESCE(gclid, '')), '') IS NOT NULL
+    OR NULLIF(TRIM(COALESCE(gbraid, '')), '') IS NOT NULL
+    OR NULLIF(TRIM(COALESCE(wbraid, '')), '') IS NOT NULL
+    THEN 'google_ads'
+  WHEN NULLIF(TRIM(COALESCE(fbclid, '')), '') IS NOT NULL THEN 'meta_ads'
+  WHEN LOWER(COALESCE(source, '')) = 'google_ads' THEN 'google_ads'
+  WHEN LOWER(COALESCE(source, '')) IN ('meta_ads', 'tiktok_ads') THEN 'meta_ads'
+  WHEN LOWER(COALESCE(source, '')) = 'seo' THEN 'seo'
+  WHEN LOWER(COALESCE(source, '')) = 'whatsapp' THEN 'whatsapp'
+  WHEN LOWER(COALESCE(source, '')) = 'call_click' THEN 'call_click'
+  WHEN LOWER(COALESCE(source, '')) = 'local_services' THEN 'local_services'
+  WHEN LOWER(COALESCE(utm_source, '')) LIKE '%instagram%'
+    OR LOWER(COALESCE(utm_source, '')) LIKE '%facebook%'
+    OR LOWER(COALESCE(utm_source, '')) LIKE '%linkedin%'
+    OR LOWER(COALESCE(utm_source, '')) LIKE '%tiktok%'
+    OR LOWER(COALESCE(utm_source, '')) LIKE '%threads%'
+    OR LOWER(COALESCE(utm_source, '')) = 'fb'
+    OR LOWER(COALESCE(utm_source, '')) = 'ig'
+    OR LOWER(COALESCE(utm_source, '')) = 'social'
+    THEN 'social_organic'
+  WHEN LOWER(COALESCE(source, '')) = 'direct' THEN 'direct'
+  ELSE 'web'
+END`;
 
 function emptyChannelStats() {
   return { leads: 0, citas: 0, acudieron: 0, convertidos: 0 };
@@ -616,13 +655,12 @@ async function aggregateLeads(scope, range) {
   };
   const rows = await LeadIntake.findAll({
     attributes: [
-      'source',
-      'utm_source',
+      [literal(LEAD_ACQUISITION_CHANNEL_SQL), 'channel_key'],
       'status_lead',
       [fn('COUNT', col('id')), 'count'],
     ],
     where,
-    group: ['source', 'utm_source', 'status_lead'],
+    group: [literal(LEAD_ACQUISITION_CHANNEL_SQL), 'status_lead'],
     raw: true,
   });
 
@@ -632,7 +670,7 @@ async function aggregateLeads(scope, range) {
   for (const row of rows) {
     const count = toNumber(row.count);
     const status = String(row.status_lead || '').toLowerCase();
-    const key = deriveChannelKey(row);
+    const key = String(row.channel_key || deriveChannelKey(row));
     if (!channels.has(key)) channels.set(key, emptyChannelStats());
     const entry = channels.get(key);
     entry.leads += count;
@@ -2459,6 +2497,9 @@ exports.getOverview = async (req, res) => {
 };
 
 exports.__testing = {
+  deriveChannelKey,
+  leadAcquisitionChannelSql: LEAD_ACQUISITION_CHANNEL_SQL,
+  aggregateLeads,
   buildEffectiveMarketingStateInput,
   resolveReportMarketingState,
   mergeEffectiveMarketingStates,
