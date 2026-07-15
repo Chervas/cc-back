@@ -2259,6 +2259,10 @@ class MetaSyncJobs {
     });
 
     try {
+      const jobRequestId = Number(options.jobRequestId || options.job_request_id || 0);
+      if (Number.isInteger(jobRequestId) && jobRequestId > 0) {
+        await jobRequestsService.setSyncLog(jobRequestId, syncLog.id);
+      }
       const explicitClinicIds = Array.from(new Set([
         ...(Array.isArray(options.clinicIds) ? options.clinicIds : []),
         ...(Array.isArray(options.clinic_ids) ? options.clinic_ids : []),
