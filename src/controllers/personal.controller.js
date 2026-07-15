@@ -2740,19 +2740,21 @@ async function buildScheduleResponse(actorId, targetUserId, query = {}) {
             };
         });
 
-    const editableClinicIds = new Set();
-    if (isAdmin(actorId) || Number(actorId) === Number(targetUserId)) {
-        clinicasBase.forEach((c) => editableClinicIds.add(Number(c.clinica_id)));
-    } else {
-        const adminScopedClinicIds = await getAdminScopedClinicIdsForUser(actorId);
-        const adminScopedSet = new Set(adminScopedClinicIds.map((id) => Number(id)));
-        clinicasBase.forEach((c) => {
+    const editableClinicEntries = await Promise.all(
+        clinicasBase.map(async (c) => {
             const clinicId = Number(c.clinica_id);
-            if (adminScopedSet.has(clinicId)) {
-                editableClinicIds.add(clinicId);
-            }
-        });
-    }
+            if (!Number.isFinite(clinicId)) return [clinicId, false];
+            return [
+                clinicId,
+                await canEditHorarios(actorId, targetUserId, clinicId),
+            ];
+        }),
+    );
+    const editableClinicIds = new Set(
+        editableClinicEntries
+            .filter(([, canEdit]) => canEdit)
+            .map(([clinicId]) => clinicId),
+    );
 
     const scheduleClinicIds = clinicasBase.map((c) => Number(c.clinica_id)).filter((id) => Number.isFinite(id));
     const scheduleTimezoneMap = await buildClinicTimezoneMap(scheduleClinicIds);
