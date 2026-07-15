@@ -2087,6 +2087,15 @@ async function assertLocalHeatmapGenerationBudget(identity) {
   });
 }
 
+function withBlockedLocalHeatmapMetadata(payload) {
+  return withHeatmapCacheMetadata(payload, null, {
+    status: 'miss',
+    refreshPending: false,
+    refreshAvailable: false,
+    algorithmVersion: LOCAL_HEATMAP_CACHE_ALGORITHM_VERSION,
+  });
+}
+
 async function getLocalRankingHeatmap(scope, { term = null, zoomKm = 3 } = {}) {
   const normalizedTerm = normalizeLocalHeatmapTerm(term) || null;
   const normalizedZoomKm = clampHeatmapZoom(zoomKm);
@@ -2095,7 +2104,7 @@ async function getLocalRankingHeatmap(scope, { term = null, zoomKm = 3 } = {}) {
     !competitionPlacesFeatureEnabled()
     || !COMPETITION_LOCAL_RANKING_STORAGE_ALLOWED
   ) {
-    return withHeatmapCacheMetadata({
+    return withBlockedLocalHeatmapMetadata({
       success: false,
       setup_required: true,
       setup_code: 'LOCAL_RANKING_PROVIDER_REQUIRED',
@@ -2103,40 +2112,28 @@ async function getLocalRankingHeatmap(scope, { term = null, zoomKm = 3 } = {}) {
       points: [],
       map_provider: null,
       map_attribution: null,
-    }, null, {
-      status: 'miss',
-      refreshPending: false,
-      algorithmVersion: LOCAL_HEATMAP_CACHE_ALGORITHM_VERSION,
     });
   }
   const setupBlocker = competitionSetupBlocker(clinic, normalizedTerm);
   if (setupBlocker) {
-    return withHeatmapCacheMetadata({
+    return withBlockedLocalHeatmapMetadata({
       success: false,
       setup_required: true,
       setup_code: setupBlocker.code,
       message: setupBlocker.message,
       points: []
-    }, null, {
-      status: 'miss',
-      refreshPending: false,
-      algorithmVersion: LOCAL_HEATMAP_CACHE_ALGORITHM_VERSION
     });
   }
 
   const terms = rankingTermsForClinic(clinic);
   const selectedTerm = normalizedTerm || terms[0];
   if (!selectedTerm) {
-    return withHeatmapCacheMetadata({
+    return withBlockedLocalHeatmapMetadata({
       success: false,
       setup_required: true,
       setup_code: 'LOCAL_TERM_REQUIRED',
       message: 'Falta una búsqueda relevante para calcular el mapa de posición local.',
       points: []
-    }, null, {
-      status: 'miss',
-      refreshPending: false,
-      algorithmVersion: LOCAL_HEATMAP_CACHE_ALGORITHM_VERSION
     });
   }
 
@@ -3697,71 +3694,92 @@ function providerStatusWithObservedErrors(status, competitors = []) {
   return output;
 }
 
-async function listCompetition(scope, { includeInactive = false } = {}) {
+function persistedOwnClinicProfile(clinic) {
+  if (!clinic) return null;
+  return {
+    name: cleanString(clinic.business_location_name) || cleanString(clinic.nombre_clinica),
+    google_place_id: normalizePlaceId(clinic.business_place_id),
+    google_maps_url: normalizeUrl(clinic.business_maps_url) || normalizeUrl(clinic.url_ficha_local),
+    primary_category: cleanString(clinic.business_primary_category),
+    address: cleanString(clinic.business_address_lines?.[0]) || cleanString(clinic.direccion),
+    latitude: toNumber(clinic.business_latitude),
+    longitude: toNumber(clinic.business_longitude),
+    rating: null,
+    review_count: null,
+    photo_url: null,
+  };
+}
+
+function persistedLocalRanking(clinic) {
+  return {
+    terms: rankingTermsForClinic(clinic),
+    entries: [],
+  };
+}
+
+async function listCompetitionWithDependencies(
+  scope,
+  { includeInactive = false } = {},
+  dependencies = {}
+) {
+  const resolveClinic = dependencies.resolvePrimaryClinic || resolvePrimaryClinic;
+  const loadCompetitorRows = dependencies.loadCompetitorRows || ((where) => MarketingCompetitor.findAll({
+    where,
+    order: [['is_active', 'DESC'], ['review_count', 'DESC'], ['rating', 'DESC'], ['name', 'ASC']]
+  }));
+  const hydrateRows = dependencies.hydrateCompetitors || hydrateCompetitors;
+  const loadProviderStatus = dependencies.providerStatusForScope || providerStatusForScope;
+
   return cachedCompetitionValue(
     cacheKey(['competition-list', scopeCacheKey(scope), includeInactive ? 'with-inactive' : 'active-only']),
     COMPETITION_REPORT_CACHE_TTL_MS,
     async () => {
-  const clinic = await resolvePrimaryClinic(scope);
-  const rows = await MarketingCompetitor.findAll({
-    where: buildCompetitorWhere(scope, { includeInactive }),
-    order: [['is_active', 'DESC'], ['review_count', 'DESC'], ['rating', 'DESC'], ['name', 'ASC']]
-  });
-  const competitors = (await hydrateCompetitors(rows))
-    .map((competitor) => ({
-      ...competitor,
-      relevance: competitorRelevanceForClinic(competitor, clinic)
-    }));
-  const setupBlocker = competitionSetupBlocker(clinic, null);
-  const ownProfile = setupBlocker
-    ? null
-    : (competitionPlacesFeatureEnabled()
-      ? await resolveOwnClinicProfile(clinic)
-      : {
-        name: cleanString(clinic?.business_location_name) || cleanString(clinic?.nombre_clinica),
-        google_place_id: normalizePlaceId(clinic?.business_place_id),
-        google_maps_url: normalizeUrl(clinic?.business_maps_url) || normalizeUrl(clinic?.url_ficha_local),
-        primary_category: cleanString(clinic?.business_primary_category),
-        address: cleanString(clinic?.business_address_lines?.[0]) || cleanString(clinic?.direccion),
-        latitude: toNumber(clinic?.business_latitude),
-        longitude: toNumber(clinic?.business_longitude),
-        rating: null,
-        review_count: null,
-        photo_url: null,
-      });
-  const localRanking = setupBlocker || !competitionPlacesFeatureEnabled()
-    ? { terms: rankingTermsForClinic(clinic), entries: [] }
-    : await buildLocalRanking(clinic, ownProfile);
-  return {
-    success: true,
-    mode: 'real_v1',
-    setup: {
-      has_competitors: competitors.some((item) => item.is_active),
-      refresh_frequency: 'weekly',
-      first_setup_requires_google_places: false,
-      manual_competitor_supported: true,
-      automatic_discovery_available: competitionPlacesFeatureEnabled(),
-      ads_provider: META_ADS_LIBRARY_PROVIDER
-    },
-    provider_status: providerStatusWithObservedErrors(await providerStatusForScope(scope), competitors),
-    own_profile: ownProfile ? {
-      name: ownProfile.name,
-      google_place_id: normalizePlaceId(ownProfile.google_place_id),
-      google_maps_url: ownProfile.google_maps_url,
-      rating: ownProfile.rating,
-      reviews_count: ownProfile.review_count,
-      category: ownProfile.primary_category,
-      address: ownProfile.address,
-      photo_url: ownProfile.photo_url || null
-    } : null,
-    local_ranking: localRanking.entries,
-    ranking_terms: localRanking.terms,
-    setup_required: !!setupBlocker,
-    setup_code: setupBlocker?.code || null,
-    competitors
-  };
+      const clinic = await resolveClinic(scope);
+      const rows = await loadCompetitorRows(buildCompetitorWhere(scope, { includeInactive }));
+      const competitors = (await hydrateRows(rows))
+        .map((competitor) => ({
+          ...competitor,
+          relevance: competitorRelevanceForClinic(competitor, clinic)
+        }));
+      const setupBlocker = competitionSetupBlocker(clinic, null);
+      // Una lectura pasiva solo consume el perfil ya sincronizado. La búsqueda
+      // y el ranking contra Places pertenecen a rutas explícitas/background.
+      const ownProfile = setupBlocker ? null : persistedOwnClinicProfile(clinic);
+      const localRanking = persistedLocalRanking(clinic);
+      return {
+        success: true,
+        mode: 'real_v1',
+        setup: {
+          has_competitors: competitors.some((item) => item.is_active),
+          refresh_frequency: 'weekly',
+          first_setup_requires_google_places: false,
+          manual_competitor_supported: true,
+          automatic_discovery_available: competitionPlacesFeatureEnabled(),
+          ads_provider: META_ADS_LIBRARY_PROVIDER
+        },
+        provider_status: providerStatusWithObservedErrors(await loadProviderStatus(scope), competitors),
+        own_profile: ownProfile ? {
+          name: ownProfile.name,
+          google_place_id: normalizePlaceId(ownProfile.google_place_id),
+          google_maps_url: ownProfile.google_maps_url,
+          rating: ownProfile.rating,
+          reviews_count: ownProfile.review_count,
+          category: ownProfile.primary_category,
+          address: ownProfile.address,
+          photo_url: ownProfile.photo_url || null
+        } : null,
+        local_ranking: localRanking.entries,
+        ranking_terms: localRanking.terms,
+        setup_required: !!setupBlocker,
+        setup_code: setupBlocker?.code || null,
+        competitors
+      };
     }
   );
+}
+
+async function listCompetition(scope, options = {}) {
+  return listCompetitionWithDependencies(scope, options);
 }
 
 async function suggestCompetitors(scope, { query = null, limit = DEFAULT_LIMIT } = {}) {
@@ -4275,12 +4293,16 @@ module.exports = {
     collectLocalHeatmapPoints,
     fetchPublicHtmlPage,
     generateLocalRankingHeatmapSnapshot,
+    competitionPlacesFeatureEnabled,
+    listCompetitionWithDependencies,
     localHeatmapPlaceKey,
     normalizeLocalHeatmapTerm,
+    persistedOwnClinicProfile,
     rankingHeatmapOffsets,
     resolveOwnClinicHeatmapProfile,
     totalProviderRequests,
     payloadIncludesGooglePlacesContent,
     toNumber,
+    withBlockedLocalHeatmapMetadata,
   },
 };
