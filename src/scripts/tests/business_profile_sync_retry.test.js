@@ -163,6 +163,7 @@ async function testBusinessProfileSyncRetriesWhenOneLocationFails() {
     jobs.config.local.betweenLocationsSleepMs = 0;
     jobs._ensureGoogleAccessToken = async () => ({ accessToken: 'token' });
     jobs._syncBusinessProfileLocationDetails = async () => ({});
+    jobs._syncBusinessProfileVoiceOfMerchantState = async () => ({ hasVoiceOfMerchant: true });
     jobs._syncBusinessProfileMetrics = async (location) => {
       if (location.id === 2) throw new Error('metrics provider unavailable');
       return 3;
@@ -195,6 +196,7 @@ async function testBusinessProfileSyncRetriesOnPartialLocation() {
     const jobs = new MetaSyncJobs();
     jobs.config.local.betweenLocationsSleepMs = 0;
     jobs._ensureGoogleAccessToken = async () => ({ accessToken: 'token' });
+    jobs._syncBusinessProfileVoiceOfMerchantState = async () => ({ hasVoiceOfMerchant: true });
     jobs._syncBusinessProfileLocationDetails = async (location) => {
       if (location.id === 2) throw new Error('details provider unavailable');
       return {};

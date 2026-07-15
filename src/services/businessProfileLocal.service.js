@@ -176,8 +176,96 @@ function normalizeCategory(category) {
   };
 }
 
+function serializeVerification(raw, location) {
+  const suspended = location.is_suspended === true;
+  const voiceState = raw.clinicaclick_voice_of_merchant_state
+    && typeof raw.clinicaclick_voice_of_merchant_state === 'object'
+    && !Array.isArray(raw.clinicaclick_voice_of_merchant_state)
+    ? raw.clinicaclick_voice_of_merchant_state
+    : null;
+  const metadataVoice = typeof raw.metadata?.hasVoiceOfMerchant === 'boolean'
+    ? raw.metadata.hasVoiceOfMerchant
+    : null;
+  const hasVoice = typeof voiceState?.hasVoiceOfMerchant === 'boolean'
+    ? voiceState.hasVoiceOfMerchant
+    : metadataVoice;
+  const hasAuthority = typeof voiceState?.hasBusinessAuthority === 'boolean'
+    ? voiceState.hasBusinessAuthority
+    : null;
+
+  if (voiceState?.complyWithGuidelines || suspended) {
+    const reason = cleanString(voiceState?.complyWithGuidelines?.recommendationReason);
+    const disabled = reason === 'BUSINESS_LOCATION_DISABLED';
+    return {
+      state: 'attention',
+      label: disabled ? 'Ficha desactivada' : 'Ficha suspendida',
+      action: 'comply_with_guidelines',
+      signal: voiceState ? 'getVoiceOfMerchantState' : 'location_suspension',
+      hasBusinessAuthority: hasAuthority,
+      detail: disabled
+        ? 'Google indica que la ubicación está desactivada y requiere seguir sus pasos de restitución.'
+        : 'Google indica que la ubicación está suspendida y requiere seguir sus pasos de restitución.',
+    };
+  }
+  if (hasVoice === true || (hasVoice === null && location.is_verified === true)) {
+    return {
+      state: 'verified',
+      label: 'Ficha verificada',
+      action: 'none',
+      signal: voiceState ? 'getVoiceOfMerchantState' : 'hasVoiceOfMerchant',
+      hasBusinessAuthority: hasAuthority,
+      detail: 'Google confirma que la empresa está en regla y tiene control sobre esta ficha.',
+    };
+  }
+  if (voiceState?.resolveOwnershipConflict) {
+    return {
+      state: 'attention',
+      label: 'Conflicto de propiedad',
+      action: 'resolve_ownership_conflict',
+      signal: 'getVoiceOfMerchantState',
+      hasBusinessAuthority: hasAuthority,
+      detail: 'Google ha detectado otra ficha dominante del mismo negocio. Solicita acceso a su propietario o usa la ficha que ya está en regla.',
+    };
+  }
+  if (voiceState?.waitForVoiceOfMerchant) {
+    return {
+      state: 'pending',
+      label: 'Ficha en revisión',
+      action: 'wait_for_review',
+      signal: 'getVoiceOfMerchantState',
+      hasBusinessAuthority: hasAuthority,
+      detail: 'Google está revisando la ficha. No requiere iniciar otra verificación mientras termina esa revisión.',
+    };
+  }
+  if (voiceState?.verify) {
+    const hasPendingVerification = voiceState.verify.hasPendingVerification === true;
+    return {
+      state: 'pending',
+      label: hasPendingVerification ? 'Verificación pendiente de completar' : 'Ficha pendiente de verificación',
+      action: hasPendingVerification ? 'complete_verification' : 'start_verification',
+      signal: 'getVoiceOfMerchantState',
+      hasBusinessAuthority: hasAuthority,
+      detail: hasPendingVerification
+        ? 'Google indica que ya se inició una verificación y todavía debe completarse en Perfil de Empresa.'
+        : 'Google requiere iniciar la verificación. Abre Perfil de Empresa para elegir uno de los métodos disponibles.',
+    };
+  }
+  return {
+    state: 'unknown',
+    label: 'Estado de control no disponible',
+    action: 'refresh_verification_state',
+    signal: voiceState ? 'getVoiceOfMerchantState' : 'hasVoiceOfMerchant',
+    hasBusinessAuthority: hasAuthority,
+    detail: hasVoice === false
+      ? 'Google aún no confirma que la ficha esté en regla y bajo control. Sincroniza de nuevo para obtener la acción exacta recomendada por Google.'
+      : 'Google no ha devuelto todavía el estado de control de esta ficha.',
+  };
+}
+
 function serializeLocation(location, { assignmentOrigin = null } = {}) {
   const raw = rawPayload(location);
+  const suspended = location.is_suspended === true;
+  const verification = serializeVerification(raw, location);
   const categories = raw.categories || {};
   const primaryCategory = normalizeCategory(categories.primaryCategory || raw.primaryCategory);
   const additionalCategories = (Array.isArray(categories.additionalCategories)
@@ -194,8 +282,12 @@ function serializeLocation(location, { assignmentOrigin = null } = {}) {
       additional: additionalCategories,
     },
     description: raw.profile?.description || raw.description || null,
-    verified: location.is_verified === true,
-    suspended: location.is_suspended === true,
+    // El snapshot vigente de Google es canónico. `is_verified` puede quedar
+    // rezagado entre sincronizaciones (caso real Badalona), por lo que solo se
+    // usa como fallback si el proveedor no entregó Voice of Merchant.
+    verified: verification.state === 'verified',
+    verification,
+    suspended,
     syncStatus: location.sync_status,
     lastSyncedAt: location.last_synced_at,
     websiteUri: raw.websiteUri || null,
@@ -626,6 +718,33 @@ function mediaType(category) {
   return 'instalaciones';
 }
 
+function mediaCategoryLabel(category, mediaFormat = 'PHOTO') {
+  const normalized = String(category || '').toUpperCase();
+  if (String(mediaFormat || '').toUpperCase() === 'VIDEO') {
+    return normalized === 'ADDITIONAL' ? 'Vídeo de la clínica' : 'Vídeo del Perfil de Empresa';
+  }
+  const labels = {
+    ADDITIONAL: 'Foto de la clínica',
+    COVER: 'Foto de portada',
+    PROFILE: 'Foto de perfil',
+    LOGO: 'Logotipo',
+    EXTERIOR: 'Exterior de la clínica',
+    INTERIOR: 'Interior de la clínica',
+    PRODUCT: 'Servicio o tratamiento',
+    AT_WORK: 'Equipo trabajando',
+    TEAM: 'Equipo de la clínica',
+    TEAMS: 'Equipo de la clínica',
+  };
+  return labels[normalized] || 'Contenido de la clínica';
+}
+
+function mediaPlaybackUrl(item) {
+  const mediaFormat = String(item?.mediaFormat || item?.media_format || '').toUpperCase();
+  const sourceUrl = cleanString(item?.sourceUrl || item?.source_url);
+  if (mediaFormat !== 'VIDEO' || !sourceUrl) return null;
+  return /\.(?:mp4|m4v|mov|webm)(?:[?#]|$)/i.test(sourceUrl) ? sourceUrl : null;
+}
+
 function normalizeMediaItem(item, index) {
   const category = item?.locationAssociation?.category
     || item?.location_association?.category
@@ -639,12 +758,22 @@ function normalizeMediaItem(item, index) {
     profileUrl: cleanString(rawAttribution.profileUrl),
     takedownUrl: cleanString(rawAttribution.takedownUrl),
   } : null;
+  const mediaFormat = String(item?.mediaFormat || item?.media_format || 'PHOTO').toUpperCase();
+  const url = item?.googleUrl || item?.sourceUrl || item?.thumbnailUrl || null;
+  const thumbnailUrl = item?.thumbnailUrl || url;
+  const rawDescription = cleanString(item?.description);
+  const description = rawDescription && rawDescription.toUpperCase() !== String(category).toUpperCase()
+    ? rawDescription
+    : null;
   return {
     id: item?.name || `media:${index}`,
-    url: item?.googleUrl || item?.sourceUrl || item?.thumbnailUrl || null,
-    thumbnailUrl: item?.thumbnailUrl || item?.googleUrl || item?.sourceUrl || null,
+    url,
+    thumbnailUrl,
+    mediaFormat,
+    isVideo: mediaFormat === 'VIDEO',
+    playbackUrl: mediaPlaybackUrl(item),
     type: mediaType(category),
-    label: item?.description || String(category).toLowerCase().replace(/_/g, ' '),
+    label: description || mediaCategoryLabel(category, mediaFormat),
     category,
     createTime: item?.createTime || null,
     widthPixels: toNumber(item?.dimensions?.widthPixels),
