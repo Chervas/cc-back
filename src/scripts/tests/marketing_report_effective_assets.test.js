@@ -352,6 +352,23 @@ async function testReportsResolveReadOnlyAndKeepHistoricalAdsScope() {
     site_url: 'sc-domain:compartida.es',
   });
   assert.equal(__testing.latestEffectiveGoogleSync(state), '2026-07-15T08:00:00.000Z');
+
+  const currentReviewScope = __testing.buildEffectiveSnapshotWhere(
+    reportScope,
+    'clinica_id',
+    'business_location_id',
+    [43]
+  );
+  assert.equal(currentReviewScope.business_location_id, 43);
+  assert.ok(!currentReviewScope[Op.or], 'current snapshots must exclude old clinic mappings');
+
+  const legacyReviewScope = __testing.buildEffectiveSnapshotWhere(
+    reportScope,
+    'clinica_id',
+    'business_location_id',
+    []
+  );
+  assert.equal(legacyReviewScope.clinica_id, 36);
 }
 
 async function testMultiScopeUnionsEffectiveAssetsByIdentity() {

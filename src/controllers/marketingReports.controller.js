@@ -7,6 +7,12 @@ const webEventsService = require('../services/webEvents.service');
 const {
   resolveEffectiveMarketingAssetInventory,
 } = require('../services/effectiveMarketingAssets.service');
+const { hasMarketingClinicScopeAccess } = require('../lib/marketingScopeAccess');
+const { isGlobalAdmin } = require('../lib/role-helpers');
+const {
+  METRIC_DEFINITIONS: BUSINESS_PROFILE_LOCAL_METRIC_DEFINITIONS,
+  metricValueByDate: businessProfileMetricValueByDate,
+} = require('../services/businessProfileLocal.service');
 
 const {
   LeadIntake,
@@ -139,19 +145,6 @@ function ratioPct(numerator, denominator, decimals = 1) {
   if (!den) return 0;
   return round((toNumber(numerator) / den) * 100, decimals);
 }
-
-const BUSINESS_PROFILE_METRIC_GROUPS = {
-  views: [
-    'BUSINESS_IMPRESSIONS_TOTAL',
-    'BUSINESS_IMPRESSIONS_DESKTOP_MAPS',
-    'BUSINESS_IMPRESSIONS_DESKTOP_SEARCH',
-    'BUSINESS_IMPRESSIONS_MOBILE_MAPS',
-    'BUSINESS_IMPRESSIONS_MOBILE_SEARCH'
-  ],
-  calls: ['BUSINESS_CONVERSIONS_CALL_CLICKS', 'CALL_CLICKS'],
-  directions: ['BUSINESS_CONVERSIONS_DIRECTIONS', 'BUSINESS_DIRECTION_REQUESTS'],
-  websiteClicks: ['BUSINESS_CONVERSIONS_WEBSITE_CLICKS', 'WEBSITE_CLICKS']
-};
 
 function money(value) {
   return round(value, 2);
@@ -554,6 +547,12 @@ function buildHistoricalOrEffectiveWhere(scope, scopeField, effectiveField, ids)
   const effectiveScope = applyEffectiveAssetIdFilter({}, effectiveField, ids);
   if (scope?.scope === 'group' || scope?.scope === 'multi') return effectiveScope;
   return { [Op.or]: [historicalScope, effectiveScope] };
+}
+
+function buildEffectiveSnapshotWhere(scope, scopeField, effectiveField, ids) {
+  const normalizedIds = normalizedUniqueIntegers(ids);
+  if (!normalizedIds.length || scope?.isAll) return scopedWhere(scopeField, scope);
+  return applyEffectiveAssetIdFilter({}, effectiveField, normalizedIds);
 }
 
 function buildSearchConsoleDataWhere(scope, marketingState) {
@@ -1518,7 +1517,7 @@ async function aggregateBusinessProfile(scope, range, marketingState = null) {
 
   const effectiveLocationIds = effectiveBusinessLocationIds(marketingState);
   const locationWhere = {
-    ...buildHistoricalOrEffectiveWhere(scope, 'clinica_id', 'id', effectiveLocationIds),
+    ...buildEffectiveSnapshotWhere(scope, 'clinica_id', 'id', effectiveLocationIds),
     is_active: true,
   };
   const latestLocation = await ClinicBusinessLocation.findOne({ where: locationWhere, order: [['last_synced_at', 'DESC']], raw: true });
@@ -1534,32 +1533,41 @@ async function aggregateBusinessProfile(scope, range, marketingState = null) {
     ...buildDateOnlyWhere('date', range),
   };
   const rows = await BusinessProfileDailyMetric.findAll({ where: metricWhere, raw: true });
-  const sumBy = (metrics) => {
-    const allowed = new Set(Array.isArray(metrics) ? metrics : [metrics]);
-    return rows
-      .filter((row) => allowed.has(row.metric_type))
-      .reduce((acc, row) => acc + toNumber(row.value), 0);
-  };
+  const sumDefinition = (definition) => businessProfileMetricValueByDate(rows, definition)
+    .reduce((sum, point) => sum + toNumber(point.value), 0);
 
-  const reviewWhere = buildHistoricalOrEffectiveWhere(
+  const reviewWhere = buildEffectiveSnapshotWhere(
     scope,
     'clinica_id',
     'business_location_id',
     effectiveLocationIds
   );
-  const reviews = await BusinessProfileReview.findAll({ where: reviewWhere, raw: true });
-  const totalReviews = reviews.length;
-  const averageRating = totalReviews
-    ? round(reviews.reduce((acc, row) => acc + toNumber(row.star_rating), 0) / totalReviews, 1)
-    : 0;
-  const newReviews = reviews.filter((row) => row.is_new).length;
-  const unansweredReviews = reviews.filter((row) => !row.has_reply).length;
+  const [reviewTotals, newReviews] = await Promise.all([
+    BusinessProfileReview.findOne({
+      where: reviewWhere,
+      attributes: [
+        [fn('COUNT', col('id')), 'totalReviews'],
+        [fn('AVG', col('star_rating')), 'averageRating'],
+        [literal('SUM(CASE WHEN has_reply = 0 THEN 1 ELSE 0 END)'), 'unansweredReviews'],
+      ],
+      raw: true,
+    }),
+    BusinessProfileReview.count({
+      where: {
+        ...reviewWhere,
+        create_time: { [Op.gte]: range.start, [Op.lt]: range.endExclusive },
+      },
+    }),
+  ]);
+  const totalReviews = toNumber(reviewTotals?.totalReviews);
+  const averageRating = round(reviewTotals?.averageRating, 1);
+  const unansweredReviews = toNumber(reviewTotals?.unansweredReviews);
 
   const metrics = {
-    views: sumBy(BUSINESS_PROFILE_METRIC_GROUPS.views),
-    calls: sumBy(BUSINESS_PROFILE_METRIC_GROUPS.calls),
-    directions: sumBy(BUSINESS_PROFILE_METRIC_GROUPS.directions),
-    websiteClicks: sumBy(BUSINESS_PROFILE_METRIC_GROUPS.websiteClicks),
+    views: sumDefinition(BUSINESS_PROFILE_LOCAL_METRIC_DEFINITIONS.profile_views),
+    calls: sumDefinition(BUSINESS_PROFILE_LOCAL_METRIC_DEFINITIONS.call_clicks),
+    directions: sumDefinition(BUSINESS_PROFILE_LOCAL_METRIC_DEFINITIONS.direction_clicks),
+    websiteClicks: sumDefinition(BUSINESS_PROFILE_LOCAL_METRIC_DEFINITIONS.website_clicks),
     newReviews,
     averageRating,
     totalReviews,
@@ -2237,6 +2245,19 @@ function buildRecommendations({ businessProfile, adsCampaigns, webPages, intakeC
 exports.getOverview = async (req, res) => {
   try {
     const scope = await resolveReportScope(req);
+    const userId = Number(req.userData?.userId || 0);
+    const allowed = scope.isAll
+      ? isGlobalAdmin(userId)
+      : await hasMarketingClinicScopeAccess({
+        userId,
+        clinicIds: scope.clinicIds || [],
+        access: 'read',
+      });
+    if (!allowed) {
+      const error = new Error('scope_forbidden');
+      error.status = 403;
+      throw error;
+    }
     const range = buildRange(req.query.startDate, req.query.endDate, 30);
     const marketingState = await resolveReportMarketingState(scope);
 
@@ -2450,6 +2471,7 @@ exports.__testing = {
   effectiveBusinessLocationIds,
   scopeWithEffectiveAssetOwners,
   buildHistoricalOrEffectiveWhere,
+  buildEffectiveSnapshotWhere,
   scopedRawOrEffectiveSql,
   buildSearchConsoleDataWhere,
   buildGoogleAdsDataWhere,

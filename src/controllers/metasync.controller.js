@@ -467,7 +467,17 @@ exports.getTokenValidationStats = async (req, res) => {
             include: [
                 {
                     model: MetaConnection,
-                    as: 'metaConnection'
+                    as: 'metaConnection',
+                    attributes: [
+                        'id',
+                        'userId',
+                        'metaUserId',
+                        'userName',
+                        'userEmail',
+                        'expiresAt',
+                        'createdAt',
+                        'updatedAt'
+                    ]
                 }
             ]
         });

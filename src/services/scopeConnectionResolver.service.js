@@ -75,18 +75,31 @@ function buildClinicScope(scope) {
   };
 }
 
+function buildGroupScope(scope) {
+  if (!scope?.groupId) return null;
+  return {
+    clinicId: null,
+    groupId: scope.groupId,
+    assignmentScope: 'group',
+    scopeId: scope.groupId,
+    scopeKey: buildScopeKey('group', scope.groupId)
+  };
+}
+
 function buildSharedConnectionScope(scope) {
   if (!scope) return null;
-  if (scope.groupId) {
-    return {
-      clinicId: null,
-      groupId: scope.groupId,
-      assignmentScope: 'group',
-      scopeId: scope.groupId,
-      scopeKey: buildScopeKey('group', scope.groupId)
-    };
-  }
-  return buildClinicScope(scope) || scope;
+  if (scope.assignmentScope === 'group') return buildGroupScope(scope) || scope;
+  if (scope.assignmentScope === 'clinic') return buildClinicScope(scope) || scope;
+  return buildClinicScope(scope) || buildGroupScope(scope) || scope;
+}
+
+function buildConnectionResolutionPlan(scope) {
+  if (!scope) return [];
+  const clinicScope = buildClinicScope(scope);
+  const groupScope = buildGroupScope(scope);
+  if (scope.assignmentScope === 'group') return groupScope ? [groupScope] : [];
+  if (scope.assignmentScope === 'clinic') return [clinicScope, groupScope].filter(Boolean);
+  return [clinicScope, groupScope].filter(Boolean);
 }
 
 function buildAuthorizedBy(connection, fallbackUserId = null) {
@@ -95,6 +108,20 @@ function buildAuthorizedBy(connection, fallbackUserId = null) {
     name: connection?.userName || null,
     email: connection?.userEmail || null
   };
+}
+
+async function findSingleUserConnection(Model, userId) {
+  const parsedUserId = parseInteger(userId);
+  if (!parsedUserId) return { connection: null, ambiguous: false };
+  const connections = await Model.findAll({
+    where: { userId: parsedUserId },
+    order: [['updatedAt', 'DESC'], ['id', 'DESC']],
+    limit: 2,
+  });
+  if (connections.length === 1) {
+    return { connection: connections[0], ambiguous: false };
+  }
+  return { connection: null, ambiguous: connections.length > 1 };
 }
 
 async function upsertMetaAssignment({ connection, scope, authorizedByUserId = null }) {
@@ -173,169 +200,250 @@ async function findGoogleAssignment(scope, statuses = ['active', 'reauthorizatio
   });
 }
 
+async function distinctConnectionIds(Model, field, where) {
+  const rows = await Model.findAll({
+    where,
+    attributes: [field],
+    group: [field],
+    limit: 2,
+    raw: true,
+  });
+  return Array.from(new Set(rows
+    .map((row) => Number.parseInt(String(row?.[field] ?? ''), 10))
+    .filter((id) => Number.isInteger(id) && id > 0)));
+}
+
+async function resolveSingleMappedConnection(Model, ids, source) {
+  if (ids.length > 1) {
+    return { connection: null, source: `${source}_ambiguous`, ambiguous: true };
+  }
+  if (ids.length !== 1) return { connection: null, source: null, ambiguous: false };
+  const connection = await Model.findByPk(ids[0]);
+  return { connection: connection || null, source: connection ? source : null, ambiguous: false };
+}
+
 async function findLegacyMetaConnectionFromMappings(scope) {
   if (scope?.clinicId) {
-    const clinicAsset = await ClinicMetaAsset.findOne({
-      where: { clinicaId: scope.clinicId, isActive: true },
-      order: [['updatedAt', 'DESC'], ['id', 'DESC']],
-      include: [{ model: MetaConnection, as: 'metaConnection' }]
-    });
-    if (clinicAsset?.metaConnection) {
-      return { connection: clinicAsset.metaConnection, source: 'legacy_mapping_clinic' };
-    }
+    const clinicConnectionIds = await distinctConnectionIds(
+      ClinicMetaAsset,
+      'metaConnectionId',
+      { clinicaId: scope.clinicId, isActive: true }
+    );
+    const clinicResult = await resolveSingleMappedConnection(
+      MetaConnection,
+      clinicConnectionIds,
+      'legacy_mapping_clinic'
+    );
+    if (clinicResult.connection || clinicResult.ambiguous) return clinicResult;
   }
 
   if (scope?.groupId) {
-    const groupAsset = await ClinicMetaAsset.findOne({
-      where: { grupoClinicaId: scope.groupId, assignmentScope: 'group', isActive: true },
-      order: [['updatedAt', 'DESC'], ['id', 'DESC']],
-      include: [{ model: MetaConnection, as: 'metaConnection' }]
-    });
-    if (groupAsset?.metaConnection) {
-      return { connection: groupAsset.metaConnection, source: 'legacy_mapping_group' };
-    }
+    const groupConnectionIds = await distinctConnectionIds(
+      ClinicMetaAsset,
+      'metaConnectionId',
+      {
+        grupoClinicaId: scope.groupId,
+        assignmentScope: 'group',
+        isActive: true,
+      }
+    );
+    const groupResult = await resolveSingleMappedConnection(
+      MetaConnection,
+      groupConnectionIds,
+      'legacy_mapping_group'
+    );
+    if (groupResult.connection || groupResult.ambiguous) return groupResult;
   }
 
-  return { connection: null, source: null };
+  return { connection: null, source: null, ambiguous: false };
+}
+
+async function googleClinicMappingConnectionIds(clinicId) {
+  const [ads, web, analytics, local] = await Promise.all([
+    distinctConnectionIds(ClinicGoogleAdsAccount, 'googleConnectionId', {
+      clinicaId: clinicId,
+      isActive: true,
+    }),
+    distinctConnectionIds(ClinicWebAsset, 'googleConnectionId', {
+      clinicaId: clinicId,
+      isActive: true,
+    }),
+    distinctConnectionIds(ClinicAnalyticsProperty, 'googleConnectionId', {
+      clinicaId: clinicId,
+      isActive: true,
+    }),
+    distinctConnectionIds(ClinicBusinessLocation, 'google_connection_id', {
+      clinica_id: clinicId,
+      is_active: true,
+    }),
+  ]);
+  return Array.from(new Set([...ads, ...web, ...analytics, ...local]));
 }
 
 async function findLegacyGoogleConnectionFromMappings(scope) {
-  const clinicId = scope?.clinicId || null;
-  if (!clinicId) {
-    return { connection: null, source: null };
+  if (scope?.clinicId) {
+    const clinicConnectionIds = await googleClinicMappingConnectionIds(scope.clinicId);
+    const clinicResult = await resolveSingleMappedConnection(
+      GoogleConnection,
+      clinicConnectionIds,
+      'legacy_mapping_google_clinic'
+    );
+    if (clinicResult.connection || clinicResult.ambiguous) return clinicResult;
   }
 
-  const searches = [
-    ClinicGoogleAdsAccount.findOne({
-      where: { clinicaId: clinicId, isActive: true },
-      order: [['updated_at', 'DESC'], ['id', 'DESC']],
-      include: [{ model: GoogleConnection, as: 'googleConnection' }]
-    }).then((row) => row?.googleConnection ? { connection: row.googleConnection, source: 'legacy_mapping_google_ads' } : null),
-    ClinicWebAsset.findOne({
-      where: { clinicaId: clinicId, isActive: true },
-      order: [['updated_at', 'DESC'], ['id', 'DESC']],
-      include: [{ model: GoogleConnection, as: 'connection' }]
-    }).then((row) => row?.connection ? { connection: row.connection, source: 'legacy_mapping_search_console' } : null),
-    ClinicAnalyticsProperty.findOne({
-      where: { clinicaId: clinicId, isActive: true },
-      order: [['updated_at', 'DESC'], ['id', 'DESC']],
-      include: [{ model: GoogleConnection, as: 'connection' }]
-    }).then((row) => row?.connection ? { connection: row.connection, source: 'legacy_mapping_analytics' } : null),
-    ClinicBusinessLocation.findOne({
-      where: { clinica_id: clinicId, is_active: true },
-      order: [['updated_at', 'DESC'], ['id', 'DESC']],
-      include: [{ model: GoogleConnection, as: 'googleConnection' }]
-    }).then((row) => row?.googleConnection ? { connection: row.googleConnection, source: 'legacy_mapping_local' } : null)
-  ];
+  if (scope?.groupId) {
+    const groupConnectionIds = await distinctConnectionIds(
+      ClinicGoogleAdsAccount,
+      'googleConnectionId',
+      {
+        grupoClinicaId: scope.groupId,
+        assignmentScope: 'group',
+        isActive: true,
+      }
+    );
+    const groupResult = await resolveSingleMappedConnection(
+      GoogleConnection,
+      groupConnectionIds,
+      'legacy_mapping_google_group'
+    );
+    if (groupResult.connection || groupResult.ambiguous) return groupResult;
+  }
 
-  const resolved = await Promise.all(searches);
-  return resolved.find(Boolean) || { connection: null, source: null };
+  return { connection: null, source: null, ambiguous: false };
 }
 
-async function resolveMetaConnectionForScope({ userId = null, clinicIdRaw = null, groupIdRaw = null, assignmentScopeRaw = null, allowLegacyUserFallback = true }) {
+async function resolveMetaConnectionForScope({
+  userId = null,
+  clinicIdRaw = null,
+  groupIdRaw = null,
+  assignmentScopeRaw = null,
+  allowLegacyUserFallback = true,
+}) {
   const scope = await normalizeScope({ clinicIdRaw, groupIdRaw, assignmentScopeRaw });
 
-  const clinicScope = buildClinicScope(scope);
-  const sharedScope = buildSharedConnectionScope(scope);
-
-  if (sharedScope?.assignmentScope === 'group') {
-    const groupAssignment = await findMetaAssignment(sharedScope);
-    if (groupAssignment?.metaConnection) {
-      return { connection: groupAssignment.metaConnection, assignment: groupAssignment, scope: sharedScope, source: 'scope_assignment_group' };
+  const requestedScope = buildSharedConnectionScope(scope) || scope;
+  for (const candidateScope of buildConnectionResolutionPlan(scope)) {
+    const assignment = await findMetaAssignment(candidateScope);
+    if (assignment?.metaConnection) {
+      const suffix = candidateScope.assignmentScope === requestedScope.assignmentScope
+        ? candidateScope.assignmentScope
+        : `${candidateScope.assignmentScope}_fallback`;
+      return {
+        connection: assignment.metaConnection,
+        assignment,
+        scope: requestedScope,
+        source: `scope_assignment_${suffix}`
+      };
     }
 
-    const blockedGroupAssignment = await findMetaAssignment(sharedScope, ['disconnected', 'revoked']);
-    if (blockedGroupAssignment) {
-      return { connection: null, assignment: blockedGroupAssignment, scope: sharedScope, source: 'scope_assignment_group_blocked' };
-    }
-
-    if (clinicScope) {
-      const clinicAssignment = await findMetaAssignment(clinicScope);
-      if (clinicAssignment?.metaConnection) {
-        const assignment = await upsertMetaAssignment({ connection: clinicAssignment.metaConnection, scope: sharedScope, authorizedByUserId: userId });
-        return { connection: clinicAssignment.metaConnection, assignment, scope: sharedScope, source: 'promoted_clinic_assignment_group' };
-      }
-    }
-  } else if (clinicScope) {
-    const clinicAssignment = await findMetaAssignment(clinicScope);
-    if (clinicAssignment?.metaConnection) {
-      return { connection: clinicAssignment.metaConnection, assignment: clinicAssignment, scope: clinicScope, source: 'scope_assignment_clinic' };
-    }
-
-    const blockedClinicAssignment = await findMetaAssignment(clinicScope, ['disconnected', 'revoked']);
-    if (blockedClinicAssignment) {
-      return { connection: null, assignment: blockedClinicAssignment, scope: clinicScope, source: 'scope_assignment_clinic_blocked' };
+    const blockedAssignment = await findMetaAssignment(candidateScope, ['disconnected', 'revoked']);
+    if (blockedAssignment) {
+      return {
+        connection: null,
+        assignment: blockedAssignment,
+        scope: requestedScope,
+        source: `scope_assignment_${candidateScope.assignmentScope}_blocked`
+      };
     }
   }
 
-  const legacy = await findLegacyMetaConnectionFromMappings(scope);
+  const legacy = await findLegacyMetaConnectionFromMappings(requestedScope);
   if (legacy.connection) {
-    const targetScope = sharedScope || clinicScope || scope;
-    const assignment = await upsertMetaAssignment({ connection: legacy.connection, scope: targetScope, authorizedByUserId: userId });
-    return { connection: legacy.connection, assignment, scope: targetScope, source: legacy.source };
+    const targetScope = requestedScope;
+    return { connection: legacy.connection, assignment: null, scope: targetScope, source: legacy.source };
+  }
+  if (legacy.ambiguous) {
+    return {
+      connection: null,
+      assignment: null,
+      scope: requestedScope,
+      source: legacy.source
+    };
   }
 
   if (allowLegacyUserFallback && userId) {
-    const connection = await MetaConnection.findOne({ where: { userId } });
+    const { connection, ambiguous } = await findSingleUserConnection(MetaConnection, userId);
     if (connection) {
-      return { connection, assignment: null, scope: sharedScope || clinicScope || scope, source: 'legacy_user' };
+      return { connection, assignment: null, scope: requestedScope, source: 'legacy_user' };
+    }
+    if (ambiguous) {
+      return {
+        connection: null,
+        assignment: null,
+        scope: requestedScope,
+        source: 'legacy_user_ambiguous'
+      };
     }
   }
 
-  return { connection: null, assignment: null, scope: sharedScope || clinicScope || scope, source: 'none' };
+  return { connection: null, assignment: null, scope: requestedScope, source: 'none' };
 }
 
-async function resolveGoogleConnectionForScope({ userId = null, clinicIdRaw = null, groupIdRaw = null, assignmentScopeRaw = null, allowLegacyUserFallback = true }) {
+async function resolveGoogleConnectionForScope({
+  userId = null,
+  clinicIdRaw = null,
+  groupIdRaw = null,
+  assignmentScopeRaw = null,
+  allowLegacyUserFallback = true,
+}) {
   const scope = await normalizeScope({ clinicIdRaw, groupIdRaw, assignmentScopeRaw });
 
-  const clinicScope = buildClinicScope(scope);
-  const sharedScope = buildSharedConnectionScope(scope);
-
-  if (sharedScope?.assignmentScope === 'group') {
-    const groupAssignment = await findGoogleAssignment(sharedScope);
-    if (groupAssignment?.googleConnection) {
-      return { connection: groupAssignment.googleConnection, assignment: groupAssignment, scope: sharedScope, source: 'scope_assignment_group' };
+  const requestedScope = buildSharedConnectionScope(scope) || scope;
+  for (const candidateScope of buildConnectionResolutionPlan(scope)) {
+    const assignment = await findGoogleAssignment(candidateScope);
+    if (assignment?.googleConnection) {
+      const suffix = candidateScope.assignmentScope === requestedScope.assignmentScope
+        ? candidateScope.assignmentScope
+        : `${candidateScope.assignmentScope}_fallback`;
+      return {
+        connection: assignment.googleConnection,
+        assignment,
+        scope: requestedScope,
+        source: `scope_assignment_${suffix}`
+      };
     }
 
-    const blockedGroupAssignment = await findGoogleAssignment(sharedScope, ['disconnected', 'revoked']);
-    if (blockedGroupAssignment) {
-      return { connection: null, assignment: blockedGroupAssignment, scope: sharedScope, source: 'scope_assignment_group_blocked' };
-    }
-
-    if (clinicScope) {
-      const clinicAssignment = await findGoogleAssignment(clinicScope);
-      if (clinicAssignment?.googleConnection) {
-        const assignment = await upsertGoogleAssignment({ connection: clinicAssignment.googleConnection, scope: sharedScope, authorizedByUserId: userId });
-        return { connection: clinicAssignment.googleConnection, assignment, scope: sharedScope, source: 'promoted_clinic_assignment_group' };
-      }
-    }
-  } else if (clinicScope) {
-    const clinicAssignment = await findGoogleAssignment(clinicScope);
-    if (clinicAssignment?.googleConnection) {
-      return { connection: clinicAssignment.googleConnection, assignment: clinicAssignment, scope: clinicScope, source: 'scope_assignment_clinic' };
-    }
-
-    const blockedClinicAssignment = await findGoogleAssignment(clinicScope, ['disconnected', 'revoked']);
-    if (blockedClinicAssignment) {
-      return { connection: null, assignment: blockedClinicAssignment, scope: clinicScope, source: 'scope_assignment_clinic_blocked' };
+    const blockedAssignment = await findGoogleAssignment(candidateScope, ['disconnected', 'revoked']);
+    if (blockedAssignment) {
+      return {
+        connection: null,
+        assignment: blockedAssignment,
+        scope: requestedScope,
+        source: `scope_assignment_${candidateScope.assignmentScope}_blocked`
+      };
     }
   }
 
-  const legacy = await findLegacyGoogleConnectionFromMappings(scope);
+  const legacy = await findLegacyGoogleConnectionFromMappings(requestedScope);
   if (legacy.connection) {
-    const targetScope = sharedScope || clinicScope || scope;
-    const assignment = await upsertGoogleAssignment({ connection: legacy.connection, scope: targetScope, authorizedByUserId: userId });
-    return { connection: legacy.connection, assignment, scope: targetScope, source: legacy.source };
+    const targetScope = requestedScope;
+    return { connection: legacy.connection, assignment: null, scope: targetScope, source: legacy.source };
+  }
+  if (legacy.ambiguous) {
+    return {
+      connection: null,
+      assignment: null,
+      scope: requestedScope,
+      source: legacy.source
+    };
   }
 
   if (allowLegacyUserFallback && userId) {
-    const connection = await GoogleConnection.findOne({ where: { userId } });
+    const { connection, ambiguous } = await findSingleUserConnection(GoogleConnection, userId);
     if (connection) {
-      return { connection, assignment: null, scope: sharedScope || clinicScope || scope, source: 'legacy_user' };
+      return { connection, assignment: null, scope: requestedScope, source: 'legacy_user' };
+    }
+    if (ambiguous) {
+      return {
+        connection: null,
+        assignment: null,
+        scope: requestedScope,
+        source: 'legacy_user_ambiguous'
+      };
     }
   }
 
-  return { connection: null, assignment: null, scope: sharedScope || clinicScope || scope, source: 'none' };
+  return { connection: null, assignment: null, scope: requestedScope, source: 'none' };
 }
 
 module.exports = {
@@ -343,8 +451,11 @@ module.exports = {
   buildScopeKey,
   normalizeScope,
   buildClinicScope,
+  buildGroupScope,
   buildSharedConnectionScope,
+  buildConnectionResolutionPlan,
   buildAuthorizedBy,
+  findSingleUserConnection,
   upsertMetaAssignment,
   upsertGoogleAssignment,
   resolveMetaConnectionForScope,

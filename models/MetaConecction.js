@@ -11,7 +11,6 @@ module.exports = (sequelize, DataTypes) => { // <-- Recibe sequelize y DataTypes
         userId: { 
             type: DataTypes.INTEGER,
             allowNull: true,
-            unique: true,
             references: {
                 model: 'Usuarios', // Nombre de la tabla, no el modelo
                 key: 'id_usuario', 
@@ -22,7 +21,6 @@ module.exports = (sequelize, DataTypes) => { // <-- Recibe sequelize y DataTypes
         metaUserId: { 
             type: DataTypes.STRING,
             allowNull: false,
-            unique: true,
         },
         accessToken: { 
             type: DataTypes.STRING(512), 
@@ -43,6 +41,15 @@ module.exports = (sequelize, DataTypes) => { // <-- Recibe sequelize y DataTypes
     }, {
         tableName: 'MetaConnections',
         timestamps: true,
+        indexes: [
+            { name: 'idx_meta_connections_user_id', fields: ['userId'] },
+            { name: 'idx_meta_connections_provider_id', fields: ['metaUserId'] },
+            {
+                name: 'uniq_meta_connections_user_provider',
+                unique: true,
+                fields: ['userId', 'metaUserId']
+            }
+        ],
     });
 
     // Definir asociaciones

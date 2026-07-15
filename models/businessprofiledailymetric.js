@@ -6,7 +6,7 @@ module.exports = (sequelize, DataTypes) => {
     clinica_id: { type: DataTypes.INTEGER, allowNull: false },
     business_location_id: { type: DataTypes.INTEGER, allowNull: false },
     metric_type: { type: DataTypes.STRING(64), allowNull: false },
-    metric_subtype: { type: DataTypes.STRING(64), allowNull: true },
+    metric_subtype: { type: DataTypes.STRING(64), allowNull: false, defaultValue: '' },
     date: { type: DataTypes.DATEONLY, allowNull: false },
     value: { type: DataTypes.INTEGER, allowNull: false, defaultValue: 0 }
   }, {

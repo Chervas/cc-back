@@ -1,8 +1,8 @@
 // backendclinicaclick/src/routes/oauth.routes.js
 const express = require('express');
 const axios = require('axios');
-const jwt = require('jsonwebtoken');  // Para decodificar el token JWT
 const router = express.Router();
+const authMiddleware = require('./auth.middleware');
 const { Op } = require('sequelize');
 const db = require('../../models'); // <-- Importa el objeto db de models/index.js
 const MetaConnection = db.MetaConnection; // <-- Accede al modelo MetaConnection
@@ -19,8 +19,6 @@ const GroupAssetClinicAssignment = db.GroupAssetClinicAssignment;
 const SocialStatsDaily = db.SocialStatsDaily;
 const SocialPosts = db.SocialPosts;
 const SocialPostStatsDaily = db.SocialPostStatsDaily;
-const SocialAdsInsightsDaily = db.SocialAdsInsightsDaily;
-const SocialAdsActionsDaily = db.SocialAdsActionsDaily;
 const GrupoClinica = db.GrupoClinica;
 const {
     googleAdsRequest,
@@ -30,23 +28,59 @@ const {
     getGoogleAdsUsageStatus,
     resumeGoogleAdsUsage
 } = require('../lib/googleAdsClient');
-const { metaSyncJobs } = require('../jobs/sync.jobs');
-const { triggerHistoricalSync } = require('../controllers/metasync.controller');
 const jobRequestsService = require('../services/jobRequests.service');
 const jobScheduler = require('../services/jobScheduler.service');
 const {
-    buildScopeKey,
+    consumeOAuthState,
+    issueOAuthState
+} = require('../services/oauthState.service');
+const {
     normalizeScope,
     buildSharedConnectionScope,
+    findSingleUserConnection,
     upsertMetaAssignment,
     upsertGoogleAssignment,
     resolveMetaConnectionForScope,
     resolveGoogleConnectionForScope
 } = require('../services/scopeConnectionResolver.service');
+const {
+    getAccessibleMarketingClinicIds,
+    hasMarketingClinicScopeAccess
+} = require('../lib/marketingScopeAccess');
+const {
+    accessibleProviderLocationsById,
+    assertBusinessProfileConnectionCoherence,
+    mergeBusinessProfileRawPayload,
+    movedOriginClinicIds,
+    normalizeBusinessProfileVerification,
+    normalizeBusinessProfileLocationMappings,
+    resolveAuthorizedDestinationGoogleConnection
+} = require('../lib/businessProfileLocationMapping');
+const {
+    authorizeRequestedMarketingConnectionScope,
+    marketingScopeInputFromRequest
+} = require('../lib/oauthMarketingScopeAccess');
+const {
+    selectAuthorizedMetaAssets,
+    withoutMetaAccessToken
+} = require('../lib/metaAssetAuthorization');
+const {
+    assertSharedMarketingAssetMutationAccess
+} = require('../lib/sharedMarketingAssetMutationAccess');
+const { normalizeOAuthReturnTo } = require('../lib/oauthRedirect');
+const { evaluateMetaConnectionHealth } = require('../lib/oauthConnectionHealth');
+const {
+    persistGoogleConnection,
+    persistMetaConnection
+} = require('../services/oauthConnectionPersistence.service');
+const {
+    deactivateGoogleMappingsForScope,
+    deactivateMetaMappingsForScope
+} = require('../services/oauthScopedDisconnect.service');
 
 // Configuración de la App de Meta
 const META_APP_ID = '1807844546609897'; // <-- App ID correcto
-const META_APP_SECRET = 'bfcfedd6447dce4c3eb280067300e141'; // <-- App Secret correcto
+const META_APP_SECRET = process.env.META_APP_SECRET || '';
 const REDIRECT_URI = 'https://autenticacion.clinicaclick.com/oauth/meta/callback';
 const FRONTEND_URL = 'https://app.clinicaclick.com';
 const FRONTEND_DEV_URL = 'http://localhost:4200'; // Para desarrollo local
@@ -85,6 +119,7 @@ const GOOGLE_BUSINESS_LOCATION_READ_MASK = [
     'phoneNumbers',
     'categories',
     'storefrontAddress',
+    'latlng',
     'websiteUri',
     'metadata',
     'openInfo',
@@ -92,6 +127,7 @@ const GOOGLE_BUSINESS_LOCATION_READ_MASK = [
     'specialHours',
     'moreHours',
     'serviceArea',
+    'serviceItems',
     'labels'
 ].join(',');
 
@@ -170,63 +206,10 @@ async function subscribeLeadgenToPage(pageId, pageAccessToken) {
 const GOOGLE_ADS_SCOPE = 'https://www.googleapis.com/auth/adwords';
 
 function normalizeFrontendReturnTo(candidate) {
-    try {
-        if (!candidate) return FRONTEND_URL;
-        const parsed = new URL(String(candidate));
-        return ALLOWED_FRONTEND_ORIGINS.has(parsed.origin) ? parsed.toString() : FRONTEND_URL;
-    } catch (error) {
-        return FRONTEND_URL;
-    }
-}
-
-function parseOAuthState(rawState) {
-    const fallback = {
-        userId: String(rawState || '').trim(),
-        returnTo: FRONTEND_URL,
-        clinicId: null,
-        groupId: null,
-        assignmentScope: null
-    };
-    if (!rawState) {
-        return fallback;
-    }
-
-    const asString = String(rawState);
-    const tryParse = (value) => {
-        try {
-            const parsed = JSON.parse(value);
-            if (parsed && typeof parsed === 'object') {
-                const userId = String(parsed.userId || parsed.u || '').trim();
-                return {
-                    userId: userId || fallback.userId,
-                    returnTo: normalizeFrontendReturnTo(parsed.returnTo || parsed.r || null),
-                    clinicId: parsed.clinicId || parsed.clinic_id || parsed.c || null,
-                    groupId: parsed.groupId || parsed.group_id || parsed.g || null,
-                    assignmentScope: parsed.assignmentScope || parsed.assignment_scope || parsed.s || null
-                };
-            }
-        } catch (error) {
-            return null;
-        }
-        return null;
-    };
-
-    const direct = tryParse(asString);
-    if (direct) {
-        return direct;
-    }
-
-    try {
-        const decoded = Buffer.from(asString, 'base64url').toString('utf8');
-        const parsed = tryParse(decoded);
-        if (parsed) {
-            return parsed;
-        }
-    } catch (error) {
-        // noop
-    }
-
-    return fallback;
+    return normalizeOAuthReturnTo(candidate, {
+        allowedOrigins: ALLOWED_FRONTEND_ORIGINS,
+        fallback: FRONTEND_URL
+    });
 }
 
 function buildFrontendSettingsRedirect(origin, query) {
@@ -251,11 +234,7 @@ function buildFrontendSettingsRedirect(origin, query) {
 }
 
 function getScopeInputFromRequest(req) {
-    return {
-        clinicIdRaw: req.query?.clinic_id ?? req.body?.clinic_id ?? req.body?.clinicId ?? null,
-        groupIdRaw: req.query?.group_id ?? req.body?.group_id ?? req.body?.groupId ?? null,
-        assignmentScopeRaw: req.query?.assignment_scope ?? req.body?.assignment_scope ?? req.body?.assignmentScope ?? null
-    };
+    return marketingScopeInputFromRequest(req);
 }
 
 function hasRequestedScope(req) {
@@ -284,21 +263,27 @@ function buildScopeResponse(scope, assignment) {
     };
 }
 
-async function resolveGoogleRequestConnection(req, { allowLegacyUserFallback = true } = {}) {
+async function resolveGoogleRequestConnection(req, {
+    allowLegacyUserFallback = true,
+    scopeInput = null
+} = {}) {
     const userId = getUserIdFromToken(req);
     const resolved = await resolveGoogleConnectionForScope({
         userId,
-        ...getScopeInputFromRequest(req),
+        ...(scopeInput || getScopeInputFromRequest(req)),
         allowLegacyUserFallback
     });
     return { userId, ...resolved };
 }
 
-async function resolveMetaRequestConnection(req, { allowLegacyUserFallback = true } = {}) {
+async function resolveMetaRequestConnection(req, {
+    allowLegacyUserFallback = true,
+    scopeInput = null
+} = {}) {
     const userId = getUserIdFromToken(req);
     const resolved = await resolveMetaConnectionForScope({
         userId,
-        ...getScopeInputFromRequest(req),
+        ...(scopeInput || getScopeInputFromRequest(req)),
         allowLegacyUserFallback
     });
     return { userId, ...resolved };
@@ -324,6 +309,7 @@ async function ensureGoogleAccessToken(conn, { allowExpired = false } = {}) {
     const threshold = now + 60_000;
 
     const shouldRefresh = conn.refreshToken && (!expiresAt || expiresAt.getTime() <= threshold);
+    let refreshError = null;
     if (shouldRefresh) {
         try {
             const tr = await axios.post('https://oauth2.googleapis.com/token', new URLSearchParams({
@@ -340,10 +326,21 @@ async function ensureGoogleAccessToken(conn, { allowExpired = false } = {}) {
                 await conn.update({ accessToken, expiresAt });
             }
         } catch (refreshErr) {
+            refreshError = refreshErr;
             if (!allowExpired) {
                 throw googleTokenError('REFRESH_FAILED', refreshErr.response?.data?.error_description || refreshErr.message || 'No se pudo refrescar el token');
             }
         }
+    }
+
+    if (!expiresAt) {
+        if (refreshError) {
+            throw googleTokenError(
+                'REFRESH_FAILED',
+                refreshError.response?.data?.error_description || refreshError.message || 'No se pudo refrescar el token'
+            );
+        }
+        throw googleTokenError('TOKEN_EXPIRY_UNKNOWN', 'La conexión Google no tiene una expiración verificable');
     }
 
     const isExpired = expiresAt ? expiresAt.getTime() <= now : false;
@@ -539,6 +536,199 @@ async function fetchAllGoogleBusinessLocations(accessToken, accountName) {
     return locations;
 }
 
+async function fetchAccessibleGoogleBusinessLocations(connection) {
+    const { accessToken } = await ensureGoogleAccessToken(connection);
+    const accounts = await fetchAllGoogleBusinessAccounts(accessToken);
+    const locations = [];
+    for (const account of accounts) {
+        const accountLocations = await fetchAllGoogleBusinessLocations(accessToken, account.name);
+        locations.push(...accountLocations
+            .map((location) => normalizeBusinessLocation(location, account))
+            .filter(Boolean));
+    }
+    return locations;
+}
+
+function inaccessibleAssetError(code, message) {
+    const error = new Error(message);
+    error.code = code;
+    error.httpStatus = 400;
+    return error;
+}
+
+async function loadAuthorizedSearchConsoleSites(connection) {
+    const { accessToken } = await ensureGoogleAccessToken(connection);
+    const response = await axios.get('https://www.googleapis.com/webmasters/v3/sites', {
+        headers: { Authorization: `Bearer ${accessToken}` }
+    });
+    return new Map((response.data?.siteEntry || [])
+        .filter((site) => String(site?.siteUrl || '').trim())
+        .map((site) => {
+            const siteUrl = String(site.siteUrl).trim();
+            return [siteUrl, {
+                siteUrl,
+                permissionLevel: site.permissionLevel || null,
+                propertyType: siteUrl.startsWith('sc-domain:') ? 'sc-domain' : 'url-prefix'
+            }];
+        }));
+}
+
+async function loadAuthorizedAnalyticsProperties(connection) {
+    const { accessToken } = await ensureGoogleAccessToken(connection);
+    const properties = new Map();
+    let pageToken = null;
+    do {
+        const response = await axios.get('https://analyticsadmin.googleapis.com/v1beta/accountSummaries', {
+            params: { pageSize: 200, pageToken: pageToken || undefined },
+            headers: { Authorization: `Bearer ${accessToken}` }
+        });
+        for (const account of response.data?.accountSummaries || []) {
+            for (const property of account.propertySummaries || []) {
+                const propertyName = String(property?.property || '').trim();
+                if (!propertyName) continue;
+                properties.set(propertyName, {
+                    propertyName,
+                    propertyDisplayName: property.displayName || null,
+                    propertyType: property.propertyType || null,
+                    parent: property.parent || account.name || null,
+                    measurementId: null
+                });
+            }
+        }
+        pageToken = response.data?.nextPageToken || null;
+    } while (pageToken);
+    return properties;
+}
+
+async function loadAuthorizedGoogleAdsAccounts(connection) {
+    const { accessToken } = await ensureGoogleAdsAccess(connection);
+    const queue = (await listAccessibleAdsCustomers(accessToken)).map((customerId) => ({ customerId, parentId: null }));
+    const seen = new Set();
+    const accounts = new Map();
+    while (queue.length) {
+        const { customerId, parentId } = queue.shift();
+        const cleanId = normalizeCustomerId(customerId);
+        if (!cleanId || seen.has(cleanId)) continue;
+        seen.add(cleanId);
+        let summary = null;
+        try {
+            summary = await fetchAdsCustomerSummary(accessToken, cleanId, { loginCustomerId: parentId || undefined });
+        } catch (_) {
+            continue;
+        }
+        const link = await fetchManagerLinkForCustomer(
+            accessToken,
+            cleanId,
+            getGoogleManagerId(),
+            { loginCustomerId: parentId || undefined }
+        ).catch(() => null);
+        const mainManagerId = normalizeCustomerId(getGoogleManagerId());
+        accounts.set(cleanId, {
+            customerId: cleanId,
+            descriptiveName: summary?.descriptiveName || null,
+            currencyCode: summary?.currencyCode || null,
+            timeZone: summary?.timeZone || null,
+            accountStatus: summary?.accountStatus || null,
+            managerCustomerId: link?.managerCustomerId || null,
+            loginCustomerId: link?.status === 'ACTIVE' ? mainManagerId : (parentId || null),
+            managerLinkId: link?.managerLinkId || null,
+            managerLinkStatus: link?.status || null,
+            invitationStatus: link?.status === 'PENDING' ? 'PENDING' : null,
+            linkedAt: link?.status === 'ACTIVE' ? new Date() : null
+        });
+        if (summary?.isManager) {
+            const children = await fetchAdsCustomerClients(accessToken, cleanId).catch(() => []);
+            for (const child of children) queue.push({ customerId: child.customerId, parentId: cleanId });
+        }
+    }
+    return accounts;
+}
+
+async function fetchAllMetaPaginatedData(initialUrl, accessToken) {
+    const allData = [];
+    let nextUrl = initialUrl;
+    let pageCount = 0;
+    while (nextUrl && pageCount < 50) {
+        pageCount += 1;
+        const parsedNextUrl = new URL(String(nextUrl), META_API_BASE_URL);
+        const allowedOrigin = new URL(META_API_BASE_URL).origin;
+        if (parsedNextUrl.protocol !== 'https:' || parsedNextUrl.origin !== allowedOrigin) {
+            throw inaccessibleAssetError(
+                'meta_pagination_url_invalid',
+                'Meta devolvió una URL de paginación fuera del dominio autorizado.'
+            );
+        }
+        const response = await axios.get(parsedNextUrl.toString(), {
+            headers: { Authorization: `Bearer ${accessToken}` }
+        });
+        if (Array.isArray(response.data?.data)) allData.push(...response.data.data);
+        nextUrl = response.data?.paging?.next || null;
+    }
+    if (nextUrl) throw new Error('Meta devolvió más páginas de activos de las permitidas.');
+    return allData;
+}
+
+async function loadAuthorizedMetaAssets(metaConnection) {
+    const pagesUrl = `${META_API_BASE_URL}/me/accounts?fields=id,name,picture.width(200).height(200),access_token,category,verification_status,followers_count,instagram_business_account{id,name,username,profile_picture_url,followers_count,media_count,biography}`;
+    const adsUrl = `${META_API_BASE_URL}/me/adaccounts?fields=id,name,account_status,currency,timezone_name,business_name`;
+    const [pages, adAccounts] = await Promise.all([
+        fetchAllMetaPaginatedData(pagesUrl, metaConnection.accessToken),
+        fetchAllMetaPaginatedData(adsUrl, metaConnection.accessToken)
+    ]);
+
+    const facebookPages = pages.map((page) => ({
+        id: String(page.id),
+        name: page.name || null,
+        type: 'facebook_page',
+        assetAvatarUrl: page.picture?.data?.url || null,
+        pageAccessToken: page.access_token || null,
+        additionalData: {
+            category: page.category || null,
+            verification_status: page.verification_status || null,
+            followers_count: page.followers_count || 0
+        }
+    }));
+    const instagramBusinessAccounts = pages
+        .filter((page) => page.instagram_business_account?.id)
+        .map((page) => {
+            const account = page.instagram_business_account;
+            return {
+                id: String(account.id),
+                name: account.name || account.username || null,
+                username: account.username || null,
+                type: 'instagram_business',
+                assetAvatarUrl: account.profile_picture_url || null,
+                linked_facebook_page: String(page.id),
+                pageAccessToken: null,
+                additionalData: {
+                    followers_count: account.followers_count || 0,
+                    media_count: account.media_count || 0,
+                    biography: account.biography || null,
+                    username: account.username || null
+                }
+            };
+        });
+    const ads = adAccounts.map((account) => ({
+        id: String(account.id),
+        name: account.name || null,
+        type: 'ad_account',
+        assetAvatarUrl: null,
+        pageAccessToken: null,
+        additionalData: {
+            account_status: account.account_status || null,
+            currency: account.currency || null,
+            timezone_name: account.timezone_name || null,
+            business_name: account.business_name || null
+        }
+    }));
+    return {
+        facebook_pages: facebookPages,
+        instagram_business: instagramBusinessAccounts,
+        ad_accounts: ads,
+        all: [...facebookPages, ...instagramBusinessAccounts, ...ads]
+    };
+}
+
 function normalizeBusinessLocation(location, account) {
     if (!location) {
         return null;
@@ -553,9 +743,10 @@ function normalizeBusinessLocation(location, account) {
         || location.categories?.primaryCategory?.displayName
         || location.categories?.primaryCategory?.name
         || null;
-    const verificationStatus = location.metadata?.verificationState || location.metadata?.verificationStatus || null;
+    const verification = normalizeBusinessProfileVerification(location.metadata);
+    const verificationStatus = verification.verificationStatus;
     const suspended = Array.isArray(location.metadata?.suspensionReasons) && location.metadata.suspensionReasons.length > 0;
-    const verified = verificationStatus ? verificationStatus.toUpperCase() === 'VERIFIED' : !!location.metadata?.hasBusinessAuthority;
+    const verified = verification.isVerified;
     const address = location.address || location.storefrontAddress || null;
     const locality = address?.locality || address?.localityName || null;
     const region = address?.administrativeArea || null;
@@ -588,6 +779,195 @@ function normalizeBusinessLocation(location, account) {
     };
 }
 
+async function authorizeExplicitConnectionScope(req, access = 'read') {
+    const userId = getUserIdFromToken(req);
+    if (!userId) {
+        const error = new Error('Usuario no autenticado');
+        error.code = 'unauthenticated';
+        error.httpStatus = 401;
+        throw error;
+    }
+    const scopeInput = getScopeInputFromRequest(req);
+    return authorizeRequestedMarketingConnectionScope({
+        userId,
+        ...scopeInput,
+        access,
+        findClinicGroupId: async (clinicId) => {
+            const clinic = await Clinica.findByPk(clinicId, {
+                attributes: ['grupoClinicaId'],
+                raw: true
+            });
+            return clinic?.grupoClinicaId || null;
+        },
+        findGroupClinicIds: getClinicIdsForGroup,
+        authorizeClinicIds: hasMarketingClinicScopeAccess
+    });
+}
+
+async function authorizeStoredOAuthState(oauthState) {
+    return authorizeRequestedMarketingConnectionScope({
+        userId: oauthState.userId,
+        clinicIdRaw: oauthState.clinicId,
+        groupIdRaw: oauthState.groupId,
+        assignmentScopeRaw: oauthState.assignmentScope,
+        access: 'write',
+        findClinicGroupId: async (clinicId) => {
+            const clinic = await Clinica.findByPk(clinicId, {
+                attributes: ['grupoClinicaId'],
+                raw: true
+            });
+            return clinic?.grupoClinicaId || null;
+        },
+        findGroupClinicIds: getClinicIdsForGroup,
+        authorizeClinicIds: hasMarketingClinicScopeAccess
+    });
+}
+
+function clinicIdsFromAssetMappings(mappings) {
+    return Array.from(new Set((Array.isArray(mappings) ? mappings : [])
+        .map((mapping) => Number.parseInt(String(mapping?.clinicaId ?? ''), 10))
+        .filter((clinicId) => Number.isInteger(clinicId) && clinicId > 0)));
+}
+
+async function requireAssetMappingClinicAccess(res, userId, mappings, access = 'write') {
+    const clinicIds = clinicIdsFromAssetMappings(mappings);
+    if (!clinicIds.length) {
+        res.status(400).json({
+            success: false,
+            error: 'asset_mapping_clinic_required',
+            message: 'Debes indicar al menos una clínica válida.'
+        });
+        return null;
+    }
+    const allowed = await hasMarketingClinicScopeAccess({ userId, clinicIds, access });
+    if (!allowed) {
+        res.status(403).json({
+            success: false,
+            error: access === 'write' ? 'asset_mapping_scope_write_forbidden' : 'asset_mapping_scope_forbidden',
+            message: 'No tienes permisos sobre todas las clínicas solicitadas.'
+        });
+        return null;
+    }
+    return clinicIds;
+}
+
+async function filterReadableClinicMappings(req, userId, rows, clinicIdOf) {
+    const candidates = Array.from(new Set((Array.isArray(rows) ? rows : [])
+        .map((row) => Number.parseInt(String(clinicIdOf(row) ?? ''), 10))
+        .filter((clinicId) => Number.isInteger(clinicId) && clinicId > 0)));
+    if (!candidates.length) return [];
+
+    const explicitScopeClinicIds = req.marketingConnectionScopeAuthorization?.requested
+        ? req.marketingConnectionScopeAuthorization.clinicIds
+        : null;
+    const allowedClinicIds = explicitScopeClinicIds || await getAccessibleMarketingClinicIds({
+        userId,
+        clinicIds: candidates,
+        access: 'read'
+    });
+    const allowed = new Set(allowedClinicIds.map(Number));
+    return rows.filter((row) => allowed.has(Number(clinicIdOf(row))));
+}
+
+async function requireSingleMappingClinicWrite(res, userId, clinicId) {
+    const allowed = await hasMarketingClinicScopeAccess({
+        userId,
+        clinicIds: [clinicId],
+        access: 'write'
+    });
+    if (!allowed) {
+        res.status(403).json({
+            success: false,
+            error: 'asset_mapping_scope_write_forbidden',
+            message: 'No tienes permisos para eliminar este mapeo.'
+        });
+        return false;
+    }
+    return true;
+}
+
+function sendKnownOAuthMappingError(res, error) {
+    const status = Number(error?.httpStatus || 0);
+    if (![400, 403, 404, 409].includes(status)) return false;
+    res.status(status).json({
+        success: false,
+        error: error?.code || 'asset_mapping_failed',
+        message: error?.message || 'No se pudo completar el mapeo.'
+    });
+    return true;
+}
+
+const PROVIDER_INVENTORY_PATHS = new Set([
+    '/google/assets',
+    '/google/analytics/properties',
+    '/google/local/locations',
+    '/google/ads/accounts',
+    '/meta/assets'
+]);
+const EXPLICIT_SCOPE_REQUIRED_PATHS = new Set([
+    ...PROVIDER_INVENTORY_PATHS,
+    '/google/connect',
+    '/meta/connect',
+    '/google/ads/request-link',
+    '/google/ads/accept-link'
+]);
+const PUBLIC_OAUTH_PATHS = new Set([
+    '/google/callback',
+    '/meta/callback',
+    '/test'
+]);
+
+// Los callbacks se autentican con state opaco de un solo uso. El resto de la
+// superficie usa el middleware JWT canónico, incluido el bloqueo de usuarios
+// revocados, antes de consultar grants o mappings centrales.
+router.use((req, res, next) => {
+    const normalizedPath = req.path.replace(/\/+$/, '') || '/';
+    if (PUBLIC_OAUTH_PATHS.has(normalizedPath)) return next();
+    return authMiddleware(req, res, next);
+});
+
+// Toda lectura o mutación scope-aware pasa por este guard antes de que los
+// resolvers puedan consultar, promover o crear assignments de conexión.
+router.use(async (req, res, next) => {
+    if (!req.path.startsWith('/google/') && !req.path.startsWith('/meta/')) {
+        return next();
+    }
+    const normalizedPath = req.path.replace(/\/+$/, '') || '/';
+    const providerInventory = PROVIDER_INVENTORY_PATHS.has(normalizedPath);
+    const explicitScopeRequired = EXPLICIT_SCOPE_REQUIRED_PATHS.has(normalizedPath);
+    if (!hasRequestedScope(req)) {
+        if (explicitScopeRequired) {
+            return res.status(400).json({
+                success: false,
+                error: 'marketing_connection_scope_required',
+                message: 'Debes indicar la clínica o grupo donde se gestionará esta conexión.'
+            });
+        }
+        return next();
+    }
+
+    const isConnectionMutation = providerInventory
+        || req.method !== 'GET'
+        || /\/(?:connect|disconnect)$/.test(normalizedPath);
+    try {
+        req.marketingConnectionScopeAuthorization = await authorizeExplicitConnectionScope(
+            req,
+            isConnectionMutation ? 'write' : 'read'
+        );
+        return next();
+    } catch (error) {
+        const status = Number(error?.httpStatus || 500);
+        if (status >= 500) {
+            console.error('❌ Error autorizando scope de conexión:', error);
+        }
+        return res.status(status >= 400 && status < 500 ? status : 500).json({
+            success: false,
+            error: error?.code || 'marketing_connection_scope_authorization_failed',
+            message: error?.message || 'No se pudo autorizar el scope solicitado.'
+        });
+    }
+});
+
 /**
  * GET /oauth/meta/connect
  * Devuelve la URL de autorización para iniciar el flujo OAuth de Meta.
@@ -596,14 +976,19 @@ router.get('/meta/connect', async (req, res) => {
     try {
         const userId = getUserIdFromToken(req);
         if (!userId) return res.status(401).json({ success: false, error: 'Usuario no autenticado' });
+        if (!META_APP_SECRET) {
+            return res.status(503).json({ success: false, error: 'meta_oauth_not_configured' });
+        }
 
         const returnTo = normalizeFrontendReturnTo(req.query?.return_to || null);
-        const state = JSON.stringify({
-            userId: String(userId),
+        const requestedScope = getScopeInputFromRequest(req);
+        const state = await issueOAuthState({
+            provider: 'meta',
+            userId,
             returnTo,
-            clinicId: req.query?.clinic_id || null,
-            groupId: req.query?.group_id || null,
-            assignmentScope: req.query?.assignment_scope || null
+            clinicId: requestedScope.clinicIdRaw,
+            groupId: requestedScope.groupIdRaw,
+            assignmentScope: requestedScope.assignmentScopeRaw
         });
         const scope = [
             'public_profile',
@@ -637,8 +1022,20 @@ router.get('/meta/connect', async (req, res) => {
  */
 router.get('/meta/callback', async (req, res) => {
     const { code, state, error, error_reason, error_description } = req.query;
-    const oauthState = parseOAuthState(state);
-    const frontendOrigin = oauthState.returnTo;
+    let oauthState;
+    let frontendOrigin = FRONTEND_URL;
+
+    try {
+        oauthState = await consumeOAuthState('meta', state);
+        frontendOrigin = normalizeFrontendReturnTo(oauthState.returnTo);
+        await authorizeStoredOAuthState(oauthState);
+    } catch (stateError) {
+        console.error('❌ State OAuth Meta rechazado:', stateError.code || stateError.message);
+        return res.redirect(buildFrontendSettingsRedirect(
+            frontendOrigin,
+            `?error=${encodeURIComponent('La autorización ha caducado o ya no es válida. Vuelve a iniciarla.')}`
+        ));
+    }
 
     console.log('➡️  Callback de Meta recibido.');
 
@@ -652,12 +1049,13 @@ router.get('/meta/callback', async (req, res) => {
         return res.redirect(buildFrontendSettingsRedirect(frontendOrigin, `?error=${encodeURIComponent('No se recibió el código de autorización.')}`));
     }
 
-    console.log('✅ Código de autorización recibido: ' + code.substring(0, 20) + '...');
+    console.log('✅ Código de autorización Meta recibido.');
 
     try {
+        if (!META_APP_SECRET) throw new Error('Meta OAuth no está configurado');
         // 1. Intercambiar el código por un Access Token de CORTA DURACIÓN
         console.log('🔄  Intercambiando código por Access Token de corta duración...');
-        const tokenUrl = `${process.env.META_API_BASE_URL}/oauth/access_token`;
+        const tokenUrl = `${META_API_BASE_URL}/oauth/access_token`;
         const tokenParams = {
             client_id: META_APP_ID,
             client_secret: META_APP_SECRET,
@@ -671,11 +1069,11 @@ router.get('/meta/callback', async (req, res) => {
             console.error('❌ No se pudo obtener el Access Token de corta duración.');
             throw new Error('No se pudo obtener el Access Token de corta duración.');
         }
-        console.log('✅ Access Token de corta duración obtenido: ' + shortLivedAccessToken.substring(0, 20) + '...');
+        console.log('✅ Access Token de corta duración obtenido.');
 
         // 2. Intercambiar el Access Token de CORTA DURACIÓN por uno de LARGA DURACIÓN
         console.log('🔄  Intercambiando por Access Token de LARGA DURACIÓN...');
-        const longLivedTokenUrl = `${process.env.META_API_BASE_URL}/oauth/access_token`;
+        const longLivedTokenUrl = `${META_API_BASE_URL}/oauth/access_token`;
         const longLivedTokenParams = {
             grant_type: 'fb_exchange_token',
             client_id: META_APP_ID,
@@ -690,11 +1088,11 @@ router.get('/meta/callback', async (req, res) => {
             console.error('❌ No se pudo obtener el Access Token de larga duración.');
             throw new Error('No se pudo obtener el Access Token de larga duración.');
         }
-        console.log('✅ Access Token de LARGA DURACIÓN obtenido: ' + longLivedAccessToken.substring(0, 20) + '...');
+        console.log('✅ Access Token de larga duración obtenido.');
 
         // 3. Obtener información básica del usuario de Meta
         console.log('👤 Obteniendo información del usuario de Meta...');
-        const userProfileUrl = `${process.env.META_API_BASE_URL.replace('/v23.0', '')}/me?fields=id,name,email&access_token=${longLivedAccessToken}`;
+        const userProfileUrl = `${META_API_BASE_URL.replace(/\/v\d+\.\d+$/, '')}/me?fields=id,name,email&access_token=${longLivedAccessToken}`;
         const userProfileResponse = await axios.get(userProfileUrl);
         const userData = userProfileResponse.data;
         console.log('👤 Usuario de Meta autenticado:', userData);
@@ -707,7 +1105,7 @@ router.get('/meta/callback', async (req, res) => {
         // - metaUserId = ID del usuario en Meta (userData.id)
         
         // Obtener el userId del parámetro state que viene del frontend
-        const userId = oauthState.userId; // El frontend debe enviar el userId de la aplicación en el state
+        const userId = oauthState.userId;
         const metaUserId = userData.id; // ID del usuario de Meta
         
         console.log('🔍 userId (aplicación):', userId);
@@ -734,7 +1132,7 @@ router.get('/meta/callback', async (req, res) => {
         
         console.log('📅 Token expirará el:', expiresAt.toISOString());
 
-        await MetaConnection.upsert({
+        const storedConnection = await persistMetaConnection({
             userId: userId, // ID del usuario de la aplicación
             metaUserId: metaUserId, // ID del usuario de Meta
             userName: userData.name,
@@ -744,7 +1142,6 @@ router.get('/meta/callback', async (req, res) => {
         });
         console.log('✅ Conexión Meta almacenada/actualizada en la base de datos.');
 
-        const storedConnection = await MetaConnection.findOne({ where: { userId } });
         const scope = await normalizeScope({
             clinicIdRaw: oauthState.clinicId,
             groupIdRaw: oauthState.groupId,
@@ -779,7 +1176,19 @@ router.get('/google/connect', async (req, res) => {
     try {
         const userId = getUserIdFromToken(req);
         if (!userId) return res.status(401).json({ success: false, error: 'Usuario no autenticado' });
+        if (!GOOGLE_CLIENT_ID || !GOOGLE_CLIENT_SECRET) {
+            return res.status(503).json({ success: false, error: 'google_oauth_not_configured' });
+        }
         const returnTo = normalizeFrontendReturnTo(req.query?.return_to || null);
+        const requestedScope = getScopeInputFromRequest(req);
+        const state = await issueOAuthState({
+            provider: 'google',
+            userId,
+            returnTo,
+            clinicId: requestedScope.clinicIdRaw,
+            groupId: requestedScope.groupIdRaw,
+            assignmentScope: requestedScope.assignmentScopeRaw
+        });
 
         const params = new URLSearchParams({
             client_id: GOOGLE_CLIENT_ID,
@@ -789,13 +1198,7 @@ router.get('/google/connect', async (req, res) => {
             access_type: 'offline',
             include_granted_scopes: 'true',
             prompt: 'consent',
-            state: JSON.stringify({
-                userId: String(userId),
-                returnTo,
-                clinicId: req.query?.clinic_id || null,
-                groupId: req.query?.group_id || null,
-                assignmentScope: req.query?.assignment_scope || null
-            })
+            state
         });
         const authUrl = `https://accounts.google.com/o/oauth2/v2/auth?${params.toString()}`;
         return res.json({ success: true, authUrl });
@@ -810,16 +1213,21 @@ router.get('/google/connect', async (req, res) => {
  * GET /oauth/google/callback
  */
 router.get('/google/callback', async (req, res) => {
+    let frontendOrigin = FRONTEND_URL;
     try {
         const { code, state, error } = req.query;
-        const oauthState = parseOAuthState(state);
-        const frontendOrigin = oauthState.returnTo;
+        const oauthState = await consumeOAuthState('google', state);
+        frontendOrigin = normalizeFrontendReturnTo(oauthState.returnTo);
+        await authorizeStoredOAuthState(oauthState);
         if (error) {
             console.error('❌ Error en callback Google:', error);
             return res.redirect(buildFrontendSettingsRedirect(frontendOrigin, `?error=${encodeURIComponent(String(error))}`));
         }
         if (!code) {
             return res.redirect(buildFrontendSettingsRedirect(frontendOrigin, `?error=${encodeURIComponent('Código no proporcionado')}`));
+        }
+        if (!GOOGLE_CLIENT_ID || !GOOGLE_CLIENT_SECRET) {
+            throw new Error('Google OAuth no está configurado');
         }
 
         // 1) Intercambiar code por tokens
@@ -840,7 +1248,8 @@ router.get('/google/callback', async (req, res) => {
 
         // 2) Userinfo (email, id)
         const ui = await axios.get('https://www.googleapis.com/oauth2/v2/userinfo', { headers: { Authorization: `Bearer ${accessToken}` } });
-        const googleUserId = ui.data?.id || 'unknown';
+        const googleUserId = String(ui.data?.id || '').trim();
+        if (!googleUserId) throw new Error('Google no devolvió una identidad de usuario válida');
         const userEmail = ui.data?.email || null;
         const userName = ui.data?.name || [ui.data?.given_name, ui.data?.family_name].filter(Boolean).join(' ') || null;
 
@@ -849,24 +1258,16 @@ router.get('/google/callback', async (req, res) => {
         if (!userId) {
             console.warn('⚠️ state vacío en callback Google');
         }
-        const existing = await GoogleConnection.findOne({ where: { userId: userId } });
-        const payload = {
+        const storedConnection = await persistGoogleConnection({
             userId,
             googleUserId,
             userEmail,
             userName,
             accessToken,
-            refreshToken: refreshToken || existing?.refreshToken || null,
+            refreshToken,
             scopes: tokenResp.data?.scope || GOOGLE_SCOPES,
             expiresAt
-        };
-        if (existing) {
-            await existing.update(payload);
-        } else {
-            await GoogleConnection.create(payload);
-        }
-
-        const storedConnection = await GoogleConnection.findOne({ where: { userId } });
+        });
         const scope = await normalizeScope({
             clinicIdRaw: oauthState.clinicId,
             groupIdRaw: oauthState.groupId,
@@ -900,9 +1301,30 @@ router.get('/google/connection-status', async (req, res) => {
             allowLegacyUserFallback: !scopedRequest
         });
         if (!userId) return res.status(401).json({ connected: false, message: 'Usuario no autenticado' });
-        if (!conn) return res.json({ connected: false });
+        if (!conn) {
+            return res.json({
+                connected: false,
+                reason: source === 'legacy_user_ambiguous' ? 'connection_scope_required' : null,
+                source
+            });
+        }
 
-        const tokenInfo = await ensureGoogleAccessToken(conn, { allowExpired: true });
+        let tokenInfo;
+        try {
+            tokenInfo = await ensureGoogleAccessToken(conn, { allowExpired: true });
+        } catch (tokenError) {
+            if (['TOKEN_EXPIRY_UNKNOWN', 'REFRESH_FAILED', 'TOKEN_EXPIRED'].includes(tokenError.code)) {
+                return res.json({
+                    connected: false,
+                    expired: tokenError.code === 'TOKEN_EXPIRED',
+                    reason: tokenError.code.toLowerCase(),
+                    reauthorizationRequired: true,
+                    scope: buildScopeResponse(scope, assignment),
+                    source
+                });
+            }
+            throw tokenError;
+        }
 
         return res.json({
             connected: !tokenInfo.expired,
@@ -976,7 +1398,7 @@ router.get('/google/analytics/connection-status', async (req, res) => {
         try {
             ({ accessToken } = await ensureGoogleAccessToken(conn));
         } catch (tokenErr) {
-            if (tokenErr.code === 'TOKEN_EXPIRED' || tokenErr.code === 'REFRESH_FAILED') {
+            if (['TOKEN_EXPIRED', 'TOKEN_EXPIRY_UNKNOWN', 'REFRESH_FAILED'].includes(tokenErr.code)) {
                 return res.json({ connected: false, reason: 'token_expired' });
             }
             throw tokenErr;
@@ -1072,14 +1494,40 @@ router.get('/google/analytics/properties', async (req, res) => {
  */
 router.post('/google/analytics/map-properties', async (req, res) => {
     try {
-        const { userId, connection: conn } = await resolveGoogleRequestConnection(req, {
-            allowLegacyUserFallback: true
-        });
+        const userId = getUserIdFromToken(req);
         if (!userId) return res.status(401).json({ success: false, error: 'Usuario no autenticado' });
-        if (!conn) return res.status(404).json({ success: false, error: 'No hay conexión Google' });
-
-        const mappings = Array.isArray(req.body?.mappings) ? req.body.mappings : [];
-        if (!mappings.length) return res.status(400).json({ success: false, error: 'mappings requerido' });
+        const requestedMappings = Array.isArray(req.body?.mappings) ? req.body.mappings : [];
+        if (!requestedMappings.length) return res.status(400).json({ success: false, error: 'mappings requerido' });
+        if (requestedMappings.some((mapping) => (
+            !Number.isInteger(Number.parseInt(String(mapping?.clinicaId ?? ''), 10))
+            || Number.parseInt(String(mapping?.clinicaId ?? ''), 10) <= 0
+            || !String(mapping?.propertyName || '').trim()
+        ))) {
+            throw inaccessibleAssetError('analytics_mapping_invalid', 'Todos los mapeos de Analytics deben indicar una clínica y una propiedad válidas.');
+        }
+        const mappings = Array.from(new Map(requestedMappings.map((mapping) => [
+            `${Number.parseInt(String(mapping.clinicaId), 10)}|${String(mapping.propertyName).trim()}`,
+            mapping
+        ])).values());
+        const { connection: conn } = await resolveAuthorizedDestinationGoogleConnection({
+            userId,
+            mappings,
+            authorizeDestinations: hasMarketingClinicScopeAccess,
+            resolveForClinic: (clinicId) => resolveGoogleRequestConnection(req, {
+                allowLegacyUserFallback: true,
+                scopeInput: { clinicIdRaw: clinicId, groupIdRaw: null, assignmentScopeRaw: 'clinic' }
+            })
+        });
+        const authorizedProperties = await loadAuthorizedAnalyticsProperties(conn);
+        for (const mapping of mappings) {
+            const propertyName = String(mapping?.propertyName || '').trim();
+            if (!propertyName || !authorizedProperties.has(propertyName)) {
+                throw inaccessibleAssetError(
+                    'analytics_property_not_accessible',
+                    'Alguna propiedad de Analytics no pertenece a la conexión Google autorizada.'
+                );
+            }
+        }
 
         const createdOrUpdated = [];
         const propertiesToBackfill = [];
@@ -1092,18 +1540,44 @@ router.post('/google/analytics/map-properties', async (req, res) => {
             if (!selectedByClinic.has(clinicaId)) selectedByClinic.set(clinicaId, new Set());
             selectedByClinic.get(clinicaId).add(propertyName);
         }
+        const existingByClinicProperty = new Map();
+        for (const m of mappings) {
+            const clinicaId = parseInt(m.clinicaId, 10);
+            const propertyName = String(m.propertyName || '').trim();
+            const existing = await ClinicAnalyticsProperty.findOne({ where: { clinicaId, propertyName } });
+            if (!existing) continue;
+            await assertSharedMarketingAssetMutationAccess({
+                userId,
+                assetType: 'google.analytics',
+                assetId: existing.id,
+                ownerClinicId: existing.clinicaId
+            });
+            existingByClinicProperty.set(`${clinicaId}|${propertyName}`, existing);
+        }
 
         if (replaceExisting) {
+            const recordsToDeactivate = [];
             for (const [clinicaId, propertyNames] of selectedByClinic.entries()) {
+                recordsToDeactivate.push(...await ClinicAnalyticsProperty.findAll({
+                    where: {
+                        clinicaId,
+                        isActive: true,
+                        propertyName: { [Op.notIn]: Array.from(propertyNames) }
+                    }
+                }));
+            }
+            for (const record of recordsToDeactivate) {
+                await assertSharedMarketingAssetMutationAccess({
+                    userId,
+                    assetType: 'google.analytics',
+                    assetId: record.id,
+                    ownerClinicId: record.clinicaId
+                });
+            }
+            if (recordsToDeactivate.length) {
                 await ClinicAnalyticsProperty.update(
                     { isActive: false },
-                    {
-                        where: {
-                            clinicaId,
-                            isActive: true,
-                            propertyName: { [Op.notIn]: Array.from(propertyNames) }
-                        }
-                    }
+                    { where: { id: { [Op.in]: recordsToDeactivate.map((record) => record.id) } } }
                 );
             }
         }
@@ -1112,19 +1586,20 @@ router.post('/google/analytics/map-properties', async (req, res) => {
             const clinicaId = parseInt(m.clinicaId, 10);
             const propertyName = String(m.propertyName || '').trim();
             if (!clinicaId || !propertyName) continue;
+            const providerProperty = authorizedProperties.get(propertyName);
 
             const payload = {
                 clinicaId,
                 googleConnectionId: conn.id,
                 propertyName,
-                propertyDisplayName: m.propertyDisplayName || null,
-                propertyType: m.propertyType || null,
-                parent: m.parent || null,
-                measurementId: m.measurementId || null,
+                propertyDisplayName: providerProperty.propertyDisplayName,
+                propertyType: providerProperty.propertyType,
+                parent: providerProperty.parent,
+                measurementId: providerProperty.measurementId,
                 isActive: true
             };
 
-            const existing = await ClinicAnalyticsProperty.findOne({ where: { clinicaId, propertyName } });
+            const existing = existingByClinicProperty.get(`${clinicaId}|${propertyName}`) || null;
             if (existing) {
                 await existing.update(payload);
                 createdOrUpdated.push({ id: existing.id, ...payload });
@@ -1155,6 +1630,7 @@ router.post('/google/analytics/map-properties', async (req, res) => {
 
         return res.json({ success: true, mapped: createdOrUpdated.length, properties: createdOrUpdated });
     } catch (e) {
+        if (sendKnownOAuthMappingError(res, e)) return;
         console.error('❌ Error en /oauth/google/analytics/map-properties:', e.response?.data || e.message);
         return res.status(500).json({ success: false, error: 'Error mapeando propiedades' });
     }
@@ -1234,86 +1710,157 @@ router.get('/google/local/locations', async (req, res) => {
  */
 router.post('/google/local/map-locations', async (req, res) => {
     try {
-        const { userId, connection: conn } = await resolveGoogleRequestConnection(req, {
-            allowLegacyUserFallback: true
-        });
+        const userId = getUserIdFromToken(req);
         if (!userId) {
             return res.status(401).json({ success: false, error: 'Usuario no autenticado' });
         }
-        if (!conn) {
-            return res.status(404).json({ success: false, error: 'No hay conexión Google' });
-        }
 
-        const mappings = Array.isArray(req.body?.mappings) ? req.body.mappings : [];
-        if (!mappings.length) {
-            return res.status(400).json({ success: false, error: 'mappings requerido' });
-        }
+        const mappings = normalizeBusinessProfileLocationMappings(req.body?.mappings);
+        const { connection: conn, destinationClinicIds } = await resolveAuthorizedDestinationGoogleConnection({
+            userId,
+            mappings,
+            authorizeDestinations: hasMarketingClinicScopeAccess,
+            resolveForClinic: (clinicId) => resolveGoogleRequestConnection(req, {
+                allowLegacyUserFallback: true,
+                scopeInput: {
+                    clinicIdRaw: clinicId,
+                    groupIdRaw: null,
+                    assignmentScopeRaw: 'clinic'
+                }
+            })
+        });
+        const providerLocationsById = accessibleProviderLocationsById(
+            mappings,
+            await fetchAccessibleGoogleBusinessLocations(conn)
+        );
 
         const createdOrUpdated = [];
         const locationsToBackfill = [];
         const replaceExisting = req.body?.replace_existing === true;
         const selectedByClinic = new Map();
         for (const mapping of mappings) {
-            const clinicaId = parseInt(mapping?.clinicaId, 10);
-            const locationId = String(mapping?.locationId || mapping?.id || '').trim();
-            if (!clinicaId || !locationId) {
-                continue;
-            }
+            const { clinicaId, locationId } = mapping;
             if (!selectedByClinic.has(clinicaId)) selectedByClinic.set(clinicaId, new Set());
             selectedByClinic.get(clinicaId).add(locationId);
         }
 
-        if (replaceExisting) {
-            for (const [clinicaId, locationIds] of selectedByClinic.entries()) {
-                await ClinicBusinessLocation.update(
-                    { is_active: false },
-                    {
-                        where: {
-                            clinica_id: clinicaId,
-                            is_active: true,
-                            location_id: { [Op.notIn]: Array.from(locationIds) }
+        await db.sequelize.transaction(async (transaction) => {
+            const requestedLocationIds = mappings.map((mapping) => mapping.locationId);
+            const affectedWhere = replaceExisting
+                ? {
+                    [Op.or]: [
+                        { location_id: { [Op.in]: requestedLocationIds } },
+                        { clinica_id: { [Op.in]: destinationClinicIds }, is_active: true }
+                    ]
+                }
+                : { location_id: { [Op.in]: requestedLocationIds } };
+            // Bloqueamos en un solo orden estable tanto las fichas solicitadas como
+            // las que replace_existing podría desactivar. Así no existe una ventana
+            // entre la comprobación del origen y la mutación, y reducimos deadlocks
+            // entre dos guardados simultáneos de una misma clínica.
+            const affectedRecords = await ClinicBusinessLocation.findAll({
+                where: affectedWhere,
+                transaction,
+                lock: transaction.LOCK.UPDATE,
+                order: [['id', 'ASC']]
+            });
+            const existingByLocation = new Map(
+                affectedRecords
+                    .filter((record) => requestedLocationIds.includes(String(record.location_id)))
+                    .map((record) => [String(record.location_id), record])
+            );
+            const originClinicIds = movedOriginClinicIds(affectedRecords, mappings);
+
+            if (originClinicIds.length) {
+                const canWriteOrigins = await hasMarketingClinicScopeAccess({
+                    userId,
+                    clinicIds: originClinicIds,
+                    access: 'write'
+                });
+                if (!canWriteOrigins) {
+                    const error = new Error(
+                        'No tienes permisos para mover una ubicación desde su clínica de origen.'
+                    );
+                    error.code = 'business_profile_origin_scope_forbidden';
+                    error.httpStatus = 403;
+                    throw error;
+                }
+            }
+            assertBusinessProfileConnectionCoherence(affectedRecords, mappings, conn.id);
+
+            if (replaceExisting) {
+                const recordsToDeactivate = affectedRecords
+                    .filter((record) => {
+                        const selectedLocationIds = selectedByClinic.get(Number(record.clinica_id));
+                        return selectedLocationIds
+                            && record.is_active
+                            && !selectedLocationIds.has(String(record.location_id));
+                    });
+                for (const record of recordsToDeactivate) {
+                    await assertSharedMarketingAssetMutationAccess({
+                        userId,
+                        assetType: 'google.business_profile',
+                        assetId: record.id,
+                        ownerClinicId: record.clinica_id,
+                        transaction
+                    });
+                }
+                if (recordsToDeactivate.length) {
+                    await ClinicBusinessLocation.update(
+                        { is_active: false },
+                        {
+                            where: { id: { [Op.in]: recordsToDeactivate.map((record) => record.id) } },
+                            transaction
                         }
-                    }
-                );
-            }
-        }
-
-        for (const mapping of mappings) {
-            const clinicaId = parseInt(mapping?.clinicaId, 10);
-            const locationId = String(mapping?.locationId || mapping?.id || '').trim();
-            if (!clinicaId || !locationId) {
-                continue;
+                    );
+                }
             }
 
-            const rawLocation = mapping.rawLocation || mapping.rawPayload || {};
-            const payload = {
-                clinica_id: clinicaId,
-                google_connection_id: conn.id,
-                location_name: mapping.locationName || mapping.title || null,
-                location_id: locationId,
-                store_code: mapping.storeCode || null,
-                primary_category: mapping.primaryCategory || null,
-                sync_status: 'pending',
-                is_verified: typeof mapping.isVerified === 'boolean' ? mapping.isVerified : false,
-                is_suspended: typeof mapping.isSuspended === 'boolean' ? mapping.isSuspended : false,
-                raw_payload: {
-                    ...(rawLocation && typeof rawLocation === 'object' ? rawLocation : {}),
-                    accountName: mapping.accountName || rawLocation.accountName || null,
-                    accountDisplayName: mapping.accountDisplayName || rawLocation.accountDisplayName || null
-                },
-                is_active: true,
-                last_synced_at: null
-            };
+            for (const mapping of mappings) {
+                const { clinicaId, locationId } = mapping;
+                const providerLocation = providerLocationsById.get(locationId);
+                let record = existingByLocation.get(locationId);
+                if (record && Number(record.clinica_id) !== clinicaId) {
+                    await assertSharedMarketingAssetMutationAccess({
+                        userId,
+                        assetType: 'google.business_profile',
+                        assetId: record.id,
+                        ownerClinicId: record.clinica_id,
+                        transaction
+                    });
+                }
+                const payload = {
+                    clinica_id: clinicaId,
+                    google_connection_id: conn.id,
+                    location_name: providerLocation.locationName || mapping.locationName || mapping.title || null,
+                    location_id: locationId,
+                    store_code: providerLocation.storeCode || mapping.storeCode || null,
+                    primary_category: providerLocation.primaryCategory || mapping.primaryCategory || null,
+                    sync_status: 'pending',
+                    is_verified: !!providerLocation.isVerified,
+                    is_suspended: !!providerLocation.isSuspended,
+                    raw_payload: mergeBusinessProfileRawPayload(
+                        record?.raw_payload,
+                        providerLocation.rawLocation,
+                        {
+                            accountName: providerLocation.accountName,
+                            accountDisplayName: providerLocation.accountDisplayName
+                        }
+                    ),
+                    is_active: true,
+                    last_synced_at: null
+                };
 
-            let record = await ClinicBusinessLocation.findOne({ where: { location_id: locationId } });
-            if (record) {
-                await record.update(payload);
-            } else {
-                record = await ClinicBusinessLocation.create(payload);
+                if (record) {
+                    await record.update(payload, { transaction });
+                } else {
+                    record = await ClinicBusinessLocation.create(payload, { transaction });
+                    existingByLocation.set(locationId, record);
+                }
+                createdOrUpdated.push({ id: record.id, clinicaId, locationId });
+                locationsToBackfill.push({ clinicId: clinicaId, locationId });
             }
-            createdOrUpdated.push({ id: record.id, clinicaId, locationId });
-            locationsToBackfill.push({ clinicId: clinicaId, locationId });
-        }
+        });
 
         if (locationsToBackfill.length) {
             try {
@@ -1335,6 +1882,14 @@ router.post('/google/local/map-locations', async (req, res) => {
         return res.json({ success: true, mapped: createdOrUpdated.length, locations: createdOrUpdated });
     } catch (err) {
         console.error('❌ Error en /oauth/google/local/map-locations:', err.response?.data || err.message);
+        const status = Number(err.httpStatus || err.status || 500);
+        if ([400, 403, 404, 409].includes(status)) {
+            return res.status(status).json({
+                success: false,
+                error: err.code || 'business_profile_mapping_failed',
+                message: err.message
+            });
+        }
         return res.status(500).json({ success: false, error: 'Error guardando mapeo Local' });
     }
 });
@@ -1354,11 +1909,17 @@ router.get('/google/local/mappings', async (req, res) => {
             return res.json({ success: true, mappings: [] });
         }
 
-        const rows = await ClinicBusinessLocation.findAll({
+        const allRows = await ClinicBusinessLocation.findAll({
             where: { google_connection_id: conn.id, is_active: true },
             include: [{ model: Clinica, as: 'clinica', required: false }],
             order: [['location_name', 'ASC']]
         });
+        const rows = await filterReadableClinicMappings(
+            req,
+            userId,
+            allRows,
+            (row) => row.clinica_id
+        );
 
         const byClinic = new Map();
         for (const row of rows) {
@@ -1416,7 +1977,7 @@ router.get('/google/ads/connection-status', async (req, res) => {
             if (tokenErr.code === 'INSUFFICIENT_SCOPE') {
                 return res.json({ connected: false, reason: 'insufficient_scope' });
             }
-            if (tokenErr.code === 'TOKEN_EXPIRED' || tokenErr.code === 'REFRESH_FAILED') {
+            if (['TOKEN_EXPIRED', 'TOKEN_EXPIRY_UNKNOWN', 'REFRESH_FAILED'].includes(tokenErr.code)) {
                 return res.json({ connected: false, reason: 'token_expired' });
             }
             if (tokenErr.code === 'ADS_CONFIG_MISSING') {
@@ -1436,9 +1997,7 @@ router.get('/google/ads/connection-status', async (req, res) => {
 
         return res.json({
             connected: true,
-            managerId: formatCustomerId(getGoogleManagerId()),
-            customersCount: customers.length,
-            customers,
+            hasAccessibleAccounts: customers.length > 0,
             scope: buildScopeResponse(scope, assignment),
             source
         });
@@ -1550,7 +2109,16 @@ router.get('/google/ads/accounts', async (req, res) => {
 
         const customers = Array.from(uniqueCustomers);
 
-        const existing = await ClinicGoogleAdsAccount.findAll({ where: { googleConnectionId: conn.id, isActive: true }, raw: true });
+        const allExisting = await ClinicGoogleAdsAccount.findAll({
+            where: { googleConnectionId: conn.id, isActive: true },
+            raw: true
+        });
+        const existing = await filterReadableClinicMappings(
+            req,
+            userId,
+            allExisting,
+            (row) => row.clinicaId
+        );
         const existingByCustomer = new Map();
         for (const row of existing) {
             const key = normalizeCustomerId(row.customerId);
@@ -1793,19 +2361,43 @@ router.post('/google/ads/accept-link', async (req, res) => {
  */
 router.post('/google/ads/map-accounts', async (req, res) => {
     try {
-        const { userId, connection: conn } = await resolveGoogleRequestConnection(req, {
-            allowLegacyUserFallback: true
-        });
+        const userId = getUserIdFromToken(req);
         if (!userId) {
             return res.status(401).json({ success: false, error: 'Usuario no autenticado' });
         }
-        if (!conn) {
-            return res.status(404).json({ success: false, error: 'No hay conexión Google' });
-        }
-
-        const mappings = Array.isArray(req.body?.mappings) ? req.body.mappings : [];
-        if (!mappings.length) {
+        const requestedMappings = Array.isArray(req.body?.mappings) ? req.body.mappings : [];
+        if (!requestedMappings.length) {
             return res.status(400).json({ success: false, error: 'mappings requerido' });
+        }
+        if (requestedMappings.some((mapping) => (
+            !Number.isInteger(Number.parseInt(String(mapping?.clinicaId ?? ''), 10))
+            || Number.parseInt(String(mapping?.clinicaId ?? ''), 10) <= 0
+            || !normalizeCustomerId(mapping?.customerId)
+        ))) {
+            throw inaccessibleAssetError('google_ads_mapping_invalid', 'Todos los mapeos de Google Ads deben indicar una clínica y una cuenta válidas.');
+        }
+        const mappings = Array.from(new Map(requestedMappings.map((mapping) => [
+            `${Number.parseInt(String(mapping.clinicaId), 10)}|${normalizeCustomerId(mapping.customerId)}`,
+            mapping
+        ])).values());
+        const { connection: conn } = await resolveAuthorizedDestinationGoogleConnection({
+            userId,
+            mappings,
+            authorizeDestinations: hasMarketingClinicScopeAccess,
+            resolveForClinic: (clinicId) => resolveGoogleRequestConnection(req, {
+                allowLegacyUserFallback: true,
+                scopeInput: { clinicIdRaw: clinicId, groupIdRaw: null, assignmentScopeRaw: 'clinic' }
+            })
+        });
+        const authorizedAccounts = await loadAuthorizedGoogleAdsAccounts(conn);
+        for (const mapping of mappings) {
+            const customerId = normalizeCustomerId(mapping?.customerId);
+            if (!customerId || !authorizedAccounts.has(customerId)) {
+                throw inaccessibleAssetError(
+                    'google_ads_account_not_accessible',
+                    'Alguna cuenta de Google Ads no pertenece a la conexión Google autorizada.'
+                );
+            }
         }
 
         const replaceExisting = req.body?.replace_existing === true;
@@ -1849,17 +2441,33 @@ router.post('/google/ads/map-accounts', async (req, res) => {
         try {
             if (replaceExisting) {
                 for (const [clinicaId, customerIds] of selectedByClinic.entries()) {
-                    await ClinicGoogleAdsAccount.update(
-                        { isActive: false },
-                        {
-                            where: {
-                                clinicaId,
-                                isActive: true,
-                                customerId: { [Op.notIn]: Array.from(customerIds) }
-                            },
+                    const recordsToDeactivate = await ClinicGoogleAdsAccount.findAll({
+                        where: {
+                            clinicaId,
+                            isActive: true,
+                            customerId: { [Op.notIn]: Array.from(customerIds) }
+                        },
+                        transaction,
+                        lock: transaction.LOCK.UPDATE
+                    });
+                    for (const record of recordsToDeactivate) {
+                        await assertSharedMarketingAssetMutationAccess({
+                            userId,
+                            assetType: 'google.ads_account',
+                            assetId: record.id,
+                            ownerClinicId: record.clinicaId,
                             transaction
-                        }
-                    );
+                        });
+                    }
+                    if (recordsToDeactivate.length) {
+                        await ClinicGoogleAdsAccount.update(
+                            { isActive: false },
+                            {
+                                where: { id: { [Op.in]: recordsToDeactivate.map((record) => record.id) } },
+                                transaction
+                            }
+                        );
+                    }
                 }
             }
 
@@ -1869,6 +2477,7 @@ router.post('/google/ads/map-accounts', async (req, res) => {
                 if (!clinicaId || !customerId) {
                     continue;
                 }
+                const providerAccount = authorizedAccounts.get(customerId);
 
                 const { assignmentScope, grupoClinicaId } = await resolveAssignment(clinicaId);
 
@@ -1876,37 +2485,30 @@ router.post('/google/ads/map-accounts', async (req, res) => {
                     clinicaId,
                     googleConnectionId: conn.id,
                     customerId,
-                    descriptiveName: mapping?.descriptiveName || null,
-                    currencyCode: mapping?.currencyCode || null,
-                    timeZone: mapping?.timeZone || null,
-                    accountStatus: mapping?.accountStatus || null,
-                    managerCustomerId: mapping?.managerCustomerId ? normalizeCustomerId(mapping.managerCustomerId) : normalizeCustomerId(getGoogleManagerId()),
-                    loginCustomerId: mapping?.loginCustomerId ? normalizeCustomerId(mapping.loginCustomerId) : (mapping?.managerCustomerId ? normalizeCustomerId(mapping.managerCustomerId) : normalizeCustomerId(getGoogleManagerId())),
-                    managerLinkId: mapping?.managerLinkId || null,
-                    managerLinkStatus: mapping?.managerLinkStatus || null,
-                    invitationStatus: mapping?.invitationStatus || null,
-                    linkedAt: mapping?.linkedAt ? new Date(mapping.linkedAt) : (mapping?.managerLinkStatus === 'ACTIVE' ? new Date() : null),
+                    descriptiveName: providerAccount.descriptiveName,
+                    currencyCode: providerAccount.currencyCode,
+                    timeZone: providerAccount.timeZone,
+                    accountStatus: providerAccount.accountStatus,
+                    managerCustomerId: providerAccount.managerCustomerId,
+                    loginCustomerId: providerAccount.loginCustomerId,
+                    managerLinkId: providerAccount.managerLinkId,
+                    managerLinkStatus: providerAccount.managerLinkStatus,
+                    invitationStatus: providerAccount.invitationStatus,
+                    linkedAt: providerAccount.linkedAt,
                     assignmentScope,
                     grupoClinicaId,
                     isActive: true
                 };
 
-                if (!replaceExisting) {
-                    await ClinicGoogleAdsAccount.update(
-                        { isActive: false },
-                        {
-                            where: {
-                                clinicaId,
-                                customerId: { [Op.ne]: customerId },
-                                isActive: true
-                            },
-                            transaction
-                        }
-                    );
-                }
-
                 const existing = await ClinicGoogleAdsAccount.findOne({ where: { clinicaId, customerId }, transaction });
                 if (existing) {
+                    await assertSharedMarketingAssetMutationAccess({
+                        userId,
+                        assetType: 'google.ads_account',
+                        assetId: existing.id,
+                        ownerClinicId: existing.clinicaId,
+                        transaction
+                    });
                     await existing.update(payload, { transaction });
                     results.push({ id: existing.id, ...payload });
                 } else {
@@ -1942,6 +2544,7 @@ router.post('/google/ads/map-accounts', async (req, res) => {
 
         return res.json({ success: true, mapped: results.length, accounts: results });
     } catch (err) {
+        if (sendKnownOAuthMappingError(res, err)) return;
         const detail = Array.isArray(err?.errors)
             ? err.errors.map((item) => item.message).filter(Boolean).join('; ')
             : (err.details || err.message);
@@ -1982,7 +2585,8 @@ router.get('/google/ads/mappings', async (req, res) => {
             return res.status(404).json({ success: false, error: 'No hay conexión Google' });
         }
 
-        const rows = await ClinicGoogleAdsAccount.findAll({ where: { googleConnectionId: conn.id, isActive: true }, raw: true });
+        const allRows = await ClinicGoogleAdsAccount.findAll({ where: { googleConnectionId: conn.id, isActive: true }, raw: true });
+        const rows = await filterReadableClinicMappings(req, userId, allRows, (row) => row.clinicaId);
         if (!rows.length) {
             return res.json({ success: true, mappings: [] });
         }
@@ -2032,29 +2636,34 @@ router.delete('/google/ads/mappings/:mappingId', async (req, res) => {
         return res.status(400).json({ success: false, error: 'mappingId inválido' });
     }
     try {
-        const { userId, connection: conn } = await resolveGoogleRequestConnection(req, {
-            allowLegacyUserFallback: true
-        });
+        const userId = getUserIdFromToken(req);
         if (!userId) {
             return res.status(401).json({ success: false, error: 'Usuario no autenticado' });
         }
-        if (!conn) {
-            return res.status(404).json({ success: false, error: 'No hay conexión Google' });
-        }
-
-        const account = await ClinicGoogleAdsAccount.findOne({ where: { id: mappingId, googleConnectionId: conn.id } });
+        const account = await ClinicGoogleAdsAccount.findByPk(mappingId);
         if (!account) {
             return res.status(404).json({ success: false, error: 'Cuenta Google Ads no encontrada' });
         }
+        if (!await requireSingleMappingClinicWrite(res, userId, account.clinicaId)) return;
 
-        await GroupAssetClinicAssignment.destroy({
-            where: { assetType: 'google.ads_account', assetId: mappingId }
+        await db.sequelize.transaction(async (transaction) => {
+            await assertSharedMarketingAssetMutationAccess({
+                userId,
+                assetType: 'google.ads_account',
+                assetId: mappingId,
+                ownerClinicId: account.clinicaId,
+                transaction
+            });
+            await GroupAssetClinicAssignment.destroy({
+                where: { assetType: 'google.ads_account', assetId: mappingId },
+                transaction
+            });
+            await account.destroy({ transaction });
         });
-
-        await account.destroy();
 
         return res.json({ success: true });
     } catch (error) {
+        if (sendKnownOAuthMappingError(res, error)) return;
         console.error('❌ Error eliminando mapeo de Google Ads:', error);
         return res.status(500).json({ success: false, error: 'Error interno del servidor' });
     }
@@ -2071,10 +2680,11 @@ router.get('/google/analytics/mappings', async (req, res) => {
         if (!userId) return res.status(401).json({ success: false, error: 'Usuario no autenticado' });
         if (!conn) return res.status(404).json({ success: false, error: 'No hay conexión Google' });
 
-        const items = await ClinicAnalyticsProperty.findAll({
+        const allItems = await ClinicAnalyticsProperty.findAll({
             where: { googleConnectionId: conn.id, isActive: true },
             include: [{ model: Clinica, as: 'clinica', attributes: ['id_clinica', 'nombre_clinica'] }]
         });
+        const items = await filterReadableClinicMappings(req, userId, allItems, (item) => item.clinicaId);
 
         const mapped = items.map(item => ({
             id: item.id,
@@ -2100,25 +2710,32 @@ router.delete('/google/analytics/mappings/:mappingId', async (req, res) => {
         return res.status(400).json({ success: false, error: 'mappingId inválido' });
     }
     try {
-        const { userId, connection: conn } = await resolveGoogleRequestConnection(req, {
-            allowLegacyUserFallback: true
-        });
+        const userId = getUserIdFromToken(req);
         if (!userId) return res.status(401).json({ success: false, error: 'Usuario no autenticado' });
-        if (!conn) return res.status(404).json({ success: false, error: 'No hay conexión Google' });
-
-        const mapping = await ClinicAnalyticsProperty.findOne({ where: { id: mappingId, googleConnectionId: conn.id } });
+        const mapping = await ClinicAnalyticsProperty.findByPk(mappingId);
         if (!mapping) {
             return res.status(404).json({ success: false, error: 'Mapeo no encontrado' });
         }
+        if (!await requireSingleMappingClinicWrite(res, userId, mapping.clinicaId)) return;
 
-        await GroupAssetClinicAssignment.destroy({
-            where: { assetType: 'google.analytics', assetId: mappingId }
+        await db.sequelize.transaction(async (transaction) => {
+            await assertSharedMarketingAssetMutationAccess({
+                userId,
+                assetType: 'google.analytics',
+                assetId: mappingId,
+                ownerClinicId: mapping.clinicaId,
+                transaction
+            });
+            await GroupAssetClinicAssignment.destroy({
+                where: { assetType: 'google.analytics', assetId: mappingId },
+                transaction
+            });
+            await mapping.destroy({ transaction });
         });
-
-        await mapping.destroy();
 
         return res.json({ success: true });
     } catch (error) {
+        if (sendKnownOAuthMappingError(res, error)) return;
         console.error('❌ Error eliminando mapeo de Analytics:', error);
         return res.status(500).json({ success: false, error: 'Error interno del servidor' });
     }
@@ -2131,14 +2748,40 @@ router.delete('/google/analytics/mappings/:mappingId', async (req, res) => {
  */
 router.post('/google/map-assets', async (req, res) => {
     try {
-        const { userId, connection: conn } = await resolveGoogleRequestConnection(req, {
-            allowLegacyUserFallback: true
-        });
+        const userId = getUserIdFromToken(req);
         if (!userId) return res.status(401).json({ success: false, error: 'Usuario no autenticado' });
-        if (!conn) return res.status(404).json({ success: false, error: 'No hay conexión Google' });
-
-        const mappings = Array.isArray(req.body?.mappings) ? req.body.mappings : [];
-        if (!mappings.length) return res.status(400).json({ success: false, error: 'mappings requerido' });
+        const requestedMappings = Array.isArray(req.body?.mappings) ? req.body.mappings : [];
+        if (!requestedMappings.length) return res.status(400).json({ success: false, error: 'mappings requerido' });
+        if (requestedMappings.some((mapping) => (
+            !Number.isInteger(Number.parseInt(String(mapping?.clinicaId ?? ''), 10))
+            || Number.parseInt(String(mapping?.clinicaId ?? ''), 10) <= 0
+            || !String(mapping?.siteUrl || '').trim()
+        ))) {
+            throw inaccessibleAssetError('search_console_mapping_invalid', 'Todos los mapeos de Search Console deben indicar una clínica y una propiedad válidas.');
+        }
+        const mappings = Array.from(new Map(requestedMappings.map((mapping) => [
+            `${Number.parseInt(String(mapping.clinicaId), 10)}|${String(mapping.siteUrl).trim()}`,
+            mapping
+        ])).values());
+        const { connection: conn } = await resolveAuthorizedDestinationGoogleConnection({
+            userId,
+            mappings,
+            authorizeDestinations: hasMarketingClinicScopeAccess,
+            resolveForClinic: (clinicId) => resolveGoogleRequestConnection(req, {
+                allowLegacyUserFallback: true,
+                scopeInput: { clinicIdRaw: clinicId, groupIdRaw: null, assignmentScopeRaw: 'clinic' }
+            })
+        });
+        const authorizedSites = await loadAuthorizedSearchConsoleSites(conn);
+        for (const mapping of mappings) {
+            const siteUrl = String(mapping?.siteUrl || '').trim();
+            if (!siteUrl || !authorizedSites.has(siteUrl)) {
+                throw inaccessibleAssetError(
+                    'search_console_site_not_accessible',
+                    'Alguna propiedad de Search Console no pertenece a la conexión Google autorizada.'
+                );
+            }
+        }
 
         const createdOrUpdated = [];
         const sitesToBackfill = [];
@@ -2151,18 +2794,44 @@ router.post('/google/map-assets', async (req, res) => {
             if (!selectedByClinic.has(clinicaId)) selectedByClinic.set(clinicaId, new Set());
             selectedByClinic.get(clinicaId).add(siteUrl);
         }
+        const existingByClinicSite = new Map();
+        for (const m of mappings) {
+            const clinicaId = parseInt(m.clinicaId, 10);
+            const siteUrl = String(m.siteUrl || '').trim();
+            const existing = await ClinicWebAsset.findOne({ where: { clinicaId, siteUrl } });
+            if (!existing) continue;
+            await assertSharedMarketingAssetMutationAccess({
+                userId,
+                assetType: 'google.search_console',
+                assetId: existing.id,
+                ownerClinicId: existing.clinicaId
+            });
+            existingByClinicSite.set(`${clinicaId}|${siteUrl}`, existing);
+        }
 
         if (replaceExisting) {
+            const recordsToDeactivate = [];
             for (const [clinicaId, siteUrls] of selectedByClinic.entries()) {
+                recordsToDeactivate.push(...await ClinicWebAsset.findAll({
+                    where: {
+                        clinicaId,
+                        isActive: true,
+                        siteUrl: { [Op.notIn]: Array.from(siteUrls) }
+                    }
+                }));
+            }
+            for (const record of recordsToDeactivate) {
+                await assertSharedMarketingAssetMutationAccess({
+                    userId,
+                    assetType: 'google.search_console',
+                    assetId: record.id,
+                    ownerClinicId: record.clinicaId
+                });
+            }
+            if (recordsToDeactivate.length) {
                 await ClinicWebAsset.update(
                     { isActive: false },
-                    {
-                        where: {
-                            clinicaId,
-                            isActive: true,
-                            siteUrl: { [Op.notIn]: Array.from(siteUrls) }
-                        }
-                    }
+                    { where: { id: { [Op.in]: recordsToDeactivate.map((record) => record.id) } } }
                 );
             }
         }
@@ -2171,16 +2840,17 @@ router.post('/google/map-assets', async (req, res) => {
             const clinicaId = parseInt(m.clinicaId, 10);
             const siteUrl = String(m.siteUrl || '').trim();
             if (!clinicaId || !siteUrl) continue;
+            const providerSite = authorizedSites.get(siteUrl);
             const payload = {
                 clinicaId,
                 googleConnectionId: conn.id,
                 siteUrl,
-                propertyType: m.propertyType || (siteUrl.startsWith('sc-domain:') ? 'sc-domain' : 'url-prefix'),
-                permissionLevel: m.permissionLevel || null,
+                propertyType: providerSite.propertyType,
+                permissionLevel: providerSite.permissionLevel,
                 verified: true,
                 isActive: true
             };
-            const existing = await ClinicWebAsset.findOne({ where: { clinicaId, siteUrl } });
+            const existing = existingByClinicSite.get(`${clinicaId}|${siteUrl}`) || null;
             if (existing) {
                 await existing.update(payload);
                 createdOrUpdated.push({ id: existing.id, ...payload });
@@ -2211,6 +2881,7 @@ router.post('/google/map-assets', async (req, res) => {
 
         return res.json({ success: true, mapped: createdOrUpdated.length, assets: createdOrUpdated });
     } catch (e) {
+        if (sendKnownOAuthMappingError(res, e)) return;
         console.error('❌ Error en /oauth/google/map-assets:', e.response?.data || e.message);
         return res.status(500).json({ success: false, error: 'Error mapeando propiedades' });
     }
@@ -2228,7 +2899,8 @@ router.get('/google/mappings', async (req, res) => {
         if (!userId) return res.status(401).json({ success: false, error: 'Usuario no autenticado' });
         if (!conn) return res.status(404).json({ success: false, error: 'No hay conexión Google' });
 
-        const rows = await ClinicWebAsset.findAll({ where: { googleConnectionId: conn.id, isActive: true }, raw: true });
+        const allRows = await ClinicWebAsset.findAll({ where: { googleConnectionId: conn.id, isActive: true }, raw: true });
+        const rows = await filterReadableClinicMappings(req, userId, allRows, (row) => row.clinicaId);
         const clinicIds = Array.from(new Set(rows.map(r => r.clinicaId))).filter(Boolean);
         const clinics = clinicIds.length ? await Clinica.findAll({ where: { id_clinica: clinicIds }, raw: true }) : [];
         const clinicIndex = new Map(clinics.map(c => [c.id_clinica, c]));
@@ -2262,25 +2934,32 @@ router.delete('/google/mappings/:mappingId', async (req, res) => {
         return res.status(400).json({ success: false, error: 'mappingId inválido' });
     }
     try {
-        const { userId, connection: conn } = await resolveGoogleRequestConnection(req, {
-            allowLegacyUserFallback: true
-        });
+        const userId = getUserIdFromToken(req);
         if (!userId) return res.status(401).json({ success: false, error: 'Usuario no autenticado' });
-        if (!conn) return res.status(404).json({ success: false, error: 'No hay conexión Google' });
-
-        const mapping = await ClinicWebAsset.findOne({ where: { id: mappingId, googleConnectionId: conn.id } });
+        const mapping = await ClinicWebAsset.findByPk(mappingId);
         if (!mapping) {
             return res.status(404).json({ success: false, error: 'Mapeo no encontrado' });
         }
+        if (!await requireSingleMappingClinicWrite(res, userId, mapping.clinicaId)) return;
 
-        await GroupAssetClinicAssignment.destroy({
-            where: { assetType: 'google.search_console', assetId: mappingId }
+        await db.sequelize.transaction(async (transaction) => {
+            await assertSharedMarketingAssetMutationAccess({
+                userId,
+                assetType: 'google.search_console',
+                assetId: mappingId,
+                ownerClinicId: mapping.clinicaId,
+                transaction
+            });
+            await GroupAssetClinicAssignment.destroy({
+                where: { assetType: 'google.search_console', assetId: mappingId },
+                transaction
+            });
+            await mapping.destroy({ transaction });
         });
-
-        await mapping.destroy();
 
         return res.json({ success: true });
     } catch (error) {
+        if (sendKnownOAuthMappingError(res, error)) return;
         console.error('❌ Error eliminando mapeo de Search Console:', error);
         return res.status(500).json({ success: false, error: 'Error interno del servidor' });
     }
@@ -2307,72 +2986,66 @@ router.delete('/google/disconnect', async (req, res) => {
                 return res.status(404).json({ success: false, error: 'No hay conexión Google para este scope' });
             }
 
-            if (scope.assignmentScope === 'clinic' && scope.clinicId) {
-                await ClinicWebAsset.destroy({ where: { clinicaId: scope.clinicId } });
-                await ClinicAnalyticsProperty.destroy({ where: { clinicaId: scope.clinicId } });
-                await ClinicBusinessLocation.destroy({ where: { clinica_id: scope.clinicId } });
-                await ClinicGoogleAdsAccount.destroy({ where: { clinicaId: scope.clinicId } });
-            }
-
-            if (scope.assignmentScope === 'group' && scope.groupId) {
-                const clinicIds = await getClinicIdsForGroup(scope.groupId);
-                if (clinicIds.length) {
-                    await ClinicWebAsset.destroy({ where: { clinicaId: { [Op.in]: clinicIds } } });
-                    await ClinicAnalyticsProperty.destroy({ where: { clinicaId: { [Op.in]: clinicIds } } });
-                    await ClinicBusinessLocation.destroy({ where: { clinica_id: { [Op.in]: clinicIds } } });
-                    await ClinicGoogleAdsAccount.destroy({ where: { clinicaId: { [Op.in]: clinicIds } } });
-                    await GoogleConnectionAssignment.update(
-                        {
-                            status: 'disconnected',
-                            lastValidatedAt: new Date(),
-                            lastErrorCode: 'DISCONNECTED_BY_USER',
-                            lastErrorMessage: 'Disconnected from group settings'
-                        },
-                        {
-                            where: {
-                                [Op.or]: [
-                                    { scopeKey: scope.scopeKey },
-                                    { clinicaId: { [Op.in]: clinicIds } }
-                                ]
-                            }
-                        }
-                    );
-                }
-                await ClinicGoogleAdsAccount.destroy({ where: { assignmentScope: 'group', grupoClinicaId: scope.groupId } });
-            }
-
             const connectionId = connection?.id || assignment?.googleConnectionId || null;
             if (connectionId) {
-                await GoogleConnectionAssignment.upsert({
-                    scopeKey: scope.scopeKey,
-                    assignmentScope: scope.assignmentScope,
-                    clinicaId: scope.assignmentScope === 'clinic' ? scope.clinicId : null,
-                    grupoClinicaId: scope.groupId || null,
-                    googleConnectionId: connectionId,
-                    status: 'disconnected',
-                    authorizedByUserId: userId,
-                    authorizedByName: connection?.userName || assignment?.authorizedByName || null,
-                    authorizedByEmail: connection?.userEmail || assignment?.authorizedByEmail || null,
-                    connectedAt: assignment?.connectedAt || connection?.updatedAt || connection?.createdAt || new Date(),
-                    lastValidatedAt: new Date(),
-                    lastErrorCode: 'DISCONNECTED_BY_USER',
-                    lastErrorMessage: 'Disconnected from scope settings'
+                await db.sequelize.transaction(async (transaction) => {
+                    await deactivateGoogleMappingsForScope({
+                        scope,
+                        connectionId,
+                        transaction
+                    });
+                    await GoogleConnectionAssignment.upsert({
+                        scopeKey: scope.scopeKey,
+                        assignmentScope: scope.assignmentScope,
+                        clinicaId: scope.assignmentScope === 'clinic' ? scope.clinicId : null,
+                        grupoClinicaId: scope.groupId || null,
+                        googleConnectionId: connectionId,
+                        status: 'disconnected',
+                        authorizedByUserId: userId,
+                        authorizedByName: connection?.userName || assignment?.authorizedByName || null,
+                        authorizedByEmail: connection?.userEmail || assignment?.authorizedByEmail || null,
+                        connectedAt: assignment?.connectedAt || connection?.updatedAt || connection?.createdAt || new Date(),
+                        lastValidatedAt: new Date(),
+                        lastErrorCode: 'DISCONNECTED_BY_USER',
+                        lastErrorMessage: 'Disconnected from scope settings'
+                    }, { transaction });
                 });
             }
 
             return res.json({ success: true, message: scope.assignmentScope === 'group' ? 'Conexión Google desconectada para todo el grupo' : 'Conexión Google desconectada para esta clínica' });
         }
 
-        const conn = await GoogleConnection.findOne({ where: { userId } });
+        const { connection: conn, ambiguous } = await findSingleUserConnection(GoogleConnection, userId);
+        if (ambiguous) {
+            const error = new Error('Hay varias conexiones Google; indica la clínica o el grupo que quieres desconectar.');
+            error.code = 'connection_scope_required';
+            error.httpStatus = 409;
+            throw error;
+        }
         if (!conn) return res.status(404).json({ success: false, error: 'No hay conexión Google' });
-        await ClinicWebAsset.destroy({ where: { googleConnectionId: conn.id } });
-        await ClinicAnalyticsProperty.destroy({ where: { googleConnectionId: conn.id } });
-        await ClinicBusinessLocation.destroy({ where: { google_connection_id: conn.id } });
-        await ClinicGoogleAdsAccount.destroy({ where: { googleConnectionId: conn.id } });
+        const [activeAssignments, webMappings, analyticsMappings, localMappings, adsMappings] = await Promise.all([
+            GoogleConnectionAssignment.count({
+                where: {
+                    googleConnectionId: conn.id,
+                    status: { [Op.in]: ['active', 'reauthorization_required'] }
+                }
+            }),
+            ClinicWebAsset.count({ where: { googleConnectionId: conn.id } }),
+            ClinicAnalyticsProperty.count({ where: { googleConnectionId: conn.id } }),
+            ClinicBusinessLocation.count({ where: { google_connection_id: conn.id } }),
+            ClinicGoogleAdsAccount.count({ where: { googleConnectionId: conn.id } })
+        ]);
+        if (activeAssignments + webMappings + analyticsMappings + localMappings + adsMappings > 0) {
+            const conflict = new Error('La conexión sigue en uso por uno o más scopes o mappings. Desconéctalos de forma individual.');
+            conflict.code = 'connection_in_use';
+            conflict.httpStatus = 409;
+            throw conflict;
+        }
         await GoogleConnectionAssignment.destroy({ where: { googleConnectionId: conn.id } });
         await conn.destroy();
-        return res.json({ success: true, message: 'Conexión Google desconectada y mapeos eliminados' });
+        return res.json({ success: true, message: 'Conexión Google desconectada' });
     } catch (e) {
+        if (sendKnownOAuthMappingError(res, e)) return;
         console.error('❌ Error en /oauth/google/disconnect:', e.response?.data || e.message);
         return res.status(500).json({ success: false, error: 'Error al desconectar Google' });
     }
@@ -2393,9 +3066,18 @@ router.get('/meta/connection-status', async (req, res) => {
 
     try {
         if (connection) {
-            // Intentar recuperar scopes actuales del token
+            const storedHealth = evaluateMetaConnectionHealth(connection, { is_valid: true });
+            if (!storedHealth.connected) {
+                return res.json({
+                    ...storedHealth,
+                    message: 'La conexión Meta necesita volver a autorizarse.',
+                    scope: buildScopeResponse(scope, assignment),
+                    source
+                });
+            }
             let scopes = [];
             let missingScopes = [];
+            let debugData = null;
             try {
                 const dbg = await axios.get(`${META_API_BASE_URL}/debug_token`, {
                     params: {
@@ -2403,16 +3085,36 @@ router.get('/meta/connection-status', async (req, res) => {
                         access_token: connection.accessToken
                     }
                 });
-                scopes = Array.isArray(dbg.data?.data?.scopes)
-                    ? dbg.data.data.scopes.map((s) => String(s).toLowerCase())
+                debugData = dbg.data?.data || null;
+                scopes = Array.isArray(debugData?.scopes)
+                    ? debugData.scopes.map((s) => String(s).toLowerCase())
                     : [];
-
-                // Scopes críticos para Lead Ads
-                const critical = ['pages_manage_ads', 'leads_retrieval'];
-                missingScopes = critical.filter((s) => !scopes.includes(s));
             } catch (err) {
                 console.warn('⚠️ No se pudo obtener scopes de Meta (debug_token):', err.response?.data || err.message);
+                return res.json({
+                    connected: false,
+                    reason: 'token_validation_failed',
+                    reauthorizationRequired: true,
+                    message: 'La conexión Meta necesita volver a autorizarse.',
+                    scope: buildScopeResponse(scope, assignment),
+                    source
+                });
             }
+
+            const health = evaluateMetaConnectionHealth(connection, debugData, {
+                expectedAppId: META_APP_ID
+            });
+            if (!health.connected) {
+                return res.json({
+                    ...health,
+                    message: 'La conexión Meta necesita volver a autorizarse.',
+                    scope: buildScopeResponse(scope, assignment),
+                    source
+                });
+            }
+
+            const critical = ['pages_manage_ads', 'leads_retrieval'];
+            missingScopes = critical.filter((s) => !scopes.includes(s));
 
             return res.json({
                 connected: true,
@@ -2429,7 +3131,14 @@ router.get('/meta/connection-status', async (req, res) => {
                 source
             });
         } else {
-            return res.json({ connected: false, message: 'No hay conexión Meta para este usuario.' });
+            return res.json({
+                connected: false,
+                reason: source === 'legacy_user_ambiguous' ? 'connection_scope_required' : null,
+                source,
+                message: source === 'legacy_user_ambiguous'
+                    ? 'Hay varias conexiones Meta; indica la clínica o el grupo.'
+                    : 'No hay conexión Meta para este usuario.'
+            });
         }
     } catch (error) {
         console.error('Error al obtener estado de conexión Meta:', error);
@@ -2472,118 +3181,21 @@ router.get('/meta/assets', async (req, res) => {
         });
 
         // 3. Verificar que el token no haya expirado
-        if (new Date() > metaConnection.expiresAt) {
-            console.log('❌ Token de Meta expirado');
+        const storedHealth = evaluateMetaConnectionHealth(metaConnection, { is_valid: true });
+        if (!storedHealth.connected) {
+            console.log('❌ Token de Meta no verificable o expirado:', storedHealth.reason);
             return res.status(401).json({ 
                 success: false, 
-                error: 'Token de Meta expirado. Por favor, reconecta tu cuenta.' 
+                error: storedHealth.reason,
+                message: 'La conexión Meta necesita volver a autorizarse.'
             });
         }
 
         console.log('✅ Token de usuario válido encontrado');
-
-        // 4. Función para obtener todos los elementos con paginación
-        async function getAllPaginatedData(initialUrl, accessToken) {
-            let allData = [];
-            let nextUrl = initialUrl;
-            let pageCount = 0;
-
-            while (nextUrl && pageCount < 50) { // Límite de seguridad: máximo 50 páginas
-                pageCount++;
-                console.log(`📄 Obteniendo página ${pageCount}...`);
-                
-                try {
-                    const response = await axios.get(nextUrl, {
-                        headers: { Authorization: `Bearer ${accessToken}` }
-                    });
-
-                    if (response.data && response.data.data) {
-                        allData.push(...response.data.data);
-                        console.log(`✅ Página ${pageCount}: ${response.data.data.length} elementos obtenidos`);
-                    }
-
-                    // Verificar si hay más páginas
-                    nextUrl = response.data.paging?.next || null;
-                    
-                    if (!nextUrl) {
-                        console.log(`🏁 Paginación completada en ${pageCount} páginas`);
-                    }
-                } catch (error) {
-                    console.log(`❌ Error en página ${pageCount}:`, error.message);
-                    break; // Salir del bucle si hay error
-                }
-            }
-
-            if (pageCount >= 50) {
-                console.log('⚠️ Límite de paginación alcanzado (50 páginas)');
-            }
-
-            return allData;
-        }
-
-        // 5. Obtener todas las páginas de Facebook con paginación
-        console.log('📄 Obteniendo páginas de Facebook...');
-        const facebookPagesUrl = `${process.env.META_API_BASE_URL}/me/accounts?fields=id,name,picture.width(200).height(200),access_token,category,verification_status,followers_count,instagram_business_account{id,name,username,profile_picture_url,followers_count,media_count,biography}`;
-        
-        const allFacebookPages = await getAllPaginatedData(facebookPagesUrl, metaConnection.accessToken);
-        console.log(`✅ ${allFacebookPages.length} páginas de Facebook encontradas`);
-
-        // 6. Obtener todas las cuentas publicitarias con paginación
-        console.log('💰 Obteniendo cuentas publicitarias...');
-        const adAccountsUrl = `${process.env.META_API_BASE_URL}/me/adaccounts?fields=id,name,account_status,currency,timezone_name,business_name`;
-        
-        const allAdAccounts = await getAllPaginatedData(adAccountsUrl, metaConnection.accessToken);
-        console.log(`✅ ${allAdAccounts.length} cuentas publicitarias encontradas`);
-
-        // 7. Procesar páginas de Facebook
-        const facebookPages = allFacebookPages.map(page => ({
-            id: page.id,
-            name: page.name,
-            type: 'facebook_page',
-            assetAvatarUrl: page.picture?.data?.url || null,
-            pageAccessToken: page.access_token, // ⭐ TOKEN ESPECÍFICO
-            additionalData: {
-                category: page.category || null,
-                verification_status: page.verification_status || null,
-                followers_count: page.followers_count || 0
-            }
-        }));
-
-        // 8. Procesar Instagram Business Accounts (separados)
-        const instagramBusinessAccounts = [];
-        allFacebookPages.forEach(page => {
-            if (page.instagram_business_account) {
-                const igAccount = page.instagram_business_account;
-                instagramBusinessAccounts.push({
-                    id: igAccount.id,
-                    name: igAccount.name || igAccount.username,
-                    username: igAccount.username,
-                    type: 'instagram_business',
-                    assetAvatarUrl: igAccount.profile_picture_url || null,
-                    linked_facebook_page: page.id, // Referencia a la página vinculada
-                    additionalData: {
-                        followers_count: igAccount.followers_count || 0,
-                        media_count: igAccount.media_count || 0,
-                        biography: igAccount.biography || null,
-                        username: igAccount.username
-                    }
-                });
-            }
-        });
-
-        // 9. Procesar cuentas publicitarias
-        const adAccounts = allAdAccounts.map(account => ({
-            id: account.id,
-            name: account.name,
-            type: 'ad_account',
-            assetAvatarUrl: null, // Las cuentas publicitarias no tienen avatar
-            additionalData: {
-                account_status: account.account_status || null,
-                currency: account.currency || null,
-                timezone_name: account.timezone_name || null,
-                business_name: account.business_name || null
-            }
-        }));
+        const authorizedAssets = await loadAuthorizedMetaAssets(metaConnection);
+        const facebookPages = authorizedAssets.facebook_pages.map(withoutMetaAccessToken);
+        const instagramBusinessAccounts = authorizedAssets.instagram_business.map(withoutMetaAccessToken);
+        const adAccounts = authorizedAssets.ad_accounts.map(withoutMetaAccessToken);
 
         // 10. Preparar respuesta final
         const response = {
@@ -2631,34 +3243,47 @@ router.get('/meta/assets', async (req, res) => {
  * Requiere que el usuario esté autenticado en tu app y tenga los roles adecuados.
  */
 router.post('/meta/map-assets', async (req, res) => {
-    const { userId, connection: metaConnection, scope } = await resolveMetaRequestConnection(req, {
-        allowLegacyUserFallback: true
-    });
-    if (!userId) {
-        return res.status(401).json({ message: 'Usuario no autenticado.' });
-    }
-
-    const { clinicaId, selectedAssets } = req.body; // selectedAssets es un array de { id, name, type, pageAccessToken (opcional) }
-
-    // TODO: AÑADIR LÓGICA DE ROLES/PERMISOS AQUÍ
-    // Verificar que el userId tiene permisos de administrador/propietario para clinicaId
-    // Esto es CRÍTICO para la seguridad y la lógica de negocio.
-    // Necesitarás una función que consulte tu base de datos de roles/permisos.
-    // Ejemplo:
-    // const userHasPermission = await checkUserRoleForClinica(userId, clinicaId, ['admin', 'propietario']);
-    // if (!userHasPermission) {
-    //     return res.status(403).json({ message: 'Permisos insuficientes para mapear activos a esta clínica.' });
-    // }
-
     try {
+        const userId = getUserIdFromToken(req);
+        if (!userId) {
+            return res.status(401).json({ message: 'Usuario no autenticado.' });
+        }
+        const clinicaId = Number.parseInt(String(req.body?.clinicaId ?? ''), 10);
+        const requestedAssets = Array.isArray(req.body?.selectedAssets) ? req.body.selectedAssets : [];
+        if (!Number.isInteger(clinicaId) || clinicaId <= 0) {
+            return res.status(400).json({ success: false, error: 'asset_mapping_clinic_required' });
+        }
+        if (!await requireAssetMappingClinicAccess(res, userId, [{ clinicaId }], 'write')) return;
+
+        const { connection: metaConnection } = await resolveMetaRequestConnection(req, {
+            allowLegacyUserFallback: true,
+            scopeInput: {
+                clinicIdRaw: clinicaId,
+                groupIdRaw: null,
+                assignmentScopeRaw: 'clinic'
+            }
+        });
         if (!metaConnection) {
             return res.status(404).json({ message: 'No hay conexión Meta activa para este usuario.' });
         }
+        const authorizedAssets = await loadAuthorizedMetaAssets(metaConnection);
+        const selectedAssets = selectAuthorizedMetaAssets(requestedAssets, authorizedAssets.all);
 
-        // Nota: actualizamos/creamos mapeos. Además, forzamos unicidad por tipo en casos clave
-        // (instagram_business) y limpiamos datos del activo desasociado.
+        // Cada tipo representa un único activo efectivo por clínica. Rechazamos
+        // selecciones ambiguas antes de realizar cualquier mutación.
+        const selectedCountByType = new Map();
+        for (const asset of selectedAssets) {
+            selectedCountByType.set(asset.type, (selectedCountByType.get(asset.type) || 0) + 1);
+        }
+        if (Array.from(selectedCountByType.values()).some((count) => count > 1)) {
+            throw inaccessibleAssetError(
+                'meta_asset_type_conflict',
+                'Solo puedes seleccionar un activo de cada tipo para una clínica.'
+            );
+        }
+
         const createdOrUpdated = [];
-        const selectedKeySet = new Set();
+        const selectedKeySet = new Set(selectedAssets.map((asset) => `${asset.type}|${asset.id}`));
         const selectedTypes = new Set(selectedAssets.map((asset) => asset?.type).filter(Boolean));
         const clinicsToSync = new Set();
         const clinicAssignmentCache = new Map();
@@ -2684,24 +3309,59 @@ router.post('/meta/map-assets', async (req, res) => {
             return resolved;
         }
 
-        // Traer mapeos actuales de la clínica del mismo usuario
+        // Traer todos los mapeos de la clínica. La conexión efectiva ya fue
+        // autorizada y el ID remoto se revalidó contra Meta.
         const existing = await ClinicMetaAsset.findAll({
-            where: { clinicaId, metaConnectionId: metaConnection.id }
+            where: { clinicaId }
         });
+        const toDeactivate = existing.filter((asset) => (
+            asset.isActive
+            && selectedTypes.has(asset.assetType)
+            && !selectedKeySet.has(`${asset.assetType}|${asset.metaAssetId}`)
+        ));
+        for (const asset of toDeactivate) {
+            await assertSharedMarketingAssetMutationAccess({
+                userId,
+                assetType: asset.assetType === 'ad_account'
+                    ? 'meta.ad_account'
+                    : asset.assetType === 'instagram_business'
+                        ? 'meta.instagram_business'
+                        : 'meta.facebook_page',
+                assetId: asset.id,
+                ownerClinicId: asset.clinicaId
+            });
+        }
+        for (const asset of selectedAssets) {
+            const found = existing.find((candidate) => (
+                candidate.assetType === asset.type
+                && candidate.metaAssetId === String(asset.id)
+            ));
+            if (found && Number(found.metaConnectionId) !== Number(metaConnection.id)) {
+                await assertSharedMarketingAssetMutationAccess({
+                    userId,
+                    assetType: found.assetType === 'ad_account'
+                        ? 'meta.ad_account'
+                        : found.assetType === 'instagram_business'
+                            ? 'meta.instagram_business'
+                            : 'meta.facebook_page',
+                    assetId: found.id,
+                    ownerClinicId: found.clinicaId
+                });
+            }
+        }
 
         // Actualizar o crear assets seleccionados
         for (const asset of selectedAssets) {
-            const key = `${asset.type}|${asset.id}`;
-            selectedKeySet.add(key);
-
             const { assignmentScope, grupoClinicaId } = await resolveAssignment(clinicaId);
 
             const found = existing.find(a => a.assetType === asset.type && a.metaAssetId === String(asset.id));
             if (found) {
                 await found.update({
+                    metaConnectionId: metaConnection.id,
                     metaAssetName: asset.name,
                     pageAccessToken: asset.pageAccessToken || found.pageAccessToken || null,
                     assetAvatarUrl: asset.assetAvatarUrl || found.assetAvatarUrl || null,
+                    additionalData: asset.additionalData || null,
                     assignmentScope,
                     grupoClinicaId,
                     isActive: true
@@ -2716,6 +3376,7 @@ router.post('/meta/map-assets', async (req, res) => {
                     metaAssetName: asset.name,
                     assetAvatarUrl: asset.assetAvatarUrl || null,
                     pageAccessToken: asset.pageAccessToken || null,
+                    additionalData: asset.additionalData || null,
                     assignmentScope,
                     grupoClinicaId,
                     isActive: true
@@ -2737,138 +3398,13 @@ router.post('/meta/map-assets', async (req, res) => {
             }
         }
 
-        // Desactivar los que ya no estén seleccionados y limpiar sus datos
-        const toDeactivate = existing.filter((a) => {
-            if (!a.isActive) {
-                return false;
-            }
-            if (!selectedTypes.has(a.assetType)) {
-                return false;
-            }
-            return !selectedKeySet.has(`${a.assetType}|${a.metaAssetId}`);
-        });
+        // El histórico puede ser consumido por otras clínicas cuando el activo
+        // es compartido. Desactivamos el mapeo, pero no borramos caches globales.
         if (toDeactivate.length) {
             await ClinicMetaAsset.update({ isActive: false }, { where: { id: toDeactivate.map(a => a.id) } });
-            // Borrar datos asociados a IG/FB desactivados cuando aplica
-            const { SocialStatsDaily, SocialPosts, SocialPostStatsDaily } = db;
-            for (const a of toDeactivate) {
-                try {
-                    await SocialStatsDaily.destroy({ where: { clinica_id: clinicaId, asset_id: a.id } });
-                    await SocialPostStatsDaily.destroy({ where: { clinica_id: clinicaId, asset_id: a.id } });
-                    await SocialPosts.destroy({ where: { clinica_id: clinicaId, asset_id: a.id } });
-                    // Opcional: eliminar el mapeo físico si es IG (se solicitó borrar anteriores)
-                    if (a.assetType === 'instagram_business') {
-                        await ClinicMetaAsset.destroy({ where: { id: a.id } });
-                    }
-                } catch (cleanErr) {
-                    console.warn('⚠️ Error limpiando datos de activo desactivado', a.id, cleanErr.message);
-                }
-            }
-        }
-
-        // Enforce: solo 1 instagram_business activo por clínica
-        try {
-            const activeIGs = await ClinicMetaAsset.findAll({ where: { clinicaId, assetType: 'instagram_business', isActive: true } });
-            if (activeIGs.length > 1) {
-                // Conservar el IG que venga en selectedAssets (el primero) o el más reciente
-                const selectedIGIds = selectedAssets.filter((a) => a.type === 'instagram_business').map((a) => String(a.id));
-                let keep = null;
-                if (selectedIGIds.length) {
-                    keep = activeIGs.find(a => selectedIGIds.includes(String(a.metaAssetId))) || activeIGs[0];
-                } else {
-                    keep = activeIGs[0];
-                }
-                const toDrop = activeIGs.filter(a => a.id !== keep.id);
-                if (toDrop.length) {
-                    await ClinicMetaAsset.update({ isActive: false }, { where: { id: toDrop.map(a => a.id) } });
-                    const { SocialStatsDaily, SocialPosts, SocialPostStatsDaily } = db;
-                    for (const a of toDrop) {
-                        try {
-                            await SocialStatsDaily.destroy({ where: { clinica_id: clinicaId, asset_id: a.id } });
-                            await SocialPostStatsDaily.destroy({ where: { clinica_id: clinicaId, asset_id: a.id } });
-                            await SocialPosts.destroy({ where: { clinica_id: clinicaId, asset_id: a.id } });
-                            await ClinicMetaAsset.destroy({ where: { id: a.id } });
-                        } catch (e) {
-                            console.warn('⚠️ Error limpiando datos IG duplicado', a.id, e.message);
-                        }
-                    }
-                }
-            }
-        } catch (enfErr) {
-            console.warn('⚠️ No se pudo forzar unicidad de Instagram por clínica:', enfErr.message);
-        }
-
-        // Enforce: solo 1 facebook_page activo por clínica
-        try {
-            const activeFB = await ClinicMetaAsset.findAll({ where: { clinicaId, assetType: 'facebook_page', isActive: true } });
-            if (activeFB.length > 1) {
-                const selectedFBIds = selectedAssets.filter((a) => a.type === 'facebook_page').map((a) => String(a.id));
-                let keep = activeFB[0];
-                if (selectedFBIds.length) keep = activeFB.find(a => selectedFBIds.includes(String(a.metaAssetId))) || activeFB[0];
-                const toDrop = activeFB.filter(a => a.id !== keep.id);
-                if (toDrop.length) {
-                    await ClinicMetaAsset.update({ isActive: false }, { where: { id: toDrop.map(a => a.id) } });
-                    const { SocialStatsDaily, SocialPosts, SocialPostStatsDaily } = db;
-                    for (const a of toDrop) {
-                        try {
-                            await SocialStatsDaily.destroy({ where: { clinica_id: clinicaId, asset_id: a.id } });
-                            await SocialPostStatsDaily.destroy({ where: { clinica_id: clinicaId, asset_id: a.id } });
-                            await SocialPosts.destroy({ where: { clinica_id: clinicaId, asset_id: a.id } });
-                            await ClinicMetaAsset.destroy({ where: { id: a.id } });
-                        } catch (e) {
-                            console.warn('⚠️ Error limpiando datos FB duplicado', a.id, e.message);
-                        }
-                    }
-                }
-            }
-        } catch (enfErr) {
-            console.warn('⚠️ No se pudo forzar unicidad de Facebook Page por clínica:', enfErr.message);
-        }
-
-        // Enforce: solo 1 ad_account activo por clínica
-        try {
-            const activeAD = await ClinicMetaAsset.findAll({ where: { clinicaId, assetType: 'ad_account', isActive: true } });
-            if (activeAD.length > 1) {
-                const selectedADIds = selectedAssets.filter((a) => a.type === 'ad_account').map((a) => String(a.id));
-                let keep = activeAD[0];
-                if (selectedADIds.length) keep = activeAD.find(a => selectedADIds.includes(String(a.metaAssetId))) || activeAD[0];
-                const toDrop = activeAD.filter(a => a.id !== keep.id);
-                if (toDrop.length) {
-                    await ClinicMetaAsset.update({ isActive: false }, { where: { id: toDrop.map(a => a.id) } });
-                    const { SocialAdsInsightsDaily, SocialAdsActionsDaily } = db;
-                    for (const a of toDrop) {
-                        try {
-                            // Borrar datos de Ads vinculados al ad_account eliminado
-                            await SocialAdsInsightsDaily.destroy({ where: { ad_account_id: a.metaAssetId } });
-                            await SocialAdsActionsDaily.destroy({ where: { ad_account_id: a.metaAssetId } });
-                            await ClinicMetaAsset.destroy({ where: { id: a.id } });
-                        } catch (e) {
-                            console.warn('⚠️ Error limpiando datos Ads duplicado', a.id, e.message);
-                        }
-                    }
-                }
-            }
-        } catch (enfErr) {
-            console.warn('⚠️ No se pudo forzar unicidad de Ad Account por clínica:', enfErr.message);
         }
 
         console.log(`✅ Mapeo actualizado para clínica ${clinicaId}: ${createdOrUpdated.length} activos activos, ${toDeactivate.length} inactivos (unicidad aplicada para IG/FB/Ads)`);
-
-        const assignmentScope = scope?.assignmentScope || 'clinic';
-        const assignmentClinicId = Number(clinicaId) || scope?.clinicId || null;
-        const assignmentGroupId = assignmentScope === 'group' ? (scope?.groupId || null) : null;
-        if (assignmentClinicId || assignmentGroupId) {
-            await upsertMetaAssignment({
-                connection: metaConnection,
-                scope: {
-                    clinicId: assignmentClinicId,
-                    groupId: assignmentGroupId,
-                    assignmentScope,
-                    scopeKey: buildScopeKey(assignmentScope, assignmentScope === 'group' ? assignmentGroupId : assignmentClinicId)
-                },
-                authorizedByUserId: userId
-            });
-        }
 
         const clinicIds = Array.from(clinicsToSync).filter((id) => Number.isInteger(id));
         if (clinicIds.length) {
@@ -2888,23 +3424,16 @@ router.post('/meta/map-assets', async (req, res) => {
             }
         }
 
-        // Disparar sincronización inicial SOLO del día actual (sin histórico)
-        try {
-            const { triggerInitialSync } = require('../controllers/metasync.controller');
-            triggerInitialSync(clinicaId);
-        } catch (err) {
-            console.error('⚠️ No se pudo iniciar la sincronización inicial del día:', err);
-        }
-
         res.status(200).json({
             message: 'Activos de Meta mapeados correctamente.',
-            assets: createdOrUpdated,
+            assets: createdOrUpdated.map(withoutMetaAccessToken),
             replacedMappings: false,
             totalActiveMappings: createdOrUpdated.length,
             totalDeactivated: toDeactivate.length
         });
 
     } catch (error) {
+        if (sendKnownOAuthMappingError(res, error)) return;
         const sequelizeDetails = Array.isArray(error?.errors)
             ? error.errors.map((item) => item?.message).filter(Boolean)
             : [];
@@ -2933,21 +3462,7 @@ router.get('/test', (req, res) => {
  * Función auxiliar para obtener el userId del token JWT
  */
 const getUserIdFromToken = (req) => {
-    try {
-        const authHeader = req.headers.authorization;
-        if (authHeader && authHeader.startsWith('Bearer ')) {
-            const token = authHeader.substring(7); // Remover 'Bearer ' del inicio
-            if (token) {
-                // Usar la misma clave que se usa en auth.controllers.js ✅
-                const decoded = jwt.verify(token, process.env.JWT_SECRET); // ✅ Usar variable de entorno
-                console.log('🔍 Token JWT decodificado para connection-status:', decoded);
-                return decoded.userId; // El campo correcto según auth.controllers.js
-            }
-        }
-    } catch (error) {
-        console.error("❌ Error decodificando JWT:", error);
-    }
-    return null;
+    return req.userData?.userId || null;
 };
 
 /**
@@ -2982,7 +3497,7 @@ router.get('/meta/mappings', async (req, res) => {
         }
         
         // ✅ CORREGIDO: Obtener todos los mapeos activos del usuario con nombres de columna correctos
-        const mappings = await ClinicMetaAsset.findAll({
+        const allMappings = await ClinicMetaAsset.findAll({
             where: {
                 metaConnectionId: metaConnection.id,
                 isActive: true
@@ -2996,6 +3511,12 @@ router.get('/meta/mappings', async (req, res) => {
             ],
             order: [['clinicaId', 'ASC'], ['assetType', 'ASC']]
         });
+        const mappings = await filterReadableClinicMappings(
+            req,
+            userId,
+            allMappings,
+            (mapping) => mapping.clinicaId
+        );
         
         // Agrupar mapeos por clínica
         const mappingsByClinica = {};
@@ -3019,16 +3540,15 @@ router.get('/meta/mappings', async (req, res) => {
                 };
             }
             
-            const assetData = {
+            const assetData = withoutMetaAccessToken({
                 id: mapping.id,
                 metaAssetId: mapping.metaAssetId,
                 metaAssetName: mapping.metaAssetName,
                 assetType: mapping.assetType,
-                pageAccessToken: mapping.pageAccessToken,
                 additionalData: mapping.additionalData,
                 createdAt: mapping.createdAt,
                 updatedAt: mapping.updatedAt
-            };
+            });
             
             // Agregar a la categoría correspondiente
             switch (mapping.assetType) {
@@ -3084,39 +3604,38 @@ router.delete('/meta/mappings/:mappingId', async (req, res) => {
     }
 
     try {
-        const { userId, connection: metaConnection } = await resolveMetaRequestConnection(req, {
-            allowLegacyUserFallback: true
-        });
+        const userId = getUserIdFromToken(req);
         if (!userId) {
             return res.status(401).json({ success: false, error: 'Usuario no autenticado' });
         }
-        if (!metaConnection) {
-            return res.status(404).json({ success: false, error: 'Usuario no conectado a Meta' });
-        }
-
-        const mapping = await ClinicMetaAsset.findOne({
-            where: { id: mappingId, metaConnectionId: metaConnection.id }
-        });
-
+        const mapping = await ClinicMetaAsset.findByPk(mappingId);
         if (!mapping) {
             return res.status(404).json({ success: false, error: 'Mapeo no encontrado' });
         }
+        if (!await requireSingleMappingClinicWrite(res, userId, mapping.clinicaId)) return;
 
         const plain = mapping.get({ plain: true });
         const clinicaId = plain.clinicaId;
         const assetType = plain.assetType;
-        const metaAssetId = plain.metaAssetId;
 
         const transaction = await db.sequelize.transaction();
         try {
+            const sharedAssetType = assetType === 'ad_account'
+                ? 'meta.ad_account'
+                : assetType === 'instagram_business'
+                    ? 'meta.instagram_business'
+                    : 'meta.facebook_page';
+            await assertSharedMarketingAssetMutationAccess({
+                userId,
+                assetType: sharedAssetType,
+                assetId: mappingId,
+                ownerClinicId: clinicaId,
+                transaction
+            });
             await GroupAssetClinicAssignment.destroy({
                 where: {
                     assetId: mappingId,
-                    assetType: assetType === 'ad_account'
-                        ? 'meta.ad_account'
-                        : assetType === 'instagram_business'
-                            ? 'meta.instagram_business'
-                            : 'meta.facebook_page'
+                    assetType: sharedAssetType
                 },
                 transaction
             });
@@ -3133,9 +3652,6 @@ router.delete('/meta/mappings/:mappingId', async (req, res) => {
                 await SocialStatsDaily.destroy({ where: { clinica_id: clinicaId, asset_id: mappingId } });
                 await SocialPostStatsDaily.destroy({ where: { clinica_id: clinicaId, asset_id: mappingId } });
                 await SocialPosts.destroy({ where: { clinica_id: clinicaId, asset_id: mappingId } });
-            } else if (assetType === 'ad_account') {
-                await SocialAdsInsightsDaily.destroy({ where: { ad_account_id: metaAssetId } });
-                await SocialAdsActionsDaily.destroy({ where: { ad_account_id: metaAssetId } });
             }
         } catch (cleanupErr) {
             console.warn('⚠️ Error limpiando datos asociados al mapeo Meta eliminado:', cleanupErr.message);
@@ -3160,6 +3676,7 @@ router.delete('/meta/mappings/:mappingId', async (req, res) => {
 
         return res.json({ success: true });
     } catch (error) {
+        if (sendKnownOAuthMappingError(res, error)) return;
         console.error('❌ Error eliminando mapeo de Meta:', error);
         return res.status(500).json({ success: false, error: 'Error interno del servidor' });
     }
@@ -3200,56 +3717,29 @@ router.delete('/meta/disconnect', async (req, res) => {
                 });
             }
 
-            if (scope.assignmentScope === 'clinic' && scope.clinicId) {
-                await ClinicMetaAsset.destroy({
-                    where: { clinicaId: scope.clinicId }
-                });
-            }
-
-            if (scope.assignmentScope === 'group' && scope.groupId) {
-                const clinicIds = await getClinicIdsForGroup(scope.groupId);
-                if (clinicIds.length) {
-                    await ClinicMetaAsset.destroy({
-                        where: { clinicaId: { [Op.in]: clinicIds } }
-                    });
-                    await MetaConnectionAssignment.update(
-                        {
-                            status: 'disconnected',
-                            lastValidatedAt: new Date(),
-                            lastErrorCode: 'DISCONNECTED_BY_USER',
-                            lastErrorMessage: 'Disconnected from group settings'
-                        },
-                        {
-                            where: {
-                                [Op.or]: [
-                                    { scopeKey: scope.scopeKey },
-                                    { clinicaId: { [Op.in]: clinicIds } }
-                                ]
-                            }
-                        }
-                    );
-                }
-                await ClinicMetaAsset.destroy({
-                    where: { grupoClinicaId: scope.groupId, assignmentScope: 'group' }
-                });
-            }
-
             const connectionId = connection?.id || assignment?.metaConnectionId || null;
             if (connectionId) {
-                await MetaConnectionAssignment.upsert({
-                    scopeKey: scope.scopeKey,
-                    assignmentScope: scope.assignmentScope,
-                    clinicaId: scope.assignmentScope === 'clinic' ? scope.clinicId : null,
-                    grupoClinicaId: scope.groupId || null,
-                    metaConnectionId: connectionId,
-                    status: 'disconnected',
-                    authorizedByUserId: userId,
-                    authorizedByName: connection?.userName || assignment?.authorizedByName || null,
-                    authorizedByEmail: connection?.userEmail || assignment?.authorizedByEmail || null,
-                    connectedAt: assignment?.connectedAt || connection?.updatedAt || connection?.createdAt || new Date(),
-                    lastValidatedAt: new Date(),
-                    lastErrorCode: 'DISCONNECTED_BY_USER',
-                    lastErrorMessage: 'Disconnected from scope settings'
+                await db.sequelize.transaction(async (transaction) => {
+                    await deactivateMetaMappingsForScope({
+                        scope,
+                        connectionId,
+                        transaction
+                    });
+                    await MetaConnectionAssignment.upsert({
+                        scopeKey: scope.scopeKey,
+                        assignmentScope: scope.assignmentScope,
+                        clinicaId: scope.assignmentScope === 'clinic' ? scope.clinicId : null,
+                        grupoClinicaId: scope.groupId || null,
+                        metaConnectionId: connectionId,
+                        status: 'disconnected',
+                        authorizedByUserId: userId,
+                        authorizedByName: connection?.userName || assignment?.authorizedByName || null,
+                        authorizedByEmail: connection?.userEmail || assignment?.authorizedByEmail || null,
+                        connectedAt: assignment?.connectedAt || connection?.updatedAt || connection?.createdAt || new Date(),
+                        lastValidatedAt: new Date(),
+                        lastErrorCode: 'DISCONNECTED_BY_USER',
+                        lastErrorMessage: 'Disconnected from scope settings'
+                    }, { transaction });
                 });
             }
 
@@ -3261,7 +3751,13 @@ router.delete('/meta/disconnect', async (req, res) => {
 
         console.log('🔍 Eliminando conexión Meta para userId:', userId);
 
-        const connection = await MetaConnection.findOne({ where: { userId: userId } });
+        const { connection, ambiguous } = await findSingleUserConnection(MetaConnection, userId);
+        if (ambiguous) {
+            const conflict = new Error('Hay varias conexiones Meta; indica la clínica o el grupo que quieres desconectar.');
+            conflict.code = 'connection_scope_required';
+            conflict.httpStatus = 409;
+            throw conflict;
+        }
         if (!connection) {
             console.log('⚠️ No se encontró conexión Meta para eliminar');
             return res.json({
@@ -3270,9 +3766,22 @@ router.delete('/meta/disconnect', async (req, res) => {
             });
         }
 
-        await MetaConnectionAssignment.destroy({
-            where: { metaConnectionId: connection.id }
-        });
+        const [activeAssignments, mappings] = await Promise.all([
+            MetaConnectionAssignment.count({
+                where: {
+                    metaConnectionId: connection.id,
+                    status: { [Op.in]: ['active', 'reauthorization_required'] }
+                }
+            }),
+            ClinicMetaAsset.count({ where: { metaConnectionId: connection.id } })
+        ]);
+        if (activeAssignments + mappings > 0) {
+            const conflict = new Error('La conexión sigue en uso por uno o más scopes o mappings. Desconéctalos de forma individual.');
+            conflict.code = 'connection_in_use';
+            conflict.httpStatus = 409;
+            throw conflict;
+        }
+        await MetaConnectionAssignment.destroy({ where: { metaConnectionId: connection.id } });
         await connection.destroy();
 
         console.log('✅ Conexión Meta eliminada correctamente');
@@ -3282,6 +3791,7 @@ router.delete('/meta/disconnect', async (req, res) => {
         });
         
     } catch (error) {
+        if (sendKnownOAuthMappingError(res, error)) return;
         console.error('❌ Error eliminando conexión Meta:', error);
         res.status(500).json({
             success: false,
@@ -3300,7 +3810,10 @@ module.exports = router;
  */
 router.get('/meta/mappings/:clinicaId', async (req, res) => {
     try {
-        const { clinicaId } = req.params;
+        const clinicaId = Number.parseInt(String(req.params.clinicaId || ''), 10);
+        if (!Number.isInteger(clinicaId) || clinicaId <= 0) {
+            return res.status(400).json({ success: false, error: 'clinic_id_invalid' });
+        }
         console.log(`🔍 Obteniendo mapeos de Meta para clínica ${clinicaId}...`);
         
         // Obtener el userId del token JWT
@@ -3313,12 +3826,25 @@ router.get('/meta/mappings/:clinicaId', async (req, res) => {
                 error: 'Usuario no autenticado'
             });
         }
+        const allowed = await hasMarketingClinicScopeAccess({
+            userId,
+            clinicIds: [clinicaId],
+            access: 'read'
+        });
+        if (!allowed) {
+            return res.status(403).json({ success: false, error: 'asset_mapping_scope_forbidden' });
+        }
         
         console.log(`🔍 Buscando mapeos para userId: ${userId}, clinicaId: ${clinicaId}`);
         
         // Buscar conexión Meta del usuario
-        const metaConnection = await MetaConnection.findOne({
-            where: { userId: userId }
+        const { connection: metaConnection } = await resolveMetaRequestConnection(req, {
+            allowLegacyUserFallback: true,
+            scopeInput: {
+                clinicIdRaw: clinicaId,
+                groupIdRaw: null,
+                assignmentScopeRaw: 'clinic'
+            }
         });
         
         if (!metaConnection) {
@@ -3333,7 +3859,7 @@ router.get('/meta/mappings/:clinicaId', async (req, res) => {
         const mappings = await ClinicMetaAsset.findAll({
             where: {
                 metaConnectionId: metaConnection.id,
-                clinicaId: parseInt(clinicaId),
+                clinicaId,
                 isActive: true
             },
             include: [
@@ -3358,7 +3884,7 @@ router.get('/meta/mappings/:clinicaId', async (req, res) => {
         
         // Estructurar datos por tipo de activo
         const clinicaData = {
-            id: mappings[0].clinica?.id_clinica || parseInt(clinicaId),
+            id: mappings[0].clinica?.id_clinica || clinicaId,
             nombre: mappings[0].clinica?.nombre_clinica || `Clínica ${clinicaId}`,
             avatar_url: mappings[0].clinica?.url_avatar || null
         };
@@ -3370,18 +3896,17 @@ router.get('/meta/mappings/:clinicaId', async (req, res) => {
         };
         
         mappings.forEach(mapping => {
-            const assetData = {
+            const assetData = withoutMetaAccessToken({
                 id: mapping.id,
                 metaAssetId: mapping.metaAssetId,
                 metaAssetName: mapping.metaAssetName,
                 assetType: mapping.assetType,
                 assetAvatarUrl: mapping.assetAvatarUrl,
-                pageAccessToken: mapping.pageAccessToken,
                 additionalData: mapping.additionalData,
                 createdAt: mapping.createdAt,
                 // ✅ AÑADIDO: URL para usar como enlace
                 assetUrl: generateAssetUrl(mapping.assetType, mapping.metaAssetId, mapping.additionalData)
-            };
+            });
             
             switch (mapping.assetType) {
                 case 'facebook_page':

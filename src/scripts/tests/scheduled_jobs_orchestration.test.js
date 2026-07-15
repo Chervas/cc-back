@@ -4,6 +4,8 @@ const assert = require('assert/strict');
 const fs = require('fs');
 const path = require('path');
 const { Op } = require('sequelize');
+process.env.JOBS_AUTO_START = 'false';
+process.env.RUNTIME_ROLE = 'gateway';
 const db = require('../../../models');
 const {
   SCHEDULED_JOB_DEFINITIONS,
@@ -73,6 +75,18 @@ function testCatalogCoversEveryCronAndExecutor() {
   assert.match(controllerSource, /enqueueUniqueJobRequest/);
   assert.match(controllerSource, /SCHEDULED_JOB_DEFINITIONS/);
 
+  const competitionControllerSource = fs.readFileSync(
+    path.resolve(__dirname, '../../controllers/marketingCompetition.controller.js'),
+    'utf8'
+  );
+  const competitionRefreshStart = competitionControllerSource.indexOf('exports.refreshCompetition');
+  const competitionHeatmapStart = competitionControllerSource.indexOf('exports.getLocalHeatmap', competitionRefreshStart);
+  const competitionRefreshBody = competitionControllerSource.slice(competitionRefreshStart, competitionHeatmapStart);
+  assert.match(competitionRefreshBody, /enqueueUniqueJobRequest/);
+  assert.match(competitionRefreshBody, /type: 'competition_refresh'/);
+  assert.match(competitionRefreshBody, /clinicIds: scopeClinicIds/);
+  assert.doesNotMatch(competitionRefreshBody, /competitionService\.refreshCompetition/);
+
   const targetedWebStart = controllerSource.indexOf('exports.runTargetedWebBackfill');
   const targetedAnalyticsStart = controllerSource.indexOf('exports.runTargetedAnalyticsBackfill');
   const targetedWebBody = controllerSource.slice(targetedWebStart, targetedAnalyticsStart);
@@ -83,6 +97,8 @@ function testCatalogCoversEveryCronAndExecutor() {
   assert.doesNotMatch(targetedAnalyticsBody, /type: 'analytics_backfill'/);
   assert.equal(typeof jobExecutor.JOB_HANDLERS.web_backfill_for_sites, 'function');
   assert.equal(typeof jobExecutor.JOB_HANDLERS.analytics_backfill_properties, 'function');
+  assert.equal(typeof jobExecutor.JOB_HANDLERS.marketing_competition_heatmap_refresh, 'function');
+  assert.ok(BACKGROUND_INTEGRATION_JOB_TYPES.includes('marketing_competition_heatmap_refresh'));
 
   const oauthSource = fs.readFileSync(path.resolve(__dirname, '../../routes/oauth.routes.js'), 'utf8');
   const analyticsMappingStart = oauthSource.indexOf("router.post('/google/analytics/map-properties'");
@@ -120,6 +136,7 @@ async function testTargetedHandlersKeepTheirExactMappings() {
     executeWebBackfillForSites: metaSyncJobs.executeWebBackfillForSites,
     executeAnalyticsBackfillForProperties: metaSyncJobs.executeAnalyticsBackfillForProperties,
     executeBusinessProfileBackfillForLocations: metaSyncJobs.executeBusinessProfileBackfillForLocations,
+    executeCompetitionHeatmapRefresh: metaSyncJobs.executeCompetitionHeatmapRefresh,
   };
   const received = {};
   metaSyncJobs.executeAdsBackfill = async (payload) => {
@@ -138,6 +155,10 @@ async function testTargetedHandlersKeepTheirExactMappings() {
     received.business = mappings;
     return { status: 'completed' };
   };
+  metaSyncJobs.executeCompetitionHeatmapRefresh = async (payload) => {
+    received.heatmap = payload;
+    return { status: 'completed' };
+  };
 
   const webMappings = [{ clinicId: 55, siteUrl: 'https://example.test/' }];
   const analyticsMappings = [{ clinicId: 55, propertyId: 123 }];
@@ -150,12 +171,14 @@ async function testTargetedHandlersKeepTheirExactMappings() {
     await jobExecutor.JOB_HANDLERS.web_backfill_for_sites({ mappings: webMappings });
     await jobExecutor.JOB_HANDLERS.analytics_backfill_properties({ mappings: analyticsMappings });
     await jobExecutor.JOB_HANDLERS.business_profile_backfill_locations({ mappings: businessMappings });
+    await jobExecutor.JOB_HANDLERS.marketing_competition_heatmap_refresh({ cacheKey: 'heatmap-cache' });
 
     assert.deepEqual(received.ads.clinicIds, [55, 56]);
     assert.equal(received.ads.windowDays, 30);
     assert.deepEqual(received.web, webMappings);
     assert.deepEqual(received.analytics, analyticsMappings);
     assert.deepEqual(received.business, businessMappings);
+    assert.deepEqual(received.heatmap, { cacheKey: 'heatmap-cache' });
     await assert.rejects(
       () => jobExecutor.JOB_HANDLERS.meta_ads_backfill_for_sites({}),
       /requires mappings or clinicIds/

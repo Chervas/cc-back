@@ -7,6 +7,100 @@ Runbooks operativos backend: `back-dev/docs/README.md`, con acceso directo a Dat
 
 ---
 
+## 2026-07-15 - Informes sin mock, Perfil Google agregado y heatmap local gobernado
+
+Este corte endurece `Marketing > Informes`, completa el lector operativo de Google Business Profile y deja preparada una medición local durable/coste-controlada detrás de un gate contractual. El contrato de producto ampliado está en `cc-front/src/Documentacion/20.7-marketing-fase7-informes.md`; el contrato transversal de ownership está en `20.13`.
+
+### Informes y ACL de Marketing
+
+- `GET /api/marketing/reports/overview` sigue siendo el agregado del resumen. El frontend ya no sustituye un error por KPIs mock: muestra error o vacío real.
+- Los controladores de Informes y Competencia exigen autenticación y validan lectura/escritura contra el scope de Marketing. Una `clinica_id` del body o query no es autorización.
+- `marketingReports.controller.js` continúa resolviendo Google Ads, Meta, Search Console, GA4, social y Perfil Google con `resolveEffectiveMarketingAssetInventory`. Conexión, sync y presencia de datos son señales independientes.
+- En vistas multiubicación de Perfil Google, las métricas se eligen por ubicación+día: se usa el agregado `TOTAL`/canónico si existe y solo se suman componentes Maps/Search o desktop/móvil cuando falta. Después se suman las ubicaciones; nunca se elige el fallback globalmente para todo el scope.
+
+### API local agregada de Perfil Google
+
+Todas las rutas `/api/local/clinica/:clinicaId/*` pasan por JWT y `hasMarketingClinicScopeAccess`. El middleware resuelve una vez las ubicaciones efectivas con `resolveEffectiveMarketingAssetInventory`; una ficha heredada/asignada se consume igual que en Informes. Las escrituras requieren `access=write` sobre la clínica solicitante y, si el activo es compartido/grupal, sobre su propietaria y todas las clínicas consumidoras; si falta una, responde `409 business_profile_asset_in_use` sin mutar Google.
+
+| Endpoint | Contrato |
+|:---|:---|
+| `GET /status` | Activo efectivo y estado saneado. No devuelve `raw_payload`; `purpose=reviews` es la única ruta que puede aplicar el alias de reseñas. |
+| `GET /dashboard` | Agrega `status`, `overview`, `timeseries`, `seasonality`, `reviews`, `posts`, `content` y `reviewInsights`. Usa `Promise.allSettled`: `partial=true` identifica las secciones fallidas sin perder las sanas. |
+| `GET /overview` | Rango actual/anterior, métricas de visibilidad/acciones y resumen de reseñas. |
+| `GET /timeseries` | Serie diaria para una métrica permitida. |
+| `GET /seasonality` | Serie mensual de 6 a 36 meses e insight de mejor/peor mes. |
+| `GET /reviews` | Paginación real `limit/offset`; filtros `rating`, `unreplied` y `negative`; excluye `raw_payload`. |
+| `GET /posts` | Paginación real `limit/offset`; excluye `raw_payload`. |
+| `GET /content` | Servicios de `serviceItems` y galería de la Media API, normalizados para UI. |
+| `GET /review-insights` | Heatmaps invierno/verano de respuestas privadas ClinicaClick y proyección de reseñas 5 estrellas para la media pública. |
+| `POST /photos` | Publica en Google un `PublicMediaAsset` público/no clínico del mismo scope; nunca consume una URL arbitraria del body. |
+
+La publicación de foto valida asset activo, `scope_type=clinic`, `clinica_id`, `sensitivity=public`, MIME `image/*`, `purpose=marketing_image`, `owner_type=google_business_profile_media` y metadata `non_clinical_asserted=true`; además rechaza defensivamente `patient_data_in_public_media`/`patient_name_present`, de modo que una imagen personalizada de WhatsApp nunca pueda reutilizarse en Google. El frontend debe pedir una confirmación explícita por cada imagen pública y solo entonces crear el asset con esa declaración; nunca la afirma automáticamente. Resuelve/renueva el token de la conexión efectiva y usa Media API v4 con una categoría permitida (`ADDITIONAL`, `COVER`, `PROFILE`, `LOGO`, `EXTERIOR`, `INTERIOR`, `PRODUCT`, `AT_WORK`, `TEAMS`). `COVER` se publica sin `description`. La lectura conserva la atribución que devuelve Google (`profileName`, foto/perfil y `takedownUrl`) y la UI debe mostrarla junto a la imagen cuando exista.
+
+### Sync GBP y consistencia
+
+- El `readMask` de Business Information incluye datos operativos, `serviceItems` ([contrato oficial de servicios](https://developers.google.com/my-business/content/services)) y `latlng`. El sync completo refresca detalles, métricas, reseñas, posts y media; conserva timestamps independientes `clinicaclick_*_synced_at` para no declarar actualizado un bloque cuyo proveedor falló.
+- La verificación usa `metadata.hasVoiceOfMerchant`, el campo canónico de Business Information; `verificationState`/`verificationStatus` quedan solo como fallback de snapshots legacy. Si es `false`, el diagnóstico ampliado debe venir de Verifications `getVoiceOfMerchantState`, no inventarse a partir de campos inexistentes.
+- Servicios permanecen dentro de los detalles de la ubicación; la lista de Media API se conserva como `clinicaclick_media_items`. La respuesta HTTP proyecta solo campos seguros/útiles.
+- La sync incremental de reseñas corre cada 15 minutos, limita páginas y solo encola conciliación para reseñas nuevas/cambiadas. La sync completa pagina todo el inventario y reconcilia reseñas que Google ya no devuelve; el borrado no se ejecuta sobre una lectura incremental o incompleta.
+- Las actualizaciones parciales de `raw_payload` se fusionan bajo lock/transacción o escritura JSON atómica. Detalles, media, timestamps y publicación de foto no deben sobrescribirse entre sí con una snapshot antigua del JSON.
+- La misma conexión/token se reutiliza dentro de la pasada para reducir refreshes OAuth. Un fallo auxiliar de servicios/media se registra por bloque y no impide conservar métricas/reseñas que sí terminaron.
+
+`BusinessProfileDailyMetrics` queda endurecida por la migración `20260715151000-dedupe-business-profile-daily-metrics.js`:
+
+1. conserva por `business_location_id + metric_type + COALESCE(metric_subtype,'') + date` la fila con `updated_at` más reciente y, en empate, mayor `id`;
+2. normaliza `metric_subtype=NULL` a cadena vacía;
+3. crea `uniq_business_profile_metric_location_type_subtype_date`;
+4. el sync puede usar upsert idempotente sin volver a acumular duplicados.
+
+Esta migración debe ejecutarse **antes de reiniciar código nuevo**: el modelo ya declara `metric_subtype NOT NULL` y el upsert depende del índice único.
+
+### Competencia local: gate contractual, coste, caché y orquestación
+
+El producto opera en el EEE. El caso de uso de inteligencia competitiva/ranking local no figura entre los usos permitidos publicados para Places API en el EEE y el contenido Places no se persiste ni se combina con otra cartografía. Por defecto quedan a `false` `COMPETITION_GOOGLE_PLACES_COMPETITOR_USE_ALLOWED`, `COMPETITION_GOOGLE_PLACES_COMPETITOR_STORAGE_ALLOWED` y `COMPETITION_LOCAL_RANKING_STORAGE_ALLOWED`. Tener `GOOGLE_PLACES_API_KEY` no habilita nada por sí solo. Solo un acuerdo/licencia que cubra expresamente uso y almacenamiento permite encender los tres gates.
+
+Con los gates apagados, `suggestions` devuelve `COMPETITION_DISCOVERY_PROVIDER_REQUIRED`, el usuario puede dar de alta competidores manuales y `local-heatmap` devuelve `LOCAL_RANKING_PROVIDER_REQUIRED`. No se aceptan `source=google_places`, `google_place_id` ni `raw_place_payload` disfrazados de alta manual. La migración `20260715152000-purge-google-places-competition-content.js` elimina snapshots, payloads, URLs, coordenadas e identificadores Places anteriores, anonimiza/desactiva esas filas y vacía el caché de ranking. Es irreversible a propósito.
+
+Si en el futuro existe cobertura contractual, `GET /api/marketing/reports/competition/local-heatmap` seguirá sin invocarse en el render inicial. El usuario elegirá término y radio `1/3/5 km` y confirmará `Calcular mapa`. Cada punto usa Places Text Search con field mask mínimo, `rankPreference=RELEVANCE` y `locationBias` centrado en el punto. La UI dibuja una matriz abstracta: no descarga, persiste, reenvía ni sirve un raster de Google Static Maps y no mezcla contenido Places con OpenStreetMap. Cuando haya contenido vivo de Google, conserva la atribución exacta `Google Maps` y explica que es una estimación, no una posición exacta/garantizada de Google Search.
+
+La migración `20260715150000-create-marketing-competition-heatmap-cache.js` crea `MarketingCompetitionHeatmapCaches`. La clave estable cubre scope, clínica primaria, identidad de ficha, término normalizado, zoom, cuadrícula y versión del algoritmo. La fila persiste payload, número de peticiones de proveedor, fechas, estado/error y lease:
+
+- `fresh`: desde la generación hasta 7 días; se devuelve sin proveedor;
+- `stale`: desde 7 días hasta antes de 14; se devuelve inmediatamente y se encola una actualización;
+- `expired`: desde 14 días; requiere recálculo explícito y no se presenta como reciente;
+- fallo global/insuficiente del proveedor: 15 minutos `fresh` y una hora hasta expiración para amortiguar la caída, nunca la ventana normal de siete días.
+
+El refresco stale es `JobRequest.type=marketing_competition_heatmap_refresh`, prioridad baja/background, hasta 4 intentos y namespace del request. `TARGETED_INTEGRATION_JOB_TYPES` y `JOB_HANDLERS` lo registran en el scheduler común. La API obtiene un lease de 30 minutos y usa `enqueueUniqueJobRequest` por `cache_key`; el handler relee identidad/lease y persiste. No se permite `setImmediate`, un cron adicional ni continuar trabajo no auditable después de responder. Reinicios, reintentos, backoff y recuperación pertenecen a `JobRequests`.
+
+El refresco manual de competidores sigue el mismo principio: `POST /api/marketing/reports/competition/refresh` no llama a Meta/Google ni ejecuta navegador dentro de la petición. Encola/deduplica un `JobRequest.type=competition_refresh` con el scope y los competidores seleccionados, dispara al worker del namespace y responde `202`; el job semanal y el disparo manual comparten handler, auditoría, reintentos y recuperación.
+
+Para controlar coste/abuso:
+
+- término normalizado, con máximo de 160 caracteres por defecto;
+- hasta 12 identidades nuevas por clínica y hora y 60 filas activas por clínica por defecto; una identidad ya cacheada no consume un alta nueva;
+- matriz/profundidad acotadas y concurrencia baja;
+- umbral de al menos el 80 % de puntos válidos o el mínimo configurado antes de considerar el resultado una medición normal; con la cuadrícula por defecto se requieren 20 de 25;
+- `system_data_cleanup` elimina filas expiradas antiguas y versiones de algoritmo obsoletas;
+- añadir/editar/eliminar competidores no recalcula el mapa ni invalida silenciosamente la última medición.
+
+La detección best-effort de redes desde la web de un competidor también debe usar el helper de destino HTTP seguro: esquema público, resolución DNS validada/pinneada, redirects manuales revalidados, `proxy=false`, límite de tamaño y timeout. No se debe volver a hacer `axios.get(website_url)` directamente porque abriría SSRF mediante URL/redirect/DNS.
+
+Migraciones de este corte, con autorización separada (no ejecutar
+`db:migrate` en lote):
+
+1. `20260715150000-create-marketing-competition-heatmap-cache.js`;
+2. `20260715151000-dedupe-business-profile-daily-metrics.js`;
+3. `20260715151500-enable-multiple-oauth-connections.js`, solo después de
+   publicar el runtime multi-conexión en backend y gateway y pausar callbacks;
+4. `20260715152000-purge-google-places-competition-content.js`, únicamente con
+   aprobación operativa explícita por ser irreversible.
+
+Preflight de la base compartida a 2026-07-15 (debe repetirse justo antes): métricas GBP `22.231` filas, todas con subtipo `NULL`, un grupo duplicado; competencia `48/49` filas con `source/place_id` Google y `69` snapshots totales, de los que `68` quedarían afectados. La `1510` hace UPDATE+DDL y requiere comprobar carga/locks. La `1520` anonimiza/desactiva esas 48 filas y elimina los 68 snapshots afectados de forma irreversible: no se aplica por inercia con el resto, sino tras mostrar el conteo vigente y obtener aprobación operativa explícita.
+
+Referencias normativas: [Places API policies](https://developers.google.com/maps/documentation/places/web-service/policies), [Google Maps Platform EEA Terms](https://cloud.google.com/terms/maps-platform/eea), [EEA Places permitted uses](https://cloud.google.com/terms/maps-platform/eea-places-api-permitted-uses) y [Static Maps caching FAQ](https://developers.google.com/maps/faq#can-i-generate-a-map-image-using-the-maps-static-api-which-i-store-and-serve-from-my-website).
+
+Regresiones mínimas: `business_profile_local.test.js`, `marketing_competition_heatmap_cache.test.js`, `marketing_report_effective_assets.test.js`, `scheduled_jobs_orchestration.test.js` y `access_policy.test.js`.
+
 ## 2026-07-14 - Corte desplegado: jobs unificados, outbox de intake, Consent v5 y `Conecta y mejora`
 
 Release funcional staging: backend `9b82958`, promovido desde dev `ac994a0`; frontend `3c4593ae`, promovido desde dev `667c6a73` —cambio funcional `f9266f0a`—, build `8ca8e450c563e9ee`. Propdental continúa en `connect_only`; Piloto automático no está activo.
@@ -401,21 +495,21 @@ ClinicaClick Analytics V1:
 - `GET /api/marketing/reports/overview` prioriza `WebPageDaily` / `WebSessionDaily` para pageviews, sesiones y visitantes. GA4 queda como fuente opcional/fallback histórico.
 - `webEventsAggregate` recalcula agregados para una ventana reciente y limpia eventos brutos antiguos según `WEB_EVENTS_RETENTION_DAYS`.
 
-## 2026-04-21 - Informes de competencia local V1
+## 2026-04-21 - Informes de competencia local V1 (histórico, gobernado desde 2026-07-15)
 
-Se añade backend V1 para una futura subpestaña `Marketing > Informes > Competencia`.
+Se añadió backend V1 para `Marketing > Informes > Competencia`. El diseño técnico de Places descrito en este bloque solo puede ejecutarse tras los tres gates contractuales del corte 2026-07-15; en el EEE están apagados por defecto y la vía operativa es el alta manual.
 
 Principios:
 
-- Sugerir competidores locales en la primera configuración con Google Places.
+- Sugerencia automática: pausada por defecto en el EEE; `suggestions` devuelve acción de alta manual hasta conectar un proveedor/licencia compatible.
 - Para sugerir competidores es obligatorio tener una ficha local propia conectada o `Clinica.url_ficha_local` guardada. Si falta, `GET /competition/suggestions` devuelve `setup_required=true`, `setup_code=LOCAL_PROFILE_REQUIRED` y no ejecuta una búsqueda genérica.
 - Si hay ancla local pero no hay categoría/especialidad suficiente, devuelve `setup_code=LOCAL_CATEGORY_REQUIRED`. No se debe usar fallback a "clínica médica" porque genera ruido en clínicas nuevas.
 - Cuando hay ficha local conectada, la categoría/nombre de Google Business Profile tiene prioridad sobre disciplinas mixtas de la clínica para inferir la búsqueda inicial. Ejemplo: si una clínica tiene varias áreas pero su ficha local es `Podólogo`, la competencia se busca como podología, no como otra disciplina secundaria.
 - Las sugerencias excluyen la propia ficha local por `place_id` y por nombre normalizado. La propia clínica no debe aparecer como competidor sugerido aunque Google la devuelva en los primeros resultados.
-- `GET /competition` devuelve también `own_profile`, `ranking_terms` y `local_ranking`: ficha propia resuelta con Places, términos por especialidad/ciudad y posición estimada frente a competidores. No debe consultar Meta/Google Ads en vivo; lee snapshots persistidos y solo usa Places para ranking local, cubierto por caché corta.
-- `GET /competition/local-heatmap` calcula bajo demanda un mapa de calor local para una búsqueda y zoom (`1`, `3` o `5` km). El front lo lanza automáticamente en la primera carga con `1 km` y lo recalcula al cambiar búsqueda o alcance, sin botón manual. Para que cada tile represente realmente su zona, el backend elimina de la query efectiva la ubicación explícita (`clínica capilar en Alicante` -> `clínica capilar`) y usa Google Places `locationRestriction` rectangular por punto con `rankPreference=DISTANCE`; si la zona no devuelve resultados, cae puntualmente a `locationBias` como fallback. Por defecto mide matriz `5x5` y profundidad `20` resultados para diferenciar `Top 3`, `#4-#9`, `#10+` y `>20`. Devuelve posición, score y primeros resultados por punto. Si `Maps Static API` está habilitada en la misma key, el backend devuelve `map_image_data_url` en base64 para pintar el mapa real sin exponer la API key al navegador.
-- Caché runtime V1: el servicio mantiene caché en memoria con TTL e in-flight dedupe para evitar segunda consulta pesada y colapsar llamadas concurrentes. Se cachean listado (`COMPETITION_REPORT_CACHE_TTL_MS`, default 3 min), sugerencias (10 min), provider status (1 min), Places Search (6 h), Place Details/fotos (12 h), heatmap (6 h) y Static Maps (6 h). Las respuestas de heatmap exitosas sin `map_image_data_url` y los mapas estáticos fallidos no se cachean, para no conservar fondos esquemáticos por errores transitorios/configuración antigua. Mutaciones (`create/update/delete/refresh`) limpian la caché local del proceso. La fuente autoritativa siguen siendo snapshots persistidos; la caché no sustituye al cron. El `competition_refresh` fuerza detalles de Places frescos para no reescribir snapshots con datos cacheados.
-- Primera consulta optimizada: ranking local y heatmap ejecutan llamadas Google Places con concurrencia limitada (`COMPETITION_GOOGLE_CONCURRENCY`, default 3) para no hacer un bucle secuencial lento ni saturar cuota.
+- `GET /competition` devuelve `own_profile`, términos y datos manuales/snapshots autorizados. No consulta Meta/Google Ads en vivo. El ranking Places queda vacío mientras el gate contractual esté cerrado.
+- `GET /competition/local-heatmap` devuelve `LOCAL_RANKING_PROVIDER_REQUIRED` por defecto. Si un proveedor compatible queda autorizado, calcula o recupera bajo demanda una matriz local para una búsqueda y radio (`1`, `3` o `5` km); el front **no** la lanza en la primera carga ni al cambiar configuración. No existe `map_image_data_url`: el frontend dibuja un grid abstracto y solo muestra `Google Maps` como atribución cuando el resultado procede realmente de Google.
+- Caché preparada: `MarketingCompetitionHeatmapCaches` solo se lee/escribe con los gates de uso+almacenamiento activos. La clave cubre scope/ficha/término/radio/cuadrícula/algoritmo; dura 7 días `fresh` y hasta 14 `stale`. Un stale encola `marketing_competition_heatmap_refresh` con lease de 30 minutos/dedupe por clave y hasta 4 intentos. `system_data_cleanup` retira filas antiguas/versiones caducadas. La migración de purga deja cero contenido previo del proveedor.
+- Concurrencia: si el gate contractual se habilita, ranking y heatmap limitan las llamadas (`COMPETITION_GOOGLE_CONCURRENCY`, default 3); apagado, realizan cero llamadas Places.
 - Si la ficha propia no aparece en una búsqueda simulada, `aboveMe` y `belowMe` deben ir vacíos y se devuelve `visibleResults` con los resultados encontrados. No tiene sentido hablar de "por encima" o "por debajo" cuando la clínica no aparece.
 - Guardar solo competidores confirmados por el usuario.
 - Actualizar semanalmente por cron, no en cada render del informe.
@@ -432,50 +526,52 @@ Principios:
 - Google Ads Transparency:
   - No existe una API oficial de Google Ads para leer anuncios de competidores desde cuentas no autorizadas. Para competencia se consulta el Ads Transparency Center público mediante sus endpoints RPC (`SearchService/SearchSuggestions` y `SearchService/SearchCreatives`), con `X-Same-Domain`, `Referer` oficial y límites bajos.
   - No se lanza navegador/headless ni se hace scraping interactivo de la web. Esto evita carga de CPU, reduce riesgo operativo y permite ejecutar la captura solo en `competition_refresh`.
-  - Resolución: primero se buscan creatividades por dominio del competidor (`website_url`/Google Places). Si no hay dominio con anuncios, se buscan anunciantes por nombre/términos y se aceptan solo coincidencias con score mínimo.
+  - Resolución: primero se buscan creatividades por dominio confirmado manualmente del competidor. Si no hay dominio con anuncios, se buscan anunciantes por nombre/términos y se aceptan solo coincidencias con score mínimo.
   - Las creatividades se guardan en `MarketingCompetitorAdSnapshots` con `provider='google_ads_transparency'`. Se devuelven en `GET /competition` bajo `competitor.google_ads`.
   - Conteo: `ads_count` representa el total estimado de anuncios del anunciante cuando Google devuelve `upper_bound/lower_bound`. `active_ads` contiene solo el set visible recuperado para UI (`visible_ads_count`, por defecto 25). No confundir "25 creatividades visibles" con "25 anuncios totales".
   - Enlaces: cada creatividad mantiene `ad_snapshot_url` al anuncio concreto, pero `library_url/advertiser_url` deben apuntar al catálogo del anunciante para que el usuario vea todos los anuncios disponibles.
   - Media de Google: se priorizan imágenes `tpc.googlesyndication.com/archive/simgad`. Si el preview llega como `content.js`, se descarga solo para los primeros anuncios configurados y se extraen imágenes/vídeos aunque vengan dentro de contenido percent-encoded. Se filtran iconos/material assets (`fonts.gstatic.com`, `www.gstatic.com`, `googlematerialicons`) para no guardar iconos como creatividad. Los vídeos de YouTube se guardan como `external_video_url` con miniatura, no como descarga local.
   - Si Google cambia el contrato RPC o bloquea la consulta, se persiste `status=unavailable` para ese provider y la UI debe mostrar el enlace oficial o estado no disponible sin bloquear el informe.
 - El alta/edición de competidor acepta `meta_page_url`. Si la URL contiene un identificador de página, backend extrae automáticamente `meta_page_id` para consultar la página exacta de Meta Ads Library.
-- En cada refresco se intenta detectar perfiles sociales públicos del competidor desde Google Places, datos manuales y su web (`website_url`). Los perfiles se guardan en `raw_place_payload.clinicaclick_social_profiles` y se añaden a `meta_ads_search_terms` para mejorar la consulta oficial de Meta Ads Library. La detección es best-effort, con timeout bajo, máximo de páginas limitado, y no bloquea el refresco de Google Places.
+- En cada refresco se intenta detectar perfiles sociales públicos desde los datos manuales y la web confirmada (`website_url`). Los perfiles se guardan en el payload manual y se añaden a `meta_ads_search_terms` para mejorar la consulta oficial de Meta Ads Library. La detección es best-effort, con destino/redirect/DNS validados, timeout bajo y máximo de páginas limitado.
 - Los competidores se etiquetan con `relevance` frente a las disciplinas de la clínica. La especialidad se infiere primero desde `configuracion.disciplinas` y, si falta, desde nombre/servicios/descripción antes de caer a categorías genéricas de Google como `Medical Clinic`. Los que no encajan, por ejemplo competidores médicos genéricos en una clínica capilar, no se borran automáticamente, pero la UI debe marcarlos como `Revisar`.
 - Reglas de relevancia V1 cubiertas: capilar, cirugía digestiva/hepatobiliar, podología y dental. Si una disciplina no tiene regla todavía, la UI debe mostrar `Sin regla de relevancia` y no ocultar resultados.
 - Mapa de calor local:
-  - Cada tile simula una búsqueda desde la coordenada del tile usando Google Places Text Search con `locationRestriction.rectangle`.
+  - Tras abrir los gates contractuales, cada tile estima resultados desde su coordenada usando Google Places Text Search con `locationBias` y `rankPreference=RELEVANCE`; con gates cerrados no se ejecuta. Nunca se presenta como posición exacta o garantizada de Google Search.
   - La matriz por defecto es `5x5` (`COMPETITION_LOCAL_HEATMAP_GRID_SIZE=5`, `COMPETITION_LOCAL_HEATMAP_MAX_POINTS=25`) y se mide hasta Top 20 (`COMPETITION_LOCAL_HEATMAP_RESULT_LIMIT=20`). `null` significa que la clínica no aparece en esa profundidad y debe mostrarse como `>20`; posiciones `1..3` son verde, `4..9` naranja y `10..20` rojo.
   - El zoom (`1/3/5 km`) solo separa más o menos los puntos alrededor de la clínica. No debe ampliar la ventana de búsqueda de cada tile, porque entonces el punto `Centro` de 3 km/5 km deja de ser comparable con el de 1 km.
-  - El mapa de Google Static Maps debe ser solo fondo visual, sin `markers`. Los marcadores se pintan en frontend con los resultados calculados; si se añaden marcadores al PNG aparece duplicado el punto central (`label:5`) bajo el marcador propio.
+  - No se solicita, descarga, almacena ni reenvía Google Static Maps. La UI representa la medición como matriz abstracta; tampoco puede combinar contenido Places con OpenStreetMap u otra cartografía.
   - La consulta efectiva elimina sufijos geográficos redundantes del término elegido (`"clínica capilar en Alicante"` -> `"clínica capilar"`) y la UI muestra también el término original si cambia.
   - En podología, no usar `"uñas"` como término aislado de ranking/relevancia. Debe ser contexto clínico (`"podólogo uñas encarnadas"`, `"podología"`, `"clínica podológica"`, `"quiropod"`, `"plantilla"`), porque `"uñas"` trae centros de manicura y distorsiona el mapa.
-  - La caché del heatmap incluye `COMPETITION_CACHE_VERSION`; al cambiar la semántica del cálculo hay que subir la versión para no mezclar mediciones antiguas.
+  - El presupuesto por defecto admite términos de hasta 160 caracteres, 12 identidades nuevas por clínica y hora y 60 filas activas por clínica; reutilizar una identidad cacheada no consume alta. Una medición normal exige al menos 20 de los 25 puntos por defecto y, en cualquier cuadrícula, al menos el 80 % o el mínimo configurado.
+  - La identidad persistente incluye versión de algoritmo; al cambiar la semántica hay que subirla para no mezclar mediciones antiguas. La respuesta expone `cache.status`, `generated_at`, `fresh_until`, `expires_at`, peticiones de proveedor y estado de refresco.
 
 Tablas:
 
 | Tabla | Uso |
 |:---|:---|
-| `MarketingCompetitors` | Competidores activos por clínica/grupo, con `google_place_id`, ficha pública y configuración opcional de página Meta. |
-| `MarketingCompetitorSnapshots` | Snapshot diario/semanal de rating, reseñas, categoría, web, teléfono y estado Google Places. |
+| `MarketingCompetitors` | Competidores activos por clínica/grupo introducidos manualmente, con configuración opcional de página Meta. Las filas proveedor antiguas quedan purgadas/desactivadas. |
+| `MarketingCompetitorSnapshots` | Snapshot histórico; el contenido Places anterior se elimina en la migración de cumplimiento. |
 | `MarketingCompetitorAdSnapshots` | Snapshot de anuncios activos por provider (`meta_ads_library`, `google_ads_transparency`) o error explícito de disponibilidad. |
+| `MarketingCompetitionHeatmapCaches` | Payload y lifecycle 7/14 días por identidad de medición, con coste del proveedor, lease y error de último refresco. |
 
 Endpoints:
 
 | Endpoint | Estado | Uso |
 |:---|:---|:---|
 | `GET /api/marketing/reports/competition` | Operativo backend V1 | Lista competidores, último snapshot, anuncios activos y estado de proveedores. |
-| `GET /api/marketing/reports/competition/suggestions` | Operativo backend V1 | Sugiere competidores con Google Places para una clínica concreta. |
-| `GET /api/marketing/reports/competition/local-heatmap` | Operativo backend V1 | Calcula bajo demanda posición local por puntos alrededor de la clínica. |
+| `GET /api/marketing/reports/competition/suggestions` | Operativo con gate | Devuelve proveedor requerido + alta manual; solo sugiere automáticamente con licencia/gates explícitos. |
+| `GET /api/marketing/reports/competition/local-heatmap` | Operativo con gate | Devuelve proveedor requerido; solo calcula bajo demanda con licencia/gates explícitos. |
 | `POST /api/marketing/reports/competition/competitors` | Operativo backend V1 | Añade un competidor confirmado por el usuario. |
 | `PATCH /api/marketing/reports/competition/competitors/:competitorId` | Operativo backend V1 | Edita datos, `meta_page_id`, términos de búsqueda o estado. |
 | `DELETE /api/marketing/reports/competition/competitors/:competitorId` | Operativo backend V1 | Desactiva sin borrar histórico. |
-| `POST /api/marketing/reports/competition/refresh` | Operativo backend V1 | Refresco manual de Google Places + Meta Ads Library + Google Ads Transparency para todos o algunos competidores. |
+| `POST /api/marketing/reports/competition/refresh` | Operativo backend V1 | Refresco de Meta Ads Library + Google Ads Transparency y, solo si está autorizado, del proveedor local. |
 
 Job:
 
 - `competitionSync`, cola `competition_refresh`, schedule por defecto `0 6 * * 1`.
-- Variables: `GOOGLE_PLACES_API_KEY`, `GOOGLE_MAPS_API_KEY`, `META_AD_LIBRARY_ACCESS_TOKEN`, `JOBS_COMPETITION_SCHEDULE`, `COMPETITION_SUGGESTION_LIMIT`, `COMPETITION_META_AD_LIMIT`, `COMPETITION_META_AD_COUNTRY`, `COMPETITION_META_BROWSER_MEDIA_MODE`, `COMPETITION_META_BROWSER_MEDIA_LIMIT`, `COMPETITION_META_BROWSER_MEDIA_IDLE_MS`, `COMPETITION_BROWSER_EXECUTABLE_PATH`, `COMPETITION_LOCAL_HEATMAP_GRID_SIZE`, `COMPETITION_LOCAL_HEATMAP_MAX_POINTS`, `COMPETITION_LOCAL_HEATMAP_RESULT_LIMIT`, `COMPETITION_GOOGLE_CONCURRENCY`, `COMPETITION_CACHE_MAX_ENTRIES`, `COMPETITION_REPORT_CACHE_TTL_MS`, `COMPETITION_SUGGESTIONS_CACHE_TTL_MS`, `COMPETITION_PROVIDER_CACHE_TTL_MS`, `COMPETITION_PLACES_CACHE_TTL_MS`, `COMPETITION_PLACE_DETAILS_CACHE_TTL_MS`, `COMPETITION_PLACE_PHOTO_CACHE_TTL_MS`, `COMPETITION_HEATMAP_CACHE_TTL_MS`, `COMPETITION_STATIC_MAP_CACHE_TTL_MS`, `COMPETITION_SOCIAL_DISCOVERY_TIMEOUT_MS`, `COMPETITION_GOOGLE_ADS_TRANSPARENCY_ENABLED`, `COMPETITION_GOOGLE_ADS_TRANSPARENCY_AD_LIMIT`, `COMPETITION_GOOGLE_ADS_TRANSPARENCY_SCRIPT_MEDIA_LIMIT`, `COMPETITION_GOOGLE_ADS_TRANSPARENCY_TIMEOUT_MS`.
-- Si `GOOGLE_PLACES_API_KEY` no está presente, las sugerencias devuelven proveedor no configurado.
+- Variables locales: `GOOGLE_PLACES_API_KEY`/fallbacks no habilitan por sí solos el uso. También deben estar a `true`, con cobertura contractual documentada, `COMPETITION_GOOGLE_PLACES_COMPETITOR_USE_ALLOWED`, `COMPETITION_GOOGLE_PLACES_COMPETITOR_STORAGE_ALLOWED` y `COMPETITION_LOCAL_RANKING_STORAGE_ALLOWED`. El resto de límites `COMPETITION_LOCAL_HEATMAP_*`, cachés runtime y concurrencia solo se aplica después del gate. `COMPETITION_STATIC_MAP_CACHE_TTL_MS` queda retirado.
+- Con cualquiera de los tres gates apagado, sugerencias/heatmap devuelven proveedor requerido y cero contenido Places aunque exista API key.
 - Si `META_AD_LIBRARY_ACCESS_TOKEN` no está presente, se intenta `META_GRAPH_TOKEN` y después una conexión Meta activa del scope. Si Meta rechaza `ads_archive` con permiso insuficiente, se guarda `status=unavailable` con el error real; esto no debe interpretarse como "sin anuncios activos".
 - `COMPETITION_GOOGLE_ADS_TRANSPARENCY_ENABLED=false` desactiva la consulta a Google Ads Transparency sin tocar el resto del informe. Por defecto está activa porque no requiere token, pero siempre se ejecuta con límite bajo y solo en refrescos/syncs.
 
@@ -492,8 +588,8 @@ La parte de ClinicaClick ya está operativa para soportar conexiones propias e h
   - fallback global de Meta Pixel/CAPI cuando aplica;
 - `Marketing > Campañas` y `Ajustes > Cuentas conectadas` ya exponen:
   - conexión heredada de grupo;
-  - conexión propia solo cuando la clínica no pertenece a grupo;
-  - CTA contextual para conectar desde la clínica; en clínicas agrupadas, el resolver la asigna/promueve al scope compartido de grupo aunque el copy histórico del CTA pudiera sugerir una conexión privada;
+  - conexión propia como override explícito de clínica, también cuando pertenece a un grupo;
+  - CTA contextual que conecta exactamente el scope elegido y nunca promociona una autorización clínica al grupo;
   - selección de activos efectivos para esa clínica.
 
 ### Bloqueo actual
@@ -1410,16 +1506,17 @@ Regla operativa:
 Perfil de Empresa Google:
 
 - `GET /oauth/google/local/locations` usa Business Information API con `readMask`; Google rechaza la llamada sin ese parámetro y no deben tragarse esos errores como "0 fichas";
-- el `readMask` debe incluir `regularHours`, `specialHours` y `moreHours`. Sin esos campos, la UI de `Marketing > Perfil Google` no puede mostrar el horario real de la ficha;
+- el `readMask` debe incluir `regularHours`, `specialHours`, `moreHours`, `serviceItems` y `latlng`. Sin esos campos, la UI no puede mostrar horario/servicios reales y Competencia no puede reutilizar el ancla geográfica persistida;
 - `POST /oauth/google/local/map-locations` guarda `ClinicBusinessLocations`, conserva `raw_payload.accountName` y encola `business_profile_backfill_locations`;
-- `businessProfileSync` refresca primero los detalles de la ubicación en Business Information API (`/v1/locations/:id`) para actualizar horario, categoría, teléfono y metadatos. Si este refresco auxiliar falla, no debe abortar métricas/reseñas/publicaciones;
+- `businessProfileSync` refresca primero los detalles de la ubicación en Business Information API (`/v1/locations/:id`) para actualizar horario, categoría, teléfono, servicios, coordenadas y metadatos. También lista medios con My Business Media API. Si un bloque auxiliar falla, no debe borrar datos previos ni abortar los demás; su timestamp solo avanza si terminó;
 - `businessProfileSync` usa la Google Business Profile Performance API para métricas recientes y las rutas v4 de My Business (`mybusiness.googleapis.com`) para reseñas/publicaciones;
 - `businessProfileReviewsSync` es el refresco ligero para conversión de reseñas: por defecto corre cada 15 minutos (`JOBS_BUSINESS_PROFILE_REVIEWS_SCHEDULE`, configurable), solo llama a la API v4 de reseñas, limita páginas con `LOCAL_REVIEWS_SYNC_MAX_PAGES` (5 por defecto) y solo encola conciliación para reseñas nuevas en esa pasada. El sync completo diario sigue siendo el que consolida métricas, publicaciones y reintentos amplios;
-- el job persiste en `BusinessProfileDailyMetrics`, `BusinessProfileReviews` y `BusinessProfilePosts`;
+- el job persiste métricas, reseñas y posts en sus tablas, y servicios/medios normalizados dentro del `raw_payload` de `ClinicBusinessLocations`. Las fusiones parciales deben serializarse para no perder claves concurrentes;
 - `BusinessProfilePosts.summary`, `call_to_action_url` y `media_url` deben ser `TEXT`; Google puede devolver publicaciones o URLs más largas que 1024 caracteres;
 - si falta `raw_payload.accountName`, Google devuelve 403/scope insuficiente o `mybusiness.googleapis.com` no está habilitada en el proyecto, la ficha queda con `sync_status=error`; no debe mostrarse como "0 reseñas/publicaciones" completado.
-- `GET /api/local/clinica/:clinicaId/status` expone `syncStatus`, `lastSyncedAt`, teléfono, web, dirección, horario y `rawPayload` procedentes de `raw_payload`;
-- `GET /api/local/clinica/:clinicaId/overview|timeseries|reviews|posts` son los endpoints reales que alimentan `Marketing > Perfil Google`. `posts` acepta `limit/offset` y devuelve `total`.
+- `GET /api/local/clinica/:clinicaId/status` proyecta `syncStatus`, timestamps, teléfono, web, dirección, horario, categorías y origen de asignación; no expone `rawPayload` completo;
+- `GET /api/local/clinica/:clinicaId/dashboard` es la carga inicial agregada de `Marketing > Perfil Google`. Los endpoints individuales `overview|timeseries|seasonality|reviews|posts|content|review-insights` quedan operativos; reseñas/posts aceptan `limit/offset`, reseñas añade filtros y ambos devuelven `total`;
+- `POST /api/local/clinica/:clinicaId/photos` publica exclusivamente un `PublicMediaAsset` público/no clínico autorizado para esa clínica.
 
 Namespace al encolar desde OAuth/gateway:
 
@@ -1469,9 +1566,9 @@ Los 30 horarios de `src/jobs/sync.jobs.js` comparten el mismo contrato. El catá
 - `queued` es un estado reclamable real, igual que `pending` y `waiting` vencido. Un `waiting` futuro no puede saltarse su `next_run_at` ni siquiera mediante `triggerImmediate()`;
 - un fallo devuelto o lanzado pasa a `waiting` con backoff exponencial (`JOB_SCHEDULER_RETRY_BASE_DELAY_MS`, 60 s por defecto; `JOB_SCHEDULER_RETRY_MAX_DELAY_MS`, 30 min por defecto) mientras `attempts < max_attempts`. Al agotar intentos queda `failed`;
 - en el arranque, `start()` espera a que `resetRunningJobs()` termine antes de instalar timers o iniciar el primer drain. Si la BD falla, mantiene el worker no-ready y reintenta continuamente con backoff exponencial acotado (`JOB_SCHEDULER_STARTUP_RETRY_BASE_DELAY_MS`, 1 s por defecto; `JOB_SCHEDULER_STARTUP_RETRY_MAX_DELAY_MS`, 30 s por defecto); `stop()` cancela la espera. Devuelve a `waiting` únicamente jobs interrumpidos con intentos disponibles y terminaliza como `failed` los que ya los habían agotado. `triggerImmediate()` comparte ese gate de readiness, por lo que tampoco puede reclamar durante el reset;
-- los 30 tipos del catálogo y las cinco integraciones dirigidas (`meta_ads_backfill_for_sites`, `web_backfill_for_sites`, `analytics_backfill_properties`, `business_profile_backfill_locations`, `whatsapp_template_sync_delayed`) se ejecutan en un **único carril background global y secuencial**. Las prioridades critical/standard siguen atendiendo CRM, automatizaciones y recordatorios sin esperar a un backfill largo, pero dentro de integraciones un backfill largo sí puede retrasar Diagnostics, revisiones y el resto de syncs: se prioriza exclusión/durabilidad sobre latencia. `automation_whatsapp_quiet_send` permanece en el carril standard/high para no esperar a un backfill. El drain adquiere además un advisory lock MySQL `GET_LOCK` ligado a una conexión para impedir que dos procesos drenen simultáneamente ese carril; el crash de la conexión libera el lock. Este lease es defensa adicional, **no habilita HA ni sustituye el contrato de un solo worker JobRequest por namespace**, porque el reset de arranque no tiene ownership/heartbeat. Un disparo inmediato de integración se une al mismo drain coalescido; no reclama por ID ni puede solapar modos mutables recent/backfill;
+- los 30 tipos del catálogo y las seis integraciones dirigidas (`meta_ads_backfill_for_sites`, `web_backfill_for_sites`, `analytics_backfill_properties`, `business_profile_backfill_locations`, `whatsapp_template_sync_delayed`, `marketing_competition_heatmap_refresh`) se ejecutan en un **único carril background global y secuencial**. Las prioridades critical/standard siguen atendiendo CRM, automatizaciones y recordatorios sin esperar a un backfill largo, pero dentro de integraciones un backfill largo sí puede retrasar Diagnostics, revisiones y el resto de syncs: se prioriza exclusión/durabilidad sobre latencia. `automation_whatsapp_quiet_send` permanece en el carril standard/high para no esperar a un backfill. El drain adquiere además un advisory lock MySQL `GET_LOCK` ligado a una conexión para impedir que dos procesos drenen simultáneamente ese carril; el crash de la conexión libera el lock. Este lease es defensa adicional, **no habilita HA ni sustituye el contrato de un solo worker JobRequest por namespace**, porque el reset de arranque no tiene ownership/heartbeat. Un disparo inmediato de integración se une al mismo drain coalescido; no reclama por ID ni puede solapar modos mutables recent/backfill;
 - OAuth de Analytics y los endpoints dirigidos encolan sus tipos `*_for_*` y el executor conserva el array exacto de `mappings`, incluso si contiene varias clínicas. `node src/scripts/backfill_ads.js` solo encola en el runtime configurado: no arranca un scheduler auxiliar, no resetea `running` ni compite con el backend;
-- estos 35 tipos de background —30 periódicos y cinco integraciones dirigidas— no usan el timeout genérico basado en `Promise.race`: esa técnica no cancela el handler original. En su lugar todas las llamadas HTTP del sync usan instancias Axios locales con timeout finito y Google Ads tiene un default no nulo. Así un socket colgado se cancela en el proveedor sin mutar el singleton Axios del resto del backend. Para jobs no background que aún usan el timeout genérico, un timeout es terminal y `retryable=false`;
+- estos 36 tipos de background —30 periódicos y seis integraciones dirigidas— no usan el timeout genérico basado en `Promise.race`: esa técnica no cancela el handler original. En su lugar todas las llamadas HTTP del sync usan instancias Axios locales con timeout finito y Google Ads tiene un default no nulo. Así un socket colgado se cancela en el proveedor sin mutar el singleton Axios del resto del backend. Para jobs no background que aún usan el timeout genérico, un timeout es terminal y `retryable=false`;
 - los barridos por elementos nunca convierten un fallo total en éxito: `eligible > 0`, `processed = 0` y errores produce `failed` reintentable; si hay elementos procesados y errores queda `completed_with_errors` en el resumen durable. `metricsSync` propaga los errores de cada asset en vez de convertirlos en cero silenciosamente;
 - toda escritura normal de settlement (`completed`, `waiting` o `failed`) usa compare-and-set `WHERE id=? AND status='running'`. Cero filas es un conflicto ya resuelto: se relee el job y no se sobrescribe el estado más nuevo dejado por reset/cancelación/otra escritura. Si la escritura lanza un error, no se traga: actualiza `workerState.lastError`, incrementa `settlementFailures`, aborta el drain y se propaga. Antes de depender de un reinicio se repite **solo la escritura de estado** con el mismo compare-and-set; si el handler ya terminó, se persiste `completed` sin volver a ejecutarlo. Si la BD sigue caída, el job queda `running` y `resetRunningJobs()` lo recupera al arrancar. `getStatus().systemChecks.settlementPersistence` expone el último fallo y su recuperación;
 - `SyncLogs.status` solo admite `pending|running|completed|failed`: una pausa de cuota/uso de Google Ads cierra ese intento como `completed` con `status_report.waiting=true`, motivo, código y `next_allowed_at`; el `JobRequest` conserva el estado durable `waiting` y el `next_run_at` real. Nunca se escribe el enum inválido `waiting` en `SyncLogs`;
@@ -1483,7 +1580,7 @@ El monitor de `node-cron` muestra `enqueued`/`already_queued`, `lastEnqueuedAt` 
 
 BullMQ sigue siendo la cola especializada de WhatsApp y otros transportes inmediatos. En tareas como `whatsapp_templates_sync`, el flujo completo es `cron -> JobRequest durable -> execute* -> BullMQ por WABA`; no existe una ejecución de negocio lateral desde el callback cron. Los envíos por horario silencioso y las resincronizaciones diferidas de plantillas no usan `delay` de BullMQ: esperan en `JobRequests` y solo despachan el transporte cuando vencen.
 
-Regresión canónica: `node src/scripts/tests/scheduled_jobs_orchestration.test.js`. Comprueba cobertura exacta de los 30 horarios, mappings dirigidos, alcance de deduplicación, índice/migración, `queued`, separación y exclusión mutua de carriles, advisory lease, monitor de enqueue, clasificación total/parcial, timeouts HTTP, `sync_log_id`, enum de `SyncLogs`, backoff, agotamiento, startup gate/retry/stop y settlements CAS con conflicto. `durable_whatsapp_scheduling.test.js` cubre las dos programaciones puntuales, la ausencia de PII/tokens en sus payloads, el inventario exacto de 47 handlers y el despacho idempotente del transporte. `intake_quickchat_outbox.test.js` añade atomicidad, rollback, idempotencia y reintento del outbox de intake. Los bridges y la retención tienen además `ops_bridge_runner.test.js` y `pm2_log_retention.test.js`.
+Regresión canónica: `node src/scripts/tests/scheduled_jobs_orchestration.test.js`. Comprueba cobertura exacta de los 30 horarios, mappings dirigidos —incluido `marketing_competition_heatmap_refresh`—, alcance de deduplicación, índice/migración, `queued`, separación y exclusión mutua de carriles, advisory lease, monitor de enqueue, clasificación total/parcial, timeouts HTTP, `sync_log_id`, enum de `SyncLogs`, backoff, agotamiento, startup gate/retry/stop y settlements CAS con conflicto. `durable_whatsapp_scheduling.test.js` cubre las dos programaciones puntuales, la ausencia de PII/tokens en sus payloads, el inventario exacto de 48 handlers y el despacho idempotente del transporte. `intake_quickchat_outbox.test.js` añade atomicidad, rollback, idempotencia y reintento del outbox de intake. Los bridges y la retención tienen además `ops_bridge_runner.test.js` y `pm2_log_retention.test.js`.
 
 Importante:
 
@@ -1608,7 +1705,9 @@ Esto evita duplicidades de gasto o conversiones en otros endpoints.
 
 ## 2026-03-18 - Diseño objetivo de conexiones OAuth por scope
 
-> **Estado:** implementado y alineado entre runtime OAuth, `Ajustes` y `back-integracion`.
+> **Estado a 2026-07-15:** implementado y probado en `wt/back-dev`; el gateway
+> público todavía usa OAuth legacy. El cutover y la migración `1515` están
+> pendientes y deben desplegarse de forma coordinada.
 
 ### Limitación que originó la migración (contexto histórico)
 
@@ -1694,26 +1793,29 @@ El resolver unificado por proveedor es:
 
 Precedencia del **grant OAuth** vigente:
 
-1. si la clínica pertenece a un grupo, assignment activa del grupo;
-2. si no hay assignment de grupo pero existe una assignment clínica compatible, se promueve al scope de grupo;
-3. si la clínica no pertenece a grupo, assignment propia de clínica;
-4. fallbacks legacy controlados durante migración;
+1. para un scope explícito `clinic`, assignment propia de la clínica;
+2. si no existe override clínico ni tombstone clínico, assignment activa del grupo como fallback heredado;
+3. para un scope explícito `group`, únicamente la assignment del grupo;
+4. fallbacks legacy controlados durante migración, siempre en modo lectura;
 5. si no existe ninguna, scope sin conexión.
 
-Esta precedencia es distinta de la selección de **activo**, donde el resolver efectivo prioriza mapping propio, asignación compartida explícita y mapping heredado de grupo. No documentar `clinic > group` como regla del grant OAuth.
+El resolver no crea ni promueve assignments. Un `map-*`, una consulta de estado o una lectura de activos solo consume la conexión efectiva. El assignment se escribe en el callback OAuth, después de consumir el `state` y revalidar permisos sobre su scope exacto, o al desconectar explícitamente ese scope.
+
+Esta precedencia es distinta de la selección de **activo**, donde el resolver efectivo prioriza mapping propio, asignación compartida explícita y mapping heredado de grupo.
 
 ### Regla operativa aplicada
 
 En la implementación activa para Meta y Google:
 
-- la conexión de una clínica perteneciente a grupo se **promociona** a conexión compartida del grupo;
-- la vista clínica hereda esa conexión de grupo;
-- la desconexión desde clínica o grupo actúa sobre la conexión compartida del grupo;
-- los mappings permanecen por clínica y se limpian por clínica afectada cuando se desconecta una conexión compartida.
+- la conexión explícita de clínica es un override de esa clínica;
+- si no existe override, la vista clínica puede heredar la conexión del grupo;
+- la conexión explícita de grupo nunca se resuelve desde una assignment clínica;
+- desconectar una clínica crea/desactiva únicamente su scope y no toca hermanas; desconectar el grupo exige permisos sobre todas sus clínicas;
+- los mappings permanecen separados del grant y se limpian solo dentro del scope autorizado.
 
 Esto fija una separación explícita:
 
-- **OAuth connection**: compartida por grupo por defecto;
+- **OAuth connection**: propia del scope conectado, con herencia `clinic -> group` solo como fallback de lectura;
 - **asset mapping**: define qué activo consume cada clínica y puede ser propio, heredado/compartido de grupo o asignado explícitamente a varias clínicas sin duplicar el activo remoto.
 
 Este resolver debe usarse en:
@@ -1745,6 +1847,18 @@ La fuente de verdad pasa a ser:
 - el usuario actual tiene permisos internos para operar en ese scope.
 
 `GroupAssetClinicAssignments` complementa los campos legacy para expresar que un único activo de grupo se asigna a varias clínicas concretas. `clinicaId` puede conservar una clínica primaria por compatibilidad, pero no debe usarse como prueba de exclusividad. La selección efectiva de Google Ads/Meta se centraliza en `effectiveMarketingAssets.service.js`; la conexión en `scopeConnectionResolver.service.js`; la normalización de scope en `clinicScope.js`. Las verticales con resolver propio, como Perfil Google, deben mantener la misma separación entre conexión, mapping y estado de sync.
+
+Contrato de seguridad de mappings OAuth:
+
+- toda clínica destino se autoriza con permiso de escritura antes de resolver la conexión;
+- los IDs de GA4, Search Console, Google Ads, Perfil de Empresa y Meta se vuelven a consultar al proveedor; nombres, estados, tokens y metadatos enviados por el navegador no son autoridad;
+- en Perfil de Empresa, `is_verified` se deriva del campo vigente `LocationMetadata.hasVoiceOfMerchant`; `verificationState`, `verificationStatus` y `hasBusinessAuthority` solo se leen como compatibilidad de snapshots legacy, nunca como contrato actual de Google;
+- Meta nunca devuelve `pageAccessToken` al frontend;
+- reemplazar, mover o eliminar un mapping compartido exige escritura sobre su clínica propietaria y todas las consumidoras de `GroupAssetClinicAssignments`; si falta alguna responde `409 asset_in_use` sin mutar;
+- desvincular una cuenta Meta Ads individual no borra caches globales por `ad_account_id`, porque pueden seguir siendo consumidos por otra clínica;
+- los listados sin scope explícito se filtran por clínicas legibles y los `DELETE` cargan primero el mapping, autorizan su clínica real y solo después resuelven conexión y mutan.
+
+Los callbacks usan un `state` opaco aleatorio, almacenado en Redis con TTL y consumo atómico de un solo uso. El callback vuelve a autorizar en escritura el scope guardado antes del intercambio de código y del `upsert`. `META_APP_SECRET` y los secretos Google proceden exclusivamente del entorno y el flujo falla cerrado si faltan.
 
 ### Desconexión segura
 
@@ -1788,9 +1902,10 @@ Debe depender de los permisos internos del usuario sobre la clínica o el grupo.
 
 Regla aprobada:
 
-1. una clínica del grupo consume la conexión compartida del grupo;
-2. una assignment clínica legacy compatible puede promoverse al grupo;
-3. la elección de un activo propio de clínica sí puede prevalecer sobre un activo compartido, pero eso ocurre en la capa de mapping, no creando un grant OAuth privado que gane al grupo.
+1. una clínica usa primero su assignment propia y, si no existe ni está bloqueada, consume la conexión compartida del grupo;
+2. el resolver nunca promociona una assignment clínica al grupo ni escribe por normalización;
+3. un request `assignmentScope=group` consulta exclusivamente el grupo;
+4. la elección de un activo propio de clínica puede prevalecer sobre un activo compartido en la capa de mapping.
 
 ### Estrategia de migración
 
@@ -1821,10 +1936,9 @@ Fases:
 
 Este bloque no se despliega solo desde `cc-back`.
 
-Además de `wt/back-integracion`, hay que integrar el runtime OAuth dedicado que sirve:
-
-- `https://autenticacion.clinicaclick.com`
-- repo local actual: `/home/ubuntu/backendclinicaclick`
+Además de `wt/back-integracion`, hay que integrar el runtime que sirve
+`https://autenticacion.clinicaclick.com`: `pm2-gateway` desde
+`/home/ubuntu/wt/gateway`.
 
 Si se mueve solo `cc-back` y no se mueve el auth runtime:
 
@@ -1832,7 +1946,12 @@ Si se mueve solo `cc-back` y no se mueve el auth runtime:
 - `connection-status` puede no reflejar el modelo por scope;
 - `disconnect` puede seguir operando con semántica legacy.
 
-Para cualquier migración de este bloque, tratar `cc-back` + auth runtime como un único paquete funcional.
+El callback público real de `autenticacion.clinicaclick.com` entra por nginx en
+el puerto `3000` y lo sirve `pm2-gateway`, cuyo código está en
+`/home/ubuntu/wt/gateway`. Para cualquier migración de este bloque, tratar
+`cc-back` + `wt/gateway` + esquema como un único paquete funcional. El proceso
+OAuth antiguo de `/home/ubuntu/backendclinicaclick` está parado y no es la
+fuente de verdad del callback público.
 
 ### Plan ejecutable de implementación
 
@@ -2039,6 +2158,150 @@ Cuando dual-read y dual-write estén estables:
 2. retirar copy/UI basada en “Conectado como X”;
 3. dejar `MetaConnection` / `GoogleConnection` como grant técnico, no como concepto de producto.
 
+### Estado implementado en dev a 2026-07-15
+
+El contrato nuevo está implementado en `wt/back-dev`, pero la migración de
+multi-conexión **no está aplicada** y no debe aplicarse hasta completar el
+cutover coordinado del gateway público.
+
+Piezas canónicas:
+
+- `src/services/scopeConnectionResolver.service.js`: resolución de clínica
+  propia y fallback de grupo, sin escrituras ni promociones silenciosas. El
+  fallback legacy por `userId` solo funciona cuando existe exactamente un
+  grant; con dos o más devuelve `legacy_user_ambiguous` y falla cerrado.
+- `src/services/oauthConnectionPersistence.service.js`: un callback actualiza
+  únicamente la fila `(userId, googleUserId)` o `(userId, metaUserId)`. Una
+  identidad proveedor distinta crea otro grant. Google conserva el
+  `refreshToken` de esa misma identidad si el proveedor no lo devuelve en una
+  reautorización.
+- `migrations/20260715151500-enable-multiple-oauth-connections.js`: elimina los
+  dos índices `UNIQUE(userId)` heredados y la unicidad global de `metaUserId`, y
+  crea `UNIQUE(userId, providerUserId)` por proveedor. El `up` aborta si ya hay
+  duplicados por pareja; el `down` aborta si el estado nuevo no cabe en las
+  unicidades antiguas. Nunca fusiona ni borra grants. Como MySQL hace autocommit
+  de DDL, primero crea los índices compuestos y solo al final retira los
+  antiguos; el rollback restaura primero los antiguos y luego retira los
+  compuestos.
+- `src/services/oauthState.service.js`: `state` aleatorio, de un solo uso,
+  ligado a proveedor, con TTL y `GETDEL` atómico en Redis. El callback vuelve a
+  autorizar el scope guardado antes de intercambiar el código.
+- `src/services/oauthScopedDisconnect.service.js`: el disconnect exacto
+  desactiva dentro de la misma transacción los mappings operativos del scope y
+  escribe su tombstone. Las clínicas con override propio se preservan al
+  desconectar un grupo. Si un mapping tiene consumidores fuera del scope, la
+  operación completa se bloquea con
+  `scope_disconnect_shared_asset_conflict`; nunca rompe silenciosamente al
+  consumidor hermano.
+
+Reglas de seguridad del runtime:
+
+- `oauth.routes` delega autenticación en `auth.middleware`; solo callbacks
+  públicos y la ruta de test quedan fuera. No decodifica JWT por su cuenta ni
+  puede saltarse el bloqueo canónico de usuarios;
+- inventarios de proveedor, `connect` y las mutaciones MCC
+  `request-link`/`accept-link` exigen scope explícito y permiso de escritura;
+- resolver un grant no autoriza al caller: `web.routes`, WhatsApp Embedded y
+  diagnósticos comprueban ACL de todas las clínicas destino antes de obtener o
+  usar un token central;
+- `/api/web` usa el middleware JWT estándar, incluido el bloqueo de identidades
+  revocadas, y después aplica ACL `read`/`write` por `:clinicaId`;
+- un activo remoto y el bearer que lo consume forman una pareja indivisible:
+  análisis, onboarding y conversiones de Google Ads cargan el
+  `googleConnectionId` del mapping exacto del customer; el listado/análisis
+  Meta agrupa cada cuenta y campaña por su `metaConnectionId`; Search Console
+  live y `webSync` obtienen el token de cada
+  `ClinicWebAsset.googleConnectionId`. Un override de clínica prevalece sobre
+  el mapping heredado del grupo; dos grants distintos para el mismo activo en
+  el mismo nivel son ambiguos y no autorizan ninguna llamada;
+- las rutas live de `/api/web` consumen el inventario efectivo común, no solo
+  `ClinicWebAsset.clinicaId`: incluyen el activo propio, el primario heredado de
+  grupo y `GroupAssetClinicAssignments`, conservando en cada caso su
+  `connection_id` original;
+- el fallo de un grant web se registra por sitio y no impide sincronizar los
+  mappings sanos de la misma clínica. Si fallan todos, `webSync` queda `failed`
+  y reintentable. PSI y los checks HTTP pueden elegir una URL sin OAuth, pero
+  URL Inspection usa necesariamente el grant de ese mismo `ClinicWebAsset`.
+  `/api/web/*/status` solo declara Google conectado cuando todos los sitios
+  activos tienen un mapping con grant utilizable;
+- las rutas globales de validación de tokens Meta requieren admin técnico y las
+  estadísticas seleccionan atributos seguros, nunca `accessToken`;
+- todo `/metasync/jobs/*`, incluidos backfills dirigidos, reanudación de cuota
+  y tail de logs, requiere admin técnico;
+- diagnósticos de Meta requieren permisos de escritura y no devuelven prefijos,
+  longitudes ni parámetros que contengan bearer tokens;
+- `paging.next` de Meta se acepta solo si mantiene HTTPS y el mismo origin de
+  Graph API;
+- Meta se considera desconectado si falta expiración, ha expirado, `debug_token`
+  falla, `is_valid` no es verdadero, el app id no coincide o expiró el acceso a
+  datos. Google con expiración desconocida también exige reautorización.
+
+Los mapeos siempre se contrastan contra inventario proveedor obtenido en el
+servidor. El navegador no puede aportar nombres, permisos, tokens de página ni
+metadatos canónicos. En Google Ads, `replace_existing=false` es aditivo (A+B no
+desactiva A); solo `replace_existing=true` desactiva omitidos. Las mutaciones de
+activos compartidos incluyen consumidores explícitos y los implícitos de un
+mapping `assignmentScope=group`.
+
+El fallback legacy del resolver también falla cerrado si los mappings
+efectivos de un scope apuntan a más de un grant: no elige el primero ni cae a
+la conexión del usuario. Regresión multi-grant canónica:
+`node src/scripts/tests/oauth_multigrant_consumers.test.js`. Cubre dos grants
+Google para el mismo customer, override clínica frente a grupo, dos cuentas
+Meta enriquecidas con tokens distintos, conexión Meta expirada sin llamada al
+proveedor y dos sitios Search Console que conservan su token exacto.
+
+### Cutover obligatorio de multi-conexión
+
+No ejecutar un `db:migrate` general: después de `1515` existe la migración
+irreversible `20260715152000-purge-google-places-competition-content.js`, que
+requiere autorización separada. El objetivo de este bloque se aplica de forma
+aislada hasta `20260715151500-enable-multiple-oauth-connections.js`.
+
+En un esquema donde `1500`, `1510` y `1515` siguen pendientes, `--to 1515`
+ejecuta también las dos anteriores. El corte debe declararlo y repetir su
+preflight. Para aplicar primero las migraciones compatibles de Informes:
+
+```bash
+npx sequelize-cli db:migrate --to 20260715151000-dedupe-business-profile-daily-metrics.js
+```
+
+Después de publicar y validar todos los writers nuevos sobre el esquema viejo,
+la ampliación multi-conexión se aplica aisladamente con:
+
+```bash
+npx sequelize-cli db:migrate --to 20260715151500-enable-multiple-oauth-connections.js
+```
+
+No sustituir ninguno por `db:migrate` sin `--to`.
+
+Orden seguro:
+
+1. bloquear temporalmente nuevos callbacks o abrir una ventana de mantenimiento;
+2. portar a `/home/ubuntu/wt/gateway` el state opaco, secretos por entorno,
+   persistencia por identidad y guards de este paquete;
+3. publicar **y reiniciar de forma controlada** cc-back y gateway con el código
+   compatible/fail-closed, tras comprobar que no hay otro reinicio ni
+   saturación. Validar sobre el esquema antiguo que no queda ningún proceso
+   OAuth legacy; una segunda identidad debe fallar por unicidad sin pisar el
+   grant existente;
+4. solo con todos los writers nuevos ya activos, aplicar de forma aislada la
+   migración `1515`;
+5. validar índices, resolución por scope, callback Google/Meta, status y
+   disconnect sin reiniciar de nuevo por inercia;
+6. rotar el secreto Meta coordinadamente y validar el nuevo entorno;
+7. reabrir callbacks.
+
+Alternativa con parada: bloquear por completo `/oauth`, detener todos los
+writers legacy, aplicar `1515` y arrancar únicamente los runtimes nuevos. Nunca
+aplicar `1515` mientras un proceso legacy siga en memoria.
+
+El gateway activo todavía contiene una copia OAuth legacy y un secreto Meta que
+estuvo versionado. Ese secreto se considera comprometido: al publicar el
+gateway nuevo debe leerse exclusivamente de entorno, y después hay que rotarlo
+en Meta y actualizar el entorno de forma coordinada. Nunca copiar el valor a
+logs, commits o documentación.
+
 ### Riesgos y mitigaciones
 
 #### Riesgo 1. Usuario borrado
@@ -2070,19 +2333,17 @@ Mitigación:
 
 - este bloque debe desplegarse coordinado entre:
   - `wt/back-integracion`
-  - `/home/ubuntu/backendclinicaclick`
+  - `/home/ubuntu/wt/gateway`
   - frontend de `Ajustes`
 
 ### Orden recomendado de ejecución
 
-1. migraciones de schema;
-2. script de backfill;
-3. servicio `scopeConnectionResolver`;
-4. endpoints nuevos de `scope-connection-status`;
-5. dual-write en callbacks OAuth;
-6. disconnect por scope;
-7. adaptación de `Ajustes`;
-8. limpieza legacy.
+1. código compatible y fail-closed en backend y gateway;
+2. migración de schema aislada hasta `1515`;
+3. validación de callbacks, assignments y mappings por scope;
+4. script de backfill, si el preflight detecta scopes legacy sin assignment;
+5. adaptación de `Ajustes`;
+6. limpieza legacy cuando ya no exista ningún consumidor directo ambiguo.
 
 ## 2026-03-08 - Conversaciones lead y actividad de paciente
 
@@ -2359,7 +2620,7 @@ En `.env` / `.env.example`:
 - El handler registrado en `JOB_HANDLERS` exige el par `audit_id + lead_id`, comprueba que el audit pertenece a ese lead y acepta audits de ambos `source_detail`. Antes de reutilizar `materializeIntakeQuickChatSummary`, normaliza internamente el source a `chatbot_quickchat` y pasa el `audit_id` como orden durable. La materialización bloquea el lead y consulta bajo la misma transacción todos sus resúmenes: `Messages.metadata.intake_audit_id` mayor gana. Si un outbox antiguo corre después, completa `skipped/stale`, no emite socket, no cambia contenido/metadata, no consolida y no toca `Conversations.last_message_at`. El watermark forma parte de `needsUpdate`: un audit posterior avanza el marcador aunque hash y contenido sean idénticos; del mismo modo, un mensaje legacy idéntico adopta el primer marcador. Reejecutar el mismo audit o recibir ambos POST no crea un segundo mensaje.
 - El handler no llama a Meta CAPI, Google Ads/Data Manager, BullMQ ni a un envío real de WhatsApp. Solo persiste el evento interno y emite el socket de interfaz como best effort. Para audits actuales extrae y valida `resolved_clinic_id` y lo pasa al materializador: si el lead pertenece a otra sede, termina sin retry con `409 quickchat_summary_clinic_mismatch`, cero Message/socket. Solo audits legacy sin `resolved_clinic_id` pueden recuperar usando la clínica persistida en el lead; nunca aceptan una sede del payload crudo. Los `4xx` guardan en `result_summary` únicamente `http_status`, `error_code` y un mensaje de allowlist, además de IDs/flags sin contenido/PII, para que el fast path conserve el `409` en vez de degradarlo a `500`. Errores técnicos se reintentan; payload incompleto o mismatch audit/lead quedan terminales no reintentables. Si el lead/audit ya fue limpiado de forma controlada, el job termina como `skipped/audit_not_found`.
 - `scripts/cleanup-intake-e2e-run.js` carga y bloquea los outbox por `payload.lead_id`, exige que cada `payload.audit_id` sea el audit exacto del lead y rechaza jobs `running`. En `simulate/apply` borra el JobRequest antes del lead dentro de la transacción y el postcheck exige `quickchat_outbox_jobs=0`, evitando que un job huérfano reconstruya la conversación tras la limpieza.
-- Regresión: `node src/scripts/tests/intake_quickchat_outbox.test.js` cubre lead nuevo y deduplicado guardando IDs resueltos, rechazo cross-clinic `409` sin materialización/socket, fallback legacy a la clínica del lead, lectura compatible del wrapper de `JobExecutor` y del formato directo de fixtures, commit atómico, rollback si falla el enqueue, `14725`/email inválido con cero lead-audit-job, unión real de `enqueueJobRequest` a la transacción, par audit/lead, fallo transitorio/reintento para ambos contratos, audit stale sin socket, duplicado idempotente, relectura tras error del trigger, outcome `unknown_durable`, fast path `completed/202 queued` sin falsos positivos, ausencia de proveedores y el inventario de 47 handlers. `intake_quickchat_summary.test.js` protege el orden inverso/doble POST, compatibilidad legacy, contenido y `last_message_at` del ganador, el `422` antes de crear, la ausencia de materialización lateral y los retornos `chatbot` deduplicado anteriores a Meta/Google conservando `409` para el resto; `cleanup_intake_e2e_run.test.js` cubre outbox exacto/running.
+- Regresión: `node src/scripts/tests/intake_quickchat_outbox.test.js` cubre lead nuevo y deduplicado guardando IDs resueltos, rechazo cross-clinic `409` sin materialización/socket, fallback legacy a la clínica del lead, lectura compatible del wrapper de `JobExecutor` y del formato directo de fixtures, commit atómico, rollback si falla el enqueue, `14725`/email inválido con cero lead-audit-job, unión real de `enqueueJobRequest` a la transacción, par audit/lead, fallo transitorio/reintento para ambos contratos, audit stale sin socket, duplicado idempotente, relectura tras error del trigger, outcome `unknown_durable`, fast path `completed/202 queued` sin falsos positivos, ausencia de proveedores y el inventario de 48 handlers. `intake_quickchat_summary.test.js` protege el orden inverso/doble POST, compatibilidad legacy, contenido y `last_message_at` del ganador, el `422` antes de crear, la ausencia de materialización lateral y los retornos `chatbot` deduplicado anteriores a Meta/Google conservando `409` para el resto; `cleanup_intake_e2e_run.test.js` cubre outbox exacto/running.
 
 **Evidencia live postdeploy:** el chat móvil controlado `CC-E2E-QUICKCHAT-20260713-0110`, con Marketing rechazado y sin click IDs, eligió Sant Martí `56`. El único lead `#7213` produjo audits `#7400/#7401`, jobs `#23818/#23819` completados al primer intento y una sola conversación/mensaje (`#3574/#43072`) cuyo watermark quedó en `7401`; hubo cero intentos Google. El procedimiento `dry-run -> simulate -> apply` retiró después exclusivamente el marcador y devolvió cero en cada postcheck comprometido. Los chats reales huérfanos `#7185/#7195/#7196` se revalidaron y recuperaron por el mismo orquestador mediante `#23820-#23822`, una conversación/resumen Sants `19` por lead; los intentos de proveedor permanecieron `3 -> 3`.
 

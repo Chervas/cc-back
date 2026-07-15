@@ -2,6 +2,25 @@
 // Modelo actualizado con campos nuevos y métodos optimizados
 module.exports = (sequelize, DataTypes) => {
 
+    async function resolveSingleMetaConnection(userId, metaConnectionId = null) {
+        if (metaConnectionId) {
+            return sequelize.models.MetaConnection.findOne({
+                where: { id: metaConnectionId, userId }
+            });
+        }
+        const connections = await sequelize.models.MetaConnection.findAll({
+            where: { userId },
+            order: [['updatedAt', 'DESC'], ['id', 'DESC']],
+            limit: 2
+        });
+        if (connections.length > 1) {
+            const error = new Error('Hay varias conexiones Meta; indica metaConnectionId');
+            error.code = 'meta_connection_scope_required';
+            throw error;
+        }
+        return connections[0] || null;
+    }
+
     const ClinicMetaAsset = sequelize.define('ClinicMetaAsset', {
         id: {
             type: DataTypes.INTEGER,
@@ -225,12 +244,10 @@ module.exports = (sequelize, DataTypes) => {
      * @returns {Promise<Array>} Resultados del mapeo
      */
     ClinicMetaAsset.mapAssetsToClinicas = async function(mappingData) {
-        const { userId, assets, clinicaIds } = mappingData;
+        const { userId, assets, clinicaIds, metaConnectionId = null } = mappingData;
         
         // Obtener metaConnectionId del usuario
-        const metaConnection = await sequelize.models.MetaConnection.findOne({
-            where: { userId }
-        });
+        const metaConnection = await resolveSingleMetaConnection(userId, metaConnectionId);
 
         if (!metaConnection) {
             throw new Error('No se encontró conexión Meta para este usuario');
@@ -308,11 +325,9 @@ module.exports = (sequelize, DataTypes) => {
      * @param {string} metaAssetId - ID del activo en Meta
      * @returns {Promise<Array>} Resultado de la operación
      */
-    ClinicMetaAsset.unmapAsset = async function(userId, clinicaId, metaAssetId) {
+    ClinicMetaAsset.unmapAsset = async function(userId, clinicaId, metaAssetId, metaConnectionId = null) {
         // Obtener metaConnectionId del usuario
-        const metaConnection = await sequelize.models.MetaConnection.findOne({
-            where: { userId }
-        });
+        const metaConnection = await resolveSingleMetaConnection(userId, metaConnectionId);
 
         if (!metaConnection) {
             throw new Error('No se encontró conexión Meta para este usuario');

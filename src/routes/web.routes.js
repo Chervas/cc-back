@@ -3,55 +3,150 @@
 const express = require('express');
 const axios = require('axios');
 const router = express.Router();
+const authMiddleware = require('./auth.middleware');
 const db = require('../../models');
 const GoogleConnection = db.GoogleConnection;
-const ClinicWebAsset = db.ClinicWebAsset;
 const Clinica = db.Clinica;
 const WebGaDaily = db.WebGaDaily;
 const WebGaDimensionDaily = db.WebGaDimensionDaily;
 const ClinicAnalyticsProperty = db.ClinicAnalyticsProperty;
 const sequelize = db.sequelize;
+const {
+  hasMarketingClinicScopeAccess,
+} = require('../lib/marketingScopeAccess');
+const {
+  resolveEffectiveMarketingAssetInventory,
+} = require('../services/effectiveMarketingAssets.service');
 
 // Helper: get userId from JWT Authorization header
 function getUserIdFromToken(req) {
-  try {
-    const auth = req.headers.authorization || '';
-    const token = auth.startsWith('Bearer ') ? auth.slice(7) : null;
-    if (!token) return null;
-    const jwt = require('jsonwebtoken');
-    const decoded = jwt.verify(token, process.env.JWT_SECRET);
-    return decoded.userId;
-  } catch {
-    return null;
-  }
+  return req.userData?.userId || null;
 }
 
-async function getGoogleAccessToken(userId) {
-  const conn = await GoogleConnection.findOne({ where: { userId } });
-  if (!conn) throw new Error('No Google connection');
-  let accessToken = conn.accessToken;
-  // refresh if soon to expire
-  const expiresAt = conn.expiresAt ? new Date(conn.expiresAt).getTime() : 0;
-  if (expiresAt && expiresAt < Date.now() + 60_000 && conn.refreshToken) {
-    const resp = await axios.post('https://oauth2.googleapis.com/token', new URLSearchParams({
+router.use(authMiddleware);
+
+router.use('/clinica/:clinicaId', async (req, res, next) => {
+  const userId = getUserIdFromToken(req);
+  if (!userId) {
+    return res.status(401).json({ success: false, error: 'unauthenticated' });
+  }
+  const clinicaId = Number.parseInt(String(req.params.clinicaId || ''), 10);
+  if (!Number.isInteger(clinicaId) || clinicaId <= 0) {
+    return res.status(400).json({ success: false, error: 'clinic_id_invalid' });
+  }
+  try {
+    const access = req.method === 'GET' ? 'read' : 'write';
+    const allowed = await hasMarketingClinicScopeAccess({
+      userId,
+      clinicIds: [clinicaId],
+      access,
+    });
+    if (!allowed) {
+      return res.status(403).json({ success: false, error: 'clinic_scope_forbidden' });
+    }
+    req.webClinicUserId = userId;
+    req.webClinicId = clinicaId;
+    return next();
+  } catch (error) {
+    console.error('❌ /web clinic scope guard:', error.message);
+    return res.status(500).json({ success: false, error: 'clinic_scope_check_failed' });
+  }
+});
+
+async function getGoogleAccessTokenForConnection(connectionId, {
+  connectionModel = GoogleConnection,
+  http = axios,
+  nowMs = Date.now()
+} = {}) {
+  const normalizedConnectionId = Number.parseInt(String(connectionId || ''), 10);
+  if (!Number.isInteger(normalizedConnectionId) || normalizedConnectionId <= 0) {
+    const error = new Error('Mapping web sin googleConnectionId válido');
+    error.code = 'web_mapping_connection_missing';
+    throw error;
+  }
+  const conn = await connectionModel.findByPk(normalizedConnectionId);
+  if (!conn || Number(conn.id) !== normalizedConnectionId) {
+    const error = new Error('La conexión Google del mapping web no existe');
+    error.code = 'web_mapping_connection_missing';
+    throw error;
+  }
+  let accessToken = conn.accessToken || null;
+  const expiresAt = conn.expiresAt ? new Date(conn.expiresAt).getTime() : NaN;
+  const mustRefresh = !Number.isFinite(expiresAt) || expiresAt < nowMs + 60_000;
+  if (mustRefresh) {
+    if (!conn.refreshToken) {
+      const error = new Error('La conexión Google del mapping web requiere volver a autorizarse');
+      error.code = Number.isFinite(expiresAt) ? 'web_mapping_token_expired' : 'web_mapping_token_expiry_unknown';
+      throw error;
+    }
+    const resp = await http.post('https://oauth2.googleapis.com/token', new URLSearchParams({
       client_id: process.env.GOOGLE_CLIENT_ID,
       client_secret: process.env.GOOGLE_CLIENT_SECRET,
       grant_type: 'refresh_token',
       refresh_token: conn.refreshToken
     }).toString(), { headers: { 'Content-Type': 'application/x-www-form-urlencoded' } });
-    accessToken = resp.data?.access_token || accessToken;
+    accessToken = resp.data?.access_token || null;
+    if (!accessToken) {
+      const error = new Error('Google no devolvió un token para el mapping web');
+      error.code = 'web_mapping_refresh_failed';
+      throw error;
+    }
     const expiresIn = resp.data?.expires_in || 3600;
-    await conn.update({ accessToken, expiresAt: new Date(Date.now() + expiresIn * 1000) });
+    await conn.update({ accessToken, expiresAt: new Date(nowMs + expiresIn * 1000) });
+  }
+  if (!accessToken) {
+    const error = new Error('La conexión Google del mapping web no tiene token');
+    error.code = 'web_mapping_token_missing';
+    throw error;
   }
   return { accessToken, connection: conn };
 }
 
-async function getClinicSiteUrls(clinicaId, userId) {
-  const { connection } = await getGoogleAccessToken(userId);
-  const rows = await ClinicWebAsset.findAll({ where: { clinicaId, googleConnectionId: connection.id, isActive: true }, raw: true });
-  const urls = rows.map(r => r.siteUrl);
-  if (!urls.length) throw new Error('No siteUrl mapped for clinic');
-  return urls;
+async function getClinicSiteMappings(clinicaId, {
+  inventoryResolver = resolveEffectiveMarketingAssetInventory
+} = {}) {
+  const inventory = await inventoryResolver({
+    clinicIdRaw: clinicaId,
+    groupIdRaw: null,
+    assignmentScopeRaw: 'clinic'
+  });
+  const mappings = (inventory?.google?.available_assets?.search_console || [])
+    .filter((row) => String(row?.site_url || '').trim())
+    .map((row) => ({
+      id: row.mapping_id || null,
+      clinicaId: row.clinic_id || null,
+      googleConnectionId: row.connection_id || null,
+      siteUrl: row.site_url,
+      propertyType: row.property_type || null,
+      permissionLevel: row.permission_level || null,
+      verified: row.verified !== false,
+      assignmentOrigin: row.assignment_origin || null,
+      isActive: true
+    }));
+  if (!mappings.length) throw new Error('No siteUrl mapped for clinic');
+  return mappings;
+}
+
+function selectPrimarySiteMapping(mappings) {
+  const rows = Array.isArray(mappings) ? mappings : [];
+  return rows.find((row) => String(row.siteUrl || '').startsWith('http')) || rows[0] || null;
+}
+
+async function getAccessTokenForWebMapping(mapping, tokenCache = new Map(), dependencies = {}) {
+  const connectionId = Number.parseInt(String(mapping?.googleConnectionId || ''), 10);
+  if (!Number.isInteger(connectionId) || connectionId <= 0) {
+    const error = new Error('Mapping web sin googleConnectionId válido');
+    error.code = 'web_mapping_connection_missing';
+    throw error;
+  }
+  if (!tokenCache.has(connectionId)) {
+    tokenCache.set(connectionId, getGoogleAccessTokenForConnection(connectionId, dependencies)
+      .catch((error) => {
+        tokenCache.delete(connectionId);
+        throw error;
+      }));
+  }
+  return tokenCache.get(connectionId);
 }
 
 function resolveDateRange(startDate, endDate, fallbackDays = 90) {
@@ -90,24 +185,37 @@ const { WebScDaily, WebScDailyAgg, WebPsiSnapshot, WebIndexCoverageDaily } = req
 // GET /web/clinica/:clinicaId/status
 router.get('/clinica/:clinicaId/status', async (req, res) => {
   try {
-    const userId = getUserIdFromToken(req) || undefined;
     const { clinicaId } = req.params;
     const { Op } = require('sequelize');
     const clinic = await Clinica.findByPk(clinicaId, { raw: true });
-    const assets = await ClinicWebAsset.findAll({ where: { clinicaId, isActive: true }, raw: true });
+    const assets = await getClinicSiteMappings(clinicaId);
     const scLastRow = await WebScDaily.findOne({ where: { clinica_id: clinicaId }, order: [['date','DESC']], raw: true });
     const psiLast = await WebPsiSnapshot.findOne({ where: { clinica_id: clinicaId }, order: [['fetched_at','DESC']], raw: true });
-    let googleConnected = false;
-    try {
-      if (userId) {
-        const conn = await GoogleConnection.findOne({ where: { userId }, raw: true });
-        googleConnected = !!conn;
+    const connectionIds = Array.from(new Set(assets
+      .map((asset) => Number.parseInt(String(asset.googleConnectionId || ''), 10))
+      .filter((id) => Number.isInteger(id) && id > 0)));
+    const tokenCache = new Map();
+    const authorizationChecks = await Promise.all(assets.map(async (asset) => {
+      try {
+        await getAccessTokenForWebMapping(asset, tokenCache);
+        return { ok: true };
+      } catch (error) {
+        return { ok: false, reason: error.code || 'web_mapping_authorization_failed' };
       }
-    } catch {}
+    }));
+    const authorizationFailures = authorizationChecks.filter((item) => !item.ok);
+    const googleConnected = assets.length > 0 && authorizationFailures.length === 0;
     return res.json({
       success: true,
       clinic: { id: clinicaId, website: clinic?.url_web || null },
       googleConnected,
+      googleConnectionStatus: {
+        connected: googleConnected,
+        mapped_connections: connectionIds.length,
+        mapped_sites: assets.length,
+        unavailable_sites: authorizationFailures.length,
+        reasons: Array.from(new Set(authorizationFailures.map((item) => item.reason)))
+      },
       hasAssets: assets.length > 0,
       siteUrls: assets.map(a => a.siteUrl),
       lastScDate: scLastRow?.date || null,
@@ -429,20 +537,42 @@ router.get('/clinica/:clinicaId/sc/queries', async (req, res) => {
 // GET /web/clinica/:clinicaId/sc/pages
 router.get('/clinica/:clinicaId/sc/pages', async (req, res) => {
   try {
-    const userId = getUserIdFromToken(req); if (!userId) return res.status(401).json({ success:false, error:'No auth' });
     const { clinicaId } = req.params; const { startDate, endDate, limit=100, offset=0 } = req.query;
     const start = startDate || new Date(Date.now()-30*86400000).toISOString().slice(0,10);
     const end = endDate || new Date().toISOString().slice(0,10);
-    const { accessToken } = await getGoogleAccessToken(userId);
-    const siteUrls = await getClinicSiteUrls(clinicaId, userId);
+    const mappings = await getClinicSiteMappings(clinicaId);
+    const tokenCache = new Map();
     const out = [];
-    for (const siteUrl of siteUrls) {
-      const resp = await axios.post(`https://www.googleapis.com/webmasters/v3/sites/${encodeURIComponent(siteUrl)}/searchAnalytics/query`, {
-        startDate: start, endDate: end, dimensions: ['page'], rowLimit: Number(limit), startRow: Number(offset)
-      }, { headers: { Authorization: `Bearer ${accessToken}` } });
-      (resp.data?.rows||[]).forEach(r=>out.push({ page: r.keys?.[0]||'', clicks: r.clicks||0, impressions: r.impressions||0, ctr: r.ctr||0, position: r.position||0 }));
+    const authorizationErrors = [];
+    for (const mapping of mappings) {
+      const siteUrl = mapping.siteUrl;
+      try {
+        const { accessToken } = await getAccessTokenForWebMapping(mapping, tokenCache);
+        const resp = await axios.post(`https://www.googleapis.com/webmasters/v3/sites/${encodeURIComponent(siteUrl)}/searchAnalytics/query`, {
+          startDate: start, endDate: end, dimensions: ['page'], rowLimit: Number(limit), startRow: Number(offset)
+        }, { headers: { Authorization: `Bearer ${accessToken}` } });
+        (resp.data?.rows||[]).forEach(r=>out.push({ page: r.keys?.[0]||'', clicks: r.clicks||0, impressions: r.impressions||0, ctr: r.ctr||0, position: r.position||0 }));
+      } catch (error) {
+        authorizationErrors.push({
+          site_url: siteUrl,
+          reason: error.code || 'search_console_request_failed'
+        });
+      }
     }
-    return res.json({ success:true, items: out, total: out.length });
+    if (!out.length && authorizationErrors.length === mappings.length) {
+      return res.status(409).json({
+        success: false,
+        error: 'web_mapping_authorization_unavailable',
+        authorization_errors: authorizationErrors
+      });
+    }
+    return res.json({
+      success:true,
+      items: out,
+      total: out.length,
+      partial: authorizationErrors.length > 0,
+      authorization_errors: authorizationErrors
+    });
   } catch (e) {
     console.error('❌ /web/sc/pages:', e.response?.data || e.message);
     return res.status(500).json({ success:false, error:'Error consultando páginas' });
@@ -452,10 +582,12 @@ router.get('/clinica/:clinicaId/sc/pages', async (req, res) => {
 // GET /web/clinica/:clinicaId/psi/latest (live) y /psi/snapshot (BD)
 router.get('/clinica/:clinicaId/psi/latest', async (req, res) => {
   try {
-    const userId = getUserIdFromToken(req); if (!userId) return res.status(401).json({ success:false, error:'No auth' });
     const { clinicaId } = req.params; const key = process.env.GOOGLE_PSI_API_KEY || '';
-    const siteUrls = await getClinicSiteUrls(clinicaId, userId);
-    const url = siteUrls.find(s => s.startsWith('http')) || siteUrls[0].replace('sc-domain:','https://');
+    const mappings = await getClinicSiteMappings(clinicaId);
+    const primaryMapping = selectPrimarySiteMapping(mappings);
+    const url = primaryMapping.siteUrl.startsWith('http')
+      ? primaryMapping.siteUrl
+      : primaryMapping.siteUrl.replace('sc-domain:','https://');
     const params = { url, strategy: 'mobile', category: ['performance','accessibility'] };
     if (key) params['key'] = key;
     const resp = await axios.get('https://www.googleapis.com/pagespeedonline/v5/runPagespeed', { params });
@@ -488,10 +620,12 @@ router.get('/clinica/:clinicaId/psi/snapshot', async (req, res) => {
 // POST /web/clinica/:clinicaId/psi/refresh → fuerza snapshot PSI + devuelve snapshot y checks técnicos
 router.post('/clinica/:clinicaId/psi/refresh', async (req, res) => {
   try {
-    const userId = getUserIdFromToken(req); if (!userId) return res.status(401).json({ success:false, error:'No auth' });
     const { clinicaId } = req.params;
-    const siteUrls = await getClinicSiteUrls(clinicaId, userId);
-    const siteUrl = siteUrls.find(s => s.startsWith('http')) || ('https://' + siteUrls[0].replace('sc-domain:',''));
+    const mappings = await getClinicSiteMappings(clinicaId);
+    const primaryMapping = selectPrimarySiteMapping(mappings);
+    const siteUrl = primaryMapping.siteUrl.startsWith('http')
+      ? primaryMapping.siteUrl
+      : ('https://' + primaryMapping.siteUrl.replace('sc-domain:',''));
 
     // PSI live
     const params = { url: siteUrl, strategy: 'mobile', category: ['performance','accessibility'] };
@@ -520,8 +654,8 @@ router.post('/clinica/:clinicaId/psi/refresh', async (req, res) => {
       // Index status (1 URL via URL Inspection API)
       let indexed_ok = null;
       try {
-        const { accessToken } = await getGoogleAccessToken(userId);
-        const siteProperty = siteUrls[0];
+        const { accessToken } = await getAccessTokenForWebMapping(primaryMapping);
+        const siteProperty = primaryMapping.siteUrl;
         const inspectUrl = siteUrl.startsWith('http') ? siteUrl : ('https://' + siteUrl.replace('sc-domain:',''));
         const inspectEndpoint = 'https://searchconsole.googleapis.com/v1/urlInspection/index:inspect';
         const respI = await axios.post(inspectEndpoint, { inspectionUrl: inspectUrl, siteUrl: siteProperty }, { headers: { Authorization: `Bearer ${accessToken}` } });
@@ -599,7 +733,6 @@ router.get('/clinica/:clinicaId/seo/timeseries', async (req, res) => {
 // GET /web/clinica/:clinicaId/seo/health
 router.get('/clinica/:clinicaId/seo/health', async (req, res) => {
   try {
-    const userId = getUserIdFromToken(req); if (!userId) return res.status(401).json({ success:false, error:'No auth' });
     const { clinicaId } = req.params; const { startDate, endDate } = req.query;
     const end = endDate || new Date().toISOString().slice(0,10);
     const start = startDate || new Date(Date.now()-30*86400000).toISOString().slice(0,10);
@@ -608,6 +741,11 @@ router.get('/clinica/:clinicaId/seo/health', async (req, res) => {
     const prevEnd = new Date(startD.getTime() - 86400000);
     const prevStart = new Date(prevEnd.getTime() - (days-1)*86400000);
     const fmt = (d)=>d.toISOString().slice(0,10);
+    const siteMappings = await getClinicSiteMappings(clinicaId);
+    const primarySiteMapping = selectPrimarySiteMapping(siteMappings);
+    const primarySiteUrl = primarySiteMapping.siteUrl.startsWith('http')
+      ? primarySiteMapping.siteUrl
+      : ('https://' + primarySiteMapping.siteUrl.replace('sc-domain:','').replace(/^https?:\/\//,''));
 
     // Agregados desde BD (WebScDaily) para periodo actual y previo
     const { Op } = require('sequelize');
@@ -648,9 +786,7 @@ router.get('/clinica/:clinicaId/seo/health', async (req, res) => {
 
     // HTTPS reachability
     try {
-      const siteUrls3 = await getClinicSiteUrls(clinicaId, userId);
-      const base = siteUrls3.find(s => s.startsWith('http')) || ('https://' + siteUrls3[0].replace('sc-domain:','').replace(/^https?:\/\//,''));
-      const testUrl = new URL(base).origin;
+      const testUrl = new URL(primarySiteUrl).origin;
       const resp = await axios.get(testUrl, { timeout: 3500, maxRedirects: 2, validateStatus: ()=>true });
       const ok = (resp.status >= 200 && resp.status < 400);
       rules.push({ id:'https_reach', status: ok ? 'ok' : 'warning', message: 'Sitio accesible por HTTPS', details:{ url: testUrl, status: resp.status } });
@@ -660,9 +796,7 @@ router.get('/clinica/:clinicaId/seo/health', async (req, res) => {
 
     // Sitemap presence
     try {
-      const siteUrls4 = await getClinicSiteUrls(clinicaId, userId);
-      const base = siteUrls4.find(s => s.startsWith('http')) || ('https://' + siteUrls4[0].replace('sc-domain:','').replace(/^https?:\/\//,''));
-      const origin = new URL(base).origin;
+      const origin = new URL(primarySiteUrl).origin;
       const candidates = [`${origin}/sitemap.xml`, `${origin}/sitemap_index.xml`];
       let found = false; let code = null; let urlOk = null;
       for (const u of candidates) {
@@ -696,5 +830,12 @@ router.get('/clinica/:clinicaId/coverage/timeseries', async (req, res) => {
     return res.status(500).json({ success:false, error:'Error obteniendo cobertura' });
   }
 });
+
+router.__test = {
+  getAccessTokenForWebMapping,
+  getClinicSiteMappings,
+  getGoogleAccessTokenForConnection,
+  selectPrimarySiteMapping
+};
 
 module.exports = router;

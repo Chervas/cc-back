@@ -9,6 +9,12 @@ const jobRequestsService = require('../services/jobRequests.service');
 const jobScheduler = require('../services/jobScheduler.service');
 const notificationService = require('../services/notifications.service');
 const { emitNotificationUpdated } = require('../services/notificationsRealtime.service');
+const {
+  resolveMetaConnectionForScope,
+} = require('../services/scopeConnectionResolver.service');
+const {
+  hasMarketingClinicScopeAccess,
+} = require('../lib/marketingScopeAccess');
 
 const router = express.Router();
 const ClinicMetaAsset = db.ClinicMetaAsset;
@@ -418,10 +424,6 @@ router.post('/embedded-signup/callback', authMiddleware, async (req, res) => {
     const connectionMode = connection_mode === 'coexistence' ? 'coexistence' : 'cloud_api';
 
     const userId = req.userData?.userId;
-    const metaConnection = await db.MetaConnection.findOne({ where: { userId } });
-    if (!metaConnection) {
-      return res.status(400).json({ success: false, error: 'meta_not_connected' });
-    }
 
     // Resolución de asignación (preasignación opcional)
     let assignmentScope = 'unassigned';
@@ -449,6 +451,48 @@ router.post('/embedded-signup/callback', authMiddleware, async (req, res) => {
 
     if (assignmentScope === 'group' && !targetGroupId) {
       assignmentScope = 'unassigned';
+    }
+
+    if (assignmentScope === 'unassigned') {
+      return res.status(400).json({
+        success: false,
+        error: 'embedded_signup_scope_required',
+      });
+    }
+
+    const targetClinicIds = assignmentScope === 'clinic'
+      ? [Number(targetClinicId)]
+      : (await db.Clinica.findAll({
+        where: { grupoClinicaId: targetGroupId },
+        attributes: ['id_clinica'],
+        raw: true,
+      })).map((clinic) => Number(clinic.id_clinica)).filter(Number.isInteger);
+    if (!targetClinicIds.length) {
+      return res.status(400).json({ success: false, error: 'embedded_signup_scope_invalid' });
+    }
+    const canManageTarget = await hasMarketingClinicScopeAccess({
+      userId,
+      clinicIds: targetClinicIds,
+      access: 'write',
+    });
+    if (!canManageTarget) {
+      return res.status(403).json({ success: false, error: 'embedded_signup_scope_forbidden' });
+    }
+
+    const { connection: metaConnection, source: metaConnectionSource } = await resolveMetaConnectionForScope({
+      userId,
+      clinicIdRaw: targetClinicId,
+      groupIdRaw: targetGroupId,
+      assignmentScopeRaw: assignmentScope === 'unassigned' ? null : assignmentScope,
+      allowLegacyUserFallback: true,
+    });
+    if (!metaConnection) {
+      return res.status(400).json({
+        success: false,
+        error: metaConnectionSource === 'legacy_user_ambiguous'
+          ? 'meta_connection_scope_required'
+          : 'meta_not_connected',
+      });
     }
 
     // Intercambiar code por token largo

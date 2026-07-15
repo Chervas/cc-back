@@ -11,20 +11,28 @@ const metaJobsController = require('../controllers/metasync.jobs.controller');
 
 // Middleware de autenticación
 const authMiddleware = require('./auth.middleware');
+const { isGlobalAdmin } = require('../lib/role-helpers');
 
 // Aplicar middleware de autenticación a todas las rutas
 router.use(authMiddleware);
 
+function requireTechnicalAdmin(req, res, next) {
+  if (!isGlobalAdmin(req.userData?.userId)) {
+    return res.status(403).json({ success: false, error: 'technical_admin_required' });
+  }
+  return next();
+}
+
 // ===== RUTAS DE SINCRONIZACIÓN =====
-router.post('/clinica/:clinicaId/sync', metaSyncController.syncClinica);
-router.post('/asset/:assetId/sync', metaSyncController.syncAsset);
-router.get('/logs', metaSyncController.getSyncLog);
-router.get('/stats', metaSyncController.getSyncStats);
+router.post('/clinica/:clinicaId/sync', requireTechnicalAdmin, metaSyncController.syncClinica);
+router.post('/asset/:assetId/sync', requireTechnicalAdmin, metaSyncController.syncAsset);
+router.get('/logs', requireTechnicalAdmin, metaSyncController.getSyncLog);
+router.get('/stats', requireTechnicalAdmin, metaSyncController.getSyncStats);
 
 // ===== RUTAS DE VALIDACIÓN DE TOKENS =====
-router.get('/tokens/validate', metaSyncController.validateTokens);
-router.get('/tokens/validate/:connectionId', metaSyncController.validateTokenById);
-router.get('/tokens/stats', metaSyncController.getTokenValidationStats);
+router.get('/tokens/validate', requireTechnicalAdmin, metaSyncController.validateTokens);
+router.get('/tokens/validate/:connectionId', requireTechnicalAdmin, metaSyncController.validateTokenById);
+router.get('/tokens/stats', requireTechnicalAdmin, metaSyncController.getTokenValidationStats);
 
 // ===== RUTAS DE MÉTRICAS =====
 router.get('/metrics/:clinicaId', metaSyncController.getMetricsByClinica);
@@ -55,6 +63,10 @@ router.get('/diagnostic/sample-data/:assetId', metaDiagnosticController.getSampl
 router.get('/diagnostic/asset-details/:assetId', metaDiagnosticController.getAssetDetails);
 
 // ===== RUTAS DE GESTIÓN DE JOBS CRON =====
+// Toda la superficie /jobs controla infraestructura global, colas y logs. Los
+// backfills clínicos ordinarios se encolan desde los endpoints OAuth que ya
+// validan destinos; esta API manual queda reservada a administración técnica.
+router.use('/jobs', requireTechnicalAdmin);
 router.post('/jobs/initialize', metaJobsController.initializeJobs);
 router.get('/jobs/status', metaJobsController.getJobsStatus);
 router.post('/jobs/start', metaJobsController.startJobs);
